@@ -42,7 +42,8 @@
 
 ## 2. 为什么是 TypeScript / Node
 
-原项目 NOFX 是 Go + React。本项目选择 Node 22 + TypeScript，原因是部署环境只保证有 Node：
+本项目选择 Node 22 + TypeScript，原因是**部署环境只需保证有 Node.js**，
+不需要额外的语言工具链（没有 Go 编译器、没有 Python 构建依赖）：
 
 - **`node:sqlite`（内置）** 让持久化零依赖、零原生编译，`npm install` 不会因为
   `better-sqlite3` 之类的原生模块编译失败而卡住。
