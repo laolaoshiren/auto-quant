@@ -253,8 +253,15 @@ HTTP 客户端就是内置的 `fetch`。默认答案是"自己写那 30 行"，�
 
 - ❌ 不要修改已经发布过的迁移 SQL（`db/schema.ts` 的 `M1_INITIAL` / `M2_TRADE_ACCOUNTING`）。
   只能**追加**新的 `version`。
-- ❌ 不要删掉 `simulate/simulatedExchange.ts` 里的 tick 精度校验与 `-2021` 立即触发校验。
-  它们存在的全部意义就是让"止损挂不上去"这类 bug 在离线时被抓到。
+- ❌ 不要删掉 `simulate/simulatedExchange.ts` 里的 `-2021`（立即触发）校验。
+  它让"止损挂不上去"这类 bug 在离线时就被抓到。
+  ⚠️ 注意触发价的 **tick 精度**处理是**取整**（`registry.roundTriggerPrice()`）而不是拒绝——
+  模拟器扮演的是 broker 角色，取整本就是 broker 的职责（真实 `BinanceBroker` 也是先取整再发送）。
+  曾经在这里写成"拒绝"，导致模拟器比现实更严格、`npm run sim` 掉到 13/15。详见
+  `docs/DEVELOPMENT.md` 的「`npm run sim` 的实测状态」。
+- ❌ 不要把校验加在错误的层。防「broker 忘记取整」的断言属于 `binance/orders.test.ts`
+  （它断言真实 broker 发送前会取整）；放在模拟器里等于在测试另一条代码路径，
+  因为模拟运行根本不会调用真实 broker。
 - ❌ 不要用 `git add -f` 绕过 `.gitignore`。
 - ❌ 不要把 API Key、Secret、密码写进代码、注释、日志或测试。日志里只允许出现**掩码**
   （`maskSecret()`），这个约定在 `llm/client.ts` 里也有明确注释。
@@ -390,8 +397,9 @@ so keeping the data vocabulary consistent anchors the output contract."*
 - 先跑 `npm run verify`（真实行情、不需要密钥、不下单）。它能在 30 秒内告诉你
   "选币 → 指标 → 提示词 → 解析 → 风控"这条链路是否还通。
 - 再跑 `npm run sim`。它会在 15 项校验里指出是哪一类接缝断了（保护单、记账、冷却、权益曲线…）。
-  ⚠️ **注意**：在撰写文档的环境上它稳定报告 **13/15**，失败的固定是"每笔开仓都挂上止损与止盈"
-  与"止损会被真实触发并正确记账"两项（原因见 `docs/DEVELOPMENT.md` 的"`npm run sim` 的当前实测状态"）。
-  先确认你看到的失败不是那两项，再去查自己的改动。
+  当前实测 **15/15 通过**。若你看到失败，先读 `docs/DEVELOPMENT.md` 的
+  「`npm run sim` 的实测状态」一节——那里记录了一次真实事故：有人把触发价精度校验加在了
+  错误的层（模拟器扮演的是 broker，取整本就是 broker 的职责），导致模拟器比现实更严格。
+  先确认你遇到的不是同类"校验加错层"的问题，再去查自己的改动。
 - 还是不通，去读那个文件顶部的注释。这个仓库的注释密度很高，通常已经写清了"为什么不能那样做"。
 - 仍然不确定 → **说出来**。不要用一个看起来合理的猜测填补空白，尤其是在文档里。
