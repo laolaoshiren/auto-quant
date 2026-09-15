@@ -1,0 +1,98 @@
+# =============================================================================
+# PR 自动打标签的路径规则（actions/labeler@v5 的配置格式）
+#
+# 为什么要有这个文件：标签是 release-drafter 生成发布说明的唯一输入，也是 triage
+# 的第一层过滤。全靠作者记得手动选，几周之后标签就会和实际改动脱节。
+#
+# ⚠️ 路径写错时 labeler **不会报错**，只是静默地不打那个标签 —— 所以每条规则的
+#    路径都必须对着目录树核对过；新增目录时也要回来补。
+# =============================================================================
+
+# 风控引擎是通往订单的唯一路径，它的改动必须能被单独筛出来。
+risk-engine:
+  - changed-files:
+      - any-glob-to-any-file:
+          - packages/server/src/risk/**
+          # 风控配置的形状（仓位上限、杠杆上限、盈亏比门槛）定义在这里，
+          # 提示词的硬约束段也由它生成 —— 改它等于改风控行为本身。
+          - packages/shared/src/strategy.ts
+
+# 可能影响真实下单的代码。与 risk-engine 分开：这两类标签对应
+# CONTRIBUTING.md「涉及真实资金的改动」里要求的验证级别，混在一起就失去筛选作用。
+trading-path:
+  - changed-files:
+      - any-glob-to-any-file:
+          - packages/server/src/binance/**
+          - packages/server/src/trader/**
+          # 冒烟测试脚本本身也要按"触及交易所接线"对待：它下的是真实订单。
+          - packages/server/src/scripts/liveSmokeTest.ts
+
+# 交易所适配层的独立标签：改动集中在这一个目录，比 trading-path 更精确。
+binance:
+  - changed-files:
+      - any-glob-to-any-file:
+          - packages/server/src/binance/**
+
+strategy:
+  - changed-files:
+      - any-glob-to-any-file:
+          - packages/server/src/strategy/**
+          - packages/server/src/market/**
+
+api:
+  - changed-files:
+      - any-glob-to-any-file:
+          - packages/server/src/api/**
+
+# 记账与净盈亏（净 = 毛 − 手续费 − 资金费）落在存储层与库定义里。
+# 单独一个标签的理由：账目类缺陷不会让程序崩溃，只会让数字不对，
+# 而"数字不对"的 PR 需要按金额算术的标准来 review。
+accounting:
+  - changed-files:
+      - any-glob-to-any-file:
+          - packages/server/src/store/**
+          - packages/server/src/db/**
+
+web:
+  - changed-files:
+      - any-glob-to-any-file:
+          - packages/web/**
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - docs/**
+          # 只匹配仓库根目录的 markdown（`*` 不跨目录）：README、CONTRIBUTING、
+          # SECURITY 这些"仓库门面"。子目录里的 markdown 已经带上了所在目录的标签
+          # （例如 deploy/README.md → deployment），不需要重复打 docs。
+          - '*.md'
+          # 许可证与合规文件**故意**也落在 docs 这个人工可见的标签上：
+          # 它们极少改动，但改的是分发条款，reviewer 需要在 PR 列表里一眼看到，
+          # 而不是等到发版前才发现授权范围变了。
+          - LICENSE
+          - THIRD-PARTY-NOTICES.md
+          - docs/LEGAL.md
+
+# 构建、部署与 CI 自身。放在一起的理由：它们都不改变交易逻辑，
+# 但任何一个出问题都会让"服务器能不能更新"这条路径失效。
+deployment:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+          - Dockerfile
+          - .dockerignore
+          - deploy/**
+          - scripts/deploy.ps1
+
+# 依赖与 lockfile 单独看：lockfile 的 diff 无法人工审查，
+# 所以"这次依赖变动能不能合"的判断只能落在标签上，而不是落在 diff 上。
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - package.json
+          - package-lock.json
+          - packages/*/package.json
+
+# `breaking` 不在这里实现：labeler 只能匹配路径与分支名，看不到 PR 标题，
+# 而"是否破坏性"只写在标题的 `!` 标记里（CI 校验标题时明确允许 `feat!:`）。
+# 它由 .github/workflows/pr-labeler.yml 里的标题前缀步骤补上。

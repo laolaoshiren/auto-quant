@@ -22,6 +22,7 @@
     "test": "npm run test --workspace @aq/server",
     "verify": "tsx packages/server/src/scripts/verifyPipeline.ts",
     "notices": "node scripts/generate-notices.mjs",
+    "check:links": "node scripts/check-links.mjs",
     "demo": "tsx packages/server/src/scripts/demoCycle.ts",
     "sim": "tsx packages/server/src/scripts/simulate.ts",
     "sim:live": "tsx packages/server/src/scripts/simulate.ts --live --loose --cycles 12"
