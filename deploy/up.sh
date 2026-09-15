@@ -328,8 +328,8 @@ confirm() {
   if [ ! -t 0 ]; then
     err "需要确认「$prompt」，但当前不是交互式终端。"
     echo ""
-    echo "  在脚本或远程命令里请显式加 --yes："
-    echo "      ./up.sh import $2 --yes"
+    echo "  在脚本或远程命令里请显式加 --yes（对任何子命令都有效）："
+    echo "      ./up.sh ${COMMAND:-up} --yes"
     exit 1
   fi
 
@@ -605,29 +605,35 @@ cmd_help() {
 }
 
 # -----------------------------------------------------------------------------
+# 参数解析
+#
+# `--yes` 在这里**全局**解析，而不是在每个子命令里各解析一次。
+# 分散解析的代价是真实的：`reset-password --yes` 曾经因为只有 `import`
+# 分支处理了这个标志而被忽略，然后在非交互环境下报出
+# 「请在 import 后面加 --yes」这种答非所问的提示。
+# -----------------------------------------------------------------------------
 
-case "${1:-up}" in
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --yes|-y) ASSUME_YES=1 ;;
+    *) POSITIONAL+=("$arg") ;;
+  esac
+done
+
+COMMAND="${POSITIONAL[0]:-up}"
+
+case "$COMMAND" in
   up|"")   cmd_up ;;
   logs)    cmd_logs ;;
   status)  cmd_status ;;
   backup)  cmd_backup ;;
-  import)
-    shift
-    # 解析 import 的参数：<目录> [--yes]
-    IMPORT_SRC=""
-    for arg in "$@"; do
-      case "$arg" in
-        --yes|-y) ASSUME_YES=1 ;;
-        *) IMPORT_SRC="$arg" ;;
-      esac
-    done
-    cmd_import "$IMPORT_SRC"
-    ;;
+  import)  cmd_import "${POSITIONAL[1]:-}" ;;
   down)    cmd_down ;;
   reset-password|reset) cmd_reset_password ;;
   help|-h|--help) cmd_help ;;
   *)
-    err "未知命令：$1"
+    err "未知命令：$COMMAND"
     echo ""
     cmd_help
     exit 1
