@@ -1,0 +1,83 @@
+# =============================================================================
+# auto-quant —— 一条命令起服务
+#
+#   docker compose pull && docker compose up -d
+#
+# 或者直接用封装好的脚本（推荐，它会处理登录、密钥生成、健康检查）：
+#
+#   ./up.sh
+#
+# 这个文件**不含任何站点专属信息**。域名、端口暴露方式、镜像地址都由 `.env` 控制，
+# 那样每台服务器可以有自己的配置，而不必改这个被版本控制的文件。
+# =============================================================================
+
+services:
+  autoquant:
+    # 镜像地址可在 .env 里覆盖，用于锁定版本或使用自建镜像仓库：
+    #   AUTOQUANT_IMAGE=ghcr.io/<owner>/auto-quant:v0.2.0
+    image: ${AUTOQUANT_IMAGE:-ghcr.io/laolaoshiren/auto-quant:latest}
+
+    container_name: autoquant
+    restart: unless-stopped
+
+    # -------------------------------------------------------------------------
+    # 端口：默认**只绑宿主机 127.0.0.1**，公网不可直接访问。
+    #
+    # 这是刻意的默认值。控制台登录后可以下真实订单，直接暴露到公网意味着
+    # 安全性完全取决于那一个密码。要对外提供访问，正确做法是在前面加一层
+    # 反向代理（Caddy / Nginx / Traefik）并启用 HTTPS，而不是把这里改成
+    # 0.0.0.0。详见 docs/DEPLOYMENT.md。
+    #
+    # 需要改绑定地址时在 .env 里设 BIND_ADDRESS。
+    # -------------------------------------------------------------------------
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3200}:3200"
+
+    # -------------------------------------------------------------------------
+    # 数据卷：数据库、AES 主密钥、JWT 密钥、日志。
+    #
+    # 用命名卷而不是绑定挂载，是为了回避宿主机目录属主与容器内 uid 1001
+    # 不一致导致的权限问题 —— 那是自建部署最常见的坑。
+    # 备份方式见 up.sh 的 backup 子命令。
+    #
+    # 这个卷丢失 = 交易所凭据与全部交易历史丢失，且无法恢复。
+    # -------------------------------------------------------------------------
+    volumes:
+      - autoquant-data:/app/data
+
+    # 环境变量来自同目录的 .env（由 up.sh 生成或你手动创建）
+    env_file:
+      - .env
+
+    # 容器内必须绑 0.0.0.0 才能让映射出去的端口连上
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3200
+
+    # 日志轮转：不加限制时容器日志会无限增长，最终把磁盘写满，
+    # 而磁盘满之后数据库写入失败、整个服务停摆。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    # 与镜像内置的 HEALTHCHECK 保持一致，这里显式写出便于查看
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3200/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+    # 优雅关闭：给正在跑的决策周期留出收尾时间，
+    # 避免在"已下单但还没记账"的窗口里被强杀。
+    stop_grace_period: 30s
+
+volumes:
+  autoquant-data:
+    name: autoquant-data
