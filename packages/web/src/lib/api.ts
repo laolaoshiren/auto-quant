@@ -138,7 +138,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     });
   } catch (error) {
     if ((error as Error).name === 'AbortError') throw error;
-    throw new ApiError(0, '无法连接后端。端口 3200 上的服务是否在运行？', null);
+    throw new ApiError(0, '无法连接后端。端口 27137 上的服务是否在运行？', null);
   }
 
   const text = await response.text();

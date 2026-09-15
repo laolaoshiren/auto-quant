@@ -222,7 +222,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 其余关键项：
 
 ```bash
-PORT=3200
+PORT=27137
 HOST=127.0.0.1          # 见第 6 节，这样选是有原因的
 BINANCE_USE_TESTNET=false   # 实盘
 DRY_RUN=false
@@ -314,7 +314,7 @@ WARN [main]   密码：xxxxxxxxxxxxxxxx
 健康检查：
 
 ```bash
-curl -s http://127.0.0.1:3200/api/health
+curl -s http://127.0.0.1:27137/api/health
 # {"ok":true,"environment":"production","dryRun":false,...}
 ```
 
@@ -344,7 +344,7 @@ curl -s http://127.0.0.1:3200/api/health
 这比绑 `0.0.0.0` 再依赖防火墙规则更可靠：安全性由绑定地址本身保证，
 而不是由防火墙配置是否正确保证。
 
-> 换成 `172.17.0.1` 后，**服务器上的 `curl 127.0.0.1:3200` 会失败**。
+> 换成 `172.17.0.1` 后，**服务器上的 `curl 127.0.0.1:27137` 会失败**。
 > 这是正常的，用绑定地址访问即可。
 
 ### 反向代理示例（Caddy）
@@ -353,7 +353,7 @@ curl -s http://127.0.0.1:3200/api/health
 quant.example.com {
     encode gzip zstd
 
-    reverse_proxy 172.17.0.1:3200 {
+    reverse_proxy 172.17.0.1:27137 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
@@ -394,8 +394,8 @@ Caddy 会自动申请并续期 Let's Encrypt 证书。**若域名挂在 Cloudfla
 - Cloudflare 的 IP / 国家规则
 - 只监听 `127.0.0.1`，用 SSH 隧道访问：
   ```bash
-  ssh -L 3200:127.0.0.1:3200 <你的主机>
-  # 然后浏览器打开 http://127.0.0.1:3200
+  ssh -L 27137:127.0.0.1:27137 <你的主机>
+  # 然后浏览器打开 http://127.0.0.1:27137
   ```
 
 ---

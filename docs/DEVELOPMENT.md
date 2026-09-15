@@ -67,7 +67,7 @@ cp .env.example .env             # Windows: Copy-Item .env.example .env
 
 | 变量 | 默认 | 第一次要不要改 |
 | --- | --- | --- |
-| `PORT` | `3200` | 一般不动。选 3200 而不是常见的 3080，是因为 3080 经常被别的本地工具占用，而端口冲突只会在 `listen()` 时暴露 |
+| `PORT` | `27137` | 一般不动。这个端口是对着 IANA 注册表筛过的：未登记、前后 100 个号内无占用、且低于 32768 以避开 Linux 临时端口区。端口冲突只在 `listen()` 时才报错，所以默认就选一个不会撞的 |
 | `HOST` | `127.0.0.1` | 本地开发不动。要让同网段访问才改成 `0.0.0.0` |
 | `BINANCE_USE_TESTNET` | `true` | **保持 `true`**。`true` 走币安 Demo 模拟盘，`false` 直接是实盘 |
 | `MASTER_KEY` / `JWT_SECRET` | 空 | 保持空也行：首次启动会生成并落盘到 `data/.master.key`、`data/.jwt.secret`。多实例或容器部署时才需要显式给定 |
@@ -90,8 +90,8 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 
 | 服务 | 地址 | 说明 |
 | --- | --- | --- |
-| 后端 API + 生产控制台 | `http://127.0.0.1:3200` | Fastify。若 `packages/web/dist` 存在，它会**顺带把控制台静态文件也托管了**，SPA 路由回落到 `index.html` |
-| 前端开发服务器 | `http://127.0.0.1:5173` | `vite.config.ts` 里把 `/api`（含 WebSocket）代理到 `127.0.0.1:3200` |
+| 后端 API + 生产控制台 | `http://127.0.0.1:27137` | Fastify。若 `packages/web/dist` 存在，它会**顺带把控制台静态文件也托管了**，SPA 路由回落到 `index.html` |
+| 前端开发服务器 | `http://127.0.0.1:5173` | `vite.config.ts` 里把 `/api`（含 WebSocket）代理到 `127.0.0.1:27137` |
 
 > `vite.config.ts` 里显式绑 `host: '127.0.0.1'` 且 `strictPort: true`。这不是洁癖：Windows 上
 > `localhost` 可能只解析到 `::1`，导致 Vite 明明起来了但 `curl http://127.0.0.1:5173` 失败。
@@ -144,8 +144,8 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 
 ### 跑起来之后应该看到什么
 
-1. 终端里出现 `数据库就绪：...`、`connected to ... (clock offset Nms)`、`loaded N tradable USDT-M perpetual contracts; weight budget N/min`、`控制台地址：http://127.0.0.1:3200`、`交易环境：币安合约 Demo 模拟盘`。
-2. 浏览器打开 `http://127.0.0.1:3200` → 登录页 → 用 `admin` + 打印出来的密码登录。
+1. 终端里出现 `数据库就绪：...`、`connected to ... (clock offset Nms)`、`loaded N tradable USDT-M perpetual contracts; weight budget N/min`、`控制台地址：http://127.0.0.1:27137`、`交易环境：币安合约 Demo 模拟盘`。
+2. 浏览器打开 `http://127.0.0.1:27137` → 登录页 → 用 `admin` + 打印出来的密码登录。
 3. 总览页顶部的环境横幅显示当前环境、是否 `DRY_RUN`、是否全局禁用、权重用量、可交易合约数。
 4. 策略工作室里已经有一个 `默认策略 — 稳健`。
 

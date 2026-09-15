@@ -23,7 +23,7 @@
 
 ```bash
 npm install
-npm run dev        # 后端，http://127.0.0.1:3200
+npm run dev        # 后端，http://127.0.0.1:27137
 npm run dev:web    # 前端开发服务器（可选）
 npm run typecheck
 npm test
