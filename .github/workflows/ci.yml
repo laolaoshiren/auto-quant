@@ -61,13 +61,34 @@ jobs:
       #
       # 这一步**不在 `npm test` 里**，所以必须单独跑：它用真实历史 K 线回放驱动一个
       # 会真正触发止损止盈的模拟交易所，覆盖「提示词 → 模型 → 解析 → 风控 → 下单 →
-      # 挂保护单 → 触发 → 记账」整条链路，并刻意安排紧止损、宽止损与超限提案来验证
-      # 每条执行路径。
+      # 挂保护单 → 触发 → 记账」整条链路。
       #
       # 加这一步是有教训的：曾给模拟交易所加了触发价精度校验（角色搞错了层），
       # 导致 40 张止盈单被拒、15 项校验只剩 13 项通过 —— 而当时 `npm test` 全绿，
-      # 因为单元测试根本走不到那条路径。规则：**没进 CI 的验证等于不存在。**
+      # 因为单元测试根本走不到那条路径。
+      #
+      # ⚠️ 环境依赖：这一步需要访问币安拉取历史 K 线，而 **GitHub 托管的 runner
+      # 位于币安的限制区域**，请求会返回 "Service unavailable from a restricted
+      # location"。所以先探测可达性：
+      #
+      #   · 能连通（自建 runner、或币安放开该区域）→ 正常执行，失败即阻断
+      #   · 连不通 → 明确跳过并打出 warning，**不静默通过**
+      #
+      # 静默跳过等于自欺：它会让人以为这个校验在跑。这里宁可让日志里有一行黄字。
+      - name: 探测币安可达性
+        id: binance
+        run: |
+          set -euo pipefail
+          if curl -s --max-time 10 https://fapi.binance.com/fapi/v1/time | grep -q serverTime; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+            echo "✅ 币安可达"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::币安不可达（GitHub 托管 runner 通常位于限制区域）。跳过交易生命周期模拟 —— 本步骤在本地或自建 runner 上仍必须执行：npm run sim"
+          fi
+
       - name: 交易生命周期模拟
+        if: steps.binance.outputs.reachable == 'true'
         run: npm run sim
 
       - name: 构建控制台
