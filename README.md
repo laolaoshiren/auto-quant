@@ -5,7 +5,7 @@
 [![CI](https://github.com/laolaoshiren/auto-quant/actions/workflows/ci.yml/badge.svg)](https://github.com/laolaoshiren/auto-quant/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522.5-blue)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-no%20copyleft-brightgreen)](THIRD-PARTY-NOTICES.md)
-[![License](https://img.shields.io/badge/license-proprietary-red)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 策略不是一堆参数，而是一段中文描述。模型每个周期读取市场、做出决策、执行下单、留下完整推理；
 而一个**独立于模型的风控引擎**会审查并钳制它发出的每一张订单。
@@ -14,15 +14,15 @@
 
 ---
 
-## 🚀 一条命令部署
+## 🚀 一键部署
 
-在一台**全新服务器**上：
+在一台**全新服务器**上，一条命令：
 
 ```bash
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/laolaoshiren/auto-quant/main/deploy/install.sh | bash
 ```
 
-**就这一条。** 它会自动完成全部准备工作：
+**就这一条，不需要任何其他操作。** 它会自动完成：
 
 - 识别系统、补齐缺失的基础工具（**包括系统里没有 `bash` 的情况**）
 - **安装 Docker 与 Compose**（如果没有）
@@ -30,24 +30,24 @@ sudo bash install.sh
 - 拉取镜像、启动服务、等待健康检查通过
 - 打印访问地址与登录凭据
 
-**你不需要预先安装任何东西** —— 不用 Node、不用源码、不用懂 Docker。
+**你不需要预先安装任何东西** —— 不用 Node、不用源码、不用懂 Docker，也不需要任何令牌。
+
 支持 Debian / Ubuntu、RHEL / CentOS / Rocky / Alma、Fedora、
-**Alpine（含没有 bash 的精简镜像）**、Arch、openSUSE。
+**Alpine（含没有 bash 的精简镜像）**、Arch、openSUSE。仅支持 x86_64。
 
-之后每次更新版本，**还是这一条命令**。
+之后更新到最新版本，**还是这一条命令**。
 
-> **首次需要授权私有镜像仓库**（仓库与镜像都是私有的）。安装器会提示你粘贴一个
-> GitHub 令牌，只需勾选 `read:packages`：
->
-> <https://github.com/settings/tokens/new?scopes=read:packages>
->
-> 也可以跳过提示，直接传入：
+> 不使用管道也可以，效果相同：
 >
 > ```bash
-> GHCR_TOKEN=<你的令牌> sudo -E bash install.sh
+> curl -fsSL https://raw.githubusercontent.com/laolaoshiren/auto-quant/main/deploy/install.sh -o install.sh
+> sudo bash install.sh
 > ```
 >
-> 令牌只用于拉取镜像，由 Docker 自己保存，安装器不会写到别处。
+> 需要 root 权限 —— 安装器在没有 root 时会自动用 sudo 重新执行自己。
+> 用管道时 sudo 会从终端读取密码，不受影响。
+
+📖 完整说明：[deploy/README.md](deploy/README.md) · [部署指南](docs/DEPLOYMENT.md)
 
 📖 完整说明：[deploy/README.md](deploy/README.md) · [部署指南](docs/DEPLOYMENT.md)
 
@@ -260,4 +260,8 @@ packages/
 
 ## 📄 许可
 
-专有软件，保留所有权利。详见 [LICENSE](LICENSE)。
+[Apache License 2.0](LICENSE) —— 可自由使用、修改、分发与商用，包括专利授权。
+再分发时请保留版权声明与 [NOTICE](NOTICE)。
+
+第三方组件的许可证见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+合规与法律风险的完整说明见 [docs/LEGAL.md](docs/LEGAL.md)。

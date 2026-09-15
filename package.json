@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "7x24 fully-automated LLM-driven crypto futures trading terminal (Binance USDⓈ-M)",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=22.5.0"
