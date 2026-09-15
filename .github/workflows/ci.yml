@@ -57,6 +57,26 @@ jobs:
       - name: 单元测试
         run: npm test
 
+      # 第三方许可证合规。
+      #
+      # 两件事一起做：
+      #   1. 重新生成声明文件 —— 脚本遇到 copyleft（GPL/AGPL/SSPL…）或无法确认的
+      #      许可证会**直接失败**。这必须在引入依赖的那一刻暴露：一旦以冲突的
+      #      条款分发过，问题就不再是改一行配置能解决的。
+      #   2. 校验生成结果与仓库中的文件一致 —— 依赖变了但声明没更新，
+      #      合规文件就会声称覆盖了实际上没覆盖的东西，比没有更糟。
+      - name: 第三方许可证合规
+        run: |
+          set -euo pipefail
+          node scripts/generate-notices.mjs
+          if ! git diff --exit-code --quiet THIRD-PARTY-NOTICES.md; then
+            echo "::error::THIRD-PARTY-NOTICES.md 与当前依赖不一致"
+            echo "本地执行 node scripts/generate-notices.mjs 并提交结果。"
+            git diff --stat THIRD-PARTY-NOTICES.md
+            exit 1
+          fi
+          echo "✅ 许可证合规检查通过"
+
       # 完整交易生命周期模拟。
       #
       # 这一步**不在 `npm test` 里**，所以必须单独跑：它用真实历史 K 线回放驱动一个
