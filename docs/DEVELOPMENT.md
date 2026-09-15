@@ -165,7 +165,7 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 | `npm test` | `npm run test --workspace @aq/server` → `tsx --test "src/**/*.test.ts"` | 提交前必跑。**只有服务端有测试**；`@aq/web` 目前没有测试脚本 |
 | `npm run verify` | `tsx packages/server/src/scripts/verifyPipeline.ts` | 用**真实币安行情**跑「选币 → 指标 → 提示词 → 解析 → 风控」全链路。**不需要任何密钥、不下单** |
 | `npm run demo` | `tsx packages/server/src/scripts/demoCycle.ts` | 往**真实数据库**写入一轮带 `[DEMO]` 前缀的完整决策审计数据，让控制台的审计界面立刻有东西可看。加 `--clean` 清除 |
-| `npm run sim` | `tsx packages/server/src/scripts/simulate.ts` | **完整交易生命周期模拟**：真实历史 K 线回放 + 会真正触发止损止盈的模拟交易所 + 脚本化模型，80 轮，15 项校验（**当前实测 13/15，见下方"已知问题"**）。写临时数据库 |
+| `npm run sim` | `tsx packages/server/src/scripts/simulate.ts` | **完整交易生命周期模拟**：真实历史 K 线回放 + 会真正触发止损止盈的模拟交易所 + 脚本化模型，80 轮，15 项校验（**当前实测 15/15 全通过**）。写临时数据库 |
 | `npm run sim:live` | `tsx packages/server/src/scripts/simulate.ts --live --loose --cycles 12` | 同上，但模型换成**真实 LLM**（需要 `SIM_LLM_KEY`），策略放宽（`--loose`）以便真的有可能下单 |
 
 各脚本自己的参数（本文不重复，脚本头部注释写得很细）：
@@ -195,22 +195,13 @@ npx tsx packages/server/src/scripts/liveSmokeTest.ts --confirm --symbol DOGEUSDT
 `liveSmokeTest.ts` 则优先读 `BINANCE_API_KEY` / `BINANCE_API_SECRET`；两者都为空时回落到
 数据库里的凭据（默认取第一个账户，可用 `--account <id>` 指定）。
 
-### ⚠️ `npm run sim` 的当前实测状态（已知问题，未修）
+### `npm run sim` 的实测状态（15/15 通过）
 
-**在撰写本文的环境上，`npm run sim` 退出码为 1，报告 `13/15 项通过`。** 这不是文档写错，
-也不是你改坏了什么——**它是仓库当前的真实状态**，写在这里是为了让你不去追一个不存在的问题。
+**`npm run sim` 退出码为 0，报告 `全部 15 项校验通过`。**
 
-稳定失败的**两项**（连续多次运行都一样）：
-
-```
-[失败] 每笔开仓都挂上止损与止盈
-       45 笔开仓 → 45 张止损单、5 张止盈单（Algo 条件单），数量均不少于开仓数。
-[失败] 止损会被真实触发并正确记账
-       价格穿越止损 0 次，已作为 close_reason=stop_loss 的交易入账。
-```
-
-其余 13 项（开仓、无保护持仓为零、止盈触发并记账、权益曲线、杠杆钳制、风控拦截与运行时调整…）
-全部通过，所以**执行接缝本身是好的**。失败的直接原因可以在日志里看到——被拒的止盈单：
+这里记录一段真实的历史，因为它是一个很好的教训：**这份文档刚写出来时，`npm run sim`
+稳定报告 13/15**，失败的固定是「每笔开仓都挂上止损与止盈」与「止损会被真实触发并正确记账」。
+日志显示 40 张止盈单被拒：
 
 ```
 ERROR [trader] 为 BTCUSDT 挂 止盈（触发价 79033.592）失败：
@@ -218,15 +209,25 @@ ERROR [trader] 为 BTCUSDT 挂 止盈（触发价 79033.592）失败：
   （-1111 Precision is over the maximum defined for this asset）
 ```
 
-也就是说：`SimulatedExchange.placeOrder` 的 tick 校验拒绝了脚本化模型算出来的触发价，
-而 `executeOpen` 里的 `placeTarget` 失败**不会**触发紧急平仓（只有止损失败才会），
-于是仓位只带止损、不带止盈。行情的实际波动也没能触及那些很紧的止损，所以第二项也失败。
+根因不是脚本化模型算错了价，而是**`SimulatedExchange` 搞错了自己扮演的角色**：
 
-**这是实现问题，不是文档问题，本文档不改它**（按任务约定，本次只创建文档、不动任何源码）。
-要修的话，正确的位置是 `simulate/simulatedExchange.ts` 的触发器精度校验与
-`scripts/simulate.ts` 里脚本化模型的价格取整方式；修完这两项应该恢复 15/15。
-在那之前，请把 `npm run sim` 当作"13 项结构性校验 + 2 项已知失败"来读，
-而不是"跑不过就是我的错"。
+- 它在流水线里被注入为 `AutoTrader` 的 **broker**，而按 `tickSize` 取整正是 **broker 的职责**——
+  真实的 `BinanceBroker.placeOrder` 就是先取整再发送。Binance 永远不会从一个正确的客户端
+  收到未对齐的触发价。
+- 但那个版本的模拟器选择了**拒绝**而不是取整，于是**模拟器比现实更严格**，
+  在真实系统完全能正常处理的场景上失败。
+- 修法：改用 `registry.roundTriggerPrice()` + `isValidTrigger()`，与 broker 契约一致。
+
+**两条值得记住的结论：**
+
+1. **校验要加在正确的层。** 防「broker 忘记取整」的断言属于 `binance/orders.test.ts`
+   （它断言真实 broker 发送前会取整）。放在模拟器里等于在测试另一条代码路径——
+   模拟运行根本不会调用真实 broker。
+2. **没进 CI 的验证等于不存在。** 当时 `npm test` 全绿，因为单元测试走不到这条路径。
+   现在 `npm run sim` 已加入 CI（`.github/workflows/ci.yml`）。
+   ⚠️ 但在 GitHub 托管的 runner 上它会被**跳过**——币安返回
+   `Service unavailable from a restricted location`（runner 位于限制区域）。
+   CI 会先探测可达性并打出 warning，**不静默通过**。本地务必自己跑。
 
 ---
 
@@ -540,7 +541,7 @@ npm run build       # 改了前端就必须跑；它会编译 packages/web 到 d
 1. **改了前端** → 除了 `build`，还应该在浏览器里真的点一遍受影响的页面（见 `docs/AGENTS.md`
    关于"不要声称没实际运行过的功能"那一条）。
 2. **改了影响交易的逻辑** → 至少再跑一次 `npm run sim`，它会在 15 项校验里覆盖执行接缝
-   （注意上面记的"13/15 已知失败"，先确认失败的是不是那两项）。
+   （当前应为 15/15 全通过；若有失败，先读上面「`npm run sim` 的实测状态」）。
 3. **改了 prompt / risk / 解析** → 额外跑一次 `npm run verify`，它用真实行情走完整链路。
 4. **改了币安相关代码（broker / 端点 / 字段）** → `docs/research/` 里有实测调研，
    动手前先读对应文件；能上真实交易所验证的，就去验证。

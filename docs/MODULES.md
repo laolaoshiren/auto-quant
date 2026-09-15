@@ -320,7 +320,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | 文件 | 命令 | 干什么 | 碰真钱吗 |
 | --- | --- | --- | --- |
 | `verifyPipeline.ts` | `npm run verify` | 真实币安行情 → 选币 → 指标 → 提示词 → 解析一份内置响应 → 风控审查。**不需要任何密钥，不下单** | 否 |
-| `simulate.ts` | `npm run sim` / `npm run sim:live` | 真实历史 K 线回放 + 模拟交易所 + 脚本化（或真实）模型，跑 80（或 12）轮，结尾跑 **15 项校验**（**当前实测 13/15**，失败的两项与止盈触发器精度有关，详见 `docs/DEVELOPMENT.md` 的"`npm run sim` 的当前实测状态"）。写**临时**数据库 | 否 |
+| `simulate.ts` | `npm run sim` / `npm run sim:live` | 真实历史 K 线回放 + 模拟交易所 + 脚本化（或真实）模型，跑 80（或 12）轮，结尾跑 **15 项校验**（**当前实测 15/15 全通过**）。写**临时**数据库 | 否 |
 | `demoCycle.ts` | `npm run demo` | 往**真实**数据库写一轮 `[DEMO]` 前缀的完整审计数据（真实行情 + 脚本化模型 + 自己的 `SimulatedBroker`）；`--clean` 清除 | 否 |
 | `liveSmokeTest.ts` | `npx tsx .../liveSmokeTest.ts --confirm` | **实盘接线冒烟**：预检 → 单向模式 → 杠杆 → 市价开仓 → 挂止损 → 挂止盈 → **回读交易所确认** → 撤单 → 平仓 → 确认账户干净 | ✅ **是** |
 
