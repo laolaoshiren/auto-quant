@@ -1,0 +1,29 @@
+# =============================================================================
+# 资助入口（GitHub Sponsors 等）
+#
+# 这个文件现在是**完全注释掉的**，因此它是惰性的：GitHub 只有在文件里存在
+# 未注释的键时，才会在仓库页面上显示 "Sponsor" 按钮。取消注释并填写之前，
+# 它不会有任何行为，也不会报错。
+#
+# 为什么默认关闭：本项目目前是专有软件（见 LICENSE），既不对外分发源码，
+# 也不承诺路线图 —— 资助没有对等回报。想支持这个项目，更有用的投入是
+# 提交可复现的缺陷报告和带测试的 PR。将来开源之后再决定是否启用也不迟。
+#
+# 启用方式：去掉对应行的 `#`，把 <待填写> 换成真实账号名或链接。
+# 各键的含义见 GitHub 文档：
+# https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+# =============================================================================
+
+# github: <待填写>            # GitHub Sponsors 用户名；多个用空格分隔
+# patreon: <待填写>
+# open_collective: <待填写>
+# ko_fi: <待填写>
+# tidelift: <待填写>          # 形如 npm/包名
+# community_bridge: <待填写>
+# liberapay: <待填写>
+# issuehunt: <待填写>
+# lfx_crowdfunding: <待填写>
+# polar: <待填写>
+# buy_me_a_coffee: <待填写>
+# thanks_dev: <待填写>
+# custom: <待填写>            # 单个 URL，例如 https://quant.example.com/sponsor

@@ -1,0 +1,114 @@
+# =============================================================================
+# PR 自动打标签
+#
+# 打标签的地方只有这一处：
+#   · 路径规则   → .github/labeler.yml
+#   · 类型规则   → 本文件最后一个步骤（读 PR 标题的 Conventional Commits 前缀）
+# 这两者产出的标签是 release-drafter 生成发布说明的唯一输入。
+#
+# -----------------------------------------------------------------------------
+# 触发器用 pull_request，而不是 pull_request_target
+# -----------------------------------------------------------------------------
+# pull_request_target 会在**基分支的上下文**里拿到一个可写 token。只要将来有人
+# 在某个步骤里 checkout 并执行了 PR 里的代码（哪怕只是 npm install 触发了
+# postinstall 脚本），外部贡献者就拿到了仓库写权限。本仓库要持有能下真实订单的
+# 交易所密钥，这个代价不值得为一个自动标签去承担。
+#
+# 代价是明确的：来自 fork 的 PR 只拿到只读 token，打标签会失败（最后一步有降级处理，
+# 不会让检查变红）。本仓库目前是私有仓库（私有仓库的 fork 限于同一组织内），
+# 所以代价可接受；将来开放外部 fork 时，也应当继续保持
+# "不检出、不执行 PR 代码"这条底线，而不是改回 pull_request_target。
+# =============================================================================
+name: PR 自动打标签
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+# 同一个 PR 的连续推送取消上一次仍在跑的计算，避免排队浪费。
+concurrency:
+  group: pr-labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# 最小权限：只需要给 PR 写标签。labeler 读改动文件列表走 API，不读工作区。
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    name: 打标签
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # 不 checkout：labeler 通过 API 读取这个 PR 改了哪些文件，
+      # 它既不需要、也不应该把 PR 的代码放到 runner 上。
+      #
+      # 这一步不需要 issues: write —— 它只有在需要**创建**标签时才用得上，
+      # 而本仓库用到的标签都已经存在。少了这个权限也就少了一条写入路径。
+      - name: 按改动路径打标签
+        uses: actions/labeler@v5
+        with:
+          # 保持默认的 false。开启 sync-labels 后，改动不再匹配某条规则时标签会被自动摘掉；
+          # 但"这次改动不再碰风控"不等于"这条 PR 与风控无关"，摘掉人工判断过的标签
+          # 只会让筛选结果更不可信。
+          sync-labels: false
+
+      # actions/labeler 只能看"改了哪些文件"，看不到标题，所以类型标签在这里补。
+      # 依据是 Conventional Commits 的标题前缀：CI 已经强制了这个格式，
+      # 所以它是唯一既客观、又不会因为作者忘记选标签而缺失的类型信号。
+      #
+      # 这一步不检出、不执行 PR 的代码 —— 下面只把事件里的标题当字符串处理。
+      - name: 按标题前缀补充类型标签
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          LABELS=""
+          add() { LABELS="$LABELS $1"; }
+          # 用 here-string 而不是管道：`grep -q` 匹配成功就退出，会让管道左侧的
+          # printf 收到 SIGPIPE，配合 pipefail 会得到一个假的失败。
+          matches() { grep -qE "$1" <<< "$PR_TITLE"; }
+
+          # `feat!:` / `fix(risk)!:` 里的 `!` 是 Conventional Commits 的破坏性标记，
+          # CI 的标题校验明确允许它。破坏性变更必须单独可见：它决定版本号，
+          # 也决定已经跑着机器人的服务器要不要先读发布说明再升级。
+          if matches '^[a-z]+(\([a-z0-9./-]+\))?!: '; then add breaking; fi
+
+          if matches '^feat(\([a-z0-9./-]+\))?!?: '; then add enhancement; fi
+          if matches '^fix(\([a-z0-9./-]+\))?!?: '; then add bug; fi
+          if matches '^perf(\([a-z0-9./-]+\))?!?: '; then add perf; fi
+          if matches '^docs(\([a-z0-9./-]+\))?!?: '; then add docs; fi
+          # Dependabot 自己也会打 dependencies 标签，这条是"作者手写依赖升级"的兜底。
+          # 特意带上 deps-dev / deps-prod 这类 scope：Dependabot 的实际标题
+          # 就是 `chore(deps-dev): bump …`，只匹配 `deps` 会漏掉一大半。
+          if matches '^(chore|build)\(deps[a-z-]*\)!?: '; then add dependencies; fi
+
+          # refactor / test / chore / ci 刻意不映射类型标签：它们会落进发布说明的
+          # 「其他」一节。为它们各建一个标签，只会增加要长期维护的标签数量。
+
+          if [ -z "${LABELS// /}" ]; then
+            echo "标题里没有可映射的类型前缀，只保留路径标签：$PR_TITLE"
+            exit 0
+          fi
+
+          # 一次只加一个标签：其中一个标签不存在时，整批添加会一起失败，
+          # 那样"缺一个标签"就会表现成"一个都没加上"，很难排查。
+          #
+          # ⚠️ 一次性前提：`perf` 不在仓库现有标签里（GitHub 默认标签集也没有性能类），
+          #    而 release-drafter 只按已有标签归类、不会创建标签 —— 缺它时发布说明的
+          #    「性能」一节会永远为空。创建一次即可：
+          #      gh label create perf --description '性能优化' --color 0E8A16
+          for label in $LABELS; do
+            if gh pr edit "$PR_NUMBER" --add-label "$label"; then
+              echo "已添加标签：$label"
+            else
+              # 来自 fork 的 PR 只有只读 token，这里必然失败。降级为警告而不是让检查变红：
+              # 外部贡献者的第一个 PR 因为一个标签就变红，只会把人赶走。
+              echo "::warning::未能添加标签 $label（标签不存在，或来自 fork 的 PR 只读 token）"
+            fi
+          done

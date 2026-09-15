@@ -2,6 +2,11 @@
 
 **用自然语言定义策略的加密货币自动交易终端。**
 
+[![CI](https://github.com/laolaoshiren/auto-quant/actions/workflows/ci.yml/badge.svg)](https://github.com/laolaoshiren/auto-quant/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522.5-blue)](package.json)
+[![Dependencies](https://img.shields.io/badge/dependencies-no%20copyleft-brightgreen)](THIRD-PARTY-NOTICES.md)
+[![License](https://img.shields.io/badge/license-proprietary-red)](LICENSE)
+
 策略不是一堆参数，而是一段中文描述。模型每个周期读取市场、做出决策、执行下单、留下完整推理；
 而一个**独立于模型的风控引擎**会审查并钳制它发出的每一张订单。
 
@@ -182,12 +187,42 @@ packages/
 | [架构文档](docs/ARCHITECTURE.md) | 设计取舍与关键工程决策 |
 | [API 参考](docs/API.md) | 全部 HTTP 端点契约 |
 | [部署指南](docs/DEPLOYMENT.md) | 上线流程、反向代理、安全检查清单 |
+| [发布手册](docs/RELEASING.md) | 维护者的发版流程 |
 | [AI 代理指南](docs/AGENTS.md) | 面向自动化编码代理的工作约束 |
-| [贡献指南](CONTRIBUTING.md) | 分支模型、提交规范、PR 流程 |
-| [安全策略](SECURITY.md) | 漏洞报告与安全敏感点 |
 | [合规清单](docs/LEGAL.md) | 许可证、交易所条款、监管风险的逐项说明 |
-| [第三方声明](THIRD-PARTY-NOTICES.md) | 运行时依赖的许可证与版权方 |
 | [调研记录](docs/research/README.md) | 交易所与模型接口的一手实测记录 |
+| [第三方声明](THIRD-PARTY-NOTICES.md) | 运行时依赖的许可证与版权方 |
+
+---
+
+## 🤝 参与
+
+这是一个**由贡献者利用业余时间维护**的项目。欢迎各种形式的参与。
+
+| 我想…… | 去哪里 |
+| --- | --- |
+| 报告缺陷 | [开 issue](/issues/new/choose) —— 请带上环境、日志与复现步骤 |
+| 提功能建议 / 问问题 | [Discussions](/discussions) |
+| 直接动手改代码 | [`good first issue`](/labels/good%20first%20issue) 标签，或先读[开发手册](docs/DEVELOPMENT.md) |
+| 了解项目往哪走 | [ROADMAP.md](ROADMAP.md) |
+| 了解怎么合作、谁能决定什么 | [GOVERNANCE.md](GOVERNANCE.md) |
+| 了解怎么贡献代码 | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| 求助 | [SUPPORT.md](SUPPORT.md) |
+| **报告安全漏洞** | **不要开公开 issue** —— 见 [SECURITY.md](SECURITY.md) |
+
+**最有价值的贡献，是把一个「应该没问题」的地方变成「我验证过了，这是证据」。**
+
+这个项目面对的是会真实亏钱的场景，所以它更看重可验证性而不是功能数量：
+
+- 修 bug 时附带一个**能复现的测试**，比修十个 bug 更有用
+- 涉及下单路径的改动，**说明验证到了哪一级**（单元测试 → 模拟 → 实盘冒烟），
+  而不是声称"应该没问题"
+- 对不确定的事**说"我不确定"** —— 在这个项目里，一个自信的错误判断会让人亏钱
+
+提交前的三条底线：`npm run typecheck`、`npm test`、`npm run build` 全部通过。
+改动影响交易逻辑时，再加一次 `npm run sim`（历史回放，不花钱、不下单）。
+
+版本间的变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

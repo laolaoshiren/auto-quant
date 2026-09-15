@@ -1,0 +1,92 @@
+# =============================================================================
+# 发布说明草稿的配置（release-drafter v6）
+#
+# 为什么要有这个文件：发布说明在每次 PR 合入 main 时由机器增量维护，
+# 而不是留到发版那一刻凭记忆写。发版当晚最不该做的事就是回忆两周里合了什么。
+#
+# 分类只能按**标签**匹配（v6 的 categories 不支持标题正则），所以类型标签由
+# .github/workflows/pr-labeler.yml 从 PR 标题前缀翻译过来：
+#   · 路径标签（labeler.yml）回答"改了哪里"
+#   · 类型标签（标题前缀）回答"这是什么改动"
+# 两者都在打标签阶段产生，本文件只负责按它们归类。
+#
+# 具体发版步骤见 docs/RELEASING.md。
+# =============================================================================
+
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+categories:
+  # 破坏性变更排在最前：升级服务器的人先看这一节，看完再决定升不升。
+  - title: '💥 破坏性变更'
+    labels: ['breaking']
+
+  - title: '🚀 新功能'
+    labels: ['enhancement']
+
+  - title: '🐛 修复'
+    labels: ['bug']
+
+  - title: '⚡ 性能'
+    labels: ['perf']
+
+  - title: '📚 文档'
+    labels: ['docs']
+
+  - title: '⬆️ 依赖更新'
+    labels: ['dependencies']
+    # Dependabot 每周成批开 PR，不折叠会把其他内容挤出屏幕。
+    collapse-after: 5
+
+  # 没有 labels 的那一个分类接住其余全部改动（refactor / test / chore / ci…）。
+  # 它必须存在：否则这些改动会从发布说明里消失，而"这次发布到底改了什么"
+  # 就不再能从发布说明回答。
+  - title: '🔧 其他'
+
+# 版本号由标签推导，不靠人记 —— PR 阶段已经打好的类型标签同时决定版本增量。
+#
+# 这里**故意没有 major**：pre-1.0 阶段破坏性变更按 semver 的规定走 minor 递增，
+# 而"这次破坏性变更够不够格升到 1.0"是产品决策，不该由一次自动标签替人做决定。
+# 1.0 怎么发见 docs/RELEASING.md。
+version-resolver:
+  minor:
+    labels: ['breaking', 'enhancement']
+  patch:
+    labels: ['bug', 'perf', 'docs', 'dependencies']
+  default: patch
+
+# 每条改动一行，PR 号在前便于反查。标题里若含 markdown 字符要转义，
+# 否则一个标题里的 `*` 就能把整段发布说明的排版弄乱。
+change-template: '- $TITLE (#$NUMBER) @$AUTHOR'
+change-title-escapes: '\<*_&'
+
+template: |
+  ## 本次变更
+
+  $CHANGES
+
+  ---
+
+  ## 怎么升级
+
+  本项目的发布产物是 **Docker 镜像**，不是源码包：
+
+  ```
+  ghcr.io/<owner>/<repo>:<tag>
+  ```
+
+  在服务器上执行 `./up.sh` 会拉取 `latest` 并重启 —— 日常升级只有这一条命令。
+
+  要固定到某个版本（例如回滚，或先在别的机器上验证），在 `deploy/.env` 里覆盖：
+
+  ```
+  AUTOQUANT_IMAGE=ghcr.io/<owner>/<repo>:<tag>
+  ```
+
+  改完再跑一次 `./up.sh` 即可生效。镜像标签与版本号的对应关系、以及完整发版流程，
+  见仓库里的 `docs/RELEASING.md`。
+
+  > ⚠️ 这个项目下的是**真实订单**。升级前请先看最上面「破坏性变更」一节，
+  > 确认这次升级没有要求改配置或迁移数据。
+
+  贡献者：$CONTRIBUTORS
