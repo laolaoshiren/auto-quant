@@ -352,24 +352,47 @@ export class SimulatedExchange {
       }
 
       /*
-       * Enforce the symbol's price tick, exactly as Binance does.
+       * Snap the trigger price to the symbol's tick — the **broker's** job.
        *
-       * Without this check the simulation accepts any float, and the real
-       * `-1111 Precision is over the maximum defined for this asset` rejection
-       * only appears against the live venue — where it means the stop was never
-       * placed. Modelling the constraint is the whole point of a simulator.
+       * This class stands in for `BinanceBroker` in the trading pipeline, so it
+       * has to have the same contract. The real broker rounds quantity to
+       * `stepSize` and trigger prices to `tickSize` before sending, precisely
+       * because Binance answers `-1111 Precision is over the maximum defined for
+       * this asset` otherwise and the stop is never placed.
+       *
+       * An earlier version of this method *rejected* off-tick prices instead of
+       * rounding them. That modelled the wrong layer: Binance never sees an
+       * off-tick price from a correct client, so the simulation became stricter
+       * than reality and `npm run sim` failed 13/15 on scenarios the real system
+       * handles fine.
+       *
+       * The regression guard for "did the broker forget to round?" lives where it
+       * belongs — `binance/orders.test.ts` asserts that `BinanceBroker.placeOrder`
+       * sends a tick-aligned trigger. Asserting it here would test the wrong code
+       * path, since the simulation never calls the real broker.
        */
-      const info = this.options.registry.require(symbol);
-      const steps = request.triggerPrice / info.tickSize;
-      if (Math.abs(steps - Math.round(steps)) > 1e-6) {
+      const rawTrigger = request.triggerPrice;
+      const triggerPrice = this.options.registry.roundTriggerPrice(
+        symbol,
+        rawTrigger,
+        request.type,
+        request.side,
+        mark,
+      );
+      if (!(triggerPrice > 0)) {
+        throw new Error(`模拟交易所拒绝：${symbol} 的触发价 ${rawTrigger} 取整后为 0`);
+      }
+      // The rounded value must still sit on the correct side of the market; this
+      // mirrors the broker's post-rounding validation.
+      if (!this.options.registry.isValidTrigger(triggerPrice, request.type, request.side, mark)) {
         throw new Error(
-          `模拟交易所拒绝：触发价 ${request.triggerPrice} 不符合 ${symbol} 的价格精度 tickSize=${info.tickSize}（-1111 Precision is over the maximum defined for this asset）`,
+          `模拟交易所拒绝：触发价 ${triggerPrice} 会立即触发（标记价 ${mark}）（-2021）`,
         );
       }
 
       position.protection.set(id, {
         kind: request.type as 'STOP_MARKET' | 'TAKE_PROFIT_MARKET',
-        triggerPrice: request.triggerPrice,
+        triggerPrice,
       });
 
       const raw: BinanceAlgoOrderResponse = {
@@ -383,7 +406,7 @@ export class SimulatedExchange {
         timeInForce: 'GTC',
         quantity: String(request.quantity ?? 0),
         algoStatus: 'NEW',
-        triggerPrice: String(request.triggerPrice),
+        triggerPrice: String(triggerPrice),
         price: '0',
         closePosition: request.closePosition ?? false,
         reduceOnly: request.reduceOnly ?? false,
