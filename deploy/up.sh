@@ -247,7 +247,7 @@ wait_healthy() {
 
 print_access_info() {
   local port bind
-  port=$(env_get PORT); port="${port:-3200}"
+  port=$(env_get PORT); port="${port:-27137}"
   bind=$(env_get BIND_ADDRESS); bind="${bind:-127.0.0.1}"
 
   local env_name
@@ -396,7 +396,7 @@ cmd_status() {
              "$CONTAINER_NAME" 2>/dev/null || echo "未运行")
   echo "  健康: $health"
   echo ""
-  local port; port=$(env_get PORT); port="${port:-3200}"
+  local port; port=$(env_get PORT); port="${port:-27137}"
   echo -n "  接口: "
   if docker exec "$CONTAINER_NAME" node -e \
        "fetch('http://127.0.0.1:${port}/api/health').then(r=>r.text()).then(t=>{console.log(t);process.exit(0)}).catch(()=>process.exit(1))" 2>/dev/null; then

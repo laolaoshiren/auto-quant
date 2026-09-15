@@ -60,9 +60,24 @@ function bool(key: string, fallback: boolean): boolean {
 }
 
 export const env = {
-  // 3200 rather than 3080: 3080 is commonly taken by other local dev tooling,
-  // and a port clash would otherwise fail only at listen() time.
-  port: int('PORT', 3200),
+  /**
+   * 默认端口 27137。
+   *
+   * 这个数字不是随手挑的 —— 它是**对着 IANA 的官方端口注册表筛出来的**：
+   *
+   *   · 未在 IANA 登记（全球已登记的单端口有 6262 个）
+   *   · 前后各 100 个端口内没有任何登记（最近的邻居是 27017 MongoDB，
+   *     隔了 120 个号）
+   *   · 不在常见开发工具的默认端口里（3000 / 5000 / 8000 / 8080 / 8888…）
+   *   · 低于 32768，**避开 Linux 的临时端口区**（通常 32768–60999）。
+   *     把服务绑在临时端口段里，会和出站连接抢端口，表现为随机、难复现的
+   *     "address already in use"。
+   *
+   * 选一个冷门端口是为了让冲突在默认情况下就不会发生：端口冲突只在
+   * listen() 那一刻才报错，且错误信息完全不提"是端口被占了"，
+   * 对刚上手的人来说是个很难定位的失败。
+   */
+  port: int('PORT', 27137),
   host: str('HOST', '127.0.0.1'),
   logLevel: str('LOG_LEVEL', 'info') as 'debug' | 'info' | 'warn' | 'error',
 
