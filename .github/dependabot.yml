@@ -1,0 +1,86 @@
+# Dependabot 配置
+#
+# 为什么是「每周」而不是每天：
+#   每天更新会产出大量噪音 PR，而噪音会训练维护者批量点「合并」—— 那正是
+#   真正需要 review 的那一条被顺手放过的方式。每周一次足够跟上安全公告的节奏，
+#   也让每个更新 PR 都还值得被认真看一眼。
+#
+# ⚠️ 本项目的一个硬性前提：
+#   **触及交易路径的依赖 PR 必须通过完整测试套件并由人 review，不得自动合并。**
+#   这里的依赖直接决定订单怎么落到交易所上（签名、条件单端点、WebSocket 路由、
+#   各 LLM 提供商的请求/响应形状）。一个「只是小版本升级」的 HTTP 客户端或
+#   签名相关依赖，就足以让条件单请求格式变化 —— 而它的失败方式不是报错，
+#   是开仓后止损没挂上。
+#
+#   因此：请不要为本仓库开启 dependabot 的 auto-merge。
+#   合并前请确认 PR 描述里说明了它触及哪些包，并按 CONTRIBUTING.md
+#   的「涉及真实资金的改动」一节验证到相应级别。
+#
+# 注意：npm workspaces（packages/shared、packages/server、packages/web）的依赖
+# 由根目录的 lockfile 统一解析，因此在根目录配置一个 npm 条目即可覆盖全部 workspace。
+# 无需为每个 workspace 单独配置（重复条目会产出重复 PR）。
+
+version: 2
+updates:
+  # -------------------------------------------------------------------------
+  # npm —— 根目录（覆盖全部 workspace）
+  # -------------------------------------------------------------------------
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      # 周一开盘前处理，留出一周时间吸收
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    versioning-strategy: increase
+    labels:
+      - dependencies
+    commit-message:
+      # 与 CONTRIBUTING.md 要求的 Conventional Commits 一致
+      prefix: "chore"
+      include: scope
+    groups:
+      # 把同类的、低风险的更新合成一个 PR，减少噪音
+      dev-tooling:
+        patterns:
+          - typescript
+          - tsx
+          - "@types/*"
+      # React 生态一起升，避免版本交叉不兼容造成的假失败
+      web-frontend:
+        patterns:
+          - react
+          - react-dom
+          - "@types/react*"
+          - vite
+          - "@vitejs/*"
+          - tailwindcss
+          - postcss
+          - autoprefixer
+
+  # -------------------------------------------------------------------------
+  # GitHub Actions —— process.yml 类工作流用到的 action 固定版本
+  #
+  # 第三方 action 以完整提交 SHA 或版本标签运行在 CI 上，具备仓库读权限；
+  # 保持它们更新是安全实践，但同样需要人看一眼 diff。
+  # -------------------------------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "chore"
+      include: scope
+    groups:
+      actions:
+        patterns:
+          - "*"

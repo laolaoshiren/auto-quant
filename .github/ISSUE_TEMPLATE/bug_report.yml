@@ -1,0 +1,101 @@
+name: 缺陷报告
+description: 报告一个可复现的缺陷（请勿在此报告安全漏洞）
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!IMPORTANT]
+        > **安全漏洞请勿在此公开报告**，请走 [SECURITY.md](../blob/main/SECURITY.md)
+        > 中的私密渠道（GitHub Security Advisories）。
+        >
+        > **提交日志或截图前必须脱敏**：请遮盖 API Key / Secret、账户余额与权益数字、
+        > 持仓数量、订单号、以及任何个人或站点信息（主机名、域名、IP、服务器路径）。
+        > 需要展示金额时，请改成虚构的等比例数字。
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请写出精确步骤。能稳定复现是缺陷报告最有价值的部分。
+      placeholder: |
+        1. 启动服务：npm run dev
+        2. 在「设置 → 交易所账户」新增一个 Demo 环境凭据
+        3. 创建一个机器人并选择「模拟（Paper）」
+        4. ...
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 你认为应该发生什么？为什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么？如有报错，请贴上脱敏后的错误信息与堆栈。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 这是模拟盘还是实盘？实盘问题请优先使用「交易事故」模板。
+      placeholder: 请选择运行环境
+      options:
+        - 模拟盘 / 币安 Demo 环境
+        - 实盘（真实资金）
+        - DRY_RUN 干跑模式
+        - 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js 版本
+      description: 输出 `node --version`。本项目要求 ≥ 22.5（用到内置 node:sqlite）。
+      placeholder: v22.11.0
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      placeholder: Windows 11 / Ubuntu 24.04 / macOS 15
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 代码版本
+      description: 请填提交哈希（`git rev-parse --short HEAD`）或分支名。项目处于 1.0 之前，只有 main 受支持。
+      placeholder: a1b2c3d
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或决策审计截图
+      description: |
+        数据页的实时日志，或机器人看板的「决策审计」截图（思维链、解析后的决策、
+        逐条执行结果）通常能直接指出问题所在。
+        **再次提醒：请先脱敏 —— 遮盖 API Key、账户余额、持仓数量与站点专属信息。**
+      placeholder: 粘贴脱敏后的日志文本，或拖入脱敏后的截图。
+    validations:
+      required: false

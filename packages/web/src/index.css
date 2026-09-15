@@ -1,0 +1,147 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-base-950 text-ink-hi font-sans text-base antialiased;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #2b2f3a transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2b2f3a;
+    border-radius: 6px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3f4d;
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font: inherit;
+  }
+
+  /* Keep number inputs honest in a dense terminal. */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+
+  ::selection {
+    background: rgba(77, 141, 255, 0.35);
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded border border-base-750 bg-base-900 shadow-panel;
+  }
+
+  .panel-head {
+    @apply flex items-center justify-between gap-2 border-b border-base-800 px-3 py-2;
+  }
+
+  .panel-title {
+    @apply text-xs font-semibold uppercase tracking-[0.14em] text-ink-lo;
+  }
+
+  .num {
+    @apply font-mono tabular-nums;
+  }
+
+  .field-label {
+    @apply mb-1 block text-2xs font-semibold uppercase tracking-[0.12em] text-ink-lo;
+  }
+
+  .input,
+  .select,
+  .textarea {
+    @apply w-full rounded border border-base-700 bg-base-850 px-2 py-1.5 text-base text-ink-hi outline-none transition
+      placeholder:text-ink-faint focus:border-accent/70 focus:ring-1 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .textarea {
+    @apply font-mono text-xs leading-relaxed;
+  }
+
+  .select {
+    @apply cursor-pointer appearance-none bg-[length:10px] bg-[right_0.5rem_center] bg-no-repeat pr-7;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%236b7486' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+  }
+
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-1.5 rounded border px-2.5 py-1.5 text-xs font-semibold
+      transition disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-primary {
+    @apply border-accent/60 bg-accent/15 text-accent hover:bg-accent/25 hover:text-white;
+  }
+
+  .btn-ghost {
+    @apply border-base-700 bg-base-850 text-ink-mid hover:border-base-600 hover:text-ink-hi;
+  }
+
+  .btn-danger {
+    @apply border-down/50 bg-down/10 text-down hover:bg-down/20 hover:text-white;
+  }
+
+  .btn-success {
+    @apply border-up/50 bg-up/10 text-up hover:bg-up/20 hover:text-white;
+  }
+
+  .btn-warn {
+    @apply border-warn/50 bg-warn/10 text-warn hover:bg-warn/20 hover:text-white;
+  }
+
+  .btn-xs {
+    @apply px-1.5 py-0.5 text-2xs;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded border px-1.5 py-px font-mono text-2xs uppercase tracking-wide;
+  }
+
+  .th {
+    @apply whitespace-nowrap px-2 py-1.5 text-left text-2xs font-semibold uppercase tracking-[0.1em] text-ink-lo;
+  }
+
+  .td {
+    @apply whitespace-nowrap px-2 py-1.5 text-xs text-ink-mid;
+  }
+
+  .row-hover {
+    @apply border-b border-base-850 transition-colors hover:bg-base-850/60;
+  }
+
+  .scroll-x {
+    @apply overflow-x-auto;
+  }
+}

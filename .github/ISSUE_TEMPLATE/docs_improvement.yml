@@ -1,0 +1,56 @@
+name: 文档改进
+description: 报告文档中的错误、过时内容，或让人走了弯路的地方
+title: "[Docs] "
+labels:
+  - documentation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        文档偏差会直接变成操作风险：本项目里读错一句话的代价可能是把服务连到了实盘，
+        或者以为止损挂上了而其实没有。所以「哪里让我走了弯路」比「有个错别字」更重要。
+
+  - type: dropdown
+    id: document
+    attributes:
+      label: 哪份文档
+      placeholder: 请选择文档
+      options:
+        - README.md
+        - docs/ARCHITECTURE.md
+        - docs/DEPLOYMENT.md
+        - docs/research/（币安 / LLM 实测调研）
+        - CONTRIBUTING.md
+        - SECURITY.md
+        - 控制台页面内的说明 / FAQ 页
+        - 代码注释
+        - 其它（请在下方说明）
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: 具体位置
+      description: 章节标题、行号或链接，越具体越好。
+      placeholder: README.md 第 3 节「部署到服务器」
+    validations:
+      required: true
+
+  - type: textarea
+    id: detour
+    attributes:
+      label: 哪里让人走了弯路
+      description: |
+        请描述你**实际做了什么、以为会发生什么、结果发生了什么**。
+        这比"这段写得不好"有用得多 —— 它是唯一能证明文档真的有问题的证据。
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: 建议怎么改
+      description: 如果已经想好了措辞，请直接写出来，我们更倾向于原文采用。
+    validations:
+      required: false

@@ -1,0 +1,139 @@
+name: 交易事故（涉及资金）
+description: 报告一次涉及真实资金的交易异常（错误下单、漏记、对账不符、保护单失效等）
+title: "[Incident] "
+labels:
+  - incident
+  - real-money
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 这是什么模板
+
+        本模板用于**已经影响或可能影响真实资金**的事件，例如：
+        仓位在机器人停止时被平掉导致这笔交易从未被记账、账面盈亏与交易所不一致、
+        止损止盈没有挂上、重复下单。
+
+        这类问题**无法只靠平台截图诊断** —— 需要交易所侧的原始数字与平台记录做差。
+        请务必填写下面两节。
+
+        > **请先脱敏**：**不要**粘贴 API Key / Secret。仓位数量、价格与盈亏数字
+        > 是诊断所必需的，可以保留；但请遮盖账户总权益、个人与站点信息
+        > （主机名、域名、IP、服务器路径）。
+
+        > **如有未平仓位或异常挂单，请先手动处理风险**（撤掉该标的的全部普通单与
+        > Algo 单，再平仓），然后再来填这张表。
+
+  - type: input
+    id: occurred-at
+    attributes:
+      label: 发生时间
+      description: 请附时区。交易所时间是 UTC，平台日志通常是本机时间 —— 请标明是哪一种。
+      placeholder: "2026-02-14 03:12 UTC（平台日志显示 11:12 CST）"
+    validations:
+      required: true
+
+  - type: input
+    id: trader-id
+    attributes:
+      label: 机器人 ID / 名称
+      description: 控制台机器人看板 URL 里的 id（`/traders/:id`），或卡片上的名称。
+      placeholder: "3（或「[DEMO] 决策审计示例」）"
+    validations:
+      required: true
+
+  - type: input
+    id: symbol
+    attributes:
+      label: 标的
+      description: 合约交易对，以及方向（多/空）与数量（张数或币数）。
+      placeholder: POWERUSDT，多，131 张
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 运行模式
+      description: 这决定了事故的严重程度：实盘意味着已经在花真钱。
+      placeholder: 请选择运行模式
+      options:
+        - 实盘（真实资金）
+        - 模拟盘 / 币安 Demo 环境
+        - DRY_RUN 干跑模式
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 按设计，这个位置应该发生什么？
+      placeholder: 止损挂上后由交易所触发，机器人周期检查时发现仓位消失并记账。
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么？机器人当时是在运行、停止，还是已进入安全模式？
+    validations:
+      required: true
+
+  - type: textarea
+    id: exchange-records
+    attributes:
+      label: 交易所侧的实际持仓与成交记录（必填）
+      description: |
+        这是本模板存在的理由 —— 诊断这类事故**必须**有交易所侧的原始数字。
+        请从币安 App / 网页端（或 API）取以下内容并贴上脱敏后的文本/截图：
+        1. 该标的的**仓位历史**（开仓、平仓时间与价格）；
+        2. 该标的的**成交记录 / 订单历史**（含触发单的实际成交价与数量、手续费）；
+        3. 平仓前后**钱包余额的变动金额**；
+        4. 事件期间**是否还有其它挂单或条件单存活**。
+
+        > 请直接给原始数字，不要先自己换算成"应该是多少"。
+      placeholder: |
+        仓位历史：POWERUSDT LONG 131 张，开仓 03:12 均价 x.xxxx，平仓 05:40 均价 y.yyyy
+        成交记录：……
+        钱包余额变动：+0.2586 USDT
+        事件期间存活挂单：无
+    validations:
+      required: true
+
+  - type: textarea
+    id: platform-records
+    attributes:
+      label: 平台记录的数字（必填）
+      description: |
+        与上一节**逐项对应**。请在「机器人看板」上取：
+        四项统计卡（胜率 / 已实现盈亏 / 保证金占用 / 杠杆）、持仓·委托·成交·订单
+        四个标签页、以及「最近决策」里该时段的记录。
+      placeholder: |
+        平台净盈亏：-0.3136 USDT
+        成交页：无该笔平仓记录
+        订单页：……
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: manual-close
+    attributes:
+      label: 是否已手动平仓
+      options:
+        - label: 已在交易所侧手动平仓（并已撤销该标的的全部普通单与 Algo 单）
+        - label: 未手动平仓，仓位仍存在
+        - label: 仓位已被交易所侧止损 / 止盈 / 爆仓平掉
+        - label: 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其它证据
+      description: 相关日志（数据页）、决策审计详情（含思维链与逐条执行结果）、对账触发记录（`POST /api/traders/:id/reconcile`）等。
+    validations:
+      required: false
