@@ -74,6 +74,14 @@ export const env = {
   /** Hex-encoded 32-byte key material. Empty means "derive one on first boot". */
   masterKey: str('MASTER_KEY', ''),
   jwtSecret: str('JWT_SECRET', ''),
+  /**
+   * 首次启动创建的管理员账号。
+   *
+   * 留空时**用户名与密码都由系统随机生成**并打印到日志一次。
+   * 这是刻意的：默认的 `admin` + 弱密码是最常见的被攻破路径，
+   * 而单人部署场景下用户拿到凭据后第一件事就是改成自己记得住的。
+   */
+  adminUsername: str('ADMIN_USERNAME', ''),
   adminPassword: str('ADMIN_PASSWORD', ''),
 
   binanceUseTestnet: bool('BINANCE_USE_TESTNET', true),

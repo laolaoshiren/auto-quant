@@ -35,7 +35,7 @@ import {
   users,
 } from '../store/repositories.js';
 import type { TraderManager } from '../trader/manager.js';
-import { requireAuth, signToken, verifyToken, generatePassword, type AuthedRequest } from './auth.js';
+import { requireAuth, signToken, verifyToken, generatePassword, generateUsername, type AuthedRequest } from './auth.js';
 import type { BalanceService } from '../services/balance.js';
 
 const log = createLogger('api');
@@ -227,31 +227,26 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * Registration is open only while the instance has no accounts: the first one
    * becomes the owner. After that, new accounts must be created by an owner.
    */
-  app.post('/api/auth/register', async (request, reply) => {
-    const parsed = CredentialsSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: '请填写用户名，以及至少 6 位字符的密码。' });
-    }
-
-    const isFirst = users.count() === 0;
-    if (!isFirst) {
-      const auth = requireAuth(deps.jwtSecret);
-      await auth(request, reply);
-      if (reply.sent) return;
-      const actor = (request as AuthedRequest).user;
-      if (actor?.role !== 'owner') {
-        return reply.code(403).send({ error: '只有 owner 账户可以创建新账户。' });
-      }
-    }
-
-    if (users.findByUsername(parsed.data.username)) {
-      return reply.code(409).send({ error: '该用户名已被占用。' });
-    }
-
-    const user = users.create(parsed.data.username, hashPassword(parsed.data.password), isFirst ? 'owner' : 'user');
-    const token = signToken({ sub: user.id, username: user.username, role: user.role }, deps.jwtSecret);
-    return { token, user };
-  });
+  /*
+   * 注册接口已移除。
+   *
+   * 这个系统目前面向**单人自用**部署：首次启动自动生成管理员账号并打印一次，
+   * 登录后可在「操作员账户」里自行修改用户名与密码。
+   *
+   * 保留一个「首个账户可自助注册」的入口意味着：任何能访问到控制台的人在
+   * 数据库为空时都能把自己变成管理员 —— 而这个窗口在部署脚本还没跑完、
+   * 或数据卷被误删重建时会真实出现。对单人部署来说，这个风险没有任何对应的收益。
+   *
+   * 这里返回明确的 410 而不是 404：如果将来有人照着旧文档去调它，
+   * 应该看到「已移除、改用首次启动自动创建」这条信息，而不是一个语焉不详的 404。
+   */
+  app.post('/api/auth/register', async (_request, reply) =>
+    reply.code(410).send({
+      error:
+        '注册已停用。本系统面向单人部署：管理员账号在首次启动时自动创建，' +
+        '凭据会打印在服务日志中；登录后可在「操作员账户」中修改用户名与密码。',
+    }),
+  );
 
   app.post('/api/auth/login', async (request, reply) => {
     const parsed = CredentialsSchema.safeParse(request.body);
@@ -282,20 +277,75 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     user: request.user,
   }));
 
-  app.post('/api/auth/password', authed, async (request: AuthedRequest, reply) => {
-    const body = request.body as { currentPassword?: string; newPassword?: string };
-    if (!body?.newPassword || body.newPassword.length < 6) {
-      return reply.code(400).send({ error: '新密码至少需要 6 位字符。' });
-    }
+  /*
+   * 修改账户凭据：用户名与密码。
+   *
+   * 两者放在同一个端点，因为它们共享同一条安全前提：**必须验证当前密码**。
+   * 只靠会话令牌就允许改密码，意味着任何一次令牌泄露（浏览器残留、日志、
+   * 代理）都能被升级成永久接管 —— 攻击者改掉密码，真正的所有者就进不来了。
+   *
+   * 改完用户名要**重新签发令牌**：JWT 的载荷里带着用户名，
+   * 不重签的话前端拿的还是旧身份，下次校验就会对不上。
+   */
+  const updateAccount = async (request: AuthedRequest, reply: FastifyReply) => {
+    const body = request.body as {
+      currentPassword?: string;
+      username?: string;
+      newPassword?: string;
+    };
+
     const record = users.findById(request.user!.sub);
-    if (!record) return reply.code(404).send({ error: '找不到该账户' });
+    if (!record) return reply.code(404).send({ error: '找不到该账户。' });
+
     const full = users.findByUsername(record.username);
-    if (!full || !verifyPassword(body.currentPassword ?? '', full.passwordHash)) {
+    if (!full || !verifyPassword(body?.currentPassword ?? '', full.passwordHash)) {
       return reply.code(401).send({ error: '当前密码不正确。' });
     }
-    users.updatePassword(record.id, hashPassword(body.newPassword));
-    return { ok: true };
-  });
+
+    const nextUsername = typeof body?.username === 'string' ? body.username.trim() : undefined;
+    const nextPassword = typeof body?.newPassword === 'string' ? body.newPassword : undefined;
+
+    if (nextUsername === undefined && nextPassword === undefined) {
+      return reply.code(400).send({ error: '没有需要修改的内容。' });
+    }
+
+    if (nextPassword !== undefined && nextPassword.length < 8) {
+      return reply.code(400).send({ error: '新密码至少需要 8 位字符。' });
+    }
+
+    if (nextUsername !== undefined) {
+      if (nextUsername.length < 3 || nextUsername.length > 64) {
+        return reply.code(400).send({ error: '用户名需要 3 到 64 个字符。' });
+      }
+      if (nextUsername !== record.username && users.findByUsername(nextUsername)) {
+        return reply.code(409).send({ error: '该用户名已被占用。' });
+      }
+      users.updateUsername(record.id, nextUsername);
+    }
+
+    if (nextPassword !== undefined) {
+      users.updatePassword(record.id, hashPassword(nextPassword));
+    }
+
+    const updated = users.findById(record.id)!;
+    // 用户名可能变了，重新签发令牌，否则前端拿的还是旧身份
+    const token = signToken(
+      { sub: updated.id, username: updated.username, role: updated.role },
+      deps.jwtSecret,
+    );
+    return { ok: true, token, user: updated };
+  };
+
+  app.patch('/api/auth/account', authed, updateAccount);
+
+  /*
+   * 旧端点保留为别名。
+   *
+   * 控制台是单页应用，浏览器可能缓存着上一版的 JS：如果直接删掉这个路由，
+   * 那些页面上的「修改密码」会得到一个 404，而用户完全无从判断原因。
+   * 保留成本是两行，收益是消除一类难以解释的失败。
+   */
+  app.post('/api/auth/password', authed, updateAccount);
 
   /* --- Static catalogues ------------------------------------------------- */
 
@@ -1037,11 +1087,22 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   return app;
 }
 
-/** Create the owner account on first boot and report the credentials once. */
-export function bootstrapOwnerAccount(): { created: boolean; password?: string } {
+/**
+ * 首次启动创建管理员账号，并把凭据打印一次。
+ *
+ * 用户名与密码**都**可以随机生成（除非通过 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 指定）。
+ * 随机用户名不是多余的：固定的 `admin` 等于把登录所需的两半信息送出去一半，
+ * 安全性就只剩密码一道防线。用户登录后可以随时在「操作员账户」里改掉。
+ */
+export function bootstrapOwnerAccount(): {
+  created: boolean;
+  username?: string;
+  password?: string;
+} {
   if (users.count() > 0) return { created: false };
 
+  const username = env.adminUsername || generateUsername();
   const password = env.adminPassword || generatePassword();
-  users.create('admin', hashPassword(password), 'owner');
-  return { created: true, password };
+  users.create(username, hashPassword(password), 'owner');
+  return { created: true, username, password };
 }

@@ -363,7 +363,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 
 其它必须知道的细节：
 
-- 路由里**只有 `/api/health`、`/api/auth/login`、`/api/auth/register` 不需要认证**，
+- 路由里**只有 `/api/health` 与 `/api/auth/login` 不需要认证**，
   其余全部走 `requireAuth`。
 - 有一个 `addContentTypeParser('*')`：把空 body 与各种奇怪的 Content-Type 统一成 `undefined` / JSON。
   这是为了让 `/start`、`/stop`、`/run-once`、`/test` 这些**可选 body 的 POST**
@@ -420,7 +420,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | `ModelsPage.tsx` / `ExchangesPage.tsx` / `AccountPage.tsx` | `/models` `/exchanges` `/account` | 都是**薄页面**：只放标题 + 引用 `components/settings/` 里的 section |
 | `DataPage.tsx` | `/data` | 实时日志（WebSocket 推送） |
 | `FaqPage.tsx` | `/faq` | 使用说明与风险提示 |
-| `LoginPage.tsx` | `/login` | 登录（首启时也用于注册 owner） |
+| `LoginPage.tsx` | `/login` | 登录（无注册入口；无账号时提示去哪看凭据） |
 | `NotFoundPage.tsx` / `SettingsPage.tsx` | `*` / `/settings` | 404 / 重定向 |
 
 ### `components/`
