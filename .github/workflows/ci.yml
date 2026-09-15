@@ -1,0 +1,209 @@
+# ---------------------------------------------------------------------------
+# 持续集成
+#
+# 三个互相独立的目标，任一失败都阻断合并：
+#
+#   1. verify   —— 类型、测试、构建。这是"代码是否还能用"的最低门槛。
+#   2. secrets  —— 仓库卫生。**这个项目尤其需要**：它持有可以下真实订单的
+#                  交易所密钥，一次误提交就是账户风险，而不是"下次改回来"。
+#   3. commit   —— 提交信息规范。PR 用 squash 合并，标题就是主分支的提交记录，
+#                  所以在这里校验标题才有意义。
+# ---------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上的新推送取消上一次仍在跑的检查，避免排队浪费。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 默认最小权限。CI 只需要读代码。
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  verify:
+    name: 类型检查 / 测试 / 构建
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # npm ci 而不是 install：严格按 lockfile 安装，构建可复现。
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+
+      # Node 22 内置 node:sqlite 是**故意**的选型：没有原生模块编译步骤，
+      # 因此 CI 不需要编译器工具链，也不会因为 ABI 版本而失败。
+      - name: 确认 node:sqlite 可用
+        run: node -e "const { DatabaseSync } = require('node:sqlite'); const d = new DatabaseSync(':memory:'); d.exec('CREATE TABLE t(x)'); console.log('node:sqlite OK');"
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建控制台
+        run: npm run build
+
+  # -------------------------------------------------------------------------
+  secrets:
+    name: 仓库卫生 / 密钥扫描
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks 需要完整历史才能扫描过去的提交，而不只是当前工作树。
+          # 只扫工作树会漏掉"曾经提交过、后来删掉"的密钥 —— 那类泄漏最常见。
+          fetch-depth: 0
+
+      # -- 第一道：本项目特有的禁区 ------------------------------------------
+      # 通用扫描器不认识这个项目的约定，所以这些断言由我们自己兜住。
+      - name: 断言敏感路径未被跟踪
+        run: |
+          set -euo pipefail
+          FAILED=0
+
+          # 精确匹配单个文件。
+          # 注意必须用 --error-unmatch 做完整匹配，不能用前缀 grep：
+          # `.env` 的前缀会命中 `.env.example`，而后者是**必须**提交的模板。
+          for exact in '.env' '.env.local' 'deploy.local.ps1'; do
+            if git ls-files --error-unmatch "$exact" >/dev/null 2>&1; then
+              echo "::error::禁止提交的文件被跟踪了: $exact"
+              FAILED=1
+            fi
+          done
+
+          # .env.* 变体（但模板 .env.example 例外）
+          LEAKED_ENV=$(git ls-files | grep -E '^\.env\.' | grep -v '^\.env\.example$' || true)
+          if [ -n "$LEAKED_ENV" ]; then
+            echo "::error::禁止提交的环境文件被跟踪了:"
+            echo "$LEAKED_ENV"
+            FAILED=1
+          fi
+
+          # 目录前缀：这些目录下的任何文件都不该被跟踪。
+          # data/ 里同时有主密钥和加密后的交易所凭据 —— 两样一起泄露等于明文泄露。
+          for dir in 'data/' 'docs/research/vendor/'; do
+            TRACKED=$(git ls-files | grep "^${dir}" || true)
+            if [ -n "$TRACKED" ]; then
+              echo "::error::禁止提交的目录下有文件被跟踪: $dir"
+              echo "$TRACKED" | head -5
+              FAILED=1
+            fi
+          done
+
+          # 数据库与密钥文件
+          SENSITIVE=$(git ls-files | grep -E '\.(sqlite|sqlite-wal|sqlite-shm|db|master\.key|pem|p12|pfx|key)$' || true)
+          if [ -n "$SENSITIVE" ]; then
+            echo "::error::数据库或密钥文件被跟踪了:"
+            echo "$SENSITIVE"
+            FAILED=1
+          fi
+
+          if [ "$FAILED" -eq 0 ]; then
+            echo "✅ 没有禁止提交的路径被跟踪"
+          fi
+          exit $FAILED
+
+      # -- 第二道：已知密钥格式 ----------------------------------------------
+      # 只匹配**高置信度**的真实凭据格式，不匹配文档里讨论这些模式的文字。
+      # 故意排除 package-lock.json（大量十六进制哈希会造成误报）。
+      - name: 扫描已知密钥格式
+        run: |
+          set -euo pipefail
+          # 排除 lockfile 与 markdown（文档里会讨论密钥格式本身）
+          FILES=$(git ls-files | grep -vE 'package-lock\.json|\.md$' || true)
+          if [ -z "$FILES" ]; then echo "无文件可扫描"; exit 0; fi
+
+          FAILED=0
+          check() {
+            local pattern="$1" label="$2"
+            local hits
+            hits=$(echo "$FILES" | xargs grep -nE "$pattern" 2>/dev/null || true)
+            if [ -n "$hits" ]; then
+              echo "::error::疑似 $label"
+              echo "$hits" | head -5
+              FAILED=1
+            fi
+          }
+
+          # Anthropic / OpenAI 风格
+          check 'sk-[A-Za-z0-9_-]{32,}' 'LLM API Key'
+          # GitHub token
+          check 'gh[pousr]_[A-Za-z0-9]{36,}' 'GitHub Token'
+          # AWS access key
+          check 'AKIA[0-9A-Z]{16}' 'AWS Access Key'
+          # 私钥块
+          check 'BEGIN (RSA|OPENSSH|EC|PGP) PRIVATE KEY' '私钥'
+          # 硬编码的密钥赋值（变量名 + 长字面量）
+          check '(?i)(api[_-]?secret|secret[_-]?key|private[_-]?key|passphrase)["'"'"']?\s*[:=]\s*["'"'"'][A-Za-z0-9/+_-]{24,}' '硬编码密钥'
+
+          if [ "$FAILED" -eq 0 ]; then echo "✅ 未发现已知密钥格式"; fi
+          exit $FAILED
+
+      # -- 第三道：gitleaks 全历史扫描 ---------------------------------------
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true   # 见下方说明
+
+      # 说明：gitleaks 作为**补充**而非门槛。它对个人账号免费，但一旦以后
+      # 变成组织仓库就需要 license，届时会直接失败。把门槛放在上面两道
+      # 我们自己可控的检查上，gitleaks 只用来发现我们没想到的格式。
+      # 它报出的问题仍会显示在 CI 里，只是不会阻断合并。
+
+  # -------------------------------------------------------------------------
+  commit-message:
+    name: 提交信息规范
+    # 只在 PR 上跑：squash 合并时 PR 标题会成为主分支的提交信息。
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: 校验 PR 标题符合 Conventional Commits
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          # 允许的类型，与 CONTRIBUTING.md 中列出的保持一致。
+          PATTERN='^(feat|fix|docs|refactor|test|chore|perf|ci|build|revert)(\([a-z0-9./-]+\))?!?: .{4,}'
+
+          if echo "$TITLE" | grep -qE "$PATTERN"; then
+            echo "✅ 标题符合规范: $TITLE"
+          else
+            echo "::error::PR 标题不符合 Conventional Commits 规范"
+            echo ""
+            echo "当前标题: $TITLE"
+            echo ""
+            echo "要求格式: <type>(<scope>): <描述>"
+            echo "  type  : feat | fix | docs | refactor | test | chore | perf | ci | build | revert"
+            echo "  scope : 可选，例如 binance / risk / trader / web / docs"
+            echo ""
+            echo "示例:"
+            echo "  feat(binance): 支持条件单走 algoOrder 端点"
+            echo "  fix(risk): 修正空头止盈被反向钳制的问题"
+            echo "  docs: 补充模块地图"
+            echo ""
+            echo "为什么校验这个: PR 用 squash 合并，标题就是主分支的提交记录，"
+            echo "也是自动生成变更日志的依据。"
+            exit 1
+          fi
