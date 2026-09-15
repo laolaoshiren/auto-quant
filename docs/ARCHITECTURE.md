@@ -59,7 +59,7 @@ SQLite，迁移由 `PRAGMA user_version` 管理（`src/db/schema.ts`）。
 
 | 表 | 作用 | 关键点 |
 | --- | --- | --- |
-| `users` | 账户 | 首个注册者成为 owner |
+| `users` | 管理员账号 | 首次启动自动创建，无注册入口；支持改名与改密 |
 | `exchange_accounts` | 交易所凭据 | `api_secret_enc` 为 AES-256-GCM 密文，**永不返回给前端** |
 | `ai_models` | LLM 端点 | 同理，Key 加密存储 |
 | `strategies` | 策略 | `config_json` 存完整 `StrategyConfig`；读取时**重新过一遍 zod schema**，因此升级新增字段后老策略依然可用 |

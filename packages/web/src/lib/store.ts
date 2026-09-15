@@ -50,7 +50,6 @@ interface SessionState {
 
   bootstrap: () => Promise<void>;
   login: (username: string, password: string) => Promise<void>;
-  register: (username: string, password: string) => Promise<void>;
   logout: () => void;
   loadCatalog: () => Promise<void>;
   refreshSystem: () => Promise<void>;
@@ -103,14 +102,6 @@ export const useApp = create<SessionState>((set, get) => ({
 
   login: async (username, password) => {
     const result = await api.login(username, password);
-    setToken(result.token);
-    setStoredUser(result.user);
-    set({ user: result.user, status: 'authenticated', lastError: null });
-    await get().bootstrap();
-  },
-
-  register: async (username, password) => {
-    const result = await api.register(username, password);
     setToken(result.token);
     setStoredUser(result.user);
     set({ user: result.user, status: 'authenticated', lastError: null });

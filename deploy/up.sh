@@ -7,14 +7,16 @@
 #   ./up.sh status       查看状态与健康检查
 #   ./up.sh backup       备份数据（数据库 + 密钥）
 #   ./up.sh import <dir> 把旧的 data/ 目录导入数据卷（从 systemd 迁移时用）
+#   ./up.sh reset-password  把管理员凭据重置为 .env 中的值（忘记密码时用）
 #   ./up.sh down         停止（数据保留）
 #   ./up.sh help         帮助
 #
 # 首次运行会自动：
 #   · 检查 Docker
-#   · 生成 .env（含随机主密钥、JWT 密钥、管理员密码）
+#   · 生成 .env（含随机主密钥、JWT 密钥、管理员用户名与密码）
 #   · 登录镜像仓库（如需）
 #   · 拉取镜像、启动、等待健康检查通过
+#   · 打印访问地址与登录凭据
 #
 # 这个脚本是**幂等**的：重复运行只会把服务更新到最新镜像，不会动数据。
 # =============================================================================
@@ -125,15 +127,20 @@ ensure_env() {
     die "找不到 $ENV_TEMPLATE。请确认 deploy/ 目录完整。"
   fi
 
-  local master jwt admin
+  local master jwt admin user
   master=$(gen_secret)
   jwt=$(gen_secret)
   # 管理员密码用更短的十六进制，便于手输
   admin=$(gen_secret | cut -c1-16)
+  # 用户名也随机生成，与不带固定 admin 默认值的设计保持一致：
+  # 固定的用户名等于把登录所需的两半信息送出去一半。
+  # 格式与服务端的 generateUsername() 一致（admin_ + 6 位十六进制）。
+  user="admin_$(gen_secret | cut -c1-6)"
 
   # 用 sed 逐项替换模板里的空值
   sed -e "s|^MASTER_KEY=.*|MASTER_KEY=${master}|" \
       -e "s|^JWT_SECRET=.*|JWT_SECRET=${jwt}|" \
+      -e "s|^ADMIN_USERNAME=.*|ADMIN_USERNAME=${user}|" \
       -e "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=${admin}|" \
       "$ENV_TEMPLATE" > "$ENV_FILE"
 
@@ -244,10 +251,17 @@ print_access_info() {
   bind=$(env_get BIND_ADDRESS); bind="${bind:-127.0.0.1}"
 
   local env_name
-  if [ "$(env_get BINANCE_USE_TESTNET)" = "true" ]; then
-    env_name="币安 Demo 模拟盘"
-  else
-    env_name="币安实盘（真实资金）"
+  case "$(env_get BINANCE_USE_TESTNET)" in
+    true)  env_name="模拟盘（Demo）" ;;
+    *)     env_name="实盘（真实资金）" ;;
+  esac
+
+  # 是否已经有账户：有的话 .env 里的密码就不再生效（首次启动时才用它创建账号）
+  local has_account=false
+  if docker exec "$CONTAINER_NAME" sh -c 'test -f /app/data/autoquant.sqlite' 2>/dev/null; then
+    if docker logs "$CONTAINER_NAME" 2>&1 | grep -q "created owner account\|已创建管理员账户"; then
+      has_account=true
+    fi
   fi
 
   echo ""
@@ -257,6 +271,26 @@ print_access_info() {
   echo ""
   echo "     交易环境：$env_name"
   echo "     绑定地址：$bind:$port"
+  echo ""
+
+  # 登录凭据。这是非开发用户最需要看到的一段 —— 没有注册入口，
+  # 账号只在首次启动时创建一次，看不到就得去翻容器日志。
+  if [ "$has_account" = "true" ]; then
+    echo "     登录账号：$(env_get ADMIN_USERNAME)（已在首次启动时创建）"
+    echo "     密码：    首次启动时设置的那个；如已遗忘，见下方说明"
+    echo ""
+    echo "     忘记密码时（会丢失加密封存，需重新添加交易所凭据）："
+    echo "         ./up.sh reset-password"
+  else
+    echo "     ┌──────────────────────────────────────────────┐"
+    echo "     │  登录凭据（请立刻保存）                       │"
+    echo "     └──────────────────────────────────────────────┘"
+    echo "         用户名：$(env_get ADMIN_USERNAME)"
+    echo "         密码：  $(env_get ADMIN_PASSWORD)"
+    echo ""
+    echo "     这组凭据在首次启动时创建。系统没有注册入口，"
+    echo "     登录后可在「操作员账户」中修改用户名与密码。"
+  fi
   echo ""
 
   if [ "$bind" = "127.0.0.1" ]; then
@@ -401,6 +435,43 @@ cmd_down() {
   info "停止服务（数据卷保留）"
   $COMPOSE -f "$COMPOSE_FILE" down
   ok "已停止。数据仍在卷 $VOLUME_NAME 中，下次 ./up.sh 会继续使用。"
+}
+
+# 重置管理员凭据。
+#
+# 没有这一步的话，忘记密码的唯一出路是删掉数据卷 —— 那会连同交易所凭据
+# 与全部交易历史一起丢掉。对单人部署来说这是必然会发生的情况。
+cmd_reset_password() {
+  require_docker
+  ensure_env
+
+  # 容器必须在运行才能 exec 进去；没跑就临时起一个
+  local running=false
+  if [ "$(docker inspect --format '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" = "true" ]; then
+    running=true
+  fi
+
+  warn "即将重置管理员凭据为 .env 中的值："
+  echo "         用户名：$(env_get ADMIN_USERNAME)"
+  echo "         密码：  $(env_get ADMIN_PASSWORD)"
+  echo ""
+  echo "  改完请用这组凭据登录，并在「操作员账户」里改成自己的。"
+  echo ""
+  confirm "确认重置？" "reset"
+
+  if [ "$running" = "true" ]; then
+    info "在运行中的容器里重置"
+    docker exec "$CONTAINER_NAME" node node_modules/tsx/dist/cli.mjs \
+      packages/server/src/scripts/resetAdminPassword.ts
+  else
+    info "容器未运行，临时启动一个执行重置"
+    $COMPOSE -f "$COMPOSE_FILE" run --rm --entrypoint node autoquant \
+      node_modules/tsx/dist/cli.mjs packages/server/src/scripts/resetAdminPassword.ts
+  fi
+
+  echo ""
+  ok "凭据已重置。现在可以用上面的用户名与密码登录。"
+  echo ""
 }
 
 # 把已有的 data/ 目录导入卷。
@@ -553,6 +624,7 @@ case "${1:-up}" in
     cmd_import "$IMPORT_SRC"
     ;;
   down)    cmd_down ;;
+  reset-password|reset) cmd_reset_password ;;
   help|-h|--help) cmd_help ;;
   *)
     err "未知命令：$1"

@@ -423,13 +423,19 @@ export const api = {
   login: (username: string, password: string) =>
     request<AuthResult>('/auth/login', { method: 'POST', body: { username, password }, anonymous: true }),
 
-  register: (username: string, password: string) =>
-    request<AuthResult>('/auth/register', { method: 'POST', body: { username, password }, anonymous: true }),
-
   me: (signal?: AbortSignal) => request<{ user: User }>('/auth/me', { signal }),
 
-  changePassword: (currentPassword: string, newPassword: string) =>
-    request<{ ok: boolean }>('/auth/password', { method: 'POST', body: { currentPassword, newPassword } }),
+  /**
+   * 修改用户名与/或密码。
+   *
+   * 必须带上当前密码：只凭会话令牌就允许改凭据，意味着任何一次令牌泄露
+   * 都能被升级成永久接管。
+   */
+  updateAccount: (input: { currentPassword: string; username?: string; newPassword?: string }) =>
+    request<{ ok: boolean; token: string; user: User }>('/auth/account', {
+      method: 'PATCH',
+      body: input,
+    }),
 
   /* --- catalogues + system --- */
   catalog: (signal?: AbortSignal) => request<Catalog>('/catalog', { signal }),

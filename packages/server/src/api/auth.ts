@@ -109,4 +109,17 @@ export function generatePassword(): string {
   return randomBytes(12).toString('base64url');
 }
 
+/**
+ * Generate a username for the first-run account.
+ *
+ * 不以固定的 `admin` 作为默认用户名：那样等于把「用户名已知」这一半信息白送给攻击者，
+ * 剩下的安全性全压在一个密码上。加随机后缀不增加使用负担（用户登录后可以改），
+ * 但让暴力尝试必须先猜对用户名。
+ *
+ * 用十六进制而不是 base64：用户名要能手输，`0/O`、`l/1` 这类歧义字符越少越好。
+ */
+export function generateUsername(): string {
+  return `admin_${randomBytes(3).toString('hex')}`;
+}
+
 export { log as authLogger };

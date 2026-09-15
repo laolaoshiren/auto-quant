@@ -57,11 +57,18 @@ async function main(): Promise<void> {
     // Printed exactly once: this is the only time the generated password exists
     // in plaintext anywhere.
     log.warn('='.repeat(72));
-    log.warn('首次启动 —— 已创建 owner 账户');
-    log.warn('  用户名：admin');
-    log.warn(`  密码：${owner.password}`);
-    log.warn('  登录后请立即修改密码。此密码只显示这一次。');
+    log.warn('首次启动 —— 已创建管理员账户');
+    log.warn('');
+    log.warn(`  用户名：${owner.username}`);
+    log.warn(`  密码：  ${owner.password}`);
+    log.warn('');
+    log.warn('  这组凭据只显示这一次，请立刻保存。');
+    log.warn('  登录后可在「操作员账户」页面修改用户名与密码。');
+    log.warn('');
+    log.warn('  系统不提供注册入口 —— 管理员账号只在首次启动时创建。');
     log.warn('='.repeat(72));
+    // 结构化输出一份，方便部署脚本自动抓取并展示给使用者
+    log.warn(`FIRST_RUN_CREDENTIALS username=${owner.username} password=${owner.password}`);
   }
 
   seedDefaults();
