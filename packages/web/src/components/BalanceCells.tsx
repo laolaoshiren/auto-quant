@@ -1,3 +1,11 @@
+/**
+ * Balance cells shared by the 交易所 credentials table and the trader dashboard.
+ *
+ * Both screens read the same exchange figures, so the vocabulary comes from
+ * `BALANCE_LABEL` rather than being spelled out per screen — 钱包余额 has to mean
+ * one number everywhere, or the operator has to guess which one is settled.
+ */
+import { RefreshCw, TriangleAlert } from 'lucide-react';
 import { Badge, Button } from './ui';
 import {
   BALANCE_LABEL,
@@ -46,16 +54,19 @@ export function BalanceCell({
     const message = error ?? '尚未读取到余额。';
     return (
       <div className="w-[196px] max-w-full space-y-1 whitespace-normal">
-        <div className="flex items-center gap-1.5">
-          <span
-            className="min-w-0 flex-1 truncate text-2xs text-warn"
-            title={`余额读取失败：${message}`}
-          >
-            ⚠ 余额读取失败：{message}
+        <div className="flex items-start gap-1.5">
+          {/*
+           * An icon rather than a `⚠` character: the font fallback for that
+           * glyph is a different width on every platform, so the wrapped second
+           * line of the message used to indent differently on Windows and macOS.
+           */}
+          <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" />
+          <span className="min-w-0 flex-1 text-2xs text-warn" title={`余额读取失败：${message}`}>
+            余额读取失败：{message}
           </span>
           {env}
         </div>
-        <div className="text-2xs text-ink-faint">点右侧 ⟳ 重试</div>
+        <div className="pl-5 text-2xs text-ink-faint">点右侧刷新按钮重试。</div>
       </div>
     );
   }
@@ -107,6 +118,10 @@ export interface TraderAccountState {
  * Shares `BALANCE_LABEL` / `fmtAsset` with the credentials table on purpose:
  * 钱包余额 must mean the same number on both screens, otherwise the operator
  * has to guess which one is the settled balance.
+ *
+ * Laid out as a definition-style grid rather than a run of `label value` pairs:
+ * every figure carries its unit and its label in a fixed column, so the strip
+ * stays scannable when it wraps to two lines on a narrow window.
  */
 export function TraderAccountStrip({
   account,
@@ -135,7 +150,7 @@ export function TraderAccountStrip({
   }
 
   return (
-    <div className="num mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-base-800 pt-1.5 text-xs text-ink-lo">
+    <div className="num mt-1.5 flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-base-800 pt-1.5 text-xs text-ink-lo">
       {/* The settled balance is the number an operator checks most, so it gets
           the size and weight rather than sitting in the same small type as the
           rest of the strip. */}
@@ -146,6 +161,8 @@ export function TraderAccountStrip({
       <span>
         {BALANCE_LABEL.available} <span className="text-ink-hi">{fmtNum(account.availableBalance)}</span>
       </span>
+      {/* 未实现 is signed through `fmtSigned`, so the +/- is always rendered —
+          the colour is a second signal, never the only one. */}
       <span>
         {BALANCE_LABEL.unrealized}{' '}
         <span className={pnlColor(account.unrealizedPnl)}>{fmtSigned(account.unrealizedPnl)}</span>
@@ -162,8 +179,11 @@ export function TraderAccountStrip({
         </span>
       )}
       {onRefresh && (
+        /* Label plus icon: a bare `⟳` glyph is unreadable to a screen reader and
+           ambiguous to anyone who has not used this app before. */
         <Button small variant="ghost" busy={busy} title="重新从交易所读取账户余额" onClick={onRefresh}>
-          ⟳ 刷新余额
+          <RefreshCw aria-hidden className="h-3.5 w-3.5" />
+          刷新余额
         </Button>
       )}
     </div>

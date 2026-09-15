@@ -7,6 +7,10 @@
  * while the wallet had gone *up* by 0.2586. Three screens render the same
  * figures, so the arithmetic lives in one place rather than being re-derived —
  * and re-broken — in each of them.
+ *
+ * The identity is never collapsed to a single number: 毛 − 手续费 − 资金费 = 净 is
+ * the accounting the whole platform is trusted on, and an operator who cannot
+ * see the two costs cannot tell a bad strategy from a fee-bleed.
  */
 import type { TraderStats } from '@aq/shared';
 import { fmtNum, fmtSigned, pnlColor } from '../lib/format';
@@ -78,6 +82,19 @@ export function pnlFormulaText(costs: PnlCosts, digits = 4): string {
  *
  * Rendered wherever a net figure is the headline, so the costs that were
  * subtracted sit next to it rather than hiding behind a tooltip.
+ *
+ * Three readability changes, no behaviour change:
+ *
+ * - the three figures are `tabular-nums` (`.num` on the wrapper) so they stop
+ *   jittering as the poll refreshes — the whole strip updates together every
+ *   few seconds, and moving digits in a row of four numbers is very visible;
+ * - 手续费 is amber rather than plain `ink-mid`: it is a guaranteed cost, and
+ *   the same amber marks fees in the trade tables and the preflight warnings;
+ * - 资金费 is always rendered, even at exactly zero. It used to be dropped when
+ *   zero, which made the line silently two terms instead of three — and since
+ *   the formula is part of what the operator is being asked to trust, a term
+ *   that disappears is worse than a term that reads `+0.0000`. The cost is one
+ *   short word in a line that is already secondary information.
  */
 export function PnlBreakdown({
   costs,
@@ -91,26 +108,39 @@ export function PnlBreakdown({
 }) {
   return (
     <span
-      className={`num inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-ink-lo${
+      className={`num inline-flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-ink-lo${
         className ? ` ${className}` : ''
       }`}
       title={pnlFormulaText(costs, digits)}
+      /* The visible line already spells out every term, but the identity itself
+         is only in the tooltip — so it is exposed here for a screen reader. */
+      aria-label={pnlFormulaText(costs, digits)}
     >
       <span>
         毛 <span className="text-ink-mid">{fmtSigned(costs.gross, digits)}</span>
       </span>
-      <span className="text-ink-faint">·</span>
-      <span>
-        手续费 <span className="text-warn">{fmtSigned(-costs.fees, digits)}</span>
+      <span aria-hidden className="text-ink-faint">
+        ·
       </span>
-      {costs.funding !== 0 && (
-        <>
-          <span className="text-ink-faint">·</span>
-          <span>
-            资金费 <span className={pnlColor(costs.funding)}>{fmtSigned(costs.funding, digits)}</span>
-          </span>
-        </>
-      )}
+      <span>
+        手续费 <span className={costs.fees === 0 ? 'text-ink-mid' : 'text-warn'}>{fmtSigned(-costs.fees, digits)}</span>
+      </span>
+      <span aria-hidden className="text-ink-faint">
+        ·
+      </span>
+      <span>
+        资金费{' '}
+        <span className={costs.funding === 0 ? 'text-ink-mid' : pnlColor(costs.funding)}>
+          {fmtSigned(costs.funding, digits)}
+        </span>
+      </span>
+      {/*
+       * 净 is rendered last, and only here.
+       *
+       * The callers already print the net figure as the headline, so repeating it
+       * inside the breakdown would double every row's numbers without adding a
+       * fact. The tooltip carries the full `净 = 毛 − 手续费 − 资金费` sentence.
+       */}
     </span>
   );
 }
