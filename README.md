@@ -21,12 +21,22 @@ cd /opt/autoquant/deploy && ./up.sh
 - 不需要克隆源码、下载依赖、构建前端
 - 服务以 **Docker 镜像**运行，镜像由 GitHub Actions 在 CI 通过后自动构建
 
-> **首次使用前的一次性准备**（因为仓库是私有的）：
+> **首次使用前的一次性准备**（因为仓库与镜像都是私有的）：
 >
 > ```bash
+> # 1. 把部署文件放到服务器
 > git clone --depth 1 https://github.com/laolaoshiren/auto-quant.git /opt/autoquant
-> cd /opt/autoquant/deploy && ./up.sh
+> cd /opt/autoquant/deploy
+>
+> # 2. 让服务器能拉取私有镜像（只做一次，之后自动复用凭据）
+> echo <你的GitHub令牌> | docker login ghcr.io -u <你的用户名> --password-stdin
+>
+> # 3. 启动
+> ./up.sh
 > ```
+>
+> 令牌只需勾选 `read:packages` 权限。也可以跳过第 2 步，改成
+> `GHCR_TOKEN=<你的令牌> ./up.sh` 临时传入。
 >
 > 之后 `deploy/` 目录就是全部的部署材料，源码不再需要。
 

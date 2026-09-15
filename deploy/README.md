@@ -12,14 +12,53 @@
 
 ---
 
-## 快速开始
+## 一次性准备
+
+### 1. 把部署文件放到服务器
 
 ```bash
-# 一次性：把部署文件放到服务器（需要对该私有仓库有访问权限）
 git clone --depth 1 https://github.com/laolaoshiren/auto-quant.git /opt/autoquant
 cd /opt/autoquant/deploy
+```
 
-# 以后每次部署 / 更新（就这一条）
+### 2. 让服务器能拉取镜像（只做一次）
+
+镜像在 GitHub Container Registry 上是**私有的**（与本项目闭源一致），
+所以服务器必须先认证一次。三步任选其一：
+
+**方式 A：用 GitHub CLI（服务器上需要装 gh）**
+
+```bash
+gh auth login                                  # 按提示走一次
+gh auth refresh -s read:packages               # ← 关键：加上这个权限
+gh auth token | docker login ghcr.io -u <你的用户名> --password-stdin
+```
+
+**方式 B：创建 Personal Access Token（不需要装 gh）**
+
+1. GitHub → Settings → Developer settings → Personal access tokens →
+   **Tokens (classic)** → Generate new token
+2. 只勾选 **`read:packages`** 即可，不要勾别的
+3. 然后在服务器上：
+
+```bash
+echo <你的token> | docker login ghcr.io -u <你的用户名> --password-stdin
+```
+
+**方式 C：临时传入（不保存凭据）**
+
+```bash
+GHCR_TOKEN=<你的token> ./up.sh
+```
+
+> **为什么不能省掉这一步**：镜像里包含完整应用代码，做成公开的等于把闭源项目
+> 直接发布出去。私有仓库 + 私有镜像 + 一次认证，是与「闭源」这个前提一致的做法。
+>
+> 凭据保存在 `~/.docker/config.json`，之后 `./up.sh` 会自动复用，不需要重复登录。
+
+### 3. 启动
+
+```bash
 ./up.sh
 ```
 
@@ -27,10 +66,9 @@ cd /opt/autoquant/deploy
 
 1. 检查 Docker 是否可用
 2. 生成 `.env`，包含随机的主密钥、JWT 密钥、管理员密码 —— **并把密码打印出来**
-3. 登录镜像仓库（如果需要）
-4. 拉取最新镜像
-5. 启动容器，等待健康检查通过
-6. 打印访问地址与登录信息
+3. 拉取最新镜像
+4. 启动容器，等待健康检查通过
+5. 打印访问地址与登录信息
 
 **重复运行是安全的**：只会把服务更新到最新镜像，不会动数据。
 
