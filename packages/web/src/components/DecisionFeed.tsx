@@ -1,5 +1,5 @@
 /**
- * 最近决策 — the decision feed rail.
+ * 最近决策 — the decision feed.
  *
  * The centrepiece of the trader dashboard. Each entry is one decision *cycle*
  * (a cycle can emit several decisions plus refusals), grouped so the operator
@@ -15,22 +15,31 @@
  *   ZECUSDT  平仓   置信度 62%   "跌破 EMA20…"
  *   AINUSDT  观望   置信度 79%   "持有吃趋势…"      ← always rendered
  *   FFUSDT   等待   置信度 80%   "通道量能萎缩…"
- *   思考过程 ▾ │ 提示词        [复制] [审计]        ← collapsed by default
+ *   思考过程 ▾ │ 提示词        [复制] [新标签打开]   ← collapsed by default
  * ```
  *
  * The previous version hid the decisions behind a per-cycle expand/collapse, so
- * the rail showed nothing but headers until you clicked one. That is backwards:
+ * the feed showed nothing but headers until you clicked one. That is backwards:
  * "what did it decide" is the information an operator is watching continuously,
  * while the chain of thought is something you open deliberately when a decision
  * looks wrong.
+ *
+ * ## The collapsed header must still answer the question
+ *
+ * With the decisions always rendered the *header* is the only thing an operator
+ * reads while scanning, so it carries a summary of what is below it
+ * (`开多 BTCUSDT · 3 条决策 · 2 条被拒`) rather than a neutral label like
+ * 思考过程. Scanning the header row alone is enough to spot a cycle that
+ * refused everything.
  */
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ChevronDown, ChevronUp, ExternalLink, RotateCw } from 'lucide-react';
 import type { DecisionRecord, Decision, ExecutionLogEntry } from '@aq/shared';
 import { api, type MarketSymbol } from '../lib/api';
 import { useEvents } from '../lib/store';
 import { useCopy, usePolled } from '../lib/hooks';
-import { Badge, Button, CopyButton, Empty, Panel, Spinner3 } from './ui';
+import { Badge, Button, CopyButton, Empty, Panel, Spinner3, cn } from './ui';
 import {
   ActionBadge,
   DecisionMetrics,
@@ -51,9 +60,18 @@ const ACTION_STRIPE: Record<string, string> = {
   wait: 'border-l-base-600',
 };
 
+/**
+ * How many cycles are rendered.
+ *
+ * The endpoint answers with 50 and the socket can append more; either way the
+ * list is capped so a long-running bot cannot turn this panel into a thousand
+ * DOM nodes. `全部记录` in the header is the way to see the rest.
+ */
+const FEED_LIMIT = 50;
+
 export function DecisionFeed({ traderId, height = 720 }: { traderId: number; height?: number }) {
   const live = useEvents((s) => s.byTrader[traderId]?.decisions);
-  const query = usePolled((signal) => api.traderDecisions(traderId, 50, signal), {
+  const query = usePolled((signal) => api.traderDecisions(traderId, FEED_LIMIT, signal), {
     intervalMs: 20_000,
     deps: [traderId],
   });
@@ -77,6 +95,8 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
     );
   }
 
+  const shown = records.slice(0, FEED_LIMIT);
+
   return (
     <Panel
       padded={false}
@@ -89,10 +109,17 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
       }
       actions={
         <span className="flex items-center gap-1.5">
-          <Button small variant="ghost" busy={query.loading} onClick={() => query.reload()} title="重新拉取决策记录">
-            ⟳
+          <Button
+            size="sm"
+            variant="ghost"
+            busy={query.loading}
+            onClick={() => query.reload()}
+            title="重新拉取决策记录"
+          >
+            <RotateCw aria-hidden className="h-3.5 w-3.5" />
+            刷新
           </Button>
-          <Link to={`/data`} className="btn btn-ghost btn-xs">
+          <Link to="/data" className="btn btn-ghost btn-xs">
             全部记录
           </Link>
         </span>
@@ -107,7 +134,7 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
         // One scroll container. Every cycle renders its decisions in full; only
         // the reasoning block inside each module is collapsible.
         <div className="overflow-y-auto" style={{ maxHeight: height }}>
-          {records.map((record) => (
+          {shown.map((record) => (
             <CycleBlock
               key={record.id}
               record={record}
@@ -115,6 +142,15 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
               symbols={symbolsQuery.data ?? []}
             />
           ))}
+          {records.length > shown.length && (
+            <p className="border-t border-base-800 px-3 py-2 text-xs text-ink-faint">
+              只显示最近 {shown.length} 个周期，共 {records.length} 个。完整历史在
+              <Link to="/data" className="ml-1 text-accent hover:underline">
+                决策记录
+              </Link>
+              。
+            </p>
+          )}
         </div>
       )}
     </Panel>
@@ -124,6 +160,36 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
 /* -------------------------------------------------------------------------- */
 /*  One cycle module                                                           */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * What the cycle decided, in one line, for the collapsed header.
+ *
+ * The operator scans the header row without expanding anything, so the header
+ * has to say *what happened* — `wait` with no refusals is a very different cycle
+ * from `open_long` with two refusals, and the old header rendered both as
+ * nothing but a cycle number.
+ */
+function summarize(record: DecisionRecord, rejected: number, failed: number): string {
+  const parts: string[] = [];
+  const first = record.decisions[0];
+
+  if (first) {
+    const label = actionLabel(first.action);
+    // `wait 3` reads as a count of nothing; naming a symbol is what tells the
+    // operator the model at least looked somewhere specific. The decision count
+    // is stated separately because one 开多 and five 开多 are different cycles.
+    parts.push(record.decisions.length === 1 ? `${label} ${first.symbol}` : `${label} ${first.symbol} 等`);
+    parts.push(`${record.decisions.length} 条决策`);
+  }
+  if (rejected > 0) parts.push(`${rejected} 条被拒`);
+  if (failed > 0) parts.push(`${failed} 条失败`);
+
+  // One decision and one refusal-free cycle collapses to `开多 BTCUSDT` — the
+  // count adds nothing when it is visibly the only card below the header.
+  if (parts.length === 0) return '本周期没有决策';
+  if (parts.length === 1) return parts[0] as string;
+  return parts.join(' · ');
+}
 
 function CycleBlock({
   record,
@@ -146,55 +212,77 @@ function CycleBlock({
     <div className="border-b border-base-850 last:border-b-0">
       {/* Cycle header: metadata only. It is deliberately *not* a toggle — the
           decisions below are always shown, so there is nothing to expand here. */}
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 bg-base-900/40 px-2.5 py-1.5">
-        <span className="num text-2xs text-ink-lo" title={record.timestamp}>
-          {timeAgo(record.timestamp)}
-        </span>
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-base-800/60 bg-base-850/40 px-3 py-2">
         <span className="num text-xs font-semibold text-ink-hi">周期 #{record.cycleNumber}</span>
         <Badge tone={record.success ? 'up' : 'down'}>{record.success ? '成功' : '失败'}</Badge>
-        <span className="num text-2xs text-ink-faint">{tokenText}</span>
-        <span className="ml-auto flex items-center gap-1.5">
-          {rejected.length > 0 && <Badge tone="warn">{rejected.length} 拒绝</Badge>}
+        {/* The collapsed-header summary: the whole point of the header row. */}
+        <span
+          className={cn(
+            'num truncate text-base',
+            rejected.length > 0 ? 'text-warn' : failed.length > 0 ? 'text-down' : 'text-ink-mid',
+          )}
+          title="本周期做出了什么决定 — 不需要展开就能看到。"
+        >
+          {summarize(record, rejected.length, failed.length)}
+        </span>
+        <span className="ml-auto flex items-center gap-2 text-xs text-ink-faint">
           {failed.length > 0 && <Badge tone="down">{failed.length} 失败</Badge>}
+          {rejected.length > 0 && <Badge tone="warn">{rejected.length} 被拒</Badge>}
+          <span className="num">{tokenText}</span>
+          <span className="num" title={record.timestamp}>
+            {timeAgo(record.timestamp)}
+          </span>
         </span>
       </div>
 
       {/* Decisions — always visible. */}
-      <div className="space-y-1.5 px-2.5 py-2">
+      <div className="space-y-2 px-3 py-2.5">
         {record.error && (
-          <div className="rounded border border-down/50 bg-down/10 px-2 py-1 text-2xs text-down">
+          <div className="rounded-md border border-down/50 bg-down/10 px-2.5 py-1.5 text-xs text-down">
             周期错误：{record.error}
           </div>
         )}
 
         {record.decisions.length === 0 && rejected.length === 0 && failed.length === 0 && (
-          <p className="text-2xs text-ink-faint">本周期模型没有给出任何决策。</p>
+          <p className="text-xs text-ink-faint">本周期模型没有给出任何决策。</p>
         )}
 
-        {record.decisions.map((decision, index) => (
-          <DecisionCard
-            key={`${decision.symbol}-${index}`}
-            decision={decision}
-            price={priceOf(symbols, decision.symbol)}
-          />
-        ))}
+        {/*
+          Two columns from `lg` up. The feed is full width now, and a single
+          column of decision cards across 1400px would put the reasoning text
+          and the confidence badge a screen apart.
+        */}
+        {record.decisions.length > 0 && (
+          <div className="grid grid-cols-1 gap-2 lg:grid-cols-2 2xl:grid-cols-3">
+            {record.decisions.map((decision, index) => (
+              <DecisionCard
+                key={`${decision.symbol}-${index}`}
+                decision={decision}
+                price={priceOf(symbols, decision.symbol)}
+              />
+            ))}
+          </div>
+        )}
 
         {/* Refusals explain "why did it do nothing", so they belong here. */}
-        {rejected.map((entry, index) => (
-          <RejectedCard key={`rej-${index}`} entry={entry} />
-        ))}
-
-        {failed.map((entry, index) => (
-          <FailedCard key={`fail-${index}`} entry={entry} />
-        ))}
+        {(rejected.length > 0 || failed.length > 0) && (
+          <div className="grid grid-cols-1 gap-2 lg:grid-cols-2 2xl:grid-cols-3">
+            {rejected.map((entry, index) => (
+              <RejectedCard key={`rej-${index}`} entry={entry} />
+            ))}
+            {failed.map((entry, index) => (
+              <FailedCard key={`fail-${index}`} entry={entry} />
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Reasoning — collapsed by default, per cycle. */}
       <CycleReasoning record={record} traderId={traderId} />
 
       {/* Footer */}
-      <div className="flex items-center justify-between px-2.5 pb-2 pt-1">
-        <span className="num text-2xs text-ink-faint">
+      <div className="flex items-center justify-between px-3 pb-2 pt-1">
+        <span className="num text-xs text-ink-faint">
           {record.candidateSymbols.length} 个候选 · 延迟 {fmtLatency(record.aiLatencyMs)}
         </span>
         <Link to={`/traders/${traderId}/decisions/${record.id}`} className="btn btn-ghost btn-xs">
@@ -214,7 +302,7 @@ function priceOf(symbols: MarketSymbol[], symbol: string): number | null {
 function ClampedText({ text }: { text: string }) {
   return (
     <p
-      className="mt-1 overflow-hidden text-2xs leading-relaxed text-ink-mid"
+      className="mt-1 overflow-hidden text-xs leading-relaxed text-ink-mid"
       style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}
       title={text}
     >
@@ -226,14 +314,17 @@ function ClampedText({ text }: { text: string }) {
 function DecisionCard({ decision, price }: { decision: Decision; price: number | null }) {
   return (
     <div
-      className={`rounded border border-base-750 border-l-2 bg-base-850/50 px-2.5 py-2 ${
-        ACTION_STRIPE[decision.action] ?? 'border-l-base-600'
-      }`}
+      className={cn(
+        'min-w-0 rounded-md border border-base-750 border-l-2 bg-base-850/50 px-3 py-2',
+        ACTION_STRIPE[decision.action] ?? 'border-l-base-600',
+      )}
     >
       <div className="flex flex-wrap items-center gap-2">
         <ActionBadge action={decision.action} />
-        <span className="text-xs font-semibold text-ink-hi">{decision.symbol}</span>
-        <span className="num ml-auto text-2xs text-ink-lo">置信度 {decision.confidence}%</span>
+        <span className="text-base font-semibold text-ink-hi">{decision.symbol}</span>
+        <span className="num ml-auto text-xs text-ink-lo" title="模型对该决策的自评置信度。">
+          置信度 {decision.confidence}%
+        </span>
       </div>
 
       {decision.reasoning && <ClampedText text={decision.reasoning} />}
@@ -241,9 +332,9 @@ function DecisionCard({ decision, price }: { decision: Decision; price: number |
       {isOpenAction(decision.action) && <DecisionMetrics decision={decision} price={price} />}
 
       {decision.adjustments.length > 0 && (
-        <ul className="mt-1 space-y-0.5">
+        <ul className="mt-1.5 space-y-0.5">
           {decision.adjustments.map((note, index) => (
-            <li key={index} className="text-2xs text-warn/90">
+            <li key={index} className="text-xs text-warn/90">
               • {note}
             </li>
           ))}
@@ -255,13 +346,13 @@ function DecisionCard({ decision, price }: { decision: Decision; price: number |
 
 function FailedCard({ entry }: { entry: ExecutionLogEntry }) {
   return (
-    <div className="rounded border border-down/50 bg-down/10 px-2.5 py-2">
+    <div className="min-w-0 rounded-md border border-down/50 bg-down/10 px-3 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone="down">失败</Badge>
-        <span className="text-xs font-semibold text-ink-hi">{entry.symbol}</span>
-        <span className="text-2xs text-ink-lo">{actionLabel(entry.action)}</span>
+        <span className="text-base font-semibold text-ink-hi">{entry.symbol}</span>
+        <span className="text-xs text-ink-lo">{actionLabel(entry.action)}</span>
       </div>
-      <p className="mt-1 whitespace-pre-wrap text-2xs leading-relaxed text-down/90">{entry.detail}</p>
+      <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-down/90">{entry.detail}</p>
     </div>
   );
 }
@@ -295,7 +386,7 @@ function CycleReasoning({ record, traderId }: { record: DecisionRecord; traderId
   const hasCot = record.cotTrace.trim().length > 0;
 
   return (
-    <div className="px-2.5 pb-1">
+    <div className="px-3 pb-1">
       <div className="flex flex-wrap items-center gap-2">
         <MiniTabs
           tabs={[
@@ -306,19 +397,27 @@ function CycleReasoning({ record, traderId }: { record: DecisionRecord; traderId
           onChange={(id) => selectTab(id as 'cot' | 'prompt')}
         />
 
+        {/*
+          The only expand/collapse in the module, and it governs the reasoning
+          *only*. The decisions above are not behind it — see the module doc.
+        */}
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          title={open ? '收起' : '展开'}
-          className="num rounded px-1 text-2xs text-ink-faint transition hover:text-accent"
+          title={open ? '收起思考过程与提示词' : '展开思考过程与提示词'}
+          className={cn(
+            'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs transition',
+            open ? 'text-accent' : 'text-ink-faint hover:text-accent',
+          )}
         >
-          {open ? '▴' : '▾'}
+          {open ? <ChevronUp aria-hidden className="h-3.5 w-3.5" /> : <ChevronDown aria-hidden className="h-3.5 w-3.5" />}
+          {open ? '收起' : '展开'}
         </button>
 
         {!open && (
-          <span className="truncate text-2xs text-ink-faint">
-            {hasCot ? `${record.cotTrace.length} 字符` : '无思考过程'}
+          <span className="truncate text-xs text-ink-faint">
+            {hasCot ? `${fmtInt(record.cotTrace.length)} 字符思考过程` : '无思考过程'}
           </span>
         )}
 
@@ -332,16 +431,18 @@ function CycleReasoning({ record, traderId }: { record: DecisionRecord; traderId
             target="_blank"
             rel="noreferrer"
             className="btn btn-ghost btn-xs"
+            title="在新标签页打开这条记录的完整审计视图"
           >
-            展开
+            <ExternalLink aria-hidden className="h-3.5 w-3.5" />
+            审计
           </a>
         </span>
       </div>
 
       {open && (
-        <div className="mt-1.5">
+        <div className="mt-2">
           {tab === 'cot' ? (
-            <ScrollPre body={record.cotTrace} empty="本周期模型未返回 <reasoning> 块。" height={260} />
+            <ScrollPre body={record.cotTrace} empty="本周期模型未返回 <reasoning> 块。" height={320} />
           ) : (
             <div className="space-y-2">
               <PromptBlock title="系统提示词" body={record.systemPrompt} />
@@ -354,11 +455,11 @@ function CycleReasoning({ record, traderId }: { record: DecisionRecord; traderId
   );
 }
 
-function ScrollPre({ body, empty, height = 220 }: { body: string; empty: string; height?: number }) {
-  if (!body) return <p className="px-1 py-3 text-xs text-ink-faint">{empty}</p>;
+function ScrollPre({ body, empty, height = 260 }: { body: string; empty: string; height?: number }) {
+  if (!body) return <p className="px-1 py-3 text-base text-ink-faint">{empty}</p>;
   return (
     <pre
-      className="overflow-auto whitespace-pre-wrap break-words rounded border border-base-800 bg-base-950 px-2.5 py-2 font-mono text-2xs leading-relaxed text-ink-mid"
+      className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-base-800 bg-base-950 px-3 py-2 font-mono text-xs leading-relaxed text-ink-mid"
       style={{ maxHeight: height }}
     >
       {body}

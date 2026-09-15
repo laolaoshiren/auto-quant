@@ -1,21 +1,20 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { ChevronLeft, Play, RefreshCw, RotateCw, Settings2, Square } from 'lucide-react';
 import type { EquitySnapshot } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
 import { useDocumentTitle, usePolled, useTicker } from '../lib/hooks';
 import { useReconcile, useRunOnce } from '../lib/actions';
-import { Badge, Button, Dot, Empty, ErrorNote, Panel, Spinner3 } from '../components/ui';
+import { Badge, Button, Dot, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import { TraderStatusBadge } from '../components/Badges';
 import { DecisionFeed } from '../components/DecisionFeed';
 import { TraderTables, type TraderTabId } from '../components/TraderTables';
-import { NET_PNL_FORMULA, PnlBreakdown, statsCosts } from '../components/PnlBreakdown';
+import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import {
   DashboardEquityChart,
   EQUITY_RANGES,
-  LeverageGauge,
-  MetricCard,
   WinLossBar,
   type EquityRange,
 } from '../components/DashboardCharts';
@@ -29,7 +28,9 @@ import {
   fmtCompact,
   fmtDateTime,
   fmtInt,
+  fmtNum,
   fmtPercent,
+  fmtProfitFactor,
   fmtUsd,
   fmtUsdSigned,
   pnlColor,
@@ -37,6 +38,12 @@ import {
 } from '../lib/format';
 
 type ChartTab = 'equity' | 'candles';
+
+/** One day, in ms — the window behind the 今日盈亏 KPI. */
+const DAY_MS = 24 * 3600 * 1000;
+
+/** How tall the decision feed scrolls before it scrolls internally. */
+const FEED_HEIGHT = 720;
 
 function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -70,9 +77,19 @@ function toAccountState(raw: Record<string, unknown> | null): TraderAccountState
 /**
  * The running-bot dashboard.
  *
- * Two-column split: the operational surface on the left (header, headline
- * metrics, chart, tables) and the decision rail on the right — "what is the
- * model thinking right now" is the question the operator actually has.
+ * Laid out in descending order of what an operator reads, per DESIGN.md §4:
+ *
+ *   1. who this is + what it is doing (header + actions)
+ *   2. the five numbers that answer "am I up or down" (KPI band, full width)
+ *   3. the equity curve — the shape of that answer over time
+ *   4. the decision feed — a full-width *section*, not a sidebar: each cycle now
+ *      renders its decisions in full, so at rail width the cards were wrapping
+ *      into unreadable columns
+ *   5. the tables, which are reference material rather than something watched
+ *
+ * The old layout put the feed in a 48% column and the tables beside it. Both
+ * lost: the tables were clipped at five rows and the feed's decision cards were
+ * squeezed. Stacking them gives each the width its content actually needs.
  */
 export function TraderPage() {
   const params = useParams();
@@ -131,7 +148,7 @@ export function TraderPage() {
   const accountState = toAccountState(accountQuery.data?.account ?? null);
 
   /*
-   * The settlement unit the exchange reports, reused by the header's 起始余额 /
+   * The settlement unit the exchange reports, reused by the KPI band's 起始余额 /
    * 权益 pair so both read in the same unit as the account strip underneath.
    * Falls back to USDT, which is what every payload we have actually uses.
    */
@@ -177,6 +194,32 @@ export function TraderPage() {
   // both lossy and, once the unit was misread, wildly wrong.
   const wins = stats?.wins ?? 0;
   const losses = stats?.losses ?? 0;
+  const openPositionCount = positions.length || stats?.openPositions || 0;
+
+  /*
+   * 今日盈亏 against the last snapshot from *before* the 24-hour window.
+   *
+   * The newest snapshot older than 24h is deliberately preferred over the
+   * oldest one inside the window: with a 15-minute cycle the in-window
+   * comparison is only two hours old, which would report a session move as a
+   * day's PnL. Falls back to the oldest snapshot when the account is younger
+   * than a day, and to 0 when there is nothing to compare against.
+   */
+  const dayAgoEquity = useMemo(() => {
+    if (snapshots.length === 0) return undefined;
+    const cutoff = Date.now() - DAY_MS;
+    let before: EquitySnapshot | undefined;
+    for (const snapshot of snapshots) {
+      if (new Date(snapshot.timestamp).getTime() < cutoff) before = snapshot;
+      else break;
+    }
+    // `snapshots[0]` is defined here — an empty list returned above — but the
+    // index signature cannot say so, hence the explicit fallback.
+    return (before ?? snapshots[0])?.equity;
+  }, [snapshots]);
+
+  const todayPnl = dayAgoEquity === undefined ? 0 : equity - dayAgoEquity;
+  const todayPercent = dayAgoEquity ? (todayPnl / Math.abs(dayAgoEquity)) * 100 : 0;
 
   const model = modelsQuery.data?.find((row) => row.id === trader?.aiModelId) ?? null;
   const strategy = strategiesQuery.data?.find((row) => row.id === trader?.strategyId) ?? null;
@@ -222,7 +265,7 @@ export function TraderPage() {
   if (!trader) {
     return (
       <Panel title="未找到机器人">
-        <p className="text-xs text-ink-lo">
+        <p className="text-base text-ink-lo">
           {tradersQuery.error ?? `没有 id 为 ${traderId} 的机器人。它可能已被删除。`}
         </p>
         <Button className="mt-3" onClick={() => navigate('/traders')}>
@@ -232,271 +275,323 @@ export function TraderPage() {
     );
   }
 
+  const statsCost = stats ? statsCosts(stats) : null;
+
   return (
-    <div className="space-y-3">
-      {/* Breadcrumb + live strip ------------------------------------------ */}
+    // `max-w` only for the ultra-wide case: past ~1760px the equity curve and
+    // the tables stretch into unreadable spans. Everything below 3xl is fluid.
+    <div className="mx-auto w-full max-w-[110rem] space-y-3">
+      {/* A. Identity + controls ------------------------------------------- */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <Link to="/traders" className="text-xs text-ink-lo transition hover:text-accent">
-          ← 机器人
+        <Link
+          to="/traders"
+          className="inline-flex items-center gap-1 text-base text-ink-lo transition hover:text-accent"
+        >
+          <ChevronLeft aria-hidden className="h-4 w-4" />
+          机器人
         </Link>
-        <span className="num text-2xs text-ink-faint">
-          周期 #{trader.lastCycleNumber} · 每 {trader.cycleIntervalMinutes}m · 最近 {timeAgo(trader.lastCycleAt)} · 失败{' '}
-          <span className={trader.consecutiveFailures > 0 ? 'text-warn' : undefined}>{trader.consecutiveFailures}</span>
-        </span>
-        <span className="ml-auto flex items-center gap-2 text-2xs text-ink-faint">
+
+        <span className="h-4 w-px bg-base-700" aria-hidden />
+
+        <h1 className="min-w-0 truncate text-xl font-semibold tracking-wide text-ink-hi">{trader.name}</h1>
+        <Badge tone="muted">#{trader.id}</Badge>
+        <TraderStatusBadge status={status} live={trader.isRunning} />
+        {trader.consecutiveFailures > 0 && (
+          <Badge tone="warn" title="连续的模型或执行失败次数；超过熔断阈值会进入安全模式。">
+            {trader.consecutiveFailures} 次连续失败
+          </Badge>
+        )}
+
+        <span className="ml-auto flex flex-wrap items-center gap-2 text-xs text-ink-faint">
           <Badge tone={socketOpen ? 'up' : 'warn'}>
             <Dot tone={socketOpen ? 'up' : 'warn'} pulse={!socketOpen} />
             {socketOpen ? '实时事件' : 'REST 轮询'}
           </Badge>
           {tick > 0 && (
-            <span className="num">时刻 {new Date(tick).toLocaleTimeString('en-GB', { hour12: false })}</span>
+            <span className="num" title="本地时钟，每 5 秒刷新">
+              时刻 {new Date(tick).toLocaleTimeString('en-GB', { hour12: false })}
+            </span>
           )}
         </span>
       </div>
 
-      {/* A. Bot header ----------------------------------------------------- */}
-      <Panel padded={false} bodyClassName="px-3 py-2.5">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded border border-accent/40 bg-accent/15 text-lg font-bold text-accent">
-            {trader.name.slice(0, 1).toUpperCase()}
-          </div>
-
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="truncate text-base font-semibold tracking-wide text-ink-hi">{trader.name}</h1>
-              <TraderStatusBadge status={status} live={trader.isRunning} />
-              <Badge tone="muted">#{trader.id}</Badge>
-            </div>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-2xs text-ink-lo">
-              <span>
-                AI 模型{' '}
-                <Link to="/models" className="num text-accent hover:underline">
-                  {model ? `${model.label}（${model.model}）` : `#${trader.aiModelId}`}
-                </Link>
-              </span>
-              <span>
-                策略{' '}
-                <Link to={`/strategy/${trader.strategyId}`} className="text-accent hover:underline">
-                  {strategy?.name ?? `#${trader.strategyId}`}
-                </Link>
-              </span>
-              <span>
-                环境 <span className="text-ink-mid">{system?.environmentLabel ?? '—'}</span>
-              </span>
-            </div>
-          </div>
-
-          <div className="ml-auto flex flex-wrap items-center gap-1.5">
-            {trader.isRunning && (
-              <Button
-                variant="primary"
-                busy={runOnceBusyId === trader.id}
-                title="立即强制执行一个决策周期，无需等待间隔"
-                onClick={() => void runOnce(trader.id, trader.name)}
-              >
-                ⟳ 立即运行
-              </Button>
-            )}
-            {trader.isRunning ? (
-              <Button variant="danger" busy={busy} onClick={() => void stop()}>
-                ■ 停止
-              </Button>
-            ) : (
-              <Button variant="success" onClick={() => setStartOpen(true)}>
-                ▶ 启动
-              </Button>
-            )}
-            <Button onClick={() => setConfigOpen(true)} disabled={trader.isRunning} title="请先停止该机器人再编辑">
-              配置
-            </Button>
-            <Button
-              busy={reconcileBusyId === trader.id}
-              title="从交易所自己的成交历史重建本机器人的账本（不下任何订单）：补录漏记的平仓、修正手续费与资金费。机器人停止时也可用。"
-              onClick={() => void onReconcile()}
-            >
-              对账
-            </Button>
-          </div>
-        </div>
-
-        {actionError && <ErrorNote className="mt-2">{actionError}</ErrorNote>}
-
-        {status === 'safe_mode' && (
-          <div className="mt-2 rounded border border-warn/60 bg-warn/10 px-3 py-2 text-xs text-warn">
-            <span className="font-semibold">已进入安全模式。</span> 连续的模型或执行失败超过了熔断阈值。循环仍在运行，
-            但只会每隔几个周期探测一次模型，直到再次成功。
-          </div>
-        )}
-
-        {status === 'error' && trader.lastError && (
-          <div className="mt-2 rounded border border-down/60 bg-down/10 px-3 py-2 text-xs text-down">
-            <span className="font-semibold">最近错误：</span> <span className="num">{trader.lastError}</span>
-          </div>
-        )}
-
-        <div className="num mt-1.5 flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-base-800 pt-1.5 text-xs text-ink-lo">
-          {/*
-            起始余额 sits immediately before 权益 on purpose: it is a baseline,
-            not a balance, and the only way that reads correctly is next to the
-            current figure it is the baseline *for*.
-          */}
-          <span
-            title="起始余额：创建该机器人时从交易所读取的钱包余额，是总收益率与盈亏的计算基准，不是当前余额。"
-          >
-            起始余额{' '}
-            <span className="text-ink-mid">{fmtAsset(trader.initialEquity, settleAsset, 4)}</span>
-          </span>
-          <span title="当前权益（保证金余额 = 钱包 + 未实现盈亏）；紧随其后的百分比是相对起始余额的总收益率。">
-            权益 <span className="text-ink-hi">{fmtAsset(equity, settleAsset, 4)}</span>
-            {stats && (
-              <span className={pnlColor(stats.totalReturnPercent)}> {fmtPercent(stats.totalReturnPercent)}</span>
-            )}
+      {/* B. The controls, and the one-line provenance of the numbers below */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="num flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
+          <span title="该机器人已完成的决策周期数（跨重启连续编号）。">
+            周期 <span className="text-ink-mid">#{fmtInt(trader.lastCycleNumber)}</span>
           </span>
           <span>
-            持仓 <span className="text-ink-hi">{positions.length || stats?.openPositions || 0}</span>
+            间隔 <span className="text-ink-mid">每 {trader.cycleIntervalMinutes}m</span>
           </span>
           <span>
-            浮动盈亏 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
+            最近周期 <span className="text-ink-mid">{timeAgo(trader.lastCycleAt)}</span>
+          </span>
+          <span title="模型与策略决定它看什么、怎么下单。">
+            AI{' '}
+            <Link to="/models" className="text-accent hover:underline">
+              {model ? `${model.label}（${model.model}）` : `#${trader.aiModelId}`}
+            </Link>
+          </span>
+          <span>
+            策略{' '}
+            <Link to={`/strategy/${trader.strategyId}`} className="text-accent hover:underline">
+              {strategy?.name ?? `#${trader.strategyId}`}
+            </Link>
+          </span>
+          <span>
+            环境 <span className="text-ink-mid">{system?.environmentLabel ?? '—'}</span>
           </span>
           <span>
             创建于 <span className="text-ink-mid">{fmtDateTime(trader.createdAt)}</span>
           </span>
-          <Link to="/exchanges" className="text-accent hover:underline">
-            凭证余额 →
-          </Link>
         </div>
 
-        {/*
-          Live exchange view. Labelled from the same vocabulary as the 余额 column
-          on the 交易所 page, so 钱包余额 / 可用 / 未实现 / 保证金占用 mean one thing
-          across both screens.
-        */}
-        <TraderAccountStrip
-          account={accountState}
-          asset={settleAsset}
-          busy={accountQuery.loading}
-          error={accountQuery.error}
-          onRefresh={accountQuery.reload}
-        />
-      </Panel>
-
-      {/* Two-column split -------------------------------------------------- */}
-      {/* The decision rail gets close to half the width: decisions are now
-          always visible there rather than hidden behind a per-cycle click, so it
-          carries far more information than it used to. */}
-      <div className="grid grid-cols-1 gap-2.5 xl:grid-cols-[52fr_48fr]">
-        {/* Left ----------------------------------------------------------- */}
-        <div className="min-w-0 space-y-2.5">
-          {/* B. Stat cards ------------------------------------------------ */}
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            <MetricCard
-              label="胜率"
-              value={stats ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
-              sub={stats ? `${fmtInt(stats.totalTrades)} 笔已平仓` : undefined}
+        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          {trader.isRunning && (
+            <Button
+              variant="primary"
+              busy={runOnceBusyId === trader.id}
+              title="立即强制执行一个决策周期，无需等待间隔"
+              onClick={() => void runOnce(trader.id, trader.name)}
             >
-              <WinLossBar wins={wins} losses={losses} />
-            </MetricCard>
-
-            <MetricCard
-              label="已实现盈亏（30日）"
-              value={fmtUsdSigned(realized, 2)}
-              tone={pnlColor(realized)}
-              sub={
-                stats ? (
-                  <>
-                    <span className="block">
-                      <PnlBreakdown costs={statsCosts(stats)} />
-                    </span>
-                    <span className="block">
-                      浮动 {fmtUsdSigned(stats.unrealizedPnl, 2)} · {fmtInt(stats.totalTrades)} 笔
-                    </span>
-                  </>
-                ) : undefined
-              }
-              title={`${NET_PNL_FORMULA}。卡片上的净额已经扣掉开仓与平仓两侧的手续费和资金费；服务端暂不按 30 日窗口切分。`}
-            />
-
-            <MetricCard label="已用保证金" value={fmtUsd(marginUsed, 2)} sub={`总名义价值 ${fmtUsd(notional, 2)}`} />
-
-            <MetricCard label="有效杠杆" title="总名义价值 ÷ 权益">
-              <div className="mt-0.5 flex items-center justify-center">
-                <LeverageGauge value={effectiveLeverage} />
-              </div>
-            </MetricCard>
-          </div>
-
-          {/* C. Equity / candles ------------------------------------------ */}
-          <Panel
-            padded={false}
-            bodyClassName="p-0"
-            title={
-              <span className="flex items-center gap-0.5">
-                <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
-                  账户净值曲线
-                </ChartTabButton>
-                <ChartTabButton active={chartTab === 'candles'} onClick={() => setChartTab('candles')}>
-                  行情图表
-                </ChartTabButton>
-              </span>
-            }
-            actions={
-              chartTab === 'equity' ? (
-                <span className="flex items-center gap-0.5">
-                  {EQUITY_RANGES.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setRange(item.id)}
-                      className={
-                        range === item.id
-                          ? 'rounded border border-accent/60 bg-accent/15 px-1.5 py-0.5 text-2xs font-semibold text-accent'
-                          : 'rounded border border-transparent px-1.5 py-0.5 text-2xs text-ink-lo transition hover:border-base-700 hover:text-ink-mid'
-                      }
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </span>
-              ) : (
-                <span className="num text-2xs text-ink-faint">最近持仓标的</span>
-              )
-            }
+              <RotateCw aria-hidden className="h-3.5 w-3.5" />
+              立即运行
+            </Button>
+          )}
+          {trader.isRunning ? (
+            <Button variant="danger" busy={busy} onClick={() => void stop()}>
+              <Square aria-hidden className="h-3.5 w-3.5" />
+              停止
+            </Button>
+          ) : (
+            <Button variant="success" onClick={() => setStartOpen(true)}>
+              <Play aria-hidden className="h-3.5 w-3.5" />
+              启动
+            </Button>
+          )}
+          <Button onClick={() => setConfigOpen(true)} disabled={trader.isRunning} title="请先停止该机器人再编辑">
+            <Settings2 aria-hidden className="h-3.5 w-3.5" />
+            配置
+          </Button>
+          <Button
+            busy={reconcileBusyId === trader.id}
+            title="从交易所自己的成交历史重建本机器人的账本（不下任何订单）：补录漏记的平仓、修正手续费与资金费。机器人停止时也可用。"
+            onClick={() => void onReconcile()}
           >
-            {chartTab === 'equity' ? (
-              <div className="px-3 pb-1.5 pt-1.5">
-                <EquityHeader snapshots={snapshots} equity={equity} />
-                <DashboardEquityChart
-                  snapshots={snapshots}
-                  range={range}
-                  baseline={trader.initialEquity}
-                  /* Deliberately short: the curve communicates trend, and the
-                     table below it is where the detail lives. */
-                  height={175}
-                />
-              </div>
-            ) : (
-              <CandlesPanel symbol={positions[0]?.symbol} />
-            )}
-          </Panel>
-
-          {/* D. Tables ---------------------------------------------------- */}
-          <TraderTables
-            traderId={traderId}
-            tab={tableTab}
-            onChange={setTableTab}
-            positionCount={positions.length || stats?.openPositions || 0}
-            openOrderCount={openOrders.length}
-            refreshToken={tradesToken}
-          />
-        </div>
-
-        {/* Right: decision feed ------------------------------------------- */}
-        <div className="min-w-0">
-          <div className="xl:sticky xl:top-2">
-            <DecisionFeed traderId={traderId} height={860} />
-          </div>
+            <RefreshCw aria-hidden className="h-3.5 w-3.5" />
+            对账
+          </Button>
         </div>
       </div>
+
+      {actionError && <ErrorNote>{actionError}</ErrorNote>}
+
+      {status === 'safe_mode' && (
+        <div className="rounded-md border border-warn/60 bg-warn/10 px-3 py-2 text-base text-warn">
+          <span className="font-semibold">已进入安全模式。</span> 连续的模型或执行失败超过了熔断阈值。循环仍在运行，
+          但只会每隔几个周期探测一次模型，直到再次成功。
+        </div>
+      )}
+
+      {status === 'error' && trader.lastError && (
+        <div className="rounded-md border border-down/60 bg-down/10 px-3 py-2 text-base text-down">
+          <span className="font-semibold">最近错误：</span> <span className="num">{trader.lastError}</span>
+        </div>
+      )}
+
+      {/* C. KPI band ------------------------------------------------------- */}
+      {/*
+        The most prominent thing on the page, per DESIGN.md §4: five numbers,
+        each on its own cell, `text-3xl` against `text-xs` labels. Nothing else
+        on this page is allowed to compete with them.
+      */}
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5">
+        <Kpi
+          label={`权益（${settleAsset}）`}
+          value={fmtNum(equity, 4)}
+          tone="text-ink-strong"
+          sub={
+            <>
+              {stats ? (
+                <span className={pnlColor(stats.totalReturnPercent)}>
+                  总收益率 {fmtPercent(stats.totalReturnPercent)}
+                </span>
+              ) : (
+                '等待统计'
+              )}
+              {/*
+                起始余额 sits in the same cell as 权益 on purpose: it is a
+                baseline, not a balance, and the only way that reads correctly is
+                right next to the current figure it is the baseline *for*.
+              */}
+              <span className="block" title="创建该机器人时从交易所读取的钱包余额，是总收益率与盈亏的计算基准。">
+                起始余额 <span className="text-ink-lo">{fmtAsset(trader.initialEquity, settleAsset, 4)}</span>
+              </span>
+            </>
+          }
+        />
+
+        <Kpi
+          label="今日盈亏"
+          value={fmtUsdSigned(todayPnl, 2)}
+          tone={pnlColor(todayPnl)}
+          sub={
+            <>
+              <span className={pnlColor(todayPnl)}>{fmtPercent(todayPercent)}</span>
+              <span className="block" title="相对 24 小时前最近一个权益快照的变化。">
+                基准 {fmtNum(dayAgoEquity ?? equity, 2)} {settleAsset}
+              </span>
+            </>
+          }
+        />
+
+        <Kpi
+          label="胜率"
+          value={stats ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
+          sub={
+            stats ? (
+              <>
+                <span className="block">
+                  {fmtInt(stats.totalTrades)} 笔已平仓 · PF {fmtProfitFactor(stats.profitFactor)}
+                </span>
+                <span className="block">
+                  <WinLossBar wins={wins} losses={losses} />
+                </span>
+              </>
+            ) : (
+              '等待统计'
+            )
+          }
+        />
+
+        <Kpi
+          label="持仓数"
+          value={fmtInt(openPositionCount)}
+          sub={
+            <>
+              <span className="block">
+                {openOrders.length} 个挂单
+              </span>
+              <span className={pnlColor(unrealized)}>浮动 {fmtUsdSigned(unrealized, 2)}</span>
+            </>
+          }
+        />
+
+        <Kpi
+          label={`保证金（${settleAsset}）`}
+          value={fmtNum(marginUsed, 2)}
+          sub={
+            <>
+              <span>
+                名义 <span className="text-ink-lo">{fmtUsd(notional, 2)}</span>
+              </span>
+              <span className="block" title="有效杠杆 = 总名义价值 ÷ 权益。满仓 10x 时读数最高。">
+                有效杠杆 <span className="text-ink-mid">{effectiveLeverage.toFixed(2)}x</span>
+              </span>
+            </>
+          }
+        />
+      </div>
+
+      {/* D. Live exchange account ----------------------------------------- */}
+      {/*
+        Kept outside the KPI band because it is the exchange's own view, read on
+        demand: it is the reconciliation surface for the equity above, not a
+        second opinion about it.
+      */}
+      <TraderAccountStrip
+        account={accountState}
+        asset={settleAsset}
+        busy={accountQuery.loading}
+        error={accountQuery.error}
+        onRefresh={accountQuery.reload}
+      />
+
+      {/* E. Equity / candles ---------------------------------------------- */}
+      <Panel
+        padded={false}
+        bodyClassName="p-0"
+        title={
+          <span className="flex items-center gap-1">
+            <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
+              账户净值曲线
+            </ChartTabButton>
+            <ChartTabButton active={chartTab === 'candles'} onClick={() => setChartTab('candles')}>
+              行情图表
+            </ChartTabButton>
+          </span>
+        }
+        actions={
+          chartTab === 'equity' ? (
+            <span className="flex items-center gap-0.5">
+              {EQUITY_RANGES.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setRange(item.id)}
+                  className={
+                    range === item.id
+                      ? 'rounded border border-accent/60 bg-accent/15 px-2 py-0.5 text-xs font-semibold text-accent'
+                      : 'rounded border border-transparent px-2 py-0.5 text-xs text-ink-lo transition hover:border-base-700 hover:text-ink-mid'
+                  }
+                >
+                  {item.label}
+                </button>
+              ))}
+            </span>
+          ) : (
+            <span className="text-xs text-ink-faint">最近持仓标的</span>
+          )
+        }
+      >
+        {chartTab === 'equity' ? (
+          <div className="px-4 pb-2 pt-3">
+            <EquityHeader snapshots={snapshots} equity={equity} asset={settleAsset} />
+            <DashboardEquityChart
+              snapshots={snapshots}
+              range={range}
+              baseline={trader.initialEquity}
+              /* A real height, not a thumbnail: the curve is the only place the
+                 shape of the account's day is visible. The tables below it are
+                 where the per-trade detail lives. */
+              height={260}
+            />
+          </div>
+        ) : (
+          <CandlesPanel symbol={positions[0]?.symbol} />
+        )}
+      </Panel>
+
+      {/* F. Decision feed — full width ------------------------------------ */}
+      <DecisionFeed traderId={traderId} height={FEED_HEIGHT} />
+
+      {/* G. Tables -------------------------------------------------------- */}
+      <TraderTables
+        traderId={traderId}
+        tab={tableTab}
+        onChange={setTableTab}
+        positionCount={openPositionCount}
+        openOrderCount={openOrders.length}
+        refreshToken={tradesToken}
+      />
+
+      {/*
+        The net-PnL bridge, spelled out once below the tables. Every 净 figure on
+        this page is 毛 − 手续费 − 资金费, and this is the line that makes that
+        checkable against the exchange rather than a number the operator has to
+        take on faith.
+      */}
+      {statsCost && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-base-800 bg-base-900/60 px-3 py-2 text-xs">
+          <span className="font-semibold text-ink-lo">已实现盈亏（净额）</span>
+          <span className={cn('num text-md font-semibold', pnlColor(realized))}>{fmtUsdSigned(realized, 2)}</span>
+          <PnlBreakdown costs={statsCost} />
+          <span className="num ml-auto text-ink-faint" title={pnlFormulaText(statsCost)}>
+            {NET_PNL_FORMULA}
+          </span>
+        </div>
+      )}
 
       <StartTraderModal
         trader={trader}
@@ -523,6 +618,43 @@ export function TraderPage() {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  KPI cell                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One cell of the headline band.
+ *
+ * Hand-rolled rather than `ui.Stat` because the band is the one place on the
+ * page allowed to use `text-3xl` and `ink-strong`, and `Stat` is deliberately
+ * tuned for the denser `text-2xl` cards used elsewhere. The treatment matches
+ * `HeadlineMetric` on the overview page — a muted surface, no border — so the
+ * same kind of figure does not change costume between two screens.
+ */
+function Kpi({
+  label,
+  value,
+  tone = 'text-ink-hi',
+  sub,
+}: {
+  label: string;
+  value: ReactNode;
+  tone?: string;
+  sub?: ReactNode;
+}) {
+  return (
+    <div className="min-w-0 rounded-md bg-base-850/40 px-4 py-3.5">
+      <div className="truncate text-xs font-semibold uppercase tracking-[0.12em] text-ink-lo" title={label}>
+        {label}
+      </div>
+      {/* break-all, not truncate: a 7-figure equity must wrap rather than be
+          clipped — a wrong-looking number is worse than a two-line one. */}
+      <div className={cn('num mt-1.5 break-all text-3xl font-semibold leading-tight', tone)}>{value}</div>
+      {sub && <div className="mt-1.5 space-y-0.5 text-xs leading-snug text-ink-faint">{sub}</div>}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Chart helpers                                                              */
 /* -------------------------------------------------------------------------- */
 
@@ -539,11 +671,13 @@ function ChartTabButton({
     <button
       type="button"
       onClick={onClick}
-      className={
+      aria-pressed={active}
+      className={cn(
+        'rounded border px-2.5 py-1 text-base transition',
         active
-          ? 'panel-title rounded border border-base-700 bg-base-800 px-2 py-0.5 text-ink-hi'
-          : 'panel-title rounded border border-transparent px-2 py-0.5 transition hover:text-ink-mid'
-      }
+          ? 'border-base-700 bg-base-800 font-semibold text-ink-hi'
+          : 'border-transparent text-ink-lo hover:text-ink-mid',
+      )}
     >
       {children}
     </button>
@@ -551,22 +685,31 @@ function ChartTabButton({
 }
 
 /** 总净值 + absolute and percentage change over the visible window. */
-function EquityHeader({ snapshots, equity }: { snapshots: EquitySnapshot[]; equity: number }) {
+function EquityHeader({
+  snapshots,
+  equity,
+  asset,
+}: {
+  snapshots: EquitySnapshot[];
+  equity: number;
+  asset: string;
+}) {
   const first = snapshots[0]?.equity ?? equity;
   const delta = equity - first;
   const percent = first !== 0 ? (delta / Math.abs(first)) * 100 : 0;
-  const tone = delta > 0 ? 'text-up' : delta < 0 ? 'text-down' : 'text-ink-mid';
+  const tone = pnlColor(delta);
 
   return (
-    <div className="mb-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+    <div className="mb-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
       <div className="flex items-baseline gap-2">
         <span className="text-xs font-semibold tracking-[0.08em] text-ink-lo">总净值</span>
-        <span className="num text-2xl leading-none text-ink-hi">{fmtUsd(equity, 2)}</span>
+        <span className="num text-3xl font-semibold leading-none text-ink-hi">{fmtNum(equity, 2)}</span>
+        <span className="text-xs text-ink-faint">{asset}</span>
       </div>
-      <div className={`num text-sm ${tone}`}>
+      <div className={cn('num text-base', tone)} title="相对可见区间第一个快照的变化。">
         {fmtUsdSigned(delta, 2)} <span className="text-xs">({fmtPercent(percent)})</span>
       </div>
-      <span className="num ml-auto text-xs text-ink-faint">{snapshots.length} 个快照</span>
+      <span className="num ml-auto text-xs text-ink-faint">{fmtInt(snapshots.length)} 个快照</span>
     </div>
   );
 }
@@ -588,20 +731,21 @@ function CandlesPanel({ symbol }: { symbol?: string }) {
   const last = candles[candles.length - 1];
 
   return (
-    <div className="p-2">
+    <div className="p-3">
       <div className="mb-1.5 flex flex-wrap items-center gap-2">
-        <span className="text-xs font-semibold text-ink-hi">{symbol}</span>
-        {last && <span className="num text-xs text-ink-mid">{fmtCompact(last.close)}</span>}
+        <span className="text-base font-semibold text-ink-hi">{symbol}</span>
+        {last && <span className="num text-base text-ink-mid">{fmtCompact(last.close)}</span>}
         <span className="ml-auto flex items-center gap-0.5">
           {['5m', '15m', '1h', '4h'].map((value) => (
             <button
               key={value}
               type="button"
               onClick={() => setIntervalValue(value)}
+              aria-pressed={interval === value}
               className={
                 interval === value
-                  ? 'rounded border border-accent/60 bg-accent/15 px-1.5 py-0.5 text-2xs text-accent'
-                  : 'rounded border border-transparent px-1.5 py-0.5 text-2xs text-ink-lo transition hover:text-ink-mid'
+                  ? 'rounded border border-accent/60 bg-accent/15 px-2 py-0.5 text-xs text-accent'
+                  : 'rounded border border-transparent px-2 py-0.5 text-xs text-ink-lo transition hover:text-ink-mid'
               }
             >
               {value}
@@ -616,7 +760,7 @@ function CandlesPanel({ symbol }: { symbol?: string }) {
       ) : candles.length === 0 ? (
         <Empty message="该交易对没有返回K线。" />
       ) : (
-        <CandlestickChart candles={candles} height={280} />
+        <CandlestickChart candles={candles} height={360} />
       )}
     </div>
   );

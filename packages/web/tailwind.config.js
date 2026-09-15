@@ -4,58 +4,147 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Terminal chrome
+        /*
+         * 层级（elevation）而不是"深浅"。
+         *
+         * base-950 是页面底色，数字越小越靠前。这套阶梯刻意**避开纯黑**：
+         * 纯黑底 + 近白字会让长时间盯盘的眼睛很累（对比度过高），
+         * 而且非 OLED 屏幕上纯黑会与面板边界糊在一起、看不出层次。
+         * 现在用带一点蓝的深灰，靠"底色差 + 细边框"来分层。
+         */
         base: {
-          950: '#08090c',
-          900: '#0b0d12',
-          850: '#0f1116',
-          800: '#14161d',
-          750: '#191c24',
-          700: '#21242e',
-          600: '#2b2f3a',
-          500: '#3a3f4d',
+          950: '#0b0e14', // 页面底
+          900: '#11151e', // 面板
+          850: '#171c27', // 抬升面板 / 表头
+          800: '#1d2330', // 输入框 / hover
+          750: '#232a38', // 分隔线（弱）
+          700: '#2c3546', // 边框
+          600: '#3a4558', // 边框（强调）
+          500: '#4b5768', // 禁用态
         },
+
+        /*
+         * 文字四级。正文用 ink-hi 而不是纯白 —— 纯白在深色底上会"发光"，
+         * 大段阅读时刺眼。纯白只留给真正需要抢注意力的地方（ink-strong）。
+         */
         ink: {
-          hi: '#e8ecf3',
-          mid: '#a7b0c0',
-          lo: '#6b7486',
-          faint: '#464e5e',
+          hi: '#e4e9f2', // 正文 / 主要信息
+          mid: '#a9b4c7', // 次要信息
+          lo: '#76839a', // 标签 / 说明
+          faint: '#535f75', // 极弱：占位符、禁用
+          strong: '#ffffff', // 强调：关键数字
         },
-        up: '#22c98a',
-        down: '#f4525f',
-        accent: '#4d8dff',
-        warn: '#f5a524',
+
+        /*
+         * 交易语义色。
+         *
+         * 红绿是行业惯例，改色相会让老手看错方向，所以保留 ——
+         * 但两端都往中间收了一点：原来的 #22c98a 偏荧光、#f4525f 偏刺。
+         * 同时刻意让两者的**明度**不同，红绿色盲用户仍能靠明暗区分
+         * （不能只依赖色相）。
+         */
+        up: '#2ed3a3', // 涨 / 多 / 盈利
+        down: '#ff6b7a', // 跌 / 空 / 亏损
+        accent: '#5b8def', // 主操作
+        'accent-hi': '#7aa5f5', // 主操作 hover
+        warn: '#f5b544', // 警告
+        info: '#60a5fa', // 提示
+
+        overlay: 'rgba(6, 9, 15, 0.72)',
       },
+
       fontFamily: {
-        sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+        sans: [
+          'Inter',
+          'system-ui',
+          '-apple-system',
+          '"Segoe UI"',
+          '"PingFang SC"',
+          '"Microsoft YaHei"',
+          'sans-serif',
+        ],
         mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
       },
+
+      /*
+       * 字号整体上移一档。
+       *
+       * 原来基线 13px、最小 10px —— 1080p 上已偏小，2K/4K 上基本读不了。
+       * 现在最小的辅助字号是 11px，正文 14px。
+       */
       fontSize: {
-        '2xs': ['10px', '14px'],
-        xs: ['11px', '16px'],
-        sm: ['12px', '18px'],
-        base: ['13px', '20px'],
-        md: ['14px', '21px'],
-        lg: ['16px', '24px'],
-        xl: ['20px', '28px'],
-        '2xl': ['26px', '32px'],
+        /*
+         * 迁移期兼容别名。
+         *
+         * `2xs` 原本是 10px，是最小的一档。重设计后最小的辅助字号是 11px，
+         * 但**不能直接删掉这个键**：Tailwind 对不存在的类不报错，只是不生成
+         * 样式 —— 45 个文件里的 `text-2xs` 会静默失去字号，变得和正文一样大，
+         * 而这种问题只会在页面上肉眼看出来。
+         *
+         * 所以保留为 11px 的别名，让老页面先"不变丑"地过渡，
+         * 新代码一律用下面的正式档位。全部页面迁移完后可以删掉。
+         */
+        '2xs': ['11px', '16px'],
+        xs: ['11px', '16px'], // 仅辅助信息：角标、单位
+        sm: ['12px', '18px'], // 表格、密集列表
+        base: ['13px', '20px'], // 次级正文
+        md: ['14px', '21px'], // 正文默认
+        lg: ['15px', '23px'], // 强调正文
+        xl: ['18px', '26px'], // 小标题
+        '2xl': ['22px', '30px'], // 卡片数值
+        '3xl': ['28px', '34px'], // 关键指标
+        '4xl': ['36px', '42px'], // 首屏核心数字
       },
+
+      /* 圆角比原来大一点：小圆角在深色界面上显得"硬" */
+      borderRadius: {
+        DEFAULT: '6px',
+        md: '8px',
+        lg: '10px',
+        xl: '14px',
+      },
+
       boxShadow: {
-        panel: '0 1px 0 0 rgba(255,255,255,0.03) inset, 0 8px 24px -12px rgba(0,0,0,0.8)',
+        /* 深色界面的层次主要靠边框与底色差，阴影只做微妙的分离 */
+        panel: '0 1px 2px 0 rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.02) inset',
+        raised: '0 4px 16px -6px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03) inset',
+        overlay: '0 24px 64px -16px rgba(0,0,0,0.75)',
+        focus: '0 0 0 3px rgba(91,141,239,0.35)',
       },
+
       keyframes: {
-        pulseSoft: {
-          '0%, 100%': { opacity: '1' },
-          '50%': { opacity: '0.45' },
+        pulseSoft: { '0%, 100%': { opacity: '1' }, '50%': { opacity: '0.45' } },
+        fadeIn: { from: { opacity: '0' }, to: { opacity: '1' } },
+        slideUp: {
+          from: { opacity: '0', transform: 'translateY(6px) scale(0.99)' },
+          to: { opacity: '1', transform: 'translateY(0) scale(1)' },
         },
-        slideIn: {
-          from: { opacity: '0', transform: 'translateY(-6px)' },
-          to: { opacity: '1', transform: 'translateY(0)' },
+        slideInRight: {
+          from: { opacity: '0', transform: 'translateX(8px)' },
+          to: { opacity: '1', transform: 'translateX(0)' },
         },
       },
       animation: {
-        pulseSoft: 'pulseSoft 1.6s ease-in-out infinite',
-        slideIn: 'slideIn 140ms ease-out',
+        'pulse-soft': 'pulseSoft 1.8s ease-in-out infinite',
+        'fade-in': 'fadeIn 140ms ease-out',
+        'slide-up': 'slideUp 160ms cubic-bezier(0.16, 1, 0.3, 1)',
+        'slide-in-right': 'slideInRight 180ms cubic-bezier(0.16, 1, 0.3, 1)',
+      },
+
+      /*
+       * 屏幕适配用 em 而不是 px。
+       *
+       * 交易界面最怕浏览器缩放把布局搞乱：用 px 断点时，用户放大到 150%
+       * 会出现"字变大了但列还是那么窄"的挤压。em 断点会跟着字号一起变，
+       * 缩放后仍然拿到合适的列数。
+       */
+      screens: {
+        sm: '40em',
+        md: '48em',
+        lg: '64em',
+        xl: '80em',
+        '2xl': '96em',
+        '3xl': '120em',
       },
     },
   },

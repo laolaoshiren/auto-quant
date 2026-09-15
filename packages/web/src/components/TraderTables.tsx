@@ -1,6 +1,15 @@
 /**
  * Trader dashboard tables: 当前持仓 / 当前委托 / 历史成交 / 订单记录.
  *
+ * Two rules hold for every table in this file, and both come from DESIGN.md §6:
+ *
+ * 1. **Never render an unbounded list.** The endpoints answer up to 200 rows;
+ *    a long-running bot reaches that in days. Each table renders at most
+ *    `MAX_ROWS` and says so in a footer instead of silently dropping rows.
+ * 2. **Horizontal scrolling stays inside the table.** Every table sits in a
+ *    `.scroll-x` box, so a 13-column order table never pushes the page wide
+ *    (the shell has `overflow-x-hidden` and would otherwise clip it).
+ *
  * The close controls are deliberately *not* wired to an API call — the backend
  * has no manual-close endpoint. Pressing one opens an explanation of how the
  * bot actually closes positions rather than pretending a request was sent.
@@ -22,6 +31,29 @@ import {
   type PnlCosts,
 } from './PnlBreakdown';
 import { fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, pnlColor } from '../lib/format';
+
+/* -------------------------------------------------------------------------- */
+/*  Row caps                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/** Rows rendered per table. The API can return 200; the DOM gets 100. */
+const MAX_ROWS = 100;
+
+/**
+ * What a capped table says instead of quietly losing rows.
+ *
+ * The count is stated because "100 of 200" is itself information — the operator
+ * learns the exporter or the API limit is in play, rather than assuming the
+ * history ends here.
+ */
+function CapNote({ shown, total }: { shown: number; total: number }) {
+  if (total <= shown) return null;
+  return (
+    <p className="border-t border-base-800 px-3 py-2 text-xs text-ink-faint">
+      只渲染最近 {shown} 行，共 {total} 行 — 更早的记录请在交易所或导出接口查询，避免一次渲染上千行拖慢页面。
+    </p>
+  );
+}
 
 /* -------------------------------------------------------------------------- */
 /*  Manual-close notice                                                        */
@@ -49,15 +81,15 @@ function CloseNoticeModal({
       footer={<Button onClick={onClose}>知道了</Button>}
     >
       <div className="space-y-2">
-        <div className="rounded border border-warn/50 bg-warn/10 px-2.5 py-2 text-xs font-semibold text-warn">
+        <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base font-semibold text-warn">
           该按钮不会下任何订单。
         </div>
         {CLOSE_EXPLANATION.map((line) => (
-          <p key={line} className="text-xs leading-relaxed text-ink-mid">
+          <p key={line} className="text-base leading-relaxed text-ink-mid">
             {line}
           </p>
         ))}
-        <p className="text-2xs leading-relaxed text-ink-faint">
+        <p className="text-xs leading-relaxed text-ink-faint">
           这里保留按钮是为了让“我想立刻平掉”这个需求有一个明确的答案，而不是一条静默失败的请求。
         </p>
       </div>
@@ -95,84 +127,100 @@ export function PositionsTable({
     return <Empty message="暂无持仓。" hint="模型选择空仓 — 没有符合条件的标时不会下任何订单。" />;
   }
 
+  const shown = positions.slice(0, MAX_ROWS);
+
   return (
-    <div className="scroll-x">
-      <table className="w-full border-collapse">
-        <thead className="border-b border-base-800 bg-base-850/60">
-          <tr>
-            <th className="th">合约 / 方向</th>
-            <th className="th text-right">数量 / 价值</th>
-            <th className="th text-right">开仓价格 / 标记价格</th>
-            <th className="th">止盈 / 止损</th>
-            <th className="th text-right">强平价</th>
-            <th className="th text-right">未实现盈亏</th>
-            <th className="th text-right">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          {positions.map((position) => {
-            const missingStop = position.stopLoss === null || position.stopLoss === undefined;
-            const stopDistance = position.stopLoss ? distancePercent(position.entryPrice, position.stopLoss) : null;
-            const targetDistance = position.takeProfit ? distancePercent(position.entryPrice, position.takeProfit) : null;
+    <div>
+      {/* max-h as well as the cap: 100 position rows is still taller than any
+          screen, and the tab bar above must stay reachable. */}
+      <div className="scroll-x max-h-[60vh] overflow-y-auto">
+        <table className="w-full border-collapse">
+          <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
+            <tr>
+              <th className="th">合约 / 方向</th>
+              <th className="th text-right">数量 / 价值</th>
+              <th className="th text-right">开仓价格 / 标记价格</th>
+              <th className="th">止盈 / 止损</th>
+              <th className="th text-right">强平价</th>
+              <th className="th text-right">未实现盈亏</th>
+              <th className="th text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((position) => {
+              const missingStop = position.stopLoss === null || position.stopLoss === undefined;
+              const stopDistance = position.stopLoss ? distancePercent(position.entryPrice, position.stopLoss) : null;
+              const targetDistance = position.takeProfit ? distancePercent(position.entryPrice, position.takeProfit) : null;
 
-            return (
-              <tr key={position.id} className="row-hover align-top">
-                <td className="td">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-ink-hi">{position.symbol}</span>
-                    <SideBadge side={position.side} />
-                    <Badge tone="muted">{position.leverage}x</Badge>
-                    {missingStop && (
-                      <Badge tone="down" title="该持仓没有交易所侧止损。">
-                        ⚠ 无止损
+              return (
+                <tr key={position.id} className="row-hover align-top">
+                  <td className="td">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base font-semibold text-ink-hi">{position.symbol}</span>
+                      <SideBadge side={position.side} />
+                      <Badge tone="muted" title="该持仓在交易所使用的杠杆倍数。">
+                        {position.leverage}x
                       </Badge>
-                    )}
-                  </div>
-                  <div className="num mt-0.5 text-2xs text-ink-faint">
-                    持仓 {fmtDuration((Date.now() - new Date(position.openedAt).getTime()) / 60_000)}
-                  </div>
-                </td>
+                      {missingStop && (
+                        <Badge tone="down" title="该持仓没有交易所侧止损。">
+                          无止损
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="num mt-0.5 text-xs text-ink-faint">
+                      持仓 {fmtDuration((Date.now() - new Date(position.openedAt).getTime()) / 60_000)}
+                    </div>
+                  </td>
 
-                <td className="td num text-right">
-                  {fmtQty(position.quantity)}
-                  <div className="text-2xs text-ink-faint">{fmtUsd(position.notional, 2)}</div>
-                </td>
+                  <td className="td num text-right">
+                    {fmtQty(position.quantity)}
+                    <div className="text-xs text-ink-faint">
+                      名义 <span className="text-ink-lo">{fmtUsd(position.notional, 2)}</span>
+                    </div>
+                  </td>
 
-                <td className="td num text-right">
-                  {fmtPrice(position.entryPrice)}
-                  <div className="text-2xs text-ink-faint">{fmtPrice(position.markPrice)}</div>
-                </td>
+                  <td className="td num text-right">
+                    {fmtPrice(position.entryPrice)}
+                    <div className="text-xs text-ink-faint">标记 {fmtPrice(position.markPrice)}</div>
+                  </td>
 
-                <td className="td">
-                  <div className="num text-xs text-up">
-                    {position.takeProfit ? fmtPrice(position.takeProfit) : '无'}
-                    {targetDistance && <span className="ml-1 text-2xs text-ink-faint">{targetDistance}</span>}
-                  </div>
-                  <div className={`num text-xs ${missingStop ? 'font-semibold text-down' : 'text-down'}`}>
-                    {position.stopLoss ? fmtPrice(position.stopLoss) : '无'}
-                    {stopDistance && <span className="ml-1 text-2xs text-ink-faint">{stopDistance}</span>}
-                  </div>
-                </td>
+                  <td className="td">
+                    <div className="num text-base text-up">
+                      {position.takeProfit ? fmtPrice(position.takeProfit) : '无'}
+                      {targetDistance && <span className="ml-1 text-xs text-ink-faint">{targetDistance}</span>}
+                    </div>
+                    <div className={`num text-base ${missingStop ? 'font-semibold text-down' : 'text-down'}`}>
+                      {position.stopLoss ? fmtPrice(position.stopLoss) : '无'}
+                      {stopDistance && <span className="ml-1 text-xs text-ink-faint">{stopDistance}</span>}
+                    </div>
+                  </td>
 
-                <td className={`td num text-right ${position.liquidationPrice ? 'text-warn' : 'text-ink-faint'}`}>
-                  {position.liquidationPrice ? fmtPrice(position.liquidationPrice) : '—'}
-                </td>
+                  <td className={`td num text-right ${position.liquidationPrice ? 'text-warn' : 'text-ink-faint'}`}>
+                    {position.liquidationPrice ? fmtPrice(position.liquidationPrice) : '—'}
+                  </td>
 
-                <td className={`td num text-right ${pnlColor(position.unrealizedPnl)}`}>
-                  {fmtUsdSigned(position.unrealizedPnl, 2)}
-                  <div className="text-2xs">{fmtPercent(position.unrealizedPnlPercent)}</div>
-                </td>
+                  <td className={`td num text-right ${pnlColor(position.unrealizedPnl)}`}>
+                    {fmtUsdSigned(position.unrealizedPnl, 2)}
+                    <div className="text-xs">{fmtPercent(position.unrealizedPnlPercent)}</div>
+                  </td>
 
-                <td className="td text-right">
-                  <Button small variant="danger" onClick={() => onCloseRequest(position.symbol)} title="查看手工平仓的说明">
-                    平仓
-                  </Button>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+                  <td className="td text-right">
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      onClick={() => onCloseRequest(position.symbol)}
+                      title="查看手工平仓的说明"
+                    >
+                      平仓
+                    </Button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <CapNote shown={shown.length} total={positions.length} />
     </div>
   );
 }
@@ -228,58 +276,65 @@ export function OrdersTable({
     );
   }
 
+  const shown = orders.slice(0, MAX_ROWS);
+
   return (
-    <div className="scroll-x">
-      <table className="w-full border-collapse">
-        <thead className="border-b border-base-800 bg-base-850/60">
-          <tr>
-            <th className="th">时间</th>
-            <th className="th">交易对</th>
-            <th className="th">用途</th>
-            <th className="th">方向</th>
-            <th className="th">类型</th>
-            <th className="th text-right">数量</th>
-            <th className="th text-right">价格</th>
-            <th className="th text-right">触发价</th>
-            <th className="th text-right">已成交</th>
-            <th className="th text-right">均价</th>
-            <th className="th">状态</th>
-            <th className="th">错误</th>
-          </tr>
-        </thead>
-        <tbody>
-          {orders.map((order) => (
-            <tr key={order.id} className="row-hover">
-              <td className="td num text-ink-faint">{fmtDateTime(order.createdAt)}</td>
-              <td className="td font-semibold text-ink-hi">{order.symbol}</td>
-              <td className="td">
-                <Badge tone={purposeTone(order.purpose)}>{purposeLabel(order.purpose)}</Badge>
-              </td>
-              <td className={`td font-semibold ${order.side === 'BUY' ? 'text-up' : 'text-down'}`}>
-                {order.side === 'BUY' ? '买入' : '卖出'}
-              </td>
-              <td className="td text-ink-lo">{order.type}</td>
-              <td className="td num text-right">{fmtQty(order.quantity)}</td>
-              <td className="td num text-right">{order.price ? fmtPrice(order.price) : '市价'}</td>
-              <td className="td num text-right text-ink-lo">{order.stopPrice ? fmtPrice(order.stopPrice) : '—'}</td>
-              <td className="td num text-right">{fmtQty(order.filledQty)}</td>
-              <td className="td num text-right">{order.avgPrice ? fmtPrice(order.avgPrice) : '—'}</td>
-              <td className="td">
-                <span
-                  className={
-                    isOpenOrder(order) ? 'text-up' : /cancel|reject|expired/i.test(order.status) ? 'text-warn' : 'text-ink-mid'
-                  }
-                >
-                  {order.status}
-                </span>
-              </td>
-              <td className="td max-w-[220px] truncate text-down" title={order.error ?? undefined}>
-                {order.error ?? ''}
-              </td>
+    <div>
+      {/* 12 columns: this is the table that most needs its own horizontal
+          scroller rather than a page-wide one. */}
+      <div className="scroll-x max-h-[60vh] overflow-y-auto">
+        <table className="w-full border-collapse">
+          <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
+            <tr>
+              <th className="th">时间</th>
+              <th className="th">交易对</th>
+              <th className="th">用途</th>
+              <th className="th">方向</th>
+              <th className="th">类型</th>
+              <th className="th text-right">数量</th>
+              <th className="th text-right">价格</th>
+              <th className="th text-right">触发价</th>
+              <th className="th text-right">已成交</th>
+              <th className="th text-right">均价</th>
+              <th className="th">状态</th>
+              <th className="th">错误</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {shown.map((order) => (
+              <tr key={order.id} className="row-hover">
+                <td className="td num text-ink-faint">{fmtDateTime(order.createdAt)}</td>
+                <td className="td font-semibold text-ink-hi">{order.symbol}</td>
+                <td className="td">
+                  <Badge tone={purposeTone(order.purpose)}>{purposeLabel(order.purpose)}</Badge>
+                </td>
+                <td className={`td font-semibold ${order.side === 'BUY' ? 'text-up' : 'text-down'}`}>
+                  {order.side === 'BUY' ? '买入' : '卖出'}
+                </td>
+                <td className="td text-ink-lo">{order.type}</td>
+                <td className="td num text-right">{fmtQty(order.quantity)}</td>
+                <td className="td num text-right">{order.price ? fmtPrice(order.price) : '市价'}</td>
+                <td className="td num text-right text-ink-lo">{order.stopPrice ? fmtPrice(order.stopPrice) : '—'}</td>
+                <td className="td num text-right">{fmtQty(order.filledQty)}</td>
+                <td className="td num text-right">{order.avgPrice ? fmtPrice(order.avgPrice) : '—'}</td>
+                <td className="td">
+                  <span
+                    className={
+                      isOpenOrder(order) ? 'text-up' : /cancel|reject|expired/i.test(order.status) ? 'text-warn' : 'text-ink-mid'
+                    }
+                  >
+                    {order.status}
+                  </span>
+                </td>
+                <td className="td max-w-[240px] truncate text-down" title={order.error ?? undefined}>
+                  {order.error ?? ''}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <CapNote shown={shown.length} total={orders.length} />
     </div>
   );
 }
@@ -335,6 +390,10 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
    * account has one: gross +0.0011, net −0.0187), and the backend's own
    * `wins`/`losses` count the net. Counting the gross here made this header
    * disagree with the 胜率 card above it.
+   *
+   * Counted over every fetched trade, not just the rendered page: the header is
+   * a summary of the history, and a capped table must not change what "12 盈"
+   * means.
    */
   const wins = trades.filter((trade) => trade.netPnl > 0).length;
   const totals: PnlCosts = trades.reduce<PnlCosts>(
@@ -347,21 +406,28 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
     { gross: 0, fees: 0, funding: 0, net: 0 },
   );
 
+  const shown = trades.slice(0, MAX_ROWS);
+
   return (
     <div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-base-800 px-3 py-1.5 text-2xs">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-base-800 px-3 py-2 text-xs">
         <span className="text-ink-lo">
           {trades.length} 笔成交 · <span className="text-up">{wins} 盈</span> /{' '}
           <span className="text-down">{trades.length - wins} 亏</span>
         </span>
+        {/*
+          The gross → net bridge, and it stays inline. Collapsing it into the
+          single 净额 figure is the difference between a number the operator
+          trusts and one they have to take on faith.
+        */}
         <PnlBreakdown costs={totals} />
-        <span className={`num ml-auto ${pnlColor(totals.net)}`} title={NET_PNL_FORMULA}>
+        <span className={`num ml-auto text-base font-semibold ${pnlColor(totals.net)}`} title={NET_PNL_FORMULA}>
           净额 {fmtUsdSigned(totals.net, 2)}
         </span>
       </div>
-      <div className="scroll-x">
+      <div className="scroll-x max-h-[60vh] overflow-y-auto">
         <table className="w-full border-collapse">
-          <thead className="border-b border-base-800 bg-base-850/60">
+          <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
               <th className="th">交易对</th>
               <th className="th">方向</th>
@@ -379,7 +445,7 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
             </tr>
           </thead>
           <tbody>
-            {trades.map((trade) => {
+            {shown.map((trade) => {
               const costs = tradeCosts(trade);
               const reconciled = trade.source === 'reconciled' || trade.closeReason === 'reconciled';
               return (
@@ -408,11 +474,11 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
                   </td>
                   <td className="td num text-right text-warn" title={pnlFormulaText(costs)}>
                     {fmtSigned(-trade.fee, 4)}
-                    <div className="text-2xs text-ink-faint">
+                    <div className="text-xs text-ink-faint">
                       开 {fmtSigned(trade.entryFee, 4)} · 平 {fmtSigned(trade.exitFee, 4)}
                     </div>
                     {trade.fundingFee !== 0 && (
-                      <div className={`text-2xs ${pnlColor(trade.fundingFee)}`} title="资金费：负数表示支付">
+                      <div className={`text-xs ${pnlColor(trade.fundingFee)}`} title="资金费：负数表示支付">
                         资 {fmtSigned(trade.fundingFee, 4)}
                       </div>
                     )}
@@ -427,6 +493,8 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
                     {fmtPercent(trade.pnlPercent)}
                   </td>
                   <td className="td" title={reconciled ? RECONCILED_TITLE : undefined}>
+                    {/* `closeReason` is a persisted machine code; the Chinese
+                        label lives in CLOSE_REASON_LABELS only. */}
                     <span className={reconciled ? 'text-warn' : 'text-ink-lo'}>
                       {closeReasonLabel(trade.closeReason)}
                     </span>
@@ -439,6 +507,7 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
           </tbody>
         </table>
       </div>
+      <CapNote shown={shown.length} total={trades.length} />
     </div>
   );
 }
@@ -484,28 +553,31 @@ export function TraderTables({
 
   return (
     <Panel padded={false} bodyClassName="p-0">
-      <div className="flex flex-wrap items-center gap-2 border-b border-base-800 px-3 py-1.5">
-        <div className="flex items-center gap-0.5">
+      <div className="flex flex-wrap items-center gap-2 border-b border-base-800 px-3 py-2">
+        {/* Real tab semantics, so the arrow keys and the tab order work. */}
+        <div role="tablist" aria-label="机器人数据表" className="flex items-center gap-0.5">
           {tabs.map((item) => (
             <button
               key={item.id}
               type="button"
+              role="tab"
+              aria-selected={tab === item.id}
               onClick={() => onChange(item.id)}
               className={
                 tab === item.id
-                  ? '-mb-px border-b-2 border-accent px-2.5 py-1 text-xs font-medium text-ink-hi'
-                  : '-mb-px border-b-2 border-transparent px-2.5 py-1 text-xs text-ink-lo transition hover:text-ink-mid'
+                  ? '-mb-px border-b-2 border-accent px-3 py-1.5 text-base font-semibold text-ink-hi'
+                  : '-mb-px border-b-2 border-transparent px-3 py-1.5 text-base text-ink-lo transition hover:text-ink-mid'
               }
             >
               {item.label}
-              {item.count !== undefined && <span className="num ml-1.5 text-2xs text-ink-faint">{item.count}</span>}
+              {item.count !== undefined && <span className="num ml-1.5 text-xs text-ink-faint">{item.count}</span>}
             </button>
           ))}
         </div>
 
         <div className="ml-auto flex items-center gap-1.5">
           <Button
-            small
+            size="sm"
             variant="danger"
             disabled={positionCount === 0}
             title={positionCount === 0 ? '当前没有持仓' : '查看手工平仓的说明'}
@@ -513,8 +585,8 @@ export function TraderTables({
           >
             全部平仓
           </Button>
-          <Button small variant="ghost" onClick={() => setOrdersRefreshToken((n) => n + 1)} title="立即刷新表格数据">
-            ⟳ 刷新
+          <Button size="sm" variant="ghost" onClick={() => setOrdersRefreshToken((n) => n + 1)} title="立即刷新表格数据">
+            刷新
           </Button>
         </div>
       </div>

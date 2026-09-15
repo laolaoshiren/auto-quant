@@ -1,12 +1,52 @@
+/**
+ * 数据与日志。
+ *
+ * 这一页的读者是"出事了正在排查的人"，所以一切让位于**可读**：
+ *
+ * - 日志行里有交易所原始的报错文本（例如 Binance 的 `-2019`），那些字符串就是
+ *   唯一的诊断依据，必须原样显示 —— 不翻译、不省略。因此容器用 `break-all`
+ *   而不是 `break-words`：没有空格的错误串会把整页顶出横向滚动条。
+ * - 级别（info / warn / error）用颜色 + 固定宽度的文字标签，两者同时存在，
+ *   不靠颜色单独传达信息。
+ * - 长列表只渲染有上限的一段（见 `MAX_RENDERED`），并明确告诉操作员被截断了多少。
+ */
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowDownToLine, Pause, Play, RefreshCw, RotateCw, Trash2 } from 'lucide-react';
 import { api, type LogLine } from '../lib/api';
 import { useApp, useEvents, type LiveLogLine } from '../lib/store';
 import { useDocumentTitle, usePolled, useTicker } from '../lib/hooks';
-import { Badge, Button, Empty, Panel, Spinner3, TextInput } from '../components/ui';
-import { SectionHeading } from '../components/Badges';
+import { Badge, Button, CopyButton, Empty, ErrorNote, Panel, Spinner3, TextInput, cn } from '../components/ui';
 import { fmtClockOffset, fmtInt, timeAgo } from '../lib/format';
 
 type Level = 'all' | 'info' | 'warn' | 'error';
+
+/**
+ * 一次渲染的日志行上限。
+ *
+ * 推送缓冲可能有几千行，全量渲染会让展开/暂停/打字都卡住 ——
+ * 而这恰恰是排查问题时最不能卡的时刻。超出部分从**最新的**开始截取，
+ * 因为最新的行才是要看的。
+ */
+const MAX_RENDERED = 500;
+
+const LEVELS: Array<{ id: Level; label: string }> = [
+  { id: 'all', label: '全部' },
+  { id: 'info', label: '信息' },
+  { id: 'warn', label: '警告' },
+  { id: 'error', label: '错误' },
+];
+
+const LEVEL_TEXT: Record<string, string> = {
+  error: 'text-down',
+  warn: 'text-warn',
+  info: 'text-ink-lo',
+};
+
+const LEVEL_LABEL: Record<string, string> = {
+  error: '错误',
+  warn: '警告',
+  info: '信息',
+};
 
 export function DataPage() {
   useDocumentTitle('数据与日志');
@@ -24,6 +64,7 @@ export function DataPage() {
   const [paused, setPaused] = useState(false);
   const [follow, setFollow] = useState(true);
   const [source, setSource] = useState<'socket' | 'rest'>('socket');
+  const [copied, setCopied] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const tick = useTicker(5000);
 
@@ -57,7 +98,7 @@ export function DataPage() {
   if (!paused && frozen.current !== null) frozen.current = null;
   const visible = frozen.current ?? lines;
 
-  const filtered = useMemo(() => {
+  const matched = useMemo(() => {
     const term = search.trim().toLowerCase();
     return visible.filter((line) => {
       if (level !== 'all' && line.level !== level) return false;
@@ -66,11 +107,14 @@ export function DataPage() {
     });
   }, [visible, level, search]);
 
+  const shown = useMemo(() => matched.slice(Math.max(0, matched.length - MAX_RENDERED)), [matched]);
+  const hiddenRows = matched.length - shown.length;
+
   useEffect(() => {
     if (!follow || paused) return;
     const node = scrollRef.current;
     if (node) node.scrollTop = node.scrollHeight;
-  }, [filtered.length, follow, paused]);
+  }, [shown.length, follow, paused]);
 
   const counts = useMemo(() => {
     const acc = { info: 0, warn: 0, error: 0 };
@@ -82,35 +126,58 @@ export function DataPage() {
     return acc;
   }, [visible]);
 
+  const copyBuffer = async () => {
+    const text = shown
+      .map(
+        (line) =>
+          `${new Date(line.timestamp).toISOString()} ${line.level.toUpperCase().padEnd(5)} ${
+            line.traderId !== null ? `t${line.traderId} ` : ''
+          }${line.message}`,
+      )
+      .join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      /* 剪贴板被浏览器拒绝（非 https / 无权限）时不弹错：操作员可以手动选中复制 */
+    }
+  };
+
+  const filtering = level !== 'all' || search.trim().length > 0;
+
   return (
     <div className="space-y-3">
-      <SectionHeading
-        title="数据与日志"
-        sub="运行时日志流、连接健康状态，以及控制台背后的原始行情计数器。"
-        right={
-          <span className="flex items-center gap-1.5">
-            <Badge tone={socketStatus === 'open' ? 'up' : 'warn'}>
-              {socketStatus === 'open' ? '推送已连接' : `推送 ${socketStatus}`}
-            </Badge>
-            {socketStatus !== 'open' && (
-              <Button small onClick={() => connect()}>
-                重新连接
-              </Button>
-            )}
-          </span>
-        }
-      />
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold tracking-wide text-ink-hi">数据与日志</h1>
+          <p className="mt-0.5 text-xs text-ink-faint">
+            运行时日志流、连接健康状态，以及控制台背后的原始行情计数器。
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge tone={socketStatus === 'open' ? 'up' : 'warn'}>
+            {socketStatus === 'open' ? '推送已连接' : `推送 ${socketStatus}`}
+          </Badge>
+          {socketStatus !== 'open' && (
+            <Button size="sm" onClick={() => connect()}>
+              <RotateCw aria-hidden className="h-3.5 w-3.5" />
+              重新连接
+            </Button>
+          )}
+        </div>
+      </div>
 
       <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
         <Metric label="环境" value={system?.environment ?? '—'} sub={system?.environmentLabel} />
-        <Metric label="时钟偏移" value={fmtClockOffset(system?.clockOffsetMs)} />
+        <Metric label="时钟偏移" value={fmtClockOffset(system?.clockOffsetMs)} sub="本机 − 交易所" />
         <Metric
           label="API 权重"
           value={`${fmtInt(system?.weightUsed)} / ${fmtInt(system?.weightLimit)}`}
           sub="每分钟"
         />
         <Metric label="可交易对" value={fmtInt(system?.tradableSymbols)} />
-        <Metric label="服务运行时长" value={health ? `${Math.floor(health.uptimeSeconds / 60)}分` : '—'} />
+        <Metric label="服务运行时长" value={health ? `${Math.floor(health.uptimeSeconds / 60)} 分` : '—'} />
         <Metric
           label="日志行数"
           value={fmtInt(visible.length)}
@@ -121,32 +188,79 @@ export function DataPage() {
       <Panel
         title="运行时日志"
         actions={
-          <div className="flex flex-wrap items-center gap-1.5">
-            <div className="flex items-center gap-0.5">
-              {(['all', 'info', 'warn', 'error'] as Level[]).map((value) => (
-                <Button key={value} small variant={level === value ? 'primary' : 'ghost'} onClick={() => setLevel(value)}>
-                  {value}
+          <div className="flex flex-wrap items-center justify-end gap-1.5">
+            {/* 级别：文字 + 颜色，两者都在 */}
+            <div role="group" aria-label="按级别过滤" className="flex items-center gap-0.5">
+              {LEVELS.map((item) => (
+                <Button
+                  key={item.id}
+                  size="sm"
+                  variant={level === item.id ? 'primary' : 'ghost'}
+                  aria-pressed={level === item.id}
+                  onClick={() => setLevel(item.id)}
+                >
+                  {item.label}
+                  {item.id !== 'all' && (
+                    <span className="num text-ink-faint">{counts[item.id as 'info' | 'warn' | 'error']}</span>
+                  )}
                 </Button>
               ))}
             </div>
-            <div className="flex items-center gap-0.5">
-              <Button small variant={source === 'socket' ? 'primary' : 'ghost'} onClick={() => setSource('socket')}>
+
+            <span aria-hidden className="mx-0.5 hidden h-4 w-px bg-base-700 sm:block" />
+
+            <div role="group" aria-label="日志来源" className="flex items-center gap-0.5">
+              <Button
+                size="sm"
+                variant={source === 'socket' ? 'primary' : 'ghost'}
+                aria-pressed={source === 'socket'}
+                onClick={() => setSource('socket')}
+              >
                 实时
               </Button>
-              <Button small variant={source === 'rest' ? 'primary' : 'ghost'} onClick={() => setSource('rest')}>
+              <Button
+                size="sm"
+                variant={source === 'rest' ? 'primary' : 'ghost'}
+                aria-pressed={source === 'rest'}
+                onClick={() => setSource('rest')}
+              >
                 持久化
               </Button>
             </div>
-            <Button small variant={follow ? 'primary' : 'ghost'} onClick={() => setFollow((value) => !value)}>
-              跟随 {follow ? '开' : '关'}
+
+            <span aria-hidden className="mx-0.5 hidden h-4 w-px bg-base-700 sm:block" />
+
+            <Button
+              size="sm"
+              variant={follow ? 'primary' : 'ghost'}
+              aria-pressed={follow}
+              title="开启后新日志会自动滚到底部"
+              onClick={() => setFollow((value) => !value)}
+            >
+              {follow ? <ArrowDownToLine aria-hidden className="h-3.5 w-3.5" /> : null}
+              跟随{follow ? '开' : '关'}
             </Button>
-            <Button small variant={paused ? 'warn' : 'ghost'} onClick={() => setPaused((value) => !value)}>
+            <Button
+              size="sm"
+              variant={paused ? 'warn' : 'ghost'}
+              aria-pressed={paused}
+              title="暂停只冻结视图，不会停止接收推送"
+              onClick={() => setPaused((value) => !value)}
+            >
+              {paused ? <Play aria-hidden className="h-3.5 w-3.5" /> : <Pause aria-hidden className="h-3.5 w-3.5" />}
               {paused ? '已暂停' : '暂停'}
             </Button>
-            <Button small onClick={() => clearLogs()} disabled={source !== 'socket'}>
+            <Button
+              size="sm"
+              onClick={() => clearLogs()}
+              disabled={source !== 'socket'}
+              title={source === 'socket' ? '清空本页的推送缓冲' : '持久化日志来自服务端，不能在这里清空'}
+            >
+              <Trash2 aria-hidden className="h-3.5 w-3.5" />
               清空
             </Button>
-            <Button small onClick={() => restQuery.reload()} busy={restQuery.loading}>
+            <Button size="sm" onClick={() => restQuery.reload()} busy={restQuery.loading}>
+              <RefreshCw aria-hidden className="h-3.5 w-3.5" />
               重新加载
             </Button>
           </div>
@@ -154,44 +268,112 @@ export function DataPage() {
         bodyClassName="p-2"
         padded={false}
       >
-        <TextInput
-          className="mb-2"
-          placeholder="过滤消息…"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-        />
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <div className="relative min-w-[12rem] flex-1">
+            <TextInput
+              className="num"
+              placeholder="按原文过滤消息…"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              aria-label="过滤日志消息"
+            />
+          </div>
+          {filtering && (
+            <>
+              <span className="num text-xs text-ink-faint">
+                命中 {fmtInt(matched.length)} / {fmtInt(visible.length)}
+              </span>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setSearch('');
+                  setLevel('all');
+                }}
+              >
+                清除过滤
+              </Button>
+            </>
+          )}
+          <CopyButton onCopy={() => void copyBuffer()} copied={copied} />
+        </div>
 
+        {/* 日志容器自己滚动、自己断词：任何一行都不许把页面撑宽 */}
         <div
           ref={scrollRef}
-          className="h-[520px] overflow-y-auto rounded border border-base-800 bg-base-950 p-1 font-mono text-xs leading-relaxed"
+          className="h-[min(70vh,560px)] overflow-y-auto overflow-x-hidden rounded-md border border-base-800 bg-base-950 p-1 font-mono text-base leading-relaxed"
         >
-          {source === 'rest' && restQuery.loading && filtered.length === 0 ? (
+          {source === 'rest' && restQuery.loading && shown.length === 0 ? (
             <Spinner3 label="正在加载持久化日志" />
-          ) : filtered.length === 0 ? (
-            <Empty message="没有匹配的日志行。" hint="服务运行时，日志会通过 WebSocket 持续推送。" />
+          ) : restQuery.error && shown.length === 0 ? (
+            <div className="p-2">
+              <ErrorNote>读取持久化日志失败：{restQuery.error}</ErrorNote>
+              <Button size="sm" className="mt-2" busy={restQuery.loading} onClick={() => restQuery.reload()}>
+                重试
+              </Button>
+            </div>
+          ) : shown.length === 0 ? (
+            <Empty
+              message={filtering ? '没有匹配当前过滤条件的日志行。' : '还没有日志。'}
+              hint={
+                filtering
+                  ? '放宽级别或清空过滤词再看一次。'
+                  : '服务一旦开始运行，日志会通过 WebSocket 持续推送过来；也可以切到「持久化」读取历史。'
+              }
+              action={
+                filtering ? (
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      setSearch('');
+                      setLevel('all');
+                    }}
+                  >
+                    清除过滤
+                  </Button>
+                ) : (
+                  <Button size="sm" variant={source === 'rest' ? 'ghost' : 'primary'} onClick={() => setSource('rest')}>
+                    读取持久化日志
+                  </Button>
+                )
+              }
+            />
           ) : (
-            filtered.map((line) => (
-              <div key={`${line.id}-${line.timestamp}`} className="flex gap-2 rounded px-1 py-px hover:bg-base-850/60">
-                <span className="shrink-0 text-ink-faint">
+            shown.map((line) => (
+              <div
+                // 同一毫秒可能有多行，id 会重复，所以把时间戳一起放进 key
+                key={`${line.id}-${line.timestamp}`}
+                className="flex items-start gap-2 rounded px-1 py-0.5 hover:bg-base-850/60"
+              >
+                <span className="num shrink-0 text-ink-faint" title={new Date(line.timestamp).toISOString()}>
                   {new Date(line.timestamp).toLocaleTimeString('en-GB', { hour12: false })}
                 </span>
                 <span
-                  className={`shrink-0 uppercase ${
-                    line.level === 'error' ? 'text-down' : line.level === 'warn' ? 'text-warn' : 'text-ink-lo'
-                  }`}
+                  className={cn(
+                    'w-8 shrink-0 select-none text-center text-xs font-semibold',
+                    LEVEL_TEXT[line.level] ?? 'text-ink-lo',
+                  )}
                 >
-                  {line.level.padEnd(5, ' ')}
+                  {LEVEL_LABEL[line.level] ?? line.level}
                 </span>
-                {line.traderId !== null && <span className="shrink-0 text-accent">t{line.traderId}</span>}
-                <span className="whitespace-pre-wrap break-words text-ink-mid">{line.message}</span>
+                {line.traderId !== null && (
+                  <span className="num shrink-0 text-accent" title={`机器人 #${line.traderId}`}>
+                    t{line.traderId}
+                  </span>
+                )}
+                {/* break-all：交易所原文没有空格，break-words 兜不住 */}
+                <span className="min-w-0 flex-1 break-all text-ink-mid">{line.message}</span>
               </div>
             ))
           )}
         </div>
 
-        <div className="num mt-1 flex items-center justify-between text-2xs text-ink-faint">
+        <div className="num mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-ink-faint">
           <span>
-            {filtered.length} / {visible.length} 行 · {source === 'socket' ? '推送缓冲' : '来自 GET /api/logs'}
+            显示 {fmtInt(shown.length)} / {fmtInt(matched.length)} 行
+            {hiddenRows > 0 && `（更早的 ${fmtInt(hiddenRows)} 行未渲染，先过滤缩小范围）`}
+            {' · '}
+            {source === 'socket' ? '推送缓冲' : '来自 GET /api/logs'}
+            {paused && ' · 视图已冻结'}
           </span>
           <span>
             最近事件 {timeAgo(lastEventAt ? new Date(lastEventAt).toISOString() : null)} · 时刻{' '}
@@ -200,19 +382,24 @@ export function DataPage() {
         </div>
       </Panel>
 
+      {/* 折叠说明：排查时用得到，平时不该占版面 */}
       <Panel title="本页数据来源">
-        <ul className="space-y-1 text-xs leading-relaxed text-ink-lo">
+        <ul className="space-y-1.5 text-base leading-relaxed text-ink-lo">
           <li>
-            • <span className="text-ink-mid">实时</span> 渲染 WebSocket 缓冲：服务端推送的每条{' '}
+            • <span className="text-ink-mid">实时</span>：渲染 WebSocket 缓冲 —— 服务端推送的每条{' '}
             <code className="num">log</code> 事件，以及以浮层形式出现的委托、成交与状态事件。
           </li>
           <li>
-            • <span className="text-ink-mid">持久化</span> 轮询 <code className="num">GET /api/logs</code>，读取裁剪过的{' '}
+            • <span className="text-ink-mid">持久化</span>：轮询 <code className="num">GET /api/logs</code>，读取裁剪过的{' '}
             <code className="num">runtime_logs</code> 表（最近 500 行）。
           </li>
           <li>
             • 推送断开后会以指数退避重连（0.8s → 15s），登出时干净关闭。REST 轮询始终继续，
-            因此推送中断时控制台仍会更新。
+            因此推送中断时本页仍会更新。
+          </li>
+          <li>
+            • 交易所返回的报错文本<span className="text-ink-mid">原样展示</span>
+            （例如 Binance 的 <code className="num">-2019</code>）—— 它通常是唯一能定位问题的线索。
           </li>
         </ul>
       </Panel>
@@ -222,12 +409,14 @@ export function DataPage() {
 
 function Metric({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="rounded border border-base-800 bg-base-900 px-2.5 py-2">
-      <div className="text-2xs font-semibold uppercase tracking-[0.12em] text-ink-lo">{label}</div>
-      <div className="num mt-1 truncate text-sm text-ink-hi" title={value}>
+    <div className="min-w-0 rounded-md border border-base-750 bg-base-850/60 px-3 py-2.5">
+      <div className="truncate text-xs font-semibold uppercase tracking-[0.12em] text-ink-lo" title={label}>
+        {label}
+      </div>
+      <div className="num mt-1.5 break-all text-2xl leading-tight text-ink-hi" title={value}>
         {value}
       </div>
-      {sub && <div className="truncate text-2xs text-ink-faint">{sub}</div>}
+      {sub && <div className="mt-0.5 truncate text-xs text-ink-faint">{sub}</div>}
     </div>
   );
 }

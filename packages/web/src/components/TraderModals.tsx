@@ -142,7 +142,7 @@ export function NewTraderModal({
       {loadError && <ErrorNote>{loadError}</ErrorNote>}
 
       {ready && missing.length > 0 && (
-        <div className="mb-3 rounded border border-warn/50 bg-warn/10 px-2.5 py-2 text-xs text-warn">
+        <div className="mb-3 rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base text-warn">
           创建机器人前，需要先添加{missing.join('、')}。
           {accounts && accounts.length === 0 && (
             <>
@@ -207,14 +207,14 @@ export function NewTraderModal({
           <EquitySourceField state={equity} />
 
           {baselineWarning && (
-            <div className="rounded border border-warn/50 bg-warn/10 px-2.5 py-2 text-xs text-warn">
+            <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base text-warn">
               <span className="font-semibold">权益基准为 0。</span> {baselineWarning}
             </div>
           )}
 
           {error && <ErrorNote>{error}</ErrorNote>}
 
-          <p className="text-2xs leading-relaxed text-ink-faint">
+          <p className="text-xs leading-relaxed text-ink-faint">
             创建机器人并不会启动它。启动时会要求你确认模拟或实盘模式，并在循环开始前展示预检项。
           </p>
         </div>
@@ -297,44 +297,47 @@ export function StartTraderModal({
       }
     >
       <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <button
             type="button"
             onClick={() => setDryRun(true)}
-            className={`rounded border px-3 py-2 text-left transition ${
-              dryRun ? 'border-accent/70 bg-accent/12' : 'border-base-700 bg-base-850 hover:border-base-600'
+            aria-pressed={dryRun}
+            className={`rounded-md border px-3 py-2.5 text-left transition ${
+              dryRun ? 'border-accent/70 bg-accent/10' : 'border-base-700 bg-base-850 hover:border-base-600'
             }`}
           >
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-ink-hi">模拟</span>
+              <span className="text-base font-semibold text-ink-hi">模拟</span>
               <Badge tone="accent">dryRun: true</Badge>
               <Badge tone="muted">推荐</Badge>
             </div>
-            <p className="mt-1 text-2xs leading-relaxed text-ink-lo">
-              订单基于实时行情模拟撮合，不涉及任何交易所凭证。
+            <p className="mt-1 text-xs leading-relaxed text-ink-lo">
+              订单基于实时行情模拟撮合，不涉及任何交易所凭证，也不会产生真实盈亏。
             </p>
           </button>
 
           <button
             type="button"
             onClick={() => setDryRun(false)}
-            className={`rounded border px-3 py-2 text-left transition ${
-              !dryRun ? 'border-warn/70 bg-warn/12' : 'border-base-700 bg-base-850 hover:border-base-600'
+            aria-pressed={!dryRun}
+            className={`rounded-md border px-3 py-2.5 text-left transition ${
+              !dryRun ? 'border-warn/70 bg-warn/10' : 'border-base-700 bg-base-850 hover:border-base-600'
             }`}
           >
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-ink-hi">实盘</span>
+              <span className="text-base font-semibold text-ink-hi">实盘</span>
               <Badge tone="warn">dryRun: false</Badge>
             </div>
-            <p className="mt-1 text-2xs leading-relaxed text-ink-lo">
+            <p className="mt-1 text-xs leading-relaxed text-ink-lo">
               在 {environmentLabel} 上用真实资金下真实订单。每次开仓都会带上交易所侧止损。
             </p>
           </button>
         </div>
 
         {!dryRun && (
-          <div className="rounded border border-warn/60 bg-warn/10 px-2.5 py-2 text-xs text-warn">
-            你即将使用真实资金交易。风控引擎仍会限制杠杆与仓位并要求止损，但亏损是真实且不可逆的。
+          <div className="rounded-md border border-warn/60 bg-warn/10 px-3 py-2 text-base text-warn">
+            <span className="font-semibold">你即将使用真实资金交易。</span>{' '}
+            风控引擎仍会限制杠杆与仓位并要求止损，但亏损是真实且不可逆的 — 启动后该循环会持续下单，直到你停止它。
           </div>
         )}
 
@@ -351,27 +354,29 @@ export function StartTraderModal({
         )}
 
         {started && !blocking && (
-          <div className="rounded border border-up/50 bg-up/10 px-2.5 py-2 text-xs text-up">
+          <div className="rounded-md border border-up/50 bg-up/10 px-3 py-2 text-base text-up">
             循环正在启动。实时状态、委托与决策将流入面板。
           </div>
         )}
 
         {!checks && (
-          <p className="text-2xs leading-relaxed text-ink-faint">
+          <p className="text-xs leading-relaxed text-ink-faint">
             启动会执行完整预检：时钟漂移、交易所连通性、交易对目录、凭证权限与模型可达性。策略中的回撤与
             单日亏损熔断从第一个周期起生效。
           </p>
         )}
 
         {trader.lastError && (
-          <div className="rounded border border-down/40 bg-down/10 px-2.5 py-2 text-2xs text-down">
-            最近错误： {trader.lastError}
+          <div className="rounded-md border border-down/40 bg-down/10 px-3 py-2 text-xs text-down">
+            最近错误： <span className="num">{trader.lastError}</span>
           </div>
         )}
 
-        <div className="num flex items-center justify-between border-t border-base-800 pt-2 text-2xs text-ink-faint">
+        <div className="num flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-base-800 pt-2 text-xs text-ink-faint">
           <span>每 {trader.cycleIntervalMinutes}m 一个周期</span>
-          <span>起始权益 {fmtUsd(trader.initialEquity, 0)}</span>
+          <span title="创建时从交易所读取的基准，用于计算总收益率。">
+            起始权益 {fmtUsd(trader.initialEquity, 0)}
+          </span>
           <span>已运行周期 {trader.lastCycleNumber}</span>
         </div>
       </div>

@@ -98,10 +98,13 @@ export const EXEC_TEXT_CLASS: Record<ExecutionLogEntry['status'], string> = {
 /*  Action badge                                                               */
 /* -------------------------------------------------------------------------- */
 
-/** Compact left badge used by the rail: 开多 / 平空 / 持有 … */
+/** Compact left badge used by the feed: 开多 / 平空 / 持有 … */
 export function ActionBadge({ action, className }: { action: string; className?: string }) {
   return (
-    <Badge tone={actionTone(action)} className={className}>
+    // The machine code goes in the tooltip rather than being translated away:
+    // an unknown action renders as its raw code on purpose, and the operator
+    // needs to be able to grep for it in the record.
+    <Badge tone={actionTone(action)} className={className} title={action}>
       {actionLabel(action)}
     </Badge>
   );
@@ -114,7 +117,7 @@ export function ActionBadge({ action, className }: { action: string; className?:
 /**
  * Distance from entry, as a percentage.
  *
- * The decision itself carries no entry price — the rail resolves the symbol's
+ * The decision itself carries no entry price — the feed resolves the symbol's
  * current price separately — so this returns `null` rather than guessing when
  * there is no reference price to measure against.
  */
@@ -133,8 +136,8 @@ export function DecisionMetrics({ decision, price }: { decision: Decision; price
       : null;
 
   return (
-    <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 rounded border border-base-800 bg-base-850/40 px-2 py-1.5">
-      <Metric label="数量" value={`${fmtUsd(decision.positionSizeUsd, 2)}`} />
+    <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1.5 rounded-md border border-base-800 bg-base-850/40 px-3 py-2 sm:grid-cols-3">
+      <Metric label="数量（USDT）" value={`${fmtUsd(decision.positionSizeUsd, 2)}`} />
       <Metric label="开仓价格" value={price !== null ? fmtPriceShort(price) : '—'} />
       <Metric
         label="止损"
@@ -157,16 +160,17 @@ export function DecisionMetrics({ decision, price }: { decision: Decision; price
 function Metric({ label, value, tone, suffix }: { label: string; value: string; tone?: string; suffix?: string }) {
   return (
     <div className="min-w-0">
-      <div className="text-2xs uppercase tracking-wide text-ink-faint">{label}</div>
-      <div className={`num truncate text-xs ${tone ?? 'text-ink-hi'}`}>
+      <div className="truncate text-xs uppercase tracking-wide text-ink-faint">{label}</div>
+      {/* nowrap: a wrapped price in a dense grid reads as two different numbers. */}
+      <div className={`num whitespace-nowrap text-base ${tone ?? 'text-ink-hi'}`}>
         {value}
-        {suffix && <span className="ml-1 text-2xs text-ink-faint">{suffix}</span>}
+        {suffix && <span className="ml-1 text-xs text-ink-faint">{suffix}</span>}
       </div>
     </div>
   );
 }
 
-/** Prices read better than a full float in a rail; the audit page shows the rest. */
+/** Prices read better than a full float in a feed card; the audit page shows the rest. */
 function fmtPriceShort(value: number): string {
   const abs = Math.abs(value);
   const digits = abs >= 1000 ? 2 : abs >= 100 ? 3 : abs >= 1 ? 4 : 6;
@@ -177,33 +181,42 @@ function fmtPriceShort(value: number): string {
 /*  Execution log                                                              */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * One execution-log entry.
+ *
+ * `entry.action` is a stable machine code and is rendered verbatim — the
+ * Chinese vocabulary lives in `ACTION_LABELS`, and applying it here would make
+ * the log disagree with the audit record an operator greps in the database.
+ */
 export function ExecutionRow({ entry }: { entry: ExecutionLogEntry }) {
   return (
-    <div className={`rounded border px-2 py-1.5 ${EXEC_ROW_CLASS[entry.status] ?? EXEC_ROW_CLASS.ok}`}>
+    <div className={`rounded-md border px-3 py-2 ${EXEC_ROW_CLASS[entry.status] ?? EXEC_ROW_CLASS.ok}`}>
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={STATUS_TONE[entry.status] ?? 'neutral'}>{statusLabel(entry.status)}</Badge>
-        <span className="text-xs font-semibold text-ink-hi">{entry.action}</span>
-        <span className="num text-2xs text-ink-lo">{entry.symbol}</span>
+        <span className="num text-base font-semibold text-ink-hi">{entry.action}</span>
+        <span className="num text-xs text-ink-lo">{entry.symbol}</span>
         {entry.notionalUsd !== undefined && (
-          <span className="num ml-auto text-2xs text-ink-lo">{fmtUsd(entry.notionalUsd, 2)}</span>
+          <span className="num ml-auto text-xs text-ink-lo" title="名义价值（USDT）">
+            {fmtUsd(entry.notionalUsd, 2)}
+          </span>
         )}
       </div>
       {entry.detail && (
-        <p className={`mt-0.5 whitespace-pre-wrap text-2xs leading-relaxed ${EXEC_TEXT_CLASS[entry.status] ?? 'text-ink-lo'}`}>
+        <p className={`mt-1 whitespace-pre-wrap text-xs leading-relaxed ${EXEC_TEXT_CLASS[entry.status] ?? 'text-ink-lo'}`}>
           {entry.detail}
         </p>
       )}
-      {entry.orderId && <p className="num mt-0.5 text-2xs text-ink-faint">委托 {entry.orderId}</p>}
+      {entry.orderId && <p className="num mt-0.5 text-xs text-ink-faint">委托 {entry.orderId}</p>}
     </div>
   );
 }
 
 export function ExecutionList({ log, empty }: { log: ExecutionLogEntry[]; empty?: string }) {
   if (log.length === 0) {
-    return <p className="px-1 py-3 text-xs text-ink-faint">{empty ?? '本周期没有执行任何操作。'}</p>;
+    return <p className="px-1 py-3 text-base text-ink-faint">{empty ?? '本周期没有执行任何操作。'}</p>;
   }
   return (
-    <div className="space-y-1">
+    <div className="space-y-1.5">
       {log.map((entry, index) => (
         <ExecutionRow key={`${entry.action}-${entry.symbol}-${index}`} entry={entry} />
       ))}
@@ -221,13 +234,13 @@ export function RejectedBanner({ log, className }: { log: ExecutionLogEntry[]; c
   const rejected = log.filter((entry) => entry.status === 'rejected');
   if (rejected.length === 0) return null;
   return (
-    <div className={`rounded border border-warn/60 bg-warn/10 px-3 py-2 ${className ?? ''}`}>
-      <div className="text-xs font-bold uppercase tracking-wide text-warn">
-        ⚠ {rejected.length} 个提案被风控引擎拒绝
+    <div className={`rounded-lg border border-warn/60 bg-warn/10 px-4 py-3 ${className ?? ''}`}>
+      <div className="text-base font-bold uppercase tracking-wide text-warn">
+        {rejected.length} 个提案被风控引擎拒绝
       </div>
-      <ul className="mt-1 space-y-1">
+      <ul className="mt-1.5 space-y-1">
         {rejected.map((entry, index) => (
-          <li key={index} className="text-2xs leading-relaxed text-warn/90">
+          <li key={index} className="text-xs leading-relaxed text-warn/90">
             <span className="num font-semibold">
               {actionLabel(entry.action)} {entry.symbol}
             </span>{' '}
@@ -245,13 +258,13 @@ export function RejectedBanner({ log, className }: { log: ExecutionLogEntry[]; c
 
 export function RejectedCard({ entry }: { entry: ExecutionLogEntry }) {
   return (
-    <div className="rounded border border-warn/50 bg-warn/10 px-2.5 py-2">
+    <div className="min-w-0 rounded-md border border-warn/50 bg-warn/10 px-3 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone="warn">被拒绝</Badge>
-        <span className="text-xs font-semibold text-ink-hi">{entry.symbol}</span>
-        <span className="text-2xs text-ink-lo">{actionLabel(entry.action)}</span>
+        <span className="text-base font-semibold text-ink-hi">{entry.symbol}</span>
+        <span className="text-xs text-ink-lo">{actionLabel(entry.action)}</span>
       </div>
-      <p className="mt-1 whitespace-pre-wrap text-2xs leading-relaxed text-warn/90">{entry.detail}</p>
+      <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-warn/90">{entry.detail}</p>
     </div>
   );
 }
@@ -270,10 +283,10 @@ export function PrePanel({
   height?: number;
   empty?: string;
 }) {
-  if (!body) return <p className="px-3 py-4 text-xs text-ink-faint">{empty}</p>;
+  if (!body) return <p className="px-3 py-4 text-base text-ink-faint">{empty}</p>;
   return (
     <pre
-      className="overflow-auto whitespace-pre-wrap break-words rounded border border-base-800 bg-base-950 px-3 py-2 font-mono text-xs leading-relaxed text-ink-mid"
+      className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-base-800 bg-base-950 px-3 py-2 font-mono text-xs leading-relaxed text-ink-mid"
       style={{ maxHeight: height }}
     >
       {body}
@@ -308,13 +321,13 @@ export function PromptBlock({
       title={<span className="font-semibold text-ink-mid">{title}</span>}
       meta={
         <span className="flex items-center gap-2">
-          <span className="num text-2xs text-ink-faint">
+          <span className="num text-xs text-ink-faint">
             {fmtInt(body.length)} 字符 · {body.split('\n').length} 行
           </span>
           {actions}
           <CopyButton copied={copied} onCopy={() => copy(body)} />
           {onExpand && (
-            <Button small onClick={onExpand} title="在新标签页打开完整审计记录">
+            <Button size="sm" onClick={onExpand} title="在新标签页打开完整审计记录">
               展开
             </Button>
           )}
@@ -338,7 +351,7 @@ export function PromptBlocks({ record, onExpand }: { record: DecisionRecord; onE
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Tabs used by the rail's two lower panels                                   */
+/*  Small segmented tabs — 思考过程 / 提示词 in the decision feed               */
 /* -------------------------------------------------------------------------- */
 
 export function MiniTabs<T extends string>({
@@ -359,8 +372,8 @@ export function MiniTabs<T extends string>({
           onClick={() => onChange(tab.id)}
           className={
             active === tab.id
-              ? 'rounded border border-accent/60 bg-accent/15 px-2 py-0.5 text-2xs font-semibold text-accent'
-              : 'rounded border border-transparent px-2 py-0.5 text-2xs text-ink-lo transition hover:border-base-700 hover:text-ink-mid'
+              ? 'rounded border border-accent/60 bg-accent/15 px-2.5 py-1 text-xs font-semibold text-accent'
+              : 'rounded border border-transparent px-2.5 py-1 text-xs text-ink-lo transition hover:border-base-700 hover:text-ink-mid'
           }
         >
           {tab.label}

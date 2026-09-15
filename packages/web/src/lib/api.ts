@@ -235,7 +235,15 @@ export interface ExchangeBalance {
   readAt: string;
 }
 
-export interface ExchangeAccountRow extends ExchangeAccount {
+/**
+ * 凭据的**对外**形状。
+ *
+ * `Omit<…, 'apiKey'>` 是刻意的：服务端只发掩码，不发原始 API Key
+ * （见 `server.ts` 的 `publicAccount()`）。类型里若还留着 `apiKey`，
+ * 等于在鼓励下一个人写 `row.apiKey` —— 而那个字段运行时是 `undefined`，
+ * TypeScript 又不会拦你。去掉它，越界访问就会在编译期报错。
+ */
+export interface ExchangeAccountRow extends Omit<ExchangeAccount, 'apiKey'> {
   apiKeyMasked: string;
   /** `null` when the read failed — see `balanceError`. */
   balance: ExchangeBalance | null;
