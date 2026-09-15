@@ -3,7 +3,7 @@
 服务端是一个 Fastify 应用，同时提供 REST 接口、WebSocket 事件流，以及控制台的静态文件。
 
 - **基地址**：`http://<HOST>:<PORT>`（默认 `127.0.0.1:3200`）
-- **认证**：除 `/api/health`、`/api/auth/login`、`/api/auth/register` 外，全部需要
+- **认证**：除 `/api/health` 与 `/api/auth/login` 外，全部需要
   `Authorization: Bearer <token>`
 - **内容类型**：请求体为 JSON。服务端注册了一个兜底解析器，所以**空 body 的 POST**
   （如 `/start`、`/stop`、`/run-once`）不会返回 415。
@@ -19,7 +19,7 @@
 | 分组 | 说明 |
 |---|---|
 | [系统](#系统) | 健康检查、运行环境、日志 |
-| [认证](#认证) | 登录、注册、改密 |
+| [认证](#认证) | 登录、修改账户凭据 |
 | [目录](#目录catalog) | 枚举框、策略预设、平仓原因等前端所需的静态数据 |
 | [交易所凭据](#交易所凭据) | CRUD、连接测试、**实时余额** |
 | [AI 模型](#ai-模型) | CRUD、连接测试、**模型列表实时发现** |
@@ -68,23 +68,51 @@
 
 ## 认证
 
+> **本系统没有注册入口。** 管理员账号在服务首次启动时自动创建，凭据（用户名与密码，
+> 两者都是随机生成）只打印一次。登录后可在控制台「操作员账户」中修改。
+>
+> 这是面向单人部署的设计：保留自助注册意味着任何能访问到控制台的人，
+> 在数据库为空时都能把自己变成管理员 —— 那个窗口在部署脚本尚未跑完、
+> 或数据卷被误删重建时会真实出现。
+
 ### `POST /api/auth/login`
 
 ```json
-{ "username": "admin", "password": "..." }
+{ "username": "admin_9f3c21", "password": "..." }
 ```
 
-→ `{ "token": "<JWT>", "user": { "id": 1, "username": "admin", "role": "owner" } }`
+→ `{ "token": "<JWT>", "user": { "id": 1, "username": "admin_9f3c21", "role": "owner" } }`
 
 密码错误返回 **401**。
 
+### `PATCH /api/auth/account`
+
+修改用户名与/或密码。需要认证。
+
+```json
+{
+  "currentPassword": "当前密码",
+  "username": "new-name",     // 可选
+  "newPassword": "新密码"      // 可选，至少 8 位
+}
+```
+
+**必须提供 `currentPassword`。** 只凭会话令牌就允许改凭据，意味着任何一次令牌泄露
+都能被升级成永久接管 —— 攻击者改掉密码，真正的所有者就再也进不来了。
+
+`username` 与 `newPassword` 至少要提供一个。用户名需 3–64 字符且未被占用（冲突返回 **409**）。
+
+响应会把**重新签发的令牌**一并返回，因为 JWT 载荷里带着用户名：
+
+```json
+{ "ok": true, "token": "<新的 JWT>", "user": { ... } }
+```
+
+> `POST /api/auth/password` 保留为同义端点（只改密码），仅为了兼容浏览器中缓存的旧版前端。
+
 ### `POST /api/auth/register`
 
-创建普通用户。首个账户由服务端在首次启动时自动创建为 `owner`。
-
-### `POST /api/auth/password`
-
-修改自己的密码。需要认证。
+**已停用**，返回 **410**。响应体里说明了替代方式。
 
 ### `GET /api/auth/me`
 
@@ -98,7 +126,7 @@
 
 前端启动时拉取的静态数据集合。一次拿到：
 
-- `exchanges` — 支持的交易所（目前只有 `binance`，含中文名与结算资产）
+- `exchanges` — 交易所适配层的注册表，含各交易所的标识、中文名与结算资产
 - `presets` — 策略预设（稳健 / 进取 / 短线），含完整的 `patch`
 - `defaultStrategy` — 默认策略配置
 - `closeReasons` — 平仓原因代码与中文标签

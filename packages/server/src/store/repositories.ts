@@ -79,6 +79,29 @@ export const users = {
   updatePassword(id: number, passwordHash: string): void {
     getDb().run('UPDATE users SET password_hash = ? WHERE id = ?', passwordHash, id);
   },
+
+  /**
+   * 改用户名。
+   *
+   * 调用方必须**先**自行检查新用户名未被占用。数据库上的 UNIQUE 约束虽然也会拦住，
+   * 但抛出来的是一条 SQLite 错误，没法直接展示给用户。
+   */
+  updateUsername(id: number, username: string): void {
+    getDb().run('UPDATE users SET username = ? WHERE id = ?', username, id);
+    log.info(`renamed account #${id} to "${username}"`);
+  },
+
+  /** 所有管理员账号，按创建时间升序。用于密码重置时找到要改的那个账号。 */
+  listOwners(): User[] {
+    return getDb()
+      .all<UserRow>("SELECT * FROM users WHERE role = 'owner' ORDER BY id")
+      .map((row) => ({
+        id: row.id,
+        username: row.username,
+        role: row.role === 'owner' ? 'owner' : 'user',
+        createdAt: row.created_at,
+      }));
+  },
 };
 
 /* -------------------------------------------------------------------------- */

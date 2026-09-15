@@ -81,6 +81,7 @@ GHCR_TOKEN=<你的token> ./up.sh
 ./up.sh logs         # 跟随日志
 ./up.sh status       # 查看状态、健康检查、接口响应
 ./up.sh backup       # 备份数据（数据库 + 主密钥）
+./up.sh reset-password   # 忘记密码时重置为 .env 中的凭据
 ./up.sh import <dir> # 把旧的 data/ 目录导入数据卷（从源码部署迁移过来时用）
 ./up.sh down         # 停止（数据保留）
 ./up.sh help         # 帮助
