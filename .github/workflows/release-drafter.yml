@@ -1,0 +1,46 @@
+# =============================================================================
+# 发布说明草稿
+#
+# 草稿是什么：一个**未发布**的 GitHub Release，内容随每次合入 main 自动累积。
+# 发版时执行者只需要核对草稿、打标签、点 Publish。
+#
+# 为什么是"持续维护的草稿"，而不是发版时再写：
+#   · 分类依据是标签，而标签在 PR 合并那一刻最准确 —— 事后补标签没人愿意做，
+#     漏掉的往往正是"为什么这么改"这类最该被读到的信息；
+#   · 草稿一直摆在那里，等于发布内容在合并阶段就已经被人看见过一次，
+#     而不是在发版当晚第一次被读到。
+#
+# 配置在 .github/release-drafter.yml。具体发版步骤见 docs/RELEASING.md。
+# =============================================================================
+name: 发布说明草稿
+
+on:
+  push:
+    branches: [main]
+  # 手动触发用于"改完标签后重新生成草稿"，不必为了刷新说明再合一个 PR。
+  workflow_dispatch:
+
+# 草稿每次都是从上一个正式发布重算到 HEAD，取消上一次不会丢内容，所以直接取消。
+concurrency:
+  group: release-drafter
+  cancel-in-progress: true
+
+permissions:
+  # 需要写权限来创建/更新草稿 release。
+  contents: write
+  # 读已合并的 PR 列表与它们的标签，用来分类。
+  pull-requests: read
+
+jobs:
+  draft:
+    name: 更新发布说明草稿
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # 不 checkout：配置由 action 通过 API 从默认分支读取，runner 上不需要代码。
+      # 少一次检出就少一次"把仓库内容放到 runner 上"的机会。
+      - name: 生成 / 更新草稿
+        uses: release-drafter/release-drafter@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

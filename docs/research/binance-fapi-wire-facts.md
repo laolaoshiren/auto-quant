@@ -111,7 +111,7 @@ Corroborating change-log entry `## 2024-08-07` (verbatim):
 >     - `account.position`: 5->10
 > - The following WebSocket User Data Requests will be deprecated from 2024-09-03
 >   - `<listenKey>@account` / `<listenKey>@balance` / `<listenKey>@position`
-> Please refer to [annoucement](…19d4e3cd0758426584dd9686eb56ec64) for api replacement
+> Please refer to the corresponding Binance announcement for api replacement
 
 Deprecation confirmation: change log `## 2024-09-27` — "The following websocket user data requests are
 deprecated: `listenkey@account`, `listenkey@balance`, `listenkey@position`" (UM **and** CM).

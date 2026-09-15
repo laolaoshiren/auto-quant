@@ -1,0 +1,101 @@
+# =============================================================================
+# 长期无活动议题的清理
+#
+# 姿态刻意保守。激进的 stale bot 会赶走贡献者，而那正好与它的目的相反：
+# 它唯一该做的事是"提醒这件事还需要吗"，而不是"替人决定不要了"。
+#
+# 具体取舍：
+#   · 90 天才算过期。这个项目的 issue 常是"某天在实盘上遇到的现象"，
+#     作者可能几周后才回来补日志，太短会把仍然有效的问题标成过期；
+#   · 挂着邀请（good first issue / help wanted）、或者涉及下单路径与风控的，
+#     一律豁免 —— 理由见下面豁免清单处的注释；
+#   · **不自动关闭 PR**。PR 是别人已经写好的代码，关掉等于把贡献扔进垃圾桶；
+#   · 只在定时任务里跑：它依据的是"最后一次活动时间"，与某一次 push 或 PR 无关，
+#     挂在事件上只会平白多出几十次运行。
+# =============================================================================
+name: 过期议题清理
+
+on:
+  schedule:
+    # 每周一 UTC 03:17。刻意避开整点：GitHub 的定时任务在整点前后最拥挤，
+    # 排队严重时会直接跳过这一次运行 —— 对每周只跑一次的任务来说，跳过等于这周没做。
+    - cron: '17 3 * * 1'
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    name: 标记长期无活动的 issue 与 PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/stale@v9
+        with:
+          # --- 时间 ------------------------------------------------
+          # 90 天无活动才标记。任何新评论都会重新计时（见下面的 remove-stale-when-updated）。
+          days-before-issue-stale: 90
+          days-before-pr-stale: 90
+
+          # issue 标记后再等 30 天（合计约四个月）才关闭。
+          days-before-issue-close: 30
+          # -1 = 永不自动关闭 PR。原因见文件顶部。
+          days-before-pr-close: -1
+
+          # 关闭原因用 not_planned 是准确的：不是做完了，而是目前不做。
+          # 用 completed 会在 issue 列表里留下一个错误的历史。
+          close-issue-reason: 'not_planned'
+
+          # 有活动就摘掉过期标记并重新计时。否则作者回来补充信息时看到的
+          # 仍是一个过期标记，那等于在赶人走。
+          remove-stale-when-updated: true
+
+          # 默认 30 次 API 调用。本仓库的历史 issue 数远超这个数，
+          # 首次运行只处理最近的一部分，看起来会像"这个工作流没生效"。
+          # 100 仍远低于 GitHub 的速率上限，不会波及同时段的其他工作流。
+          operations-per-run: 100
+
+          # --- 豁免清单 --------------------------------------------
+          # 分三组，各有各的理由：
+          #
+          #   risk-engine / trading-path / breaking
+          #     这几类是**必须慢**的改动：触及下单路径或风控的 issue 需要更高一级的
+          #     验证（见 CONTRIBUTING.md「涉及真实资金的改动」）。让机器人去催它们，
+          #     等于把"快点合"的压力加在本项目唯一不该赶进度的地方。
+          #
+          #   needs-triage
+          #     还没人看过。"没有活动"只说明排队里还没轮到它，不等于已经废弃。
+          #
+          #   good first issue / help wanted
+          #     这两个标签是**对外发出的邀请**。给挂着邀请的 issue 打过期标记，
+          #     读到的人会认为这些入口是死的。
+          exempt-issue-labels: 'good first issue,help wanted,risk-engine,trading-path,breaking,needs-triage'
+          exempt-pr-labels: 'good first issue,help wanted,risk-engine,trading-path,breaking,needs-triage'
+
+          # --- 给 issue 作者看的说明 --------------------------------
+          stale-issue-message: |
+            这个 issue 已经 90 天没有活动，先标记为过期以便清点 —— **它没有被否定**。
+
+            如果问题依然存在：回一条评论（哪怕只是"还在"）就会自动去掉过期标记并重新计时。
+            如果已经不需要了，直接关闭即可。
+
+            如果是交易相关的现象，请尽量补上运行方式（模拟盘 / 实盘、`DRY_RUN`）、
+            版本标签以及相关日志或交易所错误码 —— 缺这些信息的问题通常无法复现。
+
+          close-issue-message: |
+            这个 issue 在标记过期后又过了 30 天没有活动，现在关闭。
+
+            关闭不等于判定为无效。如果问题重新出现，直接在本 issue 下回复、或新开一个，
+            并附上当前版本标签与日志，我们会重新看。
+
+          # --- 给 PR 作者看的说明 -----------------------------------
+          stale-pr-message: |
+            这个 PR 已经 90 天没有活动，先标记为过期以便清点。
+
+            本工作流**不会自动关闭 PR**：代码已经写好了，关不关由维护者看过之后决定。
+
+            如果还打算继续：把分支 rebase 到最新的 `main` 后推一次即可，
+            过期标记会自动去掉。涉及下单路径的改动请确认 PR 描述里的
+            「是否涉及真实资金」与验证级别仍然准确（见 `CONTRIBUTING.md`）。

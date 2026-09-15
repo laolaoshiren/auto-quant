@@ -132,7 +132,7 @@ Exact strings:
 - `Private (user data): wss://fstream.binance.com/private`
 - `**Legacy URLs will remain available until 2026-04-23**, after which they will be permanently decommissioned.`
 - `**After the upgrade, any connections not migrated will ONLY be able to receive data from `wss://fstream.binance.com/public`. Channels under `/market` and `/private` will stop pushing data.** For example, `wss://fstream.binance.com/ws/btcusdt@depth` will continue to work, but `wss://fstream.binance.com/ws/btcusdt@markPrice` will not.`
-- Change-log entry `## 2026-04-02`: `Updated [important websocket change notice](...) with legacy URL decommissioning date: **2026-04-23**.`
+- Change-log entry `## 2026-04-02`: `Updated important websocket change notice with legacy URL decommissioning date: **2026-04-23**.`
 
 Also the current "Connect" page states: `Connections that do not include a routed path (/public, /market, or /private) will only receive data from the Public endpoint.`
 
