@@ -1,15 +1,51 @@
 #!/bin/sh
 # =============================================================================
-# ⚠️ 这个 shebang 是 `sh` 而不是 `bash`，是刻意的 —— 请看下面这段前导代码。
+# 前导代码（POSIX sh）
 #
-# 问题：Alpine 这类系统**默认没有 bash**，只有 busybox 的 sh。
-# 而本脚本的其余部分用到了 bash 特性。如果 shebang 写 `#!/usr/bin/env bash`，
-# 在 Alpine 上会直接以 `bash: not found` 失败，用户完全不知道该怎么办。
+# 这一段解决两个"一键安装"必须先解决的问题，两段都只用 POSIX 语法，
+# 因为此时还不知道系统里有什么。
 #
-# 解法：用 POSIX sh 写一小段前导代码，检测 bash；没有就装一个，然后
-# 用 bash 重新执行自己。装好 bash 之后再次运行时，BASH_VERSION 已存在，
-# 前导直接跳过，不会死循环。
+# ── 问题一：从管道运行时，脚本不是一个文件 ──
+#
+#   curl -fsSL <url> | bash
+#
+# 这种情况下 `$0` 是 `bash`，不是脚本路径。而后面的逻辑需要用 sudo
+# 重新执行自己（提权）、也需要用 bash 重新执行自己（Alpine 没有 bash）——
+# 两者都需要一个真实文件。`exec sudo bash "$0"` 在管道模式下会变成
+# `sudo bash bash`，直接失败。
+#
+#   解法：发现自己不是文件时，先把自己下载到临时文件再执行。
+#   此时必然有 curl 或 wget（否则用户也没法把它喂进来）。
+#
+# ── 问题二：Alpine 这类系统没有 bash ──
+#
+#   解法：检测 bash，没有就装一个，然后用它重新执行自己。
+#   装好后 BASH_VERSION 存在，前导直接跳过，不会死循环。
 # =============================================================================
+
+SELF_URL="https://raw.githubusercontent.com/${AUTOQUANT_REPO:-laolaoshiren/auto-quant}/${AUTOQUANT_BRANCH:-main}/deploy/install.sh"
+
+# --- 问题一：把自己落盘 ---
+if [ ! -f "$0" ]; then
+  SELF_TMP="/tmp/autoquant-install-$$.sh"
+  echo "==> 检测到从管道运行，正在把安装脚本落盘"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 20 -o "$SELF_TMP" "$SELF_URL" || { echo "    下载失败：$SELF_URL"; exit 1; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 20 -O "$SELF_TMP" "$SELF_URL" || { echo "    下载失败：$SELF_URL"; exit 1; }
+  else
+    echo "    需要 curl 或 wget 才能继续 —— 请先安装其中一个。"
+    exit 1
+  fi
+
+  chmod +x "$SELF_TMP"
+  echo "    ✓ $SELF_TMP"
+  # 用 sh 重新执行落盘后的脚本（后续前导会再确保 bash）
+  exec sh "$SELF_TMP" "$@"
+fi
+
+# --- 问题二：确保有 bash ---
 if [ -z "${BASH_VERSION:-}" ]; then
   # 只用 POSIX 语法 —— 这一段必须能在 busybox sh 下跑
   if ! command -v bash >/dev/null 2>&1; then
@@ -280,6 +316,20 @@ fetch() {
   fi
 }
 
+# 带凭据下载（仓库仍是私有时用）。
+# Token 走请求头而不是 URL —— URL 会出现在日志、进程列表与错误信息里。
+fetch_authed() {
+  local url="$1" out="$2" token="$3"
+  if [ "$DOWNLOADER" = "curl" ]; then
+    curl -fsSL --connect-timeout 20 \
+      -H "Authorization: Bearer $token" \
+      -H "Accept: application/vnd.github.raw" \
+      -o "$out" "$url"
+  else
+    wget -q -T 20 --header="Authorization: Bearer $token" -O "$out" "$url"
+  fi
+}
+
 # openssl 用于生成密钥；没有就用 /dev/urandom 兜底（见下），所以不是硬依赖
 if command -v openssl >/dev/null 2>&1; then
   ok "openssl"
@@ -450,53 +500,64 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# 4. 登录私有镜像仓库
+# 4. 镜像是否需要凭据
 #
-# 镜像在 GHCR 上是私有的（与项目闭源一致）。token 只用于拉取镜像，
-# 不会写到任何地方 —— 凭据由 docker 自己保存在 ~/.docker/config.json。
+# **先试匿名拉取**，而不是上来就要求 token。
+#
+# 镜像是公开的（本项目开源后即是），匿名拉取直接成功，整个安装过程
+# 不需要任何输入 —— 这才是一键安装该有的样子。
+#
+# 只有匿名失败（镜像仍是私有的，或私有复刻的镜像）才索取 token。
+# 这样同一份脚本既能用于公开版本，也能用于私有部署，不需要改代码。
 # -----------------------------------------------------------------------------
-step "登录镜像仓库"
+step "检查镜像可访问性"
 
 REGISTRY_HOST="${DEFAULT_IMAGE%%/*}"
+NEED_LOGIN=0
 
-# 已经登录过就跳过（除非提供了新 token）
-if [ -f "$HOME/.docker/config.json" ] && grep -q "$REGISTRY_HOST" "$HOME/.docker/config.json" 2>/dev/null \
-   && [ -z "${GHCR_TOKEN:-}" ]; then
-  ok "已登录 $REGISTRY_HOST（复用已有凭据）"
+if docker manifest inspect "$DEFAULT_IMAGE" >/dev/null 2>&1; then
+  ok "镜像可匿名拉取（$DEFAULT_IMAGE）"
 else
-  TOKEN="${GHCR_TOKEN:-}"
+  NEED_LOGIN=1
+fi
 
-  if [ -z "$TOKEN" ]; then
-    if [ ! -t 0 ]; then
-      err "需要镜像仓库的访问令牌，但当前不是交互式终端。"
+if [ "$NEED_LOGIN" = "1" ]; then
+  # 也许本地已经有凭据
+  if [ -f "$HOME/.docker/config.json" ] && grep -q "$REGISTRY_HOST" "$HOME/.docker/config.json" 2>/dev/null; then
+    ok "已登录 $REGISTRY_HOST（复用已有凭据）"
+  else
+    step "登录镜像仓库"
+
+    TOKEN="${GHCR_TOKEN:-}"
+
+    if [ -z "$TOKEN" ]; then
+      if [ ! -t 0 ]; then
+        err "该镜像需要凭据，但当前不是交互式终端。"
+        echo ""
+        echo "  请通过环境变量提供："
+        echo "      GHCR_TOKEN=<你的令牌> bash install.sh"
+        exit 1
+      fi
+
       echo ""
-      echo "  请通过环境变量提供："
-      echo "      GHCR_TOKEN=<你的令牌> bash install.sh"
+      echo "  这个镜像是私有的，需要一次性授权。"
       echo ""
-      echo "  令牌在 GitHub → Settings → Developer settings →"
-      echo "  Personal access tokens 创建，勾选 read:packages 即可。"
-      exit 1
+      echo "  请准备一个 Personal Access Token（只勾 read:packages）："
+      echo "      https://github.com/settings/tokens/new?scopes=read:packages"
+      echo ""
+      printf '  粘贴令牌后回车（输入不会显示）：'
+      read -rs TOKEN
+      echo ""
     fi
 
-    echo ""
-    echo "  本项目镜像在 GitHub Container Registry 上是私有的，需要一次性授权。"
-    echo ""
-    echo "  请准备一个 Personal Access Token（只勾 read:packages）："
-    echo "      https://github.com/settings/tokens/new?scopes=read:packages"
-    echo ""
-    printf '  粘贴令牌后回车（输入不会显示）：'
-    read -rs TOKEN
-    echo ""
-  fi
+    [ -n "$TOKEN" ] || die "没有提供令牌。"
 
-  [ -n "$TOKEN" ] || die "没有提供令牌。"
-
-  if printf '%s' "$TOKEN" | docker login "$REGISTRY_HOST" -u "${GHCR_USER:-oauth2}" --password-stdin >/dev/null 2>&1; then
-    ok "登录成功"
-    # 记下来给后面的文件下载复用（如果本目录缺少部署文件）
-    export INSTALLER_TOKEN="$TOKEN"
-  else
-    die "登录失败。请确认令牌有效且勾选了 read:packages 权限。"
+    if printf '%s' "$TOKEN" | docker login "$REGISTRY_HOST" -u "${GHCR_USER:-oauth2}" --password-stdin >/dev/null 2>&1; then
+      ok "登录成功"
+      export INSTALLER_TOKEN="$TOKEN"
+    else
+      die "登录失败。请确认令牌有效且勾选了 read:packages 权限。"
+    fi
   fi
 fi
 
@@ -531,21 +592,25 @@ need_file() {
     return 0
   fi
 
-  # 情况三：只有 install.sh 一个文件 → 从仓库取
-  local token="${INSTALLER_TOKEN:-${GHCR_TOKEN:-}}"
-  if [ -z "$token" ]; then
-    err "缺少 $name，且没有可用于下载的令牌。"
-    echo "  请把仓库里的 deploy/ 目录一并放到服务器上，或提供 GHCR_TOKEN。"
-    return 1
-  fi
-
+  # 情况三：只有 install.sh 一个文件 → 从仓库取。
+  # 仓库公开时直接下载；仍是私有的才需要凭据。
+  local url="https://raw.githubusercontent.com/${REPO_SLUG}/${BRANCH}/${repo_path}"
   info "$name 不存在，正在从仓库获取…"
-  if fetch "https://raw.githubusercontent.com/${REPO_SLUG}/${BRANCH}/${repo_path}" "$INSTALL_DIR/$name" 2>/dev/null; then
+
+  if fetch "$url" "$INSTALL_DIR/$name" 2>/dev/null; then
     ok "$name（从仓库获取）"
     return 0
   fi
 
-  err "无法获取 $name。请确认令牌有权读取仓库内容（需要 repo 读取权限，不只是 read:packages）。"
+  # 公开地址取不到 —— 试带凭据（私有仓库的情形）
+  local token="${INSTALLER_TOKEN:-${GHCR_TOKEN:-}}"
+  if [ -n "$token" ] && fetch_authed "$url" "$INSTALL_DIR/$name" "$token" 2>/dev/null; then
+    ok "$name（带凭据从仓库获取）"
+    return 0
+  fi
+
+  err "无法获取 $name。"
+  echo "  请把仓库里的 deploy/ 目录一并放到服务器上，或提供 GHCR_TOKEN。"
   return 1
 }
 

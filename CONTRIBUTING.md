@@ -48,9 +48,8 @@ npm test
 
 ### ⚠️ `main` 分支保护尚未启用
 
-**GitHub 的分支保护（Branch protection）与规则集（Rulesets）在私有仓库上需要
-GitHub Pro 或 Team 方案。** 本仓库目前是免费方案的私有仓库，因此**无法在技术上
-阻止直接推送到 `main`**，也无法强制 PR 与状态检查。
+**本仓库已开源。** 分支保护（Branch protection）与规则集（Rulesets）在公开仓库上
+免费可用，因此可以真正在技术上阻止直接推送到 `main`。
 
 当前替代方案是 `.github/workflows/main-guard.yml`：它**不阻断**推送，但会在每次
 直接推送到 `main` 时把偏离流程的事实和正确做法打印在 CI 日志里。
