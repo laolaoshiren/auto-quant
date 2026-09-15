@@ -34,10 +34,10 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 安装 Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -121,7 +121,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # gitleaks 需要完整历史才能扫描过去的提交，而不只是当前工作树。
           # 只扫工作树会漏掉"曾经提交过、后来删掉"的密钥 —— 那类泄漏最常见。
@@ -214,7 +214,7 @@ jobs:
 
       # -- 第三道：gitleaks 全历史扫描 ---------------------------------------
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true   # 见下方说明
