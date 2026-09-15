@@ -16,29 +16,38 @@
 
 ## 🚀 一条命令部署
 
-在服务器上（只需 Docker）：
+在一台**全新服务器**上：
 
 ```bash
-cd /opt/autoquant/deploy && ./up.sh
+sudo bash install.sh
 ```
 
-自动生成账号与密钥、拉取镜像、启动服务、等待健康检查通过，最后打印访问地址和登录凭据。
+**就这一条。** 它会自动完成全部准备工作：
 
-之后每次更新，**还是这一条命令**。
+- 识别系统、补齐缺失的基础工具（**包括系统里没有 `bash` 的情况**）
+- **安装 Docker 与 Compose**（如果没有）
+- 生成配置与随机密钥
+- 拉取镜像、启动服务、等待健康检查通过
+- 打印访问地址与登录凭据
 
-首次使用前需要一次性准备（仓库与镜像均为私有）：
+**你不需要预先安装任何东西** —— 不用 Node、不用源码、不用懂 Docker。
+支持 Debian / Ubuntu、RHEL / CentOS / Rocky / Alma、Fedora、
+**Alpine（含没有 bash 的精简镜像）**、Arch、openSUSE。
 
-```bash
-git clone --depth 1 https://github.com/laolaoshiren/auto-quant.git /opt/autoquant
-cd /opt/autoquant/deploy
+之后每次更新版本，**还是这一条命令**。
 
-# 让服务器能拉取私有镜像（只做一次，之后自动复用凭据）
-echo <你的GitHub令牌> | docker login ghcr.io -u <你的用户名> --password-stdin
-
-./up.sh
-```
-
-令牌只需勾选 `read:packages` 权限。
+> **首次需要授权私有镜像仓库**（仓库与镜像都是私有的）。安装器会提示你粘贴一个
+> GitHub 令牌，只需勾选 `read:packages`：
+>
+> <https://github.com/settings/tokens/new?scopes=read:packages>
+>
+> 也可以跳过提示，直接传入：
+>
+> ```bash
+> GHCR_TOKEN=<你的令牌> sudo -E bash install.sh
+> ```
+>
+> 令牌只用于拉取镜像，由 Docker 自己保存，安装器不会写到别处。
 
 📖 完整说明：[deploy/README.md](deploy/README.md) · [部署指南](docs/DEPLOYMENT.md)
 
