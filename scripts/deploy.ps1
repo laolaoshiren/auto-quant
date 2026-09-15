@@ -114,9 +114,9 @@ echo -n "    服务状态: "; systemctl is-active autoquant
 # 所以健康检查走绑定地址，而不是 127.0.0.1。
 BIND=`$(grep -E '^HOST=' .env | cut -d= -f2)
 BIND=`${BIND:-172.17.0.1}
-echo -n "    监听地址: `$BIND:3200"
+echo -n "    监听地址: `$BIND:27137"
 echo ""
-echo -n "    健康检查: "; curl -s --max-time 8 http://`$BIND:3200/api/health
+echo -n "    健康检查: "; curl -s --max-time 8 http://`$BIND:27137/api/health
 echo ""
 "@
 

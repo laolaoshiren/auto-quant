@@ -105,8 +105,8 @@ sudo systemctl stop autoquant && sudo systemctl disable autoquant
 默认只绑宿主机 `127.0.0.1`，公网不可直接访问。用 SSH 隧道：
 
 ```bash
-ssh -L 3200:127.0.0.1:3200 <你的服务器>
-# 然后浏览器打开 http://127.0.0.1:3200
+ssh -L 27137:127.0.0.1:27137 <你的服务器>
+# 然后浏览器打开 http://127.0.0.1:27137
 ```
 
 要对外提供访问，**正确做法是在前面加反向代理 + HTTPS**，而不是把
@@ -122,7 +122,7 @@ ssh -L 3200:127.0.0.1:3200 <你的服务器>
 |---|---|---|
 | `BINANCE_USE_TESTNET` | `true` | **最容易出错的一项**。`false` = 实盘真实资金；两者界面完全一样 |
 | `BIND_ADDRESS` | `127.0.0.1` | 改成 `0.0.0.0` 会让控制台对公网开放 |
-| `PORT` | `3200` | 宿主机端口 |
+| `PORT` | `27137` | 宿主机端口 |
 | `DRY_RUN` | `false` | `true` 时只模拟下单 |
 | `GLOBAL_TRADING_DISABLED` | `false` | 全局熔断，`true` 时拒绝启动任何机器人 |
 | `AUTOQUANT_IMAGE` | `ghcr.io/.../auto-quant:latest` | 锁定版本时改成具体 tag |

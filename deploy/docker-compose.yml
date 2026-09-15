@@ -31,7 +31,7 @@ services:
     # 需要改绑定地址时在 .env 里设 BIND_ADDRESS。
     # -------------------------------------------------------------------------
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3200}:3200"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-27137}:27137"
 
     # -------------------------------------------------------------------------
     # 数据卷：数据库、AES 主密钥、JWT 密钥、日志。
@@ -52,7 +52,7 @@ services:
     # 容器内必须绑 0.0.0.0 才能让映射出去的端口连上
     environment:
       HOST: 0.0.0.0
-      PORT: 3200
+      PORT: 27137
 
     # 日志轮转：不加限制时容器日志会无限增长，最终把磁盘写满，
     # 而磁盘满之后数据库写入失败、整个服务停摆。
@@ -68,7 +68,7 @@ services:
         - CMD
         - node
         - -e
-        - "fetch('http://127.0.0.1:3200/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        - "fetch('http://127.0.0.1:27137/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 5s
       start_period: 40s

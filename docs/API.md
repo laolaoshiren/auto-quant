@@ -2,7 +2,7 @@
 
 服务端是一个 Fastify 应用，同时提供 REST 接口、WebSocket 事件流，以及控制台的静态文件。
 
-- **基地址**：`http://<HOST>:<PORT>`（默认 `127.0.0.1:3200`）
+- **基地址**：`http://<HOST>:<PORT>`（默认 `127.0.0.1:27137`）
 - **认证**：除 `/api/health` 与 `/api/auth/login` 外，全部需要
   `Authorization: Bearer <token>`
 - **内容类型**：请求体为 JSON。服务端注册了一个兜底解析器，所以**空 body 的 POST**
