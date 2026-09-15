@@ -1,13 +1,26 @@
-import { useEffect, useMemo, useState } from 'react';
+/**
+ * 策略编辑器 —— 全应用最长的表单。
+ *
+ * 三个结构决定，都是为了让这张表单"能读、能跳、不会误丢"：
+ *
+ * 1. **分区标签页（Radix Tabs）而不是一条长滚动**。一次只挂载一个分区，
+ *    所以在一个文本域里敲字不会让另外五个分区的几十个受控输入一起重渲染 ——
+ *    这既是可导航性，也是性能手段（长表单每敲一个字就重算全树，在低频笔记本上很明显）。
+ * 2. **核心风控常驻在顶栏**。杠杆 / 仓位 / 强制止损 / 盈亏比决定这笔钱能亏多少，
+ *    它们必须在任何分区下都看得见，而不是夹在指标周期之间。
+ * 3. **脏状态必须显式**。这是真实下单的配置，用户不能靠"我记得我保存过"来判断。
+ */
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import * as TabsPrimitive from '@radix-ui/react-tabs';
+import { Activity, Coins, FileText, LoaderCircle, ShieldAlert, ShieldCheck, Tag, TriangleAlert } from 'lucide-react';
 import type { StrategyConfig } from '@aq/shared';
 import { STRATEGY_PRESETS } from '@aq/shared';
 import { api } from '../lib/api';
 import { useApp } from '../lib/store';
 import { useCopy, useDocumentTitle, usePolled } from '../lib/hooks';
 import { applyPreset, cloneConfig, presetById, validateStrategy } from '../lib/strategy';
-import { Badge, Button, CopyButton, ErrorNote, Panel, Select, Spinner3 } from '../components/ui';
-import { SectionHeading } from '../components/Badges';
+import { Badge, Button, CopyButton, ErrorNote, Panel, Select, Spinner3, cn } from '../components/ui';
 import { CoinSourceSection, IndicatorsSection } from '../components/StrategyFields';
 import { PromptSection, ProtectionSection, RiskSection, StrategyHeaderSection } from '../components/StrategyRiskFields';
 import { StrategyCheckButton, StrategyCheckModal } from '../components/StrategyCheckModal';
@@ -17,6 +30,130 @@ type LoadState =
   | { kind: 'loading' }
   | { kind: 'missing' }
   | { kind: 'ready'; id: number; name: string; description: string; presetId: string | null; config: StrategyConfig };
+
+/* -------------------------------------------------------------------------- */
+/*  Tabs                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 分区顺序即优先级：标识 → 核心风控 → 币种 → 指标 → 保护 → 提示词。
+ * 风控排在币种与指标**之前**，因为先定"能亏多少"，再谈"看什么数据"。
+ */
+const TABS = [
+  { id: 'identity', label: '标识', icon: Tag },
+  { id: 'risk', label: '核心风控', icon: ShieldAlert },
+  { id: 'universe', label: '币种来源', icon: Coins },
+  { id: 'indicators', label: '指标', icon: Activity },
+  { id: 'protection', label: '保护与限流', icon: ShieldCheck },
+  { id: 'prompt', label: '提示词', icon: FileText },
+] as const;
+
+type TabId = (typeof TABS)[number]['id'];
+
+/** 校验错误路径 → 它属于哪个分区。用于标签页上的红点和"去修复"按钮。 */
+function tabForPath(path: string): TabId {
+  if (path.startsWith('coinSource')) return 'universe';
+  if (path.startsWith('indicators')) return 'indicators';
+  if (path.startsWith('riskControl')) return 'risk';
+  if (path.startsWith('drawdownGuard') || path.startsWith('throttle') || path.startsWith('circuitBreaker')) {
+    return 'protection';
+  }
+  if (path.startsWith('promptSections') || path === 'customPrompt') return 'prompt';
+  return 'identity';
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Risk banner                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 常驻的风控读数。
+ *
+ * 只接收原始值（而不是整个 `riskControl` 对象）：对象每次按键都会换身份，
+ * `memo` 就白加了。这几个数字才是它真正依赖的东西。
+ */
+const RiskBanner = memo(function RiskBanner({
+  leverage,
+  altcoinLeverage,
+  positionRatio,
+  altcoinPositionRatio,
+  requireStopLoss,
+  riskReward,
+  onOpen,
+}: {
+  leverage: number;
+  altcoinLeverage: number;
+  positionRatio: number;
+  altcoinPositionRatio: number;
+  requireStopLoss: boolean;
+  riskReward: number;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-1.5 lg:grid-cols-4">
+      <RiskBannerCell
+        label="杠杆上限（倍）"
+        value={`≤ ${leverage}`}
+        note={`山寨币 ≤ ${altcoinLeverage}`}
+        onOpen={onOpen}
+      />
+      <RiskBannerCell
+        label="最大仓位（倍权益）"
+        value={`${positionRatio}×`}
+        note={`山寨币 ${altcoinPositionRatio}×`}
+        onOpen={onOpen}
+      />
+      <RiskBannerCell
+        label="强制止损"
+        value={requireStopLoss ? '已开启' : '未开启'}
+        note={requireStopLoss ? '交易所侧挂单' : '点击开启'}
+        tone={requireStopLoss ? 'text-up' : 'text-down'}
+        emphasize={!requireStopLoss}
+        onOpen={onOpen}
+      />
+      <RiskBannerCell label="最小盈亏比" value={`1:${riskReward}`} note="低于此值直接拒绝" onOpen={onOpen} />
+    </div>
+  );
+});
+
+function RiskBannerCell({
+  label,
+  value,
+  note,
+  tone,
+  emphasize,
+  onOpen,
+}: {
+  label: string;
+  value: string;
+  note: string;
+  tone?: string;
+  emphasize?: boolean;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title={`${label} — 点击跳到核心风控`}
+      className={cn(
+        'group flex min-w-0 flex-col rounded-md border bg-base-850/80 px-2.5 py-1.5 text-left transition hover:border-accent/60 hover:bg-base-800',
+        emphasize ? 'border-down/60' : 'border-base-750',
+      )}
+    >
+      <span className="flex w-full items-center gap-1 text-xs text-ink-lo">
+        <span className="min-w-0 truncate">{label}</span>
+        <span className="ml-auto hidden shrink-0 text-xs text-accent group-hover:inline lg:inline">调整</span>
+      </span>
+      <span className={cn('num truncate text-xl leading-tight', tone ?? 'text-ink-hi')}>{value}</span>
+      <span className="truncate text-xs text-ink-faint">{note}</span>
+    </button>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Page                                                                       */
+/* -------------------------------------------------------------------------- */
 
 export function StrategyEditorPage() {
   const params = useParams();
@@ -41,7 +178,21 @@ export function StrategyEditorPage() {
   const [showErrors, setShowErrors] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
   const [checkOpen, setCheckOpen] = useState(false);
+  const [tab, setTab] = useState<TabId>('identity');
   const rawCopy = useCopy();
+
+  /**
+   * 切换分区时回到内容顶部。
+   *
+   * 内容区是 `Layout` 里的 `<main>`（它自己滚动，不是窗口），所以直接从
+   * 根节点往上找那个滚动容器。不做这一步的话，在提示词分区底部切到标识分区
+   * 会看到一片空白 —— 新分区比旧的短，滚动位置被浏览器夹住后停在中间。
+   */
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selectTab = useCallback((next: TabId) => {
+    setTab(next);
+    rootRef.current?.closest('main')?.scrollTo({ top: 0 });
+  }, []);
 
   useEffect(() => {
     if (isNew) {
@@ -79,20 +230,27 @@ export function StrategyEditorPage() {
     }
   }, [isNew, catalog, loadCatalog, recordQuery.data, recordQuery.error, state.kind]);
 
-  useDocumentTitle(isNew ? '新建策略' : (state.kind === 'ready' ? state.name : '策略'));
+  const ready = state.kind === 'ready';
+  const currentPath = ready && state.id > 0 ? `/strategy/${state.id}` : '/strategy/new';
+  useDocumentTitle(`${dirty ? '• ' : ''}${isNew ? '新建策略' : ready ? state.name : '策略'}`);
 
   const validation = useMemo(
-    () => (state.kind === 'ready' ? validateStrategy({ ...state.config, name: state.name, description: state.description }) : null),
+    () =>
+      state.kind === 'ready'
+        ? validateStrategy({ ...state.config, name: state.name, description: state.description })
+        : null,
     [state],
   );
 
-  const patchConfig = (patch: Partial<StrategyConfig>) => {
+  /* --- dirty / clean ---------------------------------------------------- */
+
+  const patchConfig = useCallback((patch: Partial<StrategyConfig>) => {
     setState((current) => (current.kind === 'ready' ? { ...current, config: { ...current.config, ...patch } } : current));
     setDirty(true);
     setNotice(null);
-  };
+  }, []);
 
-  const patchHeader = (patch: Partial<Pick<StrategyConfig, 'name' | 'description' | 'tradingMode'>>) => {
+  const patchHeader = useCallback((patch: Partial<Pick<StrategyConfig, 'name' | 'description' | 'tradingMode'>>) => {
     setState((current) =>
       current.kind === 'ready'
         ? {
@@ -105,23 +263,62 @@ export function StrategyEditorPage() {
     );
     setDirty(true);
     setNotice(null);
-  };
+  }, []);
 
-  const applyPresetToDraft = (presetId: string) => {
-    if (state.kind !== 'ready') return;
-    const preset = STRATEGY_PRESETS.find((item) => item.id === presetId);
-    if (!preset) return;
-    const next = applyPreset(state.config, preset);
-    setState({ ...state, presetId: preset.id, config: next, description: state.description || preset.summary });
-    setDirty(true);
-    setNotice(`已将预设“${preset.label}”应用到草稿。`);
-  };
+  const onCoinSource = useCallback((next: StrategyConfig['coinSource']) => patchConfig({ coinSource: next }), [patchConfig]);
+  const onIndicators = useCallback((next: StrategyConfig['indicators']) => patchConfig({ indicators: next }), [patchConfig]);
+  const onRisk = useCallback((next: StrategyConfig['riskControl']) => patchConfig({ riskControl: next }), [patchConfig]);
+  const onProtection = useCallback(
+    (patch: Partial<Pick<StrategyConfig, 'drawdownGuard' | 'throttle' | 'circuitBreaker'>>) => patchConfig(patch),
+    [patchConfig],
+  );
+  const onPrompt = useCallback(
+    (patch: Partial<Pick<StrategyConfig, 'promptSections' | 'customPrompt'>>) => patchConfig(patch),
+    [patchConfig],
+  );
+
+  /*
+   * 带着未保存的修改离开时必须拦一下。
+   *
+   * 这个应用用的是普通 `<Routes>`（不是 data router），所以拿不到 `useBlocker`。
+   * 退而求其次：`beforeunload` 管刷新/关标签页，捕获阶段的点击监听管所有站内跳转
+   * （React Router 的 `Link` 最终就是一个 `<a href>`）。cmd/ctrl+点击、新标签页、
+   * 以及跳回当前页本身都不拦 —— 那些不会丢掉编辑内容。
+   */
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    const onClick = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const anchor = (event.target as Element | null)?.closest?.('a[href]');
+      if (!anchor) return;
+      const href = anchor.getAttribute('href') ?? '';
+      if (!href.startsWith('/') || href === currentPath) return;
+      if (anchor.getAttribute('target') === '_blank') return;
+      if (!window.confirm('有未保存的修改，离开后这些修改会丢失。确定要离开吗？')) event.preventDefault();
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    document.addEventListener('click', onClick, true);
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      document.removeEventListener('click', onClick, true);
+    };
+  }, [dirty, currentPath]);
+
+  /* --- save ------------------------------------------------------------- */
 
   const save = async (): Promise<number | null> => {
     if (state.kind !== 'ready') return null;
     if (!validation?.ok || !validation.config) {
       setShowErrors(true);
       setError('请先修正高亮字段再保存。');
+      // 直接把用户送到第一个出错的分区：错误列表在底部，不跳过去等于没说。
+      const firstPath = Object.keys(validation?.errors ?? {})[0];
+      if (firstPath) selectTab(tabForPath(firstPath));
       return null;
     }
 
@@ -166,9 +363,36 @@ export function StrategyEditorPage() {
     }
   };
 
+  /** ⌘S / Ctrl+S 保存。放进 ref 是为了让监听器只注册一次，不随每次按键重挂。 */
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        void saveRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const applyPresetToDraft = (presetId: string) => {
+    if (state.kind !== 'ready') return;
+    const preset = STRATEGY_PRESETS.find((item) => item.id === presetId);
+    if (!preset) return;
+    const next = applyPreset(state.config, preset);
+    setState({ ...state, presetId: preset.id, config: next, description: state.description || preset.summary });
+    setDirty(true);
+    setNotice(`已将预设“${preset.label}”应用到草稿。`);
+  };
+
   const remove = async () => {
     if (state.kind !== 'ready' || isNew) return;
-    if (!window.confirm(`删除“${state.name}”？`)) return;
+    const confirmed = window.confirm(
+      `删除策略“${state.name}”？\n\n引用它的机器人将无法再启动（预检会直接失败）。此操作不可撤销。`,
+    );
+    if (!confirmed) return;
     try {
       await api.deleteStrategy(state.id);
       navigate('/strategy');
@@ -177,11 +401,33 @@ export function StrategyEditorPage() {
     }
   };
 
+  /* --- derived ---------------------------------------------------------- */
+
+  const tabErrors = useMemo(() => {
+    const counts = {} as Record<TabId, number>;
+    for (const item of TABS) counts[item.id] = 0;
+    for (const path of Object.keys(validation?.errors ?? {})) counts[tabForPath(path)] += 1;
+    return counts;
+  }, [validation]);
+
+  const rawJson = useMemo(() => {
+    if (!rawOpen || state.kind !== 'ready') return '';
+    return JSON.stringify(
+      {
+        ...(validation?.config ?? state.config),
+        name: state.name.trim() || state.name,
+        description: state.description,
+      },
+      null,
+      2,
+    );
+  }, [rawOpen, state, validation]);
+
   if (state.kind === 'loading') return <Spinner3 label="正在加载策略" />;
   if (state.kind === 'missing') {
     return (
       <Panel title="未找到策略">
-        <p className="text-xs text-ink-lo">{recordQuery.error ?? '它可能已被删除。'}</p>
+        <p className="text-base text-ink-lo">{recordQuery.error ?? '它可能已被删除。'}</p>
         <Link to="/strategy" className="btn btn-ghost mt-3 inline-flex">
           返回策略工坊
         </Link>
@@ -192,32 +438,51 @@ export function StrategyEditorPage() {
   const errors = showErrors ? (validation?.errors ?? {}) : {};
   const errorCount = Object.keys(validation?.errors ?? {}).length;
   const preset = presetById(state.presetId);
+  const risk = state.config.riskControl;
 
   return (
-    <div className="space-y-3 pb-16">
-      {/* Sticky action bar ------------------------------------------------ */}
-      <div className="sticky top-0 z-20 -mx-4 -mt-4 border-b border-base-800 bg-base-950/95 px-4 py-2 backdrop-blur">
+    <TabsPrimitive.Root
+      ref={rootRef}
+      value={tab}
+      onValueChange={(next) => selectTab(next as TabId)}
+      className="space-y-3 pb-16"
+    >
+      {/* ---------------------------------------------------------------- */}
+      {/*  常驻控制区：返回 / 状态 / 操作 / 风控读数 / 分区导航              */}
+      {/* ---------------------------------------------------------------- */}
+      <div className="sticky top-0 z-20 -mx-4 -mt-4 space-y-2 border-b border-base-800 bg-base-950/95 px-4 pb-2 pt-2 backdrop-blur">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <Link to="/strategy" className="text-xs text-ink-lo transition hover:text-accent">
+          <Link
+            to="/strategy"
+            className="shrink-0 text-base text-ink-lo transition hover:text-accent"
+            title={dirty ? '有未保存的修改' : undefined}
+          >
             ← 策略工坊
           </Link>
-          <h1 className="max-w-[280px] truncate text-sm font-semibold tracking-wide text-ink-hi">
+          <h1 className="min-w-0 max-w-[40vw] truncate text-lg font-semibold tracking-wide text-ink-hi">
             {state.name || '未命名策略'}
           </h1>
-          {isNew ? <Badge tone="accent">未保存</Badge> : <Badge tone="muted">#{state.id}</Badge>}
-          {dirty && <Badge tone="warn">已修改</Badge>}
-          {preset && <Badge tone="muted">预设：{preset.id}</Badge>}
-          {validation && !validation.ok && <Badge tone="down">{errorCount} 处校验问题</Badge>}
+
+          {state.id > 0 ? <Badge tone="muted">#{state.id}</Badge> : <Badge tone="accent">未创建</Badge>}
+          <SaveState saving={saving} dirty={dirty} isNew={isNew && state.id === 0} />
+          {preset && <Badge tone="muted">预设：{preset.label}</Badge>}
+          {errorCount > 0 && (
+            <Badge tone={validation?.ok ? 'muted' : 'down'} title="点击下方任意分区查看具体字段">
+              {errorCount} 处校验问题
+            </Badge>
+          )}
 
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
             {listQuery.data && listQuery.data.length > 0 && (
               <Select
-                className="w-48"
+                className="w-44"
                 value={isNew ? '' : String(state.id)}
+                aria-label="跳转到其他策略"
                 onChange={(event) => {
-                  if (event.target.value === '') return;
-                  if (dirty && !window.confirm('放弃未保存的修改？')) return;
-                  navigate(`/strategy/${event.target.value}`);
+                  const next = event.target.value;
+                  if (next === '') return;
+                  if (dirty && !window.confirm('放弃未保存的修改？离开后这些修改会丢失。')) return;
+                  navigate(`/strategy/${next}`);
                 }}
               >
                 <option value="">— 跳转到策略 —</option>
@@ -228,7 +493,12 @@ export function StrategyEditorPage() {
                 ))}
               </Select>
             )}
-            <Select className="w-40" value={state.presetId ?? ''} onChange={(event) => event.target.value && applyPresetToDraft(event.target.value)}>
+            <Select
+              className="w-36"
+              value={state.presetId ?? ''}
+              aria-label="应用预设"
+              onChange={(event) => event.target.value && applyPresetToDraft(event.target.value)}
+            >
               <option value="">— 应用预设 —</option>
               {STRATEGY_PRESETS.map((item) => (
                 <option key={item.id} value={item.id}>
@@ -236,7 +506,11 @@ export function StrategyEditorPage() {
                 </option>
               ))}
             </Select>
-            <Button variant="ghost" onClick={() => setRawOpen((v) => !v)}>
+            <Button
+              variant="ghost"
+              onClick={() => setRawOpen((v) => !v)}
+              title="查看并复制 API 实际收到的 StrategyConfig"
+            >
               {rawOpen ? '隐藏 JSON' : '查看 JSON'}
             </Button>
             {/* Prominent: this is the "does my strategy actually work?" button. */}
@@ -251,87 +525,138 @@ export function StrategyEditorPage() {
                 删除
               </Button>
             )}
-            <Button variant="primary" onClick={() => void save()} busy={saving}>
-              {isNew ? '创建策略' : '保存修改'}
+            <Button
+              variant="primary"
+              onClick={() => void save()}
+              busy={saving}
+              title="保存修改（⌘S / Ctrl+S）"
+              disabled={!dirty && state.id > 0}
+            >
+              {saving ? '正在保存…' : isNew && state.id === 0 ? '创建策略' : '保存修改'}
             </Button>
           </div>
         </div>
 
-        {error && <ErrorNote className="mt-2">{error}</ErrorNote>}
+        <RiskBanner
+          leverage={risk.btcEthMaxLeverage}
+          altcoinLeverage={risk.altcoinMaxLeverage}
+          positionRatio={risk.btcEthMaxPositionValueRatio}
+          altcoinPositionRatio={risk.altcoinMaxPositionValueRatio}
+          requireStopLoss={risk.requireStopLoss}
+          riskReward={risk.minRiskRewardRatio}
+          onOpen={() => selectTab('risk')}
+        />
+
+        <TabsPrimitive.List
+          aria-label="策略配置分区"
+          className="flex flex-wrap items-center gap-x-1 gap-y-0.5 border-b border-base-800"
+        >
+          {TABS.map((item) => {
+            const count = showErrors ? tabErrors[item.id] : 0;
+            return (
+              <TabsPrimitive.Trigger
+                key={item.id}
+                value={item.id}
+                className={cn(
+                  '-mb-px flex items-center gap-1.5 border-b-2 px-2.5 py-1.5 text-base font-medium transition',
+                  'border-transparent text-ink-lo hover:text-ink-mid',
+                  'data-[state=active]:border-accent data-[state=active]:text-ink-hi',
+                )}
+              >
+                <item.icon aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                {item.label}
+                {count > 0 && (
+                  <span className="num rounded bg-down/15 px-1 text-xs text-down" title={`${count} 个字段有问题`}>
+                    {count}
+                  </span>
+                )}
+              </TabsPrimitive.Trigger>
+            );
+          })}
+        </TabsPrimitive.List>
+
+        {error && <ErrorNote>{error}</ErrorNote>}
         {notice && !error && (
-          <div className="mt-2 rounded border border-up/40 bg-up/10 px-2.5 py-1.5 text-xs text-up">{notice}</div>
+          <div className="rounded-md border border-up/40 bg-up/10 px-2.5 py-1.5 text-base text-up">{notice}</div>
         )}
       </div>
 
-      <SectionHeading
-        title="策略定义"
-        sub={
-          state.kind === 'ready'
-            ? `保存前会按 StrategyConfigSchema 校验${recordQuery.data ? ` · 服务端副本更新于 ${fmtDateTime(recordQuery.data.updatedAt)}` : ''}`
-            : undefined
-        }
-      />
+      {/* ---------------------------------------------------------------- */}
+      {/*  分区内容                                                         */}
+      {/* ---------------------------------------------------------------- */}
+      {recordQuery.data && (
+        <p className="text-xs text-ink-faint">
+          保存前会按 StrategyConfigSchema 校验 · 服务端副本更新于 {fmtDateTime(recordQuery.data.updatedAt)}
+        </p>
+      )}
 
-      <StrategyHeaderSection config={state.config} onChange={patchHeader} errors={errors} />
+      {/*
+        * 分区内容不写 `focus-visible:outline-none`：Radix 把面板本身做成可聚焦的，
+        * 键盘 Tab 进来时那圈轮廓是**唯一**能说明焦点在哪的线索（DESIGN.md §8）。
+        */}
+      <TabsPrimitive.Content value="identity">
+        <StrategyHeaderSection config={state.config} onChange={patchHeader} errors={errors} />
+      </TabsPrimitive.Content>
 
-      <CoinSourceSection
-        config={state.config}
-        onChange={(next) => patchConfig({ coinSource: next })}
-        errors={errors}
-      />
+      <TabsPrimitive.Content value="risk">
+        <RiskSection config={state.config} onChange={onRisk} errors={errors} />
+      </TabsPrimitive.Content>
 
-      <IndicatorsSection
-        config={state.config}
-        onChange={(next) => patchConfig({ indicators: next })}
-        errors={errors}
-      />
+      <TabsPrimitive.Content value="universe">
+        <CoinSourceSection config={state.config} onChange={onCoinSource} errors={errors} />
+      </TabsPrimitive.Content>
 
-      <RiskSection config={state.config} onChange={(next) => patchConfig({ riskControl: next })} errors={errors} />
+      <TabsPrimitive.Content value="indicators">
+        <IndicatorsSection config={state.config} onChange={onIndicators} errors={errors} />
+      </TabsPrimitive.Content>
 
-      <ProtectionSection config={state.config} onChange={(patch) => patchConfig(patch)} errors={errors} />
+      <TabsPrimitive.Content value="protection">
+        <ProtectionSection config={state.config} onChange={onProtection} errors={errors} />
+      </TabsPrimitive.Content>
 
-      <PromptSection config={state.config} onChange={(patch) => patchConfig(patch)} errors={errors} />
+      <TabsPrimitive.Content value="prompt">
+        <PromptSection config={state.config} onChange={onPrompt} errors={errors} />
+      </TabsPrimitive.Content>
 
+      {/* ---------------------------------------------------------------- */}
+      {/*  校验汇总（可跳转到出错分区）                                      */}
+      {/* ---------------------------------------------------------------- */}
       {showErrors && errorCount > 0 && (
-        <Panel title={`校验问题（${errorCount}）`}>
+        <Panel title={`校验问题（${errorCount}）`} bodyClassName="p-3">
           <ul className="space-y-1">
             {Object.entries(validation?.errors ?? {}).map(([path, message]) => (
-              <li key={path} className="flex gap-2 text-xs">
+              <li key={path} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-base">
                 <span className="num shrink-0 text-down">{path}</span>
-                <span className="text-ink-lo">{message}</span>
+                <span className="min-w-0 text-ink-lo">{message}</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="ml-auto shrink-0"
+                  onClick={() => selectTab(tabForPath(path))}
+                >
+                  去修复
+                </Button>
               </li>
             ))}
           </ul>
         </Panel>
       )}
 
+      {/* ---------------------------------------------------------------- */}
+      {/*  原始 JSON                                                        */}
+      {/* ---------------------------------------------------------------- */}
       {rawOpen && (
         <Panel
           title="原始 StrategyConfig"
           actions={
             <span className="flex items-center gap-2">
-              <span className="num text-2xs text-ink-faint">API 实际收到的内容</span>
-              <CopyButton
-                copied={rawCopy.copied}
-                onCopy={() =>
-                  rawCopy.copy(
-                    JSON.stringify(
-                      { ...(validation?.config ?? state.config), name: state.name.trim() || state.name, description: state.description },
-                      null,
-                      2,
-                    ),
-                  )
-                }
-              />
+              <span className="text-xs text-ink-faint">API 实际收到的内容</span>
+              <CopyButton copied={rawCopy.copied} onCopy={() => rawCopy.copy(rawJson)} />
             </span>
           }
         >
-          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded border border-base-800 bg-base-950 px-3 py-2 font-mono text-xs leading-relaxed text-ink-mid">
-            {JSON.stringify(
-              { ...(validation?.config ?? state.config), name: state.name.trim() || state.name, description: state.description },
-              null,
-              2,
-            )}
+          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-base-800 bg-base-950 px-3 py-2 font-mono text-xs leading-relaxed text-ink-mid">
+            {rawJson}
           </pre>
         </Panel>
       )}
@@ -353,6 +678,48 @@ export function StrategyEditorPage() {
             : null
         }
       />
-    </div>
+    </TabsPrimitive.Root>
   );
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Save state pill                                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 保存状态。
+ *
+ * 三种状态必须彼此可区分：正在保存（动）、有未保存修改（黄）、已保存（绿）。
+ * 只用一个"保存"按钮的 disabled 来表达这三件事，用户会分不清"没改过"
+ * 和"改了但没存"—— 这是真实下单的配置，含糊的代价是钱。
+ */
+const SaveState = memo(function SaveState({
+  saving,
+  dirty,
+  isNew,
+}: {
+  saving: boolean;
+  dirty: boolean;
+  isNew: boolean;
+}) {
+  if (saving) {
+    return (
+      <Badge tone="accent">
+        <LoaderCircle aria-hidden className="h-3 w-3 animate-spin" />
+        正在保存…
+      </Badge>
+    );
+  }
+  if (dirty) {
+    // `title` 而不是 Tooltip：Tooltip 的 Trigger 用 `asChild` + ref，
+    // 而 Badge 不是 forwardRef 组件，ref 与事件都会被丢掉。
+    return (
+      <Badge tone="warn" title="修改只存在于这个页面，按 ⌘S 或点「保存修改」写入服务端">
+        <TriangleAlert aria-hidden className="h-3 w-3" />
+        有未保存的修改
+      </Badge>
+    );
+  }
+  if (isNew) return <Badge tone="accent">尚未创建</Badge>;
+  return <Badge tone="up">已保存</Badge>;
+});

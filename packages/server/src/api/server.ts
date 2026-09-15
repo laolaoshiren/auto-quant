@@ -150,6 +150,31 @@ export interface ApiDependencies {
   balance: BalanceService;
 }
 
+/**
+ * 凭据对外暴露的形状。**原始 `apiKey` 绝不外发。**
+ *
+ * 这里原本在两处各写了一遍 `{ ...account, apiKeyMasked: maskSecret(account.apiKey) }`。
+ * 展开运算符把 `account.apiKey` —— **明文密钥** —— 一起带进了响应体；
+ * 掩码只是"额外加了一个字段"，并没有替换掉它。于是完整密钥出现在
+ * `GET /api/exchange-accounts` 的响应里。
+ *
+ * 为什么这种 bug 很难被发现：界面只画 `apiKeyMasked`，**肉眼看不出问题**。
+ * 但浏览器开发者工具、任何 XSS、任何错误上报或会话回放插件都能直接读到它。
+ * 同一个类型上 `hasSecret` 的注释写着 "never the secret"，说明设计意图本就是
+ * 不外发 —— 是展开运算符违背了它。
+ *
+ * 所以用**解构剔除**而不是展开整个对象：新增字段仍然默认外发，
+ * 但密钥字段必须先被显式摘掉。改这里时请保持这个方向。
+ *
+ * 提成模块级导出的纯函数，是为了能直接单测 —— 见 `serialize.test.ts`。
+ * 放在 `buildServer` 内部时，想测它就得搭一整套 `ApiDependencies` 桩对象，
+ * 于是没人会去测，而这个 bug 就会以同样的方式回来。
+ */
+export function publicAccount<T extends { apiKey: string }>(account: T) {
+  const { apiKey, ...rest } = account;
+  return { ...rest, apiKeyMasked: maskSecret(apiKey) };
+}
+
 export async function buildServer(deps: ApiDependencies): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,
@@ -385,8 +410,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     return exchanges.list().map((account) => {
       const result = balances.get(account.id);
       return {
-        ...account,
-        apiKeyMasked: maskSecret(account.apiKey),
+        ...publicAccount(account),
         balance: result?.ok ? result.balance : null,
         balanceError: result && !result.ok ? result.error : null,
       };
@@ -421,7 +445,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       canTrade: parsed.data.canTrade,
     });
     deps.balance.invalidate(account.id);
-    return { ...account, apiKeyMasked: maskSecret(account.apiKey) };
+    return publicAccount(account);
   }));
 
   /**

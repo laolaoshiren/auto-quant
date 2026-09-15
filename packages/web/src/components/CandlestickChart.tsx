@@ -1,3 +1,16 @@
+/**
+ * Candlestick chart wrapper.
+ *
+ * The chart instance is created once per mount and the series data is swapped on
+ * every update — recreating the chart on each poll would reset the user's pan and
+ * zoom, which is exactly the wrong behaviour in a live terminal.
+ *
+ * `lightweight-charts` is imported here and **nowhere else** outside a lazy
+ * route chunk: it is the second-largest dependency in the app, and the
+ * overview/login pages must not pay for it. Anything that needs candles must go
+ * through this component (or another lazy import), never a static import from
+ * the entry graph.
+ */
 import { useEffect, useRef } from 'react';
 import {
   ColorType,
@@ -11,15 +24,18 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts';
 import type { Kline } from '@aq/shared';
+import { CHART_INK } from './equityCurve';
 
-/**
- * Candlestick chart wrapper.
- *
- * The chart instance is created once per mount and the series data is swapped on
- * every update — recreating the chart on each poll would reset the user's pan and
- * zoom, which is exactly the wrong behaviour in a live terminal.
- */
-export function CandlestickChart({ candles, height = 460 }: { candles: Kline[]; height?: number }) {
+export function CandlestickChart({
+  candles,
+  height = 460,
+  loading = false,
+}: {
+  candles: Kline[];
+  height?: number;
+  /** Render the "no data yet" copy only once the first fetch has settled. */
+  loading?: boolean;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -33,28 +49,43 @@ export function CandlestickChart({ candles, height = 460 }: { candles: Kline[]; 
       height,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#a7b0c0',
+        /*
+         * `ink-mid` (#a9b4c7) spelled out: lightweight-charts paints inside its
+         * own canvas-like layer and takes colours as strings only — the same
+         * exception as `CHART_INK` in `equityCurve.ts`, which is where every
+         * other raw colour here comes from.
+         *
+         * `ink-mid`, not `ink-lo`: these are prices sitting on a dark grid, and
+         * the dimmer token is unreadable at 11px on a laptop screen at 50%
+         * brightness — which is how a trading desk is usually lit.
+         */
+        textColor: '#a9b4c7',
         fontFamily: 'JetBrains Mono, ui-monospace, Menlo, Consolas, monospace',
-        fontSize: 10,
+        fontSize: 11,
       },
       grid: {
-        vertLines: { color: '#15181f' },
-        horzLines: { color: '#15181f' },
+        // `base-750`: one step off the panel, so the grid organises without
+        // competing with the candles for attention.
+        vertLines: { color: CHART_INK.grid },
+        horzLines: { color: CHART_INK.grid },
       },
       rightPriceScale: {
-        borderColor: '#21242e',
+        borderColor: CHART_INK.grid,
         scaleMargins: { top: 0.08, bottom: 0.08 },
       },
       timeScale: {
-        borderColor: '#21242e',
+        borderColor: CHART_INK.grid,
         timeVisible: true,
         secondsVisible: false,
         rightOffset: 4,
+        // A minimum bar spacing keeps a 3-bar window from stretching each candle
+        // into a slab that looks like a different timeframe.
+        minBarSpacing: 2,
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: '#3a3f4d', labelBackgroundColor: '#21242e' },
-        horzLine: { color: '#3a3f4d', labelBackgroundColor: '#21242e' },
+        vertLine: { color: CHART_INK.rule, labelBackgroundColor: CHART_INK.track, width: 1 },
+        horzLine: { color: CHART_INK.rule, labelBackgroundColor: CHART_INK.track, width: 1 },
       },
       handleScale: { axisPressedMouseMove: { time: true, price: false } },
       localization: {
@@ -67,13 +98,13 @@ export function CandlestickChart({ candles, height = 460 }: { candles: Kline[]; 
     });
 
     const series = chart.addCandlestickSeries({
-      upColor: '#22c98a',
-      downColor: '#f4525f',
-      borderUpColor: '#22c98a',
-      borderDownColor: '#f4525f',
-      wickUpColor: '#22c98a',
-      wickDownColor: '#f4525f',
-      priceLineColor: '#4d8dff',
+      upColor: CHART_INK.up,
+      downColor: CHART_INK.down,
+      borderUpColor: CHART_INK.up,
+      borderDownColor: CHART_INK.down,
+      wickUpColor: CHART_INK.up,
+      wickDownColor: CHART_INK.down,
+      priceLineColor: CHART_INK.accent,
       priceLineStyle: LineStyle.Dashed,
     });
 
@@ -114,5 +145,20 @@ export function CandlestickChart({ candles, height = 460 }: { candles: Kline[]; 
     series.setData(deduped);
   }, [candles]);
 
-  return <div ref={containerRef} className="w-full" style={{ height }} />;
+  return (
+    <div className="relative w-full" style={{ height }}>
+      <div ref={containerRef} className="h-full w-full" />
+      {/*
+       * Four states, not two: "still fetching" and "this symbol has no history
+       * yet" look identical on a blank canvas but call for opposite reactions
+       * from the operator, so they get different words.
+       */}
+      {candles.length === 0 && (
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1 px-4 text-center">
+          <p className="text-base text-ink-lo">{loading ? '正在加载K线…' : '该周期暂无K线数据'}</p>
+          {!loading && <p className="text-xs text-ink-faint">换一个周期或交易对试试。</p>}
+        </div>
+      )}
+    </div>
+  );
 }

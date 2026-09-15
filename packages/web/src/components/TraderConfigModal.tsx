@@ -163,15 +163,18 @@ export function TraderConfigModal({
           <EquitySourceField state={equity} editing />
 
           {baselineWarning && (
-            <div className="rounded border border-warn/50 bg-warn/10 px-2.5 py-2 text-xs text-warn">
+            <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base text-warn">
               <span className="font-semibold">权益基准为 0。</span> {baselineWarning}
             </div>
           )}
 
-          <div className="flex items-center gap-2 rounded border border-base-800 bg-base-850/50 px-2.5 py-1.5">
-            <Badge tone="muted">不可变更</Badge>
-            <span className="text-2xs text-ink-lo">
+          <div className="flex items-start gap-2 rounded-md border border-base-800 bg-base-850/50 px-3 py-2">
+            <Badge tone="muted" className="mt-px">
+              不可变更
+            </Badge>
+            <span className="text-xs leading-relaxed text-ink-lo">
               模拟与实盘在每次启动时选择，不在此处保存。最近周期 #{trader.lastCycleNumber}。
+              停止中的机器人保存后会立即生效，但不会自动重新启动。
             </span>
           </div>
 

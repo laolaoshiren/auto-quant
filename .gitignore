@@ -104,3 +104,6 @@ desktop.ini
 # 可由 docs/research/README.md 中记录的来源 URL 重新获取，本地留作可检索参考。
 # ---------------------------------------------------------------------------
 docs/research/vendor/
+
+# UI 冒烟检查生成的截图（scripts/ui-smoke.mjs）
+packages/web/ui-smoke/

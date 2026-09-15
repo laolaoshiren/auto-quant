@@ -13,28 +13,46 @@
     height: 100%;
   }
 
+  /*
+   * 正文默认 14px（原来 13px）。
+   *
+   * 这个值决定整个界面的可读性基准 —— 页面里绝大多数文字不写字号，
+   * 直接继承这里。调大它是"人性化"最省力也最有效的一步。
+   */
   body {
-    @apply bg-base-950 text-ink-hi font-sans text-base antialiased;
+    @apply bg-base-950 font-sans text-md text-ink-hi antialiased;
   }
 
+  /*
+   * 滚动条：窄、无按钮、hover 才明显。
+   *
+   * 交易界面里表格与日志区经常需要滚动，默认的粗滚动条会挤占本就不多的
+   * 横向空间，而且在深色底上非常扎眼。
+   */
   * {
     scrollbar-width: thin;
-    scrollbar-color: #2b2f3a transparent;
+    scrollbar-color: #2c3546 transparent;
   }
 
   ::-webkit-scrollbar {
-    width: 9px;
-    height: 9px;
+    width: 10px;
+    height: 10px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: #2b2f3a;
-    border-radius: 6px;
+    background: #2c3546;
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 8px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #3a3f4d;
+    background: #3a4558;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
   }
 
   input,
@@ -44,7 +62,7 @@
     font: inherit;
   }
 
-  /* Keep number inputs honest in a dense terminal. */
+  /* 数字输入框去掉步进按钮：交易参数都是直接键入，步进按钮只会误触 */
   input[type='number']::-webkit-outer-spin-button,
   input[type='number']::-webkit-inner-spin-button {
     -webkit-appearance: none;
@@ -55,93 +73,190 @@
   }
 
   ::selection {
-    background: rgba(77, 141, 255, 0.35);
+    background: rgba(91, 141, 239, 0.35);
+  }
+
+  /*
+   * 键盘可达性。
+   *
+   * 原界面完全没有焦点样式 —— 纯鼠标操作时看不出问题，但一旦想用键盘
+   * （交易场景里很常见：快速切页、快速提交）就完全不知道焦点在哪。
+   * 这里统一给所有可聚焦元素一个清晰的焦点环。
+   */
+  :focus-visible {
+    outline: 2px solid theme('colors.accent');
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* 尊重系统的"减少动态效果"设置 */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }
 
 @layer components {
   .panel {
-    @apply rounded border border-base-750 bg-base-900 shadow-panel;
+    @apply rounded-lg border border-base-750 bg-base-900 shadow-panel;
   }
 
   .panel-head {
-    @apply flex items-center justify-between gap-2 border-b border-base-800 px-3 py-2;
+    @apply flex items-center justify-between gap-3 border-b border-base-800 px-4 py-2.5;
   }
 
   .panel-title {
-    @apply text-xs font-semibold uppercase tracking-[0.14em] text-ink-lo;
+    @apply text-sm font-semibold text-ink-hi;
   }
 
+  /*
+   * 数字与代码用等宽 + tabular-nums。
+   *
+   * tabular-nums 让每个数字占同样宽度，价格、盈亏在表格里才能**逐位对齐**。
+   * 没有它，数字列会随数值变化左右抖动，盯盘时非常难受。
+   */
   .num {
     @apply font-mono tabular-nums;
   }
 
   .field-label {
-    @apply mb-1 block text-2xs font-semibold uppercase tracking-[0.12em] text-ink-lo;
+    @apply mb-1.5 block text-xs font-medium text-ink-lo;
   }
 
   .input,
   .select,
   .textarea {
-    @apply w-full rounded border border-base-700 bg-base-850 px-2 py-1.5 text-base text-ink-hi outline-none transition
-      placeholder:text-ink-faint focus:border-accent/70 focus:ring-1 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply w-full rounded-md border border-base-700 bg-base-850 px-3 py-2 text-md text-ink-hi outline-none transition
+      placeholder:text-ink-faint hover:border-base-600
+      focus:border-accent focus:ring-2 focus:ring-accent/25
+      disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .textarea {
-    @apply font-mono text-xs leading-relaxed;
+    @apply font-mono text-base leading-relaxed;
   }
 
   .select {
-    @apply cursor-pointer appearance-none bg-[length:10px] bg-[right_0.5rem_center] bg-no-repeat pr-7;
-    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%236b7486' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+    @apply cursor-pointer appearance-none bg-[length:12px] bg-[right_0.75rem_center] bg-no-repeat pr-9;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%2376839a' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
   }
 
+  /*
+   * 按钮。
+   *
+   * 尺寸比原来大一档（原来 py-1.5 + text-xs ≈ 28px 高）。交易界面里
+   * 点错按钮的代价可能是真金白银，点击目标不该做得太小。
+   * 统一到 32px 高，鼠标与触屏都够用。
+   */
   .btn {
-    @apply inline-flex select-none items-center justify-center gap-1.5 rounded border px-2.5 py-1.5 text-xs font-semibold
-      transition disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex select-none items-center justify-center gap-2 whitespace-nowrap rounded-md border
+      px-3.5 py-2 text-base font-medium transition
+      active:scale-[0.985] disabled:pointer-events-none disabled:opacity-40;
   }
 
   .btn-primary {
-    @apply border-accent/60 bg-accent/15 text-accent hover:bg-accent/25 hover:text-white;
+    @apply border-transparent bg-accent text-white shadow-sm hover:bg-accent-hi;
   }
 
   .btn-ghost {
-    @apply border-base-700 bg-base-850 text-ink-mid hover:border-base-600 hover:text-ink-hi;
+    @apply border-base-700 bg-base-850 text-ink-mid hover:border-base-600 hover:bg-base-800 hover:text-ink-hi;
   }
 
   .btn-danger {
-    @apply border-down/50 bg-down/10 text-down hover:bg-down/20 hover:text-white;
+    @apply border-transparent bg-down text-white shadow-sm hover:brightness-110;
   }
 
   .btn-success {
-    @apply border-up/50 bg-up/10 text-up hover:bg-up/20 hover:text-white;
+    @apply border-transparent bg-up text-base-950 shadow-sm hover:brightness-110;
   }
 
   .btn-warn {
-    @apply border-warn/50 bg-warn/10 text-warn hover:bg-warn/20 hover:text-white;
+    @apply border-transparent bg-warn text-base-950 shadow-sm hover:brightness-110;
   }
 
+  /* 小尺寸：密集工具栏、表格行内操作 */
   .btn-xs {
-    @apply px-1.5 py-0.5 text-2xs;
+    @apply gap-1 rounded px-2 py-1 text-xs;
   }
 
   .chip {
-    @apply inline-flex items-center gap-1 rounded border px-1.5 py-px font-mono text-2xs uppercase tracking-wide;
+    @apply inline-flex items-center gap-1 rounded border px-1.5 py-px font-mono text-xs;
   }
 
   .th {
-    @apply whitespace-nowrap px-2 py-1.5 text-left text-2xs font-semibold uppercase tracking-[0.1em] text-ink-lo;
+    @apply whitespace-nowrap px-3 py-2 text-left text-xs font-semibold text-ink-lo;
   }
 
   .td {
-    @apply whitespace-nowrap px-2 py-1.5 text-xs text-ink-mid;
+    @apply whitespace-nowrap px-3 py-2 text-base text-ink-mid;
   }
 
   .row-hover {
-    @apply border-b border-base-850 transition-colors hover:bg-base-850/60;
+    @apply border-b border-base-850/70 transition-colors hover:bg-base-850/50;
   }
 
   .scroll-x {
     @apply overflow-x-auto;
+  }
+
+  /*
+   * 折叠区的高度动画。
+   *
+   * Radix 会把内容区的真实高度写进 `--radix-collapsible-content-height`，
+   * 所以能直接对 height 做动画 —— CSS 没法对 `height: auto` 过渡，
+   * 这也是原来 `<details>` 版本只能"瞬间展开"的原因。
+   * `overflow: hidden` 是必须的：动画期间子元素比容器高，不裁掉会溢出。
+   */
+  .collapsible-panel {
+    overflow: hidden;
+  }
+
+  .collapsible-panel[data-state='open'] {
+    animation: aq-collapsible-down 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .collapsible-panel[data-state='closed'] {
+    animation: aq-collapsible-up 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* 移动端侧栏抽屉：从左侧滑出，和内容的淡入分开做，避免整屏一起动 */
+  .nav-drawer[data-state='open'] {
+    animation: aq-drawer-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
+@keyframes aq-collapsible-down {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+
+@keyframes aq-collapsible-up {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+  to {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+@keyframes aq-drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
   }
 }
