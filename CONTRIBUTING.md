@@ -10,8 +10,14 @@
 
 ## 开发环境
 
-环境搭建、命令、目录结构见 **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**
-与 `README.md` 的「快速开始」章节。本文档不重复这些内容，避免两处漂移。
+**环境搭建、命令、测试策略、调试方法、常见陷阱，全部在
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。先读完那份再动手。**
+
+本文档只讲**协作流程**（分支、提交、PR、评审），不重复开发环境的内容，避免两处漂移。
+
+想理解**为什么这样设计** → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+想知道**某个功能该改哪个文件** → [`docs/MODULES.md`](docs/MODULES.md)
+如果你是**没有上下文的新 AI 会话** → [`docs/AGENTS.md`](docs/AGENTS.md)
 
 最短路径：
 
