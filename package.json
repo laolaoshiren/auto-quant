@@ -1,0 +1,28 @@
+{
+  "name": "auto-quant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "7x24 fully-automated LLM-driven crypto futures trading terminal (Binance USDⓈ-M)",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @aq/server",
+    "dev:web": "npm run dev --workspace @aq/web",
+    "start": "npm run start --workspace @aq/server",
+    "build": "npm run build --workspace @aq/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspace @aq/server",
+    "verify": "tsx packages/server/src/scripts/verifyPipeline.ts",
+    "demo": "tsx packages/server/src/scripts/demoCycle.ts",
+    "sim": "tsx packages/server/src/scripts/simulate.ts",
+    "sim:live": "tsx packages/server/src/scripts/simulate.ts --live --loose --cycles 12"
+  }
+}

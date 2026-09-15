@@ -1,0 +1,52 @@
+name: 功能建议
+description: 提出一个新功能或改进建议
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你提出建议。请重点说明**要解决的问题**，而不是先描述实现方式 ——
+        同一个问题往往有更简单的解法。
+        提交前请先看一眼 `README.md` 的「功能范围（第一阶段）」，
+        其中「暂缓」项（多交易所、回测引擎、网格、Telegram 等）属于已知的后续工作。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 现在有什么痛点？什么场景下会卡住？请描述问题本身，而不是缺哪个功能。
+      placeholder: 例：机器人在交易所侧止损触发后，我需要人工去对账才能确认盈亏……
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 设想的方案
+      description: 你希望它怎么工作？如果涉及控制台，请说明在哪个页面。
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案
+      description: 你考虑过的其他做法，以及为什么没选它们。不做这个功能行不行？
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: 影响范围
+      description: 这会触及下单或风控路径吗？触及的话，PR 需要走 CONTRIBUTING.md 里的「涉及真实资金的改动」流程。
+      options:
+        - label: 会触及**下单路径**（`packages/server/src/binance/` 或 `packages/server/src/trader/`）
+        - label: 会触及**风控引擎**（`packages/server/src/risk/`）
+        - label: 会改变**策略配置结构**（`packages/shared/src/strategy.ts`，需要兼容老策略）
+        - label: 只涉及控制台界面或文档，不影响真实下单
+        - label: 不确定
+    validations:
+      required: true
