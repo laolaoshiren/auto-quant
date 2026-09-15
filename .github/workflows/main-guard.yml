@@ -1,0 +1,95 @@
+# 主分支守卫
+#
+# ---------------------------------------------------------------------------
+# 为什么需要这个工作流
+# ---------------------------------------------------------------------------
+# GitHub 的**分支保护（Branch protection）与规则集（Rulesets）在私有仓库上
+# 需要 GitHub Pro 或 Team 方案**。本项目目前是免费方案的私有仓库，因此无法用
+# 官方机制从技术上阻止直接推送到 main。
+#
+# 这个工作流是免费方案下的替代品：它**无法阻止**推送，但会在每次直接推送到
+# main 时把问题大声说出来，并且把「应该怎么合」写清楚。
+#
+# 升级到 Pro 之后，请用下面的命令启用真正的技术强制（届时本工作流变成冗余，
+# 可以删除）：
+#
+#   gh api -X PUT repos/<owner>/<repo>/branches/main/protection \
+#     -H "Accept: application/vnd.github+json" \
+#     -f 'required_status_checks[strict]=true' \
+#     -f 'required_status_checks[contexts][]=类型检查 / 测试 / 构建' \
+#     -f 'required_status_checks[contexts][]=仓库卫生 / 密钥扫描' \
+#     -f 'required_pull_request_reviews[required_approving_review_count]=0' \
+#     -f 'required_pull_request_reviews[dismiss_stale_reviews]=true' \
+#     -f 'required_linear_history=true' \
+#     -f 'required_conversation_resolution=true' \
+#     -f 'allow_force_pushes=false' \
+#     -f 'allow_deletions=false'
+#
+# 完整说明见 CONTRIBUTING.md 的「仓库设置」一节。
+
+name: 主分支守卫
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check-merge-path:
+    name: 检查是否经由 PR 合入
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 这个作业**故意不失败**。
+      #
+      # 理由：本仓库的所有者不是程序员，直接推送在早期是正常操作。
+      # 把 main 长期弄成红色会训练人忽略红色，比没有守卫更糟。
+      # 所以这里只报告事实，把「应该怎么合」讲清楚。
+      #
+      # 团队协作开始后，把最后一行的 exit 0 改成 exit 1，即可变成硬性阻断。
+      - name: 判断本次推送是否来自已合并的 PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # 通过 GitHub API 查这个提交关联了哪些 PR
+          PRS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/pulls" \
+                  --jq '.[].number' 2>/dev/null || echo "")
+
+          if [ -n "$PRS" ]; then
+            echo "✅ 本次提交来自 PR: $(echo "$PRS" | tr '\n' ' ')"
+            echo ""
+            echo "符合流程：改动经由 PR、经过 CI 检查后合入。"
+            exit 0
+          fi
+
+          echo "::notice::检测到直接推送到 main（未经过 PR）"
+          echo ""
+          echo "────────────────────────────────────────────────────────────"
+          echo "  本次推送绕过了 PR 流程"
+          echo "────────────────────────────────────────────────────────────"
+          echo ""
+          echo "  标准流程："
+          echo "    git switch -c feat/你的改动"
+          echo "    git commit -m 'feat(scope): 描述'"
+          echo "    git push -u origin feat/你的改动"
+          echo "    gh pr create --fill"
+          echo "    # CI 通过后合并（squash）"
+          echo ""
+          echo "  为什么重要："
+          echo "    · CI 只在 PR 上跑完整检查（含标题规范校验）"
+          echo "    · PR 留下「为什么这么改」的记录，半年后仍然可查"
+          echo "    · 涉及下单路径的改动可以据此确认验证到了哪一级"
+          echo ""
+          echo "  注意：免费方案的私有仓库无法在技术上阻止直接推送。"
+          echo "        升级 GitHub Pro 后请启用分支保护，见本文件顶部注释。"
+          echo "────────────────────────────────────────────────────────────"
+          exit 0
