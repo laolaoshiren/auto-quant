@@ -1,0 +1,108 @@
+# =============================================================================
+# 构建并推送 Docker 镜像到 GitHub Container Registry
+#
+#   push 到 main（且 CI 通过）→ ghcr.io/<owner>/auto-quant:latest
+#   推送 v* 标签           → 同时打上语义化版本标签
+#
+# -----------------------------------------------------------------------------
+# 为什么用 workflow_run 而不是 on: push
+# -----------------------------------------------------------------------------
+# 直接用 `on: push` 会让镜像与检查**并行**开始构建：CI 还在跑，镜像可能已经推上去了。
+# 一旦那次提交的测试失败，产物就已经在仓库里，而服务器可能已经拉到它并部署了。
+#
+# `workflow_run` 让本工作流在 CI **完成之后**才启动，并且用
+# `conclusion == 'success'` 卡住：**只有通过全部检查的提交才会产出镜像**。
+# 这是"镜像永远可部署"这条保证的实现方式。
+#
+# ⚠️ workflow_run 有一个已知细节：它在默认分支的上下文里运行，且
+#    `github.sha` 指向默认分支的最新提交而不是触发它的那次提交。
+#    所以下面用 `github.event.workflow_run.head_sha` 取真正被验证的那个提交。
+# =============================================================================
+name: Docker 镜像
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # CI 成功才构建；手动触发与标签推送不受此限。
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      # 取真正通过检查的那个提交，而不是默认分支的最新提交。
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: 设置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 生成标签与 OCI 元数据。
+      # 默认会打上 sha-<短哈希>，所以任何一次部署都能追溯到确切的提交。
+      - name: 生成镜像元数据
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # 目前只构建 amd64 —— 部署目标是 x86_64 服务器。
+          # 需要 ARM 时在这里加 linux/arm64（会启用 QEMU，构建时间显著变长）。
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 层缓存放在 Actions 缓存里，重复构建快很多
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 把提交信息写进镜像标签，便于从镜像反查来源
+          build-args: |
+            GIT_SHA=${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: 输出结果
+        run: |
+          echo "### 镜像已推送" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "提交: \`${{ github.event.workflow_run.head_sha || github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "在服务器上执行 \`./up.sh\` 即可部署这个镜像。" >> "$GITHUB_STEP_SUMMARY"
