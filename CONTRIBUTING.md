@@ -254,3 +254,21 @@ feat(strategy): 提示词硬约束段由 RiskControlConfig 动态生成
    本项目已经有过"类型全过、但止损根本没挂上（`-4120`）"这类缺陷。
 4. 触及风控引擎的改动，reviewer 应格外确认：**钳制的方向没有被改反**，且每一次
    运行时对模型决策的推翻都会写进决策审计。
+
+### 标签与配置文件
+
+仓库里的标签**不会自动创建** —— 它们是 GitHub 上的状态，而 issue 模板与
+release-drafter 只在配置里**引用**标签名。若引用的标签不存在，
+**GitHub 会静默忽略**：不报错、不提示，只是那个标签永远打不上。
+
+当前被引用、必须存在的标签：
+
+| 标签 | 被谁引用 | 缺失的后果 |
+| --- | --- | --- |
+| `incident` | `trading_incident.yml` | 交易事故 issue 无法被筛出 —— 这是最需要优先看到的一类 |
+| `documentation` | `docs_improvement.yml` | 文档类 issue 无法筛选 |
+| `enhancement` / `bug` | feature / bug 模板 | 同上 |
+| `breaking` / `enhancement` / `bug` / `perf` / `docs` / `dependencies` | `release-drafter.yml` | 发布说明对应小节**永远为空** |
+
+改动模板或 release-drafter 的 `labels` 字段时，**请确认标签在仓库里真实存在**。
+`perf` 与 `incident` 都曾经漏掉过。
