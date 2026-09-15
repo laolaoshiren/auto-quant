@@ -16,7 +16,7 @@
 1. **GitHub Security Advisories**（首选）
    仓库页面 → `Security` → `Report a vulnerability`。
    这条通道是私密的，便于后续协调披露与 CVE。
-2. **邮件**：`<待填写>`（项目所有者请填入一个真实可用的安全联系邮箱）
+2. **邮件**：如需私下联系，请通过 GitHub 账号 [@laolaoshiren](https://github.com/laolaoshiren) 建立联系渠道。
 
 请在报告中尽量包含：影响范围、复现步骤、以及**你已经脱敏**的证据。
 

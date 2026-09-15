@@ -1,9 +1,10 @@
 # CODEOWNERS
 #
-# ⚠️ 必须替换成真实的 GitHub 用户名，否则此文件不生效（GitHub 会忽略无法解析的
-#    所有者，并且不会报错）。请不要猜测用户名 —— 用真实存在的 handle。
+# 当前所有者：@laolaoshiren
 #
-#   把下面每一处 `<待填写>` 换成所有者（或团队）的 GitHub handle。
+# 团队协作时在这里追加真实 handle。注意 GitHub 会**静默忽略**无法解析的所有者
+# （不报错、不提示），所以改完请确认用户名拼写正确，否则 review 请求根本不会发出。
+#
 #   个人：@octocat       团队：@my-org/my-team（团队需对该仓库有写权限）
 #
 # 语法：路径模式 后跟一个或多个所有者，顺序自上而下匹配，最后匹配到的规则生效。
@@ -15,7 +16,7 @@
 # 用一个兜底规则覆盖全仓库，是为了保证没有任何路径会「无人负责」地合入。
 # 本项目是私有仓库且所有者不是程序员 —— 默认全部经手，比事后追责便宜。
 # ---------------------------------------------------------------------------
-*                       @<待填写>
+*                       @laolaoshiren
 
 # ---------------------------------------------------------------------------
 # 风控引擎 —— 需要更严格的 review
@@ -25,8 +26,8 @@
 # 尤其要确认「钳制的方向」没有被改反（历史上把 clampStopLoss 与
 # clampTakeProfit 合并成一个函数，会让每一笔止盈失效）。
 # ---------------------------------------------------------------------------
-/packages/server/src/risk/                 @<待填写>
-/packages/shared/src/strategy.ts           @<待填写>
+/packages/server/src/risk/                 @laolaoshiren
+/packages/shared/src/strategy.ts           @laolaoshiren
 
 # ---------------------------------------------------------------------------
 # 交易运行时与交易所连接层 —— 直接决定订单能否正确下达
@@ -36,9 +37,9 @@
 # 手动平仓后它朝反方向再开一仓；对账归属闸门失效会把账户盈亏重复记给多个机器人。
 # 触及这些路径的 PR 必须走 CONTRIBUTING.md 的「涉及真实资金的改动」流程。
 # ---------------------------------------------------------------------------
-/packages/server/src/binance/              @<待填写>
-/packages/server/src/trader/               @<待填写>
-/packages/server/src/scripts/liveSmokeTest.ts  @<待填写>
+/packages/server/src/binance/              @laolaoshiren
+/packages/server/src/trader/               @laolaoshiren
+/packages/server/src/scripts/liveSmokeTest.ts  @laolaoshiren
 
 # ---------------------------------------------------------------------------
 # 凭据保险库与安全策略
@@ -46,9 +47,9 @@
 # 加密实现、密钥装载（MASTER_KEY / data/.master.key）与安全策略文档。
 # 这些文件的改动会影响「凭据是否真的安全」，请单独仔细看。
 # ---------------------------------------------------------------------------
-/packages/server/src/crypto/               @<待填写>
-/packages/server/src/api/auth.ts           @<待填写>
-/SECURITY.md                               @<待填写>
+/packages/server/src/crypto/               @laolaoshiren
+/packages/server/src/api/auth.ts           @laolaoshiren
+/SECURITY.md                               @laolaoshiren
 
 # ---------------------------------------------------------------------------
 # 流程与协作配置
@@ -56,5 +57,5 @@
 # CI、依赖更新与本文档自身。流程文件被悄悄放宽（例如允许自动合并依赖 PR）
 # 是很隐蔽的一类风险。
 # ---------------------------------------------------------------------------
-/.github/                                  @<待填写>
-/CONTRIBUTING.md                           @<待填写>
+/.github/                                  @laolaoshiren
+/CONTRIBUTING.md                           @laolaoshiren
