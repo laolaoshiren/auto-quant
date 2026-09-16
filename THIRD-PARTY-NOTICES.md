@@ -2,7 +2,7 @@
 
 本项目的 Docker 镜像包含以下第三方软件包。它们的许可证要求**在再分发时保留版权声明与许可证文本**，本文件即为该义务的履行方式。
 
-运行时依赖共 **194** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
+运行时依赖共 **192** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
 
 > 本文件由 `node scripts/generate-notices.mjs` 自动生成，请勿手工编辑。
 > CI 会校验它与当前依赖一致。
@@ -11,7 +11,7 @@
 
 | 许可证 | 包数量 |
 | --- | --- |
-| MIT | 153 |
+| MIT | 151 |
 | ISC | 25 |
 | BlueOak-1.0.0 | 7 |
 | BSD-3-Clause | 5 |
@@ -28,7 +28,7 @@
 | @babel/runtime | 7.29.7 | MIT | The Babel Team (https://babel.dev/team) |
 | @fastify/accept-negotiator | 2.1.0 | MIT | Aras Abbasi <aras.abbasi@gmail.com> |
 | @fastify/ajv-compiler | 4.0.6 | MIT | Manuel Spigolon <behemoth89@gmail.com> (https://github.com/E |
-| @fastify/cors | 10.1.0 | MIT | Tomas Della Vedova - @delvedor (http://delved.org) |
+| @fastify/cors | 11.3.0 | MIT | Tomas Della Vedova - @delvedor (https://delvedor.dev) |
 | @fastify/error | 4.2.0 | MIT | Tomas Della Vedova |
 | @fastify/fast-json-stringify-compiler | 5.1.0 | MIT | Manuel Spigolon <manuel.spigolon@nearform.com> (https://gith |
 | @fastify/forwarded | 3.0.2 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
@@ -154,9 +154,7 @@
 | mime | 3.0.0 | MIT | Robert Kieffer |
 | minimatch | 10.2.6 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me) |
 | minipass | 7.1.3 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
-| mnemonist | 0.40.0 | MIT | Guillaume Plique |
 | object-assign | 4.1.1 | MIT | Sindre Sorhus |
-| obliterator | 2.0.5 | MIT | Guillaume Plique |
 | on-exit-leak-free | 2.1.2 | MIT | Matteo Collina <hello@matteocollina.com> |
 | once | 1.4.0 | ISC | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
 | package-json-from-dist | 1.0.1 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (https://izs.me) |
