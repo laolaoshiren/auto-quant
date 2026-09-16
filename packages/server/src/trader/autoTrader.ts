@@ -2948,11 +2948,31 @@ export class AutoTrader {
  * Client order ids are how we correlate our records with the exchange's.
  * Binance caps them at 36 characters, and the id must be persisted *before* the
  * request so an ambiguous outcome can be reconciled instead of retried.
+ *
+ * ⚠️ 这里有两个坑，都是实盘上撞出来的：
+ *
+ * **1. 标的符号不能原样拼进去。** Binance 只接受
+ * `^[.A-Z:/a-z0-9_-]{1,36}$` —— 而交易所的标的列表里有**中文名的币**。
+ * 实测 `龙虾USDT` 会让下单直接失败：
+ *
+ *     Binance -1100: Illegal characters found in parameter 'newclientorderid'
+ *
+ * 而且**每个周期都会再失败一次**（策略会反复选中它），所以不能放着不管。
+ *
+ * **2. 唯一性后缀必须先拼。** 原来符号在 `stamp`/`random` 前面，长符号会在
+ * `.slice(0, 36)` 处把它们挤掉 —— 那样两笔订单可能拿到同一个 id。
+ * **撞 id 比下单失败更危险**：账目上无法区分那两笔，对账会认错回合。
+ * 所以唯一性后缀放在最前面，符号只作为可读的尾注，且位置最容易被截断。
+ *
+ * 没人解析这个 id 去取符号（全仓库只有相等匹配），所以调整格式不会影响对账；
+ * 已入库的旧 id 原样保留，只影响新订单。
  */
-function makeClientId(prefix: string, symbol: string): string {
+export function makeClientId(prefix: string, symbol: string): string {
   const stamp = Date.now().toString(36);
   const random = Math.random().toString(36).slice(2, 8);
-  return `${prefix}-${symbol}-${stamp}-${random}`.slice(0, 36);
+  // 只保留币安允许的字符；全被去掉时给一个占位符，避免出现空片段。
+  const safeSymbol = symbol.replace(/[^A-Za-z0-9]/g, '').slice(0, 14) || 'X';
+  return `${prefix}-${stamp}${random}-${safeSymbol}`.slice(0, 36);
 }
 
 /* -------------------------------------------------------------------------- */
