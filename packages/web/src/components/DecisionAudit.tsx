@@ -25,6 +25,16 @@ export const ACTION_LABELS: Record<string, string> = {
   close_short: '平空',
   hold: '持有',
   wait: '等待',
+  /*
+   * 整轮被跳过的通知（`AGENTS.md` §5.2：机器码可以是英文，但**面向操作员的
+   * 文本必须走中文标签** —— 未登记的动作会被 `actionLabel()` 原样显示，
+   * 界面上就会出现 `skip_cycle` 这种机器码）。
+   *
+   * 正常情况下 `DecisionFeed` 的 `LogLine` 对这条根本不显示动作（它不是
+   * 某个标的上的动作，见那里的注释）；这里登记是为了**万一别处渲染到它**
+   * 也不再漏出英文，而不是指望每个调用点都记得特判。
+   */
+  skip_cycle: '跳过本轮',
 };
 
 export const ACTION_TONES: Record<string, Tone> = {
