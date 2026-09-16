@@ -30,6 +30,7 @@ import type {
   TraderStatus,
   User,
 } from '@aq/shared';
+import { orderPurposeLabel, orderStatusLabel, traderStatusLabel } from '@aq/shared';
 import { closeReasonLabel } from './summaries';
 import { fmtSigned, sideLabel } from './format';
 
@@ -299,8 +300,10 @@ export const useEvents = create<EventState>((set, get) => ({
       const order = event.order;
       pushToast(set, {
         kind: 'order',
-        title: `${order.purpose.replace('_', ' ')} · ${order.side} ${order.symbol}`,
-        body: `${order.status}${order.error ? ` — ${order.error}` : ''} · 数量 ${order.quantity}`,
+        // 标签而不是机器码：`purpose` / `status` 是持久化在 orders 表里的英文值，
+        // 存储值不动，但界面上必须是中文（`stop_loss` → 止损，`FILLED` → 已成交）。
+        title: `${orderPurposeLabel(order.purpose)} · ${sideLabel(order.side)} ${order.symbol}`,
+        body: `${orderStatusLabel(order.status)}${order.error ? ` — ${order.error}` : ''} · 数量 ${order.quantity}`,
         traderId: event.traderId,
       });
     }
@@ -333,7 +336,7 @@ export const useEvents = create<EventState>((set, get) => ({
       const status = event.status;
       pushToast(set, {
         kind: status === 'error' ? 'error' : 'info',
-        title: `机器人 #${event.traderId} → ${status}`,
+        title: `机器人 #${event.traderId} → ${traderStatusLabel(status)}`,
         body: event.detail ?? '',
         traderId: event.traderId,
       });

@@ -309,7 +309,7 @@ export class AutoTrader {
    * `tick()` it does not swallow failures, so a caller sees the real error.
    */
   async runOnce(): Promise<string> {
-    if (this.cycleInFlight) throw new Error('A cycle is already running.');
+    if (this.cycleInFlight) throw new Error('上一轮决策尚未结束，请稍后再试。');
     return this.inCycle(async () => {
       this.cycleNumber += 1;
       const summary = await this.runCycle(this.cycleNumber);

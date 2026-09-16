@@ -321,20 +321,106 @@ export function closeReasonLabel(code: string): string {
   return CLOSE_REASON_LABELS[code] ?? code;
 }
 
-/** Label for a trading mode. */
-export const TRADING_MODE_LABELS: Record<string, string> = {
-  conservative: '稳健',
-  aggressive: '进取',
-  scalping: '短线',
-};
-
-/** Label for a trader's lifecycle status. */
-export const TRADER_STATUS_LABELS: Record<string, string> = {
+/**
+ * Chinese labels for trader status codes.
+ *
+ * Same reasoning as `CLOSE_REASON_LABELS` above, and the same trap: `status` is
+ * a **machine code persisted in the database** (`traders.status`), so the stored
+ * value must never be translated — only what the operator reads.
+ *
+ * This map used to live inside the badge component, which meant anything outside
+ * that component rendered the raw code. A status event therefore surfaced to the
+ * operator as:
+ *
+ *     机器人 #6 → stopped
+ *
+ * That is not a cosmetic problem: `stopped` is also what a deliberate operator
+ * stop writes, so an English word was the only thing distinguishing "the bot was
+ * stopped" from any other status. Putting the map in the shared package means a
+ * new status cannot be added without every surface picking up a label.
+ */
+export const TRADER_STATUS_LABELS: Record<TraderStatus, string> = {
   running: '运行中',
   stopped: '已停止',
   starting: '启动中',
   error: '异常',
   safe_mode: '安全模式',
+};
+
+/** Label for a trader status, falling back to the raw code rather than blank. */
+export function traderStatusLabel(status: string): string {
+  return TRADER_STATUS_LABELS[status as TraderStatus] ?? status;
+}
+
+/**
+ * Chinese labels for an order's purpose.
+ *
+ * Same rule as the maps above: `purpose` is persisted in `orders.purpose`, so the
+ * **stored value never changes** — only what the operator reads. Before this map
+ * existed the order toast rendered the raw code with its underscore swapped for a
+ * space, so an operator saw `stop loss · BUY BTCUSDT` instead of
+ * `止损 · 多 BTCUSDT`.
+ */
+export const ORDER_PURPOSE_LABELS: Record<string, string> = {
+  entry: '开仓',
+  exit: '平仓',
+  stop_loss: '止损',
+  take_profit: '止盈',
+  adjustment: '调整',
+};
+
+export function orderPurposeLabel(purpose: string): string {
+  return ORDER_PURPOSE_LABELS[purpose] ?? purpose;
+}
+
+/**
+ * Chinese labels for exchange order status codes.
+ *
+ * These are Binance's own values (`NEW` / `FILLED` / …). They stay English in the
+ * database and in the API — the console is the only place they get translated,
+ * and unknown values fall through unchanged so a new status is never hidden.
+ */
+export const ORDER_STATUS_LABELS: Record<string, string> = {
+  NEW: '已挂单',
+  PARTIALLY_FILLED: '部分成交',
+  FILLED: '已成交',
+  CANCELED: '已撤销',
+  CANCELLED: '已撤销',
+  REJECTED: '已拒绝',
+  EXPIRED: '已过期',
+  EXPIRED_IN_MATCH: '已过期（撮合中）',
+};
+
+export function orderStatusLabel(status: string): string {
+  return ORDER_STATUS_LABELS[status] ?? status;
+}
+
+/**
+ * Chinese labels for order types.
+ *
+ * `STOP_MARKET` / `TAKE_PROFIT_MARKET` are the conditional types the broker
+ * routes to `/fapi/v1/algoOrder`; an operator reading a table should not have to
+ * know that.
+ */
+export const ORDER_TYPE_LABELS: Record<string, string> = {
+  LIMIT: '限价',
+  MARKET: '市价',
+  STOP: '止损限价',
+  STOP_MARKET: '止损市价',
+  TAKE_PROFIT: '止盈限价',
+  TAKE_PROFIT_MARKET: '止盈市价',
+  TRAILING_STOP_MARKET: '移动止损',
+};
+
+export function orderTypeLabel(type: string): string {
+  return ORDER_TYPE_LABELS[type] ?? type;
+}
+
+/** Label for a trading mode. */
+export const TRADING_MODE_LABELS: Record<string, string> = {
+  conservative: '稳健',
+  aggressive: '进取',
+  scalping: '短线',
 };
 
 /**
