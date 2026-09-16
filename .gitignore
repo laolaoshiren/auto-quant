@@ -107,3 +107,6 @@ docs/research/vendor/
 
 # UI 冒烟检查生成的截图（scripts/ui-smoke.mjs）
 packages/web/ui-smoke/
+
+# 一次性的视觉方向对比页（给维护者看，不属于项目产物）
+_ui-directions.html

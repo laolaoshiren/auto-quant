@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { RefreshCw } from 'lucide-react';
 import { api } from '../lib/api';
 import { Badge, Button, Field, NumberInput, Spinner, Toggle } from './ui';
 import { DEFAULT_SETTLE_ASSET, fmtTime } from '../lib/format';
@@ -190,6 +191,10 @@ export function useExchangeEquity({
  * the exchange rather than asking the operator to type it is the whole point —
  * a fat-fingered baseline makes every future figure wrong in a way that looks
  * plausible.
+ *
+ * 这里没有"元信息网格"要排：它是对话框里的一行字段，所以只做密度清理 ——
+ * 旧的 `text-2xs` 兼容别名换成正式档位 `text-xs`，刷新动作的 `⟳` 文字符号
+ * 换成 `lucide-react` 图标（`DESIGN.md` §5：不用文字符号当图标）。
  */
 export function EquitySourceField({
   state,
@@ -204,13 +209,19 @@ export function EquitySourceField({
 }) {
   const { value, setValue, manual, setManual, loading, error, verified, readAt, asset, refresh } = state;
 
+  const refreshButton = (label: string) => (
+    <Button size="icon" variant="ghost" aria-label={label} title={label} onClick={refresh}>
+      <RefreshCw aria-hidden className="h-3.5 w-3.5" />
+    </Button>
+  );
+
   return (
     <div className="space-y-1.5">
       <Field label="起始权益（钱包余额）">
         {loading ? (
           <div className="input flex items-center gap-2 text-ink-lo">
             <Spinner />
-            <span className="text-2xs">正在从交易所读取钱包余额</span>
+            <span className="text-xs">正在从交易所读取钱包余额</span>
           </div>
         ) : (
           <NumberInput
@@ -225,7 +236,7 @@ export function EquitySourceField({
 
       {/* Caption: where this number came from, and how to re-read it -------- */}
       {!loading && (
-        <div className="flex flex-wrap items-center gap-1.5 text-2xs">
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
           {manual && (
             <span className="flex items-center gap-1.5 text-ink-faint">
               <Badge tone="warn">手动指定</Badge>
@@ -235,12 +246,10 @@ export function EquitySourceField({
 
           {!manual && verified && (
             <span className="flex items-center gap-1.5 text-up">
-              <span>
+              <span className="num">
                 已从交易所实时读取（{asset}，读取于 {fmtTime(readAt)}）
               </span>
-              <Button small variant="ghost" title="重新从交易所读取钱包余额" onClick={refresh}>
-                ⟳
-              </Button>
+              {refreshButton('重新从交易所读取钱包余额')}
             </span>
           )}
 
@@ -252,19 +261,16 @@ export function EquitySourceField({
                   可打开“手动指定”自行填写；留空创建时基准为 0，收益率将没有意义。
                 </span>
               </span>
-              <Button small variant="ghost" title="重试读取" onClick={refresh}>
-                ⟳
-              </Button>
+              {refreshButton('重试读取交易所余额')}
             </span>
           )}
 
           {!manual && !verified && !error && (
             <span className="flex items-center gap-1.5 text-ink-faint">
-              <span className="text-ink-faint">
-                {editing ? '重新从交易所读取：' : '立即从交易所读取：'}
-              </span>
-              <Button small variant="ghost" title="从交易所读取钱包余额" onClick={refresh}>
-                {editing ? '重新从交易所读取' : '⟳ 读取'}
+              <span>{editing ? '重新从交易所读取：' : '立即从交易所读取：'}</span>
+              <Button size="sm" variant="ghost" onClick={refresh}>
+                <RefreshCw aria-hidden className="h-3.5 w-3.5" />
+                {editing ? '重新读取' : '读取'}
               </Button>
             </span>
           )}
@@ -282,7 +288,7 @@ export function EquitySourceField({
         }
       />
 
-      <p className="text-2xs leading-relaxed text-ink-faint">
+      <p className="text-xs leading-relaxed text-ink-faint">
         这个数字是机器人收益率的基准：填错会让之后每一项业绩指标都算错，所以默认从交易所读取，而不是手填。
       </p>
     </div>

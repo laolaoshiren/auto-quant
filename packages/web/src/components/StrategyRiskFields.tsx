@@ -17,10 +17,10 @@ import { FieldError, NumField, Section } from './StrategyFieldKit';
 /** 一组风控参数的卡片。底色比 Section 更亮，读起来是"浮在上面"的重点区。 */
 function RiskCell({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
-    <div className="min-w-0 rounded-md border border-base-700 bg-base-850/80 p-3">
+    <div className="min-w-0 rounded-md border border-base-700 bg-base-850/80 p-2.5">
       <div className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-lo">{title}</div>
-      {hint && <p className="mt-1 text-xs leading-relaxed text-ink-faint">{hint}</p>}
-      <div className="mt-2.5 space-y-2.5">{children}</div>
+      {hint && <p className="mt-0.5 text-xs leading-relaxed text-ink-faint">{hint}</p>}
+      <div className="mt-2 space-y-2">{children}</div>
     </div>
   );
 }
@@ -57,7 +57,11 @@ export function RiskSection({
       }
     >
       <div className="md:col-span-2 xl:col-span-3">
-        <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2 3xl:grid-cols-4 [&_input]:py-2.5 [&_input]:text-lg">
+        {/*
+          1600px（100em）上就铺成 4 列，而不是等到 120em：核心风控是这一屏
+          最该"不滚动就能看完"的一组数字（LAYOUT.md §2 的判断标准）。
+        */}
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4 [&_input]:py-2.5 [&_input]:text-lg">
           <RiskCell title="杠杆上限（倍）" hint="模型想要更高杠杆时会被压到这里，而不是拒绝整笔交易。">
             <NumField
               label="默认杠杆（倍）"
@@ -383,7 +387,7 @@ export function PromptSection({
             <div key={field.key} className="min-w-0 rounded-md border border-base-750 bg-base-850/40 p-3">
               <Field label={field.label} hint={field.hint}>
                 <TextArea
-                  rows={9}
+                  rows={7}
                   value={value}
                   onChange={(event) =>
                     onChange({ promptSections: { ...promptSections, [field.key]: event.target.value } })

@@ -8,6 +8,7 @@
  */
 import { type ReactNode } from 'react';
 import type { Decision, DecisionRecord, ExecutionLogEntry } from '@aq/shared';
+import { orderPurposeLabel } from '@aq/shared';
 import { Badge, Button, Collapsible, CopyButton, type Tone } from './ui';
 import { useCopy } from '../lib/hooks';
 import { fmtInt, fmtUsd } from '../lib/format';
@@ -66,17 +67,15 @@ export function statusLabel(status: string): string {
   return STATUS_LABELS[status as ExecutionLogEntry['status']] ?? status;
 }
 
-/** `OrderRecord.purpose` is a stable machine code — never display it raw. */
-const PURPOSE_LABELS: Record<string, string> = {
-  entry: '开仓',
-  exit: '平仓',
-  stop_loss: '止损',
-  take_profit: '止盈',
-  adjustment: '调整',
-};
-
+/**
+ * `OrderRecord.purpose` 是稳定机器码 —— 永远不要把原码打在界面上。
+ *
+ * 标签表本身在 `@aq/shared`（`orderPurposeLabel`）里：服务端日志、提示词和
+ * 这个控制台读的是同一批码。这里保留同名导出只是为了让老调用点不用改，
+ * **不再自带一份 map** —— 两份 map 迟早会分叉，而分叉的那天没人会发现。
+ */
 export function purposeLabel(purpose: string): string {
-  return PURPOSE_LABELS[purpose] ?? purpose;
+  return orderPurposeLabel(purpose);
 }
 
 /** Tailwind classes for an execution-log status. */
@@ -184,16 +183,19 @@ function fmtPriceShort(value: number): string {
 /**
  * One execution-log entry.
  *
- * `entry.action` is a stable machine code and is rendered verbatim — the
- * Chinese vocabulary lives in `ACTION_LABELS`, and applying it here would make
- * the log disagree with the audit record an operator greps in the database.
+ * `entry.action` is a stable machine code, so the operator reads the Chinese
+ * label while the **raw code stays in the tooltip** — the audit trail and the
+ * risk engine both store the code, and someone grepping the database for
+ * `open_long` must still be able to find which row they are looking at.
  */
 export function ExecutionRow({ entry }: { entry: ExecutionLogEntry }) {
   return (
     <div className={`rounded-md border px-3 py-2 ${EXEC_ROW_CLASS[entry.status] ?? EXEC_ROW_CLASS.ok}`}>
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={STATUS_TONE[entry.status] ?? 'neutral'}>{statusLabel(entry.status)}</Badge>
-        <span className="num text-base font-semibold text-ink-hi">{actionLabel(entry.action)}</span>
+        <span className="num text-base font-semibold text-ink-hi" title={entry.action}>
+          {actionLabel(entry.action)}
+        </span>
         <span className="num text-xs text-ink-lo">{entry.symbol}</span>
         {entry.notionalUsd !== undefined && (
           <span className="num ml-auto text-xs text-ink-lo" title="名义价值（USDT）">

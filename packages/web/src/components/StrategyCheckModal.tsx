@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Ban, Bot, Check, Info, LoaderCircle, Minus, ShieldAlert, ShieldCheck, WifiOff, X } from 'lucide-react';
 import { api, type CheckStage, type StrategyCheckResult, type StrategyCheckSample } from '../lib/api';
 import { Badge, Button, Collapsible, Empty, ErrorNote, Field, Modal, Select, Spinner, TextInput, cn } from './ui';
+import { SectionLabel } from './shell';
 import { ExecutionList, PromptBlock, RejectedBanner, actionLabel } from './DecisionAudit';
 import { fmtInt, fmtLatency, fmtUsd } from '../lib/format';
 
@@ -486,7 +487,7 @@ function CheckReport({ result }: { result: StrategyCheckResult }) {
   return (
     <div className="space-y-3">
       {/* 结论 ------------------------------------------------------------ */}
-      <div className={cn('rounded-md border px-3 py-3', toneRing)}>
+      <div className={cn('rounded-md border px-3 py-2.5', toneRing)}>
         <div className="flex items-start gap-2.5">
           <Icon aria-hidden className={cn('mt-0.5 h-5 w-5 shrink-0', toneText)} />
           <div className="min-w-0 flex-1">
@@ -532,10 +533,13 @@ function CheckReport({ result }: { result: StrategyCheckResult }) {
 
       {/* 阶段清单：一眼看出卡在哪一步 ------------------------------------ */}
       <div>
-        <div className="mb-1.5 flex items-baseline justify-between gap-2">
-          <h4 className="text-base font-semibold text-ink-hi">阶段</h4>
-          <span className="text-xs text-ink-faint">图标 = 通过 / 失败 / 未执行；详情见下方折叠区</span>
-        </div>
+        {/* 区块标题统一走 SectionLabel（LAYOUT.md §5）：小字距标签 + 延伸线，
+            与下面的阶段列表在视觉上绑在一起。 */}
+        <SectionLabel
+          title="阶段"
+          count={ordered.length}
+          actions={<span className="text-xs text-ink-faint">图标 = 通过 / 失败 / 未执行</span>}
+        />
         <ol className="space-y-1">
           {ordered.map((stage, index) => {
             const skipped = 'skipped' in stage && stage.skipped === true;
@@ -698,7 +702,7 @@ function SampleReport({ sample }: { sample: StrategyCheckSample }) {
 
       {/* 风控判定：先给"模型想干什么"，再给"风控怎么处理" */}
       <div className="space-y-2">
-        <div className="panel-title">模型提出的开仓提案</div>
+        <SectionLabel title="模型提出的开仓提案" className="mb-1.5" />
         {(sample.decisions ?? []).filter((d) => isOpen(d.action)).length === 0 ? (
           <Empty
             message="模型没有提出任何开仓提案"
@@ -749,7 +753,7 @@ function SampleReport({ sample }: { sample: StrategyCheckSample }) {
       </div>
 
       <div>
-        <div className="panel-title mb-1">执行记录</div>
+        <SectionLabel title="执行记录" className="mb-1.5" />
         <ExecutionList
           log={sample.executionLog ?? []}
           empty={

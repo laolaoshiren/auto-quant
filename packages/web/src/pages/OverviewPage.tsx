@@ -2,16 +2,25 @@
  * System overview — the landing page, and the only screen that has to answer
  * "how is my money doing?" in the first second.
  *
- * Structure, in deliberate order of visual weight (DESIGN.md §4):
+ * The structure is `LAYOUT.md` §1: a page-level header row, then a **left metric
+ * rail** (280px) beside the main content. It used to be one flat vertical flow —
+ * four equal-weight figures, then a 300px chart that often drew a horizontal
+ * line — which is exactly the "no hierarchy, constant scrolling" complaint this
+ * change answers.
  *
- *   1. 头条数字 — 总归属权益 / 今日盈亏 / 总收益率 / 浮动盈亏 at `text-3xl`–`text-4xl`,
- *      full width, one row, nothing else competing with them;
- *   2. 资金曲线 — the whole width and 300px tall. It is the only thing on the
- *      page that shows *shape* rather than a snapshot, so it gets real height;
- *   3. 机器人明细 — smaller and denser; every per-bot control still lives on
- *      「机器人」, this is a read-only snapshot with the two shortcuts an operator
- *      actually wants on arrival;
- *   4. 运行环境 — a footer, at the smallest size on the page.
+ *   1. 页头 — greeting, data freshness, and the page's primary action;
+ *   2. 左栏 — the account-level figures, grouped 账户 / 交易. `MetricGroup`
+ *      supplies the grouping, which *is* the hierarchy: one `size="lg"` lead
+ *      figure (总归属权益) and everything else clearly secondary;
+ *   3. 主区 — the equity curve, which is the primary visual **only when the
+ *      series has shape** (≥3 points with real variation, `equityShape`). A flat
+ *      or thin series collapses to a 36px strip (§4: never spend a third of the
+ *      viewport drawing a straight line);
+ *   4. 机器人明细 — the dense per-bot table;
+ *   5. 运行环境 — a footer, at the smallest size on the page, holding status
+ *      only. Internal diagnostics (clock offset, API weight) appear **only when
+ *      they are out of bounds**, with the consequence rather than the raw value
+ *      (§3).
  *
  * The presentational pieces are in `overviewParts.tsx` so this file stays
  * readable as structure rather than as markup.
@@ -26,11 +35,17 @@ import { useSummaries } from '../lib/summaries';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useRunOnce } from '../lib/actions';
 import { Button, Empty, ErrorNote, Panel, Spinner3 } from '../components/ui';
-import { SectionHeading, TraderStatusBadge } from '../components/Badges';
+import { Metric, MetricGroup, PageShell, SectionLabel } from '../components/shell';
 import { NewTraderModal, StartTraderModal } from '../components/TraderModals';
-import { pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import { EQUITY_RANGES, mergeEquityCurves, rangeSpanMs, type EquityRange } from '../components/equityCurve';
-import { EquitySkeleton, HeadlineMetric, SystemFact, TradersSnapshotTable, useRecentTrades } from './overviewParts';
+import {
+  EquitySkeleton,
+  EquityStrip,
+  SystemFact,
+  TradersSnapshotTable,
+  equityShape,
+  useRecentTrades,
+} from './overviewParts';
 import {
   fmtAsset,
   fmtClockOffset,
@@ -49,7 +64,10 @@ import {
  * `recharts` is the largest dependency in the app and the overview page is the
  * first thing loaded after login — importing the chart statically would put the
  * whole library in front of the first paint of the headline numbers. The shell
- * and the four figures render immediately; the curve lands a moment later.
+ * and the rail render immediately; the curve lands a moment later.
+ *
+ * It is reached only when `equityShape` says there is something to draw, so a
+ * flat or brand-new account never downloads it at all.
  */
 const EquityCurveChart = lazy(() =>
   import('../components/EquityCurveChart').then((module) => ({ default: module.EquityCurveChart })),
@@ -57,6 +75,15 @@ const EquityCurveChart = lazy(() =>
 
 /** Per-bot rows shown before the page links out to 「机器人」. */
 const SNAPSHOT_ROWS = 5;
+
+/** 图表高度。LAYOUT.md §6：单张图不超过 30% 屏高，900px 视口下 240 正好在线内。 */
+const CHART_HEIGHT = 240;
+
+/** 时钟偏移超过这个绝对值就会被币安用 -1021 拒绝 —— 到这时它才值得占用一行。 */
+const CLOCK_WARN_MS = 2000;
+
+/** API 权重是**按分钟滚动**的，等到 100% 就已经在被拒绝了；70% 开始预警。 */
+const WEIGHT_WARN_PERCENT = 70;
 
 export function OverviewPage() {
   useDocumentTitle('总览');
@@ -145,12 +172,21 @@ export function OverviewPage() {
   const statsPending = traders.length > 0 && withStats < traders.length;
   const totalReturnPercent = totalBaseline > 0 ? ((totalEquity - totalBaseline) / totalBaseline) * 100 : 0;
 
+  /*
+   * Closed-trade counts are **summed, never divided**: `wins` / `losses` are real
+   * counts and `winRatePercent` is a server figure. Deriving an account-level
+   * rate from the two counts would be inventing a number the API never returned,
+   * so the rail shows the counts themselves (hard rule in the task brief).
+   */
+  const totalWins = traders.reduce((sum, trader) => sum + (statsMap[trader.id]?.wins ?? 0), 0);
+  const totalLosses = traders.reduce((sum, trader) => sum + (statsMap[trader.id]?.losses ?? 0), 0);
+
   /**
    * Start of the selected window, plus whether that start is really the start of
    * the window or merely the oldest snapshot there is.
    *
    * `windowStartValue` comes off the same curve that is drawn, so the change shown
-   * above the chart and the shape of the chart can never disagree. When the window
+   * in the rail and the shape of the curve can never disagree. When the window
    * holds fewer than two points it falls back to the earliest recorded value — and
    * the label has to say so, otherwise a young account's whole history gets
    * presented as "今日盈亏". `null` means there is nothing recorded at all, in
@@ -218,253 +254,285 @@ export function OverviewPage() {
 
   const listFailed = tradersQuery.error !== null && tradersQuery.data === null;
 
+  /* --- 曲线形态：决定主区是画图表、还是收成一条紧凑的缩略线（§4） ------- */
+  const shape = equityShape(curve);
+  const rangeLabel = range === 'ALL' ? '全部区间' : `近 ${range}`;
+
+  const pnlTone = (value: number): 'default' | 'up' | 'down' =>
+    value > 0 ? 'up' : value < 0 ? 'down' : 'default';
+
+  /* --- 诊断值只在越界时出现（§3） --------------------------------------- */
+  const clockWarn = Math.abs(system?.clockOffsetMs ?? 0) > CLOCK_WARN_MS;
+  const weightPercent =
+    system?.weightLimit && system.weightLimit > 0
+      ? Math.round(((system.weightUsed ?? 0) / system.weightLimit) * 100)
+      : 0;
+  const weightWarn = weightPercent >= WEIGHT_WARN_PERCENT;
+
+  /*
+   * 左指标栏。分两组（账户 / 交易），组本身就是层级 —— 这正是改造前
+   * 四个同等大小的数字并排时缺的东西。
+   *
+   * 布局随断点变（LAYOUT.md §1）：
+   * - `xl` 及以上：一列，就是那根 280px 的指标栏；
+   * - `sm`–`xl`：两组并排，占两列 —— 这样塌陷到内容上方时只有三四行高，
+   *   而不是八个指标一条长龙把主区顶到屏幕外（150% 缩放正落在这个区间）；
+   * - `< sm`：单列堆叠。
+   */
+  const rail = (
+    <div className="grid grid-cols-1 gap-4 rounded-lg border border-base-750 bg-base-900 p-3.5 shadow-panel sm:grid-cols-2 xl:grid-cols-1">
+      <MetricGroup title="账户">
+        <Metric
+          label="总归属权益"
+          size="lg"
+          tone="strong"
+          value={fmtAsset(totalEquity, 'USDT', 2)}
+          sub={
+            equityChange === null ? (
+              <span className="text-ink-faint">还没有权益快照</span>
+            ) : (
+              <span className={pnlColor(equityChange)}>
+                {fmtUsdSigned(equityChange, 2)}
+                {equityChangePercent !== null && ` · ${fmtPercent(equityChangePercent)}`}
+              </span>
+            )
+          }
+          title="各机器人归属权益之和 = Σ(初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈)。共用同一个交易所账户的机器人各自独立归属，所以这个合计不等于账户里的钱（账户权益在机器人页与交易所凭证页）。"
+        />
+
+        <Metric
+          /* The honest label changes with the data: calling a two-hour-old
+             account's entire history "今日盈亏" would misreport it by orders of
+             magnitude on the one number the page exists to show. */
+          label={has24hCoverage ? '今日盈亏' : '区间盈亏'}
+          tone={equityChange === null ? 'default' : pnlTone(equityChange)}
+          value={equityChange === null ? '—' : fmtUsdSigned(equityChange, 2)}
+          sub={
+            equityChangePercent === null
+              ? '还没有权益快照'
+              : `${has24hCoverage ? '24 小时' : `较${range === 'ALL' ? '起始' : `近 ${range}`}`} · ${fmtPercent(equityChangePercent)}`
+          }
+          title="归属权益最近 24 小时的变化（按快照口径）。它同时包含已实现与浮动盈亏，因此不再分别累加，避免重复计算。快照不足 24 小时时改显示自最早一条快照以来的变化。"
+        />
+
+        <Metric
+          label="总收益率"
+          tone={traders.length > 0 ? pnlTone(totalReturnPercent) : 'default'}
+          value={traders.length > 0 ? fmtPercent(totalReturnPercent) : '—'}
+          sub={`初始投入 ${fmtUsd(totalBaseline, 2)}`}
+          title="（当前总归属权益 − 初始投入）÷ 初始投入。初始投入取各机器人的 initialEquity 之和。"
+        />
+
+        <Metric
+          label="浮动盈亏"
+          tone={pnlTone(unrealized)}
+          value={fmtUsdSigned(unrealized, 2)}
+          sub={`${fmtInt(totalOpen)} 个持仓 · 未落袋`}
+          title="所有机器人**自己的**持仓的未实现盈亏合计（不是交易所账户的总浮盈 —— 账户的总浮盈在同一账户下的每个机器人身上都是同一个数）。它随时在变，且尚未计入已实现盈亏。"
+        />
+      </MetricGroup>
+
+      {/* 并排时（sm–xl）这组不在上一组的下方，那条分隔线会变成一根悬空的横线 */}
+      <MetricGroup title="交易" className="sm:border-t-0 sm:pt-0 xl:border-t xl:pt-3">
+        <Metric
+          label="运行中机器人"
+          value={`${fmtInt(runningCount)} / ${fmtInt(traders.length)}`}
+          sub={traders.length === 0 ? '还没有机器人' : '循环已启动 / 已配置'}
+          title="分母是已配置的机器人数量，分子是循环正在跑的。停止的机器人不会产生新的决策。"
+        />
+        <Metric
+          label="持仓（个）"
+          value={fmtInt(totalOpen)}
+          sub="各机器人自己的持仓合计"
+          title="所有机器人**自己的**持仓个数之和。同一账户下多个机器人看到的是同一个钱包，但持仓归属各自独立。"
+        />
+        <Metric
+          label="平仓记录"
+          value={withStats > 0 ? `${fmtInt(totalWins)} 盈 / ${fmtInt(totalLosses)} 亏` : '—'}
+          sub={withStats > 0 ? '按各机器人统计求和' : '统计读取中…'}
+          title="已平仓的盈利笔数与亏损笔数之和（真实计数）。账户级胜率不在这里换算 —— 各机器人自己的胜率见下表与机器人页。"
+        />
+      </MetricGroup>
+    </div>
+  );
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <ErrorNote>{actionError}</ErrorNote>
 
       {/* ------------------------------------------------------------------ */}
-      {/*  1. 头条数字                                                        */}
+      {/*  页头：标题 + 状态 + 主要操作（LAYOUT.md §1）                        */}
       {/* ------------------------------------------------------------------ */}
-      <section
-        aria-labelledby="overview-headline"
-        className="rounded-lg border border-base-750 bg-base-900 px-4 py-4 shadow-panel sm:px-5 sm:py-5"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-          <h2 id="overview-headline" className="text-md font-semibold text-ink-hi">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="min-w-0">
+          {/* `h2` 而不是 `h1`：页面级标题由应用外壳的顶栏提供，这里不重复一层 */}
+          <h2 className="truncate text-lg font-semibold tracking-tight text-ink-hi">
             欢迎回来{user?.username ? `，${user.username}` : ''}
           </h2>
-          <div className="flex items-center gap-2">
-            <span className="num text-xs text-ink-faint">
-              更新于 {timeAgo(tradersQuery.updatedAt ? new Date(tradersQuery.updatedAt).toISOString() : null)}
-            </span>
-            <Button
-              small
-              variant="ghost"
-              busy={refreshing}
-              onClick={refreshAll}
-              title="重新读取机器人列表、统计与系统状态"
-            >
-              <RefreshCw aria-hidden className="h-3.5 w-3.5" />
-              刷新
-            </Button>
-          </div>
-        </div>
-
-        {/* 权益 leads and is the widest cell: it is the number an operator checks
-            first, and giving it the same weight as 浮动盈亏 would flatten the page. */}
-        <div className="mt-4 grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2 xl:grid-cols-[1.35fr_1fr_1fr_1fr]">
-          <HeadlineMetric
-            label="总归属权益"
-            value={fmtAsset(totalEquity, 'USDT', 2)}
-            valueClass="text-ink-strong"
-            loading={tradersQuery.loading && tradersQuery.data === null}
-            sub={
-              equityChange === null ? (
-                '还没有权益快照'
-              ) : (
-                <>
-                  <span className={pnlColor(equityChange)}>
-                    {fmtUsdSigned(equityChange, 2)}
-                    {equityChangePercent !== null && ` · ${fmtPercent(equityChangePercent)}`}
-                  </span>{' '}
-                  <span className="text-ink-faint">{has24hCoverage ? '24 小时' : `较${range === 'ALL' ? '起始' : `近 ${range}`}`}</span>
-                </>
-              )
-            }
-            title="各机器人归属权益之和 = Σ(初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈)。共用同一个交易所账户的机器人各自独立归属，所以这个合计不等于账户里的钱（账户权益在机器人页与交易所凭证页）。"
-          />
-
-          <HeadlineMetric
-            /* The honest label changes with the data: calling a two-hour-old
-               account's entire history "今日盈亏" would misreport it by orders of
-               magnitude on the one number the page exists to show. */
-            label={has24hCoverage ? '今日盈亏' : '区间盈亏'}
-            value={equityChange === null ? '—' : <span className={pnlColor(equityChange)}>{fmtUsdSigned(equityChange, 2)}</span>}
-            sub={
-              equityChangePercent === null
-                ? '还没有权益快照'
-                : has24hCoverage
-                  ? `24 小时 · ${fmtPercent(equityChangePercent)}`
-                  : `自最早快照 · ${fmtPercent(equityChangePercent)}`
-            }
-            title="归属权益最近 24 小时的变化（按快照口径）。它同时包含已实现与浮动盈亏，因此不再分别累加，避免重复计算。快照不足 24 小时时改显示自最早一条快照以来的变化。"
-          />
-
-          <HeadlineMetric
-            label="总收益率"
-            value={
-              <span className={traders.length > 0 ? pnlColor(totalReturnPercent) : undefined}>
-                {traders.length > 0 ? fmtPercent(totalReturnPercent) : '—'}
-              </span>
-            }
-            sub={`初始投入 ${fmtUsd(totalBaseline, 2)}`}
-            loading={statsPending}
-            title="（当前总归属权益 − 初始投入）÷ 初始投入。初始投入取各机器人的 initialEquity 之和。"
-          />
-
-          <HeadlineMetric
-            label="浮动盈亏"
-            value={<span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>}
-            valueClass={pnlColor(unrealized)}
-            sub={`${fmtInt(totalOpen)} 个持仓 · 未落袋`}
-            loading={statsPending}
-            title="所有机器人**自己的**持仓的未实现盈亏合计（不是交易所账户的总浮盈 —— 账户的总浮盈在同一账户下的每个机器人身上都是同一个数）。它随时在变，且尚未计入已实现盈亏。"
-          />
-        </div>
-      </section>
-
-      {/* ------------------------------------------------------------------ */}
-      {/*  2. 资金曲线                                                        */}
-      {/* ------------------------------------------------------------------ */}
-      <Panel
-        padded={false}
-        bodyClassName="p-3"
-        title="各机器人的归属权益曲线之和"
-        actions={
-          <div role="group" aria-label="曲线时间范围" className="flex items-center gap-1">
-            {EQUITY_RANGES.map((item) => (
-              <Button
-                key={item.id}
-                small
-                variant={range === item.id ? 'primary' : 'ghost'}
-                aria-pressed={range === item.id}
-                onClick={() => setRange(item.id)}
-              >
-                {item.label}
-              </Button>
-            ))}
-          </div>
-        }
-      >
-        {equityQuery.error ? (
-          <ErrorNote>{equityQuery.error}</ErrorNote>
-        ) : (
-          <Suspense fallback={<EquitySkeleton height={300} />}>
-            <EquityCurveChart
-              points={curve}
-              range={range}
-              height={300}
-              baseline={totalBaseline > 0 ? totalBaseline : undefined}
-              primaryLabel="总归属权益"
-            />
-          </Suspense>
-        )}
-        <p className="num mt-1.5 text-xs text-ink-faint">
-          {equityQuery.loading && equityQuery.data !== null
-            ? '正在更新曲线…'
-            : `共 ${fmtInt(curve.length)} 个快照点 · 每个决策周期结束记录一次`}
-        </p>
-      </Panel>
-
-      {/* ------------------------------------------------------------------ */}
-      {/*  3. 机器人明细                                                      */}
-      {/* ------------------------------------------------------------------ */}
-      <section aria-labelledby="overview-traders">
-        <SectionHeading
-          title="机器人"
-          sub={
-            <span className="num">
-              {fmtInt(traders.length)} 个已配置 · {fmtInt(runningCount)} 个运行中 · {fmtInt(totalOpen)} 个持仓
-            </span>
-          }
-          right={
-            <>
-              <Link to="/traders" className="btn btn-ghost">
-                管理机器人
-              </Link>
-              <Button variant="primary" onClick={() => setNewOpen(true)}>
-                新建机器人
-              </Button>
-            </>
-          }
-        />
-        <h2 id="overview-traders" className="sr-only">
-          机器人明细
-        </h2>
-
-        {listFailed ? (
-          <Panel>
-            <ErrorNote>{tradersQuery.error}</ErrorNote>
-            <Button className="mt-2" onClick={tradersQuery.reload}>
-              重试
-            </Button>
-          </Panel>
-        ) : tradersQuery.loading && tradersQuery.data === null ? (
-          <Panel>
-            <Spinner3 label="正在读取机器人" />
-          </Panel>
-        ) : traders.length === 0 ? (
-          <Panel>
-            <Empty
-              icon={<Bot aria-hidden className="h-5 w-5" />}
-              message="还没有机器人，先创建一个。"
-              hint="创建后默认以「模拟」模式运行：不需要交易所密钥、不下真实订单，可以先看几轮决策再决定是否切到实盘。"
-              action={
-                <div className="flex flex-wrap items-center justify-center gap-2">
-                  <Button variant="primary" onClick={() => setNewOpen(true)}>
-                    新建机器人
-                  </Button>
-                  <Link to="/exchanges" className="btn btn-ghost">
-                    先去配置交易所
-                  </Link>
-                </div>
-              }
-            />
-          </Panel>
-        ) : (
-          <TradersSnapshotTable
-            traders={snapshotRows}
-            statsMap={statsMap}
-            liveStatus={liveStatus}
-            totalEquity={totalEquity}
-            equityOf={equityOf}
-            recentTrades={recentTrades}
-            busyId={busyId}
-            runOnceBusyId={runOnceBusyId}
-            navigate={navigate}
-            onRunOnce={(trader) => void runOnce(trader.id, trader.name)}
-            onStop={(trader) => void stop(trader)}
-            onStart={setStartTarget}
-            extraCount={traders.length - snapshotRows.length}
-          />
-        )}
-
-        {!listFailed && tradersQuery.error && (
-          <ErrorNote className="mt-2">最近一次刷新失败，下面是上一次的数据：{tradersQuery.error}</ErrorNote>
-        )}
-        {statsPending && (
-          <p className="mt-2 flex items-center gap-1.5 text-xs text-ink-faint">
-            <CircleAlert aria-hidden className="h-3.5 w-3.5" />
-            正在读取 {traders.length - withStats} 个机器人的统计…
+          <p className="num mt-0.5 truncate text-xs text-ink-faint">
+            更新于 {timeAgo(tradersQuery.updatedAt ? new Date(tradersQuery.updatedAt).toISOString() : null)}
+            {statsPending && ` · 正在读取 ${fmtInt(traders.length - withStats)} 个机器人的统计…`}
           </p>
-        )}
-      </section>
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          <Button small variant="ghost" busy={refreshing} onClick={refreshAll} title="重新读取机器人列表、统计与系统状态">
+            <RefreshCw aria-hidden className="h-3.5 w-3.5" />
+            刷新
+          </Button>
+          <Link to="/traders" className="btn btn-ghost btn-xs">
+            管理机器人
+          </Link>
+          <Button small variant="primary" onClick={() => setNewOpen(true)}>
+            新建机器人
+          </Button>
+        </div>
+      </header>
+
+      <PageShell rail={rail}>
+        {/* ---------------------------------------------------------------- */}
+        {/*  1. 资金曲线 —— 有形状才展开成图表（§4）                          */}
+        {/* ---------------------------------------------------------------- */}
+        <section aria-labelledby="overview-equity">
+          <SectionLabel
+            title="归属权益曲线"
+            actions={
+              <div role="group" aria-label="曲线时间范围" className="flex items-center gap-1">
+                {EQUITY_RANGES.map((item) => (
+                  <Button
+                    key={item.id}
+                    small
+                    variant={range === item.id ? 'primary' : 'ghost'}
+                    aria-pressed={range === item.id}
+                    onClick={() => setRange(item.id)}
+                  >
+                    {item.label}
+                  </Button>
+                ))}
+              </div>
+            }
+          />
+          <h2 id="overview-equity" className="sr-only">
+            各机器人的归属权益曲线之和
+          </h2>
+
+          {equityQuery.error ? (
+            <ErrorNote>{equityQuery.error}</ErrorNote>
+          ) : equityQuery.loading && equityQuery.data === null ? (
+            <EquitySkeleton />
+          ) : shape.hasShape ? (
+            <Panel padded={false} bodyClassName="p-3">
+              <Suspense fallback={<EquitySkeleton />}>
+                <EquityCurveChart
+                  points={curve}
+                  range={range}
+                  height={CHART_HEIGHT}
+                  baseline={totalBaseline > 0 ? totalBaseline : undefined}
+                  primaryLabel="总归属权益"
+                />
+              </Suspense>
+            </Panel>
+          ) : (
+            <EquityStrip
+              points={curve}
+              change={equityChange}
+              changePercent={equityChangePercent}
+              rangeLabel={rangeLabel}
+              flat={shape.flat}
+            />
+          )}
+        </section>
+
+        {/* ---------------------------------------------------------------- */}
+        {/*  2. 机器人明细                                                     */}
+        {/* ---------------------------------------------------------------- */}
+        <section aria-labelledby="overview-traders">
+          <SectionLabel
+            title="机器人"
+            count={`${fmtInt(traders.length)} 个 · ${fmtInt(runningCount)} 运行中`}
+            actions={
+              <Link to="/traders" className="btn btn-ghost btn-xs">
+                全部机器人
+              </Link>
+            }
+          />
+          <h2 id="overview-traders" className="sr-only">
+            机器人明细
+          </h2>
+
+          {listFailed ? (
+            <Panel>
+              <ErrorNote>{tradersQuery.error}</ErrorNote>
+              <Button className="mt-2" onClick={tradersQuery.reload}>
+                重试
+              </Button>
+            </Panel>
+          ) : tradersQuery.loading && tradersQuery.data === null ? (
+            <Panel>
+              <Spinner3 label="正在读取机器人" />
+            </Panel>
+          ) : traders.length === 0 ? (
+            <Panel>
+              <Empty
+                icon={<Bot aria-hidden className="h-5 w-5" />}
+                message="还没有机器人，先创建一个。"
+                hint="创建后默认以「模拟」模式运行：不需要交易所密钥、不下真实订单，可以先看几轮决策再决定是否切到实盘。"
+                action={
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Button variant="primary" onClick={() => setNewOpen(true)}>
+                      新建机器人
+                    </Button>
+                    <Link to="/exchanges" className="btn btn-ghost">
+                      先去配置交易所
+                    </Link>
+                  </div>
+                }
+              />
+            </Panel>
+          ) : (
+            <TradersSnapshotTable
+              traders={snapshotRows}
+              statsMap={statsMap}
+              liveStatus={liveStatus}
+              totalEquity={totalEquity}
+              equityOf={equityOf}
+              recentTrades={recentTrades}
+              busyId={busyId}
+              runOnceBusyId={runOnceBusyId}
+              navigate={navigate}
+              onRunOnce={(trader) => void runOnce(trader.id, trader.name)}
+              onStop={(trader) => void stop(trader)}
+              onStart={setStartTarget}
+              extraCount={traders.length - snapshotRows.length}
+            />
+          )}
+
+          {!listFailed && tradersQuery.error && (
+            <ErrorNote className="mt-2">最近一次刷新失败，下面是上一次的数据：{tradersQuery.error}</ErrorNote>
+          )}
+          {statsPending && (
+            <p className="mt-2 flex items-center gap-1.5 text-xs text-ink-faint">
+              <CircleAlert aria-hidden className="h-3.5 w-3.5" />
+              正在读取 {traders.length - withStats} 个机器人的统计…
+            </p>
+          )}
+        </section>
+      </PageShell>
 
       {/* ------------------------------------------------------------------ */}
-      {/*  4. 运行环境（页脚，全页最小字号）                                   */}
+      {/*  3. 运行环境（页脚，全页最小字号；只放状态，诊断值越界才出现）        */}
       {/* ------------------------------------------------------------------ */}
-      <section aria-labelledby="overview-system" className="rounded-lg border border-base-800 bg-base-900/60 px-4 py-3">
-        <h2 id="overview-system" className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-lo">
+      <section aria-labelledby="overview-system" className="rounded-lg border border-base-800 bg-base-900/60 px-3.5 py-3">
+        <SectionLabel title="运行环境" className="mb-2" />
+        <h2 id="overview-system" className="sr-only">
           运行环境
         </h2>
-        <dl className="num mt-2 grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-3 xl:grid-cols-6">
-          <SystemFact label="环境" value={system?.environmentLabel ?? '—'} sub={system?.environment} />
+        <dl className="num grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3 xl:grid-cols-4">
+          <SystemFact label="环境" value={system?.environmentLabel ?? '—'} />
           <SystemFact
             label="模式"
             value={system ? (system.dryRun ? '模拟' : '实盘资金') : '—'}
             sub={system?.tradingDisabled ? '交易已禁用' : '交易已启用'}
             tone={system ? (system.dryRun ? 'text-accent' : 'text-warn') : undefined}
-          />
-          <SystemFact
-            label="时钟偏移"
-            value={fmtClockOffset(system?.clockOffsetMs)}
-            sub="本地 − 交易所"
-            tone={(system?.clockOffsetMs ?? 0) > 2000 ? 'text-warn' : undefined}
-          />
-          <SystemFact
-            label="API 权重"
-            value={`${fmtNum(system?.weightUsed ?? 0, 0)} / ${fmtNum(system?.weightLimit ?? 0, 0)}`}
-            sub="当前分钟"
           />
           <SystemFact label="可交易对" value={fmtInt(system?.tradableSymbols)} sub="USDT-M 永续" />
           <SystemFact
@@ -473,6 +541,27 @@ export function OverviewPage() {
             sub={socketOpen ? 'WebSocket 已连接' : '已退回轮询'}
             tone={socketOpen ? 'text-up' : 'text-warn'}
           />
+          {/*
+            时钟偏移与 API 权重是**内部诊断值**（LAYOUT.md §3）：正常运行时它们
+            永远"没事"，看一百次有九十九次拿不到信息。所以只在越界时出现，
+            并且带后果而不是原始数值。
+          */}
+          {clockWarn && (
+            <SystemFact
+              label="⚠ 时钟偏差"
+              value={fmtClockOffset(system?.clockOffsetMs)}
+              sub="签名请求会被拒（-1021）"
+              tone="text-warn"
+            />
+          )}
+          {weightWarn && (
+            <SystemFact
+              label="⚠ API 权重"
+              value={`${fmtInt(weightPercent)}%`}
+              sub="继续升高会被封 IP（418）"
+              tone="text-warn"
+            />
+          )}
         </dl>
 
         {system?.tradingDisabled && (

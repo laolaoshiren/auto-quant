@@ -16,13 +16,12 @@
  */
 import { useState } from 'react';
 import type { OrderRecord, PositionView, TradeRecord } from '@aq/shared';
-import { orderTypeLabel } from '@aq/shared';
+import { orderPurposeLabel, orderStatusLabel, orderTypeLabel } from '@aq/shared';
 import { api } from '../lib/api';
 import { useEvents } from '../lib/store';
 import { usePolled } from '../lib/hooks';
-import { Badge, Button, Empty, Modal, Panel, Spinner3 } from './ui';
+import { Badge, Button, Modal, Panel, Spinner3 } from './ui';
 import { SideBadge } from './Badges';
-import { purposeLabel } from './DecisionAudit';
 import { closeReasonLabel } from '../lib/summaries';
 import {
   NET_PNL_FORMULA,
@@ -53,6 +52,22 @@ function CapNote({ shown, total }: { shown: number; total: number }) {
     <p className="border-t border-base-800 px-3 py-2 text-xs text-ink-faint">
       只渲染最近 {shown} 行，共 {total} 行 — 更早的记录请在交易所或导出接口查询，避免一次渲染上千行拖慢页面。
     </p>
+  );
+}
+
+/**
+ * 空表格只留一行（`LAYOUT.md` §4）。
+ *
+ * 不用 `ui.Empty`：它的 `py-10` 是给整页空状态用的，放进表格里会在面板中间
+ * 留出半屏空白 —— 那正是这次改造要修的东西。空表要说的只有"现在没有"，
+ * 以及一句"什么情况下会有"。
+ */
+function TableEmpty({ message, hint }: { message: string; hint?: string }) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-3.5 py-2.5">
+      <span className="text-base text-ink-lo">{message}</span>
+      {hint && <span className="text-xs text-ink-faint">{hint}</span>}
+    </div>
   );
 }
 
@@ -125,7 +140,7 @@ export function PositionsTable({
 
   if (query.loading && positions.length === 0) return <Spinner3 label="正在加载持仓" />;
   if (positions.length === 0) {
-    return <Empty message="暂无持仓。" hint="模型选择空仓 — 没有符合条件的标时不会下任何订单。" />;
+    return <TableEmpty message="暂无持仓。" hint="模型选择空仓 — 没有符合条件的标时不会下任何订单。" />;
   }
 
   const shown = positions.slice(0, MAX_ROWS);
@@ -271,9 +286,9 @@ export function OrdersTable({
   if (query.loading && all.length === 0) return <Spinner3 label="正在加载委托" />;
   if (orders.length === 0) {
     return onlyOpen ? (
-      <Empty message="暂无当前委托。" hint="交易所侧的止损 / 止盈单在触发前会出现在这里。" />
+      <TableEmpty message="暂无当前委托。" hint="交易所侧的止损 / 止盈单在触发前会出现在这里。" />
     ) : (
-      <Empty message="暂无订单记录。" />
+      <TableEmpty message="暂无订单记录。" />
     );
   }
 
@@ -307,7 +322,7 @@ export function OrdersTable({
                 <td className="td num text-ink-faint">{fmtDateTime(order.createdAt)}</td>
                 <td className="td font-semibold text-ink-hi">{order.symbol}</td>
                 <td className="td">
-                  <Badge tone={purposeTone(order.purpose)}>{purposeLabel(order.purpose)}</Badge>
+                  <Badge tone={purposeTone(order.purpose)}>{orderPurposeLabel(order.purpose)}</Badge>
                 </td>
                 <td className={`td font-semibold ${order.side === 'BUY' ? 'text-up' : 'text-down'}`}>
                   {order.side === 'BUY' ? '买入' : '卖出'}
@@ -319,12 +334,16 @@ export function OrdersTable({
                 <td className="td num text-right">{fmtQty(order.filledQty)}</td>
                 <td className="td num text-right">{order.avgPrice ? fmtPrice(order.avgPrice) : '—'}</td>
                 <td className="td">
+                  {/* `order.status` 是币安自己的机器码（NEW / FILLED / …），
+                      中文标签在 `@aq/shared` 的 ORDER_STATUS_LABELS —— 之前这里
+                      直接把英文码打在表格里。 */}
                   <span
+                    title={order.status}
                     className={
                       isOpenOrder(order) ? 'text-up' : /cancel|reject|expired/i.test(order.status) ? 'text-warn' : 'text-ink-mid'
                     }
                   >
-                    {order.status}
+                    {orderStatusLabel(order.status)}
                   </span>
                 </td>
                 <td className="td max-w-[240px] truncate text-down" title={order.error ?? undefined}>
@@ -381,7 +400,7 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
 
   if (query.loading && trades.length === 0) return <Spinner3 label="正在加载成交记录" />;
   if (trades.length === 0) {
-    return <Empty message="暂无历史成交。" hint="每笔平仓都会连同平仓原因一起持久化。" />;
+    return <TableEmpty message="暂无历史成交。" hint="每笔平仓都会连同平仓原因一起持久化。" />;
   }
 
   /*
@@ -592,7 +611,9 @@ export function TraderTables({
         </div>
       </div>
 
-      <div className="min-h-[220px]">
+      {/* 空表格不占位（§4）：`min-h` 曾经给这一区留了 220px，于是"暂无持仓"
+          下面跟着一片空白。高度交给内容，有行时才需要滚动。 */}
+      <div>
         {tab === 'positions' && <PositionsTable traderId={traderId} onCloseRequest={setCloseTarget} />}
         {tab === 'orders' && <OrdersTable traderId={traderId} onlyOpen refreshToken={token} />}
         {tab === 'trades' && <TradesTable traderId={traderId} refreshToken={token} />}

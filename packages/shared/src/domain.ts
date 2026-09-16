@@ -389,6 +389,12 @@ export const ORDER_STATUS_LABELS: Record<string, string> = {
   REJECTED: '已拒绝',
   EXPIRED: '已过期',
   EXPIRED_IN_MATCH: '已过期（撮合中）',
+  /*
+   * 补进来的原因：控制台的"终态"集合（`TraderTables.tsx` 的 `TERMINAL_STATUSES`）
+   * 里一直有它，标签表却没有 —— 于是同一列里 `EXPIRED_IN_MATCH` 是中文、
+   * 它是英文原码。一边中文一边英文比全英文更难读。
+   */
+  EXPIRED_IN_FUTURES: '已过期（期货）',
 };
 
 export function orderStatusLabel(status: string): string {
@@ -437,6 +443,28 @@ export const TRADING_MODE_LABELS: Record<string, string> = {
   aggressive: '进取',
   scalping: '短线',
 };
+
+/**
+ * Chinese labels for the coin-source machine codes.
+ *
+ * Same rule as the maps above: `coinSource.sourceType` is a stored contract value
+ * (`static` / `coinpool` / `oi_top` / `mixed`) that must never be translated in
+ * the database — only what the operator reads. This map did not exist, so the
+ * strategy list rendered the **raw code**, and a Chinese console showed a bare
+ * `mixed` in the 币种池 column. The editor had its own local copy of the same
+ * four labels (`SOURCE_TYPES` in `StrategyFields.tsx`), which is exactly the
+ * divergence the shared map exists to prevent.
+ */
+export const COIN_SOURCE_TYPE_LABELS: Record<string, string> = {
+  static: '静态列表',
+  coinpool: '动态币种池',
+  oi_top: '持仓量领先',
+  mixed: '混合（并集）',
+};
+
+export function coinSourceTypeLabel(sourceType: string): string {
+  return COIN_SOURCE_TYPE_LABELS[sourceType] ?? sourceType;
+}
 
 /**
  * One complete decision cycle. `systemPrompt` + `userPrompt` + `rawResponse`

@@ -1,15 +1,20 @@
 /**
  * AI 模型页：每个交易周期都由这里的模型给出决策。
  *
- * 这一页只做两件事：把"这些模型是干什么用的"说清楚（否则用户不知道要不要配第二个），
+ * 这一页只做两件事：把"这些模型是干什么用的"说清（否则用户不知道要不要配第二个），
  * 以及把真正干活的 `AiModelsSection` 放上来。真正的状态（加载/空/错误）由它自己负责。
+ *
+ * 排版上按 LAYOUT.md §1：这是**列表页**，内容就是一张表，所以用整宽骨架、
+ * 不套左指标栏。上面那三步说明压成三条紧凑的横条（§2）—— 它是首次配置的
+ * 引路牌，不该占掉表格的位置。
  */
 import { Link } from 'react-router-dom';
 import { CircleHelp } from 'lucide-react';
 import { useApp } from '../lib/store';
 import { useDocumentTitle } from '../lib/hooks';
-import { Badge, Panel } from '../components/ui';
+import { Badge } from '../components/ui';
 import { SectionHeading } from '../components/Badges';
+import { PageShell, SectionLabel } from '../components/shell';
 import { AiModelsSection } from '../components/settings/AiModelsSection';
 
 /** 三步走。空状态只写"暂无数据"等于没说，这三步才是真正的下一步。 */
@@ -24,7 +29,7 @@ export function ModelsPage() {
   const system = useApp((s) => s.system);
 
   return (
-    <div className="space-y-3">
+    <PageShell>
       <SectionHeading
         title="AI 模型"
         sub={
@@ -45,17 +50,21 @@ export function ModelsPage() {
         </div>
       )}
 
-      <Panel title="怎么用" bodyClassName="p-3" padded={false}>
-        <ol className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+      <section>
+        <SectionLabel title="怎么用" />
+        <ol className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
           {STEPS.map((step, index) => (
-            <li key={step.title} className="min-w-0 rounded-md border border-base-750 bg-base-850/50 px-3 py-2">
-              <div className="flex items-center gap-1.5">
-                <span className="num flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-accent/20 text-xs font-bold text-accent">
-                  {index + 1}
-                </span>
-                <span className="text-base font-semibold text-ink-hi">{step.title}</span>
-              </div>
-              <p className="mt-1 text-xs leading-relaxed text-ink-lo">{step.detail}</p>
+            <li
+              key={step.title}
+              className="flex min-w-0 gap-2 rounded-md border border-base-750 bg-base-850/50 px-2.5 py-1.5"
+            >
+              <span className="num mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-accent/20 text-xs font-bold text-accent">
+                {index + 1}
+              </span>
+              <span className="min-w-0">
+                <span className="block text-base font-semibold leading-tight text-ink-hi">{step.title}</span>
+                <span className="mt-0.5 block text-xs leading-snug text-ink-lo">{step.detail}</span>
+              </span>
             </li>
           ))}
         </ol>
@@ -70,9 +79,9 @@ export function ModelsPage() {
             。
           </span>
         </p>
-      </Panel>
+      </section>
 
       <AiModelsSection />
-    </div>
+    </PageShell>
   );
 }

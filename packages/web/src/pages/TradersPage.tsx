@@ -1,18 +1,21 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Pencil, Play, RotateCw, Square, Trash2 } from 'lucide-react';
+import * as PopoverPrimitive from '@radix-ui/react-popover';
+import { ArrowUpRight, MoreHorizontal, Pencil, Play, RotateCw, Square, Trash2 } from 'lucide-react';
 import type { TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useRunOnce } from '../lib/actions';
-import { Badge, Button, Empty, ErrorNote, Modal, Panel, Spinner3, Stat } from '../components/ui';
+import { Button, ErrorNote, Modal, Panel, Spinner3, cn } from '../components/ui';
 import { SectionHeading, TraderStatusBadge } from '../components/Badges';
+import { Metric, SectionLabel } from '../components/shell';
 import { NewTraderModal, StartTraderModal } from '../components/TraderModals';
 import { TraderConfigModal } from '../components/TraderConfigModal';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts, type PnlCosts } from '../components/PnlBreakdown';
 import {
+  fmtDrawdownPercent,
   fmtDuration,
   fmtInt,
   fmtPercent,
@@ -36,10 +39,19 @@ const MAX_ROWS = 100;
 type PendingAction = { kind: 'stop' | 'delete'; trader: TraderRow } | null;
 
 /**
- * Dedicated bot list.
+ * 机器人列表。
  *
- * The overview deliberately stays a system dashboard, so the full table with
- * every per-bot control lives here instead of being squeezed into it.
+ * `LAYOUT.md` §1 明确说**列表页不套左指标栏** —— 它的内容就是一整张表。
+ * 所以这一页只有：页头、一行舰队合计、整宽表格。
+ *
+ * 之前下半屏空着，是因为表格高度写死 `max-h-[70vh]` 而内容只有几行：面板在
+ * 半屏处就结束了，下面是一片页面底色，看起来像页面坏了。现在表格容器**按视口
+ * 撑满**（`h-[calc(100vh-21rem)]`），空的地方落在表格内部 —— 那是"表格还有位置"，
+ * 而不是"页面到底了"。行高一档没变（§2 要求 `py-2` 的密度）。
+ *
+ * 为什么不换成卡片网格：卡片在只有一两个维护时会排成一行，垂直方向**留白更多**，
+ * 想填满就得把卡片拉高 —— 那正是"用大卡片解决空"的老毛病（§2）。而且卡片意味着
+ * 同一批数字要有第二套渲染和第二个标签词表，列表页没必要付这个代价。
  */
 export function TradersPage() {
   useDocumentTitle('机器人');
@@ -153,60 +165,72 @@ export function TradersPage() {
       />
 
       {/*
-        The fleet's four headline numbers, at the size DESIGN.md §4 asks for.
-        `Stat` rather than a bespoke band: this row and the per-bot page are
-        read side by side, and the same figures should not change size between
-        them.
+        舰队合计：**一行紧凑指标，不是四张大卡片**（§2）。
+        这一页的主体是下面那张表，四张 `text-2xl` 的卡片会把表格挤下去半屏 ——
+        而它们回答的问题（一共几个、跑了几个、总共多少钱）一句话就能说完。
       */}
-      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-        <Stat
+      <div className="flex flex-wrap items-start gap-x-8 gap-y-2 rounded-lg border border-base-750 bg-base-900/50 px-3.5 py-2.5">
+        <Metric
           label="运行中"
           value={
             <>
               {runningCount}
-              <span className="text-xl text-ink-faint"> / {traders.length}</span>
+              <span className="text-sm text-ink-faint"> / {traders.length}</span>
             </>
           }
           sub="运行 / 总数"
         />
-        <Stat
+        <Metric
           label="总归属权益"
           value={fmtUsd(totalEquity, 2)}
+          size="lg"
+          tone="strong"
           sub={`${fmtInt(openPositions)} 个未平仓合约`}
           title="各机器人「归属权益」之和 = Σ(初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈)。共用同一个交易所账户的机器人各自独立归属，所以这个合计不等于账户里的钱 —— 账户权益见机器人页与交易所凭证页。"
         />
-        <Stat
+        <Metric
           label="已实现盈亏"
           value={fmtUsdSigned(totalRealized, 2)}
-          tone={pnlColor(totalRealized)}
+          tone={totalRealized > 0 ? 'up' : totalRealized < 0 ? 'down' : 'default'}
           sub={fleet.known ? <PnlBreakdown costs={fleet.costs} /> : '所有机器人合计'}
           title={`${NET_PNL_FORMULA}。此处为所有机器人已平仓成交的净盈亏合计。`}
         />
-        <Stat
-          label="当前持仓"
-          value={fmtInt(openPositions)}
-          sub="所有机器人的未平仓合约数"
-        />
+        <Metric label="当前持仓" value={fmtInt(openPositions)} sub="所有机器人的未平仓合约数" />
       </div>
 
       {actionError && <ErrorNote>{actionError}</ErrorNote>}
 
-      <Panel padded={false}>
+      <Panel padded={false} bodyClassName="p-0">
         {tradersQuery.loading && traders.length === 0 ? (
           <Spinner3 label="正在加载机器人" />
         ) : traders.length === 0 ? (
-          <Empty
-            message="还没有机器人。"
-            hint="先创建一个，再选择模拟或实盘 — 模拟是默认模式，无需交易所密钥即可放心运行。"
-            action={
-              <Button variant="primary" onClick={() => setNewOpen(true)}>
-                + 新建机器人
-              </Button>
-            }
-          />
+          /* 空状态不占位（§4）：三行文字说完"现在做什么"，不撑满一屏。 */
+          <div className="px-3.5 py-3">
+            <p className="text-base text-ink-lo">还没有机器人。</p>
+            <p className="mt-0.5 text-xs leading-relaxed text-ink-faint">
+              先创建一个，再选择模拟或实盘 — 模拟是默认模式，无需交易所密钥即可放心运行。
+            </p>
+            <Button variant="primary" className="mt-2" onClick={() => setNewOpen(true)}>
+              + 新建机器人
+            </Button>
+          </div>
         ) : (
           <div>
-            <div className="scroll-x max-h-[70vh] overflow-y-auto">
+            <SectionLabel
+              title="机器人列表"
+              count={traders.length}
+              className="mb-2 px-3 pt-3"
+              actions={
+                <Button size="sm" variant="ghost" busy={tradersQuery.loading} onClick={() => void tradersQuery.reload()}>
+                  刷新
+                </Button>
+              }
+            />
+            {/*
+              容器撑满剩余视口高度：行少时下面是表格自己的空白（"还有位置"），
+              行多时表体自己滚动，页面不会被顶长。
+            */}
+            <div className="scroll-x h-[calc(100vh-22rem)] min-h-[16rem] overflow-y-auto">
               <table className="w-full border-collapse">
                 <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
                   <tr>
@@ -218,13 +242,19 @@ export function TradersPage() {
                     >
                       归属权益
                     </th>
-                    <th className="th text-right">总收益率</th>
+                    <th className="th text-right" title="总收益率 = 归属权益相对起始权益的变化；下面一行是它的构成：净 = 毛 − 手续费 − 资金费。">
+                      盈亏
+                    </th>
+                    <th className="th text-right" title="胜率（winRatePercent，已是 0–100 的百分数）· 盈/亏笔数与盈利因子（∞ = 尚无亏损成交）。">
+                      胜率 / PF
+                    </th>
                     <th className="th text-right">持仓</th>
-                    <th className="th text-right">胜率</th>
-                    <th className="th text-right">成交笔数</th>
-                    <th className="th text-right">最大回撤</th>
-                    <th className="th text-right">运行时长</th>
-                    <th className="th text-right">最近周期</th>
+                    <th className="th text-right" title="历史最大回撤（账户从高水位回落的最大幅度）。">
+                      最大回撤
+                    </th>
+                    <th className="th text-right" title="已运行时长 / 最近一个决策周期的时间。">
+                      运行 / 最近周期
+                    </th>
                     <th className="th text-right">操作</th>
                   </tr>
                 </thead>
@@ -237,14 +267,14 @@ export function TradersPage() {
                     return (
                       <tr key={trader.id} className="row-hover">
                         <td className="td">
-                          {/* Whole cell is the link: the row's job is to open the
-                              trader, and a name-sized target is not enough. */}
-                          <Link to={`/traders/${trader.id}`} className="group block">
-                            <div className="text-base font-semibold text-ink-hi group-hover:text-accent">
+                          {/* 整格可点：这一行的职责就是打开这个机器人。名字列有宽度上限，
+                              否则一个长名字会把整张表撑到横向滚动。 */}
+                          <Link to={`/traders/${trader.id}`} className="group block max-w-[18rem]">
+                            <div className="truncate text-base font-semibold text-ink-hi group-hover:text-accent" title={trader.name}>
                               {trader.name}
                             </div>
-                            <div className="num text-xs text-ink-faint">
-                              #{trader.id} · 周期 {trader.lastCycleNumber} · 每 {trader.cycleIntervalMinutes}m
+                            <div className="num truncate text-xs text-ink-faint">
+                              #{trader.id} · 周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
                             </div>
                           </Link>
                         </td>
@@ -271,12 +301,14 @@ export function TradersPage() {
                             </div>
                           )}
                         </td>
+                        {/*
+                          毛 / 净 / PF 三行合成一块（原来分散在「总收益率」和「成交笔数」两列里）：
+                          它们是同一个口径下的三个数，分开摆既占宽度又要来回扫。
+                          净 first：它才是余额真正发生的变化；毛是它的输入，退一档显示。
+                        */}
                         <td className={`td num text-right ${stats ? pnlColor(stats.totalReturnPercent) : ''}`}>
                           {stats ? fmtPercent(stats.totalReturnPercent) : '—'}
                           {stats && (
-                            /* 净 first: it is what the balance did. 毛 is the
-                               input, kept one muted step back so the two are
-                               directly comparable. */
                             <div
                               className="text-xs text-ink-faint"
                               title={`${pnlFormulaText(statsCosts(stats))}。浮动盈亏 ${fmtUsdSigned(
@@ -284,38 +316,42 @@ export function TradersPage() {
                                 2,
                               )} 未计入本行。`}
                             >
-                              净 {fmtUsdSigned(stats.realizedPnl, 2)} · 毛{' '}
-                              {fmtUsdSigned(stats.grossRealizedPnl, 2)}
+                              净 {fmtUsdSigned(stats.realizedPnl, 2)} · 毛 {fmtUsdSigned(stats.grossRealizedPnl, 2)}
                             </div>
                           )}
                         </td>
-                        <td className="td num text-right">{stats ? fmtInt(stats.openPositions) : '—'}</td>
-                        {/* `winRatePercent` is already 0–100 — never × 100 again. */}
-                        <td className="td num text-right">{stats ? `${stats.winRatePercent.toFixed(1)}%` : '—'}</td>
+                        {/* `winRatePercent` is already 0–100 — never × 100 again.
+                            盈/亏是后端给的真实笔数，不由胜率反推。 */}
                         <td className="td num text-right">
                           {stats ? (
                             <>
-                              {fmtInt(stats.totalTrades)}
-                              <div className="text-xs text-ink-faint" title="盈利因子（∞ = 尚无亏损成交）">
-                                PF {fmtProfitFactor(stats.profitFactor)}
+                              {`${stats.winRatePercent.toFixed(1)}%`}
+                              <div
+                                className="text-xs text-ink-faint"
+                                title={`${fmtInt(stats.totalTrades)} 笔已平仓；盈利因子 ∞ 表示尚无亏损成交。`}
+                              >
+                                {fmtInt(stats.wins)} 盈 · {fmtInt(stats.losses)} 亏 · PF{' '}
+                                {fmtProfitFactor(stats.profitFactor)}
                               </div>
                             </>
                           ) : (
                             '—'
                           )}
                         </td>
+                        <td className="td num text-right">{stats ? fmtInt(stats.openPositions) : '—'}</td>
                         <td className="td num text-right text-down">
-                          {stats ? `-${stats.maxDrawdownPercent.toFixed(2)}%` : '—'}
+                          {stats ? fmtDrawdownPercent(stats.maxDrawdownPercent) : '—'}
                         </td>
+                        {/* 运行时长 + 最近周期合成一格：它们是同一个问题的两个方面
+                            （还在跑吗、跑到哪了），分两列各占 100px 不值。 */}
                         <td className="td num text-right text-ink-lo">
                           {stats ? fmtDuration(stats.uptimeHours * 60) : '—'}
+                          <div className="text-xs text-ink-faint">{timeAgo(trader.lastCycleAt)}</div>
                         </td>
-                        <td className="td num text-right text-ink-lo">{timeAgo(trader.lastCycleAt)}</td>
-                        <td className="td text-right">
+                        <td className="td">
+                          {/* 一行、两个常用动作 + 一个溢出菜单。以前这一格把所有动作
+                              平铺开，行高被撑起来、宽度也被吃掉。 */}
                           <div className="flex items-center justify-end gap-1">
-                            <Button size="sm" onClick={() => navigate(`/traders/${trader.id}`)}>
-                              打开
-                            </Button>
                             {trader.isRunning ? (
                               <>
                                 <Button
@@ -345,25 +381,12 @@ export function TradersPage() {
                                 启动
                               </Button>
                             )}
-                            <Button
-                              size="sm"
-                              onClick={() => setEditTarget(trader)}
-                              disabled={trader.isRunning}
-                              title={trader.isRunning ? '请先停止该机器人再修改配置。' : '编辑配置'}
-                            >
-                              <Pencil aria-hidden className="h-3.5 w-3.5" />
-                              编辑
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              busy={rowBusy && pending?.kind === 'delete'}
-                              title={`删除“${trader.name}” — 需要确认`}
-                              aria-label={`删除 ${trader.name}`}
-                              onClick={() => setPending({ kind: 'delete', trader })}
-                            >
-                              <Trash2 aria-hidden className="h-3.5 w-3.5" />
-                            </Button>
+                            <TraderRowMenu
+                              trader={trader}
+                              onOpen={() => navigate(`/traders/${trader.id}`)}
+                              onEdit={() => setEditTarget(trader)}
+                              onDelete={() => setPending({ kind: 'delete', trader })}
+                            />
                           </div>
                         </td>
                       </tr>
@@ -479,5 +502,107 @@ export function TradersPage() {
         }}
       />
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  行的溢出菜单                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 每行一个"更多操作"。
+ *
+ * 打开面板 / 编辑 / 删除都是低频动作，平铺在行里会把 11 列挤得更紧，而且它们的
+ * 存在感与「立即运行」一样强 —— 删除这种危险动作不该和主操作长得一样醒目。
+ *
+ * 用 Radix Popover 而不是手写的绝对定位 div（DESIGN.md §5）：Esc 关闭、点外部
+ * 关闭、焦点管理都已经正确，这里只负责外观 —— 与 `settings/AiModelsSection.tsx`
+ * 里的模型选择器同一套做法。
+ */
+function TraderRowMenu({
+  trader,
+  onOpen,
+  onEdit,
+  onDelete,
+}: {
+  trader: TraderRow;
+  onOpen: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  /** 每个动作做完就收起菜单，否则它会盖住下一行的反馈。 */
+  const run = (action: () => void) => () => {
+    setOpen(false);
+    action();
+  };
+
+  return (
+    <PopoverPrimitive.Root open={open} onOpenChange={setOpen}>
+      <PopoverPrimitive.Trigger asChild>
+        <Button size="icon" variant="ghost" title="更多操作" aria-label={`${trader.name} 的更多操作`}>
+          <MoreHorizontal aria-hidden className="h-3.5 w-3.5" />
+        </Button>
+      </PopoverPrimitive.Trigger>
+      <PopoverPrimitive.Portal>
+        <PopoverPrimitive.Content
+          align="end"
+          sideOffset={4}
+          role="menu"
+          aria-label={`${trader.name} 的操作`}
+          className="z-50 w-44 overflow-hidden rounded-md border border-base-600 bg-base-900 py-1 shadow-overlay"
+        >
+          <RowMenuItem icon={<ArrowUpRight aria-hidden className="h-3.5 w-3.5" />} label="打开面板" onClick={run(onOpen)} />
+          <RowMenuItem
+            icon={<Pencil aria-hidden className="h-3.5 w-3.5" />}
+            label="编辑配置"
+            disabled={trader.isRunning}
+            title={trader.isRunning ? '请先停止该机器人再修改配置。' : '编辑名称、凭证、模型、策略与周期间隔'}
+            onClick={run(onEdit)}
+          />
+          <RowMenuItem
+            icon={<Trash2 aria-hidden className="h-3.5 w-3.5" />}
+            label="删除机器人"
+            danger
+            title={`删除“${trader.name}” — 需要确认`}
+            onClick={run(onDelete)}
+          />
+        </PopoverPrimitive.Content>
+      </PopoverPrimitive.Portal>
+    </PopoverPrimitive.Root>
+  );
+}
+
+function RowMenuItem({
+  icon,
+  label,
+  onClick,
+  disabled,
+  title,
+  danger = false,
+}: {
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  title?: string;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      title={title}
+      onClick={onClick}
+      className={cn(
+        'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-base transition disabled:cursor-not-allowed disabled:opacity-40',
+        danger ? 'text-down hover:bg-down/10' : 'text-ink-mid hover:bg-base-850 hover:text-ink-hi',
+      )}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }

@@ -4,15 +4,21 @@
  * 读者画像很具体：**出事了的人**。所以这一页的质量标准不是"好看"，是"读得下去"：
  *
  * - 正文 `text-md`（14px）而不是 `text-xs`，行高放宽 —— 这一页是本项目里
- *   唯一需要连续阅读的长文；
- * - 左侧目录 + 可折叠条目：目录让人先看到"这里有什么"，折叠让长文不至于
- *   变成一屏滚不到头的墙；
+ *   唯一需要连续阅读的长文，也是 `DESIGN.md` §3 的字号体系里唯一"越大越好"的场景；
+ * - 左栏是目录（`LAYOUT.md` §1 的指标栏位置放"这里有什么"），主区是问答与清单：
+ *   目录让人先看到全局，正文再用 `SectionLabel` 分出"风险警示 / 常见问题 / 操作员清单"
+ *   三级 —— 之前只有一个 18px 的标题，长文读起来是一堵没有接缝的墙；
  * - 风险警示用 `warn` 令牌写在最前面，而不是藏进某一条问答里。
+ *
+ * 正文对比度用 `ink-mid` 而不是 `ink-faint`：`ink-faint` 是禁用/占位级别的灰，
+ * 拿它写一整页说明会让"出事了正在找答案的人"读不下去。
  */
 import { useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useDocumentTitle } from '../lib/hooks';
 import { Badge, Button, Panel, cn } from '../components/ui';
+import { SectionHeading } from '../components/Badges';
+import { MetricGroup, PageShell, SectionLabel } from '../components/shell';
 
 /**
  * 短标题（目录与折叠头用）+ 完整问答。
@@ -117,126 +123,136 @@ export function FaqPage() {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  /* ------------------------------------------------------------------------ */
+  /*  左栏：目录。长文的"这里有什么"                                          */
+  /* ------------------------------------------------------------------------ */
+  const rail = (
+    <MetricGroup title="目录">
+      <nav aria-label="常见问题目录">
+        <ol className="space-y-0.5">
+          {FAQ.map((item, index) => (
+            <li key={item.id}>
+              <button
+                type="button"
+                onClick={() => jump(item.id)}
+                className="flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left text-base text-ink-lo transition hover:bg-base-850/70 hover:text-ink-hi"
+              >
+                <span className="num shrink-0 text-xs text-ink-faint">{String(index + 1).padStart(2, '0')}</span>
+                <span className="min-w-0">{item.short}</span>
+              </button>
+            </li>
+          ))}
+          <li>
+            <button
+              type="button"
+              onClick={() => jump('faq-checklist')}
+              className="flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left text-base text-ink-lo transition hover:bg-base-850/70 hover:text-ink-hi"
+            >
+              <span className="num shrink-0 text-xs text-ink-faint">10</span>
+              <span className="min-w-0">操作员清单</span>
+            </button>
+          </li>
+        </ol>
+      </nav>
+    </MetricGroup>
+  );
+
   return (
-    <div className="mx-auto max-w-6xl space-y-3">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div className="min-w-0">
-          <h1 className="text-xl font-semibold tracking-wide text-ink-hi">这个终端如何运作</h1>
-          <p className="mt-0.5 text-md text-ink-lo">在投入真金白银之前，值得先弄清楚的机制要点。</p>
-        </div>
-        <Button
-          size="sm"
-          onClick={() =>
-            setOpen(allOpen ? {} : Object.fromEntries(FAQ.map((item) => [item.id, true])))
-          }
-        >
-          {allOpen ? <ChevronUp aria-hidden className="h-3.5 w-3.5" /> : <ChevronDown aria-hidden className="h-3.5 w-3.5" />}
-          {allOpen ? '全部折叠' : '全部展开'}
-        </Button>
-      </div>
+    <div className="min-w-0">
+      <SectionHeading
+        title="这个终端如何运作"
+        sub="在投入真金白银之前，值得先弄清楚的机制要点。"
+        right={
+          <Button
+            size="sm"
+            onClick={() => setOpen(allOpen ? {} : Object.fromEntries(FAQ.map((item) => [item.id, true])))}
+          >
+            {allOpen ? (
+              <ChevronUp aria-hidden className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronDown aria-hidden className="h-3.5 w-3.5" />
+            )}
+            {allOpen ? '全部折叠' : '全部展开'}
+          </Button>
+        }
+      />
 
-      {/* 风险警示：整页最重要的一段，放在所有人都会看到的位置 */}
-      <section className="rounded-lg border border-warn/50 bg-warn/10 px-4 py-3">
-        <h2 className="flex items-center gap-2 text-md font-bold uppercase tracking-wide text-warn">
-          <span aria-hidden className="rounded border border-warn/50 px-1.5 text-xs">
-            !
-          </span>
-          风险警示
-        </h2>
-        <p className="mt-2 max-w-4xl text-md leading-relaxed text-ink-mid">
-          带杠杆交易永续合约，亏钱的速度会比你读完这一页还快。杠杆放大亏损和放大盈利一样彻底，爆仓可以在几秒内
-          吞掉整个持仓 — 包括它的保证金。语言模型不是理财顾问，看不到未来，而且时不时会自信地犯错；本控制台的
-          风控只能减少伤害，无法消除伤害。<span className="text-ink-hi">模拟模式被设为默认是有原因的</span>
-          ：让一个策略跑得足够久，看清它的回撤，再考虑投入真实资金。永远不要用输不起的钱去交易。
-        </p>
-      </section>
+      <PageShell rail={rail}>
+        {/* 风险警示：整页最重要的一段，放在所有人都会看到的位置 */}
+        <section>
+          <SectionLabel title="风险警示" />
+          <div className="rounded-lg border border-warn/50 bg-warn/10 px-4 py-3">
+            <h3 className="flex items-center gap-2 text-md font-bold tracking-wide text-warn">
+              <span aria-hidden className="rounded border border-warn/50 px-1.5 text-xs">
+                !
+              </span>
+              带杠杆交易永续合约
+            </h3>
+            <p className="mt-2 max-w-[68ch] text-md leading-relaxed text-ink-hi">
+              亏钱的速度会比你读完这一页还快。杠杆放大亏损和放大盈利一样彻底，爆仓可以在几秒内吞掉整个持仓
+              — 包括它的保证金。语言模型不是理财顾问，看不到未来，而且时不时会自信地犯错；本控制台的风控
+              只能减少伤害，无法消除伤害。<span className="text-warn">模拟模式被设为默认是有原因的</span>
+              ：让一个策略跑得足够久，看清它的回撤，再考虑投入真实资金。永远不要用输不起的钱去交易。
+            </p>
+          </div>
+        </section>
 
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,15rem)_minmax(0,1fr)]">
-        {/* 目录：先让人看到"这里有什么"，再决定读哪一条 */}
-        <nav aria-label="常见问题目录" className="lg:sticky lg:top-0 lg:self-start">
-          <Panel title="目录" bodyClassName="p-2">
-            <ol className="space-y-0.5">
-              {FAQ.map((item, index) => (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    onClick={() => jump(item.id)}
-                    className="flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left text-base text-ink-lo transition hover:bg-base-850/70 hover:text-ink-hi"
-                  >
-                    <span className="num shrink-0 text-xs text-ink-faint">{String(index + 1).padStart(2, '0')}</span>
-                    <span className="min-w-0">{item.short}</span>
-                  </button>
+        <section>
+          <SectionLabel title="常见问题" count={FAQ.length} />
+          <div className="space-y-2">
+            {FAQ.map((item, index) => {
+              const expanded = open[item.id] === true;
+              return (
+                <div
+                  key={item.id}
+                  id={item.id}
+                  className="scroll-mt-2 rounded-lg border border-base-750 bg-base-900 shadow-panel"
+                >
+                  <h3>
+                    <button
+                      type="button"
+                      aria-expanded={expanded}
+                      aria-controls={`${item.id}-answer`}
+                      onClick={() => setOpen((current) => ({ ...current, [item.id]: !expanded }))}
+                      className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition hover:bg-base-850/60"
+                    >
+                      <span className="num shrink-0 text-xs text-ink-faint">{String(index + 1).padStart(2, '0')}</span>
+                      <span className="min-w-0 flex-1 text-lg font-semibold text-ink-hi">{item.q}</span>
+                      <ChevronDown
+                        aria-hidden
+                        className={cn('h-4 w-4 shrink-0 text-ink-faint transition-transform', expanded && 'rotate-180')}
+                      />
+                    </button>
+                  </h3>
+                  {expanded && (
+                    // 一行长度限制在 ~68 个字符：正文横跨 1600px 时眼睛会丢行
+                    <div id={`${item.id}-answer`} className="border-t border-base-800 px-4 py-3">
+                      {/* 模型契约名（requireStopLoss 等）保持等宽，正文 14px、行高放宽 */}
+                      <p className="max-w-[68ch] text-md leading-relaxed text-ink-mid">{item.a}</p>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section id="faq-checklist" className="scroll-mt-2">
+          <SectionLabel title="操作员清单" actions={<Badge tone="muted">按顺序做</Badge>} />
+          <Panel bodyClassName="p-3.5">
+            <ol className="space-y-2.5">
+              {CHECKLIST.map((item, index) => (
+                <li key={index} className="flex gap-3">
+                  <span className="num mt-0.5 shrink-0 rounded border border-base-700 bg-base-850 px-1.5 text-xs text-ink-lo">
+                    {String(index + 1).padStart(2, '0')}
+                  </span>
+                  <span className="min-w-0 max-w-[68ch] text-md leading-relaxed text-ink-mid">{item}</span>
                 </li>
               ))}
-              <li>
-                <button
-                  type="button"
-                  onClick={() => jump('faq-checklist')}
-                  className="flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left text-base text-ink-lo transition hover:bg-base-850/70 hover:text-ink-hi"
-                >
-                  <span className="num shrink-0 text-xs text-ink-faint">10</span>
-                  <span className="min-w-0">操作员清单</span>
-                </button>
-              </li>
             </ol>
           </Panel>
-        </nav>
-
-        <div className="min-w-0 space-y-2">
-          {FAQ.map((item, index) => {
-            const expanded = open[item.id] === true;
-            return (
-              <section
-                key={item.id}
-                id={item.id}
-                className="scroll-mt-2 rounded-lg border border-base-750 bg-base-900 shadow-panel"
-              >
-                <h2>
-                  <button
-                    type="button"
-                    aria-expanded={expanded}
-                    aria-controls={`${item.id}-answer`}
-                    onClick={() => setOpen((current) => ({ ...current, [item.id]: !expanded }))}
-                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-base-850/60"
-                  >
-                    <span className="num shrink-0 text-xs text-ink-faint">{String(index + 1).padStart(2, '0')}</span>
-                    <span className="min-w-0 flex-1 text-lg font-semibold text-ink-hi">{item.q}</span>
-                    <ChevronDown
-                      aria-hidden
-                      className={cn('h-4 w-4 shrink-0 text-ink-faint transition-transform', expanded && 'rotate-180')}
-                    />
-                  </button>
-                </h2>
-                {expanded && (
-                  <div id={`${item.id}-answer`} className="border-t border-base-800 px-4 py-3">
-                    {/* 模型契约名（requireStopLoss 等）保持等宽，正文保持 14px 行高放宽 */}
-                    <p className="max-w-4xl text-md leading-relaxed text-ink-mid">{item.a}</p>
-                  </div>
-                )}
-              </section>
-            );
-          })}
-
-          <section id="faq-checklist" className="scroll-mt-2">
-            <Panel
-              title="操作员清单"
-              actions={<Badge tone="muted">按顺序做</Badge>}
-              bodyClassName="p-4"
-            >
-              <ol className="space-y-2.5">
-                {CHECKLIST.map((item, index) => (
-                  <li key={index} className="flex gap-3">
-                    <span className="num mt-0.5 shrink-0 rounded border border-base-700 bg-base-850 px-1.5 text-xs text-ink-lo">
-                      {String(index + 1).padStart(2, '0')}
-                    </span>
-                    <span className="min-w-0 text-md leading-relaxed text-ink-mid">{item}</span>
-                  </li>
-                ))}
-              </ol>
-            </Panel>
-          </section>
-        </div>
-      </div>
+        </section>
+      </PageShell>
     </div>
   );
 }

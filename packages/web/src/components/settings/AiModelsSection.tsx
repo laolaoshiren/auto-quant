@@ -13,6 +13,7 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { Check, Lock, Search, TriangleAlert, X } from 'lucide-react';
+import { authStyleLabel, jsonModeLabel } from '@aq/shared';
 import {
   api,
   type AiModelRow,
@@ -38,6 +39,7 @@ import {
   TextInput,
   cn,
 } from '../ui';
+import { SectionLabel } from '../shell';
 import { fmtDateTime, fmtInt, fmtLatency } from '../../lib/format';
 
 /* -------------------------------------------------------------------------- */
@@ -177,10 +179,23 @@ const TestOutcome = memo(function TestOutcome({
  * 单独抽出来是因为这张表原本把 30 多行 JSX 写在 `models.map` 里，
  * 行内结构（参数、密钥、测试结果）几乎每次改动都要复制一遍。
  * 现在是 `memo` 组件：测试某一行的连接只重渲染那一行。
- * 数字列一律 `.num` + `text-right`，参数合并成一列以免表格横向溢出。
+ *
+ * 密度与层级（LAYOUT.md §2/§3）：
+ *
+ * - **参数不再常驻。** 原来每行都摊着 `温度 · Token · 超时 · 重试` 四段等权重
+ *   的数字，等于每一行都在喊同一句话。默认配置是常态，只有**偏离供应商默认值**
+ *   时才露一个「已调参」角标；完整参数在行的 `title` 里。
+ * - **模型 id 与基础 URL 合成一格。** 它们一起回答"请求发到哪里、要哪个模型"，
+ *   分成两列只是把一次阅读拆成两次横向扫视。
+ * - 机器码 `provider` 走目录里的中文名，界面不再出现裸的 `deepseek`。
+ *
+ * ⚠️ **密钥永远只渲染掩码。** `SecretChip` 的签名刻意不接受 `apiKey`，所以
+ * 「顺手把 `row.apiKey` 接上去」在类型上就不可能。
  */
 const ModelRow = memo(function ModelRow({
   row,
+  providerLabel,
+  defaults,
   result,
   testing,
   removing,
@@ -189,6 +204,10 @@ const ModelRow = memo(function ModelRow({
   onRemove,
 }: {
   row: AiModelRow;
+  /** 供应商的中文名（来自目录）。缺目录时退回机器码。 */
+  providerLabel: string;
+  /** 供应商默认推理参数；用来判断这一行是否被调过参。 */
+  defaults?: { temperature: number; maxTokens: number; timeoutSeconds: number; maxRetries: number };
   result?: ModelTestResult & { at: number };
   testing: boolean;
   removing: boolean;
@@ -196,32 +215,42 @@ const ModelRow = memo(function ModelRow({
   onEdit: (row: AiModelRow) => void;
   onRemove: (row: AiModelRow) => void;
 }) {
+  const params = `温度 ${row.temperature} · ${fmtInt(row.maxTokens)} tok · ${row.timeoutSeconds}s · 重试 ${row.maxRetries}`;
+  const tuned =
+    defaults !== undefined &&
+    (row.temperature !== defaults.temperature ||
+      row.maxTokens !== defaults.maxTokens ||
+      row.timeoutSeconds !== defaults.timeoutSeconds ||
+      row.maxRetries !== defaults.maxRetries);
+
   return (
-    <tr className="row-hover">
-      <td className="td">
-        <div className="flex min-w-0 flex-col gap-0.5">
-          <div className="flex items-center gap-1.5">
-            <span className="truncate text-base font-semibold text-ink-hi">{row.label}</span>
-            <Badge tone="accent">{row.provider}</Badge>
-          </div>
-          <span className="num text-xs text-ink-faint">
-            温度 {row.temperature} · {fmtInt(row.maxTokens)} tok · {row.timeoutSeconds}s · 重试 {row.maxRetries}
-          </span>
+    <tr className="row-hover" title={params}>
+      <td className="td px-2 py-1.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-base font-semibold text-ink-hi">{row.label}</span>
+          <Badge tone="accent">{providerLabel}</Badge>
+          {tuned && (
+            <Badge tone="muted" title={`已偏离供应商默认值：${params}`}>
+              已调参
+            </Badge>
+          )}
         </div>
       </td>
-      <td className="td num max-w-[200px] truncate text-ink-mid" title={row.model}>
-        {row.model}
+      <td className="td num max-w-[260px] px-2 py-1.5">
+        <div className="truncate text-ink-mid" title={row.model}>
+          {row.model}
+        </div>
+        <div className="truncate text-xs text-ink-faint" title={row.baseUrl || '—'}>
+          {row.baseUrl || '—'}
+        </div>
       </td>
-      <td className="td max-w-[200px] truncate text-ink-faint" title={row.baseUrl}>
-        {row.baseUrl || '—'}
-      </td>
-      <td className="td">
+      <td className="td px-2 py-1.5">
         <SecretChip hasKey={row.hasKey} masked={row.apiKeyMasked} />
       </td>
-      <td className="td max-w-[220px]">
+      <td className="td max-w-[220px] px-2 py-1.5">
         <TestOutcome testing={testing} result={result} />
       </td>
-      <td className="td text-right">
+      <td className="td px-2 py-1.5 text-right">
         <div className="flex items-center justify-end gap-1">
           <Button small variant="ghost" busy={testing} onClick={() => onTest(row)} title="发送一次最小补全请求">
             测试
@@ -272,6 +301,14 @@ export function AiModelsSection() {
 
   const models = query.data ?? [];
   const providers = catalog?.providers ?? [];
+
+  /**
+   * 供应商目录按 id 索引。
+   *
+   * 行里要用的两样东西都从这里来：中文名（否则表格里是裸的 `deepseek`）和默认
+   * 推理参数（用来判断某一行是否被调过参）。做成 Map 是因为它按行查、每行两次。
+   */
+  const providerById = useMemo(() => new Map(providers.map((provider) => [provider.id, provider])), [providers]);
 
   const descriptor = providers.find((p) => p.id === draft.provider);
   const defaults = descriptor?.defaults ?? FALLBACK_DEFAULTS;
@@ -515,18 +552,19 @@ export function AiModelsSection() {
     <div className="space-y-2">
       {error && <ErrorNote>{error}</ErrorNote>}
 
-      <Panel
+      {/* 区块标题用 LAYOUT.md §5 的小字距标签 + 延伸线，而不是面板自带的标题栏：
+          它和表格在视觉上绑在一起，而且省掉一整条 40px 的头部。 */}
+      <SectionLabel
         title="已配置模型"
+        count={fmtInt(models.length)}
         actions={
-          <span className="flex items-center gap-2">
-            <span className="num text-xs text-ink-faint">共 {fmtInt(models.length)} 个</span>
-            <Button variant="primary" onClick={openCreate} disabled={providers.length === 0}>
-              + 添加模型
-            </Button>
-          </span>
+          <Button variant="primary" size="sm" onClick={openCreate} disabled={providers.length === 0}>
+            + 添加模型
+          </Button>
         }
-        padded={false}
-      >
+      />
+
+      <Panel padded={false}>
         {/* 轮询失败必须说出来：否则空列表会被读成"还没配过模型" */}
         {query.error && models.length === 0 ? (
           <div className="space-y-2 p-4">
@@ -548,7 +586,7 @@ export function AiModelsSection() {
         ) : (
           <>
             {/* 工具条：搜索 + 最近测试汇总 */}
-            <div className="flex flex-wrap items-center gap-2 border-b border-base-800 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2 border-b border-base-800 px-2 py-1.5">
               <div className="relative min-w-[12rem] flex-1">
                 <Search
                   aria-hidden
@@ -588,12 +626,11 @@ export function AiModelsSection() {
                   <table className="w-full border-collapse">
                     <thead className="border-b border-base-800 bg-base-850/60">
                       <tr>
-                        <th className="th">名称</th>
-                        <th className="th">模型</th>
-                        <th className="th">基础 URL</th>
-                        <th className="th">密钥</th>
-                        <th className="th">最近测试</th>
-                        <th className="th text-right">操作</th>
+                        <th className="th px-2 py-1.5">名称</th>
+                        <th className="th px-2 py-1.5">模型 · 端点</th>
+                        <th className="th px-2 py-1.5">密钥</th>
+                        <th className="th px-2 py-1.5">最近测试</th>
+                        <th className="th px-2 py-1.5 text-right">操作</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -601,6 +638,8 @@ export function AiModelsSection() {
                         <ModelRow
                           key={row.id}
                           row={row}
+                          providerLabel={providerById.get(row.provider)?.label ?? row.provider}
+                          defaults={providerById.get(row.provider)?.defaults}
                           result={testResult[row.id]}
                           testing={testingId === row.id}
                           removing={removingId === row.id}
@@ -613,7 +652,7 @@ export function AiModelsSection() {
                   </table>
                 </div>
                 {remaining > 0 && (
-                  <div className="flex items-center justify-between gap-2 border-t border-base-800 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 border-t border-base-800 px-2 py-1.5">
                     <span className="num text-xs text-ink-faint">
                       已显示 {fmtInt(shown.length)} / {fmtInt(filtered.length)} 个
                     </span>
@@ -810,8 +849,8 @@ export function AiModelsSection() {
 
           {descriptor && (
             <div className="rounded-md border border-base-800 bg-base-850/40 px-3 py-2 text-xs text-ink-lo">
-              鉴权方式 <span className="num text-ink-mid">{descriptor.authStyle}</span> · JSON 模式{' '}
-              <span className="num text-ink-mid">{descriptor.jsonMode}</span>
+              鉴权 <span className="text-ink-mid">{authStyleLabel(descriptor.authStyle)}</span> ·{' '}
+              <span className="text-ink-mid">{jsonModeLabel(descriptor.jsonMode)}</span>
               {descriptor.docsUrl && (
                 <>
                   {' · '}

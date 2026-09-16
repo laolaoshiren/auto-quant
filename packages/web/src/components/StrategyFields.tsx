@@ -7,7 +7,7 @@
  */
 import { useState, type ReactNode } from 'react';
 import type { CoinPoolRank, CoinSourceType, StrategyConfig, Timeframe } from '@aq/shared';
-import { TIMEFRAMES } from '@aq/shared';
+import { TIMEFRAMES, coinSourceTypeLabel } from '@aq/shared';
 import { Badge, Field, NumberInput, Select, TextInput, Toggle, cn } from './ui';
 import { FieldError, NumField, PeriodListField, Section } from './StrategyFieldKit';
 
@@ -15,11 +15,18 @@ import { FieldError, NumField, PeriodListField, Section } from './StrategyFieldK
 /*  Coin source                                                                */
 /* -------------------------------------------------------------------------- */
 
-const SOURCE_TYPES: Array<{ id: CoinSourceType; label: string; hint: string }> = [
-  { id: 'static', label: '静态列表', hint: '仅使用你在下方列出的交易对。' },
-  { id: 'coinpool', label: '动态币种池', hint: '每个周期在全交易所范围内排名。' },
-  { id: 'oi_top', label: '持仓量领先', hint: '持仓量增长最快的交易对。' },
-  { id: 'mixed', label: '混合（并集）', hint: '静态列表加上动态来源，自动去重。' },
+/**
+ * 币种池的四种模式。
+ *
+ * **标签不在这里写**：`coinSourceTypeLabel` 从 `@aq/shared` 取。这一层只负责
+ * 那句"它是什么意思"的说明 —— 曾经这里自己存了一份中文标签，而策略列表页
+ * 显示的是原始机器码（`mixed`），同一件事在同一个应用里有两个说法。
+ */
+const SOURCE_TYPES: Array<{ id: CoinSourceType; hint: string }> = [
+  { id: 'static', hint: '仅使用你在下方列出的交易对。' },
+  { id: 'coinpool', hint: '每个周期在全交易所范围内排名。' },
+  { id: 'oi_top', hint: '持仓量增长最快的交易对。' },
+  { id: 'mixed', hint: '静态列表加上动态来源，自动去重。' },
 ];
 
 const RANKS: Array<{ id: CoinPoolRank; label: string }> = [
@@ -120,7 +127,7 @@ export function CoinSourceSection({
     <Section
       title="币种来源"
       hint="每个周期哪些交易对会成为候选 —— 候选越少，每次模型调用越便宜也越快。"
-      right={<Badge tone="muted">{source.sourceType}</Badge>}
+      right={<Badge tone="muted">{coinSourceTypeLabel(source.sourceType)}</Badge>}
     >
       <div className="md:col-span-2 xl:col-span-3">
         <span className="field-label">币种池模式</span>
@@ -149,7 +156,9 @@ export function CoinSourceSection({
                     : 'border-base-700 bg-base-850 hover:border-base-600 hover:bg-base-800',
                 )}
               >
-                <div className={cn('text-base font-semibold', active ? 'text-accent' : 'text-ink-hi')}>{type.label}</div>
+                <div className={cn('text-base font-semibold', active ? 'text-accent' : 'text-ink-hi')}>
+                  {coinSourceTypeLabel(type.id)}
+                </div>
                 <div className="mt-0.5 text-xs leading-snug text-ink-lo">{type.hint}</div>
               </button>
             );
@@ -280,7 +289,7 @@ function IndicatorBlock({
           {enabled ? '启用' : '关闭'}
         </Badge>
       </div>
-      <div className="mt-2 border-t border-base-800 pt-2">{children}</div>
+      <div className="mt-1.5 border-t border-base-800 pt-1.5">{children}</div>
     </div>
   );
 }
