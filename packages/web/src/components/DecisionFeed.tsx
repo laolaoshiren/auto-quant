@@ -280,7 +280,17 @@ function CycleBlock({
           and the confidence badge a screen apart.
         */}
         {record.decisions.length > 0 && (
-          <div className="grid grid-cols-1 gap-2 lg:grid-cols-2 2xl:grid-cols-3">
+          /*
+           * `items-start` 是必需的，不是可选的美化。
+           *
+           * Grid 默认 `align-items: stretch`，同一行的卡片会被**撑成等高**。
+           * 于是「平多 ARBUSDT · 置信度 0%」这种内容极少的卡片，会被拉高到和
+           * 旁边一张写满说明与数字的卡片一样高 —— 中间留下一大片空白，
+           * 看起来就是"卡片错位、东倒西歪"。在宽屏（≥1536px，卡片变三列）时最明显。
+           *
+           * 每张卡只占自己内容的高度，行高由这一行最高的那张决定，其余保持自然高度。
+           */
+          <div className="grid grid-cols-1 items-start gap-2 lg:grid-cols-2 2xl:grid-cols-3">
             {record.decisions.map((decision, index) => (
               <DecisionCard
                 key={`${decision.symbol}-${index}`}
@@ -293,7 +303,7 @@ function CycleBlock({
 
         {/* Refusals explain "why did it do nothing", so they belong here. */}
         {(rejected.length > 0 || failed.length > 0) && (
-          <div className="grid grid-cols-1 gap-2 lg:grid-cols-2 2xl:grid-cols-3">
+          <div className="grid grid-cols-1 items-start gap-2 lg:grid-cols-2 2xl:grid-cols-3">
             {rejected.map((entry, index) => (
               <RejectedCard key={`rej-${index}`} entry={entry} />
             ))}

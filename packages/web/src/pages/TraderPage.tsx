@@ -345,7 +345,7 @@ export function TraderPage() {
      * 3 列时每列只有约 200px，`实盘验证 — SOL/XRP/DOG…` 这类值会被截断 ——
      * 而策略名被截断意味着操作者认不出自己在看哪个策略。宁可两列排三行。
      */
-    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-1">
+    <div className="grid grid-cols-1 items-start gap-5 sm:grid-cols-2 xl:grid-cols-1">
       <MetricGroup title="账户">
         <Metric
           label={`归属权益（${settleAsset}）`}

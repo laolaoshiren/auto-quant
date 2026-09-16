@@ -66,7 +66,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
    */
   const rail = (
     /* 窄屏 2 列而非 3 列 —— 理由见 TraderPage 同名处：3 列会把值截断。 */
-    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-1">
+    <div className="grid grid-cols-1 items-start gap-5 sm:grid-cols-2 xl:grid-cols-1">
       <MetricGroup title="周期结果">
         <Metric
           label="决策数"
