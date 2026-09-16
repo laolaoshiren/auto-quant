@@ -1171,6 +1171,33 @@ export interface TradeStats {
 }
 
 /**
+ * 一个**固定时间窗口**内的绩效聚合（`trades.performanceSince()`）。
+ *
+ * 与 `TradeStats` 的区别是"有没有界"：`TradeStats` 是终身口径（给控制台看的），
+ * 这个结构是窗口口径（给模型看的）。它存在的全部理由是 §4 的 O(1) 性质 ——
+ * 字段是固定的，所以提示词大小与 `trades` 的行数无关。
+ */
+export interface TradePerformance {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  grossProfit: number;
+  /** 亏损单净额的绝对值之和（正数）。 */
+  grossLoss: number;
+  avgWin: number;
+  /** 平均亏损额，**正数**；渲染成负数由调用方决定。 */
+  avgLoss: number;
+  grossPnl: number;
+  totalFees: number;
+  totalFunding: number;
+  netPnl: number;
+  /** Σ|入场价 × 数量|：窗口内回合的名义价值合计。 */
+  notional: number;
+  /** 往返手续费率（**小数比例**：0.001 = 0.10%）；窗口内没有成交时为 null。 */
+  roundTripFeeRate: number | null;
+}
+
+/**
  * One pass over `trades`: aggregate in SQL, materialise only the trend window.
  *
  * Why: `computeTraderStats` used to pull every column of every round-trip into
@@ -1336,6 +1363,122 @@ export const trades = {
 
   recent(traderId: number, limit = 10): TradeRecord[] {
     return this.list(traderId, limit);
+  },
+
+  /**
+   * 一个时间窗口内的成交绩效，**全部在 SQL 里聚合**。
+   *
+   * ## 为什么必须有这个函数（提案 §4 的 O(1) 性质）
+   *
+   * 提示词要告诉模型"你最近在亏钱"，而 `trades` 是**随时间无限增长**的表。
+   * 这个函数对外只回**固定几个字段**：无论窗口里有 3 笔还是 30000 笔，进提示词的
+   * 字节数完全一样。没有这条保证，"7×24 跑一年"就只是一个说法 —— 跑一年之后
+   * 提示词会随历史长度线性膨胀，直到撑爆上下文。
+   *
+   * 分类口径与 `aggregateTrades()` 严格一致：按**净**盈亏判胜负。一笔毛赚了
+   * 一点点、但不够付手续费的钱实际是亏的，算成盈利会同时抬高胜率与盈亏比 ——
+   * 那是这个产品最容易骗自己的地方。
+   *
+   * @param sinceIso 窗口起点（含）。调用方给固定长度的窗口（例如最近 24 小时），
+   *   所以窗口内的行数由**交易频率**决定，而不是由历史长度决定。
+   */
+  performanceSince(traderId: number, sinceIso: string): TradePerformance {
+    const row = getDb().get<{
+      totalTrades: number;
+      wins: number;
+      losses: number;
+      grossProfit: number | null;
+      grossLoss: number | null;
+      grossPnl: number | null;
+      totalFees: number | null;
+      totalFunding: number | null;
+      netPnl: number | null;
+      notional: number | null;
+    }>(
+      `SELECT
+         COUNT(*)                                                   AS totalTrades,
+         COALESCE(SUM(CASE WHEN net_pnl >  0 THEN 1 ELSE 0 END), 0) AS wins,
+         COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN 1 ELSE 0 END), 0) AS losses,
+         COALESCE(SUM(CASE WHEN net_pnl >  0 THEN net_pnl ELSE 0 END), 0) AS grossProfit,
+         ABS(COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN net_pnl ELSE 0 END), 0)) AS grossLoss,
+         COALESCE(SUM(pnl), 0)          AS grossPnl,
+         COALESCE(SUM(fee), 0)          AS totalFees,
+         COALESCE(SUM(funding_fee), 0)  AS totalFunding,
+         COALESCE(SUM(net_pnl), 0)      AS netPnl,
+         COALESCE(SUM(ABS(entry_price * quantity)), 0) AS notional
+       FROM trades WHERE trader_id = ? AND closed_at >= ?`,
+      traderId,
+      sinceIso,
+    );
+
+    const wins = row?.wins ?? 0;
+    const losses = row?.losses ?? 0;
+    const grossProfit = row?.grossProfit ?? 0;
+    const grossLoss = row?.grossLoss ?? 0;
+    const totalFees = row?.totalFees ?? 0;
+    const notional = row?.notional ?? 0;
+
+    return {
+      totalTrades: row?.totalTrades ?? 0,
+      wins,
+      losses,
+      grossProfit,
+      grossLoss,
+      avgWin: wins > 0 ? grossProfit / wins : 0,
+      avgLoss: losses > 0 ? grossLoss / losses : 0,
+      grossPnl: row?.grossPnl ?? 0,
+      totalFees,
+      totalFunding: row?.totalFunding ?? 0,
+      netPnl: row?.netPnl ?? 0,
+      notional,
+      /*
+       * 往返手续费率 = Σ手续费 / Σ名义价值。
+       *
+       * 为什么是"两个总和相除"而不是"逐笔成本率的平均"：一次往返在开、平两条腿上
+       * 各付一次佣金，而两条腿的名义价值都约等于入场名义价值，所以这个比值就是
+       * "每往返一次，成本占名义价值的百分之几"——实测 0.1000%。逐笔平均会让
+       * 小额回合与小额手续费得到同等权重，一个 12 USDT 的回合和一个 1200 USDT 的
+       * 回合会各算一票，得到的费率与本账户的真实成本无关。
+       *
+       * 读不到成交（窗口内没有行）时回 null —— 让调用方自己决定用什么兜底，
+       * 而不是在这里编一个数出来（§5「不要假装算过」）。
+       */
+      roundTripFeeRate: notional > 0 ? totalFees / notional : null,
+    };
+  },
+
+  /**
+   * 最近若干笔平仓，附带**模型当时的入场理由**（提案 §2.2 的第二行）。
+   *
+   * 理由取自 `positions.open_reasoning` —— 模型下单时写进持仓行的原话。连接键是
+   * `(trader_id, symbol, opened_at)`：运行期记账时 `trades.opened_at` 就是
+   * `positions.opened_at` 那一行（`bookClosedPosition()` 直接把它抄过来），
+   * 所以这是一次**身份匹配**，不是"看起来差不多"的猜测。
+   *
+   * 对账补录的行 `opened_at` 来自交易所成交时间，本来就匹配不到持仓行 ——
+   * 那就回 null，让提示词如实写"未记录"，而不是猜一个理由出来。
+   *
+   * ⚠️ 这是提示词里唯一会出现的**逐笔**内容，所以调用方必须传固定的小数字
+   * （`PROMPT_RECENT_CLOSE_COUNT`），否则 §4 的 O(1) 性质就没了。
+   */
+  recentWithReason(
+    traderId: number,
+    limit: number,
+  ): Array<TradeRecord & { entryReason: string | null }> {
+    return getDb()
+      .all<TradeRow & { entry_reason: string | null }>(
+        `SELECT t.*, (
+           SELECT p.open_reasoning FROM positions p
+            WHERE p.trader_id = t.trader_id
+              AND p.symbol = t.symbol
+              AND p.opened_at = t.opened_at
+            LIMIT 1
+         ) AS entry_reason
+         FROM trades t WHERE t.trader_id = ? ORDER BY t.id DESC LIMIT ?`,
+        traderId,
+        Math.max(1, Math.trunc(limit)),
+      )
+      .map((row) => ({ ...toTrade(row), entryReason: row.entry_reason }));
   },
 
   /**
@@ -2188,6 +2331,25 @@ export const tradeEvents = {
       traderId,
       symbol,
       kind,
+    );
+    return row?.created_at;
+  },
+
+  /**
+   * 这个机器人最后一次平仓是什么时候（任意标的）。
+   *
+   * 提示词的「本周期约束」区块要告诉模型它离再入场冷却还有多远。冷却本身是**按标的**
+   * 计的（`isInCooldown(symbol)`），这里只回"最近一次平仓"，因为把每个仍在冷却的标的
+   * 都列出来会让区块大小随标的数变化，破坏 §4 的 O(1) 要求。
+   *
+   * 这只是让模型**看见**约束；真正的判定仍然在 `AutoTrader.isInCooldown()` 与风控里，
+   * 按标的执行。看不见的约束等于不存在 —— 但看得见的约束也不代替执行。
+   */
+  lastExit(traderId: number): string | undefined {
+    const row = getDb().get<{ created_at: string }>(
+      'SELECT created_at FROM trade_events WHERE trader_id = ? AND kind = ? ORDER BY created_at DESC LIMIT 1',
+      traderId,
+      'exit',
     );
     return row?.created_at;
   },

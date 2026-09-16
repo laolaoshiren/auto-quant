@@ -19,7 +19,12 @@ import { MarketDataService } from '../market/service.js';
 import { RiskEngine } from '../risk/engine.js';
 import { selectCandidates } from '../strategy/coins.js';
 import { parseDecisionResponse, sortDecisions } from '../strategy/parser.js';
-import { buildSystemPrompt, buildUserPrompt, type PromptContext } from '../strategy/prompt.js';
+import {
+  buildSystemPrompt,
+  buildUserPrompt,
+  emptyPromptMemory,
+  type PromptContext,
+} from '../strategy/prompt.js';
 
 /** A response in the exact shape the prompt asks the model to produce. */
 const CANNED_MODEL_RESPONSE = `<reasoning>
@@ -156,6 +161,8 @@ async function main(): Promise<void> {
     positions: [],
     candidates: snapshots,
     recentTrades: [],
+    // 这一趟没有账本（不连数据库），所以记忆区块如实表示"还没有任何成交"。
+    memory: emptyPromptMemory(config),
     oiRanking,
   };
 

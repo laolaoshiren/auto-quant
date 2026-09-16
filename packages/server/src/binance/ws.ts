@@ -58,7 +58,15 @@ export interface ResilientStreamOptions {
   url: () => string | Promise<string>;
   /** Streams whose liveness is tracked; used to compute the staleness window. */
   watchedStreams?: () => string[];
-  /** Called once per successfully received data message. */
+
+  /**
+   * 这条流的"多久没数据才算坏"窗口。
+   *
+   * 不传时按 `stalenessThresholdMs()` 从 `watchedStreams` 推导（市场数据流走这条路）。
+   * **用户数据流必须显式传** —— 它是事件驱动的，账户空闲时长时间没有消息是正常的，
+   * 用市场数据流的判据会不停地把健康连接掐掉（见 `createSocket()` 的说明）。
+   */
+  stalenessWindowMs?: number;  /** Called once per successfully received data message. */
   onData?: (stream: string, payload: unknown) => void;
   /** Called when the connection becomes live, and again when it is lost. */
   onStateChange?: (state: StreamState, detail: string) => void;
@@ -121,6 +129,8 @@ export class ResilientStream {
   }
 
   private stalenessWindowMs(): number {
+    // 调用方显式声明优先 —— 用户数据流靠这个摆脱市场数据流的判据。
+    if (this.options.stalenessWindowMs !== undefined) return this.options.stalenessWindowMs;
     const streams = this.options.watchedStreams?.() ?? [];
     if (streams.length === 0) return 120_000;
     // Tolerate the slowest stream in the set, plus generous headroom.
@@ -181,6 +191,8 @@ export class ResilientStream {
     });
 
     socket.on('message', (raw: WebSocket.RawData) => {
+      // 过期 socket 的数据不再更新状态（见上面对 close 处理器的说明）。
+      if (this.socket !== socket) return;
       this.lastMessageAt = Date.now();
       if (this.attempt !== 0) {
         // First real bytes prove the connection is genuinely useful.
@@ -207,11 +219,27 @@ export class ResilientStream {
       log.debug(`[${this.options.name}] server ping`);
     });
 
+    /*
+     * ⚠️ 下面三个处理器都必须先确认「这个事件是不是**当前** socket 发出来的」。
+     *
+     * 没有这个守卫时会出现**无限重连循环**：`connect()` 第一步就是
+     * `await this.teardown()` 关掉上一个 socket（close code 1000），而那个
+     * socket 的 `close` 处理器**仍然挂着**、`this.stopped` 也是 false，
+     * 于是它触发一次"干净关闭 → 立刻重连"，新的 `connect()` 又关掉刚建好的
+     * 那个 socket……每一轮都产生一条 `socket open (clean-close)` 与
+     * `close 1000`，实测约每分钟一次，持续不断。
+     *
+     * 判据用引用相等：事件里的 socket 不是 `this.socket` 就说明它已经被取代，
+     * 直接忽略。`message` 同理 —— 过期 socket 的数据不该再更新状态。
+     */
     socket.on('error', (error: Error) => {
+      if (this.socket !== socket) return;
       log.warn(`[${this.options.name}] socket error: ${error.message}`);
     });
 
     socket.on('close', (code: number, reason: Buffer) => {
+      // 过期 socket 的关闭事件不代表当前连接断了，忽略。
+      if (this.socket !== socket) return;
       const detail = `close ${code}${reason.length ? ` ${reason.toString()}` : ''}`;
       if (this.stopped) return;
 
@@ -459,6 +487,19 @@ export class BinanceUserDataStream {
   private createSocket(): ResilientStream {
     return new ResilientStream({
       name: 'user-data',
+      /*
+       * 用户数据流**不能**用市场数据流那套"多久没数据就算坏"的判据。
+       *
+       * Binance 只在这个账户真的发生变化时推送 `ACCOUNT_UPDATE` /
+       * `ORDER_TRADE_UPDATE` —— **空仓、无委托时长时间没有消息是完全正常的**。
+       * 用默认的 120 秒窗口会让看门狗每两分钟就判定"连接僵死"并强制重连，
+       * 实测每 5 分钟一轮、10 分钟 76 次 `clean-close`。
+       *
+       * 55 分钟：低于 listenKey 的 60 分钟有效期，所以"密钥失效导致的开着但不发数据"
+       * 仍然抓得到；而账户空闲时不会再把健康连接掐掉。
+       * 真正断掉的 TCP 由 `ws` 库的 ping/pong 负责发现，不需要这个看门狗。
+       */
+      stalenessWindowMs: 55 * 60 * 1000,
       // Recreate or refresh the key before every dial. A dial can follow a lapse,
       // and a stale key yields an open-but-silent socket.
       beforeConnect: async () => {

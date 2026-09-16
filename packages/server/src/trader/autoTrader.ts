@@ -27,7 +27,14 @@ import type { MarketDataService } from '../market/service.js';
 import { checkCircuitBreakers, RiskEngine, shouldCloseForDrawdown } from '../risk/engine.js';
 import { selectCandidates } from '../strategy/coins.js';
 import { parseDecisionResponse, sortDecisions } from '../strategy/parser.js';
-import { buildSystemPrompt, buildUserPrompt, type PromptPosition } from '../strategy/prompt.js';
+import {
+  buildSystemPrompt,
+  buildUserPrompt,
+  PROMPT_PERFORMANCE_WINDOW_HOURS,
+  PROMPT_RECENT_CLOSE_COUNT,
+  type PromptMemory,
+  type PromptPosition,
+} from '../strategy/prompt.js';
 import { isMajorSymbol } from '@aq/shared';
 import {
   attributedEquity,
@@ -790,6 +797,14 @@ export class AutoTrader {
       ? await this.deps.marketData.getOiRanking(15).catch(() => [])
       : [];
 
+    /*
+     * 本小时的已开仓数只读一次，两处用同一个数：提示词的「本周期约束」区块与风控的
+     * `entriesLastHour`。分头读会得到两个可能不一致的数字，而模型看到 2/3、风控按 3/3
+     * 拒绝，正是"看不见的约束"换一种形态。
+     */
+    const entriesLastHour = tradeEvents.entriesThisHour(traderId);
+    const memory = this.buildPromptMemory(traderId, config, entriesLastHour);
+
     const promptContext = {
       traderName: this.deps.trader.name,
       cycleNumber,
@@ -806,6 +821,7 @@ export class AutoTrader {
       candidates: snapshots,
       recentTrades: tradeStore.recent(traderId, 10),
       oiRanking,
+      memory,
     };
 
     const systemPrompt = buildSystemPrompt(promptContext);
@@ -867,7 +883,13 @@ export class AutoTrader {
       quantityFor: (symbol, notionalUsd, price) =>
         this.deps.registry.notionalToQuantity(symbol, notionalUsd, price),
       entriesThisCycle: 0,
-      entriesLastHour: tradeEvents.entriesThisHour(traderId),
+      entriesLastHour,
+      /*
+       * 手续费感知门槛用的费率。**实测优先**（窗口内的 Σ手续费 / Σ名义价值），
+       * 读不到成交时留 null，由引擎回落到配置的兜底费率 —— 提示词里那条硬性约束
+       * 用的是同一个取值规则，两边不会各说各话。
+       */
+      roundTripFeeRate: memory.performance.roundTripFeeRate,
     });
 
     for (const rejection of verdict.rejected) {
@@ -2645,11 +2667,70 @@ export class AutoTrader {
     return Date.now() - new Date(lastExit).getTime() < minutes * 60_000;
   }
 
+  /**
+   * 组装提示词里的「记忆」区块（提案 §2 的三块）。
+   *
+   * ## 为什么全部在 SQL 里做（§4 的 O(1)）
+   *
+   * 三块内容分别来自：一个**固定时间窗口**的聚合、**固定 5 笔**逐笔明细、以及计数与
+   * 时间差。进提示词的只有这些结果，所以提示词大小与 `trades` 里有多少行无关 ——
+   * 这是"跑满一年后单轮 token 数与第一天相同"这条承诺的实现方式。把成交行拉进
+   * JavaScript 再自己 reduce 也能算出同样的数，但每轮的记忆开销会随历史长度线性上升，
+   * 而 `node:sqlite` 是同步的：那笔开销直接压在交易循环所在的事件循环上。
+   *
+   * ## 为什么"当时的理由"必须和结果一起给模型
+   *
+   * 它看不到自己刚在 4 分钟前平掉了一笔、今天已经开了 7 笔、连续用同一个理由在同一个
+   * 标的上反复进出。把理由与结果并排放，是它唯一能形成"我某个判断模式不奏效"的机制：
+   * 只看结果它不知道自己错在哪，只看理由它不知道那个理由已经失败过。
+   */
+  private buildPromptMemory(
+    traderId: number,
+    config: StrategyConfig,
+    entriesThisHour: number,
+  ): PromptMemory {
+    const since = new Date(Date.now() - PROMPT_PERFORMANCE_WINDOW_HOURS * 3_600_000).toISOString();
+    const performance = tradeStore.performanceSince(traderId, since);
+    const lastExitAt = tradeEvents.lastExit(traderId);
+    const lastExitMs = lastExitAt ? Date.parse(lastExitAt) : Number.NaN;
+
+    return {
+      performance: {
+        windowHours: PROMPT_PERFORMANCE_WINDOW_HOURS,
+        totalTrades: performance.totalTrades,
+        wins: performance.wins,
+        losses: performance.losses,
+        grossPnl: performance.grossPnl,
+        totalFees: performance.totalFees,
+        totalFunding: performance.totalFunding,
+        netPnl: performance.netPnl,
+        avgWin: performance.avgWin,
+        avgLoss: performance.avgLoss,
+        /*
+         * 没有亏损单时这个比值算不出来 —— 用 null 表示"算不出来"，而不是 0 或无穷：
+         * 0 会被渲染成"实际盈亏比 0.00"，读起来像是"每一笔都亏"，与事实相反。
+         */
+        realizedPayoffRatio:
+          performance.avgLoss > 0 ? performance.avgWin / performance.avgLoss : null,
+        roundTripFeeRate: performance.roundTripFeeRate,
+      },
+      recentCloses: tradeStore.recentWithReason(traderId, PROMPT_RECENT_CLOSE_COUNT),
+      throttle: {
+        entriesThisHour,
+        maxEntriesPerHour: config.throttle.maxEntriesPerHour,
+        // 时间戳读不出来时按"从未平过仓"处理（null）：宁可少说一句，也不要报一个假的剩余时间。
+        minutesSinceLastExit: Number.isFinite(lastExitMs)
+          ? Math.max(0, (Date.now() - lastExitMs) / 60_000)
+          : null,
+        reentryCooldownMinutes: config.throttle.reentryCooldownMinutes,
+      },
+    };
+  }
+
   private buildPromptPositions(
     localPositions: PositionRow[],
     snapshots: Map<string, MarketSnapshot>,
-  ): PromptPosition[] {
-    return localPositions.map((p) => ({
+  ): PromptPosition[] {    return localPositions.map((p) => ({
       position: this.toPositionView(p, snapshots),
       snapshot: snapshots.get(p.symbol) ?? null,
       holdingMinutes: (Date.now() - new Date(p.opened_at).getTime()) / 60_000,
