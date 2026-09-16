@@ -133,7 +133,11 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
       ) : (
         // One scroll container. Every cycle renders its decisions in full; only
         // the reasoning block inside each module is collapsible.
-        <div className="overflow-y-auto" style={{ maxHeight: height }}>
+        //
+        // `space-y-3` 而不是相邻的 `border-b`：40 个周期用一条接一条的分隔线排下来，
+        // 会连成一整片、分不清哪里是上一个周期的结尾。让每个周期成为**独立的一张卡**，
+        // 靠间距和卡片边界来分组，扫读时才知道自己在看哪一轮。
+        <div className="space-y-3 overflow-y-auto p-3" style={{ maxHeight: height }}>
           {shown.map((record) => (
             <CycleBlock
               key={record.id}
@@ -143,7 +147,7 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
             />
           ))}
           {records.length > shown.length && (
-            <p className="border-t border-base-800 px-3 py-2 text-xs text-ink-faint">
+            <p className="pt-1 text-xs text-ink-faint">
               只显示最近 {shown.length} 个周期，共 {records.length} 个。完整历史在
               <Link to="/data" className="ml-1 text-accent hover:underline">
                 决策记录
@@ -205,15 +209,28 @@ function CycleBlock({
 
   const tokenText =
     record.promptTokens !== null || record.completionTokens !== null
-      ? `in ${fmtInt(record.promptTokens ?? 0)} out ${fmtInt(record.completionTokens ?? 0)}`
+      ? `输入 ${fmtInt(record.promptTokens ?? 0)} / 输出 ${fmtInt(record.completionTokens ?? 0)} tokens`
       : `延迟 ${fmtLatency(record.aiLatencyMs)}`;
 
+  /*
+   * 每个周期是一张**独立的卡**，不是列表里的一行。
+   *
+   * 原来用相邻的 `border-b` 分隔，40 个周期排下来会连成一片 —— 上下两个周期的
+   * 决策、按钮、元数据混在同一个视觉块里，扫读时分不清在哪一轮。
+   *
+   * 左边那条色条表达这一轮的**结果**（有失败→红，有拒绝→黄，正常→绿），
+   * 不必读文字就能看出哪几轮出过问题。
+   */
+  const accent = failed.length > 0 ? 'bg-down' : rejected.length > 0 ? 'bg-warn' : 'bg-up';
+
   return (
-    <div className="border-b border-base-850 last:border-b-0">
+    <article className="relative overflow-hidden rounded-lg border border-base-750 bg-base-900 shadow-panel">
+      <span aria-hidden className={cn('absolute inset-y-0 left-0 w-[3px]', accent)} />
+
       {/* Cycle header: metadata only. It is deliberately *not* a toggle — the
           decisions below are always shown, so there is nothing to expand here. */}
-      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-base-800/60 bg-base-850/40 px-3 py-2">
-        <span className="num text-xs font-semibold text-ink-hi">周期 #{record.cycleNumber}</span>
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-base-800 bg-base-850/60 py-2.5 pl-4 pr-3">
+        <span className="num text-sm font-semibold text-ink-hi">周期 #{record.cycleNumber}</span>
         <Badge tone={record.success ? 'up' : 'down'}>{record.success ? '成功' : '失败'}</Badge>
         {/* The collapsed-header summary: the whole point of the header row. */}
         <span
@@ -228,6 +245,7 @@ function CycleBlock({
         <span className="ml-auto flex items-center gap-2 text-xs text-ink-faint">
           {failed.length > 0 && <Badge tone="down">{failed.length} 失败</Badge>}
           {rejected.length > 0 && <Badge tone="warn">{rejected.length} 被拒</Badge>}
+          <span className="num">{record.candidateSymbols.length} 个候选</span>
           <span className="num">{tokenText}</span>
           <span className="num" title={record.timestamp}>
             {timeAgo(record.timestamp)}
@@ -236,7 +254,7 @@ function CycleBlock({
       </div>
 
       {/* Decisions — always visible. */}
-      <div className="space-y-2 px-3 py-2.5">
+      <div className="space-y-2 px-4 py-3">
         {record.error && (
           <div className="rounded-md border border-down/50 bg-down/10 px-2.5 py-1.5 text-xs text-down">
             周期错误：{record.error}
@@ -279,17 +297,7 @@ function CycleBlock({
 
       {/* Reasoning — collapsed by default, per cycle. */}
       <CycleReasoning record={record} traderId={traderId} />
-
-      {/* Footer */}
-      <div className="flex items-center justify-between px-3 pb-2 pt-1">
-        <span className="num text-xs text-ink-faint">
-          {record.candidateSymbols.length} 个候选 · 延迟 {fmtLatency(record.aiLatencyMs)}
-        </span>
-        <Link to={`/traders/${traderId}/decisions/${record.id}`} className="btn btn-ghost btn-xs">
-          审计
-        </Link>
-      </div>
-    </div>
+    </article>
   );
 }
 
@@ -386,7 +394,15 @@ function CycleReasoning({ record, traderId }: { record: DecisionRecord; traderId
   const hasCot = record.cotTrace.trim().length > 0;
 
   return (
-    <div className="px-3 pb-1">
+    /*
+     * 一条工具栏，所有操作都在同一行、同一高度。
+     *
+     * 原来的排布是反人类的：展开是一个只有 14px 的小三角（既看不清也点不准），
+     * 而"审计"在下面的另一行又出现了一次 —— 同一个动作两个入口、垂直节奏还错开，
+     * 每次都要在屏幕上找。现在左边是"看什么"（分段控件 + 展开），
+     * 右边是"拿走什么"（复制 + 审计），一行结束。
+     */
+    <div className="border-t border-base-800 bg-base-850/30 px-4 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <MiniTabs
           tabs={[
@@ -398,20 +414,22 @@ function CycleReasoning({ record, traderId }: { record: DecisionRecord; traderId
         />
 
         {/*
-          The only expand/collapse in the module, and it governs the reasoning
-          *only*. The decisions above are not behind it — see the module doc.
+          唯一的展开/收起，只管推理部分。上面的决策不在它后面 —— 见模块顶部注释。
+          用 `btn btn-ghost btn-xs` 而不是裸三角：它是这条工具栏里最主要的动作，
+          尺寸必须和"复制""审计"一致，否则用户找不到。
         */}
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
           title={open ? '收起思考过程与提示词' : '展开思考过程与提示词'}
-          className={cn(
-            'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs transition',
-            open ? 'text-accent' : 'text-ink-faint hover:text-accent',
-          )}
+          className="btn btn-ghost btn-xs"
         >
-          {open ? <ChevronUp aria-hidden className="h-3.5 w-3.5" /> : <ChevronDown aria-hidden className="h-3.5 w-3.5" />}
+          {open ? (
+            <ChevronUp aria-hidden className="h-3.5 w-3.5" />
+          ) : (
+            <ChevronDown aria-hidden className="h-3.5 w-3.5" />
+          )}
           {open ? '收起' : '展开'}
         </button>
 
