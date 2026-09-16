@@ -1096,6 +1096,63 @@ SYNUSDT 持仓仍开着（1 持仓 / 2 委托），暂无新平仓。
 推测与实测不符时要去核实判据，而不是继续按推测写记录。
 
 ---
+## 轮次 25 · 2026-09-17 01:26 CST（第 276 分钟）
+
+### 🐛 发现：账户被外部改回双向持仓模式时，机器人长时间无法下单
+
+**现象**：两次下单失败，方向不同、中间大量订单成功：
+
+```
+14:23:08  open_long  BRUSDT   失败：Binance -4061: Order's position side does not match user's setting
+17:23:38  open_short AINUSDT  失败：Binance -4061: Order's position side does not match user's setting
+```
+
+**机器的设计**（`broker.ts`）：
+
+```ts
+/** Position mode: `true` when the account is in hedge (dual-side) mode. */
+async isHedgeMode(): Promise<boolean>
+
+/**
+ * Force one-way mode, the only mode this bot reasons about.
+ * Binance refuses the change while any position or open order exists.
+ */
+async ensureOneWayMode(): Promise<{ changed: boolean; warning: string | null }>
+```
+
+- 订单一律带 `positionSide=BOTH`（单向模式假设）
+- 启动时调用 `ensureOneWayMode()` 把账户切成单向
+- **切不了（有持仓/挂单）时只警告并继续** —— 之后每个订单都会 -4061
+
+**日志揭示了真实序列**：
+
+```
+14:23:08  下单失败 -4061        ← 账户此时是双向模式
+14:23:17  账户已切换为单向持仓模式  ← 重启时自动纠正（我的部署）
+15:06:26  账户已切换为单向持仓模式
+15:42:11  账户已切换为单向持仓模式
+```
+
+**所以：账户会从机器人之外被改回双向模式，而机器人只在启动时纠正它。**
+
+**为什么这是个真问题**：
+
+- 每次被改回去之后，**第一个订单失败**；
+- 下一次重启之前**机器人一直处于这个破损状态** —— 17:23 失败时，最后一次纠正停留在 15:42，
+  中间近 1 小时 40 分钟；
+- 它只是在决策记录里留一条 `failed`，机器人状态仍是 `running`，
+  **从状态上看不出它已经无法下单**。
+
+**推测的修法**：`ensureOneWayMode()` 不该只在启动时跑 ——
+- 收到 `-4061` 时纠正并重试一次；或
+- 定期（比如每小时）复查模式。
+
+**为什么这一轮没有直接改**：需要先确认「账户为什么会反复被改回双向模式」——
+如果是外部工具或用户手动改的，那么"失败时自动纠正"是对的；
+但如果另有原因（比如某些标的只支持双向），自动纠正会掩盖真问题。
+**先记录，下一轮查清楚再改。**
+
+---
 ## 待人工决定（累积）
 
 **目前没有待决事项。** 用户指示「你帮我处理，我不懂」后，原先的三项已全部处理：
