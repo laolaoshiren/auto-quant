@@ -1012,3 +1012,53 @@ test('a reconcile pass does not run while a cycle is in flight', async () => {
     await trader.stop('测试结束');
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/*  关闭流程不得伪装成"操作员停止"                                              */
+/* -------------------------------------------------------------------------- */
+
+test('shutdown does not mark the trader as operator-stopped', async () => {
+  /*
+   * Why this test exists.
+   *
+   * `AutoTrader.stop()` used to always write `stopped` to the database. That is
+   * correct for an operator clicking 停止, and wrong for the process shutting
+   * down — because `resumePersisted()` treats `stopped` as **a human decision**
+   * and deliberately refuses to resume it.
+   *
+   * The consequence was silent and total: every deploy or restart turned every
+   * running bot into "manually stopped", and it never came back. Nothing looked
+   * wrong on the console — the status read `stopped`, exactly as if someone had
+   * clicked it. It was found only by restarting a live instance and noticing the
+   * bot had not resumed.
+   *
+   * So the contract is: shutdown stops the loop but leaves `running` on disk;
+   * only an explicit operator stop may write `stopped`.
+   */
+  const broker = new FakeBroker();
+  const trader = buildTrader(broker, '<decision>[]</decision>');
+
+  // Start so the persisted status becomes `running`, exactly as a real start does.
+  await trader.start();
+  assert.equal(
+    traders.get(traderId)?.status,
+    'running',
+    'starting must persist `running`, otherwise nothing is ever resumable',
+  );
+
+  // Shutdown path.
+  await trader.stop('服务器正在关闭', false);
+  assert.equal(
+    traders.get(traderId)?.status,
+    'running',
+    'shutdown must leave `running` on disk so the next boot resumes the bot',
+  );
+
+  // Operator path — the default must still mark it stopped.
+  await trader.stop('操作员手动停止');
+  assert.equal(
+    traders.get(traderId)?.status,
+    'stopped',
+    'an explicit operator stop must persist `stopped`, or resumePersisted would resurrect a bot the human stopped',
+  );
+});
