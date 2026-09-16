@@ -1,76 +1,36 @@
 /**
- * 最近决策 — the decision feed.
+ * 最近决策 — 决策流。
  *
- * The centrepiece of the trader dashboard. Each entry is one decision *cycle*
- * (a cycle can emit several decisions plus refusals), grouped so the operator
- * can see what the model proposed and what the runtime actually did.
+ * 交易页的右栏（`LAYOUT.md` §2），也是操作者一直盯着的那个面板。
  *
- * ## Layout rule
+ * ## 形态：照抄参考产品，`DECISION-FEED.md` 是契约
  *
- * **Decisions are always visible; only the reasoning is collapsed.** The feed is
- * a scrolling stack of cycle modules, not an accordion:
+ * 一轮周期 = **一行纯文字元数据 + 一个带边框的盒子 + 两个纯文字按钮**：
  *
  * ```
- * 周期 #5316  ·  in 32657 out 7396          ← metadata only, not a toggle
- *   ZECUSDT  平仓   置信度 62%   "跌破 EMA20…"
- *   AINUSDT  观望   置信度 79%   "持有吃趋势…"      ← always rendered
- *   FFUSDT   等待   置信度 80%   "通道量能萎缩…"
- *   思考过程 ▾ │ 提示词        [复制] [新标签打开]   ← collapsed by default
+ * 3 分钟前 │ 周期 #5404 │ in 34,411 · out 4,980      ← 一行纯文字，无边框无底色无徽章
+ * ┌──────────────────────────────────────────────┐
+ * │ ⬤ ZECUSDT                              观望  │   ← 币种图标 + 符号 …… 右对齐动作
+ * │   置信度: 78%                                │   ← 强调色小字
+ * │   📄 AI500=776 达标，价格站上 15m EMA20…     │   ← 文档图标 + 理由，允许折行
+ * │                                              │
+ * │ Ⓑ BRUSDT                               等待  │
+ * │   置信度: 30%                                │
+ * │   📄 AI500 仅 66.3 未达 75 红线…             │
+ * └──────────────────────────────────────────────┘
+ * ✨ 思考过程 ✓   │   🔒 提示词                        ← 两个纯文字按钮
  * ```
  *
- * The previous version hid the decisions behind a per-cycle expand/collapse, so
- * the feed showed nothing but headers until you clicked one. That is backwards:
- * "what did it decide" is the information an operator is watching continuously,
- * while the chain of thought is something you open deliberately when a decision
- * looks wrong.
+ * ## 这一版删掉的东西，以及为什么不能再加回来
  *
- * ## The collapsed header must still answer the question
- *
- * With the decisions always rendered the *header* is the only thing an operator
- * reads while scanning, so it carries a summary of what is below it
- * (`开多 BTCUSDT · 3 条决策 · 2 条被拒`) rather than a neutral label like
- * 思考过程. Scanning the header row alone is enough to spot a cycle that
- * refused everything.
- */
-import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ChevronDown, ChevronUp, ExternalLink, RotateCw } from 'lucide-react';
-import type { DecisionRecord, Decision, ExecutionLogEntry } from '@aq/shared';
-import { api, type MarketSymbol } from '../lib/api';
-import { useEvents } from '../lib/store';
-import { useCopy, usePolled } from '../lib/hooks';
-import { Badge, Button, CopyButton, Empty, Panel, Spinner3, cn } from './ui';
-import {
-  ActionBadge,
-  DecisionMetrics,
-  MiniTabs,
-  PromptBlock,
-  RejectedCard,
-  actionLabel,
-  isOpenAction,
-} from './DecisionAudit';
-import { fmtInt, fmtLatency, timeAgo } from '../lib/format';
-
-const ACTION_STRIPE: Record<string, string> = {
-  open_long: 'border-l-up',
-  open_short: 'border-l-down',
-  close_long: 'border-l-warn',
-  close_short: 'border-l-warn',
-  hold: 'border-l-base-600',
-  wait: 'border-l-base-600',
-};
-
-/**
- * How many cycles are rendered.
- *
- * The endpoint answers with 50 and the socket can append more; either way the
- * list is capped so a long-running bot cannot turn this panel into a thousand
- * DOM nodes. `全部记录` in the header is the way to see the rest.
- */
-const FEED_LIMIT = 50;
-
-/**
- * 决策流。它住在交易页的**右栏**（`LAYOUT.md` §2）。
+ * - **每条决策外面那层带边框的卡片**：一轮本来就只该有**一个**盒子。给每条决策再套
+ *   一层，屏幕上就会出现三层边框（盒子 / 决策卡 / 数字表），一屏只能看下两三条。
+ * - **决策卡内的 6 格数字表**（数量 / 开仓价 / 止损 / 止盈 / 风险回报 / 杠杆）：
+ *   它是三轮溢出 bug 的根源。表格格子有最小宽度，右栏只有 40% 宽，格子一挤，
+ *   文字就飘到相邻列里去（见 git 历史里那张 `率.47%` 的截图）。
+ *   现在这些数字变成**理由下面的一行小字**——一行文本可以折行，**不可能溢出**。
+ * - **周期头左侧的 3px 结果色条、`成功` 徽章、`N 个候选`**：参考里没有。
+ *   结果信息改用一行小字表达（`⚠ 2 条被风控拒绝`），见 `CycleBlock`。
  *
  * ## 高度：填满所在的那一栏，而不是自己算一个视口高度
  *
@@ -91,6 +51,51 @@ const FEED_LIMIT = 50;
  *   没有它，50 个周期会把整页撑成一条长条，正是 §2 要避免的。
  *   `xl:max-h-none` 把上限交还给上面那条 flex 高度链。
  */
+import { useMemo, useState, type CSSProperties } from 'react';
+import { Link } from 'react-router-dom';
+import { Check, FileText, Lock, RotateCw, Sparkles, TriangleAlert } from 'lucide-react';
+import type { DecisionRecord, Decision, ExecutionLogEntry } from '@aq/shared';
+import { api, type MarketSymbol } from '../lib/api';
+import { useEvents } from '../lib/store';
+import { usePolled } from '../lib/hooks';
+import { Empty, Panel, Spinner3, cn } from './ui';
+import { ActionBadge, actionLabel, isOpenAction } from './DecisionAudit';
+import { fmtInt, fmtLatency, fmtPriceUsd, fmtUsd, timeAgo } from '../lib/format';
+
+/**
+ * How many cycles are rendered.
+ *
+ * The endpoint answers with 50 and the socket can append more; either way the
+ * list is capped so a long-running bot cannot turn this panel into a thousand
+ * DOM nodes. `全部记录` in the header is the way to see the rest.
+ */
+const FEED_LIMIT = 50;
+
+/**
+ * 币种图标的底色。
+ *
+ * 参考产品给每个币一个彩色圆点，而**这里不引入图标库**（`package.json` 里没有
+ * 币种图标依赖，为几个圆点加一个依赖不划算）。用币种符号哈希出一个色相：
+ * 同一个币**永远**是同一个颜色，刷新、跨周期、跨机器人都不变 ——
+ * 颜色是给眼睛当锚点用的，随机变一次就废了。
+ *
+ * 固定 `42% 40%` 的饱和度与明度，只让**色相**变：深色界面上一排圆点如果明度
+ * 也各不相同，最亮的那几个会抢走数字的注意力（`DESIGN.md` §1：装饰不能挤压数据）。
+ */
+function coinColor(symbol: string): string {
+  let hash = 0;
+  for (let index = 0; index < symbol.length; index += 1) {
+    hash = (hash * 31 + symbol.charCodeAt(index)) % 100_000;
+  }
+  // 乘 47 再取模：让相邻的符号（`BTCUSDT` / `BTUSDT`）落到**相隔很远**的色相上，
+  // 而不是相邻的、肉眼分不出来的两档。
+  return `hsl(${(hash * 47) % 360} 42% 40%)`;
+}
+
+function coinInitial(symbol: string): string {
+  return symbol.slice(0, 1).toUpperCase() || '?';
+}
+
 export function DecisionFeed({ traderId }: { traderId: number }) {
   const live = useEvents((s) => s.byTrader[traderId]?.decisions);
   const query = usePolled((signal) => api.traderDecisions(traderId, FEED_LIMIT, signal), {
@@ -98,7 +103,8 @@ export function DecisionFeed({ traderId }: { traderId: number }) {
     deps: [traderId],
   });
 
-  // The market list is what turns "stop 74434.8" into "-2.50% from entry".
+  // 行情列表提供**当前价**，用来把"止损 74434.8"变成"离现价多远"，
+  // 也是开仓那一行里 `开仓 <价>` 与风险回报比的来源。
   const symbolsQuery = usePolled((signal) => api.marketSymbols(signal), { intervalMs: 20_000 });
 
   // Live records win, but a REST page can be newer after a reload.
@@ -112,7 +118,12 @@ export function DecisionFeed({ traderId }: { traderId: number }) {
   if (query.loading && records.length === 0) {
     return (
       // 加载态也占满整栏：否则数据一到位，这一栏会突然从一小条跳成整屏高。
-      <Panel title="最近决策" padded={false} className="flex h-full min-h-0 flex-col" bodyClassName="flex min-h-0 flex-1 flex-col p-0">
+      <Panel
+        title="最近决策"
+        padded={false}
+        className="flex h-full min-h-0 flex-col"
+        bodyClassName="flex min-h-0 flex-1 flex-col p-0"
+      >
         <Spinner3 label="正在加载决策" />
       </Panel>
     );
@@ -127,25 +138,20 @@ export function DecisionFeed({ traderId }: { traderId: number }) {
          "剩下的高度"并自己滚动（见组件顶部注释）。 */
       className="flex h-full min-h-0 flex-col"
       bodyClassName="flex min-h-0 flex-1 flex-col p-0"
-      title={
-        <span className="flex items-center gap-2">
-          最近决策
-          <Badge tone="muted">{records.length}</Badge>
-        </span>
-      }
+      title="最近决策"
       actions={
         <span className="flex items-center gap-1.5">
-          <Button
-            size="sm"
-            variant="ghost"
-            busy={query.loading}
+          <button
+            type="button"
             onClick={() => query.reload()}
             title="重新拉取决策记录"
+            className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-ink-lo transition hover:text-ink-hi disabled:opacity-50"
+            disabled={query.loading}
           >
-            <RotateCw aria-hidden className="h-3.5 w-3.5" />
+            <RotateCw aria-hidden className={cn('h-3.5 w-3.5', query.loading && 'animate-spin')} />
             刷新
-          </Button>
-          <Link to="/data" className="btn btn-ghost btn-xs">
+          </button>
+          <Link to="/data" className="text-xs text-ink-lo transition hover:text-accent">
             全部记录
           </Link>
         </span>
@@ -157,8 +163,7 @@ export function DecisionFeed({ traderId }: { traderId: number }) {
           hint="每个周期都会连同完整提示词与原始响应一起持久化 — 运行一次后这里就会填满。"
         />
       ) : (
-        // One scroll container. Every cycle renders its decisions in full; only
-        // the reasoning block inside each module is collapsible.
+        // One scroll container. 每轮 = 元数据行 + 盒子 + 两个文字按钮。
         //
         // `flex-1 min-h-0`：高度来自右栏（`h-full` 的确定高度），不是 `max-height`。
         // `min-h-0` 不能省 —— flex 子项默认 `min-height: auto`，那一项会让滚动区
@@ -168,17 +173,12 @@ export function DecisionFeed({ traderId }: { traderId: number }) {
         // 高度是内容高度，没有这个上限就会把整页撑长。
         //
         // `space-y-2.5` 而不是相邻的 `border-b`：40 个周期用一条接一条的分隔线排下来，
-        // 会连成一整片、分不清哪里是上一个周期的结尾。让每个周期成为**独立的一张卡**，
-        // 靠间距和卡片边界来分组，扫读时才知道自己在看哪一轮。
-        //
-        // 间距按设计规范收紧（卡内与间隙各减 2px）：这一页是操作者会一直
-        // 滚的地方，同样的屏幕高度里多挤进一轮就多一分用。
+        // 会连成一整片、分不清哪里是上一个周期的结尾。
         <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-2.5 max-h-[calc(100dvh-16rem)] xl:max-h-none">
           {shown.map((record) => (
             <CycleBlock
               key={record.id}
               record={record}
-              traderId={traderId}
               symbols={symbolsQuery.data ?? []}
             />
           ))}
@@ -201,125 +201,46 @@ export function DecisionFeed({ traderId }: { traderId: number }) {
 /*  One cycle module                                                           */
 /* -------------------------------------------------------------------------- */
 
-/**
- * What the cycle decided, in one line, for the collapsed header.
- *
- * The operator scans the header row without expanding anything, so the header
- * has to say *what happened* — `wait` with no refusals is a very different cycle
- * from `open_long` with two refusals, and the old header rendered both as
- * nothing but a cycle number.
- */
-function summarize(record: DecisionRecord, rejected: number, failed: number): string {
-  const parts: string[] = [];
-  const first = record.decisions[0];
-
-  if (first) {
-    const label = actionLabel(first.action);
-    // `wait 3` reads as a count of nothing; naming a symbol is what tells the
-    // operator the model at least looked somewhere specific. The decision count
-    // is stated separately because one 开多 and five 开多 are different cycles.
-    parts.push(record.decisions.length === 1 ? `${label} ${first.symbol}` : `${label} ${first.symbol} 等`);
-    parts.push(`${record.decisions.length} 条决策`);
-  }
-  if (rejected > 0) parts.push(`${rejected} 条被拒`);
-  if (failed > 0) parts.push(`${failed} 条失败`);
-
-  // One decision and one refusal-free cycle collapses to `开多 BTCUSDT` — the
-  // count adds nothing when it is visibly the only card below the header.
-  if (parts.length === 0) return '本周期没有决策';
-  if (parts.length === 1) return parts[0] as string;
-  return parts.join(' · ');
+function priceOf(symbols: MarketSymbol[], symbol: string): number | null {
+  const row = symbols.find((item) => item.symbol === symbol);
+  return row ? row.price : null;
 }
 
-function CycleBlock({
-  record,
-  traderId,
-  symbols,
-}: {
-  record: DecisionRecord;
-  traderId: number;
-  symbols: MarketSymbol[];
-}) {
+/**
+ * 一轮周期：**一行纯文字元数据 + 一个盒子 + 两个纯文字按钮**。
+ *
+ * 盒子里按顺序排这一轮的每一条决策（扁平行，不再给每条决策套卡片），
+ * 然后是执行失败的条目和被风控拒绝的小字说明 —— 后者是操作者判断
+ * "风控到底有没有在跑"的唯一依据，必须留在原位、不能被折叠掉
+ * （`DECISION-FEED.md` §7）。
+ */
+function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: MarketSymbol[] }) {
   const rejected = record.executionLog.filter((entry) => entry.status === 'rejected');
   const failed = record.executionLog.filter((entry) => entry.status === 'failed');
 
-  const tokenText =
-    record.promptTokens !== null || record.completionTokens !== null
-      ? `输入 ${fmtInt(record.promptTokens ?? 0)} / 输出 ${fmtInt(record.completionTokens ?? 0)} tokens`
-      : `延迟 ${fmtLatency(record.aiLatencyMs)}`;
-
-  /*
-   * 每个周期是一张**独立的卡**，不是列表里的一行。
-   *
-   * 原来用相邻的 `border-b` 分隔，40 个周期排下来会连成一片 —— 上下两个周期的
-   * 决策、按钮、元数据混在同一个视觉块里，扫读时分不清在哪一轮。
-   *
-   * 左边那条色条表达这一轮的**结果**（有失败→红，有拒绝→黄，正常→绿），
-   * 不必读文字就能看出哪几轮出过问题。
-   */
-  const accent = failed.length > 0 ? 'bg-down' : rejected.length > 0 ? 'bg-warn' : 'bg-up';
-
   return (
-    <article className="relative overflow-hidden rounded-lg border border-base-750 bg-base-900 shadow-panel">
-      <span aria-hidden className={cn('absolute inset-y-0 left-0 w-[3px]', accent)} />
+    <article className="min-w-0">
+      <CycleMeta record={record} />
 
-      {/* Cycle header: metadata only. It is deliberately *not* a toggle — the
-          decisions below are always shown, so there is nothing to expand here. */}
-      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-base-800 bg-base-850/60 py-2 pl-3.5 pr-3">
-        <span className="num text-sm font-semibold text-ink-hi">周期 #{record.cycleNumber}</span>
-        <Badge tone={record.success ? 'up' : 'down'}>{record.success ? '成功' : '失败'}</Badge>
-        {/* The collapsed-header summary: the whole point of the header row. */}
-        <span
-          className={cn(
-            'num truncate text-base',
-            rejected.length > 0 ? 'text-warn' : failed.length > 0 ? 'text-down' : 'text-ink-mid',
-          )}
-          title="本周期做出了什么决定 — 不需要展开就能看到。"
-        >
-          {summarize(record, rejected.length, failed.length)}
-        </span>
-        <span className="ml-auto flex items-center gap-2 text-xs text-ink-faint">
-          {failed.length > 0 && <Badge tone="down">{failed.length} 失败</Badge>}
-          {rejected.length > 0 && <Badge tone="warn">{rejected.length} 被拒</Badge>}
-          <span className="num">{record.candidateSymbols.length} 个候选</span>
-          <span className="num">{tokenText}</span>
-          <span className="num" title={record.timestamp}>
-            {timeAgo(record.timestamp)}
-          </span>
-        </span>
-      </div>
-
-      {/* Decisions — always visible. */}
-      <div className="space-y-1.5 px-3.5 py-2.5">
+      {/* 决策盒子：**一轮只有这一个**边框。每条决策只是里面的一段，没有自己的边框。 */}
+      <div className="min-w-0 rounded-lg border border-base-750 bg-base-900 px-3 py-2.5">
         {record.error && (
-          <div className="rounded-md border border-down/50 bg-down/10 px-2.5 py-1.5 text-xs text-down">
-            周期错误：{record.error}
-          </div>
+          <p className="mb-1.5 flex items-start gap-1.5 text-xs leading-relaxed text-down">
+            <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 break-words">周期错误：{record.error}</span>
+          </p>
         )}
 
         {record.decisions.length === 0 && rejected.length === 0 && failed.length === 0 && (
           <p className="text-xs text-ink-faint">本周期模型没有给出任何决策。</p>
         )}
 
-        {/*
-          Two columns from `lg` up. The feed is full width now, and a single
-          column of decision cards across 1400px would put the reasoning text
-          and the confidence badge a screen apart.
-        */}
         {record.decisions.length > 0 && (
-          /*
-           * `items-start` 是必需的，不是可选的美化。
-           *
-           * Grid 默认 `align-items: stretch`，同一行的卡片会被**撑成等高**。
-           * 于是「平多 ARBUSDT · 置信度 0%」这种内容极少的卡片，会被拉高到和
-           * 旁边一张写满说明与数字的卡片一样高 —— 中间留下一大片空白，
-           * 看起来就是"卡片错位、东倒西歪"。在宽屏（≥1536px，卡片变三列）时最明显。
-           *
-           * 每张卡只占自己内容的高度，行高由这一行最高的那张决定，其余保持自然高度。
-           */
-          <div className="grid grid-cols-1 items-start gap-2 lg:grid-cols-2 2xl:grid-cols-3">
+          // 决策之间只用**间距**分隔（§3），不加分隔线：一条细线在深色底上会
+          // 变成第二层边框，而这个盒子里只该有一层。
+          <div className="space-y-2.5">
             {record.decisions.map((decision, index) => (
-              <DecisionCard
+              <DecisionRow
                 key={`${decision.symbol}-${index}`}
                 decision={decision}
                 price={priceOf(symbols, decision.symbol)}
@@ -328,69 +249,129 @@ function CycleBlock({
           </div>
         )}
 
-        {/* Refusals explain "why did it do nothing", so they belong here. */}
-        {(rejected.length > 0 || failed.length > 0) && (
-          <div className="grid grid-cols-1 items-start gap-2 lg:grid-cols-2 2xl:grid-cols-3">
-            {rejected.map((entry, index) => (
-              <RejectedCard key={`rej-${index}`} entry={entry} />
-            ))}
+        {/* 执行失败 / 被风控拒绝：用一行小字说出来，不做成徽章行、不折叠。 */}
+        {failed.length + rejected.length > 0 && (
+          <ul className="mt-2 space-y-1 border-t border-base-850 pt-2">
             {failed.map((entry, index) => (
-              <FailedCard key={`fail-${index}`} entry={entry} />
+              <LogLine key={`fail-${index}`} entry={entry} />
             ))}
-          </div>
+            {rejected.map((entry, index) => (
+              <LogLine key={`rej-${index}`} entry={entry} />
+            ))}
+          </ul>
         )}
       </div>
 
-      {/* Reasoning — collapsed by default, per cycle. */}
-      <CycleReasoning record={record} traderId={traderId} />
+      <CycleDetails record={record} rejected={rejected.length} failed={failed.length} />
     </article>
   );
 }
 
-function priceOf(symbols: MarketSymbol[], symbol: string): number | null {
-  const row = symbols.find((s) => s.symbol === symbol);
-  return row ? row.price : null;
-}
+/**
+ * 周期头：一行纯文字。
+ *
+ * 内容与顺序照参考：`相对时间 │ 周期 #N │ in N · out N`。
+ * **没有**边框、底色、`成功` 徽章、`N 个候选`、`N 条决策` —— 那些都要读第二眼
+ * 才明白在说什么，而这一行的作用是让操作者扫过去就知道"这是第几轮、多久以前"。
+ *
+ * 完整时间戳放在 `title` 里：相对时间适合扫读，但对账时需要精确时刻。
+ */
+function CycleMeta({ record }: { record: DecisionRecord }) {
+  const tokens =
+    record.promptTokens === null && record.completionTokens === null
+      ? // 没有 token 计数时（老记录 / 端点未回传用量）说延迟，不写 `in 0 / out 0`：
+        // 那会让人以为模型一个 token 都没花。
+        fmtLatency(record.aiLatencyMs)
+      : `in ${fmtInt(record.promptTokens ?? 0)} · out ${fmtInt(record.completionTokens ?? 0)}`;
 
-/** Two-line clamp that does not depend on the line-clamp plugin. */
-function ClampedText({ text }: { text: string }) {
   return (
-    <p
-      className="mt-1 overflow-hidden text-xs leading-relaxed text-ink-mid"
-      style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}
-      title={text}
-    >
-      {text}
-    </p>
+    <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 px-0.5 text-xs text-ink-lo">
+      <span>{timeAgo(record.timestamp)}</span>
+      <span aria-hidden className="text-ink-faint">
+        │
+      </span>
+      <span className="num">周期 #{record.cycleNumber}</span>
+      <span aria-hidden className="text-ink-faint">
+        │
+      </span>
+      <span className="num">{tokens}</span>
+    </div>
   );
 }
 
-function DecisionCard({ decision, price }: { decision: Decision; price: number | null }) {
+/**
+ * 一条决策 = 三行，左对齐在同一条缩进线上。
+ *
+ * 图标固定 `h-5 w-5`（20px），第二、三行用 `pl-5` 对齐到符号下方 —— 缩进宽度就是
+ * 图标宽度，两处改动必须一起改，否则三行会错开。
+ *
+ * 行 1 用 `flex` 而不是 grid：符号与右侧动作徽章分别 `shrink-0`，中间没有需要
+ * 分配的空间，`ml-auto` 就够了。徽章必须 `shrink-0` —— `chip` 自带 `whitespace`
+ * 无关的 `font-mono`，一旦被压窄，`开多` 两个字会折成两行、把行高顶起来。
+ */
+function DecisionRow({ decision, price }: { decision: Decision; price: number | null }) {
+  const figures = figureParts(decision, price);
+
   return (
-    <div
-      className={cn(
-        // `@container`：让卡片内部按**卡片自己的宽度**取断点，而不是视口宽度。
-        // 见 DecisionMetrics 里的说明 —— 那是"数字挤成一团"的根因。
-        'decision-card min-w-0 rounded-md border border-base-750 border-l-2 bg-base-850/50 px-3 py-2',
-        ACTION_STRIPE[decision.action] ?? 'border-l-base-600',
-      )}
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <ActionBadge action={decision.action} />
-        <span className="text-base font-semibold text-ink-hi">{decision.symbol}</span>
-        <span className="num ml-auto text-xs text-ink-lo" title="模型对该决策的自评置信度。">
-          置信度 {decision.confidence}%
-        </span>
+    <div className="min-w-0">
+      <div className="flex min-w-0 items-center gap-2">
+        <CoinIcon symbol={decision.symbol} />
+        <span className="min-w-0 truncate text-base font-semibold text-ink-hi">{decision.symbol}</span>
+        <ActionBadge action={decision.action} className="ml-auto shrink-0" />
       </div>
 
-      {decision.reasoning && <ClampedText text={decision.reasoning} />}
+      {/* 置信度：缩进对齐到符号下方，强调色小字。 */}
+      <div className="mt-0.5 pl-5 text-xs text-accent">
+        置信度: <span className="num">{decision.confidence}%</span>
+      </div>
 
-      {isOpenAction(decision.action) && <DecisionMetrics decision={decision} price={price} />}
+      {decision.reasoning && (
+        <div className="mt-0.5 flex min-w-0 items-start gap-1.5 pl-5">
+          {/* `shrink-0` + `mt-[3px]`：图标不能被文字挤扁，也要和第一行文字的视觉中线对齐。 */}
+          <FileText aria-hidden className="mt-[3px] h-3.5 w-3.5 shrink-0 text-ink-lo" />
+          <p className="min-w-0 break-words text-xs leading-relaxed text-ink-mid">{decision.reasoning}</p>
+        </div>
+      )}
 
+      {/*
+        实际开仓的关键数字：**一行小字**，不是表格。
+        见 `figureParts` 的说明 —— 这是三轮溢出 bug 的修复方式。
+      */}
+      {figures.length > 0 && (
+        <p className="mt-1 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 pl-5 text-xs leading-relaxed text-ink-lo">
+          {figures.map((part, index) => (
+            <span key={`${part.label}-${part.value}-${index}`} className="flex items-baseline gap-1">
+              {index > 0 && (
+                <span aria-hidden className="text-ink-faint">
+                  ·
+                </span>
+              )}
+              {part.label && <span className="text-ink-faint">{part.label}</span>}
+              {/*
+                折行由**外层** `flex-wrap` 负责（在片段之间断），这是正常路径 ——
+                不要给这个数字加 `whitespace-nowrap`：`0.171900` 一旦被折成两行，
+                看起来就是两个数。
+
+                但也不能指望"片段足够窄"：所以保留 `break-all` 作为**最后一道防线**。
+                决策流在 `xl` 以下是整页宽（≥600px），在 `xl` 以上是右栏的 40%
+                （≥500px），而这一行最长的片段（`止损 0.174000`）约 90px，
+                正常永远用不到它；万一真的窄到放不下，`break-all` 保证数字在
+                **自己的盒子内**折行，而不是撑破容器跑出去
+                （`DECISION-FEED.md` 里那三轮溢出 bug 就是这么来的）。
+              */}
+              <span className="num break-all" title={FIGURE_TITLE[part.key]}>
+                {part.value}
+              </span>
+            </span>
+          ))}
+        </p>
+      )}
+
+      {/* 风控对这条决策做过的每一次干预。带数字，不是"参数已调整"这种空话。 */}
       {decision.adjustments.length > 0 && (
-        <ul className="mt-1.5 space-y-0.5">
+        <ul className="mt-1 space-y-0.5 pl-5">
           {decision.adjustments.map((note, index) => (
-            <li key={index} className="text-xs text-warn/90">
+            <li key={index} className="break-words text-xs leading-relaxed text-warn/90">
               • {note}
             </li>
           ))}
@@ -400,119 +381,224 @@ function DecisionCard({ decision, price }: { decision: Decision; price: number |
   );
 }
 
-function FailedCard({ entry }: { entry: ExecutionLogEntry }) {
+type FigureKey = 'size' | 'entry' | 'stop' | 'target' | 'reward' | 'leverage';
+
+/** 关键数字里的一个片段：`{ label: '止损', value: '0.174000' }`。 */
+interface Figure {
+  key: FigureKey;
+  /** 短标签；数量、风险回报比、杠杆没有标签，靠悬停说明解释。 */
+  label: string;
+  value: string;
+}
+
+/**
+ * 开仓关键数字里每一项的悬停说明。
+ *
+ * 这一行的标签很短（`$30.00 · 开仓 0.171900 · … · 1:8.62 · 5x`），
+ * 悬停时给出**带单位的全称** —— `DESIGN.md` §7：单位要写出来，
+ * 不能让人猜 `1:8.62` 和 `5x` 各是什么。
+ */
+const FIGURE_TITLE: Record<FigureKey, string> = {
+  size: '名义价值（USDT）',
+  entry: '当前价格，即开仓参考价',
+  stop: '止损价',
+  target: '止盈价',
+  reward: '风险回报比 = 到止盈的距离 ÷ 到止损的距离',
+  leverage: '杠杆倍数',
+};
+
+/**
+ * 开仓的关键数字，拆成**若干可以整体折行的片段**。
+ *
+ * ## 为什么不是表格（这是这个文件里最重要的一条注释）
+ *
+ * 这里原来是 6 个格子的 grid（数量 / 开仓价 / 止损 / 止盈 / 风险回报 / 杠杆），
+ * 还用了容器查询按卡片宽度切 2/3 列。它连续三轮出溢出 bug：grid 的列有最小内容
+ * 宽度，而决策流在右栏里只有约 40% 宽、卡片还得再分两三列，于是一个
+ * `0.176800` 加一个 `+26.67%` 就撑破格子，文字挤进相邻列（截图里那个飘出去的
+ * `率.47%` 就是这么来的）。
+ *
+ * 现在返回**结构化片段**而不是一整条字符串：调用处把每一项的标签与数字分开渲染，
+ * 由外层的 `flex-wrap` 在片段之间折行（正常路径），数字上再加 `break-all` 兜底。
+ * 两条加起来的结果是：**横向不可能撑破容器**，这正是三轮 bug 的根因所在。
+ *
+ * 顺序照 `DECISION-FEED.md` §6 的示例：
+ * `$30.00 · 开仓 0.171900 · 止损 0.174000 · 止盈 0.190000 · 1:8.62 · 5x`。
+ * 最后一个 `5x` 是杠杆，`1:8.62` 是风险回报比 —— 两者都在悬停说明里写清楚。
+ *
+ * 只在实际开仓（`open_*`）时出现。观望 / 等待没有仓位可谈；平仓的数字属于成交
+ * 记录，硬凑在理由下面只会让这一行变长而不增加信息。
+ */
+function figureParts(decision: Decision, price: number | null): Figure[] {
+  if (!isOpenAction(decision.action)) return [];
+
+  const parts: Figure[] = [{ key: 'size', label: '', value: fmtUsd(decision.positionSizeUsd, 2) }];
+  if (price !== null) parts.push({ key: 'entry', label: '开仓', value: fmtPriceUsd(price) });
+  if (decision.stopLoss !== null) parts.push({ key: 'stop', label: '止损', value: fmtPriceUsd(decision.stopLoss) });
+  if (decision.takeProfit !== null)
+    parts.push({ key: 'target', label: '止盈', value: fmtPriceUsd(decision.takeProfit) });
+  if (price !== null && decision.stopLoss !== null && decision.takeProfit !== null) {
+    // `Math.abs` 两侧：做空时价格在止损之上、止盈之下，直接相减会得到一个**负数**
+    // 的风险回报比 —— 那是一个不存在的比例，看起来像算错了。
+    const risk = Math.abs(price - decision.stopLoss);
+    const reward = Math.abs(decision.takeProfit - price);
+    if (risk > 0) parts.push({ key: 'reward', label: '', value: `1:${(reward / risk).toFixed(2)}` });
+  }
+  parts.push({ key: 'leverage', label: '', value: `${decision.leverage}x` });
+
+  return parts;
+}
+
+/**
+ * 币种图标：一个彩色圆点，里面是符号首字母。
+ *
+ * 不引图标库（见 `coinColor`）。`aria-hidden` + 文本缩进对齐：这一列纯粹是视觉锚点，
+ * 屏幕阅读器读出来是噪音 —— 旁边的符号本身才是内容。
+ */
+function CoinIcon({ symbol }: { symbol: string }) {
+  const style: CSSProperties = { backgroundColor: coinColor(symbol) };
   return (
-    <div className="min-w-0 rounded-md border border-down/50 bg-down/10 px-3 py-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge tone="down">失败</Badge>
-        <span className="text-base font-semibold text-ink-hi">{entry.symbol}</span>
-        <span className="text-xs text-ink-lo">{actionLabel(entry.action)}</span>
-      </div>
-      <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-down/90">{entry.detail}</p>
-    </div>
+    <span
+      aria-hidden
+      style={style}
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold leading-none text-white/90"
+    >
+      {coinInitial(symbol)}
+    </span>
+  );
+}
+
+/**
+ * 一条执行记录（失败 / 被风控拒绝），一行小字。
+ *
+ * 保留在盒子里、不折叠：`DECISION-FEED.md` §7 明确要求这些条目仍然可见 ——
+ * 它们是操作者判断"风控到底有没有在跑"的证据。一条都不显示，界面会变成
+ * "模型很保守"，而事实是"风控拦截了 3 次"。
+ */
+function LogLine({ entry }: { entry: ExecutionLogEntry }) {
+  const mark = entry.status === 'rejected' ? '⚠ 被风控拒绝' : `✕ ${entry.status === 'skipped' ? '已跳过' : '执行失败'}`;
+  const tone = entry.status === 'rejected' ? 'text-warn' : 'text-down';
+
+  return (
+    <li className="flex min-w-0 items-start gap-1.5 text-xs leading-relaxed">
+      <span className={cn('shrink-0', tone)}>{mark}</span>
+      <span className="min-w-0 break-words text-ink-lo">
+        <span className="num text-ink-mid">
+          {actionLabel(entry.action)} {entry.symbol}
+        </span>
+        {entry.detail ? ` — ${entry.detail}` : ''}
+      </span>
+    </li>
   );
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Per-cycle reasoning: 思考过程 / 提示词                                      */
+/*  底部：两个纯文字按钮 + 展开内容                                             */
 /* -------------------------------------------------------------------------- */
 
+type DetailTab = 'cot' | 'prompt';
+
 /**
- * The collapsible part of a cycle module.
+ * 一轮的底部：`✨ 思考过程 │ 🔒 提示词` 两个**纯文字按钮**。
  *
- * Collapsed by default because the chain of thought is long and is only needed
- * when a decision needs explaining. Each cycle owns its own open state, so
- * opening one does not close another — the operator can leave several expanded
- * while comparing how the model reasoned across cycles.
+ * 它们是文字 + 图标，不是带边框的按钮、也不是标签页控件（§4）。展开状态用
+ * **勾选标记 + 强调色**表示 —— 参考里展开的那一项是绿的带 ✓。用颜色 + 符号双重
+ * 表达而不是只用颜色：`DESIGN.md` §2 要求不能只靠颜色传递状态。
+ *
+ * 这两个按钮**只管推理内容**，上面的决策永远可见 —— 折叠了决策，面板就会在
+ * 没人点的时候什么都不显示，而"它到底决定了什么"才是操作者一直要看的东西。
  */
-function CycleReasoning({ record, traderId }: { record: DecisionRecord; traderId: number }) {
+function CycleDetails({
+  record,
+  rejected,
+  failed,
+}: {
+  record: DecisionRecord;
+  rejected: number;
+  failed: number;
+}) {
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<'cot' | 'prompt'>('cot');
-  const cot = useCopy();
-  const prompt = useCopy();
+  const [tab, setTab] = useState<DetailTab>('cot');
 
-  const combinedPrompt = `${record.systemPrompt}\n\n${'─'.repeat(40)}\n\n${record.userPrompt}`;
-
-  /** Selecting a tab both switches to it and opens the panel. */
-  const selectTab = (next: 'cot' | 'prompt'): void => {
+  /**
+   * 点一个按钮既切换内容也展开（§4）。
+   *
+   * 再点**同一个**按钮才收起 —— 两个按钮各管自己那一份内容，所以它们是"看什么"
+   * 的切换，而不是一个全局的开/关。第一次点击必须能打开：只切不展，用户会以为
+   * 按钮没反应。
+   */
+  const toggle = (next: DetailTab): void => {
+    const collapse = open && tab === next;
     setTab(next);
-    setOpen(true);
+    setOpen(!collapse);
   };
 
-  const hasCot = record.cotTrace.trim().length > 0;
+  const notes: string[] = [];
+  if (failed > 0) notes.push(`${failed} 条执行失败`);
+  if (rejected > 0) notes.push(`${rejected} 条被风控拒绝`);
+
+  const tabClass = (active: boolean): string =>
+    cn(
+      'inline-flex items-center gap-1 rounded px-1 py-0.5 text-xs transition',
+      active ? 'font-semibold text-up' : 'text-ink-lo hover:text-ink-hi',
+    );
 
   return (
-    /*
-     * 一条工具栏，所有操作都在同一行、同一高度。
-     *
-     * 原来的排布是反人类的：展开是一个只有 14px 的小三角（既看不清也点不准），
-     * 而"审计"在下面的另一行又出现了一次 —— 同一个动作两个入口、垂直节奏还错开，
-     * 每次都要在屏幕上找。现在左边是"看什么"（分段控件 + 展开），
-     * 右边是"拿走什么"（复制 + 审计），一行结束。
-     */
-    <div className="border-t border-base-800 bg-base-850/30 px-3.5 py-1.5">
-      <div className="flex flex-wrap items-center gap-2">
-        <MiniTabs
-          tabs={[
-            { id: 'cot', label: '思考过程' },
-            { id: 'prompt', label: '提示词' },
-          ]}
-          active={tab}
-          onChange={(id) => selectTab(id as 'cot' | 'prompt')}
-        />
-
-        {/*
-          唯一的展开/收起，只管推理部分。上面的决策不在它后面 —— 见模块顶部注释。
-          用 `btn btn-ghost btn-xs` 而不是裸三角：它是这条工具栏里最主要的动作，
-          尺寸必须和"复制""审计"一致，否则用户找不到。
-        */}
+    <div className="min-w-0">
+      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 px-0.5">
         <button
           type="button"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          title={open ? '收起思考过程与提示词' : '展开思考过程与提示词'}
-          className="btn btn-ghost btn-xs"
+          onClick={() => toggle('cot')}
+          aria-expanded={open && tab === 'cot'}
+          title={open && tab === 'cot' ? '收起思考过程' : '展开思考过程'}
+          className={tabClass(open && tab === 'cot')}
         >
-          {open ? (
-            <ChevronUp aria-hidden className="h-3.5 w-3.5" />
-          ) : (
-            <ChevronDown aria-hidden className="h-3.5 w-3.5" />
-          )}
-          {open ? '收起' : '展开'}
+          <Sparkles aria-hidden className="h-3.5 w-3.5 shrink-0" />
+          思考过程
+          {open && tab === 'cot' && <Check aria-hidden className="h-3.5 w-3.5 shrink-0" />}
         </button>
 
-        {!open && (
-          <span className="truncate text-xs text-ink-faint">
-            {hasCot ? `${fmtInt(record.cotTrace.length)} 字符思考过程` : '无思考过程'}
+        <span aria-hidden className="text-ink-faint">
+          │
+        </span>
+
+        <button
+          type="button"
+          onClick={() => toggle('prompt')}
+          aria-expanded={open && tab === 'prompt'}
+          title={open && tab === 'prompt' ? '收起提示词' : '展开提示词'}
+          className={tabClass(open && tab === 'prompt')}
+        >
+          <Lock aria-hidden className="h-3.5 w-3.5 shrink-0" />
+          提示词
+          {open && tab === 'prompt' && <Check aria-hidden className="h-3.5 w-3.5 shrink-0" />}
+        </button>
+
+        {/*
+          被拒 / 失败在底部也要有一行小字（§2）：按钮这一行是操作者扫视时的落点，
+          而"这一轮被风控拦了 2 条"是必须看见的信息 —— 光看上面的决策列表，
+          被拒的条目没有任何视觉标记。
+        */}
+        {notes.length > 0 && (
+          <span className="flex items-center gap-1 text-xs text-warn">
+            <TriangleAlert aria-hidden className="h-3.5 w-3.5 shrink-0" />
+            {notes.join(' · ')}
           </span>
         )}
-
-        <span className="ml-auto flex items-center gap-1.5">
-          <CopyButton
-            copied={tab === 'cot' ? cot.copied : prompt.copied}
-            onCopy={() => (tab === 'cot' ? cot.copy(record.cotTrace) : prompt.copy(combinedPrompt))}
-          />
-          <a
-            href={`/traders/${traderId}/decisions/${record.id}`}
-            target="_blank"
-            rel="noreferrer"
-            className="btn btn-ghost btn-xs"
-            title="在新标签页打开这条记录的完整审计视图"
-          >
-            <ExternalLink aria-hidden className="h-3.5 w-3.5" />
-            审计
-          </a>
-        </span>
       </div>
 
+      {/* 展开的内容留在同一个盒子的语义范围内、按钮下方，并且**可滚动**（§5）。 */}
       {open && (
-        <div className="mt-2">
+        <div className="mt-2 min-w-0">
           {tab === 'cot' ? (
-            <ScrollPre body={record.cotTrace} empty="本周期模型未返回 <reasoning> 块。" height={320} />
+            <ScrollArea
+              body={record.cotTrace}
+              empty="本周期模型未返回 <reasoning> 块。"
+            />
           ) : (
             <div className="space-y-2">
-              <PromptBlock title="系统提示词" body={record.systemPrompt} />
-              <PromptBlock title="用户提示词" body={record.userPrompt} />
+              <PromptSection title="系统提示词" body={record.systemPrompt} />
+              <PromptSection title="用户提示词" body={record.userPrompt} />
             </div>
           )}
         </div>
@@ -521,13 +607,26 @@ function CycleReasoning({ record, traderId }: { record: DecisionRecord; traderId
   );
 }
 
-function ScrollPre({ body, empty, height = 260 }: { body: string; empty: string; height?: number }) {
-  if (!body) return <p className="px-1 py-3 text-base text-ink-faint">{empty}</p>;
+function PromptSection({ title, body }: { title: string; body: string }) {
   return (
-    <pre
-      className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-base-800 bg-base-950 px-3 py-2 font-mono text-xs leading-relaxed text-ink-mid"
-      style={{ maxHeight: height }}
-    >
+    <section className="min-w-0">
+      <h4 className="mb-1 text-xs font-semibold text-ink-lo">{title}</h4>
+      <ScrollArea body={body} empty="（空）" />
+    </section>
+  );
+}
+
+/**
+ * 可滚动的等宽文本块。
+ *
+ * `max-h` 而不是固定 `height`：短内容不该留一大片空白。
+ * `break-words` + `whitespace-pre-wrap`：提示词里有超长 JSON 行，不折行就会
+ * 把这一栏顶出横向滚动条。
+ */
+function ScrollArea({ body, empty }: { body: string; empty: string }) {
+  if (!body.trim()) return <p className="px-1 py-2 text-xs text-ink-faint">{empty}</p>;
+  return (
+    <pre className="max-h-80 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-base-800 bg-base-950 px-2.5 py-2 font-mono text-xs leading-relaxed text-ink-mid">
       {body}
     </pre>
   );
