@@ -187,6 +187,20 @@ export function TraderPage() {
 
   const trader: TraderRow | null = tradersQuery.data?.find((row) => row.id === traderId) ?? null;
   const status = liveStatus ?? trader?.status ?? 'stopped';
+  /*
+   * 决策流用它决定要不要显示"正在请求模型"这一条。
+   *
+   * 取**并集**而不是只看 REST：REST 那一份最多滞后 8 秒，刚点下「启动」时它还是
+   * `false`，而那时周期可能已经开始了；反过来，刚点「停止」时推送也还没到。
+   * 两种口径都在说"在跑"才显示转圈，是为了不出现"停了还在转"的假状态
+   * （`LAYOUT.md` §7）。`error` / `safe_mode` 下循环仍在，但连续失败本身就该
+   * 被看见 —— 那个状态由页头的徽章与横幅负责，这里的转圈只属于正常周期。
+   */
+  const running =
+    trader?.isRunning === true ||
+    liveStatus === 'running' ||
+    liveStatus === 'starting' ||
+    liveStatus === 'safe_mode';
   const stats = statsMap[traderId] ?? null;
 
   useDocumentTitle(trader?.name ?? `机器人 ${params.id}`);
@@ -520,7 +534,7 @@ export function TraderPage() {
      * 也不再设 `max-w`：§2 明确说主内容区不设最大宽度 —— 宽屏上把空间给图表和表格。
      */
     <div className="h-full">
-      <PageShell aside={<DecisionFeed traderId={traderId} />}>
+      <PageShell aside={<DecisionFeed traderId={traderId} running={running} />}>
         {/* A. 页头：我是谁 + 什么状态 + 能做什么，常驻一行 --------------- */}
         <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <Link

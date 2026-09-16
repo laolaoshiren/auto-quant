@@ -130,10 +130,23 @@ const AiModelInputSchema = z.object({
   maxRetries: z.number().int().min(0).max(10).optional(),
 });
 
+/**
+ * 「获取可用模型」的请求体。
+ *
+ * `modelId` 存在的理由是一个**功能缺陷**：编辑已有模型时，界面刻意把 API Key 输入框
+ * 留空（提示写着"留空则保留已存储的密钥"），而旧契约只有 `apiKey`，服务端拿到空串
+ * 就只能回一句"请先填写 API Key" —— 于是**任何一个已保存的模型都获取不到模型列表**，
+ * 哪怕界面上方的密钥标签正显示着"当前已存储"。`modelId` 就是"用那条记录里已存的密钥"
+ * 这个意图的唯一表达方式。
+ *
+ * 可选而不是必填：新建模型时还没有 id；`apiKey` 非空时（用户正在输入替换密钥）
+ * 也应当优先用用户刚输入的那把。
+ */
 const DiscoverModelsInputSchema = z.object({
   provider: z.string().min(1),
   apiKey: z.string().default(''),
   baseUrl: BaseUrlSchema,
+  modelId: z.number().int().positive().optional(),
 });
 
 /**
@@ -975,6 +988,17 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * This is the primary way the UI learns about models. A static list would go
    * stale — and a stale default fails only at runtime, once a trader is already
    * trying to make a decision.
+   *
+   * 密钥来源有两条，**顺序不能反**：
+   *
+   *   1. 请求体里的 `apiKey` 非空 —— 用户正在输入一把替换密钥，以他输入的为准；
+   *   2. `apiKey` 为空但带上了 `modelId` —— 编辑已保存的模型时界面刻意留空输入框
+   *      （明文密钥从不回显），这时才回头读那条记录里加密存储的密钥。
+   *
+   * 这里的密钥**只**作为请求头发给提供商，绝不进日志、异常消息或响应体：
+   * 失败路径回给用户的始终是 `discoverModels()` 里那条不含密钥的中文提示。
+   * 另外 `modelId` 与其它模型端点一样走 `authed` 之后才可用，未认证的调用方
+   * 无法借它去用别人的密钥。
    */
   app.post('/api/ai-models/discover', authed, async (request, reply) => {
     const parsed = DiscoverModelsInputSchema.safeParse(request.body);
@@ -990,10 +1014,33 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       });
     }
 
+    const { provider, modelId } = parsed.data;
+    let apiKey = parsed.data.apiKey;
+
+    if (!apiKey && modelId !== undefined) {
+      const row = aiModels.getWithSecret(modelId);
+      if (row?.api_key_enc) {
+        try {
+          apiKey = deps.vault.decrypt(row.api_key_enc);
+        } catch {
+          // 解密失败通常意味着主密钥换过、或密文损坏。把原因说清楚，
+          // 但**不能**把密文或异常详情带出去 —— 那属于凭据材料。
+          return reply.code(400).send({
+            ok: false,
+            models: [],
+            source: 'fallback',
+            message: '已存储的 API Key 无法解密，请在编辑框中重新填写一次。',
+          });
+        }
+      }
+      // 记录不存在、或存在但没存过密钥：与"没带 modelId"走同一条落空路径，
+      // 统一由 discoverModels() 给出那句"请先填写 API Key"的中文提示。
+    }
+
     const { discoverModels } = await import('../llm/discovery.js');
     return discoverModels({
-      provider: parsed.data.provider as never,
-      apiKey: parsed.data.apiKey,
+      provider: provider as never,
+      apiKey,
       ...(parsed.data.baseUrl ? { baseUrl: parsed.data.baseUrl } : {}),
     });
   });

@@ -485,8 +485,14 @@ export const api = {
     request<{ ok: boolean }>(`/ai-models/${id}`, { method: 'PATCH', body: input }),
   deleteAiModel: (id: number) => request<{ ok: boolean }>(`/ai-models/${id}`, { method: 'DELETE' }),
   testAiModel: (id: number) => request<ModelTestResult>(`/ai-models/${id}/test`, { method: 'POST', body: {} }),
-  /** Ask the provider which models this key can use. */
-  discoverModels: (input: { provider: string; baseUrl: string; apiKey: string }) =>
+  /**
+   * Ask the provider which models this key can use.
+   *
+   * `modelId` 是"用这条记录已存储的密钥"的唯一表达方式：编辑已有模型时界面刻意不回显
+   * 明文密钥、输入框留空，只发 `apiKey: ''` 会被服务端当成"没提供密钥"而直接失败。
+   * 用户手动输入了密钥时不必传 `modelId`。
+   */
+  discoverModels: (input: { provider: string; baseUrl: string; apiKey: string; modelId?: number }) =>
     request<DiscoverModelsResult>('/ai-models/discover', { method: 'POST', body: input }),
   /** Probe an unsaved model draft before committing it. */
   testAiModelDraft: (input: AiModelInput) =>
