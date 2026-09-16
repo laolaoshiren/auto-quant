@@ -506,7 +506,7 @@ export function TraderPage() {
      *
      * 也不再设 `max-w`：§2 明确说主内容区不设最大宽度 —— 宽屏上把空间给图表和表格。
      */
-    <div className="h-full p-4">
+    <div className="h-full">
       <PageShell aside={<DecisionFeed traderId={traderId} />}>
         {/* A. 页头：我是谁 + 什么状态 + 能做什么，常驻一行 --------------- */}
         <header className="flex flex-wrap items-center gap-x-3 gap-y-2">

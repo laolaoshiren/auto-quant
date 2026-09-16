@@ -160,7 +160,7 @@ export function TradersPage() {
      * 也不设 `max-w`：列表页就是**整宽一张表**（LAYOUT.md §0 规则 2 / §2），
      * 宽屏上把空间给表格，不要在两边留白。
      */
-    <div className="w-full space-y-3 p-4">
+    <div className="w-full space-y-3">
       <SectionHeading
         title="机器人"
         sub="每个机器人 = 一份交易所凭证 + 一个 AI 模型 + 一套策略，按固定间隔循环决策。"
