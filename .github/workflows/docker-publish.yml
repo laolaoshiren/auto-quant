@@ -44,12 +44,43 @@ jobs:
     timeout-minutes: 30
 
     # CI 成功才构建；手动触发与标签推送不受此限。
+    #
+    # ⚠️ 第二个条件是这个工作流的**安全闸门**，不要删。
+    #
+    # 本工作流运行在默认分支的上下文里，却持有 `packages: write`，
+    # 并且会用 `head_sha` 检出**触发它的那次提交的代码**。对 PR 触发的
+    # CI 来说，那就是**外部贡献者的代码**。
+    #
+    # 没有这个判断时的攻击链：fork 仓库 → 建一个**名叫 `main`** 的分支 →
+    # 向上游开 PR。`on.workflow_run.branches` 按触发运行的 **head branch 名**
+    # 过滤，而这个名字由 PR 作者随便起，于是过滤形同虚设；接着本工作流
+    # 检出 fork 的提交、`docker build`（`npm ci` 的 postinstall 即任意代码
+    # 执行）、再用仓库令牌推镜像，`:latest` 被覆盖。自托管者跑 `./up.sh`
+    # 就会把攻击者的代码拉进**放着 data/（主密钥 + 交易所凭据）的容器**里。
+    #
+    # 所以：只信任来自本仓库自身的运行。fork 的 CI 仍然会跑（贡献者能看到
+    # 检查结果），但**永远不会产出镜像**。
     if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
 
     steps:
       # 取真正通过检查的那个提交，而不是默认分支的最新提交。
+      #
+      # 上面的 if 已经保证这个 sha 来自本仓库；这里再断言一次，
+      # 是为了让"只检出本仓库代码"这件事在**这里**也读得出来 ——
+      # 安全条件散落在两处时，后来的人删掉其中一处不会觉得有问题。
+      - name: 断言代码来自本仓库
+        if: github.event_name == 'workflow_run'
+        run: |
+          set -euo pipefail
+          head_repo='${{ github.event.workflow_run.head_repository.full_name }}'
+          if [ "$head_repo" != '${{ github.repository }}' ]; then
+            echo "::error::拒绝构建来自 $head_repo 的代码（本仓库是 ${{ github.repository }}）"
+            exit 1
+          fi
+
       - name: 检出代码
         uses: actions/checkout@v4
         with:
@@ -73,7 +104,13 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            # `:latest` 只在 main 上产出。
+            #
+            # 这里不用 `{{is_default_branch}}`：在 workflow_run 上下文里
+            # `github.ref` 指的是**默认分支**，那是个恒为真的条件，
+            # 读代码的人会以为它真的判断了"这次运行是不是 main"。
+            # 显式比较 head_branch，条件与实际含义一致。
+            type=raw,value=latest,enable=${{ github.event_name != 'workflow_run' || github.event.workflow_run.head_branch == 'main' }}
             type=sha,prefix=sha-,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
