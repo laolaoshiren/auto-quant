@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { LogOut, Menu, PanelLeftClose, PanelLeftOpen, Search, X } from 'lucide-react';
+import { LogOut, Menu, PanelLeftClose, PanelLeftOpen, Search, TriangleAlert, X } from 'lucide-react';
 import { useApp, useEvents } from '../lib/store';
 import { fmtClockOffset, fmtInt, timeAgo } from '../lib/format';
 import { Badge, Button, Dot, Tooltip, cn } from './ui';
@@ -92,6 +92,21 @@ export function Layout() {
 
   /** 侧栏徽标：以 `/system` 的 runningTraders 为准，列表还没到就用本地列表兜底。 */
   const runningCount = system?.runningTraders.length ?? traders.filter((trader) => trader.isRunning).length;
+
+  /*
+   * 两个诊断阈值。见顶栏那段的注释：只在越界时才显示。
+   *
+   * 时钟取绝对值 —— 交易所的时钟快于本地同样会导致 -1021，
+   * 只看正数会漏掉一半情况。
+   */
+  const clockWarn = Math.abs(system?.clockOffsetMs ?? 0) > 2000;
+  const weightPercent =
+    system?.weightLimit && system.weightLimit > 0
+      ? Math.round(((system.weightUsed ?? 0) / system.weightLimit) * 100)
+      : 0;
+  // 70% 而不是 100%：请求权重是**按分钟滚动**的，等到 100% 就已经在被拒绝了。
+  // 代码里的软上限是 75%，留一点提前量。
+  const weightWarn = weightPercent >= 70;
   const title = pageTitleFor(location.pathname);
 
   const signOut = () => {
@@ -210,25 +225,45 @@ export function Layout() {
               </span>
             </div>
 
-            {/* 数值指标：窄屏先藏，宽屏才铺开 —— 挤成两行会让 56px 的顶栏变形 */}
-            <div className="num hidden items-center gap-3 text-xs text-ink-lo xl:flex">
-              <span title="本地时钟减交易所时钟">
-                时钟{' '}
-                <span className={cn((system?.clockOffsetMs ?? 0) > 2000 ? 'text-warn' : 'text-ink-mid')}>
-                  {fmtClockOffset(system?.clockOffsetMs)}
-                </span>
-              </span>
-              <span title="当前分钟已消耗的请求权重">
-                权重{' '}
-                <span className="text-ink-mid">
-                  {fmtInt(system?.weightUsed)}
-                  <span className="text-ink-faint">/{fmtInt(system?.weightLimit)}</span>
-                </span>
-              </span>
-              <span title="运行中的循环数">
+            {/*
+              诊断指标：**正常时不显示，异常时才出现**。
+              
+              原来常驻显示 `时钟 +22 ms` 和 `权重 59/2,400`。对操作员来说这两个
+              数字在正常运行时永远"没事" —— 看它一百次有九十九次拿不到任何信息，
+              却一直占着顶栏最显眼的位置（用户原话："似乎毫无意义"）。
+              
+              而真正需要它们的时刻，恰恰是它们出问题的时刻：
+              
+              · 时钟偏差超过 2 秒 → 币安会用 -1021 拒绝每一张签名请求
+              · 权重逼近上限    → 再往上就是 418（封 IP），而不是限流
+              
+              所以改成：正常时消失，异常时带着**后果**出现。数字本身没意义，
+              "这会导致什么"才有意义。
+            */}
+            {clockWarn && (
+              <Tooltip content="本地时钟与交易所时钟相差超过 2 秒。签名请求会因时间戳超窗被拒绝（-1021），下单与撤单都会失败。请校准服务器时间（NTP）。">
+                <Badge tone="warn" className="shrink-0">
+                  <TriangleAlert aria-hidden className="h-3.5 w-3.5" />
+                  时钟偏差 {fmtClockOffset(system?.clockOffsetMs)}
+                </Badge>
+              </Tooltip>
+            )}
+
+            {weightWarn && (
+              <Tooltip content="当前分钟已消耗的请求权重接近上限。继续升高会被交易所临时封禁 IP（418），届时所有行情与交易请求都会失败。">
+                <Badge tone="warn" className="shrink-0">
+                  <TriangleAlert aria-hidden className="h-3.5 w-3.5" />
+                  API 权重 {weightPercent}%
+                </Badge>
+              </Tooltip>
+            )}
+
+            {/* 运行中的循环数：这是**真的状态**，不是诊断值，所以常驻 */}
+            {runningCount > 0 && (
+              <span className="num hidden shrink-0 text-xs text-ink-lo sm:inline" title="正在运行的机器人数量">
                 运行 <span className="text-ink-mid">{fmtInt(runningCount)}</span>
               </span>
-            </div>
+            )}
 
             <span
               className="hidden shrink-0 items-center gap-1.5 text-xs text-ink-lo sm:flex"
