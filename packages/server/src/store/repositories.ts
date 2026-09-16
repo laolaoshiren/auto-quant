@@ -812,6 +812,37 @@ export function clampOrderLimit(limit: number): number {
   return clampPageLimit(limit, ORDER_PAGE_MAX, ORDER_PAGE_DEFAULT);
 }
 
+/**
+ * 「终态」委托状态：不会再变的状态码，其余任何值都还可能与交易所不一致（§2.2）。
+ *
+ * 覆盖两套词汇，因为 `orders.status` 里两套都会出现：
+ *  · 普通订单 —— `binance/types.ts` 的 `BinanceOrderStatus`；
+ *  · Algo 条件单 —— 同文件的 `BinanceAlgoStatus`（`NEW` / `FINISHED` / `TRIGGERED` / …）。
+ *    两者只有 `NEW` 重合，所以 `FINISHED` 必须在这里列出来：漏掉它，一张已经触发成交的
+ *    条件单就会被当成"还在挂"。
+ *
+ * 判据写成**否定**形式（`status NOT IN 终态`）而不是 `status IN (NEW, PARTIALLY_FILLED)`：
+ * 交易所会新增状态码（`EXPIRED_IN_FUTURES` 就是后来补的），用肯定判据的话一个没见过的
+ * 状态码会被当成"已经结清"，于是一张真的还挂着的单在本地被判成终态 —— 那正是这次要修的
+ * 那类错误的方向。反过来，多结清一行是无害的：结清之前一定先问过交易所
+ * （见 `AutoTrader.settleStaleOrders()`）。
+ *
+ * `TRIGGERED` 刻意**不在**终态里：条件单触发之后，它产生的那张市价单还要成交
+ * （理由同 `binance/broker.ts` 的 `TERMINAL_ALGO_STATUSES`）。
+ *
+ * 控制台的 `TraderTables.tsx` 有一份等价实现（前端不能 import 服务端），两处要一起改。
+ */
+export const TERMINAL_ORDER_STATUSES: readonly string[] = [
+  'FILLED',
+  'FINISHED',
+  'CANCELED',
+  'CANCELLED',
+  'REJECTED',
+  'EXPIRED',
+  'EXPIRED_IN_MATCH',
+  'EXPIRED_IN_FUTURES',
+];
+
 export const orders = {
   /**
    * Exchange order ids this trader has placed, newest first.
@@ -925,6 +956,36 @@ export const orders = {
     return lastInsertRowid;
   },
 
+  /**
+   * 仍处于**非终态**、且早于 `createdBefore` 的委托行，最新在前。
+   *
+   * 这是"交易所已经不挂了、本地还停在 `NEW`"那些行的候选集。它只做筛选：
+   * 这里**判断不了**哪一行真的已经不在交易所 —— 那只能问交易所，所以调用方
+   * （`AutoTrader.settleStaleOrders()`）在改任何一行之前都会先去读挂单列表。
+   *
+   * `createdBefore` 是给刚下的单留的宽限窗口（窗口多长、为什么需要，见
+   * `ORDER_SETTLE_GRACE_MS`）：挂单列表是一次**读**，而一张单从"我们记下它"到
+   * "交易所的挂单列表里能看到它"之间可能有极短的时延，没有这个下界就会把刚挂上去的
+   * 保护单结清掉 —— 那正好是 §2.6 最怕的事。
+   */
+  unsettled(traderId: number, createdBefore: string): OrderRecord[] {
+    const placeholders = TERMINAL_ORDER_STATUSES.map(() => '?').join(', ');
+    return getDb()
+      .all<OrderRow>(
+        `SELECT * FROM orders WHERE trader_id = ? AND created_at <= ? AND status NOT IN (${placeholders}) ORDER BY id DESC`,
+        traderId,
+        createdBefore,
+        ...TERMINAL_ORDER_STATUSES,
+      )
+      .map(toOrder);
+  },
+
+  /**
+   * 就地修正一行订单。
+   *
+   * `undefined` **保持原值**（而不是写成 null）：调用方只想改状态时不必先把整行读出来，
+   * 也不会顺手把它没打算碰的成交数量清掉。
+   */
   update(
     id: number,
     input: Partial<{
@@ -933,17 +994,23 @@ export const orders = {
       filledQty: number;
       fee: number;
       error: string | null;
+      /**
+       * 交易所对这张单的**最终**答复。结清一张条件单时写在这里，
+       * 于是 `raw_response` 从头到尾都是交易所说过的话（§2.2），而不是只剩一个状态码。
+       */
+      rawResponse: unknown;
     }>,
   ): void {
     const row = getDb().get<OrderRow>('SELECT * FROM orders WHERE id = ?', id);
     if (!row) return;
     getDb().run(
-      'UPDATE orders SET status = ?, avg_price = ?, filled_qty = ?, fee = ?, error = ?, updated_at = ? WHERE id = ?',
+      'UPDATE orders SET status = ?, avg_price = ?, filled_qty = ?, fee = ?, error = ?, raw_response = ?, updated_at = ? WHERE id = ?',
       input.status ?? row.status,
       input.avgPrice === undefined ? row.avg_price : input.avgPrice,
       input.filledQty ?? row.filled_qty,
       input.fee ?? row.fee,
       input.error === undefined ? row.error : input.error,
+      input.rawResponse === undefined ? row.raw_response : JSON.stringify(input.rawResponse),
       now(),
       id,
     );

@@ -661,9 +661,22 @@ export function PositionsTable({
  *
  * `NEW` and `PARTIALLY_FILLED` are the only genuinely live ones; everything
  * else is history, so an "open orders" view filters on exactly that.
+ *
+ * `FINISHED` is the **Algo** API's word for "this conditional order is done"
+ * (see `binance/types.ts`'s `BinanceAlgoStatus`), and it belongs here for a
+ * concrete reason: `orders.status` stores whichever vocabulary the endpoint
+ * that created the row speaks. A stop that fired reports `FINISHED`, and since
+ * this set did not contain it, a settled stop stayed in 「当前委托」 claiming to
+ * be 已挂单 — the same display defect as a row that was never reconciled, just
+ * wearing a different code. `TRIGGERED` stays out on purpose: the market order
+ * it creates still has to fill.
+ *
+ * 服务端 `store/repositories.ts` 的 `TERMINAL_ORDER_STATUSES` 是同一份判据的另一份
+ * 实现（前端不能 import 服务端），两处要一起改。
  */
 const TERMINAL_STATUSES = new Set([
   'FILLED',
+  'FINISHED',
   'CANCELED',
   'CANCELLED',
   'REJECTED',
@@ -677,32 +690,31 @@ export function isOpenOrder(order: OrderRecord): boolean {
 }
 
 export function OrdersTable({
-  traderId,
+  paging,
   onlyOpen,
-  refreshToken,
+  positionCount,
 }: {
-  traderId: number;
-  onlyOpen: boolean;
-  refreshToken?: number;
-}) {
-  const live = useEvents((s) => s.byTrader[traderId]?.orders);
   /*
-   * 只拉**第一页**（26 = 25 + 一条探针），每 15 秒一次。以前这里是 `traderOrders(id, 200)`：
+   * 行数据由**容器**（`TraderTables`）持有，不在这里自己拉。
+   *
+   * 理由不是"架构好看"，而是标签上那个「当前委托 N」与这张表必须说同一件事：
+   * 它们以前各读一份数据（标签读 WebSocket 推来的 `order` 事件，表格读 REST 的第一页），
+   * 于是刚打开页面时标签是 0、表格里却有十几行。行数据只有一份，就不可能再有第二个数。
+   *
+   * 只拉**第一页**（26 = 25 + 一条探针），每 15 秒一次。以前是 `traderOrders(id, 200)`：
    * 无论有没有人看，每 15 秒把 200 行宽订单重新拼一遍响应、重新渲染一遍 DOM。
    * 更早的行由 `useTablePaging` 在操作者滚到底时按 `before=id` 游标取回，
    * 轮询的返回值只**并进**已加载的那些行，不会把它们重置掉。
    */
-  const query = usePolled((signal) => api.traderOrders(traderId, { limit: PAGE_LIMIT, signal }), {
-    intervalMs: 15_000,
-    deps: [traderId, refreshToken],
-  });
-
-  const paging = useTablePaging<OrderRecord>(traderId, api.traderOrders, query, live);
-
+  paging: TablePaging<OrderRecord>;
+  onlyOpen: boolean;
+  /** 本地持仓数：判断"这张看起来还挂着的单"能不能被相信，见状态列上的标注。 */
+  positionCount: number;
+}) {
   const all: OrderRecord[] = paging.rows;
   const orders = onlyOpen ? all.filter(isOpenOrder) : all;
 
-  if (query.loading && all.length === 0) return <Spinner3 label="正在加载委托" />;
+  if (paging.loading && all.length === 0) return <Spinner3 label="正在加载委托" />;
   if (orders.length === 0) {
     return onlyOpen ? (
       <TableEmpty message="暂无当前委托。" hint="交易所侧的止损 / 止盈单在触发前会出现在这里。" />
@@ -740,42 +752,74 @@ export function OrdersTable({
             </tr>
           </thead>
           <tbody>
-            {orders.map((order) => (
-              // `data-row-id` 是**给滚动锚点用的 DOM 标记**（见 `useTablePaging` 里那个
-              // `useLayoutEffect`）：新订单插到顶部时要靠它量出"我正在读的那一行"被推了多远。
-              <tr key={order.id} className="row-hover" data-row-id={order.id}>
-                <td className="td num text-ink-faint">{fmtDateTime(order.createdAt)}</td>
-                <td className="td font-semibold text-ink-hi">{order.symbol}</td>
-                <td className="td">
-                  <Badge tone={purposeTone(order.purpose)}>{orderPurposeLabel(order.purpose)}</Badge>
-                </td>
-                <td className={`td font-semibold ${order.side === 'BUY' ? 'text-up' : 'text-down'}`}>
-                  {order.side === 'BUY' ? '买入' : '卖出'}
-                </td>
-                <td className="td text-ink-lo">{orderTypeLabel(order.type)}</td>
-                <td className="td num text-right">{fmtQty(order.quantity)}</td>
-                <td className="td num text-right">{order.price ? fmtPrice(order.price) : '市价'}</td>
-                <td className="td num text-right text-ink-lo">{order.stopPrice ? fmtPrice(order.stopPrice) : '—'}</td>
-                <td className="td num text-right">{fmtQty(order.filledQty)}</td>
-                <td className="td num text-right">{order.avgPrice ? fmtPrice(order.avgPrice) : '—'}</td>
-                <td className="td">
-                  {/* `order.status` 是币安自己的机器码（NEW / FILLED / …），
-                      中文标签在 `@aq/shared` 的 ORDER_STATUS_LABELS —— 之前这里
-                      直接把英文码打在表格里。 */}
-                  <span
-                    title={order.status}
-                    className={
-                      isOpenOrder(order) ? 'text-up' : /cancel|reject|expired/i.test(order.status) ? 'text-warn' : 'text-ink-mid'
-                    }
-                  >
-                    {orderStatusLabel(order.status)}
-                  </span>
-                </td>
-                <td className="td max-w-[240px] truncate text-down" title={order.error ?? undefined}>
-                  {order.error ?? ''}
-                </td>
-              </tr>
-            ))}
+            {orders.map((order) => {
+              /*
+               * 这张"还挂着"的单，现在能不能被相信？
+               *
+               * `orders.status` 是**下单那一刻**交易所给的返回值，之后由服务端的对账
+               * （`AutoTrader.settleStaleOrders()`）在确认"交易所已经不挂着了"之后改写。
+               * 也就是说界面上的 `NEW` 只代表"上一次对账之后它还是这个状态"。
+               *
+               * 判据故意取得很窄，宁可少标也不要错标：只有**整本账都没有持仓**时，
+               * 一张仍然写着挂单的委托才值得怀疑（实盘上那 16 行孤儿委托，每一个标的的
+               * 本地持仓都是 0）。有持仓时保护单本来就该挂在那里，标上去只会制造假警报 ——
+               * 而假警报和数据缺失一样会让这个界面失去信任。
+               */
+              const pendingReconcile =
+                onlyOpen && isOpenOrder(order) && positionCount === 0;
+
+              return (
+                // `data-row-id` 是**给滚动锚点用的 DOM 标记**（见 `useTablePaging` 里那个
+                // `useLayoutEffect`）：新订单插到顶部时要靠它量出"我正在读的那一行"被推了多远。
+                <tr key={order.id} className="row-hover" data-row-id={order.id}>
+                  <td className="td num text-ink-faint">{fmtDateTime(order.createdAt)}</td>
+                  <td className="td font-semibold text-ink-hi">{order.symbol}</td>
+                  <td className="td">
+                    <Badge tone={purposeTone(order.purpose)}>{orderPurposeLabel(order.purpose)}</Badge>
+                  </td>
+                  <td className={`td font-semibold ${order.side === 'BUY' ? 'text-up' : 'text-down'}`}>
+                    {order.side === 'BUY' ? '买入' : '卖出'}
+                  </td>
+                  <td className="td text-ink-lo">{orderTypeLabel(order.type)}</td>
+                  <td className="td num text-right">{fmtQty(order.quantity)}</td>
+                  <td className="td num text-right">{order.price ? fmtPrice(order.price) : '市价'}</td>
+                  <td className="td num text-right text-ink-lo">{order.stopPrice ? fmtPrice(order.stopPrice) : '—'}</td>
+                  <td className="td num text-right">{fmtQty(order.filledQty)}</td>
+                  <td className="td num text-right">{order.avgPrice ? fmtPrice(order.avgPrice) : '—'}</td>
+                  <td className="td">
+                    {/* `order.status` 是币安自己的机器码（NEW / FILLED / …），
+                        中文标签在 `@aq/shared` 的 ORDER_STATUS_LABELS —— 之前这里
+                        直接把英文码打在表格里。
+
+                        `pendingReconcile` 的那一行不写「已挂单」而写「待对账」：
+                        本地这一列可能比交易所落后一轮，界面没有资格替交易所打包票。 */}
+                    <span
+                      title={
+                        pendingReconcile
+                          ? `交易所状态 ${order.status}（由上一次对账写入）。当前本地没有任何持仓记录，这张委托可能已经成交或被撤销，等下一次对账确认。`
+                          : order.status
+                      }
+                      className={
+                        pendingReconcile
+                          ? 'text-warn'
+                          : isOpenOrder(order)
+                            ? 'text-up'
+                            : /cancel|reject|expired/i.test(order.status)
+                              ? 'text-warn'
+                              : 'text-ink-mid'
+                      }
+                    >
+                      {pendingReconcile
+                        ? `${orderStatusLabel(order.status)}（待对账）`
+                        : orderStatusLabel(order.status)}
+                    </span>
+                  </td>
+                  <td className="td max-w-[240px] truncate text-down" title={order.error ?? undefined}>
+                    {order.error ?? ''}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
         {/* 末尾状态（哨兵 / 加载中 / 失败可重试 / 已到最早一笔）必须在滚动框**里面**：
@@ -1006,7 +1050,19 @@ export function TraderTables({
   tab: TraderTabId;
   onChange: (tab: TraderTabId) => void;
   positionCount: number;
-  openOrderCount: number;
+  /**
+   * **已废弃，故意不再使用**。
+   *
+   * 它数的是 WebSocket 推来的 `order` 事件（`store.ts` 的 `live.orders`）里还没到终态的那些：
+   * 页面刚打开时它是 **0**（推送只在"页面开着的时候恰好下了单"时才有人写），
+   * 而撤单与成交**永远不会**把它删掉。表格读的却是 REST 的第一页 —— 于是截图里
+   * 「当前委托 0」下面躺着十六行委托。两个数说的根本不是同一件事。
+   *
+   * 现在标签与表格读的是同一个数组（见下面的 `ordersPaging`），这个 prop 只为了让
+   * 调用方（`TraderPage.tsx`）不用改就能编译。调用方那边还有一个同样口径的
+   * 「持仓 / 委托」数字，改它要动 `TraderPage.tsx`，不在本次范围内。
+   */
+  openOrderCount?: number;
   /**
    * Bumped by the caller after a manual 对账, so the tables refetch instead of
    * waiting out their 15-second poll — the numbers the operator just changed
@@ -1020,9 +1076,29 @@ export function TraderTables({
   // "these rows are stale".
   const token = (refreshToken ?? 0) + ordersRefreshToken;
 
+  /*
+   * 委托数据**唯一的一份**，容器持有。
+   *
+   * 它同时喂给两个地方：表格的行、以及标签上的「当前委托 N」。以前这两处各读一份
+   * （标签读 WebSocket 的 `order` 事件、表格读 REST），于是它们可以互相矛盾 ——
+   * 而"上面写 0、下面列十六行"这种矛盾正好发生在这个系统最需要被相信的地方。
+   * 一份数据、一个数组，不一致在结构上就不再可能。
+   *
+   * 代价是这一轮询问在切到别的标签时也会发生（以前只有订单表挂载时才拉）。
+   * 25 行的一页、15 秒一次，换来的是标签上的数字与表格永远一致。
+   */
+  const liveOrders = useEvents((s) => s.byTrader[traderId]?.orders);
+  const ordersQuery = usePolled(
+    (signal) => api.traderOrders(traderId, { limit: PAGE_LIMIT, signal }),
+    { intervalMs: 15_000, deps: [traderId, token] },
+  );
+  const ordersPaging = useTablePaging<OrderRecord>(traderId, api.traderOrders, ordersQuery, liveOrders);
+  const openOrders = ordersPaging.rows.filter(isOpenOrder);
+
   const tabs: Array<{ id: TraderTabId; label: string; count?: number }> = [
     { id: 'positions', label: '当前持仓', count: positionCount },
-    { id: 'orders', label: '当前委托', count: openOrderCount },
+    // 与表格同一个数组，见上面 `ordersPaging` 的说明。
+    { id: 'orders', label: '当前委托', count: openOrders.length },
     { id: 'trades', label: '历史成交' },
     { id: 'history', label: '订单记录' },
   ];
@@ -1071,9 +1147,15 @@ export function TraderTables({
           一片空白。高度交给内容，有行时才需要滚动。 */}
       <div>
         {tab === 'positions' && <PositionsTable traderId={traderId} onCloseRequest={setCloseTarget} />}
-        {tab === 'orders' && <OrdersTable traderId={traderId} onlyOpen refreshToken={token} />}
+        {/* 两个标签共用同一个分页实例：它们读的是同一个端点，只是过滤条件不同；
+            分开两套只会让翻出来的历史与"当前委托"的数字再次分家。 */}
+        {tab === 'orders' && (
+          <OrdersTable paging={ordersPaging} onlyOpen positionCount={positionCount} />
+        )}
         {tab === 'trades' && <TradesTable traderId={traderId} refreshToken={token} />}
-        {tab === 'history' && <OrdersTable traderId={traderId} onlyOpen={false} refreshToken={token} />}
+        {tab === 'history' && (
+          <OrdersTable paging={ordersPaging} onlyOpen={false} positionCount={positionCount} />
+        )}
       </div>
 
       <CloseNoticeModal symbol={closeTarget} onClose={() => setCloseTarget(null)} />

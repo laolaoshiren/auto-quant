@@ -3,11 +3,13 @@ import {
   isCloseAction,
   isOpenAction,
   normalizeSymbol,
+  orderPurposeLabel,
   type CloseReason,
   type Decision,
   type EquitySnapshot,
   type ExecutionLogEntry,
   type MarketSnapshot,
+  type OrderRecord,
   type PositionView,
   type StrategyConfig,
   type Trader,
@@ -17,7 +19,7 @@ import type { BinanceBroker, ExchangePosition } from '../binance/broker.js';
 import type { AccountState } from '../binance/account.js';
 import type { BinanceMarketData } from '../binance/market.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
-import { BinanceApiError } from '../binance/types.js';
+import { BinanceApiError, type BinanceAlgoStatus } from '../binance/types.js';
 import { eventBus } from '../events.js';
 import { createLogger } from '../logger.js';
 import { LlmError } from '../llm/errors.js';
@@ -73,6 +75,60 @@ const RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
  * 修复路径，间隔越长，账面与账户不一致持续的时间就越长。
  */
 const FULL_RECONCILE_EVERY_PASSES = 24;
+
+/**
+ * 结清一张本地委托之前，它至少要有多"老"。
+ *
+ * ## 为什么需要这个宽限
+ *
+ * "这张单还在不在"的权威答案是交易所的挂单列表，但那是一次**读**：一张单从我们记下它
+ * （`created_at`）到它出现在 `/fapi/v1/openOrders` / `/fapi/v1/openAlgoOrders` 里，
+ * 中间可能有极短的时延（请求在途、两次读之间的竞态）。没有这个下界，一次刚好排在
+ * 下单之后的读就会把**刚挂上去的保护单**判成"已经不在交易所"，在账面上把保护单抹掉 ——
+ * 而 §2.6 存在的意义就是不让一个没有保护的杠杆仓位变得看不见。
+ *
+ * ## 为什么是 2 分钟
+ *
+ * 下界要远大于任何一次交易所读写的耗时（亚秒到几秒，相差两个数量级），
+ * 又要小到让真正已经撤销的行不会长期挂在界面上：默认周期 15 分钟，最短 1 分钟，
+ * 所以一行脏数据最多多显示一两轮就会被结清。
+ */
+export const ORDER_SETTLE_GRACE_MS = 2 * 60_000;
+
+/**
+ * 走 Algo 端点的条件单类型。
+ *
+ * 就是 `/fapi/v1/order` 会以 `-4120` 拒掉的那几种（见 `binance/types.ts`），
+ * 它们的最终状态只能用 `/fapi/v1/algoOrder` 回读。
+ */
+const CONDITIONAL_ORDER_TYPES = new Set([
+  'STOP',
+  'STOP_MARKET',
+  'TAKE_PROFIT',
+  'TAKE_PROFIT_MARKET',
+  'TRAILING_STOP_MARKET',
+]);
+
+/**
+ * 条件单的 `algoStatus` → `orders.status` 里的订单状态。
+ *
+ * 必须翻译：`orders.status` 那一列存的是**订单**状态（`FILLED` / `CANCELED` / …），
+ * 而 Algo 端点报的是它自己的状态词表（`FINISHED` / `TRIGGERED` / …），两者只有 `NEW`
+ * 一个词重合。把 `FINISHED` 原样写进那一列的话：控制台既没有它的中文标签，终态集合里
+ * 也没有它 —— 一张已经触发成交的止损会继续以"已挂单"的样子留在「当前委托」里，
+ * 也就是这次要修的显示缺陷换个状态码重演一遍。
+ *
+ * `TRIGGERED` 同样记为成交：走到这里的前提是本地已经没有任何该标的的持仓，
+ * 而 `closePosition=true` 条件单的唯一作用就是平掉整个仓位 —— 它触发了、仓位也没了，
+ * 这一张就是成交了。
+ */
+const ALGO_FINAL_ORDER_STATUS: Partial<Record<BinanceAlgoStatus, string>> = {
+  FINISHED: 'FILLED',
+  TRIGGERED: 'FILLED',
+  CANCELED: 'CANCELED',
+  EXPIRED: 'EXPIRED',
+  REJECTED: 'REJECTED',
+};
 
 /* -------------------------------------------------------------------------- */
 /*  Injected model interface                                                   */
@@ -601,6 +657,53 @@ export class AutoTrader {
     /* --- 5. Refresh state after the guard's closes ----------------------- */
     const livePositions = await this.deps.broker.getPositions();
     const localPositions = positionStore.open(traderId);
+
+    /*
+     * 熔断生效 + 手上没有任何仓位 = 本轮**不可能**有任何可执行的动作，
+     * 因此跳过这一轮的全部昂贵工作。
+     *
+     * 为什么以前不是这样：熔断在步骤 4 检查，却到步骤 8 才真正拦截决策 ——
+     * 中间隔着"抓 11 个标的的行情（每个约 5,159 tokens）+ 构建 5.8 万 token
+     * 提示词 + 请求模型"。于是熔断生效期间，每个周期都在**付费生成一批注定被
+     * 丢弃的决策**。实测：约 134 万 tokens/小时，产出为零，而熔断按"单日"
+     * 计算，可能持续数小时。
+     *
+     * ⚠️ 条件必须是「**且没有任何仓位**」，不能只看熔断：
+     * 熔断只拦新开仓，**不拦平仓**。有仓位时模型必须继续跑，因为它的决策里
+     * 可能有平仓 —— 那时省下的钱会变成没平掉的风险敞口。
+     *
+     * 本地与交易所两边的持仓都为空才跳过：两边不一致时保守地照常跑，
+     * 宁可多花一次调用的钱，也不要跳过一轮本该处理的对账/平仓。
+     *
+     * 早退方式与"行情为空"一致：写进 `progress.error` 后**正常返回**，
+     * 不抛错，所以连续失败计数与安全模式完全不受影响。
+     */
+    if (breaker.blocked && livePositions.length === 0 && localPositions.length === 0) {
+      await this.recordEquity(account, livePositions);
+      /*
+       * ⚠️ 说明写进 `executionLog`，**不写 `progress.error`**。
+       *
+       * `progress.error` 的契约是「非空即代表本轮失败」（`success: progress.error === null`）。
+       * 而熔断拦住开仓**不是失败，是系统在正常工作** —— 往失败字段里塞正常状态，
+       * 会让成功率统计虚低、让监控把正常状态报成故障，然后有人去追一个不存在的
+       * 问题。这类"语义用错字段"的代价，比一次多花的模型调用钱更贵。
+       *
+       * `executionLog` 是记录"这一轮实际发生了什么"的地方，而 `skipped`
+       * 正是它的合法取值之一（与熔断拒绝决策时用的是同一个状态）。
+       */
+      progress.executionLog = [
+        {
+          action: 'skip_cycle',
+          symbol: '—',
+          status: 'skipped',
+          detail:
+            `熔断生效，且当前没有任何持仓：${breaker.reason}` +
+            '本轮没有向模型提问、也没有下单 —— 此时模型不可能给出任何可执行的动作，' +
+            '跳过请求是为了不产生无谓的 token 开销。熔断解除后会自动恢复正常决策。',
+        },
+      ];
+      return '熔断生效且空仓，本轮跳过模型请求。';
+    }
 
     /* --- 6. Candidate universe + market snapshots ------------------------ */
     // 从这里到快照就绪之间抛出的都是普通 `Error`（行情层不发明错误类型），
@@ -1611,7 +1714,192 @@ export class AutoTrader {
         `[${this.deps.trader.name}] 对账完成：补录 ${recovered} 笔，修正 ${corrected} 笔，资金费合计 ${fundingTotal.toFixed(6)} USDT`,
       );
     }
+
+    /*
+     * 交易所已经不再挂着的本地委托行，也要在这一遍里结清。
+     *
+     * 位置放在"消失的持仓已经记账"之后：一张触发成交的止损，先要有人把那一回合记进
+     * `trades`，再谈它自己的状态；而"这个标的是否还持仓"正是那一段刚更新过的东西。
+     * 详见 `settleStaleOrders()`。
+     */
+    await this.settleStaleOrders().catch((error) => {
+      // 记账失败不能影响这一遍对账的结论（它已经写完了），更不能把异常抛给周期。
+      log.warn(
+        `[${this.deps.trader.name}] 结清本地委托记录失败（不影响本周期交易）：${(error as Error).message}`,
+      );
+    });
+
     return { recovered, corrected, funding: fundingTotal };
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /*  Stale order records                                                    */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * 把交易所已经不挂着的本地委托行结清（§2.2 只要求不删行，从不要求状态停在 `NEW`）。
+   *
+   * ## 这个缺陷是什么
+   *
+   * `orders.status` 是**下单那一刻**交易所给的返回值，此后没有任何代码更新过它
+   * （`orders.update()` 在本次修复之前没有任何调用点）。于是有三条路径会让它停在非终态：
+   *
+   *  1. **条件单触发成交** —— 平仓发生在交易所，本地行还是 `NEW`；
+   *  2. **平仓前 `cancelAllOrders()` 撤单**（§2.7）—— 撤掉了，但没写回本地行；
+   *  3. **交易所自己撤单** —— `closePosition=true` 的止损触发后，止盈那张"兄弟单"
+   *     会被交易所一并撤掉，它不会通知任何人。
+   *
+   * 实盘上量到的后果：本地 24 行 `NEW` 全部属于已经平掉的仓位，而交易所的
+   * `/fapi/v1/openOrders` 是 **0** —— 控制台的「当前委托」因此列出十几行并不存在的委托，
+   * 其中每一行按 §2.7 看起来都像是会朝反方向开出新仓的存活单。**它其实全是假警报**，
+   * 但一个不能相信的界面与真的出事一样糟：操作员无法分辨这一次到底是哪一种。
+   *
+   * ## 它只改账
+   *
+   * 这里既不补撤单、也不重挂保护单，唯一的依据是**交易所自己**说这张单还在不在
+   * （挂单列表 + 条件单的最终状态）。撤单与下单的时机、位置一个都没有变 ——
+   * 若某条路径真的漏撤了，那是另一件更严重的事，要单独报出来，而不是靠更新一行状态
+   * 把它掩盖掉。
+   *
+   * @param onlySymbol 只结清这一个标的（平仓之后立刻调用，好让控制台马上正确）；
+   *   不传时扫这个机器人全部待结清的行。对账轮次走的就是不传的那条。
+   * @returns 实际改写的行数。
+   */
+  private async settleStaleOrders(onlySymbol?: string): Promise<number> {
+    const traderId = this.deps.trader.id;
+
+    /*
+     * 只把"够老"的行当候选：`createdBefore` 就是宽限窗口的下界，
+     * 窗口取多长、为什么需要，见 `ORDER_SETTLE_GRACE_MS`。
+     */
+    const cutoff = new Date(Date.now() - ORDER_SETTLE_GRACE_MS).toISOString();
+    const candidates = orderStore
+      .unsettled(traderId, cutoff)
+      .filter((row) => onlySymbol === undefined || row.symbol === onlySymbol);
+    if (candidates.length === 0) return 0;
+
+    /*
+     * 还持仓的标的先排除。
+     *
+     * 那种情况不是"显示脏了"，而是"保护单真的没了"—— 一件更严重、也完全不同的故障
+     * （§2.6：一个没有交易所侧保护的杠杆仓位是最糟糕的状态）。把它混进这次记账修复里，
+     * 等于用一行状态更新掩盖一条真实的告警。持仓还在，这里就一行都不碰。
+     */
+    const held = new Set(positionStore.open(traderId).map((p) => p.symbol));
+    const symbols = [...new Set(candidates.map((row) => row.symbol))].filter((s) => !held.has(s));
+    if (symbols.length === 0) return 0;
+
+    /*
+     * 权威答案在交易所。
+     *
+     * 两个端点都要读：条件单在 Algo 端点（`/fapi/v1/algoOpenOrders`），普通单在
+     * `/fapi/v1/openOrders`，两边互不覆盖（`broker.cancelAllOrders()` 的注释写过同一件事）。
+     * 少读一个，都会把一张**真的还挂着**的保护单当成已经不在 —— 那就是在自己造 §2.6 的事故。
+     *
+     * 按标的读（带 symbol 是 weight 1，不带是 40），而且只为"有待结清行的标的"读：
+     * 结清之后这些标的下一次就没有候选行了，稳态下这一整段不产生任何请求。
+     */
+    const liveBySymbol = new Map<string, Set<string>>();
+    for (const symbol of symbols) {
+      try {
+        const [regular, algo] = await Promise.all([
+          this.deps.broker.getOpenOrders(symbol),
+          this.deps.broker.getOpenAlgoOrders(symbol),
+        ]);
+        const live = new Set<string>();
+        for (const order of regular) live.add(String(order.orderId));
+        for (const order of algo) live.add(String(order.algoId));
+        liveBySymbol.set(symbol, live);
+      } catch (error) {
+        /*
+         * 读不到就**什么都不做**：这一轮无法断定它已经不在交易所，而"以为它不在"
+         * 会把一张还在挂着的保护单写成终态。下一轮会重新读。
+         */
+        log.warn(
+          `[${this.deps.trader.name}] ${symbol} 的挂单列表读取失败，本轮不结清该标的的委托记录：${(error as Error).message}`,
+        );
+      }
+    }
+
+    let settled = 0;
+    const summary: string[] = [];
+    for (const row of candidates) {
+      const live = liveBySymbol.get(row.symbol);
+      // 三种情况都不是"可以结清"：这个标的一轮没读到、这行没有交易所单号、
+      // 或者它**正躺在挂单列表里**（那它当然还活着）。
+      if (!live || !row.exchangeOrderId || live.has(row.exchangeOrderId)) continue;
+
+      const outcome = await this.finalStatusOf(row);
+      if (!outcome) continue;
+
+      orderStore.update(row.id, outcome);
+      settled += 1;
+      summary.push(`${row.symbol} ${orderPurposeLabel(row.purpose)}`);
+    }
+
+    if (settled > 0) {
+      this.emit(
+        'info',
+        `对账结清了 ${settled} 张交易所已不再挂着的委托（${summary.slice(0, 8).join('、')}` +
+          `${summary.length > 8 ? ' 等' : ''}）：这些行此前停在挂单状态，实际早已成交或撤销；交易所侧没有任何改动。`,
+      );
+    }
+    return settled;
+  }
+
+  /**
+   * 一张已经**不在交易所挂单列表里**的委托，最终是怎么结束的。
+   *
+   * 判据只有两种，都来自交易所，没有一处靠推断凑数：
+   *
+   *  1. **条件单** —— `/fapi/v1/algoOrder` 能查到它自己的 `algoStatus`：
+   *     `FINISHED`/`TRIGGERED` 是触发成交，`CANCELED` 是被撤，`EXPIRED` 是过期。
+   *     这是唯一能把"止损真的触发了"和"平仓时被我们撤掉了"分开的东西，
+   *     `detectCloseReason()` 依赖的也正是同一个查询。
+   *     查不到（网络故障、dry run）时返回 `null` = **什么都不写** —— 此时把一张可能已经
+   *     成交的止损写成"已撤销"，会和 `trades.close_reason` 里的 `stop_loss` 直接矛盾，
+   *     比多留一轮脏行糟得多。
+   *  2. **普通委托**（开仓 / 平仓的市价单）—— 交易所没有按单号回读的封装，就用手上
+   *     真实拿到过的数字判：下单时确认的成交量若已覆盖整张单，就是 `FILLED`；
+   *     否则它是带着剩余数量离场的，在币安自己的语义里那就是 `CANCELED`
+   *     （部分成交 + 撤销剩余）。
+   *
+   * @returns 要写进那一行的字段；`null` 表示"这一轮不下结论"。
+   */
+  private async finalStatusOf(
+    row: OrderRecord,
+  ): Promise<{ status: string; filledQty?: number; avgPrice?: number; rawResponse?: unknown } | null> {
+    const exchangeOrderId = row.exchangeOrderId;
+    if (!exchangeOrderId) return null;
+
+    if (CONDITIONAL_ORDER_TYPES.has(row.type)) {
+      const algo = await this.deps.broker.getAlgoOrder(Number(exchangeOrderId));
+      if (!algo) return null;
+      const status = ALGO_FINAL_ORDER_STATUS[algo.algoStatus];
+      // `NEW` 会走到这里：它说"还挂着"，而挂单列表刚说"不在" —— 两次读之间的竞态，
+      // 真相是哪一个都可能是。留给下一轮，不拿这个矛盾去改账。
+      if (!status) return null;
+
+      const filledQty = Number(algo.actualQty ?? 0) || 0;
+      const avgPrice = Number(algo.actualPrice ?? 0) || 0;
+      return {
+        status,
+        // 只有交易所确实报了成交数字才写：`0` 会把已有的数字抹掉。
+        ...(filledQty > 0 ? { filledQty } : {}),
+        ...(avgPrice > 0 ? { avgPrice } : {}),
+        // 交易所对这张单的最后一次答复（§2.2：raw_response 留的是交易所的话）。
+        rawResponse: algo,
+      };
+    }
+
+    /*
+     * 相对容差而不是"浮点相等"：`quantity` 与 `filledQty` 分别是**请求数量**与交易所
+     * 回报的**成交数量**，两者都过了字符串 → 数字这一趟，一个先取整、一个由交易所
+     * 自己格式化，逐位相等不是它们之间的契约（同一取舍见 `repositories.ts` 里
+     * 判定"同一个回合"用的 `DUPLICATE_QUANTITY_TOLERANCE`）。
+     */
+    const fullyExecuted = row.quantity > 0 && row.filledQty >= row.quantity * (1 - 1e-9);
+    return fullyExecuted ? { status: 'FILLED' } : { status: 'CANCELED' };
   }
 
   /**
@@ -1834,6 +2122,19 @@ export class AutoTrader {
         fee,
         new Date().toISOString(),
       );
+
+      /*
+       * 平仓前撤掉的那些保护单（§2.7）在交易所已经没了，本地行却还写着 `NEW`。
+       * 顺手结清它们，操作员就不必等到下一轮对账才在「当前委托」里看到正确的状态。
+       *
+       * 只碰账：撤单仍然只发生在上面那一次 `cancelAllOrders()`，时机与参数都没变。
+       * 这一步失败只记日志，绝不影响这一笔已经成交的平仓。
+       */
+      await this.settleStaleOrders(symbol).catch((error) => {
+        log.warn(
+          `[${this.deps.trader.name}] ${symbol} 平仓后结清本地委托记录失败：${(error as Error).message}`,
+        );
+      });
 
       return {
         action: decision.action,
