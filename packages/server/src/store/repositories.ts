@@ -752,6 +752,66 @@ function toOrder(row: OrderRow): OrderRecord {
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Pagination caps                                                            */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * 历史表（订单 / 成交 / 决策）只回**一页**，三张表共用下面这一套钳制与游标。
+ *
+ * 为什么要共用一份实现：这三处各写一遍的话，迟早只改其中两处，而漏掉的那张表
+ * 就是操作者说的"成千上万数据一次加载出来导致系统卡死"复发的地方
+ * （`?limit=999999` 以前会被原样交给 SQL）。
+ */
+
+/**
+ * 把调用方给的 `limit` 收进 `[1, max]`。**钳制而不是报错**。
+ *
+ * 翻页的控制台不该因为页大小写得大一点就收到 400，而一个手写的
+ * `?limit=999999` 也绝不能真的返回 999999 条。
+ * 非有限值（没传 / `NaN` / `Infinity`）回落到该表自己的默认页大小，
+ * 等同于路由原来那半句 `Number.isFinite(limit) ? limit : 100`。
+ *
+ * 下界收到 1 而不是 0：`LIMIT 0` 返回的空数组和"这个机器人还没有记录"
+ * 在响应里长得一模一样，会把一次参数错误伪装成一次空结果。
+ */
+function clampPageLimit(limit: number, max: number, fallback: number): number {
+  if (!Number.isFinite(limit)) return fallback;
+  return Math.min(max, Math.max(1, Math.trunc(limit)));
+}
+
+/**
+ * 把调用方给的游标收成一个可用的 `id`；`null` 表示"第一页"。
+ *
+ * 非有限值（没传 / `?before=abc`）一律按第一页处理：发不出正确游标的调用方
+ * 应该拿到**最新的一页**，而不是一个 400 —— 与 `clampPageLimit` 同一个取舍。
+ */
+function cursorOf(before: number | null | undefined): number | null {
+  return before === undefined || before === null || !Number.isFinite(before) ? null : Math.trunc(before);
+}
+
+/**
+ * 一次最多回多少条订单记录。
+ *
+ * 卡住的是**响应体的字节数**：订单行带着状态、均价、成交数量、手续费与错误文案
+ * （12 列），而这张表是随机器人运行**无限增长**的 —— 一个跑了半年的机器人有几千行，
+ * `?limit=999999` 一次就能把整张表拼进 JSON 占住 event loop，浏览器那侧也要一次
+ * 建出几千个 DOM 节点。
+ *
+ * 200 与操作者上一版控制台每次轮询要的条数一致（那时候每 15 秒无条件拉 200 条），
+ * 而一页 25 条的翻页只需要它的一小部分 —— 上限是给手写请求用的兜底，
+ * 不是给界面用的页大小。
+ */
+export const ORDER_PAGE_MAX = 200;
+
+/** 不传 `limit` 时返回多少条 —— 与历史契约一致（路由以前写死 100，`docs/API.md` 照旧）。 */
+export const ORDER_PAGE_DEFAULT = 100;
+
+/** `orders.list()` 的页大小：见 `clampPageLimit`。 */
+export function clampOrderLimit(limit: number): number {
+  return clampPageLimit(limit, ORDER_PAGE_MAX, ORDER_PAGE_DEFAULT);
+}
+
 export const orders = {
   /**
    * Exchange order ids this trader has placed, newest first.
@@ -773,12 +833,49 @@ export const orders = {
     );
   },
 
-  list(traderId: number, limit = 100): OrderRecord[] {
+  /**
+   * 某机器人的订单记录，**最新在前**，一次一页。`before` 是游标：只返回 `id < before` 的行。
+   *
+   * ## 为什么用 `before=id` 而不是 `offset`
+   *
+   * 这个列表**在顶部持续插入**：机器人每下一单就多一行。用 `OFFSET 25` 取"第二页"时，
+   * 只要第一页之后又落了一张新订单，整个窗口就往下挪一格 —— 第二页的第一条会和第一页的
+   * 最后一条**重复**（同一张订单在表格里出现两次，看起来像下了两单）。游标锚在一条具体
+   * 订单的 `id` 上：新订单的 `id` 一定更大、永远落在游标之上，页与页之间既不重也不漏。
+   * `trades.list()` / `decisions.list()` 是同一套契约。
+   *
+   * ## 排序键必须就是游标键
+   *
+   * 翻页边界要成立，`ORDER BY` 与游标只能是同一列，所以这里按自增主键 `id`（写入顺序）
+   * 倒序。它同时仍然是"最新的一单在最上面"：订单是**下出去那一刻**写进来的，
+   * `id` 倒序与原来的 `created_at DESC` 是同一个顺序。
+   * 索引 `idx_orders_trader` 建在 `created_at` 上，所以这条查询会在按 `trader_id`
+   * 过滤之后再排序，代价可以忽略 —— 换来的是页边界不可能漏行或重复。
+   *
+   * 页大小由 `clampOrderLimit` 钳制：`?limit=999999` 最多只会拿到 `ORDER_PAGE_MAX` 条。
+   */
+  list(traderId: number, limit = ORDER_PAGE_DEFAULT, before?: number | null): OrderRecord[] {
+    const pageSize = clampOrderLimit(limit);
+    const cursor = cursorOf(before);
+
+    // 第一页与后续页只有 WHERE 一段不同：分成两条 SQL 是为了两条都能吃到索引，
+    // 也不用把 `(? IS NULL OR id < ?)` 这种对优化器不友好的写法塞进热路径。
+    if (cursor === null) {
+      return getDb()
+        .all<OrderRow>(
+          'SELECT * FROM orders WHERE trader_id = ? ORDER BY id DESC LIMIT ?',
+          traderId,
+          pageSize,
+        )
+        .map(toOrder);
+    }
+
     return getDb()
       .all<OrderRow>(
-        'SELECT * FROM orders WHERE trader_id = ? ORDER BY id DESC LIMIT ?',
+        'SELECT * FROM orders WHERE trader_id = ? AND id < ? ORDER BY id DESC LIMIT ?',
         traderId,
-        limit,
+        cursor,
+        pageSize,
       )
       .map(toOrder);
   },
@@ -932,6 +1029,42 @@ function marginOf(entryPrice: number, quantity: number, leverage: number): numbe
 export const TREND_WINDOW = 5000;
 
 /**
+ * 疑似重复行的**报告**窗口（毫秒）。
+ *
+ * 检测比写入守卫更宽：守卫要求 `closed_at` 毫秒精确相同（见 `findDuplicate()`），
+ * 是因为它要**改账**；而这里只是把可疑的成对行报给人看，宁可多报也不能漏报 ——
+ * 漏掉一对，操作者就永远不知道账上多了一份盈亏。所以窗口放到 1 秒。
+ */
+const DUPLICATE_REPORT_WINDOW_MS = 1000;
+
+/**
+ * 判定"这是同一个回合"时，数量与入场价允许的偏差（相对值）。
+ *
+ * ## 为什么数量不能当判据
+ *
+ * 同一回合的两条记账路径本来就按**不同口径**取数量：运行期记的是本地持仓行的
+ * 数量（下单时按名义价值取整得到的），对账记的是交易所实际成交量（多笔成交加权后
+ * 保留 12 位）。实盘上那三组重复行能被生成，正是因为这两个口径**不相等**时没有任何
+ * 东西拦它；这次复现量到的偏差是 0.008823 对 0.008923（约 1.1%）。
+ *
+ * 所以容差不能按"浮点噪声"来定 —— 差 1.1% 完全正常，而 1e-6 这种要求浮点相等的
+ * 判据正是这个 bug 钻过去的缝。20% 的用意是：数量只用来**排除明显不相干的同一标的
+ * 其它回合**，真正的身份是 `closed_at`（同一个真实成交，两条路径拿到的时间戳一致，
+ * 实测差 368ms）。单向持仓模式下同一标的同一毫秒不可能平掉两个仓位，所以
+ * `closed_at` 命中就是同一个真实事件。
+ */
+const DUPLICATE_QUANTITY_TOLERANCE = 0.2;
+
+/**
+ * 入场价的相对容差。
+ *
+ * 两条路径的入场价都来自交易所，但一条是持仓行里的成交均价、另一条是多笔成交
+ * 加权后保留 12 位的 VWAP，多笔分批成交时最后几位可以不同 —— 所以这里也是
+ * 相对比较，而不是"浮点相等"。
+ */
+const DUPLICATE_PRICE_TOLERANCE = 1e-6;
+
+/**
  * How many equity snapshots the time-to-trough drawdown considers.
  *
  * Same number the console passed inline before (`equity.list(traderId, 5000)`),
@@ -1054,13 +1187,82 @@ function aggregateTrades(traderId: number): { totals: TradeStats; curve: TradeCu
   };
 }
 
+/** One detected pair of rows that describe the same real round-trip. */
+export interface TradeDuplicateSuspect {
+  traderId: number;
+  /** `reconciled` 那行与运行期那行的 id；顺序按 id 升序，与来源无关。 */
+  idA: number;
+  idB: number;
+  symbol: string;
+  quantity: number;
+  closedAt: string;
+  reasonA: string;
+  reasonB: string;
+  netA: number;
+  netB: number;
+}
+
+/**
+ * 一次最多回多少条成交记录。
+ *
+ * 与 `ORDER_PAGE_MAX` 同一个理由：成交行是最宽的一张（毛盈亏、开/平两侧手续费、
+ * 资金费、净盈亏、来源、两个订单号、平仓原因…），而这张表随着每次平仓无限增长。
+ * 200 是操作者上一版控制台每次轮询要的条数，上限只为手写请求兜底。
+ */
+export const TRADE_PAGE_MAX = 200;
+
+/** 不传 `limit` 时返回多少条 —— 与历史契约一致（路由以前写死 100）。 */
+export const TRADE_PAGE_DEFAULT = 100;
+
+/** `trades.list()` 的页大小：见 `clampPageLimit`。 */
+export function clampTradeLimit(limit: number): number {
+  return clampPageLimit(limit, TRADE_PAGE_MAX, TRADE_PAGE_DEFAULT);
+}
+
 export const trades = {
-  list(traderId: number, limit = 100): TradeRecord[] {
+  /**
+   * 某机器人的成交记录，**最新在前**，一次一页。`before` 是游标：只返回 `id < before` 的行。
+   *
+   * ## 为什么用 `before=id` 而不是 `offset`
+   *
+   * 这个列表**在顶部持续插入**：每平一次仓就多一行。用 `OFFSET 25` 取"第二页"时，
+   * 只要中间又平了一仓，窗口就整体下移一格 —— 第二页会重复第一页的最后一条
+   * （同一笔成交在表格里出现两次，看起来像多平了一次仓，而这张表的数字是钱）。
+   * 游标锚在具体一行的 `id` 上，新行的 `id` 一定更大、永远落在游标之上。
+   *
+   * ## 排序键必须就是游标键 —— 这里从 `closed_at DESC` 换成了 `id DESC`
+   *
+   * 页边界要成立，`ORDER BY` 与游标只能是同一列。`closed_at` 做不到：
+   * 对账补录（`reconcileTradeHistory`）会把**进程未运行时**才平掉的回合现在写进来，
+   * 这些行的 `closed_at` 比已经在库里的行更旧，于是"按 `closed_at` 排"与"按写入顺序排"
+   * 是两种不同的顺序，用 `id` 当游标必然漏行或重复。
+   *
+   * `id` 倒序的实际含义是"最近记进来的在最上面"，运行期记账时它与 `closed_at` 完全同序
+   * （平仓那一刻就写），只有对账补录的行会排到顶部 —— 那正好是该被看见的行
+   * （表格里带 `对账补录` 徽章），也让"重复执行对账只修正、不重复插入"这件事一眼可查。
+   * 代价是补录行不再按它的成交时间插回历史中间；页边界不重不漏优先于这一点。
+   */
+  list(traderId: number, limit = TRADE_PAGE_DEFAULT, before?: number | null): TradeRecord[] {
+    const pageSize = clampTradeLimit(limit);
+    const cursor = cursorOf(before);
+
+    // 两条 SQL 各自都能吃到索引，也不用把 `(? IS NULL OR id < ?)` 塞进热路径。
+    if (cursor === null) {
+      return getDb()
+        .all<TradeRow>(
+          'SELECT * FROM trades WHERE trader_id = ? ORDER BY id DESC LIMIT ?',
+          traderId,
+          pageSize,
+        )
+        .map(toTrade);
+    }
+
     return getDb()
       .all<TradeRow>(
-        'SELECT * FROM trades WHERE trader_id = ? ORDER BY closed_at DESC LIMIT ?',
+        'SELECT * FROM trades WHERE trader_id = ? AND id < ? ORDER BY id DESC LIMIT ?',
         traderId,
-        limit,
+        cursor,
+        pageSize,
       )
       .map(toTrade);
   },
@@ -1077,6 +1279,20 @@ export const trades = {
    * place instead of each caller doing its own arithmetic and disagreeing.
    * `pnlPercent` is deliberately computed here rather than accepted, for the
    * same reason.
+   *
+   * ## 为什么幂等检查放在这一层（§2.5、§5.4「金额相关的算术只在一个地方算」）
+   *
+   * 平仓有两条记账路径：运行期（`executeClose` / `bookClosedPosition`，从本地持仓行）
+   * 与对账（`reconcileTradeHistory`，从交易所成交历史重建）。它们对同一回合算出的
+   * **数量口径可以不同**（本地持仓量 vs 交易所实际成交量），于是对账的严格键与描述
+   * 回退键会同时落空，把同一回合插成两行 —— 详见 `findDuplicate()` 的说明。
+   *
+   * 身份判断只有一处实现（`findDuplicate()`），所以不可能出现"一条路径记得、
+   * 另一条忘了"的分裂；调用方只要声明 `idempotent: true` 就拿到这个保证。
+   *
+   * 返回值带 `created`，让调用方能区分"我补录了一笔"和"这一笔本来就记过了"：
+   * 对账靠它把 `recovered` 数准 —— 把重复回合也算成"补录"会让操作员以为账本有漏记，
+   * 而实际上什么都没发生。
    */
   insert(input: {
     traderId: number;
@@ -1098,8 +1314,39 @@ export const trades = {
     source?: 'bot' | 'reconciled';
     entryOrderId?: string | null;
     exitOrderId?: string | null;
-  }): number {
+    /**
+     * 这次写入代表**一笔真实平仓**，因此必须先查重（§2.5 的幂等）。
+     *
+     * 只有 `bookClosedPosition()` 与 `reconcileTradeHistory()` 会打开它。默认关闭，
+     * 是因为判据以"平仓时刻"为身份，而测试 fixture 会连记多笔只差盈亏的假成交；
+     * 见 `insert()` 内部的说明。
+     */
+    idempotent?: boolean;
+  }): { id: number; created: boolean } {
     const closedAt = input.closedAt ?? now();
+
+    /*
+     * 幂等只在**真的在记一笔平仓**时生效：`bookClosedPosition()`（运行期）与
+     * `reconcileTradeHistory()`（对账）都会显式打开 `idempotent`。
+     *
+     * 为什么做成显式开关而不是对每一次 `insert()` 都生效：判据依赖**平仓时刻**这个
+     * 真实事件的身份，而测试与脚本会连记多笔"看起来一样"的 fixture（同一标的、
+     * 同一数量与价位，只差盈亏）。那种行本来就不代表一个交易时刻，拿时间去做唯一性
+     * 判定会把它们错误地合成一笔 —— 从而让 `totalTrades`、胜率、盈亏合计全部失真。
+     * 两条真实记账路径打开它，才是这个不变量真正需要覆盖的范围。
+     */
+    const alreadyBooked = input.idempotent
+      ? this.findDuplicate({
+          traderId: input.traderId,
+          symbol: input.symbol,
+          quantity: input.quantity,
+          entryPrice: input.entryPrice,
+          closedAt,
+          entryOrderId: input.entryOrderId,
+        })
+      : null;
+    if (alreadyBooked !== null) return { id: alreadyBooked, created: false };
+
     const holdMinutes = Math.max(
       0,
       (new Date(closedAt).getTime() - new Date(input.openedAt).getTime()) / 60_000,
@@ -1139,11 +1386,97 @@ export const trades = {
       input.entryOrderId ?? null,
       input.exitOrderId ?? null,
     );
-    return lastInsertRowid;
+    return { id: lastInsertRowid, created: true };
   },
 
   /**
-   * Correct a locally-booked trade with the exchange's authoritative figures.
+   * 找出这条"回合"是不是已经记过账了，返回已有行的 id。
+   *
+   * ## 为什么需要它（这是 §2.5「对账幂等」缺的那一环）
+   *
+   * 同一个真实回合有两条记账路径：运行期从**本地持仓行**记（`bookClosedPosition`），
+   * 对账从**交易所成交历史**重建后再记（`reconcileTradeHistory`）。两条路各自算出的
+   * 描述可以不一致 —— 最典型的是数量：本地记的是下单时的请求量 / 持仓行的数量，
+   * 交易所重建的是实际成交量（摊到多笔成交上做加权）。一旦不一致，
+   * `reconcileTradeHistory` 的严格键（symbol+qty+入场价+入口订单号）和描述回退键
+   * **同时**落空，于是它把同一回合又插了一行。实盘上量到的症状：
+   *
+   *   #17 reconciled / #18 take_profit   SYNUSDT  99  -0.047554650
+   *   #11 reconciled / #12 stop_loss     SYNUSDT 169  -0.75613135
+   *   #9  reconciled / #10 take_profit   LSKUSDT  35  +0.66674843
+   *
+   * 12 行里 4 行是 reconciled，其中只有 #4 POWERUSDT 是真的漏记。重复的那 6 行
+   * 凭空造出 **+0.4954** 的净盈亏（毛 − 手续费 − 资金费全部被算了两遍），
+   * 而对账本来只该"修正、不重复插入"。
+   *
+   * ## 为什么用这个身份，而不是浮点相等
+   *
+   * 唯一能同时被两条路拿到的身份是**交易所那一笔的成交时间**（`closed_at`）：
+   * 运行期有成交记录时用 `findRoundTrip()` 给出的交易所时间，对账用重建出的
+   * `trip.closedAt`，两者来自同一笔平仓成交，实测精确到毫秒相同（上面三组重复行
+   * 的 `closed_at` 逐字节一致）。所以判定条件是：
+   *
+   *   · `closed_at` 的**毫秒精度字符串相同**（`strftime('%Y-%m-%dT%H:%M:%f')`，
+   *     纯字符串比较，不是浮点比较），或
+   *   · `entry_order_id` 相同（两条路都拿到了交易所的入口订单号，这是铁证）
+   *
+   * 再加上 symbol + quantity（相对 20%）+ entry_price + exit_price 收窄。容差取相对值
+   * 是因为同一回合的两条路径本来就按不同口径取值（本地持仓量 vs 交易所成交量），
+   * 要求浮点相等正是这个 bug 钻过去的缝。
+   *
+   * **出场价为什么必须参与**：`closed_at` 精确相同时，唯一还能区分"同一回合被记两次"
+   * 和"同一毫秒内平掉的两笔真实成交"的就是成交价。`retention.test.ts` / `stats.test.ts`
+   * 的 fixture 正是后者——同一个标的、同一个入场价、连记四笔不同盈亏的回合；
+   * 少了出场价这一项，它们会被判成一笔，`totalTrades` 从 4 变 1、盈亏合计跟着错。
+   * 而同一回合被记两次时，交易所的成交价是同一个数（实盘那三组的入场价、出场价都
+   * 逐字节相同），所以这一项不会漏判。
+   *
+   * 找到就返回已有行，调用方**不插新行**：重复执行只修正、不重复插入。
+   */
+  findDuplicate(input: {
+    traderId: number;
+    symbol: string;
+    quantity: number;
+    entryPrice: number;
+    closedAt?: string;
+    entryOrderId?: string | null;
+  }): number | null {
+    /*
+     * 只有带交易所身份的（ISO 毫秒时间戳）才参与判定。`closed_at` 缺省时
+     * `insert()` 会填当前时间，那种行没有可与交易所对齐的身份，宁可不判定，
+     * 也不能拿"看起来差不多"当依据去吞掉一笔真实成交。
+     */
+    if (!input.closedAt || !/^\d{4}-\d{2}-\d{2}T/.test(input.closedAt)) return null;
+
+    const byOrder =
+      input.entryOrderId && input.entryOrderId.length > 0
+        ? 'OR entry_order_id = ?'
+        : '';
+    const sql = `SELECT id FROM trades
+       WHERE trader_id = ? AND symbol = ? AND quantity > 0
+         AND ABS(quantity - ?) <= MAX(1e-6, ABS(?) * ${DUPLICATE_QUANTITY_TOLERANCE})
+         AND ABS(entry_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_PRICE_TOLERANCE})
+         AND (strftime('%Y-%m-%dT%H:%M:%f', closed_at) = strftime('%Y-%m-%dT%H:%M:%f', ?)
+              ${byOrder})
+       ORDER BY id ASC
+       LIMIT 1`;
+    const params: unknown[] = [
+      input.traderId,
+      input.symbol,
+      input.quantity,
+      input.quantity,
+      input.entryPrice,
+      input.entryPrice,
+      input.closedAt,
+    ];
+    if (byOrder) params.push(String(input.entryOrderId));
+
+    const row = getDb().get<{ id: number }>(sql, ...params);
+    return row?.id ?? null;
+  },
+
+  /**
+   * 修正一条已入账的回合，用交易所的权威口径。
    *
    * Used by reconciliation for round-trips the runtime *did* record, but whose
    * costs it only partly captured: the live path records the exit commission at
@@ -1166,10 +1499,18 @@ export const trades = {
     const fee = input.entryFee + input.exitFee;
     const netPnl = input.grossPnl - fee - input.fundingFee;
     const margin = marginOf(input.entryPrice, input.quantity, input.leverage);
+    /*
+     * `quantity` 与 `pnl_percent` 都由交易所在**同一笔成交记录**里给出，所以要一起写。
+     *
+     * 这里曾经漏掉 `quantity`：参数收了、SQL 里却没有这一列，于是对账算出来的
+     * 权威成交量被**静默丢弃** —— 账本留下的仍是运行期那个较粗的口径（本地持仓量），
+     * 与交易所的成交记录对不上，而 §2.5 要求的正是"平台记录能与交易所对得上"。
+     * 本次修幂等时正是靠这一列才把同一回合的两条路径收敛到同一个数字上。
+     */
     getDb().run(
       `UPDATE trades
           SET pnl = ?, entry_fee = ?, fee = ?, funding_fee = ?, net_pnl = ?,
-              pnl_percent = ?, entry_price = ?, exit_price = ?,
+              pnl_percent = ?, entry_price = ?, exit_price = ?, quantity = ?,
               entry_order_id = COALESCE(?, entry_order_id),
               exit_order_id = COALESCE(?, exit_order_id)
         WHERE id = ?`,
@@ -1181,6 +1522,7 @@ export const trades = {
       margin > 0 ? (netPnl / margin) * 100 : 0,
       input.entryPrice,
       input.exitPrice,
+      input.quantity,
       input.entryOrderId,
       input.exitOrderId,
       input.id,
@@ -1317,6 +1659,55 @@ export const trades = {
       )
       .reverse();
   },
+
+  /**
+   * 疑似"同一回合记了两次"的成对行 —— **只报告，不删**。
+   *
+   * 为什么只报告：`data/` 里的账是历史，删一行等于改写历史，是人的决定。
+   * 这次修复只保证**今后**不再产生重复（见 `findDuplicate()`），已经落库的三组
+   * 重复行（SYNUSDT 99 / SYNUSDT 169 / LSKUSDT 35）要由操作者看过之后再决定。
+   *
+   * 判定条件与 `findDuplicate()` 同一个口径：`trader_id + symbol + quantity` 相同、
+   * `closed_at` 相差 1 秒以内，且其中恰好一行是 `reconciled`。**`side` 不参与** ——
+   * 重复行的 `side` 本来就一致，少一个条件只会让漏报更少。
+   *
+   * 注意 `close_reason`：运行期那行记的是"怎么平的"（`take_profit` / `stop_loss`），
+   * 对账那行一律是 `reconciled`。所以**保留哪一行应当按信息量决定**，而不是简单地
+   * "删掉 reconciled"：`#4 POWERUSDT 131` 是唯一一笔真正漏记的回合（没有运行期
+   * 对应行），删掉它就把对账存在的意义一起删了。
+   *
+   * `traderId` 省略时扫描**所有**机器人：复核存量数据时不该要求操作者先知道
+   * 是哪台机器人记的重复。
+   */
+  duplicateSuspects(traderId?: number): TradeDuplicateSuspect[] {
+    const filter = traderId === undefined ? '' : 'WHERE a.trader_id = ?';
+    return getDb().all<TradeDuplicateSuspect>(
+      `SELECT
+         a.trader_id    AS traderId,
+         a.id           AS idA,
+         b.id           AS idB,
+         a.symbol       AS symbol,
+         a.quantity     AS quantity,
+         a.closed_at    AS closedAt,
+         a.close_reason AS reasonA,
+         b.close_reason AS reasonB,
+         a.net_pnl      AS netA,
+         b.net_pnl      AS netB
+       FROM trades a
+       JOIN trades b
+         ON a.trader_id = b.trader_id
+        AND a.symbol = b.symbol
+        AND a.id < b.id
+        AND ABS(a.quantity - b.quantity) <= MAX(1e-6, ABS(a.quantity) * ${DUPLICATE_QUANTITY_TOLERANCE})
+        AND ABS(a.entry_price - b.entry_price) <= MAX(1e-9, ABS(a.entry_price) * ${DUPLICATE_PRICE_TOLERANCE})
+        AND ABS((julianday(a.closed_at) - julianday(b.closed_at)) * 86400000.0) <= ${DUPLICATE_REPORT_WINDOW_MS}
+        AND (a.source = 'reconciled' OR b.source = 'reconciled')
+        AND NOT (a.source = 'reconciled' AND b.source = 'reconciled')
+       ${filter}
+       ORDER BY ABS(a.net_pnl) DESC, a.closed_at DESC`,
+      ...(traderId === undefined ? [] : [traderId]),
+    );
+  },
 };
 
 /* -------------------------------------------------------------------------- */
@@ -1371,13 +1762,78 @@ function safeJsonParse<T>(text: string, fallback: T): T {
   }
 }
 
+/**
+ * 一次最多回多少条决策记录。
+ *
+ * 卡住的是**字节数**，不是行数：每条记录都带着完整提示词、思维链与原始响应
+ * （单条几十 KB 很常见）。路由以前把 `?limit=999999` 原样交给 SQL，一次请求就能
+ * 让服务端拼出几十 MB 的 JSON 占住 event loop，浏览器那侧也会直接卡死 ——
+ * 这正是操作者说的"成千上万数据一次加载出来导致系统卡死"。
+ * 200 条足够"全部记录"这类页面一次翻完一屏，也不至于把一次请求变成几 MB。
+ */
+export const DECISION_PAGE_MAX = 200;
+
+/** 不传 `limit` 时返回多少条 —— 与历史行为和 `docs/API.md` 一致。 */
+export const DECISION_PAGE_DEFAULT = 50;
+
+/**
+ * 把调用方给的 `limit` 收进 `[1, DECISION_PAGE_MAX]`。
+ *
+ * **钳制而不是报错**：翻页的控制台不该因为页大小写得大一点就收到 400，
+ * 而一个手写的 `?limit=999999` 也绝不能真的返回 999999 条。
+ * 非有限值（没传 / `NaN` / `Infinity`）回落到默认值，等同于路由原来那半句
+ * `Number.isFinite(limit) ? limit : 50`。
+ *
+ * 实现与订单 / 成交两张表共用同一个 `clampPageLimit`（见该函数的说明）：
+ * 三张历史表只有上限与默认值不同，钳制规则必须一模一样。
+ */
+export function clampDecisionLimit(limit: number): number {
+  return clampPageLimit(limit, DECISION_PAGE_MAX, DECISION_PAGE_DEFAULT);
+}
+
 export const decisions = {
-  list(traderId: number, limit = 50): DecisionRecord[] {
+  /**
+   * 某机器人的决策记录，**最新在前**。`before` 是游标：只返回 `id < before` 的记录。
+   *
+   * ## 为什么用 `before=id` 而不是 `offset`
+   *
+   * 这个列表是**在顶部持续插入**的：每跑完一轮就多一条新记录。用 `OFFSET 20` 取
+   * "第二页"时，第一条新记录一插进来，整个窗口就往下挪一格 —— 第二页的第一条会
+   * 和第一页的最后一条**重复**；反过来，如果两次请求之间旧记录被裁掉（见 `log()`），
+   * 窗口往上挪一格，中间就会**漏掉**一行。游标锚在一条具体记录的 `id` 上，
+   * 新记录拿到的 `id` 一定更大，永远落在游标之上，页与页之间既不重也不漏。
+   *
+   * ## 为什么排序键也换成 `id`
+   *
+   * 翻页边界要成立，排序键和游标键必须是同一列：这里用自增主键 `id`。
+   * 它等于写入顺序，而 `log()` 每跑完一轮只写一行、周期号单调递增，
+   * 所以 `id` 倒序与原来的 `cycle_number DESC` 是同一个顺序（最新的一轮在前）。
+   * 索引 `idx_decisions_trader` 建在 `cycle_number` 上，因此这条查询会在按
+   * `trader_id` 过滤之后再排序 —— 每个机器人最多留 500 行（见 `log()` 的保留上限），
+   * 这点排序代价可以忽略，换来的是页边界不可能漏行或重复。
+   */
+  list(traderId: number, limit = DECISION_PAGE_DEFAULT, before?: number | null): DecisionRecord[] {
+    const pageSize = clampDecisionLimit(limit);
+    const cursor = cursorOf(before);
+
+    // 第一页与后续页只有 WHERE 一段不同：分成两条 SQL 是为了两条都能吃到索引，
+    // 也不用把 `(? IS NULL OR id < ?)` 这种对优化器不友好的写法塞进热路径。
+    if (cursor === null) {
+      return getDb()
+        .all<DecisionRow>(
+          'SELECT * FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT ?',
+          traderId,
+          pageSize,
+        )
+        .map(toDecisionRecord);
+    }
+
     return getDb()
       .all<DecisionRow>(
-        'SELECT * FROM decision_records WHERE trader_id = ? ORDER BY cycle_number DESC LIMIT ?',
+        'SELECT * FROM decision_records WHERE trader_id = ? AND id < ? ORDER BY id DESC LIMIT ?',
         traderId,
-        limit,
+        cursor,
+        pageSize,
       )
       .map(toDecisionRecord);
   },

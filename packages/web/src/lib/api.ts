@@ -541,12 +541,56 @@ export const api = {
       positions: unknown[];
       error?: string;
     }>(`/traders/${id}/account`, { signal }),
-  traderOrders: (id: number, limit = 100, signal?: AbortSignal) =>
-    request<OrderRecord[]>(`/traders/${id}/orders`, { query: { limit }, signal }),
-  traderTrades: (id: number, limit = 100, signal?: AbortSignal) =>
-    request<TradeRecord[]>(`/traders/${id}/trades`, { query: { limit }, signal }),
-  traderDecisions: (id: number, limit = 50, signal?: AbortSignal) =>
-    request<DecisionRecord[]>(`/traders/${id}/decisions`, { query: { limit }, signal }),
+  /**
+   * 一页订单记录（服务端按 `id` 倒序，即最新的一单在前）。
+   *
+   * `before` 是**游标**，不是偏移量：它要求服务端只返回 `id` 比它更小的订单。
+   * 之所以不用 `offset`：订单是**在顶部持续插入**的（每下一单就多一行），用偏移量
+   * 翻页时"第 2 页"的起点会因为新订单插进来而整体后移 —— 第二页的第一条会和第一页
+   * 的最后一条重复，同一张订单在表格里出现两次。游标锚在一条具体记录上，
+   * 插入多少条都不影响它。
+   *
+   * `limit` 由服务端钳制（上限 `ORDER_PAGE_MAX`），所以这里照原样传即可。
+   * 调用方（`TraderTables`）一次多要一条来做"还有没有更早的"的判断，
+   * 所以这个参数不叫"页大小"。
+   */
+  traderOrders: (
+    id: number,
+    options: { limit?: number; before?: number | null; signal?: AbortSignal } = {},
+  ) =>
+    request<OrderRecord[]>(`/traders/${id}/orders`, {
+      query: { limit: options.limit ?? 100, before: options.before ?? undefined },
+      signal: options.signal,
+    }),
+  /** 一页成交记录，契约与 `traderOrders` 完全相同（同一套 `before=id` 游标）。 */
+  traderTrades: (
+    id: number,
+    options: { limit?: number; before?: number | null; signal?: AbortSignal } = {},
+  ) =>
+    request<TradeRecord[]>(`/traders/${id}/trades`, {
+      query: { limit: options.limit ?? 100, before: options.before ?? undefined },
+      signal: options.signal,
+    }),
+  /**
+   * 一页决策记录（服务端按 `id` 倒序，即最新的一轮在前）。
+   *
+   * `before` 是**游标**，不是偏移量：它要求服务端只返回 `id` 比它更小的记录。
+   * 之所以不用 `offset`：决策记录是**在顶部持续插入**的（每跑完一轮就多一条），
+   * 用偏移量翻页时，"第 2 页"的起点会因为新记录插进来而整体后移 ——
+   * 于是第二页的第一条会和第一页的最后一条重复，反过来（记录被裁掉时）则会漏掉。
+   * 游标锚在一条具体记录上，插入多少条都不影响它。
+   *
+   * 调用方（`DecisionFeed`）一次多要一条来做"还有没有更早的"的判断，
+   * 所以这里不把 `limit` 设成"页大小"的名字。
+   */
+  traderDecisions: (
+    id: number,
+    options: { limit?: number; before?: number | null; signal?: AbortSignal } = {},
+  ) =>
+    request<DecisionRecord[]>(`/traders/${id}/decisions`, {
+      query: { limit: options.limit ?? 50, before: options.before ?? undefined },
+      signal: options.signal,
+    }),
   traderDecision: (id: number, recordId: number, signal?: AbortSignal) =>
     request<DecisionRecord>(`/traders/${id}/decisions/${recordId}`, { signal }),
   traderEquity: (id: number, limit = 500, signal?: AbortSignal) =>

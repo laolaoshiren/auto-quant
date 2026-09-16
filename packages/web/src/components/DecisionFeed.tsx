@@ -57,10 +57,50 @@
  *   「最近决策」这一行钉在顶上不跟着滚走。
  * - **`xl` 以下**：两栏塌成一列，右栏落到主内容下面，父级高度是 `auto`，
  *   `h-full` 会解析成 `auto`。这时 `max-h-[calc(100dvh-16rem)]` 兜底 ——
- *   没有它，50 个周期会把整页撑成一条长条，正是 §2 要避免的。
+ *   没有它，几十个周期会把整页撑成一条长条，正是 §2 要避免的。
  *   `xl:max-h-none` 把上限交还给上面那条 flex 高度链。
+ *
+ * ## 一次加载多少：默认 20 条，滚到最后一条再取下一页
+ *
+ * 这个面板原来一次向服务端要 50 条、并把 50 条**全部**渲染出来。而每条决策记录都
+ * 带着完整提示词、思维链与原始响应（单条几十 KB）：轮数一多，一次请求就是一大片
+ * 数据，面板也要一次性建出上千个 DOM 节点 —— 操作者的原话是"成千上万数据一次
+ * 加载出来导致系统卡死"。
+ *
+ * 现在第一页只有 `FEED_PAGE_SIZE`（20）条，滚到列表底部（`IntersectionObserver`
+ * 观察列表末尾的哨兵）才取下一页，一直翻到服务端返回不满一页为止。
+ * 观察的根是**这个面板自己的滚动容器**，不是窗口 —— 见下面"高度"那一节：
+ * 滚动条在卡片区里，用窗口做 root 会在 `xl` 以下（整页很长）提前或永不触发。
+ *
+ * ## 分页与轮询的相互作用（这里最容易做错）
+ *
+ * - 轮询只负责**最新的一页**：`usePolled` 每 20 秒重拉第一页，它并进"已经拿到的那些行"。
+ *   已经翻出来的更早的页**原封不动** —— 决策记录落库之后不再修改，所以旧页永远不需要
+ *   重拉，新周期到达也不会把已加载的历史丢掉。
+ * - 把轮询的第一页当成一个"固定窗口"（每次替换掉旧的）是**错的**：新周期一插进来，
+ *   窗口最旧的那一条就被挤出去，而它恰好是和已加载历史相接的那一条 ——
+ *   列表中间会静默少一轮（长度还看不出来）。所以这里只做累加，见 `loaded` 的注释。
+ * - 合并按 `record.id` 去重（见 `mergeFresh`），所以同一轮既在 REST 结果里、
+ *   又在 WebSocket 推送里，或者同时落在两页的边界上，都只会渲染一次。
+ * - 新周期插到**顶部**会把下面的内容整体往下推。操作者正往下翻着看历史时，
+ *   屏幕上的字会因此跳一下 —— 组件里那个 `useLayoutEffect` 会量出锚点被推下去的
+ *   像素数并等量补偿 `scrollTop`（停在顶部时不补偿：那时新周期就该出现在眼前）。
+ * - 分页状态（已加载的页、游标、滚动位置）全是**组件自己的状态 + 真实 DOM 滚动位置**，
+ *   轮询返回不会重置任何一个。
+ * - 游标用 `before=id` 而不是 `offset`：新周期从顶部持续插入，偏移量会把页边界推歪
+ *   （第二页的第一条会重复第一页的最后一条）。理由详写在服务端
+ *   `repositories.ts` 的 `decisions.list()` 上。
  */
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import { Link } from 'react-router-dom';
 import { Check, FileText, LoaderCircle, Lock, RotateCw, Sparkles, TriangleAlert } from 'lucide-react';
 import type { DecisionRecord, Decision, ExecutionLogEntry } from '@aq/shared';
@@ -72,13 +112,43 @@ import { ActionBadge, actionLabel, isOpenAction } from './DecisionAudit';
 import { fmtInt, fmtLatency, fmtPriceUsd, fmtUsd, timeAgo } from '../lib/format';
 
 /**
- * How many cycles are rendered.
+ * 一页多少轮。
  *
- * The endpoint answers with 50 and the socket can append more; either way the
- * list is capped so a long-running bot cannot turn this panel into a thousand
- * DOM nodes. `全部记录` in the header is the way to see the rest.
+ * 这个面板原来一次要 50 条、并且把 50 条全渲染出来。每条记录都带着**完整提示词与
+ * 思维链**（单条几十 KB），轮数一多，一次请求就是一大片数据、面板也要一次性建出
+ * 上千个 DOM 节点 —— 操作者的原话是"成千上万数据一次加载出来导致系统卡死"。
+ *
+ * 现在默认只加载 20 条，滚到列表底部再取下一页（见组件顶部"一次加载多少"那一节）。
+ * 20 这个数是"一屏多一点"：比一屏多，所以第一眼就能看出下面还有东西；又足够小，
+ * 以至于一次请求和一次渲染都不可能有感知。
  */
-const FEED_LIMIT = 50;
+const FEED_PAGE_SIZE = 20;
+
+/**
+ * 每页向服务端**多要一条**，只用来判断"还有没有更早的"。
+ *
+ * 响应体是 `DecisionRecord[]`（形状没变：老客户端、`docs/API.md`、"全部记录"页都照旧），
+ * 数组里没有"还有下一页吗"这个字段，所以多要一条是最便宜的探针：
+ * 拿到 21 条 = 还有更早的；拿到 ≤20 条 = 已经到最早一轮了。
+ * 不这么做就只能靠"再请求一次、拿到空数组"来判断终点 —— 那时"加载中"会先多闪一下，
+ * 而终点提示也总是迟一步。
+ */
+const FEED_PAGE_LIMIT = FEED_PAGE_SIZE + 1;
+
+/**
+ * 把一批新行并进"已经拿到"的那一份，**按 id 去重**。
+ *
+ * 没有新行时返回**原数组**（而不是一个新数组）：`useState` 的 setter 拿到同一个引用会
+ * 直接跳过这次重渲染，而轮询每 20 秒都会调一次这里 —— 绝大多数时候一条新的都没有。
+ *
+ * 去重不是可选的：轮询的第一页与翻出来的页在边界上必然重叠一行（探针行那一行
+ * 会作为下一页的第一条被取回来），WebSocket 推送又可能同一轮再来一份。
+ */
+function mergeFresh(prev: DecisionRecord[], rows: DecisionRecord[]): DecisionRecord[] {
+  const seen = new Set(prev.map((record) => record.id));
+  const fresh = rows.filter((record) => !seen.has(record.id));
+  return fresh.length > 0 ? [...prev, ...fresh] : prev;
+}
 
 /**
  * 币种图标的底色。
@@ -222,8 +292,23 @@ function LiveCycleBlock({ live }: { live: LiveCycle }) {
  * @param running 机器人是否正在运行。页面用 REST 的 `isRunning` 与推送到的实时状态
  *   合成后传进来；省略时退回到 store 里最后一次推送的状态 —— 页面忘了传也不会出现
  *   "停了还在转圈"。
+ * @param actions 面板头里、刷新之前的那一组动作（交易页传的是「立即分析」）。
+ *
+ *   为什么是一个**元素**而不是 `onRunOnce` 之类的回调：那个动作依赖交易页自己的
+ *   store 订阅与忙碌状态（`useRunOnce`），而这里的职责只是把它排在参考产品那一行的
+ *   位置上（`DECISION-FEED.md` §1：`最近决策   ⚡立即分析   ↻`）。接收元素，这个面板
+ *   就不必知道 run-once 调的是哪个接口、忙的是哪个机器人；省略时面板头只剩刷新与
+ *   全部记录（见 §7：这两个入口必须保留）。
  */
-export function DecisionFeed({ traderId, running }: { traderId: number; running?: boolean }) {
+export function DecisionFeed({
+  traderId,
+  running,
+  actions,
+}: {
+  traderId: number;
+  running?: boolean;
+  actions?: ReactNode;
+}) {
   const live = useEvents((s) => s.byTrader[traderId]?.decisions);
   const liveCycle = selectLiveCycle(traderId);
   /*
@@ -233,22 +318,122 @@ export function DecisionFeed({ traderId, running }: { traderId: number; running?
    */
   const liveStatus = useEvents((s) => s.byTrader[traderId]?.status ?? null);
   const isRunning = running ?? (liveStatus === 'running' || liveStatus === 'starting');
-  const query = usePolled((signal) => api.traderDecisions(traderId, FEED_LIMIT, signal), {
-    intervalMs: 20_000,
-    deps: [traderId],
-  });
+  const query = usePolled(
+    (signal) => api.traderDecisions(traderId, { limit: FEED_PAGE_LIMIT, signal }),
+    {
+      intervalMs: 20_000,
+      deps: [traderId],
+    },
+  );
 
   // 行情列表提供**当前价**，用来把"止损 74434.8"变成"离现价多远"，
   // 也是开仓那一行里 `开仓 <价>` 与风险回报比的来源。
   const symbolsQuery = usePolled((signal) => api.marketSymbols(signal), { intervalMs: 20_000 });
 
-  // Live records win, but a REST page can be newer after a reload.
+  /* ------------------------------------------------------------------------ */
+  /*  分页：第一页来自轮询，更早的页由滚到列表底部触发                          */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * 服务端给过的、**已经显示出来的**行（按 id 去重；轮询的第一页与翻出来的每一页都并进来）。
+   *
+   * 为什么要**累积**，而不是"保留轮询的第一页 + 更早的页"：轮询的第一页是一个固定窗口，
+   * 新周期一插进来，窗口里最旧的那一条就被挤出去了 —— 而它恰好是和已加载历史相接的那一条。
+   * 挤掉它就等于在列表中间挖掉一轮：浏览器里实测到过这种情形，46 条记录中间少了 #26，
+   * 而列表长度看起来完全正常，肉眼根本发现不了。
+   * 累积只有"新增"没有"移除"，接缝因此不可能裂开。
+   *
+   * 增长有界且很慢：轮询只在真的出现新周期时 +1（每个决策周期才一次），
+   * 翻页每次 +20，而且只有操作者自己滚到底才会发生。
+   */
+  const [loaded, setLoaded] = useState<DecisionRecord[]>([]);
+  const [moreState, setMoreState] = useState<'idle' | 'loading' | 'error' | 'done'>('idle');
+  const [moreError, setMoreError] = useState<string | null>(null);
+  /** 最近一次"下一页"是不是满页 —— 终点提示靠它判断。 */
+  const [deeperFull, setDeeperFull] = useState(false);
+
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  /** 在途的"加载更多"请求：换机器人或卸载时要作废掉。 */
+  const moreAbortRef = useRef<AbortController | null>(null);
+  /** 当前机器人 id 的快照：异步回调里用它判断响应是不是已经属于上一个机器人了。 */
+  const traderIdRef = useRef(traderId);
+  traderIdRef.current = traderId;
+
+  useEffect(() => {
+    // 换机器人：已加载的旧页、错误与终点标记都属于上一个机器人，整套丢掉。
+    // 清理函数把在途请求也 abort 掉 —— 否则它回来时会追加到新机器人的列表里。
+    setLoaded([]);
+    setMoreState('idle');
+    setMoreError(null);
+    setDeeperFull(false);
+    return () => moreAbortRef.current?.abort();
+  }, [traderId]);
+
+  /*
+   * 轮询拿到的第一页并进来。
+   *
+   * 第一页同样是"多要一条"：最后那一条只是探针（回答"还有没有更早的"），不显示，
+   * 所以这里切掉。`traderId` 过滤不是多余的：换机器人时 `usePolled` 不会立刻清空
+   * 旧数据，不挡一下，上一家的记录会被并进新列表（它自己不知道换了人）。
+   */
+  useEffect(() => {
+    const page = query.data;
+    if (!page) return;
+    const rows = page.slice(0, FEED_PAGE_SIZE).filter((record) => record.traderId === traderId);
+    if (rows.length === 0) return;
+    setLoaded((prev) => mergeFresh(prev, rows));
+  }, [query.data, traderId]);
+
+  /**
+   * 最新的一页（轮询）+ 更早的页 + 推送进来的实时记录 → 一个列表。
+   *
+   * **按 `record.id` 去重**：同一轮同时出现在两页边界上、或者既在 REST 结果里
+   * 又在 WebSocket 推送里，都只会渲染一次（`Map` 的键就是 id）。
+   * 决策记录写进库之后不再修改，所以旧行永远不需要重拉。
+   *
+   * 轮询刚拿到的第一页也**直接**并进来，不等上面那个 effect 落地：否则"数据到了"和
+   * "列表挂上去了"会差一次重渲染，而挂在列表末尾的哨兵观察器只在这几个依赖变化时
+   * 重新挂载 —— 它会永远挂不上，滚到底毫无反应（浏览器里实测到过这个情形）。
+   */
   const records = useMemo(() => {
     const merged = new Map<number, DecisionRecord>();
-    for (const record of query.data ?? []) merged.set(record.id, record);
+    for (const record of loaded) merged.set(record.id, record);
     for (const record of live ?? []) merged.set(record.id, record);
-    return [...merged.values()].sort((a, b) => b.cycleNumber - a.cycleNumber);
-  }, [query.data, live]);
+    for (const record of (query.data ?? []).slice(0, FEED_PAGE_SIZE)) merged.set(record.id, record);
+    // 最新的一轮在最上面。第二关键字用 `id`：周期号理论上不会重复，
+    // 一旦重复（比如某一轮重试后写了两行），没有它列表顺序会随插入顺序抖动。
+    return [...merged.values()].sort((a, b) => b.cycleNumber - a.cycleNumber || b.id - a.id);
+  }, [loaded, query.data, live]);
+
+  /**
+   * 下一页的游标 = **手里最小的 id**，也就是"比我现在有的都更早"。
+   *
+   * 用"最小 id"而不是"最后一条的 id"，是为了不依赖列表的排序：排序键（周期号）
+   * 和游标键（id）是两回事，取最小值就不用担心两者哪天不一致。
+   * 被切掉的那条探针行 id 比它更小，所以下一次翻页会把探针行当作新一页的第一条
+   * 正常取回来 —— 不重不漏，代价只是每次多取一行。
+   *
+   * 只统计**服务端给过的行**（已加载的 + 本轮轮询的第一页），不含推送：
+   * 推送来的行是"最新的那些"，服务端那一份才是连续的，游标必须锚在连续的那一段上。
+   */
+  const cursor = useMemo(() => {
+    let min: number | null = null;
+    for (const record of loaded) if (min === null || record.id < min) min = record.id;
+    for (const record of (query.data ?? []).slice(0, FEED_PAGE_SIZE)) {
+      if (min === null || record.id < min) min = record.id;
+    }
+    return min;
+  }, [loaded, query.data]);
+
+  /**
+   * 还有没有更早的。
+   *
+   * - 服务端给过一个**不满一页**的下一页（`done`）→ 没有；
+   * - 最近一次下一页是满页，或者轮询的第一页是满的（说明下面还有）→ 有；
+   * - 第一页本来就不满 21 条 → 没有了，直接显示终点。
+   */
+  const hasMore = moreState !== 'done' && (deeperFull || (query.data?.length ?? 0) > FEED_PAGE_SIZE);
 
   /*
    * 要不要显示"正在请求模型"这一条。
@@ -266,6 +451,158 @@ export function DecisionFeed({ traderId, running }: { traderId: number; running?
   const showLive =
     isRunning && liveCycle !== undefined && !records.some((record) => record.cycleNumber === liveCycle.cycleNumber);
 
+  /** 列表（滚动容器与哨兵）有没有挂上去 —— 观察器要在它出现的那一次重新挂。 */
+  const listMounted = records.length > 0 || showLive;
+
+  /**
+   * 取下一页（更早的 20 条），追加到下面。
+   *
+   * 游标是"手里最小的 id"，不是偏移量，所以**不会**因为这会儿又跑完了一轮而错位：
+   * 新记录的 id 一定更大，永远落在游标之上。
+   */
+  const loadMore = useCallback(async () => {
+    if (moreState === 'loading' || moreState === 'done') return;
+    if (cursor === null) {
+      // 手里一行都没有 = 没有可翻的页（第一页还没到）。落一个终态而不只是 return：
+      // 重试按钮走的是同一条路径，这里若不落终态，用户会停在一个点了没反应的"重试"上。
+      setMoreState('done');
+      return;
+    }
+
+    const requestedFor = traderId;
+    moreAbortRef.current?.abort();
+    const controller = new AbortController();
+    moreAbortRef.current = controller;
+    setMoreState('loading');
+    setMoreError(null);
+
+    try {
+      const page = await api.traderDecisions(requestedFor, {
+        limit: FEED_PAGE_LIMIT,
+        before: cursor,
+        signal: controller.signal,
+      });
+      // 机器人已经切走（或组件已卸载）：这一页属于上一个列表，直接丢掉。
+      if (controller.signal.aborted || traderIdRef.current !== requestedFor) return;
+
+      // 显示前 20 条，最后那条探针留给下一次翻页（它会成为新一页的第一条）。
+      setLoaded((prev) => mergeFresh(prev, page.slice(0, FEED_PAGE_SIZE)));
+      setDeeperFull(page.length > FEED_PAGE_SIZE);
+      // 不满一页 = 已经到最早一轮。那条"多要一条"的探针就是为这一句存在的。
+      setMoreState(page.length > FEED_PAGE_SIZE ? 'idle' : 'done');
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      // 失败**必须**看得见并且能重试：静默停下会让操作者以为"历史只有这么多"。
+      setMoreError((error as Error).message);
+      setMoreState('error');
+    }
+  }, [cursor, moreState, traderId]);
+
+  /** 观察器回调里用的永远是**最新一次渲染**的 `loadMore`（否则会拿着旧游标再请求一次）。 */
+  const loadMoreRef = useRef(loadMore);
+  loadMoreRef.current = loadMore;
+
+  /**
+   * 滚到列表底部就取下一页。
+   *
+   * `root` 必须是这个面板**自己的滚动容器**：决策流的滚动条在卡片区里，不在窗口上
+   * （见组件顶部"高度"那一节）。用默认的视口当 root，在 `xl` 以下——整页很长、
+   * 卡片区被 `max-h` 截断——会提前触发（哨兵在视口里而没在容器底部）甚至永不触发。
+   *
+   * `rootMargin` 往下放 320px ≈ 提前一屏开始取：滚到最后一条时下一页往往已经
+   * 拼在下面了，"正在加载…"不会先闪一下再被内容顶走。
+   */
+  useEffect(() => {
+    /*
+     * 只在"还有更早的、而且此刻既没在加载也没出错"时观察：
+     * - 加载中不观察：哨兵还在视口里，重新观察会立刻再触发一次，打出重复请求；
+     * - 出错后不观察：能失败一次的请求会一直失败，自动重试就变成打不停的循环。
+     *   这时改由错误行里的"重试"按钮驱动，用户点一次才发一次。
+     */
+    if (!hasMore || moreState !== 'idle') return;
+    const root = scrollerRef.current;
+    const sentinel = sentinelRef.current;
+    if (!root || !sentinel) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void loadMoreRef.current();
+      },
+      { root, rootMargin: '320px 0px' },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+    /*
+     * `listMounted` 必须在依赖里：`hasMore` 变真的那一次提交里，列表可能还没挂上去
+     * （数据先到、渲染列表用的状态后到），`scrollerRef.current` 还是 null，
+     * 观察器就永远不会被创建。`traderId` 同理：换机器人之后要重新观察新的滚动容器。
+     */
+  }, [hasMore, moreState, traderId, listMounted]);
+
+  /*
+   * 把视口钉住：新周期插到列表**顶部**时不把正在读的内容顶走。
+   *
+   * 为什么需要它：这个面板每 20 秒轮询一次，机器人每跑完一轮就会在最上面多一条。
+   * 操作者正往下翻着看历史时，顶部插进来的那一条会把整列往下推 ——
+   * 屏幕上的字会突然跳一下，"我正在看的那一轮"就跑掉了。
+   *
+   * 做法：拿上一次提交时的**第一条记录**当锚点（`data-record-id` 是它的 DOM 标记），
+   * 量出它这次被推下去了多少像素，就把 `scrollTop` 加同样多。锚点于是原地不动，
+   * 它下面的一切也就不用动。离开顶部才补偿 —— 停在顶部时新周期本来就该出现在眼前。
+   *
+   * 浏览器自带的滚动锚定（`overflow-anchor: auto`，默认开着）在做同一件事，
+   * 两者**不会叠加**：这里设的 `scrollTop` 正是它算出来的那个值
+   * （`scrollTopRef` 由滚动事件维护，读到的是本次提交**之前**的值，加同一个 delta
+   * 得到同一个结果）。留着它是因为它对"在途周期那一条变高"这类
+   * 不经过本组件提交的位移也有效。
+   */
+  const geomRef = useRef<{ id: number; top: number } | null>(null);
+  const scrollTopRef = useRef(0);
+
+  useLayoutEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+
+    const anchor = geomRef.current;
+    if (anchor && scrollTopRef.current > 4) {
+      const node = el.querySelector<HTMLElement>(`[data-record-id="${anchor.id}"]`);
+      if (node) {
+        const delta = node.offsetTop - anchor.top;
+        if (delta > 0) el.scrollTop = scrollTopRef.current + delta;
+      }
+    }
+
+    // 重新取锚点：第一条**记录**（在途那条不是记录，没有这个标记），
+    // 它在下一次提交里依然存在（列表按 id 去重、记录不会消失）。
+    const first = el.querySelector<HTMLElement>('[data-record-id]');
+    geomRef.current = first ? { id: Number(first.dataset.recordId), top: first.offsetTop } : null;
+    scrollTopRef.current = el.scrollTop;
+  }, [records]);
+
+  /*
+   * 面板头右侧那一行：**动作（立即分析）→ 刷新 → 全部记录**，顺序照参考产品的
+   * `⚡立即分析   ↻`（`DECISION-FEED.md` §1）。抽成变量是为了加载态那张面板也用同一份 ——
+   * 否则数据一到，这个按钮会先从页面上消失再出现，读起来像功能坏了。
+   */
+  const headerActions = (
+    <span className="flex items-center gap-1.5">
+      {actions}
+      <button
+        type="button"
+        onClick={() => query.reload()}
+        title="重新拉取决策记录"
+        className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-ink-lo transition hover:text-ink-hi disabled:opacity-50"
+        disabled={query.loading}
+      >
+        <RotateCw aria-hidden className={cn('h-3.5 w-3.5', query.loading && 'animate-spin')} />
+        刷新
+      </button>
+      <Link to="/data" className="text-xs text-ink-lo transition hover:text-accent">
+        全部记录
+      </Link>
+    </span>
+  );
+
   if (query.loading && records.length === 0 && !showLive) {
     return (
       // 加载态也占满整栏：否则数据一到位，这一栏会突然从一小条跳成整屏高。
@@ -274,13 +611,12 @@ export function DecisionFeed({ traderId, running }: { traderId: number; running?
         padded={false}
         className="flex h-full min-h-0 flex-col"
         bodyClassName="flex min-h-0 flex-1 flex-col p-0"
+        actions={headerActions}
       >
         <Spinner3 label="正在加载决策" />
       </Panel>
     );
   }
-
-  const shown = records.slice(0, FEED_LIMIT);
 
   return (
     <Panel
@@ -290,23 +626,7 @@ export function DecisionFeed({ traderId, running }: { traderId: number; running?
       className="flex h-full min-h-0 flex-col"
       bodyClassName="flex min-h-0 flex-1 flex-col p-0"
       title="最近决策"
-      actions={
-        <span className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => query.reload()}
-            title="重新拉取决策记录"
-            className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-ink-lo transition hover:text-ink-hi disabled:opacity-50"
-            disabled={query.loading}
-          >
-            <RotateCw aria-hidden className={cn('h-3.5 w-3.5', query.loading && 'animate-spin')} />
-            刷新
-          </button>
-          <Link to="/data" className="text-xs text-ink-lo transition hover:text-accent">
-            全部记录
-          </Link>
-        </span>
-      }
+      actions={headerActions}
     >
       {records.length === 0 && !showLive ? (
         <Empty
@@ -325,29 +645,81 @@ export function DecisionFeed({ traderId, running }: { traderId: number; running?
         //
         // `space-y-2.5` 而不是相邻的 `border-b`：40 个周期用一条接一条的分隔线排下来，
         // 会连成一整片、分不清哪里是上一个周期的结尾。
-        <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-2.5 max-h-[calc(100dvh-16rem)] xl:max-h-none">
+        <div
+          /*
+           * `ref` + `onScroll` 是**分页与滚动位置**要的两样东西：
+           * 前者给 `IntersectionObserver` 当 `root`（哨兵必须在容器里比较，不能和窗口比），
+           * 也给那个把视口钉住的 `useLayoutEffect` 当测量对象；
+           * 后者维护"提交前"的 `scrollTop`（滚动不触发 React 重渲染，只能自己记）。
+           */
+          ref={scrollerRef}
+          onScroll={(event) => {
+            scrollTopRef.current = event.currentTarget.scrollTop;
+          }}
+          className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-2.5 max-h-[calc(100dvh-16rem)] xl:max-h-none"
+        >
           {/*
             在途周期钉在**最上面**，早于最新的成品（列表是按周期号倒序的）。
             它是"现在正在发生的事"，扫视时的第一落点必须是它 ——
             放在下面等于要操作者先划过一整盒已经结束的决策才看见"它在动"。
+            它不受分页影响：它不属于任何一页，只是钉在这个列表的顶部。
           */}
           {showLive && liveCycle && <LiveCycleBlock key={liveCycle.cycleNumber} live={liveCycle} />}
 
-          {shown.map((record) => (
+          {records.map((record) => (
             <CycleBlock
               key={record.id}
               record={record}
               symbols={symbolsQuery.data ?? []}
             />
           ))}
-          {records.length > shown.length && (
-            <p className="pt-1 text-xs text-ink-faint">
-              只显示最近 {shown.length} 个周期，共 {records.length} 个。完整历史在
-              <Link to="/data" className="ml-1 text-accent hover:underline">
-                决策记录
-              </Link>
-              。
+
+          {/*
+            哨兵：它进入滚动容器的视口（`rootMargin` 提前约一屏）就取下一页。
+            放在列表**最后**，所以只有操作者读到最下面时才会触发 ——
+            这正是"滚到最后一条以后才加载后面 20 条"。
+            `h-px` 而不是 `h-0`：零高度的元素在部分浏览器里会被当成"没有盒子"、
+            永远不产生交叉，给它 1px 就没有这个歧义（视觉上仍然看不见）。
+          */}
+          <div ref={sentinelRef} aria-hidden className="h-px w-full" />
+
+          {moreState === 'loading' && (
+            <p
+              role="status"
+              className="flex items-center justify-center gap-1.5 pt-1 text-xs text-ink-faint"
+            >
+              <LoaderCircle aria-hidden className="h-3.5 w-3.5 animate-spin" />
+              正在加载更早的周期…
             </p>
+          )}
+
+          {/*
+            失败必须看得见、并且能重试：静默停下会让操作者以为"历史只有这么多"，
+            而事实是刚才那次请求没成功。这里**不自动重试**（见上面观察器的注释），
+            所以这个按钮是唯一的出口。
+          */}
+          {moreState === 'error' && (
+            <p role="alert" className="pt-1 text-center text-xs text-down">
+              加载更早的周期失败{moreError ? `：${moreError}` : ''}
+              <button
+                type="button"
+                onClick={() => void loadMore()}
+                className="ml-1 text-accent hover:underline"
+              >
+                重试
+              </button>
+            </p>
+          )}
+
+          {/*
+            终点：明确说"没有了"，而不是留一个看起来还会加载的空当。
+
+            这里原来是"只显示最近 50 个周期，共 M 个"那一段 —— 它**永远不可能**渲染
+            （`shown` 就是 `records` 的同一个切片，`records.length > shown.length` 恒为假）。
+            现在列表里就是"已经加载的全部"，所以这一行要说的是"到头了"。
+          */}
+          {records.length > 0 && !hasMore && (
+            <p className="pt-1 text-center text-xs text-ink-faint">已到最早一轮</p>
           )}
         </div>
       )}
@@ -377,7 +749,13 @@ function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: Mark
   const failed = record.executionLog.filter((entry) => entry.status === 'failed');
 
   return (
-    <article className="min-w-0">
+    /*
+     * `data-record-id` 是**给滚动锚点用的 DOM 标记**（见 `DecisionFeed` 里那个
+     * `useLayoutEffect`）：新周期插到顶部时，要靠它认出"上一次的第一条"这一个元素、
+     * 量出它被推下去多少像素，才能把 `scrollTop` 补偿回去。它不是样式钩子，
+     * 不要用它写 CSS。
+     */
+    <article className="min-w-0" data-record-id={record.id}>
       <CycleMeta record={record} />
 
       {/*
@@ -462,17 +840,24 @@ function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: Mark
  * 完整时间戳放在 `title` 里：相对时间适合扫读，但对账时需要精确时刻。
  */
 function CycleMeta({ record }: { record: DecisionRecord }) {
-  const tokens =
-    record.promptTokens === null && record.completionTokens === null
-      ? // 没有 token 计数时（老记录 / 端点未回传用量）说延迟，不写 `in 0 / out 0`：
-        // 那会让人以为模型一个 token 都没花。
-        //
-        // 失败的周期连延迟也常常是 0（异常在拿到响应之前就抛了），此时写 `0 ms` 会被
-        // 读成"模型 0 毫秒就答完了"，所以留一个 `—`，与参考产品那一格里的 `…` 同义。
-        record.aiLatencyMs > 0 || record.success
-        ? fmtLatency(record.aiLatencyMs)
-        : '—'
-      : `in ${fmtInt(record.promptTokens ?? 0)} · out ${fmtInt(record.completionTokens ?? 0)}`;
+  /*
+   * token 数与耗时**各自独立**显示。
+   *
+   * 原来它们是「二选一」的兜底关系 —— 有 token 计数就不显示耗时。
+   * 但这两个数字回答的是不同问题：
+   *
+   *   · token 数 = 这一轮**花了多少钱**
+   *   · 耗时      = 这一轮**等了多久**
+   *
+   * 3 分钟周期下后者尤其重要：一次 15 秒的调用吃掉周期的 8%，
+   * 连续几轮变慢意味着模型服务在恶化 —— 那是要提前发现的事。
+   * 合并成"有 A 就不显示 B"，等于逼操作者在两个都关心的数字里挑一个。
+   */
+  const hasTokens = record.promptTokens !== null || record.completionTokens !== null;
+  const tokens = hasTokens
+    ? `in ${fmtInt(record.promptTokens ?? 0)} · out ${fmtInt(record.completionTokens ?? 0)}`
+    : // 不写 `in 0 · out 0`：那会让人以为模型一个 token 都没花。
+      '用量未回传';
 
   return (
     <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 px-0.5 text-xs text-ink-lo">
@@ -485,6 +870,21 @@ function CycleMeta({ record }: { record: DecisionRecord }) {
         │
       </span>
       <span className="num">{tokens}</span>
+
+      {/*
+        耗时。失败的周期常常在拿到响应之前就抛了（延迟为 0），
+        此时写 `0 ms` 会被读成"模型 0 毫秒就答完了"，所以留 `—`。
+      */}
+      {(record.aiLatencyMs > 0 || record.success) && (
+        <>
+          <span aria-hidden className="text-ink-faint">
+            │
+          </span>
+          <span className="num" title="本轮向模型发起请求到收到完整响应的时间。">
+            {fmtLatency(record.aiLatencyMs)}
+          </span>
+        </>
+      )}
 
       {!record.success && (
         <>

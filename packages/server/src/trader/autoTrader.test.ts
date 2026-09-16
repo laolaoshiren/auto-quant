@@ -10,9 +10,9 @@ import {
   type StrategyConfig,
 } from '@aq/shared';
 import type { BinanceBroker, ExchangePosition, PlacedOrder } from '../binance/broker.js';
-import { BinanceApiError, type BinanceAlgoOrderResponse, type BinanceOrderResponse } from '../binance/types.js';
+import { BinanceApiError, type BinanceAlgoOrderResponse, type BinanceOrderResponse, type BinanceUserTrade } from '../binance/types.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
-import { closeDb, initDb } from '../db/index.js';
+import { closeDb, getDb, initDb } from '../db/index.js';
 import { eventBus } from '../events.js';
 import { classifyHttpError, LlmError } from '../llm/errors.js';
 import type { MarketDataService } from '../market/service.js';
@@ -339,8 +339,11 @@ class FakeBroker {
   }
 
   async getUserTrades() {
-    return [];
+    return this.userTrades;
   }
+
+  /** 一次性探针用：交易所成交历史。 */
+  userTrades: BinanceUserTrade[] = [];
 
   async getIncome() {
     return this.income;
@@ -632,6 +635,315 @@ test('an untracked exchange position is adopted rather than ignored', async () =
   const open = positionStore.open(traderId);
   assert.equal(open.length, 1, 'the manual position must be adopted');
   assert.match(open[0]!.open_reasoning, /机器人之外/);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  一个回合只能记一次账（§2.5 的幂等）                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 把某一回合的两条交易所成交按顺序接进 `getUserTrades`。
+ *
+ * 入场成交量故意与本地持仓量**不同**：这正是实盘上对账重复记账的触发条件 ——
+ * 本地记的是持仓行的数量，交易所重建的是实际成交量（多笔成交的加权），两者
+ * 一旦不等，`findRoundTrip()` 就认不出这一回合。
+ */
+function feedRoundTrip(
+  broker: FakeBroker,
+  input: {
+    localQuantity: number;
+    exchangeQuantity: number;
+    entryOrderId: string;
+    exitOrderId: string;
+    entryTime: number;
+    exitTime: number;
+    entryPrice: number;
+    exitPrice: number;
+    grossPnl: number;
+  },
+): void {
+  broker.userTrades = [
+    {
+      symbol: SYMBOL,
+      id: 1,
+      orderId: Number(input.entryOrderId),
+      side: 'BUY',
+      positionSide: 'BOTH',
+      price: String(input.entryPrice),
+      qty: String(input.exchangeQuantity),
+      quoteQty: String(input.entryPrice * input.exchangeQuantity),
+      realizedPnl: '0',
+      marginAsset: 'USDT',
+      commission: '0.24',
+      commissionAsset: 'USDT',
+      time: input.entryTime,
+      maker: false,
+      buyer: true,
+    },
+    {
+      symbol: SYMBOL,
+      id: 2,
+      orderId: Number(input.exitOrderId),
+      side: 'SELL',
+      positionSide: 'BOTH',
+      price: String(input.exitPrice),
+      qty: String(input.exchangeQuantity),
+      quoteQty: String(input.exitPrice * input.exchangeQuantity),
+      realizedPnl: String(input.grossPnl),
+      marginAsset: 'USDT',
+      commission: '0.24',
+      commissionAsset: 'USDT',
+      time: input.exitTime,
+      maker: false,
+      buyer: false,
+    },
+  ];
+  // `localQuantity` 只是断言上的说明，不参与喂数：交易所那侧永远只认成交量。
+  void input.localQuantity;
+}
+
+test('运行期已记账的回合，对账不得再插一行（重复记账 = 凭空多出一份盈亏）', async () => {
+  /*
+   * Why this test exists —— 这个用例防的就是 §2.5「对账是幂等的：重复执行只修正、
+   * 不重复插入」被破坏的那个 bug。
+   *
+   * 实盘上量到的三组重复行（其余字段逐字节相同，只有 id / source / opened_at 不同）：
+   *
+   *   #17 reconciled / #18 take_profit   SYNUSDT  99  -0.047554650
+   *   #11 reconciled / #12 stop_loss     SYNUSDT 169  -0.75613135
+   *   #9  reconciled / #10 take_profit   LSKUSDT  35  +0.66674843
+   *
+   * 12 行里 4 行是 reconciled，多出来的 6 行凭空造出 **+0.4954** 的净盈亏，
+   * 因为毛、手续费、资金费都被算了两遍。
+   *
+   * 机制：运行期按**本地持仓行的数量**记账，对账按**交易所实际成交量**重建。
+   * 两个口径一旦不等（这次就是），`reconcileTradeHistory` 的严格键
+   * （symbol+qty+入场价+入口订单号）和只按描述匹配的回退键**同时**落空，
+   * 于是它既没认出那一行、也没有任何唯一性约束拦它 —— 两条路各插一行。
+   * `orders.exchangeOrderIds()` 那道归属闸门在这里帮不上忙：它回答的是"这个回合
+   * 是不是本机器人开的"，而不是"这一回合是不是已经记过账了"。
+   *
+   * 契约：两条路径描述同一个真实回合时，`trades` 里**有且只有一行**。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const open = positionStore.open(traderId)[0]!;
+  await buildTrader(broker, CLOSE_LONG_RESPONSE).runOnce();
+
+  const booked = tradeStore.list(traderId);
+  assert.equal(booked.length, 1, '运行期先记了一行（这是前提，否则用例证明不了什么）');
+  const runtimeRow = booked[0]!;
+
+  /*
+   * 交易所的成交记录：实际成交量比本地持仓行多一点 —— 这正是 `findRoundTrip()`
+   * 认不出这一回合的原因（它按 symbol+数量+入场价匹配），于是运行期记下的那一行
+   * 没有入口订单号，对账的严格键与描述回退键也会一起落空。
+   *
+   * 平仓时间取**运行期记下的那一刻**：两条路径读的是交易所同一笔平仓成交，
+   * 实盘上那三组重复行的 `closed_at` 正是逐字节相同的。这个时间就是幂等判据里
+   * 唯一能把"同一回合被记两次"和"两笔真实成交"分开的东西（`closed_at` 相同时
+   * 再用数量与入场价收窄）。
+   */
+  feedRoundTrip(broker, {
+    localQuantity: runtimeRow.quantity,
+    exchangeQuantity: runtimeRow.quantity + 0.0001,
+    entryOrderId: '1000',
+    exitOrderId: '1003',
+    entryTime: Date.parse(runtimeRow.openedAt),
+    exitTime: Date.parse(runtimeRow.closedAt),
+    entryPrice: runtimeRow.entryPrice,
+    exitPrice: runtimeRow.entryPrice + 100,
+    grossPnl: 0.88,
+  });
+
+  const result = await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+
+  const after = tradeStore.list(traderId);
+  assert.equal(
+    after.length,
+    1,
+    `同一回合必须只有一行；实际 ${after.length} 行：${JSON.stringify(
+      after.map((t) => ({ id: t.id, source: t.source, qty: t.quantity, net: t.netPnl })),
+    )}`,
+  );
+  // 保留的是运行期那一行（它是先写的），并把交易所的权威口径修正上去 —— 这正是
+  // "只修正、不重复插入"。
+  assert.equal(after[0]!.id, runtimeRow.id, '不得新增行，应由对账修正原行');
+  assert.equal(result.recovered, 0, '没有漏记的回合，补录数必须是 0');
+  assert.ok(
+    Math.abs(after[0]!.quantity - (runtimeRow.quantity + 0.0001)) < 1e-9,
+    '交易所的成交量是权威口径，应当被修正到那一行上',
+  );
+});
+
+test('运行期确实没记的回合，对账必须补录（#4 POWERUSDT 那种）', async () => {
+  /*
+   * Why this test exists —— 它是上一个用例的**反面**，用来防止"把对账修坏"。
+   *
+   * 12 行里 4 行 reconciled，只有 3 行是重复的；`#4 POWERUSDT 131` 没有对应的
+   * 运行期行 —— 机器人当时没在跑，那一回合是**真的漏记**了，正是对账存在的理由。
+   * 所以修复绝不能变成"凡 reconciled 就不记"或"删掉所有 reconciled"：
+   * 那会把 +0.6563 那一笔彻底丢掉，账面反而比账户少。
+   *
+   * 契约：本地账本里没有这一回合时，reconciliation 仍然插一行，且标成
+   * `source: 'reconciled'`（对账补录是"记账漏了"的信号，必须能看出来）。
+   */
+  const broker = new FakeBroker();
+  // 开仓后不经过任何平仓路径：交易所自己平掉了，本地什么都没记。
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  assert.equal(tradeStore.list(traderId).length, 0, '前提：这一回合运行时没有记过账');
+
+  const open = positionStore.open(traderId)[0]!;
+  broker.simulateExchangeClose();
+  feedRoundTrip(broker, {
+    localQuantity: open.quantity,
+    exchangeQuantity: open.quantity,
+    entryOrderId: '1000',
+    exitOrderId: '1003',
+    entryTime: Date.parse(open.opened_at),
+    exitTime: Date.parse(open.opened_at) + 300_000,
+    entryPrice: open.entry_price,
+    exitPrice: open.entry_price + 100,
+    grossPnl: 0.6563,
+  });
+
+  const result = await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+
+  const rows = tradeStore.list(traderId);
+  assert.equal(rows.length, 1, '漏记的回合必须被补录，恰好一行');
+  assert.equal(result.recovered, 1);
+  assert.equal(rows[0]!.source, 'reconciled', '补录行必须标出来源，否则"漏记"这个信号就没了');
+  assert.equal(rows[0]!.closeReason, 'reconciled');
+  assert.ok(Math.abs(rows[0]!.pnl - 0.6563) < 1e-9, '毛盈亏取自交易所，不得重算');
+});
+
+test('对账重复执行是幂等的：第二遍不再插手', async () => {
+  /*
+   * Why this test exists —— §2.5 的原话是「对账是幂等的：重复执行只修正、不重复插入」。
+   *
+   * 对账在每个周期开头都会跑一遍（`runCycleBody` 第 2 步），所以"跑两次"不是假设，
+   * 而是常态。如果第二遍又插一行，操作员每次点「对账」都会让盈亏膨胀一次。
+   *
+   * 契约：同一份交易所成交历史上跑第二遍，`recovered` 与 `corrected` 都是 0，
+   * 行数与每一行都不动。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  const open = positionStore.open(traderId)[0]!;
+  broker.simulateExchangeClose();
+  feedRoundTrip(broker, {
+    localQuantity: open.quantity,
+    exchangeQuantity: open.quantity,
+    entryOrderId: '1000',
+    exitOrderId: '1003',
+    entryTime: Date.parse(open.opened_at),
+    exitTime: Date.parse(open.opened_at) + 300_000,
+    entryPrice: open.entry_price,
+    exitPrice: open.entry_price + 100,
+    grossPnl: 0.5,
+  });
+
+  const first = await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+  assert.equal(first.recovered, 1, '第一遍负责补录，否则第二遍什么都没得比');
+  const afterFirst = tradeStore.list(traderId).map((t) => ({ id: t.id, net: t.netPnl }));
+
+  const second = await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+  assert.equal(second.recovered, 0, '重复执行不得再补录');
+  assert.deepEqual(
+    tradeStore.list(traderId).map((t) => ({ id: t.id, net: t.netPnl })),
+    afterFirst,
+    '第二遍必须什么都不改',
+  );
+});
+
+/**
+ * 直接写一行"历史重复行"。
+ *
+ * 为什么要绕过仓储：`trades.insert()` 在修复之后是幂等的，它会认出重复并返回已有行，
+ * 所以"已经落库的重复行"只能靠原始 SQL 造出来。这个助手只服务于那个检测用例。
+ */
+function insertDuplicateRow(input: {
+  traderId: number;
+  symbol: string;
+  quantity: number;
+  entryPrice: number;
+  exitPrice: number;
+  leverage: number;
+  grossPnl: number;
+  fee: number;
+  openedAt: string;
+  closedAt: string;
+  netPnl: number;
+}): number {
+  const { lastInsertRowid } = getDb().run(
+    `INSERT INTO trades (trader_id, symbol, side, quantity, entry_price, exit_price, leverage,
+       pnl, pnl_percent, fee, close_reason, opened_at, closed_at, hold_minutes,
+       entry_fee, funding_fee, net_pnl, source)
+     VALUES (?, ?, 'long', ?, ?, ?, ?, ?, 0, ?, 'reconciled', ?, ?, 0, 0, 0, ?, 'reconciled')`,
+    input.traderId,
+    input.symbol,
+    input.quantity,
+    input.entryPrice,
+    input.exitPrice,
+    input.leverage,
+    input.grossPnl,
+    input.fee,
+    input.openedAt,
+    input.closedAt,
+    input.netPnl,
+  );
+  return lastInsertRowid;
+}
+
+test('重复行只被报告出来，不被自动删除', async () => {
+  /*
+   * Why this test exists —— 已经落库的重复行要由**人**决定怎么处理。
+   *
+   * 删除会计历史是不可以自动化的事情：删错一行就永久改写了对账依据。所以修复只做
+   * 两件事 —— 今后不再产生重复、以及把疑似重复**报出来**给操作者复核。
+   * 这个用例钉住报告口径：必须成对、一 reconciled 一非 reconciled，且字段取自数据库。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  const open = positionStore.open(traderId)[0]!;
+  await buildTrader(broker, CLOSE_LONG_RESPONSE).runOnce();
+  const runtimeRow = tradeStore.list(traderId)[0]!;
+
+  // 直接构造出实盘那三组重复行的形状（修复之后正常路径不会再产生它，历史行仍在）。
+  /*
+   * 直接写 SQL 造出这一对：**不能**走 `tradeStore.insert()` —— 修复之后它自己就会
+   * 认出重复并返回已有行（那正是上一个用例钉住的行为）。这里要模拟的是**已经落库的
+   * 历史行**，所以必须绕过写入路径，否则这个用例永远造不出它要检测的形状。
+   */
+  const duplicateId = insertDuplicateRow({
+    traderId,
+    symbol: SYMBOL,
+    quantity: open.quantity,
+    entryPrice: open.entry_price,
+    exitPrice: runtimeRow.exitPrice,
+    leverage: runtimeRow.leverage,
+    grossPnl: runtimeRow.pnl,
+    fee: runtimeRow.fee,
+    openedAt: new Date(Date.parse(runtimeRow.openedAt) - 368).toISOString(),
+    closedAt: runtimeRow.closedAt,
+    netPnl: runtimeRow.netPnl,
+  });
+
+  const suspects = tradeStore.duplicateSuspects(traderId);
+  assert.equal(suspects.length, 1, '这一对重复行必须被报出来');
+  assert.deepEqual(
+    [suspects[0]!.idA, suspects[0]!.idB].sort((a, b) => a - b),
+    [runtimeRow.id, duplicateId].sort((a, b) => a - b),
+  );
+  assert.equal(suspects[0]!.symbol, SYMBOL);
+  assert.ok(
+    [suspects[0]!.reasonA, suspects[0]!.reasonB].includes('reconciled'),
+    '一对里必须恰好有一行来自对账，否则就不是重复，而是两笔真实成交',
+  );
+
+  // 报告不等于删除：两行都还在。
+  assert.equal(tradeStore.list(traderId).length, 2, '检测不得顺手删任何一行');
 });
 
 /* -------------------------------------------------------------------------- */
