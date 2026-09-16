@@ -159,7 +159,19 @@ export function DecisionMetrics({ decision, price }: { decision: Decision; price
 function Metric({ label, value, tone, suffix }: { label: string; value: string; tone?: string; suffix?: string }) {
   return (
     <div className="min-w-0">
-      <div className="truncate text-xs uppercase tracking-wide text-ink-faint">{label}</div>
+      {/*
+        ⚠️ 这里原来写的是 `truncate text-xs uppercase tracking-wide text-ink-faint`，
+        结果是 `数量（USDT）` 被截成 `数量（...`、`风险回报比` 被截成 `风险回...`。
+
+        三个类各有问题：
+        · `truncate` —— 标签被切掉，而标签是读数字的前提（"0.185500" 是什么？）
+        · `uppercase` —— 中文没有大小写，这个类对全中文标签毫无作用
+        · `tracking-wide` —— 给中文加字距，**让本来就装不下的标签更宽**，
+          它才是把标签挤爆的主因
+
+        去掉后标签可能折成两行，但**两行也比看不懂强**。卡片高度自适应，不会错位。
+      */}
+      <div className="text-xs leading-tight text-ink-faint">{label}</div>
       {/* nowrap: a wrapped price in a dense grid reads as two different numbers. */}
       <div className={`num whitespace-nowrap text-base ${tone ?? 'text-ink-hi'}`}>
         {value}
