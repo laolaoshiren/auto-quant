@@ -77,6 +77,28 @@ cd /opt/autoquant/deploy
 
 ---
 
+## 一次性：让镜像可公开拉取（仅自建部署需要）
+
+镜像的可见性与仓库是**独立**的。即使仓库已开源，GHCR 上的包仍然可能是私有的
+（它是在仓库还私有时首次推送的），此时 `install.sh` 会要求一次 `docker login`。
+
+**这一步无法由 CI 自动完成**（试过：Actions 的 `GITHUB_TOKEN` 是 GitHub App 的
+安装令牌，不能管理用户命名空间下的包；而维护者的个人令牌通常没有
+`read:packages` scope）。所以它需要在网页上点一次：
+
+> 头像 → **Your packages** → `auto-quant` → 右侧 **Package settings**
+> → 最下方 **Danger Zone** → **Change visibility** → 选 `Public` → 输入包名确认
+
+改完之后，匿名拉取即可成功，一键安装不再需要任何令牌。
+验证方法（不需要凭据）：
+
+```bash
+docker manifest inspect ghcr.io/<owner>/auto-quant:latest > /dev/null && echo "可匿名拉取"
+```
+
+`install.sh` 用的就是这个判断 —— 匿名拉取成功就跳过登录步骤。
+
+---
 ## 从「源码 + systemd」迁移过来
 
 如果之前是用源码运行、systemd 托管的，数据在原来的 `data/` 目录里。
