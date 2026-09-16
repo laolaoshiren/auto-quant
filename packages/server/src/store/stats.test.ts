@@ -203,6 +203,10 @@ test('the drawdown watermark ignores unrealised profit', () => {
       unrealizedPnl,
       marginUsed: 0,
       openPositions: unrealizedPnl === 0 ? 0 : 1,
+      // 高水位读的是**账户**两列（`equity` 自 M4 起是本机器人归属口径），所以
+      // fixture 里账户权益就是这里给的 1000/1100/1000，未实现盈亏同理。
+      accountEquity: equity,
+      accountUnrealizedPnl: unrealizedPnl,
     });
 
   snapshot(1000, 0);
@@ -219,6 +223,65 @@ test('the drawdown watermark ignores unrealised profit', () => {
   // breaker, only stop it counting money that was never booked.
   snapshot(1050, 0);
   assert.equal(equityStore.realizedHighWaterMark(traderId), 1050);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  Attributed equity                                                          */
+/* -------------------------------------------------------------------------- */
+
+test('权益按归属口径现算：没成交过的机器人是平的，共账户的机器人互不影响', () => {
+  /*
+   * Why this test exists.
+   *
+   * `equity_snapshots.equity` 曾经直接写共享钱包的余额（`broker.getAccountState()`），
+   * `computeTraderStats` 又照读它 —— 同一个交易所账户下的每个机器人因此都显示账户
+   * 的数字。实盘上量到：一个 **0 笔平仓、净 0.000000** 的机器人显示 +2.67%，而另一
+   * 个机器人显示完全相同的 +2.67%；两者读的是同一个钱包。
+   *
+   * 这里刻意把两条快照都写成**同一个账户数字**（模拟 M4 之前留下的存量行），断言
+   * 权益仍然按各自的账本现算 —— 归属口径不依赖快照里存了什么。
+   */
+  const traded = seedTrader();
+  const idle = seedTrader();
+  const db = initDb(path.join(workDir, 'stats.sqlite'));
+  db.run('DELETE FROM equity_snapshots');
+  db.run('DELETE FROM trades');
+
+  for (const id of [traded, idle]) {
+    equityStore.insert({
+      traderId: id,
+      timestamp: new Date().toISOString(),
+      equity: 1200,
+      availableBalance: 1200,
+      unrealizedPnl: 0,
+      marginUsed: 0,
+      openPositions: 0,
+      accountEquity: 1200,
+      accountUnrealizedPnl: 0,
+    });
+  }
+
+  traderId = traded;
+  insertTrade(50);
+
+  const tradedStats = computeTraderStats(traded);
+  assert.equal(tradedStats.equity, 1050, '初始 1000 + 本机器人净 50');
+  assert.equal(tradedStats.totalReturnPercent, 5);
+  // 权益、已实现、浮盈三者必须自洽：equity = initialEquity + realizedPnl + unrealizedPnl。
+  assert.equal(
+    tradedStats.equity,
+    tradedStats.initialEquity + tradedStats.realizedPnl + tradedStats.unrealizedPnl,
+  );
+
+  const idleStats = computeTraderStats(idle);
+  assert.equal(idleStats.equity, 1000, '没有成交过的机器人必须停在初始权益上');
+  assert.equal(idleStats.totalReturnPercent, 0);
+  assert.equal(idleStats.realizedPnl, 0);
+  assert.equal(idleStats.unrealizedPnl, 0);
+  // 账户权益对两个机器人是**同一个数**，所以它必须单独给出，而不是冒充某一个人的权益。
+  assert.equal(idleStats.accountEquity, 1200);
+  assert.equal(tradedStats.accountEquity, idleStats.accountEquity);
+  assert.notEqual(idleStats.accountEquity, idleStats.equity);
 });
 
 test('winRatePercent is a percentage, not a fraction', () => {

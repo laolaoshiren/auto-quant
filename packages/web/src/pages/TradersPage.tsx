@@ -170,9 +170,10 @@ export function TradersPage() {
           sub="运行 / 总数"
         />
         <Stat
-          label="总权益"
+          label="总归属权益"
           value={fmtUsd(totalEquity, 2)}
           sub={`${fmtInt(openPositions)} 个未平仓合约`}
+          title="各机器人「归属权益」之和 = Σ(初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈)。共用同一个交易所账户的机器人各自独立归属，所以这个合计不等于账户里的钱 —— 账户权益见机器人页与交易所凭证页。"
         />
         <Stat
           label="已实现盈亏"
@@ -211,7 +212,12 @@ export function TradersPage() {
                   <tr>
                     <th className="th">机器人</th>
                     <th className="th">状态</th>
-                    <th className="th text-right">权益</th>
+                    <th
+                      className="th text-right"
+                      title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。同一账户下其他机器人挣的钱不算在内。"
+                    >
+                      归属权益
+                    </th>
                     <th className="th text-right">总收益率</th>
                     <th className="th text-right">持仓</th>
                     <th className="th text-right">胜率</th>
@@ -250,6 +256,20 @@ export function TradersPage() {
                         </td>
                         <td className={`td num text-right ${stats ? 'text-ink-hi' : 'text-ink-faint'}`}>
                           {stats ? fmtUsd(stats.equity, 2) : '—'}
+                          {/*
+                            共享钱包单独一行给出。同一个交易所账户下的每个机器人都会
+                            显示同一个数 —— 那正是它必须与上面的归属权益分开显示的原因：
+                            以前这一个数就是「权益」，于是一个从未成交的机器人显示的是
+                            别人挣来的收益率。
+                          */}
+                          {stats && stats.accountEquity > 0 && (
+                            <div
+                              className="text-xs text-ink-faint"
+                              title="该机器人所属交易所账户（共享钱包）的权益。同一账户下的所有机器人读数是同一个数。"
+                            >
+                              账户 {fmtUsd(stats.accountEquity, 2)}
+                            </div>
+                          )}
                         </td>
                         <td className={`td num text-right ${stats ? pnlColor(stats.totalReturnPercent) : ''}`}>
                           {stats ? fmtPercent(stats.totalReturnPercent) : '—'}

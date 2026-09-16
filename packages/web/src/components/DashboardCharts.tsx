@@ -40,7 +40,8 @@ function EquityTooltip({ active, payload }: EquityTooltipProps) {
       style={{ backgroundColor: CHART_INK.surface }}
     >
       <div className="flex items-baseline justify-between gap-3">
-        <span className="text-xs text-ink-lo">权益</span>
+        {/* 「归属权益」而不是「权益」：这条曲线是该机器人自己的账，不是共享钱包。 */}
+        <span className="text-xs text-ink-lo">归属权益</span>
         <span className="num text-sm text-ink-hi">{fmtNum(point.equity, 2)} USDT</span>
       </div>
       {point.unrealizedPnl !== undefined && (

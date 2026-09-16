@@ -1451,6 +1451,68 @@ interface EquityRow {
   unrealized_pnl: number;
   margin_used: number;
   open_positions: number;
+  account_equity: number;
+  account_unrealized_pnl: number;
+}
+
+/**
+ * 本机器人**归属权益**。
+ *
+ * 一个机器人的权益是它自己的交易挣来的那部分，而不是共用的钱包余额：
+ *
+ *   initialEquity + Σ(本机器人 net_pnl) + 本机器人持仓浮盈
+ *
+ * `net_pnl` 是净额的唯一来源（§2.5：毛 − 手续费 − 资金费），这里**只做求和**，
+ * 不重算任何一笔的净额。
+ *
+ * 为什么必须这样算：同一个交易所账户下可以跑多个机器人，它们共用凭据与钱包，
+ * `account.equity` 对它们全都是同一个数。直接用它，一个从未成交的机器人就会
+ * 显示别的机器人挣来的收益率（实盘上量到过 +2.67%），而一个已停止的机器人的
+ * 数字会随着邻居继续交易而变化。
+ */
+export function attributedEquity(
+  initialEquity: number,
+  netRealizedPnl: number,
+  unrealizedPnl: number,
+): number {
+  return initialEquity + netRealizedPnl + unrealizedPnl;
+}
+
+/**
+ * 本机器人自己持仓的浮动盈亏。
+ *
+ * 为什么需要它：`equity_snapshots.unrealized_pnl` 原来抄的是
+ * `account.unrealizedPnl` —— 整个交易所账户的浮盈。共用账户时每个机器人记的都是
+ * 同一个数，控制台的「浮动盈亏」于是显示成账户的总浮盈（谁都能看到一个和自己
+ * 无关的数）。控制台里两个机器人显示同一个浮盈，就是从这里来的。
+ *
+ * 自己的浮盈只能用自己的持仓算：**自己的**开仓价、数量、方向，乘上**市场**的
+ * 标记价。标记价是行情事实（对所有机器人相同），借用它不引入归属错误；开仓价与
+ * 数量必须来自本机器人的 `positions` 行，因为交易所那一行可能是多个机器人合起来
+ * 的净头寸。
+ *
+ * 读不到标记价的持仓按 0 计并**把标的返回给调用方**：悄悄按 0 算是把浮盈/浮亏
+ * 藏起来，和写账户数字是同一类错误，必须有人能说出来。
+ */
+export function ownUnrealizedPnlOf(
+  openPositions: ReadonlyArray<{ symbol: string; side: string; quantity: number; entry_price: number }>,
+  markPriceOf: (symbol: string) => number | undefined,
+): { unrealizedPnl: number; missingMarkPrice: string[] } {
+  let unrealizedPnl = 0;
+  const missingMarkPrice: string[] = [];
+
+  for (const position of openPositions) {
+    const markPrice = markPriceOf(position.symbol);
+    if (typeof markPrice !== 'number' || !(markPrice > 0)) {
+      missingMarkPrice.push(position.symbol);
+      continue;
+    }
+    // 数量在 `positions` 里恒为正，方向由 `side` 承载（与交易所侧一致）。
+    const direction = position.side === 'short' ? -1 : 1;
+    unrealizedPnl += (markPrice - position.entry_price) * position.quantity * direction;
+  }
+
+  return { unrealizedPnl, missingMarkPrice };
 }
 
 export const equity = {
@@ -1470,13 +1532,15 @@ export const equity = {
         unrealizedPnl: row.unrealized_pnl,
         marginUsed: row.margin_used,
         openPositions: row.open_positions,
+        accountEquity: row.account_equity,
+        accountUnrealizedPnl: row.account_unrealized_pnl,
       }));
   },
 
   insert(snapshot: EquitySnapshot): void {
     getDb().run(
-      `INSERT INTO equity_snapshots (trader_id, timestamp, equity, available_balance, unrealized_pnl, margin_used, open_positions)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO equity_snapshots (trader_id, timestamp, equity, available_balance, unrealized_pnl, margin_used, open_positions, account_equity, account_unrealized_pnl)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       snapshot.traderId,
       snapshot.timestamp,
       snapshot.equity,
@@ -1484,28 +1548,30 @@ export const equity = {
       snapshot.unrealizedPnl,
       snapshot.marginUsed,
       snapshot.openPositions,
+      snapshot.accountEquity,
+      snapshot.accountUnrealizedPnl,
     );
   },
 
   /**
    * Highest equity ever recorded — **on closed positions only**.
    *
-   * Snapshot `equity` is the margin balance, which includes unrealised PnL. Using
-   * it as the circuit breaker's high-water mark was a live bug: one unrealised
-   * spike (price wicks up on an open position for a few seconds) raised the
-   * watermark, and when the spike retraced the mark-to-market went back to the
-   * baseline, so every later cycle computed a drawdown that never happened and
-   * `maxTotalDrawdownPercent` blocked **every** new position, permanently and
-   * silently — the reason was logged but nothing ever cleared it.
+   * Snapshot 的账户权益（`account_equity`）是保证金余额，含未实现盈亏。拿它当
+   * 熔断器的高水位是一次真实的 bug：一次未实现浮盈的尖峰（开仓价格瞬间上插）
+   * 把高水位永久抬高，价格回落后标记口径回到基线，于是之后每一轮都算出一个
+   * 从未发生过的回撤，`maxTotalDrawdownPercent` 从此**永久且静默地**拒绝开新仓
+   * —— 原因只写进日志，没有任何东西会清除它。
    *
-   * `equity - unrealized_pnl` is the balance the account would show with the
-   * open positions marked at their entry, i.e. the figure that only moves when a
-   * position is actually closed. Deposits still move it, which is correct: a
-   * deposit genuinely raises the account's base.
+   * `account_equity - account_unrealized_pnl` 是"开仓按开仓价计价"时账户的余额，
+   * 也就是只有真正平仓时才会动的那个数。入金同样会推动它，这是对的：入金确实
+   * 抬高了账户的基数。
+   *
+   * 这一列必须用 `account_*`：`equity` 自 M4 起是**本机器人归属**口径，拿它当
+   * 账户高水位会让风控的输入跟着单个机器人的账本走（§4.2，风控输入不变）。
    */
   realizedHighWaterMark(traderId: number): number {
     const row = getDb().get<{ peak: number | null }>(
-      'SELECT MAX(equity - unrealized_pnl) AS peak FROM equity_snapshots WHERE trader_id = ?',
+      'SELECT MAX(account_equity - account_unrealized_pnl) AS peak FROM equity_snapshots WHERE trader_id = ?',
       traderId,
     );
     return row?.peak ?? 0;
@@ -1731,8 +1797,21 @@ export function computeTraderStats(traderId: number): TraderStats {
    * account that had made +0.2586.
    */
   const realizedPnl = tradeStats.netPnl;
-  const equityNow = latest?.equity ?? trader?.initialEquity ?? 0;
   const initial = trader?.initialEquity ?? 0;
+  /*
+   * 归属权益：**每次按定义重算**，不读快照里存的存量值。
+   *
+   * 两个理由：
+   *  1. 升级前落库的 `equity` 装的是共享钱包余额（M4 之前的 bug），照读会把
+   *     那个数字原样带到新版本 —— 一个从未成交的机器人就继续显示别人的收益。
+   *  2. 对账补录的成交会立刻反映到控制台，不必等下一个快照；反过来，一个已停止
+   *     的机器人没有新快照，这个数就冻在那里不动 —— 这正是它该有的行为。
+   *
+   * 浮盈取最近一条快照里**本机器人自己的**那个数（标记价只有周期才会重新读到），
+   * 不是账户的总浮盈。
+   */
+  const unrealizedPnl = latest?.unrealizedPnl ?? 0;
+  const equityNow = attributedEquity(initial, realizedPnl, unrealizedPnl);
 
   // Sharpe over **net** returns, matching the headline number.
   const returns = closed.map((t) => t.pnl_percent / 100);
@@ -1780,7 +1859,13 @@ export function computeTraderStats(traderId: number): TraderStats {
     grossRealizedPnl: tradeStats.grossPnl,
     totalFees: tradeStats.totalFees,
     totalFunding: tradeStats.totalFunding,
-    unrealizedPnl: latest?.unrealizedPnl ?? 0,
+    unrealizedPnl,
+    /*
+     * 共享钱包单独给出：同一账户下的多个机器人读数是同一个数，混进 `equity`
+     * 就没法分辨"这个机器人挣了多少"和"账户里有多少钱"。没有快照时为 0，
+     * 界面据此显示"—"而不是假装账户是空的。
+     */
+    accountEquity: latest?.accountEquity ?? 0,
     totalTrades: tradeStats.totalTrades,
     // Percentage in 0–100. The field name states the unit so no caller has to
     // guess — an earlier `winRate` with no unit was multiplied by 100 again on

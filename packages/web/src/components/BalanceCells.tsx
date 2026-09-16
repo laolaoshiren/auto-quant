@@ -76,10 +76,13 @@ export function BalanceCell({
   return (
     <div className="num w-[196px] max-w-full space-y-0.5 whitespace-normal">
       <div className="flex items-center gap-1.5">
-        <span className="text-xs font-semibold text-ink-hi" title={`${BALANCE_LABEL.equity}（保证金余额 = 钱包 + 未实现盈亏）`}>
+        <span
+          className="text-xs font-semibold text-ink-hi"
+          title={`${BALANCE_LABEL.equity}（保证金余额 = 钱包 + 未实现盈亏）。这是「交易所账户」的权益，同一账户下的所有机器人共用这一个钱包。`}
+        >
           {fmtAsset(balance.equity, asset)}
         </span>
-        <span className="text-2xs text-ink-faint">权益</span>
+        <span className="text-2xs text-ink-faint">{BALANCE_LABEL.short.equity}</span>
         {env}
       </div>
       <div className="text-2xs text-ink-lo">
@@ -170,7 +173,10 @@ export function TraderAccountStrip({
       <span>
         {BALANCE_LABEL.marginUsed} <span className="text-ink-hi">{fmtNum(account.marginUsed)}</span>
       </span>
-      <span className="text-ink-faint">
+      <span
+        className="text-ink-faint"
+        title="交易所账户（共享钱包）的权益 = 钱包 + 未实现盈亏。同一账户下的所有机器人共用这一个数，所以它不等于本机器人的归属权益。"
+      >
         {BALANCE_LABEL.equity} <span className="text-ink-mid">{fmtAsset(account.equity, unit)}</span>
       </span>
       {openOrderMargin > 0 && (

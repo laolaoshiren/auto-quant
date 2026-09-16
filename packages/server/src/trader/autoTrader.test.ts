@@ -16,6 +16,7 @@ import { closeDb, initDb } from '../db/index.js';
 import { eventBus } from '../events.js';
 import type { MarketDataService } from '../market/service.js';
 import {
+  computeTraderStats,
   decisions as decisionStore,
   equity as equityStore,
   exchanges,
@@ -134,6 +135,13 @@ class FakeBroker {
   readonly leverageCalls: Array<{ symbol: string; leverage: number }> = [];
   /** Mutable mark price: price drift between the decision and execution is D1. */
   markPrice = MARK_PRICE;
+  /**
+   * 钱包（已结算）余额。
+   *
+   * 默认是 fixture 一直用的 1000；共账户的用例需要它随已实现盈亏变化 ——
+   * 那正是"账户里有多少钱"与"这个机器人挣了多少"分道扬镳的地方。
+   */
+  walletBalance = 1000;
   /** Set to make conditional orders fail, as a stop on the wrong side does. */
   rejectStops = false;
   /** Set to make the next reduce-only market order fill only this fraction. */
@@ -146,8 +154,8 @@ class FakeBroker {
   async getAccountState() {
     const unrealized = this.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
     return {
-      equity: 1000 + unrealized,
-      walletBalance: 1000,
+      equity: this.walletBalance + unrealized,
+      walletBalance: this.walletBalance,
       availableBalance: 800,
       unrealizedPnl: unrealized,
       marginUsed: 200,
@@ -195,9 +203,23 @@ class FakeBroker {
     if (!isConditional) {
       // Market orders fill instantly and update the simulated position book.
       if (request.reduceOnly) {
-        // A reduce-only order removes only what it actually filled. Modelling a
-        // partial exit as a full flatten would hide the very state under test.
+        /*
+         * 已结算盈亏真的会进钱包。
+         *
+         * `getAccountState()` 的权益因此会随着平仓变化，而不是永远 1000 + 浮盈 ——
+         * 这正是"账户里有多少钱"与"这个机器人挣了多少"分道扬镳的地方，共账户的
+         * 用例要靠这个区别才能证明归属权益不是账户权益。
+         *
+         * A reduce-only order removes only what it actually filled. Modelling a
+         * partial exit as a full flatten would hide the very state under test.
+         */
         const quantity = request.quantity ?? 0;
+        const closing = this.positions.find((p) => p.symbol === request.symbol);
+        const filled = closing ? Math.min(quantity, closing.quantity) : 0;
+        if (closing && filled > 0) {
+          const direction = closing.side === 'long' ? 1 : -1;
+          this.walletBalance += (this.markPrice - closing.entryPrice) * filled * direction;
+        }
         const remainder = quantity * (1 - (ratio ?? 1));
         if (remainder <= 1e-12) {
           this.positions = this.positions.filter((p) => p.symbol !== request.symbol);
@@ -341,9 +363,20 @@ class FakeBroker {
    *
    * Only the *unrealised* figure moves — the wallet balance is untouched — which
    * is exactly the shape that used to poison the circuit breaker's watermark.
+   *
+   * 标记价是唯一能推动未实现盈亏的东西：快照里的浮动盈亏现在是**按本机器人持仓的
+   * 开仓价与标记价算出来**的（不再抄账户的 `unrealizedPnl`），所以这里必须把价格
+   * 一起移动 —— 只改那个字段而价格不动，算出来（正确地）是 0，测试就会在到达被测
+   * 行为之前先失效。平仓成交价同样取自标记价，价格不动就永远平在开仓价上。
    */
   simulateUnrealizedPnl(value: number): void {
-    this.positions = this.positions.map((p) => ({ ...p, unrealizedPnl: value }));
+    this.positions = this.positions.map((p) => {
+      const direction = p.side === 'long' ? 1 : -1;
+      const markPrice = p.quantity > 0 ? p.entryPrice + direction * (value / p.quantity) : p.markPrice;
+      return { ...p, markPrice, unrealizedPnl: value };
+    });
+    const single = this.positions.length === 1 ? this.positions[0]!.markPrice : null;
+    if (single !== null) this.markPrice = single;
   }
 }
 
@@ -430,8 +463,14 @@ function modelReturning(text: string): DecisionModel {
   };
 }
 
-function buildTrader(broker: FakeBroker, text: string, model?: DecisionModel): AutoTrader {
-  const trader = traders.get(traderId);
+function buildTrader(
+  broker: FakeBroker,
+  text: string,
+  model?: DecisionModel,
+  /** 默认是 `beforeEach` 建的那个机器人；共账户的用例需要给第二个机器人也建一个。 */
+  id = traderId,
+): AutoTrader {
+  const trader = traders.get(id);
   const strategy = strategyStore.get(trader!.strategyId);
   return new AutoTrader({
     trader: trader!,
@@ -891,7 +930,9 @@ test('a genuine realised loss still trips the drawdown breaker', async () => {
     },
   });
 
-  // The account peaked at 1100 with nothing unrealised...
+  // The account peaked at 1100 with nothing unrealised. 高水位读的是**账户**两列
+  // （`account_equity − account_unrealized_pnl`），`equity` 自 M4 起是本机器人归属
+  // 口径 —— 风控的输入因此保持不变（§4.2）。
   equityStore.insert({
     traderId,
     timestamp: new Date(Date.now() - 60_000).toISOString(),
@@ -900,6 +941,8 @@ test('a genuine realised loss still trips the drawdown breaker', async () => {
     unrealizedPnl: 0,
     marginUsed: 0,
     openPositions: 0,
+    accountEquity: 1100,
+    accountUnrealizedPnl: 0,
   });
   // ...and the broker now reports the baseline 1000, a real 9.1% drawdown.
   await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
@@ -1011,6 +1054,143 @@ test('a reconcile pass does not run while a cycle is in flight', async () => {
     // The interval would otherwise keep the test process alive for 15 minutes.
     await trader.stop('测试结束');
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/*  一个交易所账户、两个机器人                                                  */
+/* -------------------------------------------------------------------------- */
+
+test('共用一个交易所账户的两个机器人：不交易的那个必须一直是平的，且不随另一个交易而变动', async () => {
+  /*
+   * Why this test exists —— 这就是本次修复针对的那个 bug。
+   *
+   * `equity_snapshots.equity` 过去写的是 `broker.getAccountState().equity`，也就是
+   * **共享钱包**的保证金余额；同一个账户下的机器人共用一份凭据，于是它们每个人
+   * 的每一行记的都是同一个数。实盘上量到的三个机器人（都挂在同一个账户上）：
+   *
+   *   #4 测试机器人1   0 笔平仓、净 0.000000 → 显示 +2.67%
+   *   #5 测试2         4 笔平仓、净 +0.272133 → 显示 +2.67%
+   *   #6 实盘3小时验证  0 笔平仓、净 0.000000 → 显示 −0.06%
+   *
+   * #4 从来没有成交过，却显示了别的机器人挣来的 +2.67%，而且和 #5 一模一样 ——
+   * 因为它们读的是同一个钱包。`unrealizedPnl` 是同一个病的第二个字段：它抄的是
+   * 账户的总浮盈，所以两个机器人显示同一个浮动盈亏。
+   *
+   * 这个用例钉住两件事：
+   *   1. 不交易的机器人读数是平的（恰好等于自己的 initialEquity），账户里的浮盈
+   *      一分钱都不算它的；
+   *   2. 另一个机器人继续交易时，它的每一个数字都**一动不动**。
+   */
+  const base = traders.get(traderId)!;
+  const idleId = traders.create({
+    name: 'idle',
+    exchangeAccountId: base.exchangeAccountId,
+    aiModelId: base.aiModelId,
+    strategyId: base.strategyId,
+    cycleIntervalMinutes: 15,
+    initialEquity: 1000,
+  }).id;
+
+  const broker = new FakeBroker();
+
+  /*
+   * 交易的机器人先完成一个回合，把 +1 USDT 的已实现盈亏落进**共享钱包**。
+   *
+   * 用已实现而不是浮盈，是因为共用账户时两个机器人的 `positions` 是共享的行情状态：
+   * 不交易的那个会在自己的周期里"收养"对方开着的仓位（`reconcilePositions` 的既有
+   * 行为）。平掉之后再观察，账户里变化的是钱，而不是谁名下的持仓。
+   */
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  broker.simulateUnrealizedPnl(1);
+  await buildTrader(broker, CLOSE_LONG_RESPONSE).runOnce();
+
+  const traded = computeTraderStats(traderId);
+  assert.ok(
+    traded.realizedPnl > 0.9,
+    `交易的机器人必须真的挣到了钱，否则这个用例证明不了任何事，得到 ${traded.realizedPnl}`,
+  );
+  assert.ok(Math.abs(traded.equity - 1001) < 0.01, `期望归属权益约 1001，得到 ${traded.equity}`);
+  assert.ok(
+    Math.abs((await broker.getAccountState()).equity - 1001) < 0.01,
+    '共享钱包里应当已经有这 1 USDT（否则下面测的还是同一个数）',
+  );
+
+  /*
+   * 不交易的机器人跑一轮：它自己的周期会写权益快照，而这条路径正是污染进入它账本
+   * 的地方 —— 旧代码在这里把共享钱包的 1001 写成了它的权益，于是它显示 +0.1% 的
+   * 收益率，而它的 `trades` 是空的。
+   */
+  await buildTrader(broker, '<decision>[]</decision>', undefined, idleId).runOnce();
+
+  const idleFlat = computeTraderStats(idleId);
+  assert.equal(idleFlat.equity, 1000, '没成交过的机器人必须停在初始权益上，而不是账户权益');
+  assert.equal(idleFlat.totalReturnPercent, 0, '别人的钱不是它的收益率');
+  assert.equal(idleFlat.unrealizedPnl, 0, '别人的浮盈不是它的浮盈');
+  assert.equal(idleFlat.realizedPnl, 0);
+  assert.equal(idleFlat.totalTrades, 0);
+  assert.equal(idleFlat.maxDrawdownPercent, 0);
+  // 共享钱包单独汇报，而且**不等于**归属权益 —— 这两个数以前是同一个。
+  assert.ok(
+    Math.abs(idleFlat.accountEquity - 1001) < 1e-9,
+    `账户（共享钱包）权益应当单独给出（期望 1001），得到 ${idleFlat.accountEquity}`,
+  );
+  assert.notEqual(idleFlat.accountEquity, idleFlat.equity);
+
+  /** 只取参与归属判断的字段：`uptimeHours` 每次调用都会变，不该参与比较。 */
+  const shapeOf = (id: number) => {
+    const stats = computeTraderStats(id);
+    return {
+      equity: stats.equity,
+      totalReturnPercent: stats.totalReturnPercent,
+      realizedPnl: stats.realizedPnl,
+      unrealizedPnl: stats.unrealizedPnl,
+      totalTrades: stats.totalTrades,
+      openPositions: stats.openPositions,
+      maxDrawdownPercent: stats.maxDrawdownPercent,
+    };
+  };
+  const idleBefore = shapeOf(idleId);
+  const idleSnapshotsBefore = equityStore.list(idleId).length;
+
+  // 交易的机器人再做一个回合（钱包涨到 1003），不交易的机器人一动不动。
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  broker.simulateUnrealizedPnl(2);
+  await buildTrader(broker, CLOSE_LONG_RESPONSE).runOnce();
+
+  assert.ok(
+    computeTraderStats(traderId).realizedPnl > traded.realizedPnl,
+    '交易的机器人必须继续在挣钱，否则"另一个没动"可能只是因为它也没动',
+  );
+  assert.ok(
+    (await broker.getAccountState()).equity > 1002,
+    '共享钱包必须继续变化，否则"没动"可能只是因为账户也没动',
+  );
+  assert.deepEqual(
+    shapeOf(idleId),
+    idleBefore,
+    '邻居交易时，不交易的机器人的每一个数字都必须原样不动',
+  );
+  assert.equal(
+    equityStore.list(idleId).length,
+    idleSnapshotsBefore,
+    '不交易的机器人不该被别人的周期改写快照',
+  );
+
+  /*
+   * 已停止的机器人在「对账」时也不该被改写快照。
+   *
+   * 这一遍原来无条件写一条账户权益，于是控制台上一个 stopped 的机器人的数字会
+   * 随着它自己的对账（以及邻居的交易）继续变化 —— 停止的机器人，历史必须停止移动。
+   * 它对账刚补录的成交仍然会立刻显示出来，因为权益是按 `trades` 现算的，不靠快照。
+   */
+  const idleTrader = buildTrader(broker, '<decision>[]</decision>', undefined, idleId);
+  await idleTrader.runReconcile();
+  assert.equal(
+    equityStore.list(idleId).length,
+    idleSnapshotsBefore,
+    '已停止的机器人对账后不该多出一条快照',
+  );
+  assert.deepEqual(shapeOf(idleId), idleBefore, '对账也不该让停止的机器人的数字移动');
 });
 
 /* -------------------------------------------------------------------------- */
