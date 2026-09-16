@@ -102,6 +102,18 @@
 }
 
 @layer components {
+  /*
+   * 页面内边距。
+   *
+   * 原来每个页面各自写 p-4（16px）。在 1448px 宽下就已经**贴到屏幕边缘**，
+   * 在 2192px 的宽屏上更明显 —— 内容顶满两侧，没有呼吸空间。
+   *
+   * 收进一个类，原因有两个：宽屏要逐级加大（窄屏 16px 够用，宽屏需要 40px），
+   * 以及**不会再出现"某个页面忘了加内边距"**。
+   */
+  .page-pad {
+    @apply p-4 sm:p-6 lg:p-8 2xl:p-10;
+  }
   .panel {
     @apply rounded-lg border border-base-750 bg-base-900 shadow-panel;
   }

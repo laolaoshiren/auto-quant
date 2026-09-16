@@ -138,7 +138,7 @@ export function Layout() {
 
         用纯色换掉这两个风险，视觉上几乎没有区别。LAYOUT.md §4 把这条写成了硬规则。
       */}
-      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-base-800 bg-base-900 px-3 sm:px-4">
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-base-800 bg-base-900 px-4 sm:px-6 lg:px-8">
         <Button
           size="icon"
           variant="ghost"
@@ -297,7 +297,7 @@ export function Layout() {
         两栏页面的右栏要"填满屏高并独立滚动"，靠的是 `PageShell` 在 `h-full` 里拿到的
         那份确定高度 —— 所以这里绝不能给它加 padding，否则那条高度链就断了。
       */}
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+      <div className="page-pad min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         <Outlet />
       </div>
 
