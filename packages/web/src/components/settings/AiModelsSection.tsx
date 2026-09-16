@@ -417,6 +417,10 @@ export function AiModelsSection() {
         provider: draft.provider,
         baseUrl: draft.baseUrl.trim(),
         apiKey: draft.apiKey,
+        // 编辑已有模型时输入框是**故意**留空的（明文密钥从不回显），只发空字符串
+        // 会让服务端认为"没提供密钥"而拒绝 —— 带上 id，服务端才知道该去读那条
+        // 记录里已加密存储的密钥。新建时 editing 为 null，不传该字段。
+        ...(editing ? { modelId: editing.id } : {}),
       });
       setDiscovery(result);
     } catch (err) {
@@ -757,6 +761,8 @@ export function AiModelsSection() {
                 draft={draft}
                 discovery={discovery}
                 discovering={discovering}
+                /* 已保存的模型可能有一把存在服务端的密钥 —— 输入框为空不代表"没有密钥"。 */
+                hasStoredKey={editing?.hasKey ?? false}
                 onDiscover={() => void runDiscover()}
                 onPick={(id) => {
                   setDraft((current) => ({ ...current, model: id }));
@@ -885,6 +891,7 @@ function ModelField({
   draft,
   discovery,
   discovering,
+  hasStoredKey,
   onDiscover,
   onPick,
   onType,
@@ -893,6 +900,8 @@ function ModelField({
   draft: ModelDraft;
   discovery: DiscoverModelsResult | null;
   discovering: boolean;
+  /** 服务端是否已为该模型存有密钥（`AiModelRow.hasKey`）。 */
+  hasStoredKey: boolean;
   onDiscover: () => void;
   onPick: (id: string) => void;
   onType: (id: string) => void;
@@ -919,8 +928,26 @@ function ModelField({
     return list.slice(0, PICKER_LIMIT);
   }, [entries, search]);
 
-  // Built-in list empty *and* no key yet: say so instead of showing a void.
-  const needsKey = !discovery && entries.length === 0;
+  /*
+   * 提示只在"列表里什么都没有、用户也不知道下一步该做什么"时才出现，三种状态：
+   *
+   *   · 没有任何可用密钥（输入框为空**且**服务端也没存）→ 让他先去填 API Key；
+   *   · 有密钥（刚输入的，或已存储的）但还没点过「获取可用模型」→ 邀请他去点，
+   *     并说明也可以直接手填 id；
+   *   · 已经获取过 / 内置建议非空 → 什么都不说（结果本身就在下面的 discovery 提示里）。
+   *
+   * 旧代码写的是 `!discovery && entries.length === 0`，它既漏掉了"密钥其实已经存在"
+   * （于是编辑一个已保存的模型时，上方密钥标签明明显示"当前已存储"，下面却还在要求
+   * 填 API Key），也把"还没获取过"误描述成"缺密钥"。判断必须同时看这两者。
+   */
+  const hasUsableKey = hasStoredKey || draft.apiKey.trim().length > 0;
+  const warning = !discovery
+    ? !hasUsableKey
+      ? '请先填写 API Key，然后再获取模型列表。'
+      : entries.length === 0
+        ? '点「获取可用模型」向接口询问该密钥可用的模型列表；也可以直接在输入框中手动填写模型 id。'
+        : null
+    : null;
 
   return (
     <div className="min-w-0">
@@ -1013,10 +1040,10 @@ function ModelField({
         </PopoverPrimitive.Root>
       </div>
 
-      {needsKey && (
+      {warning && (
         <p className="mt-1.5 flex items-start gap-1 text-xs leading-relaxed text-warn">
           <TriangleAlert aria-hidden className="mt-0.5 h-3 w-3 shrink-0" />
-          该供应商内置建议为空。请先填写 API Key，然后点「获取可用模型」；也可以直接手动输入模型 id。
+          {warning}
         </p>
       )}
 

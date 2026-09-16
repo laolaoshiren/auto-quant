@@ -32,6 +32,15 @@
  * - **周期头左侧的 3px 结果色条、`成功` 徽章、`N 个候选`**：参考里没有。
  *   结果信息改用一行小字表达（`⚠ 2 条被风控拒绝`），见 `CycleBlock`。
  *
+ * ## 顶部那一条"正在请求模型"（`LiveCycleBlock`）
+ *
+ * 一轮要跑 6.8–18.3 秒，而服务器在**调用模型之前**就已经推了 `cycle_start`。
+ * 这段时间里原来什么都不显示，界面看起来就像卡住了。现在周期一开始就把
+ * 一个**明确不是成品**的条目钉在最上面：同一套元数据行（§2）+ 虚线盒子 + 秒数。
+ * 它是**加在顶部的一条**，不改下面任何一个已完成周期的结构。
+ * 它什么时候消失由 `store` 负责（`cycle_end` / `decision` / 断线 / 新一轮覆盖），
+ * 这里只负责不显示一个已经被成品替代的条目。
+ *
  * ## 高度：填满所在的那一栏，而不是自己算一个视口高度
  *
  * 这里曾经有一个 `height` 参数，交易页传的是 `max(380px, calc(100vh - 18rem))`。
@@ -51,12 +60,12 @@
  *   没有它，50 个周期会把整页撑成一条长条，正是 §2 要避免的。
  *   `xl:max-h-none` 把上限交还给上面那条 flex 高度链。
  */
-import { useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
-import { Check, FileText, Lock, RotateCw, Sparkles, TriangleAlert } from 'lucide-react';
+import { Check, FileText, LoaderCircle, Lock, RotateCw, Sparkles, TriangleAlert } from 'lucide-react';
 import type { DecisionRecord, Decision, ExecutionLogEntry } from '@aq/shared';
 import { api, type MarketSymbol } from '../lib/api';
-import { useEvents } from '../lib/store';
+import { selectLiveCycle, useEvents, type LiveCycle } from '../lib/store';
 import { usePolled } from '../lib/hooks';
 import { Empty, Panel, Spinner3, cn } from './ui';
 import { ActionBadge, actionLabel, isOpenAction } from './DecisionAudit';
@@ -96,8 +105,134 @@ function coinInitial(symbol: string): string {
   return symbol.slice(0, 1).toUpperCase() || '?';
 }
 
-export function DecisionFeed({ traderId }: { traderId: number }) {
+/**
+ * 超过多少秒才提示"慢是正常的"。
+ *
+ * 实测一轮 6.8–18.3 秒，所以 20 秒是**略高于日常观测上限**的一条线：在这个点之前
+ * 提"可能会慢"只会制造焦虑，过了这个点操作者确实在问"是不是卡住了"。
+ * `LAYOUT.md` §5 的教训用在这里：正常运行时永远成立的话不要常驻，
+ * 只在越界时出现。
+ */
+const SLOW_CYCLE_SECONDS = 20;
+
+/**
+ * 已等待时长。`8 秒` / `1 分 12 秒`。
+ *
+ * 不用 `fmtDuration`（那个入参是**分钟**）：这里最短只等几秒，用分钟为单位会把 8 秒
+ * 显示成 `0.1 分钟`，正好丢掉这个读数唯一的价值 —— 秒级的变化。
+ */
+function elapsedLabel(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+}
+
+/**
+ * 一轮"正在请求模型"的占位条。
+ *
+ * ## 它解决的问题
+ *
+ * 服务器在真正调用模型**之前**就推了 `cycle_start`，而一轮要跑 6.8–18.3 秒。
+ * 这段时间里决策流原来什么都不显示，看起来就像界面卡住了 ——
+ * 操作者的原话是："如果系统开始向 AI 模型请求了，应该直接体现到页面上
+ * （而不是等结果完全出来了才显示）"。
+ *
+ * ## 形态上守的两条契约
+ *
+ * - **元数据行照 `DECISION-FEED.md` §2**：一行纯文字、`│` 分隔、无边框、无底色、
+ *   无徽章。第三格换成 `正在请求模型…`（成品那一格是 `in N · out N`），
+ *   相对时间那一格换成一个呼吸的圆点 —— "刚刚"在这个条目上永远成立，
+ *   不如用圆点表达"进行中"。
+ * - **盒子明确不是成品**：虚线边框 + 更弱的底色（**不是**成品的 `bg-base-850`）+
+ *   整体降透明度 + 一个转圈。不能让它看起来像一轮已经出结果的决策。
+ *
+ * ## 为什么秒数在这里、而不在别处
+ *
+ * 它回答的是"卡住了还是只是慢"这个问题，只有在这个条目内部才读得通
+ * （`LAYOUT.md` §5 禁止把诊断值放进状态区）。
+ */
+function LiveCycleBlock({ live }: { live: LiveCycle }) {
+  const startedAt = live.startedAt;
+  const [seconds, setSeconds] = useState(() => Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+
+  useEffect(() => {
+    // 先立刻对齐一次：从 `cycle_start` 进来到这一帧可能已经过了几百毫秒，
+    // 而 0 秒和 1 秒对这个读数来说是两种不同的意思。
+    setSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    // 1 秒一跳就够了：显示的就是秒，再密只是白重渲染（一秒两次的转圈也不会更好看）。
+    const timer = window.setInterval(() => {
+      setSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+
+  return (
+    <article className="min-w-0 opacity-70">
+      {/* 一行纯文字元数据（§2）：`呼吸圆点 │ 周期 #N │ 正在请求模型…` */}
+      <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 px-0.5 text-xs text-ink-lo">
+        <span
+          className="flex items-center gap-1.5"
+          title="这一轮的模型请求已经发出，结果还没回来。"
+        >
+          {/*
+            用圆点而不是"刚刚"：这个条目一定是刚刚开始的，那两个字不带信息；
+            圆点配 `@keyframes pulseSoft` 才是"还在动"的标记。
+            ⚠️ `animate-pulse-soft`（带连字符）是 `tailwind.config.js` 里真正注册的
+            动画名；写成 `animate-pulseSoft` 不会报错，只是**永远不生效** ——
+            这个坑 `scripts/ui-smoke.mjs` 的注释里记着。
+          */}
+          <span aria-hidden className="h-1.5 w-1.5 shrink-0 animate-pulse-soft rounded-full bg-accent" />
+          进行中
+        </span>
+        <span aria-hidden className="text-ink-faint">
+          │
+        </span>
+        <span className="num">周期 #{live.cycleNumber}</span>
+        <span aria-hidden className="text-ink-faint">
+          │
+        </span>
+        <span className="animate-pulse-soft">正在请求模型…</span>
+      </div>
+
+      {/*
+        盒子：虚线边框 + 更弱的底色，**不是**成品的 `bg-base-850`。
+        实线 + 抬升底色是"这一轮已经出结果"的语言，用在这里会被读成成品（§1）。
+      */}
+      <div className="min-w-0 rounded-lg border border-dashed border-base-600 bg-base-900/40 px-3 py-3">
+        <div className="flex min-w-0 items-start gap-2">
+          <LoaderCircle aria-hidden className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-accent" />
+          <div className="min-w-0">
+            <p className="text-xs leading-relaxed text-ink-mid" role="status">
+              模型正在思考，已等待 <span className="num font-semibold text-ink-hi">{elapsedLabel(seconds)}</span>
+            </p>
+            {seconds >= SLOW_CYCLE_SECONDS && (
+              // 越过 20 秒才说话，而且说的是"正常"而不是"出问题了"：这个系统
+              // 见过 18.3 秒的一轮，在 20 秒就报警会让操作员去查一个不存在的事故。
+              <p className="mt-1 text-xs leading-relaxed text-ink-faint">
+                模型响应偏慢 —— 本系统单轮最长见过约 18 秒，等一会儿是正常的。
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+/**
+ * @param running 机器人是否正在运行。页面用 REST 的 `isRunning` 与推送到的实时状态
+ *   合成后传进来；省略时退回到 store 里最后一次推送的状态 —— 页面忘了传也不会出现
+ *   "停了还在转圈"。
+ */
+export function DecisionFeed({ traderId, running }: { traderId: number; running?: boolean }) {
   const live = useEvents((s) => s.byTrader[traderId]?.decisions);
+  const liveCycle = selectLiveCycle(traderId);
+  /*
+   * 推送到的实时状态只是**兜底**：`stopped` / `error` 为假，`running` / `starting`
+   * 为真。`safe_mode` 也留假 —— 那时循环虽然还在，但页头已经有一个专门的横幅在说
+   * 这件事，让决策流再多一个"正在请求模型"的转圈会把一次降级说得像一切正常。
+   */
+  const liveStatus = useEvents((s) => s.byTrader[traderId]?.status ?? null);
+  const isRunning = running ?? (liveStatus === 'running' || liveStatus === 'starting');
   const query = usePolled((signal) => api.traderDecisions(traderId, FEED_LIMIT, signal), {
     intervalMs: 20_000,
     deps: [traderId],
@@ -115,7 +250,23 @@ export function DecisionFeed({ traderId }: { traderId: number }) {
     return [...merged.values()].sort((a, b) => b.cycleNumber - a.cycleNumber);
   }, [query.data, live]);
 
-  if (query.loading && records.length === 0) {
+  /*
+   * 要不要显示"正在请求模型"这一条。
+   *
+   * 三个条件缺一不可：
+   *
+   * 1. `isRunning` —— 机器人必须真的在跑。停了的机器人还转圈，就是在说一件假的
+   *    事实（`LAYOUT.md` §7）。它来自页面传来的 `running`，或者（页面没传时）
+   *    store 里最后一次推送的状态。
+   * 2. 有在途周期 —— 由 `store` 的 `cycle_start` / `cycle_end` / `decision` 维护。
+   * 3. 这一轮的成品**还没到**。正常情况下 store 会在 `decision` / `cycle_end` 时就把
+   *    在途标记清掉，所以这里多数时候只是防御：万一标记和记录同时在（比如那一帧
+   *    的处理顺序不如预期），宁可少显示一个占位条，也**绝不能**让同一轮出现两个条目。
+   */
+  const showLive =
+    isRunning && liveCycle !== undefined && !records.some((record) => record.cycleNumber === liveCycle.cycleNumber);
+
+  if (query.loading && records.length === 0 && !showLive) {
     return (
       // 加载态也占满整栏：否则数据一到位，这一栏会突然从一小条跳成整屏高。
       <Panel
@@ -157,7 +308,7 @@ export function DecisionFeed({ traderId }: { traderId: number }) {
         </span>
       }
     >
-      {records.length === 0 ? (
+      {records.length === 0 && !showLive ? (
         <Empty
           message="暂无决策记录。"
           hint="每个周期都会连同完整提示词与原始响应一起持久化 — 运行一次后这里就会填满。"
@@ -175,6 +326,13 @@ export function DecisionFeed({ traderId }: { traderId: number }) {
         // `space-y-2.5` 而不是相邻的 `border-b`：40 个周期用一条接一条的分隔线排下来，
         // 会连成一整片、分不清哪里是上一个周期的结尾。
         <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-2.5 max-h-[calc(100dvh-16rem)] xl:max-h-none">
+          {/*
+            在途周期钉在**最上面**，早于最新的成品（列表是按周期号倒序的）。
+            它是"现在正在发生的事"，扫视时的第一落点必须是它 ——
+            放在下面等于要操作者先划过一整盒已经结束的决策才看见"它在动"。
+          */}
+          {showLive && liveCycle && <LiveCycleBlock key={liveCycle.cycleNumber} live={liveCycle} />}
+
           {shown.map((record) => (
             <CycleBlock
               key={record.id}
@@ -234,16 +392,29 @@ function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: Mark
         一眼能看出"这一轮到这里结束"。
       */}
       <div className="min-w-0 rounded-lg border border-base-700 bg-base-850 px-3 py-2.5">
+        {/*
+          周期级失败：整段中文说明原样显示。**不加 `周期错误：` 前缀** —— 元数据行
+          已经写着 `失败 · <类别>`，再套一层前缀就会变成一句两个冒号的怪话，而这里
+          要的是让操作员直接读到"出了什么事、该做什么"。
+        */}
         {record.error && (
           <p className="mb-1.5 flex items-start gap-1.5 text-xs leading-relaxed text-down">
             <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span className="min-w-0 break-words">周期错误：{record.error}</span>
+            <span className="min-w-0 break-words">{record.error}</span>
           </p>
         )}
 
-        {record.decisions.length === 0 && rejected.length === 0 && failed.length === 0 && (
-          <p className="text-xs text-ink-faint">本周期模型没有给出任何决策。</p>
-        )}
+        {/*
+          `record.error === null` 这个条件是必要的：模型调用失败时决策当然是空的，
+          但"本周期模型没有给出任何决策"会把一次**失败**说成模型的一次选择（观望），
+          而上面那行红字已经说明了真正的原因。
+        */}
+        {record.error === null &&
+          record.decisions.length === 0 &&
+          rejected.length === 0 &&
+          failed.length === 0 && (
+            <p className="text-xs text-ink-faint">本周期模型没有给出任何决策。</p>
+          )}
 
         {record.decisions.length > 0 && (
           // 决策之间只用**间距**分隔（§3），不加分隔线：一条细线在深色底上会
@@ -284,6 +455,10 @@ function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: Mark
  * **没有**边框、底色、`成功` 徽章、`N 个候选`、`N 条决策` —— 那些都要读第二眼
  * 才明白在说什么，而这一行的作用是让操作者扫过去就知道"这是第几轮、多久以前"。
  *
+ * 失败的周期在这一行末尾多一小段 `⚠ 失败 · <类别>`：`§2` 要求失败"能被看见"，但用
+ * **一行小字**表达，不做徽章行 —— 参考产品那一行也是 `失败 · AI 决策` 这个样子。
+ * 类别取自服务端写在错误文案第一个全角冒号之前的那一段（见 `failureCategory`）。
+ *
  * 完整时间戳放在 `title` 里：相对时间适合扫读，但对账时需要精确时刻。
  */
 function CycleMeta({ record }: { record: DecisionRecord }) {
@@ -291,7 +466,12 @@ function CycleMeta({ record }: { record: DecisionRecord }) {
     record.promptTokens === null && record.completionTokens === null
       ? // 没有 token 计数时（老记录 / 端点未回传用量）说延迟，不写 `in 0 / out 0`：
         // 那会让人以为模型一个 token 都没花。
-        fmtLatency(record.aiLatencyMs)
+        //
+        // 失败的周期连延迟也常常是 0（异常在拿到响应之前就抛了），此时写 `0 ms` 会被
+        // 读成"模型 0 毫秒就答完了"，所以留一个 `—`，与参考产品那一格里的 `…` 同义。
+        record.aiLatencyMs > 0 || record.success
+        ? fmtLatency(record.aiLatencyMs)
+        : '—'
       : `in ${fmtInt(record.promptTokens ?? 0)} · out ${fmtInt(record.completionTokens ?? 0)}`;
 
   return (
@@ -305,8 +485,37 @@ function CycleMeta({ record }: { record: DecisionRecord }) {
         │
       </span>
       <span className="num">{tokens}</span>
+
+      {!record.success && (
+        <>
+          <span aria-hidden className="text-ink-faint">
+            │
+          </span>
+          {/* 颜色 + `⚠` 双重表达：`DESIGN.md` 要求状态不能只靠颜色传递。 */}
+          <span className="flex min-w-0 items-center gap-1 font-medium text-down">
+            <TriangleAlert aria-hidden className="h-3 w-3 shrink-0" />
+            <span className="min-w-0 truncate">失败{failureCategory(record.error)}</span>
+          </span>
+        </>
+      )}
     </div>
   );
+}
+
+/**
+ * 失败类别：服务端把类别写在错误文案的**第一个全角冒号之前**，冒号之后是给操作员的
+ * 具体说明（见 `packages/server/src/trader/autoTrader.ts` 的 `describeCycleFailure()`）。
+ *
+ * 元数据行只放类别，完整说明留在下面的盒子里 —— 这一行的作用是让人扫一眼就知道
+ * "这一轮是哪种失败"，而不是把整段话挤进一行小字。
+ *
+ * 没有冒号、或者冒号前那一段长得不像类别（老记录、别的写入方）时只显示 `失败`：
+ * 截一半的句子比不截更糟。
+ */
+function failureCategory(error: string | null): string {
+  if (!error) return '';
+  const head = error.split('：')[0]?.trim() ?? '';
+  return head !== '' && head.length <= 12 && !head.includes('\n') ? ` · ${head}` : '';
 }
 
 /**
@@ -547,6 +756,20 @@ function CycleDetails({
   if (failed > 0) notes.push(`${failed} 条执行失败`);
   if (rejected > 0) notes.push(`${rejected} 条被风控拒绝`);
 
+  /*
+   * 有没有可展开的东西。
+   *
+   * 一个在模型调用**之前**就失败的周期（欠费、行情为空、账户读取失败）三条都是空的，
+   * 那两个按钮点开只会显示"（空）"和"本周期模型未返回 <reasoning> 块。" —— 两个死
+   * 按钮比没有按钮更让人困惑。整个底部行因此只在真的有内容、或者有失败/被拒条目时
+   * 才出现（后者仍然必须可见，见 §7）。
+   */
+  const hasDetail =
+    record.cotTrace.trim() !== '' ||
+    record.systemPrompt.trim() !== '' ||
+    record.userPrompt.trim() !== '';
+  if (!hasDetail && notes.length === 0) return null;
+
   const tabClass = (active: boolean): string =>
     cn(
       'inline-flex items-center gap-1 rounded px-1 py-0.5 text-xs transition',
@@ -556,33 +779,37 @@ function CycleDetails({
   return (
     <div className="min-w-0">
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 px-0.5">
-        <button
-          type="button"
-          onClick={() => toggle('cot')}
-          aria-expanded={open && tab === 'cot'}
-          title={open && tab === 'cot' ? '收起思考过程' : '展开思考过程'}
-          className={tabClass(open && tab === 'cot')}
-        >
-          <Sparkles aria-hidden className="h-3.5 w-3.5 shrink-0" />
-          思考过程
-          {open && tab === 'cot' && <Check aria-hidden className="h-3.5 w-3.5 shrink-0" />}
-        </button>
+        {hasDetail && (
+          <>
+            <button
+              type="button"
+              onClick={() => toggle('cot')}
+              aria-expanded={open && tab === 'cot'}
+              title={open && tab === 'cot' ? '收起思考过程' : '展开思考过程'}
+              className={tabClass(open && tab === 'cot')}
+            >
+              <Sparkles aria-hidden className="h-3.5 w-3.5 shrink-0" />
+              思考过程
+              {open && tab === 'cot' && <Check aria-hidden className="h-3.5 w-3.5 shrink-0" />}
+            </button>
 
-        <span aria-hidden className="text-ink-faint">
-          │
-        </span>
+            <span aria-hidden className="text-ink-faint">
+              │
+            </span>
 
-        <button
-          type="button"
-          onClick={() => toggle('prompt')}
-          aria-expanded={open && tab === 'prompt'}
-          title={open && tab === 'prompt' ? '收起提示词' : '展开提示词'}
-          className={tabClass(open && tab === 'prompt')}
-        >
-          <Lock aria-hidden className="h-3.5 w-3.5 shrink-0" />
-          提示词
-          {open && tab === 'prompt' && <Check aria-hidden className="h-3.5 w-3.5 shrink-0" />}
-        </button>
+            <button
+              type="button"
+              onClick={() => toggle('prompt')}
+              aria-expanded={open && tab === 'prompt'}
+              title={open && tab === 'prompt' ? '收起提示词' : '展开提示词'}
+              className={tabClass(open && tab === 'prompt')}
+            >
+              <Lock aria-hidden className="h-3.5 w-3.5 shrink-0" />
+              提示词
+              {open && tab === 'prompt' && <Check aria-hidden className="h-3.5 w-3.5 shrink-0" />}
+            </button>
+          </>
+        )}
 
         {/*
           被拒 / 失败在底部也要有一行小字（§2）：按钮这一行是操作者扫视时的落点，

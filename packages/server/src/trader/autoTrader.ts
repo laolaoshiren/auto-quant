@@ -17,8 +17,10 @@ import type { BinanceBroker, ExchangePosition } from '../binance/broker.js';
 import type { AccountState } from '../binance/account.js';
 import type { BinanceMarketData } from '../binance/market.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
+import { BinanceApiError } from '../binance/types.js';
 import { eventBus } from '../events.js';
 import { createLogger } from '../logger.js';
+import { LlmError } from '../llm/errors.js';
 import type { MarketDataService } from '../market/service.js';
 import { checkCircuitBreakers, RiskEngine, shouldCloseForDrawdown } from '../risk/engine.js';
 import { selectCandidates } from '../strategy/coins.js';
@@ -102,6 +104,38 @@ export interface AutoTraderDeps {
   broker: BinanceBroker;
   model: DecisionModel;
 }
+
+/**
+ * 一个周期边走边累积的审计内容。
+ *
+ * 字段与 `decisionStore.log()` 的入参一一对应，只少了 `success` —— 它是从
+ * `error` 推出来的（非空即失败），避免出现"success = true 但带着一条错误"这种
+ * 自相矛盾的记录。
+ */
+interface CycleProgress {
+  systemPrompt: string;
+  userPrompt: string;
+  cotTrace: string;
+  decisions: Decision[];
+  rawResponse: string;
+  executionLog: ExecutionLogEntry[];
+  candidateSymbols: string[];
+  /** 非空即代表本轮失败；内容就是给操作员看的那句话。 */
+  error: string | null;
+  aiLatencyMs: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
+}
+
+/**
+ * 行情空窗的固定说明。
+ *
+ * 单独的常量：它同时被"选币为空"这条早退路径与测试断言用到，散在两处就会走样。
+ */
+const MARKET_DATA_UNAVAILABLE_MESSAGE =
+  '行情数据不可用：本轮没有任何可用行情快照（选币为空，或所有候选标的的行情都取不到），' +
+  '因此没有向模型提问、也没有下单。通常是交易所行情接口暂时不可用，机器人会在下一轮自动重试；' +
+  '若连续多轮如此，请检查网络与交易所连通性。';
 
 /* -------------------------------------------------------------------------- */
 /*  Auto trader                                                                */
@@ -415,7 +449,110 @@ export class AutoTrader {
   /*  One full decision cycle                                                */
   /* ---------------------------------------------------------------------- */
 
+  /**
+   * 跑一个周期，并保证**无论发生什么都写出恰好一条审计记录**。
+   *
+   * ## 为什么落库点必须在这里
+   *
+   * 原来写记录是周期里的第 11 步，位置在模型调用与执行**之后**，而且硬编码
+   * `success: true, error: null`。于是任何一种中途失败 —— 模型调用抛错（欠费、
+   * 被服务商拒绝、网络故障）、交易所拒单、行情取不到 —— 都会直接退出
+   * `runCycle()`，**一条记录都不写**：决策流里什么都看不到。实盘上正在发生的就是
+   * 这件事，一个欠费的模型供应商让每一轮都失败，而操作员在控制台上看不到任何迹象；
+   * `decision_records.success` / `error` 两列从一开始就在，只是从来没有被写过。
+   *
+   * 现在的结构是：
+   *
+   *   1–12 步本体（`runCycleBody`）→ 把已经拿到的内容填进 `progress`
+   *   第 11 步落库                → 本方法里**唯一**的一次 `decisionStore.log()`
+   *   失败继续抛                  → `tick()` 的连续失败计数与安全模式不变
+   *
+   * 唯一的那次写入放在本体**之后**，是为了让"一个周期恰好一条记录"成为结构性
+   * 保证：本体抛错也好、正常结束也好，都走同一个落库点。第 12 步（刷新与权益快照）
+   * 因此排在落库之前执行；它只做对账与展示快照、不下任何单，所以
+   * "先减少风险、后增加风险"的顺序（§2.9）没有变化。
+   */
   private async runCycle(cycleNumber: number): Promise<string> {
+    const traderId = this.deps.trader.id;
+
+    /*
+     * 本轮**已经拿到的东西**，边走边填。
+     *
+     * 记录必须做到"部分成功也留痕"：如果行情与模型调用都成功了、只有执行那一步抛了，
+     * 提示词、思维链、决策与执行日志还是要照样落库。等最后再拼一个完整对象做不到
+     * 这一点 —— 任何一步抛错都会把后面所有字段一起丢掉，而操作员看到的又会是一条
+     * "什么都没发生"的失败，正是本次要修的那个观测空洞的另一种形态。
+     */
+    const progress: CycleProgress = {
+      systemPrompt: '',
+      userPrompt: '',
+      cotTrace: '',
+      decisions: [],
+      rawResponse: '',
+      executionLog: [],
+      candidateSymbols: [],
+      error: null,
+      aiLatencyMs: 0,
+      promptTokens: null,
+      completionTokens: null,
+    };
+
+    /** 失败发生在哪一段。只在错误类型本身说明不了问题时才用得上（见 `describeCycleFailure`）。 */
+    const state = { phase: 'bookkeeping' as CycleFailurePhase };
+    /** 抛出的原始错误：记录落库之后要原样继续抛出去。 */
+    let thrown: unknown = null;
+    let summary: string | null = null;
+
+    try {
+      summary = await this.runCycleBody(cycleNumber, progress, state);
+    } catch (error) {
+      thrown = error;
+      progress.error = describeCycleFailure(error, state.phase);
+    }
+
+    /* --- 11. Persist the audit record ------------------------------------ */
+    // 没有硬编码的 `success`：`progress.error` 非空就是失败。"一个周期恰好一条"
+    // 由"本方法只有一个写入点"保证，而不是靠调用方自觉。
+    const recordId = decisionStore.log({
+      traderId,
+      cycleNumber,
+      ...progress,
+      success: progress.error === null,
+    });
+
+    const record = decisionStore.get(recordId);
+    if (record) eventBus.publish({ type: 'decision', traderId, record });
+
+    /*
+     * 失败要**继续抛出去**。
+     *
+     * `tick()` 的连续失败计数、安全模式，以及操作员在日志里看到的那句话，全都建立
+     * 在"runCycle 会抛错"这个前提上。在这里吞掉异常等于顺手改掉了失败策略 ——
+     * 本次改动只负责把失败**记录下来**，不负责改变机器人的行为（不加退避、不熔断、
+     * 不猜重试次数：供应商欠费时每一轮重试本来就是对的，充值后自然会恢复）。
+     */
+    if (thrown) throw thrown;
+    return summary ?? '';
+  }
+
+  /**
+   * 一个完整决策周期的 1–12 步本体。
+   *
+   * 与 `runCycle()` 分成两个方法，是为了让"记录恰好写一条"成为**结构性**保证：
+   * 落库点在 `runCycle()` 里，且只有一个，本体无论抛错还是正常结束都经过它。
+   * 写在一个方法里的话，异常路径就必须在本体中间再补一次写入，而"一个周期写两条"
+   * 或"一条都不写"又会重新变成可能。
+   *
+   * 本体只额外做一件事：把已经拿到的内容填进 `progress`。行情为空这类
+   * "什么也没做、但不是异常"的结束方式，把说明写进 `progress.error` 后正常返回 ——
+   * **刻意不抛错**，因为抛错会推进 `tick()` 的连续失败计数并可能把机器人送进安全
+   * 模式，那是行为变更；这里只补记录。
+   */
+  private async runCycleBody(
+    cycleNumber: number,
+    progress: CycleProgress,
+    state: { phase: CycleFailurePhase },
+  ): Promise<string> {
     const traderId = this.deps.trader.id;
     const config = this.deps.config;
 
@@ -466,6 +603,9 @@ export class AutoTrader {
     const localPositions = positionStore.open(traderId);
 
     /* --- 6. Candidate universe + market snapshots ------------------------ */
+    // 从这里到快照就绪之间抛出的都是普通 `Error`（行情层不发明错误类型），
+    // 失败说明里的类别全靠这个阶段标记。
+    state.phase = 'market';
     const held = localPositions.map((p) => p.symbol);
     const selection = await selectCandidates(config, this.deps.marketData, { mustInclude: held });
 
@@ -475,8 +615,16 @@ export class AutoTrader {
       selection.sourcesBySymbol,
     );
 
+    progress.candidateSymbols = snapshots.map((s) => s.symbol);
+
     if (snapshots.length === 0) {
       await this.recordEquity(account, livePositions);
+      /*
+       * 行情为空同样要留下记录 —— 这是本次修复要补的观测空洞的第二种形态：
+       * 一个什么都没做的周期在决策流里也必须看得见。写进 `progress.error`
+       * 之后**正常返回**而不是抛错，连续失败计数与安全模式因此完全不变。
+       */
+      progress.error = MARKET_DATA_UNAVAILABLE_MESSAGE;
       return '没有可用的行情数据，本轮未产生任何决策。';
     }
 
@@ -509,11 +657,22 @@ export class AutoTrader {
     const systemPrompt = buildSystemPrompt(promptContext);
     const userPrompt = buildUserPrompt(promptContext);
 
+    /*
+     * 提示词在**发请求之前**就填进进度对象：这是"部分成功也留痕"的关键一步 ——
+     * 模型调用抛错（欠费 / 被拒 / 网络）时，操作员仍然能拿到这一轮原本要问什么。
+     */
+    progress.systemPrompt = systemPrompt;
+    progress.userPrompt = userPrompt;
+
     const startedAt = Date.now();
+    state.phase = 'model';
     const response = await this.deps.model.complete(systemPrompt, userPrompt);
-    const aiLatencyMs = response.latencyMs || Date.now() - startedAt;
+    progress.aiLatencyMs = response.latencyMs || Date.now() - startedAt;
+    progress.promptTokens = response.usage.promptTokens;
+    progress.completionTokens = response.usage.completionTokens;
 
     /* --- 8. Parse -------------------------------------------------------- */
+    state.phase = 'parse';
     const openPositionMap = new Map<string, 'long' | 'short'>(
       localPositions.map((p) => [p.symbol, p.side as 'long' | 'short']),
     );
@@ -523,14 +682,21 @@ export class AutoTrader {
       allowUnlistedCloses: true,
     });
 
+    progress.cotTrace = parsed.cotTrace;
+    progress.decisions = parsed.decisions;
+    progress.rawResponse = parsed.rawResponse;
+
     const executionLog: ExecutionLogEntry[] = parsed.rejected.map((r) => ({
       action: r.action,
       symbol: r.symbol,
       status: 'rejected' as const,
       detail: r.reason,
     }));
+    // 同一个数组对象：下面每 push 一条，进度对象里也是最新的（step 10 的失败条目同理）。
+    progress.executionLog = executionLog;
 
     /* --- 9. Hard risk review --------------------------------------------- */
+    state.phase = 'risk';
     const verdict = this.risk.review(sortDecisions(parsed.decisions), {
       config,
       account: {
@@ -560,6 +726,8 @@ export class AutoTrader {
     }
 
     /* --- 10. Execute ----------------------------------------------------- */
+    // 普通 `Error`（网络层、响应解析）在这个阶段抛出，就是"订单没有得到交易所确认"。
+    state.phase = 'execute';
     let entriesTaken = 0;
     let exitsTaken = closedByGuard;
     let cooldownBlocked = 0;
@@ -621,28 +789,16 @@ export class AutoTrader {
       }
     }
 
-    /* --- 11. Persist the audit record ------------------------------------ */
-    const recordId = decisionStore.log({
-      traderId,
-      cycleNumber,
-      systemPrompt,
-      userPrompt,
-      cotTrace: parsed.cotTrace,
-      decisions: parsed.decisions,
-      rawResponse: parsed.rawResponse,
-      executionLog,
-      candidateSymbols: snapshots.map((s) => s.symbol),
-      success: true,
-      error: null,
-      aiLatencyMs,
-      promptTokens: response.usage.promptTokens,
-      completionTokens: response.usage.completionTokens,
-    });
-
-    const record = decisionStore.get(recordId);
-    if (record) eventBus.publish({ type: 'decision', traderId, record });
-
     /* --- 12. Refresh and snapshot ---------------------------------------- */
+    /*
+     * 第 12 步排在落库（第 11 步）之前，见 `runCycle()` 的说明：这样它自己抛错时
+     * 也会写成一条失败记录，而不是留下一条写着"成功"的记录。它只做对账与展示
+     * 快照，不下任何单。
+     *
+     * 阶段标记回到 `bookkeeping`：这里读到的是交易所的持仓 / 账户，抛错意味着对账
+     * 失败，而不是"订单被拒"。
+     */
+    state.phase = 'bookkeeping';
     const finalPositions = await this.deps.broker.getPositions().catch(() => livePositions);
     await this.reconcilePositions(finalPositions);
 
@@ -2189,4 +2345,146 @@ function makeClientId(prefix: string, symbol: string): string {
   const stamp = Date.now().toString(36);
   const random = Math.random().toString(36).slice(2, 8);
   return `${prefix}-${symbol}-${stamp}-${random}`.slice(0, 36);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  周期失败的分类与表述                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 失败发生在周期的哪一段。
+ *
+ * 只在**错误类型本身说明不了问题**时才用得上（`describeCycleFailure` 的最后一级）：
+ * 行情层抛的是普通 `Error`，而下单路径抛的也可能是普通 `Error` —— 同一个异常类型在
+ * 两个阶段意味着两件完全不同的事，只有阶段标记分得开。
+ */
+export type CycleFailurePhase =
+  | 'bookkeeping'
+  | 'market'
+  | 'model'
+  | 'parse'
+  | 'risk'
+  | 'execute';
+
+/** 一条记录里放得下的错误原文长度。见 `clipDetail` 的说明。 */
+const FAILURE_DETAIL_LIMIT = 300;
+
+/**
+ * 折叠并截断服务商 / 交易所返回的原文。
+ *
+ * 它们可能是一整页 HTML 错误页或者带着换行的 JSON。原样写进
+ * `decision_records.error` 会：让一条记录在决策流里占满整屏、把元数据行挤出视野。
+ * 300 字符够放下"insufficient balance: please top up"这类关键句。
+ */
+function clipDetail(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (flat === '') return '未提供错误详情';
+  return flat.length > FAILURE_DETAIL_LIMIT ? `${flat.slice(0, FAILURE_DETAIL_LIMIT)}…` : flat;
+}
+
+function detailOf(error: unknown): string {
+  if (error instanceof Error) return clipDetail(error.message);
+  return clipDetail(String(error));
+}
+
+/**
+ * `llm/errors.ts` 的 `emptyCompletionError()` 没有专属的 `kind`（HTTP 200、但没有任何
+ * 可用的助手文本），只能认它那句固定的英文文案 —— 那是"AI 响应无法解析"这一类的
+ * 唯一信号。判错的后果只是把"空补全"说成"服务不可用"，两者的处置建议相同，所以这个
+ * 妥协是可接受的；不要为了它去改 `errors.ts` 的类型（那会牵动重试策略）。
+ */
+function looksLikeEmptyCompletion(error: LlmError): boolean {
+  return error.status === null && /no assistant text/i.test(error.message);
+}
+
+/**
+ * 一次失败的周期，该对操作员说什么。
+ *
+ * ## 为什么返回中文散文，而不是堆栈
+ *
+ * 决策流是操作员唯一会去看的地方（参考产品就是这么做的），而堆栈在那里等于什么都
+ * 没说：既看不出"是谁没给钱"，也看不出"要不要做点什么"。所以每一类都给一句**能照着
+ * 做**的话，并把服务商 / 交易所的原文附在中间 —— 那句话往往已经写明了原因
+ * （额度耗尽、模型不存在、保证金不足）。
+ *
+ * ## 失败类别写在**第一个全角冒号之前**
+ *
+ * 决策流的元数据行只放类别（`失败 · AI 服务额度不足`），完整说明留在盒子里，见
+ * `packages/web/src/components/DecisionFeed.tsx` 的 `failureCategory()`。没有为此
+ * 新增列：`decision_records.error` 本来就在，而这条文本的唯一读者是人。
+ *
+ * ## 判类只做这一次，且**不看 HTTP 状态码**
+ *
+ * `LlmError.kind` 是 `llm/errors.ts` 已经判好的结论，这里直接用它。那里记着一次实测
+ * 事故：一个网关在 **HTTP 400** 里返回 `模型不可用：deepseek-flash`，而"400 不可重试"
+ * 的通用规则让一次本可成功的请求被放弃；修复方式正是在 `kindForStatus()` 里显式列出
+ * 这类可用性短语。这里若按状态码再判一次，等于把那个 bug 复制到展示层。
+ */
+export function describeCycleFailure(error: unknown, phase: CycleFailurePhase): string {
+  if (error instanceof LlmError) {
+    const detail = detailOf(error);
+    switch (error.kind) {
+      case 'quota_exhausted':
+        return `AI 服务额度不足：${detail}。服务商已经把这条密钥判定为没有余额或没有额度，机器人在充值前每一轮决策都会失败 —— 请先在服务商后台充值或提高额度；充值后无需重启机器人，下一轮会自动恢复。`;
+      case 'auth':
+        return `AI 服务拒绝：${detail}。通常是 API Key 无效、已过期或被停用，请在控制台「设置 → AI 模型」里更新密钥。`;
+      case 'permission':
+        return `AI 服务拒绝：${detail}。这把密钥没有调用该模型的权限，请确认密钥权限或改用其他模型。`;
+      case 'not_found':
+        return `AI 服务拒绝：${detail}。配置的模型名在服务商侧不存在或已下线，请在控制台改用可用的模型。`;
+      case 'bad_request':
+        return `AI 服务拒绝：请求参数错误（${detail}）。请求被 AI 服务判定为参数异常，本轮没有产生任何决策；请检查模型名、温度与最大输出 Token 的配置，若反复出现请联系模型服务商。`;
+      case 'content_filter':
+        return `AI 服务拒绝：${detail}。模型侧的内容审核拦下了本次请求，一般下一轮就会恢复；若持续出现，请检查提示词与行情数据里是否有异常内容。`;
+      case 'rate_limit':
+      case 'overloaded':
+      case 'server':
+      case 'timeout':
+        return `AI 服务不可用：${detail}。这是服务商侧的临时故障（限流 / 过载 / 超时 / 5xx），机器人下一轮会自动重试，通常不需要人工处理。`;
+      case 'unknown':
+        return looksLikeEmptyCompletion(error)
+          ? `AI 响应无法解析：${detail}。模型返回了 HTTP 成功但没有任何可用文本（推理过程耗尽输出预算、或内容被审核掉都可能这样），本轮没有决策；机器人会在下一轮重新提问。`
+          : `AI 服务不可用：${detail}。这次请求没有拿到模型的响应（网络不可达、被取消或响应异常），机器人下一轮会自动重试。`;
+    }
+  }
+
+  if (error instanceof BinanceApiError) {
+    const detail = detailOf(error);
+    if (error.isInsufficientMargin) {
+      return `交易所拒绝：保证金不足（${detail}）。这笔订单没有成交；请降低仓位比例或少开几个仓位，风控会按最新可用余额重算额度。`;
+    }
+    if (error.isRateLimited) {
+      return `交易所限流：${detail}。请求过快或已被临时限制，机器人下一轮会自动重试。`;
+    }
+    if (error.isTimestampError) {
+      return `交易所拒绝：请求时间戳超出接收窗口（${detail}）。服务器时钟需要与交易所同步，否则每一笔下单都会被拒。`;
+    }
+    if (error.isFilterError) {
+      return `交易所拒绝：订单参数不符合该标的的交易规则（${detail}）。这通常是数量 / 价格的取整或最小名义价值问题，订单没有成交。`;
+    }
+    return `交易所拒绝：${detail}。这笔订单没有得到交易所确认；原始响应与错误码已记入订单表，可据此判断是否需要人工干预。`;
+  }
+
+  const detail = detailOf(error);
+
+  // 模型返回的内容本身不是合法 JSON（被截断、或混进了额外说明）。它在"解析"阶段
+  // 抛出，但类型是 SyntaxError，比阶段标记更精确。
+  if (error instanceof SyntaxError) {
+    return `AI 响应无法解析：${detail}。模型返回的内容不是合法 JSON（可能被截断或混入了说明文字），本轮没有决策；机器人会在下一轮重新提问。`;
+  }
+
+  switch (phase) {
+    case 'market':
+      return `行情数据不可用：${detail}。本轮取不到可用行情，因此没有向模型提问、也没有下单；通常是交易所行情接口暂时失败，机器人会在下一轮重试。`;
+    case 'model':
+      return `AI 服务不可用：${detail}。调用模型时出错，且这个错误不属于已知的服务商故障类型；机器人会在下一轮重试。若持续出现，请检查网络与模型配置。`;
+    case 'parse':
+      return `AI 响应无法解析：${detail}。模型返回的内容无法解析成决策，本轮没有决策。`;
+    case 'risk':
+      return `决策处理失败：${detail}。本轮在风控裁决环节抛出异常，没有下任何单；这属于程序内部故障，请结合运行日志排查（该周期的提示词与模型返回已保存在这条记录里）。`;
+    case 'execute':
+      return `交易所下单失败：${detail}。这笔订单没有得到交易所确认，可能并未成交；请核对交易所的持仓与挂单，机器人下一轮会重新对账。`;
+    case 'bookkeeping':
+      return `未知错误：${detail}。本轮在账务 / 对账环节失败，且错误不属于已知的模型、行情或交易所类别；该周期已经拿到的提示词与执行记录已尽量保存，请结合运行日志排查。`;
+  }
 }

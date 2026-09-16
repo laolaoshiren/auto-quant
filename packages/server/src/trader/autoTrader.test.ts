@@ -10,10 +10,11 @@ import {
   type StrategyConfig,
 } from '@aq/shared';
 import type { BinanceBroker, ExchangePosition, PlacedOrder } from '../binance/broker.js';
-import type { BinanceAlgoOrderResponse, BinanceOrderResponse } from '../binance/types.js';
+import { BinanceApiError, type BinanceAlgoOrderResponse, type BinanceOrderResponse } from '../binance/types.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
 import { closeDb, initDb } from '../db/index.js';
 import { eventBus } from '../events.js';
+import { classifyHttpError, LlmError } from '../llm/errors.js';
 import type { MarketDataService } from '../market/service.js';
 import {
   computeTraderStats,
@@ -27,7 +28,7 @@ import {
   traders,
   trades as tradeStore,
 } from '../store/repositories.js';
-import { AutoTrader, type DecisionModel } from './autoTrader.js';
+import { AutoTrader, describeCycleFailure, type DecisionModel } from './autoTrader.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Harness                                                                    */
@@ -1241,4 +1242,245 @@ test('shutdown does not mark the trader as operator-stopped', async () => {
     'stopped',
     'an explicit operator stop must persist `stopped`, or resumePersisted would resurrect a bot the human stopped',
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  失败的周期必须留下记录                                                      */
+/* -------------------------------------------------------------------------- */
+
+test('模型调用抛错的周期：仍然写出恰好一条失败记录，并带上已经拿到的进度', async () => {
+  /*
+   * Why this test exists —— 这就是本次修复针对的那个 bug。
+   *
+   * 审计记录原来是周期的第 11 步，位置在模型调用与执行**之后**，而且硬编码
+   * `success: true, error: null`。于是模型调用一旦抛错，`runCycle()` 就直接退出，
+   * **一条记录都不写**：决策流里什么都看不到。实盘上正在发生的就是这件事 ——
+   * 一个欠费的模型供应商让每一轮都被拒，而操作员在控制台上看不到任何迹象。
+   * `decision_records.success` / `error` 两列一直都在，只是从来没有被写过。
+   *
+   * 这个用例钉住三件事：
+   *   1. 失败也要落库，而且**恰好一条**（不能一条都不写，也不能写两条）；
+   *   2. `error` 是能照着做的中文说明，而不是堆栈，并且带上服务商原文；
+   *   3. 已经拿到的部分（提示词、候选标的）必须一起留下 —— 否则操作员还是看不出
+   *      "这一轮原本要问什么"。
+   *
+   * 状态码用的是 429 + `insufficient_quota`：欠费在真实服务商那里就是这么回报的
+   * （见 `llm/errors.ts` 的 QUOTA_MARKERS），而不是靠推理编一个。
+   */
+  const broker = new FakeBroker();
+  const trader = buildTrader(broker, '', {
+    async complete() {
+      throw classifyHttpError('deepseek', 429, { error: { message: 'insufficient_quota' } });
+    },
+  });
+
+  await assert.rejects(() => trader.runOnce(), /insufficient_quota/);
+
+  const records = decisionStore.list(traderId);
+  assert.equal(records.length, 1, '失败的周期必须留下恰好一条记录');
+  const record = records[0]!;
+  assert.equal(record.success, false, '失败必须写成 success = false，而不是硬编码的 true');
+  assert.ok(record.error, '失败必须带一条 error');
+  assert.match(record.error!, /AI 服务额度不足/, '类别要能一眼看出是欠费');
+  assert.match(record.error!, /insufficient_quota/, '要带上服务商原文，否则没人知道是谁拒的');
+  assert.match(record.error!, /充值/, '说明必须可执行');
+
+  // 部分进度：提示词在发请求之前就写进了审计记录。
+  assert.ok(record.systemPrompt.length > 500, '失败记录仍要带上系统提示词');
+  assert.ok(record.userPrompt.length > 200, '失败记录仍要带上用户提示词');
+  assert.deepEqual(record.candidateSymbols, [SYMBOL]);
+
+  // 失败没有下单，也没有留下持仓。
+  assert.equal(broker.placed.length, 0);
+  assert.equal(positionStore.open(traderId).length, 0);
+});
+
+test('再失败一轮也只有新的一条记录：一个周期一条，不多不少', async () => {
+  /*
+   * "恰好一条"必须在**多轮**上也成立：记录写在不同位置（早退 / 抛错 / 正常结束）时，
+   * 很容易变成"某一轮写两条"。这里跑两轮失败，断言总数正好是 2。
+   */
+  const broker = new FakeBroker();
+  const trader = buildTrader(broker, '', {
+    async complete() {
+      throw classifyHttpError('deepseek', 401, { error: { message: 'invalid api key' } });
+    },
+  });
+
+  await assert.rejects(() => trader.runOnce());
+  await assert.rejects(() => trader.runOnce());
+
+  const records = decisionStore.list(traderId);
+  assert.equal(records.length, 2, '两轮失败 = 两条记录');
+  for (const record of records) {
+    assert.equal(record.success, false);
+    assert.match(record.error!, /AI 服务拒绝/);
+  }
+});
+
+test('风控裁决抛错的周期：记录里保留提示词、思维链与模型决策', async () => {
+  /*
+   * Why this test exists.
+   *
+   * 失败记录不能只有一句错误 —— 如果模型回答已经拿到、只是后面某一步抛了，那么
+   * 提示词、思维链、决策与执行日志都必须照样落库。否则操作员看到的是"什么都没发生"，
+   * 那正是这次要修的观测空洞的另一种形态。
+   *
+   * 这里让交易所的最小名义价值查询抛错：它在风控第 10 步被调用，而那时解析已经完成。
+   */
+  const broker = new FakeBroker();
+  const registry = {
+    ...fakeRegistry,
+    minNotional: () => {
+      throw new Error('symbol filters unavailable');
+    },
+  } as unknown as SymbolRegistry;
+
+  const trader = new AutoTrader({
+    trader: traders.get(traderId)!,
+    config: strategyStore.get(traders.get(traderId)!.strategyId)!.config,
+    registry,
+    market: {} as never,
+    marketData: fakeMarketData,
+    broker: broker as unknown as BinanceBroker,
+    model: modelReturning(OPEN_LONG_RESPONSE),
+  });
+
+  await assert.rejects(() => trader.runOnce(), /symbol filters unavailable/);
+
+  const records = decisionStore.list(traderId);
+  assert.equal(records.length, 1, '抛错也恰好一条');
+  const record = records[0]!;
+  assert.equal(record.success, false);
+  assert.match(record.error!, /决策处理失败/);
+  // 已经拿到的部分全在。
+  assert.equal(record.cotTrace, 'Clean setup.');
+  assert.equal(record.decisions.length, 1);
+  assert.equal(record.decisions[0]!.action, 'open_long');
+  assert.ok(record.rawResponse.includes('open_long'), '原始响应也要留下');
+  assert.ok(record.systemPrompt.length > 500);
+  // 风控在抛错前没有放行任何订单。
+  assert.equal(broker.placed.length, 0);
+});
+
+test('行情为空的一轮：也留下恰好一条记录，但不推进连续失败计数', async () => {
+  /*
+   * Why this test exists.
+   *
+   * 取不到行情时 `runCycle()` 原本**直接 return**，同样一条记录都不写 —— 决策流里
+   * 看不出机器人已经好几轮什么都没做。现在它写一条 `success = false` 的记录。
+   *
+   * 但它**刻意不抛错**：抛错会被 `tick()` 记成一次连续失败、并可能把机器人推进安全
+   * 模式。行情空窗是策略层面的正常状态（候选全被过滤掉也会这样），不是模型 / 交易所
+   * 故障 —— 所以这里同时钉住"有记录"和"失败计数没有被动过"。
+   */
+  const broker = new FakeBroker();
+  /*
+   * 行情服务"连得上但什么都给不出"：选币返回空、快照也是空 —— 这正是行情接口
+   * 大面积失败时真实的样子（`market/service.ts` 对单个标的失败是降级而不是抛错）。
+   */
+  const emptyMarketData = {
+    async screenUniverse() {
+      return [];
+    },
+    async screenOpenInterestGrowth() {
+      return [];
+    },
+    async buildSnapshots() {
+      return [];
+    },
+    async getOiRanking() {
+      return [];
+    },
+  } as unknown as MarketDataService;
+
+  const trader = new AutoTrader({
+    trader: traders.get(traderId)!,
+    config: strategyStore.get(traders.get(traderId)!.strategyId)!.config,
+    registry: fakeRegistry,
+    market: {} as never,
+    marketData: emptyMarketData,
+    broker: broker as unknown as BinanceBroker,
+    model: modelReturning('<decision>[]</decision>'),
+  });
+
+  /*
+   * 走**真正的 tick 路径**（start() 会立刻跑一轮）：只有这样"连续失败计数"与
+   * 机器人状态才是真的被观察的，而不是靠 runOnce 绕开失败策略。
+   */
+  await trader.start();
+  await trader.stop('测试：行情空窗', false);
+
+  assert.equal(broker.placed.length, 0);
+
+  const records = decisionStore.list(traderId);
+  assert.equal(records.length, 1, '什么都没做的一轮同样要留下一条记录');
+  assert.equal(records[0]!.success, false);
+  assert.match(records[0]!.error!, /行情数据不可用/);
+
+  // 行情空窗**不是**失败：机器人的状态与连续失败计数都不该被它推动。
+  assert.equal(traders.get(traderId)!.consecutiveFailures, 0, '行情空窗不该推进连续失败计数');
+  assert.equal(
+    traders.get(traderId)!.status,
+    'running',
+    '行情空窗不该把机器人推进 error / safe_mode —— 那会是行为变更，而不是补记录',
+  );
+});
+
+test('describeCycleFailure：每一类失败都给一句可执行的中文说明，且类别写在第一个全角冒号之前', async () => {
+  /*
+   * Why this test exists.
+   *
+   * 这句话是操作员在决策流里唯一会读到的失败信息，所以它必须说清"谁失败了、意味着
+   * 什么、要不要做点什么"。同时它必须只用 `llm/errors.ts` 已经判好的 `kind`，**不能**
+   * 在这里按 HTTP 状态码再判一次：那个文件里记着一次实测事故 —— 网关在 HTTP 400 里
+   * 返回 `模型不可用：deepseek-flash`，而"400 就是参数错误、不可重试"的通用规则让一次
+   * 本可成功的请求被放弃。这里钉住"展示层不会把那个 bug 复制一遍"。
+   *
+   * 最后一条断言钉的是决策流的展示契约：元数据行取第一个全角冒号之前的类别
+   * （`DecisionFeed.failureCategory()`），所以每一句话都必须以 `类别：` 开头。
+   */
+  const quota = describeCycleFailure(
+    classifyHttpError('deepseek', 429, { error: { message: 'insufficient_quota' } }),
+    'model',
+  );
+  assert.match(quota, /AI 服务额度不足/);
+  assert.match(quota, /充值/);
+
+  const unavailable = describeCycleFailure(
+    classifyHttpError('deepseek', 400, { message: '模型不可用：deepseek-flash' }),
+    'model',
+  );
+  assert.match(unavailable, /AI 服务不可用/, 'HTTP 400 里的"模型不可用"是临时不可用');
+  assert.doesNotMatch(unavailable, /请求参数错误/);
+
+  const badRequest = describeCycleFailure(
+    classifyHttpError('deepseek', 400, { message: 'invalid model id' }),
+    'model',
+  );
+  assert.match(badRequest, /AI 服务拒绝：请求参数错误/);
+
+  const empty = describeCycleFailure(
+    new LlmError('No assistant text in deepseek response', null, 'deepseek', true),
+    'parse',
+  );
+  assert.match(empty, /AI 响应无法解析/);
+
+  const market = describeCycleFailure(new Error('fetch failed'), 'market');
+  assert.match(market, /行情数据不可用/);
+
+  const exchange = describeCycleFailure(
+    new BinanceApiError(-2019, 'Margin is insufficient.', 400, null, '/fapi/v1/order'),
+    'execute',
+  );
+  assert.match(exchange, /交易所拒绝/);
+  assert.match(exchange, /保证金不足/);
+
+  const unknown = describeCycleFailure(new Error('boom'), 'bookkeeping');
+  assert.match(unknown, /未知错误/);
+
+  // 元数据行的展示契约：`类别：说明`，类别在 12 字以内（一行小字放得下）。
+  for (const message of [quota, unavailable, badRequest, empty, market, exchange, unknown]) {
+    assert.match(message, /^[^：]{2,12}：/, `类别必须写在第一个全角冒号之前：${message}`);
+  }
 });

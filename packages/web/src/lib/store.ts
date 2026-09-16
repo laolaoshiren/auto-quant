@@ -171,6 +171,24 @@ export interface Toast {
   at: number;
 }
 
+/**
+ * 一个正在执行中的周期。
+ *
+ * 服务器已经按周期推了 `cycle_start` / `cycle_end`（`ServerEvent`），但界面以前只处理
+ * 后者 —— 于是一轮 12 秒（实测 6.8–18.3 秒）的窗口里决策流什么都不显示，
+ * 看起来就像"界面卡住了"。这里记住这一轮的身份与开始时刻，让决策流能把
+ * 「正在请求模型」这一条钉在最上面。
+ *
+ * `startedAt` 用**事件自带的时间戳**而不是本地收到的时间：用本地时间的话，
+ * 页面重连后补收到的 `cycle_start` 会被算成"刚刚开始"，等了 15 秒的那一轮
+ * 会重新从 0 秒数起 —— 而这个读数的全部意义就是回答"它是不是卡住了"。
+ */
+export interface LiveCycle {
+  cycleNumber: number;
+  /** epoch ms —— `cycle_start` 事件的时间戳，组件用它算已等待秒数。 */
+  startedAt: number;
+}
+
 export interface TraderLive {
   /** Last status pushed over the socket, if any. */
   status: TraderStatus | null;
@@ -182,13 +200,61 @@ export interface TraderLive {
   decisions: DecisionRecord[];
   equity: EquitySnapshot[];
   lastEventAt: number | null;
+  /** 正在请求模型的那一轮；没有进行中的周期时为 `undefined`。 */
+  liveCycle?: LiveCycle;
 }
 
 const MAX_LOGS = 600;
 const MAX_PER_TRADER = 120;
 
 function emptyTraderLive(): TraderLive {
-  return { status: null, positions: [], orders: [], trades: [], decisions: [], equity: [], lastEventAt: null };
+  return {
+    status: null,
+    positions: [],
+    orders: [],
+    trades: [],
+    decisions: [],
+    equity: [],
+    lastEventAt: null,
+  };
+}
+
+/**
+ * 结束这一轮的在途标记。
+ *
+ * 三条路径都会走到这里（`decision` / `cycle_end` / 连接断开或机器人停止）。
+ * 用一个函数而不是各写一遍 `{ liveCycle: undefined }`：**漏掉任何一条**都会留下
+ * 一个永远转下去、和真实状态无关的转圈 —— 那比不显示还糟，因为它会让人相信
+ * 系统还在工作。
+ *
+ * `cycleNumber` 只在调用方确实知道是哪一轮时才传：带上它就只会清掉**同一轮**的
+ * 标记，一个迟到的旧周期事件不会把刚开始的新周期一起清掉。
+ */
+function clearLiveCycle(target: TraderLive, cycleNumber?: number): void {
+  if (!target.liveCycle) return;
+  if (cycleNumber !== undefined && target.liveCycle.cycleNumber !== cycleNumber) return;
+  target.liveCycle = undefined;
+}
+
+/**
+ * 连接断开 / 主动断开时，把所有机器人的在途标记一次清掉。
+ *
+ * 返回**同一个** `byTrader` 引用（没有标记可清时）：zustand 的 `set` 只要拿到同一个
+ * 引用就不会触发重渲染，于是"断线时绝大多数情况下什么都不用做"这件事不需要额外的
+ * 判断，也不会让所有读 `byTrader` 的组件白重渲染一次。
+ */
+function clearAllLiveCycles(byTrader: Record<number, TraderLive>): Record<number, TraderLive> {
+  let changed = false;
+  const next: Record<number, TraderLive> = {};
+  for (const [key, live] of Object.entries(byTrader)) {
+    if (!live.liveCycle) {
+      next[Number(key)] = live;
+      continue;
+    }
+    changed = true;
+    next[Number(key)] = { ...live, liveCycle: undefined };
+  }
+  return changed ? next : byTrader;
 }
 
 interface EventState {
@@ -249,7 +315,18 @@ export const useEvents = create<EventState>((set, get) => ({
     };
 
     ws.onclose = () => {
-      set({ status: 'closed' });
+      /*
+       * 断了就必须把"正在请求模型"一起清掉。
+       *
+       * 周期跑在服务器的循环里，和这条连接无关 —— 连接断掉时那一轮**很可能还在跑**，
+       * 但我们再也收不到它的 `cycle_end` 或 `decision` 了。留着这个转圈，
+       * 秒数会一直往上走而没有任何东西能让它停：这正是"比不显示还糟"的那种状态。
+       * 重连后如果那一轮仍在进行，页面会重新从 REST 拿到结果；拿不到就不显示。
+       */
+      set((state) => ({
+        status: 'closed',
+        byTrader: clearAllLiveCycles(state.byTrader),
+      }));
       socket = null;
       if (!getToken()) return;
       // Exponential backoff capped at 15s, so a backend restart is transparent.
@@ -278,7 +355,7 @@ export const useEvents = create<EventState>((set, get) => ({
       socket.close();
       socket = null;
     }
-    set({ status: 'idle', attempts: 0 });
+    set({ status: 'idle', attempts: 0, byTrader: clearAllLiveCycles(get().byTrader) });
   },
 
   ingest: (event) => {
@@ -342,11 +419,49 @@ export const useEvents = create<EventState>((set, get) => ({
       });
     }
 
+    /*
+     * 「正在请求模型」的清除。
+     *
+     * 放在**状态 reducer 之外**、先于它执行，因为这里要清的是上一刻的状态：
+     * `cycle_end` 的 reducer 还要用 `current.liveCycle` 之外的信息去补写本轮结果，
+     * 两件事混在一个分支里容易漏。先清、再归约，两条路径互不干扰。
+     *
+     * `decision` 也清（而不是只等 `cycle_end`）：服务器允许在周期结束**之前**
+     * 就推送决策记录，那时结果已经到页面上了，占位条必须让位，否则同一轮会出现
+     * 两个条目。`cycle_end` 先到（结果稍后单独推）的情况同样被覆盖 ——
+     * 这正是"失败周期也要落库"那次服务端改动之后的形态：`cycle_end` 到了、
+     * `decision` 没有，占位条仍然必须消失。
+     */
+    set((state) => {
+      const current = state.byTrader[event.traderId];
+      if (!current?.liveCycle) return {};
+
+      const next = { ...current };
+      if (event.type === 'decision') clearLiveCycle(next, event.record.cycleNumber);
+      else if (event.type === 'cycle_end') clearLiveCycle(next, event.cycleNumber);
+      else if (event.type === 'trader_status' && event.status === 'stopped') clearLiveCycle(next);
+
+      return next.liveCycle === current.liveCycle ? {} : { byTrader: { ...state.byTrader, [event.traderId]: next } };
+    });
+
     set((state) => {
       const current = state.byTrader[event.traderId] ?? emptyTraderLive();
       const next: TraderLive = { ...current, lastEventAt: now };
 
       switch (event.type) {
+        case 'cycle_start':
+          /*
+           * 直接用 `=` 赋值而不是比较新旧周期号：服务器在上一轮还没结束时会跳过
+           * 本次调度（`cycleInFlight`），所以正常情况下不会出现"新一轮开始时旧的
+           * 还没清"。真的出现了（比如 `cycle_end` 那一帧丢了），**新的一轮天然
+           * 覆盖旧的一轮** —— 这正是我们要的：宁可只显示最新的那一轮，
+           * 也不要留一个属于上一轮的转圈。
+           */
+          next.liveCycle = {
+            cycleNumber: event.cycleNumber,
+            startedAt: Number.isFinite(Date.parse(event.timestamp)) ? Date.parse(event.timestamp) : now,
+          };
+          break;
         case 'trader_status':
           next.status = event.status;
           break;
@@ -418,4 +533,15 @@ function pushToast(
 
 export function selectTraderLive(traderId: number | null): TraderLive {
   return useEvents((state) => (traderId === null ? undefined : state.byTrader[traderId])) ?? emptyTraderLive();
+}
+
+/**
+ * 正在请求模型的那一轮，或者 `undefined`。
+ *
+ * 单独一个选择器（而不是让调用方自己 `selectTraderLive`）是有意的：它返回的是
+ * 一个**引用稳定**的对象 —— `cycle_start` 时才换一次。决策流因此不会因为
+ * 隔壁的持仓、订单、权益事件而重渲染，转圈的秒数也不会被别的事件打断。
+ */
+export function selectLiveCycle(traderId: number): LiveCycle | undefined {
+  return useEvents((state) => state.byTrader[traderId]?.liveCycle);
 }
