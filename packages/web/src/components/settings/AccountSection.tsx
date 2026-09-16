@@ -13,6 +13,7 @@
  */
 import { useState } from 'react';
 import { Save } from 'lucide-react';
+import { userRoleLabel } from '@aq/shared';
 import { api, setToken } from '../../lib/api';
 import { useApp } from '../../lib/store';
 import { useCopy } from '../../lib/hooks';
@@ -97,7 +98,7 @@ export function AccountSection() {
       <Panel title="账户">
         <div className="num">
           <KV label="用户名" value={user?.username ?? '—'} />
-          <KV label="角色" value={user?.role ?? '—'} />
+          <KV label="角色" value={user?.role ? userRoleLabel(user.role) : '—'} />
           <KV label="账户创建时间" value={fmtDateTime(user?.createdAt)} />
           <KV label="服务端版本" value={health?.version ?? '—'} />
           <KV label="数据库" value={health?.db ?? '—'} />
