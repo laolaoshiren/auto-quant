@@ -320,12 +320,27 @@ export function mergeEquityCurves(
        * to today — but only if the trader actually existed by then, otherwise an
        * account that is about to be created would be counted as if it were
        * already funded.
+       *
+       * ⚠️ `first.t <= bucket` 对**首桶恒为假**，必须写成"第一个样本落在本桶内"。
+       *
+       * 轴上的桶是 `floor(sample.t / step) * step`，所以第一个样本所在的桶
+       * **一定 ≤ 它自己的时间**（`first.t < bucket + step` 恒成立）。用
+       * `first.t <= bucket` 判断时首桶永远进不了 baseline 分支、也就没有值，
+       * 于是**曲线第一个点恒为 0**。
+       *
+       * 后果很具体：区间盈亏 = 末点 − 首点，首点为 0 就变成"整个账户权益"
+       * —— 实测显示 +$10.42，而真实只有 +$0.03。
        */
       const first = series.samples[0];
+      const existedByThisBucket =
+        first === undefined ||
+        first.t <= bucket ||
+        // 首桶：样本还没到（cursor 仍是 -1）但它就落在本桶之内
+        first.t < bucket + step;
       const held =
         series.cursor >= 0
           ? series.samples[series.cursor]?.snapshot
-          : series.baseline !== null && (first === undefined || first.t <= bucket)
+          : series.baseline !== null && existedByThisBucket
             ? { equity: series.baseline, unrealizedPnl: 0, openPositions: 0 }
             : null;
 

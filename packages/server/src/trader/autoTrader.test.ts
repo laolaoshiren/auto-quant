@@ -690,7 +690,7 @@ test('止损比往返手续费还近的开仓：在交易循环里被拒，且�
   assert.ok(rejection, `拒绝必须写进执行日志，实际：${JSON.stringify(record.executionLog)}`);
   assert.match(rejection.detail, /往返手续费/);
   assert.match(rejection.detail, /0\.100%/);
-  assert.match(rejection.detail, /0\.300%/, '理由要给出这个费率下允许的最小止损幅度');
+  assert.match(rejection.detail, /0\.3000%/, '理由要给出这个费率下允许的最小止损幅度');
 });
 
 /* -------------------------------------------------------------------------- */

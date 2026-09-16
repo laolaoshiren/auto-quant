@@ -11,11 +11,16 @@
  *   1. 页头 — greeting, data freshness, and the page's primary action;
  *   2. 左栏 — the account-level figures, grouped 账户 / 交易. `MetricGroup`
  *      supplies the grouping, which *is* the hierarchy: one `size="lg"` lead
- *      figure (总归属权益) and everything else clearly secondary;
+ *      figure (账户权益合计) and everything else clearly secondary. The groups
+ *      are now also the **口径** boundary: 账户 is the shared exchange wallet
+ *      (counted once per account), 交易 is what each bot itself is doing (adds up).
+ *      The per-bot 归属权益 never appears as a total — that sum counted one
+ *      wallet once per bot and read ~3× high (see `lib/fleetTotals.ts`);
  *   3. 主区 — the equity curve, which is the primary visual **only when the
  *      series has shape** (≥3 points with real variation, `equityShape`). A flat
  *      or thin series collapses to a 36px strip (§4: never spend a third of the
- *      viewport drawing a straight line);
+ *      viewport drawing a straight line). It plots the **account-basis** curve;
+ *      each bot's attributed curve lives on its own dashboard;
  *   4. 机器人明细 — the dense per-bot table;
  *   5. 运行环境 — a footer, at the smallest size on the page, holding status
  *      only. Internal diagnostics (clock offset, API weight) appear **only when
@@ -32,6 +37,7 @@ import type { EquitySnapshot, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
+import { accountEquityContributor, fleetTotals } from '../lib/fleetTotals';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useRunOnce } from '../lib/actions';
 import { Button, Empty, ErrorNote, Panel, Spinner3 } from '../components/ui';
@@ -47,6 +53,7 @@ import {
   useRecentTrades,
 } from './overviewParts';
 import {
+  BALANCE_LABEL,
   fmtAsset,
   fmtClockOffset,
   fmtInt,
@@ -54,7 +61,6 @@ import {
   fmtPercent,
   fmtUsd,
   fmtUsdSigned,
-  pnlColor,
   timeAgo,
 } from '../lib/format';
 
@@ -141,36 +147,64 @@ export function OverviewPage() {
   );
 
   /*
-   * The combined curve is assembled from three sources, in one place:
+   * 曲线与合计都走**账户口径** —— 这是本次修掉的 bug 的核心（LAYOUT.md §7：
+   * 文字说的必须是事实）。
    *
-   * - the REST snapshots (drawn even before the socket connects);
-   * - whatever the live socket has pushed since (far fresher than a 60s poll, so
-   *   the curve grows while the operator is watching instead of stepping once a
-   *   minute);
-   * - each trader's `initialEquity`, used only to hold that trader's line flat
-   *   back to the start of the window — see `mergeEquityCurves`.
+   * 每个机器人的快照记的是它自己的归属权益，它**自带一份本金**；同一个交易所
+   * 账户下的多个机器人各自都带着同一笔本金，所以把归属权益相加等于把钱包数 N 遍。
+   * 实盘实测（三个机器人共用账户 #1）：Σ归属权益 30.6690、Σ初始权益 30.2316，而账户里
+   * 只有 10.4180 —— 其中 19.81 USDT 是被数了三遍的同一笔本金，总览因此显示
+   * 30.67（约 3 倍）。完整的数字与推导见 `lib/fleetTotals.ts` 顶部。
+   *
+   * 于是：先按 `exchangeAccountId` 分组，账户**之间**相加、账户**内部**只算一次。
+   * 每机器人的归属权益仍然照旧出现在下面的表格里（"哪个机器人挣的"），
+   * 只是不再参与舰队合计。
+   *
+   * 快照仍然来自原来的三个来源：REST、socket 推来的新点，以及每个账户的起始资金
+   * （`accountEquityContributor` 用它把曲线在第一条快照之前垫平）。
    */
-  const equityStored: Record<number, EquitySnapshot[]> = {};
-  const equityLive: Record<number, EquitySnapshot[]> = {};
-  const equityBaseline: Record<number, number> = {};
+  const equitySnapshots: Record<number, EquitySnapshot[]> = {};
   traders.forEach((trader, index) => {
-    equityStored[trader.id] = equityQuery.data?.[index] ?? [];
-    equityBaseline[trader.id] = trader.initialEquity;
-    const live = liveByTrader[trader.id]?.equity;
-    if (live && live.length > 0) equityLive[trader.id] = live;
+    const live = liveByTrader[trader.id]?.equity ?? [];
+    equitySnapshots[trader.id] = [...(equityQuery.data?.[index] ?? []), ...live];
   });
-  const curve = mergeEquityCurves([{ series: equityStored, live: equityLive, baseline: equityBaseline }]);
+  const merged = mergeEquityCurves([accountEquityContributor(traders, equitySnapshots)]);
+
+  /*
+   * 去掉开头那段"没有读数"的点。
+   *
+   * `mergeEquityCurves` 的第一个桶是 `floor(最早快照时间)`，因此**没有任何样本
+   * ≤ 它**，于是首桶的合计是 0 —— 这是它在首桶上的已知边界，旧的每机器人曲线
+   * 一样有这个 0（实测两种写法首点都是 0）。但 0 在权益里不是"账户没钱"，
+   * 而是"这一桶还没有读数"：留着它，`equityChange = 账户权益 − 窗口起点` 就会
+   * 等于**整个账户权益**（实测页面显示「区间盈亏 +$10.42 / 还没有权益快照」，
+   * 而真实变化是 +$0.03），正好违反 LAYOUT.md §7。
+   *
+   * 根因在 `components/equityCurve.ts`（不在本次改动的文件范围内），已上报；
+   * 这里只中和它的后果：丢掉开头这一段非正的点。若一条正读数都没有，就返回空
+   * 曲线 —— 那种情况下页面应该说的是"还没有权益快照"，而不是"账户是 0"。
+   */
+  const firstReading = merged.findIndex((point) => point.equity > 0);
+  const curve = firstReading === -1 ? [] : merged.slice(firstReading);
 
   const runningCount = traders.filter((t) => t.isRunning).length;
-  /** Falls back to `initialEquity` until the first stats response lands, so the total never reads 0. */
+
+  /** 舰队合计（账户口径与机器人归属口径分开算，见 `lib/fleetTotals.ts`）。 */
+  const fleet = fleetTotals({ traders, stats: statsMap, snapshots: equitySnapshots });
+
+  /** 单行的归属权益：**只是这个机器人自己的账**，不能相加。 */
   const equityOf = (trader: TraderRow): number => statsMap[trader.id]?.equity ?? trader.initialEquity;
-  const totalEquity = traders.reduce((sum, trader) => sum + equityOf(trader), 0);
-  const totalBaseline = traders.reduce((sum, trader) => sum + trader.initialEquity, 0);
-  const totalOpen = traders.reduce((sum, trader) => sum + (statsMap[trader.id]?.openPositions ?? 0), 0);
-  const unrealized = traders.reduce((sum, trader) => sum + (statsMap[trader.id]?.unrealizedPnl ?? 0), 0);
-  const withStats = traders.filter((trader) => statsMap[trader.id] !== undefined).length;
-  const statsPending = traders.length > 0 && withStats < traders.length;
-  const totalReturnPercent = totalBaseline > 0 ? ((totalEquity - totalBaseline) / totalBaseline) * 100 : 0;
+
+  const accountEquity = fleet.accountEquityFleet;
+  const committedCapital = fleet.committedCapitalFleet;
+  const totalReturnPercent = fleet.accountReturnPercent;
+  const totalOpen = fleet.openPositionsFleet;
+  const unrealized = fleet.unrealizedPnlFleet;
+  /** Σ 各机器人自己的净已实现盈亏 —— 这一项本来就是可加的。 */
+  const realizedPnl = fleet.realizedPnlFleet;
+  const withStats = fleet.tradersWithStats;
+  const statsPending = fleet.traderCount > 0 && withStats < fleet.traderCount;
+  const accountCount = fleet.accounts.length;
 
   /*
    * Closed-trade counts are **summed, never divided**: `wins` / `losses` are real
@@ -178,8 +212,8 @@ export function OverviewPage() {
    * rate from the two counts would be inventing a number the API never returned,
    * so the rail shows the counts themselves (hard rule in the task brief).
    */
-  const totalWins = traders.reduce((sum, trader) => sum + (statsMap[trader.id]?.wins ?? 0), 0);
-  const totalLosses = traders.reduce((sum, trader) => sum + (statsMap[trader.id]?.losses ?? 0), 0);
+  const totalWins = fleet.winsFleet;
+  const totalLosses = fleet.lossesFleet;
 
   /**
    * Start of the selected window, plus whether that start is really the start of
@@ -200,7 +234,7 @@ export function OverviewPage() {
     const cutoff = Date.now() - span;
     return curve.find((point) => point.t >= cutoff)?.equity ?? curve[0]?.equity ?? null;
   })();
-  const equityChange = windowStartValue === null ? null : totalEquity - windowStartValue;
+  const equityChange = windowStartValue === null ? null : accountEquity - windowStartValue;
   const equityChangePercent =
     windowStartValue !== null && windowStartValue !== 0 && equityChange !== null
       ? (equityChange / Math.abs(windowStartValue)) * 100
@@ -273,6 +307,16 @@ export function OverviewPage() {
    * 左指标栏。分两组（账户 / 交易），组本身就是层级 —— 这正是改造前
    * 四个同等大小的数字并排时缺的东西。
    *
+   * 分组的界线现在是**口径**，不只是主题：
+   *
+   * - 「账户」= 交易所共享钱包的钱（按账户算一次）。权益、收益率、区间盈亏都在这里，
+   *   它们回答"一共有多少钱、赚了多少"；
+   * - 「交易」= 各机器人自己的账：持仓数、自己的浮盈、自己的笔数。它们回答
+   *   "是哪些机器人在动、谁挣的"，因此可以相加。
+   *
+   * 归属权益（每个机器人自带本金的那一项）只在下面的表格里按行出现 —— 把它合计
+   * 出来就是本次修掉的 3 倍 bug（见文件顶部与 `lib/fleetTotals.ts`）。
+   *
    * 布局随断点变（LAYOUT.md §1）：
    * - `xl` 及以上：一列，就是那根 280px 的指标栏；
    * - `sm`–`xl`：两组并排，占两列 —— 这样塌陷到内容上方时只有三四行高，
@@ -283,21 +327,20 @@ export function OverviewPage() {
     <div className="grid grid-cols-1 gap-4 rounded-lg border border-base-750 bg-base-900 p-3.5 shadow-panel sm:grid-cols-2 xl:grid-cols-1">
       <MetricGroup title="账户">
         <Metric
-          label="总归属权益"
+          label={`${BALANCE_LABEL.equity}合计`}
           size="lg"
           tone="strong"
-          value={fmtAsset(totalEquity, 'USDT', 2)}
-          sub={
-            equityChange === null ? (
-              <span className="text-ink-faint">还没有权益快照</span>
-            ) : (
-              <span className={pnlColor(equityChange)}>
-                {fmtUsdSigned(equityChange, 2)}
-                {equityChangePercent !== null && ` · ${fmtPercent(equityChangePercent)}`}
-              </span>
-            )
-          }
-          title="各机器人归属权益之和 = Σ(初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈)。共用同一个交易所账户的机器人各自独立归属，所以这个合计不等于账户里的钱（账户权益在机器人页与交易所凭证页）。"
+          value={accountCount > 0 ? fmtAsset(accountEquity, 'USDT', 2) : '—'}
+          sub={accountCount > 0 ? `按账户口径 · ${fmtInt(accountCount)} 个账户` : '还没有交易所账户'}
+          title={`所有交易所账户（共享钱包）的${BALANCE_LABEL.equity}之和 —— **每个账户只算一次**。共用同一个账户的机器人读的是同一个钱包，所以它们的「归属权益」不能相加：实盘实测三个机器人 Σ归属权益 30.6690、Σ初始权益 30.2316，而账户里只有 10.4180，其中 19.81 是被数了三遍的同一笔本金。各机器人自己挣了多少见下表「归属权益」列，单个账户的钱见「交易所」页。`}
+        />
+
+        <Metric
+          label="累计净盈亏"
+          tone={pnlTone(realizedPnl)}
+          value={fmtUsdSigned(realizedPnl, 2)}
+          sub="各机器人自己的净额之和"
+          title="Σ(每个机器人自己的已平仓净盈亏)，净 = 毛 − 手续费 − 资金费。这一项**可以相加**：每个机器人只认自己挂过的订单对应的回合（归属闸门），共享账户不会让它重复计入别人的盈亏。它不含持仓浮盈。"
         />
 
         <Metric
@@ -312,23 +355,15 @@ export function OverviewPage() {
               ? '还没有权益快照'
               : `${has24hCoverage ? '24 小时' : `较${range === 'ALL' ? '起始' : `近 ${range}`}`} · ${fmtPercent(equityChangePercent)}`
           }
-          title="归属权益最近 24 小时的变化（按快照口径）。它同时包含已实现与浮动盈亏，因此不再分别累加，避免重复计算。快照不足 24 小时时改显示自最早一条快照以来的变化。"
+          title="账户权益（账户口径）在窗口内的变化，含已实现与浮动盈亏；入金/出金同样会推动它 —— 它说的是「账户里的钱怎么变」，策略自己赚的那部分看「累计净盈亏」。快照不足 24 小时时改显示自最早一条快照以来的变化。"
         />
 
         <Metric
-          label="总收益率"
-          tone={traders.length > 0 ? pnlTone(totalReturnPercent) : 'default'}
-          value={traders.length > 0 ? fmtPercent(totalReturnPercent) : '—'}
-          sub={`初始投入 ${fmtUsd(totalBaseline, 2)}`}
-          title="（当前总归属权益 − 初始投入）÷ 初始投入。初始投入取各机器人的 initialEquity 之和。"
-        />
-
-        <Metric
-          label="浮动盈亏"
-          tone={pnlTone(unrealized)}
-          value={fmtUsdSigned(unrealized, 2)}
-          sub={`${fmtInt(totalOpen)} 个持仓 · 未落袋`}
-          title="所有机器人**自己的**持仓的未实现盈亏合计（不是交易所账户的总浮盈 —— 账户的总浮盈在同一账户下的每个机器人身上都是同一个数）。它随时在变，且尚未计入已实现盈亏。"
+          label="总收益率（账户口径）"
+          tone={committedCapital > 0 ? pnlTone(totalReturnPercent) : 'default'}
+          value={committedCapital > 0 ? fmtPercent(totalReturnPercent) : '—'}
+          sub={`初始投入 ${fmtUsd(committedCapital, 2)}`}
+          title="（账户权益合计 − 账户起始资金）÷ 账户起始资金。本金按**账户**算：共享账户取该账户被接入时的起始资金（最早那个机器人建号时从交易所读到的钱包余额），不是各机器人 initialEquity 之和 —— 后者在同一账户下会把同一笔本金数很多遍（实测 Σ初始权益 30.2316 vs 账户里 10.4180，多算 19.81 USDT）。各机器人自己的收益率见下表。入金/出金也计入本比率。"
         />
       </MetricGroup>
 
@@ -345,6 +380,13 @@ export function OverviewPage() {
           value={fmtInt(totalOpen)}
           sub="各机器人自己的持仓合计"
           title="所有机器人**自己的**持仓个数之和。同一账户下多个机器人看到的是同一个钱包，但持仓归属各自独立。"
+        />
+        <Metric
+          label="浮动盈亏"
+          tone={pnlTone(unrealized)}
+          value={fmtUsdSigned(unrealized, 2)}
+          sub={`${fmtInt(totalOpen)} 个持仓 · 未落袋`}
+          title="所有机器人**自己的**持仓的未实现盈亏合计（不是交易所账户的总浮盈 —— 账户的总浮盈在同一账户下的每个机器人身上都是同一个数）。它随时在变，且尚未计入已实现盈亏。"
         />
         <Metric
           label="平仓记录"
@@ -394,7 +436,7 @@ export function OverviewPage() {
         {/* ---------------------------------------------------------------- */}
         <section aria-labelledby="overview-equity">
           <SectionLabel
-            title="归属权益曲线"
+            title={`${BALANCE_LABEL.equity}曲线`}
             actions={
               <div role="group" aria-label="曲线时间范围" className="flex items-center gap-1">
                 {EQUITY_RANGES.map((item) => (
@@ -412,7 +454,7 @@ export function OverviewPage() {
             }
           />
           <h2 id="overview-equity" className="sr-only">
-            各机器人的归属权益曲线之和
+            所有交易所账户的{BALANCE_LABEL.equity}之和（按账户口径，共用钱包只算一次）
           </h2>
 
           {equityQuery.error ? (
@@ -426,8 +468,8 @@ export function OverviewPage() {
                   points={curve}
                   range={range}
                   height={CHART_HEIGHT}
-                  baseline={totalBaseline > 0 ? totalBaseline : undefined}
-                  primaryLabel="总归属权益"
+                  baseline={committedCapital > 0 ? committedCapital : undefined}
+                  primaryLabel={BALANCE_LABEL.equity}
                 />
               </Suspense>
             </Panel>
@@ -493,7 +535,7 @@ export function OverviewPage() {
               traders={snapshotRows}
               statsMap={statsMap}
               liveStatus={liveStatus}
-              totalEquity={totalEquity}
+              fleet={fleet}
               equityOf={equityOf}
               recentTrades={recentTrades}
               busyId={busyId}

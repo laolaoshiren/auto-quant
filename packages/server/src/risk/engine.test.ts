@@ -249,7 +249,7 @@ test('rejects an entry whose stop is closer than K times the round-trip fee', ()
   const reason = verdict.rejected[0]!.reason;
   assert.match(reason, /往返手续费/);
   assert.match(reason, /0\.200%/, '拒绝理由要带上这一笔真实的止损幅度');
-  assert.match(reason, /0\.300%/, '拒绝理由要带上这个费率下允许的最小止损幅度');
+  assert.match(reason, /0\.3000%/, '拒绝理由要带上这个费率下允许的最小止损幅度');
   assert.doesNotMatch(reason, /盈亏比/, '这条校验排在盈亏比之前，理由是止损距离本身');
 });
 
@@ -299,7 +299,7 @@ test('falls back to the configured fee rate while the account has no fills yet',
 
   assert.equal(verdict.approved.length, 0);
   assert.match(verdict.rejected[0]!.reason, /配置的兜底费率/);
-  assert.match(verdict.rejected[0]!.reason, /0\.600%/);
+  assert.match(verdict.rejected[0]!.reason, /0\.6000%/);
 });
 
 test('a stop far wider than the fee floor is untouched', () => {

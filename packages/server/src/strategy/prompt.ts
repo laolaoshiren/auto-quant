@@ -718,20 +718,21 @@ function renderUserPrompt(
   parts.push(renderRecentCloses(ctx.memory.recentCloses, ctx.now));
   parts.push(renderThrottleBudget(ctx.memory.throttle));
 
-  /* 5 — Recent closed trades -------------------------------------------- */
-  if (ctx.recentTrades.length > 0) {
-    const lines = ctx.recentTrades.slice(0, 10).map((t, index) => {
-      return `${index + 1}. ${t.symbol} ${t.side === 'long' ? '多头' : '空头'} | 入场 ${fmt(t.entryPrice)} → 出场 ${fmt(
-        t.exitPrice,
-      )} | ${t.leverage}x | 盈亏 ${fmtSigned(t.pnl)}（${fmtPercent(t.pnlPercent)}）| 持仓 ${humanDuration(
-        t.holdMinutes,
-      )} | 平仓原因：${closeReasonLabel(t.closeReason)}`;
-    });
-    const wins = ctx.recentTrades.filter((t) => t.pnl > 0).length;
-    parts.push(
-      `# 最近已平仓交易（最新的在前）\n${lines.join('\n')}\n\n近期战绩：${ctx.recentTrades.length} 笔中盈利 ${wins} 笔。`,
-    );
-  }
+  /*
+   * 这里原有一个 `# 最近已平仓交易` 区块，**已删除**。
+   *
+   * 它和上面第 4 段的 `# 最近平仓` 讲的是同一批成交，但两者对同一笔给出
+   * **不同的盈亏数字**：旧区块用 `t.pnl`（毛），新区块用净额。
+   * 模型在同一个提示词里看到两个互相矛盾的"这笔赚了多少"，而两者都没写口径 ——
+   * 那比少给信息更糟。
+   *
+   * 新区块还多两样旧区块没有的东西：**模型当时的入场理由**（§2.2 —— 那是唯一
+   * 能让它发现自己某个判断模式不奏效的机制），以及固定的 5 笔上限（O(1)）。
+   * 旧区块的「近期战绩 N 笔中盈利 M 笔」也已由 `# 你的交易绩效` 里的
+   * 「15 笔（6 胜 9 负）」覆盖。
+   *
+   * 所以删除它不丢任何信息，只去掉重复与矛盾。
+   */
 
   /* 6 — Open positions --------------------------------------------------- */
   if (ctx.positions.length === 0) {
