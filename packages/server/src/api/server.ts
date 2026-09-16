@@ -907,6 +907,8 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         apiKey: parsed.data.apiKey,
         apiSecret: parsed.data.apiSecret,
         dryRun: true,
+        // 一次性的连通性自检：结论由下面的 preflight 报告，不必广播"已连接"。
+        quiet: true,
       });
       const checks = await preflight(connection, { requireCredentials: true });
       return { ok: checks.every((c) => c.ok || !c.blocking), checks };
@@ -960,6 +962,8 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         apiKey: row.api_key,
         apiSecret: deps.vault.decrypt(row.api_secret_enc),
         dryRun: true,
+        // 同上：自检结果由 preflight 报告。
+        quiet: true,
       });
       const checks = await preflight(connection, { requireCredentials: true });
       return { ok: checks.every((c) => c.ok || !c.blocking), checks };
@@ -1405,6 +1409,12 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         apiKey: row.api_key,
         apiSecret: deps.vault.decrypt(row.api_secret_enc),
         dryRun: true,
+        /*
+         * 这条连接是**一次性**的：控制台每次轮询都会重建它，只为拿到交易所
+         * 真实持仓（而不是本地镜像）。不加这个开关时，`loaded 528 tradable...`
+         * 会每 44 秒写一条 —— 30 分钟 41 条，而同期只有 11 个周期。
+         */
+        quiet: true,
       });
       const [account, livePositions] = await Promise.all([
         connection.broker.getAccountState(),
