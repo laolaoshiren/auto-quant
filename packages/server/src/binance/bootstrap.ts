@@ -30,6 +30,20 @@ export interface ConnectOptions {
   dryRun?: boolean;
   /** Override the WebSocket host (testnet hosts are genuinely ambiguous). */
   wsHostOverride?: string;
+
+  /**
+   * 不广播"已连接 / 已加载合约"这两条启动日志。
+   *
+   * 给**一次性只读连接**用 —— 控制台为了显示交易所真实持仓，每次轮询都会
+   * 临时建一条这样的连接（见 `liveExchangeView`）。那两条日志对真正启动的
+   * 连接有意义（操作者需要知道连上了哪个环境、时钟偏差多少），
+   * **但对每次轮询都重建的临时连接不是事件，只是某个端点的实现细节**。
+   *
+   * 实测不加这个开关时：`loaded 528 tradable...` 30 分钟出现 **41 次**，
+   * 而同期只有 11 个决策周期 —— 日志被这一条填满，真正的异常被埋掉。
+   * 这与"每个周期都成立的警告按事件每轮写一次"是同一类问题。
+   */
+  quiet?: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -66,18 +80,20 @@ export async function connectExchange(options: ConnectOptions): Promise<Exchange
 
   // 1. Clock sync before anything signed.
   const clockOffsetMs = await rest.syncTime(true);
-  log.info(
-    `connected to ${endpoints.label} (clock offset ${clockOffsetMs}ms)`,
-  );
+  if (!options.quiet) {
+    log.info(`connected to ${endpoints.label} (clock offset ${clockOffsetMs}ms)`);
+  }
 
   // 2 + 3. Exchange metadata: rate limits and symbol filters.
   const info = await rest.publicGet<BinanceExchangeInfo>('/fapi/v1/exchangeInfo');
   applyRateLimits(rest, info);
 
   const registry = SymbolRegistry.fromExchangeInfo(info);
-  log.info(
-    `loaded ${registry.size} tradable USDT-M perpetual contracts; weight budget ${rest.weightLimitPerMinute}/min`,
-  );
+  if (!options.quiet) {
+    log.info(
+      `loaded ${registry.size} tradable USDT-M perpetual contracts; weight budget ${rest.weightLimitPerMinute}/min`,
+    );
+  }
 
   const market = new BinanceMarketData(rest);
   const broker = new BinanceBroker(rest, market, registry, {
