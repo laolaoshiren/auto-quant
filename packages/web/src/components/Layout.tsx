@@ -174,7 +174,21 @@ export function Layout() {
       {/*  主列                                                             */}
       {/* ---------------------------------------------------------------- */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center gap-2 border-b border-base-800 bg-base-900/80 px-3 backdrop-blur sm:px-4">
+        {/*
+          顶栏用**不透明**背景，不用 backdrop-blur。
+          
+          原来这里是 `bg-base-900/80 backdrop-blur`。毛玻璃在深色界面上几乎看不出来
+          （80% 不透明的深色叠在深色页面上 ≈ 纯深色），代价却是实打实的：
+          
+          1. **它是整个页面里唯一一个常驻的 backdrop-filter。** Chrome 会为它创建
+             "背景根"，在某些 GPU 驱动、远程桌面或虚拟显示环境下，会把整页内容
+             错误地提升进滤镜图层 —— 表现为**整页均匀发虚、但布局完全正常**。
+             这正是操作者报告过的现象，而且极难从代码上看出来。
+          2. 它强制执行一次合成，滚动时每帧都要重算。
+          
+          用纯色换掉这两个风险，视觉上几乎没有区别。
+        */}
+        <header className="flex h-14 shrink-0 items-center gap-2 border-b border-base-800 bg-base-900 px-3 sm:px-4">
           <Button
             size="icon"
             variant="ghost"

@@ -457,7 +457,10 @@ export function StrategyEditorPage() {
       {/* ---------------------------------------------------------------- */}
       {/*  常驻控制区：返回 / 状态 / 操作 / 风控读数 / 分区导航              */}
       {/* ---------------------------------------------------------------- */}
-      <div className="sticky top-0 z-20 -mx-4 -mt-4 space-y-2 border-b border-base-800 bg-base-950/95 px-4 pb-2 pt-2 backdrop-blur">
+      {/* 常驻工具条：用不透明背景，不用 backdrop-blur —— 理由见 Layout 顶栏的注释：
+          常驻的 backdrop-filter 会让 Chrome 创建"背景根"，在部分 GPU/远程桌面环境下
+          把整页内容错误地模糊掉。这里 95% 不透明已经足够遮住滚动内容。 */}
+      <div className="sticky top-0 z-20 -mx-4 -mt-4 space-y-2 border-b border-base-800 bg-base-950 px-4 pb-2 pt-2">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <Link
             to="/strategy"
