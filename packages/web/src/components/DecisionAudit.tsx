@@ -7,7 +7,7 @@
  * here rather than being duplicated per surface.
  */
 import { type ReactNode } from 'react';
-import type { Decision, DecisionRecord, ExecutionLogEntry } from '@aq/shared';
+import type { DecisionRecord, ExecutionLogEntry } from '@aq/shared';
 import { orderPurposeLabel } from '@aq/shared';
 import { Badge, Button, Collapsible, CopyButton, type Tone } from './ui';
 import { useCopy } from '../lib/hooks';
@@ -113,105 +113,19 @@ export function ActionBadge({ action, className }: { action: string; className?:
 /*  Metric block for open proposals                                            */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Distance from entry, as a percentage.
+/*
+ * ⚠️ 这里原本有一个 `DecisionMetrics`：6 格数字表（数量 / 开仓价 / 止损 / 止盈 /
+ * 风险回报比 / 杠杆）+ 容器查询切 2/3 列，以及配套的 `distancePercent` 与
+ * `Metric` 帮助组件。**已按 `DECISION-FEED.md` §6 删除。**
  *
- * The decision itself carries no entry price — the feed resolves the symbol's
- * current price separately — so this returns `null` rather than guessing when
- * there is no reference price to measure against.
+ * 删掉的原因不是"参考里没有"这么简单，而是它连续三轮出溢出 bug：grid 的列有
+ * 最小内容宽度，而决策流在右栏里只有约 40% 宽，一个 `0.176800` 加上 `+26.67%`
+ * 就能撑破格子、把文字挤进相邻列。决策流现在把同样的数字打成**一行会折行的小字**
+ * （见 `DecisionFeed.tsx` 的 `figureParts`）—— 一行文本没有最小宽度，横向永不溢出。
+ *
+ * 如果将来别的页面（例如决策详情页）需要这张表，请在那里重新实现，**不要再放回
+ * 决策流** —— 那个位置容不下固定列宽的东西。
  */
-export function distancePercent(entry: number | null, level: number | null): string | null {
-  if (entry === null || level === null || entry === 0) return null;
-  const percent = ((level - entry) / entry) * 100;
-  return `${percent >= 0 ? '+' : ''}${percent.toFixed(2)}%`;
-}
-
-export function DecisionMetrics({ decision, price }: { decision: Decision; price: number | null }) {
-  const stopDistance = distancePercent(price, decision.stopLoss);
-  const targetDistance = distancePercent(price, decision.takeProfit);
-  const reward =
-    price !== null && decision.stopLoss !== null && decision.takeProfit !== null
-      ? Math.abs(decision.takeProfit - price) / Math.max(Math.abs(price - decision.stopLoss), 1e-9)
-      : null;
-
-  return (
-    /*
-     * ⚠️ 断点必须用**容器查询**（`@[..]`），不能用 `sm:` 这类视口断点。
-     *
-     * 这里原来写的是 `grid-cols-2 sm:grid-cols-3`。`sm:` 看的是**视口宽度**，
-     * 于是在 2192px 的屏幕上它强制 3 列 —— 可这张卡片本身只有约 270px 宽
-     * （决策卡在 2xl 下排 3 列，右栏又只占 40%）。每列约 75px，
-     * 装不下 `0.176800` 加上 `+26.67%`，于是文字互相挤压、飘到相邻列里：
-     *
-     *     数量        开仓价格    止损
-     *     （USDT）    0.176800   0.174000 -1.58%
-     *     $30.00
-     *     止盈        风险回报    杠杆
-     *     0.190000   1:4.71      5x
-     *     率.47%   ← 从上一格挤过来的
-     *
-     * 现在按**卡片自身宽度**决定列数：窄卡两列、够宽才三列。
-     * 父级 `DecisionCard` 上有 `@container`，这是 Tailwind 3.4 的内置能力。
-     */
-    <div className="decision-metrics mt-2 rounded-md border border-base-800 bg-base-850/40 px-3 py-2">
-      <Metric label="数量（USDT）" value={`${fmtUsd(decision.positionSizeUsd, 2)}`} />
-      <Metric label="开仓价格" value={price !== null ? fmtPriceShort(price) : '—'} />
-      <Metric
-        label="止损"
-        value={decision.stopLoss !== null ? fmtPriceShort(decision.stopLoss) : '无'}
-        tone="text-down"
-        suffix={stopDistance ?? undefined}
-      />
-      <Metric
-        label="止盈"
-        value={decision.takeProfit !== null ? fmtPriceShort(decision.takeProfit) : '无'}
-        tone="text-up"
-        suffix={targetDistance ?? undefined}
-      />
-      <Metric label="风险回报比" value={`1:${reward !== null && Number.isFinite(reward) ? reward.toFixed(2) : '—'}`} />
-      <Metric label="杠杆" value={`${decision.leverage}x`} />
-    </div>
-  );
-}
-
-function Metric({ label, value, tone, suffix }: { label: string; value: string; tone?: string; suffix?: string }) {
-  return (
-    <div className="min-w-0">
-      {/*
-        ⚠️ 这里原来写的是 `truncate text-xs uppercase tracking-wide text-ink-faint`，
-        结果是 `数量（USDT）` 被截成 `数量（...`、`风险回报比` 被截成 `风险回...`。
-
-        三个类各有问题：
-        · `truncate` —— 标签被切掉，而标签是读数字的前提（"0.185500" 是什么？）
-        · `uppercase` —— 中文没有大小写，这个类对全中文标签毫无作用
-        · `tracking-wide` —— 给中文加字距，**让本来就装不下的标签更宽**，
-          它才是把标签挤爆的主因
-
-        去掉后标签可能折成两行，但**两行也比看不懂强**。卡片高度自适应，不会错位。
-      */}
-      <div className="text-xs leading-tight text-ink-faint">{label}</div>
-      {/*
-        数值与百分比**分两行**，不并排。
-        
-        原来它们并排（`whitespace-nowrap` + `ml-1`），于是 `0.235600` 加 `-1.48%`
-        需要 102px —— 而一张 255px 的卡片分成两列后，每格只有 93px，**必然溢出**，
-        文字挤进相邻格（截图里那个飘到别处的 `率.47%` 就是这么来的）。
-        
-        价格是 4–6 位小数的等宽数字，本身就宽；把百分比折到下一行，
-        任何卡片宽度下都不会溢出，而且"价格 / 变动"分行读也更清楚。
-      */}
-      <div className={`num text-base leading-tight ${tone ?? 'text-ink-hi'}`}>{value}</div>
-      {suffix && <div className="num text-xs leading-tight text-ink-faint">{suffix}</div>}
-    </div>
-  );
-}
-
-/** Prices read better than a full float in a feed card; the audit page shows the rest. */
-function fmtPriceShort(value: number): string {
-  const abs = Math.abs(value);
-  const digits = abs >= 1000 ? 2 : abs >= 100 ? 3 : abs >= 1 ? 4 : 6;
-  return value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
-}
 
 /* -------------------------------------------------------------------------- */
 /*  Execution log                                                              */
