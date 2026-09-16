@@ -177,7 +177,7 @@ export function FaqPage() {
         }
       />
 
-      <PageShell rail={rail}>
+      <PageShell aside={rail}>
         {/* 风险警示：整页最重要的一段，放在所有人都会看到的位置 */}
         <section>
           <SectionLabel title="风险警示" />

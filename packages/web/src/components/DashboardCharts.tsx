@@ -102,7 +102,7 @@ export function DashboardEquityChart({
 
   if (points.length < 2) {
     /*
-     * 空状态**不占高度**（LAYOUT.md §4）。
+     * 空状态**不占高度**（`LAYOUT.md` §3：图表只在有数据可看时才占大块）。
      *
      * 这里原来渲染一个 `style={{ height }}` 的虚线盒子（默认 240px），于是
      * "还没有快照"这个状态和一张真图表占一样多的地方 —— 而它一个字的信息量
@@ -219,7 +219,7 @@ export function DashboardEquityChart({
  *
  * 层级上它只有一个主读数：条本身（`h-1`）。两侧的计数留在 `text-xs`，因为
  * 真正的"胜率"数字由调用方以更大的字号单独给出 —— 在这里再放大一次，等于
- * 同一个数在一屏里出现两次同等权重（LAYOUT.md §2）。
+ * 同一个数在一屏里出现两次同等权重（DESIGN.md §4"不要把所有东西做成一样大"）。
  */
 export function WinLossBar({ wins, losses }: { wins: number; losses: number }) {
   const total = wins + losses;

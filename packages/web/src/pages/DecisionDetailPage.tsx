@@ -143,7 +143,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
         </div>
       )}
 
-      <PageShell rail={rail}>
+      <PageShell aside={rail}>
         {/* Decisions ------------------------------------------------------- */}
         {/*
           The parsed decisions get the full width, first. They are what the page

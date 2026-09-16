@@ -70,12 +70,28 @@ const ACTION_STRIPE: Record<string, string> = {
 const FEED_LIMIT = 50;
 
 /**
- * 决策流的可视高度。
+ * 决策流。它住在交易页的**右栏**（`LAYOUT.md` §2）。
  *
- * 可以给数字（px），也可以给 CSS 长度 —— 交易页给的是 `max(380px, calc(100vh - …))`：
- * 这一页的主内容就是决策流，高度跟着视口走才不会在 4K 上缩成一小条。
+ * ## 高度：填满所在的那一栏，而不是自己算一个视口高度
+ *
+ * 这里曾经有一个 `height` 参数，交易页传的是 `max(380px, calc(100vh - 18rem))`。
+ * 那个写法在"左指标栏 + 主内容"的旧骨架里是唯一可行的做法 —— 决策流是主内容区里
+ * 的**第一块**，它上面的页头有多高只有页面自己知道，于是只能靠手算一个 `18rem`
+ * 去凑。骨架改成两栏之后这个数就没法对了：右栏的顶边等于内容区顶边，要减多少
+ * 完全由外壳（顶栏高度 + 页面内边距）决定，页面再算一次必然算错。
+ *
+ * 现在分成两件事：
+ *
+ * - **`xl` 及以上**：`PageShell` 的右栏在 `h-full` 的高度链上拿到了"可视区 − 顶栏"
+ *   这份确定高度，所以面板 `h-full`、表头 `shrink-0`、卡片区 `flex-1 min-h-0
+ *   overflow-y-auto` —— 决策流自己撑满整栏，滚动条只有一条（在卡片区），
+ *   「最近决策」这一行钉在顶上不跟着滚走。
+ * - **`xl` 以下**：两栏塌成一列，右栏落到主内容下面，父级高度是 `auto`，
+ *   `h-full` 会解析成 `auto`。这时 `max-h-[calc(100dvh-16rem)]` 兜底 ——
+ *   没有它，50 个周期会把整页撑成一条长条，正是 §2 要避免的。
+ *   `xl:max-h-none` 把上限交还给上面那条 flex 高度链。
  */
-export function DecisionFeed({ traderId, height = 720 }: { traderId: number; height?: number | string }) {
+export function DecisionFeed({ traderId }: { traderId: number }) {
   const live = useEvents((s) => s.byTrader[traderId]?.decisions);
   const query = usePolled((signal) => api.traderDecisions(traderId, FEED_LIMIT, signal), {
     intervalMs: 20_000,
@@ -95,7 +111,8 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
 
   if (query.loading && records.length === 0) {
     return (
-      <Panel title="最近决策" padded={false} bodyClassName="p-0">
+      // 加载态也占满整栏：否则数据一到位，这一栏会突然从一小条跳成整屏高。
+      <Panel title="最近决策" padded={false} className="flex h-full min-h-0 flex-col" bodyClassName="flex min-h-0 flex-1 flex-col p-0">
         <Spinner3 label="正在加载决策" />
       </Panel>
     );
@@ -106,7 +123,10 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
   return (
     <Panel
       padded={false}
-      bodyClassName="p-0"
+      /* 填满右栏：面板 `h-full` + 一个 `min-h-0` 的纵向 flex，卡片区才能拿到
+         "剩下的高度"并自己滚动（见组件顶部注释）。 */
+      className="flex h-full min-h-0 flex-col"
+      bodyClassName="flex min-h-0 flex-1 flex-col p-0"
       title={
         <span className="flex items-center gap-2">
           最近决策
@@ -140,13 +160,20 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
         // One scroll container. Every cycle renders its decisions in full; only
         // the reasoning block inside each module is collapsible.
         //
+        // `flex-1 min-h-0`：高度来自右栏（`h-full` 的确定高度），不是 `max-height`。
+        // `min-h-0` 不能省 —— flex 子项默认 `min-height: auto`，那一项会让滚动区
+        // 永远不肯比内容矮，于是滚动条跑到整栏外面去。
+        //
+        // `max-h-[calc(100dvh-16rem)]` 只在 `xl` 以下生效：那时右栏塌到主内容下面，
+        // 高度是内容高度，没有这个上限就会把整页撑长。
+        //
         // `space-y-2.5` 而不是相邻的 `border-b`：40 个周期用一条接一条的分隔线排下来，
         // 会连成一整片、分不清哪里是上一个周期的结尾。让每个周期成为**独立的一张卡**，
         // 靠间距和卡片边界来分组，扫读时才知道自己在看哪一轮。
         //
-        // 间距按 `LAYOUT.md` §2 收紧（卡内与间隙各减 2px）：这一页是操作者会一直
+        // 间距按设计规范收紧（卡内与间隙各减 2px）：这一页是操作者会一直
         // 滚的地方，同样的屏幕高度里多挤进一轮就多一分用。
-        <div className="space-y-2.5 overflow-y-auto p-2.5" style={{ maxHeight: height }}>
+        <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-2.5 max-h-[calc(100dvh-16rem)] xl:max-h-none">
           {shown.map((record) => (
             <CycleBlock
               key={record.id}

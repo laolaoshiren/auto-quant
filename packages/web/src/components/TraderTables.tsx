@@ -56,7 +56,7 @@ function CapNote({ shown, total }: { shown: number; total: number }) {
 }
 
 /**
- * 空表格只留一行（`LAYOUT.md` §4）。
+ * 空表格只留一行。
  *
  * 不用 `ui.Empty`：它的 `py-10` 是给整页空状态用的，放进表格里会在面板中间
  * 留出半屏空白 —— 那正是这次改造要修的东西。空表要说的只有"现在没有"，
@@ -611,8 +611,8 @@ export function TraderTables({
         </div>
       </div>
 
-      {/* 空表格不占位（§4）：`min-h` 曾经给这一区留了 220px，于是"暂无持仓"
-          下面跟着一片空白。高度交给内容，有行时才需要滚动。 */}
+      {/* 空表格不占位：`min-h` 曾经给这一区留了 220px，于是"暂无持仓"下面跟着
+          一片空白。高度交给内容，有行时才需要滚动。 */}
       <div>
         {tab === 'positions' && <PositionsTable traderId={traderId} onCloseRequest={setCloseTarget} />}
         {tab === 'orders' && <OrdersTable traderId={traderId} onlyOpen refreshToken={token} />}
