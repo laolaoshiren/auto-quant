@@ -41,6 +41,6 @@ jobs:
       # 不 checkout：配置由 action 通过 API 从默认分支读取，runner 上不需要代码。
       # 少一次检出就少一次"把仓库内容放到 runner 上"的机会。
       - name: 生成 / 更新草稿
-        uses: release-drafter/release-drafter@v6
+        uses: release-drafter/release-drafter@v7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
