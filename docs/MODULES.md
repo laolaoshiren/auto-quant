@@ -61,7 +61,7 @@ export * from './indicators.js'; export * from './symbols.js';
 
 ```ts
 export const CLOSE_REASONS = ['model_decision','stop_loss','take_profit','drawdown_guard',
-                              'liquidated','external','reconciled'] as const;
+                              'liquidated','external','protection_unavailable','reconciled'] as const;
 export type CloseReason = (typeof CLOSE_REASONS)[number];
 ```
 
@@ -267,13 +267,15 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | --- | --- | --- | --- |
 | `autoTrader.ts` | **一个机器人的自主循环**（12 步周期，见 `DEVELOPMENT.md` 第 5 节的表）。含对账、回撤守卫、执行、保护单、紧急平仓、审计落库 | `AutoTrader`（`runOnce` / `reconcileTradeHistory` / `currentStatus`）、`AutoTraderDeps`、`DecisionModel` | `@aq/shared`、`binance/*`、`market/service.js`、`risk/engine.js`、`strategy/*`、`store/repositories.js`、`./roundTrips.js` |
 | `manager.ts` | **多机器人生命周期**：每个机器人独立的交易所连接 / 行情缓存 / 模型客户端；启动预检；停止；单次运行；对账；重启恢复；用户数据流（**只告警**） | `TraderManager`（`startTrader`/`stopTrader`/`runCycleNow`/`reconcileTrader`/`reconcileAllTraders`/`stopAll`/`resumePersisted`/`isRunning`/`runningIds`/`statusOf`）、`StartResult` | 大多数上层模块 |
-| `roundTrips.ts` | **从交易所成交历史重建完整回合**（净盈亏口径与对账的基础）；本地/交易所回合的匹配键 | `reconstructRoundTrips()`、`roundTripKey()`、`ReconstructedTrade` | `binance/types.js` |
+| `roundTrips.ts` | **从交易所成交历史重建完整回合**（净盈亏口径与对账的基础）；本地/交易所回合的匹配键 | `reconstructRoundTrips()`、`roundTripKey()`（含 `entryOrderId`，同标同价同量的两个回合不冲突）、`roundTripQueryKey()`（仅用于「本地行没记入口订单号」的回退查找）、`ReconstructedTrade` | `binance/types.js` |
 
 `DecisionModel` 是**结构化声明**的接口（只有 `complete()`），不是导入具体客户端——
 这是为了让交易循环可以用桩测试、并且不耦合任何提供商。`manager.ts` 在组装时把 `LlmClient` 包一层塞进去。
 
 `TraderManager.reconcileTrader()` 刻意用**一个会抛错的桩模型**（`complete: () => Promise.reject(...)`）：
 对账只读交易所成交历史、从不问 LLM，把它变成结构性事实，意味着**一个坏掉的 API Key 永远无法阻止账本被修正**。
+机器人**正在运行**时，该端点不再另建一个 `AutoTrader`，而是走 `AutoTrader.runReconcile()`——它会先等
+在跑的那一轮周期结束（有超时上限），因为两个实例并发对账会重复记账。
 
 `reconcileAllTraders()` 是**顺序**执行的，理由是权重预算：一次开机就并发十几个对账会花光实盘交易需要的额度；
 而且单个机器人失败不能中断其它机器人的修正。

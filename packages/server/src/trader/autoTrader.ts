@@ -202,7 +202,20 @@ export class AutoTrader {
     this.running = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    await this.waitForIdle();
+    const drained = await this.waitForIdle();
+    if (!drained) {
+      /*
+       * The wait is bounded so a wedged exchange call cannot hang shutdown
+       * forever — but a timeout must be **loud**, because the state it leaves is
+       * the dangerous one: the cycle may be sitting between "entry filled" and
+       * "stop placed", and the next cycle that would have fixed it can never run
+       * now that the loop is stopped. That needs a human.
+       */
+      this.emit(
+        'error',
+        `停止时上一轮决策未在时限内结束，可能留下未挂保护单的仓位。请人工核对交易所持仓与挂单。`,
+      );
+    }
     this.setStatus('stopped', null);
     this.emit('info', `机器人「${this.deps.trader.name}」已停止（${reason}）`);
   }
@@ -303,7 +316,7 @@ export class AutoTrader {
    * rather than races.
    */
   async runReconcile(): Promise<{ recovered: number; corrected: number; funding: number }> {
-    const idle = true;
+    const idle = await this.waitForIdle();
     if (!idle) {
       // The cycle is stuck on something slow rather than finished. Skipping is
       // safe: the cycle reconciles at its own head, and this pass is a repair,
