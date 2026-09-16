@@ -1062,7 +1062,65 @@ export class AutoTrader {
      */
     const fundingFee = await this.fundingFor(local.symbol, local.opened_at, closedAt);
 
-    const tradeId = tradeStore.insert({
+    /*
+     * 上锁前先问一次：这一回合是不是已经记过账了？
+     *
+     * 对账（`reconcileTradeHistory`）在周期开头跑，`reconcilePositions` 在周期末尾跑，
+     * 两者都可能看到同一个已经消失的仓位。`positionStore.close()` 只能保证**本进程内**
+     * 不会重复记账，而这里要保证的是"同一个真实回合在 `trades` 里只有一行"——
+     * 所以判定必须在写账之前，用的身份与 `trades.insert()` 里的完全一致
+     * （`trades.findDuplicate()` 是同一个实现，不存在两套判据）。
+     */
+    const alreadyBooked = tradeStore.findDuplicate({
+      traderId,
+      symbol: local.symbol,
+      quantity: authoritative?.quantity ?? local.quantity,
+      entryPrice: local.entry_price,
+      closedAt,
+      entryOrderId: authoritative?.entryOrderId ?? null,
+    });
+    if (alreadyBooked !== null) {
+      if (authoritative) {
+        /*
+         * 运行期拿到了成交记录的权威口径，就把它写到已有那一行上 —— 这正是
+         * §2.5 的"重复执行只修正"：`net_pnl` 仍然只在
+         * `trades.insert()` / `applyExchangeFigures()` 里算过一次。
+         *
+         * 为什么必须修正而不是"找到就什么都不做"：运行期与对账对同一回合取到的
+         * 数量口径本来就可能不同（本地持仓量 vs 交易所实际成交量）。如果只认"已存在"
+         * 而把交易所的数字丢掉，账本里留下的就是那个较粗的口径 —— 与账户对不上，
+         * 而 §2.5 要求账目必须能与交易所对得上。
+         */
+        tradeStore.applyExchangeFigures({
+          id: alreadyBooked,
+          grossPnl: authoritative.grossPnl,
+          entryFee: authoritative.entryFee,
+          exitFee: authoritative.exitFee,
+          fundingFee,
+          entryPrice: authoritative.entryPrice,
+          exitPrice: authoritative.exitPrice,
+          quantity: authoritative.quantity,
+          leverage: local.leverage,
+          entryOrderId: authoritative.entryOrderId || null,
+          exitOrderId: authoritative.exitOrderId || null,
+        });
+      }
+      positionStore.close(local.id);
+      tradeEvents.record(traderId, local.symbol, 'exit');
+      const existing = tradeStore.list(traderId, 200).find((t) => t.id === alreadyBooked);
+      this.emit(
+        'info',
+        `${local.symbol} 的平仓此前已入账（第 #${alreadyBooked} 笔），本次不再重复记录；净 ${(existing?.netPnl ?? 0).toFixed(4)} USDT。`,
+      );
+      return {
+        netPnl: existing?.netPnl ?? 0,
+        grossPnl: existing?.pnl ?? grossPnl,
+        exitPrice: existing?.exitPrice ?? exitPrice,
+        quantity: existing?.quantity ?? local.quantity,
+      };
+    }
+
+    const booked = tradeStore.insert({
       traderId,
       symbol: local.symbol,
       side: isLong ? 'long' : 'short',
@@ -1080,7 +1138,10 @@ export class AutoTrader {
       source: 'bot',
       entryOrderId: authoritative?.entryOrderId ?? null,
       exitOrderId: authoritative?.exitOrderId ?? null,
+      // 这是一笔真实平仓：先查重，别把同一回合记两次（§2.5 的幂等）。
+      idempotent: true,
     });
+    const tradeId = booked.id;
 
     positionStore.close(local.id);
     tradeEvents.record(traderId, local.symbol, 'exit');
@@ -1088,17 +1149,32 @@ export class AutoTrader {
     const record = tradeStore.list(traderId, 200).find((t) => t.id === tradeId);
     if (record) eventBus.publish({ type: 'trade', traderId, trade: record });
 
-    // Log the **net** figure: it is what actually moved the balance, and the
-    // gross number was what made the console disagree with the account.
+    /*
+     * Log the **net** figure: it is what actually moved the balance, and the
+     * gross number was what made the console disagree with the account.
+     */
     const net = record?.netPnl ?? grossPnl - entryFee - exitFee - fundingFee;
     const sign = net >= 0 ? '+' : '';
     const costNote =
       entryFee + exitFee > 0 ? `，含手续费 ${(entryFee + exitFee).toFixed(4)}` : '';
     const fundingNote = fundingFee !== 0 ? `，含资金费 ${fundingFee.toFixed(4)}` : '';
-    this.emit(
-      'info',
-      `已平仓 ${local.symbol} ${local.side === 'long' ? '多头' : '空头'} @ ${exitPrice} → 净 ${sign}${net.toFixed(4)} USDT（毛 ${grossPnl >= 0 ? '+' : ''}${grossPnl.toFixed(4)}${costNote}${fundingNote}，${closeReasonLabel(reason)}）`,
-    );
+    if (!booked.created) {
+      /*
+       * 这一回合已经记过账了（对账先补录、运行期后到），`insert()` 把那一行还了回来。
+       * 不新增行，也**不再播报一次"已平仓"** —— 否则操作员会以为账户上真的平了两次。
+       * 保留的仍是运行期发现的平仓原因（`stop_loss` / `take_profit` 比 `reconciled`
+       * 信息多），所以这里只把重复这件事说清楚。
+       */
+      this.emit(
+        'info',
+        `${local.symbol} 的平仓此前已入账（第 #${tradeId} 笔），本次不再重复记录；净 ${sign}${net.toFixed(4)} USDT。`,
+      );
+    } else {
+      this.emit(
+        'info',
+        `已平仓 ${local.symbol} ${local.side === 'long' ? '多头' : '空头'} @ ${exitPrice} → 净 ${sign}${net.toFixed(4)} USDT（毛 ${grossPnl >= 0 ? '+' : ''}${grossPnl.toFixed(4)}${costNote}${fundingNote}，${closeReasonLabel(reason)}）`,
+      );
+    }
 
     return {
       netPnl: net,
@@ -1384,6 +1460,17 @@ export class AutoTrader {
          * corrupts the ledger permanently while a skip corrects itself the moment
          * the order row exists.
          */
+        /*
+         * 这段"归属闸门"（`ownOrders`）必须先说清楚它管什么、不管什么：
+         * 它回答的是"这一回合是不是**本机器人**开的"，用来防止同一个交易所账户下的
+         * 多个机器人各自把账户的全部盈亏记到自己账上。
+         *
+         * 它**不**回答"这一回合是不是已经记过账了"。运行期从本地持仓行记的那一行
+         * 完全属于这台机器人，闸门照样放行 —— 于是同一回合被记两次（实盘上
+         * SYNUSDT 99/169、LSKUSDT 35 三组，凭空多出 +0.4954）。幂等由
+         * `trades.insert()` 内部的身份判定负责（见 `trades.findDuplicate()`），
+         * 而不是由这道闸门负责；两者的职责不要混。
+         */
         if (!trip.entryOrderId || !ownOrders.has(trip.entryOrderId)) {
           log.debug(
             `[${this.deps.trader.name}] 跳过非本机器人开立的成交：${symbol} ${trip.quantity} @ ${trip.entryPrice}（入口订单 ${trip.entryOrderId || '未知'}）`,
@@ -1391,7 +1478,8 @@ export class AutoTrader {
           continue;
         }
 
-        const tradeId = tradeStore.insert({          traderId,
+        const booked = tradeStore.insert({
+          traderId,
           symbol: trip.symbol,
           side: trip.side,
           quantity: trip.quantity,
@@ -1408,8 +1496,45 @@ export class AutoTrader {
           source: 'reconciled',
           entryOrderId: trip.entryOrderId || null,
           exitOrderId: trip.exitOrderId || null,
+          // 这是从交易所成交重建出的真实回合：同一回合已经记过就只修正，不再插一行。
+          idempotent: true,
         });
-        byKey.set(key, tradeId);
+        /*
+         * 无论本次是"新插入"还是"命中已有行"，这条成交都已经被账本认领了，所以
+         * 两个索引都要更新 —— 否则同一遍里第二笔长相相同的成交会绕过刚刚建立的
+         * 认知（`byKey.set` 原来只在新插入时做，是因为那时没有第二种结果）。
+         */
+        byKey.set(key, booked.id);
+
+        if (!booked.created) {
+          /*
+           * 这一回合运行期已经记过账了：`insert()` 认出并返回了那一行。
+           * 这里**不算补录、也不播报补录** —— 账本一行没多，"补录了 N 笔"的日志
+           * 会让操作员以为发生过漏记，而漏记才是需要警惕的信号。
+           *
+           * 但要把交易所的权威口径写到那一行上（§2.5 的"只修正"）：运行期是从本地
+           * 持仓行记的，数量与手续费口径都比成交记录粗；不修正，账本就停在一个
+           * 与账户对不上的数字上。
+           */
+          tradeStore.applyExchangeFigures({
+            id: booked.id,
+            grossPnl: trip.grossPnl,
+            entryFee: trip.entryFee,
+            exitFee: trip.exitFee,
+            fundingFee: funding,
+            entryPrice: trip.entryPrice,
+            exitPrice: trip.exitPrice,
+            quantity: trip.quantity,
+            leverage: this.leverageFor(symbol),
+            entryOrderId: trip.entryOrderId || null,
+            exitOrderId: trip.exitOrderId || null,
+          });
+          log.debug(
+            `[${this.deps.trader.name}] 对账发现 ${symbol} 的这一回合已在账上（第 #${booked.id} 笔），只修正不重复插入。`,
+          );
+          continue;
+        }
+
         recovered += 1;
 
         const net = trip.grossPnl - trip.fee - funding;

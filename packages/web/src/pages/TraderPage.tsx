@@ -6,17 +6,16 @@ import {
   ChevronRight,
   ChevronUp,
   Play,
-  RefreshCw,
-  RotateCw,
   Settings2,
   Square,
+  Zap,
 } from 'lucide-react';
 import type { EquitySnapshot } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
-import { useReconcile, useRunOnce } from '../lib/actions';
+import { useRunOnce } from '../lib/actions';
 import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import { TraderStatusBadge } from '../components/Badges';
 import { PageShell, Metric } from '../components/shell';
@@ -140,11 +139,7 @@ export function TraderPage() {
    * 换一段窗口本来就该重新看一眼。
    */
   const [chartOverride, setChartOverride] = useState<boolean | null>(null);
-  // Bumped after a manual 对账 so the tables refetch instead of waiting out
-  // their 15-second poll.
-  const [tradesToken, setTradesToken] = useState(0);
   const { runOnce, busyId: runOnceBusyId } = useRunOnce();
-  const { reconcile, busyId: reconcileBusyId } = useReconcile();
 
   const tradersQuery = usePolled((signal) => api.traders(signal), {
     intervalMs: socketOpen ? 8000 : 4000,
@@ -300,26 +295,6 @@ export function TraderPage() {
     }
   };
 
-  /**
-   * Rebuild the books from the exchange's own fill history.
-   *
-   * Works while the bot is stopped — that is the point: a position closed by an
-   * exchange-side take-profit while the process was down is only recoverable
-   * this way. Never places an order.
-   */
-  const onReconcile = async () => {
-    if (!trader) return;
-    const outcome = await reconcile(trader.id, trader.name);
-    if (!outcome.ok) {
-      setActionError(outcome.message);
-      return;
-    }
-    setActionError(null);
-    setTradesToken((n) => n + 1);
-    await fetchStats(trader.id);
-    await tradersQuery.reload();
-  };
-
   /*
    * 这三个提前返回也要自己加内边距：外壳不再替页面留边（见文件末尾的注释），
    * 少了它，错误提示会贴着屏幕左上角。
@@ -355,6 +330,39 @@ export function TraderPage() {
   }
 
   const statsCost = stats ? statsCosts(stats) : null;
+
+  /**
+   * 「立即分析」——**只跑一个决策周期，不启动机器人**。
+   *
+   * 启动是页头的「启动」。旧名字「立即运行」把这两件事混成一件，会让人以为点了
+   * 就开始交易了；参考产品把同一个动作叫「立即分析」，这里照抄它。
+   *
+   * 它现在住在右栏决策流的**面板头**里（`DECISION-FEED.md` §1 的参考形态是
+   * `最近决策   ⚡立即分析   ↻`）：结果就落在这个面板里，按钮放在结果旁边，
+   * 点完不必再把视线挪回页头。为此它作为一个**元素**传给 `DecisionFeed`，
+   * 决策流因此不需要知道 `useRunOnce`，也不需要知道忙的是哪个机器人。
+   *
+   * 仍然**只在机器人运行时出现**：`runCycleNow` 在找不到运行实例时会直接抛
+   * 「该机器人当前未在运行。」（`manager.ts`），摆一个按下去必然报错的按钮，
+   * 就是在界面上写一句不成立的话（`LAYOUT.md` §7）。忙闲、提示与 toast 全部沿用
+   * `useRunOnce`（只跑一轮，不做别的）。
+   */
+  const runNowAction = running ? (
+    <Button
+      size="sm"
+      variant="primary"
+      busy={runOnceBusyId === trader.id}
+      title="立即分析一次：强制执行一个决策周期，不等间隔。它不会启动机器人 —— 要开始交易请用页头的「启动」。"
+      onClick={() => void runOnce(trader.id, trader.name)}
+    >
+      {/*
+        闪电而不是循环箭头：面板头的「刷新」用的就是循环箭头，两个一样的图标并排会
+        分不清哪个是刷新记录、哪个是跑一轮。参考产品这一格（`⚡立即分析`）也是闪电。
+      */}
+      <Zap aria-hidden className="h-3.5 w-3.5" />
+      立即分析
+    </Button>
+  ) : null;
 
   /*
    * B. 指标行：4 个关键数字，**横排卡片**（`LAYOUT.md` §0 规则 3）。
@@ -534,7 +542,9 @@ export function TraderPage() {
      * 也不再设 `max-w`：§2 明确说主内容区不设最大宽度 —— 宽屏上把空间给图表和表格。
      */
     <div className="h-full">
-      <PageShell aside={<DecisionFeed traderId={traderId} running={running} />}>
+      <PageShell
+        aside={<DecisionFeed traderId={traderId} running={running} actions={runNowAction} />}
+      >
         {/* A. 页头：我是谁 + 什么状态 + 能做什么，常驻一行 --------------- */}
         <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <Link
@@ -561,18 +571,22 @@ export function TraderPage() {
             </Badge>
           )}
 
+          {/*
+            页头只留「启动 / 停止」与「配置」。
+
+            · 「立即分析」搬去了右栏决策流的面板头 —— 它跑出来的那一轮就落在那个面板里，
+              摆在结果旁边比摆在页头更近（见上面 `runNowAction`）。
+            · 「对账」删掉：对账是服务端**自己按周期做**的，不靠人按 —— 运行中的机器人
+              每个决策周期都浅对账最近 30 天，并且每 24 轮做一次覆盖全生命周期的深对账
+              （`autoTrader.ts` 的 `reconcileTradeHistory()` / `FULL_RECONCILE_EVERY_PASSES`），
+              服务启动时再对所有机器人跑一次（`index.ts` 的 `reconcileAllTraders()`）。
+              常驻一个手动按钮反而在暗示"不按就不对账"，那是假的。
+              注意边界：**停止中**的机器人不在周期对账的覆盖范围内，它只在服务启动
+              那一次被对账（或重新启动机器人之后）。接口仍然在
+              （`POST /api/traders/:id/reconcile`、`lib/actions.ts` 的 `useReconcile`），
+              只是控制台不再提供一个按钮。
+          */}
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
-            {trader.isRunning && (
-              <Button
-                variant="primary"
-                busy={runOnceBusyId === trader.id}
-                title="立即强制执行一个决策周期，无需等待间隔"
-                onClick={() => void runOnce(trader.id, trader.name)}
-              >
-                <RotateCw aria-hidden className="h-3.5 w-3.5" />
-                立即运行
-              </Button>
-            )}
             {trader.isRunning ? (
               <Button variant="danger" busy={busy} onClick={() => void stop()}>
                 <Square aria-hidden className="h-3.5 w-3.5" />
@@ -587,14 +601,6 @@ export function TraderPage() {
             <Button onClick={() => setConfigOpen(true)} disabled={trader.isRunning} title="请先停止该机器人再编辑">
               <Settings2 aria-hidden className="h-3.5 w-3.5" />
               配置
-            </Button>
-            <Button
-              busy={reconcileBusyId === trader.id}
-              title="从交易所自己的成交历史重建本机器人的账本（不下任何订单）：补录漏记的平仓、修正手续费与资金费。机器人停止时也可用。"
-              onClick={() => void onReconcile()}
-            >
-              <RefreshCw aria-hidden className="h-3.5 w-3.5" />
-              对账
             </Button>
           </div>
         </header>
@@ -734,14 +740,21 @@ export function TraderPage() {
           )}
         </Panel>
 
-        {/* E. 表格：参考材料，不是盯盘对象 --------------------------- */}
+        {/*
+          E. 表格：参考材料，不是盯盘对象。
+
+          这里**不再传 `refreshToken`**。那个令牌原来只服务于「对账」按钮：按一下就在
+          本地把它加一，逼三张表立刻重取，省下等下一次轮询的十几秒。按钮删掉之后令牌
+          就没有生产者了。表格各自照常轮询 —— 持仓 5 秒、委托与成交各 15 秒（见
+          `TraderTables` 里的 `usePolled`），推送在线时还会被 WebSocket 的快照覆盖，
+          所以刷新路径没有丢，只是回到"它自己会更新"。
+        */}
         <TraderTables
           traderId={traderId}
           tab={tableTab}
           onChange={setTableTab}
           positionCount={openPositionCount}
           openOrderCount={openOrders.length}
-          refreshToken={tradesToken}
         />
 
         {/*

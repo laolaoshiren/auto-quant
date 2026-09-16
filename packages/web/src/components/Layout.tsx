@@ -230,29 +230,51 @@ export function Layout() {
             </span>
           )}
 
-          <span
-            className="hidden shrink-0 items-center gap-1.5 text-xs text-ink-lo sm:flex"
-            title={`实时事件推送：${socketStatus}`}
-          >
-            <Dot
-              tone={socketStatus === 'open' ? 'up' : socketStatus === 'connecting' ? 'warn' : 'down'}
-              pulse={socketStatus !== 'open'}
-            />
-            {socketStatus === 'open' ? '推送在线' : socketStatus}
-          </span>
+          {
+            /*
+              推送状态**只在异常时出现**。
+
+              原来常驻显示 `● 推送在线`，它和之前从顶栏删掉的 `时钟 +22 ms`、
+              `权重 59/2,400` 是同一类东西：99.9% 的时间显示"在线"，而且**断线时
+              系统会自动降级成轮询** —— 意思是这个指示器无论亮什么，操作者都不需要做任何事。
+
+              一个你永远不必对它采取行动的指示器，不该占着顶栏。
+              现在只在异常时出现，并说清后果（"轮询兜底"）而不是只报状态。
+            */
+          }
+          {socketStatus !== 'open' && (
+            <span
+              className="hidden shrink-0 items-center gap-1.5 text-xs text-warn sm:flex"
+              title="实时事件连接异常。页面已自动降级为轮询，数据仍会更新，只是延迟更大；无需手动操作，系统会自动重连。"
+            >
+              <Dot
+                tone={socketStatus === 'connecting' ? 'warn' : 'down'}
+                pulse
+              />
+              {socketStatus === 'connecting' ? '连接中 · 轮询兜底' : '推送断开 · 轮询兜底'}
+            </span>
+          )}
 
           {/* 搜索入口。显示 ⌘K 是要让人**发现**快捷键，而不是把快捷键藏在文档里 */}
           <button
             type="button"
             onClick={() => setPaletteOpen(true)}
             aria-label="打开命令面板"
-            className="flex h-9 min-w-0 items-center gap-2 rounded-md border border-base-700 bg-base-850 px-2.5 text-ink-lo transition hover:border-base-600 hover:text-ink-mid"
+            /*
+              收成一个图标按钮，不再是带占位文字的输入框。
+
+              原来那个框占着顶栏最显眼的位置，写着"搜索或跳转"，但它的价值随机器人
+              数量增长，而页面跳转这一项本来就和顶部导航重复（9 个导航项全都看得见）。
+              真正有用的是"快速启停某个机器人"——那个等机器人多了才成为高频操作。
+
+              所以保留能力、还回空间：⌘K 快捷键照旧可用，图标作为发现入口。
+              `title` 里带上快捷键，让不熟悉的人也能发现它。
+            */
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-base-700 bg-base-850 text-ink-lo transition hover:border-base-600 hover:text-ink-mid"
+            title="打开命令面板（⌘K）—— 快速跳转、切换机器人、启动或停止"
           >
             <Search aria-hidden className="h-4 w-4 shrink-0" />
-            <span className="hidden truncate text-base sm:inline">搜索或跳转</span>
-            <kbd className="num hidden shrink-0 rounded border border-base-700 bg-base-800 px-1.5 py-0.5 text-xs text-ink-faint sm:inline">
-              ⌘K
-            </kbd>
+            <span className="sr-only">打开命令面板（⌘K）</span>
           </button>
 
           <Tooltip content={`${user?.username ?? '—'}${user?.role ? ` · ${userRoleLabel(user.role)}` : ''}`} side="bottom">

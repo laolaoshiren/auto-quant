@@ -26,14 +26,17 @@ import { maskSecret, hashPassword, verifyPassword, DUMMY_PASSWORD_HASH } from '.
 import {
   aiModels,
   computeTraderStats,
+  DECISION_PAGE_DEFAULT,
   decisions as decisionStore,
   equity as equityStore,
   exchanges,
+  ORDER_PAGE_DEFAULT,
   orders as orderStore,
   positions as positionStore,
   runtimeLogs,
   strategies,
   traders,
+  TRADE_PAGE_DEFAULT,
   trades as tradeStore,
   users,
 } from '../store/repositories.js';
@@ -1478,19 +1481,62 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     return liveExchangeView(trader.id);
   });
 
+  /**
+   * 订单记录，**分页**返回；响应体是 `OrderRecord[]`，**形状没有变**
+   * （老客户端与 `docs/API.md` 都照旧）。
+   *
+   * | 参数 | 说明 |
+   * |---|---|
+   * | `limit` | 一页多少条。默认 100，上限 `ORDER_PAGE_MAX`（200）——**钳制不报错** |
+   * | `before` | 游标：只返回 `id` 比它更小的订单。第一页不传 |
+   *
+   * 上限的钳制在仓储层（`clampOrderLimit`），所以这里不做验证：
+   * 一个手写的 `?limit=999999` 最坏也只是拿到 200 条，而不是把整张订单表
+   * 拼成响应 —— 这张表随机器人运行无限增长，正是操作者说的"一次加载上万条卡死"。
+   */
   app.get('/api/traders/:id/orders', authed, async (request) => {
-    const limit = Number((request.query as { limit?: string }).limit ?? 100);
-    return orderStore.list(traderIdOf(request), Number.isFinite(limit) ? limit : 100);
+    const query = request.query as { limit?: string; before?: string };
+    const limit = Number(query.limit ?? ORDER_PAGE_DEFAULT);
+    // `before` 是非数字/缺失时按"第一页"处理：发不出正确游标的调用方应该拿到
+    // 最新的一页，而不是一个 400（与 `limit` 的钳制同一个取舍）。
+    const before = Number(query.before);
+    return orderStore.list(traderIdOf(request), limit, Number.isFinite(before) ? before : null);
   });
 
+  /**
+   * 成交记录，**分页**返回；响应体是 `TradeRecord[]`，**形状没有变**。
+   *
+   * 参数与 `/orders` 完全一致（`limit` 默认 100、上限 `TRADE_PAGE_MAX`，`before=id` 游标）。
+   * 成交行是最宽的一张表（毛/净盈亏、两侧手续费、资金费、两个订单号），
+   * 一次拉全量既是带宽也是渲染代价。
+   */
   app.get('/api/traders/:id/trades', authed, async (request) => {
-    const limit = Number((request.query as { limit?: string }).limit ?? 100);
-    return tradeStore.list(traderIdOf(request), Number.isFinite(limit) ? limit : 100);
+    const query = request.query as { limit?: string; before?: string };
+    const limit = Number(query.limit ?? TRADE_PAGE_DEFAULT);
+    const before = Number(query.before);
+    return tradeStore.list(traderIdOf(request), limit, Number.isFinite(before) ? before : null);
   });
 
+  /**
+   * 决策记录，**分页**返回；响应体是 `DecisionRecord[]`，**形状没有变**
+   * （老客户端、`docs/API.md` 与"全部记录"页都照旧）。
+   *
+   * | 参数 | 说明 |
+   * |---|---|
+   * | `limit` | 一页多少条。默认 50，上限 `DECISION_PAGE_MAX`（200）——**钳制不报错** |
+   * | `before` | 游标：只返回 `id` 比它更小的记录。第一页不传 |
+   *
+   * 上限的钳制在仓储层（`clampDecisionLimit`），所以这里不做验证：
+   * 一个手写的 `?limit=999999` 最坏也只是拿到 200 条，
+   * 而不是把整个决策史（含完整提示词）一次性拼成响应。
+   */
   app.get('/api/traders/:id/decisions', authed, async (request) => {
-    const limit = Number((request.query as { limit?: string }).limit ?? 50);
-    return decisionStore.list(traderIdOf(request), Number.isFinite(limit) ? limit : 50);
+    const query = request.query as { limit?: string; before?: string };
+    const limit = Number(query.limit ?? DECISION_PAGE_DEFAULT);
+    // `before` 是新参数，非数字/缺失一律按"第一页"处理：发不出正确游标的调用方
+    // 应该拿到最新的一页，而不是一个 400。
+    const before = Number(query.before);
+    return decisionStore.list(traderIdOf(request), limit, Number.isFinite(before) ? before : null);
   });
 
   app.get('/api/traders/:id/decisions/:recordId', authed, async (request, reply) => {

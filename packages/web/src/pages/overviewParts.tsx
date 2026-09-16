@@ -198,7 +198,9 @@ export function useRecentTrades(traderIds: number[]): {
     async (signal) => {
       const results = await Promise.all(
         traderIds.map(async (id): Promise<[number, TradeRecord | null]> => {
-          const trades = await api.traderTrades(id, 1, signal);
+          // 只要最新的一条：`traderTrades` 现在是 `{ limit, before, signal }` 的选项式签名
+          // （与 `traderDecisions` 一致，游标分页要能传 `before`）。
+          const trades = await api.traderTrades(id, { limit: 1, signal });
           return [id, trades[0] ?? null];
         }),
       );
