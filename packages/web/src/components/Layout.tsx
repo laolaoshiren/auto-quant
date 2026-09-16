@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { LogOut, Menu, PanelLeftClose, PanelLeftOpen, Search, TriangleAlert, X } from 'lucide-react';
+import { userRoleLabel } from '@aq/shared';
 import { useApp, useEvents } from '../lib/store';
 import { fmtClockOffset, fmtInt, timeAgo } from '../lib/format';
 import { Badge, Button, Dot, Tooltip, cn } from './ui';
@@ -345,7 +346,7 @@ function NavRow({ item, collapsed, badge }: { item: NavItem; collapsed: boolean;
       end={item.to === '/'}
       className={({ isActive }) =>
         cn(
-          'relative flex items-center gap-2.5 rounded-md py-2 text-base transition',
+          'relative flex items-center gap-2.5 rounded-md py-2.5 text-lg font-medium transition',
           collapsed ? 'justify-center px-0' : 'px-2.5',
           isActive ? 'bg-accent/10 text-ink-hi' : 'text-ink-lo hover:bg-base-850 hover:text-ink-mid',
         )
@@ -355,7 +356,7 @@ function NavRow({ item, collapsed, badge }: { item: NavItem; collapsed: boolean;
         <>
           {/* 选中标记用真实元素而不是内联阴影：写死的颜色在换主题时不会跟着变 */}
           {isActive && <span aria-hidden className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-accent" />}
-          <item.icon aria-hidden className="h-4 w-4 shrink-0" />
+          <item.icon aria-hidden className="h-[18px] w-[18px] shrink-0" />
           {!collapsed && <span className="min-w-0 flex-1 truncate">{item.label}</span>}
           {badge > 0 &&
             (collapsed ? (
@@ -436,7 +437,7 @@ function SidebarStatus({
       <div className="mt-1 flex items-center justify-between gap-1 rounded-md border border-base-800 bg-base-850/60 px-2 py-1.5">
         <div className="min-w-0">
           <div className="truncate text-xs text-ink-mid">{username}</div>
-          <div className="truncate text-xs text-ink-faint">{role}</div>
+          <div className="truncate text-xs text-ink-faint">{userRoleLabel(role)}</div>
         </div>
         <Button size="sm" variant="ghost" onClick={onSignOut} className="shrink-0">
           退出

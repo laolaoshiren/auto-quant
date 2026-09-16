@@ -416,6 +416,21 @@ export function orderTypeLabel(type: string): string {
   return ORDER_TYPE_LABELS[type] ?? type;
 }
 
+/**
+ * Chinese labels for account roles.
+ *
+ * Same rule as the other label maps: the value is a machine code stored in
+ * `users.role`, so only the display changes. It used to render raw in the
+ * sidebar footer, which showed a bare English `owner` under the username.
+ */
+export const USER_ROLE_LABELS: Record<string, string> = {
+  owner: '拥有者',
+  user: '操作员',
+};
+
+export function userRoleLabel(role: string): string {
+  return USER_ROLE_LABELS[role] ?? role;
+}
 /** Label for a trading mode. */
 export const TRADING_MODE_LABELS: Record<string, string> = {
   conservative: '稳健',
