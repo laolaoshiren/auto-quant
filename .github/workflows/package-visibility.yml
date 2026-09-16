@@ -1,0 +1,103 @@
+# =============================================================================
+# 把 GHCR 镜像包设为公开
+#
+# -----------------------------------------------------------------------------
+# 为什么需要这个工作流
+# -----------------------------------------------------------------------------
+# README 里的一键安装承诺"不需要任何令牌"：
+#
+#     curl -fsSL .../deploy/install.sh | bash
+#
+# 这只有在**镜像可匿名拉取**时才成立。GHCR 的包可见性与仓库可见性是**独立**的：
+# 仓库转公开后，包仍然默认是私有的（它是在仓库还私有时首次推送的），
+# 于是安装脚本仍然要一次 `docker login`，一键安装就少了一键。
+#
+# 而修改包可见性需要一个带 `read:packages` / `write:packages` 的个人令牌 ——
+# 本项目的维护者令牌没有这两个 scope。但仓库自身的 `GITHUB_TOKEN` 有
+# `packages: write`，这就够了：包属于这个仓库，用仓库的令牌管理它是正当的。
+#
+# 所以：与其让每个自托管者记住先去网页点四下，不如把这一步变成可重复执行的代码。
+#
+# -----------------------------------------------------------------------------
+# 用法
+# -----------------------------------------------------------------------------
+#   Actions → 设置镜像包可见性 → Run workflow
+#
+# 只需要跑一次。重复执行是安全的（幂等）。
+# =============================================================================
+name: 设置镜像包可见性
+
+on:
+  workflow_dispatch:
+    inputs:
+      visibility:
+        description: '目标可见性'
+        required: true
+        default: public
+        type: choice
+        options: [public, private]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  set-visibility:
+    name: 设置包可见性
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: 读取当前状态
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner='${{ github.repository_owner }}'
+          echo "### 包可见性" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          gh api "/users/$owner/packages/container/auto-quant" \
+            --jq '"当前：`\(.visibility)`（仓库关联：\(.repository.full_name // "未关联")）"' \
+            >> "$GITHUB_STEP_SUMMARY" || echo "读取失败" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 修改为 ${{ inputs.visibility }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner='${{ github.repository_owner }}'
+          target='${{ inputs.visibility }}'
+
+          # 用 PATCH 而不是 PUT：这是局部更新，且只在值不同的时候才真的改动。
+          if gh api -X PATCH "/users/$owner/packages/container/auto-quant" \
+               -f "visibility=$target" --jq '"→ 已设为 `\(.visibility)`"'; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "已设为 **$target**。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::修改失败。若提示权限不足，说明 GITHUB_TOKEN 不足以管理该包 —— 此时需要在 GitHub 网页上手动修改（Package settings → Danger Zone → Change visibility）。"
+            exit 1
+          fi
+
+      - name: 验证匿名可拉取
+        if: inputs.visibility == 'public'
+        run: |
+          set -euo pipefail
+          # 不带任何凭据地探测 manifest —— 这正是自托管者安装时的处境。
+          # install.sh 也是用同样的方式判断"要不要登录"的。
+          image='ghcr.io/${{ github.repository }}:latest'
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          for attempt in 1 2 3 4 5; do
+            if docker manifest inspect "$image" > /dev/null 2>&1; then
+              echo "✅ 匿名拉取成功：\`$image\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "匿名拉取成功，一键安装不再需要令牌。"
+              exit 0
+            fi
+            echo "第 $attempt 次探测未通过（GHCR 的可见性变更需要一点时间生效），15 秒后重试…"
+            sleep 15
+          done
+
+          # 可见性变更在 GHCR 上是**最终一致**的，短时间未生效不算失败 ——
+          # 所以这里只是警告，不去把工作流判红，否则会误导人去排查一个不存在的问题。
+          echo "::warning::匿名拉取仍未成功。可见性变更在 GHCR 上可能需要几分钟生效；若长时间无效，请检查包是否确实已设为 public。"
+          echo "⚠️ 尚未生效（GHCR 可见性变更是最终一致的，稍后再试）" >> "$GITHUB_STEP_SUMMARY"
