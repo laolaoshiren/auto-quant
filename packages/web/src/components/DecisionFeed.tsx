@@ -222,8 +222,18 @@ function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: Mark
     <article className="min-w-0">
       <CycleMeta record={record} />
 
-      {/* 决策盒子：**一轮只有这一个**边框。每条决策只是里面的一段，没有自己的边框。 */}
-      <div className="min-w-0 rounded-lg border border-base-750 bg-base-900 px-3 py-2.5">
+      {/*
+        决策盒子：**一轮只有这一个**边框。每条决策只是里面的一段，没有自己的边框。
+
+        ⚠️ 底色必须是 `bg-base-850` 而不是 `bg-base-900`。
+        面板（Panel）本身就是 `bg-base-900` —— 盒子用同色等于**没有边界**，
+        几十轮决策连成一片，分不清哪一条属于哪一轮（操作者原话：
+        "肉眼看不出来每一期决策"）。
+
+        `base-850` 比面板抬升一层，盒子就浮出来了；配合边框，
+        一眼能看出"这一轮到这里结束"。
+      */}
+      <div className="min-w-0 rounded-lg border border-base-700 bg-base-850 px-3 py-2.5">
         {record.error && (
           <p className="mb-1.5 flex items-start gap-1.5 text-xs leading-relaxed text-down">
             <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
