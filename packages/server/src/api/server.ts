@@ -403,7 +403,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     try {
       done(null, JSON.parse(text));
     } catch {
-      const error = new Error('Request body must be valid JSON');
+      const error = new Error('请求体不是合法的 JSON');
       (error as { statusCode?: number }).statusCode = 400;
       done(error, undefined);
     }

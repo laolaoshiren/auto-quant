@@ -193,7 +193,7 @@ export function ExecutionRow({ entry }: { entry: ExecutionLogEntry }) {
     <div className={`rounded-md border px-3 py-2 ${EXEC_ROW_CLASS[entry.status] ?? EXEC_ROW_CLASS.ok}`}>
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={STATUS_TONE[entry.status] ?? 'neutral'}>{statusLabel(entry.status)}</Badge>
-        <span className="num text-base font-semibold text-ink-hi">{entry.action}</span>
+        <span className="num text-base font-semibold text-ink-hi">{actionLabel(entry.action)}</span>
         <span className="num text-xs text-ink-lo">{entry.symbol}</span>
         {entry.notionalUsd !== undefined && (
           <span className="num ml-auto text-xs text-ink-lo" title="名义价值（USDT）">

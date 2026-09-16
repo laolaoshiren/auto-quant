@@ -16,6 +16,7 @@
  */
 import { useState } from 'react';
 import type { OrderRecord, PositionView, TradeRecord } from '@aq/shared';
+import { orderTypeLabel } from '@aq/shared';
 import { api } from '../lib/api';
 import { useEvents } from '../lib/store';
 import { usePolled } from '../lib/hooks';
@@ -311,7 +312,7 @@ export function OrdersTable({
                 <td className={`td font-semibold ${order.side === 'BUY' ? 'text-up' : 'text-down'}`}>
                   {order.side === 'BUY' ? '买入' : '卖出'}
                 </td>
-                <td className="td text-ink-lo">{order.type}</td>
+                <td className="td text-ink-lo">{orderTypeLabel(order.type)}</td>
                 <td className="td num text-right">{fmtQty(order.quantity)}</td>
                 <td className="td num text-right">{order.price ? fmtPrice(order.price) : '市价'}</td>
                 <td className="td num text-right text-ink-lo">{order.stopPrice ? fmtPrice(order.stopPrice) : '—'}</td>

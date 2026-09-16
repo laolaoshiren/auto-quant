@@ -9,6 +9,7 @@ import type { ReactNode } from 'react';
 import clsx from 'clsx';
 import { Check, TriangleAlert, X } from 'lucide-react';
 import type { TraderStatus } from '@aq/shared';
+import { traderStatusLabel } from '@aq/shared';
 import { Badge, Dot, type Tone } from './ui';
 import type { PreflightCheck } from '../lib/api';
 
@@ -27,13 +28,13 @@ const STATUS_TONE: Record<TraderStatus, Tone> = {
   safe_mode: 'warn',
 };
 
-const STATUS_LABEL: Record<TraderStatus, string> = {
-  running: '运行中',
-  stopped: '已停止',
-  starting: '启动中',
-  error: '错误',
-  safe_mode: '安全模式',
-};
+/*
+ * 状态标签来自 `@aq/shared`，不在组件里本地定义。
+ *
+ * 本地定义过一份，结果是组件之外的地方（例如状态变化的 toast）只能拿到
+ * 原始机器码，界面上出现 `机器人 #6 → stopped`。
+ * 一份映射、一个来源，才不会再有第二个地方漏掉。
+ */
 
 /**
  * The pulse is reserved for a status that is *changing right now*.
@@ -49,7 +50,7 @@ function pulses(status: TraderStatus, live?: boolean): boolean {
 
 export function TraderStatusBadge({ status, live }: { status: TraderStatus; live?: boolean }) {
   const tone = STATUS_TONE[status] ?? 'neutral';
-  const label = STATUS_LABEL[status] ?? status;
+  const label = traderStatusLabel(status);
 
   return (
     <Badge
