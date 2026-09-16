@@ -177,18 +177,27 @@ export function Layout() {
         )}
 
         <div className="flex min-w-0 shrink-0 items-center gap-2">
-          <div className="hidden items-center gap-2 lg:flex">
+          {/*
+            只留徽章，不留 `币安 USDT 本位合约（实盘）` 那串文字。
+
+            理由：徽章带的是**唯一会变**的信息（`env.dryRun` —— 真钱还是模拟），
+            而 `environmentLabel` 是交易所端点的**静态标签**，部署好之后永远不变。
+            更要紧的是那串文字末尾**又写了一遍「（实盘）」** —— 和旁边的徽章重复，
+            两个来源并列反而让徽章看起来像"两个信号之一"，削弱它的警告作用。
+
+            信息不丢：「打的是哪个端点」在排查异常时有用，放进徽章的悬停里。
+          */}
+          <Tooltip
+            content={
+              system?.dryRun
+                ? `模拟盘 —— 下单不会真的成交。接口端点：${system?.environmentLabel ?? '连接中…'}`
+                : `实盘 —— 下单会动用真实资金。接口端点：${system?.environmentLabel ?? '连接中…'}`
+            }
+          >
             <Badge tone={system?.dryRun ? 'accent' : 'warn'} className="shrink-0">
               {system?.dryRun ? '模拟' : '实盘'}
             </Badge>
-            {/* 环境名是长文本，只在宽屏给位置 —— 窄屏它会把导航挤成两行 */}
-            <span
-              className="hidden max-w-[12rem] truncate text-base text-ink-mid xl:inline"
-              title={system?.environmentLabel}
-            >
-              {system?.environmentLabel ?? '连接中…'}
-            </span>
-          </div>
+          </Tooltip>
 
           {/*
             诊断指标：**正常时不显示，异常时才出现**。
