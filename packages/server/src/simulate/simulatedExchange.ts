@@ -6,7 +6,12 @@ import type {
   PlacedOrder,
 } from '../binance/broker.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
-import type { BinanceAlgoOrderResponse, BinanceOrderResponse, BinanceUserTrade } from '../binance/types.js';
+import type {
+  BinanceAlgoOrderResponse,
+  BinanceIncome,
+  BinanceOrderResponse,
+  BinanceUserTrade,
+} from '../binance/types.js';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('sim:exchange');
@@ -630,6 +635,21 @@ export class SimulatedExchange {
       }
     }
     return rows;
+  }
+
+  /**
+   * 回放里不存在资金费结算，所以**必须返回空数组**，而不是省略这个方法。
+   *
+   * `AutoTrader` 在平仓时会读一次 `/fapi/v1/income` 把资金费记进这一笔（§2.5）。
+   * 方法缺失时每次平仓都会打一条 `getIncome is not a function` 的警告 ——
+   * 降级行为本身是对的（记 0 并明确告警），但**模拟运行里刷出的一屏警告会把
+   * 真正的问题淹掉**，而模拟的价值恰恰在于"出了异常一眼能看见"。
+   *
+   * 返回空数组表达的是"这段时间没有资金费"，语义正确，且与实际部署一致：
+   * 一次 5 分钟的回放本来就跨不过 8 小时的结算点。
+   */
+  async getIncome(): Promise<BinanceIncome[]> {
+    return [];
   }
 
   async getUserTrades(symbol: string, limit = 50): Promise<BinanceUserTrade[]> {
