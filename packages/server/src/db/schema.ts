@@ -294,8 +294,60 @@ const M3_SESSION_REVOCATION = /* sql */ `
 ALTER TABLE users ADD COLUMN credentials_changed_at TEXT NOT NULL DEFAULT '';
 `;
 
+/**
+ * 权益归属：把「账户权益」与「本机器人归属权益」分开存。
+ *
+ * 为什么需要这次迁移：`equity_snapshots.equity` 一直写的是
+ * `broker.getAccountState().equity` —— **共享钱包**的保证金余额。同一个交易所
+ * 账户下跑多个机器人时它们共用一份凭据，于是每个机器人每一行记的都是同一个数。
+ * 实盘上量到的后果（三个机器人共用一个账户）：
+ *
+ *   #4 测试机器人1   0 笔平仓、净 0.000000 → 显示 +2.67%
+ *   #5 测试2         4 笔平仓、净 +0.272133 → 显示 +2.67%（和 #4 一模一样）
+ *   #6 实盘3小时验证  0 笔平仓、净 0.000000 → 显示 −0.06%
+ *
+ * 也就是说一个**从未交易**的机器人显示了别的机器人挣的钱，而两个机器人的收益率
+ * 完全相同 —— 因为它们读的是同一个钱包。
+ *
+ * 迁移之后：
+ *   · `equity` / `unrealized_pnl` 改记**本机器人**的归属口径；
+ *   · `account_equity` / `account_unrealized_pnl` 记账户（共享钱包）的口径，
+ *     风控的回撤高水位与「账户权益」展示读这两列（见 `realizedHighWaterMark`）。
+ *
+ * 回填的取舍（历史行无法精确重建，这里选**最不撒谎**的那种）：
+ *   · 旧行的 `equity` 就是账户权益，先原样搬到 `account_equity` —— 高水位的历史
+ *     因此不失真（`MAX` 是单调的，少一个点只会低估峰值）。
+ *   · 本机器人当年的浮盈从没被记录过（那一列当时装的是账户的总浮盈，不是它的），
+ *     无法反推，所以旧行 `unrealized_pnl` 置 0，`equity` 用
+ *     `initial_equity + Σ(该时刻之前已平仓的 net_pnl)` 重建 —— 这是一条只有已实现
+ *     盈亏的曲线，形状正确、数字有出处。
+ *   · `open_positions` 旧行记的是账户的持仓数，同样无法按机器人重建，因此不动它
+ *     （它只用于曲线 tooltip，不参与任何金额计算）。
+ *
+ * 注意 `net_pnl` 在这里只被**求和**，不重算：净额的唯一计算点仍然是
+ * `trades.insert()` / `applyExchangeFigures()`（§2.5）。
+ */
+const M4_ATTRIBUTED_EQUITY = /* sql */ `
+ALTER TABLE equity_snapshots ADD COLUMN account_equity         REAL NOT NULL DEFAULT 0;
+ALTER TABLE equity_snapshots ADD COLUMN account_unrealized_pnl  REAL NOT NULL DEFAULT 0;
+
+UPDATE equity_snapshots
+   SET account_equity = equity,
+       account_unrealized_pnl = unrealized_pnl;
+
+UPDATE equity_snapshots
+   SET equity = COALESCE(
+         (SELECT t.initial_equity FROM traders t WHERE t.id = equity_snapshots.trader_id), 0)
+       + COALESCE(
+         (SELECT SUM(tr.net_pnl) FROM trades tr
+           WHERE tr.trader_id = equity_snapshots.trader_id
+             AND tr.closed_at <= equity_snapshots.timestamp), 0),
+       unrealized_pnl = 0;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
   { version: 3, name: 'session-revocation', sql: M3_SESSION_REVOCATION },
+  { version: 4, name: 'attributed-equity', sql: M4_ATTRIBUTED_EQUITY },
 ];

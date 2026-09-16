@@ -407,7 +407,7 @@ export function TraderPage() {
       */}
       <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5">
         <Kpi
-          label={`权益（${settleAsset}）`}
+          label={`归属权益（${settleAsset}）`}
           value={fmtNum(equity, 4)}
           tone="text-ink-strong"
           sub={
@@ -429,6 +429,7 @@ export function TraderPage() {
               </span>
             </>
           }
+          title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。它只包含这个机器人自己的交易；下面的「交易所账户」一栏才是共用的钱包余额。"
         />
 
         <Kpi
@@ -485,7 +486,7 @@ export function TraderPage() {
               <span>
                 名义 <span className="text-ink-lo">{fmtUsd(notional, 2)}</span>
               </span>
-              <span className="block" title="有效杠杆 = 总名义价值 ÷ 权益。满仓 10x 时读数最高。">
+              <span className="block" title="有效杠杆 = 本机器人总名义价值 ÷ 归属权益。满仓 10x 时读数最高。">
                 有效杠杆 <span className="text-ink-mid">{effectiveLeverage.toFixed(2)}x</span>
               </span>
             </>
@@ -514,7 +515,7 @@ export function TraderPage() {
         title={
           <span className="flex items-center gap-1">
             <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
-              账户净值曲线
+              归属权益曲线
             </ChartTabButton>
             <ChartTabButton active={chartTab === 'candles'} onClick={() => setChartTab('candles')}>
               行情图表
@@ -552,7 +553,7 @@ export function TraderPage() {
               range={range}
               baseline={trader.initialEquity}
               /* A real height, not a thumbnail: the curve is the only place the
-                 shape of the account's day is visible. The tables below it are
+                 shape of this bot's day is visible. The tables below it are
                  where the per-trade detail lives. */
               height={260}
             />
@@ -634,15 +635,18 @@ function Kpi({
   value,
   tone = 'text-ink-hi',
   sub,
+  title,
 }: {
   label: string;
   value: ReactNode;
   tone?: string;
   sub?: ReactNode;
+  /** 说明这个数字的口径（例如"权益"到底是归属权益还是账户权益）。 */
+  title?: string;
 }) {
   return (
-    <div className="min-w-0 rounded-md bg-base-850/40 px-4 py-3.5">
-      <div className="truncate text-xs font-semibold uppercase tracking-[0.12em] text-ink-lo" title={label}>
+    <div className="min-w-0 rounded-md bg-base-850/40 px-4 py-3.5" title={title}>
+      <div className="truncate text-xs font-semibold uppercase tracking-[0.12em] text-ink-lo" title={title ?? label}>
         {label}
       </div>
       {/* break-all, not truncate: a 7-figure equity must wrap rather than be
@@ -683,7 +687,7 @@ function ChartTabButton({
   );
 }
 
-/** 总净值 + absolute and percentage change over the visible window. */
+/** 归属权益 + absolute and percentage change over the visible window. */
 function EquityHeader({
   snapshots,
   equity,
@@ -701,7 +705,12 @@ function EquityHeader({
   return (
     <div className="mb-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
       <div className="flex items-baseline gap-2">
-        <span className="text-xs font-semibold tracking-[0.08em] text-ink-lo">总净值</span>
+        <span
+          className="text-xs font-semibold tracking-[0.08em] text-ink-lo"
+          title="本机器人的归属权益曲线（初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈）。共用同一账户的其他机器人不在其中。"
+        >
+          归属权益
+        </span>
         <span className="num text-3xl font-semibold leading-none text-ink-hi">{fmtNum(equity, 2)}</span>
         <span className="text-xs text-ink-faint">{asset}</span>
       </div>

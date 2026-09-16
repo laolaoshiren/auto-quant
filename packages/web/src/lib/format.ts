@@ -25,16 +25,20 @@ export function fmtUsd(value: number | null | undefined, digits = 2): string {
  * The credentials table and the trader dashboard both label the same exchange
  * figures, so a divergence here (“钱包余额” on one screen, “余额” on the other)
  * would make an operator doubt both.
+ *
+ * `equity` 从“权益”改成“账户权益”是刻意的：这些读数是**交易所账户**的（共享钱包），
+ * 而机器人页面上的“权益”是**该机器人归属**的那一份。同一个词指两个数，操作员就
+ * 没法判断哪个是账户里的钱、哪个是这个机器人挣的 —— 这正是本次修的那个 bug。
  */
 export const BALANCE_LABEL = {
-  equity: '权益',
+  equity: '账户权益',
   wallet: '钱包余额',
   available: '可用',
   unrealized: '未实现',
   marginUsed: '保证金占用',
   openOrderMargin: '挂单占用',
   short: {
-    equity: '权益',
+    equity: '账户权益',
     wallet: '钱包',
     available: '可用',
   },

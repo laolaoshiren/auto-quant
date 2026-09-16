@@ -139,7 +139,7 @@ export interface EquityCurveChartProps {
    */
   primaryLabel?: string;
   primaryDigits?: number;
-  /** Adds `浮动盈亏` from the snapshot, for the per-account curve. */
+  /** Adds `浮动盈亏` from the snapshot, for the per-trader curve. */
   showUnrealized?: boolean;
 }
 
@@ -148,7 +148,7 @@ export function EquityCurveChart({
   range,
   height = 300,
   baseline,
-  primaryLabel = '权益',
+  primaryLabel = '归属权益',
   primaryDigits = TOOLTIP_DIGITS,
   showUnrealized = false,
 }: EquityCurveChartProps) {
@@ -188,8 +188,8 @@ export function EquityCurveChart({
   /*
    * 退化时围绕**基线**取窗口，而不是围绕 0。
    *
-   * `baseline` 是账户的起始权益，也就是这条线"本来该在"的位置。
-   * 用它做中心，一个还没有快照的账户会看到一条居中的平线 ——
+   * `baseline` 是该机器人的起始权益，也就是这条线"本来该在"的位置。
+   * 用它做中心，一个还没有快照的机器人会看到一条居中的平线 ——
    * 这比铺满 0 到 1000 的空白坐标轴诚实得多，也让人一眼知道
    * "图表在工作，只是还没有数据变化"，而不是"图表坏了"。
    */

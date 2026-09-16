@@ -466,18 +466,52 @@ export interface ExecutionLogEntry {
   adjustments?: string[];
 }
 
+/**
+ * 某个机器人在某一时刻的权益快照。
+ *
+ * `equity` 是**归属**权益（`initialEquity + Σ net_pnl + 自己的浮盈`），不是钱包
+ * 余额。同一个交易所账户下可以跑多个机器人，它们共用一份凭据、共用一个钱包，
+ * 所以钱包余额对它们全都是同一个数 —— 把它写进这里会让一个从未成交的机器人显示
+ * 别的机器人挣来的收益率，也会让一个已停止的机器人的数字随着邻居交易而变。
+ * 账户（共享钱包）的权益另存 `accountEquity` / `accountUnrealizedPnl`。
+ */
 export interface EquitySnapshot {
   traderId: number;
   timestamp: string;
+  /**
+   * 归属权益：**本机器人自己的交易**挣来的那部分。
+   *
+   * `initialEquity + Σ(本机器人 net_pnl) + 本机器人持仓浮盈`。机器人没成交时
+   * 就等于 `initialEquity`（平的），停止后不再变化。
+   */
   equity: number;
+  /**
+   * 账户的可用余额。
+   *
+   * 它和 `marginUsed` 都是**账户级**的量：自由保证金是共享钱包的属性，按机器人
+   * 拆分没有意义（交易所也不提供这个口径）。保留在这里是为了记录快照当时的账户
+   * 状态，不要把它当成"这个机器人的可用余额"。
+   */
   availableBalance: number;
+  /** 本机器人自己持仓的浮动盈亏，不是账户的总浮盈。 */
   unrealizedPnl: number;
+  /** 账户级：被持仓与挂单占用的初始保证金。 */
   marginUsed: number;
+  /** 本机器人自己的未平仓合约数。 */
   openPositions: number;
+  /** 账户（共享钱包）的权益 —— `totalMarginBalance`，同一账户下所有机器人共用。 */
+  accountEquity: number;
+  /** 账户的总浮动盈亏，用于对账展示；风控高水位读的是 `accountEquity − accountUnrealizedPnl`。 */
+  accountUnrealizedPnl: number;
 }
 
 export interface TraderStats {
   traderId: number;
+  /**
+   * 归属权益（默认口径）：`initialEquity + realizedPnl + unrealizedPnl`。
+   *
+   * 不是账户余额 —— 见 `accountEquity`。
+   */
   equity: number;
   initialEquity: number;
   totalReturnPercent: number;
@@ -495,6 +529,14 @@ export interface TraderStats {
   /** Total funding paid (negative) or received (positive). */
   totalFunding: number;
   unrealizedPnl: number;
+  /**
+   * 该机器人所属**交易所账户**（共享钱包）的权益，来自最近一条快照。
+   *
+   * 之所以单独给出而不是让界面用 `equity` 顶替：同一账户下的多个机器人读数是
+   * 同一个数，混在一起就没法分辨"这个机器人挣了多少"和"账户里有多少钱"。
+   * 没有快照时为 0。
+   */
+  accountEquity: number;
   totalTrades: number;
   /**
    * Winning trades as a **percentage in 0–100**, not a 0–1 fraction.

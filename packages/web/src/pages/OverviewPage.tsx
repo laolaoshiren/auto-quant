@@ -4,7 +4,7 @@
  *
  * Structure, in deliberate order of visual weight (DESIGN.md §4):
  *
- *   1. 头条数字 — 总权益 / 今日盈亏 / 总收益率 / 浮动盈亏 at `text-3xl`–`text-4xl`,
+ *   1. 头条数字 — 总归属权益 / 今日盈亏 / 总收益率 / 浮动盈亏 at `text-3xl`–`text-4xl`,
  *      full width, one row, nothing else competing with them;
  *   2. 资金曲线 — the whole width and 300px tall. It is the only thing on the
  *      page that shows *shape* rather than a snapshot, so it gets real height;
@@ -254,7 +254,7 @@ export function OverviewPage() {
             first, and giving it the same weight as 浮动盈亏 would flatten the page. */}
         <div className="mt-4 grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2 xl:grid-cols-[1.35fr_1fr_1fr_1fr]">
           <HeadlineMetric
-            label="总权益"
+            label="总归属权益"
             value={fmtAsset(totalEquity, 'USDT', 2)}
             valueClass="text-ink-strong"
             loading={tradersQuery.loading && tradersQuery.data === null}
@@ -271,6 +271,7 @@ export function OverviewPage() {
                 </>
               )
             }
+            title="各机器人归属权益之和 = Σ(初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈)。共用同一个交易所账户的机器人各自独立归属，所以这个合计不等于账户里的钱（账户权益在机器人页与交易所凭证页）。"
           />
 
           <HeadlineMetric
@@ -286,7 +287,7 @@ export function OverviewPage() {
                   ? `24 小时 · ${fmtPercent(equityChangePercent)}`
                   : `自最早快照 · ${fmtPercent(equityChangePercent)}`
             }
-            title="总权益最近 24 小时的变化（按快照口径）。它同时包含已实现与浮动盈亏，因此不再分别累加，避免重复计算。快照不足 24 小时时改显示自最早一条快照以来的变化。"
+            title="归属权益最近 24 小时的变化（按快照口径）。它同时包含已实现与浮动盈亏，因此不再分别累加，避免重复计算。快照不足 24 小时时改显示自最早一条快照以来的变化。"
           />
 
           <HeadlineMetric
@@ -298,7 +299,7 @@ export function OverviewPage() {
             }
             sub={`初始投入 ${fmtUsd(totalBaseline, 2)}`}
             loading={statsPending}
-            title="（当前总权益 − 初始投入）÷ 初始投入。初始投入取各机器人的 initialEquity 之和。"
+            title="（当前总归属权益 − 初始投入）÷ 初始投入。初始投入取各机器人的 initialEquity 之和。"
           />
 
           <HeadlineMetric
@@ -307,7 +308,7 @@ export function OverviewPage() {
             valueClass={pnlColor(unrealized)}
             sub={`${fmtInt(totalOpen)} 个持仓 · 未落袋`}
             loading={statsPending}
-            title="所有机器人当前持仓的未实现盈亏合计。它随时在变，且尚未计入已实现盈亏。"
+            title="所有机器人**自己的**持仓的未实现盈亏合计（不是交易所账户的总浮盈 —— 账户的总浮盈在同一账户下的每个机器人身上都是同一个数）。它随时在变，且尚未计入已实现盈亏。"
           />
         </div>
       </section>
@@ -318,7 +319,7 @@ export function OverviewPage() {
       <Panel
         padded={false}
         bodyClassName="p-3"
-        title="总权益曲线"
+        title="各机器人的归属权益曲线之和"
         actions={
           <div role="group" aria-label="曲线时间范围" className="flex items-center gap-1">
             {EQUITY_RANGES.map((item) => (
@@ -344,7 +345,7 @@ export function OverviewPage() {
               range={range}
               height={300}
               baseline={totalBaseline > 0 ? totalBaseline : undefined}
-              primaryLabel="总权益"
+              primaryLabel="总归属权益"
             />
           </Suspense>
         )}

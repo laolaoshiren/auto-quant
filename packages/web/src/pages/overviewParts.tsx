@@ -239,7 +239,7 @@ export function TradersSnapshotTable({
       <Panel padded={false}>
         <div className="scroll-x">
           <table className="w-full border-collapse">
-            <caption className="sr-only">机器人权益与运行状态快照</caption>
+            <caption className="sr-only">机器人归属权益与运行状态快照</caption>
             <thead className="border-b border-base-800 bg-base-850/60">
               <tr>
                 <th scope="col" className="th px-2">
@@ -249,7 +249,9 @@ export function TradersSnapshotTable({
                   状态
                 </th>
                 <th scope="col" className="th px-2 text-right">
-                  权益
+                  <span title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。同一账户下其他机器人挣的钱不算在内。">
+                    归属权益
+                  </span>
                 </th>
                 <th scope="col" className="th px-2 text-right">
                   总收益率
@@ -291,12 +293,19 @@ export function TradersSnapshotTable({
                       )}
                     </td>
                     <td className="td px-2 text-right">
-                      <div className={`num ${stats ? 'text-ink-hi' : 'text-ink-faint'}`}>
+                      <div
+                        className={`num ${stats ? 'text-ink-hi' : 'text-ink-faint'}`}
+                        title={
+                          stats
+                            ? `归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。所属账户（共享钱包）权益 ${fmtUsd(stats.accountEquity, 2)}，同一账户下的所有机器人读数是同一个数。`
+                            : undefined
+                        }
+                      >
                         {stats ? fmtUsd(equity, 2) : '—'}
                       </div>
                       <div
                         className="ml-auto mt-1 h-1 w-16 overflow-hidden rounded-full bg-base-800"
-                        title={`占全部权益的 ${share.toFixed(1)}%`}
+                        title={`占全部归属权益的 ${share.toFixed(1)}%`}
                       >
                         <div className="h-full rounded-full bg-accent/70" style={{ width: `${share}%` }} />
                       </div>

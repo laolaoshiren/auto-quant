@@ -14,6 +14,7 @@ import {
   type TraderStatus,
 } from '@aq/shared';
 import type { BinanceBroker, ExchangePosition } from '../binance/broker.js';
+import type { AccountState } from '../binance/account.js';
 import type { BinanceMarketData } from '../binance/market.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
 import { eventBus } from '../events.js';
@@ -25,9 +26,11 @@ import { parseDecisionResponse, sortDecisions } from '../strategy/parser.js';
 import { buildSystemPrompt, buildUserPrompt, type PromptPosition } from '../strategy/prompt.js';
 import { isMajorSymbol } from '@aq/shared';
 import {
+  attributedEquity,
   decisions as decisionStore,
   equity as equityStore,
   orders as orderStore,
+  ownUnrealizedPnlOf,
   positions as positionStore,
   runtimeLogs,
   tradeEvents,
@@ -473,13 +476,7 @@ export class AutoTrader {
     );
 
     if (snapshots.length === 0) {
-      await this.recordEquity(
-        account.equity,
-        account.availableBalance,
-        account.unrealizedPnl,
-        account.marginUsed,
-        livePositions.length,
-      );
+      await this.recordEquity(account, livePositions);
       return '没有可用的行情数据，本轮未产生任何决策。';
     }
 
@@ -650,13 +647,7 @@ export class AutoTrader {
     await this.reconcilePositions(finalPositions);
 
     const finalAccount = await this.deps.broker.getAccountState().catch(() => account);
-    await this.recordEquity(
-      finalAccount.equity,
-      finalAccount.availableBalance,
-      finalAccount.unrealizedPnl,
-      finalAccount.marginUsed,
-      finalPositions.length,
-    );
+    await this.recordEquity(finalAccount, finalPositions);
 
     eventBus.publish({
       type: 'positions',
@@ -1305,29 +1296,33 @@ export class AutoTrader {
     }
 
     /*
-     * Refresh the equity snapshot from the exchange.
+     * Refresh the display snapshot — 但**只给在跑的机器人**刷新。
      *
-     * `computeTraderStats` reads the newest snapshot, and a stopped trader writes
-     * none — so its displayed equity freezes at whenever the last cycle ran. On
-     * the live account that meant showing 9.6213 while the real balance was
-     * 10.2586, because the profit landed *after* the bot was stopped. Writing one
-     * here is correct precisely because this pass is the moment the books are
-     * known to match reality.
+     * 这一段原来存在的理由：`computeTraderStats` 读最近一条快照，而一个已停止的
+     * 机器人不再写快照，于是它的显示权益冻在最后一次周期那一刻。实盘上那次是
+     * 显示 9.6213 而真实余额 10.2586 —— 利润是在机器人停下**之后**到的账。所以
+     * 「对账时顺手写一条」在当时是对的。
+     *
+     * 但它同时是一个 bug 的一半：这一遍也会在一个**已停止**的机器人上跑（控制台的
+     * 「对账」按钮、以及启动前的这一遍），而它当时写进去的是 `account.equity` ——
+     * **共享钱包**的余额。同账户下每个机器人的快照因此都被刷成同一个数：一个从未
+     * 成交的机器人显示别人的收益率，而一个已停止的机器人的数字会随着邻居继续交易
+     * 而变动。**停止的机器人，历史必须停止移动。**
+     *
+     * 所以：只有循环是活的（`this.running`）或者这一遍本身就在一个进行中的周期里
+     * （`this.cycleInFlight`）时才写。停止状态下点「对账」不再改动任何机器人快照；
+     * 而"账刚对上就要显示新数字"这件事没有丢 —— `computeTraderStats` 在读取时按
+     * 归属口径从 `trades` 现算权益，这一遍刚补录的成交立刻就会出现在控制台上，
+     * 根本不需要一条新快照。
      */
-    try {
-      const account = await this.deps.broker.getAccountState();
-      const livePositions = await this.deps.broker.getPositions().catch(() => []);
-      equityStore.insert({
-        traderId,
-        timestamp: new Date().toISOString(),
-        equity: account.equity,
-        availableBalance: account.availableBalance,
-        unrealizedPnl: account.unrealizedPnl,
-        marginUsed: account.marginUsed,
-        openPositions: livePositions.length,
-      });
-    } catch (error) {
-      log.debug(`[${this.deps.trader.name}] 对账后写入权益快照失败：${(error as Error).message}`);
+    if (this.running || this.cycleInFlight) {
+      try {
+        const account = await this.deps.broker.getAccountState();
+        const livePositions = await this.deps.broker.getPositions().catch(() => []);
+        equityStore.insert(this.buildEquitySnapshot(account, livePositions));
+      } catch (error) {
+        log.debug(`[${this.deps.trader.name}] 对账后写入权益快照失败：${(error as Error).message}`);
+      }
     }
 
     if (recovered > 0 || corrected > 0) {
@@ -2121,22 +2116,61 @@ export class AutoTrader {
     });
   }
 
-  private async recordEquity(
-    equity: number,
-    availableBalance: number,
-    unrealizedPnl: number,
-    marginUsed: number,
-    openPositions: number,
-  ): Promise<void> {
-    const snapshot: EquitySnapshot = {
-      traderId: this.deps.trader.id,
+  /**
+   * 组装这个机器人本次的权益快照。
+   *
+   * 为什么不能直接写 `account.equity`：同一个交易所账户下可以跑多个机器人 ——
+   * 它们共用一份凭据、共用一个钱包，`account.equity` 对它们全都是**同一个数**。
+   * 实盘上量到的后果：一个 **0 笔平仓、净盈亏 0.000000** 的机器人显示 +2.67%
+   * 收益率，而另一个机器人显示完全相同的 +2.67%（两个机器人读的是同一个钱包）。
+   *
+   * 归属权益只由这个机器人自己的东西构成（见 `attributedEquity()`）：
+   *
+   *   initialEquity + Σ(本机器人 net_pnl) + 本机器人持仓浮盈
+   *
+   * 浮盈用**自己的** `positions` 行（开仓价、数量、方向）按标记价算；标记价取自
+   * 交易所持仓里的 `markPrice`（行情事实，对所有机器人相同，借用它不引入归属
+   * 错误），**不是** `account.unrealizedPnl` —— 那个数同样是整个账户的，会把它
+   * 人的浮盈算进来。读不到标记价时按 0 计并明确报警，不静默。
+   *
+   * 账户权益没有丢：`accountEquity` / `accountUnrealizedPnl` 两列记的就是它，
+   * 风控的回撤高水位与「账户权益」展示读那两列（见 `realizedHighWaterMark`）。
+   */
+  private buildEquitySnapshot(account: AccountState, exchangePositions: ExchangePosition[]): EquitySnapshot {
+    const traderId = this.deps.trader.id;
+    const openPositions = positionStore.open(traderId);
+    const markPrices = new Map(exchangePositions.map((p) => [p.symbol, p.markPrice]));
+
+    const { unrealizedPnl, missingMarkPrice } = ownUnrealizedPnlOf(openPositions, (symbol) =>
+      markPrices.get(symbol),
+    );
+    if (missingMarkPrice.length > 0) {
+      this.emit(
+        'warn',
+        `读不到 ${missingMarkPrice.join('、')} 的标记价，这些持仓的浮动盈亏暂按 0 计入归属权益。`,
+      );
+    }
+
+    return {
+      traderId,
       timestamp: new Date().toISOString(),
-      equity,
-      availableBalance,
+      // 归属权益：本机器人自己的账，不是共享钱包。
+      equity: attributedEquity(
+        traderStore.get(traderId)?.initialEquity ?? 0,
+        tradeStore.stats(traderId).netPnl,
+        unrealizedPnl,
+      ),
+      availableBalance: account.availableBalance,
       unrealizedPnl,
-      marginUsed,
-      openPositions,
+      marginUsed: account.marginUsed,
+      openPositions: openPositions.length,
+      accountEquity: account.equity,
+      accountUnrealizedPnl: account.unrealizedPnl,
     };
+  }
+
+  private async recordEquity(account: AccountState, exchangePositions: ExchangePosition[]): Promise<void> {
+    const snapshot = this.buildEquitySnapshot(account, exchangePositions);
     equityStore.insert(snapshot);
     eventBus.publish({ type: 'equity', traderId: this.deps.trader.id, snapshot });
   }
