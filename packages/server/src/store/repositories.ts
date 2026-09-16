@@ -1132,6 +1132,32 @@ const DUPLICATE_QUANTITY_TOLERANCE = 0.2;
 const DUPLICATE_PRICE_TOLERANCE = 1e-6;
 
 /**
+ * `closed_at` 允许的偏差（毫秒）—— **这是写入守卫的关键容差**。
+ *
+ * ## 为什么不能要求毫秒精确相等
+ *
+ * 这一处原来写的是
+ * `strftime('%Y-%m-%dT%H:%M:%f', closed_at) = strftime('%Y-%m-%dT%H:%M:%f', ?)`，
+ * 即**毫秒精确相等**。而同一回合的两条记账路径拿到的平仓时刻本来就不同：
+ * 运行期用的是它在本地**察觉到仓位消失**的时刻，对账用的是交易所**成交记录**里的时刻。
+ *
+ * 上一条注释一边说这两者"一致、实测差 368ms"，一边把守卫写成精确相等 ——
+ * **自相矛盾，于是守卫在它本该生效的那个场景里永远不会触发**。实盘后果实测到了：
+ *
+ *     #29 BULLAUSDT  closed_at 17:39:06.483  source=bot         费 0
+ *     #30 BULLAUSDT  closed_at 17:39:06.033  source=reconciled  费 0.0249
+ *
+ * 同一个回合被记了两次，账面多算一笔 -0.156 的亏损。
+ *
+ * ## 为什么 2 秒是安全的
+ *
+ * 单向持仓模式下**同一标的同一时刻只能有一个仓位**；同一标的的两笔真实回合之间
+ * 至少隔着再入场冷却（配置里是分钟级）。所以 2 秒远不足以把两笔真实回合并成一笔，
+ * 而 450ms 这种路径差异又能被覆盖。
+ */
+const DUPLICATE_CLOSE_TOLERANCE_MS = 2000;
+
+/**
  * How many equity snapshots the time-to-trough drawdown considers.
  *
  * Same number the console passed inline before (`equity.list(traderId, 5000)`),
@@ -1666,7 +1692,7 @@ export const trades = {
        WHERE trader_id = ? AND symbol = ? AND quantity > 0
          AND ABS(quantity - ?) <= MAX(1e-6, ABS(?) * ${DUPLICATE_QUANTITY_TOLERANCE})
          AND ABS(entry_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_PRICE_TOLERANCE})
-         AND (strftime('%Y-%m-%dT%H:%M:%f', closed_at) = strftime('%Y-%m-%dT%H:%M:%f', ?)
+         AND (ABS(julianday(closed_at) - julianday(?)) * 86400000 <= ${DUPLICATE_CLOSE_TOLERANCE_MS}
               ${byOrder})
        ORDER BY id ASC
        LIMIT 1`;

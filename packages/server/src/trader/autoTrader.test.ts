@@ -1019,6 +1019,89 @@ test('clientOrderId 对中文与超长标的都合法、唯一且不超 36 字�
   for (let i = 0; i < 50; i += 1) ids.add(makeClientId('entry', 'BULLAUSDT'));
   assert.equal(ids.size, 50, '同一毫秒内生成的 id 出现重复 —— 唯一性后缀被截断了');
 });
+/*
+ * 同一回合的两条记账路径，平仓时刻相差几百毫秒 —— 守卫必须认出来。
+ *
+ * 实盘事故（2026-09-17 17:39）：
+ *
+ *     #29 BULLAUSDT  closed_at 17:39:06.483  source=bot         费 0
+ *     #30 BULLAUSDT  closed_at 17:39:06.033  source=reconciled  费 0.0249
+ *
+ * 同一个回合被记了两次，账面多算一笔 -0.156 的亏损。
+ *
+ * 原因是守卫要求 `closed_at` **毫秒精确相等**，而运行期用的是"本地察觉到仓位消失"
+ * 的时刻、对账用的是交易所成交记录里的时刻，两者本来就差几百毫秒（实测 450ms）。
+ * 于是守卫在它本该生效的那个场景里**永远不会触发**。
+ *
+ * 这个用例钉住容差：500ms 的偏差必须被认成同一回合。
+ */
+test('两条记账路径的平仓时刻相差 500ms 时，仍判为同一回合而不重复插入', () => {
+  const qty = 218;
+  const entryPrice = 0.1145555;
+  const first = tradeStore.insert({
+    traderId,
+    symbol: 'BULLAUSDT',
+    side: 'long',
+    quantity: qty,
+    entryPrice,
+    exitPrice: 0.1139543,
+    leverage: 5,
+    grossPnl: -0.1062,
+    entryFee: 0.0124,
+    exitFee: 0.0125,
+    closeReason: 'drawdown_guard',
+    openedAt: '2026-09-17T17:33:51.340Z',
+    closedAt: '2026-09-17T17:39:06.483Z',
+    source: 'bot',
+  });
+
+  // 对账路径：同一回合，但平仓时刻晚了 450ms
+  const second = tradeStore.insert({
+    traderId,
+    symbol: 'BULLAUSDT',
+    side: 'long',
+    quantity: qty,
+    entryPrice,
+    exitPrice: 0.1139543,
+    leverage: 5,
+    grossPnl: -0.1062,
+    entryFee: 0.0124,
+    exitFee: 0.0125,
+    closeReason: 'reconciled',
+    openedAt: '2026-09-17T17:33:50.968Z',
+    closedAt: '2026-09-17T17:39:06.033Z',
+    source: 'reconciled',
+    idempotent: true,
+  });
+
+  assert.equal(second.created, false, '450ms 的偏差必须被认成同一回合，不得插第二行');
+  assert.equal(second.id, first.id, '返回的应当是已有那一行');
+  assert.equal(tradeStore.list(traderId).length, 1, '账上只应有一行');
+
+  /*
+   * 反面：2 秒之外的**真实**另一回合必须照常插入。
+   * 没有这一半，把容差改成"永远匹配"也能让上面全绿 —— 那会把真成交吞掉。
+   */
+  const later = tradeStore.insert({
+    traderId,
+    symbol: 'BULLAUSDT',
+    side: 'long',
+    quantity: qty,
+    entryPrice,
+    exitPrice: 0.1139543,
+    leverage: 5,
+    grossPnl: -0.115,
+    entryFee: 0.0125,
+    exitFee: 0.0125,
+    closeReason: 'drawdown_guard',
+    openedAt: '2026-09-17T17:45:00.000Z',
+    closedAt: '2026-09-17T17:50:00.000Z',
+    source: 'bot',
+    idempotent: true,
+  });
+  assert.equal(later.created, true, '相隔数分钟的另一回合必须照常入账');
+  assert.equal(tradeStore.list(traderId).length, 2);
+});
 test('运行中触发止损：平仓原因是「触发止损」而不是「对账补录」', async () => {
   const broker = new FakeBroker();
   await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
