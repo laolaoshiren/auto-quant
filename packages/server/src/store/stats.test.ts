@@ -343,3 +343,43 @@ test('a trader with no closed trades reports zeroes rather than dividing by zero
   assert.equal(stats.winRatePercent, 0);
   assert.ok(Number.isFinite(stats.profitFactor), 'profitFactor must not be NaN');
 });
+
+test('同一毫秒内的多条权益快照：最新的一条必须是最后写入的那条', () => {
+  /*
+   * Why this test exists —— 这是一个**间歇性**故障的根因，不是假想的问题。
+   *
+   * 一个周期写一条权益快照，而两个周期完全可能落在同一毫秒里（实测：`autoTrader.test.ts`
+   * 里那个"开仓 + 平仓"的用例整段只要 3.9ms）。只按 `timestamp` 排序时，同一毫秒内的
+   * 行序是未定义的，而 SQLite 实测会先回**先插入**的那一行 —— 于是 `equity.latest()`
+   * 拿到上一轮的快照，`computeTraderStats` 用它的浮动盈亏算出**晚一轮**的权益。
+   *
+   * 症状是那个用例里"平仓后归属权益应为 1001、却间歇性得到 1002"（浮盈被取成平仓前
+   * 那一轮的 +1），大约每 10 次全量测试出现一次。修复是让自增主键当决胜键。
+   */
+  traderId = seedTrader();
+  const at = new Date().toISOString();
+  const snapshots = [
+    { equity: 1001, unrealizedPnl: 1 },
+    { equity: 1001, unrealizedPnl: 0 },
+  ];
+  for (const snapshot of snapshots) {
+    equityStore.insert({
+      traderId,
+      timestamp: at,
+      equity: snapshot.equity,
+      availableBalance: 800,
+      unrealizedPnl: snapshot.unrealizedPnl,
+      marginUsed: 200,
+      openPositions: snapshot.unrealizedPnl > 0 ? 1 : 0,
+      accountEquity: snapshot.equity,
+      accountUnrealizedPnl: snapshot.unrealizedPnl,
+    });
+  }
+
+  assert.equal(equityStore.latest(traderId)?.unrealizedPnl, 0, '时间戳相同时，"最新"是最后写入的那条');
+  // 曲线本身仍是按时间正序，同毫秒内按写入顺序（先写的在前）。
+  assert.deepEqual(
+    equityStore.list(traderId, 10).map((s) => s.unrealizedPnl),
+    [1, 0],
+  );
+});

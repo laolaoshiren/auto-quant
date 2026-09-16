@@ -98,7 +98,6 @@ function contextWith(memory: PromptMemory, candidates?: MarketSnapshot[]): Promp
     },
     positions: [],
     candidates: candidates ?? [snapshot('BTCUSDT', 68_000), snapshot('ETHUSDT', 2_500)],
-    recentTrades: [],
     oiRanking: [],
     memory,
   };

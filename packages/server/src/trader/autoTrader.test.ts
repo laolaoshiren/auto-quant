@@ -27,6 +27,7 @@ import {
   strategies as strategyStore,
   traders,
   trades as tradeStore,
+  tradeEvents,
 } from '../store/repositories.js';
 import { AutoTrader, describeCycleFailure, ORDER_SETTLE_GRACE_MS, type DecisionModel } from './autoTrader.js';
 
@@ -1421,6 +1422,55 @@ test('an unrealised spike does not permanently trip the drawdown breaker', async
  *   ① 空仓 + 熔断 → 一次模型调用都不发生；
  *   ② 未熔断 → 照常调用（否则"跳过"会变成"再也不决策"）。
  */
+/*
+ * 每小时开仓额度用满、且空仓时同样跳过模型请求。
+ *
+ * 与熔断那条是**同一个判据**：本轮有没有可能产生可执行的动作。
+ * 额度满 → 新开仓全被拦；空仓 → 没有平仓可做。所以本轮必定无事可做，
+ * 花钱请求模型只会得到一批注定被拒的决策。
+ *
+ * 实测：额度（3 笔）用满后，最近 12 轮里有 5 轮是这种空转，
+ * 每轮约 6 万 tokens，共 30 万 tokens 产出为零。
+ *
+ * 这个测试钉住的是"额度满也要跳过"，**不是**"额度满就什么都不做" ——
+ * 有持仓时必须照常请求，因为决策里可能有平仓。
+ */
+test('每小时额度用满且空仓时跳过模型请求', async () => {
+  let calls = 0;
+  const countingModel: DecisionModel = {
+    complete: async () => {
+      calls += 1;
+      return {
+        text: OPEN_LONG_RESPONSE,
+        usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+        latencyMs: 1,
+      };
+    },
+  };
+
+  /*
+   * 额度设成 1（schema 的下限 —— `maxEntriesPerHour` 是
+   * `z.number().int().min(1).max(60)`，**写 0 会被拒**，整个 config 回落到默认值，
+   * 测试就会以"额度并没满"的方式假绿）。
+   * 然后手动记一条开仓事件，让本小时计数达到 1 —— 此时账户仍是空仓。
+   */
+  strategyStore.update(traders.get(traderId)!.strategyId, {
+    config: {
+      ...permissiveConfig(),
+      throttle: { ...permissiveConfig().throttle, maxEntriesPerHour: 1 },
+    },
+  });
+  tradeEvents.record(traderId, 'BTCUSDT', 'entry');
+  assert.equal(tradeEvents.entriesThisHour(traderId), 1, '夹具应已记下 1 笔本小时开仓');
+
+  const summary = await buildTrader(new FakeBroker(), '', countingModel).runOnce();
+
+  assert.equal(calls, 0, '额度用满且空仓时不得请求模型 —— 那是注定被丢弃的付费调用');
+  assert.ok(
+    summary.includes('额度'),
+    `runOnce 的返回值应说明是额度触发的跳过，实际是：${summary}`,
+  );
+});
 test('熔断生效且空仓时跳过模型请求，未熔断时照常请求', async () => {
   let calls = 0;
   const countingModel: DecisionModel = {
