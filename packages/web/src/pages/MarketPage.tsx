@@ -16,7 +16,7 @@ import { useEvents } from '../lib/store';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, TextInput, cn } from '../components/ui';
 import { CandlestickChart } from '../components/CandlestickChart';
-import { fmtCompact, fmtPercent, fmtPrice, pnlColor } from '../lib/format';
+import { fmtCompactAmount, fmtPercent, fmtPriceUsd, pnlColor } from '../lib/format';
 
 const INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 type Interval = (typeof INTERVALS)[number];
@@ -127,7 +127,7 @@ export function MarketPage() {
         {active && (
           <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
             <span className="num text-2xl leading-tight text-ink-strong" title="最新成交价（USDT）">
-              {fmtPrice(active.price)}
+              {fmtPriceUsd(active.price)}
             </span>
             {/* 带符号：颜色只是辅助，符号才是所有人都能读到的方向 */}
             <span className={cn('num text-lg', pnlColor(active.changePercent24h))} title="24 小时涨跌幅">
@@ -135,12 +135,13 @@ export function MarketPage() {
               <span className="ml-1 text-xs text-ink-faint">24h</span>
             </span>
             <span className="num text-xs text-ink-faint">
-              24h 成交额 {fmtCompact(active.quoteVolume24h)} USDT · 最小名义价值 {active.minNotional}
+              24h 成交额 {fmtCompactAmount(active.quoteVolume24h, 'USDT')} · 最小名义价值{' '}
+              {fmtCompactAmount(active.minNotional, 'USDT')}
             </span>
           </span>
         )}
 
-        <div className="ml-auto">
+        <div className="ml-auto shrink-0">
           <IntervalPicker value={interval} onChange={setKlineInterval} />
         </div>
       </div>
@@ -263,11 +264,13 @@ export function MarketPage() {
                             {row.baseAsset}
                             <span className="text-ink-faint">USDT</span>
                           </td>
-                          <td className="td num text-right">{fmtPrice(row.price)}</td>
+                          <td className="td num text-right">{fmtPriceUsd(row.price)}</td>
                           <td className={cn('td num text-right', pnlColor(row.changePercent24h))}>
                             {fmtPercent(row.changePercent24h)}
                           </td>
-                          <td className="td num text-right text-ink-lo">{fmtCompact(row.quoteVolume24h)}</td>
+                          <td className="td num text-right text-ink-lo">
+                            {fmtCompactAmount(row.quoteVolume24h, 'USDT')}
+                          </td>
                         </tr>
                       );
                     })}
@@ -347,15 +350,29 @@ export function MarketPage() {
               padded={false}
             >
               <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 xl:grid-cols-4 3xl:grid-cols-6">
-                <Readout label={`开盘（${selected.replace(/USDT$/, '')}）`} value={fmtPrice(last.open)} />
-                <Readout label="最高" value={fmtPrice(last.high)} tone="text-up" />
-                <Readout label="最低" value={fmtPrice(last.low)} tone="text-down" />
-                <Readout label="收盘" value={fmtPrice(last.close)} />
-                <Readout label="成交量（币）" value={fmtCompact(last.volume)} />
-                <Readout label="成交额（USDT）" value={fmtCompact(last.quoteVolume)} />
+                {/*
+                 * 每一条都带单位：同一个 `12.35M` 在"成交量（币）"和"成交额（USDT）"
+                 * 里是两个量级完全不同的东西，单位必须进数值本身而不只靠标签
+                 * （见 `lib/format.ts` 的命名规则与 `DESIGN.md` §5.3）。
+                 */}
+                <Readout
+                  label={`开盘（${selected.replace(/USDT$/, '')}）`}
+                  value={fmtPriceUsd(last.open)}
+                />
+                <Readout label="最高（USDT）" value={fmtPriceUsd(last.high)} tone="text-up" />
+                <Readout label="最低（USDT）" value={fmtPriceUsd(last.low)} tone="text-down" />
+                <Readout label="收盘（USDT）" value={fmtPriceUsd(last.close)} />
+                <Readout
+                  label={`成交量（${selected.replace(/USDT$/, '')}）`}
+                  value={fmtCompactAmount(last.volume, selected.replace(/USDT$/, ''))}
+                />
+                <Readout label="成交额（USDT）" value={fmtCompactAmount(last.quoteVolume, 'USDT')} />
                 <Readout label="成交笔数" value={String(last.trades)} />
-                <Readout label="主动买入（币）" value={fmtCompact(last.takerBuyBase)} />
-                <Readout label="主动买入（额）" value={fmtCompact(last.takerBuyQuote)} />
+                <Readout
+                  label={`主动买入（${selected.replace(/USDT$/, '')}）`}
+                  value={fmtCompactAmount(last.takerBuyBase, selected.replace(/USDT$/, ''))}
+                />
+                <Readout label="主动买入（USDT）" value={fmtCompactAmount(last.takerBuyQuote, 'USDT')} />
                 <Readout
                   label="主动买入占比"
                   value={last.volume > 0 ? `${((last.takerBuyBase / last.volume) * 100).toFixed(1)}%` : '—'}

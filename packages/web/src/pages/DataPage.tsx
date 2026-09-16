@@ -15,8 +15,8 @@ import { ArrowDownToLine, Pause, Play, RefreshCw, RotateCw, Trash2 } from 'lucid
 import { api, type LogLine } from '../lib/api';
 import { useApp, useEvents, type LiveLogLine } from '../lib/store';
 import { useDocumentTitle, usePolled, useTicker } from '../lib/hooks';
-import { Badge, Button, CopyButton, Empty, ErrorNote, Panel, Spinner3, TextInput, cn } from '../components/ui';
-import { fmtClockOffset, fmtInt, timeAgo } from '../lib/format';
+import { Badge, Button, CopyButton, ErrorNote, Panel, Spinner3, TextInput, cn } from '../components/ui';
+import { fmtClockOffsetMs, fmtInt, timeAgo } from '../lib/format';
 
 type Level = 'all' | 'info' | 'warn' | 'error';
 
@@ -145,6 +145,8 @@ export function DataPage() {
   };
 
   const filtering = level !== 'all' || search.trim().length > 0;
+  /** 有内容才给日志容器那一块固定高度；空状态只占一行（`LAYOUT.md` §4）。 */
+  const hasLines = shown.length > 0;
 
   return (
     <div className="space-y-3">
@@ -170,7 +172,7 @@ export function DataPage() {
 
       <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
         <Metric label="环境" value={system?.environment ?? '—'} sub={system?.environmentLabel} />
-        <Metric label="时钟偏移" value={fmtClockOffset(system?.clockOffsetMs)} sub="本机 − 交易所" />
+        <Metric label="时钟偏移" value={fmtClockOffsetMs(system?.clockOffsetMs)} sub="本机 − 交易所" />
         <Metric
           label="API 权重"
           value={`${fmtInt(system?.weightUsed)} / ${fmtInt(system?.weightLimit)}`}
@@ -297,46 +299,55 @@ export function DataPage() {
           <CopyButton onCopy={() => void copyBuffer()} copied={copied} />
         </div>
 
-        {/* 日志容器自己滚动、自己断词：任何一行都不许把页面撑宽 */}
+        {/*
+         * 日志容器自己滚动、自己断词：任何一行都不许把页面撑宽。
+         *
+         * 高度分成两种（`LAYOUT.md` §4：空状态不占位）：
+         * - 有内容时给足 `min(70vh,560px)` 并在内部滚动 —— 日志行又长又多，
+         *   这是唯一能既不撑宽页面、又不让排查者频繁滚动的做法；
+         * - 空/加载/出错时**不预留那块高度**，只占一行多一点。空列表撑满一屏
+         *   正是这条规范要消掉的浪费。
+         */}
         <div
           ref={scrollRef}
-          className="h-[min(70vh,560px)] overflow-y-auto overflow-x-hidden rounded-md border border-base-800 bg-base-950 p-1 font-mono text-base leading-relaxed"
+          className={cn(
+            'overflow-y-auto overflow-x-hidden rounded-md border border-base-800 bg-base-950 p-1 font-mono text-base leading-relaxed',
+            hasLines ? 'h-[min(70vh,560px)]' : 'min-h-0',
+          )}
         >
           {source === 'rest' && restQuery.loading && shown.length === 0 ? (
             <Spinner3 label="正在加载持久化日志" />
           ) : restQuery.error && shown.length === 0 ? (
-            <div className="p-2">
+            <div className="space-y-1.5 p-2">
               <ErrorNote>读取持久化日志失败：{restQuery.error}</ErrorNote>
-              <Button size="sm" className="mt-2" busy={restQuery.loading} onClick={() => restQuery.reload()}>
+              <Button size="sm" busy={restQuery.loading} onClick={() => restQuery.reload()}>
                 重试
               </Button>
             </div>
           ) : shown.length === 0 ? (
-            <Empty
-              message={filtering ? '没有匹配当前过滤条件的日志行。' : '还没有日志。'}
-              hint={
-                filtering
-                  ? '放宽级别或清空过滤词再看一次。'
-                  : '服务一旦开始运行，日志会通过 WebSocket 持续推送过来；也可以切到「持久化」读取历史。'
-              }
-              action={
-                filtering ? (
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      setSearch('');
-                      setLevel('all');
-                    }}
-                  >
-                    清除过滤
-                  </Button>
-                ) : (
-                  <Button size="sm" variant={source === 'rest' ? 'ghost' : 'primary'} onClick={() => setSource('rest')}>
-                    读取持久化日志
-                  </Button>
-                )
-              }
-            />
+            // 一行话 + 下一步动作：不用 `Empty`，它的 py-10 会为"没有日志"预留一屏高度。
+            <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1.5">
+              <span className="font-sans text-base text-ink-mid">
+                {filtering
+                  ? '没有匹配当前过滤条件的日志行 —— 放宽级别或清空过滤词。'
+                  : '还没有日志。服务开始运行后会通过推送持续写入。'}
+              </span>
+              {filtering ? (
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setSearch('');
+                    setLevel('all');
+                  }}
+                >
+                  清除过滤
+                </Button>
+              ) : (
+                <Button size="sm" onClick={() => setSource('rest')}>
+                  读取持久化日志
+                </Button>
+              )}
+            </div>
           ) : (
             shown.map((line) => (
               <div

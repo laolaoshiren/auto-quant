@@ -24,7 +24,6 @@ import { Badge, Button, CopyButton, ErrorNote, Panel, Select, Spinner3, cn } fro
 import { CoinSourceSection, IndicatorsSection } from '../components/StrategyFields';
 import { PromptSection, ProtectionSection, RiskSection, StrategyHeaderSection } from '../components/StrategyRiskFields';
 import { StrategyCheckButton, StrategyCheckModal } from '../components/StrategyCheckModal';
-import { fmtDateTime } from '../lib/format';
 
 type LoadState =
   | { kind: 'loading' }
@@ -69,6 +68,11 @@ function tabForPath(path: string): TabId {
 /**
  * 常驻的风控读数。
  *
+ * **层级，不是四个等大的格子。** 主读数只有一个：「强制止损」—— 它是唯一一个
+ * 关掉就等于"亏损没有上限"的开关，所以它拿到最大的字号、最宽的格子，未开启时
+ * 还带红边。杠杆、仓位、盈亏比都是在这个前提下的数量约束，降一档并排放在一条
+ * 紧凑的行里即可（LAYOUT.md §2，以及本文档开头"决定单笔亏损上限的数字要最大"）。
+ *
  * 只接收原始值（而不是整个 `riskControl` 对象）：对象每次按键都会换身份，
  * `memo` 就白加了。这几个数字才是它真正依赖的东西。
  */
@@ -90,45 +94,54 @@ const RiskBanner = memo(function RiskBanner({
   onOpen: () => void;
 }) {
   return (
-    <div className="grid grid-cols-2 gap-1.5 lg:grid-cols-4">
-      <RiskBannerCell
-        label="杠杆上限（倍）"
-        value={`≤ ${leverage}`}
-        note={`山寨币 ≤ ${altcoinLeverage}`}
-        onOpen={onOpen}
-      />
-      <RiskBannerCell
-        label="最大仓位（倍权益）"
-        value={`${positionRatio}×`}
-        note={`山寨币 ${altcoinPositionRatio}×`}
-        onOpen={onOpen}
-      />
-      <RiskBannerCell
-        label="强制止损"
-        value={requireStopLoss ? '已开启' : '未开启'}
-        note={requireStopLoss ? '交易所侧挂单' : '点击开启'}
-        tone={requireStopLoss ? 'text-up' : 'text-down'}
-        emphasize={!requireStopLoss}
-        onOpen={onOpen}
-      />
-      <RiskBannerCell label="最小盈亏比" value={`1:${riskReward}`} note="低于此值直接拒绝" onOpen={onOpen} />
+    <div className="flex flex-wrap items-stretch gap-2">
+      <button
+        type="button"
+        onClick={onOpen}
+        title="强制止损 — 点击跳到核心风控"
+        className={cn(
+          'group flex min-w-0 shrink-0 basis-full flex-col rounded-md border bg-base-850/80 px-3 py-1.5 text-left transition hover:bg-base-800 sm:basis-auto sm:min-w-[16rem]',
+          requireStopLoss ? 'border-base-750 hover:border-accent/60' : 'border-down/60 hover:border-down',
+        )}
+      >
+        <span className="flex w-full items-center gap-1.5 text-xs uppercase tracking-[0.12em] text-ink-lo">
+          强制止损
+          <span className="ml-auto hidden shrink-0 text-xs normal-case tracking-normal text-accent group-hover:inline">
+            调整
+          </span>
+        </span>
+        <span className={cn('num truncate text-xl leading-tight', requireStopLoss ? 'text-up' : 'text-down')}>
+          {requireStopLoss ? '已开启' : '未开启'}
+        </span>
+        <span className={cn('truncate text-xs', requireStopLoss ? 'text-ink-faint' : 'text-down')}>
+          {requireStopLoss ? '交易所侧挂单，程序挂掉也仍然有效' : '⚠ 现在可以开出没有止损的仓位'}
+        </span>
+      </button>
+
+      <div className="grid min-w-0 flex-1 grid-cols-3 gap-1.5">
+        <RiskReadout label="杠杆上限（倍）" value={`≤ ${leverage}`} note={`山寨 ≤ ${altcoinLeverage}`} onOpen={onOpen} />
+        <RiskReadout
+          label="最大仓位（倍权益）"
+          value={`${positionRatio}×`}
+          note={`山寨 ${altcoinPositionRatio}×`}
+          onOpen={onOpen}
+        />
+        <RiskReadout label="最小盈亏比" value={`1:${riskReward}`} note="低于此值直接拒绝" onOpen={onOpen} />
+      </div>
     </div>
   );
 });
 
-function RiskBannerCell({
+/** 次要的风控读数：一格一个数字，比主读数小一档（`text-base` 对 `text-xl`）。 */
+function RiskReadout({
   label,
   value,
   note,
-  tone,
-  emphasize,
   onOpen,
 }: {
   label: string;
   value: string;
   note: string;
-  tone?: string;
-  emphasize?: boolean;
   onOpen: () => void;
 }) {
   return (
@@ -136,16 +149,10 @@ function RiskBannerCell({
       type="button"
       onClick={onOpen}
       title={`${label} — 点击跳到核心风控`}
-      className={cn(
-        'group flex min-w-0 flex-col rounded-md border bg-base-850/80 px-2.5 py-1.5 text-left transition hover:border-accent/60 hover:bg-base-800',
-        emphasize ? 'border-down/60' : 'border-base-750',
-      )}
+      className="group flex min-w-0 flex-col rounded-md border border-base-750 bg-base-850/60 px-2 py-1 text-left transition hover:border-accent/60 hover:bg-base-800"
     >
-      <span className="flex w-full items-center gap-1 text-xs text-ink-lo">
-        <span className="min-w-0 truncate">{label}</span>
-        <span className="ml-auto hidden shrink-0 text-xs text-accent group-hover:inline lg:inline">调整</span>
-      </span>
-      <span className={cn('num truncate text-xl leading-tight', tone ?? 'text-ink-hi')}>{value}</span>
+      <span className="truncate text-xs text-ink-faint">{label}</span>
+      <span className="num truncate text-base leading-tight text-ink-hi">{value}</span>
       <span className="truncate text-xs text-ink-faint">{note}</span>
     </button>
   );
@@ -558,7 +565,7 @@ export function StrategyEditorPage() {
                 key={item.id}
                 value={item.id}
                 className={cn(
-                  '-mb-px flex items-center gap-1.5 border-b-2 px-2.5 py-1.5 text-base font-medium transition',
+                  '-mb-px flex items-center gap-1.5 border-b-2 px-2.5 py-1 text-base font-medium transition',
                   'border-transparent text-ink-lo hover:text-ink-mid',
                   'data-[state=active]:border-accent data-[state=active]:text-ink-hi',
                 )}
@@ -584,11 +591,9 @@ export function StrategyEditorPage() {
       {/* ---------------------------------------------------------------- */}
       {/*  分区内容                                                         */}
       {/* ---------------------------------------------------------------- */}
-      {recordQuery.data && (
-        <p className="text-xs text-ink-faint">
-          保存前会按 StrategyConfigSchema 校验 · 服务端副本更新于 {fmtDateTime(recordQuery.data.updatedAt)}
-        </p>
-      )}
+      {/* 这里原本有一行「保存前会按 StrategyConfigSchema 校验 · 服务端副本更新于 …」。
+          它是内部诊断值（LAYOUT.md §3）：正常编辑时永远"没事"，却常驻在最显眼的
+          位置。脏状态由上面的徽章负责，服务端副本在保存后会重新拉取。 */}
 
       {/*
         * 分区内容不写 `focus-visible:outline-none`：Radix 把面板本身做成可聚焦的，

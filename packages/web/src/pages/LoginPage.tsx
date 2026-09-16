@@ -16,6 +16,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { TriangleAlert, ArrowRight, LineChart, ShieldCheck, Terminal, Wallet } from 'lucide-react';
 import { Button, ErrorNote, Field, TextInput } from '../components/ui';
+import { SectionLabel } from '../components/shell';
 import { useApp } from '../lib/store';
 import { useDocumentTitle } from '../lib/hooks';
 
@@ -77,8 +78,9 @@ export function LoginPage() {
       {/*  品牌区：说清这是什么、以及下单意味着什么                          */}
       {/* ---------------------------------------------------------------- */}
       {/* 窄屏下这段被压成一条标题条而不是整块删除：「实盘会花真钱」这句话
-          不应该只在宽屏上出现。 */}
-      <aside className="flex flex-col justify-between gap-6 border-b border-base-800 bg-base-900 px-5 py-6 sm:px-8 lg:w-[46%] lg:max-w-2xl lg:border-b-0 lg:border-r lg:px-12 lg:py-14">
+          不应该只在宽屏上出现。垂直留白按 LAYOUT.md §4 收紧了一档 ——
+          登录页也不该把内容摊在一条 40px 的空隙里。 */}
+      <aside className="flex flex-col justify-between gap-5 border-b border-base-800 bg-base-900 px-5 py-6 sm:px-8 lg:w-[46%] lg:max-w-2xl lg:border-b-0 lg:border-r lg:px-10 lg:py-10">
         <div>
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent/15 text-md font-bold text-accent">
@@ -90,11 +92,14 @@ export function LoginPage() {
             </div>
           </div>
 
-          <p className="mt-6 max-w-md text-base leading-relaxed text-ink-mid">
+          <p className="mt-5 max-w-md text-base leading-relaxed text-ink-mid">
             7×24 自动运行：模型判断方向，服务端风控逐笔约束杠杆、仓位与止损，交易记录逐条落库、可回放。
           </p>
 
-          <ul className="mt-6 space-y-3">
+          {/* 区块标题走 SectionLabel（LAYOUT.md §5）：这三条是"为什么可以信任它"，
+              没有标题时它们读起来只是三句孤立的宣传语。 */}
+          <SectionLabel title="为什么可以信任它" className="mt-5 mb-2.5" />
+          <ul className="space-y-2.5">
             <TrustRow icon={<Wallet aria-hidden className="h-4 w-4" />} title="下单用真钱" text="实盘模式下会向币安提交真实订单。模拟模式不需要密钥，随时可切。" />
             <TrustRow icon={<ShieldCheck aria-hidden className="h-4 w-4" />} title="风控不可绕过" text="杠杆、保证金、单笔风险由服务端夹紧；模型给出的越界参数会被改写并记录。" />
             <TrustRow icon={<LineChart aria-hidden className="h-4 w-4" />} title="账是可核对的" text="净盈亏 = 毛盈亏 − 手续费 − 资金费，每笔成交都按这个等式展示。" />
@@ -116,14 +121,14 @@ export function LoginPage() {
       {/* ---------------------------------------------------------------- */}
       {/*  表单区                                                           */}
       {/* ---------------------------------------------------------------- */}
-      <main className="flex flex-1 items-center justify-center px-5 py-8 sm:px-8 lg:py-14">
+      <main className="flex flex-1 items-center justify-center px-5 py-8 sm:px-8 lg:py-10">
         <div className="w-full max-w-md">
           <h2 className="text-xl font-semibold text-ink-hi">登录控制台</h2>
           <p className="mt-1 text-xs text-ink-lo">
             本系统没有注册入口，账号在服务首次启动时自动生成。
           </p>
 
-          <form onSubmit={submit} className="mt-5 space-y-4">
+          <form onSubmit={submit} className="mt-4 space-y-4">
             {noAccountYet && (
               <div
                 role="status"
@@ -137,7 +142,7 @@ export function LoginPage() {
                   管理员账号在服务首次启动时自动创建，凭据只打印一次。若已丢失，只能从服务日志里取回：
                 </p>
                 <div className="mt-2 flex items-start gap-2">
-                  <code className="num min-w-0 flex-1 select-all break-all rounded bg-base-950 px-2 py-1.5 text-2xs text-ink-mid">
+                  <code className="num min-w-0 flex-1 select-all break-all rounded bg-base-950 px-2 py-1.5 text-xs text-ink-mid">
                     {FIRST_RUN_HINT}
                   </code>
                   <Button small variant="ghost" onClick={copyHint} title="复制这条命令">
@@ -182,11 +187,16 @@ export function LoginPage() {
             </Button>
 
             {/* 恢复路径的第二处提示。上面那块只在「还没有账户」时出现，而
-                忘记密码的情况同样需要它 —— 那正是这条命令最有用的时候。 */}
-            <p className="rounded-md border border-base-800 bg-base-900/60 px-3 py-2 text-xs leading-relaxed text-ink-lo">
-              忘记密码？本系统不提供邮件重置。用服务端日志里的首次凭据登录后，可在「操作员账户」中修改用户名与密码：
-              <code className="num mt-1 block select-all break-all text-2xs text-ink-faint">{FIRST_RUN_HINT}</code>
-            </p>
+                忘记密码的情况同样需要它 —— 那正是这条命令最有用的时候。
+                用 SectionLabel 立一个小标题：这条路径是操作员唯一的退路，
+                不该长得像一句补充说明。 */}
+            <div className="rounded-md border border-base-800 bg-base-900/60 px-3 py-2">
+              <SectionLabel title="账号恢复" className="mb-1.5" />
+              <p className="text-xs leading-relaxed text-ink-lo">
+                忘记密码？本系统不提供邮件重置。用服务端日志里的首次凭据登录后，可在「操作员账户」中修改用户名与密码：
+              </p>
+              <code className="num mt-1 block select-all break-all text-xs text-ink-faint">{FIRST_RUN_HINT}</code>
+            </div>
           </form>
 
           <div className="mt-5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-base-800 pt-3 text-xs text-ink-faint">

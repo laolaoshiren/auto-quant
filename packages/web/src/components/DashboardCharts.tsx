@@ -101,11 +101,15 @@ export function DashboardEquityChart({
     .filter((point) => Number.isFinite(point.t));
 
   if (points.length < 2) {
+    /*
+     * 空状态**不占高度**（LAYOUT.md §4）。
+     *
+     * 这里原来渲染一个 `style={{ height }}` 的虚线盒子（默认 240px），于是
+     * "还没有快照"这个状态和一张真图表占一样多的地方 —— 而它一个字的信息量
+     * 都不比一行文字多。收成一条横条，页面的其余部分就上来了。
+     */
     return (
-      <div
-        className="flex flex-col items-center justify-center gap-1 rounded-md border border-dashed border-base-700 px-4 text-center"
-        style={{ height }}
-      >
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 rounded-md border border-dashed border-base-700 px-3 py-2.5">
         <p className="text-base text-ink-lo">还没有足够的权益快照</p>
         <p className="text-xs text-ink-faint">每个决策周期结束时会记录一次，两个周期后这里就会画出曲线。</p>
       </div>
@@ -210,12 +214,22 @@ export function DashboardEquityChart({
 /*  Win / loss proportional bar                                                */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * 盈亏笔数的比例条。
+ *
+ * 层级上它只有一个主读数：条本身（`h-1`）。两侧的计数留在 `text-xs`，因为
+ * 真正的"胜率"数字由调用方以更大的字号单独给出 —— 在这里再放大一次，等于
+ * 同一个数在一屏里出现两次同等权重（LAYOUT.md §2）。
+ */
 export function WinLossBar({ wins, losses }: { wins: number; losses: number }) {
   const total = wins + losses;
   const winPercent = total > 0 ? (wins / total) * 100 : 0;
 
   return (
-    <div className="mt-1">
+    <div
+      className="mt-1"
+      title={total > 0 ? `${fmtInt(wins)} 笔盈利 / ${fmtInt(losses)} 笔亏损` : '还没有平仓记录'}
+    >
       {/*
        * The track is a neutral token, not `bg-down/50`.
        *
@@ -225,7 +239,7 @@ export function WinLossBar({ wins, losses }: { wins: number; losses: number }) {
        * unfilled part is all losses.
        */}
       <div
-        className="flex h-1.5 w-full overflow-hidden rounded-full"
+        className="flex h-1 w-full overflow-hidden rounded-full"
         style={{ backgroundColor: CHART_INK.track }}
         role="img"
         aria-label={`${fmtInt(wins)} 笔盈利，${fmtInt(losses)} 笔亏损`}

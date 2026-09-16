@@ -20,6 +20,9 @@ import { Field, NumberInput, TextInput } from './ui';
  *
  * 内容区固定 `md:2 列 / xl:3 列`：调用方会用 `md:col-span-2 xl:col-span-3`
  * 把整行字段（币种列表、开关组）铺满，列数变了那些跨列就会错位。
+ *
+ * 头部与内边距按 LAYOUT.md §2 收紧过一档：这是全应用最长的表单，每个 Section
+ * 省下 8px，六个分区叠起来就是一屏。
  */
 export function Section({
   title,
@@ -34,7 +37,7 @@ export function Section({
 }) {
   return (
     <section className="overflow-hidden rounded-lg border border-base-750 bg-base-850/40">
-      <header className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1 border-b border-base-800 bg-base-850/70 px-3 py-2.5 sm:px-4">
+      <header className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1 border-b border-base-800 bg-base-850/70 px-3 py-2 sm:px-3.5">
         <div className="min-w-0">
           <h3 className="text-md font-semibold leading-tight text-ink-hi">{title}</h3>
           {/* 说明文字用 ink-lo 而不是 ink-faint：它是"这组字段是什么意思"，不是装饰 */}
@@ -42,7 +45,7 @@ export function Section({
         </div>
         {right && <div className="shrink-0">{right}</div>}
       </header>
-      <div className="grid grid-cols-1 gap-x-4 gap-y-4 p-3 sm:p-4 md:grid-cols-2 xl:grid-cols-3">{children}</div>
+      <div className="grid grid-cols-1 gap-x-4 gap-y-3.5 p-3 md:grid-cols-2 xl:grid-cols-3">{children}</div>
     </section>
   );
 }

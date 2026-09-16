@@ -1,22 +1,35 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ChevronLeft, Play, RefreshCw, RotateCw, Settings2, Square } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Play,
+  RefreshCw,
+  RotateCw,
+  Settings2,
+  Square,
+} from 'lucide-react';
 import type { EquitySnapshot } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
-import { useDocumentTitle, usePolled, useTicker } from '../lib/hooks';
+import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useReconcile, useRunOnce } from '../lib/actions';
-import { Badge, Button, Dot, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
+import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import { TraderStatusBadge } from '../components/Badges';
+import { PageShell, Metric, MetricGroup } from '../components/shell';
 import { DecisionFeed } from '../components/DecisionFeed';
 import { TraderTables, type TraderTabId } from '../components/TraderTables';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
+import { DashboardEquityChart, WinLossBar } from '../components/DashboardCharts';
 import {
-  DashboardEquityChart,
-  WinLossBar,
-} from '../components/DashboardCharts';
-import { EQUITY_RANGES, type EquityRange } from '../components/equityCurve';
+  EQUITY_RANGES,
+  filterByRange,
+  hasEquityVariation,
+  type EquityRange,
+} from '../components/equityCurve';
 import { CandlestickChart } from '../components/CandlestickChart';
 import { StartTraderModal } from '../components/TraderModals';
 import { TraderConfigModal } from '../components/TraderConfigModal';
@@ -41,11 +54,32 @@ type ChartTab = 'equity' | 'candles';
 /** One day, in ms — the window behind the 今日盈亏 KPI. */
 const DAY_MS = 24 * 3600 * 1000;
 
-/** How tall the decision feed scrolls before it scrolls internally. */
-const FEED_HEIGHT = 720;
+/**
+ * 决策流的可视高度。
+ *
+ * 它是这一页的**主要内容**（见 `LAYOUT.md` §1），所以按视口给高度而不是写死像素：
+ * 1600×900 上一眼能看到最近几轮，4K 上也不会缩在角落。下限 380px 是为了矮窗口
+ * —— 高度归零的话，决策流就退化成"要点开才能看"的东西，那正是这次改造要修的。
+ */
+const FEED_HEIGHT = 'max(380px, calc(100vh - 18rem))';
+
+/**
+ * 展开后的权益曲线高度。
+ *
+ * 220px 在 900px 视口上约 24% 屏高（`LAYOUT.md` §6 的上限是 30%）：有形状时
+ * 够看清趋势，没形状时根本不会画出来（见 `EquityMiniStrip`）。
+ */
+const EQUITY_CHART_HEIGHT = 220;
 
 function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** `Metric` 的色调用有限联合，这里把"盈亏正负"翻译过去（0 走默认色）。 */
+function toneOf(value: number): 'up' | 'down' | 'default' {
+  if (value > 0) return 'up';
+  if (value < 0) return 'down';
+  return 'default';
 }
 
 /**
@@ -76,19 +110,14 @@ function toAccountState(raw: Record<string, unknown> | null): TraderAccountState
 /**
  * The running-bot dashboard.
  *
- * Laid out in descending order of what an operator reads, per DESIGN.md §4:
+ * 版式按 `LAYOUT.md` §1 重排：**左指标栏 + 主内容区**。
  *
- *   1. who this is + what it is doing (header + actions)
- *   2. the five numbers that answer "am I up or down" (KPI band, full width)
- *   3. the equity curve — the shape of that answer over time
- *   4. the decision feed — a full-width *section*, not a sidebar: each cycle now
- *      renders its decisions in full, so at rail width the cards were wrapping
- *      into unreadable columns
- *   5. the tables, which are reference material rather than something watched
- *
- * The old layout put the feed in a 48% column and the tables beside it. Both
- * lost: the tables were clipped at five rows and the feed's decision cards were
- * squeezed. Stacking them gives each the width its content actually needs.
+ * - 页头只留一行"我是谁、什么状态、能做什么"；变化很慢的配置收进 `ConfigSummary`。
+ * - 左栏 280px，按 账户 / 交易 / 系统 分组 —— 分组本身就是层级，比八段同权重文字
+ *   有用得多（操作者原话："扫一眼不知道哪个重要"）。
+ * - 主区先给**决策流**：它是这一页最该被盯着的部分，以前被一张占 40% 屏高的
+ *   平线权益图挤到了屏幕底部。
+ * - 权益曲线只在**真有形状**时才画成图表，否则压成 36px 的缩略条（§4）。
  */
 export function TraderPage() {
   const params = useParams();
@@ -108,10 +137,17 @@ export function TraderPage() {
   const [tableTab, setTableTab] = useState<TraderTabId>('positions');
   const [chartTab, setChartTab] = useState<ChartTab>('equity');
   const [range, setRange] = useState<EquityRange>('ALL');
+  /**
+   * 手动覆盖"要不要展开曲线"。
+   *
+   * `null` = 交给数据判断（有形状就展开，平线就收起）；`true` = 操作者自己点开了
+   * 一条平线；`false` = 自己收起了有形状的曲线。切区间时清空覆盖，重新按数据判断 ——
+   * 换一段窗口本来就该重新看一眼。
+   */
+  const [chartOverride, setChartOverride] = useState<boolean | null>(null);
   // Bumped after a manual 对账 so the tables refetch instead of waiting out
   // their 15-second poll.
   const [tradesToken, setTradesToken] = useState(0);
-  const tick = useTicker(5000);
   const { runOnce, busyId: runOnceBusyId } = useRunOnce();
   const { reconcile, busyId: reconcileBusyId } = useReconcile();
 
@@ -147,8 +183,8 @@ export function TraderPage() {
   const accountState = toAccountState(accountQuery.data?.account ?? null);
 
   /*
-   * The settlement unit the exchange reports, reused by the KPI band's 起始余额 /
-   * 权益 pair so both read in the same unit as the account strip underneath.
+   * The settlement unit the exchange reports, reused by the rail's 起始余额 and the
+   * account strip underneath, so both read in the same unit.
    * Falls back to USDT, which is what every payload we have actually uses.
    */
   const rawAsset = accountQuery.data?.account?.asset;
@@ -220,6 +256,23 @@ export function TraderPage() {
   const todayPnl = dayAgoEquity === undefined ? 0 : equity - dayAgoEquity;
   const todayPercent = dayAgoEquity ? (todayPnl / Math.abs(dayAgoEquity)) * 100 : 0;
 
+  /*
+   * 图表与缩略条共用同一份"可见区间"数据。
+   *
+   * `filterByRange` 必须在这里调用一次，而不是让图表自己筛：收起与否取决于
+   * **当前区间**里有没有形状，两处各筛一次就会出现"图表画的是 7D、判断用的是全部"
+   * 这种自相矛盾的状态。
+   */
+  const windowed = useMemo(() => filterByRange(snapshots, range), [snapshots, range]);
+  const windowFirst = windowed[0]?.equity ?? equity;
+  const windowDelta = equity - windowFirst;
+  const windowPercent = windowFirst !== 0 ? (windowDelta / Math.abs(windowFirst)) * 100 : 0;
+  const curveHasShape = useMemo(
+    () => hasEquityVariation(windowed.map((snapshot) => snapshot.equity)),
+    [windowed],
+  );
+  const curveCollapsed = chartOverride ?? !curveHasShape;
+
   const model = modelsQuery.data?.find((row) => row.id === trader?.aiModelId) ?? null;
   const strategy = strategiesQuery.data?.find((row) => row.id === trader?.strategyId) ?? null;
 
@@ -276,12 +329,124 @@ export function TraderPage() {
 
   const statsCost = stats ? statsCosts(stats) : null;
 
+  /*
+   * 左指标栏。三条规矩（`LAYOUT.md` §1/§3）：
+   *
+   * 1. 按语义分组，组内紧凑、组间留白 —— 分组本身就是层级；
+   * 2. 每个分组最多一个 `size="lg"`：所有数字一样大等于没有重点；
+   * 3. **只放状态，不放诊断值** —— 没有 token 数、没有快照数、没有本地时钟。
+   *    "此刻几点"和"权重还剩多少"在正常运行时永远没事（§3 的教训），
+   *    它们只会把真正要看的数字稀释掉。
+   */
+  const rail = (
+    <div className="grid grid-cols-1 gap-5 sm:grid-cols-3 xl:grid-cols-1">
+      <MetricGroup title="账户">
+        <Metric
+          label={`归属权益（${settleAsset}）`}
+          value={fmtNum(equity, 4)}
+          size="lg"
+          tone="strong"
+          title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。它只包含这个机器人自己的交易；共用的钱包见页面顶部的「交易所账户」。"
+          sub={
+            <>
+              {stats ? (
+                <span className={pnlColor(stats.totalReturnPercent)}>
+                  总收益率 {fmtPercent(stats.totalReturnPercent)}
+                </span>
+              ) : (
+                '等待统计'
+              )}
+              <span title="创建该机器人时从交易所读取的钱包余额，是总收益率与盈亏的计算基准。">
+                {' · '}起始 {fmtAsset(trader.initialEquity, settleAsset, 4)}
+              </span>
+            </>
+          }
+        />
+        <Metric
+          label="今日盈亏"
+          value={fmtUsdSigned(todayPnl, 2)}
+          tone={toneOf(todayPnl)}
+          sub={`${fmtPercent(todayPercent)} · 基准 ${fmtNum(dayAgoEquity ?? equity, 2)}`}
+          title="相对 24 小时前最近一个权益快照的变化。"
+        />
+      </MetricGroup>
+
+      <MetricGroup title="交易">
+        <Metric
+          label="胜率"
+          value={stats ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
+          title="winRatePercent 本身就是 0–100 的百分数；盈/亏笔数直接来自后端，不由胜率反推。"
+          sub={
+            stats ? (
+              <>
+                <WinLossBar wins={wins} losses={losses} />
+                <span>
+                  PF {fmtProfitFactor(stats.profitFactor)} · {fmtInt(stats.totalTrades)} 笔已平仓
+                </span>
+              </>
+            ) : (
+              '等待统计'
+            )
+          }
+        />
+        <Metric
+          label="持仓 / 挂单"
+          value={`${fmtInt(openPositionCount)} / ${fmtInt(openOrders.length)}`}
+          sub={
+            <>
+              浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
+            </>
+          }
+        />
+        <Metric
+          label={`保证金（${settleAsset}）`}
+          value={fmtNum(marginUsed, 2)}
+          title="有效杠杆 = 本机器人总名义价值 ÷ 归属权益。满仓 10x 时读数最高。"
+          sub={
+            <>
+              名义 {fmtUsd(notional, 2)} · 有效杠杆 {effectiveLeverage.toFixed(2)}x
+            </>
+          }
+        />
+      </MetricGroup>
+
+      <MetricGroup title="系统">
+        <Metric
+          label="AI 模型"
+          value={
+            <Link to="/models" className="text-accent hover:underline">
+              {model ? model.label : `#${trader.aiModelId}`}
+            </Link>
+          }
+          sub={model?.model}
+          title="决定它看什么、怎么下单的模型。"
+        />
+        <Metric
+          label="策略"
+          value={
+            <Link to={`/strategy/${trader.strategyId}`} className="text-accent hover:underline">
+              {strategy?.name ?? `#${trader.strategyId}`}
+            </Link>
+          }
+          title="决定候选交易对、杠杆与风控阈值的策略。"
+        />
+        <Metric
+          label="数据源"
+          value={socketOpen ? '实时事件' : 'REST 轮询'}
+          tone={socketOpen ? 'default' : 'warn'}
+          sub={socketOpen ? '推送在线' : '推送断开，按 4 秒轮询兜底'}
+          title="页面上的持仓、委托与决策是从推送来的还是轮询来的 —— 它决定你看到的数字有多新。"
+        />
+      </MetricGroup>
+    </div>
+  );
+
   return (
-    // `max-w` only for the ultra-wide case: past ~1760px the equity curve and
-    // the tables stretch into unreadable spans. Everything below 3xl is fluid.
+    // `max-w` only for the ultra-wide case: past ~1760px the curve and the tables
+    // stretch into unreadable spans. Everything below 3xl is fluid.
     <div className="mx-auto w-full max-w-[110rem] space-y-3">
-      {/* A. Identity + controls ------------------------------------------- */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      {/* A. 页头：我是谁 + 什么状态 + 能做什么，常驻一行 --------------- */}
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <Link
           to="/traders"
           className="inline-flex items-center gap-1 text-base text-ink-lo transition hover:text-accent"
@@ -292,59 +457,19 @@ export function TraderPage() {
 
         <span className="h-4 w-px bg-base-700" aria-hidden />
 
-        <h1 className="min-w-0 truncate text-xl font-semibold tracking-wide text-ink-hi">{trader.name}</h1>
+        <h1 className="min-w-0 max-w-[24rem] truncate text-xl font-semibold tracking-wide text-ink-hi">
+          {trader.name}
+        </h1>
         <Badge tone="muted">#{trader.id}</Badge>
         <TraderStatusBadge status={status} live={trader.isRunning} />
+        <Badge tone="muted" title="该机器人所在的交易环境，由服务端配置决定。">
+          {system?.environmentLabel ?? '—'}
+        </Badge>
         {trader.consecutiveFailures > 0 && (
           <Badge tone="warn" title="连续的模型或执行失败次数；超过熔断阈值会进入安全模式。">
             {trader.consecutiveFailures} 次连续失败
           </Badge>
         )}
-
-        <span className="ml-auto flex flex-wrap items-center gap-2 text-xs text-ink-faint">
-          <Badge tone={socketOpen ? 'up' : 'warn'}>
-            <Dot tone={socketOpen ? 'up' : 'warn'} pulse={!socketOpen} />
-            {socketOpen ? '实时事件' : 'REST 轮询'}
-          </Badge>
-          {tick > 0 && (
-            <span className="num" title="本地时钟，每 5 秒刷新">
-              时刻 {new Date(tick).toLocaleTimeString('en-GB', { hour12: false })}
-            </span>
-          )}
-        </span>
-      </div>
-
-      {/* B. The controls, and the one-line provenance of the numbers below */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <div className="num flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
-          <span title="该机器人已完成的决策周期数（跨重启连续编号）。">
-            周期 <span className="text-ink-mid">#{fmtInt(trader.lastCycleNumber)}</span>
-          </span>
-          <span>
-            间隔 <span className="text-ink-mid">每 {trader.cycleIntervalMinutes}m</span>
-          </span>
-          <span>
-            最近周期 <span className="text-ink-mid">{timeAgo(trader.lastCycleAt)}</span>
-          </span>
-          <span title="模型与策略决定它看什么、怎么下单。">
-            AI{' '}
-            <Link to="/models" className="text-accent hover:underline">
-              {model ? `${model.label}（${model.model}）` : `#${trader.aiModelId}`}
-            </Link>
-          </span>
-          <span>
-            策略{' '}
-            <Link to={`/strategy/${trader.strategyId}`} className="text-accent hover:underline">
-              {strategy?.name ?? `#${trader.strategyId}`}
-            </Link>
-          </span>
-          <span>
-            环境 <span className="text-ink-mid">{system?.environmentLabel ?? '—'}</span>
-          </span>
-          <span>
-            创建于 <span className="text-ink-mid">{fmtDateTime(trader.createdAt)}</span>
-          </span>
-        </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
           {trader.isRunning && (
@@ -382,7 +507,10 @@ export function TraderPage() {
             对账
           </Button>
         </div>
-      </div>
+      </header>
+
+      {/* A2. 配置摘要：次要信息折起来，但永远点得到 -------------------- */}
+      <ConfigSummary trader={trader} />
 
       {actionError && <ErrorNote>{actionError}</ErrorNote>}
 
@@ -399,106 +527,12 @@ export function TraderPage() {
         </div>
       )}
 
-      {/* C. KPI band ------------------------------------------------------- */}
       {/*
-        The most prominent thing on the page, per DESIGN.md §4: five numbers,
-        each on its own cell, `text-3xl` against `text-xs` labels. Nothing else
-        on this page is allowed to compete with them.
-      */}
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5">
-        <Kpi
-          label={`归属权益（${settleAsset}）`}
-          value={fmtNum(equity, 4)}
-          tone="text-ink-strong"
-          sub={
-            <>
-              {stats ? (
-                <span className={pnlColor(stats.totalReturnPercent)}>
-                  总收益率 {fmtPercent(stats.totalReturnPercent)}
-                </span>
-              ) : (
-                '等待统计'
-              )}
-              {/*
-                起始余额 sits in the same cell as 权益 on purpose: it is a
-                baseline, not a balance, and the only way that reads correctly is
-                right next to the current figure it is the baseline *for*.
-              */}
-              <span className="block" title="创建该机器人时从交易所读取的钱包余额，是总收益率与盈亏的计算基准。">
-                起始余额 <span className="text-ink-lo">{fmtAsset(trader.initialEquity, settleAsset, 4)}</span>
-              </span>
-            </>
-          }
-          title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。它只包含这个机器人自己的交易；下面的「交易所账户」一栏才是共用的钱包余额。"
-        />
+        B. 交易所账户。
 
-        <Kpi
-          label="今日盈亏"
-          value={fmtUsdSigned(todayPnl, 2)}
-          tone={pnlColor(todayPnl)}
-          sub={
-            <>
-              <span className={pnlColor(todayPnl)}>{fmtPercent(todayPercent)}</span>
-              <span className="block" title="相对 24 小时前最近一个权益快照的变化。">
-                基准 {fmtNum(dayAgoEquity ?? equity, 2)} {settleAsset}
-              </span>
-            </>
-          }
-        />
-
-        <Kpi
-          label="胜率"
-          value={stats ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
-          sub={
-            stats ? (
-              <>
-                <span className="block">
-                  {fmtInt(stats.totalTrades)} 笔已平仓 · PF {fmtProfitFactor(stats.profitFactor)}
-                </span>
-                <span className="block">
-                  <WinLossBar wins={wins} losses={losses} />
-                </span>
-              </>
-            ) : (
-              '等待统计'
-            )
-          }
-        />
-
-        <Kpi
-          label="持仓数"
-          value={fmtInt(openPositionCount)}
-          sub={
-            <>
-              <span className="block">
-                {openOrders.length} 个挂单
-              </span>
-              <span className={pnlColor(unrealized)}>浮动 {fmtUsdSigned(unrealized, 2)}</span>
-            </>
-          }
-        />
-
-        <Kpi
-          label={`保证金（${settleAsset}）`}
-          value={fmtNum(marginUsed, 2)}
-          sub={
-            <>
-              <span>
-                名义 <span className="text-ink-lo">{fmtUsd(notional, 2)}</span>
-              </span>
-              <span className="block" title="有效杠杆 = 本机器人总名义价值 ÷ 归属权益。满仓 10x 时读数最高。">
-                有效杠杆 <span className="text-ink-mid">{effectiveLeverage.toFixed(2)}x</span>
-              </span>
-            </>
-          }
-        />
-      </div>
-
-      {/* D. Live exchange account ----------------------------------------- */}
-      {/*
-        Kept outside the KPI band because it is the exchange's own view, read on
-        demand: it is the reconciliation surface for the equity above, not a
-        second opinion about it.
+        放在骨架**外面**横跨整页，因为它描述的是一个**共用钱包**（同一账户下所有
+        机器人读数是同一个数），不属于这个机器人；左栏只放归属这个机器人的数字。
+        以前它和归属权益混在一起，于是一个从未成交的机器人看起来也"有余额"。
       */}
       <TraderAccountStrip
         account={accountState}
@@ -508,90 +542,131 @@ export function TraderPage() {
         onRefresh={accountQuery.reload}
       />
 
-      {/* E. Equity / candles ---------------------------------------------- */}
-      <Panel
-        padded={false}
-        bodyClassName="p-0"
-        title={
-          <span className="flex items-center gap-1">
-            <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
-              归属权益曲线
-            </ChartTabButton>
-            <ChartTabButton active={chartTab === 'candles'} onClick={() => setChartTab('candles')}>
-              行情图表
-            </ChartTabButton>
-          </span>
-        }
-        actions={
-          chartTab === 'equity' ? (
-            <span className="flex items-center gap-0.5">
-              {EQUITY_RANGES.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setRange(item.id)}
-                  className={
-                    range === item.id
-                      ? 'rounded border border-accent/60 bg-accent/15 px-2 py-0.5 text-xs font-semibold text-accent'
-                      : 'rounded border border-transparent px-2 py-0.5 text-xs text-ink-lo transition hover:border-base-700 hover:text-ink-mid'
-                  }
-                >
-                  {item.label}
-                </button>
-              ))}
+      <PageShell rail={rail}>
+        {/* C. 决策流 —— 主内容，占满剩余宽度并给足高度 --------------- */}
+        <DecisionFeed traderId={traderId} height={FEED_HEIGHT} />
+
+        {/* D. 权益 / 行情 -------------------------------------------- */}
+        <Panel
+          padded={false}
+          bodyClassName="p-0"
+          title={
+            <span className="flex items-center gap-1">
+              <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
+                归属权益曲线
+              </ChartTabButton>
+              <ChartTabButton active={chartTab === 'candles'} onClick={() => setChartTab('candles')}>
+                行情图表
+              </ChartTabButton>
             </span>
+          }
+          actions={
+            chartTab === 'equity' ? (
+              <span className="flex items-center gap-0.5">
+                {EQUITY_RANGES.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => {
+                      setRange(item.id);
+                      // 换区间就重新按数据判断收起与否，别把上一段的展开状态带过来。
+                      setChartOverride(null);
+                    }}
+                    aria-pressed={range === item.id}
+                    className={
+                      range === item.id
+                        ? 'rounded border border-accent/60 bg-accent/15 px-2 py-0.5 text-xs font-semibold text-accent'
+                        : 'rounded border border-transparent px-2 py-0.5 text-xs text-ink-lo transition hover:border-base-700 hover:text-ink-mid'
+                    }
+                  >
+                    {item.label}
+                  </button>
+                ))}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-expanded={!curveCollapsed}
+                  title={curveCollapsed ? '展开完整权益曲线' : '把曲线收成一行，给决策流让出高度'}
+                  onClick={() => setChartOverride(!curveCollapsed)}
+                >
+                  {curveCollapsed ? '展开' : '收起'}
+                </Button>
+              </span>
+            ) : (
+              <span className="text-xs text-ink-faint">最近持仓标的</span>
+            )
+          }
+        >
+          {chartTab === 'equity' ? (
+            curveCollapsed ? (
+              /*
+                数据太薄时压成一行（§4）。**不是把曲线藏起来**：这条序列本身仍然
+                画在这里，只是 36px 高、不要坐标轴 —— 一条平线本来就不需要 220px。
+                "展开"始终在工具栏上，所以没有任何数据是拿不到的。
+              */
+              <EquityMiniStrip
+                values={windowed.map((snapshot) => snapshot.equity)}
+                delta={windowDelta}
+                percent={windowPercent}
+                asset={settleAsset}
+                note={
+                  windowed.length === 0
+                    ? '还没有权益快照，每个决策周期结束时会记录一次'
+                    : windowed.length < 3
+                      ? `仅 ${fmtInt(windowed.length)} 个快照，连不成曲线`
+                      : '这段区间内权益几乎没变化'
+                }
+                onExpand={() => setChartOverride(true)}
+              />
+            ) : (
+              <div className="px-3.5 pb-2.5 pt-2">
+                <EquityWindowLine
+                  snapshots={windowed}
+                  equity={equity}
+                  delta={windowDelta}
+                  percent={windowPercent}
+                  asset={settleAsset}
+                />
+                <DashboardEquityChart
+                  snapshots={snapshots}
+                  range={range}
+                  baseline={trader.initialEquity}
+                  height={EQUITY_CHART_HEIGHT}
+                />
+              </div>
+            )
           ) : (
-            <span className="text-xs text-ink-faint">最近持仓标的</span>
-          )
-        }
-      >
-        {chartTab === 'equity' ? (
-          <div className="px-4 pb-2 pt-3">
-            <EquityHeader snapshots={snapshots} equity={equity} asset={settleAsset} />
-            <DashboardEquityChart
-              snapshots={snapshots}
-              range={range}
-              baseline={trader.initialEquity}
-              /* A real height, not a thumbnail: the curve is the only place the
-                 shape of this bot's day is visible. The tables below it are
-                 where the per-trade detail lives. */
-              height={260}
-            />
+            <CandlesPanel symbol={positions[0]?.symbol} />
+          )}
+        </Panel>
+
+        {/* E. 表格：参考材料，不是盯盘对象 --------------------------- */}
+        <TraderTables
+          traderId={traderId}
+          tab={tableTab}
+          onChange={setTableTab}
+          positionCount={openPositionCount}
+          openOrderCount={openOrders.length}
+          refreshToken={tradesToken}
+        />
+
+        {/*
+          The net-PnL bridge, spelled out once below the tables. Every 净 figure on
+          this page is 毛 − 手续费 − 资金费, and this is the line that makes that
+          checkable against the exchange rather than a number the operator has to
+          take on faith.
+        */}
+        {statsCost && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-base-800 bg-base-900/60 px-3 py-2 text-xs">
+            <span className="font-semibold text-ink-lo">已实现盈亏（净额）</span>
+            <span className={cn('num text-md font-semibold', pnlColor(realized))}>{fmtUsdSigned(realized, 2)}</span>
+            <PnlBreakdown costs={statsCost} />
+            <span className="num ml-auto text-ink-faint" title={pnlFormulaText(statsCost)}>
+              {NET_PNL_FORMULA}
+            </span>
           </div>
-        ) : (
-          <CandlesPanel symbol={positions[0]?.symbol} />
         )}
-      </Panel>
-
-      {/* F. Decision feed — full width ------------------------------------ */}
-      <DecisionFeed traderId={traderId} height={FEED_HEIGHT} />
-
-      {/* G. Tables -------------------------------------------------------- */}
-      <TraderTables
-        traderId={traderId}
-        tab={tableTab}
-        onChange={setTableTab}
-        positionCount={openPositionCount}
-        openOrderCount={openOrders.length}
-        refreshToken={tradesToken}
-      />
-
-      {/*
-        The net-PnL bridge, spelled out once below the tables. Every 净 figure on
-        this page is 毛 − 手续费 − 资金费, and this is the line that makes that
-        checkable against the exchange rather than a number the operator has to
-        take on faith.
-      */}
-      {statsCost && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-base-800 bg-base-900/60 px-3 py-2 text-xs">
-          <span className="font-semibold text-ink-lo">已实现盈亏（净额）</span>
-          <span className={cn('num text-md font-semibold', pnlColor(realized))}>{fmtUsdSigned(realized, 2)}</span>
-          <PnlBreakdown costs={statsCost} />
-          <span className="num ml-auto text-ink-faint" title={pnlFormulaText(statsCost)}>
-            {NET_PNL_FORMULA}
-          </span>
-        </div>
-      )}
+      </PageShell>
 
       <StartTraderModal
         trader={trader}
@@ -618,41 +693,58 @@ export function TraderPage() {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  KPI cell                                                                   */
+/*  配置摘要                                                                   */
 /* -------------------------------------------------------------------------- */
 
 /**
- * One cell of the headline band.
+ * 次要配置摘要 —— 默认收起的那一半页头。
  *
- * Hand-rolled rather than `ui.Stat` because the band is the one place on the
- * page allowed to use `text-3xl` and `ink-strong`, and `Stat` is deliberately
- * tuned for the denser `text-2xl` cards used elsewhere. The treatment matches
- * `HeadlineMetric` on the overview page — a muted surface, no border — so the
- * same kind of figure does not change costume between two screens.
+ * 改版前这里是一个平铺的 flex 行：周期、间隔、最近周期、AI、策略、环境、创建于
+ * 七段文字和机器人名字**同等字重**地挤在顶部（操作者原话："八段同等权重的文字，
+ * 扫一眼不知道哪个重要"）。问题的解法不是把字调小，而是分层：
+ *
+ * - 名称 / 状态 / 环境留在页头第一行；
+ * - 模型与策略（"它是什么"）进左栏「系统」组，常驻可见；
+ * - **周期编号、间隔、最近周期、创建于**这些变化很慢的配置收在这里，点一下展开。
+ *
+ * 收起态只留一个按钮 —— 它不占高度，也不会因为"没东西"而让页头看起来像坏了。
  */
-function Kpi({
-  label,
-  value,
-  tone = 'text-ink-hi',
-  sub,
-  title,
-}: {
-  label: string;
-  value: ReactNode;
-  tone?: string;
-  sub?: ReactNode;
-  /** 说明这个数字的口径（例如"权益"到底是归属权益还是账户权益）。 */
-  title?: string;
-}) {
+function ConfigSummary({ trader }: { trader: TraderRow }) {
+  const [open, setOpen] = useState(false);
+
   return (
-    <div className="min-w-0 rounded-md bg-base-850/40 px-4 py-3.5" title={title}>
-      <div className="truncate text-xs font-semibold uppercase tracking-[0.12em] text-ink-lo" title={title ?? label}>
-        {label}
-      </div>
-      {/* break-all, not truncate: a 7-figure equity must wrap rather than be
-          clipped — a wrong-looking number is worse than a two-line one. */}
-      <div className={cn('num mt-1.5 break-all text-3xl font-semibold leading-tight', tone)}>{value}</div>
-      {sub && <div className="mt-1.5 space-y-0.5 text-xs leading-snug text-ink-faint">{sub}</div>}
+    <div className="-mt-1">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="inline-flex items-center gap-1 text-xs text-ink-lo transition hover:text-ink-mid"
+      >
+        {open ? (
+          <ChevronUp aria-hidden className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronDown aria-hidden className="h-3.5 w-3.5" />
+        )}
+        配置摘要
+        <span className="num text-ink-faint">周期 #{fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m</span>
+      </button>
+
+      {open && (
+        <div className="num mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
+          <span title="该机器人已完成的决策周期数（跨重启连续编号）。">
+            周期编号 <span className="text-ink-mid">#{fmtInt(trader.lastCycleNumber)}</span>
+          </span>
+          <span>
+            间隔 <span className="text-ink-mid">每 {trader.cycleIntervalMinutes} 分钟</span>
+          </span>
+          <span>
+            最近周期 <span className="text-ink-mid">{timeAgo(trader.lastCycleAt)}</span>
+          </span>
+          <span>
+            创建于 <span className="text-ink-mid">{fmtDateTime(trader.createdAt)}</span>
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -660,6 +752,126 @@ function Kpi({
 /* -------------------------------------------------------------------------- */
 /*  Chart helpers                                                              */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * 数据太薄时的紧凑权益条。
+ *
+ * 为什么是"画出来"而不是"藏起来"：曲线讲的是形状，而这里要回答的正是
+ * "为什么没有形状"。一条 36px 的缩略线把这件事一次说完 —— 走平就是走平，
+ * 两个点就是两个点，不需要 220px 的坐标轴来证明（`LAYOUT.md` §4）。
+ *
+ * 为什么就画在这个文件里，而不是复用总览页的 `EquityStrip`
+ * （`pages/overviewParts.tsx`）：那一页的点是**多机器人合并**后的序列，形状不同、
+ * 这一页要显示的口径也不同（归属权益 vs 总权益），跨页互引会让两个页面必须一起改。
+ */
+function EquityMiniStrip({
+  values,
+  delta,
+  percent,
+  asset,
+  note,
+  onExpand,
+}: {
+  values: number[];
+  delta: number;
+  percent: number;
+  asset: string;
+  /** 为什么收起了 —— 一句话说清，比"暂无数据"有用。 */
+  note: string;
+  onExpand: () => void;
+}) {
+  const min = values.length > 0 ? Math.min(...values) : 0;
+  const max = values.length > 0 ? Math.max(...values) : 0;
+  const span = max - min;
+  const last = values.length - 1;
+
+  /*
+   * `viewBox="0 0 100 100"` + `preserveAspectRatio="none"` 把线拉满整宽，所以
+   * `strokeWidth` 必须配 `vectorEffect="non-scaling-stroke"`：非等比缩放会把线宽
+   * 一起压成细丝或拉成色块。
+   */
+  const path = values
+    .map((value, index) => {
+      const x = last <= 0 ? 0 : (index / last) * 100;
+      // 走平时按中线画：贴在盒子边缘的一条线看起来像被裁掉了。
+      const y = span === 0 ? 50 : 100 - ((value - min) / span) * 100;
+      return `${index === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(' ');
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3.5 py-2">
+      {values.length >= 2 ? (
+        <div className={cn('h-9 min-w-[8rem] flex-1', pnlColor(delta))}>
+          <svg
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            className="h-full w-full"
+            role="img"
+            aria-label={`收益曲线缩略线，共 ${fmtInt(values.length)} 个快照`}
+          >
+            <path d={path} fill="none" stroke="currentColor" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+          </svg>
+        </div>
+      ) : (
+        <span className="min-w-[8rem] flex-1 text-xs text-ink-faint">{note}</span>
+      )}
+
+      <div className="shrink-0 text-right">
+        <div className={cn('num text-base leading-tight', pnlColor(delta))}>
+          {fmtUsdSigned(delta, 2)} <span className="text-xs text-ink-faint">{asset}</span>
+        </div>
+        <div className="num text-xs text-ink-faint">
+          {values.length >= 2 && `${note} · `}
+          {fmtPercent(percent)}
+        </div>
+      </div>
+
+      <Button size="sm" variant="ghost" onClick={onExpand} aria-expanded={false} title="展开完整权益曲线">
+        <ChevronRight aria-hidden className="h-3.5 w-3.5" />
+        展开
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * 展开态下图表上方的一行口径说明。
+ *
+ * 只讲**这一段窗口里涨跌了多少**：当前归属权益本身常驻在左栏，在这里再放一个
+ * `text-3xl` 会让同一个数字在一屏里出现两次，而且都比别的东西显眼（DESIGN.md §4
+ * "不要把所有东西做成一样大"）。
+ */
+function EquityWindowLine({
+  snapshots,
+  equity,
+  delta,
+  percent,
+  asset,
+}: {
+  snapshots: EquitySnapshot[];
+  equity: number;
+  delta: number;
+  percent: number;
+  asset: string;
+}) {
+  return (
+    <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
+      <span className="text-ink-lo" title="相对可见区间第一个快照的变化。">
+        本段变化
+      </span>
+      <span className={cn('num text-base font-semibold', pnlColor(delta))}>
+        {fmtUsdSigned(delta, 2)} {asset}
+      </span>
+      <span className={cn('num', pnlColor(delta))}>({fmtPercent(percent)})</span>
+      <span className="num ml-auto text-ink-faint" title="快照数决定这条曲线有多细，也解释了它为什么会被收成一行。">
+        {fmtInt(snapshots.length)} 个快照
+      </span>
+      {/* `equity` 只用来兜底没有快照时的比较基准，与图表内部口径一致。 */}
+      <span className="sr-only">当前归属权益 {fmtNum(equity, 2)}</span>
+    </div>
+  );
+}
 
 function ChartTabButton({
   active,
@@ -684,41 +896,6 @@ function ChartTabButton({
     >
       {children}
     </button>
-  );
-}
-
-/** 归属权益 + absolute and percentage change over the visible window. */
-function EquityHeader({
-  snapshots,
-  equity,
-  asset,
-}: {
-  snapshots: EquitySnapshot[];
-  equity: number;
-  asset: string;
-}) {
-  const first = snapshots[0]?.equity ?? equity;
-  const delta = equity - first;
-  const percent = first !== 0 ? (delta / Math.abs(first)) * 100 : 0;
-  const tone = pnlColor(delta);
-
-  return (
-    <div className="mb-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
-      <div className="flex items-baseline gap-2">
-        <span
-          className="text-xs font-semibold tracking-[0.08em] text-ink-lo"
-          title="本机器人的归属权益曲线（初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈）。共用同一账户的其他机器人不在其中。"
-        >
-          归属权益
-        </span>
-        <span className="num text-3xl font-semibold leading-none text-ink-hi">{fmtNum(equity, 2)}</span>
-        <span className="text-xs text-ink-faint">{asset}</span>
-      </div>
-      <div className={cn('num text-base', tone)} title="相对可见区间第一个快照的变化。">
-        {fmtUsdSigned(delta, 2)} <span className="text-xs">({fmtPercent(percent)})</span>
-      </div>
-      <span className="num ml-auto text-xs text-ink-faint">{fmtInt(snapshots.length)} 个快照</span>
-    </div>
   );
 }
 
@@ -768,7 +945,7 @@ function CandlesPanel({ symbol }: { symbol?: string }) {
       ) : candles.length === 0 ? (
         <Empty message="该交易对没有返回K线。" />
       ) : (
-        <CandlestickChart candles={candles} height={360} />
+        <CandlestickChart candles={candles} height={300} />
       )}
     </div>
   );

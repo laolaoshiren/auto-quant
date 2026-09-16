@@ -69,7 +69,13 @@ const ACTION_STRIPE: Record<string, string> = {
  */
 const FEED_LIMIT = 50;
 
-export function DecisionFeed({ traderId, height = 720 }: { traderId: number; height?: number }) {
+/**
+ * 决策流的可视高度。
+ *
+ * 可以给数字（px），也可以给 CSS 长度 —— 交易页给的是 `max(380px, calc(100vh - …))`：
+ * 这一页的主内容就是决策流，高度跟着视口走才不会在 4K 上缩成一小条。
+ */
+export function DecisionFeed({ traderId, height = 720 }: { traderId: number; height?: number | string }) {
   const live = useEvents((s) => s.byTrader[traderId]?.decisions);
   const query = usePolled((signal) => api.traderDecisions(traderId, FEED_LIMIT, signal), {
     intervalMs: 20_000,
@@ -134,10 +140,13 @@ export function DecisionFeed({ traderId, height = 720 }: { traderId: number; hei
         // One scroll container. Every cycle renders its decisions in full; only
         // the reasoning block inside each module is collapsible.
         //
-        // `space-y-3` 而不是相邻的 `border-b`：40 个周期用一条接一条的分隔线排下来，
+        // `space-y-2.5` 而不是相邻的 `border-b`：40 个周期用一条接一条的分隔线排下来，
         // 会连成一整片、分不清哪里是上一个周期的结尾。让每个周期成为**独立的一张卡**，
         // 靠间距和卡片边界来分组，扫读时才知道自己在看哪一轮。
-        <div className="space-y-3 overflow-y-auto p-3" style={{ maxHeight: height }}>
+        //
+        // 间距按 `LAYOUT.md` §2 收紧（卡内与间隙各减 2px）：这一页是操作者会一直
+        // 滚的地方，同样的屏幕高度里多挤进一轮就多一分用。
+        <div className="space-y-2.5 overflow-y-auto p-2.5" style={{ maxHeight: height }}>
           {shown.map((record) => (
             <CycleBlock
               key={record.id}
@@ -229,7 +238,7 @@ function CycleBlock({
 
       {/* Cycle header: metadata only. It is deliberately *not* a toggle — the
           decisions below are always shown, so there is nothing to expand here. */}
-      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-base-800 bg-base-850/60 py-2.5 pl-4 pr-3">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-base-800 bg-base-850/60 py-2 pl-3.5 pr-3">
         <span className="num text-sm font-semibold text-ink-hi">周期 #{record.cycleNumber}</span>
         <Badge tone={record.success ? 'up' : 'down'}>{record.success ? '成功' : '失败'}</Badge>
         {/* The collapsed-header summary: the whole point of the header row. */}
@@ -254,7 +263,7 @@ function CycleBlock({
       </div>
 
       {/* Decisions — always visible. */}
-      <div className="space-y-2 px-4 py-3">
+      <div className="space-y-1.5 px-3.5 py-2.5">
         {record.error && (
           <div className="rounded-md border border-down/50 bg-down/10 px-2.5 py-1.5 text-xs text-down">
             周期错误：{record.error}
@@ -402,7 +411,7 @@ function CycleReasoning({ record, traderId }: { record: DecisionRecord; traderId
      * 每次都要在屏幕上找。现在左边是"看什么"（分段控件 + 展开），
      * 右边是"拿走什么"（复制 + 审计），一行结束。
      */
-    <div className="border-t border-base-800 bg-base-850/30 px-4 py-2">
+    <div className="border-t border-base-800 bg-base-850/30 px-3.5 py-1.5">
       <div className="flex flex-wrap items-center gap-2">
         <MiniTabs
           tabs={[

@@ -61,12 +61,12 @@ export function BalanceCell({
            * line of the message used to indent differently on Windows and macOS.
            */}
           <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" />
-          <span className="min-w-0 flex-1 text-2xs text-warn" title={`余额读取失败：${message}`}>
+          <span className="min-w-0 flex-1 text-xs text-warn" title={`余额读取失败：${message}`}>
             余额读取失败：{message}
           </span>
           {env}
         </div>
-        <div className="pl-5 text-2xs text-ink-faint">点右侧刷新按钮重试。</div>
+        <div className="pl-5 text-xs text-ink-faint">点右侧刷新按钮重试。</div>
       </div>
     );
   }
@@ -82,19 +82,19 @@ export function BalanceCell({
         >
           {fmtAsset(balance.equity, asset)}
         </span>
-        <span className="text-2xs text-ink-faint">{BALANCE_LABEL.short.equity}</span>
+        <span className="text-xs text-ink-faint">{BALANCE_LABEL.short.equity}</span>
         {env}
       </div>
-      <div className="text-2xs text-ink-lo">
+      <div className="text-xs text-ink-lo">
         {BALANCE_LABEL.short.wallet} {fmtNum(balance.walletBalance)} · {BALANCE_LABEL.short.available}{' '}
         {fmtNum(balance.availableBalance)}
       </div>
       {balance.unrealizedPnl !== 0 && (
-        <div className={`text-2xs ${pnlColor(balance.unrealizedPnl)}`}>
+        <div className={`text-xs ${pnlColor(balance.unrealizedPnl)}`}>
           {BALANCE_LABEL.unrealized} {fmtSigned(balance.unrealizedPnl)}
         </div>
       )}
-      <div className="text-2xs text-ink-faint" title={`读取于 ${fmtTime(balance.readAt)}`}>
+      <div className="text-xs text-ink-faint" title={`读取于 ${fmtTime(balance.readAt)}`}>
         读取于 {timeAgo(balance.readAt)}
       </div>
     </div>
@@ -122,9 +122,13 @@ export interface TraderAccountState {
  * 钱包余额 must mean the same number on both screens, otherwise the operator
  * has to guess which one is the settled balance.
  *
- * Laid out as a definition-style grid rather than a run of `label value` pairs:
- * every figure carries its unit and its label in a fixed column, so the strip
- * stays scannable when it wraps to two lines on a narrow window.
+ * Laid out as one inline row: every figure carries its label and its unit, so the
+ * strip stays scannable when it wraps to two lines on a narrow window.
+ *
+ * 版式：它现在横跨交易页整页、位于左指标栏**之上**，因为这一组数字描述的是一个
+ * **共用钱包**（同一账户下所有机器人读数是同一个数），不属于某一个机器人 ——
+ * 左栏只放归属这个机器人的数字。带一个分组标题和上下边线，正是为了让这件事
+ * 一眼可见：以前它无标题地贴在归属权益下面，一个从未成交的机器人看起来也"有余额"。
  */
 export function TraderAccountStrip({
   account,
@@ -142,9 +146,20 @@ export function TraderAccountStrip({
   const unit = asset?.trim() || DEFAULT_SETTLE_ASSET;
   const openOrderMargin = account?.openOrderMargin ?? 0;
 
+  /** 分组标题：与 `MetricGroup` 的组名同一套排版，让"这是另一组数字"一眼可见。 */
+  const heading = (
+    <span
+      className="font-sans text-xs font-semibold uppercase tracking-[0.12em] text-ink-faint"
+      title="这些是「交易所账户」（共享钱包）的数字：同一账户下的所有机器人读数是同一个，所以它不等于任何一个机器人的归属权益。"
+    >
+      交易所账户
+    </span>
+  );
+
   if (!account) {
     return (
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-base-800 pt-1.5 text-xs text-ink-lo">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-y border-base-800 bg-base-900/40 px-3 py-2 text-xs text-ink-lo">
+        {heading}
         <Badge tone="muted">未连接交易所</Badge>
         <span>机器人运行时会在这里显示交易所的真实账户余额。</span>
         {error && <span className="text-warn">（{error}）</span>}
@@ -153,7 +168,8 @@ export function TraderAccountStrip({
   }
 
   return (
-    <div className="num mt-1.5 flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-base-800 pt-1.5 text-xs text-ink-lo">
+    <div className="num flex flex-wrap items-baseline gap-x-4 gap-y-1 border-y border-base-800 bg-base-900/40 px-3 py-2 text-xs text-ink-lo">
+      {heading}
       {/* The settled balance is the number an operator checks most, so it gets
           the size and weight rather than sitting in the same small type as the
           rest of the strip. */}

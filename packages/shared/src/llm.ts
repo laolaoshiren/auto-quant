@@ -206,3 +206,40 @@ export function looksLikeReasoningModel(modelId: string): boolean {
     modelId,
   );
 }
+
+/* -------------------------------------------------------------------------- */
+/*  协议码的中文标签                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Chinese labels for the two protocol codes the provider catalogue stores.
+ *
+ * Same rule as the `*_LABELS` maps in `domain.ts`: `authStyle` / `jsonMode` are
+ * contract values shared with the server (`bearer`, `x-api-key`, `json_object`,
+ * `json_schema`, `none`), so **only the display changes**. They live here, next to
+ * the descriptors that define them, because that is the only place in the codebase
+ * that produces them.
+ *
+ * The AI 模型 dialog used to render them raw — an operator configuring a custom
+ * endpoint read `鉴权方式 bearer · JSON 模式 json_object`, two English codes with
+ * no explanation of what they mean for the request being sent.
+ */
+export const AUTH_STYLE_LABELS: Record<string, string> = {
+  bearer: 'Bearer 令牌（Authorization 头）',
+  'x-api-key': 'x-api-key 请求头',
+  'query-key': 'URL 查询参数',
+};
+
+export function authStyleLabel(style: string): string {
+  return AUTH_STYLE_LABELS[style] ?? style;
+}
+
+export const JSON_MODE_LABELS: Record<string, string> = {
+  json_object: 'JSON 对象模式',
+  json_schema: 'JSON Schema 模式',
+  none: '不支持 JSON 模式',
+};
+
+export function jsonModeLabel(mode: string): string {
+  return JSON_MODE_LABELS[mode] ?? mode;
+}

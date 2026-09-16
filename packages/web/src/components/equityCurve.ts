@@ -129,6 +129,38 @@ function sortSnapshots(snapshots: EquitySnapshot[]): EquitySnapshot[] {
   return [...snapshots].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 }
 
+/**
+ * 这段权益序列值不值得画成曲线？
+ *
+ * 起因是操作者的反馈：权益曲线占了 40% 屏高，却只画出一条平线，而真正要看的
+ * 决策流被挤到屏幕底部要滚动（见 `LAYOUT.md` §1/§4）。
+ *
+ * 判据放在这个无依赖模块里，而不是某个图表组件内部，是因为**"平"只能有一个定义**：
+ * 交易页在调用处决定收起还是展开，两个图表组件各自决定 Y 轴留白。三处阈值如果
+ * 各写一套，同一条序列在不同页面上会得到不同结论。
+ *
+ * 阈值与总览页的 `equityShape()`（`pages/overviewParts.tsx`）**必须逐位一致**：
+ * `max(|峰值| × 0.02%, 0.005)`，外加"至少 3 个点"。
+ *
+ * - 绝对下限用一分钱：一个 0.00 的账户上任何浮点噪声都会变成相对意义上的"巨大波动"；
+ * - 相对下限让大账户上几美分的抖动不至于撑起一整张图 —— 那种抖动在
+ *   `[min - pad, max + pad]` 的坐标轴里同样是一条直线。
+ *
+ * 它只回答"有没有形状"，**不返回任何被丢弃的数据**：调用方据此收起图表时，
+ * 仍要把这条序列本身画出来（见 `TraderPage` 的权益条），否则就是静默丢数据。
+ */
+export function hasEquityVariation(values: ReadonlyArray<number>, minPoints = 3): boolean {
+  const finite = values.filter((value) => Number.isFinite(value));
+  if (finite.length < minPoints) return false;
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const value of finite) {
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+  return max - min > Math.max(Math.abs(max) * 0.0002, 0.005);
+}
+
 /** Visible window of a range id, in ms. `ALL` (or anything unknown) is unbounded. */
 export function rangeSpanMs(range: string): number {
   switch (range) {

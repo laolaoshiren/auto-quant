@@ -2,17 +2,23 @@
  * 交易所凭证管理。
  *
  * 这一屏是全站风险最高的一屏：它握住下单用的密钥，也是操作员判断
- * "我的钱还在不在"的地方。所以版面按**操作员的提问顺序**排：
+ * "我的钱还在不在"的地方。所以版面按**操作员的提问顺序**排，并且用
+ * `LAYOUT.md` §1 的左指标栏 + 主内容区结构，把"状态"和"管理"分开：
  *
- *   1. 钱在不在？      —— 顶部余额卡（交易所回报的权益，`text-3xl`）+ 读取时刻
- *   2. 这是真钱吗？    —— 主网凭证在卡上、行里、横幅里三处写明白
- *   3. 密钥能用吗？    —— 连接测试结果带通过项、阻断项与测试时刻
- *   4. 怎么管理？      —— 下方一行一张凭证卡片，危险操作在行尾
+ *   1. 钱在不在？      —— 左栏第一组「账户余额」：所有凭证的权益合计 + 读取时刻
+ *   2. 这是真钱吗？    —— 左栏「环境」组 + 主区顶部横幅 + 每张凭证的徽章 + 编辑框警告
+ *   3. 密钥能用吗？    —— 每张凭证块里的连接测试结果（通过项 / 阻断项 / 测试时刻）
+ *   4. 怎么管理？      —— 主区一行一张凭证，危险操作在行尾
  *
- * 余额单独成卡而不是塞进表格单元格：表格列宽有限，权益数字会被压成
- * 和"添加时间"一样大，而这一屏最不该被压小的就是它。
+ * 为什么余额从"每张一张大卡"收进左栏：改造前它是一组最多三列的大卡片，把
+ * 凭证列表挤到了屏幕下方 —— 而"我的钱还在不在"其实只有一个答案（合计），
+ * 逐个账户的大数字是**细节**。左栏给合计，每张凭证块里保留一行紧凑读数
+ * （`BalanceCell`，与列表同源），两个视图都还在，只是主次分开了。
+ *
+ * 密钥：主区只画服务端给的掩码（`apiKeyMasked`）。**任何情况下都不渲染 Secret**
+ * —— 不掩码、不截断、不放进 `title`。编辑框为空即"保持原样"。
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Plus, RotateCw, Trash2 } from 'lucide-react';
 import { api, type ExchangeAccountInput, type ExchangeAccountRow, type ExchangeBalance, type ExchangeBalanceResult, type PreflightCheck } from '../../lib/api';
 import { useApp } from '../../lib/store';
@@ -32,8 +38,22 @@ import {
   Toggle,
 } from '../ui';
 import { CheckList } from '../Badges';
+import { Metric, MetricGroup, PageShell, SectionLabel } from '../shell';
 import { BalanceCell } from '../BalanceCells';
-import { BALANCE_LABEL, DEFAULT_SETTLE_ASSET, fmtAsset, fmtDateTime, fmtNum, fmtSigned, fmtTime, pnlColor, timeAgo } from '../../lib/format';
+import {
+  BALANCE_LABEL,
+  DEFAULT_SETTLE_ASSET,
+  TRADING_ENV_LABEL,
+  fmtAmount,
+  fmtAsset,
+  fmtDateTime,
+  fmtInt,
+  fmtTime,
+  tradingEnvLabel,
+  tradingEnvTitle,
+  timeAgo,
+  pnlColor,
+} from '../../lib/format';
 
 interface AccountDraft {
   exchange: string;
@@ -53,15 +73,6 @@ const EMPTY_ACCOUNT: AccountDraft = {
   canTrade: true,
 };
 
-/**
- * 余额卡网格：最多 3 列。
- *
- * 不用 `auto-fit minmax(20rem, 1fr)` —— 那个写法在窄容器里会**先缩成一列再
- * 掉出横向溢出**，而这里必须保证 150% 缩放下没有横向滚动条。
- * 显式断点（1 → 2 → 3 列）在每种缩放下都是确定的。
- */
-const BALANCE_GRID = 'grid grid-cols-1 gap-2 md:grid-cols-2 3xl:grid-cols-3';
-
 function checksPassed(checks: PreflightCheck[]): boolean {
   return checks.every((check) => check.ok || !check.blocking);
 }
@@ -80,128 +91,80 @@ interface TestOutcome {
 /**
  * 环境标签。
  *
- * 测试网是**灰的**、主网是**琥珀的**，而且两者都带文字：
- * 颜色不是所有人都能分辨，而这里分辨错的代价是真金白银。
+ * 文案统一来自 `format.ts` 的 `TRADING_ENV_LABEL`：测试网是**灰的**、主网是
+ * **琥珀的**，而且两者都带文字 —— 颜色不是所有人都能分辨，而这里分辨错的代价
+ * 是真金白银。措辞只有一处来源，三处显示才不会各说各话。
  */
 function EnvBadge({ testnet, className }: { testnet: boolean; className?: string }) {
   return (
-    <Badge
-      tone={testnet ? 'muted' : 'warn'}
-      className={className}
-      title={
-        testnet
-          ? '测试网 / 模拟盘：订单不会进入真实市场。'
-          : '主网 / 实盘：这里的订单是真钱，会在真实市场成交。'
-      }
-    >
-      {testnet ? '测试网 · 模拟' : '主网 · 真实资金'}
+    <Badge tone={testnet ? 'muted' : 'warn'} className={className} title={tradingEnvTitle(testnet)}>
+      {tradingEnvLabel(testnet, 'short')}
     </Badge>
   );
 }
 
 /**
- * 一张凭证的实时余额卡。
+ * 手动刷新的读数，按凭证 id 存放，并记录取样时刻。
  *
- * 余额是这一屏的主数字，所以它单独成卡、用 `text-3xl`；凭证列表里的
- * `BalanceCell` 是它的紧凑副本，两者共用同一份读数（见列表里的 `fresh`）。
+ * 手动刷新回答的是"现在"，所以必须盖过轮询来的那一行 —— 但只到下一次
+ * 轮询真正落地为止（服务端缓存 20s、这里 30s 轮询一次，所以轮询回来的
+ * 确实更新）。比时刻而不是无条件覆盖，这一列才不会永远停在最后一次点击上。
  */
-function BalanceCard({
-  row,
-  fresh,
-  onRefresh,
-  refreshing,
-}: {
-  row: ExchangeAccountRow;
-  /** 手动刷新拿到的更新读数；比最近一次轮询新时才生效。 */
-  fresh: { at: number; result: ExchangeBalanceResult } | undefined;
-  onRefresh: () => void;
-  refreshing: boolean;
-}) {
-  const balance: ExchangeBalance | null = fresh ? (fresh.result.ok ? fresh.result.balance : null) : row.balance;
-  const error: string | null = fresh
-    ? fresh.result.ok
-      ? null
-      : fresh.result.error
-    : row.balanceError;
+type FreshRead = { at: number; result: ExchangeBalanceResult };
 
-  const asset = balance?.asset?.trim() || DEFAULT_SETTLE_ASSET;
+/**
+ * 把一堆凭证的余额合成左栏要的那一个答案。
+ *
+ * 三条规则，每条都是为了不撒谎：
+ * - **只累加结算币种相同的读数**，混币求和没有意义（`settleAsset` 因此也参与判断）；
+ * - 读失败的凭证**不当作 0**（那会让人以为钱没了），只记下有几个读不到；
+ * - 读取时刻取**最新的一次成功读取**，并在副标题里写明合计了几个凭证 ——
+ *   否则这几个字看起来像是同一时刻的快照，实际不是。
+ */
+function aggregateBalance(
+  rows: ExchangeAccountRow[],
+  freshOf: (id: number) => FreshRead | undefined,
+) {
+  let total = 0;
+  let wallet = 0;
+  let available = 0;
+  let unrealized = 0;
+  let readAt: string | null = null;
+  let readAtMs = 0;
+  let asset: string = DEFAULT_SETTLE_ASSET;
+  let counted = 0;
+  let failed = 0;
+  let skippedAsset = 0;
 
-  return (
-    <article className="flex flex-col gap-2 rounded-md border border-base-750 bg-base-850/40 p-3">
-      <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="min-w-0 truncate text-base font-semibold text-ink-hi" title={row.label}>
-          {row.label}
-        </span>
-        <span className="text-xs text-ink-lo">{row.exchange}</span>
-        <EnvBadge testnet={row.testnet} className="ml-auto" />
-      </header>
+  for (const row of rows) {
+    const fresh = freshOf(row.id);
+    const balance: ExchangeBalance | null = fresh ? (fresh.result.ok ? fresh.result.balance : null) : row.balance;
+    const error = fresh ? (fresh.result.ok ? null : fresh.result.error) : row.balanceError;
 
-      {balance ? (
-        <div className="min-w-0">
-          <div className="text-xs uppercase tracking-wide text-ink-lo">{BALANCE_LABEL.equity}（交易所回报）</div>
-          <div className="num mt-0.5 break-all text-3xl leading-tight text-ink-strong" title={fmtAsset(balance.equity, asset)}>
-            {fmtAsset(balance.equity, asset)}
-          </div>
-        </div>
-      ) : error ? (
-        // 读不到也是一条信息 —— 空白单元格会让人以为"余额是 0"。
-        <div className="min-w-0">
-          <div className="text-xs uppercase tracking-wide text-ink-lo">{BALANCE_LABEL.equity}（交易所回报）</div>
-          <div className="mt-1 text-base font-semibold text-warn">读取失败</div>
-          <p className="mt-1 break-words text-xs leading-relaxed text-warn/90">
-            交易所原样返回：{error}
-          </p>
-        </div>
-      ) : (
-        <div className="min-w-0">
-          <div className="text-xs uppercase tracking-wide text-ink-lo">{BALANCE_LABEL.equity}（交易所回报）</div>
-          <div className="num mt-1 text-3xl leading-tight text-ink-faint">—</div>
-          <p className="mt-1 text-xs text-ink-faint">尚未读取到余额。点右侧刷新向交易所重新查询。</p>
-        </div>
-      )}
+    if (!balance) {
+      if (error) failed += 1;
+      continue;
+    }
+    const rowAsset = balance.asset?.trim() || DEFAULT_SETTLE_ASSET;
+    // 第一行决定合计的币种；不同币种的读数不能相加，只统计数量并在界面上说明。
+    if (counted === 0) asset = rowAsset;
+    if (rowAsset !== asset) {
+      skippedAsset += 1;
+      continue;
+    }
+    total += balance.equity;
+    wallet += balance.walletBalance;
+    available += balance.availableBalance;
+    unrealized += balance.unrealizedPnl;
+    counted += 1;
+    const at = new Date(balance.readAt).getTime();
+    if (Number.isFinite(at) && at > readAtMs) {
+      readAtMs = at;
+      readAt = balance.readAt;
+    }
+  }
 
-      {balance && (
-        <div className="num space-y-0.5 text-xs text-ink-lo">
-          <div>
-            {BALANCE_LABEL.short.wallet} <span className="text-ink-mid">{fmtNum(balance.walletBalance)}</span> ·{' '}
-            {BALANCE_LABEL.short.available} <span className="text-ink-mid">{fmtNum(balance.availableBalance)}</span>
-          </div>
-          {balance.unrealizedPnl !== 0 && (
-            <div className={pnlColor(balance.unrealizedPnl)}>
-              {BALANCE_LABEL.unrealized} {fmtSigned(balance.unrealizedPnl)} {asset}
-            </div>
-          )}
-        </div>
-      )}
-
-      <footer className="mt-auto flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-base-800 pt-2">
-        <span className="num min-w-0 text-xs text-ink-faint" title={balance ? `交易所返回的读取时刻 ${fmtTime(balance.readAt)}` : undefined}>
-          {balance ? `读取于 ${timeAgo(balance.readAt)}（${fmtTime(balance.readAt)}）` : error ? '读取未成功' : '未读取'}
-        </span>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="ml-auto shrink-0"
-          busy={refreshing}
-          onClick={onRefresh}
-          title="向交易所强制重新读取该凭证的余额（绕过服务端缓存）"
-        >
-          <RotateCw aria-hidden className="h-3.5 w-3.5" />
-          刷新
-        </Button>
-      </footer>
-
-      {/*
-       * 读数确实来自手动刷新时说明一句：否则操作员按了刷新、标题上的读数没动，
-       * 会以为按钮坏了。（卡片里的"读取于"跟着读数一起走，见上面的 readAt。）
-       */}
-      {fresh && (
-        <p className="text-xs text-ink-faint">
-          本卡为最近一次手动刷新的读数（{timeAgo(new Date(fresh.at).toISOString())}）。
-        </p>
-      )}
-    </article>
-  );
+  return { total, wallet, available, unrealized, readAt, asset, counted, failed, skippedAsset };
 }
 
 export function ExchangeAccountsSection() {
@@ -215,21 +178,14 @@ export function ExchangeAccountsSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tests, setTests] = useState<Record<number, TestOutcome>>({});
+  /** 每张凭证的连接测试展开态；未记录时按结论决定（未通过默认展开）。 */
   const [openTests, setOpenTests] = useState<Record<number, boolean>>({});
   const [testingId, setTestingId] = useState<number | null>(null);
   const [draftChecks, setDraftChecks] = useState<PreflightCheck[] | null>(null);
   const [draftTestedAt, setDraftTestedAt] = useState<number | null>(null);
   const [draftError, setDraftError] = useState<string | null>(null);
   const [testingDraft, setTestingDraft] = useState(false);
-
-  /**
-   * 手动刷新的读数，按凭证 id 存放，并记录取样时刻。
-   *
-   * 手动刷新回答的是"现在"，所以必须盖过轮询来的那一行 —— 但只到下一次
-   * 轮询真正落地为止（服务端缓存 20s、这里 30s 轮询一次，所以轮询回来的
-   * 确实更新）。比时刻而不是无条件覆盖，这一列才不会永远停在最后一次点击上。
-   */
-  const [overrides, setOverrides] = useState<Record<number, { at: number; result: ExchangeBalanceResult }>>({});
+  const [overrides, setOverrides] = useState<Record<number, FreshRead>>({});
   const [refreshingId, setRefreshingId] = useState<number | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   /** 每秒走一次的时钟，让"12 秒前"在两次轮询之间也不说谎。 */
@@ -248,6 +204,8 @@ export function ExchangeAccountsSection() {
     },
     [overrides, query.updatedAt],
   );
+
+  const totals = useMemo(() => aggregateBalance(accounts, overrideFor), [accounts, overrideFor]);
 
   const refreshOne = useCallback(async (id: number) => {
     setRefreshingId(id);
@@ -423,192 +381,309 @@ export function ExchangeAccountsSection() {
   };
 
   const exchangeLabel = (id: string) => exchanges.find((row) => row.id === id)?.label ?? id;
+  const failedReads = totals.failed;
 
-  return (
-    <div className="space-y-3">
-      {error && <ErrorNote>{error}</ErrorNote>}
-
-      {/* ------------------------------------------------------------------ */}
-      {/*  主网横幅：整屏最不能看错的一条                                     */}
-      {/* ------------------------------------------------------------------ */}
+  /* ------------------------------------------------------------------------ */
+  /*  左指标栏：先回答"钱在不在"，再回答"这是真钱吗"                          */
+  /* ------------------------------------------------------------------------ */
+  const rail = (
+    <div className="space-y-4">
+      {/*
+       * 主网横幅。放在左栏最上方而不是主区顶部：`xl` 下左栏是常驻可见的一列，
+       * 滚到凭证列表深处也躲不开它 —— 而这正是"不可能看错"的唯一可靠做法。
+       */}
       {liveAccounts.length > 0 && (
-        <div className="flex flex-wrap items-start gap-2 rounded-md border border-warn/50 bg-warn/10 px-3 py-2.5 text-warn">
-          <span className="rounded border border-warn/50 px-1.5 text-xs font-bold uppercase tracking-wide">实盘</span>
-          <p className="min-w-0 flex-1 text-base leading-relaxed">
-            有 <span className="num font-semibold">{liveAccounts.length}</span> 个凭证是
-            <span className="font-semibold">主网 / 实盘</span>：
-            {liveAccounts.map((row) => row.label).join('、')}。
-            它们下的每一单都会在真实市场成交并动用真实资金 ——
-            不确定时请先切到测试网密钥。
+        <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2.5 text-warn">
+          <div className="flex items-center gap-2">
+            <span className="rounded border border-warn/50 px-1.5 text-xs font-bold tracking-wide">实盘</span>
+            <span className="num text-xs font-semibold">{liveAccounts.length} 个凭证</span>
+          </div>
+          <p className="mt-1.5 text-xs leading-relaxed">
+            <span className="font-semibold">{TRADING_ENV_LABEL.long.live}：</span>
+            它们下的每一单都会在真实市场成交并动用真实资金。不确定时请先切到测试网密钥。
           </p>
+          <p className="mt-1 break-words text-xs text-warn/90">{liveAccounts.map((row) => row.label).join('、')}</p>
         </div>
       )}
 
-      {/* ------------------------------------------------------------------ */}
-      {/*  余额：操作员的第一个问题                                            */}
-      {/* ------------------------------------------------------------------ */}
-      <Panel
-        title="账户余额"
-        actions={
-          <>
-            <span className="hidden text-xs text-ink-faint sm:inline">
-              每 30 秒轮询一次；「刷新」会绕过服务端缓存
-            </span>
-            <Button
-              size="sm"
-              busy={refreshingAll}
-              disabled={accounts.length === 0}
-              title="强制刷新所有凭证的实时余额（绕过服务端缓存）"
-              onClick={() => void refreshAll(accounts.map((row) => row.id))}
-            >
-              <RotateCw aria-hidden className="h-3.5 w-3.5" />
-              刷新全部
-            </Button>
-            <Button variant="primary" size="sm" onClick={openCreate} disabled={exchanges.length === 0}>
-              <Plus aria-hidden className="h-3.5 w-3.5" />
-              添加凭证
-            </Button>
-          </>
-        }
-      >
+      <MetricGroup title="账户余额">
         {query.loading && accounts.length === 0 ? (
-          <Spinner3 label="正在加载凭证与余额" />
+          <p className="text-xs text-ink-lo">正在读取交易所余额…</p>
         ) : accounts.length === 0 ? (
-          <Empty
-            message="还没有交易所凭证，因此没有余额可读。"
-            hint="模拟模式不需要任何密钥。要接实盘，先添加一把测试网密钥，确认行情、签名与风控这条链路通了再换主网。"
-            action={
-              <Button variant="primary" onClick={openCreate} disabled={exchanges.length === 0}>
-                <Plus aria-hidden className="h-3.5 w-3.5" />
-                添加第一个凭证
-              </Button>
-            }
-          />
-        ) : (
-          <div className={BALANCE_GRID}>
-            {accounts.map((row) => (
-              <BalanceCard
-                key={row.id}
-                row={row}
-                fresh={overrideFor(row.id)}
-                onRefresh={() => void refreshOne(row.id)}
-                refreshing={refreshingId === row.id}
-              />
-            ))}
-          </div>
-        )}
-
-        {query.error && <ErrorNote className="mt-2">读取凭证列表失败：{query.error}</ErrorNote>}
-      </Panel>
-
-      {/* ------------------------------------------------------------------ */}
-      {/*  凭证本身：一行一张，管理操作在行尾                                  */}
-      {/* ------------------------------------------------------------------ */}
-      <Panel title="交易所凭证" bodyClassName="p-3">
-        {query.loading && accounts.length === 0 ? (
-          <Spinner3 label="正在加载凭证" />
-        ) : accounts.length === 0 ? (
-          <p className="text-base leading-relaxed text-ink-lo">
-            暂无凭证。点上方
-            <span className="mx-1 text-ink-hi">添加凭证</span>
-            录入密钥 —— 测试网密钥可以先在实盘前验证整条链路。
+          <p className="text-xs leading-relaxed text-ink-lo">
+            还没有凭证，因此没有余额可读。模拟模式不需要密钥。
           </p>
+        ) : totals.counted === 0 ? (
+          <>
+            <Metric label={BALANCE_LABEL.equity} value="—" size="lg" />
+            <p className="text-xs leading-relaxed text-warn">
+              {failedReads > 0
+                ? `${failedReads} 个凭证读取失败，合计未知 —— 读不到不等于余额是 0。`
+                : '尚未读取到余额。点主区的「刷新全部」向交易所重新查询。'}
+            </p>
+          </>
         ) : (
-          <ul className="space-y-2">
-            {accounts.map((row) => {
-              const outcome = tests[row.id];
-              const passed = outcome ? checksPassed(outcome.checks) : false;
-              // 同一行里的两个余额视图必须同源，否则手动刷新后上下会互相矛盾。
-              const fresh = overrideFor(row.id);
-              const balance = fresh ? (fresh.result.ok ? fresh.result.balance : null) : row.balance;
-              const balanceError = fresh ? (fresh.result.ok ? null : fresh.result.error) : row.balanceError;
-              const testedAtLabel = (
-                <span className="num text-xs text-ink-faint">
-                  测试于 {outcome ? fmtTime(new Date(outcome.at).toISOString()) : '—'}
-                </span>
-              );
-
-              return (
-                <li key={row.id} className="rounded-md border border-base-750 bg-base-850/40 p-3">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
-                    <span className="min-w-0 truncate text-lg font-semibold text-ink-hi" title={row.label}>
-                      {row.label}
-                    </span>
-                    <Badge tone="accent">{exchangeLabel(row.exchange)}</Badge>
-                    <EnvBadge testnet={row.testnet} />
-                    {row.canTrade ? <Badge tone="up">可下单</Badge> : <Badge tone="warn">只读</Badge>}
-
-                    <span className="ml-auto flex flex-wrap items-center gap-1.5">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        busy={testingId === row.id}
-                        onClick={() => void test(row)}
-                        title="用已保存的密钥向交易所发起一次只读探测"
-                      >
-                        测试连接
-                      </Button>
-                      <Button size="sm" onClick={() => openEdit(row)}>
-                        编辑
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        onClick={() => setRemoving(row)}
-                        aria-label={`删除凭证 ${row.label}`}
-                      >
-                        <Trash2 aria-hidden className="h-3.5 w-3.5" />
-                        删除
-                      </Button>
-                    </span>
-                  </div>
-
-                  {/* 元信息：密钥只以服务端给出的掩码出现，且没有回退到原值 */}
-                  <div className="num mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
-                    <span className="min-w-0">
-                      API Key <span className="text-ink-mid">{row.apiKeyMasked || '—'}</span>
-                    </span>
-                    <span>
-                      添加于 <span className="text-ink-faint">{fmtDateTime(row.createdAt)}</span>
-                    </span>
-                    <span>
-                      最后更新 <span className="text-ink-faint">{fmtDateTime(row.updatedAt)}</span>
-                    </span>
-                  </div>
-
-                  <div className="mt-2">
-                    <BalanceCell balance={balance} error={balanceError} testnet={row.testnet} now={now} />
-                  </div>
-
-                  {/* 连接测试结果：结论、通过项、阻断项、时刻缺一不可 */}
-                  {outcome && (
-                    <Collapsible
-                      className="mt-2"
-                      open={openTests[row.id] ?? true}
-                      onOpenChange={(next) => setOpenTests((current) => ({ ...current, [row.id]: next }))}
-                      meta={testedAtLabel}
-                      title={
-                        <span className="flex flex-wrap items-center gap-2">
-                          <span>连接测试</span>
-                          <Badge tone={passed ? 'up' : 'down'}>{passed ? '通过' : '未通过'}</Badge>
-                          <span className="num text-xs text-ink-lo">
-                            {outcome.checks.filter((check) => severityOf(check) === 'ok').length} 项通过 ·{' '}
-                            {outcome.checks.filter((check) => severityOf(check) === 'error').length} 项失败 ·{' '}
-                            {outcome.checks.filter((check) => severityOf(check) === 'warn').length} 项待确认
-                          </span>
-                        </span>
-                      }
-                    >
-                      {outcome.error && <ErrorNote className="mb-2">{outcome.error}</ErrorNote>}
-                      <CheckList checks={outcome.checks} />
-                    </Collapsible>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
+          <>
+            {/* 这一屏的主数字：操作员的第一个问题就这一个答案 */}
+            <Metric
+              label={`${BALANCE_LABEL.equity}合计（${totals.asset}）`}
+              value={fmtAsset(totals.total, totals.asset)}
+              sub={`${totals.counted} 个凭证合计 · ${BALANCE_LABEL.settleAsset} ${totals.asset}`}
+              size="lg"
+              tone="strong"
+              title="所有凭证由交易所回报的账户权益之和，不是本终端的归属权益"
+            />
+            <Metric
+              label={BALANCE_LABEL.wallet}
+              value={fmtAmount(totals.wallet)}
+              sub={`${BALANCE_LABEL.available} ${fmtAmount(totals.available)}`}
+            />
+            {totals.unrealized !== 0 && (
+              <Metric
+                label={`${BALANCE_LABEL.unrealized}（${totals.asset}）`}
+                value={fmtAsset(totals.unrealized, totals.asset)}
+                tone={totals.unrealized > 0 ? 'up' : 'down'}
+              />
+            )}
+            {failedReads > 0 && (
+              <p className="text-xs leading-relaxed text-warn">
+                {failedReads} 个凭证读取失败，未计入合计。
+              </p>
+            )}
+            {totals.skippedAsset > 0 && (
+              <p className="text-xs leading-relaxed text-warn">
+                {totals.skippedAsset} 个凭证以其他币种计价，未计入合计（混币相加没有意义）。
+              </p>
+            )}
+          </>
         )}
-      </Panel>
+      </MetricGroup>
+
+      <MetricGroup title="环境">
+        <Metric
+          label="实盘凭证"
+          value={fmtInt(liveAccounts.length)}
+          tone={liveAccounts.length > 0 ? 'warn' : 'default'}
+          sub={liveAccounts.length > 0 ? TRADING_ENV_LABEL.long.live : '没有实盘凭证，当前不会动用真实资金'}
+        />
+        <Metric
+          label="测试网凭证"
+          value={fmtInt(accounts.length - liveAccounts.length)}
+          sub={TRADING_ENV_LABEL.long.testnet}
+        />
+      </MetricGroup>
+
+      <MetricGroup title="读取">
+        <Metric
+          label="最近一次成功读取"
+          value={totals.readAt ? timeAgo(totals.readAt) : '尚未读取'}
+          sub={totals.readAt ? fmtTime(totals.readAt) : '点「刷新全部」立即读取'}
+          title={totals.readAt ? `交易所返回的读取时刻 ${fmtTime(totals.readAt)}` : undefined}
+        />
+        <Metric label="本机时刻" value={fmtTime(new Date(now).toISOString())} sub="每 30 秒自动轮询一次" />
+      </MetricGroup>
+    </div>
+  );
+
+  /* ------------------------------------------------------------------------ */
+  /*  主内容区                                                                */
+  /* ------------------------------------------------------------------------ */
+  return (
+    <>
+      <PageShell rail={rail}>
+        {error && <ErrorNote>{error}</ErrorNote>}
+
+        {query.error && <ErrorNote>读取凭证列表失败：{query.error}</ErrorNote>}
+
+        {query.loading && accounts.length === 0 ? (
+          <Panel title="交易所凭证">
+            <Spinner3 label="正在加载凭证" />
+          </Panel>
+        ) : accounts.length === 0 ? (
+          <Panel title="交易所凭证">
+            <Empty
+              message="还没有交易所凭证，因此没有余额可读。"
+              hint="模拟模式不需要任何密钥。要接实盘，先添加一把测试网密钥，确认行情、签名与风控这条链路通了再换主网。"
+              action={
+                <Button variant="primary" onClick={openCreate} disabled={exchanges.length === 0}>
+                  <Plus aria-hidden className="h-3.5 w-3.5" />
+                  添加第一个凭证
+                </Button>
+              }
+            />
+          </Panel>
+        ) : (
+          <section>
+            <SectionLabel
+              title="交易所凭证"
+              count={accounts.length}
+              actions={
+                <>
+                  <span className="hidden text-xs text-ink-faint lg:inline">
+                    「刷新」绕过服务端缓存
+                  </span>
+                  <Button
+                    size="sm"
+                    busy={refreshingAll}
+                    title="强制刷新所有凭证的实时余额（绕过服务端缓存）"
+                    onClick={() => void refreshAll(accounts.map((row) => row.id))}
+                  >
+                    <RotateCw aria-hidden className="h-3.5 w-3.5" />
+                    刷新全部
+                  </Button>
+                  <Button variant="primary" size="sm" onClick={openCreate} disabled={exchanges.length === 0}>
+                    <Plus aria-hidden className="h-3.5 w-3.5" />
+                    添加凭证
+                  </Button>
+                </>
+              }
+            />
+
+            <ul className="space-y-2">
+              {accounts.map((row) => {
+                const outcome = tests[row.id];
+                const passed = outcome ? checksPassed(outcome.checks) : false;
+                // 同一行里的两个余额视图必须同源，否则手动刷新后上下会互相矛盾。
+                const fresh = overrideFor(row.id);
+                const balance = fresh ? (fresh.result.ok ? fresh.result.balance : null) : row.balance;
+                const balanceError = fresh ? (fresh.result.ok ? null : fresh.result.error) : row.balanceError;
+                const asset = balance?.asset?.trim() || DEFAULT_SETTLE_ASSET;
+                const testedAtLabel = (
+                  <span className="num text-xs text-ink-faint">
+                    测试于 {outcome ? fmtTime(new Date(outcome.at).toISOString()) : '—'}
+                  </span>
+                );
+
+                return (
+                  <li key={row.id} className="rounded-md border border-base-750 bg-base-850/40 p-3">
+                    {/* 标识行：名称 + 交易所 + 两枚不能看错的徽章 */}
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+                      <span className="min-w-0 truncate text-lg font-semibold text-ink-hi" title={row.label}>
+                        {row.label}
+                      </span>
+                      <Badge tone="accent">{exchangeLabel(row.exchange)}</Badge>
+                      <EnvBadge testnet={row.testnet} />
+                      {row.canTrade ? <Badge tone="up">可下单</Badge> : <Badge tone="warn">只读</Badge>}
+
+                      <span className="ml-auto flex flex-wrap items-center gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          busy={testingId === row.id}
+                          onClick={() => void test(row)}
+                          title="用已保存的密钥向交易所发起一次只读探测"
+                        >
+                          测试连接
+                        </Button>
+                        <Button size="sm" onClick={() => openEdit(row)}>
+                          编辑
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={() => setRemoving(row)}
+                          aria-label={`删除凭证 ${row.label}`}
+                        >
+                          <Trash2 aria-hidden className="h-3.5 w-3.5" />
+                          删除
+                        </Button>
+                      </span>
+                    </div>
+
+                    {/*
+                     * 余额：**只有一处读数**（`BalanceCell`）。
+                     *
+                     * 左栏给的是合计，这里给的是**这一把凭证**的读数 —— 两者回答不同
+                     * 的问题（"我的钱在不在" vs "是哪一把密钥读到的"）。
+                     *
+                     * 为什么不再自己画一个大号权益数字：那样会和 `BalanceCell` 的
+                     * 权益、钱包、可用、未实现重复一遍，同一张卡上出现两套同一组数字
+                     * 正是改造前"没有主次"的病根。`BalanceCell` 内部已经把权益放在
+                     * 第一行、用更亮的字色，并且读失败时给出可操作的警告 —— 保留它，
+                     * 主次由左栏的合计承担。
+                     */}
+                    <div className="mt-2 border-t border-base-800 pt-2">
+                      <BalanceCell balance={balance} error={balanceError} testnet={row.testnet} now={now} />
+                      {balance && asset !== DEFAULT_SETTLE_ASSET && (
+                        // 交易所钱包不是 USDT 时，左栏合计不会把它加进去 —— 必须说清。
+                        <p className="mt-0.5 text-xs text-warn">
+                          该钱包以 {asset} 计价，不会计入左栏的 {DEFAULT_SETTLE_ASSET} 合计。
+                        </p>
+                      )}
+                    </div>
+
+                    {/* 元信息：密钥只以服务端给出的掩码出现，且没有回退到原值 */}
+                    <div className="num mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
+                      <span className="min-w-0">
+                        API Key <span className="text-ink-mid">{row.apiKeyMasked || '—'}</span>
+                      </span>
+                      <span>
+                        添加于 <span className="text-ink-faint">{fmtDateTime(row.createdAt)}</span>
+                      </span>
+                      <span>
+                        最后更新 <span className="text-ink-faint">{fmtDateTime(row.updatedAt)}</span>
+                      </span>
+                      <span className="min-w-0 text-ink-faint">
+                        {balance
+                          ? `读取于 ${timeAgo(balance.readAt)}（${fmtTime(balance.readAt)}）`
+                          : balanceError
+                            ? '读取未成功'
+                            : '未读取'}
+                      </span>
+                      <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          busy={refreshingId === row.id}
+                          onClick={() => void refreshOne(row.id)}
+                          title="向交易所强制重新读取该凭证的余额（绕过服务端缓存）"
+                        >
+                          <RotateCw aria-hidden className="h-3.5 w-3.5" />
+                          刷新
+                        </Button>
+                      </span>
+                    </div>
+
+                    {/* 连接测试结果：结论、通过项、阻断项、时刻缺一不可 */}
+                    {outcome && (
+                      <Collapsible
+                        className="mt-2"
+                        open={
+                          // 失败的结果必须自己展开：折叠起来等于把"密钥不能用了"藏了起来。
+                          openTests[row.id] ?? !passed
+                        }
+                        onOpenChange={(next) => setOpenTests((current) => ({ ...current, [row.id]: next }))}
+                        meta={testedAtLabel}
+                        title={
+                          <span className="flex flex-wrap items-center gap-2">
+                            <span>连接测试</span>
+                            <Badge tone={passed ? 'up' : 'down'}>{passed ? '通过' : '未通过'}</Badge>
+                            <span className="num text-xs text-ink-lo">
+                              {outcome.checks.filter((check) => severityOf(check) === 'ok').length} 项通过 ·{' '}
+                              {outcome.checks.filter((check) => severityOf(check) === 'error').length} 项失败 ·{' '}
+                              {outcome.checks.filter((check) => severityOf(check) === 'warn').length} 项待确认
+                            </span>
+                          </span>
+                        }
+                      >
+                        {outcome.error && <ErrorNote className="mb-2">{outcome.error}</ErrorNote>}
+                        <CheckList checks={outcome.checks} />
+                      </Collapsible>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+
+            {accounts.length > 0 && (
+              <p className="mt-2 text-xs leading-relaxed text-ink-faint">
+                合计与单个读数都来自交易所回报的<span className="text-ink-lo">账户</span>权益（共享钱包），不是某个机器人的归属权益；
+                同一交易所有多把指向同一账户的凭证时，合计会把同一份钱算两次。
+              </p>
+            )}
+          </section>
+        )}
+      </PageShell>
 
       {/* ------------------------------------------------------------------ */}
       {/*  添加 / 编辑                                                        */}
@@ -706,11 +781,11 @@ export function ExchangeAccountsSection() {
            */}
           {draft.testnet ? (
             <div className="rounded-md border border-base-700 bg-base-850/60 px-3 py-2 text-base leading-relaxed text-ink-lo">
-              这是<span className="mx-1 text-ink-hi">测试网 / 模拟盘</span>凭证：下单不会进入真实市场。
+              这是<span className="mx-1 text-ink-hi">{TRADING_ENV_LABEL.long.testnet}</span>凭证：下单不会进入真实市场。
             </div>
           ) : (
             <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base leading-relaxed text-warn">
-              <span className="font-semibold">主网 / 真实资金。</span>
+              <span className="font-semibold">{TRADING_ENV_LABEL.long.live}。</span>
               保存后，使用该凭证的机器人会向真实市场提交真实订单，盈亏从账户里真实增减。
               请确认密钥已关闭提现权限，并尽量限制为服务器 IP。
             </div>
@@ -765,7 +840,7 @@ export function ExchangeAccountsSection() {
           <div className="space-y-3">
             <p className="text-base leading-relaxed text-ink-hi">
               即将永久删除凭证“<span className="font-semibold">{removing.label}</span>”（{exchangeLabel(removing.exchange)}
-              ，{removing.testnet ? '测试网 · 模拟' : '主网 · 真实资金'}）。
+              ，{tradingEnvLabel(removing.testnet, 'short')}）。
             </p>
             <ul className="space-y-1.5 text-base leading-relaxed text-ink-lo">
               <li>• 服务端存储的 API Key 与加密后的 Secret 会一并删除，<span className="text-ink-hi">无法恢复</span>。</li>
@@ -786,6 +861,6 @@ export function ExchangeAccountsSection() {
           </div>
         )}
       </Modal>
-    </div>
+    </>
   );
 }
