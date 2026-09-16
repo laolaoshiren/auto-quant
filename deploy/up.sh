@@ -151,7 +151,9 @@ ensure_env() {
   printf '%s  ┌──────────────────────────────────────────────┐%s\n' "$C_BOLD" "$C_RESET"
   printf '%s  │  控制台登录信息（请立刻保存）                │%s\n' "$C_BOLD" "$C_RESET"
   printf '%s  └──────────────────────────────────────────────┘%s\n' "$C_BOLD" "$C_RESET"
-  echo "     用户名：admin"
+  # 必须回显 $user 而不是字面量 admin：用户名是随机生成的（admin_ + 6 位十六进制），
+  # 这里曾经写死 "admin"，照着横幅输入的人会因为用户名不存在而登录失败。
+  echo "     用户名：$user"
   echo "     密码：  $admin"
   echo ""
   echo "     这个密码也可以随时在 $ENV_FILE 里查看或修改。"

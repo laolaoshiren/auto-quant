@@ -273,7 +273,29 @@ UPDATE trades SET net_pnl = pnl - fee;
 CREATE INDEX idx_trades_exit_order ON trades(trader_id, exit_order_id);
 `;
 
+/**
+ * 可撤销的会话。
+ *
+ * 为什么需要：JWT 是无状态的，签发之后服务端没有任何办法让它失效。
+ * 于是「修改密码」这个唯一的补救动作在最需要它的时候是**无效的** ——
+ * 令牌一旦泄漏（浏览器残留、代理日志、旧设备），攻击者可以在剩下的
+ * 有效期内继续下单，而所有者改密码、甚至改用户名都不会把它踢下线。
+ *
+ * 做法：在 `users` 上记一个「凭据变更时间」。签发令牌时把这个时间写进载荷
+ * （`credAt`），校验时与数据库里的当前值等值比较；改密码或改用户名会刷新它，
+ * 于是所有更早签发的令牌立即失配。为什么不是「iat 早于变更时间」的比大小：
+ * 见 `api/auth.ts` 的 `isTokenRevoked()`。
+ *
+ * 默认空串 = 「从未改过」，因此**升级不会把现有会话全部踢下线**：
+ * 只有真正发生凭据变更时才作废旧令牌。这是刻意的 —— 升级本身不该让操作员
+ * 在一个正在跑真实订单的系统上失去控制台访问。
+ */
+const M3_SESSION_REVOCATION = /* sql */ `
+ALTER TABLE users ADD COLUMN credentials_changed_at TEXT NOT NULL DEFAULT '';
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
+  { version: 3, name: 'session-revocation', sql: M3_SESSION_REVOCATION },
 ];

@@ -40,7 +40,17 @@ export function Toaster() {
           type="button"
           onClick={() => dismiss(toast.id)}
           className={clsx(
-            'pointer-events-auto animate-slideIn rounded border px-2.5 py-2 text-left shadow-panel backdrop-blur transition hover:brightness-125',
+            /*
+             * `animate-slide-in-right`, not `animate-slideIn`.
+             *
+             * `slideIn` is not a key defined in tailwind.config.js, and Tailwind
+             * emits nothing at all for an unknown class rather than failing the
+             * build — so the toasts silently stopped animating in the redesign
+             * and nobody noticed, because "no animation" still looks fine.
+             * This is the actual toast entrance (bottom-right stack), so it maps
+             * onto the config's existing `slide-in-right`.
+             */
+            'pointer-events-auto animate-slide-in-right rounded border px-2.5 py-2 text-left shadow-panel backdrop-blur transition hover:brightness-125',
             KIND_STYLE[toast.kind] ?? KIND_STYLE.info,
           )}
         >

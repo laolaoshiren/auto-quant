@@ -435,8 +435,29 @@ export class BinanceUserDataStream {
   ) {}
 
   async start(): Promise<void> {
-    await this.ensureListenKey();
-    this.socket = new ResilientStream({
+    // Idempotent on purpose, and not merely as a courtesy.
+    //
+    // `start()` used to overwrite `this.socket` with a brand-new
+    // `ResilientStream` unconditionally. Every caller that restarts the stream —
+    // `keepalive()` on a lapsed key, the `listenKeyExpired` event path, and any
+    // future one — therefore orphaned the previous object: its socket stayed
+    // connected (so Binance kept delivering user-data frames), its 10-second
+    // watchdog interval stayed scheduled, and both copies dispatched the same
+    // `ORDER_TRADE_UPDATE` / `MARGIN_CALL` events. Bots that reconnect often
+    // accumulate one live socket and one leaked timer per partition.
+    //
+    // Stopping first fixes both: exactly one socket and exactly one watchdog,
+    // and the old key's frames stop arriving before the new key is dialled.
+    await this.stopSocket();
+
+    this.socket = this.createSocket();
+    await this.socket.start();
+    this.startKeepalive();
+  }
+
+  /** Build a fresh resilient stream over the current `listenKey`. */
+  private createSocket(): ResilientStream {
+    return new ResilientStream({
       name: 'user-data',
       // Recreate or refresh the key before every dial. A dial can follow a lapse,
       // and a stale key yields an open-but-silent socket.
@@ -453,9 +474,30 @@ export class BinanceUserDataStream {
         await this.handlers.onReconnected?.(reason);
       },
     });
+  }
 
+  /**
+   * Tear down the current stream, if any.
+   *
+   * Single place that owns "there is no live socket", so the three restart
+   * paths cannot each get the teardown order slightly different.
+   */
+  private async stopSocket(): Promise<void> {
+    const previous = this.socket;
+    this.socket = null;
+    if (!previous) return;
+    await previous.stop().catch((error) => {
+      this.log.warn(`停止旧的用户数据流失败：${(error as Error).message}`);
+    });
+  }
+
+  /** Recreate the key and dial a fresh socket, replacing any live one. */
+  private async restart(reason: string): Promise<void> {
+    this.log.warn(`用户数据流重连（${reason}）`);
+    await this.ensureListenKey();
+    await this.stopSocket();
+    this.socket = this.createSocket();
     await this.socket.start();
-    this.startKeepalive();
   }
 
   private startKeepalive(): void {
@@ -487,9 +529,7 @@ export class BinanceUserDataStream {
       this.log.warn(`listenKey keepalive failed (${(error as Error).message})`);
       if (expired) {
         this.log.warn('listenKey expired; recreating and reconnecting');
-        await this.ensureListenKey();
-        await this.socket?.stop();
-        await this.socket?.start();
+        await this.restart('keepalive-lapsed');
         await this.handlers.onListenKeyExpired?.();
       }
     }
@@ -516,9 +556,7 @@ export class BinanceUserDataStream {
       case 'listenKeyExpired':
         this.log.warn('listenKeyExpired event received — recreating key and reconnecting');
         void (payload as BinanceWsListenKeyExpiredEvent);
-        await this.ensureListenKey();
-        await this.socket?.stop();
-        await this.socket?.start();
+        await this.restart('listenKeyExpired-event');
         await this.handlers.onListenKeyExpired?.();
         return;
       default:
@@ -533,8 +571,7 @@ export class BinanceUserDataStream {
   async stop(): Promise<void> {
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
     this.keepaliveTimer = null;
-    await this.socket?.stop();
-    this.socket = null;
+    await this.stopSocket();
     // Release the server-side key so another process can take over cleanly.
     try {
       await this.rest.keyedRequest('DELETE', '/fapi/v1/listenKey');
