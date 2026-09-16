@@ -507,7 +507,7 @@ export function ExchangeAccountsSection() {
   /* ------------------------------------------------------------------------ */
   return (
     <>
-      <PageShell rail={rail}>
+      <PageShell aside={rail}>
         {error && <ErrorNote>{error}</ErrorNote>}
 
         {query.error && <ErrorNote>读取凭证列表失败：{query.error}</ErrorNote>}

@@ -12,7 +12,7 @@ import { useApp } from './lib/store';
  * 现在每个页面按需加载：入口只剩外壳与登录判定，图表库跟着用到它的页面走。
  *
  * 代价是切换页面时会有一次极短的 chunk 拉取，用 `RouteFallback` 兜住：
- * 它撑满内容区，所以侧栏、顶栏不动，也不会出现"内容先塌成一条再弹回来"的跳版。
+ * 它撑满内容区，所以顶栏不动，也不会出现"内容先塌成一条再弹回来"的跳版。
  */
 const LoginPage = lazy(() => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })));
 const OverviewPage = lazy(() => import('./pages/OverviewPage').then((m) => ({ default: m.OverviewPage })));
@@ -196,7 +196,7 @@ export function App() {
  * 一个路由元素 + 它自己的 Suspense 边界。
  *
  * 边界放在元素这一层而不是整个 `<Routes>` 外面：这样加载下一页时外壳
- * （侧栏、顶栏、推送状态）保持挂载，只有内容区换成 fallback；
+ * （顶栏、导航、推送状态）保持挂载，只有内容区换成 fallback；
  * 放在外面会让整棵树连同 socket 状态一起卸载重建。
  */
 function Lazy({ children }: { children: ReactNode }) {

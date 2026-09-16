@@ -41,16 +41,16 @@ type PendingAction = { kind: 'stop' | 'delete'; trader: TraderRow } | null;
 /**
  * 机器人列表。
  *
- * `LAYOUT.md` §1 明确说**列表页不套左指标栏** —— 它的内容就是一整张表。
+ * `LAYOUT.md` §0 规则 2 明确说**列表页不套右栏**，内容就是一整张表（也不设最大宽度，见 §2）。
  * 所以这一页只有：页头、一行舰队合计、整宽表格。
  *
  * 之前下半屏空着，是因为表格高度写死 `max-h-[70vh]` 而内容只有几行：面板在
  * 半屏处就结束了，下面是一片页面底色，看起来像页面坏了。现在表格容器**按视口
- * 撑满**（`h-[calc(100vh-21rem)]`），空的地方落在表格内部 —— 那是"表格还有位置"，
- * 而不是"页面到底了"。行高一档没变（§2 要求 `py-2` 的密度）。
+ * 撑满**（`h-[calc(100vh-22rem)]`），空的地方落在表格内部 —— 那是"表格还有位置"，
+ * 而不是"页面到底了"。行高保持一档 `py-2` 的密度。
  *
  * 为什么不换成卡片网格：卡片在只有一两个维护时会排成一行，垂直方向**留白更多**，
- * 想填满就得把卡片拉高 —— 那正是"用大卡片解决空"的老毛病（§2）。而且卡片意味着
+ * 想填满就得把卡片拉高 —— 那正是"用大卡片解决空"的老毛病。而且卡片意味着
  * 同一批数字要有第二套渲染和第二个标签词表，列表页没必要付这个代价。
  */
 export function TradersPage() {
@@ -153,7 +153,14 @@ export function TradersPage() {
   const shown = traders.slice(0, MAX_ROWS);
 
   return (
-    <div className="mx-auto w-full max-w-[110rem] space-y-3">
+    /*
+     * 页面自己负责内边距：外壳（Layout.tsx）刻意不给内容区加 padding —— 两栏页面的
+     * 右栏要的是"可视区 − 顶栏"那份确定高度，中间再夹一层边距就说不清了。
+     *
+     * 也不设 `max-w`：列表页就是**整宽一张表**（LAYOUT.md §0 规则 2 / §2），
+     * 宽屏上把空间给表格，不要在两边留白。
+     */
+    <div className="w-full space-y-3 p-4">
       <SectionHeading
         title="机器人"
         sub="每个机器人 = 一份交易所凭证 + 一个 AI 模型 + 一套策略，按固定间隔循环决策。"
@@ -165,7 +172,7 @@ export function TradersPage() {
       />
 
       {/*
-        舰队合计：**一行紧凑指标，不是四张大卡片**（§2）。
+        舰队合计：**一行紧凑指标，不是四张大卡片**（DESIGN.md §4"不要把所有东西做成一样大"）。
         这一页的主体是下面那张表，四张 `text-2xl` 的卡片会把表格挤下去半屏 ——
         而它们回答的问题（一共几个、跑了几个、总共多少钱）一句话就能说完。
       */}
@@ -204,7 +211,7 @@ export function TradersPage() {
         {tradersQuery.loading && traders.length === 0 ? (
           <Spinner3 label="正在加载机器人" />
         ) : traders.length === 0 ? (
-          /* 空状态不占位（§4）：三行文字说完"现在做什么"，不撑满一屏。 */
+          /* 空状态不占位：三行文字说完"现在做什么"，不撑满一屏。 */
           <div className="px-3.5 py-3">
             <p className="text-base text-ink-lo">还没有机器人。</p>
             <p className="mt-0.5 text-xs leading-relaxed text-ink-faint">

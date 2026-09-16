@@ -125,10 +125,10 @@ export interface TraderAccountState {
  * Laid out as one inline row: every figure carries its label and its unit, so the
  * strip stays scannable when it wraps to two lines on a narrow window.
  *
- * 版式：它现在横跨交易页整页、位于左指标栏**之上**，因为这一组数字描述的是一个
- * **共用钱包**（同一账户下所有机器人读数是同一个数），不属于某一个机器人 ——
- * 左栏只放归属这个机器人的数字。带一个分组标题和上下边线，正是为了让这件事
- * 一眼可见：以前它无标题地贴在归属权益下面，一个从未成交的机器人看起来也"有余额"。
+ * 版式：它现在是交易页主栏里的一行（右栏是决策流），带一个分组标题和上下边线，
+ * 正是为了让这件事一眼可见：这些数字属于**交易所账户**（共享钱包），
+ * 与上方那四张只讲本机器人的指标卡不是一个口径。以前它无标题地贴在归属权益下面，
+ * 一个从未成交的机器人看起来也"有余额"。
  */
 export function TraderAccountStrip({
   account,

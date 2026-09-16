@@ -122,7 +122,7 @@ export function AccountSection() {
   );
 
   return (
-    <PageShell rail={rail}>
+    <PageShell aside={rail}>
       {/* 表单区自己限宽：输入框横跨 1600px 会让"标签在左、输入在右"的对应关系断掉 */}
       <section className="max-w-3xl">
         <SectionLabel
