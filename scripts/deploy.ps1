@@ -113,6 +113,17 @@ cd $RemoteDir
 
 # 解压前先看一眼 .env 是否还在，避免把它弄丢
 HAD_ENV=`$( [ -f .env ] && echo yes || echo no )
+
+# 前端产物目录先删干净再解包。
+#
+# `vite build` 给每个 chunk 起带内容哈希的名字，所以每次构建的文件名都不同。
+# 而 `tar -x` 只覆盖、不删除 —— 结果是**每次部署都在服务器上留下一批陈旧 chunk**：
+# 实测一次累积到 69 个文件，而本地构建只有 35 个。它们不会被 index.html 引用，
+# 但会一直占着磁盘，也让"服务器上到底是哪一版"变得难以判断。
+#
+# `dist` 完全由构建产出，删掉再解包是安全的；源码与 data 都不在这个目录里。
+rm -rf packages/web/dist
+
 tar -xzf /tmp/aq.tar.gz -C $RemoteDir
 rm -f /tmp/aq.tar.gz
 
