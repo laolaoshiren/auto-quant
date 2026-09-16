@@ -782,7 +782,7 @@ function SampleReport({ sample }: { sample: StrategyCheckSample }) {
 function MiniStat({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
     <div className="min-w-0 rounded-md border border-base-800 bg-base-850/50 px-2.5 py-1.5">
-      <div className="truncate text-xs uppercase tracking-wide text-ink-faint">{label}</div>
+      <div className="text-xs leading-tight text-ink-faint">{label}</div>
       <div className={cn('num text-xl leading-tight', tone ?? 'text-ink-hi')}>{value}</div>
     </div>
   );
