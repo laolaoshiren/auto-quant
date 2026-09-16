@@ -541,7 +541,19 @@ export function TraderPage() {
      *
      * 也不再设 `max-w`：§2 明确说主内容区不设最大宽度 —— 宽屏上把空间给图表和表格。
      */
-    <div className="h-full">
+    /*
+     * 页面纵向切成两块：**上面是两栏（主内容 + 决策流），下面是全宽的表格区**。
+     *
+     * 为什么必须这样切：成交表有 11 列、需要约 1200px，而两栏布局只给它 60%
+     * （1440px 视口下约 807px）。要让两者并存得靠约 2100px 的视口 —— 现实分辨率
+     * 里不存在，所以表格只能脱离那两栏、占满整宽，否则永远要左右拖动。
+     *
+     * `min-h-0` 两个都不能省：flex 子项的默认 `min-height: auto` 会按内容撑高，
+     * 于是 `flex-1` 失效、高度链断掉，决策流拿不到确定高度、内部滚动条随之消失。
+     * 这条链是：这里 → `PageShell` 的 `xl:h-full` → 右栏 `max-h-full` → 决策流 `h-full`。
+     */
+    <div className="flex h-full min-h-0 flex-col gap-4">
+      <div className="min-h-0 flex-1">
       <PageShell
         aside={<DecisionFeed traderId={traderId} running={running} actions={runNowAction} />}
       >
@@ -740,15 +752,22 @@ export function TraderPage() {
           )}
         </Panel>
 
-        {/*
-          E. 表格：参考材料，不是盯盘对象。
+      </PageShell>
+      </div>
 
-          这里**不再传 `refreshToken`**。那个令牌原来只服务于「对账」按钮：按一下就在
-          本地把它加一，逼三张表立刻重取，省下等下一次轮询的十几秒。按钮删掉之后令牌
-          就没有生产者了。表格各自照常轮询 —— 持仓 5 秒、委托与成交各 15 秒（见
-          `TraderTables` 里的 `usePolled`），推送在线时还会被 WebSocket 的快照覆盖，
-          所以刷新路径没有丢，只是回到"它自己会更新"。
-        */}
+      {/*
+        E. 表格：参考材料，不是盯盘对象。
+
+        放在**两栏之外、占满整宽** —— 成交表 11 列需要约 1200px，而两栏里的主栏
+        只有 60%（1440px 视口下约 807px），放进去就永远要左右拖动。
+
+        这里**不再传 `refreshToken`**。那个令牌原来只服务于「对账」按钮：按一下就在
+        本地把它加一，逼三张表立刻重取，省下等下一次轮询的十几秒。按钮删掉之后令牌
+        就没有生产者了。表格各自照常轮询 —— 持仓 5 秒、委托与成交各 15 秒（见
+        `TraderTables` 里的 `usePolled`），推送在线时还会被 WebSocket 的快照覆盖，
+        所以刷新路径没有丢，只是回到"它自己会更新"。
+      */}
+      <div className="space-y-4">
         <TraderTables
           traderId={traderId}
           tab={tableTab}
@@ -773,7 +792,7 @@ export function TraderPage() {
             </span>
           </div>
         )}
-      </PageShell>
+      </div>
 
       <StartTraderModal
         trader={trader}
