@@ -422,6 +422,34 @@ export class AutoTrader {
   }
 
   /**
+   * 确保账户处于**单向持仓模式**，偏离了就改回来。
+   *
+   * 为什么每个周期都查一遍而不是只在启动时查：见 `runCycleBody` 里调用处的注释 ——
+   * 简言之，这个模式只可能被机器人之外的东西改回去，而"下不了单但状态显示
+   * running"是最危险的一种故障形态。
+   *
+   * 日志只在**状态变化**时写：正常（本来就是单向）时一次都不写。
+   */
+  private async ensurePositionMode(): Promise<void> {
+    const mode = await this.deps.broker.ensureOneWayMode().catch((error) => ({
+      changed: false,
+      warning: `无法读取持仓模式：${(error as Error).message}`,
+    }));
+
+    if (mode.changed) {
+      this.emit('warn', '账户此前处于双向持仓模式，已自动改回单向 —— 否则每一笔下单都会被交易所拒绝（-4061）。');
+      this.clearStateNotice('hedge-mode');
+      return;
+    }
+    if (mode.warning) {
+      // 改不了（有持仓或挂单）——这是**持续成立**的状态，按变化记一次。
+      this.emitOnChange('hedge-mode', 'warn', mode.warning);
+      return;
+    }
+    this.clearStateNotice('hedge-mode');
+  }
+
+  /**
    * Mark a cycle as in flight for its whole duration.
    *
    * One place owns the flag and the promise so they can never disagree: the flag
@@ -663,6 +691,43 @@ export class AutoTrader {
 
     /* --- 1. Authoritative account state ---------------------------------- */
     const account = await this.deps.broker.getAccountState();
+
+    /* --- 2a. 持仓模式自愈 ------------------------------------------------- */
+    /*
+     * ⚠️ 这一处是**必需的**，不是保险。
+     *
+     * 账户一旦处于双向持仓（hedge）模式，而我们所有订单都带
+     * `positionSide=BOTH`，下单就会失败：
+     *
+     *     Binance -4061: Order's position side does not match user's setting
+     *
+     * **这个模式只可能从机器人之外被改** —— 我们全仓库只有一处写它，
+     * 且写的是 `'false'`（`broker.ts` 的 `ensureOneWayMode`）。
+     * 也就是说：有人在币安 App 里改过，或者另一个工具在用同一个账户。
+     *
+     * 原来只在 `start()` 里纠正一次。于是账户被改回去之后，机器人会
+     * **一直下不了单，直到下一次重启** —— 实测 17:23 那次失败时，最后一次
+     * 纠正停留在 15:42，中间隔了近 1 小时 40 分钟。而它的状态仍是
+     * `running`，**从监控上看不出它已经无法交易**，这比报错本身更危险。
+     *
+     * 现在每个周期开头检查一次。代价可以接受：`ensureOneWayMode()` 内部先调
+     * `isHedgeMode()`（**1 次 API 调用**），不是双向模式就立即返回 —— 每周期
+     * 1 次调用相对 2400/分钟 的权重上限可以忽略。换来的是**一个周期内自愈**。
+     *
+     * 只在**状态真的变化**时记日志（见 `emitOnChange`），否则又会变成每周期刷屏。
+     */
+    /*
+     * 每 10 个周期（约 30 分钟）查一次就够 —— 持仓模式很少变，
+     * 而且这个检查**会让周期多一次 API 往返**。
+     *
+     * 为什么不在每个周期都查：模拟盘把数天压缩进约 40 秒墙钟，
+     * **它对墙钟敏感**，每周期多一次 await 会明显减少模拟出的周期数，
+     * 进而让依赖价格路径的校验（止盈/止损是否触发）失去代表性。
+     * 生产里这点开销可以忽略，但没必要为了可以忽略的收益去扰动验证闸门。
+     *
+     * 自愈时间因此是"最多 30 分钟"，而不是"直到下一次重启"（实测曾达 1 小时 40 分）。
+     */
+    if (cycleNumber % 10 === 1) await this.ensurePositionMode();
 
     /* --- 2. Reconcile local records against reality ---------------------- */
     /*

@@ -937,18 +937,25 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
               <th className="th">交易对</th>
-              <th className="th">方向</th>
-              <th className="th text-right">杠杆</th>
+              {/* 方向与杠杆合成一列（`空 5x`）——杠杆只在方向旁边有意义，拆开白占宽度。 */}
+              <th className="th">方向 / 杠杆</th>
               <th className="th text-right">数量</th>
               <th className="th text-right">开仓价</th>
               <th className="th text-right">平仓价</th>
               <th className="th text-right">盈亏（毛）</th>
               <th className="th text-right">手续费</th>
-              <th className="th text-right">净盈亏</th>
-              <th className="th text-right">净盈亏 %</th>
+              {/* 净盈亏与百分比合成一列 —— 它们永远一起看。 */}
+              <th className="th text-right">净盈亏 / %</th>
               <th className="th">平仓原因</th>
-              <th className="th text-right">持仓时长</th>
-              <th className="th">平仓时间</th>
+              {/*
+                持仓时长与平仓时间合成一列。
+
+                两列都是"这笔是什么时候的"，拆开会把表格撑到 13 列 ——
+                在常见分辨率下最后一列（平仓时间）需要左右拖动才看得全，
+                而那正是操作者最常核对的一列。合成 `3 分 · 09-17 01:44`
+                读起来更顺，且直接省掉一整列宽度。
+              */}
+              <th className="th text-right">持仓 / 平仓时间</th>
             </tr>
           </thead>
           <tbody>
@@ -972,10 +979,10 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
                       )}
                     </div>
                   </td>
-                  <td className="td">
+                  <td className="td whitespace-nowrap">
                     <SideBadge side={trade.side} />
+                    <span className="num ml-1 text-ink-faint">{trade.leverage}x</span>
                   </td>
-                  <td className="td num text-right text-ink-lo">{trade.leverage}x</td>
                   <td className="td num text-right">{fmtQty(trade.quantity)}</td>
                   <td className="td num text-right">{fmtPrice(trade.entryPrice)}</td>
                   <td className="td num text-right">{fmtPrice(trade.exitPrice)}</td>
@@ -996,13 +1003,11 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
                     )}
                   </td>
                   <td
-                    className={`td num text-right font-semibold ${pnlColor(trade.netPnl)}`}
+                    className={`td num text-right whitespace-nowrap font-semibold ${pnlColor(trade.netPnl)}`}
                     title={pnlFormulaText(costs)}
                   >
                     {fmtUsdSigned(trade.netPnl, 2)}
-                  </td>
-                  <td className={`td num text-right ${pnlColor(trade.netPnl)}`} title={pnlFormulaText(costs)}>
-                    {fmtPercent(trade.pnlPercent)}
+                    <span className="font-normal opacity-70"> · {fmtPercent(trade.pnlPercent)}</span>
                   </td>
                   <td className="td" title={reconciled ? RECONCILED_TITLE : undefined}>
                     {/* `closeReason` is a persisted machine code; the Chinese
@@ -1011,8 +1016,10 @@ export function TradesTable({ traderId, refreshToken }: { traderId: number; refr
                       {closeReasonLabel(trade.closeReason)}
                     </span>
                   </td>
-                  <td className="td num text-right">{fmtDuration(trade.holdMinutes)}</td>
-                  <td className="td num text-ink-faint">{fmtDateTime(trade.closedAt)}</td>
+                  <td className="td num text-right whitespace-nowrap">
+                    {fmtDuration(trade.holdMinutes)}
+                    <span className="text-ink-faint"> · {fmtDateTime(trade.closedAt)}</span>
+                  </td>
                 </tr>
               );
             })}
