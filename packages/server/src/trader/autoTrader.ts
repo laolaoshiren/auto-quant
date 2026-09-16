@@ -666,16 +666,43 @@ export class AutoTrader {
 
     /* --- 2. Reconcile local records against reality ---------------------- */
     /*
-     * The ledger pass runs first and unconditionally: it is what recovers a
-     * round-trip that closed while the process was not running, which is the
-     * only way the console's PnL can be trusted to match the account.
+     * ⚠️ **顺序要紧：先按仓位推断原因，再拿成交历史兜底。**
+     *
+     * 这两步都会把"一笔还没入账的回合"记进 `trades`，但**能给出的信息不一样**：
+     *
+     * · `reconcilePositions` 手上有**本地仓位行**，能用 `detectCloseReason()`
+     *   判断这笔到底是触发了止损、止盈，还是模型主动平的；
+     * · `reconcileTradeHistory` 只有交易所的成交记录，判断不出原因，只能记成
+     *   `reconciled`（对账补录）。
+     *
+     * 原来的顺序是历史在前。于是**止损在交易所触发时**：历史那一遍先发现这笔
+     * 未入账的回合、按 `reconciled` 记下；等仓位那一遍再跑，本地仓位已经没了、
+     * 无事可做 —— **真实的平仓原因永远不会被确定**。
+     *
+     * 实测三笔运行中发生的平仓全部记成了「对账补录」
+     * （POWERUSDT / SYNUSDT / LSKUSDT）。这不只是标签不好看：模型的
+     * 「最近平仓」区块看到的是"对账补录"而不是"触发止损"，而那个区块存在的
+     * 意义正是让它把**自己当时的理由**与**实际结果**对上 —— 标签错了，
+     * 学习信号就废了一半。
+     *
+     * 对调**不降低覆盖**，三种情况都验过：
+     *   · 运行中触发止损 → 仓位这一遍定出真实原因；历史那一遍被
+     *     `findDuplicate()` 拦住，不会重复记账。
+     *   · 进程离线期间平仓（没有本地仓位行）→ 仓位这一遍无事可做，
+     *     历史那一遍照旧兜底记 `reconciled`，**行为与以前完全一致**。
+     *   · 完全在两个周期之间开平 → 同上。
+     *
+     * `settleStaleOrders()`（结清陈旧保护单）挂在历史那一遍里，它的注释要求
+     * "仓位先被处理" —— 对调之后这个前提**更强**了，仍然满足。
      */
+    const exchangePositions = await this.deps.broker.getPositions();
+    await this.reconcilePositions(exchangePositions);
+
+    // 历史兜底：只负责"仓位那一遍解释不了"的部分 ——
+    // 进程没在跑的时候发生的平仓。它可能无事可做，这是正常的。
     await this.reconcileTradeHistory(false).catch((error) => {
       log.warn(`[${this.deps.trader.name}] 成交对账失败（不影响本周期交易）：${(error as Error).message}`);
     });
-
-    const exchangePositions = await this.deps.broker.getPositions();
-    await this.reconcilePositions(exchangePositions);
 
     /* --- 3. Mechanical protections --------------------------------------- */
     const closedByGuard = await this.applyDrawdownGuard();
