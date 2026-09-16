@@ -198,7 +198,24 @@ export class AutoTrader {
    * order is either in place or the position has been flattened before `stop()`
    * resolves — which is the state shutdown needs in order to be safe.
    */
-  async stop(reason = '操作员手动停止'): Promise<void> {
+  /**
+   * @param reason 停止原因，写进日志。
+   * @param persist 是否把 `stopped` 写进数据库。
+   *
+   * `persist: false` 是给**进程关闭**用的，不是给"操作员点了停止"用的，
+   * 这个区分很关键：
+   *
+   * `resumePersisted()` 只恢复 `running` / `safe_mode` / `error`，**刻意不恢复
+   * `stopped`** —— 因为那被当作操作员的决定，自动启动它等于代码推翻人。
+   *
+   * 但关闭流程也会走 `stop()`。如果它照样写 `stopped`，那么**每一次部署或重启
+   * 都会把所有机器人变成"操作员手动停止"**，重启后不再恢复 —— 机器人就此静默
+   * 停摆，而控制台上看不出任何异常（状态显示为 stopped，像是有人点过）。
+   *
+   * 这个 bug 真实发生过：加了优雅停机之后，一次部署就静默停掉了正在跑的机器人。
+   * 关闭是进程行为，不是人的决定，所以它不该留下"人的决定"这个痕迹。
+   */
+  async stop(reason = '操作员手动停止', persist = true): Promise<void> {
     this.running = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
@@ -216,7 +233,7 @@ export class AutoTrader {
         `停止时上一轮决策未在时限内结束，可能留下未挂保护单的仓位。请人工核对交易所持仓与挂单。`,
       );
     }
-    this.setStatus('stopped', null);
+    if (persist) this.setStatus('stopped', null);
     this.emit('info', `机器人「${this.deps.trader.name}」已停止（${reason}）`);
   }
 

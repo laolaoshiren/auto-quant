@@ -613,7 +613,17 @@ export class TraderManager {
     await Promise.all(
       [...this.running.entries()].map(async ([id, trader]) => {
         try {
-          await trader.stop(reason);
+          /*
+           * `persist: false` —— 进程关闭不是"操作员点了停止"。
+           *
+           * 若这里照常写入 `stopped`，`resumePersisted()` 会把它当成人的决定而
+           * 拒绝恢复（见那里的注释），于是**每一次部署或重启都会静默停掉所有
+           * 机器人** —— 而且控制台上看起来就像是有人手动停的，没有任何异常提示。
+           * 这个 bug 真实发生过。
+           *
+           * 保留库里的 `running`，下次启动就能恢复。
+           */
+          await trader.stop(reason, false);
         } catch (error) {
           log.warn(`停止机器人 ${id} 失败：${(error as Error).message}`);
         }
