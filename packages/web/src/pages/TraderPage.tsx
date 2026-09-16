@@ -378,23 +378,37 @@ export function TraderPage() {
       </MetricGroup>
 
       <MetricGroup title="交易">
-        <Metric
-          label="胜率"
-          value={stats ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
-          title="winRatePercent 本身就是 0–100 的百分数；盈/亏笔数直接来自后端，不由胜率反推。"
-          sub={
-            stats ? (
+        {/*
+          没有已平仓交易时，**不摆一排零**。
+          
+          原来这里恒定显示 `胜率 0.0%` + `0 盈/0 亏` + `PF 0.00 · 0 笔已平仓` ——
+          对一个从未成交的机器人，四行零占了左栏最显眼的一段，而它们不含任何信息：
+          0% 的胜率和"还没交易过"是完全不同的两件事，前者会让人以为策略很烂。
+          
+          有交易时按原来的三行显示；没有时只说一句实话。
+        */}
+        {stats && stats.totalTrades > 0 ? (
+          <Metric
+            label="胜率"
+            value={`${stats.winRatePercent.toFixed(1)}%`}
+            title="winRatePercent 本身就是 0–100 的百分数；盈/亏笔数直接来自后端，不由胜率反推。"
+            sub={
               <>
                 <WinLossBar wins={wins} losses={losses} />
                 <span>
                   PF {fmtProfitFactor(stats.profitFactor)} · {fmtInt(stats.totalTrades)} 笔已平仓
                 </span>
               </>
-            ) : (
-              '等待统计'
-            )
-          }
-        />
+            }
+          />
+        ) : (
+          <Metric
+            label="已平仓交易"
+            value="尚无"
+            title="这个机器人还没有完成过任何一次开仓—平仓回合，所以胜率与盈亏比都没有意义。"
+            sub={stats ? '完成第一个回合后这里会显示胜率与盈亏比' : '等待统计'}
+          />
+        )}
         <Metric
           label="持仓 / 挂单"
           value={`${fmtInt(openPositionCount)} / ${fmtInt(openOrders.length)}`}
