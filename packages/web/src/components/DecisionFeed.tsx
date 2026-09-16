@@ -32,6 +32,31 @@
  * - **周期头左侧的 3px 结果色条、`成功` 徽章、`N 个候选`**：参考里没有。
  *   结果信息改用一行小字表达（`⚠ 2 条被风控拒绝`），见 `CycleBlock`。
  *
+ * ## 每条决策都必须写出它的**执行结果**（这一版的核心修复）
+ *
+ * 这里原来只认两种执行状态：`rejected`（风控拒绝）与 `failed`（执行抛错），
+ * 而服务端在 `autoTrader.ts` 里还会发 `skipped` —— 单日亏损熔断、安全模式、
+ * 再入冷却、没有行情快照、没有可用价格、本地没有持仓可平。这些条目**一条都不会**
+ * 出现在界面上。
+ *
+ * 后果不是"少显示一行小字"，而是**界面在说假话**：一轮里模型给出
+ * `开空 POWERUSDT`，熔断把它拦了下来，操作者看到的却是一行干干净净的开空提案 ——
+ * 像是在下单，而账户里既没有仓位也没有订单（`LAYOUT.md` §7：文字说的必须是事实）。
+ * 操作者会一直等一个永远不会来的仓位，而"为什么什么都没发生"的答案
+ * （熔断：今日已实现亏损 $0.59，占权益 6.03%）恰恰是这一刻屏幕上最该有的东西。
+ *
+ * 现在**结果挂在决策自己那一行上**（`DecisionOutcome`），四种状态各自可辨：
+ *
+ * | 状态 | 含义 | 呈现 |
+ * | --- | --- | --- |
+ * | `ok` | 真的执行了 | 一个安静的 `✓ 已执行` + 成交金额 |
+ * | `rejected` | 被风控引擎拦下 | `⚠ 被风控拒绝` + 原因 |
+ * | `failed` | 试过，但失败了 | `✕ 执行失败` + 错误 |
+ * | `skipped` | 运行时**决定不动手** | `⊘ 未执行` + 原因 |
+ *
+ * `skipped` 与 `failed` 必须看起来不一样：前者是"我们选择不下这一单"，
+ * 后者是"我们下了，它炸了"。两者混在一起，操作者就没法判断该查配置还是查网络。
+ *
  * ## 顶部那一条"正在请求模型"（`LiveCycleBlock`）
  *
  * 一轮要跑 6.8–18.3 秒，而服务器在**调用模型之前**就已经推了 `cycle_start`。
@@ -102,13 +127,23 @@ import {
   type ReactNode,
 } from 'react';
 import { Link } from 'react-router-dom';
-import { Check, FileText, LoaderCircle, Lock, RotateCw, Sparkles, TriangleAlert } from 'lucide-react';
+import {
+  Ban,
+  Check,
+  FileText,
+  LoaderCircle,
+  Lock,
+  RotateCw,
+  Sparkles,
+  TriangleAlert,
+  X,
+} from 'lucide-react';
 import type { DecisionRecord, Decision, ExecutionLogEntry } from '@aq/shared';
 import { api, type MarketSymbol } from '../lib/api';
 import { selectLiveCycle, useEvents, type LiveCycle } from '../lib/store';
 import { usePolled } from '../lib/hooks';
-import { Empty, Panel, Spinner3, cn } from './ui';
-import { ActionBadge, actionLabel, isOpenAction } from './DecisionAudit';
+import { Badge, Empty, Panel, Spinner3, cn } from './ui';
+import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
 import { fmtInt, fmtLatency, fmtPriceUsd, fmtUsd, timeAgo } from '../lib/format';
 
 /**
@@ -740,13 +775,25 @@ function priceOf(symbols: MarketSymbol[], symbol: string): number | null {
  * 一轮周期：**一行纯文字元数据 + 一个盒子 + 两个纯文字按钮**。
  *
  * 盒子里按顺序排这一轮的每一条决策（扁平行，不再给每条决策套卡片），
- * 然后是执行失败的条目和被风控拒绝的小字说明 —— 后者是操作者判断
- * "风控到底有没有在跑"的唯一依据，必须留在原位、不能被折叠掉
- * （`DECISION-FEED.md` §7）。
+ * **每条决策都带着它自己的执行结果**（见 `DecisionOutcome`）—— 被风控拒绝、
+ * 执行失败、运行时跳过、已执行，四种状态全部落在决策那一行上，一条都不会消失
+ * （`DECISION-FEED.md` §7：拒绝与失败必须仍然可见，并说明原因）。
+ *
+ * `export` 只是为了 SSR 验证脚本能够直接渲染它（`scripts/ssr-decision-feed.tsx`）。
+ * 它在页面里的唯一调用点是下面的 `DecisionFeed`。
  */
-function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: MarketSymbol[] }) {
-  const rejected = record.executionLog.filter((entry) => entry.status === 'rejected');
-  const failed = record.executionLog.filter((entry) => entry.status === 'failed');
+export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: MarketSymbol[] }) {
+  /*
+   * 把执行日志按 `action` + `symbol` 配到各自的决策上。
+   *
+   * 为什么不是 `filter(status === 'skipped')` 那种写法：那样的结果是"结果"与"决策"
+   * 分居盒子上下两处，操作者要把上面的提案和下面的小字自己对起来 ——
+   * 而熔断真正拦下的是**那一条**提案，答案必须写在那一条旁边。
+   */
+  const plan = planExecution(record.executionLog, record.decisions);
+  const skipped = plan.counts.skipped;
+  const rejected = plan.counts.rejected;
+  const failed = plan.counts.failed;
 
   return (
     /*
@@ -786,11 +833,14 @@ function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: Mark
           `record.error === null` 这个条件是必要的：模型调用失败时决策当然是空的，
           但"本周期模型没有给出任何决策"会把一次**失败**说成模型的一次选择（观望），
           而上面那行红字已经说明了真正的原因。
+
+          执行日志也必须为空：一轮可能模型没给出任何决策，却仍然执行了动作
+          （回撤守卫平仓、失败重试），此时说"没有给出任何决策"是把一次**执行**
+          说成了模型的沉默。
         */}
         {record.error === null &&
           record.decisions.length === 0 &&
-          rejected.length === 0 &&
-          failed.length === 0 && (
+          record.executionLog.length === 0 && (
             <p className="text-xs text-ink-faint">本周期模型没有给出任何决策。</p>
           )}
 
@@ -803,27 +853,118 @@ function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: Mark
                 key={`${decision.symbol}-${index}`}
                 decision={decision}
                 price={priceOf(symbols, decision.symbol)}
+                outcome={plan.outcomes[index] ?? null}
               />
             ))}
           </div>
         )}
 
-        {/* 执行失败 / 被风控拒绝：用一行小字说出来，不做成徽章行、不折叠。 */}
-        {failed.length + rejected.length > 0 && (
-          <ul className="mt-2 space-y-1 border-t border-base-850 pt-2">
-            {failed.map((entry, index) => (
-              <LogLine key={`fail-${index}`} entry={entry} />
-            ))}
-            {rejected.map((entry, index) => (
-              <LogLine key={`rej-${index}`} entry={entry} />
+        {/*
+          没有配上任何决策的执行条目。
+
+          正常情况下这里是空的：服务端的每一条执行日志都是**从决策列表里长出来的**
+          （拒绝来自风控对同一批决策的裁决，跳过与执行来自被批准的那几条），
+          所以 `action` + `symbol` 一定能配到一条决策上。
+
+          但"配不上"这件事不能因此就丢掉：老记录、字段被截断的记录、或者别的写入方
+          都有可能留下孤立条目 —— 那正是最需要被看见的一类（静默丢弃 = 又一次
+          让界面说"什么都没发生"）。
+        */}
+        {plan.leftover.length > 0 && (
+          <ul className="mt-2 space-y-1 border-t border-base-800 pt-2">
+            {plan.leftover.map((entry, index) => (
+              <LogLine key={`leftover-${index}`} entry={entry} />
             ))}
           </ul>
         )}
       </div>
 
-      <CycleDetails record={record} rejected={rejected.length} failed={failed.length} />
+      <CycleDetails
+        record={record}
+        counts={{ failed, rejected, skipped }}
+      />
     </article>
   );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  执行日志 → 决策 的配对                                                      */
+/* -------------------------------------------------------------------------- */
+
+/** 一条执行日志配到哪条决策上（`null` = 这条决策在运行时没有任何记录）。 */
+interface ExecutionPlan {
+  /** 与 `decisions` **同下标**：第 i 条决策的结果，`null` 表示没有对应记录。 */
+  outcomes: Array<ExecutionLogEntry | null>;
+  /** 没有配上任何决策的日志条目（防御性兜底，正常为空）。 */
+  leftover: ExecutionLogEntry[];
+  counts: Record<ExecutionLogEntry['status'], number>;
+}
+
+/** 决策与执行日志的配对键。用 `\u0000`：币种符号与动作里都不可能含这个字符。 */
+function pairKey(action: string, symbol: string): string {
+  return `${action}\u0000${symbol}`;
+}
+
+/**
+ * 把执行日志配到决策上。
+ *
+ * ## 为什么需要一个函数、而不是两个 `filter`
+ *
+ * 契约要求"每条决策都写出结果"，而 `executionLog` 是一个**扁平数组**：
+ * 它既没有决策下标，也没有决策 id。唯一稳的对应关系是 `action` + `symbol`。
+ *
+ * ## 同一个币种出现多条决策时怎么办（这是最容易做错的地方）
+ *
+ * 用**队列**而不是查找：策略允许一轮里对同一个币种给出多条决策
+ * （平多之后立刻开空是很常见的组合）。队列的规则是"**先提出的先配上**" ——
+ * 这正是服务端的行为：`rejected` 按 `sortDecisions()` 的顺序推、执行按
+ * `verdict.approved` 的顺序推，两者与 `record.decisions` 是同一个顺序。
+ *
+ * 队列只能一对一占用：同符号的两条决策**不可能**都拿到同一条日志
+ * （那会让一条"被拒"同时写给两条决策，等于凭空多出一次拒绝）。
+ *
+ * 配不上的决策拿到 `null`（界面会明说"运行时没有留下执行记录"），
+ * 配不上的日志进 `leftover`（界面照旧列出来，一条都不丢）。
+ */
+function planExecution(log: ExecutionLogEntry[], decisions: Decision[]): ExecutionPlan {
+  /** 每个配对键下**还没被认领**的日志下标，按出现顺序排队。 */
+  const queue = new Map<string, number[]>();
+  for (let index = 0; index < log.length; index += 1) {
+    const entry = log[index];
+    if (!entry) continue;
+    const key = pairKey(entry.action, entry.symbol);
+    const bucket = queue.get(key);
+    if (bucket) bucket.push(index);
+    else queue.set(key, [index]);
+  }
+
+  const outcomes: Array<ExecutionLogEntry | null> = [];
+  const claimed = new Set<number>();
+  for (const decision of decisions) {
+    const bucket = queue.get(pairKey(decision.action, decision.symbol));
+    // 每认领一条就把它从队列头移走：同一个币种的第二条决策因此拿到**下一条**日志。
+    const index = bucket?.shift();
+    if (index === undefined) {
+      outcomes.push(null);
+      continue;
+    }
+    claimed.add(index);
+    outcomes.push(log[index] ?? null);
+  }
+
+  const counts: Record<ExecutionLogEntry['status'], number> = {
+    ok: 0,
+    rejected: 0,
+    failed: 0,
+    skipped: 0,
+  };
+  for (const entry of log) counts[entry.status] += 1;
+
+  return {
+    outcomes,
+    leftover: log.filter((_, index) => !claimed.has(index)),
+    counts,
+  };
 }
 
 /**
@@ -927,8 +1068,19 @@ function failureCategory(error: string | null): string {
  * 行 1 用 `flex` 而不是 grid：符号与右侧动作徽章分别 `shrink-0`，中间没有需要
  * 分配的空间，`ml-auto` 就够了。徽章必须 `shrink-0` —— `chip` 自带 `whitespace`
  * 无关的 `font-mono`，一旦被压窄，`开多` 两个字会折成两行、把行高顶起来。
+ *
+ * 第四段（`outcome`）是**这一条决策的执行结果**：`null` 表示运行时一条记录都没留下。
+ * 它由 `planExecution` 从 `executionLog` 里配出来，见上面的说明。
  */
-function DecisionRow({ decision, price }: { decision: Decision; price: number | null }) {
+function DecisionRow({
+  decision,
+  price,
+  outcome,
+}: {
+  decision: Decision;
+  price: number | null;
+  outcome: ExecutionLogEntry | null;
+}) {
   const figures = figureParts(decision, price);
 
   return (
@@ -986,10 +1138,103 @@ function DecisionRow({ decision, price }: { decision: Decision; price: number | 
         </p>
       )}
 
-      {/* 风控对这条决策做过的每一次干预。带数字，不是"参数已调整"这种空话。 */}
-      {decision.adjustments.length > 0 && (
-        <ul className="mt-1 space-y-0.5 pl-5">
-          {decision.adjustments.map((note, index) => (
+      {/* 这一条决策在运行时到底发生了什么（含风控干预与命中熔断的原因）。 */}
+      <DecisionOutcome decision={decision} entry={outcome} />
+    </div>
+  );
+}
+
+/**
+ * 一条决策的**执行结果**。
+ *
+ * ## 为什么它必须长在决策行上
+ *
+ * "为什么什么都没发生？"是操作者最常问的问题，而答案几乎总是这条决策被执行阶段
+ * 拦住了 —— 熔断、冷却、安全模式、没有行情、没有持仓可平。这些原因以前一条都
+ * 不显示（只过滤了 `rejected` / `failed`），于是屏幕上只剩一行像是在下单的提案。
+ *
+ * ## 四种状态刻意长得不一样
+ *
+ * - `ok`：安静的 `✓ 已执行` + 成交金额。**不需要抢注意力** —— 真正成交了，
+ *   下面的持仓与成交表会说得更详细。
+ * - `rejected`：`⚠ 被风控拒绝`，黄色。风控引擎在读模型之前的裁决。
+ * - `failed`：`✕ 执行失败`，红色。**试过了**，订单/网络/交易所出了问题，
+ *   这是要人去查的事故。
+ * - `skipped`：`⊘ 未执行`，中性灰。**没有失败，是我们选择不动手** ——
+ *   把它们染成红色会在一次正常的熔断上拉响一次假警报
+ *   （`DESIGN.md`：状态不能只靠颜色表达，图标与文字同样要能区分）。
+ *
+ * ## 没有执行记录时也要说话
+ *
+ * "运行时没有留下执行记录"本身就是一条信息：它意味着这一条决策**没走到执行那一步**
+ * （在解析、风控之前就被丢掉了，或者记录不完整）。留白会让操作者以为"大概是
+ * 在排队执行" —— 而这恰恰是这次要修的那类误读。
+ */
+function DecisionOutcome({
+  decision,
+  entry,
+}: {
+  decision: Decision;
+  entry: ExecutionLogEntry | null;
+}) {
+  /*
+   * 风控对这条决策做过的每一次干预。
+   *
+   * 优先用**执行记录上**的那一份：`ok` 条目才带 `adjustments`
+   * （见 `autoTrader.executeOpen`），它记的是策略真正采用的那组参数。
+   * 记录上没有时退回决策自己带的那一份，这样任何一条现在能看见的干预
+   * 都不会因为这次改动而消失。
+   */
+  const notes = entry?.adjustments?.length ? entry.adjustments : decision.adjustments;
+
+  if (!entry) {
+    return (
+      <div className="mt-1 pl-5 text-xs leading-relaxed text-ink-faint">
+        运行时没有留下这条决策的执行记录 —— 它没有进入执行阶段。
+      </div>
+    );
+  }
+
+  const { key, label, tone } = outcomeBadge(entry.status);
+  /*
+   * 图标与文字一起区分四种状态（`DESIGN.md` §2：不能只靠颜色）。
+   * `rejected` 与 `failed` 刻意用**不同**的图标：两者都是"没成交"，但一个是
+   * 风控的裁决、一个是事故，混用同一个三角感叹号等于把这两件事又合并回去。
+   */
+  const Icon =
+    key === 'ok' ? Check : key === 'rejected' ? TriangleAlert : key === 'failed' ? X : Ban;
+
+  return (
+    <div className="mt-1 min-w-0 pl-5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+        <Badge tone={tone} className="inline-flex shrink-0 items-center gap-1">
+          <Icon aria-hidden className="h-3 w-3 shrink-0" />
+          {label}
+        </Badge>
+        {entry.notionalUsd !== undefined && (
+          <span className="num text-xs text-ink-lo" title="名义价值（USDT）">
+            {fmtUsd(entry.notionalUsd, 2)}
+          </span>
+        )}
+        {entry.orderId && (
+          <span className="num text-xs text-ink-faint" title={`交易所委托号 ${entry.orderId}`}>
+            委托 {entry.orderId}
+          </span>
+        )}
+      </div>
+
+      {/*
+        原因 / 错误：**原样显示服务端写的那句话**（`entry.detail`）。
+        熔断那条本身就是一句完整的中文（`单日亏损熔断：今日已实现亏损 $0.59，
+        占权益 6.03%（上限 5%）。`），改写它只会把数字弄丢 —— 而数字才是重点。
+      */}
+      {entry.detail && (
+        <p className="mt-0.5 break-words text-xs leading-relaxed text-ink-mid">{entry.detail}</p>
+      )}
+
+      {notes.length > 0 && (
+        <ul className="mt-0.5 space-y-0.5">
+          {notes.map((note, index) => (
             <li key={index} className="break-words text-xs leading-relaxed text-warn/90">
               • {note}
             </li>
@@ -998,6 +1243,41 @@ function DecisionRow({ decision, price }: { decision: Decision; price: number | 
       )}
     </div>
   );
+}
+
+/**
+ * 执行状态 → 徽章。**四种状态都必须在这里有名字**。
+ *
+ * 这里的 `switch` 而不是一张 `Record` 表：`executionLog[].status` 是服务端与
+ * `@aq/shared` 共有的四值联合，将来加第五种状态时，`switch` 的穷尽性检查
+ * （`never` 那一支）会直接编译不过 —— 而一张表只会静默地少一个键，
+ * 然后那个状态又会像 `skipped` 这次一样从界面上消失。
+ *
+ * 文案对得上 `DecisionAudit` 的 `STATUS_LABELS`（那三个字是状态码的中文名），
+ * 但**语气是决策流自己的**：`skipped` 在这里叫"未执行"而不是"已跳过" ——
+ * 操作者要判断的是"这一单有没有下出去"，而"跳过"听起来像一件已经发生过的事，
+ * 于是被跳过的那一单看起来就像已经处理完了。
+ */
+function outcomeBadge(status: ExecutionLogEntry['status']): {
+  key: ExecutionLogEntry['status'];
+  label: string;
+  tone: 'up' | 'warn' | 'down' | 'muted';
+} {
+  switch (status) {
+    case 'ok':
+      return { key: status, label: `✓ ${STATUS_LABELS.ok}`, tone: 'up' };
+    case 'rejected':
+      return { key: status, label: `⚠ 被风控拒绝`, tone: 'warn' };
+    case 'failed':
+      return { key: status, label: `✕ 执行失败`, tone: 'down' };
+    case 'skipped':
+      return { key: status, label: `⊘ 未执行（${STATUS_LABELS.skipped}）`, tone: 'muted' };
+    default: {
+      // 穷尽性检查：`status` 只能是上面四种。少写一种，这一行会编译报错。
+      const exhaustive: never = status;
+      return { key: exhaustive, label: status, tone: 'muted' };
+    }
+  }
 }
 
 type FigureKey = 'size' | 'entry' | 'stop' | 'target' | 'reward' | 'leverage';
@@ -1088,19 +1368,22 @@ function CoinIcon({ symbol }: { symbol: string }) {
 }
 
 /**
- * 一条执行记录（失败 / 被风控拒绝），一行小字。
+ * 一条**没有配上决策**的执行记录，一行小字。
  *
- * 保留在盒子里、不折叠：`DECISION-FEED.md` §7 明确要求这些条目仍然可见 ——
- * 它们是操作者判断"风控到底有没有在跑"的证据。一条都不显示，界面会变成
- * "模型很保守"，而事实是"风控拦截了 3 次"。
+ * 正常路径上这个组件不会被调用（见 `CycleBlock` 里 `plan.leftover` 的说明）：
+ * 每一条执行记录现在都挂在它对应的决策行上，连同原因一起。这里保留它，
+ * 是为了让"配不上决策的条目"仍然可见 —— 丢掉它们就等于又一次让界面
+ * 对已经发生过的事情沉默。
+ *
+ * 四种状态全在这里有名字：`skipped` 以前会和 `failed` 一起被当成"执行失败"，
+ * 那是两种完全不同的事件。
  */
 function LogLine({ entry }: { entry: ExecutionLogEntry }) {
-  const mark = entry.status === 'rejected' ? '⚠ 被风控拒绝' : `✕ ${entry.status === 'skipped' ? '已跳过' : '执行失败'}`;
-  const tone = entry.status === 'rejected' ? 'text-warn' : 'text-down';
+  const { label, tone } = logLineStyle(entry.status);
 
   return (
     <li className="flex min-w-0 items-start gap-1.5 text-xs leading-relaxed">
-      <span className={cn('shrink-0', tone)}>{mark}</span>
+      <span className={cn('shrink-0', tone)}>{label}</span>
       <span className="min-w-0 break-words text-ink-lo">
         <span className="num text-ink-mid">
           {actionLabel(entry.action)} {entry.symbol}
@@ -1109,6 +1392,24 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
       </span>
     </li>
   );
+}
+
+/** `LogLine` 的标记与颜色。四种状态各自可辨，见 `outcomeBadge` 的同一条理由。 */
+function logLineStyle(status: ExecutionLogEntry['status']): { label: string; tone: string } {
+  switch (status) {
+    case 'ok':
+      return { label: `✓ ${STATUS_LABELS.ok}`, tone: 'text-up' };
+    case 'rejected':
+      return { label: `⚠ 被风控拒绝`, tone: 'text-warn' };
+    case 'failed':
+      return { label: `✕ 执行失败`, tone: 'text-down' };
+    case 'skipped':
+      return { label: `⊘ 未执行`, tone: 'text-ink-lo' };
+    default: {
+      const exhaustive: never = status;
+      return { label: exhaustive, tone: 'text-ink-lo' };
+    }
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1129,12 +1430,10 @@ type DetailTab = 'cot' | 'prompt';
  */
 function CycleDetails({
   record,
-  rejected,
-  failed,
+  counts,
 }: {
   record: DecisionRecord;
-  rejected: number;
-  failed: number;
+  counts: { failed: number; rejected: number; skipped: number };
 }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<DetailTab>('cot');
@@ -1153,8 +1452,17 @@ function CycleDetails({
   };
 
   const notes: string[] = [];
-  if (failed > 0) notes.push(`${failed} 条执行失败`);
-  if (rejected > 0) notes.push(`${rejected} 条被风控拒绝`);
+  if (counts.failed > 0) notes.push(`${counts.failed} 条执行失败`);
+  /*
+   * `skipped` 也要进这一行。
+   *
+   * 一轮里**全部**决策都被跳过时（`success: true`，熔断或冷却把每一条都拦下），
+   * 周期头那一行看起来和一次正常执行完全一样：`周期 #38 │ in 4,980 · out 210 │ 12.3s`。
+   * 这一行小字是操作者扫视整列时唯一能一眼看出"这一轮什么都没执行"的地方
+   * （§2：这类信息用一行小字表达，不要做成徽章行）。
+   */
+  if (counts.skipped > 0) notes.push(`${counts.skipped} 条未执行`);
+  if (counts.rejected > 0) notes.push(`${counts.rejected} 条被风控拒绝`);
 
   /*
    * 有没有可展开的东西。
@@ -1212,9 +1520,9 @@ function CycleDetails({
         )}
 
         {/*
-          被拒 / 失败在底部也要有一行小字（§2）：按钮这一行是操作者扫视时的落点，
-          而"这一轮被风控拦了 2 条"是必须看见的信息 —— 光看上面的决策列表，
-          被拒的条目没有任何视觉标记。
+          被拒 / 未执行 / 失败在底部也要有一行小字（§2）：按钮这一行是操作者扫视时的落点，
+          而"这一轮被风控拦了 2 条"是必须看见的信息 —— 具体的**原因**在每条决策
+          自己的行上（`DecisionOutcome`），这里只报数量。
         */}
         {notes.length > 0 && (
           <span className="flex items-center gap-1 text-xs text-warn">

@@ -606,6 +606,20 @@ export class SimulatedExchange {
     };
   }
 
+  /**
+   * 挂着的**普通**委托。
+   *
+   * 模拟器只下市价单，而下单即成交 —— 所以这里永远是空的。它必须存在，是因为
+   * `BinanceBroker` 的这个方法被交易循环用来回答"那张单还在不在交易所"：
+   * 少了它，结清过期委托记录时按标的的读取会整体抛错，模拟运行就比现实更容易失败
+   * （同一个道理写在 `placeOrder` 里关于触发价取整的那段注释上）。
+   *
+   * 条件单不走这里，它们在 `getOpenAlgoOrders()`。
+   */
+  async getOpenOrders(): Promise<BinanceOrderResponse[]> {
+    return [];
+  }
+
   async getOpenAlgoOrders(symbol?: string): Promise<BinanceAlgoOrderResponse[]> {
     const rows: BinanceAlgoOrderResponse[] = [];
     for (const position of this.positions.values()) {

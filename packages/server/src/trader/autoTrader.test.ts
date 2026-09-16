@@ -28,7 +28,7 @@ import {
   traders,
   trades as tradeStore,
 } from '../store/repositories.js';
-import { AutoTrader, describeCycleFailure, type DecisionModel } from './autoTrader.js';
+import { AutoTrader, describeCycleFailure, ORDER_SETTLE_GRACE_MS, type DecisionModel } from './autoTrader.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Harness                                                                    */
@@ -149,6 +149,16 @@ class FakeBroker {
   partialFillRatio: number | null = null;
   /** `/fapi/v1/income` events, for funding attribution. */
   income: Array<{ symbol: string; incomeType: string; income: string; time: number }> = [];
+  /**
+   * 挂着的条件单，按算法单号索引。
+   *
+   * 必须有这本账：本文件要验的是"本地行停在 `NEW`、而交易所早就不挂了"这类对账契约，
+   * 而"交易所还挂着什么"正是被验的那一侧。以前这里 `getOpenAlgoOrders()` 恒回空数组，
+   * 于是任何"这张单还在不在"的判断都无从被测到。
+   */
+  private readonly algoOrders = new Map<string, BinanceAlgoOrderResponse>();
+  /** 算法单号只在自己标的下唯一（币安如此），所以查挂单要带上标的。 */
+  private readonly algoSymbol = new Map<string, string>();
   private positions: ExchangePosition[] = [];
   private nextId = 1000;
 
@@ -270,6 +280,9 @@ class FakeBroker {
         updateTime: 0,
         triggerTime: 0,
       };
+      // 挂进"交易所的账"：它就是"这张单还挂着"这个问题的答案来源。
+      this.algoOrders.set(id, raw);
+      this.algoSymbol.set(id, request.symbol);
       return {
         kind: 'algo',
         id,
@@ -336,6 +349,17 @@ class FakeBroker {
 
   async cancelAllOrders(symbol: string) {
     this.cancelledSymbols.push(symbol);
+    /*
+     * 撤单**真的撤掉了** —— 这正是 §2.7 在交易所侧的效果。
+     *
+     * 以前这里只往数组里记一个标的名就完了，于是"本地行还写着 NEW、交易所早就撤了"
+     * 这个状态在测试里根本造不出来。
+     */
+    for (const [id, order] of this.algoOrders) {
+      if (this.algoSymbol.get(id) === symbol && order.algoStatus === 'NEW') {
+        this.algoOrders.set(id, { ...order, algoStatus: 'CANCELED' });
+      }
+    }
   }
 
   async getUserTrades() {
@@ -353,13 +377,71 @@ class FakeBroker {
     return this.markPrice;
   }
 
-  async getOpenAlgoOrders() {
-    return [];
+  /** 交易所挂着的普通委托。这个替身只下市价单，而下单即成交 —— 所以永远是空的。 */
+  async getOpenOrders() {
+    return [] as BinanceOrderResponse[];
+  }
+
+  async getOpenAlgoOrders(symbol?: string) {
+    return [...this.algoOrders.entries()]
+      .filter(([id, order]) => order.algoStatus === 'NEW' && (!symbol || this.algoSymbol.get(id) === symbol))
+      .map(([, order]) => order);
+  }
+
+  /** 回读单张条件单，包括已经不在挂单列表里的（币安就是靠它区分"触发了"和"被撤了"）。 */
+  async getAlgoOrder(algoId: number) {
+    return this.algoOrders.get(String(algoId)) ?? null;
   }
 
   /** Test helper: make the position vanish as if the exchange closed it. */
   simulateExchangeClose(): void {
     this.positions = [];
+  }
+
+  /**
+   * Test helper: 交易所**自己**把仓位平掉了，并顺手撤掉还挂着的保护单。
+   *
+   * `closePosition=true` 的条件单在仓位消失时由交易所一并撤掉（存活的那张标成
+   * `CANCELED`），它不会通知任何人 —— 这正是"本地行停在 NEW"的第三条成因。
+   */
+  simulateExternalClose(): void {
+    this.positions = [];
+    for (const [id, order] of this.algoOrders) {
+      if (order.algoStatus === 'NEW') {
+        this.algoOrders.set(id, { ...order, algoStatus: 'CANCELED' });
+      }
+    }
+  }
+
+  /**
+   * Test helper: 止损真的触发成交。
+   *
+   * 交易所的行为是：触发的那张变成 `FINISHED`（并带上实际成交量与成交价），
+   * 同一仓位上还挂着的兄弟单（止盈）被一并撤掉。仓位没了，而**没有任何一条
+   * 本地订单行被更新过** —— 这就是实盘上 24 行 `NEW` 的来源。
+   *
+   * @returns 触发的那张单的算法单号。
+   */
+  simulateStopFired(filledQty = 1): string {
+    let fired: string | null = null;
+    for (const [id, order] of this.algoOrders) {
+      if (order.algoStatus !== 'NEW') continue;
+      if (order.orderType === 'STOP_MARKET') {
+        fired = id;
+        this.algoOrders.set(id, {
+          ...order,
+          algoStatus: 'FINISHED',
+          actualQty: String(filledQty),
+          actualPrice: String(this.markPrice),
+          triggerTime: Date.now(),
+        });
+      } else {
+        this.algoOrders.set(id, { ...order, algoStatus: 'CANCELED' });
+      }
+    }
+    this.positions = [];
+    if (!fired) throw new Error('没有可触发的止损单：用例的前提没有成立');
+    return fired;
   }
 
   /**
@@ -1223,6 +1305,79 @@ test('an unrealised spike does not permanently trip the drawdown breaker', async
   );
 });
 
+/*
+ * 熔断生效且空仓时**不请求模型**。
+ *
+ * 为什么需要这个测试：熔断原先在步骤 4 检查、到步骤 8 才拦截，中间隔着
+ * "抓 11 个标的的行情 + 构建 5.8 万 token 提示词 + 请求模型"。于是熔断期间
+ * 每个周期都在**付费生成一批注定被丢弃的决策**（实测约 134 万 tokens/小时，
+ * 产出为零，而熔断按"单日"计算，可能持续数小时）。
+ *
+ * 这个测试钉住两件事，缺一不可：
+ *   ① 空仓 + 熔断 → 一次模型调用都不发生；
+ *   ② 未熔断 → 照常调用（否则"跳过"会变成"再也不决策"）。
+ */
+test('熔断生效且空仓时跳过模型请求，未熔断时照常请求', async () => {
+  let calls = 0;
+  const countingModel: DecisionModel = {
+    complete: async () => {
+      calls += 1;
+      return {
+        text: OPEN_LONG_RESPONSE,
+        usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+        latencyMs: 1,
+      };
+    },
+  };
+
+  /* --- ① 未熔断：必须调用 --- */
+  strategyStore.update(traders.get(traderId)!.strategyId, {
+    config: {
+      ...permissiveConfig(),
+      circuitBreaker: {
+        maxDailyLossPercent: 100,
+        maxTotalDrawdownPercent: 100,
+        safeModeAfterFailures: 3,
+        safeModeProbeCycles: 3,
+      },
+    },
+  });
+  await buildTrader(new FakeBroker(), '', countingModel).runOnce();
+  assert.equal(calls, 1, '未熔断时必须照常请求模型');
+
+  /* --- ② 熔断 + 空仓：一次都不能调用 --- */
+  calls = 0;
+  strategyStore.update(traders.get(traderId)!.strategyId, {
+    config: {
+      ...permissiveConfig(),
+      circuitBreaker: {
+        maxDailyLossPercent: 0,
+        maxTotalDrawdownPercent: 5,
+        safeModeAfterFailures: 3,
+        safeModeProbeCycles: 3,
+      },
+    },
+  });
+  // 高水位 1100、账户回到 1000 = 真实 9.1% 回撤，熔断必然生效
+  equityStore.insert({
+    traderId,
+    timestamp: new Date(Date.now() - 60_000).toISOString(),
+    equity: 1100,
+    availableBalance: 800,
+    unrealizedPnl: 0,
+    marginUsed: 0,
+    openPositions: 0,
+    accountEquity: 1100,
+    accountUnrealizedPnl: 0,
+  });
+  const summary = await buildTrader(new FakeBroker(), '', countingModel).runOnce();
+
+  assert.equal(calls, 0, '熔断生效且空仓时不得请求模型 —— 那是注定被丢弃的付费调用');
+  assert.ok(
+    summary.includes('跳过'),
+    `runOnce 的返回值应说明本轮跳过了模型请求，实际是：${summary}`,
+  );
+});
 test('a genuine realised loss still trips the drawdown breaker', async () => {
   /*
    * Companion to the test above, and the reason the watermark fix is not a
@@ -1260,12 +1415,39 @@ test('a genuine realised loss still trips the drawdown breaker', async () => {
   // ...and the broker now reports the baseline 1000, a real 9.1% drawdown.
   await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
 
-  const log = decisionStore
-    .list(traderId)
-    .flatMap((r) => r.executionLog.map((e) => e.detail));
+  /*
+   * 理由可能出现**两处**，取决于熔断在哪一步生效：
+   *
+   *   · 记录的 `error` 字段 —— 熔断生效且空仓时，周期提前返回、根本不再请求
+   *     模型（省掉一次注定被丢弃的付费调用），理由写在 `error` 里；
+   *   · `executionLog` 的 detail —— 熔断生效但**有仓位**时，模型必须继续跑
+   *     （它的决策里可能有平仓），于是理由由风控在拒绝决策时写入。
+   *
+   * 两处都算通过 —— 本测试要保证的是"真实回撤仍然拦住开仓"这件事本身，
+   * 而不是理由恰好写在哪个字段里。
+   */
+  const records = decisionStore.list(traderId);
+  const reasons = records.flatMap((r) => [
+    ...(r.error ? [r.error] : []),
+    ...r.executionLog.map((e) => e.detail),
+  ]);
   assert.ok(
-    log.some((d) => d.includes('总回撤熔断')),
-    `a real drawdown must still block entries, got: ${log.join(' | ')}`,
+    reasons.some((d) => d.includes('总回撤熔断')),
+    `a real drawdown must still block entries, got: ${reasons.join(' | ')}`,
+  );
+
+  /*
+   * 真正断言"被拦住"的是这一条：**不许有任何成功的开仓**。
+   *
+   * 只看理由文字是不够的 —— 理由写对了但订单照样出去，才是真正危险的情况。
+   */
+  const opened = records.flatMap((r) =>
+    r.executionLog.filter((e) => e.status === 'ok' && e.action.startsWith('open_')),
+  );
+  assert.equal(
+    opened.length,
+    0,
+    `熔断期间不得有任何成功开仓，实际有 ${opened.length} 笔：${opened.map((e) => `${e.action} ${e.symbol}`).join(', ')}`,
   );
   assert.equal(positionStore.open(traderId).length, 0, 'no entry may be opened while blocked');
 });
@@ -1795,4 +1977,189 @@ test('describeCycleFailure：每一类失败都给一句可执行的中文说明
   for (const message of [quota, unavailable, badRequest, empty, market, exchange, unknown]) {
     assert.match(message, /^[^：]{2,12}：/, `类别必须写在第一个全角冒号之前：${message}`);
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/*  停在 NEW 的委托行必须被结清                                                */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * 这一组用例针对的显示缺陷：
+ *
+ *   本地 `orders.status` 分布是 `NEW: 24 / FILLED: 19`，而那 24 行的标的**每一个**的
+ *   本地持仓都是 0；同一时刻对实盘账户做签名的只读 `GET /fapi/v1/openOrders` 得到 **0**。
+ *   也就是说撤单本身没问题（交易所在撤），只是**本地那一行从来没有人更新过**
+ *   （`orders.update()` 在这次修复之前没有任何调用点）。后果是「当前委托」里列出十几行
+ *   并不存在的委托 —— 按 §2.7，每一行看起来都像是会朝反方向开出新仓的存活单。
+ *   它其实全是假警报，但一个不能相信的界面和真的出事一样糟。
+ *
+ * 三条成因各有一个用例：触发成交、平仓前撤单、交易所自己撤单；外加一条宽限窗口。
+ */
+
+/**
+ * 把委托行的 `created_at` 推到宽限窗口之前。
+ *
+ * 为什么必须动 SQL：`ORDER_SETTLE_GRACE_MS` 是**生产路径**的一部分，不能为了测试把它
+ * 调小（那测的就不是真实行为了），而"这张单已经挂了一会儿"只能靠改时间戳来造。
+ */
+function ageOrders(forTrader = traderId, symbol?: string): void {
+  const past = new Date(Date.now() - ORDER_SETTLE_GRACE_MS - 60_000).toISOString();
+  if (symbol) {
+    getDb().run('UPDATE orders SET created_at = ? WHERE trader_id = ? AND symbol = ?', past, forTrader, symbol);
+  } else {
+    getDb().run('UPDATE orders SET created_at = ? WHERE trader_id = ?', past, forTrader);
+  }
+}
+
+/** 重新读一行（`list()` 最新在前，这里按 id 找，与顺序无关）。 */
+function orderRow(id: number) {
+  const row = orderStore.list(traderId, 200).find((o) => o.id === id);
+  assert.ok(row, `订单 #${id} 不见了 —— 结清只能改状态，绝不能删行（§2.2）`);
+  return row;
+}
+
+function purposeRow(purpose: 'stop_loss' | 'take_profit') {
+  const row = orderStore.list(traderId, 200).find((o) => o.purpose === purpose);
+  assert.ok(row, `本地没有 ${purpose} 的订单行，用例的前提没有成立`);
+  return row;
+}
+
+test('触发成交的条件单不会停在 NEW：交易所说 FINISHED，本地就写 FILLED', async () => {
+  /*
+   * 成因一：条件单触发成交。平仓发生在交易所，本地行还是 `NEW`。
+   *
+   * 契约：`FINISHED` 必须被翻译成订单状态 `FILLED` —— `orders.status` 是**订单**状态列，
+   * 而控制台的终态集合与中文标签表都不认识 Algo 自己的 `FINISHED`。原样写进去，
+   * 一张已经成交的止损会继续以"已挂单"留在「当前委托」里，缺陷换个状态码重演。
+   *
+   * 同时钉住兄弟单：止盈被交易所一并撤掉，它必须是 `CANCELED`，而不是也变成"成交"。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const stop = purposeRow('stop_loss');
+  const target = purposeRow('take_profit');
+  assert.equal(stop.status, 'NEW', '前提：止损挂上去时是 NEW');
+  assert.equal(target.status, 'NEW');
+
+  const firedId = broker.simulateStopFired(stop.quantity);
+  assert.equal(firedId, stop.exchangeOrderId, '前提：触发的是被验的那张止损');
+
+  // 挂了一会儿之后再走对账（宽限窗口见最后一个用例）。
+  ageOrders();
+  await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+
+  const settledStop = orderRow(stop.id);
+  assert.equal(settledStop.status, 'FILLED', '触发成交的止损必须被结清，而不是停在 NEW');
+  assert.ok(settledStop.filledQty > 0, '交易所报了 actualQty，就该写进成交数量');
+  assert.equal(orderRow(target.id).status, 'CANCELED', '被交易所一并撤掉的兄弟单是已撤销');
+
+  // 这一回合照样要记账（§2.3），结清订单行不影响它。
+  assert.equal(tradeStore.list(traderId).length, 1);
+});
+
+test('平仓时被撤掉的条件单：本地行必须跟着结清（§2.7 的撤单要有回执）', async () => {
+  /*
+   * 成因二：`executeClose()` 在平仓前先 `cancelAllOrders(symbol)`（§2.7）。
+   * 交易所在那一瞬间就撤掉了两张保护单，而本地行一直写着 `NEW`。
+   *
+   * 契约：平仓成功之后那两张单必须是终态（这里是 `CANCELED`），而且**不能**因此多下
+   * 或补撤任何一张单 —— 交易所侧的撤单动作仍然只发生在那一次 `cancelAllOrders()`。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  const stop = purposeRow('stop_loss');
+  const target = purposeRow('take_profit');
+
+  // 保护单是上一轮挂上去的：已经过了宽限窗口。
+  ageOrders();
+  const summary = await buildTrader(broker, CLOSE_LONG_RESPONSE).runOnce();
+  assert.match(summary, /平仓 1/, '前提：这一轮真的平掉了仓位');
+
+  assert.equal(orderRow(stop.id).status, 'CANCELED', '平仓前撤掉的止损必须被结清');
+  assert.equal(orderRow(target.id).status, 'CANCELED', '平仓前撤掉的止盈必须被结清');
+
+  // 交易所侧没有被重挂、也没有被补撤：两轮合起来只有第 1 轮挂过保护单。
+  const conditional = broker.placed.filter(
+    (p) => p.type === 'STOP_MARKET' || p.type === 'TAKE_PROFIT_MARKET',
+  );
+  assert.equal(conditional.length, 2, '结清只是记账，绝不能重新下单或重新撤单');
+  assert.deepEqual(broker.cancelledSymbols, [SYMBOL], '撤单仍然只发生在平仓那一次');
+});
+
+test('交易所自己撤掉的条件单（closePosition 兄弟单）：下一次对账结清', async () => {
+  /*
+   * 成因三：交易所自己撤单。仓位没了之后，`closePosition=true` 的条件单会被交易所一并
+   * 撤掉 —— 更不会通知任何人，这是本地最不可能自己知道的一种。
+   *
+   * 契约：下一遍对账必须把它结清，而且这一回合仍然要记进 `trades`（§2.3）：
+   * 结清订单行与记账是两件事，前者不能顶替后者。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  const stop = purposeRow('stop_loss');
+  const target = purposeRow('take_profit');
+
+  broker.simulateExternalClose();
+  ageOrders();
+  await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+
+  assert.equal(orderRow(stop.id).status, 'CANCELED');
+  assert.equal(orderRow(target.id).status, 'CANCELED');
+  assert.equal(tradeStore.list(traderId).length, 1, '消失的仓位仍然要入账，不能被结清顶替');
+  assert.equal(positionStore.open(traderId).length, 0);
+});
+
+test('刚下的单不会被宽限窗口误判：交易所那一读没报它，也不等于它已经死了', async () => {
+  /*
+   * 宽限窗口存在的唯一理由：挂单列表是一次**读**，而一张单从"我们记下它"到"它出现在
+   * 挂单列表里"之间可能有极短的时延。没有这个下界，一次刚好排在下单之后的读就会把刚挂上
+   * 的保护单判成"已经不在交易所"，在账面上把保护单抹掉 —— 而那正是 §2.6 最怕的状态。
+   *
+   * 契约：**同一份交易所状态**下，只差 `created_at`（宽限期内 / 宽限期外）两种结果。
+   * 这样断言，测的才是窗口本身，而不是别的什么东西。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  const stop = purposeRow('stop_loss');
+
+  // 仓位在交易所消失了（被别的路径平掉），同时两张保护单也已不在挂单列表里 ——
+  // 唯一的不同是这两行刚刚才下出去。
+  broker.simulateExternalClose();
+  await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+  assert.equal(
+    orderRow(stop.id).status,
+    'NEW',
+    '刚下的单必须留在原地：一次没报它说明不了任何事',
+  );
+
+  // 过了宽限窗口，交易所的同一份回答就必须被采纳。
+  ageOrders();
+  await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+  assert.equal(orderRow(stop.id).status, 'CANCELED', '过了宽限期就该结清，否则脏行永远留着');
+});
+
+test('本地还持仓的标的：一行都不碰（那可能是保护单真的没了，不是显示脏了）', async () => {
+  /*
+   * 这一条守的是**修复的边界**，不是显示效果。
+   *
+   * 一个本地还持仓、而交易所挂单列表里没有它的保护单的标的，可能的真相是
+   * 「保护单真的没了」—— §2.6 里最糟糕的状态。把这种情况也顺手结清，等于用一行状态更新
+   * 把一个真实的告警盖掉；而本次修复的授权范围只是"交易所已经不挂了、本地还留着"的显示记账，
+   * 依据是"这个标的本地已经没有持仓"。所以持仓还在时，这里必须一行都不改。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  const stop = purposeRow('stop_loss');
+  const target = purposeRow('take_profit');
+
+  // 保护单在交易所侧消失了（人工撤单 / 别的进程），仓位还在本地。
+  await broker.cancelAllOrders(SYMBOL);
+  ageOrders();
+
+  await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+
+  assert.equal(positionStore.open(traderId).length, 1, '前提：本地仍然持仓');
+  assert.equal(orderRow(stop.id).status, 'NEW', '持仓还在时不得改写订单状态');
+  assert.equal(orderRow(target.id).status, 'NEW');
 });
