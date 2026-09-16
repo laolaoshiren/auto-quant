@@ -36,7 +36,6 @@ import {
   orders as orderStore,
   ownUnrealizedPnlOf,
   positions as positionStore,
-  runtimeLogs,
   tradeEvents,
   traders as traderStore,
   trades as tradeStore,
@@ -218,6 +217,15 @@ export class AutoTrader {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private cycleInFlight = false;
+
+  /**
+   * 每个"状态位"最近一次记下的文案。
+   *
+   * 用于 `emitOnChange()`：状态没变就不再记。键是状态位名（例如 `circuit-breaker`），
+   * 值是上次记的文案 —— 文案变了（例如亏损比例变了）也算变化，会重新记一条，
+   * 这样操作者既不会被重复刷屏，也不会漏掉数值的实质变化。
+   */
+  private stateNotices = new Map<string, string>();
   /**
    * 已经跑过多少次对账。决定这一次是「例行浅对账」还是「全量深对账」。
    *
@@ -360,16 +368,50 @@ export class AutoTrader {
     });
   }
 
+  /**
+   * 记一条属于本机器人的日志。
+   *
+   * ⚠️ **只走 logger 这一条路径**，不要在这里再 `runtimeLogs.write()` 与
+   * `eventBus.publish()` 一次。
+   *
+   * 原来三样都做，而 `log[level]()` 会触发全局 sink（`server.ts` 的
+   * `setLogSink`），sink 同样写库、同样推事件 —— 于是**一条日志变成两条库记录
+   * 加两个前端事件**，界面上同一句话出现两遍。而且两条记录的归属还对不上：
+   * sink 那条 `trader_id = NULL`（并带上 scope 前缀），这里那条才有真实 id。
+   *
+   * 现在把归属通过 `meta` 交给 sink，由它统一落盘与推送：
+   *   · `traderId` —— 这条日志属于哪个机器人
+   *   · `raw`      —— 不带机器人名前缀的原文（stdout 仍用带前缀的版本，
+   *                   数据库与界面里则由 `trader_id` 表达归属，不必重复写名字）
+   */
   private emit(level: 'info' | 'warn' | 'error', message: string): void {
-    log[level](`[${this.deps.trader.name}] ${message}`);
-    runtimeLogs.write(this.deps.trader.id, level, 'trader', message);
-    eventBus.publish({
-      type: 'log',
+    log[level](`[${this.deps.trader.name}] ${message}`, {
       traderId: this.deps.trader.id,
-      level,
-      message,
-      timestamp: new Date().toISOString(),
+      raw: message,
     });
+  }
+
+  /**
+   * 只在**状态发生变化**时记一条，状态没变就不记。
+   *
+   * 用于"每个周期都成立"的状态（熔断生效、候选池被预算裁剪）。它们**每轮都会
+   * 再次成立**，按事件每轮写一次的结果是：日志被同一句话填满，真正的异常被埋掉
+   * —— 一个每轮都响的警告等于没有警告。
+   *
+   * 只在**进入**该状态时记一次；状态解除后再进入会重新记一次（这正是操作者
+   * 需要知道的两个时刻：什么时候开始的、什么时候结束的）。
+   *
+   * `key` 用来区分不同的状态位（同一个机器人可能同时有多条这类状态）。
+   */
+  private emitOnChange(key: string, level: 'info' | 'warn', message: string): void {
+    if (this.stateNotices.get(key) === message) return;
+    this.stateNotices.set(key, message);
+    this.emit(level, message);
+  }
+
+  /** 状态解除：下一次再进入时会重新记一条。 */
+  private clearStateNotice(key: string): void {
+    this.stateNotices.delete(key);
   }
 
   /**
@@ -652,7 +694,16 @@ export class AutoTrader {
       dailyRealizedPnl: tradeStore.realizedPnlToday(traderId),
       highWaterEquity: highWater,
     });
-    if (breaker.blocked) this.emit('warn', breaker.reason);
+    if (breaker.blocked) {
+      // 每轮都成立的**状态**，只在进入时记一次（详见 emitOnChange 的说明）。
+      this.emitOnChange('circuit-breaker', 'warn', breaker.reason);
+    } else {
+      // 解除：先记一条"恢复"，再清掉状态，这样"什么时候恢复的"也有记录。
+      if (this.stateNotices.has('circuit-breaker')) {
+        this.clearStateNotice('circuit-breaker');
+        this.emit('info', '熔断已解除，恢复正常决策。');
+      }
+    }
 
     /* --- 5. Refresh state after the guard's closes ----------------------- */
     const livePositions = await this.deps.broker.getPositions();
