@@ -52,7 +52,7 @@ export function ModelsPage() {
 
       <section>
         <SectionLabel title="怎么用" />
-        <ol className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+        <ol className="grid grid-cols-1 items-start gap-1.5 sm:grid-cols-3">
           {STEPS.map((step, index) => (
             <li
               key={step.title}

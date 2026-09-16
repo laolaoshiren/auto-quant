@@ -514,7 +514,7 @@ function CheckReport({ result }: { result: StrategyCheckResult }) {
       </div>
 
       {/* 双轴读数：模型侧 vs 风控侧 -------------------------------------- */}
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-2">
         <AxisCard
           title="模型侧（调用与解析）"
           Icon={Bot}
@@ -673,7 +673,7 @@ function SampleReport({ sample }: { sample: StrategyCheckSample }) {
         只做决策与风控复核，<span className="font-semibold">绝不下单</span>，也不接触任何交易所凭证。
       </div>
 
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+      <div className="grid grid-cols-2 items-start gap-2 md:grid-cols-4">
         <MiniStat label="候选标的" value={fmtInt(sample.candidateSymbols.length)} />
         <MiniStat label="解析出的决策" value={fmtInt(sample.decisions.length)} />
         <MiniStat label="风控通过（开仓）" value={fmtInt(approvedOpens.length)} tone={approvedOpens.length > 0 ? 'text-up' : undefined} />

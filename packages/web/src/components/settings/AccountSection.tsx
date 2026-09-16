@@ -230,7 +230,7 @@ export function AccountSection() {
               hint="这通常意味着目录接口失败或版本不匹配 —— 先看「数据与日志」里的报错，再重启服务。"
             />
           ) : (
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+            <div className="grid grid-cols-1 items-start gap-2 md:grid-cols-2 xl:grid-cols-3">
               {providers.map((provider) => (
                 <div key={provider.id} className="min-w-0 rounded-md border border-base-750 bg-base-850/40 px-3 py-2">
                   <div className="flex flex-wrap items-center gap-2">

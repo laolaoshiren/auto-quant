@@ -697,7 +697,7 @@ export function AiModelsSection() {
         }
       >
         <div className="space-y-3">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
             <Field
               label="供应商"
               hint={descriptor ? (descriptor.openAiCompatible ? 'OpenAI 兼容 API' : `原生 ${descriptor.authStyle} 鉴权`) : undefined}
@@ -1080,7 +1080,7 @@ function AdvancedSettings({
           </p>
         )}
 
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
           <Field label="温度" hint="越低越确定 — 交易场景建议调低。">
             <NumberInput
               className="text-right"

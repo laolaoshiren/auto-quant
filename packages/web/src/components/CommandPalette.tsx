@@ -430,7 +430,7 @@ function ConfirmStep({
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
         {pending.kind === 'start' ? (
           <>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-2">
               <button
                 type="button"
                 onClick={() => onDryRunChange(true)}
