@@ -48,7 +48,7 @@ jobs:
       # 这一步不需要 issues: write —— 它只有在需要**创建**标签时才用得上，
       # 而本仓库用到的标签都已经存在。少了这个权限也就少了一条写入路径。
       - name: 按改动路径打标签
-        uses: actions/labeler@v5
+        uses: actions/labeler@v7
         with:
           # 保持默认的 false。开启 sync-labels 后，改动不再匹配某条规则时标签会被自动摘掉；
           # 但"这次改动不再碰风控"不等于"这条 PR 与风控无关"，摘掉人工判断过的标签

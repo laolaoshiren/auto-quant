@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/stale@v9
+      - uses: actions/stale@v11
         with:
           # --- 时间 ------------------------------------------------
           # 90 天无活动才标记。任何新评论都会重新计时（见下面的 remove-stale-when-updated）。
