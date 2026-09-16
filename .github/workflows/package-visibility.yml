@@ -54,11 +54,23 @@ jobs:
         run: |
           set -euo pipefail
           owner='${{ github.repository_owner }}'
-          echo "### 包可见性" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          gh api "/users/$owner/packages/container/auto-quant" \
-            --jq '"当前：`\(.visibility)`（仓库关联：\(.repository.full_name // "未关联")）"' \
-            >> "$GITHUB_STEP_SUMMARY" || echo "读取失败" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### 包可见性"
+            echo ""
+            echo "本仓库拥有者名下的容器包："
+            echo ""
+            echo '```'
+            # 先把真实存在的包名打出来。硬编码包名曾经导致 404，
+            # 而 404 既可能是"名字不对"也可能是"令牌看不到"——
+            # 列出实际内容能立刻区分这两种情况。
+            gh api "/users/$owner/packages?package_type=container&per_page=100" \
+              --jq '.[] | "\(.name)  visibility=\(.visibility)  repo=\(.repository.full_name // "未关联")"' \
+              2>&1 || echo "(列出失败)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # 同时打到日志里，这样不用下载 artifact 也能看到
+          gh api "/users/$owner/packages?package_type=container&per_page=100" \
+            --jq '.[] | "\(.name)  \(.visibility)"' 2>&1 || true
 
       - name: 修改为 ${{ inputs.visibility }}
         env:
@@ -67,9 +79,16 @@ jobs:
           set -euo pipefail
           owner='${{ github.repository_owner }}'
           target='${{ inputs.visibility }}'
+          pkg='auto-quant'
 
-          # 用 PATCH 而不是 PUT：这是局部更新，且只在值不同的时候才真的改动。
-          if gh api -X PATCH "/users/$owner/packages/container/auto-quant" \
+          # 先确认这个包确实存在，避免把一次 404 误读成权限问题。
+          if ! gh api "/users/$owner/packages?package_type=container&per_page=100" \
+                 --jq '.[].name' 2>/dev/null | grep -qx "$pkg"; then
+            echo "::error::拥有者名下找不到名为 $pkg 的容器包。上面的列表里有实际存在的包名。"
+            exit 1
+          fi
+
+          if gh api -X PATCH "/users/$owner/packages/container/$pkg" \
                -f "visibility=$target" --jq '"→ 已设为 `\(.visibility)`"'; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "已设为 **$target**。" >> "$GITHUB_STEP_SUMMARY"
