@@ -964,6 +964,61 @@ test('运行期已记账的回合，对账不得再插一行（重复记账 = �
   );
 });
 
+/*
+ * 运行中触发止损：平仓原因必须是「触发止损」，不能是「对账补录」。
+ *
+ * 为什么需要这个测试 —— 实盘上三笔在机器人**运行中**发生的平仓
+ * （POWERUSDT / SYNUSDT / LSKUSDT）全部被记成了 `reconciled`。
+ *
+ * 原因是周期里两步对账的顺序：`reconcileTradeHistory` 跑在前面，它只有交易所的
+ * 成交记录、判断不出原因，就先按 `reconciled` 记下了；等 `reconcilePositions`
+ * 再跑，本地仓位已经没了、无事可做 —— 真实原因永远不会被确定。
+ *
+ * 为什么这不只是标签问题：模型的「最近平仓」区块看到的是"对账补录"而不是
+ * "触发止损"，而那个区块存在的意义正是让它把**自己当时的理由**与**实际结果**
+ * 对上。标签错了，学习信号就废了一半。
+ *
+ * 必须跑**完整周期**，不能用 `runReconcile()` —— 后者只调 `reconcileTradeHistory`，
+ * 测不到两步之间的顺序（这正是本用例要钉的东西）。
+ */
+test('运行中触发止损：平仓原因是「触发止损」而不是「对账补录」', async () => {
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const open = positionStore.open(traderId)[0]!;
+  assert.ok(open, '前提：已开出一笔仓位');
+  assert.equal(tradeStore.list(traderId).length, 0, '前提：这一回合运行期还没记账');
+
+  // 止损在交易所触发成交，同仓位的止盈被交易所一并撤掉；本地订单行无人更新。
+  broker.simulateStopFired(open.quantity);
+  /*
+   * 同时喂一份交易所成交历史 —— 这是实盘的常态：`reconcileTradeHistory` 每次
+   * 都会去拉它。只有把两个数据源都摆出来，才测得出"谁先谁后"。
+   */
+  feedRoundTrip(broker, {
+    localQuantity: open.quantity,
+    exchangeQuantity: open.quantity,
+    entryOrderId: '1000',
+    exitOrderId: '1003',
+    entryTime: Date.parse(open.opened_at),
+    exitTime: Date.parse(open.opened_at) + 240_000,
+    entryPrice: open.entry_price,
+    exitPrice: open.entry_price - 50,
+    grossPnl: -0.18,
+  });
+
+  // 完整周期：里面依次跑 reconcilePositions 与 reconcileTradeHistory。
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  const rows = tradeStore.list(traderId);
+  assert.equal(rows.length, 1, '恰好一行 —— 两步对账不得各记一条');
+  assert.equal(
+    rows[0]!.closeReason,
+    'stop_loss',
+    `运行中触发止损必须保住真实原因，实际是 ${rows[0]!.closeReason}。` +
+      '若这里变成 reconciled，说明两步对账的顺序又反了 —— 见 runCycleBody 步骤 2 的注释。',
+  );
+});
 test('运行期确实没记的回合，对账必须补录（#4 POWERUSDT 那种）', async () => {
   /*
    * Why this test exists —— 它是上一个用例的**反面**，用来防止"把对账修坏"。
