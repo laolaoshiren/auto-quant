@@ -369,7 +369,9 @@ function DecisionCard({ decision, price }: { decision: Decision; price: number |
   return (
     <div
       className={cn(
-        'min-w-0 rounded-md border border-base-750 border-l-2 bg-base-850/50 px-3 py-2',
+        // `@container`：让卡片内部按**卡片自己的宽度**取断点，而不是视口宽度。
+        // 见 DecisionMetrics 里的说明 —— 那是"数字挤成一团"的根因。
+        'decision-card min-w-0 rounded-md border border-base-750 border-l-2 bg-base-850/50 px-3 py-2',
         ACTION_STRIPE[decision.action] ?? 'border-l-base-600',
       )}
     >

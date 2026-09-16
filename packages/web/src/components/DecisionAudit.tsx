@@ -135,7 +135,25 @@ export function DecisionMetrics({ decision, price }: { decision: Decision; price
       : null;
 
   return (
-    <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1.5 rounded-md border border-base-800 bg-base-850/40 px-3 py-2 sm:grid-cols-3">
+    /*
+     * ⚠️ 断点必须用**容器查询**（`@[..]`），不能用 `sm:` 这类视口断点。
+     *
+     * 这里原来写的是 `grid-cols-2 sm:grid-cols-3`。`sm:` 看的是**视口宽度**，
+     * 于是在 2192px 的屏幕上它强制 3 列 —— 可这张卡片本身只有约 270px 宽
+     * （决策卡在 2xl 下排 3 列，右栏又只占 40%）。每列约 75px，
+     * 装不下 `0.176800` 加上 `+26.67%`，于是文字互相挤压、飘到相邻列里：
+     *
+     *     数量        开仓价格    止损
+     *     （USDT）    0.176800   0.174000 -1.58%
+     *     $30.00
+     *     止盈        风险回报    杠杆
+     *     0.190000   1:4.71      5x
+     *     率.47%   ← 从上一格挤过来的
+     *
+     * 现在按**卡片自身宽度**决定列数：窄卡两列、够宽才三列。
+     * 父级 `DecisionCard` 上有 `@container`，这是 Tailwind 3.4 的内置能力。
+     */
+    <div className="decision-metrics mt-2 rounded-md border border-base-800 bg-base-850/40 px-3 py-2">
       <Metric label="数量（USDT）" value={`${fmtUsd(decision.positionSizeUsd, 2)}`} />
       <Metric label="开仓价格" value={price !== null ? fmtPriceShort(price) : '—'} />
       <Metric
@@ -172,11 +190,18 @@ function Metric({ label, value, tone, suffix }: { label: string; value: string; 
         去掉后标签可能折成两行，但**两行也比看不懂强**。卡片高度自适应，不会错位。
       */}
       <div className="text-xs leading-tight text-ink-faint">{label}</div>
-      {/* nowrap: a wrapped price in a dense grid reads as two different numbers. */}
-      <div className={`num whitespace-nowrap text-base ${tone ?? 'text-ink-hi'}`}>
-        {value}
-        {suffix && <span className="ml-1 text-xs text-ink-faint">{suffix}</span>}
-      </div>
+      {/*
+        数值与百分比**分两行**，不并排。
+        
+        原来它们并排（`whitespace-nowrap` + `ml-1`），于是 `0.235600` 加 `-1.48%`
+        需要 102px —— 而一张 255px 的卡片分成两列后，每格只有 93px，**必然溢出**，
+        文字挤进相邻格（截图里那个飘到别处的 `率.47%` 就是这么来的）。
+        
+        价格是 4–6 位小数的等宽数字，本身就宽；把百分比折到下一行，
+        任何卡片宽度下都不会溢出，而且"价格 / 变动"分行读也更清楚。
+      */}
+      <div className={`num text-base leading-tight ${tone ?? 'text-ink-hi'}`}>{value}</div>
+      {suffix && <div className="num text-xs leading-tight text-ink-faint">{suffix}</div>}
     </div>
   );
 }
