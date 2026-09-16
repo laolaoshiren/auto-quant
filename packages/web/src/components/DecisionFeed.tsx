@@ -1381,14 +1381,27 @@ function CoinIcon({ symbol }: { symbol: string }) {
 function LogLine({ entry }: { entry: ExecutionLogEntry }) {
   const { label, tone } = logLineStyle(entry.status);
 
+  /*
+   * `skip_cycle` 是**整轮被跳过**的通知，不属于任何标的。
+   *
+   * 它没有真实的 action / symbol 可显示 —— 硬拼出来只会得到
+   * `skip_cycle — — <说明>`：一个没登记标签的机器码、一个占位破折号，
+   * 再加一个分隔符破折号。而 `detail` 已经把话说完（为什么跳过、什么时候恢复），
+   * 所以这类条目直接给说明。见 `AGENTS.md` §5.2：机器码可以是英文，
+   * **但面向操作员的文本必须走中文标签**，不能把机器码原样显示出来。
+   */
+  const isCycleNotice = entry.action === 'skip_cycle';
+
   return (
     <li className="flex min-w-0 items-start gap-1.5 text-xs leading-relaxed">
       <span className={cn('shrink-0', tone)}>{label}</span>
       <span className="min-w-0 break-words text-ink-lo">
-        <span className="num text-ink-mid">
-          {actionLabel(entry.action)} {entry.symbol}
-        </span>
-        {entry.detail ? ` — ${entry.detail}` : ''}
+        {!isCycleNotice && (
+          <span className="num text-ink-mid">
+            {actionLabel(entry.action)} {entry.symbol}
+          </span>
+        )}
+        {entry.detail ? `${isCycleNotice ? '' : ' — '}${entry.detail}` : ''}
       </span>
     </li>
   );
