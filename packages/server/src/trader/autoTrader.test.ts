@@ -29,7 +29,13 @@ import {
   trades as tradeStore,
   tradeEvents,
 } from '../store/repositories.js';
-import { AutoTrader, describeCycleFailure, ORDER_SETTLE_GRACE_MS, type DecisionModel } from './autoTrader.js';
+import {
+  AutoTrader,
+  describeCycleFailure,
+  makeClientId,
+  ORDER_SETTLE_GRACE_MS,
+  type DecisionModel,
+} from './autoTrader.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Harness                                                                    */
@@ -981,6 +987,38 @@ test('运行期已记账的回合，对账不得再插一行（重复记账 = �
  * 必须跑**完整周期**，不能用 `runReconcile()` —— 后者只调 `reconcileTradeHistory`，
  * 测不到两步之间的顺序（这正是本用例要钉的东西）。
  */
+/*
+ * 下单用的 clientOrderId 必须是币安接受的字符集。
+ *
+ * 实测故障：
+ *
+ *     open_long 龙虾USDT 执行失败：
+ *     Binance -1100: Illegal characters found in parameter 'newclientorderid'
+ *
+ * 交易所的标的列表里有**中文名的币**，而 id 由 `prefix-symbol-stamp-random`
+ * 拼成 —— 中文被原样带进去，下单直接失败，而且**每个周期都会再失败一次**
+ * （策略会反复选中它）。
+ *
+ * 币安接受的是 `^[.A-Z:/a-z0-9_-]{1,36}$`，所以这里同时钉住三件事：
+ *   ① 任何标的（含中文、含超长）产出的 id 都合法且不超 36 字符；
+ *   ② 唯一性后缀不被截断挤掉 —— 撞 id 会让两笔订单在账目上无法区分，
+ *      比下单失败更危险；
+ *   ③ 同一毫秒内连续生成不重复。
+ */
+test('clientOrderId 对中文与超长标的都合法、唯一且不超 36 字符', () => {
+  const legal = /^[.A-Z:/a-z0-9_-]{1,36}$/;
+
+  for (const symbol of ['龙虾USDT', '1000SATSUSDT', 'BTCUSDT', '龙虾', 'A'.repeat(40)]) {
+    const id = makeClientId('stop_loss', symbol);
+    assert.ok(legal.test(id), `「${symbol}」产出的 id 非法：${id}`);
+    assert.ok(id.length <= 36, `「${symbol}」产出的 id 超过 36 字符：${id}`);
+  }
+
+  // 唯一性：同一毫秒内连续生成不得重复（后缀没被截断才会成立）。
+  const ids = new Set<string>();
+  for (let i = 0; i < 50; i += 1) ids.add(makeClientId('entry', 'BULLAUSDT'));
+  assert.equal(ids.size, 50, '同一毫秒内生成的 id 出现重复 —— 唯一性后缀被截断了');
+});
 test('运行中触发止损：平仓原因是「触发止损」而不是「对账补录」', async () => {
   const broker = new FakeBroker();
   await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
