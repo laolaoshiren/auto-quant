@@ -48,7 +48,6 @@ export const CoinSourceConfigSchema = z.object({
   /** OI growth is measured over this window (hours). */
   oiTopWindowHours: z.number().int().min(1).max(24).default(4),
 });
-export type CoinSourceConfig = z.infer<typeof CoinSourceConfigSchema>;
 
 /* -------------------------------------------------------------------------- */
 /*  Indicators                                                                 */
@@ -73,7 +72,6 @@ export const KlineConfigSchema = z.object({
    */
   primaryCount: z.number().int().min(10).max(1000).default(60),
 });
-export type KlineConfig = z.infer<typeof KlineConfigSchema>;
 
 export const IndicatorConfigSchema = z.object({
   kline: KlineConfigSchema.default({}),
@@ -164,7 +162,6 @@ export const ThrottleConfigSchema = z.object({
   /** Entry orders allowed per rolling hour. */
   maxEntriesPerHour: z.number().int().min(1).max(60).default(6),
 });
-export type ThrottleConfig = z.infer<typeof ThrottleConfigSchema>;
 
 export const CircuitBreakerConfigSchema = z.object({
   /** Halt new entries once the day's realised loss exceeds this (% of equity). */
@@ -176,7 +173,6 @@ export const CircuitBreakerConfigSchema = z.object({
   /** While in safe mode, wait this many cycles before probing the model again. */
   safeModeProbeCycles: z.number().int().min(1).max(100).default(3),
 });
-export type CircuitBreakerConfig = z.infer<typeof CircuitBreakerConfigSchema>;
 
 /* -------------------------------------------------------------------------- */
 /*  Prompt sections — the strategy itself                                      */

@@ -153,7 +153,7 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 
 ## 3. 命令表
 
-根 `package.json` 的脚本就是下面这 10 条，没有更多。它们全是对各 workspace 脚本的转发：
+根 `package.json` 的脚本就是下面这 13 条，没有更多。它们全是对各 workspace 脚本的转发：
 
 | 命令 | 实际执行 | 什么时候用 |
 | --- | --- | --- |
@@ -167,6 +167,9 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 | `npm run demo` | `tsx packages/server/src/scripts/demoCycle.ts` | 往**真实数据库**写入一轮带 `[DEMO]` 前缀的完整决策审计数据，让控制台的审计界面立刻有东西可看。加 `--clean` 清除 |
 | `npm run sim` | `tsx packages/server/src/scripts/simulate.ts` | **完整交易生命周期模拟**：真实历史 K 线回放 + 会真正触发止损止盈的模拟交易所 + 脚本化模型，80 轮，15 项校验（**当前实测 15/15 全通过**）。写临时数据库 |
 | `npm run sim:live` | `tsx packages/server/src/scripts/simulate.ts --live --loose --cycles 12` | 同上，但模型换成**真实 LLM**（需要 `SIM_LLM_KEY`），策略放宽（`--loose`）以便真的有可能下单 |
+| `npm run notices` | `node scripts/generate-notices.mjs` | 重新生成 `THIRD-PARTY-NOTICES.md`。**改过任何依赖之后必须跑**——CI 会校验产物与当前依赖一致，不一致就红 |
+| `npm run check:links` | `node scripts/check-links.mjs` | 检查文档里的**站内链接**是否都解析得到（外链不查，别人家站点挂了不该让本项目变红）。改过文档路径/标题就跑一次 |
+| `npm run ui:smoke` | `node scripts/ui-smoke.mjs` | 用真实浏览器把每个页面打开一遍，抓运行时报错、白屏、横向滚动条。（需要先有 `packages/web/dist` 且服务在跑；用本机 Chrome/Edge，不下载浏览器） |
 
 各脚本自己的参数（本文不重复，脚本头部注释写得很细）：
 
@@ -244,7 +247,9 @@ ERROR [trader] 为 BTCUSDT 挂 止盈（触发价 79033.592）失败：
 
 ### 当前规模（实测）
 
-全量 `npm test`：**194 个用例，全部通过，约 0.36 秒**。
+全量 `npm test`：**全部用例通过**。用例数**以命令自己打印的 `# tests` 为准，不要手写在这里** ——
+它一直在长（同一棵树上的真实观测：194 → 199 → 280），写死必然过时。
+下表的"用例数"同理，只是量级参考：它是长期存在的那些套件，新增套件不一定会及时补进来。
 
 | 测试文件 | 用例数 | 覆盖什么 |
 | --- | --- | --- |
@@ -254,11 +259,12 @@ ERROR [trader] 为 BTCUSDT 挂 止盈（触发价 79033.592）失败：
 | `risk/engine.test.ts` | 27 | 风控每一条限制与钳制方向、回撤守卫、熔断器 |
 | `market/indicators.test.ts` | 16 | 指标数学（Wilder RSI/ATR 参考值、EMA 种子、MACD 对齐） |
 | `binance/account.test.ts` | 10 | 账户字段映射（尤其是 `walletBalance` 这种拼写陷阱） |
-| `trader/roundTrips.test.ts` | 10 | 从成交历史重建回合、手续费双侧累计、匹配键 |
-| `trader/autoTrader.test.ts` | 7 | 交易循环集成（真实 SQLite 临时库 + 假的 broker/model） |
+| `trader/roundTrips.test.ts` | 12 | 从成交历史重建回合、手续费双侧累计、匹配键 |
+| `trader/autoTrader.test.ts` | 15 | 交易循环集成（真实 SQLite 临时库 + 假的 broker/model） |
 | `store/stats.test.ts` | 7 | 统计口径（净盈亏分类、胜率、利润因子） |
 | `binance/income.test.ts` | 6 | 收入流水分页与汇总、资金费归属窗口 |
 | `strategy/prompt.test.ts` | 6 | 提示词组装与 token 预算估算 |
+| `api/serialize.test.ts` | 5 | `publicAccount()`：密钥必须被剥掉，其余字段原样透传 |
 
 ### 新贡献者必须遵守的约定
 
@@ -532,7 +538,7 @@ and is on the path of every order."*
 
 ```bash
 npm run typecheck   # 必须 0 退出
-npm test            # 必须全绿（当前 194 个用例）
+npm test            # 必须全绿（用例数看它自己打印的 `# tests`）
 npm run build       # 改了前端就必须跑；它会编译 packages/web 到 dist
 ```
 

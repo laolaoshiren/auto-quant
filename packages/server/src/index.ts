@@ -130,6 +130,16 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log.info(`收到 ${signal} 信号，正在关闭`);
     try {
+      /*
+       * `stopAll` waits for any cycle still in flight before returning.
+       *
+       * This is the whole point of the ordering: an entry can be filled and its
+       * stop not yet placed, and exiting at that instant leaves the account with
+       * an unprotected leveraged position (a breach of the "every entry has
+       * exchange-side protection" invariant) that nothing will ever fix, because
+       * the timer is gone too. The wait is bounded inside `stop()`, so a wedged
+       * exchange call delays shutdown rather than hanging it permanently.
+       */
       await manager.stopAll(signal);
       await app.close();
     } finally {

@@ -54,17 +54,6 @@ export function fmtAsset(
   return `${amount} ${asset?.trim() || DEFAULT_SETTLE_ASSET}`;
 }
 
-/** Signed asset amount — `+15.50 USDT`, sign never implied. */
-export function fmtAssetSigned(
-  value: number | null | undefined,
-  asset: string | null | undefined,
-  digits = 2,
-): string {
-  if (!isNum(value)) return '—';
-  const sign = value > 0 ? '+' : value < 0 ? '-' : '';
-  return `${sign}${fmtNum(Math.abs(value), digits)} ${asset?.trim() || DEFAULT_SETTLE_ASSET}`;
-}
-
 /** Unsigned magnitude, for labels that already say `未实现`. */
 export function fmtSigned(
   value: number | null | undefined,
@@ -168,11 +157,6 @@ export function fmtProfitFactor(value: number | null | undefined): string {
   return value.toFixed(2);
 }
 
-export function shortId(id: string | null | undefined, keep = 8): string {
-  if (!id) return '—';
-  return id.length <= keep ? id : `${id.slice(0, keep)}…`;
-}
-
 /** Coarse relative time, good enough for a status line. */
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return '从未';
@@ -184,18 +168,6 @@ export function timeAgo(iso: string | null | undefined): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
   if (seconds < 86_400) return `${Math.floor(seconds / 3600)} 小时前`;
   return `${Math.floor(seconds / 86_400)} 天前`;
-}
-
-/** Unicode sparkline, used for tiny inline equity trends. */
-export function sparkline(values: number[]): string {
-  if (values.length === 0) return '';
-  const blocks = '▁▂▃▄▅▆▇█';
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const span = max - min || 1;
-  return values
-    .map((value) => blocks[Math.min(blocks.length - 1, Math.floor(((value - min) / span) * (blocks.length - 1)))] ?? '▁')
-    .join('');
 }
 
 export function sideLabel(side: string): string {

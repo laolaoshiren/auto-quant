@@ -4,7 +4,11 @@
 
 - **基地址**：`http://<HOST>:<PORT>`（默认 `127.0.0.1:27137`）
 - **认证**：除 `/api/health` 与 `/api/auth/login` 外，全部需要
-  `Authorization: Bearer <token>`
+  `Authorization: Bearer <token>`。**只有 `/api/events` 的 WebSocket 升级**
+  接受 `?token=`（浏览器无法给升级请求设 header）；HTTP 路由只认请求头，
+  因为 URL 会落进反向代理日志、浏览器历史与 `Referer`。
+- **会话有效期**：**12 小时**。改密码或改用户名会**立即作废该账户此前签发的所有令牌**
+  （见下），不需要等过期。
 - **内容类型**：请求体为 JSON。服务端注册了一个兜底解析器，所以**空 body 的 POST**
   （如 `/start`、`/stop`、`/run-once`）不会返回 415。
 
@@ -35,7 +39,7 @@
 
 ### `GET /api/health` — 健康检查
 
-无需认证。用于部署校验与存活探测。
+无需认证。用于部署校验与存活探测。**它现在是决策新鲜度检查，不只是"进程还活着"。**
 
 ```json
 {
@@ -46,9 +50,39 @@
   "dryRun": false,
   "tradingDisabled": false,
   "environment": "production",
-  "db": "/opt/autoquant/data/autoquant.sqlite"
+  "db": "autoquant.sqlite",
+  "staleTraders": [],
+  "runningTraders": 2
 }
 ```
+
+**状态码**：只要有**正在运行**的机器人超过了它的决策新鲜度阈值，就返回 **503**
+（响应体形状相同，另加一个 `reason` 字段说明是哪个环节）。这不是可有可无的细节 ——
+`Dockerfile` 与 `deploy/docker-compose.yml` 的 `HEALTHCHECK` 都只以这个端点为判据，
+而它原来无条件返回 `{ok: true}`：一个决策循环已经挂死、或者事件循环被同步 SQLite
+调用堵住的进程，在编排器看来永远健康 —— 不告警、不重启，而账户上可能还挂着仓位。
+
+判定规则（**只有 `status = 'running'` 的机器人参与**）：
+
+| 情形 | 结果 |
+| --- | --- |
+| 距离上一轮决策结束 < `max(周期 × 2, 300s)` | 健康 |
+| 超过该阈值 | **503**，并在 `staleTraders` 里列出 |
+| 已启动但还没跑完第一轮，且启动未满阈值 | 健康（冷启动宽限） |
+| 已启动但还没跑完第一轮，且已超过阈值 | **503**，`awaitingFirstCycle: true` |
+| `stopped` / `safe_mode` / `error` / `starting` | **不影响状态码** |
+
+阈值的取法见 `packages/server/src/api/server.ts` 的 `STALE_CYCLE_MULTIPLIER` 与
+`STARTUP_GRACE_MS`；简单说：`last_cycle_at` 只在**一轮结束**时写入，所以 1 倍周期
+必然产生假警报（每轮都会短暂越线），2 倍才是"连续两轮都没跑完"；
+300 秒是下界，避免冷启动时编排器在不该重启的时候重启容器。
+
+> 暂停（`safe_mode`）与已停止的机器人**不会**让这个端点变红。
+> 把"被刻意停下"算成"不健康"会让一个正常的实例在编排器眼里永远是坏的。
+
+> `db` 只是**文件名**，不是路径。这个端点无需认证，所以不能借它公布
+> 部署目录布局（操作系统、部署根目录、数据目录名都是给后续攻击挑目标的线索）。
+> 控制台「操作员账户」页把它当作「连的是哪个库」的提示来显示。
 
 > `environment` 是 **`production`** 还是 **`demo`** 值得每次部署后确认一次：
 > 两者界面完全一样，配置错了不会报错，只会让交易跑到错误的环境上。
@@ -56,6 +90,29 @@
 ### `GET /api/system` — 运行环境概览
 
 当前交易环境、可交易合约数量、时钟偏移、权重预算等。
+
+```json
+{
+  "weightUsed": 412,
+  "weightLimit": 2400,
+  "requestsInFlight": 3,
+  "maxRequestsInFlight": 6,
+  "runningTraders": [1, 2],
+  "failedTraders": []
+}
+```
+
+> `requestsInFlight` / `maxRequestsInFlight`：权重预算以前只能靠"上一份响应里的
+> header"约束，而每一批 `Promise.all` 都在读完那个已经过期的值之后同时放行 ——
+> 40 个请求一起出去，75% 的软上限等于不存在，唯一的兜底是币安的 429（再往上
+> 一次 418 就是 IP 封禁）。现在每个请求在发出前先占一个槽位，这两个字段让
+> 并发占用可见，而不是只能靠推测。
+
+> `failedTraders`：**自动恢复已经放弃**的机器人（`status = 'error'` 且没在运行），
+> 每项含 `id` / `name` / `lastError`。启动失败以前是终局且静默的 ——
+> 一次网络抖动就把机器人永久钉在 `error` 上，而没有任何地方会再提起它。
+> 现在它会按退避自动重试，放弃时留在这个列表里、写进日志、也留在
+> `traders.last_error` 上（控制台机器人列表会直接渲染那个字段）。
 
 ### `GET /api/logs` — 滚动日志
 
@@ -83,7 +140,16 @@
 
 → `{ "token": "<JWT>", "user": { "id": 1, "username": "admin_9f3c21", "role": "owner" } }`
 
-密码错误返回 **401**。
+密码错误返回 **401**；令牌有效期 **12 小时**。
+
+尝试过于频繁返回 **429**（带 `Retry-After`，单位秒）。节流按**用户名**与**来源 IP**
+两个维度独立计数，阈值分别是 5 次与 20 次连续失败，超过后按 1s、2s、4s…
+指数锁定，封顶 15 分钟；失败记录在 30 分钟无新失败后失效。
+
+> 即使用户名不存在也会走完同样的口令派生（scrypt），所以「用户名是否存在」
+> 无法从响应时间上区分出来 —— 随机用户名的价值正建立在这一点上。
+>
+> 节流状态存在**进程内存**里（单人自用部署，不引入 Redis），重启即清零。
 
 ### `PATCH /api/auth/account`
 
@@ -101,6 +167,11 @@
 都能被升级成永久接管 —— 攻击者改掉密码，真正的所有者就再也进不来了。
 
 `username` 与 `newPassword` 至少要提供一个。用户名需 3–64 字符且未被占用（冲突返回 **409**）。
+请求体一律先过 zod：类型不对（例如 `currentPassword` 传了数字）返回 **400**，
+而不是让 `scryptSync` 抛出 500。
+
+**改用户名或改密码都会作废该账户此前签发的所有令牌**（包括其他浏览器 / 设备上的会话），
+响应里返回的是重新签发的新令牌。
 
 响应会把**重新签发的令牌**一并返回，因为 JWT 载荷里带着用户名：
 
@@ -109,6 +180,9 @@
 ```
 
 > `POST /api/auth/password` 保留为同义端点（只改密码），仅为了兼容浏览器中缓存的旧版前端。
+
+> `currentPassword` 校验同样有节流（阈值与登录一致），连错后返回 **429 + `Retry-After`**：
+> 拿到会话令牌不等于知道密码，这个端点不能变成在线口令预言机。
 
 ### `POST /api/auth/register`
 
@@ -129,9 +203,12 @@
 - `exchanges` — 交易所适配层的注册表，含各交易所的标识、中文名与结算资产
 - `presets` — 策略预设（稳健 / 进取 / 短线），含完整的 `patch`
 - `defaultStrategy` — 默认策略配置
-- `closeReasons` — 平仓原因代码与中文标签
 - `providers` — LLM 提供商目录（含 `modelsPath`、`modelsAuth` 等发现字段）
-- `tradingModes`、`traderStatuses` 等枚举与标签
+
+> 只有上面四项。**平仓原因、交易模式、机器人状态这些枚举不在这个端点的响应里**——
+> 它们由 `@aq/shared` 的常量（`CLOSE_REASONS` / `CLOSE_REASON_LABELS` 等）随前端代码一起打包，
+> 前端不再从 `/api/catalog` 取。以前这里列过 `closeReasons` / `tradingModes` / `traderStatuses`，
+> 服务端从来没有返回过它们。
 
 > 新增枚举值时改 **`packages/shared/src/domain.ts`**，前端会自动跟着变——不要在前端
 > 硬编码这些列表。
@@ -227,6 +304,20 @@
 
 推理参数（`temperature` / `maxTokens` / `timeoutSeconds` / `maxRetries`）**全部可选**，
 留空时按提供商取默认值。
+
+`baseUrl` 会过**出站地址白名单**：只允许 `http` / `https`，并且拒绝回环
+（`127.0.0.0/8`、`::1`、`localhost`）、链路本地（`169.254.0.0/16`，云元数据服务在这里）、
+私有网段（`10/8`、`172.16/12`、`192.168/16`，以及 IPv6 的 `fc00::/7`、`fe80::/10`）、
+运营商级 NAT（`100.64/10`）与组播 / 保留地址，也拒绝 `.internal` / `.local` 这类内部域名。
+自定义公网端点（自建网关、代理）不受影响。
+
+> 为什么：这个地址是**服务端替你去访问**的。允许它指向内网，等于把控制台会话
+> 升级成"以服务器身份访问内网"——`http://169.254.169.254/latest/meta-data/...`
+> 能读到云主机凭据，`127.0.0.1:xxxx` 能打到只监听本机的服务。被拒绝时返回 **400**
+> 并说明原因。
+>
+> 白名单校验的是**字面主机**，不做 DNS 解析：一个解析到内网地址的公开域名
+> （DNS rebinding）不在防护范围内。
 
 ### `POST /api/ai-models/discover`
 
@@ -477,3 +568,9 @@
 
 浏览器 WebSocket API 无法自定义请求头，因此握手时 token 通过**查询参数**传递。
 **这要求传输层是 HTTPS**，否则 token 会以明文出现在链路上。
+
+> 这是**唯一**接受 `?token=` 的端点。REST 路由只认 `Authorization` 头：
+> URL 会被反向代理的 access log、浏览器历史和 `Referer` 记录下来，
+> 把会话凭据放进 URL 等于把它抄送到多个你无法控制的地方。
+>
+> 校验同样包含**撤销**检查：账户改过凭据之后，旧令牌在 WebSocket 上也不再被接受。

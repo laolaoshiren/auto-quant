@@ -1,5 +1,5 @@
 import { Link, useParams } from 'react-router-dom';
-import { ChevronLeft, ExternalLink } from 'lucide-react';
+import { ChevronLeft } from 'lucide-react';
 import type { DecisionRecord } from '@aq/shared';
 import { api } from '../lib/api';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
@@ -270,19 +270,5 @@ function Readout({ label, value, tone }: { label: string; value: string; tone?: 
       <span className="text-xs uppercase tracking-wide text-ink-lo">{label}</span>
       <span className={`num whitespace-nowrap text-base ${tone ?? 'text-ink-hi'}`}>{value}</span>
     </div>
-  );
-}
-
-/** Small back-reference used from the trader dashboard's decision list. */
-export function DecisionLinkButton({ traderId, recordId }: { traderId: number; recordId: number }) {
-  return (
-    <Link
-      to={`/traders/${traderId}/decisions/${recordId}`}
-      className="btn btn-primary btn-xs"
-      title="打开这条决策的完整审计记录"
-    >
-      <ExternalLink aria-hidden className="h-3.5 w-3.5" />
-      审计
-    </Link>
   );
 }

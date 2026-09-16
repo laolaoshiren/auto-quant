@@ -93,6 +93,10 @@ export function hashPassword(password: string): string {
 }
 
 export function verifyPassword(password: string, stored: string): boolean {
+  // 非字符串（例如 JSON 里传了个数字）会让 scryptSync 抛 TypeError 并变成 HTTP 500。
+  // 校验失败一律返回 false：这里**没有**绕过风险，但 500 会把内部实现细节
+  // 和一条栈信息暴露给未认证的调用方。
+  if (typeof password !== 'string') return false;
   const parts = stored.split('$');
   if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
   const [, nStr, rStr, pStr, saltHex, hashHex] = parts as [
@@ -117,6 +121,26 @@ export function verifyPassword(password: string, stored: string): boolean {
   });
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
+
+/**
+ * 一个永远不会匹配成功的口令哈希，用来给「用户不存在」这条分支**跑一遍同样的 scrypt**。
+ *
+ * 防的是用户名枚举：登录原本写成 `if (!record || !verifyPassword(...))`，
+ * `||` 短路意味着用户名不存在时根本不会做密钥派生，401 会早几十毫秒返回。
+ * 这个时间差足以把「哪些用户名存在」一个个试出来 —— 而随机用户名
+ * （`generateUsername()`）的全部价值就在于让攻击者必须先猜对用户名。
+ *
+ * 参数与 `hashPassword()` 完全一致，所以两条分支的 CPU 成本相同；
+ * 全零摘要不可能等于任何真实 scrypt 输出（概率 2^-512）。
+ */
+export const DUMMY_PASSWORD_HASH = [
+  'scrypt',
+  SCRYPT_N,
+  SCRYPT_R,
+  SCRYPT_P,
+  '00000000000000000000000000000000',
+  '0'.repeat(KEY_LENGTH * 2),
+].join('$');
 
 /* -------------------------------------------------------------------------- */
 /*  API key masking                                                            */

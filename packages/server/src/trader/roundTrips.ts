@@ -253,20 +253,56 @@ function addCommission(
  * A key that identifies the same round-trip in both the local book and the
  * exchange's reconstruction.
  *
- * Symbol plus quantity plus entry price, rounded to a sane tolerance. Entry
- * price is the useful discriminator: the same symbol rarely round-trips the same
- * size at the same price twice. Timestamps are deliberately *not* part of the
- * key — the local `closed_at` is when the runtime noticed, while the exchange's
- * is when the fill happened, and those can differ by minutes.
+ * **The entries' order id is the discriminator**, with symbol + quantity +
+ * entry price as the description.
+ *
+ * Symbol/quantity/price alone is not unique, and the collision is not
+ * theoretical: an account that opens the same size at the same price twice —
+ * a retry after a stop, or two round-trips inside one 5-minute candle on a
+ * low-priced altcoin — produced two identical keys. `applyExchangeFigures`
+ * matches on this key, so the exchange's figures for the *second* round-trip
+ * were written over the *first* row: one trade's PnL silently replaced
+ * another's, and the console disagreed with the account while looking
+ * perfectly well-formed.
+ *
+ * Timestamps are still deliberately *not* part of the key — the local
+ * `closed_at` is when the runtime noticed, while the exchange's is when the
+ * fill happened, and those can differ by minutes, so a timestamp would stop
+ * the same round-trip from ever matching itself.
  */
+
+/** Strict key: identifies one specific entry order's round-trip. */
 export function roundTripKey(input: {
   symbol: string;
   quantity: number;
   entryPrice: number;
+  /** The exchange order that opened the position. Required for a strict key. */
+  entryOrderId?: string | null;
 }): string {
   const qty = Number(input.quantity).toFixed(8);
   // 6 significant digits on price: enough to separate distinct entries on the
   // same symbol, loose enough to survive float noise from an average.
   const price = Number(input.entryPrice).toPrecision(6);
-  return `${input.symbol}|${qty}|${price}`;
+  // `~` cannot be produced by `String(orderId)`, so a row with no recorded entry
+  // order can never accidentally collide with a real order's key.
+  const owner = input.entryOrderId ? String(input.entryOrderId) : '~';
+  return `${input.symbol}|${qty}|${price}|${owner}`;
+}
+
+/**
+ * The key without the order-id component, for **fallback** matching only.
+ *
+ * Used when the local row has no `entry_order_id` (the fills were unreadable at
+ * close time, so the id could not be learned) while the exchange's
+ * reconstruction has one. Without this fallback the reconcile pass would insert
+ * a *second* row for a round-trip it already booked — duplicating the PnL
+ * instead of correcting it, which is worse than the collision this key change
+ * fixes.
+ */
+export function roundTripQueryKey(input: {
+  symbol: string;
+  quantity: number;
+  entryPrice: number;
+}): string {
+  return roundTripKey({ ...input, entryOrderId: null });
 }

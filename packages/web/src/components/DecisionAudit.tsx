@@ -10,7 +10,7 @@ import { type ReactNode } from 'react';
 import type { Decision, DecisionRecord, ExecutionLogEntry } from '@aq/shared';
 import { Badge, Button, Collapsible, CopyButton, type Tone } from './ui';
 import { useCopy } from '../lib/hooks';
-import { clamp, fmtInt, fmtUsd } from '../lib/format';
+import { fmtInt, fmtUsd } from '../lib/format';
 
 /* -------------------------------------------------------------------------- */
 /*  Action vocabulary                                                          */
@@ -381,10 +381,4 @@ export function MiniTabs<T extends string>({
       ))}
     </div>
   );
-}
-
-/** Small helper so callers do not each re-derive a clamped percentage. */
-export function clampPercent(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  return clamp(value, 0, 100);
 }

@@ -12,6 +12,49 @@ import { AutoTrader, type DecisionModel } from './autoTrader.js';
 
 const log = createLogger('manager');
 
+/**
+ * 开机恢复的重试节奏（F2 + F4）。
+ *
+ * 为什么需要重试：`startTrader()` 的失败以前是**终局**的。启动时一次网络抖动、
+ * 一次 LLM 提供商的 5xx、一次交易所 503，就把机器人写成 `error`，
+ * 而 `resumePersisted()` 只恢复 `running` / `safe_mode` —— 于是它**永远**
+ * 停在 error 上，静默地什么都不做，直到有人注意到控制台并手动点一次启动。
+ * 一个"必须无人值守跑几周"的系统不能有这种闩锁。
+ *
+ * 为什么是这几个数：
+ *  · 第一次尝试不等待 —— 绝大多数启动是正常的，冒烟路径不能变慢。
+ *  · 退避 5s → 15s → 45s → 90s（上限 90s）。单次失败最常见的成因（DNS 抖动、
+ *    网关 502）在十几秒内就会自愈，所以早期退避要短；而一次失败的 LLM/交易所
+ *    调用本身可能已经等了 15–120s，所以上限不宜太小，否则总预算被一次慢失败吃掉。
+ *  · 4 次重试 / 约 2.5 分钟的总预算。它必须**明显短于**最短的合法
+ *    `cycleIntervalMinutes`（schema 允许的最小值是 1 分钟）乘以一个"人还能忍"的
+ *    倍数，否则"启动中"会变成一种新的静默状态；同时它又要长到能穿过一次
+ *    分钟级的提供商抽风。
+ */
+const BOOT_RETRY_BACKOFF_MS = [5_000, 15_000, 45_000, 90_000];
+
+/**
+ * 这些启动失败**不重试**：重试改变不了结果，只会让"机器人起不来"这件事
+ * 延迟几分钟才浮出水面，并在此期间反复把同样的错误发进日志和事件流。
+ *
+ * 判据是"人需要做点什么"：填凭据、入金、改配置。
+ */
+const PERMANENT_START_FAILURES = [
+  /还没有配置 API Key/,
+  /还没有存储 API Key/,
+  /没有合约交易权限/,
+  /可用余额为 0/,
+  /找不到交易所账户/,
+  /找不到策略/,
+  /找不到 AI 模型/,
+  /找不到机器人/,
+  /还没有配置/,
+];
+
+function isPermanentStartFailure(message: string): boolean {
+  return PERMANENT_START_FAILURES.some((pattern) => pattern.test(message));
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Manager                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -35,6 +78,23 @@ export class TraderManager {
   private readonly connections = new Map<number, ExchangeConnection>();
   private readonly userStreams = new Map<number, BinanceUserDataStream>();
   private stopping = false;
+  /**
+   * 被明确取消启动的机器人（操作员点了停止、或进程正在关闭）。
+   *
+   * 开机恢复会在退避后重试启动，而"点了停止"是比"我想让它跑"更强的意图：
+   * 没有这个集合时，`stopTrader()` 之后退避到期的重试仍然会把机器人拉起来。
+   */
+  private readonly cancelledStarts = new Set<number>();
+  /**
+   * 每个正在运行的机器人是什么时候被启动的（本地时钟）。
+   *
+   * 给 `/api/health` 用：一个已经跑起来但还没写 `last_cycle_at` 的机器人，
+   * 它的启动宽限期必须从**它自己**启动那一刻算起。用一个全局的「进程已运行多久」
+   * 会让运行两小时后才启动的机器人在卡死时被白白宽限两小时；按「第一次看到
+   * null」算则更糟 —— 一个永远跑不完第一轮的机器人每次探测都能重新获得宽限，
+   * 于是**永远不会**被判为卡住，而它恰恰是这个检查要抓的东西。
+   */
+  private readonly startedAt = new Map<number, number>();
 
   constructor(private readonly vault: Vault) {}
 
@@ -112,6 +172,11 @@ export class TraderManager {
     return [...this.running.keys()];
   }
 
+  /** 正在运行的机器人的启动时刻，供健康检查计算启动宽限期。 */
+  runningSince(): ReadonlyMap<number, number> {
+    return this.startedAt;
+  }
+
   statusOf(traderId: number): TraderStatus {
     return this.running.get(traderId)?.currentStatus ?? 'stopped';
   }
@@ -187,7 +252,19 @@ export class TraderManager {
   /*  Start / stop                                                           */
   /* ---------------------------------------------------------------------- */
 
-  async startTrader(traderId: number, dryRun: boolean): Promise<StartResult> {
+  /**
+   * Start one trader, optionally retrying a **transient** failure with backoff.
+   *
+   * Retrying lives here rather than in `resumePersisted()` so there is exactly one
+   * retry loop in the lifecycle: the boot path and any future automatic caller get
+   * the same policy, and an operator-initiated start stays instant because the
+   * operator is present and can see the error themselves.
+   */
+  async startTrader(
+    traderId: number,
+    dryRun: boolean,
+    options: { retryTransient?: boolean } = {},
+  ): Promise<StartResult> {
     const trader = traders.get(traderId);
     if (!trader) return { ok: false, error: `找不到机器人 ${traderId}`, preflight: [] };
 
@@ -195,6 +272,58 @@ export class TraderManager {
       return { ok: false, error: '该机器人已经在运行中', preflight: [] };
     }
 
+    this.stopping = false;
+    const retry = options.retryTransient === true;
+
+    for (let attempt = 0; ; attempt += 1) {
+      const outcome = await this.attemptStart(traderId, trader, dryRun);
+      if (outcome.result.ok) return outcome.result;
+
+      const message = outcome.result.error ?? '未知错误';
+      const canRetry =
+        retry &&
+        !outcome.permanent &&
+        !this.cancelledStarts.has(traderId) &&
+        !this.stopping &&
+        attempt < BOOT_RETRY_BACKOFF_MS.length;
+
+      if (!canRetry) return outcome.result;
+
+      const waitMs = BOOT_RETRY_BACKOFF_MS[attempt] ?? 90_000;
+      log.warn(
+        `机器人 ${traderId} 启动失败（第 ${attempt + 1} 次）：${message}；${Math.round(waitMs / 1000)}s 后重试`,
+      );
+      runtimeLogs.write(
+        traderId,
+        'warn',
+        'manager',
+        `启动失败，${Math.round(waitMs / 1000)} 秒后自动重试（第 ${attempt + 1}/${BOOT_RETRY_BACKOFF_MS.length} 次）：${message}`,
+      );
+      await this.waitForRetry(waitMs, traderId);
+      if (this.cancelledStarts.has(traderId) || this.stopping) return outcome.result;
+    }
+  }
+
+  /**
+   * 等待下一次重试，但**可以被取消**。
+   *
+   * 用 1 秒的短切片而不是一次 `setTimeout(waitMs)`：退避最长 90 秒，
+   * 而中间任何时刻操作员都可能点"停止"或进程收到 SIGTERM。一次性的长
+   * 定时器会让这两个信号都要等满退避才生效 —— 期间机器人还会被启动起来。
+   */
+  private async waitForRetry(waitMs: number, traderId: number): Promise<void> {
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      if (this.stopping || this.cancelledStarts.has(traderId)) return;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, deadline - Date.now())));
+    }
+  }
+
+  private async attemptStart(
+    traderId: number,
+    trader: NonNullable<ReturnType<typeof traders.get>>,
+    dryRun: boolean,
+  ): Promise<{ result: StartResult; permanent: boolean }> {
     const checks: PreflightCheck[] = [];
 
     try {
@@ -208,7 +337,10 @@ export class TraderManager {
         this.connections.delete(traderId);
         const message = blocking.map((c) => `${c.name}: ${c.detail}`).join(' ');
         traders.setStatus(traderId, 'error', message);
-        return { ok: false, error: message, preflight: checks };
+        return {
+          result: { ok: false, error: message, preflight: checks },
+          permanent: isPermanentStartFailure(message),
+        };
       }
 
       /* --- Strategy ----------------------------------------------------- */
@@ -277,6 +409,7 @@ export class TraderManager {
       });
 
       this.running.set(traderId, autoTrader);
+      this.startedAt.set(traderId, Date.now());
       await autoTrader.start();
       // Attached after the trader is live, so a stream failure can never prevent
       // the trading loop from starting.
@@ -292,23 +425,40 @@ export class TraderManager {
         timestamp: new Date().toISOString(),
       });
 
-      return { ok: true, preflight: checks };
+      return { result: { ok: true, preflight: checks }, permanent: false };
     } catch (error) {
       const message = (error as Error).message;
       log.error(`启动机器人 ${traderId} 失败：${message}`);
       this.running.delete(traderId);
       this.connections.delete(traderId);
       traders.setStatus(traderId, 'error', message);
-      return { ok: false, error: message, preflight: checks };
+      return {
+        result: { ok: false, error: message, preflight: checks },
+        permanent: isPermanentStartFailure(message),
+      };
     }
   }
 
+  /**
+   * Stop a trader's loop **and wait for the cycle already in flight**.
+   *
+   * `AutoTrader.stop()` now drains the running cycle (see its comment: a cycle
+   * that dies mid-way between "entry filled" and "stop placed" leaves an
+   * unprotected leveraged position). The map entry is deliberately kept until the
+   * drain finishes, so a concurrent `startTrader` cannot slip a second instance
+   * in behind this one while it is still writing.
+   */
   async stopTrader(traderId: number): Promise<void> {
+    // Record the operator's intent before doing any async work, so a boot retry
+    // parked in `waitForRetry()` aborts instead of starting the trader seconds
+    // after it was told to stop.
+    this.cancelledStarts.add(traderId);
     const autoTrader = this.running.get(traderId);
     if (autoTrader) {
       await autoTrader.stop();
       this.running.delete(traderId);
     }
+    this.startedAt.delete(traderId);
     const stream = this.userStreams.get(traderId);
     if (stream) {
       await stream.stop().catch(() => undefined);
@@ -349,6 +499,23 @@ export class TraderManager {
   ): Promise<{ recovered: number; corrected: number; funding: number }> {
     const trader = traders.get(traderId);
     if (!trader) throw new Error('机器人不存在。');
+
+    /*
+     * When the trader is live, reconcile **through the live instance**.
+     *
+     * Building a second `AutoTrader` here used to run a full ledger pass
+     * concurrently with the trading cycle: both read the same `trades` rows and
+     * the same positions, and both could book the same close — or one could close
+     * a local row the other had just corrected. `runReconcile()` waits for the
+     * in-flight cycle, so there is only ever one writer.
+     *
+     * The stub-model construction below is still used for a trader that is not
+     * running, which is the case this endpoint exists for (a position closed
+     * while the bot was down), and keeps the structural guarantee that
+     * reconciliation never depends on an LLM.
+     */
+    const live = this.running.get(traderId);
+    if (live) return live.runReconcile();
 
     const connection = await this.connectionFor(traderId, trader.exchangeAccountId, false);
     const strategyRecord = strategies.get(trader.strategyId);
@@ -411,6 +578,16 @@ export class TraderManager {
   /** Stop everything — used on shutdown, and by the global kill switch. */
   async stopAll(reason = '服务器正在关闭'): Promise<void> {
     if (this.stopping) return;
+    /*
+     * Cancel every in-flight boot retry *before* anything else.
+     *
+     * `resumePersisted()` can be sitting in a 90-second backoff when SIGTERM
+     * arrives. Without this, the shutdown would clear the loop timers, close the
+     * database, and the backoff would then expire and try to start a trader
+     * against a closed database — a crash during shutdown that looks like a
+     * random failure on the next boot.
+     */
+    for (const trader of traders.list()) this.cancelledStarts.add(trader.id);
     this.stopping = true;
 
     await Promise.all(
@@ -424,6 +601,15 @@ export class TraderManager {
     );
     this.userStreams.clear();
 
+    /*
+     * `trader.stop()` waits for the cycle in flight before resolving, which is
+     * what makes this shutdown safe: Ctrl+C used to land between "entry filled"
+     * and "stop placed", the timer was already cleared, `process.exit(0)` ran
+     * immediately, and the account was left holding a leveraged position with no
+     * exchange-side stop — the exact state §2.6 forbids. The wait is bounded
+     * inside `stop()`, so a wedged exchange call delays shutdown but cannot hang
+     * it forever.
+     */
     await Promise.all(
       [...this.running.entries()].map(async ([id, trader]) => {
         try {
@@ -435,7 +621,13 @@ export class TraderManager {
     );
     this.running.clear();
     this.connections.clear();
-    this.stopping = false;
+    /*
+     * `stopping` deliberately stays true: this instance is on its way down, and
+     * any boot retry still parked in `waitForRetry()` must abort rather than
+     * resurrect a trader against a closing database. `startTrader()` resets the
+     * flag itself, so a start issued after a shutdown (the global kill switch can
+     * stop traders without ending the process) still works.
+     */
     log.info('所有机器人已停止');
   }
 
@@ -446,13 +638,74 @@ export class TraderManager {
    * rather than silently sitting idle.
    */
   async resumePersisted(dryRun: boolean): Promise<void> {
+    /*
+     * `error` is recovered too, and that is the whole point of F2.
+     *
+     * A transient failure at boot wrote `error` and nothing ever looked at it
+     * again: `resumePersisted()` only resumed `running` / `safe_mode`, so the bot
+     * stayed down until a human clicked start. The status is written into the
+     * database, which means it *survives the restart that would have fixed the
+     * underlying blip* — the most common shape of this latch.
+     *
+     * `stopped` is still excluded: that status is an operator decision, and
+     * starting it would be this code overriding a human.
+     */
+    const resumable = new Set(['running', 'safe_mode', 'error']);
+
     for (const trader of traders.list()) {
-      if (trader.status !== 'running' && trader.status !== 'safe_mode') continue;
-      log.info(`重启后正在恢复机器人「${trader.name}」`);
-      const result = await this.startTrader(trader.id, dryRun);
-      if (!result.ok) {
-        log.warn(`无法恢复机器人「${trader.name}」：${result.error}`);
-      }
+      if (!resumable.has(trader.status)) continue;
+      // A stop request that arrives while earlier traders are still starting must
+      // win: the operator may be shutting the instance down.
+      if (this.cancelledStarts.has(trader.id) || this.stopping) break;
+
+      const recovering = trader.status === 'error';
+      log.info(
+        recovering
+          ? `重启后发现处于 error 状态的机器人「${trader.name}」，正在尝试恢复（原因：${trader.lastError ?? '未知'}）`
+          : `重启后正在恢复机器人「${trader.name}」`,
+      );
+
+      /*
+       * Only the `error` case gets the retry budget. A trader that was healthy
+       * when the host went down is expected to come straight back; if it cannot,
+       * the retry loop would spend ~2.5 minutes per broken trader and delay every
+       * later one. `error` is the case where a transient cause is the likely
+       * explanation and waiting is the whole fix.
+       */
+      const result = await this.startTrader(trader.id, dryRun, { retryTransient: recovering });
+      if (result.ok) continue;
+
+      /*
+       * Give up **visibly**. The point of F2 is that this state must not be
+       * silent, so it goes to three places the operator actually looks: the
+       * process log, the console's rolling log pane, and the trader row itself
+       * (`status='error'` + `lastError`, which `TradersPage` renders).
+       */
+      const detail = `启动恢复失败，已停止自动重试，需要人工处理：${result.error ?? '未知错误'}`;
+      traders.setStatus(trader.id, 'error', detail);
+      runtimeLogs.write(trader.id, 'error', 'manager', detail);
+      eventBus.publish({
+        type: 'log',
+        traderId: trader.id,
+        level: 'error',
+        message: `机器人「${trader.name}」${detail}`,
+        timestamp: new Date().toISOString(),
+      });
+      log.error(`机器人「${trader.name}」恢复失败并已放弃重试：${result.error}`);
     }
+  }
+
+  /**
+   * 处于 `error` 且**没有**在运行的机器人 —— 也就是"自动恢复已经放弃"的那一批。
+   *
+   * 给 `/api/system` 用。它存在的理由是 F2 的另一半：放弃重试这件事本身必须是
+   * 可见的。只看 `runningIds()` 的话，一个启动失败的机器人和一个被操作员
+   * 主动停掉的机器人长得一模一样。
+   */
+  failedTraders(): Array<{ id: number; name: string; lastError: string | null }> {
+    return traders
+      .list()
+      .filter((trader) => trader.status === 'error' && !this.running.has(trader.id))
+      .map((trader) => ({ id: trader.id, name: trader.name, lastError: trader.lastError }));
   }
 }

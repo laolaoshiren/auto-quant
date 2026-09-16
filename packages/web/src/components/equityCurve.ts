@@ -87,6 +87,48 @@ export function equityAxisFormatter(value: number): string {
   return value.toFixed(2);
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Equity ranges                                                              */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * The range selector's vocabulary lives here, not in `DashboardCharts.tsx`.
+ *
+ * `OverviewPage.tsx` needs `EQUITY_RANGES` to render its range buttons, and it
+ * used to import them from `DashboardCharts.tsx` — which begins with an
+ * `import ... from 'recharts'`. The bundler therefore put the entire 398 kB
+ * recharts chunk *in front of* the landing page's first paint, defeating the
+ * lazy `EquityCurveChart` import that exists for exactly that reason. Anything
+ * the overview page shares with a chart belongs in this module, which imports
+ * nothing but a type.
+ */
+export type EquityRange = '1D' | '7D' | '1M' | '3M' | 'ALL';
+
+export const EQUITY_RANGES: Array<{ id: EquityRange; label: string; ms: number | null }> = [
+  { id: '1D', label: '1D', ms: 24 * 3600 * 1000 },
+  { id: '7D', label: '7D', ms: 7 * 24 * 3600 * 1000 },
+  { id: '1M', label: '1M', ms: 30 * 24 * 3600 * 1000 },
+  { id: '3M', label: '3M', ms: 90 * 24 * 3600 * 1000 },
+  { id: 'ALL', label: '全部', ms: null },
+];
+
+/** Down-sample to the selected window. `ALL` keeps everything. */
+export function filterByRange(snapshots: EquitySnapshot[], range: EquityRange): EquitySnapshot[] {
+  const window = EQUITY_RANGES.find((r) => r.id === range)?.ms ?? null;
+  if (window === null) {
+    return [...snapshots].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  }
+  const cutoff = Date.now() - window;
+  const inside = snapshots.filter((s) => new Date(s.timestamp).getTime() >= cutoff);
+  // A quiet account can have nothing inside a short window; showing an empty
+  // chart would read as "no data" when the truth is "nothing recent".
+  return inside.length >= 2 ? sortSnapshots(inside) : sortSnapshots(snapshots).slice(-2);
+}
+
+function sortSnapshots(snapshots: EquitySnapshot[]): EquitySnapshot[] {
+  return [...snapshots].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+
 /** Visible window of a range id, in ms. `ALL` (or anything unknown) is unbounded. */
 export function rangeSpanMs(range: string): number {
   switch (range) {

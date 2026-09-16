@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { BinanceUserTrade } from '../binance/types.js';
-import { reconstructRoundTrips, roundTripKey } from './roundTrips.js';
+import { reconstructRoundTrips, roundTripKey, roundTripQueryKey } from './roundTrips.js';
 
 /**
  * Fixtures are **real fills pulled from a live account**, not invented.
@@ -184,4 +184,58 @@ test('the match key ignores timestamp drift but separates distinct entries', () 
 
   const c = roundTripKey({ symbol: 'POWERUSDT', quantity: 111, entryPrice: 0.17803 });
   assert.notEqual(a, c, 'the two POWERUSDT round-trips must not collide');
+});
+
+test('two identical-looking round-trips are distinguished by their entry order', () => {
+  /*
+   * Why this test exists: the key was `symbol | qty | entryPrice` with no time
+   * and no order id, and `applyExchangeFigures()` matches on it. An account that
+   * opened the same size at the same price twice — a re-entry after a stop, or
+   * two round-trips inside one candle on a low-priced altcoin — produced two
+   * identical keys, so the second round-trip's exchange figures were written
+   * over the first one's `trades` row. One trade's PnL silently replaced
+   * another's, and the console disagreed with the account while looking
+   * perfectly well-formed.
+   *
+   * These two round-trips are identical in every field the old key used.
+   */
+  const fills: BinanceUserTrade[] = [
+    fill({ id: 50, orderId: 9001, time: T0, symbol: 'ARBUSDT', side: 'BUY', price: '0.1556', qty: '89.8', commission: '0.00698644' }),
+    fill({ id: 51, orderId: 9002, time: T0 + 60_000, symbol: 'ARBUSDT', side: 'SELL', price: '0.1600', qty: '89.8', realizedPnl: '0.39512', commission: '0.0071840' }),
+    fill({ id: 52, orderId: 9003, time: T0 + 120_000, symbol: 'ARBUSDT', side: 'BUY', price: '0.1556', qty: '89.8', commission: '0.00698644' }),
+    fill({ id: 53, orderId: 9004, time: T0 + 180_000, symbol: 'ARBUSDT', side: 'SELL', price: '0.1500', qty: '89.8', realizedPnl: '-0.50288', commission: '0.0067350' }),
+  ];
+
+  const trades = reconstructRoundTrips(fills);
+  assert.equal(trades.length, 2, 'two separate round-trips');
+
+  const [first, second] = trades;
+  assert.ok(first && second);
+  assert.equal(first.entryPrice, second.entryPrice, 'the old key saw these as one row');
+  assert.equal(first.quantity, second.quantity);
+
+  const a = roundTripKey(first);
+  const b = roundTripKey(second);
+  assert.notEqual(a, b, 'same size, same entry price, different order — must not collide');
+  assert.equal(a, roundTripKey({ ...first, entryOrderId: '9001' }));
+  assert.equal(b, roundTripKey({ ...second, entryOrderId: '9003' }));
+});
+
+test('a row with no recorded entry order keys separately from an identified one', () => {
+  const withoutId = roundTripKey({ symbol: 'POWERUSDT', quantity: 131, entryPrice: 0.18064 });
+  const withId = roundTripKey({
+    symbol: 'POWERUSDT',
+    quantity: 131,
+    entryPrice: 0.18064,
+    entryOrderId: '9001',
+  });
+  assert.notEqual(withoutId, withId, 'a missing order id must not match a real order id');
+
+  // The description-only key is what reconciles a row that predates entry-order
+  // tracking — it must be exactly the "no id" key, so it can never be confused
+  // with a row that has one.
+  assert.equal(
+    withoutId,
+    roundTripQueryKey({ symbol: 'POWERUSDT', quantity: 131, entryPrice: 0.18064 }),
+  );
 });

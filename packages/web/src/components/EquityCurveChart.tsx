@@ -42,8 +42,7 @@ const BASELINE = '#3a4558';
 const TOOLTIP_BG = '#11151e';
 const ACCENT = '#5b8def';
 
-/** One decimal on the axis, two in the tooltip: the axis is a scale, not a number to act on. */
-const AXIS_DIGITS = 1;
+/** Two decimals in the tooltip: an axis label is a scale, not a number to act on. */
 const TOOLTIP_DIGITS = 2;
 
 /* -------------------------------------------------------------------------- */

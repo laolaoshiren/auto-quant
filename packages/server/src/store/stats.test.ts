@@ -8,6 +8,7 @@ import { closeDb, initDb } from '../db/index.js';
 import {
   aiModels,
   computeTraderStats,
+  equity as equityStore,
   exchanges,
   strategies,
   traders,
@@ -169,6 +170,56 @@ test('the aggregate breakdown adds up to the net figure', () => {
 function clearTrades(): void {
   initDb(path.join(workDir, 'stats.sqlite')).run('DELETE FROM trades');
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Circuit-breaker high-water mark                                            */
+/* -------------------------------------------------------------------------- */
+
+test('the drawdown watermark ignores unrealised profit', () => {
+  /*
+   * Why this test exists (D2).
+   *
+   * The breaker's watermark was `MAX(equity)` over the snapshots, and snapshot
+   * `equity` is the **margin balance** — it carries the open positions'
+   * unrealised PnL. So one unrealised spike (a price wick on an open position)
+   * raised the watermark permanently: when the wick retraced, equity came back to
+   * the baseline, and every later cycle computed a drawdown that never happened.
+   * `maxTotalDrawdownPercent` then refused to open anything, forever, with only a
+   * log line to say why.
+   *
+   * `equity − unrealized_pnl` is what the balance would be with open positions
+   * marked at their entry: it only moves when something is actually closed.
+   */
+  traderId = seedTrader();
+  const db = initDb(path.join(workDir, 'stats.sqlite'));
+  db.run('DELETE FROM equity_snapshots');
+
+  const snapshot = (equity: number, unrealizedPnl: number): void =>
+    equityStore.insert({
+      traderId,
+      timestamp: new Date().toISOString(),
+      equity,
+      availableBalance: equity,
+      unrealizedPnl,
+      marginUsed: 0,
+      openPositions: unrealizedPnl === 0 ? 0 : 1,
+    });
+
+  snapshot(1000, 0);
+  snapshot(1100, 100); // the wick: +100 of *unrealised* profit
+  snapshot(1000, 0); // it retraces
+
+  assert.equal(
+    equityStore.realizedHighWaterMark(traderId),
+    1000,
+    'a spike in unrealised PnL must not raise the watermark',
+  );
+
+  // A genuine realised gain still does raise it — the fix must not defang the
+  // breaker, only stop it counting money that was never booked.
+  snapshot(1050, 0);
+  assert.equal(equityStore.realizedHighWaterMark(traderId), 1050);
+});
 
 test('winRatePercent is a percentage, not a fraction', () => {
   traderId = seedTrader();

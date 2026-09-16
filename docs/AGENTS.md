@@ -25,7 +25,7 @@
 
 | 文件 | 为什么它排在最前面 |
 | --- | --- |
-| `packages/server/src/risk/engine.ts` | **风控引擎**。整个设计的地基："模型提议，运行时裁决"。改任何与交易有关的逻辑前必须知道这里的 13 步检查 |
+| `packages/server/src/risk/engine.ts` | **风控引擎**。整个设计的地基："模型提议，运行时裁决"。改任何与交易有关的逻辑前必须知道这里的 14 步检查（源码标记 0–13） |
 | `packages/server/src/trader/autoTrader.ts` | **交易循环**。12 步周期、对账、回撤守卫、执行、保护单、审计落库。这是最大也最重要的文件 |
 | `packages/server/src/api/server.ts` | **API 层**。所有 HTTP 路由与 WebSocket 事件流，以及数据是怎么流向前端的 |
 | `packages/server/src/store/repositories.ts` | **存储层**。所有表的读写、以及**净盈亏唯一算出来的地方** |
@@ -142,7 +142,7 @@
 
 ```bash
 npm run typecheck   # 必须 0 退出
-npm test            # 必须全绿（当前 194 个用例）
+npm test            # 必须全绿（用例数看它自己打印的 `# tests`，不要在文档里写死）
 ```
 
 改了前端再加 `npm run build`。这三条是**最低门槛**，不是可选项。

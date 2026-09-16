@@ -7,6 +7,7 @@ import * as openai from './openaiCompatible.js';
 import * as anthropic from './anthropic.js';
 import * as gemini from './gemini.js';
 import { EMPTY_USAGE, type ChatMessage, type ChatResult, type OutboundRequest } from './types.js';
+import { checkOutboundUrl } from './urlGuard.js';
 
 const log = createLogger('llm');
 
@@ -109,6 +110,26 @@ export class LlmClient {
         null,
         this.provider,
         false,
+      );
+    }
+
+    /*
+     * 出站地址白名单也放在构造函数里，因为这里是**所有**模型请求的必经之路：
+     * 交易循环、连接探测、策略体检、模型列表发现全都从 `LlmClient` 出去。
+     * 放在这里还有一层意义 —— 数据库里**已经存着**的旧地址（本次改动之前写入的）
+     * 同样会被拦下，而只在 API 层校验做不到这一点。
+     *
+     * 不重试、直接失败：这不是网络抖动，重试只会把同一个内网请求再发一遍。
+     */
+    const verdict = checkOutboundUrl(this.baseUrl);
+    if (!verdict.allowed) {
+      throw new LlmError(
+        `baseUrl 不被允许：${verdict.reason}`,
+        null,
+        this.provider,
+        false,
+        undefined,
+        { kind: 'bad_request' },
       );
     }
   }

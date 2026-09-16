@@ -20,7 +20,6 @@ export default {
           750: '#232a38', // 分隔线（弱）
           700: '#2c3546', // 边框
           600: '#3a4558', // 边框（强调）
-          500: '#4b5768', // 禁用态
         },
 
         /*
@@ -48,7 +47,6 @@ export default {
         accent: '#5b8def', // 主操作
         'accent-hi': '#7aa5f5', // 主操作 hover
         warn: '#f5b544', // 警告
-        info: '#60a5fa', // 提示
 
         overlay: 'rgba(6, 9, 15, 0.72)',
       },
@@ -78,7 +76,7 @@ export default {
          *
          * `2xs` 原本是 10px，是最小的一档。重设计后最小的辅助字号是 11px，
          * 但**不能直接删掉这个键**：Tailwind 对不存在的类不报错，只是不生成
-         * 样式 —— 45 个文件里的 `text-2xs` 会静默失去字号，变得和正文一样大，
+         * 样式 —— 7 个文件里 27 处 `text-2xs` 会静默失去字号，变得和正文一样大，
          * 而这种问题只会在页面上肉眼看出来。
          *
          * 所以保留为 11px 的别名，让老页面先"不变丑"地过渡，
@@ -101,7 +99,6 @@ export default {
         DEFAULT: '6px',
         md: '8px',
         lg: '10px',
-        xl: '14px',
       },
 
       boxShadow: {
@@ -109,7 +106,6 @@ export default {
         panel: '0 1px 2px 0 rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.02) inset',
         raised: '0 4px 16px -6px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03) inset',
         overlay: '0 24px 64px -16px rgba(0,0,0,0.75)',
-        focus: '0 0 0 3px rgba(91,141,239,0.35)',
       },
 
       keyframes: {

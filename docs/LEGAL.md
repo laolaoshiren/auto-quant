@@ -14,16 +14,21 @@
 
 ### 结论：干净，无 copyleft
 
-运行时会打进 Docker 镜像的依赖共 **145 个**，许可证分布：
+运行时会打进 Docker 镜像的依赖共 **194 个**，许可证分布：
 
 | 许可证 | 包数量 | 义务 |
 | --- | --- | --- |
-| MIT | 107 | 保留版权声明与许可证文本 |
-| ISC | 24 | 同上 |
+| MIT | 153 | 保留版权声明与许可证文本 |
+| ISC | 25 | 同上 |
 | BlueOak-1.0.0 | 7 | 同上 |
 | BSD-3-Clause | 5 | 同上 |
-| Apache-2.0 | 1 | 同上；若包内有 `NOTICE` 还需一并保留 |
+| Apache-2.0 | 2 | 同上；若包内有 `NOTICE` 还需一并保留 |
+| 0BSD | 1 | 同上（0BSD 实际上不要求署名，这里仍一并列出） |
 | MIT AND ISC | 1 | 同上 |
+
+> 这张表由 `node scripts/generate-notices.mjs` 统计，**以
+> [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) 为准**。改依赖后请重新生成，
+> 不要手改这里的数字（它已经漂移过两次：145 → 205 → 194）。
 
 **没有任何 GPL / AGPL / SSPL / BUSL / Commons Clause 依赖**，也没有许可证未知的依赖。
 
@@ -45,7 +50,8 @@
 
 ## 2. 本项目自己的许可证 【需专业意见】
 
-本项目采用 **[Apache License 2.0](../LICENSE)**（自 v0.1.1 起；此前为专有软件）。
+本项目采用 **[Apache License 2.0](../LICENSE)**（此前为专有软件）。
+仓库当前版本号是 `0.1.0`，尚无正式发布标签 —— 不要引用一个不存在的版本号。
 
 ### 将来开源时的选项
 
@@ -82,7 +88,8 @@
 一旦有人向公开仓库提交了代码，**你就不能单方面改变整个项目的许可证**了 ——
 那部分代码的版权属于贡献者。如果预见到将来可能需要换协议，要么现在就用 CLA，
 要么在 CONTRIBUTING 里写明"提交即表示同意按当前协议授权"。当前的
-[CONTRIBUTING.md](../CONTRIBUTING.md) **没有**这一条。
+[CONTRIBUTING.md](../CONTRIBUTING.md) **已经有这一条**（见其「贡献授权」一节：
+*"提交 Pull Request 即表示你同意：你贡献的代码按本项目当前所采用的许可证授权给本项目。"*）。
 
 ---
 
@@ -157,7 +164,8 @@ Please contact customer service if you believe you received this message in erro
 - 本项目**不构成投资建议**，不对任何交易结果作出担保
 - 使用者需自行确认其所在辖区允许进行加密货币合约交易
 
-当前 [README](../README.md) 已有前两条，第三条建议补上（见第 6 节）。
+当前 [README](../README.md) 的「风险提示」一节**三条都已写明**：真实资金损失、
+不构成投资建议、以及使用者需自行确认所在辖区允许加密货币合约交易并遵守交易所条款。
 
 ---
 
@@ -186,12 +194,12 @@ Please contact customer service if you believe you received this message in erro
 
 ## 6. 待办清单
 
-按优先级排列，前两项建议现在就做：
+按优先级排列：
 
-- [ ] **【现在就做】** 在 README 的风险提示中补上"使用者需自行确认所在辖区允许
+- [x] **已完成** 在 README 的风险提示中写明"使用者需自行确认所在辖区允许
       进行加密货币合约交易，并遵守交易所条款" —— 这是**使用者责任**与
       **项目责任**的分界
-- [ ] **【现在就做】** 在 `CONTRIBUTING.md` 中补上贡献授权条款
+- [x] **已完成** 在 `CONTRIBUTING.md` 中写明贡献授权条款
       （"提交即表示同意按项目当前许可证授权"），为将来可能的协议变更留出空间
 - [ ] **【开源前】** 决定采用哪个协议，并让律师审阅最终的 `LICENSE`
 - [ ] **【开源前】** 确认届时的依赖清单仍无 copyleft（运行 `node scripts/generate-notices.mjs`）

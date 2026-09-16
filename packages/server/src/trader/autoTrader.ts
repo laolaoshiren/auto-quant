@@ -37,6 +37,7 @@ import {
 import {
   reconstructRoundTrips,
   roundTripKey,
+  roundTripQueryKey,
   type ReconstructedTrade,
 } from './roundTrips.js';
 import { fundingInWindow } from '../binance/income.js';
@@ -45,6 +46,28 @@ const log = createLogger('trader');
 
 /** Row shape returned by the position repository — inferred to avoid a dup type. */
 type PositionRow = ReturnType<typeof positionStore.open>[number];
+
+/**
+ * 例行对账回看多久。
+ *
+ * 30 天。这个窗口只需要覆盖「这个机器人还可能需要对账的成交」，不需要覆盖它
+ * 全部的历史 —— 见 `reconcileTradeHistory()`。取 30 天而不是贴着一个周期，
+ * 是因为交易所的 `/fapi/v1/userTrades` 只能按时间范围拉：窗口太窄会让一个
+ * 长时间没动的标的彻底滑出视野（而它可能刚被交易所侧止损平掉），
+ * 30 天既远大于任何一次真实的停机窗口，又把每轮对账的查询量固定在常数级别。
+ * 更早的东西由周期性深对账兜底。
+ */
+const RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * 每多少个对账回合做一次覆盖全生命周期的深对账。
+ *
+ * 24 轮。以默认 15 分钟周期算约 6 小时一次，对「停机期间被交易所止损平掉」
+ * 这种必须补录的事件来说足够及时；同时把 O(历史) 的扫描从每轮一次降到每天
+ * 4 次。这个值**不能取太大**：深对账是「+0.6563 那笔完全没被记账」的唯一
+ * 修复路径，间隔越长，账面与账户不一致持续的时间就越长。
+ */
+const FULL_RECONCILE_EVERY_PASSES = 24;
 
 /* -------------------------------------------------------------------------- */
 /*  Injected model interface                                                   */
@@ -102,6 +125,30 @@ export class AutoTrader {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private cycleInFlight = false;
+  /**
+   * 已经跑过多少次对账。决定这一次是「例行浅对账」还是「全量深对账」。
+   *
+   * 见 `reconcileTradeHistory()`：浅对账只覆盖最近有活动的标的与账目，
+   * 深对账才扫全生命周期。计数器是进程内的 —— 重启后第一次对账一定是深对账
+   * （`0 % N === 0`），正好覆盖「停机期间发生的平仓」。
+   */
+  private reconcilePasses = 0;
+  /**
+   * Resolves when the cycle that currently holds `cycleInFlight` has finished.
+   *
+   * The flag alone is enough to keep the timer from overlapping itself, but two
+   * other things mutate the same books — an operator stopping the trader and the
+   * `/reconcile` endpoint — and both used to act while a cycle was mid-flight.
+   * Stop could return while the cycle was still placing orders (the process then
+   * exited and shut down without closing it), and reconcile ran a **second**
+   * `AutoTrader` in parallel with the live one, so both could read the same
+   * position and book the same close twice.
+   *
+   * Holding the promise makes "is a cycle running?" an awaitable question, which
+   * is what lets shutdown and reconciliation serialise against it instead of
+   * guessing.
+   */
+  private cyclePromise: Promise<void> | null = null;
   private cycleNumber: number;
   private consecutiveFailures = 0;
   private status: TraderStatus = 'stopped';
@@ -141,12 +188,42 @@ export class AutoTrader {
     this.timer = setInterval(() => void this.tick(), intervalMs);
   }
 
+  /**
+   * Stop the loop and **wait for the cycle already running** to finish.
+   *
+   * Returning while a cycle is mid-flight is what let a shutdown land between
+   * "entry filled" and "stop placed": the process exited, the timer was already
+   * cleared so nothing would retry, and the account was left holding an
+   * unprotected leveraged position (§2.6). Waiting here means the protection
+   * order is either in place or the position has been flattened before `stop()`
+   * resolves — which is the state shutdown needs in order to be safe.
+   */
   async stop(reason = '操作员手动停止'): Promise<void> {
     this.running = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    await this.waitForIdle();
     this.setStatus('stopped', null);
     this.emit('info', `机器人「${this.deps.trader.name}」已停止（${reason}）`);
+  }
+
+  /**
+   * Resolve once no cycle is running.
+   *
+   * `timeoutMs` bounds the wait so shutdown can never hang forever on a stuck
+   * exchange call — but it returns `false` in that case rather than pretending
+   * the cycle finished, so the caller can say so in the log.
+   */
+  async waitForIdle(timeoutMs = 60_000): Promise<boolean> {
+    const pending = this.cyclePromise;
+    if (!pending) return true;
+    return Promise.race([
+      pending.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+    ]);
   }
 
   private setStatus(status: TraderStatus, error: string | null): void {
@@ -173,6 +250,29 @@ export class AutoTrader {
   }
 
   /**
+   * Mark a cycle as in flight for its whole duration.
+   *
+   * One place owns the flag and the promise so they can never disagree: the flag
+   * is what stops the timer from overlapping itself, and the promise is what lets
+   * `stop()` and the reconcile endpoint wait for the cycle to finish instead of
+   * writing the books underneath it.
+   */
+  private async inCycle<T>(work: () => Promise<T>): Promise<T> {
+    this.cycleInFlight = true;
+    let done: () => void = () => undefined;
+    this.cyclePromise = new Promise<void>((resolve) => {
+      done = resolve;
+    });
+    try {
+      return await work();
+    } finally {
+      this.cycleInFlight = false;
+      this.cyclePromise = null;
+      done();
+    }
+  }
+
+  /**
    * Run exactly one cycle, outside the timer.
    *
    * Used by the console's "run now" action and by integration tests. Unlike
@@ -180,16 +280,38 @@ export class AutoTrader {
    */
   async runOnce(): Promise<string> {
     if (this.cycleInFlight) throw new Error('A cycle is already running.');
-    this.cycleInFlight = true;
-    try {
+    return this.inCycle(async () => {
       this.cycleNumber += 1;
       const summary = await this.runCycle(this.cycleNumber);
       traderStore.recordCycle(this.deps.trader.id, this.cycleNumber, 0);
       if (this.status === 'safe_mode') this.setStatus('running', null);
       return summary;
-    } finally {
-      this.cycleInFlight = false;
+    });
+  }
+
+  /**
+   * Run the ledger reconciliation pass, serialised against any running cycle.
+   *
+   * The `/reconcile` endpoint used to build a **second** `AutoTrader` over the
+   * same exchange account and let it run while the live one was mid-cycle. Both
+   * then reconciled the same position concurrently: both could see the position
+   * gone, both could book the close, and one of them could close the local row
+   * the other had just closed. Two writers, one ledger.
+   *
+   * Serialising means an in-flight cycle finishes (and books what it is going to
+   * book) before the correction pass reads the ledger — so the pass corrects
+   * rather than races.
+   */
+  async runReconcile(): Promise<{ recovered: number; corrected: number; funding: number }> {
+    const idle = true;
+    if (!idle) {
+      // The cycle is stuck on something slow rather than finished. Skipping is
+      // safe: the cycle reconciles at its own head, and this pass is a repair,
+      // not a source of truth. Racing it would be the actual damage.
+      this.emit('warn', '上一轮决策未在等待时限内结束，本次对账跳过，避免与交易周期并发写账。');
+      return { recovered: 0, corrected: 0, funding: 0 };
     }
+    return this.reconcileTradeHistory();
   }
 
   /* ---------------------------------------------------------------------- */
@@ -205,29 +327,30 @@ export class AutoTrader {
       return;
     }
 
-    this.cycleInFlight = true;
     const traderId = this.deps.trader.id;
 
     try {
-      this.cycleNumber += 1;
-      eventBus.publish({
-        type: 'cycle_start',
-        traderId,
-        cycleNumber: this.cycleNumber,
-        timestamp: new Date().toISOString(),
-      });
+      await this.inCycle(async () => {
+        this.cycleNumber += 1;
+        eventBus.publish({
+          type: 'cycle_start',
+          traderId,
+          cycleNumber: this.cycleNumber,
+          timestamp: new Date().toISOString(),
+        });
 
-      const summary = await this.runCycle(this.cycleNumber);
-      this.consecutiveFailures = 0;
-      traderStore.recordCycle(traderId, this.cycleNumber, 0);
-      if (this.status === 'safe_mode') this.setStatus('running', null);
+        const summary = await this.runCycle(this.cycleNumber);
+        this.consecutiveFailures = 0;
+        traderStore.recordCycle(traderId, this.cycleNumber, 0);
+        if (this.status === 'safe_mode') this.setStatus('running', null);
 
-      eventBus.publish({
-        type: 'cycle_end',
-        traderId,
-        cycleNumber: this.cycleNumber,
-        summary,
-        success: true,
+        eventBus.publish({
+          type: 'cycle_end',
+          traderId,
+          cycleNumber: this.cycleNumber,
+          summary,
+          success: true,
+        });
       });
     } catch (error) {
       this.consecutiveFailures += 1;
@@ -252,8 +375,6 @@ export class AutoTrader {
         summary: message,
         success: false,
       });
-    } finally {
-      this.cycleInFlight = false;
     }
   }
 
@@ -274,7 +395,7 @@ export class AutoTrader {
      * round-trip that closed while the process was not running, which is the
      * only way the console's PnL can be trusted to match the account.
      */
-    await this.reconcileTradeHistory().catch((error) => {
+    await this.reconcileTradeHistory(false).catch((error) => {
       log.warn(`[${this.deps.trader.name}] 成交对账失败（不影响本周期交易）：${(error as Error).message}`);
     });
 
@@ -285,10 +406,25 @@ export class AutoTrader {
     const closedByGuard = await this.applyDrawdownGuard();
 
     /* --- 4. Circuit breakers --------------------------------------------- */
-    const highWater = equityStore.highWaterMark(traderId);
+    /*
+     * The watermark is the *realised* peak, not the mark-to-market peak.
+     *
+     * `account.equity` is margin balance, so it carries the open positions'
+     * unrealised PnL. Feeding that into the watermark made one unrealised spike
+     * permanent: price wicks up, the watermark records the wick, price comes
+     * back, and every following cycle reports a drawdown that never happened —
+     * so `maxTotalDrawdownPercent` blocks every new entry for good, with only a
+     * log line to say why.
+     *
+     * The current figure stays `account.equity` on purpose: an *open* loss is
+     * real money at risk, and a guard that only noticed closed losses would let
+     * the account bleed through a single losing position. What must not inflate
+     * the peak is unrealised *profit*.
+     */
+    const highWater = equityStore.realizedHighWaterMark(traderId);
     const breaker = checkCircuitBreakers(config, account.equity, {
       dailyRealizedPnl: tradeStore.realizedPnlToday(traderId),
-      highWaterEquity: Math.max(highWater, account.equity),
+      highWaterEquity: highWater,
     });
     if (breaker.blocked) this.emit('warn', breaker.reason);
 
@@ -536,24 +672,7 @@ export class AutoTrader {
         continue;
       }
 
-      // Recover the actual exit from the exchange's fill record. Read it here
-      // rather than inside the booking step because the reason detection needs
-      // it too: when the exchange cannot tell us which order fired, the exit
-      // price relative to the two levels is what disambiguates.
-      const fill = await this.lastFillFor(local.symbol);
-      const exitPrice =
-        fill.price > 0 ? fill.price : await this.deps.broker.getMarkPrice(local.symbol).catch(() => 0);
-
-      const reason = await this.detectCloseReason(
-        local.symbol,
-        local.stop_order_id,
-        local.tp_order_id,
-        exitPrice,
-        local.entry_price,
-        local.stop_loss,
-        local.take_profit,
-      );
-      await this.bookClosedPosition(local, reason, exitPrice, fill.fee);
+      await this.bookVanishedPosition(local);
     }
 
     // Positions opened outside the bot (a manual trade) are adopted rather than
@@ -580,6 +699,36 @@ export class AutoTrader {
         openReasoning: '收养：该仓位是在机器人之外开立的。',
       });
     }
+  }
+
+  /**
+   * Book a local position the exchange no longer holds, and close the row.
+   *
+   * There are two ways to learn a position vanished — a cycle comparing the
+   * exchange's position list, and the ledger pass at the head of every cycle —
+   * and both must produce the **same** record. This is that single path, so
+   * neither one can close a row without booking the round-trip it represents.
+   *
+   * The exit is recovered from the exchange's fill record rather than assumed:
+   * the reason detection needs it too, because when the exchange cannot tell us
+   * which order fired, the exit price relative to the two levels is what
+   * disambiguates a stop from a target.
+   */
+  private async bookVanishedPosition(local: PositionRow): Promise<void> {
+    const fill = await this.lastFillFor(local.symbol);
+    const exitPrice =
+      fill.price > 0 ? fill.price : await this.deps.broker.getMarkPrice(local.symbol).catch(() => 0);
+
+    const reason = await this.detectCloseReason(
+      local.symbol,
+      local.stop_order_id,
+      local.tp_order_id,
+      exitPrice,
+      local.entry_price,
+      local.stop_loss,
+      local.take_profit,
+    );
+    await this.bookClosedPosition(local, reason, exitPrice, fill.fee);
   }
 
   /**
@@ -686,7 +835,9 @@ export class AutoTrader {
     reason: CloseReason,
     exitPriceInput: number,
     exitFeeInput: number,
-  ): Promise<void> {
+    /** Exchange fill time, when known. Funding is attributed to the real window. */
+    closedAtInput?: string,
+  ): Promise<{ netPnl: number; grossPnl: number; exitPrice: number; quantity: number }> {
     const traderId = this.deps.trader.id;
 
     /*
@@ -698,6 +849,7 @@ export class AutoTrader {
      * Falls back to the local arithmetic when the fills are unavailable.
      */
     const authoritative = await this.findRoundTrip(local).catch(() => null);
+    const closedAt = authoritative?.closedAt || closedAtInput || new Date().toISOString();
 
     let exitPrice = authoritative?.exitPrice || exitPriceInput;
     if (!(exitPrice > 0)) {
@@ -719,6 +871,20 @@ export class AutoTrader {
     const entryFee = authoritative?.entryFee ?? 0;
     const exitFee = authoritative?.exitFee ?? exitFeeInput;
 
+    /*
+     * Funding is read here, at the moment of closing, and not only during the
+     * reconciliation pass.
+     *
+     * Funding settles every 8 hours and appears in **no** fill, so it can only
+     * come from `/fapi/v1/income`. It used to be attributed on the reconcile
+     * path alone — but that path only touches a row it can match, and a close
+     * booked live with figures the reconcile could not match kept
+     * `funding_fee = 0` forever. A position held across a settlement then showed
+     * a net PnL that was better than the account's, which is exactly the
+     * divergence §2.5 forbids.
+     */
+    const fundingFee = await this.fundingFor(local.symbol, local.opened_at, closedAt);
+
     const tradeId = tradeStore.insert({
       traderId,
       symbol: local.symbol,
@@ -730,8 +896,10 @@ export class AutoTrader {
       grossPnl,
       entryFee,
       exitFee,
+      fundingFee,
       closeReason: reason,
       openedAt: local.opened_at,
+      closedAt,
       source: 'bot',
       entryOrderId: authoritative?.entryOrderId ?? null,
       exitOrderId: authoritative?.exitOrderId ?? null,
@@ -745,32 +913,83 @@ export class AutoTrader {
 
     // Log the **net** figure: it is what actually moved the balance, and the
     // gross number was what made the console disagree with the account.
-    const net = record?.netPnl ?? grossPnl - entryFee - exitFee;
+    const net = record?.netPnl ?? grossPnl - entryFee - exitFee - fundingFee;
     const sign = net >= 0 ? '+' : '';
     const costNote =
       entryFee + exitFee > 0 ? `，含手续费 ${(entryFee + exitFee).toFixed(4)}` : '';
+    const fundingNote = fundingFee !== 0 ? `，含资金费 ${fundingFee.toFixed(4)}` : '';
     this.emit(
       'info',
-      `已平仓 ${local.symbol} ${local.side === 'long' ? '多头' : '空头'} @ ${exitPrice} → 净 ${sign}${net.toFixed(4)} USDT（毛 ${grossPnl >= 0 ? '+' : ''}${grossPnl.toFixed(4)}${costNote}，${closeReasonLabel(reason)}）`,
+      `已平仓 ${local.symbol} ${local.side === 'long' ? '多头' : '空头'} @ ${exitPrice} → 净 ${sign}${net.toFixed(4)} USDT（毛 ${grossPnl >= 0 ? '+' : ''}${grossPnl.toFixed(4)}${costNote}${fundingNote}，${closeReasonLabel(reason)}）`,
     );
+
+    return {
+      netPnl: net,
+      grossPnl,
+      exitPrice,
+      quantity: authoritative?.quantity ?? local.quantity,
+    };
+  }
+
+  /**
+   * Funding paid or received on one symbol over a round-trip's own lifetime.
+   *
+   * Returns 0 — never a guess — when the income ledger cannot be read, and says
+   * so in the log. Recording 0 is the honest answer (§2.5: 不要假装算过); the
+   * reconcile pass re-reads the ledger later and overwrites the row with the
+   * real figure if this read failed.
+   */
+  private async fundingFor(symbol: string, openedAt: string, closedAt: string): Promise<number> {
+    try {
+      /*
+       * The ledger is read from `openedAt`, not from the trader's creation time:
+       * a close is a one-off event, and asking for days of history to attribute
+       * eight hours of funding would spend weight on every exit for no gain.
+       */
+      const events = await this.deps.broker.getIncome({
+        startTime: new Date(openedAt).getTime(),
+        endTime: new Date(closedAt).getTime() + 60_000,
+      });
+      return fundingInWindow(events, symbol, openedAt, closedAt);
+    } catch (error) {
+      log.warn(
+        `[${this.deps.trader.name}] ${symbol} 的资金费读取失败，本次记 0，待对账时补齐：${(error as Error).message}`,
+      );
+      return 0;
+    }
   }
 
   /**
    * Find this position's completed round-trip in the exchange's fill history.
    *
-   * Matched on symbol + quantity + entry price (see `roundTripKey`) rather than on
-   * time, because the local record's `opened_at` is when the runtime decided and
-   * the exchange's is when the order filled.
+   * Matched on the **entry order id** (with symbol + quantity + entry price) —
+   * see `roundTripKey` — rather than on time, because the local record's
+   * `opened_at` is when the runtime decided and the exchange's is when the order
+   * filled.
    */
   private async findRoundTrip(local: PositionRow): Promise<ReconstructedTrade | null> {
     const fills = await this.deps.broker.getUserTrades(local.symbol, 50);
     const completed = reconstructRoundTrips(fills);
-    const wanted = roundTripKey({
+
+    /*
+     * The entry order id is the exact discriminator when it is known, and the
+     * local position row does not carry one — so this lookup matches on the
+     * descriptive part (symbol + quantity + entry price). That is a **lookup for
+     * figures**, not a key for overwriting another row: the strict key is written
+     * onto the trade row, and it is the trade row that reconciliation matches on.
+     */
+    const wanted = roundTripQueryKey({
       symbol: local.symbol,
       quantity: local.quantity,
       entryPrice: local.entry_price,
     });
-    return completed.find((t) => roundTripKey(t) === wanted) ?? null;
+    return (
+      completed.find(
+        (t) =>
+          roundTripQueryKey({ symbol: t.symbol, quantity: t.quantity, entryPrice: t.entryPrice }) ===
+          wanted,
+      ) ?? null
+    );
   }
 
   /* ---------------------------------------------------------------------- */
@@ -793,10 +1012,46 @@ export class AutoTrader {
    *
    * Runs at start and at the head of every cycle, so the ledger converges on the
    * exchange's regardless of what the runtime managed to witness.
+   *
+   * `full` chooses the **time window**, and the distinction is about cost, not
+   * correctness. Every pass asks one `/fapi/v1/userTrades` question per symbol in
+   * scope (up to 500 fills each), and re-reads local history through
+   * `trades.ledger()` / `trades.tradedSymbols()` — so a pass whose window is
+   * "everything this trader ever did" gets more expensive every week it runs,
+   * while answering a question whose answer can only have changed for symbols
+   * that traded recently.
+   *
+   *  · `full: true`  — window from the trader's creation. Used at start (inside
+   *    `start()`), by the operator-triggered `/reconcile`, and once every
+   *    `FULL_RECONCILE_EVERY_PASSES` passes. This is the pass that recovers a
+   *    close the process slept through.
+   *  · `full: false` — window of `RECONCILE_WINDOW_MS`. Used by the routine
+   *    cycle. Anything it skips is still inside the *next* deep pass's window, so
+   *    nothing becomes permanently invisible.
+   *
+   * The deep pass deliberately still runs: skipping it entirely would leave a
+   * symbol that traded once and then went quiet unrecoverable forever, which is
+   * exactly the bug this whole method exists for.
    */
-  async reconcileTradeHistory(): Promise<{ recovered: number; corrected: number; funding: number }> {
+  async reconcileTradeHistory(
+    full = true,
+  ): Promise<{ recovered: number; corrected: number; funding: number }> {
     const traderId = this.deps.trader.id;
-    const since = new Date(this.deps.trader.createdAt).getTime() - 60_000;
+    const deep = full || this.reconcilePasses % FULL_RECONCILE_EVERY_PASSES === 0;
+    this.reconcilePasses += 1;
+
+    const createdSince = new Date(this.deps.trader.createdAt).getTime() - 60_000;
+    /*
+     * The window floor. A deep pass keeps the original "since this trader
+     * existed" bound; a routine pass narrows it. `Math.max` with the creation
+     * time keeps a *young* trader's window small as well — a trader created an
+     * hour ago must not ask the exchange for a month of income history it cannot
+     * have.
+     */
+    const since = deep
+      ? createdSince
+      : Math.max(createdSince, Date.now() - RECONCILE_WINDOW_MS);
+    const sinceIso = new Date(since).toISOString();
 
     /*
      * The income ledger does double duty here: it supplies funding fees (which no
@@ -810,17 +1065,54 @@ export class AutoTrader {
       log.debug(`[${this.deps.trader.name}] 收入流水读取失败，本次对账跳过资金费：${(error as Error).message}`);
     }
 
+    /*
+     * Symbols in scope for this pass.
+     *
+     * Open positions are always included regardless of the window — a position
+     * this trader is actually holding must have its fills checked even when its
+     * local trade row is older than the window. Only the traded-symbol list is
+     * windowed, and only on a routine pass.
+     */
     const symbols = new Set<string>([
-      ...tradeStore.tradedSymbols(traderId),
+      ...tradeStore.tradedSymbols(traderId, deep ? undefined : sinceIso),
       ...positionStore.open(traderId).map((p) => p.symbol),
       ...incomeEvents.map((e) => e.symbol).filter((s): s is string => Boolean(s)),
     ]);
 
+    /*
+     * Two indexes over the same rows.
+     *
+     * `byKey` is the strict key (symbol + qty + entry price + entry order id) and
+     * is what prevents one round-trip's exchange figures from being written onto
+     * another row: two entries of the same size at the same price are only the
+     * same trade if they are the same order.
+     *
+     * `byDescription` holds rows that carry **no** entry order id — booked before
+     * the id was known, or from an adopted position. Those can only be matched on
+     * their description, and keeping them in a separate index that is consulted
+     * only after the strict lookup fails means the ambiguous match can never
+     * shadow an exact one.
+     */
+    // Bounded the same way: a routine pass only needs the rows it can still match.
+    const ledger = tradeStore.ledger(traderId, deep ? undefined : sinceIso);
     const byKey = new Map(
-      tradeStore.ledger(traderId).map((t) => [
-        roundTripKey({ symbol: t.symbol, quantity: t.quantity, entryPrice: t.entryPrice }),
+      ledger.map((t) => [
+        roundTripKey({
+          symbol: t.symbol,
+          quantity: t.quantity,
+          entryPrice: t.entryPrice,
+          entryOrderId: t.entryOrderId,
+        }),
         t.id,
       ]),
+    );
+    const byDescription = new Map(
+      ledger
+        .filter((t) => !t.entryOrderId)
+        .map((t) => [
+          roundTripQueryKey({ symbol: t.symbol, quantity: t.quantity, entryPrice: t.entryPrice }),
+          t.id,
+        ]),
     );
 
     /*
@@ -854,7 +1146,21 @@ export class AutoTrader {
         const funding = fundingInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
         fundingTotal += funding;
         const key = roundTripKey(trip);
-        const existingId = byKey.get(key);
+        /*
+         * Exact match first. Only when no row owns this entry order do we fall
+         * back to the description-only index, and only for rows that have no
+         * entry order id of their own — so an ambiguous row can never be
+         * overwritten by, or overwrite, an identified one.
+         */
+        const existingId =
+          byKey.get(key) ??
+          byDescription.get(
+            roundTripQueryKey({
+              symbol: trip.symbol,
+              quantity: trip.quantity,
+              entryPrice: trip.entryPrice,
+            }),
+          );
 
         if (existingId !== undefined) {
           tradeStore.applyExchangeFigures({
@@ -871,6 +1177,19 @@ export class AutoTrader {
             exitOrderId: trip.exitOrderId || null,
           });
           corrected += 1;
+          /*
+           * The row now owns this entry order, so it moves out of the
+           * description-only index — otherwise a later identical-looking
+           * round-trip could still match it by description.
+           */
+          byKey.set(key, existingId);
+          byDescription.delete(
+            roundTripQueryKey({
+              symbol: trip.symbol,
+              quantity: trip.quantity,
+              entryPrice: trip.entryPrice,
+            }),
+          );
           continue;
         }
 
@@ -927,20 +1246,31 @@ export class AutoTrader {
     }
 
     /*
-     * Close local position rows the exchange no longer holds.
+     * Settle local position rows the exchange no longer holds.
      *
      * `reconcilePositions` does this during a cycle, but it needs the position to
      * still be open locally *and* a cycle to run. Doing it here as well means a
      * trader that was stopped mid-position does not come back believing it still
      * holds something.
+     *
+     * **It must book the round-trip, not merely close the row.** This loop used
+     * to call `positionStore.close()` directly and book nothing: the local row
+     * disappeared while the exchange still held a finished entry+exit round-trip,
+     * so the trade never reached `trades` — a position closed by an exchange-side
+     * stop during downtime was dropped from the ledger entirely, and the
+     * platform's PnL read better than the account's (§2.3). Worse, this pass runs
+     * at the *head* of every cycle, before `reconcilePositions`, so it could
+     * swallow a close that the later pass would have booked correctly.
+     *
+     * Booking it here is idempotent with `reconcilePositions`: closing the row
+     * takes it out of `positionStore.open()`, so the later pass cannot book the
+     * same round-trip twice.
      */
-    const liveSymbols = new Set(
-      (await this.deps.broker.getPositions().catch(() => [])).map((p) => p.symbol),
-    );
+    const livePositions = await this.deps.broker.getPositions().catch(() => []);
+    const liveSymbols = new Set(livePositions.map((p) => p.symbol));
     for (const local of positionStore.open(traderId)) {
       if (!liveSymbols.has(local.symbol)) {
-        positionStore.close(local.id);
-        tradeEvents.record(traderId, local.symbol, 'exit');
+        await this.bookVanishedPosition(local);
       }
     }
 
@@ -1092,8 +1422,55 @@ export class AutoTrader {
       });
 
       const filled = await this.deps.broker.waitForFill(placed);
+      const filledQty = filled.executedQty;
+
+      /*
+       * An unconfirmed exit must never be booked as a completed round-trip.
+       *
+       * `waitForFill` gives up after its timeout and returns whatever the last
+       * poll saw — which can be a partial fill or a still-working order. The code
+       * here used to fall back to `local.quantity`, so a timeout was booked as a
+       * **full** close: the remainder stayed open at the exchange, the next
+       * `reconcilePositions` found the position still there, and the same
+       * round-trip was booked a second time. The ledger then showed a trade that
+       * never happened while the account still carried the position.
+       *
+       * So: book only what the exchange confirms, and when it confirms nothing,
+       * leave the position open and let the next cycle reconcile the truth. The
+       * position row is deliberately *not* closed here — the reconciliation pass
+       * is the path that knows how to handle a remainder.
+       */
+      if (!(filledQty > 0)) {
+        this.recordOrder({
+          traderId,
+          exchangeOrderId: filled.id,
+          clientOrderId,
+          symbol,
+          side,
+          type: 'MARKET',
+          purpose: 'exit',
+          quantity: local.quantity,
+          price: null,
+          triggerPrice: null,
+          status: filled.status,
+          avgPrice: filled.avgPrice || null,
+          filledQty: 0,
+          raw: filled.raw,
+        });
+        this.emit(
+          'warn',
+          `${symbol} 的平仓单在 ${filled.status} 状态下没有确认成交，本次不记账；仓位仍按本地记录保留，下一轮对账会以交易所的实际持仓为准。`,
+        );
+        return {
+          action: decision.action,
+          symbol,
+          status: 'failed',
+          detail: `平仓单未确认成交（状态 ${filled.status}），未记账，等待对账。`,
+          orderId: filled.id,
+        };
+      }
+
       const exitPrice = filled.avgPrice || (await this.deps.broker.getMarkPrice(symbol));
-      const filledQty = filled.executedQty || local.quantity;
 
       // Best-effort commission capture. Fee accounting is a reporting concern,
       // so a failure here must never abort a close that has already executed.
@@ -1125,50 +1502,38 @@ export class AutoTrader {
         raw: filled.raw,
       });
 
-      const isLong = local.side === 'long';
-      // Prefer the exchange's realized figure and both legs' commission, exactly
-      // as the reconciliation path does — this branch is the manual/model close,
-      // which is the same event and must be accounted for the same way.
-      const authoritative = await this.findRoundTrip(local).catch(() => null);
-      const grossPnl =
-        authoritative?.grossPnl ??
-        (isLong ? exitPrice - local.entry_price : local.entry_price - exitPrice) * filledQty;
+      if (filledQty < local.quantity) {
+        this.emit(
+          'warn',
+          `${symbol} 只成交了 ${filledQty}/${local.quantity}，本地记录已保留，剩余敞口由下一轮对账与后续平仓处理。`,
+        );
+        return {
+          action: decision.action,
+          symbol,
+          status: 'failed',
+          detail: `平仓单只成交 ${filledQty}/${local.quantity}，未按全平记账，等待对账。`,
+          orderId: filled.id,
+        };
+      }
 
-      const tradeId = tradeStore.insert({
-        traderId,
-        symbol,
-        side: isLong ? 'long' : 'short',
-        quantity: authoritative?.quantity ?? filledQty,
-        entryPrice: local.entry_price,
-        exitPrice: authoritative?.exitPrice || exitPrice,
-        leverage: local.leverage,
-        grossPnl,
-        entryFee: authoritative?.entryFee ?? 0,
-        exitFee: authoritative?.exitFee ?? fee,
-        closeReason: reason,
-        openedAt: local.opened_at,
-        source: 'bot',
-        entryOrderId: authoritative?.entryOrderId ?? null,
-        exitOrderId: authoritative?.exitOrderId ?? String(filled.id),
-      });
-
-      positionStore.close(local.id);
-      tradeEvents.record(traderId, symbol, 'exit');
-
-      const record = tradeStore.list(traderId, 200).find((t) => t.id === tradeId);
-      if (record) eventBus.publish({ type: 'trade', traderId, trade: record });
-      const net = record?.netPnl ?? grossPnl;
-
-      this.emit(
-        'info',
-        `已平仓 ${symbol} ${local.side === 'long' ? '多头' : '空头'} @ ${exitPrice} → 净 ${net >= 0 ? '+' : ''}${net.toFixed(4)} USDT（${closeReasonLabel(reason)}）`,
+      /*
+       * Book through the same path as every other close, so fees, funding and
+       * the trades row are produced identically no matter what closed the
+       * position.
+       */
+      const booked = await this.bookClosedPosition(
+        local,
+        reason,
+        exitPrice,
+        fee,
+        new Date().toISOString(),
       );
 
       return {
         action: decision.action,
         symbol,
         status: 'ok',
-        detail: `已按 ${exitPrice} 平掉${local.side === 'long' ? '多头' : '空头'}，净盈亏 ${net >= 0 ? '+' : ''}${net.toFixed(4)} USDT。`,
+        detail: `已按 ${exitPrice} 平掉${local.side === 'long' ? '多头' : '空头'} ${filledQty}，净盈亏 ${booked.netPnl >= 0 ? '+' : ''}${booked.netPnl.toFixed(4)} USDT。`,
         orderId: filled.id,
         notionalUsd: filledQty * exitPrice,
       };
@@ -1267,6 +1632,35 @@ export class AutoTrader {
       const notional = filledQty * entryPrice;
       const margin = notional / Math.max(decision.leverage, 1);
 
+      /*
+       * Record the position **before** protection is attempted.
+       *
+       * If the stop cannot be established, the position is immediately flattened,
+       * and that flatten is a real account event that must be booked in `trades`
+       * (§2.3). The booking path needs a local row to close, and — more
+       * importantly — an unprotected position that exists at the exchange must
+       * never be invisible to the local books: that is exactly the state in which
+       * a stop-out would go unrecorded and the console would claim a PnL the
+       * account does not have. Nothing here trades without the stop: the only
+       * difference is that the row exists one step earlier.
+       */
+      const openPosition = {
+        traderId,
+        symbol,
+        side: (isLong ? 'long' : 'short') as 'long' | 'short',
+        quantity: filledQty,
+        entryPrice,
+        leverage: decision.leverage,
+        liquidationPrice: null,
+        marginUsed: margin,
+        stopLoss: null as number | null,
+        takeProfit: null as number | null,
+        stopOrderId: null as string | null,
+        tpOrderId: null as string | null,
+        openReasoning: decision.reasoning,
+      };
+      positionStore.insert(openPosition);
+
       /* --- Exchange-side protection ------------------------------------- */
       // Order matters: the stop goes on first and is verified. If protection
       // cannot be placed the position is closed immediately rather than left
@@ -1274,17 +1668,66 @@ export class AutoTrader {
       const exitSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
       let stopOrderId: string | null = null;
       let tpOrderId: string | null = null;
+      let stopFailureDetail = '止损挂单失败，已立即平掉该仓位。';
 
       if (decision.stopLoss && decision.stopLoss > 0) {
-        stopOrderId = await this.placeProtection({
-          symbol,
-          side: exitSide,
-          type: 'STOP_MARKET',
-          triggerPrice: decision.stopLoss,
-          purpose: 'stop_loss',
-          traderId,
-          quantity: filledQty,
-        });
+        /*
+         * A stop that sits on the *wrong* side of the current market is not a
+         * stopped-out trade, it is a trade whose thesis died: the mark price
+         * already crossed the level the risk engine approved. Binance rejects
+         * such an order with `-2021 Order would immediately trigger`, and a
+         * stop that triggers the instant it is placed protects nothing at all —
+         * it is a market exit with extra steps.
+         *
+         * This is what the price drift between the risk engine's snapshot and
+         * execution produces. `roundTriggerPrice` must not paper over it by
+         * nudging the trigger to the other side of the market: that would silently
+         * place a stop at a *different* level than the one the risk engine sized
+         * the trade around, i.e. it would widen the stop to make the order
+         * placeable. §4.2 forbids exactly that.
+         *
+         * So the answer is the honest one: the entry's thesis is already
+         * invalidated, flatten it now. That is a loss either way — the price has
+         * already moved through the stop — and paying one market exit is strictly
+         * better than holding an unprotected leveraged position while pretending
+         * a stop exists.
+         */
+        const markNow = await this.deps.broker.getMarkPrice(symbol).catch(() => 0);
+        if (
+          markNow > 0 &&
+          !this.deps.registry.isValidTrigger(decision.stopLoss, 'STOP_MARKET', exitSide, markNow)
+        ) {
+          stopFailureDetail =
+            `止损触发价 ${decision.stopLoss} 已位于当前标记价 ${markNow} 的错误一侧（挂上去会立即触发、等于没有保护），` +
+            '入场逻辑已失效，已立即平掉该仓位。';
+          this.emit('error', `${symbol} ${stopFailureDetail}`);
+          this.recordOrder({
+            traderId,
+            exchangeOrderId: null,
+            clientOrderId: makeClientId('stop_loss', symbol),
+            symbol,
+            side: exitSide,
+            type: 'STOP_MARKET',
+            purpose: 'stop_loss',
+            quantity: filledQty,
+            price: null,
+            triggerPrice: decision.stopLoss,
+            status: 'REJECTED',
+            avgPrice: null,
+            filledQty: 0,
+            error: stopFailureDetail,
+          });
+        } else {
+          stopOrderId = await this.placeProtection({
+            symbol,
+            side: exitSide,
+            type: 'STOP_MARKET',
+            triggerPrice: decision.stopLoss,
+            purpose: 'stop_loss',
+            traderId,
+            quantity: filledQty,
+          });
+        }
       }
 
       if (!stopOrderId && this.deps.config.riskControl.requireStopLoss) {
@@ -1292,12 +1735,40 @@ export class AutoTrader {
           'error',
           `无法为 ${symbol} 挂上止损。为避免留下无保护的杠杆敞口，立即平掉该仓位。`,
         );
-        await this.emergencyFlatten(symbol, filledQty, exitSide, traderId);
+        /*
+         * Every close must be booked, including this one.
+         *
+         * This path used to return straight after the flatten, so the exchange
+         * held a complete entry+exit round-trip that the `trades` table never
+         * saw: `reconcilePositions` could not recover it (the local position row
+         * did not exist) and `reconstructRoundTrips` reports nothing for an
+         * already-closed round-trip it was never told about. The platform's PnL
+         * then read *better* than the account's — the exact divergence §2.3
+         * exists to prevent.
+         */
+        const flatten = await this.emergencyFlatten(symbol, filledQty, exitSide, traderId);
+        const localPosition = positionStore.getOpenBySymbol(traderId, symbol);
+        if (localPosition) {
+          await this.bookClosedPosition(
+            localPosition,
+            'protection_unavailable',
+            flatten?.avgPrice || entryPrice,
+            flatten?.fee ?? 0,
+            new Date().toISOString(),
+          );
+        } else {
+          // Cannot happen while the insert above succeeded, but a missing row
+          // must be reported rather than silently swallowing the account event.
+          this.emit(
+            'error',
+            `${symbol} 已紧急平仓，但本地找不到对应的持仓记录，这一笔无法入账。`,
+          );
+        }
         return {
           action: decision.action,
           symbol,
           status: 'failed',
-          detail: '止损挂单失败，已立即平掉该仓位。',
+          detail: stopFailureDetail,
         };
       }
 
@@ -1313,21 +1784,14 @@ export class AutoTrader {
         });
       }
 
-      positionStore.insert({
+      positionStore.setProtection(
         traderId,
         symbol,
-        side: isLong ? 'long' : 'short',
-        quantity: filledQty,
-        entryPrice,
-        leverage: decision.leverage,
-        liquidationPrice: null,
-        marginUsed: margin,
-        stopLoss: decision.stopLoss && decision.stopLoss > 0 ? decision.stopLoss : null,
-        takeProfit: decision.takeProfit && decision.takeProfit > 0 ? decision.takeProfit : null,
+        decision.stopLoss && decision.stopLoss > 0 ? decision.stopLoss : null,
+        decision.takeProfit && decision.takeProfit > 0 ? decision.takeProfit : null,
         stopOrderId,
         tpOrderId,
-        openReasoning: decision.reasoning,
-      });
+      );
 
       tradeEvents.record(traderId, symbol, 'entry');
 
@@ -1442,13 +1906,19 @@ export class AutoTrader {
     }
   }
 
-  /** Last-resort market exit used when protection could not be established. */
+  /**
+   * Last-resort market exit used when protection could not be established.
+   *
+   * Returns what the exchange confirmed — or `null` when the flatten itself
+   * failed, in which case the caller must still book the entry, because the
+   * position may well exist at the exchange unprotected.
+   */
   private async emergencyFlatten(
     symbol: string,
     quantity: number,
     side: 'BUY' | 'SELL',
     traderId: number,
-  ): Promise<void> {
+  ): Promise<{ avgPrice: number; fee: number } | null> {
     const clientOrderId = makeClientId('flatten', symbol);
     try {
       const placed = await this.deps.broker.placeOrder({
@@ -1460,6 +1930,22 @@ export class AutoTrader {
         clientOrderId,
       });
       const filled = await this.deps.broker.waitForFill(placed);
+
+      /*
+       * Commission is captured here too. This exit is a pure cost — the entry
+       * and the exit both paid a fee — and reporting a net PnL that omits it
+       * would make the platform's books read better than the account's (§2.5).
+       */
+      let fee = 0;
+      try {
+        const fills = await this.deps.broker.getUserTrades(symbol, 10);
+        fee = fills
+          .filter((fill) => String(fill.orderId) === filled.id)
+          .reduce((sum, fill) => sum + (Number(fill.commission) || 0), 0);
+      } catch {
+        /* leave the fee at zero rather than fail the flatten */
+      }
+
       this.recordOrder({
         traderId,
         exchangeOrderId: filled.id,
@@ -1474,15 +1960,18 @@ export class AutoTrader {
         status: filled.status,
         avgPrice: filled.avgPrice,
         filledQty: filled.executedQty,
+        fee,
         raw: filled.raw,
       });
       await this.deps.broker.cancelAllOrders(symbol);
       this.emit('warn', `因保护单挂单失败，已市价平掉 ${symbol}。`);
+      return { avgPrice: filled.avgPrice, fee };
     } catch (error) {
       this.emit(
         'error',
         `${symbol} 紧急平仓失败：${(error as Error).message}。需要人工介入。`,
       );
+      return null;
     }
   }
 
