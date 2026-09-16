@@ -16,6 +16,7 @@ import { parseDecisionResponse, hasDecisionBlock, sortDecisions } from './parser
 import {
   buildSystemPrompt,
   buildUserPrompt,
+  emptyPromptMemory,
   estimateCandidateChars,
   estimateTokens,
   PROMPT_TOKEN_BUDGET,
@@ -194,6 +195,11 @@ export async function checkStrategy(options: {
     positions: [],
     candidates: snapshots,
     recentTrades: [],
+    /*
+     * 体检不连数据库，所以记忆区块是空的 —— 但它必须**存在**：这一段的目的是量出
+     * 真实的提示词大小，少一块就等于把报告里的 token 数报低了（见下面的预算检查）。
+     */
+    memory: emptyPromptMemory(options.config),
     oiRanking,
   };
 

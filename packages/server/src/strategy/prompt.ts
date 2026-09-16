@@ -37,6 +37,119 @@ export interface PromptContext {
   candidates: MarketSnapshot[];
   recentTrades: TradeRecord[];
   oiRanking: OiRankRow[];
+  /**
+   * 模型对自己历史的「记忆」（提案 §2 的三个区块）。
+   *
+   * ⚠️ 这三个区块是**唯一不参与预算裁剪**的内容：组装完成后超出预算时先砍候选标的，
+   * 绝不砍它们。理由见 `trimCandidatesForBudget()` —— 行情是"这一轮的机会"，
+   * 记忆是"我一直在亏钱"；丢掉前者只是错过一次机会，丢掉后者会让系统永远重复
+   * 同一个错误，而那正是当前问题的根源。
+   */
+  memory: PromptMemory;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  记忆区块的输入（提案 §2）                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 绩效区块的统计窗口（小时）。
+ *
+ * 固定值，不是"从第一笔成交算起"：窗口固定 + SQL 聚合 = §4 要求的 O(1)。
+ * 没有这条，"7×24 跑一年"之后这个区块会随历史长度线性膨胀。
+ */
+export const PROMPT_PERFORMANCE_WINDOW_HOURS = 24;
+
+/**
+ * 「最近平仓」区块的笔数。
+ *
+ * 固定 N 是第二块 O(1)：逐笔明细永远只有 5 行，跑一年也不会变长。
+ * 这也是 §2.4「不加完整成交历史」的落地方式 —— 明细是 O(n)，聚合是 O(1)。
+ */
+export const PROMPT_RECENT_CLOSE_COUNT = 5;
+
+/**
+ * 绩效区块的全部输入。字段固定，所以渲染出来的字节数固定。
+ *
+ * 金额都是 USDT；`roundTripFeeRate` 是**小数比例**（0.001 = 0.10%），
+ * 字段名带单位后缀以免调用方再乘一次 100（§5.3）。
+ */
+export interface PromptPerformance {
+  windowHours: number;
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  grossPnl: number;
+  totalFees: number;
+  totalFunding: number;
+  netPnl: number;
+  avgWin: number;
+  /** 平均亏损额（正数）。渲染时加负号。 */
+  avgLoss: number;
+  /** 实际盈亏比 = 平均盈利 / 平均亏损；窗口内没有亏损单时为 null。 */
+  realizedPayoffRatio: number | null;
+  /** 往返成本占名义价值的比例；窗口内没有成交时为 null（不编造）。 */
+  roundTripFeeRate: number | null;
+}
+
+/**
+ * 一笔最近平仓 + **模型当时的入场理由**。
+ *
+ * 第二项是关键：把"当时的理由"和"实际结果"放在一起，是模型唯一能形成
+ * "我某个判断模式不奏效"的机制。没有它，明细只是流水账。
+ */
+export type PromptClose = TradeRecord & {
+  /** 开仓时模型写下的理由（持仓行的 `open_reasoning`），可能为空。 */
+  entryReason: string | null;
+};
+
+/** 「本周期约束」区块的输入：模型离节流与冷却还有多远。 */
+export interface PromptThrottleBudget {
+  entriesThisHour: number;
+  maxEntriesPerHour: number;
+  /** 距最近一次平仓过了多少分钟；从未平过仓时为 null。 */
+  minutesSinceLastExit: number | null;
+  reentryCooldownMinutes: number;
+}
+
+/** 三个记忆区块的全部输入。 */
+export interface PromptMemory {
+  performance: PromptPerformance;
+  recentCloses: PromptClose[];
+  throttle: PromptThrottleBudget;
+}
+
+/**
+ * 没有账本可读时的记忆区块（策略体检 / 管道验证这类诊断路径）。
+ *
+ * 如实表示"还没有任何成交"，而不是编一组数字出来：诊断路径展示的提示词必须与
+ * 实盘真的会发出去的那一份形状一致，否则体检报告的 token 数就没意义了 ——
+ * 那正是 `healthCheck` 里"这段预算检查必须在调用之前做"的原因。
+ */
+export function emptyPromptMemory(config: StrategyConfig): PromptMemory {
+  return {
+    performance: {
+      windowHours: PROMPT_PERFORMANCE_WINDOW_HOURS,
+      totalTrades: 0,
+      wins: 0,
+      losses: 0,
+      grossPnl: 0,
+      totalFees: 0,
+      totalFunding: 0,
+      netPnl: 0,
+      avgWin: 0,
+      avgLoss: 0,
+      realizedPayoffRatio: null,
+      roundTripFeeRate: null,
+    },
+    recentCloses: [],
+    throttle: {
+      entriesThisHour: 0,
+      maxEntriesPerHour: config.throttle.maxEntriesPerHour,
+      minutesSinceLastExit: null,
+      reentryCooldownMinutes: config.throttle.reentryCooldownMinutes,
+    },
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -112,6 +225,37 @@ const MODE_GUIDANCE: Record<StrategyConfig['tradingMode'], string> = {
   ].join('\n'),
 };
 
+/**
+ * 硬性约束里那条与手续费有关的止损要求（提案 §5）。
+ *
+ * ## 为什么它必须出现在提示词里
+ *
+ * 与 §2.3 同一条道理：**看不见的约束等于不存在**。这条门槛会拒掉一批"看起来没问题"
+ * 的止损（止损比往返成本还近），而模型如果不知道它，就会一轮又一轮地提出这些提案 ——
+ * 每一次被拒都浪费一次决策机会。
+ *
+ * ## 数字必须与风控用的是同一个
+ *
+ * 有成交就按成交记录实测的费率，没有就按配置的兜底费率 —— 与
+ * `RiskEngine.reviewOpen()` 第 6b 步的取值规则完全一致。两处各说各话时，模型会照着
+ * 提示词里的数字合规，却仍然被拒（或反过来）。
+ */
+function feeAwareStopConstraint(
+  risk: StrategyConfig['riskControl'],
+  observedRoundTripFeeRate: number | null,
+): string {
+  const multiple = risk.minStopLossFeeMultiple;
+  if (!(multiple > 0)) return '';
+  const rate = observedRoundTripFeeRate ?? risk.fallbackRoundTripFeeRate;
+  const source = observedRoundTripFeeRate === null ? '按配置的兜底费率' : '按近期成交实测';
+  const minPercent = rate * multiple * 100;
+  return (
+    `- 止损距离（|开仓价 − 止损价| / 开仓价）必须至少是往返手续费的 ${multiple} 倍` +
+    `（${source}，往返成本约 ${(rate * 100).toFixed(2)}%，即止损幅度不得小于 ${minPercent.toFixed(2)}%）。` +
+    '止损比交易成本还近的交易，方向做对了也是亏的。'
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /*  System prompt                                                              */
 /* -------------------------------------------------------------------------- */
@@ -170,6 +314,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       `- 单笔最小名义价值：${risk.minPositionSize} USDT`,
       `- 最大保证金占用：权益的 ${risk.maxMarginUsage}%`,
       `- 新开仓的最低盈亏比：1:${risk.minRiskRewardRatio}`,
+      feeAwareStopConstraint(risk, ctx.memory.performance.roundTripFeeRate),
       `- 开仓所需的最低置信度：${risk.minConfidence}/100`,
       risk.requireStopLoss
         ? '- 每一笔开仓都必须带止损。没有止损的开仓会被拒绝。'
@@ -273,14 +418,240 @@ export function buildSystemPrompt(ctx: PromptContext): string {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  记忆区块的渲染（提案 §2）                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 「你的交易绩效」区块（§2.1）。固定四行左右，永远不随历史增长。
+ *
+ * ## 为什么最后一行是服务端算出来的倍数，而不是一句固定文案
+ *
+ * 那一行是**反过度交易的核心信号**：它把"你在亏"直接翻译成"你该少做"，而不是让
+ * 模型自己从一堆数字里推断。但如果写成固定句子，它在账户开始赚钱之后仍然是
+ * 同一句话 —— 模型只要发现一次"这行是假的"，整个区块的可信度就没了。
+ *
+ * 所以倍数一律按窗口内的真实数字算，并且：
+ *   · 毛盈亏为 0 时倍数是无穷，直接渲染 ∞（同一个模板，只换数字）；
+ *   · 倍数 < 1（成本还没吞掉全部毛盈亏）时**只陈述事实**，不加"减少交易次数"那句
+ *     指令 —— 那时它不是唯一有效的方向，说反了比不说更糟。
+ */
+function renderPerformance(performance: PromptPerformance, config: StrategyConfig): string {
+  const lines: string[] = ['# 你的交易绩效'];
+  const hours = performance.windowHours;
+
+  if (performance.totalTrades === 0) {
+    lines.push(`最近 ${hours} 小时没有已平仓的交易，因此没有可对比的绩效。`);
+    return lines.join('\n');
+  }
+
+  /*
+   * 资金费只在非 0 时出现。
+   *
+   * 不是可选的装饰：`净 = 毛 − 手续费 − 资金费` 是这个平台唯一允许出现的盈亏口径
+   * （§2.5）。资金费被结算过、却不在这一行里露面的账，模型无论怎么加都对不上，
+   * 而一个对不上的账本会让人（和模型）不再相信里面任何一个数字。
+   */
+  const fundingTerm =
+    performance.totalFunding !== 0 ? ` · 资金费 ${fmtSigned(-performance.totalFunding, 2)}` : '';
+
+  lines.push(
+    `最近 ${hours} 小时：${performance.totalTrades} 笔（${performance.wins} 胜 ${performance.losses} 负）` +
+      `· 毛 ${fmtSigned(performance.grossPnl, 2)}` +
+      ` · 手续费 ${fmtSigned(-performance.totalFees, 2)}${fundingTerm}` +
+      ` · 净 ${fmtSigned(performance.netPnl, 2)}`,
+  );
+
+  const payoffRatio = performance.realizedPayoffRatio;
+  lines.push(
+    `平均盈利 ${fmtSigned(performance.avgWin, 2)} · 平均亏损 ${fmtSigned(-performance.avgLoss, 2)}` +
+      ` · 实际盈亏比 ${payoffRatio === null ? '无（窗口内没有亏损单）' : payoffRatio.toFixed(2)}` +
+      `（新开仓要求 ≥ ${config.riskControl.minRiskRewardRatio}）`,
+  );
+
+  if (performance.roundTripFeeRate !== null) {
+    lines.push(`每次往返成本约 ${(performance.roundTripFeeRate * 100).toFixed(2)}%（名义价值）`);
+  }
+
+  if (performance.totalFees > 0) {
+    const multiple =
+      Math.abs(performance.grossPnl) > 1e-9
+        ? performance.totalFees / Math.abs(performance.grossPnl)
+        : Number.POSITIVE_INFINITY;
+    const rendered = Number.isFinite(multiple) ? multiple.toFixed(1) : '∞';
+    lines.push(
+      multiple >= 1
+        ? `**手续费是毛盈亏的 ${rendered} 倍 —— 减少交易次数是当前唯一有效的改进方向。**`
+        : `手续费是毛盈亏的 ${rendered} 倍。`,
+    );
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * 「最近平仓」区块（§2.2）：固定 N=5 笔，每笔**两行**。
+ *
+ * 第二行才是重点 —— 把模型**当时的理由**和**实际结果**并排放在一起。这是它唯一
+ * 能形成"我某个判断模式不奏效"的机制：只看结果它不知道自己错在哪，只看理由它
+ * 不知道那个理由已经失败过。
+ *
+ * 理由只留**一句话**（§2.4）：全文会让区块变成 O(n)，而理由的**形状**
+ * （是"1M 突破"还是"RSI 超卖"）比全文更有诊断价值。
+ */
+function renderRecentCloses(closes: PromptClose[], now: Date): string {
+  if (closes.length === 0) {
+    return '# 最近平仓\n还没有已平仓的交易。';
+  }
+
+  const blocks = closes.map((close) => {
+    const closedAt = new Date(close.closedAt).getTime();
+    const minutesAgo = Number.isFinite(closedAt)
+      ? Math.max(0, (now.getTime() - closedAt) / 60_000)
+      : 0;
+    const head =
+      `- ${close.symbol} ${close.side === 'long' ? '多' : '空'} ${close.leverage}x ` +
+      `@${fmt(close.entryPrice)}→${fmt(close.exitPrice)}  净 ${fmtSigned(close.netPnl, 3)}  ` +
+      `${closeReasonLabel(close.closeReason)}  (${humanDuration(minutesAgo)}前)`;
+    return `${head}\n  你当时的理由：${oneLine(close.entryReason, 60)}`;
+  });
+
+  return `# 最近平仓（最新在前）\n${blocks.join('\n')}`;
+}
+
+/**
+ * 「本周期约束」区块（§2.3）：让模型知道自己离节流与冷却多远。
+ *
+ * 这些限制**已经在代码里强制执行**，但模型看不见。看不见的约束等于不存在 ——
+ * 它会反复提出必然被拒的请求，浪费一次调用，也浪费一次决策机会。
+ *
+ * 冷却只报"最近一次平仓"（见 `tradeEvents.lastExit()`）：列出每个仍在冷却的标的
+ * 会让这一块随标的数增长，而 §4 要求它是 O(1)。判定仍然按标的执行，这里只是
+ * 让模型看得见它。
+ */
+function renderThrottleBudget(budget: PromptThrottleBudget): string {
+  const parts = [`本小时已开仓 ${budget.entriesThisHour} / ${budget.maxEntriesPerHour} 笔`];
+
+  if (budget.minutesSinceLastExit === null) {
+    parts.push('本机器人还没有平过仓');
+  } else if (budget.reentryCooldownMinutes <= 0) {
+    parts.push(`上次平仓在 ${humanDuration(budget.minutesSinceLastExit)}前（未启用再入场冷却）`);
+  } else {
+    const remaining = budget.reentryCooldownMinutes - budget.minutesSinceLastExit;
+    parts.push(
+      `上次平仓在 ${humanDuration(budget.minutesSinceLastExit)}前（再入场冷却 ${budget.reentryCooldownMinutes} 分钟，` +
+        (remaining > 0 ? `还剩 ${humanDuration(remaining)}）` : '已满）'),
+    );
+  }
+
+  return `# 本周期约束\n${parts.join(' · ')}`;
+}
+
+/**
+ * 压成一行并截断。
+ *
+ * 模型写下的 `reasoning` 可以是多行散文；原样进提示词会让"每笔两行"变成长短不一的
+ * 段落（区块大小随内容浮动），也会挤掉真正重要的聚合数字。
+ */
+function oneLine(text: string | null, maxChars: number): string {
+  const flat = (text ?? '').replace(/\s+/g, ' ').trim();
+  if (flat === '') return '（未记录）';
+  return flat.length > maxChars ? `${flat.slice(0, maxChars)}…` : flat;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  User prompt                                                                */
 /* -------------------------------------------------------------------------- */
 
 /**
  * Assemble the per-cycle user prompt: the complete, factual state of the world
  * the model needs to decide.
+ *
+ * ## 预算守卫：超预算时**先砍行情，绝不砍记忆**（提案 §3）
+ *
+ * 组装完成后估算 token 数（`estimateTokens()`），超过上限就从**最弱的候选标的**
+ * 开始丢，直到装得下为止。绩效、最近平仓与约束这三个区块**一个字段都不裁**。
+ *
+ * 这个取舍方向是刻意的：候选区块是"这一轮的机会"，记忆区块是"我一直在亏钱"。
+ * 丢掉前者只是错过一次机会；丢掉后者会让系统永远重复同一个错误 —— 而后者正是
+ * 当前问题的根源。见 `trimCandidatesForBudget()`。
  */
-export function buildUserPrompt(ctx: PromptContext): string {
+export function buildUserPrompt(ctx: PromptContext, budgetTokens = PROMPT_TOKEN_BUDGET): string {
+  /*
+   * 系统提示词也是同一次请求的一部分，所以预算必须把它算进去。只量用户提示词的话，
+   * 一个 3k tokens 的系统提示词会凭空落在预算之外 —— 而 §3 要的是一条**硬**上限。
+   */
+  const systemTokens = estimateTokens(buildSystemPrompt(ctx));
+  let prompt = renderUserPrompt(ctx, ctx.candidates, null);
+  let spent = systemTokens + estimateTokens(prompt);
+
+  if (spent > budgetTokens) {
+    const held = new Set(ctx.positions.map((p) => p.position.symbol));
+    // 已有持仓的标的**一个都不裁**：模型必须看得见自己手上有什么，否则只能盲目持有。
+    const minKeep = Math.max(1, ctx.candidates.filter((c) => held.has(c.symbol)).length);
+    let keep = ctx.candidates.length;
+
+    while (keep > minKeep && spent > budgetTokens) {
+      const overflow = spent - budgetTokens;
+      /*
+       * 用实测的"每个候选约多少 token"估算这一轮要丢几个，而不是一次丢一个：
+       * 逐个试在大候选池上要重渲染十几次。估算偏小也没关系 —— 循环会再走一轮，
+       * 而每一轮 `keep` 都严格变小，所以最多循环"候选数"次就收敛。
+       */
+      const perCandidateTokens = Math.max(1, estimateCandidateChars(ctx.config) / 1.7);
+      const drop = Math.max(1, Math.ceil(overflow / perCandidateTokens));
+      keep = Math.max(minKeep, keep - drop);
+      prompt = renderUserPrompt(ctx, trimCandidatesForBudget(ctx.candidates, held, keep), {
+        total: ctx.candidates.length,
+      });
+      spent = systemTokens + estimateTokens(prompt);
+    }
+  }
+
+  return prompt;
+}
+
+/**
+ * 按预算裁剪候选标的：**从最弱的开始丢**（提案 §3）。
+ *
+ * `candidates` 的顺序就是选币给出的强弱顺序（`selectCandidates()` 把已有持仓放在最前，
+ * 其余按来源加入的顺序），所以"最弱的"就是数组末尾那些。过滤而不是切片，是为了
+ * 保持原来的顺序不变 —— 顺序本身是信息（最强的在前），裁剪不该把它打乱。
+ *
+ * 已有持仓的标的**永远不裁**（`coins.ts` 的预算裁剪也是同一条规则）：一个看不见
+ * 自己持仓行情的模型，会把"没有数据"当成"没有理由继续持有"。
+ */
+function trimCandidatesForBudget(
+  candidates: MarketSnapshot[],
+  held: Set<string>,
+  keep: number,
+): MarketSnapshot[] {
+  if (keep >= candidates.length) return candidates;
+
+  const keepSet = new Set<string>();
+  for (const candidate of candidates) {
+    if (held.has(candidate.symbol)) keepSet.add(candidate.symbol);
+  }
+  for (const candidate of candidates) {
+    if (keepSet.size >= keep) break;
+    if (!held.has(candidate.symbol)) keepSet.add(candidate.symbol);
+  }
+  return candidates.filter((candidate) => keepSet.has(candidate.symbol));
+}
+
+/**
+ * The user prompt itself, for a given candidate list.
+ *
+ * Split out of `buildUserPrompt()` so the budget guard can re-render it with a shorter
+ * candidate list — measuring is the only honest way to enforce a ceiling.
+ *
+ * @param trimmedFrom 非空表示这一份是**预算裁剪之后**的版本：候选区块会说明从多少个
+ *   里裁到了多少个。模型知道这件事很重要 —— 否则它会以为某个标的从候选池里消失了。
+ */
+function renderUserPrompt(
+  ctx: PromptContext,
+  candidates: MarketSnapshot[],
+  trimmedFrom: { total: number } | null,
+): string {
   const parts: string[] = [];
 
   /* 1 — System status ---------------------------------------------------- */
@@ -295,7 +666,7 @@ export function buildUserPrompt(ctx: PromptContext): string {
   );
 
   /* 2 — BTC market overview --------------------------------------------- */
-  const btc = ctx.candidates.find((c) => c.symbol === 'BTCUSDT');
+  const btc = candidates.find((c) => c.symbol === 'BTCUSDT');
   if (btc) {
     const rsiKey = Object.keys(btc.primary.rsi)[0];
     const emaKey = Object.keys(btc.primary.ema)[0];
@@ -334,7 +705,20 @@ export function buildUserPrompt(ctx: PromptContext): string {
     ].join('\n'),
   );
 
-  /* 4 — Recent closed trades -------------------------------------------- */
+  /* 4 — 记忆区块（提案 §2） ---------------------------------------------- */
+  /*
+   * 放在账户之后、行情之前，是刻意的：先让模型看见"我最近在亏钱、我离约束有多远"，
+   * 再让它看这一轮有什么机会。顺序反过来时，注意力会先被一堆具体行情吃掉 ——
+   * 而这一整块存在的理由，正是每一轮"干净的行情 + 干净的账户"看起来都像新机会。
+   *
+   * 三块都是 O(1)：聚合在 SQL 里做（固定 24 小时窗口），最近平仓固定 5 笔，
+   * 约束是计数与时间差。见 §4。
+   */
+  parts.push(renderPerformance(ctx.memory.performance, ctx.config));
+  parts.push(renderRecentCloses(ctx.memory.recentCloses, ctx.now));
+  parts.push(renderThrottleBudget(ctx.memory.throttle));
+
+  /* 5 — Recent closed trades -------------------------------------------- */
   if (ctx.recentTrades.length > 0) {
     const lines = ctx.recentTrades.slice(0, 10).map((t, index) => {
       return `${index + 1}. ${t.symbol} ${t.side === 'long' ? '多头' : '空头'} | 入场 ${fmt(t.entryPrice)} → 出场 ${fmt(
@@ -349,7 +733,7 @@ export function buildUserPrompt(ctx: PromptContext): string {
     );
   }
 
-  /* 5 — Open positions --------------------------------------------------- */
+  /* 6 — Open positions --------------------------------------------------- */
   if (ctx.positions.length === 0) {
     parts.push('# 当前持仓\n当前没有持仓。');
   } else {
@@ -376,21 +760,22 @@ export function buildUserPrompt(ctx: PromptContext): string {
     parts.push(`# 当前持仓\n${lines.join('\n\n')}`);
   }
 
-  /* 6 — Candidate coins -------------------------------------------------- */
-  if (ctx.candidates.length === 0) {
+  /* 7 — Candidate coins -------------------------------------------------- */
+  if (candidates.length === 0) {
     parts.push(
       '# 候选标的\n本周期没有选出任何候选标的。你只能管理已有持仓；若无事可做，返回 `[]`。',
     );
   } else {
-    const blocks = ctx.candidates.map((snap, index) => formatMarketData(snap, index, ctx.config));
-    parts.push(
-      `# 候选标的（${ctx.candidates.length} 个）\n每个区块给出一个标的、选中它的来源，以及每个已配置时间周期的指标序列，按由旧到新排列。每个序列的最后一个值就是最新值。\n\n${blocks.join(
-        '\n\n',
-      )}`,
-    );
+    const blocks = candidates.map((snap, index) => formatMarketData(snap, index, ctx.config));
+    const header = trimmedFrom
+      ? `# 候选标的（${candidates.length} 个，已因上下文预算从 ${trimmedFrom.total} 个裁剪）\n` +
+        `为把这一次请求控制在上下文预算内，本轮只保留了最强的 ${candidates.length} 个标的；` +
+        '被裁掉的是排序最靠后的候选。绩效与历史区块不受影响。'
+      : `# 候选标的（${candidates.length} 个）\n每个区块给出一个标的、选中它的来源，以及每个已配置时间周期的指标序列，按由旧到新排列。每个序列的最后一个值就是最新值。`;
+    parts.push(`${header}\n\n${blocks.join('\n\n')}`);
   }
 
-  /* 7 — OI ranking ------------------------------------------------------- */
+  /* 8 — OI ranking ------------------------------------------------------- */
   if (ctx.config.indicators.enableOiRanking && ctx.oiRanking.length > 0) {
     const rows = ctx.oiRanking
       .slice(0, 15)

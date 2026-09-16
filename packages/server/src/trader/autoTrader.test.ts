@@ -590,6 +590,110 @@ const CLOSE_LONG_RESPONSE = `<reasoning>Target reached.</reasoning>
 <decision>[{"symbol":"BTCUSDT","action":"close_long","confidence":90,"reasoning":"Thesis complete."}]</decision>`;
 
 /* -------------------------------------------------------------------------- */
+/*  模型真的能看见自己的绩效（提案 §2）                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 一个把提示词收下来的模型替身。
+ *
+ * 单元测试能证明渲染函数是对的、聚合是 O(1) 的，但证明不了它们**被接进了交易循环** ——
+ * "改了但没接线"正好藏在那个缝里。所以这三个用例断言的是模型**实际收到**的内容。
+ */
+function capturingModel(response: string): {
+  model: DecisionModel;
+  prompts: Array<{ system: string; user: string }>;
+} {
+  const prompts: Array<{ system: string; user: string }> = [];
+  return {
+    prompts,
+    model: {
+      async complete(systemPrompt, userPrompt) {
+        prompts.push({ system: systemPrompt, user: userPrompt });
+        return { text: response, latencyMs: 1, usage: { promptTokens: 1, completionTokens: 1 } };
+      },
+    },
+  };
+}
+
+test('每一轮的提示词里都带着绩效、最近平仓与行为余量三个区块', async () => {
+  /*
+   * Why this test exists —— 这次改动的一句话说明是"让模型看见自己在亏"，而它成立的前提
+   * 是这三个区块**真的出现在发给模型的提示词里**。渲染函数单测绿了、聚合 O(1) 也测了，
+   * 两者都不代表它们被接到了 `runCycleBody` 组装的上下文上。
+   */
+  const captured = capturingModel(OPEN_LONG_RESPONSE);
+  const trader = buildTrader(new FakeBroker(), '', captured.model);
+
+  await trader.runOnce();
+
+  const { system, user } = captured.prompts[0]!;
+  assert.match(user, /# 你的交易绩效/);
+  assert.match(user, /# 最近平仓/);
+  assert.match(user, /# 本周期约束/);
+  // 还没有成交时如实说"没有"，而不是编一组数字。
+  assert.match(user, /最近 24 小时没有已平仓的交易/);
+  // 本小时已开仓 0 / 10：`permissiveConfig()` 的 maxEntriesPerHour 就是 10。
+  assert.match(user, /本小时已开仓 0 \/ 10 笔/);
+  // 止损手续费门槛必须写进硬性约束（系统提示词）：看不见的约束等于不存在。
+  assert.match(system, /必须至少是往返手续费的 3 倍/);
+});
+
+test('平仓之后，模型下一轮能看到自己当时的理由和真实结果并排出现', async () => {
+  /*
+   * Why this test exists —— §2.2 的第二行是整块记忆里唯一能让模型形成"我某个判断模式
+   * 不奏效"的机制：只看结果它不知道自己错在哪，只看理由它不知道那个理由已经失败过。
+   *
+   * 这里走完整条链：模型开仓（写下理由）→ 平仓（结果入账）→ 下一轮提问。
+   * 理由取自 `positions.open_reasoning`，靠 `(symbol, opened_at)` 与成交行对上号 ——
+   * 这条连接是这次改动里最容易悄悄断掉的一环（断了不会报错，只会少一行）。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  await buildTrader(broker, CLOSE_LONG_RESPONSE).runOnce();
+  assert.equal(tradeStore.list(traderId).length, 1, '前提：这一回合已经入账');
+
+  const captured = capturingModel('<decision>[]</decision>');
+  await buildTrader(broker, '', captured.model).runOnce();
+
+  const prompt = captured.prompts[0]!.user;
+  // 结果 + 当时的理由（OPEN_LONG_RESPONSE 的 reasoning）并排出现。
+  assert.match(prompt, /- BTCUSDT 多 3x @68000\.00→68000\.00  净 \+0\.000  模型主动平仓/);
+  assert.match(prompt, /你当时的理由：Breakout with rising OI\./);
+  // 绩效区块也有了真实数字（这一笔毛 0、手续费 0 → 净 0，按净额记为亏损）。
+  assert.match(prompt, /最近 24 小时：1 笔（0 胜 1 负）/);
+  // 行为余量：刚平过仓，冷却 0 分钟的配置下要如实说明。
+  assert.match(prompt, /上次平仓在 不到 1 分钟前（未启用再入场冷却）/);
+});
+
+test('止损比往返手续费还近的开仓：在交易循环里被拒，且理由带具体数字', async () => {
+  /*
+   * Why this test exists —— §5 的门槛必须**在通往订单的那条路径上**，而不是只在风控的
+   * 单元测试里成立。这里让模型提一个止损只有 0.10% 的多头（往返成本就是 0.10%，K=3
+   * 要求 0.30%）：它必须被拒、订单不得到达交易所，而且拒绝理由要带数字并写进决策记录 ——
+   * 每一次运行时对模型的推翻都要留下痕迹（§2.1）。
+   */
+  const broker = new FakeBroker();
+  const trader = buildTrader(
+    broker,
+    `<decision>[{"symbol":"BTCUSDT","action":"open_long","leverage":3,"position_size_usd":600,
+      "stop_loss":67932,"take_profit":68400,"confidence":90,"reasoning":"tight scalp"}]</decision>`,
+  );
+
+  const summary = await trader.runOnce();
+
+  assert.match(summary, /开仓 0/);
+  assert.equal(broker.placed.length, 0, '被手续费门槛拒掉的提案不得到达交易所');
+  assert.equal(positionStore.open(traderId).length, 0);
+
+  const record = decisionStore.list(traderId)[0]!;
+  const rejection = record.executionLog.find((entry) => entry.status === 'rejected');
+  assert.ok(rejection, `拒绝必须写进执行日志，实际：${JSON.stringify(record.executionLog)}`);
+  assert.match(rejection.detail, /往返手续费/);
+  assert.match(rejection.detail, /0\.100%/);
+  assert.match(rejection.detail, /0\.300%/, '理由要给出这个费率下允许的最小止损幅度');
+});
+
+/* -------------------------------------------------------------------------- */
 /*  Opening                                                                    */
 /* -------------------------------------------------------------------------- */
 

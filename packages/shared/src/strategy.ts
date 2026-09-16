@@ -136,6 +136,27 @@ export const RiskControlConfigSchema = z.object({
   fallbackStopLossPercent: z.number().min(0.05).max(50).default(2.5),
   /** Take-profit distance as a % of entry, applied when the model omits one. */
   fallbackTakeProfitPercent: z.number().min(0.05).max(200).default(7.5),
+
+  /**
+   * 止损距离必须至少是**往返手续费**的多少倍（提案 §5 的手续费感知门槛）。
+   *
+   * 一笔止损比往返成本还近的交易，**即使方向做对了也是亏的**：价格必须先走完
+   * 成本才开始为账户挣钱。这条校验把"手续费"从一个模型可以考虑的因素，变成一条
+   * 由风控强制执行的入场边界（§2.1：风控是通往订单的唯一路径）。
+   *
+   * 3 是保守起点：止损幅度等于手续费时，胜率再高也只是在给交易所打工。
+   * 0 表示关闭这条校验（与 `maxDailyLossPercent` 等字段同一约定）。
+   */
+  minStopLossFeeMultiple: z.number().min(0).max(50).default(3),
+  /**
+   * 读不到成交记录时，按这个**往返**手续费率校验（小数比例：0.001 = 0.10%）。
+   *
+   * 实测均值是 0.1000%（15 笔成交），但不同标的、不同 VIP 等级会不同，所以真实
+   * 取值优先用成交记录算出来的 `Σfee / Σ名义价值`（见
+   * `RiskEnvironment.roundTripFeeRate`）；这里的默认值只在"这个机器人还没有任何
+   * 成交"时兜底。**不要把它写死成常量**：那会让这个数字在 VIP 账户上系统性偏高。
+   */
+  fallbackRoundTripFeeRate: z.number().min(0).max(0.05).default(0.001),
 });
 export type RiskControlConfig = z.infer<typeof RiskControlConfigSchema>;
 
@@ -271,6 +292,8 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
         requireTakeProfit: true,
         fallbackStopLossPercent: 2.5,
         fallbackTakeProfitPercent: 7.5,
+        minStopLossFeeMultiple: 3,
+        fallbackRoundTripFeeRate: 0.001,
       },
       throttle: {
         minHoldMinutes: 30,
@@ -326,6 +349,8 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
         requireTakeProfit: true,
         fallbackStopLossPercent: 3,
         fallbackTakeProfitPercent: 8,
+        minStopLossFeeMultiple: 3,
+        fallbackRoundTripFeeRate: 0.001,
       },
       throttle: {
         minHoldMinutes: 5,
@@ -399,6 +424,8 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
         requireTakeProfit: true,
         fallbackStopLossPercent: 0.6,
         fallbackTakeProfitPercent: 1.2,
+        minStopLossFeeMultiple: 3,
+        fallbackRoundTripFeeRate: 0.001,
       },
       drawdownGuard: { enabled: true, activationPercent: 0.4, givebackRatio: 0.4 },
       throttle: {

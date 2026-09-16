@@ -220,6 +220,100 @@ test('rejects a short whose target is above the current price', () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/*  手续费感知的止损门槛（提案 §5）                                              */
+/* -------------------------------------------------------------------------- */
+
+test('rejects an entry whose stop is closer than K times the round-trip fee', () => {
+  /*
+   * Why this test exists —— 这就是 §5 要挡的那类交易：**盈亏比达标但仍然必亏**。
+   *
+   * 下面这个多头"看起来没问题"：置信度 90、仓位 500、盈亏比刚好 1:3（止损 136 点、
+   * 止盈 408 点），旧风控的每一条都会放行。但止损只有 0.20%，而实测往返手续费是名义
+   * 价值的 0.10% —— 价格必须先走完 0.1% 的成本才开始挣钱，而止损在 0.2% 就被扫掉。
+   * 止损幅度等于手续费时，胜率再高也只是在给交易所打工。
+   *
+   * 两件事一并钉住：
+   *   1. 它必须被拒，且理由里带具体数字（§5.4：`杠杆超限` 那种话没有用）；
+   *   2. 拒绝必须来自**这条**校验，而不是盈亏比 —— 理由里出现「盈亏比」会让操作者
+   *      以为把盈亏比调低就能做，方向完全反了。
+   */
+  const config = configWith({
+    riskControl: { ...defaultStrategyConfig().riskControl, minStopLossFeeMultiple: 3 },
+  });
+  const verdict = engine.review(
+    [openDecision({ stopLoss: 67_864, takeProfit: 68_408 })],
+    environment({ config, roundTripFeeRate: 0.001 }),
+  );
+
+  assert.equal(verdict.approved.length, 0, '止损比往返成本还近的交易不得被放行');
+  const reason = verdict.rejected[0]!.reason;
+  assert.match(reason, /往返手续费/);
+  assert.match(reason, /0\.200%/, '拒绝理由要带上这一笔真实的止损幅度');
+  assert.match(reason, /0\.300%/, '拒绝理由要带上这个费率下允许的最小止损幅度');
+  assert.doesNotMatch(reason, /盈亏比/, '这条校验排在盈亏比之前，理由是止损距离本身');
+});
+
+test('a stop exactly K times the round-trip fee is allowed, and the check is recorded', () => {
+  /*
+   * "至少 K 倍"要按字面执行：止损幅度**恰好**等于 K × 往返成本时必须通过。
+   *
+   * 边界不能凭感觉收紧：0.30% 正是这个费率下允许的最小止损，而它也是
+   * `npm run sim` 里脚本化模型用的那一档。把边界判死会让门槛比它宣称的更严，
+   * 操作者按提示词里的数字去做反而被拒 —— 那比没有这条规则更糟。
+   */
+  const config = configWith({
+    riskControl: { ...defaultStrategyConfig().riskControl, minStopLossFeeMultiple: 3 },
+  });
+  // 68000 → 67796 是 0.300%；止盈 68612 是 0.900%，盈亏比 1:3。
+  const verdict = engine.review(
+    [openDecision({ stopLoss: 67_796, takeProfit: 68_612 })],
+    environment({ config, roundTripFeeRate: 0.001 }),
+  );
+
+  assert.equal(verdict.approved.length, 1, `正好卡在门槛上的止损必须通过：${verdict.rejected[0]?.reason ?? ''}`);
+  assert.match(
+    verdict.approved[0]!.adjustments.join(' '),
+    /止损距离 0\.300% ≥ 往返成本 0\.1000% 的 3 倍/,
+    '每一次运行时的判断都要留在 adjustments 里，操作者才看得出这条校验跑过',
+  );
+});
+
+test('falls back to the configured fee rate while the account has no fills yet', () => {
+  /*
+   * 一个刚建的机器人还没有任何成交，`trades.performanceSince()` 给不出实测费率
+   * （它回 null，而不是编一个数）。此时必须用配置里的兜底费率：这道门槛最需要生效的
+   * 时刻，恰恰是账户还没有任何反馈、模型最容易开始高频试错的时候。
+   */
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      fallbackRoundTripFeeRate: 0.002,
+      minStopLossFeeMultiple: 3,
+    },
+  });
+  // 兜底 0.20% × 3 = 0.60%；这里的止损只有 0.40%（68000 → 67728）。
+  const verdict = engine.review(
+    [openDecision({ stopLoss: 67_728, takeProfit: 70_000 })],
+    environment({ config }),
+  );
+
+  assert.equal(verdict.approved.length, 0);
+  assert.match(verdict.rejected[0]!.reason, /配置的兜底费率/);
+  assert.match(verdict.rejected[0]!.reason, /0\.600%/);
+});
+
+test('a stop far wider than the fee floor is untouched', () => {
+  /*
+   * 反方向也要钉住：这条门槛不能把正常交易一起拒掉。
+   *
+   * 默认策略的兜底止损是 2.5%（手续费的 25 倍），下面这个 fixture 是 2.94% ——
+   * 它必须原样通过，否则"新增一条校验"就变成了"顺手改了所有交易的入场条件"。
+   */
+  const verdict = engine.review([openDecision()], environment());
+  assert.equal(verdict.approved.length, 1);
+});
+
+/* -------------------------------------------------------------------------- */
 /*  Reward / risk                                                             */
 /* -------------------------------------------------------------------------- */
 

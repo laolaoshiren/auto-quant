@@ -153,10 +153,18 @@ function check(name: string, ok: boolean, detail: string): void {
  *
  * Coverage is planned by entry index, six at a time:
  *
- *  - `0/1/3` — very tight protection (0.2–0.3% stop, with the target just above
- *    the 1.2 reward:risk floor). Crypto moves that far within a few 5-minute
+ *  - `0/1/3` — very tight protection (0.4–0.5% stop, with the target just above
+ *    the reward:risk floor). Crypto moves that far within a few 5-minute
  *    candles in either direction, so the exchange-side stop *and* target both
  *    get triggered across the run.
+ *
+ *    ⚠️ 止损不能再比 0.4% 更近：风控有一条手续费感知的门槛
+ *    （`minStopLossFeeMultiple`，默认 3），而模拟交易所两腿手续费合计是名义价值的
+ *    0.1%（**实测**算出来还会略高一点，因为数量取整后名义价值略小于请求值）——
+ *    0.3% 的止损因此会被**正确地**拒掉，实测就拦到过。断言"止损/止盈真的会被触发"
+ *    的用例，前提是它提出的是**能成立的交易**：提一个必亏的提案，测到的只是拒绝路径。
+ *    0.4% 留了余量，免得门槛随实测费率的小数位抖动而忽过忽不过。
+ *    改这条下限之前先看 `RiskEngine.reviewOpen()` 的第 6b 步。
  *  - `2/4`   — wide protection, held on purpose so the model-close path runs.
  *  - `4`     — additionally proposes 100× leverage and a 50 000 USDT notional,
  *    which the risk engine must clamp. That is how we prove the clamps are
@@ -205,11 +213,12 @@ function makeScriptedModel(state: () => {
         const phase = proposalIndex % PHASES;
         proposalIndex += 1;
         const wide = WIDE_PHASES.has(phase);
-        // Tight pairs are chosen to sit just above the configured 1.2 R:R floor.
+        // Tight pairs are chosen to sit just above the configured reward:risk
+        // floor — and never closer than the fee-aware stop floor (see above).
         const tight: Array<[number, number]> = [
-          [0.2, 0.3],
-          [0.3, 0.5],
-          [0.25, 0.4],
+          [0.4, 0.7],
+          [0.45, 0.8],
+          [0.5, 0.9],
         ];
         const pair = tight[phase % tight.length] ?? [0.3, 0.5];
         const slPercent = wide ? 8 : pair[0];

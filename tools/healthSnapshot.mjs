@@ -144,6 +144,32 @@ if (errs.length) {
   for (const e of errs) console.log(`    ${e.created_at} [${e.level}] ${e.m}`);
 }
 
+/* --- 8. 资金是否被重复计算（共享钱包） ---------------------------------- */
+/*
+ * 多个机器人共用一个交易所账户时，每个机器人的"归属权益"里都含同一笔初始资金。
+ * 把它们求和 = **同一笔钱被数了很多遍**。
+ *
+ * 这条检查是真实事故的产物：首页一度显示「总归属权益 30.67」，而钱包里只有
+ * 10.42 —— 初始权益被重复计算了 19.81 USDT，约是真实资金的 3 倍。
+ * 靠人眼发现太晚，所以做成自动检查。
+ */
+const traders = q('SELECT id, initial_equity, exchange_account_id FROM traders');
+const accounts = new Set(traders.map((t) => t.exchange_account_id));
+const sumInitial = traders.reduce((s, t) => s + Number(t.initial_equity), 0);
+const latest = one('SELECT account_equity FROM equity_snapshots ORDER BY id DESC LIMIT 1');
+if (latest && accounts.size < traders.length) {
+  const real = Number(latest.account_equity);
+  const inflation = sumInitial - real;
+  console.log(
+    `\n── 共享钱包：${traders.length} 个机器人共用 ${accounts.size} 个账户；` +
+      `初始权益求和 ${num(sumInitial, 2)} vs 实际钱包 ${num(real, 2)}`,
+  );
+  check(
+    inflation <= real * 0.5,
+    `初始权益求和比实际钱包多 ${num(inflation, 2)} USDT —— 首页若按机器人求和会虚高`,
+  );
+}
+
 /* --- 汇总 --------------------------------------------------------------- */
 console.log(`\n══ 结论 ══`);
 if (alerts.length === 0) {

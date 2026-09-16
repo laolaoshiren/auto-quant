@@ -38,6 +38,18 @@ export interface RiskEnvironment {
   entriesThisCycle: number;
   /** New entries taken in the trailing hour. */
   entriesLastHour: number;
+  /**
+   * 这个标的**往返一次**的手续费占名义价值的比例（小数：0.001 = 0.10%）。
+   *
+   * 由调用方从**成交记录实测**给出（`trades.performanceSince()` 的 Σ手续费 / Σ名义价值），
+   * 而不是写死一个常量 —— 不同标的、不同 VIP 等级的真实费率不同，而写死的数字要么
+   * 在某处过松、要么在另一处把本来能做的交易全拒掉。
+   *
+   * 省略或传 null 时回落到 `riskControl.fallbackRoundTripFeeRate`（只在"这个机器人
+   * 还没有任何成交"时会发生）。引擎自己不去查库：仓储负责行字段转换，风控只裁决事实
+   * （§5.4），这个字段就是把那个事实递进来的口子。
+   */
+  roundTripFeeRate?: number | null;
 }
 
 export interface RiskRejection {
@@ -263,8 +275,60 @@ export class RiskEngine {
       };
     }
 
-    /* --- 7. Reward:risk -------------------------------------------------- */
+    /* --- 6b. 止损距离必须覆盖往返手续费（提案 §5） ------------------------ */
+    /*
+     * 一笔止损比往返手续费还近的交易，**即使方向做对了也是亏的**：价格必须先走完
+     * 成本，才开始为账户挣钱。原来的风控只有 `minRiskRewardRatio`（要求盈亏比），
+     * 而它有个漏洞 —— 一笔盈亏比达标但止损距离小于往返成本的交易，是数学上必亏的：
+     * 止损幅度等于手续费时，胜率再高也只是在给交易所打工。
+     *
+     * 这条规则会拒掉一批"看起来没问题"的交易，而那正是目的：它把"手续费"从模型的
+     * 一个考虑项，变成一条由代码强制执行的入场边界。**它只新增拒绝，不放宽任何
+     * 既有上限**（§4.2）。
+     *
+     * 标记成 6b 而不是新增一段 14：源码里的这些数字标记与 `docs/MODULES.md`、
+     * `docs/AGENTS.md` 的「14 步检查（源码标记 0–13）」一一对应，重编号会让那两份
+     * 文档失准，而本次改动不允许改文档。校验本身是完整的一步，不是附属条件。
+     */
+    const feeMultiple = risk.minStopLossFeeMultiple;
+    const observedFeeRate = env.roundTripFeeRate;
+    const roundTripFeeRate =
+      typeof observedFeeRate === 'number' && Number.isFinite(observedFeeRate) && observedFeeRate > 0
+        ? observedFeeRate
+        : risk.fallbackRoundTripFeeRate;
     const riskDistance = Math.abs(price - stopLoss);
+    const stopDistancePercent = (riskDistance / price) * 100;
+    const minStopDistancePercent = roundTripFeeRate * feeMultiple * 100;
+
+    /*
+     * 容差 1e-9：止损幅度**恰好**等于 K × 手续费时必须通过。取"至少 K 倍"的字面意思，
+     * 不额外收紧 —— 一个比宣称更严的门槛会让照做的人莫名其妙被拒，那比没有规则更糟。
+     */
+    if (feeMultiple > 0 && stopDistancePercent + 1e-9 < minStopDistancePercent) {
+      const feeSource =
+        observedFeeRate === null || observedFeeRate === undefined ? '配置的兜底费率' : '近期成交实测';
+      return {
+        ok: false,
+        reason:
+          `止损距离 ${stopDistancePercent.toFixed(3)}%（${price} → ${stopLoss}）不足往返手续费的 ${feeMultiple} 倍：` +
+          /*
+           * 最小幅度用 4 位小数，实际幅度用 3 位。
+           *
+           * 实测费率常常不是整数（模拟账户里就是 0.1001%），于是最小幅度是 0.3003% ——
+           * 两者都只显示 3 位时会打印成"止损距离 0.300% …… 至少要有 0.300%"，读起来
+           * 像一条自相矛盾的规则。数字的精度在这里是给人看的，多一位就没有歧义。
+           */
+          `按${feeSource}，往返成本约 ${(roundTripFeeRate * 100).toFixed(4)}%，止损幅度至少要有 ${minStopDistancePercent.toFixed(4)}%。` +
+          '止损比交易成本还近的交易，方向做对了也是亏的。',
+      };
+    }
+    if (feeMultiple > 0) {
+      adjustments.push(
+        `止损距离 ${stopDistancePercent.toFixed(3)}% ≥ 往返成本 ${(roundTripFeeRate * 100).toFixed(4)}% 的 ${feeMultiple} 倍。`,
+      );
+    }
+
+    /* --- 7. Reward:risk -------------------------------------------------- */
     const rewardDistance = Math.abs(takeProfit - price);
     const rewardRisk = riskDistance > 0 ? rewardDistance / riskDistance : 0;
     if (rewardRisk < risk.minRiskRewardRatio) {
