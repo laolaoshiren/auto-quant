@@ -160,7 +160,6 @@ async function main(): Promise<void> {
     },
     positions: [],
     candidates: snapshots,
-    recentTrades: [],
     // 这一趟没有账本（不连数据库），所以记忆区块如实表示"还没有任何成交"。
     memory: emptyPromptMemory(config),
     oiRanking,

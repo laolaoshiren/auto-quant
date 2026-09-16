@@ -736,7 +736,17 @@ export class AutoTrader {
      * 早退方式与"行情为空"一致：写进 `progress.error` 后**正常返回**，
      * 不抛错，所以连续失败计数与安全模式完全不受影响。
      */
-    if (breaker.blocked && livePositions.length === 0 && localPositions.length === 0) {
+    /*
+     * 每小时开仓额度是否已用满。
+     *
+     * 在**跳过判据之前**读，而不是等到组装提示词时 —— 判据要用它。
+     * 只能读一次：分头读会得到两个可能不一致的数字，而"模型看到 2/3、
+     * 风控按 3/3"这种不一致会让模型提出注定被拒的请求。
+     */
+    const entriesLastHour = tradeEvents.entriesThisHour(traderId);
+    const quotaExhausted = entriesLastHour >= config.throttle.maxEntriesPerHour;
+
+    if ((breaker.blocked || quotaExhausted) && livePositions.length === 0 && localPositions.length === 0) {
       await this.recordEquity(account, livePositions);
       /*
        * ⚠️ 说明写进 `executionLog`，**不写 `progress.error`**。
@@ -749,18 +759,32 @@ export class AutoTrader {
        * `executionLog` 是记录"这一轮实际发生了什么"的地方，而 `skipped`
        * 正是它的合法取值之一（与熔断拒绝决策时用的是同一个状态）。
        */
+      /*
+       * 说清**是哪个条件**触发的跳过，并给出解除它的条件。
+       *
+       * 两个条件的解除方式完全不同：熔断按"单日"结算，要等到第二天；
+       * 额度按小时滚动，最迟下一个整点就恢复。把它们写成同一句话，
+       * 操作者就分不清"还要等多久"。
+       */
+      const blocker = breaker.blocked
+        ? `熔断生效：${breaker.reason}`
+        : `本小时开仓额度已用满（${entriesLastHour} / ${config.throttle.maxEntriesPerHour} 笔）`;
+      const recovery = breaker.blocked
+        ? '熔断按单日结算，跨过零点后自动恢复。'
+        : '额度按小时滚动，最迟下一个整点恢复。';
+
       progress.executionLog = [
         {
           action: 'skip_cycle',
           symbol: '—',
           status: 'skipped',
           detail:
-            `熔断生效，且当前没有任何持仓：${breaker.reason}` +
+            `${blocker}，且当前没有任何持仓。` +
             '本轮没有向模型提问、也没有下单 —— 此时模型不可能给出任何可执行的动作，' +
-            '跳过请求是为了不产生无谓的 token 开销。熔断解除后会自动恢复正常决策。',
+            `跳过请求是为了不产生无谓的 token 开销。${recovery}`,
         },
       ];
-      return '熔断生效且空仓，本轮跳过模型请求。';
+      return breaker.blocked ? '熔断生效且空仓，本轮跳过模型请求。' : '本小时额度已满且空仓，本轮跳过模型请求。';
     }
 
     /* --- 6. Candidate universe + market snapshots ------------------------ */
@@ -802,7 +826,7 @@ export class AutoTrader {
      * `entriesLastHour`。分头读会得到两个可能不一致的数字，而模型看到 2/3、风控按 3/3
      * 拒绝，正是"看不见的约束"换一种形态。
      */
-    const entriesLastHour = tradeEvents.entriesThisHour(traderId);
+    // 已在步骤 4 之前读取（跳过判据要用），此处不再重复读 —— 分头读会得到两个可能不一致的数字。
     const memory = this.buildPromptMemory(traderId, config, entriesLastHour);
 
     const promptContext = {
@@ -819,7 +843,6 @@ export class AutoTrader {
       },
       positions: promptPositions,
       candidates: snapshots,
-      recentTrades: tradeStore.recent(traderId, 10),
       oiRanking,
       memory,
     };

@@ -2185,7 +2185,19 @@ export const equity = {
   list(traderId: number, limit = 500): EquitySnapshot[] {
     return getDb()
       .all<EquityRow>(
-        'SELECT * FROM equity_snapshots WHERE trader_id = ? ORDER BY timestamp DESC LIMIT ?',
+        /*
+         * `id DESC` 是 `timestamp DESC` 的**决胜键**，不是装饰。
+         *
+         * 一个周期写一条快照，而两个周期完全可能落在**同一毫秒**里（实测：整个测试跑完
+         * 只要 3.9ms）。只按 `timestamp` 排序时，同一毫秒内的行序是未定义的 —— 实测
+         * SQLite 会先回**先插入**的那一行，于是 `latest()` 拿到的是上一轮的快照：
+         * 控制台显示的浮盈晚一轮，而依赖它的归属权益会算错。这不是理论问题：它让
+         * `stats.test.ts` 里"开仓 + 平仓后权益应为 1001"的断言间歇性地得到 1002
+         * （浮盈取到了平仓前那一轮的 +1），大约每 10 次全量测试出现一次。
+         *
+         * 时间戳相同时，"最新"只能是**最后写入**的那一条，所以用自增主键决胜。
+         */
+        'SELECT * FROM equity_snapshots WHERE trader_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?',
         traderId,
         limit,
       )

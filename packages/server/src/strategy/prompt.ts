@@ -35,7 +35,6 @@ export interface PromptContext {
   account: PromptAccountInfo;
   positions: PromptPosition[];
   candidates: MarketSnapshot[];
-  recentTrades: TradeRecord[];
   oiRanking: OiRankRow[];
   /**
    * 模型对自己历史的「记忆」（提案 §2 的三个区块）。
