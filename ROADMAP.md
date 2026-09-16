@@ -55,6 +55,33 @@
 
 ---
 
+## 待办：大版本依赖升级
+
+Dependabot 提出了四项大版本升级，评估后**暂缓**——每一项都需要独立一轮迁移与全量回归，
+而不是直接合入。它们不紧急（当前版本都受支持），但会在某个时点变成必须做的事。
+
+| 升级 | 影响面 | 为什么需要单独一轮 |
+| --- | --- | --- |
+| **React 18 → 19** | `packages/web` 全部组件 | refs 与并发渲染有行为差异 |
+| **Tailwind 3 → 4** | `tailwind.config.js` + 设计令牌 | 配置格式从 JS 改为 CSS-first，`packages/web/DESIGN.md` 描述的整套令牌要重写 |
+| **TypeScript 5.7 → 7.0** | 整个 monorepo | 编译器更换实现，需先确认诊断行为无差异 |
+| **zod 3 → 4** | `StrategyConfigSchema` 等 | 校验 API 有破坏性变更，而 zod 是本项目策略配置的**唯一事实来源** |
+| **react-router-dom 6 → 7** | 全部路由 | 路由 API 破坏性变更 |
+
+**升级一项时的验收标准**（缺一不可）：
+
+```
+npm run typecheck && npm test && npm run sim
+npm run build && npm run ui:smoke     # 前端相关
+```
+
+`ui:smoke` 是必须的：typecheck 与 build 通过**不代表页面能用**，
+这个项目里已经有过 `animate-pulseSoft` 这种"编译全绿但功能是死的"实例。
+
+React 19 与 Tailwind 4 建议**一起做**——两者都触及 `packages/web` 的渲染层，
+分两次回归是重复劳动。
+
+---
 ## 中期
 
 - [ ] **策略回测** —— 用历史数据评估一个策略，而不只是验证它能跑通
