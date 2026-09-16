@@ -157,12 +157,29 @@ export function TraderAccountStrip({
   );
 
   if (!account) {
+    /*
+     * 机器人没在运行时无实时读数。
+     *
+     * ⚠️ 这里原来写的是「未连接交易所」，**那是一句不成立的话**：凭证早就配好了，
+     * 只是这个机器人当前没在跑、所以没有实时读数。操作者看到「未连接」会去交易所
+     * 页面重新检查凭证 —— 那是白跑一趟，而且会让人怀疑自己的配置。
+     *
+     * 说清楚"没有读数"和"没有连接"的区别，是这一行唯一要做的事。
+     */
     return (
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-y border-base-800 bg-base-900/40 px-3 py-2 text-xs text-ink-lo">
         {heading}
-        <Badge tone="muted">未连接交易所</Badge>
-        <span>机器人运行时会在这里显示交易所的真实账户余额。</span>
-        {error && <span className="text-warn">（{error}）</span>}
+        {error ? (
+          <>
+            <Badge tone="down">读取失败</Badge>
+            <span className="text-warn">{error}</span>
+          </>
+        ) : (
+          <>
+            <Badge tone="muted">暂无实时读数</Badge>
+            <span>机器人启动后这里会显示交易所的真实账户余额（共享钱包）。</span>
+          </>
+        )}
       </div>
     );
   }
