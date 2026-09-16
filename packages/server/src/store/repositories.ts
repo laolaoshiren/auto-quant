@@ -34,6 +34,7 @@ interface UserRow {
   password_hash: string;
   role: string;
   created_at: string;
+  credentials_changed_at: string;
 }
 
 export const users = {
@@ -101,6 +102,36 @@ export const users = {
         role: row.role === 'owner' ? 'owner' : 'user',
         createdAt: row.created_at,
       }));
+  },
+
+  /**
+   * 该账户最后一次修改凭据的时间（epoch 毫秒），从未改过则为 `null`。
+   *
+   * 供 JWT 撤销使用：签发令牌时把这个值写进载荷，校验时与它等值比较，
+   * 不等即说明令牌是在凭据变更之前签发的，必须拒绝。见 `api/auth.ts`。
+   */
+  credentialsChangedAt(id: number): number | null {
+    const row = getDb().get<{ credentials_changed_at: string }>(
+      'SELECT credentials_changed_at FROM users WHERE id = ?',
+      id,
+    );
+    const raw = row?.credentials_changed_at;
+    if (!raw) return null;
+    const ms = Date.parse(raw);
+    return Number.isFinite(ms) ? ms : null;
+  },
+
+  /**
+   * 记录一次凭据变更，作废该账户此前签发的全部令牌。
+   *
+   * 调用点必须在**重新签发**令牌之前调用它，否则新令牌会带着旧的时间戳，
+   * 一签发就是失效的（用户会被立刻踢回登录页，且看不出原因）。
+   */
+  markCredentialsChanged(id: number): number {
+    const timestamp = now();
+    getDb().run('UPDATE users SET credentials_changed_at = ? WHERE id = ?', timestamp, id);
+    log.info(`account #${id} credentials changed — previously issued sessions are now revoked`);
+    return Date.parse(timestamp);
   },
 };
 
@@ -890,6 +921,139 @@ function marginOf(entryPrice: number, quantity: number, leverage: number): numbe
   return notional > 0 ? notional / Math.max(leverage, 1) : 0;
 }
 
+/**
+ * How many round-trips the dashboard's trend window covers.
+ *
+ * 5000 is the same ceiling the console used to request, now applied **in SQL**
+ * via `ORDER BY closed_at DESC LIMIT ?` instead of by loading every row and
+ * slicing in JavaScript. For any trader under 5000 round-trips the numbers the
+ * dashboard renders are byte-for-byte what they were before.
+ */
+export const TREND_WINDOW = 5000;
+
+/**
+ * How many equity snapshots the time-to-trough drawdown considers.
+ *
+ * Same number the console passed inline before (`equity.list(traderId, 5000)`),
+ * hoisted to a named constant so the single read and any future caller agree on
+ * it. With one snapshot per cycle, 5000 covers a 15-minute trader for ~52 days —
+ * beyond that the dashboard's drawdown is "recent", and the *breaker* uses
+ * `equity.realizedHighWaterMark()`, which is unaffected by this bound.
+ */
+export const EQUITY_CURVE_WINDOW = 5000;
+
+/** One point of the PnL curve. Where the type says `snake_case`, SQL named it. */
+export interface TradeCurvePoint {
+  pnl: number;
+  pnl_percent: number;
+  net_pnl: number;
+  fee: number;
+  funding_fee: number;
+  closedAt: string;
+}
+
+export interface TradeStats {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  grossProfit: number;
+  grossLoss: number;
+  best: number;
+  worst: number;
+  avgWin: number;
+  avgLoss: number;
+  grossPnl: number;
+  totalFees: number;
+  totalFunding: number;
+  netPnl: number;
+  /** Earliest close on the books, for "how long has this been running". */
+  firstClosedAt: string | null;
+}
+
+/**
+ * One pass over `trades`: aggregate in SQL, materialise only the trend window.
+ *
+ * Why: `computeTraderStats` used to pull every column of every round-trip into
+ * JavaScript objects and reduce them there — twice per request, once for
+ * `stats()` and once for the Sharpe input — and it is called every 5–12 s per
+ * trader. `node:sqlite` is synchronous, so those object graphs were built on the
+ * same event loop that places orders. SQLite counts and sums without leaving C,
+ * so the JavaScript work drops from O(all round-trips) to O(window).
+ *
+ * `COUNT(*)` and `SUM(...)` deliberately still cover the **whole** table: the
+ * headline totals (lifetime trades, net PnL, fees, funding) must stay lifetime
+ * figures and must not silently follow the window.
+ */
+function aggregateTrades(traderId: number): { totals: TradeStats; curve: TradeCurvePoint[] } {
+  const totals = getDb().get<{
+    totalTrades: number;
+    wins: number;
+    losses: number;
+    grossProfit: number | null;
+    grossLoss: number | null;
+    best: number | null;
+    worst: number | null;
+    grossPnl: number | null;
+    totalFees: number | null;
+    totalFunding: number | null;
+    netPnl: number | null;
+    firstClosedAt: string | null;
+  }>(
+    `SELECT
+       COUNT(*)                                                   AS totalTrades,
+       COALESCE(SUM(CASE WHEN net_pnl >  0 THEN 1 ELSE 0 END), 0) AS wins,
+       COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN 1 ELSE 0 END), 0) AS losses,
+       COALESCE(SUM(CASE WHEN net_pnl >  0 THEN net_pnl ELSE 0 END), 0) AS grossProfit,
+       ABS(COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN net_pnl ELSE 0 END), 0)) AS grossLoss,
+       MAX(net_pnl) AS best,
+       MIN(net_pnl) AS worst,
+       COALESCE(SUM(pnl), 0)         AS grossPnl,
+       COALESCE(SUM(fee), 0)         AS totalFees,
+       COALESCE(SUM(funding_fee), 0) AS totalFunding,
+       COALESCE(SUM(net_pnl), 0)     AS netPnl,
+       MIN(closed_at) AS firstClosedAt
+     FROM trades WHERE trader_id = ?`,
+    traderId,
+  );
+
+  const totalTrades = totals?.totalTrades ?? 0;
+  const wins = totals?.wins ?? 0;
+  const losses = totals?.losses ?? 0;
+  const grossProfit = totals?.grossProfit ?? 0;
+  const grossLoss = totals?.grossLoss ?? 0;
+
+  return {
+    totals: {
+      totalTrades,
+      wins,
+      losses,
+      grossProfit,
+      grossLoss,
+      // `MAX(net_pnl)` is NULL only when there are no rows, which is reported as 0
+      // rather than left as a null the console would have to special-case.
+      best: totals?.best ?? 0,
+      worst: totals?.worst ?? 0,
+      avgWin: wins > 0 ? grossProfit / wins : 0,
+      avgLoss: losses > 0 ? grossLoss / losses : 0,
+      grossPnl: totals?.grossPnl ?? 0,
+      totalFees: totals?.totalFees ?? 0,
+      totalFunding: totals?.totalFunding ?? 0,
+      netPnl: totals?.netPnl ?? 0,
+      firstClosedAt: totals?.firstClosedAt ?? null,
+    },
+    curve: getDb()
+      .all<TradeCurvePoint>(
+        `SELECT pnl, pnl_percent, net_pnl, fee, funding_fee, closed_at AS closedAt
+           FROM trades WHERE trader_id = ? ORDER BY closed_at DESC LIMIT ?`,
+        traderId,
+        TREND_WINDOW,
+      )
+      // Reversed to chronological order: a drawdown walk is direction-sensitive,
+      // so walking newest-first would silently report a different (smaller) one.
+      .reverse(),
+  };
+}
+
 export const trades = {
   list(traderId: number, limit = 100): TradeRecord[] {
     return getDb()
@@ -1023,39 +1187,76 @@ export const trades = {
     );
   },
 
-  /** Set the funding fee on a trade after the fact (funding settles every 8h). */
-  setFundingFee(id: number, fundingFee: number): void {
-    const row = getDb().get<{ pnl: number; fee: number }>(
-      'SELECT pnl, fee FROM trades WHERE id = ?',
-      id,
-    );
-    if (!row) return;
-    const netPnl = row.pnl - row.fee - fundingFee;
-    getDb().run('UPDATE trades SET funding_fee = ?, net_pnl = ? WHERE id = ?', fundingFee, netPnl, id);
-  },
+  /**
+   * There is deliberately **no** `setFundingFee()` here.
+   *
+   * Funding cannot be read at the instant a position closes, and a setter that
+   * writes a figure without recomputing `net_pnl` is an invitation to record a
+   * number that never reaches the balance. Every close path therefore passes
+   * `fundingFee` into `insert()` (read from `/fapi/v1/income`, or 0 and logged
+   * when unreadable), and the reconcile pass rewrites it through
+   * `applyExchangeFigures()`. Both of those derive `net_pnl` in one place.
+   */
 
-  /** Round-trips already on the books, for matching against the exchange. */
+  /**
+   * Round-trips already on the books, for matching against the exchange.
+   *
+   * `sinceIso` bounds the read to closes at or after that instant, and exists so
+   * the **routine** reconciliation pass does not reload the trader's entire
+   * lifetime every cycle. This method used to have no bound at all: a trader that
+   * had been running for months rebuilt a map of every round-trip it had ever
+   * booked, once per cycle, and `node:sqlite` is synchronous — so the cost was
+   * paid on the event loop that runs the trading loop. The boot pass and the
+   * periodic deep pass still read everything (omit the argument), which is what
+   * keeps a close this trader slept through recoverable.
+   */
   ledger(
     traderId: number,
-  ): Array<{ id: number; symbol: string; quantity: number; entryPrice: number; openedAt: string }> {
+    sinceIso?: string,
+  ): Array<{
+    id: number;
+    symbol: string;
+    quantity: number;
+    entryPrice: number;
+    openedAt: string;
+    entryOrderId: string | null;
+  }> {
+    const sql =
+      'SELECT id, symbol, quantity, entry_price, opened_at, entry_order_id FROM trades WHERE trader_id = ?' +
+      (sinceIso ? ' AND closed_at >= ?' : '');
     return getDb()
-      .all<{ id: number; symbol: string; quantity: number; entry_price: number; opened_at: string }>(
-        'SELECT id, symbol, quantity, entry_price, opened_at FROM trades WHERE trader_id = ?',
-        traderId,
-      )
+      .all<{
+        id: number;
+        symbol: string;
+        quantity: number;
+        entry_price: number;
+        opened_at: string;
+        entry_order_id: string | null;
+      }>(sql, ...(sinceIso ? [traderId, sinceIso] : [traderId]))
       .map((r) => ({
         id: r.id,
         symbol: r.symbol,
         quantity: r.quantity,
         entryPrice: r.entry_price,
         openedAt: r.opened_at,
+        entryOrderId: r.entry_order_id,
       }));
   },
 
-  /** Distinct symbols this trader has ever traded, so reconciliation can scope its queries. */
-  tradedSymbols(traderId: number): string[] {
+  /**
+   * Distinct symbols this trader traded.
+   *
+   * `sinceIso` has the same purpose as on `ledger()`: reconciliation asks one
+   * `userTrades` question per symbol, so an unbounded list keeps asking about
+   * symbols that stopped trading months ago and spends weight every cycle on an
+   * answer that cannot have changed.
+   */
+  tradedSymbols(traderId: number, sinceIso?: string): string[] {
+    const sql =
+      'SELECT DISTINCT symbol FROM trades WHERE trader_id = ?' +
+      (sinceIso ? ' AND closed_at >= ?' : '');
     return getDb()
-      .all<{ symbol: string }>('SELECT DISTINCT symbol FROM trades WHERE trader_id = ?', traderId)
+      .all<{ symbol: string }>(sql, ...(sinceIso ? [traderId, sinceIso] : [traderId]))
       .map((r) => r.symbol);
   },
 
@@ -1083,48 +1284,38 @@ export const trades = {
    * less than it paid in commission lost money, and counting it as a win would
    * flatter the win rate and the profit factor.
    */
-  stats(traderId: number): {
-    totalTrades: number;
-    wins: number;
-    losses: number;
-    grossProfit: number;
-    grossLoss: number;
-    best: number;
-    worst: number;
-    avgWin: number;
-    avgLoss: number;
-    grossPnl: number;
-    totalFees: number;
-    totalFunding: number;
-    netPnl: number;
-  } {
-    const rows = getDb().all<{
-      net_pnl: number;
-      pnl: number;
-      fee: number;
-      funding_fee: number;
-    }>('SELECT net_pnl, pnl, fee, funding_fee FROM trades WHERE trader_id = ? ORDER BY closed_at', traderId);
+  /**
+   * Aggregate performance.
+   *
+   * Classification is by **net** PnL: a trade that made a little on price but
+   * less than it paid in commission lost money, and counting it as a win would
+   * flatter the win rate and the profit factor. Kept as a repository method for
+   * callers that only want the totals; the arithmetic itself lives in
+   * `aggregateTrades()` so there is exactly one definition of every figure.
+   */
+  stats(traderId: number): TradeStats {
+    return aggregateTrades(traderId).totals;
+  },
 
-    const wins = rows.filter((r) => r.net_pnl > 0);
-    const losses = rows.filter((r) => r.net_pnl <= 0);
-    const grossProfit = wins.reduce((a, b) => a + b.net_pnl, 0);
-    const grossLoss = Math.abs(losses.reduce((a, b) => a + b.net_pnl, 0));
-
-    return {
-      totalTrades: rows.length,
-      wins: wins.length,
-      losses: losses.length,
-      grossProfit,
-      grossLoss,
-      best: rows.length > 0 ? Math.max(...rows.map((r) => r.net_pnl)) : 0,
-      worst: rows.length > 0 ? Math.min(...rows.map((r) => r.net_pnl)) : 0,
-      avgWin: wins.length > 0 ? grossProfit / wins.length : 0,
-      avgLoss: losses.length > 0 ? grossLoss / losses.length : 0,
-      grossPnl: rows.reduce((a, b) => a + b.pnl, 0),
-      totalFees: rows.reduce((a, b) => a + b.fee, 0),
-      totalFunding: rows.reduce((a, b) => a + b.funding_fee, 0),
-      netPnl: rows.reduce((a, b) => a + b.net_pnl, 0),
-    };
+  /**
+   * The gross/net curve a Sharpe ratio and a drawdown are computed from.
+   *
+   * Time-ordered ascending and **bounded**, because `computeTraderStats` runs on
+   * every dashboard refresh (every 5–12 s per trader) and `node:sqlite` is
+   * synchronous — an unbounded `SELECT *` here is paid for with a blocked event
+   * loop, i.e. with the trading loop. The bound is a display choice that is
+   * stated in the code rather than hidden: beyond `TREND_WINDOW` round-trips the
+   * dashboard's drawdown/Sharpe are "recent", not "lifetime".
+   */
+  curve(traderId: number, limit = TREND_WINDOW): TradeCurvePoint[] {
+    return getDb()
+      .all<TradeCurvePoint>(
+        `SELECT pnl, pnl_percent, net_pnl, fee, funding_fee, closed_at AS closedAt
+           FROM trades WHERE trader_id = ? ORDER BY closed_at DESC LIMIT ?`,
+        traderId,
+        limit,
+      )
+      .reverse();
   },
 };
 
@@ -1296,9 +1487,25 @@ export const equity = {
     );
   },
 
-  highWaterMark(traderId: number): number {
+  /**
+   * Highest equity ever recorded — **on closed positions only**.
+   *
+   * Snapshot `equity` is the margin balance, which includes unrealised PnL. Using
+   * it as the circuit breaker's high-water mark was a live bug: one unrealised
+   * spike (price wicks up on an open position for a few seconds) raised the
+   * watermark, and when the spike retraced the mark-to-market went back to the
+   * baseline, so every later cycle computed a drawdown that never happened and
+   * `maxTotalDrawdownPercent` blocked **every** new position, permanently and
+   * silently — the reason was logged but nothing ever cleared it.
+   *
+   * `equity - unrealized_pnl` is the balance the account would show with the
+   * open positions marked at their entry, i.e. the figure that only moves when a
+   * position is actually closed. Deposits still move it, which is correct: a
+   * deposit genuinely raises the account's base.
+   */
+  realizedHighWaterMark(traderId: number): number {
     const row = getDb().get<{ peak: number | null }>(
-      'SELECT MAX(equity) AS peak FROM equity_snapshots WHERE trader_id = ?',
+      'SELECT MAX(equity - unrealized_pnl) AS peak FROM equity_snapshots WHERE trader_id = ?',
       traderId,
     );
     return row?.peak ?? 0;
@@ -1314,6 +1521,50 @@ export const equity = {
 /*  Trade events (throttling bookkeeping)                                      */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * `trade_events` 保留窗口。
+ *
+ * 这张表原来**没有任何保留策略**，而每个回合至少写两行（entry + exit），
+ * 于是它随交易次数线性增长、永不收缩。
+ *
+ * 7 天是"安全富余"而不是"刚好够用"，理由是这张表的**每一个读取者**都只看最近一小段：
+ *
+ *  · `entriesThisHour()` 只看 1 小时；
+ *  · `isInCooldown()` 只问「这个标的上一次 exit 是什么时候」，而 cooldown 的上限由
+ *    `StrategyConfigSchema` 钉死在 1440 分钟（24 小时）—— 超过 24 小时的记录
+ *    无论存在与否都不改变判断结果。
+ *
+ * 所以 7 天 = 最长 cooldown 的 7 倍，即使出现时钟跳变或手工改过配置也不会读到
+ * 被裁掉的行。反向的取舍：裁早了会**放开**一个本该仍在冷却的标的（更激进），
+ * 所以窗口宁可给足，不能贴着 1440 分钟设。
+ *
+ * 注意：账目正确性不依赖这张表 —— 净盈亏来自 `trades`，节流只是运行时约束。
+ */
+const TRADE_EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * 一次 count 结果的阈值，到了才顺手裁剪一次。
+ *
+ * 这个数字同时是"多久裁一次"的开关：`countSince()` 的返回值是有界窗口内的条数，
+ * 正常情况下是个位到两位数，所以稳态下这条 DELETE 一次都不会执行。只有当窗口内
+ * 真的积压了 200 条以上事件时才触发一次裁剪 —— 那时删掉 7 天前的行是纯收益。
+ */
+const TRADE_EVENT_TRIM_THRESHOLD = 200;
+
+/**
+ * 裁掉保留窗口之外的节流事件。
+ *
+ * 模块级函数而不是 `tradeEvents.trim`：`countSince` 内部要调它，而对象字面量
+ * 在初始化期间引用自身（`tradeEvents.trim()`）会抛 TDZ 的 ReferenceError ——
+ * 一个只在阈值被突破时才现形的隐藏炸弹。
+ */
+function trimTradeEvents(retentionMs = TRADE_EVENT_RETENTION_MS): void {
+  getDb().run(
+    'DELETE FROM trade_events WHERE created_at < ?',
+    new Date(Date.now() - retentionMs).toISOString(),
+  );
+}
+
 export const tradeEvents = {
   record(traderId: number, symbol: string, kind: 'entry' | 'exit'): void {
     getDb().run(
@@ -1325,13 +1576,20 @@ export const tradeEvents = {
     );
   },
 
+  /** 裁剪到保留窗口内。**按批次调用**（入口是 `countSince()`），不是每次写入都调。 */
+  trim(retentionMs = TRADE_EVENT_RETENTION_MS): void {
+    trimTradeEvents(retentionMs);
+  },
+
   countSince(traderId: number, kind: 'entry' | 'exit', sinceIso: string): number {
-    return getDb().count(
+    const count = getDb().count(
       'SELECT COUNT(*) AS n FROM trade_events WHERE trader_id = ? AND kind = ? AND created_at >= ?',
       traderId,
       kind,
       sinceIso,
     );
+    if (count >= TRADE_EVENT_TRIM_THRESHOLD) trimTradeEvents();
+    return count;
   },
 
   /** Most recent event of a kind for a symbol — drives the re-entry cooldown. */
@@ -1377,6 +1635,25 @@ export const settings = {
   },
 };
 
+/** 控制台日志保留的最新行数。表有界，但**不再每写一行就裁剪一次**。 */
+export const RUNTIME_LOG_CAP = 500;
+/**
+ * 每写入这么多行才执行一次裁剪。
+ *
+ * 为什么不是每行一次：原实现的 DELETE 是
+ * `DELETE … WHERE id NOT IN (SELECT id … LIMIT 500)`，每写一行扫一遍全表。
+ * 而 `emit()` 会在**每个标的的循环里**调用它（对账补录、保护单挂不上、
+ * 平仓失败……），一轮周期里能触发几十次；`node:sqlite` 是同步 API，
+ * 这些全表扫描全部阻塞事件循环 —— 事件循环正是交易循环本身。
+ *
+ * 200 这个数字是"内存里多留 200 行"换"DELETE 次数降两个数量级"：
+ * 表的上界变成 CAP + TRIM_EVERY = 700 行，而控制台只读最近 200 行，
+ * 缓冲的那部分没有任何读取路径依赖它。
+ */
+const TRIM_EVERY_WRITES = 200;
+/** 距离上次裁剪已写入的行数。模块级状态即可：裁剪是全局的，不区分 trader。 */
+let writesSinceTrim = 0;
+
 export const runtimeLogs = {
   write(traderId: number | null, level: string, scope: string, message: string): void {
     getDb().run(
@@ -1387,9 +1664,18 @@ export const runtimeLogs = {
       message,
       now(),
     );
-    // Trim aggressively: this is a console convenience, not an audit trail.
+    writesSinceTrim += 1;
+    if (writesSinceTrim >= TRIM_EVERY_WRITES) {
+      writesSinceTrim = 0;
+      this.trim();
+    }
+  },
+
+  /** 把表压回 `RUNTIME_LOG_CAP` 行。写路径按批次调用，不是每行调用。 */
+  trim(): void {
     getDb().run(
-      'DELETE FROM runtime_logs WHERE id NOT IN (SELECT id FROM runtime_logs ORDER BY id DESC LIMIT 500)',
+      `DELETE FROM runtime_logs
+        WHERE id NOT IN (SELECT id FROM runtime_logs ORDER BY id DESC LIMIT ${RUNTIME_LOG_CAP})`,
     );
   },
 
@@ -1424,7 +1710,17 @@ export const runtimeLogs = {
  */
 export function computeTraderStats(traderId: number): TraderStats {
   const trader = traders.get(traderId);
-  const tradeStats = trades.stats(traderId);
+  /*
+   * One pass over `trades` for both the totals and the Sharpe input.
+   *
+   * This used to be **four** full scans per request: `trades.stats()`, a second
+   * `SELECT pnl, pnl_percent FROM trades` for the Sharpe, and `equity.list(5000)`
+   * called *twice* — once for the drawdown walk and once again just to read
+   * `[0].timestamp`. The dashboard refreshes this every 5–12 s per trader, and
+   * `node:sqlite` is synchronous, so every one of those scans ran on the event
+   * loop that also drives the trading cycle. Two of them were also unbounded.
+   */
+  const { totals: tradeStats, curve: closed } = aggregateTrades(traderId);
   const latest = equity.latest(traderId);
   const openPositions = positions.open(traderId);
 
@@ -1438,10 +1734,6 @@ export function computeTraderStats(traderId: number): TraderStats {
   const equityNow = latest?.equity ?? trader?.initialEquity ?? 0;
   const initial = trader?.initialEquity ?? 0;
 
-  const closed = getDb().all<{ pnl: number; pnl_percent: number }>(
-    'SELECT pnl, pnl_percent FROM trades WHERE trader_id = ? ORDER BY closed_at',
-    traderId,
-  );
   // Sharpe over **net** returns, matching the headline number.
   const returns = closed.map((t) => t.pnl_percent / 100);
   const mean = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
@@ -1452,11 +1744,21 @@ export function computeTraderStats(traderId: number): TraderStats {
   const stdDev = Math.sqrt(variance);
   const sharpe = stdDev > 0 ? (mean / stdDev) * Math.sqrt(Math.min(returns.length, 252)) : null;
 
+  /*
+   * Equity curve for the drawdown walk and for uptime.
+   *
+   * Read **once**. The previous code called `equity.list(traderId, 5000)` twice
+   * with identical arguments — the second time purely to read element `[0]` — so
+   * every dashboard refresh scanned and materialised the same 5000 snapshots
+   * twice.
+   */
+  const equityCurve = equity.list(traderId, EQUITY_CURVE_WINDOW);
+
   // Max peak-to-trough drawdown across the equity curve.
-  const curve = equity.list(traderId, 5000).map((e) => e.equity);
   let peak = 0;
   let maxDrawdown = 0;
-  for (const value of curve) {
+  for (const snapshot of equityCurve) {
+    const value = snapshot.equity;
     if (value > peak) peak = value;
     if (peak > 0) {
       const dd = ((peak - value) / peak) * 100;
@@ -1464,7 +1766,7 @@ export function computeTraderStats(traderId: number): TraderStats {
     }
   }
 
-  const firstSnapshot = equity.list(traderId, 5000)[0];
+  const firstSnapshot = equityCurve[0];
   const uptimeHours = firstSnapshot
     ? (Date.now() - new Date(firstSnapshot.timestamp).getTime()) / 3_600_000
     : 0;

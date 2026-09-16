@@ -14,10 +14,9 @@ import { TraderTables, type TraderTabId } from '../components/TraderTables';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import {
   DashboardEquityChart,
-  EQUITY_RANGES,
   WinLossBar,
-  type EquityRange,
 } from '../components/DashboardCharts';
+import { EQUITY_RANGES, type EquityRange } from '../components/equityCurve';
 import { CandlestickChart } from '../components/CandlestickChart';
 import { StartTraderModal } from '../components/TraderModals';
 import { TraderConfigModal } from '../components/TraderConfigModal';

@@ -2,7 +2,7 @@
 
 本项目的 Docker 镜像包含以下第三方软件包。它们的许可证要求**在再分发时保留版权声明与许可证文本**，本文件即为该义务的履行方式。
 
-运行时依赖共 **205** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
+运行时依赖共 **194** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
 
 > 本文件由 `node scripts/generate-notices.mjs` 自动生成，请勿手工编辑。
 > CI 会校验它与当前依赖一致。
@@ -11,7 +11,7 @@
 
 | 许可证 | 包数量 |
 | --- | --- |
-| MIT | 164 |
+| MIT | 153 |
 | ISC | 25 |
 | BlueOak-1.0.0 | 7 |
 | BSD-3-Clause | 5 |
@@ -44,11 +44,8 @@
 | @isaacs/cliui | 9.0.0 | BlueOak-1.0.0 | — |
 | @lukeed/ms | 2.0.2 | MIT | Luke Edwards |
 | @pinojs/redact | 0.4.0 | MIT | Matteo Collina <hello@matteocollina.com> |
-| @radix-ui/number | 1.1.3 | MIT | — |
 | @radix-ui/primitive | 1.1.7 | MIT | — |
-| @radix-ui/react-accordion | 1.2.20 | MIT | — |
 | @radix-ui/react-arrow | 1.1.15 | MIT | — |
-| @radix-ui/react-checkbox | 1.3.11 | MIT | — |
 | @radix-ui/react-collapsible | 1.1.20 | MIT | — |
 | @radix-ui/react-collection | 1.1.15 | MIT | — |
 | @radix-ui/react-compose-refs | 1.1.5 | MIT | — |
@@ -56,22 +53,16 @@
 | @radix-ui/react-dialog | 1.1.23 | MIT | — |
 | @radix-ui/react-direction | 1.1.4 | MIT | — |
 | @radix-ui/react-dismissable-layer | 1.1.19 | MIT | — |
-| @radix-ui/react-dropdown-menu | 2.1.24 | MIT | — |
 | @radix-ui/react-focus-guards | 1.1.6 | MIT | — |
 | @radix-ui/react-focus-scope | 1.1.16 | MIT | — |
 | @radix-ui/react-id | 1.1.4 | MIT | — |
 | @radix-ui/react-label | 2.1.15 | MIT | — |
-| @radix-ui/react-menu | 2.1.24 | MIT | — |
 | @radix-ui/react-popover | 1.1.23 | MIT | — |
 | @radix-ui/react-popper | 1.3.7 | MIT | — |
 | @radix-ui/react-portal | 1.1.17 | MIT | — |
 | @radix-ui/react-presence | 1.1.10 | MIT | — |
 | @radix-ui/react-primitive | 2.1.10 | MIT | — |
 | @radix-ui/react-roving-focus | 1.1.19 | MIT | — |
-| @radix-ui/react-scroll-area | 1.2.18 | MIT | — |
-| @radix-ui/react-select | 2.3.7 | MIT | — |
-| @radix-ui/react-separator | 1.1.15 | MIT | — |
-| @radix-ui/react-slider | 1.4.7 | MIT | — |
 | @radix-ui/react-slot | 1.3.3 | MIT | — |
 | @radix-ui/react-switch | 1.3.7 | MIT | — |
 | @radix-ui/react-tabs | 1.1.21 | MIT | — |
@@ -81,7 +72,6 @@
 | @radix-ui/react-use-effect-event | 0.0.5 | MIT | — |
 | @radix-ui/react-use-is-hydrated | 0.1.3 | MIT | — |
 | @radix-ui/react-use-layout-effect | 1.1.4 | MIT | — |
-| @radix-ui/react-use-previous | 1.1.4 | MIT | — |
 | @radix-ui/react-use-rect | 1.1.4 | MIT | — |
 | @radix-ui/react-use-size | 1.1.4 | MIT | — |
 | @radix-ui/react-visually-hidden | 1.2.11 | MIT | — |
@@ -208,7 +198,6 @@
 | shebang-regex | 3.0.0 | MIT | Sindre Sorhus |
 | signal-exit | 4.1.0 | ISC | Ben Coe <ben@npmjs.com> |
 | sonic-boom | 4.2.1 | MIT | Matteo Collina <hello@matteocollina.com> |
-| sonner | 2.0.8 | MIT | Emil Kowalski <e@emilkowal.ski> |
 | split2 | 4.2.0 | ISC | Matteo Collina <hello@matteocollina.com> |
 | statuses | 2.0.2 | MIT | — |
 | stream-shift | 1.0.3 | MIT | Mathias Buus (@mafintosh) |

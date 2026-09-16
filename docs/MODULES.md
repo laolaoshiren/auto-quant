@@ -11,6 +11,7 @@
 | [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) | 怎么跑、怎么测、有哪些坑 |
 | [`docs/API.md`](API.md) | 逐个端点的请求/响应参考 |
 | [`docs/AGENTS.md`](AGENTS.md) | 不可违反的改动规则 |
+| [`packages/web/DESIGN.md`](../packages/web/DESIGN.md) | 控制台的**视觉规范**：色板/字号/间距/布局与响应式断点。改前端样式前先读它 |
 
 约定：路径一律相对仓库根；**"要加一个新的 X 就改这里"** 一律指需要真正动手的位置。
 
@@ -21,7 +22,7 @@
 | 包 | 名字 | 角色 | 有测试吗 |
 | --- | --- | --- | --- |
 | `packages/shared` | `@aq/shared` | 跨端契约：zod schema、领域类型、指标数学、LLM 供应商目录、符号工具 | ❌ 由 server/web 的测试间接覆盖 |
-| `packages/server` | `@aq/server` | Fastify API、币安适配、LLM 客户端、策略引擎、风控引擎、交易运行时、SQLite 存储 | ✅ 11 个文件、194 个用例 |
+| `packages/server` | `@aq/server` | Fastify API、币安适配、LLM 客户端、策略引擎、风控引擎、交易运行时、SQLite 存储 | ✅ 有测试（文件数与用例数以 `npm test` 为准，不要写死） |
 | `packages/web` | `@aq/web` | React 18 + Vite + Tailwind 控制台 | ❌ 无测试脚本 |
 
 `@aq/shared` 通过 `exports: { ".": "./src/index.ts" }` 直接暴露 **TypeScript 源码**，
@@ -161,8 +162,9 @@ bootstrap ──► broker ──► symbols, market, account, income, rest, typ
 | `openaiCompatible.ts` | **一个适配器服务所有 OpenAI 方言**（DeepSeek/OpenAI/Qwen/Grok/Kimi/MiniMax/OpenRouter/custom），并把各家的偏差显式处理掉 | `buildBody()`、`buildRequest()`、`parseResponse()`、`extractText()`、`stripThinkTags()`、`normalizeFinishReason()`、`rejectsSamplingParameters()`、`supportsResponseFormat()`、`supportsStrictSchema()`、`maxTokensField()`、`defaultBaseUrl()` | `@aq/shared`、`./http.js`、`./errors.js`、`./types.js` |
 | `anthropic.ts` | 原生 Messages API：`system` 是顶层字段、`content` 是类型化块数组、`x-api-key` + `anthropic-version`、新模型拒绝 sampling 参数 | `buildBody()`、`buildRequest()`、`parseResponse()`、`extractText()`、`normalizeStopReason()`、`rejectsSamplingParameters()`、`ANTHROPIC_VERSION` | `./http.js`、`./errors.js`、`./types.js` |
 | `gemini.ts` | 原生 `generateContent`：key 走 query、角色是 `model`、`systemInstruction` 顶层、schema 必须翻译成**全大写类型**并丢掉不支持的键 | `buildBody()`、`buildRequest()`、`parseResponse()`、`toGeminiSchema()`、`extractText()`、`hasFunctionCall()`、`normalizeFinishReason()` | `./http.js`、`./errors.js`、`./types.js` |
-| `client.ts` | **统一策略层**：按 `openAiCompatible` 分派 → 各家 `buildRequest`/`parseResponse`；超时、重试、全抖动退避、结构化日志（**永不记录 API Key 本身**，只记掩码）；连接探测 | `LlmClient`、`LlmClientOptions`、`ConnectionProbe`、`backoffDelayMs()` | `@aq/shared`、`./errors.js`、`./http.js`、三个适配器 |
-| `discovery.ts` | 用**用户自己的 key** 向厂商拉取**当前可用**模型列表（三种响应方言归一化），失败回落内置提示并标记 `source: 'fallback'` | `discoverModels()`、`DiscoverModelsResult` | `@aq/shared`、`./errors.js` |
+| `client.ts` | **统一策略层**：按 `openAiCompatible` 分派 → 各家 `buildRequest`/`parseResponse`；超时、重试、全抖动退避、结构化日志（**永不记录 API Key 本身**，只记掩码）；连接探测；构造时用 `urlGuard` 拒绝内网 `baseUrl`（这是所有模型请求的必经之路，连库里存着的旧地址也会被拦下） | `LlmClient`、`LlmClientOptions`、`ConnectionProbe`、`backoffDelayMs()` | `@aq/shared`、`./errors.js`、`./http.js`、`./urlGuard.js`、三个适配器 |
+| `discovery.ts` | 用**用户自己的 key** 向厂商拉取**当前可用**模型列表（三种响应方言归一化），失败回落内置提示并标记 `source: 'fallback'`；请求前同样过 `urlGuard` | `discoverModels()`、`DiscoverModelsResult` | `@aq/shared`、`./errors.js`、`./urlGuard.js` |
+| `urlGuard.ts` | 出站 URL 白名单（SSRF 防护）：只允许 http(s)，拒绝回环 / 链路本地（含云元数据）/ RFC1918 / CGNAT / ULA / 组播，含 IPv4-mapped 与 NAT64 形式；校验**字面主机**，不做 DNS 解析 | `checkOutboundUrl()`、`assertOutboundUrlAllowed()`、`UrlGuardVerdict` | `node:net` |
 
 ### `LlmClient` 的调用面
 
@@ -236,7 +238,9 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | `checkCircuitBreakers()` | 熔断器（纯函数，只阻止**新开仓**，不平仓） |
 | `CircuitBreakerState` / `CircuitBreakerVerdict` | 上面那个的输入输出 |
 
-### `reviewOpen` 的实际检查顺序（13 步）
+### `reviewOpen` 的实际检查顺序（14 步）
+
+编号与源码里的 `/* --- N. --- */` 标记**一一对应**（0–13），想核对时直接按标记 grep 即可。
 
 0. 账户权益 > 0 ｜ 标的有可用价格（**绝不在没有价格时盲目下单**）
 1. 持仓槽位未满 ｜ 2. 置信度达标
@@ -246,9 +250,9 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 7. 盈亏比达标 ｜ 8. 名义价值上限（按权益倍数）｜ 9. 保证金预算（同时受 `maxMarginUsage` 与可用余额约束，超了就缩名义价值）
 10. 最小下单量（交易所 `MIN_NOTIONAL` 与配置值的**较大者**）｜ 11. 节流（每轮/每小时开仓上限）
 12. **数量可按步长取整**（取不到整数手直接拒绝）
+13. 把止损/止盈各自**钳到入场价的安全侧**（`clampStopLoss` / `clampTakeProfit`，两个镜像函数）
 
-最后把止损/止盈各自**钳到入场价的安全侧**（`clampStopLoss` / `clampTakeProfit`，两个镜像函数），
-按实际可取整数量反推最终名义价值，算出真实 `riskUsd` 与"占权益百分比"，然后写进 `adjustments`。
+最后按实际可取整数量反推最终名义价值，算出真实 `riskUsd` 与"占权益百分比"，然后写进 `adjustments`。
 
 `reviewClose` 只有一条限制：最小持仓时间。**"拒绝平仓"是把小亏变成爆仓的经典方式。**
 
@@ -323,6 +327,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | `simulate.ts` | `npm run sim` / `npm run sim:live` | 真实历史 K 线回放 + 模拟交易所 + 脚本化（或真实）模型，跑 80（或 12）轮，结尾跑 **15 项校验**（**当前实测 15/15 全通过**）。写**临时**数据库 | 否 |
 | `demoCycle.ts` | `npm run demo` | 往**真实**数据库写一轮 `[DEMO]` 前缀的完整审计数据（真实行情 + 脚本化模型 + 自己的 `SimulatedBroker`）；`--clean` 清除 | 否 |
 | `liveSmokeTest.ts` | `npx tsx .../liveSmokeTest.ts --confirm` | **实盘接线冒烟**：预检 → 单向模式 → 杠杆 → 市价开仓 → 挂止损 → 挂止盈 → **回读交易所确认** → 撤单 → 平仓 → 确认账户干净 | ✅ **是** |
+| `resetAdminPassword.ts` | `npx tsx .../resetAdminPassword.ts` | **锁死时的后门**：直接改库里的管理员用户名/密码（调 `generatePassword()` / `generateUsername()`，与首启一致）。`deploy/up.sh` 的 `reset-credentials` 会调它 | 否 |
 
 ### `simulate.ts` 的脚本化模型是刻意的
 
@@ -348,8 +353,10 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 
 | 文件 | 一句话职责 | 关键导出 | 依赖 |
 | --- | --- | --- | --- |
-| `server.ts` | **全部 HTTP 路由 + WebSocket 事件流 + 静态控制台托管**。含请求 zod schema、错误处理、`guard()` 包装、实时交易所视图 | `buildServer()`、`ApiDependencies`、`bootstrapOwnerAccount()` | 几乎全部 server 模块 |
-| `auth.ts` | 手写 HS256 JWT（签发/校验，`timingSafeEqual` 比较签名）+ Fastify preHandler 守卫 + 首启密码生成 | `signToken()`、`verifyToken()`、`TokenPayload`、`requireAuth()`、`extractToken()`、`generatePassword()`、`AuthedRequest` | `node:crypto`、`fastify` |
+| `server.ts` | **全部 HTTP 路由 + WebSocket 事件流 + 静态控制台托管**。含请求 zod schema、错误处理、`guard()` 包装、实时交易所视图 | `buildServer()`、`ApiDependencies`、`bootstrapOwnerAccount()`、`publicAccount()`（把账户行里的密钥剥掉再序列化；提成模块级纯函数就是为了能直接单测） | 几乎全部 server 模块 |
+| `auth.ts` | 手写 HS256 JWT（签发/校验，`timingSafeEqual` 比较签名）+ Fastify preHandler 守卫 + 首启密码生成 + **令牌撤销判定**（`credAt` 与库中"凭据变更时间"等值比较）；`extractToken()` 默认只认 `Authorization` 头 | `signToken()`、`verifyToken()`、`isTokenRevoked()`、`TOKEN_TTL_SECONDS`、`TokenPayload`、`requireAuth()`、`extractToken()`、`generatePassword()`、`generateUsername()`、`AuthedRequest` | `node:crypto`、`fastify` |
+| `loginThrottle.ts` | 登录失败节流：按**用户名**与**来源 IP** 两个维度计数、指数锁定，`Map` 有 LRU + 过期双重上限（没有上限的节流器本身就是一条内存耗尽路径） | `FailureThrottle`、`USERNAME_THROTTLE_OPTIONS`、`IP_THROTTLE_OPTIONS` | 无（刻意零依赖） |
+| `serialize.test.ts` | `publicAccount()` 的回归测试：**密钥必须被剥掉**，其余字段原样透传（多一个字段不该被静默丢掉，也不该把 `api_secret_enc` 漏出去） | —— | `node:test`、`./server.js` |
 
 ### 路由的两类失败形式（容易踩的坑）
 
@@ -371,7 +378,8 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 - 静态控制台只在 `packages/web/dist` **存在时**才注册；`setNotFoundHandler` 对 `/api` 前缀回 404 JSON，
   其余回落到 `index.html`（SPA 客户端路由）。
 - `/api/events` 是 WebSocket，token 从 **query 参数**取（浏览器无法给 WebSocket 升级请求设 header），
-  连上后先回放最近 30 条历史，避免新开的控制台空白。
+  连上后先回放最近 30 条历史，避免新开的控制台空白。**只有这一个端点接受 `?token=`**；
+  REST 路由只认 `Authorization` 头（URL 会进代理日志、浏览器历史和 `Referer`）。
 
 ---
 
@@ -386,7 +394,8 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | --- | --- |
 | `main.tsx` | `createRoot` + `<BrowserRouter>` + `<App />`，挂载 `Toaster` |
 | `App.tsx` | 全部路由 + `RequireAuth` 包裹。`/settings` 保留为**重定向**到 `/models`（老书签不 404） |
-| `components/Layout.tsx` | 侧边导航 + 顶部状态条。导航项定义在文件内的 `NAV` 常量里 |
+| `components/Layout.tsx` | 侧边导航 + 顶部状态条。导航**数据**不在这个文件里，见 `components/nav.ts` |
+| `components/nav.ts` | **导航表的唯一来源**：`NAV_ITEMS`（`{ to, label, icon, jump }`，`icon` 是 lucide 组件）+ `pageTitleFor()` 顶栏标题判定。侧栏与命令面板共用它，避免"加了一个页面只有侧栏有"的漂移 |
 
 实际路由（`App.tsx` 为准）：`/`（总览）、`/traders`、`/traders/:id`、`/traders/:id/decisions/:recordId`、
 `/strategy`、`/strategy/:id`、`/market`、`/models`、`/exchanges`、`/account`、`/settings`（重定向）、
@@ -400,7 +409,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | `store.ts` | **两个 zustand store**：`useApp`（会话 / 目录 / 系统状态 / 机器人列表，慢）与 `useEvents`（WebSocket 实时日志、订单、持仓、通知，快）。拆开的理由：繁忙的 socket 帧只重渲染真正读它的面板 | `useApp`、`useEvents`、`selectTraderLive()`、`cachedUser`、`SessionStatus`、`SocketStatus`、`Toast`、`TraderLive` |
 | `hooks.ts` | 轮询与 UI 辅助 | `usePolled()`、`fallbackInterval()`、`useDocumentTitle()`、`useCopy()`、`useTicker()`、`QueryState` |
 | `actions.ts` | "立即运行一轮"与"手动对账"的交互封装（含 toast 文案） | `useRunOnce()`、`useReconcile()`、`reconcileSummary()`、`ReconcileOutcome` |
-| `format.ts` | 全部格式化函数与颜色 | `fmtNum`/`fmtUsd`/`fmtAsset`/`fmtSigned`/`fmtPercent`/`fmtPrice`/`fmtQty`/`fmtInt`/`fmtCompact`/`fmtDuration`/`fmtTime`/`fmtDateTime`/`fmtLatency`/`fmtProfitFactor`/`timeAgo`/`sparkline`/`sideLabel`/`pnlColor`/`shortId`/`safeJson`/`clamp`、`BALANCE_LABEL`、`DEFAULT_SETTLE_ASSET` |
+| `format.ts` | 全部格式化函数与颜色 | `fmtNum`/`fmtUsd`/`fmtAsset`/`fmtSigned`/`fmtPercent`/`fmtPrice`/`fmtQty`/`fmtInt`/`fmtCompact`/`fmtDuration`/`fmtTime`/`fmtDateTime`/`fmtLatency`/`fmtProfitFactor`/`timeAgo`/`sideLabel`/`pnlColor`/`safeJson`/`clamp`、`BALANCE_LABEL`、`DEFAULT_SETTLE_ASSET` |
 | `strategy.ts` | 策略草案的工具：套用预设、预校验、深拷贝 | `applyPreset()`、`presetById()`、`validateStrategy()`、`cloneConfig()`、`ValidationResult` |
 | `summaries.ts` | 平仓原因等标签的本地兜底 + 摘要 store | `useSummaries`、`closeReasonLabel()` |
 
@@ -422,6 +431,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | `FaqPage.tsx` | `/faq` | 使用说明与风险提示 |
 | `LoginPage.tsx` | `/login` | 登录（无注册入口；无账号时提示去哪看凭据） |
 | `NotFoundPage.tsx` / `SettingsPage.tsx` | `*` / `/settings` | 404 / 重定向 |
+| `overviewParts.tsx` | 无（被 `/` 引用）| 总览页的展示件：`HeadlineMetric` / `SystemFact` / `TradersSnapshotTable` / `EquitySkeleton` / `useRecentTrades`。拆出来是为了让 `OverviewPage.tsx` 读起来是**结构**而不是一堆 markup |
 
 ### `components/`
 
@@ -440,7 +450,11 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | `StrategyFields.tsx` / `StrategyRiskFields.tsx` / `StrategyFieldKit.tsx` | 策略编辑器的字段分组与字段原语 |
 | `StrategyCheckModal.tsx` | 策略体检弹窗 |
 | `EquitySourceField.tsx` | 起始权益来源选择（从交易所读 / 手动输入） |
-| `DashboardCharts.tsx` | 权益曲线、杠杆仪表、胜负条、指标卡 |
+| `DashboardCharts.tsx` | 交易看板的图表件：权益曲线（`DashboardEquityChart`）、胜负条（`WinLossBar`）。**它 import 了 recharts**，所以只允许被懒加载的页面引用 |
+| `EquityCurveChart.tsx` | 总览页专用的权益曲线（同样基于 recharts）。**单独一个文件就是为了把 recharts 挡在首屏之外**——它只经 `lazy(() => import('./EquityCurveChart'))` 到达 |
+| `equityCurve.ts` | 两条曲线共用的**零图表依赖**算术与调色：`mergeEquityCurves()`、`rangeSpanMs()`、`equityAxisFormatter()`、`CHART_INK`、`EQUITY_RANGES`/`filterByRange()`。放这里是因为任何被首屏引用的东西都不能牵进 recharts |
+| `nav.ts` | 导航表（见上） |
+| `CommandPalette.tsx` | ⌘K 命令面板（`cmdk` + Radix Dialog）：页面跳转、机器人操作，快捷键与 `NAV_ITEMS` 同源 |
 | `CandlestickChart.tsx` | 轻量 K 线图封装 |
 | `Toaster.tsx` | 通知浮层 |
 | `settings/AccountSection.tsx` / `AiModelsSection.tsx` / `ExchangeAccountsSection.tsx` | 设置三节的实体实现 |
@@ -584,7 +598,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | --- | --- | --- |
 | 1 | 新文件 `packages/web/src/pages/YourPage.tsx` | 导出 `export function YourPage()`。照现有页面的骨架写：`useDocumentTitle('...')` → `<SectionHeading title sub>` → 内容。数据用 `usePolled()` 或 `useApp`/`useEvents` |
 | 2 | `packages/web/src/App.tsx` | 在 `<RequireAuth><Layout /></RequireAuth>` 这层路由组里加 `<Route path="/your" element={<YourPage />} />`。放在这层外就是公开页面 |
-| 3 | `packages/web/src/components/Layout.tsx` | 在文件内的 `NAV` 常量里加一条 `{ to: '/your', label: '...', glyph: '▤' }`（`glyph` 是一个单字符符号，与现有风格保持一致，没有图标库） |
+| 3 | `packages/web/src/components/nav.ts` | 往 `NAV_ITEMS` 里加一条 `{ to: '/your', label: '...', icon: SomeLucideIcon, jump: 'y' }`。`icon` 是 **lucide-react 的组件**（本项目有图标库），`jump` 是 `g` 前缀快捷键的第二段，只用小写字母 |
 | 4 | 需要的组件 | 若页面较大，把实体拆到 `components/` 下（参考 `pages/ModelsPage.tsx` + `components/settings/AiModelsSection.tsx` 的分工：page 管路由/标题/布局，component 管表单与逻辑） |
 | 5 | 后端 | 数据来自 `packages/web/src/lib/api.ts` 的 `api` 对象。缺端点就先按配方 6 加 |
 | 6 | 验证 | `npm run typecheck` + `npm run build`，然后**在浏览器里真的点一遍**。别只看编译通过就说它工作了 |

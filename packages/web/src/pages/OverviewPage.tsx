@@ -29,8 +29,7 @@ import { Button, Empty, ErrorNote, Panel, Spinner3 } from '../components/ui';
 import { SectionHeading, TraderStatusBadge } from '../components/Badges';
 import { NewTraderModal, StartTraderModal } from '../components/TraderModals';
 import { pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
-import { EQUITY_RANGES, type EquityRange } from '../components/DashboardCharts';
-import { mergeEquityCurves, rangeSpanMs } from '../components/equityCurve';
+import { EQUITY_RANGES, mergeEquityCurves, rangeSpanMs, type EquityRange } from '../components/equityCurve';
 import { EquitySkeleton, HeadlineMetric, SystemFact, TradersSnapshotTable, useRecentTrades } from './overviewParts';
 import {
   fmtAsset,

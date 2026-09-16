@@ -1,49 +1,20 @@
 /**
- * Dashboard chart + stat-card primitives.
+ * Per-trader dashboard chart primitives: the equity curve and the win/loss bar.
  *
- * Kept apart from the page so the equity chart, the leverage gauge and the win
- * ratio bar can each be reasoned about (and reused) on their own.
+ * Kept apart from the page so each can be reasoned about (and reused) on its own.
  *
  * The overview page reaches the same visual language through
  * `EquityCurveChart.tsx`, which is a separate module on purpose — see the header
  * of that file for why the recharts import must not be shared.
  */
-import type { ReactNode } from 'react';
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { EquitySnapshot } from '@aq/shared';
 import { fmtInt, fmtNum, fmtTime } from '../lib/format';
-import { CHART_INK, equityAxisFormatter, rangeSpanMs, type EquityPoint } from './equityCurve';
+import { CHART_INK, equityAxisFormatter, filterByRange, rangeSpanMs, type EquityPoint, type EquityRange } from './equityCurve';
 
 /* -------------------------------------------------------------------------- */
 /*  Equity chart                                                               */
 /* -------------------------------------------------------------------------- */
-
-export type EquityRange = '1D' | '7D' | '1M' | '3M' | 'ALL';
-
-export const EQUITY_RANGES: Array<{ id: EquityRange; label: string; ms: number | null }> = [
-  { id: '1D', label: '1D', ms: 24 * 3600 * 1000 },
-  { id: '7D', label: '7D', ms: 7 * 24 * 3600 * 1000 },
-  { id: '1M', label: '1M', ms: 30 * 24 * 3600 * 1000 },
-  { id: '3M', label: '3M', ms: 90 * 24 * 3600 * 1000 },
-  { id: 'ALL', label: '全部', ms: null },
-];
-
-/** Down-sample to the selected window. `ALL` keeps everything. */
-export function filterByRange(snapshots: EquitySnapshot[], range: EquityRange): EquitySnapshot[] {
-  const window = EQUITY_RANGES.find((r) => r.id === range)?.ms ?? null;
-  if (window === null) {
-    return [...snapshots].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  }
-  const cutoff = Date.now() - window;
-  const inside = snapshots.filter((s) => new Date(s.timestamp).getTime() >= cutoff);
-  // A quiet account can have nothing inside a short window; showing an empty
-  // chart would read as "no data" when the truth is "nothing recent".
-  return inside.length >= 2 ? sortSnapshots(inside) : sortSnapshots(snapshots).slice(-2);
-}
-
-function sortSnapshots(snapshots: EquitySnapshot[]): EquitySnapshot[] {
-  return [...snapshots].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-}
 
 interface EquityTooltipProps {
   active?: boolean;
@@ -235,87 +206,6 @@ export function DashboardEquityChart({
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Leverage gauge (semicircular arc)                                          */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Effective leverage as a half-doughnut.
- *
- * The arc runs green → amber → red over 0–10x, so an over-levered account is
- * obvious at a glance rather than needing the number to be read.
- */
-export function LeverageGauge({ value, size = 100 }: { value: number; size?: number }) {
-  const max = 10;
-  const clamped = Number.isFinite(value) ? Math.min(Math.max(value, 0), max) : 0;
-  const ratio = clamped / max;
-
-  const stroke = 9;
-  const width = size;
-  const height = size * 0.62;
-  const cx = width / 2;
-  const cy = height - 4;
-  const r = (width - stroke) / 2 - 2;
-  const startAngle = Math.PI;
-  const endAngle = 0;
-
-  const point = (angle: number) => ({
-    x: cx + r * Math.cos(angle),
-    y: cy - r * Math.sin(angle),
-  });
-
-  const arcPath = (from: number, to: number) => {
-    const a = point(from);
-    const b = point(to);
-    const largeArc = Math.abs(to - from) > Math.PI ? 1 : 0;
-    // Sweep is clockwise on screen because y is flipped by the point() helper.
-    return `M ${a.x} ${a.y} A ${r} ${r} 0 ${largeArc} 0 ${b.x} ${b.y}`;
-  };
-
-  const valueAngle = startAngle + (endAngle - startAngle) * ratio;
-  const tone = ratio >= 0.7 ? CHART_INK.down : ratio >= 0.4 ? CHART_INK.warn : CHART_INK.up;
-
-  return (
-    <div className="flex flex-col items-center">
-      <svg width={width} height={height} role="img" aria-label={Number.isFinite(value) ? `有效杠杆 ${value.toFixed(2)} 倍` : '有效杠杆未知'}>
-        <defs>
-          <linearGradient id="leverageArc" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor={CHART_INK.up} />
-            <stop offset="55%" stopColor={CHART_INK.warn} />
-            <stop offset="100%" stopColor={CHART_INK.down} />
-          </linearGradient>
-        </defs>
-        <path d={arcPath(startAngle, endAngle)} fill="none" stroke={CHART_INK.track} strokeWidth={stroke} strokeLinecap="round" />
-        <path
-          d={arcPath(startAngle, valueAngle)}
-          fill="none"
-          stroke={ratio > 0.02 ? 'url(#leverageArc)' : tone}
-          strokeWidth={stroke}
-          strokeLinecap="round"
-        />
-        <text
-          x={cx}
-          y={cy - 10}
-          textAnchor="middle"
-          fill={CHART_INK.inkHi}
-          fontSize={size * 0.22}
-          fontFamily='JetBrains Mono, ui-monospace, Menlo, Consolas, monospace'
-        >
-          {Number.isFinite(value) ? `${value.toFixed(2)}x` : '—'}
-        </text>
-        <text x={cx} y={cy + 2} textAnchor="middle" fill={CHART_INK.axis} fontSize={size * 0.095}>
-          {`0 – ${max}x`}
-        </text>
-      </svg>
-      {/*
-       * No "杠杆" caption here. The card's own label already says 有效杠杆, and
-       * the gauge is the tallest thing in the stat row — this card sets the row
-       * height, so a redundant word costs the order table real pixels.
-       */}
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
 /*  Win / loss proportional bar                                                */
 /* -------------------------------------------------------------------------- */
 
@@ -345,51 +235,6 @@ export function WinLossBar({ wins, losses }: { wins: number; losses: number }) {
         <span className="num text-up">{fmtInt(wins)} 盈</span>
         <span className="num text-down">{fmtInt(losses)} 亏</span>
       </div>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Compact metric card                                                        */
-/* -------------------------------------------------------------------------- */
-
-export function MetricCard({
-  label,
-  value,
-  tone,
-  sub,
-  children,
-  title,
-}: {
-  label: string;
-  value?: ReactNode;
-  tone?: string;
-  sub?: ReactNode;
-  children?: ReactNode;
-  title?: string;
-}) {
-  /*
-   * Bigger type, smaller footprint.
-   *
-   * The type went up a step (label/sub 2xs→xs, value xl→2xl) while the vertical
-   * padding and the gaps between the three lines came down by more, so the card
-   * ends up *shorter* than before despite the larger text. That is the point:
-   * these four numbers are what an operator reads at a glance, and every pixel
-   * the row gives up is a pixel the order table below gets.
-   */
-  return (
-    <div
-      title={title}
-      className="flex min-w-0 flex-col rounded-md border border-base-750 bg-base-900 px-3 py-1.5 shadow-panel"
-    >
-      <div className="truncate text-xs font-semibold tracking-[0.08em] text-ink-lo">{label}</div>
-      {/* min-w-0 + break: a long 24h loss must wrap rather than widen the card
-          and push the other three out of the row. */}
-      {value !== undefined && (
-        <div className={`num mt-0.5 min-w-0 break-words text-2xl leading-none ${tone ?? 'text-ink-hi'}`}>{value}</div>
-      )}
-      {sub !== undefined && <div className="mt-1 text-xs leading-snug text-ink-faint">{sub}</div>}
-      {children}
     </div>
   );
 }

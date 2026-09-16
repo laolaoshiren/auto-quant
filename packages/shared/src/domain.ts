@@ -277,6 +277,16 @@ export const CLOSE_REASONS = [
   'liquidated', // liquidation or ADL
   'external', // closed outside the bot, reason unknown
   /*
+   * Entered, but the exchange-side stop could not be established — so the
+   * position was market-closed to avoid holding a naked leveraged exposure.
+   *
+   * A distinct code on purpose: this close is a **cost** the runtime chose to
+   * pay, and an operator needs to see how often it happens. Folding it into
+   * `external` or `stop_loss` would hide the fact that the entry and the
+   * protection disagreed about price.
+   */
+  'protection_unavailable',
+  /*
    * Recovered from the exchange's fill history rather than observed live.
    *
    * A distinct code on purpose: the position certainly closed, but the process
@@ -302,6 +312,7 @@ export const CLOSE_REASON_LABELS: Record<string, string> = {
   drawdown_guard: '回撤守卫平仓',
   liquidated: '爆仓',
   external: '外部平仓',
+  protection_unavailable: '保护单缺失（已立即平仓）',
   reconciled: '对账补录',
 };
 

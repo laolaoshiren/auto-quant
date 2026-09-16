@@ -1,8 +1,9 @@
-import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import { existsSync } from 'node:fs';
+import { basename } from 'node:path';
 import {
   EXCHANGES,
   LLM_PROVIDERS,
@@ -11,6 +12,8 @@ import {
   defaultStrategyConfig,
   providerDefaults,
   type ServerEvent,
+  type Trader,
+  type TraderStatus,
 } from '@aq/shared';
 import { z } from 'zod';
 import type { ExchangeConnection } from '../binance/bootstrap.js';
@@ -19,7 +22,7 @@ import type { Vault } from '../crypto/vault.js';
 import { dbPath, env, webDistDir } from '../env.js';
 import { eventBus } from '../events.js';
 import { createLogger, setLogSink } from '../logger.js';
-import { maskSecret, hashPassword, verifyPassword } from '../crypto/vault.js';
+import { maskSecret, hashPassword, verifyPassword, DUMMY_PASSWORD_HASH } from '../crypto/vault.js';
 import {
   aiModels,
   computeTraderStats,
@@ -35,7 +38,19 @@ import {
   users,
 } from '../store/repositories.js';
 import type { TraderManager } from '../trader/manager.js';
-import { requireAuth, signToken, verifyToken, generatePassword, generateUsername, type AuthedRequest } from './auth.js';
+import {
+  requireAuth,
+  signToken,
+  verifyToken,
+  extractToken,
+  isTokenRevoked,
+  generatePassword,
+  generateUsername,
+  type AuthedRequest,
+  type TokenPayload,
+} from './auth.js';
+import { FailureThrottle, IP_THROTTLE_OPTIONS, USERNAME_THROTTLE_OPTIONS } from './loginThrottle.js';
+import { checkOutboundUrl } from '../llm/urlGuard.js';
 import type { BalanceService } from '../services/balance.js';
 
 const log = createLogger('api');
@@ -48,6 +63,39 @@ const CredentialsSchema = z.object({
   username: z.string().min(1).max(64),
   password: z.string().min(6).max(256),
 });
+
+/**
+ * 修改账户凭据的请求体。
+ *
+ * 加 zod 不是为了拦攻击，而是为了拦住**类型错误**：`currentPassword` 传数字时，
+ * 旧代码会把它一路送到 `scryptSync`，抛出的 `TypeError` 变成 HTTP 500。
+ * 校验发生在任何写操作之前，所以这里没有绕过风险 —— 但 500 会让一个纯粹的
+ * 客户端错误看起来像服务端故障，还会把内部栈信息回显出去。
+ */
+const UpdateAccountSchema = z.object({
+  currentPassword: z.string({ description: '当前密码' }).min(1, '请填写当前密码。').max(256),
+  username: z.string().max(64).optional(),
+  newPassword: z.string().max(256).optional(),
+});
+
+/**
+ * 自定义模型端点地址。
+ *
+ * 在这里（而不是只在真正发请求的地方）校验，是为了给操作员一条明确的 400，
+ * 而不是把危险地址先存进数据库、等到交易循环才以一条看不懂的超时报错。
+ * 真正的兜底在 `LlmClient` 构造函数里 —— 那里覆盖所有出站路径，
+ * 包括本次改动之前就已经存进库里的旧地址。
+ */
+const BaseUrlSchema = z
+  .string()
+  .default('')
+  .superRefine((value, ctx) => {
+    if (!value) return;
+    const verdict = checkOutboundUrl(value);
+    if (!verdict.allowed) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `baseUrl 不被允许：${verdict.reason}` });
+    }
+  });
 
 const ExchangeAccountInputSchema = z.object({
   exchange: z.enum(['binance']).default('binance'),
@@ -74,7 +122,7 @@ const AiModelInputSchema = z.object({
   provider: z.string().min(1),
   label: z.string().min(1).max(80),
   model: z.string().min(1),
-  baseUrl: z.string().default(''),
+  baseUrl: BaseUrlSchema,
   apiKey: z.string().default(''),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().min(64).max(2_000_000).optional(),
@@ -85,7 +133,7 @@ const AiModelInputSchema = z.object({
 const DiscoverModelsInputSchema = z.object({
   provider: z.string().min(1),
   apiKey: z.string().default(''),
-  baseUrl: z.string().default(''),
+  baseUrl: BaseUrlSchema,
 });
 
 /**
@@ -99,7 +147,7 @@ const DiscoverModelsInputSchema = z.object({
 const DraftModelInputSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
-  baseUrl: z.string().default(''),
+  baseUrl: BaseUrlSchema,
   apiKey: z.string().default(''),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().min(64).max(2_000_000).optional(),
@@ -175,6 +223,156 @@ export function publicAccount<T extends { apiKey: string }>(account: T) {
   return { ...rest, apiKeyMasked: maskSecret(apiKey) };
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Health truth                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 一个机器人多久没走完一轮才算"卡住"——以它的周期为单位的倍数。
+ *
+ * **2 倍**，理由是把"合法的最慢情况"排除在外：
+ *
+ *  · `traders.last_cycle_at` 是在**一轮走完之后**才写的
+ *    （`store/repositories.ts` 的 `recordCycle()`），所以 1 倍周期时，
+ *    每一轮都恰好会在写之前短暂越线 —— 那是必然发生的假警报，不是故障。
+ *  · 一轮的墙钟时间 = 周期本身 + 它对模型的调用 + 行情快照。模型的超时上限
+ *    就是分钟级的，一个慢周期花掉接近一整个周期的时间是正常的。
+ *  · 取 2 倍意味着"连续两轮都没能结束"才报警：单次超时、单次提供商抽风、
+ *    单次交易所 503 都不会触发它，而**真正卡死**（事件循环被同步 SQLite 堵住、
+ *    网络调用永不返回、循环退出）会在一个有界的时间内必然触发。
+ *
+ * 为什么不能再大：这个数字同时是运维发现"机器人已经不工作了"的延迟上限。
+ * 取 3 倍会让一个 15 分钟的机器人最多沉默 45 分钟才被发现，而它在无保护、
+ * 有持仓的情况下沉默的每一分钟都是真金白银的风险。
+ */
+export const STALE_CYCLE_MULTIPLIER = 2;
+
+/**
+ * 启动宽限期：这之后才开始判定"卡住"。
+ *
+ * 没有它，健康检查会在冷启动时**必然**失败一次：进程起来 → 容器开始探测 →
+ * 行情快照 / 合约元数据 / 用户数据流还在加载，第一个周期要几十秒才走完，
+ * 而 `last_cycle_at` 这时还是 null。那会让编排器在最不该重启的时候重启容器。
+ *
+ * 300 秒是一个"足够慢的启动也能走完第一轮"的下限；它也是每个机器人各自计算的
+ * 下界（`max(周期 × 2, 300s)`），所以它对周期 1 分钟的机器人同样有效。
+ */
+export const STARTUP_GRACE_MS = 300_000;
+
+export interface TraderHealth {
+  traderId: number;
+  name: string;
+  status: TraderStatus;
+  /** 距离上一轮结束的毫秒数；从未跑完过一轮时为 null。 */
+  staleForMs: number | null;
+  /** 该机器人被判定为卡住。只有 status === 'running' 才可能为 true。 */
+  stale: boolean;
+  /** 已在运行但还没有任何一轮的完成记录（首轮仍在跑）。 */
+  awaitingFirstCycle: boolean;
+}
+
+export interface HealthVerdict {
+  /** 所有**正在运行**的机器人都还有心跳。注意它与 HTTP 状态码是同一件事。 */
+  ok: boolean;
+  /** 只有"运行中且已卡住"的机器人。 */
+  stale: TraderHealth[];
+  /** 所有机器人（含已停止的），便于控制台一眼看到全貌。 */
+  traders: TraderHealth[];
+}
+
+/**
+ * 从 `traders.last_cycle_at` 推导每个机器人的决策新鲜度。
+ *
+ * 这个函数存在的理由只有一个：**让健康检查说真话**。
+ * 原来 `/api/health` 无条件返回 `ok: true`，而 `deploy/docker-compose.yml` 与
+ * `Dockerfile` 的 HEALTHCHECK 都以它为准 —— 于是一个决策循环已经挂死、
+ * 或者事件循环被同步 SQLite 阻塞的进程，在编排器看来永远"健康"。
+ * 没人会收到告警，容器也不会重启，而账户可能还挂着仓位。
+ *
+ * 三条必须守住的边界（否则这就是一个比原来更糟的检查）：
+ *
+ *  1. **只有 `running` 参与判定。** `safe_mode` / `error` 仍在跑循环，但它们的
+ *     失败是**已经**通过状态和 `last_error` 上报过的；`stopped` 则根本不跑。
+ *     把它们算成"不健康"会让一个被刻意停在原地的机器人在编排器眼里永远是坏的。
+ *  2. **`starting` 不参与。** AutoTrader 先写 `starting` 再跑首轮，把它算进去
+ *     等于在启动瞬间就判定失败。
+ *  3. **阈值有下界（启动宽限），且基于该机器人自己的周期。** 见上面两个常量。
+ *
+ * 纯函数：只依赖传入的列表和 `now`，所以可以直接单测边界（见 `health.test.ts`）。
+ */
+export function evaluateTraderHealth(
+  traderRows: readonly Pick<
+    Trader,
+    'id' | 'name' | 'status' | 'lastCycleAt' | 'cycleIntervalMinutes'
+  >[],
+  now: number,
+  /**
+   * 每个**正在运行**的机器人是什么时候被启动的。
+   *
+   * 为什么需要它而不是用进程启动时间：宽限期必须按每个机器人自己的年龄算。
+   * 用一个全局的"进程已运行多久"会让运行两小时后才启动的机器人在第一轮
+   * 卡死时被宽限整整 2 小时；反过来，如果按"第一次看到 null 的时间"算，
+   * 一个永远跑不完第一轮的机器人每次探测都重新获得宽限，**永远不会**被判为
+   * 卡住 —— 那正是这个检查要抓的情形。
+   *
+   * 缺省为空时退化为"用进程启动时间"，只是为了让纯函数好测。
+   */
+  startedAtByTrader: ReadonlyMap<number, number> = new Map(),
+): HealthVerdict {
+  const traders: TraderHealth[] = traderRows.map((trader) => {
+    const thresholdMs = Math.max(
+      Math.max(1, trader.cycleIntervalMinutes) * 60_000 * STALE_CYCLE_MULTIPLIER,
+      STARTUP_GRACE_MS,
+    );
+    const lastCycleMs = trader.lastCycleAt ? new Date(trader.lastCycleAt).getTime() : null;
+    const valid = lastCycleMs !== null && Number.isFinite(lastCycleMs);
+
+    // Only a `running` trader is judged. See the boundary list above.
+    if (trader.status !== 'running') {
+      return {
+        traderId: trader.id,
+        name: trader.name,
+        status: trader.status,
+        staleForMs: valid ? now - (lastCycleMs as number) : null,
+        stale: false,
+        awaitingFirstCycle: false,
+      };
+    }
+
+    if (!valid) {
+      /*
+       * Running but no completed cycle is tolerated only for the startup grace
+       * period, measured from *this trader's* start. `start()` kicks the first
+       * cycle off immediately, so either it finished and wrote the timestamp, or
+       * it is wedged.
+       */
+      const startedAt = startedAtByTrader.get(trader.id);
+      const runningForMs = startedAt === undefined ? null : now - startedAt;
+      return {
+        traderId: trader.id,
+        name: trader.name,
+        status: trader.status,
+        staleForMs: runningForMs,
+        stale: runningForMs !== null && runningForMs > thresholdMs,
+        awaitingFirstCycle: true,
+      };
+    }
+
+    const staleForMs = now - (lastCycleMs as number);
+    return {
+      traderId: trader.id,
+      name: trader.name,
+      status: trader.status,
+      staleForMs,
+      stale: staleForMs > thresholdMs,
+      awaitingFirstCycle: false,
+    };
+  });
+
+  const stale = traders.filter((t) => t.stale);
+  return { ok: stale.length === 0, stale, traders };
+}
+
 export async function buildServer(deps: ApiDependencies): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,
@@ -237,16 +435,93 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   /*  Health + auth (unauthenticated)                                        */
   /* ---------------------------------------------------------------------- */
 
-  app.get('/api/health', async () => ({
-    ok: true,
-    version: '0.1.0',
-    uptimeSeconds: Math.round(process.uptime()),
-    hasOwner: users.count() > 0,
-    dryRun: env.dryRun,
-    tradingDisabled: env.globalTradingDisabled,
-    environment: deps.publicConnection.environment,
-    db: dbPath,
-  }));
+  /**
+   * 存活探测。
+   *
+   * 这个端点是**未认证**的（容器 healthcheck 必须能打它），所以它不能回显
+   * 文件系统布局：此前直接返回 `dbPath`（如 `/srv/<应用目录>/data/autoquant.sqlite`），
+   * 未认证的调用方由此得知操作系统、部署根目录、以及数据目录名 ——
+   * 那是给后续攻击挑目标的信息，而这个端点本来就只是回答"我还活着吗"。
+   *
+   * 只保留文件名而不是删掉整个字段：控制台「操作员账户」页把它当作
+   * 「连的是哪个库」的提示在显示（`packages/web/.../AccountSection.tsx`）。
+   * 文件名足以区分实例，且不泄漏任何路径。
+   */
+  /*
+   * Health now tells the truth, and it still answers only one question: "is this
+   * process still doing its job?"
+   *
+   * Why it had to change: the Dockerfile and `deploy/docker-compose.yml`
+   * HEALTHCHECKs both use this endpoint as their **only** signal, and it used to
+   * return `ok: true` unconditionally. A trading process whose decision loop had
+   * hung — or whose event loop was blocked on synchronous SQLite work — looked
+   * permanently healthy to the orchestrator: no alert, no restart, while the
+   * account may still be carrying open positions.
+   *
+   * Why a non-200 is safe here: every existing caller already checks only
+   * `r.ok` (the HEALTHCHECK `fetch`) or just prints the body (`up.sh`), so the
+   * 200/503 distinction breaks nothing while giving the orchestrator a way to
+   * restart a wedged instance. Stopped and paused traders **never** affect the
+   * status code — that would make a deliberately stopped bot permanently "bad".
+   */
+  app.get('/api/health', async (_request, reply) => {
+    /*
+     * `runningSince()` is optional at the call site on purpose.
+     *
+     * This is the one route whose failure takes the whole instance down in an
+     * orchestrator's eyes, and it runs before anything else the process does. An
+     * `ApiDependencies.manager` that predates this method — a test stub, or any
+     * embedder supplying its own manager — would otherwise turn a *successful*
+     * probe into a 500, which is the same "the healthcheck lies" failure this
+     * endpoint was just fixed to stop producing, pointing the other way.
+     *
+     * Missing the map degrades instead of throwing: a running trader with no
+     * completed cycle is then not judged, rather than judged wrongly.
+     */
+    const runningSince =
+      typeof deps.manager.runningSince === 'function'
+        ? deps.manager.runningSince()
+        : new Map<number, number>();
+    const health = evaluateTraderHealth(traders.list(), Date.now(), runningSince);
+    const body = {
+      ok: health.ok,
+      version: '0.1.0',
+      uptimeSeconds: Math.round(process.uptime()),
+      hasOwner: users.count() > 0,
+      dryRun: env.dryRun,
+      tradingDisabled: env.globalTradingDisabled,
+      environment: deps.publicConnection.environment,
+      /*
+       * 只回**文件名**，绝不回 `dbPath`。
+       *
+       * 这个端点**无需认证**（容器 healthcheck 必须能打它），所以它不能公布
+       * 文件系统布局：绝对路径会同时泄漏操作系统、部署根目录与数据目录名 ——
+       * 那是给后续攻击挑目标的信息，而这个端点本来就只是回答"我还活着吗"。
+       * 保留字段本身是因为控制台「操作员账户」页把它当作"连的是哪个库"的提示。
+       */
+      db: basename(dbPath),
+      /*
+       * Decision freshness. Only running-and-stale traders appear here; each one
+       * carries how long it has been silent so an operator does not have to read
+       * the source to know what "too long" means
+       * (threshold = max(cycleIntervalMinutes × 2, 300s)).
+       */
+      staleTraders: health.stale.map((entry) => ({
+        id: entry.traderId,
+        name: entry.name,
+        staleForMs: entry.staleForMs,
+        awaitingFirstCycle: entry.awaitingFirstCycle,
+      })),
+      runningTraders: health.traders.filter((entry) => entry.status === 'running').length,
+    };
+    if (!health.ok) {
+      return reply.code(503).send({
+        ...body,
+        reason: `有 ${health.stale.length} 个正在运行的机器人已超过各自周期的 2 倍仍未完成一轮决策。`,
+      });
+    }
+    return body;
+  });
 
   /**
    * Registration is open only while the instance has no accounts: the first one
@@ -265,6 +540,43 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * 这里返回明确的 410 而不是 404：如果将来有人照着旧文档去调它，
    * 应该看到「已移除、改用首次启动自动创建」这条信息，而不是一个语焉不详的 404。
    */
+  /* ---------------------------------------------------------------------- */
+  /*  Login throttling                                                       */
+  /* ---------------------------------------------------------------------- */
+
+  /*
+   * 两个维度各一把节流器，见 `loginThrottle.ts` 里对阈值取舍的说明。
+   * 计数器只在内存里，进程重启即清零：这是单人自用部署下的刻意取舍
+   * （见该模块顶部注释），换来的是不引入 Redis 这类新依赖。
+   */
+  const usernameThrottle = new FailureThrottle(USERNAME_THROTTLE_OPTIONS);
+  const ipThrottle = new FailureThrottle(IP_THROTTLE_OPTIONS);
+
+  /*
+   * 修改凭据的「当前密码」校验也要节流，但用**独立**的实例。
+   *
+   * 需要它：这个端点要求已登录，但"已登录"不等于"知道密码" ——
+   * 令牌泄漏之后，攻击者可以拿它当在线口令预言机（每次校验同样跑 scrypt）。
+   * 独立实例的理由：在这里连错几次不该把**登录**路径锁掉（反之亦然），
+   * 否则一个错误的猜测就能把操作员挡在自己的控制台外面。
+   */
+  const accountThrottle = new FailureThrottle(USERNAME_THROTTLE_OPTIONS);
+  const accountIpThrottle = new FailureThrottle(IP_THROTTLE_OPTIONS);
+
+  /**
+   * 一次登录尝试要计入的「来源」键。
+   *
+   * 除了 `request.ip`（`trustProxy: true` 下取自 `X-Forwarded-For`，**可被伪造**），
+   * 还额外计入 TCP 层的对端地址：直连场景下攻击者能随意编造 XFF 来轮换 IP 键，
+   * 但换不掉自己的出口地址。两者相同时只记一个键，避免把正常流量算两遍。
+   */
+  const ipThrottleKeys = (request: FastifyRequest): string[] => {
+    const keys = [`ip:${request.ip}`];
+    const socketAddress = request.socket.remoteAddress;
+    if (socketAddress && socketAddress !== request.ip) keys.push(`sock:${socketAddress}`);
+    return keys;
+  };
+
   app.post('/api/auth/register', async (_request, reply) =>
     reply.code(410).send({
       error:
@@ -277,13 +589,55 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     const parsed = CredentialsSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: '请填写用户名与密码。' });
 
-    const record = users.findByUsername(parsed.data.username);
-    if (!record || !verifyPassword(parsed.data.password, record.passwordHash)) {
+    const username = parsed.data.username;
+    const password = parsed.data.password;
+    const usernameKeys = [`user:${username.toLowerCase()}`];
+    const ipKeys = ipThrottleKeys(request);
+
+    // 先判节流、后验口令：scrypt 是刻意做得昂贵的（约几十毫秒），
+    // 一个不限次数的登录端点本身就是一条 CPU 耗尽路径 ——
+    // 节流器在这里既防爆破，也让每个被拒的请求几乎不花 CPU。
+    const userVerdict = usernameThrottle.check(usernameKeys);
+    const ipVerdict = ipThrottle.check(ipKeys);
+    if (!userVerdict.allowed || !ipVerdict.allowed) {
+      const retryAfterSeconds = Math.max(userVerdict.retryAfterSeconds, ipVerdict.retryAfterSeconds);
+      return reply
+        .header('Retry-After', String(retryAfterSeconds))
+        .code(429)
+        .send({ error: `登录尝试过于频繁，请在 ${retryAfterSeconds} 秒后重试。` });
+    }
+
+    const record = users.findByUsername(username);
+    let passwordOk = false;
+    if (record) {
+      passwordOk = verifyPassword(password, record.passwordHash);
+    } else {
+      // 用户名不存在时**也必须**跑一遍 scrypt。
+      //
+      // 这里原先是 `if (!record || !verifyPassword(...))`，`||` 短路意味着
+      // 未知用户名的 401 根本不派生密钥，比"密码错"快几十毫秒。
+      // 那条时间差就是一个可靠的**用户名枚举预言机**：
+      // 先花几毫秒问出哪些用户名存在，再对存在的那个慢慢爆破密码 ——
+      // 于是 generateUsername() 随机后缀换来的优势被完全抵消。
+      verifyPassword(password, DUMMY_PASSWORD_HASH);
+    }
+
+    if (!record || !passwordOk) {
+      usernameThrottle.recordFailure(usernameKeys);
+      ipThrottle.recordFailure(ipKeys);
       return reply.code(401).send({ error: '用户名或密码不正确。' });
     }
 
+    usernameThrottle.recordSuccess(usernameKeys);
+    ipThrottle.recordSuccess(ipKeys);
+
     const token = signToken(
-      { sub: record.id, username: record.username, role: record.role },
+      {
+        sub: record.id,
+        username: record.username,
+        role: record.role,
+        credAt: users.credentialsChangedAt(record.id) ?? 0,
+      },
       deps.jwtSecret,
     );
     return {
@@ -296,7 +650,17 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   /*  Everything below requires a session                                    */
   /* ---------------------------------------------------------------------- */
 
-  const authed = { preHandler: requireAuth(deps.jwtSecret) };
+  /**
+   * 令牌签名有效 ≠ 仍然有效。
+   *
+   * 账户改过凭据之后，此前签发的所有令牌都必须立刻作废 —— 否则"改密码"
+   * 在最需要它的时候（令牌泄漏、设备丢失）救不了任何东西。
+   * 判定逻辑本身是 `auth.ts` 里的纯函数，这里只负责把数据库里的当前值喂给它。
+   */
+  const tokenRevoked = (payload: TokenPayload): boolean =>
+    isTokenRevoked(payload, users.credentialsChangedAt(payload.sub));
+
+  const authed = { preHandler: requireAuth(deps.jwtSecret, tokenRevoked) };
 
   app.get('/api/auth/me', authed, async (request: AuthedRequest) => ({
     user: request.user,
@@ -313,22 +677,45 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * 不重签的话前端拿的还是旧身份，下次校验就会对不上。
    */
   const updateAccount = async (request: AuthedRequest, reply: FastifyReply) => {
-    const body = request.body as {
-      currentPassword?: string;
-      username?: string;
-      newPassword?: string;
-    };
+    // 校验请求体再动任何东西：`currentPassword` 不是字符串时会一路走进
+    // `scryptSync` 并抛出 TypeError，变成一条 500 —— 看起来像服务端坏了。
+    const parsed = UpdateAccountSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? '请求内容无效。' });
+    }
+    const body = parsed.data;
 
     const record = users.findById(request.user!.sub);
     if (!record) return reply.code(404).send({ error: '找不到该账户。' });
 
-    const full = users.findByUsername(record.username);
-    if (!full || !verifyPassword(body?.currentPassword ?? '', full.passwordHash)) {
-      return reply.code(401).send({ error: '当前密码不正确。' });
+    // 节流的键用**库里的**用户名，不用请求体里的：请求体根本没有用户名字段，
+    // 而这个端点一次只能改自己的凭据。
+    const accountKeys = [`acct:${record.username.toLowerCase()}`];
+    const accountIpKeys = ipThrottleKeys(request);
+    const accountVerdict = accountThrottle.check(accountKeys);
+    const accountIpVerdict = accountIpThrottle.check(accountIpKeys);
+    if (!accountVerdict.allowed || !accountIpVerdict.allowed) {
+      const retryAfterSeconds = Math.max(
+        accountVerdict.retryAfterSeconds,
+        accountIpVerdict.retryAfterSeconds,
+      );
+      return reply
+        .header('Retry-After', String(retryAfterSeconds))
+        .code(429)
+        .send({ error: `当前密码尝试过于频繁，请在 ${retryAfterSeconds} 秒后重试。` });
     }
 
-    const nextUsername = typeof body?.username === 'string' ? body.username.trim() : undefined;
-    const nextPassword = typeof body?.newPassword === 'string' ? body.newPassword : undefined;
+    const full = users.findByUsername(record.username);
+    if (!full || !verifyPassword(body.currentPassword, full.passwordHash)) {
+      accountThrottle.recordFailure(accountKeys);
+      accountIpThrottle.recordFailure(accountIpKeys);
+      return reply.code(401).send({ error: '当前密码不正确。' });
+    }
+    accountThrottle.recordSuccess(accountKeys);
+    accountIpThrottle.recordSuccess(accountIpKeys);
+
+    const nextUsername = typeof body.username === 'string' ? body.username.trim() : undefined;
+    const nextPassword = typeof body.newPassword === 'string' ? body.newPassword : undefined;
 
     if (nextUsername === undefined && nextPassword === undefined) {
       return reply.code(400).send({ error: '没有需要修改的内容。' });
@@ -352,10 +739,29 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       users.updatePassword(record.id, hashPassword(nextPassword));
     }
 
+    /*
+     * 凭据变更加盖时间戳，作废该账户此前签发的**所有**会话。
+     *
+     * 用户名也算凭据：令牌载荷里带着用户名，改完名字之后另一个浏览器里的旧会话
+     * 仍然以旧身份通过校验。一次"改名"或"改密码"应当等价于"把其他设备登出"。
+     *
+     * 顺序很关键：必须**先**盖时间戳、**后**签发新令牌，
+     * 否则新令牌带着变更前的时间戳，一签发就会被自己的撤销检查拒掉。
+     */
+    const credentialsChangedAt =
+      nextUsername !== undefined || nextPassword !== undefined
+        ? users.markCredentialsChanged(record.id)
+        : (users.credentialsChangedAt(record.id) ?? 0);
+
     const updated = users.findById(record.id)!;
     // 用户名可能变了，重新签发令牌，否则前端拿的还是旧身份
     const token = signToken(
-      { sub: updated.id, username: updated.username, role: updated.role },
+      {
+        sub: updated.id,
+        username: updated.username,
+        role: updated.role,
+        credAt: credentialsChangedAt,
+      },
       deps.jwtSecret,
     );
     return { ok: true, token, user: updated };
@@ -391,8 +797,26 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     clockOffsetMs: deps.publicConnection.clockOffsetMs,
     weightUsed: deps.publicConnection.rest.usedWeight1m,
     weightLimit: deps.publicConnection.rest.weightLimitPerMinute,
+    /**
+     * 并发请求占用。
+     *
+     * 权重预算曾经只能靠"上一份响应里的 header"约束，而每一批 `Promise.all`
+     * 都在读完那个已经过期的值之后同时放行 —— 40 个请求一起出去，75% 的软上限
+     * 等于不存在。现在每个请求在发出前先占一个槽位，这个字段让"当前有几个请求
+     * 同时在路上"变得可见，而不是只能靠推测。
+     */
+    requestsInFlight: deps.publicConnection.rest.inFlightCount,
+    maxRequestsInFlight: deps.publicConnection.rest.maxInFlightPerRequest,
     tradableSymbols: deps.publicConnection.registry.size,
     runningTraders: deps.manager.runningIds(),
+    /**
+     * 自动恢复已经放弃的机器人（`status = 'error'` 且没在运行）。
+     *
+     * 见 `TraderManager.resumePersisted()`：一次瞬时的启动失败以前会把机器人
+     * 永久钉在 error 上，而**没有任何地方**会再提起它。现在它会被自动重试，
+     * 放弃时也会留在这里 —— 这个列表就是为了让"放弃"这件事不可能被忽略。
+     */
+    failedTraders: deps.manager.failedTraders(),
   }));
 
   app.get('/api/logs', authed, async (request) => {
@@ -554,7 +978,17 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    */
   app.post('/api/ai-models/discover', authed, async (request, reply) => {
     const parsed = DiscoverModelsInputSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ ok: false, models: [], source: 'fallback', message: '参数无效。' });
+    if (!parsed.success) {
+      // baseUrl 被地址白名单拒绝时要把原因说出来（"为什么不能打这个地址"），
+      // 其余字段的 zod 默认提示是英文，对操作员没用 —— 保持原来的中文兜底。
+      const baseUrlIssue = parsed.error.issues.find((issue) => issue.path[0] === 'baseUrl');
+      return reply.code(400).send({
+        ok: false,
+        models: [],
+        source: 'fallback',
+        message: baseUrlIssue?.message ?? '参数无效。',
+      });
+    }
 
     const { discoverModels } = await import('../llm/discovery.js');
     return discoverModels({
@@ -1060,12 +1494,15 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   /* --- Live event stream ------------------------------------------------- */
 
   app.get('/api/events', { websocket: true }, (socket, request) => {
-    const token = (request.query as { token?: string })?.token ?? null;
+    // 这是**唯一**允许从查询参数取令牌的地方（浏览器的 WebSocket 构造函数
+    // 无法设置请求头）。HTTP 路由一律只认 Authorization 头，见 auth.ts。
+    const token = extractToken(request, { allowQueryToken: true });
     if (!token) {
       socket.close(1008, '需要登录');
       return;
     }
-    if (!verifyToken(token, deps.jwtSecret)) {
+    const payload = verifyToken(token, deps.jwtSecret);
+    if (!payload || tokenRevoked(payload)) {
       socket.close(1008, 'Invalid session');
       return;
     }
