@@ -474,13 +474,30 @@ export function ExchangeAccountsSection() {
       </MetricGroup>
 
       <MetricGroup title="读取">
+        {/*
+          只留一个时间，而且用**相对时间**。
+          
+          原来这里还有一条 `本机时刻`，每秒跳动，旁边写着"每 30 秒自动轮询一次"。
+          两条说的是同一件事（数据新不新），但一个是绝对时间、一个是跳动的时钟，
+          操作者得自己相减才知道"数据有多旧"。
+          
+          这正是先前从顶栏删掉 `时钟 +22 ms` 的同一类问题：**常驻的诊断值，
+          正常运行时永远没事**。相对时间直接回答了那个唯一有价值的问题。
+        */}
         <Metric
           label="最近一次成功读取"
           value={totals.readAt ? timeAgo(totals.readAt) : '尚未读取'}
-          sub={totals.readAt ? fmtTime(totals.readAt) : '点「刷新全部」立即读取'}
-          title={totals.readAt ? `交易所返回的读取时刻 ${fmtTime(totals.readAt)}` : undefined}
+          sub={
+            totals.readAt
+              ? `${fmtTime(totals.readAt)} · 每 30 秒自动轮询`
+              : '点「刷新全部」立即读取'
+          }
+          title={
+            totals.readAt
+              ? `交易所返回的读取时刻 ${fmtTime(totals.readAt)}`
+              : undefined
+          }
         />
-        <Metric label="本机时刻" value={fmtTime(new Date(now).toISOString())} sub="每 30 秒自动轮询一次" />
       </MetricGroup>
     </div>
   );
