@@ -357,7 +357,20 @@ export function TraderPage() {
    *    顶栏已经常驻显示推送状态，所以这里也不再重复一个「数据源」。
    */
   const metricCards = (
-    <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    /*
+     * 指标卡**等高**（不加 `items-start`），这是刻意的。
+     *
+     * 与决策卡的规则相反，原因也相反：
+     *
+     * · **决策卡**内容差异极大（有的只有一行标题、有的写满说明与数字），
+     *   撑等高会让短卡中间空出一大片 —— 那里用 `items-start` 是对的。
+     * · **指标卡**是一组 KPI 方块，是**一个视觉单元**。高低不齐本身就是错的：
+     *   操作者扫一眼这四个数，"胜率"那张因为多了进度条而比邻居高一截，
+     *   会让人觉得它们不属于同一组。
+     *
+     * 等高由这一行最高的那张决定，其余三张把多出来的空间留在底部。
+     */
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <MetricCard>
         <Metric
           label={`归属权益（${settleAsset}）`}
