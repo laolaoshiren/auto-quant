@@ -1613,14 +1613,28 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   /* --- Server logs to the console ---------------------------------------- */
 
-  setLogSink((level, scope, message) => {
+  /*
+   * 全局日志落盘与推送。**这是日志进入数据库与前端事件的唯一入口。**
+   *
+   * 交易循环（`AutoTrader.emit`）不再自己写库与推事件，而是通过 `meta` 把
+   * 归属交过来 —— 原先两边各写一次，一条日志就变成两条记录加两个事件，
+   * 界面上同一句话出现两遍。
+   *
+   * `meta.traderId` 存在时：记录归属该机器人，`message` 用 `meta.raw`
+   * （不带机器人名前缀 —— 归属已经由 `trader_id` 表达，名字不必再写一遍）。
+   * 不存在时：是服务器级日志，`trader_id` 留空，并按 `[scope]` 加前缀区分来源。
+   */
+  setLogSink((level, scope, message, meta) => {
     if (level === 'debug') return;
-    runtimeLogs.write(null, level, scope, message);
+    const m = (meta ?? {}) as { traderId?: number; raw?: string };
+    const traderId = typeof m.traderId === 'number' ? m.traderId : null;
+    const text = traderId !== null && typeof m.raw === 'string' ? m.raw : message;
+    runtimeLogs.write(traderId, level, scope, text);
     eventBus.publish({
       type: 'log',
-      traderId: null,
+      traderId,
       level,
-      message: `[${scope}] ${message}`,
+      message: traderId === null ? `[${scope}] ${message}` : text,
       timestamp: new Date().toISOString(),
     });
   });

@@ -5,6 +5,9 @@ import { candidateBudget, estimateCandidateChars, PROMPT_TOKEN_BUDGET } from './
 
 const log = createLogger('strategy:coins');
 
+/** 上一次记下的候选池裁剪文案 —— 见下方 log.warn 处的说明。文案没变就不再记。 */
+let lastTrimNotice: string | null = null;
+
 export interface CoinSelectionResult {
   symbols: string[];
   /** Which sources nominated each symbol — surfaced to the model as signal strength. */
@@ -154,11 +157,24 @@ export async function selectCandidates(
     const drop: string[] = [];
     for (const symbol of symbols) (mustKeep.has(symbol) ? keep : drop).push(symbol);
     trimmed = [...keep, ...drop.slice(0, Math.max(0, maxCandidates - keep.length))];
-    log.warn(
+    /*
+     * 只在**裁剪结果发生变化**时记一条。
+     *
+     * 这个裁剪在每个周期都会发生（策略配了 25 个候选、预算只容得下 11 个），
+     * 按事件每轮写一次的结果是日志被同一句话填满 —— 实测一小时 21 条，
+     * 而真正的异常会被埋掉。**一个每轮都响的警告等于没有警告。**
+     *
+     * 文案里带了具体数字，所以按文案去重等于"数字变了才重新记"，
+     * 既不会刷屏，也不会漏掉候选数或预算的实质变化。
+     */
+    const notice =
       `候选池按提示词预算从 ${symbols.length} 个裁剪到 ${trimmed.length} 个` +
-        `（该策略下每个标的约占 ${Math.round(estimateCandidateChars(config) / 1.7)} tokens，` +
-        `预算 ${PROMPT_TOKEN_BUDGET} tokens）`,
-    );
+      `（该策略下每个标的约占 ${Math.round(estimateCandidateChars(config) / 1.7)} tokens，` +
+      `预算 ${PROMPT_TOKEN_BUDGET} tokens）`;
+    if (lastTrimNotice !== notice) {
+      lastTrimNotice = notice;
+      log.warn(notice);
+    }
   }
 
   // Reported so the caller can tell the operator what the budget did.
