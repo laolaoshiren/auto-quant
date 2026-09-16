@@ -114,9 +114,18 @@ echo -n "    服务状态: "; systemctl is-active autoquant
 # 所以健康检查走绑定地址，而不是 127.0.0.1。
 BIND=`$(grep -E '^HOST=' .env | cut -d= -f2)
 BIND=`${BIND:-172.17.0.1}
-echo -n "    监听地址: `$BIND:27137"
+
+# 端口必须读 .env，不能写死。
+#
+# 曾经写死过 27137（当时的默认值），而线上 .env 里是 PORT=3200 ——
+# 于是部署日志里"健康检查"永远是空的，看起来像服务没起来，
+# 实际上只是查错了端口。默认值会变，部署脚本不该假设它。
+PORT=`$(grep -E '^PORT=' .env | cut -d= -f2)
+PORT=`${PORT:-27137}
+
+echo -n "    监听地址: `$BIND:`$PORT"
 echo ""
-echo -n "    健康检查: "; curl -s --max-time 8 http://`$BIND:27137/api/health
+echo -n "    健康检查: "; curl -s --max-time 8 http://`$BIND:`$PORT/api/health
 echo ""
 "@
 
