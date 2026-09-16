@@ -18,11 +18,12 @@ import { ArrowRight } from 'lucide-react';
 import type { TraderStats, TradeRecord, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { closeReasonLabel } from '../lib/summaries';
+import type { FleetTotals } from '../lib/fleetTotals';
 import { usePolled } from '../lib/hooks';
 import { Button, Panel, cn } from '../components/ui';
 import { SideBadge, TraderStatusBadge } from '../components/Badges';
 import { pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
-import { fmtInt, fmtPercent, fmtUsd, fmtUsdSigned, pnlColor, timeAgo } from '../lib/format';
+import { BALANCE_LABEL, fmtInt, fmtPercent, fmtUsd, fmtUsdSigned, pnlColor, timeAgo } from '../lib/format';
 import type { EquityPoint } from '../components/equityCurve';
 
 /* -------------------------------------------------------------------------- */
@@ -125,7 +126,7 @@ export function EquityStrip({
           preserveAspectRatio="none"
           className="h-full w-full"
           role="img"
-          aria-label={`${rangeLabel} 归属权益缩略线`}
+          aria-label={`${rangeLabel} ${BALANCE_LABEL.equity}缩略线`}
         >
           <path d={path} fill="none" stroke="currentColor" strokeWidth={2} vectorEffect="non-scaling-stroke" />
         </svg>
@@ -139,7 +140,7 @@ export function EquityStrip({
           看它一百次也拿不到信息。这里要说的是**为什么没有展开成图表**。
         */}
         <div className="num text-xs text-ink-faint">
-          {flat ? `${rangeLabel} 权益持平` : '采样点不足，暂不展开曲线'}
+          {flat ? `${rangeLabel} ${BALANCE_LABEL.equity}持平` : '采样点不足，暂不展开曲线'}
           {changePercent !== null && ` · ${fmtPercent(changePercent)}`}
         </div>
       </div>
@@ -288,12 +289,18 @@ export function EquitySkeleton() {
  *   already-coloured number (the share moved into the `title`), and 打开 only
  *   duplicated the row itself — DESIGN.md §6 wants the whole row clickable, not a
  *   small button.
+ *
+ * 归属权益这一列**只讲这个机器人自己的账**，而且它上面的合计已经不再用它：
+ * 共用同一个交易所账户的机器人各自带着同一笔本金，把这一列加起来会把钱包数 N 遍
+ * （实测 Σ30.6690 vs 账户里 10.4180，多算 19.81 —— 见 `lib/fleetTotals.ts`）。
+ * 所以行内的 title 改成说清"它属于哪个账户、那个账户里有多少钱"，
+ * 原来那句「占全部归属权益的 X%」也删掉了：在共用账户下它本来就不是一个占比。
  */
 export function TradersSnapshotTable({
   traders,
   statsMap,
   liveStatus,
-  totalEquity,
+  fleet,
   equityOf,
   recentTrades,
   busyId,
@@ -307,7 +314,11 @@ export function TradersSnapshotTable({
   traders: TraderRow[];
   statsMap: Record<number, TraderStats>;
   liveStatus: Record<number, TraderStatus | null>;
-  totalEquity: number;
+  /**
+   * 舰队合计（账户口径）。这里**只读**每行的账户信息，绝不把它当成一行一行的
+   * 归属权益之和 —— 那个和就是本页修掉的 bug。
+   */
+  fleet: FleetTotals;
   equityOf: (trader: TraderRow) => number;
   recentTrades: { byTrader: Record<number, TradeRecord>; loading: boolean };
   busyId: number | null;
@@ -334,7 +345,7 @@ export function TradersSnapshotTable({
                   状态
                 </th>
                 <th scope="col" className="th px-2 py-1.5 text-right">
-                  <span title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。同一账户下其他机器人挣的钱不算在内。">
+                  <span title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。**只是这个机器人自己的账**，同一账户下其他机器人挣的钱不算在内；反过来，共用同一个账户的机器人各自都带着同一笔本金，所以这一列**不能相加**（相加会把钱包数 N 遍）。账户里的钱看左栏「账户权益合计」。">
                     归属权益
                   </span>
                 </th>
@@ -357,7 +368,20 @@ export function TradersSnapshotTable({
                 const stats = statsMap[trader.id];
                 const status: TraderStatus = liveStatus[trader.id] ?? trader.status;
                 const equity = equityOf(trader);
-                const share = totalEquity > 0 ? Math.max(0, Math.min(100, (equity / totalEquity) * 100)) : 0;
+                /*
+                 * 这一行的账户上下文。
+                 *
+                 * 原来这里算的是「占全部归属权益的 X%」—— 在共用账户下那个分母本来就是
+                 * 错的（同一笔本金被数了三遍），一个从没成交的机器人也能"占 32%"。改成
+                 * 说明它属于哪个账户、那个账户里有多少钱：同样的宽度，说的是真事。
+                 */
+                const account = fleet.byTrader[trader.id];
+                const accountNote = account
+                  ? `它属于交易所账户 #${account.exchangeAccountId}（共享钱包，${BALANCE_LABEL.equity} ${fmtUsd(
+                      account.accountEquity,
+                      2,
+                    )}）；该账户下共 ${fmtInt(account.traderIds.length)} 个机器人共用这一个钱包，所以各行的归属权益不能相加。`
+                  : '';
                 const target = `/traders/${trader.id}`;
                 return (
                   <tr
@@ -391,12 +415,9 @@ export function TradersSnapshotTable({
                       className="td px-2 py-1.5 text-right"
                       title={
                         stats
-                          ? `归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。占全部归属权益的 ${share.toFixed(
-                              1,
-                            )}%。${pnlFormulaText(statsCosts(stats))}。浮动盈亏 ${fmtUsdSigned(
-                              stats.unrealizedPnl,
-                              2,
-                            )} 未计入本行。`
+                          ? `归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈（**只是这个机器人自己的账**）。${accountNote}${pnlFormulaText(
+                              statsCosts(stats),
+                            )}。浮动盈亏 ${fmtUsdSigned(stats.unrealizedPnl, 2)} 未计入本行。`
                           : undefined
                       }
                     >

@@ -6,6 +6,7 @@ import type { TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
+import { committedCapitalOf, groupTradersByAccount } from '../lib/fleetTotals';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useRunOnce } from '../lib/actions';
 import { Button, ErrorNote, Modal, Panel, Spinner3, cn } from '../components/ui';
@@ -119,10 +120,28 @@ export function TradersPage() {
   };
 
   const runningCount = traders.filter((t) => t.isRunning).length;
-  const totalEquity = traders.reduce(
-    (sum, trader) => sum + (statsMap[trader.id]?.equity ?? trader.initialEquity),
-    0,
-  );
+  /*
+   * ⚠️ 不能把各机器人的「归属权益」求和。
+   *
+   * 共用同一个交易所账户的机器人，每个人的归属权益里都含**同一笔初始资金**
+   * （归属权益 = 初始权益 + 自己的净盈亏 + 自己的浮盈）。求和 = 把同一笔钱
+   * 数很多遍 —— 实测三个机器人给出 **30.67**，而钱包里只有 **10.42**，
+   * 初始权益被重复计算了 **19.81 USDT**。
+   *
+   * 首页曾经就是这个错（`OverviewPage` 已修），这里是同一处的另一份实现。
+   * 正确的口径：**账户权益每个账户只算一次**（同一账户下所有机器人读的是同一个
+   * 钱包余额），账户之间再相加。已实现盈亏是可加的，保持求和。
+   *
+   * 这一处原来在 tooltip 里写了免责说明来解释"这个合计不等于钱包余额"——
+   * 但**把数字改对，比在说明里解释它为什么错要好**。
+   */
+  const totalEquity = [...groupTradersByAccount(traders).values()].reduce((sum, group) => {
+    // 同一账户下所有机器人的 accountEquity 是同一个数（共享钱包），取一个即可。
+    const shared = group
+      .map((trader) => statsMap[trader.id]?.accountEquity)
+      .find((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0);
+    return sum + (shared ?? committedCapitalOf(group));
+  }, 0);
   const totalRealized = traders.reduce((sum, trader) => sum + (statsMap[trader.id]?.realizedPnl ?? 0), 0);
   const openPositions = traders.reduce((sum, trader) => sum + (statsMap[trader.id]?.openPositions ?? 0), 0);
 
@@ -188,12 +207,12 @@ export function TradersPage() {
           sub="运行 / 总数"
         />
         <Metric
-          label="总归属权益"
+          label="账户权益合计"
           value={fmtUsd(totalEquity, 2)}
           size="lg"
           tone="strong"
           sub={`${fmtInt(openPositions)} 个未平仓合约`}
-          title="各机器人「归属权益」之和 = Σ(初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈)。共用同一个交易所账户的机器人各自独立归属，所以这个合计不等于账户里的钱 —— 账户权益见机器人页与交易所凭证页。"
+          title="按交易所账户合计的权益：同一账户下的多个机器人共用同一个钱包，只算一次；账户之间再相加。表格每一行的「归属权益」是那个机器人自己的贡献。原文：账户里的钱 —— 账户权益见机器人页与交易所凭证页。"
         />
         <Metric
           label="已实现盈亏"
