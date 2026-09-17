@@ -145,15 +145,33 @@ export function TraderConfigModal({
             </Select>
           </Field>
 
-          <Field label="策略">
-            <Select value={strategyId} onChange={(e) => setStrategyId(Number(e.target.value))}>
-              {strategies.map((strategy) => (
-                <option key={strategy.id} value={strategy.id}>
-                  {strategy.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
+          {/*
+            AI 托管机器人**不显示策略选择器**。
+
+            理由与机器人页头那个「策略 #8」链接相同：对 AI 托管机器人来说，
+            `strategies` 表里那一行**不生效**（生效的是 `agent_config_json`）。
+            在这里给一个能改的下拉框，用户改完发现没有任何变化 ——
+            **一个能操作但无效果的控件，比一个不存在的控件更糟**：
+            它会让人怀疑是自己操作错了，而不是这个控件本来就没用。
+          */}
+          {trader.mode === 'ai_managed' ? (
+            <Field
+              label="策略"
+              hint="AI 托管机器人不使用策略 —— 参数与交易提示词由 AI 自己设定并持续调整。"
+            >
+              <div className="text-base text-ink-faint">智能托管（不使用策略参数）</div>
+            </Field>
+          ) : (
+            <Field label="策略">
+              <Select value={strategyId} onChange={(e) => setStrategyId(Number(e.target.value))}>
+                {strategies.map((strategy) => (
+                  <option key={strategy.id} value={strategy.id}>
+                    {strategy.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
 
           <Field label="周期间隔（分钟）">
             <NumberInput value={cycleIntervalMinutes} onValueChange={setCycleIntervalMinutes} step={1} />

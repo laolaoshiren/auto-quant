@@ -263,7 +263,20 @@ export function TraderPage() {
   // both lossy and, once the unit was misread, wildly wrong.
   const wins = stats?.wins ?? 0;
   const losses = stats?.losses ?? 0;
-  const openPositionCount = positions.length || stats?.openPositions || 0;
+  /*
+   * 持仓数**只看本地那一份列表**，不再回落到 `stats.openPositions`。
+   *
+   * 原来是 `positions.length || stats?.openPositions || 0` —— 三层来源。
+   * 于是本地列表为空、而服务端统计说还有 2 个时，卡片显示 2、
+   * 下面的持仓表却是空的：**同一屏上同一个概念给出两个互相矛盾的数**。
+   *
+   * 这正是订单数那条 bug 的同一个成因（实测撞到过「挂单 4 / 当前委托 2」），
+   * 只是换了一个概念。**回落看起来是"更健壮"，实际是把不一致引了进来。**
+   *
+   * 现在卡片与持仓表读的是同一个表达式（`live?.positions ?? []`）——
+   * 要过期就一起过期，至少不会自相矛盾。
+   */
+  const openPositionCount = positions.length;
 
   /*
    * 今日盈亏 against the last snapshot from *before* the 24-hour window.
