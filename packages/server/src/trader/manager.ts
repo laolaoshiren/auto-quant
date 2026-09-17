@@ -415,6 +415,17 @@ export class TraderManager {
       const agentRuntime = new AgentRuntime({
         traderId,
         strategyConfig: () => config,
+        /*
+         * 选了这个预设就等于"要求 AI 托管"，哪怕它还没改过任何参数。
+         *
+         * ⚠️ 这个判据是**启动死锁的解药**：只看 `agent_config_json` 非空的话，
+         * 而那一列只有 AI 调参才会写，而 AI 只有在跑时才调参 ——
+         * 一个刚建的 AI 机器人会安静地什么都不做，且没有任何东西报错。
+         */
+        isAiStrategy: () => {
+          const s = strategies.get(trader.strategyId);
+          return s?.presetId === 'ai_managed';
+        },
         model,
         equityNow: () => equity.latest(traderId)?.equity ?? null,
       });

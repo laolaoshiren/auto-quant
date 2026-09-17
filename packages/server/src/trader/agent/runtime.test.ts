@@ -93,8 +93,8 @@ function stubModel(reply = JSON.stringify({ tool: 'finish', args: { summary: '�
   return m;
 }
 
-const runtime = (model: LoopModel = stubModel()) =>
-  new AgentRuntime({ traderId, strategyConfig: config, model, equityNow: () => 10 });
+const runtime = (model: LoopModel = stubModel(), isAiStrategy = false) =>
+  new AgentRuntime({ traderId, strategyConfig: config, isAiStrategy: () => isAiStrategy, model, equityNow: () => 10 });
 
 /** 等一拍，让 `void` 触发的异步流程走完。 */
 const flush = () => new Promise((r) => setTimeout(r, 20));
@@ -121,6 +121,24 @@ test('没有 AI 配置时整个空转 —— 老机器人行为不变', async ()
   await flush();
 
   assert.equal(m.calls, 0, '非 AI 模式下一次模型都不该调');
+});
+
+test('启动死锁：选了 ai_managed 预设但还没调过参时，必须是启用状态', () => {
+  /*
+   * 这是我在启动真钱机器人之前才发现的缺陷，而且它**没有任何症状**：
+   *
+   *     isEnabled()            判据是 agent_config_json 非空
+   *     agent_config_json 非空  由 set_params 写入
+   *     set_params 被调用       需要 AI 在跑
+   *     AI 在跑                需要 isEnabled() 为真
+   *
+   * 一个刚建的 AI 机器人会周期照跑、日志干净、**但智能体一次都不会被调用**。
+   * 所以"选了那个预设"本身就必须算作 AI 模式。
+   */
+  assert.equal(traders.get(traderId)!.agentConfigJson, null, '前提：还没有任何 AI 配置');
+  const rt = runtime(stubModel(), true);
+  assert.equal(rt.isEnabled(), true, '选了预设就是要求 AI 托管，哪怕它还没改过参数');
+  assert.equal(runtime(stubModel(), false).isEnabled(), false, '没选预设且没有配置时仍然是空转');
 });
 
 test('有 AI 配置时启用，并提供配置覆盖', () => {

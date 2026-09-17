@@ -38,6 +38,12 @@ export interface AgentRuntimeDeps {
   traderId: number;
   /** 策略里的配置 —— AI 还没写过配置时的基准。 */
   strategyConfig: () => StrategyConfig;
+  /**
+   * 这个机器人选的策略是不是「全自动智能托管」预设。
+   *
+   * ⚠️ **这是启动死锁的解药。** 见 `isEnabled()` 的注释。
+   */
+  isAiStrategy: () => boolean;
   /** 与交易循环同一个模型客户端（`DecisionModel` 的形状正好满足 `LoopModel`）。 */
   model: LoopModel;
   /** 当前权益，用来在唤醒时打基线（判回撤用）。 */
@@ -66,11 +72,31 @@ export class AgentRuntime {
   /**
    * 这个机器人是不是 AI 托管模式。
    *
-   * 判据是 `agent_config_json` 非空 —— 显式、可查询，不靠标志位去猜。
+   * ## 两个条件满足任一即为真，而且**缺一不可**
+   *
+   * 1. `agent_config_json` 非空 —— AI 已经接手（它自己调过参）
+   * 2. **策略是「全自动智能托管」预设** —— 用户要求 AI 托管，AI 还没接手
+   *
+   * ## 为什么必须有第二条（这是一个启动死锁）
+   *
+   * 我最初只写了第一条。那样会死锁：
+   *
+   *     isEnabled()            ← 判据是 agent_config_json 非空
+   *     agent_config_json 非空  ← 由 set_params 写入
+   *     set_params 被调用       ← 需要 AI 在跑
+   *     AI 在跑                ← 需要 isEnabled() 为真
+   *
+   * **一个刚建的 AI 机器人会安静地什么都不做** —— 它看起来在正常运行、
+   * 周期照跑、日志干净，**但智能体一次都不会被调用**。这是最难发现的一类缺陷：
+   * 没有任何东西报错。
+   *
+   * 第二条打破死锁：选了那个预设就等于"要求 AI 托管"，哪怕它还没改过任何参数。
+   * 之后 AI 第一次调参写入 `agent_config_json`，第一条也开始为真 —— 两条互为补充。
    */
   isEnabled(): boolean {
     const raw = traders.get(this.deps.traderId)?.agentConfigJson;
-    return typeof raw === 'string' && raw.length > 0;
+    if (typeof raw === 'string' && raw.length > 0) return true;
+    return this.deps.isAiStrategy();
   }
 
   /**
