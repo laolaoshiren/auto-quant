@@ -24,6 +24,8 @@
 
 import type { StrategyConfig } from '@aq/shared';
 
+import type { ReviewTradeFacts } from '../autoTrader.js';
+
 import { createLogger } from '../../logger.js';
 import { agentMemory } from '../../store/agentStore.js';
 import { traders } from '../../store/repositories.js';
@@ -169,21 +171,57 @@ export class AgentRuntime {
    *
    * **不 await**：复盘是附加动作，不该拖慢平仓路径。
    */
-  reviewTrade(input: { tradeId: number; symbol: string; closeReason: string; netPnl: number }): void {
+  reviewTrade(input: ReviewTradeFacts): void {
     if (!this.isEnabled()) return;
     void (async () => {
       try {
-        const ports = makeAgentPorts({
-          traderId: this.deps.traderId,
-          strategyConfig: this.deps.strategyConfig,
-          hourlyBudget: (this.deps.policy ?? DEFAULT_WAKE_POLICY).hourlyBudget,
-        });
         const recent = agentMemory.forSymbol(this.deps.traderId, input.symbol, 5);
+
+        /*
+         * 组装复盘素材。
+         *
+         * ⚠️ **这几个数字是实测逼出来的。** 最初这里只有「symbol + 平仓原因 + 净额」，
+         * 于是复盘员的结论只能是「**数据不足**，无法判定盈亏归因」——
+         * 而它列的缺口（持仓时间、浮盈回撤轨迹、成本占比）**全都在手边**。
+         *
+         * 尤其 `peakPnlPercent`：它是区分
+         * 「正常波动的保护性离场」与「止盈过晚导致利润回吐」的唯一依据，
+         * 而这两者的改法完全相反 —— 没有它，复盘员只能含糊其辞。
+         *
+         * **让 AI 说「数据不足」是这一侧的责任。**
+         */
+        const feeShare = input.grossPnl !== 0 ? (input.fee / Math.abs(input.grossPnl)) * 100 : null;
+        const priceMove = ((input.exitPrice - input.entryPrice) / input.entryPrice) * 100;
+
+        const lines = [
+          `标的：${input.symbol}`,
+          `方向与价位：开仓 ${input.entryPrice} → 平仓 ${input.exitPrice}（价格变动 ${priceMove.toFixed(3)}%）`,
+          `毛盈亏 ${input.grossPnl.toFixed(4)}　手续费 ${input.fee.toFixed(4)}　净盈亏 ${input.netPnl.toFixed(4)}`,
+          feeShare === null
+            ? '成本占比：毛盈亏为 0，无法计算占比。'
+            : `成本占比：手续费占毛盈亏绝对值的 ${feeShare.toFixed(1)}%` +
+              (feeShare >= 50 ? ' —— **成本吃掉了大部分毛收益**，这笔交易在扣费前就已经很薄。' : ''),
+          `持仓时长：${input.holdMinutes.toFixed(1)} 分钟`,
+          `平仓原因：${input.closeReason}`,
+          /*
+           * 浮盈轨迹这一行刻意写成"峰值 vs 最终"，因为复盘员要判断的正是
+           * "曾经赚到多少、又还回去多少"。
+           */
+          `浮盈轨迹：持仓期间最大浮盈 ${input.peakPnlPercent.toFixed(3)}%` +
+            (input.peakPnlPercent > 0
+              ? `，最终净 ${(input.netPnl / (input.entryPrice * 0.01)).toFixed(3)}%（按价格口径近似）`
+              : '') +
+            (input.peakPnlPercent > 0 && input.netPnl <= 0
+              ? ' —— **曾经浮盈但最终没赚到，这是"止盈/移动止损是否设晚"的直接证据。**'
+              : ''),
+        ];
+
         const facts =
-          `这笔：${input.symbol} 以「${input.closeReason}」结束，净 ${input.netPnl.toFixed(4)}。\n` +
+          lines.join('\n') +
+          '\n' +
           (recent.length > 0
-            ? `这个标的历史上的记录：\n${recent.map((m) => `- ${m.lesson}`).join('\n')}`
-            : '这个标的历史上没有记录。');
+            ? `\n这个标的历史上的记录：\n${recent.map((m) => `- ${m.lesson}`).join('\n')}`
+            : '\n这个标的历史上没有记录。');
 
         const r = await reviewClosedTrade({
           model: this.deps.model,

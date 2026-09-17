@@ -178,6 +178,39 @@ export interface AutoTraderDeps {
 }
 
 /**
+ * 平仓时传给复盘员的事实。
+ *
+ * **这些字段是实测逼出来的。** 最初只传了 `tradeId` / `symbol` / `closeReason` / `netPnl`，
+ * 于是复盘员的结论只能是「**数据不足**，无法判定这笔的盈亏归因」——
+ * 而它列的缺口（持仓时间、浮盈回撤轨迹、手续费占比）**全都在这份事实里**。
+ *
+ * **让 AI 说「数据不足」是调用方的责任，不是它的。**
+ */
+export interface ReviewTradeFacts {
+  tradeId: number;
+  symbol: string;
+  closeReason: string;
+  /** 净盈亏（毛 − 手续费 − 资金费）。 */
+  netPnl: number;
+  /** 毛盈亏。与净额一起看才知道成本吃掉了多少。 */
+  grossPnl: number;
+  /** 手续费合计（开仓侧 + 平仓侧）。 */
+  fee: number;
+  /**
+   * 持仓期间达到过的最大浮盈百分比。
+   *
+   * **判断「止盈 / 移动止损是否设晚了」的唯一依据。**
+   * 没有它，复盘员分不清「正常波动的保护性离场」与「利润回吐」——
+   * 而这两者的改法完全相反。
+   */
+  peakPnlPercent: number;
+  /** 持仓时长（分钟）。 */
+  holdMinutes: number;
+  entryPrice: number;
+  exitPrice: number;
+}
+
+/**
  * 交易循环对智能体的全部认知。**刻意只有五个方法** ——
  * 接口越小，"交易被智能体影响"的可能面就越小。
  */
@@ -193,7 +226,7 @@ export interface AgentHook {
   /** 结算等待中的参数实验（每笔平仓后最该做）。 */
   settleOnly: () => void;
   /** 一笔平仓之后请复盘员写因果结论。**不阻塞。** */
-  reviewTrade: (trade: { tradeId: number; symbol: string; closeReason: string; netPnl: number }) => void;
+  reviewTrade: (trade: ReviewTradeFacts) => void;
   /** AI 是否主动停手（停手时不开新仓，既有仓位的管理照常）。 */
   paused: () => boolean;
 }
@@ -1603,6 +1636,20 @@ export class AutoTrader {
         symbol: local.symbol,
         closeReason: reason,
         netPnl: net,
+        grossPnl,
+        fee: entryFee + exitFee,
+        /*
+         * 这几项是复盘员**真正需要**的事实，此前没被传出去 ——
+         * 于是它的结论只能停在「数据不足」（实测 #1 号记忆就是如此）。
+         *
+         * `peakPnlPercent` 最关键：没有它，复盘员分不清
+         * 「正常波动的保护性离场」与「止盈过晚导致利润回吐」，
+         * 而这两者的改法完全相反。
+         */
+        peakPnlPercent: local.peak_pnl_percent,
+        holdMinutes: Math.max(0, (Date.now() - new Date(local.opened_at).getTime()) / 60_000),
+        entryPrice: local.entry_price,
+        exitPrice,
       });
       agent.settleOnly();
     }
