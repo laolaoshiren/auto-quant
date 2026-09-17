@@ -41,7 +41,7 @@ import {
   tradeCosts,
   type PnlCosts,
 } from './PnlBreakdown';
-import { fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, pnlColor, symbolTone } from '../lib/format';
+import { fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, pnlColor } from '../lib/format';
 
 /* -------------------------------------------------------------------------- */
 /*  Row caps                                                                   */
@@ -537,12 +537,9 @@ function distancePercent(entry: number, level: number | null): string | null {
 export function PositionsTable({
   traderId,
   onCloseRequest,
-  onSelectSymbol,
 }: {
   traderId: number;
   onCloseRequest: (symbol: string) => void;
-  /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
-  onSelectSymbol?: (symbol: string) => void;
 }) {
   const live = useEvents((s) => s.byTrader[traderId]?.positions);
   const query = usePolled((signal) => api.traderPositions(traderId, signal), {
@@ -586,7 +583,7 @@ export function PositionsTable({
                 <tr key={position.id} className="row-hover align-top">
                   <td className="td">
                     <div className="flex items-center gap-2">
-                  <SymbolCell symbol={position.symbol} onSelect={onSelectSymbol} />
+                      <span className="text-base font-semibold text-ink-hi">{position.symbol}</span>
                       <SideBadge side={position.side} />
                       <Badge tone="muted" title="该持仓在交易所使用的杠杆倍数。">
                         {position.leverage}x
@@ -701,49 +698,6 @@ const TERMINAL_STATUSES = new Set([
   'EXPIRED_IN_FUTURES',
 ]);
 
-/**
- * 表格里的**币种单元格**：有色、可点击。
- *
- * ## 为什么是一个共用组件
- *
- * 四张表（持仓 / 委托 / 成交 / 订单记录）都要显示币种名，而它们此前各写一遍
- * —— 于是"有的能点、有的不能"这种分叉迟早发生。**同一屏上的同一个概念
- * 只能有一个实现**（这条教训在本文件里已经因为订单数吃过一次）。
- *
- * ## 颜色是辅助，不是信息
- *
- * 色相由 `symbolTone` 按名称哈希得到：**同一个币种永远是同一个颜色**，
- * 无论出现在哪张表、翻到哪一页。但它只是帮眼睛定位，**身份仍然由文字承担** ——
- * 所以颜色不参与任何判断，也不表示涨跌。
- */
-function SymbolCell({
-  symbol,
-  onSelect,
-}: {
-  symbol: string;
-  onSelect?: (symbol: string) => void;
-}) {
-  const tone = symbolTone(symbol);
-  /*
-   * 没有回调时退化成纯文本：表格被用在不需要跳转的地方（比如策略体检报告）时，
-   * 一个点不动的按钮比一段文字更糟。
-   */
-  if (!onSelect) {
-    return <span style={{ color: tone }}>{symbol}</span>;
-  }
-  return (
-    <button
-      type="button"
-      onClick={() => onSelect(symbol)}
-      title={`在行情图表里查看 ${symbol}`}
-      className="rounded px-1 -mx-1 transition hover:bg-base-800"
-      style={{ color: tone }}
-    >
-      {symbol}
-    </button>
-  );
-}
-
 export function isOpenOrder(order: OrderRecord): boolean {
   return !TERMINAL_STATUSES.has(order.status.toUpperCase());
 }
@@ -752,7 +706,6 @@ export function OrdersTable({
   paging,
   onlyOpen,
   positionCount,
-  onSelectSymbol,
 }: {
   /*
    * 行数据由**容器**（`TraderTables`）持有，不在这里自己拉。
@@ -770,8 +723,6 @@ export function OrdersTable({
   onlyOpen: boolean;
   /** 本地持仓数：判断"这张看起来还挂着的单"能不能被相信，见状态列上的标注。 */
   positionCount: number;
-  /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
-  onSelectSymbol?: (symbol: string) => void;
 }) {
   const all: OrderRecord[] = paging.rows;
   const orders = onlyOpen ? all.filter(isOpenOrder) : all;
@@ -835,7 +786,7 @@ export function OrdersTable({
                 // `useLayoutEffect`）：新订单插到顶部时要靠它量出"我正在读的那一行"被推了多远。
                 <tr key={order.id} className="row-hover" data-row-id={order.id}>
                   <td className="td num text-ink-faint">{fmtDateTime(order.createdAt)}</td>
-                    <td className="td font-semibold"><SymbolCell symbol={order.symbol} onSelect={onSelectSymbol} /></td>
+                  <td className="td font-semibold text-ink-hi">{order.symbol}</td>
                   <td className="td">
                     <Badge tone={purposeTone(order.purpose)}>{orderPurposeLabel(order.purpose)}</Badge>
                   </td>
@@ -929,16 +880,7 @@ function purposeTone(purpose: string): 'accent' | 'neutral' | 'down' | 'up' | 'w
 const RECONCILED_TITLE =
   '该持仓在机器人未运行期间平仓（例如交易所侧止盈被触发），本行由对账从交易所的成交历史补录，实时记账当时漏掉了它。';
 
-export function TradesTable({
-  traderId,
-  refreshToken,
-  onSelectSymbol,
-}: {
-  traderId: number;
-  refreshToken?: number;
-  /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
-  onSelectSymbol?: (symbol: string) => void;
-}) {
+export function TradesTable({ traderId, refreshToken }: { traderId: number; refreshToken?: number }) {
   const live = useEvents((s) => s.byTrader[traderId]?.trades);
   /*
    * 只拉**第一页**（26 = 25 + 一条探针），每 15 秒一次 —— 以前是 `traderTrades(id, 200)`。
@@ -1042,7 +984,7 @@ export function TradesTable({
                 >
                   <td className="td font-semibold text-ink-hi">
                     <div className="flex items-center gap-1.5">
-                      <SymbolCell symbol={trade.symbol} onSelect={onSelectSymbol} />
+                      <span>{trade.symbol}</span>
                       {reconciled && (
                         <Badge tone="warn" title={RECONCILED_TITLE}>
                           对账补录
@@ -1123,7 +1065,6 @@ export function TraderTables({
   positionCount,
   openOrderCount,
   refreshToken,
-  onSelectSymbol,
 }: {
   traderId: number;
   tab: TraderTabId;
@@ -1148,8 +1089,6 @@ export function TraderTables({
    * should be the numbers on screen.
    */
   refreshToken?: number;
-  /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
-  onSelectSymbol?: (symbol: string) => void;
 }) {
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   const [ordersRefreshToken, setOrdersRefreshToken] = useState(0);
@@ -1231,11 +1170,11 @@ export function TraderTables({
         {/* 两个标签共用同一个分页实例：它们读的是同一个端点，只是过滤条件不同；
             分开两套只会让翻出来的历史与"当前委托"的数字再次分家。 */}
         {tab === 'orders' && (
-            <OrdersTable paging={ordersPaging} onlyOpen positionCount={positionCount} onSelectSymbol={onSelectSymbol} />
+          <OrdersTable paging={ordersPaging} onlyOpen positionCount={positionCount} />
         )}
-            {tab === 'trades' && <TradesTable traderId={traderId} refreshToken={token} onSelectSymbol={onSelectSymbol} />}
+        {tab === 'trades' && <TradesTable traderId={traderId} refreshToken={token} />}
         {tab === 'history' && (
-          <OrdersTable paging={ordersPaging} onlyOpen={false} positionCount={positionCount} onSelectSymbol={onSelectSymbol} />
+          <OrdersTable paging={ordersPaging} onlyOpen={false} positionCount={positionCount} />
         )}
       </div>
 
