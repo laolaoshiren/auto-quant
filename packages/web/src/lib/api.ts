@@ -189,6 +189,13 @@ export interface Catalog {
   exchanges: Array<{ id: string; label: string; market: string; available: boolean }>;
   presets: StrategyPreset[];
   defaultStrategy: StrategyConfig;
+  /**
+   * 创建机器人时预选哪个模型。
+   *
+   * 原来是"列表第一个"，而列表按 id 排 —— 于是一个**已失效**的模型只要 id 最小
+   * 就会成为默认，每次创建都要手动改回来。取不到时为 null，调用方回落到第一个。
+   */
+  defaultAiModelId: number | null;
 }
 
 export interface SystemStatus {

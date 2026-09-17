@@ -149,6 +149,19 @@ export const RiskControlConfigSchema = z.object({
    */
   minStopLossFeeMultiple: z.number().min(0).max(50).default(3),
   /**
+   * 保本止损：浮盈达到这个百分比时，把止损移到开仓价。
+   *
+   * **0 表示关闭**（与 `maxDailyLossPercent` 等字段同一约定）。
+   *
+   * 为什么需要它：实测平均持仓 4.6 分钟、手续费占毛盈亏 38%，
+   * 而**一笔已经赚到钱的单又变回亏损单是最亏的做法**。
+   * 既有的回撤守卫管的是"浮盈回吐太多就落袋"，管不了这件事 ——
+   * 它给利润设了上限，而这里要的是"这笔不再可能亏"。
+   *
+   * ⚠️ 只能往有利方向移，永不回退（见 `risk/breakeven.ts`）。
+   */
+  breakevenTriggerPercent: z.number().min(0).max(100).default(0),
+  /**
    * 读不到成交记录时，按这个**往返**手续费率校验（小数比例：0.001 = 0.10%）。
    *
    * 实测均值是 0.1000%（15 笔成交），但不同标的、不同 VIP 等级会不同，所以真实
@@ -294,6 +307,7 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
         fallbackTakeProfitPercent: 7.5,
         minStopLossFeeMultiple: 3,
         fallbackRoundTripFeeRate: 0.001,
+        breakevenTriggerPercent: 8,
       },
       throttle: {
         minHoldMinutes: 30,

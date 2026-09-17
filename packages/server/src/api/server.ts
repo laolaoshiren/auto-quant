@@ -34,6 +34,7 @@ import {
   orders as orderStore,
   positions as positionStore,
   runtimeLogs,
+  settings,
   strategies,
   traders,
   TRADE_PAGE_DEFAULT,
@@ -810,6 +811,18 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     exchanges: EXCHANGES,
     presets: STRATEGY_PRESETS,
     defaultStrategy: defaultStrategyConfig(),
+    /*
+     * 创建机器人时预选哪个模型。
+     *
+     * 原来是"列表第一个"，而列表按 id 排 —— 于是一个**余额不足或已失效**的模型
+     * 只要 id 最小，就会成为每个新机器人的默认，每次创建都要手动改回来。
+     * 这里让操作员能指定，取不到就回落到第一个（与以前的行为一致）。
+     */
+    defaultAiModelId: (() => {
+      const saved = Number(settings.get('default_ai_model_id') ?? '');
+      if (Number.isFinite(saved) && saved > 0 && aiModels.get(saved)) return saved;
+      return aiModels.list()[0]?.id ?? null;
+    })(),
   }));
 
   /* --- System status ----------------------------------------------------- */
