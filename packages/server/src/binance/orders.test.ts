@@ -631,3 +631,54 @@ test('closePosition 的单一律豁免 —— 拒掉止损单会让仓位失去�
   });
   assert.equal(calls.length, 1, 'closePosition 的止损单不得被名义检查拦下');
 });
+
+test('市价单也要做名义检查 —— 它没有 price/triggerPrice，曾经整段被跳过', async () => {
+  /*
+   * ⚠️ 这条钉的是一个**"加了检查但检查不生效"**的缺陷。
+   *
+   * 我第一版写的是：
+   *
+   *     const refPrice = request.price ?? request.triggerPrice ?? 0;
+   *     if (refPrice > 0 && !request.closePosition) { ...检查... }
+   *
+   * 而**开仓用的是市价单** —— 它既没有 `price` 也没有 `triggerPrice`，
+   * 于是 `refPrice` 恒为 0、整个检查被静默跳过。
+   *
+   * 结果是 `-4164` 仍然反复出现，而我以为已经堵住了。
+   * **一次"加了检查但检查不生效"比没有检查更糟** —— 它会让人停止追查。
+   *
+   * 现在的实现在价格取不到时会去问标记价，所以市价单也走得通这条检查。
+   */
+  /*
+   * 夹具的两个约束都要照顾到，这是两次写错之后才理清的：
+   *
+   *  · 价格取的是**假行情的标记价**（`premiumIndex` 写死 68000），
+   *    不是传进 placeOrder 的那个 —— 市价单本来就没有价格参数
+   *  · 夹具的 `minQty` 固定是 `0.001`，所以数量不能小于它（那会撞另一条规则）
+   *
+   * 于是把 `minNotional` 抬高：0.001 × 68000 = 68 < 100。
+   */
+  const registry = SymbolRegistry.fromExchangeInfo(exchangeInfo({ minNotional: '100' }));
+  const { rest, calls } = fakeRest({ orderId: 1 });
+  const b = new BinanceBroker(rest, fakeMarket, registry);
+
+  // 市价单：不传 price、不传 triggerPrice。
+  await assert.rejects(
+    () => b.placeOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 0.001 }),
+    (err: Error) => {
+      assert.match(err.message, /名义价值不足/, '市价单也必须触发名义检查');
+      return true;
+    },
+  );
+  assert.equal(calls.filter((c) => c.path === '/fapi/v1/order').length, 0, '本地就该拦下，不能发出去');
+});
+
+test('市价单名义达标时正常放行 —— 检查不能把合法订单也拦掉', async () => {
+  const registry = SymbolRegistry.fromExchangeInfo(exchangeInfo({ minNotional: '50' }));
+  const { rest, calls } = fakeRest({ orderId: 1 });
+  const b = new BinanceBroker(rest, fakeMarket, registry);
+
+  // 0.001 × 68000 = 68 ≥ 50
+  await b.placeOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 0.001 });
+  assert.equal(calls.filter((c) => c.path === '/fapi/v1/order').length, 1, '达标的市价单必须能发出去');
+});

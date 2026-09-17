@@ -388,7 +388,25 @@ export class BinanceBroker {
        * 如果这里把它们一起拒掉，**仓位会失去保护** ——
        * 那是 §2.6 说的最糟状态，而且比"名义太小下不出去"严重得多。
        */
-      const refPrice = request.price && request.price > 0 ? request.price : request.triggerPrice ?? 0;
+      /*
+       * ⚠️ **市价单也必须能算出参考价。**
+       *
+       * 原来的写法是 `request.price ?? request.triggerPrice ?? 0`，而**开仓用的是市价单**
+       * —— 它既没有 `price` 也没有 `triggerPrice`，于是 `refPrice` 恒为 0、
+       * **整个名义检查被静默跳过**。实测里 `-4164` 因此仍然反复出现：
+       * 那个检查对"市价开仓"从来没运行过，而市价开仓正是最常见的路径。
+       *
+       * **一次「加了检查但检查不生效」比没有检查更糟** ——
+       * 它会让人（包括我自己）以为问题已经堵住了。
+       *
+       * 所以价格取不到时**主动去问交易所**（与下面条件单分支用的是同一个方法）。
+       * 拿不到标记价时**放行而不是拒绝**：一个取不到价格的网络问题，
+       * 不该让一笔合法订单下不出去 —— 那种情况交给交易所去判。
+       */
+      let refPrice = request.price && request.price > 0 ? request.price : request.triggerPrice ?? 0;
+      if (!(refPrice > 0) && !request.closePosition) {
+        refPrice = await this.getMarkPrice(symbol).catch(() => 0);
+      }
       if (refPrice > 0 && !request.closePosition) {
         const info = this.registry.require(symbol);
         const notional = rounded * refPrice;

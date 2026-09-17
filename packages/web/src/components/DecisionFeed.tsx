@@ -138,7 +138,7 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react';
-import type { DecisionRecord, Decision, ExecutionLogEntry } from '@aq/shared';
+import { exchangeErrorLabel, type DecisionRecord, type Decision, type ExecutionLogEntry } from '@aq/shared';
 import { api, type MarketSymbol } from '../lib/api';
 import { selectLiveCycle, useEvents, type LiveCycle } from '../lib/store';
 import { usePolled } from '../lib/hooks';
