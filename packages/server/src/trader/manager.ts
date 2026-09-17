@@ -508,11 +508,25 @@ export class TraderManager {
        * 报告形式是"**哪些标的能交易**"而不是"某一类可行吗" ——
        * 后者（"BTC 不行、SOL 行"）没法直接用于决策，前者可以。
        */
+      /*
+       * ⚠️ 报告里必须说清**评了哪些标的**。
+       *
+       * 实测撞到过：这里只评了 `staticCoins`（BTC/ETH），而配置里
+       * `useCoinPool: true` —— **动态币池那些真正能交易的山寨币根本没被评估**。
+       * 于是预检对操作员说"一个都开不出来"，而实际上 SOL/HYPE 是可以的。
+       *
+       * 启动时拿不到动态币池（它需要先拉行情），**但报告必须诚实说明范围** ——
+       * 否则操作员会据此做出错误决定。这与我前面几处犯的错是同一类：
+       * **一个说得太满的检查，比一个范围明确的检查更糟。**
+       */
+      const poolNote = effectiveConfig.coinSource.useCoinPool
+        ? `（只评了静态列表；动态币池需要行情，启动时不评估 —— 里面可能有可交易的标的）`
+        : '';
       checks.push({
         name: '可交易标的',
         severity: reach.ok ? 'ok' : 'warn',
         ok: reach.ok,
-        detail: reach.summary,
+        detail: reach.summary + poolNote,
         blocking: false,
       });
       // 被挡下的逐个列出（最多 5 个）—— 操作员需要知道是哪些、为什么。
