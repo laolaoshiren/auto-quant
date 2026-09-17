@@ -24,6 +24,7 @@ import { eventBus } from '../events.js';
 import { createLogger } from '../logger.js';
 import { LlmError } from '../llm/errors.js';
 import type { MarketDataService } from '../market/service.js';
+import { shouldMoveStopToBreakeven } from '../risk/breakeven.js';
 import { checkCircuitBreakers, RiskEngine, shouldCloseForDrawdown } from '../risk/engine.js';
 import { selectCandidates } from '../strategy/coins.js';
 import { parseDecisionResponse, sortDecisions } from '../strategy/parser.js';
@@ -841,6 +842,22 @@ export class AutoTrader {
 
     /* --- 3. Mechanical protections --------------------------------------- */
     const closedByGuard = await this.applyDrawdownGuard();
+    /*
+     * 保本止损与回撤守卫并列，都在问模型之前。
+     *
+     * 理由与 `applyDrawdownGuard` 的类注释相同：**保护已实现的利润，
+     * 恰恰是模型可靠地判断错的那件事。** 而且它是纯机械的 ——
+     * "浮盈达到 N% 就把止损移到成本价"没有任何需要判断的成分。
+     *
+     * 放在回撤守卫**之后**：那一条是"浮盈回吐太多就落袋"（平仓），
+     * 这一条是"这笔不再可能亏"（移止损）。先平仓、后移止损，
+     * 与 §2.9「减少风险的工作先于增加风险的工作」一致 ——
+     * 虽然移止损也是减少风险，但平仓减少得更多，让它先判定。
+     */
+    await this.applyBreakevenGuard().catch((error) => {
+      // 机械保护失败不该让整个周期失败 —— 既有的止损单仍然有效。
+      log.warn(`[${this.deps.trader.name}] 保本止损检查失败（不影响本周期交易）：${(error as Error).message}`);
+    });
 
     /* --- 4. Circuit breakers --------------------------------------------- */
     /*
@@ -2289,6 +2306,149 @@ export class AutoTrader {
 
     return closed;
   }
+  /* ---------------------------------------------------------------------- */
+  /*  Breakeven guard                                                        */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * 浮盈够多时把止损移到开仓价。
+   *
+   * ## 与回撤守卫的分工
+   *
+   * `applyDrawdownGuard()` 是**平仓**：浮盈回吐太多就落袋 —— 它给利润设了上限。
+   * 这里**不平仓**，只把止损移到成本价，**让赢的单继续跑**。
+   *
+   * 两者互补。而这一条治的是实测到的那个病：
+   * **平均持仓 4.6 分钟、手续费占毛盈亏 38%，一笔已经赚到钱的单又变回亏损单。**
+   *
+   * ## ⚠️ 顺序：先挂新止损，再撤旧的
+   *
+   * 这是这个方法里唯一真正需要想清楚的地方。
+   *
+   * | 顺序 | 新挂失败时 |
+   * | --- | --- |
+   * | 先撤旧、再挂新 | **仓位无保护** → 必须立刻平仓（§2.6 的最糟状态） |
+   * | **先挂新、再撤旧** | **旧止损还在**，仓位仍有保护 |
+   *
+   * 第二种永远不会让仓位暴露。代价只是"可能短暂存在两张止损单"，
+   * 而最坏情况是**以较差的价位被保护性平掉** —— 不是失去保护。
+   * 按 §2.6 的精神，这个取舍没有疑问。
+   *
+   * 撤旧失败时也**不**回滚新的：那会主动放弃更好的保护价位。
+   * 让两张并存，下一轮会再试一次撤旧。
+   *
+   * ## 为什么不做 "cancelAllOrders"
+   *
+   * 那会连**止盈单一起撤掉**，然后我就得把它也重新挂一遍 ——
+   * 多一个失败点、多一次无保护窗口，而它和保本毫无关系。
+   * `cancelOrder(symbol, id, kind)` 能只撤那一张。
+   */
+  private async applyBreakevenGuard(): Promise<number> {
+    const traderId = this.deps.trader.id;
+    const threshold = this.activeConfig.riskControl.breakevenTriggerPercent;
+
+    // 阈值为 0 表示关闭这条规则 —— 连行情都不必拉。
+    if (!(threshold > 0)) return 0;
+
+    const exchangePositions = await this.deps.broker.getPositions();
+    const liveBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
+    let moved = 0;
+
+    for (const local of positionStore.open(traderId)) {
+      const live = liveBySymbol.get(local.symbol);
+      if (!live) continue;
+
+      /*
+       * 用 `toPositionView` 而不是直接读 `local.side`。
+       *
+       * `positionStore.open()` 返回的是**原始数据库行**（`side` 是 `string`），
+       * 而视图把它收窄成 `PositionSide`。既有代码（`applyDrawdownGuard`）
+       * 走的也是这条路 —— 直接读会拿到一个宽类型，硬转则会把
+       * "数据库里出现了意料之外的 side 值"这件事静默吞掉。
+       */
+      const view: PositionView = {
+        ...this.toPositionView(local, new Map()),
+        markPrice: live.markPrice,
+        unrealizedPnl: live.unrealizedPnl,
+        unrealizedPnlPercent: live.unrealizedPnlPercent,
+      };
+
+      const verdict = shouldMoveStopToBreakeven({
+        side: view.side,
+        entryPrice: view.entryPrice,
+        currentStop: view.stopLoss,
+        markPrice: view.markPrice,
+        unrealizedPnlPercent: view.unrealizedPnlPercent,
+        triggerPercent: threshold,
+      });
+
+      if (!verdict.move || verdict.newStop === null) continue;
+
+      /*
+       * ⚠️ **先挂新止损。** 见方法注释里的顺序说明 ——
+       * 这一步失败时旧止损还在，仓位仍然有保护，所以只记一条日志、继续。
+       */
+      const newStopId = await this.placeProtection({
+        symbol: local.symbol,
+        side: local.side === 'long' ? 'SELL' : 'BUY',
+        type: 'STOP_MARKET',
+        triggerPrice: verdict.newStop,
+        purpose: 'stop_loss',
+        traderId,
+        quantity: local.quantity,
+      }).catch(() => null);
+
+      if (!newStopId) {
+        this.emitOnChange(
+          `breakeven-fail:${local.id}`,
+          'warn',
+          `想把 ${local.symbol} 的止损移到开仓价 ${verdict.newStop}，但新止损没挂上；` +
+            `**原有的止损仍然有效**，下一轮再试。`,
+        );
+        continue;
+      }
+
+      /*
+       * 再撤旧的。撤失败**不回滚**新的 —— 两张并存好过放弃更好的保护价位，
+       * 而且下一轮会再试一次。
+       */
+      const oldStopId = local.stop_order_id ? Number(local.stop_order_id) : null;
+      if (oldStopId && Number.isFinite(oldStopId)) {
+        const cancelled = await this.deps.broker
+          .cancelOrder(local.symbol, oldStopId, 'order')
+          .then(() => true)
+          .catch(() => false);
+        if (!cancelled) {
+          this.emit(
+            'warn',
+            `${local.symbol} 的旧止损 #${oldStopId} 未能撤掉，与新的保本止损并存；下一轮会再试。`,
+          );
+        }
+      }
+
+      /*
+       * 本地记录必须与交易所一致：把 `stop_loss` 也更新成刚挂上去的保本价。
+       *
+       * 只更新单号是不够的 —— 下一轮的 `shouldMoveStopToBreakeven()` 会拿
+       * `local.stop_loss` 判断"是否仍在亏损侧"，读到旧值的话它会以为还需要移，
+       * 于是**每一轮都重复挂一张新止损**，把交易所堆满同向的条件单。
+       */
+      positionStore.setProtection(
+        traderId,
+        local.symbol,
+        verdict.newStop,
+        local.take_profit,
+        String(newStopId),
+        local.tp_order_id,
+      );
+      this.clearStateNotice(`breakeven-fail:${local.id}`);
+      this.emit('info', verdict.reason);
+      moved += 1;
+    }
+
+    return moved;
+  }
+
 
   /* ---------------------------------------------------------------------- */
   /*  Execution                                                              */
