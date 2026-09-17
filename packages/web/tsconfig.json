@@ -18,5 +18,6 @@
     "strict": true,
     "useDefineForClassFields": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "../shared/src/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "../shared/src/**/*.ts"],
+  "exclude": ["../shared/src/**/*.test.ts"]
 }
