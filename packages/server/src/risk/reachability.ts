@@ -220,7 +220,20 @@ export function checkConfigReachability(input: ReachabilityInput): ReachabilityR
       ? `${input.symbols.length} 个候选里有 ${tradable.length} 个可交易` +
         (input.symbols.length <= 12 ? `：${names.join('、')}。` : `（${names.slice(0, 8).join('、')} 等）。`) +
         (blocked.length > 0 ? `另有 ${blocked.length} 个因账户规模不足被挡下。` : '')
-      : `**${input.symbols.length} 个候选里一个都开不出来** —— 这是配置/账户规模问题，不是策略判断。` +
-        '机器人会永远空转，而每轮周期都会"成功"、日志干净、状态显示 running。',
+      : /*
+         * ⚠️ 这里的措辞要克制。
+         *
+         * 我最初写的是"机器人会永远空转" —— 而实测里**那是错的**：
+         * 启动时只评得了静态列表（BTC/ETH，两个都开不出来），
+         * 而配置开着动态币池，里面那些最小名义 5 USDT 的山寨币**是可交易的**
+         * （机器人确实成功开过 SOLUSDT 的仓）。
+         *
+         * **一句说得太重的总结，会让操作员对一份其实可行的配置失去信心** ——
+         * 与我前面"编数字"和"漏一层算术"是同一类错误的第三个变体：
+         * 都是**把有限的检查说成了无限的结论**。
+         */
+        `评到的 ${input.symbols.length} 个候选里一个都开不出来 —— 这是配置/账户规模问题，不是策略判断。` +
+        '**注意这只是评到的那些标的**：如果配置开着动态币池，池内标的（尤其最小名义 5 USDT 的山寨币）' +
+        '可能仍然可交易，本检查在启动时拿不到它们的行情。',
   };
 }
