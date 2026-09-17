@@ -97,6 +97,15 @@ const runtime = (model: LoopModel = stubModel(), isAiStrategy = false) =>
   new AgentRuntime({ traderId, strategyConfig: config, isAiStrategy: () => isAiStrategy, model, equityNow: () => 10 });
 
 /** 等一拍，让 `void` 触发的异步流程走完。 */
+const facts = (over: Record<string, unknown> = {}) => (
+  {
+    tradeId: 1, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1,
+    grossPnl: -0.08, fee: 0.02, peakPnlPercent: 0, holdMinutes: 30,
+    entryPrice: 100, exitPrice: 99,
+    ...over,
+  }
+);
+
 const flush = () => new Promise((r) => setTimeout(r, 20));
 
 /* -------------------------------------------------------------------------- */
@@ -117,7 +126,7 @@ test('没有 AI 配置时整个空转 —— 老机器人行为不变', async ()
 
   rt.triggerReview();
   rt.settleOnly();
-  rt.reviewTrade({ tradeId: 1, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1 });
+  rt.reviewTrade(facts({ tradeId: 1, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1 }));
   await flush();
 
   assert.equal(m.calls, 0, '非 AI 模式下一次模型都不该调');
@@ -189,7 +198,7 @@ test('复盘失败不抛穿', async () => {
       throw new Error('模型服务挂了');
     },
   };
-  runtime(exploding).reviewTrade({ tradeId: 2, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1 });
+  runtime(exploding).reviewTrade(facts({ tradeId: 2, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1 }));
   await flush();
   assert.ok(true);
 });

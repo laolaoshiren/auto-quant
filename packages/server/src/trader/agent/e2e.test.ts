@@ -141,6 +141,15 @@ const runtime = (model: LoopModel) =>
     equityNow: () => 9.1,
   });
 
+const facts = (over: Record<string, unknown> = {}) => (
+  {
+    tradeId: 1, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1,
+    grossPnl: -0.08, fee: 0.02, peakPnlPercent: 0, holdMinutes: 30,
+    entryPrice: 100, exitPrice: 99,
+    ...over,
+  }
+);
+
 const flush = () => new Promise((r) => setTimeout(r, 30));
 
 /* -------------------------------------------------------------------------- */
@@ -216,7 +225,16 @@ test('端到端 ④：平仓后会写下一条挂在真实成交上的因果结�
       }),
     ]),
   );
-  rt.reviewTrade({ tradeId, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1 });
+  rt.reviewTrade(
+    facts({
+      tradeId,
+      symbol: 'BTCUSDT',
+      closeReason: 'stop_loss',
+      netPnl: -0.1,
+      /* 造出一个"曾浮盈但最终亏损"的轨迹 —— 那正是复盘最该抓住的形状。 */
+      peakPnlPercent: 1.8,
+    }),
+  );
   await flush();
 
   const rows = agentMemory.recent(traderId, 5);
