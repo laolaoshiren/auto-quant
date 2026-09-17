@@ -926,8 +926,30 @@ function ConfigSummary({ trader, asset }: { trader: TraderRow; asset: string }) 
       <span title="该机器人已完成的决策周期数（跨重启连续编号）。">
         周期编号 <span className="text-ink-mid">#{fmtInt(trader.lastCycleNumber)}</span>
       </span>
-      <span>
-        间隔 <span className="text-ink-mid">每 {trader.cycleIntervalMinutes} 分钟</span>
+      <span
+        title={
+          trader.mode === 'ai_managed'
+            ? /*
+               * ⚠️ 这里要说实话。
+               *
+               * AI 托管模式下，用户预期"决策周期也由 AI 调"（这是他当初的要求之一），
+               * 而**这个功能目前没实现**：`cycleIntervalMinutes` 是 `traders` 表上的列、
+               * 不在 `StrategyConfig` 里，所以 AI 改不到它；而且调度器是在启动时
+               * **读一次**就把间隔固定住的（`setInterval`），改了也不会生效。
+               *
+               * 所以显示成"由 AI 调整"会是撒谎。如实写"固定"，并说明它还归人管 ——
+               * 一个写着"智能"其实是固定的标签，比写着"固定"的标签有害得多：
+               * 用户会以为它在自适应，从而不再关注它。
+               */
+              '决策间隔当前是固定值（创建机器人时设定）。AI 托管目前还改不到它 —— 这是待实现的项。'
+            : '该机器人每多久跑一次决策周期。'
+        }
+      >
+        间隔{' '}
+        <span className="text-ink-mid">
+          每 {trader.cycleIntervalMinutes} 分钟
+          {trader.mode === 'ai_managed' && <span className="text-ink-faint">（固定）</span>}
+        </span>
       </span>
       <span>
         最近周期 <span className="text-ink-mid">{timeAgo(trader.lastCycleAt)}</span>
