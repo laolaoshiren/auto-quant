@@ -234,3 +234,71 @@ test('强度由程序决定：常规轮次用单次，超预算降级而不是�
     '超预算仍然要给单次调用，而不是什么都不做',
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  原生工具调用方言（实测逼出来的）                                           */
+/* -------------------------------------------------------------------------- */
+
+/** 拼那种格式的行。用码点写，避免源码里出现难辨认的全角竖线。 */
+const MARK = '\uFF5C\uFF5CDSML\uFF5C\uFF5C';
+const nativeTurn = (tool: string, args: Record<string, string>, thought = ''): string =>
+  [
+    '<' + MARK + ' calls>',
+    '<' + MARK + ' invoke name="' + tool + '">',
+    ...Object.entries(args).map(([k, v]) => '<' + MARK + ' parameter name="' + k + '" string="true">' + v),
+  ].join('\n');
+
+test('循环能吃下模型的**原生工具调用格式** —— 这是实测逼出来的', async () => {
+  /*
+   * 为什么这条必须有：Command 厂商的 deepseek-v4.1-flash 会用训练时的原生格式
+   * 回来，而不是我们提示词里要求的 JSON。
+   *
+   * 实测后果：整个循环判失败，**烧掉 2,561 输入 + 4,725 输出 tokens**，
+   * 只留下一句"模型没输出可解析的工具调用" —— 看起来像模型不听话，
+   * 实际是"我们没接住它的话"。
+   *
+   * 这条用例走的是**完整的 runToolLoop**，不只是解析器 ——
+   * 否则测的只是"解析器能跑"，而不是"循环真的用它"。
+   */
+  const { deps } = makeDeps();
+  const { model, calls } = scripted([
+    nativeTurn('get_performance', { window: '24h' }, '先看绩效'),
+    nativeTurn('finish', { summary: '看完了，不改' }),
+  ]);
+
+  const r = await runToolLoop({ role: 'strategist', task: 'x', facts: 'y', deps, model, maxSteps: 4 });
+
+  assert.equal(r.outcome, 'ok', '原生格式必须被接住，而不是判失败');
+  assert.equal(r.conclusion, '看完了，不改');
+  assert.equal(r.steps[0]!.tool, 'get_performance');
+  assert.equal((r.steps[0]!.args as { window?: string }).window, '24h');
+  assert.equal(calls(), 2);
+});
+
+test('两种方言混着来也能跑 —— 模型不必前后一致', async () => {
+  const { deps } = makeDeps();
+  const { model } = scripted([
+    turn('get_performance', { window: '24h' }),
+    nativeTurn('finish', { summary: '第二次改用了原生格式' }),
+  ]);
+
+  const r = await runToolLoop({ role: 'strategist', task: 'x', facts: 'y', deps, model, maxSteps: 4 });
+  assert.equal(r.outcome, 'ok');
+  assert.equal(r.conclusion, '第二次改用了原生格式');
+});
+
+test('原生格式里的工具名同样过校验 —— 只多认格式，不放宽语义', async () => {
+  /*
+   * §2.4：加的是字段别名，不是放宽语义校验。
+   * 一个幻觉出来的工具名，在两种方言下都必须被拒。
+   */
+  const { deps } = makeDeps();
+  const { model } = scripted([
+    nativeTurn('set_levrage', { value: '10' }),
+    turn('finish', { summary: '改对了' }),
+  ]);
+
+  const r = await runToolLoop({ role: 'strategist', task: 'x', facts: 'y', deps, model, maxSteps: 4 });
+  assert.equal(r.outcome, 'ok');
+  assert.match(JSON.stringify(r.steps[0]!.result as unknown), /没有名为/, '原生格式下的坏工具名照样要被拒');
+});

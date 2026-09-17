@@ -26,6 +26,7 @@
  *    再坏就结束并标记 `failed` —— **绝不用默认值替它编一个动作**。
  */
 
+import { parseNativeToolCalls } from './nativeToolCall.js';
 import { contextFor, parseRoleOutput, renderPriorFailures, ROLES, type AgentRole } from './roles.js';
 import { dispatchTool, renderToolCatalogue, type AgentToolDeps } from './tools.js';
 import type { AgentMemoryRow } from '../../store/agentStore.js';
@@ -99,20 +100,51 @@ interface TurnAction {
  * **但抽不出 `tool` 就是失败** —— 不猜它想干什么。
  */
 function parseTurn(text: string): { action: TurnAction | null; error: string | null } {
+  /*
+   * 先试约定好的 JSON —— 那是提示词里要求的形式。
+   */
   const parsed = parseRoleOutput<{ thought?: unknown; tool?: unknown; args?: unknown }>(text);
-  if (parsed.error || !parsed.value) return { action: null, error: parsed.error ?? '空输出' };
-
-  const tool = parsed.value.tool;
-  if (typeof tool !== 'string' || tool.length === 0) {
-    return { action: null, error: `输出里没有 tool 字段（收到 ${JSON.stringify(parsed.value).slice(0, 120)}）` };
+  if (!parsed.error && parsed.value) {
+    const tool = parsed.value.tool;
+    if (typeof tool === 'string' && tool.length > 0) {
+      return {
+        action: {
+          thought: typeof parsed.value.thought === 'string' ? parsed.value.thought : '',
+          tool,
+          args: parsed.value.args ?? {},
+        },
+        error: null,
+      };
+    }
   }
+
+  /*
+   * JSON 不认，再试模型的**原生工具调用方言**。
+   *
+   * ⚠️ 这一条是实测逼出来的，不是设想的。Command 厂商的 deepseek-v4.1-flash
+   * 会用它训练时的原生格式回来，而那时整个循环会判失败 ——
+   * **烧掉 2.5 万 tokens、产出一句"模型没输出可解析的工具调用"**，
+   * 看起来像模型不听话，实际是"我们没接住它的话"。
+   *
+   * 这只是**多认一种格式**，不放宽任何语义：抽出来的工具名与参数照样过
+   * `dispatchTool` 那套校验（§2.4 的"加字段别名，不放宽语义校验"）。
+   */
+  const native = parseNativeToolCalls(text);
+  if (native.length > 0) {
+    const first = native[0] as { tool: string; args: Record<string, unknown> };
+    /*
+     * 一次回复里出现多个调用时**只用第一个**。
+     *
+     * 循环的形状是"一步一个动作、看到结果再决定下一步"；一次塞多个进来
+     * 就变成了"模型在看不到结果的情况下连续决策"，而那正是这个设计要避免的。
+     * 剩下的会被忽略 —— 如果模型反复这样，它会在 `thought` 与后续轮次里暴露出来。
+     */
+    return { action: { thought: '', tool: first.tool, args: first.args }, error: null };
+  }
+
   return {
-    action: {
-      thought: typeof parsed.value.thought === 'string' ? parsed.value.thought : '',
-      tool,
-      args: parsed.value.args ?? {},
-    },
-    error: null,
+    action: null,
+    error: parsed.error ?? `输出里没有 tool 字段（收到 ${JSON.stringify(parsed.value ?? text).slice(0, 120)}）`,
   };
 }
 
