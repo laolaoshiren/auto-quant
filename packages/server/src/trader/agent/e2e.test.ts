@@ -32,7 +32,15 @@ import { defaultStrategyConfig, STRATEGY_PRESETS, StrategyConfigSchema, type Str
 
 import { closeDb, getDb, initDb } from '../../db/index.js';
 import { agentExperiments, agentMemory, agentRuns } from '../../store/agentStore.js';
-import { aiModels, exchanges, positions, strategies, traders, trades } from '../../store/repositories.js';
+import {
+  aiModels,
+  decisions as decisionStore,
+  exchanges,
+  positions,
+  strategies,
+  traders,
+  trades,
+} from '../../store/repositories.js';
 import type { LoopModel } from './loop.js';
 import { settlePending } from './orchestrator.js';
 import { makeAgentPorts } from './ports.js';
@@ -318,4 +326,122 @@ test('端到端 ⑥：整条链路不写 trades（智能体不改账）', async 
   // 停手是落库的，不是内存标志
   assert.ok(rt.paused(), 'pause_trading 必须被记下来 —— 重启后仍应生效');
   assert.equal(positions.open(traderId).length, 0, '智能体不得建仓');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  复盘素材：入场理由必须真的被传过去                                          */
+/* -------------------------------------------------------------------------- */
+
+test('端到端 ⑦：复盘素材里必须带**入场那一轮的原始理由**', async () => {
+  /*
+   * 这条钉住一个实测暴露的缺口。
+   *
+   * 补上浮盈轨迹之后，复盘员的结论从「无法区分」变成了「能排除假设」，
+   * 但它紧接着指出下一层缺口：
+   *
+   *   「由于缺少入场逻辑、周期与当时的趋势/关键位背景，无法判定这次止损是
+   *     设得过紧被正常波动打掉，还是入场方向本就错误」
+   *
+   * **而那两种结论的改法完全相反** —— 而入场理由一直在
+   * `decision_records.decisions[].reasoning` 里，只是没被传出去。
+   *
+   * 做法是**捕获喂给模型的提示词**，断言里面确实出现了当时的理由文本。
+   * 直接断言"记忆写下来了"是不够的：那测不到理由有没有进去。
+   */
+  /*
+   * `decisions.log()` 的时间戳由它自己取 `now()`（不接受外部传入），
+   * 所以这里让"开仓时刻"就是现在 —— 记录与开仓落在同一毫秒附近，
+   * 而回查用的是 `<= openedAt + 1000ms`，覆盖得到。
+   */
+  const openedAt = new Date().toISOString();
+
+  // 先造一条开仓决策记录。
+  decisionStore.log({
+    traderId,
+    cycleNumber: 7,
+    systemPrompt: 'sis',
+    userPrompt: 'u',
+    cotTrace: '',
+    decisions: [
+      {
+        symbol: 'BTCUSDT',
+        action: 'open_long',
+        leverage: 3,
+        positionSizeUsd: 6,
+        stopLoss: 98,
+        takeProfit: 104,
+        confidence: 71,
+        riskUsd: 0.2,
+        reasoning: '1H 与 15M 同向多头，价格站上 EMA20/50，突破基座 99.2 上方。',
+        adjustments: ['杠杆已从 5x 压到上限 3x。'],
+      },
+    ],
+    rawResponse: '{"decisions":[]}',
+    executionLog: [],
+    candidateSymbols: ['BTCUSDT'],
+    success: true,
+    error: null,
+    aiLatencyMs: 100,
+    promptTokens: 10,
+    completionTokens: 5,
+  });
+
+  const tradeId = makeTrade({ openedAt });
+
+  // 捕获喂给模型的提示词。
+  let seen = '';
+  const capturing: LoopModel = {
+    complete: async (_system, prompt) => {
+      seen = prompt;
+      return {
+        text: JSON.stringify({
+          lesson: '按入场理由看方向没错，是止损偏紧。',
+          decisionQuality: 'good',
+          outcomeMatchedQuality: false,
+          tags: ['止损偏紧'],
+        }),
+        usage: { promptTokens: 1, completionTokens: 1 },
+        latencyMs: 1,
+      };
+    },
+  };
+
+  runtime(capturing).reviewTrade(facts({ tradeId, symbol: 'BTCUSDT', openedAt }));
+  await flush();
+
+  assert.match(seen, /1H 与 15M 同向多头/, '入场理由必须出现在复盘素材里 —— 否则复盘员分不清"止损紧"与"方向错"');
+  assert.match(seen, /第 #7 轮/, '要带上轮次，以便回查那一轮的完整上下文');
+  assert.match(seen, /置信度 71/, '置信度是判断"当时有多确定"的依据');
+  assert.match(seen, /杠杆已从 5x 压到上限 3x/, '风控当时的调整也要给 —— 它改变了实际敞口');
+});
+
+test('端到端 ⑧：查不到入场理由时**明说查不到**，而不是留空', async () => {
+  /*
+   * 三种状态必须分清：查到了 / 查不到（记录已轮转）/ 回查出错。
+   *
+   * 这一条测第二种。**留空是最坏的做法** —— 复盘员会把"没有信息"
+   * 读成"当时没有理由"，而那个前提它无从验证。
+   */
+  const tradeId = makeTrade();
+
+  let seen = '';
+  const capturing: LoopModel = {
+    complete: async (_system, prompt) => {
+      seen = prompt;
+      return {
+        text: JSON.stringify({ lesson: '无足够信息。', decisionQuality: 'unclear', outcomeMatchedQuality: true, tags: [] }),
+        usage: { promptTokens: 1, completionTokens: 1 },
+        latencyMs: 1,
+      };
+    },
+  };
+
+  // 刻意不写任何决策记录。
+  runtime(capturing).reviewTrade(
+    facts({ tradeId, symbol: 'NOSUCHUSDT', openedAt: new Date().toISOString() }),
+  );
+  await flush();
+
+  assert.match(seen, /查不到|没有理由/, '查不到时必须明说，不能留空让复盘员误读');
+  assert.ok(!/入场理由：\s*$/.test(seen), '入场理由那一行不能是空的');
 });
