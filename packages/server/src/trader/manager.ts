@@ -422,10 +422,14 @@ export class TraderManager {
          * 而那一列只有 AI 调参才会写，而 AI 只有在跑时才调参 ——
          * 一个刚建的 AI 机器人会安静地什么都不做，且没有任何东西报错。
          */
-        isAiStrategy: () => {
-          const s = strategies.get(trader.strategyId);
-          return s?.presetId === 'ai_managed';
-        },
+        /*
+         * 判据是**机器人自己的模式**，不是"策略是不是某个预设"。
+         *
+         * AI 托管本来就不该是一个策略：策略是"一组固定参数"，而 AI 模式的
+         * 意思是"没有固定参数" —— 后者不能是前者的一种。挂在策略上还会让它
+         * 出现在策略列表里，任何既有机器人都能选中它。
+         */
+        isAiStrategy: () => traders.get(traderId)?.mode === 'ai_managed',
         model,
         equityNow: () => equity.latest(traderId)?.equity ?? null,
       });

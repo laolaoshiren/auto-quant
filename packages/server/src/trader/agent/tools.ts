@@ -119,7 +119,15 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'set_params',
     describe:
-      'Change strategy parameters. This is a DELTA: only the fields you include change. You MUST give a reason — an unexplained change cannot be reviewed later, and you will be asked for it again. Anything the structural guard overrides is reported back in clamps.',
+      'Change the parameters that govern YOUR OWN trading — including your own instructions. ' +
+      'This is a DELTA: only the fields you include change. ' +
+      'Adjustable: coin selection (coinSource.*), indicators (indicators.*), how much you risk ' +
+      '(riskControl.*, throttle.*, circuitBreaker.*), AND YOUR OWN PROMPT ' +
+      '(promptSections.roleDefinition / tradingFrequency / entryStandards / decisionProcess, and customPrompt). ' +
+      'Your prompt is a parameter like any other: if it no longer fits the market, change it — ' +
+      'a fixed prompt cannot be called intelligent. ' +
+      'You MUST give a reason — an unexplained change cannot be reviewed later. ' +
+      'Anything the structural guard overrides is reported back in clamps.',
     args: {
       patch: { type: 'object', required: true, describe: 'The fields to change.' },
       reason: {

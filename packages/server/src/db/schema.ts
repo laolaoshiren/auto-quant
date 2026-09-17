@@ -458,6 +458,29 @@ const M6_AGENT_CONFIG = /* sql */ `
 ALTER TABLE traders ADD COLUMN agent_config_json TEXT;
 `;
 
+const M7_TRADER_MODE = /* sql */ `
+-- ---------------------------------------------------------------------------
+-- 机器人的运行模式：由固定策略参数驱动，还是由 AI 智能体托管
+--
+-- ## 为什么这是一个"机器人的属性"而不是"一个策略"
+--
+-- AI 托管最初被做成了一个策略预设（presetId = 'ai_managed'）。那是错的：
+--
+--   · **策略是"一组固定参数"，而 AI 模式的意思是"没有固定参数"** ——
+--     后者根本不能是前者的一种。
+--   · 挂在策略上意味着它会出现在策略列表里，**任何既有机器人都能选中它**，
+--     包括那些本该按固定参数跑的。
+--   · AI 模式的参数存在 traders.agent_config_json（按机器人隔离），
+--     概念上它**从来不需要一个策略**。
+--
+-- 所以模式是机器人自己的属性。strategy_id 保留 NOT NULL（策略模式下用得上，
+-- AI 模式下被忽略）—— 不动外键是为了不牵动既有数据的完整性约束。
+--
+-- 默认 'strategy'，所以所有既有机器人行为完全不变。
+-- ---------------------------------------------------------------------------
+ALTER TABLE traders ADD COLUMN mode TEXT NOT NULL DEFAULT 'strategy';
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -465,4 +488,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 4, name: 'attributed-equity', sql: M4_ATTRIBUTED_EQUITY },
   { version: 5, name: 'ai-agent-memory', sql: M5_AI_AGENT_MEMORY },
   { version: 6, name: 'agent-config', sql: M6_AGENT_CONFIG },
+  { version: 7, name: 'trader-mode', sql: M7_TRADER_MODE },
 ];
