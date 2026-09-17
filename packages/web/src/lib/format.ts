@@ -364,3 +364,41 @@ export function safeJson(value: unknown, indent = 2): string {
     return String(value);
   }
 }
+
+/**
+ * 交易对名称的**区分色**。
+ *
+ * ## 为什么按名称哈希取色，而不是按出现顺序
+ *
+ * 按顺序分配会让同一个币种在不同表格、翻页之后变色 —— 而颜色的唯一用途
+ * 就是**让人一眼认出"这是同一个东西"**。哈希保证：**同一个币种永远是同一个颜色**，
+ * 无论出现在哪张表、翻到哪一页。
+ *
+ * ## 为什么不用主题里的语义色
+ *
+ * `up`（绿）/ `down`（红）/ `warn`（琥珀）在这个界面里含义是固定的（涨跌与风险）。
+ * **拿它们去"区分币种"会制造假信号**：一个红色的 BTCUSDT 看起来像"BTC 在跌"，
+ * 而它只是恰好排到了红色那一档。所以用一组避开红/绿/琥珀语义区间的中性色。
+ *
+ * 碰撞是允许的（只有 8 档）：**颜色是辅助，名称本身才是身份。**
+ */
+const SYMBOL_TONES = [
+  '#6ea8fe', // 蓝
+  '#a78bfa', // 紫
+  '#22d3ee', // 青
+  '#f472b6', // 粉
+  '#facc15', // 黄
+  '#34d399', // 翠
+  '#fb923c', // 橙
+  '#818cf8', // 靛
+] as const;
+
+export function symbolTone(symbol: string): string {
+  // FNV-1a 的简化版：够均匀，且不依赖任何库。
+  let h = 2166136261;
+  for (let i = 0; i < symbol.length; i += 1) {
+    h ^= symbol.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return SYMBOL_TONES[Math.abs(h) % SYMBOL_TONES.length] as string;
+}
