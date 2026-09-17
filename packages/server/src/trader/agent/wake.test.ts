@@ -31,6 +31,7 @@ const quiet = (over: Partial<WakeFacts> = {}): WakeFacts => ({
   lastDecisionWasNoChange: false,
   hasPosition: false,
   minutesSinceStrategyReview: 20,
+  idleCycles: 0,
   ...over,
 });
 
@@ -207,4 +208,57 @@ test('结算门槛可调', () => {
     decideSettle(experimentAt(30), { tradesSince: 20, netPnlSince: 0, nowMs: Date.now() }, strict).settle,
     true,
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  长期零成交 —— 静默失效的那一类                                             */
+/* -------------------------------------------------------------------------- */
+
+test('长期零成交会唤醒 —— 这是唯一能发现"参数不可达"的判据', () => {
+  /*
+   * 这条是实测逼出来的，而且它描述的失效最难发现：
+   *
+   * 机器人**在正确地空转** —— 模型每轮都判断 wait，于是没有成交、没有被拒、
+   * 权益也不动。**所有既有判据都是 0**，只有 60 分钟兜底会让它醒，
+   * 而醒来看到的还是同一份数据。
+   *
+   * 实测情形：三条门槛叠加（最小止损 0.30%、盈亏比 ≥1:3、置信度 ≥80）
+   * 在当前行情下不可达，机器人永远不交易 —— 而每轮周期都"成功"、日志干净、
+   * 状态显示 running。
+   */
+  const d = decideWake(quiet({ idleCycles: 25 }));
+  assert.equal(d.wake, true, '连续零成交必须唤醒，否则参数不可达时系统不会主动发现');
+  assert.equal(d.trigger, 'idle');
+  assert.match(d.why, /不可达|门槛/, '理由要指向"参数可能不可达"，而不是泛泛说"很久没动"');
+  assert.match(d.why, /25/, '要写出实际轮数');
+});
+
+test('零成交轮数没到门槛时不唤醒（不能每轮都醒）', () => {
+  assert.equal(decideWake(quiet({ idleCycles: 19 })).wake, false);
+});
+
+test('长期零成交的优先级高于"有新结果"', () => {
+  /*
+   * 一个连续 20 轮没开仓的机器人，比"刚平了一笔"更值得审视 ——
+   * 前者说明参数可能根本不可达，后者只是一个数据点。
+   */
+  const d = decideWake(quiet({ idleCycles: 30, newClosedTrades: 3 }));
+  assert.equal(d.trigger, 'idle');
+});
+
+test('但它排在回撤与连亏之后 —— 那两条更急', () => {
+  assert.equal(decideWake(quiet({ idleCycles: 30, equityDriftPercent: -5 })).trigger, 'drawdown');
+  assert.equal(decideWake(quiet({ idleCycles: 30, losingStreak: 5 })).trigger, 'losing_streak');
+});
+
+test('冷却仍然压过它 —— 防抖动对这条同样适用', () => {
+  const d = decideWake(quiet({ idleCycles: 30, minutesSinceLastWake: 1 }));
+  assert.equal(d.wake, false);
+  assert.match(d.why, /冷却/);
+});
+
+test('门槛可调', () => {
+  const custom = { ...DEFAULT_WAKE_POLICY, idleCycleThreshold: 5 };
+  assert.equal(decideWake(quiet({ idleCycles: 5 }), custom).wake, true);
+  assert.equal(decideWake(quiet({ idleCycles: 4 }), custom).wake, false);
 });

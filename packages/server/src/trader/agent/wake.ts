@@ -47,6 +47,23 @@ export interface WakeFacts {
   hasPosition: boolean;
   /** 距上次**策略审视**（不是任意唤醒）过了多久 —— 强度选择的依据。 */
   minutesSinceStrategyReview: number;
+  /**
+   * 自上次唤醒以来跑了多少个周期，**一个仓位都没开**。
+   *
+   * ## 为什么需要它（这是一个真实的死循环，实测撞到）
+   *
+   * 机器人可能一直在"正确地"空转：模型每轮都判断 `wait`，
+   * 于是没有成交（`newClosedTrades` 恒为 0）、没有被拒（`rejectionsSinceLastWake` 恒为 0）、
+   * 权益也不动（`equityDriftPercent` 恒为 0）——
+   * **所有既有判据都是 0，只有 60 分钟兜底会让它醒，而醒来看到的还是同一份数据。**
+   *
+   * 实测情形：三条门槛叠加（最小止损 0.30%、盈亏比 ≥1:3、置信度 ≥80）
+   * 在当前行情下**不可达**，于是机器人永远不交易，而它自己不会主动发现这一点。
+   *
+   * **而这是最难发现的一类失效**：每轮周期都"成功"、日志干净、
+   * 状态显示 `running` —— **只是什么都不做。**
+   */
+  idleCycles: number;
 }
 
 export interface WakePolicy {
@@ -62,6 +79,8 @@ export interface WakePolicy {
   equityDriftThresholdPercent: number;
   /** 连续被拒多少次算"参数与市场脱节"。 */
   rejectionThreshold: number;
+  /** 连续多少轮零成交算"参数可能不可达"。 */
+  idleCycleThreshold: number;
 }
 
 /**
@@ -81,6 +100,11 @@ export const DEFAULT_WAKE_POLICY: WakePolicy = {
   losingStreakThreshold: 3,
   equityDriftThresholdPercent: 2,
   rejectionThreshold: 5,
+  /*
+   * 20 轮 ≈ 1 小时（3 分钟周期）。再长的话，一个"参数不可达"的机器人会安静地
+   * 空转几小时才被审视 —— 而那期间它在持续消耗 token。
+   */
+  idleCycleThreshold: 20,
 };
 
 export type WakeTrigger =
@@ -89,6 +113,7 @@ export type WakeTrigger =
   | 'drawdown'
   | 'rejections'
   | 'timeout'
+  | 'idle'
   | 'manual'
   | 'none';
 
@@ -160,6 +185,24 @@ export function decideWake(facts: WakeFacts, policy: WakePolicy = DEFAULT_WAKE_P
       wake: true,
       trigger: 'rejections',
       why: `上次唤醒后被风控拒绝 ${facts.rejectionsSinceLastWake} 次（阈值 ${policy.rejectionThreshold}），说明模型在提注定被拒的请求 —— 参数与市场脱节。`,
+    };
+  }
+
+  /*
+   * 长期零成交。
+   *
+   * 放在"有新结果"**之前**：一个连续 20 轮没开仓的机器人，
+   * 比"刚平了一笔"更值得审视 —— 前者说明参数可能根本不可达，
+   * 而后者只是一个数据点。
+   */
+  if (facts.idleCycles >= policy.idleCycleThreshold) {
+    return {
+      wake: true,
+      trigger: 'idle',
+      why:
+        `已连续 ${facts.idleCycles} 个周期没有任何开仓（阈值 ${policy.idleCycleThreshold}），` +
+        '且这期间没有成交、没有被拒、权益也没有变化 —— ' +
+        '**所有既有判据都是 0，只有这条能发现"参数可能不可达"**。请检查入场门槛在当前账户规模与行情下是否成立。',
     };
   }
 

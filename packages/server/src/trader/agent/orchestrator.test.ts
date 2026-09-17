@@ -45,6 +45,7 @@ function makePorts(over: Partial<OrchestratorPorts> = {}) {
     lastDecisionWasNoChange: false,
     hasPosition: false,
     minutesSinceStrategyReview: 5,
+    idleCycles: 0,
   });
 
   const ports: OrchestratorPorts = {
@@ -113,7 +114,7 @@ test('先结算旧实验，再开始新一轮 —— 否则策略师看到的"�
     ports,
     model: scripted([JSON.stringify({ tool: 'finish', args: { summary: '看完了' } })]),
     force: true,
-    policy: { hourlyBudget: 40, cooldownMinutes: 0, maxIdleMinutes: 60, losingStreakThreshold: 3, equityDriftThresholdPercent: 2, rejectionThreshold: 5 },
+    policy: { hourlyBudget: 40, cooldownMinutes: 0, maxIdleMinutes: 60, losingStreakThreshold: 3, equityDriftThresholdPercent: 2, rejectionThreshold: 5, idleCycleThreshold: 20 },
   });
 
   assert.equal(r.ran, true);
@@ -170,7 +171,7 @@ test('调参通过编排层落到实验记录，且带上 patch 与 applied 的�
     ports,
     model,
     force: true,
-    policy: { hourlyBudget: 40, cooldownMinutes: 0, maxIdleMinutes: 60, losingStreakThreshold: 3, equityDriftThresholdPercent: 2, rejectionThreshold: 5 },
+    policy: { hourlyBudget: 40, cooldownMinutes: 0, maxIdleMinutes: 60, losingStreakThreshold: 3, equityDriftThresholdPercent: 2, rejectionThreshold: 5, idleCycleThreshold: 20 },
   });
 
   assert.equal(r.ran, true);
@@ -195,7 +196,7 @@ test('运行轨迹被落下，且带强度与触发原因', async () => {
     ports,
     model: scripted([JSON.stringify({ tool: 'finish', args: { summary: 'x' } })]),
     force: true,
-    policy: { hourlyBudget: 40, cooldownMinutes: 0, maxIdleMinutes: 60, losingStreakThreshold: 3, equityDriftThresholdPercent: 2, rejectionThreshold: 5 },
+    policy: { hourlyBudget: 40, cooldownMinutes: 0, maxIdleMinutes: 60, losingStreakThreshold: 3, equityDriftThresholdPercent: 2, rejectionThreshold: 5, idleCycleThreshold: 20 },
   });
 
   assert.equal(runs.length, 1);
@@ -294,7 +295,7 @@ test('调参落实验记录时，tool_calls 必须**已经带上推理依据**',
     ports,
     model,
     force: true,
-    policy: { hourlyBudget: 40, cooldownMinutes: 0, maxIdleMinutes: 60, losingStreakThreshold: 3, equityDriftThresholdPercent: 2, rejectionThreshold: 5 },
+    policy: { hourlyBudget: 40, cooldownMinutes: 0, maxIdleMinutes: 60, losingStreakThreshold: 3, equityDriftThresholdPercent: 2, rejectionThreshold: 5, idleCycleThreshold: 20 },
   });
 
   assert.equal(experiments.length, 1, '调参应当留下一条实验记录');
