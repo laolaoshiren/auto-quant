@@ -550,6 +550,7 @@ function promptForHistory(count: number): { text: string; tokens: number } {
   ).toISOString();
   const performance = tradeStore.performanceSince(o1TraderId, since);
   const memory: PromptMemory = {
+    recentRejections: [],
     performance: {
       windowHours: PROMPT_PERFORMANCE_WINDOW_HOURS,
       totalTrades: performance.totalTrades,

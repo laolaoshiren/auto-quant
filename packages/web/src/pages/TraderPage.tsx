@@ -20,7 +20,7 @@ import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, cn } from '../compone
 import { TraderStatusBadge } from '../components/Badges';
 import { PageShell, Metric } from '../components/shell';
 import { DecisionFeed } from '../components/DecisionFeed';
-import { TraderTables, type TraderTabId } from '../components/TraderTables';
+import { isOpenOrder, TraderTables, type TraderTabId } from '../components/TraderTables';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import { DashboardEquityChart, WinLossBar } from '../components/DashboardCharts';
 import {
@@ -210,9 +210,23 @@ export function TraderPage() {
   /* --- derived headline numbers ----------------------------------------- */
 
   const positions = live?.positions ?? [];
-  const openOrders = (live?.orders ?? []).filter(
-    (order) => !/FILLED|CANCELED|CANCELLED|REJECTED|EXPIRED/i.test(order.status),
-  );
+  /*
+   * ⚠️ **必须用 `isOpenOrder`，不能自己写判定。**
+   *
+   * 这里原本是一个本地正则：`!/FILLED|CANCELED|.../i.test(order.status)`。
+   * 而下方 `TraderTables` 的「当前委托 N」用的是 `isOpenOrder()` ——
+   * **两套判定数出来的是两个数**，于是同一屏上「挂单 4」与「当前委托 2」
+   * 互相矛盾（用户实际就是这样发现的）。
+   *
+   * 后者是对的：`isOpenOrder` 用的是完整的终态集合（含
+   * `EXPIRED_IN_MATCH` / `EXPIRED_IN_FUTURES` 这两个**旧正则没覆盖**的状态），
+   * 而 `TraderTables` 里有一段注释记录了他们为"已结算的止损单仍停留在委托里"
+   * 这个问题专门建了它。
+   *
+   * **同一屏上的同一个概念只能有一个判定。** 两个"都对"的实现放在一起，
+   * 结果就是两个都不可信。
+   */
+  const openOrders = (live?.orders ?? []).filter(isOpenOrder);
 
   // A REST page wins, but the socket appends snapshots between polls, so both
   // are merged and de-duplicated by timestamp.
@@ -503,14 +517,33 @@ export function TraderPage() {
         {model?.model && <span className="ml-1 text-ink-faint">{model.model}</span>}
       </span>
       <span>
-        策略{' '}
-        <Link
-          to={`/strategy/${trader.strategyId}`}
-          className="text-accent hover:underline"
-          title="决定候选交易对、杠杆与风控阈值的策略。"
-        >
-          {strategy?.name ?? `#${trader.strategyId}`}
-        </Link>
+        {/*
+          AI 托管模式下**不显示策略**。
+          
+          策略是"一组固定参数"，而 AI 模式的意思是"由 AI 实时设定并调整参数"——
+          对这台机器人来说，`strategies` 表里那一行**不生效**（生效的是
+          `agent_config_json`）。
+          
+          之前这里显示「策略 #8」并链到策略编辑页，那会让人以为改那里能影响它 ——
+          **一个链到无效配置的链接，比没有链接更糟**：用户改完发现没效果，
+          却不知道该怪谁。
+        */}
+        {trader.mode === 'ai_managed' ? (
+          <span title="参数与交易提示词由 AI 自主设定并持续调整；生效的配置不在策略里。">
+            智能托管
+          </span>
+        ) : (
+          <>
+            策略{' '}
+            <Link
+              to={`/strategy/${trader.strategyId}`}
+              className="text-accent hover:underline"
+              title="决定候选交易对、杠杆与风控阈值的策略。"
+            >
+              {strategy?.name ?? `#${trader.strategyId}`}
+            </Link>
+          </>
+        )}
       </span>
       {/*
         推送断开时才出现。
