@@ -279,18 +279,6 @@ export function TraderPage() {
   const openPositionCount = positions.length;
 
   /*
-   * 行情图表当前显示的币种。
-   *
-   * 默认取第一个持仓（"我在盯什么"），而下方表格里的币种名可以点击把它换掉 ——
-   * 用户看到某个陌生币种时，最自然的动作就是"让我看看它长什么样"。
-   *
-   * `undefined` 表示还没选过：那时跟随第一个持仓。**一旦用户点过，就不再自动跟随** ——
-   * 否则行情会因为持仓变动而跳走，那比不跳更烦人。
-   */
-  const [pickedSymbol, setPickedSymbol] = useState<string | undefined>(undefined);
-  const chartSymbol = pickedSymbol ?? positions[0]?.symbol;
-
-  /*
    * 今日盈亏 against the last snapshot from *before* the 24-hour window.
    *
    * The newest snapshot older than 24h is deliberately preferred over the
@@ -847,7 +835,7 @@ export function TraderPage() {
               </div>
             )
           ) : (
-              <CandlesPanel symbol={chartSymbol} />
+            <CandlesPanel symbol={positions[0]?.symbol} />
           )}
         </Panel>
 
@@ -873,7 +861,6 @@ export function TraderPage() {
           onChange={setTableTab}
           positionCount={openPositionCount}
           openOrderCount={openOrders.length}
-              onSelectSymbol={setPickedSymbol}
         />
 
         {/*
