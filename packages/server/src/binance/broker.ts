@@ -361,6 +361,55 @@ export class BinanceBroker {
         );
       }
       normalised.quantity = rounded;
+
+      /*
+       * 取整后的名义价值必须仍然达到交易所的下限。
+       *
+       * ⚠️ 这一条是实测撞出来的：风控校验的是**取整之前**的名义价值，
+       * 于是"6 USDT ≥ 5 USDT"通过了，而按步长向下取整之后真正发出去的名义
+       * 已经低于 5 —— 交易所拒单：`-4164 Order's notional must be no smaller than 5`。
+       *
+       * **风控只保证方向与量级，不保证精度**（这一点在 `placeOrder` 的类注释里
+       * 已经写着，同样的道理适用于名义价值而不只是触发价）。适配器是唯一同时
+       * 知道合约过滤器、又在每一张订单路径上的层 —— 所以判定在这里。
+       *
+       * **为什么本地判定比让交易所拒绝更重要**：
+       * `-4164` 只告诉操作员"名义太小"，看不出是**取整**造成的，
+       * 也看不出差了多少。这里把三个数字（实际名义、下限、步长）一次说清，
+       * 让"为什么这张单下不出去"变成一个可定位的问题。
+       */
+      /*
+       * ⚠️ **`closePosition` 的单必须豁免这个检查。**
+       *
+       * 币安的错误信息里那句「unless you choose reduce only」就是这个意思：
+       * `closePosition: true` 的条件单只用于平掉既有仓位，**不受名义下限约束**。
+       *
+       * 我们的止损/止盈正是这么挂的（`placeProtection` 传 `closePosition: true`）。
+       * 如果这里把它们一起拒掉，**仓位会失去保护** ——
+       * 那是 §2.6 说的最糟状态，而且比"名义太小下不出去"严重得多。
+       */
+      const refPrice = request.price && request.price > 0 ? request.price : request.triggerPrice ?? 0;
+      if (refPrice > 0 && !request.closePosition) {
+        const info = this.registry.require(symbol);
+        const notional = rounded * refPrice;
+        if (info.minNotional > 0 && notional < info.minNotional) {
+          const neededQty = this.registry.roundQuantity(symbol, info.minNotional / refPrice);
+          /*
+           * 说清"需要多少数量"而不只是"不够"：如果连**下限对应的数量**取整后
+           * 仍然不足，那这一类标的在这个价位上根本开不出来（步长太粗），
+           * 那是与"仓位太小"完全不同的结论，操作员该做的是换标的而不是加仓。
+           */
+          const bumpNote =
+            neededQty >= rounded
+              ? `至少需要 ${neededQty}（按 ${info.stepSize} 步长）`
+              : `按 ${info.stepSize} 步长取整后无法达到下限 —— 该标的在当前价位开不出来`;
+          throw new Error(
+            `${symbol} 的名义价值不足：${rounded} × ${refPrice} = ${notional.toFixed(4)} USDT，` +
+              `低于交易所下限 ${info.minNotional} USDT。${bumpNote}。` +
+              `（数量 ${request.quantity} 按步长取整为 ${rounded} 之后才不足 —— 调整仓位时要把这一步算进去。）`,
+          );
+        }
+      }
     }
 
     if (isConditional) {
