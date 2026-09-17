@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { TraderStatus } from '@aq/shared';
+import type { TraderMode, TraderStatus } from '@aq/shared';
 import {
   api,
   type AiModelRow,
@@ -37,6 +37,8 @@ export function NewTraderModal({
   const [exchangeAccountId, setExchangeAccountId] = useState<number | ''>('');
   const [aiModelId, setAiModelId] = useState<number | ''>('');
   const [strategyId, setStrategyId] = useState<number | ''>('');
+  /** 运行模式。默认按策略，与既有行为一致。 */
+  const [mode, setMode] = useState<TraderMode>('strategy');
   const [cycleIntervalMinutes, setCycleIntervalMinutes] = useState(15);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +99,7 @@ export function NewTraderModal({
         exchangeAccountId: Number(exchangeAccountId),
         aiModelId: Number(aiModelId),
         strategyId: Number(strategyId),
+        mode,
         cycleIntervalMinutes,
         // Omitted unless the operator took over: the server then reads the real
         // wallet balance itself. `undefined` drops the key from the JSON body.
@@ -189,8 +192,64 @@ export function NewTraderModal({
             </Field>
           </div>
 
-          <Field label="策略">
-            <Select value={strategyId} onChange={(e) => setStrategyId(Number(e.target.value))}>
+          {/*
+            运行模式。
+            
+            AI 托管**不是一个策略** —— 策略是"一组固定参数"，而 AI 模式的意思是
+            "没有固定参数"。所以它是机器人自己的一个属性，在创建时选。
+          */}
+          <Field
+            label="运行模式"
+            hint="AI 托管下参数由 AI 自己设定并持续调整，交易提示词也是它的一部分 —— 一份固定不变的提示词称不上智能。"
+          >
+            <div className="flex flex-col gap-1.5">
+              <label className="flex cursor-pointer items-start gap-2 text-base">
+                <input
+                  type="radio"
+                  name="trader-mode"
+                  className="mt-0.5"
+                  checked={mode === 'strategy'}
+                  onChange={() => setMode('strategy')}
+                />
+                <span>
+                  <span className="font-medium">按策略参数</span>
+                  <span className="block text-xs text-ink-faint">
+                    用下面选中的策略里的固定参数跑。行为与以前完全一致。
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2 text-base">
+                <input
+                  type="radio"
+                  name="trader-mode"
+                  className="mt-0.5"
+                  checked={mode === 'ai_managed'}
+                  onChange={() => setMode('ai_managed')}
+                />
+                <span>
+                  <span className="font-medium">AI 智能托管（全自动）</span>
+                  <span className="block text-xs text-ink-faint">
+                    参数与交易提示词全部由 AI 自主设定并实时调整：周期、标的池、杠杆、仓位、
+                    止损止盈、节流与冷却。以盈利为唯一目标，并根据真实交易结果不断反思、迭代。
+                  </span>
+                </span>
+              </label>
+            </div>
+          </Field>
+
+          <Field
+            label="策略"
+            hint={
+              mode === 'ai_managed'
+                ? 'AI 托管模式下这项被忽略 —— 参数来自 AI 自己（每个机器人独立一份）。仍需选一个是为了保留数据库约束，它不会影响 AI 的决策。'
+                : undefined
+            }
+          >
+            <Select
+              value={strategyId}
+              onChange={(e) => setStrategyId(Number(e.target.value))}
+              disabled={mode === 'ai_managed'}
+            >
               {strategyList?.map((strategy) => (
                 <option key={strategy.id} value={strategy.id}>
                   {strategy.name}
