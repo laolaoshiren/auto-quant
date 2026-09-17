@@ -409,22 +409,51 @@ export class TraderManager {
        * **不阻断启动**：某一类标的不可达时另一类可能仍然可交易
        * （实测里 BTC/ETH 可以、山寨币不行）。阻断会让一个还能工作的机器人启动不了。
        */
+      /*
+       * ⚠️ **必须用「生效配置」，不是策略配置。**
+       *
+       * AI 托管机器人的参数存在 `agent_config_json`（由 AI 自己写），
+       * 策略里的那份**不生效**。第一次实现时我用了策略配置，于是预检报出：
+       *
+       *     山寨币开不出仓位：名义上限 9.11 × 0.5 = 4.56，低于 minPositionSize=12
+       *
+       * 而 AI 早把 minPositionSize 调成 5、比例调成 1 —— **那两个数字在生效配置里
+       * 根本不存在**。也就是说这个检查**报了一个不存在的问题，同时漏掉了真正的问题**。
+       *
+       * 一个用来防错的检查自己给出错误结论，比没有它更糟：它会让操作员去修一个
+       * 不存在的问题，同时对真问题视而不见。
+       */
+      const effectiveConfig = (() => {
+        const raw = traders.get(traderId)?.agentConfigJson;
+        if (trader.mode === 'ai_managed' && typeof raw === 'string' && raw.length > 0) {
+          try {
+            const parsedAi = StrategyConfigSchema.safeParse(JSON.parse(raw));
+            if (parsedAi.success) return parsedAi.data;
+          } catch {
+            // 坏 JSON 与 schema 不通过走同一条回落路径。
+          }
+          // 与 `AutoTrader.refreshAgentState()` 的回落保持一致：坏 AI 配置时用策略配置。
+          log.warn(`机器人 #${traderId} 的 AI 配置无法解析，可达性检查按策略配置进行。`);
+        }
+        return config;
+      })();
+
       const reachEquity = await connection.broker
         .getAccountState()
         .then((s) => s.walletBalance)
         .catch(() => trader.initialEquity);
       const reach = checkConfigReachability({
         equity: reachEquity,
-        maxMarginUsagePercent: config.riskControl.maxMarginUsage,
+        maxMarginUsagePercent: effectiveConfig.riskControl.maxMarginUsage,
         ratios: {
-          major: config.riskControl.btcEthMaxPositionValueRatio,
-          altcoin: config.riskControl.altcoinMaxPositionValueRatio,
+          major: effectiveConfig.riskControl.btcEthMaxPositionValueRatio,
+          altcoin: effectiveConfig.riskControl.altcoinMaxPositionValueRatio,
         },
-        minPositionSize: config.riskControl.minPositionSize,
-        defaultLeverage: config.riskControl.defaultLeverage,
+        minPositionSize: effectiveConfig.riskControl.minPositionSize,
+        defaultLeverage: effectiveConfig.riskControl.defaultLeverage,
         maxLeverage: {
-          major: config.riskControl.btcEthMaxLeverage,
-          altcoin: config.riskControl.altcoinMaxLeverage,
+          major: effectiveConfig.riskControl.btcEthMaxLeverage,
+          altcoin: effectiveConfig.riskControl.altcoinMaxLeverage,
         },
       });
       for (const finding of reach.findings) {
