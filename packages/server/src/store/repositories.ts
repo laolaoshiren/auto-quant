@@ -480,6 +480,7 @@ interface TraderRow {
   last_cycle_number: number;
   last_error: string | null;
   consecutive_failures: number;
+  agent_config_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -498,6 +499,7 @@ function toTrader(row: TraderRow): Trader {
     lastCycleNumber: row.last_cycle_number,
     lastError: row.last_error,
     consecutiveFailures: row.consecutive_failures,
+    agentConfigJson: row.agent_config_json,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -556,6 +558,24 @@ export const traders = {
       input.strategyId ?? current.strategyId,
       input.cycleIntervalMinutes ?? current.cycleIntervalMinutes,
       input.initialEquity ?? current.initialEquity,
+      now(),
+      id,
+    );
+  },
+
+  /**
+   * 写入 AI 托管模式下的参数。**非空即代表这个机器人由 AI 托管。**
+   *
+   * 单独一个列而不是复用 `strategies.config`：一个策略可以被多个机器人共用，
+   * 而 AI 模式下每个机器人的参数是各自演化的 —— 共用会让两个 AI 互相覆盖，
+   * 且那种覆盖看起来完全正常（配置就是配置，看不出被谁改的）。
+   *
+   * 传 null 表示退出 AI 托管，回到策略里的固定参数。
+   */
+  setAgentConfig(id: number, configJson: string | null): void {
+    getDb().run(
+      'UPDATE traders SET agent_config_json = ?, updated_at = ? WHERE id = ?',
+      configJson,
       now(),
       id,
     );

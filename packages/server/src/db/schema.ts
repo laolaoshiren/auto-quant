@@ -442,10 +442,27 @@ CREATE TABLE agent_runs (
 CREATE INDEX idx_agent_runs_trader ON agent_runs(trader_id, created_at DESC);
 `;
 
+const M6_AGENT_CONFIG = /* sql */ `
+-- ---------------------------------------------------------------------------
+-- AI 智能托管：每个机器人自己的一份参数
+--
+-- 为什么不能复用 strategies.config：**一个策略可以被多个机器人共用**，
+-- 而 AI 模式下的参数是**每个机器人各自演化**的。共用一个位置会让两个 AI
+-- 机器人互相覆盖对方的参数，而且那种覆盖看起来完全正常（配置就是配置）。
+--
+-- agent_config_json 非空即代表这个机器人处于 AI 托管模式 ——
+-- 一个显式、可查询的判据，而不是靠 strategy_id 或某个标志位去猜。
+--
+-- 为 NULL 时机器人按 strategy.config 跑，行为与以前完全一致（老机器人不受影响）。
+-- ---------------------------------------------------------------------------
+ALTER TABLE traders ADD COLUMN agent_config_json TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
   { version: 3, name: 'session-revocation', sql: M3_SESSION_REVOCATION },
   { version: 4, name: 'attributed-equity', sql: M4_ATTRIBUTED_EQUITY },
   { version: 5, name: 'ai-agent-memory', sql: M5_AI_AGENT_MEMORY },
+  { version: 6, name: 'agent-config', sql: M6_AGENT_CONFIG },
 ];
