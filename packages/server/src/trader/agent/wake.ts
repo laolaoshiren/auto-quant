@@ -43,6 +43,10 @@ export interface WakeFacts {
   callsThisHour: number;
   /** 上一次的调参结论是不是"不改" —— 用来避免反复问同一件事。 */
   lastDecisionWasNoChange: boolean;
+  /** 当前是否有持仓 —— 有仓位时判断更重要，值得开完整面板。 */
+  hasPosition: boolean;
+  /** 距上次**策略审视**（不是任意唤醒）过了多久 —— 强度选择的依据。 */
+  minutesSinceStrategyReview: number;
 }
 
 export interface WakePolicy {

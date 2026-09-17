@@ -29,6 +29,8 @@ const quiet = (over: Partial<WakeFacts> = {}): WakeFacts => ({
   rejectionsSinceLastWake: 0,
   callsThisHour: 0,
   lastDecisionWasNoChange: false,
+  hasPosition: false,
+  minutesSinceStrategyReview: 20,
   ...over,
 });
 
