@@ -47,6 +47,19 @@ export const CoinSourceConfigSchema = z.object({
   oiTopLimit: z.number().int().min(1).max(100).default(10),
   /** OI growth is measured over this window (hours). */
   oiTopWindowHours: z.number().int().min(1).max(24).default(4),
+  /**
+   * 候选评分门槛（0–100）。**0 表示关闭**（与其它风控字段同一约定）。
+   *
+   * 低于这个分数的标的**不进提示词**。
+   *
+   * 为什么需要它：实测单次决策的提示词是 69,678 字符 / 48,005 tokens，
+   * 而其中相当一部分标的是陪跑的。**"多看"和"看得准"不是一回事** ——
+   * 信号淹没在数据里本身就会让判断变差，不只是变贵。
+   *
+   * ⚠️ 门槛太严会把机会一起滤掉，而**"不交易"也是一种亏损**（错过机会）。
+   * 所以在 AI 托管模式下它是 AI 可调的参数，且要按"改了什么、之后真实结果如何"来检验。
+   */
+  minScore: z.number().min(0).max(100).default(0),
 });
 
 /* -------------------------------------------------------------------------- */

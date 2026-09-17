@@ -14,6 +14,7 @@ import { normalizeSymbol } from '../binance/symbols.js';
 import type { BinancePremiumIndex, BinanceTicker24h } from '../binance/types.js';
 import { createLogger } from '../logger.js';
 import { computeTimeframeIndicators } from './indicators.js';
+import { scoreSymbol } from '../strategy/scoring.js';
 
 const log = createLogger('market:service');
 
@@ -166,6 +167,16 @@ export class MarketDataService {
 
     const derivatives = await this.buildDerivatives(symbol, price, premium, config);
 
+    /*
+     * 候选评分。
+     *
+     * 在这里算而不是在调用方算，是因为**只有这里同时拿得到 15m 与 4h 的原始 K 线** ——
+     * 快照里只带算好的指标，带不了 K 线（那会让快照大得多）。
+     * 而评分必须两个周期都要：只看小周期会被日内噪声带走，只看大周期会错过入场点。
+     */
+    const klinesOf = (tf: string): Kline[] => klineResults.find((r) => r.tf === tf)?.klines ?? [];
+    const score = scoreSymbol(klinesOf('15m'), klinesOf('4h'));
+
     return {
       symbol,
       sources,
@@ -179,6 +190,7 @@ export class MarketDataService {
       timeframes: computed,
       derivatives,
       quant: config.enableQuantData ? await this.buildQuant(symbol, primary) : null,
+      score,
     };
   }
 
