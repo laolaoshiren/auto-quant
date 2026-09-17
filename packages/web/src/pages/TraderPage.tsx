@@ -158,10 +158,6 @@ export function TraderPage() {
     intervalMs: 300_000,
   });
 
-  /** 这个机器人用的钱包名。取不到时回落到通用称呼，不显示空。 */
-  const accountLabel = exchangeAccountsQuery.data?.find(
-    (row) => row.id === trader?.exchangeAccountId,
-  )?.label;
   const equityQuery = usePolled((signal) => api.traderEquity(traderId, 2000, signal), {
     intervalMs: 20_000,
     enabled: Number.isFinite(traderId),
@@ -197,6 +193,17 @@ export function TraderPage() {
   const settleAsset = typeof rawAsset === 'string' && rawAsset.trim() ? rawAsset.trim() : DEFAULT_SETTLE_ASSET;
 
   const trader: TraderRow | null = tradersQuery.data?.find((row) => row.id === traderId) ?? null;
+  /**
+   * 这个机器人用的钱包名。取不到时回落到通用称呼，不显示空。
+   *
+   * ⚠️ **必须在 `trader` 之后**：这里引用了 `trader?.exchangeAccountId`，
+   * 而它下面的 `.find()` 是**同步执行**的 —— 放在 `trader` 声明之前会撞上
+   * 暂时性死区（`Cannot access before initialization`），整棵 React 树会卸载。
+   * 类型检查抓不到它，因为引用包在箭头函数里、看起来像是稍后才跑。
+   */
+  const accountLabel = exchangeAccountsQuery.data?.find(
+    (row) => row.id === trader?.exchangeAccountId,
+  )?.label;
   const status = liveStatus ?? trader?.status ?? 'stopped';
   /*
    * 决策流用它决定要不要显示"正在请求模型"这一条。
