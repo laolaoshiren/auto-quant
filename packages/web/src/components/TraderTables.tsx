@@ -565,7 +565,7 @@ export function PositionsTable({
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
               <th className="th">合约 / 方向</th>
-              <th className="th text-right">数量 / 价值</th>
+              <th className="th text-right">数量 / 名义 / 保证金</th>
               <th className="th text-right">开仓价格 / 标记价格</th>
               <th className="th">止盈 / 止损</th>
               <th className="th text-right">强平价</th>
@@ -603,6 +603,19 @@ export function PositionsTable({
                     {fmtQty(position.quantity)}
                     <div className="text-xs text-ink-faint">
                       名义 <span className="text-ink-lo">{fmtUsd(position.notional, 2)}</span>
+                    </div>
+                    {/*
+                      每个仓位占用多少保证金（本金）。
+
+                      操作员最常问的问题之一是「这笔压了多少钱进去」——
+                      而它此前只能从「名义 ÷ 杠杆」自己算。名义与保证金是两个不同的量
+                      （名义是敞口、保证金是真金），**摆在一起才看得懂杠杆在做什么**。
+                    */}
+                    <div
+                      className="text-xs text-ink-faint"
+                      title="该仓位占用的保证金（本金）= 名义价值 ÷ 杠杆。"
+                    >
+                      保证金 <span className="text-ink-lo">{fmtUsd(position.marginUsed, 2)}</span>
                     </div>
                   </td>
 
