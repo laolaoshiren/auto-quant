@@ -2545,7 +2545,7 @@ function breakevenConfig(): StrategyConfig {
   return { ...base, riskControl: { ...base.riskControl, breakevenTriggerPercent: 5 } };
 }
 
-test('浮盈达标时把止损移到开仓价 —— 而且**先挂新、再撤旧**', async () => {
+test('浮盈达标时把止损移到开仓价 —— 而且**先撤旧、再挂新**', async () => {
   /*
    * 这条钉的是保本止损里唯一需要证的不变量：**顺序**。
    *
@@ -2584,8 +2584,11 @@ test('浮盈达标时把止损移到开仓价 —— 而且**先挂新、再撤�
   assert.ok(placeIdx >= 0, `新止损应当挂在开仓价 68000，实际：${JSON.stringify(move)}`);
   assert.ok(cancelIdx >= 0, `旧止损应当被撤掉，实际：${JSON.stringify(move)}`);
   assert.ok(
-    placeIdx < cancelIdx,
-    `**必须先挂新再撤旧** —— 反过来会让仓位在新止损挂上之前处于无保护状态。实际顺序：${JSON.stringify(move)}`,
+    cancelIdx < placeIdx,
+    `**必须先撤旧、再挂新。** 我一开始写的是反过来（理由是"挂新失败时旧止损还在"），` +
+      `但那个推理漏了交易所的约束：**币安不允许同一仓位存在两张条件单**，` +
+      `所以先挂新必然吃 -4130 —— 实测订单记录里连刷了四条拒绝，` +
+      `保本止损从未生效过。实际顺序：${JSON.stringify(move)}`,
   );
 
   // 本地记录也要跟着走，否则下一轮会重复挂单。

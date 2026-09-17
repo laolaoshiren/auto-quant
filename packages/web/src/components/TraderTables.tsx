@@ -26,7 +26,7 @@ import {
   type MutableRefObject,
 } from 'react';
 import { LoaderCircle } from 'lucide-react';
-import type { OrderRecord, PositionView, TradeRecord } from '@aq/shared';
+import { exchangeErrorLabel, type OrderRecord, type PositionView, type TradeRecord } from '@aq/shared';
 import { orderPurposeLabel, orderStatusLabel, orderTypeLabel } from '@aq/shared';
 import { api } from '../lib/api';
 import { useEvents } from '../lib/store';
@@ -828,7 +828,7 @@ export function OrdersTable({
                     </span>
                   </td>
                   <td className="td max-w-[240px] truncate text-down" title={order.error ?? undefined}>
-                    {order.error ?? ''}
+                      {order.error ? exchangeErrorLabel(order.error) : ''}
                   </td>
                 </tr>
               );

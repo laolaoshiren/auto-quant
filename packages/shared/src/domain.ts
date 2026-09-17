@@ -398,6 +398,64 @@ export function orderPurposeLabel(purpose: string): string {
 }
 
 /**
+ * 交易所拒单错误的**中文人话**。
+ *
+ * ## 为什么需要它
+ *
+ * 订单记录里原本直接显示原始字符串：
+ *
+ *     Binance -4130: An open stop or take profit order with GTC...
+ *     Binance -4164: Order's notional must be no smaller than ...
+ *
+ * **那是给开发者看的，不是给操作员看的。** 操作员看到的是英文技术报错，
+ * 既不知道发生了什么、也不知道该不该动手 —— 而这一栏存在的唯一意义
+ * 就是回答那两个问题。
+ *
+ * ## 与其它标签表同一条纪律
+ *
+ * 与 `CLOSE_REASON_LABELS` / `ORDER_PURPOSE_LABELS` 一样：**存进库的永远是
+ * 交易所原码原话**（诊断要靠它），**翻译只发生在展示层**。
+ * 翻译表变化不影响历史数据。
+ *
+ * ## 只翻译**已知**的码
+ *
+ * 认不出的码原样显示并保留原始信息 —— `-4130` 这种是实测撞出来的，
+ * 而**猜一个不认识的错误码的含义比不翻译更糟**：它会让操作员
+ * 按错误的理解去处理。
+ */
+export const EXCHANGE_ERROR_LABELS: Record<string, string> = {
+  '-4130': '该仓位已有止损或止盈单，不能重复挂 —— 要改价格必须先撤掉原来那张。',
+  '-4164': '订单名义价值低于交易所要求的最小值（币安合约约 5 USDT）。',
+  '-4120': '这类订单必须走条件单接口，普通下单接口不接受。',
+  '-1111': '价格或数量的精度不符合该合约的要求（小数位过多）。',
+  '-2019': '保证金不足，无法开仓。',
+  '-2021': '触发价会立即成交，交易所拒绝受理。',
+  '-2010': '下单被交易所拒绝（通常是余额或参数问题）。',
+  '-1003': '请求过于频繁，被交易所限流。',
+};
+
+/** 从交易所错误串里取出错误码。`Binance -4130: ...` → `-4130`。 */
+export function exchangeErrorCode(raw: string): string | null {
+  const m = /(?:Binance\s+)?(-?\d{3,5})\s*:/.exec(raw);
+  return m ? (m[1] as string) : null;
+}
+
+/**
+ * 把交易所错误渲染成给操作员看的一句话。
+ *
+ * 认得出错误码时给出中文解释并**保留原始码**（排查要靠它）；
+ * 认不出时原样返回，不猜。
+ */
+export function exchangeErrorLabel(raw: string): string {
+  const code = exchangeErrorCode(raw);
+  if (!code) return raw;
+  const explained = EXCHANGE_ERROR_LABELS[code];
+  if (!explained) return raw;
+  return `${explained}（${code}）`;
+}
+
+
+/**
  * Chinese labels for exchange order status codes.
  *
  * These are Binance's own values (`NEW` / `FILLED` / …). They stay English in the
