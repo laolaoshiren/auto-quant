@@ -140,6 +140,13 @@ function permissiveConfig(): StrategyConfig {
 class FakeBroker {
   readonly placed: Array<Parameters<BinanceBroker['placeOrder']>[0]> = [];
   readonly cancelledSymbols: string[] = [];
+  /**
+   * 下单与撤单的**交错顺序**。
+   *
+   * `placed` 只记下单，看不出「先挂新还是先撤旧」—— 而那正是保本止损里
+   * 唯一需要证的不变量（**先挂新 ⇒ 任何一步失败都不会让仓位失去保护**）。
+   */
+  readonly opLog: string[] = [];
   readonly leverageCalls: Array<{ symbol: string; leverage: number }> = [];
   /** Mutable mark price: price drift between the decision and execution is D1. */
   markPrice = MARK_PRICE;
@@ -196,6 +203,7 @@ class FakeBroker {
 
   async placeOrder(request: Parameters<BinanceBroker['placeOrder']>[0]): Promise<PlacedOrder> {
     this.placed.push(request);
+    this.opLog.push(`place:${request.type}@${request.triggerPrice ?? request.price ?? '-'}`);
     const id = String(this.nextId++);
     const isConditional = request.type === 'STOP_MARKET' || request.type === 'TAKE_PROFIT_MARKET';
 
@@ -352,6 +360,17 @@ class FakeBroker {
 
   async waitForFill(order: PlacedOrder) {
     return order;
+  }
+
+  /**
+   * 单张撤单。
+   *
+   * **此前 FakeBroker 没有这个方法** —— 保本止损用它只撤旧止损、不动止盈，
+   * 而测试里没有对应实现。之前测试不炸，只是因为配置里阈值默认为 0、
+   * 那一行提前返回了：**没测的路径就是可能已经坏掉的路径。**
+   */
+  async cancelOrder(symbol: string, orderId: number) {
+    this.opLog.push(`cancel:${symbol}#${orderId}`);
   }
 
   async cancelAllOrders(symbol: string) {
