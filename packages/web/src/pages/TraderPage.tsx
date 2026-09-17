@@ -877,7 +877,18 @@ export function TraderPage() {
         `TraderTables` 里的 `usePolled`），推送在线时还会被 WebSocket 的快照覆盖，
         所以刷新路径没有丢，只是回到"它自己会更新"。
       */}
-      <div className="space-y-4">
+      {/*
+        表格区**不再无约束地长高**。
+
+        原来它没有任何高度约束，内容多高它就多高 —— 而上面那块是 `flex-1`，
+        **于是被挤到几乎看不见**。用户的描述很准确：「这一块会挡住页面大部分，
+        需要手动点当前持仓才能缩小」。
+
+        表格内部本来就有 `max-h-[34vh] overflow-y-auto`（见 `TraderTables`），
+        所以这里只需给外层一个上限，让整块（标签栏 + 表体 + 净额桥）
+        不超视口的四成半 —— **上面那两块（指标卡与图表）才是盯盘要看的东西。**
+      */}
+      <div className="max-h-[46vh] space-y-4 overflow-y-auto">
         <TraderTables
           traderId={traderId}
           tab={tableTab}
