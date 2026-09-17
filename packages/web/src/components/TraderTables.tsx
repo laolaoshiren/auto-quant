@@ -135,7 +135,7 @@ function mergeById<T extends { id: number }>(prev: T[], rows: T[]): T[] {
  *
  * ## `root` 是**表格自己的滚动框**，不是窗口
  *
- * 这两张表的滚动条在 `<div class="scroll-x max-h-[60vh] overflow-y-auto">` 里
+ * 这两张表的滚动条在 `<div class="scroll-x max-h-[34vh] overflow-y-auto">` 里
  * （见下面两张表的 JSX）：内容超过 60vh 之后由**它**滚，而不是页面滚
  * （`Layout.tsx` 的内容区虽然在 `xl` 以上也让主栏自己滚，但表格自己有 `max-h`，
  * 永远轮不到主栏去滚表格里的行）。用默认的视口当 `root` 会比错对象：
@@ -563,7 +563,7 @@ export function PositionsTable({
     <div>
       {/* max-h as well as the cap: 100 position rows is still taller than any
           screen, and the tab bar above must stay reachable. */}
-      <div className="scroll-x max-h-[60vh] overflow-y-auto">
+      <div className="scroll-x max-h-[34vh] overflow-y-auto">
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
@@ -790,11 +790,11 @@ export function OrdersTable({
         12 columns: this is the table that most needs its own horizontal
         scroller rather than a page-wide one.
 
-        `max-h-[60vh] overflow-y-auto` 同时是**分页观察器的 root**（`paging.scrollerRef`）：
+        `max-h-[34vh] overflow-y-auto` 同时是**分页观察器的 root**（`paging.scrollerRef`）：
         行高超过 60vh 之后是**这个盒子**在滚，不是页面。观察错了对象，
         哨兵会在"没滚到底"时就被判为可见，于是一口气把整段历史拉进来。
       */}
-      <div ref={paging.scrollerRef} className="scroll-x max-h-[60vh] overflow-y-auto">
+      <div ref={paging.scrollerRef} className="scroll-x max-h-[34vh] overflow-y-auto">
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
@@ -1002,7 +1002,7 @@ export function TradesTable({
         </span>
       </div>
       {/* 与订单表同一个滚动框：它既是横向滚动盒，也是分页观察器的 root（见 `useTablePaging`）。 */}
-      <div ref={paging.scrollerRef} className="scroll-x max-h-[60vh] overflow-y-auto">
+      <div ref={paging.scrollerRef} className="scroll-x max-h-[34vh] overflow-y-auto">
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
