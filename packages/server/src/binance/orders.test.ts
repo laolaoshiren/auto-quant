@@ -554,3 +554,80 @@ test('only USDT-margined perpetuals enter the registry', () => {
   assert.equal(registry.get('BTCUSDT_250627'), undefined);
   assert.equal(registry.get('BTCUSD_PERP'), undefined);
 });
+
+/* -------------------------------------------------------------------------- */
+/*  取整之后的名义价值 —— -4164 的那个坑                                        */
+/* -------------------------------------------------------------------------- */
+
+test('取整后名义跌破交易所下限时，本地拒绝并说清三个数字', async () => {
+  /*
+   * 实测撞到过：模型提议名义 6 USDT、风控校验「6 ≥ 5」通过，
+   * 而按步长向下取整之后真正发出去的名义已经低于 5 —— 交易所拒单：
+   * `-4164 Order's notional must be no smaller than 5`。
+   *
+   * **风控只保证方向与量级，不保证精度** —— 同样的道理在类注释里
+   * 已经为触发价写过一次。这个用例把它钉在名义价值上。
+   *
+   * 为什么本地判定比让交易所拒绝更重要：`-4164` 看不出是取整造成的，
+   * 也看不出差多少。这里把实际名义、下限、步长一次说清。
+   */
+  const registry = SymbolRegistry.fromExchangeInfo(
+    exchangeInfo({ stepSize: '1', minNotional: '50' }),
+  );
+  const { rest, calls } = fakeRest({ orderId: 1 });
+  const b = new BinanceBroker(rest, fakeMarket, registry);
+
+  // 数量 0.7 → 按步长 1 向下取整为 0……那就先撞到"取整为 0"。
+  // 改用数量 1.7 → 取整为 1，价格 40 → 名义 40 < 50。
+  await assert.rejects(
+    () => b.placeOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 1.7, price: 40 }),
+    (err: Error) => {
+      assert.match(err.message, /名义价值不足/, '要说清是名义价值的问题');
+      assert.match(err.message, /40/, '要有实际名义');
+      assert.match(err.message, /50/, '要有交易所下限');
+      return true;
+    },
+  );
+  assert.equal(calls.length, 0, '本地就该拒绝，不能把注定失败的订单发出去');
+});
+
+test('取整后名义达标时正常放行', async () => {
+  const registry = SymbolRegistry.fromExchangeInfo(
+    exchangeInfo({ stepSize: '1', minNotional: '50' }),
+  );
+  const { rest, calls } = fakeRest({ orderId: 1 });
+  const b = new BinanceBroker(rest, fakeMarket, registry);
+
+  // 数量 2 → 取整仍为 2，价格 40 → 名义 80 ≥ 50
+  await b.placeOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 2, price: 40 });
+  assert.equal(calls.length, 1, '达标的订单必须能发出去');
+});
+
+test('closePosition 的单一律豁免 —— 拒掉止损单会让仓位失去保护', async () => {
+  /*
+   * ⚠️ 这条比上面两条更要紧，方向相反。
+   *
+   * 币安那句「unless you choose reduce only」就是这个意思：`closePosition: true`
+   * 的条件单只用于平掉既有仓位，**不受名义下限约束**。
+   *
+   * 我们的止损/止盈正是这么挂的。如果这个检查把它们一起拒掉，
+   * **仓位会失去保护** —— 那是 §2.6 说的最糟状态，
+   * 比「名义太小下不出去」严重得多。
+   */
+  const registry = SymbolRegistry.fromExchangeInfo(
+    exchangeInfo({ stepSize: '1', minNotional: '50', tickSize: '0.10' }),
+  );
+  const { rest, calls } = fakeRest({ orderId: 1 });
+  const b = new BinanceBroker(rest, fakeMarket, registry);
+
+  // 名义 1 × 40 = 40 < 50，但因为是 closePosition，必须放行
+  await b.placeOrder({
+    symbol: 'BTCUSDT',
+    side: 'SELL',
+    type: 'STOP_MARKET',
+    quantity: 1,
+    triggerPrice: 40,
+    closePosition: true,
+  });
+  assert.equal(calls.length, 1, 'closePosition 的止损单不得被名义检查拦下');
+});
