@@ -60,14 +60,23 @@ export function NewTraderModal({
     let alive = true;
     setLoadError(null);
     setBaselineWarning(null);
-    void Promise.all([api.exchangeAccounts(), api.aiModels(), api.strategies()])
-      .then(([accountRows, modelRows, strategyRows]) => {
+    void Promise.all([api.exchangeAccounts(), api.aiModels(), api.strategies(), api.catalog()])
+      .then(([accountRows, modelRows, strategyRows, catalog]) => {
         if (!alive) return;
         setAccounts(accountRows);
         setModels(modelRows);
         setStrategyList(strategyRows.map((s) => ({ id: s.id, name: s.name })));
         if (accountRows[0]) setExchangeAccountId(accountRows[0].id);
-        if (modelRows[0]) setAiModelId(modelRows[0].id);
+        /*
+         * 用服务端指定的默认模型，而不是"列表第一个"。
+         *
+         * 列表按 id 排，所以一个**余额不足或已失效**的模型只要 id 最小，
+         * 就会成为每个新机器人的默认 —— 每次创建都要手动改回来。
+         * 取不到时回落到第一个，与以前的行为一致。
+         */
+        const preferred = catalog.defaultAiModelId;
+        if (preferred && modelRows.some((m) => m.id === preferred)) setAiModelId(preferred);
+        else if (modelRows[0]) setAiModelId(modelRows[0].id);
         if (strategyRows[0]) setStrategyId(strategyRows[0].id);
       })
       .catch((err: Error) => alive && setLoadError(err.message));
