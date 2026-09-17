@@ -146,6 +146,22 @@ export function TraderPage() {
   });
   const modelsQuery = usePolled((signal) => api.aiModels(signal), { intervalMs: 60_000 });
   const strategiesQuery = usePolled((signal) => api.strategies(signal), { intervalMs: 60_000 });
+  /*
+   * 交易所账户列表 —— 只为了页头能显示**这个机器人用的是哪个钱包**。
+   *
+   * 原来页头显示的是环境标签（「币安 USDT 本位合约（实盘）」），
+   * 那说的是**平台**，不是**账户**。同一个平台下可能配了多个钱包，
+   * 而"这台机器人花的是哪一笔钱"是操作员最需要一眼确认的事 ——
+   * 尤其当多个机器人共用一个账户时。
+   */
+  const exchangeAccountsQuery = usePolled((signal) => api.exchangeAccounts(signal), {
+    intervalMs: 300_000,
+  });
+
+  /** 这个机器人用的钱包名。取不到时回落到通用称呼，不显示空。 */
+  const accountLabel = exchangeAccountsQuery.data?.find(
+    (row) => row.id === trader?.exchangeAccountId,
+  )?.label;
   const equityQuery = usePolled((signal) => api.traderEquity(traderId, 2000, signal), {
     intervalMs: 20_000,
     enabled: Number.isFinite(traderId),
@@ -475,8 +491,17 @@ export function TraderPage() {
 
       <MetricCard>
         <Metric
-          label="持仓 / 挂单"
-          value={`${fmtInt(openPositionCount)} / ${fmtInt(openOrders.length)}`}
+          label="持仓"
+          /*
+           * 只显示持仓数，**不再显示挂单数**。
+           *
+           * 原来写「持仓 / 挂单」，而下面「当前委托」标签本来就报同一个数 ——
+           * 同一屏上同一个概念出现两次，一旦两处的判定或数据源有一点差别，
+           * 用户看到的就是两个互相矛盾的数（实测撞到过：挂单 4 与当前委托 2）。
+           *
+           * **多余的信息不只占地方，它会主动制造错误印象。**
+           */
+          value={fmtInt(openPositionCount)}
           size="lg"
           sub={
             <>
@@ -607,8 +632,24 @@ export function TraderPage() {
           </h1>
           <Badge tone="muted">#{trader.id}</Badge>
           <TraderStatusBadge status={status} live={trader.isRunning} />
-          <Badge tone="muted" title="该机器人所在的交易环境，由服务端配置决定。">
-            {system?.environmentLabel ?? '—'}
+          {/*
+            显示**这个机器人用的是哪个钱包**，而不是交易环境标签。
+            
+            原来这里是「币安 USDT 本位合约（实盘）」—— 那说的是**平台**，
+            不是**账户**。同一个平台下可能配了多个钱包，而
+            「这台机器人花的是哪一笔钱」才是操作员需要一眼确认的事，
+            尤其当几个机器人共用同一个账户时（那种情况下很容易看错）。
+            
+            环境（实盘/模拟）仍然有价值，但它降级到 title 里 ——
+            它不随机器人变化，而钱包名会。
+          */}
+          <Badge
+            tone="muted"
+            title={
+              `该机器人使用的交易所钱包。交易环境：${system?.environmentLabel ?? '未知'}（由服务端配置决定）。`
+            }
+          >
+            {accountLabel ?? `${settleAsset} 账户`}
           </Badge>
           {trader.consecutiveFailures > 0 && (
             <Badge tone="warn" title="连续的模型或执行失败次数；超过熔断阈值会进入安全模式。">
@@ -871,49 +912,37 @@ export function TraderPage() {
  * 收起态只留一个按钮 —— 它不占高度，也不会因为"没东西"而让页头看起来像坏了。
  */
 function ConfigSummary({ trader, asset }: { trader: TraderRow; asset: string }) {
-  const [open, setOpen] = useState(false);
-
+  /*
+   * **直接摊平，不再做折叠。**
+   *
+   * 原来它默认收起、点一下才展开。但收起时按钮上已经显示「周期 #N · 每 3m」——
+   * 也就是说**收起状态本身就占一行**，展开再占一行。**两行换一行信息，纯亏。**
+   *
+   * 这一块总共只有一行内容。摊平之后省掉一次点击，也省掉那一行按钮，
+   * 上下空间反而更省。
+   */
   return (
-    <div className="-mt-1">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="inline-flex items-center gap-1 text-xs text-ink-lo transition hover:text-ink-mid"
-      >
-        {open ? (
-          <ChevronUp aria-hidden className="h-3.5 w-3.5" />
-        ) : (
-          <ChevronDown aria-hidden className="h-3.5 w-3.5" />
-        )}
-        配置摘要
-        <span className="num text-ink-faint">周期 #{fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m</span>
-      </button>
-
-      {open && (
-        <div className="num mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
-          <span title="该机器人已完成的决策周期数（跨重启连续编号）。">
-            周期编号 <span className="text-ink-mid">#{fmtInt(trader.lastCycleNumber)}</span>
-          </span>
-          <span>
-            间隔 <span className="text-ink-mid">每 {trader.cycleIntervalMinutes} 分钟</span>
-          </span>
-          <span>
-            最近周期 <span className="text-ink-mid">{timeAgo(trader.lastCycleAt)}</span>
-          </span>
-          {/*
-            起始权益曾挂在指标行的「归属权益」下面。指标行改成 4 张卡之后，那一行
-            放不下两个数（`Metric` 的 sub 会截断），而它本身是**创建时读到的钱包余额**、
-            之后不再变化 —— 属于配置，不属于盯盘指标，所以收在这里。
-          */}
-          <span title="创建该机器人时从交易所读取的钱包余额，是总收益率与盈亏的计算基准。">
-            起始权益 <span className="text-ink-mid">{fmtAsset(trader.initialEquity, asset, 4)}</span>
-          </span>
-          <span>
-            创建于 <span className="text-ink-mid">{fmtDateTime(trader.createdAt)}</span>
-          </span>
-        </div>
-      )}
+    <div className="num -mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
+      <span title="该机器人已完成的决策周期数（跨重启连续编号）。">
+        周期编号 <span className="text-ink-mid">#{fmtInt(trader.lastCycleNumber)}</span>
+      </span>
+      <span>
+        间隔 <span className="text-ink-mid">每 {trader.cycleIntervalMinutes} 分钟</span>
+      </span>
+      <span>
+        最近周期 <span className="text-ink-mid">{timeAgo(trader.lastCycleAt)}</span>
+      </span>
+      {/*
+        起始权益曾挂在指标行的「归属权益」下面。指标行改成 4 张卡之后，那一行
+        放不下两个数（`Metric` 的 sub 会截断），而它本身是**创建时读到的钱包余额**、
+        之后不再变化 —— 属于配置，不属于盯盘指标，所以留在这里。
+      */}
+      <span title="创建该机器人时从交易所读取的钱包余额，是总收益率与盈亏的计算基准。">
+        起始权益 <span className="text-ink-mid">{fmtAsset(trader.initialEquity, asset, 4)}</span>
+      </span>
+      <span>
+        创建于 <span className="text-ink-mid">{fmtDateTime(trader.createdAt)}</span>
+      </span>
     </div>
   );
 }
