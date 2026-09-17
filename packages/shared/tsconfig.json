@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    /*
+     * 这个包里有测试文件（`src/**\/*.test.ts`），它们用 `node:test` 与 `node:assert` ——
+     * 所以需要 node 的类型。
+     *
+     * ⚠️ **这个 tsconfig 的存在本身就是必要的。**
+     *
+     * 在此之前 `packages/shared` 没有自己的 tsconfig，于是**谁引用它、谁就按自己的配置
+     * 去编它的文件** —— `@aq/web`（浏览器包，没有 `@types/node`）因此报出
+     * 「找不到模块 node:test」，而 server 单独 typecheck 却是干净的。
+     *
+     * 一个没有自己 tsconfig 的包，它的类型检查结果取决于**谁在引用它**。
+     */
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}
