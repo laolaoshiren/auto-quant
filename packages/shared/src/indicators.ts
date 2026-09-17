@@ -98,6 +98,22 @@ export interface MarketSnapshot {
   timeframes: TimeframeIndicators[];
   derivatives: DerivativeContext;
   quant: QuantContext | null;
+  /**
+   * 候选评分（0–100）与各分量。
+   *
+   * 在**建快照时**算好 —— 那是唯一同时拿得到 15m 与 4h K 线的地方，
+   * 而评分必须两个周期都要：只看小周期会被日内噪声带走，只看大周期会错过入场点。
+   *
+   * 用途是**在构建提示词之前筛掉不值得看的标的**。实测单次决策的提示词是
+   * 69,678 字符 / 48,005 tokens，而其中相当一部分标的是陪跑的。
+   *
+   * 可选：不经过评分路径的调用点没有它，那种情况下门槛判据按**放行**处理
+   * （宁可多看，也不要把可能的机会静默滤掉）。
+   */
+  score?: {
+    total: number;
+    parts: { trend: number; breakoutVolume: number; consolidation: number; volatilityPenalty: number };
+  };
 }
 
 /** One row of the cross-sectional open-interest ranking table. */

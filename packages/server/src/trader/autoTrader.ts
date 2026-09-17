@@ -956,11 +956,39 @@ export class AutoTrader {
     const held = localPositions.map((p) => p.symbol);
     const selection = await selectCandidates(config, this.deps.marketData, { mustInclude: held });
 
-    const snapshots = await this.deps.marketData.buildSnapshots(
+    let snapshots = await this.deps.marketData.buildSnapshots(
       selection.symbols,
       config.indicators,
       selection.sourcesBySymbol,
     );
+
+    /*
+     * 候选评分门槛 —— 在**构建提示词之前**筛掉不值得看的标的。
+     *
+     * 实测单次决策的提示词是 69,678 字符 / 48,005 tokens，而其中相当一部分是陪跑的。
+     * 门槛为 0 时这条完全不动（既有策略行为不变）。
+     *
+     * ⚠️ 没有分数的快照**放行**，不是滤掉：
+     * 那种情况说明评分路径没跑到（比如调用点不同），
+     * 而**宁可多看一个，也不要把可能的机会静默丢掉** —— 后者是看不见的损失。
+     *
+     * 被滤掉的写进进度与决策记录，**不是静默丢弃** ——
+     * 门槛太严会让机器人不交易，而那正是这个系统里最难发现的一类失效。
+     */
+    const gate = config.coinSource.minScore;
+    let gateDropped: string[] = [];
+    if (gate > 0) {
+      const kept = snapshots.filter((s) => (s.score ? s.score.total >= gate : true));
+      gateDropped = snapshots.filter((s) => s.score && s.score.total < gate).map((s) => s.symbol);
+      if (gateDropped.length > 0) {
+        this.emitOnChange(
+          `score-gate:${gate}`,
+          'info',
+          `评分门槛 ${gate}：滤掉 ${gateDropped.length} 个标的（${gateDropped.slice(0, 6).join('、')}${gateDropped.length > 6 ? ' 等' : ''}），保留 ${kept.length} 个。`,
+        );
+      }
+      snapshots = kept;
+    }
 
     progress.candidateSymbols = snapshots.map((s) => s.symbol);
 
