@@ -271,3 +271,35 @@ test('复盘输出缺 lesson 时不算成功', async () => {
   assert.equal(r.ok, false);
   assert.match(r.error ?? '', /lesson/);
 });
+
+test('调参落实验记录时，tool_calls 必须**已经带上推理依据**', async () => {
+  /*
+   * 这条钉的是一个实测缺陷：`tool_calls_json` 一直是 `[]`。
+   *
+   * 原因是我以为"闭包返回引用就能拿到当时的步骤"，而**赋值发生在循环结束之后** ——
+   * 所以 `set_params` 落记录的那一刻它还是空数组。
+   * 结果是**每条调参实验都丢了它的推理依据**，而且完全看不出来。
+   *
+   * 修法：让循环每步实时回调。这条用例走完整的 runStrategyReview，
+   * 断言"先查了绩效、再调参"时，实验记录里能看到那次查询。
+   */
+  const { ports, experiments } = makePorts();
+  const model = scripted([
+    JSON.stringify({ thought: '先看绩效', tool: 'get_performance', args: { window: '24h' } }),
+    JSON.stringify({ thought: '据此降杠杆', tool: 'set_params', args: { patch: { riskControl: { btcEthMaxLeverage: 2 } }, reason: '连亏' } }),
+    JSON.stringify({ tool: 'finish', args: { summary: '降了杠杆' } }),
+  ]);
+
+  await runStrategyReview({
+    ports,
+    model,
+    force: true,
+    policy: { hourlyBudget: 40, cooldownMinutes: 0, maxIdleMinutes: 60, losingStreakThreshold: 3, equityDriftThresholdPercent: 2, rejectionThreshold: 5 },
+  });
+
+  assert.equal(experiments.length, 1, '调参应当留下一条实验记录');
+  const exp = experiments[0] as { toolCalls: unknown };
+  const text = JSON.stringify(exp.toolCalls);
+  assert.match(text, /get_performance/, '实验记录里必须看得到"它先查了什么" —— 那是它的推理依据');
+  assert.ok(text.length > 10, `tool_calls 不该是空的，实际是 ${text}`);
+});

@@ -164,6 +164,14 @@ export interface LoopInput {
   maxSteps?: number;
   /** 这个标的历史失败（只给风控官）。 */
   priorFailures?: readonly AgentMemoryRow[];
+  /**
+   * 每执行完一步就回调一次。
+   *
+   * 存在的理由很具体：`set_params` 会在**循环中途**写一条实验记录，
+   * 而那条记录要带上"到目前为止调过哪些工具"。等到循环结束再取就晚了 ——
+   * 实测得到的是空数组，于是每一次调参的实验记录里都缺了它的推理依据。
+   */
+  onStep?: (step: LoopStep) => void;
 }
 
 const DEFAULT_MAX_STEPS = 8;
@@ -240,13 +248,16 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
     }
 
     const outcome = dispatchTool(action.tool, action.args, input.deps);
-    steps.push({
+    const record: LoopStep = {
       step,
       thought: action.thought,
       tool: action.tool,
       args: action.args,
       result: outcome.result,
-    });
+    };
+    steps.push(record);
+    // 立刻通知调用方 —— 它可能在下一步就用到（见 `onStep` 的说明）。
+    input.onStep?.(record);
 
     if (outcome.finished) {
       return {

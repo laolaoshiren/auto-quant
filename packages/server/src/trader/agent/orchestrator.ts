@@ -162,10 +162,16 @@ export async function runStrategyReview(input: {
   const factsText = `唤醒原因：${decision.why}\n当前参数：${JSON.stringify(input.ports.readConfig())}`;
 
   /*
-   * 工具调用的完整序列要等循环结束才知道，但它得进实验记录。
-   * 用一个引用盒子：`set_params` 发生时把当前已发生的步骤快照进去。
+   * 工具调用的序列要进实验记录，而 `set_params` 会在**循环中途**写那条记录。
+   *
+   * ⚠️ 这里原本写的是"用一个引用盒子，`set_params` 发生时把当前步骤快照进去"，
+   * **但那是错的**：闭包返回的是 `trace.steps` 的引用，而它在那一刻还是空数组
+   * （赋值发生在循环结束之后）。实测结果就是每条调参实验的 `tool_calls_json`
+   * 都是 `[]` —— **推理依据整段丢失，而且看不出来。**
+   *
+   * 改成让循环**每步实时回调**进来。
    */
-  const trace: { steps: unknown } = { steps: [] };
+  const trace: { steps: unknown[] } = { steps: [] };
   const deps = buildToolDeps(ports, { trigger: decision.trigger, observed: factsText, steps: () => trace.steps });
 
   /*
@@ -186,8 +192,9 @@ export async function runStrategyReview(input: {
     deps,
     model: input.model,
     maxSteps: chosen.intensity === 'panel' ? 12 : 8,
+    // 每步实时进来 —— 这样 `set_params` 落实验记录时它已经有内容了。
+    onStep: (step) => trace.steps.push(step),
   });
-  trace.steps = loop.steps;
 
   // 5. 落运行轨迹
   ports.recordRun({ kind: 'strategy', trigger: decision.trigger, intensity: chosen.intensity, result: loop });
