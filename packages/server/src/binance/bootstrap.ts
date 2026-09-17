@@ -235,27 +235,23 @@ export async function preflight(
       );
 
       /*
-       * Withdrawal permission is reported as a **warning**, never a failure.
+       * 提现权限：**不再在每次启动时提示。**
        *
-       * `canWithdraw` is the permission *flag*, not effective capability, and on
-       * a **sub-account** it reads `true` while the master account still controls
-       * whether anything can actually be withdrawn — and to which whitelisted
-       * address. Reporting that as a red failure is a false alarm, and a panel
-       * that cries wolf is a panel operators learn to ignore.
+       * 这里原本推一条 `提现权限（请确认）` 的警告。**那是错的**，
+       * 而且是这段代码自己的注释早就指出过的那种错：
        *
-       * The check is therefore phrased as something to confirm, not something
-       * that is wrong. On a genuine main-account key it still surfaces the advice.
+       *   · `canWithdraw` 是权限**标志位**，不是实际能力。在**子账户**上它读作
+       *     `true`，而能不能真的提现、提到哪个白名单地址，由主账户决定。
+       *   · 这个代码**无法从 API 可靠区分**主账户与子账户密钥 —— 所以那条提示
+       *     一旦出现就永远无法消除，操作员只能反复看到它。
+       *
+       * **一个每次启动都出现、又永远无法解决的提示，就是"狼来了"** ——
+       * 而一个被学会忽略的面板，会连带把真正要紧的警告一起淹没。
+       *
+       * 那条建议本身是对的（交易机器人不需要提现权限），但它属于
+       * **配置交易所账户时的一次性说明**，不属于每次启动的运行时预检。
        */
-      if (permissions.canWithdraw) {
-        checks.push(
-          check(
-            '提现权限（请确认）',
-            'warn',
-            '交易所返回该 Key 的提现标志位为已开启。若这是**子账户**密钥，实际提现仍由主账户控制，通常可以忽略；' +
-              '若这是**主账户**密钥，建议关闭提现权限 —— 交易机器人不需要它，开启只会扩大密钥泄露时的损失。',
-          ),
-        );
-      } else {
+      if (!permissions.canWithdraw) {
         checks.push(check('提现权限', 'ok', '该 Key 未开启提现权限。'));
       }
     } else {
