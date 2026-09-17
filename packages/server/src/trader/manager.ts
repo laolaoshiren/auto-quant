@@ -8,6 +8,7 @@ import { MarketDataService } from '../market/service.js';
 import { LlmClient } from '../llm/client.js';
 import { aiModels, equity, exchanges, runtimeLogs, strategies, traders } from '../store/repositories.js';
 import { eventBus } from '../events.js';
+import { checkConfigReachability } from '../risk/reachability.js';
 import { AgentRuntime } from './agent/runtime.js';
 import { AutoTrader, type DecisionModel } from './autoTrader.js';
 
@@ -383,6 +384,60 @@ export class TraderManager {
             timestamp: new Date().toISOString(),
           });
         }
+      }
+
+      /*
+       * --- Config reachability ----------------------------------------------
+       *
+       * 这个配置在这个账户规模下**究竟能不能开出仓来**。
+       *
+       * ⚠️ 这条检查是实测逼出来的：机器人空转了 60 多个周期一笔单没开，
+       * 而每轮周期都"成功"、日志干净、状态显示 running ——
+       * **唯一的现象是"什么都不发生"**。
+       *
+       * 根因是两条互相矛盾的配置，数字上完全不显眼：
+       * 山寨币名义上限 4.55 USDT < 币安最小名义 5 USDT，任何仓位都不成立。
+       *
+       * 放进预检是因为**这是操作员一定会看到的地方** ——
+       * 而"参数不可达"与"市场不好"在控制台上长得一模一样：
+       * 前者是配置错误，后者才是策略判断。混为一谈的代价是几十轮空转。
+       *
+       * ⚠️ **位置很要紧**：必须在读到真实权益之后。放在前面的话它会拿
+       * `initialEquity`（可能是 0）去算，于是**这个检查本身会给出错误结论** ——
+       * 一个用来防错的东西自己出错，比没有它更糟。
+       *
+       * **不阻断启动**：某一类标的不可达时另一类可能仍然可交易
+       * （实测里 BTC/ETH 可以、山寨币不行）。阻断会让一个还能工作的机器人启动不了。
+       */
+      const reachEquity = await connection.broker
+        .getAccountState()
+        .then((s) => s.walletBalance)
+        .catch(() => trader.initialEquity);
+      const reach = checkConfigReachability({
+        equity: reachEquity,
+        maxMarginUsagePercent: config.riskControl.maxMarginUsage,
+        ratios: {
+          major: config.riskControl.btcEthMaxPositionValueRatio,
+          altcoin: config.riskControl.altcoinMaxPositionValueRatio,
+        },
+        minPositionSize: config.riskControl.minPositionSize,
+        defaultLeverage: config.riskControl.defaultLeverage,
+        maxLeverage: {
+          major: config.riskControl.btcEthMaxLeverage,
+          altcoin: config.riskControl.altcoinMaxLeverage,
+        },
+      });
+      for (const finding of reach.findings) {
+        checks.push({
+          name: `仓位可达性（${finding.scope === 'major' ? 'BTC/ETH' : '山寨币'}）`,
+          severity: finding.reachable ? 'ok' : 'warn',
+          ok: finding.reachable,
+          detail: finding.detail,
+          blocking: false,
+        });
+      }
+      if (!reach.ok) {
+        log.warn(`机器人 #${traderId} 的配置可能无法开出任何仓位：${reach.summary}`);
       }
 
       const model: DecisionModel = {
