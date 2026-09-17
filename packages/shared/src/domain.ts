@@ -130,6 +130,9 @@ export interface DiscoveredModel {
   discovered: boolean;
 }
 
+/** 机器人的运行模式。**这是机器人的属性，不是一个策略** —— 见 `M7_TRADER_MODE` 的注释。 */
+export type TraderMode = 'strategy' | 'ai_managed';
+
 export type TraderStatus = 'running' | 'stopped' | 'starting' | 'error' | 'safe_mode';
 
 export interface Trader {
@@ -161,6 +164,17 @@ export interface Trader {
    * 为 null 时按 `strategies.config` 跑，行为与以前完全一致。
    */
   agentConfigJson: string | null;
+  /**
+   * 运行模式。
+   *
+   * `'strategy'` —— 按 `strategies.config` 的固定参数跑（既有机器人的行为）。
+   * `'ai_managed'` —— 由 AI 智能体托管：参数由它自己设定并持续调整，
+   *   存在 `agentConfigJson`（按机器人隔离），策略参数被忽略。
+   *
+   * **这是一个机器人的属性，不是一个策略。** 策略是"一组固定参数"，
+   * 而 AI 模式的意思是"没有固定参数" —— 后者不能是前者的一种。
+   */
+  mode: TraderMode;
   createdAt: string;
   updatedAt: string;
 }

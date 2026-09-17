@@ -12,6 +12,7 @@ import type {
   StrategyRecord,
   TradeRecord,
   Trader,
+  TraderMode,
   TraderStats,
   TraderStatus,
   User,
@@ -481,6 +482,7 @@ interface TraderRow {
   last_error: string | null;
   consecutive_failures: number;
   agent_config_json: string | null;
+  mode: string;
   created_at: string;
   updated_at: string;
 }
@@ -500,6 +502,7 @@ function toTrader(row: TraderRow): Trader {
     lastError: row.last_error,
     consecutiveFailures: row.consecutive_failures,
     agentConfigJson: row.agent_config_json,
+    mode: row.mode as TraderMode,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -522,16 +525,26 @@ export const traders = {
     strategyId: number;
     cycleIntervalMinutes: number;
     initialEquity: number;
+    /**
+     * 运行模式。默认 `'strategy'`。
+     *
+     * ⚠️ 这个字段**靠列上的 `DEFAULT 'strategy'` 兜底也能跑** ——
+     * 既有调用点不传就落到默认值，所以"这里漏了它"不会有任何症状：
+     * 类型检查过、测试全绿、机器人照常创建，只是**建出来的永远不会是 AI 模式**。
+     * 只能靠读这行代码发现。
+     */
+    mode?: TraderMode;
   }): Trader {
     const ts = now();
     const { lastInsertRowid } = getDb().run(
-      `INSERT INTO traders (name, exchange_account_id, ai_model_id, strategy_id, cycle_interval_minutes, initial_equity, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'stopped', ?, ?)`,
+      `INSERT INTO traders (name, exchange_account_id, ai_model_id, strategy_id, cycle_interval_minutes, mode, initial_equity, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'stopped', ?, ?)`,
       input.name,
       input.exchangeAccountId,
       input.aiModelId,
       input.strategyId,
       input.cycleIntervalMinutes,
+      input.mode ?? 'strategy',
       input.initialEquity,
       ts,
       ts,
