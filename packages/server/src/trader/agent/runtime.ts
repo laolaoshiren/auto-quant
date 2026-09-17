@@ -28,6 +28,7 @@ import type { ReviewTradeFacts } from '../autoTrader.js';
 
 import { createLogger } from '../../logger.js';
 import { agentMemory } from '../../store/agentStore.js';
+import { decisions as decisionStore } from '../../store/repositories.js';
 import { traders } from '../../store/repositories.js';
 import type { LoopModel } from './loop.js';
 import { markStrategyReview, markWoken, makeAgentPorts, readPause } from './ports.js';
@@ -193,6 +194,50 @@ export class AgentRuntime {
         const feeShare = input.grossPnl !== 0 ? (input.fee / Math.abs(input.grossPnl)) * 100 : null;
         const priceMove = ((input.exitPrice - input.entryPrice) / input.entryPrice) * 100;
 
+        /*
+         * 回查**入场那一轮的决策记录**，取出这笔的入场理由。
+         *
+         * 实测复盘员明确指出「缺少入场逻辑、周期与当时的趋势/关键位背景，
+         * 无法判定这次止损是设得过紧被正常波动打掉，还是入场方向本就错误」——
+         * **而那个理由就在 `decisions[].reasoning` 里，只是没被传过去。**
+         *
+         * 做法：在开仓时刻**之前**的决策记录里，找最近一条包含这个标的、
+         * 且动作是开仓的那一轮。**找不到就明说找不到，不用别的轮次凑** ——
+         * 那会让复盘员基于错误的入场理由下结论，比没有理由更糟。
+         */
+        const entry = (() => {
+          try {
+            const openedMs = new Date(input.openedAt).getTime();
+            if (!Number.isFinite(openedMs)) return { kind: 'missing' as const };
+            const candidates = decisionStore
+              .list(this.deps.traderId, 200)
+              .filter((d) => {
+                const t = new Date(d.timestamp).getTime();
+                return Number.isFinite(t) && t <= openedMs + 1000;
+              })
+              .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+            for (const rec of candidates) {
+              const hit = rec.decisions.find(
+                (dec) => dec.symbol === input.symbol && /^(open_long|open_short)$/.test(dec.action),
+              );
+              if (hit) {
+                return {
+                  kind: 'found' as const,
+                  cycle: rec.cycleNumber,
+                  action: hit.action,
+                  confidence: hit.confidence,
+                  reasoning: hit.reasoning,
+                  adjustments: hit.adjustments,
+                };
+              }
+            }
+            return { kind: 'missing' as const };
+          } catch {
+            return { kind: 'failed' as const };
+          }
+        })();
+
         const lines = [
           `标的：${input.symbol}`,
           `方向与价位：开仓 ${input.entryPrice} → 平仓 ${input.exitPrice}（价格变动 ${priceMove.toFixed(3)}%）`,
@@ -201,19 +246,31 @@ export class AgentRuntime {
             ? '成本占比：毛盈亏为 0，无法计算占比。'
             : `成本占比：手续费占毛盈亏绝对值的 ${feeShare.toFixed(1)}%` +
               (feeShare >= 50 ? ' —— **成本吃掉了大部分毛收益**，这笔交易在扣费前就已经很薄。' : ''),
-          `持仓时长：${input.holdMinutes.toFixed(1)} 分钟`,
+          `持仓时长：${input.holdMinutes.toFixed(1)} 分钟（${input.openedAt} 开仓）`,
           `平仓原因：${input.closeReason}`,
           /*
            * 浮盈轨迹这一行刻意写成"峰值 vs 最终"，因为复盘员要判断的正是
            * "曾经赚到多少、又还回去多少"。
            */
           `浮盈轨迹：持仓期间最大浮盈 ${input.peakPnlPercent.toFixed(3)}%` +
-            (input.peakPnlPercent > 0
-              ? `，最终净 ${(input.netPnl / (input.entryPrice * 0.01)).toFixed(3)}%（按价格口径近似）`
-              : '') +
             (input.peakPnlPercent > 0 && input.netPnl <= 0
               ? ' —— **曾经浮盈但最终没赚到，这是"止盈/移动止损是否设晚"的直接证据。**'
               : ''),
+          /*
+           * 入场理由是复盘员区分「止损太紧」与「方向就错」的唯一依据，
+           * 而这两种结论对应的改法完全相反。**三种状态要分清**：
+           * 查到了 / 查不到（记录已轮转）/ 查出错（不是"当时没有理由"）。
+           */
+          entry.kind === 'found'
+            ? `入场理由（第 #${entry.cycle} 轮，动作 ${entry.action}，置信度 ${entry.confidence}）：` +
+              `${entry.reasoning}` +
+              (entry.adjustments.length > 0
+                ? `\n  风控当时记下的调整：${entry.adjustments.join('；')}`
+                : '')
+            : entry.kind === 'failed'
+              ? '入场理由：**回查决策记录时出错**（这不等于"当时没有理由"，别据此判断）。'
+              : '入场理由：**查不到对应那一轮的决策记录**（可能已被轮转清理）。' +
+                '缺少入场理由时无法区分"止损设得过紧"与"入场方向本就错误" —— 请以此为限下结论。',
         ];
 
         const facts =
