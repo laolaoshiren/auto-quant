@@ -189,7 +189,29 @@ class FakeBroker {
   }
 
   async getPositions(symbol?: string) {
-    return symbol ? this.positions.filter((p) => p.symbol === symbol) : [...this.positions];
+    /*
+     * 按**当前标记价**重算浮盈，而不是返回开仓时快照的 0。
+     *
+     * ⚠️ 这里原本硬编码 `unrealizedPnlPercent: 0` —— 于是**任何依赖浮盈的
+     * 逻辑在测试里都从未被真正走到过**：保本止损每次都读到 0%，
+     * 永远不触发，而用例照样全绿。
+     *
+     * 这正是「没测的路径就是可能已经坏掉的路径」最纯粹的例子 ——
+     * 不是断言写得松，而是**夹具让被测的那条分支根本不可达**。
+     */
+    const marked = this.positions.map((p) => {
+      const direction = p.side === 'long' ? 1 : -1;
+      const move = (this.markPrice - p.entryPrice) * direction;
+      const unrealizedPnl = move * p.quantity;
+      return {
+        ...p,
+        markPrice: this.markPrice,
+        unrealizedPnl,
+        // 交易所口径：价格变动百分比 × 杠杆。
+        unrealizedPnlPercent: p.entryPrice > 0 ? (move / p.entryPrice) * 100 * p.leverage : 0,
+      };
+    });
+    return symbol ? marked.filter((p) => p.symbol === symbol) : marked;
   }
 
   async setLeverage(symbol: string, leverage: number) {
@@ -2511,4 +2533,88 @@ test('本地还持仓的标的：一行都不碰（那可能是保护单真的�
   assert.equal(positionStore.open(traderId).length, 1, '前提：本地仍然持仓');
   assert.equal(orderRow(stop.id).status, 'NEW', '持仓还在时不得改写订单状态');
   assert.equal(orderRow(target.id).status, 'NEW');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  保本止损：顺序不变量                                                        */
+/* -------------------------------------------------------------------------- */
+
+/** 与 `permissiveConfig()` 相同，但开了保本止损。 */
+function breakevenConfig(): StrategyConfig {
+  const base = permissiveConfig();
+  return { ...base, riskControl: { ...base.riskControl, breakevenTriggerPercent: 5 } };
+}
+
+test('浮盈达标时把止损移到开仓价 —— 而且**先挂新、再撤旧**', async () => {
+  /*
+   * 这条钉的是保本止损里唯一需要证的不变量：**顺序**。
+   *
+   * | 顺序 | 新挂失败时 |
+   * | --- | --- |
+   * | 先撤旧、再挂新 | **仓位无保护** → 必须立刻平仓（§2.6 的最糟状态） |
+   * | 先挂新、再撤旧 | 旧止损还在，仓位仍有保护 |
+   *
+   * 所以断言的是 `opLog` 里 `place` 出现在 `cancel` **之前** —— 不是"两者都发生了"。
+   * 只断言后者的话，一个把顺序写反的实现照样能过，而那正是会让仓位暴露的写法。
+   *
+   * 夹具：入场 68000、止损 66000、止盈 74000。把标记价抬到 70000
+   * （价格 +2.94%，3x 下浮盈约 8.8% ≥ 阈值 5%），且**不触发止盈**。
+   */
+  const strategyRecord = strategyStore.list().find((s) => s.name === 'test')!;
+  strategyStore.update(strategyRecord.id, { config: breakevenConfig() });
+
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const pos = positionStore.open(traderId).find((p) => p.symbol === SYMBOL);
+  assert.ok(pos, '前提：仓位已开');
+  assert.equal(pos.stop_loss, 66000, '前提：初始止损在开仓价之下（亏损侧）');
+
+  // 抬价制造浮盈。
+  broker.markPrice = 70_000;
+  broker.opLog.length = 0; // 只看这一轮的动作
+
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  const move = broker.opLog.filter((op) => op.startsWith('place:STOP_MARKET') || op.startsWith('cancel:'));
+  assert.ok(move.length >= 2, `应当既有挂新也有撤旧，实际：${JSON.stringify(broker.opLog)}`);
+
+  const placeIdx = move.findIndex((op) => op.startsWith('place:STOP_MARKET@68000'));
+  const cancelIdx = move.findIndex((op) => op.startsWith('cancel:'));
+  assert.ok(placeIdx >= 0, `新止损应当挂在开仓价 68000，实际：${JSON.stringify(move)}`);
+  assert.ok(cancelIdx >= 0, `旧止损应当被撤掉，实际：${JSON.stringify(move)}`);
+  assert.ok(
+    placeIdx < cancelIdx,
+    `**必须先挂新再撤旧** —— 反过来会让仓位在新止损挂上之前处于无保护状态。实际顺序：${JSON.stringify(move)}`,
+  );
+
+  // 本地记录也要跟着走，否则下一轮会重复挂单。
+  const after = positionStore.open(traderId).find((p) => p.symbol === SYMBOL);
+  assert.equal(after?.stop_loss, 68000, '本地止损价必须更新成保本价，否则每轮都会重复挂一张新止损');
+});
+
+test('止损已在保本或更好时不动 —— 棘轮只往有利方向走', async () => {
+  /*
+   * 允许回退是最坏的一种"自作聪明"：操作员手动设了更紧的止损，
+   * 保本逻辑如果把它退回开仓价，等于**主动放宽了风险**。
+   *
+   * 这里把初始止损直接设在开仓价之上（65000 是止损，68000 是入场 ——
+   * 用 69000 模拟"已被移到更好的位置"），断言**没有**任何撤挂动作。
+   */
+  const strategyRecord = strategyStore.list().find((s) => s.name === 'test')!;
+  strategyStore.update(strategyRecord.id, { config: breakevenConfig() });
+
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  // 手动把本地止损记到开仓价之上，模拟"已经被移到更好的位置"。
+  const pos = positionStore.open(traderId).find((p) => p.symbol === SYMBOL)!;
+  positionStore.setProtection(traderId, SYMBOL, 69_000, pos.take_profit, pos.stop_order_id, pos.tp_order_id);
+
+  broker.markPrice = 70_000;
+  broker.opLog.length = 0;
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  const moved = broker.opLog.filter((op) => op.startsWith('place:STOP_MARKET') || op.startsWith('cancel:'));
+  assert.deepEqual(moved, [], `止损已在保本之上时不该有任何撤挂动作，实际：${JSON.stringify(moved)}`);
 });
