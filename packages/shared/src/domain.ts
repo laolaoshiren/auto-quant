@@ -151,6 +151,16 @@ export interface Trader {
   lastCycleNumber: number;
   lastError: string | null;
   consecutiveFailures: number;
+  /**
+   * AI 智能托管模式下的参数（JSON），**非空即代表这个机器人由 AI 托管**。
+   *
+   * 不能用 `strategies.config` 的原因：**一个策略可以被多个机器人共用**，
+   * 而 AI 模式下每个机器人的参数是各自演化的 —— 共用会让两个 AI 互相覆盖，
+   * 而且那种覆盖看起来完全正常。
+   *
+   * 为 null 时按 `strategies.config` 跑，行为与以前完全一致。
+   */
+  agentConfigJson: string | null;
   createdAt: string;
   updatedAt: string;
 }
