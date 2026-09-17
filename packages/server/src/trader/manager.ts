@@ -6,8 +6,9 @@ import type { Vault } from '../crypto/vault.js';
 import { createLogger } from '../logger.js';
 import { MarketDataService } from '../market/service.js';
 import { LlmClient } from '../llm/client.js';
-import { aiModels, exchanges, runtimeLogs, strategies, traders } from '../store/repositories.js';
+import { aiModels, equity, exchanges, runtimeLogs, strategies, traders } from '../store/repositories.js';
 import { eventBus } from '../events.js';
+import { AgentRuntime } from './agent/runtime.js';
 import { AutoTrader, type DecisionModel } from './autoTrader.js';
 
 const log = createLogger('manager');
@@ -398,6 +399,26 @@ export class TraderManager {
         },
       };
 
+      /*
+       * AI 智能托管接缝。
+       *
+       * ⚠️ **总是传**，而不是"只在策略是 ai_managed 时传"。
+       *
+       * 判据是 `traders.agent_config_json` 非空，而那一列**可以在机器人运行期间
+       * 被写**（AI 第一次调参就会写它）。若按启动时的策略 id 决定传不传，
+       * 那么一个"启动时还不是 AI 模式、运行中变成 AI 模式"的机器人就永远接不上 ——
+       * 而那恰恰是这个模式本来的用法。
+       *
+       * 传进去是安全的：`AgentRuntime` 自己在非 AI 模式下完全空转
+       * （`isEnabled()` 为假时所有方法直接返回）。
+       */
+      const agentRuntime = new AgentRuntime({
+        traderId,
+        strategyConfig: () => config,
+        model,
+        equityNow: () => equity.latest(traderId)?.equity ?? null,
+      });
+
       const autoTrader = new AutoTrader({
         trader,
         config,
@@ -406,6 +427,13 @@ export class TraderManager {
         marketData,
         broker: connection.broker,
         model,
+        agent: {
+          configOverride: () => agentRuntime.configOverride(),
+          triggerReview: () => agentRuntime.triggerReview(),
+          settleOnly: () => agentRuntime.settleOnly(),
+          reviewTrade: (t) => agentRuntime.reviewTrade(t),
+          paused: () => agentRuntime.paused() !== null,
+        },
       });
 
       this.running.set(traderId, autoTrader);

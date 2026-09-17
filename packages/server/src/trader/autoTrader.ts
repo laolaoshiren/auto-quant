@@ -165,6 +165,36 @@ export interface AutoTraderDeps {
   marketData: MarketDataService;
   broker: BinanceBroker;
   model: DecisionModel;
+  /**
+   * AI 智能托管接缝（**可选**）。
+   *
+   * 不传时交易循环的行为与以前**完全一致** —— 这是刻意的：老机器人不该因为
+   * 这一层存在而有任何变化。它是"挂在交易循环上的一个能力"，不是它的一部分。
+   *
+   * 只在两个点被用到：进周期时问一次"要不要审视"、平仓后请它复盘。
+   */
+  agent?: AgentHook;
+}
+
+/**
+ * 交易循环对智能体的全部认知。**刻意只有五个方法** ——
+ * 接口越小，"交易被智能体影响"的可能面就越小。
+ */
+export interface AgentHook {
+  /**
+   * AI 模式下应当生效的配置；非 AI 模式返回 `null`（调用方继续用策略配置）。
+   *
+   * 这是"AI 下发的参数真的被用上"的唯一出口。
+   */
+  configOverride: () => StrategyConfig | null;
+  /** 进周期时问一次"要不要审视"。**不阻塞** —— 实现方保证不 await。 */
+  triggerReview: () => void;
+  /** 结算等待中的参数实验（每笔平仓后最该做）。 */
+  settleOnly: () => void;
+  /** 一笔平仓之后请复盘员写因果结论。**不阻塞。** */
+  reviewTrade: (trade: { tradeId: number; symbol: string; closeReason: string; netPnl: number }) => void;
+  /** AI 是否主动停手（停手时不开新仓，既有仓位的管理照常）。 */
+  paused: () => boolean;
 }
 
 /**
@@ -266,6 +296,33 @@ export class AutoTrader {
     // Resume numbering so the audit trail stays continuous across restarts.
     this.cycleNumber = deps.trader.lastCycleNumber;
     this.consecutiveFailures = deps.trader.consecutiveFailures;
+    // 默认就是策略配置；AI 模式下每个周期开头会被刷成 AI 下发的那份。
+    this.activeConfig = deps.config;
+  }
+
+  /**
+   * **本周期生效的配置** —— 交易路径全部读它，不再直接读 `this.deps.config`。
+   *
+   * 为什么要有这个字段而不是每次访问都调 `agent.configOverride()`：
+   *
+   *  - 那样每周期会读**六次**数据库并解析六次 JSON（配置在交易路径上被读六处）；
+   *  - 更要紧的是，**同一周期内读到不同的配置会让行为无法解释** ——
+   *    比如风控按 A 配置放行、下单按 B 配置取整。一次刷新、周期内不变，才可推理。
+   */
+  private activeConfig: StrategyConfig;
+
+  /**
+   * 刷新本周期生效的配置，并在 AI 模式下触发一次审视判断。
+   *
+   * `deps.agent` 不存在时这里**什么都不做** —— 老机器人的行为不受任何影响。
+   */
+  private refreshAgentState(): void {
+    const agent = this.deps.agent;
+    if (!agent) return;
+    const override = agent.configOverride();
+    if (override) this.activeConfig = override;
+    // 不 await：审视可能跑几十秒，不能把 3 分钟的周期撑长。
+    agent.triggerReview();
   }
 
   /* ---------------------------------------------------------------------- */
@@ -558,7 +615,7 @@ export class AutoTrader {
       this.emit('error', `第 #${this.cycleNumber} 轮决策失败：${message}`);
       traderStore.recordCycle(traderId, this.cycleNumber, this.consecutiveFailures);
 
-      const threshold = this.deps.config.circuitBreaker.safeModeAfterFailures;
+      const threshold = this.activeConfig.circuitBreaker.safeModeAfterFailures;
       if (this.consecutiveFailures >= threshold) {
         // Repeated failures usually mean a rejected key, an exhausted balance or
         // a model outage. Stop opening new positions until something changes.
@@ -687,7 +744,20 @@ export class AutoTrader {
     state: { phase: CycleFailurePhase },
   ): Promise<string> {
     const traderId = this.deps.trader.id;
-    const config = this.deps.config;
+
+    /*
+     * --- 0. AI 托管：刷新本周期生效的配置，并问一次"要不要审视" --------
+     *
+     * ⚠️ **必须在读配置之前**，而且只能在这里刷一次。
+     *
+     * 顺序错了（比如放在下面那行之后）会导致本周期用旧配置跑，
+     * 而下一周期又突然换新 —— 那种"配置晚一拍生效"的行为很难追，
+     * 因为每一轮看起来都正常。
+     *
+     * `deps.agent` 不存在时这个调用什么都没做，所以老机器人不受影响。
+     */
+    this.refreshAgentState();
+    const config = this.activeConfig;
 
     /* --- 1. Authoritative account state ---------------------------------- */
     const account = await this.deps.broker.getAccountState();
@@ -1467,6 +1537,31 @@ export class AutoTrader {
       );
     }
 
+    /*
+     * --- AI 托管：平仓之后请复盘员写因果结论，并结算参数实验 ------------
+     *
+     * ⚠️ **只挂在 `booked.created === true` 上**，也就是"这确实是一笔新入账的平仓"。
+     *
+     * 挂在重复入账上会有两个后果：`agent_memory.trade_id` 有 UNIQUE，
+     * 重复写会被幂等跳过（无害）；但**结算**会被多触发一次 ——
+     * 而结算依据是"这次调整之后有几笔结果"，重复触发会让它把同一笔数两遍，
+     * 于是策略师看到一个比真实更"有依据"的历史。
+     *
+     * 放在这里而不是三个 `bookClosedPosition` 调用点上：那样漏掉任何一个
+     * 都会让一部分平仓永远得不到复盘 —— 而漏掉是静默的。
+     */
+    if (booked.created && this.deps.agent) {
+      const agent = this.deps.agent;
+      // 两个调用都不阻塞平仓路径：复盘要调模型，可能几秒到几十秒。
+      agent.reviewTrade({
+        tradeId,
+        symbol: local.symbol,
+        closeReason: reason,
+        netPnl: net,
+      });
+      agent.settleOnly();
+    }
+
     return {
       netPnl: net,
       grossPnl,
@@ -2102,7 +2197,7 @@ export class AutoTrader {
   private leverageFor(symbol: string): number {
     const open = positionStore.open(this.deps.trader.id).find((p) => p.symbol === symbol);
     if (open && open.leverage > 0) return open.leverage;
-    const risk = this.deps.config.riskControl;
+    const risk = this.activeConfig.riskControl;
     return isMajorSymbol(symbol) ? risk.btcEthMaxLeverage : risk.altcoinMaxLeverage;
   }
 
@@ -2135,7 +2230,7 @@ export class AutoTrader {
         unrealizedPnlPercent: live.unrealizedPnlPercent,
       };
 
-      const verdict = shouldCloseForDrawdown(view, this.deps.config);
+      const verdict = shouldCloseForDrawdown(view, this.activeConfig);
       if (!verdict.close) continue;
 
       this.emit('info', verdict.reason);
@@ -2525,7 +2620,7 @@ export class AutoTrader {
         }
       }
 
-      if (!stopOrderId && this.deps.config.riskControl.requireStopLoss) {
+      if (!stopOrderId && this.activeConfig.riskControl.requireStopLoss) {
         this.emit(
           'error',
           `无法为 ${symbol} 挂上止损。为避免留下无保护的杠杆敞口，立即平掉该仓位。`,
@@ -2775,7 +2870,7 @@ export class AutoTrader {
   /* ---------------------------------------------------------------------- */
 
   private isInCooldown(symbol: string): boolean {
-    const minutes = this.deps.config.throttle.reentryCooldownMinutes;
+    const minutes = this.activeConfig.throttle.reentryCooldownMinutes;
     if (minutes <= 0) return false;
     const lastExit = tradeEvents.lastFor(this.deps.trader.id, symbol, 'exit');
     if (!lastExit) return false;
