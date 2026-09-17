@@ -345,9 +345,107 @@ UPDATE equity_snapshots
        unrealized_pnl = 0;
 `;
 
+const M5_AI_AGENT_MEMORY = /* sql */ `
+-- ---------------------------------------------------------------------------
+-- 全自动智能托管（AI Agent 模式）—— 三张表
+--
+-- 这个模式与之前所有策略的**本质区别**在于：模型的每一次决策不再孤立。
+-- 它有自己的历史、自己的改动记录、以及**这些改动之后真实发生了什么**。
+--
+-- 所以「越跑越厉害」不靠一句"请反思"，而靠这三张表：
+--   · agent_experiments —— 我改了什么 + 之后真实结果（学习的**事实**来源）
+--   · agent_memory      —— 这个形态/这个失败原因，上次是怎么亏的（**前车之鉴**）
+--   · agent_runs        —— 每次循环的完整轨迹（**可审计**，也是排查依据）
+--
+-- 没有这三张表，"AI 自我迭代"只是一段听起来很专业的文字。
+-- ---------------------------------------------------------------------------
+
+-- 每一次参数调整，以及之后真实发生了什么。
+--
+-- ⚠️ patch_json（AI 想改什么）与 applied_json（守卫之后实际生效什么）
+-- 必须**分开存**：两者不同时要能一眼看出来。否则守卫钳制了、而 AI 以为自己改成了，
+-- 下一轮它会基于一个错误的前提继续推理。
+CREATE TABLE agent_experiments (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  trader_id             INTEGER NOT NULL REFERENCES traders(id),
+  created_at            TEXT    NOT NULL,
+
+  -- 为什么被唤醒：new_result / drawdown / losing_streak / timeout / rejections / manual
+  trigger               TEXT    NOT NULL,
+  -- 唤醒时它看到的绩效快照（JSON）。留着是为了回答"它当时凭什么这么改"。
+  observed_json         TEXT    NOT NULL,
+  patch_json            TEXT    NOT NULL,
+  applied_json          TEXT    NOT NULL,
+  -- 被守卫钳制的项及原因（[{"field","asked","allowed","why"}]）。空数组表示原样通过。
+  clamps_json           TEXT    NOT NULL DEFAULT '[]',
+  -- AI 自己写的判断。**必填** —— 一次没有理由的调参无法被审查。
+  reason                TEXT    NOT NULL,
+  -- 它查了什么（工具调用序列）。用来还原它的推理依据。
+  tool_calls_json       TEXT    NOT NULL DEFAULT '[]',
+
+  -- ↓ 由后续周期回填：这次调整之后真实发生了什么。**这是"学习"的落地处。**
+  outcome_trades        INTEGER,
+  outcome_net_pnl       REAL,
+  outcome_evaluated_at  TEXT
+);
+
+CREATE INDEX idx_agent_experiments_trader ON agent_experiments(trader_id, created_at DESC);
+-- 回填扫描用：只找还没结算的那些。
+CREATE INDEX idx_agent_experiments_pending ON agent_experiments(trader_id, outcome_evaluated_at);
+
+-- 复盘员在每笔平仓后写的因果结论。**这是"前车之鉴"的来源。**
+--
+-- 与 agent_experiments 的分工：那个记"我改了什么参数"，
+-- 这个记"这笔为什么赚/亏" —— 前者是策略层的记忆，后者是执行层的记忆。
+CREATE TABLE agent_memory (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  trader_id     INTEGER NOT NULL REFERENCES traders(id),
+  -- 一笔平仓对应一条。UNIQUE 保证重复对账不会写出两条互相矛盾的经验。
+  trade_id      INTEGER NOT NULL UNIQUE REFERENCES trades(id),
+  created_at    TEXT    NOT NULL,
+
+  symbol        TEXT    NOT NULL,
+  close_reason  TEXT    NOT NULL,
+  net_pnl       REAL    NOT NULL,
+  -- 因果结论：这笔为什么赚/亏。面向模型，所以是散文。
+  lesson        TEXT    NOT NULL,
+  -- 可检索的标签（["追高","逆势","费用吃掉利润"]）。检索靠它，不靠全文匹配。
+  tags_json     TEXT    NOT NULL DEFAULT '[]'
+);
+
+CREATE INDEX idx_agent_memory_trader ON agent_memory(trader_id, created_at DESC);
+CREATE INDEX idx_agent_memory_symbol ON agent_memory(trader_id, symbol, created_at DESC);
+
+-- 每次智能体循环的完整轨迹。可审计，也是"这一步为什么花这么多 token"的依据。
+CREATE TABLE agent_runs (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  trader_id     INTEGER NOT NULL REFERENCES traders(id),
+  created_at    TEXT    NOT NULL,
+
+  -- decision（每轮交易台）/ strategy（低频调参）/ review（复盘）
+  kind          TEXT    NOT NULL,
+  trigger       TEXT    NOT NULL,
+  -- single（单次调用）/ panel（多角色并行）。**由程序决定用哪档，不让 AI 自己选。**
+  intensity     TEXT    NOT NULL,
+  steps         INTEGER NOT NULL DEFAULT 0,
+  -- 各角色返回的结构化结论（JSON 数组）。
+  agents_json   TEXT    NOT NULL DEFAULT '[]',
+  -- ok / degraded（超预算降级）/ failed
+  outcome       TEXT    NOT NULL,
+  detail        TEXT    NOT NULL DEFAULT '',
+
+  tokens_in     INTEGER NOT NULL DEFAULT 0,
+  tokens_out    INTEGER NOT NULL DEFAULT 0,
+  latency_ms    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_agent_runs_trader ON agent_runs(trader_id, created_at DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
   { version: 3, name: 'session-revocation', sql: M3_SESSION_REVOCATION },
   { version: 4, name: 'attributed-equity', sql: M4_ATTRIBUTED_EQUITY },
+  { version: 5, name: 'ai-agent-memory', sql: M5_AI_AGENT_MEMORY },
 ];
