@@ -206,6 +206,13 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
         lastDecisionWasNoChange: false,
         hasPosition: positions.open(traderId).length > 0,
         minutesSinceStrategyReview: minutesSince(lastReviewIso, now),
+        /*
+         * 自上次唤醒以来跑了多少个周期。用来发现"参数不可达"那种静默失效 ——
+         * 见 `WakeFacts.idleCycles` 的注释。
+         */
+        idleCycles: decisions
+          .list(traderId, 60)
+          .filter((d) => ms(d.timestamp) > since).length,
       };
     },
 

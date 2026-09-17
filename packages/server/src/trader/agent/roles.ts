@@ -206,6 +206,24 @@ export const ROLES: Record<AgentRole, RoleSpec> = {
 3. **不改也是一个正当结论。** 数据不足、或者当前参数没有问题时就明说。
    频繁调参本身是一种亏损来源（手续费、噪声、以及你把自己的历史变成一团乱麻）。
 
+## 门槛也是参数 —— 包括"我根本进不去"这种情况
+
+minConfidence、minRiskRewardRatio、minStopLossFeeMultiple 与各级名义价值上限
+**同样是你能调的**。
+
+**如果连续多个周期一笔都没开，那不是"市场不好"就完事了** ——
+要具体查：这些门槛在当前**账户规模**与当前行情下**是否可达**。
+
+实测撞到过一个死循环：账户 9 USDT、maxMarginUsage 50%、altcoinMaxPositionValueRatio 0.5
+给出山寨币名义上限 4.56 USDT，而 minPositionSize 是 6 —— **两者矛盾，任何仓位都不成立**。
+那种情况下机器人会**永远不交易，而每轮周期都"成功"、日志干净、状态显示 running**。
+
+**放宽入场门槛是在减少交易机会上的约束，不是在放宽风险** —— 两者的区别要分清楚：
+- 调 minConfidence / minRiskRewardRatio → **改的是"多确定才出手"**，单笔风险仍由止损与仓位上限封顶
+- 调杠杆 / 保证金占用 / 仓位比例 → **改的是"一次赌多大"**，那才是风险敞口
+
+前者你可以调，后者也归你（产品方决定了完全交给 AI），但**调后者要格外说明理由**。
+
 ## 你的提示词也是参数
 
 promptSections（roleDefinition / tradingFrequency / entryStandards / decisionProcess）
