@@ -116,6 +116,31 @@ export interface PromptMemory {
   performance: PromptPerformance;
   recentCloses: PromptClose[];
   throttle: PromptThrottleBudget;
+  /**
+   * 最近被风控拒绝的提议。
+   *
+   * ## 为什么必须有这一块（实测出来的）
+   *
+   * 上面那段注释已经写着原则：**看不见的约束等于不存在** ——
+   * 模型会反复提出必然被拒的请求。但那条原则此前只落实在节流/冷却上。
+   *
+   * 实测的形态：模型提「名义 $6.00」，运行时按步长取整后是 $5.00，
+   * 低于下限 $6.00 → 拒绝。**下一轮模型只看到绩效与节流，完全不知道被拒过**，
+   * 于是原样再提一次。用户看到的是「为什么同一个错误反复出现」——
+   * **不是模型不智能，是这一侧没把它自己的失败告诉它。**
+   *
+   * 固定取最近 3 条（与最近平仓同样的 O(1) 纪律，见 §4）。
+   */
+  recentRejections: PromptRejection[];
+}
+
+/** 一条被拒的提议 —— 给模型看的是「它提了什么、为什么不行」。 */
+export interface PromptRejection {
+  symbol: string;
+  /** 当时提议的名义价值（美元）。 */
+  positionSizeUsd: number;
+  /** 拒绝理由，运行时原话。 */
+  reason: string;
 }
 
 /**
@@ -148,6 +173,7 @@ export function emptyPromptMemory(config: StrategyConfig): PromptMemory {
       minutesSinceLastExit: null,
       reentryCooldownMinutes: config.throttle.reentryCooldownMinutes,
     },
+    recentRejections: [],
   };
 }
 
@@ -546,6 +572,37 @@ function renderThrottleBudget(budget: PromptThrottleBudget): string {
 }
 
 /**
+ * 「最近被拒的提议」区块。
+ *
+ * ## 为什么必须有这一块（实测出来的）
+ *
+ * 上面 `renderThrottleBudget` 的注释已经写着原则：**看不见的约束等于不存在** ——
+ * 模型会反复提出必然被拒的请求。**但那条原则此前只落实在节流/冷却上。**
+ *
+ * 实测的形态：模型提「名义 $6.00」，运行时按步长取整后是 $5.00，
+ * 低于下限 $6.00 → 拒绝。**下一轮模型只看到绩效与节流，完全不知道被拒过**，
+ * 于是原样再提一次。操作员看到的是「为什么同一个错误反复出现」——
+ * **不是模型不智能，是这一侧没把它自己的失败告诉它。**
+ *
+ * 理由用运行时的**原话**，不改写：那句话里带着具体数字（差多少、下限多少），
+ * 而那正是模型调整提议所需要的。改写会把可行动的细节磨掉。
+ */
+function renderRejections(rejections: PromptRejection[]): string | null {
+  if (rejections.length === 0) return null;
+
+  const lines = rejections.map(
+    (r) => `- ${r.symbol} 提议名义 $${r.positionSizeUsd.toFixed(2)}：${r.reason}`,
+  );
+
+  return (
+    `# 最近被拒的提议（最新在前）\n${lines.join('\n')}\n` +
+    '**这些提议没有进入执行阶段。** 如果原因是你的数值在当前账户规模下不可行，' +
+    '下一轮请给出一个确实能通过的数值，而不是重复同一个 —— ' +
+    '每次重复都在浪费一次决策机会。'
+  );
+}
+
+/**
  * 压成一行并截断。
  *
  * 模型写下的 `reasoning` 可以是多行散文；原样进提示词会让"每笔两行"变成长短不一的
@@ -716,6 +773,14 @@ function renderUserPrompt(
   parts.push(renderPerformance(ctx.memory.performance, ctx.config));
   parts.push(renderRecentCloses(ctx.memory.recentCloses, ctx.now));
   parts.push(renderThrottleBudget(ctx.memory.throttle));
+  /*
+   * 被拒的提议排在最后 —— 它是最贴近"上一轮到底发生了什么"的一块。
+   *
+   * `renderRejections` 在没有被拒记录时返回 null（不产生空区块）：
+   * 一个永远写着"无"的区块会占预算，还会让模型学会跳过它。
+   */
+  const rejections = renderRejections(ctx.memory.recentRejections);
+  if (rejections) parts.push(rejections);
 
   /*
    * 这里原有一个 `# 最近已平仓交易` 区块，**已删除**。

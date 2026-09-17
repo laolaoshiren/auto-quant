@@ -35,6 +35,7 @@ import {
   PROMPT_RECENT_CLOSE_COUNT,
   type PromptMemory,
   type PromptPosition,
+  type PromptRejection,
 } from '../strategy/prompt.js';
 import { isMajorSymbol } from '@aq/shared';
 import {
@@ -3181,7 +3182,54 @@ export class AutoTrader {
           : null,
         reentryCooldownMinutes: config.throttle.reentryCooldownMinutes,
       },
+      /*
+       * 最近被风控拒绝的提议。
+       *
+       * **这一块是实测逼出来的**：模型提「名义 $6.00」→ 取整后 $5.00 → 拒绝，
+       * 而下一轮它只看到绩效与节流、**完全不知道被拒过**，于是原样再提一次。
+       * 操作员看到的是「为什么同一个错误反复出现」——
+       * **不是模型不智能，是这一侧没把它自己的失败告诉它。**
+       *
+       * 取自 `decision_records` 的执行记录（`status === 'rejected'`），
+       * 固定取最近 3 条（与最近平仓同样的 O(1) 纪律，见 §4）。
+       */
+      recentRejections: this.buildPromptRejections(traderId),
     };
+  }
+
+  /**
+   * 最近被拒的提议，给提示词用。
+   *
+   * 只取 `rejected`（被风控挡下），**不含 `failed`**（执行出错）——
+   * 后者是系统问题，让模型去"调整提议"是误导。
+   */
+  private buildPromptRejections(traderId: number): PromptRejection[] {
+    try {
+      const recent = decisionStore.list(traderId, 20);
+      const out: PromptRejection[] = [];
+      for (const rec of recent) {
+        for (const entry of rec.executionLog) {
+          if (entry.status !== 'rejected') continue;
+          // 从记录里找回当时提议的名义价值：执行记录只带理由，
+          // 而"我提了多少"是模型调整时最需要的对照。
+          const decision = rec.decisions.find((d) => d.symbol === entry.symbol);
+          out.push({
+            symbol: entry.symbol,
+            positionSizeUsd: decision?.positionSizeUsd ?? 0,
+            reason: entry.detail,
+          });
+          if (out.length >= 3) return out;
+        }
+      }
+      return out;
+    } catch {
+      /*
+       * 读不到就当作"没有被拒记录" —— 少一块记忆好过整个周期失败。
+       * **但这是有损的**：模型会因此重复它上一次的错误，所以只吞读取异常，
+       * 不吞逻辑异常。
+       */
+      return [];
+    }
   }
 
   private buildPromptPositions(
