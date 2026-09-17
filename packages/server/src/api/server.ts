@@ -198,6 +198,15 @@ const TraderInputSchema = z.object({
    * silently disagree with the account and make every return figure wrong.
    */
   initialEquity: z.number().min(0).optional(),
+  /**
+   * 运行模式。
+   *
+   * `'ai_managed'` 表示由 AI 智能体托管：参数由它自己设定并持续调整，
+   * 存在 `agent_config_json`（按机器人隔离），**策略参数被忽略**。
+   *
+   * 默认 `'strategy'`，所以既有调用点（前端与脚本）行为完全不变。
+   */
+  mode: z.enum(['strategy', 'ai_managed']).default('strategy'),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1308,6 +1317,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       strategyId: parsed.data.strategyId,
       cycleIntervalMinutes: parsed.data.cycleIntervalMinutes,
       initialEquity,
+      mode: parsed.data.mode,
     });
 
     return { ...trader, equitySource };

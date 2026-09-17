@@ -24,6 +24,7 @@ import type {
   StrategyRecord,
   TradeRecord,
   Trader,
+  TraderMode,
   TraderStats,
   User,
 } from '@aq/shared';
@@ -418,6 +419,13 @@ export interface TraderInput {
    * operator explicitly chose to type the baseline themselves.
    */
   initialEquity?: number;
+  /**
+   * 运行模式。
+   *
+   * `'ai_managed'` 时参数由 AI 智能体自己设定并持续调整，**策略参数被忽略** ——
+   * 所以那种情况下 `strategyId` 仍然要传（服务端是 NOT NULL），但不起作用。
+   */
+  mode?: TraderMode;
 }
 
 /* -------------------------------------------------------------------------- */
