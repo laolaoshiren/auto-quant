@@ -146,6 +146,7 @@ const facts = (over: Record<string, unknown> = {}) => (
     tradeId: 1, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1,
     grossPnl: -0.08, fee: 0.02, peakPnlPercent: 0, holdMinutes: 30,
     entryPrice: 100, exitPrice: 99,
+    openedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
     ...over,
   }
 );

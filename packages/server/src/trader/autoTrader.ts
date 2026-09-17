@@ -208,6 +208,17 @@ export interface ReviewTradeFacts {
   holdMinutes: number;
   entryPrice: number;
   exitPrice: number;
+  /**
+   * 开仓时刻（ISO）。
+   *
+   * 用途是**回查那一轮的决策记录**：实测复盘员明确指出
+   * 「缺少入场逻辑、周期与当时的趋势/关键位背景，无法判定这次止损是
+   * 设得过紧被正常波动打掉，还是入场方向本就错误」——
+   * **而那个入场理由就在 `decision_records.decisions[].reasoning` 里。**
+   *
+   * 没有它，复盘员永远只能在这两种结论之间含糊 —— 而两者的改法完全相反。
+   */
+  openedAt: string;
 }
 
 /**
@@ -1650,6 +1661,7 @@ export class AutoTrader {
         holdMinutes: Math.max(0, (Date.now() - new Date(local.opened_at).getTime()) / 60_000),
         entryPrice: local.entry_price,
         exitPrice,
+        openedAt: local.opened_at,
       });
       agent.settleOnly();
     }
