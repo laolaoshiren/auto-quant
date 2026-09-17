@@ -6,6 +6,8 @@
  * reading a response.
  */
 
+import { EXCHANGE_ERROR_LABELS } from '@aq/shared';
+
 /* -------------------------------------------------------------------------- */
 /*  exchangeInfo                                                               */
 /* -------------------------------------------------------------------------- */
@@ -518,7 +520,27 @@ export class BinanceApiError extends Error {
     readonly retryAfterSeconds: number | null = null,
     readonly endpoint = '',
   ) {
-    super(`Binance ${code}: ${message} (${endpoint})`);
+    /*
+     * ⚠️ **这是所有交易所报错的唯一成型点 —— 所以中文翻译在这里做一次就够。**
+     *
+     * 原来拼的是 `Binance -4164: Order's notional must be no smaller than 5
+     * (unless you choose reduce only). (/fapi/v1/order)` —— 给开发者看的。
+     * 而操作员在**六个不同的地方**会看到这条字符串（决策流、决策审计、
+     * 决策详情、订单表……）：操作员看到它既不知道发生了什么、也不知道该不该动手。
+     *
+     * 我一开始是在那些显示处逐个翻译 —— **那是错的做法**：
+     * 漏掉一处就还是英文，而这正是"不能一劳永逸"的原因。
+     * 在源头翻译一次，所有显示它的地方自动都是中文。
+     *
+     * **错误码必须保留**（括号里那一段）：排查、对交易所文档、以及
+     * `isRateLimited` / `isTimestampError` 这些判定都靠它。
+     */
+    const explained = EXCHANGE_ERROR_LABELS[String(code)];
+    super(
+      explained
+        ? `${explained}（币安错误码 ${code}，接口 ${endpoint}）`
+        : `币安错误 ${code}：${message}（接口 ${endpoint}）`,
+    );
     this.name = 'BinanceApiError';
   }
 
