@@ -185,6 +185,19 @@ const StrategyInputSchema = z.object({
   config: StrategyConfigSchema,
 });
 
+/**
+ * AI 托管模式的标记。
+ *
+ * 它**不是一个策略预设** —— 保留这个常量是为了让既有数据能被识别：
+ * 早期版本把 AI 托管做成过策略预设，于是数据库里留下了 `preset_id='ai_managed'`
+ * 的策略行。那行必须从策略列表里排除，否则它会出现在用户选策略的地方。
+ *
+ * 与 `packages/shared/src/strategy.ts` 的注释一致：AI 托管是**机器人自己的模式**
+ * （`traders.mode`），不是策略的一种 —— 策略是"一组固定参数"，
+ * 而 AI 模式的意思是"没有固定参数"。
+ */
+const AI_MANAGED_PRESET = 'ai_managed';
+
 const TraderInputSchema = z.object({
   name: z.string().min(1).max(80),
   exchangeAccountId: z.number().int().positive(),
@@ -1245,7 +1258,31 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   /* --- Strategies -------------------------------------------------------- */
 
-  app.get('/api/strategies', authed, async () => strategies.list());
+  /*
+   * 策略列表**排除 AI 托管模式用的那类策略**。
+   *
+   * ## 为什么
+   *
+   * AI 托管**不是一个策略** —— 策略是"一组固定参数"，而 AI 模式的意思是"没有固定参数"。
+   * 它在创建机器人时作为一个**模式**被选中，而不是从策略列表里挑。
+   *
+   * 让它出现在这里有两个具体后果：
+   *   1. 任何既有机器人都能选中它，包括那些本该按固定参数跑的；
+   *   2. 它看上去像一个"可以编辑的策略"，而那个外壳是假的 ——
+   *      用户改完，AI 下一轮就覆盖；或者用户的修改被静默忽略。
+   *
+   * ## ⚠️ 这是权宜之计，不是最终形态
+   *
+   * 真正干净的做法是让 `traders.strategy_id` 可空，使 AI 机器人**根本不需要**一个策略。
+   * **那需要重建 traders 表，而它被 8 张表用 ON DELETE CASCADE 引用** ——
+   * `DROP TABLE traders` 会连带删掉全部交易历史。那件事必须单独做、带备份、
+   * 并且在能守在现场的时候做。**不能顺手做。**
+   *
+   * 在那之前，用这条过滤保证"它不出现在用户能选策略的任何地方"。
+   */
+  app.get('/api/strategies', authed, async () =>
+    strategies.list().filter((s) => s.presetId !== AI_MANAGED_PRESET),
+  );
 
   app.get('/api/strategies/:id', authed, async (request, reply) => {
     const strategy = strategies.get(Number((request.params as { id: string }).id));
