@@ -2445,9 +2445,51 @@ export class AutoTrader {
       if (!verdict.move || verdict.newStop === null) continue;
 
       /*
-       * ⚠️ **先挂新止损。** 见方法注释里的顺序说明 ——
-       * 这一步失败时旧止损还在，仓位仍然有保护，所以只记一条日志、继续。
+       * ⚠️ **先撤旧止损，再挂新的 —— 顺序与我最初的实现相反。**
+       *
+       * ## 我最初写反了，而实盘证明它完全不工作
+       *
+       * 原本是"先挂新、再撤旧"，理由是"新挂失败时旧止损还在，仓位不会失去保护"。
+       * **那个推理漏了一个前提：交易所允不允许两张条件单并存。**
+       *
+       * 实测（订单记录里连刷四条）：
+       *
+       *     20:00:25  ZECUSDT 止损 已拒绝  Binance -4130
+       *     20:12:25  ZECUSDT 止损 已拒绝  Binance -4130
+       *     20:15:25  ZECUSDT 止损 已拒绝  Binance -4130
+       *     20:16:25  ZECUSDT 止损 已拒绝  Binance -4130
+       *
+       * `-4130` = 该仓位已有止损/止盈单，不能再挂一张。**所以新止损每一次都被拒绝，
+       * 保本止损从未生效过，而它每一轮都重试、把订单记录刷满拒绝。**
+       *
+       * ## 现在的顺序，以及它带来的代价
+       *
+       * 撤旧 → 挂新。中间有一个**短暂的无保护窗口**，这无法避免：
+       * 交易所不允许两张并存，"先撤"是唯一路径。
+       *
+       * 所以挂新失败时**必须按 §2.6 处理** —— 立刻市价平仓并记账，
+       * 而不是留一个没有止损的杠杆敞口等下一轮。
        */
+      const oldStopId = local.stop_order_id ? Number(local.stop_order_id) : null;
+      if (oldStopId && Number.isFinite(oldStopId)) {
+        const cancelled = await this.deps.broker
+          .cancelOrder(local.symbol, oldStopId, 'order')
+          .then(() => true)
+          .catch(() => false);
+        if (!cancelled) {
+          /*
+           * 撤不掉就**不要挂新的**：那必然吃 `-4130`，只会多一条无用的拒绝记录，
+           * 而旧止损仍然有效 —— 当前状态是安全的，下一轮再试。
+           */
+          this.emitOnChange(
+            `breakeven-cancel-fail:${local.id}`,
+            'warn',
+            `${local.symbol} 的旧止损 #${oldStopId} 未能撤掉，本轮不移动止损（原有的仍然有效）。`,
+          );
+          continue;
+        }
+      }
+
       const newStopId = await this.placeProtection({
         symbol: local.symbol,
         side: local.side === 'long' ? 'SELL' : 'BUY',
@@ -2459,31 +2501,34 @@ export class AutoTrader {
       }).catch(() => null);
 
       if (!newStopId) {
-        this.emitOnChange(
-          `breakeven-fail:${local.id}`,
-          'warn',
-          `想把 ${local.symbol} 的止损移到开仓价 ${verdict.newStop}，但新止损没挂上；` +
-            `**原有的止损仍然有效**，下一轮再试。`,
+        /*
+         * 撤旧成功、挂新失败 —— **此刻仓位没有止损**。按 §2.6：
+         * 一个没有保护的杠杆仓位是最糟糕的状态，宁可立刻退出。
+         */
+        this.emit(
+          'error',
+          `为 ${local.symbol} 移动止损时，旧止损已撤但新止损（开仓价 ${verdict.newStop}）没挂上。` +
+            '为避免留下无保护的敞口，立即平掉该仓位。',
         );
-        continue;
-      }
-
-      /*
-       * 再撤旧的。撤失败**不回滚**新的 —— 两张并存好过放弃更好的保护价位，
-       * 而且下一轮会再试一次。
-       */
-      const oldStopId = local.stop_order_id ? Number(local.stop_order_id) : null;
-      if (oldStopId && Number.isFinite(oldStopId)) {
-        const cancelled = await this.deps.broker
-          .cancelOrder(local.symbol, oldStopId, 'order')
-          .then(() => true)
-          .catch(() => false);
-        if (!cancelled) {
-          this.emit(
-            'warn',
-            `${local.symbol} 的旧止损 #${oldStopId} 未能撤掉，与新的保本止损并存；下一轮会再试。`,
+        const exitSide: 'BUY' | 'SELL' = local.side === 'long' ? 'SELL' : 'BUY';
+        const flatten = await this.emergencyFlatten(
+          local.symbol,
+          local.quantity,
+          exitSide,
+          traderId,
+        ).catch(() => null);
+        const still = positionStore.getOpenBySymbol(traderId, local.symbol);
+        if (still) {
+          await this.bookClosedPosition(
+            still,
+            'protection_unavailable',
+            flatten?.avgPrice || view.markPrice,
+            flatten?.fee ?? 0,
+            new Date().toISOString(),
           );
         }
+        moved += 1;
+        continue;
       }
 
       /*
