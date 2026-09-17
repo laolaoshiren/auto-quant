@@ -442,6 +442,53 @@ export class TraderManager {
         .getAccountState()
         .then((s) => s.walletBalance)
         .catch(() => trader.initialEquity);
+      /*
+       * 候选池的**真实**交易所约束。
+       *
+       * 全部取自 `registry`（它解析的就是 `fapi/v1/exchangeInfo`），
+       * **不接受任何推测的数字** —— 我上一版在这里编了一个
+       * `EXCHANGE_MIN_NOTIONAL_USD = 5`，而真值按标的不同（BTC 50、ETH 20、山寨 5），
+       * 于是体检恰好漏掉了唯一真正不可达的那一类。
+       *
+       * 用**配置里的候选池**而不是"全部合约"：体检要回答的是
+       * "照这个配置能交易哪些标的"，所以标的集合必须与配置一致。
+       */
+      const universe = new Set<string>([
+        ...effectiveConfig.coinSource.staticCoins,
+        ...(effectiveConfig.coinSource.useCoinPool ? [] : []),
+      ]);
+      const constraints = [...universe]
+        .flatMap((symbol) => {
+          try {
+            const info = connection.registry.require(symbol);
+            return [
+              {
+                symbol,
+                minNotional: info.minNotional,
+                stepSize: info.stepSize,
+                price: 0, // 下面用实时标记价填 —— 价格影响取整后的有效下限。
+                isMajor: connection.registry.isMajor(symbol),
+              },
+            ];
+          } catch {
+            return [];
+          }
+        });
+
+      /*
+       * 价格必须用**实时标记价**：取整后的有效下限依赖它
+       * （HYPE 在 80 时下限 5 会取整到 5.60，在 100 时是 5.00）。
+       * 拿不到价格的标的一并跳过 —— 用 0 会除零，用一个旧价会给出错误结论。
+       */
+      const priced = (
+        await Promise.all(
+          constraints.map(async (c) => {
+            const price = await connection.broker.getMarkPrice(c.symbol).catch(() => 0);
+            return price > 0 ? { ...c, price } : null;
+          }),
+        )
+      ).filter((c): c is NonNullable<typeof c> => c !== null);
+
       const reach = checkConfigReachability({
         equity: reachEquity,
         maxMarginUsagePercent: effectiveConfig.riskControl.maxMarginUsage,
@@ -450,23 +497,36 @@ export class TraderManager {
           altcoin: effectiveConfig.riskControl.altcoinMaxPositionValueRatio,
         },
         minPositionSize: effectiveConfig.riskControl.minPositionSize,
-        defaultLeverage: effectiveConfig.riskControl.defaultLeverage,
         maxLeverage: {
           major: effectiveConfig.riskControl.btcEthMaxLeverage,
           altcoin: effectiveConfig.riskControl.altcoinMaxLeverage,
         },
+        symbols: priced,
       });
-      for (const finding of reach.findings) {
+
+      /*
+       * 报告形式是"**哪些标的能交易**"而不是"某一类可行吗" ——
+       * 后者（"BTC 不行、SOL 行"）没法直接用于决策，前者可以。
+       */
+      checks.push({
+        name: '可交易标的',
+        severity: reach.ok ? 'ok' : 'warn',
+        ok: reach.ok,
+        detail: reach.summary,
+        blocking: false,
+      });
+      // 被挡下的逐个列出（最多 5 个）—— 操作员需要知道是哪些、为什么。
+      for (const v of reach.blocked.slice(0, 5)) {
         checks.push({
-          name: `仓位可达性（${finding.scope === 'major' ? 'BTC/ETH' : '山寨币'}）`,
-          severity: finding.reachable ? 'ok' : 'warn',
-          ok: finding.reachable,
-          detail: finding.detail,
+          name: `不可交易（${v.symbol}）`,
+          severity: 'warn',
+          ok: false,
+          detail: v.reason,
           blocking: false,
         });
       }
       if (!reach.ok) {
-        log.warn(`机器人 #${traderId} 的配置可能无法开出任何仓位：${reach.summary}`);
+        log.warn(`机器人 #${traderId} 当前配置下没有可交易的标的：${reach.summary}`);
       }
 
       const model: DecisionModel = {
