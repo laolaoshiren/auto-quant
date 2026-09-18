@@ -78,7 +78,7 @@ async function main(): Promise<void> {
     coinSource: { ...paperStrategy.coinSource, coinPoolLimit: 6, oiTopLimit: 4 },
     indicators: {
       ...paperStrategy.indicators,
-      kline: { primaryTimeframe: '5m', selectedTimeframes: ['5m', '15m', '1h'], primaryCount: 60 },
+      kline: { primaryTimeframe: '5m', selectedTimeframes: ['5m', '15m', '1h'], promptPoints: 30, primaryCount: 60 },
       enableQuantData: true,
       enableOiRanking: true,
     },

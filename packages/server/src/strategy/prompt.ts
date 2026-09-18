@@ -325,6 +325,34 @@ const DEFAULT_DECISION_PROCESS = [
   '6. 对已有持仓，还要问一句：**这笔已经走出来的利润，有多少是被保护住的？** 止损还停在最初那个位置的话，浮盈随时可能全部回吐 —— 用 `adjust_protection` 把它提上来（提到成本价或更高，视结构而定）。',
   '7. 对新的入场，先定止损，再定目标，最后确定仓位大小，使止损被扫时的亏损是可以接受的。',
   '8. 如实给出置信度。低于阈值的置信度意味着你根本不应该交易。',
+  /*
+   * 第 9 步：**候选池本身是可以改的**。
+   *
+   * 用户实测观察：「做的币种始终是那几个热门币，似乎没有机会很大的山寨币」。
+   * 查证结果：候选池按 `coinSource.coinPoolRank` 排，生产上设的是
+   * `quote_volume`（成交额榜）—— **天然只有最热门的那些**。
+   *
+   * 而 `coinSource.*` 本来就在 `set_params` 的可调范围里（排序方式、数量、
+   * 成交额与持仓量门槛……都能改）。**能力一直在，缺的是一个去用它的理由。**
+   *
+   * 这和"只做多"那条是同一个病：**能力存在，但提示词没让它想到要用。**
+   */
+  '9. **如果连续几轮都在同样的几个标的上找不到机会，问题可能不在标的，而在你怎么选标的。** 候选池的排序方式（`coinSource.coinPoolRank`：成交额、涨幅、跌幅、波动率、资金费极端值）与规模（`coinPoolLimit`）都是你可以用 `set_params` 改的参数。一个按成交额排出来的池子永远是最热门的那几个 —— **而"机会大"往往出现在波动率或资金费极端的那一类里，不是成交额最高的那一类。**',
+  /*
+   * 第 10 步：**你的输入长度本身是一个可以权衡的成本。**
+   *
+   * 实测：每轮约 49,700 个 prompt token，而**主体是每个候选标的约 10,200 字
+   * 的逐根 K 线数字数组**（7 个候选 ≈ 68,000 字）。这些数字按
+   * `indicators.kline.promptPoints` 渲染，**那个值原来写死在代码里**，
+   * 现在归你了。
+   *
+   * 为什么必须让 AI 知道这件事：它是一笔**真实的成本**，而只有它能判断
+   * "多给 15 根 K 线"值不值那个钱 —— 代码不知道它这轮要做的是形态判断
+   * 还是粗略的方向确认。
+   *
+   * 措辞刻意不给建议值：**"该给多少"正是要它自己回答的问题。**
+   */
+  '10. **你看到的每根 K 线都是有成本的。** 每个候选标的的指标序列长度由 `indicators.kline.promptPoints` 决定（5–120，当前值可在 `get_current_params` 里读到）—— 每多一个点，每个标的、每个指标、每个时间周期都多一个数字。**当你发现自己在做粗略的方向确认而不是精细的形态判断时，把它调小是合理的；当你需要更厚的历史依据时，把它调大。** 这笔账归你算。',
 ].join('\n');
 
 /**
@@ -1049,7 +1077,23 @@ const FIXED_PROMPT_TOKENS = 3_000;
  */
 export function estimateCandidateChars(config: StrategyConfig): number {
   const indicators = config.indicators;
-  const points = Math.min(config.indicators.kline.primaryCount, MAX_RENDER_POINTS);
+  /*
+   * ⚠️ **这个公式必须与 `renderTimeframe` 逐字一致。**
+   *
+   * 它被预算裁剪用着：估算偏大 → 砍掉本来放得下的候选标的（丢掉真实的机会）；
+   * 估算偏小 → 提示词超预算、被模型截断。
+   *
+   * 我给渲染加了 `promptPoints` 之后**忘了同步这里** —— 于是"调小点数省钱"
+   * 这个动作在裁剪逻辑里完全看不见，估算值纹丝不动。
+   * **用例抓到了它**（8 点与 30 点算出来都是 12760 字）。
+   *
+   * 两处的取值口径现在完全相同：`min(promptPoints, primaryCount, MAX_RENDER_POINTS)`。
+   */
+  const points = Math.min(
+    config.indicators.kline.promptPoints ?? 30,
+    config.indicators.kline.primaryCount,
+    MAX_RENDER_POINTS,
+  );
   const timeframes = Math.max(1, indicators.kline.selectedTimeframes.length);
 
   let seriesPerTimeframe = 1; // prices
@@ -1183,7 +1227,14 @@ function lastValue(series: Array<number | null> | undefined): number | null {
 
 function renderTimeframe(tf: TimeframeIndicators, config: StrategyConfig['indicators']): string {
   const label = tf.timeframe.toUpperCase();
-  const points = Math.min(config.kline.primaryCount, MAX_RENDER_POINTS);
+  /*
+   * 渲染多少个点由配置决定（`promptPoints`），**不再写死 30**。
+   *
+   * 上限仍取 `primaryCount` 与 `MAX_RENDER_POINTS` 的较小者：前者是"取了多少根"，
+   * 后者是"最多渲染多少根"（防一个异常大的配置把提示词撑爆）。
+   * 于是 `promptPoints` 只能**减**，不能凭空要求比取到的还多。
+   */
+  const points = Math.min(config.kline.promptPoints ?? 30, config.kline.primaryCount, MAX_RENDER_POINTS);
   const lines: string[] = [`=== ${label} 周期（由旧到新）===`];
 
   lines.push(`价格: ${series(tf.closes, priceDecimalsFor(tf), points)}`);

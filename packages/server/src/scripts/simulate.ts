@@ -377,7 +377,7 @@ async function main(): Promise<void> {
     },
     indicators: {
       ...defaultStrategyConfig().indicators,
-      kline: { primaryTimeframe: PRIMARY, selectedTimeframes: TIMEFRAMES, primaryCount: WARMUP_CANDLES },
+      kline: { primaryTimeframe: PRIMARY, selectedTimeframes: TIMEFRAMES, promptPoints: 30, primaryCount: WARMUP_CANDLES },
       enableQuantData: true,
       enableOiRanking: false,
     },
