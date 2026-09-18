@@ -26,6 +26,7 @@ const config = (): StrategyConfig =>
 
 function makeDeps() {
   const pauses: string[] = [];
+  const cycleIntervals: number[] = [];
   let current = config();
   const deps: AgentToolDeps = {
     currentConfig: () => current,
@@ -40,6 +41,9 @@ function makeDeps() {
       marketOverview: () => [{ symbol: 'BTCUSDT' }],
     },
     requestPause: (reason) => pauses.push(reason),
+    /* 测试要能看到 AI 改周期这件事 —— 与 pauses 同一个形状。 */
+    cycleInterval: () => 3,
+    setCycleInterval: (minutes) => { cycleIntervals.push(minutes); return { minutes, clamped: false }; },
   };
   return { deps, pauses };
 }

@@ -32,6 +32,7 @@ function makePorts(over: Partial<OrchestratorPorts> = {}) {
   const experiments: unknown[] = [];
   const runs: unknown[] = [];
   const pauses: string[] = [];
+  const cycleIntervals: number[] = [];
   const savedConfigs: unknown[] = [];
   let current = config();
 
@@ -68,6 +69,9 @@ function makePorts(over: Partial<OrchestratorPorts> = {}) {
     recordExperiment: (row) => experiments.push(row),
     recordRun: (row) => runs.push(row),
     requestPause: (reason) => pauses.push(reason),
+    /* 测试要能看到 AI 改周期这件事 —— 与 pauses 同一个形状。 */
+    cycleInterval: () => 3,
+    setCycleInterval: (minutes) => { cycleIntervals.push(minutes); return { minutes, clamped: false }; },
     ...over,
   };
 

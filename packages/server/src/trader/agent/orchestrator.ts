@@ -78,6 +78,16 @@ export interface OrchestratorPorts {
 
   /** 请求暂停交易（只收紧）。 */
   requestPause: (reason: string) => void;
+
+  /**
+   * AI 改自己的决策周期（分钟）。落库到 `traders.cycle_interval_minutes`。
+   *
+   * 它**不在** `StrategyConfig` 里 —— 那是调度器要在配置之外读的一列。
+   * 单独开一个口子是为了让这件事显式，而不是让工具层去猜。
+   */
+  /** 当前的决策周期（分钟）。 */
+  cycleInterval: () => number;
+  setCycleInterval: (minutes: number, reason: string) => { minutes: number; clamped: boolean };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -282,6 +292,14 @@ export async function reviewClosedTrade(input: {
           marketOverview: () => null,
         },
         requestPause: () => {},
+        /*
+         * 复盘用的桩：**它不该改周期**。
+         *
+         * 复盘是"这笔为什么赚/亏"的学习环节，而改决策频率是一次交易决策
+         * —— 让复盘阶段能顺手改掉调度参数，等于给一条只该反思的路径开了写权限。
+         */
+        cycleInterval: () => 0,
+        setCycleInterval: () => ({ minutes: 0, clamped: false }),
       },
       model: input.model,
     });
@@ -354,5 +372,7 @@ function buildToolDeps(ports: OrchestratorPorts, context: { trigger: string; obs
     },
     read: ports.toolReads,
     requestPause: (reason) => ports.requestPause(reason),
+    cycleInterval: () => ports.cycleInterval(),
+    setCycleInterval: (minutes, reason) => ports.setCycleInterval(minutes, reason),
   };
 }

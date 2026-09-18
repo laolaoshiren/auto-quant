@@ -19,7 +19,7 @@
 import type { StrategyConfig } from '@aq/shared';
 
 import { agentExperiments, agentMemory, agentRuns } from '../../store/agentStore.js';
-import { decisions, equity, positions, settings, traders, trades } from '../../store/repositories.js';
+import { decisions, equity, positions, runtimeLogs, settings, traders, trades } from '../../store/repositories.js';
 import type { OrchestratorPorts } from './orchestrator.js';
 import type { WakeFacts } from './wake.js';
 
@@ -279,6 +279,55 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
      */
     requestPause: (reason) => {
       settings.set(pausedKey(traderId), JSON.stringify({ at: new Date().toISOString(), reason }));
+    },
+
+    /*
+     * AI 改自己的决策周期。
+     *
+     * ## 它为什么不是 `saveConfig` 的一部分
+     *
+     * 决策周期不活在 `StrategyConfig` 里 —— 它是 `traders` 表上的一列。
+     * 理由是调度器要在**配置之外**读它：一轮跑完之后要重新排下一次，
+     * 而那一刻手里不一定有策略配置对象。
+     *
+     * ## 上下限由服务端强制，不信模型报上来的数
+     *
+     * `1–1440` 必须与 `CreateTraderSchema` 里的约束**保持一致** ——
+     * 两处各写一个范围迟早会分叉，而分叉那天没人会发现：
+     * AI 在提示词里读到"1–1440"，实际却被另一个更窄的约束默默钳掉。
+     *
+     * **钳制而不是拒绝**：一个 0.5 分钟的请求变成 1 分钟，比整条工具调用失败有用
+     * —— 但必须**回喂实际值**，否则下一轮它会基于错误前提推理。
+     */
+    setCycleInterval: (minutes, reason) => {
+      const requested = Number.isFinite(minutes) ? Math.round(minutes) : 15;
+      const clamped = Math.min(1440, Math.max(1, requested));
+      const wasClamped = clamped !== requested;
+
+      traders.update(traderId, { cycleIntervalMinutes: clamped });
+      runtimeLogs.write(
+        traderId,
+        'info',
+        'agent',
+        `AI 把决策周期改为每 ${clamped} 分钟一次` +
+          (wasClamped ? `（请求 ${requested}，被限制在 1–1440）` : '') +
+          `：${reason}`,
+      );
+
+      return { minutes: clamped, clamped: wasClamped };
+    },
+
+    /*
+     * 读当前的决策周期。
+     *
+     * `get_current_params` 要把它一起给 AI —— **不知道起点就没法判断该往哪边调**。
+     * 读不到时退回 15（schema 的默认值），而不是 0：0 会让 AI 以为
+     * "我从不醒来"，而那是错的。
+     */
+    cycleInterval: () => {
+      const row = traders.get(traderId);
+      const value = row?.cycleIntervalMinutes;
+      return Number.isFinite(value) && (value as number) > 0 ? (value as number) : 15;
     },
   };
 }
