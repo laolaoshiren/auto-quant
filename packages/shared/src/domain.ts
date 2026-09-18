@@ -416,6 +416,59 @@ export function orderPurposeLabel(purpose: string): string {
 }
 
 /**
+ * 运行时日志的**来源**，翻译成给操作员看的中文。
+ *
+ * ## 为什么需要它
+ *
+ * 日志正文前面原来拼着模块名：`[binance:bootstrap] connected to …`。
+ * 那是**给开发者看的** —— 操作员看到 `binance:bootstrap` 不知道那是什么，
+ * 看到 `main` 也不知道"主程序"在做什么。
+ *
+ * ## 与其它标签表同一条纪律
+ *
+ * 与 `CLOSE_REASON_LABELS` / `ORDER_PURPOSE_LABELS` 一样：
+ * **存进库的永远是原码**（`scope` 列，筛选与排查靠它），
+ * **翻译只发生在展示层**。翻译表变化不影响历史数据。
+ *
+ * 认不出的来源**原样显示** —— 不猜。将来有人加了新模块却忘了登记，
+ * 界面会露出机器码，那是一个**看得见的提醒**，而不是一句编出来的中文。
+ */
+export const LOG_SCOPE_LABELS: Record<string, string> = {
+  main: '主程序',
+  api: '接口服务',
+  auth: '登录鉴权',
+  db: '数据库',
+  store: '数据仓库',
+  manager: '机器人管理',
+  trader: '交易循环',
+  'trader:agent': 'AI 智能体',
+  llm: '语言模型',
+  'llm:discovery': '模型探测',
+  balance: '余额',
+  'market:service': '行情服务',
+  'binance:bootstrap': '币安 · 启动检查',
+  'binance:account': '币安 · 账户',
+  'binance:broker': '币安 · 下单',
+  'binance:market': '币安 · 行情',
+  'binance:rest': '币安 · 接口',
+  'binance:ws': '币安 · 推送',
+  'binance:userdata': '币安 · 用户数据流',
+  'strategy:coins': '选币',
+  'strategy:parser': '决策解析',
+  'strategy:check': '策略体检',
+  simulate: '模拟回放',
+  'sim:exchange': '模拟交易所',
+  smoke: '冒烟测试',
+  'reset-admin': '重置管理员',
+};
+
+/** 日志来源的中文标签，认不出时**原样返回**。 */
+export function logScopeLabel(scope: string | null | undefined): string {
+  if (!scope) return '';
+  return LOG_SCOPE_LABELS[scope] ?? scope;
+}
+
+/**
  * 交易所拒单错误的**中文人话**。
  *
  * ## 为什么需要它
@@ -726,4 +779,28 @@ export type ServerEvent =
   | { type: 'order'; traderId: number; order: OrderRecord }
   | { type: 'trade'; traderId: number; trade: TradeRecord }
   | { type: 'equity'; traderId: number; snapshot: EquitySnapshot }
-  | { type: 'log'; traderId: number | null; level: 'info' | 'warn' | 'error'; message: string; timestamp: string };
+  | {
+      type: 'log';
+      traderId: number | null;
+      level: 'info' | 'warn' | 'error';
+      message: string;
+      /**
+       * 记录来源的**稳定机器码**（模块名，例如 `binance:bootstrap`）。
+       *
+       * ## 为什么它是单独一个字段，而不是拼进 `message`
+       *
+       * 原来服务端把 `[${scope}]` 拼在正文最前面，于是界面上显示的是
+       * `[binance:bootstrap] loaded 528 tradable USDT-M perpetual contracts` ——
+       * **一个内部模块名加一句英文**。
+       *
+       * 那有两个问题：
+       *   · **机器码出现在给人看的文本里**（本项目在别处已经统一纠正过这件事：
+       *     展示层翻译，存库的永远是原码）
+       *   · 拼进去之后**界面再也分不出哪一段是来源、哪一段是正文**，
+       *     于是连"把来源翻译成中文"都做不到
+       *
+       * 所以来源单独传，由展示层翻译。原始码仍然完整保留 —— 筛选与排查靠它。
+       */
+      scope?: string;
+      timestamp: string;
+    };

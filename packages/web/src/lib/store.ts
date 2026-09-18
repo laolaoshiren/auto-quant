@@ -387,6 +387,8 @@ export const useEvents = create<EventState>((set, get) => ({
         traderId: event.traderId,
         level: event.level,
         message: event.message,
+        /* 来源单独传 —— 界面用中文标签渲染，见 `logScopeLabel`。 */
+        scope: event.scope,
         timestamp: event.timestamp,
       };
       set((state) => ({ logs: [...state.logs.slice(-(MAX_LOGS - 1)), line], lastEventAt: now }));

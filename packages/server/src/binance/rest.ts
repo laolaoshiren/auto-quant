@@ -277,7 +277,7 @@ export class BinanceRest {
           if (error instanceof BinanceApiError) {
             // Clock drift: re-sync and retry immediately — the request itself was fine.
             if (error.isTimestampError && attempt < retries) {
-              log.warn(`timestamp rejected by ${path}; re-syncing clock and retrying`);
+              log.warn(`签名时间戳被 ${path} 拒绝；重新校时后重试`);
               this.lastTimeSyncAt = 0;
               await this.syncTime(true);
               continue;

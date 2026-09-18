@@ -12,11 +12,12 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDownToLine, Pause, Play, RefreshCw, RotateCw, Trash2 } from 'lucide-react';
+import { logScopeLabel } from '@aq/shared';
 import { api, type LogLine } from '../lib/api';
 import { useApp, useEvents, type LiveLogLine } from '../lib/store';
 import { useDocumentTitle, usePolled, useTicker } from '../lib/hooks';
 import { Badge, Button, CopyButton, ErrorNote, Panel, Spinner3, TextInput, cn } from '../components/ui';
-import { fmtClockOffsetMs, fmtInt, timeAgo } from '../lib/format';
+import { fmtClockOffsetMs, fmtInt, timeAgo, tradingEnvironmentLabel } from '../lib/format';
 
 type Level = 'all' | 'info' | 'warn' | 'error';
 
@@ -171,7 +172,16 @@ export function DataPage() {
       </div>
 
       <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
-        <Metric label="环境" value={system?.environment ?? '—'} sub={system?.environmentLabel} />
+        {/*
+                  显示**中文**，不是 `production`。
+                  `environment` 是机器码，由 `tradingEnvironmentLabel` 翻译；
+                  `environmentLabel`（交易所端点名）作为注解留在下面。
+                */}
+                <Metric
+                  label="环境"
+                  value={tradingEnvironmentLabel(system?.environment)}
+                  sub={system?.environmentLabel}
+                />
         <Metric label="时钟偏移" value={fmtClockOffsetMs(system?.clockOffsetMs)} sub="本机 − 交易所" />
         <Metric
           label="API 权重"
@@ -369,6 +379,22 @@ export function DataPage() {
                 {line.traderId !== null && (
                   <span className="num shrink-0 text-accent" title={`机器人 #${line.traderId}`}>
                     t{line.traderId}
+                  </span>
+                )}
+                {/*
+                  来源用**中文标签**渲染，`title` 里保留原始码。
+
+                  服务端原来把 `[binance:bootstrap]` 拼在正文最前面 ——
+                  那是**内部模块名出现在给人看的文本里**。现在来源单独传，
+                  这里翻成中文（「币安 · 启动检查」），而原始码仍然可查
+                  （悬停可见），按来源筛选也仍然用原始码。
+                */}
+                {line.scope && (
+                  <span
+                    className="shrink-0 rounded bg-base-850 px-1 text-xs text-ink-faint"
+                    title={`来源：${line.scope}`}
+                  >
+                    {logScopeLabel(line.scope)}
                   </span>
                 )}
                 {/* break-all：交易所原文没有空格，break-words 兜不住 */}

@@ -119,6 +119,8 @@ export class TraderManager {
         traderId,
         level,
         message,
+        /* 来源单独传 —— 界面用中文标签渲染，原始码仍存库供筛选。 */
+        scope: 'binance:userdata',
         timestamp: new Date().toISOString(),
       });
     };
@@ -381,6 +383,7 @@ export class TraderManager {
             traderId,
             level: 'info',
             message,
+            scope: 'manager',
             timestamp: new Date().toISOString(),
           });
         }
@@ -623,6 +626,7 @@ export class TraderManager {
         traderId,
         level: 'info',
         message: `机器人已启动（${mode}）`,
+        scope: 'manager',
         timestamp: new Date().toISOString(),
       });
 
@@ -1003,6 +1007,7 @@ export class TraderManager {
         traderId: trader.id,
         level: 'error',
         message: `机器人「${trader.name}」${detail}`,
+        scope: 'manager',
         timestamp: new Date().toISOString(),
       });
       log.error(`机器人「${trader.name}」恢复失败并已放弃重试：${result.error}`);

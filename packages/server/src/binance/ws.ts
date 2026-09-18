@@ -553,7 +553,7 @@ export class BinanceUserDataStream {
     const response = await this.rest.keyedRequest<{ listenKey: string }>('POST', '/fapi/v1/listenKey');
     if (!response?.listenKey) throw new Error('Binance did not return a listenKey');
     if (this.listenKey && this.listenKey !== response.listenKey) {
-      this.log.info('listenKey rotated by the server');
+      this.log.info('交易所已轮换用户数据流的密钥');
     }
     this.listenKey = response.listenKey;
     return response.listenKey;
@@ -569,7 +569,7 @@ export class BinanceUserDataStream {
         error instanceof BinanceApiError && (error.code === -1125 || error.code === -1102);
       this.log.warn(`listenKey keepalive failed (${(error as Error).message})`);
       if (expired) {
-        this.log.warn('listenKey expired; recreating and reconnecting');
+        this.log.warn('用户数据流的密钥已过期；重新申请并重连');
         await this.restart('keepalive-lapsed');
         await this.handlers.onListenKeyExpired?.();
       }
@@ -588,14 +588,14 @@ export class BinanceUserDataStream {
         this.handlers.onAccountUpdate?.(payload as BinanceWsAccountUpdateEvent);
         return;
       case 'MARGIN_CALL':
-        this.log.error('MARGIN CALL received — the account is close to liquidation', payload);
+        this.log.error('收到保证金追缴通知 —— 账户已接近强平，请立即处理', payload);
         this.handlers.onMarginCall?.(payload as BinanceWsMarginCallEvent);
         return;
       case 'ACCOUNT_CONFIG_UPDATE':
         this.handlers.onAccountConfigUpdate?.(payload as BinanceWsAccountConfigUpdateEvent);
         return;
       case 'listenKeyExpired':
-        this.log.warn('listenKeyExpired event received — recreating key and reconnecting');
+        this.log.warn('收到密钥过期事件；重新申请并重连');
         void (payload as BinanceWsListenKeyExpiredEvent);
         await this.restart('listenKeyExpired-event');
         await this.handlers.onListenKeyExpired?.();
