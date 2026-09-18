@@ -4,6 +4,7 @@ import {
   OPEN_ACTIONS,
   RawDecisionSchema,
   isCloseAction,
+  isAdjustAction,
   isOpenAction,
   normalizeSymbol,
   type Decision,
@@ -340,7 +341,16 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
     // --- Symbol must be one the model was shown ---------------------------
     const isListed = ctx.candidateSymbols.has(coerced.symbol);
     const heldSide = ctx.openPositions.get(coerced.symbol);
-    if (!isListed && !(ctx.allowUnlistedCloses && isCloseAction(action) && heldSide)) {
+    /*
+     * **已经持有的仓位，即使这个币种不在本轮候选池里，也必须能操作它。**
+     *
+     * 候选池是"这一轮有什么机会"，而调保护位/平仓是"我手里这笔怎么办" ——
+     * 后者不该受前者的约束。原来的条件只给 `isCloseAction` 开了口子，
+     * 于是**对持仓调保护位时，币种一旦掉出候选池就会被拒**，
+     * 而模型以为它把止损提上来了。
+     */
+    const isHeldPositionAction = Boolean(heldSide) && (isCloseAction(action) || isAdjustAction(action));
+    if (!isListed && !(ctx.allowUnlistedCloses && isHeldPositionAction)) {
       rejected.push({
         symbol: coerced.symbol,
         action,
@@ -405,6 +415,15 @@ const ACTION_PRIORITY: Record<DecisionAction, number> = {
   // Freeing capital and cutting risk always comes before committing more.
   close_long: 1,
   close_short: 1,
+  /*
+   * 调保护位排在开仓**之前**。
+   *
+   * 理由与"平仓排最前"同源：**先把手里的仓位弄安全，再去冒险。**
+   * 一个已经浮盈的仓位，把止损提上来比开新仓更紧急 ——
+   * 反过来做的话，模型可能把这一轮的资金与额度用在新仓上，
+   * 而那个该保护的老仓位一直裸着。
+   */
+  adjust_protection: 1,
   open_long: 2,
   open_short: 2,
   hold: 3,

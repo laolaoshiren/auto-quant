@@ -1,6 +1,7 @@
 import {
   closeReasonLabel,
   isCloseAction,
+  isAdjustAction,
   isOpenAction,
   normalizeSymbol,
   orderPurposeLabel,
@@ -1231,7 +1232,30 @@ export class AutoTrader {
     let cooldownBlocked = 0;
 
     for (const decision of verdict.approved) {
-      if (!isOpenAction(decision.action) && !isCloseAction(decision.action)) continue;
+      /*
+       * ⚠️ 这一行曾经把 `adjust_protection` 静默吃掉。
+       *
+       * 它原来只放行 open / close —— 于是"调保护位"这类新动作
+       * **会被当成 no-op 跳过，而且不留任何记录**：
+       * 模型以为它把止损提上来了，执行日志里却什么都没有。
+       *
+       * 这正是我在 `isAdjustAction` 注释里警告过的失效模式，而它真的发生了。
+       * **所以这里不再用"白名单"式的静默跳过** —— 认不出的动作走下面那个
+       * `else` 分支，报一条失败，而不是消失。
+       */
+      if (
+        !isOpenAction(decision.action) &&
+        !isCloseAction(decision.action) &&
+        !isAdjustAction(decision.action)
+      ) {
+        executionLog.push({
+          action: decision.action,
+          symbol: decision.symbol,
+          status: 'failed',
+          detail: `不认识的决策动作「${decision.action}」—— 已拒绝执行。`,
+        });
+        continue;
+      }
 
       if (isOpenAction(decision.action)) {
         // Circuit breakers and safe mode take precedence over any model intent.
@@ -1270,6 +1294,9 @@ export class AutoTrader {
           const outcome = await this.executeClose(decision, 'model_decision');
           executionLog.push(outcome);
           if (outcome.status === 'ok') exitsTaken += 1;
+        } else if (isAdjustAction(decision.action)) {
+          const outcome = await this.executeAdjust(decision);
+          executionLog.push(outcome);
         } else {
           const outcome = await this.executeOpen(decision, snapshotBySymbol.get(decision.symbol));
           executionLog.push(outcome);
@@ -3145,6 +3172,190 @@ export class AutoTrader {
    */
   /* ---------------------------------------------------------------------- */
   /*  手工平仓（操作员的最高权限）                                            */
+  /**
+   * 执行「调整保护位」：把已有的止损/止盈换成新的。
+   *
+   * ## 顺序不可颠倒，理由与保本止损那次完全相同
+   *
+   * **先撤旧单，再挂新单。**
+   *
+   * 币安不允许同一仓位存在两张条件单（实测吃 `-4130`）。
+   * 我最早在保本止损里写的是"先挂新、再撤旧"，理由是"挂新失败时旧止损还在" ——
+   * **那个推理漏了交易所的约束**，结果新止损每次都被拒、保本从未生效过。
+   * 这里必须是同一个顺序。
+   *
+   * ## 撤旧成功、挂新失败 = 仓位裸着 → 立刻平掉（§2.6）
+   *
+   * 这是这一步唯一的危险时刻。一个没有止损的杠杆敞口是最糟的状态，
+   * 宁可立刻退出也不留着它等下一轮 —— 与 `applyBreakevenGuard` 同一处理。
+   */
+  private async executeAdjust(decision: Decision): Promise<ExecutionLogEntry> {
+    const traderId = this.deps.trader.id;
+    const local = positionStore.getOpenBySymbol(traderId, decision.symbol);
+
+    if (!local) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail: `${decision.symbol} 没有持仓，无法调整保护位。`,
+      };
+    }
+
+    const newStop = decision.stopLoss;
+    const newTarget = decision.takeProfit;
+
+    if (newStop === null && newTarget === null) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'skipped',
+        detail: '既没给止损也没给止盈，没有可执行的变化。',
+      };
+    }
+
+    /* ① 先撤旧单 —— 这一条不能颠倒。 */
+    await this.deps.broker.cancelAllOrders(decision.symbol).catch((error) => {
+      this.emit(
+        'warn',
+        `${decision.symbol} 调整保护位时撤旧单失败（${(error as Error).message}），继续尝试挂新单。`,
+      );
+    });
+
+    /* ② 挂新单。止损与止盈各自独立，一个失败不影响另一个。 */
+    const exitSide: 'BUY' | 'SELL' = local.side === 'long' ? 'SELL' : 'BUY';
+    let stopOrderId: string | null = null;
+    let tpOrderId: string | null = null;
+    const placed: string[] = [];
+    const failed: string[] = [];
+
+    if (newStop !== null) {
+      stopOrderId = await this.placeProtection({
+        symbol: decision.symbol,
+        side: exitSide,
+        type: 'STOP_MARKET',
+        triggerPrice: newStop,
+        purpose: 'stop_loss',
+        traderId,
+        quantity: local.quantity,
+      }).catch(() => null);
+      if (stopOrderId) placed.push(`止损 ${newStop}`);
+      else failed.push('止损');
+    }
+
+    if (newTarget !== null) {
+      tpOrderId = await this.placeProtection({
+        symbol: decision.symbol,
+        side: exitSide,
+        type: 'TAKE_PROFIT_MARKET',
+        triggerPrice: newTarget,
+        purpose: 'take_profit',
+        traderId,
+        quantity: local.quantity,
+      }).catch(() => null);
+      if (tpOrderId) placed.push(`止盈 ${newTarget}`);
+      else failed.push('止盈');
+    }
+
+    /*
+     * ③ 关键判断：这次调整之后，仓位**还有没有止损**？
+     *
+     * 用交易所的实际挂单判断，不用本地记录 —— 本地记录正是我们刚刚
+     * 撤掉/重挂的那一份，它此刻不可能是权威。
+     *
+     * 只有"请求里带止损但没挂上"或"请求里没带止损而旧的被撤了"这两种情况
+     * 会让仓位失去保护，而它们都落在这个判断里。
+     */
+    const survivingStop = newStop ?? local.stop_loss;
+    const stillProtected =
+      survivingStop !== null
+        ? await this.hasLiveStop(decision.symbol, survivingStop)
+        : await this.hasLiveStop(decision.symbol, null);
+
+    if (!stillProtected) {
+      this.emit(
+        'error',
+        `${decision.symbol} 调整保护位后没有有效的止损，为避免留下无保护的敞口，立即平仓。`,
+      );
+      const flatten = await this.emergencyFlatten(
+        decision.symbol,
+        local.quantity,
+        exitSide,
+        traderId,
+      ).catch(() => null);
+      const still = positionStore.getOpenBySymbol(traderId, decision.symbol);
+      if (still) {
+        await this.bookClosedPosition(
+          still,
+          'protection_unavailable',
+          flatten?.avgPrice || decision.takeProfit || 0,
+          flatten?.fee ?? 0,
+          new Date().toISOString(),
+        );
+      }
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail: `新保护单没挂上（${failed.join('、') || '止损缺失'}），已按 §2.6 立即平仓，不留无保护敞口。`,
+      };
+    }
+
+    /*
+     * ④ 本地记录必须与交易所一致 —— 连**单号**一起更新。
+     *
+     * 只改价格是不够的：下一轮的保本守卫会拿 `local.stop_loss` 判断
+     * "是否仍在亏损侧"，读到旧值的话它会以为还需要移，于是**每一轮都重复挂一张新止损**。
+     * 保本止损那段注释里已经记过这个坑。
+     */
+    positionStore.setProtection(
+      traderId,
+      decision.symbol,
+      newStop ?? local.stop_loss,
+      newTarget ?? local.take_profit,
+      stopOrderId ?? (newStop === null ? local.stop_order_id : null),
+      tpOrderId ?? (newTarget === null ? local.tp_order_id : null),
+    );
+
+    if (failed.length > 0) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail: `${failed.join('、')} 没挂上（已挂：${placed.join('、')}）。`,
+      };
+    }
+
+    return {
+      action: decision.action,
+      symbol: decision.symbol,
+      status: 'ok',
+      detail: `已调整保护位：${placed.join('、')}。`,
+    };
+  }
+
+  /**
+   * 该标的上现在有没有活的止损单。
+   *
+   * 用**交易所的实际挂单**而不是本地记录判断 —— 本地记录正是我们刚刚
+   * 撤掉/重挂的那一份，它此刻不可能是权威。
+   *
+   * `expectedStop` 给定时要求价格吻合；给 null 时只要求"存在一张止损"。
+   */
+  private async hasLiveStop(symbol: string, expectedStop: number | null): Promise<boolean> {
+    return this.deps.broker
+      .getOpenOrders(symbol)
+      .then((orders) =>
+        orders.some((o) => {
+          const stopPrice = Number((o as { stopPrice?: string | number }).stopPrice ?? 0);
+          if (!(stopPrice > 0)) return false;
+          if (expectedStop === null) return true;
+          return Math.abs(stopPrice - expectedStop) < 1e-9;
+        }),
+      )
+      .catch(() => false);
+  }
+
   /* ---------------------------------------------------------------------- */
 
   /**

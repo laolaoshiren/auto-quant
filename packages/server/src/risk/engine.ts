@@ -1,5 +1,6 @@
 import {
   isCloseAction,
+  isAdjustAction,
   isMajorSymbol,
   isOpenAction,
   type Decision,
@@ -83,6 +84,143 @@ function num(value: number | null | undefined, fallback = 0): number {
  */
 export class RiskEngine {
   /**
+  /**
+   * 审核「调整保护位」。
+   *
+   * ## 它为什么需要独立审核，而不是直接放行
+   *
+   * 这个动作**不改变持仓数量、不占用保证金**，所以它看起来"无害"。
+   * 但它能造成两种很坏的后果：
+   *
+   *   1. **把止损移到错误的一侧** —— 多头止损放到现价之上，
+   *      交易所会立刻触发它，等于市价平仓（而模型以为自己只是"设了个止损"）
+   *   2. **把止损设得离现价太近** —— 下一根 K 线的正常波动就扫掉它，
+   *      于是这笔交易的结局由噪音决定，而不是由判断决定
+   *
+   * 两个都是 §2.1「模型提议、运行时裁决」要拦的东西：
+   * **模型的意图可能是对的（"这笔该保护一下"），而它填的数字可能不成立。**
+   *
+   * ## 与 `reviewOpen` 共用同一批评据
+   *
+   * 止损必须在正确一侧、距离必须 ≥ 往返成本的若干倍 —— 这两条在开仓时
+   * 已经有一份实现（第 6 条与 `minStopLossFeeMultiple`）。**这里用同一份判断**
+   * （同一套 `roundTripFeeRate` 回退逻辑），否则同一个止损在开仓时合格、
+   * 移动时不合格，而操作员看不出为什么。
+   */
+  private reviewAdjust(
+    decision: Decision,
+    env: RiskEnvironment,
+  ): { ok: true; decision: Decision } | { ok: false; reason: string } {
+    const position = env.positions.get(decision.symbol);
+    if (!position) {
+      return { ok: false, reason: `${decision.symbol} 没有持仓，无法调整保护位。` };
+    }
+
+    const snapshot = env.snapshots.get(decision.symbol);
+    const price = snapshot?.price ?? position.markPrice ?? position.entryPrice;
+    if (!(price > 0)) {
+      return { ok: false, reason: `${decision.symbol} 拿不到现价，无法判断保护位是否有效。` };
+    }
+
+    const isLong = position.side === 'long';
+    const stop = decision.stopLoss;
+    const target = decision.takeProfit;
+
+    if (stop === null && target === null) {
+      return { ok: false, reason: '要调整保护位，但止损和止盈两个都没给。' };
+    }
+
+    /*
+     * 止损必须在**保护**的一侧。
+     *
+     * 多头止损 ≥ 现价 意味着"价格一碰就平" —— 那不是保护，是立刻市价平仓。
+     * 空头止损 ≤ 现价同理。
+     */
+    if (stop !== null) {
+      if (isLong && !(stop < price)) {
+        return { ok: false, reason: `多头止损 ${stop} 必须在现价 ${price} 之下。` };
+      }
+      if (!isLong && !(stop > price)) {
+        return { ok: false, reason: `空头止损 ${stop} 必须在现价 ${price} 之上。` };
+      }
+
+      /* 距离必须盖过往返成本 —— 与开仓同一把尺子、同一套回退。 */
+      const risk = env.config.riskControl;
+      const feeMultiple = risk.minStopLossFeeMultiple;
+      const observed = env.roundTripFeeRate;
+      const roundTripFeeRate =
+        typeof observed === 'number' && Number.isFinite(observed) && observed > 0
+          ? observed
+          : risk.fallbackRoundTripFeeRate;
+
+      const distancePercent = (Math.abs(price - stop) / price) * 100;
+      const minPercent = roundTripFeeRate * feeMultiple * 100;
+
+      /* 容差 1e-9：恰好等于 K × 手续费时必须通过 —— 与 `reviewOpen` 一致。 */
+      if (feeMultiple > 0 && distancePercent + 1e-9 < minPercent) {
+        return {
+          ok: false,
+          reason:
+            `止损距离 ${distancePercent.toFixed(3)}% 低于往返成本的 ${feeMultiple} 倍` +
+            `（${minPercent.toFixed(3)}%）—— 这么近的止损会被正常波动扫掉，` +
+            '结局由噪音决定而不是由判断决定。',
+        };
+      }
+    }
+
+    /* 止盈同样必须在目标一侧，否则它一挂上就成交。 */
+    if (target !== null) {
+      if (isLong && !(target > price)) {
+        return { ok: false, reason: `多头止盈 ${target} 必须在现价 ${price} 之上。` };
+      }
+      if (!isLong && !(target < price)) {
+        return { ok: false, reason: `空头止盈 ${target} 必须在现价 ${price} 之下。` };
+      }
+    }
+
+    /*
+     * **移动方向必须对仓位有利。**
+     *
+     * 多头把止损往上移是收紧保护；往下移是放松保护 ——
+     * 后者在一笔已有浮盈的仓位上是**主动扩大风险**。
+     * 允许它意味着模型可以把一个已经移到保本的止损再挪回去，
+     * 而那正是"浮盈回吐"的成因。
+     *
+     * 没有旧止损时放行：那是在给一个裸仓位补保护，方向问题不存在。
+     */
+    if (stop !== null && position.stopLoss !== null && position.stopLoss > 0) {
+      if (isLong && stop < position.stopLoss) {
+        return {
+          ok: false,
+          reason:
+            `多头止损只能往上移（当前 ${position.stopLoss}，你给的是 ${stop}）` +
+            '—— 往下移是主动扩大风险。',
+        };
+      }
+      if (!isLong && stop > position.stopLoss) {
+        return {
+          ok: false,
+          reason:
+            `空头止损只能往下移（当前 ${position.stopLoss}，你给的是 ${stop}）` +
+            '—— 往上移是主动扩大风险。',
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      decision: {
+        ...decision,
+        stopLoss: stop ?? position.stopLoss,
+        takeProfit: target ?? position.takeProfit,
+        /* 调保护不动数量与杠杆 —— 固定成持仓的真实值，免得下游误读。 */
+        positionSizeUsd: position.notional,
+        leverage: position.leverage,
+      },
+    };
+  }
+
+  /**
    * Review a full batch of decisions.
    *
    * Closes are always evaluated first and are almost never blocked — reducing
@@ -102,13 +240,27 @@ export class RiskEngine {
 
     const ordered = [
       ...decisions.filter((d) => isCloseAction(d.action)),
+      /*
+       * 调保护位排在开仓之前 —— 与 `ACTION_PRIORITY` 同一个理由：
+       * **先把手里的仓位弄安全，再去冒险。**
+       */
+      ...decisions.filter((d) => isAdjustAction(d.action)),
       ...decisions.filter((d) => isOpenAction(d.action)),
-      ...decisions.filter((d) => !isCloseAction(d.action) && !isOpenAction(d.action)),
+      ...decisions.filter(
+        (d) => !isCloseAction(d.action) && !isOpenAction(d.action) && !isAdjustAction(d.action),
+      ),
     ];
 
     for (const decision of ordered) {
       if (isCloseAction(decision.action)) {
         const verdict = this.reviewClose(decision, env);
+        if (verdict.ok) approved.push(verdict.decision);
+        else rejected.push({ decision, reason: verdict.reason });
+        continue;
+      }
+
+      if (isAdjustAction(decision.action)) {
+        const verdict = this.reviewAdjust(decision, env);
         if (verdict.ok) approved.push(verdict.decision);
         else rejected.push({ decision, reason: verdict.reason });
         continue;
