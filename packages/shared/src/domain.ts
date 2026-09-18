@@ -748,6 +748,15 @@ export interface DecisionRecord {
   aiLatencyMs: number;
   promptTokens: number | null;
   completionTokens: number | null;
+  /**
+   * `promptTokens` 里命中上下文缓存的部分。
+   *
+   * `null` = 服务商没报这个字段（**不知道**）；`0` = 报了，确实没命中。
+   * 两者的结论完全相反 —— 前者该换供应商，后者该查提示词。
+   */
+  cachedTokens?: number | null;
+  /** `completionTokens` 里花在思考上的部分。 */
+  reasoningTokens?: number | null;
 }
 
 export interface ExecutionLogEntry {

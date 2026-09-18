@@ -514,6 +514,26 @@ ALTER TABLE positions ADD COLUMN realized_partial_pnl REAL NOT NULL DEFAULT 0;
 ALTER TABLE positions ADD COLUMN booked_partial_qty REAL NOT NULL DEFAULT 0;
 `;
 
+
+/*
+ * 决策记录里补上**缓存命中**与**思考 token**。
+ *
+ * ## 为什么这两列值钱
+ *
+ * 缓存命中价与未命中价差 50 倍，而输出价是缓存命中输入价的 200 倍。
+ * 少了这两个数，"这个机器人为什么烧钱"就只能靠猜。
+ *
+ * ## 为什么允许 NULL
+ *
+ * `NULL` = 服务商没报这个字段（**不知道**）；
+ * `0` = 报了，确实一个都没命中。**两者的结论完全相反**，
+ * 所以不设默认值 —— 一个默认的 0 会把"不知道"永久伪装成"没命中"。
+ */
+const M9_USAGE_DETAIL = /* sql */ `
+ALTER TABLE decision_records ADD COLUMN cached_tokens INTEGER;
+ALTER TABLE decision_records ADD COLUMN reasoning_tokens INTEGER;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -523,4 +543,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 6, name: 'agent-config', sql: M6_AGENT_CONFIG },
   { version: 7, name: 'trader-mode', sql: M7_TRADER_MODE },
   { version: 8, name: 'partial-close', sql: M8_PARTIAL_CLOSE },
+  { version: 9, name: 'usage-detail', sql: M9_USAGE_DETAIL },
 ];

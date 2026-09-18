@@ -271,7 +271,19 @@ test('openai parser: extracts choices[0].message.content and usage', () => {
   const parsed = openai.parseResponse('deepseek', payload, 'deepseek-flash');
   assert.equal(parsed.text, 'Funding is positive.');
   assert.equal(parsed.finishReason, 'stop');
-  assert.deepEqual(parsed.usage, { promptTokens: 42, completionTokens: 128, totalTokens: 170 });
+  assert.deepEqual(parsed.usage, {
+    promptTokens: 42,
+    completionTokens: 128,
+    totalTokens: 170,
+    /*
+     * payload 里没有 `prompt_tokens_details` —— 所以是 **null（不知道）**
+     * 而不是 **0（确实没命中）**。这两个结论完全相反：前者该换供应商，
+     * 后者该查提示词。归一化把「字段缺失」和「值为零」混掉的话，
+     * 就会把不支持上报的供应商显示成「缓存全没命中」。
+     */
+    cachedTokens: null,
+    reasoningTokens: null,
+  });
   assert.equal(parsed.isEmpty, false);
 });
 
@@ -372,7 +384,7 @@ test('anthropic parser: only text blocks are joined, thinking blocks are skipped
   const parsed = anthropic.parseResponse(payload, 'claude-opus-5');
   assert.equal(parsed.text, 'Funding is positive on BTC.');
   assert.equal(parsed.finishReason, 'stop');
-  assert.deepEqual(parsed.usage, { promptTokens: 1024, completionTokens: 256, totalTokens: 1280 });
+  assert.deepEqual(parsed.usage, { promptTokens: 1024, completionTokens: 256, totalTokens: 1280, cachedTokens: null, reasoningTokens: null });
   assert.equal(parsed.model, 'claude-opus-5');
 });
 
@@ -407,7 +419,7 @@ test('gemini parser: text comes from candidates[0].content.parts[*].text', () =>
   const parsed = gemini.parseResponse(payload, 'gemini-3.8-flash');
   assert.equal(parsed.text, 'Funding is positive.');
   assert.equal(parsed.finishReason, 'stop');
-  assert.deepEqual(parsed.usage, { promptTokens: 12, completionTokens: 22, totalTokens: 34 });
+  assert.deepEqual(parsed.usage, { promptTokens: 12, completionTokens: 22, totalTokens: 34, cachedTokens: null, reasoningTokens: null });
   assert.equal(parsed.model, 'gemini-3.8-flash');
 });
 
@@ -652,17 +664,24 @@ test('normalizeUsage: handles the differing provider key names and missing usage
     promptTokens: null,
     completionTokens: null,
     totalTokens: null,
+    cachedTokens: null,
+    reasoningTokens: null,
   });
   assert.deepEqual(normalizeUsage({ input_tokens: 10, output_tokens: 5 }), {
     promptTokens: 10,
     completionTokens: 5,
     totalTokens: 15,
+    /* 这两个 payload 都没报缓存/思考详情 ⇒ null（不知道），不是 0。 */
+    cachedTokens: null,
+    reasoningTokens: null,
   });
   // Gemini's wire name for completion tokens is not reliably one thing.
   assert.deepEqual(normalizeUsage({ promptTokenCount: 3, candidatesTokenCount: 4, totalTokenCount: 7 }), {
     promptTokens: 3,
     completionTokens: 4,
     totalTokens: 7,
+    cachedTokens: null,
+    reasoningTokens: null,
   });
   // Gemini's typedoc and prose disagree on the output-token key, so both work.
   assert.equal(normalizeUsage({ promptTokenCount: 3, responseTokenCount: 9 }).completionTokens, 9);

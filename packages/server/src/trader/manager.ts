@@ -585,6 +585,13 @@ export class TraderManager {
             usage: {
               promptTokens: result.usage.promptTokens,
               completionTokens: result.usage.completionTokens,
+              /*
+               * 把这两个数一路带到落库 —— 见 `autoTrader` 里 `progress` 上的说明。
+               * **适配层漏掉它们，前面所有的工作都白做**：数据在最后一跳丢掉，
+               * 而界面上什么都不会显示。
+               */
+              cachedTokens: result.usage.cachedTokens,
+              reasoningTokens: result.usage.reasoningTokens,
             },
           };
         },
