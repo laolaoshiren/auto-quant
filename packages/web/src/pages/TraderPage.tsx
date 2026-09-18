@@ -119,6 +119,11 @@ export function TraderPage() {
   const navigate = useNavigate();
   const system = useApp((s) => s.system);
   const socketOpen = useEvents((s) => s.status) === 'open';
+  /*
+   * 平仓后用 REST 的结果覆盖 store 里的持仓 —— 见 `onPositionsChanged` 上的说明。
+   * 这里取的是**动作**（引用稳定），不是状态，所以不会引起额外渲染。
+   */
+  const setLivePositions = useEvents((s) => s.setPositions);
   const live = useEvents((s) => (Number.isFinite(traderId) ? s.byTrader[traderId] : undefined));
   const liveStatus = live?.status ?? null;
   const statsMap = useSummaries((s) => s.stats);
@@ -896,6 +901,22 @@ export function TraderPage() {
           positionCount={openPositionCount}
           openOrderCount={openOrders.length}
           onSelectSymbol={setPickedSymbol}
+          positionSymbols={positions.map((p) => p.symbol)}
+          /*
+           * 手工平仓成功后**立刻重取持仓并写进 store**。
+           *
+           * 不能只靠 WebSocket 推送：用户实测过「平仓提示成功、持仓里还显示着」——
+           * 于是他会以为没平掉、再按一次。
+           * **操作员按下平仓之后的界面状态，不能依赖推送的到达时间。**
+           */
+          onPositionsChanged={() => {
+            void api
+              .traderPositions(traderId)
+              .then((rows) => setLivePositions(traderId, rows))
+              .catch(() => undefined);
+            // 图表盯着的那个币种可能已经被平掉了 —— 回到"跟随持仓"。
+            setPickedSymbol(undefined);
+          }}
         />
 
         {/*
