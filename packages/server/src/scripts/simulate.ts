@@ -30,6 +30,7 @@ import {
   type StrategyConfig,
   type Timeframe,
 } from '@aq/shared';
+import { CLOSE_REASONS } from '@aq/shared';
 import { connectExchange } from '../binance/bootstrap.js';
 import type { BinanceBroker } from '../binance/broker.js';
 import { Vault } from '../crypto/vault.js';
@@ -183,6 +184,7 @@ function makeScriptedModel(state: () => {
   heldCycles: number;
   openCount: number;
   price: number;
+  stopLoss: number | null;
 }): DecisionModel {
   const PHASES = 6;
   /** Entry indices held on purpose and closed by the model. */
@@ -254,6 +256,78 @@ function makeScriptedModel(state: () => {
           action: s.side === 'short' ? 'close_short' : 'close_long',
           confidence: 90,
           reasoning: `脚本化决策：已持有 ${s.heldCycles} 个周期，主动平仓。`,
+        };
+      } else if (s.heldCycles === 1) {
+        /*
+         * **调整保护位** —— 把一个已经有浮盈的仓位止损往有利方向挪。
+         *
+         * ## 必须提议一个**真正的改善**，而不是一个固定的百分比
+         *
+         * 第一版提的是 `price × 0.99`（低 1%）。而开仓时用的是**紧止损**
+         * （0.4–0.5%），所以对那几笔来说 1% 反而更松 —— 风控正确拒绝，
+         * 这条校验于是永远失败。实测到的原文：
+         *
+         *     多头止损只能往上移（当前 80265.349，你给的是 79907.058）
+         *
+         * **那次失败暴露的是提议不合理，不是风控有问题** ——
+         * 而一个永远失败的校验会掩盖真正的回归，所以必须修好它。
+         *
+         * 现在取**现有止损与现价的中点**：它一定比现有止损更紧
+         * （多头往上、空头往下），也一定还在保护的那一侧。
+         */
+        const current = s.stopLoss;
+        /*
+         * **只在"有空间可收"时才收。**
+         *
+         * 第二版取的是"现有止损与现价的中点"。当仓位只有一点点浮盈时，
+         * 那个中点离现价太近 —— 风控正确拒绝：
+         *
+         *     止损距离 0.147% 低于往返成本的 3 倍（0.287%）
+         *
+         * **这不是风控太严，是提议本身是个坏主意**：贴脸的止损会被
+         * 正常波动扫掉，结局由噪音决定。所以这里先算一下空间够不够，
+         * 不够就老实持有 —— 那正是真实的交易判断。
+         */
+        const room = current === null ? s.price * 0.01 : Math.abs(s.price - current);
+        /* 距现价至少 0.35%：盖过 0.287% 的门槛，留一点余量。 */
+        const minGap = s.price * 0.0035;
+        const candidate = current === null ? s.price * 0.99 : (current + s.price) / 2;
+        const usable = Math.abs(s.price - candidate) >= minGap;
+        decision = usable
+          ? {
+              symbol,
+              action: 'adjust_protection',
+              stop_loss: Number(candidate.toPrecision(8)),
+              confidence: 85,
+              reasoning:
+                `脚本化决策：把止损从 ${current ?? '（无）'} 收紧到 ${candidate.toPrecision(8)}` +
+                `（第 ${s.heldCycles} 个周期）。`,
+            }
+          : {
+              symbol,
+              action: 'hold',
+              confidence: 80,
+              reasoning:
+                `脚本化决策：止损离现价只有 ${(Math.abs(s.price - candidate) / s.price * 100).toFixed(3)}%，` +
+                `收过去会被正常波动扫掉（空间 ${(room / s.price * 100).toFixed(3)}%），继续持有。`,
+            };
+      } else if (s.heldCycles === 2) {
+        /* **加仓** —— 敞口变大，保护必须跟着重挂。 */
+        decision = {
+          symbol,
+          action: 'add_to_position',
+          position_size_usd: 100,
+          confidence: 85,
+          reasoning: `脚本化决策：同向加仓（第 ${s.heldCycles} 个周期）。`,
+        };
+      } else if (s.heldCycles === 3) {
+        /* **减仓** —— 部分平仓，要当场记账、并按剩余数量重挂保护。 */
+        decision = {
+          symbol,
+          action: 'reduce_position',
+          reduce_percent: 40,
+          confidence: 85,
+          reasoning: `脚本化决策：先落袋一部分（第 ${s.heldCycles} 个周期）。`,
         };
       } else {
         decision = {
@@ -485,6 +559,19 @@ async function main(): Promise<void> {
         heldCycles,
         openCount,
         price: (first ? exchange.lastCandle(first.symbol)?.close ?? first.entry_price : 0) || fallbackPrice,
+        /*
+         * **当前止损必须给出来。**
+         *
+         * 调整保护位时，脚本化模型要提一个**比现有止损更紧**的价位。
+         * 不给它这个值的话，它只能猜（原来是 `price × 0.99`）——
+         * 而遇到开仓时就用紧止损的那些阶段，这个"改善"其实是**放松**，
+         * 于是被风控正确拒绝，校验就永远失败。
+         *
+         * 实测到的原文：`多头止损只能往上移（当前 80265.349，你给的是 79907.058）`。
+         * **那次失败暴露的是脚本化提议不合理，不是风控有问题** ——
+         * 而一个永远失败的校验会掩盖真正的回归，必须修好。
+         */
+        stopLoss: first?.stop_loss ?? null,
       };
     });
   }
@@ -648,7 +735,18 @@ async function main(): Promise<void> {
   const closeReasons = [...new Set(trades.map((t) => t.closeReason))];
   check(
     '平仓原因使用稳定机器码',
-    closeReasons.every((r) => ['model_decision', 'stop_loss', 'take_profit', 'drawdown_guard', 'liquidated', 'external'].includes(r)),
+    /*
+     * ⚠️ **用权威名单，不在这里再抄一份。**
+     *
+     * 这里原来是一份硬编码数组：`['model_decision', 'stop_loss', …]`。
+     * 而权威名单是 `@aq/shared` 的 `CLOSE_REASONS` —— 两处各写一份，
+     * **我加 `manual_partial` 时只改了权威那份，这条校验就失败了**
+     * （报「实际出现的平仓原因：…、manual_partial」）。
+     *
+     * 这正是本项目在别处反复修过的那个模式：同一个概念两套实现，
+     * 改动只覆盖了其中一处。**改成引用同一个常量，它就不可能再分叉。**
+     */
+    closeReasons.every((r) => (CLOSE_REASONS as readonly string[]).includes(r)),
     `实际出现的平仓原因：${closeReasons.length > 0 ? closeReasons.join('、') : '（无）'}。`,
   );
 
@@ -699,6 +797,62 @@ async function main(): Promise<void> {
     withAdjustments.length > 0
       ? `记录了 ${withAdjustments.length} 条运行时调整（风控推翻模型的地方），例如：${withAdjustments[0]}`
       : '本次回放未触发运行时调整（提案本身已在限制内），这属于正常情况。',
+  );
+
+  /* ---------------------------------------------------------------------- */
+  /*  仓位管理动作（调整保护 / 加仓 / 减仓）                                   */
+  /* ---------------------------------------------------------------------- */
+
+  /*
+   * 这三个动作有一段时间**在动作集合里根本不存在** —— 模型只能开或平，
+   * 止损止盈在开仓那一刻定死。用户的原话是「没有动态加仓、减仓、调整」。
+   *
+   * 它们各自有两个**只在真实往返里才暴露**的失败方式：
+   *
+   *   · 调整保护：旧止损没撤干净（交易所侧两张条件单，真实环境吃 `-4130`）、
+   *     或本地 `stop_loss` 没跟着改（下一轮重复挂同一张）
+   *   · 加仓：敞口变大而保护没跟着重挂 —— **多出来的那部分是裸的**
+   *   · 减仓：部分平仓没当场记账（账面落后于账户）、或剩余数量的保护没重挂
+   *
+   * 单元测试覆盖了风控裁决，**覆盖不了这些"执行之后交易所侧与本地是否一致"** ——
+   * 而那正是这一段要验证的。
+   */
+  const allExec = decisions.flatMap((d) => d.executionLog);
+  const adjustRuns = allExec.filter((e) => e.action === 'adjust_protection');
+  const addRuns = allExec.filter((e) => e.action === 'add_to_position');
+  const reduceRuns = allExec.filter((e) => e.action === 'reduce_position');
+
+  check(
+    '调整保护位被真实执行',
+    adjustRuns.some((e) => e.status === 'ok') || USE_LIVE_MODEL,
+    `共 ${adjustRuns.length} 次调整保护位提案，其中 ${adjustRuns.filter((e) => e.status === 'ok').length} 次成功。` +
+      (adjustRuns[0] ? ` 示例：${adjustRuns[0].detail}` : ''),
+  );
+
+  check(
+    '加仓被真实执行',
+    addRuns.some((e) => e.status === 'ok') || USE_LIVE_MODEL,
+    `共 ${addRuns.length} 次加仓提案，其中 ${addRuns.filter((e) => e.status === 'ok').length} 次成功。` +
+      (addRuns[0] ? ` 示例：${addRuns[0].detail}` : ''),
+  );
+
+  /*
+   * **减仓必须留下一笔单独记账的成交。**
+   *
+   * 减仓与"全部平仓"的区别就在账目上：它当场记一笔（那部分已经实现），
+   * 而仓位还开着。如果这里没有 `manual_partial` 的成交记录，
+   * 说明那一部分盈亏根本没进账 —— 账面会比账户差，而 §2.5 两边都要能对上。
+   */
+  const partialTrades = tradeStore
+    .list(trader.id, 500)
+    .filter((t) => t.closeReason === 'manual_partial');
+  check(
+    '减仓留下了一笔单独记账的部分平仓',
+    partialTrades.length > 0 || USE_LIVE_MODEL,
+    partialTrades.length > 0
+      ? `记录了 ${partialTrades.length} 笔部分平仓，例如 ${partialTrades[0]!.symbol} ` +
+        `净 ${partialTrades[0]!.netPnl.toFixed(4)} USDT。`
+      : '回放中没有产生部分平仓记录。',
   );
 
   /* ---------------------------------------------------------------------- */

@@ -94,6 +94,15 @@ export interface SimulatedExchangeOptions {
  */
 export class SimulatedExchange {
   private balance: number;
+  /**
+   * 当前杠杆。
+   *
+   * **下单请求里没有这个字段** —— 币安的杠杆是另一个接口（`setLeverage`）
+   * 设的，下单时它已经是账户状态的一部分。所以模拟器必须自己记着它，
+   * 而不是在下单时从请求里读（原来那句 `const leverage = 3` 就是因为它读不到，
+   * 只能写死 —— 于是机器人设成 5x，模拟器仍按 3x 记保证金）。
+   */
+  private defaultLeverage = 3;
   private readonly positions = new Map<string, SimPosition>();
   private readonly fills: SimulatedFill[] = [];
   private readonly feeRate: number;
@@ -307,6 +316,7 @@ export class SimulatedExchange {
   }
 
   async setLeverage(_symbol: string, leverage: number) {
+    this.defaultLeverage = leverage;
     return { ok: true, leverage };
   }
 
@@ -442,31 +452,107 @@ export class SimulatedExchange {
 
     const fee = mark * quantity * this.feeRate;
 
-    if (request.reduceOnly) {
-      const position = this.positions.get(symbol);
-      if (!position) throw new Error(`${symbol} 没有可平的持仓`);
-      const isLong = position.side === 'long';
-      const pnl = (isLong ? mark - position.entryPrice : position.entryPrice - mark) * quantity;
-      this.balance += pnl - fee;
-      for (const id of position.protection.keys()) this.resolvedAlgo.set(id, 'CANCELED');
-      position.protection.clear();
-      this.positions.delete(symbol);
+    /*
+     * ⚠️ **按方向判断加仓还是平仓，不按 `reduceOnly` 判断。**
+     *
+     * 这里原来是：
+     *
+     *     if (request.reduceOnly) { 平掉整个持仓 }
+     *     else { positions.set(...) 覆盖 }
+     *
+     * 两个缺陷：
+     *
+     *   1. **部分平仓根本没被建模** —— `reduceOnly` 一律平掉**整个**持仓，
+     *      无视 `quantity`。「减仓」在执行层发的是部分数量的 `reduceOnly` 单，
+     *      而模拟交易所把它当成清仓，于是"减完之后还剩多少"在模拟里是错的。
+     *   2. **加仓变成了替换** —— 同向的非 `reduceOnly` 单会 `positions.set` 覆盖，
+     *      数量没累加、均价没重算。更糟的是它**看起来是成功的**：
+     *      调用方以为加仓成了，实际持仓被换掉了。
+     *
+     * 真实交易所的规则很简单，`reconstructRoundTrips()` 里也是这么写的
+     * （「Adding to the position: the entry average moves」）：
+     *
+     *   · **同向** → 数量累加，入场价重算成加权平均
+     *   · **反向** → 按 `quantity` 平掉一部分或全部
+     *
+     * 模拟器是这套系统唯一的集成测试。**它把交易所建模错了，
+     * 就等于给了假信心** —— 而这比没有模拟更危险。
+     */
+    const existing = this.positions.get(symbol);
+    const incomingIsLong = request.side === 'BUY';
+    const sameDirection = existing ? (existing.side === 'long') === incomingIsLong : false;
+
+    if (existing && sameDirection) {
+      /* --- 加仓：数量累加，均价重算 --- */
+      const newQty = existing.quantity + quantity;
+      const newEntry = (existing.entryPrice * existing.quantity + mark * quantity) / newQty;
+      this.balance -= fee;
+      this.positions.set(symbol, {
+        ...existing,
+        quantity: newQty,
+        entryPrice: newEntry,
+        marginUsed: (newQty * newEntry) / existing.leverage,
+      });
       this.fills.push({
         at: this.now,
         symbol,
         side: request.side,
-        purpose: 'exit',
+        purpose: 'entry',
         type: request.type,
         quantity,
         price: mark,
         fee,
         notional: mark * quantity,
         orderId: id,
-        pnl: pnl - fee,
+      });
+    } else if (existing) {
+      /* --- 反向：按数量平掉一部分或全部 --- */
+      const closing = Math.min(quantity, existing.quantity);
+      const isLong = existing.side === 'long';
+      const pnl = (isLong ? mark - existing.entryPrice : existing.entryPrice - mark) * closing;
+      /* 手续费按平掉的比例分摊 —— 部分平仓时不该把整笔的手续费都记上。 */
+      const closingFee = fee * (closing / quantity);
+      this.balance += pnl - closingFee;
+
+      if (closing >= existing.quantity) {
+        for (const pid of existing.protection.keys()) this.resolvedAlgo.set(pid, 'CANCELED');
+        existing.protection.clear();
+        this.positions.delete(symbol);
+      } else {
+        /*
+         * 部分平仓：仓位**留着**，数量减少、**均价不变**（卖掉一部分不改变
+         * 剩余部分当初的买入价），保护单由调用方按新数量重挂。
+         */
+        const remaining = existing.quantity - closing;
+        this.positions.set(symbol, {
+          ...existing,
+          quantity: remaining,
+          marginUsed: (remaining * existing.entryPrice) / existing.leverage,
+        });
+      }
+
+      this.fills.push({
+        at: this.now,
+        symbol,
+        side: request.side,
+        purpose: 'exit',
+        type: request.type,
+        quantity: closing,
+        price: mark,
+        fee: closingFee,
+        notional: mark * closing,
+        orderId: id,
+        pnl: pnl - closingFee,
         closeReason: 'model_decision',
       });
     } else {
-      const leverage = 3;
+      /* --- 空仓 → 开新仓 --- */
+      /*
+       * 杠杆是**另一个接口**设的（`setLeverage`），下单请求里没有这个字段 ——
+       * 所以这里读不到"用户设的杠杆"，只能用模拟器自己的默认值。
+       * 真实的币安也是这样：下单时杠杆已经是账户状态的一部分。
+       */
+      const leverage = this.defaultLeverage;
       this.balance -= fee;
       this.positions.set(symbol, {
         symbol,
