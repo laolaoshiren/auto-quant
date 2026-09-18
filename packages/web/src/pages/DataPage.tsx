@@ -84,14 +84,26 @@ const SCOPE_TONE: Record<string, string> = {
  */
 function highlightNumbers(text: string): ReactNode[] {
   const parts: ReactNode[] = [];
-  const re = /([+-]\d+(?:\.\d+)?|(?<![.\d])\d+\.\d+)\s*(USDT|U|ms|%|x)?/g;
+  /*
+   * ⚠️ **只认"带正负号"或"带单位"的数字，不认裸小数。**
+   *
+   * 第一版还匹配 `\d+\.\d+`，于是 `http://172.17.0.1:3200` 里的
+   * **`172.17` 被当成一个数值高亮了** —— 在一句 URL 中间突然冒出
+   * 一个亮色数字。实测是在浏览器里读 DOM 才发现的。
+   *
+   * 裸小数太容易误伤（IP、版本号、时间、路径里的编号），
+   * 而日志里真正值得关注的数字**几乎都带正负号或单位**
+   * （`净 +0.0771 USDT`、`时钟偏移 -75ms`、`止损距离 0.4%`）。
+   */
+  const re = /([+-]\d+(?:\.\d+)?)\s*(USDT|U|ms|%|x)?|(\d+(?:\.\d+)?)\s*(USDT|ms|%)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let key = 0;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) parts.push(text.slice(last, m.index));
-    const num = m[1] ?? '';
-    const unit = m[2] ?? '';
+    /* 正则有两组分支（带符号 / 带单位），取值要把两边都兜住。 */
+    const num = m[1] ?? m[3] ?? '';
+    const unit = m[2] ?? m[4] ?? '';
     /*
      * 带正负号的用主题的涨跌色，其余（时长、比例）用中性高亮。
      * **不按"好/坏"判断**：`-75ms` 是时钟偏移，不是亏损。
@@ -106,7 +118,17 @@ function highlightNumbers(text: string): ReactNode[] {
         {num}
       </span>,
     );
-    if (unit) parts.push(<span key={key++} className="text-ink-faint">{` ${unit}`}</span>);
+    /*
+     * 单位**紧贴数字**，不插空格。
+     *
+     * 第一版写的是 `` ` ${unit}` `` —— 于是 `-75ms` 渲染成 `-75 ms`、
+     * `0.147%` 渲染成 `0.147 %`。**那两处在日志原文里本来就是连着的**，
+     * 而中文技术文案里 `75ms` / `0.147%` 也是标准写法。
+     * 改写原文的排版，是在用一个"看起来更整齐"的规则去破坏它。
+     *
+     * 数字与单位的区分由**颜色**承担，不需要空格。
+     */
+    if (unit) parts.push(<span key={key++} className="text-ink-faint">{unit}</span>);
     last = m.index + m[0].length;
   }
   if (last < text.length) parts.push(text.slice(last));
