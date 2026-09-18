@@ -1413,6 +1413,33 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   });
 
   /** Force one decision cycle immediately instead of waiting for the interval. */
+  /*
+   * 手工平仓 —— **操作员的最高权限**。
+   *
+   * ## 为什么不加任何前置检查
+   *
+   * 这里原本**根本没有这条路由**：控制台上的「平仓」按钮只弹一个说明弹窗。
+   * 那个设计的理由是"机器人自己在管理持仓，控制台不该和它抢"。
+   *
+   * **那个理由把"代码整洁"放在了"操作员对自己资金的控制权"前面。**
+   *
+   * 所以这条路由**不检查机器人是否在运行、不检查是否 dryRun、不检查全局开关**
+   * —— 那些检查都属于"机器人要不要开仓"，而这条是"人要退出"。
+   * **一个止不住手的操作员是被困住的。**
+   *
+   * 唯一的前置条件是"本地有这个持仓"，由 `closePosition` 内部判断。
+   */
+  app.post('/api/traders/:id/positions/:symbol/close', authed, async (request, reply) => {
+    const id = Number((request.params as { id: string }).id);
+    const symbol = String((request.params as { symbol: string }).symbol).toUpperCase();
+    try {
+      const result = await deps.manager.closePosition(id, symbol);
+      return { ok: true, ...result };
+    } catch (error) {
+      return reply.code(400).send({ ok: false, error: (error as Error).message });
+    }
+  });
+
   app.post('/api/traders/:id/run-once', authed, async (request, reply) => {
     const id = Number((request.params as { id: string }).id);
     if (env.globalTradingDisabled) {

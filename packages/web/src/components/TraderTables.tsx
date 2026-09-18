@@ -31,7 +31,7 @@ import { orderPurposeLabel, orderStatusLabel, orderTypeLabel } from '@aq/shared'
 import { api } from '../lib/api';
 import { useEvents } from '../lib/store';
 import { usePolled } from '../lib/hooks';
-import { Badge, Button, Modal, Panel, Spinner3 } from './ui';
+import { Badge, Button, ErrorNote, Modal, Panel, Spinner3 } from './ui';
 import { SideBadge } from './Badges';
 import { closeReasonLabel } from '../lib/summaries';
 import {
@@ -486,39 +486,118 @@ function TableEmpty({ message, hint }: { message: string; hint?: string }) {
 /*  Manual-close notice                                                        */
 /* -------------------------------------------------------------------------- */
 
-const CLOSE_EXPLANATION = [
-  '本控制台没有手工平仓的功能：后端不提供手动平仓接口。',
-  '持仓由机器人自己了结，只有三条路径：模型在下一个决策周期给出平仓决定；交易所侧的止损 / 止盈单被触发；回撤守卫在浮盈大幅回吐时以市价平仓。',
-  '如果你想立刻结束某个持仓，请先在交易所手动平掉它，然后停止该机器人 — 机器人检测到持仓消失后会记录为“外部平仓”。',
-];
 
-function CloseNoticeModal({
+/**
+ * 确认并执行手工平仓。
+ *
+ * ## 它替换掉了什么
+ *
+ * 原来这里是一个 `CloseNoticeModal`，标题写着「平仓不可用」，
+ * 正文第一句是「该按钮不会下任何订单」。
+ *
+ * **那比"按钮不响应"更糟** —— 它是一个明确告诉你"这个按钮没用"的按钮。
+ * 设计初衷是"机器人自己在管理持仓，控制台不该和它抢"，
+ * **但那把"代码整洁"放在了"操作员对自己资金的控制权"前面。**
+ *
+ * 一个止不住手的操作员是被困住的。**无论机器人当时在做什么，人都必须能立刻退出。**
+ *
+ * ## 二次确认，但不啰嗦
+ *
+ * 平仓是破坏性操作，要确认；但**确认框只说清"平什么、会怎样"**，
+ * 不写一段免责声明 —— 操作员按这个按钮时通常正在亏钱，
+ * 那是他们最不需要读长文的时刻。
+ */
+function ClosePositionModal({
+  traderId,
   symbol,
   onClose,
+  onDone,
 }: {
+  traderId: number;
   symbol: string | null;
   onClose: () => void;
+  onDone: () => void;
 }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ stillRunning: boolean; avgPrice: number } | null>(null);
+
+  // 每次打开都清掉上一次的结果 —— 否则会看到上一个人的成交价。
+  useEffect(() => {
+    if (symbol !== null) {
+      setError(null);
+      setResult(null);
+    }
+  }, [symbol]);
+
+  if (symbol === null) return null;
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const target = symbol;
+      const response = await api.closePosition(traderId, target);
+      setResult({ stillRunning: response.stillRunning, avgPrice: response.avgPrice });
+      onDone();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Modal
-      open={symbol !== null}
+      open
       onClose={onClose}
-      title={symbol === '__all__' ? '全部平仓不可用' : `平仓 ${symbol ?? ''} 不可用`}
-      width="max-w-lg"
-      footer={<Button onClick={onClose}>知道了</Button>}
+      title="手工平仓"
+      width="max-w-md"
+      footer={
+        result ? (
+          <Button onClick={onClose}>关闭</Button>
+        ) : (
+          <>
+            <Button variant="ghost" onClick={onClose} disabled={busy}>
+              取消
+            </Button>
+            <Button variant="danger" onClick={submit} disabled={busy}>
+              {busy ? '正在平仓…' : '确认平仓'}
+            </Button>
+          </>
+        )
+      }
     >
-      <div className="space-y-2">
-        <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base font-semibold text-warn">
-          该按钮不会下任何订单。
-        </div>
-        {CLOSE_EXPLANATION.map((line) => (
-          <p key={line} className="text-base leading-relaxed text-ink-mid">
-            {line}
-          </p>
-        ))}
-        <p className="text-xs leading-relaxed text-ink-faint">
-          这里保留按钮是为了让“我想立刻平掉”这个需求有一个明确的答案，而不是一条静默失败的请求。
-        </p>
+      <div className="space-y-3">
+        {result ? (
+          <>
+            <div className="rounded-md border border-up/50 bg-up/10 px-3 py-2 text-base font-semibold text-up">
+              已平仓 {symbol}，成交均价 {result.avgPrice}。
+            </div>
+            {result.stillRunning && (
+              /*
+               * 这一句是必要的：机器人还在跑，它下一个周期可能重新开一个同样的仓。
+               * **那不是 bug，是它的工作** —— 但操作员需要知道，
+               * 否则会以为自己的平仓没生效。
+               */
+              <p className="text-base leading-relaxed text-warn">
+                机器人**仍在运行**，它可能在下一个决策周期重新开出同样的仓位。
+                如果不想让它再开，请先「停止」机器人。
+              </p>
+            )}
+          </>
+        ) : (
+          <>
+            <p className="text-base leading-relaxed text-ink-hi">
+              以**市价**平掉 <span className="font-semibold">{symbol}</span> 的全部仓位，
+              并撤掉它的止损与止盈单。
+            </p>
+            <p className="text-xs leading-relaxed text-ink-faint">
+              成交价以交易所实际回报为准，这里无法预知滑点。
+            </p>
+            {error && <ErrorNote>{error}</ErrorNote>}
+          </>
+        )}
       </div>
     </Modal>
   );
@@ -1238,7 +1317,13 @@ export function TraderTables({
         )}
       </div>
 
-      <CloseNoticeModal symbol={closeTarget} onClose={() => setCloseTarget(null)} />
+        <ClosePositionModal
+          traderId={traderId}
+          symbol={closeTarget}
+          onClose={() => setCloseTarget(null)}
+          /* 平完立刻刷新三张表 —— 否则表格里还留着刚平掉的那一行。 */
+          onDone={() => setOrdersRefreshToken((n) => n + 1)}
+        />
     </Panel>
   );
 }

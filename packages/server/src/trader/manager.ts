@@ -741,6 +741,70 @@ export class TraderManager {
 
     return autoTrader.reconcileTradeHistory();
   }
+  /**
+   * 操作员手工平掉一个持仓。**无论机器人在跑还是已停止，都必须能用。**
+   *
+   * ## 为什么不复用 `this.running` 里的实例就够了
+   *
+   * 机器人停止时 `running` 里没有实例，而**"已停止的机器人有持仓"恰恰是最需要
+   * 手工平仓的场景** —— 它不会再自己了结，仓位会一直挂在那里。
+   *
+   * 所以形状照 `reconcileTrader`：
+   *   · 运行中 → 走实例（只有一个写者）
+   *   · 已停止 → 建一个**不调模型**的桩实例，只为拿到 broker 与记账能力
+   *
+   * ## 一个必须处理的冲突
+   *
+   * 机器人正在跑的时候手工平仓，**下一个周期它可能会立刻重新开一个同样的仓**
+   * （它有额度、也认为那个标的有机会）。**那不是 bug，是它的工作。**
+   * 但操作员需要知道这件事 —— 所以返回值里带一个 `stillRunning` 标记，
+   * 由界面提示"机器人仍在运行，它可能重新开仓；要它别开请先停止"。
+   *
+   * @returns 成交结果与"机器人是否仍在运行"
+   */
+  async closePosition(
+    traderId: number,
+    symbol: string,
+  ): Promise<{ avgPrice: number; fee: number; stillRunning: boolean }> {
+    const trader = traders.get(traderId);
+    if (!trader) throw new Error('机器人不存在。');
+
+    const running = this.running.get(traderId);
+    if (running) {
+      const result = await running.closeManually(symbol);
+      if (!result) throw new Error(`本地没有 ${symbol} 的持仓。`);
+      return { ...result, stillRunning: true };
+    }
+
+    /*
+     * 已停止：建一个一次性实例。
+     *
+     * 模型换成"永远拒绝"的桩 —— 手工平仓绝不该调用 LLM：
+     * 那会让"按一个按钮"变成"等一次模型请求"，而且在模型故障时根本用不了。
+     * **操作员的退出路径不能依赖任何外部服务。**
+     */
+    const connection = await this.connectionFor(traderId, trader.exchangeAccountId, false);
+    const strategyRecord = strategies.get(trader.strategyId);
+    const parsed = strategyRecord ? StrategyConfigSchema.safeParse(strategyRecord.config) : null;
+    const config: StrategyConfig = parsed?.success ? parsed.data : StrategyConfigSchema.parse({});
+
+    const autoTrader = new AutoTrader({
+      trader,
+      config,
+      registry: connection.registry,
+      market: connection.market,
+      marketData: new MarketDataService(connection.market, connection.registry),
+      broker: connection.broker,
+      model: {
+        complete: () => Promise.reject(new Error('手工平仓不调用模型')),
+      },
+    });
+
+    const result = await autoTrader.closeManually(symbol);
+    if (!result) throw new Error(`本地没有 ${symbol} 的持仓。`);
+    return { ...result, stillRunning: false };
+  }
+
 
   /**
    * Reconcile every trader's ledger, sequentially.
