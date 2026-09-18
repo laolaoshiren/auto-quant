@@ -322,7 +322,7 @@ export class BinanceBroker {
     } catch (error) {
       if (error instanceof BinanceApiError && error.code === -4046) return true;
       if (error instanceof BinanceApiError && error.code === -4047) return false;
-      log.warn(`setMarginType(${normalized}, ${marginType}) failed: ${(error as Error).message}`);
+      log.warn(`设置 ${normalized} 的保证金模式为 ${marginType} 失败：${(error as Error).message}`);
       return false;
     }
   }
@@ -621,7 +621,7 @@ export class BinanceBroker {
       if (latest.terminal) return latest;
     }
 
-    log.warn(`${order.kind} ${order.id} (${order.symbol}) not terminal after ${timeoutMs}ms`, {
+    log.warn(`${order.symbol} 的 ${order.kind} 单 #${order.id} 在 ${timeoutMs}ms 内没有进入终态`, {
       status: latest.status,
     });
     return latest;
@@ -650,7 +650,7 @@ export class BinanceBroker {
     } catch (error) {
       // -2011 "Unknown order sent" means it already filled or was cancelled.
       if (error instanceof BinanceApiError && error.code === -2011) return true;
-      log.warn(`cancelOrder(${symbol}, ${orderId}, ${kind}) failed: ${(error as Error).message}`);
+      log.warn(`撤销 ${symbol} 的 ${kind} 单 #${orderId} 失败：${(error as Error).message}`);
       return false;
     }
   }
@@ -676,7 +676,7 @@ export class BinanceBroker {
       if (result.status === 'rejected') {
         const error = result.reason as BinanceApiError;
         if (error instanceof BinanceApiError && error.code === -2011) continue;
-        log.warn(`cancelAllOrders(${normalized}) partially failed: ${error.message ?? error}`);
+        log.warn(`撤销 ${normalized} 的全部挂单时部分失败：${error.message ?? error}`);
       }
     }
   }

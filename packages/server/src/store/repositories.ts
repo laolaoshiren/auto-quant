@@ -90,7 +90,7 @@ export const users = {
    */
   updateUsername(id: number, username: string): void {
     getDb().run('UPDATE users SET username = ? WHERE id = ?', username, id);
-    log.info(`renamed account #${id} to "${username}"`);
+    log.info(`账户 #${id} 已改名为「${username}」`);
   },
 
   /** 所有管理员账号，按创建时间升序。用于密码重置时找到要改的那个账号。 */
@@ -131,7 +131,7 @@ export const users = {
   markCredentialsChanged(id: number): number {
     const timestamp = now();
     getDb().run('UPDATE users SET credentials_changed_at = ? WHERE id = ?', timestamp, id);
-    log.info(`account #${id} credentials changed — previously issued sessions are now revoked`);
+    log.info(`账户 #${id} 的凭据已变更 —— 之前签发的所有登录会话已作废`);
     return Date.parse(timestamp);
   },
 };
@@ -384,7 +384,7 @@ function toStrategy(row: StrategyRow): StrategyRecord {
     const result = StrategyConfigSchema.safeParse(raw);
     parsed = result.success ? result.data : StrategyConfigSchema.parse({});
   } catch {
-    log.warn(`strategy ${row.id} has unreadable config JSON; falling back to defaults`);
+    log.warn(`策略 #${row.id} 的配置 JSON 无法解析，已回落到默认配置`);
     parsed = StrategyConfigSchema.parse({});
   }
 

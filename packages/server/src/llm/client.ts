@@ -173,7 +173,7 @@ export class LlmClient {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      log.warn(`connection probe failed for ${this.provider}`, {
+      log.warn(`${this.provider} 的连通性探测失败`, {
         provider: this.provider,
         model: this.model,
         baseUrl: this.baseUrl,
@@ -204,7 +204,7 @@ export class LlmClient {
 
       try {
         const result = await this.attempt(messages, startedAt, startedAtIso, options.probe === true);
-        log.info(`chat ok ${this.provider}/${result.model}`, {
+        log.info(`模型调用成功：${this.provider} / ${result.model}`, {
           provider: this.provider,
           model: result.model,
           finishReason: result.finishReason,
@@ -230,15 +230,15 @@ export class LlmClient {
         };
 
         if (!canRetry) {
-          if (retryable) log.error(`chat failed for ${this.provider} — retries exhausted`, detail);
-          else log.error(`chat failed for ${this.provider} — not retryable`, detail);
+          if (retryable) log.error(`${this.provider} 的模型调用失败 —— 重试次数已用尽`, detail);
+          else log.error(`${this.provider} 的模型调用失败 —— 这类错误不会因重试而成功`, detail);
           throw error;
         }
 
         // Prefer the server's Retry-After over our own backoff when present.
         const retryAfterMs = error instanceof LlmError ? error.retryAfterMs : null;
         const delayMs = retryAfterMs ?? backoffDelayMs(attempt);
-        log.warn(`chat retry ${attempt + 1}/${this.maxRetries} for ${this.provider} in ${delayMs}ms`, {
+        log.warn(`第 ${attempt + 1}/${this.maxRetries} 次重试 ${this.provider}，等待 ${delayMs}ms 后开始`, {
           ...detail,
           retryAfterMs,
         });
@@ -326,7 +326,7 @@ export class LlmClient {
     }
 
     if (parsed.finishReason === 'length' && parsed.isEmpty) {
-      log.warn(`empty completion with finish_reason=length for ${this.provider}`, {
+      log.warn(`${this.provider} 返回了空内容（finish_reason=length，输出被长度上限截断）`, {
         provider: this.provider,
         model: parsed.model ?? this.model,
         startedAt: startedAtIso,
@@ -337,7 +337,7 @@ export class LlmClient {
     // The concrete model the provider actually served. This differs from the
     // configured id on OpenRouter aliases and xAI `latest`, so it is logged.
     if (parsed.model && parsed.model !== this.model) {
-      log.info(`model echo differs from request for ${this.provider}`, {
+      log.info(`${this.provider} 回显的模型名与请求的不一致`, {
         requested: this.model,
         served: parsed.model,
       });
