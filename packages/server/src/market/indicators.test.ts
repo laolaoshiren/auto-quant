@@ -42,7 +42,7 @@ function bar(close: number, high = close + 1, low = close - 1, volume = 1): Klin
  */
 function indicatorConfig(overrides: Partial<IndicatorConfig> = {}): IndicatorConfig {
   return {
-    kline: { primaryTimeframe: '5m', selectedTimeframes: ['5m', '15m', '1h', '4h'], primaryCount: 30 },
+    kline: { primaryTimeframe: '5m', selectedTimeframes: ['5m', '15m', '1h', '4h'], promptPoints: 30, primaryCount: 30 },
     enableEma: true,
     emaPeriods: [20, 50],
     enableMacd: true,

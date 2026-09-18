@@ -138,7 +138,7 @@ test('a candidate costs more when more timeframes or indicators are enabled', ()
     ...defaultStrategyConfig(),
     indicators: {
       ...defaultStrategyConfig().indicators,
-      kline: { primaryTimeframe: '5m', selectedTimeframes: ['5m', '15m'], primaryCount: 60 },
+      kline: { primaryTimeframe: '5m', selectedTimeframes: ['5m', '15m'], promptPoints: 30, primaryCount: 60 },
       enableEma: true,
       enableMacd: false,
       enableRsi: false,
@@ -150,7 +150,7 @@ test('a candidate costs more when more timeframes or indicators are enabled', ()
     ...lean,
     indicators: {
       ...lean.indicators,
-      kline: { primaryTimeframe: '5m', selectedTimeframes: ['5m', '15m', '1h', '4h'], primaryCount: 60 },
+      kline: { primaryTimeframe: '5m', selectedTimeframes: ['5m', '15m', '1h', '4h'], promptPoints: 30, primaryCount: 60 },
       enableMacd: true,
       enableRsi: true,
       enableAtr: true,
@@ -168,11 +168,11 @@ test('rendered points are capped, so a huge candle count does not scale the cost
   const base = configFromPreset('conservative');
   const with60: StrategyConfig = {
     ...base,
-    indicators: { ...base.indicators, kline: { ...base.indicators.kline, primaryCount: 60 } },
+    indicators: { ...base.indicators, kline: { ...base.indicators.kline, promptPoints: 30, primaryCount: 60 } },
   };
   const with300: StrategyConfig = {
     ...base,
-    indicators: { ...base.indicators, kline: { ...base.indicators.kline, primaryCount: 300 } },
+    indicators: { ...base.indicators, kline: { ...base.indicators.kline, promptPoints: 30, primaryCount: 300 } },
   };
   assert.equal(
     estimateCandidateChars(with60),
@@ -209,7 +209,7 @@ test('a light strategy is allowed a much larger universe than a heavy one', () =
     ...defaultStrategyConfig(),
     indicators: {
       ...defaultStrategyConfig().indicators,
-      kline: { primaryTimeframe: '1h', selectedTimeframes: ['1h'], primaryCount: 60 },
+      kline: { primaryTimeframe: '1h', selectedTimeframes: ['1h'], promptPoints: 30, primaryCount: 60 },
       enableMacd: false,
       enableRsi: false,
       enableAtr: false,
@@ -695,3 +695,68 @@ test('提示词必须告诉模型它能移动止损 —— 否则这个动作等
   );
 });
 
+
+test('提示词要提醒模型：候选池本身也可以改', () => {
+  /*
+   * 用户实测观察：「做的币种始终是那几个热门币，似乎没有机会很大的山寨币」。
+   *
+   * 查证：候选池按 coinSource.coinPoolRank 排，生产上设的是 quote_volume
+   * （成交额榜）—— 天然只有最热门的那些。而 coinSource.* 本来就在 set_params
+   * 的可调范围里。**能力一直在，缺的是一个去用它的理由。**
+   *
+   * 这与"只做多"那条是同一个病：**能力存在，但提示词没让它想到要用。**
+   */
+  const text = buildSystemPrompt(contextWith(blankMemory()));
+  assert.match(text, /coinPoolRank/, '要写出那个参数的名字，否则模型不知道改什么');
+  assert.match(
+    text,
+    /怎么选标的|怎么选/,
+    '要说清"问题可能不在标的、而在选择方式"——只列出参数名不够',
+  );
+  assert.match(text, /波动率|资金费/, '要给它一个具体的替代方向，而不只是"你可以改"');
+});
+
+test('指标序列的渲染长度归 AI 调 —— 它以前是写死的 30', () => {
+  /*
+   * 实测：每轮约 49,700 个 prompt token，**主体是每个候选标的约 10,200 字
+   * 的逐根 K 线数字数组**。而那个长度原来是
+   * `series(values, decimals, maxPoints = 30)` 里的一个默认参数 —— **没有配置项**。
+   *
+   * 于是"给它更多历史还是更少"这个取舍，由代码替 AI 做了。
+   * 那违背了 AI 托管的前提：**代码不知道它这轮要做形态判断还是粗略的方向确认。**
+   */
+  const base = configFromPreset('conservative');
+  const withConfig = (points: number): StrategyConfig => ({
+    ...base,
+    indicators: { ...base.indicators, kline: { ...base.indicators.kline, promptPoints: points } },
+  });
+
+  const lean = estimateCandidateChars(withConfig(8));
+  const heavy = estimateCandidateChars(withConfig(30));
+
+  assert.ok(
+    heavy > lean,
+    `promptPoints 必须真的影响成本：8 点 ${lean} 字，30 点 ${heavy} 字`,
+  );
+  const ratio = heavy / lean;
+  /* 大致成比例即可：差一个数量级说明参数没接上渲染那条路径。 */
+  assert.ok(ratio > 1.5 && ratio < 6, `成本应当随点数放大约 3–4 倍，实际 ${ratio.toFixed(2)}`);
+});
+
+test('提示词要告诉 AI：输入长度本身是一笔可以权衡的成本', () => {
+  const text = buildSystemPrompt(contextWith(blankMemory()));
+  assert.match(text, /promptPoints/, '要写出参数名，否则模型不知道改什么');
+  assert.match(
+    text,
+    /成本|都是有成本/,
+    '要说清它是成本 —— 只列出参数名，模型没有理由去调它',
+  );
+  /*
+   * **刻意不给建议值**：「该给多少」正是要 AI 自己回答的问题。
+   * 用例在这里钉住这一点，防止后来者"顺手"加一句推荐值。
+   */
+  assert.ok(
+    !/建议.*(10|15|20) 点|推荐.*(10|15|20) 点/.test(text),
+    '不该给出推荐点数 —— 那等于把取舍又替它做了',
+  );
+});

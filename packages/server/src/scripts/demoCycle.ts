@@ -298,7 +298,7 @@ async function main(): Promise<void> {
   config.coinSource = { ...config.coinSource, coinPoolLimit: 8, minQuoteVolume24h: 100_000_000 };
   config.indicators = {
     ...config.indicators,
-    kline: { primaryTimeframe: '5m', selectedTimeframes: ['5m', '15m', '1h'], primaryCount: 60 },
+    kline: { primaryTimeframe: '5m', selectedTimeframes: ['5m', '15m', '1h'], promptPoints: 30, primaryCount: 60 },
     enableQuantData: true,
   };
 
