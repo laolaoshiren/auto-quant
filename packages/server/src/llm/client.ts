@@ -44,6 +44,12 @@ export interface LlmClientOptions {
   maxRetries?: number;
   jsonMode?: boolean;
   jsonSchema?: Record<string, unknown>;
+  /**
+   * 思考等级。默认 `high` —— 见 `ChatRequest.reasoningEffort` 上的说明。
+   *
+   * 设成 `undefined` 就完全不发这个参数（给"确认不支持"的 provider 用）。
+   */
+  reasoningEffort?: 'low' | 'medium' | 'high';
 }
 
 export interface ConnectionProbe {
@@ -87,6 +93,10 @@ export class LlmClient {
   private readonly maxRetries: number;
   private readonly jsonMode: boolean;
   private readonly jsonSchema: Record<string, unknown> | undefined;
+  /**
+   * 思考等级。**不是 `readonly`** —— 被 provider 拒绝时要在运行中清掉它。
+   */
+  private reasoningEffort: 'low' | 'medium' | 'high' | undefined;
   /** Never logged in full; kept only so an operator can tell which key is live. */
   private readonly keyHint: string;
 
@@ -102,6 +112,7 @@ export class LlmClient {
     this.maxRetries = Math.max(0, options.maxRetries ?? DEFAULT_MAX_RETRIES);
     this.jsonMode = options.jsonMode === true;
     this.jsonSchema = options.jsonSchema;
+    this.reasoningEffort = options.reasoningEffort;
     this.keyHint = this.apiKey === '' ? '<empty>' : maskSecret(this.apiKey);
 
     if (this.baseUrl === '') {
@@ -214,6 +225,41 @@ export class LlmClient {
         return result;
       } catch (error) {
         lastError = error;
+
+        /*
+         * ⚠️ **降级：`reasoning_effort` 被拒时，去掉它重来一次。**
+         *
+         * 这个参数不是所有 provider 都认。而 400 被正确地归为**不可重试**
+         * （重试改变不了结果）—— 于是不支持的 provider 会让**每一轮决策都失败**。
+         *
+         * **这不是「重试同一个请求」，而是「换一个更保守的请求」**：
+         * 去掉那个可能不被接受的参数。代价只是多一个往返，
+         * 收益是「默认 high」这个要求不会变成一次全线故障。
+         *
+         * 只做一次（`effortDropped` 守住），而且**清掉之后就不再恢复** ——
+         * 一个已经被拒的参数，下一轮再带上只会再被拒一次。
+         * 这个判断活在客户端实例上，而实例是每个机器人一个、随进程存活。
+         */
+        if (
+          this.reasoningEffort !== undefined &&
+          error instanceof LlmError &&
+          error.kind === 'bad_request'
+        ) {
+          const dropped = this.reasoningEffort;
+          this.reasoningEffort = undefined;
+          log.warn(
+            `${this.provider} 拒绝了 reasoning_effort=${dropped}，已去掉该参数并立即重试 —— ` +
+              '这次调用不会因为一个可选的思考等级而失败。',
+            { provider: this.provider, model: this.model, status: error.status },
+          );
+          /*
+           * `continue` 而不是递归：重试循环本来就是为"再试一次"存在的，
+           * 而 `attempt` 不递增 —— 这次降级**不算一次重试**
+           * （它不是失败后的重试，是换了参数的第一次尝试）。
+           */
+          continue;
+        }
+
         const retryable = isRetryable(error);
         const canRetry = retryable && attempt < this.maxRetries;
 
@@ -274,6 +320,14 @@ export class LlmClient {
           ...(this.maxTokens !== undefined ? { maxTokens: this.maxTokens } : {}),
           jsonMode: this.jsonMode,
           ...(this.jsonSchema !== undefined ? { jsonSchema: this.jsonSchema } : {}),
+          /*
+           * 思考等级。探测请求（`probe`）刻意**不带**它 ——
+           * 探测只回答"这个端点通不通、这把钥匙对不对"，
+           * 让一次连通性检查也去花思考预算是浪费。
+           */
+          ...(this.reasoningEffort !== undefined
+            ? { reasoningEffort: this.reasoningEffort }
+            : {}),
         };
 
     if (this.descriptor.openAiCompatible) {

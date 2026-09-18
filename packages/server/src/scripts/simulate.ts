@@ -524,6 +524,14 @@ async function main(): Promise<void> {
       maxTokens: 8192,
       timeoutSeconds: 180,
       maxRetries: 1,
+      /*
+       * **与生产同一条路径。**
+       *
+       * 真实交易循环用的是 `reasoningEffort: 'high'`，模拟回放要用同一个值 ——
+       * **否则这个回放就不是在生产的那条路径上跑**，而它存在的唯一理由
+       * 就是"用真实往返验证真实路径"。
+       */
+      reasoningEffort: 'high',
     });
     const probe = await client.testConnection();
     check('真实模型可用', probe.ok, probe.ok ? `${liveModelId} 响应 ${probe.latencyMs}ms。` : probe.message);

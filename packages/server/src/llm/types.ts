@@ -21,6 +21,21 @@ export interface ChatRequest {
   jsonMode?: boolean;
   /** Optional JSON schema, used only where the provider supports strict schemas (see B.15). */
   jsonSchema?: Record<string, unknown>;
+  /**
+   * 请求模型在回答前思考多久。
+   *
+   * ## 为什么这是一个交易参数，而不是一个技术开关
+   *
+   * 这个机器人的每一轮决策都是「看一遍行情、判断该不该动」——
+   * 一次判断的代价可能是一笔真实的盈亏。**思考预算花在这里是值得的**：
+   * 多花几秒和几百个 token，换一个更审慎的判断。
+   *
+   * ## 名字沿用各家 API 的叫法
+   *
+   * OpenAI 系把它叫 `reasoning_effort`。这里保留同一个词，
+   * 免得又多一个「我们自己发明的名字」需要对照。
+   */
+  reasoningEffort?: 'low' | 'medium' | 'high';
 }
 
 export interface ChatUsage {
