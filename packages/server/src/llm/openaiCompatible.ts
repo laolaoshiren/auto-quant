@@ -22,6 +22,20 @@ export interface OpenAiBodyOptions {
   maxTokens?: number;
   jsonMode?: boolean;
   jsonSchema?: Record<string, unknown>;
+  /**
+   * 思考等级，翻译成 OpenAI 的 `reasoning_effort`。
+   *
+   * ## 为什么默认只在"确认支持"时才发
+   *
+   * 这是**一个会让整条调用链失败的风险**：不支持的 provider 收到未知参数
+   * 可能返回 400，而 400 被正确地归为"不可重试"（重试改变不了结果）——
+   * 于是**每一轮决策都会失败**。
+   *
+   * 所以只对已知支持的 provider 发。`custom` 是"用户自填的 OpenAI 兼容端点"，
+   * 能力未知，**由调用方用一个显式开关决定**（见 `LlmClient` 的降级逻辑：
+   * 第一次带上，被拒就立刻去掉重来一次）。
+   */
+  reasoningEffort?: 'low' | 'medium' | 'high';
 }
 
 type JsonObject = Record<string, unknown>;
@@ -119,6 +133,17 @@ export function buildBody(
 
   if (options.maxTokens !== undefined) {
     body[maxTokensField(provider)] = options.maxTokens;
+  }
+
+  /*
+   * 思考等级。
+   *
+   * **这里不做 provider 能力判断** —— 判断留给调用方，理由是它需要
+   * 一次失败才能知道答案（`custom` 是用户自填的端点，没有可查的能力表）。
+   * 本函数只负责把调用方决定要发的值翻译成线上的字段名。
+   */
+  if (options.reasoningEffort !== undefined) {
+    body['reasoning_effort'] = options.reasoningEffort;
   }
 
   if (supportsResponseFormat(provider)) {

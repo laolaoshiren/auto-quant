@@ -257,6 +257,18 @@ export class TraderManager {
       maxTokens: row.max_tokens,
       timeoutSeconds: row.timeout_seconds,
       maxRetries: row.max_retries,
+      /*
+       * **思考等级默认 `high`。**
+       *
+       * `row` 上没有这一列 —— 它是**所有模型共用的策略**，不是每个模型各配一个。
+       * 理由是它回答的是"这个机器人该怎么思考"，而不是"这个端点支持什么"：
+       * 每一次决策的代价都可能是一笔真实的盈亏，**思考预算花在这里是值得的**。
+       *
+       * ⚠️ 不是所有 provider 都认这个参数，所以 `LlmClient` 里有一层降级：
+       * 第一次带上，被 400 拒绝就立刻去掉重来一次，并把这次经历记进日志。
+       * **一个可选的思考等级，不该让整条决策链失败。**
+       */
+      reasoningEffort: 'high',
     });
 
     const probe = await client.testConnection();
