@@ -995,6 +995,30 @@ function CycleMeta({ record }: { record: DecisionRecord }) {
    * 合并成"有 A 就不显示 B"，等于逼操作者在两个都关心的数字里挑一个。
    */
   const hasTokens = record.promptTokens !== null || record.completionTokens !== null;
+  /*
+   * **用量那一格要带上缓存命中率。**
+   *
+   * 「in N · out N」只说了"花了多少"，没说"花得值不值"。而这个项目
+   * 实测缓存命中 99.6%、成本 93.5% 来自输出 —— 两个数字都不是从
+   * token 总量能看出来的。
+   *
+   * 命中率**只在服务商报了 `cachedTokens` 时才显示**：
+   * `null` 是"不知道"（这个供应商没上报），`0` 是"确实没命中"。
+   * 把前者显示成 0% 会让人去查一个根本不存在的问题。
+   */
+  const cachePct =
+    record.cachedTokens != null && record.promptTokens != null && record.promptTokens > 0
+      ? Math.round((record.cachedTokens / record.promptTokens) * 100)
+      : null;
+  /*
+   * 思考占比同理：输出价是缓存命中输入价的 200 倍，
+   * 所以"这一轮 4,439 个输出里有多少是在想"直接决定这一轮值不值。
+   */
+  const thinkPct =
+    record.reasoningTokens != null && record.completionTokens != null && record.completionTokens > 0
+      ? Math.round((record.reasoningTokens / record.completionTokens) * 100)
+      : null;
+
   const tokens = hasTokens
     ? `in ${fmtInt(record.promptTokens ?? 0)} · out ${fmtInt(record.completionTokens ?? 0)}`
     : // 不写 `in 0 · out 0`：那会让人以为模型一个 token 都没花。
@@ -1011,6 +1035,59 @@ function CycleMeta({ record }: { record: DecisionRecord }) {
         │
       </span>
       <span className="num">{tokens}</span>
+
+      {/*
+        缓存命中率。
+
+        缓存命中价是未命中价的 1/50，所以"输入花了多少钱"几乎完全由
+        这个百分比决定。实测这个项目是 99.6%。
+
+        **只在服务商报了 `cachedTokens` 时才显示** —— `null` 是"不知道"
+        （供应商没上报），显示成 0% 会让人去查一个不存在的问题。
+        高命中不额外加颜色：它是正常状态，**一个天天都是绿色的徽章
+        很快就不会再被人看见**；只有明显偏低时才值得提示。
+      */}
+      {cachePct !== null && (
+        <>
+          <span aria-hidden className="text-ink-faint">
+            │
+          </span>
+          <span
+            className={cn('num', cachePct < 50 ? 'text-warn' : 'text-ink-faint')}
+            title={
+              `输入里有 ${fmtInt(record.cachedTokens ?? 0)} 个 token 命中了上下文缓存` +
+              `（占 ${cachePct}%）。\n` +
+              '缓存命中的输入价比未命中便宜约 50 倍，所以这个数字直接决定输入成本。'
+            }
+          >
+            缓存 {cachePct}%
+          </span>
+        </>
+      )}
+
+      {/*
+        思考占输出的比例。
+
+        输出价是缓存命中输入价的 200 倍，所以"输出里有多少是在想"
+        是这一轮成本的主要变量 —— 实测它常常占一多半。
+      */}
+      {thinkPct !== null && (
+        <>
+          <span aria-hidden className="text-ink-faint">
+            │
+          </span>
+          <span
+            className="num text-ink-faint"
+            title={
+              `输出里有 ${fmtInt(record.reasoningTokens ?? 0)} 个 token 花在思考上` +
+              `（占 ${thinkPct}%）。输出价比缓存命中的输入价贵约 200 倍，` +
+              '所以这是本轮成本的主要部分。'
+            }
+          >
+            思考 {thinkPct}%
+          </span>
+        </>
+      )}
 
       {/*
         耗时。失败的周期常常在拿到响应之前就抛了（延迟为 0），
