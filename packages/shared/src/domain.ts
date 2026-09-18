@@ -469,6 +469,86 @@ export function logScopeLabel(scope: string | null | undefined): string {
 }
 
 /**
+ * 日志**级别**的图标。
+ *
+ * ## 为什么用图标而不是文字
+ *
+ * 这一栏原来写「信息」/「警告」/「错误」—— 三个词都是一样的宽度，
+ * 而**九成以上的日志是"信息"**。一列重复的"信息"占着地方，却什么也没告诉你。
+ *
+ * 图标占同样的宽度，但**形状本身就能扫**：`⚠️` 和 `❌` 在余光里就认得出来，
+ * 而"警告"和"错误"两个字必须逐个读。
+ *
+ * **图标不替代颜色**：颜色是给"扫一眼"的，图标是给"看清是什么"的，
+ * 文字标签留在 `title` 里给屏幕阅读器与新用户。
+ *
+ * ⚠️ **`info` 刻意用一个小圆点而不是 `ℹ️`。**
+ * 它出现得最多，而一个信息量很低的行不该抢走注意力 ——
+ * **满屏图标和没有图标是一回事**：都会让人停止阅读。
+ */
+export const LOG_LEVEL_ICONS: Record<string, string> = {
+  info: '·',
+  warn: '⚠️',
+  error: '❌',
+};
+
+/**
+ * 日志来源的**图标**，按模块归类。
+ *
+ * 这一层比中文标签更早被眼睛抓住：`🔌` 是交易所的事、`🧠` 是 AI 的事、
+ * `💾` 是存储的事 —— **一眼就能把"哪个子系统在说话"分开**，
+ * 而读「币安 · 启动检查」要慢一步。
+ *
+ * 与标签表同一条纪律：认不出的来源**不给图标**（返回空串），不猜。
+ */
+export const LOG_SCOPE_ICONS: Record<string, string> = {
+  main: '🚀',
+  api: '🌐',
+  auth: '🔑',
+  db: '💾',
+  store: '💾',
+  manager: '🤖',
+  trader: '🔄',
+  'trader:agent': '🧠',
+  llm: '🧠',
+  'llm:discovery': '🔍',
+  balance: '💰',
+  'market:service': '📈',
+  'binance:bootstrap': '🔌',
+  'binance:account': '💰',
+  'binance:broker': '📤',
+  'binance:market': '📈',
+  'binance:rest': '📡',
+  'binance:ws': '📡',
+  'binance:userdata': '📥',
+  'strategy:coins': '🎯',
+  'strategy:parser': '📋',
+  'strategy:check': '🩺',
+  simulate: '🎬',
+  'sim:exchange': '🎬',
+  smoke: '🧪',
+  'reset-admin': '🔑',
+};
+
+/**
+ * 来源的**类别**，用来决定标签配色。
+ *
+ * 与币种着色同一条纪律：**颜色是辅助定位，身份由图标与文字承担。**
+ * 所以认不出的来源归入 `other`，而不是随便挑一个颜色 ——
+ * **一个猜出来的颜色比没有颜色更容易误导。**
+ */
+export type LogScopeKind = 'exchange' | 'ai' | 'data' | 'runtime' | 'other';
+
+export function logScopeKind(scope: string | null | undefined): LogScopeKind {
+  if (!scope) return 'other';
+  if (scope.startsWith('binance:')) return 'exchange';
+  if (scope === 'llm' || scope.startsWith('llm:') || scope === 'trader:agent') return 'ai';
+  if (scope === 'db' || scope === 'store') return 'data';
+  if (scope === 'main' || scope === 'api' || scope === 'auth') return 'runtime';
+  return 'other';
+}
+
+/**
  * 交易所拒单错误的**中文人话**。
  *
  * ## 为什么需要它
