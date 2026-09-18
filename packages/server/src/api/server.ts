@@ -1429,6 +1429,24 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    *
    * 唯一的前置条件是"本地有这个持仓"，由 `closePosition` 内部判断。
    */
+  /*
+   * 全部平仓。
+   *
+   * **这条路由必须在 `:symbol` 那条之前**，否则 `/positions/close-all`
+   * 会被当成 `symbol = 'CLOSE-ALL'` 吃掉。
+   *
+   * 与单币种平仓同样**不做任何前置检查** —— 见上面那条的说明。
+   */
+  app.post('/api/traders/:id/positions/close-all', authed, async (request, reply) => {
+    const id = Number((request.params as { id: string }).id);
+    try {
+      const result = await deps.manager.closeAllPositions(id);
+      return { ok: true, ...result };
+    } catch (error) {
+      return reply.code(400).send({ ok: false, error: (error as Error).message });
+    }
+  });
+
   app.post('/api/traders/:id/positions/:symbol/close', authed, async (request, reply) => {
     const id = Number((request.params as { id: string }).id);
     const symbol = String((request.params as { symbol: string }).symbol).toUpperCase();

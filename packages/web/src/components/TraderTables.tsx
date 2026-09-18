@@ -488,57 +488,72 @@ function TableEmpty({ message, hint }: { message: string; hint?: string }) {
 
 
 /**
- * 确认并执行手工平仓。
+ * 确认并执行手工平仓（单个或全部）。
  *
  * ## 它替换掉了什么
  *
- * 原来这里是一个 `CloseNoticeModal`，标题写着「平仓不可用」，
+ * 原来这里是一个 `CloseNoticeModal`，标题写着「平仓不可用」、
  * 正文第一句是「该按钮不会下任何订单」。
  *
  * **那比"按钮不响应"更糟** —— 它是一个明确告诉你"这个按钮没用"的按钮。
- * 设计初衷是"机器人自己在管理持仓，控制台不该和它抢"，
- * **但那把"代码整洁"放在了"操作员对自己资金的控制权"前面。**
  *
- * 一个止不住手的操作员是被困住的。**无论机器人当时在做什么，人都必须能立刻退出。**
+ * ## `__all__` 是一个内部哨兵，**绝不该出现在界面上**
+ *
+ * 第一版我把 `'__all__'` 直接当成"目标"存进 state，于是界面上出现了
+ * 「以市价平掉 __all__ 的全部仓位」和「本地没有 __ALL__ 的持仓」——
+ * **内部标记漏进了给操作员看的文案**，而且后者还把服务端的错误原样透出来了。
+ *
+ * 现在哨兵只用于**分支判断**：文案说"全部 N 个持仓"，请求走 `closeAllPositions`。
  *
  * ## 二次确认，但不啰嗦
  *
- * 平仓是破坏性操作，要确认；但**确认框只说清"平什么、会怎样"**，
- * 不写一段免责声明 —— 操作员按这个按钮时通常正在亏钱，
- * 那是他们最不需要读长文的时刻。
+ * 平仓是破坏性操作，要确认；但确认框只说清"平什么、会怎样"——
+ * 操作员按这个按钮时通常正在亏钱，那是他们最不需要读长文的时刻。
  */
 function ClosePositionModal({
   traderId,
-  symbol,
+  target,
+  symbols,
   onClose,
   onDone,
 }: {
   traderId: number;
-  symbol: string | null;
+  /** `null` = 关闭；`'__all__'` = 全部；其他 = 该币种。**只在内部用，不显示。** */
+  target: string | null;
+  /** 当前持仓的币种列表 —— 用来把"全部"说成"全部 2 个持仓"而不是一个哨兵。 */
+  symbols: string[];
   onClose: () => void;
   onDone: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ stillRunning: boolean; avgPrice: number } | null>(null);
+  const [result, setResult] = useState<{ closed: string[]; stillRunning: boolean } | null>(null);
 
-  // 每次打开都清掉上一次的结果 —— 否则会看到上一个人的成交价。
+  // 每次打开都清掉上一次的结果 —— 否则会看到上一次的成交结果。
   useEffect(() => {
-    if (symbol !== null) {
+    if (target !== null) {
       setError(null);
       setResult(null);
     }
-  }, [symbol]);
+  }, [target]);
 
-  if (symbol === null) return null;
+  if (target === null) return null;
+
+  const isAll = target === '__all__';
+  /** 给操作员看的名字。**哨兵到这里就结束了。** */
+  const label = isAll ? `全部 ${symbols.length} 个持仓` : target;
 
   const submit = async () => {
     setBusy(true);
     setError(null);
     try {
-      const target = symbol;
-      const response = await api.closePosition(traderId, target);
-      setResult({ stillRunning: response.stillRunning, avgPrice: response.avgPrice });
+      if (isAll) {
+        const response = await api.closeAllPositions(traderId);
+        setResult({ closed: response.closed, stillRunning: response.stillRunning });
+      } else {
+        const response = await api.closePosition(traderId, target);
+        setResult({ closed: [target], stillRunning: response.stillRunning });
+      }
       onDone();
     } catch (err) {
       setError((err as Error).message);
@@ -551,7 +566,7 @@ function ClosePositionModal({
     <Modal
       open
       onClose={onClose}
-      title="手工平仓"
+      title={isAll ? '全部平仓' : '手工平仓'}
       width="max-w-md"
       footer={
         result ? (
@@ -572,16 +587,18 @@ function ClosePositionModal({
         {result ? (
           <>
             <div className="rounded-md border border-up/50 bg-up/10 px-3 py-2 text-base font-semibold text-up">
-              已平仓 {symbol}，成交均价 {result.avgPrice}。
+              {result.closed.length === 0
+                ? '没有需要平掉的持仓。'
+                : `已平仓：${result.closed.join('、')}。`}
             </div>
             {result.stillRunning && (
               /*
-               * 这一句是必要的：机器人还在跑，它下一个周期可能重新开一个同样的仓。
-               * **那不是 bug，是它的工作** —— 但操作员需要知道，
+               * 机器人还在跑，它下一个周期可能重新开仓。
+               * **那不是 bug、是它的工作** —— 但操作员需要知道，
                * 否则会以为自己的平仓没生效。
                */
               <p className="text-base leading-relaxed text-warn">
-                机器人<strong>仍在运行</strong>，它可能在下一个决策周期重新开出同样的仓位。
+                机器人<strong>仍在运行</strong>，它可能在下一个决策周期重新开出仓位。
                 如果不想让它再开，请先「停止」机器人。
               </p>
             )}
@@ -589,9 +606,14 @@ function ClosePositionModal({
         ) : (
           <>
             <p className="text-base leading-relaxed text-ink-hi">
-              以<strong>市价</strong>平掉 <span className="font-semibold">{symbol}</span> 的全部仓位，
-              并撤掉它的止损与止盈单。
+              以<strong>市价</strong>平掉 <span className="font-semibold">{label}</span>
+              的全部仓位，并撤掉对应的止损与止盈单。
             </p>
+            {isAll && symbols.length > 0 && (
+              <p className="text-xs leading-relaxed text-ink-mid">
+                将依次平掉：{symbols.join('、')}
+              </p>
+            )}
             <p className="text-xs leading-relaxed text-ink-faint">
               成交价以交易所实际回报为准，这里无法预知滑点。
             </p>
@@ -1202,6 +1224,8 @@ export function TraderTables({
   openOrderCount,
   refreshToken,
   onSelectSymbol,
+  positionSymbols,
+  onPositionsChanged,
 }: {
   traderId: number;
   tab: TraderTabId;
@@ -1228,6 +1252,10 @@ export function TraderTables({
   refreshToken?: number;
   /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
   onSelectSymbol?: (symbol: string) => void;
+  /** 当前持仓的币种 —— 弹窗用它把"全部"说成"全部 2 个持仓"。 */
+  positionSymbols: string[];
+  /** 平仓成功后通知页面立刻重取持仓 —— 否则界面还留着刚平掉的那一行。 */
+  onPositionsChanged?: () => void;
 }) {
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   const [ordersRefreshToken, setOrdersRefreshToken] = useState(0);
@@ -1317,13 +1345,25 @@ export function TraderTables({
         )}
       </div>
 
-        <ClosePositionModal
-          traderId={traderId}
-          symbol={closeTarget}
-          onClose={() => setCloseTarget(null)}
-          /* 平完立刻刷新三张表 —— 否则表格里还留着刚平掉的那一行。 */
-          onDone={() => setOrdersRefreshToken((n) => n + 1)}
-        />
+      {/*
+        平仓后要刷新的是**三样东西**，不只是订单表。
+
+        第一版我只加了 `setOrdersRefreshToken` —— 于是手工平仓成功后
+        持仓行还留在「当前持仓」里（用户实测报回来的就是这个）。
+        `positionCount` 是页面从 WebSocket 里算的，它有自己的更新节奏，
+        **不能指望它"过一会儿自己会好"**：操作员按了平仓、界面却还显示着那个仓，
+        他会以为没平掉，然后再按一次。
+      */}
+      <ClosePositionModal
+        traderId={traderId}
+        target={closeTarget}
+        symbols={positionSymbols}
+        onClose={() => setCloseTarget(null)}
+        onDone={() => {
+          setOrdersRefreshToken((n) => n + 1);
+          onPositionsChanged?.();
+        }}
+      />
     </Panel>
   );
 }

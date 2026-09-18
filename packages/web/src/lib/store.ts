@@ -268,6 +268,15 @@ interface EventState {
   connect: () => void;
   disconnect: () => void;
   ingest: (event: ServerEvent) => void;
+  /**
+   * 用一份 REST 拿到的持仓**覆盖**某个机器人的持仓。
+   *
+   * 存在的理由：手工平仓之后，界面必须**立刻**不再显示那个仓位。
+   * 而 `byTrader` 平时只由 WebSocket 推送更新 —— 用户实测过：
+   * 平仓成功了、界面却还留着那一行，于是他会以为没平掉、再按一次。
+   * **操作员按下平仓之后的界面状态，不能依赖推送的到达时间。**
+   */
+  setPositions: (traderId: number, positions: PositionView[]) => void;
   hydrateLogs: (lines: LiveLogLine[]) => void;
   dismissToast: (id: number) => void;
   clearLogs: () => void;
@@ -357,6 +366,17 @@ export const useEvents = create<EventState>((set, get) => ({
     }
     set({ status: 'idle', attempts: 0, byTrader: clearAllLiveCycles(get().byTrader) });
   },
+
+  /*
+   * 用 REST 的结果覆盖持仓。**与推送无关** —— 见接口上的说明。
+   */
+  setPositions: (traderId, positions) =>
+    set((state) => ({
+      byTrader: {
+        ...state.byTrader,
+        [traderId]: { ...(state.byTrader[traderId] ?? emptyTraderLive()), positions },
+      },
+    })),
 
   ingest: (event) => {
     const now = Date.now();

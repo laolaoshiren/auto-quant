@@ -556,6 +556,18 @@ export const api = {
       { method: 'POST', body: {} },
     ),
 
+  /**
+   * 平掉**该机器人的全部持仓**。
+   *
+   * 服务端逐个平（每个都走 `closeManually` 的同一套顺序：先撤单、再市价平、再记账），
+   * 并返回**实际平掉的币种列表** —— 界面靠这个列表说话，而不是靠一个哨兵值。
+   */
+  closeAllPositions: (id: number) =>
+    request<{ ok: boolean; closed: string[]; stillRunning: boolean }>(
+      `/traders/${id}/positions/close-all`,
+      { method: 'POST', body: {} },
+    ),
+
   /* --- per-trader data --- */
   traderStats: (id: number, signal?: AbortSignal) =>
     request<TraderStats>(`/traders/${id}/stats`, { signal }),

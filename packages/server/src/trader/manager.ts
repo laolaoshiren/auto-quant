@@ -6,7 +6,7 @@ import type { Vault } from '../crypto/vault.js';
 import { createLogger } from '../logger.js';
 import { MarketDataService } from '../market/service.js';
 import { LlmClient } from '../llm/client.js';
-import { aiModels, equity, exchanges, runtimeLogs, strategies, traders } from '../store/repositories.js';
+import { aiModels, equity, exchanges, positions, runtimeLogs, strategies, traders } from '../store/repositories.js';
 import { eventBus } from '../events.js';
 import { checkConfigReachability } from '../risk/reachability.js';
 import { AgentRuntime } from './agent/runtime.js';
@@ -804,6 +804,45 @@ export class TraderManager {
     if (!result) throw new Error(`本地没有 ${symbol} 的持仓。`);
     return { ...result, stillRunning: false };
   }
+  /**
+   * 平掉该机器人的**全部**持仓。
+   *
+   * ## 为什么不做成"把 `__all__` 当币种传下去"
+   *
+   * 第一版就是那么做的：界面把哨兵 `'__all__'` 当参数发给单币种平仓接口，
+   * 于是错误信息变成了「本地没有 __ALL__ 的持仓」—— **内部标记漏到了界面上**。
+   *
+   * 正确做法是在这里展开成真实币种，**逐个走同一套顺序**
+   * （先撤单 → 市价平 → 记账，见 `closeManually`），
+   * 并把**实际平掉的币种列表**返回给界面。
+   *
+   * ## 一个失败不该阻断其余的
+   *
+   * 平仓是操作员的退出手段。**某一个标的平不掉，不该让其他标的也平不掉** ——
+   * 所以逐个 try/catch，把失败的理由带回去，继续平下一个。
+   */
+  async closeAllPositions(
+    traderId: number,
+  ): Promise<{ closed: string[]; failed: Array<{ symbol: string; error: string }>; stillRunning: boolean }> {
+    const trader = traders.get(traderId);
+    if (!trader) throw new Error('机器人不存在。');
+
+    const symbols = [...new Set(positions.open(traderId).map((p) => p.symbol))];
+    const closed: string[] = [];
+    const failed: Array<{ symbol: string; error: string }> = [];
+
+    for (const symbol of symbols) {
+      try {
+        const result = await this.closePosition(traderId, symbol);
+        if (result) closed.push(symbol);
+      } catch (error) {
+        failed.push({ symbol, error: (error as Error).message });
+      }
+    }
+
+    return { closed, failed, stillRunning: this.running.has(traderId) };
+  }
+
 
 
   /**
