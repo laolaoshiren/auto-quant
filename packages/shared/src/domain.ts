@@ -542,9 +542,35 @@ export type LogScopeKind = 'exchange' | 'ai' | 'data' | 'runtime' | 'other';
 export function logScopeKind(scope: string | null | undefined): LogScopeKind {
   if (!scope) return 'other';
   if (scope.startsWith('binance:')) return 'exchange';
-  if (scope === 'llm' || scope.startsWith('llm:') || scope === 'trader:agent') return 'ai';
+  if (scope === 'llm' || scope.startsWith('llm:')) return 'ai';
+  /*
+   * ⚠️ **类别表要覆盖全部已知来源。**
+   *
+   * 第一版只列了 exchange / ai / data / runtime 四类的少数几个，
+   * 于是 `trader`（交易循环）、`manager`（机器人管理）、`trader:agent`
+   * 这些最常出现的来源全部落进 `other` —— **界面上全是一个颜色**，
+   * 而"按类别配色"这件事等于没做。
+   *
+   * 漏掉的不会报错，只会让配色退化成灰色 —— **一个静默失效的视觉设计**。
+   */
+  if (scope === 'trader:agent' || scope.startsWith('strategy:')) return 'ai';
   if (scope === 'db' || scope === 'store') return 'data';
-  if (scope === 'main' || scope === 'api' || scope === 'auth') return 'runtime';
+  if (scope === 'main' || scope === 'api' || scope === 'auth' || scope.startsWith('reset-')) {
+    return 'runtime';
+  }
+  /* 交易循环、机器人管理、行情服务、模拟与测试 —— 都属"运行时"。 */
+  if (
+    scope === 'trader' ||
+    scope === 'manager' ||
+    scope === 'balance' ||
+    scope.startsWith('market:') ||
+    scope === 'simulate' ||
+    scope.startsWith('sim:') ||
+    scope.endsWith(':check') ||
+    scope === 'smoke'
+  ) {
+    return 'runtime';
+  }
   return 'other';
 }
 
