@@ -207,6 +207,24 @@ export class TraderManager {
       apiKey,
       apiSecret,
       dryRun,
+      /*
+       * **不给每个机器人刷两条启动日志。**
+       *
+       * `connectExchange` 在非 quiet 时会打「已连接 …」和「已加载 528 个
+       * 可交易的 USDT 本位永续合约；请求权重上限 2400/分钟」。
+       * 而这里是**每个机器人各建一条连接**（缓存按 `traderId`），
+       * 于是 5 个机器人启动时把同样两句话刷 5 遍 ——
+       * 实测在「数据与日志」页上，十几行日志里只有两行是新信息。
+       *
+       * `server.ts` 里那三处调用本来就传了 `quiet: true`，这里是漏掉的第四处。
+       *
+       * ⚠️ 顺便记下**没有**做的事：连接缓存是按 `traderId` 的，
+       * 所以共用同一个交易所账户的多个机器人会各建一条连接（各做一次校时、
+       * 各拉一次 `exchangeInfo`）。**那确实是浪费，但不改** ——
+       * 它要动"下单用的 broker 对象归谁"，而收益只是启动时省几次 API 调用
+       * （不是热点），风险与收益不成比例。
+       */
+      quiet: true,
       ...(process.env.BINANCE_WS_HOST ? { wsHostOverride: process.env.BINANCE_WS_HOST } : {}),
     });
 
