@@ -81,7 +81,7 @@ export async function connectExchange(options: ConnectOptions): Promise<Exchange
   // 1. Clock sync before anything signed.
   const clockOffsetMs = await rest.syncTime(true);
   if (!options.quiet) {
-    log.info(`connected to ${endpoints.label} (clock offset ${clockOffsetMs}ms)`);
+    log.info(`已连接 ${endpoints.label}（时钟偏移 ${clockOffsetMs}ms）`);
   }
 
   // 2 + 3. Exchange metadata: rate limits and symbol filters.
@@ -91,7 +91,7 @@ export async function connectExchange(options: ConnectOptions): Promise<Exchange
   const registry = SymbolRegistry.fromExchangeInfo(info);
   if (!options.quiet) {
     log.info(
-      `loaded ${registry.size} tradable USDT-M perpetual contracts; weight budget ${rest.weightLimitPerMinute}/min`,
+      `已加载 ${registry.size} 个可交易的 USDT 本位永续合约；请求权重上限 ${rest.weightLimitPerMinute}/分钟`,
     );
   }
 
@@ -125,7 +125,7 @@ function applyRateLimits(rest: BinanceRest, info: BinanceExchangeInfo): void {
   if (weightLimit?.limit && Number.isFinite(weightLimit.limit)) {
     rest.weightLimitPerMinute = weightLimit.limit;
   } else {
-    log.warn('exchangeInfo did not publish a REQUEST_WEIGHT/MINUTE limit; keeping the default');
+    log.warn('交易所没有公布 REQUEST_WEIGHT/MINUTE 限额，沿用默认值');
   }
 }
 

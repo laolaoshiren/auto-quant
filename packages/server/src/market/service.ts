@@ -125,7 +125,7 @@ export class MarketDataService {
     try {
       info = this.registry.require(symbol);
     } catch {
-      log.debug(`skipping unknown symbol ${symbol}`);
+      log.debug(`跳过未登记的标的 ${symbol}`);
       return null;
     }
 

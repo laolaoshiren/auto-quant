@@ -317,7 +317,7 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
 
   const parsed = safeParseJson(jsonText);
   if (parsed === undefined) {
-    log.warn('model returned JSON that could not be parsed after repair', {
+    log.warn('模型返回的 JSON 在自动修复之后仍无法解析', {
       preview: jsonText.slice(0, 300),
     });
     return { cotTrace, decisions: [], rawResponse: raw, rejected: [] };
@@ -333,7 +333,7 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
   for (const item of rawItems) {
     const coerced = coerceRawDecision(item);
     if (!coerced) {
-      log.debug('dropped an unparseable decision entry', { item });
+      log.debug('丢弃了一条无法解析的决策项', { item });
       continue;
     }
 

@@ -402,3 +402,24 @@ export function symbolTone(symbol: string): string {
   }
   return SYMBOL_TONES[Math.abs(h) % SYMBOL_TONES.length] as string;
 }
+
+/**
+ * 交易环境的**中文标签**。
+ *
+ * `system.environment` 是 `'production' | 'demo'` —— 一个**稳定机器码**，
+ * 由服务端按交易所端点算出。而「数据与日志」页原来把它**原样显示**：
+ * 操作员看到的是一张写着 `production` 的卡片。
+ *
+ * 与本文件里其它标签函数同一条纪律：**存的是机器码，翻译在展示层。**
+ * 认不出的值原样返回 —— 不猜。
+ *
+ * 注意它与 `environmentLabel`（「币安 USDT 本位合约（实盘）」）的区别：
+ * 后者是**交易所端点**的名字，这个概念是**"真钱还是假钱"**。
+ * 两个都放在卡片上：一个是主语，一个是定语。
+ */
+export function tradingEnvironmentLabel(environment: string | null | undefined): string {
+  if (!environment) return '—';
+  if (environment === 'production') return '实盘';
+  if (environment === 'demo') return '模拟盘';
+  return environment;
+}

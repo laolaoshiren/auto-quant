@@ -1749,7 +1749,19 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       type: 'log',
       traderId,
       level,
-      message: traderId === null ? `[${scope}] ${message}` : text,
+      /*
+       * ⚠️ **不再把 `[scope]` 拼进正文。**
+       *
+       * 原来这里是 `message: traderId === null ? `[${scope}] ${message}` : text`，
+       * 于是界面上显示 `[binance:bootstrap] loaded 528 tradable …` ——
+       * **机器码出现在给人看的文本里**。
+       *
+       * 拼进去之后界面就再也分不出哪段是来源、哪段是正文，
+       * 连"把来源翻译成中文"都做不到。所以来源单独传，
+       * 由展示层翻译（`logScopeLabel`）。原始码完整保留，筛选靠它。
+       */
+      message: text,
+      scope,
       timestamp: new Date().toISOString(),
     });
   });
