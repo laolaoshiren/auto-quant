@@ -167,7 +167,7 @@ export class ResilientStream {
       await this.options.beforeConnect?.();
       url = await this.options.url();
     } catch (error) {
-      log.error(`[${this.options.name}] could not prepare stream URL`, error);
+      log.error(`[${this.options.name}] 无法构造数据流地址`, error);
       this.scheduleReconnect('url-error');
       return;
     }
@@ -184,7 +184,7 @@ export class ResilientStream {
     this.lastMessageAt = 0;
 
     socket.on('open', () => {
-      log.info(`[${this.options.name}] socket open (${reason})`);
+      log.info(`[${this.options.name}] 连接已建立（${reason}）`);
       // Deliberately NOT resetting `attempt` here. A routed-URL mistake yields an
       // open socket with no data; resetting now would spin forever.
       void this.options.onOpen?.(reason);
@@ -196,7 +196,7 @@ export class ResilientStream {
       this.lastMessageAt = Date.now();
       if (this.attempt !== 0) {
         // First real bytes prove the connection is genuinely useful.
-        log.info(`[${this.options.name}] stream verified live; backoff reset`);
+        log.info(`[${this.options.name}] 数据流已确认可用；重连退避已重置`);
         this.attempt = 0;
       }
       this.setState('live', 'receiving data');
@@ -234,7 +234,7 @@ export class ResilientStream {
      */
     socket.on('error', (error: Error) => {
       if (this.socket !== socket) return;
-      log.warn(`[${this.options.name}] socket error: ${error.message}`);
+      log.warn(`[${this.options.name}] 连接出错：${error.message}`);
     });
 
     socket.on('close', (code: number, reason: Buffer) => {
@@ -246,7 +246,7 @@ export class ResilientStream {
       // A clean close or a planned rotation deserves an immediate retry;
       // anything else is a fault and backs off.
       const immediate = code === 1000;
-      log.warn(`[${this.options.name}] socket closed: ${detail}`);
+      log.warn(`[${this.options.name}] 连接已断开：${detail}`);
       this.setState('reconnecting', detail);
       if (immediate) {
         void this.connect('clean-close');
@@ -265,7 +265,7 @@ export class ResilientStream {
     if (this.stopped) return;
     const delay = fullJitterBackoff(this.attempt);
     this.attempt += 1;
-    log.warn(`[${this.options.name}] reconnecting in ${delay}ms (attempt ${this.attempt}, ${reason})`);
+    log.warn(`[${this.options.name}] ${delay}ms 后重连（第 ${this.attempt} 次，原因：${reason}）`);
     this.reconnectTimer = setTimeout(() => {
       void this.connect(reason);
     }, delay);
@@ -567,7 +567,7 @@ export class BinanceUserDataStream {
     } catch (error) {
       const expired =
         error instanceof BinanceApiError && (error.code === -1125 || error.code === -1102);
-      this.log.warn(`listenKey keepalive failed (${(error as Error).message})`);
+      this.log.warn(`用户数据流密钥的保活失败（${(error as Error).message}）`);
       if (expired) {
         this.log.warn('用户数据流的密钥已过期；重新申请并重连');
         await this.restart('keepalive-lapsed');

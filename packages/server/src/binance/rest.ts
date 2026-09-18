@@ -204,7 +204,7 @@ export class BinanceRest {
     this.timeOffset = serverTime + Math.floor(rtt / 2) - Date.now();
     this.lastTimeSyncAt = Date.now();
     if (Math.abs(this.timeOffset) > 1000) {
-      log.warn(`clock drift detected: ${this.timeOffset}ms — signing with corrected timestamp`);
+      log.warn(`检测到时钟偏移 ${this.timeOffset}ms —— 本次请求已按校正后的时间戳签名`);
     }
     return this.timeOffset;
   }
@@ -288,7 +288,7 @@ export class BinanceRest {
               const waitMs = error.retryAfterSeconds
                 ? error.retryAfterSeconds * 1000
                 : Math.min(30_000, 2 ** attempt * 1000);
-              log.warn(`${path} rate limited (${error.code}); sleeping ${waitMs}ms`);
+              log.warn(`${path} 被限流（错误码 ${error.code}）；等待 ${waitMs}ms 后重试`);
               await sleep(waitMs);
               continue;
             }
@@ -308,7 +308,7 @@ export class BinanceRest {
           // Transport-level failure (DNS, TLS, socket reset, timeout).
           if (attempt < retries) {
             const waitMs = 2 ** attempt * 500;
-            log.warn(`${path} transport error (${(error as Error).message}); retrying in ${waitMs}ms`);
+            log.warn(`${path} 网络传输错误（${(error as Error).message}）；${waitMs}ms 后重试`);
             await sleep(waitMs);
             continue;
           }

@@ -93,7 +93,7 @@ export async function selectCandidates(
               minOpenInterestUsd: coinSource.minOpenInterestUsd,
             })
             .catch((error) => {
-              log.warn(`coinpool screen failed: ${(error as Error).message}`);
+              log.warn(`按成交额筛选候选池失败：${(error as Error).message}`);
               return [] as string[];
             });
           for (const symbol of symbols) add(symbol, 'coinpool');
@@ -108,7 +108,7 @@ export async function selectCandidates(
               minOpenInterestUsd: coinSource.minOpenInterestUsd,
             })
             .catch((error) => {
-              log.warn(`oi_top screen failed: ${(error as Error).message}`);
+              log.warn(`按持仓量增长筛选候选池失败：${(error as Error).message}`);
               return [] as string[];
             });
           for (const symbol of symbols) add(symbol, 'oi_top');
@@ -119,7 +119,7 @@ export async function selectCandidates(
       }
     }
   } catch (error) {
-    log.error(`candidate selection failed: ${(error as Error).message}`);
+    log.error(`选币失败：${(error as Error).message}`);
   }
 
   // Existing positions are non-negotiable members of the universe.

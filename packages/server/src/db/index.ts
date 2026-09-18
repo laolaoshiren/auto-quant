@@ -53,7 +53,7 @@ export class Db {
 
     for (const migration of MIGRATIONS) {
       if (migration.version <= current) continue;
-      log.info(`applying migration ${migration.version} (${migration.name})`);
+      log.info(`正在应用数据库迁移 v${migration.version}（${migration.name}）`);
       this.db.exec('BEGIN');
       try {
         this.db.exec(migration.sql);

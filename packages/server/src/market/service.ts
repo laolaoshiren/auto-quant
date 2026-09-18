@@ -63,11 +63,11 @@ export class MarketDataService {
 
     const [tickers, premiums] = await Promise.all([
       this.market.ticker24h().catch((error) => {
-        log.warn(`universe ticker fetch failed: ${(error as Error).message}`);
+        log.warn(`拉取全市场行情快照失败：${(error as Error).message}`);
         return [] as BinanceTicker24h[];
       }),
       this.market.premiumIndex().catch((error) => {
-        log.warn(`universe premium fetch failed: ${(error as Error).message}`);
+        log.warn(`拉取全市场标记价与资金费率失败：${(error as Error).message}`);
         return [] as BinancePremiumIndex[];
       }),
     ]);
@@ -137,7 +137,7 @@ export class MarketDataService {
         try {
           return { tf, klines: await this.getKlines(symbol, tf, count) };
         } catch (error) {
-          log.warn(`klines(${symbol}, ${tf}) failed: ${(error as Error).message}`);
+          log.warn(`拉取 ${symbol} 的 ${tf} K 线失败：${(error as Error).message}`);
           return { tf, klines: [] as Kline[] };
         }
       }),
