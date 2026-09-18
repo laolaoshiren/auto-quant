@@ -618,3 +618,127 @@ test('breakers stay clear when neither condition is met', () => {
   const verdict = checkCircuitBreakers(config, 1010, { dailyRealizedPnl: 5, highWaterEquity: 1000 });
   assert.equal(verdict.blocked, false);
 });
+
+/* -------------------------------------------------------------------------- */
+/*  adjust_protection                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 「调整保护位」这个动作在一段时间里是**结构性缺失**的：模型只能开或平，
+ * 止损止盈在开仓那一刻定死，之后只有代码里那个固定阈值的回撤守卫能动它。
+ * 用户的原话是「没有动态加仓、减仓、调整」——这是"调整"那一半。
+ *
+ * 这些用例钉住的是**它不能变成新的伤害来源**：调保护位不占保证金、不改数量，
+ * 看起来无害，但它能把止损移到错误的一侧（等于立刻市价平仓）、
+ * 或者移到贴脸的位置（下一根 K 线就扫掉，结局由噪音决定）。
+ */
+function adjustDecision(overrides: Partial<Decision> = {}): Decision {
+  return {
+    symbol: 'BTCUSDT',
+    action: 'adjust_protection',
+    leverage: 5,
+    positionSizeUsd: 690,
+    stopLoss: 67_000,
+    takeProfit: null,
+    confidence: 70,
+    riskUsd: 10,
+    reasoning: '把止损提到成本附近',
+    adjustments: [],
+    ...overrides,
+  };
+}
+
+test('adjust_protection：把多头止损往上移会被放行', () => {
+  const env = environment({
+    positions: new Map([['BTCUSDT', position({ side: 'long', stopLoss: 64_000 })]]),
+  });
+  /* 现价 68,000（`environment` 的默认快照）：移到 67,000 是收紧保护。 */
+  const verdict = engine.review([adjustDecision({ stopLoss: 67_000 })], env);
+  assert.equal(verdict.approved.length, 1, `应当放行，实际：${JSON.stringify(verdict.rejected)}`);
+  assert.equal(verdict.approved[0]!.stopLoss, 67_000);
+});
+
+test('adjust_protection：把多头止损往下移会被拒 —— 那是主动扩大风险', () => {
+  const env = environment({
+    positions: new Map([['BTCUSDT', position({ side: 'long', stopLoss: 66_000 })]]),
+  });
+  const verdict = engine.review([adjustDecision({ stopLoss: 65_000 })], env);
+  assert.equal(verdict.approved.length, 0, '往下移止损必须被拒');
+  assert.match(verdict.rejected[0]!.reason, /只能往上移/);
+});
+
+test('adjust_protection：止损放到现价之上会被拒 —— 那等于立刻市价平仓', () => {
+  const env = environment({
+    positions: new Map([['BTCUSDT', position({ side: 'long', stopLoss: 60_000 })]]),
+  });
+  /* 现价 68,000；止损 69,000 在多头上意味着"一碰就平"。 */
+  const verdict = engine.review([adjustDecision({ stopLoss: 69_000 })], env);
+  assert.equal(verdict.approved.length, 0);
+  assert.match(verdict.rejected[0]!.reason, /必须在现价/);
+});
+
+test('adjust_protection：止损贴得太近会被拒 —— 与开仓用同一把尺子', () => {
+  /*
+   * 往返成本默认 0.10%（fallback）、minStopLossFeeMultiple 默认 3
+   * ⇒ 最小止损距离 0.30%。现价 68,000 的 0.1% 是 68 点，会低于门槛。
+   */
+  const env = environment({
+    positions: new Map([['BTCUSDT', position({ side: 'long', stopLoss: 60_000 })]]),
+  });
+  const verdict = engine.review([adjustDecision({ stopLoss: 67_950 })], env);
+  assert.equal(verdict.approved.length, 0, '贴脸的止损必须被拒');
+  assert.match(verdict.rejected[0]!.reason, /往返成本/);
+});
+
+test('adjust_protection：空头的方向判断是镜像的', () => {
+  const env = environment({
+    positions: new Map([
+      ['BTCUSDT', position({ side: 'short', entryPrice: 68_000, stopLoss: 72_000 })],
+    ]),
+  });
+  /* 空头止损往下移是收紧保护 —— 放行。 */
+  const ok = engine.review([adjustDecision({ stopLoss: 69_000 })], env);
+  assert.equal(ok.approved.length, 1, `空头往下移应当放行：${JSON.stringify(ok.rejected)}`);
+
+  /* 空头止损放到现价之下 —— 一碰就平，拒绝。 */
+  const bad = engine.review([adjustDecision({ stopLoss: 67_000 })], env);
+  assert.equal(bad.approved.length, 0);
+  assert.match(bad.rejected[0]!.reason, /必须在现价/);
+});
+
+test('adjust_protection：没有持仓时被拒', () => {
+  const env = environment({ positions: new Map() });
+  const verdict = engine.review([adjustDecision()], env);
+  assert.equal(verdict.approved.length, 0);
+  assert.match(verdict.rejected[0]!.reason, /没有持仓/);
+});
+
+test('adjust_protection：两个价位都不给会被拒 —— 那是没有内容的动作', () => {
+  const env = environment({
+    positions: new Map([['BTCUSDT', position()]]),
+  });
+  const verdict = engine.review([adjustDecision({ stopLoss: null, takeProfit: null })], env);
+  assert.equal(verdict.approved.length, 0);
+  assert.match(verdict.rejected[0]!.reason, /都没给/);
+});
+
+test('adjust_protection 在开仓之前执行 —— 先弄安全，再冒险', () => {
+  /*
+   * 顺序不是风格问题：如果开仓先跑，这一轮的资金与额度可能被新仓吃掉，
+   * 而那个该保护的老仓位一直裸着。
+   */
+  const env = environment({
+    positions: new Map([['BTCUSDT', position({ side: 'long', stopLoss: 64_000 })]]),
+  });
+  const verdict = engine.review(
+    [openDecision({ symbol: 'BTCUSDT', stopLoss: 64_000 }), adjustDecision({ stopLoss: 67_000 })],
+    env,
+  );
+  assert.ok(verdict.approved.length >= 1);
+  assert.equal(
+    verdict.approved[0]!.action,
+    'adjust_protection',
+    `调保护位必须排在开仓之前，实际顺序：${verdict.approved.map((d) => d.action).join('、')}`,
+  );
+});
+
