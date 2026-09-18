@@ -544,6 +544,18 @@ export const api = {
   reconcileTrader: (id: number) =>
     request<ReconcileResult>(`/traders/${id}/reconcile`, { method: 'POST', body: {} }),
 
+  /**
+   * 手工平掉一个持仓 —— **操作员的最高权限，随时可用**。
+   *
+   * 服务端不对它做任何"机器人是否在运行"的前置检查：那是"机器人要不要开仓"
+   * 的范畴，而这是"人要退出"。**一个止不住手的操作员是被困住的。**
+   */
+  closePosition: (id: number, symbol: string) =>
+    request<{ ok: boolean; avgPrice: number; fee: number; stillRunning: boolean }>(
+      `/traders/${id}/positions/${symbol}/close`,
+      { method: 'POST', body: {} },
+    ),
+
   /* --- per-trader data --- */
   traderStats: (id: number, signal?: AbortSignal) =>
     request<TraderStats>(`/traders/${id}/stats`, { signal }),

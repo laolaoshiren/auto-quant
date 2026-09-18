@@ -3096,6 +3096,77 @@ export class AutoTrader {
    * failed, in which case the caller must still book the entry, because the
    * position may well exist at the exchange unprotected.
    */
+  /* ---------------------------------------------------------------------- */
+  /*  手工平仓（操作员的最高权限）                                            */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * 操作员在控制台上手工平掉一个持仓。
+   *
+   * ## 为什么它必须随时可用
+   *
+   * 这里原本**没有**这个能力：控制台上的「平仓」按钮只弹一个说明弹窗，
+   * 理由是"机器人自己在管理持仓，控制台不该和它抢"。
+   *
+   * **那个理由把"代码整洁"放在了"操作员对自己资金的控制权"前面。**
+   * 一个止不住手的操作员是被困住的 —— 无论机器人当时在做什么，
+   * **人都必须能立刻退出。这是最高权限，不该被任何设计考量限制。**
+   *
+   * ## 顺序不可颠倒（§2.7）
+   *
+   * **先撤该标的的全部挂单，再市价平仓。**
+   *
+   * 保护单是 `closePosition=true` 的条件单，**手动平仓后它会继续存活**，
+   * 然后朝反方向开出一个新仓 —— 操作员以为自己平掉了，实际开了一个反向仓。
+   * 这个坑在 `executeClose` 的注释里记着，这里必须重复一遍。
+   *
+   * ## 记账（§2.3）
+   *
+   * 平完必须走 `bookClosedPosition` —— 那是唯一算净额的地方。
+   * 少记这一笔会让平台账面比账户好看，而那正是 §2.5 存在的理由。
+   *
+   * @returns 成交均价与手续费；没有本地持仓时返回 null
+   */
+  async closeManually(symbol: string): Promise<{ avgPrice: number; fee: number } | null> {
+    const traderId = this.deps.trader.id;
+    const local = positionStore.getOpenBySymbol(traderId, symbol);
+    if (!local) return null;
+
+    // ① 先撤单 —— 这一条不能颠倒，见上面的说明。
+    await this.deps.broker.cancelAllOrders(symbol).catch((error) => {
+      /*
+       * 撤单失败**不阻断平仓**：一个撤不掉的保护单是麻烦，
+       * 而一个平不掉的亏损仓位是危险。**两害相权，先平。**
+       */
+      this.emit(
+        'warn',
+        `${symbol} 手工平仓前撤单失败（${(error as Error).message}），仍然继续平仓。`,
+      );
+    });
+
+    // ② 市价平仓。
+    const exitSide: 'BUY' | 'SELL' = local.side === 'long' ? 'SELL' : 'BUY';
+    const flatten = await this.emergencyFlatten(symbol, local.quantity, exitSide, traderId);
+    if (!flatten) {
+      throw new Error(`${symbol} 手工平仓失败：交易所没有接受平仓单。`);
+    }
+
+    // ③ 记账 —— 唯一算净额的地方。
+    const still = positionStore.getOpenBySymbol(traderId, symbol);
+    if (still) {
+      await this.bookClosedPosition(
+        still,
+        'manual',
+        flatten.avgPrice,
+        flatten.fee,
+        new Date().toISOString(),
+      );
+    }
+
+    this.emit('info', `操作员手工平仓 ${symbol} @ ${flatten.avgPrice}。`);
+    return flatten;
+  }
+
   private async emergencyFlatten(
     symbol: string,
     quantity: number,

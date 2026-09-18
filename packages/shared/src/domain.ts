@@ -301,6 +301,14 @@ export const CLOSE_REASONS = [
   'liquidated', // liquidation or ADL
   'external', // closed outside the bot, reason unknown
   /*
+   * 操作员在控制台上手工平的。
+   *
+   * **必须与 `model_decision` 分开**：那一个是 AI 的决定，这一个是人的决定。
+   * 两者的绩效含义完全不同 —— 混在一起会让"这个策略表现如何"这个问题的答案里
+   * 混进人的干预，而那正是操作员最需要分清的一件事。
+   */
+  'manual',
+  /*
    * Entered, but the exchange-side stop could not be established — so the
    * position was market-closed to avoid holding a naked leveraged exposure.
    *
@@ -338,6 +346,7 @@ export const CLOSE_REASON_LABELS: Record<string, string> = {
   external: '外部平仓',
   protection_unavailable: '保护单缺失（已立即平仓）',
   reconciled: '对账补录',
+  manual: '手工平仓',
 };
 
 /** Label for a close reason, falling back to the raw code rather than blank. */
