@@ -5,6 +5,7 @@ import {
   RawDecisionSchema,
   isCloseAction,
   isAdjustAction,
+  isResizeAction,
   isOpenAction,
   normalizeSymbol,
   type Decision,
@@ -275,6 +276,15 @@ function coerceRawDecision(input: unknown): LenientDecision | null {
     take_profit: toFiniteNumber(o.take_profit ?? o.takeProfit ?? o.tp) ?? undefined,
     confidence: toFiniteNumber(o.confidence ?? o.conf) ?? undefined,
     risk_usd: toFiniteNumber(o.risk_usd ?? o.riskUsd ?? o.risk) ?? undefined,
+    /*
+     * 减仓的两个字段。**接受 camelCase 与下划线两种写法** ——
+     * 其他字段都是这样做的（`position_size_usd ?? positionSizeUsd`），
+     * 而模型输出哪个纯看它当天的习惯。只认一种的话，另一半写法会被静默丢弃，
+     * 减仓会因为"两个都没给"而被拒 —— 而模型明明给了。
+     */
+    reduce_percent: toFiniteNumber(o.reduce_percent ?? o.reducePercent ?? o.percent) ?? undefined,
+    reduce_quantity:
+      toFiniteNumber(o.reduce_quantity ?? o.reduceQuantity ?? o.quantity) ?? undefined,
     reasoning: typeof o.reasoning === 'string' ? o.reasoning : typeof o.reason === 'string' ? o.reason : undefined,
   };
 
@@ -349,7 +359,9 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
      * 于是**对持仓调保护位时，币种一旦掉出候选池就会被拒**，
      * 而模型以为它把止损提上来了。
      */
-    const isHeldPositionAction = Boolean(heldSide) && (isCloseAction(action) || isAdjustAction(action));
+    const isHeldPositionAction =
+      Boolean(heldSide) &&
+      (isCloseAction(action) || isAdjustAction(action) || isResizeAction(action));
     if (!isListed && !(ctx.allowUnlistedCloses && isHeldPositionAction)) {
       rejected.push({
         symbol: coerced.symbol,
@@ -399,6 +411,8 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
       takeProfit: coerced.take_profit ?? null,
       confidence: coerced.confidence ?? 0,
       riskUsd: coerced.risk_usd ?? 0,
+      reducePercent: coerced.reduce_percent ?? null,
+      reduceQuantity: coerced.reduce_quantity ?? null,
       reasoning: coerced.reasoning ?? '',
       adjustments: [],
     });
@@ -424,10 +438,26 @@ const ACTION_PRIORITY: Record<DecisionAction, number> = {
    * 而那个该保护的老仓位一直裸着。
    */
   adjust_protection: 1,
+  /*
+   * 减仓与调保护位同层 —— 都是**降低已有仓位风险**的动作。
+   *
+   * 它排在加仓与新开仓之前：一个该减的仓位先减掉，
+   * 再去考虑把资金投到哪里。反过来做的话，可能先加仓、再发现额度不够减仓
+   * （虽然减仓不占额度，但顺序影响的是模型的思考顺序与执行日志的可读性）。
+   */
+  reduce_position: 1,
+  /*
+   * 加仓排在**新开仓之后**。
+   *
+   * 理由：一个新标的的机会是"从零到一"，而加仓是"在一笔已有敞口上再加"——
+   * **后者的边际价值更低，风险却更集中**（同一标的的敞口翻倍）。
+   * 所以先给新机会留出额度。
+   */
   open_long: 2,
   open_short: 2,
-  hold: 3,
-  wait: 3,
+  add_to_position: 3,
+  hold: 4,
+  wait: 4,
 };
 
 /**

@@ -28,6 +28,34 @@ export const DecisionActionSchema = z.enum([
    * 所以不涉及均价与部分平仓的账目问题。
    */
   'adjust_protection',
+  /*
+   * 加仓 / 减仓 —— **调整一个已有持仓的规模**。
+   *
+   * 用户的原话是「没有动态加仓、减仓、调整」。
+   * `adjust_protection` 是「调整」；这两个是另外两半。
+   *
+   * ## 为什么它们现在能安全地做
+   *
+   * 我一开始以为这需要发明"加权均价"和"部分成交"的账目模型，
+   * 所以先只做了 `adjust_protection`。查证之后发现**那套基础设施已经存在** ——
+   * `reconstructRoundTrips()` 里写着：
+   *
+   *   · 「Adding to the position: the entry average moves.」—— 加仓累加
+   *     `entryQty` / `entryNotional`，均价由 `entryNotional / entryQty` 得出
+   *   · 「Closing (possibly partially)」—— 部分出场按剩余数量封顶，
+   *     手续费按 `closing / qty` 分摊
+   *
+   * 缺的只是**触发它的动作**，以及本地持仓的同步。
+   *
+   * ## 唯一需要新增的记账机制
+   *
+   * 部分平仓必须当场记账，而最终平仓时 `findRoundTrip()` 会把整段往返再算一遍 ——
+   * 同一笔利润会被记两次。所以加了 `positions.realized_partial_pnl` 与
+   * `booked_partial_qty`（迁移 M8），最终平仓时把已记的部分减掉。
+   * **重复记账比漏记更糟**：它让账面比账户好看，而那正是 §2.5 禁止的方向。
+   */
+  'add_to_position',
+  'reduce_position',
   'hold',
   'wait',
 ]);
@@ -54,6 +82,16 @@ export function isCloseAction(a: DecisionAction): boolean {
 export function isAdjustAction(a: DecisionAction): boolean {
   return a === 'adjust_protection';
 }
+/**
+ * 加仓 / 减仓 —— 改变一个已有持仓的规模。
+ *
+ * 单独一个谓词的理由与 `isAdjustAction` 相同：风控与执行都是
+ * `if (isClose) … else if (isOpen) … else 当成 no-op`，
+ * **没有谓词的话新动作会被静默当成"什么都不做"**。
+ */
+export function isResizeAction(a: DecisionAction): boolean {
+  return a === 'add_to_position' || a === 'reduce_position';
+}
 
 /** The raw decision object as emitted by the model inside the `<decision>` block. */
 export const RawDecisionSchema = z.object({
@@ -65,6 +103,15 @@ export const RawDecisionSchema = z.object({
   take_profit: z.number().optional(),
   confidence: z.number().optional(),
   risk_usd: z.number().optional(),
+  /*
+   * 减仓用：卖掉落多少。
+   *
+   * **两个字段而不是一个**：按比例减是交易员的自然说法（"减一半"），
+   * 而按数量减在数量不是整数时更精确（币的数量可以是小数）。
+   * 两个都给时以数量为准 —— 它更具体。
+   */
+  reduce_percent: z.number().optional(),
+  reduce_quantity: z.number().optional(),
   reasoning: z.string().optional(),
 });
 export type RawDecision = z.infer<typeof RawDecisionSchema>;
@@ -84,6 +131,14 @@ export interface Decision {
   takeProfit: number | null;
   confidence: number;
   riskUsd: number;
+  /**
+   * 减仓用：卖掉落多少。
+   *
+   * 归一化之后**两个都可能为 null**（不是减仓动作时）——
+   * 风控会把模型给的比例或数量换算成一个，另一个留空。
+   */
+  reducePercent: number | null;
+  reduceQuantity: number | null;
   reasoning: string;
   /** Human-readable notes describing every risk-engine adjustment. */
   adjustments: string[];

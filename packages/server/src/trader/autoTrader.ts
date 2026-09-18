@@ -2,6 +2,7 @@ import {
   closeReasonLabel,
   isCloseAction,
   isAdjustAction,
+  isResizeAction,
   isOpenAction,
   normalizeSymbol,
   orderPurposeLabel,
@@ -1246,7 +1247,8 @@ export class AutoTrader {
       if (
         !isOpenAction(decision.action) &&
         !isCloseAction(decision.action) &&
-        !isAdjustAction(decision.action)
+        !isAdjustAction(decision.action) &&
+        !isResizeAction(decision.action)
       ) {
         executionLog.push({
           action: decision.action,
@@ -1296,6 +1298,13 @@ export class AutoTrader {
           if (outcome.status === 'ok') exitsTaken += 1;
         } else if (isAdjustAction(decision.action)) {
           const outcome = await this.executeAdjust(decision);
+          executionLog.push(outcome);
+        } else if (decision.action === 'add_to_position') {
+          const outcome = await this.executeAdd(decision);
+          executionLog.push(outcome);
+          if (outcome.status === 'ok') entriesTaken += 1;
+        } else if (decision.action === 'reduce_position') {
+          const outcome = await this.executeReduce(decision);
           executionLog.push(outcome);
         } else {
           const outcome = await this.executeOpen(decision, snapshotBySymbol.get(decision.symbol));
@@ -1563,9 +1572,32 @@ export class AutoTrader {
     }
 
     const isLong = local.side === 'long';
-    const grossPnl =
+    /*
+     * ⚠️ **减过仓的仓位，要把已经记过的那部分减掉。**
+     *
+     * 「减仓」会当场记一笔（那部分已经实现）。而 `findRoundTrip()` 重建的是
+     * **整段往返** —— 它的 grossPnl / entryFee / exitFee 覆盖全部入场与出场。
+     * 直接记下去的话，同一笔利润会被记两次。
+     *
+     * **重复记账比漏记更糟**：漏记让账面比账户差，而重复记账让账面比账户好 ——
+     * 后者正是 §2.5 明令禁止的方向（它会让一个亏损账户看起来是赚的）。
+     *
+     * 已记的部分存在 `positions.realized_partial_pnl`（迁移 M8）。
+     * 没有减过仓时它是 0，行为与以前完全一致。
+     */
+    const partialPnl = positionStore.partialBooked(traderId, local.symbol).pnl;
+
+    const grossRaw =
       authoritative?.grossPnl ??
       (isLong ? exitPrice - local.entry_price : local.entry_price - exitPrice) * local.quantity;
+
+    /*
+     * 只在**有权威值时**减：那种情况下权威值覆盖整段往返。
+     *
+     * 而回退公式用的是 `local.quantity` —— 那个数量在减仓之后已经变小了，
+     * 所以它本来只覆盖剩余部分，再减一次就会少记。
+     */
+    const grossPnl = authoritative && partialPnl !== 0 ? grossRaw - partialPnl : grossRaw;
 
     // When the fills are unavailable we know only the exit leg's commission, and
     // recording that as zero would be worse than recording half of it — the
@@ -2425,6 +2457,8 @@ export class AutoTrader {
             confidence: 100,
             riskUsd: 0,
             reasoning: verdict.reason,
+reducePercent: null,
+reduceQuantity: null,
             adjustments: [],
           },
           'drawdown_guard',
@@ -3169,9 +3203,404 @@ export class AutoTrader {
    * Returns what the exchange confirmed — or `null` when the flatten itself
    * failed, in which case the caller must still book the entry, because the
    * position may well exist at the exchange unprotected.
-   */
+
   /* ---------------------------------------------------------------------- */
-  /*  手工平仓（操作员的最高权限）                                            */
+  /*  加仓 / 减仓                                                             */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * 加仓：在一个已有持仓上再买一部分。
+   *
+   * ## 三个必须做对的地方
+   *
+   * 1. **均价要重算成加权平均** —— `(旧均价×旧数量 + 新价×新数量) / 总数量`。
+   *    只改数量的话，平仓时的盈亏算错，而那个数字会成为永久的账面记录。
+   * 2. **保护单要按新数量重挂。** 原来的止损单只覆盖旧数量 ——
+   *    加仓之后**多出来的那部分是裸的**。这是加仓最危险的一步：
+   *    敞口变大而保护没跟上。
+   * 3. 顺序照 §2.7：**先撤旧单，再按新数量挂新单**（币安不允许两张条件单并存）。
+   */
+  private async executeAdd(decision: Decision): Promise<ExecutionLogEntry> {
+    const traderId = this.deps.trader.id;
+    const local = positionStore.getOpenBySymbol(traderId, decision.symbol);
+    if (!local) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail: `${decision.symbol} 没有持仓，不能加仓。`,
+      };
+    }
+
+    const mark = await this.deps.broker.getMarkPrice(decision.symbol).catch(() => 0);
+    const price = mark > 0 ? mark : local.entry_price;
+    if (!(price > 0)) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail: `${decision.symbol} 拿不到价格，无法加仓。`,
+      };
+    }
+
+    const addQty = this.deps.registry.notionalToQuantity(
+      decision.symbol,
+      decision.positionSizeUsd,
+      price,
+    );
+    if (!(addQty > 0)) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'skipped',
+        detail: `拟加仓名义 $${decision.positionSizeUsd.toFixed(2)} 按步长取整后为 0，没有可下数量。`,
+      };
+    }
+
+    /* ① 先撤旧保护单 —— 它们只覆盖旧数量。 */
+    await this.deps.broker.cancelAllOrders(decision.symbol).catch(() => undefined);
+
+    /* ② 市价买入/卖出这一部分。 */
+    const side: 'BUY' | 'SELL' = local.side === 'long' ? 'BUY' : 'SELL';
+    const clientOrderId = makeClientId('add', decision.symbol);
+    let filledId = '';
+    let fillPrice = price;
+    try {
+      const placed = await this.deps.broker.placeOrder({
+        symbol: decision.symbol,
+        side,
+        type: 'MARKET',
+        quantity: addQty,
+        clientOrderId,
+      });
+      const filled = await this.deps.broker.waitForFill(placed);
+      filledId = filled.id;
+      fillPrice = Number(filled.avgPrice) || price;
+    } catch (error) {
+      /*
+       * 加仓失败时**旧保护单已经撤了** —— 仓位此刻是裸的。
+       * 按 §2.6：立刻把它补回来，而不是留一个没有止损的敞口。
+       */
+      await this.restoreProtection(local, traderId, decision.symbol);
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail: `加仓下单失败（${(error as Error).message}），已尝试恢复原有保护。`,
+      };
+    }
+
+    const newQty = local.quantity + addQty;
+    const newEntry = (local.entry_price * local.quantity + fillPrice * addQty) / newQty;
+
+    /* ③ 更新本地持仓：数量与**加权均价**一起改。 */
+    positionStore.resize(traderId, decision.symbol, {
+      quantity: newQty,
+      entryPrice: newEntry,
+      marginUsed: (newQty * newEntry) / Math.max(local.leverage, 1),
+    });
+
+    /* ④ 按新数量重挂保护 —— 用模型给的新价位（如果给了），否则沿用旧的。 */
+    const protection = await this.replaceProtection({
+      symbol: decision.symbol,
+      side: local.side === 'long' ? 'long' : 'short',
+      quantity: newQty,
+      stop: decision.stopLoss ?? local.stop_loss,
+      target: decision.takeProfit ?? local.take_profit,
+      traderId,
+    });
+
+    if (!protection.stopPlaced) {
+      /*
+       * 加仓成功但保护挂不上 —— 敞口变大了却没有止损。
+       * 按 §2.6 平掉**整个仓位**（不是只平掉刚加的那部分：
+       * 原来那部分此刻也没有保护了）。
+       */
+      await this.flattenAndBook(decision.symbol, newQty, local.side === 'long' ? 'long' : 'short', traderId, fillPrice);
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail: '加仓后保护单挂不上，已按 §2.6 立即平掉整个仓位。',
+      };
+    }
+
+    return {
+      action: decision.action,
+      symbol: decision.symbol,
+      status: 'ok',
+      detail:
+        `加仓 ${addQty} @ ${fillPrice}，均价 ${local.entry_price} → ${newEntry}，` +
+        `总数量 ${newQty}，保护单已按新数量重挂。`,
+    };
+  }
+
+  /**
+   * 减仓：平掉一个已有持仓的一部分。
+   *
+   * ## 记账是这个方法里唯一复杂的地方
+   *
+   * 卖掉的那一部分必须**当场记账**（交易所已经实现了盈亏）。
+   * 而仓位最终平掉时 `findRoundTrip()` 会把整段往返再算一遍 ——
+   * 所以这里把已记的部分写进 `positions.realized_partial_pnl` /
+   * `booked_partial_qty`，最终平仓时减掉（迁移 M8）。
+   *
+   * ## 均价不变
+   *
+   * 卖掉一部分不改变剩余部分当初的买入价 —— 那正是"加权平均"的含义。
+   * 改它会让剩余部分的盈亏算错。
+   */
+  private async executeReduce(decision: Decision): Promise<ExecutionLogEntry> {
+    const traderId = this.deps.trader.id;
+    const local = positionStore.getOpenBySymbol(traderId, decision.symbol);
+    if (!local) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail: `${decision.symbol} 没有持仓，无法减仓。`,
+      };
+    }
+
+    const mark = await this.deps.broker.getMarkPrice(decision.symbol).catch(() => 0);
+    const refPrice = mark > 0 ? mark : local.entry_price;
+
+    const reduceQty = this.deps.registry.notionalToQuantity(
+      decision.symbol,
+      decision.positionSizeUsd,
+      refPrice > 0 ? refPrice : local.entry_price,
+    );
+    if (!(reduceQty > 0) || reduceQty >= local.quantity) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'skipped',
+        detail: `拟减数量 ${reduceQty} 不合法（持仓 ${local.quantity}）—— 要全部平掉请用 close_${local.side}。`,
+      };
+    }
+
+    /* ① 先撤保护单：它们覆盖的是全部数量。 */
+    await this.deps.broker.cancelAllOrders(decision.symbol).catch(() => undefined);
+
+    /* ② reduceOnly 市价平掉这一部分。 */
+    const side: 'BUY' | 'SELL' = local.side === 'long' ? 'SELL' : 'BUY';
+    const clientOrderId = makeClientId('reduce', decision.symbol);
+    let filledId = '';
+    let exitPrice = refPrice;
+    try {
+      const placed = await this.deps.broker.placeOrder({
+        symbol: decision.symbol,
+        side,
+        type: 'MARKET',
+        quantity: reduceQty,
+        reduceOnly: true,
+        clientOrderId,
+      });
+      const filled = await this.deps.broker.waitForFill(placed);
+      filledId = filled.id;
+      exitPrice = Number(filled.avgPrice) || refPrice;
+    } catch (error) {
+      await this.restoreProtection(local, traderId, decision.symbol);
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail: `减仓下单失败（${(error as Error).message}），已尝试恢复原有保护。`,
+      };
+    }
+
+    const isLong = local.side === 'long';
+    const grossPnl =
+      (isLong ? exitPrice - local.entry_price : local.entry_price - exitPrice) * reduceQty;
+    let exitFee = 0;
+    try {
+      const fills = await this.deps.broker.getUserTrades(decision.symbol, 10);
+      exitFee = fills
+        .filter((f) => String(f.orderId) === filledId)
+        .reduce((sum, f) => sum + (Number(f.commission) || 0), 0);
+    } catch {
+      /* 拿不到手续费就记 0，对账会补 */
+    }
+
+    /*
+     * ③ 当场记这一笔部分平仓。
+     *
+     * 走 `tradeStore.insert` —— **那是唯一算净额的地方**（§2.3）。
+     * 不自己拼一个 insert：账目只能有一个计算点。
+     *
+     * `idempotent: false`：这不是"一个仓位的最终成交"，
+     * 它没有可与交易所对齐的整段往返身份，也不该被重建逻辑覆盖。
+     */
+    const netPnl = grossPnl - exitFee;
+    tradeStore.insert({
+      traderId,
+      symbol: decision.symbol,
+      side: local.side === 'long' ? 'long' : 'short',
+      quantity: reduceQty,
+      entryPrice: local.entry_price,
+      exitPrice,
+      leverage: local.leverage,
+      grossPnl,
+      entryFee: 0,
+      exitFee,
+      fundingFee: 0,
+      closeReason: 'manual_partial',
+      openedAt: local.opened_at,
+      closedAt: new Date().toISOString(),
+      source: 'bot',
+      entryOrderId: null,
+      exitOrderId: filledId,
+      idempotent: false,
+    });
+
+    /* ④ 更新持仓：数量减、**均价不变**、已记部分累加。 */
+    const remaining = local.quantity - reduceQty;
+    positionStore.resize(traderId, decision.symbol, {
+      quantity: remaining,
+      entryPrice: local.entry_price,
+      marginUsed: (remaining * local.entry_price) / Math.max(local.leverage, 1),
+      addRealizedPartialPnl: netPnl,
+      addBookedPartialQty: reduceQty,
+    });
+
+    /* ⑤ 按剩余数量重挂保护。 */
+    const protection = await this.replaceProtection({
+      symbol: decision.symbol,
+      side: isLong ? 'long' : 'short',
+      quantity: remaining,
+      stop: decision.stopLoss ?? local.stop_loss,
+      target: decision.takeProfit ?? local.take_profit,
+      traderId,
+    });
+
+    if (!protection.stopPlaced) {
+      await this.flattenAndBook(decision.symbol, remaining, local.side === 'long' ? 'long' : 'short', traderId, exitPrice);
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail: `减仓 ${reduceQty} 已成交，但剩余部分的保护单挂不上，已按 §2.6 平掉剩余 ${remaining}。`,
+      };
+    }
+
+    return {
+      action: decision.action,
+      symbol: decision.symbol,
+      status: 'ok',
+      detail:
+        `减仓 ${reduceQty} @ ${exitPrice}，净 ${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(4)} USDT，` +
+        `剩余 ${remaining}，保护单已按剩余数量重挂。`,
+    };
+  }
+
+  /**
+   * 按给定数量重挂保护单（**先撤后挂由调用方完成**）。
+   *
+   * 返回止损有没有挂上 —— **那一个是"仓位是否受保护"的判据**。
+   * 止盈挂了更好，没挂不构成"裸仓"。
+   */
+  private async replaceProtection(input: {
+    symbol: string;
+    side: 'long' | 'short';
+    quantity: number;
+    stop: number | null;
+    target: number | null;
+    traderId: number;
+  }): Promise<{ stopPlaced: boolean; targetPlaced: boolean }> {
+    const exitSide: 'BUY' | 'SELL' = input.side === 'long' ? 'SELL' : 'BUY';
+    let stopOrderId: string | null = null;
+    let tpOrderId: string | null = null;
+
+    if (input.stop !== null && input.stop > 0) {
+      stopOrderId = await this.placeProtection({
+        symbol: input.symbol,
+        side: exitSide,
+        type: 'STOP_MARKET',
+        triggerPrice: input.stop,
+        purpose: 'stop_loss',
+        traderId: input.traderId,
+        quantity: input.quantity,
+      }).catch(() => null);
+    }
+    if (input.target !== null && input.target > 0) {
+      tpOrderId = await this.placeProtection({
+        symbol: input.symbol,
+        side: exitSide,
+        type: 'TAKE_PROFIT_MARKET',
+        triggerPrice: input.target,
+        purpose: 'take_profit',
+        traderId: input.traderId,
+        quantity: input.quantity,
+      }).catch(() => null);
+    }
+
+    positionStore.setProtection(
+      input.traderId,
+      input.symbol,
+      input.stop,
+      input.target,
+      stopOrderId,
+      tpOrderId,
+    );
+
+    return { stopPlaced: Boolean(stopOrderId), targetPlaced: Boolean(tpOrderId) };
+  }
+
+  /** 用**本地记录里的价位**恢复保护（撤单之后下单失败时用）。 */
+  private async restoreProtection(
+    local: {
+      symbol: string;
+      side: string;
+      quantity: number;
+      stop_loss: number | null;
+      take_profit: number | null;
+    },
+    traderId: number,
+    symbol: string,
+  ): Promise<void> {
+    await this.replaceProtection({
+      symbol,
+      side: local.side === 'long' ? 'long' : 'short',
+      quantity: local.quantity,
+      stop: local.stop_loss,
+      target: local.take_profit,
+      traderId,
+    }).catch((error) => {
+      this.emit(
+        'error',
+        `${symbol} 恢复保护单失败（${(error as Error).message}）—— 该仓位目前可能没有止损，请检查。`,
+      );
+    });
+  }
+
+  /** 平掉整个仓位并记账（§2.6：不留无保护敞口）。 */
+  private async flattenAndBook(
+    symbol: string,
+    quantity: number,
+    side: 'long' | 'short',
+    traderId: number,
+    fallbackPrice: number,
+  ): Promise<void> {
+    const exitSide: 'BUY' | 'SELL' = side === 'long' ? 'SELL' : 'BUY';
+    const flatten = await this.emergencyFlatten(symbol, quantity, exitSide, traderId).catch(
+      () => null,
+    );
+    const still = positionStore.getOpenBySymbol(traderId, symbol);
+    if (still) {
+      await this.bookClosedPosition(
+        still,
+        'protection_unavailable',
+        flatten?.avgPrice || fallbackPrice,
+        flatten?.fee ?? 0,
+        new Date().toISOString(),
+      );
+    }
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /*  调整保护位                                                              */
+  /* ---------------------------------------------------------------------- */
+
   /**
    * 执行「调整保护位」：把已有的止损/止盈换成新的。
    *

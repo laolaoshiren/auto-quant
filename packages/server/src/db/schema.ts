@@ -481,6 +481,39 @@ const M7_TRADER_MODE = /* sql */ `
 ALTER TABLE traders ADD COLUMN mode TEXT NOT NULL DEFAULT 'strategy';
 `;
 
+/*
+ * 部分平仓的记账去重。
+ *
+ * ## 为什么需要这两列
+ *
+ * 「减仓」是一个部分出场：仓位还开着，但已经卖掉了一部分。
+ * 那一部分必须**当场记账** —— 交易所已经实现了盈亏，不记的话账面就落后于账户。
+ *
+ * 而仓位最终平掉时，`findRoundTrip()` 会从成交历史里重建**整段往返**：
+ * 它的 grossPnl、entryFee、exitFee 覆盖的是**全部**入场与出场。
+ *
+ * 于是同一笔利润会被记两次 —— 一次在减仓时、一次在最终平仓时。
+ * **重复记账比漏记更糟**：漏记让账面比实际差，而重复记账让账面比实际好，
+ * 后者正是 §2.5 明令禁止的方向（它会让一个亏损账户看起来是赚的）。
+ *
+ * ## 两列分别是什么
+ *
+ *   · `realized_partial_pnl` —— 减仓时已经记过的**净**盈亏累计
+ *   · `booked_partial_qty` —— 已经记过账的出场数量累计
+ *
+ * 最终平仓时把重建结果**减去**这两项，剩下的才是这一次该记的。
+ *
+ * ## 为什么"减仓时直接改 quantity"不够
+ *
+ * 改 quantity 只解决"还剩多少"，不解决"已经记了多少"。
+ * 重建函数按 (symbol, 数量, 均价) 去匹配整段往返，它不知道我们已经提前记过一部分
+ * —— 所以必须有一处显式记下来。
+ */
+const M8_PARTIAL_CLOSE = /* sql */ `
+ALTER TABLE positions ADD COLUMN realized_partial_pnl REAL NOT NULL DEFAULT 0;
+ALTER TABLE positions ADD COLUMN booked_partial_qty REAL NOT NULL DEFAULT 0;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -489,4 +522,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 5, name: 'ai-agent-memory', sql: M5_AI_AGENT_MEMORY },
   { version: 6, name: 'agent-config', sql: M6_AGENT_CONFIG },
   { version: 7, name: 'trader-mode', sql: M7_TRADER_MODE },
+  { version: 8, name: 'partial-close', sql: M8_PARTIAL_CLOSE },
 ];
