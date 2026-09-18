@@ -3321,7 +3321,7 @@ reduceQuantity: null,
         action: decision.action,
         symbol: decision.symbol,
         status: 'failed',
-        detail: '加仓后保护单挂不上，已按 §2.6 立即平掉整个仓位。',
+        detail: `加仓后保护单挂不上（${protection.failures.join('；') || '原因未知'}），已按 §2.6 立即平掉整个仓位。`,
       };
     }
 
@@ -3479,7 +3479,7 @@ reduceQuantity: null,
         action: decision.action,
         symbol: decision.symbol,
         status: 'failed',
-        detail: `减仓 ${reduceQty} 已成交，但剩余部分的保护单挂不上，已按 §2.6 平掉剩余 ${remaining}。`,
+        detail: `减仓 ${reduceQty} 已成交，但剩余部分的保护单挂不上（${protection.failures.join('；') || '原因未知'}），已按 §2.6 平掉剩余 ${remaining}。`,
       };
     }
 
@@ -3506,10 +3506,12 @@ reduceQuantity: null,
     stop: number | null;
     target: number | null;
     traderId: number;
-  }): Promise<{ stopPlaced: boolean; targetPlaced: boolean }> {
+  }): Promise<{ stopPlaced: boolean; targetPlaced: boolean; failures: string[] }> {
     const exitSide: 'BUY' | 'SELL' = input.side === 'long' ? 'SELL' : 'BUY';
     let stopOrderId: string | null = null;
     let tpOrderId: string | null = null;
+    /** 挂单失败的原因。**必须带回去** —— 见下面的说明。 */
+    const failures: string[] = [];
 
     if (input.stop !== null && input.stop > 0) {
       stopOrderId = await this.placeProtection({
@@ -3520,7 +3522,24 @@ reduceQuantity: null,
         purpose: 'stop_loss',
         traderId: input.traderId,
         quantity: input.quantity,
-      }).catch(() => null);
+      }).catch((error) => {
+        /*
+         * ⚠️ **不能只 `catch(() => null)`。**
+         *
+         * 原来失败的原因被整个吞掉，调用方只能报"止损缺失"——
+         * 而**缺失的原因决定了操作员该做什么**：
+         *
+         *   · 触发价方向不对 → 模型的价位给错了
+         *   · 交易所拒单（-2021 会立即成交）→ 当前波动太大，该等
+         *   · 网络/限流 → 下一轮会好
+         *
+         * 三种都报成同一句话，等于把可诊断的问题变成了不可诊断的。
+         * 这条是在模拟回放里发现的：17 次调整保护位全部失败，
+         * 而日志只肯说"新保护单没挂上"。
+         */
+        failures.push(`止损：${(error as Error).message}`);
+        return null;
+      });
     }
     if (input.target !== null && input.target > 0) {
       tpOrderId = await this.placeProtection({
@@ -3531,7 +3550,10 @@ reduceQuantity: null,
         purpose: 'take_profit',
         traderId: input.traderId,
         quantity: input.quantity,
-      }).catch(() => null);
+      }).catch((error) => {
+        failures.push(`止盈：${(error as Error).message}`);
+        return null;
+      });
     }
 
     positionStore.setProtection(
@@ -3543,7 +3565,11 @@ reduceQuantity: null,
       tpOrderId,
     );
 
-    return { stopPlaced: Boolean(stopOrderId), targetPlaced: Boolean(tpOrderId) };
+    return {
+      stopPlaced: Boolean(stopOrderId),
+      targetPlaced: Boolean(tpOrderId),
+      failures,
+    };
   }
 
   /** 用**本地记录里的价位**恢复保护（撤单之后下单失败时用）。 */
@@ -3667,9 +3693,11 @@ reduceQuantity: null,
         purpose: 'stop_loss',
         traderId,
         quantity: local.quantity,
-      }).catch(() => null);
+      }).catch((error) => {
+        failed.push(`止损：${(error as Error).message}`);
+        return null;
+      });
       if (stopOrderId) placed.push(`止损 ${newStop}`);
-      else failed.push('止损');
     }
 
     if (newTarget !== null) {
@@ -3681,9 +3709,11 @@ reduceQuantity: null,
         purpose: 'take_profit',
         traderId,
         quantity: local.quantity,
-      }).catch(() => null);
+      }).catch((error) => {
+        failed.push(`止盈：${(error as Error).message}`);
+        return null;
+      });
       if (tpOrderId) placed.push(`止盈 ${newTarget}`);
-      else failed.push('止盈');
     }
 
     /*
@@ -3726,7 +3756,7 @@ reduceQuantity: null,
         action: decision.action,
         symbol: decision.symbol,
         status: 'failed',
-        detail: `新保护单没挂上（${failed.join('、') || '止损缺失'}），已按 §2.6 立即平仓，不留无保护敞口。`,
+        detail: `新保护单没挂上（拟设止损=${String(newStop)}、止盈=${String(newTarget)}；${failed.join('、') || '没有挂单尝试'}），已按 §2.6 立即平仓，不留无保护敞口。`,
       };
     }
 
@@ -3772,14 +3802,46 @@ reduceQuantity: null,
    * `expectedStop` 给定时要求价格吻合；给 null 时只要求"存在一张止损"。
    */
   private async hasLiveStop(symbol: string, expectedStop: number | null): Promise<boolean> {
+    /*
+     * ⚠️ **必须查条件单接口，不是普通挂单接口。**
+     *
+     * 第一版写的是 `broker.getOpenOrders(symbol)` 并找 `o.stopPrice` ——
+     * **两处都错**：
+     *
+     *   · 止损/止盈是 `closePosition` 的**条件单**，币安把它们放在
+     *     `openAlgoOrders`，而不是普通挂单接口
+     *   · 那个接口里的字段是 `triggerPrice`，不是 `stopPrice`
+     *
+     * 于是这个函数**永远返回 false** —— 调用方每次都会误判"仓位裸着"
+     * 并立刻平仓。**实测是在模拟回放里发现的：17 次调整保护位全部失败，
+     * 而且每次都把仓位平掉。** 没跑模拟的话，这个缺陷会在实盘上
+     * 把一笔本来安全的仓位平掉。
+     */
     return this.deps.broker
-      .getOpenOrders(symbol)
+      .getOpenAlgoOrders(symbol)
       .then((orders) =>
         orders.some((o) => {
-          const stopPrice = Number((o as { stopPrice?: string | number }).stopPrice ?? 0);
-          if (!(stopPrice > 0)) return false;
+          /* 只认止损那一类；止盈不算"有保护"。 */
+          const kind = String((o as { orderType?: string }).orderType ?? '');
+          if (!kind.includes('STOP')) return false;
+          const trigger = Number((o as { triggerPrice?: string | number }).triggerPrice ?? 0);
+          if (!(trigger > 0)) return false;
           if (expectedStop === null) return true;
-          return Math.abs(stopPrice - expectedStop) < 1e-9;
+          /*
+           * ⚠️ **容差不能用 1e-9。**
+           *
+           * 下单时 `broker` 会把触发价**按 tickSize 取整** —— 传进去的
+           * 75829.784 挂上去是 75829.78。所以"精确相等"永远匹配不上，
+           * 而匹配不上就会被当成"没有止损"，进而把仓位平掉。
+           *
+           * 实测是在模拟回放里发现的：
+           *   拟设止损=75829.784、止盈=91202.564；没有挂单尝试
+           * 两个挂单都成功了，但这个比较说不匹配。
+           *
+           * 用相对容差（万分之五）而不是绝对容差：价格是 7 万还是 0.5，
+           * tickSize 造成的那点偏差相对量级是一样的。
+           */
+          return Math.abs(trigger - expectedStop) <= Math.max(expectedStop * 5e-5, 1e-9);
         }),
       )
       .catch(() => false);
