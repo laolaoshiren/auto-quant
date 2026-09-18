@@ -157,7 +157,14 @@ export interface DecisionModel {
   ): Promise<{
     text: string;
     latencyMs: number;
-    usage: { promptTokens: number | null; completionTokens: number | null };
+    usage: {
+      promptTokens: number | null;
+      completionTokens: number | null;
+      /** 命中缓存的输入 token；`null` 表示服务商没报这个字段。 */
+      cachedTokens?: number | null;
+      /** 花在思考上的输出 token（已计入 completion）。 */
+      reasoningTokens?: number | null;
+    };
   }>;
 }
 
@@ -265,6 +272,14 @@ interface CycleProgress {
   aiLatencyMs: number;
   promptTokens: number | null;
   completionTokens: number | null;
+  /*
+   * 缓存命中与思考 token。
+   *
+   * 这两个数决定"这一轮钱花在哪"：缓存命中价是未命中价的 1/50，
+   * 而输出价是缓存命中价的 200 倍。少了它们，成本问题只能靠猜。
+   */
+  cachedTokens: number | null;
+  reasoningTokens: number | null;
 }
 
 /**
@@ -779,6 +794,8 @@ export class AutoTrader {
       error: null,
       aiLatencyMs: 0,
       promptTokens: null,
+  cachedTokens: null,
+  reasoningTokens: null,
       completionTokens: null,
     };
 
@@ -1164,6 +1181,8 @@ export class AutoTrader {
     progress.aiLatencyMs = response.latencyMs || Date.now() - startedAt;
     progress.promptTokens = response.usage.promptTokens;
     progress.completionTokens = response.usage.completionTokens;
+    progress.cachedTokens = response.usage.cachedTokens ?? null;
+    progress.reasoningTokens = response.usage.reasoningTokens ?? null;
 
     /* --- 8. Parse -------------------------------------------------------- */
     state.phase = 'parse';

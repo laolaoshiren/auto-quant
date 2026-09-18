@@ -2061,6 +2061,9 @@ interface DecisionRow {
   ai_latency_ms: number;
   prompt_tokens: number | null;
   completion_tokens: number | null;
+  /* 迁移 M9 加的；迁移之前的行是 NULL（= 当时没记，不是没命中）。 */
+  cached_tokens: number | null;
+  reasoning_tokens: number | null;
 }
 
 function toDecisionRecord(row: DecisionRow): DecisionRecord {
@@ -2081,6 +2084,15 @@ function toDecisionRecord(row: DecisionRow): DecisionRecord {
     aiLatencyMs: row.ai_latency_ms,
     promptTokens: row.prompt_tokens,
     completionTokens: row.completion_tokens,
+    /*
+     * 缓存命中与思考 token。
+     *
+     * **`?? null` 而不是 `?? 0`**：迁移之前的历史行这两列是 NULL，
+     * 而 NULL 的含义是"当时没记"、不是"没命中"。把它们读成 0
+     * 会让所有历史记录看起来像缓存全没命中。
+     */
+    cachedTokens: row.cached_tokens ?? null,
+    reasoningTokens: row.reasoning_tokens ?? null,
   };
 }
 
@@ -2188,10 +2200,14 @@ export const decisions = {
     aiLatencyMs: number;
     promptTokens: number | null;
     completionTokens: number | null;
+    /** 命中缓存的输入 token，`null` 表示服务商没报。 */
+    cachedTokens?: number | null;
+    /** 花在思考上的输出 token（已计入 completion）。 */
+    reasoningTokens?: number | null;
   }): number {
     const { lastInsertRowid } = getDb().run(
-      `INSERT INTO decision_records (trader_id, cycle_number, timestamp, system_prompt, user_prompt, cot_trace, decisions_json, raw_response, execution_log_json, candidate_symbols_json, success, error, ai_latency_ms, prompt_tokens, completion_tokens)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO decision_records (trader_id, cycle_number, timestamp, system_prompt, user_prompt, cot_trace, decisions_json, raw_response, execution_log_json, candidate_symbols_json, success, error, ai_latency_ms, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.traderId,
       input.cycleNumber,
       now(),
@@ -2207,6 +2223,8 @@ export const decisions = {
       input.aiLatencyMs,
       input.promptTokens,
       input.completionTokens,
+      input.cachedTokens ?? null,
+      input.reasoningTokens ?? null,
     );
     // Keep the audit trail bounded so the database does not grow without limit.
     getDb().run(
