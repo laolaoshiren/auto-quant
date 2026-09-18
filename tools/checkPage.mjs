@@ -28,7 +28,26 @@ page.on('console', (msg) => {
   else logs.push(`[${msg.type()}] ${msg.text()}`);
 });
 page.on('pageerror', (err) => errors.push(`[pageerror] ${err.message}\n${err.stack ?? ''}`));
-page.on('requestfailed', (req) => errors.push(`[requestfailed] ${req.url()} ${req.failure()?.errorText ?? ''}`));
+/*
+ * `ERR_ABORTED` **不是失败，是客户端主动取消。**
+ *
+ * 应用用 `AbortController` 在依赖变化或组件卸载时中断在途请求
+ * （见 `usePolled`），那是正确行为 —— 不中断的话，一个过期的响应
+ * 会写进已经变了的状态里。
+ *
+ * 第一版把每一条 `requestfailed` 都当错误报出来，于是这个工具
+ * 每次运行有约 40% 的概率喊一条假警报。
+ * **一个会误报的检查比没有检查更糟**：它会把人训练成忽略它 ——
+ * 而这正是本仓库在别处反复写过的那件事（「狼来了」的面板会被学会忽略）。
+ *
+ * 真正要报的是**服务器拒绝**、**连接失败**、**超时**那些。
+ */
+const IGNORED_FAILURES = ['net::ERR_ABORTED'];
+page.on('requestfailed', (req) => {
+  const reason = req.failure()?.errorText ?? '';
+  if (IGNORED_FAILURES.some((x) => reason.includes(x))) return;
+  errors.push(`[requestfailed] ${req.url()} ${reason}`);
+});
 
 try {
   // 1. 登录
