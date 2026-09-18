@@ -76,6 +76,8 @@ function openDecision(overrides: Partial<Decision> = {}): Decision {
     confidence: 90,
     riskUsd: 20,
     reasoning: 'test',
+reducePercent: null,
+reduceQuantity: null,
     adjustments: [],
     ...overrides,
   };
@@ -643,6 +645,8 @@ function adjustDecision(overrides: Partial<Decision> = {}): Decision {
     confidence: 70,
     riskUsd: 10,
     reasoning: '把止损提到成本附近',
+reducePercent: null,
+reduceQuantity: null,
     adjustments: [],
     ...overrides,
   };
@@ -740,5 +744,162 @@ test('adjust_protection 在开仓之前执行 —— 先弄安全，再冒险', 
     'adjust_protection',
     `调保护位必须排在开仓之前，实际顺序：${verdict.approved.map((d) => d.action).join('、')}`,
   );
+});
+
+
+/* -------------------------------------------------------------------------- */
+/*  add_to_position / reduce_position                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 用户的原话是「没有动态加仓、减仓、调整」。
+ * 这些用例钉的是**它们不能变成新的伤害来源**。
+ *
+ * 加仓的独特风险是"敞口变大而保护没跟上"，
+ * 减仓的独特风险是"减完之后剩下一个既挂不了保护单也减不动的残仓"。
+ */
+function addDecision(overrides: Partial<Decision> = {}): Decision {
+  return {
+    symbol: 'BTCUSDT',
+    action: 'add_to_position',
+    leverage: 5,
+    positionSizeUsd: 100,
+    /*
+     * 现价 68,000（`environment` 的默认快照）：止损距 2,000、止盈距 6,000
+     * ⇒ **盈亏比 1:3**，恰好是默认门槛。差一点就会被风控正确拒掉。
+     */
+    stopLoss: 66_000,
+    takeProfit: 74_000,
+    /* 默认 minConfidence 是 75 —— 用例填低了会被风控正确拒掉。 */
+    confidence: 85,
+    riskUsd: 10,
+    reducePercent: null,
+    reduceQuantity: null,
+    reasoning: '结构仍成立，加一点',
+    adjustments: [],
+    ...overrides,
+  };
+}
+
+function reduceDecision(overrides: Partial<Decision> = {}): Decision {
+  return {
+    symbol: 'BTCUSDT',
+    action: 'reduce_position',
+    leverage: 5,
+    positionSizeUsd: 0,
+    stopLoss: null,
+    takeProfit: null,
+    confidence: 60,
+    riskUsd: 0,
+    reducePercent: 50,
+    reduceQuantity: null,
+    reasoning: '先落袋一半',
+    adjustments: [],
+    ...overrides,
+  };
+}
+
+/** 现价 68,000（`environment` 的默认快照），持仓 0.01 BTC ≈ $680。 */
+function withPosition(overrides: Partial<PositionView> = {}): RiskEnvironment {
+  return environment({
+    positions: new Map([['BTCUSDT', position({ side: 'long', ...overrides })]]),
+  });
+}
+
+test('加仓：同向、额度足够时放行，且 action 保持为 add_to_position', () => {
+  const verdict = engine.review([addDecision({ positionSizeUsd: 50 })], withPosition());
+  assert.equal(verdict.approved.length, 1, `应当放行：${JSON.stringify(verdict.rejected)}`);
+  /*
+   * **action 必须保持 add_to_position。**
+   *
+   * `reviewAdd` 内部借用了 `reviewOpen` 的判据，而它会返回一个 action 被改成
+   * `open_long` 的 decision。忘了改回去的话，执行层会把它当**新开仓**处理 ——
+   * 那个标的已经有仓了，本地会插入第二行持仓，账目从此错位。
+   */
+  assert.equal(verdict.approved[0]!.action, 'add_to_position');
+});
+
+test('加仓：没有持仓时被拒 —— 那应该用 open_long', () => {
+  const verdict = engine.review([addDecision()], environment({ positions: new Map() }));
+  assert.equal(verdict.approved.length, 0);
+  assert.match(verdict.rejected[0]!.reason, /没有持仓/);
+});
+
+test('加仓：与新开仓共享同一批上限（保证金不足时被拒）', () => {
+  /*
+   * 这是加仓最容易漏的一条：它看起来"只是加一点"，但占用的是同一份保证金预算。
+   * 用一个大到必然超出预算的名义值来验证。
+   */
+  const verdict = engine.review([addDecision({ positionSizeUsd: 999_999 })], withPosition());
+  /* 会被削到上限而不是直接拒绝 —— 两种都行，但**不能原样放行**。 */
+  if (verdict.approved.length > 0) {
+    assert.ok(
+      verdict.approved[0]!.positionSizeUsd < 999_999,
+      '超出额度的加仓必须被削，不能原样通过',
+    );
+  }
+});
+
+test('加仓：持仓数已满时仍然放行 —— 它不占新的仓位名额', () => {
+  /*
+   * `account.positionCount` 已达 `maxPositions`，但这笔加仓用的是**已有的名额**。
+   * `reviewAdd` 把 positionCount 减 1 再交给 reviewOpen 就是为了这个。
+   * 不这么做的话，持满仓位的机器人永远加不了仓。
+   */
+  const env = environment({
+    config: configWith({ riskControl: { ...defaultStrategyConfig().riskControl, maxPositions: 1 } }),
+    account: { equity: 1000, availableBalance: 900, marginUsed: 200, positionCount: 1 },
+    positions: new Map([['BTCUSDT', position({ side: 'long' })]]),
+  });
+  const verdict = engine.review([addDecision({ positionSizeUsd: 30 })], env);
+  assert.equal(
+    verdict.approved.length,
+    1,
+    `持满名额时加仓不该被"最大持仓数"挡住：${JSON.stringify(verdict.rejected)}`,
+  );
+});
+
+test('减仓：给出比例时放行，并把要减的名义算出来', () => {
+  const verdict = engine.review([reduceDecision({ reducePercent: 50 })], withPosition());
+  assert.equal(verdict.approved.length, 1, `应当放行：${JSON.stringify(verdict.rejected)}`);
+  const size = verdict.approved[0]!.positionSizeUsd;
+  /* 持仓 0.01 × 50% × 68,000 = 340 */
+  assert.ok(Math.abs(size - 340) < 1, `要减的名义应当约 340，实际 ${size}`);
+});
+
+test('减仓：比例达到 100% 被拒 —— 那应该用 close_long', () => {
+  const verdict = engine.review([reduceDecision({ reducePercent: 100 })], withPosition());
+  assert.equal(verdict.approved.length, 0);
+  assert.match(verdict.rejected[0]!.reason, /close_long|close_short|100%/);
+});
+
+test('减仓：两个字段都不给时被拒，且说清该给什么', () => {
+  const verdict = engine.review(
+    [reduceDecision({ reducePercent: null, reduceQuantity: null })],
+    withPosition(),
+  );
+  assert.equal(verdict.approved.length, 0);
+  assert.match(verdict.rejected[0]!.reason, /reduce_percent|reduce_quantity/);
+});
+
+test('减仓：减完只剩残仓（低于最小下单量）时被拒', () => {
+  /*
+   * 那会让剩下的那半既挂不了保护单也减不动 —— 只能靠全部平掉来收拾。
+   * 与其让操作员事后发现，不如当场拒绝并说清。
+   */
+  const env = environment({
+    positions: new Map([['BTCUSDT', position({ side: 'long', quantity: 0.001 })]]),
+    /* 最小名义 5，现价 68,000 ⇒ 最小数量 ≈ 0.0000735；减 99% 之后剩 0.00001。 */
+    minNotionalOf: () => 5,
+  });
+  const verdict = engine.review([reduceDecision({ reducePercent: 99 })], env);
+  assert.equal(verdict.approved.length, 0, '残仓必须被拒绝');
+  assert.match(verdict.rejected[0]!.reason, /最小下单量|残仓/);
+});
+
+test('减仓：没有持仓时被拒', () => {
+  const verdict = engine.review([reduceDecision()], environment({ positions: new Map() }));
+  assert.equal(verdict.approved.length, 0);
+  assert.match(verdict.rejected[0]!.reason, /没有持仓/);
 });
 

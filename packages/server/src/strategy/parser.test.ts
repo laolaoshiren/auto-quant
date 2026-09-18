@@ -34,6 +34,8 @@ function decision(overrides: Partial<Decision> = {}): Decision {
     confidence: 0,
     riskUsd: 0,
     reasoning: '',
+reducePercent: null,
+reduceQuantity: null,
     adjustments: [],
     ...overrides,
   };

@@ -724,6 +724,67 @@ export const positions = {
     );
   },
 
+
+  /**
+   * 支撑「加仓 / 减仓」的两个仓库方法。
+   *
+   * ## 为什么数量与均价要一起改
+   *
+   * 加仓改变的是**加权平均入场价**：`(旧均价×旧数量 + 新价×新数量) / 总数量`。
+   * 只改数量、不改均价的话，平仓时算出来的盈亏是错的 ——
+   * 而那个数字会一路传到 `trades`，成为永久的账面记录。
+   *
+   * **减仓反过来：均价不变。** 卖掉一部分不改变剩余部分当初的买入价
+   * —— 这正是"加权平均"这个模型的含义。改它是记账错误。
+   */
+  resize(
+    traderId: number,
+    symbol: string,
+    input: {
+      /** 新的总数量（不是增量）。 */
+      quantity: number;
+      /** 新的加权均价；减仓时传原值。 */
+      entryPrice: number;
+      /** 保证金随之变化 —— 它由数量与杠杆决定。 */
+      marginUsed: number;
+      /** 部分平仓累计已记的净盈亏（只增不减）。 */
+      addRealizedPartialPnl?: number;
+      /** 部分平仓累计已记的数量（只增不减）。 */
+      addBookedPartialQty?: number;
+    },
+  ): void {
+    const row = this.getOpenBySymbol(traderId, symbol);
+    if (!row) return;
+    getDb().run(
+      `UPDATE positions
+         SET quantity = ?, entry_price = ?, margin_used = ?,
+             realized_partial_pnl = realized_partial_pnl + ?,
+             booked_partial_qty = booked_partial_qty + ?
+       WHERE id = ?`,
+      input.quantity,
+      input.entryPrice,
+      input.marginUsed,
+      input.addRealizedPartialPnl ?? 0,
+      input.addBookedPartialQty ?? 0,
+      row.id,
+    );
+  },
+
+  /**
+   * 部分平仓已经记了多少。
+   *
+   * 最终平仓时要把它从交易所重建的整段往返里**减掉** —— 见迁移 M8 的说明：
+   * 重复记账会让账面比账户好看，而那正是 §2.5 禁止的方向。
+   */
+  partialBooked(traderId: number, symbol: string): { pnl: number; qty: number } {
+    const row = this.getOpenBySymbol(traderId, symbol);
+    if (!row) return { pnl: 0, qty: 0 };
+    const r = getDb().get(
+      'SELECT realized_partial_pnl AS pnl, booked_partial_qty AS qty FROM positions WHERE id = ?',
+      row.id,
+    ) as { pnl: number | null; qty: number | null } | undefined;
+    return { pnl: Number(r?.pnl) || 0, qty: Number(r?.qty) || 0 };
+  },
   close(id: number): void {
     getDb().run("UPDATE positions SET status = 'closed' WHERE id = ?", id);
   },

@@ -309,6 +309,14 @@ export const CLOSE_REASONS = [
    */
   'manual',
   /*
+   * 部分平仓（减仓）。
+   *
+   * **与 manual 分开**：那一个是"把整个仓位平掉"，这一个是"卖掉一部分"。
+   * 混在一起会让"减仓这个动作对这个策略是好是坏"这个问题无法回答 ——
+   * 而它恰恰是最需要单独衡量的一类决策。
+   */
+  'manual_partial',
+  /*
    * Entered, but the exchange-side stop could not be established — so the
    * position was market-closed to avoid holding a naked leveraged exposure.
    *
@@ -347,6 +355,7 @@ export const CLOSE_REASON_LABELS: Record<string, string> = {
   protection_unavailable: '保护单缺失（已立即平仓）',
   reconciled: '对账补录',
   manual: '手工平仓',
+  manual_partial: '减仓（部分平仓）',
 };
 
 /** Label for a close reason, falling back to the raw code rather than blank. */

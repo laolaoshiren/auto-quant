@@ -1,6 +1,7 @@
 import {
   isCloseAction,
   isAdjustAction,
+  isResizeAction,
   isMajorSymbol,
   isOpenAction,
   type Decision,
@@ -84,6 +85,194 @@ function num(value: number | null | undefined, fallback = 0): number {
  */
 export class RiskEngine {
   /**
+  /**
+  /**
+   * 审核「加仓」—— 在一个已有持仓上再买一部分。
+   *
+   * ## 为什么不重写一份判据，而是复用 `reviewOpen`
+   *
+   * 加仓要守的上限与开仓**完全一样**（杠杆、名义上限、保证金占用、
+   * 止损距离、盈亏比、节流）。重写一份意味着**同一批规则有两个实现**，
+   * 而它们迟早会分叉 —— 那时同一笔交易在开仓时合格、在加仓时不合格，
+   * 而操作员看不出为什么。
+   *
+   * 所以这里只做**一件事**：把"已有敞口"从额度里扣掉，
+   * 然后把扣剩下的额度交给 `reviewOpen` 去判。
+   *
+   * ## 三个必须扣掉的东西
+   *
+   *   1. **持仓数**（`positionCount - 1`）—— 这一仓已经占着一个名额，
+   *      不扣的话第二次加仓就会被"已达最大持仓数"挡住
+   *   2. **保证金**（`marginUsed` 已由调用方传入真实值）—— 加仓要与已有仓位
+   *      共享同一个 `maxMarginUsage` 预算
+   *   3. **名义价值上限** —— 这里最容易被忽略：`maxNotionalByRatio` 是
+   *      **单个仓位**的上限，所以加仓后 `已有 + 新增` 不能超过它。
+   *      `reviewOpen` 只会拿"新增"去比，所以本方法先把新增削到剩余额度。
+   */
+  private reviewAdd(
+    decision: Decision,
+    env: RiskEnvironment,
+  ): { ok: true; decision: Decision } | { ok: false; reason: string } {
+    const position = env.positions.get(decision.symbol);
+    if (!position) {
+      return { ok: false, reason: `${decision.symbol} 没有持仓，不能加仓（要新开请用 open_long/open_short）。` };
+    }
+
+    /* 方向必须与已有持仓一致 —— 反向的"加仓"其实是先把仓位平掉再反向开。 */
+    const wantsLong = decision.action === 'add_to_position';
+    if ((position.side === 'long') !== wantsLong) {
+      return {
+        ok: false,
+        reason: `${decision.symbol} 当前是${position.side === 'long' ? '多头' : '空头'}，` +
+          `add_to_position 只能同向加仓；反向要先用 close_${position.side} 平掉。`,
+      };
+    }
+
+    const snapshot = env.snapshots.get(decision.symbol);
+    const price = snapshot?.price ?? position.markPrice;
+    if (!(price > 0)) {
+      return { ok: false, reason: `${decision.symbol} 没有可用价格，无法计算加仓额度。` };
+    }
+
+    /* 单仓名义上限减去已有敞口，剩下的才是这次能加的。 */
+    const risk = env.config.riskControl;
+    const maxRatio = isMajorSymbol(decision.symbol)
+      ? risk.btcEthMaxPositionValueRatio
+      : risk.altcoinMaxPositionValueRatio;
+    const cap = env.account.equity * maxRatio;
+    const room = cap - position.notional;
+
+    if (!(room > 0)) {
+      return {
+        ok: false,
+        reason:
+          `${decision.symbol} 的敞口 $${position.notional.toFixed(2)} 已达单仓上限 ` +
+          `$${cap.toFixed(2)}（权益的 ${maxRatio} 倍），没有加仓空间。`,
+      };
+    }
+
+    /*
+     * 把新增削到剩余额度，然后交给 `reviewOpen` —— 由它套用全部判据，
+     * 并且**由它决定最终名义值**（`positionSizeUsd` 会被它自己的上限逻辑再算一遍）。
+     */
+    const requested = num(decision.positionSizeUsd, 0);
+    const capped = requested > 0 ? Math.min(requested, room) : room;
+    const adjustments =
+      requested > room
+        ? [`加仓名义已从 $${requested.toFixed(2)} 削到 $${capped.toFixed(2)}（单仓上限剩余额度）。`]
+        : [];
+
+    const verdict = this.reviewOpen(
+      { ...decision, action: wantsLong ? 'open_long' : 'open_short', positionSizeUsd: capped },
+      {
+        ...env,
+        /* 这一仓已占着名额 —— 不扣掉的话加仓会被"最大持仓数"挡住。 */
+        account: { ...env.account, positionCount: Math.max(0, env.account.positionCount - 1) },
+        /* 加仓不占新的"开仓节流"额度的一部分吗？占 —— 它确实是一笔新的入场。 */
+      },
+    );
+
+    if (!verdict.ok) return verdict;
+
+    /*
+     * 把动作改回 `add_to_position` —— `reviewOpen` 返回的 decision 里
+     * action 被换成了 `open_long` / `open_short`，而执行层靠 action 分支。
+     * 忘了改回去的话，一笔加仓会被当成**新开一个仓位**去执行，
+     * 而那个标的已经有仓了 —— 交易所那一侧会变成加仓（同向），
+     * 但本地会插入第二行持仓，账目从此错位。
+     */
+    return {
+      ok: true,
+      decision: {
+        ...verdict.decision,
+        action: 'add_to_position',
+        adjustments: [...verdict.decision.adjustments, ...adjustments],
+      },
+    };
+  }
+
+  /**
+   * 审核「减仓」—— 平掉已有持仓的一部分。
+   *
+   * ## 它为什么比加仓简单得多
+   *
+   * 减仓**只降低风险**：敞口变小、保证金释放、爆仓价变远。
+   * 唯一需要守的两条是"有仓可减"和"减的量合法"（大于零、不超过持仓）。
+   *
+   * ## 参考价必须写进 decision
+   *
+   * 执行层按 `positionSizeUsd` 换算数量。减仓的"名义价值"= 要减掉的那部分的名义，
+   * 所以这里按**现价 × 要减的数量**算出来 —— 让执行层不需要再去猜数量。
+   */
+  private reviewReduce(
+    decision: Decision,
+    env: RiskEnvironment,
+  ): { ok: true; decision: Decision } | { ok: false; reason: string } {
+    const position = env.positions.get(decision.symbol);
+    if (!position) {
+      return { ok: false, reason: `${decision.symbol} 没有持仓，无法减仓。` };
+    }
+
+    const snapshot = env.snapshots.get(decision.symbol);
+    const price = snapshot?.price ?? position.markPrice;
+    if (!(price > 0)) {
+      return { ok: false, reason: `${decision.symbol} 没有可用价格，无法计算减仓数量。` };
+    }
+
+    const reduceQty = num(decision.reduceQuantity, 0);
+    const reducePercent = num(decision.reducePercent, 0);
+
+    let fraction = 0;
+    if (reduceQty > 0) {
+      fraction = reduceQty / position.quantity;
+    } else if (reducePercent > 0) {
+      fraction = reducePercent / 100;
+    } else {
+      return {
+        ok: false,
+        reason: '减仓要给出 reduce_percent（1–100）或 reduce_quantity，两个都没给。',
+      };
+    }
+
+    if (!(fraction > 0)) {
+      return { ok: false, reason: '减仓比例必须大于 0。' };
+    }
+    if (fraction >= 1) {
+      return {
+        ok: false,
+        reason: '减仓比例不能达到 100% —— 要全部平掉请用 close_long / close_short。',
+      };
+    }
+
+    /*
+     * 减完之后不能小于交易所的最小下单量。
+     *
+     * 否则会出现"减完剩下的这半份根本挂不出去"的局面 —— 保护单下不了、
+     * 想再减也下不了，那个残仓只能靠全部平掉来收拾。
+     * 与其让操作员事后发现，不如当场拒绝并说清。
+     */
+    const remaining = position.quantity * (1 - fraction);
+    const minQty = env.quantityFor(decision.symbol, env.minNotionalOf(decision.symbol), price);
+    if (minQty > 0 && remaining < minQty) {
+      return {
+        ok: false,
+        reason:
+          `减 ${(fraction * 100).toFixed(0)}% 之后只剩 ${remaining}，低于该标的的最小下单量 ${minQty} —— ` +
+          '那样剩下的残仓既挂不了保护单也减不动。要么少减一点，要么直接全部平掉。',
+      };
+    }
+
+    return {
+      ok: true,
+      decision: {
+        ...decision,
+        /* 执行层按这个换算数量：要减掉的那部分的名义价值。 */
+        positionSizeUsd: position.quantity * fraction * price,
+        leverage: position.leverage,
+      },
+    };
+  }
+
   /**
    * 审核「调整保护位」。
    *
@@ -241,13 +430,25 @@ export class RiskEngine {
     const ordered = [
       ...decisions.filter((d) => isCloseAction(d.action)),
       /*
-       * 调保护位排在开仓之前 —— 与 `ACTION_PRIORITY` 同一个理由：
+       * 调保护位与减仓排在开仓之前 —— 与 `ACTION_PRIORITY` 同一个理由：
        * **先把手里的仓位弄安全，再去冒险。**
+       *
+       * ⚠️ **每一个动作都必须落进这个数组的某一个桶里。**
+       * 我加这两个动作时只把它们从"其他"那个桶里排除掉，**忘了给它们自己的桶** ——
+       * 于是加仓/减仓的决策被整个丢掉：既不放行、也不拒绝，
+       * 而模型以为它做了什么。这正是我在 `isResizeAction` 注释里警告过的失效模式，
+       * 而它以另一种形式又发生了一次。
        */
       ...decisions.filter((d) => isAdjustAction(d.action)),
+      ...decisions.filter((d) => d.action === 'reduce_position'),
       ...decisions.filter((d) => isOpenAction(d.action)),
+      ...decisions.filter((d) => d.action === 'add_to_position'),
       ...decisions.filter(
-        (d) => !isCloseAction(d.action) && !isOpenAction(d.action) && !isAdjustAction(d.action),
+        (d) =>
+          !isCloseAction(d.action) &&
+          !isOpenAction(d.action) &&
+          !isAdjustAction(d.action) &&
+          !isResizeAction(d.action),
       ),
     ];
 
@@ -263,6 +464,52 @@ export class RiskEngine {
         const verdict = this.reviewAdjust(decision, env);
         if (verdict.ok) approved.push(verdict.decision);
         else rejected.push({ decision, reason: verdict.reason });
+        continue;
+      }
+
+      /*
+       * 加仓 / 减仓。
+       *
+       * 加仓**占用额度**（它是新的一笔入场），所以要通过与开仓同一批上限；
+       * 减仓只释放风险，不占额度。
+       * 两者都并入 `marginUsed` 的滚动视图 —— 同一批里先加仓再算别的仓位时，
+       * 那笔保证金必须已经被算进去。
+       */
+      if (decision.action === 'add_to_position') {
+        const verdict = this.reviewAdd(decision, {
+          ...env,
+          account: { ...env.account, positionCount, marginUsed },
+        });
+        if (verdict.ok) {
+          approved.push(verdict.decision);
+          entriesThisCycle += 1;
+          const snapshot = env.snapshots.get(decision.symbol);
+          const price = snapshot?.price ?? 0;
+          if (price > 0) {
+            marginUsed += verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1);
+          }
+        } else {
+          rejected.push({ decision, reason: verdict.reason });
+        }
+        continue;
+      }
+
+      if (decision.action === 'reduce_position') {
+        const verdict = this.reviewReduce(decision, env);
+        if (verdict.ok) {
+          approved.push(verdict.decision);
+          /* 减仓释放保证金 —— 让同一批里后面的开仓看得见这部分空间。 */
+          const snapshot = env.snapshots.get(decision.symbol);
+          const price = snapshot?.price ?? 0;
+          if (price > 0) {
+            marginUsed = Math.max(
+              0,
+              marginUsed - verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1),
+            );
+          }
+        } else {
+          rejected.push({ decision, reason: verdict.reason });
+        }
         continue;
       }
 
@@ -282,8 +529,7 @@ export class RiskEngine {
           if (price > 0) {
             marginUsed += verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1);
           }
-        } else {
-          rejected.push({ decision, reason: verdict.reason });
+        } else {          rejected.push({ decision, reason: verdict.reason });
         }
         continue;
       }
