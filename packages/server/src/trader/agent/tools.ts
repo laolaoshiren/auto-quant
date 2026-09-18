@@ -140,6 +140,34 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
     },
   },
   {
+    name: 'set_cycle_interval',
+    describe:
+      'Change how often YOU wake up to make decisions, in minutes (1–1440). ' +
+      'This is a first-class trading decision, not a setting: ' +
+      'wake up often when the market is moving and you have room to act; ' +
+      'wake up rarely when nothing is happening, when you are holding a position ' +
+      'whose thesis needs time to play out, or when you keep deciding to do nothing ' +
+      '(every cycle costs tokens and attention). ' +
+      'The new value takes effect on your very next cycle — no restart needed. ' +
+      'You MUST give a reason.',
+    args: {
+      minutes: {
+        type: 'number',
+        required: true,
+        min: 1,
+        max: 1440,
+        describe: 'How many minutes between cycles.',
+      },
+      reason: {
+        type: 'string',
+        required: true,
+        min: 1,
+        max: 2000,
+        describe: 'Why this frequency fits the current situation.',
+      },
+    },
+  },
+  {
     name: 'pause_trading',
     describe:
       'Stop opening new positions. Use it when the market or your own recent results say you should stand aside. This only ever TIGHTENS — there is no "resume" tool, because resuming is a decision the operator makes.',
@@ -261,6 +289,17 @@ export interface AgentToolDeps {
   };
   /** 请求暂停交易（只收紧）。 */
   requestPause: (reason: string) => void;
+  /**
+   * 改变**自己的决策周期**（分钟）。
+   *
+   * 为什么单独一个能力、而不是塞进 `saveConfig`：
+   * 决策周期不活在 `StrategyConfig` 里 —— 它是 `traders` 表上的一列
+   * （因为调度器要在**配置之外**读它）。放在这里是让那件事**显式可见**，
+   * 而不是让工具层去猜它属于哪张表。
+   */
+  /** 当前的决策周期（分钟）—— `get_current_params` 要把它一起给出。 */
+  cycleInterval: () => number;
+  setCycleInterval: (minutes: number, reason: string) => { minutes: number; clamped: boolean };
 }
 
 export interface ToolOutcome {
@@ -332,7 +371,14 @@ export function dispatchTool(name: unknown, args: unknown, deps: AgentToolDeps):
     case 'get_market_overview':
       return { result: bound(deps.read.marketOverview(a.limit as number)) };
     case 'get_current_params':
-      return { result: bound(deps.currentConfig()) };
+      /*
+       * 「当前参数」**必须把决策周期一起给出来**。
+       *
+       * 它不在 `StrategyConfig` 里（是 `traders` 表上的一列），所以第一版
+       * 这个工具读不到它 —— 于是 AI 想调频率时**不知道自己现在是多少**，
+       * 只能瞎猜一个数。**不知道起点就没法判断该往哪边调。**
+       */
+      return { result: bound({ ...deps.currentConfig(), cycleIntervalMinutes: deps.cycleInterval() }) };
     case 'set_params': {
       const reason = a.reason as string;
       const patch = applyAgentPatch(deps.currentConfig(), a.patch);
@@ -354,6 +400,25 @@ export function dispatchTool(name: unknown, args: unknown, deps: AgentToolDeps):
               : '补丁被整体拒绝，一个字段都没改。',
         },
         patch,
+      };
+    }
+    case 'set_cycle_interval': {
+      const reason = a.reason as string;
+      const requested = Number(a.minutes);
+      const applied = deps.setCycleInterval(requested, reason);
+      return {
+        result: {
+          minutes: applied.minutes,
+          /*
+           * 被钳制时**必须回喂实际值** —— 与 `set_params` 的 clamps 同一个理由：
+           * AI 以为自己改成了 0.5 分钟、而实际是 1 的话，
+           * 下一轮它会基于一个错误前提推理（"我刚提高了频率"）。
+           */
+          clamped: applied.clamped,
+          note: applied.clamped
+            ? `请求的 ${requested} 分钟超出允许范围（1–1440），实际设为 ${applied.minutes} 分钟。`
+            : `决策周期已改为每 ${applied.minutes} 分钟一次，从下一轮起生效。`,
+        },
       };
     }
     case 'pause_trading': {

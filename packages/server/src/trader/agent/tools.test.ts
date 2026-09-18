@@ -30,6 +30,7 @@ function makeDeps(overrides: Partial<AgentToolDeps> = {}) {
   const calls: Array<{ tool: string; args: unknown }> = [];
   const saved: Array<{ reason: string; patch: unknown; clamps: unknown }> = [];
   const pauses: string[] = [];
+  const cycleIntervals: number[] = [];
   let current = config();
 
   const deps: AgentToolDeps = {
@@ -61,6 +62,9 @@ function makeDeps(overrides: Partial<AgentToolDeps> = {}) {
       },
     },
     requestPause: (reason) => pauses.push(reason),
+    /* 测试要能看到 AI 改周期这件事 —— 与 pauses 同一个形状。 */
+    cycleInterval: () => 3,
+    setCycleInterval: (minutes) => { cycleIntervals.push(minutes); return { minutes, clamped: false }; },
     ...overrides,
   };
 
@@ -263,4 +267,62 @@ test('renderToolCatalogue 会把九个工具与参数都渲染出来', () => {
     assert.match(text, new RegExp(`### ${tool.name}`), `${tool.name} 没出现在清单里`);
   }
   assert.match(text, /必填/, '必填标记必须渲染出来');
+});
+
+test('set_cycle_interval 会落库、钳制越界值、并回喂实际值', () => {
+  /*
+   * 这条钉住三件事，每一件都有具体的失效方式：
+   *
+   *  1. **落库** —— 只记在内存里的话，进程重启就回到旧值，
+   *     而 AI 会以为自己调过。决策周期是调度器每轮要读的，必须在库里。
+   *  2. **钳制越界** —— 0 或 100000 这种值会让调度器空转或永远不醒。
+   *  3. **回喂实际值** —— 与 set_params 的 clamps 同一个理由：
+   *     AI 以为改成了 0.5、实际是 1 的话，下一轮它会基于错误前提推理。
+   */
+  const applied: Array<{ minutes: number; reason: string }> = [];
+  const { deps } = makeDeps({
+    setCycleInterval: (minutes, reason) => {
+      const clamped = Math.min(1440, Math.max(1, Math.round(minutes)));
+      applied.push({ minutes: clamped, reason });
+      return { minutes: clamped, clamped: clamped !== minutes };
+    },
+  });
+
+  const ok = dispatchTool('set_cycle_interval', { minutes: 7, reason: '行情快' }, deps);
+  assert.equal(applied.at(-1)?.minutes, 7, '正常值应当原样落库');
+  assert.equal((ok.result as { clamped: boolean }).clamped, false);
+
+  /*
+   * 越界值走的是**参数校验**那条路，不是实现里的钳制 ——
+   * 工具声明里写了 `min: 1, max: 1440`，`validateArgs` 先把它拦下来。
+   * （实现里那一层 `Math.min/max` 是第二道保险，覆盖"校验被绕过"的情况。）
+   */
+  const tooSmall = dispatchTool('set_cycle_interval', { minutes: 0.2, reason: '想更快' }, deps);
+  assert.notEqual(tooSmall.result, undefined, '越界值不该静默通过');
+  const rejectedText = JSON.stringify(tooSmall.result);
+  assert.match(rejectedText, /min|1|范围|超出/, `越界值必须被拒绝并说清原因，实际：${rejectedText}`);
+  assert.equal(applied.length, 1, '被拒绝的调用不该落到实现里');
+
+  /*
+   * 而上限那一侧同样要被拦住 —— `0` 会让调度器空转，
+   * `100000` 等于永不醒来。两种都是真实的失效方式。
+   */
+  const tooBig = dispatchTool('set_cycle_interval', { minutes: 100000, reason: '想更慢' }, deps);
+  assert.match(JSON.stringify(tooBig.result), /max|1440|范围|超出/);
+  assert.equal(applied.length, 1, '被拒绝的调用不该落到实现里');
+});
+
+test('get_current_params 必须带上决策周期 —— 否则 AI 不知道起点', () => {
+  /*
+   * 决策周期不在 StrategyConfig 里（是 traders 表上的一列），
+   * 所以第一版这个工具读不到它 —— AI 想调频率时不知道自己现在是多少，
+   * 只能瞎猜一个数。**不知道起点就没法判断该往哪边调。**
+   */
+  const { deps } = makeDeps({ cycleInterval: () => 7 });
+  const out = dispatchTool('get_current_params', {}, deps);
+  assert.equal(
+    (out.result as { cycleIntervalMinutes: number }).cycleIntervalMinutes,
+    7,
+    '当前参数里必须能看到决策周期',
+  );
 });

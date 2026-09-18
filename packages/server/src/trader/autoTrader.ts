@@ -395,10 +395,49 @@ export class AutoTrader {
 
     // Run the first cycle immediately so the operator is not left waiting.
     void this.tick();
-    const intervalMs = Math.max(1, this.deps.trader.cycleIntervalMinutes) * 60_000;
-    this.timer = setInterval(() => void this.tick(), intervalMs);
+    this.scheduleNextCycle();
   }
 
+  /**
+   * 排下一次周期 —— **用自续期的 `setTimeout` 链，不用 `setInterval`。**
+   *
+   * ## 为什么必须换掉 `setInterval`
+   *
+   * 原来这里是一句 `setInterval(() => tick(), cycleIntervalMinutes * 60_000)`，
+   * 间隔在**启动那一刻读一次就固定住了**。
+   *
+   * 于是「决策周期由 AI 调整」这件事在**结构上不可能** ——
+   * AI 就算改了那个值，也要等机器人重启才生效，而重启不是它能做的。
+   * 用户实测看到的「每次 AI 周期还都是 3 分钟」，根因就在这里。
+   *
+   * **自续期的写法让每一轮都重新读一次当前值**，AI 改完下一轮就生效。
+   *
+   * ## 为什么是"跑完再排下一次"，而不是"先排好再跑"
+   *
+   * 周期本身耗时不定（模型调用几秒到几十秒）。固定间隔的 `setInterval`
+   * 在周期比间隔还长时会**重叠执行** —— 那意味着同一时间有两个决策在跑，
+   * 而它们会读同一份持仓、可能各下一单。**串行是这里唯一安全的选择。**
+   */
+  private scheduleNextCycle(): void {
+    if (this.timer) clearTimeout(this.timer);
+    /*
+     * 每次排期都**重新读**数据库里的值 —— 那是 AI 改完之后的真实值。
+     *
+     * 读失败时退回启动时那份（`deps.trader`），不让一次数据库抖动
+     * 把周期变成 NaN 或 0 而疯狂空转。
+     */
+    let minutes = this.deps.trader.cycleIntervalMinutes;
+    try {
+      const fresh = traderStore.get(this.deps.trader.id);
+      if (fresh && Number.isFinite(fresh.cycleIntervalMinutes)) {
+        minutes = fresh.cycleIntervalMinutes;
+      }
+    } catch {
+      /* 用启动时那份 */
+    }
+    const intervalMs = Math.max(1, minutes) * 60_000;
+    this.timer = setTimeout(() => void this.tick(), intervalMs);
+  }
   /**
    * Stop the loop and **wait for the cycle already running** to finish.
    *
@@ -678,6 +717,14 @@ export class AutoTrader {
         summary: message,
         success: false,
       });
+    } finally {
+      /*
+       * **跑完再排下一次** —— 见 `scheduleNextCycle`。
+       *
+       * 排在这里（`finally`）而不是成功分支里：一轮失败也必须继续跑，
+       * 否则一次网络抖动会让机器人永远停在那里，而状态还显示 `running`。
+       */
+      if (this.running) this.scheduleNextCycle();
     }
   }
 

@@ -999,25 +999,29 @@ function ConfigSummary({ trader, asset }: { trader: TraderRow; asset: string }) 
         title={
           trader.mode === 'ai_managed'
             ? /*
-               * ⚠️ 这里要说实话。
+               * ⚠️ 这一段曾经说的是反话，改回来过一次 —— 值得记下来。
                *
-               * AI 托管模式下，用户预期"决策周期也由 AI 调"（这是他当初的要求之一），
-               * 而**这个功能目前没实现**：`cycleIntervalMinutes` 是 `traders` 表上的列、
-               * 不在 `StrategyConfig` 里，所以 AI 改不到它；而且调度器是在启动时
-               * **读一次**就把间隔固定住的（`setInterval`），改了也不会生效。
+               * **先前**：AI 改不到决策周期（它是 `traders` 表上的一列、
+               * 不在 `StrategyConfig` 里；而且调度器用 `setInterval`，
+               * 启动时读一次就固定住）。那时如实标注「（固定）」。
                *
-               * 所以显示成"由 AI 调整"会是撒谎。如实写"固定"，并说明它还归人管 ——
-               * 一个写着"智能"其实是固定的标签，比写着"固定"的标签有害得多：
-               * 用户会以为它在自适应，从而不再关注它。
+               * **现在**：两件事都补上了 ——
+               *   · AI 有 `set_cycle_interval` 工具，能直接改这一列
+               *   · 调度器换成**自续期的 `setTimeout` 链**，每轮重新读当前值，
+               *     所以改完**下一轮就生效**，不需要重启
+               *
+               * 于是这个标注必须跟着改。**上一版的「（固定）」现在是假话** ——
+               * 而一个说"AI 改不到"、实际它随时会改的标签，
+               * 和不标注一样有害：操作员会基于错的前提去解读周期变化。
                */
-              '决策间隔当前是固定值（创建机器人时设定）。AI 托管目前还改不到它 —— 这是待实现的项。'
+              '决策间隔由 AI 自己决定，它可以在每轮决策时调整（1–1440 分钟），改完下一轮即生效。'
             : '该机器人每多久跑一次决策周期。'
         }
       >
         间隔{' '}
         <span className="text-ink-mid">
           每 {trader.cycleIntervalMinutes} 分钟
-          {trader.mode === 'ai_managed' && <span className="text-ink-faint">（固定）</span>}
+          {trader.mode === 'ai_managed' && <span className="text-ink-faint">（AI 可调）</span>}
         </span>
       </span>
       <span>
