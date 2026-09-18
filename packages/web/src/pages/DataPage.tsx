@@ -10,9 +10,9 @@
  *   不靠颜色单独传达信息。
  * - 长列表只渲染有上限的一段（见 `MAX_RENDERED`），并明确告诉操作员被截断了多少。
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowDownToLine, Pause, Play, RefreshCw, RotateCw, Trash2 } from 'lucide-react';
-import { logScopeLabel } from '@aq/shared';
+import { LOG_LEVEL_ICONS, LOG_SCOPE_ICONS, logScopeKind, logScopeLabel } from '@aq/shared';
 import { api, type LogLine } from '../lib/api';
 import { useApp, useEvents, type LiveLogLine } from '../lib/store';
 import { useDocumentTitle, usePolled, useTicker } from '../lib/hooks';
@@ -48,6 +48,70 @@ const LEVEL_LABEL: Record<string, string> = {
   warn: '警告',
   info: '信息',
 };
+
+/*
+ * 日志背景的**整行底色**。
+ *
+ * 只有警告与错误上色 —— 一条正常的日志刷一条底色，等于把所有行都变成
+ * "需要注意"，而那正是**注意力被摊平**的成因。
+ *
+ * 用 `/8` 与 `/5` 的极低不透明度：那一行的**文字仍然比底色显眼**，
+ * 底色只是把"这里有一件要处理的事"从余光里递过来。
+ */
+const LEVEL_ROW: Record<string, string> = {
+  error: 'bg-down/10',
+  warn: 'bg-warn/5',
+  info: '',
+};
+
+/** 来源标签的配色，按**类别**分 —— 同类的东西在整页里长得一样。 */
+const SCOPE_TONE: Record<string, string> = {
+  exchange: 'bg-accent/15 text-accent',
+  ai: 'bg-[#a78bfa]/15 text-[#a78bfa]',
+  data: 'bg-[#22d3ee]/15 text-[#22d3ee]',
+  runtime: 'bg-base-800 text-ink-mid',
+  other: 'bg-base-850 text-ink-faint',
+};
+
+/**
+ * 把正文里的**金额**挑出来上色。
+ *
+ * 日志的重点常常是一个数字（`净 +0.0771 USDT`、`时钟偏移 -75ms`），
+ * 而它原来和周围的灰字一样 —— **重点埋在灰字里就等于没有重点**。
+ *
+ * 只认"带正负号或小数点的数字 + 可选单位"，**保守匹配**：
+ * 匹配错了会让一段普通文字突然变色，那比不着色更糟。
+ */
+function highlightNumbers(text: string): ReactNode[] {
+  const parts: ReactNode[] = [];
+  const re = /([+-]\d+(?:\.\d+)?|(?<![.\d])\d+\.\d+)\s*(USDT|U|ms|%|x)?/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let key = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    const num = m[1] ?? '';
+    const unit = m[2] ?? '';
+    /*
+     * 带正负号的用主题的涨跌色，其余（时长、比例）用中性高亮。
+     * **不按"好/坏"判断**：`-75ms` 是时钟偏移，不是亏损。
+     */
+    const tone = num.startsWith('-')
+      ? 'text-down'
+      : num.startsWith('+')
+        ? 'text-up'
+        : 'text-ink-hi';
+    parts.push(
+      <span key={key++} className={cn('num font-medium', tone)}>
+        {num}
+      </span>,
+    );
+    if (unit) parts.push(<span key={key++} className="text-ink-faint">{` ${unit}`}</span>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
 
 export function DataPage() {
   useDocumentTitle('数据与日志');
@@ -363,18 +427,34 @@ export function DataPage() {
               <div
                 // 同一毫秒可能有多行，id 会重复，所以把时间戳一起放进 key
                 key={`${line.id}-${line.timestamp}`}
-                className="flex items-start gap-2 rounded px-1 py-0.5 hover:bg-base-850/60"
+                className={cn(
+                  'flex items-start gap-2 rounded px-1 py-0.5 hover:bg-base-850/60',
+                  /* 只有警告与错误有底色 —— 见 `LEVEL_ROW` 上的说明。 */
+                  LEVEL_ROW[line.level] ?? '',
+                )}
               >
                 <span className="num shrink-0 text-ink-faint" title={new Date(line.timestamp).toISOString()}>
                   {new Date(line.timestamp).toLocaleTimeString('en-GB', { hour12: false })}
                 </span>
+                {/*
+                  级别用**图标**，文字标签退到 `title` 里。
+
+                  这一栏原来写「信息」/「警告」/「错误」—— 三个词一样宽，
+                  而九成以上的日志是"信息"。一列重复的"信息"占着地方，
+                  却什么也没告诉你。图标占同样的宽度，而**形状本身就能扫**：
+                  `⚠️` 与 `❌` 在余光里就认得出来，文字必须逐个读。
+
+                  颜色、图标、`title` 三者都在 —— **不靠颜色单独传达信息**
+                  （色盲、以及"打印成黑白"这两种情况都还在）。
+                */}
                 <span
                   className={cn(
-                    'w-8 shrink-0 select-none text-center text-xs font-semibold',
+                    'w-6 shrink-0 select-none text-center text-sm',
                     LEVEL_TEXT[line.level] ?? 'text-ink-lo',
                   )}
+                  title={LEVEL_LABEL[line.level] ?? line.level}
                 >
-                  {LEVEL_LABEL[line.level] ?? line.level}
+                  {LOG_LEVEL_ICONS[line.level] ?? '·'}
                 </span>
                 {line.traderId !== null && (
                   <span className="num shrink-0 text-accent" title={`机器人 #${line.traderId}`}>
@@ -382,23 +462,36 @@ export function DataPage() {
                   </span>
                 )}
                 {/*
-                  来源用**中文标签**渲染，`title` 里保留原始码。
+                  来源：**图标 + 中文标签 + 类别配色**，`title` 里保留原始码。
 
                   服务端原来把 `[binance:bootstrap]` 拼在正文最前面 ——
                   那是**内部模块名出现在给人看的文本里**。现在来源单独传，
-                  这里翻成中文（「币安 · 启动检查」），而原始码仍然可查
-                  （悬停可见），按来源筛选也仍然用原始码。
+                  这里翻成中文（「币安 · 启动检查」）并配一个图标，
+                  而原始码仍然可查（悬停可见），按来源筛选也仍然用原始码。
+
+                  图标比文字更早被眼睛抓住：`🔌` 是交易所的事、`🧠` 是 AI 的事、
+                  `💾` 是存储的事 —— **一眼把"哪个子系统在说话"分开**。
                 */}
                 {line.scope && (
                   <span
-                    className="shrink-0 rounded bg-base-850 px-1 text-xs text-ink-faint"
+                    className={cn(
+                      'shrink-0 rounded px-1 text-xs',
+                      SCOPE_TONE[logScopeKind(line.scope)] ?? SCOPE_TONE.other,
+                    )}
                     title={`来源：${line.scope}`}
                   >
+                    {LOG_SCOPE_ICONS[line.scope] ? `${LOG_SCOPE_ICONS[line.scope]} ` : ''}
                     {logScopeLabel(line.scope)}
                   </span>
                 )}
-                {/* break-all：交易所原文没有空格，break-words 兜不住 */}
-                <span className="min-w-0 flex-1 break-all text-ink-mid">{line.message}</span>
+                {/*
+                  break-all：交易所原文没有空格，break-words 兜不住。
+                  数字单独上色 —— 日志的重点常常就是一个数字，而它原来
+                  和周围的灰字一样，**重点埋在灰字里等于没有重点**。
+                */}
+                <span className="min-w-0 flex-1 break-all text-ink-mid">
+                  {highlightNumbers(line.message)}
+                </span>
               </div>
             ))
           )}
