@@ -581,7 +581,7 @@ function ClosePositionModal({
                * 否则会以为自己的平仓没生效。
                */
               <p className="text-base leading-relaxed text-warn">
-                机器人**仍在运行**，它可能在下一个决策周期重新开出同样的仓位。
+                机器人<strong>仍在运行</strong>，它可能在下一个决策周期重新开出同样的仓位。
                 如果不想让它再开，请先「停止」机器人。
               </p>
             )}
@@ -589,7 +589,7 @@ function ClosePositionModal({
         ) : (
           <>
             <p className="text-base leading-relaxed text-ink-hi">
-              以**市价**平掉 <span className="font-semibold">{symbol}</span> 的全部仓位，
+              以<strong>市价</strong>平掉 <span className="font-semibold">{symbol}</span> 的全部仓位，
               并撤掉它的止损与止盈单。
             </p>
             <p className="text-xs leading-relaxed text-ink-faint">
