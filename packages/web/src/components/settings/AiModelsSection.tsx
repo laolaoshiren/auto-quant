@@ -896,7 +896,7 @@ function ModelField({
   onPick,
   onType,
 }: {
-  descriptor: { label: string; models: string[] } | undefined;
+  descriptor: { label: string; models: string[]; docsUrl?: string } | undefined;
   draft: ModelDraft;
   discovery: DiscoverModelsResult | null;
   discovering: boolean;
@@ -1057,7 +1057,35 @@ function ModelField({
         >
           {discovery.ok ? '✓ ' : '⚠ '}
           {discovery.message}
-          {!discovery.ok && entries.length > 0 && ' 下方列表为内置建议，并非实时结果。'}
+          {!discovery.ok && entries.length > 0 && (
+            <>
+              {' 下方列表为内置建议，并非实时结果。'}
+              {/*
+                ⚠️ **要说清它会过期，并给出核对的地方。**
+
+                这份列表是手工维护的外部事实，而模型名更新很快 ——
+                实测核对时发现 Gemini 那一条停在 2.5 一代、而当时已经是 3.8，
+                DeepSeek 用的还是一个已被官方标为 legacy 的名字变体。
+
+                只写「并非实时结果」不够：用户不知道**该去哪核对**。
+                `docsUrl` 就在 provider 描述符里，指过去即可。
+              */}
+              {'这些名字会随时间过期，请以官方文档为准。'}
+              {descriptor?.docsUrl && (
+                <>
+                  {' '}
+                  <a
+                    href={descriptor.docsUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline decoration-dotted underline-offset-2"
+                  >
+                    查看官方文档
+                  </a>
+                </>
+              )}
+            </>
+          )}
         </div>
       )}
     </div>
