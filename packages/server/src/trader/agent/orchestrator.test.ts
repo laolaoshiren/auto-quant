@@ -18,8 +18,59 @@ import test from 'node:test';
 import { defaultStrategyConfig, STRATEGY_PRESETS, StrategyConfigSchema, type StrategyConfig } from '@aq/shared';
 
 import type { LoopModel } from './loop.js';
-import { reviewClosedTrade, runStrategyReview, settlePending, type OrchestratorPorts } from './orchestrator.js';
+import {
+  STRATEGIST_MAX_STEPS,
+  reviewClosedTrade,
+  runStrategyReview,
+  settlePending,
+  strategistTask,
+  type OrchestratorPorts,
+} from './orchestrator.js';
 import type { WakeFacts } from './wake.js';
+
+test('派给策略师的任务里必须写出步数预算 —— 不知道预算就没法规划', () => {
+  /*
+   * 原来这段任务描述"一个字都没提它只有几步可走"，于是它按"反正能一直读"的
+   * 方式花预算：实测 39 次 degraded（33%）全是"达到步数上限仍未结束"，
+   * **已经烧掉 6–7 步的 token 却什么都没产出**。
+   *
+   * 这条用例防的是"以后有人重写任务描述时把预算那一段丢掉"。
+   */
+  for (const budget of [8, 11, 20]) {
+    const task = strategistTask(budget);
+    assert.match(task, new RegExp(String(budget)), `任务里没有写出预算 ${budget}`);
+    assert.match(task, /预算/, '必须点明这是"预算"而不是别的数字');
+  }
+  assert.match(strategistTask(11), /没有结论的这一轮等于白花/, '要说清"没结论"的代价');
+});
+
+test('策略师的步数预算必须容得下"必读清单 + 决策"', () => {
+  /*
+   * 这条防的是**"加了工具却忘了同步步数预算"** —— 上一轮新增 `get_lessons` 时
+   * 必读清单又多一步，而预算没跟着动，那等于把更多运行推进"必然撞限"的区间。
+   *
+   * 策略师的纪律要求它先读 get_experiments 与 get_lessons，再读绩效 / 权益曲线 /
+   * 最近决策 / 当前参数 —— **6 次只读调用**，之后还要 set_params（或 pause_trading）
+   * 与 finish。**预算小于这个数，它必然撞上限、必然没有结论。**
+   *
+   * 实测代价：`agent_runs` 里 39 次 `degraded`（占 33%）的 detail 全是
+   * "达到步数上限仍未结束"，平均停在 7.6 步，而成功的那些平均 7.1 步 ——
+   * 两个分布贴着同一条边界，"能不能得出结论"基本由运气决定。
+   */
+  const READ_ONLY_STEPS = 6;
+  const DECISION_AND_FINISH = 2;
+  const required = READ_ONLY_STEPS + DECISION_AND_FINISH;
+
+  assert.ok(
+    STRATEGIST_MAX_STEPS.single >= required,
+    `single 档只有 ${STRATEGIST_MAX_STEPS.single} 步，而必读清单就要 ${required} 步 —— ` +
+      '这一档的策略师必然说不出结论。加只读工具时记得同步放宽这里。',
+  );
+  assert.ok(
+    STRATEGIST_MAX_STEPS.panel >= STRATEGIST_MAX_STEPS.single,
+    '完整面板读的东西更多，预算不该低于常规档',
+  );
+});
 
 const config = (): StrategyConfig =>
   StrategyConfigSchema.parse({

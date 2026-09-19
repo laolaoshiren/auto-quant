@@ -107,6 +107,65 @@ export interface StrategyReviewOutcome {
 }
 
 /**
+ * 策略师的步数预算。
+ *
+ * ## 这是按"必读清单"倒推的，不是拍脑袋
+ *
+ * 策略师的纪律要求它**先读** `get_experiments` 与 `get_lessons`，再读绩效 / 权益曲线 /
+ * 最近决策 / 当前参数 —— **6 次只读调用**，之后还要 `set_params`（或 `pause_trading`）
+ * 与 `finish`，合计 **8 步**。原来 `single` 档给的就是 8：**一步余量都没有。**
+ *
+ * ## 实测的代价
+ *
+ * `agent_runs` 里 **39 次 `degraded`（占 33%）** 的 detail 全是同一句
+ * "达到步数上限（8 步）仍未结束，本轮没有结论"，平均停在 **7.6 步**；
+ * 而成功的那些平均 **7.1 步**。**两个分布贴着同一条边界** ——
+ * "这一轮能不能得出结论"基本由运气决定。
+ *
+ * 这些运行**已经烧掉 6–7 步的 token 却什么都没产出**。再多给两三步让它把结论
+ * 说出来，比让它白烧更省 —— 而"给出结论"正是这个角色存在的全部意义。
+ *
+ * ## 加工具时必须同步这里
+ *
+ * 上一轮新增 `get_lessons` 时必读清单又多一步，而预算没跟着动 ——
+ * 那等于**把更多的运行推进必然撞限的区间**。`orchestrator.test.ts` 里有一条用例
+ * 专门钉住"预算容得下必读清单"，就是为了让下一次加工具的人（或 AI）不会漏掉。
+ */
+export const STRATEGIST_MAX_STEPS = {
+  /** 常规轮次：必读 6 步 + 决策 + finish，再留 3 步余量。 */
+  single: 11,
+  /** 完整面板：额外开了并行分析，读的东西更多。 */
+  panel: 14,
+} as const;
+
+/**
+ * 派给策略师的任务描述。
+ *
+ * ⚠️ **必须把步数预算告诉它，否则它无法规划。**
+ *
+ * 原来这一段只说"先读历史调整、再决定要不要改"，**一个字都没提它只有几步可走**。
+ * 于是它按"反正能一直读"的方式花预算 —— 实测 39 次 `degraded`（占 33%）全是
+ * "达到步数上限仍未结束，本轮没有结论"，而那些运行**已经烧掉 6–7 步的 token
+ * 却什么都没产出**。
+ *
+ * 一个知道自己有预算的 agent 和一个不知道的，行为不一样：前者先读最关键的、
+ * 并在预算内给结论；后者读完再说（然后没机会说）。
+ *
+ * 提成纯函数是为了**可测** —— 否则"有没有把预算写进去"只能靠读代码确认。
+ */
+export function strategistTask(budget: number): string {
+  return (
+    '审视当前的交易参数。先读你自己的历史调整与它们之后真实发生的结果，再决定要不要改。' +
+    '一次只改少数几项 —— 一次改十项的话，之后无论结果好坏你都学不到东西。' +
+    '不改也是一个正当结论。' +
+    `\n\n⚠️ 你这一轮有 ${budget} 次工具调用的预算，**用完就必须给出结论**。` +
+    '所以：先读最关键的，不要重复读同一类信息。' +
+    '如果预算快用完还没读全，就用手上已有的信息下结论 —— ' +
+    '**没有结论的这一轮等于白花**（实测这一档有三分之一的运行就是这么浪费掉的）。'
+  );
+}
+
+/**
  * 跑一次策略审视。
  *
  * 顺序：**先结算旧实验 → 再判断该不该醒 → 再决定用哪档 → 跑循环 → 落库**。
@@ -165,10 +224,8 @@ export async function runStrategyReview(input: {
   });
 
   // 4. 跑循环
-  const task =
-    '审视当前的交易参数。先读你自己的历史调整与它们之后真实发生的結果，再决定要不要改。' +
-    '一次只改少数几项 —— 一次改十项的话，之后无论结果好坏你都学不到东西。' +
-    '不改也是一个正当结论。';
+  const budget = chosen.intensity === 'panel' ? STRATEGIST_MAX_STEPS.panel : STRATEGIST_MAX_STEPS.single;
+  const task = strategistTask(budget);
   const factsText = `唤醒原因：${decision.why}\n当前参数：${JSON.stringify(input.ports.readConfig())}`;
 
   /*
@@ -201,7 +258,7 @@ export async function runStrategyReview(input: {
     facts: factsText,
     deps,
     model: input.model,
-    maxSteps: chosen.intensity === 'panel' ? 12 : 8,
+    maxSteps: chosen.intensity === 'panel' ? STRATEGIST_MAX_STEPS.panel : STRATEGIST_MAX_STEPS.single,
     // 每步实时进来 —— 这样 `set_params` 落实验记录时它已经有内容了。
     onStep: (step) => trace.steps.push(step),
   });
