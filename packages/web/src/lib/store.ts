@@ -553,17 +553,28 @@ function pushToast(
 /*  Selection helpers                                                          */
 /* -------------------------------------------------------------------------- */
 
-export function selectTraderLive(traderId: number | null): TraderLive {
+/**
+ * ⚠️ **这两个是 hook，名字必须以 `use` 开头。**
+ *
+ * 它们内部调用 `useEvents`（zustand 的 hook），所以**只能在组件的顶层调用**。
+ * 原来的名字是 `selectTraderLive` / `selectLiveCycle` —— 读起来像普通选择器，
+ * 调用方没有任何线索知道"把它放进 `if` 里会崩"。
+ *
+ * 而更糟的是机制层面的后果：`react-hooks/rules-of-hooks` 只认 `use` 前缀，
+ * 名字不带前缀时**这条规则根本不会检查它们的调用点**（它以为那是普通函数）。
+ * 也就是说这个命名把一整类崩溃挡在了检查之外 —— 是 `npm run lint` 把它翻出来的。
+ */
+export function useTraderLive(traderId: number | null): TraderLive {
   return useEvents((state) => (traderId === null ? undefined : state.byTrader[traderId])) ?? emptyTraderLive();
 }
 
 /**
  * 正在请求模型的那一轮，或者 `undefined`。
  *
- * 单独一个选择器（而不是让调用方自己 `selectTraderLive`）是有意的：它返回的是
+ * 单独一个选择器（而不是让调用方自己 `useTraderLive`）是有意的：它返回的是
  * 一个**引用稳定**的对象 —— `cycle_start` 时才换一次。决策流因此不会因为
  * 隔壁的持仓、订单、权益事件而重渲染，转圈的秒数也不会被别的事件打断。
  */
-export function selectLiveCycle(traderId: number): LiveCycle | undefined {
+export function useLiveCycle(traderId: number): LiveCycle | undefined {
   return useEvents((state) => state.byTrader[traderId]?.liveCycle);
 }

@@ -19,6 +19,7 @@
     "start": "npm run start --workspace @aq/server",
     "build": "npm run build --workspace @aq/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint packages/web/src",
     "test": "npm run test --workspace @aq/shared && npm run test --workspace @aq/server && npm run test --workspace @aq/web && npm run test:feed",
     "verify": "tsx packages/server/src/scripts/verifyPipeline.ts",
     "test:feed": "node scripts/ssr-decision-feed.mjs",
@@ -30,6 +31,9 @@
     "sim:live": "tsx packages/server/src/scripts/simulate.ts --live --loose --cycles 12"
   },
   "devDependencies": {
-    "playwright-core": "^1.63.0"
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "playwright-core": "^1.63.0",
+    "typescript-eslint": "^8.70.0"
   }
 }

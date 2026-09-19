@@ -140,7 +140,7 @@ import {
 } from 'lucide-react';
 import { exchangeErrorLabel, type DecisionRecord, type Decision, type ExecutionLogEntry } from '@aq/shared';
 import { api, type MarketSymbol } from '../lib/api';
-import { selectLiveCycle, useEvents, type LiveCycle } from '../lib/store';
+import { useLiveCycle, useEvents, type LiveCycle } from '../lib/store';
 import { usePolled } from '../lib/hooks';
 import { Badge, Empty, Panel, Spinner3, cn } from './ui';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
@@ -345,7 +345,7 @@ export function DecisionFeed({
   actions?: ReactNode;
 }) {
   const live = useEvents((s) => s.byTrader[traderId]?.decisions);
-  const liveCycle = selectLiveCycle(traderId);
+  const liveCycle = useLiveCycle(traderId);
   /*
    * 推送到的实时状态只是**兜底**：`stopped` / `error` 为假，`running` / `starting`
    * 为真。`safe_mode` 也留假 —— 那时循环虽然还在，但页头已经有一个专门的横幅在说
