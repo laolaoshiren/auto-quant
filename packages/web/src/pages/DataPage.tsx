@@ -30,6 +30,30 @@ type Level = 'all' | 'info' | 'warn' | 'error';
  */
 const MAX_RENDERED = 500;
 
+/**
+ * 页脚那一格「最近事件 · 时刻」。
+ *
+ * ## 为什么它必须是一个独立组件 —— 这一页的性能问题就在这里
+ *
+ * 这一格每 5 秒要跳一次：`时刻` 是当前时钟，`最近事件` 是"3 分钟前"这种相对时间。
+ *
+ * 原来 `useTicker(5000)` 写在 `DataPage` 的**顶层** —— 于是每 5 秒整个页面重渲染
+ * 一次，而那 500 行日志是**内联的 `<div>`**（不是 `memo` 组件），一点都省不下来：
+ * **为了让这一格跳字，每 5 秒重建约 2000 个 DOM 节点。**
+ *
+ * 而这一页恰恰是"出事了要翻开看日志"的地方 —— 卡在这里最难受。
+ * 把 ticker 收进这个叶子组件之后，重渲染只发生在这一个 `<span>` 里。
+ */
+function FeedClock({ lastEventAt }: { lastEventAt: number | null }) {
+  const tick = useTicker(5000);
+  return (
+    <span>
+      最近事件 {timeAgo(lastEventAt ? new Date(lastEventAt).toISOString() : null)} · 时刻{' '}
+      {new Date(tick).toLocaleTimeString('en-GB', { hour12: false })}
+    </span>
+  );
+}
+
 const LEVELS: Array<{ id: Level; label: string }> = [
   { id: 'all', label: '全部' },
   { id: 'info', label: '信息' },
@@ -148,7 +172,6 @@ export function DataPage() {
   const [source, setSource] = useState<'socket' | 'rest'>('socket');
   const [copied, setCopied] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const tick = useTicker(5000);
 
   const restQuery = usePolled((signal) => api.logs(300, signal), { intervalMs: socketStatus === 'open' ? 30_000 : 8000 });
 
@@ -522,10 +545,11 @@ export function DataPage() {
             {source === 'socket' ? '推送缓冲' : '来自 GET /api/logs'}
             {paused && ' · 视图已冻结'}
           </span>
-          <span>
-            最近事件 {timeAgo(lastEventAt ? new Date(lastEventAt).toISOString() : null)} · 时刻{' '}
-            {new Date(tick).toLocaleTimeString('en-GB', { hour12: false })}
-          </span>
+          {/*
+            时钟收进独立组件：它每 5 秒跳一次，而**这一页不该为它重渲染**。
+            详见 `FeedClock` 上的说明（这里是那约 2000 个节点的来源）。
+          */}
+          <FeedClock lastEventAt={lastEventAt} />
         </div>
       </Panel>
 
