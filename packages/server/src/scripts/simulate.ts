@@ -1,10 +1,16 @@
 /**
  * Full trading-lifecycle simulation.
  *
- * Replays **real historical candles** through the real decision pipeline
+ * Replays candles through the real decision pipeline
  * (prompt → model → parse → risk engine → execution) against a simulated
  * exchange that actually triggers stop-loss and take-profit orders when price
  * crosses them.
+ *
+ * The candles are a **deterministic fixture** by default. They used to be
+ * whatever the live market was doing, which made the two checks that assert
+ * "a stop/target actually fired" depend on the weather rather than on the code.
+ * `--real-market` restores the live fetch for when that is what you want to
+ * watch; see `simulate/syntheticCandles.ts` for why the default is fixed.
  *
  * Why this exists: the dangerous bugs in a trading bot are not in the risk
  * arithmetic, they are in the seams — a position that opens without protection
@@ -15,6 +21,7 @@
  *   npx tsx packages/server/src/scripts/simulate.ts                 # scripted model, many cycles
  *   npx tsx packages/server/src/scripts/simulate.ts --live --cycles 6
  *   npx tsx packages/server/src/scripts/simulate.ts --json          # machine-readable report
+ *   npx tsx packages/server/src/scripts/simulate.ts --real-market   # live candles, non-deterministic
  *
  * It writes to a **temporary database**, so the real one is never touched.
  */
@@ -50,6 +57,7 @@ import {
 import { AutoTrader, type DecisionModel } from '../trader/autoTrader.js';
 import { ReplayMarketData, type ReplaySource } from '../simulate/replayMarketData.js';
 import { SimulatedExchange, type SimulatedPriceStep } from '../simulate/simulatedExchange.js';
+import { buildSyntheticMarket } from '../simulate/syntheticCandles.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Options                                                                    */
@@ -66,6 +74,17 @@ const value = (name: string, fallback: number): number => {
 
 const USE_LIVE_MODEL = flag('live');
 const AS_JSON = flag('json');
+/**
+ * Replay **real** Binance candles instead of the deterministic fixture.
+ *
+ * The default is the fixture, and that default is the point: two of the checks
+ * assert that a stop-loss and a take-profit actually fired. When the market
+ * decides whether price reaches the protection, those checks report the weather
+ * rather than the code — see `simulate/syntheticCandles.ts`. Use this flag when
+ * you specifically want to watch the harness against live price action, and read
+ * a red result there as "the market was quiet", not as a regression.
+ */
+const REAL_MARKET = flag('real-market');
 /**
  * Use a deliberately eager strategy.
  *
@@ -85,6 +104,18 @@ const TIMEFRAMES: Timeframe[] = ['5m', '15m', '1h'];
 const WARMUP_CANDLES = 60;
 const CANDLES_PER_CYCLE = 3; // 3 × 5m = a 15-minute decision interval
 const LEVERAGE = 3;
+
+/**
+ * Anchors for the deterministic fixture (`--real-market` opts out).
+ *
+ * Fixed by design: a fixture that moved with the wall clock could not make an
+ * assertion deterministic, which is the entire reason it exists. The start time
+ * is aligned to the primary timeframe so the first aggregated bucket is a whole
+ * one; the base prices only set the magnitude the sizing maths works in, and the
+ * fixture is self-contained, so they do not track the live market.
+ */
+const FIXTURE_START_TIME = Date.UTC(2026, 0, 1, 0, 0, 0);
+const FIXTURE_BASE_PRICES: Record<string, number> = { BTCUSDT: 100_000, ETHUSDT: 4_000 };
 
 const log = createLogger('simulate');
 
@@ -361,24 +392,41 @@ async function main(): Promise<void> {
   line(`临时数据库：${dbFile}`);
 
   /* --- Market data ------------------------------------------------------ */
-  heading('1. 拉取真实历史K线');
+  const candleCount = WARMUP_CANDLES + CYCLES * CANDLES_PER_CYCLE + 20;
   const connection = await connectExchange({ environment: 'demo', dryRun: true });
-  const sources = new Map<string, ReplaySource>();
-  const primaryCandles = new Map<string, Kline[]>();
 
-  for (const symbol of SYMBOLS) {
-    const klines = new Map<Timeframe, Kline[]>();
-    for (const tf of TIMEFRAMES) {
-      const rows = await connection.market.fetchClosedKlines(
-        symbol,
-        tf,
-        WARMUP_CANDLES + CYCLES * CANDLES_PER_CYCLE + 20,
-      );
-      klines.set(tf, rows);
+  let sources: Map<string, ReplaySource>;
+  if (REAL_MARKET) {
+    heading('1. 拉取真实历史K线');
+    sources = new Map<string, ReplaySource>();
+    for (const symbol of SYMBOLS) {
+      const klines = new Map<Timeframe, Kline[]>();
+      for (const tf of TIMEFRAMES) {
+        const rows = await connection.market.fetchClosedKlines(symbol, tf, candleCount);
+        klines.set(tf, rows);
+      }
+      sources.set(symbol, { klines });
     }
-    sources.set(symbol, { klines });
-    primaryCandles.set(symbol, klines.get(PRIMARY) ?? []);
-    line(`  ${symbol}: ${klines.get(PRIMARY)?.length ?? 0} 根 ${PRIMARY} K线，${klines.get('1h')?.length ?? 0} 根 1h K线`);
+  } else {
+    heading('1. 确定性 K 线夹具（--real-market 可切回真实行情）');
+    sources = buildSyntheticMarket({
+      symbols: SYMBOLS,
+      timeframes: TIMEFRAMES,
+      primary: PRIMARY,
+      candlesPerTimeframe: candleCount,
+      startTime: FIXTURE_START_TIME,
+      basePrices: Object.fromEntries(SYMBOLS.map((s) => [s, FIXTURE_BASE_PRICES[s] ?? 100])),
+    });
+  }
+
+  const primaryCandles = new Map<string, Kline[]>();
+  for (const symbol of SYMBOLS) {
+    const klines = sources.get(symbol)?.klines;
+    primaryCandles.set(symbol, klines?.get(PRIMARY) ?? []);
+    line(
+      `  ${symbol}: ${klines?.get(PRIMARY)?.length ?? 0} 根 ${PRIMARY} K线，` +
+        `${klines?.get('1h')?.length ?? 0} 根 1h K线${REAL_MARKET ? '' : '（夹具）'}`,
+    );
   }
 
   const earliest = Math.min(

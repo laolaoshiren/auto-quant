@@ -115,7 +115,7 @@ npm run dev:web      # 前端热更新 → http://127.0.0.1:5173
 npm run typecheck    # 类型检查
 npm test             # 单元测试
 npm run verify       # 用真实行情跑通「选币 → 指标 → 提示词 → 解析 → 风控」
-npm run sim          # 完整交易生命周期模拟（历史 K 线回放 + 模拟交易所）
+npm run sim          # 完整交易生命周期模拟（确定性行情 + 模拟交易所）
 npm run sim:live     # 同上，但使用真实模型
 ```
 
@@ -230,7 +230,7 @@ packages/
 - 对不确定的事**说"我不确定"** —— 在这个项目里，一个自信的错误判断会让人亏钱
 
 提交前的三条底线：`npm run typecheck`、`npm test`、`npm run build` 全部通过。
-改动影响交易逻辑时，再加一次 `npm run sim`（历史回放，不花钱、不下单）。
+改动影响交易逻辑时，再加一次 `npm run sim`（确定性回放，不花钱、不下单）。
 
 版本间的变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 

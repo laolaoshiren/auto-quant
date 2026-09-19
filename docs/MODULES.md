@@ -312,6 +312,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | --- | --- | --- | --- |
 | `simulatedExchange.ts` | **不是空壳的模拟交易所**：真实仓位账本与保证金、市价成交、以及**在价格穿越时真的触发止损止盈**（用 K 线最高/最低）；刻意复刻币安的 tick 精度（`-1111`）与立即触发（`-2021`）拒绝 | `SimulatedExchange`、`SimulatedFill`、`SimulatedPriceStep`、`SimulatedExchangeOptions` | `binance/broker.js`、`binance/symbols.js`、`binance/types.js` |
 | `replayMarketData.ts` | 用录制好的 K 线替代实时 API 的 `MarketDataService`：**无未来函数**（只看 `closeTime <= 模拟时钟` 的蜡烛）、**复用生产指标代码**；衍生品上下文如实报告为缺失而不是编造 | `ReplayMarketData`、`ReplaySource`、`ReplayMarketDataIsCompatible` | `@aq/shared`、`binance/symbols.js`、`market/indicators.js` |
+| `syntheticCandles.ts` | **确定性 K 线夹具**，`npm run sim` 的默认行情（`--real-market` 换回真实）。每根 K 线带 1.7% 的方向性影线、方向逐根交替，实体沿正弦缓慢漂移：影线保证"开仓后的下一根必然够得到保护位"，交替保证止损与止盈**两条路径**都被走到。**它存在的理由是那两条校验不该赌行情** —— 详见文件头注释与 `docs/DEVELOPMENT.md` 的「`npm run sim` 的实测状态」 | `buildSyntheticMarket`、`SyntheticMarketOptions`、`TIMEFRAME_MS`、`SYNTHETIC_FIXTURE_SHAPE` | `@aq/shared` |
 
 `simulatedExchange` 里有一个容易被误删的细节：`resolvedAlgo` 映射记录了已不再挂着的条件单终态。
 它存在的原因是——币安在仓位因 `closePosition` 条件单平掉后**会把幸存的那张也一起移除**，
@@ -326,7 +327,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | 文件 | 命令 | 干什么 | 碰真钱吗 |
 | --- | --- | --- | --- |
 | `verifyPipeline.ts` | `npm run verify` | 真实币安行情 → 选币 → 指标 → 提示词 → 解析一份内置响应 → 风控审查。**不需要任何密钥，不下单** | 否 |
-| `simulate.ts` | `npm run sim` / `npm run sim:live` | 真实历史 K 线回放 + 模拟交易所 + 脚本化（或真实）模型，跑 80（或 12）轮，结尾跑 **15 项校验**（**当前实测 15/15 全通过**）。写**临时**数据库 | 否 |
+| `simulate.ts` | `npm run sim` / `npm run sim:live` | 确定性 K 线夹具（`--real-market` 可换真实行情）+ 模拟交易所 + 脚本化（或真实）模型，跑 80（或 12）轮，结尾跑**逐项校验**（**当前全部通过**；项数会随校验增加，不要在文档里写死）。写**临时**数据库 | 否 |
 | `demoCycle.ts` | `npm run demo` | 往**真实**数据库写一轮 `[DEMO]` 前缀的完整审计数据（真实行情 + 脚本化模型 + 自己的 `SimulatedBroker`）；`--clean` 清除 | 否 |
 | `liveSmokeTest.ts` | `npx tsx .../liveSmokeTest.ts --confirm` | **实盘接线冒烟**：预检 → 单向模式 → 杠杆 → 市价开仓 → 挂止损 → 挂止盈 → **回读交易所确认** → 撤单 → 平仓 → 确认账户干净 | ✅ **是** |
 | `resetAdminPassword.ts` | `npx tsx .../resetAdminPassword.ts` | **锁死时的后门**：直接改库里的管理员用户名/密码（调 `generatePassword()` / `generateUsername()`，与首启一致）。`deploy/up.sh` 的 `reset-credentials` 会调它 | 否 |

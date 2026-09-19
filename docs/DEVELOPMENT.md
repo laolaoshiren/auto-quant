@@ -165,7 +165,7 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 | `npm test` | `npm run test --workspace @aq/server` → `tsx --test "src/**/*.test.ts"` | 提交前必跑。**只有服务端有测试**；`@aq/web` 目前没有测试脚本 |
 | `npm run verify` | `tsx packages/server/src/scripts/verifyPipeline.ts` | 用**真实币安行情**跑「选币 → 指标 → 提示词 → 解析 → 风控」全链路。**不需要任何密钥、不下单** |
 | `npm run demo` | `tsx packages/server/src/scripts/demoCycle.ts` | 往**真实数据库**写入一轮带 `[DEMO]` 前缀的完整决策审计数据，让控制台的审计界面立刻有东西可看。加 `--clean` 清除 |
-| `npm run sim` | `tsx packages/server/src/scripts/simulate.ts` | **完整交易生命周期模拟**：真实历史 K 线回放 + 会真正触发止损止盈的模拟交易所 + 脚本化模型，80 轮，15 项校验（**当前实测 15/15 全通过**）。写临时数据库 |
+| `npm run sim` | `tsx packages/server/src/scripts/simulate.ts` | **完整交易生命周期模拟**：确定性 K 线夹具 + 会真正触发止损止盈的模拟交易所 + 脚本化模型，80 轮，逐项校验（**当前全部通过**；`--real-market` 可换回真实行情）。写临时数据库 |
 | `npm run sim:live` | `tsx packages/server/src/scripts/simulate.ts --live --loose --cycles 12` | 同上，但模型换成**真实 LLM**（需要 `SIM_LLM_KEY`），策略放宽（`--loose`）以便真的有可能下单 |
 | `npm run notices` | `node scripts/generate-notices.mjs` | 重新生成 `THIRD-PARTY-NOTICES.md`。**改过任何依赖之后必须跑**——CI 会校验产物与当前依赖一致，不一致就红 |
 | `npm run check:links` | `node scripts/check-links.mjs` | 检查文档里的**站内链接**是否都解析得到（外链不查，别人家站点挂了不该让本项目变红）。改过文档路径/标题就跑一次 |
@@ -176,6 +176,7 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 ```bash
 npx tsx packages/server/src/scripts/simulate.ts --cycles 120   # 更长回放
 npx tsx packages/server/src/scripts/simulate.ts --json         # 机器可读报告
+npx tsx packages/server/src/scripts/simulate.ts --real-market  # 真实行情回放（结果不再确定）
 npx tsx packages/server/src/scripts/demoCycle.ts --clean       # 清演示数据
 npx tsx packages/server/src/scripts/liveSmokeTest.ts --confirm --symbol DOGEUSDT --notional 6
 ```
@@ -198,9 +199,37 @@ npx tsx packages/server/src/scripts/liveSmokeTest.ts --confirm --symbol DOGEUSDT
 `liveSmokeTest.ts` 则优先读 `BINANCE_API_KEY` / `BINANCE_API_SECRET`；两者都为空时回落到
 数据库里的凭据（默认取第一个账户，可用 `--account <id>` 指定）。
 
-### `npm run sim` 的实测状态（15/15 通过）
+### `npm run sim` 的实测状态（全部通过）
 
-**`npm run sim` 退出码为 0，报告 `全部 15 项校验通过`。**
+**`npm run sim` 退出码为 0，报告 `全部 N 项校验通过`。**
+项数会随校验增加而变 —— **不要在文档里写死它**，看脚本自己打印的那一行。
+
+#### 行情是夹具，不是实时行情
+
+这一条是后来才修正的，因为原来的做法有系统性缺陷：它回放的是**运行那一刻的真实
+K 线**，于是那两条"止损 / 止盈真的被触发并记账"的校验实际上在赌行情：
+
+```
+[失败] 止损会被真实触发并正确记账
+       价格穿越止损 0 次，已作为 close_reason=stop_loss 的交易入账。
+```
+
+脚本化模型刻意提**很紧**的保护（0.4–0.5% 止损 / 0.7–0.9% 止盈），前提是
+"加密市场在几根 5 分钟 K 线内会走这么远"。行情安静时这个前提不成立，
+校验于是红给一个**与代码无关**的理由。**一个因为外部原因变红的校验，会训练人
+忽略红色** —— 那比没有校验更糟，而 `npm run sim` 正是本仓库"性价比最高的一步验证"。
+
+现在行情来自 `simulate/syntheticCandles.ts` 的**确定性夹具**：每根 K 线带一根
+1.7% 的方向性影线、方向逐根交替，实体沿正弦缓慢漂移（±0.3%，避免 RSI/ATR 退化成
+NaN）。影线保证"开仓后的下一根必然够得到保护位"，交替保证止损与止盈**两条路径**
+都会被走到。夹具的形状本身有 11 条用例钉着（`syntheticCandles.test.ts`），
+包括**反向影线必须远短于最紧止损**——否则同一根 K 线会同时跨越两个方向，
+而 `SimulatedExchange` 按「止损优先」结算，止盈那条路径就会**静默消失**、
+校验却仍然是绿的。
+
+要看真实行情下的行为，用 `--real-market`，并把那里的红读作"这段行情很安静"。
+
+#### 一段更早的历史（校验加错层）
 
 这里记录一段真实的历史，因为它是一个很好的教训：**这份文档刚写出来时，`npm run sim`
 稳定报告 13/15**，失败的固定是「每笔开仓都挂上止损与止盈」与「止损会被真实触发并正确记账」。
@@ -546,8 +575,8 @@ npm run build       # 改了前端就必须跑；它会编译 packages/web 到 d
 
 1. **改了前端** → 除了 `build`，还应该在浏览器里真的点一遍受影响的页面（见 `docs/AGENTS.md`
    关于"不要声称没实际运行过的功能"那一条）。
-2. **改了影响交易的逻辑** → 至少再跑一次 `npm run sim`，它会在 15 项校验里覆盖执行接缝
-   （当前应为 15/15 全通过；若有失败，先读上面「`npm run sim` 的实测状态」）。
+2. **改了影响交易的逻辑** → 至少再跑一次 `npm run sim`，它会在逐项校验里覆盖执行接缝
+   （当前应为全部通过；若有失败，先读上面「`npm run sim` 的实测状态」）。
 3. **改了 prompt / risk / 解析** → 额外跑一次 `npm run verify`，它用真实行情走完整链路。
 4. **改了币安相关代码（broker / 端点 / 字段）** → `docs/research/` 里有实测调研，
    动手前先读对应文件；能上真实交易所验证的，就去验证。
