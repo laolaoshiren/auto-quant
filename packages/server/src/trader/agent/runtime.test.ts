@@ -81,12 +81,16 @@ after(() => {
   rmSync(workDir, { recursive: true, force: true });
 });
 
-/** 一个记调用次数、可注入失败的桩模型。 */
-function stubModel(reply = JSON.stringify({ tool: 'finish', args: { summary: '看完了' } })): LoopModel & { calls: number } {
+/** 一个记调用次数、并留下最后一次用户提示词的桩模型。 */
+function stubModel(
+  reply = JSON.stringify({ tool: 'finish', args: { summary: '看完了' } }),
+): LoopModel & { calls: number; lastPrompt: string } {
   const m = {
     calls: 0,
-    complete: async () => {
+    lastPrompt: '',
+    complete: async (_system: string, user: string) => {
       m.calls += 1;
+      m.lastPrompt = user;
       return { text: reply, usage: { promptTokens: 10, completionTokens: 5 }, latencyMs: 1 };
     },
   };
@@ -190,6 +194,34 @@ test('审视失败不抛穿 —— 智能体坏了不该让机器人停止交易
 
   // 走到这里就说明没抛穿
   assert.ok(true);
+});
+
+test('外部平仓不要谎称"记录可能被轮转清理" —— 那本来就不是我们的仓', async () => {
+  /*
+   * `close_reason: 'external'` 的仓位**不是本平台开的**（操作员手工下的、
+   * 或别的程序下的），所以查不到入场理由是**正确的结果**，不是数据缺失。
+   *
+   * 原来这里一律说"可能已被轮转清理"，把复盘员引去追一个永远不会有的东西 ——
+   * 实测记忆 #24（APTUSDT，external）的原文就是这么写的：
+   *   「…但入场理由缺失，无法判断是方向本就错、还是止损/出场过紧。」
+   */
+  traders.setAgentConfig(traderId, JSON.stringify(config()));
+  const m = stubModel();
+  runtime(m).reviewTrade(facts({ closeReason: 'external', symbol: 'APTUSDT' }));
+  await flush();
+
+  assert.ok(m.lastPrompt.includes('不是本平台开的'), '必须说清这个仓不是我们开的');
+  assert.ok(!m.lastPrompt.includes('轮转清理'), '不能把"外部仓"说成"记录丢了"');
+});
+
+test('查不到记录的普通平仓，原因确实是"记录被轮转"', async () => {
+  traders.setAgentConfig(traderId, JSON.stringify(config()));
+  const m = stubModel();
+  runtime(m).reviewTrade(facts({ closeReason: 'stop_loss', symbol: 'BTCUSDT' }));
+  await flush();
+
+  assert.ok(m.lastPrompt.includes('轮转清理'), '普通平仓查不到记录时，原因该是记录被清理');
+  assert.ok(!m.lastPrompt.includes('不是本平台开的'), '别把普通平仓说成外部仓');
 });
 
 test('复盘失败不抛穿', async () => {
