@@ -4,6 +4,7 @@ import {
   isResizeAction,
   isMajorSymbol,
   isOpenAction,
+  type CircuitBreakerKind,
   type Decision,
   type MarketSnapshot,
   type PositionView,
@@ -955,8 +956,10 @@ export interface CircuitBreakerVerdict {
    * 「跨过零点后自动恢复」—— 而它已经这样静默地跳过了 15 个周期。**空仓时权益不会
    * 自己变化，所以它永远等不到那一天。** 这比不写原因更糟：它给的是一个
    * **会让人安心地不去处理**的错误信息。
+   *
+   * 类型的单一来源在 `@aq/shared`（控制台也要用同一个），这里只是引用它。
    */
-  kind: 'daily_loss' | 'total_drawdown' | 'none';
+  kind: CircuitBreakerKind;
 }
 
 /**

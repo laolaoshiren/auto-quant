@@ -1648,7 +1648,29 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     }
   };
 
-  app.get('/api/traders/:id/stats', authed, async (request) => computeTraderStats(traderIdOf(request)));
+  /**
+   * 统计 + **熔断器的当前读数**。
+   *
+   * ## 熔断读数为什么挂在响应上、而不是进 `TraderStats`
+   *
+   * `TraderStats` 是**仓储层**算出来的纯统计（只读数据库）。而熔断读数依赖
+   * **运行时真实生效的那份配置**（AI 托管下来自 `traders.agent_config_json`，
+   * 与策略表里那份可能不同）与进程内的最新权益 —— 让仓储去重算它，既多两趟查询，
+   * 又可能算出与交易循环不一致的答案。
+   *
+   * ## 它回答的是哪一个问题
+   *
+   * 熔断生效时交易循环会**跳过整个周期**（连模型都不问），所以操作员看到的是：
+   * 状态 running、权益一动不动、决策流里一条 `skipped` —— 而**没有任何一处说
+   * "它被熔断了、以及怎么解除"**。这个字段就是那一处。
+   *
+   * 机器人在**停止**时是 `null`（那时没有内存里的配置可用来判定），
+   * 客户端据此不渲染那一行 —— 而不是渲染成"没有熔断"。
+   */
+  app.get('/api/traders/:id/stats', authed, async (request) => {
+    const id = traderIdOf(request);
+    return { ...computeTraderStats(id), circuitBreaker: deps.manager.readCircuitBreaker(id) };
+  });
 
   app.get('/api/traders/:id/positions', authed, async (request) => {
     const id = traderIdOf(request);

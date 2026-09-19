@@ -8,20 +8,39 @@
  * dashboard also writes into it, so navigating back to the overview is instant.
  */
 import { create } from 'zustand';
-import { closeReasonLabel as sharedCloseReasonLabel, type TraderStats } from '@aq/shared';
+import {
+  closeReasonLabel as sharedCloseReasonLabel,
+  type CircuitBreakerReading,
+  type TraderStats,
+} from '@aq/shared';
 import { api } from './api';
 
+/**
+ * 概览表与机器人页共用的"一个机器人的摘要"。
+ *
+ * 它比 `TraderStats` 多一项**熔断读数** —— 那个数由服务端从运行时组装，
+ * 不属于仓储层的纯统计（见 `/api/traders/:id/stats` 上的说明）。
+ *
+ * ⚠️ 它被声明成**可选**，因为这个 map 有两个写入方：
+ *   · `fetchOne` —— 走那个端点，熔断读数一定有（可能是 `null`，见下）
+ *   · `put`      —— WebSocket 推来的单条统计，**没有**熔断读数
+ *
+ * 用可选而不是让 `put` 的调用方编一个假值：**"不知道"与"没有熔断"是两件事** ——
+ * 前者不该渲染成"一切正常"。
+ */
+export type TraderSummary = TraderStats & { circuitBreaker?: CircuitBreakerReading | null };
+
 interface SummaryState {
-  stats: Record<number, TraderStats>;
+  stats: Record<number, TraderSummary>;
   /** Trader ids with a request currently in flight. */
   pending: Record<number, boolean>;
   lastRefresh: number | null;
   errors: Record<number, string>;
 
-  fetchOne: (traderId: number) => Promise<TraderStats | null>;
+  fetchOne: (traderId: number) => Promise<TraderSummary | null>;
   refreshMany: (traderIds: number[]) => Promise<void>;
   prune: (traderIds: number[]) => void;
-  put: (stats: TraderStats) => void;
+  put: (stats: TraderSummary) => void;
 }
 
 export const useSummaries = create<SummaryState>((set, get) => ({

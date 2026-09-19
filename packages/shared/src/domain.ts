@@ -893,6 +893,37 @@ export interface TraderStats {
   uptimeHours: number;
 }
 
+/**
+ * 熔断的两种类型。**它们的解除方式完全不同，不能用一个布尔值概括。**
+ *
+ *   · `daily_loss`     —— 按单日结算，跨过零点自动恢复
+ *   · `total_drawdown` —— **没有"按日"这个概念**：它比较的是历史最高水位与当前
+ *     权益，要等权益涨回门槛以内才解除。**空仓时权益不会自己变化，所以它不会
+ *     自行恢复** —— 需要操作员处理
+ */
+export type CircuitBreakerKind = 'daily_loss' | 'total_drawdown' | 'none';
+
+/**
+ * 熔断器在某一时刻的读数。
+ *
+ * ## 它为什么不挂在 `TraderStats` 上
+ *
+ * `TraderStats` 是**仓储层**算出来的纯统计（它只读数据库）。而熔断读数依赖
+ * **运行时真实生效的那份配置**（AI 托管下它来自 `traders.agent_config_json`，
+ * 与策略表里的那份可能不同）与**进程内的最新权益** —— 让仓储去重算它，
+ * 既多两次查询，又可能算出与交易循环不一致的答案。
+ *
+ * 所以它由 API 层从运行时组装，与 `/stats` 的响应合并（见 `GET /api/traders/:id/stats`）。
+ */
+export interface CircuitBreakerReading {
+  blocked: boolean;
+  kind: CircuitBreakerKind;
+  /** 面向操作员的一句话：为什么被拦。`blocked` 为假时是空串。 */
+  reason: string;
+  /** 当前权益较历史最高水位回撤了多少（**0–100 的百分数**，不是小数）。 */
+  drawdownPercent: number;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Live event bus (server → browser)                                          */
 /* -------------------------------------------------------------------------- */

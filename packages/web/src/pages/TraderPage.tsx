@@ -239,6 +239,12 @@ export function TraderPage() {
     liveStatus === 'starting' ||
     liveStatus === 'safe_mode';
   const stats = statsMap[traderId] ?? null;
+  /*
+   * 熔断器的当前读数。机器人在**停止**时服务端给 `null`（没有内存里的配置可用来
+   * 判定），所以这里也要区分「不知道」与「没有熔断」—— 只有 `blocked === true`
+   * 时才渲染那一行。
+   */
+  const breaker = stats?.circuitBreaker ?? null;
 
   useDocumentTitle(trader?.name ?? `机器人 ${params.id}`);
 
@@ -858,6 +864,27 @@ export function TraderPage() {
         <ConfigSummary trader={trader} asset={settleAsset} />
 
         {actionError && <ErrorNote>{actionError}</ErrorNote>}
+
+        {/*
+          ⚠️ **熔断提示 —— 它在页面上的唯一一处。**
+          
+          熔断生效时交易循环会**跳过整个决策周期**（连模型都不问），于是操作员
+          看到的是：状态 running、权益一动不动、决策流里一条 `skipped` ——
+          而在此之前，**没有任何一处说"它被熔断了、以及怎么解除"**。
+          实测这件事在生产上静默持续了 15 个周期。
+          
+          **用 warn 而不是 danger**：熔断不是故障，是系统在正常工作（亏到阈值就
+          停手）。用红色会把它渲染成异常 —— 与下面那段注释里"整块红色警示区
+          假设了恶意"是同一类错误。
+          
+          `reason` 由服务端与 `executionLog` **共用同一个函数**生成，
+          所以面板与决策流里说的是同一句话。
+        */}
+        {breaker?.blocked && (
+          <div className="rounded-md border border-warn/60 bg-warn/10 px-3 py-2 text-base text-warn">
+            <span className="font-semibold">已触发熔断，暂不开新仓。</span> {breaker.reason}
+          </div>
+        )}
 
         {status === 'safe_mode' && (
           <div className="rounded-md border border-warn/60 bg-warn/10 px-3 py-2 text-base text-warn">

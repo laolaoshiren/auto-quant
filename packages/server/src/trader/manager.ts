@@ -1,4 +1,9 @@
-import { StrategyConfigSchema, type StrategyConfig, type TraderStatus } from '@aq/shared';
+import {
+  StrategyConfigSchema,
+  type CircuitBreakerReading,
+  type StrategyConfig,
+  type TraderStatus,
+} from '@aq/shared';
 import { connectExchange, preflight, type ExchangeConnection, type PreflightCheck } from '../binance/bootstrap.js';
 import type { BinanceEnvironment } from '../binance/endpoints.js';
 import { BinanceUserDataStream } from '../binance/ws.js';
@@ -750,6 +755,17 @@ export class TraderManager {
       };
     }
     return autoTrader.requestAgentReview();
+  }
+
+  /**
+   * 熔断器**此刻**的读数 —— 让控制台能回答"它为什么一单都不开"。
+   *
+   * 机器人**没在运行**时返回 `null`：这个数必须用一份**在内存里的**配置来重算，
+   * 而 AI 托管下那份配置来自 `traders.agent_config_json`（与策略表里那份可能不同）。
+   * 从数据库另拼一份会算出与交易循环不一致的答案 —— 宁可让调用方知道"不知道"。
+   */
+  readCircuitBreaker(traderId: number): CircuitBreakerReading | null {
+    return this.running.get(traderId)?.circuitBreakerReading() ?? null;
   }
 
   /**

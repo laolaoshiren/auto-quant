@@ -19,6 +19,7 @@ import type {
   LlmProviderDescriptor,
   OrderRecord,
   PositionView,
+  CircuitBreakerReading,
   StrategyConfig,
   StrategyPreset,
   StrategyRecord,
@@ -632,8 +633,17 @@ export const api = {
     ),
 
   /* --- per-trader data --- */
+  /**
+   * 统计 + **熔断器的当前读数**。
+   *
+   * `circuitBreaker` 不是 `TraderStats` 的一部分：那个类型是仓储层算的纯统计，
+   * 而这个数由服务端从**运行时**组装（见端点上的说明）。机器人在**停止**时它是
+   * `null` —— 那时没有内存里的配置可用来判定，**而不是"确认没有熔断"**。
+   */
   traderStats: (id: number, signal?: AbortSignal) =>
-    request<TraderStats>(`/traders/${id}/stats`, { signal }),
+    request<TraderStats & { circuitBreaker: CircuitBreakerReading | null }>(`/traders/${id}/stats`, {
+      signal,
+    }),
   traderPositions: (id: number, signal?: AbortSignal) =>
     request<PositionView[]>(`/traders/${id}/positions`, { signal }),
   traderAccount: (id: number, signal?: AbortSignal) =>

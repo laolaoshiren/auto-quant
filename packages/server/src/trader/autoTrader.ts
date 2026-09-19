@@ -8,6 +8,7 @@ import {
   orderPurposeLabel,
   exchangeErrorCode,
   type CloseReason,
+  type CircuitBreakerReading,
   type Decision,
   type EquitySnapshot,
   type ExecutionLogEntry,
@@ -28,7 +29,12 @@ import { createLogger } from '../logger.js';
 import { LlmError } from '../llm/errors.js';
 import type { MarketDataService } from '../market/service.js';
 import { shouldMoveStopToBreakeven } from '../risk/breakeven.js';
-import { checkCircuitBreakers, RiskEngine, shouldCloseForDrawdown } from '../risk/engine.js';
+import {
+  checkCircuitBreakers,
+  RiskEngine,
+  shouldCloseForDrawdown,
+  type CircuitBreakerVerdict,
+} from '../risk/engine.js';
 import { selectCandidates } from '../strategy/coins.js';
 import { parseDecisionResponse, sortDecisions } from '../strategy/parser.js';
 import {
@@ -401,6 +407,24 @@ export class AutoTrader {
   private activeConfig: StrategyConfig;
 
   /**
+   * 最近一次跑周期时的**账户权益与历史最高水位**，供控制台回答
+   * "它为什么一单都不开"。
+   *
+   * ## 为什么记这一份而不是让 `/stats` 自己算
+   *
+   * 周期里本来就在算这两个数（熔断器要用）。而 `/stats` 自己算要两趟查询
+   * （今日已实现盈亏、历史最高水位），而这个端点每 5–12 秒被每个机器人拉一次 ——
+   * `node:sqlite` 是同步的，那些查询会跑在**驱动交易循环的同一条事件循环**上。
+   *
+   * ## 它为什么不是"上一轮的结论"
+   *
+   * 只记**输入**（权益与高水位），不记裁决结果 —— 裁决在读取时用
+   * `this.activeConfig` 重算，这样熔断解除（例如入金）之后控制台会立刻反映出来，
+   * 而不是挂着一条过期的"被熔断"直到下个周期。
+   */
+  private lastBreakerInput: { equity: number; highWater: number } | null = null;
+
+  /**
    * 刷新本周期生效的配置，并在 AI 模式下触发一次审视判断。
    *
    * `deps.agent` 不存在时这里**什么都不做** —— 老机器人的行为不受任何影响。
@@ -673,6 +697,44 @@ export class AutoTrader {
       this.cyclePromise = null;
       done();
     }
+  }
+
+  /**
+   * 熔断器**此刻**的读数 —— 让控制台能回答"它为什么一单都不开"。
+   *
+   * ## 为什么需要它
+   *
+   * 熔断生效时，`runCycle` 会**跳过整个决策周期**（连模型都不问），只把原因写进
+   * 那一轮的 `executionLog`。于是操作员看到的是：状态 **running**、决策流里一条
+   * `skipped`、权益一动不动 —— 而页面上的任何一处都没有说"它被熔断了、怎么解除"。
+   * 实测这件事在生产上静默持续了 15 个周期。
+   *
+   * ## 为什么用当前配置重算，而不是回放上一轮的结论
+   *
+   * 熔断可能因为**外部原因**解除（入金、或 AI 调高上限）。回放旧结论会让控制台
+   * 挂着一条过期的"被熔断"，而操作员刚往账户里打了钱。
+   *
+   * 还没跑过任何周期时返回"未熔断" —— 那时确实没有可判定的输入，
+   * 而不是"确认没有熔断"。
+   */
+  circuitBreakerReading(): CircuitBreakerReading {
+    const input = this.lastBreakerInput;
+    if (!input) return { blocked: false, kind: 'none', reason: '', drawdownPercent: 0 };
+
+    const drawdownPercent =
+      input.highWater > 0 ? Math.max(0, ((input.highWater - input.equity) / input.highWater) * 100) : 0;
+    const verdict = checkCircuitBreakers(this.activeConfig, input.equity, {
+      dailyRealizedPnl: tradeStore.realizedPnlToday(this.deps.trader.id),
+      highWaterEquity: input.highWater,
+    });
+
+    return {
+      blocked: verdict.blocked,
+      kind: verdict.kind,
+      // 与 `executionLog` 用的是同一个函数 —— 两处必须说同一件事。
+      reason: describeBreaker(verdict, this.activeConfig),
+      drawdownPercent: Math.round(drawdownPercent * 100) / 100,
+    };
   }
 
   /**
@@ -1071,6 +1133,11 @@ export class AutoTrader {
       dailyRealizedPnl: tradeStore.realizedPnlToday(traderId),
       highWaterEquity: highWater,
     });
+    /*
+     * 留下这一份输入，供 `/stats` 回答"它为什么一单都不开" —— 见字段上的说明。
+     * 只记输入、不记结论：结论在读取时按**当前**配置重算。
+     */
+    this.lastBreakerInput = { equity: account.equity, highWater };
     if (breaker.blocked) {
       // 每轮都成立的**状态**，只在进入时记一次（详见 emitOnChange 的说明）。
       this.emitOnChange('circuit-breaker', 'warn', breaker.reason);
@@ -1148,17 +1215,16 @@ export class AutoTrader {
        * 那句错误的信息会让操作员**安心地不去处理**，而它永远不会恢复 ——
        * 这比不写原因更糟。
        */
-      const blocker = breaker.blocked
-        ? `熔断生效：${breaker.reason}`
-        : `本小时开仓额度已用满（${entriesLastHour} / ${config.throttle.maxEntriesPerHour} 笔）`;
-      const recovery = breaker.blocked
-        ? breaker.kind === 'total_drawdown'
-          ? '注意：总回撤熔断不按日重置 —— 它要等权益回到最高水位以下 ' +
-            `${config.circuitBreaker.maxTotalDrawdownPercent}% 以内才会解除，` +
-            '而空仓时权益不会自己变化，所以它不会自行恢复。' +
-            '要不要继续交易需要操作员决定（例如入金，或调整这一上限）。'
-          : '单日亏损熔断按日结算，跨过零点后自动恢复。'
-        : '额度按小时滚动，最迟下一个整点恢复。';
+      /*
+       * 一句话说清"为什么被拦、以及怎么解除"。
+       *
+       * `describeBreaker` 与 `/stats` 那边共用 —— **两处必须说同一件事**，
+       * 否则操作员会在面板上看到一种说法、在决策流里看到另一种。
+       */
+      const why = breaker.blocked
+        ? describeBreaker(breaker, config)
+        : `本小时开仓额度已用满（${entriesLastHour} / ${config.throttle.maxEntriesPerHour} 笔），` +
+          '额度按小时滚动，最迟下一个整点恢复。';
 
       progress.executionLog = [
         {
@@ -1166,9 +1232,9 @@ export class AutoTrader {
           symbol: '—',
           status: 'skipped',
           detail:
-            `${blocker}，且当前没有任何持仓。` +
+            `${why}且当前没有任何持仓。` +
             '本轮没有向模型提问、也没有下单 —— 此时模型不可能给出任何可执行的动作，' +
-            `跳过请求是为了不产生无谓的 token 开销。${recovery}`,
+            '跳过请求是为了不产生无谓的 token 开销。',
         },
       ];
       return breaker.blocked ? '熔断生效且空仓，本轮跳过模型请求。' : '本小时额度已满且空仓，本轮跳过模型请求。';
@@ -4813,6 +4879,29 @@ export function describeCycleFailure(error: unknown, phase: CycleFailurePhase): 
     case 'bookkeeping':
       return `未知错误：${detail}。本轮在账务 / 对账环节失败，且错误不属于已知的模型、行情或交易所类别；该周期已经拿到的提示词与执行记录已尽量保存，请结合运行日志排查。`;
   }
+}
+
+/**
+ * 把熔断裁决变成一句**给人看的话**：为什么被拦、以及怎么解除。
+ *
+ * 提取出来是因为它有**两个调用点**：跳过周期时的 `executionLog`，以及控制台的
+ * `/stats` 响应。**两处必须说同一件事** —— 否则操作员会在面板上看到一种说法、
+ * 在决策流里看到另一种，然后去追一个不存在的差异。
+ *
+ * ⚠️ **两种熔断的解除方式完全不同，不能都用"等零点"概括。**
+ * `total_drawdown` 比较的是历史最高水位与当前权益，**没有"按日"这个概念**；
+ * 空仓时权益不会自己变化，所以它**不会自行恢复**。这里原来对所有 `blocked`
+ * 都写「熔断按单日结算，跨过零点后自动恢复」—— 一个被总回撤熔断的机器人因此
+ * 连续 15 个周期都在给操作员一条**会让他安心地不去处理**的错误信息。
+ */
+export function describeBreaker(verdict: CircuitBreakerVerdict, config: StrategyConfig): string {
+  if (!verdict.blocked) return '';
+  return verdict.kind === 'total_drawdown'
+    ? `${verdict.reason}注意：总回撤熔断不按日重置 —— 它要等权益回到最高水位以下 ` +
+        `${config.circuitBreaker.maxTotalDrawdownPercent}% 以内才会解除，` +
+        '而空仓时权益不会自己变化，所以它不会自行恢复。' +
+        '要不要继续交易需要操作员决定（例如入金，或调整这一上限）。'
+    : `${verdict.reason}单日亏损熔断按日结算，跨过零点后自动恢复。`;
 }
 
 /**
