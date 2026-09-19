@@ -930,3 +930,44 @@ export type ServerEvent =
       scope?: string;
       timestamp: string;
     };
+
+/* -------------------------------------------------------------------------- */
+/*  自然日边界（北京时间）                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 北京时间的 UTC 偏移。
+ *
+ * **常量而不是查时区库**：中国自 1991 年起不实行夏令时，UTC+8 是恒定的。
+ * 引入 Intl 或时区数据库只为这一件事，代价远大于收益。
+ */
+export const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * 北京时间「今天 0:00」对应的 **UTC 时刻**（ISO 字符串）。
+ *
+ * ## 算法
+ *
+ * 把时间戳平移 +8 小时后，它读起来就是北京时间的钟面；按天取整；
+ * 再平移回去得到 UTC。三步都**不依赖服务器**的时区设置。
+ *
+ * ## 为什么返回值是 UTC ISO
+ *
+ * 库里存的一律是 UTC ISO（本项目的一条纪律），所以比较也必须用 UTC ——
+ * 变的只是**边界的定义**，不是存储格式。
+ *
+ * @example
+ *   // 北京时间 2026-09-19 07:30（= UTC 2026-09-18 23:30）
+ *   beijingDayStartIso(Date.parse("2026-09-18T23:30:00Z"))
+ *   // → "2026-09-18T16:00:00.000Z"  也就是北京时间 9-19 00:00
+ */
+export function beijingDayStartIso(nowMs: number = Date.now()): string {
+  const shifted = nowMs + BEIJING_OFFSET_MS;
+  const dayStart = Math.floor(shifted / 86_400_000) * 86_400_000;
+  return new Date(dayStart - BEIJING_OFFSET_MS).toISOString();
+}
+
+/** 北京时间「今天 0:00」的毫秒时间戳。 */
+export function beijingDayStartMs(nowMs: number = Date.now()): number {
+  return Date.parse(beijingDayStartIso(nowMs));
+}

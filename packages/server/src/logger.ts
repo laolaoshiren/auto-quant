@@ -1,3 +1,4 @@
+import { BEIJING_OFFSET_MS } from '@aq/shared';
 import { env } from './env.js';
 
 /**
@@ -20,8 +21,28 @@ const DIM = '\x1b[2m';
 
 const useColor = process.stdout.isTTY === true;
 
+/**
+ * 控制台/文件日志的时间戳，**北京时间**。
+ *
+ * ## 为什么不用 `toISOString()`
+ *
+ * 那给出的是 UTC，而界面上显示的是浏览器本地时间（操作员在中国 = 北京时间）。
+ * 于是同一条日志，在 `journalctl` 里和在「数据与日志」页上**差 8 小时** ——
+ * 排查问题时要来回换算，而这一步经常出错。
+ *
+ * ## 为什么不用 `toLocaleString()`
+ *
+ * 那用的是**服务器**的时区，而部署环境的时区不受这个仓库控制：
+ * 换一台 UTC 的机器，日志会静默变回 UTC，**而且不会有任何报错**。
+ *
+ * 所以显式按 UTC+8 算，与服务器时区无关（中国不实行夏令时，+8 是常量）。
+ *
+ * ⚠️ **这只影响给人看的那一行**：写进 `runtime_logs` 的仍是 UTC ISO
+ * （`now()`，本项目的存储纪律），界面渲染时转成浏览器本地时间。
+ */
 function stamp(): string {
-  return new Date().toISOString().replace('T', ' ').slice(0, 23);
+  const beijing = new Date(Date.now() + BEIJING_OFFSET_MS);
+  return beijing.toISOString().replace('T', ' ').slice(0, 23);
 }
 
 /** Optional sink so the UI can stream server logs over the event bus. */

@@ -17,7 +17,7 @@ import type {
   TraderStatus,
   User,
 } from '@aq/shared';
-import { StrategyConfigSchema } from '@aq/shared';
+import { StrategyConfigSchema, beijingDayStartIso } from '@aq/shared';
 import { getDb } from '../db/index.js';
 import { createLogger } from '../logger.js';
 
@@ -1939,12 +1939,23 @@ export const trades = {
    * keep trading through a streak that is only breaking even on paper.
    */
   realizedPnlToday(traderId: number): number {
-    const startOfDay = new Date();
-    startOfDay.setUTCHours(0, 0, 0, 0);
+    /*
+     * ⚠️ **日界是北京时间，不是 UTC。**
+     *
+     * 原来这里是 setUTCHours(0, 0, 0, 0) —— UTC 零点，
+     * 也就是**北京时间早上 8 点**。于是北京时间 9-19 07:30 的一笔平仓
+     * 会被算进「UTC 9-18」，操作员上午看到的「今日」实际覆盖
+     * 9-18 08:00 → 9-19 08:00，与他的认知差 8 小时。
+     *
+     * 而这个数字正是熔断（maxDailyLossPercent）用来决定要不要停手的依据。
+     *
+     * 用 beijingDayStartIso() 而不是 setHours(0,0,0,0)：
+     * 后者用的是**服务器**的时区，换一台 UTC 的机器就会静默变回 UTC 零点。
+     */
     const row = getDb().get<{ total: number | null }>(
       'SELECT SUM(net_pnl) AS total FROM trades WHERE trader_id = ? AND closed_at >= ?',
       traderId,
-      startOfDay.toISOString(),
+      beijingDayStartIso(),
     );
     return row?.total ?? 0;
   },
