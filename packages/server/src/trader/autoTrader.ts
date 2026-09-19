@@ -1153,7 +1153,7 @@ export class AutoTrader {
         : `本小时开仓额度已用满（${entriesLastHour} / ${config.throttle.maxEntriesPerHour} 笔）`;
       const recovery = breaker.blocked
         ? breaker.kind === 'total_drawdown'
-          ? '注意：**总回撤熔断不按日重置** —— 它要等权益回到最高水位以下 ' +
+          ? '注意：总回撤熔断不按日重置 —— 它要等权益回到最高水位以下 ' +
             `${config.circuitBreaker.maxTotalDrawdownPercent}% 以内才会解除，` +
             '而空仓时权益不会自己变化，所以它不会自行恢复。' +
             '要不要继续交易需要操作员决定（例如入金，或调整这一上限）。'
