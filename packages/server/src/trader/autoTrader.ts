@@ -6,6 +6,7 @@ import {
   isOpenAction,
   normalizeSymbol,
   orderPurposeLabel,
+  exchangeErrorCode,
   type CloseReason,
   type Decision,
   type EquitySnapshot,
@@ -327,6 +328,25 @@ export class AutoTrader {
    */
   private stateNotices = new Map<string, string>();
   /**
+   * 非 `null` 时**本轮不下任何单** —— 账户处于双向持仓模式。
+   *
+   * ## 为什么需要它
+   *
+   * 双向模式（Hedge Mode）下币安要求每张单都带 `positionSide: 'LONG' | 'SHORT'`，
+   * 而这个机器人一律发 `'BOTH'`，于是**每一笔下单都被拒**：`-4061`。
+   * **平仓单也一样**（`reduceOnly` 不豁免 `positionSide`），所以是彻底瘫持。
+   *
+   * 原来 `ensurePositionMode()` 检测得到、但只记日志不阻止，周期照跑 ——
+   * 从"账户被改"到"人看到日志"最多 30 分钟，这期间每次决策都白跑。
+   *
+   * ## 两条设置它的路径
+   *
+   * 1. **主动检查**（每 10 轮一次，为了不扰动模拟盘的墙钟）
+   * 2. **下单失败时识别 `-4061`** —— 这一条才是关键：
+   *    它让机器人**在第一次失败时就知道**，而不是再等最多 30 分钟。
+   */
+  private positionModeBlocked: string | null = null;
+  /**
    * 已经跑过多少次对账。决定这一次是「例行浅对账」还是「全量深对账」。
    *
    * 见 `reconcileTradeHistory()`：浅对账只覆盖最近有活动的标的与账目，
@@ -597,14 +617,25 @@ export class AutoTrader {
 
     if (mode.changed) {
       this.emit('warn', '账户此前处于双向持仓模式，已自动改回单向 —— 否则每一笔下单都会被交易所拒绝（-4061）。');
+      this.positionModeBlocked = null;
       this.clearStateNotice('hedge-mode');
       return;
     }
     if (mode.warning) {
+      /*
+       * ⚠️ **不只是记一条日志，还要真的拦住下单。**
+       *
+       * 这里原来只有 `emitOnChange(...)` + `return` —— 周期照跑，
+       * 于是每一笔决策都带着 `positionSide: 'BOTH'` 撞上 `-4061`。
+       * 那三行的注释早就写明了「下不了单但状态显示 running 是最危险的一种故障形态」，
+       * 而当时的实现只做到了"记录"。
+       */
+      this.positionModeBlocked = mode.warning;
       // 改不了（有持仓或挂单）——这是**持续成立**的状态，按变化记一次。
       this.emitOnChange('hedge-mode', 'warn', mode.warning);
       return;
     }
+    this.positionModeBlocked = null;
     this.clearStateNotice('hedge-mode');
   }
 
@@ -1251,7 +1282,49 @@ export class AutoTrader {
     let exitsTaken = closedByGuard;
     let cooldownBlocked = 0;
 
+    /*
+     * ⚠️ **账户处于双向持仓模式时，一个单都不要下。**
+     *
+     * 币安的双向模式（Hedge Mode）要求每一张单都带 `positionSide: 'LONG' | 'SHORT'`，
+     * 而这个机器人只推理单向模式、一律发 `positionSide: 'BOTH'` —— 于是**每一笔
+     * 下单都会被拒**：`-4061 Order's position side does not match user's setting`。
+     *
+     * **平仓单也一样被拒**（`reduceOnly` 并不豁免 `positionSide`），
+     * 所以这不是"少赚"，是**整个机器人瘫持**：开不了、平不了、保护位也挂不上。
+     *
+     * ## 为什么原来没挡住
+     *
+     * `ensurePositionMode()` 早就检测得到这个状态，但它**只记一条日志就 return**，
+     * 周期照跑。而检查每 10 轮才做一次（为了不扰动模拟盘的墙钟），
+     * 于是从"账户被改成双向"到"人看到日志"最多 30 分钟，
+     * **这期间每一笔决策都白跑一趟、还会在交易所侧留下一串失败**。
+     *
+     * 它上面三行的注释其实已经写明了这个风险 ——
+     * **「下不了单但状态显示 running 是最危险的一种故障形态」** ——
+     * 只是当时的实现只做到了"记录"，没做到"阻止"。
+     *
+     * ## 为什么放在这里而不是风控引擎里
+     *
+     * 风控引擎是纯函数，它不知道账户的持仓模式（那是交易所侧的状态，
+     * 需要一次 API 往返）。而这里是**已经知道**这个事实的地方 ——
+     * 与"模型提议，运行时裁决"同一条思路：模型没错，是当前环境不允许。
+     */
+    const modeBlocked = this.positionModeBlocked;
+
     for (const decision of verdict.approved) {
+      if (modeBlocked !== null) {
+        progress.executionLog.push({
+          action: decision.action,
+          symbol: decision.symbol,
+          status: 'rejected',
+          detail:
+            `${modeBlocked}本轮没有任何下单 —— 在双向持仓模式下，` +
+            '开仓、平仓与保护单都会因为 positionSide 不匹配而被交易所拒绝（-4061）。' +
+            '请到交易所端把持仓模式改回「单向持仓」，机器人会在下一次检查时自动恢复。',
+        });
+        continue;
+      }
+
       /*
        * ⚠️ 这一行曾经把 `adjust_protection` 静默吃掉。
        *
@@ -1361,6 +1434,33 @@ export class AutoTrader {
           status: 'failed',
           detail,
         });
+
+        /*
+         * ⚠️ **在第一次 `-4061` 上就认清"账户被改成了双向模式"。**
+         *
+         * 那是唯一一个**必须等一次失败才能知道**的状态：主动检查要花一次
+         * API 往返，而且为了不扰动模拟盘的墙钟只每 10 轮做一次 ——
+         * 于是从"账户被改"到"人看到日志"最多 30 分钟，这期间每次决策都白跑。
+         *
+         * 而这里是所有下单失败汇聚的**唯一位置**（开仓、平仓、加仓、减仓、
+         * 挂保护、调保护都走这一个 `catch`），所以识别一次就够，
+         * 不用去每个 `execute*` 里各写一遍。
+         *
+         * 认出之后**本周期剩下的单也不再尝试**，并且从这里开始的每一轮
+         * 都不会再下单 —— 见执行阶段开头的 `modeBlocked` 拦截。
+         */
+        if (exchangeErrorCode(detail) === '-4061' && this.positionModeBlocked === null) {
+          this.positionModeBlocked =
+            '账户当前是双向持仓模式（Hedge Mode），而本机器人只按单向持仓模式下单。';
+          this.emit(
+            'error',
+            '账户已被改成**双向持仓模式**，这个机器人无法在这种模式下交易：' +
+              '它一律发送 positionSide=BOTH，而双向模式要求 LONG/SHORT，' +
+              '于是每一笔下单（包括平仓单）都会被交易所拒绝（-4061）。' +
+              '**已停止下单**，请到交易所端把持仓模式改回「单向持仓」；' +
+              '改回之后机器人会在下一次检查时自动恢复。',
+          );
+        }
       }
     }
 
