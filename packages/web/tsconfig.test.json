@@ -1,0 +1,16 @@
+{
+  "//": [
+    "前端测试的编译配置 —— 与 `tsconfig.json` 分开的唯一原因是**运行环境不同**：",
+    "应用代码跑在浏览器里（`types: [vite/client]`），测试跑在 Node 里（`node:test`）。",
+    "把 `node` 直接加进主 tsconfig 会让组件误用 `process` / `Buffer` 通过类型检查 ——",
+    "而那在浏览器里是 undefined，属于只在运行时现形的假绿。",
+    "",
+    "`include` 只列测试文件：TypeScript 会顺着 import 自动把它们依赖的源码一起检查。"
+  ],
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["vite/client", "node"]
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "../shared/src/**/*.ts"],
+  "exclude": ["../shared/src/**/*.test.ts"]
+}

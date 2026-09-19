@@ -19,5 +19,14 @@
     "useDefineForClassFields": true
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "../shared/src/**/*.ts"],
-  "exclude": ["../shared/src/**/*.test.ts"]
+  /*
+   * 测试文件在 **Node** 里跑（`node:test` / `node:assert`），而应用代码在浏览器里跑。
+   * 两者的全局类型不同，所以这里把它们排除掉，交给 `tsconfig.test.json`（它会额外
+   * 加载 `@types/node`）。
+   *
+   * **不要图省事把 `node` 加进上面的 `types`** —— 那样组件里写 `process.env.X`
+   * 或 `Buffer` 会通过 typecheck，而 Vite 构建出来的浏览器包里它是 `undefined`：
+   * 一条只在运行时才现形的假绿。
+   */
+  "exclude": ["../shared/src/**/*.test.ts", "src/**/*.test.ts", "src/**/*.test.tsx"]
 }
