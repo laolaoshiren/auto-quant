@@ -7,7 +7,7 @@
  * here rather than being duplicated per surface.
  */
 import { type ReactNode } from 'react';
-import type { DecisionRecord, ExecutionLogEntry } from '@aq/shared';
+import type { DecisionAction, DecisionRecord, ExecutionLogEntry } from '@aq/shared';
 import { orderPurposeLabel } from '@aq/shared';
 import { Badge, Button, Collapsible, CopyButton, type Tone } from './ui';
 import { useCopy } from '../lib/hooks';
@@ -17,41 +17,67 @@ import { fmtInt, fmtUsd } from '../lib/format';
 /*  Action vocabulary                                                          */
 /* -------------------------------------------------------------------------- */
 
-/** Stable machine code → Chinese label. */
-export const ACTION_LABELS: Record<string, string> = {
+/**
+ * 动作的机器码 → 中文标签。
+ *
+ * ## ⚠️ 类型是 `Record<DecisionAction, string>`，**不是 `Record<string, string>`**
+ *
+ * 原来它是 `Record<string, string>` —— 于是**漏登记一个动作不会有任何提示**，
+ * `actionLabel()` 会把机器码原样显示到界面上：
+ *
+ *     置信度: 0%              adjust_protection      ← 操作员看到的
+ *
+ * 那正是这次真实发生的事：`adjust_protection` / `add_to_position` /
+ * `reduce_position` 三个动作加进来了，而这张表没跟上。
+ *
+ * **改成按 `DecisionAction` 收窄之后，漏一个就编译不过** ——
+ * 这条纪律从此由 `tsc` 保证，而不是靠"下次记得"。
+ *
+ * ## 只允许 `DecisionAction` 里有的键
+ *
+ * `skip_cycle` 不在 `DecisionAction` 里（它是整轮跳过，不是某个标的上的动作），
+ * 所以它按 `satisfies` 的规则额外加在下面。它登记的原因是**万一别处渲染到它**
+ * 也不再漏出英文，而不是指望每个调用点都记得特判。
+ */
+export const ACTION_LABELS: Record<DecisionAction, string> = {
   open_long: '开多',
   open_short: '开空',
   close_long: '平多',
   close_short: '平空',
+  adjust_protection: '调整保护',
+  add_to_position: '加仓',
+  reduce_position: '减仓',
   hold: '持有',
   wait: '等待',
-  /*
-   * 整轮被跳过的通知（`AGENTS.md` §5.2：机器码可以是英文，但**面向操作员的
-   * 文本必须走中文标签** —— 未登记的动作会被 `actionLabel()` 原样显示，
-   * 界面上就会出现 `skip_cycle` 这种机器码）。
-   *
-   * 正常情况下 `DecisionFeed` 的 `LogLine` 对这条根本不显示动作（它不是
-   * 某个标的上的动作，见那里的注释）；这里登记是为了**万一别处渲染到它**
-   * 也不再漏出英文，而不是指望每个调用点都记得特判。
-   */
+};
+
+/*
+ * 整轮跳过的通知码。它不属于任何标的上的动作，所以单独一张表 ——
+ * 但同样要走中文，理由见上。
+ */
+export const EXTRA_ACTION_LABELS: Record<string, string> = {
   skip_cycle: '跳过本轮',
 };
 
-export const ACTION_TONES: Record<string, Tone> = {
+export const ACTION_TONES: Record<DecisionAction, Tone> = {
   open_long: 'up',
   open_short: 'down',
   close_long: 'warn',
   close_short: 'warn',
+  /* 三个仓位管理动作都不改变方向，用中性色 —— 它们既不是"看多"也不是"看空"。 */
+  adjust_protection: 'neutral',
+  add_to_position: 'neutral',
+  reduce_position: 'neutral',
   hold: 'muted',
   wait: 'muted',
 };
 
 export function actionLabel(action: string): string {
-  return ACTION_LABELS[action] ?? action;
+  return ACTION_LABELS[action as DecisionAction] ?? EXTRA_ACTION_LABELS[action] ?? action;
 }
 
 export function actionTone(action: string): Tone {
-  return ACTION_TONES[action] ?? 'neutral';
+  return ACTION_TONES[action as DecisionAction] ?? 'neutral';
 }
 
 export function isOpenAction(action: string): boolean {

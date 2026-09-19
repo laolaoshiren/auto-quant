@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Pencil, Plus, Search, X } from 'lucide-react';
-import type { StrategyRecord } from '@aq/shared';
+import type { StrategyRecord, TradingMode } from '@aq/shared';
 import { STRATEGY_PRESETS, TRADING_MODE_LABELS, coinSourceTypeLabel } from '@aq/shared';
 import { api } from '../lib/api';
 import { useApp } from '../lib/store';
@@ -31,9 +31,15 @@ import { fmtDateTime } from '../lib/format';
 /** 首屏渲染多少行策略；再多就分批展开，避免一次挂出上百行。 */
 const ROW_PAGE = 25;
 
-/** 交易模式的机器码 → 中文。缺映射时退回原码，绝不显示空白。 */
+/**
+ * 交易模式的机器码 → 中文。缺映射时退回原码，绝不显示空白。
+ *
+ * 入参是 `string` 而不是 `TradingMode`：策略是从数据库读出来的，
+ * 可能带着这张表之后新增、或迁移前留下的值。**收窄的是表的键，
+ * 不是调用方的入参** —— 前者由编译器保证不漏，后者必须容忍未知。
+ */
 function tradingModeLabel(mode: string): string {
-  return TRADING_MODE_LABELS[mode] ?? mode;
+  return TRADING_MODE_LABELS[mode as TradingMode] ?? mode;
 }
 
 export function StrategyListPage() {

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { StrategyConfig } from './strategy.js';
+import type { CoinSourceType, StrategyConfig, TradingMode } from './strategy.js';
 import type { Decision } from './decision.js';
 
 /* -------------------------------------------------------------------------- */
@@ -345,7 +345,7 @@ export type CloseReason = (typeof CLOSE_REASONS)[number];
  * lines, the prompt sent to the model, and the console. Keeping one map means a
  * new reason cannot be added without every surface picking it up.
  */
-export const CLOSE_REASON_LABELS: Record<string, string> = {
+export const CLOSE_REASON_LABELS: Record<CloseReason, string> = {
   model_decision: '模型主动平仓',
   stop_loss: '触发止损',
   take_profit: '触发止盈',
@@ -360,7 +360,8 @@ export const CLOSE_REASON_LABELS: Record<string, string> = {
 
 /** Label for a close reason, falling back to the raw code rather than blank. */
 export function closeReasonLabel(code: string): string {
-  return CLOSE_REASON_LABELS[code] ?? code;
+  /* 入参保持 string：库里可能读到迁移前留下的、或状态码表之后新增的值。 */
+  return CLOSE_REASON_LABELS[code as CloseReason] ?? code;
 }
 
 /**
@@ -706,7 +707,7 @@ export function userRoleLabel(role: string): string {
   return USER_ROLE_LABELS[role] ?? role;
 }
 /** Label for a trading mode. */
-export const TRADING_MODE_LABELS: Record<string, string> = {
+export const TRADING_MODE_LABELS: Record<TradingMode, string> = {
   conservative: '稳健',
   aggressive: '进取',
   scalping: '短线',
@@ -723,7 +724,7 @@ export const TRADING_MODE_LABELS: Record<string, string> = {
  * four labels (`SOURCE_TYPES` in `StrategyFields.tsx`), which is exactly the
  * divergence the shared map exists to prevent.
  */
-export const COIN_SOURCE_TYPE_LABELS: Record<string, string> = {
+export const COIN_SOURCE_TYPE_LABELS: Record<CoinSourceType, string> = {
   static: '静态列表',
   coinpool: '动态币种池',
   oi_top: '持仓量领先',
@@ -731,7 +732,8 @@ export const COIN_SOURCE_TYPE_LABELS: Record<string, string> = {
 };
 
 export function coinSourceTypeLabel(sourceType: string): string {
-  return COIN_SOURCE_TYPE_LABELS[sourceType] ?? sourceType;
+  /* 入参保持 string —— 同 closeReasonLabel：库里可能读到未知值。 */
+  return COIN_SOURCE_TYPE_LABELS[sourceType as CoinSourceType] ?? sourceType;
 }
 
 /**
