@@ -15,7 +15,7 @@ import test from 'node:test';
 
 import { defaultStrategyConfig, STRATEGY_PRESETS, StrategyConfigSchema, type StrategyConfig } from '@aq/shared';
 
-import { intensityFor, runSingleShot, runToolLoop, type LoopModel } from './loop.js';
+import { firstBalancedObject, intensityFor, runSingleShot, runToolLoop, type LoopModel } from './loop.js';
 import type { AgentToolDeps } from './tools.js';
 
 const config = (): StrategyConfig =>
@@ -277,6 +277,49 @@ test('循环能吃下模型的**原生工具调用格式** —— 这是实测�
   assert.equal(r.steps[0]!.tool, 'get_performance');
   assert.equal((r.steps[0]!.args as { window?: string }).window, '24h');
   assert.equal(calls(), 2);
+});
+
+test('模型一次吐出两个 JSON 对象时只取第一个 —— 实测 31% 的运行死在这里', async () => {
+  /*
+   * 为什么这条必须有：`agent_runs` 里 **37 次 `failed` 全是这个形状**
+   * （占全部运行的 31%，每次烧 2–6 万 tokens 却零结论）。原文：
+   *
+   *   {"thought":"先看绩效与权益曲线…","tool":"get_performance","args":{"window":"7d"}}
+   *   {"thought":"同时看最近的决策与拒绝记录…
+   *
+   * 而报出来的错是"无法从回复里解析出 JSON 对象"—— 读起来像模型根本没输出 JSON，
+   * **实际是它输出了两个**。`parseRoleOutput` 的兜底是"第一个 `{` 到最后一个 `}`"，
+   * 两个对象时那一段仍然是两个对象，`JSON.parse` 必然失败。
+   *
+   * 取第一个而不是把两段合并：与原生方言分支同一条规则，也符合循环的形状
+   * （一步一个动作、看到结果再决定下一步）。
+   */
+  const { deps } = makeDeps();
+  const { model, calls } = scripted([
+    `${turn('get_performance', { window: '7d' })}\n${turn('get_market_overview', { limit: 15 })}`,
+    turn('finish', { summary: '继续了' }),
+  ]);
+
+  const r = await runToolLoop({ role: 'strategist', task: 'x', facts: 'y', deps, model, maxSteps: 4 });
+
+  assert.equal(r.outcome, 'ok', '多吐一个对象不该让整轮判失败');
+  assert.equal(r.steps[0]!.tool, 'get_performance', '取的是第一个');
+  assert.equal((r.steps[0]!.args as { window?: string }).window, '7d');
+  assert.equal(calls(), 2, '一次回复只算一步，不是两步');
+});
+
+test('配平扫描不被参数里的花括号骗到', async () => {
+  /*
+   * `args` 里带一段 JSON 文本是很正常的事（`set_params` 的 patch 就是）。
+   * 用"找第一个 `}`"会在那里直接截断，所以必须按括号配平扫 ——
+   * 与 `strategy/parser.ts` 用的是同一种手法，那里也踩过同一个坑。
+   */
+  const text = `${turn('set_params', { patch: '{"riskControl":{"minPositionSize":6}}' })}\n${turn('finish', {})}`;
+  const first = firstBalancedObject(text);
+  assert.ok(first, '应当切出第一个对象');
+  const parsed = JSON.parse(first) as { tool?: string; args?: { patch?: string } };
+  assert.equal(parsed.tool, 'set_params');
+  assert.equal(parsed.args?.patch, '{"riskControl":{"minPositionSize":6}}');
 });
 
 test('两种方言混着来也能跑 —— 模型不必前后一致', async () => {

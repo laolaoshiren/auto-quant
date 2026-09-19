@@ -93,6 +93,54 @@ interface TurnAction {
   args: unknown;
 }
 
+/** 收一个解析出来的对象；没有可用的 `tool` 就返回 `null`。 */
+function toAction(value: { thought?: unknown; tool?: unknown; args?: unknown } | null): TurnAction | null {
+  if (!value) return null;
+  const tool = value.tool;
+  if (typeof tool !== 'string' || tool.length === 0) return null;
+  return {
+    thought: typeof value.thought === 'string' ? value.thought : '',
+    tool,
+    args: value.args ?? {},
+  };
+}
+
+/**
+ * 切出**第一个括号配平的对象字面量**，没有就返回 `null`。
+ *
+ * 逐字符扫描，同时跟踪三件事：括号深度、是否在字符串里、字符串里刚才是转义符。
+ * 三者缺一不可 —— 只看深度会被字符串里的 `{`/`}` 骗到（`args` 里带一段 JSON
+ * 文本是很正常的事）。与 `strategy/parser.ts` 用的是同一种手法。
+ */
+export function firstBalancedObject(text: string): string | null {
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+
+    if (char === '"') inString = true;
+    else if (char === '{') depth += 1;
+    else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+
+  return null;
+}
+
 /**
  * 抽出一轮的动作。
  *
@@ -100,22 +148,41 @@ interface TurnAction {
  * **但抽不出 `tool` 就是失败** —— 不猜它想干什么。
  */
 function parseTurn(text: string): { action: TurnAction | null; error: string | null } {
+  type Shape = { thought?: unknown; tool?: unknown; args?: unknown };
+
   /*
    * 先试约定好的 JSON —— 那是提示词里要求的形式。
    */
-  const parsed = parseRoleOutput<{ thought?: unknown; tool?: unknown; args?: unknown }>(text);
-  if (!parsed.error && parsed.value) {
-    const tool = parsed.value.tool;
-    if (typeof tool === 'string' && tool.length > 0) {
-      return {
-        action: {
-          thought: typeof parsed.value.thought === 'string' ? parsed.value.thought : '',
-          tool,
-          args: parsed.value.args ?? {},
-        },
-        error: null,
-      };
-    }
+  const parsed = parseRoleOutput<Shape>(text);
+  const direct = toAction(parsed.value);
+  if (direct) return { action: direct, error: null };
+
+  /*
+   * 再试：模型一次吐了**多个**对象，只取第一个。
+   *
+   * ## 这是实测出来的，且代价很大
+   *
+   * `parseRoleOutput` 抽的是"一个角色的结论"，所以它对多对象**必须失败**
+   * （取哪一个有歧义，猜错就是把结论搞混）。但工具循环的语义不同：这里的协议是
+   * "一轮一个 JSON：选一个工具、看结果、再决定下一步"，模型多吐一个只是**多写了一个**，
+   * 第一个仍然是它此刻想做的事。
+   *
+   * 实测 `agent_runs` 里 **37 次 `failed` 全是这个形状**（占全部运行的 31%，
+   * 每次烧 2–6 万 tokens 却零结论）。原文：
+   *
+   *     {"thought":"先看绩效与权益曲线…","tool":"get_performance","args":{"window":"7d"}}
+   *     {"thought":"同时看最近的决策与拒绝记录…
+   *
+   * 而当时报出来的错是"无法从回复里解析出 JSON 对象"—— 读起来像模型根本没输出 JSON，
+   * **实际是它输出了两个**，于是排查方向从一开始就偏了。
+   *
+   * 与下面那个原生方言分支同一条规则：**多个调用只用第一个**，因为让模型在看不到
+   * 结果的情况下连续决策，正是这个循环要避免的事。
+   */
+  const firstObject = firstBalancedObject(text);
+  if (firstObject !== null) {
+    const single = toAction(parseRoleOutput<Shape>(firstObject).value);
+    if (single) return { action: single, error: null };
   }
 
   /*

@@ -392,6 +392,16 @@ export function parseRoleOutput<T>(text: string): ParseResult<T> {
     if (sliced.ok) return { value: sliced.value, error: null };
   }
 
+  /*
+   * ⚠️ **这里刻意不做"取出第一个对象"那种更宽的兜底。**
+   *
+   * `parseRoleOutput` 解析的是**一个角色的结论**，所以"回复里有多个对象"
+   * 意味着"有多个结论"，而取哪一个是有歧义的 —— 猜错的后果是把一个角色的结论
+   * 当成另一个角色的。所以多对象在这里**必须失败**（见 roles.test.ts 的同名用例）。
+   *
+   * 工具循环那边需要相反的宽容（模型一次吐多个工具调用时取第一个），
+   * 但那是 `loop.ts` 的语义，不是这里的 —— 两者的判据**分别写在各自的层**。
+   */
   return {
     value: null,
     error: `无法从回复里解析出 JSON 对象（前 120 字符：${cleaned.slice(0, 120)}）`,
