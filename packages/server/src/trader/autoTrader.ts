@@ -4764,17 +4764,41 @@ export function describeCycleFailure(error: unknown, phase: CycleFailurePhase): 
  * 一个读不出来的注解不该让整个周期失败。但也不会静默假装"没有外部活动" ——
  * 认不出就返回空，让 prompt 那一行不渲染（见那里的 `> 0` 判断）。
  */
-function readForeignActivity(traderId: number): { foreignRounds?: number; foreignNet?: number } {
+function readForeignActivity(traderId: number): {
+  foreignRounds?: number;
+  foreignNet?: number;
+  ledgerGap?: number;
+} {
+  const out: { foreignRounds?: number; foreignNet?: number; ledgerGap?: number } = {};
   try {
     const raw = settings.get(`foreign_activity:${traderId}`);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as { rounds?: number; net?: number };
-    if (typeof parsed.rounds !== "number" || parsed.rounds <= 0) return {};
-    return {
-      foreignRounds: parsed.rounds,
-      foreignNet: typeof parsed.net === "number" ? parsed.net : 0,
-    };
+    if (raw) {
+      const parsed = JSON.parse(raw) as { rounds?: number; net?: number };
+      if (typeof parsed.rounds === "number" && parsed.rounds > 0) {
+        out.foreignRounds = parsed.rounds;
+        out.foreignNet = typeof parsed.net === "number" ? parsed.net : 0;
+      }
+    }
   } catch {
-    return {};
+    /* 读不出来就不带这一项 —— 见下面 ledgerGap 的注释。 */
   }
+  /*
+   * 账本差额：**必须单独读，而且失败时不能静默当成 0。**
+   *
+   * 它是「平台账本与交易所对不上」的唯一信号。读不到时留 `undefined`，
+   * prompt 那一行按「大于 0.01 才渲染」判断 —— 于是读不到就不渲染，
+   * **而不是渲染成"差额为 0、账是对的"**。
+   *
+   * 两种失败的含义完全不同：一个是"我们不知道"，一个是"账没问题"。
+   */
+  try {
+    const raw = settings.get(`ledger_check:${traderId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { gap?: number };
+      if (typeof parsed.gap === "number") out.ledgerGap = parsed.gap;
+    }
+  } catch {
+    /* 同上：留空，不要假装是 0。 */
+  }
+  return out;
 }
