@@ -42,6 +42,7 @@ import {
   fmtNum,
   fmtPercent,
   fmtProfitFactor,
+  fmtSigned,
   fmtUsd,
   fmtUsdSigned,
   pnlColor,
@@ -186,6 +187,19 @@ export function TraderPage() {
   });
 
   const accountState = toAccountState(accountQuery.data?.account ?? null);
+
+  /*
+   * 账户上的外部交易活动 —— 见 `api.foreignActivity` 上的说明。
+   *
+   * 轮询间隔比账户读数**慢得多**（它来自每 10 轮一次的深对账，快轮询没有意义），
+   * 而且机器人在停止状态下也要能读到（那正是最需要它的时刻）。
+   */
+  const foreignQuery = usePolled((signal) => api.foreignActivity(traderId, signal), {
+    intervalMs: 120_000,
+    enabled: Number.isFinite(traderId),
+    deps: [traderId],
+  });
+  const foreign = foreignQuery.data ?? null;
 
   /*
    * The settlement unit the exchange reports, reused by `ConfigSummary`'s 起始权益
@@ -811,6 +825,39 @@ export function TraderPage() {
           </div>
         )}
 
+        {/*
+          账户上有不属于本平台的交易。
+
+          **放在这里而不是塞进说明文字里**：它解释的是操作员最容易误解的那个现象 ——
+          「机器人显示在赚钱，账户却在缩水」。两者都对，差额来自这些交易。
+
+          用 `down` 色调而不是 `warn`：这不是"注意一下"，是**账户里的钱在减少、
+          而原因可能不在你的机器人身上**（也可能是别人在用这个账户）。
+        */}
+        {foreign !== null && foreign.rounds > 0 && (
+          <div className="rounded-md border border-down/60 bg-down/10 px-3 py-2 text-base text-ink-hi">
+            <div className="flex flex-wrap items-baseline gap-x-2">
+              <span className="font-semibold text-down">账户上有不属于本平台的交易</span>
+              <span className="num">
+                {fmtInt(foreign.rounds)} 笔 · 净 {fmtSigned(foreign.net, 4)} USDT
+              </span>
+            </div>
+            <p className="mt-1 text-sm text-ink-mid">
+              这些成交不是这个平台下的单，它们的盈亏**直接从交易所余额进出**，
+              不计入本机器人的绩效。所以「归属权益」与「交易所账户余额」对不上时，
+              差额可能来自这里 —— **不是你的策略在亏。**
+            </p>
+            {foreign.symbols.length > 0 && (
+              <p className="num mt-1 text-sm text-ink-lo">
+                涉及标的：{foreign.symbols.slice(0, 8).join("、")}
+                {foreign.symbols.length > 8 ? ` 等 ${foreign.symbols.length} 个` : ""}
+              </p>
+            )}
+            <p className="mt-1 text-sm text-warn">
+              如果这不是你在别的程序或交易所端下的单，请立刻到交易所检查 API Key 与账户安全。
+            </p>
+          </div>
+        )}
         {status === 'error' && trader.lastError && (
           <div className="rounded-md border border-down/60 bg-down/10 px-3 py-2 text-base text-down">
             <span className="font-semibold">最近错误：</span> <span className="num">{trader.lastError}</span>

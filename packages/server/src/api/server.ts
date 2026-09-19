@@ -1597,6 +1597,25 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   });
 
   /**
+   * 账户上的**外部交易活动** —— 不属于本平台任何机器人的成交。
+   *
+   * ## 为什么是独立端点而不是塞进 `/account`
+   *
+   * `/account` 是**实时**读交易所的，而这个结论来自**最近一次对账**
+   * （每 10 轮一次深扫）。两者时效性不同、失败方式也不同：交易所读不到时
+   * `/account` 报错，而这个检测的结论**仍然有效**（来自上一次成功的对账）。
+   * 混在一个响应里会让「哪个是实时、哪个是上次的」变得说不清。
+   *
+   * 机器人**停止之后**这个端点仍然能返回结论 —— 那正是最需要它的时刻：
+   * 操作员看到余额不对，而机器人已经停了、不会再跑对账。
+   */
+  app.get('/api/traders/:id/foreign-activity', authed, (request, reply) => {
+    const trader = traders.get(traderIdOf(request));
+    if (!trader) return reply.code(404).send({ error: '找不到该机器人' });
+    return readForeignActivityFor(trader.id);
+  });
+
+  /**
    * 订单记录，**分页**返回；响应体是 `OrderRecord[]`，**形状没有变**
    * （老客户端与 `docs/API.md` 都照旧）。
    *
@@ -1800,4 +1819,44 @@ export function bootstrapOwnerAccount(): {
   const password = env.adminPassword || generatePassword();
   users.create(username, hashPassword(password), 'owner');
   return { created: true, username, password };
+}
+
+/**
+ * 读最近一次对账检测到的外部交易活动。
+ *
+ * 返回 `rounds: 0` 而不是 `null`：**「检测过，没有外部活动」和
+ * 「从来没检测过」对操作员的含义不同** —— 前者是"账户干净"，
+ * 后者是"我们还不知道"。用 `detectedAt` 区分。
+ */
+function readForeignActivityFor(traderId: number): {
+  rounds: number;
+  net: number;
+  symbols: string[];
+  firstAt: string | null;
+  lastAt: string | null;
+  detectedAt: string | null;
+} {
+  const empty = {
+    rounds: 0,
+    net: 0,
+    symbols: [] as string[],
+    firstAt: null,
+    lastAt: null,
+    detectedAt: null,
+  };
+  try {
+    const raw = settings.get(`foreign_activity:${traderId}`);
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw) as Partial<ReturnType<typeof readForeignActivityFor>>;
+    return {
+      rounds: typeof parsed.rounds === "number" ? parsed.rounds : 0,
+      net: typeof parsed.net === "number" ? parsed.net : 0,
+      symbols: Array.isArray(parsed.symbols) ? parsed.symbols : [],
+      firstAt: typeof parsed.firstAt === "string" ? parsed.firstAt : null,
+      lastAt: typeof parsed.lastAt === "string" ? parsed.lastAt : null,
+      detectedAt: typeof parsed.detectedAt === "string" ? parsed.detectedAt : null,
+    };
+  } catch {
+    return empty;
+  }
 }

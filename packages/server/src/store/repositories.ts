@@ -959,6 +959,27 @@ export const orders = {
   },
 
   /**
+   * **全部**机器人挂过的交易所订单号 —— 用来把「别人的机器人」和「外部活动」分开。
+   *
+   * ## 为什么不能复用 `exchangeOrderIds(traderId)`
+   *
+   * 那个函数默认只取最新 2000 条，而且按机器人过滤。它的上限是**归属判断**的
+   * 保守设计（宁可跳过也不冒认一笔），但用在"这笔成交是不是平台的"上会
+   * 反过来：订单超过 2000 条之后，**本平台自己的早期成交会被误报成外部活动**。
+   *
+   * 所以这里**不设上限**，也不过滤机器人。
+   */
+  allExchangeOrderIds(): Set<string> {
+    return new Set(
+      getDb()
+        .all<{ exchange_order_id: string | null }>(
+          'SELECT DISTINCT exchange_order_id FROM orders WHERE exchange_order_id IS NOT NULL',
+        )
+        .map((r) => String(r.exchange_order_id)),
+    );
+  },
+
+  /**
    * 某机器人的订单记录，**最新在前**，一次一页。`before` 是游标：只返回 `id < before` 的行。
    *
    * ## 为什么用 `before=id` 而不是 `offset`
