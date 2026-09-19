@@ -14,6 +14,7 @@ import { BinanceApiError, type BinanceAlgoOrderResponse, type BinanceOrderRespon
 import type { SymbolRegistry } from '../binance/symbols.js';
 import { closeDb, getDb, initDb } from '../db/index.js';
 import { eventBus } from '../events.js';
+import { setLogSink } from '../logger.js';
 import { classifyHttpError, LlmError } from '../llm/errors.js';
 import type { MarketDataService } from '../market/service.js';
 import {
@@ -2620,4 +2621,110 @@ test('止损已在保本或更好时不动 —— 棘轮只往有利方向走', 
 
   const moved = broker.opLog.filter((op) => op.startsWith('place:STOP_MARKET') || op.startsWith('cancel:'));
   assert.deepEqual(moved, [], `止损已在保本之上时不该有任何撤挂动作，实际：${JSON.stringify(moved)}`);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  总账校验：读不到流水 ≠ 账本错了                                             */
+/* -------------------------------------------------------------------------- */
+
+test('★ 读不到交易所流水时，校验必须标出"这一轮不算数"而不是断言账本错了', async () => {
+  /*
+   * Why this test exists —— 这条告警曾经把"我没查到"报成了"你的账错了"。
+   *
+   * `incomeEvents` 为空的两种情况含义完全不同：**账户上真的没有流水**，
+   * 与**这一次没读到**。原来那个 `catch` 只写 `log.debug`，然后数组停在 `[]` ——
+   * 总账校验于是拿一个 0 去比，报出「平台的账本可能有漏记或重复记账」。
+   *
+   * 实测那条告警长这样：
+   *
+   *   账目与交易所对不上：平台记录 0.3246 USDT、交易所流水 **0.0000** USDT，差 0.3246
+   *
+   * —— 0.3246 恰好是那个机器人的**全部净盈亏**，而流水是 0，说明**流水根本没读到**。
+   * 同一次运行的落库值 `gap` 只有 0.0057（正常）：**读成功就正常、读失败就报账目错误。**
+   *
+   * 而这段代码自己写着「一个永久误报的校验比没有校验更糟 —— 它会训练操作员忽略这条
+   * 告警，而这是唯一能自动发现『账本错了』的地方」。
+   */
+  /*
+   * ⚠️ **必须先造一笔窗口内的成交，否则这个用例测不到任何东西。**
+   *
+   * 空库上 `platformNet` 恒为 0；而流水读失败时 `exchangeNet` 也是 0 ——
+   * 于是 `gap` 是 0，**不触发告警**，无论被测代码是对是错都会通过。
+   * 变异测试（把 `!incomeReadFailed` 条件去掉）没有失败，才把它翻出来。
+   */
+  tradeStore.insert({
+    traderId,
+    symbol: 'BTCUSDT',
+    side: 'long',
+    quantity: 1,
+    entryPrice: 100,
+    exitPrice: 101,
+    leverage: 1,
+    grossPnl: 1,
+    entryFee: 0.05,
+    exitFee: 0.05,
+    closeReason: 'take_profit',
+    openedAt: new Date(Date.now() - 120_000).toISOString(),
+    closedAt: new Date(Date.now() - 60_000).toISOString(),
+    source: 'bot',
+  });
+
+  /*
+   * ⚠️ **告警走的是 logger 的 sink，不是 `runtime_logs`。**
+   *
+   * 第一版这里查的是 `runtime_logs` 表 —— 而那张表由 `server.ts` 的 `setLogSink`
+   * 写入，测试进程里**没有那个 sink**，所以它永远是空的：断言"没有这条告警"
+   * 在任何情况下都会通过。
+   */
+  const notices: string[] = [];
+  setLogSink((_level, _scope, message) => {
+    notices.push(message);
+  });
+
+  const readBack = () => {
+    const row = getDb().get<{ value: string }>('SELECT value FROM settings WHERE key = ?', `ledger_check:${traderId}`);
+    assert.ok(row, '每一轮对账都应当把校验结果落库');
+    return JSON.parse(row.value) as { incomeReadFailed?: boolean; exchangeNet?: number; gap?: number };
+  };
+
+  /* --- 情形一：流水读不到（注入失败） --- */
+  const broken = new FakeBroker();
+  broken.getIncome = async () => {
+    throw new Error('权重用尽');
+  };
+  const traderA = buildTrader(broken, '<decision>[]</decision>');
+  await traderA.start();
+  try {
+    await traderA.runReconcile();
+    const after = readBack();
+    assert.equal(after.incomeReadFailed, true, '必须标出"这一轮没读到流水" —— 否则调用方分不清它与"真的没有流水"');
+    assert.equal(after.exchangeNet, 0, '没读到就是 0（这个 0 的含义是"未知"，所以才需要那个标志）');
+
+    /*
+     * ★ **这一条才是修复的目的。**
+     *
+     * 上面那两条只证明了"标志写对了"；而这次修的是**它引发的那句错话** ——
+     * 读不到流水时报出「账目与交易所对不上…平台的账本可能有漏记或重复记账」。
+     * 没有这条断言，把 `if (!incomeReadFailed && …)` 改回 `if (…)` 仍然全绿。
+     */
+    assert.ok(
+      !notices.some((message) => message.includes('账目与交易所对不上')),
+      '读不到流水时**不该**报"账目与交易所对不上" —— 那正是这次修的东西',
+    );
+  } finally {
+    setLogSink(null);
+    await traderA.stop('测试结束');
+  }
+
+  /* --- 情形二：流水读得到（对照） --- */
+  const healthy = new FakeBroker();
+  const traderB = buildTrader(healthy, '<decision>[]</decision>');
+  await traderB.start();
+  try {
+    await traderB.runReconcile();
+    const after = readBack();
+    assert.equal(after.incomeReadFailed, false, '读成功时不该带上那个标志');
+  } finally {
+    await traderB.stop('测试结束');
+  }
 });

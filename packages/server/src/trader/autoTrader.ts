@@ -2197,10 +2197,26 @@ export class AutoTrader {
      * is how a symbol the platform has no record of at all gets discovered.
      */
     let incomeEvents: Awaited<ReturnType<BinanceBroker['getIncome']>> = [];
+    /*
+     * ⚠️ **"读失败"与"读到空"是两件事，而它们在这里被混成了一件。**
+     *
+     * 下面那个 `catch` 原来只写 `log.debug`，然后 `incomeEvents` 停在 `[]` ——
+     * 于是**总账校验**拿一个空数组算出 `exchangeNet = 0`，再把差额报成
+     * "平台的账本可能有漏记或重复记账"。
+     *
+     * 实测那个账户上报出「平台记录 0.3246、交易所流水 **0.0000**，差 0.3246」——
+     * 0.3246 恰好是它的全部净盈亏，而流水是 0，**说明流水根本没读到**。
+     * 而同一次运行的落库值 `gap` 只有 0.0057（正常）：**读成功就正常、读失败就报账目错误。**
+     *
+     * 那正是这段代码下面自己警告过的：「一个永久误报的校验比没有校验更糟 ——
+     * 它会训练操作员忽略这条告警，而这是唯一能自动发现『账本错了』的地方」。
+     */
+    let incomeReadFailed = false;
     try {
       incomeEvents = await this.deps.broker.getIncome({ startTime: since });
     } catch (error) {
-      log.debug(`[${this.deps.trader.name}] 收入流水读取失败，本次对账跳过资金费：${(error as Error).message}`);
+      incomeReadFailed = true;
+      log.debug(`[${this.deps.trader.name}] 收入流水读取失败，本次对账跳过资金费与总账校验：${(error as Error).message}`);
     }
 
     /*
@@ -2619,11 +2635,20 @@ export class AutoTrader {
         platformNet: Number(platformNet.toFixed(6)),
         exchangeNet: Number(exchangeNet.toFixed(6)),
         gap: ledgerGap,
+        // 让落库的数据自己说清这一轮算不算数（读失败时 exchangeNet 是 0，不是"真的 0"）。
+        incomeReadFailed,
         checkedAt: new Date().toISOString(),
       }),
     );
     
-    if (Math.abs(ledgerGap) > LEDGER_GAP_TOLERANCE) {
+    /*
+     * ⚠️ **读不到流水就不要下"账本错了"这个结论。**
+     *
+     * `incomeEvents` 为空的两种情况含义完全不同：**账户上真的没有流水**，
+     * 与**这一次没读到**。只有前者支持"账目对不上"的判断；后者什么也说明不了 ——
+     * 拿 0 去比只会得到一个假差额，而这条告警的价值恰恰在于它稀有一响。
+     */
+    if (!incomeReadFailed && Math.abs(ledgerGap) > LEDGER_GAP_TOLERANCE) {
       /*
        * ⚠️ **这条告警比外部活动那条更严重。**
        *
