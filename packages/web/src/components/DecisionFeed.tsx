@@ -441,6 +441,16 @@ export function DecisionFeed({
     return [...merged.values()].sort((a, b) => b.cycleNumber - a.cycleNumber || b.id - a.id);
   }, [loaded, query.data, live]);
 
+  /*
+   * 连续相同的轮次压成一段再渲染。
+   *
+   * ⚠️ **必须和上面那些 hook 放在一起，不能挪到条件 `return` 之后。**
+   * 第一版就是写在下面的（紧挨着 `return`），于是加载态那一次渲染提前返回、
+   * **少执行一个 hook**，数据到位后 hook 数量从 N 变成 N+1 —— React 直接抛
+   * `error #310`，整个机器人详情页白屏（`typecheck` 完全不查这个）。
+   */
+  const runs = useMemo(() => groupCycles(records), [records]);
+
   /**
    * 下一页的游标 = **手里最小的 id**，也就是"比我现在有的都更早"。
    *
@@ -652,12 +662,6 @@ export function DecisionFeed({
       </Panel>
     );
   }
-
-  /*
-   * 连续相同的轮次压成一段再渲染。放在 `useMemo` 里：`cycleSignature` 要
-   * `JSON.stringify` 每一轮的决策与执行日志，而轮询每隔几秒就会重渲染一次。
-   */
-  const runs = useMemo(() => groupCycles(records), [records]);
 
   return (
     <Panel
