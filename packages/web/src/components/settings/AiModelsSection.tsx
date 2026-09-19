@@ -297,8 +297,13 @@ export function AiModelsSection() {
   const [filter, setFilter] = useState('');
   const [rowLimit, setRowLimit] = useState(ROW_PAGE);
 
-  const models = query.data ?? [];
-  const providers = catalog?.providers ?? [];
+  /*
+   * ⚠️ **不能写 `query.data ?? []`** —— 那个字面量每轮渲染都会新建一个数组，
+   * 以它为依赖的 `useMemo` / `useCallback` 于是**每轮都重算**，看起来却在做缓存。
+   * （这一页的模型列表可能有几十上百项，还要过滤与分页。）
+   */
+  const models = useMemo(() => query.data ?? [], [query.data]);
+  const providers = useMemo(() => catalog?.providers ?? [], [catalog]);
 
   /**
    * 供应商目录按 id 索引。

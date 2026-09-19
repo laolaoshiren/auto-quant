@@ -154,7 +154,7 @@ export function useExchangeEquity({
     return () => {
       alive = false;
     };
-  }, [open, manual, readId, exchangeAccountId]);
+  }, [open, manual, readId, exchangeAccountId, applyRead]);
 
   const refresh = useCallback(() => {
     touched.current = false;

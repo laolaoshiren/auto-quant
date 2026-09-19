@@ -465,7 +465,12 @@ export function StrategyCheckModal({
 /* -------------------------------------------------------------------------- */
 
 function CheckReport({ result }: { result: StrategyCheckResult }) {
-  const stages = result.stages ?? [];
+  /*
+   * ⚠️ **不能写 `result.stages ?? []`** —— 那个字面量每轮渲染都会新建一个数组，
+   * 下面的 `ordered` 因此**每轮都重算**，而它看起来是在做缓存。
+   * 这里只是把它包稳；`result` 本身来自一次请求的结果，引用是稳定的。
+   */
+  const stages = useMemo(() => result.stages ?? [], [result]);
   // Present the canonical order even if a run aborted before reaching a stage.
   const ordered = useMemo(() => {
     const byName = new Map(stages.map((stage) => [stage.name, stage]));

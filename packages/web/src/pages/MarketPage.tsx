@@ -19,6 +19,19 @@ import { CandlestickChart } from '../components/CandlestickChart';
 import { fmtCompactAmount, fmtPercent, fmtPriceUsd, pnlColor } from '../lib/format';
 
 const INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
+
+/**
+ * 引用**稳定**的空数组。
+ *
+ * ⚠️ **不要写 `query.data ?? []`** —— 那个字面量每轮渲染都会新建一个数组，于是所有
+ * 以它为依赖的 `useMemo` / `useEffect` **每轮都重新执行**，而它们看起来是在做缓存。
+ *
+ * `react-hooks/exhaustive-deps` 会为此报警，但那句
+ * "could make the dependencies change on every render" 读起来像风格建议 ——
+ * 它实际说的是**缓存完全失效**。这个页面的清单最多上千行、还要排序，
+ * 所以那一层 `useMemo` 是真的在干活。
+ */
+const NO_SYMBOLS: MarketSymbol[] = [];
 type Interval = (typeof INTERVALS)[number];
 
 /** 一次能扫完的行数上限；再多的靠搜索定位，不靠滚动。 */
@@ -55,7 +68,7 @@ export function MarketPage() {
     intervalMs: socketOpen ? 20_000 : 10_000,
   });
 
-  const symbols = symbolsQuery.data ?? [];
+  const symbols = symbolsQuery.data ?? NO_SYMBOLS;
   const [selected, setSelected] = useState<string>('BTCUSDT');
   const [interval, setKlineInterval] = useState<Interval>('15m');
   const [search, setSearch] = useState('');

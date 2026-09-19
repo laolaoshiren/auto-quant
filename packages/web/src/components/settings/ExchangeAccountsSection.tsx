@@ -191,8 +191,13 @@ export function ExchangeAccountsSection() {
   /** 每秒走一次的时钟，让"12 秒前"在两次轮询之间也不说谎。 */
   const now = useTicker(1000);
 
-  const accounts = query.data ?? [];
-  const exchanges = catalog?.exchanges ?? [];
+  /*
+   * ⚠️ **不能写 `query.data ?? []`** —— 那个字面量每轮渲染都会新建一个数组，
+   * 以它为依赖的 `useMemo` / `useCallback` 于是**每轮都重算**，看起来却在做缓存。
+   * 这个组件的 `accounts` 还被 `liveAccounts` 与几处 `useCallback` 依赖着。
+   */
+  const accounts = useMemo(() => query.data ?? [], [query.data]);
+  const exchanges = useMemo(() => catalog?.exchanges ?? [], [catalog]);
   const liveAccounts = accounts.filter((row) => !row.testnet);
 
   const overrideFor = useCallback(

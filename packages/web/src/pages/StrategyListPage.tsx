@@ -55,7 +55,13 @@ export function StrategyListPage() {
   const [filter, setFilter] = useState('');
   const [rowLimit, setRowLimit] = useState(ROW_PAGE);
 
-  const strategies = query.data ?? [];
+  /*
+   * ⚠️ **不能写 `query.data ?? []`** —— 那个字面量每轮渲染都会新建一个数组，
+   * 于是所有以 `strategies` 为依赖的 `useMemo` / `useCallback` **每轮都重算**，
+   * 而它们看起来是在做缓存。`exhaustive-deps` 的报警措辞像风格建议，
+   * 说的却是这件事。包一层 `useMemo` 让引用稳定。
+   */
+  const strategies = useMemo(() => query.data ?? [], [query.data]);
 
   /** 策略 → 引用它的机器人数量。删之前要知道会波及谁。 */
   const usageByStrategy = useMemo(() => {
