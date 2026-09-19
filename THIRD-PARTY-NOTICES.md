@@ -2,7 +2,7 @@
 
 本项目的 Docker 镜像包含以下第三方软件包。它们的许可证要求**在再分发时保留版权声明与许可证文本**，本文件即为该义务的履行方式。
 
-运行时依赖共 **181** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
+运行时依赖共 **180** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
 
 > 本文件由 `node scripts/generate-notices.mjs` 自动生成，请勿手工编辑。
 > CI 会校验它与当前依赖一致。
@@ -11,7 +11,7 @@
 
 | 许可证 | 包数量 |
 | --- | --- |
-| MIT | 147 |
+| MIT | 146 |
 | ISC | 21 |
 | BSD-3-Clause | 5 |
 | BlueOak-1.0.0 | 4 |
@@ -75,7 +75,6 @@
 | @radix-ui/react-use-size | 1.1.4 | MIT | — |
 | @radix-ui/react-visually-hidden | 1.2.11 | MIT | — |
 | @radix-ui/rect | 1.1.3 | MIT | — |
-| @remix-run/router | 1.23.4 | MIT | Remix Software <hello@remix.run> |
 | @types/d3-array | 3.2.2 | MIT | — |
 | @types/d3-color | 3.1.3 | MIT | — |
 | @types/d3-ease | 3.0.2 | MIT | — |
@@ -164,8 +163,8 @@
 | react-is | 18.3.1 | MIT | — |
 | react-remove-scroll | 2.7.2 | MIT | Anton Korzunov <thekashey@gmail.com> |
 | react-remove-scroll-bar | 2.3.8 | MIT | Anton Korzunov <thekashey@gmail.com> |
-| react-router | 6.30.6 | MIT | Remix Software <hello@remix.run> |
-| react-router-dom | 6.30.6 | MIT | Remix Software <hello@remix.run> |
+| react-router | 7.18.4 | MIT | Remix Software <hello@remix.run> |
+| react-router-dom | 7.18.4 | MIT | Remix Software <hello@remix.run> |
 | react-smooth | 4.0.4 | MIT | JasonHzq |
 | react-style-singleton | 2.2.3 | MIT | Anton Korzunov (thekashey@gmail.com) |
 | react-transition-group | 4.4.5 | BSD-3-Clause | — |
