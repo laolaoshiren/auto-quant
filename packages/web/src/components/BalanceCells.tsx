@@ -136,12 +136,21 @@ export function TraderAccountStrip({
   busy,
   onRefresh,
   error,
+  lastKnown,
 }: {
   account: TraderAccountState | null;
   asset?: string;
   busy?: boolean;
   onRefresh?: () => void;
   error?: string | null;
+  /**
+   * 最近一条快照上的交易所读数。只在 `account` 为 null（机器人没在跑、
+   * 拿不到实时值）时使用，用来回答「那上次看到的是多少」。
+   *
+   * `at` 是那条快照的时间 —— **必须显示出来**：一个陈旧的数字冒充实时，
+   * 比不显示更糟。
+   */
+  lastKnown?: { account: TraderAccountState; at: string } | null;
 }) {
   const unit = asset?.trim() || DEFAULT_SETTLE_ASSET;
   const openOrderMargin = account?.openOrderMargin ?? 0;
@@ -176,8 +185,36 @@ export function TraderAccountStrip({
           </>
         ) : (
           <>
-            <Badge tone="muted">暂无实时读数</Badge>
-            <span>机器人启动后这里会显示交易所的真实账户余额（共享钱包）。</span>
+            {/*
+              有上次读数就先把数字摆出来 —— 见 `lastKnown` 的说明。
+              两个数字能不能当面对照，决定了操作员会不会以为其中一个算错了。
+            */}
+            {lastKnown ? (
+              <>
+                <Badge tone="muted">上次读数</Badge>
+                <span className="text-ink-faint">{timeAgo(lastKnown.at)}</span>
+                <span>
+                  {BALANCE_LABEL.wallet}{" "}
+                  <span className="text-sm font-semibold text-ink-hi">
+                    {fmtAsset(lastKnown.account.walletBalance, unit)}
+                  </span>
+                </span>
+                <span>
+                  {BALANCE_LABEL.available}{" "}
+                  <span className="text-ink-hi">
+                    {fmtNum(lastKnown.account.availableBalance)}
+                  </span>
+                </span>
+                <span className="text-ink-faint">
+                  （机器人运行时记录的交易所真实余额，含同一账户下其它机器人的交易）
+                </span>
+              </>
+            ) : (
+              <>
+                <Badge tone="muted">暂无读数</Badge>
+                <span>机器人启动后这里会显示交易所的真实账户余额（共享钱包）。</span>
+              </>
+            )}
           </>
         )}
       </div>
