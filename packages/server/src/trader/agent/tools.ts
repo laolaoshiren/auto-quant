@@ -126,7 +126,9 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'get_current_params',
     describe:
-      'Read the parameters currently in effect. Always read this before changing them — a patch is a delta, not a full replacement, and you need to know what you are changing FROM.',
+      'Read the parameters currently in effect. Always read this before changing them — a patch is a delta, not a full replacement, and you need to know what you are changing FROM. ' +
+      'The `derived` field explains the parameters whose **basis is not in their name** (for example whether a multiple applies to the round-trip or the one-way fee). ' +
+      '**Read it instead of guessing from the field name** — a wrong assumption there silently doubles or halves the number you are aiming for.',
     args: {},
   },
   {
@@ -330,6 +332,53 @@ export interface ToolOutcome {
 export const MAX_JSON_CHARS = 6000;
 
 /**
+ * 几个**光看字段名推不出含义**的派生量，挂在 `get_current_params` 的结果上。
+ *
+ * ## 为什么需要它（实测）
+ *
+ * 一次真实的策略审视里，AI 把 `minStopLossFeeMultiple` 从 3 改成 6，然后在
+ * `reason` 里写下这样一句：
+ *
+ *   「不确定项已标注：该乘数的基准我只能从命名与 `fallbackRoundTripFeeRate` 推断为
+ *     往返费；**若实际按单边费计，本次改动几乎空转**」
+ *
+ * 它的推断**是对的**（`RiskEngine.reviewOpen` 与交易员提示词都用往返费率），
+ * 但**它本不该猜**：那个定义写在**交易员的提示词**里（`feeAwareStopConstraint`），
+ * 而策略师只拿得到配置对象。
+ *
+ * 猜错的代价很实：这个参数的作用是"止损不能比交易成本还近"，基准差一倍、
+ * 目标值就差一倍 —— 而 AI 会照着一个错的前提去调它，并在下一轮把它当成已验证的事实。
+ *
+ * ## 为什么不是把整份配置的说明都写进来
+ *
+ * 那会挤占预算（`bound()` 在 `MAX_JSON_CHARS` 处截断），而且大多数参数的名字
+ * 已经说清了自己。这里只列**真的会读错**的那几个 —— 判断标准是
+ * "**它的基准或方向不在名字里**"。
+ *
+ * ## 只写定义，不写建议
+ *
+ * 这些是**事实**（基准是什么、当前折算出来是多少），不是"应该设成多少"。
+ * 后者是策略师的判断，不该由工具层替它做。
+ */
+export function derivedRiskFigures(config: StrategyConfig): Record<string, string> {
+  const risk = config.riskControl;
+  const floorPercent = risk.fallbackRoundTripFeeRate * risk.minStopLossFeeMultiple * 100;
+  const fallbackPercent = (risk.fallbackRoundTripFeeRate * 100).toFixed(3);
+  return {
+    'riskControl.minStopLossFeeMultiple':
+      `基准是【往返】手续费 —— 开仓 + 平仓两侧合计，不是单边。` +
+      `按兜底费率 ${fallbackPercent}% 折算，当前要求止损幅度 ≥ ${floorPercent.toFixed(3)}%。` +
+      '（有近期成交时，风控会用实测往返费率替换兜底值。）',
+    'riskControl.fallbackRoundTripFeeRate':
+      `【往返】费率（两侧合计），不是单边。当前 ${fallbackPercent}%。` +
+      '有近期成交记录时它会被实测值替换 —— 所以它只是兜底。',
+    'riskControl.breakevenTriggerPercent':
+      '浮盈达到这个百分比时，把止损抬到开仓成本价。' +
+      '它**不会**限制浮盈、也不影响开仓，只在达到之后改变止损的位置。',
+  };
+}
+
+/**
  * 把结果裁到模型读得下的长度。
  *
  * 工具不该把整张表倒进提示词。裁剪是**有损的**，所以一定要在结果里说明裁了，
@@ -393,8 +442,17 @@ export function dispatchTool(name: unknown, args: unknown, deps: AgentToolDeps):
        * 它不在 `StrategyConfig` 里（是 `traders` 表上的一列），所以第一版
        * 这个工具读不到它 —— 于是 AI 想调频率时**不知道自己现在是多少**，
        * 只能瞎猜一个数。**不知道起点就没法判断该往哪边调。**
+       *
+       * `derived` 是同一条道理的下一层：AI 看得到 `minStopLossFeeMultiple: 3`，
+       * 却看不到它**是几倍于什么** —— 见 `derivedRiskFigures` 上的说明。
        */
-      return { result: bound({ ...deps.currentConfig(), cycleIntervalMinutes: deps.cycleInterval() }) };
+      return {
+        result: bound({
+          ...deps.currentConfig(),
+          cycleIntervalMinutes: deps.cycleInterval(),
+          derived: derivedRiskFigures(deps.currentConfig()),
+        }),
+      };
     case 'set_params': {
       const reason = a.reason as string;
       const patch = applyAgentPatch(deps.currentConfig(), a.patch);

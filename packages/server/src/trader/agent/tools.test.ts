@@ -17,7 +17,7 @@ import test from 'node:test';
 
 import { defaultStrategyConfig, STRATEGY_PRESETS, StrategyConfigSchema, type StrategyConfig } from '@aq/shared';
 
-import { AGENT_TOOLS, dispatchTool, renderToolCatalogue, validateArgs, type AgentToolDeps } from './tools.js';
+import { AGENT_TOOLS, derivedRiskFigures, dispatchTool, renderToolCatalogue, validateArgs, type AgentToolDeps } from './tools.js';
 
 const config = (): StrategyConfig =>
   StrategyConfigSchema.parse({
@@ -264,6 +264,37 @@ test('工具清单：说明写给模型看，且都非空', () => {
       assert.ok(spec.describe.length > 0, `${tool.name}.${name} 缺说明`);
     }
   }
+});
+
+test('★ 基准不在名字里的参数必须给出解释，而不是让 AI 去猜', () => {
+  /*
+   * 实测：一次真实的策略审视里，AI 把 `minStopLossFeeMultiple` 从 3 改成 6，
+   * 然后在 reason 里写下：
+   *
+   *   「不确定项已标注：该乘数的基准我只能从命名与 fallbackRoundTripFeeRate 推断为
+   *     往返费；**若实际按单边费计，本次改动几乎空转**」
+   *
+   * 它的推断**是对的**，但**它本不该猜** —— 那个定义写在交易员的提示词里，
+   * 策略师只拿得到配置对象。而基准差一倍、目标值就差一倍：猜错的代价是
+   * AI 照着一个错前提调参，并在下一轮把它当成已验证的事实。
+   */
+  const c = defaultStrategyConfig();
+  const derived = derivedRiskFigures(c);
+  const note = derived['riskControl.minStopLossFeeMultiple'] ?? '';
+
+  assert.match(note, /往返/, '必须点明基准是往返费');
+  assert.match(note, /不是单边/, '必须排除"单边"这个同样合理的读法');
+
+  /*
+   * 光有定义还不够：AI 要拿它判断"这个门槛在当前波动下是否可达"，
+   * 所以折算出来的**具体百分比**必须真的算在返回里。
+   */
+  const risk = c.riskControl;
+  const expected = (risk.fallbackRoundTripFeeRate * risk.minStopLossFeeMultiple * 100).toFixed(3);
+  assert.ok(
+    note.includes(expected),
+    `必须给出折算后的门槛（期望包含 ${expected}%），实际：${note}`,
+  );
 });
 
 test('get_lessons 把复盘教训交给 AI —— 复盘能影响决策的唯一通路', () => {
