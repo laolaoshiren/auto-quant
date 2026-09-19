@@ -31,6 +31,8 @@ const quiet = (over: Partial<WakeFacts> = {}): WakeFacts => ({
   lastDecisionWasNoChange: false,
   hasPosition: false,
   minutesSinceStrategyReview: 20,
+  // 默认"没有熔断" —— 熔断降频那一组用例自己把它设成 true
+  breakerBlocked: false,
   idleCycles: 0,
   ...over,
 });
@@ -302,4 +304,51 @@ test('门槛可调', () => {
   const custom = { ...DEFAULT_WAKE_POLICY, idleCycleThreshold: 5 };
   assert.equal(decideWake(quiet({ idleCycles: 5 }), custom).wake, true);
   assert.equal(decideWake(quiet({ idleCycles: 4 }), custom).wake, false);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  熔断锁死：降频，而不是每轮重读同一批事实                                    */
+/* -------------------------------------------------------------------------- */
+
+test('★ 熔断锁死且空仓时降频 —— 不再每轮把同一批旧事实重读一遍', () => {
+  /*
+   * 实测：`cooldownMinutes` 是 10 分钟而这个机器人的周期是 15 分钟，所以**每轮都过
+   * 冷却**；一个被熔断锁死的机器人因此每 15 分钟醒一次 —— 最近 9 小时 23 次、
+   * 1.86M 输入 tokens，而它每一次的结论都是「停摆期间任何参数改动既不会成交、
+   * 也无法被验证」。
+   *
+   * 它说得对。**问题在于我们本来就不该让它每小时说四遍同一句话。**
+   */
+  const blocked = decideWake(
+    quiet({ breakerBlocked: true, minutesSinceLastWake: 20, losingStreak: 5 }),
+  );
+  assert.equal(blocked.wake, false, '熔断锁死时不该每轮都醒');
+  assert.match(blocked.why, /熔断生效且空仓/);
+  assert.match(blocked.why, /没有新信息/);
+});
+
+test('★ 但它仍然会醒 —— 这是"降频"，不是"瞎掉"', () => {
+  /*
+   * 三条边界，任何一条弄错都会把这条判据变成一个坑：
+   *
+   *  1. 过了兜底窗口必须醒 —— 否则熔断期间 AI 完全停止观察
+   *  2. **有持仓时不该降频** —— 熔断只挡开仓，既有仓位仍然归它管
+   *  3. **权益变化优先** —— 熔断解除与入金都会改变权益，那正是最该醒的时刻
+   */
+  const later = decideWake(
+    quiet({ breakerBlocked: true, minutesSinceLastWake: 61, losingStreak: 5 }),
+  );
+  assert.equal(later.wake, true, '过了兜底窗口必须醒');
+  assert.equal(later.trigger, 'losing_streak');
+
+  const withPosition = decideWake(
+    quiet({ breakerBlocked: true, hasPosition: true, minutesSinceLastWake: 20, losingStreak: 5 }),
+  );
+  assert.equal(withPosition.wake, true, '有持仓时熔断不挡"管理仓位"这件事');
+
+  const drifted = decideWake(
+    quiet({ breakerBlocked: true, minutesSinceLastWake: 20, equityDriftPercent: 5 }),
+  );
+  assert.equal(drifted.wake, true);
+  assert.equal(drifted.trigger, 'drawdown', '权益变化必须排在降频之前');
 });

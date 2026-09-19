@@ -98,6 +98,7 @@ function makePorts(over: Partial<OrchestratorPorts> = {}) {
     hasPosition: false,
     minutesSinceStrategyReview: 5,
     idleCycles: 0,
+    breakerBlocked: false,
   });
 
   const ports: OrchestratorPorts = {

@@ -18,6 +18,7 @@
 
 import type { StrategyConfig } from '@aq/shared';
 
+import { checkCircuitBreakers } from '../../risk/engine.js';
 import { agentExperiments, agentMemory, agentRuns } from '../../store/agentStore.js';
 import { decisions, equity, positions, runtimeLogs, settings, traders, trades } from '../../store/repositories.js';
 import type { OrchestratorPorts } from './orchestrator.js';
@@ -310,6 +311,21 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
         idleCycles: decisions
           .list(traderId, 60)
           .filter((d) => ms(d.timestamp) > since).length,
+        /*
+         * 熔断是否正在挡住开仓 —— 见 `WakeFacts.breakerBlocked`。
+         *
+         * ⚠️ **这里自己算，而不是去问 `AutoTrader`。** `ports` 是 runtime 的依赖，
+         * 而 runtime 又是 `AutoTrader` 的依赖 —— 反向引用会成环。代价是两趟查询
+         * （今日已实现盈亏、历史高水位），但这个函数**每个周期只调一次**，
+         * 而且它本来就在做十几趟查询。
+         *
+         * 配置取 `readConfig()`（AI 托管下是 `agent_config_json`），
+         * 与交易循环用的必须是**同一份** —— 否则会出现"审视说没熔断、交易循环却在跳过"。
+         */
+        breakerBlocked: checkCircuitBreakers(readConfig(), latest?.accountEquity ?? 0, {
+          dailyRealizedPnl: trades.realizedPnlToday(traderId),
+          highWaterEquity: equity.realizedHighWaterMark(traderId),
+        }).blocked,
       };
     },
 

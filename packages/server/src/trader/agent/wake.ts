@@ -64,6 +64,24 @@ export interface WakeFacts {
    * 状态显示 `running` —— **只是什么都不做。**
    */
   idleCycles: number;
+  /**
+   * 熔断器此刻是否正在挡住开仓。
+   *
+   * ## 为什么它必须进事实包
+   *
+   * 熔断生效时交易循环**整轮跳过**（连模型都不问）：不成交、不被拒、权益不变，
+   * 于是"连亏 / 被拒 / 零成交"这些**事件判据每轮都在命中同一个旧事实** ——
+   * 而 AI 每次都得把同样的一堆数据重读一遍、得出同样的结论。
+   *
+   * 实测：`cooldownMinutes` 是 10 分钟而这个机器人的周期是 15 分钟，所以每轮都过
+   * 冷却。一个被熔断锁死的机器人因此**每 15 分钟醒一次**；最近 9 小时 23 次、
+   * 1.86M 输入 tokens。其中一次的结论原文是：
+   *
+   *   「停摆期间任何参数改动既不会成交、也无法被验证 —— 所以现在叠加改动等于白…」
+   *
+   * 它说得对。**问题在于我们本来就不该让它每小时说四遍同一句话。**
+   */
+  breakerBlocked: boolean;
 }
 
 export interface WakePolicy {
@@ -170,6 +188,34 @@ export function decideWake(facts: WakeFacts, policy: WakePolicy = DEFAULT_WAKE_P
       trigger: 'drawdown',
       why: `权益相对上次判断变化 ${facts.equityDriftPercent.toFixed(2)}%（阈值 ${policy.equityDriftThresholdPercent}%）${down ? '，是回撤，需要重新评估。' : '，是新高，需要重新评估仓位。'}`,
     };
+  }
+
+  /*
+   * --- 熔断锁死且空仓：降频，而不是每轮重读同一批事实 ---
+   *
+   * ## 为什么它排在权益变化**之后**
+   *
+   * 熔断解除（权益涨回门槛内）与入金都会改变权益 —— 那会先走上面的 `drawdown`
+   * 分支正常唤醒。**这里挡的只是"什么都没变，只是同一批旧事实又被读了一遍"。**
+   *
+   * ## 它做了什么、没做什么
+   *
+   * **不是不醒**，而是退到 `maxIdleMinutes`（默认 60 分钟）那一档：保留
+   * "每小时看一眼"，只是不再每 15 分钟说一遍同样的话。实测一个被熔断锁死的
+   * 机器人每 15 分钟醒一次（`cooldownMinutes` 10 < 周期 15），最近 9 小时 23 次、
+   * 1.86M 输入 tokens —— 而它每一次的结论都是"停摆期间改参数没有意义"。
+   */
+  if (facts.breakerBlocked && !facts.hasPosition) {
+    if (facts.minutesSinceLastWake < policy.maxIdleMinutes) {
+      return {
+        wake: false,
+        trigger: 'none',
+        why:
+          '熔断生效且空仓 —— 交易循环整轮被跳过（不成交、不被拒、权益也不变），' +
+          `本轮没有新信息可看。距上次审视 ${facts.minutesSinceLastWake} 分钟，` +
+          `退到 ${policy.maxIdleMinutes} 分钟那一档再醒。`,
+      };
+    }
   }
 
   if (facts.losingStreak >= policy.losingStreakThreshold) {
