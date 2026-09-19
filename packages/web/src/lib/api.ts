@@ -589,6 +589,20 @@ export const api = {
   /** Force one decision cycle now instead of waiting for the interval. */
   runTraderOnce: (id: number) =>
     request<{ ok: boolean; summary: string }>(`/traders/${id}/run-once`, { method: 'POST', body: {} }),
+  /**
+   * 让 AI **现在**审视一次策略 —— 与 `runTraderOnce` 是两件事。
+   *
+   *   `runTraderOnce`  跑一个**决策周期**：机器人按当前参数决策一次
+   *   这个             跑一次**策略审视**：AI 反思绩效与复盘，决定要不要改参数
+   *
+   * 它下不了单，但确实会改参数（受结构守卫约束）。返回的是"请求已发出"
+   * 而不是结果 —— 审视异步执行，且仍可能被每小时预算挡下。
+   */
+  agentReview: (id: number) =>
+    request<{ ok: boolean; accepted: boolean; note: string }>(`/traders/${id}/agent-review`, {
+      method: 'POST',
+      body: {},
+    }),
   /** Rebuild the books from the exchange's fill history — never places an order. */
   reconcileTrader: (id: number) =>
     request<ReconcileResult>(`/traders/${id}/reconcile`, { method: 'POST', body: {} }),

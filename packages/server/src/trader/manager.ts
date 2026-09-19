@@ -642,7 +642,12 @@ export class TraderManager {
         model,
         agent: {
           configOverride: () => agentRuntime.configOverride(),
-          triggerReview: () => agentRuntime.triggerReview(),
+          /*
+           * ⚠️ **`reason` 必须透传。** 原来这里是 `() => agentRuntime.triggerReview()`，
+           * 于是 `'manual'` 那条分支从写下那天起就没被走到过 —— 而
+           * `orchestrator.ts` 里还写着"操作员点立即分析"。见 `requestAgentReview()`。
+           */
+          triggerReview: (reason) => agentRuntime.triggerReview(reason),
           settleOnly: () => agentRuntime.settleOnly(),
           reviewTrade: (t) => agentRuntime.reviewTrade(t),
           paused: () => agentRuntime.paused() !== null,
@@ -721,6 +726,30 @@ export class TraderManager {
     const autoTrader = this.running.get(traderId);
     if (!autoTrader) throw new Error('该机器人当前未在运行。');
     return autoTrader.runOnce();
+  }
+
+  /**
+   * 让操作员**现在**就要一次 AI 策略审视（不等事件、不等兜底超时）。
+   *
+   * 与 `runCycleNow` 是两件不同的事，别混：
+   * - `runCycleNow` —— 跑一个**决策周期**（让机器人按当前参数决策一次）
+   * - 这个 —— 跑一次**策略审视**（让 AI 反思并决定要不要改参数）
+   *
+   * ## 为什么需要机器人**在运行**
+   *
+   * 审视走的是机器人的 `AgentRuntime`（它持有模型客户端与工具依赖），
+   * 而这个运行时只在机器人启动后存在。所以停着的机器人**没有可触发的东西** ——
+   * 返回一句说清原因的话，而不是静默什么都不做。
+   */
+  requestAgentReview(traderId: number): { accepted: boolean; note: string } {
+    const autoTrader = this.running.get(traderId);
+    if (!autoTrader) {
+      return {
+        accepted: false,
+        note: '机器人没有在运行 —— 策略审视需要一个活着的运行时（先「启动」，它会照常按策略交易）。',
+      };
+    }
+    return autoTrader.requestAgentReview();
   }
 
   /**

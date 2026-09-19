@@ -244,8 +244,13 @@ export interface AgentHook {
    * 这是"AI 下发的参数真的被用上"的唯一出口。
    */
   configOverride: () => StrategyConfig | null;
-  /** 进周期时问一次"要不要审视"。**不阻塞** —— 实现方保证不 await。 */
-  triggerReview: () => void;
+  /**
+   * 进周期时问一次"要不要审视"。**不阻塞** —— 实现方保证不 await。
+   *
+   * `reason: 'manual'` 表示**操作员明确要求现在就想一次**：它绕过冷却与事件判据，
+   * 但不绕过每小时预算（见 `runStrategyReview` 的 `force`）。
+   */
+  triggerReview: (reason?: 'cycle' | 'manual') => void;
   /** 结算等待中的参数实验（每笔平仓后最该做）。 */
   settleOnly: () => void;
   /** 一笔平仓之后请复盘员写因果结论。**不阻塞。** */
@@ -668,6 +673,42 @@ export class AutoTrader {
       this.cyclePromise = null;
       done();
     }
+  }
+
+  /**
+   * 让操作员**现在**就要一次策略审视。
+   *
+   * ## 为什么需要它
+   *
+   * `triggerReview` 从写下那天起就带着 `'manual'` 这条分支，`orchestrator.ts`
+   * 的注释也写着"强制唤醒（操作员点"立即分析"）"—— **但那条路径从来不可达**：
+   * 三个生产调用点（本文件的 `refreshAgentState`、`manager.ts` 的接线）全都没传参数，
+   * 于是永远走 `'cycle'`。注释在描述一个不存在的能力。
+   *
+   * 后果不是"少一个按钮"，而是**操作员在等一个不会发生的审视**：AI 只在事件
+   * （连亏、被拒、新结果）或 60 分钟兜底时才醒，想让它"现在就看一眼"没有任何办法。
+   * 而"AI 睡着了/它到底在想什么"恰恰是操作员最需要能确认的事。
+   *
+   * ## 它不绕过什么
+   *
+   * 让路的是冷却与事件判据（那是操作员的明确意图）；**每小时预算照旧** ——
+   * 否则一个手滑的连点就能把当天的 LLM 预算烧光。
+   *
+   * ## 为什么返回一个"请求已发出"而不是结果
+   *
+   * 审视是**异步**的（可能跑几十秒），而且它仍然可能被预算挡下。所以这里只能说
+   * "请求已经发出、去哪里看结果"，**不能说"它正在审视"** —— 那是编造。
+   */
+  requestAgentReview(): { accepted: boolean; note: string } {
+    const agent = this.deps.agent;
+    if (!agent) {
+      return { accepted: false, note: '这个机器人不是 AI 托管模式 —— 它没有可审视的策略。' };
+    }
+    agent.triggerReview('manual');
+    return {
+      accepted: true,
+      note: '已请求一次策略审视。它异步执行、且仍受每小时调用预算限制 —— 结果会出现在「最近决策」面板。',
+    };
   }
 
   /**

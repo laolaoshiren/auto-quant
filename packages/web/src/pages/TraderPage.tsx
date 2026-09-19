@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
+  Brain,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -15,7 +16,7 @@ import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
-import { useRunOnce } from '../lib/actions';
+import { useRunOnce, useAgentReview } from '../lib/actions';
 import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import { TraderStatusBadge } from '../components/Badges';
 import { PageShell, Metric } from '../components/shell';
@@ -144,6 +145,7 @@ export function TraderPage() {
    */
   const [chartOverride, setChartOverride] = useState<boolean | null>(null);
   const { runOnce, busyId: runOnceBusyId } = useRunOnce();
+  const { requestReview, busyId: reviewBusyId } = useAgentReview();
 
   const tradersQuery = usePolled((signal) => api.traders(signal), {
     intervalMs: socketOpen ? 8000 : 4000,
@@ -511,6 +513,34 @@ export function TraderPage() {
   ) : null;
 
   /*
+   * 「让 AI 审视」—— 与「立即分析」是**两件事**，所以并排放、文案说清区别。
+   *
+   *   「立即分析」    跑一个决策周期：机器人按**当前参数**决策一次
+   *   「让 AI 审视」  AI 反思绩效与复盘，决定**要不要改参数**
+   *
+   * 出现条件比「立即分析」多一条，两条都是**硬条件**而不是保守：
+   *   · 机器人必须在运行 —— 审视走的是它的 `AgentRuntime`，停着就没有可触发的东西
+   *   · 必须是 **AI 托管**模式 —— 策略模式没有"让 AI 反思"这回事
+   * 摆一个按下去只会报错的按钮，就是在界面上写一句不成立的话（`LAYOUT.md` §7）。
+   *
+   * 在此之前 `reason: 'manual'` 这条路径**从来不可达**（三个调用点都没传参数），
+   * 而 `orchestrator.ts` 的注释却写着"操作员点立即分析" —— 操作员在等一个
+   * 永远不会发生的审视。
+   */
+  const reviewAction =
+    running && trader.mode === 'ai_managed' ? (
+      <Button
+        size="sm"
+        busy={reviewBusyId === trader.id}
+        title="让 AI 现在审视一次策略：读绩效、复盘与历史实验，决定要不要改参数。它不会下单，但会改参数（受结构守卫约束）。"
+        onClick={() => void requestReview(trader.id, trader.name)}
+      >
+        <Brain aria-hidden className="h-3.5 w-3.5" />
+        让 AI 审视
+      </Button>
+    ) : null;
+
+  /*
    * B. 指标行：4 个关键数字，**横排卡片**（`LAYOUT.md` §0 规则 3）。
    *
    * 旧版是 280px 的竖排左指标栏，八段同权重的文字分成三组堆了一列。竖排的代价是
@@ -735,7 +765,18 @@ export function TraderPage() {
     <div className="flex h-full min-h-0 flex-col gap-4">
       <div className="min-h-0 flex-1">
       <PageShell
-        aside={<DecisionFeed traderId={traderId} running={running} actions={runNowAction} />}
+        aside={
+          <DecisionFeed
+            traderId={traderId}
+            running={running}
+            actions={
+              <>
+                {runNowAction}
+                {reviewAction}
+              </>
+            }
+          />
+        }
       >
         {/* A. 页头：我是谁 + 什么状态 + 能做什么，常驻一行 --------------- */}
         <header className="flex flex-wrap items-center gap-x-3 gap-y-2">

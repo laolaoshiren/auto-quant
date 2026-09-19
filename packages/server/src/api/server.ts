@@ -1535,6 +1535,33 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   });
 
   /**
+   * 让 AI **现在**审视一次策略（不等事件、不等兜底超时）。
+   *
+   * ## 与 `/run-once` 的区别（别混）
+   *
+   *   `/run-once`      跑一个**决策周期** —— 机器人按当前参数决策一次
+   *   `/agent-review`  跑一次**策略审视** —— AI 反思并决定要不要改参数
+   *
+   * ## 为什么不受全局熔断限制
+   *
+   * 审视**不下任何订单** —— 它只读绩效、复盘与实验记录，然后可能写一份新参数。
+   * 而"交易被禁用时正该能做的事"恰恰包括"让 AI 想想我们哪里做错了"，
+   * 与 `/reconcile` 同一条理由。
+   *
+   * 参数写回后**不会**立刻变成订单：下单是决策周期的事，而周期在熔断下不跑。
+   */
+  app.post('/api/traders/:id/agent-review', authed, async (request, reply) => {
+    const id = Number((request.params as { id: string }).id);
+    try {
+      const result = deps.manager.requestAgentReview(id);
+      if (!result.accepted) return reply.code(409).send({ ok: false, ...result });
+      return { ok: true, ...result };
+    } catch (error) {
+      return reply.code(400).send({ ok: false, note: (error as Error).message });
+    }
+  });
+
+  /**
    * Rebuild a trader's ledger from the exchange's own history.
    *
    * Deliberately **not** gated by the global trading kill switch: it places no
