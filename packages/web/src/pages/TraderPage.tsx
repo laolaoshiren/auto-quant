@@ -10,7 +10,7 @@ import {
   Square,
   Zap,
 } from 'lucide-react';
-import type { EquitySnapshot } from '@aq/shared';
+import { beijingDayStartMs, type EquitySnapshot } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
@@ -50,8 +50,6 @@ import {
 
 type ChartTab = 'equity' | 'candles';
 
-/** One day, in ms — the window behind the 今日盈亏 KPI. */
-const DAY_MS = 24 * 3600 * 1000;
 
 /**
  * 展开后的权益曲线高度。
@@ -282,6 +280,45 @@ export function TraderPage() {
   }, [equityQuery.data, live?.equity]);
 
   const equity = stats?.equity ?? snapshots[snapshots.length - 1]?.equity ?? trader?.initialEquity ?? 0;
+
+  /*
+   * 最近一条快照里的**交易所账户读数**。
+   *
+   * ## 为什么需要它
+   *
+   * 机器人停止时，`api.traderAccount()` 拿不到实时值，「交易所账户」那一行
+   * 就只显示「暂无实时读数」。于是这一页上有两个**无法对照**的数字：
+   *
+   *     归属权益 9.4246     ← 初始 9.1 + 本机器人累计净 +0.3246
+   *     交易所账户          ← 「暂无实时读数」
+   *
+   * 而同一个账户上另外两个机器人分别亏了 0.4005 与 0.4663 ——
+   * **它们亏的钱是从同一个钱包扣的**，所以钱包里实际只有 7.54。
+   * 操作员看到 9.42、去交易所看到 7.54，自然会问为什么对不上。
+   *
+   * 快照里存着当时的真实账户权益（`accountEquity`）与可用余额，
+   * **数据在库里、界面却不说** —— 那才是困惑的来源。
+   *
+   * ## 取的是账户口径，不是归属口径
+   *
+   * `accountEquity` / `accountUnrealizedPnl` 是**账户级**的（共享钱包）；
+   * 而 `equity` / `unrealizedPnl` 是**归属这个机器人**的。
+   * 混用会让这一行和上面的指标卡对不上，那正是它要消除的问题。
+   */
+  const lastKnownAccount = useMemo(() => {
+    const latest = snapshots[snapshots.length - 1];
+    if (!latest) return null;
+    return {
+      at: latest.timestamp,
+      account: {
+        equity: latest.accountEquity,
+        walletBalance: latest.accountEquity,
+        availableBalance: latest.availableBalance,
+        unrealizedPnl: latest.accountUnrealizedPnl,
+        marginUsed: latest.marginUsed,
+      },
+    };
+  }, [snapshots]);
   const marginUsed = positions.reduce((sum, p) => sum + p.marginUsed, 0);
   const notional = positions.reduce((sum, p) => sum + p.notional, 0);
   const effectiveLeverage = equity > 0 ? notional / equity : 0;
@@ -307,29 +344,53 @@ export function TraderPage() {
   const openPositionCount = positions.length;
 
   /*
-   * 今日盈亏 against the last snapshot from *before* the 24-hour window.
+   * 「今日盈亏」= 当前归属权益 − **北京时间今天 0:00 时**的归属权益。
    *
-   * The newest snapshot older than 24h is deliberately preferred over the
-   * oldest one inside the window: with a 15-minute cycle the in-window
-   * comparison is only two hours old, which would report a session move as a
-   * day's PnL. Falls back to the oldest snapshot when the account is younger
-   * than a day, and to 0 when there is nothing to compare against.
+   * ## 为什么不是「滚动 24 小时」
+   *
+   * 原来这里比的是 `Date.now() - 24h` 那条快照。那有两个毛病：
+   *
+   *   · **它不叫「今日」。** 在北京时间凌晨 0:35，滚动 24 小时实际覆盖的是
+   *     「昨天 0:35 到现在」—— 操作员问"今天赚了多少"，得到的却是昨天大半天
+   *     加上今天凌晨的数字。
+   *   · **同一个页面上的两个数字口径不同。** 「归属权益」是累计值，
+   *     而旁边的「今日盈亏」是滑动窗口，两者对不上时没人能一眼看出为什么。
+   *
+   * 自然日还有一个好处：它**跨刷新、跨重启都稳定** —— 同一个"今天"里
+   * 中午看和晚上看，基准是同一个数。
+   *
+   * ## 基准怎么取
+   *
+   * 取**北京时间 0:00 之前的最后一条**快照。用"最后一条"而不是"第一条"：
+   * 0:00 之后的第一条快照可能已经过了好几分钟（周期是 15 分钟），
+   * 而那几分钟里的盈亏本来就该算在今天 —— 用日界之前的那条才不漏。
+   *
+   * 机器人今天才建、日界之前没有任何快照时，回落到**最早的一条**：
+   * 那等于"从开始记录算起"，并在卡片上如实标注区间（见下面的 `todayIsPartial`）。
    */
-  const dayAgoEquity = useMemo(() => {
+  const todayBaseline = useMemo(() => {
     if (snapshots.length === 0) return undefined;
-    const cutoff = Date.now() - DAY_MS;
+    const dayStart = beijingDayStartMs();
     let before: EquitySnapshot | undefined;
     for (const snapshot of snapshots) {
-      if (new Date(snapshot.timestamp).getTime() < cutoff) before = snapshot;
+      if (new Date(snapshot.timestamp).getTime() < dayStart) before = snapshot;
       else break;
     }
-    // `snapshots[0]` is defined here — an empty list returned above — but the
-    // index signature cannot say so, hence the explicit fallback.
-    return (before ?? snapshots[0])?.equity;
+    /*
+     * `before` 存在 ⇒ 基准真的落在日界之前，覆盖完整。
+     * 否则用最早那条（机器人今天才启动），此时**不能**叫它"今日"。
+     */
+    return before
+      ? { equity: before.equity, full: true }
+      : snapshots[0]
+        ? { equity: snapshots[0].equity, full: false }
+        : undefined;
   }, [snapshots]);
 
-  const todayPnl = dayAgoEquity === undefined ? 0 : equity - dayAgoEquity;
-  const todayPercent = dayAgoEquity ? (todayPnl / Math.abs(dayAgoEquity)) * 100 : 0;
+  const todayPnl = todayBaseline === undefined ? 0 : equity - todayBaseline.equity;
+  const todayIsPartial = todayBaseline !== undefined && !todayBaseline.full;
+  const todayBase = todayBaseline?.equity;
+  const todayPercent = todayBase ? (todayPnl / Math.abs(todayBase)) * 100 : 0;
 
   /*
    * 图表与缩略条共用同一份"可见区间"数据。
@@ -489,8 +550,14 @@ export function TraderPage() {
           value={fmtUsdSigned(todayPnl, 2)}
           size="lg"
           tone={toneOf(todayPnl)}
-          sub={`${fmtPercent(todayPercent)} · 基准 ${fmtNum(dayAgoEquity ?? equity, 2)}`}
-          title="相对 24 小时前最近一个权益快照的变化；「基准」就是那个快照上的权益。"
+          sub={`${todayIsPartial ? '自启动 ' : ''}${fmtPercent(todayPercent)} · 基准 ${fmtNum(todayBase ?? equity, 2)}`}
+          title={
+            todayIsPartial
+              ? '这个机器人今天才开始记录，日界之前没有快照 —— 基准取的是最早一条，' +
+                '所以这里显示的是「自启动以来」的变化，不是完整的自然日。'
+              : '相对**北京时间今天 0:00** 那个时刻的权益变化。「基准」就是日界之前最后一条快照上的权益。' +
+                '用自然日而不是滚动 24 小时：凌晨看它时，得到的是「今天」而不是「昨天大半天加今天凌晨」。'
+          }
         />
       </MetricCard>
 
@@ -771,6 +838,12 @@ export function TraderPage() {
           busy={accountQuery.loading}
           error={accountQuery.error}
           onRefresh={accountQuery.reload}
+          /*
+            实时读数拿不到时（机器人没在跑），回落到最近一条快照里的交易所读数 ——
+            见 `lastKnownAccount` 上的说明。它让这一行与上面的「归属权益」能当面对照，
+            而**不改变任何口径**：数字来自交易所，只是时间旧一点，且会标出来。
+          */
+          lastKnown={lastKnownAccount}
         />
 
         {/* D. 权益 / 行情（§3 的第 3 项：最大的一块，但只在有数据可看时才占大块） */}

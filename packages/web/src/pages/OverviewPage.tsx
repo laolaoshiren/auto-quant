@@ -344,10 +344,22 @@ export function OverviewPage() {
         />
 
         <Metric
-          /* The honest label changes with the data: calling a two-hour-old
-             account's entire history "今日盈亏" would misreport it by orders of
-             magnitude on the one number the page exists to show. */
-          label={has24hCoverage ? '今日盈亏' : '区间盈亏'}
+          /*
+           * ⚠️ **不叫「今日盈亏」。**
+           *
+           * 这张卡显示的是**所选窗口**内的变化，而 `range = '1D'` 是
+           * **滚动 24 小时**（`Date.now() - 24h`），不是自然日。
+           *
+           * 原来它写着「今日盈亏」，于是北京时间凌晨打开这一页时，
+           * 这个数字覆盖的是「昨天大半天 + 今天凌晨」—— 名字和内容对不上。
+           * 操作员问"今天赚了多少"，得到的是另一段时间的答案。
+           *
+           * 机器人详情页那张「今日盈亏」已经改成**北京时间自然日**；
+           * 这张是区间卡（1D / 7D / 30D / ALL 可切），所以它的 1D 就该
+           * 老老实实叫「近 24 小时」—— **一个会随窗口变化的数字，
+           * 不该顶着一个固定时间范围的名字。**
+           */
+          label={has24hCoverage ? `近 ${range}` : '区间盈亏'}
           tone={equityChange === null ? 'default' : pnlTone(equityChange)}
           value={equityChange === null ? '—' : fmtUsdSigned(equityChange, 2)}
           sub={
@@ -355,7 +367,7 @@ export function OverviewPage() {
               ? '还没有权益快照'
               : `${has24hCoverage ? '24 小时' : `较${range === 'ALL' ? '起始' : `近 ${range}`}`} · ${fmtPercent(equityChangePercent)}`
           }
-          title="账户权益（账户口径）在窗口内的变化，含已实现与浮动盈亏；入金/出金同样会推动它 —— 它说的是「账户里的钱怎么变」，策略自己赚的那部分看「累计净盈亏」。快照不足 24 小时时改显示自最早一条快照以来的变化。"
+          title="账户权益（账户口径）在窗口内的变化，含已实现与浮动盈亏；入金/出金同样会推动它 —— 它说的是「账户里的钱怎么变」，策略自己赚的那部分看「累计净盈亏」。快照不足所选窗口时改显示自最早一条快照以来的变化。（这里按滚动窗口算，不是自然日 —— 自然日的「今日盈亏」在机器人详情页。）"
         />
 
         <Metric
