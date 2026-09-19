@@ -325,7 +325,7 @@ export function OverviewPage() {
    */
   const rail = (
     <div className="grid grid-cols-1 gap-4 rounded-lg border border-base-750 bg-base-900 p-3.5 shadow-panel sm:grid-cols-2 xl:grid-cols-1">
-      <MetricGroup title="账户">
+      <MetricGroup title="账户" columns={2}>
         <Metric
           label={`${BALANCE_LABEL.equity}合计`}
           size="lg"
@@ -380,7 +380,7 @@ export function OverviewPage() {
       </MetricGroup>
 
       {/* 并排时（sm–xl）这组不在上一组的下方，那条分隔线会变成一根悬空的横线 */}
-      <MetricGroup title="交易" className="sm:border-t-0 sm:pt-0 xl:border-t xl:pt-3">
+      <MetricGroup title="交易" columns={2} className="sm:border-t-0 sm:pt-0 xl:border-t xl:pt-3">
         <Metric
           label="运行中机器人"
           value={`${fmtInt(runningCount)} / ${fmtInt(traders.length)}`}

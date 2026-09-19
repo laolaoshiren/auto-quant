@@ -406,7 +406,7 @@ export function ExchangeAccountsSection() {
         </div>
       )}
 
-      <MetricGroup title="账户余额">
+      <MetricGroup title="账户余额" columns={2}>
         {query.loading && accounts.length === 0 ? (
           <p className="text-xs text-ink-lo">正在读取交易所余额…</p>
         ) : accounts.length === 0 ? (
@@ -459,7 +459,7 @@ export function ExchangeAccountsSection() {
         )}
       </MetricGroup>
 
-      <MetricGroup title="环境">
+      <MetricGroup title="环境" columns={2}>
         <Metric
           label="实盘凭证"
           value={fmtInt(liveAccounts.length)}
@@ -473,7 +473,7 @@ export function ExchangeAccountsSection() {
         />
       </MetricGroup>
 
-      <MetricGroup title="读取">
+      <MetricGroup title="读取" columns={2}>
         {/*
           只留一个时间，而且用**相对时间**。
           
