@@ -942,6 +942,21 @@ export interface CircuitBreakerVerdict {
   /** When true, no new positions may be opened. */
   blocked: boolean;
   reason: string;
+  /**
+   * 这个熔断**什么时候自己解除**。
+   *
+   * ⚠️ **两种熔断的解除方式完全不同，不能用一句话概括。**
+   *
+   * 原来调用方对所有 `blocked` 都写「熔断按单日结算，跨过零点后自动恢复」——
+   * **那句话只对 `daily_loss` 成立**。而 `total_drawdown` 完全没有"按日"的概念：
+   * 它比较的是**历史最高水位**与当前权益，要等权益自己涨回门槛以内才解除。
+   *
+   * 实测后果：一个被总回撤熔断的机器人，每一轮的 `executionLog` 都在告诉操作员
+   * 「跨过零点后自动恢复」—— 而它已经这样静默地跳过了 15 个周期。**空仓时权益不会
+   * 自己变化，所以它永远等不到那一天。** 这比不写原因更糟：它给的是一个
+   * **会让人安心地不去处理**的错误信息。
+   */
+  kind: 'daily_loss' | 'total_drawdown' | 'none';
 }
 
 /**
@@ -962,6 +977,7 @@ export function checkCircuitBreakers(
     if (drawdown >= maxTotalDrawdownPercent) {
       return {
         blocked: true,
+        kind: 'total_drawdown',
         reason: `总回撤熔断：权益较最高水位 $${state.highWaterEquity.toFixed(2)} 回撤了 ${drawdown.toFixed(2)}%（上限 ${maxTotalDrawdownPercent}%）。`,
       };
     }
@@ -972,10 +988,11 @@ export function checkCircuitBreakers(
     if (dailyLossPercent >= maxDailyLossPercent) {
       return {
         blocked: true,
+        kind: 'daily_loss',
         reason: `单日亏损熔断：今日已实现亏损 $${Math.abs(state.dailyRealizedPnl).toFixed(2)}，占权益 ${dailyLossPercent.toFixed(2)}%（上限 ${maxDailyLossPercent}%）。`,
       };
     }
   }
 
-  return { blocked: false, reason: '' };
+  return { blocked: false, kind: 'none', reason: '' };
 }

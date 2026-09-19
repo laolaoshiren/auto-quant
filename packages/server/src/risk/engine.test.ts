@@ -619,6 +619,44 @@ test('breakers stay clear when neither condition is met', () => {
   const config = defaultStrategyConfig();
   const verdict = checkCircuitBreakers(config, 1010, { dailyRealizedPnl: 5, highWaterEquity: 1000 });
   assert.equal(verdict.blocked, false);
+  assert.equal(verdict.kind, 'none');
+});
+
+test('★ 两种熔断必须报告不同的 kind —— 它们的解除方式完全不同', () => {
+  /*
+   * 实测代价：一个被**总回撤**熔断的机器人，连续 15 个周期每一轮都在
+   * `executionLog` 里写着「熔断按单日结算，跨过零点后自动恢复」。
+   *
+   * 而总回撤熔断**没有"按日"这个概念** —— 它比较的是历史最高水位与当前权益，
+   * 要等权益涨回门槛以内才解除。**空仓时权益不会自己变化，所以它永远不会恢复。**
+   *
+   * 那句错误的信息会让操作员**安心地不去处理**。所以判定结果必须能区分两者，
+   * 调用方才有机会给出正确的解除条件。
+   */
+  const config = configWith({
+    circuitBreaker: {
+      ...defaultStrategyConfig().circuitBreaker,
+      maxTotalDrawdownPercent: 20,
+      maxDailyLossPercent: 5,
+    },
+  });
+
+  // 总回撤：权益较峰值跌了 21%，但当日没有已实现亏损
+  const total = checkCircuitBreakers(config, 790, { dailyRealizedPnl: 0, highWaterEquity: 1000 });
+  assert.equal(total.blocked, true);
+  assert.equal(total.kind, 'total_drawdown');
+
+  // 单日亏损：距峰值只有 1%（没触发总回撤），但当日已实现亏损 6%
+  const daily = checkCircuitBreakers(config, 990, { dailyRealizedPnl: -60, highWaterEquity: 1000 });
+  assert.equal(daily.blocked, true);
+  assert.equal(daily.kind, 'daily_loss');
+
+  /*
+   * ★ 关键断言：两者**必须不同**。如果哪天有人把 kind 合并成一个，
+   * 或者调用方又退回用 `blocked` 这一个布尔值去决定文案，
+   * 「跨过零点后自动恢复」那句错话就会回来。
+   */
+  assert.notEqual(total.kind, daily.kind);
 });
 
 /* -------------------------------------------------------------------------- */
