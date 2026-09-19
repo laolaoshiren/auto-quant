@@ -4955,7 +4955,7 @@ export function describeBreaker(verdict: CircuitBreakerVerdict, config: Strategy
  * 一个读不出来的注解不该让整个周期失败。但也不会静默假装"没有外部活动" ——
  * 认不出就返回空，让 prompt 那一行不渲染（见那里的 `> 0` 判断）。
  */
-function readForeignActivity(traderId: number): {
+export function readForeignActivity(traderId: number): {
   foreignRounds?: number;
   foreignNet?: number;
   ledgerGap?: number;
@@ -4985,8 +4985,19 @@ function readForeignActivity(traderId: number): {
   try {
     const raw = settings.get(`ledger_check:${traderId}`);
     if (raw) {
-      const parsed = JSON.parse(raw) as { gap?: number };
-      if (typeof parsed.gap === "number") out.ledgerGap = parsed.gap;
+      const parsed = JSON.parse(raw) as { gap?: number; incomeReadFailed?: boolean };
+      /*
+       * ⚠️ **读流水失败的那一轮整个不算数 —— 包括这里的 `gap`。**
+       *
+       * 上面那段注释讲的是"读不到时不要假装是 0"；这里是它的**另一面**：
+       * `incomeReadFailed` 为真时，`gap` 是在 `exchangeNet` 为 0 的前提下算出来的，
+       * 它等于整个 `platformNet` —— 一个**假差额**。
+       *
+       * 把它喂给模型，等于告诉它"账本与交易所差了 N USDT、可能有漏记"，
+       * 而真实情况只是**这一次没读到流水**。上一轮修了"是否告警"却漏了这条路径，
+       * 而这条路径的读者是**正在做决策的模型**。
+       */
+      if (!parsed.incomeReadFailed && typeof parsed.gap === 'number') out.ledgerGap = parsed.gap;
     }
   } catch {
     /* 同上：留空，不要假装是 0。 */

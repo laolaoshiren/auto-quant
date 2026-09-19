@@ -26,6 +26,7 @@ import {
   orders as orderStore,
   positions as positionStore,
   strategies as strategyStore,
+  settings,
   traders,
   trades as tradeStore,
   tradeEvents,
@@ -35,6 +36,7 @@ import {
   describeCycleFailure,
   makeClientId,
   ORDER_SETTLE_GRACE_MS,
+  readForeignActivity,
   type DecisionModel,
 } from './autoTrader.js';
 
@@ -2727,4 +2729,35 @@ test('★ 读不到交易所流水时，校验必须标出"这一轮不算数"�
   } finally {
     await traderB.stop('测试结束');
   }
+});
+
+test('★ 读流水失败那一轮的"差额"不能进提示词 —— 它是假差额', () => {
+  /*
+   * Why this test exists —— 上一轮修了"是否告警"，却漏了**这条路径**：
+   * 同一个 `ledger_check` 还会被 `readForeignActivity` 读出来、喂给模型。
+   *
+   * `incomeReadFailed` 为真时，`gap` 是在 `exchangeNet` 为 0 的前提下算出来的，
+   * 它等于整个 `platformNet` —— 一个**假差额**。把它喂给模型等于告诉它
+   * "账本与交易所差了 N USDT、可能有漏记"，而真实情况只是**这一次没读到流水**。
+   *
+   * 而这条路径的读者比日志更要紧：**它是正在做决策的模型。**
+   * （`readForeignActivity` 上面那段注释自己写着"两种失败的含义完全不同：
+   *   一个是『我们不知道』，一个是『账没问题』" —— 这里是同一件事的反向。）
+   */
+  settings.set(`ledger_check:${traderId}`, JSON.stringify({ gap: 0.5, incomeReadFailed: false }));
+  assert.equal(readForeignActivity(traderId).ledgerGap, 0.5, '正常的一轮照读');
+
+  settings.set(`ledger_check:${traderId}`, JSON.stringify({ gap: 0.3246, incomeReadFailed: true }));
+  assert.equal(
+    readForeignActivity(traderId).ledgerGap,
+    undefined,
+    '读流水失败时那个 gap 是假的，不能进提示词',
+  );
+
+  /*
+   * 老数据（写这个字段之前落库的那一批）没有 `incomeReadFailed` —— 必须仍然照读，
+   * 否则一次升级会**静默丢掉所有历史读数**，而那正好是"账本曾经对不上"的证据。
+   */
+  settings.set(`ledger_check:${traderId}`, JSON.stringify({ gap: 0.02 }));
+  assert.equal(readForeignActivity(traderId).ledgerGap, 0.02, '没有那个字段的老数据必须照读');
 });
