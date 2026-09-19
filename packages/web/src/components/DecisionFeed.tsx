@@ -653,6 +653,12 @@ export function DecisionFeed({
     );
   }
 
+  /*
+   * 连续相同的轮次压成一段再渲染。放在 `useMemo` 里：`cycleSignature` 要
+   * `JSON.stringify` 每一轮的决策与执行日志，而轮询每隔几秒就会重渲染一次。
+   */
+  const runs = useMemo(() => groupCycles(records), [records]);
+
   return (
     <Panel
       padded={false}
@@ -701,12 +707,11 @@ export function DecisionFeed({
           */}
           {showLive && liveCycle && <LiveCycleBlock key={liveCycle.cycleNumber} live={liveCycle} />}
 
-          {records.map((record) => (
-            <CycleBlock
-              key={record.id}
-              record={record}
-              symbols={symbolsQuery.data ?? []}
-            />
+          {runs.map((run) => (
+            <div key={run.record.id}>
+              <CycleBlock record={run.record} symbols={symbolsQuery.data ?? []} />
+              {run.repeats.length > 0 && <RepeatedCycles repeats={run.repeats} />}
+            </div>
           ))}
 
           {/*
@@ -759,6 +764,88 @@ export function DecisionFeed({
         </div>
       )}
     </Panel>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  连续相同轮次的压缩                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 一轮的**内容签名** —— 只由"发生了什么"决定，**不含周期号与时间**。
+ *
+ * 返回 `null` 表示这一轮不参与合并。
+ */
+function cycleSignature(record: DecisionRecord): string | null {
+  // 失败的轮次永远单独显示：要读的是那一次具体的错误，不是"又失败了一次"。
+  if (record.error !== null) return null;
+
+  const log = record.executionLog ?? [];
+  // 完全空白的一轮也不合并 —— 它本身信息就少，再折起来等于让它消失。
+  if (record.decisions.length === 0 && log.length === 0) return null;
+
+  return JSON.stringify([
+    record.decisions.map((decision) => [decision.action, decision.symbol, decision.confidence]),
+    log.map((entry) => [entry.status, entry.action, entry.symbol, entry.detail]),
+  ]);
+}
+
+interface CycleRun {
+  record: DecisionRecord;
+  /** 紧随其后、内容**完全**相同的轮次（不含 `record` 自己），最近的在前。 */
+  repeats: DecisionRecord[];
+}
+
+/**
+ * 把列表里**连续且内容完全相同**的轮次压成一段。
+ *
+ * ## 为什么需要它
+ *
+ * 熔断、冷却、安全模式这类**持续状态**每一轮都会写一条决策记录，而记录的内容
+ * 一字不差。实测 AI 托管机器人 #8 的右栏连着 5 条都是同一句
+ * 「总回撤熔断…本轮没有向模型提问，也没有下单」—— 操作者翻多少屏都是同一句话，
+ * **真正有信息量的那一轮反而被淹掉**。这是评估报告里标为"最影响可用性"的一条，
+ * 而它对 AI 托管模式尤其要紧：那一栏正是操作员看"它在想什么"的唯一窗口。
+ *
+ * ## 为什么折叠是安全的
+ *
+ * 判据是**内容签名完全相同**，不是"看起来差不多"：被折起来的轮次没有携带
+ * 任何这一条没有的信息。周期号范围仍然显示出来，因为"从第几轮开始变成这样"
+ * 本身就是信息。
+ *
+ * ## 为什么不合并到数据层
+ *
+ * `decision_records` 是**审计记录**：每一轮都必须落库，那是可复现的凭证链
+ * （`AGENTS.md` §2）。压缩只发生在**展示**这一层 —— 数据一条都不能少。
+ */
+function groupCycles(records: DecisionRecord[]): CycleRun[] {
+  const runs: Array<CycleRun & { signature: string | null }> = [];
+  for (const record of records) {
+    const signature = cycleSignature(record);
+    const last = runs[runs.length - 1];
+    if (last && signature !== null && last.signature === signature) {
+      last.repeats.push(record);
+      continue;
+    }
+    runs.push({ record, signature, repeats: [] });
+  }
+  return runs;
+}
+
+/**
+ * 「同样的内容还有 N 轮」。
+ *
+ * 缩进一格、灰字、一行 —— 它是**注解**而不是内容，不该和决策本身抢注意力。
+ */
+function RepeatedCycles({ repeats }: { repeats: DecisionRecord[] }) {
+  const numbers = repeats.map((row) => row.cycleNumber);
+  const low = Math.min(...numbers);
+  const high = Math.max(...numbers);
+  const range = low === high ? `#${low}` : `#${low}–#${high}`;
+  return (
+    <p className="pl-2 pt-1 text-xs text-ink-faint">
+      ⤷ 同样的内容还有 {repeats.length} 轮（周期 {range}）
+    </p>
   );
 }
 
