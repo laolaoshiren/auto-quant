@@ -37,6 +37,7 @@ function makeDeps() {
       performance: () => ({ net: 0.31 }),
       equityCurve: () => [{ equity: 10 }],
       experiments: () => [{ reason: '上次降杠杆', outcomeNetPnl: 0.5 }],
+      lessons: () => [{ symbol: 'BTCUSDT', lesson: '止损过紧', tags: ['止损过紧'] }],
       recentDecisions: () => [{ cycle: 1 }],
       marketOverview: () => [{ symbol: 'BTCUSDT' }],
     },

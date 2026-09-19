@@ -288,6 +288,7 @@ export async function reviewClosedTrade(input: {
           performance: () => null,
           equityCurve: () => null,
           experiments: () => null,
+          lessons: () => null,
           recentDecisions: () => null,
           marketOverview: () => null,
         },

@@ -59,6 +59,7 @@ function makePorts(over: Partial<OrchestratorPorts> = {}) {
       performance: () => ({ net: 0.31 }),
       equityCurve: () => [],
       experiments: () => [],
+      lessons: () => [],
       recentDecisions: () => [],
       marketOverview: () => [],
     },

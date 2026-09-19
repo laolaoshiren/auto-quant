@@ -95,6 +95,17 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
     },
   },
   {
+    name: 'get_lessons',
+    describe:
+      'Read the LESSONS written after each closed trade: why it actually won or lost, plus tags. ' +
+      'Different from get_experiments — that one shows what YOU changed; this one is what the reviewer concluded about the real trades. ' +
+      'Pay attention to `recurringTags`: if the same tag keeps appearing across different trades, that is your diagnosis. ' +
+      'The per-trade lesson also says what it could NOT determine and why — treat a missing premise as unknown, not as favourable.',
+    args: {
+      limit: { type: 'number', min: 1, max: 30, default: 12, describe: 'How many recent lessons.' },
+    },
+  },
+  {
     name: 'get_recent_decisions',
     describe:
       'Read what you decided in recent cycles, and what the risk engine rejected. A high rejection rate means your proposals do not match the parameters or the market.',
@@ -284,6 +295,7 @@ export interface AgentToolDeps {
     performance: (window: string) => unknown;
     equityCurve: (limit: number) => unknown;
     experiments: (limit: number) => unknown;
+    lessons: (limit: number) => unknown;
     recentDecisions: (limit: number) => unknown;
     marketOverview: (limit: number) => unknown;
   };
@@ -366,6 +378,8 @@ export function dispatchTool(name: unknown, args: unknown, deps: AgentToolDeps):
       return { result: bound(deps.read.equityCurve(a.limit as number)) };
     case 'get_experiments':
       return { result: bound(deps.read.experiments(a.limit as number)) };
+    case 'get_lessons':
+      return { result: bound(deps.read.lessons(a.limit as number)) };
     case 'get_recent_decisions':
       return { result: bound(deps.read.recentDecisions(a.limit as number)) };
     case 'get_market_overview':

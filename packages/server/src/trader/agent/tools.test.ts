@@ -52,6 +52,10 @@ function makeDeps(overrides: Partial<AgentToolDeps> = {}) {
         calls.push({ tool: 'get_experiments', args: { limit } });
         return { rows: limit };
       },
+      lessons: (limit) => {
+        calls.push({ tool: 'get_lessons', args: { limit } });
+        return { rows: limit };
+      },
       recentDecisions: (limit) => {
         calls.push({ tool: 'get_recent_decisions', args: { limit } });
         return { cycles: limit };
@@ -239,6 +243,7 @@ test('结果过长时截断，并**说明**截断了', () => {
       performance: () => ({ blob: 'x'.repeat(20000) }),
       equityCurve: () => [],
       experiments: () => [],
+      lessons: () => [],
       recentDecisions: () => [],
       marketOverview: () => [],
     },
@@ -261,7 +266,23 @@ test('工具清单：说明写给模型看，且都非空', () => {
   }
 });
 
-test('renderToolCatalogue 会把九个工具与参数都渲染出来', () => {
+test('get_lessons 把复盘教训交给 AI —— 复盘能影响决策的唯一通路', () => {
+  /*
+   * 为什么这条必须有：`agent_memory` 原本**只有一个出口** —— 复盘时按标的检索、
+   * 喂给复盘员自己（`forSymbol`）。也就是说"这笔为什么亏"的结论**永远到不了
+   * 做决策的策略师**。`agentMemory.recent()` 的注释写着"用于让模型看到最近学到了
+   * 什么"，而它的唯一调用者在测试里。
+   *
+   * 实测后果：复盘员在不同标的上反复打出「止损过紧」「离场不锁盈」「费用吃掉利润」，
+   * 而策略师在同一段时间里**一直在 minPositionSize 上反复微调**（12→6→6→5.5→5.1，
+   * 五次，每次理由都是同一句"账户太小"）—— 因为它看不到那个诊断。
+   */
+  const { deps } = makeDeps();
+  const out = dispatchTool('get_lessons', { limit: 5 }, deps);
+  assert.deepEqual(out.result, { rows: 5 }, '必须真的走到 read.lessons，并把 limit 透传下去');
+});
+
+test('renderToolCatalogue 会把每个工具与参数都渲染出来', () => {
   const text = renderToolCatalogue();
   for (const tool of AGENT_TOOLS) {
     assert.match(text, new RegExp(`### ${tool.name}`), `${tool.name} 没出现在清单里`);

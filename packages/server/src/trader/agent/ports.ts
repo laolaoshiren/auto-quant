@@ -138,6 +138,39 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
           outcomeNetPnl: e.outcomeNetPnl,
         })),
 
+      lessons: (limit) => {
+        const rows = agentMemory.recent(traderId, limit);
+        const tagCounts = new Map<string, number>();
+        for (const row of rows) {
+          for (const tag of tagsOf(row.tagsJson)) {
+            tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+          }
+        }
+        return {
+          total: agentMemory.count(traderId),
+          shown: rows.length,
+          /*
+           * ⚠️ **这一行是整条闭环里最要紧的。**
+           *
+           * 单条 `lesson` 说的是"这一笔为什么亏"；而**反复出现的标签**说的是
+           * "我一直在这个地方亏" —— 后者才是可行动的诊断。
+           */
+          recurringTags: [...tagCounts.entries()]
+            .filter(([, n]) => n >= 2)
+            .sort((a, b) => b[1] - a[1])
+            .map(([tag, n]) => `${tag} ×${n}`),
+          recent: rows.map((row) => ({
+            at: row.createdAt,
+            symbol: row.symbol,
+            closeReason: row.closeReason,
+            netPnl: row.netPnl,
+            tags: tagsOf(row.tagsJson),
+            // lesson 里含"它没能确定什么、为什么" —— 那是判断的边界，不是套话
+            lesson: row.lesson,
+          })),
+        };
+      },
+
       recentDecisions: (limit) =>
         decisions.list(traderId, limit).map((d) => ({
           cycle: d.cycleNumber,
@@ -343,6 +376,17 @@ function safeJson(text: string): unknown {
   } catch {
     return text;
   }
+}
+
+/**
+ * `agent_memory.tags_json` → 干净的字符串数组。
+ *
+ * 坏数据（不是 JSON、不是数组、数组里有非字符串）一律**当作没有标签**，
+ * 而不是让整个工具失败：一份格式有问题的记忆，不该让 AI 读不到其余的。
+ */
+function tagsOf(raw: string): string[] {
+  const parsed = safeJson(raw);
+  return Array.isArray(parsed) ? parsed.filter((tag): tag is string => typeof tag === 'string') : [];
 }
 
 /** 记下"这一轮唤醒了"。冷却与兜底判据都依赖它，所以必须落库。 */
