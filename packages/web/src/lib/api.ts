@@ -581,6 +581,34 @@ export const api = {
       error?: string;
     }>(`/traders/${id}/account`, { signal }),
   /**
+   * 账户上的**外部交易活动** —— 不属于本平台任何机器人的成交。
+   *
+   * ## 为什么它值得单独一个端点
+   *
+   * 这些交易的盈亏**直接从交易所余额进出**，却不计入任何机器人的绩效。
+   * 于是会出现一个看起来自相矛盾、而两者都正确的情形：
+   *
+   *     机器人绩效 +0.32      账户余额 −1.56
+   *
+   * 在加这个端点之前，平台对此**一个字都不说**（归属闸门在跳过时写的是
+   * `log.debug`，而那个级别不显示）。操作员只能自己猜，AI 也只能自己猜。
+   *
+   * 结论来自**最近一次对账**，所以机器人在停止状态下仍然可读 ——
+   * 那正是最需要它的时刻。
+   *
+   * `detectedAt` 为 `null` 表示**从未检测过**，与「检测过、没有外部活动」
+   * （`rounds = 0`）是两件事，界面必须分开说。
+   */
+  foreignActivity: (id: number, signal?: AbortSignal) =>
+    request<{
+      rounds: number;
+      net: number;
+      symbols: string[];
+      firstAt: string | null;
+      lastAt: string | null;
+      detectedAt: string | null;
+    }>(`/traders/${id}/foreign-activity`, { signal }),
+  /**
    * 一页订单记录（服务端按 `id` 倒序，即最新的一单在前）。
    *
    * `before` 是**游标**，不是偏移量：它要求服务端只返回 `id` 比它更小的订单。

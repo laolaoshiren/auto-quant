@@ -48,6 +48,7 @@ import {
   orders as orderStore,
   ownUnrealizedPnlOf,
   positions as positionStore,
+  settings,
   tradeEvents,
   traders as traderStore,
   trades as tradeStore,
@@ -1189,6 +1190,13 @@ export class AutoTrader {
         unrealizedPnl: account.unrealizedPnl,
         marginUsed: account.marginUsed,
         positionCount: livePositions.length,
+        /*
+         * 外部交易活动 —— 见 `PromptAccountInfo` 上的说明。
+         *
+         * 读的是**最近一次对账的结论**（存在 `settings` 里），而不是本轮
+         * 对账的返回值：对账不一定每轮都跑，而模型每轮都需要知道这件事。
+         */
+        ...readForeignActivity(traderId),
       },
       positions: promptPositions,
       candidates: snapshots,
@@ -2026,7 +2034,15 @@ export class AutoTrader {
    */
   async reconcileTradeHistory(
     full = true,
-  ): Promise<{ recovered: number; corrected: number; funding: number }> {
+  ): Promise<{
+    recovered: number;
+    corrected: number;
+    funding: number;
+    /** 不属于本平台任何机器人的成交笔数（外部活动）。 */
+    foreignRounds: number;
+    /** 这些外部成交的净额，用来解释「账户为什么在缩水」。 */
+    foreignNet: number;
+  }> {
     const traderId = this.deps.trader.id;
     const deep = full || this.reconcilePasses % FULL_RECONCILE_EVERY_PASSES === 0;
     this.reconcilePasses += 1;
@@ -2118,6 +2134,16 @@ export class AutoTrader {
      * boot pass that booked the same four trades onto both.
      */
     const ownOrders = orderStore.exchangeOrderIds(traderId);
+    /*
+     * **全局**订单号 —— 用来把「别的机器人」和「外部活动」分开。
+     *
+     * 两者都"不属于本机器人"，但处置完全相反：前者是多机器人共用账户的
+     * 正常情况，静默跳过是对的；后者意味着**账户上有本平台之外的交易**，
+     * 那会直接吃掉余额，而账面上看不出来。
+     */
+    const allOrders = orderStore.allExchangeOrderIds();
+    /** 不属于本平台**任何**机器人的成交。函数末尾汇总上报。 */
+    const foreign: Array<{ symbol: string; net: number; at: string }> = [];
 
     let recovered = 0;
     let corrected = 0;
@@ -2210,6 +2236,23 @@ export class AutoTrader {
          * 而不是由这道闸门负责；两者的职责不要混。
          */
         if (!trip.entryOrderId || !ownOrders.has(trip.entryOrderId)) {
+          /*
+           * ⚠️ **这里原来是一句 debug 日志 —— 而 debug 级日志不会被显示。**
+           *
+           * 于是"账户上有别人的交易"这件事从来没有在界面上出现过：
+           * 操作员看到机器人赚了 0.32、账户少了 1.56，无法解释；
+           * **AI 也看到同样的矛盾，而它连"账户上有外部交易"都不知道。**
+           *
+           * 现在按归属分两类，只有真正的外部活动才收集上报：
+           * 属于别的机器人的是正常情况（共用账户），不该刷告警。
+           */
+          if (!trip.entryOrderId || !allOrders.has(trip.entryOrderId)) {
+            foreign.push({
+              symbol,
+              net: trip.grossPnl - trip.entryFee - trip.exitFee,
+              at: trip.closedAt,
+            });
+          }
           log.debug(
             `[${this.deps.trader.name}] 跳过非本机器人开立的成交：${symbol} ${trip.quantity} @ ${trip.entryPrice}（入口订单 ${trip.entryOrderId || '未知'}）`,
           );
@@ -2364,7 +2407,59 @@ export class AutoTrader {
       );
     });
 
-    return { recovered, corrected, funding: fundingTotal };
+    /*
+     * ── 外部交易活动 ──────────────────────────────────────────────────
+     *
+     * 到这一步 foreign 里装的是**不属于本平台任何机器人**的成交。
+     * 它们不是"别人的机器人"（那种是共用账户的正常情况），而是这个账户上
+     * 有本平台之外的东西在交易 —— **它产生的盈亏直接从余额里进出，而账面看不见**。
+     *
+     * 这正是「机器人显示一直在挣钱、账户却在缩水」的成因，也是 AI 无法
+     * 解释的那个矛盾。所以必须上报，不能只写 debug。
+     */
+    const foreignNet = Number(foreign.reduce((sum, r) => sum + r.net, 0).toFixed(6));
+    const foreignSymbols = [...new Set(foreign.map((r) => r.symbol))];
+    /*
+     * 持久化：这一页要在**机器人停止之后**仍然能显示它 —— 而停止之后
+     * 就不会再跑对账了，只放在内存里等于关掉页面就没了。
+     */
+    settings.set(
+      `foreign_activity:${traderId}`,
+      JSON.stringify({
+        rounds: foreign.length,
+        net: foreignNet,
+        symbols: foreignSymbols.slice(0, 20),
+        firstAt: foreign[0]?.at ?? null,
+        lastAt: foreign[foreign.length - 1]?.at ?? null,
+        detectedAt: new Date().toISOString(),
+      }),
+    );
+    if (foreign.length > 0) {
+      const list = foreignSymbols.slice(0, 6).join("、");
+      const more = foreignSymbols.length > 6 ? " 等" : "";
+      /*
+       * 按**状态变化**记，不是每轮都记：这是一个会持续成立的状态
+       * （外部程序一直在跑），每轮刷一条会把日志淹掉。
+       */
+      this.emitOnChange(
+        "foreign-activity",
+        "warn",
+        `账户上发现 ${foreign.length} 笔不属于本平台的成交，净 ${foreignNet.toFixed(4)} USDT` +
+          `（涉及 ${list}${more}）。这些盈亏直接从交易所余额进出，不计入本机器人的绩效。` +
+          "如果这不是你在别的程序或交易所端下的单，请立刻检查账户安全。",
+      );
+    } else {
+      /* 外部活动消失（或本来就没有）时清掉状态，否则会永远挂着一个旧告警。 */
+      this.clearStateNotice("foreign-activity");
+    }
+    
+    return {
+      recovered,
+      corrected,
+      funding: fundingTotal,
+      foreignRounds: foreign.length,
+      foreignNet,
+    };
   }
 
   /* ---------------------------------------------------------------------- */
@@ -4575,5 +4670,27 @@ export function describeCycleFailure(error: unknown, phase: CycleFailurePhase): 
       return `交易所下单失败：${detail}。这笔订单没有得到交易所确认，可能并未成交；请核对交易所的持仓与挂单，机器人下一轮会重新对账。`;
     case 'bookkeeping':
       return `未知错误：${detail}。本轮在账务 / 对账环节失败，且错误不属于已知的模型、行情或交易所类别；该周期已经拿到的提示词与执行记录已尽量保存，请结合运行日志排查。`;
+  }
+}
+
+/**
+ * 读最近一次对账检测到的外部交易活动。
+ *
+ * 解析失败时返回空对象而**不是抛错**：这是给模型看的注解，
+ * 一个读不出来的注解不该让整个周期失败。但也不会静默假装"没有外部活动" ——
+ * 认不出就返回空，让 prompt 那一行不渲染（见那里的 `> 0` 判断）。
+ */
+function readForeignActivity(traderId: number): { foreignRounds?: number; foreignNet?: number } {
+  try {
+    const raw = settings.get(`foreign_activity:${traderId}`);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as { rounds?: number; net?: number };
+    if (typeof parsed.rounds !== "number" || parsed.rounds <= 0) return {};
+    return {
+      foreignRounds: parsed.rounds,
+      foreignNet: typeof parsed.net === "number" ? parsed.net : 0,
+    };
+  } catch {
+    return {};
   }
 }
