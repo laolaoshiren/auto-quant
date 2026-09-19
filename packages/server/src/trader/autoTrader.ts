@@ -590,7 +590,14 @@ export class AutoTrader {
    *
    * `key` 用来区分不同的状态位（同一个机器人可能同时有多条这类状态）。
    */
-  private emitOnChange(key: string, level: 'info' | 'warn', message: string): void {
+  /*
+   * `level` 含 `'error'`：有些**持续成立**的状态本身就是错误的，而不是"注意一下"。
+   *
+   * 加这条的直接原因是总账校验（`ledger-gap`）—— 「平台的账与交易所对不上」
+   * 意味着账本不可信、而 AI 正照着它决策。把这种状态降级成 `warn` 只是为了让
+   * 它挤进旧签名，那是**让告警去迁就类型**，正好反了。
+   */
+  private emitOnChange(key: string, level: 'info' | 'warn' | 'error', message: string): void {
     if (this.stateNotices.get(key) === message) return;
     this.stateNotices.set(key, message);
     this.emit(level, message);
@@ -2434,7 +2441,72 @@ export class AutoTrader {
         detectedAt: new Date().toISOString(),
       }),
     );
-    if (foreign.length > 0) {
+
+    /*
+     * ── 总账校验 ──────────────────────────────────────────────────────
+     *
+     * 到这里 `incomeEvents`（交易所权威流水）与 `foreign`（外部活动）都在手上，
+     * 正好可以做一次**总账级**的对账 —— 它回答「平台整体记的账，与交易所实际
+     * 发生的，能不能对上」。
+     *
+     * 这是唯一能**自动**发现「机器人显示在挣钱、账户却在缩水」这类故障的地方：
+     * 账本自己不会说自己错了，只有拿它和权威流水比才知道。
+     */
+    const exchangeNet = incomeEvents.reduce((sum, e) => {
+      /*
+       * 只算交易口径。`TRANSFER`（入金/出金）不是盈亏 ——
+       * 把它算进来会让「刚充过钱」看起来像「赚了钱」。
+       * 未知的 incomeType 也一并跳过：宁可不计入，也不要凭猜归类。
+       */
+      if (
+        e.incomeType !== 'REALIZED_PNL' &&
+        e.incomeType !== 'COMMISSION' &&
+        e.incomeType !== 'FUNDING_FEE'
+      ) {
+        return sum;
+      }
+      return sum + (Number(e.income) || 0);
+    }, 0);
+    
+    /* 平台侧：所有机器人的已实现净额 + 外部活动净额。 */
+    const platformNet = tradeStore.netForAllTraders() + foreignNet;
+    const ledgerGap = Number((platformNet - exchangeNet).toFixed(6));
+    
+    /*
+     * 阈值 0.01 USDT：浮点误差远小于它，而任何一笔真实的漏记/错记都大于它
+     * （这个账户上最小的一笔成交手续费是 0.0005）。
+     */
+    const LEDGER_GAP_TOLERANCE = 0.01;
+    settings.set(
+      `ledger_check:${traderId}`,
+      JSON.stringify({
+        platformNet: Number(platformNet.toFixed(6)),
+        exchangeNet: Number(exchangeNet.toFixed(6)),
+        gap: ledgerGap,
+        checkedAt: new Date().toISOString(),
+      }),
+    );
+    
+    if (Math.abs(ledgerGap) > LEDGER_GAP_TOLERANCE) {
+      /*
+       * ⚠️ **这条告警比外部活动那条更严重。**
+       *
+       * 外部活动只是"账户上有别人的交易"，而账本本身是对的。
+       * 这里是**账本本身与交易所对不上** —— 意味着平台记录的盈亏不可信，
+       * 而 AI 正是照着它做决策的。
+       */
+      this.emitOnChange(
+        "ledger-gap",
+        "error",
+        `账目与交易所对不上：平台记录 ${platformNet.toFixed(4)} USDT、` +
+          `交易所流水 ${exchangeNet.toFixed(4)} USDT，差 ${ledgerGap.toFixed(4)}。` +
+          "这个差额既不是外部活动、也不是资金费 —— 平台的账本可能有漏记或重复记账，" +
+          "请先核对再让机器人继续交易。",
+      );
+    } else {
+      this.clearStateNotice("ledger-gap");
+    }
+        if (foreign.length > 0) {
       const list = foreignSymbols.slice(0, 6).join("、");
       const more = foreignSymbols.length > 6 ? " 等" : "";
       /*
