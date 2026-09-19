@@ -159,6 +159,34 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
         }
 
         return {
+          /*
+           * ⚠️ **顺序是有意的：`repeatedFields` 必须在 `recent` 之前。**
+           *
+           * `bound()` 截断时**只保留前 N 个字符**（`preview: text.slice(0, MAX_JSON_CHARS)`），
+           * 而 `recent` 每一条都带着完整的 `asked` / `applied` 补丁 JSON —— 十几条就能
+           * 吃满预算。第一版把聚合放在 `recent` 后面，于是**最该被看到的那一项正好
+           * 落在截断线之外**。
+           *
+           * 实测代价（真实运行 #121 里模型自己的话）：
+           *
+           *   「get_experiments 被截断，没看到 repeatedFields（提示词明确要求看它）；
+           *     再看最近决策的被拒率。**用最小 limit 避开截断**。」
+           *
+           * —— 它为此**多花了一轮工具调用**去重读，而那一轮的预算本来就不够用
+           * （它最后正是死在"剩余预算不足以再读一类新信息"上）。
+           *
+           * 一条被自己撑爆的返回，等于没给。
+           */
+          repeatedFields: [...perField.entries()]
+            .filter(([, agg]) => agg.times >= 2)
+            .sort((a, b) => b[1].times - a[1].times)
+            .map(([field, agg]) => ({
+              field,
+              times: agg.times,
+              settled: agg.settled,
+              pending: agg.pending,
+              netPnlSince: Math.round(agg.netPnl * 10_000) / 10_000,
+            })),
           recent: rows.map((e) => ({
             at: e.createdAt,
             trigger: e.trigger,
@@ -171,20 +199,6 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
             outcomeTrades: e.outcomeTrades,
             outcomeNetPnl: e.outcomeNetPnl,
           })),
-          /*
-           * 只列**改过两次以上**的字段：改一次是正常迭代，反复改才是信号。
-           * 按次数倒序 —— 最该被质疑的那个排在最前面。
-           */
-          repeatedFields: [...perField.entries()]
-            .filter(([, agg]) => agg.times >= 2)
-            .sort((a, b) => b[1].times - a[1].times)
-            .map(([field, agg]) => ({
-              field,
-              times: agg.times,
-              settled: agg.settled,
-              pending: agg.pending,
-              netPnlSince: Math.round(agg.netPnl * 10_000) / 10_000,
-            })),
         };
       },
 

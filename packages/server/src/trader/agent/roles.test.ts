@@ -100,6 +100,26 @@ test('风控官拿不到交易员的角色上下文（隔离是声明式的）',
   assert.notEqual(contextFor('risk_officer'), contextFor('trader'));
 });
 
+test('★ 策略师必须被告知"给结论的唯一方式是 finish"', () => {
+  /*
+   * 真实的一次失败（运行 #121）：它在**还剩两次调用预算**时输出了一段
+   * **只有 thought、没有 tool** 的总结 —— 整段话读起来完全像结论，
+   * 而那一轮的 15 万输入 token 全部白烧，循环以 `failed` 收场。
+   *
+   * 根因在提示词：COMMON 的铁律 3 写着"你的输出必须是一个 JSON 对象"
+   * （那对**单次调用**的角色是对的 —— 绩效、归因、复盘都只被调用一次），
+   * 而**策略师走的是工具循环**。它的「输出：」段只描述了结论结构，
+   * 从没说那个结构要放进 `finish` —— 模型于是照着结构吐了一份没有 `tool` 的 JSON。
+   *
+   * 这条用例钉住那段协议说明不会被后人删掉。
+   */
+  const s = ROLES.strategist.system;
+  assert.match(s, /工具循环/, '必须说明它在跑一个工具循环');
+  assert.match(s, /finish/, '必须点名 finish 这个工具');
+  assert.match(s, /每一轮/, '要说清"每一轮回复都必须是工具调用"');
+  assert.match(s, /没有 tool|不写 tool/, '要说清"只写 thought 会被判失败"');
+});
+
 test('行情分析师拿不到账户绩效 —— 那会干扰对行情本身的判断', () => {
   assert.equal(contextFor('market_analyst'), 'market');
   assert.equal(contextFor('performance_analyst'), 'strategy_review');

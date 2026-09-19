@@ -24,6 +24,7 @@ import { closeDb, initDb } from '../../db/index.js';
 import { agentExperiments, agentRuns } from '../../store/agentStore.js';
 import { aiModels, exchanges, strategies, traders, trades } from '../../store/repositories.js';
 import { clearPause, leafPaths, makeAgentPorts, markStrategyReview, markWoken, readPause, saveMemory } from './ports.js';
+import { MAX_JSON_CHARS } from './tools.js';
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'aq-ports-'));
 const config = (): StrategyConfig =>
@@ -298,14 +299,56 @@ test('leafPaths 摊到叶子字段，数组与 null 不展开', () => {
   assert.deepEqual(leafPaths('scalar'), [], '没有前缀的标量不是字段');
 });
 
+test('★ repeatedFields 必须落在截断线之内 —— 所以它排在 recent 前面', () => {
+  /*
+   * `bound()` 截断时**只保留前 N 个字符**，而 `recent` 每一条都带着完整的
+   * `asked` / `applied` 补丁 JSON，十几条就吃满预算。
+   *
+   * 第一版把聚合放在 `recent` **后面**，于是最该被看到的那一项正好落在截断线之外。
+   * 实测代价（真实运行 #121 里模型自己的话）：
+   *
+   *   「get_experiments 被截断，没看到 repeatedFields（提示词明确要求看它）；
+   *     再看最近决策的被拒率。**用最小 limit 避开截断**。」
+   *
+   * 它为此多花了一轮工具调用去重读 —— 而那一轮最后正是死在"剩余预算不足以再读
+   * 一类新信息"上。**一条被自己撑爆的返回等于没给。**
+   */
+  const fat = { riskControl: { minPositionSize: 5.1, note: 'x'.repeat(400) } };
+  for (let i = 0; i < 12; i += 1) {
+    agentExperiments.insert({
+      traderId,
+      trigger: 'losing_streak',
+      observed: {},
+      patch: fat,
+      applied: fat,
+      clamps: [],
+      reason: '账户太小、门槛不可达',
+      toolCalls: [],
+    });
+  }
+
+  const text = JSON.stringify(ports().toolReads.experiments(20));
+
+  // 前提断言：这份返回**确实会**被截断，否则这条用例测不到东西。
+  assert.ok(
+    text.length > MAX_JSON_CHARS,
+    `构造的返回只有 ${text.length} 字符，没到截断线（${MAX_JSON_CHARS}），这条用例失去意义`,
+  );
+
+  const preview = text.slice(0, MAX_JSON_CHARS);
+  assert.match(preview, /repeatedFields/, '聚合字段必须落在截断线之内');
+  assert.match(preview, /riskControl\.minPositionSize/);
+});
+
 test('★ repeatedFields 数出"同一个参数改过几次、合计结果如何"', () => {
   /*
-   * 实测的形状：`minPositionSize` 被连着改了五次（12→6→6→5.5→5.1），每次理由都是
-   * 同一句"账户太小、门槛不可达"，而每次结算的结果都是负的。
+   * 实测的形状：`minPositionSize` 与 `promptSections.decisionProcess` 是被反复调整的
+   * 两项（真实数据：4 次与 5 次），而它们一直散在十几条其它改动中间。要看出"我在同一个
+   * 地方反复动手"，得先把它们数出来 —— 而**数这件事该由程序做**。
    *
-   * 那五条记录一直都在 `get_experiments` 的返回里，只是散在别的改动中间。要看出
-   * "我在原地打转"，得先把它们数出来 —— 而**数这件事该由程序做**，不该指望模型
-   * 每次自己从一列散记录里翻。
+   * ⚠️ 注意 `netPnlSince` 的语义：它是"**这次改动之后那个窗口的净额**"，**不是这次
+   * 改动的因果效果**（账户在动、市场也在动）。真实数据里这两项的窗口净额是 **正的**
+   * （+0.65 / +0.27）—— 所以这个字段只能用来提示"改了几次"，不能用来断言"改坏了"。
    */
   const add = (patch: unknown, netPnl: number | null) => {
     const id = agentExperiments.insert({

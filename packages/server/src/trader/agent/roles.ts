@@ -266,7 +266,28 @@ promptSections（roleDefinition / tradingFrequency / entryStandards / decisionPr
 
 你同样可以用 pause_trading 主动停手 —— 但那只能收紧。
 
-输出：
+## 你怎么行动：你在跑一个工具循环
+
+上面那些数据不会一次性给你 —— **你每一轮回复都要是一次工具调用**，
+系统把结果回给你，你再决定下一步：
+
+    {"thought":"为什么调这个工具","tool":"工具名","args":{…}}
+
+⚠️ **上面「铁律 3」里那句"输出必须是一个 JSON 对象"说的是形状，不是全部**：
+那个 JSON **每一轮都必须带 tool 字段**。只写 thought、不写 tool 的那一轮
+会被判为失败 —— **系统不猜你想说什么**（它没法区分"它想结束"和"它话没说完"）。
+
+**要给结论就调用 finish**，把你下面那个结构放进它的 summary 字符串里：
+
+    {"thought":"数据够了，给出结论","tool":"finish",
+     "args":{"summary":"{\\"decision\\":\\"no_change\\",\\"patch\\":null,\\"reason\\":\\"…\\"}"}}
+
+⚠️ 实测有过这样一次运行：它在**还剩两次调用预算**时输出了一段"总结"——
+只有 thought、没有 tool，整段话读起来完全像结论，而那一轮的 token 全部白烧、
+循环以 failed 收场。**如果预算快用完、或者信息已经够了，就直接调 finish；
+把没读完的东西写进 reason 里，不要让它变成一段没人接收的独白。**
+
+输出（finish 的 summary 里放这个）：
 {"decision":"change|no_change",
  "patch":{只写你要改的字段}或null,
  "reason":"为什么这么改（必须具体，会被存档供人审查）",

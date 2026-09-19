@@ -327,7 +327,7 @@ export interface ToolOutcome {
   paused?: { reason: string };
 }
 
-const MAX_JSON_CHARS = 6000;
+export const MAX_JSON_CHARS = 6000;
 
 /**
  * 把结果裁到模型读得下的长度。
