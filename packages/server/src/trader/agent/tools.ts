@@ -89,7 +89,9 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'get_experiments',
     describe:
-      'Read your OWN past parameter changes together with what actually happened afterwards. This is the only place where you can see whether a change you made helped. Read it before changing anything.',
+      'Read your OWN past parameter changes together with what actually happened afterwards. This is the only place where you can see whether a change you made helped. Read it before changing anything. ' +
+      'Pay close attention to `repeatedFields`: it counts how many times each parameter has been changed, and the realised PnL since. ' +
+      '**Changing the same field over and over while its net result stays negative is going in circles — that is evidence the approach does not work, not a reason to nudge the number once more.**',
     args: {
       limit: { type: 'number', min: 1, max: 30, default: 10, describe: 'How many past experiments.' },
     },

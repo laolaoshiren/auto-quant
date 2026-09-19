@@ -124,19 +124,69 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
           accountEquity: s.accountEquity,
         })),
 
-      experiments: (limit) =>
-        agentExperiments.recent(traderId, limit).map((e) => ({
-          at: e.createdAt,
-          trigger: e.trigger,
-          reason: e.reason,
-          // 想让改什么、实际生效什么 —— 两者不同时必须看得出来
-          asked: safeJson(e.patchJson),
-          applied: safeJson(e.appliedJson),
-          clamps: safeJson(e.clampsJson),
-          // ⚠️ 这三个决定"它能不能学到东西"。null 表示还没结算。
-          outcomeTrades: e.outcomeTrades,
-          outcomeNetPnl: e.outcomeNetPnl,
-        })),
+      /*
+       * ⚠️ **散记录不够，还要给出"同一个参数改过几次、合计效果如何"。**
+       *
+       * 实测的形状：`agent_experiments` 里 `minPositionSize` 被连着改了五次
+       * （12→6→6→5.5→5.1），每次理由都是同一句"账户太小、门槛不可达"——
+       * **而每次结算的结果都是负的**。
+       *
+       * 那五条记录一直都在 `get_experiments` 的返回里，只是散在十几条别的改动中间。
+       * 要看出"我在原地打转"，得先把它们数出来 —— 而**数这件事该由程序做**，
+       * 不该指望模型每次自己从一列散记录里翻。
+       *
+       * 这与 `get_lessons` 的 `recurringTags` 是同一条思路：单条说的是"这一次"，
+       * 聚合说的是"我一直在同一个地方"。
+       */
+      experiments: (limit) => {
+        const rows = agentExperiments.recent(traderId, limit);
+
+        const perField = new Map<
+          string,
+          { times: number; settled: number; netPnl: number; pending: number }
+        >();
+        for (const row of rows) {
+          for (const field of leafPaths(safeJson(row.patchJson))) {
+            const agg = perField.get(field) ?? { times: 0, settled: 0, netPnl: 0, pending: 0 };
+            agg.times += 1;
+            if (row.outcomeNetPnl === null) agg.pending += 1;
+            else {
+              agg.settled += 1;
+              agg.netPnl += row.outcomeNetPnl;
+            }
+            perField.set(field, agg);
+          }
+        }
+
+        return {
+          recent: rows.map((e) => ({
+            at: e.createdAt,
+            trigger: e.trigger,
+            reason: e.reason,
+            // 想让改什么、实际生效什么 —— 两者不同时必须看得出来
+            asked: safeJson(e.patchJson),
+            applied: safeJson(e.appliedJson),
+            clamps: safeJson(e.clampsJson),
+            // ⚠️ 这三个决定"它能不能学到东西"。null 表示还没结算。
+            outcomeTrades: e.outcomeTrades,
+            outcomeNetPnl: e.outcomeNetPnl,
+          })),
+          /*
+           * 只列**改过两次以上**的字段：改一次是正常迭代，反复改才是信号。
+           * 按次数倒序 —— 最该被质疑的那个排在最前面。
+           */
+          repeatedFields: [...perField.entries()]
+            .filter(([, agg]) => agg.times >= 2)
+            .sort((a, b) => b[1].times - a[1].times)
+            .map(([field, agg]) => ({
+              field,
+              times: agg.times,
+              settled: agg.settled,
+              pending: agg.pending,
+              netPnlSince: Math.round(agg.netPnl * 10_000) / 10_000,
+            })),
+        };
+      },
 
       lessons: (limit) => {
         const rows = agentMemory.recent(traderId, limit);
@@ -368,6 +418,27 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
 /* -------------------------------------------------------------------------- */
 /*  辅助                                                                       */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * 把嵌套的 patch 摊平成**叶子路径**（`riskControl.minPositionSize`）。
+ *
+ * 只摊平普通对象：**数组与 `null` 都当成叶子** —— `emaPeriods.0` 这种带下标的
+ * 路径对模型没有价值，而"`indicators.emaPeriods` 改过 3 次"才是它想问的问题。
+ *
+ * 摊平是必要的：`patch` 是嵌套的（`{riskControl:{minPositionSize:6}}`），
+ * 不摊平的话 `riskControl` 这一层会把**所有**风险参数的改动混成一个计数，
+ * 而那正好掩盖了"反复改的是哪一项"。
+ */
+export function leafPaths(value: unknown, prefix = ''): string[] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return prefix ? [prefix] : [];
+  }
+  const out: string[] = [];
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    out.push(...leafPaths(child, prefix ? `${prefix}.${key}` : key));
+  }
+  return out;
+}
 
 /** 行里存的是 JSON 文本；坏了就返回原始文本，而不是抛错让整条流程失败。 */
 function safeJson(text: string): unknown {

@@ -23,7 +23,7 @@ import { defaultStrategyConfig, STRATEGY_PRESETS, StrategyConfigSchema, type Str
 import { closeDb, initDb } from '../../db/index.js';
 import { agentExperiments, agentRuns } from '../../store/agentStore.js';
 import { aiModels, exchanges, strategies, traders, trades } from '../../store/repositories.js';
-import { clearPause, makeAgentPorts, markStrategyReview, markWoken, readPause, saveMemory } from './ports.js';
+import { clearPause, leafPaths, makeAgentPorts, markStrategyReview, markWoken, readPause, saveMemory } from './ports.js';
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'aq-ports-'));
 const config = (): StrategyConfig =>
@@ -277,3 +277,76 @@ test('记忆写入挂在真实成交上', () => {
   const again = saveMemory(traderId, { symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1, lesson: 'y', tags: [] }, tradeId);
   assert.equal(again, false, '同一笔不该写两条互相矛盾的经验');
 });
+
+/* -------------------------------------------------------------------------- */
+/*  实验的聚合：同一个参数被反复改                                              */
+/* -------------------------------------------------------------------------- */
+
+test('leafPaths 摊到叶子字段，数组与 null 不展开', () => {
+  /*
+   * 摊平是必要的：`patch` 是嵌套的，不摊平的话 `riskControl` 这一层会把**所有**
+   * 风险参数的改动混成一个计数 —— 而那正好掩盖了"反复改的是哪一项"。
+   */
+  assert.deepEqual(leafPaths({ riskControl: { minPositionSize: 6 } }), ['riskControl.minPositionSize']);
+  assert.deepEqual(
+    leafPaths({ indicators: { emaPeriods: [9, 21] }, customPrompt: null }),
+    ['indicators.emaPeriods', 'customPrompt'],
+    '数组与 null 都当成叶子 —— `emaPeriods.0` 这种带下标的路径对模型没有价值',
+  );
+  assert.deepEqual(leafPaths({ a: { b: { c: 1 } } }), ['a.b.c'], '多层要一直摊到底');
+  assert.deepEqual(leafPaths({}), [], '空对象没有叶子');
+  assert.deepEqual(leafPaths('scalar'), [], '没有前缀的标量不是字段');
+});
+
+test('★ repeatedFields 数出"同一个参数改过几次、合计结果如何"', () => {
+  /*
+   * 实测的形状：`minPositionSize` 被连着改了五次（12→6→6→5.5→5.1），每次理由都是
+   * 同一句"账户太小、门槛不可达"，而每次结算的结果都是负的。
+   *
+   * 那五条记录一直都在 `get_experiments` 的返回里，只是散在别的改动中间。要看出
+   * "我在原地打转"，得先把它们数出来 —— 而**数这件事该由程序做**，不该指望模型
+   * 每次自己从一列散记录里翻。
+   */
+  const add = (patch: unknown, netPnl: number | null) => {
+    const id = agentExperiments.insert({
+      traderId,
+      trigger: 'losing_streak',
+      observed: {},
+      patch,
+      applied: patch,
+      clamps: [],
+      reason: '账户太小、门槛不可达',
+      toolCalls: [],
+    });
+    if (netPnl !== null) agentExperiments.settle(id, { trades: 1, netPnl });
+    return id;
+  };
+
+  // 同一个字段改三次（两次已结算、一次还在等）
+  add({ riskControl: { minPositionSize: 6 } }, -0.1);
+  add({ riskControl: { minPositionSize: 5.5 } }, -0.2);
+  add({ riskControl: { minPositionSize: 5.1 } }, null);
+  // 另一个字段只改过一次 —— 那是正常迭代，不该出现在 repeatedFields 里
+  add({ riskControl: { leverage: 3 } }, 0.4);
+
+  const out = ports().toolReads.experiments(20) as {
+    recent: unknown[];
+    repeatedFields: Array<{ field: string; times: number; settled: number; pending: number; netPnlSince: number }>;
+  };
+
+  assert.ok(Array.isArray(out.recent), '散记录仍然要给出来');
+
+  const top = out.repeatedFields[0];
+  assert.ok(top, '至少该有一项被反复改过');
+  assert.equal(top.field, 'riskControl.minPositionSize');
+  assert.equal(top.times, 3, '三次都要数上，包括还没结算的那次');
+  assert.equal(top.settled, 2, '两次有结果');
+  assert.equal(top.pending, 1, '一次还在等结果');
+  assert.ok(Math.abs(top.netPnlSince - -0.3) < 1e-9, `合计净额应为 -0.3，实际 ${top.netPnlSince}`);
+
+  assert.ok(
+    !out.repeatedFields.some((f) => f.field === 'riskControl.leverage'),
+    '只改过一次的字段是正常迭代，不该混进来',
+  );
+});
+
