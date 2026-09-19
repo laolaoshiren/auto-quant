@@ -88,7 +88,19 @@ async function main(): Promise<void> {
 
   /* --- HTTP ------------------------------------------------------------- */
   await app.listen({ port: env.port, host: env.host });
-  log.info(`控制台地址：http://${env.host}:${env.port}`);
+  /*
+   * ⚠️ **不回显绑定的 host。**
+   *
+   * 这条日志会进控制台的「数据与日志」页（登录后就能看见），而 `server.ts` 的
+   * health 端点那边有一整段注释刻意避免泄漏部署布局 —— 同一个原则不该在这里反过来。
+   *
+   * `172.17.0.1` 单独看只是通用的 Docker 网桥地址，但它与"服务绑在容器网关上"
+   * 这件事一起出现时，就是在给"下一步该打哪里"提供线索；而日志里并没有任何
+   * 需要这条 host 才能完成的判断。
+   *
+   * **端口仍然打印** —— 那是排障时真正要用的信息，而它本身没有指向性。
+   */
+  log.info(`控制台已就绪（端口 ${env.port}）`);
   log.info(
     `交易环境：${publicConnection.endpoints.label}${env.dryRun ? ' | 干跑模式（DRY_RUN=true）' : ''}`,
   );
