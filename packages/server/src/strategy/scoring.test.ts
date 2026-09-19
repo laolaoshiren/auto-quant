@@ -109,6 +109,45 @@ test('横盘的趋势分接近 0', () => {
   assert.ok(Math.abs(t) < 0.2, `横盘不应有强趋势分，实际 ${t}`);
 });
 
+test('下行趋势不该被系统性压低 —— 那是"可以做空的结构"，不是"质量差"', () => {
+  /*
+   * 这是"把方向当质量"造成的具体伤害（交付记录里的原文）：
+   *
+   *     | BTC（4H 偏空）  | 负 × 40 → 钳到 0 | **被滤掉**
+   *     | ZEC（24h +17%） | 满分 → +40       | **入选**
+   *
+   * 于是门槛同时做了两件**方向相反**的坏事：滤掉唯一能交易的标的（BTC/ETH），
+   * 留下模型一定会拒绝的超买山寨币 —— 它接着正确地拒绝了 ZEC
+   * （「4H RSI 85，抛物线末端的追高」）。
+   *
+   * 修法：**保留 `parts.trend` 的符号**（方向是有用信息，上面那条用例钉住它），
+   * 但**总分取绝对值** —— 总分回答的是"这个标的值不值得放进提示词"，
+   * 而"4h 明确向下"与"4h 明确向上"一样是**可交易的结构**（一个做多、一个做空）。
+   */
+  const up = scoreSymbol(flat(40), uptrend(60));
+  const down = scoreSymbol(flat(40), downtrend(60));
+
+  // 分量仍带符号：方向信息一点都没丢。
+  assert.ok(up.parts.trend > 0, `上行分量应为正，实际 ${up.parts.trend}`);
+  assert.ok(down.parts.trend < 0, `下行分量应为负，实际 ${down.parts.trend}`);
+
+  /*
+   * ⚠️ 这两个分数**不是完全相等**，差 1.18 分（实测），来源是 `trendScore` 里
+   * `slope = (now - prev) / |prev|` 的分母：上行的 `prev` 大、下行的 `prev` 小，
+   * 同样的绝对变化在下行那边算出略大的比率。那是斜率定义的固有性质，
+   * **不是"把方向当质量"** —— 后者实测会造成 **26.72 分**的差距
+   * （trend 分量上行 +0.319 / 下行 −0.349，按有符号加权）。
+   *
+   * 阈值取 5：远小于 26.72（能抓住那个回归），也容得下这 1.18 的固有不对称。
+   */
+  assert.ok(
+    Math.abs(up.total - down.total) < 5,
+    `同一段行情的上行与下行总分应当接近（up=${up.total} down=${down.total}）—— ` +
+      '差得很多说明总分里还在把方向当质量。' +
+      `实测分量：up.trend=${up.parts.trend} down.trend=${down.parts.trend}`,
+  );
+});
+
 test('K 线太少时趋势分给 0，而不是从一个不可靠的斜率外推', () => {
   assert.equal(scoreSymbol(flat(40), uptrend(10)).parts.trend, 0);
 });
@@ -220,7 +259,7 @@ test('总分 = 各分量按权重求和 —— 这是唯一能精确测到"惩�
   for (const [k15, k4] of cases) {
     const s = scoreSymbol(k15, k4);
     const expected =
-      s.parts.trend * SCORE_WEIGHTS.trend +
+      Math.abs(s.parts.trend) * SCORE_WEIGHTS.trend +
       s.parts.breakoutVolume * SCORE_WEIGHTS.breakoutVolume +
       s.parts.consolidation * SCORE_WEIGHTS.consolidation -
       s.parts.volatilityPenalty * SCORE_WEIGHTS.volatilityPenalty;

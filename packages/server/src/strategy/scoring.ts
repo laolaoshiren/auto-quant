@@ -45,8 +45,17 @@ import { atr, ema, last } from '../market/indicators.js';
  * 各分量的权重。**总和不必是 100** —— 最后会钳到 0–100。
  *
  * 数值取"趋势与量能占大头、整理是中性的加分、波动是减分"这个相对关系，
- * 而不是精确的最优解。**最优解要靠 A/B 测出来**（见 `PROPOSAL-scoring-gate.md` 第 4 节），
- * 而现在给一个合理的起点即可 —— **这些权重在 AI 托管模式下是 AI 可以调的参数**。
+ * 而不是精确的最优解。**最优解要靠 A/B 测出来**（见 `PROPOSAL-scoring-gate.md` 第 4 节）。
+ *
+ * ⚠️ **这四项目前是硬编码的，AI 调不到它们。**
+ *
+ * 这里原来写着"这些权重在 AI 托管模式下是 AI 可以调的参数"—— **那句话是假的**：
+ * `SCORE_WEIGHTS` 只在 `scoring.ts` 内部被用到，从来没有进过 `StrategyConfig`，
+ * 而 AI 的 `set_params` 只能改配置里有的字段。它**顶多能调门槛值 `minScore`**。
+ *
+ * 把权重暴露出去是另一件事（要进 schema、要过守卫、要重算 `estimateCandidateChars`
+ * 的预算），在没做之前，注释不该说它已经能调 —— **一条描述不存在行为的注释，
+ * 会让下一个读它的人以为自己错了**（这个仓库里已经出现过三次同类问题）。
  */
 export const SCORE_WEIGHTS = {
   trend: 40,
@@ -195,14 +204,47 @@ export function scoreSymbol(klines15m: readonly Kline[], klines4h: readonly Klin
   const consolidation = consolidationScore(klines15m);
   const penalty = volatilityPenalty(klines15m);
 
+  /*
+   * ⚠️ **总分里取趋势的绝对值 —— 方向不是质量。**
+   *
+   * `trendScore` 返回**有符号**的方向，那个符号是有价值的信息，所以
+   * `parts.trend` 原样保留它（`scoring.test.ts` 有一条用例专门钉住"下行给负分"）。
+   *
+   * **但把它直接加权进总分是错的。** 总分回答的问题是
+   * "**这个标的值不值得放进提示词**"，而"4h 明确向下"与"4h 明确向上"一样是
+   * **可交易的结构**（一个做多、一个做空）—— 它不是"质量差"。
+   *
+   * 实测伤害（交付记录里的原文）：
+   *
+   *     | BTC（4H 偏空）  | 负 × 40 → 钳到 0 | **被滤掉**
+   *     | ZEC（24h +17%） | 满分 → +40       | **入选**
+   *
+   * 用两条对称的测试行情量一下（同一段 15m，只把 4h 换成上行 / 下行）：
+   *
+   *     trend 分量：上行 +0.319、下行 −0.349
+   *     按**有符号**加权：总分差 **26.72 分**   ← 修前
+   *     按**绝对值**加权：总分差 **1.18 分**    ← 修后
+   *
+   * 26.72 分在 0–100 的评分里足以把一个"可以做空"的标的整段滤掉。修后剩下的
+   * 1.18 分来自 `trendScore` 里 `slope = (now - prev) / |prev|` 的分母：上行的
+   * `prev` 大、下行的 `prev` 小，同样的绝对变化在下行那边算出略大的比率 ——
+   * 那是斜率定义的固有性质，不是方向偏见。
+   *
+   * 这也和 `breakoutVolumeScore` 从一开始就是双向的（`brokeUp || brokeDown`）
+   * 是同一条道理 —— 现在两者一致了。
+   *
+   * 影响面：门槛（`coinSource.minScore`）默认是 **0（关闭）**，所以这个修正
+   * **不改变当前行为**；它改变的是"门槛可以被安全打开"这件事。
+   */
   const raw =
-    trend * SCORE_WEIGHTS.trend +
+    Math.abs(trend) * SCORE_WEIGHTS.trend +
     breakoutVolume * SCORE_WEIGHTS.breakoutVolume +
     consolidation * SCORE_WEIGHTS.consolidation -
     penalty * SCORE_WEIGHTS.volatilityPenalty;
 
   return {
     total: Math.round(Math.max(0, Math.min(100, raw)) * 100) / 100,
+    // ⚠️ `trend` 在这里**保持原符号** —— 它是方向信息，不是质量分。
     parts: { trend, breakoutVolume, consolidation, volatilityPenalty: penalty },
   };
 }
