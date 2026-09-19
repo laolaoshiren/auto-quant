@@ -25,6 +25,7 @@
     "test:feed": "node scripts/ssr-decision-feed.mjs",
     "notices": "node scripts/generate-notices.mjs",
     "check:links": "node scripts/check-links.mjs",
+    "check:routes": "node scripts/check-api-routes.mjs",
     "ui:smoke": "node scripts/ui-smoke.mjs",
     "demo": "tsx packages/server/src/scripts/demoCycle.ts",
     "sim": "tsx packages/server/src/scripts/simulate.ts",
