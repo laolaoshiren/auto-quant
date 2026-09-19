@@ -265,8 +265,20 @@ RestartSec=5
 # 崩溃循环保护：5 分钟内重启超过 5 次就放弃，避免无限重启掩盖真实故障
 StartLimitIntervalSec=300
 StartLimitBurst=5
-StandardOutput=append:/opt/autoquant/data/server.log
-StandardError=append:/opt/autoquant/data/server.log
+
+# ⚠️ **日志走 journald —— 不要在这里写 `StandardOutput=append:…`。**
+#
+# 原来这两行指向 `/opt/autoquant/data/server.log`，而那份文件**只会增长**：
+# 部署机上的 `/etc/logrotate.d/` 里没有它的配置，unit 也不做轮转。
+# 实测 5 天 2.1 MB —— 本身不算大，但**一次刷屏就能把它推上去**
+# （例如同一条状态被每个周期播报一遍），而**磁盘写满会让服务直接崩掉**。
+#
+# 更要紧的是**不一致**：本文件下面的排查步骤写的全是 `journalctl -u autoquant`，
+# 而 `append:` 让应用日志根本不进 journal —— 照着文档排查的人会发现那里是空的。
+#
+# 删掉那两行就是 systemd 的默认行为（journal），它自带按容量与时间的轮转
+# （见 `journalctl --disk-usage` 与 `/etc/systemd/journald.conf` 的 `SystemMaxUse`）。
+# 于是"文档说的"与"实际发生的"终于是同一件事。
 
 # 基础加固
 NoNewPrivileges=true
