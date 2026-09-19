@@ -251,6 +251,47 @@ test('但它排在回撤与连亏之后 —— 那两条更急', () => {
   assert.equal(decideWake(quiet({ idleCycles: 30, losingStreak: 5 })).trigger, 'losing_streak');
 });
 
+test('idle 的理由必须如实报告窗口内真实发生的事 —— 不能断言没发生过的事', () => {
+  /*
+   * 第一版无论窗口里发生了什么，都写「这期间没有成交、没有被拒、权益也没有变化」，
+   * 而代码只看 `idleCycles`。AI 读完工具返回的真实数据后发现前提是假的 ——
+   * 实验 #7 的 reason 原文：
+   *
+   *   「唤醒理由的三条前提（无成交、无被拒、权益不变）与
+   *     get_recent_decisions / get_equity_curve 直接矛盾：窗口内有 3 次 SOL 被拒、
+   *     2 次成功开仓、权益 9.343→9.456」
+   *
+   * 它花自己那点预算去**证伪**系统给它的前提，然后基于"这个理由在撒谎"做判断。
+   * 一个会说假话的判据污染的是 AI 的整个推理起点。
+   */
+  const d = decideWake(
+    quiet({
+      idleCycles: 25,
+      newClosedTrades: 2,
+      rejectionsSinceLastWake: 3,
+      equityDriftPercent: 0.4,
+    }),
+  );
+
+  assert.equal(d.trigger, 'idle');
+  // 真实数字必须出现在理由里。
+  assert.match(d.why, /新平仓 2 笔/);
+  assert.match(d.why, /被风控拒绝 3 次/);
+  assert.match(d.why, /\+0\.40%/);
+  // 而"什么都没发生"这种断言一句都不能有。
+  assert.doesNotMatch(d.why, /没有成交/);
+  assert.doesNotMatch(d.why, /没有被拒/);
+  assert.doesNotMatch(d.why, /没有变化/);
+});
+
+test('窗口内真的什么都没有时，理由如实说零，并把注意力引向门槛是否可达', () => {
+  const d = decideWake(quiet({ idleCycles: 25 }));
+  assert.equal(d.trigger, 'idle');
+  assert.match(d.why, /新平仓 0 笔/);
+  assert.match(d.why, /被风控拒绝 0 次/);
+  assert.match(d.why, /不可达/);
+});
+
 test('冷却仍然压过它 —— 防抖动对这条同样适用', () => {
   const d = decideWake(quiet({ idleCycles: 30, minutesSinceLastWake: 1 }));
   assert.equal(d.wake, false);

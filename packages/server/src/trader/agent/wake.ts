@@ -196,13 +196,37 @@ export function decideWake(facts: WakeFacts, policy: WakePolicy = DEFAULT_WAKE_P
    * 而后者只是一个数据点。
    */
   if (facts.idleCycles >= policy.idleCycleThreshold) {
+    /*
+     * ⚠️ **理由里的每一个数字都必须是查过的，不能只在文案里断言。**
+     *
+     * 第一版写的是"且这期间没有成交、没有被拒、权益也没有变化"，而代码只看
+     * `idleCycles` —— 于是**只要 20 轮没开仓它就这么说**，哪怕窗口里明明有平仓、
+     * 有被拒、权益也动过。
+     *
+     * 实测后果：AI 在实验 #7 里读完工具返回的真实数据后写道
+     *
+     *   「唤醒理由的三条前提（无成交、无被拒、权益不变）与
+     *     get_recent_decisions / get_equity_curve 直接矛盾：窗口内有 3 次 SOL 被拒、
+     *     2 次成功开仓、权益 9.343→9.456」
+     *
+     * 也就是说它花了自己那点预算去**证伪系统给它的前提**，然后基于"这个理由在
+     * 撒谎"做判断。**一个会说假话的判据比没有判据更糟** —— 它污染的是 AI 的全部
+     * 推理起点。
+     *
+     * 现在把窗口内的真实活动照实写出来。**不改成"四条全为 0 才算触发"**：
+     * 这条判据的全部价值就是发现"参数不可达"，而不可达的典型症状恰恰是**有少量
+     * 被拒**（提出的单子反复被门槛打回）。收紧它等于把最该醒的情形挡在门外。
+     * 把事实给全，让 AI 自己判断"是门槛不可达，还是别的事"。
+     */
     return {
       wake: true,
       trigger: 'idle',
       why:
-        `已连续 ${facts.idleCycles} 个周期没有任何开仓（阈值 ${policy.idleCycleThreshold}），` +
-        '且这期间没有成交、没有被拒、权益也没有变化 —— ' +
-        '**所有既有判据都是 0，只有这条能发现"参数可能不可达"**。请检查入场门槛在当前账户规模与行情下是否成立。',
+        `已连续 ${facts.idleCycles} 个周期没有开仓（阈值 ${policy.idleCycleThreshold}）。` +
+        `这期间：新平仓 ${facts.newClosedTrades} 笔、被风控拒绝 ${facts.rejectionsSinceLastWake} 次、` +
+        `权益变化 ${facts.equityDriftPercent >= 0 ? '+' : ''}${facts.equityDriftPercent.toFixed(2)}%。` +
+        '如果这几项都接近于零，那说明入场门槛在当前账户规模与行情下可能不可达 —— ' +
+        '请检查它是否成立。',
     };
   }
 
