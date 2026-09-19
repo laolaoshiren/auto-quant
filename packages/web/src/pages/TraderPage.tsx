@@ -842,10 +842,16 @@ export function TraderPage() {
                 {fmtInt(foreign.rounds)} 笔 · 净 {fmtSigned(foreign.net, 4)} USDT
               </span>
             </div>
+            {/*
+              ⚠️ **JSX 不解析 Markdown** —— 这里原来写的是 `**直接从交易所余额进出**`，
+              那六个字符会原样出现在界面上。加粗必须用 <strong>。
+              （这个坑在本仓库其它地方也踩过：`DecisionFeed` 里有一条同样的注释。）
+            */}
             <p className="mt-1 text-sm text-ink-mid">
-              这些成交不是这个平台下的单，它们的盈亏**直接从交易所余额进出**，
-              不计入本机器人的绩效。所以「归属权益」与「交易所账户余额」对不上时，
-              差额可能来自这里 —— **不是你的策略在亏。**
+              这些成交不是这个平台下的单，它们的盈亏
+              <strong className="text-ink-hi">直接从交易所余额进出</strong>
+              ，不计入本机器人的绩效。所以「归属权益」与「交易所账户余额」对不上时，
+              差额可能来自这里 —— <strong className="text-ink-hi">不是你的策略在亏。</strong>
             </p>
             {foreign.symbols.length > 0 && (
               <p className="num mt-1 text-sm text-ink-lo">
