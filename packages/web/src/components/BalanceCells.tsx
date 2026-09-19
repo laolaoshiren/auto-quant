@@ -53,7 +53,13 @@ export function BalanceCell({
 
   if (!balance) {
     const message = error ?? '尚未读取到余额。';
-    return (
+    /*
+   * 账户上非本机器人的交易 —— 一句**安静的事实说明**。
+   *
+   * 提到变量里是因为**两个渲染分支都要用它**：第一次只加在"有实时读数"
+   * 那个分支里，而机器人停止时走的是另一个分支，于是它一次都没显示过。
+   */
+  return (
       <div className="w-[196px] max-w-full space-y-1 whitespace-normal">
         <div className="flex items-start gap-1.5">
           {/*
@@ -180,6 +186,22 @@ export function TraderAccountStrip({
       交易所账户
     </span>
   );
+  const foreignNote =
+    foreign != null && foreign.rounds > 0 ? (
+      <span
+        className="text-ink-faint"
+        title={
+          `账户上另有 ${foreign.rounds} 笔不是本平台机器人下的成交，` +
+          `净 ${fmtSigned(foreign.net, 4)} ${unit}。` +
+          '它们的盈亏直接从余额进出、不计入本机器人的绩效 —— ' +
+          '所以「归属权益」与这里的余额对不上时，差额就来自它们。'
+        }
+      >
+        另有 <span className="text-ink-mid">{fmtInt(foreign.rounds)}</span> 笔非本机器人的交易
+        <span className="text-ink-mid"> {fmtSigned(foreign.net, 4)}</span>
+      </span>
+    ) : null;
+
 
   if (!account) {
     /*
@@ -224,6 +246,14 @@ export function TraderAccountStrip({
                 <span className="text-ink-faint">
                   （机器人运行时记录的交易所真实余额，含同一账户下其它机器人的交易）
                 </span>
+                {/*
+                  ⚠️ **两个分支都要有这一句。**
+
+                  第一次加的时候只加在了"有实时读数"那个分支里，
+                  而机器人停止时页面走的是**这个**分支 —— 于是它一次都没显示过。
+                  所以把它提成上面的 `foreignNote`，两处共用同一个节点。
+                */}
+                {foreignNote}
               </>
             ) : (
               <>
@@ -236,6 +266,7 @@ export function TraderAccountStrip({
       </div>
     );
   }
+
 
   return (
     <div className="num flex flex-wrap items-baseline gap-x-4 gap-y-1 border-y border-base-800 bg-base-900/40 px-3 py-2 text-xs text-ink-lo">
@@ -266,32 +297,7 @@ export function TraderAccountStrip({
         {BALANCE_LABEL.equity} <span className="text-ink-mid">{fmtAsset(account.equity, unit)}</span>
       </span>
 
-      {/*
-        ⚠️ **这里是「陈述」，不是「警报」。**
-
-        同一个钱包上「AI 在跑 + 用户自己手动做单」是**完全正当**的用法。
-        原来它是一整块红色警示区、末尾还写「请立刻检查账户安全」——
-        那**假设了恶意**，而对一个正常手动交易的用户，那块警示每次开面板
-        都占着一整块、还在暗示他的账户出了问题。
-
-        所以现在：**一行、小字、中性措辞、放在它解释的那个数字旁边**。
-        系统的职责是说清差额从哪来；它分不清「用户手动」和「被盗」，
-        而拿不准的事不该由它下结论。
-      */}
-      {foreign != null && foreign.rounds > 0 && (
-        <span
-          className="text-ink-faint"
-          title={
-            `账户上另有 ${foreign.rounds} 笔不是本平台机器人下的成交，` +
-            `净 ${fmtSigned(foreign.net, 4)} ${unit}。` +
-            '它们的盈亏直接从余额进出、不计入本机器人的绩效 —— ' +
-            '所以「归属权益」与这里的余额对不上时，差额就来自它们。'
-          }
-        >
-          另有 <span className="text-ink-mid">{fmtInt(foreign.rounds)}</span> 笔非本机器人的交易
-          <span className="text-ink-mid"> {fmtSigned(foreign.net, 4)}</span>
-        </span>
-      )}
+      {foreignNote}
       {openOrderMargin > 0 && (
         <span className="text-ink-faint">
           {BALANCE_LABEL.openOrderMargin} <span className="text-ink-mid">{fmtNum(openOrderMargin)}</span>
