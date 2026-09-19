@@ -826,44 +826,20 @@ export function TraderPage() {
         )}
 
         {/*
-          账户上有不属于本平台的交易。
+          ⚠️ **这里原来是一整块红色警示区，标题「账户上有不属于本平台的交易」，
+          最后一句「请立刻到交易所检查 API Key 与账户安全」。已删除。**
 
-          **放在这里而不是塞进说明文字里**：它解释的是操作员最容易误解的那个现象 ——
-          「机器人显示在赚钱，账户却在缩水」。两者都对，差额来自这些交易。
+          它假设了恶意。但同一个钱包上「AI 在跑 + 用户自己手动做单」是
+          **完全正当、也很常见**的用法 —— 对这样的用户，那块警示是：
+          每次打开面板都占着一整块、用红色暗示账户出了问题，而他什么都没做错。
 
-          用 `down` 色调而不是 `warn`：这不是"注意一下"，是**账户里的钱在减少、
-          而原因可能不在你的机器人身上**（也可能是别人在用这个账户）。
+          **这个错误我犯过第二次**：之前是 `hold` 被报成「执行失败」——
+          同样是**把正常情况渲染成异常**。一条把正常行为报成问题的提示，
+          会让人不再相信所有提示。
+
+          现在它降级成「交易所账户」那一行里的一句安静说明 ——
+          **放在它解释的那个数字旁边**，而不是抢走整页的注意力。
         */}
-        {foreign !== null && foreign.rounds > 0 && (
-          <div className="rounded-md border border-down/60 bg-down/10 px-3 py-2 text-base text-ink-hi">
-            <div className="flex flex-wrap items-baseline gap-x-2">
-              <span className="font-semibold text-down">账户上有不属于本平台的交易</span>
-              <span className="num">
-                {fmtInt(foreign.rounds)} 笔 · 净 {fmtSigned(foreign.net, 4)} USDT
-              </span>
-            </div>
-            {/*
-              ⚠️ **JSX 不解析 Markdown** —— 这里原来写的是 `**直接从交易所余额进出**`，
-              那六个字符会原样出现在界面上。加粗必须用 <strong>。
-              （这个坑在本仓库其它地方也踩过：`DecisionFeed` 里有一条同样的注释。）
-            */}
-            <p className="mt-1 text-sm text-ink-mid">
-              这些成交不是这个平台下的单，它们的盈亏
-              <strong className="text-ink-hi">直接从交易所余额进出</strong>
-              ，不计入本机器人的绩效。所以「归属权益」与「交易所账户余额」对不上时，
-              差额可能来自这里 —— <strong className="text-ink-hi">不是你的策略在亏。</strong>
-            </p>
-            {foreign.symbols.length > 0 && (
-              <p className="num mt-1 text-sm text-ink-lo">
-                涉及标的：{foreign.symbols.slice(0, 8).join("、")}
-                {foreign.symbols.length > 8 ? ` 等 ${foreign.symbols.length} 个` : ""}
-              </p>
-            )}
-            <p className="mt-1 text-sm text-warn">
-              如果这不是你在别的程序或交易所端下的单，请立刻到交易所检查 API Key 与账户安全。
-            </p>
-          </div>
-        )}
         {status === 'error' && trader.lastError && (
           <div className="rounded-md border border-down/60 bg-down/10 px-3 py-2 text-base text-down">
             <span className="font-semibold">最近错误：</span> <span className="num">{trader.lastError}</span>
@@ -897,6 +873,12 @@ export function TraderPage() {
             而**不改变任何口径**：数字来自交易所，只是时间旧一点，且会标出来。
           */
           lastKnown={lastKnownAccount}
+          /*
+            账户上非本机器人的交易 —— 一句**安静的事实说明**，放在它解释的
+            那个数字旁边。不占独立区块、不用警示色、不替用户下"账户可能被盗"
+            的结论（系统分不清那是他手动做的还是别人做的）。
+          */
+          foreign={foreign}
         />
 
         {/* D. 权益 / 行情（§3 的第 3 项：最大的一块，但只在有数据可看时才占大块） */}

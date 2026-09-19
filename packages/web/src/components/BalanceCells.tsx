@@ -11,6 +11,7 @@ import {
   BALANCE_LABEL,
   DEFAULT_SETTLE_ASSET,
   fmtAsset,
+  fmtInt,
   fmtNum,
   fmtSigned,
   pnlColor,
@@ -137,6 +138,7 @@ export function TraderAccountStrip({
   onRefresh,
   error,
   lastKnown,
+  foreign,
 }: {
   account: TraderAccountState | null;
   asset?: string;
@@ -151,6 +153,20 @@ export function TraderAccountStrip({
    * 比不显示更糟。
    */
   lastKnown?: { account: TraderAccountState; at: string } | null;
+  /**
+   * 账户上**非本平台机器人**的交易 —— 一句安静的事实说明。
+   *
+   * ## 为什么它是这个语气
+   *
+   * 同一个钱包上「AI 在跑 + 用户自己手动做单」是**完全正当**的用法。
+   * 原来它是一整块红色警示区、末尾还写「请立刻检查账户安全」——
+   * 那**假设了恶意**，而对一个正常手动交易的用户，那块警示每次开面板
+   * 都占着一整块、还在暗示他的账户出了问题。
+   *
+   * 系统的职责是**陈述事实**：这一行只说明「归属权益与余额的差额从哪来」。
+   * 它分不清"用户手动"和"被盗"，而拿不准的事不该由它下结论。
+   */
+  foreign?: { rounds: number; net: number } | null;
 }) {
   const unit = asset?.trim() || DEFAULT_SETTLE_ASSET;
   const openOrderMargin = account?.openOrderMargin ?? 0;
@@ -249,6 +265,33 @@ export function TraderAccountStrip({
       >
         {BALANCE_LABEL.equity} <span className="text-ink-mid">{fmtAsset(account.equity, unit)}</span>
       </span>
+
+      {/*
+        ⚠️ **这里是「陈述」，不是「警报」。**
+
+        同一个钱包上「AI 在跑 + 用户自己手动做单」是**完全正当**的用法。
+        原来它是一整块红色警示区、末尾还写「请立刻检查账户安全」——
+        那**假设了恶意**，而对一个正常手动交易的用户，那块警示每次开面板
+        都占着一整块、还在暗示他的账户出了问题。
+
+        所以现在：**一行、小字、中性措辞、放在它解释的那个数字旁边**。
+        系统的职责是说清差额从哪来；它分不清「用户手动」和「被盗」，
+        而拿不准的事不该由它下结论。
+      */}
+      {foreign != null && foreign.rounds > 0 && (
+        <span
+          className="text-ink-faint"
+          title={
+            `账户上另有 ${foreign.rounds} 笔不是本平台机器人下的成交，` +
+            `净 ${fmtSigned(foreign.net, 4)} ${unit}。` +
+            '它们的盈亏直接从余额进出、不计入本机器人的绩效 —— ' +
+            '所以「归属权益」与这里的余额对不上时，差额就来自它们。'
+          }
+        >
+          另有 <span className="text-ink-mid">{fmtInt(foreign.rounds)}</span> 笔非本机器人的交易
+          <span className="text-ink-mid"> {fmtSigned(foreign.net, 4)}</span>
+        </span>
+      )}
       {openOrderMargin > 0 && (
         <span className="text-ink-faint">
           {BALANCE_LABEL.openOrderMargin} <span className="text-ink-mid">{fmtNum(openOrderMargin)}</span>
