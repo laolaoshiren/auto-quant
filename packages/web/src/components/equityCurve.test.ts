@@ -1,0 +1,138 @@
+/**
+ * 权益曲线的算术。
+ *
+ * ## 为什么这一组里最重要的那条是"两处必须一致"
+ *
+ * "这条曲线算不算平"这个判据在**两个地方各实现了一遍**：
+ *
+ *   · `components/equityCurve.ts` 的 `hasEquityVariation`（交易页用它决定收起/展开）
+ *   · `pages/overviewParts.tsx` 的 `equityShape`（总览页用它决定展开/塌陷）
+ *
+ * `equityCurve.ts` 的注释写着「**必须逐位一致**……三处阈值如果各写一套，同一条
+ * 序列在不同页面上会得到不同结论」。**那句话原来只是一句注释。**
+ *
+ * 而这类不一致**不会有任何报错**：同一条权益序列，交易页说"值得画"、总览页说"平"，
+ * 而两边看起来都在正常工作 —— 正是那种要靠人盯着两个页面比对才能发现的故障。
+ * 所以这里把它变成**可执行**的断言。
+ */
+
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { hasEquityVariation, rangeSpanMs, EQUITY_BUCKET_MS } from './equityCurve';
+import { equityShape } from '../pages/overviewParts';
+
+/* -------------------------------------------------------------------------- */
+/*  两处判据必须给出同一个答案                                                  */
+/* -------------------------------------------------------------------------- */
+
+test('★ 交易页与总览页对"这条曲线算不算平"必须给出同一个答案', () => {
+  /*
+   * 覆盖的是**阈值附近**：绝对下限 0.005、相对下限 `|峰值| × 0.0002`、
+   * 以及"至少 3 个点"这三条边界的两侧。
+   */
+  const cases: Array<[string, number[]]> = [
+    ['完全平', [10, 10, 10]],
+    ['浮点噪声级', [10, 10.000001, 10]],
+    ['刚好在绝对阈值下方', [10, 10.004, 10]],
+    ['刚好在绝对阈值上方', [10, 10.006, 10]],
+    ['恰好等于绝对阈值', [10, 10.005, 10]],
+    ['大账户上的微小抖动（相对阈值生效）', [1000, 1000.1, 1000.2]],
+    /*
+     * ⚠️ **这几条是必须的，而第一版漏了它们。**
+     *
+     * `|峰值| × 0.0002` 在 1000 的账户上是 **0.2**。上面那条用例的 spread 恰好
+     * 也是 0.2 —— 对 0.0002 与 0.0003 **都不成立**，所以两处"仍然一致"：
+     * 我把一处阈值改掉去验证这条用例时，**它没有抓住**。
+     *
+     * 真正能区分两个系数的是 `0.2 < spread <= 0.3` 这一段。**没有落在分歧区间里的
+     * 用例，等于没有在测"两处一致"。**
+     */
+    ['相对阈值附近（分歧区间下沿）', [1000, 1000.21, 1000]],
+    ['相对阈值附近（分歧区间中部）', [1000, 1000.25, 1000]],
+    ['相对阈值附近（分歧区间上沿）', [1000, 1000.29, 1000]],
+    ['大账户上的真实波动', [1000, 1001, 1002]],
+    ['全是 0', [0, 0, 0]],
+    ['跨零', [-5, 5, 0]],
+    ['只有 2 个点', [10, 20]],
+    ['只有 1 个点', [10]],
+    ['空序列', []],
+    ['含非有限值', [10, Number.NaN, 10, Number.POSITIVE_INFINITY, 10]],
+  ];
+
+  for (const [label, values] of cases) {
+    const tradePage = hasEquityVariation(values);
+    const overviewPage = equityShape(values.map((equity, index) => ({ t: index, equity }))).hasShape;
+    assert.equal(
+      tradePage,
+      overviewPage,
+      `「${label}」这条序列在两个页面上得到了不同结论：` +
+        `交易页 ${tradePage}、总览页 ${overviewPage}（values=${JSON.stringify(values)}）。` +
+        '—— 两处的阈值必须逐位一致，改一处就要改另一处。',
+    );
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/*  判据自身的边界                                                              */
+/* -------------------------------------------------------------------------- */
+
+test('点数不足时不画曲线 —— 两个点连不成形状，只能连成线段', () => {
+  assert.equal(hasEquityVariation([]), false);
+  assert.equal(hasEquityVariation([10]), false);
+  assert.equal(hasEquityVariation([10, 20]), false);
+  assert.equal(hasEquityVariation([10, 20, 30]), true, '三个点且有差距就该画');
+});
+
+test('非有限值被剔除，而不是让整条序列失去形状', () => {
+  /*
+   * `NaN` 参与 `Math.min` / `Math.max` 会**污染整个结果**（`Math.min(1, NaN)` 是 NaN），
+   * 于是"含一个坏点"会变成"整条曲线是平的"。剔除之后剩下的点仍然说话。
+   *
+   * ⚠️ **"至少 3 个点"这条规则在剔除之后才应用**（实现里的顺序是
+   * `filter` → `length < minPoints` → 算极差）。所以剔掉坏点后只剩两个的话，
+   * 结论是"点太少"，不是"平" —— 两者在界面上是同一件事（都不画），
+   * 但把期望值写对才能让这条用例真的在测剔除行为。
+   */
+  assert.equal(hasEquityVariation([10, Number.NaN, 30]), false, '剔掉 NaN 只剩 2 个点 → 点数不足');
+  assert.equal(hasEquityVariation([10, Number.NaN, 30, 25]), true, '剔掉 NaN 还有 3 个点且有差距');
+  assert.equal(hasEquityVariation([Number.NaN, Number.NaN, Number.NaN]), false, '全是坏点 = 没有形状');
+  assert.equal(hasEquityVariation([10, 10, Number.NaN, 10]), false, '剔掉坏点后有 3 个点，但完全平');
+});
+
+test('绝对下限兜住"小账户上任何噪声都算大波动"', () => {
+  /*
+   * 一个 0.00 附近的账户，几厘的浮点噪声在相对意义上就是"巨大波动" ——
+   * 没有绝对下限的话，它会撑起一整张只有噪声的图。
+   */
+  assert.equal(hasEquityVariation([0.001, 0.004, 0.002]), false, '差距 0.003 < 0.005');
+  assert.equal(hasEquityVariation([0.001, 0.02, 0.002]), true, '差距 0.019 > 0.005');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  时间窗口                                                                    */
+/* -------------------------------------------------------------------------- */
+
+test('区间跨度：已知区间给具体值，未知的（含 ALL）是不设限', () => {
+  const HOUR = 3600 * 1000;
+  const DAY = 24 * HOUR;
+  assert.equal(rangeSpanMs('1D'), DAY);
+  assert.equal(rangeSpanMs('7D'), 7 * DAY);
+  assert.equal(rangeSpanMs('1M'), 30 * DAY);
+  assert.equal(rangeSpanMs('3M'), 90 * DAY);
+  /*
+   * `ALL` 与**任何未知值**都必须落到"不设限" —— 后者是刻意的：
+   * 一个拼错的区间 id 应当显示**全部**数据，而不是静默显示一个空窗口。
+   */
+  assert.equal(rangeSpanMs('ALL'), Number.POSITIVE_INFINITY);
+  assert.equal(rangeSpanMs('nonsense'), Number.POSITIVE_INFINITY);
+});
+
+test('采样桶是 1 分钟 —— 它决定 1D 窗口里能有多少个点', () => {
+  /*
+   * `MAX_EQUITY_POINTS` 的取值理由就写在这个关系上（1D = 1440 点）。
+   * 改动桶宽会让那条推理失效，所以把它钉住。
+   */
+  assert.equal(EQUITY_BUCKET_MS, 60_000);
+  assert.equal(rangeSpanMs('1D') / EQUITY_BUCKET_MS, 1440);
+});
