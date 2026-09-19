@@ -2,7 +2,7 @@
 
 本项目的 Docker 镜像包含以下第三方软件包。它们的许可证要求**在再分发时保留版权声明与许可证文本**，本文件即为该义务的履行方式。
 
-运行时依赖共 **192** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
+运行时依赖共 **181** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
 
 > 本文件由 `node scripts/generate-notices.mjs` 自动生成，请勿手工编辑。
 > CI 会校验它与当前依赖一致。
@@ -11,10 +11,10 @@
 
 | 许可证 | 包数量 |
 | --- | --- |
-| MIT | 151 |
-| ISC | 25 |
-| BlueOak-1.0.0 | 7 |
+| MIT | 147 |
+| ISC | 21 |
 | BSD-3-Clause | 5 |
+| BlueOak-1.0.0 | 4 |
 | Apache-2.0 | 2 |
 | 0BSD | 1 |
 | MIT AND ISC | 1 |
@@ -35,13 +35,12 @@
 | @fastify/merge-json-schemas | 0.2.1 | MIT | Ivan Tymoshenko <ivan@tymoshenko.me> |
 | @fastify/proxy-addr | 5.1.0 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
 | @fastify/send | 4.1.1 | MIT | TJ Holowaychuk <tj@vision-media.ca> |
-| @fastify/static | 8.3.0 | MIT | Tommaso Allevi - @allevo |
+| @fastify/static | 10.1.4 | MIT | Tommaso Allevi - @allevo |
 | @fastify/websocket | 11.3.0 | MIT | Matteo Collina <hello@matteocollina.com> |
 | @floating-ui/core | 1.8.0 | MIT | atomiks |
 | @floating-ui/dom | 1.8.0 | MIT | atomiks |
 | @floating-ui/react-dom | 2.1.9 | MIT | atomiks |
 | @floating-ui/utils | 0.2.12 | MIT | atomiks |
-| @isaacs/cliui | 9.0.0 | BlueOak-1.0.0 | — |
 | @lukeed/ms | 2.0.2 | MIT | Luke Edwards |
 | @pinojs/redact | 0.4.0 | MIT | Matteo Collina <hello@matteocollina.com> |
 | @radix-ui/primitive | 1.1.7 | MIT | — |
@@ -97,9 +96,8 @@
 | class-variance-authority | 0.7.1 | Apache-2.0 | Joe Bell (https://joebell.co.uk) |
 | clsx | 2.1.1 | MIT | Luke Edwards |
 | cmdk | 1.1.1 | MIT | Paco |
-| content-disposition | 0.5.4 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
+| content-disposition | 3.0.0 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
 | cookie | 1.1.1 | MIT | Roman Shtylman <shtylman@gmail.com> |
-| cross-spawn | 7.0.6 | MIT | André Cruz <andre@moxy.studio> |
 | csstype | 3.2.3 | MIT | Fredrik Nicol <fredrik.nicol@gmail.com> |
 | d3-array | 3.2.4 | ISC | Mike Bostock |
 | d3-color | 3.1.0 | ISC | Mike Bostock |
@@ -130,18 +128,15 @@
 | fast-querystring | 1.1.2 | MIT | Yagiz Nizipli <yagiz@nizipli.com> |
 | fast-uri | 4.1.5 | BSD-3-Clause | Vincent Le Goff <vince.legoff@gmail.com> (https://github.com |
 | fastify | 5.12.4 | MIT | Matteo Collina <hello@matteocollina.com> |
-| fastify-plugin | 5.1.0 | MIT | Tomas Della Vedova - @delvedor (http://delved.org) |
+| fastify-plugin | 6.0.0 | MIT | Tomas Della Vedova - @delvedor (http://delved.org) |
 | fastq | 1.20.3 | ISC | Matteo Collina <hello@matteocollina.com> |
 | find-my-way | 9.9.0 | MIT | Tomas Della Vedova - @delvedor (http://delved.org) |
-| foreground-child | 3.3.1 | ISC | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
 | get-nonce | 1.0.1 | MIT | Anton Korzunov <thekashey@gmail.com> |
-| glob | 11.1.0 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (https://blog.izs.me/) |
+| glob | 13.0.6 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (https://blog.izs.me/) |
 | http-errors | 2.0.1 | MIT | Jonathan Ong <me@jongleberry.com> (http://jongleberry.com) |
 | inherits | 2.0.4 | ISC | — |
 | internmap | 2.0.3 | ISC | Mike Bostock |
 | ipaddr.js | 2.5.0 | MIT | whitequark <whitequark@whitequark.org> |
-| isexe | 2.0.0 | ISC | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
-| jackspeak | 4.2.3 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> |
 | js-tokens | 4.0.0 | MIT | Simon Lydell |
 | json-schema-ref-resolver | 3.0.0 | MIT | Ivan Tymoshenko <ivan@tymoshenko.me> |
 | json-schema-traverse | 1.0.0 | MIT | Evgeny Poberezkin |
@@ -157,8 +152,6 @@
 | object-assign | 4.1.1 | MIT | Sindre Sorhus |
 | on-exit-leak-free | 2.1.2 | MIT | Matteo Collina <hello@matteocollina.com> |
 | once | 1.4.0 | ISC | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
-| package-json-from-dist | 1.0.1 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (https://izs.me) |
-| path-key | 3.1.1 | MIT | Sindre Sorhus |
 | path-scurry | 2.0.2 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (https://blog.izs.me) |
 | pino | 10.3.1 | MIT | Matteo Collina <hello@matteocollina.com> |
 | pino-abstract-transport | 3.0.0 | MIT | Matteo Collina <hello@matteocollina.com> |
@@ -192,9 +185,6 @@
 | semver | 6.3.1 | ISC | GitHub Inc. |
 | set-cookie-parser | 2.7.2 | MIT | Nathan Friedly |
 | setprototypeof | 1.2.0 | ISC | Wes Todd |
-| shebang-command | 2.0.0 | MIT | Kevin Mårtensson |
-| shebang-regex | 3.0.0 | MIT | Sindre Sorhus |
-| signal-exit | 4.1.0 | ISC | Ben Coe <ben@npmjs.com> |
 | sonic-boom | 4.2.1 | MIT | Matteo Collina <hello@matteocollina.com> |
 | split2 | 4.2.0 | ISC | Matteo Collina <hello@matteocollina.com> |
 | statuses | 2.0.2 | MIT | — |
@@ -211,7 +201,6 @@
 | use-sidecar | 1.1.3 | MIT | theKashey <thekashey@gmail.com> |
 | util-deprecate | 1.0.2 | MIT | Nathan Rajlich <nathan@tootallnate.net> (http://n8.io/) |
 | victory-vendor | 36.9.2 | MIT AND ISC | Formidable |
-| which | 2.0.2 | ISC | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me) |
 | wrappy | 1.0.2 | ISC | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
 | ws | 8.21.3 | MIT | Einar Otto Stangvik <einaros@gmail.com> (http://2x.io) |
 | yallist | 3.1.1 | ISC | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
