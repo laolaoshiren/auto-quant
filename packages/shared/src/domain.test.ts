@@ -18,7 +18,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { exchangeErrorCode, exchangeErrorLabel } from './domain.js';
+import { beijingDayStartIso, exchangeErrorCode, exchangeErrorLabel } from './domain.js';
 
 test('实测撞到的 -4130 被翻译成可行动的一句话', () => {
   /*
@@ -88,4 +88,65 @@ test('错误码提取：带与不带 Binance 前缀都能取到', () => {
   assert.equal(exchangeErrorCode('Binance -4130: x'), '-4130');
   assert.equal(exchangeErrorCode('-4164: x'), '-4164');
   assert.equal(exchangeErrorCode('没有码'), null);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  自然日边界（北京时间）                                                      */
+/* -------------------------------------------------------------------------- */
+
+test('日界落在北京时间 0:00 —— 不是 UTC 0:00', () => {
+  /*
+   * 这个函数存在的全部理由就是这一条断言。
+   *
+   * 原来熔断用的是 `setUTCHours(0, 0, 0, 0)`，也就是 **UTC 零点 = 北京时间
+   * 早上 8 点**。于是北京时间 9-19 07:30 的一笔平仓被算进「UTC 9-18」，
+   * 操作员上午看到的「今日已实现亏损」实际覆盖 9-18 08:00 → 9-19 08:00 ——
+   * **与他的认知差 8 小时**，而熔断正是拿这个数字决定要不要停手的。
+   *
+   * 所以边界必须精确落在北京时间的 0:00：9-18 23:59:59 还算前一天，
+   * 9-19 00:00:00 就必须翻页。
+   */
+  // UTC 16:00 == 北京时间次日 00:00
+  assert.equal(
+    beijingDayStartIso(Date.parse('2026-09-18T16:00:00Z')),
+    '2026-09-18T16:00:00.000Z',
+    '北京 9-19 00:00 → 日界应当是它自己',
+  );
+  assert.equal(
+    beijingDayStartIso(Date.parse('2026-09-18T15:59:59Z')),
+    '2026-09-17T16:00:00.000Z',
+    '北京 9-18 23:59:59 → 仍属 9-18（日界是北京 9-18 00:00）',
+  );
+  // 这一条是原实现真正算错的那一格
+  assert.equal(
+    beijingDayStartIso(Date.parse('2026-09-18T23:30:00Z')),
+    '2026-09-18T16:00:00.000Z',
+    '北京 9-19 07:30 → 必须算进 9-19；按 UTC 会错算成 9-18',
+  );
+  assert.equal(
+    beijingDayStartIso(Date.parse('2026-09-19T15:59:59Z')),
+    '2026-09-18T16:00:00.000Z',
+    '北京 9-19 23:59:59 → 仍属 9-19',
+  );
+  assert.equal(
+    beijingDayStartIso(Date.parse('2026-09-19T16:00:00Z')),
+    '2026-09-19T16:00:00.000Z',
+    '北京 9-20 00:00 → 翻到新的一天',
+  );
+});
+
+test('日界与服务器时区无关', () => {
+  /*
+   * 用 `setHours(0,0,0,0)` 也能得到"某一天的零点"，但那用的是**服务器**的
+   * 时区：换一台 UTC 的机器，日界会静默变回 UTC 零点，而且不会有任何报错。
+   *
+   * 这个函数按常量 +8 显式平移，所以同一个时刻在任何时区的机器上
+   * 都给出同一个 UTC 边界。
+   */
+  const at = Date.parse('2026-09-18T23:30:00Z');
+  assert.equal(beijingDayStartIso(at), beijingDayStartIso(at), '同一输入必须稳定');
+  assert.ok(
+    beijingDayStartIso(at).endsWith('Z'),
+    '返回值是 UTC ISO —— 库里存的是 UTC，比较也必须用 UTC',
+  );
 });
