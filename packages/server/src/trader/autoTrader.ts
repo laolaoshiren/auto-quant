@@ -2469,7 +2469,19 @@ export class AutoTrader {
     }, 0);
     
     /* 平台侧：所有机器人的已实现净额 + 外部活动净额。 */
-    const platformNet = tradeStore.netForAllTraders() + foreignNet;
+    /*
+     * ⚠️ **平台侧必须与交易所侧用同一个时间窗。**
+     *
+     * `incomeEvents` 是 `since` 之后的（币安的收入接口必须给窗口），
+     * 所以这里也要用 `netSince(sinceIso)` 而不是"全部历史" ——
+     * 否则差额里会混进窗口之外的历史交易，**那会永久误报**。
+     *
+     * 实测：用全部历史时这个账户报出 −0.86 的假差额，
+     * 而真实差值是 0.0057（窗口边界的浮点误差）。
+     * **一个永久误报的校验比没有校验更糟** —— 它会训练操作员忽略这条告警，
+     * 而这是唯一能自动发现"账本错了"的地方。
+     */
+    const platformNet = tradeStore.netSince(sinceIso) + foreignNet;
     const ledgerGap = Number((platformNet - exchangeNet).toFixed(6));
     
     /*
