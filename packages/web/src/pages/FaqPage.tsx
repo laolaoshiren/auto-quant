@@ -18,7 +18,7 @@ import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useDocumentTitle } from '../lib/hooks';
 import { Badge, Button, Panel, cn } from '../components/ui';
 import { SectionHeading } from '../components/Badges';
-import { MetricGroup, PageShell, SectionLabel } from '../components/shell';
+import { PageShell, SectionLabel } from '../components/shell';
 
 /**
  * 短标题（目录与折叠头用）+ 完整问答。
@@ -126,8 +126,16 @@ export function FaqPage() {
   /* ------------------------------------------------------------------------ */
   /*  左栏：目录。长文的"这里有什么"                                          */
   /* ------------------------------------------------------------------------ */
+  /*
+   * ⚠️ **目录不能用 `MetricGroup` 包。**
+   *
+   * 它是"指标组"，在 `xl` 下排成 **4 列网格** —— 而这里只有一个 `<nav>`，
+   * 于是目录被塞进四分之一的栏宽（约 150px），「止损为什么挂在交易所」这种
+   * 11 个字的标题必然折成两行，读起来支离破碎。目录要的是**整栏宽度**。
+   */
   const rail = (
-    <MetricGroup title="目录">
+    <section>
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-ink-faint">目录</h3>
       <nav aria-label="常见问题目录">
         <ol className="space-y-0.5">
           {FAQ.map((item, index) => (
@@ -154,7 +162,7 @@ export function FaqPage() {
           </li>
         </ol>
       </nav>
-    </MetricGroup>
+    </section>
   );
 
   return (
@@ -181,14 +189,18 @@ export function FaqPage() {
         {/* 风险警示：整页最重要的一段，放在所有人都会看到的位置 */}
         <section>
           <SectionLabel title="风险警示" />
-          <div className="rounded-lg border border-warn/50 bg-warn/10 px-4 py-3">
+          {/*
+           * 框宽 = 文字宽。原来是整宽的框配 68ch 的文字，右半边空出一大片，
+           * 看起来像"文字没排满"；而框一旦收窄到文字宽，它立刻变成一块**重点块**。
+           */}
+          <div className="max-w-[68ch] rounded-lg border border-warn/50 bg-warn/10 px-4 py-3">
             <h3 className="flex items-center gap-2 text-md font-bold tracking-wide text-warn">
               <span aria-hidden className="rounded border border-warn/50 px-1.5 text-xs">
                 !
               </span>
               带杠杆交易永续合约
             </h3>
-            <p className="mt-2 max-w-[68ch] text-md leading-relaxed text-ink-hi">
+            <p className="mt-2 text-md leading-relaxed text-ink-hi">
               亏钱的速度会比你读完这一页还快。杠杆放大亏损和放大盈利一样彻底，爆仓可以在几秒内吞掉整个持仓
               — 包括它的保证金。语言模型不是理财顾问，看不到未来，而且时不时会自信地犯错；本控制台的风控
               只能减少伤害，无法消除伤害。<span className="text-warn">模拟模式被设为默认是有原因的</span>

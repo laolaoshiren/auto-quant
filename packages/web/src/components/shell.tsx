@@ -84,25 +84,41 @@ export function MetricGroup({
   title,
   children,
   layout = 'horizontal',
+  columns = 4,
   className,
 }: {
   title: string;
   children: ReactNode;
   layout?: 'horizontal' | 'vertical';
+  /**
+   * `horizontal` 下的列数上限。
+   *
+   * ⚠️ **列数是按视口断点算的，不是按容器宽度。** 把 `MetricGroup` 放进
+   * `PageShell` 的右栏（只占视口的 40%）时，`xl:grid-cols-4` 照样生效 ——
+   * 4 个指标被塞进半个屏幕，每列只剩约 150px，而 `Metric` 的数值是 `truncate`
+   * 的：`main @ 222ae15` 被切掉一半、`2026-09-20 03:33` 变成 `2026-09-20 03:…`。
+   * 界面上看起来只是"有点挤"，实际是**信息被静默丢掉了**。
+   *
+   * 所以放进窄栏时**必须显式降列**，或者干脆用 `layout="vertical"`。
+   * 更省事的做法是别把状态信息放进窄栏 —— 横排占整宽才放得下长值。
+   */
+  columns?: 1 | 2 | 3 | 4;
   className?: string;
 }) {
+  const gridClass =
+    columns === 1
+      ? 'grid grid-cols-1 gap-y-2.5'
+      : columns === 2
+        ? 'grid grid-cols-1 gap-x-4 gap-y-2.5 sm:grid-cols-2'
+        : columns === 3
+          ? 'grid grid-cols-2 gap-x-4 gap-y-2.5 sm:grid-cols-3'
+          : // 2 列 → 3 列 → 4 列；4 是上限，再多就该拆成两组了
+            'grid grid-cols-2 gap-x-4 gap-y-2.5 sm:grid-cols-3 xl:grid-cols-4';
+
   return (
     <section className={cn('border-t border-base-800 pt-3 first:border-t-0 first:pt-0', className)}>
       <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-ink-faint">{title}</h3>
-      <div
-        className={cn(
-          'items-start',
-          layout === 'vertical'
-            ? 'space-y-2.5'
-            : // 2 列 → 3 列 → 4 列；4 是上限，再多就该拆成两组了
-              'grid grid-cols-2 gap-x-4 gap-y-2.5 sm:grid-cols-3 xl:grid-cols-4',
-        )}
-      >
+      <div className={cn('items-start', layout === 'vertical' ? 'space-y-2.5' : gridClass)}>
         {children}
       </div>
     </section>
