@@ -14,6 +14,7 @@ import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, 
 import { CheckList } from './Badges';
 import { EquitySourceField, equityPayload, useExchangeEquity } from './EquitySourceField';
 import { fmtUsd } from '../lib/format';
+import type { Catalog } from '../lib/api';
 
 /* -------------------------------------------------------------------------- */
 /*  Create a trader                                                            */
@@ -32,10 +33,27 @@ export function NewTraderModal({
   const [models, setModels] = useState<AiModelRow[] | null>(null);
   const [strategyList, setStrategyList] = useState<Array<{ id: number; name: string }> | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /**
+   * 厂商目录（`LlmProviderDescriptor[]`）与默认模型。
+   *
+   * 原来 `catalog` 只是 `.then()` 里的一个局部变量，用完就丢了 ——
+   * 而两级选择需要它（第一个下拉就是厂商列表）。
+   */
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
 
   const [name, setName] = useState('');
   const [exchangeAccountId, setExchangeAccountId] = useState<number | ''>('');
   const [aiModelId, setAiModelId] = useState<number | ''>('');
+  /*
+   * 两级选择的中间态 —— 见下面「AI 模型」那一栏上的说明。
+   *
+   * `providerId` 是厂商，`modelChoice` 是模型下拉的**编码值**：
+   *   · 纯数字（`"3"`）→ 该厂商下**已有**的模型记录，直接用它的 id
+   *   · `new:<modelId>` → 该厂商内置建议里、**还没有记录**的模型；
+   *     提交时先建一条记录再创建机器人
+   */
+  const [providerId, setProviderId] = useState<string>('');
+  const [modelChoice, setModelChoice] = useState<string>('');
   const [strategyId, setStrategyId] = useState<number | ''>('');
   /** 运行模式。默认按策略，与既有行为一致。 */
   const [mode, setMode] = useState<TraderMode>('strategy');
@@ -66,6 +84,7 @@ export function NewTraderModal({
         setAccounts(accountRows);
         setModels(modelRows);
         setStrategyList(strategyRows.map((s) => ({ id: s.id, name: s.name })));
+        setCatalog(catalog);
         if (accountRows[0]) setExchangeAccountId(accountRows[0].id);
         /*
          * 用服务端指定的默认模型，而不是"列表第一个"。
@@ -86,6 +105,21 @@ export function NewTraderModal({
   }, [open]);
 
   const ready = accounts !== null && models !== null && strategyList !== null;
+  /*
+   * 两级选择的派生数据。
+   *
+   * `configuredModels` 是该厂商**已配置的**记录（用户自定义的），
+   * `suggestedModels` 是它的内置建议里**还没有记录的**那些 ——
+   * 两者合起来正是用户说的"2 种情况"。
+   */
+  const providers = catalog?.providers ?? [];
+  const descriptor = providers.find((p) => p.id === providerId);
+  const configuredModels = (models ?? []).filter((m) => m.provider === providerId);
+  const suggestedModels = (() => {
+    const configured = new Set(configuredModels.map((m) => m.model));
+    return (descriptor?.models ?? []).filter((id) => !configured.has(id));
+  })();
+
   const missing = useMemo(() => {
     const gaps: string[] = [];
     if (accounts && accounts.length === 0) gaps.push('交易所凭证');
@@ -98,15 +132,47 @@ export function NewTraderModal({
     setError(null);
     setBaselineWarning(null);
     if (!name.trim()) return setError('请为机器人起个名字。');
-    if (exchangeAccountId === '' || aiModelId === '' || strategyId === '') return setError('请选择凭证、模型与策略。');
+    /*
+     * 校验按 `modelChoice` 而不是 `aiModelId` —— 选了"厂商建议"里的模型时
+     * `aiModelId` 还是空的（它的记录要等到下面才建）。
+     */
+    if (exchangeAccountId === '' || modelChoice === '' || strategyId === '') return setError('请选择凭证、模型与策略。');
 
     setBusy(true);
     try {
+      /*
+       * 选了「厂商建议」里的模型 → **先建一条记录**，再拿它的 id 创建机器人。
+       *
+       * ## 为什么必须有这一步
+       *
+       * 机器人绑定的是 `ai_model_id`（一条记录），而不是"厂商 + 型号"这对字符串。
+       * 而"厂商建议"里那些模型**还没有记录** —— 不建就只能让用户先去模型管理页
+       * 手工添加，那正是这次要消掉的那一步。
+       *
+       * ## 空 API Key 是允许的
+       *
+       * 服务端的 `apiKey` 默认空串，而 `custom` / 网关类厂商本来就可能没有 Key。
+       * 所以这里建出来的记录**可能还没有密钥** —— 那没关系：机器人启动时才需要它，
+       * 而用户随后可以在模型管理页补上。**不因此拦住创建机器人。**
+       */
+      let resolvedModelId = Number(aiModelId);
+      if (modelChoice.startsWith('new:')) {
+        const modelId = modelChoice.slice(4);
+        const created = await api.createAiModel({
+          provider: providerId,
+          label: `${descriptor?.label ?? providerId} · ${modelId}`,
+          model: modelId,
+          baseUrl: descriptor?.baseUrl ?? '',
+          apiKey: '',
+        });
+        resolvedModelId = created.id;
+      }
+
       const manualEquity = equityPayload(equity);
       const trader = await api.createTrader({
         name: name.trim(),
         exchangeAccountId: Number(exchangeAccountId),
-        aiModelId: Number(aiModelId),
+        aiModelId: resolvedModelId,
         strategyId: Number(strategyId),
         mode,
         cycleIntervalMinutes,
@@ -190,13 +256,82 @@ export function NewTraderModal({
               </Select>
             </Field>
 
-            <Field label="AI 模型">
-              <Select value={aiModelId} onChange={(e) => setAiModelId(Number(e.target.value))}>
-                {models?.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.label} · {model.model}
+            {/*
+              两级：**先厂商、再模型**。
+
+              原来只有一个下拉，列的是 ai_models 里已配置的记录 ——
+              于是「我想用 Command Code 的某个模型」必须先去模型管理页建一条
+              记录、再回来选。而用户此刻的意图是「建一个机器人」。
+
+              两级之后，第二个下拉同时给出两种情况：
+                · 该厂商**已配置的**模型（用户自定义的）
+                · 它内置建议里**还没有记录的**模型（选中后在提交时自动建记录）
+            */}
+            <Field label="模型厂商">
+              <Select
+                value={providerId}
+                onChange={(e) => {
+                  // 换厂商就把模型清掉 —— 上一个厂商的模型在这里毫无意义。
+                  setProviderId(e.target.value);
+                  setModelChoice("");
+                  setAiModelId("");
+                }}
+              >
+                <option value="">请选择厂商</option>
+                {providers.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.label}
                   </option>
                 ))}
+              </Select>
+            </Field>
+
+            <Field
+              label="模型"
+              hint={
+                !providerId
+                  ? "先选一个模型厂商。"
+                  : configuredModels.length === 0 && suggestedModels.length === 0
+                    ? "该厂商还没有可选模型 —— 可以到「AI 模型」页添加。"
+                    : configuredModels.length > 0
+                      ? "已配置的在前，厂商建议的在后（选后者会自动建一条记录）。"
+                      : "来自该厂商的建议列表（选中后会自动建一条记录）。"
+              }
+            >
+              <Select
+                value={modelChoice}
+                disabled={!providerId}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setModelChoice(value);
+                  /*
+                   * 已配置的：编码就是它的数字 id，直接填 aiModelId。
+                   * 建议的：编码是 new:<模型id>，**提交时才建记录** ——
+                   * 不在 onChange 里建，否则用户每试一个型号都会留下一条
+                   * 用不上的记录。
+                   */
+                  setAiModelId(value.startsWith("new:") ? "" : Number(value));
+                }}
+              >
+                <option value="">请选择模型</option>
+                {configuredModels.length > 0 && (
+                  <optgroup label="已配置">
+                    {configuredModels.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.label} · {model.model}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {suggestedModels.length > 0 && (
+                  <optgroup label="厂商建议">
+                    {suggestedModels.map((id) => (
+                      <option key={id} value={"new:" + id}>
+                        {id}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </Select>
             </Field>
           </div>

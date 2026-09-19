@@ -36,6 +36,7 @@ export const LlmProviderIdSchema = z.enum([
   'kimi',
   'minimax',
   'openrouter',
+  'commandcode',
   'custom',
 ]);
 export type LlmProviderId = z.infer<typeof LlmProviderIdSchema>;

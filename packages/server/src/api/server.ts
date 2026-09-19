@@ -128,10 +128,20 @@ const AiModelInputSchema = z.object({
   model: z.string().min(1),
   baseUrl: BaseUrlSchema,
   apiKey: z.string().default(''),
-  temperature: z.number().min(0).max(2).optional(),
-  maxTokens: z.number().int().min(64).max(2_000_000).optional(),
-  timeoutSeconds: z.number().int().min(5).max(3600).optional(),
-  maxRetries: z.number().int().min(0).max(10).optional(),
+  /*
+   * ⚠️ **`temperature` / `maxTokens` / `timeoutSeconds` / `maxRetries`
+   * 曾经在这里，已删除。**
+   *
+   * 它们现在**只由 `providerDefaults()` 决定**，不接受客户端传入 ——
+   * 控制台上那个「高级设置」面板也已经删掉。
+   *
+   * 删掉而不是"保留但忽略"，是因为**保留一个不会生效的入参**会让人以为
+   * 它有用（比如某个脚本按旧契约传 `maxTokens: 8192`，然后困惑为什么
+   * 实际用的是 16384）。**契约要跟行为一致。**
+   *
+   * 具体风险见 `POST /api/ai-models` 里那段说明：一个被手工调低的
+   * `maxTokens` 会把决策截断成空响应，而那看起来像密钥坏了。
+   */
 });
 
 /**
@@ -1142,10 +1152,14 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       model: parsed.data.model,
       baseUrl,
       apiKeyEnc: deps.vault.encryptOptional(parsed.data.apiKey),
-      temperature: parsed.data.temperature ?? defaults.temperature,
-      maxTokens: parsed.data.maxTokens ?? defaults.maxTokens,
-      timeoutSeconds: parsed.data.timeoutSeconds ?? defaults.timeoutSeconds,
-      maxRetries: parsed.data.maxRetries ?? defaults.maxRetries,
+      /*
+       * 四个参数**一律**取 provider 的默认值 —— 见 `AiModelInputSchema` 上的说明。
+       * 控制台的「高级设置」面板已删掉，这里也不再接受客户端传入。
+       */
+      temperature: defaults.temperature,
+      maxTokens: defaults.maxTokens,
+      timeoutSeconds: defaults.timeoutSeconds,
+      maxRetries: defaults.maxRetries,
     });
   }));
 
@@ -1160,10 +1174,22 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     if (parsed.data.model !== undefined) patch.model = parsed.data.model;
     if (parsed.data.baseUrl !== undefined) patch.baseUrl = parsed.data.baseUrl;
     if (parsed.data.apiKey) patch.apiKeyEnc = deps.vault.encrypt(parsed.data.apiKey);
-    if (parsed.data.temperature !== undefined) patch.temperature = parsed.data.temperature;
-    if (parsed.data.maxTokens !== undefined) patch.maxTokens = parsed.data.maxTokens;
-    if (parsed.data.timeoutSeconds !== undefined) patch.timeoutSeconds = parsed.data.timeoutSeconds;
-    if (parsed.data.maxRetries !== undefined) patch.maxRetries = parsed.data.maxRetries;
+    /*
+     * ⚠️ **改了 provider 就要把这四项刷新成它的默认值。**
+     *
+     * 它们现在是"provider 的属性"而不是"这条记录的属性"：把 kimi 的记录
+     * 改成 commandcode、却留着 kimi 的超时与输出预算，会得到一个**两边都不对**
+     * 的组合（比如 kimi 的 180s 超时配上一个更慢的网关）。
+     *
+     * 只在 provider 真的变了时候刷新：只是想改个名字的 PATCH 不该动它们。
+     */
+    if (patch.provider !== undefined) {
+      const next = providerDefaults(patch.provider);
+      patch.temperature = next.temperature;
+      patch.maxTokens = next.maxTokens;
+      patch.timeoutSeconds = next.timeoutSeconds;
+      patch.maxRetries = next.maxRetries;
+    }
 
     aiModels.update(id, patch);
     return { ok: true };

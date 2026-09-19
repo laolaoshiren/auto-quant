@@ -66,7 +66,6 @@ interface ModelDraft {
 
 const FALLBACK_DEFAULTS = { temperature: 0.2, maxTokens: 8192, timeoutSeconds: 180, maxRetries: 2 };
 
-type AdvancedKey = 'temperature' | 'maxTokens' | 'timeoutSeconds' | 'maxRetries';
 
 /** 表格首屏渲染多少行；点「显示更多」再追加，避免一次挂几百个 DOM 节点。 */
 const ROW_PAGE = 25;
@@ -286,7 +285,6 @@ export function AiModelsSection() {
   const [editing, setEditing] = useState<AiModelRow | null>(null);
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<ModelDraft>(() => emptyDraft('deepseek', '', ''));
-  const [touched, setTouched] = useState<Set<AdvancedKey>>(() => new Set());
   const [busy, setBusy] = useState(false);
   const [removingId, setRemovingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -339,7 +337,6 @@ export function AiModelsSection() {
     const first = providers[0];
     const builtin = first?.models[0] ?? '';
     setDraft({ ...emptyDraft(first?.id ?? 'deepseek', first?.label ?? '', first?.baseUrl ?? ''), model: builtin });
-    setTouched(new Set());
     setError(null);
     setDiscovery(null);
     setDraftTest(null);
@@ -359,8 +356,6 @@ export function AiModelsSection() {
       timeoutSeconds: row.timeoutSeconds,
       maxRetries: row.maxRetries,
     });
-    // Editing an existing row means every knob is already a deliberate value.
-    setTouched(new Set<AdvancedKey>(['temperature', 'maxTokens', 'timeoutSeconds', 'maxRetries']));
     setError(null);
     setDiscovery(null);
     setDraftTest(null);
@@ -395,17 +390,11 @@ export function AiModelsSection() {
         maxRetries: next?.defaults.maxRetries ?? FALLBACK_DEFAULTS.maxRetries,
       };
     });
-    // Back to "untouched": the new provider's own defaults are the right answer.
-    setTouched(new Set());
     setDiscovery(null);
     setDraftTest(null);
     setError(null);
   };
 
-  const setAdvanced = (key: AdvancedKey, value: number) => {
-    setDraft((current) => ({ ...current, [key]: value }));
-    setTouched((current) => new Set(current).add(key));
-  };
 
   /* --- discovery --------------------------------------------------------- */
 
@@ -445,13 +434,13 @@ export function AiModelsSection() {
       model: draft.model.trim(),
       baseUrl: draft.baseUrl.trim(),
       apiKey: draft.apiKey,
+      /*
+       * ⚠️ **不再发送 temperature / maxTokens / timeoutSeconds / maxRetries。**
+       *
+       * 它们现在完全由服务端按厂商决定，而服务端的入参里也已经没有这四个字段 ——
+       * 客户端继续发送只会得到一个"传了但不生效"的假契约。
+       */
     };
-    // Only the advanced fields the operator actually touched travel with the
-    // request — the rest are left to the provider defaults server-side.
-    if (touched.has('temperature')) payload.temperature = draft.temperature;
-    if (touched.has('maxTokens')) payload.maxTokens = draft.maxTokens;
-    if (touched.has('timeoutSeconds')) payload.timeoutSeconds = draft.timeoutSeconds;
-    if (touched.has('maxRetries')) payload.maxRetries = draft.maxRetries;
     return payload;
   };
 
@@ -834,24 +823,23 @@ export function AiModelsSection() {
             </div>
           )}
 
-          {/* Advanced disclosure ----------------------------------------- */}
-          <AdvancedSettings
-            draft={draft}
-            touched={touched}
-            defaults={defaults}
-            supportsThinking={descriptor?.supportsThinking ?? false}
-            onChange={setAdvanced}
-            onReset={() => {
-              setDraft((current) => ({
-                ...current,
-                temperature: defaults.temperature,
-                maxTokens: defaults.maxTokens,
-                timeoutSeconds: defaults.timeoutSeconds,
-                maxRetries: defaults.maxRetries,
-              }));
-              setTouched(new Set());
-            }}
-          />
+          {/*
+            「高级设置」面板已删除 —— 温度 / 最大输出 / 超时 / 重试次数
+            **完全由系统按厂商决定**，用户不需要也不应该改它们。
+
+            ## 为什么不该让用户改
+
+            那四项看起来像"可调参数"，但它们其实是**厂商的属性**：
+            每个厂商的合理超时与输出预算由它的接口特性决定（比如网关背后
+            常常是推理模型，思考与回答共用同一个输出预算）。
+
+            而「最大输出 Token」特别危险：这个项目的决策输出实测峰值 11487，
+            把它调低会让模型**思考完之后没有额度输出决策** —— 返回空内容、
+            那一轮什么都不做，而症状看起来像密钥坏了。
+
+            所以后端也已经把这四个字段从入参里删掉了（见 `AiModelInputSchema`），
+            **界面与契约同时改**，不留一个"传了但不生效"的假入口。
+          */}
 
           {descriptor && (
             <div className="rounded-md border border-base-800 bg-base-850/40 px-3 py-2 text-xs text-ink-lo">
@@ -1093,103 +1081,3 @@ function ModelField({
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Advanced parameters                                                        */
-/* -------------------------------------------------------------------------- */
-
-function AdvancedSettings({
-  draft,
-  touched,
-  defaults,
-  supportsThinking,
-  onChange,
-  onReset,
-}: {
-  draft: ModelDraft;
-  touched: Set<AdvancedKey>;
-  defaults: { temperature: number; maxTokens: number; timeoutSeconds: number; maxRetries: number };
-  supportsThinking: boolean;
-  onChange: (key: AdvancedKey, value: number) => void;
-  onReset: () => void;
-}) {
-  const changed = touched.size;
-
-  return (
-    <Collapsible
-      title={<span className="font-semibold">高级设置</span>}
-      meta={
-        <span className="num">
-          默认 温度 {defaults.temperature} · Token {fmtInt(defaults.maxTokens)} · 超时 {defaults.timeoutSeconds}s
-        </span>
-      }
-    >
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs leading-relaxed text-ink-lo">这些参数已按供应商预填，通常无需修改。</p>
-          {changed > 0 && <Badge tone="warn">{changed} 项已修改</Badge>}
-        </div>
-
-        {supportsThinking && (
-          <p className="rounded-md border border-warn/40 bg-warn/10 px-2.5 py-2 text-xs leading-relaxed text-warn">
-            该供应商支持推理模式：推理过程会消耗输出预算，若「最大输出 Token」设得过低，模型可能思考完就
-            没有额度输出决策了。
-          </p>
-        )}
-
-        <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
-          <Field label="温度" hint="越低越确定 — 交易场景建议调低。">
-            <NumberInput
-              className="text-right"
-              value={draft.temperature}
-              onValueChange={(value) => onChange('temperature', value)}
-              step={0.1}
-              min={0}
-              max={2}
-            />
-          </Field>
-
-          <Field label="最大输出 Token" hint="上限 2,000,000。">
-            <NumberInput
-              className="text-right"
-              value={draft.maxTokens}
-              onValueChange={(value) => onChange('maxTokens', value)}
-              step={256}
-              min={64}
-              max={2000000}
-            />
-          </Field>
-
-          <Field label="超时（秒）">
-            <NumberInput
-              className="text-right"
-              value={draft.timeoutSeconds}
-              onValueChange={(value) => onChange('timeoutSeconds', value)}
-              step={10}
-              min={5}
-              max={3600}
-            />
-          </Field>
-
-          <Field label="最大重试次数（次）">
-            <NumberInput
-              className="text-right"
-              value={draft.maxRetries}
-              onValueChange={(value) => onChange('maxRetries', value)}
-              step={1}
-              min={0}
-              max={10}
-            />
-          </Field>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs text-ink-faint">
-            未修改的字段不会随请求提交 — 服务端会使用该供应商的默认值。
-          </span>
-          <Button small onClick={onReset} disabled={changed === 0}>
-            恢复供应商默认值
-          </Button>
-        </div>
-      </div>
-    </Collapsible>
-  );
-}

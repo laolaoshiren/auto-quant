@@ -230,6 +230,43 @@ export const LLM_PROVIDERS: readonly LlmProviderDescriptor[] = [
     supportsThinking: true,
   },
   {
+    /*
+     * Command Code —— 聚合网关（一个 Key 转发多家模型）。
+     *
+     * 配置项**全部来自实测**（2026-09-19 用真实 Key 调过），不是照文档抄的：
+     *
+     *   · `GET {base}/models` → **HTTP 200，71 个模型**
+     *   · 认证：`Authorization: Bearer <key>`
+     *   · 模型名形如 `deepseek/deepseek-v4.1-flash`、`claude-sonnet-5`
+     *
+     * 它此前只能靠 `custom` 手工填 baseUrl 才能用 —— 而生产上确实就是这么跑的。
+     * 做成内置之后，用户只要填一个 Key。
+     */
+    id: 'commandcode',
+    label: 'Command Code（聚合网关）',
+    baseUrl: 'https://api.commandcode.ai/provider/v1',
+    authStyle: 'bearer',
+    /*
+     * **故意留空。** 71 个模型、而且会随上游变动（列表里 12 个里就有
+     * `gpt-5.6-sol` / `claude-opus-5` 这种刚发布的）——
+     * 手抄一份必然过期，而**过期的模型名只在运行时失败**。
+     * 有 Key 时走 `/models` 的实时结果即可。
+     */
+    models: [],
+    openAiCompatible: true,
+    jsonMode: 'json_object',
+    docsUrl: 'https://commandcode.ai/docs/provider',
+    modelsPath: '/models',
+    modelsAuth: 'bearer',
+    /*
+     * 与 `custom` 同档：网关背后常常是推理模型，而思考与回答**共用同一个
+     * 输出预算**。实测这个项目的决策输出峰值 11487 —— 8192 会把回答截断成空，
+     * 那看起来像密钥坏了，不像预算不够。
+     */
+    defaults: { temperature: 0.2, maxTokens: 16384, timeoutSeconds: 240, maxRetries: 2 },
+    supportsThinking: true,
+  },
+  {
     id: 'custom',
     label: '自定义 OpenAI 兼容端点',
     baseUrl: '',

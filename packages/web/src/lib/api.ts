@@ -401,10 +401,12 @@ export interface AiModelInput {
   model: string;
   baseUrl: string;
   apiKey?: string;
-  temperature?: number;
-  maxTokens?: number;
-  timeoutSeconds?: number;
-  maxRetries?: number;
+  /*
+   * ⚠️ **不再有 temperature / maxTokens / timeoutSeconds / maxRetries。**
+   *
+   * 它们完全由服务端按厂商决定（见 `AiModelInputSchema`），控制台上的
+   * 「高级设置」面板也已删除。**契约里继续留着它们，会让人以为传了有用。**
+   */
 }
 
 export interface StrategyInput {
