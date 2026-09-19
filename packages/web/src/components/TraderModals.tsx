@@ -4,6 +4,7 @@ import type { TraderMode, TraderStatus } from '@aq/shared';
 import {
   api,
   type AiModelRow,
+  type DiscoverModelsResult,
   type EquitySource,
   type ExchangeAccountRow,
   type PreflightCheck,
@@ -54,6 +55,35 @@ export function NewTraderModal({
    */
   const [providerId, setProviderId] = useState<string>('');
   const [modelChoice, setModelChoice] = useState<string>('');
+  /**
+   * 每个厂商**从它自己的接口读回来**的模型列表，按 provider id 缓存。
+   *
+   * ## 为什么必须是"读取接口"，而不是内置静态列表
+   *
+   * 二级选择里"用户没自定义"的那一半，要展示的正是**该厂商此刻真正提供**的模型。
+   * 内置的 `descriptor.models` 是一份手抄的提示，而它对聚合网关这类厂商**故意留空**
+   * （`LLM_PROVIDERS` 里 commandcode 的 `models: []`）—— 于是选了 Command Code 之后
+   * 那个下拉是**空的**，提示还写着"可以到「AI 模型」页添加"，恰好把这次要消掉的那一步
+   * 又推回给用户。实测该厂商有 **71 个**可用模型，一个都不显示。
+   *
+   * 所以这里直接用**该厂商已存密钥**去问它的 `/models`：这正是 `discoverModels()`
+   * 存在的理由，也让"模型列表会随上游变"这件事自动成立。
+   *
+   * ## 为什么缓存
+   *
+   * 用户在"厂商"下拉里来回比较是常态，而每次切换都发一次外部请求既慢又白费配额。
+   * 一个厂商在一个弹窗的生命周期里只读一次。
+   */
+  const [discovered, setDiscovered] = useState<Record<string, DiscoverModelsResult>>({});
+  /**
+   * **正在读取哪个厂商** —— 记厂商 id，而不是一个布尔值。
+   *
+   * 布尔值在这里是错的：用户在读取途中切到另一个**已缓存**的厂商时，effect 会从
+   * "已读过"那条分支提前返回，于是那个 `true` 再也没有人负责关掉 —— 界面上会
+   * 一直显示"正在读取该厂商当前可用的模型…"，而请求其实早就结束了。
+   * 记 id 之后，"读取中"只在它确实是**当前这个厂商**时才成立。
+   */
+  const [loadingProvider, setLoadingProvider] = useState<string | null>(null);
   const [strategyId, setStrategyId] = useState<number | ''>('');
   /** 运行模式。默认按策略，与既有行为一致。 */
   const [mode, setMode] = useState<TraderMode>('strategy');
@@ -87,15 +117,25 @@ export function NewTraderModal({
         setCatalog(catalog);
         if (accountRows[0]) setExchangeAccountId(accountRows[0].id);
         /*
-         * 用服务端指定的默认模型，而不是"列表第一个"。
+         * 预选服务端指定的默认模型，而不是"列表第一个"。
          *
          * 列表按 id 排，所以一个**余额不足或已失效**的模型只要 id 最小，
          * 就会成为每个新机器人的默认 —— 每次创建都要手动改回来。
          * 取不到时回落到第一个，与以前的行为一致。
+         *
+         * ⚠️ 预选必须**同时**写满两级。改两级选择时这里漏过一次：只写了 `aiModelId`，
+         * 而提交校验看的是 `modelChoice` —— 于是默认值形同虚设，每次新建机器人都
+         * 要把厂商和模型各选一遍，而界面上看不出默认值其实已经"选好了"。
+         * 一条被后续校验绕过的赋值，比没有它更难发现。
          */
         const preferred = catalog.defaultAiModelId;
-        if (preferred && modelRows.some((m) => m.id === preferred)) setAiModelId(preferred);
-        else if (modelRows[0]) setAiModelId(modelRows[0].id);
+        const preselected =
+          (preferred ? modelRows.find((m) => m.id === preferred) : undefined) ?? modelRows[0];
+        if (preselected) {
+          setProviderId(preselected.provider);
+          setModelChoice(String(preselected.id));
+          setAiModelId(preselected.id);
+        }
         if (strategyRows[0]) setStrategyId(strategyRows[0].id);
       })
       .catch((err: Error) => alive && setLoadError(err.message));
@@ -106,18 +146,67 @@ export function NewTraderModal({
 
   const ready = accounts !== null && models !== null && strategyList !== null;
   /*
-   * 两级选择的派生数据。
+   * 两级选择的派生数据 —— 正是"2 种情况"：
    *
-   * `configuredModels` 是该厂商**已配置的**记录（用户自定义的），
-   * `suggestedModels` 是它的内置建议里**还没有记录的**那些 ——
-   * 两者合起来正是用户说的"2 种情况"。
+   *   · `configuredModels` —— 该厂商**已配置的**记录（用户自定义的）
+   *   · `availableModels`  —— **从厂商接口读回来的**、还没有记录的那些
    */
   const providers = catalog?.providers ?? [];
   const descriptor = providers.find((p) => p.id === providerId);
   const configuredModels = (models ?? []).filter((m) => m.provider === providerId);
-  const suggestedModels = (() => {
+  const providerDiscovery = providerId ? discovered[providerId] : undefined;
+  /** 该厂商有没有一条带密钥的记录 —— 没有就读不了它的模型列表。 */
+  const canDiscover = (models ?? []).some((m) => m.provider === providerId && m.hasKey);
+  const discovering = providerId !== '' && loadingProvider === providerId;
+
+  /*
+   * 选了厂商就去问它有哪些模型。
+   *
+   * 密钥只存在服务端，所以这里只传**记录 id**，由服务端取密钥并发出请求 ——
+   * 密钥本身永远不下发到浏览器（这一点与「AI 模型」页的获取按钮是同一条路径）。
+   */
+  useEffect(() => {
+    if (!open || !providerId) return;
+    if (discovered[providerId]) return; // 这个厂商已经读过了
+    const rows = (models ?? []).filter((m) => m.provider === providerId);
+    const withKey = rows.find((m) => m.hasKey);
+    if (!withKey) return; // 没有密钥 —— 读不了，由提示说明原因
+
+    let alive = true;
+    setLoadingProvider(providerId);
+    api
+      .discoverModels({
+        provider: providerId,
+        // 用这条记录自己的 baseUrl：`custom` 厂商的内置 baseUrl 是空的。
+        baseUrl: withKey.baseUrl,
+        apiKey: '',
+        modelId: withKey.id,
+      })
+      .then((result) => {
+        if (alive) setDiscovered((prev) => ({ ...prev, [providerId]: result }));
+      })
+      .catch(() => {
+        /* 读不到就停在"未读取"，由提示说明；不打断创建流程。 */
+      })
+      .finally(() => {
+        if (alive) setLoadingProvider(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, providerId, models, discovered]);
+
+  /*
+   * 接口结果优先，读不到时才回落到内置提示。
+   *
+   * 回落是有意的：一个还没有密钥的厂商仍值得显示"它大概有哪些模型"，
+   * 但那必须**标明是建议** —— 不能让用户以为那是该账号真正可用的清单。
+   */
+  const availableModels = (() => {
     const configured = new Set(configuredModels.map((m) => m.model));
-    return (descriptor?.models ?? []).filter((id) => !configured.has(id));
+    const fromApi = providerDiscovery?.ok ? providerDiscovery.models.map((m) => m.id) : null;
+    const source = fromApi ?? descriptor?.models ?? [];
+    return { ids: source.filter((id) => !configured.has(id)), live: fromApi !== null };
   })();
 
   const missing = useMemo(() => {
@@ -263,9 +352,12 @@ export function NewTraderModal({
               于是「我想用 Command Code 的某个模型」必须先去模型管理页建一条
               记录、再回来选。而用户此刻的意图是「建一个机器人」。
 
-              两级之后，第二个下拉同时给出两种情况：
+              两级之后，第二个下拉给出两种情况：
                 · 该厂商**已配置的**模型（用户自定义的）
-                · 它内置建议里**还没有记录的**模型（选中后在提交时自动建记录）
+                · 该厂商**接口读回来的**模型（选中后在提交时自动建记录）
+
+              第二种**必须来自接口**而不是内置静态列表：聚合网关的内置列表是空的，
+              照静态列表做出来的下拉在那些厂商上会一个模型都不显示。
             */}
             <Field label="模型厂商">
               <Select
@@ -291,11 +383,15 @@ export function NewTraderModal({
               hint={
                 !providerId
                   ? "先选一个模型厂商。"
-                  : configuredModels.length === 0 && suggestedModels.length === 0
-                    ? "该厂商还没有可选模型 —— 可以到「AI 模型」页添加。"
-                    : configuredModels.length > 0
-                      ? "已配置的在前，厂商建议的在后（选后者会自动建一条记录）。"
-                      : "来自该厂商的建议列表（选中后会自动建一条记录）。"
+                  : discovering
+                    ? "正在读取该厂商当前可用的模型…"
+                    : availableModels.live
+                      ? configuredModels.length > 0
+                        ? "已配置的在前，该厂商当前可用的在后（选后者会自动建一条记录）。"
+                        : "来自该厂商接口的实时列表（选中后会自动建一条记录）。"
+                      : configuredModels.length > 0
+                        ? "已配置的。未能从该厂商接口读取模型列表。"
+                        : "该厂商还没有可选模型。"
               }
             >
               <Select
@@ -306,7 +402,7 @@ export function NewTraderModal({
                   setModelChoice(value);
                   /*
                    * 已配置的：编码就是它的数字 id，直接填 aiModelId。
-                   * 建议的：编码是 new:<模型id>，**提交时才建记录** ——
+                   * 读回来的：编码是 new:<模型id>，**提交时才建记录** ——
                    * 不在 onChange 里建，否则用户每试一个型号都会留下一条
                    * 用不上的记录。
                    */
@@ -323,9 +419,9 @@ export function NewTraderModal({
                     ))}
                   </optgroup>
                 )}
-                {suggestedModels.length > 0 && (
-                  <optgroup label="厂商建议">
-                    {suggestedModels.map((id) => (
+                {availableModels.ids.length > 0 && (
+                  <optgroup label={availableModels.live ? "厂商可用模型" : "厂商建议"}>
+                    {availableModels.ids.map((id) => (
                       <option key={id} value={"new:" + id}>
                         {id}
                       </option>
@@ -333,6 +429,20 @@ export function NewTraderModal({
                   </optgroup>
                 )}
               </Select>
+              {/*
+                读不到原因必须说出来。一个空下拉配上"该厂商还没有可选模型"，
+                会让用户以为这个厂商真的没模型 —— 而实际原因可能是密钥没配、
+                或者密钥被拒。两种情况要做的事完全不同。
+              */}
+              {providerId && !discovering && providerDiscovery && !providerDiscovery.ok && (
+                <p className="mt-1 text-xs text-warn">{providerDiscovery.message}</p>
+              )}
+              {providerId && !discovering && !providerDiscovery && !canDiscover && (
+                <p className="mt-1 text-xs text-ink-faint">
+                  该厂商还没有带密钥的记录，无法读取它的模型列表 —— 到「AI 模型」页添加一条并填上 API
+                  Key，回来就会自动列出。
+                </p>
+              )}
             </Field>
           </div>
 
