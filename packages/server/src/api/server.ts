@@ -1319,6 +1319,29 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     }
   });
 
+  /**
+   * 指定「创建新机器人时预选哪个模型」。
+   *
+   * ## 为什么需要它
+   *
+   * `GET /api/config-catalog` 早就在读 `settings.default_ai_model_id` 并把它交给
+   * 前端（`catalog.defaultAiModelId`），那段注释写着它存在的理由：
+   *
+   *   原来是"列表第一个"，而列表按 id 排 —— 于是一个**余额不足或已失效**的模型
+   *   只要 id 最小，就会成为每个新机器人的默认，每次创建都要手动改回来。
+   *   **这里让操作员能指定。**
+   *
+   * **但没有任何地方写这个设置** —— 它读得到、用得上、改不了，
+   * 于是"取不到就回落到第一个"那半句成了唯一会发生的行为，而操作员每次创建
+   * 新机器人仍然要手动改回来。这个端点补上缺的那一头。
+   */
+  app.post('/api/ai-models/:id/set-default', authed, async (request, reply) => {
+    const id = Number((request.params as { id: string }).id);
+    if (!aiModels.get(id)) return reply.code(404).send({ error: '找不到该模型' });
+    settings.set('default_ai_model_id', String(id));
+    return { ok: true, defaultAiModelId: id };
+  });
+
   /* --- Strategies -------------------------------------------------------- */
 
   /*

@@ -549,6 +549,18 @@ export const api = {
   updateAiModel: (id: number, input: Partial<AiModelInput>) =>
     request<{ ok: boolean }>(`/ai-models/${id}`, { method: 'PATCH', body: input }),
   deleteAiModel: (id: number) => request<{ ok: boolean }>(`/ai-models/${id}`, { method: 'DELETE' }),
+  /**
+   * 指定「新建机器人时预选哪个模型」。
+   *
+   * 服务端一直在读 `settings.default_ai_model_id` 并把结果交给
+   * `catalog.defaultAiModelId`（创建机器人时用它预选），**但此前没有任何地方写它** ——
+   * 于是"取不到就回落到列表第一个"成了唯一会发生的行为。
+   */
+  setDefaultAiModel: (id: number) =>
+    request<{ ok: boolean; defaultAiModelId: number }>(`/ai-models/${id}/set-default`, {
+      method: 'POST',
+      body: {},
+    }),
   testAiModel: (id: number) => request<ModelTestResult>(`/ai-models/${id}/test`, { method: 'POST', body: {} }),
   /**
    * Ask the provider which models this key can use.

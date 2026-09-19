@@ -198,8 +198,10 @@ const ModelRow = memo(function ModelRow({
   result,
   testing,
   removing,
+  isDefault,
   onTest,
   onEdit,
+  onSetDefault,
   onRemove,
 }: {
   row: AiModelRow;
@@ -210,8 +212,11 @@ const ModelRow = memo(function ModelRow({
   result?: ModelTestResult & { at: number };
   testing: boolean;
   removing: boolean;
+  /** 新建机器人时会不会预选这一行。 */
+  isDefault: boolean;
   onTest: (row: AiModelRow) => void;
   onEdit: (row: AiModelRow) => void;
+  onSetDefault: (row: AiModelRow) => void;
   onRemove: (row: AiModelRow) => void;
 }) {
   const params = `温度 ${row.temperature} · ${fmtInt(row.maxTokens)} tok · ${row.timeoutSeconds}s · 重试 ${row.maxRetries}`;
@@ -257,6 +262,24 @@ const ModelRow = memo(function ModelRow({
           <Button small onClick={() => onEdit(row)}>
             编辑
           </Button>
+          {/*
+            「默认」是一个**标记**而不是一个按钮：已经是默认时不该再有一个可点的
+            "设为默认"，那会让操作员怀疑自己点没点上。不是默认时才给按钮。
+          */}
+          {isDefault ? (
+            <span className="px-1 text-xs text-ink-faint" title="新建机器人时会预选这个模型">
+              默认
+            </span>
+          ) : (
+            <Button
+              small
+              variant="ghost"
+              onClick={() => onSetDefault(row)}
+              title="新建机器人时预选这个模型（而不是列表里的第一个）"
+            >
+              设为默认
+            </Button>
+          )}
           <Button
             small
             variant="danger"
@@ -296,6 +319,14 @@ export function AiModelsSection() {
   const [testingDraft, setTestingDraft] = useState(false);
   const [filter, setFilter] = useState('');
   const [rowLimit, setRowLimit] = useState(ROW_PAGE);
+  /**
+   * 刚设过的默认模型。
+   *
+   * `catalog.defaultAiModelId` 是"哪一个是默认"的**权威来源**，但它要等目录
+   * 重新拉取才会动。这里存一份**乐观值**：操作员点完立刻看到标记移过去 ——
+   * 否则会有几秒钟"我点了吗"的疑惑，而重拉失败时那个疑惑会一直留着。
+   */
+  const [defaultIdOverride, setDefaultIdOverride] = useState<number | null>(null);
 
   /*
    * ⚠️ **不能写 `query.data ?? []`** —— 那个字面量每轮渲染都会新建一个数组，
@@ -493,6 +524,23 @@ export function AiModelsSection() {
     }
   };
 
+  /**
+   * 指定"新建机器人时预选哪个模型"。
+   *
+   * 这个设置此前**读得到、用得上、改不了** —— 服务端与前端都在消费
+   * `default_ai_model_id`，却没有任何地方写它。于是"取不到就回落到列表第一个"
+   * 成了唯一会发生的行为。
+   */
+  const setDefault = useCallback(async (row: AiModelRow) => {
+    setError(null);
+    try {
+      await api.setDefaultAiModel(row.id);
+      setDefaultIdOverride(row.id);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }, []);
+
   const remove = useCallback(
     async (row: AiModelRow) => {
       // 后果写进确认文案：删掉模型本身不会撤销历史决策，但会让引用它的机器人在预检就被拦下。
@@ -641,8 +689,10 @@ export function AiModelsSection() {
                           result={testResult[row.id]}
                           testing={testingId === row.id}
                           removing={removingId === row.id}
+                          isDefault={row.id === (defaultIdOverride ?? catalog?.defaultAiModelId ?? null)}
                           onTest={onTest}
                           onEdit={openEdit}
+                          onSetDefault={setDefault}
                           onRemove={onRemove}
                         />
                       ))}
