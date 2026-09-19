@@ -1959,6 +1959,32 @@ export const trades = {
    * Net, not gross: fees are a real loss and a breaker that ignores them will
    * keep trading through a streak that is only breaking even on paper.
    */
+  /**
+   * **全部**机器人的已实现净额合计。
+   *
+   * ## 为什么需要「全部」而不是某一个
+   *
+   * 交易所的 `income` 流水**不区分是哪个机器人下的单** —— 一个账户上的
+   * 所有交易混在一起。所以「平台的账与交易所对不对得上」只能整体校验。
+   *
+   * 单个机器人只对自己的那一份负责，而剩下的差额就是外部活动。
+   */
+  netForAllTraders(): number {
+    const row = getDb().get<{ total: number | null }>(
+      'SELECT SUM(net_pnl) AS total FROM trades',
+    );
+    return row?.total ?? 0;
+  },
+
+  /** 单个机器人的已实现净额合计。 */
+  netForTrader(traderId: number): number {
+    const row = getDb().get<{ total: number | null }>(
+      'SELECT SUM(net_pnl) AS total FROM trades WHERE trader_id = ?',
+      traderId,
+    );
+    return row?.total ?? 0;
+  },
+
   realizedPnlToday(traderId: number): number {
     /*
      * ⚠️ **日界是北京时间，不是 UTC。**
