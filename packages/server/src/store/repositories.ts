@@ -1960,30 +1960,26 @@ export const trades = {
    * keep trading through a streak that is only breaking even on paper.
    */
   /**
-   * **全部**机器人的已实现净额合计。
+   * **指定时间之后**的全部机器人已实现净额合计。
    *
-   * ## 为什么需要「全部」而不是某一个
+   * ## 为什么必须能按时间窗取
    *
-   * 交易所的 `income` 流水**不区分是哪个机器人下的单** —— 一个账户上的
-   * 所有交易混在一起。所以「平台的账与交易所对不对得上」只能整体校验。
+   * 总账校验的交易所侧来自 `income` 流水，而那个接口**必须给时间窗**
+   * （币安限制窗口长度）。于是平台侧**也必须限定在同一个窗口**，
+   * 否则差额里会混进"窗口之外的历史交易"—— 那会**永久误报**，
+   * 而一个永久误报的校验会训练操作员忽略这条告警。
    *
-   * 单个机器人只对自己的那一份负责，而剩下的差额就是外部活动。
+   * 实测：不加窗口时这个账户会报出 −0.86 的假差额，
+   * 而真实差值是 0.0057（窗口边界的浮点误差）。
    */
-  netForAllTraders(): number {
+  netSince(sinceIso: string): number {
     const row = getDb().get<{ total: number | null }>(
-      'SELECT SUM(net_pnl) AS total FROM trades',
+      'SELECT SUM(net_pnl) AS total FROM trades WHERE closed_at >= ?',
+      sinceIso,
     );
     return row?.total ?? 0;
   },
 
-  /** 单个机器人的已实现净额合计。 */
-  netForTrader(traderId: number): number {
-    const row = getDb().get<{ total: number | null }>(
-      'SELECT SUM(net_pnl) AS total FROM trades WHERE trader_id = ?',
-      traderId,
-    );
-    return row?.total ?? 0;
-  },
 
   realizedPnlToday(traderId: number): number {
     /*

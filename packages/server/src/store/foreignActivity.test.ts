@@ -32,7 +32,7 @@ import { after, before, beforeEach, test } from 'node:test';
 import { defaultStrategyConfig } from '@aq/shared';
 
 import { closeDb, getDb, initDb } from '../db/index.js';
-import { aiModels, exchanges, orders, strategies, traders } from './repositories.js';
+import { aiModels, exchanges, orders, strategies, traders, trades } from './repositories.js';
 
 let workDir: string;
 
@@ -140,4 +140,98 @@ test('order id 为空的行不进任何集合 —— 空串不是有效的归属
 
   assert.ok(!orders.allExchangeOrderIds().has(''), '空串不该在集合里');
   assert.ok(!orders.exchangeOrderIds(t).has(''));
+});
+
+test('netSince 只算窗口内的 —— 总账校验的两侧必须比同一段', () => {
+  /*
+   * 这一条是我自己在实现总账校验时踩的坑，值得钉住。
+   *
+   * 校验的交易所侧来自 `income` 流水，而那个接口**必须给时间窗**
+   * （币安限制窗口长度）。所以平台侧也**必须**限定在同一个窗口 ——
+   * 否则差额里会混进"窗口之外的历史交易"，而那是**永久误报**。
+   *
+   * 实测：不按窗口取时，这个账户报出 −0.86 的假差额；
+   * 按窗口取是 0.0057（窗口边界的浮点误差）。
+   *
+   * **一个永久误报的校验比没有校验更糟**：它会训练操作员忽略这条告警，
+   * 而这是唯一能自动发现"账本错了"的地方。
+   */
+  const t = seedTrader('net-since');
+  const account = exchanges.create({
+    exchange: 'binance',
+    label: 'net-since-2',
+    apiKey: 'k',
+    apiSecretEnc: 'v1:00:00:00',
+    testnet: true,
+    canTrade: true,
+  });
+
+  /* 窗口之前的一笔（应当被排除）。 */
+  trades.insert({
+    traderId: t,
+    symbol: 'SOLUSDT',
+    side: 'long',
+    quantity: 1,
+    entryPrice: 1,
+    exitPrice: 1.1,
+    leverage: 1,
+    openedAt: '2026-01-01T00:00:00.000Z',
+    closedAt: '2026-01-01T00:10:00.000Z',
+    closeReason: 'model_decision',
+    grossPnl: 10,
+    entryFee: 0,
+    fundingFee: 0,
+    source: 'bot',
+  });
+  /* 窗口之内的一笔。 */
+  trades.insert({
+    traderId: t,
+    symbol: 'SOLUSDT',
+    side: 'long',
+    quantity: 1,
+    entryPrice: 1,
+    exitPrice: 1.01,
+    leverage: 1,
+    openedAt: '2026-06-01T00:00:00.000Z',
+    closedAt: '2026-06-01T00:10:00.000Z',
+    closeReason: 'model_decision',
+    grossPnl: 1,
+    entryFee: 0,
+    fundingFee: 0,
+    source: 'bot',
+  });
+
+  const sinceIso = '2026-05-01T00:00:00.000Z';
+  const inWindow = trades.netSince(sinceIso);
+  assert.ok(inWindow < 5, `窗口内的净额应当只有那一笔（拿到 ${inWindow}）`);
+  assert.ok(
+    trades.netSince('2020-01-01T00:00:00.000Z') > inWindow,
+    '把窗口放宽到全部历史时，净额必须更大 —— 否则说明 since 根本没生效',
+  );
+  assert.equal(trades.netSince('2030-01-01T00:00:00.000Z'), 0, '窗口在未来时应当什么都没有');
+});
+
+test('netSince 跨全部机器人求和 —— 交易所流水不区分是谁下的单', () => {
+  const a = seedTrader('net-multi-a');
+  const b = seedTrader('net-multi-b');
+  for (const [t, pnl] of [[a, 2], [b, 3]] as Array<[number, number]>) {
+    trades.insert({
+      traderId: t,
+      symbol: 'SOLUSDT',
+      side: 'long',
+      quantity: 1,
+      entryPrice: 1,
+      exitPrice: 1.1,
+      leverage: 1,
+      openedAt: '2026-06-01T00:00:00.000Z',
+      closedAt: '2026-06-01T00:10:00.000Z',
+      closeReason: 'model_decision',
+      grossPnl: pnl,
+      entryFee: 0,
+      fundingFee: 0,
+      source: 'bot',
+    });
+  }
+  const total = trades.netSince('2026-05-01T00:00:00.000Z');
+  assert.ok(total >= 5, `两个机器人（2 + 3）都要算进来，拿到 ${total}`);
 });
