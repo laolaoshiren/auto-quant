@@ -93,6 +93,39 @@ if (-not $SkipBuild) {
     }
 }
 
+Write-Host "==> 生成构建信息（build-info.json）" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# 为什么这个文件必须存在
+# ---------------------------------------------------------------------------
+# 服务器上**没有 `.git`**（部署是打包上传，`.git` 在下面的排除列表里），所以运行
+# 目录里根本没有仓库 —— 它无法回答"我在跑哪个提交"。控制台「操作员账户」页那个
+# 「服务端版本」格子因此长期显示一个硬编码的 `'0.1.0'`：一个永远不变的数字，
+# 看起来像状态，其实什么都没说。
+#
+# 这个文件就是那条信息从构建机传到运行环境的**唯一通道**：HEAD、提交时间、以及
+# 仓库地址（从 `origin` 读，所以本脚本自己仍然不含任何站点专属信息），一并写下来，
+# 服务端读它并与远端比对"是否落后"。
+#
+# `dirty` 必须如实记录：工作区有未提交改动时，服务器跑的东西**不等于**这个提交，
+# 而"版本一致"会让一个改到一半的部署看起来是干净的。
+$gitSha = (& git -C $repoRoot rev-parse HEAD).Trim()
+$buildInfo = [ordered]@{
+    commit      = $gitSha
+    commitShort = $gitSha.Substring(0, 7)
+    branch      = (& git -C $repoRoot rev-parse --abbrev-ref HEAD).Trim()
+    subject     = (& git -C $repoRoot log -1 --format=%s).Trim()
+    committedAt = (& git -C $repoRoot log -1 --format=%cI).Trim()
+    deployedAt  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss'Z'")
+    dirty       = [bool](& git -C $repoRoot status --porcelain)
+    repository  = ((& git -C $repoRoot remote get-url origin) -replace '\.git$', '').Trim()
+}
+[System.IO.File]::WriteAllText(
+    (Join-Path $repoRoot 'build-info.json'),
+    ($buildInfo | ConvertTo-Json),
+    (New-Object System.Text.UTF8Encoding($false))
+)
+Write-Host "    $($buildInfo.branch) @ $($buildInfo.commitShort)$(if ($buildInfo.dirty) { '（工作区有未提交改动）' })"
+
 Write-Host "==> 打包（排除 .env / data / node_modules；含前端产物）" -ForegroundColor Cyan
 $archive = Join-Path $repoRoot '_deploy.tar.gz'
 if (Test-Path $archive) { Remove-Item $archive -Force }

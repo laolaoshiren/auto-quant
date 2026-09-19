@@ -19,7 +19,7 @@ import { Save } from 'lucide-react';
 import { userRoleLabel } from '@aq/shared';
 import { api, setToken } from '../../lib/api';
 import { useApp } from '../../lib/store';
-import { useCopy } from '../../lib/hooks';
+import { useCopy, usePolled } from '../../lib/hooks';
 import { Badge, Button, CopyButton, Empty, ErrorNote, Field, Panel, TextInput } from '../ui';
 import { Metric, MetricGroup, PageShell, SectionLabel } from '../shell';
 import { fmtDateTime } from '../../lib/format';
@@ -40,6 +40,39 @@ export function AccountSection() {
   const [done, setDone] = useState<string | null>(null);
   const catalogCopy = useCopy();
   const providers = catalog?.providers ?? [];
+
+  /*
+   * 部署版本，以及"线上是不是最新的"。
+   *
+   * 版本比对**单独加载**，因为服务端要为它出网（打 GitHub，8 秒超时）——
+   * 塞进 `/api/system` 会让整页的加载被一个有则更好、没有也无妨的诊断拖住。
+   * 不带 interval：打开这一页查一次就够，服务端自己缓存 10 分钟。
+   */
+  const build = system?.build ?? null;
+  const update = usePolled((signal) => api.updateCheck(signal), { intervalMs: 0 });
+
+  const updateLabel = update.error
+    ? '检查失败'
+    : update.loading
+      ? '检查中…'
+      : update.data?.state === 'up-to-date'
+        ? '一致'
+        : update.data?.state === 'behind'
+          ? `落后${update.data.behindBy === null ? '' : ` ${update.data.behindBy} 个提交`}`
+          : update.data?.state === 'ahead'
+            ? '领先（未推送）'
+            : update.data?.state === 'diverged'
+              ? '已分叉'
+              : '未知';
+  const updateTone: 'default' | 'up' | 'warn' = update.error
+    ? 'warn'
+    : update.data?.state === 'up-to-date'
+      ? 'up'
+      : update.data?.state === 'behind' ||
+          update.data?.state === 'ahead' ||
+          update.data?.state === 'diverged'
+        ? 'warn'
+        : 'default';
 
   const reset = () => {
     setNewUsername('');
@@ -111,8 +144,27 @@ export function AccountSection() {
         tone={system?.dryRun ? 'default' : 'warn'}
         sub={system?.environmentLabel ?? system?.environment ?? '—'}
       />
-      <Metric label="服务端版本" value={health?.version ?? '—'} />
+      <Metric
+        label="服务端版本"
+        value={build ? `${build.branch} @ ${build.commitShort}` : '未知'}
+        sub={build?.subject || (build ? undefined : '本次部署没有写出版本信息')}
+        tone={build?.dirty ? 'warn' : 'default'}
+      />
+      <Metric label="部署时间" value={build?.deployedAt ? fmtDateTime(build.deployedAt) : '—'} />
+      <Metric
+        label="与 GitHub"
+        value={updateLabel}
+        tone={updateTone}
+        sub={update.error ?? update.data?.message}
+      />
+      <Metric label="产品版本" value={system?.version ?? health?.version ?? '—'} />
       <Metric label="数据库" value={health?.db ?? '—'} />
+      {build?.dirty && (
+        <p className="text-xs leading-relaxed text-warn">
+          ⚠ 打包时工作区有未提交改动 —— 线上跑的代码<strong>不等于</strong> {build.commitShort}{' '}
+          这个提交，它的行为无法用仓库里的任何一版解释。
+        </p>
+      )}
       <p className="text-xs leading-relaxed text-ink-faint">
         本系统面向单人部署：管理员账号在服务首次启动时自动创建，不提供注册入口，
         也没有找回密码的流程 —— 修改只能在这里做，且需要验证当前密码。

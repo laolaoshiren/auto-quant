@@ -104,6 +104,22 @@ export const env = {
   globalTradingDisabled: bool('GLOBAL_TRADING_DISABLED', false),
   dryRun: bool('DRY_RUN', false),
 
+  /**
+   * 关掉"与 GitHub 比对版本"这个出站请求。
+   *
+   * 默认开着，因为控制台用它回答"线上跑的是不是最新版"。但**在一个不出网的部署里
+   * 它只会在每次查看时白等一次超时**，所以必须能关。关掉之后控制台显示"未启用"，
+   * 而不是把它伪装成"一致"。
+   */
+  updateCheckDisabled: bool('UPDATE_CHECK_DISABLED', false),
+  /**
+   * 可选的 GitHub token，只为提高 API 速率限制（未认证 60 次/小时/IP）。
+   *
+   * public 仓库不需要它；私有仓库需要。**它只出现在请求头里**，不进日志、
+   * 不进响应体、不进错误消息 —— 与 `llm/client.ts` 里 API Key 的处理同一条约定。
+   */
+  githubToken: str('GITHUB_TOKEN', ''),
+
   isProduction: process.env.NODE_ENV === 'production',
 } as const;
 

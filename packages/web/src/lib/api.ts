@@ -198,6 +198,42 @@ export interface Catalog {
   defaultAiModelId: number | null;
 }
 
+/**
+ * 部署版本 —— 线上跑的是哪一次构建。
+ *
+ * 服务器上没有 `.git`（部署是打包上传），所以这些值由构建机写进 `build-info.json`
+ * 随包传过去。`null` 表示**这次部署没有写出版本信息**（部署脚本早于该功能，
+ * 或用了别的部署方式）—— 界面必须把它显示成"未知"，不能回落到一个默认真值。
+ */
+export interface BuildInfo {
+  commit: string;
+  commitShort: string;
+  branch: string;
+  subject: string;
+  committedAt: string;
+  deployedAt: string;
+  /** 打包时工作区有未提交改动 —— 服务器跑的东西不等于这个提交。 */
+  dirty: boolean;
+  repository: string;
+}
+
+export type UpdateState = 'up-to-date' | 'behind' | 'ahead' | 'diverged' | 'unknown';
+
+/** `GET /api/system/update` —— 与远端仓库比对的结果（服务端缓存 10 分钟）。 */
+export interface UpdateCheck {
+  state: UpdateState;
+  message: string;
+  checkedAt: string;
+  repository: string | null;
+  branch: string | null;
+  localCommit: string | null;
+  latestCommit: string | null;
+  latestCommitShort: string | null;
+  latestSubject: string | null;
+  latestCommittedAt: string | null;
+  behindBy: number | null;
+}
+
 export interface SystemStatus {
   dryRun: boolean;
   tradingDisabled: boolean;
@@ -208,6 +244,10 @@ export interface SystemStatus {
   weightLimit: number;
   tradableSymbols: number;
   runningTraders: number[];
+  /** 部署版本。`null` = 这次部署没写出版本信息。 */
+  build: BuildInfo | null;
+  /** 产品版本号（`package.json`）。与 `build` 是两件事。 */
+  version: string;
 }
 
 export interface LogLine {
@@ -465,6 +505,13 @@ export const api = {
   /* --- catalogues + system --- */
   catalog: (signal?: AbortSignal) => request<Catalog>('/catalog', { signal }),
   system: (signal?: AbortSignal) => request<SystemStatus>('/system', { signal }),
+  /**
+   * 与远端仓库比对部署版本。
+   *
+   * 单独一次请求，因为它**要出网**（服务端打 GitHub，8 秒超时）—— 不能让它拖住
+   * 整页的加载。服务端缓存 10 分钟，所以重复打开这一页不会重复打 GitHub。
+   */
+  updateCheck: (signal?: AbortSignal) => request<UpdateCheck>('/system/update', { signal }),
   logs: (limit = 200, signal?: AbortSignal) =>
     request<{ logs: LogLine[] }>('/logs', { query: { limit }, signal }),
 

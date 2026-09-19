@@ -20,6 +20,7 @@ import type { ExchangeConnection } from '../binance/bootstrap.js';
 import { preflight } from '../binance/bootstrap.js';
 import type { Vault } from '../crypto/vault.js';
 import { dbPath, env, webDistDir } from '../env.js';
+import { checkForUpdates, readAppVersion, readBuildInfo } from '../buildInfo.js';
 import { eventBus } from '../events.js';
 import { createLogger, setLogSink } from '../logger.js';
 import { maskSecret, hashPassword, verifyPassword, DUMMY_PASSWORD_HASH } from '../crypto/vault.js';
@@ -534,7 +535,18 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     const health = evaluateTraderHealth(traders.list(), Date.now(), runningSince);
     const body = {
       ok: health.ok,
-      version: '0.1.0',
+      /*
+       * 产品版本号，取自 `package.json`。
+       *
+       * 原来这里是**硬编码的 `'0.1.0'`** —— 一个从写下那天起就没变过、也永远不会
+       * 变的字符串。它看起来像状态，其实什么都没说：控制台「操作员账户」页那个
+       * 「服务端版本」格子因此长期在骗人。
+       *
+       * 这个端点**无需认证**，所以它只回产品版本号，**不回 commit**：
+       * 精确到提交的版本足以让攻击者去查该提交的已知缺陷，而这属于认证后才该给的
+       * 信息（见 `/api/system` 的 `build` 与 `/api/system/update`）。
+       */
+      version: readAppVersion(),
       uptimeSeconds: Math.round(process.uptime()),
       hasOwner: users.count() > 0,
       dryRun: env.dryRun,
@@ -878,7 +890,32 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 放弃时也会留在这里 —— 这个列表就是为了让"放弃"这件事不可能被忽略。
      */
     failedTraders: deps.manager.failedTraders(),
+    /**
+     * 部署版本 —— "线上跑的是哪一版"。
+     *
+     * 服务器上没有 `.git`（部署是打包上传），所以这份信息来自构建机随包写下的
+     * `build-info.json`。**没有它时是 `null`**，而不是一个看起来正常的默认值：
+     * "我不知道我跑的是哪一版"必须显示成未知。
+     */
+    build: readBuildInfo(),
+    /** 产品版本号（`package.json`）。与上面那个是两件事，分开给。 */
+    version: readAppVersion(),
   }));
+
+  /**
+   * 与远端仓库比对部署版本 —— 回答"线上是不是最新的"。
+   *
+   * ## 为什么单独一个端点，而不是塞进 `/api/system`
+   *
+   * 这一次要**出网**（GitHub API，8 秒超时）。塞进 `/api/system` 会让整页的加载
+   * 被一个诊断性的可选项拖住，而 `/api/system` 是控制台每次轮询都会打的端点。
+   * 单独一个端点也让它能被独立缓存与独立失败：取不到版本比对，不该影响"我现在
+   * 跑在什么环境里"那一整块。
+   *
+   * 结果在 `checkForUpdates()` 内部缓存（成功 10 分钟、失败 1 分钟），
+   * 所以反复打开这一页不会反复打 GitHub。
+   */
+  app.get('/api/system/update', authed, async () => checkForUpdates());
 
   app.get('/api/logs', authed, async (request) => {
     const limit = Number((request.query as { limit?: string }).limit ?? 200);

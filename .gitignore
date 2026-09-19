@@ -55,6 +55,11 @@ service-account*.json
 deploy.local.ps1
 deploy.local.sh
 
+# 构建信息（scripts/deploy.ps1 每次部署时生成，随包传给服务器）。
+# 服务器上没有 .git，运行目录无法自己知道"我在跑哪个提交" —— 这个文件是那条信息
+# 从构建机到运行环境的唯一通道。它是**构建产物**，不是源码：每次部署覆盖，绝不入库。
+build-info.json
+
 # 站点专属敏感信息规则（域名 / IP / 主机名）。
 # 钩子脚本读取它，但它本身绝不入库 —— 否则就自相矛盾了。
 # 模板见 sensitive-patterns.example.txt
