@@ -36,7 +36,7 @@ import {
   type CircuitBreakerVerdict,
 } from '../risk/engine.js';
 import { selectCandidates } from '../strategy/coins.js';
-import { parseDecisionResponse, sortDecisions } from '../strategy/parser.js';
+import { parseDecisionResponse, hasDecisionBlock, sortDecisions } from '../strategy/parser.js';
 import {
   buildSystemPrompt,
   buildUserPrompt,
@@ -46,7 +46,7 @@ import {
   type PromptPosition,
   type PromptRejection,
 } from '../strategy/prompt.js';
-import { isMajorSymbol } from '@aq/shared';
+import { isMajorSymbol, type DecisionAction } from '@aq/shared';
 import {
   attributedEquity,
   decisions as decisionStore,
@@ -1409,6 +1409,34 @@ export class AutoTrader {
 
     /* --- 8. Parse -------------------------------------------------------- */
     state.phase = 'parse';
+    /*
+     * ⚠️ **没有 `<decision>` 块 = 这一轮失败，不能往下走。**
+     *
+     * `parseDecisionResponse` 找不到 `<decision>` 时会**逐步放宽**：先试围栏代码块、
+     * 再试"整段回复里第一个括号配平的区域"。那是为诊断路径设计的宽容（健康检查要能
+     * 回答"模型到底吐了什么"），但**交易路径用它会出事**：
+     *
+     *   · 模型在 `<reasoning>` 里写一个示例或假设性的 JSON（很常见），而响应又被
+     *     输出长度截断、没写出真正的 `<decision>` —— 那段散文里的 JSON 会被当成
+     *     真实提案送进风控。而系统提示词自己就带着**两份字段完整、confidence 82/78
+     *     的范例**，只要方向恰好成立，**它可能真的开出一笔仓**。
+     *   · 兜底只试**第一个**配平区域。推理里先出现 `RSI[14]` 这种方括号时，
+     *     它会返回 `[14]` 并放弃继续找后面真正的决策数组。
+     *
+     * 判据函数 `hasDecisionBlock()` 早就写好了，但**只有健康检查用它** ——
+     * 交易路径一次都没用。同一个失败在诊断里被判失败、在交易里被判成功，
+     * 这本身就是信号：**该信的是那个更严的判据。**
+     *
+     * 抛错而不是"当作 0 条决策"：后者会让这一轮记成 `success`、把
+     * `consecutiveFailures` 清零，**安全模式因此永远不触发**（而健康检查那边
+     * 判它是失败）。截断是模型失败的一种，就该按失败计数。
+     */
+    if (!hasDecisionBlock(response.text)) {
+      throw new Error(
+        `模型回复里没有 <decision> 块（finish_reason 可能为 length，输出被截断）—— ` +
+          `本轮不执行任何决策。响应 ${response.text.length} 字符。`,
+      );
+    }
     const openPositionMap = new Map<string, 'long' | 'short'>(
       localPositions.map((p) => [p.symbol, p.side as 'long' | 'short']),
     );
@@ -1433,7 +1461,50 @@ export class AutoTrader {
 
     /* --- 9. Hard risk review --------------------------------------------- */
     state.phase = 'risk';
-    const verdict = this.risk.review(sortDecisions(parsed.decisions), {
+    /*
+     * ⚠️ **AI 主动停手时，只放行"减少风险"的决策。**
+     *
+     * `pause_trading` 工具从写下来那天起就没有生效过：它把状态写进
+     * `settings.agent_paused:<id>`，而**交易循环从来没有读过它** ——
+     * `deps.paused` 在整个文件里只出现在接口声明那一行。于是 AI 调用它之后
+     * 仓位照开，而工具回喂给它的是一句肯定句「已停止开新仓」：**AI 的上下文里
+     * 被写入了一个假事实**，下一轮的推理建立在"我已经停手了"之上。
+     *
+     * 这是 AI 除了调参之外**唯一能减少风险的动作**，而它对结果零影响 ——
+     * 比"工具不存在"更糟，因为它让模型以为自己已经做了该做的事。
+     *
+     * 闸门放在风控之前：开仓一律拦下（`open_long` / `open_short`），
+     * 平仓与减仓照常走 —— 与 §2.9「减少风险的工作先于增加风险的工作」一致。
+     * 拦下的每一条都进执行日志，**不是静默丢弃**（否则决策流上看不出
+     * "这一轮为什么没开仓"）。
+     */
+    const orderedDecisions = sortDecisions(parsed.decisions);
+    const isOpening = (action: DecisionAction): boolean =>
+      action === 'open_long' || action === 'open_short';
+    const agentPaused = this.deps.agent?.paused() ?? false;
+    const gatedDecisions = agentPaused
+      ? orderedDecisions.filter((d) => !isOpening(d.action))
+      : orderedDecisions;
+    if (agentPaused) {
+      for (const d of orderedDecisions.filter((x) => isOpening(x.action))) {
+        executionLog.push({
+          action: d.action,
+          symbol: d.symbol,
+          status: 'skipped',
+          detail: 'AI 已主动停手（pause_trading）：本轮不开新仓；既有仓位的管理与平仓照常。',
+        });
+      }
+      const dropped = orderedDecisions.length - gatedDecisions.length;
+      if (dropped > 0) {
+        this.emitOnChange(
+          'agent-paused',
+          'info',
+          `AI 处于停手状态：拦下 ${dropped} 条开仓决策，平仓与减仓照常执行。恢复由操作员决定。`,
+        );
+      }
+    }
+
+    const verdict = this.risk.review(gatedDecisions, {
       config,
       account: {
         equity: account.equity,
@@ -1565,7 +1636,26 @@ export class AutoTrader {
         continue;
       }
 
-      if (isOpenAction(decision.action)) {
+      /*
+       * ⚠️ **熔断与安全模式必须拦住"任何增加敞口的动作"，包括加仓。**
+       *
+       * 原来这三条判据都写在 `isOpenAction(...)` 里面，而 `isOpenAction` 只认
+       * `open_long` / `open_short`。于是 `add_to_position` 直接落到下面的执行分支
+       * ——**单日亏损熔断或总回撤熔断生效期间，模型仍然可以加仓扩大敞口**。
+       *
+       * 而熔断为什么还有机会轮到模型：早退判据要求"空仓"（见上面 `breaker.blocked`
+       * 那段），**有仓位时模型每轮都会被问到**。也就是说这条路径不是理论上的：
+       * 一笔浮亏中的持仓正好是加仓最"有理由"的时候。
+       *
+       * 提示词那边还写着加仓"与新开仓共用同一批上限"—— 模型因此会合理地以为
+       * 熔断也挡着它。**它没有。**
+       *
+       * 与 §2.9 一致：熔断期间只允许**减少**风险的动作（平仓、减仓、调整保护单）。
+       */
+      const isRiskIncreasing = (action: DecisionAction): boolean =>
+        isOpenAction(action) || action === 'add_to_position';
+
+      if (isRiskIncreasing(decision.action)) {
         // Circuit breakers and safe mode take precedence over any model intent.
         if (breaker.blocked) {
           executionLog.push({
@@ -1581,20 +1671,22 @@ export class AutoTrader {
             action: decision.action,
             symbol: decision.symbol,
             status: 'skipped',
-            detail: '当前处于安全模式，在模型恢复正常之前禁止开新仓。',
+            detail: '当前处于安全模式，在模型恢复正常之前禁止开新仓与加仓。',
           });
           continue;
         }
-        if (this.isInCooldown(decision.symbol)) {
-          cooldownBlocked += 1;
-          executionLog.push({
-            action: decision.action,
-            symbol: decision.symbol,
-            status: 'skipped',
-            detail: `该标的处于再入冷却期（平仓后 ${config.throttle.reentryCooldownMinutes} 分钟内不可再入场）。`,
-          });
-          continue;
-        }
+      }
+
+      /* 冷却只针对"开新仓"：平掉之后短时间内不该重新建仓，而加仓本来就是既有仓位。 */
+      if (isOpenAction(decision.action) && this.isInCooldown(decision.symbol)) {
+        cooldownBlocked += 1;
+        executionLog.push({
+          action: decision.action,
+          symbol: decision.symbol,
+          status: 'skipped',
+          detail: `该标的处于再入冷却期（平仓后 ${config.throttle.reentryCooldownMinutes} 分钟内不可再入场）。`,
+        });
+        continue;
       }
 
       try {
