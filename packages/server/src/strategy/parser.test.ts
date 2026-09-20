@@ -275,6 +275,46 @@ test('a truncated response is distinguishable from a deliberate empty decision',
   assert.equal(parsed.cotTrace.startsWith('<reasoning>'), false);
 });
 
+test('★ 推理里的 JSON 不是决策：没有 <decision> 块时交易路径必须拒绝整轮', () => {
+  /*
+   * 这条用例来自一次代码审查发现的洞，而那个洞是**真的会让钱出去**的。
+   *
+   * `parseDecisionResponse` 在找不到 `<decision>` 时会逐步放宽，最后退到
+   * "整段回复里第一个括号配平的区域"。那是为**诊断**路径设计的宽容
+   * （健康检查要能回答"模型到底吐了什么"），但系统提示词自己就带着两份
+   * **字段完整、confidence 82/78** 的决策范例 —— 模型在推理里回显或假设
+   * 一个 JSON 非常常见。
+   *
+   * 于是"响应被截断、没写出 `<decision>`"这一种失败，会变成"从推理里捡出
+   * 一个看起来合法的提案送进风控"。交易路径原来没有检查块的存在性（只有
+   * `healthCheck.ts` 检查），所以两个路径对同一次失败给出相反的判定。
+   *
+   * ⚠️ 这条用例钉的是**判据**（`hasDecisionBlock`）。真正的护栏是
+   * `autoTrader.ts` 在 parse 之前那段 `throw` —— 删除它，这条用例不会变红。
+   * 所以下面加了反证：**说明"不检查"会导致真的解析出一条提案。**
+   */
+  const leaked = [
+    '<reasoning>',
+    '我倾向于开多。参考格式：',
+    '{"symbol":"BTCUSDT","action":"open_long","confidence":82,"position_size_usd":150,',
+    '"stop_loss":79000,"take_profit":83000}',
+    '但还没想完就被截断了',
+  ].join('\n');
+
+  assert.equal(hasDecisionBlock(leaked), false, '没有 <decision> 块 → 判据必须为 false');
+
+  /*
+   * 反证。这条断言**故意断言兜底路径是宽的** —— 它与上面那条一起构成
+   * "必须检查块存在性"的完整理由。如果它哪天变成 0 条，说明兜底变严了，
+   * 交易路径那道闸就不再是唯一的防线，那时应当重新评估（而不是默默删掉这条）。
+   */
+  const parsed = parseDecisionResponse(leaked, context());
+  assert.ok(
+    parsed.decisions.length > 0,
+    '兜底没有从推理里捡出提案 —— 若这是有意收紧的，请连同 autoTrader 那道闸一起重新评估',
+  );
+});
+
 /* -------------------------------------------------------------------------- */
 /*  Ordering                                                                   */
 /* -------------------------------------------------------------------------- */
