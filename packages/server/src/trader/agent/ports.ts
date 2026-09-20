@@ -23,6 +23,7 @@ import { agentExperiments, agentMemory, agentRuns } from '../../store/agentStore
 import { decisions, equity, positions, runtimeLogs, settings, traders, trades } from '../../store/repositories.js';
 import type { OrchestratorPorts } from './orchestrator.js';
 import type { WakeFacts } from './wake.js';
+import { readAgentConfig } from './config.js';
 
 /** "上次唤醒"落库用的键。 */
 const lastWakeKey = (traderId: number) => `agent_last_wake:${traderId}`;
@@ -70,17 +71,16 @@ export interface AgentPortDeps {
 export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
   const { traderId } = deps;
 
-  /** AI 模式下的配置；没有就回落到策略配置。 */
-  const readConfig = (): StrategyConfig => {
-    const raw = traders.get(traderId)?.agentConfigJson;
-    if (!raw) return deps.strategyConfig();
-    try {
-      return JSON.parse(raw) as StrategyConfig;
-    } catch {
-      // 配置坏了不该让机器人停摆 —— 回落到策略配置，并把这件事记下来。
-      return deps.strategyConfig();
-    }
-  };
+  /**
+   * AI 模式下的配置；没有就回落到策略配置。
+   *
+   * ⚠️ 走共用的 `readAgentConfig`（**过 zod**），不要在这里 `JSON.parse(...) as`。
+   * 断言式读取会让将来新增的、带默认值的安全字段在老配置里读成 `undefined`，
+   * 而 `x > 0` 形式的判据随之静默变成 false —— 那等于把那条风控关掉，且不报错。
+   * 详见 `config.ts` 顶部。
+   */
+  const readConfig = (): StrategyConfig =>
+    readAgentConfig(traderId, deps.strategyConfig()) ?? deps.strategyConfig();
 
   return {
     readConfig,

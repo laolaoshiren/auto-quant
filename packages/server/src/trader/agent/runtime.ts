@@ -31,6 +31,7 @@ import { agentMemory } from '../../store/agentStore.js';
 import { decisions as decisionStore } from '../../store/repositories.js';
 import { traders } from '../../store/repositories.js';
 import type { LoopModel } from './loop.js';
+import { hasAgentConfig, readAgentConfig } from './config.js';
 import { markStrategyReview, markWoken, makeAgentPorts, readPause } from './ports.js';
 import { reviewClosedTrade, runStrategyReview, settlePending } from './orchestrator.js';
 import { DEFAULT_WAKE_POLICY, type WakePolicy } from './wake.js';
@@ -110,14 +111,25 @@ export class AgentRuntime {
    */
   configOverride(): StrategyConfig | null {
     if (!this.isEnabled()) return null;
-    const raw = traders.get(this.deps.traderId)!.agentConfigJson as string;
-    try {
-      return JSON.parse(raw) as StrategyConfig;
-    } catch (error) {
-      // 坏配置不该让机器人停摆；回落到策略配置，并让这件事可见。
-      log.warn(`机器人 #${this.deps.traderId} 的 AI 配置无法解析，回落策略配置：${(error as Error).message}`);
-      return null;
-    }
+    /*
+     * ⚠️ **不要在这里 `JSON.parse(raw) as StrategyConfig`。**
+     *
+     * 断言式读取把 schema 校验留在了"写入那一刻"（`patch.ts`），于是将来给
+     * `StrategyConfigSchema` 加一个**带默认值的安全字段**时，老配置读出来是
+     * `undefined` —— 代码里 `x > 0` 形式的判据会**静默变成 false**，也就是
+     * 把那条风控关掉，而且没有任何报错。
+     *
+     * 共用的 `readAgentConfig` 过 zod 并回落到策略配置。`hasAgentConfig`
+     * 单独判一次是为了保住本函数的 `null` 语义：**"AI 还没写过配置"应当返回
+     * null 让调用方走策略配置**，而不是把 fallback 伪装成一份"AI 配置"。
+     */
+    if (!hasAgentConfig(this.deps.traderId)) return null;
+    /*
+     * 兜底传 `null` 而不是策略配置：本函数的契约是"没有可用的 AI 配置就返回
+     * null"，由调用方那句 `?? strategyConfig` 完成回落。配置坏掉时与"没写过"
+     * 走同一条路 —— 行为与改动前一致，只是**多了一道 schema 校验**。
+     */
+    return readAgentConfig(this.deps.traderId, null);
   }
 
   /** 是否被 AI 主动停手。**恢复由操作员决定，模型没有这个工具。** */
