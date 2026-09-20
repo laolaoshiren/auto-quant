@@ -40,6 +40,7 @@ import { parseDecisionResponse, hasDecisionBlock, sortDecisions } from '../strat
 import {
   buildSystemPrompt,
   buildUserPrompt,
+  buildUserPromptParts,
   PROMPT_PERFORMANCE_WINDOW_HOURS,
   PROMPT_RECENT_CLOSE_COUNT,
   promptTokenBudget,
@@ -175,6 +176,32 @@ export interface DecisionModel {
       /** 命中缓存的输入 token；`null` 表示服务商没报这个字段。 */
       cachedTokens?: number | null;
       /** 花在思考上的输出 token（已计入 completion）。 */
+      reasoningTokens?: number | null;
+    };
+  }>;
+
+  /**
+   * 多消息版本 —— **缓存能不能命中就靠它**。
+   *
+   * `complete(system, user)` 内部就是 `chat([system, user])`，所以这只是把底层
+   * 已经支持的能力暴露出来。区别在于**前缀的长度**：
+   *
+   *   · 两条消息时，`user` 里任何一处变化都会让整个 `user` 段退出缓存；
+   *   · 拆成「稳定段 / 占位 / 变动段」之后，稳定段**逐字节不变**，于是它是
+   *     可缓存前缀的一部分。
+   *
+   * 实测差距：本产品的 AI 托管只命中 5%（只有 system 那 2300 token 进了缓存），
+   * 而追加式结构的会话能到 99%。见 `buildUserPromptParts()`。
+   *
+   * 可选：测试用的桩可以只实现 `complete`，调用方会回落到它。
+   */
+  chat?(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>): Promise<{
+    text: string;
+    latencyMs: number;
+    usage: {
+      promptTokens: number | null;
+      completionTokens: number | null;
+      cachedTokens?: number | null;
       reasoningTokens?: number | null;
     };
   }>;
@@ -1437,10 +1464,23 @@ export class AutoTrader {
 
     const systemPrompt = buildSystemPrompt(promptContext);
     /*
-     * ⚠️ 预算必须显式传 —— `buildUserPrompt` 的默认值是保守的 6 万，
-     * 而这一轮的实际预算是按模型能力算出来的（见构造函数）。
+     * ⚠️ **拆成「稳定段 / 占位 / 变动段」三条消息 —— 缓存命中率就靠这一步。**
+     *
+     * 原来这里是一句 `buildUserPrompt(ctx, budget)` 拼出**一整条** user 消息，
+     * 而它的第一行是 `时间：<ISO>` —— 每轮都不同，于是从第一个字符起前缀就分叉，
+     * 整条消息（4.7 万 token）全部按全价计费。实测 `cached_tokens 2304 / prompt_tokens 49394`
+     * —— **只有 system 那一段命中了 5%**。
+     *
+     * 拆开之后前缀变成：`system` + `稳定段`，两者都只在**成交之后**才变，
+     * 于是连续多轮之间逐字节相同、进缓存。中间那条 assistant 占位是必要的：
+     * 它让最后一条仍是 `user`，模型看到的仍是"一轮新的输入"，而不是两段连贯的
+     * 用户指令叠在一起。
      */
-    const userPrompt = buildUserPrompt(promptContext, this.promptBudget);
+    const { stable: stablePrompt, volatile: volatilePrompt } = buildUserPromptParts(
+      promptContext,
+      this.promptBudget,
+    );
+    const userPrompt = stablePrompt.length > 0 ? `${stablePrompt}\n\n${volatilePrompt}` : volatilePrompt;
 
     /*
      * 提示词在**发请求之前**就填进进度对象：这是"部分成功也留痕"的关键一步 ——
@@ -1451,7 +1491,29 @@ export class AutoTrader {
 
     const startedAt = Date.now();
     state.phase = 'model';
-    const response = await this.deps.model.complete(systemPrompt, userPrompt);
+    /*
+     * 有 `chat` 就用它（真客户端有），没有就回落到 `complete`（测试桩）。
+     *
+     * 回落不是"降级"而是为了不改动已有的桩：`complete` 内部本来就是
+     * `chat([system, user])`，两条消息也能跑，只是缓存命中差一些。
+     */
+    const response = this.deps.model.chat
+      ? await this.deps.model.chat([
+          { role: 'system', content: systemPrompt },
+          ...(stablePrompt.length > 0
+            ? [
+                { role: 'user' as const, content: stablePrompt },
+                /*
+                 * 占位回复。它的内容不重要（模型不会把它当成指令），重要的是
+                 * **它把最后一条推回 `user`** —— 否则两条 `user` 会连成一段，
+                 * 而 `stable` 与 `volatile` 的语义边界就消失了。
+                 */
+                { role: 'assistant' as const, content: '（已读取当前状态与历史。）' },
+              ]
+            : []),
+          { role: 'user', content: volatilePrompt },
+        ])
+      : await this.deps.model.complete(systemPrompt, userPrompt);
     progress.aiLatencyMs = response.latencyMs || Date.now() - startedAt;
     progress.promptTokens = response.usage.promptTokens;
     progress.completionTokens = response.usage.completionTokens;

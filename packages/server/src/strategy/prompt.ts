@@ -870,13 +870,51 @@ function oneLine(text: string | null, maxChars: number): string {
  * 当前问题的根源。见 `trimCandidatesForBudget()`。
  */
 export function buildUserPrompt(ctx: PromptContext, budgetTokens = PROMPT_TOKEN_BUDGET): string {
+  const { stable, volatile } = buildUserPromptParts(ctx, budgetTokens);
+  return stable.length > 0 ? `${stable}\n\n${volatile}` : volatile;
+}
+
+/**
+ * 用户提示词的**两段**：变化慢的与每轮变的。
+ *
+ * ## 为什么要分两段 —— 这是缓存能不能命中的全部原因
+ *
+ * 实测对照：本产品的 AI 托管**只命中 5%**（`cached_tokens 2304 / prompt_tokens 49394`），
+ * 而 DSH 自己的会话是 **99%**。差别不在措辞，在**请求结构**：
+ *
+ *   · DSH 是**追加式**对话 —— 每轮 `[system, ...历史, 最新一条]`，前缀只增不改，
+ *     于是除最后一条外全部命中；
+ *   · 我们每轮**重新拼一个全新的字符串**，而这个字符串的第一行就是
+ *     `时间：2026-09-20T14:37:38.123Z` —— 从第一个字符起就与上一轮分叉。
+ *     于是只有 `system` 那一段（约 2300 token）命中，其余 4.7 万全是全价。
+ *
+ * 分两段之后发给模型的是：
+ *
+ * ```
+ * [{ role: 'system',    content: 系统提示词 },      ← 稳定
+ *  { role: 'user',      content: stable },          ← 稳定（教训 / 最近平仓 / 绩效）
+ *  { role: 'assistant', content: '（已读）' },        ← 占位，让下一段是"新一轮输入"
+ *  { role: 'user',      content: volatile }]        ← 每轮变（时间 / 账户 / 行情）
+ * ```
+ *
+ * `stable` 只在**成交之后**才变，所以连续多轮之间它是逐字节相同的 —— 那几段就进了
+ * 缓存。这也解释了为什么"段落顺序"要按变化频率排：**前缀一旦分叉，后面再稳定也没用**。
+ */
+export function buildUserPromptParts(
+  ctx: PromptContext,
+  budgetTokens = PROMPT_TOKEN_BUDGET,
+): { stable: string; volatile: string } {
   /*
    * 系统提示词也是同一次请求的一部分，所以预算必须把它算进去。只量用户提示词的话，
    * 一个 3k tokens 的系统提示词会凭空落在预算之外 —— 而 §3 要的是一条**硬**上限。
    */
   const systemTokens = estimateTokens(buildSystemPrompt(ctx));
-  let prompt = renderUserPrompt(ctx, ctx.candidates, null);
-  let spent = systemTokens + estimateTokens(prompt);
+  const measure = (stable: string, volatile: string): number =>
+    systemTokens + estimateTokens(stable) + estimateTokens(volatile);
+
+  let stable = renderUserPrompt(ctx, ctx.candidates, null, 'stable');
+  let volatile = renderUserPrompt(ctx, ctx.candidates, null, 'volatile');
+  let spent = measure(stable, volatile);
 
   if (spent > budgetTokens) {
     const held = new Set(ctx.positions.map((p) => p.position.symbol));
@@ -894,14 +932,15 @@ export function buildUserPrompt(ctx: PromptContext, budgetTokens = PROMPT_TOKEN_
       const perCandidateTokens = Math.max(1, estimateCandidateChars(ctx.config) / 1.7);
       const drop = Math.max(1, Math.ceil(overflow / perCandidateTokens));
       keep = Math.max(minKeep, keep - drop);
-      prompt = renderUserPrompt(ctx, trimCandidatesForBudget(ctx.candidates, held, keep), {
-        total: ctx.candidates.length,
-      });
-      spent = systemTokens + estimateTokens(prompt);
+      const trimmed = trimCandidatesForBudget(ctx.candidates, held, keep);
+      const meta = { total: ctx.candidates.length };
+      stable = renderUserPrompt(ctx, trimmed, meta, 'stable');
+      volatile = renderUserPrompt(ctx, trimmed, meta, 'volatile');
+      spent = measure(stable, volatile);
     }
   }
 
-  return prompt;
+  return { stable, volatile };
 }
 
 /**
@@ -945,8 +984,19 @@ function renderUserPrompt(
   ctx: PromptContext,
   candidates: MarketSnapshot[],
   trimmedFrom: { total: number } | null,
+  /**
+   * 只渲染哪一段。见 `buildUserPromptParts()` 的说明：
+   *
+   *   · `'stable'`   —— 变化慢的（教训 / 最近平仓 / 绩效），进缓存前缀；
+   *   · `'volatile'` —— 每轮变的（时间 / 账户 / 行情 / 持仓 / 节流 / 被拒）；
+   *   · `'all'`      —— 两段都要（诊断路径与测试用）。
+   */
+  part: 'all' | 'stable' | 'volatile' = 'all',
 ): string {
-  const parts: string[] = [];
+  const stableParts: string[] = [];
+  const volatileParts: string[] = [];
+  const wantStable = part !== 'volatile';
+  const wantVolatile = part !== 'stable';
 
   /*
    * ## ⚠️ 段落的顺序由**缓存命中**决定，不只是由阅读顺序决定
@@ -983,13 +1033,13 @@ function renderUserPrompt(
    * 连续多轮之间这一段是逐字节相同的，能进缓存。
    */
   const lessons = renderLessons(ctx.memory.lessons);
-  if (lessons) parts.push(lessons);
+  if (lessons) stableParts.push(lessons);
 
-  parts.push(renderRecentCloses(ctx.memory.recentCloses, ctx.now));
-  parts.push(renderPerformance(ctx.memory.performance, ctx.config));
+  stableParts.push(renderRecentCloses(ctx.memory.recentCloses, ctx.now));
+  stableParts.push(renderPerformance(ctx.memory.performance, ctx.config));
 
   /* 2 — System status ---------------------------------------------------- */
-  parts.push(
+  volatileParts.push(
     [
       '# 系统状态',
       `时间：${ctx.now.toISOString()}（UTC）`,
@@ -1007,7 +1057,7 @@ function renderUserPrompt(
     const last = <T,>(arr: Array<T | null>): T | null =>
       [...arr].reverse().find((v) => v !== null) ?? null;
 
-    parts.push(
+    volatileParts.push(
       [
         '# BTC 市场概览',
         `价格：${fmt(btc.price)} | 24h 涨跌：${fmtPercent(btc.priceChangePercent24h)}`,
@@ -1029,7 +1079,7 @@ function renderUserPrompt(
   const balancePct = a.equity > 0 ? (a.availableBalance / a.equity) * 100 : 0;
   const pnlPct = a.equity > 0 ? (a.unrealizedPnl / a.equity) * 100 : 0;
   const marginPct = a.equity > 0 ? (a.marginUsed / a.equity) * 100 : 0;
-  parts.push(
+  volatileParts.push(
     [
       '# 账户',
       `权益 ${fmt(a.equity)} | 可用 ${fmt(a.availableBalance)}（${balancePct.toFixed(1)}%）| 未实现盈亏 ${fmtSigned(
@@ -1049,7 +1099,7 @@ function renderUserPrompt(
    * 只有这一个机器人在交易，而外部活动让这个假设不成立了。
    */
   if ((a.foreignRounds ?? 0) > 0) {
-    parts.push(
+    volatileParts.push(
       [
         '# 注意：账户上有不属于本机器人的交易',
         `交易所账户里还有 ${a.foreignRounds} 笔不是本平台开立的成交（净 ${fmtSigned(a.foreignNet ?? 0, 4)} USDT）。` +
@@ -1071,7 +1121,7 @@ function renderUserPrompt(
    * 于是一路往错误的方向调，而没有任何一处会纠正它。
    */
   if (Math.abs(a.ledgerGap ?? 0) > 0.01) {
-    parts.push(
+    volatileParts.push(
       [
         '# 警告：账目与交易所对不上',
         `平台记录的盈亏与交易所的流水相差 ${fmtSigned(a.ledgerGap ?? 0, 4)} USDT。` +
@@ -1092,9 +1142,9 @@ function renderUserPrompt(
    * 上面第 1 段已经渲染了绩效与最近平仓；原来这里还有一份重复的 `push`，
    * 已随重排一并去掉（同一个区块渲染两次既浪费预算，也会让两处的数字有机会不一致）。
    */
-  parts.push(renderThrottleBudget(ctx.memory.throttle));
+  volatileParts.push(renderThrottleBudget(ctx.memory.throttle));
   const rejections = renderRejections(ctx.memory.recentRejections);
-  if (rejections) parts.push(rejections);
+  if (rejections) volatileParts.push(rejections);
 
   /*
    * 这里原有一个 `# 最近已平仓交易` 区块，**已删除**。
@@ -1114,7 +1164,7 @@ function renderUserPrompt(
 
   /* 6 — Open positions --------------------------------------------------- */
   if (ctx.positions.length === 0) {
-    parts.push('# 当前持仓\n当前没有持仓。');
+    volatileParts.push('# 当前持仓\n当前没有持仓。');
   } else {
     const lines = ctx.positions.map((p, index) => {
       const pos = p.position;
@@ -1136,12 +1186,12 @@ function renderUserPrompt(
       }
       return rows.join('\n');
     });
-    parts.push(`# 当前持仓\n${lines.join('\n\n')}`);
+    volatileParts.push(`# 当前持仓\n${lines.join('\n\n')}`);
   }
 
   /* 7 — Candidate coins -------------------------------------------------- */
   if (candidates.length === 0) {
-    parts.push(
+    volatileParts.push(
       '# 候选标的\n本周期没有选出任何候选标的。你只能管理已有持仓；若无事可做，返回 `[]`。',
     );
   } else {
@@ -1162,7 +1212,7 @@ function renderUserPrompt(
         (universeNote ? `\n⚠️ ${universeNote} —— **你没看到的那些不是"市场里没有"，而是被配置的候选上限挡掉了。** 若因此觉得可选标的太少，该调的是 coinSource.coinPoolLimit 或门槛，不是选币逻辑。` : '')
       : `# 候选标的（${candidates.length} 个）\n每个区块给出一个标的、选中它的来源，以及每个已配置时间周期的指标序列，按由旧到新排列。每个序列的最后一个值就是最新值。` +
         (universeNote ? `\n⚠️ ${universeNote} —— **你没看到的那些不是"市场里没有"，而是被配置的候选上限挡掉了。**` : '');
-    parts.push(`${header}\n\n${blocks.join('\n\n')}`);
+    volatileParts.push(`${header}\n\n${blocks.join('\n\n')}`);
   }
 
   /* 8 — OI ranking ------------------------------------------------------- */
@@ -1175,11 +1225,11 @@ function renderUserPrompt(
             r.changePercent,
           )} | 价格 ${fmtPercent(r.priceChangePercent)}`,
       );
-    parts.push(`# 持仓量排行\n${rows.join('\n')}`);
+    volatileParts.push(`# 持仓量排行\n${rows.join('\n')}`);
   }
 
   /* Closing instruction -------------------------------------------------- */
-  parts.push(
+  volatileParts.push(
     [
       '# 你的任务',
       '分析以上内容，先输出 `<reasoning>` 块，再输出包含 JSON 数组的 `<decision>` 块。',
@@ -1190,7 +1240,7 @@ function renderUserPrompt(
     ].join('\n'),
   );
 
-  return parts.join('\n\n');
+  return [...(wantStable ? stableParts : []), ...(wantVolatile ? volatileParts : [])].join('\n\n');
 }
 
 /* -------------------------------------------------------------------------- */
