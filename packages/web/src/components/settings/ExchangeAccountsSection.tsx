@@ -411,6 +411,15 @@ export function ExchangeAccountsSection() {
         </div>
       )}
 
+      {/*
+        三个指标组包在**一张卡**里，与左栏的凭证卡同一种视觉语言。
+        
+        它们原来是三个裸的 `MetricGroup`（只有 `border-t` 分隔线、没有容器），
+        于是右栏看起来是一列散落的文字，而左栏是一张带边框的卡 —— **同一个页面
+        两套语言**。`MetricGroup` 自带的分隔线放在卡片内部正合适：它本来就是
+        "紧贴上一块的续接块"的设计（`first:border-t-0` 就是照这个用的）。
+      */}
+      <Panel bodyClassName="p-4">
       <MetricGroup title="账户余额" columns={2}>
         {query.loading && accounts.length === 0 ? (
           <p className="text-xs text-ink-lo">正在读取交易所余额…</p>
@@ -504,6 +513,7 @@ export function ExchangeAccountsSection() {
           }
         />
       </MetricGroup>
+      </Panel>
     </div>
   );
 
