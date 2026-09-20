@@ -261,6 +261,26 @@ export function TraderPage() {
   const positions = live?.positions ?? [];
 
   /*
+   * ⚠️ **「读不到」不是「没有持仓」—— 这两件事必须分开显示。**
+   *
+   * `/api/traders/:id/live` 在**机器人没在运行时**直接返回
+   * `{ live: false, positions: [] }`（见 `liveExchangeView`），而且在读取
+   * 交易所失败时也返回空数组。两种情况下 `positions.length` 都是 0。
+   *
+   * 而下面那张卡的语义是"你有几个仓" —— 把"查不到"渲染成 `0`，
+   * 就是在告诉操作员**"你已经空仓了"**，而事实可能是"我们没能问到"。
+   * 实测踩到过：部署重启服务后刷新页面，机器人还没被 manager 拉起来，
+   * 卡片显示「持仓 0」，而两秒后同一个页面上持仓表里躺着两个仓位。
+   *
+   * **一个会主动说谎的仪表盘比没有仪表盘更危险**：操作员会据此判断
+   * "仓位已经平了、可以放心操作"，而真实敞口一直在那里。
+   *
+   * 所以卡片在读不到时显示 `—` 并说明原因；数字只在这个数据真的可信时才给。
+   */
+  const liveUnavailable = live !== null && live !== undefined && live.live === false;
+  const liveUnavailableWhy = live?.error ?? '机器人当前未在运行，或交易所暂时无法读取 —— 不是"没有持仓"。';
+
+  /*
    * 行情图表当前显示的币种。
    *
    * 默认取第一个持仓（"我在盯什么"），而下方表格里的币种名可以点击把它换掉 ——
@@ -655,12 +675,21 @@ export function TraderPage() {
            *
            * **多余的信息不只占地方，它会主动制造错误印象。**
            */
-          value={fmtInt(openPositionCount)}
+          /*
+           * ⚠️ **读不到时显示 `—`，不显示 `0`。** 理由见 `liveUnavailable` 的说明：
+           * `0` 会被读成"我已经空仓了"，而真相可能是"我们没能问到交易所"。
+           */
+          value={liveUnavailable ? '—' : fmtInt(openPositionCount)}
           size="lg"
+          title={liveUnavailable ? liveUnavailableWhy : undefined}
           sub={
-            <>
-              浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
-            </>
+            liveUnavailable ? (
+              <span className="text-ink-faint">仓位状态暂不可读</span>
+            ) : (
+              <>
+                浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
+              </>
+            )
           }
           /*
            * ⚠️ **表盘放在 `footer`，不是 `sub`。**
