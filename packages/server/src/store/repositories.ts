@@ -251,6 +251,8 @@ interface AiModelRow {
   max_tokens: number;
   timeout_seconds: number;
   max_retries: number;
+  /** 模型能吃多大的输入；`0` = 不知道（服务商没报、用户没填）。 */
+  input_token_limit: number;
   created_at: string;
   updated_at: string;
 }
@@ -267,6 +269,7 @@ function toAiModel(row: AiModelRow): AiModelConfig {
     maxTokens: row.max_tokens,
     timeoutSeconds: row.timeout_seconds,
     maxRetries: row.max_retries,
+    inputTokenLimit: row.input_token_limit,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -296,11 +299,13 @@ export const aiModels = {
     maxTokens: number;
     timeoutSeconds: number;
     maxRetries: number;
+    /** 可省。省略 = 不知道，提示词预算回落到保守值。 */
+    inputTokenLimit?: number;
   }): AiModelConfig {
     const ts = now();
     const { lastInsertRowid } = getDb().run(
-      `INSERT INTO ai_models (provider, label, model, base_url, api_key_enc, temperature, max_tokens, timeout_seconds, max_retries, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO ai_models (provider, label, model, base_url, api_key_enc, temperature, max_tokens, timeout_seconds, max_retries, input_token_limit, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.provider,
       input.label,
       input.model,
@@ -310,6 +315,7 @@ export const aiModels = {
       input.maxTokens,
       input.timeoutSeconds,
       input.maxRetries,
+      input.inputTokenLimit ?? 0,
       ts,
       ts,
     );
@@ -328,6 +334,7 @@ export const aiModels = {
       maxTokens: number;
       timeoutSeconds: number;
       maxRetries: number;
+      inputTokenLimit: number;
     }>,
   ): void {
     const current = this.getWithSecret(id);
@@ -335,7 +342,8 @@ export const aiModels = {
     getDb().run(
       `UPDATE ai_models
          SET provider = ?, label = ?, model = ?, base_url = ?, api_key_enc = ?,
-             temperature = ?, max_tokens = ?, timeout_seconds = ?, max_retries = ?, updated_at = ?
+             temperature = ?, max_tokens = ?, timeout_seconds = ?, max_retries = ?,
+             input_token_limit = ?, updated_at = ?
        WHERE id = ?`,
       input.provider ?? current.provider,
       input.label ?? current.label,
@@ -346,6 +354,7 @@ export const aiModels = {
       input.maxTokens ?? current.max_tokens,
       input.timeoutSeconds ?? current.timeout_seconds,
       input.maxRetries ?? current.max_retries,
+      input.inputTokenLimit ?? current.input_token_limit,
       now(),
       id,
     );

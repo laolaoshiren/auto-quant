@@ -42,6 +42,7 @@ import {
   buildUserPrompt,
   PROMPT_PERFORMANCE_WINDOW_HOURS,
   PROMPT_RECENT_CLOSE_COUNT,
+  promptTokenBudget,
   type PromptMemory,
   type PromptLesson,
   type PromptPosition,
@@ -51,6 +52,7 @@ import { isMajorSymbol, type DecisionAction } from '@aq/shared';
 import { agentMemory } from '../store/agentStore.js';
 import {
   attributedEquity,
+  aiModels,
   decisions as decisionStore,
   equity as equityStore,
   orders as orderStore,
@@ -395,7 +397,29 @@ export class AutoTrader {
     this.consecutiveFailures = deps.trader.consecutiveFailures;
     // 默认就是策略配置；AI 模式下每个周期开头会被刷成 AI 下发的那份。
     this.activeConfig = deps.config;
+
+    /*
+     * ⚠️ **候选池的大小由这一行决定。**
+     *
+     * 提示词预算原来硬编码 6 万，而候选池 = 预算 ÷ 每个候选的字符成本 ——
+     * 一个 4 周期策略因此**只能看到 7 个标的**。实测某机器人连续 15 轮候选池
+     * 都是 7 个、15 轮 0 决策，而它挂的模型能吃 100 万 token。
+     *
+     * 现在按模型自己报的输入上限算（`promptTokenBudget` 会 clamp 到
+     * `[6万, 20万]`：下限保住既有行为，上限是成本）。
+     *
+     * 在这里算一次而不是每轮算：`aiModelId` 是机器人的属性，运行期不会变。
+     */
+    const modelLimit = aiModels.get(deps.trader.aiModelId)?.inputTokenLimit ?? 0;
+    this.promptBudget = promptTokenBudget(modelLimit);
   }
+
+  /**
+   * 这一轮组装提示词用的 token 预算（见构造函数里的说明）。
+   *
+   * 它同时决定三件事：候选池能放多少个、选币阶段裁多少、以及最终发出去的请求多大。
+   */
+  private readonly promptBudget: number;
 
   /**
    * **本周期生效的配置** —— 交易路径全部读它，不再直接读 `this.deps.config`。
@@ -1247,7 +1271,11 @@ export class AutoTrader {
     // 失败说明里的类别全靠这个阶段标记。
     state.phase = 'market';
     const held = localPositions.map((p) => p.symbol);
-    const selection = await selectCandidates(config, this.deps.marketData, { mustInclude: held });
+    const selection = await selectCandidates(config, this.deps.marketData, {
+      mustInclude: held,
+      /* 候选池的大小直接由它决定 —— 见构造函数里 `promptBudget` 的说明。 */
+      budgetTokens: this.promptBudget,
+    });
 
     let snapshots = await this.deps.marketData.buildSnapshots(
       selection.symbols,
@@ -1408,7 +1436,11 @@ export class AutoTrader {
     };
 
     const systemPrompt = buildSystemPrompt(promptContext);
-    const userPrompt = buildUserPrompt(promptContext);
+    /*
+     * ⚠️ 预算必须显式传 —— `buildUserPrompt` 的默认值是保守的 6 万，
+     * 而这一轮的实际预算是按模型能力算出来的（见构造函数）。
+     */
+    const userPrompt = buildUserPrompt(promptContext, this.promptBudget);
 
     /*
      * 提示词在**发请求之前**就填进进度对象：这是"部分成功也留痕"的关键一步 ——

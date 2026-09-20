@@ -1241,8 +1241,56 @@ export function estimateTokens(text: string): number {
  *  - It is a budget, not a target. A light single-timeframe strategy still gets
  *    a large universe; only heavy configurations are constrained, and they are
  *    exactly the ones that were overflowing.
+ *
+ * ## ⚠️ 它现在是一个**下限**（"什么都不知道时用这个"）
+ *
+ * 模型自己的输入上限存在 `ai_models.input_token_limit`。知道那个数时用
+ * `promptTokenBudget()` 算，而它会**不低于这个常量**。
  */
 export const PROMPT_TOKEN_BUDGET = 60_000;
+
+/**
+ * **你愿意花多少** —— 提示词预算的成本上限，与模型能吃多少无关。
+ *
+ * ## 为什么必须与"模型能吃多少"分开
+ *
+ * 实测：某机器人挂的模型能吃 100 万 token，而候选池只有 **7 个**（因为预算
+ * 硬编码 6 万），连续 15 轮 0 决策。把预算只按"模型能吃多少"放开，会走到另一个
+ * 极端：80 万 token 的提示词 × 每小时几十次 = 一份真实且巨大的账单。
+ *
+ * 所以两个数字：
+ *
+ *   · `ai_models.input_token_limit` —— **能力**（物理上能吃多少）；
+ *   · 这个常量 —— **意愿**（一次请求最多花多少）。
+ *
+ * ## 20 万的由来
+ *
+ * 按现在的渲染密度（4 个周期 × 30 个点 ≈ 8,000 字符/候选）折合 **约 42 个候选**。
+ * 而 `PROMPT_TOKEN_BUDGET` 的注释里记着一个真实的坑：**128k 的提示词让模型把
+ * 整个输出预算花在推理上、返回空**。20 万仍然在"留足输出空间"这一侧
+ * （1M 上下文的模型只用掉 20%），但比 6 万宽了三倍多。
+ */
+export const PROMPT_TOKEN_CEILING = 200_000;
+
+/**
+ * 这一轮该给多少 token 的提示词预算。
+ *
+ * @param inputTokenLimit 模型的输入上限；`0` 或非法值 = **不知道** → 用保守的
+ *   `PROMPT_TOKEN_BUDGET`。
+ *
+ * 取值规则：`clamp(上限 × 0.5, 下限 6 万, 上限 20 万)`。
+ *
+ * 乘 0.5 而不是 0.8：这个系统一次请求里，**输出（含推理）占的比例很高** ——
+ * 实测 `completion_tokens` 里 80%+ 是 `reasoning_tokens`。留一半给输出，
+ * 而不是按"压缩阈值"的思路顶到 80%。
+ */
+export function promptTokenBudget(inputTokenLimit: number): number {
+  if (!Number.isFinite(inputTokenLimit) || inputTokenLimit <= 0) return PROMPT_TOKEN_BUDGET;
+  return Math.max(
+    PROMPT_TOKEN_BUDGET,
+    Math.min(Math.floor(inputTokenLimit * 0.5), PROMPT_TOKEN_CEILING),
+  );
+}
 
 /**
  * Average rendered size of one number, including its separator.

@@ -113,6 +113,21 @@ export interface AiModelConfig {
   maxTokens: number;
   timeoutSeconds: number;
   maxRetries: number;
+  /**
+   * 模型能吃多大的输入（token）。`0` = **不知道**（服务商没报、用户没填）。
+   *
+   * ## 它决定候选池能有多大
+   *
+   * 提示词预算不是独立定的：`candidateBudget()` = 预算 ÷ 每个候选的字符成本。
+   * 原来预算硬编码 6 万，于是一个 4 周期 × 30 个点的策略**只能看到 7 个标的** ——
+   * 实测某机器人连续 15 轮候选池都是 7 个、15 轮 0 决策，而它挂的模型能吃 100 万。
+   *
+   * ⚠️ 这一列是**能力上限**（模型物理上能吃多少），不是**你愿意花多少** ——
+   * 后者由 `PROMPT_TOKEN_CEILING` 控制（成本考虑）。两个数字分开，因为"能"和
+   * "愿意"是两回事：一个 1M 上下文的模型，每小时几十次都塞 80 万 token，
+   * 那仍然是真实账单。
+   */
+  inputTokenLimit: number;
   createdAt: string;
   updatedAt: string;
 }

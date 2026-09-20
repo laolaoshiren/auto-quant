@@ -534,6 +534,26 @@ ALTER TABLE decision_records ADD COLUMN cached_tokens INTEGER;
 ALTER TABLE decision_records ADD COLUMN reasoning_tokens INTEGER;
 `;
 
+/**
+ * 模型能吃多大的输入 —— 让提示词预算跟着它走，而不是写死 6 万。
+ *
+ * ## 为什么需要这一列
+ *
+ * `PROMPT_TOKEN_BUDGET` 原来硬编码 `60_000`，而候选池的大小是
+ * **预算 ÷ 每个候选的字符成本**（`candidateBudget()`）—— 于是一个 4 周期、
+ * 每周期 30 个点的策略只能看到 **7 个标的**。实测：某机器人连续 15 轮候选池
+ * 都只有 7 个、15 轮 0 决策，而它挂的模型能吃 100 万。
+ *
+ * `0` = **不知道**（服务商没报、用户没填）→ 回落到原来那个保守的 6 万。
+ * 用 `0` 而不是 `NULL`：这一列是"能力上限"，0 与"不知道"在这里的处置**相同**
+ * （都走保守回落），不像 `cached_tokens` 那样两者结论相反，所以不需要三态。
+ *
+ * 上限不写进这一列 —— 那是"允许花多少"的策略，属于 `PROMPT_TOKEN_CEILING`。
+ */
+const M10_INPUT_TOKEN_LIMIT = /* sql */ `
+ALTER TABLE ai_models ADD COLUMN input_token_limit INTEGER NOT NULL DEFAULT 0;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -544,4 +564,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 7, name: 'trader-mode', sql: M7_TRADER_MODE },
   { version: 8, name: 'partial-close', sql: M8_PARTIAL_CLOSE },
   { version: 9, name: 'usage-detail', sql: M9_USAGE_DETAIL },
+  { version: 10, name: 'input-token-limit', sql: M10_INPUT_TOKEN_LIMIT },
 ];

@@ -38,7 +38,16 @@ export interface CoinSelectionResult {
 export async function selectCandidates(
   config: StrategyConfig,
   market: MarketDataService,
-  options: { mustInclude?: Iterable<string> } = {},
+  options: {
+    mustInclude?: Iterable<string>;
+    /**
+     * 提示词 token 预算。省略 = 保守默认（6 万）。
+     *
+     * 调用方应当传 `promptTokenBudget(model.inputTokenLimit)` —— 候选池的大小
+     * 直接由它决定，而模型能吃多大是已知的（见 `ai_models.input_token_limit`）。
+     */
+    budgetTokens?: number;
+  } = {},
 ): Promise<CoinSelectionResult> {
   const sourcesBySymbol = new Map<string, string[]>();
 
@@ -146,19 +155,24 @@ export async function selectCandidates(
   /*
    * Cap the universe so the prompt fits the token budget.
    *
-   * The limit is derived from the strategy itself, not fixed: a candidate costs
+   * The limit comes **only** from the strategy and the budget: a candidate costs
    * `timeframes × series × rendered points`, so a 3-timeframe scalping config
    * with every indicator on is several times heavier per symbol than a
-   * 2-timeframe one. A fixed cap of 40 therefore allowed a 128k-token prompt,
-   * which is the failure mode this replaces — the model spent its whole output
-   * budget reasoning about the input and returned nothing at all.
+   * 2-timeframe one. `candidateBudget()` accounts for that.
+   *
+   * ⚠️ **这里原来还有一个写死的 `hardCap = 40`，已删除。** 它是 `candidateBudget()`
+   * 出现之前的兜底（当时的注释写着"A fixed cap of 40 therefore allowed a
+   * 128k-token prompt"）—— 而现在预算是按策略算出来的，再叠一个固定上限只会
+   * **把已经算准的预算又砍掉**：实测一个 4 周期策略的预算是 7 个候选，而一旦
+   * 模型上限被填对、预算升到 20 万，`hardCap` 就成了"40 个封顶"的隐形天花板，
+   * 与"让 AI 有得选"直接冲突。
+   *
+   * 成本的上界由 `PROMPT_TOKEN_CEILING` 负责，不在这一层重复设限。
    *
    * Position symbols are never dropped: the model must be able to manage what it
    * already holds, whatever the budget says.
    */
-  const budgeted = candidateBudget(config);
-  const hardCap = 40;
-  const maxCandidates = Math.min(budgeted, hardCap);
+  const maxCandidates = candidateBudget(config, options.budgetTokens);
   const mustKeep = new Set([...(options.mustInclude ?? [])].map(normalizeSymbol));
 
   let trimmed = symbols;
