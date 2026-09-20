@@ -2295,6 +2295,14 @@ export class AutoTrader {
     let recovered = 0;
     let corrected = 0;
     let fundingTotal = 0;
+    /*
+     * 诊断计数器 —— 定位"外部净额"与交易所流水那 0.2 差额到底丢在哪一步。
+     *
+     * 光看汇总值只能知道"差 0.2"，而它可能是：时间窗把某些回合挡在外面、
+     * 还是归属闸门把它们判给了别的机器人、还是没有 `entryOrderId` 的成交。
+     * 三种原因的修法完全不同，所以把它们分开数。
+     */
+    const skipDiag = { beforeWindow: 0, otherTrader: 0, foreign: 0, foreignNoId: 0 };
 
     for (const symbol of symbols) {
       if (!this.deps.registry.get(symbol)) continue;
@@ -2306,7 +2314,10 @@ export class AutoTrader {
       }
 
       for (const trip of reconstructRoundTrips(fills)) {
-        if (new Date(trip.closedAt).getTime() < since) continue;
+        if (new Date(trip.closedAt).getTime() < since) {
+          skipDiag.beforeWindow += 1;
+          continue;
+        }
         const funding = fundingInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
         fundingTotal += funding;
         const key = roundTripKey(trip);
@@ -2411,11 +2422,15 @@ export class AutoTrader {
              * `funding` 在上面已经算好（`fundingInWindow`），这里只是把它减掉 ——
              * 与 `trades.insert()` 的 `净 = 毛 − 费 − 资金费` 完全同一个口径。
              */
+            if (trip.entryOrderId) skipDiag.foreign += 1;
+            else skipDiag.foreignNoId += 1;
             foreign.push({
               symbol,
               net: trip.grossPnl - trip.entryFee - trip.exitFee - funding,
               at: trip.closedAt,
             });
+          } else {
+            skipDiag.otherTrader += 1;
           }
           log.debug(
             `[${this.deps.trader.name}] 跳过非本机器人开立的成交：${symbol} ${trip.quantity} @ ${trip.entryPrice}（入口订单 ${trip.entryOrderId || '未知'}）`,
@@ -2671,6 +2686,7 @@ export class AutoTrader {
         platformSelf: Number(platformSelf.toFixed(6)),
         foreignNet: Number(foreignNet.toFixed(6)),
         foreignRounds: foreign.length,
+        skipDiag,
         // 让落库的数据自己说清这一轮算不算数（读失败时 exchangeNet 是 0，不是"真的 0"）。
         incomeReadFailed,
         checkedAt: new Date().toISOString(),
