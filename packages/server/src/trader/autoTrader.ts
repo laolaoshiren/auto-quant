@@ -4045,6 +4045,21 @@ reduceQuantity: null,
       marginUsed: (newQty * newEntry) / Math.max(local.leverage, 1),
     });
 
+    /*
+     * ⚠️ **加仓也要写"入场事件"。**
+     *
+     * 小时节流（`throttle.maxEntriesPerHour`）是从 `trade_events` 里数 `entry` 的
+     * （`tradeEvents.entriesThisHour()`，见 `runCycle` 里读 `entriesLastHour` 那行）。
+     * 原来只有 `executeOpen` 写它，加仓不写 —— 于是"每小时最多 N 笔"对加仓
+     * **完全无效**：模型可以在一小时里加十几次仓，而计数一直是 0。
+     *
+     * 同一件事的另一半是 `reviewAdd` 拿不到滚动的周期计数（已另修）。两处合起来，
+     * 节流对加仓才真的成立 —— 而提示词一直告诉模型「加仓与新开仓共用同一批上限」。
+     *
+     * 加仓就是一笔新的入场：它让敞口变大，就该占这个额度。
+     */
+    tradeEvents.record(traderId, decision.symbol, 'entry');
+
     /* ④ 按新数量重挂保护 —— 用模型给的新价位（如果给了），否则沿用旧的。 */
     const protection = await this.replaceProtection({
       symbol: decision.symbol,

@@ -497,6 +497,24 @@ export class RiskEngine {
         const verdict = this.reviewAdd(decision, {
           ...env,
           account: { ...env.account, positionCount, marginUsed },
+          /*
+           * ⚠️ **必须传当前的滚动计数，不能沿用 `env` 里那个入口值。**
+           *
+           * `env.entriesThisCycle` 是**进入 `review()` 时**的值，调用点给的是 0
+           * （`autoTrader.ts` 里 `entriesThisCycle: 0`）。而加仓最终会走
+           * `reviewOpen`，节流判据读的正是这两个数 —— 于是 `maxEntriesPerCycle`
+           * 与 `maxEntriesPerHour` **对加仓完全无效**：模型可以在一个周期里
+           * 连续加仓，节流一次都数不到。
+           *
+           * 而提示词明确告诉模型「加仓与新开仓共用同一批上限（杠杆、单仓名义上限、
+           * 保证金占用、节流）」—— 它因此以为节流在替它兜底。**它没有。**
+           *
+           * 两个数都要带上本周期已经用掉的量：`entriesThisCycle` 是局部变量，
+           * 它会在下面 `+= 1` 累加；`entriesLastHour` 是入口值，加上本周期已用的
+           * 部分才是真实的滚动小时数。
+           */
+          entriesThisCycle,
+          entriesLastHour: env.entriesLastHour + entriesThisCycle,
         });
         if (verdict.ok) {
           approved.push(verdict.decision);
