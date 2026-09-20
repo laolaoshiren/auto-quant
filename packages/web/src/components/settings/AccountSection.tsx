@@ -7,7 +7,12 @@
  *   左指标栏（只读状态）：当前身份 / 角色 / 账户创建时间 / 服务端版本 / 数据库 / 运行环境。
  *     这些数字回答的是"我现在改的是哪个账号、跑在什么环境里" —— 它们是**状态**，
  *     改密码时不需要动它们，所以不该和表单抢同一列。
- *   主内容区：凭据变更表单（用户名 / 当前密码 / 新密码），供应商目录在它下面。
+ *   主内容区：凭据变更表单（用户名 / 当前密码 / 新密码）。
+ *
+ * **供应商目录已删除**：那是一张"这个版本支持哪些模型厂商"的静态清单，与
+ * "改我的账号凭据"没有任何关系，而它占了整页最下方一大块。要看供应商清单去
+ * 「AI 模型」页 —— 那里每一行都是**你实际配置过的**模型，比一张通用目录有用。
+ * （见 `git log` 里 `fix(ui): 账号页删掉与它无关的供应商目录`。）
  *
  * `PATCH /api/auth/account` 要求**当前密码**，这是有意为之：能碰到这台浏览器的人
  * 不应该因此就能永久接管账户。这一道校验在前端不做任何"放宽" ——
@@ -19,14 +24,13 @@ import { Save } from 'lucide-react';
 import { userRoleLabel } from '@aq/shared';
 import { api, setToken } from '../../lib/api';
 import { useApp } from '../../lib/store';
-import { useCopy, usePolled } from '../../lib/hooks';
-import { Badge, Button, CopyButton, Empty, ErrorNote, Field, Panel, TextInput } from '../ui';
+import { usePolled } from '../../lib/hooks';
+import { Button, ErrorNote, Field, Panel, TextInput } from '../ui';
 import { Metric, MetricGroup, SectionLabel } from '../shell';
 import { fmtDateTime } from '../../lib/format';
 
 export function AccountSection() {
   const user = useApp((s) => s.user);
-  const catalog = useApp((s) => s.catalog);
   const system = useApp((s) => s.system);
   const health = useApp((s) => s.health);
   const bootstrap = useApp((s) => s.bootstrap);
@@ -38,8 +42,6 @@ export function AccountSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
-  const catalogCopy = useCopy();
-  const providers = catalog?.providers ?? [];
 
   /*
    * 部署版本，以及"线上是不是最新的"。
@@ -302,58 +304,6 @@ export function AccountSection() {
 
         {notes}
       </div>
-
-      <section>
-        <SectionLabel
-          title="供应商目录"
-          count={providers.length}
-          actions={
-            providers.length > 0 ? (
-              <CopyButton
-                copied={catalogCopy.copied}
-                onCopy={() => catalogCopy.copy(JSON.stringify(providers, null, 2))}
-              />
-            ) : undefined
-          }
-        />
-        <Panel bodyClassName="p-3">
-          {providers.length === 0 ? (
-            <Empty
-              message="服务端没有返回任何模型供应商。"
-              hint="这通常意味着目录接口失败或版本不匹配 —— 先看「数据与日志」里的报错，再重启服务。"
-            />
-          ) : (
-            /*
-             * 卡片**等高**（不加 `items-start`）：它们是同一个网格里结构相同的一组，
-             * 高低不齐看起来就是排版坏了。底部那行用 `mt-auto` 贴到卡片底边，
-             * 于是"认证 / JSON"在各列里连成一条线。
-             *
-             * URL 用 `break-all` 换行而**不截断**：它是这一格里最有用的信息
-             * （要复制去用），为了整齐把它切掉是本末倒置。
-             */
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-              {providers.map((provider) => (
-                <div
-                  key={provider.id}
-                  className="flex min-w-0 flex-col rounded-md border border-base-750 bg-base-850/40 px-3 py-2"
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="min-w-0 truncate text-base font-semibold text-ink-hi">{provider.label}</span>
-                    {provider.openAiCompatible ? <Badge tone="muted">OpenAI 兼容</Badge> : <Badge tone="warn">原生</Badge>}
-                  </div>
-                  <div className="num mt-1 break-all text-xs text-ink-faint">
-                    {provider.baseUrl || '（自定义）'}
-                  </div>
-                  <div className="num mt-auto flex flex-wrap items-center gap-x-2 pt-1.5 text-xs text-ink-lo">
-                    <span>认证 {provider.authStyle}</span>
-                    <span>JSON {provider.jsonMode}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Panel>
-      </section>
     </div>
   );
 }
