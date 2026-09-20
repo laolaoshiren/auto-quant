@@ -948,7 +948,47 @@ function renderUserPrompt(
 ): string {
   const parts: string[] = [];
 
-  /* 1 — System status ---------------------------------------------------- */
+  /*
+   * ## ⚠️ 段落的顺序由**缓存命中**决定，不只是由阅读顺序决定
+   *
+   * 实测：一轮请求 `prompt_tokens = 49,394`，而 `cached_tokens = 2,304` ——
+   * **只有 5% 命中**。那 2,304 大致就是系统提示词的长度，也就是说
+   * **系统提示词命中了、用户提示词那 4.7 万 token 全部没命中**。
+   *
+   * 原因是缓存的工作方式：**前缀必须逐字节相同**。而原来用户提示词的第一行是
+   *
+   *     时间：2026-09-20T14:37:38.123Z（UTC）
+   *
+   * —— **每一轮都不同**，于是从第一个字符起就与上一轮分叉，后面再稳定也没用。
+   *
+   * 所以这里按"变化频率"重排：**变化慢的在前，每轮变的在后**。
+   *
+   * | 段 | 变化频率 | 位置 |
+   * | --- | --- | --- |
+   * | AI 的教训 | 只在平仓后变 | 最前 |
+   * | 最近平仓 | 只在平仓后变 | 次之 |
+   * | 交易绩效（24h 滚动） | 慢 | 再次 |
+   * | 系统状态（时间 / 轮次） | **每轮变** | 之后 |
+   * | 账户 | 每轮变 | 之后 |
+   * | 持仓 / 行情 / 候选 | 每轮变 | 最后（也是最大的一块） |
+   *
+   * 顺序变了**不改变**原来那条设计意图（"先让模型看见自己在亏钱、离约束有多远，
+   * 再看这一轮有什么机会"）—— 前面几段全是"我过去怎么样"，它反而更早了。
+   */
+
+  /* 1 — 记忆里**变化最慢**的两块：教训与最近平仓 -------------------------- */
+  /*
+   * 教训来自 `agent_memory`（每笔平仓写一条），最近平仓固定 5 笔。
+   * 它们只在**成交之后**才变 —— 而成交远不如行情频繁，所以放在最前面时，
+   * 连续多轮之间这一段是逐字节相同的，能进缓存。
+   */
+  const lessons = renderLessons(ctx.memory.lessons);
+  if (lessons) parts.push(lessons);
+
+  parts.push(renderRecentCloses(ctx.memory.recentCloses, ctx.now));
+  parts.push(renderPerformance(ctx.memory.performance, ctx.config));
+
+  /* 2 — System status ---------------------------------------------------- */
   parts.push(
     [
       '# 系统状态',
@@ -959,7 +999,7 @@ function renderUserPrompt(
     ].join('\n'),
   );
 
-  /* 2 — BTC market overview --------------------------------------------- */
+  /* 3 — BTC market overview --------------------------------------------- */
   const btc = candidates.find((c) => c.symbol === 'BTCUSDT');
   if (btc) {
     const rsiKey = Object.keys(btc.primary.rsi)[0];
@@ -1042,36 +1082,19 @@ function renderUserPrompt(
       ].join('\n'),
     );
   }
-  /* 4 — 记忆区块（提案 §2） ---------------------------------------------- */
   /*
-   * 放在账户之后、行情之前，是刻意的：先让模型看见"我最近在亏钱、我离约束有多远"，
-   * 再让它看这一轮有什么机会。顺序反过来时，注意力会先被一堆具体行情吃掉 ——
-   * 而这一整块存在的理由，正是每一轮"干净的行情 + 干净的账户"看起来都像新机会。
+   * 4 — 节流与被拒提议。
    *
-   * 三块都是 O(1)：聚合在 SQL 里做（固定 24 小时窗口），最近平仓固定 5 笔，
-   * 约束是计数与时间差。见 §4。
+   * ⚠️ 它们**留在最后**，因为它们每轮都变（计数与时间差），放到前面会把缓存前缀
+   * 立刻打断 —— 那正是这一轮重排要解决的问题。而"离约束有多远"这件事本来就
+   * 与"这一轮有什么机会"贴得最近，放这里也合乎阅读顺序。
+   *
+   * 上面第 1 段已经渲染了绩效与最近平仓；原来这里还有一份重复的 `push`，
+   * 已随重排一并去掉（同一个区块渲染两次既浪费预算，也会让两处的数字有机会不一致）。
    */
-  parts.push(renderPerformance(ctx.memory.performance, ctx.config));
-  parts.push(renderRecentCloses(ctx.memory.recentCloses, ctx.now));
   parts.push(renderThrottleBudget(ctx.memory.throttle));
-  /*
-   * 被拒的提议排在最后 —— 它是最贴近"上一轮到底发生了什么"的一块。
-   *
-   * `renderRejections` 在没有被拒记录时返回 null（不产生空区块）：
-   * 一个永远写着"无"的区块会占预算，还会让模型学会跳过它。
-   */
   const rejections = renderRejections(ctx.memory.recentRejections);
   if (rejections) parts.push(rejections);
-
-  /*
-   * AI 自己的教训 —— 排在被拒提议之后。
-   *
-   * 它是"我这个人过去怎么亏的"（跨轮、跨标的的模式），与上面几块的"这一轮
-   * 我离约束有多远"不是同一类信息。放在最后是因为它最需要模型**主动对照**
-   * 当前行情来用，而不是当成硬约束。
-   */
-  const lessons = renderLessons(ctx.memory.lessons);
-  if (lessons) parts.push(lessons);
 
   /*
    * 这里原有一个 `# 最近已平仓交易` 区块，**已删除**。
