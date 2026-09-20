@@ -1538,6 +1538,42 @@ export class AutoTrader {
       });
     }
 
+    /*
+     * ⚠️ **落库的决策必须是"风控处置过"的那一份，不是"模型提的"那一份。**
+     *
+     * `progress.decisions` 是在**风控之前**赋的值（见上面 `state.phase = 'parse'`
+     * 之后那几行），而 `parseDecisionResponse` 给每条决策的 `adjustments` 一律填 `[]`
+     * （`parser.ts`）。于是风控真正做过的事 —— 名义被削到多少、杠杆被压到几倍、
+     * 加了什么限制 —— **全部丢失**：
+     *
+     *   · 模型下一轮继续按"我提的 $200 / 20 倍已经执行"推理，而实际上被压成了
+     *     $40 / 5 倍。它因此**无法从"结果不如预期"里学到任何东西** —— 它归因的
+     *     那个动作根本没有发生。这是"AI 看到假事实"的另一种形态，而且更隐蔽：
+     *     假的那个数字是**它自己刚写的**。
+     *   · 复盘员那条「风控当时记下的调整」**永远渲染不出来**（`runtime.ts` 读的
+     *     就是这里，而这里恒为空数组）—— 一个写了却永远不会显示的字段。
+     *   · 审计上，`decision_records.decisions` 回答不了"最终批准并下单的是什么"，
+     *     而那正是这张表存在的理由。
+     *
+     * 风控是"模型提议、运行时裁决"里的裁决方（§2.1）。**裁决结果必须回到记录里**，
+     * 否则那条设计原则在数据上不成立。
+     *
+     * 用 `action:symbol` 作键：风控在同标的同动作上不会给出两条裁决，而
+     * `verdict.approved` 的顺序已经被 `sortDecisions` 重排过，按位置对不上。
+     */
+    const adjustmentsByDecision = new Map<string, string[]>();
+    for (const approved of verdict.approved) {
+      if (approved.adjustments.length > 0) {
+        adjustmentsByDecision.set(`${approved.action}:${approved.symbol}`, approved.adjustments);
+      }
+    }
+    if (adjustmentsByDecision.size > 0) {
+      progress.decisions = parsed.decisions.map((d) => {
+        const adjustments = adjustmentsByDecision.get(`${d.action}:${d.symbol}`);
+        return adjustments ? { ...d, adjustments } : d;
+      });
+    }
+
     /* --- 10. Execute ----------------------------------------------------- */
     // 普通 `Error`（网络层、响应解析）在这个阶段抛出，就是"订单没有得到交易所确认"。
     state.phase = 'execute';
