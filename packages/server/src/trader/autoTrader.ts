@@ -43,10 +43,12 @@ import {
   PROMPT_PERFORMANCE_WINDOW_HOURS,
   PROMPT_RECENT_CLOSE_COUNT,
   type PromptMemory,
+  type PromptLesson,
   type PromptPosition,
   type PromptRejection,
 } from '../strategy/prompt.js';
 import { isMajorSymbol, type DecisionAction } from '@aq/shared';
+import { agentMemory } from '../store/agentStore.js';
 import {
   attributedEquity,
   decisions as decisionStore,
@@ -1361,7 +1363,12 @@ export class AutoTrader {
      * 拒绝，正是"看不见的约束"换一种形态。
      */
     // 已在步骤 4 之前读取（跳过判据要用），此处不再重复读 —— 分头读会得到两个可能不一致的数字。
-    const memory = this.buildPromptMemory(traderId, config, entriesLastHour);
+    const memory = this.buildPromptMemory(
+      traderId,
+      config,
+      entriesLastHour,
+      snapshots.map((s) => s.symbol),
+    );
 
     const promptContext = {
       traderName: this.deps.trader.name,
@@ -4771,6 +4778,8 @@ reduceQuantity: null,
     traderId: number,
     config: StrategyConfig,
     entriesThisHour: number,
+    /** 这一轮的候选标的 —— 用来取"我在这些标的上以前是怎么亏的"。 */
+    symbols: readonly string[],
   ): PromptMemory {
     const since = new Date(Date.now() - PROMPT_PERFORMANCE_WINDOW_HOURS * 3_600_000).toISOString();
     const performance = tradeStore.performanceSince(traderId, since);
@@ -4819,7 +4828,46 @@ reduceQuantity: null,
        * 固定取最近 3 条（与最近平仓同样的 O(1) 纪律，见 §4）。
        */
       recentRejections: this.buildPromptRejections(traderId),
+      lessons: this.buildPromptLessons(traderId, symbols),
     };
+  }
+
+  /**
+   * AI 自己复盘出来的教训，按候选标的取。
+   *
+   * ## 为什么这一条是"越跑越厉害"的关键
+   *
+   * `agent_memory` 是复盘员每笔平仓之后写下的结论（"止损过紧""费用吃掉利润"
+   * 之类）。它写进了库，**但在这次改动之前没有任何决策路径读它** ——
+   * 交易决策提示词里从来没有出现过教训，于是 AI 每一轮都在从零开始：
+   * 它看不见自己上一笔为什么亏，也看不见复盘员对那笔怎么说。
+   *
+   * 一条教训要影响交易，原来只能**绕道**：复盘员的结论 → 策略师（如果它恰好
+   * 调用了 `get_lessons`）→ 变成一次参数改动 → 才间接影响下一笔。
+   * 中间任何一跳断掉，教训就沉在库里了。
+   *
+   * ## 取多少
+   *
+   * 每个标的最近 2 条，总数封顶 8 条 —— 与 `recentCloses` / `recentRejections`
+   * 同样的 **O(1) 纪律**（§4）：区块大小不随交易历史增长。超过就丢后面的，
+   * 因为**最近的教训最可能还与当前行情相关**。
+   *
+   * 按候选顺序取（候选已按评分排过），于是最值得看的标的的教训优先保留。
+   */
+  private buildPromptLessons(traderId: number, symbols: readonly string[]): PromptLesson[] {
+    const out: PromptLesson[] = [];
+    for (const symbol of symbols) {
+      for (const m of agentMemory.forSymbol(traderId, symbol, 2)) {
+        out.push({
+          symbol: m.symbol,
+          closeReason: m.closeReason,
+          netPnl: m.netPnl,
+          lesson: m.lesson,
+        });
+        if (out.length >= 8) return out;
+      }
+    }
+    return out;
   }
 
   /**

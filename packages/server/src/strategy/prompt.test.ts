@@ -272,6 +272,41 @@ test('绩效区块：把"你在亏"翻译成"你该少做"，而倍数由真实�
   assert.match(prompt, /\*\*手续费是毛盈亏的 9\.8 倍 —— 减少交易次数是当前唯一有效的改进方向。\*\*/);
 });
 
+test('★ 教训区块：AI 自己复盘出来的结论真的进得了决策提示词', () => {
+  /*
+   * 这条用例存在的理由：`agent_memory` 写进库之后的**唯一**读者曾经是复盘员
+   * 自己（再喂给下一轮复盘）与测试 —— **没有任何决策路径读它**。
+   *
+   * 于是一条教训要影响下一笔交易，只能绕道让策略师把它变成一个参数改动：
+   * 间接、有损，还得恰好被策略师读进上下文。那正是"越跑越厉害"断掉的地方 ——
+   * AI 每一轮看到的都是"干净的行情 + 干净的账户"，看不见自己上一笔为什么亏。
+   *
+   * 断言分两半：有教训时整块都在（标的、平仓原因、**净**额、结论），
+   * 没有教训时**不产生空区块** —— 一个永远写着"无"的区块会占预算，
+   * 还会让模型学会跳过它。
+   */
+  const memory = emptyPromptMemory(defaultStrategyConfig());
+  memory.lessons = [
+    {
+      symbol: 'BTCUSDT',
+      closeReason: 'stop_loss',
+      netPnl: -0.42,
+      lesson: '止损挂在 0.4% 处，被正常波动扫掉了 —— 这个标的的日内噪声大于这个距离。',
+    },
+  ];
+
+  const prompt = buildUserPrompt(contextWith(memory));
+
+  assert.match(prompt, /# 你自己复盘出来的教训/);
+  assert.match(prompt, /BTCUSDT（平仓原因 stop_loss，净 -0\.4200 USDT）/);
+  assert.match(prompt, /日内噪声大于这个距离/);
+  /* 教训是"具体情形"而不是通用规则 —— 这条提醒必须一起进去，否则模型会照搬。 */
+  assert.match(prompt, /不是通用规则/);
+
+  const without = buildUserPrompt(contextWith(emptyPromptMemory(defaultStrategyConfig())));
+  assert.doesNotMatch(without, /# 你自己复盘出来的教训/);
+});
+
 test('绩效区块：账户真的在赚钱时，不会仍然说"减少交易次数是唯一方向"', () => {
   /*
    * 同一个模板必须随着事实变化。毛 +3.00、手续费 0.30（0.1 倍）时，成本已经不再是
@@ -551,6 +586,7 @@ function promptForHistory(count: number): { text: string; tokens: number } {
   const performance = tradeStore.performanceSince(o1TraderId, since);
   const memory: PromptMemory = {
     recentRejections: [],
+    lessons: [],
     performance: {
       windowHours: PROMPT_PERFORMANCE_WINDOW_HOURS,
       totalTrades: performance.totalTrades,

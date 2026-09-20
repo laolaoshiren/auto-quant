@@ -152,6 +152,37 @@ export interface PromptMemory {
    * 固定取最近 3 条（与最近平仓同样的 O(1) 纪律，见 §4）。
    */
   recentRejections: PromptRejection[];
+  /**
+   * AI 自己复盘出来的教训（`agent_memory`）。
+   *
+   * ## ⚠️ 这一块原来**根本不存在**，而那是「越跑越厉害」断掉的地方
+   *
+   * `agent_memory`（每笔平仓后由复盘员写下的"这一笔为什么亏")从写下那天起
+   * **没有任何决策路径读它** —— 全仓库唯一的调用者是复盘员自己（再喂给下一轮
+   * 复盘），以及测试。也就是说：
+   *
+   *   · 交易决策提示词里从来没有出现过教训；
+   *   · 一条教训要影响下一笔交易，只能**绕道**让策略师把它变成一个参数改动
+   *     （或写进 `promptSections`）—— 那是间接的、有损的、还得恰好被策略师看见。
+   *   · 仓库自己早就记着这件事（`tools.test.ts` 里那段话："复盘员反复打出
+   *     「止损过紧」「费用吃掉利润」，而策略师一直在 `minPositionSize` 上反复
+   *     微调 —— 因为它看不到那个诊断"）。
+   *
+   * 把教训直接放进决策提示词，是"AI 从自己的失败里学"最直接的一条路：
+   * 它每次做决定前都能看到"我在这个标的上以前是怎么亏的"。
+   */
+  lessons: PromptLesson[];
+}
+
+/** 一条教训 —— 给模型看的是"哪个标的、什么结局、结论是什么"。 */
+export interface PromptLesson {
+  symbol: string;
+  /** 平仓原因（英文稳定码，见 `CLOSE_REASONS`）。 */
+  closeReason: string;
+  /** 那笔的**净**盈亏（已扣手续费与资金费）。 */
+  netPnl: number;
+  /** 复盘员写下的结论。 */
+  lesson: string;
 }
 
 /** 一条被拒的提议 —— 给模型看的是「它提了什么、为什么不行」。 */
@@ -194,6 +225,7 @@ export function emptyPromptMemory(config: StrategyConfig): PromptMemory {
       reentryCooldownMinutes: config.throttle.reentryCooldownMinutes,
     },
     recentRejections: [],
+    lessons: [],
   };
 }
 
@@ -760,6 +792,38 @@ function renderRejections(rejections: PromptRejection[]): string | null {
 }
 
 /**
+ * AI 自己复盘出来的教训 —— 按标的给出"我上次在这里是怎么亏的"。
+ *
+ * ## 这一块为什么存在
+ *
+ * `agent_memory` 从写下那天起**没有任何决策路径读它**：唯一的调用者是复盘员
+ * 自己（喂给下一轮复盘）与测试。于是 AI 每次做决定前看到的都是"干净的行情 +
+ * 干净的账户"，而它自己上一笔为什么亏、复盘员下了什么结论，**它看不到**。
+ *
+ * 一条教训要影响交易，原来只能**绕道**让策略师把它变成一个参数改动 —— 间接、
+ * 有损，还得恰好被策略师读进上下文。仓库自己的 `tools.test.ts` 里记着那个现场：
+ * "复盘员反复打出「止损过紧」「费用吃掉利润」，而策略师一直在 `minPositionSize`
+ * 上反复微调 —— 因为它看不到那个诊断。"
+ *
+ * 没有教训时返回 null（不产生空区块）：一个永远写着"无"的区块会占预算，
+ * 还会让模型学会跳过它。
+ */
+function renderLessons(lessons: PromptLesson[]): string | null {
+  if (lessons.length === 0) return null;
+
+  const lines = lessons.map(
+    (l) =>
+      `- ${l.symbol}（平仓原因 ${l.closeReason}，净 ${l.netPnl >= 0 ? '+' : ''}${l.netPnl.toFixed(4)} USDT）：${oneLine(l.lesson, 200)}`,
+  );
+
+  return (
+    `# 你自己复盘出来的教训（最新在前）\n${lines.join('\n')}\n` +
+    '**这些是你自己（复盘环节）在那些平仓之后写下的结论。** 它们针对的是**具体标的与具体情形**，' +
+    '不是通用规则 —— 请对照当前行情判断它们是否仍然适用，而不是无条件照做。'
+  );
+}
+
+/**
  * 压成一行并截断。
  *
  * 模型写下的 `reasoning` 可以是多行散文；原样进提示词会让"每笔两行"变成长短不一的
@@ -981,6 +1045,16 @@ function renderUserPrompt(
    */
   const rejections = renderRejections(ctx.memory.recentRejections);
   if (rejections) parts.push(rejections);
+
+  /*
+   * AI 自己的教训 —— 排在被拒提议之后。
+   *
+   * 它是"我这个人过去怎么亏的"（跨轮、跨标的的模式），与上面几块的"这一轮
+   * 我离约束有多远"不是同一类信息。放在最后是因为它最需要模型**主动对照**
+   * 当前行情来用，而不是当成硬约束。
+   */
+  const lessons = renderLessons(ctx.memory.lessons);
+  if (lessons) parts.push(lessons);
 
   /*
    * 这里原有一个 `# 最近已平仓交易` 区块，**已删除**。
