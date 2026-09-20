@@ -689,32 +689,33 @@ export function TraderPage() {
           value={liveUnavailable ? '—' : fmtInt(openPositionCount)}
           size="lg"
           title={liveUnavailable ? liveUnavailableWhy : undefined}
-          sub={
+          /*
+           * ⚠️ **「浮动」与表盘放**同一行**，不换行。**
+           *
+           * 原来表盘单独占一行（在「浮动」下面），于是这一张卡的内容比同排另外
+           * 三张高 —— 而四张卡是等高的（grid 默认 stretch），多出来的高度就变成
+           * **另外三张卡下面的一大片空白**。实测：卡片都是 132px，而前三张的内容
+           * 只用了 64px，第 106px 高的那张把整排撑起来，剩下三张空着。
+           *
+           * 把两者并排之后，这一张的内容高度掉回和邻居一样，空白随之消失。
+           * 而「浮动」和「有效杠杆」本来就读在一起（"我在亏多少" + "我用了多大
+           * 敞口"），横排比竖排更顺。
+           *
+           * 用 `footer` 而不是 `sub` 装这个横向容器：`sub` 带 `truncate`
+           * （`overflow:hidden; white-space:nowrap`），会把表盘裁掉下半截。
+           */
+          footer={
             liveUnavailable ? (
-              <span className="text-ink-faint">仓位状态暂不可读</span>
+              <span className="text-xs text-ink-faint">仓位状态暂不可读</span>
             ) : (
-              <>
-                浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
-              </>
+              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="num text-xs text-ink-faint">
+                  浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
+                </span>
+                <LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} />
+              </span>
             )
           }
-          /*
-           * ⚠️ **表盘放在 `footer`，不是 `sub`。**
-           *
-           * 原来它挂在 `sub` 里，而 `sub` 那一层带 `truncate`
-           * （`overflow:hidden; white-space:nowrap`）—— 一个块级 SVG 被塞进
-           * "不许换行"的容器里，结果**表盘被裁掉下半部分**，而且这一张卡
-           * 比同排另外三张高出一大截（它们的副信息只是一行 16px 文字），
-           * 看起来就是"错位"。
-           *
-           * `footer` 不裁剪、有自己的行高，与 `MetricGroup` 的 `items-start`
-           * 配套：卡片顶部对齐，底部各按内容延伸。
-           *
-           * 至于**为什么挂在"持仓"这张卡上**而不是自己占一张：它和持仓是同一个
-           * 问题的两面（敞口由持仓产生），而指标行按 `LAYOUT.md` §0 规则 3
-           * 最多放 4 张 —— 再加一张会把四个数字一起压窄。
-           */
-          footer={<LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} />}
         />
       </MetricCard>
     </div>
