@@ -147,6 +147,27 @@ npm test            # 必须全绿（用例数看它自己打印的 `# tests`，
 
 改了前端再加 `npm run build`。这三条是**最低门槛**，不是可选项。
 
+> ⚠️ **把命令接进管道之后，`$LASTEXITCODE` 读的就不是它了。**
+>
+> PowerShell 里 `$LASTEXITCODE` 是**最后一条外部命令**的退出码。写成
+>
+> ```powershell
+> npm run typecheck 2>&1 | Select-String "error TS"; "exit=$LASTEXITCODE"
+> ```
+>
+> 那个 `$LASTEXITCODE` 是 **`Select-String` 的**（有输入就返回 0），**不是 `npm` 的** ——
+> 于是无论 typecheck 成功还是失败，屏幕上都会打出 `exit=0`。
+>
+> 这个仓库为此付过一次代价：连续多轮汇报"typecheck 0"，而实际上有一个
+> TS7016 一直存在，直到某次没接管道才现形。
+>
+> 正确写法是**让它别接管道**（重定向到文件再读）：
+>
+> ```powershell
+> npm run typecheck > $env:TEMP\tc.log 2>&1
+> if ($LASTEXITCODE -ne 0) { Get-Content $env:TEMP\tc.log | Select-String "error TS" }
+> ```
+
 ### 3.2 不要声称你没实际运行过的功能
 
 具体含义：
