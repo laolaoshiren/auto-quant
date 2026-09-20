@@ -1877,6 +1877,53 @@ export class AutoTrader {
         tpOrderId: null,
         openReasoning: '收养：该仓位是在机器人之外开立的。',
       });
+
+      /*
+       * ⚠️ **收养之后立刻补挂保护单 —— 不要留一个裸的杠杆敞口。**
+       *
+       * 收养的意义是"让模型可以管理它"，而一个没有交易所侧保护的杠杆仓位
+       * **是最糟糕的状态**（§2.6）：VPS 重启、网络中断、进程卡住，那个仓位
+       * 就没有任何东西在兜底。原来收养只写一行记录、把 `stop_loss` 留成 null，
+       * 保护单要等到**下一次加仓或减仓**才可能被补上 —— 而在那之前敞口是裸的，
+       * 在那之后还有"缺记录被误判成挂单失败"的另一个坑（已单独修）。
+       *
+       * 用**兜底比例**而不是问模型：收养发生在对账里，此刻没有模型上下文，
+       * 而"先有个保护、再由模型按失效位调整"明显好于"等着"。
+       *
+       * ## 挂不上时**不**擅自平仓
+       *
+       * §2.6 的"挂不上就立刻市价平仓"是针对**本机器人自己开的仓** ——
+       * 那种情况下平掉是回到已知状态。而这里是**操作员手动开的一个仓位**：
+       * 替他决定平掉，比留一个无保护的仓位更越界。所以报错，让他自己处置。
+       */
+      const fallbackPercent = this.activeConfig.riskControl.fallbackStopLossPercent;
+      const fallbackDistance = live.entryPrice * (fallbackPercent / 100);
+      const adoptedStop =
+        live.side === 'long'
+          ? live.entryPrice - fallbackDistance
+          : live.entryPrice + fallbackDistance;
+
+      const protection = await this.replaceProtection({
+        symbol: live.symbol,
+        side: live.side,
+        quantity: live.quantity,
+        stop: adoptedStop,
+        target: null,
+        traderId,
+      });
+
+      if (protection.stopPlaced) {
+        this.emit(
+          'info',
+          `已为收养的 ${live.symbol} 挂上兜底止损 ${adoptedStop.toFixed(6)}（按 ${fallbackPercent}%）—— 这是系统挑的价位，建议让模型按真实失效位调整一次。`,
+        );
+      } else {
+        this.emit(
+          'error',
+          `收养的 ${live.symbol} 仓位**没能挂上止损**（${protection.failures.join('；') || '原因未知'}）—— ` +
+            '它现在没有交易所侧保护。这是你手动开的仓，系统不会替你平掉，请手动处理。',
+        );
+      }
     }
   }
 
