@@ -769,6 +769,43 @@ export class TraderManager {
   }
 
   /**
+   * 这台机器人**生效**的杠杆上限 —— 控制台用它当有效杠杆表盘的刻度。
+   *
+   * ## 为什么必须走「生效配置」
+   *
+   * AI 托管机器人的参数存在 `agent_config_json`（AI 自己写），策略表里那份
+   * **不生效**。这个坑在可达性检查里已经记过一次：那个检查用策略配置算出了
+   * 「名义上限 9.11 × 0.5 = 4.56，低于 minPositionSize=12」，而 AI 早把比例
+   * 调成了 1 —— **报了一个不存在的问题，同时漏掉真问题**。刻度取错上限，
+   * 指针就会停在一个没有意义的位置上。
+   *
+   * ## 为什么取两者中较大的那个
+   *
+   * `btcEthMaxLeverage` 与 `altcoinMaxLeverage` 是两个独立上限，而表盘要表达的是
+   * **这台机器人的敞口天花板**，不是某一个标的的限制 —— 所以取大的那个。
+   *
+   * 返回 `null` 表示读不到。调用方应当显示"不知道"，**不要回落成 0**：
+   * 0 会让表盘看起来像"完全没加杠杆"，而那恰好是最容易被误读成安全的状态。
+   */
+  leverageCap(traderId: number): number | null {
+    const trader = traders.get(traderId);
+    if (!trader) return null;
+    const record = strategies.get(trader.strategyId);
+    if (!record) return null;
+    let config: StrategyConfig = record.config;
+    const raw = trader.agentConfigJson;
+    if (trader.mode === 'ai_managed' && typeof raw === 'string' && raw.length > 0) {
+      try {
+        const parsed = StrategyConfigSchema.safeParse(JSON.parse(raw));
+        if (parsed.success) config = parsed.data;
+      } catch {
+        // 坏 JSON 与 schema 不通过都回落到策略配置 —— 与可达性检查保持一致。
+      }
+    }
+    return Math.max(config.riskControl.btcEthMaxLeverage, config.riskControl.altcoinMaxLeverage);
+  }
+
+  /**
    * Reconcile one trader's ledger against the exchange **without trading**.
    *
    * Needed because the interesting failure is precisely the one a cycle cannot

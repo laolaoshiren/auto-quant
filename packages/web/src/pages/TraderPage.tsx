@@ -24,6 +24,7 @@ import { DecisionFeed } from '../components/DecisionFeed';
 import { isOpenOrder, TraderTables, type TraderTabId } from '../components/TraderTables';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import { DashboardEquityChart, WinLossBar } from '../components/DashboardCharts';
+import { LeverageArc } from '../components/LeverageArc';
 import {
   EQUITY_RANGES,
   filterByRange,
@@ -664,6 +665,16 @@ export function TraderPage() {
           sub={
             <>
               浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
+              {/*
+                有效杠杆的表盘挂在**这一张卡**上，而不是自己占一张。
+
+                它和"持仓"是同一个问题的两面（敞口由持仓产生），而指标行按
+                `LAYOUT.md` §0 规则 3 最多放 4 张 —— 再加一张会把四个数字一起压窄。
+                做法与"胜率"卡里的 `WinLossBar` 一致：图形作为 `sub` 嵌在卡内。
+              */}
+              <span className="mt-1 block">
+                <LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} />
+              </span>
             </>
           }
         />
@@ -674,9 +685,12 @@ export function TraderPage() {
   /*
    * 指标行下面的一行次要事实。
    *
-   * 它们是**同一个口径的三个数**（保证金 / 名义 / 有效杠杆 —— 都由持仓推出），
-   * 加上"这个机器人是什么"（模型 / 策略）。都要常驻可见，但不该和归属权益一样大，
-   * 所以降级成一行小字而不是第 5、第 6 张卡（`LAYOUT.md` §0 规则 3：一行最多 4 个）。
+   * 保证金与名义是**同一个口径的两个数**（都由持仓推出），加上"这个机器人是什么"
+   * （模型 / 策略）。都要常驻可见，但不该和归属权益一样大，所以降级成一行小字
+   * 而不是第 5、第 6 张卡（`LAYOUT.md` §0 规则 3：一行最多 4 个）。
+   *
+   * **有效杠杆不在这里**：它是同一个口径的第三个数，但"0.5x 算高还是低"要看刻度，
+   * 光一个数字答不了 —— 所以它做成了「持仓」卡里的表盘（`LeverageArc`）。
    */
   const secondaryFacts = (
     <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 px-1 text-xs text-ink-lo">
@@ -689,7 +703,7 @@ export function TraderPage() {
       <span title="所有未平仓合约的名义价值之和。">
         名义 <span className="num text-ink-mid">{fmtUsd(notional, 2)}</span>
       </span>
-      <span title="有效杠杆 = 本机器人总名义价值 ÷ 归属权益。满仓 10x 时读数最高。">
+      <span title="有效杠杆 = 本机器人总名义价值 ÷ 归属权益。它的表盘在「持仓」卡里 —— 敞口由持仓产生，两件事放在一起读最省事。">
         有效杠杆 <span className="num text-ink-mid">{effectiveLeverage.toFixed(2)}x</span>
       </span>
       <span>

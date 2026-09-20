@@ -28,7 +28,17 @@ import { api } from './api';
  * 用可选而不是让 `put` 的调用方编一个假值：**"不知道"与"没有熔断"是两件事** ——
  * 前者不该渲染成"一切正常"。
  */
-export type TraderSummary = TraderStats & { circuitBreaker?: CircuitBreakerReading | null };
+/**
+ * `maxLeverage` 是**这台机器人生效配置里的杠杆天花板**（AI 托管时取
+ * `agent_config_json`，否则取策略）。有效杠杆表盘用它当刻度。
+ *
+ * `null` = 读不到 —— 前端显示"不知道"，**不要当成 0**：0 会让表盘看起来像
+ * "完全没加杠杆"，而那恰好是最容易被误读成安全的状态。
+ */
+export type TraderSummary = TraderStats & {
+  circuitBreaker?: CircuitBreakerReading | null;
+  maxLeverage?: number | null;
+};
 
 interface SummaryState {
   stats: Record<number, TraderSummary>;

@@ -1692,7 +1692,15 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    */
   app.get('/api/traders/:id/stats', authed, async (request) => {
     const id = traderIdOf(request);
-    return { ...computeTraderStats(id), circuitBreaker: deps.manager.readCircuitBreaker(id) };
+    return {
+      ...computeTraderStats(id),
+      circuitBreaker: deps.manager.readCircuitBreaker(id),
+      /*
+       * 有效杠杆表盘的刻度。`null` = 读不到，前端显示"不知道"而不是 0 ——
+       * 见 `manager.leverageCap()` 的说明。
+       */
+      maxLeverage: deps.manager.leverageCap(id),
+    };
   });
 
   app.get('/api/traders/:id/positions', authed, async (request) => {
