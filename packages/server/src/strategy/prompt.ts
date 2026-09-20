@@ -425,16 +425,43 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       `- 最大杠杆（其他所有标的）：${risk.altcoinMaxLeverage}x`,
       `- 单仓名义价值上限（BTC/ETH）：账户权益的 ${risk.btcEthMaxPositionValueRatio} 倍`,
       `- 单仓名义价值上限（其他所有标的）：账户权益的 ${risk.altcoinMaxPositionValueRatio} 倍`,
+      /*
+       * ⚠️ **配置下限不是全部。**
+       *
+       * 实际门槛是 `max(minPositionSize, 交易所该标的的最小名义)`（见 `risk/engine.ts`
+       * 的 `effectiveMin`）。交易所那一侧按标的差别很大 —— BTC 与 ETH 明显更高、
+       * 山寨较低。原来提示词只给一个配置下限，于是模型照着它提金额，在 BTC 上
+       * **必然被拒**，而它无从预先算出来：每个新标的都要浪费一次决策机会去试。
+       *
+       * 不把每个标的的数字拼进这里（那要改快照类型、组装与渲染三处），而是
+       * 把**事实**说清楚：门槛可能更高，被拒的理由会回来。被拒记录本来就回喂
+       * （那套机制是好的），模型据此能自己学到每个标的的量级。
+       */
       `- 单笔最小名义价值：${risk.minPositionSize} USDT`,
+      '- **每个标的在交易所那边还有自己的最小名义，实际门槛取这两个数里的较大者** —— BTC/ETH 明显更高、山寨较低。按上面这个配置下限提金额，在主流的几个标的上可能直接被拒。拿不准时宁可提大一点。',
       `- 最大保证金占用：权益的 ${risk.maxMarginUsage}%`,
       `- 新开仓的最低盈亏比：1:${risk.minRiskRewardRatio}`,
       feeAwareStopConstraint(risk, ctx.memory.performance.roundTripFeeRate),
       `- 开仓所需的最低置信度：${risk.minConfidence}/100`,
+      /*
+       * ⚠️ 这两条原来写的是「没有止损的开仓会被拒绝」—— **而那是不成立的**。
+       *
+       * `reviewOpen` 里的拒绝分支要求 `fallbackStopLossPercent <= 0`，而那个字段的
+       * schema 是 `min(0.05)`：**它永远不可能 ≤ 0，那条分支不可达**。实际行为是
+       * 按兜底比例补一个止损然后照常开仓。
+       *
+       * 于是模型读到一句它无法验证的承诺（"会被拒绝"，那还暗示它可以试探），
+       * 而系统实际上是在**一个它从未选择的价位**上开出了真仓 —— 那个止损与它
+       * 自己的失效位论证毫无关系。
+       *
+       * 说真话比空承诺更有约束力：**把后果讲清楚**（"等于把这一笔的风险控制
+       * 交了出去"），模型才有理由每次都自己写。
+       */
       risk.requireStopLoss
-        ? '- 每一笔开仓都必须带止损。没有止损的开仓会被拒绝。'
+        ? `- 每一笔开仓都必须带止损。**如果你没给，系统会按配置的兜底比例 ${risk.fallbackStopLossPercent}% 自动补一个 —— 那个价位与你的失效位论证无关，等于把这一笔的风险控制交了出去。** 所以永远自己写。`
         : '- 强烈建议每一笔开仓都带止损。',
       risk.requireTakeProfit
-        ? '- 每一笔开仓都必须带止盈。没有止盈的开仓会被拒绝。'
+        ? `- 每一笔开仓都必须带止盈。**如果你没给，系统会按配置的兜底比例 ${risk.fallbackTakeProfitPercent}% 自动补一个。** 所以永远自己写。`
         : '- 建议每一笔开仓都带止盈。',
       '- 同一时间每个标的至多一个仓位。',
       `- 开仓节流：每个周期最多 ${config.throttle.maxEntriesPerCycle} 个新仓位，每小时最多 ${config.throttle.maxEntriesPerHour} 个。`,
