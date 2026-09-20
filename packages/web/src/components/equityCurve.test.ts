@@ -20,8 +20,36 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { hasEquityVariation, rangeSpanMs, EQUITY_BUCKET_MS, CHART_INK } from './equityCurve';
+import { leverageRatio } from './LeverageArc';
 import { equityShape } from '../pages/overviewParts';
 import tailwindConfig from '../../tailwind.config.js';
+
+/* -------------------------------------------------------------------------- */
+/*  杠杆表盘的比例                                                              */
+/* -------------------------------------------------------------------------- */
+
+test('★ 杠杆表盘的比例：上限不可用时画空槽，而不是画满', () => {
+  /*
+   * 这条用例存在的理由：真实页面上那台机器人**没有持仓**，有效杠杆恒为 0 ——
+   * 「填充段」那条路径在浏览器里根本走不到，而比例算错恰恰是这种图形最常见的
+   * 故障（上限为 0 时除出 NaN，弧会画到半圆之外、或者整条消失）。
+   *
+   * 而 `max` 不可用时**必须返回 0 而不是 1**：画满会被读成"敞口拉满"，
+   * 那是最危险的一种误读。
+   */
+  const close = (a: number, b: number) => Math.abs(a - b) < 1e-9;
+
+  assert.ok(close(leverageRatio(0.5, 3), 1 / 6), '0.5x / 上限 3x = 六分之一');
+  assert.equal(leverageRatio(3, 3), 1, '刚好到上限 = 满格');
+  assert.equal(leverageRatio(5, 3), 1, '超出上限要夹到 1，不能画出半圆之外');
+  assert.equal(leverageRatio(0, 3), 0, '零杠杆 = 空槽');
+
+  assert.equal(leverageRatio(1, 0), 0, '上限 0 = 不可用 → 空槽（不能是满格）');
+  assert.equal(leverageRatio(1, -1), 0, '负上限 = 不可用 → 空槽');
+  assert.equal(leverageRatio(Number.NaN, 3), 0, 'NaN 杠杆 → 空槽');
+  assert.equal(leverageRatio(1, Number.NaN), 0, 'NaN 上限 → 空槽');
+  assert.equal(leverageRatio(Number.POSITIVE_INFINITY, 3), 0, '无穷杠杆 → 空槽（不是满格）');
+});
 
 /* -------------------------------------------------------------------------- */
 /*  CHART_INK 与 tailwind 的 token 必须逐位一致                                 */

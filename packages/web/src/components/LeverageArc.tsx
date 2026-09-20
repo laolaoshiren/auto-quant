@@ -27,6 +27,21 @@ import { CHART_INK } from './equityCurve';
 /** 弧的粗细（px）。细一档：它是卡片内的小图形，不该和主数字抢注意力。 */
 const STROKE = 4;
 
+/**
+ * 表盘填充比例（0–1）。
+ *
+ * 提成纯函数是为了能被直接测：浏览器里那台机器人**当前没有持仓**，杠杆恒为 0，
+ * 于是"填充段"这条路径在真实页面上根本走不到 —— 而"比例算错"恰恰是这种图形
+ * 最容易出的问题（上限为 0 时除出 `NaN`、超出上限时弧画到半圆之外）。
+ *
+ * `max <= 0` 或非有限值时返回 0：**上限不可用 = 画空槽**，而不是画满。
+ * 画满会读成"敞口拉满"，那是最危险的一种误读。
+ */
+export function leverageRatio(leverage: number, max: number): number {
+  if (!Number.isFinite(leverage) || !Number.isFinite(max) || max <= 0) return 0;
+  return Math.max(0, Math.min(1, leverage / max));
+}
+
 export function LeverageArc({
   leverage,
   max,
@@ -38,7 +53,7 @@ export function LeverageArc({
   size?: number;
 }) {
   const usable = Number.isFinite(leverage) && Number.isFinite(max) && max > 0;
-  const ratio = usable ? Math.max(0, Math.min(1, leverage / max)) : 0;
+  const ratio = leverageRatio(leverage, max);
 
   const r = (size - STROKE) / 2;
   const cx = size / 2;
