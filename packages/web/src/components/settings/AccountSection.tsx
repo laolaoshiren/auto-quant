@@ -154,6 +154,30 @@ export function AccountSection() {
         tone={system?.dryRun ? 'default' : 'warn'}
         sub={system?.environmentLabel ?? system?.environment ?? '—'}
       />
+    </MetricGroup>
+  );
+
+  /*
+   * 服务端信息 —— **放在右栏，与说明卡同列**。
+   *
+   * ## 为什么它和「当前账户」分开
+   *
+   * 这两组回答的是不同的问题：「当前账户」是"我在改谁的凭据"，服务端信息是
+   * "这套东西跑在什么版本上"。把它们堆成一组九个数、横排占满整宽，结果是
+   * 上方一大条指标、下方左栏一个长表单而右栏一张短卡 —— 右下角那片空白。
+   *
+   * ## ⚠️ 列数必须跟着栏宽降下来
+   *
+   * 上面那段注释记着一次事故：这组指标曾经**就在右栏里**，而 `MetricGroup` 在
+   * `xl` 下是 4 列网格 —— 每列只剩约 150px，而 `Metric` 的值是 `truncate` 的，
+   * `main @ 222ae15`、`2026-09-20 03:33`、`autoquant.sqlite` 全被切掉，
+   * 界面上看起来只是"有点挤"，实际是**信息被静默丢掉了**。
+   *
+   * 所以这里显式给 `columns={2}`：右栏约 920px，两列各 460px，值是放得下的。
+   * **不要改回 4** —— 那是把同一个 bug 再犯一次。
+   */
+  const serverStatus = (
+    <MetricGroup title="服务端" columns={2} layout="vertical">
       <Metric
         label="服务端版本"
         value={build ? `${build.branch} @ ${build.commitShort}` : '未知'}
@@ -173,26 +197,33 @@ export function AccountSection() {
   );
 
   /*
-   * 安全说明。它原来挤在窄栏的最底下，一行只放得下二十来个字 —— 一段需要通读的
-   * 文字不该放在那种宽度里。现在它是右栏的一张卡，行宽够读。
+   * 右栏 = 安全说明 + 服务端信息。
+   *
+   * 说明原来是一张孤零零的短卡，而左栏的表单有五个字段 —— 于是右下角空出一大块。
+   * 把「服务端」那组指标移到它下面之后，两栏高度接近，而"我改的这套东西跑在什么
+   * 版本上"也回到了它该在的位置：和"关于这个账户"是同一类**只读的背景信息**。
    */
   const notes = (
-    <Panel>
-      <h3 className="text-sm font-semibold text-ink-hi">关于这个账户</h3>
-      <div className="mt-2 space-y-2 text-xs leading-relaxed text-ink-mid">
-        <p>
-          本系统面向单人部署：管理员账号在服务首次启动时自动创建，<strong>不提供注册入口</strong>
-          ，也没有找回密码的流程 —— 修改只能在这里做，且必须验证当前密码。
-        </p>
-        <p>如果用户名与密码都忘了，只能到服务器上重置数据库里的凭据记录。</p>
-        {build?.dirty && (
-          <p className="text-warn">
-            ⚠ 打包时工作区有未提交改动 —— 线上跑的代码<strong>不等于</strong> {build.commitShort}{' '}
-            这个提交，它的行为无法用仓库里的任何一版解释。
+    <div className="space-y-5">
+      <Panel>
+        <h3 className="text-sm font-semibold text-ink-hi">关于这个账户</h3>
+        <div className="mt-2 space-y-2 text-xs leading-relaxed text-ink-mid">
+          <p>
+            本系统面向单人部署：管理员账号在服务首次启动时自动创建，<strong>不提供注册入口</strong>
+            ，也没有找回密码的流程 —— 修改只能在这里做，且必须验证当前密码。
           </p>
-        )}
-      </div>
-    </Panel>
+          <p>如果用户名与密码都忘了，只能到服务器上重置数据库里的凭据记录。</p>
+          {build?.dirty && (
+            <p className="text-warn">
+              ⚠ 打包时工作区有未提交改动 —— 线上跑的代码<strong>不等于</strong> {build.commitShort}{' '}
+              这个提交，它的行为无法用仓库里的任何一版解释。
+            </p>
+          )}
+        </div>
+      </Panel>
+
+      {serverStatus}
+    </div>
   );
 
   /*
