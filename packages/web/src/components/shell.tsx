@@ -156,7 +156,7 @@ export function Metric({
 
   return (
     <div className="min-w-0" title={title}>
-      <div className="truncate text-xs text-ink-lo">{label}</div>
+      <div className="truncate text-xs font-medium uppercase tracking-wider text-ink-lo">{label}</div>
       <div
         className={cn(
           'num truncate leading-tight',

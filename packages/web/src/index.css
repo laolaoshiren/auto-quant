@@ -115,7 +115,7 @@
     @apply p-4 sm:p-6 lg:p-8 2xl:p-10;
   }
   .panel {
-    @apply rounded-lg border border-base-750 bg-base-900 shadow-panel;
+    @apply rounded-lg border border-base-700 bg-base-900 shadow-panel;
   }
 
   .panel-head {
@@ -137,7 +137,7 @@
   }
 
   .field-label {
-    @apply mb-1.5 block text-xs font-medium text-ink-lo;
+    @apply mb-1.5 block text-xs font-medium tracking-wide text-ink-lo;
   }
 
   .input,
@@ -201,7 +201,7 @@
   }
 
   .th {
-    @apply whitespace-nowrap px-3 py-2 text-left text-sm font-semibold text-ink-lo;
+    @apply whitespace-nowrap px-3 py-2 text-left text-xs font-semibold uppercase tracking-wider text-ink-lo;
   }
 
   .td {
