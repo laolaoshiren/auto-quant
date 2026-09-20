@@ -2638,7 +2638,19 @@ export class AutoTrader {
      * **一个永久误报的校验比没有校验更糟** —— 它会训练操作员忽略这条告警，
      * 而这是唯一能自动发现"账本错了"的地方。
      */
-    const platformNet = tradeStore.netSince(sinceIso) + foreignNet;
+    /*
+     * 分两项存下来，**不只是为了好看**。
+     *
+     * 原来这里只有 `platformNet` 一个汇总值。于是当差额出现时，能看到的只有
+     * "差 0.2" —— 而它可能是本机器人的成交记错了、也可能是外部活动那侧漏了，
+     * 两种原因的修法完全不同，光看汇总值无从判断。
+     *
+     * 实测的代价：我按"外部活动漏算资金费"改了一版，部署、对账、`checkedAt`
+     * 是新的、`gap` 一模一样 —— **因为没有任何一项能告诉我改动到底作用在哪一侧**，
+     * 只能再从头推一遍。把分项存下来，这个问题下次当场就答完了。
+     */
+    const platformSelf = tradeStore.netSince(sinceIso);
+    const platformNet = platformSelf + foreignNet;
     const ledgerGap = Number((platformNet - exchangeNet).toFixed(6));
     
     /*
@@ -2652,6 +2664,13 @@ export class AutoTrader {
         platformNet: Number(platformNet.toFixed(6)),
         exchangeNet: Number(exchangeNet.toFixed(6)),
         gap: ledgerGap,
+        /*
+         * 两个分项。差额出现时，"本机器人的成交"与"外部活动"哪一侧出的问题，
+         * 看这两个数就知道 —— 而它们的修法完全不同。
+         */
+        platformSelf: Number(platformSelf.toFixed(6)),
+        foreignNet: Number(foreignNet.toFixed(6)),
+        foreignRounds: foreign.length,
         // 让落库的数据自己说清这一轮算不算数（读失败时 exchangeNet 是 0，不是"真的 0"）。
         incomeReadFailed,
         checkedAt: new Date().toISOString(),
