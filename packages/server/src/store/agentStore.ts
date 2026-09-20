@@ -162,6 +162,90 @@ const toRun = (r: RawRun): AgentRunRow => ({
 });
 
 /* -------------------------------------------------------------------------- */
+/*  增长上界                                                                    */
+/* -------------------------------------------------------------------------- */
+/*
+ * ## 为什么这三张表必须有上限
+ *
+ * 仓库自己定的契约（`retention.test.ts` 顶部）：**凡是交易循环写入的表都必须有界，
+ * 而且裁剪不能发生在每行的写入路径上**。已实现的两张是 `runtime_logs`（按条数封顶）
+ * 与 `trade_events`（按时间保留 + 阈值触发）。
+ *
+ * 而这三张 agent 表漏了 —— 它们是"AI 托管越跑越厉害"的落地处，写入频率却和
+ * 交易量同阶：
+ *
+ *   · `agent_memory`     每平一笔仓一行
+ *   · `agent_runs`       每次审视一行
+ *   · `agent_experiments` 每次调参一行，**且每行含整份 StrategyConfig（约 2KB）**
+ *
+ * 一台跑几个月的机器人会攒下几万行，其中 `agent_experiments` 是空间上的大头。
+ * 而读它们的地方全都是"最近 N 条"（`recent` / `forSymbol` / `get_experiments`），
+ * 没有任何一处需要全集 —— 所以裁剪不会丢任何被读的信息。
+ *
+ * ## 为什么按条数而不是按时间
+ *
+ * 这三张表的价值密度与**交易活动**相关，不是与自然时间相关：一个停了两周的机器人
+ * 不该因为"太老"而丢掉它最后一次实验的结果。按条数保留"最近 N 次"才对应
+ * "我还记得最近发生过什么"这个真实需求。
+ *
+ * ## ⚠️ 未结算的实验永远不裁
+ *
+ * `agent_experiments` 的结算要等结果（5 笔或 24 小时）。一条**还没结算**的记录
+ * 被裁掉，就意味着那笔调参的因果永远对不上 —— 而这正是"越跑越厉害"的机制本身。
+ * 所以裁剪只作用于 `outcome_evaluated_at IS NOT NULL` 的行，并且**上限只对已结算的
+ * 那些计数**。未结算的行数天然很小（同一时刻至多几条），不需要额外封顶。
+ */
+export const AGENT_MEMORY_CAP = 500;
+export const AGENT_RUNS_CAP = 500;
+export const AGENT_EXPERIMENTS_CAP = 200;
+
+/**
+ * 每写这么多行裁一次。
+ *
+ * 与 `runtime_logs` 同样的理由：`node:sqlite` 是**同步**的，裁剪会阻塞事件循环 ——
+ * 而事件循环正是跑交易周期的那个。所以绝不能在每行写入时裁（那一版真的发生过：
+ * 一个周期里几十次全表 DELETE）。
+ *
+ * ⚠️ 它同时决定**真实上界** = `CAP + TRIM_EVERY_WRITES`：最后一批未满的行会留着。
+ * 导出是为了让测试断言真实的上界，而不是一个达不到的理想值 —— `runtime_logs`
+ * 的注释里写的是同一个道理（"表的上界变成 CAP + TRIM_EVERY = 700 行"）。
+ */
+export const TRIM_EVERY_WRITES = 100;
+let writesSinceTrim = 0;
+
+/** 把三张表压回各自的上限。写路径按批次调用，不是每行调用。 */
+export function trimAgentTables(): void {
+  const db = getDb();
+  db.run(
+    `DELETE FROM agent_memory
+      WHERE id NOT IN (SELECT id FROM agent_memory ORDER BY id DESC LIMIT ${AGENT_MEMORY_CAP})`,
+  );
+  db.run(
+    `DELETE FROM agent_runs
+      WHERE id NOT IN (SELECT id FROM agent_runs ORDER BY id DESC LIMIT ${AGENT_RUNS_CAP})`,
+  );
+  /* 只裁已结算的 —— 未结算的带着"待回填"的语义，见上面那段。 */
+  db.run(
+    `DELETE FROM agent_experiments
+      WHERE outcome_evaluated_at IS NOT NULL
+        AND id NOT IN (
+          SELECT id FROM agent_experiments
+           WHERE outcome_evaluated_at IS NOT NULL
+           ORDER BY id DESC LIMIT ${AGENT_EXPERIMENTS_CAP}
+        )`,
+  );
+}
+
+/** 写路径按批次触发裁剪。 */
+function noteAgentWrite(): void {
+  writesSinceTrim += 1;
+  if (writesSinceTrim >= TRIM_EVERY_WRITES) {
+    writesSinceTrim = 0;
+    trimAgentTables();
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /*  实验（策略层的记忆：我改了什么 + 之后真实结果）                             */
 /* -------------------------------------------------------------------------- */
 
@@ -197,6 +281,7 @@ export const agentExperiments = {
       input.reason,
       JSON.stringify(input.toolCalls ?? []),
     );
+    noteAgentWrite();
     return Number(lastInsertRowid);
   },
 
@@ -279,6 +364,7 @@ export const agentMemory = {
       input.lesson,
       JSON.stringify(input.tags),
     );
+    noteAgentWrite();
     return true;
   },
 
@@ -354,6 +440,7 @@ export const agentRuns = {
       input.tokensOut,
       input.latencyMs,
     );
+    noteAgentWrite();
     return Number(lastInsertRowid);
   },
 

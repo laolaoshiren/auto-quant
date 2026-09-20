@@ -16,6 +16,14 @@ import {
   traders,
   trades as tradeStore,
 } from './repositories.js';
+import {
+  AGENT_EXPERIMENTS_CAP,
+  AGENT_RUNS_CAP,
+  TRIM_EVERY_WRITES,
+  agentExperiments,
+  agentRuns,
+  trimAgentTables,
+} from './agentStore.js';
 
 /**
  * The "growth" contract: every table that is written by the trading loop must be
@@ -290,5 +298,91 @@ test('the equity curve is read once, so max drawdown is unchanged by the rewrite
   assert.ok(
     Math.abs(stats.maxDrawdownPercent - 25) < 1e-9,
     `expected 25% drawdown, got ${stats.maxDrawdownPercent}`,
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  AI 的三张表                                                                */
+/* -------------------------------------------------------------------------- */
+
+test('★ AI 的运行记录表也有界，不会随交易量无限增长', () => {
+  /*
+   * 这条用例存在的理由：仓库自己定的契约是「凡是交易循环写入的表都必须有界」
+   * （见本文件顶部），而 AI 托管的三张表漏了 —— 它们与交易量同阶增长：
+   * 每平一笔写一条经验、每次审视写一条运行记录、每次调参写一条实验
+   * （**且每行含整份 StrategyConfig，约 2KB**）。
+   *
+   * 读它们的地方全都是"最近 N 条"，没有任何一处需要全集 —— 所以裁剪不丢信息。
+   */
+  const id = seedTrader();
+
+  /* 造够行数触发裁剪（写满一个批次）。 */
+  for (let i = 0; i < AGENT_RUNS_CAP + 120; i++) {
+    agentRuns.insert({
+      traderId: id,
+      kind: 'strategy',
+      trigger: 'manual',
+      intensity: 'normal',
+      steps: 1,
+      agents: {},
+      outcome: 'ok',
+      detail: `seed ${i}`,
+      tokensIn: 1,
+      tokensOut: 1,
+      latencyMs: 1,
+    });
+  }
+
+  const count =
+    getDb().get<{ n: number }>('SELECT COUNT(*) AS n FROM agent_runs WHERE trader_id = ?', id)?.n ?? -1;
+  /*
+   * 断言的是**真实上界** `CAP + TRIM_EVERY_WRITES`，不是 CAP —— 裁剪按批次发生，
+   * 最后一批未满的行会留着（与 `runtime_logs` 同一个模式，它的注释里写着
+   * "表的上界变成 CAP + TRIM_EVERY = 700 行"）。
+   *
+   * 第一版这里断言 `<= CAP`，于是它失败了 —— 而那次失败说明的是**断言写错了**，
+   * 不是实现错了（实测：插 620 行后是 520，手动裁一次回到 500）。
+   */
+  assert.ok(
+    count <= AGENT_RUNS_CAP + TRIM_EVERY_WRITES,
+    `agent_runs 上界应为 ${AGENT_RUNS_CAP + TRIM_EVERY_WRITES}，实际 ${count} —— 超了就是裁剪没在跑`,
+  );
+  assert.ok(count > AGENT_RUNS_CAP, '夹具本身要能把表顶过上限，否则这条用例什么都没测');
+});
+
+test('★ 未结算的实验永远不裁：裁掉它，那笔调参的因果就永远对不上', () => {
+  /*
+   * `agent_experiments` 的结算要等结果（5 笔成交或 24 小时）。一条**还没结算**的
+   * 记录被裁掉，就意味着"我改了什么 → 之后发生了什么"这个环永远断了 ——
+   * 而那正是"越跑越厉害"的全部机制。
+   *
+   * 所以裁剪只作用于已结算的行，且上限只对已结算的那些计数。
+   */
+  const id = seedTrader();
+  const seed = (trigger: string) => ({
+    traderId: id,
+    trigger,
+    observed: {},
+    patch: {},
+    applied: {},
+    clamps: {},
+    reason: 'seed',
+    toolCalls: [],
+  });
+
+  const stillPending = agentExperiments.insert(seed('timeout'));
+
+  /* 一批**已结算**的实验，把已结算那部分顶过上限。 */
+  for (let i = 0; i < AGENT_EXPERIMENTS_CAP + 30; i++) {
+    const settled = agentExperiments.insert(seed('periodic'));
+    agentExperiments.settle(settled, { trades: 1, netPnl: 0 });
+  }
+
+  /* 直接调一次裁剪（不依赖批次计数），断言的是"未结算的还在"。 */
+  trimAgentTables();
+
+  assert.ok(
+    agentExperiments.pending(id).some((e) => e.id === stillPending),
+    '未结算的那条必须还在 —— 裁掉它，那笔调参的因果就永远对不上',
   );
 });
