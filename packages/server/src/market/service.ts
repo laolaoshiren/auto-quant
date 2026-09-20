@@ -18,6 +18,14 @@ import { scoreSymbol } from '../strategy/scoring.js';
 
 const log = createLogger('market:service');
 
+/**
+ * 「评分用的 15m / 4h 缺失」只告警一次。
+ *
+ * 这一条会在**每个标的、每一轮**都被触发（配置不会自己变好），所以不加开关的话
+ * 日志会被它淹没 —— 而一条淹没在噪音里的告警等于没有告警。
+ */
+let warnedMissingScoreTimeframes = false;
+
 /* -------------------------------------------------------------------------- */
 /*  Universe snapshot                                                          */
 /* -------------------------------------------------------------------------- */
@@ -173,9 +181,35 @@ export class MarketDataService {
      * 在这里算而不是在调用方算，是因为**只有这里同时拿得到 15m 与 4h 的原始 K 线** ——
      * 快照里只带算好的指标，带不了 K 线（那会让快照大得多）。
      * 而评分必须两个周期都要：只看小周期会被日内噪声带走，只看大周期会错过入场点。
+     *
+     * ## ⚠️ 评分固定用 15m + 4h，与 `selectedTimeframes` 无关
+     *
+     * 这是刻意写死的：评分回答的是"这个标的现在值不值得看"，它需要一组**所有策略
+     * 都相同**的尺子 —— 若跟着配置变，两个策略各自的 `minScore` 就不可比了。
+     *
+     * 但代价是：**配置里如果没选 15m 或 4h，评分恒为 0**（`scoring.ts` 要求
+     * 4h ≥ 30 根、15m ≥ 25 根，空数组直接返回 0）。那时任何 `minScore > 0`
+     * 都会把全部候选滤掉 —— 而门槛恰恰是 AI 能调的参数，它调完看到"没有机会"，
+     * 会以为市场不好，而不是"这个配置下评分根本没有信息量"。
+     *
+     * 所以对这种组合**记一条明确的告警**（只记一次，否则每个标的每一轮都会刷）。
      */
     const klinesOf = (tf: string): Kline[] => klineResults.find((r) => r.tf === tf)?.klines ?? [];
-    const score = scoreSymbol(klinesOf('15m'), klinesOf('4h'));
+    const scoreKlines15m = klinesOf('15m');
+    const scoreKlines4h = klinesOf('4h');
+    if (
+      (scoreKlines15m.length === 0 || scoreKlines4h.length === 0) &&
+      !warnedMissingScoreTimeframes
+    ) {
+      warnedMissingScoreTimeframes = true;
+      log.warn(
+        '候选评分固定使用 15m 与 4h 两根 K 线，而本策略配置的周期集合里缺了其中一个 —— ' +
+          '这会让**所有标的的评分恒为 0**，任何「候选评分门槛」（coinSource.minScore > 0）' +
+          '都会因此把全部候选滤掉。请把 15m 与 4h 加回 indicators.kline.selectedTimeframes，' +
+          '或把 minScore 设为 0（关闭门槛）。',
+      );
+    }
+    const score = scoreSymbol(scoreKlines15m, scoreKlines4h);
 
     return {
       symbol,
