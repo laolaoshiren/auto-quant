@@ -1269,13 +1269,37 @@ export class AutoTrader {
     const gate = config.coinSource.minScore;
     let gateDropped: string[] = [];
     if (gate > 0) {
-      const kept = snapshots.filter((s) => (s.score ? s.score.total >= gate : true));
-      gateDropped = snapshots.filter((s) => s.score && s.score.total < gate).map((s) => s.symbol);
+      /*
+       * ⚠️ **持仓标的永远不参与评分门槛。**
+       *
+       * 门槛回答的是"这个标的值不值得**开**新仓"，而"要不要继续持有/平掉"
+       * 是另一个问题 —— 那个决定必须基于真实行情，不该因为"它现在的分数低"
+       * 而连看都不看。
+       *
+       * 原来的写法会把持仓标的也滤掉，后果是一串连锁：
+       *
+       *   1. 被滤掉的标的不在 `snapshots` 里 → `snapshotBySymbol` 里没有它；
+       *   2. `toPositionView()` 取不到快照，`markPrice` **回落到开仓价**
+       *      （`snapshot?.price ?? row.entry_price`），于是**未实现盈亏算成 0**；
+       *   3. 模型看到的是"这笔持仓浮盈 +0.00"，而它可能正在亏 —— **假事实**；
+       *   4. 若所有候选都被滤掉，`snapshots.length === 0` 会直接早退，
+       *      **那一轮连持仓都不管**。
+       *
+       * 门槛越严，这个洞越容易踩到 —— 而"机器人不交易"正是这个系统里
+       * 最难发现的一类失效（见下面 gateDropped 的注释）。
+       */
+      const heldSymbols = new Set(held);
+      const kept = snapshots.filter(
+        (s) => heldSymbols.has(s.symbol) || (s.score ? s.score.total >= gate : true),
+      );
+      gateDropped = snapshots
+        .filter((s) => !heldSymbols.has(s.symbol) && s.score && s.score.total < gate)
+        .map((s) => s.symbol);
       if (gateDropped.length > 0) {
         this.emitOnChange(
           `score-gate:${gate}`,
           'info',
-          `评分门槛 ${gate}：滤掉 ${gateDropped.length} 个标的（${gateDropped.slice(0, 6).join('、')}${gateDropped.length > 6 ? ' 等' : ''}），保留 ${kept.length} 个。`,
+          `评分门槛 ${gate}：滤掉 ${gateDropped.length} 个标的（${gateDropped.slice(0, 6).join('、')}${gateDropped.length > 6 ? ' 等' : ''}），保留 ${kept.length} 个。持仓标的不参与门槛。`,
         );
       }
       snapshots = kept;
@@ -4702,6 +4726,22 @@ reduceQuantity: null,
 
   private toPositionView(row: PositionRow, snapshots: Map<string, MarketSnapshot>): PositionView {
     const snapshot = snapshots.get(row.symbol);
+    /*
+     * ⚠️ **这个回落是"账面上的假事实"，不要让它发生。**
+     *
+     * 取不到快照时拿开仓价当市价，算出来的未实现盈亏恒等于 0 —— 一笔正在亏的
+     * 持仓会以"浮盈 +0.00"的样子进到提示词里，而模型据此会认为没什么可管的。
+     *
+     * 这条路径应当是**不可达**的：候选评分门槛已经把持仓标的排除在外
+     * （见上面 gate 那段），而持仓标的本身是由 `mustInclude: held` 强制进候选池的。
+     * 剩下唯一的可能是"这个标的的行情确实取不到"—— 那种情况下
+     * `ownUnrealizedPnlOf()`（归属权益那条路径）会另外报一条"读不到标记价"的告警，
+     * 提示词里的这一处仍然不代表真相。
+     *
+     * 保留回落是为了不改 `PositionView.markPrice: number` 的类型契约（改动会波及
+     * 前端与持仓页）；但**如果这条路径真的开始出现，该做的是让持仓标的必然带快照，
+     * 而不是在这里补一个更好看的默认值。**
+     */
     const markPrice = snapshot?.price ?? row.entry_price;
     const isLong = row.side === 'long';
     const unrealizedPnl =
