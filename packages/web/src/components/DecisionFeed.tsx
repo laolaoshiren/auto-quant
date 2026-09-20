@@ -1353,6 +1353,7 @@ function DecisionOutcome({
    * 记录上没有时退回决策自己带的那一份，这样任何一条现在能看见的干预
    * 都不会因为这次改动而消失。
    */
+  const [expanded, setExpanded] = useState(false);
   const notes = entry?.adjustments?.length ? entry.adjustments : decision.adjustments;
 
   if (!entry) {
@@ -1372,6 +1373,19 @@ function DecisionOutcome({
   const Icon =
     key === 'ok' ? Check : key === 'rejected' ? TriangleAlert : key === 'failed' ? X : Ban;
 
+  /*
+   * 「第一句」与「其余」。
+   *
+   * 断句用中文句号与分号 —— 服务端写的这些句子本身就以此断句
+   * （`单日亏损熔断：今日已实现亏损 $0.59，占权益 6.03%（上限 5%）。`）。
+   * 一个断句符都找不到时整段都算第一句：短消息本来就不需要折叠。
+   */
+  const detail = entry.detail ?? '';
+  const cut = detail.search(/[。；]/);
+  const lead = cut >= 0 ? detail.slice(0, cut + 1) : detail;
+  const rest = cut >= 0 ? detail.slice(cut + 1).trim() : '';
+  const hasMore = rest.length > 0 || notes.length > 0;
+
   return (
     <div className="mt-1 min-w-0 pl-5">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -1389,25 +1403,60 @@ function DecisionOutcome({
             委托 {entry.orderId}
           </span>
         )}
+        {/*
+          折叠开关只在**真的有后续内容**时出现 —— 每条决策都挂一个点开是空的
+          "详情"比没有更让人困惑（同一个教训见 `CycleDetails` 里那两个死按钮）。
+        */}
+        {hasMore && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            className="shrink-0 rounded px-1 text-xs text-ink-lo transition hover:text-ink-hi"
+            title={expanded ? '收起剩余说明' : '展开剩余说明'}
+          >
+            {expanded ? '收起' : '详情'}
+          </button>
+        )}
       </div>
 
       {/*
-        原因 / 错误：**原样显示服务端写的那句话**（`entry.detail`）。
-        熔断那条本身就是一句完整的中文（`单日亏损熔断：今日已实现亏损 $0.59，
-        占权益 6.03%（上限 5%）。`），改写它只会把数字弄丢 —— 而数字才是重点。
-      */}
-      {entry.detail && (
-        <p className="mt-0.5 break-words text-xs leading-relaxed text-ink-mid">{entry.detail}</p>
-      )}
+        原因 / 错误：**原样显示服务端写的那句话**（`entry.detail`）—— 但只显示**第一句**。
+        改写它会把数字弄丢（数字才是重点），所以一个字都不动，只是把后半段折起来。
 
-      {notes.length > 0 && (
-        <ul className="mt-0.5 space-y-0.5">
-          {notes.map((note, index) => (
-            <li key={index} className="break-words text-xs leading-relaxed text-warn/90">
-              • {note}
-            </li>
-          ))}
-        </ul>
+        ## 为什么要折
+
+        实测熔断那条 `detail` 是一整段四行：
+
+          总回撤熔断：权益较最高水位 $9.54 回撤了 21.00%（上限 20%）。注意：总回撤
+          熔断不按日重置 —— 它要等权益回到最高水位以下 20% 以内才会解除，而空仓时
+          权益不会自己变化，所以它不会自行恢复。要不要继续交易需要操作员决定
+          （例如入金，或调整这一上限）。
+
+        它**每一轮都出现**，而连续 32 轮的内容一字不差（`groupCycles` 折叠了重复的
+        轮次，但单条内部这四行仍然照渲）。参考产品一条决策只占一行多一点 ——
+        差别不在骨架（币种图标 + 符号 + 动作徽章 + 置信度 + 理由，我们与它一致），
+        而在**我们额外挂了两段**：执行结果与风控注意事项。
+
+        这两段**不能删**（`AGENTS.md` §2.7：界面不能对"发生了什么"说谎），
+        但可以**默认收起**。分界线是「第一句」：它是"为什么"的答案
+        （熔断、被拒、失败的**具体**原因），必须始终可见；其后的补充与建议按需展开。
+      */}
+      {lead && <p className="mt-0.5 break-words text-xs leading-relaxed text-ink-mid">{lead}</p>}
+
+      {expanded && (
+        <>
+          {rest && <p className="mt-0.5 break-words text-xs leading-relaxed text-ink-mid">{rest}</p>}
+          {notes.length > 0 && (
+            <ul className="mt-0.5 space-y-0.5">
+              {notes.map((note, index) => (
+                <li key={index} className="break-words text-xs leading-relaxed text-warn/90">
+                  • {note}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
     </div>
   );
