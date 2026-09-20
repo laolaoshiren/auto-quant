@@ -2394,9 +2394,26 @@ export class AutoTrader {
            * 属于别的机器人的是正常情况（共用账户），不该刷告警。
            */
           if (!trip.entryOrderId || !allOrders.has(trip.entryOrderId)) {
+            /*
+             * ⚠️ **`net` 必须把资金费算进来 —— 它原来漏了，而那是 0.2 USDT 的假差额。**
+             *
+             * 外部活动的净额原来写的是 `grossPnl - entryFee - exitFee`，少了
+             * `funding`。而另一侧（`exchangeNet`）是对交易所 `income` 流水求和，
+             * `FUNDING_FEE` **在里面**。于是总账校验拿两个不同口径去比：
+             *
+             *     gap = platformNet - exchangeNet = -（外部活动的资金费）
+             *
+             * 实测三个共用账户的机器人报出 **-0.2026 / -0.1962**，而同一账户上
+             * 两个没有外部活动的机器人只有 ±0.006（浮点级）。差额全部来自这一个缺项，
+             * 却被报成「平台的账本可能有漏记或重复记账」—— 又是一次**账本明明是对的、
+             * 报警说它错了**。
+             *
+             * `funding` 在上面已经算好（`fundingInWindow`），这里只是把它减掉 ——
+             * 与 `trades.insert()` 的 `净 = 毛 − 费 − 资金费` 完全同一个口径。
+             */
             foreign.push({
               symbol,
-              net: trip.grossPnl - trip.entryFee - trip.exitFee,
+              net: trip.grossPnl - trip.entryFee - trip.exitFee - funding,
               at: trip.closedAt,
             });
           }
