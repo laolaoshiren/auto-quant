@@ -263,22 +263,29 @@ export function TraderPage() {
   /*
    * ⚠️ **「读不到」不是「没有持仓」—— 这两件事必须分开显示。**
    *
-   * `/api/traders/:id/live` 在**机器人没在运行时**直接返回
+   * `/api/traders/:id/account` 在**机器人没在运行时**直接返回
    * `{ live: false, positions: [] }`（见 `liveExchangeView`），而且在读取
-   * 交易所失败时也返回空数组。两种情况下 `positions.length` 都是 0。
+   * 交易所失败时也返回空数组。两种情况下持仓数都是 0。
    *
    * 而下面那张卡的语义是"你有几个仓" —— 把"查不到"渲染成 `0`，
    * 就是在告诉操作员**"你已经空仓了"**，而事实可能是"我们没能问到"。
    * 实测踩到过：部署重启服务后刷新页面，机器人还没被 manager 拉起来，
-   * 卡片显示「持仓 0」，而两秒后同一个页面上持仓表里躺着两个仓位。
+   * 卡片显示「持仓 0」，而几秒后同一个页面上持仓表里躺着两个仓位。
    *
    * **一个会主动说谎的仪表盘比没有仪表盘更危险**：操作员会据此判断
    * "仓位已经平了、可以放心操作"，而真实敞口一直在那里。
    *
-   * 所以卡片在读不到时显示 `—` 并说明原因；数字只在这个数据真的可信时才给。
+   * 所以卡片在读不到时显示 `—` 并说明原因；数字只在数据真的可信时才给。
+   *
+   * 用的是 `accountQuery`（实时查交易所）而不是页面上的 `live`（WebSocket
+   * 推送的本地镜像）：后者在 socket 断开时给的是过期数据，而这里要回答的
+   * 恰恰是"**现在**交易所那边到底有没有仓"。
    */
-  const liveUnavailable = live !== null && live !== undefined && live.live === false;
-  const liveUnavailableWhy = live?.error ?? '机器人当前未在运行，或交易所暂时无法读取 —— 不是"没有持仓"。';
+  const accountView = accountQuery.data ?? null;
+  const liveUnavailable = accountView !== null && accountView.live === false;
+  const liveUnavailableWhy =
+    accountView?.error ??
+    '机器人当前未在运行，或交易所暂时无法读取 —— 这是"读不到"，不是"没有持仓"。';
 
   /*
    * 行情图表当前显示的币种。
