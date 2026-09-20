@@ -198,14 +198,23 @@ export function AccountSection() {
    *
    * 供应商目录占整宽、而不是缩在表单下面：它是一张需要横向空间的网格，每个卡片的
    * URL 动辄三四十个字符，放在窄栏里只能截断 —— 而 URL 恰恰是那一格最有用的信息。
+   *
+   * ## ⚠️ 左列宽度必须**等于表单的限宽**
+   *
+   * 原来写的是 `2fr 1fr`（左列约占 2/3）而表单自己 `max-w-xl`（36rem）。
+   * 在 1600px 的屏上左列约 1000px、表单只占 576px —— **左边空出四百多像素**，
+   * 整页看起来像"内容缩在左上角"。两个数字各自都合理，问题在于它们是**两个**
+   * 数字：列宽不知道表单会自己限宽。
+   *
+   * 现在列宽就是 `36rem`，表单不再需要自己限宽（小屏单列时仍然保留 `max-w-xl`，
+   * 否则输入框会横跨整个手机屏之外）。
    */
   return (
     <div className="min-w-0 space-y-5">
       {status}
 
-      <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        {/* 表单自己限宽：输入框横跨 1600px 会让"标签在左、输入在右"的对应关系断掉 */}
-        <section className="max-w-xl">
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,36rem)_minmax(0,1fr)]">
+        <section className="min-w-0 max-w-xl">
           <SectionLabel
             title="修改用户名与密码"
             actions={<span className="text-xs text-ink-faint">Enter 提交 · Esc 清空</span>}
