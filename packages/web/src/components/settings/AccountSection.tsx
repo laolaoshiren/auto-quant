@@ -177,7 +177,18 @@ export function AccountSection() {
    * **不要改回 4** —— 那是把同一个 bug 再犯一次。
    */
   const serverStatus = (
-    <MetricGroup title="服务端" columns={2} layout="vertical">
+    /*
+     * `columns={2}` 而**不加** `layout="vertical"`。
+     *
+     * 上一版我写的是 `layout="vertical"`（单列竖排），理由是"怕列数太多把值截断" ——
+     * 但那把一个 924px 宽的右栏变成了五行各占一行、每行右边空 600px 的清单。
+     * 2 列各约 460px，`main @ 7c37783`、`2026-09-20 12:28:06` 这些值都放得下
+     * （上面 `MetricGroup` 的说明里记着：**只有 3–4 列在窄栏里才会截断**）。
+     *
+     * 顺带：它只有 5 个指标，2 列排出来是三行（最后一行一个），比五行矮得多 ——
+     * 右栏下方那片空白也跟着小了一截。
+     */
+    <MetricGroup title="服务端" columns={2}>
       <Metric
         label="服务端版本"
         value={build ? `${build.branch} @ ${build.commitShort}` : '未知'}
