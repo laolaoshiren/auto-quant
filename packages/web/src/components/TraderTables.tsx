@@ -930,6 +930,30 @@ export function OrdersTable({
               const pendingReconcile =
                 onlyOpen && isOpenOrder(order) && positionCount === 0;
 
+              /*
+               * ⚠️ **成交数量已经等于下单数量时，这一单就是成交了 —— 不管 `status` 那一刻写的是什么。**
+               *
+               * 实测一条真实的市价开仓单：交易所返回
+               * `{"status":"NEW","executedQty":"0.000","avgPrice":"0.00"}`，而**持仓那边
+               * 确实出现了那个数量**。于是表格里出现了自相矛盾的一行 ——
+               * 「状态」列写着**已挂单**（读 `status`），而同一行的「已成交」列写着
+               * **0.009**、均价 **2634.32**（读 `filled_qty` / `avg_price`）。
+               *
+               * **一个自己跟自己打架的表格，比少一列更糟**：操作员会去数到底是哪个对，
+               * 而正确答案是"这一单已经成交了，只是状态字段没跟上"。
+               *
+               * 所以这里按**事实**显示：数量对上就是已成交。容差用相对值
+               * （交易所会对数量做四舍五入，不保证位级相等），与 `autoTrader`
+               * 里 `fullyExecuted`、以及 `broker.ts` 里 `normalizeStandard` 的终态判据
+               * **同一口径** —— 三处对"什么算成交完了"必须是同一个答案。
+               *
+               * 排除掉撤销/拒绝/过期：那些状态下即使数量曾经对上，结论也已经变了。
+               */
+              const fullyFilled =
+                order.quantity > 0 &&
+                order.filledQty >= order.quantity * (1 - 1e-9) &&
+                !/cancel|reject|expired/i.test(order.status);
+
               return (
                 // `data-row-id` 是**给滚动锚点用的 DOM 标记**（见 `useTablePaging` 里那个
                 // `useLayoutEffect`）：新订单插到顶部时要靠它量出"我正在读的那一行"被推了多远。
@@ -959,7 +983,9 @@ export function OrdersTable({
                       title={
                         pendingReconcile
                           ? `交易所状态 ${order.status}（由上一次对账写入）。当前本地没有任何持仓记录，这张委托可能已经成交或被撤销，等下一次对账确认。`
-                          : order.status
+                          : fullyFilled
+                            ? `成交数量 ${fmtQty(order.filledQty)} 已等于下单数量 ${fmtQty(order.quantity)}，所以这一单实质已成交 —— 尽管交易所那一刻返回的状态是 ${order.status}。`
+                            : order.status
                       }
                       className={
                         pendingReconcile
@@ -973,7 +999,9 @@ export function OrdersTable({
                     >
                       {pendingReconcile
                         ? `${orderStatusLabel(order.status)}（待对账）`
-                        : orderStatusLabel(order.status)}
+                        : fullyFilled
+                          ? '已成交'
+                          : orderStatusLabel(order.status)}
                     </span>
                   </td>
                   <td className="td max-w-[240px] truncate text-down" title={order.error ?? undefined}>
