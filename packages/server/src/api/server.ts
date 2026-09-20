@@ -1884,8 +1884,36 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(event));
     });
 
-    socket.on('close', unsubscribe);
-    socket.on('error', unsubscribe);
+    /*
+     * ⚠️ **心跳。原来没有，于是页面老是显示「推送断开」。**
+     *
+     * 这条流是**事件驱动**的：只在有事件时发数据。而机器人空闲时（等待下一个
+     * 周期、或者根本没在运行）一分钟都可能一个事件都没有 —— 而中间的
+     * 反向代理有一条空闲超时（nginx 的 `proxy_read_timeout` 默认 60 秒），
+     * **一条 60 秒没有数据的 WebSocket 会被它单方面切断**。
+     *
+     * 客户端会把这次切断当成故障：状态变 `closed`、页面顶上弹「推送断开，
+     * 按 4 秒轮询兜底」，然后指数退避重连。重连成功后过一分钟再来一次 ——
+     * **于是这条警告变成了一个周期性的东西**，而它本意是提示异常。
+     * 一个每两分钟出现一次的"异常提示"等于没有提示，而且它让操作员
+     * 误以为系统不稳定。
+     *
+     * 用协议层的 `ping`：浏览器会自动回 `pong`（不需要改客户端），
+     * 而任何中间代理看到的都是**双向的真实流量**，空闲计时器因此被重置。
+     * 30 秒是常见的空闲超时（60 秒）的一半，留了一半余量。
+     */
+    const heartbeat = setInterval(() => {
+      if (socket.readyState === socket.OPEN) socket.ping();
+    }, 30_000);
+
+    socket.on('close', () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
+    socket.on('error', () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
   });
 
   /* --- Server logs to the console ---------------------------------------- */
