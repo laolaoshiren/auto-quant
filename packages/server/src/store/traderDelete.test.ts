@@ -87,7 +87,6 @@ beforeEach(() => {
     cycleIntervalMinutes: 3,
     initialEquity: 10,
     mode: 'ai_managed',
-    agentConfigJson: null,
   }).id;
 });
 
