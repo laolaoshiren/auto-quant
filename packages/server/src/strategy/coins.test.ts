@@ -103,10 +103,18 @@ test('裁剪时从最弱的开始丢，且保持原有的强弱顺序', async ()
   const result = await selectCandidates(config, market, { budgetTokens: PROMPT_TOKEN_BUDGET });
   assert.ok(result.symbols.length < ranked.length, '这个夹具必须真的触发裁剪，否则用例什么都没测');
 
-  /* 保留下来的必须是原序列的**前缀**（最强的那些），而不是任意子集。 */
+  /*
+   * 保留下来的必须是**原序列的前缀**（最强的那些），而不是任意子集。
+   *
+   * ⚠️ 先排除 BTC：它是**无条件入选**的，会被插到最前面（见下一条用例）。
+   * 第一版断言直接拿整份结果和 `ranked.slice()` 比，于是 BTC 一进来就失败 ——
+   * 而那次失败说明的是**断言没把"BTC 总会插队"这个前提写进去**，不是实现错了。
+   * 这类"夹具假设与现实不符"的失败要能和"实现坏了"区分开。
+   */
+  const withoutBtc = result.symbols.filter((s) => s !== 'BTCUSDT');
   assert.deepEqual(
-    result.symbols,
-    ranked.slice(0, result.symbols.length),
+    withoutBtc,
+    ranked.slice(0, withoutBtc.length),
     '裁剪应当从最弱的开始丢，保留最强的连续前缀',
   );
 });
