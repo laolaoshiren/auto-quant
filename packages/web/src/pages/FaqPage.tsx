@@ -151,8 +151,14 @@ export function FaqPage() {
      */
     const scroller = document.getElementById(MAIN_SCROLL_ID);
     if (!scroller) return;
-    /* 阈值取 120px：大约是一条区块标题刚滚到接近顶部时的位置。 */
-    const THRESHOLD = 120;
+    /*
+     * 阈值**相对滚动容器**算，不是相对视口。
+     *
+     * 这一页折叠起来只比视口高三百来像素。按"视口顶部 + 120px"判，第二节永远
+     * 到不了那条线 —— 实测高亮一直停在第一项。改成相对容器的顶部之后，判据与
+     * "这一页总共能滚多少"无关。
+     */
+    const THRESHOLD = scroller.getBoundingClientRect().top + 96;
     const onScroll = () => {
       let current = navIds[0] ?? '';
       for (const id of navIds) {
@@ -178,12 +184,14 @@ export function FaqPage() {
    */
   const rail = (
     /*
-     * `sticky top-0`：目录是**导航**，翻到第 7 节时它必须在场。
+     * ⚠️ **这里不要再写 `sticky`。**
      *
-     * ⚠️ 粘的是 `Layout` 的 `<main>`（滚动容器），不是 viewport —— 所以 `top-0`
-     * 指的是"内容区顶部"，正好落在顶栏下面，不需要给顶栏的 h-14 留偏移。
+     * `PageShell` 的 `<aside>` 本身已经是 `xl:sticky xl:top-0 xl:max-h-full`，
+     * 并靠那份"可视区减去顶栏"的高度获得活动空间。在里面再套一层 `sticky top-0`
+     * 是**嵌套粘性定位** —— 外层已经粘住了，内层相对它没有可移动的距离，
+     * 什么也不会发生，只会让"到底谁负责吸顶"变得看不清。
      */
-    <section className="sticky top-0">
+    <section>
       <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-ink-faint">目录</h3>
       <nav aria-label="常见问题目录">
         {/*
@@ -231,7 +239,17 @@ export function FaqPage() {
   );
 
   return (
-    <div className="min-w-0">
+    /*
+     * ⚠️ **高度链必须一路传下去。**
+     *
+     * `PageShell` 的根节点是 `xl:h-full`，它的活动空间来自 `Layout` 的 `<main>`
+     * （`flex-1 min-h-0`）。中间只要夹一个不传高度的普通 `<div>`，`h-full` 就退化成
+     * `auto` —— 右栏 `<aside>` 的 `sticky` 随之失去活动空间，**目录就会跟着页面滚出去**
+     * （实测：滚到底时它已经在视口上方 -139px）。
+     *
+     * `flex-col` 是为了让 `SectionHeading` 占掉它该占的高度、`PageShell` 拿到剩下的。
+     */
+    <div className="flex h-full min-w-0 flex-col">
       <SectionHeading
         title="这个终端如何运作"
         sub="在投入真金白银之前，值得先弄清楚的机制要点。"
