@@ -31,6 +31,15 @@ import { NAV_ITEMS, type NavItem } from './nav';
 /** `lg` 断点（见 tailwind.config.js，em 单位）。 */
 const DESKTOP_NAV_QUERY = '(min-width: 64em)';
 
+/**
+ * 内容区滚动容器的 id。
+ *
+ * 导出是因为**别的地方也需要找它** —— `FaqPage` 的目录跟随高亮要监听它的 `scroll`
+ * 事件。以前那些地方靠 `querySelector('main')` 去找，而当时的元素是一个没有 id 的
+ * `<div>`：查找静默失败、功能静默不工作，而页面看起来毫无异常。
+ */
+export const MAIN_SCROLL_ID = 'main-scroll';
+
 export function Layout() {
   const user = useApp((s) => s.user);
   const system = useApp((s) => s.system);
@@ -351,10 +360,19 @@ export function Layout() {
         长表格滚动时顶栏必须钉住。
         两栏页面的右栏要"填满屏高并独立滚动"，靠的是 `PageShell` 在 `h-full` 里拿到的
         那份确定高度 —— 所以这里绝不能给它加 padding，否则那条高度链就断了。
+
+        ⚠️ **它就是那个滚动容器，而且它有 id。**
+        以前它是一个没有 id 的 `<div>`，而本文件别的注释把它称作"Layout 的 `<main>`" ——
+        于是 `FaqPage` 照着那句话去 `querySelector('main')`，拿到 `null` 就静默返回，
+        目录的跟随高亮**从未绑定过**（而页面看起来完全正常）。
+        现在它是真正的 `<main>`，并带一个 id 供需要找滚动容器的组件使用。
       */}
-      <div className="page-pad min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+      <main
+        id={MAIN_SCROLL_ID}
+        className="page-pad min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
+      >
         <Outlet />
-      </div>
+      </main>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       <Toaster />

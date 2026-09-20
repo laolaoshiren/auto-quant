@@ -19,6 +19,7 @@ import { useDocumentTitle } from '../lib/hooks';
 import { Badge, Button, Panel, cn } from '../components/ui';
 import { SectionHeading } from '../components/Badges';
 import { PageShell, SectionLabel } from '../components/shell';
+import { MAIN_SCROLL_ID } from '../components/Layout';
 
 /**
  * 短标题（目录与折叠头用）+ 完整问答。
@@ -140,7 +141,15 @@ export function FaqPage() {
   const [activeId, setActiveId] = useState<string>(navIds[0] ?? '');
 
   useEffect(() => {
-    const scroller = document.querySelector('main');
+    /*
+     * 找**真正的**滚动容器。
+     *
+     * ⚠️ 第一版写的是 `querySelector('main')` —— 而那时 `Layout` 的内容区是一个
+     * 没有 id 的 `<div>`（别的注释里把它称作"Layout 的 `<main>`"，我就是被那句话
+     * 带偏的）。查找返回 `null` 之后这里直接 `return`，于是跟随高亮**从未绑定**，
+     * 而页面看起来完全正常。现在容器是真 `<main>` 且带固定 id。
+     */
+    const scroller = document.getElementById(MAIN_SCROLL_ID);
     if (!scroller) return;
     /* 阈值取 120px：大约是一条区块标题刚滚到接近顶部时的位置。 */
     const THRESHOLD = 120;
