@@ -520,13 +520,18 @@ export function ExchangeAccountsSection() {
   /* ------------------------------------------------------------------------ */
   /*  主内容区                                                                */
   /* ------------------------------------------------------------------------ */
+  /*
+   * `fillHeight={false}`：这一页内容少（左栏两张卡、右栏一张卡），撑满视口
+   * 只会在下方空出半屏纯黑。右栏没有需要吸顶的东西，所以按内容高度正合适。
+   *
+   * ⚠️ **这段注释必须放在 `return` 之前。**
+   * 放进 `return (<>` 之后它就是 JSX 的**子元素**，会被当成文本**渲染到页面上** ——
+   * 而 typecheck、lint、build 全都不报错，因为那在语法上完全合法（一个字符串
+   * 子节点而已）。只有真实渲染、或看一眼截图才发现得了。
+   */
   return (
     <>
-      /*
-     * `fillHeight={false}`：这一页内容少（左栏两张卡、右栏一张卡），撑满视口
-     * 只会在下方空出半屏纯黑。右栏没有需要吸顶的东西，所以按内容高度正合适。
-     */
-    <PageShell aside={rail} fillHeight={false}>
+      <PageShell aside={rail} fillHeight={false}>
         {error && <ErrorNote>{error}</ErrorNote>}
 
         {query.error && <ErrorNote>读取凭证列表失败：{query.error}</ErrorNote>}
