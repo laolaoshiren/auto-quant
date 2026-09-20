@@ -19,8 +19,60 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { hasEquityVariation, rangeSpanMs, EQUITY_BUCKET_MS } from './equityCurve';
+import { hasEquityVariation, rangeSpanMs, EQUITY_BUCKET_MS, CHART_INK } from './equityCurve';
 import { equityShape } from '../pages/overviewParts';
+import tailwindConfig from '../../tailwind.config.js';
+
+/* -------------------------------------------------------------------------- */
+/*  CHART_INK 与 tailwind 的 token 必须逐位一致                                 */
+/* -------------------------------------------------------------------------- */
+
+test('★ CHART_INK 里的每个十六进制值都必须等于 tailwind 里对应的 token', () => {
+  /*
+   * `CHART_INK` 的注释写着它们 *"are kept **identical to the tokens** in
+   * tailwind.config.js"* —— 而**这句话此前没有任何东西在检查**。
+   *
+   * 它为什么值得钉住：SVG 的 `stroke` / `fill` 吃不了 Tailwind 类，所以曲线、
+   * K 线、杠杆仪表、比例条的底色全是从这里取的字面量。改了 `tailwind.config.js`
+   * 却漏了这个文件，界面会变成**两套配色拼在一起** —— 面板换了、图表还是旧的，
+   * 而**编译、类型检查、构建全都不会报错**。
+   */
+  type Colors = {
+    up: string;
+    down: string;
+    warn: string;
+    accent: string;
+    base: Record<string, string>;
+    ink: Record<string, string>;
+  };
+  const colors = (tailwindConfig as { theme: { extend: { colors: Colors } } }).theme.extend.colors;
+
+  /*
+   * 右边写的是**路径**而不是值 —— 这条用例要回答的问题是"两处有没有一起改"，
+   * 把值抄进来只会让它变成"值有没有变"（那是另一件事，而且会在改配色时变成噪音）。
+   */
+  const pairs: Array<[keyof typeof CHART_INK, string, string]> = [
+    ['up', colors.up, 'up'],
+    ['down', colors.down, 'down'],
+    ['warn', colors.warn, 'warn'],
+    ['accent', colors.accent, 'accent'],
+    ['grid', colors.base['750']!, 'base-750'],
+    ['axis', colors.ink.lo!, 'ink-lo'],
+    ['rule', colors.base['600']!, 'base-600'],
+    ['track', colors.base['700']!, 'base-700'],
+    ['surface', colors.base['900']!, 'base-900'],
+    ['inkHi', colors.ink.hi!, 'ink-hi'],
+  ];
+
+  for (const [chartKey, expected, tokenPath] of pairs) {
+    assert.equal(
+      CHART_INK[chartKey],
+      expected,
+      `CHART_INK.${chartKey} 是 ${CHART_INK[chartKey]}，而 tailwind 的 ${tokenPath} 是 ${expected}。` +
+        '—— 两处必须一起改；只改一处会让图表与面板变成两套配色，且不会有任何报错。',
+    );
+  }
+});
 
 /* -------------------------------------------------------------------------- */
 /*  两处判据必须给出同一个答案                                                  */

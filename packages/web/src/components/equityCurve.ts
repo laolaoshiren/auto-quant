@@ -24,29 +24,33 @@ import type { EquitySnapshot } from '@aq/shared';
  * disagree. If a token changes, these lines change with it and every chart
  * follows.
  *
+ * ⚠️ **这句话是可以被检查的，所以有一条用例钉着它** ——
+ * `equityCurve.test.ts` 会把这里的值与 `tailwind.config.js` 里的 token 逐项比对。
+ * 一份"必须保持一致"的承诺如果没人检查，它只在有人记得的时候才成立。
+ *
  * They live here, in the dependency-free module, rather than in either chart
  * file: `DashboardCharts.tsx` importing them from `EquityCurveChart.tsx` would
  * pull recharts back into the landing chunk — the exact thing the split exists
  * to prevent.
  */
 export const CHART_INK = {
-  up: '#2ed3a3',
-  down: '#ff6b7a',
+  up: '#0ecb81',
+  down: '#f6465d',
   /** `warn` — the middle stop of the leverage arc and its "getting hot" state. */
-  warn: '#f5b544',
-  accent: '#5b8def',
+  warn: '#f59e0b',
+  accent: '#7060f5',
   /** Grid — `base-750`. One step off the panel so it separates without competing with the data. */
-  grid: '#232a38',
+  grid: '#282828',
   /** Axis ticks — `ink-lo`. */
-  axis: '#76839a',
+  axis: '#7d7a8c',
   /** Reference lines and the crosshair — `base-600`. */
-  rule: '#3a4558',
+  rule: '#3d3d3d',
   /** Track behind a proportional bar — `base-700`. */
-  track: '#2c3546',
+  track: '#2f2f2f',
   /** Tooltip surface — `base-900`, opaque so the curve does not show through the digits. */
-  surface: '#11151e',
+  surface: '#121212',
   /** Large value inside an SVG gauge — `ink-hi`. */
-  inkHi: '#e4e9f2',
+  inkHi: '#eae9f4',
 } as const;
 
 /** One point on a rendered curve. */
