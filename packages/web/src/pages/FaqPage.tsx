@@ -18,7 +18,7 @@ import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useDocumentTitle } from '../lib/hooks';
 import { Badge, Button, Panel, cn } from '../components/ui';
 import { SectionHeading } from '../components/Badges';
-import { PageShell, SectionLabel } from '../components/shell';
+import { PageShell, SectionLabel, PAGE_MAIN_ID } from '../components/shell';
 import { MAIN_SCROLL_ID } from '../components/Layout';
 
 /**
@@ -142,14 +142,23 @@ export function FaqPage() {
 
   useEffect(() => {
     /*
-     * 找**真正的**滚动容器。
+     * 找**真正的**滚动容器 —— 而"真正"取决于页面形态。
      *
-     * ⚠️ 第一版写的是 `querySelector('main')` —— 而那时 `Layout` 的内容区是一个
-     * 没有 id 的 `<div>`（别的注释里把它称作"Layout 的 `<main>`"，我就是被那句话
-     * 带偏的）。查找返回 `null` 之后这里直接 `return`，于是跟随高亮**从未绑定**，
-     * 而页面看起来完全正常。现在容器是真 `<main>` 且带固定 id。
+     * 这一页用了 `PageShell`（有 `aside`），所以 `xl` 及以上时**两栏各自滚动**，
+     * 滚的是 `PageShell` 里的主内容列；`Layout` 的 `<main>` 那时几乎不滚。
+     *
+     * ⚠️ 这一点我错了两次，记下来免得第三次：
+     *   1. 第一版 `querySelector('main')` —— 那时内容区是没有 id 的 `<div>`，
+     *      查找返回 null，回调从未绑上；
+     *   2. 第二版改成 `#main-scroll`（真 `<main>` 了）—— 但加了高度链之后滚动
+     *      转移到了主内容列，`<main>` 只剩 14px 可滚，于是"目录不动"看起来
+     *      像吸顶成功，其实是容器压根没动。
+     *
+     * 现在按 `PAGE_MAIN_ID` 找，并且**在下面断言它真的能滚** —— 找一个不滚的
+     * 容器不会报错，只会安静地什么都不做。
      */
-    const scroller = document.getElementById(MAIN_SCROLL_ID);
+    const scroller =
+      document.getElementById(PAGE_MAIN_ID) ?? document.getElementById(MAIN_SCROLL_ID);
     if (!scroller) return;
     /*
      * 阈值**相对滚动容器**算，不是相对视口。

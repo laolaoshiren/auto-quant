@@ -10,6 +10,24 @@
 import type { ReactNode } from 'react';
 import { cn } from './ui';
 
+/**
+ * 两栏页面里**主内容列**的 id。
+ *
+ * ## 为什么需要它
+ *
+ * `xl` 及以上时，`PageShell` 让两栏**各自滚动**（主内容一列、右栏一列），
+ * 而 `Layout` 的 `<main>` 在那种情况下几乎不滚（实测只剩 14px）。于是"页面在滚"
+ * 这件事有两个不同的答案：
+ *
+ *   · 单栏页面（没有 `aside`）→ 滚的是 `Layout` 的 `<main id="main-scroll">`
+ *   · 两栏页面（有 `aside`）  → 滚的是**这一列**
+ *
+ * 需要监听滚动的组件（例如帮助页目录的跟随高亮）必须按**页面形态**选对容器，
+ * 否则会拿到一个永远不动的元素：事件绑上了、回调不触发、功能静默失效，
+ * 而页面看起来毫无异常。
+ */
+export const PAGE_MAIN_ID = 'page-main';
+
 /* -------------------------------------------------------------------------- */
 /*  页面外壳                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -47,7 +65,12 @@ export function PageShell({
   return (
     <div className={cn('flex min-w-0 flex-col gap-4 xl:h-full xl:flex-row xl:gap-6', className)}>
       {/* 主内容：xl 以下跟着页面一起滚，xl 及以上自己滚（两栏各自独立） */}
-      <div className="min-w-0 space-y-4 xl:min-h-0 xl:flex-[3_1_0%] xl:overflow-y-auto xl:pr-1">{children}</div>
+      <div
+        id={PAGE_MAIN_ID}
+        className="min-w-0 space-y-4 xl:min-h-0 xl:flex-[3_1_0%] xl:overflow-y-auto xl:pr-1"
+      >
+        {children}
+      </div>
 
       {/*
         右栏 `max-h-full` + 自己滚动：`sticky` 需要一个有界的滚动容器，
