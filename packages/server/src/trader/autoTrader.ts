@@ -1289,8 +1289,37 @@ export class AutoTrader {
        * 行情为空同样要留下记录 —— 这是本次修复要补的观测空洞的第二种形态：
        * 一个什么都没做的周期在决策流里也必须看得见。写进 `progress.error`
        * 之后**正常返回**而不是抛错，连续失败计数与安全模式因此完全不变。
+       *
+       * ## ⚠️ 但"没有行情"有三个完全不同的原因，不能只报一句话
+       *
+       * 原来这里一律写 `MARKET_DATA_UNAVAILABLE_MESSAGE`，而那段话把原因归给
+       * 「通常是交易所行情接口暂时不可用……请检查网络与交易所连通性」。
+       *
+       * 实测代价：一个新建的机器人，币种来源是默认的「固定清单」而清单是**空的**
+       * —— 它每轮都选不出任何标的，日志却说"检查网络"。而那段话把操作员（以及
+       * 读同一份日志的 AI）指向了错误的方向：网络是通的，是**配置从来没被填过**。
+       *
+       * 三种原因要操作员做的事完全不同，所以分开报：
+       *   · 选币本身为空 + 固定清单为空 → **去填清单**（配置问题）
+       *   · 选币本身为空 + 其它来源     → **去放宽门槛**（门槛问题）
+       *   · 选出了标的但拿不到行情     → 这才是网络/接口问题
        */
-      progress.error = MARKET_DATA_UNAVAILABLE_MESSAGE;
+      const source = config.coinSource;
+      const staticListEmpty = source.sourceType === 'static' && source.staticCoins.length === 0;
+      if (selection.symbols.length === 0) {
+        progress.error = staticListEmpty
+          ? '选币结果为空：币种来源是「固定清单」，而清单里一个币种都没有 —— 到「策略工作室」把清单填上，' +
+            '或把来源改成「币池」。这不是行情接口的问题，下一轮也不会自己好转。'
+          : `选币结果为空：来源「${source.sourceType}」本轮没有选出任何标的` +
+            `（24h 成交额门槛 ${source.minQuoteVolume24h}、持仓量门槛 ${source.minOpenInterestUsd} —— ` +
+            '可能是门槛把全部候选滤掉了）。到「策略工作室」放宽门槛。';
+      } else if (gateDropped.length > 0 && gateDropped.length >= selection.symbols.length) {
+        progress.error =
+          `选币选出了 ${selection.symbols.length} 个标的，但全被评分门槛 ${gate} 滤掉 —— ` +
+          '门槛设得比这批标的的实际得分还高，机器人会一直不交易。把「候选评分门槛」调低或设为 0（关闭）。';
+      } else {
+        progress.error = MARKET_DATA_UNAVAILABLE_MESSAGE;
+      }
       return '没有可用的行情数据，本轮未产生任何决策。';
     }
 
