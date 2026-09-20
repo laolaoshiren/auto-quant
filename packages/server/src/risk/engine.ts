@@ -153,15 +153,32 @@ export class RiskEngine {
     }
 
     /*
-     * 把新增削到剩余额度，然后交给 `reviewOpen` —— 由它套用全部判据，
-     * 并且**由它决定最终名义值**（`positionSizeUsd` 会被它自己的上限逻辑再算一遍）。
+     * ⚠️ **漏填金额时不能默认"加满"。**
+     *
+     * 原来写的是 `requested > 0 ? Math.min(requested, room) : room` —— 模型只要
+     * 漏掉 `position_size_usd`（提示词只说"带上 position_size_usd"，没说漏了会怎样），
+     * 这笔加仓就被顶到单仓名义上限的剩余额度。**默认值的方向与安全相反**，
+     * 而漏填恰恰是模型出错时的样子。
+     *
+     * 对照新开仓：`reviewOpen` 遇到没给金额时取 `min(上限, 权益 × 10%)` —— 保守的
+     * 那一边。加仓用同一个兜底，"模型忘记填金额"在两个动作上得到同一种待遇，
+     * 操作员只需要记住一条规则。
      */
     const requested = num(decision.positionSizeUsd, 0);
-    const capped = requested > 0 ? Math.min(requested, room) : room;
-    const adjustments =
-      requested > room
+    const missingAmount = !(requested > 0);
+    const fallback = Math.min(room, env.account.equity * 0.1);
+    const capped = missingAmount ? fallback : Math.min(requested, room);
+    const adjustments = [
+      ...(requested > room
         ? [`加仓名义已从 $${requested.toFixed(2)} 削到 $${capped.toFixed(2)}（单仓上限剩余额度）。`]
-        : [];
+        : []),
+      ...(missingAmount
+        ? [
+            `模型没有给出加仓金额，已按权益的 10%（$${fallback.toFixed(2)}）执行，` +
+              `而不是可用的剩余额度 $${room.toFixed(2)} —— 漏填不等于要加满。`,
+          ]
+        : []),
+    ];
 
     const verdict = this.reviewOpen(
       { ...decision, action: wantsLong ? 'open_long' : 'open_short', positionSizeUsd: capped },
