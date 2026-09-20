@@ -98,7 +98,7 @@ function stubModel(
 }
 
 const runtime = (model: LoopModel = stubModel(), isAiStrategy = false) =>
-  new AgentRuntime({ traderId, strategyConfig: config, isAiStrategy: () => isAiStrategy, model, equityNow: () => 10 });
+  new AgentRuntime({ traderId, strategyConfig: config, isAiStrategy: () => isAiStrategy, model, equityNow: () => 10, priceChangeSince: async () => null });
 
 /** 等一拍，让 `void` 触发的异步流程走完。 */
 const facts = (over: Record<string, unknown> = {}) => (

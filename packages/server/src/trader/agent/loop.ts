@@ -314,7 +314,7 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
       continue;
     }
 
-    const outcome = dispatchTool(action.tool, action.args, input.deps);
+    const outcome = await dispatchTool(action.tool, action.args, input.deps);
     const record: LoopStep = {
       step,
       thought: action.thought,

@@ -635,6 +635,26 @@ export class TraderManager {
         isAiStrategy: () => traders.get(traderId)?.mode === 'ai_managed',
         model,
         equityNow: () => equity.latest(traderId)?.equity ?? null,
+        /*
+         * ⚠️ **「被否掉的标的后来走了多少」靠它算。**
+         *
+         * AI 每轮否掉候选池里绝大多数标的，而它从来没有这些标的后续走势的数据 ——
+         * 于是它的入场标准永远得不到校准。它自己在审视里点明了这一点：
+         * 「minScore 我没有任何'被滤掉的标的后来是否走了行情'的数据，无依据不动。」
+         *
+         * 用 15m K 线 × 500 根 ≈ 125 小时，足够覆盖"最近几十轮"的观察窗口。
+         * 取**不晚于** `sinceIso` 的最后一根作为起点（那时的价），
+         * 与最新一根相比 —— 和 `agentStore` 里那条"`>` 而不是 `>=`"的纪律一致：
+         * 宁可少算，也不要把"被否之前就发生的涨跌"算成错过的机会。
+         */
+        priceChangeSince: async (symbol, sinceIso) => {
+          const klines = await marketData.getKlines(symbol, '15m', 500);
+          const since = new Date(sinceIso).getTime();
+          const before = [...klines].reverse().find((k) => k.openTime <= since) ?? null;
+          const latest = klines[klines.length - 1] ?? null;
+          if (!before || !latest || before.close <= 0) return null;
+          return ((latest.close - before.close) / before.close) * 100;
+        },
       });
 
       const autoTrader = new AutoTrader({

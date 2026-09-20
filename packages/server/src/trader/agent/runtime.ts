@@ -52,6 +52,13 @@ export interface AgentRuntimeDeps {
   model: LoopModel;
   /** 当前权益，用来在唤醒时打基线（判回撤用）。 */
   equityNow: () => number | null;
+  /**
+   * 某个标的从指定时刻到现在的涨跌幅（百分数）；取不到时 `null`。
+   *
+   * 由 `TraderManager` 注入（它手上有 `MarketDataService`）—— 这一层不碰网络，
+   * 见 `AgentPortDeps.priceChangeSince` 的说明。
+   */
+  priceChangeSince: (symbol: string, sinceIso: string) => Promise<number | null>;
   policy?: WakePolicy;
 }
 
@@ -170,6 +177,7 @@ export class AgentRuntime {
         traderId: this.deps.traderId,
         strategyConfig: this.deps.strategyConfig,
         hourlyBudget: (this.deps.policy ?? DEFAULT_WAKE_POLICY).hourlyBudget,
+        priceChangeSince: this.deps.priceChangeSince,
       }));
       if (r.settled > 0) {
         log.info(`机器人 #${this.deps.traderId} 结算了 ${r.settled} 条参数实验。`);
@@ -336,6 +344,7 @@ export class AgentRuntime {
       traderId: this.deps.traderId,
       strategyConfig: this.deps.strategyConfig,
       hourlyBudget: (this.deps.policy ?? DEFAULT_WAKE_POLICY).hourlyBudget,
+      priceChangeSince: this.deps.priceChangeSince,
     });
 
     const outcome = await runStrategyReview({

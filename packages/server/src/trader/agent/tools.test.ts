@@ -66,6 +66,7 @@ function makeDeps(overrides: Partial<AgentToolDeps> = {}) {
         calls.push({ tool: 'get_market_overview', args: { limit } });
         return { symbols: limit };
       },
+        skippedOutcomes: async () => ({ skipped: 0, symbols: [] }),
     },
     requestPause: (reason) => pauses.push(reason),
     /* 测试要能看到 AI 改周期这件事 —— 与 pauses 同一个形状。 */
@@ -81,47 +82,47 @@ function makeDeps(overrides: Partial<AgentToolDeps> = {}) {
 /*  参数校验                                                                   */
 /* -------------------------------------------------------------------------- */
 
-test('未知工具名返回错误而不是抛异常', () => {
+test('未知工具名返回错误而不是抛异常', async () => {
   /*
    * 幻觉出来的工具名不该让整个循环崩掉 —— 一轮循环里崩一次，
    * 后面所有工具调用都白做，而且 AI 拿不到"这个名字不存在"这个关键信息。
    */
   const { deps } = makeDeps();
-  const out = dispatchTool('set_levrage', { value: 10 }, deps);
+  const out = await dispatchTool('set_levrage', { value: 10 }, deps);
   const result = out.result as { error: string };
   assert.match(result.error, /set_levrage/, '错误里必须点名它写错的那个，它才改得过来');
   assert.match(result.error, /set_params/, '必须列出可用工具');
 });
 
-test('缺必填参数时不执行工具，并把问题回报清楚', () => {
+test('缺必填参数时不执行工具，并把问题回报清楚', async () => {
   const { deps, saved } = makeDeps();
-  const out = dispatchTool('set_params', { patch: { coinSource: { coinPoolLimit: 5 } } }, deps);
+  const out = await dispatchTool('set_params', { patch: { coinSource: { coinPoolLimit: 5 } } }, deps);
 
   assert.match(JSON.stringify(out.result), /reason/, '必须点名缺的是 reason');
   assert.equal(saved.length, 0, '参数不合格时**绝不能**已经改动配置');
   assert.equal(out.patch, undefined, '没有执行就没有守卫结果');
 });
 
-test('数字参数拒绝字符串：悄悄转换会让一次参数错误变成看不见的行为差异', () => {
+test('数字参数拒绝字符串：悄悄转换会让一次参数错误变成看不见的行为差异', async () => {
   const { deps } = makeDeps();
-  const out = dispatchTool('get_experiments', { limit: '10' }, deps);
+  const out = await dispatchTool('get_experiments', { limit: '10' }, deps);
   assert.match(JSON.stringify(out.result), /必须是有限数字/);
 });
 
-test('越界的数字被拒绝，而不是被截断', () => {
+test('越界的数字被拒绝，而不是被截断', async () => {
   /*
    * 截断是错的：模型传 limit=99999 而实际用 30，它会对"我只看到 30 条"
    * 这个事实一无所知，于是基于一个它以为完整的结果继续推理。
    */
   const { deps } = makeDeps();
-  const out = dispatchTool('get_experiments', { limit: 99999 }, deps);
+  const out = await dispatchTool('get_experiments', { limit: 99999 }, deps);
   assert.match(JSON.stringify(out.result), /不得大于 30/);
   assert.match(JSON.stringify(out.result), /99999/, '要把它给的值原样报回去');
 });
 
-test('非法枚举值被拒绝并列出去可用值', () => {
+test('非法枚举值被拒绝并列出去可用值', async () => {
   const { deps } = makeDeps();
-  const out = dispatchTool('get_performance', { window: '1y' }, deps);
+  const out = await dispatchTool('get_performance', { window: '1y' }, deps);
   assert.match(JSON.stringify(out.result), /24h/);
   assert.match(JSON.stringify(out.result), /1y/);
 });
@@ -132,7 +133,7 @@ test('未给的选填参数用声明里的默认值', () => {
   assert.deepEqual(calls, [{ tool: 'get_performance', args: { window: '24h' } }]);
 });
 
-test('参数不是对象时被拒绝 —— 但 null/undefined 宽容地当成"无参数"', () => {
+test('参数不是对象时被拒绝 —— 但 null/undefined 宽容地当成"无参数"', async () => {
   /*
    * 分层是刻意的（§2.4：对结构宽容、对语义严格）：
    * 模型调一个无参工具时可能给 `null`、可能干脆省略，那**不是错误**，
@@ -140,13 +141,13 @@ test('参数不是对象时被拒绝 —— 但 null/undefined 宽容地当成"�
    */
   for (const bad of [null, undefined]) {
     const { deps } = makeDeps();
-    const out = dispatchTool('get_performance', bad, deps);
+    const out = await dispatchTool('get_performance', bad, deps);
     assert.equal((out.result as { net?: number }).net, 0.31, `${String(bad)} 应当被当成无参数并正常执行`);
   }
 
   for (const bad of [42, 'x', []]) {
     const { deps } = makeDeps();
-    const out = dispatchTool('get_performance', bad, deps);
+    const out = await dispatchTool('get_performance', bad, deps);
     assert.match(JSON.stringify(out.result), /必须是一个对象/, `${JSON.stringify(bad)} 应被拒绝`);
   }
 });
@@ -162,11 +163,11 @@ test('validateArgs 直接可用：合法参数原样通过', () => {
 /*  分发行为                                                                   */
 /* -------------------------------------------------------------------------- */
 
-test('set_params 过守卫：越界被整体拒绝，且配置一个字段都没动', () => {
+test('set_params 过守卫：越界被整体拒绝，且配置一个字段都没动', async () => {
   const { deps, saved, rejected, snapshot } = makeDeps();
   const before = snapshot();
 
-  const out = dispatchTool(
+  const out = await dispatchTool(
     'set_params',
     { patch: { riskControl: { btcEthMaxLeverage: 9999 } }, reason: '想加大杠杆' },
     deps,
@@ -189,10 +190,10 @@ test('set_params 过守卫：越界被整体拒绝，且配置一个字段都没
   assert.equal(rejected[0]!.rejected, result.rejected);
 });
 
-test('set_params 生效时把守卫结果带出来（含被钳制的项）', () => {
+test('set_params 生效时把守卫结果带出来（含被钳制的项）', async () => {
   const { deps, saved } = makeDeps();
 
-  const out = dispatchTool(
+  const out = await dispatchTool(
     'set_params',
     {
       patch: { riskControl: { requireStopLoss: false }, coinSource: { coinPoolLimit: 7 } },
@@ -212,7 +213,7 @@ test('set_params 生效时把守卫结果带出来（含被钳制的项）', () 
   assert.equal(deps.currentConfig().coinSource.coinPoolLimit, 7);
 });
 
-test('set_params 之后的 get_current_params 看到的是**实际生效**的值', () => {
+test('set_params 之后的 get_current_params 看到的是**实际生效**的值', async () => {
   /*
    * 这一条是"钳制必须回喂"的另一半：AI 改完再看一眼，看到的必须是真值。
    * 如果它看到的是自己提交的那份，它会以为自己成功了。
@@ -223,13 +224,36 @@ test('set_params 之后的 get_current_params 看到的是**实际生效**的值
     { patch: { riskControl: { requireStopLoss: false } }, reason: 'x' },
     deps,
   );
-  const seen = dispatchTool('get_current_params', {}, deps).result as StrategyConfig;
+  const seen = (await dispatchTool('get_current_params', {}, deps)).result as StrategyConfig;
   assert.equal(seen.riskControl.requireStopLoss, true);
 });
 
-test('pause_trading 只收紧，且没有反向工具', () => {
+test('★ get_skipped_outcomes 是异步的，并把结果原样交给 AI', async () => {
+  /*
+   * 这条用例存在的理由：**它是 AI 唯一能校准入场标准的反馈。**
+   *
+   * 模型每轮把候选池里绝大多数标的否掉，而它从来不知道那些标的后来的走势 ——
+   * 于是它的入场标准（`minRiskRewardRatio`、`minScore`、它自己写的 `entryStandards`）
+   * 永远得不到检验。它自己在一轮审视里明确点出了这个缺口：
+   * 「minScore 我**没有任何'被滤掉的标的后来是否走了行情'的数据，无依据不动**」。
+   *
+   * 断言两件事：
+   *  1. 它是**异步**的（唯一需要网络往返的只读工具，因此也是唯一被 `await` 的）；
+   *  2. 返回值**原样**交给模型 —— 不做二次加工，尤其是**不能把 null 换成 0**：
+   *     取不到价格与"价格没变"是两回事，混在一起会让模型在错的样本上做判断。
+   */
+  const { deps } = makeDeps();
+  const seen = (await dispatchTool('get_skipped_outcomes', { cycles: 5 }, deps)).result as {
+    skipped: number;
+    symbols: Array<{ symbol: string; changePercent: number | null }>;
+  };
+  assert.equal(typeof seen.skipped, 'number');
+  assert.ok(Array.isArray(seen.symbols));
+});
+
+test('pause_trading 只收紧，且没有反向工具', async () => {
   const { deps, pauses } = makeDeps();
-  const out = dispatchTool('pause_trading', { reason: '市场在横盘，等信号' }, deps);
+  const out = await dispatchTool('pause_trading', { reason: '市场在横盘，等信号' }, deps);
 
   assert.deepEqual(pauses, ['市场在横盘，等信号']);
   assert.match(JSON.stringify(out.result), /只能收紧/);
@@ -239,13 +263,13 @@ test('pause_trading 只收紧，且没有反向工具', () => {
   );
 });
 
-test('finish 带上结论并终止本轮', () => {
+test('finish 带上结论并终止本轮', async () => {
   const { deps } = makeDeps();
-  const out = dispatchTool('finish', { summary: '这轮什么都不改' }, deps);
+  const out = await dispatchTool('finish', { summary: '这轮什么都不改' }, deps);
   assert.equal(out.finished?.summary, '这轮什么都不改');
 });
 
-test('结果过长时截断，并**说明**截断了', () => {
+test('结果过长时截断，并**说明**截断了', async () => {
   /*
    * 静默截断比不截断更糟：模型会以为自己看到了全部，然后基于一个残缺的
    * 图景下结论。所以截断必须自己说出来。
@@ -258,9 +282,10 @@ test('结果过长时截断，并**说明**截断了', () => {
       lessons: () => [],
       recentDecisions: () => [],
       marketOverview: () => [],
+      skippedOutcomes: async () => ({}),
     },
   });
-  const out = dispatchTool('get_performance', {}, deps).result as { truncated?: boolean; note?: string };
+  const out = (await dispatchTool('get_performance', {}, deps)).result as { truncated?: boolean; note?: string };
   assert.equal(out.truncated, true);
   assert.match(out.note ?? '', /截断/, '必须说明被截断了');
 });
@@ -309,7 +334,7 @@ test('★ 基准不在名字里的参数必须给出解释，而不是让 AI 去
   );
 });
 
-test('get_lessons 把复盘教训交给 AI —— 复盘能影响决策的唯一通路', () => {
+test('get_lessons 把复盘教训交给 AI —— 复盘能影响决策的唯一通路', async () => {
   /*
    * 为什么这条必须有：`agent_memory` 原本**只有一个出口** —— 复盘时按标的检索、
    * 喂给复盘员自己（`forSymbol`）。也就是说"这笔为什么亏"的结论**永远到不了
@@ -321,7 +346,7 @@ test('get_lessons 把复盘教训交给 AI —— 复盘能影响决策的唯一
    * 五次，每次理由都是同一句"账户太小"）—— 因为它看不到那个诊断。
    */
   const { deps } = makeDeps();
-  const out = dispatchTool('get_lessons', { limit: 5 }, deps);
+  const out = await dispatchTool('get_lessons', { limit: 5 }, deps);
   assert.deepEqual(out.result, { rows: 5 }, '必须真的走到 read.lessons，并把 limit 透传下去');
 });
 
@@ -333,7 +358,7 @@ test('renderToolCatalogue 会把每个工具与参数都渲染出来', () => {
   assert.match(text, /必填/, '必填标记必须渲染出来');
 });
 
-test('set_cycle_interval 会落库、钳制越界值、并回喂实际值', () => {
+test('set_cycle_interval 会落库、钳制越界值、并回喂实际值', async () => {
   /*
    * 这条钉住三件事，每一件都有具体的失效方式：
    *
@@ -352,7 +377,7 @@ test('set_cycle_interval 会落库、钳制越界值、并回喂实际值', () =
     },
   });
 
-  const ok = dispatchTool('set_cycle_interval', { minutes: 7, reason: '行情快' }, deps);
+  const ok = await dispatchTool('set_cycle_interval', { minutes: 7, reason: '行情快' }, deps);
   assert.equal(applied.at(-1)?.minutes, 7, '正常值应当原样落库');
   assert.equal((ok.result as { clamped: boolean }).clamped, false);
 
@@ -361,7 +386,7 @@ test('set_cycle_interval 会落库、钳制越界值、并回喂实际值', () =
    * 工具声明里写了 `min: 1, max: 1440`，`validateArgs` 先把它拦下来。
    * （实现里那一层 `Math.min/max` 是第二道保险，覆盖"校验被绕过"的情况。）
    */
-  const tooSmall = dispatchTool('set_cycle_interval', { minutes: 0.2, reason: '想更快' }, deps);
+  const tooSmall = await dispatchTool('set_cycle_interval', { minutes: 0.2, reason: '想更快' }, deps);
   assert.notEqual(tooSmall.result, undefined, '越界值不该静默通过');
   const rejectedText = JSON.stringify(tooSmall.result);
   assert.match(rejectedText, /min|1|范围|超出/, `越界值必须被拒绝并说清原因，实际：${rejectedText}`);
@@ -371,19 +396,19 @@ test('set_cycle_interval 会落库、钳制越界值、并回喂实际值', () =
    * 而上限那一侧同样要被拦住 —— `0` 会让调度器空转，
    * `100000` 等于永不醒来。两种都是真实的失效方式。
    */
-  const tooBig = dispatchTool('set_cycle_interval', { minutes: 100000, reason: '想更慢' }, deps);
+  const tooBig = await dispatchTool('set_cycle_interval', { minutes: 100000, reason: '想更慢' }, deps);
   assert.match(JSON.stringify(tooBig.result), /max|1440|范围|超出/);
   assert.equal(applied.length, 1, '被拒绝的调用不该落到实现里');
 });
 
-test('get_current_params 必须带上决策周期 —— 否则 AI 不知道起点', () => {
+test('get_current_params 必须带上决策周期 —— 否则 AI 不知道起点', async () => {
   /*
    * 决策周期不在 StrategyConfig 里（是 traders 表上的一列），
    * 所以第一版这个工具读不到它 —— AI 想调频率时不知道自己现在是多少，
    * 只能瞎猜一个数。**不知道起点就没法判断该往哪边调。**
    */
   const { deps } = makeDeps({ cycleInterval: () => 7 });
-  const out = dispatchTool('get_current_params', {}, deps);
+  const out = await dispatchTool('get_current_params', {}, deps);
   assert.equal(
     (out.result as { cycleIntervalMinutes: number }).cycleIntervalMinutes,
     7,

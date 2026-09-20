@@ -95,7 +95,13 @@ export class MarketDataService {
    * The live candle is always excluded: feeding a partial candle into EMA/RSI
    * makes indicators jitter on every poll and manufactures phantom crossovers.
    */
-  private async getKlines(symbol: string, timeframe: Timeframe, count: number): Promise<Kline[]> {
+  /**
+   * 拉某个周期的原始 K 线。
+   *
+   * 公开：`get_skipped_outcomes` 要用它算"被否掉的标的后来走了多少" ——
+   * 那是 AI 唯一能校准入场标准的反馈，而它需要历史价格。
+   */
+  async getKlines(symbol: string, timeframe: Timeframe, count: number): Promise<Kline[]> {
     const key = `${symbol}:${timeframe}:${count}`;
     const cached = this.klineCache.get(key);
     // A candle closes at most once per timeframe; 15s is safely within that.

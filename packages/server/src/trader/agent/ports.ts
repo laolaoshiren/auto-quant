@@ -61,6 +61,17 @@ export interface AgentPortDeps {
   strategyConfig: () => StrategyConfig;
   /** 本小时的调用预算。 */
   hourlyBudget: number;
+  /**
+   * 某个标的**从指定时刻到现在**的涨跌幅（百分数）。
+   *
+   * 由调用方注入而不是在这里拉行情：这个文件是纯数据访问层（§5.4 的
+   * "SQL 只在 store 层"同一条思路 —— 网络只在服务层）。`autoTrader` 手上有
+   * `MarketDataService`，由它实现。
+   *
+   * 取不到时返回 `null`（**不编造**）：一个标的的价格查不到，不该让
+   * `get_skipped_outcomes` 整个失败，也不该在样本里塞一个假的 0。
+   */
+  priceChangeSince: (symbol: string, sinceIso: string) => Promise<number | null>;
 }
 
 /**
@@ -256,6 +267,94 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
           openPositions: open.length,
           note: `当前持仓 ${open.length} 个。候选池的实时行情由交易循环注入，这里只给结构。`,
           requested: limit,
+        };
+      },
+      /**
+       * **被自己否掉的标的，后来走了多少。**
+       *
+       * 模型每轮否掉候选池里绝大多数标的，而它**永远不知道那些标的后来的走势** ——
+       * 于是它的入场标准（`minRiskRatio`、`minScore`、它自己写的 `entryStandards`）
+       * 从来没有被校准过。它自己在一轮审视里明确说过缺这个：
+       * 「minScore 我没有任何'被滤掉的标的后来是否走了行情'的数据，无依据不动。」
+       *
+       * 做法：从最近 N 轮的决策记录里收集"进了候选池、但没进决策"的标的，
+       * 按**最早那次被否**的时间为起点，算它们到现在的涨跌幅。
+       *
+       * ⚠️ **样本有偏，必须在返回值里说清楚**：只覆盖进过候选池的标的（成交额前 N 名），
+       * 窗口只有最近几十轮，而且同一标的可能被否过多次（只取最早那次，避免重复计数）。
+       * 一台什么都做对的机器也不该因为三个样本就去改门槛 —— 所以样本量一起给出来。
+       */
+      skippedOutcomes: async (cycles) => {
+        const c = Math.max(1, Math.min(30, Math.floor(cycles)));
+        const records = decisions.list(traderId, c);
+        if (records.length === 0) {
+          return { skipped: 0, symbols: [], note: '还没有任何决策记录。' };
+        }
+
+        /*
+         * 收集被否的标的，**只取最早那次**：越早被否，观察窗口越长，
+         * 而同一个标的被否五次不该在样本里占五份权重。
+         */
+        const firstSkipAt = new Map<string, string>();
+        for (const rec of records) {
+          const decided = new Set(rec.decisions.map((d) => d.symbol));
+          for (const symbol of rec.candidateSymbols) {
+            if (decided.has(symbol)) continue;
+            const prev = firstSkipAt.get(symbol);
+            if (prev === undefined || ms(rec.timestamp) < ms(prev)) {
+              firstSkipAt.set(symbol, rec.timestamp);
+            }
+          }
+        }
+        if (firstSkipAt.size === 0) {
+          return {
+            skipped: 0,
+            symbols: [],
+            note: `最近 ${records.length} 轮里没有"进了候选池但没做"的标的。`,
+          };
+        }
+
+        /*
+         * 最多查 10 个 —— **每个都要一次网络往返**，而 Agent 的调用预算是有数的。
+         * 按"被否得最早"排（窗口最长、信息最多），不看谁涨得多（那等于用结果挑样本）。
+         */
+        const ordered = [...firstSkipAt.entries()]
+          .sort((a, b) => ms(a[1]) - ms(b[1]))
+          .slice(0, 10);
+
+        const rows: Array<{
+          symbol: string;
+          skippedAt: string;
+          changePercent: number | null;
+        }> = [];
+        for (const [symbol, skippedAt] of ordered) {
+          let changePercent: number | null = null;
+          try {
+            changePercent = await deps.priceChangeSince(symbol, skippedAt);
+          } catch {
+            /* 取不到就留 null：**不编造**，也不让一个标的失败毁掉整次查询。 */
+          }
+          rows.push({ symbol, skippedAt, changePercent });
+        }
+        rows.sort((a, b) => (b.changePercent ?? -Infinity) - (a.changePercent ?? -Infinity));
+
+        const usable = rows.filter((r) => r.changePercent !== null);
+        const up = usable.filter((r) => (r.changePercent ?? 0) > 0).length;
+        return {
+          windowCycles: records.length,
+          skipped: rows.length,
+          usable,
+          up,
+          down: usable.length - up,
+          symbols: rows.map((r) => ({
+            symbol: r.symbol,
+            skippedAt: r.skippedAt,
+            changePercent: r.changePercent === null ? null : Math.round(r.changePercent * 100) / 100,
+          })),
+          note:
+            '这些是**你看到了但没做**的标的，从现在往回看它们各自走了多少（正数=你错过上涨，负数=你躲过了下跌）。' +
+            '样本有偏且很小：只包含进过候选池的标的、窗口只有最近几十轮、同一标的只算最早那次。' +
+            '**别用三五个样本去改门槛** —— 但如果被否的多数都在大涨、而且样本足够，那就是你的标准太严的证据。',
         };
       },
     },

@@ -114,6 +114,7 @@ function makePorts(over: Partial<OrchestratorPorts> = {}) {
       lessons: () => [],
       recentDecisions: () => [],
       marketOverview: () => [],
+      skippedOutcomes: async () => ({}),
     },
     collectFacts: quietFacts,
     callsThisHour: () => 0,

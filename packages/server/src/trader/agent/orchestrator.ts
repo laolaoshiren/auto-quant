@@ -349,6 +349,7 @@ export async function reviewClosedTrade(input: {
           lessons: () => null,
           recentDecisions: () => null,
           marketOverview: () => null,
+          skippedOutcomes: async () => ({}),
         },
         requestPause: () => {},
         /*

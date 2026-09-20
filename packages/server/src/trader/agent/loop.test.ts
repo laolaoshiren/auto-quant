@@ -42,6 +42,7 @@ function makeDeps() {
       lessons: () => [{ symbol: 'BTCUSDT', lesson: '止损过紧', tags: ['止损过紧'] }],
       recentDecisions: () => [{ cycle: 1 }],
       marketOverview: () => [{ symbol: 'BTCUSDT' }],
+      skippedOutcomes: async () => ({}),
     },
     requestPause: (reason) => pauses.push(reason),
     /* 测试要能看到 AI 改周期这件事 —— 与 pauses 同一个形状。 */

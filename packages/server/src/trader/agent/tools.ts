@@ -124,6 +124,26 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
     },
   },
   {
+    name: 'get_skipped_outcomes',
+    describe:
+      'Read what happened to the symbols you LOOKED AT BUT DID NOT TRADE. ' +
+      'Every cycle you reject most of the candidate pool, and without this you never learn whether those rejections were right. ' +
+      'For each symbol you skipped recently it shows the price move SINCE the cycle in which you skipped it. ' +
+      '**This is the only feedback that can calibrate your entry standards.** ' +
+      'If symbols you kept rejecting went up a lot, your filter is too strict — that is evidence, not opinion. ' +
+      'If they fell, your caution was correct and you should NOT loosen anything. ' +
+      'Note the sample is small and one-sided (it only covers symbols that reached your candidate pool at all).',
+    args: {
+      cycles: {
+        type: 'number',
+        min: 1,
+        max: 30,
+        default: 8,
+        describe: 'How many recent cycles of skipped symbols to look at.',
+      },
+    },
+  },
+  {
     name: 'get_current_params',
     describe:
       'Read the parameters currently in effect. Always read this before changing them — a patch is a delta, not a full replacement, and you need to know what you are changing FROM. ' +
@@ -313,6 +333,24 @@ export interface AgentToolDeps {
     lessons: (limit: number) => unknown;
     recentDecisions: (limit: number) => unknown;
     marketOverview: (limit: number) => unknown;
+    /**
+     * **被自己否掉的标的，后来走了多少** —— 校准入场标准的唯一反馈。
+     *
+     * ## 为什么这个必须存在
+     *
+     * 模型每轮把候选池里的绝大多数标的否掉，而它**永远不知道那些标的后来的走势**。
+     * 那意味着它的入场标准（无论是 `minRiskRewardRatio`、`minScore` 还是它自己写的
+     * `entryStandards`）**从来得不到任何校准** —— 它只能从"成交过的那些"里学，
+     * 而那恰恰是经过筛选的样本。
+     *
+     * 实测证据：一个机器人在自己的审视结论里明确写下了它缺什么 ——
+     * 「minScore 我**没有任何'被滤掉的标的后来是否走了行情'的数据，无依据不动**」。
+     * 工具面缺了这一项，它就只能靠猜或者不动。
+     *
+     * ⚠️ 样本是**有偏的**：只覆盖进过候选池的标的，而且窗口很短。
+     * 所以返回值必须把样本量一起给出来，让模型自己判断可信度。
+     */
+    skippedOutcomes: (cycles: number) => Promise<unknown>;
   };
   /** 请求暂停交易（只收紧）。 */
   requestPause: (reason: string) => void;
@@ -412,7 +450,11 @@ function bound(result: unknown): unknown {
  *             一次幻觉出来的工具名不该让整个循环崩掉。
  * @param args 参数。**不可信**，先过 `validateArgs`。
  */
-export function dispatchTool(name: unknown, args: unknown, deps: AgentToolDeps): ToolOutcome {
+export async function dispatchTool(
+  name: unknown,
+  args: unknown,
+  deps: AgentToolDeps,
+): Promise<ToolOutcome> {
   const spec = AGENT_TOOLS.find((t) => t.name === name);
   if (!spec) {
     return {
@@ -446,6 +488,12 @@ export function dispatchTool(name: unknown, args: unknown, deps: AgentToolDeps):
       return { result: bound(deps.read.recentDecisions(a.limit as number)) };
     case 'get_market_overview':
       return { result: bound(deps.read.marketOverview(a.limit as number)) };
+    case 'get_skipped_outcomes':
+      /*
+       * 异步：它要**拉历史价格**才能算出"被否掉之后走了多少"。
+       * 这是唯一一个需要网络往返的只读工具，所以也是唯一一个 `await` 的 case。
+       */
+      return { result: bound(await deps.read.skippedOutcomes(a.cycles as number)) };
     case 'get_current_params':
       /*
        * 「当前参数」**必须把决策周期一起给出来**。

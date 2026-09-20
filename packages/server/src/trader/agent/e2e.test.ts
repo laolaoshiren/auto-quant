@@ -147,6 +147,7 @@ const runtime = (model: LoopModel) =>
     isAiStrategy: () => strategies.get(traders.get(traderId)!.strategyId)?.presetId === 'ai_managed',
     model,
     equityNow: () => 9.1,
+    priceChangeSince: async () => null,
   });
 
 const facts = (over: Record<string, unknown> = {}) => (
@@ -214,7 +215,7 @@ test('端到端 ③：AI 调参会同时写下配置、实验记录与钳制信�
   assert.match(exps[0]!.appliedJson, /coinPoolLimit/, '实际生效什么也要在');
 
   // ③ 下一条新端口读到的是 AI 那份（而不是策略里的）
-  const ports = makeAgentPorts({ traderId, strategyConfig: aiConfig, hourlyBudget: 40 });
+  const ports = makeAgentPorts({ traderId, strategyConfig: aiConfig, hourlyBudget: 40, priceChangeSince: async () => null });
   assert.equal(ports.readConfig().coinSource.coinPoolLimit, 6, 'AI 下发的参数必须真的被后续周期用上');
 });
 
@@ -262,7 +263,7 @@ test('端到端 ⑤：等够笔数后 outcome_* 被回填，策略师下次能�
    * 这是「越跑越厉害」能不能成立的关口：没有回填，AI 只知道自己改过什么、
    * 不知道改动有没有用。
    */
-  const ports = makeAgentPorts({ traderId, strategyConfig: aiConfig, hourlyBudget: 40 });
+  const ports = makeAgentPorts({ traderId, strategyConfig: aiConfig, hourlyBudget: 40, priceChangeSince: async () => null });
   const id = agentExperiments.insert({
     traderId,
     trigger: 'new_result',

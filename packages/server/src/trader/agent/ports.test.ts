@@ -100,7 +100,7 @@ const makeTrade = (over: Partial<Parameters<typeof trades.insert>[0]> = {}): num
     ...over,
   }).id;
 
-const ports = () => makeAgentPorts({ traderId, strategyConfig: config, hourlyBudget: 40 });
+const ports = () => makeAgentPorts({ traderId, strategyConfig: config, hourlyBudget: 40, priceChangeSince: async () => null });
 
 /* -------------------------------------------------------------------------- */
 /*  配置                                                                       */
