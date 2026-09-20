@@ -250,7 +250,9 @@ export function FaqPage() {
      * 什么也不会发生，只会让"到底谁负责吸顶"变得看不清。
      */
     <div className="space-y-5">
-      <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-ink-faint">目录</h3>
+      {/* 目录。外层用 `<div>` 是为了把风险卡也收进右栏 —— 见 `riskNotice` 的说明。 */}
+      <section>
+        <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-ink-faint">目录</h3>
       <nav aria-label="常见问题目录">
         {/*
           一条竖线把目录从"一列浮动文字"变成**轨道**，当前项在轨道上有一个点。
