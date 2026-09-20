@@ -125,11 +125,21 @@ export async function selectCandidates(
   // Existing positions are non-negotiable members of the universe.
   for (const symbol of options.mustInclude ?? []) add(symbol, 'position');
 
-  // Majors are always worth a look: they set the context for everything else,
-  // and the prompt's BTC overview section depends on BTCUSDT being present.
-  if (config.indicators.enableOiRanking || sourcesBySymbol.size === 0) {
-    add('BTCUSDT', 'reference');
-  }
+  /*
+   * **BTC 无条件加入候选池。**
+   *
+   * 它不只是"顺带看一眼的大盘"，而是提示词里 `# BTC 市场概览` 那一整块的**唯一来源**：
+   * `prompt.ts` 找不到 BTCUSDT 快照就整段不渲染。于是模型会**安静地失去大盘背景**
+   * —— 而它不会知道"这块本来应该有"。
+   *
+   * 原来这里的条件是 `enableOiRanking || sourcesBySymbol.size === 0`，而紧挨着的
+   * 注释却写着"majors 永远值得看一眼……BTC 概览依赖它在场"。**注释描述的是无条件，
+   * 代码写的是有条件**：用 `coinpool` 或 `mixed` 且开了 OI 排行之外的配置时，
+   * BTC 可能压根不在池子里 —— 而那种配置恰恰是最需要大盘背景的（选的是山寨）。
+   *
+   * 成本是一个候选位的 token；丢掉的是模型对"现在是不是该出手"的整体判断。
+   */
+  add('BTCUSDT', 'reference');
 
   const symbols = [...sourcesBySymbol.keys()];
 

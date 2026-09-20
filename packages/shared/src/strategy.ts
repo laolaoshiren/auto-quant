@@ -242,7 +242,23 @@ export const CircuitBreakerConfigSchema = z.object({
   maxTotalDrawdownPercent: z.number().min(0).max(100).default(20),
   /** Consecutive LLM/execution failures before safe mode engages. */
   safeModeAfterFailures: z.number().int().min(1).max(50).default(3),
-  /** While in safe mode, wait this many cycles before probing the model again. */
+  /**
+   * ⚠️ **当前未生效 —— 保留字段，不要以为它在工作。**
+   *
+   * 这个字段的意图是"处于安全模式时，等这么多周期再去探测模型一次"。
+   * 而服务端**没有任何地方读它**：`AutoTrader` 的实现是"连续失败 N 次进入安全模式，
+   * 下一次成功即退出"（`if (this.status === 'safe_mode') this.setStatus('running', null)`），
+   * 中间没有节流探测。
+   *
+   * 也就是说调整它对行为**没有任何影响** —— 而字段名与这里原本的描述（"While in
+   * safe mode, wait this many cycles before probing the model again"）都让人以为有。
+   * **一个看起来能动、实际不动的旋钮比没有这个旋钮更糟**：操作员会以为自己在调节
+   * 探测频率，而真实行为一点没变。
+   *
+   * 保留字段而不是删掉：删它会让所有已存在的策略读取失败（见 §5.4 那条
+   * "每个新字段都必须有 `.default()`" 的反面）—— 一个字段消失比一个字段不生效
+   * 更严重。要让它真的生效，需要在 `AutoTrader` 里加"安全模式下的探测节流"。
+   */
   safeModeProbeCycles: z.number().int().min(1).max(100).default(3),
 });
 

@@ -253,9 +253,19 @@ export class LlmClient {
             { provider: this.provider, model: this.model, status: error.status },
           );
           /*
-           * `continue` 而不是递归：重试循环本来就是为"再试一次"存在的，
-           * 而 `attempt` 不递增 —— 这次降级**不算一次重试**
-           * （它不是失败后的重试，是换了参数的第一次尝试）。
+           * ⚠️ **`continue` 会消耗一次重试预算 —— 注释原来写反了。**
+           *
+           * 这里是 `for (let attempt = 0; attempt <= this.maxRetries; attempt += 1)`，
+           * 而 `for` 里的 `continue` **会执行 `attempt += 1`**。原来那句注释说
+           * "`attempt` 不递增 —— 这次降级不算一次重试"，描述的语义并没有发生。
+           *
+           * 后果有限但不为零：`maxRetries: 3` 时少一次重试预算。真正会出事的是
+           * `maxRetries: 0`（API 允许这么配）—— 那种情况下 `attempt` 直接变 1、
+           * 循环条件不再成立，**去掉 `reasoning_effort` 的降级重试永远不会发生**，
+           * `bad_request` 会原样抛出去。
+           *
+           * 这条注释改成陈述事实。要不要把"降级不计入重试"真的实现出来是另一个决定
+           * （改循环结构），但那属于行为变更，不该顺手做。
            */
           continue;
         }
