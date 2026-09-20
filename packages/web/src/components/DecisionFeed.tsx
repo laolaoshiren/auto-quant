@@ -1597,6 +1597,7 @@ function CoinIcon({ symbol }: { symbol: string }) {
  */
 function LogLine({ entry }: { entry: ExecutionLogEntry }) {
   const { label, tone } = logLineStyle(entry.status);
+  const [expanded, setExpanded] = useState(false);
 
   /*
    * `skip_cycle` 是**整轮被跳过**的通知，不属于任何标的。
@@ -1609,17 +1610,55 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
    */
   const isCycleNotice = entry.action === 'skip_cycle';
 
+  /*
+   * ⚠️ **折叠规则与 `DecisionOutcome` 相同：第一句始终可见，其余收起。**
+   *
+   * 这里是**文字墙真正的来源**，不是 `DecisionOutcome`。整轮被跳过时
+   * `decisions` 是空数组，于是这条记录配不到任何决策，落到 `plan.leftover`
+   * 走这个组件；而它的 `detail` 实测有四行：
+   *
+   *   总回撤熔断：权益较最高水位 $9.54 回撤了 21.00%（上限 20%）。注意：总回撤熔断
+   *   不按日重置 —— …（例如入金，或调整这一上限）。且当前没有任何持仓。本轮没有向
+   *   模型提问、也没有下单 —— …跳过请求是为了不产生无谓的 token 开销。
+   *
+   * 而它**每一轮都出现**，连续几十轮一字不差。第一句就是操作者要的答案
+   * （"这一轮为什么什么都没做"），后面全是补充说明与建议。
+   *
+   * 改这里之前先在那台跑着的控制台上看一眼右栏 —— 那次我改了 `DecisionOutcome`
+   * 就以为完事了，而屏幕上的文字墙一行都没少。
+   */
+  const detail = entry.detail ?? '';
+  const cut = detail.search(/[。；]/);
+  const lead = cut >= 0 ? detail.slice(0, cut + 1) : detail;
+  const rest = cut >= 0 ? detail.slice(cut + 1).trim() : '';
+
   return (
-    <li className="flex min-w-0 items-start gap-1.5 text-xs leading-relaxed">
-      <span className={cn('shrink-0', tone)}>{label}</span>
-      <span className="min-w-0 break-words text-ink-lo">
-        {!isCycleNotice && (
-          <span className="num text-ink-mid">
-            {actionLabel(entry.action)} {entry.symbol}
-          </span>
-        )}
-        {entry.detail ? `${isCycleNotice ? '' : ' — '}${entry.detail}` : ''}
-      </span>
+    <li className="min-w-0 text-xs leading-relaxed">
+      <div className="flex min-w-0 items-start gap-1.5">
+        <span className={cn('shrink-0', tone)}>{label}</span>
+        <span className="min-w-0 break-words text-ink-lo">
+          {!isCycleNotice && (
+            <span className="num text-ink-mid">
+              {actionLabel(entry.action)} {entry.symbol}
+            </span>
+          )}
+          {lead ? `${isCycleNotice ? '' : ' — '}${lead}` : ''}
+          {rest && (
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              aria-expanded={expanded}
+              title={expanded ? '收起剩余说明' : '展开剩余说明'}
+              className="ml-1 shrink-0 text-ink-faint transition hover:text-ink-hi"
+            >
+              {expanded ? '收起' : '详情'}
+            </button>
+          )}
+        </span>
+      </div>
+      {expanded && rest && (
+        <p className="mt-0.5 min-w-0 break-words pl-1 text-ink-mid">{rest}</p>
+      )}
     </li>
   );
 }
