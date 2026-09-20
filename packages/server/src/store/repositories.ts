@@ -615,8 +615,35 @@ export const traders = {
     );
   },
 
+  /**
+   * 删除一个机器人，连带它所有的从属数据。
+   *
+   * ## ⚠️ 必须先清这三张表，否则 **AI 托管的机器人一定删不掉**
+   *
+   * `agent_experiments` / `agent_memory` / `agent_runs` 引用 `traders(id)` 时
+   * **没有写 `ON DELETE CASCADE`**（见 `schema.ts` 的建表语句），而 `trades` /
+   * `positions` / `orders` / `equity_snapshots` / `trade_events` /
+   * `decision_records` 那六张都写了。
+   *
+   * 后果非常具体，而且从界面上完全猜不出来：**策略模式的机器人能删，AI 托管的
+   * 一定删不掉** —— 只有 AI 托管才会往这三张表里写行。操作员看到的只是一句
+   * `FOREIGN KEY constraint failed`，于是很容易往"是不是最后一个才删不掉"
+   * 这个方向猜（那是个无法证伪的猜测：删掉别的之后它确实是最后一个）。
+   *
+   * 顺序也不能反：`agent_memory` 另有一列 `trade_id REFERENCES trades(id)`，
+   * 而 `trades` 是随 `traders` 级联删的 —— 先删 `traders` 会让 `agent_memory`
+   * 指向不存在的成交，同样报外键失败。
+   *
+   * 为什么不加一个迁移把那三张表改成 `ON DELETE CASCADE`：SQLite 不支持给已有表
+   * 添加外键，只能整表重建；而 §4.5 禁止改动已发布的迁移。在这里显式清一遍效果
+   * 相同，而且能把原因写在它该在的地方。
+   */
   remove(id: number): void {
-    getDb().run('DELETE FROM traders WHERE id = ?', id);
+    const db = getDb();
+    db.run('DELETE FROM agent_memory WHERE trader_id = ?', id);
+    db.run('DELETE FROM agent_experiments WHERE trader_id = ?', id);
+    db.run('DELETE FROM agent_runs WHERE trader_id = ?', id);
+    db.run('DELETE FROM traders WHERE id = ?', id);
   },
 };
 
