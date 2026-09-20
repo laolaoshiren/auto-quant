@@ -1393,6 +1393,18 @@ export class AutoTrader {
       candidates: snapshots,
       oiRanking,
       memory,
+      /*
+       * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**
+       *
+       * `selectCandidates` 会返回 `trimmedFrom`（按候选上限截断前的数量），
+       * 但在这之前它被直接丢掉了 —— 于是模型看到"候选标的（11 个）"，
+       * 而配置里其实是 25 个，**它无从知道池子被裁过**。
+       *
+       * 更糟的是提示词第 9 条明确鼓动它"如果连续几轮在同样的标的上找不到机会，
+       * 问题可能在你选标的的方式"—— 于是它会在一个**被静默裁过的池子**上
+       * 做归因，然后去改一个本来没问题的参数。
+       */
+      universeTrimmedFrom: selection.trimmedFrom,
     };
 
     const systemPrompt = buildSystemPrompt(promptContext);

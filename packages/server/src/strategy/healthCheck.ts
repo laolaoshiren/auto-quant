@@ -200,6 +200,11 @@ export async function checkStrategy(options: {
      */
     memory: emptyPromptMemory(options.config),
     oiRanking,
+    /*
+     * 体检这条路径也**如实**填 —— 它不跑 `selectCandidates` 的裁剪，所以是 null。
+     * 与 `memory` 同样的理由：报告里的 token 数必须对应实盘真会发出去的那一份形状。
+     */
+    universeTrimmedFrom: null,
   };
 
   const systemPrompt = buildSystemPrompt(promptContext);

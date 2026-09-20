@@ -163,6 +163,8 @@ async function main(): Promise<void> {
     // 这一趟没有账本（不连数据库），所以记忆区块如实表示"还没有任何成交"。
     memory: emptyPromptMemory(config),
     oiRanking,
+    /* 管道验证不做选币裁剪（候选就那几个），如实填 null。 */
+    universeTrimmedFrom: null,
   };
 
   const systemPrompt = buildSystemPrompt(context);

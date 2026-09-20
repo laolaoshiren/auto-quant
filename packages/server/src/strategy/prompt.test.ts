@@ -100,6 +100,8 @@ function contextWith(memory: PromptMemory, candidates?: MarketSnapshot[]): Promp
     candidates: candidates ?? [snapshot('BTCUSDT', 68_000), snapshot('ETHUSDT', 2_500)],
     oiRanking: [],
     memory,
+    /* 默认不裁剪；需要测"选币阶段裁过"的用例自己覆盖它。 */
+    universeTrimmedFrom: null,
   };
 }
 
@@ -305,6 +307,31 @@ test('★ 教训区块：AI 自己复盘出来的结论真的进得了决策提�
 
   const without = buildUserPrompt(contextWith(emptyPromptMemory(defaultStrategyConfig())));
   assert.doesNotMatch(without, /# 你自己复盘出来的教训/);
+});
+
+test('★ 候选池在选币阶段被裁过时会告诉模型，而不是让它以为市场里就这些', () => {
+  /*
+   * 这条用例存在的理由：候选池**被裁了两次**，而模型原来只被告知其中一次。
+   *
+   *   · 第一次在 `coins.ts`：按 `candidateBudget(config)` 的上限截断候选池
+   *     （`selectCandidates` 会返回截断前的数量，但调用方把它丢了）；
+   *   · 第二次在 `buildUserPrompt`：按 token 预算再砍一轮（那次一直都会写进标题）。
+   *
+   * 于是模型看到"候选标的（11 个）"而配置里是 25 个，**它无从知道池子被裁过**。
+   * 而提示词第 9 条又明确鼓动它"如果连续几轮在同样的标的上找不到机会，问题可能
+   * 在你选标的的方式"—— 它会在一个**被静默裁过的池子**上做归因，然后去改一个
+   * 本来没问题的参数。
+   */
+  const ctx = contextWith(emptyPromptMemory(defaultStrategyConfig()));
+  ctx.universeTrimmedFrom = 25;
+
+  const prompt = buildUserPrompt(ctx);
+  assert.match(prompt, /选币阶段已按候选上限从 25 个截断/);
+  /* 必须点明"不是市场里没有" —— 否则模型仍然会把"池子小"读成"行情差"。 */
+  assert.match(prompt, /不是"市场里没有"/);
+
+  const clean = buildUserPrompt(contextWith(emptyPromptMemory(defaultStrategyConfig())));
+  assert.doesNotMatch(clean, /选币阶段已按候选上限/, '没裁过时不该出现那句话（会白占预算）');
 });
 
 test('绩效区块：账户真的在赚钱时，不会仍然说"减少交易次数是唯一方向"', () => {

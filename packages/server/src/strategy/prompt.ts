@@ -65,6 +65,23 @@ export interface PromptContext {
    * 同一个错误，而那正是当前问题的根源。
    */
   memory: PromptMemory;
+  /**
+   * 选币阶段**已经**裁掉了多少个标的（`selectCandidates` 的候选上限）。
+   *
+   * ⚠️ 这是**第二次**裁剪，与 `buildUserPrompt` 内部那次（提示词 token 预算）
+   * 不是同一件事，而它原来完全没有告诉模型：
+   *
+   *   · 第一次在 `coins.ts`：按 `candidateBudget(config)` 的上限截断候选池；
+   *   · 第二次在这里：按 token 预算再砍一轮（那次会写进候选区块的标题）。
+   *
+   * 于是模型看到的是"候选标的（11 个）"，而配置里其实是 25 个 ——
+   * 它无从知道池子被裁过。而提示词第 9 条又明确鼓动它"如果连续几轮在同样的
+   * 标的上找不到机会，问题可能在你选标的的方式"—— **它会在一个被静默裁过的
+   * 池子上做归因**，然后去改一个本来没问题的参数。
+   *
+   * 非 null 表示这一轮真的裁过；null 表示没裁（那时不必占一行预算）。
+   */
+  universeTrimmedFrom: number | null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1106,11 +1123,22 @@ function renderUserPrompt(
     );
   } else {
     const blocks = candidates.map((snap, index) => formatMarketData(snap, index, ctx.config));
+    /*
+     * 两处裁剪都要说 —— 它们发生在不同阶段，模型不该把它们合成一个数字：
+     * `ctx.universeTrimmedFrom` 是**选币阶段**按候选上限截断的，
+     * `trimmedFrom` 是**这一份提示词**为 token 预算再砍的。
+     */
+    const universeNote =
+      ctx.universeTrimmedFrom !== null
+        ? `本轮的候选池在选币阶段已按候选上限从 ${ctx.universeTrimmedFrom} 个截断`
+        : null;
     const header = trimmedFrom
       ? `# 候选标的（${candidates.length} 个，已因上下文预算从 ${trimmedFrom.total} 个裁剪）\n` +
         `为把这一次请求控制在上下文预算内，本轮只保留了最强的 ${candidates.length} 个标的；` +
-        '被裁掉的是排序最靠后的候选。绩效与历史区块不受影响。'
-      : `# 候选标的（${candidates.length} 个）\n每个区块给出一个标的、选中它的来源，以及每个已配置时间周期的指标序列，按由旧到新排列。每个序列的最后一个值就是最新值。`;
+        '被裁掉的是排序最靠后的候选。绩效与历史区块不受影响。' +
+        (universeNote ? `\n⚠️ ${universeNote} —— **你没看到的那些不是"市场里没有"，而是被配置的候选上限挡掉了。** 若因此觉得可选标的太少，该调的是 coinSource.coinPoolLimit 或门槛，不是选币逻辑。` : '')
+      : `# 候选标的（${candidates.length} 个）\n每个区块给出一个标的、选中它的来源，以及每个已配置时间周期的指标序列，按由旧到新排列。每个序列的最后一个值就是最新值。` +
+        (universeNote ? `\n⚠️ ${universeNote} —— **你没看到的那些不是"市场里没有"，而是被配置的候选上限挡掉了。**` : '');
     parts.push(`${header}\n\n${blocks.join('\n\n')}`);
   }
 
