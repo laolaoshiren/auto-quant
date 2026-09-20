@@ -628,14 +628,9 @@ export function TraderPage() {
             value={`${stats.winRatePercent.toFixed(1)}%`}
             size="lg"
             title="winRatePercent 本身就是 0–100 的百分数；盈/亏笔数直接来自后端，不由胜率反推。"
-            sub={
-              <>
-                <WinLossBar wins={wins} losses={losses} />
-                <span>
-                  PF {fmtProfitFactor(stats.profitFactor)} · {fmtInt(stats.totalTrades)} 笔已平仓
-                </span>
-              </>
-            }
+            sub={`PF ${fmtProfitFactor(stats.profitFactor)} · ${fmtInt(stats.totalTrades)} 笔已平仓`}
+            /* 图形放 `footer`：`sub` 是单行且会截断的，塞进去会把柱状条压扁并裁掉。 */
+            footer={<WinLossBar wins={wins} losses={losses} />}
           />
         ) : (
           <Metric
@@ -665,18 +660,25 @@ export function TraderPage() {
           sub={
             <>
               浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
-              {/*
-                有效杠杆的表盘挂在**这一张卡**上，而不是自己占一张。
-
-                它和"持仓"是同一个问题的两面（敞口由持仓产生），而指标行按
-                `LAYOUT.md` §0 规则 3 最多放 4 张 —— 再加一张会把四个数字一起压窄。
-                做法与"胜率"卡里的 `WinLossBar` 一致：图形作为 `sub` 嵌在卡内。
-              */}
-              <span className="mt-1 block">
-                <LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} />
-              </span>
             </>
           }
+          /*
+           * ⚠️ **表盘放在 `footer`，不是 `sub`。**
+           *
+           * 原来它挂在 `sub` 里，而 `sub` 那一层带 `truncate`
+           * （`overflow:hidden; white-space:nowrap`）—— 一个块级 SVG 被塞进
+           * "不许换行"的容器里，结果**表盘被裁掉下半部分**，而且这一张卡
+           * 比同排另外三张高出一大截（它们的副信息只是一行 16px 文字），
+           * 看起来就是"错位"。
+           *
+           * `footer` 不裁剪、有自己的行高，与 `MetricGroup` 的 `items-start`
+           * 配套：卡片顶部对齐，底部各按内容延伸。
+           *
+           * 至于**为什么挂在"持仓"这张卡上**而不是自己占一张：它和持仓是同一个
+           * 问题的两面（敞口由持仓产生），而指标行按 `LAYOUT.md` §0 规则 3
+           * 最多放 4 张 —— 再加一张会把四个数字一起压窄。
+           */
+          footer={<LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} />}
         />
       </MetricCard>
     </div>

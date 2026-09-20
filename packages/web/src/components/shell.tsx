@@ -184,18 +184,40 @@ export function MetricGroup({
  *
  * `value` 用 `.num`（等宽 + tabular-nums），否则实时数字会让整组左右抖动。
  * `sub` 放次要信息（基准、占比、说明）——**不要**把次要信息做成第二个大数字。
+ *
+ * ## ⚠️ `sub` 是**单行**的，图形要放 `footer`
+ *
+ * `sub` 那一层带 `truncate`（`overflow:hidden; white-space:nowrap`）—— 这是
+ * 刻意的：副信息在窄列里换行会把指标行撑得参差不齐，而它本来就该是一句话。
+ *
+ * 但**图形不能塞进 `sub`**：那个 `nowrap` 会把一个块级 SVG 压成一行文字的高度，
+ * 于是它既被裁剪、又让这一张卡比同排的其它卡高出一大截 —— 看上去就是"错位"。
+ * 实测：四张指标卡里只有"持仓"那张带了杠杆表盘，那一张的内部布局和另外三张
+ * 对不上，而表盘本身也被切掉了下半部分。
+ *
+ * 所以图形放 `footer`：它在 `sub` 之后、**不裁剪、不截断**，且有自己的行高。
+ * 用法与 `MetricGroup` 的 `items-start` 配套 —— 卡片顶部对齐，底部各按内容延伸。
  */
 export function Metric({
   label,
   value,
   sub,
+  footer,
   tone = 'default',
   size = 'md',
   title,
 }: {
   label: string;
   value: ReactNode;
+  /** 单行次要信息（基准、占比、一句说明）。会截断，所以**别放图形**。 */
   sub?: ReactNode;
+  /**
+   * 指标下方的图形或块级内容（表盘、迷你柱状图）。
+   *
+   * 与 `sub` 分开的理由见上面的说明：`sub` 是单行的、会截断的文本行，
+   * 而这里是**任意块级内容**，不许裁剪 —— 图形被切一半比不显示更糟。
+   */
+  footer?: ReactNode;
   tone?: 'default' | 'strong' | 'up' | 'down' | 'warn';
   /** `lg` 只给每个分组里的第一个指标，或整组最关键的那个。 */
   size?: 'md' | 'lg';
@@ -221,6 +243,7 @@ export function Metric({
         {value}
       </div>
       {sub !== undefined && <div className="num mt-0.5 truncate text-xs text-ink-faint">{sub}</div>}
+      {footer !== undefined && <div className="mt-1.5">{footer}</div>}
     </div>
   );
 }
