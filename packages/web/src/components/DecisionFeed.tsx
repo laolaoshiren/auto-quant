@@ -1384,7 +1384,12 @@ function DecisionOutcome({
   const cut = detail.search(/[。；]/);
   const lead = cut >= 0 ? detail.slice(0, cut + 1) : detail;
   const rest = cut >= 0 ? detail.slice(cut + 1).trim() : '';
-  const hasMore = rest.length > 0 || notes.length > 0;
+  /*
+   * 折叠开关**只看 `rest`**。
+   *
+   * `notes`（风控干预）不参与折叠 —— 原因见下面那段说明。
+   */
+  const hasMore = rest.length > 0;
 
   return (
     <div className="mt-1 min-w-0 pl-5">
@@ -1444,19 +1449,32 @@ function DecisionOutcome({
       */}
       {lead && <p className="mt-0.5 break-words text-xs leading-relaxed text-ink-mid">{lead}</p>}
 
-      {expanded && (
-        <>
-          {rest && <p className="mt-0.5 break-words text-xs leading-relaxed text-ink-mid">{rest}</p>}
-          {notes.length > 0 && (
-            <ul className="mt-0.5 space-y-0.5">
-              {notes.map((note, index) => (
-                <li key={index} className="break-words text-xs leading-relaxed text-warn/90">
-                  • {note}
-                </li>
-              ))}
-            </ul>
-          )}
-        </>
+      {/*
+        ⚠️ **风控干预始终可见，不跟着"详情"一起折。**
+
+        折叠是为了少几行字，但这两类文字的性质不同：
+
+        · `detail` 的**后半段**是补充说明与建议（"要不要继续交易需要操作员决定…"）——
+          它可以在你需要时再展开；
+        · `adjustments` 是**风控推翻模型的地方**（"杠杆已从 20x 压到上限 5x。"）。
+          `AGENTS.md` §2.1 要求每一次运行时推翻都留下痕迹，那是这个产品可被信任的
+          前提 —— **一眼扫过时它必须在场**。
+
+        第一版把两类一起折了，`test:feed` 里那条「风控干预仍然显示」立刻失败。
+        那是对的：**当一条检查说"屏幕上少了一句话"，先怀疑自己减少了什么。**
+      */}
+      {notes.length > 0 && (
+        <ul className="mt-0.5 space-y-0.5">
+          {notes.map((note, index) => (
+            <li key={index} className="break-words text-xs leading-relaxed text-warn/90">
+              • {note}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {expanded && rest && (
+        <p className="mt-0.5 break-words text-xs leading-relaxed text-ink-mid">{rest}</p>
       )}
     </div>
   );
