@@ -169,6 +169,18 @@ export function FaqPage() {
      */
     const THRESHOLD = scroller.getBoundingClientRect().top + 96;
     const onScroll = () => {
+      /*
+       * 滚到底时直接选最后一节。
+       *
+       * 不加这条的话，滚到最底下高亮会停在中途某一节 —— 因为后面几节**确实**
+       * 还在阈值线下方（判据没错），但"我已经到底了，目录却指着我没在看的地方"
+       * 读起来就是坏了。到底等同于"后面全看过了"。
+       */
+      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4;
+      if (atBottom && navIds.length > 0) {
+        setActiveId(navIds[navIds.length - 1]!);
+        return;
+      }
       let current = navIds[0] ?? '';
       for (const id of navIds) {
         const el = document.getElementById(id);
