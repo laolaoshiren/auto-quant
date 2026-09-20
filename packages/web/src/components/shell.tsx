@@ -52,32 +52,63 @@ export function PageShell({
   aside,
   children,
   className,
+  fillHeight = true,
 }: {
   /** 右侧伴随栏。命名不用 `rail`：它现在是"伴随信息"而不是指标栏，内容也不一定是指标。 */
   aside?: ReactNode;
   children: ReactNode;
   className?: string;
+  /**
+   * 两栏是否**撑满可视区高度**。
+   *
+   * ## 为什么需要这个开关
+   *
+   * 撑满是为了让右栏能"独立滚动 + 吸顶"：滚到主内容的深处时，右栏（决策流、目录）
+   * 仍然钉在视野里。`/traders/:id` 与 `/faq` 需要它。
+   *
+   * **但内容少的页面会因此空出半屏。** `/exchanges` 与 `/account` 就是这样：
+   * 左栏两三张卡、右栏一张卡，加起来不到视口的一半，而 `h-full` 把两栏拉到满高
+   * —— 于是下方一大片纯黑。那不是"留白"，是**排版没跟上内容的量**。
+   *
+   * 所以那一类页面传 `false`：两栏按内容高度，页面自然结束；右栏跟着页面一起滚
+   * （它本来也没有需要吸顶的东西）。
+   */
+  fillHeight?: boolean;
 }) {
   if (!aside) {
     return <div className={cn('min-w-0 space-y-4', className)}>{children}</div>;
   }
 
   return (
-    <div className={cn('flex min-w-0 flex-col gap-4 xl:h-full xl:flex-row xl:gap-6', className)}>
-      {/* 主内容：xl 以下跟着页面一起滚，xl 及以上自己滚（两栏各自独立） */}
+    <div
+      className={cn(
+        'flex min-w-0 flex-col gap-4 xl:flex-row xl:gap-6',
+        fillHeight && 'xl:h-full',
+        className,
+      )}
+    >
+      {/* 主内容：xl 以下跟着页面一起滚；xl 及以上、且要求撑满时自己滚（两栏各自独立） */}
       <div
         id={PAGE_MAIN_ID}
-        className="min-w-0 space-y-4 xl:min-h-0 xl:flex-[3_1_0%] xl:overflow-y-auto xl:pr-1"
+        className={cn(
+          'min-w-0 space-y-4 xl:flex-[3_1_0%] xl:pr-1',
+          fillHeight && 'xl:min-h-0 xl:overflow-y-auto',
+        )}
       >
         {children}
       </div>
 
       {/*
-        右栏 `max-h-full` + 自己滚动：`sticky` 需要一个有界的滚动容器，
-        这里的界限就是主内容区那份"可视区减去顶栏"的高度（见 Layout.tsx 的注释）。
+        右栏：只有要求撑满时才 `sticky` + 自己滚。`sticky` 需要一个**有界的**滚动
+        容器，而"按内容高度"的布局里没有那个界限 —— 那时让它跟着页面滚反而正常。
         再加 `items-start` 那类修饰会把它拉回内容高度，"撑满屏高"就没了。
       */}
-      <aside className="min-w-0 xl:sticky xl:top-0 xl:max-h-full xl:flex-[2_1_0%] xl:overflow-y-auto">
+      <aside
+        className={cn(
+          'min-w-0 xl:flex-[2_1_0%]',
+          fillHeight && 'xl:sticky xl:top-0 xl:max-h-full xl:overflow-y-auto',
+        )}
+      >
         {aside}
       </aside>
     </div>

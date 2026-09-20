@@ -522,7 +522,11 @@ export function ExchangeAccountsSection() {
   /* ------------------------------------------------------------------------ */
   return (
     <>
-      <PageShell aside={rail}>
+      /*
+     * `fillHeight={false}`：这一页内容少（左栏两张卡、右栏一张卡），撑满视口
+     * 只会在下方空出半屏纯黑。右栏没有需要吸顶的东西，所以按内容高度正合适。
+     */
+    <PageShell aside={rail} fillHeight={false}>
         {error && <ErrorNote>{error}</ErrorNote>}
 
         {query.error && <ErrorNote>读取凭证列表失败：{query.error}</ErrorNote>}
