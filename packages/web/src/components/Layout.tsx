@@ -18,7 +18,8 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { LogOut, Menu, Search, TriangleAlert, X } from 'lucide-react';
+import * as PopoverPrimitive from '@radix-ui/react-popover';
+import { ChevronDown, LogOut, Menu, Search, TriangleAlert, X } from 'lucide-react';
 import { userRoleLabel } from '@aq/shared';
 import { useApp, useEvents } from '../lib/store';
 import { fmtClockOffset, fmtInt } from '../lib/format';
@@ -118,6 +119,20 @@ export function Layout() {
       />
     ));
 
+  /*
+   * 顶栏的分组。
+   *
+   * 九项横排时每一项都又窄又挤，而模型 / 交易所 / 账户三项是**低频的配置操作** ——
+   * 它们和"看机器人现在怎么样"不是同一类动作，却各占一格最贵的位置。
+   * 收进一个「设置」下拉之后顶栏剩六项，与参考产品的密度接近。
+   *
+   * ⚠️ 只有**顶栏**这么分。小屏抽屉仍然是平铺的全部（纵向列表，收起只会多一次
+   * 点击），命令面板也仍然是全部（它的价值就是"什么都能搜到"）。
+   */
+  const primaryNav = NAV_ITEMS.filter((item) => !item.group);
+  const settingsNav = NAV_ITEMS.filter((item) => item.group === 'settings');
+  const onSettingsPage = settingsNav.some((item) => item.to === location.pathname);
+
   return (
     /*
      * `overflow-x-hidden` 是刻意的：页面里忘记收窄的元素会被裁掉而不是
@@ -158,7 +173,16 @@ export function Layout() {
           h-14 的横条上，大面积色块比文字本身还抢眼，反而看不出当前在哪一页。
         */}
         <nav aria-label="主导航" className="hidden min-w-0 items-center gap-0.5 lg:ml-2 lg:flex">
-          {navLinks()}
+          {primaryNav.map((item) => (
+            <NavLinkItem
+              key={item.to}
+              item={item}
+              badge={item.to === '/traders' ? runningCount : 0}
+            />
+          ))}
+          {settingsNav.length > 0 && (
+            <SettingsMenu items={settingsNav} active={onSettingsPage} />
+          )}
         </nav>
 
         {/* 弹性空白：把状态区推到最右 */}
@@ -341,6 +365,76 @@ export function Layout() {
 /* -------------------------------------------------------------------------- */
 /*  顶栏零件                                                                   */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * 顶栏的「设置」下拉 —— 收低频的配置类页面（AI 模型 / 交易所 / 操作员账户）。
+ *
+ * ## 为什么用 popover 而不是自己写一个开关
+ *
+ * 外部点击关闭、Esc 关闭、焦点管理与 `aria-expanded` —— 自己写这四样一定会漏掉
+ * 其中一两样，而漏掉的那一样通常只在特定操作下才现形（比如只用键盘的人打不开）。
+ * `AiModelsSection` 里的模型选择器也是这么做的。
+ *
+ * ## 为什么"当前页就在下拉里"时触发器也要变亮
+ *
+ * 否则站在 `/models` 上时顶栏看起来**没有任何一项是当前页**。而"我在哪"是顶栏
+ * 要回答的第一个问题 —— 下拉收起了链接，但不能把这条信息一起收掉。
+ */
+function SettingsMenu({ items, active }: { items: NavItem[]; active: boolean }) {
+  const [open, setOpen] = useState(false);
+  const { pathname } = useLocation();
+
+  // 跳页之后 popover 不会自己知道，得手动关。
+  useEffect(() => setOpen(false), [pathname]);
+
+  return (
+    <PopoverPrimitive.Root open={open} onOpenChange={setOpen}>
+      <PopoverPrimitive.Trigger asChild>
+        <button
+          type="button"
+          className={cn(
+            'relative flex h-14 shrink-0 items-center gap-1 whitespace-nowrap px-2.5 text-base font-medium transition',
+            active ? 'text-ink-hi' : 'text-ink-lo hover:text-ink-mid',
+          )}
+        >
+          <span>设置</span>
+          <ChevronDown
+            aria-hidden
+            className={cn('h-3.5 w-3.5 shrink-0 transition', open && 'rotate-180')}
+          />
+          {active && (
+            <span aria-hidden className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-accent" />
+          )}
+        </button>
+      </PopoverPrimitive.Trigger>
+      <PopoverPrimitive.Portal>
+        <PopoverPrimitive.Content
+          align="start"
+          sideOffset={4}
+          className="z-50 min-w-44 rounded-lg border border-base-700 bg-base-900 p-1 shadow-overlay"
+        >
+          {items.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) =>
+                cn(
+                  'flex items-center gap-2 rounded-md px-2.5 py-2 text-base transition',
+                  isActive
+                    ? 'bg-base-850 text-ink-hi'
+                    : 'text-ink-mid hover:bg-base-850/60 hover:text-ink-hi',
+                )
+              }
+            >
+              <item.icon aria-hidden className="h-4 w-4 shrink-0" />
+              <span className="min-w-0 truncate">{item.label}</span>
+            </NavLink>
+          ))}
+        </PopoverPrimitive.Content>
+      </PopoverPrimitive.Portal>
+    </PopoverPrimitive.Root>
+  );
+}
 
 function Brand({ onClose }: { onClose?: () => void }) {
   return (
