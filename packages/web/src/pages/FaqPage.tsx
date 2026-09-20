@@ -8,7 +8,8 @@
  * - 左栏是目录（`LAYOUT.md` §1 的指标栏位置放"这里有什么"），主区是问答与清单：
  *   目录让人先看到全局，正文再用 `SectionLabel` 分出"风险警示 / 常见问题 / 操作员清单"
  *   三级 —— 之前只有一个 18px 的标题，长文读起来是一堵没有接缝的墙；
- * - 风险警示用 `warn` 令牌写在最前面，而不是藏进某一条问答里。
+ * - 风险警示用 `warn` 令牌，**放在右栏目录下方** —— 与目录一起在第一屏可见，
+ *   而它的宽度（`max-w-[68ch]`）恰好等于右栏宽，不再和主内容列的列表比出参差。
  *
  * 正文对比度用 `ink-mid` 而不是 `ink-faint`：`ink-faint` 是禁用/占位级别的灰，
  * 拿它写一整页说明会让"出事了正在找答案的人"读不下去。
@@ -203,6 +204,42 @@ export function FaqPage() {
    * 于是目录被塞进四分之一的栏宽（约 150px），「止损为什么挂在交易所」这种
    * 11 个字的标题必然折成两行，读起来支离破碎。目录要的是**整栏宽度**。
    */
+  /*
+   * 风险警示卡 —— **放在右栏目录下方**，而不是主内容列的最上方。
+   *
+   * ## 为什么换位置
+   *
+   * 它原来在主内容列顶部，而卡片宽度是 `max-w-[68ch]`（约 558px）、下面「常见问题」
+   * 列表是整列 895px —— **左边对齐、右边参差**，读起来像排版没对齐。
+   *
+   * 把它挪到右栏之后：
+   *   · 右栏约 600px，**558px 几乎正好填满**，不再有那截多出来的空白；
+   *   · 主内容列只剩「常见问题 + 操作员清单」，**整列同宽**；
+   *   · 它仍然在第一屏内、紧挨着目录，**没有从"该被看到的位置"上消失**。
+   *
+   * ⚠️ `max-w-[68ch]` **保留**。它的来历写在下面（收窄到文字宽才是一块"重点块"），
+   * 而在这里它恰好等于栏宽，所以既保住了那个理由、又不再造成参差。
+   */
+  const riskNotice = (
+    <section>
+      <SectionLabel title="风险警示" />
+      <div className="max-w-[68ch] rounded-md border border-warn/50 bg-warn/10 px-3 py-2">
+        <h3 className="flex items-center gap-2 text-md font-bold tracking-wide text-warn">
+          <span aria-hidden className="rounded border border-warn/50 px-1.5 text-xs">
+            !
+          </span>
+          带杠杆交易永续合约
+        </h3>
+        <p className="mt-2 text-md leading-relaxed text-ink-hi">
+          亏钱的速度会比你读完这一页还快。杠杆放大亏损和放大盈利一样彻底，爆仓可以在几秒内吞掉整个持仓
+          — 包括它的保证金。语言模型不是理财顾问，看不到未来，而且时不时会自信地犯错；本控制台的风控
+          只能减少伤害，无法消除伤害。<span className="text-warn">模拟模式被设为默认是有原因的</span>
+          ：让一个策略跑得足够久，看清它的回撤，再考虑投入真实资金。永远不要用输不起的钱去交易。
+        </p>
+      </div>
+    </section>
+  );
+
   const rail = (
     /*
      * ⚠️ **这里不要再写 `sticky`。**
@@ -212,7 +249,7 @@ export function FaqPage() {
      * 是**嵌套粘性定位** —— 外层已经粘住了，内层相对它没有可移动的距离，
      * 什么也不会发生，只会让"到底谁负责吸顶"变得看不清。
      */
-    <section>
+    <div className="space-y-5">
       <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-ink-faint">目录</h3>
       <nav aria-label="常见问题目录">
         {/*
@@ -256,7 +293,10 @@ export function FaqPage() {
           })}
         </ol>
       </nav>
-    </section>
+      </section>
+
+      {riskNotice}
+    </div>
   );
 
   return (
@@ -290,35 +330,6 @@ export function FaqPage() {
       />
 
       <PageShell aside={rail}>
-        {/* 风险警示：整页最重要的一段，放在所有人都会看到的位置 */}
-        <section>
-          <SectionLabel title="风险警示" />
-          {/*
-           * 框宽 = 文字宽。整宽的框配 68ch 的文字，右半边会空出一大片，
-           * 看起来像"文字没排满"；收窄到文字宽之后它是一块**重点块**。
-           *
-           * ⚠️ **但圆角与内边距必须与全站其它警示卡一致。**
-           * 原来这里是 `rounded-lg px-4 py-3`，而全站二十多处 warn 卡用的都是
-           * `rounded-md px-3 py-2`（`TraderModals`、`StrategyCheckModal`、
-           * `CommandPalette`、`LoginPage`…）—— 同一类东西两个规格，翻两个页面
-           * 就能看出"黄框长得不一样"。
-           */}
-          <div className="max-w-[68ch] rounded-md border border-warn/50 bg-warn/10 px-3 py-2">
-            <h3 className="flex items-center gap-2 text-md font-bold tracking-wide text-warn">
-              <span aria-hidden className="rounded border border-warn/50 px-1.5 text-xs">
-                !
-              </span>
-              带杠杆交易永续合约
-            </h3>
-            <p className="mt-2 text-md leading-relaxed text-ink-hi">
-              亏钱的速度会比你读完这一页还快。杠杆放大亏损和放大盈利一样彻底，爆仓可以在几秒内吞掉整个持仓
-              — 包括它的保证金。语言模型不是理财顾问，看不到未来，而且时不时会自信地犯错；本控制台的风控
-              只能减少伤害，无法消除伤害。<span className="text-warn">模拟模式被设为默认是有原因的</span>
-              ：让一个策略跑得足够久，看清它的回撤，再考虑投入真实资金。永远不要用输不起的钱去交易。
-            </p>
-          </div>
-        </section>
-
         <section>
           <SectionLabel title="常见问题" count={FAQ.length} />
           <div className="space-y-2">
