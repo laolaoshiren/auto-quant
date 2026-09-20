@@ -331,6 +331,21 @@ const DEFAULT_ENTRY_STANDARDS = [
   '**下跌结构与上涨结构是同等质量的交易机会，条件完全相同。** 失效位在上方（前高 / 均线 / 区间上沿）时，止损放在它之外、目标在下方，这就是做空 —— 它的每一道审核标准（失效位清晰、盈亏比、与大周期不冲突）与做多一字不差。**不要因为方向朝下就把它当成"不适合"，那等于白放掉一半的机会。**',
 ].join('\n');
 
+/**
+ * How many recent points of each series are rendered into the prompt.
+ *
+ * The indicator *calculations* run over the full candle set so that warm-up is
+ * satisfied, but past ~30 points the model gains nothing and the prompt grows
+ * linearly with the candidate count.
+ *
+ * ⚠️ **它同时被系统提示词引用了**（第 10 条那条"每根 K 线都有成本"）。
+ * 原来它定义在文件靠后的位置，而提示词在前面 —— 于是提示词只能写死一个
+ * 「5–120」（那是 schema 的允许范围），**比真实上限大一倍**：AI 把
+ * `promptPoints` 从 30 调到 120，看到的点数一根都不会变，而它会把这记成
+ * "我加厚了历史依据"并据此归因。定义必须排在提示词之前，两边才不会各说各话。
+ */
+const MAX_RENDER_POINTS = 30;
+
 const DEFAULT_DECISION_PROCESS = [
   '1. 先确定所提供的最高时间周期上的主导趋势。',
   '2. 定位关键结构：最近的波段高低点、价格正在反应的位置、以及流动性聚集处。',
@@ -372,7 +387,10 @@ const DEFAULT_DECISION_PROCESS = [
    *
    * 措辞刻意不给建议值：**"该给多少"正是要它自己回答的问题。**
    */
-  '10. **你看到的每根 K 线都是有成本的。** 每个候选标的的指标序列长度由 `indicators.kline.promptPoints` 决定（5–120，当前值可在 `get_current_params` 里读到）—— 每多一个点，每个标的、每个指标、每个时间周期都多一个数字。**当你发现自己在做粗略的方向确认而不是精细的形态判断时，把它调小是合理的；当你需要更厚的历史依据时，把它调大。** 这笔账归你算。',
+  '10. **你看到的每根 K 线都是有成本的。** 每个候选标的的指标序列长度由 `indicators.kline.promptPoints` 决定（可设 5–120，当前值可在 `get_current_params` 里读到）—— 但**实际渲染还有一道硬上限：每个序列最多 ' +
+    `${MAX_RENDER_POINTS} 根` +
+    '**，设得比它大不会让你看到更多。每多一个点，每个标的、每个指标、每个时间周期都多一个数字。**当你发现自己在做粗略的方向确认而不是精细的形态判断时，把它调小是合理的；但把它调到 ' +
+    `${MAX_RENDER_POINTS} 以上是无效的 —— 那只会让你以为自己的历史依据变厚了。** 这笔账归你算。',
 ].join('\n');
 
 /**
@@ -1062,15 +1080,6 @@ function summariseSnapshot(snap: MarketSnapshot): string {
   }
   return pieces.join(', ');
 }
-
-/**
- * How many recent points of each series are rendered into the prompt.
- *
- * The indicator *calculations* run over the full candle set so that warm-up is
- * satisfied, but past ~30 points the model gains nothing and the prompt grows
- * linearly with the candidate count.
- */
-const MAX_RENDER_POINTS = 30;
 
 /* -------------------------------------------------------------------------- */
 /*  Prompt budget                                                              */
