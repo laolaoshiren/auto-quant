@@ -5010,6 +5010,14 @@ reduceQuantity: null,
         realizedPayoffRatio:
           performance.avgLoss > 0 ? performance.avgWin / performance.avgLoss : null,
         roundTripFeeRate: performance.roundTripFeeRate,
+        /*
+         * ⚠️ **连续空转了多少轮。**
+         *
+         * 上面那些字段在"没有成交"时全是 0，而模型需要区分"刚开始跑"与
+         * "已经连着二十几轮把候选全部否掉"。后者是系统性问题，处置方式
+         * （改门槛 / 改标的池 / 承认账户规模不该交易）与"再等等"完全不同。
+         */
+        idleCycles: this.countIdleCycles(traderId),
       },
       recentCloses: tradeStore.recentWithReason(traderId, PROMPT_RECENT_CLOSE_COUNT),
       throttle: {
@@ -5107,6 +5115,34 @@ reduceQuantity: null,
        * 不吞逻辑异常。
        */
       return [];
+    }
+  }
+
+  /**
+   * 连续多少轮没有做出**任何**决策。
+   *
+   * 从最近的决策记录往前数，遇到第一条有决策的就停。它回答的是
+   * "我是不是已经空转很久了" —— 而那个问题在绩效区块里原来没有答案：
+   * `totalTrades === 0` 只会说"最近 N 小时没有已平仓的交易"，
+   * 那既可能是刚跑两轮，也可能是连着二十几轮把候选全部否掉。
+   *
+   * ⚠️ 扫的是固定 50 条（O(1) 的窗口，与其它记忆块同一纪律）：这个数字只需要
+   * 分辨"几轮"与"几十轮"，不需要跨月精确 —— 而扫全表会让每轮都读一遍历史。
+   *
+   * 读不到时返回 0（而不是抛）：一块统计缺失不该让整个周期失败。
+   * **但那是偏乐观的默认** —— 读失败时它会显示成"没有空转"，所以只吞读取异常。
+   */
+  private countIdleCycles(traderId: number): number {
+    try {
+      const recent = decisionStore.list(traderId, 50);
+      let idle = 0;
+      for (const rec of recent) {
+        if (rec.decisions.length > 0) break;
+        idle += 1;
+      }
+      return idle;
+    } catch {
+      return 0;
     }
   }
 

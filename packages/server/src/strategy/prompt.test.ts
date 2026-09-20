@@ -263,6 +263,7 @@ test('绩效区块：把"你在亏"翻译成"你该少做"，而倍数由真实�
     avgLoss: 0.18,
     realizedPayoffRatio: 0.83,
     roundTripFeeRate: 0.001,
+    idleCycles: 0,
   };
 
   const prompt = buildUserPrompt(contextWith(memory));
@@ -334,6 +335,36 @@ test('★ 候选池在选币阶段被裁过时会告诉模型，而不是让它�
   assert.doesNotMatch(clean, /选币阶段已按候选上限/, '没裁过时不该出现那句话（会白占预算）');
 });
 
+test('★ 空转够久时绩效区块必须点出来 —— 否则模型只会继续等', () => {
+  /*
+   * 这条用例存在的理由：绩效区块原来在"没有成交"时只说一句
+   * 「最近 N 小时没有已平仓的交易」，而那句话**区分不出两种完全不同的处境**：
+   *
+   *   · 刚跑两轮，还没等到机会（正常）；
+   *   · 已经连着二十几轮把候选全部否掉（系统性问题）。
+   *
+   * 实测就是后一种：某机器人连续 28 个周期 0 决策，推理质量很高 ——
+   * 每一轮都在认真分析，**只是看不到"我已经这样很多轮了"**。
+   * 它因此一直在等一个"更好的信号"，而真正该做的是回头检查门槛 / 标的池 / 标准。
+   */
+  const memory = emptyPromptMemory(defaultStrategyConfig());
+  memory.performance.idleCycles = 28;
+
+  const prompt = buildUserPrompt(contextWith(memory));
+  assert.match(prompt, /你已连续 28 轮没有做出任何决策/);
+  /* 必须指明出处 —— 只指出问题而不给可用的动作，等于把焦虑丢回给模型。 */
+  assert.match(prompt, /set_params/);
+
+  /* 反向：空转没到阈值时不该出现那句话（每轮都喊等于没喊）。 */
+  const calm = emptyPromptMemory(defaultStrategyConfig());
+  calm.performance.idleCycles = 2;
+  assert.doesNotMatch(
+    buildUserPrompt(contextWith(calm)),
+    /轮没有做出任何决策/,
+    '刚开始跑就说"你已空转很久"，会让这句话失去意义',
+  );
+});
+
 test('绩效区块：账户真的在赚钱时，不会仍然说"减少交易次数是唯一方向"', () => {
   /*
    * 同一个模板必须随着事实变化。毛 +3.00、手续费 0.30（0.1 倍）时，成本已经不再是
@@ -355,6 +386,7 @@ test('绩效区块：账户真的在赚钱时，不会仍然说"减少交易次�
     avgLoss: 0.6,
     realizedPayoffRatio: 2,
     roundTripFeeRate: 0.001,
+    idleCycles: 0,
   };
 
   const prompt = buildUserPrompt(contextWith(memory));
@@ -382,6 +414,7 @@ test('绩效区块：资金费非 0 时必须出现在行里，否则净额对�
     avgLoss: 0.35,
     realizedPayoffRatio: 1.71,
     roundTripFeeRate: 0.001,
+    idleCycles: 0,
   };
 
   const prompt = buildUserPrompt(contextWith(memory));
@@ -627,6 +660,7 @@ function promptForHistory(count: number): { text: string; tokens: number } {
       avgLoss: performance.avgLoss,
       realizedPayoffRatio: performance.avgLoss > 0 ? performance.avgWin / performance.avgLoss : null,
       roundTripFeeRate: performance.roundTripFeeRate,
+      idleCycles: 0,
     },
     recentCloses: tradeStore.recentWithReason(o1TraderId, PROMPT_RECENT_CLOSE_COUNT),
     throttle: {
@@ -705,6 +739,7 @@ test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）',
     avgLoss: 0.18,
     realizedPayoffRatio: 0.83,
     roundTripFeeRate: 0.001,
+    idleCycles: 0,
   };
   memory.throttle = {
     entriesThisHour: 2,

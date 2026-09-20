@@ -110,6 +110,15 @@ export const PROMPT_RECENT_CLOSE_COUNT = 5;
  * 金额都是 USDT；`roundTripFeeRate` 是**小数比例**（0.001 = 0.10%），
  * 字段名带单位后缀以免调用方再乘一次 100（§5.3）。
  */
+/**
+ * 连续空转到多少轮，就该在绩效区块里明确点出来。
+ *
+ * 取 8：按 15 分钟一轮约两小时。短于它的空转可能只是"这段行情确实没有机会"，
+ * 而长于它、且每一轮都在否掉全部候选，就已经是**系统性问题**而不是运气 ——
+ * 那时模型该做的是回头检查门槛 / 标的池 / 自己的标准，而不是继续等。
+ */
+export const IDLE_CYCLES_ALERT_THRESHOLD = 8;
+
 export interface PromptPerformance {
   windowHours: number;
   totalTrades: number;
@@ -126,6 +135,25 @@ export interface PromptPerformance {
   realizedPayoffRatio: number | null;
   /** 往返成本占名义价值的比例；窗口内没有成交时为 null（不编造）。 */
   roundTripFeeRate: number | null;
+  /**
+   * **连续有多少轮没有做出任何决策**（`decisions` 为空的周期数，从最近往前数）。
+   *
+   * ## 为什么这个数字必须单独给
+   *
+   * 上面那些字段都在描述"成交之后怎么样"，而**空转时它们全是 0** ——
+   * `totalTrades === 0` 只渲染一句"最近 N 小时没有已平仓的交易"。
+   * 而那句话无法区分两种完全不同的处境：
+   *
+   *   · 刚跑了两轮，还没等到机会（正常）；
+   *   · **已经连续二十几轮、每一轮都把候选逐个否掉**（那是系统性问题）。
+   *
+   * 实测就是后一种：某机器人 28 个周期 0 决策，而它的推理质量很高 ——
+   * 它每一轮都在认真分析，只是**看不到"我已经这样很多轮了"这件事**。
+   * 绩效区块说的是"没成交"，而它需要知道的是"我一直在原地"。
+   *
+   * 这个数字是"该反思自己而不是继续等待"的直接依据，所以放在绩效里。
+   */
+  idleCycles: number;
 }
 
 /**
@@ -233,6 +261,8 @@ export function emptyPromptMemory(config: StrategyConfig): PromptMemory {
       avgLoss: 0,
       realizedPayoffRatio: null,
       roundTripFeeRate: null,
+      /* 诊断路径没有决策历史 —— 如实填 0，而不是编一个"空转了很久"。 */
+      idleCycles: 0,
     },
     recentCloses: [],
     throttle: {
@@ -713,6 +743,21 @@ function renderPerformance(performance: PromptPerformance, config: StrategyConfi
 
   if (performance.totalTrades === 0) {
     lines.push(`最近 ${hours} 小时没有已平仓的交易，因此没有可对比的绩效。`);
+    /*
+     * ⚠️ **空转的轮数必须单独说。**
+     *
+     * 上面那句无法区分"刚开始跑"和"已经连着二十几轮都在否掉全部候选" ——
+     * 而后者是系统性问题，需要用完全不同的方式处置（改门槛、改标的池，或者
+     * 承认这个账户规模下不该交易）。模型看不到轮数，就只能继续等下去。
+     */
+    if (performance.idleCycles >= IDLE_CYCLES_ALERT_THRESHOLD) {
+      lines.push(
+        `**你已连续 ${performance.idleCycles} 轮没有做出任何决策（每一轮都把所有候选否掉了）。** ` +
+          '连续空转到这个程度时，"再等一个更好的信号"已经不是稳健，而是**整轮流程没有在产生价值**。' +
+          '请检查：是门槛组合不可达、标的池太小、还是你的标准本身需要一个复核 —— ' +
+          '这三样里有两样你可以直接用 `set_params` 改。',
+      );
+    }
     return lines.join('\n');
   }
 
