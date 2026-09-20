@@ -704,15 +704,34 @@ export function TraderPage() {
            * 用 `footer` 而不是 `sub` 装这个横向容器：`sub` 带 `truncate`
            * （`overflow:hidden; white-space:nowrap`），会把表盘裁掉下半截。
            */
+          /*
+           * ⚠️ **「浮动」与表盘放同一行，而且表盘要缩到与文字同高。**
+           *
+           * 两件事必须一起做，少一件都不齐：
+           *
+           * 1. **同一行。** 原来表盘单独占一行（在「浮动」下面），这一张卡的内容
+           *    就比邻居高。四张卡是等高的（grid 默认 stretch），多出来的高度变成
+           *    **另外三张下面的一大片空白**。
+           * 2. **同高。** `LeverageArc` 默认 `size={52}` —— 一个 52px 的图形配
+           *    16px 的文字，即使并排，这一行仍然比邻居的 `sub` 高 36px。
+           *    所以传 `size={20}`：弧的粗细是固定 4px，缩到 20 之后仍看得清弧度，
+           *    而整行高度落回文字行高附近。
+           *
+           * 实测（浏览器）：修之前底部空白是 `51 / 51 / 51 / 13 px`，
+           * 也就是前三张各空 51px —— 那就是被这一张撑出来的。
+           *
+           * 用 `footer` 而不是 `sub` 装这个横向容器：`sub` 带 `truncate`
+           * （`overflow:hidden; white-space:nowrap`），会把表盘裁掉下半截。
+           */
           footer={
             liveUnavailable ? (
               <span className="text-xs text-ink-faint">仓位状态暂不可读</span>
             ) : (
-              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="flex flex-wrap items-center gap-x-2.5">
                 <span className="num text-xs text-ink-faint">
                   浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
                 </span>
-                <LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} />
+                <LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} size={20} />
               </span>
             )
           }
