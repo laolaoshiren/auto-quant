@@ -79,10 +79,40 @@ $excludes = @(
 #
 # 这一步放在打包之前：构建失败就该**中止部署**，而不是把一个不完整/陈旧的包
 # 传到线上。
+#
+# ## ⚠️ 两道闸，都**不能接管道**
+#
+# PowerShell 里 `cmd 2>&1 | Select-String ...` 之后，`$LASTEXITCODE` 是
+# **`Select-String` 的**（有输入就返回 0），不是 `cmd` 的 —— 于是无论成功还是
+# 失败都会读到 0，`throw` 永远不会执行。见 `docs/AGENTS.md` §3.1。
+#
+# 这个脚本原来正是这么写的（`& npm run build 2>&1 | Select-String ...`），
+# 所以那句"构建失败，已中止部署"**从来没生效过**。重定向到文件再读退出码才是真的。
+#
+# ## ⚠️ 为什么必须先 typecheck
+#
+# `npm run build` **只编前端**（`--workspace @aq/web`）。服务端的语法错误它
+# 一点都不会碰 —— 实测代价：一个漏掉的反引号让 `prompt.ts` 解析失败，
+# 而"构建成功"照样放行、包照样传上去、**服务在线上进入崩溃循环**
+# （`systemctl` 显示 `activating (auto-restart)`，进程 exit-code 1）。
+# 类型检查是唯一能在本地拦住那类错误的闸。
 if (-not $SkipBuild) {
+    $tcLog = Join-Path $env:TEMP 'aq-typecheck.log'
+    Write-Host "==> 类型检查（全仓）" -ForegroundColor Cyan
+    & npm run typecheck *> $tcLog
+    if ($LASTEXITCODE -ne 0) {
+        Get-Content $tcLog | Select-String -Pattern 'error TS' | Select-Object -First 12 | ForEach-Object { Write-Host "    $($_.Line.Trim())" -ForegroundColor Red }
+        throw "类型检查失败，已中止部署（服务端的错误 build 抓不到，只有这一步能拦）"
+    }
+
+    $buildLog = Join-Path $env:TEMP 'aq-build.log'
     Write-Host "==> 本地构建前端" -ForegroundColor Cyan
-    & npm run build 2>&1 | Select-String -Pattern 'built in|error|✗' | ForEach-Object { Write-Host "    $($_.Line.Trim())" }
-    if ($LASTEXITCODE -ne 0) { throw "本地构建失败，已中止部署（不会把陈旧产物传上去）" }
+    & npm run build *> $buildLog
+    if ($LASTEXITCODE -ne 0) {
+        Get-Content $buildLog | Select-String -Pattern 'error|✗' | Select-Object -First 12 | ForEach-Object { Write-Host "    $($_.Line.Trim())" -ForegroundColor Red }
+        throw "本地构建失败，已中止部署（不会把陈旧产物传上去）"
+    }
+    Get-Content $buildLog | Select-String -Pattern 'built in' | Select-Object -First 2 | ForEach-Object { Write-Host "    $($_.Line.Trim())" }
 
     $distIndex = Join-Path $repoRoot 'packages/web/dist/index.html'
     if (-not (Test-Path $distIndex)) { throw "构建完成但找不到 packages/web/dist/index.html —— 产物不完整，已中止" }
