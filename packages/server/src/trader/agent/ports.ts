@@ -331,8 +331,9 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
 
     callsThisHour: () => agentRuns.countSince(traderId, new Date(Date.now() - 3_600_000).toISOString()),
 
-    pendingExperiments: () =>
-      agentExperiments.pending(traderId).map((e) => {
+    pendingExperiments: () => {
+      const pending = agentExperiments.pending(traderId);
+      return pending.map((e, index) => {
         /*
          * 只数**严格晚于**那次调整的成交。
          *
@@ -345,15 +346,32 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
          * 同一毫秒的平局在本会话里已经害过一次（`equity.list()` 的
          * `ORDER BY timestamp DESC` 返回了最旧那行，约 1/8 的运行读到错的权益）。
          * 那次是修 bug，这次是**选对方向**。
+         *
+         * ## ⚠️ 窗口还必须在上一次改动处**截止**
+         *
+         * 原来这里统计的是"这条实验创建之后的**所有**成交"。那样只要有**两条**
+         * 未结算的实验（而它们同时存在的窗口是常态：结算要等 5 笔或 24 小时），
+         * 同一批成交就会被**两条例各数一遍** —— 于是后一条的 `outcome_net_pnl`
+         * 里混着前一条的后果，而 AI 会拿它当"我这次改动的效果"来学。
+         *
+         * 这是"AI 越跑越准"里最容易骗到它的那类错误：数字看着完全正常，
+         * 只是它归因的那个因果链是错的。窗口取 `[本次改动, 下次改动)`。
          */
-        const after = trades.list(traderId, 200).filter((t) => ms(t.closedAt) > ms(e.createdAt));
+        const nextAt = pending[index + 1]?.createdAt ?? null;
+        const after = trades.list(traderId, 200).filter((t) => {
+          const at = ms(t.closedAt);
+          if (!(at > ms(e.createdAt))) return false;
+          if (nextAt !== null && !(at < ms(nextAt))) return false;
+          return true;
+        });
         return {
           id: e.id,
           createdAt: e.createdAt,
           tradesSince: after.length,
           netPnlSince: after.reduce((s, t) => s + t.netPnl, 0),
         };
-      }),
+      });
+    },
 
     settleExperiment: (id, outcome) => agentExperiments.settle(id, outcome),
 
