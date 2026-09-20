@@ -652,6 +652,21 @@ export const positions = {
     );
   },
 
+  /**
+   * **账户级**：当前所有未平仓持仓的符号（不分机器人）。
+   *
+   * 与 `tradedSymbols` / `allTradedSymbols` 同一个理由：清点"账户上的外部活动"时，
+   * 别的机器人正持有的符号也必须扫到 —— 那些仓位平掉时产生的外部成交同样在
+   * 交易所流水里，漏掉就又是一笔假差额。
+   */
+  allOpenSymbols(): string[] {
+    return getDb()
+      .all<{ symbol: string }>(
+        "SELECT DISTINCT symbol FROM positions WHERE status = 'open'",
+      )
+      .map((r) => r.symbol);
+  },
+
   getOpenBySymbol(traderId: number, symbol: string): PositionRow | undefined {
     return getDb().get<PositionRow>(
       "SELECT * FROM positions WHERE trader_id = ? AND symbol = ? AND status = 'open'",
@@ -1950,6 +1965,31 @@ export const trades = {
       (sinceIso ? ' AND closed_at >= ?' : '');
     return getDb()
       .all<{ symbol: string }>(sql, ...(sinceIso ? [traderId, sinceIso] : [traderId]))
+      .map((r) => r.symbol);
+  },
+
+  /**
+   * **账户级**：所有机器人交易过的符号。
+   *
+   * ## 为什么需要它，而不是复用 `tradedSymbols(traderId)`
+   *
+   * 对账要跑两件事，而它们的**范围不同**：
+   *
+   *   · **恢复本机器人的成交** —— 只看**本机器人**交易过的符号（`tradedSymbols`）。
+   *   · **清点外部活动** —— 那是**账户级**的概念："不属于本平台任何机器人"的成交。
+   *     它落在哪个符号上，与本机器人自己交易过什么**毫无关系**。
+   *
+   * 原来两件事共用一份"本机器人"的符号表。后果是：一个只交易过少数几个币种的
+   * 机器人，**看不到账户在别的币种上的外部活动** —— 那部分盈亏记不进
+   * `foreignNet`，而它确实在交易所流水里，于是总账校验报出假差额。
+   *
+   * 实测：共用账户的三个机器人里，两个只报 195 笔外部活动、另一个报 223 笔，
+   * 差额 −0.20 与 −0.006 的区别就出在这里。
+   */
+  allTradedSymbols(sinceIso?: string): string[] {
+    const sql = 'SELECT DISTINCT symbol FROM trades' + (sinceIso ? ' WHERE closed_at >= ?' : '');
+    return getDb()
+      .all<{ symbol: string }>(sql, ...(sinceIso ? [sinceIso] : []))
       .map((r) => r.symbol);
   },
 

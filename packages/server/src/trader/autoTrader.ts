@@ -2227,9 +2227,33 @@ export class AutoTrader {
      * local trade row is older than the window. Only the traded-symbol list is
      * windowed, and only on a routine pass.
      */
+    /*
+     * 扫描范围 —— **必须是账户级，不是本机器人级**。
+     *
+     * ## 为什么
+     *
+     * 这一趟循环做两件事，而它们的范围本来就不同：
+     *
+     *   1. **恢复本机器人的成交**（下面 `tradeStore.insert`，由 `ownOrders` 闸门把关）；
+     *   2. **清点外部活动** —— "不属于本平台任何机器人"的成交，那是个**账户级**概念，
+     *      落在哪个符号上与本机器人自己交易过什么毫无关系。
+     *
+     * 原来两件事共用一份"本机器人"的符号表（`tradedSymbols(traderId)` /
+     * `positions.open(traderId)`）。结果一个只交易过少数币种的机器人**看不到账户在
+     * 别的币种上的外部活动**：那部分盈亏记不进 `foreignNet`，却实实在在躺在交易所
+     * `income` 流水里 —— 于是总账校验报出**账本并没有错**的假差额。
+     *
+     * ⚠️ 实测：共用同一账户的五个机器人里，三个报 195 笔外部活动、差额 −0.20，
+     * 两个报 222/223 笔、差额 ±0.006。**差的就是扫描范围。**
+     *
+     * 多扫几个符号的代价是几次 `getUserTrades`，而漏扫的代价是一个永久误报的
+     * 账本校验 —— 那会训练操作员忽略这条唯一能自动发现"账本错了"的告警。
+     *
+     * 窗口仍然保留：例行对账只看窗口内交易过的符号，只有深扫才不限。
+     */
     const symbols = new Set<string>([
-      ...tradeStore.tradedSymbols(traderId, deep ? undefined : sinceIso),
-      ...positionStore.open(traderId).map((p) => p.symbol),
+      ...tradeStore.allTradedSymbols(deep ? undefined : sinceIso),
+      ...positionStore.allOpenSymbols(),
       ...incomeEvents.map((e) => e.symbol).filter((s): s is string => Boolean(s)),
     ]);
 
