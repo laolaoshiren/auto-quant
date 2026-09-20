@@ -13,7 +13,7 @@
  * 正文对比度用 `ink-mid` 而不是 `ink-faint`：`ink-faint` 是禁用/占位级别的灰，
  * 拿它写一整页说明会让"出事了正在找答案的人"读不下去。
  */
-import { useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useDocumentTitle } from '../lib/hooks';
 import { Badge, Button, Panel, cn } from '../components/ui';
@@ -123,6 +123,40 @@ export function FaqPage() {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  /*
+   * 目录里的"当前读到哪一节"。
+   *
+   * ## 为什么监听 `<main>` 的 scroll，而不是用 `IntersectionObserver`
+   *
+   * 滚动发生在 `Layout` 的 `<main>` 里（内容区自己滚，顶栏钉住），**viewport 本身
+   * 从来不动**。所以 `IntersectionObserver` 用默认 root（viewport）观察不到任何
+   * 变化 —— 它会把所有区块都判成"始终可见"。要它工作就得把 `root` 指到 `<main>`，
+   * 而那需要把那个元素一路传进来，耦合比这里需要的多。
+   *
+   * 直接算 `getBoundingClientRect().top` 更省事，而且判据一眼可读：
+   * **最后一个顶部越过阈值线的区块，就是当前节**。
+   */
+  const navIds = useMemo(() => [...FAQ.map((item) => item.id), 'faq-checklist'], []);
+  const [activeId, setActiveId] = useState<string>(navIds[0] ?? '');
+
+  useEffect(() => {
+    const scroller = document.querySelector('main');
+    if (!scroller) return;
+    /* 阈值取 120px：大约是一条区块标题刚滚到接近顶部时的位置。 */
+    const THRESHOLD = 120;
+    const onScroll = () => {
+      let current = navIds[0] ?? '';
+      for (const id of navIds) {
+        const el = document.getElementById(id);
+        if (el && el.getBoundingClientRect().top <= THRESHOLD) current = id;
+      }
+      setActiveId(current);
+    };
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+    return () => scroller.removeEventListener('scroll', onScroll);
+  }, [navIds]);
+
   /* ------------------------------------------------------------------------ */
   /*  左栏：目录。长文的"这里有什么"                                          */
   /* ------------------------------------------------------------------------ */
@@ -134,32 +168,54 @@ export function FaqPage() {
    * 11 个字的标题必然折成两行，读起来支离破碎。目录要的是**整栏宽度**。
    */
   const rail = (
-    <section>
+    /*
+     * `sticky top-0`：目录是**导航**，翻到第 7 节时它必须在场。
+     *
+     * ⚠️ 粘的是 `Layout` 的 `<main>`（滚动容器），不是 viewport —— 所以 `top-0`
+     * 指的是"内容区顶部"，正好落在顶栏下面，不需要给顶栏的 h-14 留偏移。
+     */
+    <section className="sticky top-0">
       <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-ink-faint">目录</h3>
       <nav aria-label="常见问题目录">
-        <ol className="space-y-0.5">
-          {FAQ.map((item, index) => (
-            <li key={item.id}>
-              <button
-                type="button"
-                onClick={() => jump(item.id)}
-                className="flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left text-base text-ink-lo transition hover:bg-base-850/70 hover:text-ink-hi"
-              >
-                <span className="num shrink-0 text-xs text-ink-faint">{String(index + 1).padStart(2, '0')}</span>
-                <span className="min-w-0">{item.short}</span>
-              </button>
-            </li>
-          ))}
-          <li>
-            <button
-              type="button"
-              onClick={() => jump('faq-checklist')}
-              className="flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left text-base text-ink-lo transition hover:bg-base-850/70 hover:text-ink-hi"
-            >
-              <span className="num shrink-0 text-xs text-ink-faint">10</span>
-              <span className="min-w-0">操作员清单</span>
-            </button>
-          </li>
+        {/*
+          一条竖线把目录从"一列浮动文字"变成**轨道**，当前项在轨道上有一个点。
+          在这之前"我读到哪一节了"只能靠猜 —— 而这一页有十节。
+        */}
+        <ol className="relative space-y-0.5 border-l border-base-750 pl-3">
+          {[
+            ...FAQ.map((item, index) => ({
+              id: item.id,
+              label: item.short,
+              num: String(index + 1).padStart(2, '0'),
+            })),
+            { id: 'faq-checklist', label: '操作员清单', num: '10' },
+          ].map((entry) => {
+            const active = entry.id === activeId;
+            return (
+              <li key={entry.id} className="relative">
+                {active && (
+                  <span
+                    aria-hidden
+                    className="absolute -left-3 top-2 h-4 w-0.5 rounded-full bg-accent"
+                  />
+                )}
+                <button
+                  type="button"
+                  onClick={() => jump(entry.id)}
+                  aria-current={active ? 'true' : undefined}
+                  className={cn(
+                    'flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left text-base transition',
+                    active ? 'text-ink-hi' : 'text-ink-lo hover:bg-base-850/70 hover:text-ink-hi',
+                  )}
+                >
+                  <span className={cn('num shrink-0 text-xs', active ? 'text-accent' : 'text-ink-faint')}>
+                    {entry.num}
+                  </span>
+                  <span className="min-w-0">{entry.label}</span>
+                </button>
+              </li>
+            );
+          })}
         </ol>
       </nav>
     </section>
