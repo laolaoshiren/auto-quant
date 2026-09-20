@@ -1104,7 +1104,21 @@ export class AutoTrader {
      *
      * 自愈时间因此是"最多 30 分钟"，而不是"直到下一次重启"（实测曾达 1 小时 40 分）。
      */
-    if (cycleNumber % 10 === 1) await this.ensurePositionMode();
+    /*
+     * ⚠️ **每个周期都查。**
+     *
+     * 原来这里是 `if (cycleNumber % 10 === 1)`，理由是"模拟盘对墙钟敏感，
+     * 每周期多一次 await 会减少模拟出的周期数"。**而那个顾虑不成立**：
+     * `ensureOneWayMode()` 的第一行就是 `if (this.dryRun) return` ——
+     * 模拟盘下它**根本不发请求**，连一次 await 的往返都没有。生产里那一次
+     * API 往返可以忽略。所以每周期查的成本是零，而漏查的代价很大：
+     *
+     * 实测：账户在两次检查之间被机器人之外的东西改成双向模式，而 `#29`
+     * （离上次检查 8 轮）发出了一笔真实下单 —— 交易所回 `-4061`，
+     * 那笔决策白跑。**"下不了单但状态显示 running"是这个文件自己警告过
+     * 最危险的故障形态，而每 10 轮一次的检查恰好留出了那个窗口。**
+     */
+    await this.ensurePositionMode();
 
     /* --- 2. Reconcile local records against reality ---------------------- */
     /*
