@@ -173,7 +173,21 @@ export async function selectCandidates(
    * already holds, whatever the budget says.
    */
   const maxCandidates = candidateBudget(config, options.budgetTokens);
+  /*
+   * ⚠️ **BTC 也要在 `mustKeep` 里，否则上面的"无条件加入"只做了一半。**
+   *
+   * 实测抓到的：`add('BTCUSDT', 'reference')` 确实把它放进了池子（21 个里有它），
+   * 但**裁剪这一步只保护 `mustInclude`（持仓标的）**，于是 BTC 在池子超过预算时
+   * 被当成"最弱的那些"丢掉 —— 而它在序列里排第 1，`drop.slice()` 恰好留不下它。
+   *
+   * 结果与"压根没加"完全一样：`prompt.ts` 的 `# BTC 市场概览` 找不到快照就
+   * **整段不渲染**，模型安静地失去大盘背景。而这一条极难从表面发现 ——
+   * 候选池里有 7 个标的、周期照常跑、什么错都不报。
+   *
+   * 所以"无条件入选"必须同时成立两次：**进池子** 与 **过裁剪**。
+   */
   const mustKeep = new Set([...(options.mustInclude ?? [])].map(normalizeSymbol));
+  mustKeep.add('BTCUSDT');
 
   let trimmed = symbols;
   if (symbols.length > maxCandidates) {
