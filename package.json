@@ -27,6 +27,7 @@
     "check:links": "node scripts/check-links.mjs",
     "check:routes": "node scripts/check-api-routes.mjs",
     "ui:smoke": "node scripts/ui-smoke.mjs",
+    "ui:check": "node scripts/ui-check.mjs",
     "demo": "tsx packages/server/src/scripts/demoCycle.ts",
     "sim": "tsx packages/server/src/scripts/simulate.ts",
     "sim:live": "tsx packages/server/src/scripts/simulate.ts --live --loose --cycles 12"
