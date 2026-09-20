@@ -258,8 +258,18 @@ export function TraderPage() {
 
   /* --- derived headline numbers ----------------------------------------- */
 
-  const positions = live?.positions ?? [];
-
+  /*
+   * ⚠️ **持仓用「实时查询」优先，WebSocket 镜像只作兜底。**
+   *
+   * 原来只用 `live?.positions ?? []`（WS 推送的本地镜像）。而镜像要等事件流
+   * 把它建起来 —— 服务刚重启、或者页面刚打开而事件还没到的那几秒里它是空的，
+   * 于是卡片显示「持仓 0」，而**同一个页面下方那张卡上的"浮动 −$0.13"却有值**
+   * （那个数字走了 `stats?.unrealizedPnl ?? …` 的回落）。同一张卡上两个数字
+   * 来自不同源、互相矛盾。
+   *
+   * 更荒谬的是：`accountQuery` **已经拿到了交易所的真实持仓**，只是没人用它。
+   * 所以这里改成实时优先 —— 它回答的正是"**现在**交易所那边有什么"。
+   */
   /*
    * ⚠️ **「读不到」不是「没有持仓」—— 这两件事必须分开显示。**
    *
@@ -280,12 +290,30 @@ export function TraderPage() {
    * 用的是 `accountQuery`（实时查交易所）而不是页面上的 `live`（WebSocket
    * 推送的本地镜像）：后者在 socket 断开时给的是过期数据，而这里要回答的
    * 恰恰是"**现在**交易所那边到底有没有仓"。
+   *
+   * ⚠️ **必须在 `positions` 之前声明。** 那个变量要用 `accountView`，而这个
+   * 文件里为此白屏过一次 —— `const` 的暂时性死区在类型检查里看不见
+   * （尤其是引用包在回调或 `??` 里的时候），只在运行时炸。
    */
   const accountView = accountQuery.data ?? null;
   const liveUnavailable = accountView !== null && accountView.live === false;
   const liveUnavailableWhy =
     accountView?.error ??
     '机器人当前未在运行，或交易所暂时无法读取 —— 这是"读不到"，不是"没有持仓"。';
+
+  /*
+   * ⚠️ **持仓用「实时查询」优先，WebSocket 镜像只作兜底。**
+   *
+   * 原来只用 `live?.positions ?? []`（WS 推送的本地镜像）。而镜像要等事件流
+   * 把它建起来 —— 服务刚重启、或者页面刚打开而事件还没到的那几秒里它是空的，
+   * 于是卡片显示「持仓 0」，而**同一个页面下方那张卡上的"浮动 −$0.13"却有值**
+   * （那个数字走了 `stats?.unrealizedPnl ?? …` 的回落）。同一张卡上两个数字
+   * 来自不同源、互相矛盾。
+   *
+   * 更荒谬的是：`accountQuery` **已经拿到了交易所的真实持仓**，只是没人用它。
+   * 所以这里改成实时优先 —— 它回答的正是"**现在**交易所那边有什么"。
+   */
+  const positions = accountView?.positions ?? live?.positions ?? [];
 
   /*
    * 行情图表当前显示的币种。

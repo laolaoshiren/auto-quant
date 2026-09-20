@@ -662,7 +662,15 @@ export const api = {
     request<{
       live: boolean;
       account: Record<string, unknown> | null;
-      positions: unknown[];
+      /**
+       * 交易所**实时**持仓（`liveExchangeView` 直接问交易所，不是本地镜像）。
+       *
+       * ⚠️ 类型原来写的是 `unknown[]` —— 那让调用方只能断言或者绕开，而"绕开"
+       * 的结果是页面拿 WebSocket 推的本地镜像当持仓数：服务刚重启、镜像还没建
+       * 起来时显示「持仓 0」，而**这个端点明明已经拿到了真实持仓**。
+       * 类型松一档，正确的那条路就没人走。
+       */
+      positions: PositionView[];
       error?: string;
     }>(`/traders/${id}/account`, { signal }),
   /**
