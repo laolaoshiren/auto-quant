@@ -204,10 +204,24 @@ export function AccountSection() {
    * 版本上"也回到了它该在的位置：和"关于这个账户"是同一类**只读的背景信息**。
    */
   const notes = (
-    <div className="space-y-5">
-      <Panel>
-        <h3 className="text-sm font-semibold text-ink-hi">关于这个账户</h3>
-        <div className="mt-2 space-y-2 text-xs leading-relaxed text-ink-mid">
+    /*
+     * ⚠️ **外面这一层 `SectionLabel` 不只是标题，它是对齐用的。**
+     *
+     * 左栏的结构是「`SectionLabel` + 无标题 `Panel`」，而右栏原来直接就是
+     * 「带 `<h3>` 的 `Panel`」—— 两种模式。后果是同一行的两个区块**顶部差 28px**
+     * （`SectionLabel` 那一行的高度 + 它的 `mb-3`），实测左栏 `top=280`、
+     * 右栏 `top=252`。在 `items-start` 的网格里，这就是肉眼可见的错位。
+     *
+     * 现在两栏同构：都是「`SectionLabel` + 内容」。"关于这个账户"那个 `<h3>`
+     * 因此去掉了 —— 标题只能有一个，而 `SectionLabel` 的小字距样式才是全站统一的
+     * 那一套（`Metric` 的标签、表头 `.th` 都是它）。
+     */
+    <section className="min-w-0">
+      <SectionLabel title="账户说明" />
+      <div className="space-y-5">
+        <Panel>
+          {/* 标题由外层的 `SectionLabel` 承担，这里不再有 `<h3>`，所以也不需要上边距。 */}
+        <div className="space-y-2 text-xs leading-relaxed text-ink-mid">
           <p>
             本系统面向单人部署：管理员账号在服务首次启动时自动创建，<strong>不提供注册入口</strong>
             ，也没有找回密码的流程 —— 修改只能在这里做，且必须验证当前密码。
@@ -222,8 +236,9 @@ export function AccountSection() {
         </div>
       </Panel>
 
-      {serverStatus}
-    </div>
+        {serverStatus}
+      </div>
+    </section>
   );
 
   /*
