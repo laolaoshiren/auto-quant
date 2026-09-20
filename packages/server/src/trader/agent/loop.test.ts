@@ -33,6 +33,8 @@ function makeDeps() {
     saveConfig: (next) => {
       current = next;
     },
+    /* 被守卫拒绝的补丁只留痕、不改配置；这个桩不需要记。 */
+    recordRejectedPatch: () => {},
     read: {
       performance: () => ({ net: 0.31 }),
       equityCurve: () => [{ equity: 10 }],

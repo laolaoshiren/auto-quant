@@ -341,6 +341,7 @@ export async function reviewClosedTrade(input: {
       deps: {
         currentConfig: () => ({}) as StrategyConfig,
         saveConfig: () => {},
+    recordRejectedPatch: () => {},
         read: {
           performance: () => null,
           equityCurve: () => null,
@@ -425,6 +426,29 @@ function buildToolDeps(ports: OrchestratorPorts, context: { trigger: string; obs
         clamps: meta.clamps,
         reason: meta.reason,
         // 工具调用序列在循环结束后才完整，所以传的是一个取值的闭包。
+        toolCalls: context.steps(),
+      });
+    },
+    /*
+     * ⚠️ **被守卫拒绝的补丁也要留一条记录。**
+     *
+     * 原来被拒时只有工具回喂给模型**本轮**的 `note`（"补丁被整体拒绝，一个字段都没改"），
+     * 而**库里的 `agent_experiments` 里什么都没有**。于是下一次审视时，
+     * `get_experiments` 看不到它试过这次 —— AI 会**再试一遍同一个被拒的改动**，
+     * 而它无从知道上一次为什么不行。
+     *
+     * 这一条对"越跑越准"是必要的：一个只记录成功的实验日志，训练不出
+     * "什么不能做"这一半的知识。`applied` 传 `null` 明确表示**没有生效**
+     * （而不是传一份看起来像成功的配置）。
+     */
+    recordRejectedPatch: (meta) => {
+      ports.recordExperiment({
+        trigger: context.trigger,
+        observed: context.observed,
+        patch: meta.patch,
+        applied: null,
+        clamps: [],
+        reason: `${meta.reason}；被守卫整体拒绝（${meta.rejected}），一个字段都没改`,
         toolCalls: context.steps(),
       });
     },

@@ -29,6 +29,7 @@ const config = (): StrategyConfig =>
 function makeDeps(overrides: Partial<AgentToolDeps> = {}) {
   const calls: Array<{ tool: string; args: unknown }> = [];
   const saved: Array<{ reason: string; patch: unknown; clamps: unknown }> = [];
+  const rejected: Array<{ reason: string; patch: unknown; rejected: unknown }> = [];
   const pauses: string[] = [];
   const cycleIntervals: number[] = [];
   let current = config();
@@ -39,6 +40,7 @@ function makeDeps(overrides: Partial<AgentToolDeps> = {}) {
       current = next;
       saved.push(context);
     },
+    recordRejectedPatch: (meta) => rejected.push(meta),
     read: {
       performance: (window) => {
         calls.push({ tool: 'get_performance', args: { window } });
@@ -72,7 +74,7 @@ function makeDeps(overrides: Partial<AgentToolDeps> = {}) {
     ...overrides,
   };
 
-  return { deps, calls, saved, pauses, snapshot: () => current };
+  return { deps, calls, saved, rejected, pauses, snapshot: () => current };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -161,7 +163,7 @@ test('validateArgs 直接可用：合法参数原样通过', () => {
 /* -------------------------------------------------------------------------- */
 
 test('set_params 过守卫：越界被整体拒绝，且配置一个字段都没动', () => {
-  const { deps, saved, snapshot } = makeDeps();
+  const { deps, saved, rejected, snapshot } = makeDeps();
   const before = snapshot();
 
   const out = dispatchTool(
@@ -173,8 +175,18 @@ test('set_params 过守卫：越界被整体拒绝，且配置一个字段都没
   const result = out.result as { applied: boolean; rejected: string | null };
   assert.equal(result.applied, false);
   assert.ok(result.rejected, '必须把拒绝原因回报给模型');
-  assert.equal(saved.length, 0, '被拒绝时不得落库');
+  assert.equal(saved.length, 0, '被拒绝时不得写回配置');
   assert.deepEqual(snapshot(), before, '被拒绝时配置必须原封不动');
+  /*
+   * ⚠️ **但必须留一条记录。**
+   *
+   * 上面两条断言的是"配置没被改"，而这一条断言的是"AI 下次还看得到这次尝试" ——
+   * 它们是两件事，第一版把它们合成了一句"被拒时不落库"，于是
+   * `get_experiments` 里查不到被拒的补丁，AI 会重复同一个不可能通过的改动。
+   * 一个只记录成功的实验日志，训练不出"什么不能做"那一半的知识。
+   */
+  assert.equal(rejected.length, 1, '被拒绝也要留一条记录 —— 否则 AI 看不到自己试过什么');
+  assert.equal(rejected[0]!.rejected, result.rejected);
 });
 
 test('set_params 生效时把守卫结果带出来（含被钳制的项）', () => {

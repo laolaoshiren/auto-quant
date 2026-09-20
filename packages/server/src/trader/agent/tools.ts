@@ -294,6 +294,17 @@ export interface AgentToolDeps {
   currentConfig: () => StrategyConfig;
   /** 写回一份新配置。由调用方决定怎么落库（策略表 / 机器人覆盖）。 */
   saveConfig: (config: StrategyConfig, context: { reason: string; patch: unknown; clamps: unknown }) => void;
+  /**
+   * 记下**被守卫拒绝**的补丁。
+   *
+   * 与 `saveConfig` 分开而不是给它加一个标记位：两者的后果完全不同 ——
+   * 一个会改变生效配置，一个只留痕。混在一个方法里，调用方很容易在某次重构中
+   * 把"被拒"也传进 `saveConfig`。
+   *
+   * 被拒的补丁不留记录时，AI 看不到自己试过什么、为什么不行 —— 那等于让它
+   * 只从成功里学，而"什么不能做"这一半的知识全靠撞墙才知道。
+   */
+  recordRejectedPatch: (meta: { reason: string; patch: unknown; rejected: unknown }) => void;
   /** 读取工具的实现。返回**已经可以喂给模型**的结构化对象。 */
   read: {
     performance: (window: string) => unknown;
@@ -458,6 +469,13 @@ export function dispatchTool(name: unknown, args: unknown, deps: AgentToolDeps):
       const patch = applyAgentPatch(deps.currentConfig(), a.patch);
       if (patch.rejected === null) {
         deps.saveConfig(patch.config, { reason, patch: a.patch, clamps: patch.clamps });
+      } else {
+        /*
+         * ⚠️ 被拒也要落一条记录 —— 否则下一次审视的 `get_experiments` 里
+         * 看不到"我试过这个、它被拒了"，AI 会重复同一个不可能通过的改动。
+         * 见 `recordRejectedPatch` 的说明。
+         */
+        deps.recordRejectedPatch({ reason, patch: a.patch, rejected: patch.rejected });
       }
       return {
         result: {
