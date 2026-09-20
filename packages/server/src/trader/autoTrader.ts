@@ -4067,12 +4067,44 @@ reduceQuantity: null,
      */
     tradeEvents.record(traderId, decision.symbol, 'entry');
 
-    /* ④ 按新数量重挂保护 —— 用模型给的新价位（如果给了），否则沿用旧的。 */
+    /*
+     * ④ 按新数量重挂保护 —— 用模型给的新价位（如果给了），否则沿用旧的。
+     *
+     * ⚠️ **"本地没有止损"必须在这里补上，不能让它变成"挂单失败"。**
+     *
+     * 收养进来的外部持仓，本地记录里 `stop_loss` 是 `null`（收养时不补挂 ——
+     * 见 `positionStore.insert` 那段）。而一次加仓会把本地值原样传下去：
+     *
+     *     stop: decision.stopLoss ?? local.stop_loss      → null
+     *
+     * `replaceProtection` 只在 `stop > 0` 时才真的去挂单，于是 `stopPlaced`
+     * 为 false —— 而调用方的判据是「加仓成功但保护挂不上」，按 §2.6
+     * **把整个仓位市价平掉**。
+     *
+     * 结果是：一个正常持有中的仓位，**因为一条合规的加仓指令被全平**。
+     * 而提示词还告诉模型「保护单会按新数量自动重挂，你不需要操心这两件事」——
+     * 照做的模型根本不会在加仓里再给一次止损。
+     *
+     * 所以缺止损时按**与新开仓完全相同的兜底比例**补一个：`§2.6` 要的是
+     * "不能有裸的杠杆敞口"，而平掉整个仓位是那条规则为"**挂单真的失败**"
+     * 准备的处置 —— 两件事不该共用一条路径。
+     */
+    let stopForProtection = decision.stopLoss ?? local.stop_loss;
+    if (stopForProtection === null || !(stopForProtection > 0)) {
+      const fallbackPercent = this.activeConfig.riskControl.fallbackStopLossPercent;
+      const distance = fillPrice * (fallbackPercent / 100);
+      stopForProtection = local.side === 'long' ? fillPrice - distance : fillPrice + distance;
+      this.emit(
+        'warn',
+        `${decision.symbol} 加仓时本地没有止损记录（可能是收养的仓位），已按兜底比例 ${fallbackPercent}% 补挂 ${stopForProtection.toFixed(6)} —— 请按你自己的失效位调一次。`,
+      );
+    }
+
     const protection = await this.replaceProtection({
       symbol: decision.symbol,
       side: local.side === 'long' ? 'long' : 'short',
       quantity: newQty,
-      stop: decision.stopLoss ?? local.stop_loss,
+      stop: stopForProtection,
       target: decision.takeProfit ?? local.take_profit,
       traderId,
     });
@@ -4230,12 +4262,32 @@ reduceQuantity: null,
       addBookedPartialQty: reduceQty,
     });
 
-    /* ⑤ 按剩余数量重挂保护。 */
+    /*
+     * ⑤ 按剩余数量重挂保护。
+     *
+     * ⚠️ 与加仓同一处陷阱：收养进来的持仓本地 `stop_loss` 是 `null`，
+     * 原样传下去会让 `stopPlaced` 为 false —— 而调用方按 §2.6 把**剩余部分
+     * 全部平掉**。一笔合规的减仓指令因此把仓位清空。
+     *
+     * 减仓让敞口变小，用"平掉剩余"来处置"本地缺一条止损记录"就更过头了：
+     * 那条规则是为「保护单**真的挂不上**」准备的。缺记录时按兜底比例补一个。
+     */
+    let stopForProtection = decision.stopLoss ?? local.stop_loss;
+    if (stopForProtection === null || !(stopForProtection > 0)) {
+      const fallbackPercent = this.activeConfig.riskControl.fallbackStopLossPercent;
+      const distance = exitPrice * (fallbackPercent / 100);
+      stopForProtection = local.side === 'long' ? exitPrice - distance : exitPrice + distance;
+      this.emit(
+        'warn',
+        `${decision.symbol} 减仓时本地没有止损记录（可能是收养的仓位），已按兜底比例 ${fallbackPercent}% 补挂 ${stopForProtection.toFixed(6)} —— 请按你自己的失效位调一次。`,
+      );
+    }
+
     const protection = await this.replaceProtection({
       symbol: decision.symbol,
       side: isLong ? 'long' : 'short',
       quantity: remaining,
-      stop: decision.stopLoss ?? local.stop_loss,
+      stop: stopForProtection,
       target: decision.takeProfit ?? local.take_profit,
       traderId,
     });
