@@ -294,10 +294,16 @@ export function FaqPage() {
         <section>
           <SectionLabel title="风险警示" />
           {/*
-           * 框宽 = 文字宽。原来是整宽的框配 68ch 的文字，右半边空出一大片，
-           * 看起来像"文字没排满"；而框一旦收窄到文字宽，它立刻变成一块**重点块**。
+           * 框宽 = 文字宽。整宽的框配 68ch 的文字，右半边会空出一大片，
+           * 看起来像"文字没排满"；收窄到文字宽之后它是一块**重点块**。
+           *
+           * ⚠️ **但圆角与内边距必须与全站其它警示卡一致。**
+           * 原来这里是 `rounded-lg px-4 py-3`，而全站二十多处 warn 卡用的都是
+           * `rounded-md px-3 py-2`（`TraderModals`、`StrategyCheckModal`、
+           * `CommandPalette`、`LoginPage`…）—— 同一类东西两个规格，翻两个页面
+           * 就能看出"黄框长得不一样"。
            */}
-          <div className="max-w-[68ch] rounded-lg border border-warn/50 bg-warn/10 px-4 py-3">
+          <div className="max-w-[68ch] rounded-md border border-warn/50 bg-warn/10 px-3 py-2">
             <h3 className="flex items-center gap-2 text-md font-bold tracking-wide text-warn">
               <span aria-hidden className="rounded border border-warn/50 px-1.5 text-xs">
                 !
