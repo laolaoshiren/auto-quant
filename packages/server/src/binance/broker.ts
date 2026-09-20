@@ -810,6 +810,28 @@ const TERMINAL_ALGO_STATUSES: ReadonlySet<BinanceAlgoStatus> = new Set([
 ]);
 
 export function normalizeStandard(response: BinanceOrderResponse): PlacedOrder {
+  const executed = Number(response.executedQty) || 0;
+  const original = Number(response.origQty) || 0;
+  /*
+   * ⚠️ **「已经成交完」也是终态，即使 `status` 还写着 `NEW`。**
+   *
+   * 实测（一个真实成交的市价开仓单）：轮询拿到的是
+   *
+   *     {"status":"NEW","executedQty":"0.000","origQty":"0.009","avgPrice":"0.00"}
+   *
+   * 而**持仓那边确实出现了 0.009** —— 单子成交了，只是这一份轮询响应里
+   * `status` 还是 `NEW`、`executedQty` 还是 0。原来的判断只看 `status`，
+   * 于是 `waitForFill` 一直轮询到超时，返回一份"没有成交"的快照。
+   *
+   * 后果不是"显示不好看"：开仓路径拿到 `executedQty === 0` 之后用
+   * `filled.executedQty || quantity` 回退成请求数量，**把一次未确认的成交
+   * 记成了完全成交**，而 `status` 字段留下 `NEW` —— 账本与界面从此各说各话。
+   *
+   * 所以终态要按**事实**判断：成交数量已经等于原始数量，就是成了。
+   * 容差用相对值而不是浮点相等（数量经交易所四舍五入，不保证位级相同）——
+   * 与 `autoTrader` 里 `fullyExecuted` 的判据保持同一个口径。
+   */
+  const fullyExecuted = executed > 0 && original > 0 && executed >= original * (1 - 1e-9);
   return {
     kind: 'order',
     id: String(response.orderId),
@@ -819,8 +841,8 @@ export function normalizeStandard(response: BinanceOrderResponse): PlacedOrder {
     type: response.type,
     status: response.status,
     avgPrice: Number(response.avgPrice) || 0,
-    executedQty: Number(response.executedQty) || 0,
-    terminal: TERMINAL_ORDER_STATUSES.has(response.status),
+    executedQty: executed,
+    terminal: TERMINAL_ORDER_STATUSES.has(response.status) || fullyExecuted,
     raw: response,
   };
 }

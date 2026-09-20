@@ -220,7 +220,7 @@ async function main(): Promise<void> {
     const entryFilled = await connection.broker.waitForFill(entryOrder, 15_000);
     if (entryFilled.status !== 'FILLED') throw new Error(`开仓未成交，状态 ${entryFilled.status}`);
 
-    openedQuantity = entryFilled.executedQty || quantity;
+    openedQuantity = entryFilled.executedQty; // 交易所说什么就是什么，不用请求数量冒充
     entryPrice = entryFilled.avgPrice || markPrice;
     ok(`已成交：${openedQuantity} 张 @ ${entryPrice}（订单号 ${entryFilled.id}）`);
 

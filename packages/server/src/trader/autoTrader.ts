@@ -3819,8 +3819,54 @@ reduceQuantity: null,
       });
 
       const filled = await this.deps.broker.waitForFill(placed);
+
+      /*
+       * ⚠️ **不能拿「请求的数量」冒充「成交的数量」。**
+       *
+       * 这里原来是 `filled.executedQty || quantity`：只要交易所没报成交
+       * （超时、或那一刻 `executedQty` 还是 0），它就**回退成请求数量** ——
+       * 于是一次**没有确认**的成交被记成了完全成交，而 `status` 字段留下交易所
+       * 那一刻的 `NEW`。界面上一半读 `status`（"已挂单"）、一半读 `filled_qty`
+       * （"已成交 0.009"），**两个互相矛盾的字段并存**。
+       *
+       * 平仓路径早就有这条纪律（`if (!(filledQty > 0))` 就不记账、留给对账），
+       * 而开仓路径漏了 —— 同一条规则在一半代码里缺席，是这类 bug 最常见的形状。
+       *
+       * 现在的做法：**交易所说什么就是什么**。它报了 0 就按 0 记，并把这一笔
+       * 标成失败交给对账；绝不用本地的意图去填补交易所的事实。
+       */
+      const filledQty = filled.executedQty;
       const entryPrice = filled.avgPrice || price;
-      const filledQty = filled.executedQty || quantity;
+
+      if (!(filledQty > 0)) {
+        this.recordOrder({
+          traderId,
+          exchangeOrderId: filled.id,
+          clientOrderId,
+          symbol,
+          side,
+          type: 'MARKET',
+          purpose: 'entry',
+          quantity,
+          price: null,
+          triggerPrice: null,
+          status: filled.status,
+          avgPrice: null,
+          filledQty: 0,
+          raw: filled.raw,
+        });
+        this.emit(
+          'warn',
+          `${symbol} 的开仓单在 ${filled.status} 状态下没有确认成交，本次不建仓；下一轮对账会以交易所的实际持仓为准。`,
+        );
+        return {
+          action: decision.action,
+          symbol,
+          status: 'failed',
+          detail: `开仓单未确认成交（状态 ${filled.status}），未建仓，等待对账。`,
+          orderId: filled.id,
+        };
+      }
 
       this.recordOrder({
         traderId,
