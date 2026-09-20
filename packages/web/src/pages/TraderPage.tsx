@@ -1243,10 +1243,17 @@ function ConfigSummary({ trader, asset }: { trader: TraderRow; asset: string }) 
  *
  * 为什么要有这层壳：`Metric` 是**指标**（标签 + 数值 + 说明），本身没有底色。
  * 从竖排指标栏改成横排之后，需要一层卡片边界才能一眼看出"这是 4 个并列的数字"，
- * 否则它们只是浮在页面底色上的四段文字（`LAYOUT.md` §0 规则 3 要的就是卡片）。
+ * 否则它们只是浮在页面底底色上的四段文字（`LAYOUT.md` §0 规则 3 要的就是卡片）。
  *
- * 卡片不设固定高度，网格上也加了 `items-start`：每张卡只占自己内容的高度
- * （§6 —— 不写就会被 Grid 拉成等高，短的那个下面留一片空白）。
+ * ⚠️ **这层壳不设高度 —— 等高由网格的默认 `stretch` 负责，这一行不要加 `items-start`。**
+ *
+ * 这里原来写着「网格上也加了 `items-start`：每张卡只占自己内容的高度」—— **那句话是错的**：
+ * 网格的 class 里从来没有 `items-start`，实测四张卡也确实是等高的
+ * （浏览器实测：`460×132 / 132 / 132 / 132`，最大差 0px）。
+ *
+ * 两条注释曾经互相矛盾（`metricCards` 那边写的是"等高，不加 `items-start`，这是刻意的"），
+ * 而**错的那条正好在真正的组件旁边** —— 下一个读代码的人会照着它去加 `items-start`，
+ * 于是把一组本该成块的 KPI 拆成高低不齐的四块。所以这里改成陈述事实。
  */
 function MetricCard({ children }: { children: ReactNode }) {
   return <div className="min-w-0 rounded-lg border border-base-750 bg-base-900 px-3.5 py-3">{children}</div>;
