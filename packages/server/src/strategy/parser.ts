@@ -402,6 +402,27 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
       continue;
     }
 
+    /*
+     * 入场方式。**只在开仓动作上才认它** —— 一个 `reduce_position` 带
+     * `entry_type: 'limit'` 是无意义的，静默丢掉比执行一个没定义的行为安全。
+     *
+     * 缺 `limit_price` 的限价单**在这里就退回市价并说明**，而不是让一个
+     * 没有价格的 `LIMIT` 单走到执行层 —— 那样交易所会拒，而错误会更难读。
+     */
+    const entryAdjustments: string[] = [];
+    let entryType: 'market' | 'limit' = 'market';
+    let limitPrice: number | null = null;
+    if (isOpenAction(action)) {
+      if (coerced.entry_type === 'limit') {
+        if ((coerced.limit_price ?? 0) > 0) {
+          entryType = 'limit';
+          limitPrice = coerced.limit_price ?? null;
+        } else {
+          entryAdjustments.push('限价入场缺少合法的 limit_price，已按市价开盘。');
+        }
+      }
+    }
+
     decisions.push({
       symbol: coerced.symbol,
       action,
@@ -421,8 +442,11 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
       riskUsd: coerced.risk_usd ?? 0,
       reducePercent: coerced.reduce_percent ?? null,
       reduceQuantity: coerced.reduce_quantity ?? null,
+      /* 入场方式 —— 由上面那段算好（`entryAdjustments` 带说明）。 */
+      entryType,
+      limitPrice,
       reasoning: coerced.reasoning ?? '',
-      adjustments: [],
+      adjustments: entryAdjustments,
     });
   }
 
