@@ -1047,15 +1047,29 @@ function purposeTone(purpose: string): 'accent' | 'neutral' | 'down' | 'up' | 'w
 /* -------------------------------------------------------------------------- */
 
 /**
- * Why a row carries the 对账补录 badge.
+ * 「对账补录」这个来源**不在表格里显示**，只在悬停该行时给出说明。
  *
- * The position certainly closed — the exchange's own history says so — but the
- * bot was not running to observe which order did it, so the round-trip was
- * rebuilt afterwards. Seeing the badge means live bookkeeping missed a close,
- * which is exactly the thing an operator should know about.
+ * ## 为什么把徽章去掉了
+ *
+ * 这里原来给补录的行挂一个橙色徽章、外加整行 `bg-warn/5` 的黄色底。理由是
+ * 「看见徽章说明实时记账漏了一笔，那是操作员该知道的」—— **那个假设是错的**：
+ *
+ *  · 那笔成交是**真实的**（交易所的成交历史里有它），盈亏也**算得对**；
+ *  · 「补录」只说明**系统是怎么知道它的**（进程当时没在跑，事后从成交历史核对出来），
+ *    不说明账本有问题、更不需要操作员做任何事；
+ *  · 而**当初真正值得报警的那个 bug 已经修了** —— 运行中触发的止损曾被记成
+ *    `reconciled`（对账两遍的顺序反了），现在运行期的原因优先。今天还落在这个
+ *    来源里的，只剩"机器人停着的时候交易所侧止盈/止损被触发"这一种正常情形。
+ *
+ * 所以它是一个**开发信号**，不是操作信号：开发要看"补录率"来判断记账有没有漏，
+ * 而操作员看到一行黄色的 `对账补录` 只会以为出了故障。**把维护者的仪表装到
+ * 操作员的界面上，代价是让正常状态看起来像异常** —— 而一个经常误报的界面，
+ * 在真的出事时也没人看。
+ *
+ * 保留 `title`：需要的时候（比如排查）把鼠标放上去仍然能看到来源。
  */
 const RECONCILED_TITLE =
-  '该持仓在机器人未运行期间平仓（例如交易所侧止盈被触发），本行由对账从交易所的成交历史补录，实时记账当时漏掉了它。';
+  '这笔在机器人未运行期间平仓（例如交易所侧的止盈被触发），成交与盈亏取自交易所的成交历史，是真实记录。';
 
 export function TradesTable({
   traderId,
@@ -1165,17 +1179,13 @@ export function TradesTable({
                 // `data-row-id` 给滚动锚点用（见 `useTablePaging` 的 `useLayoutEffect`）。
                 <tr
                   key={trade.id}
-                  className={reconciled ? 'row-hover bg-warn/5' : 'row-hover'}
+                  /* 补录来源不再改变整行底色 —— 见 `RECONCILED_TITLE` 的说明。 */
+                  className="row-hover"
                   data-row-id={trade.id}
                 >
                   <td className="td font-semibold text-ink-hi">
                     <div className="flex items-center gap-1.5">
                       <SymbolCell symbol={trade.symbol} onSelect={onSelectSymbol} />
-                      {reconciled && (
-                        <Badge tone="warn" title={RECONCILED_TITLE}>
-                          对账补录
-                        </Badge>
-                      )}
                     </div>
                   </td>
                   <td className="td whitespace-nowrap">
@@ -1210,10 +1220,12 @@ export function TradesTable({
                   </td>
                   <td className="td" title={reconciled ? RECONCILED_TITLE : undefined}>
                     {/* `closeReason` is a persisted machine code; the Chinese
-                        label lives in CLOSE_REASON_LABELS only. */}
-                    <span className={reconciled ? 'text-warn' : 'text-ink-lo'}>
-                      {closeReasonLabel(trade.closeReason)}
-                    </span>
+                        label lives in CLOSE_REASON_LABELS only.
+
+                        ⚠️ 这一格**不再因为来源是补录而变黄**：那是一个开发信号
+                        （说明记账当时漏了一笔），不是操作信号 —— 这笔成交真实、
+                        盈亏正确、也不需要操作员做任何事。见 `RECONCILED_TITLE`。 */}
+                    <span className="text-ink-lo">{closeReasonLabel(trade.closeReason)}</span>
                   </td>
                   <td className="td num text-right whitespace-nowrap">
                     {fmtDuration(trade.holdMinutes)}
