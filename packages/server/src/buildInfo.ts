@@ -324,10 +324,42 @@ export async function checkForUpdates(info: BuildInfo | null = readBuildInfo()):
       const cmp = await githubGet<GithubCompareBody>(
         `${GITHUB_API}/repos/${slug}/compare/${info.commit}...${encodeURIComponent(info.branch)}`,
       );
-      if (cmp.status === 'behind') behindBy = cmp.behind_by ?? null;
+      /*
+       * ## ⚠️ 这两个方向原来**正好写反了**
+       *
+       * GitHub 的 `compare/{base}...{head}` 语义是「**head 相对 base 怎么样**」：
+       * `status: 'ahead'` 表示 **head 领先 base**（`ahead_by` 是 head 多出的提交数）。
+       *
+       * 而这里的 base 是 `info.commit`（**线上正在跑的那个提交**）、
+       * head 是 `info.branch`（**GitHub 上的 main**）。所以：
+       *
+       *   · `ahead`   ⇒ GitHub 上的 main 领先线上跑的 ⇒ **服务器落后，该部署了**；
+       *   · `behind`  ⇒ GitHub 上的 main 落后线上跑的 ⇒ **本地有提交没推**。
+       *
+       * 原来两句写成了反的（`ahead` 说"领先 GitHub，线上的提交还没推送"）——
+       * **一个方向说反的提示比没有提示更糟**：它只在"服务器落后"时出现，
+       * 而它让人以为"是我本地忘了推送"，正好指错排查方向。
+       *
+       * 用真实仓库验证过一次：
+       *   `compare/b4b835e...0c1206b` → `{"status":"ahead","ahead_by":2,"behind_by":0}`
+       * 即 `ahead` 时**第一个参数（base）是落后的那一方**。
+       */
       if (cmp.status === 'ahead') {
+        /* 服务器落后：GitHub 上有更新的提交，`ahead_by` 就是差了多少个。 */
+        behindBy = cmp.ahead_by ?? null;
+        const howFar = behindBy === null ? '' : ` ${behindBy} 个提交`;
         return remember(
-          base('ahead', `领先 GitHub 上的 ${info.branch} —— 线上的提交还没推送。`, seen),
+          base(
+            'behind',
+            `落后 GitHub 上的 ${info.branch}${howFar} —— 远端最新是 ${latestSubject || latestCommitShort || '（未知）'}。`,
+            { ...seen, behindBy },
+          ),
+        );
+      }
+      if (cmp.status === 'behind') {
+        /* 服务器领先：本地有提交还没推上去。 */
+        return remember(
+          base('ahead', `领先 GitHub 上的 ${info.branch} —— 本地的提交还没推送。`, seen),
         );
       }
       if (cmp.status === 'diverged') {
@@ -346,6 +378,15 @@ export async function checkForUpdates(info: BuildInfo | null = readBuildInfo()):
       );
     }
 
+    /*
+     * 兜底：`compare` 成功、但 `status` 是上面四个之外的值（GitHub 将来加了新状态，
+     * 或者返回了一个我们没预期的形状）。
+     *
+     * 这时 `behindBy` 一定是 `null`（它只在 `ahead` 分支里被赋值），所以给出的
+     * 是一句不带数字的"落后"——**方向选"落后"而不是"领先"**：落后意味着
+     * "线上不是最新的"，那是一个值得去看一眼的状态；而"领先"暗示"一切正常"。
+     * 一个说不清的版本比对，宁可让人去部署一次，也不要让人以为没事。
+     */
     const howFar = behindBy === null ? '' : ` ${behindBy} 个提交`;
     return remember(
       base(
