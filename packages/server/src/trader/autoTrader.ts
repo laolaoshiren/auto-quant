@@ -2283,6 +2283,10 @@ export class AutoTrader {
       symbol: local.symbol,
       quantity: authoritative?.quantity ?? local.quantity,
       entryPrice: local.entry_price,
+      /* 出场价——两条记账路径之间唯一同源的字段，见 `findDuplicate()` 的说明。 */
+      exitPrice,
+      /* 开仓时刻 —— 主判据（两条路径的平仓时刻不同源，差过 11 分钟）。 */
+      openedAt: local.opened_at,
       closedAt,
       entryOrderId: authoritative?.entryOrderId ?? null,
     });
