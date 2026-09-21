@@ -1298,6 +1298,48 @@ const DUPLICATE_QUANTITY_TOLERANCE = 0.2;
 const DUPLICATE_PRICE_TOLERANCE = 1e-6;
 
 /**
+ * **出场价**的相对容差 —— 两条记账路径之间唯一同源的那个字段。
+ *
+ * 取得比入场价那条（1e-6）宽、比"完全相等"实际：同一个真实成交的出场均价
+ * 在两条路径上可能因为分批成交的加权顺序差末位，但不可能差出千分之一。
+ * 0.05% 对 2600 美元的 ETH 是 1.3 美元 —— 远小于任何两个**不同**回合之间的价差
+ * （同标的、同方向、同数量、同一价位附近平掉两笔真实回合，中间还隔着再入场冷却）。
+ *
+ * 详见 `findDuplicate()` 里那段"为什么不能靠放宽平仓时间"的说明。
+ */
+const DUPLICATE_EXIT_PRICE_TOLERANCE = 5e-4;
+
+/**
+ * **入场时间**允许的偏差（毫秒）—— 判定"同一个回合"的主判据。
+ *
+ * ## 为什么是 `opened_at` 而不是 `closed_at`
+ *
+ * 实测一对真实的重复（同一笔 ETH 被记了两次）：
+ *
+ *     #90 bot          opened_at 17:14:51.381   closed_at 02:02:20.361
+ *     #92 reconciled   opened_at 17:14:41.276   closed_at 01:51:35.036
+ *
+ * **入场时间只差 10 秒**（下单到成交的延迟），**平仓时间差了 11 分钟**。
+ * 两个字段的差别在于**它们各自从哪来**：
+ *
+ *  · `opened_at` 两条路径都锚在**这笔仓位什么时候开的**，中间只隔下单延迟；
+ *  · `closed_at` 一条是本地"察觉到仓位消失"的时刻（可能晚一整轮），
+ *    另一条是交易所成交记录里的时刻 —— **两个不同的时钟**。
+ *
+ * 所以身份判据要挂在 `opened_at` 上，而不是 `closed_at`。
+ *
+ * ## 为什么 5 分钟既能覆盖又能区分
+ *
+ *  · **能覆盖**：同一回合的两条路径差的是下单延迟，实测 10 秒；
+ *  · **能区分**：同一标的两笔**真实**回合之间至少隔着再入场冷却
+ *    （`throttle.reentryCooldownMinutes`，配置里是 10 分钟）——
+ *    而 `autoTrader.test.ts` 里那个 fixture 的两笔正好差 11 分钟。
+ *
+ * 5 分钟留了一半余量给"时钟漂移 + 下单延迟"，又远小于冷却时间。
+ */
+const DUPLICATE_OPEN_TOLERANCE_MS = 300_000;
+
+/**
  * `closed_at` 允许的偏差（毫秒）—— **这是写入守卫的关键容差**。
  *
  * ## 为什么不能要求毫秒精确相等
@@ -1743,6 +1785,14 @@ export const trades = {
           symbol: input.symbol,
           quantity: input.quantity,
           entryPrice: input.entryPrice,
+          /*
+           * ⚠️ **出场价必须传。** 它是这两条记账路径之间**唯一真正同源的字段** ——
+           * 两者都由交易所给出，而 `closed_at` 不同源（一条是本地察觉到仓位消失的
+           * 时刻，一条是交易所成交记录里的时刻，实测差过 11 分钟）、`entry_price`
+           * 也不同源（补录那条用的是快照价而不是成交均价）。见 `findDuplicate()`。
+           */
+          exitPrice: input.exitPrice,
+          openedAt: input.openedAt,
           closedAt,
           entryOrderId: input.entryOrderId,
         })
@@ -1840,6 +1890,9 @@ export const trades = {
     symbol: string;
     quantity: number;
     entryPrice: number;
+    exitPrice: number;
+    /** 开仓时刻 —— **主判据**，见 `DUPLICATE_OPEN_TOLERANCE_MS`。 */
+    openedAt: string;
     closedAt?: string;
     entryOrderId?: string | null;
   }): number | null {
@@ -1854,12 +1907,51 @@ export const trades = {
       input.entryOrderId && input.entryOrderId.length > 0
         ? 'OR entry_order_id = ?'
         : '';
+    /*
+     * ## ⚠️ 为什么还要一条按**出场价**的判据
+     *
+     * 下面那三条判据（入场价 1e-6、平仓时间 2 秒、入场订单号）是为一类场景写的：
+     * **同一秒里两条路径几乎同时记账**。而实盘真正发生的重复是另一类 ——
+     * 运行期记了一次，**几十分钟之后**对账又从成交历史补了一次：
+     *
+     *     #90 ETHUSDT  入场 2634.3164186  出场 2655.66  净 +0.1821  source=bot    closed_at 02:02:20
+     *     #92 ETHUSDT  入场 2634.2        出场 2655.66  净 +0.1713  source=reconciled  closed_at 01:51:35
+     *
+     * 三个判据在这笔上**全部落空**：入场价差 0.116（容差 0.0026）、时间差 11 分钟
+     * （窗口 2 秒）、补录那条又没有订单号。于是同一笔被算了两次，账面多出 0.17 ——
+     * 而**钱包余额不会跟着多**，操作员看到的就是"界面说赚了 0.20、钱包只多了 0.03"。
+     *
+     * ### 为什么不能靠放宽上面那两条
+     *
+     * 平仓时间那一条**不能继续放宽**：同一标的两笔真实回合之间只隔着再入场冷却
+     * （配置里是分钟级），而这两笔正好差 11 分钟 —— 窗口一放到十几分钟，
+     * 就可能把两笔**真实**的回合并成一笔，那是比重复更严重的错（会凭空吃掉一笔交易）。
+     *
+     * ### 为什么出场价可以当身份
+     *
+     * 它是两条路径之间**唯一同源的字段**：都由交易所给出（成交均价 / 成交记录），
+     * 而 `closed_at` 一条来自本地时钟、`entry_price` 补录时用的是快照价。
+     * 实测这一对上完全相同（2655.66 = 2655.66）。
+     *
+     * 容差用相对值且取得很小（0.05%）：真实同一回合的出场价来自同一个成交，
+     * 只可能有浮点末位差异。**单向持仓模式下，同一标的在同一价位平掉两笔真实回合，
+     * 中间还要隔着再入场冷却** —— 所以"同标的 + 同数量 + 同出场价"落在冷却窗口里，
+     * 就是同一个回合。数量容差沿用 20%（两条路径的数量口径本来就不同）。
+     */
     const sql = `SELECT id FROM trades
        WHERE trader_id = ? AND symbol = ? AND quantity > 0
          AND ABS(quantity - ?) <= MAX(1e-6, ABS(?) * ${DUPLICATE_QUANTITY_TOLERANCE})
-         AND ABS(entry_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_PRICE_TOLERANCE})
-         AND (ABS(julianday(closed_at) - julianday(?)) * 86400000 <= ${DUPLICATE_CLOSE_TOLERANCE_MS}
-              ${byOrder})
+         AND (
+              (
+                ABS(exit_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_EXIT_PRICE_TOLERANCE})
+            AND ABS(julianday(opened_at) - julianday(?)) * 86400000 <= ${DUPLICATE_OPEN_TOLERANCE_MS}
+              )
+           OR (
+                ABS(entry_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_PRICE_TOLERANCE})
+            AND ABS(julianday(closed_at) - julianday(?)) * 86400000 <= ${DUPLICATE_CLOSE_TOLERANCE_MS}
+              )
+              ${byOrder}
+         )
        ORDER BY id ASC
        LIMIT 1`;
     const params: unknown[] = [
@@ -1867,6 +1959,9 @@ export const trades = {
       input.symbol,
       input.quantity,
       input.quantity,
+      input.exitPrice,
+      input.exitPrice,
+      input.openedAt,
       input.entryPrice,
       input.entryPrice,
       input.closedAt,
@@ -2141,6 +2236,22 @@ export const trades = {
    */
   duplicateSuspects(traderId?: number): TradeDuplicateSuspect[] {
     const filter = traderId === undefined ? '' : 'WHERE a.trader_id = ?';
+    /*
+     * ⚠️ **两组判据并列，而不是一组放宽的判据。**
+     *
+     * 原来只有下面第一组（入场价 1e-6 + 平仓时间 1 秒）。它覆盖不了实盘真正
+     * 发生的那类重复 —— 运行期记一次、几十分钟后对账又补一次（实测 `#90`/`#92`
+     * 差 11 分钟、入场价差 0.116）。于是**那一对既没被写入守卫拦住、也没被这里
+     * 报出来**，账上凭空多出 0.17，而钱包余额不会跟着多。
+     *
+     * 第二组用**出场价**（两条路径唯一同源的字段）做身份。**为什么不干脆把第一组的
+     * 窗口和容差放大**：平仓时间那一条不能放 —— 同一标的两笔真实回合之间只隔着
+     * 再入场冷却（分钟级），而实测那两笔正好差 11 分钟；窗口一放就可能把两笔
+     * **真实**回合并成一笔，那比重复更严重（会凭空吃掉一笔交易）。
+     *
+     * 两组都要求 `source` 恰好一边是 `reconciled`：两行都是 `bot` 的重复属于
+     * 另一类缺陷，不该混进这个报告里让人误判。
+     */
     return getDb().all<TradeDuplicateSuspect>(
       `SELECT
          a.trader_id    AS traderId,
@@ -2159,8 +2270,16 @@ export const trades = {
         AND a.symbol = b.symbol
         AND a.id < b.id
         AND ABS(a.quantity - b.quantity) <= MAX(1e-6, ABS(a.quantity) * ${DUPLICATE_QUANTITY_TOLERANCE})
-        AND ABS(a.entry_price - b.entry_price) <= MAX(1e-9, ABS(a.entry_price) * ${DUPLICATE_PRICE_TOLERANCE})
-        AND ABS((julianday(a.closed_at) - julianday(b.closed_at)) * 86400000.0) <= ${DUPLICATE_REPORT_WINDOW_MS}
+        AND (
+             (
+               ABS(a.exit_price - b.exit_price) <= MAX(1e-9, ABS(a.exit_price) * ${DUPLICATE_EXIT_PRICE_TOLERANCE})
+           AND ABS((julianday(a.opened_at) - julianday(b.opened_at)) * 86400000.0) <= ${DUPLICATE_OPEN_TOLERANCE_MS}
+             )
+          OR (
+               ABS(a.entry_price - b.entry_price) <= MAX(1e-9, ABS(a.entry_price) * ${DUPLICATE_PRICE_TOLERANCE})
+           AND ABS((julianday(a.closed_at) - julianday(b.closed_at)) * 86400000.0) <= ${DUPLICATE_REPORT_WINDOW_MS}
+             )
+        )
         AND (a.source = 'reconciled' OR b.source = 'reconciled')
         AND NOT (a.source = 'reconciled' AND b.source = 'reconciled')
        ${filter}

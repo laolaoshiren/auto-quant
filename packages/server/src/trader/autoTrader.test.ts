@@ -1146,6 +1146,136 @@ test('两条记账路径的平仓时刻相差 500ms 时，仍判为同一回合�
   assert.equal(later.created, true, '相隔数分钟的另一回合必须照常入账');
   assert.equal(tradeStore.list(traderId).length, 2);
 });
+
+test('★ 对账晚 11 分钟才补的行也必须被认成同一回合 —— 判据是开仓时刻而不是平仓时刻', () => {
+  /*
+   * ## 这条用例来自一次真实的账面错误
+   *
+   * 实盘上同一笔 ETH 被记了两次：
+   *
+   *     #90 bot          opened_at 17:14:51.381   closed_at 02:02:20.361   净 +0.1821
+   *     #92 reconciled   opened_at 17:14:41.276   closed_at 01:51:35.036   净 +0.1713
+   *
+   * **入场时间只差 10 秒**（下单到成交的延迟），**平仓时间差 11 分钟**。
+   * 而当时守卫的三个判据在这笔上**全部落空**：入场价容差 1e-6（实际差 0.116）、
+   * 平仓时间窗口 2 秒（实际差 11 分钟）、补录那条没有入场订单号。
+   *
+   * 后果不是"数字不好看"：那 0.17 被算进了净盈亏，而**钱包余额不会跟着多** ——
+   * 操作员看到的是「界面说赚了 0.20，钱包只多了 0.03」。
+   *
+   * ## 为什么不能靠放宽平仓时间那条
+   *
+   * 同一标的两笔**真实**回合之间只隔着再入场冷却（分钟级），而这两笔正好差
+   * 11 分钟 —— 窗口一放就可能把两笔真实回合并成一笔，那比重复更严重
+   * （会凭空吃掉一笔交易）。所以判据挂在**开仓时刻**上：它两条路径都锚在
+   * "仓位什么时候开的"，只隔下单延迟。
+   *
+   * 上面那条 500ms 的用例仍然要有 —— 它覆盖"两条路径几乎同时记账"那一类；
+   * 这条覆盖"对账几十分钟后才补"那一类。**两类都必须被拦住。**
+   */
+  const qty = 0.009;
+  const exitPrice = 2655.66;
+
+  const live = tradeStore.insert({
+    traderId,
+    symbol: 'ETHUSDT',
+    side: 'long',
+    quantity: qty,
+    entryPrice: 2634.3164186,
+    exitPrice,
+    leverage: 3,
+    grossPnl: 0.1920922326,
+    entryFee: 0,
+    exitFee: 0.01195047,
+    fundingFee: 0.00194304,
+    closeReason: 'stop_loss',
+    openedAt: '2026-09-20T17:14:51.381Z',
+    closedAt: '2026-09-21T02:02:20.361Z',
+    source: 'bot',
+  });
+
+  /* 对账那条：平仓时刻晚了 11 分钟，入场价用的是快照价（差 0.116）。 */
+  const reconciled = tradeStore.insert({
+    traderId,
+    symbol: 'ETHUSDT',
+    side: 'long',
+    quantity: qty,
+    entryPrice: 2634.2,
+    exitPrice,
+    leverage: 3,
+    grossPnl: 0.19314,
+    entryFee: 0.0118539,
+    exitFee: 0.02380437,
+    fundingFee: 0.00194304,
+    closeReason: 'reconciled',
+    openedAt: '2026-09-20T17:14:41.276Z',
+    closedAt: '2026-09-21T01:51:35.036Z',
+    source: 'reconciled',
+    idempotent: true,
+  });
+
+  assert.equal(
+    reconciled.created,
+    false,
+    '开仓时刻只差 10 秒 —— 这是同一个回合，不得插第二行（否则净盈亏会凭空多出 0.17）',
+  );
+  assert.equal(reconciled.id, live.id, '返回的应当是已有的那一行');
+  assert.equal(tradeStore.list(traderId).length, 1, '账上只应有一行');
+});
+
+test('★ 但同一标的、同一个出场价的两笔**真实**回合必须照常入账', () => {
+  /*
+   * 这条是上一条的反面，**没有它，把判据改成"出场价相同就算重复"也能让上面全绿**
+   * —— 而那会吞掉一笔真实成交，比重复记账更严重。
+   *
+   * 区分点是开仓时刻：两笔真实回合之间至少隔一个再入场冷却（配置里 10 分钟），
+   * 而同一回合的两条路径只差下单延迟（实测 10 秒）。5 分钟的窗口把两者分开。
+   */
+  const qty = 218;
+  const entryPrice = 0.1145555;
+  const exitPrice = 0.1139543;
+
+  const first = tradeStore.insert({
+    traderId,
+    symbol: 'BULLAUSDT',
+    side: 'long',
+    quantity: qty,
+    entryPrice,
+    exitPrice,
+    leverage: 5,
+    grossPnl: -0.1062,
+    entryFee: 0.0124,
+    exitFee: 0.0125,
+    closeReason: 'drawdown_guard',
+    openedAt: '2026-09-17T17:33:51.340Z',
+    closedAt: '2026-09-17T17:39:06.483Z',
+    source: 'bot',
+  });
+
+  /* 11 分钟之后另开的一笔：同样的标的、数量、入场与出场价，但**开仓时刻不同**。 */
+  const later = tradeStore.insert({
+    traderId,
+    symbol: 'BULLAUSDT',
+    side: 'long',
+    quantity: qty,
+    entryPrice,
+    exitPrice,
+    leverage: 5,
+    grossPnl: -0.115,
+    entryFee: 0.0125,
+    exitFee: 0.0125,
+    closeReason: 'drawdown_guard',
+    openedAt: '2026-09-17T17:45:00.000Z',
+    closedAt: '2026-09-17T17:50:00.000Z',
+    source: 'reconciled',
+    idempotent: true,
+  });
+
+  assert.equal(later.created, true, '相隔 11 分钟的另一回合必须照常入账，不能被当成重复吞掉');
+  assert.notEqual(later.id, first.id);
+  assert.equal(tradeStore.list(traderId).length, 2);
+});
+
 test('运行中触发止损：平仓原因是「触发止损」而不是「对账补录」', async () => {
   const broker = new FakeBroker();
   await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
