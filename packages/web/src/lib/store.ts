@@ -453,12 +453,26 @@ export const useEvents = create<EventState>((set, get) => ({
 
     if (event.type === 'trader_status') {
       const status = event.status;
-      pushToast(set, {
-        kind: status === 'error' ? 'error' : 'info',
-        title: `机器人 #${event.traderId} → ${traderStatusLabel(status)}`,
-        body: event.detail ?? '',
-        traderId: event.traderId,
-      });
+      /*
+       * ⚠️ **重放的历史不弹通知 —— 但状态照常更新。**
+       *
+       * 这一类与上面三类不同，所以**不能**在 `ingest` 开头一并 `return`：
+       * `trader_status` 除了弹通知，还要更新 `byTrader[id].status`（在下面的
+       * reducer 里）—— 那是新开页面拿到"这台机器人现在是什么状态"的初值来源，
+       * 跳过它会让界面停在上一次会话的旧状态上。
+       *
+       * 实测：每次刷新页面都会看到「机器人 #9 → 启动中」和「→ 运行中」两条提示，
+       * 而它们是**几小时前那次服务重启**留下的历史 —— 重放的 30 条里就带着这一对，
+       * 于是每刷新一次就播一遍。
+       */
+      if (event.replay !== true) {
+        pushToast(set, {
+          kind: status === 'error' ? 'error' : 'info',
+          title: `机器人 #${event.traderId} → ${traderStatusLabel(status)}`,
+          body: event.detail ?? '',
+          traderId: event.traderId,
+        });
+      }
     }
 
     /*
