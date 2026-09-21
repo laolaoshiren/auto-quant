@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BinanceBroker, normalizeAlgo, normalizeStandard } from './broker.js';
+import { BinanceBroker, normalizeAlgo, normalizeStandard, parseAdmittedLeverage } from './broker.js';
 import { roundDownToStep, roundPrice, stepDecimals, SymbolRegistry } from './symbols.js';
 import type { BinanceRest } from './rest.js';
 import type { BinanceMarketData } from './market.js';
@@ -682,3 +682,46 @@ test('市价单名义达标时正常放行 —— 检查不能把合法订单也
   await b.placeOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 0.001 });
   assert.equal(calls.filter((c) => c.path === '/fapi/v1/order').length, 1, '达标的市价单必须能发出去');
 });
+
+/* -------------------------------------------------------------------------- */
+/*  交易所自己说出来的杠杆上限                                                    */
+/* -------------------------------------------------------------------------- */
+
+test('★ 从「杠杆不允许」的报错里挖出交易所承认的上限', () => {
+  /*
+   * ## 为什么需要挖这个数字
+   *
+   * `leverageBracket` 只能给出 **symbol 那一层**的上界 —— 实测这个账户：
+   * BTC 150x、山寨 75x。而**账户级那一层它不反映**（子账户、开户未满 30 天
+   * 之类的限制都在那里）。
+   *
+   * 所以那句报错是账户真实上限**唯一**的来源：拿到它就能一步降到位，
+   * 拿不到就只能二分盲降。
+   */
+  assert.equal(
+    parseAdmittedLeverage('Current symbol max leverage limit is 5x'),
+    5,
+    '`-4209` 的消息里带着数字，必须挖出来',
+  );
+  assert.equal(parseAdmittedLeverage('Leverage limit is 20x'), 20);
+  assert.equal(parseAdmittedLeverage('maximum is 75x'), 75);
+
+  /* 反面：挖不到就返回 null，由调用方退回降级 —— **不许猜**。 */
+  assert.equal(
+    parseAdmittedLeverage('Change leverage failed'),
+    null,
+    '`-4203` 只给一句英文时不能猜一个数字出来',
+  );
+  assert.equal(parseAdmittedLeverage(undefined), null);
+  assert.equal(parseAdmittedLeverage(''), null);
+  /*
+   * 别把消息里别的数字当成杠杆：这句里有个 30，而它不是杠杆上限。
+   * 宁可返回 null（走降级），也不要拿错数字去设一个交易所不认的值。
+   */
+  assert.equal(
+    parseAdmittedLeverage('Account must be at least 30 days old'),
+    null,
+    '没有"limit is N x"那种句式时不得乱认数字',
+  );
+});
+
