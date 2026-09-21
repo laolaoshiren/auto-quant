@@ -1472,7 +1472,27 @@ function renderUserPrompt(
       '# 候选标的\n本周期没有选出任何候选标的。你只能管理已有持仓；若无事可做，返回 `[]`。',
     );
   } else {
-    const blocks = candidates.map((snap, index) => formatMarketData(snap, index, ctx.config));
+    /*
+     * ⚠️ **前 `DETAILED_CANDIDATE_COUNT` 个给完整序列，其余只给概览。**
+     *
+     * 实测：一轮输入 **14.7 万 token**，其中 **95% 是这 20 个标的的完整指标序列**
+     * （4 周期 × 10 条序列 × 30 个点），而模型**通常只深入看 1–2 个**。
+     *
+     * `candidates` 是**按强弱排序**的（`selectCandidates` 把持仓放最前），
+     * 所以"前几个详细"天然落在最该被看的那几个上。
+     *
+     * **持仓标的永远详细** —— 即使它因为某种原因排到了后面。管理已有仓位是核心职责，
+     * 不该因为排序被降级。（正常情况下它们在候选池最前，这一条是兜底。）
+     *
+     * 想看其余标的的完整序列？**现在可以点名要**（`get_klines`）。
+     */
+    const held = new Set(ctx.positions.map((p) => p.position.symbol));
+    const blocks = candidates.map((snap, index) =>
+      formatMarketData(snap, index, ctx.config, {
+        detailed: index < DETAILED_CANDIDATE_COUNT || held.has(snap.symbol),
+      }),
+    );
+    const detailedCount = blocks.filter((_, i) => i < DETAILED_CANDIDATE_COUNT).length;
     /*
      * 两处裁剪都要说 —— 它们发生在不同阶段，模型不该把它们合成一个数字：
      * `ctx.universeTrimmedFrom` 是**选币阶段**按候选上限截断的，
@@ -1487,7 +1507,10 @@ function renderUserPrompt(
         `为把这一次请求控制在上下文预算内，本轮只保留了最强的 ${candidates.length} 个标的；` +
         '被裁掉的是排序最靠后的候选。绩效与历史区块不受影响。' +
         (universeNote ? `\n⚠️ ${universeNote} —— **你没看到的那些不是"市场里没有"，而是被配置的候选上限挡掉了。** 若因此觉得可选标的太少，该调的是 coinSource.coinPoolLimit 或门槛，不是选币逻辑。` : '')
-      : `# 候选标的（${candidates.length} 个）\n每个区块给出一个标的、选中它的来源，以及每个已配置时间周期的指标序列，按由旧到新排列。每个序列的最后一个值就是最新值。` +
+      : `# 候选标的（${candidates.length} 个）\n` +
+        `**前 ${Math.min(detailedCount, candidates.length)} 个给出完整指标序列**（按由旧到新排列，最后一个值就是最新值）；` +
+        '**其余只给摘要**（最新值 + 最近 5 根的走向）—— 那足够用来筛掉它们，' +
+        '而**任何一个你想深看的标的，都可以用 `get_klines` 点名要完整序列**，不必它排前面。' +
         (universeNote ? `\n⚠️ ${universeNote} —— **你没看到的那些不是"市场里没有"，而是被配置的候选上限挡掉了。**` : '');
     volatileParts.push(`${header}\n\n${blocks.join('\n\n')}`);
   }
@@ -1599,6 +1622,29 @@ export function estimateTokens(text: string): number {
  */
 export const PROMPT_TOKEN_BUDGET = 60_000;
 
+/**
+ * 候选池里**给出完整指标序列**的标的个数，其余只给摘要。
+ *
+ * ## 为什么是 5
+ *
+ * 实测量出来的账：一个候选的完整区块约 **10,200 字符**，而其中
+ * **95% 是「4 周期 × 10 条序列 × 30 个点」**；概览（最新价、持仓量、资金费、
+ * 候选评分）只占约 500 字符。
+ *
+ * 20 个候选全给完整序列 = **约 20 万字符 / 14.7 万 token 的输入**，
+ * 而**模型实测通常只深入看 1–2 个**。也就是说绝大多数候选的那 30 个点从没被读过
+ * —— 而"信号淹没在数据里会让人判断变差"这件事，这个文件里写过不止一次。
+ *
+ * 取 5 而不是 2：候选池是**按强弱排序**的，但"最强的"不等于"最值得交易的那个"
+ * （评分量的是"盘整后即将突破"，对已经走出来的强趋势给分偏低 —— 同一段注释里记过）。
+ * 留一倍半的余量，让模型有东西可比较。
+ *
+ * **持仓标的永远详细**，不受这个数字影响。
+ *
+ * 想看其余标的的完整序列？**模型现在可以点名要**（`get_klines`，见 `decisionTools.ts`）
+ * —— 这正是先做"按需取数"再做这个的原因：**先给它后路，再收窄默认。**
+ */
+export const DETAILED_CANDIDATE_COUNT = 5;
 /**
  * **你愿意花多少** —— 提示词预算的成本上限，与模型能吃多少无关。
  *
@@ -1741,7 +1787,28 @@ export function candidateBudget(
  * Volumes: [...]
  * ```
  */
-export function formatMarketData(snap: MarketSnapshot, index: number, config: StrategyConfig): string {
+export function formatMarketData(
+  snap: MarketSnapshot,
+  index: number,
+  config: StrategyConfig,
+  /**
+   * 是否渲染**每个周期的完整指标序列**。
+   *
+   * ## 为什么要有这个开关（实测量出来的）
+   *
+   * 一个候选标的的完整区块约 **10,200 字符**，其中概览（最新价、持仓量、资金费、
+   * 候选评分）只占 **约 500** —— **95% 是「4 个周期 × 10 条序列 × 30 个点」**。
+   *
+   * 而 20 个候选合起来是 **约 20 万字符 / 14.7 万 token 的输入**，
+   * 实测**模型最后通常只深入看 1–2 个标的**。也就是说：**绝大多数候选的
+   * 那 30 个点，它根本没读。** 而"信号淹没在数据里"本身就会让判断变差
+   * （不只是变贵）—— 这句话在这个文件里写过。
+   *
+   * 所以：**候选池前几个给完整序列，其余只给概览**；谁想深看，
+   * 现在有 `get_klines` 可以点名要（见 `decisionTools.ts`）。
+   */
+  options: { detailed: boolean } = { detailed: true },
+): string {
   const indicatorCfg = config.indicators;
   // Multi-source nominations are a genuine signal for the model: a symbol that
   // both the liquidity screen and the open-interest screen picked is stronger
@@ -1829,12 +1896,26 @@ export function formatMarketData(snap: MarketSnapshot, index: number, config: St
         ` · 突破量能 ${(s.parts.breakoutVolume * w.breakoutVolume).toFixed(1)}／${w.breakoutVolume}` +
         ` · 盘整 ${(s.parts.consolidation * w.consolidation).toFixed(1)}／${w.consolidation}` +
         ` · 波动扣分 −${(s.parts.volatilityPenalty * w.volatilityPenalty).toFixed(1)}`,
-      '评分口径：**趋势**=4h EMA21 在最近 5 根（约 20 小时）的斜率，1.5% 即满分；' +
-        '**突破量能**=15m 刚创新高或新低**且**成交量 ≥ 均量 1.5 倍（**只在突破那一刻给分**）；' +
-        '**盘整**=15m 近 10 根窄幅；**波动扣分**=高波动惩罚。' +
-        '→ 它偏向「**盘整后即将突破**」。**对"已经涨了很久的强趋势"给分天然偏低**（那种标的既不在突破那一刻、也不在盘整，还会被波动扣分）。' +
-        '所以分数低**不等于没机会**，只等于"它不在这条尺子量的那类结构里"—— 那种情况下请**用你自己的分析判断**，而不是被这个数字否决。',
     );
+    /*
+     * ⚠️ **口径说明只在第一个候选后面写一次。**
+     *
+     * 它讲的是**同一把尺子** —— 20 个候选各写一遍就是 20 遍同样的 300 字符
+     * （合计约 6,000 字符 ≈ 3,500 token）。实测渲染 20 个候选时量到的浪费。
+     *
+     * 而它必须**出现在第一次看到分数的地方**：那句"分数低不等于没机会"是用来
+     * 防止模型被这个数字否决的，挪到末尾的通用说明里就晚了。
+     */
+    if (index === 0) {
+      lines.push(
+        '评分口径（**只在这里说明一次；后面每个标的的分数都用同一把尺子**）：' +
+          '**趋势**=4h EMA21 在最近 5 根（约 20 小时）的斜率，1.5% 即满分；' +
+          '**突破量能**=15m 刚创新高或新低**且**成交量 ≥ 均量 1.5 倍（**只在突破那一刻给分**）；' +
+          '**盘整**=15m 近 10 根窄幅；**波动扣分**=高波动惩罚。' +
+          '→ 它偏向「**盘整后即将突破**」。**对"已经涨了很久的强趋势"给分天然偏低**（那种标的既不在突破那一刻、也不在盘整，还会被波动扣分）。' +
+          '所以分数低**不等于没机会**，只等于"它不在这条尺子量的那类结构里"—— 那种情况下请**用你自己的分析判断**，而不是被这个数字否决。',
+      );
+    }
   }
 
   /* Quant / order-flow context -------------------------------------------- */
@@ -1851,11 +1932,76 @@ export function formatMarketData(snap: MarketSnapshot, index: number, config: St
   }
 
   /* Per-timeframe series -------------------------------------------------- */
-  for (const tf of snap.timeframes) {
-    lines.push('', renderTimeframe(tf, indicatorCfg));
+  /*
+   * ⚠️ **只有 `detailed` 才渲染完整序列** —— 见 `formatMarketData` 的参数说明。
+   *
+   * 非 detailed 时保留**最新值**（已在 headline 里）与**这一段的方向摘要**，
+   * 那正是"一眼扫过 20 个标的时真正会用到的信息"。
+   */
+  if (options.detailed) {
+    for (const tf of snap.timeframes) {
+      lines.push('', renderTimeframe(tf, indicatorCfg));
+    }
+  } else {
+    lines.push('', renderTimeframeSummary(snap));
   }
 
   return lines.join('\n');
+}
+
+/**
+ * 概览模式下的周期摘要 —— 替代完整序列。
+ *
+ * 每条序列只给**最新值 + 最近 5 根的走向**，而"走向"用**相对最新值的百分比**
+ * 表示而不是把 5 个原始数字列出来：模型看"EMA20 在涨、价格刚站上去"这类判断时，
+ * 百分比比裸数字更快、更省，而**原始数字它想看随时能要**。
+ *
+ * 这一段是给"扫一遍 20 个标的、挑出值得深看的那一两个"用的。
+ */
+function renderTimeframeSummary(snap: MarketSnapshot): string {
+  const lines: string[] = ['周期摘要（完整序列见 `get_klines`，需要哪个周期就点名要）：'];
+  for (const tf of snap.timeframes) {
+    const label = tf.timeframe.toUpperCase();
+    const parts: string[] = [];
+
+    const price = lastValue(tf.closes);
+    if (price !== null) parts.push(`价 ${fmt(price)}${trendOf(tf.closes, price)}`);
+
+    for (const [period, values] of Object.entries(tf.ema)) {
+      const v = lastValue(values);
+      if (v !== null) parts.push(`EMA${period} ${fmt(v)}${trendOf(values, v)}`);
+    }
+    if (tf.macd) {
+      const hist = lastValue(tf.macd.histogram);
+      if (hist !== null) parts.push(`MACD柱 ${fmt(hist)}`);
+    }
+    for (const [period, values] of Object.entries(tf.rsi)) {
+      const v = lastValue(values);
+      if (v !== null) parts.push(`RSI${period} ${fmt(v, 1)}`);
+    }
+    for (const [period, values] of Object.entries(tf.atr)) {
+      const v = lastValue(values);
+      if (v !== null) parts.push(`ATR${period} ${fmt(v)}`);
+    }
+    if (parts.length > 0) lines.push(`${label}: ${parts.join(' | ')}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 一串序列最近 5 根相对于最新值的走向 —— `(↑1.2%)` / `(↓0.8%)` / 空串。
+ *
+ * 只在变化有意义时才标（小于 0.05% 当作持平），避免满屏 `(↑0.0%)` 的噪声。
+ */
+function trendOf(series: Array<number | null> | undefined, latest: number): string {
+  if (!series || latest === 0) return '';
+  const window = series.slice(-5).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  if (window.length < 2) return '';
+  const first = window[0]!;
+  if (first === 0) return '';
+  const pct = ((latest - first) / Math.abs(first)) * 100;
+  if (Math.abs(pct) < 0.05) return '';
+  return `(${pct > 0 ? '↑' : '↓'}${Math.abs(pct).toFixed(1)}%)`;
 }
 
 function lastValue(series: Array<number | null> | undefined): number | null {
