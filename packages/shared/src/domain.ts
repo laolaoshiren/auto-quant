@@ -383,10 +383,39 @@ export const CLOSE_REASON_LABELS: Record<CloseReason, string> = {
   manual_partial: '减仓（部分平仓）',
 };
 
-/** Label for a close reason, falling back to the raw code rather than blank. */
-export function closeReasonLabel(code: string): string {
+/**
+ * Label for a close reason, falling back to the raw code rather than blank.
+ *
+ * ## ⚠️ 传 `netPnl` 之后，「触发止损」会被分成两种说法
+ *
+ * 实测一次真实的困惑：操作员看到两笔成交显示 **盈利**，而平仓原因写着
+ * **「触发止损」**，于是判断这是自相矛盾的 bug。而数据两边都对：
+ *
+ *     ETHUSDT  入场 2634.32  止损位 2660（在成本**之上**）  触发时 +0.17
+ *     BNBUSDT  入场 775.11   止损位 778.6（在成本**之上**）  触发时 +0.03
+ *
+ * 那两笔确实**触发了止损单**，而止损位已经被 `adjust_protection` **上移到成本价之上**
+ * —— 触发的结果就是保本或小赚离场。**这是提示词明确要求它做的事**
+ * （"把止损提到成本价或更高，等于把这笔交易变成最坏情况不亏"），
+ * 是专业做法，不是异常。
+ *
+ * 问题只在措辞：「触发止损」在中文里天然等于"亏了"。所以调用方**知道盈亏时**
+ * 应当把它传进来 —— 那样同一次触发会按结果说成两种话，而且两种都准确。
+ *
+ * 不传也仍然可用（返回通用的"触发止损"）：有些调用点只拿到机器码
+ * （比如日志行、提示词里回放历史），那时宁可用宽泛的说法，也不该猜。
+ */
+export function closeReasonLabel(code: string, netPnl?: number | null): string {
   /* 入参保持 string：库里可能读到迁移前留下的、或状态码表之后新增的值。 */
-  return CLOSE_REASON_LABELS[code as CloseReason] ?? code;
+  const base = CLOSE_REASON_LABELS[code as CloseReason] ?? code;
+  /*
+   * 只在**止损**这一类上分叉。止盈触发本来就只会赚钱，不需要区分；
+   * 其它原因（模型主动平、回撤守卫、爆仓…）与"止损"这个词无关。
+   */
+  if (code === 'stop_loss' && typeof netPnl === 'number' && netPnl > 0) {
+    return '移动止损（保本离场）';
+  }
+  return base;
 }
 
 /**

@@ -1225,7 +1225,9 @@ export function TradesTable({
                         ⚠️ 这一格**不再因为来源是补录而变黄**：那是一个开发信号
                         （说明记账当时漏了一笔），不是操作信号 —— 这笔成交真实、
                         盈亏正确、也不需要操作员做任何事。见 `RECONCILED_TITLE`。 */}
-                    <span className="text-ink-lo">{closeReasonLabel(trade.closeReason)}</span>
+                    <span className="text-ink-lo">
+                      {closeReasonLabel(trade.closeReason, trade.netPnl)}
+                    </span>
                   </td>
                   <td className="td num text-right whitespace-nowrap">
                     {fmtDuration(trade.holdMinutes)}
