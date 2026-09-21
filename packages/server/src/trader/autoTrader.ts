@@ -3545,27 +3545,27 @@ reduceQuantity: null,
    * 两者互补。而这一条治的是实测到的那个病：
    * **平均持仓 4.6 分钟、手续费占毛盈亏 38%，一笔已经赚到钱的单又变回亏损单。**
    *
-   * ## ⚠️ 顺序：先挂新止损，再撤旧的
+   * ## ⚠️ 顺序：**先撤旧、再挂新**（这一段原来是反的，见下）
    *
-   * 这是这个方法里唯一真正需要想清楚的地方。
+   * 实测得出的结论，而不是推理出来的：
    *
-   * | 顺序 | 新挂失败时 |
+   * | 顺序 | 结果 |
    * | --- | --- |
-   * | 先撤旧、再挂新 | **仓位无保护** → 必须立刻平仓（§2.6 的最糟状态） |
-   * | **先挂新、再撤旧** | **旧止损还在**，仓位仍有保护 |
+   * | **先撤旧、再挂新** | 中间有一个短暂的无保护窗口 —— 但这是**唯一可行**的顺序 |
+   * | 先挂新、再撤旧 | **必吃 `-4130`**（币安不允许同一仓位存在两张条件单） |
    *
-   * 第二种永远不会让仓位暴露。代价只是"可能短暂存在两张止损单"，
-   * 而最坏情况是**以较差的价位被保护性平掉** —— 不是失去保护。
-   * 按 §2.6 的精神，这个取舍没有疑问。
+   * 原来这里写的是"先挂新、再撤旧"，理由是"挂新失败时旧止损还在"。那个推理
+   * **漏了交易所的约束**：两张不能并存。实测后果是订单记录里连刷四条 `-4130`、
+   * **保本止损从未生效过**（`20:00:25 / 20:12:25 / 20:15:25 / 20:16:25`）。
    *
-   * 撤旧失败时也**不**回滚新的：那会主动放弃更好的保护价位。
-   * 让两张并存，下一轮会再试一次撤旧。
+   * 所以挂新失败时**必须按 §2.6 处理** —— 立刻市价平仓并记账，
+   * 而不是留一个没有止损的杠杆敞口等下一轮。
    *
-   * ## 为什么不做 "cancelAllOrders"
+   * ## 为什么不用 `cancelAllOrders`
    *
-   * 那会连**止盈单一起撤掉**，然后我就得把它也重新挂一遍 ——
-   * 多一个失败点、多一次无保护窗口，而它和保本毫无关系。
-   * `cancelOrder(symbol, id, kind)` 能只撤那一张。
+   * 它同时撤**普通单和条件单**，会把**止盈单一起撤掉** —— 而本函数只重挂止损，
+   * 那个止盈就永久没了。**精选要撤的那一张**，而不是推倒重来。
+   * 用 `cancelOrder(symbol, id, 'algo')` —— `kind` 必须传 `'algo'`，理由见调用处的注释。
    */
   private async applyBreakevenGuard(): Promise<number> {
     const traderId = this.deps.trader.id;
@@ -3636,8 +3636,29 @@ reduceQuantity: null,
        */
       const oldStopId = local.stop_order_id ? Number(local.stop_order_id) : null;
       if (oldStopId && Number.isFinite(oldStopId)) {
+        /*
+         * ⚠️ **`kind` 必须传 `'algo'` —— 这是本次修的那个 bug。**
+         *
+         * 止损/止盈是**条件单**，挂在币安的 Algo 端点上（`placeProtection` 返回的是
+         * `algoId`）。而 `cancelOrder` 的默认 `kind` 是 `'order'`，会去打：
+         *
+         *     DELETE /fapi/v1/order   { symbol, orderId: <algoId> }
+         *
+         * 那个端点不认 algoId → 返回 `-2011 Unknown order sent` → 而 `cancelOrder` 里
+         * **`-2011` 被当作"已经成交或被撤销"而无条件返回 `true`**
+         * （那个分支对普通订单是对的，详见 `broker.ts` 的注释）。
+         *
+         * 于是这里以为撤干净了，接着去挂新止损 —— 旧的那张**其实还占着名额**，
+         * 撞 `-4130`「该仓位已有止损单」→ `newStopId` 为 null → 按 §2.6 **立刻平仓**。
+         * 实测形态与 `protection_unavailable` 那几笔完全吻合。
+         *
+         * ## 为什么不用 `cancelAllOrders`
+         *
+         * 它同时撤**普通单和条件单**，会把**止盈单一起撤掉** —— 而本函数只重挂止损，
+         * 那个止盈就永久没了。**精选要撤的那一张**，而不是推倒重来。
+         */
         const cancelled = await this.deps.broker
-          .cancelOrder(local.symbol, oldStopId, 'order')
+          .cancelOrder(local.symbol, oldStopId, 'algo')
           .then(() => true)
           .catch(() => false);
         if (!cancelled) {
@@ -4303,7 +4324,15 @@ reduceQuantity: null,
         triggerPrice: input.triggerPrice,
         closePosition: true,
         workingType: 'MARK_PRICE',
-        priceProtect: true,
+        /*
+         * ⚠️ 由策略配置决定 —— **默认关掉**（`priceProtectOnStop: false`）。
+         *
+         * 原来这里写死 `true`。官方语义是"双价差超过阈值时**本次触发受保护**"，
+         * 也就是**极端行情里止损不会触发**。对保证金账户那个取舍是反的：
+         * 影线打掉止损只是少赚一次，**止损不生效可能亏掉保证金**。
+         * 见 `StrategyConfigSchema.priceProtectOnStop` 的完整说明。
+         */
+        priceProtect: this.activeConfig.riskControl.priceProtectOnStop,
         clientOrderId,
       });
 
