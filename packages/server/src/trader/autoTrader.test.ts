@@ -601,7 +601,60 @@ const fakeMarketData = {
   async getOiRanking() {
     return [];
   },
+  /** 按需取数走这里。默认给两根假 K 线，够断言"取到的数据被回喂了"。 */
+  async getKlines(_symbol: string, _timeframe: string, count: number) {
+    return Array.from({ length: Math.min(count, 2) }, (_, i) => ({
+      openTime: Date.UTC(2026, 8, 21, 12, i),
+      open: 2600 + i,
+      high: 2610 + i,
+      low: 2590 + i,
+      close: 2605 + i,
+      volume: 100 + i,
+      closeTime: Date.UTC(2026, 8, 21, 12, i, 59),
+      quoteVolume: 0,
+      trades: 0,
+      takerBuyBase: 0,
+      takerBuyQuote: 0,
+    }));
+  },
+  /** 记录每一次取数请求 —— 用例靠它证明"模型要什么、系统就取什么"。 */
+  klineRequests: [] as Array<{ symbol: string; timeframe: string; count: number }>,
 } as unknown as MarketDataService;
+
+/** 带取数记录的版本。`fakeMarketData` 是共享单例，用例要用自己的。 */
+function recordingMarketData(): {
+  market: MarketDataService;
+  requests: Array<{ symbol: string; timeframe: string; count: number }>;
+} {
+  const requests: Array<{ symbol: string; timeframe: string; count: number }> = [];
+  const market = {
+    async buildSnapshots() {
+      return [snapshot()];
+    },
+    async getOiRanking() {
+      return [];
+    },
+    async getKlines(symbol: string, timeframe: string, count: number) {
+      requests.push({ symbol, timeframe, count });
+      return [
+        {
+          openTime: Date.UTC(2026, 8, 21, 12, 0),
+          open: 2600,
+          high: 2610,
+          low: 2590,
+          close: 2605,
+          volume: 120,
+          closeTime: Date.UTC(2026, 8, 21, 12, 0, 59),
+          quoteVolume: 0,
+          trades: 0,
+          takerBuyBase: 0,
+          takerBuyQuote: 0,
+        },
+      ];
+    },
+  } as unknown as MarketDataService;
+  return { market, requests };
+}
 
 /** Only the methods the trader actually uses. */
 const fakeRegistry = {
@@ -3189,3 +3242,90 @@ test('★ 挂保护单之前必须先撤掉该标的的旧条件单', async () =
     '止盈同理',
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  按需取数                                                                    */
+/* -------------------------------------------------------------------------- */
+
+test('★ 模型可以中途要数据：要什么就取什么，取完再给它出结论', async () => {
+  /*
+   * ## 这条用例守的是"数据视界"
+   *
+   * 在此之前，一个周期开始时批量取好的数据就是模型的**全部世界**：
+   * 它看了 1h 觉得没机会，而 1m 图上刚放量突破 —— **它没有任何办法去要那张图**。
+   * 真人交易员是反过来的：先扫一眼候选，**再针对性地去翻**那个让他起疑的图。
+   *
+   * 这条用例走完整链路：**模型要 → 系统取 → 回喂 → 模型给结论**。
+   */
+  const { market, requests } = recordingMarketData();
+  const responses = [
+    /* 第一轮：分析完发现要更多数据。 */
+    '15m/1h 都没有干净结构，但盘口像刚启动 —— 我要 1 分钟图确认。\n' +
+      '<tool>{"tool":"get_klines","args":{"symbol":"ETHUSDT","timeframe":"1m","count":120}}</tool>',
+    /* 第二轮：拿到数据后给结论。 */
+    OPEN_LONG_RESPONSE,
+  ];
+  let call = 0;
+  const model: DecisionModel = {
+    async complete() {
+      const text = responses[Math.min(call, responses.length - 1)]!;
+      call += 1;
+      return { text, latencyMs: 42, usage: { promptTokens: 100, completionTokens: 50 } };
+    },
+  };
+
+  const trader = new AutoTrader({
+    trader: traders.get(traderId)!,
+    config: strategyStore.get(traders.get(traderId)!.strategyId)!.config,
+    registry: fakeRegistry,
+    market: {} as never,
+    marketData: market,
+    broker: new FakeBroker() as unknown as BinanceBroker,
+    model,
+  });
+
+  const summary = await trader.runOnce();
+
+  assert.equal(requests.length, 1, `应当恰好取一次数，实际 ${JSON.stringify(requests)}`);
+  assert.deepEqual(
+    requests[0],
+    { symbol: 'ETHUSDT', timeframe: '1m', count: 120 },
+    '**取的数据必须正是模型要的那一份** —— 换个周期或换个标的都等于没听懂它',
+  );
+  /* 取完之后它仍然要能给出决策 —— 而且要真的被解析、被执行。 */
+  assert.match(summary, /开仓 1|open/i, `第二轮应当产出决策，实际摘要：${summary}`);
+  assert.equal(call, 2, '应当问了模型两次：一次要数据、一次给结论');
+});
+
+test('没有工具调用时不多问一次 —— 大多数轮次都该只调一次模型', async () => {
+  /*
+   * 反面：**绝大多数周期模型不会要数据**。如果那条路径也多发一次请求，
+   * 每轮就白烧 10 万 token —— 而这个是热路径，代价按周期数放大。
+   */
+  const { market, requests } = recordingMarketData();
+  let call = 0;
+  const model: DecisionModel = {
+    async complete() {
+      call += 1;
+      return {
+        text: OPEN_LONG_RESPONSE,
+        latencyMs: 42,
+        usage: { promptTokens: 100, completionTokens: 50 },
+      };
+    },
+  };
+
+  await new AutoTrader({
+    trader: traders.get(traderId)!,
+    config: strategyStore.get(traders.get(traderId)!.strategyId)!.config,
+    registry: fakeRegistry,
+    market: {} as never,
+    marketData: market,
+    broker: new FakeBroker() as unknown as BinanceBroker,
+    model,
+  }).runOnce();
+
+  assert.equal(call, 1, '没有工具调用就只该问一次');
+  assert.equal(requests.length, 0, '没要数据就不该取数');
+});
+

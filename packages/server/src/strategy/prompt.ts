@@ -9,6 +9,7 @@ import {
 } from '@aq/shared';
 
 import { SCORE_WEIGHTS } from './scoring.js';
+import { DECISION_TOOL_CATALOGUE } from '../trader/decisionTools.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Prompt context                                                             */
@@ -884,6 +885,21 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       '决策块内只能输出合法 JSON：双引号、无注释、无尾随逗号。你可以在 `reasoning` 字段里写简短理由，但 JSON 必须能被解析。',
     ].join('\n'),
   );
+
+  /*
+   * 7.5 — 按需取数（§ 见 `decisionTools.ts`）。
+   *
+   * ⚠️ **这一节必须紧跟在"输出格式"之后。**
+   *
+   * 上面刚说完"只输出两个 XML 块，不要有任何其他内容" —— 那是这套提示词原有的
+   * 硬约束。而"你可以中途要数据"恰好是**对那条约束的一个例外**，所以例外要写在
+   * 规则旁边；放到别处会读成"另外还有个建议"，模型多半不会当回事。
+   *
+   * 这一段解决的是**数据视界**问题：在此之前，每个周期开始时批量取好的那些数据
+   * 就是模型的全部世界 —— 它看了 1h 觉得没机会，而 1m 图上刚放量突破，
+   * **它没有任何办法去要那张图**。真人交易员不会这样工作。
+   */
+  sections.push(DECISION_TOOL_CATALOGUE);
 
   /* 8 — Custom prompt ---------------------------------------------------- */
   const custom = config.customPrompt.trim();

@@ -18,6 +18,8 @@ import {
   type StrategyConfig,
   type Trader,
   type TraderStatus,
+  type Kline,
+  type Timeframe,
 } from '@aq/shared';
 import type { BinanceBroker, ExchangePosition } from '../binance/broker.js';
 import type { AccountState } from '../binance/account.js';
@@ -37,6 +39,11 @@ import {
 } from '../risk/engine.js';
 import { selectCandidates } from '../strategy/coins.js';
 import { parseDecisionResponse, hasDecisionBlock, sortDecisions } from '../strategy/parser.js';
+import {
+  extractToolCalls,
+  runDecisionTool,
+  type DecisionToolDeps,
+} from './decisionTools.js';
 import {
   buildSystemPrompt,
   buildUserPrompt,
@@ -117,6 +124,17 @@ const FULL_RECONCILE_EVERY_PASSES = 24;
  * 所以一行脏数据最多多显示一两轮就会被结清。
  */
 export const ORDER_SETTLE_GRACE_MS = 2 * 60_000;
+
+/**
+ * 一个决策周期里，模型最多能**主动索要几次数据**。
+ *
+ * 每次索要都是一次完整的模型调用（实测单次输入 10 万+ token），而且发生在
+ * 决策周期的**热路径**上 —— 无限轮会让一轮的耗时和成本失控。
+ *
+ * 3 轮覆盖了正常需求（"先要 1m 确认是不是刚启动，再要 4h 看那个结构位"），
+ * 提示词里也把它写明，免得模型以为可以一直要。
+ */
+export const MAX_DATA_ROUNDS = 3;
 
 /**
  * 走 Algo 端点的条件单类型。
@@ -324,6 +342,14 @@ interface CycleProgress {
    */
   cachedTokens: number | null;
   reasoningTokens: number | null;
+  /**
+   * 这一轮模型**主动索要**过的数据（`get_klines ETHUSDT 1m ×120` 这样的短句）。
+   *
+   * 存在的理由与工具调用记录一样：事后要能回答"**它当时到底看了什么**"。
+   * 没有这个字段，一轮"要了三次数据"的决策在事后看起来和"什么都没要"一模一样 ——
+   * 而**要了什么**恰恰决定了它的结论值不值得信。
+   */
+  dataRequests: string[];
 }
 
 /**
@@ -1038,9 +1064,10 @@ export class AutoTrader {
       error: null,
       aiLatencyMs: 0,
       promptTokens: null,
-  cachedTokens: null,
-  reasoningTokens: null,
       completionTokens: null,
+      cachedTokens: null,
+      reasoningTokens: null,
+      dataRequests: [],
     };
 
     /** 失败发生在哪一段。只在错误类型本身说明不了问题时才用得上（见 `describeCycleFailure`）。 */
@@ -1560,7 +1587,7 @@ export class AutoTrader {
      * 回落不是"降级"而是为了不改动已有的桩：`complete` 内部本来就是
      * `chat([system, user])`，两条消息也能跑，只是缓存命中差一些。
      */
-    const response = this.deps.model.chat
+    let response = this.deps.model.chat
       ? await this.deps.model.chat([
           { role: 'system', content: systemPrompt },
           ...(stablePrompt.length > 0
@@ -1577,11 +1604,120 @@ export class AutoTrader {
           { role: 'user', content: volatilePrompt },
         ])
       : await this.deps.model.complete(systemPrompt, userPrompt);
-    progress.aiLatencyMs = response.latencyMs || Date.now() - startedAt;
-    progress.promptTokens = response.usage.promptTokens;
-    progress.completionTokens = response.usage.completionTokens;
-    progress.cachedTokens = response.usage.cachedTokens ?? null;
-    progress.reasoningTokens = response.usage.reasoningTokens ?? null;
+
+    /*
+     * ── 按需取数：模型可以在给结论之前主动要数据 ─────────────────────────
+     *
+     * ## 为什么要有这一段
+     *
+     * 在此之前，这个周期开始时批量取好的那些数据就是模型的**全部世界** ——
+     * 它看了 1h 觉得没机会，而 1m 图上刚放量突破，**它没有任何办法去要那张图**。
+     * 真人交易员是反过来的：先扫一眼候选，**再针对性地去翻**那个让他起疑的
+     * 币、那个关键周期的图。
+     *
+     * ## 为什么是"最多 3 轮"而不是无限
+     *
+     * 每要一次都是一次完整的模型调用（**实测单次输入 10 万+ token**），
+     * 而这一步发生在**决策周期的热路径上**。无限轮次会让一轮决策的耗时和成本
+     * 失控。3 轮足够覆盖"先要 1m 确认启动、再要 4h 确认结构"这种正常需求，
+     * 而提示词里也明确告诉它"最多 3 次，一次要够"。
+     *
+     * ## token 用量必须累计
+     *
+     * `progress` 里的用量是给操作员看"这一轮花了多少"的。只记最后一次调用
+     * 会让**要了数据的那几轮凭空消失** —— 而那恰好是最贵的那几轮。
+     */
+    let finalResponse = response;
+    const toolDeps: DecisionToolDeps = {
+      klines: (symbol, timeframe, count) =>
+        this.deps.marketData.getKlines(
+          symbol,
+          timeframe as Timeframe,
+          count,
+        ) as Promise<Kline[]>,
+      candidates: async () => snapshots.map((s) => s.symbol),
+    };
+
+    /*
+     * 用量从**第一次调用**起累加。
+     *
+     * 用一个独立的累加器而不是直接改 `response.usage` —— 后者是模型客户端返回的
+     * 对象，改它会让"这一轮的真实用量"和"最后一次调用的用量"这两个不同的东西
+     * 混成一个，而账目恰恰要能分开看。
+     */
+    let totalPrompt = response.usage.promptTokens;
+    let totalCompletion = response.usage.completionTokens;
+    let totalCached: number | null = response.usage.cachedTokens ?? null;
+    let totalReasoning: number | null = response.usage.reasoningTokens ?? null;
+    const dataRequests: string[] = [];
+
+    for (let dataRound = 1; dataRound <= MAX_DATA_ROUNDS; dataRound += 1) {
+      const calls = extractToolCalls(finalResponse.text);
+      if (calls.length === 0) break;
+
+      const outcomes = await Promise.all(calls.map((call) => runDecisionTool(call, toolDeps)));
+      const summaries = outcomes.map((o) => o.summary);
+      dataRequests.push(...summaries);
+
+      this.emit(
+        'info',
+        `按需取数 #${dataRound}：${summaries.join('、')}（这一轮还会再问一次模型）`,
+      );
+
+      /*
+       * 与上面那次调用同样的回落：有 `chat` 就用它，没有（测试桩）就用 `complete`。
+       * 回落时把工具结果直接拼进 user 提示词 —— 两条消息也能跑，只是缓存命中差。
+       */
+      const askAgain = (extra: string) =>
+        this.deps.model.chat
+          ? this.deps.model.chat([
+              { role: 'system', content: systemPrompt },
+              ...(stablePrompt.length > 0
+                ? [{ role: 'user' as const, content: stablePrompt }]
+                : []),
+              { role: 'user', content: volatilePrompt },
+              { role: 'assistant', content: finalResponse.text },
+              { role: 'user', content: extra },
+            ])
+          : this.deps.model.complete(systemPrompt, `${userPrompt}\n\n${extra}`);
+
+      const followUp = await askAgain(
+        `你要的数据：\n\n${outcomes.map((o) => o.text).join('\n\n')}\n\n` +
+          '现在给出你的最终结论 —— 输出 `<reasoning>` 与 `<decision>` 两个块。' +
+          (dataRound >= MAX_DATA_ROUNDS
+            ? '**取数次数已经用完，不要再写工具调用。**'
+            : `还可以再要 ${MAX_DATA_ROUNDS - dataRound} 次数据，或者直接给结论。`),
+      );
+
+      totalPrompt = (totalPrompt ?? 0) + (followUp.usage.promptTokens ?? 0);
+      totalCompletion = (totalCompletion ?? 0) + (followUp.usage.completionTokens ?? 0);
+      totalCached = (totalCached ?? 0) + (followUp.usage.cachedTokens ?? 0);
+      totalReasoning = (totalReasoning ?? 0) + (followUp.usage.reasoningTokens ?? 0);
+
+      finalResponse = followUp;
+    }
+
+    progress.promptTokens = totalPrompt;
+    progress.completionTokens = totalCompletion;
+    progress.cachedTokens = totalCached;
+    progress.reasoningTokens = totalReasoning;
+    /*
+     * 延迟：**取过数就用端到端**（那才是这一轮真实的等待时间，模型被问了不止一次），
+     * 没取数就沿用客户端报的读数。
+     */
+    progress.aiLatencyMs =
+      dataRequests.length > 0 ? Date.now() - startedAt : response.latencyMs || Date.now() - startedAt;
+    progress.dataRequests = dataRequests;
+
+    /*
+     * ⚠️ **把最终那次回复交回去给下面的解析用。**
+     *
+     * 循环里每一轮的结果在 `finalResponse`；而下面 8.Parse 读的是 `response.text`。
+     * 少了这一行，**要过数据的那一轮会被判成"没有 `<decision>` 块"** ——
+     * 因为 `response` 还是第一轮那条只带 `<tool>` 的回复。
+     * （实测：这条路径第一次跑就踩了，用例当场抓到。）
+     */
+    response = finalResponse;
 
     /* --- 8. Parse -------------------------------------------------------- */
     state.phase = 'parse';
