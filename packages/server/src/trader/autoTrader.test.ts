@@ -413,12 +413,47 @@ class FakeBroker {
     }
   }
 
+  /**
+   * 交易所成交历史。
+   *
+   * 默认空。两个来源：
+   *   · 测试直接设 `userTrades`（要造特定的成交形状时）；
+   *   · 或打开 `autoUserTrades` —— 那时每一笔**已下的市价单**会按 `commissionRate`
+   *     生成一条成交，用于验证"运行期能不能把手续费读回来"。
+   *
+   * 后者是必需的：开仓路径要按 `clientOrderId` 去成交明细里查佣金，而那个订单号
+   * 是运行期生成的（`makeClientId` 带随机后缀），测试**没法预先知道**它。
+   */
   async getUserTrades() {
-    return this.userTrades;
+    if (!this.autoUserTrades) return this.userTrades;
+    return this.placed
+      .filter((r) => r.type === 'MARKET')
+      .map((r) => {
+        const qty = r.quantity ?? 0;
+        const price = this.markPrice;
+        return {
+          orderId: Number(r.clientOrderId?.replace(/\D/g, '') ?? 0) || 0,
+          clientOrderId: r.clientOrderId ?? '',
+          symbol: r.symbol,
+          side: r.side,
+          price: String(price),
+          qty: String(qty),
+          /* 币安把佣金报成负数（支出）。 */
+          commission: String(-(qty * price * this.commissionRate)),
+          commissionAsset: 'USDT',
+          time: Date.now(),
+        } as unknown as BinanceUserTrade;
+      });
   }
 
   /** 一次性探针用：交易所成交历史。 */
   userTrades: BinanceUserTrade[] = [];
+
+  /** 打开后 `getUserTrades` 按已下的市价单生成成交（见该方法说明）。 */
+  autoUserTrades = false;
+
+  /** 生成成交时用的佣金率。默认 0.04%（币安 USDT-M 吃单费率的量级）。 */
+  commissionRate = 0.0004;
 
   async getIncome() {
     return this.income;
@@ -2890,4 +2925,102 @@ test('★ 读流水失败那一轮的"差额"不能进提示词 —— 它是假
    */
   settings.set(`ledger_check:${traderId}`, JSON.stringify({ gap: 0.02 }));
   assert.equal(readForeignActivity(traderId).ledgerGap, 0.02, '没有那个字段的老数据必须照读');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  订单记录的完整性                                                            */
+/* -------------------------------------------------------------------------- */
+
+test('★ 开仓手续费要查成交明细写进订单 —— 下单响应里没有它', async () => {
+  /*
+   * ## 这条用例来自一次"我的修法加的是 0"
+   *
+   * 我给总账校验加了「把未平仓的持有成本算进平台侧」，它读的是 `orders.fee` ——
+   * 而那个字段对每一张开仓单都是 `0`。**我基于一个没验证的假设写了修法。**
+   *
+   * 币安的下单响应里本来就不含佣金，要另外查成交明细。平仓路径早就这么做了
+   * （`lastFillFor`），而开仓路径从来没查过。除了让总账校验失效，它还让
+   * **订单列表的「手续费」列对开仓单永远是 0** —— 界面与事实不符。
+   */
+  const broker = new FakeBroker();
+  broker.autoUserTrades = true;
+
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const entry = orderStore.list(traderId).find((o) => o.purpose === 'entry');
+  assert.ok(entry, '前提：开仓单已记录');
+  assert.ok(
+    entry.fee > 0,
+    `开仓单的手续费必须从成交明细查回来，实际 ${entry.fee}` +
+      '（它是总账校验把未平仓成本算进平台侧的唯一数据源，也是订单列表那一列的内容）',
+  );
+});
+
+test('★ 加仓也要记订单 —— 它是一笔真实成交', async () => {
+  /*
+   * `add_to_position` 原来下单、等成交、改本地持仓、写节流事件，**唯独没有
+   * `recordOrder`** —— 于是订单列表里永远看不到加仓单，而它是一笔有真实手续费的成交。
+   * 操作员拿订单列表与交易所核对时会对不上。
+   */
+  const broker = new FakeBroker();
+  broker.autoUserTrades = true;
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const before = orderStore.list(traderId).filter((o) => o.purpose === 'entry').length;
+
+  const addResponse = `<decision>
+\`\`\`json
+[
+  {
+    "symbol": "${SYMBOL}",
+    "action": "add_to_position",
+    "position_size_usd": 100,
+    "confidence": 80,
+    "reasoning": "结构仍成立，加一点。"
+  }
+]
+\`\`\`
+</decision>`;
+  await buildTrader(broker, addResponse).runOnce();
+
+  const entries = orderStore.list(traderId).filter((o) => o.purpose === 'entry');
+  assert.equal(
+    entries.length,
+    before + 1,
+    `加仓必须多出一条入场订单记录，实际 ${before} → ${entries.length}` +
+      '（少了它，"当前委托/历史委托"里就少了这一笔真实成交）',
+  );
+});
+
+test('★ 减仓也要记订单 —— 同上', async () => {
+  /*
+   * `reduce_position` 算出了 `exitFee`、写进了成交表、改了持仓，也没有 `recordOrder`。
+   */
+  const broker = new FakeBroker();
+  broker.autoUserTrades = true;
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const before = orderStore.list(traderId).filter((o) => o.purpose === 'exit').length;
+
+  const reduceResponse = `<decision>
+\`\`\`json
+[
+  {
+    "symbol": "${SYMBOL}",
+    "action": "reduce_position",
+    "reduce_percent": 50,
+    "confidence": 80,
+    "reasoning": "结构转弱，先减一半保浮盈。"
+  }
+]
+\`\`\`
+</decision>`;
+  await buildTrader(broker, reduceResponse).runOnce();
+
+  const exits = orderStore.list(traderId).filter((o) => o.purpose === 'exit');
+  assert.equal(
+    exits.length,
+    before + 1,
+    `减仓必须多出一条平仓订单记录，实际 ${before} → ${exits.length}`,
+  );
 });
