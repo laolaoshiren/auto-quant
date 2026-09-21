@@ -162,7 +162,31 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
       'Your prompt is a parameter like any other: if it no longer fits the market, change it — ' +
       'a fixed prompt cannot be called intelligent. ' +
       'You MUST give a reason — an unexplained change cannot be reviewed later. ' +
-      'Anything the structural guard overrides is reported back in clamps.',
+      'Anything the structural guard overrides is reported back in clamps.' +
+      /*
+       * ⚠️ **"看多长的周期"是一个一等一的交易决策，而它原来只被 `indicators.*` 一笔带过。**
+       *
+       * 实测：机器人跑了几十轮，`indicators.kline.selectedTimeframes` 一直是
+       * `["5m","15m","1h","4h"]`、`primaryTimeframe: "5m"`，**一次都没改过** ——
+       * 而它自己在 `entryStandards` 里写下了「只在 15m 与 1h 同向时才考虑入场」，
+       * 也就是**它给自己上了锁，却不知道钥匙就在这个工具里**。
+       *
+       * 真人交易员不是这么做的：看到刚放量的突破会去翻 1m/5m 找精确入场点；
+       * 判断一波趋势还能不能拿，会去看 4h/1d 的结构。**同一个币在不同时刻该看不同周期。**
+       *
+       * 所以这里照 `set_cycle_interval` 的写法（那个工具的说明把"多久醒一次"讲成了
+       * 交易决策而不是设置，效果明显好得多）把同一件事讲透。
+       */
+      ' ' +
+      '**AND — reading the right timeframes is a first-class trading decision, not a setting.** ' +
+      '`indicators.kline.selectedTimeframes` decides which candles you actually SEE, and ' +
+      '`indicators.kline.primaryTimeframe` / `promptPoints` decide how much of each. ' +
+      'They are all adjustable above. Ask yourself regularly: *is the timeframe I am staring at ' +
+      'the one this opportunity lives on?* A breakout that just printed huge volume is a 1m/5m ' +
+      'question; whether a trend still holds is a 4h/1d question. If your own entry standards ' +
+      'name fixed timeframes ("only when 15m and 1h agree"), that rule is a parameter too — ' +
+      're-read it against the market you are actually in, not the market you wrote it for. ' +
+      'Changes take effect on your next cycle.',
     args: {
       patch: { type: 'object', required: true, describe: 'The fields to change.' },
       reason: {
