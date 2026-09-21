@@ -102,6 +102,7 @@ function contextWith(memory: PromptMemory, candidates?: MarketSnapshot[]): Promp
     memory,
     /* 默认不裁剪；需要测"选币阶段裁过"的用例自己覆盖它。 */
     universeTrimmedFrom: null,
+    pendingEntries: [],
   };
 }
 

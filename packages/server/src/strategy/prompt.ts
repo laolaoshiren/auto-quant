@@ -50,6 +50,22 @@ export interface PromptPosition {
   holdingMinutes: number;
 }
 
+/** 一张挂出去、还没成交的限价入场单（提示词用）。 */
+export interface PromptPendingEntry {
+  symbol: string;
+  side: 'long' | 'short';
+  quantity: number;
+  /** 挂单的价位（**不是成交价** —— 它还没成交）。 */
+  limitPrice: number;
+  /** 挂上去多少分钟了。 */
+  waitingMinutes: number;
+  /** 成交后会用这个止损挂保护单。 */
+  stopLoss: number | null;
+  takeProfit: number | null;
+  /** 当初为什么挂这一单。 */
+  reasoning: string;
+}
+
 export interface PromptContext {
   traderName: string;
   cycleNumber: number;
@@ -57,6 +73,19 @@ export interface PromptContext {
   config: StrategyConfig;
   account: PromptAccountInfo;
   positions: PromptPosition[];
+  /**
+   * **已挂出、等待成交的限价入场单。**
+   *
+   * ## 为什么它必须进提示词
+   *
+   * 没有它，模型**不知道自己在等什么** —— 它会为一笔已经挂好的入场重复提案，
+   * 或者干脆忘了这件事。而这两件事都真实发生过（`agent_memory` 里那句
+   * 「问题出在移损/止盈规则过松」的另一面就是：它对自己手上的状态不完全清楚）。
+   *
+   * 它**不是持仓**，所以单独一段、措辞明确 —— 不能混进「当前持仓」里，
+   * 那会让模型以为仓位已经成立、去做它现在还做不到的事（比如"把止损上移"）。
+   */
+  pendingEntries: PromptPendingEntry[];
   candidates: MarketSnapshot[];
   oiRanking: OiRankRow[];
   /**
@@ -1519,6 +1548,38 @@ function renderUserPrompt(
       return rows.join('\n');
     });
     volatileParts.push(`# 当前持仓\n${lines.join('\n\n')}`);
+  }
+
+  /* 6.5 — Pending limit entries ------------------------------------------ */
+  /*
+   * ⚠️ **挂在外面、等成交的限价单必须让模型看见。**
+   *
+   * 没有这一段，模型**不知道自己在等什么** —— 它会为一笔已经挂好的入场重复提案，
+   * 或者干脆忘了这件事。
+   *
+   * 而它**单独成段、措辞明确**：这不是持仓（一根都没成交），模型不该拿它当仓位
+   * 去管理（比如"把止损上移" —— 挂单上根本没有止损单可移，那个止损只是**计划**）。
+   * 混进「当前持仓」会让它做出执行层做不到的动作。
+   */
+  if (ctx.pendingEntries.length > 0) {
+    const lines = ctx.pendingEntries.map((p, index) => {
+      const rows = [
+        `${index + 1}. ${p.symbol} ${p.side === 'long' ? '做多' : '做空'} | **挂单 ${fmt(p.limitPrice)}**（尚未成交）`,
+        `   数量 ${fmt(p.quantity, 6)} | 已等 ${humanDuration(p.waitingMinutes)}`,
+        `   成交后会用这两个价位挂保护单：止损 ${p.stopLoss ? fmt(p.stopLoss) : '无'} | 止盈 ${p.takeProfit ? fmt(p.takeProfit) : '无'}`,
+      ];
+      if (p.reasoning) rows.push(`   当初的理由：${p.reasoning.slice(0, 200)}`);
+      return rows.join('\n');
+    });
+    volatileParts.push(
+      `# 等待成交的挂单（${ctx.pendingEntries.length} 张，**不是持仓**）\n` +
+        `${lines.join('\n\n')}\n\n` +
+        '**这些是"已经在排队"的入场，不是"可以再开一个"的名额** —— 它们已经占着持仓上限。' +
+        '所以：不要在同一个标的上再提一次入场（那张单还在等）；也不要以为仓位已经成立 —— ' +
+        '**成交之前你无法管理它**（改不了它的止损，因为还没有仓位）。\n' +
+        '如果你认为那张单已经**不该再等下去**（价位错了、逻辑变了、等太久了），' +
+        '下一步我会给你撤单的能力；在那之前，用 `wait` 说明你的判断即可。',
+    );
   }
 
   /* 7 — Candidate coins -------------------------------------------------- */

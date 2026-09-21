@@ -165,6 +165,7 @@ async function main(): Promise<void> {
     oiRanking,
     /* 管道验证不做选币裁剪（候选就那几个），如实填 null。 */
     universeTrimmedFrom: null,
+    pendingEntries: [],
   };
 
   const systemPrompt = buildSystemPrompt(context);
