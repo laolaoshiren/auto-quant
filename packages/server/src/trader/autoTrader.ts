@@ -2213,6 +2213,38 @@ export class AutoTrader {
     return { price: 0, fee: 0 };
   }
 
+  /**
+   * 这一张开仓单**实际付掉的手续费**（按订单号把多笔成交的佣金加起来）。
+   *
+   * ## 为什么开仓也要查一次
+   *
+   * 币安的下单响应里**不含佣金**，要另外查成交明细。平仓路径早就这么做了
+   * （`lastFillFor`），而开仓路径从来没查过 —— 于是 `orders.fee` 对每一张开仓单
+   * 都是 `0`，带来两个后果：
+   *
+   *  1. **订单列表的「手续费」列对开仓单永远是 0** —— 界面与事实不符；
+   *  2. **总账校验无法把"未平仓的持有成本"加到平台侧**（它要读这个字段），
+   *     于是那个差额被报成"账本可能有漏记或重复记账"，而且每轮报一次。
+   *
+   * 按 `clientOrderId` 筛而不是"取最后一笔"：市价单可能拆成多笔成交
+   * （`lastFillFor` 只取最后一笔，对平仓够用，因为那里同时要的是最新价）。
+   * 佣金是**支出**，币安报成负数，这里取绝对值 —— 与 `orders.fee` 的语义
+   * （"付了多少"的正数）一致。
+   */
+  private async entryFeeFor(symbol: string, clientOrderId: string): Promise<number> {
+    try {
+      const fills = await this.deps.broker.getUserTrades(symbol, 20);
+      const mine = fills.filter(
+        (f) => String((f as { clientOrderId?: string }).clientOrderId ?? '') === clientOrderId,
+      );
+      if (mine.length === 0) return 0;
+      return Math.abs(mine.reduce((sum, f) => sum + (Number(f.commission) || 0), 0));
+    } catch {
+      /* 拿不到就按 0：宁可这一列暂时空着，也不要让开仓整个失败。 */
+      return 0;
+    }
+  }
+
   /** Persist a trade and mark the local position closed. */
   private async bookClosedPosition(
     local: PositionRow,
@@ -3947,6 +3979,12 @@ reduceQuantity: null,
         };
       }
 
+      /*
+       * ⚠️ **开仓手续费要自己查一次** —— 下单响应里没有它，而订单列表要显示、
+       * 总账校验也要用它。见 `entryFeeFor` 的说明。
+       */
+      const entryFee = await this.entryFeeFor(symbol, clientOrderId);
+
       this.recordOrder({
         traderId,
         exchangeOrderId: filled.id,
@@ -3961,6 +3999,7 @@ reduceQuantity: null,
         status: filled.status,
         avgPrice: entryPrice,
         filledQty,
+        fee: entryFee,
         raw: filled.raw,
       });
 
@@ -4337,6 +4376,33 @@ reduceQuantity: null,
     const newQty = local.quantity + addQty;
     const newEntry = (local.entry_price * local.quantity + fillPrice * addQty) / newQty;
 
+    /*
+     * ⚠️ **加仓也是一笔真实订单，必须进订单表。**
+     *
+     * 这一段原来什么都不记：下单、等成交、改本地持仓、写节流事件 —— 唯独没有
+     * `recordOrder`。后果是**订单列表里永远看不到加仓单**，而它是一笔真实的成交、
+     * 有真实的手续费，操作员在「当前委托 / 历史委托」里核对时会对不上账。
+     *
+     * 与开仓同一处口径：手续费要另外查成交明细（下单响应里没有）。
+     */
+    const addFee = await this.entryFeeFor(decision.symbol, clientOrderId);
+    this.recordOrder({
+      traderId,
+      exchangeOrderId: filledId,
+      clientOrderId,
+      symbol: decision.symbol,
+      side,
+      type: 'MARKET',
+      purpose: 'entry',
+      quantity: addQty,
+      price: null,
+      triggerPrice: null,
+      status: 'FILLED',
+      avgPrice: fillPrice,
+      filledQty: addQty,
+      fee: addFee,
+    });
+
     /* ③ 更新本地持仓：数量与**加权均价**一起改。 */
     positionStore.resize(traderId, decision.symbol, {
       quantity: newQty,
@@ -4512,6 +4578,32 @@ reduceQuantity: null,
     } catch {
       /* 拿不到手续费就记 0，对账会补 */
     }
+
+    /*
+     * ⚠️ **减仓同样是一笔真实订单，必须进订单表。**
+     *
+     * 与 `executeAdd` 同一个缺口：下单、算手续费、写成交表、改持仓 —— 唯独没有
+     * `recordOrder`，于是「当前委托 / 历史委托」里永远看不到这一笔。
+     * 操作员拿订单列表与交易所核对时会对不上。
+     *
+     * 用途是 `exit`（平掉一部分），所以它进「历史委托」的"平仓"这一类。
+     */
+    this.recordOrder({
+      traderId,
+      exchangeOrderId: filledId,
+      clientOrderId,
+      symbol: decision.symbol,
+      side,
+      type: 'MARKET',
+      purpose: 'exit',
+      quantity: reduceQty,
+      price: null,
+      triggerPrice: null,
+      status: 'FILLED',
+      avgPrice: exitPrice,
+      filledQty: reduceQty,
+      fee: exitFee,
+    });
 
     /*
      * ③ 当场记这一笔部分平仓。
