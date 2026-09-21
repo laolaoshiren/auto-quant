@@ -4440,6 +4440,54 @@ test('★ 风控拒绝了提案时也要回执 —— 那是模型能立刻修�
   );
 });
 
+/* -------------------------------------------------------------------------- */
+/*  可观测性：追问就要留痕                                                        */
+/* -------------------------------------------------------------------------- */
+
+test('★ 追问了就记一条日志 —— 哪怕模型什么都没调整', async () => {
+  /*
+   * ## 这条守的是"机制可观察"
+   *
+   * 我第一版只在"模型确实调了什么"时才 emit，于是这两种情况**在日志里长得
+   * 一模一样**：
+   *
+   *   · **回执发生了、而模型回了空数组**（完全正常的答案）；
+   *   · **回执压根没发生**（某个筛选条件把它排除了）。
+   *
+   * 而实测我正是**靠日志判断"回执有没有上线"** —— 那个 0 条的日志让我怀疑了
+   * 两轮，还去对了服务启动时间才排除"代码没生效"。
+   *
+   * **一个观察不到的机制，等于无法验证的机制。** 这条钉住"追问就留痕"。
+   */
+  const broker = new FakeBroker();
+  const messages: string[] = [];
+  setLogSink((_level, _scope, message) => {
+    messages.push(message);
+  });
+
+  let call = 0;
+  const model: DecisionModel = {
+    async complete() {
+      call += 1;
+      /* 第一次正常开仓；回执那一轮**什么都不调整**（空数组）。 */
+      return {
+        text: call === 1 ? OPEN_LONG_RESPONSE : '<decision>[]</decision>',
+        latencyMs: 10,
+        usage: { promptTokens: 1, completionTokens: 1 },
+      };
+    },
+  };
+
+  await buildTrader(broker, OPEN_LONG_RESPONSE, model).runOnce();
+  setLogSink(null);
+
+  assert.equal(call, 2, '前提：回执确实追问了一次');
+  assert.ok(
+    messages.some((m) => m.includes('执行回执已追问')),
+    `★ 追问了就必须留一条日志 —— 否则"模型没调整"和"回执没发生"分不出来。实际日志：${JSON.stringify(messages.slice(-4))}`,
+  );
+});
+
 
 
 
