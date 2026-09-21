@@ -4909,6 +4909,26 @@ reduceQuantity: null,
     input.progress.completionTokens =
       (input.progress.completionTokens ?? 0) + (usage.completionTokens ?? 0);
 
+    /*
+     * ⚠️ **追问就记 —— 不管模型有没有真的调整。**
+     *
+     * 我第一版只在"模型确实调了什么"时才 emit，于是：
+     *
+     *   · **回执发生了、而模型回了空数组**（那是一个完全正常的答案）；
+     *   · **回执压根没发生**（比如某个筛选条件把它排除了）
+     *
+     * ——**这两种情况在日志里长得一模一样**。而实测我正是靠日志判断"回执有没有
+     * 上线"，于是那一条 0 条的日志让我怀疑了两轮。
+     *
+     * 那正是这个项目反复在修的那类问题：**一个观察不到的机制，等于无法验证的机制。**
+     */
+    this.emit(
+      'info',
+      `执行回执已追问（${happened.length} 条结果交回给模型）：${happened
+        .map((h) => `${h.status}:${h.action} ${h.symbol}`)
+        .join('、')}`,
+    );
+
     const parsed = parseDecisionResponse(text, {
       candidateSymbols: new Set(positionStore.open(traderId).map((p) => p.symbol)),
       openPositions: new Map(positionStore.open(traderId).map((p) => [p.symbol, p.side as 'long' | 'short'])),
