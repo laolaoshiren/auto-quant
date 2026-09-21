@@ -2,7 +2,7 @@
 
 本项目的 Docker 镜像包含以下第三方软件包。它们的许可证要求**在再分发时保留版权声明与许可证文本**，本文件即为该义务的履行方式。
 
-运行时依赖共 **180** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
+运行时依赖共 **183** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
 
 > 本文件由 `node scripts/generate-notices.mjs` 自动生成，请勿手工编辑。
 > CI 会校验它与当前依赖一致。
@@ -11,12 +11,13 @@
 
 | 许可证 | 包数量 |
 | --- | --- |
-| MIT | 146 |
-| ISC | 21 |
+| MIT | 148 |
+| ISC | 22 |
 | BSD-3-Clause | 5 |
-| BlueOak-1.0.0 | 4 |
+| BlueOak-1.0.0 | 3 |
 | Apache-2.0 | 2 |
 | 0BSD | 1 |
+| BSD-2-Clause | 1 |
 | MIT AND ISC | 1 |
 
 各项义务：**MIT / ISC / BSD / BlueOak** 要求保留版权与许可证文本；**Apache-2.0** 还要求在存在 `NOTICE` 文件时一并保留（当前依赖均不含 NOTICE）。以上各项均已通过本文件与镜像内的原始许可证文件满足。
@@ -33,10 +34,10 @@
 | @fastify/fast-json-stringify-compiler | 5.1.0 | MIT | Manuel Spigolon <manuel.spigolon@nearform.com> (https://gith |
 | @fastify/forwarded | 3.0.2 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
 | @fastify/merge-json-schemas | 0.2.1 | MIT | Ivan Tymoshenko <ivan@tymoshenko.me> |
-| @fastify/proxy-addr | 5.1.0 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
+| @fastify/proxy-addr | 5.1.1 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
 | @fastify/send | 4.1.1 | MIT | TJ Holowaychuk <tj@vision-media.ca> |
 | @fastify/static | 10.1.4 | MIT | Tommaso Allevi - @allevo |
-| @fastify/websocket | 11.3.0 | MIT | Matteo Collina <hello@matteocollina.com> |
+| @fastify/websocket | 11.3.1 | MIT | Matteo Collina <hello@matteocollina.com> |
 | @floating-ui/core | 1.8.0 | MIT | atomiks |
 | @floating-ui/dom | 1.8.0 | MIT | atomiks |
 | @floating-ui/react-dom | 2.1.9 | MIT | atomiks |
@@ -85,16 +86,17 @@
 | @types/d3-time | 3.0.4 | MIT | — |
 | @types/d3-timer | 3.0.2 | MIT | — |
 | abstract-logging | 2.0.1 | MIT | James Sumners <james.sumners@gmail.com> |
-| ajv | 8.20.0 | MIT | Evgeny Poberezkin |
+| ajv | 6.15.0 | MIT | Evgeny Poberezkin |
 | ajv-formats | 3.0.1 | MIT | Evgeny Poberezkin |
 | aria-hidden | 1.2.6 | MIT | Anton Korzunov <thekashey@gmail.com> |
 | atomic-sleep | 1.0.0 | MIT | David Mark Clements (@davidmarkclem) |
 | avvio | 9.3.0 | MIT | Matteo Collina <hello@matteocollina.com> |
-| balanced-match | 4.0.4 | MIT | — |
-| brace-expansion | 5.0.12 | MIT | — |
+| balanced-match | 1.0.2 | MIT | Julian Gruber |
+| brace-expansion | 1.1.21 | MIT | Julian Gruber |
 | class-variance-authority | 0.7.1 | Apache-2.0 | Joe Bell (https://joebell.co.uk) |
 | clsx | 2.1.1 | MIT | Luke Edwards |
 | cmdk | 1.1.1 | MIT | Paco |
+| concat-map | 0.0.1 | MIT | James Halliday |
 | content-disposition | 3.0.0 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
 | cookie | 1.1.1 | MIT | Roman Shtylman <shtylman@gmail.com> |
 | csstype | 3.2.3 | MIT | Fredrik Nicol <fredrik.nicol@gmail.com> |
@@ -122,11 +124,12 @@
 | fancy-canvas | 2.1.0 | MIT | smakarov@tradingview.com |
 | fast-decode-uri-component | 1.0.1 | MIT | Tomas Della Vedova - @delvedor (http://delved.org) |
 | fast-deep-equal | 3.1.3 | MIT | Evgeny Poberezkin |
-| fast-equals | 5.4.2 | MIT | Tony Quetano |
+| fast-equals | 5.4.3 | MIT | Tony Quetano |
+| fast-json-stable-stringify | 2.1.0 | MIT | James Halliday |
 | fast-json-stringify | 7.0.1 | MIT | Matteo Collina <hello@matteocollina.com> |
 | fast-querystring | 1.1.2 | MIT | Yagiz Nizipli <yagiz@nizipli.com> |
-| fast-uri | 4.1.5 | BSD-3-Clause | Vincent Le Goff <vince.legoff@gmail.com> (https://github.com |
-| fastify | 5.12.4 | MIT | Matteo Collina <hello@matteocollina.com> |
+| fast-uri | 4.2.1 | BSD-3-Clause | Vincent Le Goff <vince.legoff@gmail.com> (https://github.com |
+| fastify | 5.12.5 | MIT | Matteo Collina <hello@matteocollina.com> |
 | fastify-plugin | 6.0.0 | MIT | Tomas Della Vedova - @delvedor (http://delved.org) |
 | fastq | 1.20.3 | ISC | Matteo Collina <hello@matteocollina.com> |
 | find-my-way | 9.9.0 | MIT | Tomas Della Vedova - @delvedor (http://delved.org) |
@@ -138,15 +141,15 @@
 | ipaddr.js | 2.5.0 | MIT | whitequark <whitequark@whitequark.org> |
 | js-tokens | 4.0.0 | MIT | Simon Lydell |
 | json-schema-ref-resolver | 3.0.0 | MIT | Ivan Tymoshenko <ivan@tymoshenko.me> |
-| json-schema-traverse | 1.0.0 | MIT | Evgeny Poberezkin |
+| json-schema-traverse | 0.4.1 | MIT | Evgeny Poberezkin |
 | light-my-request | 6.6.0 | BSD-3-Clause | Tomas Della Vedova - @delvedor (http://delved.org) |
 | lightweight-charts | 4.2.3 | Apache-2.0 | TradingView, Inc. |
 | lodash | 4.18.1 | MIT | John-David Dalton <john.david.dalton@gmail.com> |
 | loose-envify | 1.4.0 | MIT | Andres Suarez <zertosh@gmail.com> |
 | lru-cache | 5.1.1 | ISC | Isaac Z. Schlueter <i@izs.me> |
-| lucide-react | 1.46.0 | ISC | Eric Fennis |
+| lucide-react | 1.47.0 | ISC | Eric Fennis |
 | mime | 3.0.0 | MIT | Robert Kieffer |
-| minimatch | 10.2.6 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me) |
+| minimatch | 3.1.5 | ISC | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me) |
 | minipass | 7.1.3 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
 | object-assign | 4.1.1 | MIT | Sindre Sorhus |
 | on-exit-leak-free | 2.1.2 | MIT | Matteo Collina <hello@matteocollina.com> |
@@ -157,6 +160,7 @@
 | pino-std-serializers | 7.1.0 | MIT | James Sumners <james.sumners@gmail.com> |
 | process-warning | 5.1.0 | MIT | Tomas Della Vedova |
 | prop-types | 15.8.1 | MIT | — |
+| punycode | 2.3.1 | MIT | Mathias Bynens |
 | quick-format-unescaped | 4.0.4 | MIT | David Mark Clements |
 | react | 18.3.1 | MIT | — |
 | react-dom | 18.3.1 | MIT | — |
@@ -172,7 +176,6 @@
 | real-require | 0.2.0 | MIT | Paolo Insogna <shogun@cowtech.it> |
 | recharts | 2.15.4 | MIT | recharts group |
 | recharts-scale | 0.4.5 | MIT | recharts group |
-| require-from-string | 2.0.2 | MIT | Vsevolod Strukchinsky |
 | ret | 0.5.0 | MIT | fent <fentbox@gmail.com> (https://github.com/fent) |
 | reusify | 1.1.0 | MIT | Matteo Collina <hello@matteocollina.com> |
 | rfdc | 1.4.1 | MIT | David Mark Clements <david.clements@nearform.com> |
@@ -195,7 +198,8 @@
 | toad-cache | 3.7.4 | MIT | Igor Savin <kibertoad@gmail.com> |
 | toidentifier | 1.0.1 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
 | tslib | 2.8.1 | 0BSD | Microsoft Corp. |
-| tsx | 4.23.13 | MIT | Hiroki Osame |
+| tsx | 4.23.15 | MIT | Hiroki Osame |
+| uri-js | 4.4.1 | BSD-2-Clause | Gary Court <gary.court@gmail.com> |
 | use-callback-ref | 1.3.3 | MIT | theKashey <thekashey@gmail.com> |
 | use-sidecar | 1.1.3 | MIT | theKashey <thekashey@gmail.com> |
 | util-deprecate | 1.0.2 | MIT | Nathan Rajlich <nathan@tootallnate.net> (http://n8.io/) |
