@@ -111,8 +111,13 @@ export const useSummaries = create<SummaryState>((set, get) => ({
  * prompt sent to the model and this console all render the same codes; keeping
  * one map means a new reason cannot be added without every surface showing it.
  */
-export function closeReasonLabel(reason: string | null | undefined): string {
+export function closeReasonLabel(reason: string | null | undefined, netPnl?: number | null): string {
   // The console shows an em-dash for "nothing recorded" rather than an empty cell.
   if (!reason) return '—';
-  return sharedCloseReasonLabel(reason);
+  /*
+   * ⚠️ **把盈亏传下去。** 否则「触发止损」这一格会在**显示盈利**的那一行里出现，
+   * 读起来像自相矛盾 —— 而它其实是一次**被上移到成本之上的止损**（保本离场）。
+   * 实测操作员正是这样误判的。见 `closeReasonLabel` 在 `@aq/shared` 里的说明。
+   */
+  return sharedCloseReasonLabel(reason, netPnl);
 }

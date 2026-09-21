@@ -18,7 +18,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { beijingDayStartIso, exchangeErrorCode, exchangeErrorLabel } from './domain.js';
+import { beijingDayStartIso, closeReasonLabel, exchangeErrorCode, exchangeErrorLabel } from './domain.js';
 
 test('实测撞到的 -4130 被翻译成可行动的一句话', () => {
   /*

@@ -446,7 +446,7 @@ export const useEvents = create<EventState>((set, get) => ({
         body: `净 ${net >= 0 ? '+' : '-'}$${Math.abs(net).toFixed(2)}${percent} · 手续费 ${fmtSigned(
           -trade.fee,
           4,
-        )} · ${closeReasonLabel(trade.closeReason)}`,
+        )} · ${closeReasonLabel(trade.closeReason, net)}`,
         traderId: event.traderId,
       });
     }
