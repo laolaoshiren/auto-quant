@@ -4704,6 +4704,17 @@ reduceQuantity: null,
     const clientOrderId = makeClientId('add', decision.symbol);
     let filledId = '';
     let fillPrice = price;
+    /*
+     * ⚠️ **只用交易所报的成交量，不用我们请求的数量。**
+     *
+     * 这一段原来是 `filled.avgPrice` 取了、`executedQty` 没取，然后拿**请求量**
+     * `addQty` 去累加本地持仓与加权均价。开仓/平仓路径早就改成"只看 `executedQty`，
+     * 等于 0 就不建仓"了，**这两条（加仓/减仓）没跟上**。
+     *
+     * 后果在**部分成交**时出现：请求 0.02、实际成交 0.012，本地却按 0.02 记 ——
+     * 持仓数量与均价一起偏离，而账目之后只会离得更远。
+     */
+    let filledAddQty = 0;
     try {
       const placed = await this.deps.broker.placeOrder({
         symbol: decision.symbol,
@@ -4715,6 +4726,20 @@ reduceQuantity: null,
       const filled = await this.deps.broker.waitForFill(placed);
       filledId = filled.id;
       fillPrice = Number(filled.avgPrice) || price;
+      filledAddQty = filled.executedQty;
+      /*
+       * 没确认成交就**不加仓** —— 与开仓路径同一条口径（`filled.executedQty` 为 0
+       * 时不建仓）。旧保护单已经撤了，所以要先把它补回来（§2.6：不留裸仓）。
+       */
+      if (!(filledAddQty > 0)) {
+        await this.restoreProtection(local, traderId, decision.symbol);
+        return {
+          action: decision.action,
+          symbol: decision.symbol,
+          status: 'failed',
+          detail: `加仓单在 ${filled.status} 状态下没有确认成交，本次不加仓；下一轮对账会以交易所的实际持仓为准。`,
+        };
+      }
     } catch (error) {
       /*
        * 加仓失败时**旧保护单已经撤了** —— 仓位此刻是裸的。
@@ -4729,8 +4754,8 @@ reduceQuantity: null,
       };
     }
 
-    const newQty = local.quantity + addQty;
-    const newEntry = (local.entry_price * local.quantity + fillPrice * addQty) / newQty;
+    const newQty = local.quantity + filledAddQty;
+    const newEntry = (local.entry_price * local.quantity + fillPrice * filledAddQty) / newQty;
 
     /*
      * ⚠️ **加仓也是一笔真实订单，必须进订单表。**
@@ -4750,12 +4775,12 @@ reduceQuantity: null,
       side,
       type: 'MARKET',
       purpose: 'entry',
-      quantity: addQty,
+      quantity: filledAddQty,
       price: null,
       triggerPrice: null,
       status: 'FILLED',
       avgPrice: fillPrice,
-      filledQty: addQty,
+      filledQty: filledAddQty,
       fee: addFee,
     });
 
@@ -4900,6 +4925,14 @@ reduceQuantity: null,
     const clientOrderId = makeClientId('reduce', decision.symbol);
     let filledId = '';
     let exitPrice = refPrice;
+    /*
+     * ⚠️ **与加仓同一处口径：只看交易所报的成交量。**
+     *
+     * 这一段原来和加仓一样 —— `avgPrice` 取了、`executedQty` 没取，后面 6 处
+     * （毛盈亏、订单记录、成交记录、剩余持仓、已实现盈亏累计）**全用请求量**。
+     * 部分成交时那 6 个数字会一起偏离，而账目之后只会离得更远。
+     */
+    let filledReduceQty = 0;
     try {
       const placed = await this.deps.broker.placeOrder({
         symbol: decision.symbol,
@@ -4912,6 +4945,16 @@ reduceQuantity: null,
       const filled = await this.deps.broker.waitForFill(placed);
       filledId = filled.id;
       exitPrice = Number(filled.avgPrice) || refPrice;
+      filledReduceQty = filled.executedQty;
+      if (!(filledReduceQty > 0)) {
+        await this.restoreProtection(local, traderId, decision.symbol);
+        return {
+          action: decision.action,
+          symbol: decision.symbol,
+          status: 'failed',
+          detail: `减仓单在 ${filled.status} 状态下没有确认成交，本次不减仓；下一轮对账会以交易所的实际持仓为准。`,
+        };
+      }
     } catch (error) {
       await this.restoreProtection(local, traderId, decision.symbol);
       return {
@@ -4924,7 +4967,7 @@ reduceQuantity: null,
 
     const isLong = local.side === 'long';
     const grossPnl =
-      (isLong ? exitPrice - local.entry_price : local.entry_price - exitPrice) * reduceQty;
+      (isLong ? exitPrice - local.entry_price : local.entry_price - exitPrice) * filledReduceQty;
     let exitFee = 0;
     try {
       const fills = await this.deps.broker.getUserTrades(decision.symbol, 10);
@@ -4952,12 +4995,12 @@ reduceQuantity: null,
       side,
       type: 'MARKET',
       purpose: 'exit',
-      quantity: reduceQty,
+      quantity: filledReduceQty,
       price: null,
       triggerPrice: null,
       status: 'FILLED',
       avgPrice: exitPrice,
-      filledQty: reduceQty,
+      filledQty: filledReduceQty,
       fee: exitFee,
     });
 
@@ -4975,7 +5018,7 @@ reduceQuantity: null,
       traderId,
       symbol: decision.symbol,
       side: local.side === 'long' ? 'long' : 'short',
-      quantity: reduceQty,
+      quantity: filledReduceQty,
       entryPrice: local.entry_price,
       exitPrice,
       leverage: local.leverage,
@@ -4993,13 +5036,13 @@ reduceQuantity: null,
     });
 
     /* ④ 更新持仓：数量减、**均价不变**、已记部分累加。 */
-    const remaining = local.quantity - reduceQty;
+    const remaining = local.quantity - filledReduceQty;
     positionStore.resize(traderId, decision.symbol, {
       quantity: remaining,
       entryPrice: local.entry_price,
       marginUsed: (remaining * local.entry_price) / Math.max(local.leverage, 1),
       addRealizedPartialPnl: netPnl,
-      addBookedPartialQty: reduceQty,
+      addBookedPartialQty: filledReduceQty,
     });
 
     /*
