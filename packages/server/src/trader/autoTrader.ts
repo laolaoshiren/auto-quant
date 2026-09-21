@@ -4793,14 +4793,32 @@ reduceQuantity: null,
     const traderId = this.deps.trader.id;
 
     /*
-     * 只把**真的改变了什么**的那些挑出来。
-     *
-     * `skipped` / `rejected` 不进回执：它们没有产生新的状态，而回执的篇幅是
-     * 要花 token 的 —— 把"什么都没发生"的那些也塞进去，等于用真金白银换噪声。
+     * 挑出"模型需要立刻知道结果"的那些 —— 见下面 `filter` 里的逐条说明。
      */
-    const happened = input.log.filter(
-      (entry) => entry.status === 'ok' || entry.status === 'submitted' || entry.status === 'failed',
-    );
+    const happened = input.log.filter((entry) => {
+      /* 真的改变了什么状态的三种。 */
+      if (entry.status === 'ok' || entry.status === 'submitted' || entry.status === 'failed') {
+        return true;
+      }
+      /*
+       * ⚠️ **风控拒绝也要进回执 —— 这一点我原来想错了。**
+       *
+       * 第一版只挑了上面三种，理由是"`rejected` 没有产生新状态"。**而那个理由
+       * 是错的**：模型提了一个被拒的开仓，它**要等到下一轮（45 分钟后）才可能
+       * 知道** —— 甚至永远不知道（如果它下一轮换了别的想法）。而"我这个提案
+       * 为什么没通过"恰恰是回执该回答的问题：它是模型**能立刻修正**的东西
+       * （"名义太小"→ 提大一点；"盈亏比不够"→ 换价位）。
+       *
+       * 实测触发这条的场景：`#120` 有一条 `rejected open_long BNBUSDT`，
+       * 而它在原来的筛选下**完全不会进回执** —— 那一轮等于白提。
+       */
+      if (entry.status === 'rejected') return true;
+      /*
+       * 而"下去再来"的那种跳过**不进**：节流与冷却到下一轮自然会解除，
+       * 模型知道了也做不了什么 —— 塞进回执只是花 token 换噪声。
+       */
+      return false;
+    });
     if (happened.length === 0) return [];
 
     const summary = happened
@@ -4810,7 +4828,9 @@ reduceQuantity: null,
             ? '✅ 已执行'
             : entry.status === 'submitted'
               ? '⧗ 已挂单（未成交）'
-              : '⚠️ 执行失败';
+              : entry.status === 'rejected'
+                ? '⊘ 被风控拒绝（**没有执行**）'
+                : '⚠️ 执行失败';
         return `${head} ${entry.action} ${entry.symbol}\n   ${entry.detail}`;
       })
       .join('\n');
@@ -4830,7 +4850,7 @@ reduceQuantity: null,
       .join('\n');
 
     const feedback = [
-      '# 你刚才的动作**已经执行**，这是结果',
+      '# 你刚才的动作结果如下',
       '',
       summary,
       '',

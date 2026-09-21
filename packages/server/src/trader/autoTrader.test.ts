@@ -4252,7 +4252,14 @@ test('★ 开仓之后把真实成交价交回给模型，让它按实际价位�
   /* ① 追问真的发生了。 */
   assert.equal(call, 2, '★ 开仓之后必须把结果交回给模型 —— 否则它看不见自己动手之后发生了什么');
   const receipt = prompts.at(-1) ?? '';
-  assert.match(receipt, /已经执行/, '★ 回执必须说清"这是刚才真的发生了的"');
+  /*
+   * ⚠️ 措辞是「你刚才的动作**结果如下**」，而不是「**已经执行**」。
+   *
+   * 我第一版用的是后者，而回执里现在**也可能有被风控拒绝的条目** ——
+   * 那种情况说"已经执行"是**说谎**，而模型会据此以为自己的提案被采纳了。
+   */
+  assert.match(receipt, /结果如下/, '★ 回执必须说清"这是刚才真的发生了的"');
+  assert.match(receipt, /已执行/, '★ 成功的那些要说清状态；被拒的那些另有标记');
 
   /* ② 真实成交价在里面 —— 那正是这一轮存在的理由。 */
   assert.match(
@@ -4373,6 +4380,66 @@ test('重试仍然没有结论时才按失败计数（不把失败藏起来）',
   assert.equal(call, 2, '只重试一次，不递归');
   assert.equal(broker.placed.length, 0, '没有结论就绝不下单');
 });
+
+/* -------------------------------------------------------------------------- */
+/*  回执要包含"被拒绝"                                                           */
+/* -------------------------------------------------------------------------- */
+
+test('★ 风控拒绝了提案时也要回执 —— 那是模型能立刻修正的东西', async () => {
+  /*
+   * ## 这条来自生产数据，而且它修的是**我自己想错的地方**
+   *
+   * `#120` 那一轮：`动作 0 条`，但里面有一条 `rejected open_long BNBUSDT`。
+   * 而我第一版的回执筛选**只挑 `ok` / `submitted` / `failed`**，理由是
+   * "`rejected` 没有产生新状态"。
+   *
+   * **而那个理由是错的**：模型提了一个被拒的开仓，**要等到下一轮（45 分钟后）
+   * 才可能知道**，甚至永远不知道。而"我这个提案为什么没通过"恰恰是它**能立刻
+   * 修正**的东西 —— "名义太小"→ 提大一点；"盈亏比不够"→ 换价位。
+   *
+   * 节流/冷却那种"下去再来"的跳过**不进**回执（模型知道了也做不了什么）——
+   * 那条区分也在这条用例的断言里。
+   */
+  const broker = new FakeBroker();
+  let call = 0;
+  const prompts: string[] = [];
+
+  const model: DecisionModel = {
+    async complete(_system, user) {
+      call += 1;
+      prompts.push(user);
+      if (call === 1) {
+        /* 名义价值小到必然被风控拒（低于 minPositionSize）。 */
+        return {
+          text: `<decision>
+\`\`\`json
+[{"symbol": "${SYMBOL}", "action": "open_long", "leverage": 3, "position_size_usd": 0.5, "stop_loss": ${(broker.markPrice * 0.98).toFixed(2)}, "take_profit": ${(broker.markPrice * 1.08).toFixed(2)}, "confidence": 90, "reasoning": "试试。"}]
+\`\`\`
+</decision>`,
+          latencyMs: 10,
+          usage: { promptTokens: 1, completionTokens: 1 },
+        };
+      }
+      return {
+        text: '<decision>[]</decision>',
+        latencyMs: 10,
+        usage: { promptTokens: 1, completionTokens: 1 },
+      };
+    },
+  };
+
+  await buildTrader(broker, OPEN_LONG_RESPONSE, model).runOnce();
+
+  assert.equal(broker.placed.filter((p) => p.type === 'MARKET').length, 0, '前提：那笔被拒了');
+  assert.ok(call >= 2, '★ 有被拒的提案时也必须回执');
+  const receipt = prompts.at(-1) ?? '';
+  assert.match(
+    receipt,
+    /被风控拒绝/,
+    `★ 回执里必须告诉模型"你那条被拒了、为什么" —— 否则它要等 45 分钟才知道。实际：${receipt.slice(0, 400)}`,
+  );
+});
+
 
 
 
