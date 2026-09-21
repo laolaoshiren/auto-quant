@@ -941,3 +941,100 @@ test('减仓：没有持仓时被拒', () => {
   assert.match(verdict.rejected[0]!.reason, /没有持仓/);
 });
 
+/* -------------------------------------------------------------------------- */
+/*  限价入场：盈亏比与方向校验都要按「挂单价」                                    */
+/* -------------------------------------------------------------------------- */
+
+test('★ 限价单的盈亏比要按挂单价算 —— 按市价算会把它误杀', () => {
+  /*
+   * ## 这条用的是生产上的真实数字（`#116`，2026-09-21 20:47 UTC）
+   *
+   *     模型提的：open_long BNBUSDT  entry_type=limit  limit_price=800.5
+   *               止损 793.5   止盈 821.5
+   *     实际结果：rejected — 盈亏比 1:1.82 低于要求的 1:3
+   *
+   * 而按挂单价算，它是 **1:3.00** —— 刚好达标：
+   *
+   *     (821.5 - 800.5) / (800.5 - 793.5) = 21.0 / 7.0 = 3.00
+   *
+   * **模型做对了，而风控用错了参考价** —— 于是**限价入场这条链路自上线以来
+   * 一次都没成功过**：每一次都被这条判据拦下，而拦它的理由是基于一个这笔交易
+   * 根本不会成交的价位算出来的。
+   */
+  const symbol = 'BNBUSDT';
+  const env = environment({
+    snapshots: new Map([[symbol, snapshot(symbol, 803.4)]]), // 当前市价
+    config: configWith({
+      riskControl: {
+        ...defaultStrategyConfig().riskControl,
+        minRiskRewardRatio: 3,
+        minStopLossFeeMultiple: 0, // 这一条测的是盈亏比，手续费门槛另行关闭
+      },
+    }),
+  });
+
+  const limitOrder = openDecision({
+    symbol,
+    action: 'open_long',
+    entryType: 'limit',
+    limitPrice: 800.5,
+    stopLoss: 793.5,
+    takeProfit: 821.5,
+    positionSizeUsd: 60,
+    leverage: 3,
+  });
+
+  const approved = engine.review([limitOrder], env);
+  assert.equal(
+    approved.rejected.length,
+    0,
+    `★ 按挂单价 800.5 算盈亏比是 1:3.00（刚好达标），不该被拒。实际理由：${approved.rejected[0]?.reason ?? '（无）'}`,
+  );
+
+  /*
+   * 反面：**同一个单，如果按市价算就该被拒** —— 那证明判据真的变了参考价，
+   * 而不是"阈值被放松了"。
+   */
+  const asMarket = engine.review([{ ...limitOrder, entryType: 'market', limitPrice: null }], env);
+  assert.equal(asMarket.approved.length, 0, '按市价 803.4 算的话，这个单确实不达标 —— 那正是原来的误杀');
+  assert.match(asMarket.rejected[0]!.reason, /盈亏比/, '拒绝理由应当还是盈亏比');
+});
+
+test('限价单的方向校验也按挂单价 —— 否则一笔正确的挂单会被判成"止损放反了"', () => {
+  /*
+   * 挂单价低于市价时，一个"贴在市价下方"的止损**相对挂单价是在正确的一侧**、
+   * 相对市价却可能在错误的一侧。用市价校验会把一笔合规的挂单拒掉，
+   * 而理由（"止损未低于当前价"）与"这笔亏不亏钱"毫无关系。
+   */
+  const symbol = 'BNBUSDT';
+  const env = environment({
+    snapshots: new Map([[symbol, snapshot(symbol, 803.4)]]),
+    config: configWith({
+      riskControl: {
+        ...defaultStrategyConfig().riskControl,
+        minRiskRewardRatio: 0, // 这一条测的是方向校验
+        minStopLossFeeMultiple: 0,
+      },
+    }),
+  });
+
+  /* 止损 801 在挂单价 800.5 **上方** —— 对做多而言是错的，必须被拒。 */
+  const wrongSide = engine.review(
+    [
+      openDecision({
+        symbol,
+        action: 'open_long',
+        entryType: 'limit',
+        limitPrice: 800.5,
+        stopLoss: 801,
+        takeProfit: 821.5,
+        positionSizeUsd: 60,
+      }),
+    ],
+    env,
+  );
+  assert.equal(wrongSide.approved.length, 0, '止损在挂单价上方 —— 做多的止损放反了，必须拒');
+  assert.match(wrongSide.rejected[0]!.reason, /止损无效/, '理由要说清是止损位置的问题');
+});
+
+
