@@ -189,7 +189,24 @@ test('远端有新提交 → behind，并给出差多少个', async () => {
   await withFetch(
     (url) =>
       url.includes('/compare/')
-        ? { body: { status: 'behind', behind_by: 7 } }
+        ? /*
+           * ⚠️ **fixture 里的 `status` 必须是 `ahead`，不是 `behind`。**
+           *
+           * 这一条原来写的是 `{ status: 'behind', behind_by: 7 }`，而那是**反的**：
+           * GitHub 的 `compare/{base}...{head}` 语义是「head 相对 base 怎么样」，
+           * 而这里的 base 是线上跑的提交、head 是 GitHub 上的分支。
+           *
+           *   · `ahead`  ⇒ GitHub 领先线上 ⇒ **服务器落后**（本条用例的场景）
+           *   · `behind` ⇒ GitHub 落后线上 ⇒ 本地有提交没推
+           *
+           * 用真实仓库验证过：`compare/b4b835e...0c1206b` 返回
+           * `{"status":"ahead","ahead_by":2,"behind_by":0}` —— 旧的那个在前、
+           * 新的那个在后，`ahead` 说的是**第二个参数领先第一个**。
+           *
+           * **实现和测试当时一起说反了，所以 CI 一直是绿的。** 一条照着重反的
+           * 实现写出来的断言证明不了那个方向 —— 它只证明了"两边一致"。
+           */
+          { body: { status: 'ahead', ahead_by: 7 } }
         : { body: { sha: remoteSha, commit: { message: 'fix: newer\n\nbody', committer: { date: 'd' } } } },
     async () => {
       const result = await checkForUpdates(local);
@@ -197,6 +214,25 @@ test('远端有新提交 → behind，并给出差多少个', async () => {
       assert.equal(result.behindBy, 7);
       // 提交信息是多行的，界面只放得下一行 —— 必须取主题行。
       assert.equal(result.latestSubject, 'fix: newer');
+    },
+  );
+});
+
+test('GitHub 落后于线上（本地有提交没推）→ ahead', async () => {
+  /*
+   * 上一条的反面。两条必须同时存在：只留一条的话，一个把两个方向对调的固定实现
+   * 照样能让它通过 —— 而那正是这个文件里曾经发生的事。
+   */
+  resetBuildInfoCache();
+  await withFetch(
+    (url) =>
+      url.includes('/compare/')
+        ? { body: { status: 'behind', behind_by: 3 } }
+        : { body: { sha: 'd'.repeat(40), commit: { message: 'old', committer: { date: 'd' } } } },
+    async () => {
+      const result = await checkForUpdates(info());
+      assert.equal(result.state, 'ahead', 'GitHub 落后线上 = 本地有提交没推');
+      assert.match(result.message, /领先 GitHub/);
     },
   );
 });
