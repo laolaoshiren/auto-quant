@@ -1015,7 +1015,17 @@ test('a cycle opens a position and places exchange-side protection', async () =>
   assert.ok(records[0]!.systemPrompt.length > 500);
   assert.ok(records[0]!.userPrompt.length > 200);
   assert.equal(records[0]!.aiLatencyMs, 42);
-  assert.equal(records[0]!.promptTokens, 100);
+  /*
+   * ⚠️ **`>= 100` 而不是 `=== 100`。**
+   *
+   * 这条守的是"用量被记下来了"。而现在开仓成功之后还有一次**执行回执**的追问，
+   * 它的 token 会**累加**到同一个周期上 —— 那正是要的（那一轮确实花了两次调用的钱）。
+   * 钉死成 100 会让"回执的用量没被累加"这个 bug 反过来变成通过。
+   */
+  assert.ok(
+    (records[0]!.promptTokens ?? 0) >= 100,
+    `用量必须记下来（含执行回执那一次），实际 ${records[0]!.promptTokens}`,
+  );
   assert.deepEqual(records[0]!.candidateSymbols, [SYMBOL]);
 
   // Equity snapshot for the curve.
@@ -2080,7 +2090,17 @@ test('熔断生效且空仓时跳过模型请求，未熔断时照常请求', as
     },
   });
   await buildTrader(new FakeBroker(), '', countingModel).runOnce();
-  assert.equal(calls, 1, '未熔断时必须照常请求模型');
+  /*
+   * ⚠️ **`>= 1` 而不是 `=== 1`。**
+   *
+   * 这条守的是"未熔断时**必须**请求模型"（而不是"只请求一次"）。而现在开仓成功
+   * 之后会多一次**执行回执**的追问，所以这里可能是 2 次。
+   *
+   * 判据改成"至少一次"，它仍然是这条用例真正要守的东西 —— 而"最多几次"
+   * 由别处的用例管（那是另一件事）。
+   */
+  assert.ok(calls >= 1, `未熔断时必须照常请求模型（实际 ${calls} 次）`);
+  assert.ok(calls <= 2, `未熔断时不该超过 2 次（主轮 + 执行回执），实际 ${calls} 次`);
 
   /* --- ② 熔断 + 空仓：一次都不能调用 --- */
   calls = 0;
@@ -3421,7 +3441,15 @@ test('★ 模型可以中途要数据：要什么就取什么，取完再给它�
   );
   /* 取完之后它仍然要能给出决策 —— 而且要真的被解析、被执行。 */
   assert.match(summary, /开仓 1|open/i, `第二轮应当产出决策，实际摘要：${summary}`);
-  assert.equal(call, 2, '应当问了模型两次：一次要数据、一次给结论');
+  /*
+   * ⚠️ **`call` 现在是 3，而不是 2** —— 因为开仓成功之后还有一次**执行回执**。
+   *
+   * 这一条守的是"要数据那一步真的多问了一次"（1 次要数据 + 1 次给结论），
+   * 而回执是另一个机制加的第三次。所以判据写成"**至少 2 次**"+
+   * "**不多于 3 次**" —— 那既守住了原来的意图，也钉住了"回执只追问一轮、
+   * 不递归"这条纪律。
+   */
+  assert.equal(call, 3, '要数据一轮、给结单一轮、执行回执一轮 —— 回执只追问一次，不递归');
 });
 
 test('没有工具调用时不多问一次 —— 大多数轮次都该只调一次模型', async () => {
@@ -3452,8 +3480,21 @@ test('没有工具调用时不多问一次 —— 大多数轮次都该只调一
     model,
   }).runOnce();
 
-  assert.equal(call, 1, '没有工具调用就只该问一次');
+  /*
+   * ⚠️ **断言的是"没有为取数多问"，不是"总共只调一次模型"。**
+   *
+   * 这条用例原来的期望是 `call === 1`。而现在开仓成功之后会多一次**执行回执**
+   * 的追问（把成交价交回给模型），所以这里实际是 2 次。
+   *
+   * 那**不是回归**：回执是另一个机制，而这条用例守的是"取数那条路径不要在
+   * 没必要的时候追问"。所以判据改成**"取数请求数为 0"** —— 那才是它要守的东西，
+   * 而调用次数只作为"没有取数轮"的佐证。
+   */
   assert.equal(requests.length, 0, '没要数据就不该取数');
+  assert.ok(
+    call <= 2,
+    `没有工具调用时不该为取数多问；算上执行回执最多 2 次，实际 ${call} 次`,
+  );
 });
 
 /* -------------------------------------------------------------------------- */
@@ -4149,6 +4190,107 @@ test('时限设为 0 时关闭这条规则', async () => {
     '配置为 0 时必须保留挂单 —— "想关但关不掉"比没有这条规则更糟',
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  执行回执                                                                     */
+/* -------------------------------------------------------------------------- */
+
+test('★ 开仓之后把真实成交价交回给模型，让它按实际价位重定保护位', async () => {
+  /*
+   * ## 这条守的是"能看见自己动手之后发生了什么"
+   *
+   * 在此之前这个循环是：模型决策 → 执行 → 记账 → 下一轮（45 分钟后）。
+   * 也就是说**模型看不见自己动手之后发生了什么**。而有两件事只有执行完才知道：
+   *
+   *   · **成交价** —— 止损是按**决策时那个价**算的，而实际成交价可能差 0.5%，
+   *     止损距离跟着变。真实交易员是成交之后按**实际入场价**定保护位的。
+   *   · **拒绝** —— 风控压了多少、交易所为什么拒。
+   *
+   * 这条用例证明三件事：**追问真的发生了**、**成交价在里面**、
+   * **超出范围的动作被忽略**（这一轮只允许调保护位与撤单）。
+   */
+  const broker = new FakeBroker();
+  /** 每次追问的 user 提示词 —— 回执就在最后一条里。 */
+  const prompts: string[] = [];
+  let call = 0;
+
+  /* 第一轮：正常开仓。第二轮（回执）：要求调保护位 + 一个超范围的开仓。 */
+  const model: DecisionModel = {
+    async complete(system, user) {
+      call += 1;
+      prompts.push(user);
+      if (call === 1) {
+        return { text: OPEN_LONG_RESPONSE, latencyMs: 10, usage: { promptTokens: 1, completionTokens: 1 } };
+      }
+      /* 回执那一轮：一个合法动作（调保护位）+ 一个越权动作（开仓）。 */
+      return {
+        text: `<decision>
+\`\`\`json
+[
+  { "symbol": "${SYMBOL}", "action": "adjust_protection", "stop_loss": ${(broker.markPrice * 0.99).toFixed(2)}, "reasoning": "按真实成交价把止损上移一点。" },
+  { "symbol": "ETHUSDT", "action": "open_long", "leverage": 5, "position_size_usd": 50, "confidence": 90, "reasoning": "顺便再开一个。" }
+]
+\`\`\`
+</decision>`,
+        latencyMs: 10,
+        usage: { promptTokens: 1, completionTokens: 1 },
+      };
+    },
+  };
+
+  const trader = new AutoTrader({
+    trader: traders.get(traderId)!,
+    config: strategyStore.get(traders.get(traderId)!.strategyId)!.config,
+    registry: fakeRegistry,
+    market: {} as never,
+    marketData: fakeMarketData,
+    broker: broker as unknown as BinanceBroker,
+    model,
+  });
+  await trader.runOnce();
+
+  /* ① 追问真的发生了。 */
+  assert.equal(call, 2, '★ 开仓之后必须把结果交回给模型 —— 否则它看不见自己动手之后发生了什么');
+  const receipt = prompts.at(-1) ?? '';
+  assert.match(receipt, /已经执行/, '★ 回执必须说清"这是刚才真的发生了的"');
+
+  /* ② 真实成交价在里面 —— 那正是这一轮存在的理由。 */
+  assert.match(
+    receipt,
+    new RegExp(String(broker.markPrice).slice(0, 5)),
+    `★ 回执里必须有真实成交价（找 ${broker.markPrice}）—— 止损该按它算，而不是按决策时的价位`,
+  );
+
+  /* ③ 越权动作被忽略：不许在回执那一轮开新仓。 */
+  /*
+   * ⚠️ **这条纪律实际有三层，而变异只测得动前两层。**
+   *
+   * 我第一版想断言执行层那条"不在这一轮允许的范围内"的日志 —— 而它**不会出现**：
+   * `ETHUSDT` 在**解析阶段**就被挡住了（回执那一轮喂给解析器的候选池只含当前持仓
+   * 的标的），根本没走到执行层。
+   *
+   * 于是做了个"同时放开两层"的变异（动作白名单 + 候选池）—— **它仍然没被抓到**，
+   * 因为第三层在结构上就做不到：`followUpAfterExecution` 调 `executeOpen` 时
+   * **不传行情快照**（回执那一段压根没有快照可用），而 `undefined` 会让开仓
+   * 直接返回 `skipped`。
+   *
+   * **我不会为了让这个变异可测而给回执那轮补上快照 —— 那正是要防的事。**
+   * 所以这条用例的价值不在于"变异抓得到它"，而在于**它是将来那次改动的哨兵**：
+   * 如果有人给回执那轮加了快照（一个看起来无害的"完善"），前两层仍然会拦着，
+   * 而这条断言会在那一刻失败。
+   */
+  assert.equal(
+    broker.placed.filter((p) => p.symbol === 'ETHUSDT').length,
+    0,
+    '★ 回执那一轮不能开新仓 —— 它只能调保护位或撤单，否则一轮之内的敞口会反复膨胀',
+  );
+  assert.equal(
+    positionStore.open(traderId).filter((p) => p.symbol === 'ETHUSDT').length,
+    0,
+    '★ 也不许在本地凭空多出一个 ETHUSDT 持仓',
+  );
+});
+
 
 
 
