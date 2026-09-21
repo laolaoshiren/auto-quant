@@ -45,6 +45,7 @@ export const ACTION_LABELS: Record<DecisionAction, string> = {
   close_long: '平多',
   close_short: '平空',
   adjust_protection: '调整保护',
+  cancel_pending: '撤单',
   add_to_position: '加仓',
   reduce_position: '减仓',
   hold: '持有',
@@ -64,8 +65,10 @@ export const ACTION_TONES: Record<DecisionAction, Tone> = {
   open_short: 'down',
   close_long: 'warn',
   close_short: 'warn',
-  /* 三个仓位管理动作都不改变方向，用中性色 —— 它们既不是"看多"也不是"看空"。 */
+  /* 仓位管理动作都不改变方向，用中性色 —— 它们既不是"看多"也不是"看空"。 */
   adjust_protection: 'neutral',
+  /* 撤单是**降低风险**，同样中性：它不表达方向，只表达"这笔不再等了"。 */
+  cancel_pending: 'neutral',
   add_to_position: 'neutral',
   reduce_position: 'neutral',
   hold: 'muted',
