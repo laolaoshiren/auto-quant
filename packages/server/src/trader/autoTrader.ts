@@ -2309,6 +2309,31 @@ export class AutoTrader {
       }
     }
 
+    /*
+     * --- 11.5 执行回执 ----------------------------------------------------
+     *
+     * 把"刚才真的发生了什么"（成交价、成交量、失败原因）交回给模型，
+     * 让它**在成交之后**再决定一次 —— 而这一轮只允许调保护位与撤单。
+     *
+     * ⚠️ **放在落库（第 11 步）之后、刷新（第 12 步）之前**：回执可能改掉保护位，
+     * 而随后第 12 步的持仓快照要反映那个改动。
+     */
+    const followed = await this.followUpAfterExecution({
+      systemPrompt,
+      stablePrompt,
+      volatilePrompt,
+      log: executionLog,
+      progress,
+    }).catch((error) => {
+      log.warn(`[${this.deps.trader.name}] 执行回执失败（不影响已完成的下单）：${(error as Error).message}`);
+      return [] as ExecutionLogEntry[];
+    });
+    if (followed.length > 0) {
+      executionLog.push(...followed);
+      /* 回执里撤掉的单、改了的保护位都算"这一轮做过的事"，摘要要说实话。 */
+      cancelsTaken += followed.filter((f) => f.action === 'cancel_pending' && f.status === 'ok').length;
+    }
+
     /* --- 12. Refresh and snapshot ---------------------------------------- */
     /*
      * 第 12 步排在落库（第 11 步）之前，见 `runCycle()` 的说明：这样它自己抛错时
@@ -4667,6 +4692,186 @@ reduceQuantity: null,
       status: 'ok',
       detail: `已撤掉 ${symbol} 的限价挂单（挂单价 ${row.entry_price}）—— 该入场作废，名额已释放。`,
     };
+  }
+
+  /**
+   * **执行回执：把"刚才真的发生了什么"交回给模型，让它再决定一次。**
+   *
+   * ## 它补的是哪一环
+   *
+   * 在此之前这个循环是：
+   *
+   *     模型决策 → 风控 → 执行 → 记账 → 下一轮（45 分钟后）
+   *
+   * 也就是说**模型看不见自己动手之后发生了什么**。而有两件事只有执行完才知道：
+   *
+   *   · **成交价**。止损是按**决策时那个价**算出来的，而实际成交价可能差
+   *     0.5% —— 止损距离跟着变，而那笔的风险画像就不一样了。真实交易员是
+   *     成交之后按**实际入场价**去定保护位的。
+   *   · **拒绝**。风控把它压了多少、交易所为什么拒 —— 那些现在只进执行日志，
+   *     模型要等下一轮才（可能）看到。
+   *
+   * ## ⚠️ 为什么只允许"调保护位"与"撤单"
+   *
+   * 这是**刻意的限制**，它让这一轮的成本与风险都可控：
+   *
+   *   · 那正是**最需要回执的场景**（成交价出来了 → 按真实价定止损）；
+   *   · 而这两个动作**只降低风险或持平**，不会让敞口在一轮之内反复膨胀；
+   *   · 放它开新仓的话，一轮可能开出好几笔 —— 而每追问一次都是一次完整的
+   *     模型调用（实测单次输入 10 万+ token），成本与敞口会一起失控。
+   *
+   * ## 只在"真的执行了动作"时才追问
+   *
+   * 大多数轮次模型什么都不做（`wait` / `hold`）。那种情况下没有回执可言 ——
+   * 追问一次就是白花一次完整调用的钱，而结论只会是"我什么都没做"。
+   *
+   * **只追问一轮**，不递归：回执本身再产生"要不要再回执"的疑问时，
+   * 答案是"不"。一轮足够拿到成交价并调整保护位。
+   */
+  private async followUpAfterExecution(input: {
+    systemPrompt: string;
+    stablePrompt: string;
+    volatilePrompt: string;
+    /** 这一轮已经产生的执行结果（含风控拒绝）。 */
+    log: ExecutionLogEntry[];
+    /** 本周期用过的行情快照，用来给回执里的价位提供上下文。 */
+    progress: CycleProgress;
+  }): Promise<ExecutionLogEntry[]> {
+    const traderId = this.deps.trader.id;
+
+    /*
+     * 只把**真的改变了什么**的那些挑出来。
+     *
+     * `skipped` / `rejected` 不进回执：它们没有产生新的状态，而回执的篇幅是
+     * 要花 token 的 —— 把"什么都没发生"的那些也塞进去，等于用真金白银换噪声。
+     */
+    const happened = input.log.filter(
+      (entry) => entry.status === 'ok' || entry.status === 'submitted' || entry.status === 'failed',
+    );
+    if (happened.length === 0) return [];
+
+    const summary = happened
+      .map((entry) => {
+        const head =
+          entry.status === 'ok'
+            ? '✅ 已执行'
+            : entry.status === 'submitted'
+              ? '⧗ 已挂单（未成交）'
+              : '⚠️ 执行失败';
+        return `${head} ${entry.action} ${entry.symbol}\n   ${entry.detail}`;
+      })
+      .join('\n');
+
+    /* 当前持仓与挂单的**最新**状态 —— 回执里的价位要能对上真实情况。 */
+    const positions = positionStore
+      .open(traderId)
+      .map(
+        (p) =>
+          `${p.symbol} ${p.side === 'long' ? '多头' : '空头'} 数量 ${p.quantity} 入场 ${p.entry_price}` +
+          ` 止损 ${p.stop_loss ?? '无'} 止盈 ${p.take_profit ?? '无'}`,
+      )
+      .join('\n');
+    const pending = positionStore
+      .pending(traderId)
+      .map((p) => `${p.symbol} 挂单 ${p.entry_price}（未成交）`)
+      .join('\n');
+
+    const feedback = [
+      '# 你刚才的动作**已经执行**，这是结果',
+      '',
+      summary,
+      '',
+      '## 现在的真实状态',
+      positions ? `持仓：\n${positions}` : '持仓：无',
+      pending ? `挂单：\n${pending}` : '',
+      '',
+      '## 你现在可以做什么',
+      '',
+      '**只能用这两个动作**（它们只降低风险，所以这一轮不再走那批开仓上限）：',
+      '',
+      '- `adjust_protection` —— **按上面的真实成交价**重新考虑止损止盈。',
+      '  决策时的价位与成交价可能不同，止损距离跟着变；**这是你唯一一次在成交后',
+      '  修正它的机会**，而它必须仍满足盈亏比与手续费门槛。',
+      '- `cancel_pending` —— 撤掉上面的挂单（如果你认为它不该再等了）。',
+      '',
+      '**改不了的就别写**：不要开新仓、不要加仓、不要减仓平仓 —— 那些下一轮再说。',
+      '如果你认为**不需要调整**，返回空数组 `[]` 即可（那是一个完全正常的答案）。',
+      '',
+      '输出格式与之前**完全一样**（`<reasoning>` + `<decision>`）。',
+    ]
+      .filter((part) => part !== '')
+      .join('\n');
+
+    let text: string;
+    let usage: { promptTokens: number | null; completionTokens: number | null };
+    try {
+      /*
+       * 与主调用同一个消息形状（system + 稳定段 + 变动段 + 回执），
+       * **前缀完全一致** —— 那让这一轮的输入能命中缓存，成本是未命中价的 1/50。
+       */
+      const response = this.deps.model.chat
+        ? await this.deps.model.chat([
+            { role: 'system', content: input.systemPrompt },
+            ...(input.stablePrompt.length > 0
+              ? [{ role: 'user' as const, content: input.stablePrompt }]
+              : []),
+            { role: 'user', content: input.volatilePrompt },
+            { role: 'assistant', content: '（已给出决策。）' },
+            { role: 'user', content: feedback },
+          ])
+        : await this.deps.model.complete(input.systemPrompt, `${input.volatilePrompt}\n\n${feedback}`);
+      text = response.text;
+      usage = response.usage;
+    } catch (error) {
+      /*
+       * 追问失败**不影响已经完成的事** —— 单已经下了、仓位已经建了、记账已经做了。
+       * 这一轮只是少了"事后微调保护位"的机会，下一轮的机械保护仍然在兜底。
+       */
+      log.warn(`[${this.deps.trader.name}] 执行回执追问失败（不影响已完成的下单）：${(error as Error).message}`);
+      return [];
+    }
+
+    /* token 用量必须累计 —— 否则"这一轮花了多少"会少算一整次调用。 */
+    input.progress.promptTokens = (input.progress.promptTokens ?? 0) + (usage.promptTokens ?? 0);
+    input.progress.completionTokens =
+      (input.progress.completionTokens ?? 0) + (usage.completionTokens ?? 0);
+
+    const parsed = parseDecisionResponse(text, {
+      candidateSymbols: new Set(positionStore.open(traderId).map((p) => p.symbol)),
+      openPositions: new Map(positionStore.open(traderId).map((p) => [p.symbol, p.side as 'long' | 'short'])),
+      allowUnlistedCloses: true,
+      pendingSymbols: new Set(positionStore.pending(traderId).map((p) => p.symbol)),
+    });
+
+    /*
+     * ⚠️ **只执行白名单里的两个动作。**
+     *
+     * 模型可能仍然写了开仓（提示词说了不要，但它不一定照做）。**静默丢弃它**
+     * 而不是报错：这一轮的定位就是"事后微调"，而一条超出范围的决策
+     * 没有产生任何后果 —— 记成 failed 反而会污染决策流。
+     */
+    const followed: ExecutionLogEntry[] = [];
+    for (const decision of parsed.decisions) {
+      if (isAdjustAction(decision.action)) {
+        followed.push(await this.executeAdjust(decision));
+      } else if (isCancelPendingAction(decision.action)) {
+        followed.push(await this.executeCancelPending(decision));
+      } else {
+        this.emit(
+          'info',
+          `执行回执那一轮里模型提出了 ${decision.action} ${decision.symbol} —— 该动作不在这一轮允许的范围内（只能调保护位或撤单），已忽略。`,
+        );
+      }
+    }
+
+    if (followed.length > 0) {
+      this.emit(
+        'info',
+        `执行回执：模型在成交后主动调整了 ${followed.filter((f) => f.status === 'ok').length} 处（只能调保护位或撤单）。`,
+      );
+    }
+
+    return followed;
   }
 
   /** Market-enter, then immediately place exchange-side protection. */
