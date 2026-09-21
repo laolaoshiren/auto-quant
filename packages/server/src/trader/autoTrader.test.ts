@@ -4291,6 +4291,90 @@ test('★ 开仓之后把真实成交价交回给模型，让它按实际价位�
   );
 });
 
+/* -------------------------------------------------------------------------- */
+/*  截断自动重试                                                                 */
+/* -------------------------------------------------------------------------- */
+
+test('★ 回复被截断时先重试一次，而不是白等一整轮', async () => {
+  /*
+   * ## 实测两次截断，`completionTokens` 都正好是 16,384
+   *
+   * 那是**输出上限**，而其中约 15,000 是思考 —— **思考把输出预算吃光，
+   * 正文一个字都没写出来**（`#104`、`#119`）。
+   *
+   * 原来的处理是直接抛错、这一轮跳过。而那两次都发生在**45 分钟一轮**的时段里，
+   * 等于白等一整轮。而重试一次的成本远低于等 45 分钟 —— 这类截断是**一次性**的。
+   */
+  const broker = new FakeBroker();
+  let call = 0;
+  const model: DecisionModel = {
+    async complete() {
+      call += 1;
+      if (call === 1) {
+        /* 第一次：只有思考、没有 `<decision>` —— 模拟被截断。 */
+        return {
+          text: '<reasoning>我想了很久很久……</reasoning>',
+          latencyMs: 10,
+          usage: { promptTokens: 100, completionTokens: 16_384 },
+        };
+      }
+      /* 第二次：正常给出结论。 */
+      return {
+        text: OPEN_LONG_RESPONSE,
+        latencyMs: 10,
+        usage: { promptTokens: 100, completionTokens: 50 },
+      };
+    },
+  };
+
+  const summary = await buildTrader(broker, OPEN_LONG_RESPONSE, model).runOnce();
+
+  assert.equal(
+    call,
+    3,
+    '第一次（截断）+ 重试（拿到结论）+ 开仓后的执行回执 —— 共 3 次',
+  );
+  assert.match(
+    summary,
+    /开仓 1/,
+    `★ 重试拿到结论之后要照常执行 —— 而不是把这一轮判成失败。实际：${summary}`,
+  );
+});
+
+test('重试仍然没有结论时才按失败计数（不把失败藏起来）', async () => {
+  /*
+   * 反面，而且它比上面那条更重要：**重试是"多给一次机会"，不是"掩盖失败"。**
+   *
+   * 截断必须按失败计数 —— 否则 `consecutiveFailures` 永远不涨、
+   * **安全模式永远不触发**。那正是这个文件里另一处注释警告过的形态：
+   * "同一个失败在诊断里被判失败、在交易里被判成功"。
+   */
+  const broker = new FakeBroker();
+  let call = 0;
+  const model: DecisionModel = {
+    async complete() {
+      call += 1;
+      return {
+        text: '<reasoning>还是只想不说。</reasoning>',
+        latencyMs: 10,
+        usage: { promptTokens: 100, completionTokens: 16_384 },
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => buildTrader(broker, OPEN_LONG_RESPONSE, model).runOnce(),
+    (err: Error) => {
+      assert.match(err.message, /被截断/, '两次都没有结论时必须照旧报失败');
+      assert.match(err.message, /重试一次仍然如此/, '理由里要说清重试过了');
+      return true;
+    },
+  );
+  assert.equal(call, 2, '只重试一次，不递归');
+  assert.equal(broker.placed.length, 0, '没有结论就绝不下单');
+});
+
+
 
 
 
