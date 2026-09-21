@@ -170,6 +170,26 @@ export const RiskControlConfigSchema = z.object({
   requireStopLoss: z.boolean().default(true),
   /** Force an exchange-side take profit on every entry. */
   requireTakeProfit: z.boolean().default(true),
+
+  /**
+   * 保护单是否开启币安的「触发价格保护」（`priceProtect`）。
+   *
+   * ## ⚠️ 默认 `false`，而默认值改过 —— 原来是 `true`
+   *
+   * 官方对 `priceProtect` 的定义是：价格触及 `stopPrice` 时，若**标记价与合约价
+   * 的偏离率**超过该标的的 `triggerProtect` 阈值（BTC/ETH 是 5%，部分是 10%），
+   * **本次触发受保护**。
+   *
+   * 好处是**不被瞬间影线打掉**。而代价是：**极端行情双价差拉大时，止损根本不会触发。**
+   *
+   * 对一个保证金账户来说那个取舍是反的 —— **止损的全部意义就是"该止损时一定止损"**。
+   * 一张"在剧烈行情里不生效"的止损，恰好在你最需要它的那一刻缺席，而那时仓位正在
+   * 快速亏钱。影线打掉止损只是少赚一次；止损不触发则可能亏掉保证金。
+   *
+   * 所以默认关掉，并把开关**交给 AI 与操作员**：低波动、流动性好的标的上打开它
+   * 有道理；持仓已经很大、或标的波动剧烈时应当关掉。
+   */
+  priceProtectOnStop: z.boolean().default(false),
   /** Stop-loss distance as a % of entry, applied when the model omits one. */
   fallbackStopLossPercent: z.number().min(0.05).max(50).default(2.5),
   /** Take-profit distance as a % of entry, applied when the model omits one. */
