@@ -129,7 +129,26 @@ export interface Decision {
   positionSizeUsd: number;
   stopLoss: number | null;
   takeProfit: number | null;
-  confidence: number;
+  /**
+   * 模型对这个决策的自评置信度（0–100）。
+   *
+   * ## ⚠️ `null` 表示**模型没有给出** —— 它与 `0` 是两件事
+   *
+   * 实测：模型输出的 JSON 里**压根没有 `confidence` 这个字段**（它只写了
+   * `symbol` / `action` / `reasoning`），而解析器当时填的是 `0` ——
+   * 于是界面上每个决策都显示「置信度 0%」，看起来像"模型对每个判断都毫无把握"。
+   *
+   * 更糟的是风控那道 `minConfidence` 门槛：**一个真实把握 75 分、只是漏填字段的
+   * 开仓会被当成 0 分直接拒掉**，而拒绝理由会写着"置信度 0 低于要求的最低值 68"
+   * —— 那句话是错的，它应该说"你根本没给"。
+   *
+   * 类型原来是必填的 `number`，而 zod schema 是 `.optional()` —— **两者不一致，
+   * 解析器就用 `0` 去满足类型**。改成可空之后，"没给"和"给了 0"在类型上就分开了。
+   * （模型为什么漏填：提示词只给了 `open_long` / `open_short` 两个范例，
+   * `wait` / `hold` 这些动作没有范例可照 —— 见 `prompt.ts` 里新增的那个。
+   * 范例对输出形状的锚定作用比措辞强得多，这一点提示词自己的注释里写过。）
+   */
+  confidence: number | null;
   riskUsd: number;
   /**
    * 减仓用：卖掉落多少。
