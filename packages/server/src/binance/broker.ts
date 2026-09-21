@@ -266,6 +266,54 @@ export class BinanceBroker {
   /* ---------------------------------------------------------------------- */
 
   /**
+   * 交易所对某个标的**实际允许**的最大杠杆。
+   *
+   * ## 为什么需要它（`GET /fapi/v1/leverageBracket`）
+   *
+   * 官方口径是：**能设的最大杠杆 = min(名义价值所在档的 `initialLeverage`, 账户级限制, symbol 上限)**。
+   * 而账户级那一项对**子账户**尤其要紧 —— 官方 FAQ 明文：
+   *
+   * > Starting from 12 August 2025, leverage levels over 5x are **not** available to
+   * > Futures Accounts created by **regular users' sub-accounts**.
+   *
+   * 也就是说：**同一份配置，跑在主账户上能用 20x，跑在子账户上只能 5x** —— 而在此之前
+   * 我们完全不知道这件事（`leverageBracket` 在这个仓库里一次都没被调用过）。
+   *
+   * ## 为什么取"最高档"的 `initialLeverage`
+   *
+   * 档位是按**名义价值**分的：仓位越大，允许的杠杆越低。而我们问的是
+   * **"这个标的能设到多少"** —— 那正是**最小仓位那一档**（brackets[0]）的值。
+   * 真正下单时的名义价值如果更大，`setLeverage` 会以 `-2027`/`-2028` 拒回来，
+   * 那时再降 —— **宁可在这里给一个偏乐观的上界，也不要凭空收紧模型的可用空间**。
+   *
+   * 返回 `null` = **不知道**（读失败、dry-run、或响应形状不认识）。
+   * 调用方据此退回"只用配置的上限" —— 读不到档位不该让交易停下来。
+   */
+  async getMaxLeverage(symbol: string): Promise<number | null> {
+    if (this.dryRun) return null;
+    const normalized = normalizeSymbol(symbol);
+    try {
+      const rows = await this.rest.signedRequest<
+        Array<{ symbol: string; brackets: Array<{ initialLeverage: number; notionalCap: number }> }>
+      >('GET', '/fapi/v1/leverageBracket', { symbol: normalized });
+      const row = rows.find((r) => r.symbol === normalized) ?? rows[0];
+      if (!row || !Array.isArray(row.brackets) || row.brackets.length === 0) return null;
+      /*
+       * 第一档 = 名义价值最小的那一档 = 允许杠杆最高的那一档。
+       * 不假设它已排序：取 `initialLeverage` 的最大值更稳。
+       */
+      const best = row.brackets.reduce(
+        (max, b) => (Number(b.initialLeverage) > max ? Number(b.initialLeverage) : max),
+        0,
+      );
+      return best > 0 ? best : null;
+    } catch (error) {
+      log.warn(`读取 ${normalized} 的杠杆档位失败（本轮只用配置上限）：${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
    * Set leverage for a symbol.
    *
    * `-4046` ("no need to change leverage") is benign; `-4168` means open orders
