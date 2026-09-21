@@ -222,6 +222,22 @@ class FakeBroker {
     return { ok: true, leverage };
   }
 
+  /**
+   * 保证金模式。**必须存在** —— 开仓路径在每个新标的下第一单之前都会调它，
+   * 桩里少这一个方法会让所有涉及开仓的用例在运行时炸掉（实测：28 个）。
+   *
+   * 默认返回 `true`（设成功），并记录每次调用，好让用例断言"设的是什么模式"。
+   */
+  async setMarginType(symbol: string, marginType: 'ISOLATED' | 'CROSSED') {
+    this.marginTypeCalls.push({ symbol, marginType });
+    return this.marginTypeOk;
+  }
+
+  /** 用例可以设成 false，模拟"该标的已有持仓/挂单，改不了"。 */
+  marginTypeOk = true;
+
+  marginTypeCalls: Array<{ symbol: string; marginType: 'ISOLATED' | 'CROSSED' }> = [];
+
   async ensureOneWayMode() {
     return { changed: false, warning: null };
   }
@@ -3328,4 +3344,48 @@ test('没有工具调用时不多问一次 —— 大多数轮次都该只调一
   assert.equal(call, 1, '没有工具调用就只该问一次');
   assert.equal(requests.length, 0, '没要数据就不该取数');
 });
+
+/* -------------------------------------------------------------------------- */
+/*  保证金模式                                                                  */
+/* -------------------------------------------------------------------------- */
+
+test('★ 开仓前把保证金模式设成逐仓 —— 这一步以前完全缺失', async () => {
+  /*
+   * ## 为什么这条用例重要
+   *
+   * 币安官方明文：**「All contracts and positions are defaulted to the Cross
+   * Margin mode」** —— 不管它，账户就是**全仓**。而这个系统在此以前从来没调用过
+   * `setMarginType`，所以实盘上一直是全仓。
+   *
+   * 全仓意味着：**任何一笔判断错到底，都可能把其他仓位的钱一起带走** ——
+   * 爆仓清空整个合约钱包，而不是亏掉那一笔。对一个小本金、多仓位的账户，
+   * 这不是理论风险。
+   *
+   * 硬约束是它**只能在零持仓、零挂单时改**，所以正确的位置是"每个标的下第一单
+   * 之前" —— 也就是这条用例走的那条路径。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  assert.ok(
+    broker.marginTypeCalls.length > 0,
+    '开仓路径必须设置保证金模式 —— 不设就是币安默认的全仓',
+  );
+  assert.deepEqual(
+    broker.marginTypeCalls.map((c) => c.marginType),
+    ['ISOLATED'],
+    '默认配置是逐仓：单仓最多亏掉自己的保证金，不会动到别的仓位',
+  );
+
+  /* 反面：设不上（该标的已有持仓/挂单）时**不该阻断开仓** —— 它只影响损失上限。 */
+  const broker2 = new FakeBroker();
+  broker2.marginTypeOk = false;
+  const summary = await buildTrader(broker2, OPEN_LONG_RESPONSE).runOnce();
+  assert.match(
+    summary,
+    /开仓 1|open/i,
+    `设不上保证金模式不该让开仓失败（那会让"改不了模式"变成"做不了交易"）。实际：${summary}`,
+  );
+});
+
 
