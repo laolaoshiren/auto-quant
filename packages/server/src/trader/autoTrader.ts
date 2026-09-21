@@ -1625,7 +1625,17 @@ export class AutoTrader {
         availableBalance: account.availableBalance,
         unrealizedPnl: account.unrealizedPnl,
         marginUsed: account.marginUsed,
-        positionCount: livePositions.length,
+        /*
+         * ⚠️ **待成交的限价入场也要占名额。**
+         *
+         * `livePositions` 是**交易所已经存在的仓位** —— 而一张挂着的限价单
+         * 一根都没成交，所以它不在里面。但**它是已经承诺出去的风险**：
+         * 价格一过来它就变成持仓，而那时可能已经有 `maxPositions` 个仓位了。
+         *
+         * 不加这一项的话，`maxPositions: 3` 管不住「3 个挂单 + 3 个持仓 = 6 个敞口」。
+         * 挂单与持仓在"占多少风险额度"这件事上**是同一件事**，只是时间不同。
+         */
+        positionCount: livePositions.length + positionStore.pending(traderId).length,
         /*
          * 外部交易活动 —— 见 `PromptAccountInfo` 上的说明。
          *
@@ -1650,6 +1660,26 @@ export class AutoTrader {
        * 做归因，然后去改一个本来没问题的参数。
        */
       universeTrimmedFrom: selection.trimmedFrom,
+      /*
+       * ⚠️ **待成交的限价单要进提示词。**
+       *
+       * 没有它，模型**不知道自己在等什么** —— 它会为一笔已经挂好的入场重复提案，
+       * 或者干脆忘了这件事。而持仓那一区读的是 `positionStore.open()`
+       * （只含已成交），所以挂单必须单独传。
+       *
+       * `waitingMinutes` 用 `opened_at` 算：那一列在挂单时写的是**挂出时刻**，
+       * 所以它就是"等了多久"。
+       */
+      pendingEntries: positionStore.pending(traderId).map((row) => ({
+        symbol: row.symbol,
+        side: row.side === 'long' ? ('long' as const) : ('short' as const),
+        quantity: row.quantity,
+        limitPrice: row.entry_price,
+        waitingMinutes: Math.max(0, (Date.now() - Date.parse(row.opened_at)) / 60_000),
+        stopLoss: row.stop_loss,
+        takeProfit: row.take_profit,
+        reasoning: row.open_reasoning,
+      })),
     };
 
     const systemPrompt = buildSystemPrompt(promptContext);
@@ -1937,7 +1967,8 @@ export class AutoTrader {
         equity: account.equity,
         availableBalance: account.availableBalance,
         marginUsed: account.marginUsed,
-        positionCount: livePositions.length,
+        /* 待成交的挂单也占名额 —— 见上面 `PromptAccountInfo` 那处的完整说明。 */
+        positionCount: livePositions.length + positionStore.pending(traderId).length,
       },
       positions: new Map(
         localPositions.map((p) => [p.symbol, this.toPositionView(p, snapshotBySymbol)]),

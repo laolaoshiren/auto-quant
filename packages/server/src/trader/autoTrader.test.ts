@@ -3849,6 +3849,98 @@ test('★ 部分成交后被撤销：已经成交的那部分是真实持仓，�
   );
 });
 
+test('★ 待成交的挂单要占持仓名额 —— 否则 maxPositions 管不住真实敞口', async () => {
+  /*
+   * ## 这是一条**真实的风控漏洞**，而且是加挂单那一步时留下的
+   *
+   * `positionCount` 原来数的是**交易所已存在的仓位**（`livePositions.length`），
+   * 而一张挂着的限价单一根都没成交，所以它不在里面。
+   *
+   * 但**它是已经承诺出去的风险** —— 价格一过来它就变成持仓。不加这一项的话：
+   *
+   *     maxPositions: 3   →   3 个挂单 + 3 个持仓 = 6 个敞口
+   *
+   * 也就是说模型可以先把名额用挂单占满，等它们陆续成交，实际敞口翻倍。
+   * 挂单与持仓在"占多少风险额度"这件事上**是同一件事**，只是时间不同。
+   *
+   * ## 用例怎么证明
+   *
+   * 把 `maxPositions` 设成 1，先挂一张限价单（占掉那个唯一名额），
+   * 然后让模型再提一笔开仓 —— **必须被拒**，理由要提到持仓数。
+   */
+  const strategy = strategyStore.get(traders.get(traderId)!.strategyId)!;
+  strategyStore.update(strategy.id, {
+    config: { ...strategy.config, riskControl: { ...strategy.config.riskControl, maxPositions: 1 } },
+  });
+
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+
+  /* 第一轮：挂上一张限价单 —— 它占掉唯一的那个名额。 */
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+  assert.equal(positionStore.pending(traderId).length, 1, '前提：挂上了一张单');
+
+  /* 第二轮：模型再提一笔市价开仓 —— 名额已经被挂单占了，必须被拒。 */
+  const again = OPEN_LONG_RESPONSE.replace(/"confidence":\s*\d+/, '"confidence": 90');
+  const summary = await buildTrader(broker, again).runOnce();
+
+  const openedMarket = broker.placed.filter((p) => p.type === 'MARKET');
+  assert.equal(
+    openedMarket.length,
+    0,
+    `★ 挂单占着名额时不能再开新仓 —— 否则 maxPositions 管不住真实敞口。` +
+      `实际下了 ${openedMarket.length} 张市价单，摘要：${summary}`,
+  );
+});
+
+test('提示词要告诉模型它在等什么 —— 挂单不能对它隐身', async () => {
+  /*
+   * ## 没有这一段，模型不知道自己在等什么
+   *
+   * 提示词的「当前持仓」读的是 `positionStore.open()`（只含已成交），
+   * 所以挂单**不在里面** —— 模型会为一笔已经挂好的入场重复提案，或者忘了这件事。
+   *
+   * 而它必须**单独成段、措辞明确说"不是持仓"**：混进「当前持仓」会让模型
+   * 拿它当仓位去管理（"把止损上移"——挂单上根本没有止损单可移）。
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  /*
+   * 下一轮拿到的提示词里必须出现那张挂单。
+   *
+   * 用 `FakeBroker` 之外的办法读不到提示词，所以这里直接看**决策记录**里
+   * 落库的那种 —— 它和生产环境存的是同一个字符串。
+   */
+  const captured: string[] = [];
+  const model: DecisionModel = {
+    async complete(system, user) {
+      captured.push(user);
+      return {
+        text: '<decision>[]</decision>',
+        latencyMs: 10,
+        usage: { promptTokens: 1, completionTokens: 1 },
+      };
+    },
+  };
+  await buildTrader(broker, '<decision>[]</decision>', model).runOnce();
+
+  const prompt = captured.at(-1) ?? '';
+  assert.match(
+    prompt,
+    /等待成交的挂单/,
+    '★ 提示词里必须有"等待成交的挂单"那一段 —— 否则模型不知道自己在等什么',
+  );
+  assert.match(prompt, /不是持仓/, '★ 必须说清它不是持仓，否则模型会去管理一个还不存在的仓位');
+  /* 挂单价位也要在，模型才能判断"这个价位还该不该等"。 */
+  assert.ok(
+    prompt.includes(String(limitPrice).slice(0, 6)),
+    `挂单价位应当出现在提示词里（找 ${limitPrice}），实际片段：${prompt.slice(0, 200)}`,
+  );
+});
+
+
 
 
 
