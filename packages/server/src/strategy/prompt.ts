@@ -720,6 +720,43 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       ']',
       '```',
       '',
+      /*
+       * ⚠️ **"不动"也要有范例，而且 `confidence` 一个都不能少。**
+       *
+       * 实测：机器人连续多轮输出的每条决策都只有三个字段
+       * （`symbol` / `action` / `reasoning`）—— **`confidence` 整份输出里一次都没出现**。
+       * 于是解析器填了 `0`，界面上每个决策都显示「置信度 0%」，看起来像"模型对
+       * 每个判断都毫无把握"；而风控那边拒绝开仓时会说"置信度 0 低于 68"，
+       * **把"漏填字段"说成了"信心不足"**。
+       *
+       * 原因就在上面：两个范例都是**开仓**动作。`wait` / `hold` 这些"不动"的决策
+       * 没有范例可照，模型就自由发挥了。**范例对输出形状的锚定作用比措辞强得多**
+       * —— 这个文件里为"只做多"加做空范例时，写的就是同一条道理。
+       */
+      '**"不做任何动作"时同样给出完整字段，一个都不能省** —— 尤其是 `confidence`：',
+      '```json',
+      '[',
+      '  {',
+      '    "symbol": "SOLUSDT",',
+      '    "action": "wait",',
+      '    "confidence": 35,',
+      '    "reasoning": "15m 与 1h 方向冲突，且波动率在收敛 —— 结构不成立。把握 35 分，远低于门槛。"',
+      '  }',
+      ']',
+      '```',
+      '',
+      '`hold`（维持已有仓位）的字段形状相同，也**必须**带 `confidence`：',
+      '```json',
+      '[',
+      '  {',
+      '    "symbol": "ETHUSDT",',
+      '    "action": "hold",',
+      '    "confidence": 72,',
+      '    "reasoning": "趋势仍成立、未触及失效位，继续持有；把握 72 分。"',
+      '  }',
+      ']',
+      '```',
+      '',
       '字段规则：',
       '- `symbol`：必须与候选区中列出的完全一致，例如 `BTCUSDT`。',
       '- `action`：取值为 `open_long`、`open_short`、`close_long`、`close_short`、`adjust_protection`、`add_to_position`、`reduce_position`、`hold`、`wait` 之一。',
@@ -740,7 +777,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       '- `leverage`：整数，不得超过该标的的硬性上限。',
       '- `position_size_usd`：以 USDT 计的名义价值，介于最小名义价值与该标的上限之间。',
       '- `stop_loss` / `take_profit`：绝对价格，不是百分比、也不是距离。',
-      '- `confidence`：0-100 的整数。请如实填写——低于阈值的值不会被交易。',
+      '- `confidence`：**0-100 的整数，每一个决策都要给 —— 包括 `wait` 和 `hold`。漏填会被当作"没有把握"而拒绝开仓**（风控的门槛看的就是它）。请如实填写：低于阈值的值不会被交易。',
       '- `risk_usd`：若止损被触发，损失的 USDT 金额。',
       '',
       '决策块内只能输出合法 JSON：双引号、无注释、无尾随逗号。你可以在 `reasoning` 字段里写简短理由，但 JSON 必须能被解析。',

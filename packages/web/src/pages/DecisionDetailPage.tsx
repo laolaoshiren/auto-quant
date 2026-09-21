@@ -185,8 +185,12 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
                       <span className="num text-xs text-ink-lo" title="名义价值（USDT）">
                         {fmtUsd(decision.positionSizeUsd, 2)}
                       </span>
+                      {/*
+                        ⚠️ 漏填时显示"未给出"而不是 0% —— 两者含义相反，
+                        见 `Decision.confidence` 的说明。
+                      */}
                       <span className="num ml-auto text-xs text-ink-lo" title="模型对该决策的自评置信度。">
-                        置信度 {decision.confidence}%
+                        {decision.confidence === null ? '置信度 未给出' : `置信度 ${decision.confidence}%`}
                       </span>
                     </div>
 
