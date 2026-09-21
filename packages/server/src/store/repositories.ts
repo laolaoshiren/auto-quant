@@ -1077,6 +1077,41 @@ export const orders = {
       .map(toOrder);
   },
 
+  /**
+   * **还没平掉的那些仓位，已经付掉的入场成本合计**（手续费 + 资金费）。
+   *
+   * ## 为什么总账校验需要它
+   *
+   * 交易所的流水（`incomeEvents`）从**开仓那一刻**就有 `COMMISSION`，持仓期间还会
+   * 有 `FUNDING_FEE`；而平台的 `trades` **只在平仓时**记一笔。于是只要有持仓，
+   * 「平台净额」天然比「交易所流水」少一个"未平仓的持有成本"。
+   *
+   * 实测：两条告警的差额 `0.0119` / `0.0202` 正好等于当时那两个仓位的入场手续费
+   * （ETH `0.0118539` + HYPE `0.00837404`）。而它被报成了
+   * **「平台的账本可能有漏记或重复记账，请先核对再让机器人继续交易」** ——
+   * 一个纯粹的口径差被说成了账目错误，而且每轮都报一次。
+   *
+   * 所以总账校验的两侧必须用**同一个口径**：把未平仓的持有成本加到平台侧。
+   *
+   * @param symbols **当前仍持仓**的标的；不传就只按 `trader_id` 汇总所有入场单
+   *   （那样会把已平仓的入场费也算进来，反而造成反向误差 —— 所以要传）。
+   */
+  openEntryCosts(traderId: number, symbols: readonly string[]): number {
+    if (symbols.length === 0) return 0;
+    const placeholders = symbols.map(() => '?').join(', ');
+    const row = getDb().get<{ total: number | null }>(
+      `SELECT SUM(COALESCE(fee, 0)) AS total
+         FROM orders
+        WHERE trader_id = ?
+          AND purpose = 'entry'
+          AND status = 'FILLED'
+          AND symbol IN (${placeholders})`,
+      traderId,
+      ...symbols,
+    );
+    return Number(row?.total ?? 0);
+  },
+
   insert(input: {
     traderId: number;
     exchangeOrderId: string | null;

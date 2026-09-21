@@ -96,6 +96,9 @@ function seedOrder(input: {
   symbol?: string;
   /** `created_at` 相对现在的偏移（毫秒，负数=更早）。 */
   ageMs?: number;
+  /** 默认 `stop_loss`（本文件多数用例关心的那种）；测入场费时传 `entry`。 */
+  purpose?: string;
+  fee?: number;
 }): number {
   const id = orderStore.insert({
     traderId: input.forTrader ?? traderId,
@@ -104,11 +107,12 @@ function seedOrder(input: {
     symbol: input.symbol ?? 'BTCUSDT',
     side: 'SELL',
     type: 'STOP_MARKET',
-    purpose: 'stop_loss',
+    purpose: (input.purpose ?? 'stop_loss') as never,
     quantity: 1,
     price: null,
     stopPrice: 66_000,
     status: input.status,
+    fee: input.fee ?? 0,
   });
   if (input.ageMs !== undefined) {
     getDb().run(
@@ -197,4 +201,60 @@ test('候选集只作用于本机器人', () => {
 
   const ids = orderStore.unsettled(traderId, cutoff).map((row) => row.id);
   assert.deepEqual(ids, [mine]);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  未平仓的入场成本                                                            */
+/* -------------------------------------------------------------------------- */
+
+test('★ 未平仓的入场成本：只算「入场 + 已成交 + 该标的仍持仓」', () => {
+  /*
+   * ## 为什么总账校验需要它
+   *
+   * 交易所流水从**开仓那一刻**就有 `COMMISSION`，而平台的 `trades` 只在**平仓时**
+   * 记一笔。于是只要有持仓，「平台净额」天然比「交易所流水」少一个"未平仓的持有成本"。
+   *
+   * 实测：两条告警的差额 `0.0119` / `0.0202` 正好是当时那两个仓位的入场手续费
+   * （ETH `0.0118539` + HYPE `0.00837404` = `0.0202`）—— **一个纯粹的口径差被报成了
+   * 「平台的账本可能有漏记或重复记账」**，而且每轮都报一次（上百条）。
+   *
+   * 所以这个汇总的口径必须精确，四条边界各钉一条：
+   */
+  traderId = seedTrader();
+
+  /* ① 要算的：入场 + 已成交 + 该标的仍持仓 */
+  seedOrder({ index: 1, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 0.0118539 });
+  /* ② 不算：那是保护单，不是入场费 */
+  seedOrder({ index: 2, status: 'FILLED', purpose: 'stop_loss', symbol: 'ETHUSDT', fee: 9 });
+  /* ③ 不算：它是另一个标的的入场费，而那个标的已经不在持仓列表里 */
+  seedOrder({ index: 3, status: 'FILLED', purpose: 'entry', symbol: 'BNBUSDT', fee: 7 });
+  /* ④ 不算：还没成交的单没有手续费 */
+  seedOrder({ index: 4, status: 'NEW', purpose: 'entry', symbol: 'ETHUSDT', fee: 5 });
+
+  const total = orderStore.openEntryCosts(traderId, ['ETHUSDT']);
+  assert.ok(
+    Math.abs(total - 0.0118539) < 1e-9,
+    `只应汇总 ETHUSDT 那一笔入场费，实际 ${total}` +
+      '（把保护单、别的标的、或未成交的单算进来都会让总账校验反向误报）',
+  );
+});
+
+test('没有持仓时未平仓成本是 0，不是「全部入场费」', () => {
+  /*
+   * 空标的列表必须短路返回 0。若不短路，SQL 里的 `IN ()` 会变成语法错误，
+   * 而更糟的一种实现是"忘了过滤" —— 那样已平仓的入场费也会被加进平台侧，
+   * 于是一个**已经对上的账**会被推成负差额。
+   */
+  traderId = seedTrader();
+  seedOrder({ index: 1, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 3 });
+  assert.equal(orderStore.openEntryCosts(traderId, []), 0);
+});
+
+test('未平仓成本只作用于本机器人', () => {
+  // 多个机器人共用一个库：把别人的入场费算进来会让本机器人的总账凭空多一笔。
+  traderId = seedTrader('mine');
+  const other = seedTrader('other');
+  seedOrder({ index: 1, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 1.5 });
+  seedOrder({ forTrader: other, index: 2, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 99 });
+  assert.ok(Math.abs(orderStore.openEntryCosts(traderId, ['ETHUSDT']) - 1.5) < 1e-9);
 });
