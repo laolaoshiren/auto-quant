@@ -1259,9 +1259,25 @@ function DecisionRow({
         <ActionBadge action={decision.action} className="ml-auto shrink-0" />
       </div>
 
-      {/* 置信度：缩进对齐到符号下方，强调色小字。 */}
+      {/*
+        置信度：缩进对齐到符号下方，强调色小字。
+
+        ⚠️ **模型没给这个字段时显示"未给出"，不显示 0%。**
+        实测模型有一整轮输出的每条决策都漏了 `confidence`（提示词当时只给了开仓的
+        范例），而这里原来无条件渲染 `${decision.confidence}%` —— 于是屏幕上每个
+        标的都写着「置信度: 0%」，看起来像"模型对每个判断都毫无把握"。
+        **0 分和"没给"是完全不同的两件事**，界面把它们显示成同一个数字就是在说谎。
+      */}
       <div className="mt-0.5 pl-5 text-xs text-accent">
-        置信度: <span className="num">{decision.confidence}%</span>
+        {decision.confidence === null ? (
+          <span className="text-ink-faint" title="模型这一条决策里没有给出 confidence 字段。">
+            置信度: 未给出
+          </span>
+        ) : (
+          <>
+            置信度: <span className="num">{decision.confidence}%</span>
+          </>
+        )}
       </div>
 
       {decision.reasoning && (

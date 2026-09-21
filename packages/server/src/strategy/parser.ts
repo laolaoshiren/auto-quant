@@ -409,7 +409,15 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
       positionSizeUsd: coerced.position_size_usd ?? 0,
       stopLoss: coerced.stop_loss ?? null,
       takeProfit: coerced.take_profit ?? null,
-      confidence: coerced.confidence ?? 0,
+      /*
+       * ⚠️ **缺失时是 `null`，不是 `0`。**
+       *
+       * 两者在界面上都会显示成"很低"，但含义相反：`0` 是"模型给了 0 分"，
+       * `null` 是"模型根本没给这个字段"。实测模型只输出了
+       * `symbol` / `action` / `reasoning`（提示词当时只给了开仓的范例），
+       * 而这里填 `0` 让界面显示"置信度 0%"、让风控说着"置信度 0 低于门槛"。
+       */
+      confidence: coerced.confidence ?? null,
       riskUsd: coerced.risk_usd ?? 0,
       reducePercent: coerced.reduce_percent ?? null,
       reduceQuantity: coerced.reduce_quantity ?? null,

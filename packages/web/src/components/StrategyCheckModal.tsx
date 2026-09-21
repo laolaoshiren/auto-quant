@@ -747,7 +747,9 @@ function SampleReport({ sample }: { sample: StrategyCheckSample }) {
                       <span>杠杆 {decision.leverage}×</span>
                       <span>止损 {decision.stopLoss ?? '无'}</span>
                       <span>止盈 {decision.takeProfit ?? '无'}</span>
-                      <span>置信度 {decision.confidence}</span>
+                      <span>
+                        置信度 {decision.confidence === null ? '未给出' : decision.confidence}
+                      </span>
                     </div>
                     {reason && <p className="mt-1 text-xs leading-relaxed text-warn">{reason}</p>}
                   </div>
