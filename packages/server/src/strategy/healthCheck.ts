@@ -205,6 +205,7 @@ export async function checkStrategy(options: {
      * 与 `memory` 同样的理由：报告里的 token 数必须对应实盘真会发出去的那一份形状。
      */
     universeTrimmedFrom: null,
+    pendingEntries: [],
   };
 
   const systemPrompt = buildSystemPrompt(promptContext);
