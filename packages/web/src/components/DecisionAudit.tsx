@@ -86,6 +86,8 @@ export function isOpenAction(action: string): boolean {
 
 export const STATUS_TONE: Record<ExecutionLogEntry['status'], Tone> = {
   ok: 'up',
+  /* 已挂单未成交 —— 不是"做成了"，但也不是失败。用中性色，别让人误读成仓位。 */
+  submitted: 'muted',
   rejected: 'warn',
   failed: 'down',
   skipped: 'muted',
@@ -94,6 +96,7 @@ export const STATUS_TONE: Record<ExecutionLogEntry['status'], Tone> = {
 /** `executionLog[].status` is a stable machine code — never display it raw. */
 export const STATUS_LABELS: Record<ExecutionLogEntry['status'], string> = {
   ok: '已执行',
+  submitted: '已挂单',
   rejected: '已拒绝',
   failed: '失败',
   skipped: '已跳过',
@@ -117,6 +120,7 @@ export function purposeLabel(purpose: string): string {
 /** Tailwind classes for an execution-log status. */
 export const EXEC_ROW_CLASS: Record<ExecutionLogEntry['status'], string> = {
   ok: 'border-base-800 bg-base-850/50',
+  submitted: 'border-base-700 bg-base-850/60',
   rejected: 'border-warn/50 bg-warn/10',
   failed: 'border-down/50 bg-down/10',
   skipped: 'border-base-800 bg-base-850/40',
@@ -124,6 +128,7 @@ export const EXEC_ROW_CLASS: Record<ExecutionLogEntry['status'], string> = {
 
 export const EXEC_TEXT_CLASS: Record<ExecutionLogEntry['status'], string> = {
   ok: 'text-ink-lo',
+  submitted: 'text-ink-lo',
   rejected: 'text-warn/90',
   failed: 'text-down/90',
   skipped: 'text-ink-faint',

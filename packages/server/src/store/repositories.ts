@@ -678,6 +678,8 @@ interface PositionRow {
   open_reasoning: string;
   opened_at: string;
   status: string;
+  /** 限价入场的交易所单号（`status='pending'` 时有值）。见 `M11_PENDING_ENTRY`。 */
+  entry_order_id: string | null;
 }
 
 export const positions = {
@@ -725,10 +727,21 @@ export const positions = {
     stopOrderId: string | null;
     tpOrderId: string | null;
     openReasoning: string;
+    /**
+     * `'open'`（默认，成交后的持仓）或 `'pending'`（**限价入场：单已挂出、
+     * 还没成交**）。
+     *
+     * `pending` 的行**不是持仓**：`open()` 只返回 `'open'`，所以风控、UI、
+     * 权益计算看不到它 —— 那正是要的，一个还没成交的单不该占仓位名额。
+     * 它的作用只有一个：**让对账知道"有一张挂出去的单要盯着"**。
+     */
+    status?: 'open' | 'pending';
+    /** 限价入场那笔单的交易所单号 —— 对账靠它去问"成交了吗"。 */
+    entryOrderId?: string | null;
   }): number {
     const { lastInsertRowid } = getDb().run(
-      `INSERT INTO positions (trader_id, symbol, side, quantity, entry_price, leverage, liquidation_price, margin_used, peak_pnl_percent, stop_loss, take_profit, stop_order_id, tp_order_id, open_reasoning, opened_at, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 'open')`,
+      `INSERT INTO positions (trader_id, symbol, side, quantity, entry_price, leverage, liquidation_price, margin_used, peak_pnl_percent, stop_loss, take_profit, stop_order_id, tp_order_id, open_reasoning, opened_at, status, entry_order_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.traderId,
       input.symbol,
       input.side,
@@ -743,8 +756,51 @@ export const positions = {
       input.tpOrderId,
       input.openReasoning,
       now(),
+      input.status ?? 'open',
+      input.entryOrderId ?? null,
     );
     return lastInsertRowid;
+  },
+
+  /**
+   * 还挂着的**限价入场单**（`status='pending'`）。
+   *
+   * 对账每轮拿它们去问交易所："成交了吗" —— 见 `AutoTrader.settlePendingEntries`。
+   * 之所以要单独一个方法而不是让调用方自己过滤 `open()`：`open()` 刻意不返回
+   * `pending`（它不是持仓），而"哪些单在等"是一个独立的、必须被看见的集合。
+   */
+  pending(traderId: number): PositionRow[] {
+    return getDb().all<PositionRow>(
+      "SELECT * FROM positions WHERE trader_id = ? AND status = 'pending' ORDER BY id",
+      traderId,
+    );
+  },
+
+  /**
+   * 把一行 `pending` 转成真正的持仓 —— 限价单成交了。
+   *
+   * 用**交易所报的成交价与成交量**覆盖挂单时的意向值：挂单时填的是"我想在
+   * 这个价位买这么多"，而成交时可能部分成交、也可能在更好的价位。
+   * 本地账本只能记**实际发生的**（这条纪律这个项目里已经踩过三次）。
+   *
+   * `stop_order_id` / `tp_order_id` 由调用方在挂完保护单后用 `setProtection` 写。
+   */
+  promote(
+    traderId: number,
+    symbol: string,
+    fill: { quantity: number; entryPrice: number; marginUsed: number },
+  ): void {
+    getDb().run(
+      `UPDATE positions
+          SET status = 'open', quantity = ?, entry_price = ?, margin_used = ?, opened_at = ?
+        WHERE trader_id = ? AND symbol = ? AND status = 'pending'`,
+      fill.quantity,
+      fill.entryPrice,
+      fill.marginUsed,
+      now(),
+      traderId,
+      symbol,
+    );
   },
 
   updatePeak(traderId: number, symbol: string, peakPnlPercent: number): void {

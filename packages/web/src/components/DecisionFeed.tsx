@@ -1045,6 +1045,7 @@ function planExecution(log: ExecutionLogEntry[], decisions: Decision[]): Executi
 
   const counts: Record<ExecutionLogEntry['status'], number> = {
     ok: 0,
+    submitted: 0,
     rejected: 0,
     failed: 0,
     skipped: 0,
@@ -1517,6 +1518,14 @@ function outcomeBadge(status: ExecutionLogEntry['status']): {
   switch (status) {
     case 'ok':
       return { key: status, label: `✓ ${STATUS_LABELS.ok}`, tone: 'up' };
+    /*
+     * 已挂单、尚未成交（限价入场）。
+     *
+     * ⚠️ **不能显示成"已执行"** —— 这一轮**没有产生持仓**，而执行摘要里
+     * "开仓 N" 数的是 `ok`。说"已执行"会让人去持仓列表找一个不存在的仓位。
+     */
+    case 'submitted':
+      return { key: status, label: `⧗ ${STATUS_LABELS.submitted}（等成交）`, tone: 'muted' };
     case 'rejected':
       return { key: status, label: `⚠ 被风控拒绝`, tone: 'warn' };
     case 'failed':
@@ -1524,7 +1533,7 @@ function outcomeBadge(status: ExecutionLogEntry['status']): {
     case 'skipped':
       return { key: status, label: `⊘ 未执行（${STATUS_LABELS.skipped}）`, tone: 'muted' };
     default: {
-      // 穷尽性检查：`status` 只能是上面四种。少写一种，这一行会编译报错。
+      // 穷尽性检查：`status` 只能是上面五种。少写一种，这一行会编译报错。
       const exhaustive: never = status;
       return { key: exhaustive, label: status, tone: 'muted' };
     }
@@ -1697,11 +1706,13 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
   );
 }
 
-/** `LogLine` 的标记与颜色。四种状态各自可辨，见 `outcomeBadge` 的同一条理由。 */
+/** `LogLine` 的标记与颜色。五种状态各自可辨，见 `outcomeBadge` 的同一条理由。 */
 function logLineStyle(status: ExecutionLogEntry['status']): { label: string; tone: string } {
   switch (status) {
     case 'ok':
       return { label: `✓ ${STATUS_LABELS.ok}`, tone: 'text-up' };
+    case 'submitted':
+      return { label: `⧗ ${STATUS_LABELS.submitted}`, tone: 'text-ink-lo' };
     case 'rejected':
       return { label: `⚠ 被风控拒绝`, tone: 'text-warn' };
     case 'failed':

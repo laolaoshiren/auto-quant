@@ -237,6 +237,53 @@ class FakeBroker {
   marginTypeOk = true;
 
   /**
+   * 还挂着的限价单（`orderId` → 交易所响应）。由 `getOrder` 回答"成交了吗"。
+   * 用例通过 `fillRestingOrder()` 让它成交，模拟价格走过来。
+   */
+  restingOrders = new Map<number, BinanceOrderResponse>();
+
+  /** 让一张挂着的限价单成交 —— 成交价就是它自己的挂单价。 */
+  fillRestingOrder(orderId: number): void {
+    const order = this.restingOrders.get(orderId);
+    if (!order) return;
+    const qty = Number(order.origQty) || 0;
+    order.status = 'FILLED';
+    order.executedQty = String(qty);
+    order.avgPrice = order.price;
+    /*
+     * 成交意味着仓位真的出现了 —— 限价入场对账之后会去建本地持仓，
+     * 但 `getPositions()`（交易所那一侧）也必须反映它，否则后续的对账
+     * 会认为"本地多了一个交易所没有的仓位"。
+     */
+    this.positions.push({
+      symbol: order.symbol,
+      side: order.side === 'BUY' ? 'long' : 'short',
+      quantity: qty,
+      entryPrice: Number(order.price),
+      markPrice: this.markPrice,
+      leverage: 3,
+      liquidationPrice: null,
+      unrealizedPnl: 0,
+      unrealizedPnlPercent: 0,
+      marginUsed: (qty * Number(order.price)) / 3,
+      notional: qty * Number(order.price),
+      marginType: 'cross',
+    });
+  }
+
+  /** 撤销一张挂着的限价单 —— 对账应当把它当作"从未成为持仓"。 */
+  cancelRestingOrder(orderId: number): void {
+    const order = this.restingOrders.get(orderId);
+    if (order) order.status = 'CANCELED';
+  }
+
+  async getOrder(symbol: string, orderId: string | number): Promise<BinanceOrderResponse | null> {
+    const order = this.restingOrders.get(Number(orderId));
+    if (!order || order.symbol !== symbol) return null;
+    return order;
+  }
+
+  /**
    * 交易所允许的最大杠杆。**默认 `null` = 不知道**，这时引擎只用配置上限 ——
    * 也就是改动之前的行为，所以既有用例的期望值不需要改。
    *
@@ -259,6 +306,51 @@ class FakeBroker {
     this.opLog.push(`place:${request.type}@${request.triggerPrice ?? request.price ?? '-'}`);
     const id = String(this.nextId++);
     const isConditional = request.type === 'STOP_MARKET' || request.type === 'TAKE_PROFIT_MARKET';
+
+    /*
+     * ⚠️ **限价单挂上不成交。**
+     *
+     * 原来这里只分"条件单"和"非条件单"，把**所有**非条件单都当市价立即成交 ——
+     * 包括 `LIMIT`。于是限价入场的整条路径（挂单 → pending → 对账 → 转正）
+     * 在测试里**根本走不到**：桩会直接把仓位建好。
+     *
+     * 现在它把限价单记进 `restingOrders`，由 `getOrder` 按用例设定的脚本回答
+     * "成交了吗"。默认**一直挂着**（最保守），用例想让它成交就改那张单的状态。
+     */
+    if (request.type === 'LIMIT') {
+      const resting: BinanceOrderResponse = {
+        symbol: request.symbol,
+        orderId: Number(id),
+        clientOrderId: request.clientOrderId ?? id,
+        side: request.side,
+        type: 'LIMIT',
+        status: 'NEW',
+        price: String(request.price ?? 0),
+        origQty: String(request.quantity ?? 0),
+        executedQty: '0',
+        avgPrice: '0',
+        timeInForce: 'GTC',
+        reduceOnly: false,
+        closePosition: false,
+        workingType: 'MARK_PRICE',
+        priceProtect: false,
+        updateTime: 0,
+      } as BinanceOrderResponse;
+      this.restingOrders.set(Number(id), resting);
+      return {
+        kind: 'order',
+        id,
+        clientId: resting.clientOrderId,
+        symbol: request.symbol,
+        side: request.side,
+        type: 'LIMIT',
+        status: 'NEW',
+        avgPrice: 0,
+        executedQty: 0,
+        terminal: false,
+        raw: resting,
+      };
+    }
 
     if (isConditional && this.rejectStops) {
       // Mirrors the real broker: a conditional order whose trigger is already on
@@ -3527,6 +3619,237 @@ test('★ 减仓只部分成交时，本地持仓按实际成交量减 —— �
   );
   assert.ok(reduced > 0, '成交了一部分，就该减掉那一部分');
 });
+
+/* -------------------------------------------------------------------------- */
+/*  限价入场                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/** 一条"挂限价单做多"的模型响应。 */
+function limitEntryResponse(limitPrice: number, markPrice: number): string {
+  /*
+   * ⚠️ **止损止盈要相对市价满足盈亏比，不是相对限价。**
+   *
+   * 风控算盈亏比用的是**当前市价**与那两个价位的距离（它不知道也不该知道
+   * 这笔将来会挂在哪儿）。所以挂一个低于市价 3% 的限价单时，止损如果按限价
+   * 算就变成"距市价 -4.9%"，而止盈只有 +2.8% —— 盈亏比 0.57，直接被拒。
+   *
+   * 这不是系统的毛病：真实交易员挂低吸单时，止损当然按他的入场价算，
+   * 但他不会设一个**相对当前市价**只有 0.57 盈亏比的单。夹具要照他的做法写。
+   */
+  const stop = markPrice * 0.985;
+  const target = markPrice * 1.05;
+  return `<decision>
+\`\`\`json
+[
+  {
+    "symbol": "${SYMBOL}",
+    "action": "open_long",
+    "entry_type": "limit",
+    "limit_price": ${limitPrice},
+    "leverage": 3,
+    "position_size_usd": 60,
+    "stop_loss": ${stop.toFixed(4)},
+    "take_profit": ${target.toFixed(4)},
+    "confidence": 80,
+    "reasoning": "预测回踩到这个区间，挂单等成交。"
+  }
+]
+\`\`\`
+</decision>`;
+}
+
+test('★ 限价入场：挂单后不建仓，成交后才转正并挂上保护单', async () => {
+  /*
+   * ## 这条用例走的是「真实交易员」那条路
+   *
+   * 分析完行情之后预测一个区间、在那儿挂限价单等着，而不是立刻市价吃进去
+   * （后者付 taker 费、还吃滑点）。这个系统在此之前只会市价开仓。
+   *
+   * 它要证明四件事：
+   *
+   * 1. **挂的是 `LIMIT` 单**，不是一个市价单；
+   * 2. **挂了之后本地没有持仓** —— 只有一行 `pending`（`open()` 看不到）；
+   * 3. **对账发现成交后，仓位带着止损止盈转正**；
+   * 4. **保护单在同一轮里就挂上了** —— 否则那段窗口就是没有保护的杠杆仓位。
+   */
+  const broker = new FakeBroker();
+  /* 价格要低于市价，否则会被判成"会立即成交"。 */
+  const limitPrice = broker.markPrice * 0.995;
+
+  const first = await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  /* ① 挂的是限价单。 */
+  const limitOrder = broker.placed.find((p) => p.type === 'LIMIT');
+  assert.ok(limitOrder, `必须挂出 LIMIT 单，实际下了：${broker.placed.map((p) => p.type).join('、')}`);
+  assert.equal(limitOrder.price, limitPrice, '挂单价必须就是模型给的那个价位');
+  assert.equal(limitOrder.timeInForce, 'GTC', '挂单要一直有效到撤销，不能 IOC');
+
+  /* ② 这一轮没有持仓 —— 只有一行 pending。 */
+  assert.equal(
+    positionStore.open(traderId).filter((p) => p.symbol === SYMBOL).length,
+    0,
+    '★ 挂单不等于建仓 —— 这一轮本地不能出现持仓（否则就是"界面说有仓、交易所说没有"）',
+  );
+  const pendingRows = positionStore.pending(traderId);
+  assert.equal(pendingRows.length, 1, '应当留下一行待成交记录，供对账去盯');
+  assert.equal(pendingRows[0]!.entry_price, limitPrice, 'pending 行要记住打算成交的价位');
+  assert.equal(pendingRows[0]!.stop_loss !== null, true, 'pending 行必须带着计划中的止损');
+
+  /* ③ 执行摘要说的是"已挂单"，不是"已开仓"。 */
+  assert.match(first, /挂单|等待成交/, `摘要应当说清楚这一轮只是挂了单，实际：${first}`);
+
+  /* ④ 让那张单成交，再跑一轮 —— 对账应当把它转正。 */
+  const orderId = Number(pendingRows[0]!.entry_order_id);
+  broker.fillRestingOrder(orderId);
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  const opened = positionStore.open(traderId).find((p) => p.symbol === SYMBOL);
+  assert.ok(opened, '★ 成交之后必须转成真正的持仓');
+  assert.equal(opened.quantity, Number(limitOrder.quantity), '数量取实际成交');
+  assert.equal(opened.entry_price, limitPrice, '成交价就是挂单价（这张单是按挂单价成交的）');
+  assert.equal(
+    positionStore.pending(traderId).length,
+    0,
+    'pending 行转正后不该还留在待成交集合里',
+  );
+
+  /*
+   * ⑤ **保护单必须挂上了** —— 这是整条路径里唯一有风险的地方。
+   * 成交与挂保护单之间是一个真实的窗口，所以转正与挂单在同一段代码里连着做。
+   */
+  const stops = broker.placed.filter(
+    (p) => p.type === 'STOP_MARKET' && p.symbol === SYMBOL && (p.triggerPrice ?? 0) > 0,
+  );
+  assert.ok(
+    stops.length > 0,
+    '★ 成交后必须立刻挂上止损 —— 否则那段时间是没有保护的杠杆仓位（§2.6）',
+  );
+});
+
+test('限价单未成交就被撤销时，本地不留任何痕迹', async () => {
+  /*
+   * 反面：单子被撤了（或过期了），它**从未成为过持仓**。
+   *
+   * 这一条防的是"pending 行永远留着" —— 那种行会每轮被查询一次，
+   * 而更重要的是它会让操作员以为"有一笔入场在等"，实际上那张单早就没了。
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  const pendingRow = positionStore.pending(traderId)[0];
+  assert.ok(pendingRow, '前提：留下了待成交记录');
+  broker.cancelRestingOrder(Number(pendingRow.entry_order_id));
+
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  assert.equal(positionStore.pending(traderId).length, 0, '撤销后不该再留着待成交记录');
+  assert.equal(
+    positionStore.open(traderId).filter((p) => p.symbol === SYMBOL).length,
+    0,
+    '没成交就撤销 = 从未建仓，不能凭空多出一个持仓',
+  );
+});
+
+test('限价买价高于市价时会立即成交 —— 那就不是"挂单等"，按市价处理并说明', async () => {
+  /*
+   * 模型给了一个**高于市价**的买价：那意味着立刻成交，而不是"等价格过来"。
+   *
+   * 与其让它悄悄变成一张立即成交的限价单（用户以为在等、实际上已经进场了），
+   * 不如**说清楚并明确按市价开仓** —— 行为一致，但话是真的。
+   */
+  const broker = new FakeBroker();
+  const previous = buildTrader(broker, limitEntryResponse(broker.markPrice * 1.003, broker.markPrice));
+
+  const log = await previous.runOnce();
+  assert.ok(
+    broker.placed.some((p) => p.type === 'MARKET'),
+    '会立即成交的"限价单"应当按市价处理，而不是挂一张必然立刻吃掉的单',
+  );
+  assert.equal(positionStore.pending(traderId).length, 0, '这种路径不该留下待成交记录');
+  assert.match(log, /开仓|open|市价/i, `应当走正常开仓路径，实际：${log}`);
+});
+
+test('★ 部分成交后被撤销：已经成交的那部分是真实持仓，必须转正', async () => {
+  /*
+   * ## 这条守的是一个**判断顺序**，而变异测试证明它原来没人守
+   *
+   * 对账拿到交易所的答复时有两条独立的线索：
+   *
+   *   · `executedQty > 0` —— **成交了多少**；
+   *   · `status ∈ {CANCELED, EXPIRED, …}` —— **这张单还在不在**。
+   *
+   * 而它们是**可以同时成立**的：一张限价单成交了一部分，剩下的被撤掉
+   * （或 IOC 剩余过期）。那种情况下：
+   *
+   *   | 先判什么 | 结果 |
+   *   | --- | --- |
+   *   | **先判成交量**（正确）| 转正 + 挂保护单 —— 那笔真实的持仓有人管 |
+   *   | 先判状态（错误）| **当成"从未发生"** —— 钱已经花了、仓位已经开了，而本地不知道 |
+   *
+   * 第二种会留下一个**没有任何保护单、也不在任何账本里的杠杆仓位** ——
+   * §2.6 说的最糟状态。
+   *
+   * 最初写这段时我以为它是显然的，所以没写用例；变异测试（把顺序反过来）
+   * 全绿通过 —— **那就是"显然"的反证。** 现在它是显式的。
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  const pendingRow = positionStore.pending(traderId)[0];
+  assert.ok(pendingRow, '前提：留下了待成交记录');
+  const orderId = Number(pendingRow.entry_order_id);
+  const intendedQty = Number(broker.restingOrders.get(orderId)?.origQty ?? 0);
+
+  /* 成交一部分（一半），剩下的被撤 —— 两个条件同时成立。 */
+  broker.fillRestingOrder(orderId);
+  const resting = broker.restingOrders.get(orderId)!;
+  resting.origQty = String(intendedQty / 2);
+  resting.executedQty = String(intendedQty / 2);
+  resting.status = 'CANCELED';
+
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  const opened = positionStore.open(traderId).find((p) => p.symbol === SYMBOL);
+  assert.ok(
+    opened,
+    '★ 成交了一部分就是真实持仓 —— 不能因为"单被撤了"就当成从未发生（那笔钱已经花了）',
+  );
+  assert.equal(
+    positionStore.pending(traderId).length,
+    0,
+    '转正之后不该还留着待成交记录',
+  );
+
+  /*
+   * ⚠️ **光断言"有止损单"不够 —— 收养路径也会挂一张。**
+   *
+   * 变异测试暴露了这一点：把"成交 → 转正"改坏成"成交 → 关掉"之后，用例**仍然通过**。
+   * 原因是那个坏实现下，仓位会由 `reconcilePositions` 兜底**收养**进来，
+   * 而收养路径同样会补一张**兜底比例**的止损单（那是它的职责）。
+   *
+   * 两条路都"最终有持仓、有止损"，所以宏观断言分不出对错 —— 区别在**价位**：
+   *
+   *   · **转正**（正确）：止损就是当初计划好的那个（存在 pending 行上）；
+   *   · 收养（兜底）：止损是**兜底比例**算出来的一个系统挑的价位。
+   *
+   * 所以判据是"止损价位是不是我计划的那个" —— 那才是"系统知道这张单在等什么"的证据。
+   */
+  const plannedStop = pendingRow.stop_loss;
+  assert.ok(plannedStop !== null, '前提：挂单时记下了计划中的止损');
+  const stopOrders = broker.placed.filter(
+    (p) => p.type === 'STOP_MARKET' && p.symbol === SYMBOL,
+  );
+  assert.ok(
+    stopOrders.some((p) => Math.abs((p.triggerPrice ?? 0) - (plannedStop ?? 0)) < 1e-6),
+    '★ 必须用**计划中的止损价位**挂保护单（实际挂的：' +
+      stopOrders.map((p) => p.triggerPrice).join('、') +
+      `）—— 只挂一张兜底比例的止损说明仓位是被"收养"的，不是这次入场转正的`,
+  );
+});
+
+
 
 
 

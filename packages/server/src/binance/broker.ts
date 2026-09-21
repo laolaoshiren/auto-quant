@@ -662,6 +662,33 @@ export class BinanceBroker {
   }
 
   /**
+   * 查**单张普通订单**（`GET /fapi/v1/order`）。
+   *
+   * ## 为什么需要它 —— 限价入场
+   *
+   * `getOpenOrders` 只能回答"它**还挂着**吗"，回答不了"它**成交了吗**"：
+   * 一张已经成交的限价单会从挂单列表里消失，和"被撤销"长得一模一样。
+   *
+   * 而限价入场要的恰恰是后者 —— 挂单之后系统必须能问出三种结果：
+   * **成交了**（转正成持仓）、**撤了/过期了**（从未成为持仓）、**还挂着**（继续等）。
+   *
+   * 与 `getAlgoOrder` 同一个形状：读不到返回 `null`，由调用方决定"下一轮再问"，
+   * **不让一次读失败被误当成一种结论**。
+   */
+  async getOrder(symbol: string, orderId: string | number): Promise<BinanceOrderResponse | null> {
+    if (this.dryRun) return null;
+    try {
+      return await this.rest.signedRequest<BinanceOrderResponse>('GET', '/fapi/v1/order', {
+        symbol: normalizeSymbol(symbol),
+        orderId,
+      });
+    } catch (error) {
+      log.debug(`getOrder(${symbol}, ${orderId}) failed: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
    * Open algo orders. Weight 1 with a symbol, **40 without** — so this is always
    * called per symbol.
    */
