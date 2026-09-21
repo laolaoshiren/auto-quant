@@ -285,6 +285,22 @@ function coerceRawDecision(input: unknown): LenientDecision | null {
     reduce_percent: toFiniteNumber(o.reduce_percent ?? o.reducePercent ?? o.percent) ?? undefined,
     reduce_quantity:
       toFiniteNumber(o.reduce_quantity ?? o.reduceQuantity ?? o.quantity) ?? undefined,
+    /*
+     * 入场方式。同样**接受两种写法**，理由与减仓那两个字段一样：
+     * 模型输出 camelCase 还是下划线纯看它当天的习惯，只认一种就等于一半被静默丢弃。
+     *
+     * ⚠️ 这里的 `entry_type` 加得比字段本身更要紧 —— **宽容转换函数是解析的入口**，
+     * 加在它后面的字段不会被它带出来。第一版我把它加在了调用点，于是 zod 认、
+     * 而 `coerced` 里根本没有这两个键，限价入场永远是市价。
+     */
+    entry_type:
+      typeof o.entry_type === 'string'
+        ? o.entry_type.toLowerCase().trim()
+        : typeof o.entryType === 'string'
+          ? o.entryType.toLowerCase().trim()
+          : undefined,
+    limit_price:
+      toFiniteNumber(o.limit_price ?? o.limitPrice ?? o.entry_price ?? o.entryPrice) ?? undefined,
     reasoning: typeof o.reasoning === 'string' ? o.reasoning : typeof o.reason === 'string' ? o.reason : undefined,
   };
 

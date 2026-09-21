@@ -137,6 +137,24 @@ export const ORDER_SETTLE_GRACE_MS = 2 * 60_000;
 export const MAX_DATA_ROUNDS = 3;
 
 /**
+ * 「这张单**已经不存在了**」的交易所状态 —— 限价入场对账用。
+ *
+ * ⚠️ **判断顺序很重要**：调用方必须先看 `executedQty > 0`，再看这张表。
+ * 因为 `CANCELED` 也可能是**部分成交之后被撤**（撤销剩余），而 `EXPIRED` 同理
+ * （IOC 剩余过期）。**先问"成交了多少"，再问"单还在不在"** —— 反过来会把一个
+ * 已经成交了一部分的入场当成"从未发生"，那笔真实持仓就没人管了。
+ *
+ * `PARTIALLY_FILLED` 不在表里：它还活着，继续等。
+ */
+const TERMINAL_GONE_STATUSES: ReadonlySet<string> = new Set([
+  'CANCELED',
+  'EXPIRED',
+  'EXPIRED_IN_MATCH',
+  'REJECTED',
+]);
+
+
+/**
  * 走 Algo 端点的条件单类型。
  *
  * 就是 `/fapi/v1/order` 会以 `-4120` 拒掉的那几种（见 `binance/types.ts`），
@@ -1283,6 +1301,21 @@ export class AutoTrader {
      * "仓位先被处理" —— 对调之后这个前提**更强**了，仍然满足。
      */
     const exchangePositions = await this.deps.broker.getPositions();
+    /*
+     * ⚠️ **限价入场的对账必须排在仓位对账之前。**
+     *
+     * 两者都会看到"交易所上多了一个仓位"，但**知道的东西不一样**：这里知道
+     * 那张单是我们自己挂的、以及当初打算用的止损止盈；`reconcilePositions`
+     * 只能看到"多了一个仓位"，说不出它是怎么来的 —— 它会收养它（那是它的
+     * 兜底职责），但**保护单要靠猜**。
+     *
+     * 先跑这里，仓位就带着它的止损止盈转正；后跑的话，这次转正会找不到
+     * pending 行，而那个仓位**没有任何保护单、也没人知道它本该有一个**。
+     * 那是 §2.6 说的最糟状态。
+     */
+    await this.settlePendingEntries().catch((error) => {
+      log.warn(`[${this.deps.trader.name}] 待成交对账失败（不影响本周期其余工作）：${(error as Error).message}`);
+    });
     await this.reconcilePositions(exchangePositions);
 
     // 历史兜底：只负责"仓位那一遍解释不了"的部分 ——
@@ -1991,6 +2024,14 @@ export class AutoTrader {
     state.phase = 'execute';
     let entriesTaken = 0;
     let exitsTaken = closedByGuard;
+    /**
+     * 已挂出、等待成交的限价入场（**不是开仓**）。
+     *
+     * 与 `entriesTaken` 分开数：那一轮**没有产生持仓**，把它算进"开仓"会让
+     * 操作员去持仓列表找一个不存在的仓位 —— 正是这个项目一直在消灭的那类矛盾。
+     * 但也不能不报：**"什么都没做"和"挂了一张单在等"是两件事**。
+     */
+    let limitSubmissions = 0;
     let cooldownBlocked = 0;
 
     /*
@@ -2156,6 +2197,8 @@ export class AutoTrader {
           const outcome = await this.executeOpen(decision, snapshotBySymbol.get(decision.symbol));
           executionLog.push(outcome);
           if (outcome.status === 'ok') entriesTaken += 1;
+          /* 挂单不是开仓 —— 分开数，见 `limitSubmissions` 的说明。 */
+          if (outcome.status === 'submitted') limitSubmissions += 1;
         }
       } catch (error) {
         const detail = (error as Error).message;
@@ -2225,6 +2268,8 @@ export class AutoTrader {
       `开仓 ${entriesTaken}`,
       `平仓 ${exitsTaken}`,
     ];
+    /* 挂单单独报 —— 它既不是"开仓"也不是"什么都没做"。 */
+    if (limitSubmissions > 0) parts.push(`挂单 ${limitSubmissions}（等成交）`);
     if (cooldownBlocked > 0) parts.push(`${cooldownBlocked} 条被冷却期拦截`);
     const rejectedCount = parsed.rejected.length + verdict.rejected.length;
     if (rejectedCount > 0) parts.push(`${rejectedCount} 条被拒绝`);
@@ -2243,6 +2288,129 @@ export class AutoTrader {
    * is not detected the bot believes it holds something it does not, and every
    * subsequent decision is built on a false premise.
    */
+  /**
+   * **结清待成交的限价入场单。**
+   *
+   * ## 它是「挂单」与「成交」之间唯一的连接
+   *
+   * `submitLimitEntry` 挂出一张限价单、留一行 `status='pending'` 就结束了 ——
+   * 那时**没有任何仓位**。这个方法是另一半：拿那一行的 `entry_order_id` 去问
+   * 交易所，按答案分三种处理。
+   *
+   * ## ⚠️ 为什么它必须排在 `reconcilePositions` **之前**
+   *
+   * 两者都会看到"交易所上多了一个仓位"，但**知道的东西不一样**：
+   *
+   *   · 这里知道**那张单是我们自己挂的**（`entry_order_id`）、以及当初打算用的
+   *     止损止盈（存在那一行 pending 上）；
+   *   · `reconcilePositions` 只能看到"多了一个仓位"，说不出它是怎么来的 ——
+   *     它会把仓位收养进来（那是它的兜底职责），但**保护单要靠猜**。
+   *
+   * 先跑这里，仓位就带着它的止损止盈转正；后跑的话，`reconcilePositions`
+   * 已经收养过它了，而这次转正会找不到 `pending` 行 —— 结果是那个仓位
+   * **没有任何保护单，也没人知道它本该有一个**。那就是 §2.6 说的最糟状态。
+   *
+   * ## 三种答案
+   *
+   * | 交易所说 | 处理 |
+   * | --- | --- |
+   * | 成交了（`executedQty > 0`）| 转正 + **同一段代码里立刻挂保护单** |
+   * | 撤单 / 过期 / 拒绝 | 关掉那一行 —— **它从未成为过持仓** |
+   * | 还挂着 / 读不到 | 什么都不做，下一轮再问 |
+   */
+  private async settlePendingEntries(): Promise<void> {
+    const traderId = this.deps.trader.id;
+    const rows = positionStore.pending(traderId);
+    if (rows.length === 0) return;
+
+    for (const row of rows) {
+      const orderId = row.entry_order_id;
+      if (!orderId) {
+        /*
+         * 没有单号的 pending 行是坏数据（迁移之前的行、或者写入时出了岔子）。
+         * **不能留着** —— 它会永远挂在 pending 里被反复查询。
+         */
+        positionStore.close(row.id);
+        this.emit('warn', `${row.symbol} 的待成交记录没有交易所单号，已作废该记录。`);
+        continue;
+      }
+
+      let order: Awaited<ReturnType<BinanceBroker['getOrder']>>;
+      try {
+        order = await this.deps.broker.getOrder(row.symbol, orderId);
+      } catch (error) {
+        log.warn(`[${this.deps.trader.name}] 查询 ${row.symbol} 的挂单失败：${(error as Error).message}`);
+        continue;
+      }
+      /* 读不到 = **不知道**，不是"没成交"。下一轮再问。 */
+      if (!order) continue;
+
+      const executed = Number(order.executedQty) || 0;
+      const isGone = TERMINAL_GONE_STATUSES.has(order.status);
+
+      if (executed > 0) {
+        await this.promotePendingEntry(row, executed, Number(order.avgPrice) || row.entry_price);
+      } else if (isGone) {
+        positionStore.close(row.id);
+        this.emit(
+          'info',
+          `${row.symbol} 的限价单已${order.status === 'EXPIRED' ? '过期' : '撤销'}（未成交），该入场作废。`,
+        );
+      }
+      /* 其余情况（`NEW` / `PARTIALLY_FILLED` 但还没成交）继续等。 */
+    }
+  }
+
+  /**
+   * 把一行待成交转成真正的持仓，**并在同一段代码里挂上保护单**。
+   *
+   * 这两个动作必须连着做：中间任何 `await` 抛出去，都会留下一个**没有止损的
+   * 杠杆仓位**。所以保护单挂失败时走的是"立刻平仓"那条路（§2.6），
+   * 而不是"下一轮再试"。
+   */
+  private async promotePendingEntry(
+    row: PositionRow,
+    executedQty: number,
+    avgPrice: number,
+  ): Promise<void> {
+    const traderId = this.deps.trader.id;
+    const symbol = row.symbol;
+    const isLong = row.side === 'long';
+    const exitSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
+
+    /*
+     * 先转正、再挂保护单 —— 顺序与 `executeOpen` 一致：保护单需要持仓存在
+     * （`closePosition` 的条件单在没有仓位时会被拒）。
+     *
+     * 用**交易所报的**成交量与成交价覆盖挂单时的意向值：部分成交在限价单上
+     * 很常见，而账本只能记实际发生的。
+     */
+    positionStore.promote(traderId, symbol, {
+      quantity: executedQty,
+      entryPrice: avgPrice,
+      marginUsed: (executedQty * avgPrice) / Math.max(row.leverage, 1),
+    });
+    tradeEvents.record(traderId, symbol, 'entry');
+
+    const refresh = positionStore.getOpenBySymbol(traderId, symbol);
+    if (!refresh) return;
+
+    await this.placeProtection({
+      symbol,
+      side: exitSide,
+      type: 'STOP_MARKET',
+      triggerPrice: row.stop_loss ?? 0,
+      purpose: 'stop_loss',
+      traderId,
+      quantity: executedQty,
+    });
+
+    this.emit(
+      'info',
+      `限价单成交：${symbol} ${isLong ? '多头' : '空头'} ${executedQty} @ ${avgPrice}（挂在 ${row.entry_price}）—— 已按计划挂上保护单。`,
+    );
+  }
+
   private async reconcilePositions(exchangePositions: ExchangePosition[]): Promise<void> {
     const traderId = this.deps.trader.id;
     const exchangeBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
@@ -4147,6 +4315,138 @@ reduceQuantity: null,
     }
   }
 
+  /**
+   * **限价入场**：挂单，这一轮不建仓。
+   *
+   * ## 它为什么和市价开仓是两条路
+   *
+   * 市价那条：下单 → 等成交 → 建仓 → 挂保护单，四步连着做完，一轮之内仓位就成立了。
+   *
+   * 限价这条：**下单之后就结束了**。单挂在交易所上等价格过来，可能几分钟、
+   * 也可能几小时 —— 而这一轮**不建仓**，只在 `positions` 里留一行
+   * `status='pending'`（`open()` 看不到它，风控与权益也不把它算作持仓）。
+   *
+   * ## 为什么 `stopLoss` / `takeProfit` 现在就存下来
+   *
+   * 挂单时**挂不了保护单**（还没有仓位，`closePosition` 的条件单会被拒）。
+   * 但成交那一刻必须立刻挂上 —— 所以决策里的止损止盈要先存在那一行 pending 上，
+   * 等 `settlePendingEntries` 转正时直接拿来用。**不给的话，成交之后就是裸仓。**
+   *
+   * ## 返回 `submitted`（不是 `filled`）
+   *
+   * 状态名要说实话：这一轮**没有成交**，只有一个挂出去的委托。执行摘要里
+   * 它必须和"已开仓"分开显示 —— 否则界面又会变成"显示有持仓而实际没有"。
+   */
+  private async submitLimitEntry(
+    decision: Decision,
+    snapshot: MarketSnapshot | undefined,
+    ctx: {
+      traderId: number;
+      symbol: string;
+      side: 'BUY' | 'SELL';
+      quantity: number;
+      price: number;
+      clientOrderId: string;
+    },
+  ): Promise<ExecutionLogEntry> {
+    const { traderId, symbol, side, quantity, price, clientOrderId } = ctx;
+    const limitPrice = decision.limitPrice ?? 0;
+
+    /*
+     * 本地先做一次方向检查：买单的限价**高于**市价会立刻成交（那就不是"挂单等"），
+     * 卖单反之。这不是交易所会拒的错，而是**意图与做法不一致** —— 与其让它
+     * 悄悄变成市价单，不如说清楚。
+     */
+    const wouldFillImmediately = side === 'BUY' ? limitPrice >= price : limitPrice <= price;
+    if (wouldFillImmediately) {
+      this.emit(
+        'warn',
+        `${symbol} 的限价 ${limitPrice} 相对于市价 ${price} 会立即成交（${side === 'BUY' ? '买价高于市价' : '卖价低于市价'}）—— 这已经不是"挂单等成交"了。已按市价开仓处理。`,
+      );
+      return this.executeOpen({ ...decision, entryType: 'market', limitPrice: null }, snapshot);
+    }
+
+    try {
+      const placed = await this.deps.broker.placeOrder({
+        symbol,
+        side,
+        type: 'LIMIT',
+        quantity,
+        price: limitPrice,
+        timeInForce: 'GTC',
+        clientOrderId,
+      });
+
+      /*
+       * ⚠️ **挂单也可能立刻成交**（价格刚好穿过去）。那种情况下 `placed` 回来就是
+       * 终态，而"等成交"的整条路径白走 —— 直接走市价那条收尾逻辑。
+       */
+      if (placed.terminal && placed.executedQty > 0) {
+        this.emit('info', `${symbol} 的限价单已立即成交，按普通开仓继续。`);
+        return this.executeOpen({ ...decision, entryType: 'market', limitPrice: null }, snapshot);
+      }
+
+      /* 记进订单表（`NEW`，`limitPrice` 落进 `price` 而不是 `avgPrice`）。 */
+      this.recordOrder({
+        traderId,
+        exchangeOrderId: placed.id,
+        clientOrderId,
+        symbol,
+        side,
+        type: 'LIMIT',
+        purpose: 'entry',
+        quantity,
+        price: limitPrice,
+        triggerPrice: null,
+        status: 'NEW',
+        avgPrice: 0,
+        filledQty: 0,
+        fee: 0,
+      });
+
+      /*
+       * 插一行 `pending`：它**不是持仓**，只是"有一张挂出去的单要盯着"。
+       * `stopLoss` / `takeProfit` 存在这一行上，成交时直接拿来挂保护单。
+       */
+      positionStore.insert({
+        traderId,
+        symbol,
+        side: decision.action === 'open_long' ? 'long' : 'short',
+        quantity,
+        entryPrice: limitPrice,
+        leverage: decision.leverage,
+        liquidationPrice: null,
+        marginUsed: (quantity * limitPrice) / Math.max(decision.leverage, 1),
+        stopLoss: decision.stopLoss,
+        takeProfit: decision.takeProfit,
+        stopOrderId: null,
+        tpOrderId: null,
+        openReasoning: decision.reasoning,
+        status: 'pending',
+        entryOrderId: placed.id,
+      });
+
+      this.emit(
+        'info',
+        `已挂限价单 ${symbol} ${decision.action === 'open_long' ? '做多' : '做空'} ${quantity} @ ${limitPrice}（现价 ${price}，${decision.leverage}x）—— 成交后会自动挂上止损 ${decision.stopLoss ?? '无'} 与止盈 ${decision.takeProfit ?? '无'}。`,
+      );
+
+      return {
+        action: decision.action,
+        symbol,
+        status: 'submitted',
+        detail: `已挂限价单 @ ${limitPrice}（现价 ${price}），等待成交；成交后自动挂保护单。`,
+      };
+    } catch (error) {
+      return {
+        action: decision.action,
+        symbol,
+        status: 'failed',
+        detail: `限价挂单失败（${(error as Error).message}）。`,
+      };
+    }
+  }
+
   /** Market-enter, then immediately place exchange-side protection. */
   private async executeOpen(
     decision: Decision,
@@ -4223,6 +4523,30 @@ reduceQuantity: null,
 
     const clientOrderId = makeClientId('entry', symbol);
     const side: 'BUY' | 'SELL' = isLong ? 'BUY' : 'SELL';
+
+    /*
+     * ⚠️ **限价入场走另一条路。**
+     *
+     * 市价那条路的核心是"下单 → 等成交 → 建仓"，三步连着做完；而限价入场
+     * **下单之后就结束了** —— 单挂在交易所上等价格过来，这一轮**不建仓**。
+     *
+     * 它会在 `positions` 里留下一行 `status='pending'`（不是持仓，`open()` 看不到），
+     * 由 `settlePendingEntries` 在后续周期里问交易所"成交了吗"，成交那一刻才
+     * 转正并**立刻补挂保护单**。
+     *
+     * 这是整个限价入场机制里唯一有风险的地方：**从成交到挂上保护单之间有一个窗口**。
+     * 所以转正与挂保护单必须在同一段代码里连着做（见 `settlePendingEntries`）。
+     */
+    if (decision.entryType === 'limit' && (decision.limitPrice ?? 0) > 0) {
+      return this.submitLimitEntry(decision, snapshot, {
+        traderId,
+        symbol,
+        side,
+        quantity,
+        price,
+        clientOrderId,
+      });
+    }
 
     try {
       const placed = await this.deps.broker.placeOrder({
