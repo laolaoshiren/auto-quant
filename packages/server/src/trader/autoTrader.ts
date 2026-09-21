@@ -407,6 +407,19 @@ export class AutoTrader {
    * 只活在进程内：**重启后重新设一遍是对的** —— 交易所侧可能被别的东西改回去。
    */
   private marginSet = new Map<string, string>();
+
+  /**
+   * 交易所允许的最大杠杆（symbol → 值）。**本进程缓存**，由周期开头预取。
+   *
+   * 为什么要有它：`RiskEnvironment` 的字段都是**同步**的（风控引擎不 await），
+   * 而档位要从交易所读。所以取数发生在周期开头（`prefetchLeverageCaps`），
+   * 这里只存结果给引擎同步查。
+   *
+   * 为什么缓存不用失效：档位是**交易所对账户的授信**，几分钟内不会变，
+   * 而它变化时（比如开户满 30 天）下一轮重启或下一次预取自然会取到新的。
+   * 每轮重取也不贵（weight 1），但没必要为每个候选各取一次。
+   */
+  private leverageCapCache = new Map<string, number>();
   /**
    * 非 `null` 时**本轮不下任何单** —— 账户处于双向持仓模式。
    *
@@ -759,8 +772,39 @@ export class AutoTrader {
    *
    * 日志只在**状态变化**时写：正常（本来就是单向）时一次都不写。
    */
-  private async ensurePositionMode(): Promise<void> {
-    const mode = await this.deps.broker.ensureOneWayMode().catch((error) => ({
+
+  /**
+   * 预取交易所对这批标的**实际允许**的最大杠杆。
+   *
+   * ## 为什么值得每轮取一次
+   *
+   * 官方口径：能设的最大杠杆 = min(名义价值所在档的 `initialLeverage`, 账户级限制,
+   * symbol 上限)。而**账户级那一项对子账户是硬的** —— 官方 FAQ：普通用户
+   * 2025-08-12 之后新建的子账户，合约杠杆**不超过 5x**。
+   *
+   * 也就是说：**同一份策略配置，跑在主账户上能用 20x，跑在子账户上只能 5x。**
+   * 在此之前引擎只认配置值，于是模型提 20x 会被交易所拒（`-4203`/`-4209`），
+   * 而它收到一句**自己无法预先算出来**的拒绝。
+   *
+   * ## 取舍
+   *
+   * `weight 1`／次，一个周期最多几个标的 —— 与"模型反复提一个注定被拒的杠杆、
+   * 白烧一整轮决策"相比，这个成本可以忽略。读失败什么都不做（引擎退回只用配置上限），
+   * **不会让交易停下来**。
+   */
+  private async prefetchLeverageCaps(symbols: readonly string[]): Promise<void> {
+    const unique = [...new Set(symbols)];
+    await Promise.all(
+      unique.map(async (symbol) => {
+        /* 同一个进程里取过一次就够了：这是交易所对账户的授信，不会几分钟就变。 */
+        if (this.leverageCapCache.has(symbol)) return;
+        const cap = await this.deps.broker.getMaxLeverage(symbol).catch(() => null);
+        if (cap !== null && cap > 0) this.leverageCapCache.set(symbol, cap);
+      }),
+    );
+  }
+
+  private async ensurePositionMode(): Promise<void> {    const mode = await this.deps.broker.ensureOneWayMode().catch((error) => ({
       changed: false,
       warning: `无法读取持仓模式：${(error as Error).message}`,
     }));
@@ -1412,6 +1456,18 @@ export class AutoTrader {
     );
 
     /*
+     * --- 预取交易所的杠杆上限 --------------------------------------------
+     *
+     * 风控引擎的 `exchangeMaxLeverageOf` 是**同步**的（引擎不 await），所以档位
+     * 必须在进入风控之前取好 —— 放到"用到时再取"已经晚了，那时在引擎内部。
+     *
+     * **只为本轮候选取**：一个周期最多几个请求（weight 1/次），而它决定
+     * "模型提的杠杆到底能不能设" —— 子账户是 5x、名义价值分档还会更低。
+     * 读失败不影响任何事（引擎退回只用配置上限）。
+     */
+    await this.prefetchLeverageCaps(snapshots.map((s) => s.symbol));
+
+    /*
      * 候选评分门槛 —— 在**构建提示词之前**筛掉不值得看的标的。
      *
      * 实测单次决策的提示词是 69,678 字符 / 48,005 tokens，而其中相当一部分是陪跑的。
@@ -1865,6 +1921,24 @@ export class AutoTrader {
        * 用的是同一个取值规则，两边不会各说各话。
        */
       roundTripFeeRate: memory.performance.roundTripFeeRate,
+      /*
+       * ⚠️ **交易所实际允许的杠杆上限** —— 与配置里那个取小。
+       *
+       * 在此之前引擎只用配置值：配置写 20x 就照 20x 批，然后 `setLeverage` 被
+       * 交易所拒（子账户 5x、名义价值分档还会更低）。而**同一份配置跑在主账户与
+       * 子账户上的结果是不同的** —— 子账户那条限制（普通用户 2025-08-12 后新建的
+       * 不超过 5x）在这之前完全不可见。
+       *
+       * ## 为什么是同步回调 + 预热
+       *
+       * `RiskEnvironment` 的字段都是同步的（引擎不 await），所以这里查的是
+       * **本进程这一轮已经预取好的缓存**；缓存没命中就返回 null（= 不知道），
+       * 于是只用配置上限 —— **与以前的行为完全一致，读不到不会让交易停下来**。
+       *
+       * 预取发生在周期开头（`prefetchLeverageCaps`），只为**本轮候选**取，
+       * 一个周期最多几个请求，而且档位在几分钟内不会变。
+       */
+      exchangeMaxLeverageOf: (symbol) => this.leverageCapCache.get(symbol) ?? null,
     });
 
     for (const rejection of verdict.rejected) {

@@ -236,6 +236,18 @@ class FakeBroker {
   /** 用例可以设成 false，模拟"该标的已有持仓/挂单，改不了"。 */
   marginTypeOk = true;
 
+  /**
+   * 交易所允许的最大杠杆。**默认 `null` = 不知道**，这时引擎只用配置上限 ——
+   * 也就是改动之前的行为，所以既有用例的期望值不需要改。
+   *
+   * 用例可以把它设成一个数字来验证"配置写 20x、交易所只给 5x"那种情况。
+   */
+  async getMaxLeverage(_symbol: string): Promise<number | null> {
+    return this.maxLeverageCap;
+  }
+
+  maxLeverageCap: number | null = null;
+
   marginTypeCalls: Array<{ symbol: string; marginType: 'ISOLATED' | 'CROSSED' }> = [];
 
   async ensureOneWayMode() {
@@ -3387,5 +3399,79 @@ test('★ 开仓前把保证金模式设成逐仓 —— 这一步以前完全�
     `设不上保证金模式不该让开仓失败（那会让"改不了模式"变成"做不了交易"）。实际：${summary}`,
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  杠杆上限来自交易所                                                          */
+/* -------------------------------------------------------------------------- */
+
+test('★ 配置写 20x 而交易所只允许 5x 时，按 5x 走 —— 而不是让交易所拒回来', async () => {
+  /*
+   * ## 这条用例对应的就是那个问题
+   *
+   * > 我现在跑的是币安子账户，平台应该限制了 5x 最大，**AI 有没有能识别**？
+   *
+   * 官方 FAQ 明文：普通用户在 **2025-08-12 之后新建的子账户**，合约杠杆不超过 5x。
+   * 而在此之前，引擎只认配置里那个数字 —— **同一份配置跑在主账户与子账户上的结果
+   * 不会不同**，因为代码根本不知道子账户有这条限制（`leverageBracket` 全仓库 0 命中）。
+   *
+   * 后果不是"少赚"：模型提 20x → 风控照批 → `setLeverage` 被交易所拒
+   * （`-4203`/`-4209`）→ 它收到一句**自己无法预先算出来**的拒绝。
+   *
+   * 现在引擎取**两者的小**。
+   */
+  const strategy = strategyStore.get(traders.get(traderId)!.strategyId)!;
+  strategyStore.update(strategy.id, {
+    config: {
+      ...strategy.config,
+      riskControl: { ...strategy.config.riskControl, btcEthMaxLeverage: 20 },
+    },
+  });
+
+  const broker = new FakeBroker();
+  /* 交易所说：这个标的只能 5x（子账户那条限制）。 */
+  broker.maxLeverageCap = 5;
+
+  /* 模型要 20x —— 照配置是完全合法的。 */
+  const greedy = OPEN_LONG_RESPONSE.replace(/"leverage":\s*3/, '"leverage": 20');
+  await buildTrader(broker, greedy).runOnce();
+
+  const placed = broker.placed.find((p) => p.type === 'MARKET');
+  assert.ok(placed, '前提：确实下了一单');
+  assert.equal(
+    broker.leverageCalls.at(-1)?.leverage,
+    5,
+    '★ 传给交易所的杠杆必须是**交易所允许的那个**（5x），不是配置里那个（20x）—— ' +
+      '否则会被交易所拒回来，而模型收到一句它无法预先算出的错误',
+  );
+});
+
+test('读不到档位时退回配置上限 —— 读不到不该让交易停下来', async () => {
+  /*
+   * 反面：`getMaxLeverage` 返回 `null`（接口失败 / dry-run / 响应形状不认识）时，
+   * 引擎必须**只用配置上限**，行为与改动之前完全一致。
+   *
+   * 这一条比上一条更重要：一个"读不到就不开仓"的实现会让网络抖动变成停摆。
+   */
+  const strategy = strategyStore.get(traders.get(traderId)!.strategyId)!;
+  strategyStore.update(strategy.id, {
+    config: {
+      ...strategy.config,
+      riskControl: { ...strategy.config.riskControl, btcEthMaxLeverage: 20 },
+    },
+  });
+
+  const broker = new FakeBroker();
+  broker.maxLeverageCap = null; // 读不到
+
+  const greedy = OPEN_LONG_RESPONSE.replace(/"leverage":\s*3/, '"leverage": 12');
+  await buildTrader(broker, greedy).runOnce();
+
+  assert.equal(
+    broker.leverageCalls.at(-1)?.leverage,
+    12,
+    '读不到交易所档位时应当照模型提的走（只受配置上限约束）—— 不能因此拒绝交易',
+  );
+});
+
 
 
