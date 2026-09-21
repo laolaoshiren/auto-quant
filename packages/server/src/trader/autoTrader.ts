@@ -1344,6 +1344,22 @@ export class AutoTrader {
       log.warn(`[${this.deps.trader.name}] 保本止损检查失败（不影响本周期交易）：${(error as Error).message}`);
     });
 
+    /*
+     * --- 3.5 挂太久的限价入场单 -------------------------------------------
+     *
+     * 模型能撤单（`cancel_pending`），但那要求它**每轮都记得回头看**这件事 ——
+     * 而"一张挂单还该不该等"恰恰是它容易往后放的那类判断。
+     *
+     * 与 `applyBreakevenGuard` 同一类：**保护一个已经做出的判断，恰恰是模型
+     * 可靠地判断错的那件事。** "等太久了就撤"没有需要判断的成分。
+     *
+     * 放在机械保护这一组里、且**在问模型之前** —— 撤掉的额度可以给这一轮的
+     * 新机会用（与 `ACTION_PRIORITY` 把 `cancel_pending` 排在最前同一个理由）。
+     */
+    await this.expireStalePendingEntries().catch((error) => {
+      log.warn(`[${this.deps.trader.name}] 挂单超时检查失败（不影响本周期其余工作）：${(error as Error).message}`);
+    });
+
     /* --- 4. Circuit breakers --------------------------------------------- */
     /*
      * The watermark is the *realised* peak, not the mark-to-market peak.
@@ -2465,6 +2481,66 @@ export class AutoTrader {
       'info',
       `限价单成交：${symbol} ${isLong ? '多头' : '空头'} ${executedQty} @ ${avgPrice}（挂在 ${row.entry_price}）—— 已按计划挂上保护单。`,
     );
+  }
+
+  /**
+   * **把等太久的限价入场单撤掉。**
+   *
+   * ## 为什么是一条机械规则，而不是留给模型判断
+   *
+   * 模型现在能撤单了，但那要求它**每轮都记得回头看**。而它每轮要处理 20 个候选、
+   * 几个持仓、一堆约束 —— "我半小时前挂了张单"很容易被挤出去。
+   *
+   * 与 `applyBreakevenGuard` / `applyDrawdownGuard` 同一个理由：
+   * **保护一个已经做出的判断，恰恰是模型可靠地判断错的那件事。**
+   * 而"等太久了就撤"没有任何需要判断的成分。
+   *
+   * ## 与模型主动撤单的分工
+   *
+   * 这一条是**兜底**，不是替代：模型看到理由不成立了，可以立刻撤（`cancel_pending`）；
+   * 而它没想到的时候，这条时间规则保证那张单不会一直占着持仓名额。
+   *
+   * 撤掉的理由**要说实话**：不是"它已经没机会了"（那要模型判断），
+   * 而是"等得超过了配置的时限"—— 一个纯粹的时间事实。
+   */
+  private async expireStalePendingEntries(): Promise<number> {
+    const traderId = this.deps.trader.id;
+    const limitMinutes = this.activeConfig.riskControl.pendingEntryTimeoutMinutes;
+    if (limitMinutes <= 0) return 0;
+
+    const rows = positionStore.pending(traderId);
+    if (rows.length === 0) return 0;
+
+    let expired = 0;
+    for (const row of rows) {
+      const waitedMinutes = (Date.now() - Date.parse(row.opened_at)) / 60_000;
+      if (!(waitedMinutes >= limitMinutes)) continue;
+
+      try {
+        if (row.entry_order_id) {
+          await this.deps.broker.cancelOrder(row.symbol, Number(row.entry_order_id), 'order');
+        }
+      } catch (error) {
+        /*
+         * 撤不掉就**留着**，不改本地状态 —— 与模型的撤单同一处理。
+         * 特别地：如果它其实已经成交了，`settlePendingEntries` 会把它转正；
+         * 而这里若抢先关掉记录，那笔真实持仓就没人管了。
+         */
+        log.warn(
+          `[${this.deps.trader.name}] ${row.symbol} 的挂单超时但未能撤掉：${(error as Error).message}`,
+        );
+        continue;
+      }
+
+      positionStore.close(row.id);
+      expired += 1;
+      this.emit(
+        'info',
+        `${row.symbol} 的限价挂单已等满 ${Math.round(waitedMinutes)} 分钟（上限 ${limitMinutes}）仍未成交，已自动撤掉并释放该入场名额。`,
+      );
+    }
+
+    return expired;
   }
 
   private async reconcilePositions(exchangePositions: ExchangePosition[]): Promise<void> {
