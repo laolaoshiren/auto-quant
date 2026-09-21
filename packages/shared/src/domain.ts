@@ -827,7 +827,19 @@ export interface DecisionRecord {
 export interface ExecutionLogEntry {
   action: string;
   symbol: string;
-  status: 'ok' | 'rejected' | 'failed' | 'skipped';
+  /**
+   * `submitted` = **已挂单，尚未成交**（限价入场）。
+   *
+   * ## 为什么不能复用 `ok`
+   *
+   * `ok` 在生成摘要时被算作"开仓 N"（见 `summarizeExecution`）。而限价挂单
+   * **这一轮没有产生持仓** —— 把它记成 `ok` 会让执行摘要说"开仓 1"，而界面上
+   * 一个持仓都没有。那正是这个项目花了很多轮在消灭的那类矛盾：
+   * **一个字段说"做成了"，另一个字段说"什么都没有"。**
+   *
+   * 状态名要说实话，摘要才可能说实话。
+   */
+  status: 'ok' | 'submitted' | 'rejected' | 'failed' | 'skipped';
   detail: string;
   orderId?: string;
   /** Notional actually filled, when applicable. */
