@@ -4066,6 +4066,23 @@ reduceQuantity: null,
       // cannot be placed the position is closed immediately rather than left
       // naked — an unprotected leveraged position is the worst state to be in.
       const exitSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
+
+      /*
+       * ⚠️ **挂这一批保护单之前，先撤掉该标的已有的条件单。**
+       *
+       * 币安不允许同一仓位存在两张条件单，而**最容易踩的形态是"上一张单已经过期了"**
+       * —— 过期的 Algo 单在交易所那边仍然占着名额。实测三次完全相同的序列：
+       * 开仓挂上保护单 → 交易所报 `EXPIRED` → 模型想移动保护位 → 重挂撞 `-4130`
+       * → 判成"保护单缺失" → **把仓位提前平掉**（三次都恰好盈利，纯属运气）。
+       *
+       * 撤单必须在**这一批之前**、而不是在 `placeProtection` 内部：那一次调用
+       * 要连着挂止损和止盈，在内部撤会把刚挂好的止损一起撤掉（实测报过
+       * 「没有可触发的止损单」）。
+       */
+      await this.deps.broker.cancelAllOrders(symbol).catch((error) => {
+        this.emit('warn', `${symbol} 挂保护单前撤旧单失败（不影响后续尝试）：${(error as Error).message}`);
+      });
+
       let stopOrderId: string | null = null;
       let tpOrderId: string | null = null;
       let stopFailureDetail = '止损挂单失败，已立即平掉该仓位。';
@@ -4240,6 +4257,33 @@ reduceQuantity: null,
    * always covers the full position however the size drifts, and cannot be left
    * behind as a partial residual. Binance forbids combining it with `quantity`,
    * which the broker strips automatically.
+   */
+  /**
+   * 挂一张保护单（止损或止盈）。
+   *
+   * ## ⚠️ 调用方必须在**挂这一批之前**先撤掉该标的的旧条件单
+   *
+   * 币安不允许同一仓位存在两张条件单 —— 撞上就是 `-4130`（原文：「该仓位已有
+   * 止损或止盈单，不能重复挂」）。而**最容易踩的形态是"上一张单已经过期了"**：
+   * 实测三次完全相同的序列：
+   *
+   * ```
+   * 06:22:17  stop_loss    EXPIRED   单号 3000002207017212   ← 交易所报"已过期"
+   *    ...    （2 小时 52 分后，模型决定移动保护位）
+   * 09:14:37  stop_loss    REJECTED  -4130「已有止损单」      ← 挂不上
+   * 09:14:38  exit         FILLED                            ← 判"保护单缺失"→ 立即平仓
+   * ```
+   *
+   * 也就是说：**过期的 Algo 单在交易所那边仍然占着那个名额**，而本地看它
+   * `EXPIRED` 就以为可以挂新的了。于是连续三次"移动保护位"都变成**把仓位提前
+   * 平掉**（三次都恰好是盈利的，纯属运气）。
+   *
+   * **但不能在这个函数里撤** —— 它被调用 8 次，而其中 4 次是"止损 + 止盈"
+   * 成对出现的：在挂止盈时撤一次，会把**刚刚挂好的止损**一起撤掉。实测这么写过
+   * 一次，测试立刻报「没有可触发的止损单」。撤单属于**批次**，不属于单张。
+   *
+   * `replaceProtection` 那条路径（保本止损）一直是"先撤旧、再挂新"，
+   * 开仓路径与另外两处漏了 —— 撤单加在它们的**第一张之前**。
    */
   private async placeProtection(input: {
     symbol: string;

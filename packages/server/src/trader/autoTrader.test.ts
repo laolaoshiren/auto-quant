@@ -401,6 +401,13 @@ class FakeBroker {
   async cancelAllOrders(symbol: string) {
     this.cancelledSymbols.push(symbol);
     /*
+     * 也进 `opLog` —— 那样才能断言**撤单与挂单的相对顺序**。
+     *
+     * 两个数组（`cancelledSymbols` / `placed`）各自只记自己那一类，之间没有时间线；
+     * 而"先撤后挂"正是这里要钉住的那条不变量（不先撤，挂上去就是 `-4130`）。
+     */
+    this.opLog.push(`cancel:${symbol}`);
+    /*
      * 撤单**真的撤掉了** —— 这正是 §2.7 在交易所侧的效果。
      *
      * 以前这里只往数组里记一个标的名就完了，于是"本地行还写着 NEW、交易所早就撤了"
@@ -859,6 +866,17 @@ test('a close cancels protection before flattening', async () => {
   assert.equal(positionStore.open(traderId).length, 1);
 
   broker.placed.length = 0;
+  /*
+   * ⚠️ `cancelledSymbols` 也要清。
+   *
+   * 开仓路径现在也会撤一次单（挂保护单之前要清掉该标的的旧条件单 —— 见
+   * `placeProtection` 的注释：过期的 Algo 单在交易所那边仍占着名额）。这里测的是
+   * **平仓时**的撤单，所以要把开仓那一次从记录里去掉，否则断言到的是两条。
+   *
+   * `placed` 本来就清了，撤单记录是这次改动新引入的脏数据 —— 两件事必须一起清，
+   * 否则"测的是哪一次撤单"就变得含糊了。
+   */
+  broker.cancelledSymbols.length = 0;
   const summary = await buildTrader(broker, CLOSE_LONG_RESPONSE).runOnce();
 
   assert.match(summary, /平仓 1/);
@@ -2623,7 +2641,16 @@ test('平仓时被撤掉的条件单：本地行必须跟着结清（§2.7 的�
     (p) => p.type === 'STOP_MARKET' || p.type === 'TAKE_PROFIT_MARKET',
   );
   assert.equal(conditional.length, 2, '结清只是记账，绝不能重新下单或重新撤单');
-  assert.deepEqual(broker.cancelledSymbols, [SYMBOL], '撤单仍然只发生在平仓那一次');
+  /*
+   * ⚠️ 两次撤单，**各属于一轮**：开仓那一轮挂保护单之前清一次旧条件单，
+   * 平仓那一轮按 §2.7 撤一次。原来只断言一次 —— 那时开仓路径还没有这次撤单，
+   * 而过期的 Algo 单占着名额正是老 bug 的根因。
+   */
+  assert.deepEqual(
+    broker.cancelledSymbols,
+    [SYMBOL, SYMBOL],
+    '撤单只应发生在"开仓挂保护单之前"与"平仓之前"这两处，不该有第三次',
+  );
 });
 
 test('交易所自己撤掉的条件单（closePosition 兄弟单）：下一次对账结清', async () => {
@@ -3101,5 +3128,64 @@ test('★ 一轮失败把状态标成 error，下一轮成功必须回到 runnin
     'running',
     '★ 成功一轮就必须回到 running —— 否则一次瞬时的模型失败会把机器人永久标成故障，' +
       '而它其实一直在正常跑。实测操作员看到的正是那条关不掉的红色横幅。',
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  保护单：先撤后挂                                                            */
+/* -------------------------------------------------------------------------- */
+
+test('★ 挂保护单之前必须先撤掉该标的的旧条件单', async () => {
+  /*
+   * ## 这条用例来自三次完全相同的"提前平仓"
+   *
+   * 实测序列（三次一模一样）：
+   *
+   * ```
+   * 06:22:17  stop_loss    EXPIRED   单号 3000002207017212   ← 交易所报"已过期"
+   *    ...    （2 小时 52 分后，模型决定移动保护位）
+   * 09:14:37  stop_loss    REJECTED  -4130「已有止损单」      ← 挂不上
+   * 09:14:38  exit         FILLED                            ← 判"保护单缺失"→ 立即平仓
+   * ```
+   *
+   * **过期的 Algo 单在交易所那边仍然占着「该仓位已有条件单」的名额**，而本地看它
+   * `EXPIRED` 就以为能挂新的了。于是一次"移动保护位"变成把仓位提前平掉 ——
+   * 三次都恰好盈利，纯属运气。
+   *
+   * ## 为什么断言的是**顺序**而不是"撤了几次"
+   *
+   * 撤单本身不是目的：**在挂之前撤**才是。只断言"撤过"的话，一个把撤单写在挂单
+   * **之后**的实现照样通过 —— 而那个顺序是无效的（挂的时候旧单还在，照样 `-4130`）。
+   *
+   * 而且这一批要挂两张（止损 + 止盈）：撤单必须在**第一张之前**，不能在两张之间
+   * —— 在中间撤会把刚挂好的止损一起撤掉（实测这么写过一次，报的是
+   * 「没有可触发的止损单」）。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const ops = broker.opLog;
+  const cancelIdx = ops.findIndex((op) => op.startsWith('cancel:'));
+  const firstConditional = ops.findIndex(
+    (op) => op.startsWith('place:STOP_MARKET') || op.startsWith('place:TAKE_PROFIT_MARKET'),
+  );
+
+  assert.ok(cancelIdx >= 0, `挂保护单之前必须先撤一次旧条件单，实际操作序列：${JSON.stringify(ops)}`);
+  assert.ok(firstConditional >= 0, '前提：这一轮确实挂了保护单');
+  assert.ok(
+    cancelIdx < firstConditional,
+    `★ 撤单必须在**第一张保护单之前**。过期的 Algo 单在交易所仍占名额，` +
+      `不先撤就是 -4130 → 判"保护单缺失" → 把仓位提前平掉。实际序列：${JSON.stringify(ops)}`,
+  );
+  /* 两张保护单都挂上了 —— 撤单没有把先挂的那张撤掉。 */
+  assert.equal(
+    ops.filter((op) => op.startsWith('place:STOP_MARKET')).length,
+    1,
+    '止损必须挂着，不能被同一批里的撤单撤掉',
+  );
+  assert.equal(
+    ops.filter((op) => op.startsWith('place:TAKE_PROFIT_MARKET')).length,
+    1,
+    '止盈同理',
   );
 });
