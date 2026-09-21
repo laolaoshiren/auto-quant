@@ -1037,4 +1037,81 @@ test('限价单的方向校验也按挂单价 —— 否则一笔正确的挂单
   assert.match(wrongSide.rejected[0]!.reason, /止损无效/, '理由要说清是止损位置的问题');
 });
 
+/* -------------------------------------------------------------------------- */
+/*  盈亏比的浮点边界                                                             */
+/* -------------------------------------------------------------------------- */
+
+test('★ 盈亏比"刚好达标"必须通过 —— 浮点误差不该变成拒绝的理由', () => {
+  /*
+   * ## 这条用的是生产上的真实数字（`#87`，2026-09-21）
+   *
+   *     止损 111   止盈 115.8   市价 112.2
+   *     下行 = 112.2 − 111   = 1.2
+   *     上行 = 115.8 − 112.2 = 3.6
+   *     盈亏比 = 3.6 / 1.2 = 2.999999999999988
+   *
+   * 而拒绝理由写的是：
+   *
+   *     > 盈亏比 1:3.00 低于要求的 1:3。
+   *
+   * **显示出来是相等的两个数，而判定是"低于"** —— `toFixed(2)` 把
+   * 2.999999999999988 显示成 `3.00`，而比较是 `2.999999999999988 < 3`。
+   *
+   * 于是**一个数学上刚好达标的单被拒了**，而那正是提示词要求它做的
+   * （「止盈 ≥ 止损幅度的 3 倍」）—— **"刚好 3 倍"是按规则算出来的结果。**
+   */
+  const symbol = 'SOLUSDT';
+  const env = environment({
+    snapshots: new Map([[symbol, snapshot(symbol, 112.2)]]),
+    config: configWith({
+      riskControl: {
+        ...defaultStrategyConfig().riskControl,
+        minRiskRewardRatio: 3,
+        minStopLossFeeMultiple: 0,
+      },
+    }),
+  });
+
+  const verdict = engine.review(
+    [
+      openDecision({
+        symbol,
+        action: 'open_long',
+        stopLoss: 111,
+        takeProfit: 115.8,
+        positionSizeUsd: 60,
+        leverage: 3,
+      }),
+    ],
+    env,
+  );
+
+  assert.equal(
+    verdict.rejected.length,
+    0,
+    `★ 3.6 / 1.2 在数学上就是 3.00，不该因为浮点误差被拒。实际：${verdict.rejected[0]?.reason ?? '（无）'}`,
+  );
+
+  /*
+   * 反面：**真的差一点就要拒**（2.99 而不是 2.999999999999988）——
+   * 证明容差是 1e-9 而不是"把阈值放松了"。
+   */
+  const justShort = engine.review(
+    [
+      openDecision({
+        symbol,
+        action: 'open_long',
+        stopLoss: 111,
+        takeProfit: 115.79, // 3.59 / 1.2 = 2.9916…
+        positionSizeUsd: 60,
+        leverage: 3,
+      }),
+    ],
+    env,
+  );
+  assert.equal(justShort.approved.length, 0, '真的不达标（2.99）必须照旧拒 —— 容差不是放松阈值');
+  assert.match(justShort.rejected[0]!.reason, /盈亏比/, '理由应当还是盈亏比');
+});
+
+
 

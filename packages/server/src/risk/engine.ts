@@ -908,7 +908,32 @@ export class RiskEngine {
      */
     const rewardDistance = Math.abs(takeProfit - entryPrice);
     const rewardRisk = riskDistance > 0 ? rewardDistance / riskDistance : 0;
-    if (rewardRisk < risk.minRiskRewardRatio) {
+    /*
+     * ⚠️ **容差 1e-9 —— 与上面两处手续费门槛同一个写法，而这条原来漏了。**
+     *
+     * 实测（`#87`，2026-09-21）：
+     *
+     *     止损 111   止盈 115.8   市价 112.2
+     *     下行 = 112.2 − 111   = 1.2
+     *     上行 = 115.8 − 112.2 = 3.6
+     *     盈亏比 = 3.6 / 1.2 = 2.999999999999988
+     *
+     * 而拒绝理由是这么写的：
+     *
+     *     > 盈亏比 1:3.00 低于要求的 1:3。
+     *
+     * **显示出来是相等的两个数，而判定是"低于"** —— 因为 `toFixed(2)` 把
+     * 2.999999999999988 显示成了 `3.00`，而比较是 `2.999999999999988 < 3`。
+     *
+     * 于是**一个数学上刚好达标的单被拒了**。而那件事正是提示词要求它做的：
+     * 「止盈 ≥ 止损幅度的 3 倍」—— **"刚好 3 倍"是按规则算出来的结果，
+     * 而不该因为浮点误差变成拒绝的理由。**
+     *
+     * 这个文件里另外两条同类判据（`reviewAdjust` 与这里的手续费门槛）**都用了
+     * 同一个 1e-9 容差** —— 只有盈亏比这条漏了。**同一个文件里有的地方用容差、
+     * 有的没用，本身就是需要统一检查的信号。**
+     */
+    if (rewardRisk + 1e-9 < risk.minRiskRewardRatio) {
       return {
         ok: false,
         reason: `盈亏比 1:${rewardRisk.toFixed(2)} 低于要求的 1:${risk.minRiskRewardRatio}。`,
