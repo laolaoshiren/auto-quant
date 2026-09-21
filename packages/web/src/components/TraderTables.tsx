@@ -1375,7 +1375,24 @@ export function TraderTables({
       {/* 空表格不占位：`min-h` 曾经给这一区留了 220px，于是"暂无持仓"下面跟着
           一片空白。高度交给内容，有行时才需要滚动。 */}
       <div>
-        {tab === 'positions' && <PositionsTable traderId={traderId} onCloseRequest={setCloseTarget} />}
+        {/*
+          ⚠️ **`onSelectSymbol` 必须传** —— 漏过一次。
+
+          `PositionsTable` 一直支持点击币种跳转行情图（它内部用的就是下面三张表同一个
+          `SymbolCell`），但这一行**没有把它传进去**：委托表、成交表、订单记录都传了，
+          持仓表漏了。于是四张表里唯独最上面那张点了没反应 —— 而它恰恰是操作员最想
+          看行情的那一张（手上正拿着这个仓位）。
+
+          `onSelectSymbol` 是可选的，所以漏传**不会报错**，只会静默失去功能。
+          这正是四个调用点里最容易漏掉第三个的原因。
+        */}
+        {tab === 'positions' && (
+          <PositionsTable
+            traderId={traderId}
+            onCloseRequest={setCloseTarget}
+            onSelectSymbol={onSelectSymbol}
+          />
+        )}
         {/* 两个标签共用同一个分页实例：它们读的是同一个端点，只是过滤条件不同；
             分开两套只会让翻出来的历史与"当前委托"的数字再次分家。 */}
         {tab === 'orders' && (
