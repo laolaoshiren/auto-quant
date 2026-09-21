@@ -1892,24 +1892,77 @@ export class AutoTrader {
      */
     if (!hasDecisionBlock(response.text)) {
       /*
-       * ⚠️ **这句会被操作员看到（它进 `last_error`），所以说的是人话。**
+       * ⚠️ **先重试一次，再判失败。**
        *
-       * 原文案是「模型回复里没有 `<decision>` 块（finish_reason 可能为 length，
-       * 输出被截断）—— 本轮不执行任何决策。响应 1162 字符。」—— 那是**给维护者
-       * 看的一句话**：`<decision>` 块、`finish_reason`、字符数，三样都不是操作员
-       * 需要判断的东西，而它们把「这一轮怎么了」埋在了括号里。
+       * 实测两次截断（`#104`、`#119`）的 `completionTokens` **都正好是 16,384**
+       * —— 那是输出上限，而其中约 15,000 是**思考**。也就是说：**思考把输出预算
+       * 吃光，正文一个字都没写出来。**
        *
-       * 抛错本身是对的（截断是模型失败的一种，必须按失败计数、让安全模式能触发，
-       * 见上面那段）。**要改的是措辞，不是行为。**
+       * 原来的处理是直接抛错、这一轮跳过。而实测两次都发生在**轮次稀少的时段**
+       * （45 分钟一轮），等于白等一整轮。**而重试一次的成本远低于等 45 分钟**：
+       * 这类截断是**一次性**的（换一次生成通常就正常了），不是模型"不会做"。
        *
-       * 操作员需要知道三件事：**发生了什么**（输出被截断、本轮没有决策）、
-       * **有没有危险**（没有 —— 已跳过，持仓与既有委托不受影响）、
-       * **要不要管**（通常不用；反复出现再去调大输出上限）。
+       * ## 重试时说什么
+       *
+       * 一句**具体的**要求，而不是"再试一次"：明确告诉它**上一条没有产出结论**、
+       * 以及**这次要直接给**。与工具回执那段用的是同一个手法 ——
+       * 把"哪里不对"说清楚，比说"请重试"有用得多。
+       *
+       * ## 第二次仍然失败才按失败计数
+       *
+       * 截断是模型失败的一种，**必须按失败计数**（否则安全模式永远不触发）。
+       * 所以这里只是"多给一次机会"，不是"把失败藏起来"：两次都没有 `<decision>`
+       * 就照旧抛错。用量两次都累加 —— 那两笔钱都花了。
        */
-      throw new Error(
-        '这一轮模型的输出被截断了，没有形成任何交易决策 —— 已安全跳过。' +
-          '持仓与已经挂出的委托不受影响。偶尔出现无需处理；若连续多轮如此，请把该模型的「最大输出 Token」调大。',
-      );
+      const retryPrompt =
+        '你上一条回复里**没有 `<decision>` 块**（很可能是因为思考太长、把输出预算用完了）。' +
+        '请**直接给出结论**：先写 `<reasoning>`（简短即可），然后立刻写 `<decision>` 块。' +
+        '如果你这一轮不打算做任何动作，`<decision>` 里写一个空数组 `[]` 就够了 —— **不要省略这个块**。';
+
+      let retry: typeof response;
+      try {
+        retry = this.deps.model.chat
+          ? await this.deps.model.chat([
+              { role: 'system', content: systemPrompt },
+              ...(stablePrompt.length > 0
+                ? [{ role: 'user' as const, content: stablePrompt }]
+                : []),
+              { role: 'user', content: volatilePrompt },
+              { role: 'assistant', content: response.text || '（上一条回复为空。）' },
+              { role: 'user', content: retryPrompt },
+            ])
+          : await this.deps.model.complete(systemPrompt, `${userPrompt}\n\n${retryPrompt}`);
+      } catch (error) {
+        log.warn(`[${this.deps.trader.name}] 截断后的重试调用失败：${(error as Error).message}`);
+        retry = response;
+      }
+
+      /* 重试的用量照常累加 —— 不管它成不成功，那笔钱都花了。 */
+      totalPrompt = (totalPrompt ?? 0) + (retry.usage.promptTokens ?? 0);
+      totalCompletion = (totalCompletion ?? 0) + (retry.usage.completionTokens ?? 0);
+      totalCached = (totalCached ?? 0) + (retry.usage.cachedTokens ?? 0);
+      totalReasoning = (totalReasoning ?? 0) + (retry.usage.reasoningTokens ?? 0);
+
+      /* 保留第一次那份用于诊断 —— 第二次也失败时它的长度是判断依据。 */
+      const firstText = response.text;
+      response = retry;
+
+      if (hasDecisionBlock(response.text)) {
+        log.info(
+          `[${this.deps.trader.name}] 第一次回复没有 <decision> 块（输出被截断），重试后拿到了结论。`,
+        );
+        this.emit('warn', '模型这一轮第一次回复被截断，已自动重试并拿到结论。');
+      } else {
+        /*
+         * 第二次仍然没有 —— 照旧抛错，而且**把两次的长度一起报出来**：
+         * 那是判断"是不是该去调大输出上限"的唯一依据。
+         */
+        throw new Error(
+          '这一轮模型的输出被截断了，没有形成任何交易决策（重试一次仍然如此）—— 已安全跳过。' +
+            `持仓与已经挂出的委托不受影响。两次输出分别 ${firstText.length} 与 ${response.text.length} 字符；` +
+            '反复出现请把该模型的「最大输出 Token」调大。',
+        );
+      }
     }
     const openPositionMap = new Map<string, 'long' | 'short'>(
       localPositions.map((p) => [p.symbol, p.side as 'long' | 'short']),
