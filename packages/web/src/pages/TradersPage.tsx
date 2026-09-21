@@ -384,11 +384,24 @@ export function TradersPage() {
                                   size="sm"
                                   variant="primary"
                                   busy={busyOnceId === trader.id}
-                                  title="立即强制执行一个决策周期"
+                                  /*
+                                   * ⚠️ 文案是「立即分析」，**不是「立即运行」**。
+                                   *
+                                   * 它做的是"强制执行一个决策周期"（跑一轮分析、可能下单），
+                                   * 而旧名字读起来像"启动这台机器人"。详情页早就改了
+                                   * （`TraderPage.tsx` 那段注释写着「旧名字『立即运行』把
+                                   * 这两件事混成一件」），这一页和总览页当时漏了。
+                                   *
+                                   * 总览页那个**已经删除**（那里和「停止」并排放着，看起来
+                                   * 就是一对启动/停止开关，而且总览页本来就不该放这个动作）。
+                                   * 这一页保留：每行一台机器、用来快速跑一轮，位置合理 ——
+                                   * 错的只是名字。
+                                   */
+                                  title="立即分析一次：强制执行一个决策周期，不等间隔。它不会启动机器人 —— 要开始交易请用「启动」。"
                                   onClick={() => void runOnce(trader.id, trader.name)}
                                 >
                                   <RotateCw aria-hidden className="h-3.5 w-3.5" />
-                                  立即运行
+                                  立即分析
                                 </Button>
                                 <Button
                                   size="sm"

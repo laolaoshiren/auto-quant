@@ -304,9 +304,7 @@ export function TradersSnapshotTable({
   equityOf,
   recentTrades,
   busyId,
-  runOnceBusyId,
   navigate,
-  onRunOnce,
   onStop,
   onStart,
   extraCount,
@@ -322,9 +320,12 @@ export function TradersSnapshotTable({
   equityOf: (trader: TraderRow) => number;
   recentTrades: { byTrader: Record<number, TradeRecord>; loading: boolean };
   busyId: number | null;
-  runOnceBusyId: number | null;
   navigate: NavigateFunction;
-  onRunOnce: (trader: TraderRow) => void;
+  /*
+   * 这里原来还有 `runOnceBusyId` 与 `onRunOnce` —— 它们只服务于那个被删掉的
+   * 「立即运行」按钮。留一个没人用的 prop 会让下一个读这段代码的人以为
+   * "总览页能跑一轮"，而那正是被删掉的那件事。
+   */
   onStop: (trader: TraderRow) => void;
   onStart: (trader: TraderRow) => void;
   /** Rows that exist but are not rendered, so the footer link can say how many. */
@@ -455,27 +456,33 @@ export function TradersSnapshotTable({
                     </td>
                     <td className="td px-2 py-1.5 text-right">
                       <div className="flex items-center justify-end gap-1" onClick={(event) => event.stopPropagation()}>
+                        {/*
+                          ⚠️ **这里原来还有一个「立即运行」按钮，已删除。**
+
+                          它做的是"强制执行一个决策周期"（跑一轮分析），**而文案写的是
+                          「立即运行」** —— 读起来就是"启动这台机器人"。更糟的是它
+                          **和「停止」并排、一绿一红**，那个组合看起来就是「启动 / 停止」
+                          这一对开关。操作员很容易以为自己点的是"开始交易"。
+
+                          同一件事在机器人详情页叫「立即分析」（`TraderPage.tsx` 里那段
+                          注释自己写着「旧名字『立即运行』把这两件事混成一件」）——
+                          当时只改了详情页，这里和「机器人」列表页漏了。
+
+                          而**总览页本来就不该放这个操作**：它要的是"一眼看清每台机器在
+                          什么状态"，动作有两个（停止 / 启动）已经够了；真要立刻跑一轮，
+                          点进那台机器人即可。去掉之后这一格是干净的**两态**：
+                          在跑 → 停止；没在跑 → 启动。
+                        */}
                         {trader.isRunning ? (
-                          <>
-                            <Button
-                              small
-                              variant="primary"
-                              busy={runOnceBusyId === trader.id}
-                              title="立即强制执行一个决策周期"
-                              onClick={() => onRunOnce(trader)}
-                            >
-                              立即运行
-                            </Button>
-                            <Button
-                              small
-                              variant="danger"
-                              busy={busyId === trader.id}
-                              title="立即停止：会取消尚未执行的周期，但不会平掉已有持仓"
-                              onClick={() => onStop(trader)}
-                            >
-                              停止
-                            </Button>
-                          </>
+                          <Button
+                            small
+                            variant="danger"
+                            busy={busyId === trader.id}
+                            title="立即停止：会取消尚未执行的周期，但不会平掉已有持仓"
+                            onClick={() => onStop(trader)}
+                          >
+                            停止
+                          </Button>
                         ) : (
                           <Button small variant="success" onClick={() => onStart(trader)}>
                             启动

@@ -39,7 +39,6 @@ import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
 import { accountEquityContributor, fleetTotals } from '../lib/fleetTotals';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
-import { useRunOnce } from '../lib/actions';
 import { Button, Empty, ErrorNote, Panel, Spinner3 } from '../components/ui';
 import { Metric, MetricGroup, PageShell, SectionLabel } from '../components/shell';
 import { NewTraderModal, StartTraderModal } from '../components/TraderModals';
@@ -115,8 +114,6 @@ export function OverviewPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [range, setRange] = useState<EquityRange>('7D');
   const [refreshing, setRefreshing] = useState(false);
-  const { runOnce, busyId: runOnceBusyId } = useRunOnce();
-
   useEffect(() => {
     if (tradersQuery.data) setTraders(tradersQuery.data);
   }, [tradersQuery.data, setTraders]);
@@ -551,9 +548,7 @@ export function OverviewPage() {
               equityOf={equityOf}
               recentTrades={recentTrades}
               busyId={busyId}
-              runOnceBusyId={runOnceBusyId}
               navigate={navigate}
-              onRunOnce={(trader) => void runOnce(trader.id, trader.name)}
               onStop={(trader) => void stop(trader)}
               onStart={setStartTarget}
               extraCount={traders.length - snapshotRows.length}
