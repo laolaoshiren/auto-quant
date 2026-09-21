@@ -277,6 +277,9 @@ class FakeBroker {
     if (order) order.status = 'CANCELED';
   }
 
+  /** 用例设成 true 时，撤单请求会失败（模拟"撤的时候交易所说它已经没了"）。 */
+  failCancel = false;
+
   async getOrder(symbol: string, orderId: string | number): Promise<BinanceOrderResponse | null> {
     const order = this.restingOrders.get(Number(orderId));
     if (!order || order.symbol !== symbol) return null;
@@ -515,6 +518,10 @@ class FakeBroker {
    * 那一行提前返回了：**没测的路径就是可能已经坏掉的路径。**
    */
   async cancelOrder(symbol: string, orderId: number) {
+    /* 用例可以设成 true，模拟"撤的时候交易所说这张单已经没了"。 */
+    if (this.failCancel) {
+      throw new Error(symbol + ' 的订单 ' + orderId + ' 不存在或已终结');
+    }
     this.opLog.push(`cancel:${symbol}#${orderId}`);
   }
 
@@ -3939,6 +3946,108 @@ test('提示词要告诉模型它在等什么 —— 挂单不能对它隐身', 
     `挂单价位应当出现在提示词里（找 ${limitPrice}），实际片段：${prompt.slice(0, 200)}`,
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  撤掉待成交的挂单                                                             */
+/* -------------------------------------------------------------------------- */
+
+test('★ 模型可以撤掉自己的挂单 —— 「挂单」不能是一扇单向门', async () => {
+  /*
+   * ## 这条守的是"能挂不能撤"
+   *
+   * 上一批做完之后模型能挂限价单、也能从提示词里看见它在等，**但改不了它**。
+   * 于是出现这种局面：一张单挂了很久、当初的理由早已不成立（结构破了、
+   * 价位被甩开），而它**只能干看着** —— 那张单占着持仓名额，机会成本一直在流。
+   *
+   * 这个文件里已经为同一条规律写过三次注释：**范例里没有的动作，模型不会写。**
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  const pendingRow = positionStore.pending(traderId)[0];
+  assert.ok(pendingRow, '前提：挂上了一张单');
+
+  const cancelResponse = `<decision>
+\`\`\`json
+[
+  {
+    "symbol": "${SYMBOL}",
+    "action": "cancel_pending",
+    "reasoning": "等太久没成交，而结构已经变了 —— 当初的理由不成立。"
+  }
+]
+\`\`\`
+</decision>`;
+  const summary = await buildTrader(broker, cancelResponse).runOnce();
+
+
+  assert.equal(
+    positionStore.pending(traderId).length,
+    0,
+    '★ 撤单之后本地不该还留着待成交记录 —— 否则它会被每轮查询，而操作员以为还有一笔在等',
+  );
+  assert.match(summary, /撤单 1/, `摘要要如实报"撤单 1"，实际：${summary}`);
+  /*
+   * ⚠️ **撤单不是平仓、更不是开仓。**
+   *
+   * 执行层是链式分派（最后一个是"当成开仓"），`cancel_pending` 掉进去会被
+   * 真的当成一笔开仓 —— 那比"静默什么都不做"更糟。这条断言盯的就是那个。
+   */
+  assert.equal(
+    broker.placed.filter((p) => p.type === 'MARKET').length,
+    0,
+    '★ 撤单绝不能产生任何下单一 —— 它只是把一张挂着的单收回来',
+  );
+  assert.match(summary, /开仓 0/, `撤单不该被算成开仓，实际：${summary}`);
+});
+
+test('撤单失败时保留本地记录 —— 下一轮继续尝试，而不是当它已经撤了', async () => {
+  /*
+   * ## ⚠️ 这一条我最初写的是别的场景，而我写错了
+   *
+   * 原来断言的是"撤单时发现那张单**已经成交** → 本地记录必须保留"。
+   * 实测是 **0**：因为**对账（`settlePendingEntries`）每轮先于模型决策跑**，
+   * 它已经发现那张单成交、把它**转正**了 —— 撤单那一步看到的是"没有待成交记录"，
+   * 走 `skipped` 分支。
+   *
+   * **那正是正确的顺序**（先对账、后决策）。而"撤单失败 + 已成交"这个组合
+   * 要求一个很窄的时序（成交发生在对账之后、撤单之前），在用例里构造不稳定 ——
+   * **我没有为让它可测而人为制造那个窗口，因为那样测的是夹具而不是系统。**
+   *
+   * 改成测**可稳定构造**的那一支：撤单请求失败、而那张单**确实还没成交**。
+   * 那时**不能**关掉本地记录 —— 关掉它等于"从此不再管这张单"，
+   * 而它可能下一秒就成交。
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  assert.ok(positionStore.pending(traderId)[0], '前提：挂上了一张单');
+
+  /* 撤单请求被拒，而那张单还挂着（没有成交）。 */
+  broker.failCancel = true;
+
+  const cancelResponse = `<decision>
+\`\`\`json
+[{"symbol": "${SYMBOL}", "action": "cancel_pending", "reasoning": "不想等了。"}]
+\`\`\`
+</decision>`;
+  const summary = await buildTrader(broker, cancelResponse).runOnce();
+
+  assert.equal(
+    positionStore.pending(traderId).length,
+    1,
+    '★ 撤单失败时必须保留本地记录 —— 关掉它等于"从此不再管这张单"，而它可能下一秒就成交',
+  );
+  assert.equal(
+    broker.placed.filter((p) => p.type === 'MARKET').length,
+    0,
+    '撤不掉也不该改用市价开仓 —— 那会把一个"取消入场"的意图变成"立刻入场"',
+  );
+  assert.match(summary, /开仓 0/, `撤单失败不是开仓，实际：${summary}`);
+});
+
 
 
 

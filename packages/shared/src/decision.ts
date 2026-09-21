@@ -58,6 +58,22 @@ export const DecisionActionSchema = z.enum([
   'reduce_position',
   'hold',
   'wait',
+  /*
+   * **撤掉一张还没成交的限价入场单。**
+   *
+   * ## 为什么需要它
+   *
+   * 限价入场挂出去之后，模型只能"看着" —— 它能从提示词里看到那张单在等，
+   * 但**改不了它**。而现实中"这笔不该再等下去了"是常见的判断：
+   * 挂单的理由已经不成立（结构破了）、价位早就被甩开、或者等得太久
+   * （占着持仓名额，而机会成本在流逝）。
+   *
+   * ## 它只降低风险
+   *
+   * 撤单**释放**一个已经承诺出去的敞口（挂单成交就会变成持仓）。所以在风控里
+   * 它**总是通过** —— 与 `reduce_position` 同类，不需要过那批"增加风险"的上限。
+   */
+  'cancel_pending',
 ]);
 export type DecisionAction = z.infer<typeof DecisionActionSchema>;
 
@@ -91,6 +107,22 @@ export function isAdjustAction(a: DecisionAction): boolean {
  */
 export function isResizeAction(a: DecisionAction): boolean {
   return a === 'add_to_position' || a === 'reduce_position';
+}
+
+/**
+ * 撤掉一张还没成交的限价入场单。
+ *
+ * ⚠️ **单独一个谓词，理由与 `isAdjustAction` / `isResizeAction` 一字不差**：
+ * 风控与执行层都是
+ *
+ *     if (isCloseAction) … else if (isOpenAction) … else 当成 no-op
+ *
+ * 的链式分派。**没有谓词的话，新动作会掉进最后那个分支** ——
+ * 而 `cancel_pending` 掉进去的结果比"什么都不做"更糟：它会被当成**开仓**去审，
+ * 甚至真的被当成开仓执行。这个文件里已经为同一个坑写过两次注释。
+ */
+export function isCancelPendingAction(a: DecisionAction): boolean {
+  return a === 'cancel_pending';
 }
 
 /** The raw decision object as emitted by the model inside the `<decision>` block. */

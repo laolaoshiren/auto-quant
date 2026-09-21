@@ -1,6 +1,7 @@
 import {
   isCloseAction,
   isAdjustAction,
+  isCancelPendingAction,
   isResizeAction,
   isMajorSymbol,
   isOpenAction,
@@ -496,6 +497,22 @@ export class RiskEngine {
     ];
 
     for (const decision of ordered) {
+      /*
+       * ⚠️ **撤单排在最前面，而且总是通过。**
+       *
+       * 它**只降低风险**：撤掉一张挂着的入场单，等于释放一个已经承诺出去的敞口
+       * （那张单成交就会变成持仓）。与 `reduce_position` 同类 —— 不需要过那批
+       * "增加风险"的上限（持仓数、保证金、节流）。
+       *
+       * **必须放在 `isOpenAction` 那条兜底之前**：那个链式分派的最后一个分支
+       * 是"当成开仓"，而 `cancel_pending` 掉进去会被当成一笔开仓去审、
+       * 甚至真的被当成开仓执行。这个文件里已经为同一个坑写过两次注释。
+       */
+      if (isCancelPendingAction(decision.action)) {
+        approved.push({ ...decision, adjustments: decision.adjustments });
+        continue;
+      }
+
       if (isCloseAction(decision.action)) {
         const verdict = this.reviewClose(decision, env);
         if (verdict.ok) approved.push(verdict.decision);
