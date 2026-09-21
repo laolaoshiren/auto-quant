@@ -861,7 +861,13 @@ export class AutoTrader {
       this.cycleNumber += 1;
       const summary = await this.runCycle(this.cycleNumber);
       traderStore.recordCycle(this.deps.trader.id, this.cycleNumber, 0);
-      if (this.status === 'safe_mode') this.setStatus('running', null);
+      /*
+       * ⚠️ 与 `tick()` 成功分支同一处遗漏 —— `error` 也必须能回到 `running`。
+       * 这两行是同一个判断的两份拷贝，理由见那一处的注释。
+       */
+      if (this.status === 'safe_mode' || this.status === 'error') {
+        this.setStatus('running', null);
+      }
       return summary;
     });
   }
@@ -919,7 +925,27 @@ export class AutoTrader {
         const summary = await this.runCycle(this.cycleNumber);
         this.consecutiveFailures = 0;
         traderStore.recordCycle(traderId, this.cycleNumber, 0);
-        if (this.status === 'safe_mode') this.setStatus('running', null);
+        /*
+         * ⚠️ **成功一轮就要回到 `running` —— `error` 也必须能回来。**
+         *
+         * 这里原来只认 `safe_mode`：
+         *
+         *     if (this.status === 'safe_mode') this.setStatus('running', null);
+         *
+         * 而 `error` 是**单次**失败的标记（连续失败到阈值才升到 `safe_mode`，
+         * 见下面 `catch` 里那两个分支）。于是路径是：**一次瞬时的模型输出截断
+         * → 状态被设成 `error` → 永远回不去**，只有"重启机器人"能清掉它。
+         *
+         * 实测后果：机器人一直在正常跑（每 45 分钟一轮、不断产出决策），
+         * 而 `/traders/9` 顶部挂着一条红色大横幅说它出了故障 ——
+         * **界面与事实不符**，而且是一条自己不会消失的告警。
+         *
+         * `safe_mode` 同样该在这里恢复：一轮成功就说明"反复失败"的那个条件
+         * 已经不成立了。原来只列出它的名字，是因为写这行的时候只想到了它。
+         */
+        if (this.status === 'safe_mode' || this.status === 'error') {
+          this.setStatus('running', null);
+        }
 
         eventBus.publish({
           type: 'cycle_end',
