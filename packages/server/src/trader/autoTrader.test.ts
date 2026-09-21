@@ -4048,6 +4048,109 @@ test('撤单失败时保留本地记录 —— 下一轮继续尝试，而不是
   assert.match(summary, /开仓 0/, `撤单失败不是开仓，实际：${summary}`);
 });
 
+/* -------------------------------------------------------------------------- */
+/*  挂单超时自动撤                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 把某个机器人**所有待成交记录**的挂出时刻往前挪，模拟"已经等了很久"。
+ *
+ * 直接改库而不是注入时钟：`opened_at` 就是这一件事的事实来源，
+ * 把它改早与"时间真的过去了"对被测代码**不可区分** —— 而引入一个假时钟
+ * 会牵动整个 `autoTrader` 的时间调用面，为了测一条规则不值得。
+ */
+function agePendingEntries(traderId: number, minutes: number): void {
+  getDb().run(
+    "UPDATE positions SET opened_at = ? WHERE trader_id = ? AND status = 'pending'",
+    new Date(Date.now() - minutes * 60_000).toISOString(),
+    traderId,
+  );
+}
+
+test('★ 挂太久的限价单会被自动撤掉 —— 不能一直占着持仓名额', async () => {
+  /*
+   * ## 为什么需要一条机械规则，而不是全靠模型自己撤
+   *
+   * 模型现在能撤单（`cancel_pending`），但那要求它**每轮都记得回头看**。
+   * 而它每轮要处理 20 个候选、几个持仓、一堆约束 ——「我半小时前挂了张单」
+   * 很容易被挤出去。
+   *
+   * 与 `applyBreakevenGuard` / `applyDrawdownGuard` 同一个理由：
+   * **保护一个已经做出的判断，恰恰是模型可靠地判断错的那件事。**
+   * 而"等太久了就撤"没有任何需要判断的成分。
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+  assert.equal(positionStore.pending(traderId).length, 1, '前提：挂上了一张单');
+
+  /* 把它"挂出时刻"挪到 100 分钟前 —— 默认时限是 45 分钟。 */
+  agePendingEntries(traderId, 100);
+
+  /* 再跑一轮，模型什么都不说 —— 撤销应当由机械规则完成。 */
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  assert.equal(
+    positionStore.pending(traderId).length,
+    0,
+    '★ 超过时限的挂单必须被自动撤掉 —— 否则它会一直占着持仓名额，而模型可能一直没回头看',
+  );
+  assert.ok(
+    broker.opLog.some((o) => o.startsWith('cancel:')),
+    '撤单必须真的打到交易所（不能只改本地记录 —— 那会让交易所还挂着一张我们以为没有的单）',
+  );
+});
+
+test('时限内的挂单不许动 —— 时间没到就撤等于让限价入场白做', async () => {
+  /*
+   * 反面，而且它比上面那条更要紧：**一条把正常挂单也撤掉的规则，会让限价入场
+   * 完全失去意义** —— 单子刚挂上就被收回来，等于每次挂单都白付一次判断的代价。
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  agePendingEntries(traderId, 5); // 默认 45 分钟，才等 5 分钟
+
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  assert.equal(
+    positionStore.pending(traderId).length,
+    1,
+    '★ 时限内的挂单必须留着 —— 撤早了等于把限价入场变成一个多余的步骤',
+  );
+});
+
+test('时限设为 0 时关闭这条规则', async () => {
+  /*
+   * 与 `maxDailyLossPercent` / `breakevenTriggerPercent` 同一约定：**0 = 关闭**。
+   *
+   * 一个"想关但关不掉"的机械规则比没有它更糟 —— 操作员会以为已经关上了。
+   */
+  const strategy = strategyStore.get(traders.get(traderId)!.strategyId)!;
+  strategyStore.update(strategy.id, {
+    config: {
+      ...strategy.config,
+      riskControl: { ...strategy.config.riskControl, pendingEntryTimeoutMinutes: 0 },
+    },
+  });
+
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  agePendingEntries(traderId, 10_000); // 等了 7 天
+
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  assert.equal(
+    positionStore.pending(traderId).length,
+    1,
+    '配置为 0 时必须保留挂单 —— "想关但关不掉"比没有这条规则更糟',
+  );
+});
+
+
 
 
 
