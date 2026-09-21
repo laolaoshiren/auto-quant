@@ -5,6 +5,7 @@ import {
   RawDecisionSchema,
   isCloseAction,
   isAdjustAction,
+  isCancelPendingAction,
   isResizeAction,
   isOpenAction,
   normalizeSymbol,
@@ -12,7 +13,8 @@ import {
   type DecisionAction,
   type ParsedDecisionSet,
   type RejectedDecision,
-} from '@aq/shared';import { z } from 'zod';
+} from '@aq/shared';
+import { z } from 'zod';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('strategy:parser');
@@ -241,6 +243,19 @@ export interface ParseContext {
    * need to manage a position whose symbol fell out of the universe).
    */
   allowUnlistedCloses?: boolean;
+  /**
+   * **有挂单在等成交**的标的。
+   *
+   * ## 为什么 `cancel_pending` 必须豁免"必须在候选池里"那条
+   *
+   * 一条挂单最需要被撤掉的时候，往往**正是它掉出候选池的时候** ——
+   * 那意味着"这一轮它不再是个机会了"，而当初挂它的理由也就不成立了。
+   *
+   * 原来那道检查只给**持仓**操作开口子（平仓/调保护/加减仓），挂单不在里面，
+   * 于是：**标的掉出候选池 → 撤不掉它 → 它一直占着持仓名额。**
+   * 这与"减仓/平仓不该受候选池约束"是同一条道理，只是对象从仓位变成了挂单。
+   */
+  pendingSymbols?: ReadonlySet<string>;
 }
 
 function toFiniteNumber(value: unknown): number | null {
@@ -378,7 +393,16 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
     const isHeldPositionAction =
       Boolean(heldSide) &&
       (isCloseAction(action) || isAdjustAction(action) || isResizeAction(action));
-    if (!isListed && !(ctx.allowUnlistedCloses && isHeldPositionAction)) {
+    /*
+     * ⚠️ **撤单也豁免候选池检查 —— 理由和平仓/调保护位一模一样。**
+     *
+     * 一条挂单最需要被撤的时候，往往正是它**掉出候选池**的时候（那意味着
+     * 这一轮它不再是个机会，而当初挂它的理由也就不成立了）。
+     * 不豁免的话：标的掉出候选池 → 撤不掉 → 它一直占着持仓名额。
+     */
+    const isPendingCancel =
+      isCancelPendingAction(action) && Boolean(ctx.pendingSymbols?.has(coerced.symbol));
+    if (!isListed && !(ctx.allowUnlistedCloses && isHeldPositionAction) && !isPendingCancel) {
       rejected.push({
         symbol: coerced.symbol,
         action,
@@ -494,6 +518,14 @@ const ACTION_PRIORITY: Record<DecisionAction, number> = {
    * （虽然减仓不占额度，但顺序影响的是模型的思考顺序与执行日志的可读性）。
    */
   reduce_position: 1,
+  /*
+   * 撤单与它们同层：**它释放的是"已经承诺出去、但还没变成持仓"的敞口**。
+   *
+   * 排在开仓之前是刻意的 —— 如果模型这一轮既想撤掉一张等太久的单、
+   * 又想在别处开新仓，那应该**先撤**：撤掉的额度可以给新机会用，
+   * 而反过来（先开新仓、额度不够再撤）会让两件事互相挤。
+   */
+  cancel_pending: 1,
   /*
    * 加仓排在**新开仓之后**。
    *

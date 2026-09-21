@@ -2,6 +2,7 @@ import {
   closeReasonLabel,
   isCloseAction,
   isAdjustAction,
+  isCancelPendingAction,
   isResizeAction,
   isOpenAction,
   normalizeSymbol,
@@ -1901,6 +1902,14 @@ export class AutoTrader {
       candidateSymbols: new Set(snapshots.map((s) => s.symbol)),
       openPositions: openPositionMap,
       allowUnlistedCloses: true,
+      /*
+       * ⚠️ **挂单的标的也要豁免"必须在候选池里"那条。**
+       *
+       * 一条挂单最需要被撤的时候，往往正是它**掉出候选池**的时候 ——
+       * 那意味着这一轮它不再是个机会，而当初挂它的理由也就不成立了。
+       * 不传这个的话：标的掉出候选池 → 撤不掉 → 它一直占着持仓名额。
+       */
+      pendingSymbols: new Set(positionStore.pending(traderId).map((p) => p.symbol)),
     });
 
     progress.cotTrace = parsed.cotTrace;
@@ -2063,6 +2072,8 @@ export class AutoTrader {
      * 但也不能不报：**"什么都没做"和"挂了一张单在等"是两件事**。
      */
     let limitSubmissions = 0;
+    /** 撤掉的待成交挂单（**不是平仓** —— 撤单没有产生任何成交）。 */
+    let cancelsTaken = 0;
     let cooldownBlocked = 0;
 
     /*
@@ -2145,7 +2156,8 @@ export class AutoTrader {
         !isOpenAction(decision.action) &&
         !isCloseAction(decision.action) &&
         !isAdjustAction(decision.action) &&
-        !isResizeAction(decision.action)
+        !isResizeAction(decision.action) &&
+        !isCancelPendingAction(decision.action)
       ) {
         executionLog.push({
           action: decision.action,
@@ -2210,7 +2222,18 @@ export class AutoTrader {
       }
 
       try {
-        if (isCloseAction(decision.action)) {
+        /*
+         * ⚠️ **撤单排在最前，而且必须显式分支。**
+         *
+         * 这个链式分派的最后一个分支是"当成开仓"。`cancel_pending` 掉进去
+         * 会被真的当成一笔开仓去执行 —— 那比"静默什么都不做"更糟。
+         * `decision.ts` 里已经为同一个坑写过三次注释。
+         */
+        if (isCancelPendingAction(decision.action)) {
+          const outcome = await this.executeCancelPending(decision);
+          executionLog.push(outcome);
+          if (outcome.status === 'ok') cancelsTaken += 1;
+        } else if (isCloseAction(decision.action)) {
           const outcome = await this.executeClose(decision, 'model_decision');
           executionLog.push(outcome);
           if (outcome.status === 'ok') exitsTaken += 1;
@@ -2301,6 +2324,8 @@ export class AutoTrader {
     ];
     /* 挂单单独报 —— 它既不是"开仓"也不是"什么都没做"。 */
     if (limitSubmissions > 0) parts.push(`挂单 ${limitSubmissions}（等成交）`);
+    /* 撤单也单独报 —— 它没有产生任何成交，不是"平仓"。 */
+    if (cancelsTaken > 0) parts.push(`撤单 ${cancelsTaken}`);
     if (cooldownBlocked > 0) parts.push(`${cooldownBlocked} 条被冷却期拦截`);
     const rejectedCount = parsed.rejected.length + verdict.rejected.length;
     if (rejectedCount > 0) parts.push(`${rejectedCount} 条被拒绝`);
@@ -4476,6 +4501,96 @@ reduceQuantity: null,
         detail: `限价挂单失败（${(error as Error).message}）。`,
       };
     }
+  }
+
+  /**
+   * **撤掉一张还没成交的限价入场单。**
+   *
+   * ## 为什么它需要一个显式分支
+   *
+   * 执行层是链式分派（`isClose` → `isAdjust` → `add` → `reduce` → **否则当成开仓**）。
+   * 不加这个分支的话，`cancel_pending` 会**被真的当成一笔开仓去执行** ——
+   * 那比"静默什么都不做"更糟。`decision.ts` 里已经为同一个坑写过三次注释。
+   *
+   * ## ⚠️ 撤单失败时**先问清楚它是"没了"还是"成了"**
+   *
+   * 交易所回"这张单不存在"有两种可能，而它们的结果完全相反：
+   *
+   *   · 它**被撤销/过期了** → 从未成为持仓，关掉本地记录就对了；
+   *   · 它**刚刚成交了** → 那是一笔真实持仓，**关掉本地记录等于把一个仓位丢了**
+   *     （钱花了、仓位在，而账本上没有它）。
+   *
+   * 所以撤单失败时**不猜**：去查一次那张单的真实状态，成交了就交给
+   * `settlePendingEntries` 走转正那条路（它下一轮会跑），**本地记录保持不动**。
+   */
+  private async executeCancelPending(decision: Decision): Promise<ExecutionLogEntry> {
+    const traderId = this.deps.trader.id;
+    const symbol = normalizeSymbol(decision.symbol);
+
+    const row = positionStore.pending(traderId).find((p) => p.symbol === symbol);
+    if (!row) {
+      return {
+        action: decision.action,
+        symbol,
+        status: 'skipped',
+        detail: `${symbol} 没有等待成交的挂单（可能已经成交或被撤销）。`,
+      };
+    }
+
+    const orderId = row.entry_order_id;
+    if (!orderId) {
+      /* 坏数据：没有单号的待成交行撤不了什么，直接作废（与对账同一处理）。 */
+      positionStore.close(row.id);
+      return {
+        action: decision.action,
+        symbol,
+        status: 'ok',
+        detail: `${symbol} 的待成交记录没有交易所单号，已作废。`,
+      };
+    }
+
+    try {
+      await this.deps.broker.cancelOrder(symbol, Number(orderId), 'order');
+    } catch (error) {
+      /*
+       * 撤不掉 —— **先查清楚那张单现在是什么状态**，而不是想当然。
+       * 查不到（null）也不动：交给下一轮的对账，它每轮都会问一次。
+       */
+      const order = await this.deps.broker.getOrder(symbol, orderId).catch(() => null);
+      const executed = Number(order?.executedQty ?? 0) || 0;
+      if (executed > 0) {
+        return {
+          action: decision.action,
+          symbol,
+          status: 'failed',
+          detail:
+            `撤单时发现 ${symbol} 那张单**已经成交了**（${executed}）—— 撤不了，` +
+            '它是一笔真实持仓，已留给对账去转正并挂保护单。',
+        };
+      }
+      return {
+        action: decision.action,
+        symbol,
+        status: 'failed',
+        detail: `撤销 ${symbol} 的挂单失败（${(error as Error).message}）；本地记录保留，下一轮继续尝试。`,
+      };
+    }
+
+    /*
+     * 撤成功（或交易所说它本来就不存在）→ 关掉本地记录。
+     *
+     * 这里可以放心关：上面那个 `catch` 已经处理了"其实已经成交"的情况，
+     * 而走到这里意味着交易所接受了撤单请求。
+     */
+    positionStore.close(row.id);
+    this.emit('info', `已撤掉 ${symbol} 的限价挂单（挂在 ${row.entry_price}，未成交），释放该入场名额。`);
+
+    return {
+      action: decision.action,
+      symbol,
+      status: 'ok',
+      detail: `已撤掉 ${symbol} 的限价挂单（挂单价 ${row.entry_price}）—— 该入场作废，名额已释放。`,
+    };
   }
 
   /** Market-enter, then immediately place exchange-side protection. */
