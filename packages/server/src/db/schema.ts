@@ -554,6 +554,37 @@ const M10_INPUT_TOKEN_LIMIT = /* sql */ `
 ALTER TABLE ai_models ADD COLUMN input_token_limit INTEGER NOT NULL DEFAULT 0;
 `;
 
+/**
+ * 限价入场的待成交持仓。
+ *
+ * ## 为什么需要这一列
+ *
+ * 「挂限价单等成交」是真实交易员的标准做法（预测一个区间、在那儿等着）。
+ * 而它要求系统能回答一个问题：**那张挂出去的单，成交了吗？**
+ *
+ * 在此之前 `positions` 表回答不了 —— 它没有存入场单的交易所单号，而
+ * `entry_price` 是"成交均价"，挂单时根本还没有。于是系统只能把限价单
+ * 当成"已经成交"来处理，那会把一个还没发生的持仓记进账本。
+ *
+ * ## 与 `status` 的配合
+ *
+ * 挂上限价单时插一行 `status='pending'`：`entry_order_id` 是那张单，
+ * `quantity` / `entry_price` 是**打算**要的量与价。对账拿这个单号去问交易所：
+ *
+ *   · 成交 → 改 `status='open'`、用真实成交价与成交量覆盖，**并立刻挂保护单**；
+ *   · 撤单/过期 → 改 `status='closed'`，它从未成为过持仓；
+ *   · 还没成交 → 原样留着，下一轮再问。
+ *
+ * `positionStore.open()` 只返回 `status='open'`，所以 `pending` 的行
+ * **不会污染任何现有的持仓读取** —— 风控、UI、权益计算看到的仍然是真实持仓。
+ *
+ * 用 `status` 而不是新建一张表：持仓的单一事实源只能有一个，而这张表
+ * 已经是它了。第二张表意味着两处都要维护"一个标的只有一个仓位"这条不变量。
+ */
+const M11_PENDING_ENTRY = /* sql */ `
+ALTER TABLE positions ADD COLUMN entry_order_id TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -565,4 +596,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 8, name: 'partial-close', sql: M8_PARTIAL_CLOSE },
   { version: 9, name: 'usage-detail', sql: M9_USAGE_DETAIL },
   { version: 10, name: 'input-token-limit', sql: M10_INPUT_TOKEN_LIMIT },
+  { version: 11, name: 'pending-entry', sql: M11_PENDING_ENTRY },
 ];

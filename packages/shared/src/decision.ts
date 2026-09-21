@@ -112,6 +112,14 @@ export const RawDecisionSchema = z.object({
    */
   reduce_percent: z.number().optional(),
   reduce_quantity: z.number().optional(),
+  /*
+   * 入场方式。省略 = 市价（与既有行为一致 —— 模型不写这个字段时什么都没变）。
+   *
+   * `entry_type: 'limit'` 时 `limit_price` 必填；解析器会校验并给出可读的拒绝理由，
+   * 而不是让一个缺价的限价单走到执行层去。
+   */
+  entry_type: z.enum(['market', 'limit']).optional(),
+  limit_price: z.number().optional(),
   reasoning: z.string().optional(),
 });
 export type RawDecision = z.infer<typeof RawDecisionSchema>;
@@ -127,6 +135,26 @@ export interface Decision {
   action: DecisionAction;
   leverage: number;
   positionSizeUsd: number;
+  /**
+   * 开仓用**市价**还是**限价挂单等成交**。省略 = 市价（既有行为）。
+   *
+   * ## 为什么要有它
+   *
+   * 真实交易员分析完行情之后，常见做法是**预测一个区间、在那儿挂限价单等着**，
+   * 而不是立刻市价吃进去 —— 后者要付 taker 费、还要承受滑点。这个系统在此之前
+   * 只会市价开仓。
+   *
+   * ## 它与别的字段的关系
+   *
+   * · `limit` 时 **`limitPrice` 必填**，它是入场触发价；
+   * · 挂上之后**这一轮不建仓** —— 它变成一行 `status='pending'` 的持仓，
+   *   由对账在成交后转正并**立刻补挂保护单**（见 `M11_PENDING_ENTRY` 的说明）；
+   * · `stopLoss` / `takeProfit` 仍然要照常给：挂单时挂不上去（没有仓位），
+   *   但**成交那一刻要立刻用它们挂保护单** —— 不给的话仓位会有一段裸奔窗口。
+   */
+  entryType?: 'market' | 'limit';
+  /** 限价入场的价格。`entryType === 'limit'` 时必填。 */
+  limitPrice?: number | null;
   stopLoss: number | null;
   takeProfit: number | null;
   /**
