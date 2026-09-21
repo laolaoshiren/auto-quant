@@ -1250,7 +1250,20 @@ export function TraderPage() {
           onChange={setTableTab}
           positionCount={openPositionCount}
           openOrderCount={openOrders.length}
-          onSelectSymbol={setPickedSymbol}
+          onSelectSymbol={(symbol) => {
+            /*
+             * ⚠️ **点币种要同时把图表切到「行情」** —— 只设币种是不够的。
+             *
+             * 这一格默认停在「归属权益曲线」，而用户点币种的意图**百分百是"看这个币
+             * 的行情"**。只设 `pickedSymbol` 的话，他还要再点一下「行情图表」那个
+             * tab 才看得到 —— 而那一格点开是空的权益曲线，看起来像"点了没反应"。
+             *
+             * 记不得上次选了哪个 tab 是对的（那是页面状态），但"点币种"这个动作本身
+             * 就表达了"我要看行情"，所以顺手切过去是**消除一步**，而不是替用户做决定。
+             */
+            setPickedSymbol(symbol);
+            setChartTab('candles');
+          }}
           positionSymbols={positions.map((p) => p.symbol)}
           /*
            * 手工平仓成功后**立刻重取持仓并写进 store**。
