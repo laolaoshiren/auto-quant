@@ -53,6 +53,31 @@ export interface RiskEnvironment {
    * （§5.4），这个字段就是把那个事实递进来的口子。
    */
   roundTripFeeRate?: number | null;
+  /**
+   * 交易所**实际允许**的最大杠杆（该标的）。
+   *
+   * ## 为什么它必须从外面递进来
+   *
+   * `risk.btcEthMaxLeverage` / `altcoinMaxLeverage` 是**我们自己配的上限** —— 而
+   * 交易所那边还有一个**独立的**上限，两者取小才是真正能设的值：
+   *
+   *   · **子账户**：普通用户 2025-08-12 之后新建的子账户，合约杠杆**不超过 5x**（官方 FAQ）；
+   *   · **开户未满 30 天**：不超过 20x；
+   *   · **名义价值分档**：每个 symbol 有按仓位大小分的档位，档位越高允许的杠杆越低。
+   *
+   * 在此之前引擎完全不知道这件事：配置写 20x，它就照 20x 批，然后 `setLeverage`
+   * 被交易所拒（`-4203` / `-4205` / `-4209`），而**模型那边收到的是一句它无法
+   * 预先算出来的拒绝**。
+   *
+   * ## 为什么是回调而不是一个 Map
+   *
+   * 与 `minNotionalOf` / `quantityFor` 同一个理由：**引擎只裁决事实，不查数据源**
+   * （§5.4）。谁来提供这个数字（缓存、交易所、降级值）是调用方的事。
+   *
+   * 返回 `null` 表示"不知道" —— 那时**只用配置的上限**，行为与以前完全一致。
+   * 这是刻意的：读不到档位不该让交易停下来。
+   */
+  exchangeMaxLeverageOf?(symbol: string): number | null;
 }
 
 export interface RiskRejection {
@@ -668,14 +693,32 @@ export class RiskEngine {
     }
 
     /* --- 3. Leverage clamp ----------------------------------------------- */
-    const maxLeverage = isMajorSymbol(symbol) ? risk.btcEthMaxLeverage : risk.altcoinMaxLeverage;
+    /*
+     * ⚠️ **两个上限取小**：我们自己配的，与交易所实际允许的。
+     *
+     * 原来只看配置那一个 —— 于是配置写 20x 就照 20x 批，然后 `setLeverage` 被
+     * 交易所拒（子账户是 5x、名义价值分档还会更低）。而模型收到的是一句
+     * **它无法预先算出来的**拒绝。
+     *
+     * `exchangeMaxLeverageOf` 返回 null（读不到）时退回旧行为 —— **读不到档位
+     * 不该让交易停下来**。
+     */
+    const configuredMax = isMajorSymbol(symbol) ? risk.btcEthMaxLeverage : risk.altcoinMaxLeverage;
+    const exchangeMax = env.exchangeMaxLeverageOf?.(symbol) ?? null;
+    const maxLeverage =
+      exchangeMax !== null && exchangeMax > 0 ? Math.min(configuredMax, exchangeMax) : configuredMax;
     let leverage = Math.round(num(decision.leverage, 0));
     if (leverage <= 0) {
       leverage = Math.min(risk.defaultLeverage, maxLeverage);
       adjustments.push(`模型未给出杠杆，已使用默认值 ${leverage}x。`);
     }
     if (leverage > maxLeverage) {
-      adjustments.push(`杠杆已从 ${leverage}x 压到上限 ${maxLeverage}x。`);
+      adjustments.push(
+        `杠杆已从 ${leverage}x 压到上限 ${maxLeverage}x` +
+          (exchangeMax !== null && exchangeMax < configuredMax
+            ? `（交易所对该标的实际允许的上限；配置里写的是 ${configuredMax}x）。`
+            : '。'),
+      );
       leverage = maxLeverage;
     }
 
