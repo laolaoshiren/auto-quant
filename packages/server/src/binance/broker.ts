@@ -352,14 +352,73 @@ export class BinanceBroker {
             note: `${normalized} 有挂单未成交，杠杆保持不变`,
           };
         }
+        /*
+         * ⚠️ **"你这个杠杆不允许"是一个可以挽救的失败，不该让整轮开仓白跑。**
+         *
+         * 交易所拒绝杠杆有三个码，语义都是"太高了"，而**上限它自己会说出来**：
+         *
+         *   · `-4203` Change leverage failed（该账户/该档位不允许这个值）
+         *   · `-4205` 超出账户允许的最大杠杆（**子账户、开户未满 30 天**都在这一档）
+         *   · `-4209` Current symbol max leverage limit is %sx（**消息里带数字**）
+         *
+         * `leverageBracket` 只能给出 **symbol 那一层**的上界（实测：BTC 150x、
+         * 山寨 75x），而**账户级那一层它不反映** —— 所以光靠档位缓存无法预先知道
+         * 账户真正的上限。这条路径就是那层信息唯一的来源。
+         *
+         * 处理：**先从消息里解析出上限**（`-4209` 会明说），解析不出就**逐级降**。
+         * 降完仍然失败才抛 —— 那时是真的有别的毛病。
+         */
+        if (error.code === -4203 || error.code === -4205 || error.code === -4209) {
+          const admitted = parseAdmittedLeverage(error.message);
+          const target = admitted ?? Math.max(1, Math.floor(leverage / 2));
+          if (target < leverage) {
+            const retry = await this.retryLeverage(normalized, target);
+            if (retry !== null) {
+              return {
+                ok: true,
+                leverage: retry,
+                note:
+                  `${normalized} 的杠杆从 ${leverage}x 降到 ${retry}x` +
+                  `（交易所不允许更高${admitted !== null ? `，它自己说的上限是 ${admitted}x` : ''}）。`,
+              };
+            }
+          }
+        }
       }
       throw error;
     }
   }
 
+  /**
+   * 逐级降到交易所接受为止。返回**实际设上的杠杆**，全都不行时返回 `null`。
+   *
+   * 二分而不是每次减 1：一个 20x 的请求最多 5 次请求就能落到 1x，
+   * 而"每次减 1"最坏是 19 次。这个方法只在**已经被拒之后**才跑，所以
+   * 正常路径（一次成功）完全不受影响。
+   */
+  private async retryLeverage(symbol: string, from: number): Promise<number | null> {
+    let high = from;
+    let low = 1;
+    let best: number | null = null;
+    for (let attempt = 0; attempt < 6 && low <= high; attempt += 1) {
+      const mid = Math.floor((low + high) / 2);
+      try {
+        await this.rest.signedRequest('POST', '/fapi/v1/leverage', { symbol, leverage: mid });
+        best = mid;
+        low = mid + 1;
+      } catch (retryError) {
+        if (retryError instanceof BinanceApiError && retryError.code === -4168) {
+          /* 有挂单挡住了 —— 那不是"杠杆太高"，再降也没用。 */
+          return best;
+        }
+        high = mid - 1;
+      }
+    }
+    return best;
+  }
+
   /** Set margin type for a symbol. Cannot change while positions are open. */
-  async setMarginType(symbol: string, marginType: 'ISOLATED' | 'CROSSED'): Promise<boolean> {
-    if (this.dryRun) return true;
+  async setMarginType(symbol: string, marginType: 'ISOLATED' | 'CROSSED'): Promise<boolean> {    if (this.dryRun) return true;
     const normalized = normalizeSymbol(symbol);
     try {
       await this.rest.signedRequest('POST', '/fapi/v1/marginType', {
@@ -919,3 +978,34 @@ export function isFilled(order: PlacedOrder): boolean {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/**
+ * 从交易所那句"你这个杠杆不允许"里**挖出它自己承认的上限**。
+ *
+ * 三个错误码里只有 `-4209` 会明说数字：
+ *
+ * > Current symbol max leverage limit is **5x**
+ *
+ * 而 `-4203` / `-4205` 只给一句英文（"Change leverage failed" / 超出账户允许的
+ * 最大杠杆），**括号里可能带数字也可能不带** —— 所以这里做的是"能挖到就挖，
+ * 挖不到返回 `null`"，由调用方退回二分降级。
+ *
+ * 为什么值得挖：`leverageBracket` 只能给出 **symbol 那一层**的上界
+ * （实测 BTC 150x、山寨 75x），而**账户级那一层它不反映**（子账户、开户未满
+ * 30 天之类的限制都在那里）。所以那句报错是那个数字**唯一**的来源 ——
+ * 拿到它就能一步到位，而不是盲降几次。
+ */
+export function parseAdmittedLeverage(message: string | undefined): number | null {
+  if (!message) return null;
+  /*
+   * 匹配 `... limit is 5x` / `... maximum is 20x` / `... allows 5x` 这几种说法。
+   * 数字取 1–125（币安的上限区间），避免把消息里别的数字（比如 "30 days"）当成杠杆。
+   */
+  const match = /(?:limit is|maximum is|allows|max leverage(?: limit)? is)\s*(\d{1,3})\s*x/i.exec(
+    message,
+  );
+  if (!match || !match[1]) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value >= 1 && value <= 125 ? value : null;
+}
+
