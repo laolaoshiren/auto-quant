@@ -679,9 +679,32 @@ export class AutoTrader {
    * 意味着账本不可信、而 AI 正照着它决策。把这种状态降级成 `warn` 只是为了让
    * 它挤进旧签名，那是**让告警去迁就类型**，正好反了。
    */
-  private emitOnChange(key: string, level: 'info' | 'warn' | 'error', message: string): void {
-    if (this.stateNotices.get(key) === message) return;
-    this.stateNotices.set(key, message);
+  /**
+   * 只在**状态变化**时记一条 —— 同一个 key 下内容没变就不再记。
+   *
+   * ## ⚠️ `stateKey`：比较用的键**不必**等于写进日志的那句话
+   *
+   * 原来这里拿**整条 `message`** 当比较键。那对"文本固定"的告警是对的，但对
+   * **句子里带数字**的那种就失效了：数字每轮都在变，于是"状态没变就不再记"
+   * 永远不成立。
+   *
+   * 实测的代价：总账校验那条告警的差额在 `0.0119` 与 `0.0202` 之间来回，
+   * 于是它**每一轮都写一条 error** —— 从 17:17 一直刷到 18:32，上百条。
+   * 而它要说的其实是同一件事（"有持仓，所以差一个未平仓的持有成本"）。
+   * **一个每轮都响的告警等于没有告警**，这个文件里已经为同一件事写过三回注释。
+   *
+   * 所以调用方可以传一个**不含数字的稳定键**（比如 `'ledger-gap'`）；
+   * 状态真正解除时由 `clearStateNotice()` 清掉，下次进入会重新记一条。
+   */
+  private emitOnChange(
+    key: string,
+    level: 'info' | 'warn' | 'error',
+    message: string,
+    stateKey?: string,
+  ): void {
+    const probe = stateKey ?? message;
+    if (this.stateNotices.get(key) === probe) return;
+    this.stateNotices.set(key, probe);
     this.emit(level, message);
   }
 
@@ -3063,7 +3086,30 @@ export class AutoTrader {
      * 只能再从头推一遍。把分项存下来，这个问题下次当场就答完了。
      */
     const platformSelf = tradeStore.netSince(sinceIso);
-    const platformNet = platformSelf + foreignNet;
+    /*
+     * ⚠️ **未平仓的持有成本必须加在平台侧，否则这个校验会永久误报。**
+     *
+     * 交易所流水从**开仓那一刻**就有 `COMMISSION`、持仓期间还有 `FUNDING_FEE`；
+     * 而 `trades` **只在平仓时**记一笔。只要有持仓，「平台净额」就天然比
+     * 「交易所流水」少一个"还拿在手上的那些仓位的持有成本"。
+     *
+     * 实测：两条告警的差额 `0.0119` / `0.0202` 正好是当时那两个仓位的入场手续费
+     * （ETH `0.0118539` + HYPE `0.00837404` = `0.0202`）—— **一个纯粹的口径差
+     * 被报成了"账本可能有漏记或重复记账"**。
+     *
+     * 两侧必须同口径，否则这个校验的每一次响都是假的，而它本该是唯一能自动发现
+     * "账本真的错了"的地方（实测它确实抓到过那次 0.17 的重复记账）。
+     */
+    const openCosts = (() => {
+      try {
+        const symbols = positionStore.open(traderId).map((p) => p.symbol);
+        return orderStore.openEntryCosts(traderId, symbols);
+      } catch {
+        /* 读不到就按 0：宁可这一轮差一点，也不要让对账整个失败。 */
+        return 0;
+      }
+    })();
+    const platformNet = platformSelf + foreignNet + openCosts;
     const ledgerGap = Number((platformNet - exchangeNet).toFixed(6));
     
     /*
@@ -3084,6 +3130,8 @@ export class AutoTrader {
         platformSelf: Number(platformSelf.toFixed(6)),
         foreignNet: Number(foreignNet.toFixed(6)),
         foreignRounds: foreign.length,
+        /* 未平仓的持有成本（加在平台侧的那个数）—— 它长期是差额的主要来源。 */
+        openCosts: Number(openCosts.toFixed(6)),
         skipDiag,
         // 让落库的数据自己说清这一轮算不算数（读失败时 exchangeNet 是 0，不是"真的 0"）。
         incomeReadFailed,
@@ -3105,14 +3153,26 @@ export class AutoTrader {
        * 外部活动只是"账户上有别人的交易"，而账本本身是对的。
        * 这里是**账本本身与交易所对不上** —— 意味着平台记录的盈亏不可信，
        * 而 AI 正是照着它做决策的。
+       *
+       * ## 为什么第四个参数是固定的 `'ledger-gap'`
+       *
+       * 句子里带着四个会变的数字，而 `emitOnChange` 的"状态没变就不再记"是拿
+       * **整条文本**比的 —— 于是差额每变一次就重记一条。实测：从 17:17 到 18:32
+       * **上百条一模一样的 error**，而它们说的都是同一件事。
+       *
+       * 传一个稳定键之后：**状态真的解除时由 `clearStateNotice()` 清掉**，
+       * 下次再出现才重新记。这既保住了"稀有一响"的分量，也不丢信息 ——
+       * 差额的精确数值在 `ledger_check:` 里一直存着。
        */
       this.emitOnChange(
         "ledger-gap",
         "error",
         `账目与交易所对不上：平台记录 ${platformNet.toFixed(4)} USDT、` +
           `交易所流水 ${exchangeNet.toFixed(4)} USDT，差 ${ledgerGap.toFixed(4)}。` +
+          `（平台侧已含未平仓的持有成本 ${openCosts.toFixed(4)}。）` +
           "这个差额既不是外部活动、也不是资金费 —— 平台的账本可能有漏记或重复记账，" +
           "请先核对再让机器人继续交易。",
+        'ledger-gap',
       );
     } else {
       this.clearStateNotice("ledger-gap");
