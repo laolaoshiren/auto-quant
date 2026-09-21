@@ -952,7 +952,29 @@ export interface CircuitBreakerReading {
 /*  Live event bus (server → browser)                                          */
 /* -------------------------------------------------------------------------- */
 
-export type ServerEvent =
+/**
+ * 服务端 → 浏览器的事件。
+ *
+ * ## ⚠️ `replay` —— "这是历史，不是刚发生"
+ *
+ * WebSocket 连接建立时，服务端会重放最近 30 条事件，**免得新打开的页面是空的**
+ * （见 `server.ts` 的 `/api/events`）。那些事件**本来是几分钟甚至几小时前发生的**，
+ * 而客户端原来把它们和实时事件一视同仁 —— 于是**每刷新一次页面，右下角就弹一轮
+ * 「已平仓 ETHUSDT」「委托 · 平仓」的通知**，内容还是过时的。
+ *
+ * 一个每次刷新都误报的界面，等于训练操作员忽略通知 —— 而通知里本来该有
+ * 「刚刚平了一笔」这种要及时看见的东西。
+ *
+ * 所以重放的事件带上这个标记：**数据照填**（持仓、权益、状态需要初值），
+ * **但不触发通知、也不重复追加日志**。两类事件的差别不在内容，在**它们是不是
+ * 刚刚发生的** —— 而那正是界面做不做提示的依据。
+ */
+type Replayable<T> = T & {
+  /** 服务端在连接建立时重放的历史事件。**不要**为它弹通知或追加日志。 */
+  replay?: true;
+};
+
+export type ServerEvent = Replayable<
   | { type: 'trader_status'; traderId: number; status: TraderStatus; detail?: string }
   | { type: 'cycle_start'; traderId: number; cycleNumber: number; timestamp: string }
   | { type: 'cycle_end'; traderId: number; cycleNumber: number; summary: string; success: boolean }
@@ -985,7 +1007,8 @@ export type ServerEvent =
        */
       scope?: string;
       timestamp: string;
-    };
+    }
+>;
 
 /* -------------------------------------------------------------------------- */
 /*  自然日边界（北京时间）                                                      */

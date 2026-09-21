@@ -1877,8 +1877,20 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       return;
     }
 
-    // Replay recent history so a freshly-opened console is not blank.
-    for (const event of eventBus.history(30)) socket.send(JSON.stringify(event));
+    /*
+     * Replay recent history so a freshly-opened console is not blank.
+     *
+     * ⚠️ **必须带 `replay: true`。** 这些事件是几分钟甚至几小时前发生的，而客户端
+     * 原来把它们和实时事件一视同仁 —— 于是**每刷新一次页面，右下角就弹一轮
+     * 「已平仓 ETHUSDT」**，内容还是过时的。操作员实测到的就是"每次刷新都弹，
+     * 弹的全是旧消息"。
+     *
+     * 带标记之后：**数据照填**（持仓、权益、状态需要初值），
+     * **但不弹通知、也不重复追加日志**。见 `ServerEvent` 上 `Replayable` 的说明。
+     */
+    for (const event of eventBus.history(30)) {
+      socket.send(JSON.stringify({ ...event, replay: true }));
+    }
 
     const unsubscribe = eventBus.subscribe((event: ServerEvent) => {
       if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(event));
