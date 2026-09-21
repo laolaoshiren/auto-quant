@@ -381,6 +381,26 @@ export const useEvents = create<EventState>((set, get) => ({
   ingest: (event) => {
     const now = Date.now();
 
+    /*
+     * ⚠️ **重放的历史事件不弹通知、也不追加日志。**
+     *
+     * 服务端在连接建立时重放最近 30 条事件（免得新打开的页面是空的），而它们是
+     * 几分钟甚至几小时前发生的。原来客户端一视同仁 —— 于是**每刷新一次页面，
+     * 右下角就弹一轮「已平仓 ETHUSDT」「委托 · 平仓」，内容还是过时的**。
+     * 操作员实测到的正是这个（"每次刷新都弹，弹的全是旧消息"）。
+     *
+     * 只跳过这三类**会留下痕迹**的事件：
+     *
+     *   · `log` / `order` / `trade` —— 会往列表里追加、或弹通知；
+     *   · 而 `positions` / `equity` / `trader_status` / `decision` **照常处理** ——
+     *     它们的作用正是给新开的页面一个初值，跳过反而让页面空着。
+     *
+     * 区别不在内容，**在它是不是刚刚发生的** —— 而那正是界面做不做提示的依据。
+     */
+    if (event.replay === true && (event.type === 'log' || event.type === 'order' || event.type === 'trade')) {
+      return;
+    }
+
     if (event.type === 'log') {
       const line: LiveLogLine = {
         id: logSeq++,
