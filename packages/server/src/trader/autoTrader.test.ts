@@ -3473,5 +3473,61 @@ test('读不到档位时退回配置上限 —— 读不到不该让交易停下
   );
 });
 
+/* -------------------------------------------------------------------------- */
+/*  加仓 / 减仓按「实际成交量」记账，不是请求量                                    */
+/* -------------------------------------------------------------------------- */
+
+test('★ 减仓只部分成交时，本地持仓按实际成交量减 —— 不是按请求量', async () => {
+  /*
+   * ## 这条来自一次审计，而它是同一个病的最后一个入口
+   *
+   * 开仓与平仓路径早就改成"只看 `executedQty`"了（那也是之前一个真实 bug 的
+   * 修法：开仓单 `status=NEW` 而 `executedQty` 有值，用 `|| quantity` 回退会把
+   * 未确认的成交记成完全成交）。而 `executeAdd` / `executeReduce` 两条**没跟上**：
+   *
+   * 它们取了 `filled.avgPrice`，却没取 `filled.executedQty`，然后拿**请求量**去算
+   * 毛盈亏、订单记录、成交记录、剩余持仓、已实现盈亏累计 —— **5 个数字一起偏离**。
+   *
+   * 部分成交在实盘上不罕见（市价单在流动性薄的标的上会分批成交），而它对账时
+   * 表现为"本地持仓与交易所对不上"，那正是我们花了很多轮在修的那类问题。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const before = positionStore.open(traderId).find((p) => p.symbol === SYMBOL);
+  assert.ok(before, '前提：已开仓');
+  const originalQty = before.quantity;
+
+  /* 模型说减一半，而交易所**只成交了三分之一**（`partialFillRatio` 消费一次）。 */
+  broker.partialFillRatio = 1 / 3;
+  const reduceResponse = `<decision>
+\`\`\`json
+[
+  {
+    "symbol": "${SYMBOL}",
+    "action": "reduce_position",
+    "reduce_percent": 50,
+    "confidence": 80,
+    "reasoning": "先减一半锁盈。"
+  }
+]
+\`\`\`
+</decision>`;
+  await buildTrader(broker, reduceResponse).runOnce();
+
+  const after = positionStore.open(traderId).find((p) => p.symbol === SYMBOL);
+  assert.ok(after, '减仓不该把仓位整个平掉');
+  const reduced = originalQty - after.quantity;
+  const requested = originalQty * 0.5;
+
+  assert.ok(
+    reduced < requested * 0.9,
+    `减仓数量必须按**实际成交**（约 ${(requested / 3).toFixed(6)}）而不是请求量（${requested.toFixed(6)}）记。` +
+      `实际减了 ${reduced.toFixed(6)} —— 按请求量记账会让本地持仓比交易所多减`,
+  );
+  assert.ok(reduced > 0, '成交了一部分，就该减掉那一部分');
+});
+
+
 
 
