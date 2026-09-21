@@ -902,7 +902,7 @@ function renderRecentCloses(closes: PromptClose[], now: Date): string {
     const head =
       `- ${close.symbol} ${close.side === 'long' ? '多' : '空'} ${close.leverage}x ` +
       `@${fmt(close.entryPrice)}→${fmt(close.exitPrice)}  净 ${fmtSigned(close.netPnl, 3)}  ` +
-      `${closeReasonLabel(close.closeReason)}  (${humanDuration(minutesAgo)}前)`;
+      `${closeReasonLabel(close.closeReason, close.netPnl)}  (${humanDuration(minutesAgo)}前)`;
     return `${head}\n  你当时的理由：${oneLine(close.entryReason, 60)}`;
   });
 

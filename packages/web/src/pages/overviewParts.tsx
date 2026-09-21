@@ -231,7 +231,7 @@ export function RecentClose({ trade, pending }: { trade: TradeRecord | undefined
     return <span className="text-xs text-ink-faint">{pending ? '读取中…' : '暂无平仓'}</span>;
   }
   return (
-    <div className="text-right" title={`${fmtPercent(trade.pnlPercent)} · ${closeReasonLabel(trade.closeReason)}`}>
+    <div className="text-right" title={`${fmtPercent(trade.pnlPercent)} · ${closeReasonLabel(trade.closeReason, trade.netPnl)}`}>
       <div className="flex items-center justify-end gap-1.5">
         <span className="num text-sm text-ink-mid">{trade.symbol}</span>
         <SideBadge side={trade.side} />
@@ -239,7 +239,7 @@ export function RecentClose({ trade, pending }: { trade: TradeRecord | undefined
         <span className={cn('num text-xs', pnlColor(trade.netPnl))}>净 {fmtUsdSigned(trade.netPnl, 2)}</span>
       </div>
       <div className="num truncate text-xs text-ink-faint">
-        {closeReasonLabel(trade.closeReason)} · {timeAgo(trade.closedAt)}
+        {closeReasonLabel(trade.closeReason, trade.netPnl)} · {timeAgo(trade.closedAt)}
       </div>
     </div>
   );
