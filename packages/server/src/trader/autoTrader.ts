@@ -396,6 +396,17 @@ export class AutoTrader {
    * 这样操作者既不会被重复刷屏，也不会漏掉数值的实质变化。
    */
   private stateNotices = new Map<string, string>();
+
+  /**
+   * 已经设过的**保证金模式**（symbol → 模式）。
+   *
+   * 存在的理由：`setMarginType` 要在**零持仓零挂单**时才能调，而一个标的的模式
+   * 设好之后就不该反复调（每次都是一次签名请求，而且 `-4046` 重复设置虽然无害，
+   * 但那是白花权重）。只在新标的、或模式配置变了时才真正打这一枪。
+   *
+   * 只活在进程内：**重启后重新设一遍是对的** —— 交易所侧可能被别的东西改回去。
+   */
+  private marginSet = new Map<string, string>();
   /**
    * 非 `null` 时**本轮不下任何单** —— 账户处于双向持仓模式。
    *
@@ -4083,6 +4094,42 @@ reduceQuantity: null,
     /* --- Leverage -------------------------------------------------------- */
     const leverageResult = await this.deps.broker.setLeverage(symbol, decision.leverage);
     if (leverageResult.note) this.emit('warn', leverageResult.note);
+
+    /*
+     * --- Margin mode -----------------------------------------------------
+     *
+     * ⚠️ **在下第一单之前设保证金模式 —— 而这一步以前完全缺失。**
+     *
+     * 币安官方明文「All contracts and positions are defaulted to the Cross Margin
+     * mode」：**不管它，账户就是全仓**。而全仓意味着**任何一笔判断错到底都可能
+     * 把其他仓位的钱一起带走** —— 爆仓清空整个钱包，而不是亏掉那一笔。
+     *
+     * 硬约束是它**只能在零持仓、零挂单时改**（`-4047`/`-4048`）—— 所以只能在这里
+     * 设，而且只对新标的生效。已经存在的仓位保持原样：**为了改模式去平掉一个正在
+     * 跑的仓，比全仓本身更危险**（§2.6：一个没有保护的杠杆敞口是最糟的状态）。
+     *
+     * `marginSet` 是进程内的"这个标的已经设过"缓存。跨进程重启会重新设一次 ——
+     * 那正是我们要的：交易所侧可能被别的东西改回去。
+     */
+    const wantedMode = this.activeConfig.riskControl.marginMode;
+    if (this.marginSet.get(symbol) !== wantedMode) {
+      const ok = await this.deps.broker.setMarginType(
+        symbol,
+        wantedMode === 'isolated' ? 'ISOLATED' : 'CROSSED',
+      );
+      if (ok) {
+        this.marginSet.set(symbol, wantedMode);
+      } else {
+        /*
+         * 设不上不算开仓失败：**它只影响"这笔最多亏多少"，不影响这笔该不该做**。
+         * 失败通常有明确原因（该标的已有持仓或挂单），下一轮会再试。
+         */
+        this.emit(
+          'warn',
+          `${symbol} 的保证金模式未能设为${wantedMode === 'isolated' ? '逐仓' : '全仓'}（该标的可能已有持仓或挂单）—— 本次开仓继续，但这一仓的损失上限按当前模式计算。`,
+        );
+      }
+    }
 
     /* --- Size ------------------------------------------------------------ */
     const price = await this.deps.broker.getMarkPrice(symbol).catch(() => snapshot.price);
