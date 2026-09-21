@@ -3024,3 +3024,82 @@ test('★ 减仓也要记订单 —— 同上', async () => {
     `减仓必须多出一条平仓订单记录，实际 ${before} → ${exits.length}`,
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  失败状态必须能恢复                                                          */
+/* -------------------------------------------------------------------------- */
+
+test('★ 一轮失败把状态标成 error，下一轮成功必须回到 running', async () => {
+  /*
+   * ## 这条用例来自一次真实的"关不掉的红色大横幅"
+   *
+   * 操作员看到 `/traders/9` 顶上挂着一整条红色横幅：「这一轮模型的输出被截断了…」，
+   * 而**机器人其实一直在正常跑**（每 45 分钟一轮、不断产出决策）。
+   *
+   * 根因是成功分支里那一行条件的遗漏（**两处，各一份拷贝**）：
+   *
+   *     if (this.status === 'safe_mode') this.setStatus('running', null);
+   *
+   * 只认 `safe_mode`，而 `error` 是**单次**失败的标记（连续失败到阈值才升到
+   * `safe_mode`）。于是：**一次瞬时的模型输出截断 → 状态设为 `error` → 永远回不去**，
+   * 只有"重启机器人"能清掉它。
+   *
+   * 后果不只是"多了一行字"：那个状态会渲染成整页最显眼的告警，**而它是假的** ——
+   * 一个长期误报的状态会训练操作员忽略所有告警。
+   *
+   * ## ⚠️ 第一版用例是无效的（变异测试发现的）
+   *
+   * 它第二阶段用的是**新的 `buildTrader(...).start()`** —— 而 `start()` 自己就会
+   * `setStatus('running', null)`（第 513 行）。所以"成功那一轮能不能恢复"**从来没被
+   * 考到**：把实现改回只认 `safe_mode`，那条用例照样通过。
+   *
+   * 现在两阶段用**同一个实例**：`start()` 跑出失败的一轮，再用 `runOnce()`
+   * 跑一轮成功的 —— `stop(_, false)` 不改状态，所以 `error` 会一直留到被真正恢复。
+   */
+  const broker = new FakeBroker();
+
+  /*
+   * ⚠️ **必须用同一个实例** —— `this.status` 是**实例字段**。
+   *
+   * 第一版两阶段各造了一个实例：阶段二那句恢复的条件是
+   * `this.status === 'safe_mode' || 'error'`，而**新实例的 `this.status` 不是
+   * `error`**（数据库里是，实例上不是）—— 于是它什么也没做，用例却因为
+   * `start()` 自己设了 `running` 而"看起来通过"。
+   *
+   * 所以模型的响应要**可变**：同一个模型对象，按调用次数返回不同的东西。
+   */
+  let responseText = '模型被截断了，这里没有 decision 块';
+  const model: DecisionModel = {
+    async complete() {
+      return { text: responseText, latencyMs: 42, usage: { promptTokens: 100, completionTokens: 50 } };
+    },
+  };
+  const trader = buildTrader(broker, '', model);
+
+  /* 阶段一：输出不含 `<decision>`（被截断的样子）→ 走失败分支 → error。 */
+  await trader.start();
+  await trader.stop('测试：先失败一轮', false);
+
+  assert.equal(
+    traders.get(traderId)!.status,
+    'error',
+    '前提：单次失败应当把状态标成 error（连续失败才是 safe_mode）',
+  );
+  assert.ok(traders.get(traderId)!.lastError, '前提：这一轮的错误原因已记录');
+
+  /*
+   * 阶段二：**同一个实例**、模型这次正常返回。
+   *
+   * 不能用 `start()` —— 它自己就会 `setStatus('running')`，那样子断言无论实现
+   * 对不对都会通过（这正是第一版的问题）。`runOnce()` 走的才是"成功分支里那句恢复"。
+   */
+  responseText = '<decision>[]</decision>';
+  await trader.runOnce();
+
+  assert.equal(
+    traders.get(traderId)!.status,
+    'running',
+    '★ 成功一轮就必须回到 running —— 否则一次瞬时的模型失败会把机器人永久标成故障，' +
+      '而它其实一直在正常跑。实测操作员看到的正是那条关不掉的红色横幅。',
+  );
+});

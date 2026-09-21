@@ -114,7 +114,43 @@ function toAccountState(raw: Record<string, unknown> | null): TraderAccountState
  *   部分，以前被一张占 40% 屏高的平线权益图挤到了页面底部。
  * - 权益曲线只在**真有形状**时才画成图表，否则压成 36px 的缩略条。
  */
+/*
+ * 「最近错误」的收起状态。
+ *
+ * ## 为什么记的是**消息指纹**，而不是一个"关过没"的布尔值
+ *
+ * 存一个布尔值最容易写 —— 而那意味着**关一次之后就再也看不到新错误了**，
+ * 那是另一种谎，而且更危险：真出问题时页面上安安静静。
+ *
+ * 所以存的是**这一条消息**被关过。新的一条（内容不同）指纹不同，照常显示。
+ * 放在 `sessionStorage` 而不是 `localStorage`：关掉标签页就忘掉，
+ * 下次打开还能看见当前这条 —— 收起是"这一会儿不想看"，不是"永远别看"。
+ */
+const ERROR_DISMISS_KEY = 'aq.traderErrorDismissed';
+
+function dismissedFingerprint(): string {
+  try {
+    return sessionStorage.getItem(ERROR_DISMISS_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function dismissError(message: string): void {
+  try {
+    sessionStorage.setItem(ERROR_DISMISS_KEY, message);
+  } catch {
+    /* 存不了就让它在这次渲染里消失也行 —— 不值得为它报错。 */
+  }
+}
+
 export function TraderPage() {
+  /*
+   * 当前被收起的**那一条**错误消息（空串 = 没有收起任何一条）。
+   * 初始值取自 `sessionStorage`，所以刷新之后它仍然是收起的 —— 而换了一条新错误
+   * （指纹不同）就会重新显示出来。
+   */
+  const [dismissedError, setDismissedError] = useState(dismissedFingerprint);
   const params = useParams();
   const traderId = Number(params.id);
   const navigate = useNavigate();
@@ -1012,9 +1048,43 @@ export function TraderPage() {
           现在它降级成「交易所账户」那一行里的一句安静说明 ——
           **放在它解释的那个数字旁边**，而不是抢走整页的注意力。
         */}
-        {status === 'error' && trader.lastError && (
-          <div className="rounded-md border border-down/60 bg-down/10 px-3 py-2 text-base text-down">
-            <span className="font-semibold">最近错误：</span> <span className="num">{trader.lastError}</span>
+        {/*
+          ⚠️ **「最近错误」原来是一整条红色大横幅，而且关不掉。**
+
+          正上方那段注释自己写着"**这个错误我犯过第二次**：把正常情况渲染成异常"
+          —— 而紧挨着下面就又是它。「把维护者的仪表装到操作员的界面上」这件事，
+          在这个文件里已经被记过三回了。
+
+          三处改动：
+
+            1. **不再是一整块红色**：降成一行小字，颜色只用在"错误"两个字上 ——
+               它要能看见，但不该抢走整页的注意力；真正的错误详情在日志区里；
+            2. **能关**：右侧一个 ×，关掉之后记在 `sessionStorage`；
+            3. **关了之后新错误仍会出现**：记的是**这条消息的指纹**，不是"关过就不显示"
+               —— 否则关一次就永远看不到新问题了，那是另一种谎。
+
+          它的根因（`error` 状态回不去 `running`）已经在服务端修了：真正健康的一轮
+          跑完，这个区块自己就消失了。这里做的是**兜底** —— 万一它真的粘住了，
+          操作员至少能把它收起来，而不是被一条关不掉的横幅挡着。
+        */}
+        {status === 'error' && trader.lastError && dismissedError !== trader.lastError && (
+          <div className="flex items-baseline gap-2 px-1 text-xs text-ink-lo">
+            <span className="shrink-0 font-semibold text-down">最近错误</span>
+            <span className="num min-w-0 flex-1 truncate" title={trader.lastError}>
+              {trader.lastError}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                dismissError(trader.lastError!);
+                setDismissedError(trader.lastError!);
+              }}
+              className="shrink-0 rounded px-1 text-ink-faint hover:bg-panel hover:text-ink-hi"
+              title="收起这条提示（新出现的错误仍会显示）"
+              aria-label="收起这条提示"
+            >
+              ×
+            </button>
           </div>
         )}
 
