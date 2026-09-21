@@ -671,6 +671,43 @@ export class RiskEngine {
     }
     const price = snapshot.price;
 
+    /*
+     * ⚠️ **这笔交易真正的入场价 —— 挂单时是挂单价，不是当前市价。**
+     *
+     * ## 这是一个真实的 bug，实测代价是"限价入场一次都没成功过"
+     *
+     * `#116` 的原始记录：
+     *
+     *     模型提的：open_long BNBUSDT  entry_type=limit  limit_price=800.5
+     *               止损 793.5   止盈 821.5
+     *     实际结果：rejected — 盈亏比 1:1.82 低于要求的 1:3
+     *
+     * 算一下就清楚了（当时市价 ≈803.4）：
+     *
+     * | 按哪个价算 | 上行 / 下行 | 盈亏比 |
+     * | --- | --- | --- |
+     * | **挂单价 800.5**（模型的本意）| 21.0 / **7.0** | **1:3.00** ✅ 刚好达标 |
+     * | 当前市价 803.4（修之前用的）| 18.1 / 9.9 | 1:1.82 ❌ 被拒 |
+     *
+     * **模型做对了**：它写了 `entry_type: limit` + `limit_price`，而风控没有按
+     * 那个价衡量风险收益。于是**限价入场这条链路自上线以来一次都没成功过** ——
+     * 每一次都被这条判据拦下，而拦它的理由（"盈亏比不够"）**是基于一个这笔交易
+     * 根本不会成交的价位算出来的**。
+     *
+     * ## 为什么按挂单价算才是对的
+     *
+     * 挂单价**就是**这笔交易的入场价 —— 那张单要么在那个价位成交、要么不成交。
+     * 用当前市价去衡量它，等于在问"如果我现在市价进，风险收益如何" ——
+     * **而那不是模型提的这笔交易。**
+     *
+     * 限价单的意义正是"等一个更好的价位"：那个更好的价位**会改善**盈亏比
+     * （止损距离变近、或止盈距离变远）。用市价算就把这个改善抹掉了。
+     */
+    const entryPrice =
+      decision.entryType === 'limit' && (decision.limitPrice ?? 0) > 0
+        ? (decision.limitPrice as number)
+        : price;
+
     /* --- 1. Position slots ----------------------------------------------- */
     if (account.positionCount >= risk.maxPositions) {
       return {
@@ -745,8 +782,12 @@ export class RiskEngine {
       if (risk.requireStopLoss && risk.fallbackStopLossPercent <= 0) {
         return { ok: false, reason: '未提供止损，且兜底止损已被禁用。' };
       }
-      const distance = price * (risk.fallbackStopLossPercent / 100);
-      stopLoss = isLong ? price - distance : price + distance;
+      /*
+       * ⚠️ 兜底比例按 `entryPrice` —— 挂单时这个止损是相对**挂单价**设的，
+       * 而它成交也只会发生在那个价位。按市价设会让止损距离与设计不符。
+       */
+      const distance = entryPrice * (risk.fallbackStopLossPercent / 100);
+      stopLoss = isLong ? entryPrice - distance : entryPrice + distance;
       adjustments.push(
         `模型未给出止损，已按配置的 ${risk.fallbackStopLossPercent}% 兜底比例设为 ${stopLoss.toFixed(6)}。`,
       );
@@ -758,36 +799,43 @@ export class RiskEngine {
       if (risk.requireTakeProfit && risk.fallbackTakeProfitPercent <= 0) {
         return { ok: false, reason: '未提供止盈，且兜底止盈已被禁用。' };
       }
-      const distance = price * (risk.fallbackTakeProfitPercent / 100);
-      takeProfit = isLong ? price + distance : price - distance;
+      const distance = entryPrice * (risk.fallbackTakeProfitPercent / 100);
+      takeProfit = isLong ? entryPrice + distance : entryPrice - distance;
       adjustments.push(
         `模型未给出止盈，已按配置的 ${risk.fallbackTakeProfitPercent}% 兜底比例设为 ${takeProfit.toFixed(6)}。`,
       );
     }
 
     /* --- 6. Protection must sit on the correct side ---------------------- */
-    if (isLong && !(stopLoss < price)) {
+    /*
+     * ⚠️ **方向校验按 `entryPrice`，理由与风险距离一样**：挂单那笔交易的失效位
+     * 是相对**挂单价**说的。按市价判会把一笔正确的挂单判成"止损在错误的一侧"
+     * —— 而那与"这笔亏不亏钱"毫无关系。
+     *
+     * 错误文案里说的是"未低于当前价" —— 现在它说的是**入场价**，措辞也跟着改。
+     */
+    if (isLong && !(stopLoss < entryPrice)) {
       return {
         ok: false,
-        reason: `多头止损无效：止损价 ${stopLoss} 未低于当前价 ${price}。`,
+        reason: `多头止损无效：止损价 ${stopLoss} 未低于入场价 ${entryPrice}。`,
       };
     }
-    if (!isLong && !(stopLoss > price)) {
+    if (!isLong && !(stopLoss > entryPrice)) {
       return {
         ok: false,
-        reason: `空头止损无效：止损价 ${stopLoss} 未高于当前价 ${price}。`,
+        reason: `空头止损无效：止损价 ${stopLoss} 未高于入场价 ${entryPrice}。`,
       };
     }
-    if (isLong && !(takeProfit > price)) {
+    if (isLong && !(takeProfit > entryPrice)) {
       return {
         ok: false,
-        reason: `多头止盈无效：止盈价 ${takeProfit} 未高于当前价 ${price}。`,
+        reason: `多头止盈无效：止盈价 ${takeProfit} 未高于入场价 ${entryPrice}。`,
       };
     }
-    if (!isLong && !(takeProfit < price)) {
+    if (!isLong && !(takeProfit < entryPrice)) {
       return {
         ok: false,
-        reason: `空头止盈无效：止盈价 ${takeProfit} 未低于当前价 ${price}。`,
+        reason: `空头止盈无效：止盈价 ${takeProfit} 未低于入场价 ${entryPrice}。`,
       };
     }
 
@@ -812,8 +860,15 @@ export class RiskEngine {
       typeof observedFeeRate === 'number' && Number.isFinite(observedFeeRate) && observedFeeRate > 0
         ? observedFeeRate
         : risk.fallbackRoundTripFeeRate;
-    const riskDistance = Math.abs(price - stopLoss);
-    const stopDistancePercent = (riskDistance / price) * 100;
+    /*
+     * ⚠️ **风险距离与止损幅度都按"这笔交易真正的入场价"算**（见上面 `entryPrice`）。
+     *
+     * 挂单价与市价不同时，两者的差距会直接改变"止损够不够远"以及"盈亏比够不够"。
+     * 用市价算会让一笔按 800.5 挂单的交易，被按 803.4 去评判 ——
+     * 而它永远不会在 803.4 成交。
+     */
+    const riskDistance = Math.abs(entryPrice - stopLoss);
+    const stopDistancePercent = (riskDistance / entryPrice) * 100;
     const minStopDistancePercent = roundTripFeeRate * feeMultiple * 100;
 
     /*
@@ -845,7 +900,13 @@ export class RiskEngine {
     }
 
     /* --- 7. Reward:risk -------------------------------------------------- */
-    const rewardDistance = Math.abs(takeProfit - price);
+    /*
+     * ⚠️ **分子分母都按 `entryPrice`** —— 与上面 `riskDistance` 同一口径。
+     *
+     * 混用（一个按市价、一个按挂单价）会算出一个**毫无意义**的比值，
+     * 而它可能恰好落在门槛两侧的任意一边。
+     */
+    const rewardDistance = Math.abs(takeProfit - entryPrice);
     const rewardRisk = riskDistance > 0 ? rewardDistance / riskDistance : 0;
     if (rewardRisk < risk.minRiskRewardRatio) {
       return {
