@@ -3995,8 +3995,63 @@ test('提示词要告诉模型它在等什么 —— 挂单不能对它隐身', 
 });
 
 /* -------------------------------------------------------------------------- */
-/*  撤掉待成交的挂单                                                             */
+/*  限价成交后必须把保护单号写回持仓                                              */
 /* -------------------------------------------------------------------------- */
+
+test('★ 限价成交后要把止损单号写回持仓 —— 不写，保本守卫会把仓位平掉', async () => {
+  /*
+   * ## 这条钉的是一个**实测发生过、代价很大**的漏记
+   *
+   * 生产上的那一轮（`#91` UNIUSDT）：
+   *
+   * ```
+   * 限价单成交 → 挂上计划止损 8.86
+   * → 保本守卫想把止损移到成本价 8.98
+   * → -4130「该仓位已有止损单」（因为它不知道 8.86 那张是自己挂的）
+   * → 判为"保护单缺失" → §2.6 立刻市价平仓
+   * ```
+   *
+   * 而那一笔本来是**盈利**的（挂单价 8.98、成交价 9.073）。
+   *
+   * 根因：`promotePendingEntry` 挂了止损，却**没把单号写回 `positions.stop_order_id`**。
+   * 而保本守卫的第一步就是"读旧止损单号"：
+   *
+   * ```ts
+   * const oldStopId = local.stop_order_id ? Number(local.stop_order_id) : null;
+   * if (oldStopId && …) { …撤旧… }        // ← null 就整段跳过
+   * ```
+   *
+   * → 跳过撤旧 → 直接挂新的 → 撞 `-4130`。**同一个文件里已经为"写了一半的记账"
+   * 写过很多次注释了。**
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  const pendingRow = positionStore.pending(traderId)[0];
+  assert.ok(pendingRow, '前提：挂上了一张单');
+  const orderId = Number(pendingRow.entry_order_id);
+
+  /* 让它成交，再跑一轮 —— 对账会转正并挂保护单。 */
+  broker.fillRestingOrder(orderId);
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  const opened = positionStore.open(traderId).find((p) => p.symbol === SYMBOL);
+  assert.ok(opened, '★ 成交之后必须转成真正的持仓');
+
+  /*
+   * ★ **这里就是那个漏记**：单号必须被写回来。
+   *
+   * 不写的话 `stop_order_id` 是 `null`，而保本守卫据此认为"没有旧止损可撤"
+   * → 直接挂新的 → 撞 `-4130` → 平仓。
+   */
+  assert.ok(
+    opened.stop_order_id,
+    '★ 挂上止损之后必须把它的单号写回持仓 —— 不写的话保本守卫会以为没有保护单，' +
+      '然后挂新单撞 -4130、把一笔盈利仓位平掉（实测 #91 就是这样）',
+  );
+});
+
 
 test('★ 模型可以撤掉自己的挂单 —— 「挂单」不能是一扇单向门', async () => {
   /*
