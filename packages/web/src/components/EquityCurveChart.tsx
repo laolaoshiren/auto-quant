@@ -20,7 +20,7 @@
  */
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { fmtTime } from '../lib/format';
-import { equityAxisFormatter, rangeSpanMs, type EquityPoint } from './equityCurve';
+import { axisTicks, equityAxisFormatter, HOURLY_AXIS_MAX_MS, rangeSpanMs, type EquityPoint } from './equityCurve';
 
 /* -------------------------------------------------------------------------- */
 /*  Palette                                                                    */
@@ -200,12 +200,20 @@ export function EquityCurveChart({
     : [center - Math.max(center * 0.002, 0.5), center + Math.max(center * 0.002, 0.5)];
 
   const reference = baseline ?? (hasData ? first : center);
-  const spanDays = rangeSpanMs(range) / 86_400_000;
+  /*
+   * 阈值与刻度摆放共用 `HOURLY_AXIS_MAX_MS` —— 见 `axisTicks` 的注释：
+   * 一处按整点摆、另一处把整点格式化成日期，会得到重复标签。
+   */
   const axisTick =
-    spanDays <= 1
+    rangeSpanMs(range) <= HOURLY_AXIS_MAX_MS
       ? (value: number) => fmtTime(new Date(value).toISOString())
       : (value: number) =>
           new Date(value).toLocaleDateString('en-CA', { month: '2-digit', day: '2-digit' });
+  /*
+   * 刻度钉在真实的整点 / 日界上 —— 与交易页那条曲线同一份实现，
+   * 否则同一个区间在两个页面上会长出两条不一样的时间轴。
+   */
+  const ticks = axisTicks(points, range);
 
   const TooltipContent = buildTooltip({
     primaryLabel,
@@ -240,6 +248,8 @@ export function EquityCurveChart({
           dataKey="t"
           type="number"
           domain={['dataMin', 'dataMax']}
+          /* 刻度钉在真实整点/日界上，理由见 `equityCurve.axisTicks`。 */
+          {...(ticks.length > 0 ? { ticks } : {})}
           tickFormatter={axisTick}
           tick={{ fill: AXIS, fontSize: 11 }}
           tickLine={false}

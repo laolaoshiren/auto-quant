@@ -19,10 +19,75 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { hasEquityVariation, rangeSpanMs, EQUITY_BUCKET_MS, CHART_INK } from './equityCurve';
+import { axisTicks, hasEquityVariation, rangeSpanMs, EQUITY_BUCKET_MS, CHART_INK } from './equityCurve';
 import { leverageRatio } from './LeverageArc';
 import { equityShape } from '../pages/overviewParts';
 import tailwindConfig from '../../tailwind.config.js';
+
+/* -------------------------------------------------------------------------- */
+/*  X 轴刻度：位置必须对得上标签                                                */
+/* -------------------------------------------------------------------------- */
+
+/** 一个点够了 —— `axisTicks` 只看首尾的时间。 */
+function pointAt(iso: string) {
+  return { t: new Date(iso).getTime(), equity: 21, unrealizedPnl: 0, openPositions: 0 };
+}
+
+test('★ 多天范围：刻度钉在本地日界上，不按数值均匀摊', () => {
+  /*
+   * Why this test exists —— 用户的原话：「归属权益曲线上查看历史的时候，
+   * 显示不正确」。
+   *
+   * 我先核了数据：服务器上那条快照 `2026-09-22T01:33:18.427Z` 的权益是
+   * `22.12549787`，换算到用户时区正是 tooltip 里的 `09:33:18 / 22.13` ——
+   * **数值没有错**。错的是**刻度的位置**：图表库默认把刻度按数值均匀摊开，
+   * 再把每个刻度格式化成日期，于是 `09-20 21:12 / 09-21 12:33 / 09-22 03:55`
+   * 变成 `09-20 / 09-21 / 09-22` —— **每一个都不在那一天的开始**，
+   * 于是按标签定位历史会系统性偏一天。
+   *
+   * 这个用例钉的就是那件事：这一串刻度里，只要有一个不是本地 00:00，
+   * 时间轴就又在骗人。
+   */
+  const ticks = axisTicks(
+    [pointAt('2026-09-20T21:12:15+08:00'), pointAt('2026-09-23T03:26:10+08:00')],
+    'ALL',
+  );
+
+  assert.ok(ticks.length >= 2, `跨度两天多应当至少有两天日界，实际 ${ticks.length}`);
+  for (const t of ticks) {
+    const d = new Date(t);
+    assert.equal(d.getHours(), 0, `刻度必须落在本地日界，实际是 ${d.toLocaleString('en-GB')}`);
+    assert.equal(d.getMinutes(), 0);
+    assert.equal(d.getSeconds(), 0);
+  }
+  // 且必须落在数据跨度**之内** —— 画到曲线外面去会凭空多出一段时间。
+  const from = new Date('2026-09-20T21:12:15+08:00').getTime();
+  const to = new Date('2026-09-23T03:26:10+08:00').getTime();
+  for (const t of ticks) assert.ok(t > from && t <= to, `刻度 ${new Date(t).toISOString()} 跑到跨度外了`);
+});
+
+test('一天半以内：刻度落在整点（时钟轴）', () => {
+  const ticks = axisTicks(
+    [pointAt('2026-09-22T00:10:00+08:00'), pointAt('2026-09-22T18:40:00+08:00')],
+    '1D',
+  );
+
+  assert.ok(ticks.length > 0, '一天的范围里应当有整点刻度');
+  for (const t of ticks) {
+    const d = new Date(t);
+    assert.equal(d.getMinutes(), 0, `整点刻度的分钟必须是 0，实际 ${d.getMinutes()}`);
+    assert.equal(d.getSeconds(), 0);
+  }
+});
+
+test('跨度不足一个整点时返回空数组 —— 交给图表库的默认行为', () => {
+  // 返回一个非空但错误的刻度比返回空更糟：调用方会用它覆盖掉默认轴。
+  const ticks = axisTicks(
+    [pointAt('2026-09-22T00:10:00+08:00'), pointAt('2026-09-22T00:40:00+08:00')],
+    '1D',
+  );
+  assert.deepEqual(ticks, []);
+});
 
 /* -------------------------------------------------------------------------- */
 /*  杠杆表盘的比例                                                              */
