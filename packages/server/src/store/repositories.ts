@@ -1216,6 +1216,26 @@ export const orders = {
   },
 
   /**
+   * 按**交易所单号**找一行。
+   *
+   * ## 为什么需要它（而不是用本地 `orders.id`）
+   *
+   * 成交那一刻手上只有**持仓行**（`promotePendingEntry()`），而
+   * `positions.entry_order_id` 存的是**交易所单号** —— 本地订单表的主键在那条路径上
+   * 根本拿不到。加这个方法，是为了让"成交了"这件事能在**发生的地方**写回订单行，
+   * 而不是指望以后有人来收拾（实测就是没人收拾：那张开仓单从成交起一直停在 `NEW`，
+   * 界面上同时显示"持仓 12.7 @ 1.5600"和"开仓 限价 已挂单"）。
+   */
+  findByExchangeOrderId(traderId: number, exchangeOrderId: string): OrderRecord | null {
+    const row = getDb().get<OrderRow>(
+      'SELECT * FROM orders WHERE trader_id = ? AND exchange_order_id = ? ORDER BY id DESC LIMIT 1',
+      traderId,
+      exchangeOrderId,
+    );
+    return row ? toOrder(row) : null;
+  },
+
+  /**
    * 仍处于**非终态**、且早于 `createdBefore` 的委托行，最新在前。
    *
    * 这是"交易所已经不挂了、本地还停在 `NEW`"那些行的候选集。它只做筛选：

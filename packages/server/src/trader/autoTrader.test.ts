@@ -3824,6 +3824,31 @@ test('★ 限价入场：挂单后不建仓，成交后才转正并挂上保护�
     stops.length > 0,
     '★ 成交后必须立刻挂上止损 —— 否则那段时间是没有保护的杠杆仓位（§2.6）',
   );
+
+  /*
+   * ⑥ **那张入场单行必须已经结清。**
+   *
+   * 用户看着「当前委托」问的原话是：「这一笔开仓买入，是否已经成交完了？如果是
+   * 成交完了，为什么委托里面还显示有这个？」—— 成交完了（持仓就是证据），而本地
+   * 那张订单行一直停在 `NEW`：建仓、挂保护单都做了，唯独没人回写它。界面于是同时
+   * 说「持仓 12.7 @ 1.5600」和「开仓 限价 已挂单」，两句话互相矛盾。
+   *
+   * 这里钉的是**回写发生的地方** —— `promotePendingEntry()` 里，转正那一刻。
+   * 兜底那条路（`settleStaleOrders()`）也补了，但它过去被"这个标的还持仓"整段
+   * 排除掉，指望不上；这条断言保证不靠兜底也是对的。
+   */
+  const entryRow = orderStore.list(traderId).find((o) => o.purpose === 'entry');
+  assert.ok(entryRow, '前提：入场单应当有一行记录');
+  assert.equal(
+    entryRow.status,
+    'FILLED',
+    `★ 入场单成交后必须写成 FILLED，实际停在 ${entryRow.status}` +
+      ' —— 停在 NEW 会让「当前委托」永远显示一张早已成交的单',
+  );
+  assert.ok(
+    entryRow.filledQty > 0,
+    `★ 成交量也必须回写（实际 ${entryRow.filledQty}）—— settleStaleOrders 判终态时读的就是它`,
+  );
 });
 
 test('限价单未成交就被撤销时，本地不留任何痕迹', async () => {
