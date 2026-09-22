@@ -1637,6 +1637,18 @@ export class AutoTrader {
       cycleNumber,
       now: new Date(),
       config,
+      /*
+       * ⚠️ **AI 托管时不能替它预设交易性格。**
+       *
+       * `buildSystemPrompt` 会按这个标志决定第 2 段写什么：非托管时注入写死的
+       * `MODE_GUIDANCE`（「模式：稳健……保住本金压倒一切」），托管时改成
+       * 「交易风格 —— 由你自己判断」。
+       *
+       * 实测 `#9` 修之前的样子：角色句说「对资金保持保守」、MODE_GUIDANCE 又说
+       * 一遍「稳健/保住本金压倒一切」、而它自己写的 `entryStandards` 里还抄了
+       * 第三遍 —— **三层都在替它回答一个本该它自己回答的问题。**
+       */
+      aiManaged: this.deps.trader.mode === 'ai_managed',
       account: {
         equity: account.equity,
         availableBalance: account.availableBalance,
