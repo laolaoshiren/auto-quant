@@ -58,6 +58,14 @@ export async function fetchIncome(
    */
   const WINDOW = 7 * 24 * 60 * 60 * 1000;
   let cursor = options.startTime;
+  /*
+   * ⚠️ 起点必须是数字，否则 `cursor < endTime` 直接把整个循环跳过 ——
+   * 于是返回 `[]`，调用方把它读成"这个账户没有流水"。那正是下面那条注释
+   * 批评过的形状：**"没读到"伪装成"没有"**。
+   */
+  if (!Number.isFinite(cursor)) {
+    throw new Error(`/fapi/v1/income 的起始时间不是有效数字：${String(options.startTime)}`);
+  }
   while (cursor < endTime) {
     const sliceEnd = Math.min(cursor + WINDOW, endTime);
     const page = await rest.signedRequest<BinanceIncome[]>('GET', '/fapi/v1/income', {
@@ -67,7 +75,34 @@ export async function fetchIncome(
       ...(options.incomeType ? { incomeType: options.incomeType } : {}),
       limit: options.limit ?? 1000,
     });
-    if (Array.isArray(page)) events.push(...page);
+    /*
+     * ⚠️ **不是数组就抛错，不要当成空。**
+     *
+     * 这一行原来写的是 `if (Array.isArray(page)) events.push(...page);` ——
+     * 一个"响应不是数组"的请求于是**静默变成零条流水**。而
+     * `rest.signedRequest()` 在**响应体为空**时正是返回 `undefined`
+     * （见 `rest.ts` 的 `if (!text) return undefined as T`）—— 一个 200 加空 body
+     * 的网关抽风，看起来和"这个账户什么都没做过"一模一样。
+     *
+     * 实测代价（部署后立刻撞上）：
+     *
+     *     22:14:33 ERROR 账目与交易所对不上：平台记录 1.1063 USDT、
+     *                    交易所流水 0.0000 USDT，差 1.1063
+     *
+     * 而同一时刻直接问交易所，同一个窗口是 **58 条、合计 1.10634107** ——
+     * 平台记的账一分不差，报错的是**读取**。这条告警的文案是"请先核对再让
+     * 机器人继续交易"，也就是它会指着一个完全正确的账本要求人工介入。
+     *
+     * 抛错之后，`reconcileTradeHistory()` 的 `catch` 会把它记成
+     * `incomeReadFailed`，总账校验**整条跳过**（那个标志就是为这件事存在的）。
+     */
+    if (!Array.isArray(page)) {
+      throw new Error(
+        `/fapi/v1/income 返回的不是数组（${page === undefined ? '空响应体' : typeof page}）：` +
+          `${JSON.stringify(page)?.slice(0, 200)}`,
+      );
+    }
+    events.push(...page);
     cursor = sliceEnd + 1;
   }
 
