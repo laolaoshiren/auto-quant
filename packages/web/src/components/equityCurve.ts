@@ -182,6 +182,59 @@ export function rangeSpanMs(range: string): number {
 }
 
 /**
+ * 时间轴用"时钟刻度"还是"日期刻度"的分界。
+ *
+ * ⚠️ **刻度摆放与刻度格式化必须共用这一个数**：一处按整点摆刻度、
+ * 另一处把整点格式化成日期，会得到 `09-21 / 09-21 / 09-22` 这种重复标签。
+ */
+export const HOURLY_AXIS_MAX_MS = 36 * 3600 * 1000;
+
+/**
+ * X 轴的刻度必须落在**真实的整点 / 日界**上，而不是让图表库按数值均匀摊。
+ *
+ * ## 为什么（用户的原话：「归属权益曲线上查看历史的时候，显示不正确」）
+ *
+ * Recharts 默认把刻度**按数值均匀**摊开，再把每个刻度格式化成日期。一条跨度
+ * 「09-20 21:12 → 09-23 03:26」（本地时间，2 天 6 小时）的曲线，均匀刻度落在
+ * `09-20 21:12 / 09-21 12:33 / 09-22 03:55 / 09-22 19:16`，去重后是
+ * `09-20 / 09-21 / 09-22` —— **每一个的位置都不是那一天的开始**。
+ *
+ * 后果：操作员按标签在脑子里定位"09-22 那天发生了什么"，**而标签左边那一大段
+ * 其实还属于 09-21** —— 悬停读到的时刻看起来"比标签晚了一天"。
+ * **一条位置对不上的时间轴，比没有时间轴更糟**：它会让人怀疑曲线本身画错了。
+ *
+ * 所以刻度自己算：一天半以内按整点，更长按**本地日界**（`setHours(0)`，
+ * 因此跨夏令时的那一天也是对的）。
+ *
+ * 放在这个**无依赖模块**里而不是某个图表组件里：交易页与总览页是两个图表组件，
+ * 而"刻度落在哪"只能有一个定义 —— 两处各写一套，同一个区间在两个页面上
+ * 会长出两条不一样的时间轴（`hasEquityVariation` 的注释写着同一条道理）。
+ */
+export function axisTicks(points: EquityPoint[], range: string): number[] {
+  if (points.length < 2) return [];
+  const from = points[0]!.t;
+  const to = points[points.length - 1]!.t;
+  const hourly = rangeSpanMs(range) <= HOURLY_AXIS_MAX_MS;
+  const step = hourly ? 3600 * 1000 : 24 * 3600 * 1000;
+
+  const cursor = new Date(from);
+  cursor.setMinutes(0, 0, 0);
+  if (!hourly) cursor.setHours(0);
+
+  const ticks: number[] = [];
+  let t = cursor.getTime() + step;
+  /*
+   * 上限 10 个：`3M` / `ALL` 那种跨度下日界可能有几十个，全画出来会糊成一片
+   * （图表库的 `minTickGap` 也会再剔一遍，但先从源头限住更省事）。
+   */
+  while (t <= to && ticks.length < 10) {
+    ticks.push(t);
+    t += step;
+  }
+  return ticks;
+}
+
+/**
  * The snapshot the REST endpoint would have returned, plus whatever the live
  * socket has pushed since. Kept here so the dedupe happens once, in the module
  * that owns the merging, instead of in every caller.
