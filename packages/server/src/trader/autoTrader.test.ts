@@ -4549,6 +4549,85 @@ test('★ 追问了就记一条日志 —— 哪怕模型什么都没调整', as
   );
 });
 
+/* -------------------------------------------------------------------------- */
+/*  账本不变量                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 检查"一个开着的持仓该有的字段都写了吗"。
+ *
+ * ## 为什么把它做成一个函数，而不是散在几条用例里
+ *
+ * 这一轮（Round 17–24）连着修了六个 bug，而它们的形态是**同一个**：
+ *
+ *   1. `promotePendingEntry` 挂了止损却**没把单号写回** → 保本守卫读不到旧单号
+ *      → 跳过撤旧 → 挂新单撞 `-4130` → **把一笔盈利仓位平掉**（实测 `#91`）；
+ *   2. 资金费符号反了 → 净额算错 → **每轮都报一条假的账目告警**；
+ *   3. 限价单的盈亏比按市价算 → 它**从未挂出过**；
+ *   4. 服务日志不落盘 → **所有"机制有没有生效"的判断都是假信号**。
+ *
+ * **共同点是：数据层少了一个值 / 多了一个符号，而没有任何东西在检查它。**
+ * 每一条都是**事后从生产数据里撞出来的** —— 那意味着下一个同类问题也会。
+ *
+ * 所以这个函数把"该有什么"写下来，让它在**每次测试**里被检查一次。
+ */
+function assertPositionRowInvariants(label: string): void {
+  const open = positionStore.open(traderId);
+  for (const p of open) {
+    assert.ok(
+      p.stop_order_id,
+      `[${label}] ★ 开着的持仓必须有止损单号（${p.symbol} 是 null）—— ` +
+        '保本守卫靠它判断"有没有旧止损可撤"，读不到就会去挂新单、撞 -4130、然后把仓位平掉（实测 #91）',
+    );
+    assert.ok(p.stop_loss !== null && p.stop_loss > 0, `[${label}] 开着的持仓必须有止损价（${p.symbol}）`);
+    assert.ok(p.quantity > 0, `[${label}] 开着的持仓数量必须为正（${p.symbol}）`);
+  }
+  const pending = positionStore.pending(traderId);
+  for (const p of pending) {
+    assert.ok(
+      p.entry_order_id,
+      `[${label}] ★ 待成交记录必须有交易所单号（${p.symbol} 是 null）—— ` +
+        '没单号就对不了账，它会永远占着持仓名额',
+    );
+  }
+}
+
+test('★ 走完一个开仓周期后，持仓行的账本不变量全部成立', async () => {
+  /*
+   * 这条不测某一个行为，它测**"记账写全了没有"** —— 而上面那个函数列出了
+   * "写全"的定义。见它的注释：这一轮六个 bug 全都是它的某个变体。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  assertPositionRowInvariants('市价开仓');
+  assert.ok(positionStore.open(traderId).length > 0, '前提：确实开出了一个仓位');
+});
+
+test('★ 走完一个限价成交周期后，账本不变量同样成立', async () => {
+  /*
+   * 限价入场那条路径**曾经在同一个坑里**（`#91`）：挂了止损、没写单号，
+   * 而当时 652 项测试全绿 —— 因为那些用例只检查了"止损有没有挂"，
+   * 没有检查"单号有没有写回"。
+   *
+   * 这条与上面那条的区别只在"怎么走到持仓"：一个是市价、一个要等成交。
+   * 而**走到之后要满足的东西是同一套** —— 那正是把它抽成函数的意义。
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  const pendingRow = positionStore.pending(traderId)[0];
+  assert.ok(pendingRow, '前提：挂上了一张单');
+  /* 挂单状态下必须先满足 pending 的那条不变量。 */
+  assertPositionRowInvariants('限价挂单中');
+
+  broker.fillRestingOrder(Number(pendingRow.entry_order_id));
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  assert.ok(positionStore.open(traderId).length > 0, '前提：那张单成交并转正了');
+  assertPositionRowInvariants('限价成交后');
+});
+
 
 
 
