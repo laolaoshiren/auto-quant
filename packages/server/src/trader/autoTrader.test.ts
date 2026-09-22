@@ -967,6 +967,49 @@ test('止损比往返手续费还近的开仓：在交易循环里被拒，且�
 });
 
 /* -------------------------------------------------------------------------- */
+/*  ★ skip：看过、不做 —— 但它要留下一条带评分的记录                            */
+/* -------------------------------------------------------------------------- */
+
+test('★ skip 不产生任何订单、也不被记成失败，但分数必须落库', async () => {
+  /*
+   * Why this test exists —— `skip` 每轮会有十几条（提示词要求模型对**每一个**
+   * 候选标的都留一条），所以它在执行层的两种"出错方式"后果都会被放大十几倍：
+   *
+   *  · 掉进最后的 `else` 被当成**开仓**执行 → 十几笔凭空下的单
+   *    （`cancel_pending` 那个坑的翻版，`decision.ts` 里为它写过三次注释）；
+   *  · 掉进"不认识的决策动作"兜底 → 十几条红字**执行失败**，而那一轮什么都没做错
+   *    （`hold` 曾经这样报了很久 —— "一个把正常行为报成错误的检查，
+   *    会让人不再相信错误提示"）。
+   *
+   * 最后一条断言钉的是这条路线的**目的**：那条决策要带着 `setupScore` 落库。
+   * 它是"校准入场门槛"唯一的原料 —— 没有它，`get_skipped_outcomes` 只能告诉
+   * 模型"这些后来涨了"，回答不了"我的线是不是划高了"。
+   */
+  const broker = new FakeBroker();
+  const before = broker.placed.length;
+
+  const response = `<decision>[
+    {"symbol":"BTCUSDT","action":"skip","setup_score":58,
+     "setup_score_basis":"抛物线中段 止损无处可放","confidence":70,"reasoning":"不追高"}
+  ]</decision>`;
+  const summary = await buildTrader(broker, response).runOnce();
+
+  assert.equal(broker.placed.length, before, '★ skip 不得产生任何订单');
+  assert.equal(positionStore.open(traderId).length, 0, '★ 也不得建仓');
+  assert.match(summary, /开仓 0/, `摘要里不该出现任何动作，实际：${summary}`);
+
+  const record = decisionStore.list(traderId)[0]!;
+  assert.equal(
+    record.executionLog.filter((e) => e.status === 'failed').length,
+    0,
+    `★ skip 不该被记成执行失败，实际：${JSON.stringify(record.executionLog)}`,
+  );
+  const skipped = record.decisions.find((d) => d.symbol === 'BTCUSDT')!;
+  assert.equal(skipped.action, 'skip');
+  assert.equal(skipped.setupScore, 58, '★ 分数必须落库 —— 那是校准门槛唯一的原料');
+});
+
+/* -------------------------------------------------------------------------- */
 /*  Opening                                                                    */
 /* -------------------------------------------------------------------------- */
 

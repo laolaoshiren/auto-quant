@@ -316,6 +316,24 @@ function coerceRawDecision(input: unknown): LenientDecision | null {
           : undefined,
     limit_price:
       toFiniteNumber(o.limit_price ?? o.limitPrice ?? o.entry_price ?? o.entryPrice) ?? undefined,
+    /*
+     * ⚠️ **评分也要在这里搬一次 —— 上面那段注释说的就是这个坑，这是第二次踩。**
+     *
+     * 这里是解析的**入口**：`LenientDecisionSchema` 认哪些字段不算数，
+     * **这个白名单里有什么才算数**。第一版 `entry_type` 加在了调用点，结果是
+     * "zod 认、而 `coerced` 里根本没有这个键"；`setup_score` 一模一样 ——
+     * 提示词要求模型打分、schema 也收了，而它在这一步被静默丢掉，
+     * 于是统计里永远是 `null`，**看起来像"模型不肯打分"**。
+     *
+     * 同样接受两种写法：模型输出 camelCase 还是下划线，纯看它当天的习惯。
+     */
+    setup_score: toFiniteNumber(o.setup_score ?? o.setupScore) ?? undefined,
+    setup_score_basis:
+      typeof o.setup_score_basis === 'string'
+        ? o.setup_score_basis
+        : typeof o.setupScoreBasis === 'string'
+          ? o.setupScoreBasis
+          : undefined,
     reasoning: typeof o.reasoning === 'string' ? o.reasoning : typeof o.reason === 'string' ? o.reason : undefined,
   };
 
@@ -486,6 +504,15 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
       entryType,
       limitPrice,
       reasoning: coerced.reasoning ?? '',
+      /*
+       * 评分与它的依据 —— **原样带过去，不做任何加工**。
+       *
+       * 它是模型自己的尺子：系统既不定义多少分算好，也不拿它去卡单
+       * （开不开仍由模型的规则与风控决定）。系统只负责让它落库、
+       * 并且能被 `get_skipped_outcomes` 取回来做对照。
+       */
+      setupScore: coerced.setup_score ?? null,
+      setupScoreBasis: coerced.setup_score_basis ?? '',
       adjustments: entryAdjustments,
     });
   }
@@ -538,6 +565,14 @@ const ACTION_PRIORITY: Record<DecisionAction, number> = {
   add_to_position: 3,
   hold: 4,
   wait: 4,
+  /*
+   * `skip` 排在最后 —— 它**什么都不产生**，所以顺序对它没有实质影响。
+   *
+   * 放在这里而不是省略，是因为类型是 `Record<DecisionAction, number>`：
+   * 加动作而忘了给优先级会**编译不过**。那是刻意的 —— 排序是这个文件里
+   * 唯一一处"新增动作必须表态"的地方，比注释更能拦住人。
+   */
+  skip: 5,
 };
 
 /**

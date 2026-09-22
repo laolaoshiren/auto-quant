@@ -36,6 +36,8 @@ function decision(overrides: Partial<Decision> = {}): Decision {
     reasoning: '',
 reducePercent: null,
 reduceQuantity: null,
+    setupScore: null,
+    setupScoreBasis: '',
     adjustments: [],
     ...overrides,
   };
@@ -125,6 +127,67 @@ test('repairs trailing commas', () => {
   const raw = '<decision>[{"symbol":"BTCUSDT","action":"hold",},]</decision>';
   const parsed = parseDecisionResponse(raw, context());
   assert.equal(parsed.decisions.length, 1);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ★ `skip` 与 `setup_score`：把"我否掉了它"变成可校准的数字                    */
+/* -------------------------------------------------------------------------- */
+
+test('★ skip 带着评分一起被解析出来 —— 门槛要靠它才有对错可言', () => {
+  /*
+   * Why this test exists —— 用户的原话是「复盘不够智能」。
+   *
+   * 查下去发现：复盘的工具（`get_skipped_outcomes`）齐备，模型也确实在调用它 ——
+   * 缺的是**一个可比的量**。它每轮否掉十几个标的，却从不给它们打分，于是那个
+   * 工具只能告诉它"这些后来涨了"，回答不了真正的问题：「我的线是不是划高了」。
+   *
+   * 这个用例钉的是那条链路的第一环：`setup_score` / `setup_score_basis` 必须真的
+   * 从模型的 JSON 走到 `Decision` 上。**解析器漏掉它，后面所有校准都是空的** ——
+   * 而且不会报错，只会一直返回 `null`，看起来像"模型没给"。
+   */
+  const raw =
+    '<decision>[' +
+    '{"symbol":"MUBARAKUSDT","action":"skip","setup_score":58,' +
+    '"setup_score_basis":"抛物线中段，止损无处可放","confidence":70,"reasoning":"不追高"},' +
+    '{"symbol":"BTCUSDT","action":"wait","setup_score":44,"confidence":60,"reasoning":"箱体震荡"}' +
+    ']</decision>';
+  const parsed = parseDecisionResponse(
+    raw,
+    context({ candidateSymbols: new Set(['MUBARAKUSDT', 'BTCUSDT']) }),
+  );
+
+  assert.equal(parsed.decisions.length, 2, `两条都该被接受，实际：${JSON.stringify(parsed.rejected)}`);
+  const skipped = parsed.decisions.find((d) => d.symbol === 'MUBARAKUSDT')!;
+  assert.equal(skipped.action, 'skip');
+  assert.equal(skipped.setupScore, 58, '★ 分数必须被解析出来');
+  /*
+   * 用 `match` 而不是 `equal`：解析器有一条**既有的全角标点修复**
+   * （`repairEncoding`），中文逗号会被规范化成半角。那是它的正常工作，
+   * 与本次改动无关 —— 这里钉的是"依据原文带过来了"，不是标点形态。
+   */
+  assert.match(skipped.setupScoreBasis, /抛物线中段/);
+  assert.match(skipped.setupScoreBasis, /止损无处可放/);
+  /*
+   * `confidence` 与 `setup_score` 是**两个问题**，不能互相顶替：
+   * 上面对"不追高"这个**决策**很确定（70），而对**这个标的**只给了 58 ——
+   * 一个"这次不做、但值得盯着"的正常判断。
+   */
+  assert.equal(skipped.confidence, 70);
+
+  const waited = parsed.decisions.find((d) => d.symbol === 'BTCUSDT')!;
+  assert.equal(waited.setupScore, 44);
+  assert.equal(waited.setupScoreBasis, '', '没给依据时是空串，不是 undefined');
+});
+
+test('没给 setup_score 时是 null，不是 0', () => {
+  // 与 `confidence` 同一条约定：`0` 是"它打了零分"，`null` 是"它没打"。
+  // 混起来会让"没要求打分时期的旧记录"在统计里被当成一堆 0 分。
+  const parsed = parseDecisionResponse(
+    '<decision>[{"symbol":"BTCUSDT","action":"hold"}]</decision>',
+    context(),
+  );
+  assert.equal(parsed.decisions[0]!.setupScore, null);
+  assert.equal(parsed.decisions[0]!.setupScoreBasis, '');
 });
 
 /* -------------------------------------------------------------------------- */

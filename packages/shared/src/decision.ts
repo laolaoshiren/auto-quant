@@ -74,6 +74,36 @@ export const DecisionActionSchema = z.enum([
    * 它**总是通过** —— 与 `reduce_position` 同类，不需要过那批"增加风险"的上限。
    */
   'cancel_pending',
+  /*
+   * **「我看过了，不做。」**
+   *
+   * ## 为什么需要一个"什么都不做"的动作
+   *
+   * 在此之前，模型对候选池里**没做的那些标的**不留任何结构化痕迹 ——
+   * 它只在推理文本里写一句"排除"，`decisions_json` 里根本没有这些标的。
+   * 后果是**它的入场标准从来没有被校准过**：
+   *
+   *   · `get_skipped_outcomes` 能告诉它"这些标的后来涨了/跌了"，
+   *   · 却回答不了真正的问题 ——「**我的门槛是不是太高**」，
+   *   · 因为**没有"门槛"这个量**，也就没有"差多少"。
+   *
+   * 实测（用户的原话）：一个 24h +94%、成交额排全市场第 12 的标的，它连续五轮
+   * 写"抛物线、4h RSI 90+、追高禁区"然后跳过，**一轮都没做**。而它的复盘工具
+   * 齐备、也确实调用了 `get_skipped_outcomes` —— 缺的是一个能把"我否掉它"
+   * 变成**可比数字**的载体。
+   *
+   * ## 它必须是 no-op，而且要显式声明
+   *
+   * 风控与执行层都是
+   *
+   *     if (isCloseAction) … else if (isOpenAction) … else 当成 no-op
+   *
+   * 的链式分派。`skip` 掉进最后那个分支**恰好**是它想要的语义 ——
+   * 但 `cancel_pending` 掉进去会被当成开仓（见上面那段注释）。所以这里同样
+   * 给出独立谓词：**下一次有人在这条链上动手时，该看见"skip 必须继续是 no-op"，
+   * 而不是靠它碰巧掉对了分支。**
+   */
+  'skip',
 ]);
 export type DecisionAction = z.infer<typeof DecisionActionSchema>;
 
@@ -125,6 +155,25 @@ export function isCancelPendingAction(a: DecisionAction): boolean {
   return a === 'cancel_pending';
 }
 
+/**
+ * 「看过了，不做」—— 一个**纯记录**动作，不产生任何订单。
+ *
+ * ⚠️ **单独一个谓词，理由与上面三个一字不差**：风控与执行层都是链式分派，
+ * 而没有谓词的新动作会掉进最后那个 `else`。`skip` 掉进去**正好**是它要的语义
+ * （什么都不做），所以它今天不会出事 —— 但"碰巧对"不是"约定"。
+ * 让这个谓词存在，是为了让下一个人在改那条链时能看见它、并且不得不处理它。
+ *
+ * ## 它为什么值得占一个动作
+ *
+ * 它让模型**对每一个候选标的都留一条结构化记录**（`setup_score` 那一项），
+ * 而不仅仅是它决定要做的那些。`get_skipped_outcomes` 因此可以从
+ * 「这些标的后来涨了」升级成「**我否掉的平均 62 分、开仓的平均 78 分，
+ * 而某个后来涨了 40% 的标的当时 74 分**」—— 那才是能校准门槛的证据。
+ */
+export function isSkipAction(a: DecisionAction): boolean {
+  return a === 'skip';
+}
+
 /** The raw decision object as emitted by the model inside the `<decision>` block. */
 export const RawDecisionSchema = z.object({
   symbol: z.string().min(1),
@@ -152,6 +201,26 @@ export const RawDecisionSchema = z.object({
    */
   entry_type: z.enum(['market', 'limit']).optional(),
   limit_price: z.number().optional(),
+  /*
+   * **这个标的的评分（0–100）—— 标准由你自己定义。**
+   *
+   * ## 为什么是"你自己定义"，而不是系统给一把尺子
+   *
+   * 系统的模式是「全智能、不写死」：入场标准本来就归模型自己（`entryStandards`
+   * 是它能改的提示词段落之一）。所以这里**不定义什么叫 80 分**，只要求它
+   * **对每一个候选标的都给出一个数**，并说明依据。
+   *
+   * 那个数的作用不是决定"开不开"（开不开仍由它的规则与风控决定），
+   * 而是让它**可被自己校准**：`setup_score` 落了库，`get_skipped_outcomes`
+   * 才能算出「我否掉的那批平均多少分、我开仓的那批平均多少分、
+   * 而后来涨了很多的那些当时是多少分」。
+   *
+   * 没有这个数，它每一轮都在用同一把尺子，而**那把尺子从来没被校准过** ——
+   * 这正是用户说的"复盘不够智能"：不是它不复盘，是**复盘拿不到可比的量**。
+   */
+  setup_score: z.number().min(0).max(100).optional(),
+  /** 上面那个分数是**按什么打出来的**（一句话，便于以后对照）。 */
+  setup_score_basis: z.string().optional(),
   reasoning: z.string().optional(),
 });
 export type RawDecision = z.infer<typeof RawDecisionSchema>;
@@ -219,6 +288,21 @@ export interface Decision {
   reducePercent: number | null;
   reduceQuantity: number | null;
   reasoning: string;
+  /**
+   * 模型给这个标的打的评分（0–100），以及它的依据。
+   *
+   * `null` = **模型没给**（与 `confidence` 同一条约定：`0` 与 `null` 是两件事）。
+   *
+   * 它与 `confidence` 的区别很重要，别混：
+   *   · `confidence` 是"我对我这个**决策**有多确定"
+   *   · `setup_score` 是"这个**标的本身**有多符合我的入场标准"
+   *
+   * 一个被 `skip` 掉的标的没有决策可言，但**有分数** —— 而那正是校准
+   * 入场门槛唯一需要的量。详见 `setup_score` 在 `RawDecisionSchema` 上的说明。
+   */
+  setupScore: number | null;
+  /** 打分依据（一句话）。没给时是空串。 */
+  setupScoreBasis: string;
   /** Human-readable notes describing every risk-engine adjustment. */
   adjustments: string[];
 }
