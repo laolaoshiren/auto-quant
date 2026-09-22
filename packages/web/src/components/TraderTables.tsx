@@ -29,6 +29,7 @@ import { LoaderCircle } from 'lucide-react';
 import { exchangeErrorLabel, type OrderRecord, type PositionView, type TradeRecord } from '@aq/shared';
 import { orderPurposeLabel, orderStatusLabel, orderTypeLabel } from '@aq/shared';
 import { api } from '../lib/api';
+import { needsReconcileFlag } from '../lib/orderFlags';
 import { useEvents } from '../lib/store';
 import { usePolled } from '../lib/hooks';
 import { Badge, Button, ErrorNote, Modal, Panel, Spinner3 } from './ui';
@@ -926,9 +927,31 @@ export function OrdersTable({
                * 一张仍然写着挂单的委托才值得怀疑（实盘上那 16 行孤儿委托，每一个标的的
                * 本地持仓都是 0）。有持仓时保护单本来就该挂在那里，标上去只会制造假警报 ——
                * 而假警报和数据缺失一样会让这个界面失去信任。
+               *
+               * ⚠️ **但入场单不算可疑 —— 它在成交之前，整本账本来就是空的。**
+               *
+               * 这正是上面那条判据唯一抓错的地方：一张**限价入场单**从挂出到成交
+               * 之间必然没有持仓，那是它的**正常状态**，不是"账本可能错了"。
+               * 把它标成「待对账」，等于给每一张刚挂出的单都挂上一个"数据可能不对"
+               * 的警告，而这个警告会一直挂到它成交或被撤（最长 `pendingEntryTimeoutMinutes`）。
+               *
+               * 实测（用户连着两次问到这里）：一张 `03:23:14` 挂出的 HYPEUSDT 限价单，
+               * 界面上写着「已挂单（待对账）」，他问的是"这个不是系统应该自动自主
+               * 实时处理的吗"。答案是：**它本来就在正常等待，没有任何东西需要处理。**
+               *
+               * 真正可疑的是**保护单**：有止损/止盈挂着、而整本账没有任何持仓 ——
+               * 那才是"委托与持仓对不上"。所以只对那两种用途保留这个标记。
+               *
+               * 入场单成交之后由谁纠正？`applyExchangeFill()`（成交推送到达即对账）
+               * 与 `settleStaleOrders()`（对账兜底），两条路都在服务端 ——
+               * **界面不需要用一个警告去替它们兜底**，那只会让操作员学会忽略这个颜色。
                */
-              const pendingReconcile =
-                onlyOpen && isOpenOrder(order) && positionCount === 0;
+              const pendingReconcile = needsReconcileFlag({
+                onlyOpen,
+                stillOpen: isOpenOrder(order),
+                purpose: order.purpose,
+                positionCount,
+              });
 
               /*
                * ⚠️ **成交数量已经等于下单数量时，这一单就是成交了 —— 不管 `status` 那一刻写的是什么。**
