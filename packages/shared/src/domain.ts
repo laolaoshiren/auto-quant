@@ -223,8 +223,19 @@ export interface PositionView {
   leverage: number;
   liquidationPrice: number | null;
   unrealizedPnl: number;
+  /**
+   * 未实现盈亏**对保证金**的百分比 —— ⚠️ **含杠杆，不是价格变动百分比**。
+   *
+   * 5x 下价格涨 1%，这里是 5%。要和价格口径比，必须走
+   * `marginPercentToPricePercent`。
+   */
   unrealizedPnlPercent: number;
-  /** Best unrealised PnL seen, used by the drawdown guard. */
+  /**
+   * Best unrealised PnL seen, used by the drawdown guard.
+   *
+   * **同样是对保证金的口径**（与 `unrealizedPnlPercent` 一致）——
+   * 而它是最容易被读错的一个，因为它经常和价格口径的数字并排出现。
+   */
   peakPnlPercent: number;
   marginUsed: number;
   notional: number;
@@ -233,6 +244,26 @@ export interface PositionView {
   openedAt: string;
   /** Free-form reason captured at entry, from the model. */
   openReasoning: string;
+}
+
+/**
+ * 把「对保证金的收益率」换算成「价格变动百分比」。
+ *
+ * ⚠️ **为什么需要这个函数**：仓库里有两套百分比同时在流动 ——
+ * 「价格变动」（`(exit − entry) / entry`）与「对保证金的收益率」
+ * （`unrealizedPnl / marginUsed`）。它们**长得一模一样，而数值差一个杠杆倍数**。
+ *
+ * 实测代价（2026-09-22，持仓 `#95` XRPUSDT 5x）：复盘回执把保证金口径的
+ * 「最大浮盈 3.146%」与价格口径的「价格变动」印在**相邻两行**、两边都没写口径 ——
+ * 模型于是把 3.146% 当成价格涨幅，反算出 **1.5606** 这个**从未出现的价格**
+ * （那 55 分钟里真实最高是 1.5318），并据此写下「浮盈触达目标价区却没兑现」的结论。
+ * 而那张止盈单（1.5565）**从来没有被触及过**，它的表现完全正常。
+ *
+ * 恒等式：`marginUsed = notional / leverage`，所以逐仓下
+ * `对保证金的收益率 = 价格变动% × leverage`（精确，不是近似）。
+ */
+export function marginPercentToPricePercent(percentOnMargin: number, leverage: number): number {
+  return Number.isFinite(leverage) && leverage > 0 ? percentOnMargin / leverage : percentOnMargin;
 }
 
 export interface OrderRecord {
