@@ -1215,13 +1215,29 @@ export class TraderManager {
       );
 
       /*
-       * Only the `error` case gets the retry budget. A trader that was healthy
-       * when the host went down is expected to come straight back; if it cannot,
-       * the retry loop would spend ~2.5 minutes per broken trader and delay every
-       * later one. `error` is the case where a transient cause is the likely
-       * explanation and waiting is the whole fix.
+       * **所有恢复都给重试预算**（原来只有 `error` 状态给）。
+       *
+       * 原来的理由是一句成本权衡：一个"关机时健康"的机器人应该直接回来，给它
+       * 2.5 分钟的重试循环会拖慢后面每一个。**那次实测把这个权衡推翻了**：
+       *
+       *     22:12:37 重启后正在恢复机器人「AI托管测试」（状态是 running，不是 error）
+       *     22:12:49 LLM 第 1/2 次重试 … Cannot reach commandcode: fetch failed
+       *     22:13:10 机器人「AI托管测试」恢复失败并已放弃重试
+       *     22:14:30 同一个地址恢复正常（0.03 秒 200）
+       *
+       * 也就是说：**LLM 网关抖了约 100 秒，机器人被永久停在 error**，直到操作员
+       * 手动点一次启动。而 `error` 状态下"没人点就永远不跑"正是这段注释开头
+       * （F2）要修的那个闩锁 —— 它只是绕了个圈子又回来了。
+       *
+       * 代价仍然被两层挡着：
+       *   · `isPermanentStartFailure()` 的原因（找不到账户、Key 没权限…）**立即放弃**，
+       *     不会为它等满预算；
+       *   · 重试是**可取消的**（`waitForRetry` 按 1 秒切片），停机不受影响。
+       *
+       * 而收益的不对称很大：启动慢 2.5 分钟是体验问题，**一个持有杠杆仓位的机器人
+       * 静默停摆**是钱的问题。
        */
-      const result = await this.startTrader(trader.id, dryRun, { retryTransient: recovering });
+      const result = await this.startTrader(trader.id, dryRun, { retryTransient: true });
       if (result.ok) continue;
 
       /*
