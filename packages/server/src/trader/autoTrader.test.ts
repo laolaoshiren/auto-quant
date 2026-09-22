@@ -1557,6 +1557,52 @@ test('运行中触发止损：平仓原因是「触发止损」而不是「对�
       '若这里变成 reconciled，说明两步对账的顺序又反了 —— 见 runCycleBody 步骤 2 的注释。',
   );
 });
+
+test('交易所推来成交：账本当场对齐，不用等下一个周期', async () => {
+  /*
+   * Why this test exists —— 实测故障，不是设想。
+   *
+   * 用户数据流的订单回调此前只写一行日志，账本完全由每 `cycleIntervalMinutes`
+   * 一轮的周期对账刷新（生产里 45 分钟）。实测两笔保本止损在 21:17:15 与
+   * 21:27:38 触发，而控制台到 21:43 仍显示「当前持仓 0、委托全部待对账」、
+   * 历史成交里没有这两笔 —— 操作员看到的是一份停在上一个周期的账，而它说的是
+   * **已经不存在的事**。直到手动点一次「对账」才入账。
+   *
+   * 对账本身一条都没错（上面那个用例证明连平仓原因都是对的），错的是**它被触发的
+   * 时机**。所以这里钉的就是时机：一次 `applyExchangeFill()` 就要把整本账对齐。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const open = positionStore.open(traderId)[0]!;
+  assert.ok(open, '前提：已开出一笔仓位');
+  assert.equal(tradeStore.list(traderId).length, 0, '前提：这一回合运行期还没记账');
+
+  // 止损在交易所触发成交，仓位没了 —— 而本地此刻一个字段都没变。
+  broker.simulateStopFired(open.quantity);
+  feedRoundTrip(broker, {
+    localQuantity: open.quantity,
+    exchangeQuantity: open.quantity,
+    entryOrderId: '1000',
+    exitOrderId: '1003',
+    entryTime: Date.parse(open.opened_at),
+    exitTime: Date.parse(open.opened_at) + 240_000,
+    entryPrice: open.entry_price,
+    exitPrice: open.entry_price - 50,
+    grossPnl: -0.18,
+  });
+
+  await buildTrader(broker, '<decision>[]</decision>').applyExchangeFill();
+
+  const rows = tradeStore.list(traderId);
+  assert.equal(rows.length, 1, '成交推送一到，这一回合就必须已经入账，且只有一行');
+  assert.equal(
+    rows[0]!.closeReason,
+    'stop_loss',
+    '即使由成交推着跑，原因仍由仓位那一遍定出 —— 不能被历史那一遍顶成 reconciled',
+  );
+  assert.equal(positionStore.open(traderId).length, 0, '本地那一行必须已经关掉');
+});
 test('运行期确实没记的回合，对账必须补录（#4 POWERUSDT 那种）', async () => {
   /*
    * Why this test exists —— 它是上一个用例的**反面**，用来防止"把对账修坏"。

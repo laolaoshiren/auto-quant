@@ -1006,6 +1006,89 @@ export class AutoTrader {
     return this.reconcileTradeHistory();
   }
 
+  /**
+   * 交易所刚推来一条**成交** —— 现在就把账本对齐，而不是等下一个周期。
+   *
+   * ## 为什么需要它（实测故障，不是设想）
+   *
+   * 用户数据流此前是**纯告警**：`onOrderUpdate` 只写一行日志，账本完全由每
+   * `cycleIntervalMinutes`（生产里 45 分钟）一轮的周期对账刷新。于是：
+   *
+   *  · **交易所侧的止损/止盈触发后，账本死在上一轮周期那一刻。** 控制台在最长
+   *    45 分钟里显示「当前持仓 0、委托全部待对账」，历史成交里也没有那一笔。
+   *    实测 21:17:15 与 21:27:38 两笔保本止损成交，直到 21:46 操作员手动点
+   *    「对账」才入账 —— 界面那 26 分钟里说的是**已经不存在的事**。
+   *  · 更贵的是**入场限价单成交**：转正与挂保护单在同一段代码里
+   *    （`settlePendingEntries`），而它只在周期开头跑。也就是说从成交到挂上
+   *    交易所侧止损之间，敞口是**裸的**，时长等于"到下一个周期还有多久"。
+   *    实测 HYPEUSDT 那一笔成交后近半小时没有任何保护单。
+   *
+   * 记账本身没有实时性问题，缺的只是一个**触发** —— 推送早就在手上了。
+   *
+   * ## 为什么不是让 WS 回调直接写库
+   *
+   * 因为那就成了「两个写者一个账本」。这里走 `waitForIdle()`，与
+   * `runReconcile()` 同一条理由：周期正在跑时**直接返回**，它自己在这一遍里
+   * 会做完全同样的事；抢进去只会让两边互相覆盖。套接字断掉也只是退回原来的
+   * 行为（下一个周期对账），不会更差。
+   *
+   * ## 为什么这里不判断"机器人是否在运行"
+   *
+   * 调用方（`TraderManager.scheduleFillReconcile`）拿的是 `running` 表里的实例，
+   * 停机会把还没到点的触发一并取消 —— 所以"只对运行中的机器人做"这条约束已经
+   * 在唯一调用点上成立了。这里再判一次是**第二份拷贝**，而它的代价是"成交后
+   * 对齐一次"这件事没法被直接调用与验证。对账本身幂等且串行，停机时多对齐一次
+   * 也不是坏事。
+   */
+  async applyExchangeFill(): Promise<void> {
+    if (!(await this.waitForIdle())) return;
+
+    const exchangePositions = await this.deps.broker.getPositions().catch((error) => {
+      log.warn(
+        `[${this.deps.trader.name}] 成交后对齐账本时读持仓失败（下一个周期仍会补上）：${(error as Error).message}`,
+      );
+      return null;
+    });
+    if (!exchangePositions) return;
+
+    await this.reconcileAgainstExchange(exchangePositions).catch((error) => {
+      log.warn(
+        `[${this.deps.trader.name}] 成交后对齐账本失败（下一个周期仍会补上）：${(error as Error).message}`,
+      );
+    });
+  }
+
+  /**
+   * 把本地账本对齐到交易所 —— 周期开头那一遍的两个对账步骤，单独成一段。
+   *
+   * ## 为什么要抽出来
+   *
+   * 因为它现在有**两个触发时机**：周期开头，以及交易所推来成交的时候
+   * （`applyExchangeFill`）。两处要做的必须是同一件事，而这一串的顺序是
+   * **被理由锁死的**，不是随手排的：
+   *
+   *  · `settlePendingEntries` 必须排在 `reconcilePositions` **之前** ——
+   *    前者知道那张单是我们自己挂的、以及当初打算用的止损止盈，后者只能看到
+   *    "多了一个仓位"、保护单要靠猜。对调会让仓位**没有任何保护单**。
+   *  · `reconcilePositions` 必须排在 `reconcileTradeHistory` **之前** ——
+   *    前者能用本地仓位行定出真实的平仓原因（止损 / 止盈 / 模型主动），后者
+   *    只能记成「对账补录」。对调会让真实原因永远丢失。
+   *
+   * 抄一份到别处就意味着这两条约束迟早只在一边成立，所以这里只留一份。
+   */
+  private async reconcileAgainstExchange(exchangePositions: ExchangePosition[]): Promise<void> {
+    await this.settlePendingEntries().catch((error) => {
+      log.warn(`[${this.deps.trader.name}] 待成交对账失败（不影响本周期其余工作）：${(error as Error).message}`);
+    });
+    await this.reconcilePositions(exchangePositions);
+
+    // 历史兜底：只负责"仓位那一遍解释不了"的部分 ——
+    // 进程没在跑的时候发生的平仓。它可能无事可做，这是正常的。
+    await this.reconcileTradeHistory(false).catch((error) => {
+      log.warn(`[${this.deps.trader.name}] 成交对账失败（不影响本周期交易）：${(error as Error).message}`);
+    });
+  }
+
   /* ---------------------------------------------------------------------- */
   /*  Cycle driver                                                           */
   /* ---------------------------------------------------------------------- */
@@ -1323,16 +1406,7 @@ export class AutoTrader {
      * pending 行，而那个仓位**没有任何保护单、也没人知道它本该有一个**。
      * 那是 §2.6 说的最糟状态。
      */
-    await this.settlePendingEntries().catch((error) => {
-      log.warn(`[${this.deps.trader.name}] 待成交对账失败（不影响本周期其余工作）：${(error as Error).message}`);
-    });
-    await this.reconcilePositions(exchangePositions);
-
-    // 历史兜底：只负责"仓位那一遍解释不了"的部分 ——
-    // 进程没在跑的时候发生的平仓。它可能无事可做，这是正常的。
-    await this.reconcileTradeHistory(false).catch((error) => {
-      log.warn(`[${this.deps.trader.name}] 成交对账失败（不影响本周期交易）：${(error as Error).message}`);
-    });
+    await this.reconcileAgainstExchange(exchangePositions);
 
     /* --- 3. Mechanical protections --------------------------------------- */
     const closedByGuard = await this.applyDrawdownGuard();
