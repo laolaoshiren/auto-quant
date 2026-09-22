@@ -263,6 +263,22 @@ export class TraderManager {
     return this.running.has(traderId);
   }
 
+  /**
+   * 某个机器人此刻是不是在纸面模式下跑。
+   *
+   * `null` = **它没在运行**，所以这个值此刻不存在 —— 与 `circuitBreakerReading()`
+   * 同一条约定：**"不知道"不能渲染成 `false`**（那会被读成"它在花真钱"）。
+   *
+   * 类型上 `isDryRun` 是 `boolean`，但 `deps.broker` 在测试里是替身、
+   * 不一定实现了那个 getter —— 所以按 `unknown` 收，读不到就老实说读不到。
+   */
+  dryRunOf(traderId: number): boolean | null {
+    const trader = this.running.get(traderId);
+    if (!trader) return null;
+    const value: unknown = trader.isDryRun;
+    return typeof value === 'boolean' ? value : null;
+  }
+
   runningIds(): number[] {
     return [...this.running.keys()];
   }
