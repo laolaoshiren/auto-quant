@@ -237,9 +237,35 @@ fi
 $remote += @"
 
 echo "==> 重启服务"
+# ── 日志落盘（drop-in）──────────────────────────────────────────────────────
+#
+# ⚠️ **这一条是 2026-09-22 加的，而它修的是一个让我误判了两次的问题。**
+#
+# 在那之前服务没配 `StandardOutput`，于是输出全交给 journald —— 而 journald
+# 有容量与限流（本机 journal 已占 964M 并在滚动丢旧记录）。排查时我 grep 的
+# `data/server.log` 其实是某次手工 tee 留下的**残留文件**，最后一行停在
+# 1.5 天前 —— 于是「某机制 0 次」这种判断**全是假信号**。
+#
+# 用 **drop-in** 而不是改主单元文件：不猜原文件是谁写的，升级也不丢。
+#
+# 幂等：内容一样就不重写（避免每次部署都 daemon-reload）。
+LOGUNIT=/etc/systemd/system/autoquant.service.d/logging.conf
+if ! grep -q "append:/opt/autoquant/data/server.log" "`$LOGUNIT" 2>/dev/null; then
+    mkdir -p /etc/systemd/system/autoquant.service.d
+    cat > "`$LOGUNIT" <<'LOGCONF'
+[Service]
+# 日志追加到固定文件，而不是交给 journald —— 见 deploy.ps1 里的说明。
+StandardOutput=append:/opt/autoquant/data/server.log
+StandardError=append:/opt/autoquant/data/server.log
+LOGCONF
+    systemctl daemon-reload
+    echo "    已配置日志落盘（drop-in）"
+fi
+
 systemctl restart autoquant
 sleep 15
 echo -n "    服务状态: "; systemctl is-active autoquant
+echo -n "    日志文件: "; ls -la /opt/autoquant/data/server.log 2>/dev/null | awk '{print `$5" 字节  最后写入 "`$6" "`$7" "`$8}'
 
 # 服务绑定在 Docker 网桥网关（供反向代理容器访问），公网无法直接路由到它。
 # 所以健康检查走绑定地址，而不是 127.0.0.1。
