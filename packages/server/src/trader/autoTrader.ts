@@ -2545,7 +2545,34 @@ export class AutoTrader {
     const refresh = positionStore.getOpenBySymbol(traderId, symbol);
     if (!refresh) return;
 
-    await this.placeProtection({
+    /*
+     * ⚠️ **必须把单号写回持仓 —— 丢了它，保本守卫就会把仓位平掉。**
+     *
+     * ## 这是一个实测发生过的、代价很大的一次漏记
+     *
+     * 原来这里只是 `await this.placeProtection({...})`，**返回值被丢掉了**，
+     * 也没调 `positionStore.setProtection()`。于是 `positions.stop_order_id`
+     * 停在 `null`，而保本守卫的逻辑是「**先撤旧止损、再挂新**」：
+     *
+     * ```ts
+     * const oldStopId = local.stop_order_id ? Number(local.stop_order_id) : null;
+     * if (oldStopId && …) { …撤旧… }          // ← null 就整段跳过
+     * const newStopId = await this.placeProtection({ triggerPrice: 成本价 });
+     * if (!newStopId) { /* §2.6：立刻平仓 *\/ }
+     * ```
+     *
+     * `stop_order_id` 是 `null` → **它跳过了撤旧**，直接去挂保本止损（成本价），
+     * 而计划止损还挂在交易所上 → `-4130`「该仓位已有止损单」→ `newStopId` 为 null
+     * → **按 §2.6 立刻平仓**。
+     *
+     * 实测那一轮（`#91` UNIUSDT）：限价单成交 → 挂上计划止损 `8.86` → 保本守卫
+     * 想把它移到成本价 `8.98` → `-4130` → **市价平仓**。而那一笔本来是盈利的
+     * （挂单价 8.98、成交价 9.073）。
+     *
+     * **同一个文件里已经为这个形态写过很多次注释了：一个写了一半的记账，
+     * 会在别处被读成"什么都没有"。**
+     */
+    const stopOrderId = await this.placeProtection({
       symbol,
       side: exitSide,
       type: 'STOP_MARKET',
@@ -2553,11 +2580,60 @@ export class AutoTrader {
       purpose: 'stop_loss',
       traderId,
       quantity: executedQty,
-    });
+    }).catch(() => null);
+
+    /*
+     * 止盈也要挂 —— `row.take_profit` 一直存在，而这一段原来**只用止损**，
+     * 于是限价入场的止盈计划从来没有生效过（模型给了、存了、然后没用）。
+     */
+    const tpOrderId =
+      row.take_profit !== null && row.take_profit > 0
+        ? await this.placeProtection({
+            symbol,
+            side: exitSide,
+            type: 'TAKE_PROFIT_MARKET',
+            triggerPrice: row.take_profit,
+            purpose: 'take_profit',
+            traderId,
+            quantity: executedQty,
+          }).catch(() => null)
+        : null;
+
+    /* 单号写回 —— 不写的话，下一轮的保本守卫/加仓/减仓都会以为"没有保护单"。 */
+    positionStore.setProtection(
+      traderId,
+      symbol,
+      row.stop_loss ?? null,
+      row.take_profit ?? null,
+      stopOrderId,
+      tpOrderId,
+    );
+
+    if (!stopOrderId) {
+      /*
+       * 挂不上止损 → §2.6：**不留没有保护的杠杆仓位**，立刻平掉。
+       *
+       * 与 `executeOpen` 同一条纪律 —— 那一笔钱已经进了市场，而没有任何东西
+       * 在兜底。宁可立刻退出。
+       */
+      this.emit(
+        'error',
+        `限价单成交后未能为 ${symbol} 挂上止损（计划 ${row.stop_loss}）—— 为避免留下无保护的敞口，立即平掉该仓位。`,
+      );
+      await this.flattenAndBook(
+        symbol,
+        executedQty,
+        isLong ? 'long' : 'short',
+        traderId,
+        avgPrice,
+      );
+      return;
+    }
 
     this.emit(
       'info',
-      `限价单成交：${symbol} ${isLong ? '多头' : '空头'} ${executedQty} @ ${avgPrice}（挂在 ${row.entry_price}）—— 已按计划挂上保护单。`,
+      `限价单成交：${symbol} ${isLong ? '多头' : '空头'} ${executedQty} @ ${avgPrice}（挂在 ${row.entry_price}）—— 已按计划挂上保护单` +
+        (tpOrderId ? '（含止盈）' : ''),
     );
   }
 
