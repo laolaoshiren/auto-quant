@@ -2655,6 +2655,35 @@ export class AutoTrader {
     });
     tradeEvents.record(traderId, symbol, 'entry');
 
+    /*
+     * ⚠️ **那张入场单也要在同一刻结清。**
+     *
+     * 用户看着「当前委托」问：「这一笔开仓买入，是否已经成交完了？如果是成交完了，
+     * 为什么委托里面还显示有这个？」—— 答案是成交完了（持仓就是证据），而
+     * **本地那张订单行从头到尾停在 `NEW`**：建仓、挂保护单都做了，唯独没人回写它。
+     * 界面上于是同时出现"持仓 12.7 @ 1.5600"和"开仓 买入 限价 已挂单"，
+     * 两句话互相矛盾，而真的那一句是持仓。
+     *
+     * 下面 `placeProtection()` 会为两张保护单各写一行，入场单这一行就写在这里 ——
+     * **知道事实的地方就是该写它的地方。** 兜底那条路（`settleStaleOrders()`）也补了，
+     * 但它本来被"这个标的还持仓"整段排除掉，指望不上。
+     */
+    const entryRow = row.entry_order_id
+      ? orderStore.findByExchangeOrderId(traderId, String(row.entry_order_id))
+      : null;
+    if (entryRow) {
+      orderStore.update(entryRow.id, { status: 'FILLED', filledQty: executedQty, avgPrice });
+    } else {
+      /*
+       * 找不到就**说一声**，不静默：这意味着 `orders` 里没有这张单的中间态记录，
+       * 界面会一直把它显示成"已挂单"。
+       */
+      log.warn(
+        `[${this.deps.trader.name}] ${symbol} 的入场单 ${row.entry_order_id} 已成交，` +
+          '但本地找不到对应的订单行，界面会继续把它显示为挂单。',
+      );
+    }
+
     const refresh = positionStore.getOpenBySymbol(traderId, symbol);
     if (!refresh) return;
 
@@ -4125,9 +4154,22 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      * 那种情况不是"显示脏了"，而是"保护单真的没了"—— 一件更严重、也完全不同的故障
      * （§2.6：一个没有交易所侧保护的杠杆仓位是最糟糕的状态）。把它混进这次记账修复里，
      * 等于用一行状态更新掩盖一条真实的告警。持仓还在，这里就一行都不碰。
+     *
+     * ⚠️ **但入场单不受这条影响，它不是保护单。**
+     *
+     * 上面说的是保护单；而**入场单成交了，持仓才会存在** —— 用"这个标的还持仓"
+     * 把它一起排除掉，那张已成交的 entry 行就永远停在 `NEW`。实测就是：
+     * 持仓 `12.7 @ 1.5600` 好好挂在界面上，而「当前委托」里同一张开仓单写着
+     * 「已挂单」，用户据此问"到底是成交了还是没成交"。
      */
     const held = new Set(positionStore.open(traderId).map((p) => p.symbol));
-    const symbols = [...new Set(candidates.map((row) => row.symbol))].filter((s) => !held.has(s));
+    const symbols = [
+      ...new Set(
+        candidates
+          .filter((row) => row.purpose === 'entry' || !held.has(row.symbol))
+          .map((row) => row.symbol),
+      ),
+    ];
     if (symbols.length === 0) return 0;
 
     /*
@@ -4165,6 +4207,9 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     let settled = 0;
     const summary: string[] = [];
     for (const row of candidates) {
+      // 还持仓的标的上，**保护单**一行都不碰（理由见上面那段）；入场单照常结清。
+      if (held.has(row.symbol) && row.purpose !== 'entry') continue;
+
       const live = liveBySymbol.get(row.symbol);
       // 三种情况都不是"可以结清"：这个标的一轮没读到、这行没有交易所单号、
       // 或者它**正躺在挂单列表里**（那它当然还活着）。
@@ -4230,6 +4275,39 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         ...(avgPrice > 0 ? { avgPrice } : {}),
         // 交易所对这张单的最后一次答复（§2.2：raw_response 留的是交易所的话）。
         rawResponse: algo,
+      };
+    }
+
+    /*
+     * ⚠️ **限价单必须问交易所，不能靠"下单时拿到过的数字"判。**
+     *
+     * 下面那条 `fullyExecuted` 的判据只有一个输入：`row.filledQty`。而一张限价单
+     * **挂出去的时候成交量就是 0** —— 它是之后某个时刻才成交的，本地那一行如果没被
+     * 别的路径回写，`filledQty` 会一直是 0，于是这里把一张**已经成交**的单判成
+     * `CANCELED`。实测：持仓 `12.7 @ 1.5600` 明明在，它的入场单却会被判成"已撤销"。
+     *
+     * 交易所对普通单有单号回读（`GET /fapi/v1/order`），所以这里去问它 ——
+     * 与 `settlePendingEntries()` 问的是同一个接口、同一个答案。
+     */
+    if (row.type === 'LIMIT') {
+      const limit = await this.deps.broker.getOrder(row.symbol, exchangeOrderId).catch(() => null);
+      // 读不到 = 不知道，这一轮不下结论。
+      if (!limit) return null;
+
+      const executed = Number(limit.executedQty) || 0;
+      const avgPrice = Number(limit.avgPrice) || 0;
+      if (executed <= 0) {
+        // 成交量为 0 且已不在挂单列表里 —— 被撤或过期，交易所自己说了是哪一个。
+        return {
+          status: limit.status === 'EXPIRED' ? 'EXPIRED' : 'CANCELED',
+          rawResponse: limit,
+        };
+      }
+      return {
+        status: executed >= row.quantity * (1 - 1e-9) ? 'FILLED' : 'CANCELED',
+        filledQty: executed,
+        ...(avgPrice > 0 ? { avgPrice } : {}),
+        rawResponse: limit,
       };
     }
 
