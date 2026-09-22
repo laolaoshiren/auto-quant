@@ -18,6 +18,8 @@ import type {
   User,
 } from '@aq/shared';
 import { StrategyConfigSchema, beijingDayStartIso } from '@aq/shared';
+/* 净盈亏的唯一算式 —— 见 `netPnlOf` 的注释（资金费的符号）。 */
+import { netPnlOf } from '../binance/income.js';
 import { getDb } from '../db/index.js';
 import { createLogger } from '../logger.js';
 
@@ -1898,7 +1900,12 @@ export const trades = {
     const exitFee = input.exitFee ?? 0;
     const fee = entryFee + exitFee;
     const fundingFee = input.fundingFee ?? 0;
-    const netPnl = input.grossPnl - fee - fundingFee;
+    /*
+     * ⚠️ **用 `netPnlOf`，不要在这里重写算式** —— 见它的注释：
+     * "净 = 毛 − 手续费 − 资金费"那个直觉写法把资金费的符号搞反了，
+     * 而它在仓库里曾经有**五份副本**（同一个错误复制了五遍）。
+     */
+    const netPnl = netPnlOf({ grossPnl: input.grossPnl, fee, fundingFee });
     const margin = marginOf(input.entryPrice, input.quantity, input.leverage);
     const pnlPercent = margin > 0 ? (netPnl / margin) * 100 : 0;
 
@@ -2085,7 +2092,7 @@ export const trades = {
     exitOrderId: string | null;
   }): void {
     const fee = input.entryFee + input.exitFee;
-    const netPnl = input.grossPnl - fee - input.fundingFee;
+    const netPnl = netPnlOf({ grossPnl: input.grossPnl, fee, fundingFee: input.fundingFee });
     const margin = marginOf(input.entryPrice, input.quantity, input.leverage);
     /*
      * `quantity` 与 `pnl_percent` 都由交易所在**同一笔成交记录**里给出，所以要一起写。

@@ -222,10 +222,17 @@ test('aggregate stats still match a hand-computed ledger', () => {
   traderId = seedTrader();
   const openedAt = new Date(Date.now() - 3_600_000).toISOString();
 
-  // 3 wins, 1 loss, with both legs of commission and funding on one row.
+  /*
+   * 3 wins, 1 loss, with both legs of commission and funding on one row.
+   *
+   * ⚠️ **`funding` 是交易所口径的带符号值 —— 支出为负。** 这里原来是 `+0.02`
+   * （凭直觉写的"支出为正"），而真实观测到的是负数（`#9` 的 `-0.00718777`）。
+   * 符号搞错一次会让"一笔支出"被算成"一笔收入"，而表现是**每轮都报一条假的
+   * 账目告警**。见 `netPnlOf` 的注释。
+   */
   const rows: Array<{ gross: number; entryFee: number; exitFee: number; funding: number }> = [
     { gross: 10, entryFee: 0.1, exitFee: 0.1, funding: 0 },
-    { gross: 5, entryFee: 0.05, exitFee: 0.05, funding: 0.02 },
+    { gross: 5, entryFee: 0.05, exitFee: 0.05, funding: -0.02 },
     { gross: 2, entryFee: 0.01, exitFee: 0.01, funding: 0 },
     { gross: -8, entryFee: 0.08, exitFee: 0.08, funding: 0 },
   ];
@@ -248,7 +255,8 @@ test('aggregate stats still match a hand-computed ledger', () => {
   }
 
   const expectedNet = rows.reduce(
-    (sum, row) => sum + row.gross - row.entryFee - row.exitFee - row.funding,
+    /* `+ row.funding` —— 它已经是带符号的（支出为负）。 */
+    (sum, row) => sum + row.gross - row.entryFee - row.exitFee + row.funding,
     0,
   );
   const stats = computeTraderStats(traderId);
@@ -261,7 +269,7 @@ test('aggregate stats still match a hand-computed ledger', () => {
   assert.ok(
     Math.abs(stats.totalFees - rows.reduce((s, r) => s + r.entryFee + r.exitFee, 0)) < 1e-9,
   );
-  assert.ok(Math.abs(stats.totalFunding - 0.02) < 1e-9);
+  assert.ok(Math.abs(stats.totalFunding - -0.02) < 1e-9, `got ${stats.totalFunding}`);
   assert.ok(Math.abs(stats.grossRealizedPnl - (10 + 5 + 2 - 8)) < 1e-9);
   // best/worst are `MAX/MIN(net_pnl)` — the funded row's net is smaller than the
   // unfunded 4.9, so it is *not* the best. Asserting that pins the definition:

@@ -78,7 +78,7 @@ import {
   roundTripQueryKey,
   type ReconstructedTrade,
 } from './roundTrips.js';
-import { fundingInWindow } from '../binance/income.js';
+import { fundingInWindow, netPnlOf } from '../binance/income.js';
 
 const log = createLogger('trader');
 
@@ -3044,7 +3044,9 @@ export class AutoTrader {
      * Log the **net** figure: it is what actually moved the balance, and the
      * gross number was what made the console disagree with the account.
      */
-    const net = record?.netPnl ?? grossPnl - entryFee - exitFee - fundingFee;
+    /* ⚠️ 用 
+etPnlOf —— 见它的注释（资金费的符号）。 */
+    const net = record?.netPnl ?? netPnlOf({ grossPnl, fee: entryFee + exitFee, fundingFee });
     const sign = net >= 0 ? '+' : '';
     const costNote =
       entryFee + exitFee > 0 ? `，含手续费 ${(entryFee + exitFee).toFixed(4)}` : '';
@@ -3504,7 +3506,7 @@ export class AutoTrader {
             else skipDiag.foreignNoId += 1;
             foreign.push({
               symbol,
-              net: trip.grossPnl - trip.entryFee - trip.exitFee - funding,
+              net: netPnlOf({ grossPnl: trip.grossPnl, fee: trip.entryFee + trip.exitFee, fundingFee: funding }),
               at: trip.closedAt,
             });
           } else {
@@ -3575,7 +3577,7 @@ export class AutoTrader {
 
         recovered += 1;
 
-        const net = trip.grossPnl - trip.fee - funding;
+        const net = netPnlOf({ grossPnl: trip.grossPnl, fee: trip.fee, fundingFee: funding });
         this.emit(
           'warn',
           `对账补录了一笔未被记录的成交：${trip.symbol} ${trip.side === 'long' ? '多头' : '空头'} ` +

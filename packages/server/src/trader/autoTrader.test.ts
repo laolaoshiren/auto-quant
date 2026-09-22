@@ -1934,10 +1934,16 @@ test('funding is attributed when the bot closes the position itself', async () =
     Math.abs(trade.fundingFee - -0.0231) < 1e-12,
     `funding must be read from the income ledger, got ${trade.fundingFee}`,
   );
-  // Net is derived in one place and must include the funding.
+  /*
+   * Net is derived in one place and must include the funding.
+   *
+   * ⚠️ **加法：`fundingFee` 是交易所口径的带符号值**（上面那条 fixture 用的
+   * `'-0.0231'` 就是真实符号）。这里原来写的是 `− fundingFee` —— 而那个假设
+   * 把一笔支出算成了收入，代价是**每轮都报一条假的账目告警**。见 `netPnlOf`。
+   */
   assert.ok(
-    Math.abs(trade.netPnl - (trade.pnl - trade.fee - trade.fundingFee)) < 1e-12,
-    'net PnL must equal gross − fees − funding',
+    Math.abs(trade.netPnl - (trade.pnl - trade.fee + trade.fundingFee)) < 1e-12,
+    'net PnL must equal gross − fees + funding（资金费带符号）',
   );
 });
 
