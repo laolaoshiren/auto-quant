@@ -97,11 +97,24 @@ function insertTrade(pnl: number, costs: { entryFee?: number; exitFee?: number; 
 /*  Net accounting                                                             */
 /* -------------------------------------------------------------------------- */
 
-test('net PnL subtracts fees and funding from the exchange gross figure', () => {
+test('net PnL adds fees and funding to the exchange gross figure（交易所口径：支出为负）', () => {
   traderId = seedTrader();
   clearTrades();
 
-  // Real shape from a live round-trip.
+  /*
+   * ⚠️ **`fundingFee` 是交易所口径的带符号值 —— 支出为负。**
+   *
+   * 这条用例原来传的是 `+0.002`（凭直觉写的"支出为正"），而**真实观测到的是负数**：
+   * 生产上 `#9` 的资金费是 `-0.00718777`（`/fapi/v1/income` 的 `FUNDING_FEE`）。
+   *
+   * 而那个符号搞错一次，代价是**每轮都报一条假的账目告警**：
+   *
+   *     账目与交易所对不上：平台记录 1.358103、交易所流水 1.343728，差 0.014376
+   *     （= 资金费的两倍 —— 因为一笔支出被"减负数"加成了收入）
+   *
+   * §3.4 说"测试里写**观测到的真实值**，不要写你算出来的值" —— 这条原来写的是
+   * 凭直觉算的值，于是它把错误的口径**固化成了一条通过的断言**。
+   */
   tradeStore.insert({
     traderId,
     symbol: 'POWERUSDT',
@@ -113,7 +126,8 @@ test('net PnL subtracts fees and funding from the exchange gross figure', () => 
     grossPnl: 0.65631,
     entryFee: 0.01183192,
     exitFee: 0.01216007,
-    fundingFee: 0.002,
+    /* 真实符号：资金费是支出，所以在交易所口径里是负数。 */
+    fundingFee: -0.002,
     closeReason: 'reconciled',
     openedAt: new Date(Date.now() - 7_200_000).toISOString(),
     source: 'reconciled',
@@ -123,10 +137,10 @@ test('net PnL subtracts fees and funding from the exchange gross figure', () => 
   assert.ok(trade);
   assert.equal(trade.pnl, 0.65631, 'pnl stays the exchange gross figure');
   assert.ok(Math.abs(trade.fee - (0.01183192 + 0.01216007)) < 1e-9, 'fee is both legs');
-  assert.equal(trade.fundingFee, 0.002);
+  assert.equal(trade.fundingFee, -0.002);
   assert.equal(trade.source, 'reconciled');
-  // The number that actually moved the balance.
-  const expected = 0.65631 - (0.01183192 + 0.01216007) - 0.002;
+  /* The number that actually moved the balance. */
+  const expected = 0.65631 - (0.01183192 + 0.01216007) + -0.002;
   assert.ok(Math.abs(trade.netPnl - expected) < 1e-9, `got ${trade.netPnl}, want ${expected}`);
 });
 
@@ -152,18 +166,23 @@ test('the aggregate breakdown adds up to the net figure', () => {
   traderId = seedTrader();
   clearTrades();
 
+  /*
+   * ⚠️ **资金费是带符号的交易所口径值（支出为负）** —— 见上面那条用例的说明。
+   * 这里原来传 `+0.02` 并按 `gross − fees − funding` 校验，两处都用了错误的符号假设。
+   */
   insertTrade(5, { entryFee: 0.1, exitFee: 0.1 });
-  insertTrade(-2, { entryFee: 0.08, exitFee: 0.08, fundingFee: 0.02 });
+  insertTrade(-2, { entryFee: 0.08, exitFee: 0.08, fundingFee: -0.02 });
   insertTrade(1, { entryFee: 0.05, exitFee: 0.05 });
 
   const stats = computeTraderStats(traderId);
-  const derived = stats.grossRealizedPnl - stats.totalFees - stats.totalFunding;
+  /* 加法而不是减法 —— `totalFunding` 已经是带符号的。 */
+  const derived = stats.grossRealizedPnl - stats.totalFees + stats.totalFunding;
   assert.ok(
     Math.abs(stats.realizedPnl - derived) < 1e-9,
-    `realizedPnl ${stats.realizedPnl} must equal gross − fees − funding = ${derived}`,
+    `realizedPnl ${stats.realizedPnl} must equal gross − fees + funding = ${derived}`,
   );
   assert.ok(Math.abs(stats.totalFees - 0.46) < 1e-9, `got ${stats.totalFees}`);
-  assert.ok(Math.abs(stats.totalFunding - 0.02) < 1e-9);
+  assert.ok(Math.abs(stats.totalFunding - -0.02) < 1e-9, `got ${stats.totalFunding}`);
 });
 
 /** Wipe the trade table between cases. */
