@@ -864,3 +864,79 @@ test('提示词要告诉 AI：输入长度本身是一笔可以权衡的成本',
     '不该给出推荐点数 —— 那等于把取舍又替它做了',
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  AI 托管：不替它预设交易性格                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 这一组守的是**「智能模式里不能有写死的性格」**。
+ *
+ * 实测 `#9` 修之前，同一个意思在系统提示词里出现了**三次**：
+ *
+ * ```
+ * # 角色
+ * …并且对资金保持保守。                       ← DEFAULT_ROLE
+ * # 模式：稳健
+ * 保住本金压倒一切。宁可交易更少、质量更高。      ← MODE_GUIDANCE.conservative
+ * （加上它自己写的 entryStandards 里那句「保守模式」—— 那条是它的自主权，测试不管）
+ * ```
+ *
+ * 而 AI 托管模式的全部意义是**由它自己决定该稳健还是该进取**。
+ * 三层都在替它回答同一个问题，等于把那个判断拿走了。
+ */
+test('★ AI 托管时不再注入写死的交易性格 —— 改成把判断交给它', () => {
+  const text = buildSystemPrompt({ ...contextWith(blankMemory()), aiManaged: true });
+
+  assert.ok(
+    !/保住本金压倒一切/.test(text),
+    '★ AI 托管时不该出现 MODE_GUIDANCE 的写死内容 —— 那是在替它定性格',
+  );
+  assert.ok(
+    !/模式：稳健|模式：进取|模式：短线/.test(text),
+    '★ 三档写死的模式标签都该消失，而不只是默认那一档',
+  );
+  assert.ok(
+    /由你自己判断/.test(text),
+    '★ 换掉不等于不说 —— 必须明确告诉它「这归你判断」，否则它会保留上一段留下的印象',
+  );
+  assert.ok(
+    /set_params/.test(text),
+    '★ 还要说清改到哪里去（它自己的 entryStandards / tradingFrequency），否则那个判断没有落点',
+  );
+});
+
+test('固定策略仍然按它选的那一档执行 —— 不能因为改 AI 托管而顺手删掉', () => {
+  const text = buildSystemPrompt({ ...contextWith(blankMemory()), aiManaged: false });
+  assert.ok(
+    /模式：稳健/.test(text),
+    '非 AI 托管的策略：写策略的人确实选了那一档，照旧注入',
+  );
+});
+
+test('两种角色句里都不该出现「保守」—— 那是它要自己得出的结论', () => {
+  const fixed = buildSystemPrompt({ ...contextWith(blankMemory()), aiManaged: false });
+  const ai = buildSystemPrompt({ ...contextWith(blankMemory()), aiManaged: true });
+
+  /*
+   * 固定策略的角色句里保留「对资金保持保守」是**准确的**（写策略的人就是那么选的），
+   * 所以这一条只钉 AI 托管那一份。
+   */
+  assert.ok(
+    !/保持保守|偏保守/.test(ai.split('\n# 交易风格')[0] ?? ai),
+    `★ AI 托管的角色段里不该替它写「保守」。实际开头：${ai.slice(0, 220)}`,
+  );
+  /* 而固定策略那一份不必改 —— 把它写出来是为了说明"两者有意不同"。 */
+  assert.ok(/保持保守/.test(fixed), '固定策略的角色句照旧（它描述的是写策略那个人的选择）');
+});
+
+test('拿掉性格不等于拿掉安全边界', () => {
+  const text = buildSystemPrompt({ ...contextWith(blankMemory()), aiManaged: true });
+  /*
+   * ⚠️ 这一条是防止有人把「不预设性格」误读成「不用管风险」。
+   * 硬性约束那一段与交易性格是两回事，**一条都不该少**。
+   */
+  assert.ok(/硬性约束/.test(text), '硬性约束那一段必须还在');
+  assert.ok(/最大杠杆/.test(text), '杠杆上限照旧');
+  assert.ok(/保证金模式/.test(text), '保证金模式照旧');
+});
