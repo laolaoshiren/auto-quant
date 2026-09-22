@@ -1700,6 +1700,16 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        * 见 `manager.leverageCap()` 的说明。
        */
       maxLeverage: deps.manager.leverageCap(id),
+      /*
+       * 这个机器人自己在不在纸面模式。
+       *
+       * 与 `circuitBreaker` 同一个理由挂在响应上，而不是进 `TraderStats`：
+       * 它是**运行时**的事实（`dryRun` 是启动参数、不落库），仓储层算不出来。
+       *
+       * `null` = 它没在运行 —— 客户端据此**不渲染**那一行，而不是渲染成「实盘」。
+       * 顶栏那个徽章读的是进程级的 `env.dryRun`，两者可以不一致，所以必须分开说。
+       */
+      dryRun: deps.manager.dryRunOf(id),
     };
   });
 

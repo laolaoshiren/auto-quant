@@ -577,6 +577,24 @@ export class AutoTrader {
     return this.status;
   }
 
+  /**
+   * 这个实例此刻是不是在**纸面模式**下跑 —— 由 broker 决定。
+   *
+   * ## 为什么必须能读出来
+   *
+   * `dryRun` 是**每次启动时传进去的参数**（`POST /traders/:id/start` 的 body，
+   * 默认 `true`），**不持久化**。也就是说"这台机器人现在花的是真钱还是假钱"
+   * 在启动之后**只存在于运行中的实例里** —— 数据库、列表、页头都看不到。
+   *
+   * 实测代价（本轮部署之后）：用 API 启动时忘了带 `{"dryRun": false}`，
+   * 机器人以纸面模式跑了一整轮（开仓、挂保护单、被强制平仓，全是模拟的），
+   * 而顶栏那个徽章读的是**进程级**的 `env.dryRun`，它显示「实盘」。
+   * 两个说法不一致，而**没有任何一处**能看出这个机器人在模拟。
+   */
+  get isDryRun(): boolean {
+    return this.deps.broker.isDryRun;
+  }
+
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;

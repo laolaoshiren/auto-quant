@@ -38,6 +38,18 @@ import { api } from './api';
 export type TraderSummary = TraderStats & {
   circuitBreaker?: CircuitBreakerReading | null;
   maxLeverage?: number | null;
+  /**
+   * **这个机器人自己**在不在纸面模式（`true` = 订单只在本地撮合）。
+   *
+   * 与 `circuitBreaker` 同一类字段：服务端从运行时组装，不属于仓储层的纯统计。
+   *
+   * ⚠️ 它与顶栏那个徽章（读进程级的 `env.dryRun`）**可以不一致** ——
+   * `POST /traders/:id/start` 的 `dryRun` 是每次启动单独传的。实测有人（我）
+   * 忘了传 `{"dryRun": false}`，机器人就在纸面模式下跑了一轮，而顶栏写着「实盘」。
+   *
+   * `null` / 缺省 = 它没在运行，**读不到** —— 不要渲染成「实盘」。
+   */
+  dryRun?: boolean | null;
 };
 
 interface SummaryState {

@@ -646,14 +646,17 @@ export const api = {
 
   /* --- per-trader data --- */
   /**
-   * 统计 + **熔断器的当前读数**。
+   * 统计 + **熔断器的当前读数** + **这个机器人自己在不在纸面模式**。
    *
-   * `circuitBreaker` 不是 `TraderStats` 的一部分：那个类型是仓储层算的纯统计，
-   * 而这个数由服务端从**运行时**组装（见端点上的说明）。机器人在**停止**时它是
-   * `null` —— 那时没有内存里的配置可用来判定，**而不是"确认没有熔断"**。
+   * `circuitBreaker` 与 `dryRun` 都不是 `TraderStats` 的一部分：那个类型是仓储层
+   * 算的纯统计，而这两个数由服务端从**运行时**组装（见端点上的说明）。机器人在
+   * **停止**时它们都是 `null` —— 那时没有内存里的配置/实例可用来判定，
+   * **而不是"确认没有熔断"或"确认在花真钱"**。
    */
   traderStats: (id: number, signal?: AbortSignal) =>
-    request<TraderStats & { circuitBreaker: CircuitBreakerReading | null }>(`/traders/${id}/stats`, {
+    request<
+      TraderStats & { circuitBreaker: CircuitBreakerReading | null; dryRun: boolean | null }
+    >(`/traders/${id}/stats`, {
       signal,
     }),
   traderPositions: (id: number, signal?: AbortSignal) =>
