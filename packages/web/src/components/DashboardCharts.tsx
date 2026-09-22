@@ -10,7 +10,16 @@
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { EquitySnapshot } from '@aq/shared';
 import { fmtInt, fmtNum, fmtTime } from '../lib/format';
-import { CHART_INK, equityAxisFormatter, filterByRange, rangeSpanMs, type EquityPoint, type EquityRange } from './equityCurve';
+import {
+  axisTicks,
+  CHART_INK,
+  equityAxisFormatter,
+  filterByRange,
+  HOURLY_AXIS_MAX_MS,
+  rangeSpanMs,
+  type EquityPoint,
+  type EquityRange,
+} from './equityCurve';
 
 /* -------------------------------------------------------------------------- */
 /*  Equity chart                                                               */
@@ -76,6 +85,11 @@ function EquityCursor({ points }: { points?: Array<{ x?: number; y?: number }> }
   return <line x1={x} x2={x} y1={0} y2="100%" stroke={CHART_INK.rule} strokeWidth={1} />;
 }
 
+/*
+ * 时间轴刻度的摆放与格式化阈值都搬去了 `./equityCurve` —— 交易页与总览页是
+ * 两个图表组件，而"刻度落在哪"只能有一个定义（理由写在 `axisTicks` 的注释里）。
+ */
+
 export function DashboardEquityChart({
   snapshots,
   range,
@@ -136,12 +150,12 @@ export function DashboardEquityChart({
   const referenceValue = baseline ?? first;
   const unit = asset?.trim() || 'USDT';
 
-  // Under a day the axis is a clock; past that a clock tells the operator
-  // nothing about where in the month a dip happened.
+  // 一天半以内用时钟，更长用日期 —— 阈值与 `axisTicks` 共用，见上面的常量。
   const axisTick =
-    rangeSpanMs(range) <= 24 * 3600 * 1000
+    rangeSpanMs(range) <= HOURLY_AXIS_MAX_MS
       ? (value: number) => fmtTime(new Date(value).toISOString())
       : (value: number) => new Date(value).toLocaleDateString('en-CA', { month: '2-digit', day: '2-digit' });
+  const ticks = axisTicks(points, range);
 
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -161,6 +175,12 @@ export function DashboardEquityChart({
           dataKey="t"
           type="number"
           domain={['dataMin', 'dataMax']}
+          /*
+           * 刻度由 `axisTicks` 钉在真实的整点/日界上，而不是让 Recharts 按数值
+           * 均匀摊 —— 理由见那个函数的注释（"查看历史时显示不正确"）。
+           * 它可能返回空数组（跨度不足一个整点），那时交回默认行为。
+           */
+          {...(ticks.length > 0 ? { ticks } : {})}
           tickFormatter={axisTick}
           tick={{ fill: CHART_INK.axis, fontSize: 11 }}
           tickLine={false}
