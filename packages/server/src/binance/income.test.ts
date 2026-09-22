@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { BinanceIncome } from './types.js';
-import { fundingInWindow, summarizeIncome } from './income.js';
+import type { BinanceRest } from './rest.js';
+import { fetchIncome, fundingInWindow, summarizeIncome } from './income.js';
 
 /**
  * The income ledger is the only place funding fees appear — no fill mentions
@@ -100,4 +101,52 @@ test('an empty ledger yields zeroes rather than NaN', () => {
   assert.equal(summary.fundingFee, 0);
   assert.equal(summary.netTradingIncome, 0);
   assert.ok(Number.isFinite(summary.netTradingIncome));
+});
+
+/* -------------------------------------------------------------------------- */
+/*  Fetch: 「没读到」不许伪装成「没有」                                          */
+/* -------------------------------------------------------------------------- */
+
+/** 一个只回答一次的假 REST 客户端。 */
+function restReturning(page: unknown): BinanceRest {
+  return { signedRequest: async () => page } as unknown as BinanceRest;
+}
+
+test('空响应体必须抛错，不能变成「这个账户没有流水」', async () => {
+  /*
+   * Why this test exists —— 部署后当场撞上的故障。
+   *
+   * `rest.signedRequest()` 在**响应体为空**时返回 `undefined`（`rest.ts` 里那句
+   * `if (!text) return undefined as T`）。而这里原来是
+   * `if (Array.isArray(page)) events.push(...page);` —— 于是一次网关抽风
+   * **静默变成零条流水**，总账校验拿 `exchangeNet = 0` 报出：
+   *
+   *     账目与交易所对不上：平台记录 1.1063 USDT、交易所流水 0.0000 USDT，差 1.1063
+   *
+   * 而同一时刻、同一个窗口直接问交易所是 **58 条、合计 1.10634107** —— 平台记的账
+   * 一分不差，错的是读取。这条告警的文案还要求"请先核对再让机器人继续交易"，
+   * 也就是说它会指着一个完全正确的账本要求人工介入。
+   *
+   * 抛错之后，`reconcileTradeHistory()` 的 `catch` 会把它记成 `incomeReadFailed`，
+   * 总账校验整条跳过 —— 那个标志本来就是为这件事存在的。
+   */
+  await assert.rejects(
+    () => fetchIncome(restReturning(undefined), { startTime: Date.now() - 60_000 }),
+    /不是数组/,
+    '把 undefined 当空数组，就等于把"没读到"说成"没有"',
+  );
+});
+
+test('空数组仍然是合法的答案 —— 账户真的没有流水', async () => {
+  // 这一条与上一条是一对：区分「读到零条」与「没读到」正是这次修复的全部内容，
+  // 少了它，下一次有人"简化"成 `?? []` 就没有东西拦得住。
+  assert.deepEqual(await fetchIncome(restReturning([]), { startTime: Date.now() - 60_000 }), []);
+});
+
+test('起始时间不是数字时必须抛错，而不是跳过整个窗口', async () => {
+  // `cursor < endTime` 对 NaN 恒为 false —— 循环一次都不进，返回 `[]`。
+  await assert.rejects(
+    () => fetchIncome(restReturning([]), { startTime: Number.NaN }),
+    /不是有效数字/,
+  );
 });

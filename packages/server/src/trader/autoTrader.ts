@@ -3379,8 +3379,8 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
    * while answering a question whose answer can only have changed for symbols
    * that traded recently.
    *
-   *  · `full: true`  — window from the trader's creation. Used at start (inside
-   *    `start()`), by the operator-triggered `/reconcile`, and once every
+   *  · `full: true`  — window from the trader's creation. Used by the
+   *    operator-triggered `/reconcile`, and once every
    *    `FULL_RECONCILE_EVERY_PASSES` passes. This is the pass that recovers a
    *    close the process slept through.
    *  · `full: false` — window of `RECONCILE_WINDOW_MS`. Used by the routine
