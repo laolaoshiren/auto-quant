@@ -22,7 +22,7 @@
  *    老机器人不该因为这一层存在而有任何行为变化。
  */
 
-import { marginPercentToPricePercent, type StrategyConfig } from '@aq/shared';
+import { closeReasonLabel, marginPercentToPricePercent, type StrategyConfig } from '@aq/shared';
 
 import type { ReviewTradeFacts } from '../autoTrader.js';
 
@@ -267,7 +267,26 @@ export class AgentRuntime {
             : `成本占比：手续费占毛盈亏绝对值的 ${feeShare.toFixed(1)}%` +
               (feeShare >= 50 ? ' —— **成本吃掉了大部分毛收益**，这笔交易在扣费前就已经很薄。' : ''),
           `持仓时长：${input.holdMinutes.toFixed(1)} 分钟（${input.openedAt} 开仓）`,
-          `平仓原因：${input.closeReason}`,
+          /*
+           * ⚠️ **必须走 `closeReasonLabel`，不能直接印机器码。**
+           *
+           * `close_reason: 'stop_loss'` 配上「平仓价高于开仓价」在复盘员眼里
+           * 就是**自相矛盾的数据** —— 而它已经这么说过至少三次（都写进了记忆）：
+           *
+           *     ETHUSDT  「平仓价 2789.5 高于开仓价 2762.21 却标记为 stop_loss…
+           *               推测为移动止损上移触发…但数据不足以确认」
+           *     BNBUSDT  「平仓价高于开仓价却标记 stop_loss，离场机制数据不足，
+           *               无法确认是移动止损保护还是止盈管理失误」
+           *
+           * **而真相是确定的**：那些止损位被保本守卫/`adjust_protection`
+           * 上移到了成本价之上，触发的结果就是保本或小赚离场 ——
+           * 这正是提示词要求它做的事。`closeReasonLabel` 就是为这件事写的
+           * （它把「止损触发 + 盈利」说成「移动止损（保本离场）」），
+           * 而且 `prompt.ts` 早就用上了。
+           *
+           * 只有这里一直印机器码，于是同一个困惑从操作员身上搬到了复盘员身上。
+           */
+          `平仓原因：${closeReasonLabel(input.closeReason, input.netPnl)}`,
           /*
            * 浮盈轨迹这一行刻意写成"峰值 vs 最终"，因为复盘员要判断的正是
            * "曾经赚到多少、又还回去多少"。

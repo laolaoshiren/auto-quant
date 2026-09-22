@@ -321,3 +321,42 @@ test('复盘回执必须标出浮盈的口径 —— 否则会被当成价格涨
     '要明说不能拿它跟价位比 —— 模型上一次正是这么做的',
   );
 });
+
+test('止损触发但整体盈利时必须说成「保本离场」—— 否则复盘员看到的是自相矛盾的数据', async () => {
+  /*
+   * 实测：AI 的记忆里**至少三条**在抱怨同一件事 ——
+   *
+   *     ETHUSDT  「平仓价 2789.5 高于开仓价 2762.21 却标记为 stop_loss…
+   *               推测为移动止损上移触发…但数据不足以确认」
+   *     BNBUSDT  「平仓价高于开仓价却标记 stop_loss，离场机制数据不足…」
+   *
+   * 而系统里早就有 `closeReasonLabel` 专治这件事（它把「止损触发 + 盈利」
+   * 说成「移动止损（保本离场）」），`prompt.ts` 也早就用上了 ——
+   * 只有复盘回执一直印机器码，于是同一个困惑从操作员身上搬到了复盘员身上。
+   *
+   * 判据：那句"平仓原因"里**不能再出现机器码**。
+   */
+  traders.setAgentConfig(traderId, JSON.stringify(config()));
+  const m = stubModel();
+  runtime(m).reviewTrade(
+    facts({
+      closeReason: 'stop_loss',
+      netPnl: 0.1961, // ETHUSDT 那笔的真实净额 —— 盈利，而原因写着 stop_loss
+      entryPrice: 2762.21,
+      exitPrice: 2789.5,
+      peakPnlPercent: 4.445215814933514,
+      leverage: 3,
+    }),
+  );
+  await flush();
+
+  assert.match(
+    m.lastPrompt,
+    /平仓原因：移动止损（保本离场）/,
+    '止损位被上移到成本之上、触发时是赚的 —— 必须说成保本离场',
+  );
+  assert.ok(
+    !/平仓原因：stop_loss/.test(m.lastPrompt),
+    '不能再把机器码当平仓原因印出去 —— 那正是"数据自相矛盾"的来源',
+  );
+});
