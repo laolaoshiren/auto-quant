@@ -20,6 +20,15 @@ import { AutoTrader, type DecisionModel } from './autoTrader.js';
 const log = createLogger('manager');
 
 /**
+ * 成交推送之后，隔多久去对一次账。
+ *
+ * 一笔平仓会连着推若干帧（部分成交、最后成交），而一次对账要为每个相关标的
+ * 问一遍 `/fapi/v1/userTrades`。5 秒足够把「同一次平仓」的全部帧收进同一次对账，
+ * 又短到操作员在界面上看不出延迟。
+ */
+const FILL_RECONCILE_DEBOUNCE_MS = 5_000;
+
+/**
  * 开机恢复的重试节奏（F2 + F4）。
  *
  * 为什么需要重试：`startTrader()` 的失败以前是**终局**的。启动时一次网络抖动、
@@ -84,6 +93,10 @@ export class TraderManager {
   private readonly running = new Map<number, AutoTrader>();
   private readonly connections = new Map<number, ExchangeConnection>();
   private readonly userStreams = new Map<number, BinanceUserDataStream>();
+  /**
+   * 成交触发的即时对账，按机器人去抖 —— 见 `scheduleFillReconcile()`。
+   */
+  private readonly fillReconcileTimers = new Map<number, NodeJS.Timeout>();
   private stopping = false;
   /**
    * 被明确取消启动的机器人（操作员点了停止、或进程正在关闭）。
@@ -142,11 +155,21 @@ export class TraderManager {
       },
       onOrderUpdate: (event) => {
         const o = event.o;
-        // Only surface the transitions an operator cares about; the REST loop
-        // remains the source of truth for fills.
+        // Only surface the transitions an operator cares about.
         if (o.X === 'FILLED' || o.X === 'CANCELED' || o.X === 'EXPIRED') {
           emit('info', `订单 ${o.s} ${o.S} ${o.o} ${o.X} 数量=${o.z}@${o.ap}`);
         }
+        /*
+         * 成交 → 立刻把账本对齐。
+         *
+         * 这里原来只写一行日志，配一句注释说"成交以 REST 对账为准"。那句话在
+         * "对账是唯一写者"这一层仍然成立，但它掩盖了一个代价：**账本最长滞后
+         * 一整个周期**（生产里 45 分钟）。对账仍是唯一写者，现在只是多了一个
+         * 触发时机 —— 见 `scheduleFillReconcile()`。
+         *
+         * 撤单 / 过期不动账本（它们不改变持仓），仍由周期对账收拾。
+         */
+        if (o.X === 'FILLED') this.scheduleFillReconcile(traderId);
       },
       onListenKeyExpired: () => {
         emit('warn', '用户数据流的 listenKey 已过期，已重新创建并重连。');
@@ -171,6 +194,56 @@ export class TraderManager {
       log.warn(`无法启动用户数据流：${(error as Error).message}`);
       emit('warn', `无法订阅用户数据流：${(error as Error).message}`);
     }
+  }
+
+  /**
+   * 交易所刚推来一条成交 —— 排一次即时对账。
+   *
+   * ## 这一条把「纯告警」的注释改了
+   *
+   * `startUserStream()` 上面写着用户数据流是 "advisory only … a dropped socket
+   * can only delay a notification"。那个说法有一个没被兑现的前提：**既然成交
+   * 推送已经到了手上，账本就没有理由再等下一个周期**。实测两笔保本止损在
+   * 21:17 与 21:27 触发，控制台到 21:43 仍显示「持仓 0、委托全部待对账」、
+   * 历史成交里没有这两笔 —— 操作员看到的是一份停在上一个周期的账，而它说的
+   * 是**已经不存在的事**。
+   *
+   * ## 仍然可以断
+   *
+   * 套接字掉线只是退回原来的行为（下一个周期对账），不会更差；对账本身是幂等
+   * 且串行的（`applyExchangeFill` 会等周期跑完），所以这里加的**只是一个触发**，
+   * 没有改动任何记账语义。这正是让一个流式依赖可以挂在一个必须无人值守的系统上
+   * 的前提。
+   */
+  private scheduleFillReconcile(traderId: number): void {
+    // 已经排上了就合并 —— 同一笔成交会推好几帧，没必要对账好几遍。
+    if (this.fillReconcileTimers.has(traderId)) return;
+
+    const timer = setTimeout(() => {
+      this.fillReconcileTimers.delete(traderId);
+      const autoTrader = this.running.get(traderId);
+      if (!autoTrader) return;
+      void autoTrader.applyExchangeFill().catch((error) => {
+        log.warn(
+          `机器人 #${traderId} 成交后即时对账失败（下一个周期仍会补上）：${(error as Error).message}`,
+        );
+      });
+    }, FILL_RECONCILE_DEBOUNCE_MS);
+
+    /*
+     * 不因为这个定时器把进程吊在退出前：它是**可丢弃的** ——
+     * 丢掉只是退回"下一个周期对账"，而不是丢掉一次成交。
+     */
+    timer.unref();
+    this.fillReconcileTimers.set(traderId, timer);
+  }
+
+  /** 取消一个还没到点的即时对账（机器人被停掉、或进程正在关闭）。 */
+  private cancelFillReconcile(traderId: number): void {
+    const timer = this.fillReconcileTimers.get(traderId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.fillReconcileTimers.delete(traderId);
   }
 
   isRunning(traderId: number): boolean {
@@ -731,6 +804,7 @@ export class TraderManager {
       this.running.delete(traderId);
     }
     this.startedAt.delete(traderId);
+    this.cancelFillReconcile(traderId);
     const stream = this.userStreams.get(traderId);
     if (stream) {
       await stream.stop().catch(() => undefined);
@@ -1047,6 +1121,11 @@ export class TraderManager {
       }),
     );
     this.userStreams.clear();
+    /*
+     * 还没到点的即时对账一并丢掉：机器人已经不再运行，`applyExchangeFill()`
+     * 的第一行就会返回。
+     */
+    for (const id of [...this.fillReconcileTimers.keys()]) this.cancelFillReconcile(id);
 
     /*
      * `trader.stop()` waits for the cycle in flight before resolving, which is
