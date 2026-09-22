@@ -1120,7 +1120,7 @@ export function TradesTable({
     (sum, trade) => ({
       gross: sum.gross + trade.pnl,
       fees: sum.fees + trade.fee,
-      funding: sum.funding + trade.fundingFee,
+      funding: sum.funding - trade.fundingFee,
       net: sum.net + trade.netPnl,
     }),
     { gross: 0, fees: 0, funding: 0, net: 0 },
