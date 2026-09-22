@@ -104,7 +104,7 @@ const runtime = (model: LoopModel = stubModel(), isAiStrategy = false) =>
 const facts = (over: Record<string, unknown> = {}) => (
   {
     tradeId: 1, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1,
-    grossPnl: -0.08, fee: 0.02, peakPnlPercent: 0, holdMinutes: 30,
+    grossPnl: -0.08, fee: 0.02, peakPnlPercent: 0, leverage: 3, holdMinutes: 30,
     entryPrice: 100, exitPrice: 99,
     openedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
     ...over,
@@ -278,4 +278,46 @@ test('审视进行中时重复触发被挡住（否则两轮会各改一遍参�
 
   resolve();
   await flush();
+});
+
+/* -------------------------------------------------------------------------- */
+/*  浮盈的口径                                                                 */
+/* -------------------------------------------------------------------------- */
+
+test('复盘回执必须标出浮盈的口径 —— 否则会被当成价格涨幅读', async () => {
+  /*
+   * 实测（2026-09-22，持仓 `#95` XRPUSDT 5x，入场 1.513）：
+   *
+   *     positions.peak_pnl_percent = 3.1456890134116477
+   *     那段持仓里交易所最高价        1.5318  → 价格口径只有 +1.24%
+   *
+   * 而回执里印的是一个**裸的**"最大浮盈 3.146%"，紧挨着它上面那行
+   * 「价格变动 X%」又恰好是**价格**口径。模型按最近的口径去读，
+   * 反算出 **1.5606** 这个从未出现的价格，于是判定一张
+   * **从未被触及**的止盈单（1.5565）该兑现却没兑现，并据此去改离场逻辑。
+   *
+   * 判据必须落在**只有正确路径才有**的东西上 —— 也就是**换算后的价格数字**：
+   * 光断言"提到了对保证金"是不够的，那样把一个仍然没换算的实现也算过。
+   */
+  traders.setAgentConfig(traderId, JSON.stringify(config()));
+  const m = stubModel();
+  runtime(m).reviewTrade(facts({ peakPnlPercent: 3.1456890134116477, leverage: 5 }));
+  await flush();
+
+  assert.match(
+    m.lastPrompt,
+    /最大浮盈 3\.146%（\*\*对保证金/,
+    '口径必须**紧跟**在数字后面 —— 隔开一段再写，读的时候仍然会把它当价格',
+  );
+  assert.match(
+    m.lastPrompt,
+    /折合价格约 0\.629%/,
+    '#95 的真实数字必须被换算出来（3.1456890134116477 ÷ 5 = 0.629），否则模型还得自己猜',
+  );
+  assert.match(m.lastPrompt, /含 5x 杠杆/, '要给杠杆倍数，否则那个换算无从复核');
+  assert.match(
+    m.lastPrompt,
+    /别拿这个去和止盈\/止损价比较/,
+    '要明说不能拿它跟价位比 —— 模型上一次正是这么做的',
+  );
 });

@@ -18,7 +18,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { beijingDayStartIso, closeReasonLabel, exchangeErrorCode, exchangeErrorLabel } from './domain.js';
+import {
+  beijingDayStartIso,
+  closeReasonLabel,
+  exchangeErrorCode,
+  exchangeErrorLabel,
+  marginPercentToPricePercent,
+} from './domain.js';
 
 test('实测撞到的 -4130 被翻译成可行动的一句话', () => {
   /*
@@ -201,4 +207,54 @@ test('只有止损那一种原因会分叉 —— 止盈与其它原因不受盈
   assert.equal(closeReasonLabel('model_decision', -0.5), '模型主动平仓');
   /* 未知机器码原样返回 —— 库里可能读到迁移前留下的值。 */
   assert.equal(closeReasonLabel('some_future_code', 0.5), 'some_future_code');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  「对保证金」与「价格」两个口径的换算                                        */
+/* -------------------------------------------------------------------------- */
+
+test('实测 #95 的峰值浮盈换算回价格 —— 5x 下 3.146% 是 0.629%', () => {
+  /*
+   * 这组数字是生产上真实留下的（持仓 `#95` XRPUSDT，5x，入场 1.513）：
+   *
+   *     positions.peak_pnl_percent = 3.1456890134116477
+   *
+   * 而那段持仓时间里交易所的最高价只有 1.5318 —— 也就是价格口径 **+1.24%**。
+   *
+   * 模型在复盘里把这个数当成了**价格涨幅**，反算出 1.5606 这个从未出现的价格，
+   * 于是判定一张从未被触及的止盈单（1.5565）"该兑现却没兑现"。
+   * 换算成价格口径之后，那个误读一眼就能看出来。
+   */
+  const pricePercent = marginPercentToPricePercent(3.1456890134116477, 5);
+  assert.ok(
+    Math.abs(pricePercent - 0.6291378026823295) < 1e-12,
+    `5x 下的价格口径必须小 5 倍，实际算出 ${pricePercent}`,
+  );
+  assert.equal(pricePercent.toFixed(3), '0.629');
+});
+
+test('杠杆是除数 —— 同一个保证金收益率，杠杆越高对应的价格变动越小', () => {
+  /*
+   * 这条是「保本止损 / 回撤守卫的触发线在价格上到底多远」的全部依据：
+   * 配置里写的是对保证金的口径，而模型脑子里想的是价格。
+   */
+  assert.equal(marginPercentToPricePercent(1, 3), 1 / 3);
+  assert.equal(marginPercentToPricePercent(1, 5), 0.2);
+  assert.ok(
+    marginPercentToPricePercent(1, 10) < marginPercentToPricePercent(1, 2),
+    '杠杆越高，同一个"保证金浮盈 1%"在价格上越近',
+  );
+  /* 1x 时两个口径重合 —— 那时换算必须是恒等的，不能引入误差。 */
+  assert.equal(marginPercentToPricePercent(2.5, 1), 2.5);
+});
+
+test('杠杆不可用时原样返回，不猜也不除零', () => {
+  /*
+   * `leverage` 来自数据库列，而迁移前的老行可能是 `0`。
+   * 那时**宁可少做一次换算**（把数原样带出去），也不能算出 `Infinity` ——
+   * 一个 `Infinity` 印进提示词会比不换算更糟。
+   */
+  assert.equal(marginPercentToPricePercent(3, 0), 3);
+  assert.equal(marginPercentToPricePercent(3, Number.NaN), 3);
+  assert.equal(marginPercentToPricePercent(3, -5), 3);
 });

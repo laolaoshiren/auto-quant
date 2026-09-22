@@ -22,7 +22,7 @@
  *    老机器人不该因为这一层存在而有任何行为变化。
  */
 
-import type { StrategyConfig } from '@aq/shared';
+import { marginPercentToPricePercent, type StrategyConfig } from '@aq/shared';
 
 import type { ReviewTradeFacts } from '../autoTrader.js';
 
@@ -271,8 +271,21 @@ export class AgentRuntime {
           /*
            * 浮盈轨迹这一行刻意写成"峰值 vs 最终"，因为复盘员要判断的正是
            * "曾经赚到多少、又还回去多少"。
+           *
+           * ⚠️ **口径必须写出来，而且必须和上一行的「价格变动」区分开。**
+           *
+           * 上面那行是**价格**口径（`(exit-entry)/entry`，不含杠杆），
+           * 这一行是**对保证金**的口径（含杠杆）。两行紧挨着、数字长得一样，
+           * 而它差一个杠杆倍数 —— 实测就是这么被读错的：
+           * `#95`（XRPUSDT 5x）记下 3.146%，模型拿它当价格涨幅去反算目标价，
+           * 得到 1.5606（真实最高 1.5318），于是判定一张**从未被触及**的
+           * 止盈单"应该兑现却没兑现"，并据此去改离场逻辑。
+           *
+           * 所以这里同时给两个口径，并明说"不要把它当价格"。
            */
           `浮盈轨迹：持仓期间最大浮盈 ${input.peakPnlPercent.toFixed(3)}%` +
+            `（**对保证金的口径，含 ${input.leverage}x 杠杆 —— 折合价格约 ${marginPercentToPricePercent(input.peakPnlPercent, input.leverage).toFixed(3)}%**；` +
+            '上一行的「价格变动」是价格口径，两个数不是一个东西，别拿这个去和止盈/止损价比较）' +
             (input.peakPnlPercent > 0 && input.netPnl <= 0
               ? ' —— **曾经浮盈但最终没赚到，这是"止盈/移动止损是否设晚"的直接证据。**'
               : ''),
