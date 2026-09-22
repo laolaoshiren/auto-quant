@@ -78,6 +78,8 @@ function openDecision(overrides: Partial<Decision> = {}): Decision {
     reasoning: 'test',
 reducePercent: null,
 reduceQuantity: null,
+    setupScore: null,
+    setupScoreBasis: '',
     adjustments: [],
     ...overrides,
   };
@@ -685,6 +687,8 @@ function adjustDecision(overrides: Partial<Decision> = {}): Decision {
     reasoning: '把止损提到成本附近',
 reducePercent: null,
 reduceQuantity: null,
+    setupScore: null,
+    setupScoreBasis: '',
     adjustments: [],
     ...overrides,
   };
@@ -814,6 +818,8 @@ function addDecision(overrides: Partial<Decision> = {}): Decision {
     reducePercent: null,
     reduceQuantity: null,
     reasoning: '结构仍成立，加一点',
+    setupScore: null,
+    setupScoreBasis: '',
     adjustments: [],
     ...overrides,
   };
@@ -832,6 +838,8 @@ function reduceDecision(overrides: Partial<Decision> = {}): Decision {
     reducePercent: 50,
     reduceQuantity: null,
     reasoning: '先落袋一半',
+    setupScore: null,
+    setupScoreBasis: '',
     adjustments: [],
     ...overrides,
   };

@@ -3,6 +3,7 @@ import {
   isCloseAction,
   isAdjustAction,
   isCancelPendingAction,
+  isSkipAction,
   isResizeAction,
   isOpenAction,
   normalizeSymbol,
@@ -2329,8 +2330,19 @@ export class AutoTrader {
        *
        * **一个把正常行为报成错误的检查，会让人不再相信错误提示。**
        */
-      if (decision.action === 'hold' || decision.action === 'wait') {
-        /* 明确的不操作 —— 不记日志，也不占执行计数。 */
+      if (decision.action === 'hold' || decision.action === 'wait' || isSkipAction(decision.action)) {
+        /*
+         * 明确的不操作 —— 不记日志，也不占执行计数。
+         *
+         * ⚠️ **`skip` 必须在这个早退里**，否则它会落到下面那条"不认识的决策动作"
+         * 检查上，每轮十几条 `skip` 全部被记成**执行失败**。那正是这个文件上面
+         * 那段注释刚讲过的事故：`hold` 曾经被这样报了一个月的红字，
+         * "而那一轮什么都没做错"。
+         *
+         * 它与 `hold`/`wait` 的区别不在执行（三者都是什么都不做），而在**它落了库**：
+         * 一条带着 `setupScore` 的 `skip` 是"我看过这个标的、按我的尺子打了几分"，
+         * 那是以后校准入场门槛唯一的凭据。执行层对它什么都不做，正是它要的语义。
+         */
         continue;
       }
 
@@ -2339,7 +2351,8 @@ export class AutoTrader {
         !isCloseAction(decision.action) &&
         !isAdjustAction(decision.action) &&
         !isResizeAction(decision.action) &&
-        !isCancelPendingAction(decision.action)
+        !isCancelPendingAction(decision.action) &&
+        !isSkipAction(decision.action)
       ) {
         executionLog.push({
           action: decision.action,
@@ -4384,6 +4397,9 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
             reasoning: verdict.reason,
 reducePercent: null,
 reduceQuantity: null,
+            /* 回撤守卫是机械动作，没有"标的评分"可言 —— 如实留空。 */
+            setupScore: null,
+            setupScoreBasis: '',
             adjustments: [],
           },
           'drawdown_guard',
@@ -5219,6 +5235,22 @@ reduceQuantity: null,
         followed.push(await this.executeAdjust(decision));
       } else if (isCancelPendingAction(decision.action)) {
         followed.push(await this.executeCancelPending(decision));
+      } else if (
+        isSkipAction(decision.action) ||
+        decision.action === 'hold' ||
+        decision.action === 'wait'
+      ) {
+        /*
+         * ⚠️ **"什么都没做"不该被报成"越界"。**
+         *
+         * 这一轮只允许调保护位与撤单，别的动作都会被下面那条日志记成
+         * "不在允许范围内，已忽略"。而 `skip` / `hold` / `wait` **本来就没有动作** ——
+         * 报它们越界，等于把"我看了一圈、没有需要调的"说成一次违规。
+         *
+         * 提示词现在要求模型对**每一个候选标的**都留一条（不做的用 `skip`，
+         * 带 `setup_score`），所以这一轮正常就会有十几条 —— 全报出来的话，
+         * 日志里真正该被看见的那一两条会被淹掉。
+         */
       } else {
         this.emit(
           'info',

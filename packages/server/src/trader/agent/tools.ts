@@ -129,10 +129,13 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
       'Read what happened to the symbols you LOOKED AT BUT DID NOT TRADE. ' +
       'Every cycle you reject most of the candidate pool, and without this you never learn whether those rejections were right. ' +
       'For each symbol you skipped recently it shows the price move SINCE the cycle in which you skipped it. ' +
+      '**It also returns the `setupScore` you yourself gave each of them at the time** — that is what makes the filter calibratable: ' +
+      'compare `avgScore` (the ones you skipped) with `avgScoreOpened` (the ones you actually acted on), and look at `biggestMovers` — ' +
+      'if a symbol you scored high went up a lot, your line is drawn too high; if the high-scored ones fell too, the problem is on the exit side, not the entry bar. ' +
       '**This is the only feedback that can calibrate your entry standards.** ' +
       'If symbols you kept rejecting went up a lot, your filter is too strict — that is evidence, not opinion. ' +
       'If they fell, your caution was correct and you should NOT loosen anything. ' +
-      'Note the sample is small and one-sided (it only covers symbols that reached your candidate pool at all).',
+      'Note the sample is small and one-sided (it only covers symbols that reached your candidate pool at all), and the scores are your own — they may drift across cycles.',
     args: {
       cycles: {
         type: 'number',

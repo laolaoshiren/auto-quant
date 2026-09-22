@@ -50,6 +50,15 @@ export const ACTION_LABELS: Record<DecisionAction, string> = {
   reduce_position: '减仓',
   hold: '持有',
   wait: '等待',
+  /*
+   * 「看过了，不做」。
+   *
+   * 它不是"等待"（那是**挂着的限价单在等成交**），也不是"持有"（那是有仓位）。
+   * 它是模型对候选池里**没动**的那些标的留下的一条结构化记录 ——
+   * 带 `setup_score`，用来让它的入场门槛**可被自己校准**。
+   * 详见 `DecisionActionSchema` 里 `skip` 那段。
+   */
+  skip: '跳过',
 };
 
 /*
@@ -73,6 +82,8 @@ export const ACTION_TONES: Record<DecisionAction, Tone> = {
   reduce_position: 'neutral',
   hold: 'muted',
   wait: 'muted',
+  /* `skip` 是"什么都没做"，用最弱的色调 —— 它在决策流里会很频繁。 */
+  skip: 'muted',
 };
 
 export function actionLabel(action: string): string {

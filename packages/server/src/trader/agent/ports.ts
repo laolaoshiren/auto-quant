@@ -16,7 +16,7 @@
  *    冷却与兜底判据就全部归零，大脑会被立刻唤醒一次 —— 那正是抖动。
  */
 
-import type { StrategyConfig } from '@aq/shared';
+import { isSkipAction, type StrategyConfig } from '@aq/shared';
 
 import { checkCircuitBreakers } from '../../risk/engine.js';
 import { agentExperiments, agentMemory, agentRuns } from '../../store/agentStore.js';
@@ -295,14 +295,35 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
          * 收集被否的标的，**只取最早那次**：越早被否，观察窗口越长，
          * 而同一个标的被否五次不该在样本里占五份权重。
          */
+        /*
+         * ⚠️ **`skip` 不算"做了"，否则这个工具会永远返回空。**
+         *
+         * 模型现在会对**每个候选标的**都留一条决策（不做的用 `action: 'skip'`），
+         * 为的是让 `setup_score` 落库、让门槛可被校准。所以"被否"的判据必须把
+         * `skip` 排除掉 —— 只写 `rec.decisions.map(d => d.symbol)` 的话，
+         * 每一个候选都"有决策"，`firstSkipAt` 永远是空的。
+         */
         const firstSkipAt = new Map<string, string>();
+        /**
+         * 每个标的**最早被否那一刻**模型给它打的分（它自己的口径，`null` = 没给）。
+         *
+         * 这个数才是这个工具真正的价值：`changePercent` 只说"它后来涨了"，
+         * 而配上分数才能回答「**我的线是不是划高了**」——
+         * 「我否掉的平均 58 分，后来涨 40% 的那个当时 74 分」是一句可执行的诊断，
+         * 「它涨了 40%」不是（它只说明市场动了，不说明我的标准错了）。
+         */
+        const scoreAtFirstSkip = new Map<string, number | null>();
         for (const rec of records) {
-          const decided = new Set(rec.decisions.map((d) => d.symbol));
+          const decided = new Set(
+            rec.decisions.filter((d) => !isSkipAction(d.action)).map((d) => d.symbol),
+          );
+          const scoreOf = new Map(rec.decisions.map((d) => [d.symbol, d.setupScore ?? null]));
           for (const symbol of rec.candidateSymbols) {
             if (decided.has(symbol)) continue;
             const prev = firstSkipAt.get(symbol);
             if (prev === undefined || ms(rec.timestamp) < ms(prev)) {
               firstSkipAt.set(symbol, rec.timestamp);
+              scoreAtFirstSkip.set(symbol, scoreOf.get(symbol) ?? null);
             }
           }
         }
@@ -326,6 +347,8 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
           symbol: string;
           skippedAt: string;
           changePercent: number | null;
+          /** 最早被否时模型自己打的分（`null` = 那时还没要求它打分）。 */
+          setupScore: number | null;
         }> = [];
         for (const [symbol, skippedAt] of ordered) {
           let changePercent: number | null = null;
@@ -334,27 +357,97 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
           } catch {
             /* 取不到就留 null：**不编造**，也不让一个标的失败毁掉整次查询。 */
           }
-          rows.push({ symbol, skippedAt, changePercent });
+          rows.push({ symbol, skippedAt, changePercent, setupScore: scoreAtFirstSkip.get(symbol) ?? null });
         }
         rows.sort((a, b) => (b.changePercent ?? -Infinity) - (a.changePercent ?? -Infinity));
 
         const usable = rows.filter((r) => r.changePercent !== null);
         const up = usable.filter((r) => (r.changePercent ?? 0) > 0).length;
+
+        /*
+         * ── 评分对照 ─────────────────────────────────────────────────────
+         *
+         * 这是这个工具真正的用处。只有"涨跌幅"时，模型能得出的结论最多是
+         * "市场里有些东西涨了" —— 而它**否掉它们时并不是瞎否**（它的理由每轮
+         * 都写得很具体）。真正能校准门槛的问法是：
+         *
+         *     我否掉的那批，**按我自己的尺子**是多少分？我开仓的那批呢？
+         *     后来涨了很多的那些，当时是多少分？
+         *
+         * 三个数放在一起，"我的线划在 75"这件事才有对错可言。
+         * 没有分数之前，这个问题在系统里**无法被回答**。
+         *
+         * ⚠️ 评分是模型**自己**打的，不是系统给的 —— 所以它也可能自相矛盾。
+         * 把这批分数的**离散程度**一起给它，它才看得出自己的尺子稳不稳。
+         */
+        const scored = rows.filter((r) => r.setupScore !== null);
+        const scoredValues = scored.map((r) => r.setupScore as number);
+        const avgScore =
+          scoredValues.length > 0
+            ? Math.round((scoredValues.reduce((s, v) => s + v, 0) / scoredValues.length) * 10) / 10
+            : null;
+        /*
+         * 涨幅最大的那三个 —— **不是"最该买"的三个**，只是"最显眼"的三个。
+         * 样本选择仍然不用涨幅（那会变成幸存者偏差），这里只是把已有的行
+         * 按涨幅排一下，好让模型一眼看到最极端的对照。
+         */
+        const biggestMovers = rows
+          .filter((r) => r.changePercent !== null && r.changePercent > 0)
+          .sort((a, b) => (b.changePercent ?? 0) - (a.changePercent ?? 0))
+          .slice(0, 3)
+          .map((r) => ({
+            symbol: r.symbol,
+            changePercent: Math.round((r.changePercent ?? 0) * 100) / 100,
+            setupScore: r.setupScore,
+          }));
+
+        /*
+         * 对照组：同一个窗口里**它真正动手的那些标的**当时是多少分。
+         *
+         * `hold` / `wait` 不算"动手" —— 那是维持已有仓位或等一张已经挂出去的
+         * 限价单，不是"我看上了这个新机会"。
+         */
+        const openedScores: number[] = [];
+        for (const rec of records) {
+          for (const d of rec.decisions) {
+            if (d.setupScore === null) continue;
+            if (isSkipAction(d.action) || d.action === 'hold' || d.action === 'wait') continue;
+            openedScores.push(d.setupScore);
+          }
+        }
+        const avgScoreOpened =
+          openedScores.length > 0
+            ? Math.round((openedScores.reduce((s, v) => s + v, 0) / openedScores.length) * 10) / 10
+            : null;
+
         return {
           windowCycles: records.length,
           skipped: rows.length,
           usable,
           up,
           down: usable.length - up,
+          /** 有多少条带着模型自己打的分（分数是后来才要求给的，老记录没有）。 */
+          scored: scored.length,
+          /** 被否标的中，模型自己打分的平均值 —— 与它开仓时的平均分对照才有意义。 */
+          avgScore,
+          /** 它**真正动手**的那些标的的平均分（`hold`/`wait` 不算）。两个数的差就是"线划在哪"。 */
+          avgScoreOpened,
+          /** 涨幅最大的三个（含它们当时的分）。 */
+          biggestMovers,
           symbols: rows.map((r) => ({
             symbol: r.symbol,
             skippedAt: r.skippedAt,
             changePercent: r.changePercent === null ? null : Math.round(r.changePercent * 100) / 100,
+            setupScore: r.setupScore,
           })),
           note:
             '这些是**你看到了但没做**的标的，从现在往回看它们各自走了多少（正数=你错过上涨，负数=你躲过了下跌）。' +
-            '样本有偏且很小：只包含进过候选池的标的、窗口只有最近几十轮、同一标的只算最早那次。' +
-            '**别用三五个样本去改门槛** —— 但如果被否的多数都在大涨、而且样本足够，那就是你的标准太严的证据。',
+            '`setupScore` 是**你当时自己给它们打的分**（`null` = 那时还没有要求打分）。' +
+            '**真正该拿它做的，是回头校准你自己那条线**：把 `avgScore` 与你开仓时的分数比、' +
+            '把 `biggestMovers` 里那几分的标的与你现在的门槛比 —— 如果一大片高分标的你都没做，' +
+            '那是线划错了；如果高分标的后来也跌了，那是执行或退出端的问题，与门槛无关。' +
+            '⚠️ 样本有偏且很小：只包含进过候选池的标的、窗口只有最近几十轮、同一标的只算最早那次；' +
+            '分数是你自己打的，跨轮未必同口径。**别用三五个样本去改门槛。**',
         };
       },
     },

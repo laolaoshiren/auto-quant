@@ -1023,14 +1023,80 @@ export function buildSystemPrompt(ctx: PromptContext): string {
        * 没有范例可照，模型就自由发挥了。**范例对输出形状的锚定作用比措辞强得多**
        * —— 这个文件里为"只做多"加做空范例时，写的就是同一条道理。
        */
-      '**"不做任何动作"时同样给出完整字段，一个都不能省** —— 尤其是 `confidence`：',
+      '**"不做任何动作"时同样给出完整字段，一个都不能省** —— 尤其是 `confidence` 与 `setup_score`：',
       '```json',
       '[',
       '  {',
       '    "symbol": "SOLUSDT",',
-      '    "action": "wait",',
+      '    "action": "skip",',
+      '    "setup_score": 41,',
+      '    "setup_score_basis": "15m 与 1h 方向冲突、波动率收敛，四条入场标准一条都不满足",',
       '    "confidence": 35,',
       '    "reasoning": "15m 与 1h 方向冲突，且波动率在收敛 —— 结构不成立。把握 35 分，远低于门槛。"',
+      '  }',
+      ']',
+      '```',
+      '',
+      /*
+       * ⚠️ **每个候选标的都要有一条，包括你决定不做的那些。**
+       *
+       * ## 为什么（用户的原话：「复盘不够智能」）
+       *
+       * 实测：一个 24h +94%、成交额排全市场第 12 的标的，连续五轮被写进
+       * "抛物线、4h RSI 90+、追高禁区，排除"—— 而 `decisions_json` 里
+       * **关于它一条记录都没有**。
+       *
+       * 后果不是"它漏看了"（它看得见，也读了自己的复盘工具），而是：
+       * **它的入场门槛从来没有被校准过**。工具能告诉它"这些标的后来涨了"，
+       * 但回答不了真正的问题 ——「我的线是不是划高了」，因为**没有"线"这个数**。
+       *
+       * 所以：**对每一个进你视野的候选标的都给一个 `setup_score`**，
+       * 用 `action: "skip"` 表示"看过、不做"。分数落在库里之后，
+       * 你才能在复盘时算出来：我否掉的那批平均多少分、开仓的那批平均多少分、
+       * 而**后来涨了很多的那些当时是多少分**。那是唯一能校准这条线的证据。
+       *
+       * ## 分数是你自己的标准，不是系统给的
+       *
+       * 系统**不定义**什么叫 80 分，也不拿它卡单 —— 开不开仍由你的规则与风控决定。
+       * 你可以在 `entryStandards` 里自己写清楚评分口径（那本来就是你改的）。
+       * 唯一的纪律是：**同一套口径要能横着比** —— 别让 70 分在 A 标的意味着
+       * "很有机会"、在 B 标的意味着"还差点"，那这个数就白记了。
+       *
+       * ## 一条重要的区分
+       *
+       * · `setup_score` 说的是「**这个标的本身**有多符合我的入场标准」
+       * · `confidence` 说的是「我对我这个**决策**有多确定」
+       *
+       * 一个你已经持有的、正在 `hold` 的标的，`setup_score` 可能只有 55
+       * （它当初达标、现在结构变差了）而 `confidence` 是 72（你对"继续持有"很确定）。
+       * 两个数不矛盾，它们回答不同的问题。
+       */
+      '⚠️ **每一个候选标的都要有一条决策，包括你不做的那些** —— 不做的用 `action: "skip"`，',
+      '并且**同样要给 `setup_score`**（0–100，你自己的标准）与一句话的 `setup_score_basis`。',
+      '只有落了库，你以后才可能知道自己那条线划得对不对。范例：',
+      '```json',
+      '[',
+      '  {',
+      '    "symbol": "MUBARAKUSDT",',
+      '    "action": "skip",',
+      '    "setup_score": 58,',
+      '    "setup_score_basis": "趋势极强，但 4h RSI 92、价格偏离 EMA20 达 11%，止损无处可放、盈亏比算不出来",',
+      '    "confidence": 70,',
+      '    "reasoning": "抛物线中段，追进去的失效位太远 —— 把握 70 分地认为**现在**不该进，但值得继续跟踪回踩。"',
+      '  }',
+      ']',
+      '```',
+      '',
+      '`wait`（**挂着的限价单在等成交** —— 与 `skip` 不是一回事）同样要给全字段：',
+      '```json',
+      '[',
+      '  {',
+      '    "symbol": "XRPUSDT",',
+      '    "action": "wait",',
+      '    "setup_score": 71,',
+      '    "setup_score_basis": "趋势未破、回踩位仍在，但现价超买不宜追",',
+      '    "confidence": 66,',
+      '    "reasoning": "挂单 1.5510 的回踩逻辑仍成立，继续等；把握 66 分。"',
       '  }',
       ']',
       '```',
@@ -1041,6 +1107,8 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       '  {',
       '    "symbol": "ETHUSDT",',
       '    "action": "hold",',
+      '    "setup_score": 74,',
+      '    "setup_score_basis": "三周期仍同向，但动量在衰减",',
       '    "confidence": 72,',
       '    "reasoning": "趋势仍成立、未触及失效位，继续持有；把握 72 分。"',
       '  }',
@@ -1119,7 +1187,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       '',
       '字段规则：',
       '- `symbol`：必须与候选区中列出的完全一致，例如 `BTCUSDT`。',
-      '- `action`：取值为 `open_long`、`open_short`、`close_long`、`close_short`、`adjust_protection`、`add_to_position`、`reduce_position`、`hold`、`wait` 之一。',
+      '- `action`：取值为 `open_long`、`open_short`、`close_long`、`close_short`、`adjust_protection`、`add_to_position`、`reduce_position`、`hold`、`wait`、`cancel_pending`、`skip` 之一。`skip` = **看过、不做**（照样要给 `setup_score`）。',
       '  - `close_long` / `close_short` 会平掉该方向上的整个现有仓位。平仓时不要附带 `leverage`、`position_size_usd`、`stop_loss` 或 `take_profit`，它们会被忽略。',
       '  - `adjust_protection`：**移动一个已有持仓的止损或止盈**（不改数量、不占保证金）。带上新的 `stop_loss` 和/或 `take_profit`（绝对价格），其余字段会被忽略。',
       '    - **这是你管理已有仓位的主要手段。** 一笔已经走出利润的仓位，把止损提到成本价或更高，等于把这笔交易变成"最坏情况不亏"——**这是专业交易员每天在做的事，而不做它意味着浮盈随时可能全部回吐。**',
