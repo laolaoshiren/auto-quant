@@ -1,5 +1,6 @@
 import {
   closeReasonLabel,
+  marginPercentToPricePercent,
   type MarketSnapshot,
   type OiRankRow,
   type PositionView,
@@ -715,9 +716,25 @@ export function buildSystemPrompt(ctx: PromptContext): string {
        * 后果是具体的：它会看到止损"自己动了"，可能以为是哪个环节错了，于是用
        * `adjust_protection` 去"修正" —— 而下一轮守卫又会移一次。
        * **两方来回改同一个止损位，而它每次都要花一次决策预算。**
+       *
+       * ⚠️ **口径也要写清 —— 这是同一类问题的第二次，而代价更大。**
+       *
+       * 2026-09-22 实测（`#95` XRPUSDT 5x）：复盘回执里印的是一个裸的
+       * "最大浮盈 3.146%"，而它是**对保证金**的口径。模型按最近的那个口径
+       * （同一段里「价格变动」是价格口径）去读，反算出 **1.5606** 这个
+       * 从未出现的价格（真实最高 1.5318），于是判定一张**从未被触及**的止盈单
+       * 该兑现却没兑现，并据此去改离场逻辑。
+       *
+       * **一个不带口径的百分比，会被按离它最近的那个口径读。**
+       * 而这里更隐蔽：`breakevenTriggerPercent` 的语义本身就是对保证金的口径
+       * （`shouldMoveStopToBreakeven` 拿 `unrealizedPnlPercent` 跟它比），
+       * 所以 AI 设 1 时以为是"价格涨 1%"，实际是"价格涨 1/杠杆"。
        */
       risk.breakevenTriggerPercent > 0
-        ? `- 保本止损：当某个仓位的浮盈达到 **${risk.breakevenTriggerPercent}%** 时，运行时会**自动把它的止损移到开仓价**（只能往有利方向移，永不回退）。` +
+        ? `- 保本止损：当某个仓位的**保证金浮盈**达到 **${risk.breakevenTriggerPercent}%** 时，运行时会**自动把它的止损移到开仓价**（只能往有利方向移，永不回退）。` +
+          `⚠️ **口径是"对保证金"的、含杠杆** —— 折合价格变动 = ${risk.breakevenTriggerPercent} ÷ 该仓位的杠杆，` +
+          `所以 3x 时约合价格 ${(risk.breakevenTriggerPercent / 3).toFixed(2)}%、5x 时约 ${(risk.breakevenTriggerPercent / 5).toFixed(2)}%。` +
+          '**杠杆越高，这条线在价格上离入场价越近**，越容易被一次正常回踩触发 —— 调它时按你实际会用的杠杆去算。' +
           '所以你看到止损被移动过，**那是这条规则做的，不是你错了** —— 不要为此去调整它，除非你有别的理由。' +
           '**这个值归你（`set_params` 改，0 = 关闭）—— 嫌它太早或太晚，就改它。**'
         : '- 保本止损：**已关闭**（`riskControl.breakevenTriggerPercent = 0`）—— 运行时不移动止损。**这条规则归你，需要就开（`set_params`）。**',
@@ -809,7 +826,10 @@ export function buildSystemPrompt(ctx: PromptContext): string {
         ? `- 平掉某个标的之后，${config.throttle.reentryCooldownMinutes} 分钟内不能再次入场该标的。`
         : '',
       config.drawdownGuard.enabled
-        ? `- 回撤守卫：当某个仓位的浮盈超过 ${config.drawdownGuard.activationPercent}% 后，若回吐达到峰值的 ${(config.drawdownGuard.givebackRatio * 100).toFixed(0)}%，运行时会自动平掉它。`
+        ? `- 回撤守卫：当某个仓位的**保证金浮盈**超过 ${config.drawdownGuard.activationPercent}% 后，若回吐达到峰值的 ${(config.drawdownGuard.givebackRatio * 100).toFixed(0)}%，运行时会自动平掉它。` +
+          '⚠️ 口径同上（**对保证金**、含杠杆）—— 折合价格变动 = 上面的数 ÷ 该仓位的杠杆。' +
+          `3x 时 ${config.drawdownGuard.activationPercent}% 约合价格 ${(config.drawdownGuard.activationPercent / 3).toFixed(2)}%、5x 时约 ${(config.drawdownGuard.activationPercent / 5).toFixed(2)}%。` +
+          '**"回吐达到峰值"那部分是比值，与口径无关**（分子分母同一个口径，杠杆会约掉）。'
         : '',
       config.circuitBreaker.maxDailyLossPercent > 0
         ? `- 单日亏损熔断：若当日已实现亏损超过权益的 ${config.circuitBreaker.maxDailyLossPercent}%，所有新开仓会停止直到次日。`
@@ -1698,6 +1718,18 @@ function renderUserPrompt(
    */
 
   /* 6 — Open positions --------------------------------------------------- */
+  /*
+   * ⚠️ **这一段里有两个口径的百分比在同时流动，必须各自标出来。**
+   *
+   * | 数 | 口径 |
+   * | --- | --- |
+   * | `unrealizedPnlPercent` / `peakPnlPercent` | **对保证金**（含杠杆）|
+   * | 换算出来的「≈ 价格 X%」 | **价格变动**（不含杠杆）|
+   *
+   * 它们只差一个杠杆倍数，而模型要拿"价格"去和止损/止盈价比较 ——
+   * 所以两个都给，而不是让模型自己去猜哪个是哪个。
+   * 实测 `#95` 就是猜错的那一次，见 `runtime.ts` 里同一处的注释。
+   */
   if (ctx.positions.length === 0) {
     volatileParts.push('# 当前持仓\n当前没有持仓。');
   } else {
@@ -1709,8 +1741,12 @@ function renderUserPrompt(
           pos.markPrice,
         )}`,
         `   数量 ${fmt(pos.quantity, 6)} | 名义价值 ${fmtUsd(pos.notional)}`,
-        `   盈亏 ${fmtPercent(pos.unrealizedPnlPercent)} | 金额 ${fmtUsd(pos.unrealizedPnl)}`,
-        `   最高浮盈 ${fmtPercent(pos.peakPnlPercent)} | 杠杆 ${pos.leverage}x`,
+        `   盈亏 ${fmtPercent(pos.unrealizedPnlPercent)}（**对保证金**的口径，含 ${pos.leverage}x 杠杆 ≈ 价格 ${fmtPercent(
+          marginPercentToPricePercent(pos.unrealizedPnlPercent, pos.leverage),
+        )}）| 金额 ${fmtUsd(pos.unrealizedPnl)}`,
+        `   最高浮盈 ${fmtPercent(pos.peakPnlPercent)}（**对保证金**的口径 ≈ 价格 ${fmtPercent(
+          marginPercentToPricePercent(pos.peakPnlPercent, pos.leverage),
+        )}）| 杠杆 ${pos.leverage}x`,
         `   保证金 ${fmtUsd(pos.marginUsed)} | 强平价 ${pos.liquidationPrice ? fmt(pos.liquidationPrice) : '无'}`,
         pos.stopLoss ? `   止损 ${fmt(pos.stopLoss)}` : '   止损：未设置',
         pos.takeProfit ? `   止盈 ${fmt(pos.takeProfit)}` : '   止盈：未设置',

@@ -288,8 +288,17 @@ export interface ReviewTradeFacts {
    * **判断「止盈 / 移动止损是否设晚了」的唯一依据。**
    * 没有它，复盘员分不清「正常波动的保护性离场」与「利润回吐」——
    * 而这两者的改法完全相反。
+   *
+   * ⚠️ **口径是「对保证金」的，含杠杆 —— 不是价格涨幅。**
+   *
+   * 这条以前没写，代价是实测过的：`#95`（XRPUSDT 5x）记下 3.146%，
+   * 模型把它当成价格涨幅、反算出 1.5606 这个从未出现的价格，
+   * 于是得出一张从未被触及的止盈单「失效」的结论。
+   * 展示时必须同时给 `leverage`（`marginPercentToPricePercent` 要用）。
    */
   peakPnlPercent: number;
+  /** 该仓位的杠杆倍数 —— 换算上面那个「对保证金」的口径要用到它。 */
+  leverage: number;
   /** 持仓时长（分钟）。 */
   holdMinutes: number;
   entryPrice: number;
@@ -3189,6 +3198,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
          * 而这两者的改法完全相反。
          */
         peakPnlPercent: local.peak_pnl_percent,
+        leverage: local.leverage,
         holdMinutes: Math.max(0, (Date.now() - new Date(local.opened_at).getTime()) / 60_000),
         entryPrice: local.entry_price,
         exitPrice,
