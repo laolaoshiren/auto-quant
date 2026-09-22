@@ -175,10 +175,23 @@ export class TraderManager {
         emit('warn', '用户数据流的 listenKey 已过期，已重新创建并重连。');
       },
       onReconnected: (reason) => {
-        emit(
-          'info',
-          `用户数据流已重连（${reason}）。持仓状态会在下一轮决策时对账。`,
-        );
+        emit('info', `用户数据流已重连（${reason}）。`);
+        /*
+         * ⚠️ **重连（以及首次连接）之后立刻对齐一次。**
+         *
+         * 断线期间可能漏掉成交推送 —— 重连不等于"什么都没发生"。实测 `20:55`
+         * 那次 watchdog 强制重连之后，`21:17` 与 `21:27` 两笔保本止损在交易所
+         * 成交，而账本整整 26 分钟毫无反应（当时还没有 `scheduleFillReconcile`，
+         * 两个成因叠在一起，于是界面显示的是**已经不存在的事**）。
+         *
+         * 连接重建是**唯一**能补上"断线窗口"的时刻：那段窗口里的帧永远不会再来，
+         * 只能靠读交易所补齐。
+         *
+         * 首次连接也走这条路径（`reason` 是 `startup`）—— 那正是想要的：进程刚
+         * 起来，账本最需要立刻确认一次。它与 `AutoTrader.start()` 里那一遍重复，
+         * 但对账幂等且串行，多跑一遍只是几次 API 调用。
+         */
+        this.scheduleFillReconcile(traderId);
       },
       onAccountConfigUpdate: (event) => {
         if (event.ac) emit('info', `${event.ac.s} 的杠杆已调整为 ${event.ac.l}x`);
