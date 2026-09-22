@@ -997,6 +997,36 @@ export function TraderPage() {
           >
             {accountLabel ?? `${settleAsset} 账户`}
           </Badge>
+          {/*
+            ⚠️ **「这个机器人在不在花真钱」必须能被一眼看到，而它不在顶栏里。**
+            
+            顶栏那个徽章读的是**进程级**的 `env.dryRun`，而
+            `POST /traders/:id/start` 的 `dryRun` 是**每次启动单独传的** ——
+            两者可以不一致。实测：用 API 启动时忘了带 `{"dryRun": false}`，
+            机器人以纸面模式跑了一整轮（开仓、挂保护单、被强制平仓，全是模拟的），
+            而顶栏写着「实盘」，页头什么也没说。
+            
+            只在**与顶栏不一致**或**会花真钱**时渲染：
+              · `dryRun === true`  —— 顶栏说实盘、它在模拟 → 最危险的那一半；
+              · `dryRun === false` 且进程是模拟 → 它在花真钱 → 同样要说。
+            两边一致时不加徽章，否则每台机器人头上都挂一个"实盘"变成噪音。
+          */}
+          {stats?.dryRun === true && (
+            <Badge
+              tone="accent"
+              title="这个机器人此刻在模拟模式下运行：订单只在本地撮合，不会发到交易所。注意顶栏那个徽章说的是**平台**，不是它。"
+            >
+              模拟模式 —— 不会真的下单
+            </Badge>
+          )}
+          {stats?.dryRun === false && system?.dryRun === true && (
+            <Badge
+              tone="warn"
+              title="这个机器人是**实盘**启动的：订单会用真实资金发到交易所。顶栏那个「模拟」说的是平台默认值，不是它。"
+            >
+              实盘 —— 真实资金
+            </Badge>
+          )}
           {trader.consecutiveFailures > 0 && (
             <Badge tone="warn" title="连续的模型或执行失败次数；超过熔断阈值会进入安全模式。">
               {trader.consecutiveFailures} 次连续失败
