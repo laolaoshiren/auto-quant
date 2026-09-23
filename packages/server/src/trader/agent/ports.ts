@@ -114,6 +114,33 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
         const wins = rows.filter((t) => t.netPnl > 0);
         const losses = rows.filter((t) => t.netPnl <= 0);
         const avg = (xs: typeof rows) => (xs.length > 0 ? xs.reduce((s, t) => s + t.netPnl, 0) / xs.length : null);
+        /*
+         * ── 按平仓原因分组：**峰值浮盈 vs 实际落袋** ──────────────────────
+         *
+         * 用户的原话：「我看到历史成交大多是提示：移动止损（保本离场）」。
+         * 实测那台机器人 13 笔止损类平仓**平均峰值浮盈 2.84%、平均落袋 0.42%**
+         * —— 回吐约 85%，而它的止盈目标是 3%。
+         *
+         * 上面那几个总数（净盈亏、胜率、平均盈亏）**看不出这件事**：那些交易全都
+         * 记成"盈利"，只是每笔只赚几分钱。要看出"我在同一个地方把利润还回去"，
+         * 必须把峰值和落袋放在一起、按原因分组 —— 而 `peak_pnl_percent` 只在持仓行里。
+         *
+         * 与前两条聚合（`get_lessons` 的 `recurringTags`、`get_experiments` 的
+         * `repeatedFields`）同一条思路：**单条是"这一次"，聚合是"我一直在同一个地方"。**
+         * 而**数这件事该由程序做** —— 模型每一轮都去减一遍，迟早算错一次。
+         */
+        const byCloseReason = positions.peakVsRealised(traderId, since).map((r) => ({
+          ...r,
+          /*
+           * 回吐比例（%）。只在"平均落袋低于平均峰值"时给 —— 反之为负属于
+           * "峰值没记全"（比如接不到持仓行的老记录），那不是一个可以拿来
+           * 下结论的数，宁可留 `null`。
+           */
+          giveBackPercent:
+            r.avgPeakPercent !== null && r.avgPeakPercent > 0 && r.avgNetPercent !== null
+              ? Math.round(((r.avgPeakPercent - r.avgNetPercent) / r.avgPeakPercent) * 1000) / 10
+              : null,
+        }));
         return {
           window,
           trades: rows.length,
@@ -124,6 +151,14 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
           avgWin: avg(wins),
           avgLoss: avg(losses),
           feeToGrossRatio: Math.abs(gross) > 1e-9 ? fees / Math.abs(gross) : null,
+          /*
+           * ⚠️ **本金之外最该看的一组数。** 它回答的是"我的离场把多少浮盈还了回去"，
+           * 而那是一个**按原因分组才有意义**的问题：保本止损还回去的和止盈兑现的
+           * 完全是两件事。`avgPeakPercent` 明显高于 `avgNetPercent` 的那一组，
+           * 就是离场端在漏水的地方 —— 至于该不该动 `breakevenTriggerPercent`
+           * 那条线，**那是你的判断**（提示词里说了那个值归你）。
+           */
+          byCloseReason,
           // 少于 30 笔无法区分"策略有效"与"运气好" —— 让模型自己看到这一点。
           sampleAdequate: rows.length >= 30,
         };
