@@ -153,6 +153,20 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     }
   }
 
+  /*
+   * ── 滑动续期 ─────────────────────────────────────────────────────────
+   *
+   * 服务端在令牌剩余不足一半寿命时，会把一张同身份的新令牌放进这个响应头
+   * （见 `auth.ts` 的 `refreshIfStale`）。存回去，下次请求就用新的 ——
+   * 于是**只要页面还在轮询，登录状态就不会掉**。
+   *
+   * 放在 `response.ok` 判断**之前**：续期与这次请求成功与否无关，
+   * 一个 500 的响应也可能带着新令牌（它同样是"经过校验的请求"）。
+   * 漏掉它，一次后端抖动就会顺带把会话寿命白扔一半。
+   */
+  const refreshed = response.headers.get('x-refreshed-token');
+  if (refreshed && !anonymous) setToken(refreshed);
+
   if (!response.ok) {
     if (response.status === 401 && !anonymous) onUnauthorized?.();
     const message =
