@@ -181,6 +181,40 @@ export class SymbolRegistry {
     return rounded;
   }
 
+  /**
+   * Ceil a quantity to a valid, tradable amount —— 「**上取一档**」那个方向。
+   *
+   * ## 为什么需要它（`roundQuantity` 只肯向下）
+   *
+   * 向下取整是对的默认：多买一点就是多冒一点风险。但**恰好掉到门槛之下**时，
+   * 向下就变成了"白白放掉一次机会"，而那本来是"差一档"的问题。
+   *
+   * 实测（用户的原话：「仅仅差了 0.53，这是不是模型计算问题？这种系统是否给
+   * 一定容错帮他补齐？（不然导致错失机会？）」）：ETHUSDT 报 $22.00 名义、
+   * 价格 2768.18、`stepSize` 0.001 —— `$22 / 2768.18 = 0.007947`，
+   * **向下取整 0.007 = $19.47**，差 $0.53 没够到 $20 的门槛，整笔被拒。
+   * 而**上取一档是 0.008 = $22.15** —— 只比模型要的多 0.7%。
+   *
+   * ⚠️ **它只负责"对齐到一档"，不负责判断该不该进位。** 那个判断在风控引擎里，
+   * 而且要连带检查名义比例上限与保证金上限 —— 见 `engine.ts` 里用它那一段。
+   */
+  roundQuantityUp(symbol: string, quantity: number): number {
+    if (!Number.isFinite(quantity) || quantity <= 0) return 0;
+    const info = this.require(symbol);
+    const decimals = stepDecimals(String(info.stepSize));
+    const ratio = quantity / info.stepSize;
+    /*
+     * ⚠️ **`floor + 1`，不是 `ceil`。**
+     *
+     * `ceil` 是"向上对齐"，而**已经落在档位上的数量对齐之后还是它自己** ——
+     * 传 0.007 进去拿回 0.007，功能看起来像没生效。这里要的是"**再进一格**"。
+     */
+    const next = Number(((Math.floor(ratio + 1e-9) + 1) * info.stepSize).toFixed(decimals));
+    /* 超出 `maxQty` 时**返回 0 而不是夹到上限** —— 夹过去会变成"比要求的多很多"。 */
+    if (next < info.minQty || (info.maxQty > 0 && next > info.maxQty)) return 0;
+    return next;
+  }
+
   roundPriceValue(symbol: string, price: number, direction: 'up' | 'down' | 'nearest' = 'nearest'): number {
     const info = this.require(symbol);
     return roundPrice(price, info.tickSize, stepDecimals(String(info.tickSize)), direction);
