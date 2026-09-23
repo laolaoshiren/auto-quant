@@ -68,7 +68,10 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'get_performance',
     describe:
-      'Read the realised trading performance over a window. Use this first when you need to know whether the account is winning or losing, and why.',
+      'Read the realised trading performance over a window. Use this first when you need to know whether the account is winning or losing, and why. ' +
+      '**Also read `byCloseReason`** — it breaks the same window down by exit reason and, for each, puts the **average peak unrealised profit next to the average actually booked** (both in margin terms, so `giveBackPercent` is directly comparable). ' +
+      'That pair is the only way to see "I keep giving the profit back at the same place": a group whose `avgPeakPercent` is far above its `avgNetPercent` is leaking on the exit side. ' +
+      'It is deliberately a measurement, not a recommendation — whether the fix is your breakeven line, your take-profit placement, or your exit process is your call.',
     args: {
       window: {
         type: 'string',

@@ -684,7 +684,72 @@ interface PositionRow {
   entry_order_id: string | null;
 }
 
+/**
+ * 一行「按平仓原因聚合的 峰值 vs 落袋」—— 见 `positions.peakVsRealised()`。
+ *
+ * 百分比都是**保证金口径**（`trades.pnl_percent` 与 `positions.peak_pnl_percent`
+ * 同源），与提示词里"浮盈 X%"的说法一致。
+ */
+export interface PeakVsRealisedRow {
+  closeReason: string;
+  trades: number;
+  /** 这一组的净盈亏合计（含手续费与资金费）。 */
+  netPnl: number;
+  /** 平均落袋（保证金口径 %）。 */
+  avgNetPercent: number | null;
+  /** 平均峰值浮盈（保证金口径 %）—— 接不到持仓行时为 `null`。 */
+  avgPeakPercent: number | null;
+  maxPeakPercent: number | null;
+  /** 这一组里净盈亏为正的笔数。 */
+  profitable: number;
+}
+
 export const positions = {
+  /**
+   * **峰值浮盈 → 实际落袋**的对照，**按平仓原因分组**。
+   *
+   * ## 为什么需要它（用户的原话：「我看到历史成交大多是提示：移动止损（保本离场）」）
+   *
+   * 实测那台机器人：**13 笔止损类平仓的平均峰值浮盈 2.84%、平均落袋只有 0.42%**
+   * —— 回吐约 85%。而它自己的止盈目标是 3%。
+   *
+   * `trades.performanceSince()` 给的是"总净盈亏、胜率、平均盈亏"，**看不出这件事**：
+   * 那些交易全都记成"盈利"，只是每笔只赚几分钱。要看出"**我在同一个地方把利润
+   * 还回去**"，必须把**峰值**和**落袋**放在一起、按原因分组 ——
+   * 而 `peak_pnl_percent` 只存在于**持仓行**，成交行里没有这一列。
+   *
+   * 与 `get_lessons` 的 `recurringTags`、`get_experiments` 的 `repeatedFields`
+   * 是同一条思路：**单条说的是"这一次"，聚合说的是"我一直在同一个地方"。**
+   * 而**数这件事该由程序做** —— 不该指望模型每次自己从一列散记录里翻。
+   *
+   * ## 关联键是 `symbol` + `opened_at`
+   *
+   * 两个仓储各写各的表，关联只能靠这两个字段（同一次开仓，两边的值同源）。
+   * 用 `LEFT JOIN`：接不上的行（老记录、迁移前的手工数据）仍然计入成交那一侧，
+   * 只是峰值为 `NULL` —— **宁可少一个数，也不要凭空丢掉一笔交易**。
+   */
+  peakVsRealised(traderId: number, sinceIso: string): PeakVsRealisedRow[] {
+    return getDb().all<PeakVsRealisedRow>(
+      `SELECT t.close_reason                                    AS closeReason,
+              COUNT(*)                                          AS trades,
+              ROUND(SUM(t.net_pnl), 4)                          AS netPnl,
+              ROUND(AVG(t.pnl_percent), 2)                      AS avgNetPercent,
+              ROUND(AVG(p.peak_pnl_percent), 2)                 AS avgPeakPercent,
+              ROUND(MAX(p.peak_pnl_percent), 2)                 AS maxPeakPercent,
+              SUM(CASE WHEN t.net_pnl > 0 THEN 1 ELSE 0 END)    AS profitable
+         FROM trades t
+         LEFT JOIN positions p
+                ON p.trader_id = t.trader_id
+               AND p.symbol = t.symbol
+               AND p.opened_at = t.opened_at
+        WHERE t.trader_id = ? AND t.closed_at >= ?
+        GROUP BY t.close_reason
+        ORDER BY trades DESC`,
+      traderId,
+      sinceIso,
+    );
+  },
+
   open(traderId: number): PositionRow[] {
     return getDb().all<PositionRow>(
       "SELECT * FROM positions WHERE trader_id = ? AND status = 'open' ORDER BY opened_at",
