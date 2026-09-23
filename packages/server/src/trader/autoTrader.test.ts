@@ -1687,6 +1687,92 @@ test('运行期确实没记的回合，对账必须补录（#4 POWERUSDT 那种�
   assert.ok(Math.abs(rows[0]!.pnl - 0.6563) < 1e-9, '毛盈亏取自交易所，不得重算');
 });
 
+test('★ 同标的、同数量、同入场价的两个回合：必须按开仓时刻挑对那一个', async () => {
+  /*
+   * Why this test exists —— 实盘事故（用户的原话：
+   * 「机器人未运行时平仓是什么意思？首先我没有关闭过机器人」）。
+   *
+   * 两笔 HYPEUSDT 的回合撞在同一个 key 上：
+   *
+   *     #111  0.21 @ 97.2 → 97.575   opened 01:09  closed 05:21
+   *     #110  0.21 @ 97.2 → 96.451   opened 05:53  closed 07:54
+   *
+   * `findRoundTrip()` 的匹配键是 `symbol + quantity + entryPrice`（**不含时间**），
+   * 而 `find(...)` 取第一个 —— 于是 #110 的往返被认成了 #111 的：`closedAt` 与
+   * `exitPrice` 全套是错的值，再拿这组错参数去 `findDuplicate()` 必然命中 #111，
+   * 运行期记账被跳过；这笔真实成交最后只能由兜底路径补录成 `reconciled`
+   * —— 界面上就成了「机器人未运行时平仓」，而机器人从头到尾没停过、
+   * WS 推来了成交、那张止损单在库里是 `FILLED`、本地持仓行也带着 `stop_order_id`。
+   *
+   * 这个用例把那两个回合一起摆出来，断言挑中的是**开仓时刻更近**的那一个，
+   * 而且它必须是**运行期记账**（`source: 'bot'`）而不是补录。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const open = positionStore.open(traderId)[0]!;
+  const entryAt = Date.parse(open.opened_at);
+  const { symbol, quantity: qty, entry_price: price } = open;
+
+  const fill = (
+    id: number,
+    orderId: number,
+    side: 'BUY' | 'SELL',
+    p: number,
+    t: number,
+    pnl: number,
+  ) => ({
+    symbol,
+    id,
+    orderId,
+    side,
+    positionSide: 'BOTH' as const,
+    price: String(p),
+    qty: String(qty),
+    quoteQty: String(p * qty),
+    realizedPnl: String(pnl),
+    marginAsset: 'USDT',
+    commission: '0.24',
+    commissionAsset: 'USDT',
+    time: t,
+    maker: false,
+    buyer: side === 'BUY',
+  });
+
+  /* ① 两小时前的**另一个**回合：同样的数量与入场价，只有时间与出场价不同。 */
+  const earlier = entryAt - 2 * 3600_000;
+  broker.userTrades = [
+    fill(1, 9001, 'BUY', price, earlier, 0),
+    fill(2, 9002, 'SELL', price + 100, earlier + 600_000, 20),
+    /* ② **本次**的回合 —— 出场价在入场价**之下**，用它来区分挑中的是哪一个。 */
+    fill(3, 9003, 'BUY', price, entryAt, 0),
+    fill(4, 9004, 'SELL', price - 100, entryAt + 300_000, -20),
+  ];
+  broker.simulateExchangeClose();
+
+  await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+
+  const rows = tradeStore.list(traderId);
+  const mine = rows.find((t) => t.exitPrice < price);
+  assert.ok(
+    mine,
+    `必须有一行是**本次**那个回合（出场 ${price - 100}）。实际：` +
+      JSON.stringify(rows.map((r) => ({ exit: r.exitPrice, reason: r.closeReason, source: r.source }))),
+  );
+  /*
+   * ⚠️ **这一条才是用户看到的那句话。**
+   *
+   * `source: 'bot'` = 运行期记账（本地持仓行 + 交易所成交一起看出来的），
+   * 而 `'reconciled'` = 兜底补录 —— 后者在界面上显示成「**机器人未运行时平仓**」。
+   * 机器人当时明明在跑，那个措辞是假的。
+   */
+  assert.equal(
+    mine.source,
+    'bot',
+    `本次平仓发生在运行期，必须是运行期记账；实际是 ${mine.source}（界面上会写成"机器人未运行时平仓"）`,
+  );
+});
+
 test('对账重复执行是幂等的：第二遍不再插手', async () => {
   /*
    * Why this test exists —— §2.5 的原话是「对账是幂等的：重复执行只修正、不重复插入」。
