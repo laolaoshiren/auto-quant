@@ -35,13 +35,33 @@ export interface TokenPayload {
 /**
  * 会话有效期。
  *
- * 原先写死 7 天，对一台「登进去就能下真实订单」的控制台来说太长了：
- * 令牌一旦泄漏（浏览器残留、代理日志、备份），攻击者有一个完整工作周的时间窗口。
- * 这里改成 12 小时 —— 覆盖一整天的交易时段，操作员不需要中途重新登录，
- * 而泄漏的令牌最多活半天。配合 `credAt` 撤销（改密码即作废全部旧令牌），
- * 长尾风险由「可撤销」兜住，而不是靠 TTL 兜。
+ * ## 为什么是 30 天（用户的原话：「登录状态会莫名其妙丢失」）
+ *
+ * 这里原来是 **12 小时**。那是错的 —— 它意味着「昨晚登录、今天下午回来」就掉线，
+ * 而这是一台**操作员自己家的**控制台（单用户、`hasOwner`），不是共享的门户。
+ * 用户实测被踢，原话是「系统应该设计成用户不点击退出，那么就不会丢失登录状态」。
+ *
+ * 所以改成长寿命，**同时**在 `requireAuth` 里做**滑动续期**：只要还有请求在跑，
+ * 令牌就一路往后延（剩余不到一半时换一张新的，通过响应头回传）。
+ * 于是实际行为是「**在用就不会掉**」，而不是「每天到点必掉」。
+ *
+ * ## 长 TTL 的风险由什么兜住
+ *
+ * 不是靠 TTL，而是靠**可撤销**：`credAt` 与数据库里的
+ * `users.credentials_changed_at` 等值比较 —— **改一次密码就作废此前签发的全部令牌**
+ * （`isTokenRevoked` 的注释写了为什么用等值而不是时间比较）。
+ * 也就是说泄漏的令牌最多活到"操作员发现并改密码"为止，而不是"活 30 天"。
  */
-export const TOKEN_TTL_SECONDS = 12 * 3600;
+export const TOKEN_TTL_SECONDS = 30 * 24 * 3600;
+
+/**
+ * 服务端在这个响应头里回传一个**续过期的令牌**。
+ *
+ * 用响应头而不是"另开一个 `/refresh` 端点"：续期不该是一次额外的往返，
+ * 也不该是一个需要前端记住何时调用的约定 —— 它挂在**每一次已经发生的请求**上，
+ * 前端只有一行 `if (header) setToken(header)`。
+ */
+export const REFRESHED_TOKEN_HEADER = 'x-refreshed-token';
 
 function base64url(input: Buffer | string): string {
   return Buffer.from(input).toString('base64url');
@@ -158,8 +178,40 @@ export function requireAuth(secret: string, isRevoked?: (payload: TokenPayload) 
       await reply.code(401).send({ error: '登录状态已失效（账户凭据已变更），请重新登录' });
       return;
     }
+    /*
+     * ── 滑动续期 ─────────────────────────────────────────────────────────
+     *
+     * 每一次**已经通过校验**的请求都顺手看一眼令牌还剩多久，剩余不到一半就换一张
+     * 新的、放进响应头。前端把它存回去，于是「只要在用就不会掉线」。
+     *
+     * ⚠️ **放在这里而不是一个 `/refresh` 端点**：那样要多一次往返，而且前端必须
+     * 自己记住"什么时候该续"（忘了就是被踢）。挂在这条所有受保护路由都必经的
+     * 路径上，续期就是幂等的、无需任何人记得的事。
+     *
+     * ⚠️ **只有签得动才续**，而且用**原令牌里的 `credAt`**（不是重新查库）——
+     * 续期不该改变任何一条授权事实，它只是把同一个身份的有效期往后推。
+     */
+    const refreshed = refreshIfStale(payload, secret);
+    if (refreshed) reply.header(REFRESHED_TOKEN_HEADER, refreshed);
     (request as AuthedRequest).user = payload;
   };
+}
+
+/**
+ * 令牌剩余不足一半寿命时，签一张同身份的新令牌；否则返回 `null`。
+ *
+ * 阈值取**一半**而不是"快过期了再换"：一次慢请求、一次时钟偏移都可能让
+ * "还剩 5 分钟"直接跨过零点。换得早一点，代价只是一条响应头。
+ */
+export function refreshIfStale(payload: TokenPayload, secret: string): string | null {
+  const now = Math.floor(Date.now() / 1000);
+  const lifetime = payload.exp - payload.iat;
+  if (!Number.isFinite(lifetime) || lifetime <= 0) return null;
+  if (payload.exp - now > lifetime / 2) return null;
+  return signToken(
+    { sub: payload.sub, username: payload.username, role: payload.role, credAt: payload.credAt },
+    secret,
+  );
 }
 
 /** Generate a readable, high-entropy password for the first-run account. */

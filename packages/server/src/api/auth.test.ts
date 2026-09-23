@@ -20,6 +20,7 @@ import {
   TOKEN_TTL_SECONDS,
   extractToken,
   isTokenRevoked,
+  refreshIfStale,
   signToken,
   verifyToken,
   type TokenPayload,
@@ -39,6 +40,63 @@ function payloadOf(token: string): TokenPayload {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  滑动续期                                                                    */
+/* -------------------------------------------------------------------------- */
+
+test('★ 令牌过半寿命时自动续签，没过半不签 —— 「在用就不会掉线」', () => {
+  /*
+   * Why this test exists —— 用户的原话：
+   *
+   *   「登录状态会莫名其妙丢失（系统应该设计成用户不点击退出，那么就不会丢失
+   *     登录状态）」
+   *
+   * 根因是 TTL 只有 12 小时：昨晚登录、今天下午回来就掉线。改法有**两半** ——
+   * 拉长 TTL（那只是把问题推远）**加上滑动续期**（这一半才是"在用就不会掉"）。
+   *
+   * 这个用例钉的是第二半，而且要同时钉住**边界的两侧**：没过半就不该换
+   * （否则每条请求都签一张新令牌，等于白白扩大泄漏面），过半就必须换。
+   */
+  const now = Math.floor(Date.now() / 1000);
+  const payload = { sub: 1, username: 'admin_abc123', role: 'owner' as const, credAt: 0 };
+
+  // 还剩 60% 寿命 —— 不动。
+  assert.equal(
+    refreshIfStale({ ...payload, iat: now - TOKEN_TTL_SECONDS * 0.4, exp: now + TOKEN_TTL_SECONDS * 0.6 }, SECRET),
+    null,
+    '刚签发不久的令牌不该被换掉 —— 每条请求都换等于无限延长泄漏面',
+  );
+
+  // 还剩 40% —— 换一张。
+  const refreshed = refreshIfStale(
+    { ...payload, iat: now - TOKEN_TTL_SECONDS * 0.6, exp: now + TOKEN_TTL_SECONDS * 0.4 },
+    SECRET,
+  );
+  assert.ok(refreshed, '过半之后必须续签，否则"在用就不会掉"这句话不成立');
+
+  const back = verifyToken(refreshed, SECRET);
+  assert.ok(back, '续签出来的必须是张合法令牌');
+  assert.equal(back.sub, 1);
+  assert.equal(back.username, 'admin_abc123');
+  /*
+   * ⚠️ **`credAt` 必须原样带过去。**
+   *
+   * 它是撤销机制的钥匙：改一次密码就把 `users.credentials_changed_at` 改掉，
+   * 于是所有带着旧 `credAt` 的令牌立刻失配。如果续签时把它重新读一遍（或者清零），
+   * 一个**已经该被作废的会话就能靠"续期"活下来** —— 那等于把撤销机制整个绕过去。
+   */
+  assert.equal(back.credAt, 0, '续签不得改变身份，也不得绕过 credAt 撤销');
+  assert.ok(back.exp - now > TOKEN_TTL_SECONDS * 0.9, '新令牌应当拿到接近完整的寿命');
+});
+
+test('寿命信息不合理的令牌不续签（宁可让它自然过期）', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = { sub: 1, username: 'admin_abc123', role: 'owner' as const, credAt: 0 };
+  // `exp === iat`（零寿命）：拿它去算"过半"会除出 0，续签只会把一张坏令牌变成
+  // 一张看起来正常的新令牌 —— 那比让它过期糟。
+  assert.equal(refreshIfStale({ ...payload, iat: now, exp: now }, SECRET), null);
+});
+
+/* -------------------------------------------------------------------------- */
 /*  签发与校验                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -50,11 +108,21 @@ test('签发的令牌可以通过校验，并且带回凭据时间戳', () => {
   assert.equal(payload.credAt, 1_700_000_000_000);
 });
 
-test('默认有效期是 12 小时 —— 不是原来的 7 天', () => {
+test('默认有效期是 30 天，而且"在用就不会掉"靠的是滑动续期', () => {
   const token = mint();
   const payload = payloadOf(token);
   assert.equal(payload.exp - payload.iat, TOKEN_TTL_SECONDS);
-  assert.equal(TOKEN_TTL_SECONDS, 12 * 3600);
+  /*
+   * 这个数变过两次：7 天 → 12 小时 → 30 天。
+   *
+   * 中间那一版（12 小时）是错的 —— 它意味着"昨晚登录、今天下午回来"就掉线，
+   * 而这是一台操作员自己家的单用户控制台。用户实测被踢，原话是「登录状态会
+   * 莫名其妙丢失（系统应该设计成用户不点击退出，那么就不会丢失登录状态）」。
+   *
+   * ⚠️ 光把这个数调大只解决一半问题（闲置久了照样掉）。另一半是
+   * `requireAuth` 里的滑动续期 —— 见上面那两条用例。**两个一起才是"不点退出就不丢"。**
+   */
+  assert.equal(TOKEN_TTL_SECONDS, 30 * 24 * 3600);
 });
 
 test('过期令牌被拒绝', () => {
