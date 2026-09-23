@@ -1667,6 +1667,18 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       });
       return { live: true, account, positions, error: undefined as string | undefined };
     } catch (error) {
+      /*
+       * ⚠️ **这条日志是必须的，不是可选的。**
+       *
+       * 这个 `catch` 原来**什么都不打**：交易所读失败时静默返回 `live: false`，
+       * 而调用方会把它当成"机器人没在跑"、回退到本地镜像 —— 于是界面上出现
+       * 一个已经不存在的持仓、几秒后又消失（用户报的那个现象）。
+       *
+       * 那种故障**没有留下任何痕迹**，只能靠盯着界面看。一条 warn 让"到底是不是
+       * 交易所读数在失败"变成一个可以查的问题。频率有上限：控制台的持仓轮询
+       * 是 30 秒一次，所以最坏也只是每 30 秒一行。
+       */
+      log.warn(`机器人 #${traderId} 的交易所读数失败，本轮不回退到本地镜像：${(error as Error).message}`);
       return { live: false, account: null, positions: [], error: (error as Error).message };
     }
   };
@@ -1713,13 +1725,37 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     };
   });
 
-  app.get('/api/traders/:id/positions', authed, async (request) => {
+  app.get('/api/traders/:id/positions', authed, async (request, reply) => {
     const id = traderIdOf(request);
-    // Prefer the exchange's own view; fall back to the local mirror when the
-    // trader is stopped or the exchange is unreachable.
     const live = await liveExchangeView(id);
-    if (live.positions.length > 0 || live.live) return live.positions;
 
+    /*
+     * ── 读得到交易所就用交易所的；**读不到时不要拿本地镜像冒充** ──────────
+     *
+     * `live.live === false` 有**两个完全不同的原因**，而它们原来被当成了一回事：
+     *
+     *   1. **机器人没在跑** —— 此时本地镜像是唯一的真相，必须返回它；
+     *   2. **读交易所失败**（网络抖动、限流、连接超时）—— 此时本地镜像**可能已经过期**：
+     *      仓位刚在交易所平掉、而对账还没跑，本地那一行还写着 `open`。
+     *
+     * 第二种情况下把镜像返回出去，界面就会**先显示一个已经不存在的持仓、几秒后又
+     * 让它消失**（用户的原话：「会显示不存在的订单（实际是没有的，会出现几秒钟
+     * 然后又突然消失）」）。而本地镜像是**回退值**：它的权益、标记价、浮盈全是
+     * 占位零（见下面那段 map），也就是说那份"持仓"从数字上就不可信。
+     *
+     * **一个会闪烁的表格比一个说"读不到"的表格更糟** —— 前者让人怀疑整张表，
+     * 后者只说明这一次读数没成功。所以这里回 503：前端拿到非 2xx 会**保留上一次
+     * 成功的交易所读数**（`usePolled` 的既有行为），界面于是停在"最后一次真实读数"
+     * 上，而不是跳到一个本地猜的版本。
+     */
+    if (live.live) return live.positions;
+
+    if (live.error) {
+      reply.code(503);
+      return { error: `暂时读不到交易所持仓：${live.error}` };
+    }
+
+    /* 机器人没在跑 —— 本地镜像是唯一的真相，照旧返回。 */
     return positionStore.open(id).map((row) => ({
       id: row.id,
       traderId: row.trader_id,
