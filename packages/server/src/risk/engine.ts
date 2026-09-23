@@ -38,6 +38,19 @@ export interface RiskEnvironment {
   minNotionalOf(symbol: string): number;
   /** Rounds a notional to a tradable quantity; returns 0 when unrepresentable. */
   quantityFor(symbol: string, notionalUsd: number, price: number): number;
+  /**
+   * 把数量**向上**对齐到交易所的最小变动单位 —— 「上取一档」那个方向。
+   *
+   * ## 为什么风控需要这个方向
+   *
+   * 取整必须向下（多买一点就是多冒一点风险），但**向下之后恰好掉到最低名义之下**
+   * 属于"差一档"，不是"这笔不成立"。直接拒会白白放掉机会 —— 实测 ETHUSDT 那一笔
+   * 差 $0.53，而上取一档只比模型要的多 0.7%。
+   *
+   * **可选**：不实现时引擎退回旧行为（到门槛之下就拒），所以这个口子可以逐个实现
+   * 慢慢接。接到之后**该不该进位仍由引擎判**（它要连带检查名义比例与保证金上限）。
+   */
+  quantityUpFor?(symbol: string, quantity: number): number;
   /** New entries already taken during the current cycle. */
   entriesThisCycle: number;
   /** New entries taken in the trailing hour. */
@@ -1015,7 +1028,7 @@ export class RiskEngine {
     }
 
     /* --- 12. Tradability ------------------------------------------------- */
-    const quantity = env.quantityFor(symbol, notional, price);
+    let quantity = env.quantityFor(symbol, notional, price);
     if (quantity <= 0) {
       return {
         ok: false,
@@ -1025,7 +1038,42 @@ export class RiskEngine {
 
     // Re-derive the notional from the actually-tradable quantity so that every
     // recorded figure matches what the exchange will really fill.
-    const finalNotional = quantity * price;
+    let finalNotional = quantity * price;
+
+    /*
+     * ⚠️ **向下取整掉到最低名义之下时，先试一档向上 —— 不要直接拒。**
+     *
+     * 取整方向必须向下（多买一点就是多冒一点风险），但**向下之后恰好掉到门槛之下**
+     * 属于"差一档"，不是"这笔不成立"。直接拒会白白放掉一次机会。
+     *
+     * 实测（用户的原话：「仅仅差了 0.53，这是不是模型计算问题？这种系统是否给
+     * 一定容错帮他补齐？（不然导致错失机会？）」）：ETHUSDT 报 $22.00 名义、
+     * 价格 2768.18、`stepSize` 0.001 —— `$22 / 2768.18 = 0.007947`，
+     * **向下取整 0.007 = $19.47**，差 $0.53 没够到 $20 的门槛，整笔被拒。
+     * 而**上取一档是 0.008 = $22.15** —— 只比模型要的多 0.7%。
+     *
+     * ## 这不是放宽风控
+     *
+     * 进位后的名义**必须仍然落在这一步之前就已经算好的两个上限之内**：
+     * `maxNotionalByRatio`（名义比例上限）与 `spendable`（可用保证金）。
+     * 也就是说它只是"在允许的空间里把数量凑到能下单"，一条约束都没动。
+     * 而门槛本身（`effectiveMin`）也一个字没改 —— 越过不了就还是拒。
+     */
+    if (finalNotional < effectiveMin && env.quantityUpFor) {
+      const bumped = env.quantityUpFor(symbol, quantity);
+      const bumpedNotional = bumped * price;
+      const withinRatio = bumpedNotional <= maxNotionalByRatio + 1e-9;
+      const withinMargin = bumpedNotional / leverage <= spendable + 1e-9;
+      if (bumped > quantity && withinRatio && withinMargin) {
+        adjustments.push(
+          `数量从 ${quantity} 上取一档到 ${bumped}（名义 $${finalNotional.toFixed(2)} → ` +
+            `$${bumpedNotional.toFixed(2)}），以越过最低名义 $${effectiveMin.toFixed(2)}。`,
+        );
+        quantity = bumped;
+        finalNotional = bumpedNotional;
+      }
+    }
+
     if (finalNotional < effectiveMin) {
       return {
         ok: false,
