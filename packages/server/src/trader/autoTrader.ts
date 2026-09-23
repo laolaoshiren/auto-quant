@@ -2169,6 +2169,8 @@ export class AutoTrader {
       minNotionalOf: (symbol) => this.deps.registry.minNotional(symbol),
       quantityFor: (symbol, notionalUsd, price) =>
         this.deps.registry.notionalToQuantity(symbol, notionalUsd, price),
+      /* 「上取一档」—— 向下取整恰好掉到最低名义之下时用它，见 `engine.ts` 那一段。 */
+      quantityUpFor: (symbol, quantity) => this.deps.registry.roundQuantityUp(symbol, quantity),
       entriesThisCycle: 0,
       entriesLastHour,
       /*

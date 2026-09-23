@@ -886,6 +886,37 @@ export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbol
   const rejected = plan.counts.rejected;
   const failed = plan.counts.failed;
 
+  /*
+   * ── `skip` 折叠 ────────────────────────────────────────────────────────
+   *
+   * 提示词现在要求模型对**每一个候选标的**都留一条决策（不做的用 `skip`，带
+   * `setup_score`，见 `decision.ts` 里那段）—— 那是为了让它能校准自己的入场门槛。
+   * 但一轮有二十个候选，**决策流于是被十几条"跳过"刷满**，真正该看的那一两条
+   * 被挤到看不见的地方。用户的原话：「显示太多币种（把那些置信度低的或者你看看
+   * 用什么做参考把不重要的隐藏了，只保留重要的）」。
+   *
+   * 所以：**有动作的照旧逐张显示；`skip` 收进一个可展开的折叠块**。
+   * 信息一条没丢（展开就在，而且每条的评分与理由都在），首屏只剩需要看的东西。
+   *
+   * ⚠️ **必须带着原下标一起过滤。** `plan.outcomes` 是**按 `record.decisions`
+   * 的下标对齐**的（见 `planExecution` 的说明），过滤之后下标会错位 ——
+   * 那样"这张卡片的结果"就会挂到别的决策上去。折叠块里那批也一样要带。
+   */
+  const visible = record.decisions
+    .map((decision, index) => ({ decision, index }))
+    .filter(({ decision }) => decision.action !== 'skip');
+  const skippedRows = record.decisions
+    .map((decision, index) => ({ decision, index }))
+    .filter(({ decision }) => decision.action === 'skip');
+  /** 被跳过的那批里分最高的一个 —— 折叠标题上给一个可比较的数，省得非展开不可。 */
+  const topSkippedScore = skippedRows.reduce<number | null>(
+    (best, { decision }) =>
+      typeof decision.setupScore === 'number' && (best === null || decision.setupScore > best)
+        ? decision.setupScore
+        : best,
+    null,
+  );
+
   return (
     /*
      * `data-record-id` 是**给滚动锚点用的 DOM 标记**（见 `DecisionFeed` 里那个
@@ -939,7 +970,7 @@ export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbol
           // 决策之间只用**间距**分隔（§3），不加分隔线：一条细线在深色底上会
           // 变成第二层边框，而这个盒子里只该有一层。
           <div className="space-y-2.5">
-            {record.decisions.map((decision, index) => (
+            {visible.map(({ decision, index }) => (
               <DecisionRow
                 key={`${decision.symbol}-${index}`}
                 decision={decision}
@@ -947,6 +978,30 @@ export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbol
                 outcome={plan.outcomes[index] ?? null}
               />
             ))}
+            {/*
+              跳过的那批 —— 用原生 `<details>`，**不需要任何状态**。
+              折叠而不是删掉：那十几条里有 `setup_score`，而"我把哪些标的打了几分"
+              正是操作员核对模型判断时的原始材料（也是模型自己复盘校准门槛的原料）。
+            */}
+            {skippedRows.length > 0 && (
+              <details className="rounded-md border border-base-800 px-2.5 py-1.5">
+                <summary className="cursor-pointer select-none text-xs text-ink-faint">
+                  另有 {skippedRows.length} 个标的看过未做
+                  {topSkippedScore !== null ? `（最高 ${topSkippedScore} 分）` : ''}
+                  {' '}—— 展开可见各自的评分与理由
+                </summary>
+                <div className="mt-2.5 space-y-2.5">
+                  {skippedRows.map(({ decision, index }) => (
+                    <DecisionRow
+                      key={`skip-${decision.symbol}-${index}`}
+                      decision={decision}
+                      price={priceOf(symbols, decision.symbol)}
+                      outcome={plan.outcomes[index] ?? null}
+                    />
+                  ))}
+                </div>
+              </details>
+            )}
           </div>
         )}
 

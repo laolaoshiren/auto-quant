@@ -124,6 +124,13 @@ function environment(overrides: Partial<RiskEnvironment> = {}): RiskEnvironment 
      * a cap must never leak in.
      */
     quantityFor: (_symbol, notionalUsd, price) => Math.floor((notionalUsd / price) * 1e6) / 1e6,
+    /**
+     * Mirrors `SymbolRegistry.roundQuantityUp` —— 与 `quantityFor` 相反的那个方向。
+     *
+     * 引擎只在"向下取整掉到最低名义之下"时才用它，而且进位后的名义还要过
+     * 名义比例上限与保证金上限两道检查（见 `reviewOpen` 第 12 步）。
+     */
+    quantityUpFor: (_symbol, quantity) => (Math.floor(quantity * 1e6 + 1e-6) + 1) / 1e6,
     entriesThisCycle: 0,
     entriesLastHour: 0,
     ...overrides,
@@ -382,6 +389,67 @@ test('rejects a position that rounds below the minimum notional', () => {
   // The ratio cap does not block it; the minimum does.
   assert.equal(verdict.approved.length, 0);
   assert.match(verdict.rejected[0]!.reason, /低于最低要求/);
+});
+
+test('★ 向下取整掉到最低名义之下时，上取一档而不是直接拒', () => {
+  /*
+   * Why this test exists —— 用户的原话：
+   *
+   *   「⚠ 被风控拒绝：取整后的数量（0.007）价值 $19.47，低于最低要求 $20.00。
+   *     仅仅差了 0.53，这是不是模型计算问题？这种系统是否给一定容错帮他补齐？
+   *     （不然导致错失机会？）」
+   *
+   * 那一笔是真实的：ETHUSDT 报 $22.00 名义、价格 2768.18、交易所 `stepSize` 0.001
+   * —— `$22 / 2768.18 = 0.007947`，向下取整 **0.007 = $19.47**，差 $0.53 没够到
+   * 门槛；而**上取一档 0.008 = $22.15**，只比模型要的多 0.7%。
+   *
+   * 这个用例把那笔交易原样复现（步长 0.001、价格 2768.18、名义 $22、门槛 $20）。
+   * 注意测试默认的 `quantityFor` 步长是 1e-6，**太细**，进位永远不生效 ——
+   * 所以这里显式换成 0.001，否则用例会"通过"却什么都没测到。
+   */
+  const symbol = 'ETHUSDT';
+  const price = 2768.18;
+  const step = 0.001;
+  const config = configWith({
+    riskControl: { ...defaultStrategyConfig().riskControl, minPositionSize: 20 },
+  });
+  const verdict = engine.review(
+    [
+      openDecision({
+        symbol,
+        positionSizeUsd: 22,
+        /*
+         * 止损放宽到 0.5%（2768.18 → 2754.34）：截图里那笔用的是 2764（0.151%），
+         * 而**这个仓库另有一条独立的规则**会因此拒绝它（止损距离必须 ≥ 往返成本的
+         * 3 倍）—— 那条规则与本次要测的"取整方向"是两件事，混在一起就测不到重点。
+         */
+        stopLoss: price * 0.995,
+        takeProfit: 2833,
+      }),
+    ],
+    environment({
+      config,
+      snapshots: new Map([[symbol, snapshot(symbol, price)]]),
+      quantityFor: (_s, notionalUsd, p) => Math.floor(notionalUsd / p / step) * step,
+      quantityUpFor: (_s, q) => (Math.floor(Math.round(q / step) + 1e-9) + 1) * step,
+    }),
+  );
+
+  assert.equal(
+    verdict.approved.length,
+    1,
+    `这一笔应当被放行，实际被拒的理由：${JSON.stringify(verdict.rejected.map((r) => r.reason))}`,
+  );
+  const approved = verdict.approved[0]!;
+  assert.ok(
+    Math.abs(approved.positionSizeUsd - 0.008 * price) < 1e-6,
+    `期望上取一档到 0.008（$${(0.008 * price).toFixed(2)}），实际 $${approved.positionSizeUsd.toFixed(2)}`,
+  );
+  assert.match(
+    approved.adjustments.join('；'),
+    /上取一档/,
+    '进位这件事必须写进 adjustments —— 否则账上多出来的那点名义没有出处',
+  );
 });
 
 test('shrinks the notional to fit the available margin', () => {
