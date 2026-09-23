@@ -3386,6 +3386,35 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
    * see `roundTripKey` — rather than on time, because the local record's
    * `opened_at` is when the runtime decided and the exchange's is when the order
    * filled.
+   *
+   * ## ⚠️ 但那个 key **不是唯一的** —— 同标的的两个回合可能撞在一起
+   *
+   * 实测事故（用户的原话：「机器人未运行时平仓是什么意思？首先我没有关闭过机器人」）：
+   *
+   *     上一笔 #111  HYPEUSDT 0.21 @ 97.2 → 97.575   opened 01:09  closed 05:21
+   *     这一笔 #110  HYPEUSDT 0.21 @ 97.2 → 96.451   opened 05:53  closed 07:54
+   *
+   * **同样的标的、同样的数量、同样的入场价** —— `roundTripQueryKey` 完全一致，
+   * 而 `find(...)` 取到的是时间更早的那个（`#111`）。于是：
+   *
+   *   · `closedAt` 被替换成 `#111` 的平仓时刻、`exitPrice` 变成 `97.575`；
+   *   · 再拿这组**错的**参数去 `findDuplicate()`，`|closedAt − #111.closed_at| = 0`
+   *     必然命中 `#111`，于是运行期记账直接跳过（「此前已入账（第 #111 笔）」）；
+   *   · 这笔真实成交最后只能由兜底路径补录，**平仓原因被写成 `reconciled`**
+   *     —— 界面上就成了「机器人未运行时平仓」，而机器人从头到尾没停过，
+   *     WS 把成交推来了、那张止损单在库里是 `FILLED`、本地持仓行也带着
+   *     `stop_order_id`：**原因本来完全查得到。**
+   *
+   * ## 修法：key 仍然只做**筛选**，时间只做**排序**
+   *
+   * 注释原来给的理由（本地 `opened_at` 是决策时刻、交易所的是成交时刻，两者不同源）
+   * 说的是**不能拿时间做等式**，而不是"时间没有用"。所以这里：
+   *
+   *   · 时间**不参与**过滤（不同源的问题原样保留，行为不会因此变紧）；
+   *   · 只在**已通过 key 筛选**的候选里，取开仓时刻最接近 `local.opened_at` 的那个。
+   *
+   * 两个候选的时间差都落在"不同源误差"之内时，选哪个都对 —— 那说明它们本就同源。
+   * 而像上面那种差 4.7 小时的情形，这一步就是决定性的。
    */
   private async findRoundTrip(local: PositionRow): Promise<ReconstructedTrade | null> {
     const fills = await this.deps.broker.getUserTrades(local.symbol, 50);
@@ -3403,13 +3432,17 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       quantity: local.quantity,
       entryPrice: local.entry_price,
     });
-    return (
-      completed.find(
-        (t) =>
-          roundTripQueryKey({ symbol: t.symbol, quantity: t.quantity, entryPrice: t.entryPrice }) ===
-          wanted,
-      ) ?? null
+    const matches = completed.filter(
+      (t) =>
+        roundTripQueryKey({ symbol: t.symbol, quantity: t.quantity, entryPrice: t.entryPrice }) ===
+        wanted,
     );
+    if (matches.length === 0) return null;
+    if (matches.length === 1) return matches[0]!;
+
+    const target = new Date(local.opened_at).getTime();
+    const distance = (t: ReconstructedTrade): number => Math.abs(new Date(t.openedAt).getTime() - target);
+    return matches.reduce((best, t) => (distance(t) < distance(best) ? t : best));
   }
 
   /* ---------------------------------------------------------------------- */
