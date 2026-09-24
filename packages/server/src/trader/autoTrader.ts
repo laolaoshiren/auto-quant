@@ -3202,6 +3202,15 @@ export class AutoTrader {
       openedAt: local.opened_at,
       closedAt,
       entryOrderId: authoritative?.entryOrderId ?? null,
+      /*
+       * **确定性键。** 同一笔平仓在交易所只有一个 `orderId`，所以"两条路径拿到
+       * 同一个单号"就等于"这是同一个回合" —— 不依赖任何容差窗口。
+       *
+       * 上面那些启发式判据都有边界：实测漏网的一对（ZECUSDT `#107`/`#120`）
+       * 共用同一个 `exit_order_id`，却因为平仓时刻差 6 秒（超出 2 秒窗口）
+       * 被判成两个回合，账上多记一笔 —— 而那一笔让归属权益比钱包高出 0.015。
+       */
+      exitOrderId: authoritative?.exitOrderId ?? null,
     });
     if (alreadyBooked !== null) {
       if (authoritative) {

@@ -1973,6 +1973,8 @@ export const trades = {
           openedAt: input.openedAt,
           closedAt,
           entryOrderId: input.entryOrderId,
+          /* 确定性键 —— 同一笔平仓只有一个交易所单号，见 `findDuplicate()`。 */
+          exitOrderId: input.exitOrderId,
         })
       : null;
     if (alreadyBooked !== null) return { id: alreadyBooked, created: false };
@@ -2078,6 +2080,19 @@ export const trades = {
     openedAt: string;
     closedAt?: string;
     entryOrderId?: string | null;
+    /**
+     * **平仓单的交易所单号 —— 这一组判据里唯一确定性的那个。**
+     *
+     * 一笔平仓在交易所只有一个 `orderId`，而 `trades` 里 25 行**全都有**它
+     * （`entry_order_id` 同样 100% 填充）。所以"两个回合的 `exit_order_id` 相同"
+     * 不是概率判断，是**同一个回合**的定义。
+     *
+     * 它接进来之前，去重全靠启发式（数量容差 + 价格容差 + 时间窗），而那些窗口
+     * 一定有边界 —— 实测漏网的一对（ZECUSDT `#107` / `#120`）共用一个
+     * `exit_order_id`，却因为平仓时刻差 6 秒（超出 2 秒窗口）被判成两个回合，
+     * 账上多出一笔。
+     */
+    exitOrderId?: string | null;
   }): number | null {
     /*
      * 只有带交易所身份的（ISO 毫秒时间戳）才参与判定。`closed_at` 缺省时
@@ -2085,6 +2100,30 @@ export const trades = {
      * 也不能拿"看起来差不多"当依据去吞掉一笔真实成交。
      */
     if (!input.closedAt || !/^\d{4}-\d{2}-\d{2}T/.test(input.closedAt)) return null;
+
+    /*
+     * ── 确定性判据放在最前面：**平仓单号相同就是同一个回合** ──────────────
+     *
+     * 它不看数量、不看价格、不看时间窗 —— 因为交易所的单号本身就是身份。
+     * 这一步存在与否，决定了"重复记账"是一个**有边界的启发式问题**，
+     * 还是一个**可以彻底关掉的问题**：
+     *
+     *   · 运行期记账有 `authoritative.exitOrderId`（来自成交明细）；
+     *   · 对账重建有 `trip.exitOrderId`（来自同一份成交明细）；
+     *   两者是**同一笔平仓**，单号逐字相同。
+     *
+     * ⚠️ 仍然要求 `closedAt` 存在（上面那道门）—— 老记录、手工插入的行没有单号时，
+     * 走下面的启发式，行为与以前完全一致。
+     */
+    if (input.exitOrderId && input.exitOrderId.length > 0) {
+      const exact = getDb().get<{ id: number }>(
+        'SELECT id FROM trades WHERE trader_id = ? AND symbol = ? AND exit_order_id = ? ORDER BY id ASC LIMIT 1',
+        input.traderId,
+        input.symbol,
+        input.exitOrderId,
+      );
+      if (exact) return exact.id;
+    }
 
     const byOrder =
       input.entryOrderId && input.entryOrderId.length > 0
@@ -2485,6 +2524,21 @@ export const trades = {
      *
      * 两组都要求 `source` 恰好一边是 `reconciled`：两行都是 `bot` 的重复属于
      * 另一类缺陷，不该混进这个报告里让人误判。
+     *
+     * ## ⚠️ 但两组都是启发式，而**单号是确定性的**
+     *
+     * 实测漏报（用户报的"归属权益和钱包对不上"）：ZECUSDT 的 `#107` 与 `#120`
+     * **共用同一个 `exit_order_id`**（`807238763718`），却因为
+     *   · 数量 0.009 vs 0.004 —— 差 0.005，超出 20% 容差（0.0018），**外层一票否决**；
+     *   · 平仓时刻差 6 秒 —— 超出 2 秒窗口；
+     * 而被这份报告整个漏掉。那一笔让归属权益比钱包高出 0.015。
+     *
+     * 所以：
+     *
+     *   ① 新增一条**最高优先**的判据 —— **两行的 `exit_order_id` 相同且非空**。
+     *      它是交易所给的身份，不需要任何容差。
+     *   ② 数量容差从外层收进启发式那一组里 —— 它不该跨分支否决单号判据
+     *      （`findDuplicate()` 里是同一个毛病，一起改了）。
      */
     return getDb().all<TradeDuplicateSuspect>(
       `SELECT
@@ -2503,15 +2557,23 @@ export const trades = {
          ON a.trader_id = b.trader_id
         AND a.symbol = b.symbol
         AND a.id < b.id
-        AND ABS(a.quantity - b.quantity) <= MAX(1e-6, ABS(a.quantity) * ${DUPLICATE_QUANTITY_TOLERANCE})
         AND (
              (
-               ABS(a.exit_price - b.exit_price) <= MAX(1e-9, ABS(a.exit_price) * ${DUPLICATE_EXIT_PRICE_TOLERANCE})
-           AND ABS((julianday(a.opened_at) - julianday(b.opened_at)) * 86400000.0) <= ${DUPLICATE_OPEN_TOLERANCE_MS}
+               a.exit_order_id IS NOT NULL AND a.exit_order_id <> ''
+           AND a.exit_order_id = b.exit_order_id
              )
           OR (
-               ABS(a.entry_price - b.entry_price) <= MAX(1e-9, ABS(a.entry_price) * ${DUPLICATE_PRICE_TOLERANCE})
-           AND ABS((julianday(a.closed_at) - julianday(b.closed_at)) * 86400000.0) <= ${DUPLICATE_REPORT_WINDOW_MS}
+               ABS(a.quantity - b.quantity) <= MAX(1e-6, ABS(a.quantity) * ${DUPLICATE_QUANTITY_TOLERANCE})
+           AND (
+                (
+                  ABS(a.exit_price - b.exit_price) <= MAX(1e-9, ABS(a.exit_price) * ${DUPLICATE_EXIT_PRICE_TOLERANCE})
+              AND ABS((julianday(a.opened_at) - julianday(b.opened_at)) * 86400000.0) <= ${DUPLICATE_OPEN_TOLERANCE_MS}
+                )
+             OR (
+                  ABS(a.entry_price - b.entry_price) <= MAX(1e-9, ABS(a.entry_price) * ${DUPLICATE_PRICE_TOLERANCE})
+              AND ABS((julianday(a.closed_at) - julianday(b.closed_at)) * 86400000.0) <= ${DUPLICATE_REPORT_WINDOW_MS}
+                )
+             )
              )
         )
         AND (a.source = 'reconciled' OR b.source = 'reconciled')
