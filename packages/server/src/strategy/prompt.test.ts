@@ -21,6 +21,8 @@ import {
   buildSystemPrompt,
   buildUserPrompt,
   candidateBudget,
+  DETAILED_CANDIDATE_COUNT,
+  detailedCandidateCount,
   emptyPromptMemory,
   estimateCandidateChars,
   estimateTokens,
@@ -300,6 +302,53 @@ test('★ 主动告诉模型它的输出空间 —— 一条过时的自我约�
   assert.match(prompt, /你的输出空间/, '必须主动说，否则它会继续自我压缩');
   assert.match(prompt, /131072/, '要给具体数字，而不是"空间很大"这种空话');
   assert.match(prompt, /已经不成立/, '要点明那条旧限制的过时性 —— 否则它没有理由改掉习惯');
+});
+
+test('★ 详细行情给几个，按预算算 —— 不再写死 5', () => {
+  /*
+   * 用户的原则：「**最大化利用模型能力、上下文**」。
+   *
+   * `DETAILED_CANDIDATE_COUNT = 5` 是照着**20 万**预算定的账（一个详细区块约
+   * 6,000 token）。而预算现在按模型能力算 —— 1M 上下文的模型拿到 **80 万**，
+   * 20 个候选全给详细也只有 12 万 token（占 15%）。
+   *
+   * 那段注释里还有个循环论证：「模型实测通常只深入看 1–2 个」——
+   * **但它当时只能看到 5 个的详细序列**。把供给限制当成了需求证据。
+   */
+  const config = defaultStrategyConfig();
+  assert.ok(
+    detailedCandidateCount(config, 800_000, 100) > 20,
+    '80 万预算下应当能给出远多于 5 个完整序列',
+  );
+  assert.equal(
+    detailedCandidateCount(config, 1, 100),
+    DETAILED_CANDIDATE_COUNT,
+    '极小预算也必须保留原来的 5 个下限 —— 这个改动不该让任何情况变差',
+  );
+  assert.equal(detailedCandidateCount(config, 800_000, 3), 3, '候选只有 3 个时不该报出更多');
+});
+
+test('★ 大预算下提示词真的把更多候选给成完整序列（不只是算了个数）', () => {
+  /*
+   * 反面保险：只断言 `detailedCandidateCount()` 的返回值，无法证明**渲染路径真的用了它**。
+   * 这一条读提示词本身 —— 那句"前 N 个给出完整指标序列"里的 N 才是模型实际看到的东西。
+   */
+  const memory = blankMemory();
+  const many = Array.from({ length: 30 }, (_, i) => snapshot(`SYM${i}USDT`, 100 + i));
+
+  const roomy = buildUserPrompt(contextWith(memory, many), 800_000);
+  const bigNote = /前 (\d+) 个给出完整指标序列/.exec(roomy);
+  assert.ok(bigNote, '候选区块必须说明给了几个完整序列');
+  assert.ok(Number(bigNote[1]) > 5, `80 万预算下应当给多于 5 个，实际 ${bigNote[1]}`);
+
+  const tight = buildUserPrompt(contextWith(memory, many.slice(0, 3)), 10_000);
+  const smallNote = /前 (\d+) 个给出完整指标序列/.exec(tight);
+  assert.ok(smallNote, '候选没被预算裁掉时要说明给了几个完整序列');
+  assert.equal(
+    Number(smallNote[1]),
+    3,
+    '3 个候选时最多只能给 3 个完整序列（下限 5 不该被撑破候选总数）',
+  );
 });
 
 test('a light strategy is allowed a much larger universe than a heavy one', () => {
