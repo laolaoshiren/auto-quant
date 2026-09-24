@@ -1071,6 +1071,41 @@ export class RiskEngine {
         );
         quantity = bumped;
         finalNotional = bumpedNotional;
+      } else if (bumped > quantity) {
+        /*
+         * ── 进位**试过了，但它会越界** —— 这一点必须说出来 ────────────────
+         *
+         * 用户的原话：「连续两次被风控（同一个币种），AI 好像没有记忆？
+         * 头一次知道了低于最低要求 $20.00 为什么第二次还是犯错？」
+         *
+         * 实盘那一对（周期 #233，两次）：BNBUSDT、`$21.00`、价格 785.34、
+         * `stepSize` 0.01、门槛 $20、名义上限 $21.97 ——
+         *
+         *     向下取整 0.02 → $15.71   < 门槛            ✗
+         *     上取一档 0.03 → $23.56   > 名义上限 $21.97  ✗
+         *
+         * **这个标的在那个账户规模下不存在任何合规数量。** 而原来给出的理由
+         * 只有前半句（"取整后低于最低要求"），于是模型读到的是"再提一点名义
+         * 就行"—— 它照做了（$21 已贴着上限），当然还是被拒。
+         *
+         * 差距不在模型的记忆：拒绝理由是通过执行回执**回传给它的**。问题是
+         * **理由里没有它能采取的行动**，于是它只能反复试同一个尺寸。
+         *
+         * 所以这里把"为什么进位也不行"和"因此该怎么做"讲全。这不是放宽风控 ——
+         * 门槛与上限一个字没动，只是把**同一个拒绝**的真实边界说清楚。
+         */
+        const ratioCap = maxNotionalByRatio;
+        const marginCap = spendable * leverage;
+        const cap = Math.min(ratioCap, marginCap);
+        const capLabel = ratioCap <= marginCap ? '名义比例上限' : '可用保证金上限';
+        return {
+          ok: false,
+          reason:
+            `取整后的数量（${quantity}）价值 $${finalNotional.toFixed(2)}，低于最低要求 $${effectiveMin.toFixed(2)}；` +
+            `而上一档数量（${bumped}）价值 $${bumpedNotional.toFixed(2)}，会超过${capLabel} $${cap.toFixed(2)}。` +
+            `**这个标的在当前账户规模下不存在任何合规的数量 —— 不要再对它提案，` +
+            `换一个价格量级更合适的标的，或者先给账户增加资金。**`,
+        };
       }
     }
 

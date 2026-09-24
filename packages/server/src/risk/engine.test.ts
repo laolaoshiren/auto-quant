@@ -452,6 +452,63 @@ test('★ 向下取整掉到最低名义之下时，上取一档而不是直接�
   );
 });
 
+test('★ 向上取一档也会越界时，理由必须说清「不存在合规数量」', () => {
+  /*
+   * 用户的原话：
+   *   「连续两次被风控（同一个币种），AI 好像没有记忆？
+   *     头一次知道了低于最低要求 $20.00 为什么第二次还是犯错？」
+   *
+   * 实盘那一对（周期 #233，两次）：BNBUSDT、报 $21.00、价格 785.34、
+   * `stepSize` 0.01、门槛 **$20**（交易所对该标的的最小名义，比配置里的
+   * `minPositionSize: 12` 更高）、名义上限 **$21.97**（权益 21.97 × 比例 1）——
+   *
+   *     向下取整 0.02 → $15.71   < 门槛            ✗
+   *     上取一档 0.03 → $23.56   > 名义上限 $21.97  ✗
+   *
+   * **这个标的在那个账户规模下不存在任何合规数量。**
+   *
+   * 而原来的理由只有前半句（"取整后低于最低要求"），模型读到的是
+   * "再提一点名义就行" —— 它照做了（$21 已经贴着上限），当然还是被拒。
+   * **差距不在它的记忆**（拒绝理由是通过执行回执回传给它的），
+   * 而在理由里**没有它能采取的行动**。
+   *
+   * 契约：理由必须说明进位也试过了、越的是哪个界，并给出"这个标的做不了"的结论。
+   */
+  const symbol = 'BNBUSDT';
+  const price = 785.34;
+  const step = 0.01;
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      minPositionSize: 20,
+      altcoinMaxPositionValueRatio: 1,
+    },
+  });
+  const verdict = engine.review(
+    [
+      openDecision({
+        symbol,
+        positionSizeUsd: 21,
+        stopLoss: price * 0.99,
+        takeProfit: price * 1.03,
+      }),
+    ],
+    environment({
+      config,
+      account: { equity: 21.97, availableBalance: 21.97, marginUsed: 0, positionCount: 0 },
+      snapshots: new Map([[symbol, snapshot(symbol, price)]]),
+      quantityFor: (_s, notionalUsd, p) => Math.floor(notionalUsd / p / step) * step,
+      quantityUpFor: (_s, q) => (Math.floor(Math.round(q / step) + 1e-9) + 1) * step,
+    }),
+  );
+
+  assert.equal(verdict.approved.length, 0, '那一笔确实开不出来');
+  const reason = verdict.rejected[0]!.reason;
+  assert.match(reason, /上一档/, '必须说清"进位也试过了"，否则模型只会继续加大名义');
+  assert.match(reason, /会超过/, '必须说清它越的是哪一个界');
+  assert.match(reason, /不存在任何合规的数量/, '必须给出"这个标的做不了"的结论，而不是只报前半句');
+});
+
 test('shrinks the notional to fit the available margin', () => {
   const config = configWith({
     riskControl: {
