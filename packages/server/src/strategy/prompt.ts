@@ -2017,6 +2017,42 @@ export function estimateTokens(text: string): number {
 export const PROMPT_TOKEN_BUDGET = 60_000;
 
 /**
+ * 上下文利用率 —— **上限的 80%**。
+ *
+ * ## 用户的原则（原话）
+ *
+ *   「在**最大化发挥模型能力**的前提下，才考虑优化模型成本 …… 这个模型最大
+ *     上下文是 1M，那么要**最大化利用模型能力、上下文**（当然也考虑安全冗余，
+ *     我记得是 80%）来使得交易更加智能、准确」
+ *
+ * 留 20% 而不是顶到 100%：`estimateTokens()` 是**估算**（1.7 字符/token），
+ * 而渲染抖动、多轮工具结果追加重放都会让实际输入比估算值大。20% 是给那些
+ * 误差的余量，不是"省钱的余量"。
+ */
+export const PROMPT_UTILISATION = 0.8;
+
+/**
+ * 给**输出**预留的空间（token）。
+ *
+ * ## 为什么必须单独留，而不能靠"输入占一半"
+ *
+ * 输入 + 输出 + 推理**共享同一个上下文窗口**。而这一轮实测确认：
+ *
+ *   · 输出上限（provider 硬限）= **393,216**（`max_tokens=1000000` 被拒：
+ *     "the valid range of max_tokens is [1, 393216]"）；
+ *   · 但实际输出量**远小于**它：推理峰值实测 28,590、正文 1–2k；
+ *   · 而这个模型**强制思考、关不掉**（`thinking:{type:disabled}` 与
+ *     `enable_thinking:false` 都被忽略，仍有 reasoning）。
+ *
+ * 所以预留取 **131,072（128k）** —— 远高于观测峰值，给"某次特别难的决策"
+ * 留出空间；又不至于像按 393,216 预留那样白扔掉 26 万 token 的上下文。
+ *
+ * 原来是"输入只能占一半"（`× 0.5`），那等于**无条件扔掉一半上下文** ——
+ * 而输出实际只用 5% 左右。那是把"省钱的保守"当成了"安全的保守"。
+ */
+export const PROMPT_OUTPUT_RESERVE = 131_072;
+
+/**
  * 候选池里**给出完整指标序列**的标的个数，其余只给摘要。
  *
  * ## 为什么是 5
@@ -2060,7 +2096,7 @@ export const DETAILED_CANDIDATE_COUNT = 5;
  * 整个输出预算花在推理上、返回空**。20 万仍然在"留足输出空间"这一侧
  * （1M 上下文的模型只用掉 20%），但比 6 万宽了三倍多。
  */
-export const PROMPT_TOKEN_CEILING = 200_000;
+export const PROMPT_TOKEN_CEILING = 800_000;
 
 /**
  * 这一轮该给多少 token 的提示词预算。
@@ -2068,17 +2104,41 @@ export const PROMPT_TOKEN_CEILING = 200_000;
  * @param inputTokenLimit 模型的输入上限；`0` 或非法值 = **不知道** → 用保守的
  *   `PROMPT_TOKEN_BUDGET`。
  *
- * 取值规则：`clamp(上限 × 0.5, 下限 6 万, 上限 20 万)`。
+ * ## 取值规则（**能力优先**，与项目原来的写法相反）
  *
- * 乘 0.5 而不是 0.8：这个系统一次请求里，**输出（含推理）占的比例很高** ——
- * 实测 `completion_tokens` 里 80%+ 是 `reasoning_tokens`。留一半给输出，
- * 而不是按"压缩阈值"的思路顶到 80%。
+ * ```
+ * budget = clamp( min(上限 × 80%, 上限 − 输出预留), 下限 6 万, 上限 80 万 )
+ * ```
+ *
+ * **两条约束取小**：
+ *
+ *   · **利用率 80%** —— 用户明确的安全冗余，留给估算误差与渲染抖动；
+ *   · **上限 − 输出预留 128k** —— 输入 + 输出共享同一个窗口，输出必须有地方写。
+ *
+ * ## ⚠️ 这一段原来写的是 `上限 × 0.5`
+ *
+ * 理由是"这个系统输出（含推理）占比很高"。**事实上确实是**（实测
+ * `reasoning_tokens` 占 `completion_tokens` 的 80%+），但**绝对量很小**：
+ * 推理峰值 28,590，而窗口是 1,000,000。
+ *
+ * **把一个 3% 的占比当成 50% 来预留，等于无条件扔掉一半上下文** ——
+ * 而那与用户"最大化利用上下文"的要求正好相反。**省钱的保守不等于安全的保守**，
+ * 这里原来把两者混在了一起。
+ *
+ * ## 换模型时会自己调节吗 —— 会
+ *
+ * 这个函数只吃 `ai_models.input_token_limit`，而那个值有两个来源：
+ * `providerDefaults()` 的兜底，以及 `/models` 的发现（`discoverModels` 会读
+ * provider 报的 `context_length`）。所以**换一个上下文更大的模型，预算自动跟着涨；
+ * 换一个更小的，自动降**，不需要改代码。
  */
 export function promptTokenBudget(inputTokenLimit: number): number {
   if (!Number.isFinite(inputTokenLimit) || inputTokenLimit <= 0) return PROMPT_TOKEN_BUDGET;
+  const byUtilisation = Math.floor(inputTokenLimit * PROMPT_UTILISATION);
+  const byRoomForOutput = inputTokenLimit - PROMPT_OUTPUT_RESERVE;
   return Math.max(
     PROMPT_TOKEN_BUDGET,
-    Math.min(Math.floor(inputTokenLimit * 0.5), PROMPT_TOKEN_CEILING),
+    Math.min(byUtilisation, byRoomForOutput, PROMPT_TOKEN_CEILING),
   );
 }
 
