@@ -213,7 +213,18 @@ const TraderInputSchema = z.object({
   name: z.string().min(1).max(80),
   exchangeAccountId: z.number().int().positive(),
   aiModelId: z.number().int().positive(),
-  strategyId: z.number().int().positive(),
+  /**
+   * 引用的策略 —— **AI 托管模式不需要它，传 `null`（或省略）**。
+   *
+   * 参数整份在 `traders.agent_config_json` 里（由 AI 自己写），策略对它不生效。
+   * 三种取值都有意义，所以是 `nullable().optional()`：
+   *   · 一个正数 → 固定策略模式引用它；
+   *   · `null`   → 明确表示"不引用任何策略"（AI 托管）；
+   *   · 省略     → `PATCH` 时不改动这个字段。
+   *
+   * 模式与它是否匹配由下面的端点校验 —— 那一层才知道 `mode`。
+   */
+  strategyId: z.number().int().positive().nullable().optional(),
   cycleIntervalMinutes: z.number().int().min(1).max(1440).default(15),
   /**
    * Starting equity, used as the baseline for the return percentage.
@@ -1431,7 +1442,30 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     const account = exchanges.get(parsed.data.exchangeAccountId);
     if (!account) throw new Error('未知的交易所账户');
     if (!aiModels.get(parsed.data.aiModelId)) throw new Error('未知的 AI 模型');
-    if (!strategies.get(parsed.data.strategyId)) throw new Error('未知的策略');
+
+    /*
+     * ── 策略：**两种模式的要求正好相反** ────────────────────────────────
+     *
+     * 用户的原话：「智能托管模式完全独立出来……就算策略工坊里面默认策略 —
+     * 稳健就算删除、没有任何策略，都不影响智能托管模式（做到完全独立）」。
+     *
+     *   · **AI 托管**：**不引用任何策略** —— 参数整份在 `agent_config_json` 里。
+     *     所以连"必须选一个"这个动作都取消了，`strategyId` 直接写 `null`。
+     *   · **固定策略**：**必须**有一个 —— 否则它没有任何可用的参数。
+     *
+     * 两个方向都要拦：只拦一边的话，要么建出"没有配置的固定策略机器人"，
+     * 要么又把 AI 托管绑回一个它用不上的策略（这正是要修的那个问题）。
+     */
+    const isAiManaged = parsed.data.mode === 'ai_managed';
+    const requestedStrategyId = parsed.data.strategyId ?? null;
+    if (isAiManaged) {
+      if (requestedStrategyId !== null) {
+        throw new Error('智能托管模式不引用任何策略 —— 请不要为它选择策略。');
+      }
+    } else {
+      if (requestedStrategyId === null) throw new Error('固定策略模式必须选择一个策略。');
+      if (!strategies.get(requestedStrategyId)) throw new Error('未知的策略');
+    }
 
     // Seed the return baseline from the exchange rather than from a typed number.
     let initialEquity = parsed.data.initialEquity ?? 0;
@@ -1450,11 +1484,29 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       name: parsed.data.name,
       exchangeAccountId: parsed.data.exchangeAccountId,
       aiModelId: parsed.data.aiModelId,
-      strategyId: parsed.data.strategyId,
+      strategyId: requestedStrategyId,
       cycleIntervalMinutes: parsed.data.cycleIntervalMinutes,
       initialEquity,
       mode: parsed.data.mode,
     });
+
+    /*
+     * ── AI 托管的机器人**自带一份完整配置** ─────────────────────────────
+     *
+     * ⚠️ 这一步是"完全独立"的实质所在。
+     *
+     * `agent_config_json` 原来**只在 AI 自己改参数时**才被写入（`ports.ts` 的
+     * `setAgentConfig`）—— 也就是说一个刚建好的 AI 托管机器人身上是 `NULL`，
+     * 它第一轮跑起来读的是**策略的配置**。于是"策略没了"就等于"它没有配置"，
+     * 这正是用户要修的那个依赖。
+     *
+     * 现在建号时就写入一份完整配置（所有字段走 schema 的默认值，与
+     * `manager.ts` 在策略不可用时的兜底用的是同一个表达式）。从这一刻起它
+     * 的参数只属于它自己，策略（乃至"没有任何策略"）与它再无关系。
+     */
+    if (isAiManaged) {
+      traders.setAgentConfig(trader.id, JSON.stringify(StrategyConfigSchema.parse({})));
+    }
 
     return { ...trader, equitySource };
   }));

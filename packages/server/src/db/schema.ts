@@ -7,6 +7,20 @@ export interface Migration {
   version: number;
   name: string;
   sql: string;
+  /**
+   * 这个迁移会 `DROP` 一张**被别的表引用**的表并重建它。
+   *
+   * ## 为什么必须显式标出来
+   *
+   * 连接打开时是 `PRAGMA foreign_keys = ON`（见 `db/index.ts`），而迁移跑在
+   * `BEGIN...COMMIT` 里 —— **`PRAGMA foreign_keys` 在事务内是 no-op**。
+   * 所以一个重建表的迁移如果照常执行，`DROP TABLE traders` 会**级联删掉
+   * 所有持仓、成交、订单与决策记录**（它们都是 `ON DELETE CASCADE`）。
+   *
+   * 标上它之后，执行器会在 `BEGIN` **之前**关外键、`COMMIT` **之后**恢复，
+   * 并跑一次 `PRAGMA foreign_key_check` 确认重建没有留下悬空引用。
+   */
+  detachForeignKeys?: boolean;
 }
 
 const M1_INITIAL = /* sql */ `
@@ -585,6 +599,74 @@ const M11_PENDING_ENTRY = /* sql */ `
 ALTER TABLE positions ADD COLUMN entry_order_id TEXT;
 `;
 
+const M12_STRATEGY_OPTIONAL = /* sql */ `
+-- ---------------------------------------------------------------------------
+-- AI 托管与策略**彻底解耦**：strategy_id 允许为空，删策略时置空而不是阻止
+--
+-- ## 用户的原话
+--
+--   「智能托管模式完全独立出来，也就是说不依赖于任何策略（包括默认、内置策略），
+--     就算策略工坊里面默认策略 — 稳健就算删除、没有任何策略，都不影响智能托管
+--     模式（做到完全独立）」
+--
+-- ## 原先那两个约束合起来造成的局面
+--
+--   strategy_id INTEGER NOT NULL REFERENCES strategies(id) ON DELETE RESTRICT
+--
+--   · **NOT NULL** → 建 AI 托管机器人时**必须**选一个策略，而那个策略对它
+--     **完全不生效**（参数在 traders.agent_config_json 里，见 M6 的说明）；
+--   · **RESTRICT** → 于是那个策略**永远删不掉**，哪怕没有任何固定策略机器人在用它，
+--     而界面上那句「1 个机器人 · 1 运行中」还会让人以为它在跑那个策略。
+--
+-- 两者都是"AI 模式还需要一个策略"这个错误前提留下的。M7 已经把 mode 从策略
+-- 提升成**机器人自己的属性**（那一段注释里写着"AI 模式的参数概念上从来不需要
+-- 一个策略"），这一步把数据层最后一条腿锯掉。
+--
+-- ## 为什么是 SET NULL 而不是 CASCADE
+--
+-- 删掉一个**固定策略**机器人的策略时，不该把那台机器人一起删掉 ——
+-- ON DELETE CASCADE 会连带删掉它的成交、持仓与决策记录，**而那是账本**。
+-- 置空之后它启动时会因为"没有生效配置"而给出明确错误，让人去选一个；
+-- 静默消失才是不可接受的。
+--
+-- ## 为什么只能重建整张表
+--
+-- SQLite 不支持 ALTER COLUMN。所以这里建新表、复制、改名 —— 而重建一张
+-- **被引用的**表必须在事务外关外键（否则 DROP 会级联删掉子表数据），
+-- 所以这个迁移带了 detachForeignKeys 标志，见 db/index.ts 的 migrate()。
+--
+-- ⚠️ 下面的列顺序必须与迁移前**逐字一致** —— INSERT ... SELECT 是按位置对应的。
+-- 顺序取自实盘的 PRAGMA table_info(traders)。
+-- ---------------------------------------------------------------------------
+CREATE TABLE traders_new (
+  id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+  name                   TEXT    NOT NULL,
+  exchange_account_id    INTEGER NOT NULL REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+  ai_model_id            INTEGER NOT NULL REFERENCES ai_models(id) ON DELETE RESTRICT,
+  -- ⚠️ 这两处是本次迁移的**唯一实质改动**：去掉 NOT NULL，RESTRICT 换成 SET NULL。
+  strategy_id            INTEGER          REFERENCES strategies(id) ON DELETE SET NULL,
+  cycle_interval_minutes INTEGER NOT NULL DEFAULT 15,
+  initial_equity         REAL    NOT NULL DEFAULT 0,
+  status                 TEXT    NOT NULL DEFAULT 'stopped',
+  last_cycle_at          TEXT,
+  last_cycle_number      INTEGER NOT NULL DEFAULT 0,
+  last_error             TEXT,
+  consecutive_failures   INTEGER NOT NULL DEFAULT 0,
+  created_at             TEXT    NOT NULL,
+  updated_at             TEXT    NOT NULL,
+  agent_config_json      TEXT,
+  mode                   TEXT    NOT NULL DEFAULT 'strategy'
+);
+INSERT INTO traders_new SELECT * FROM traders;
+-- ⚠️ 把**已有的** AI 托管机器人的引用真正置空。
+-- 不置空的话它们会继续指向一个对自己不生效的策略：那个策略删不掉（拦截逻辑
+-- 虽然按 mode 判断，但外键 RESTRICT 仍在数据层），而界面也会显示成"正在引用"。
+UPDATE traders_new SET strategy_id = NULL WHERE mode = 'ai_managed';
+DROP TABLE traders;
+ALTER TABLE traders_new RENAME TO traders;
+CREATE INDEX idx_traders_status ON traders(status);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -597,4 +679,11 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 9, name: 'usage-detail', sql: M9_USAGE_DETAIL },
   { version: 10, name: 'input-token-limit', sql: M10_INPUT_TOKEN_LIMIT },
   { version: 11, name: 'pending-entry', sql: M11_PENDING_ENTRY },
+  {
+    version: 12,
+    name: 'strategy-optional',
+    sql: M12_STRATEGY_OPTIONAL,
+    /* 重建被引用的表 —— 必须在事务外关外键，否则 DROP 会级联删掉子表数据。 */
+    detachForeignKeys: true,
+  },
 ];
