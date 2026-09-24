@@ -254,6 +254,33 @@ test('★ 预算按模型能力算：能力优先，但输出必须留得下', (
   assert.equal(promptTokenBudget(Number.NaN), PROMPT_TOKEN_BUDGET);
 });
 
+test('★ 上下文还有空间时告诉模型 —— 但吃满时闭嘴', () => {
+  /*
+   * 用户的原则：「在**最大化发挥模型能力**的前提下，才考虑优化模型成本……
+   * 要**最大化利用模型能力、上下文**」。
+   *
+   * 之前预算是**单向**的：它在拦候选池（`buildUserPromptParts` 里的裁剪循环），
+   * 而模型**不知道自己有多少空间** —— 于是它不会去用。实测那台机器人
+   * `coinPoolLimit = 20`，而 80 万的预算能放约 **106 个候选**：**87% 的上下文空着**。
+   *
+   * 这一条钉住两件事：**该说时说清"空间是有的"**，以及**吃满时闭嘴**
+   * （吃满时那段话没有任何可执行的动作，只是噪音 + 花 token）。
+   */
+  const memory = blankMemory();
+  const few = [snapshot('BTCUSDT', 68_000), snapshot('ETHUSDT', 2_500)];
+
+  /* ① 候选很少、预算很大 —— 必须说，而且要点明"卡住它的是配置，不是上下文"。 */
+  const roomy = buildUserPrompt(contextWith(memory, few), 800_000);
+  assert.match(roomy, /你的上下文空间/);
+  assert.match(roomy, /最多能放约 \d+ 个候选/, '要给出具体的空间数字，模型自己推不出来');
+  assert.match(roomy, /不是上下文/, '必须说清卡住它的是配置而不是预算');
+  assert.match(roomy, /coinPoolLimit/, '要指出该调哪个参数');
+
+  /* ② 候选已经吃满预算 —— 不该出现（否则每轮多一段无法执行的建议）。 */
+  const tight = buildUserPrompt(contextWith(memory, few), 1);
+  assert.doesNotMatch(tight, /你的上下文空间/, '池子已经贴着上限时不该再催促');
+});
+
 test('a light strategy is allowed a much larger universe than a heavy one', () => {
   const light: StrategyConfig = {
     ...defaultStrategyConfig(),
