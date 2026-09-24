@@ -20,6 +20,7 @@ import {
 import {
   buildSystemPrompt,
   buildUserPrompt,
+  buildUserPromptParts,
   candidateBudget,
   DETAILED_CANDIDATE_COUNT,
   detailedCandidateCount,
@@ -351,6 +352,61 @@ test('★ 大预算下提示词真的把更多候选给成完整序列（不只�
   );
 });
 
+test('★ stable 段必须与「现在几点」无关 —— 否则缓存每轮都失效', () => {
+  /*
+   * 实测抓到的缓存杀手：「最近平仓」原来把时间渲染成「3 小时前」
+   * （`humanDuration(now - closedAt)`）。而 `now` 每轮都在变 —— 45 分钟之后
+   * 「3 小时前」变成「4 小时前」，**整个 stable 段从那一行起就与上一轮分叉**。
+   * 而缓存要求**前缀逐字节相同** —— 后面那几万 token 全部按全价计费。
+   *
+   * 证据在那份命中率里：**没有平仓记录时**（那一块是常量文案）命中
+   * **59,000**；**一旦有平仓记录**，命中掉到 **8,000**（只剩系统提示词）。
+   * 同一份结构、同样的候选池，差别只在这一行。
+   *
+   * 契约：**同一个记忆 + 两个不同的"现在" → stable 段必须逐字节相同。**
+   * 这既是缓存能否命中的判据，也是这一块"稳定"二字的定义。
+   */
+  const memory: PromptMemory = {
+    ...blankMemory(),
+    recentCloses: [
+      {
+        id: 1,
+        traderId: 1,
+        symbol: 'BTCUSDT',
+        side: 'long',
+        quantity: 1,
+        entryPrice: 68_000,
+        exitPrice: 68_400,
+        leverage: 5,
+        pnl: 0.5,
+        entryFee: 0.01,
+        exitFee: 0.01,
+        fee: 0.02,
+        fundingFee: 0,
+        netPnl: 0.48,
+        pnlPercent: 0.6,
+        closeReason: 'take_profit',
+        source: 'bot',
+        openedAt: '2026-01-01T18:00:00.000Z',
+        closedAt: '2026-01-01T20:00:00.000Z',
+        holdMinutes: 120,
+        entryReason: '测试用的入场理由',
+      },
+    ],
+  };
+  const at = new Date('2026-01-02T00:00:00.000Z');
+  const stableA = buildUserPromptParts({ ...contextWith(memory), now: at }, 200_000).stable;
+  const stableB = buildUserPromptParts(
+    { ...contextWith(memory), now: new Date(at.getTime() + 45 * 60_000) },
+    200_000,
+  ).stable;
+
+  assert.equal(stableA, stableB, '两轮的 stable 段必须逐字节相同，否则缓存永远命中不了');
+  /* 反过来也要说清它渲染成了什么 —— 绝对时间戳，而不是"X 前"。 */
+  assert.match(stableA, /\d{2}-\d{2} \d{2}:\d{2} UTC/, '平仓时刻要渲染成绝对时间戳');
+  assert.doesNotMatch(stableA, /\d+\s*小时前|\d+\s*分钟前/, 'stable 段里不许出现相对时间');
+});
+
 test('a light strategy is allowed a much larger universe than a heavy one', () => {
   const light: StrategyConfig = {
     ...defaultStrategyConfig(),
@@ -632,7 +688,14 @@ test('最近平仓区块：把模型当时的理由和实际结果放在一起�
   const prompt = buildUserPrompt(contextWith(memory));
 
   assert.match(prompt, /# 最近平仓（最新在前）/);
-  assert.match(prompt, /- SYNUSDT 多 5x @0\.180500→0\.180200  净 -0\.048  触发止盈  \(3 分钟前\)/);
+  /*
+   * ⚠️ 平仓时刻现在是**绝对时间戳**（`MM-DD HH:mm UTC`），不是「3 分钟前」。
+   * 原因见上面那条「stable 段必须与「现在几点」无关」的用例：相对时间每轮都变，
+   * 会让整个 stable 段的缓存前缀失效。
+   *
+   * `BASE_NOW` 是 `2026-01-02T00:00:00.000Z`，所以"3 分钟前" = `01-01 23:57 UTC`。
+   */
+  assert.match(prompt, /- SYNUSDT 多 5x @0\.180500→0\.180200  净 -0\.048  触发止盈  \(01-01 23:57 UTC\)/);
   assert.match(
     prompt,
     /你当时的理由：1M 放量刷新低点，RSI7 12 超卖 \(模型当时还写了一整段推演，不该进提示词\)/,
@@ -643,7 +706,10 @@ test('最近平仓区块：把模型当时的理由和实际结果放在一起�
    * ⚠️ 标签是「机器人未运行时平仓」而**不是「对账补录」** —— 后者描述的是
    * 系统怎么知道的，而提示词里这句话要和成交列表上看到的是同一个说法。
    */
-  assert.match(prompt, /- LSKUSDT 空 10x @1\.2000→1\.1900  净 \+0\.667  机器人未运行时平仓  \(1 小时前\)\n  你当时的理由：（未记录）/);
+  assert.match(
+    prompt,
+    /- LSKUSDT 空 10x @1\.2000→1\.1900  净 \+0\.667  机器人未运行时平仓  \(01-01 23:00 UTC\)\n  你当时的理由：（未记录）/,
+  );
 });
 
 test('本周期约束区块：把已经在强制执行、但模型看不见的节流与冷却说出来', () => {
