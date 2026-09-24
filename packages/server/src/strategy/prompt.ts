@@ -1563,7 +1563,64 @@ export function buildUserPromptParts(
     }
   }
 
+  /*
+   * ── 把「你的上下文还有多少空间」告诉模型 ──────────────────────────────
+   *
+   * 用户的原则：「在**最大化发挥模型能力**的前提下，才考虑优化模型成本……
+   * 要**最大化利用模型能力、上下文**来使得交易更加智能、准确」。
+   *
+   * 之前这一层是**单向**的：预算在阻止候选池过大（上面那个裁剪循环），
+   * 但模型**不知道自己有多少空间可用** —— 于是它不会去用它。实测那台机器人
+   * `coinSource.coinPoolLimit = 20`，而 80 万的预算按当前渲染密度能放
+   * **约 106 个候选**：**87% 的上下文是空着的**，而它每一轮都在同样的 20 个
+   * 标的里挑。
+   *
+   * 加在 `volatile` 而不是 `stable`：它含"本轮实际用了多少"（每轮都不同），
+   * 放进 `stable` 会让缓存前缀每轮分叉 —— 而缓存命中是这套提示词结构
+   * （`buildUserPromptParts` 的注释）存在的全部理由。
+   */
+  const budgetNote = renderBudgetNote(ctx, budgetTokens, spent);
+  if (budgetNote.length > 0) volatile = `${volatile}\n\n${budgetNote}`;
+
   return { stable, volatile };
+}
+
+/**
+ * 渲染「上下文空间」那一段。**只在真的还有空间时才出现。**
+ *
+ * ## 为什么必须由程序说这件事
+ *
+ * `coinSource.coinPoolLimit` 是模型可以用 `set_params` 改的参数，提示词里也写了
+ * "候选池的规模是你可以改的"。但**"可以改"和"还剩多少空间"是两件事** ——
+ * 前者它早就知道，后者它无从计算：那需要知道本轮预算（来自模型的
+ * `input_token_limit`）、当前渲染密度（来自策略的周期数与指标数）、以及
+ * 本轮实际用掉多少。**这些数是运行时的事实，模型自己推不出来。**
+ *
+ * ## 什么时候不说
+ *
+ * 候选池已经接近预算能容纳的数量时返回空串。理由是每多一段话都在花 token，
+ * 而**在池子已经吃满时它没有任何可执行的动作** —— 那只是一段噪音，还会稀释
+ * 别的约束（这个文件里对"信号淹没"记过不止一次）。
+ *
+ * 阈值取 1.3 倍：留一点余量，避免"刚好差 2 个"就反复催促。
+ */
+function renderBudgetNote(ctx: PromptContext, budgetTokens: number, spentNow: number): string {
+  const shown = ctx.candidates.length;
+  const roomFor = candidateBudget(ctx.config, budgetTokens);
+  if (roomFor <= shown * 1.3) return '';
+
+  const usedPercent = budgetTokens > 0 ? Math.round((spentNow / budgetTokens) * 100) : 0;
+  return [
+    '## 你的上下文空间',
+    '',
+    `- 本轮提示词预算 **${budgetTokens.toLocaleString()}** tokens（来自模型自己的上下文上限，已留出安全余量与输出空间）`,
+    `- 本轮实际渲染约 **${spentNow.toLocaleString()}** tokens，也就是**${usedPercent}%**`,
+    `- 按当前的渲染密度（周期数 × 指标数），这个预算**最多能放约 ${roomFor} 个候选标的**，`,
+    `  而你现在只看到 **${shown}** 个 —— 卡住它的是候选池上限 \`coinSource.coinPoolLimit\`，**不是上下文**。`,
+    '',
+    '**这个上限归你**（`set_params` 改）。空间是有的；如果连续几轮都在同样那几个标的里',
+    '找不到机会，把它调大是合理的 —— 但要有理由，别只是"多看看"。',
+  ].join('\n');
 }
 
 /**
