@@ -1866,7 +1866,8 @@ export class AutoTrader {
       const bySection = (text: string): string =>
         text
           .split(/\n(?=# )/)
-          .map((seg, i) => `${i}=${h(seg)}(${seg.length})`)
+          /* 带上**段首行**：只给哈希还得反推"这是哪一段"，而段首行一眼就是答案。 */
+          .map((seg, i) => `${i}=${h(seg)}(${seg.length})「${seg.split('\n')[0]!.slice(0, 20)}」`)
           .join(' ');
       log.info(
         `[cache-debug] system=${systemPrompt.length}(${h(systemPrompt)}) ` +
