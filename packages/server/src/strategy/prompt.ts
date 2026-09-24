@@ -1579,8 +1579,8 @@ export function buildUserPromptParts(
   const measure = (stable: string, volatile: string): number =>
     systemTokens + estimateTokens(stable) + estimateTokens(volatile);
 
-  let stable = renderUserPrompt(ctx, ctx.candidates, null, 'stable');
-  let volatile = renderUserPrompt(ctx, ctx.candidates, null, 'volatile');
+  let stable = renderUserPrompt(ctx, ctx.candidates, null, 'stable', budgetTokens);
+  let volatile = renderUserPrompt(ctx, ctx.candidates, null, 'volatile', budgetTokens);
   let spent = measure(stable, volatile);
 
   if (spent > budgetTokens) {
@@ -1601,8 +1601,8 @@ export function buildUserPromptParts(
       keep = Math.max(minKeep, keep - drop);
       const trimmed = trimCandidatesForBudget(ctx.candidates, held, keep);
       const meta = { total: ctx.candidates.length };
-      stable = renderUserPrompt(ctx, trimmed, meta, 'stable');
-      volatile = renderUserPrompt(ctx, trimmed, meta, 'volatile');
+      stable = renderUserPrompt(ctx, trimmed, meta, 'stable', budgetTokens);
+      volatile = renderUserPrompt(ctx, trimmed, meta, 'volatile', budgetTokens);
       spent = measure(stable, volatile);
     }
   }
@@ -1716,6 +1716,13 @@ function renderUserPrompt(
    *   · `'all'`      —— 两段都要（诊断路径与测试用）。
    */
   part: 'all' | 'stable' | 'volatile' = 'all',
+  /**
+   * 本轮提示词预算 —— **给多少个候选完整序列由它决定**（`detailedCandidateCount()`）。
+   *
+   * 传进来而不是读全局：预算是按**这个模型**的上下文算出来的运行时事实，
+   * 而这个函数在测试与诊断脚本里也要能用一个假预算跑。
+   */
+  budgetTokens = PROMPT_TOKEN_BUDGET,
 ): string {
   const stableParts: string[] = [];
   const volatileParts: string[] = [];
@@ -1982,12 +1989,17 @@ function renderUserPrompt(
      * 想看其余标的的完整序列？**现在可以点名要**（`get_klines`）。
      */
     const held = new Set(ctx.positions.map((p) => p.position.symbol));
+    /*
+     * ⚠️ **给多少个完整序列，按预算算**（原来写死 5，那个数是照着 20 万预算定的账）。
+     * 见 `detailedCandidateCount()` 的说明 —— 它同时保留了"不低于 5"的下限。
+     */
+    const detailed = detailedCandidateCount(ctx.config, budgetTokens, candidates.length);
     const blocks = candidates.map((snap, index) =>
       formatMarketData(snap, index, ctx.config, {
-        detailed: index < DETAILED_CANDIDATE_COUNT || held.has(snap.symbol),
+        detailed: index < detailed || held.has(snap.symbol),
       }),
     );
-    const detailedCount = blocks.filter((_, i) => i < DETAILED_CANDIDATE_COUNT).length;
+    const detailedCount = blocks.filter((_, i) => i < detailed).length;
     /*
      * 两处裁剪都要说 —— 它们发生在不同阶段，模型不该把它们合成一个数字：
      * `ctx.universeTrimmedFrom` 是**选币阶段**按候选上限截断的，
@@ -2176,6 +2188,58 @@ export const PROMPT_OUTPUT_RESERVE = 131_072;
  * —— 这正是先做"按需取数"再做这个的原因：**先给它后路，再收窄默认。**
  */
 export const DETAILED_CANDIDATE_COUNT = 5;
+
+/**
+ * **详细区块能占预算的多大比例。**
+ *
+ * 剩下那部分要留给：固定的系统提示词、绩效与历史区块、候选概览、持仓区块，
+ * 以及**输出**（推理 + 正文，实测推理峰值 28,590）。
+ */
+const DETAILED_BUDGET_SHARE = 0.7;
+
+/**
+ * 给**完整指标序列**的候选个数 —— **按预算算，不再写死**。
+ *
+ * ## 为什么原来写死的 5 不够用了
+ *
+ * `DETAILED_CANDIDATE_COUNT` 上面那份账（一个区块约 10,200 字符、20 个候选
+ * 全详细约 14.7 万 token）**是照着 20 万预算算的**。而预算现在按模型能力算：
+ * 1M 上下文的模型拿到 **80 万**（见 `promptTokenBudget`）。
+ *
+ * 按新预算重算：`20 个候选 × 6,000 token ≈ 12 万 token` —— **只占预算的 15%**。
+ * 也就是说"为了省预算只给 5 个详细"这个理由，在新预算下**已经不成立**。
+ *
+ * ## 那段注释里还有一个循环论证
+ *
+ * 它写着「模型实测通常只深入看 1–2 个」—— 但**模型当时只能看到 5 个的详细序列**。
+ * 从"它没看"推出"它不需要看"，是把**供给限制**当成了**需求证据**。
+ *
+ * ## 用户的原则
+ *
+ * 「在**最大化发挥模型能力**的前提下，才考虑优化模型成本 …… 要**最大化利用
+ * 模型能力、上下文**」。把 90% 的候选降级成摘要，是在**替模型做取舍** ——
+ * 而它才是那个该判断"哪个标的值得看"的角色。
+ *
+ * ## 下限仍然是 5
+ *
+ * 小预算下（不知道模型能力时的 6 万兜底）算出来会比 5 小，那时保留 5 ——
+ * **这个改动不该让任何情况变差**。
+ *
+ * **持仓标的永远详细**，不受这个数字影响（见调用点）。
+ */
+export function detailedCandidateCount(
+  config: StrategyConfig,
+  budgetTokens = PROMPT_TOKEN_BUDGET,
+  total = 0,
+): number {
+  /* 一个详细区块的 token 成本 —— 与 `estimateCandidateChars()` 同一个口径。 */
+  const perDetailed = Math.max(1, estimateCandidateChars(config) / 1.7);
+  const roomFor = Math.max(
+    DETAILED_CANDIDATE_COUNT,
+    Math.floor((budgetTokens * DETAILED_BUDGET_SHARE) / perDetailed),
+  );
+  return total > 0 ? Math.min(roomFor, total) : roomFor;
+}
 /**
  * **你愿意花多少** —— 提示词预算的成本上限，与模型能吃多少无关。
  *
