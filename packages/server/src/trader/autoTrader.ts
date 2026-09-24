@@ -1841,24 +1841,39 @@ export class AutoTrader {
     progress.userPrompt = userPrompt;
 
     /*
-     * ── 临时诊断：stable / system 段是否真的逐字节稳定 ──────────────────
+     * ── 临时诊断：system / stable 段是否真的逐字节稳定 ──────────────────
      *
      * 实测确定的事实（直接对 provider 做的实验）：**前缀不变就命中 97%，
-     * 前缀分叉就归零**。而线上命中率一直是 5–8% —— 也就是说
-     * `system` + `stable` 这两段里**一定有一处在每轮变化**。
+     * 前缀分叉就归零**；而线上命中量稳定在 8,320 —— 那大致就是
+     * `system + stable` 的大小，所以这两段里一定有一处在变。
      *
-     * 三块 stable 内容（教训 / 最近平仓 / 绩效）都已经逐行读过、看起来都不含
-     * 易变字段，所以不能再靠"读代码猜" —— 这里把两个**哈希**打出来，
-     * 连续两轮一比就知道是哪一段在动。定位之后这段日志要删掉。
+     * 第一版只打了整段哈希，结果是：
+     *
+     *     02:29:59  system=12481(e04e5aba7caf)  stable=3986(c6c26b8c1da4)
+     *     02:37:33  system=12481(e04e5aba7caf)  stable=3986(c6c26b8c1da4)   ← 两次相同 ✓
+     *     02:39:46  system=12480(fcf7278caf23)  stable=4109(12cbf6c871c2)   ← system 也变了 ✗
+     *
+     * 前两行证明 `stable` 段（上一轮修掉相对时间之后）**确实逐字节稳定**；
+     * 但第三行显示 **`system` 段自己也在变** —— 而它在 `stable` **前面**，
+     * **它一变，后面全部失效**。
+     *
+     * 所以这一版改成**段落级哈希**：定位到"哪一段在变"，而不是只知道"它变了"。
+     * 定位并修好之后，这段诊断要删掉。
      */
     {
       const { createHash } = await import('node:crypto');
-      const h = (s: string): string => createHash('sha256').update(s).digest('hex').slice(0, 12);
+      const h = (s: string): string => createHash('sha256').update(s).digest('hex').slice(0, 10);
+      const bySection = (text: string): string =>
+        text
+          .split(/\n(?=# )/)
+          .map((seg, i) => `${i}=${h(seg)}(${seg.length})`)
+          .join(' ');
       log.info(
         `[cache-debug] system=${systemPrompt.length}(${h(systemPrompt)}) ` +
-          `stable=${stablePrompt.length}(${h(stablePrompt)}) ` +
-          `volatile=${volatilePrompt.length}(${h(volatilePrompt)})`,
+          `stable=${stablePrompt.length}(${h(stablePrompt)}) volatile=${volatilePrompt.length}`,
       );
+      log.info(`[cache-debug] system 分段：${bySection(systemPrompt)}`);
+      log.info(`[cache-debug] stable 分段：${bySection(stablePrompt)}`);
     }
 
     const startedAt = Date.now();
