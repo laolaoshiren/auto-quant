@@ -20,6 +20,41 @@ import { AutoTrader, type DecisionModel } from './autoTrader.js';
 const log = createLogger('manager');
 
 /**
+ * 一次调用的输出上限**下限**（token）—— 保证推理有地方可写。
+ *
+ * ## 为什么需要它（实盘实测，不是推测）
+ *
+ * provider 的 `max_tokens` 在不同端点上的行为**并不一致**，但有一种明确有害：
+ * **推理与正文共享同一个额度**。而本系统的提示词很大（实测 `prompt_tokens`
+ * 51161–278504、平均 107114），`reasoningEffort` 又是 `high` ——
+ * **推理量随提示词规模一起涨**。
+ *
+ * 实测那台机器人（`ai_models.max_tokens = 16384`）：
+ *
+ *     #235   in 51521   out 16384   reasoning 16384   ← 推理吃满，正文 0
+ *     #234   in 105846  out 30567   reasoning 28590   ← 推理 28590 > 16384
+ *
+ * `#235` 那一轮**正文一个字都没剩下**，而它仍然被记成 `success=1` ——
+ * 从操作台上看只是"这一轮没什么可做的"。库里有 **8 次** `completion_tokens`
+ * 正好等于 16384，也就是 **8 次把输出预算全部花在思考上**。
+ *
+ * ## 为什么是 65536 而不是"按提示词算"
+ *
+ * 推理量不可预测（`#234` 是 28590，比 16384 高 74%）。这里取一个**远高于
+ * 观测峰值**的下限，让"输出被推理挤空"从"经常发生"变成"需要一次极端异常"。
+ *
+ * 它**不增加正常开销**：`max_tokens` 是上限而不是预扣，模型不会因为它变大
+ * 就多说废话。真正的成本约束在输入侧（`PROMPT_TOKEN_CEILING`）。
+ *
+ * ## 为什么是"下限"而不是直接覆盖
+ *
+ * 值可能来自数据库（控制台不暴露这个字段，但迁移与脚本可以写）。
+ * 用一个下限意味着：**更高的配置照旧生效，更低的会被抬上来** ——
+ * 而"更低"在当前契约下没有任何正当理由。
+ */
+const MIN_MAX_TOKENS_FOR_REASONING = 65_536;
+
+/**
  * 成交推送之后，隔多久去对一次账。
  *
  * 一笔平仓会连着推若干帧（部分成交、最后成交），而一次对账要为每个相关标的
@@ -350,8 +385,7 @@ export class TraderManager {
     const row = aiModels.getWithSecret(aiModelId);
     if (!row) throw new Error(`找不到 AI 模型 ${aiModelId}`);
 
-    const apiKey = this.vault.decryptOptional(row.api_key_enc);
-    if (!apiKey && row.provider !== 'custom') {
+    const apiKey = this.vault.decryptOptional(row.api_key_enc);    if (!apiKey && row.provider !== 'custom') {
       throw new Error(`AI 模型「${row.label}」还没有存储 API Key`);
     }
 
@@ -361,7 +395,11 @@ export class TraderManager {
       model: row.model,
       ...(row.base_url ? { baseUrl: row.base_url } : {}),
       temperature: row.temperature,
-      maxTokens: row.max_tokens,
+      /*
+       * ⚠️ **抬到下限**：推理与正文共享这个额度，而推理量随提示词规模增长 ——
+       * 16384 的文件已实测被推理吃满、正文 0（见常量上的说明）。
+       */
+      maxTokens: Math.max(row.max_tokens, MIN_MAX_TOKENS_FOR_REASONING),
       timeoutSeconds: row.timeout_seconds,
       maxRetries: row.max_retries,
       /*
