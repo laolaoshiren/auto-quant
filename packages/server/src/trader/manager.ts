@@ -11,6 +11,7 @@ import type { Vault } from '../crypto/vault.js';
 import { createLogger } from '../logger.js';
 import { MarketDataService } from '../market/service.js';
 import { LlmClient } from '../llm/client.js';
+import { discoverModels } from '../llm/discovery.js';
 import { aiModels, equity, exchanges, positions, runtimeLogs, strategies, traders } from '../store/repositories.js';
 import { eventBus } from '../events.js';
 import { checkConfigReachability } from '../risk/reachability.js';
@@ -392,6 +393,51 @@ export class TraderManager {
    * otherwise only surface as a failed trading cycle every N minutes, which is
    * a slow and confusing way to learn that a key is wrong.
    */
+  /**
+   * 问 provider 要一次这个模型的上下文长度，**写回数据库**。
+   *
+   * 调用点是 `buildModel()`：只在 `input_token_limit` 为空时才走这里，所以
+   * 正常路径下它一辈子只跑一次。见那段注释里"为什么必须在这里补"。
+   *
+   * 全程不抛：任何失败都只记一条 warn 并保持保守预算 —— **读不到上下文长度
+   * 不该让机器人起不来**。
+   */
+  private async discoverContextLength(
+    aiModelId: number,
+    row: { provider: string; model: string; label: string; base_url: string | null; api_key_enc: string | null },
+  ): Promise<void> {
+    const apiKey = this.vault.decryptOptional(row.api_key_enc);
+    if (!apiKey) return;
+
+    const result = await discoverModels({
+      provider: row.provider as never,
+      apiKey,
+      ...(row.base_url ? { baseUrl: row.base_url } : {}),
+    });
+    if (!result.ok) {
+      log.warn(
+        `模型「${row.label}」的上下文长度未知，且无法从 provider 发现（${result.message}）——` +
+          '**提示词预算将退回保守值**，这会白白浪费上下文（1M 的模型只能用 6 万）。',
+      );
+      return;
+    }
+
+    const match = result.models.find((m) => m.id === row.model);
+    if (!match?.contextLength) {
+      log.warn(
+        `模型「${row.label}」（${row.model}）不在 provider 返回的 ${result.models.length} 个模型里，` +
+          '或者它没有 `context_length` 字段 —— 提示词预算退回保守值。',
+      );
+      return;
+    }
+
+    aiModels.update(aiModelId, { inputTokenLimit: match.contextLength });
+    log.info(
+      `模型「${row.label}」的上下文长度已自动发现：${match.contextLength} tokens —— ` +
+        '提示词预算按它重算（换模型后不需要手工填任何东西）。',
+    );
+  }
+
   private async buildModel(aiModelId: number): Promise<{ client: LlmClient; config: ReturnType<typeof aiModels.get> }> {
     const row = aiModels.getWithSecret(aiModelId);
     if (!row) throw new Error(`找不到 AI 模型 ${aiModelId}`);
@@ -399,6 +445,37 @@ export class TraderManager {
     const apiKey = this.vault.decryptOptional(row.api_key_enc);
     if (!apiKey && row.provider !== 'custom') {
       throw new Error(`AI 模型「${row.label}」还没有存储 API Key`);
+    }
+
+    /*
+     * ── 补上这个模型的上下文长度（它是提示词预算的唯一依据）────────────────
+     *
+     * ## 为什么必须在这里补，而不是在创建模型时
+     *
+     * `promptTokenBudget(inputTokenLimit)` 把**模型能吃的上下文**换算成提示词预算
+     * （1M 的模型 → 80 万；见那段注释）。而 `input_token_limit` 这一列**创建端点
+     * 从来不写它** —— `POST /api/ai-models` 只填了 temperature / maxTokens /
+     * timeout / maxRetries，于是它一直是建表时的默认值 **0**。
+     *
+     * 而 `promptTokenBudget(0)` 会退回保守的 **6 万**。也就是说：
+     *
+     *   · 用户换一个 1M 上下文的新模型 → **预算仍停在 6 万**，九成上下文白给；
+     *   · 而且**没有任何症状** —— 机器人照常跑，只是看不见那么多标的。
+     *
+     * 用户的要求原话是：「**如果后续我更换其他模型（上下文/思考等参数有变动，
+     * 得保证系统可用性，会自己调节等等）**」。所以这里做成**自愈**的：
+     * 这一列为空时，去问 provider 要一次（`/models` 的 `context_length`）
+     * 并**写回数据库** —— 下一次启动就不必再问。
+     *
+     * ## 为什么失败不阻断启动
+     *
+     * 拉模型列表是一次网络请求，而它失败的原因（网关不稳、该端点不返回
+     * `context_length`、Key 权限不含 models 读取）都与"这台机器人能不能交易"
+     * 无关。**读不到就退回保守预算**，而不是让机器人起不来 —— 与
+     * `getMaxLeverage()` 读不到档位时的处理同一个原则。
+     */
+    if (!(row.input_token_limit > 0)) {
+      await this.discoverContextLength(aiModelId, row).catch(() => undefined);
     }
 
     const client = new LlmClient({
