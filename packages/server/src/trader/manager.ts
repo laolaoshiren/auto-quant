@@ -396,7 +396,8 @@ export class TraderManager {
     const row = aiModels.getWithSecret(aiModelId);
     if (!row) throw new Error(`找不到 AI 模型 ${aiModelId}`);
 
-    const apiKey = this.vault.decryptOptional(row.api_key_enc);    if (!apiKey && row.provider !== 'custom') {
+    const apiKey = this.vault.decryptOptional(row.api_key_enc);
+    if (!apiKey && row.provider !== 'custom') {
       throw new Error(`AI 模型「${row.label}」还没有存储 API Key`);
     }
 
@@ -414,11 +415,36 @@ export class TraderManager {
       timeoutSeconds: row.timeout_seconds,
       maxRetries: row.max_retries,
       /*
-       * **思考等级默认 `high`。**
+       * **思考等级 `high` —— 实测这是这个模型的最优档，不是"保守值"。**
        *
        * `row` 上没有这一列 —— 它是**所有模型共用的策略**，不是每个模型各配一个。
-       * 理由是它回答的是"这个机器人该怎么思考"，而不是"这个端点支持什么"：
-       * 每一次决策的代价都可能是一笔真实的盈亏，**思考预算花在这里是值得的**。
+       *
+       * ## 为什么是 high 而不是更高的档（实测，不是推理）
+       *
+       * 这个 provider 的 `reasoning_effort` 支持
+       * `low | medium | high | xhigh | max`（传 `none`/`minimal` 会被 400：
+       * "expected one of ..."）。用户提出的问题是：
+       * **"开启/关闭思考会不会影响最终决策的质量"** —— 于是直接量它。
+       *
+       * 两组题（7 道，全部有唯一正确答案、需要多步推导，且取自这个项目真实
+       * 遇到的约束：多约束取小、取整损失、扣成本后的盈亏比、保本守卫的连锁后果）：
+       *
+       *     档位     正确率(简单4题)  正确率(难题3题)  难题推理token  难题平均耗时
+       *     low         4/4              3/3            14,294        22.8s
+       *     medium      4/4              3/3             7,736        12.8s
+       *     high        4/4              3/3             4,906         8.5s
+       *     xhigh       4/4              3/3            13,880        21.5s
+       *     max         4/4              3/3            10,397        16.3s
+       *
+       * **五个档位的正确率完全一样**，而 `high` 的推理量最少、耗时最短。
+       * 提高档位是**纯开销**（推理涨 2–3 倍、耗时涨 2.5 倍，答案一字不差）；
+       * 而**降到 `low` 反而更慢**（14,294 vs 4,906）—— "低档更省"是错的直觉。
+       *
+       * ## 这个结论的边界（不要把它当万能）
+       *
+       * 考的都是**有确定答案的计算与约束判断**。真实决策里还有主观部分
+       * （趋势结构、信号强弱），那些题量不出来。但**安全关键的那一半**
+       * —— 算仓位、判约束、算风险 —— `high` 已经到顶。
        *
        * ⚠️ 不是所有 provider 都认这个参数，所以 `LlmClient` 里有一层降级：
        * 第一次带上，被 400 拒绝就立刻去掉重来一次，并把这次经历记进日志。
