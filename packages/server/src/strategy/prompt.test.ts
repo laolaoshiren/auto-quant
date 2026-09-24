@@ -281,6 +281,27 @@ test('★ 上下文还有空间时告诉模型 —— 但吃满时闭嘴', () =>
   assert.doesNotMatch(tight, /你的上下文空间/, '池子已经贴着上限时不该再催促');
 });
 
+test('★ 主动告诉模型它的输出空间 —— 一条过时的自我约束比没有约束更糟', () => {
+  /*
+   * 实盘观察：这台机器人给**自己**定了一条规则（写在它自己维护的
+   * `promptSections.decisionProcess` 里）：
+   *
+   *     「⚠️ 输出预算很紧：分析文字总计不超过 150 字 …… 历史上已出现过整轮因
+   *       输出被截断而报废」
+   *
+   * **那句话在写下的时候是对的**：当时 `max_tokens = 16384`，而推理与正文
+   * 共享这个额度（实测推理峰值 28,590），库里有 8 次正文被吃光。
+   *
+   * 现在上限已抬到 131072（`MIN_MAX_TOKENS_FOR_REASONING`），**而它不会自己
+   * 知道** —— 于是继续按一个已经不存在的限制压缩分析。用户的要求是
+   * 「**最大化发挥模型能力**」，所以提示词必须主动更新这个事实。
+   */
+  const prompt = buildSystemPrompt(contextWith(blankMemory()));
+  assert.match(prompt, /你的输出空间/, '必须主动说，否则它会继续自我压缩');
+  assert.match(prompt, /131072/, '要给具体数字，而不是"空间很大"这种空话');
+  assert.match(prompt, /已经不成立/, '要点明那条旧限制的过时性 —— 否则它没有理由改掉习惯');
+});
+
 test('a light strategy is allowed a much larger universe than a heavy one', () => {
   const light: StrategyConfig = {
     ...defaultStrategyConfig(),
