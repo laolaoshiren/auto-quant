@@ -83,15 +83,20 @@ export function StrategyListPage() {
    * （`ON DELETE RESTRICT`），所以不能直接把它藏掉。
    */
   const usageByStrategy = useMemo(() => {
-    const counts = new Map<number, { total: number; running: number; aiBaseline: number }>();
+    const counts = new Map<number, { total: number; running: number }>();
     for (const trader of traders) {
-      const entry = counts.get(trader.strategyId) ?? { total: 0, running: 0, aiBaseline: 0 };
-      if (trader.mode === 'ai_managed') {
-        entry.aiBaseline += 1;
-      } else {
-        entry.total += 1;
-        if (trader.isRunning) entry.running += 1;
-      }
+      /*
+       * ⚠️ **AI 托管的机器人不引用任何策略**（`strategyId === null`）。
+       *
+       * 这里原来还有一档 `aiBaseline` —— 那是"AI 托管拿某个策略当基线"时期的
+       * 说法。现在它在设计上已经不存在了：AI 托管的参数整份在它自己的
+       * `agent_config_json` 里，建号时就写入了（数据库迁移 M12 + 创建端点），
+       * 与策略（乃至"没有任何策略"）再无关系。
+       */
+      if (trader.strategyId === null) continue;
+      const entry = counts.get(trader.strategyId) ?? { total: 0, running: 0 };
+      entry.total += 1;
+      if (trader.isRunning) entry.running += 1;
       counts.set(trader.strategyId, entry);
     }
     return counts;
@@ -142,16 +147,18 @@ export function StrategyListPage() {
   const remove = async (record: StrategyRecord) => {
     const usage = usageByStrategy.get(record.id);
     /*
-     * 文案要分清两种情况 —— AI 托管那些**不读这份参数**，
-     * 但它们的外键仍然指着它，所以"删除后这些机器人将无法启动"对它们是**假话**
-     * （它们启动时用的根本不是这份配置）；而"没人引用"同样是假话（会撞外键）。
+     * ⚠️ **AI 托管的机器人不会出现在这里。**
+     *
+     * 它们不引用任何策略（`strategyId === null`），所以 `usageByStrategy` 里
+     * 根本没有它们。这里原来还有一档"AI 托管拿它当外键占位"的文案 ——
+     * 那是"AI 托管仍然需要一个策略"时期的说法。现在那条依赖已经拆掉了：
+     * 新建的 AI 托管机器人自带一份完整配置，删掉一个策略也不再会撞外键
+     * （`ON DELETE SET NULL` 把残留的引用置空）。
      */
     const consequence =
       usage && usage.total > 0
         ? `有 ${usage.total} 个机器人正在引用它${usage.running > 0 ? `（其中 ${usage.running} 个在运行）` : ''}，删除后这些机器人将无法启动。`
-        : usage && usage.aiBaseline > 0
-          ? `只有 ${usage.aiBaseline} 个 AI 托管机器人拿它当外键占位 —— 它们不读这份参数（参数存在各自身上），但这个引用仍然会让删除失败。`
-          : '当前没有机器人引用它。';
+        : '当前没有机器人引用它。';
     if (!window.confirm(`删除策略“${record.name}”？\n\n${consequence}此操作不可撤销。`)) return;
 
     setBusy({ kind: 'row', id: record.id });
@@ -306,33 +313,18 @@ export function StrategyListPage() {
                                 {risk.maxPositions} 持仓 · {risk.defaultLeverage}×
                               </td>
                               <td className="td px-2 py-1.5">
-                                {usage && (usage.total > 0 || usage.aiBaseline > 0) ? (
-                                  <span className="flex flex-wrap items-center gap-1">
-                                    {usage.total > 0 && (
-                                      <Badge tone={usage.running > 0 ? 'up' : 'muted'}>
-                                        {usage.total} 个机器人
-                                        {usage.running > 0 ? ` · ${usage.running} 运行中` : ''}
-                                      </Badge>
-                                    )}
-                                    {/*
-                                      AI 托管的那一笔**与"引用"分开画** ——
-                                      它们不读这份参数（见 `usageByStrategy` 的注释）。
-                                      单独列出来而不是直接藏掉：外键仍然指着它，
-                                      删除时会撞上 `ON DELETE RESTRICT`。
-                                    */}
-                                    {usage.aiBaseline > 0 && (
-                                      <Badge
-                                        tone="muted"
-                                        title={
-                                          '这些机器人是 AI 托管模式：参数由 AI 自己维护、存在每个机器人身上，' +
-                                          '这个策略只是数据库外键要求的占位 —— **对它不生效**。' +
-                                          '（`traders.strategy_id` 是 NOT NULL，AI 模式下被忽略。）'
-                                        }
-                                      >
-                                        AI 托管基线 ×{usage.aiBaseline}
-                                      </Badge>
-                                    )}
-                                  </span>
+                                {/*
+                                  ⚠️ **只有"真的在用这份参数"的机器人会被数进来。**
+                                  AI 托管的机器人 `strategyId === null`，压根不在这张表里
+                                  （见 `usageByStrategy`）—— 所以这里回到了最简形式，
+                                  不再有"AI 托管基线 ×N"那一档。那一档是"AI 托管仍然
+                                  需要一个策略占位"时期的说法，而那条依赖已经拆掉了。
+                                */}
+                                {usage && usage.total > 0 ? (
+                                  <Badge tone={usage.running > 0 ? 'up' : 'muted'}>
+                                    {usage.total} 个机器人
+                                    {usage.running > 0 ? ` · ${usage.running} 运行中` : ''}
+                                  </Badge>
                                 ) : (
                                   <span className="text-ink-faint">未使用</span>
                                 )}

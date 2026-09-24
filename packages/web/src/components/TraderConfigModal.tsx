@@ -27,7 +27,12 @@ export function TraderConfigModal({
   const [name, setName] = useState('');
   const [exchangeAccountId, setExchangeAccountId] = useState(0);
   const [aiModelId, setAiModelId] = useState(0);
-  const [strategyId, setStrategyId] = useState(0);
+  /*
+   * `null` = 这个机器人不引用任何策略（AI 托管）。见 `Trader.strategyId` ——
+   * 那种情况下下面根本不渲染这个控件，但状态本身要能装下这个值：
+   * 编辑一台 AI 托管机器人时 `trader.strategyId` 就是 `null`。
+   */
+  const [strategyId, setStrategyId] = useState<number | null>(null);
   const [cycleIntervalMinutes, setCycleIntervalMinutes] = useState(15);
   /** Set when the save left the trader with a 0 baseline. */
   const [baselineWarning, setBaselineWarning] = useState<string | null>(null);
@@ -80,7 +85,12 @@ export function TraderConfigModal({
         name: name.trim(),
         exchangeAccountId,
         aiModelId,
-        strategyId,
+        /*
+         * AI 托管时 `strategyId` 是 `null` —— 传 `undefined` 让服务端**不动这个字段**
+         * （它本来就是空的）。绝不能传一个数字：那等于又把机器人绑回一个策略，
+         * 而用户要的正是"完全独立"。
+         */
+        strategyId: strategyId ?? undefined,
         cycleIntervalMinutes,
         ...(manualEquity !== undefined ? { initialEquity: manualEquity } : {}),
       });
@@ -163,7 +173,7 @@ export function TraderConfigModal({
             </Field>
           ) : (
             <Field label="策略">
-              <Select value={strategyId} onChange={(e) => setStrategyId(Number(e.target.value))}>
+              <Select value={strategyId ?? ''} onChange={(e) => setStrategyId(Number(e.target.value))}>
                 {strategies.map((strategy) => (
                   <option key={strategy.id} value={strategy.id}>
                     {strategy.name}

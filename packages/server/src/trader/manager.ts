@@ -484,12 +484,32 @@ export class TraderManager {
         };
       }
 
-      /* --- Strategy ----------------------------------------------------- */
-      const strategyRecord = strategies.get(trader.strategyId);
-      if (!strategyRecord) throw new Error(`找不到策略 ${trader.strategyId}`);
-      const parsed = StrategyConfigSchema.safeParse(strategyRecord.config);
-      const config: StrategyConfig = parsed.success ? parsed.data : StrategyConfigSchema.parse({});
-      if (!parsed.success) {
+      /* --- Strategy（**可选**）-------------------------------------------- */
+      /*
+       * ⚠️ **AI 托管的机器人不依赖策略。**
+       *
+       * 它的参数整份存在 `agent_config_json` 里（由 AI 自己写），策略对它
+       * **完全不生效** —— 见下面 `effectiveConfig` 与 `M6`/`M7` 的说明。
+       * 所以这里**不能**因为"策略不存在"就抛错：那会让"把默认策略删掉"直接变成
+       * "AI 托管机器人启动不了"，而用户的要求恰恰是
+       * 「就算策略工坊里面默认策略 — 稳健就算删除、没有任何策略，都不影响智能托管模式」。
+       *
+       * 这里原来的写法是 `if (!strategyRecord) throw`，而 `strategies.get()` 对
+       * `null` 会返回 `undefined` —— 于是报错信息还会是「找不到策略 null」。
+       *
+       * 固定策略模式下策略仍然**必须**有，但那条约束由**创建/编辑的 API** 把关，
+       * 并且这里给一个说人话的错误，而不是让它在别处以奇怪的方式失败。
+       */
+      const strategyRecord =
+        trader.strategyId === null ? undefined : strategies.get(trader.strategyId);
+      if (trader.mode !== 'ai_managed' && !strategyRecord) {
+        throw new Error(
+          '这个机器人按固定策略运行，但它引用的策略已不存在 —— 请为它重新选择一个策略，或改成智能托管。',
+        );
+      }
+      const parsed = strategyRecord ? StrategyConfigSchema.safeParse(strategyRecord.config) : null;
+      const config: StrategyConfig = parsed?.success ? parsed.data : StrategyConfigSchema.parse({});
+      if (strategyRecord && !parsed?.success) {
         log.warn(`策略「${strategyRecord.name}」校验未通过，非法字段已回退为默认值`);
       }
 
@@ -913,9 +933,19 @@ export class TraderManager {
   leverageCap(traderId: number): number | null {
     const trader = traders.get(traderId);
     if (!trader) return null;
-    const record = strategies.get(trader.strategyId);
-    if (!record) return null;
-    let config: StrategyConfig = record.config;
+    /*
+     * ⚠️ **AI 托管不需要策略。**
+     *
+     * 下面那一段本来就会优先用 `agent_config_json`，但它上面有一道
+     * `if (!record) return null` —— 于是"策略被删掉"会让杠杆表盘整个变成
+     * 「不知道」，而 AI 托管的杠杆上限在它自己的配置里，根本不缺。
+     *
+     * 所以：没有策略时，AI 托管用默认配置兜底（随后立刻被 `agent_config_json`
+     * 覆盖）；固定策略模式仍然返回 `null`（那种情况下确实读不到）。
+     */
+    const record = trader.strategyId === null ? undefined : strategies.get(trader.strategyId);
+    if (!record && trader.mode !== 'ai_managed') return null;
+    let config: StrategyConfig = record?.config ?? StrategyConfigSchema.parse({});
     const raw = trader.agentConfigJson;
     if (trader.mode === 'ai_managed' && typeof raw === 'string' && raw.length > 0) {
       try {
@@ -965,7 +995,9 @@ export class TraderManager {
     if (live) return live.runReconcile();
 
     const connection = await this.connectionFor(traderId, trader.exchangeAccountId, false);
-    const strategyRecord = strategies.get(trader.strategyId);
+    /* `null` = 不依赖策略（AI 托管）；这里本来就已容错，只是要接受空值。 */
+    const strategyRecord =
+      trader.strategyId === null ? undefined : strategies.get(trader.strategyId);
     const parsed = strategyRecord
       ? StrategyConfigSchema.safeParse(strategyRecord.config)
       : null;
@@ -1030,7 +1062,9 @@ export class TraderManager {
      * **操作员的退出路径不能依赖任何外部服务。**
      */
     const connection = await this.connectionFor(traderId, trader.exchangeAccountId, false);
-    const strategyRecord = strategies.get(trader.strategyId);
+    /* `null` = 不依赖策略（AI 托管）—— 手工平仓同理，绝不能因为策略没了就用不了。 */
+    const strategyRecord =
+      trader.strategyId === null ? undefined : strategies.get(trader.strategyId);
     const parsed = strategyRecord ? StrategyConfigSchema.safeParse(strategyRecord.config) : null;
     const config: StrategyConfig = parsed?.success ? parsed.data : StrategyConfigSchema.parse({});
 

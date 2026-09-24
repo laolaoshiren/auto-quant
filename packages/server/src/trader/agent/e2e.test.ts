@@ -144,7 +144,7 @@ const runtime = (model: LoopModel) =>
   new AgentRuntime({
     traderId,
     strategyConfig: aiConfig,
-    isAiStrategy: () => strategies.get(traders.get(traderId)!.strategyId)?.presetId === 'ai_managed',
+    isAiStrategy: () => strategies.get(traders.get(traderId)!.strategyId!)?.presetId === 'ai_managed',
     model,
     equityNow: () => 9.1,
     priceChangeSince: async () => null,

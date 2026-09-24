@@ -156,7 +156,24 @@ export interface Trader {
   name: string;
   exchangeAccountId: number;
   aiModelId: number;
-  strategyId: number;
+  /**
+   * 这个机器人引用的策略 —— **`null` 表示它不依赖任何策略**。
+   *
+   * ## 为什么它可以是空的
+   *
+   * AI 托管的参数整份存在 `agentConfigJson` 里（由 AI 自己写），策略对它
+   * **完全不生效**。原先这一列是 `NOT NULL`，于是建 AI 托管机器人时必须选一个
+   * 用它不上的策略 —— 而那个策略又因为外键约束（`ON DELETE RESTRICT`）
+   * **永远删不掉**，界面上还会显示成「1 个机器人正在引用它」。
+   *
+   * 用户的原话：「智能托管模式完全独立出来……就算策略工坊里面默认策略 — 稳健
+   * 就算删除、没有任何策略，都不影响智能托管模式（做到完全独立）」。
+   *
+   * 所以 `mode === 'ai_managed'` 的机器人 `strategyId` 就是 `null`；而固定策略
+   * 模式下它是必填的。删掉一个策略时，引用它的机器人会被置空
+   * （`ON DELETE SET NULL`），而不是阻止删除、也不是把机器人一起删掉。
+   */
+  strategyId: number | null;
   /** Minutes between decision cycles. */
   cycleIntervalMinutes: number;
   initialEquity: number;

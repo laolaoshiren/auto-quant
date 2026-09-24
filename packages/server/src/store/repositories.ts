@@ -464,8 +464,31 @@ export const strategies = {
     getDb().run('DELETE FROM strategies WHERE id = ?', id);
   },
 
+  /**
+   * 有多少个机器人**真的在靠这个策略的参数运行**。
+   *
+   * ## ⚠️ 只数固定策略模式 —— AI 托管的机器人不算
+   *
+   * AI 托管的参数整份在它自己的 `agent_config_json` 里，**这个策略对它不生效**。
+   * 把它算进来会造成两个具体的后果：
+   *
+   *   · 删除被 `409` 挡住（"该策略正被 N 个机器人使用"），而那个机器人
+   *     根本没用它 —— 于是**一个没人用的策略删不掉**；
+   *   · 界面上显示成"有机器人在引用它"，让人以为那台机器人在跑这个策略。
+   *
+   * 用户的原话：「就算策略工坊里面默认策略 — 稳健就算删除、没有任何策略，
+   * 都不影响智能托管模式（做到完全独立）」。
+   *
+   * 加 `mode <> 'ai_managed'` 而不是只依赖"新数据里 AI 托管的 `strategy_id` 是
+   * NULL"：**老数据里存在 `mode = 'ai_managed'` 却还指向某个策略的行**，
+   * 只靠 NULL 判断就会漏掉它们。M12 会把那些行置空，但那之后的任何写入方
+   * 也不该再制造出这种组合。
+   */
   usageCount(id: number): number {
-    return getDb().count('SELECT COUNT(*) AS n FROM traders WHERE strategy_id = ?', id);
+    return getDb().count(
+      "SELECT COUNT(*) AS n FROM traders WHERE strategy_id = ? AND mode <> 'ai_managed'",
+      id,
+    );
   },
 
   /** The strategy a brand-new trader starts from. */
@@ -484,7 +507,8 @@ interface TraderRow {
   name: string;
   exchange_account_id: number;
   ai_model_id: number;
-  strategy_id: number;
+  /** `null` = 这个机器人不依赖任何策略（AI 托管）。见 `Trader.strategyId`。 */
+  strategy_id: number | null;
   cycle_interval_minutes: number;
   initial_equity: number;
   status: string;
@@ -533,7 +557,12 @@ export const traders = {
     name: string;
     exchangeAccountId: number;
     aiModelId: number;
-    strategyId: number;
+    /**
+     * 引用的策略。**AI 托管（`mode: 'ai_managed'`）传 `null`** ——
+     * 它的参数在 `agent_config_json` 里，策略对它不生效。
+     * 固定策略模式下必填，由调用方（API 层）保证。
+     */
+    strategyId: number | null;
     cycleIntervalMinutes: number;
     initialEquity: number;
     /**
@@ -568,7 +597,7 @@ export const traders = {
     input: Partial<{
       name: string;
       aiModelId: number;
-      strategyId: number;
+      strategyId: number | null;
       cycleIntervalMinutes: number;
       initialEquity: number;
     }>,
@@ -579,7 +608,15 @@ export const traders = {
       `UPDATE traders SET name = ?, ai_model_id = ?, strategy_id = ?, cycle_interval_minutes = ?, initial_equity = ?, updated_at = ? WHERE id = ?`,
       input.name ?? current.name,
       input.aiModelId ?? current.aiModelId,
-      input.strategyId ?? current.strategyId,
+      /*
+       * ⚠️ **这里不能用 `??`。**
+       *
+       * `input.strategyId ?? current.strategyId` 会把显式传入的 `null` 当成
+       * "没传"而回落到旧值 —— 于是"把机器人改成不依赖策略"这个操作**静默失败**，
+       * 而它看起来完全正常（没有报错、字段也确实没变）。
+       * 用 `in` 判断键是否存在，`null` 才能真的写进去。
+       */
+      'strategyId' in input ? (input.strategyId ?? null) : current.strategyId,
       input.cycleIntervalMinutes ?? current.cycleIntervalMinutes,
       input.initialEquity ?? current.initialEquity,
       now(),

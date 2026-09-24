@@ -830,7 +830,7 @@ function buildTrader(
   id = traderId,
 ): AutoTrader {
   const trader = traders.get(id);
-  const strategy = strategyStore.get(trader!.strategyId);
+  const strategy = strategyStore.get(trader!.strategyId!);
   return new AutoTrader({
     trader: trader!,
     config: strategy!.config,
@@ -2142,7 +2142,7 @@ test('an unrealised spike does not permanently trip the drawdown breaker', async
    */
   const broker = new FakeBroker();
   // A configured breaker, unlike the permissive default of the other tests.
-  strategyStore.update(traders.get(traderId)!.strategyId, {
+  strategyStore.update(traders.get(traderId)!.strategyId!, {
     config: {
       ...permissiveConfig(),
       circuitBreaker: {
@@ -2228,7 +2228,7 @@ test('每小时额度用满且空仓时跳过模型请求', async () => {
    * 测试就会以"额度并没满"的方式假绿）。
    * 然后手动记一条开仓事件，让本小时计数达到 1 —— 此时账户仍是空仓。
    */
-  strategyStore.update(traders.get(traderId)!.strategyId, {
+  strategyStore.update(traders.get(traderId)!.strategyId!, {
     config: {
       ...permissiveConfig(),
       throttle: { ...permissiveConfig().throttle, maxEntriesPerHour: 1 },
@@ -2259,7 +2259,7 @@ test('熔断生效且空仓时跳过模型请求，未熔断时照常请求', as
   };
 
   /* --- ① 未熔断：必须调用 --- */
-  strategyStore.update(traders.get(traderId)!.strategyId, {
+  strategyStore.update(traders.get(traderId)!.strategyId!, {
     config: {
       ...permissiveConfig(),
       circuitBreaker: {
@@ -2285,7 +2285,7 @@ test('熔断生效且空仓时跳过模型请求，未熔断时照常请求', as
 
   /* --- ② 熔断 + 空仓：一次都不能调用 --- */
   calls = 0;
-  strategyStore.update(traders.get(traderId)!.strategyId, {
+  strategyStore.update(traders.get(traderId)!.strategyId!, {
     config: {
       ...permissiveConfig(),
       circuitBreaker: {
@@ -2324,7 +2324,7 @@ test('a genuine realised loss still trips the drawdown breaker', async () => {
    * comparison, not how the loss was produced.
    */
   const broker = new FakeBroker();
-  strategyStore.update(traders.get(traderId)!.strategyId, {
+  strategyStore.update(traders.get(traderId)!.strategyId!, {
     config: {
       ...permissiveConfig(),
       circuitBreaker: {
@@ -2770,7 +2770,7 @@ test('风控裁决抛错的周期：记录里保留提示词、思维链与模�
 
   const trader = new AutoTrader({
     trader: traders.get(traderId)!,
-    config: strategyStore.get(traders.get(traderId)!.strategyId)!.config,
+    config: strategyStore.get(traders.get(traderId)!.strategyId!)!.config,
     registry,
     market: {} as never,
     marketData: fakeMarketData,
@@ -2828,7 +2828,7 @@ test('行情为空的一轮：也留下恰好一条记录，但不推进连续�
 
   const trader = new AutoTrader({
     trader: traders.get(traderId)!,
-    config: strategyStore.get(traders.get(traderId)!.strategyId)!.config,
+    config: strategyStore.get(traders.get(traderId)!.strategyId!)!.config,
     registry: fakeRegistry,
     market: {} as never,
     marketData: emptyMarketData,
@@ -3604,7 +3604,7 @@ test('★ 模型可以中途要数据：要什么就取什么，取完再给它�
 
   const trader = new AutoTrader({
     trader: traders.get(traderId)!,
-    config: strategyStore.get(traders.get(traderId)!.strategyId)!.config,
+    config: strategyStore.get(traders.get(traderId)!.strategyId!)!.config,
     registry: fakeRegistry,
     market: {} as never,
     marketData: market,
@@ -3653,7 +3653,7 @@ test('没有工具调用时不多问一次 —— 大多数轮次都该只调一
 
   await new AutoTrader({
     trader: traders.get(traderId)!,
-    config: strategyStore.get(traders.get(traderId)!.strategyId)!.config,
+    config: strategyStore.get(traders.get(traderId)!.strategyId!)!.config,
     registry: fakeRegistry,
     market: {} as never,
     marketData: market,
@@ -3740,7 +3740,7 @@ test('★ 配置写 20x 而交易所只允许 5x 时，按 5x 走 —— 而不�
    *
    * 现在引擎取**两者的小**。
    */
-  const strategy = strategyStore.get(traders.get(traderId)!.strategyId)!;
+  const strategy = strategyStore.get(traders.get(traderId)!.strategyId!)!;
   strategyStore.update(strategy.id, {
     config: {
       ...strategy.config,
@@ -3773,7 +3773,7 @@ test('读不到档位时退回配置上限 —— 读不到不该让交易停下
    *
    * 这一条比上一条更重要：一个"读不到就不开仓"的实现会让网络抖动变成停摆。
    */
-  const strategy = strategyStore.get(traders.get(traderId)!.strategyId)!;
+  const strategy = strategyStore.get(traders.get(traderId)!.strategyId!)!;
   strategyStore.update(strategy.id, {
     config: {
       ...strategy.config,
@@ -4122,7 +4122,7 @@ test('★ 待成交的挂单要占持仓名额 —— 否则 maxPositions 管不
    * 把 `maxPositions` 设成 1，先挂一张限价单（占掉那个唯一名额），
    * 然后让模型再提一笔开仓 —— **必须被拒**，理由要提到持仓数。
    */
-  const strategy = strategyStore.get(traders.get(traderId)!.strategyId)!;
+  const strategy = strategyStore.get(traders.get(traderId)!.strategyId!)!;
   strategyStore.update(strategy.id, {
     config: { ...strategy.config, riskControl: { ...strategy.config.riskControl, maxPositions: 1 } },
   });
@@ -4429,7 +4429,7 @@ test('时限设为 0 时关闭这条规则', async () => {
    *
    * 一个"想关但关不掉"的机械规则比没有它更糟 —— 操作员会以为已经关上了。
    */
-  const strategy = strategyStore.get(traders.get(traderId)!.strategyId)!;
+  const strategy = strategyStore.get(traders.get(traderId)!.strategyId!)!;
   strategyStore.update(strategy.id, {
     config: {
       ...strategy.config,
@@ -4501,7 +4501,7 @@ test('★ 开仓之后把真实成交价交回给模型，让它按实际价位�
 
   const trader = new AutoTrader({
     trader: traders.get(traderId)!,
-    config: strategyStore.get(traders.get(traderId)!.strategyId)!.config,
+    config: strategyStore.get(traders.get(traderId)!.strategyId!)!.config,
     registry: fakeRegistry,
     market: {} as never,
     marketData: fakeMarketData,
