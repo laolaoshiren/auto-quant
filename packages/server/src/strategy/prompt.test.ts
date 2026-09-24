@@ -27,6 +27,7 @@ import {
   PROMPT_PERFORMANCE_WINDOW_HOURS,
   PROMPT_RECENT_CLOSE_COUNT,
   PROMPT_TOKEN_BUDGET,
+  promptTokenBudget,
   type PromptContext,
   type PromptMemory,
 } from './prompt.js';
@@ -205,6 +206,52 @@ test('the scalping preset is the heavy case and gets a small candidate budget', 
     perCandidate * budget <= PROMPT_TOKEN_BUDGET * 1.1,
     `budget ${budget} × ${perCandidate} tokens must stay near the ${PROMPT_TOKEN_BUDGET} budget`,
   );
+});
+
+test('★ 预算按模型能力算：能力优先，但输出必须留得下', () => {
+  /*
+   * 用户的原则（原话）：
+   *   「在**最大化发挥模型能力**的前提下，才考虑优化模型成本 …… 这个模型最大
+   *     上下文是 1M，那么要**最大化利用模型能力、上下文**（当然也考虑安全冗余，
+   *     我记得是 80%）」
+   *
+   * ⚠️ **这个函数原来写的是 `上限 × 0.5`**，理由是"输出（含推理）占比很高"。
+   * 占比确实高（实测 `reasoning_tokens` 占 `completion_tokens` 的 80%+），
+   * **但绝对量很小**：推理峰值 28,590，而窗口是 1,000,000。
+   * 把 3% 的占比当成 50% 来预留，等于**无条件扔掉一半上下文** ——
+   * 那与"最大化利用"正好相反。**省钱的保守不等于安全的保守。**
+   *
+   * 下面这几个数都是**实测**来的：provider 的 `/models` 报
+   * `context_length: 1000000`，而 `max_tokens` 的硬上限是 393216
+   * （传 1000000 被拒："the valid range of max_tokens is [1, 393216]"）。
+   */
+  assert.equal(
+    promptTokenBudget(1_000_000),
+    800_000,
+    '1M 的模型应当能用 80% —— 用户明确的安全冗余，而不是原来的一半',
+  );
+
+  /*
+   * `上限 − 输出预留` 在小窗口上会变成负数 —— 那时必须落回保守下限，
+   * 而不是硬塞。这条保证"给输出留空间"**永远不会被利用率那条压过**：
+   * 一个 128k 的模型减掉 128k 的输出预留之后没有余量，只能用兜底值。
+   */
+  assert.equal(
+    promptTokenBudget(128_000),
+    PROMPT_TOKEN_BUDGET,
+    '128k 的窗口放不下"预留 128k 给输出"，必须落回保守下限',
+  );
+
+  /* 两条约束真的在**取小**，而不是只看利用率。 */
+  assert.equal(
+    promptTokenBudget(600_000),
+    468_928,
+    '600k 的窗口：利用率算出 480000，但留给输出后只有 468928 —— 取小的那个',
+  );
+
+  /* 不知道模型能吃多少时（`input_token_limit = 0`）用保守值，不猜。 */
+  assert.equal(promptTokenBudget(0), PROMPT_TOKEN_BUDGET);
+  assert.equal(promptTokenBudget(Number.NaN), PROMPT_TOKEN_BUDGET);
 });
 
 test('a light strategy is allowed a much larger universe than a heavy one', () => {
