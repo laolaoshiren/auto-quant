@@ -54,6 +54,16 @@ export class Db {
     for (const migration of MIGRATIONS) {
       if (migration.version <= current) continue;
       log.info(`正在应用数据库迁移 v${migration.version}（${migration.name}）`);
+      /*
+       * ⚠️ **重建表的迁移必须在事务之外关外键。**
+       *
+       * `PRAGMA foreign_keys` 在事务**内**是 no-op —— 所以把它写进迁移 SQL 里
+       * 没有任何作用，而 `DROP TABLE traders` 会顺着 `ON DELETE CASCADE`
+       * 把持仓、成交、订单、决策记录**全部删掉**。
+       *
+       * 顺序也不能换：关外键 → BEGIN → 迁移 → COMMIT → 校验 → 开外键。
+       */
+      if (migration.detachForeignKeys) this.db.exec('PRAGMA foreign_keys = OFF');
       this.db.exec('BEGIN');
       try {
         this.db.exec(migration.sql);
@@ -66,6 +76,20 @@ export class Db {
         throw new Error(
           `Migration ${migration.version} (${migration.name}) failed: ${(error as Error).message}`,
         );
+      } finally {
+        if (migration.detachForeignKeys) {
+          /*
+           * 重建之后必须确认没有留下悬空引用 —— 关着外键做的改动不会被自动检查，
+           * 而一张引用了不存在的行的表会在很久以后以别的方式炸出来。
+           */
+          const violations = this.db.prepare('PRAGMA foreign_key_check').all();
+          this.db.exec('PRAGMA foreign_keys = ON');
+          if (violations.length > 0) {
+            throw new Error(
+              `迁移 v${migration.version}（${migration.name}）之后外键校验不通过：${violations.length} 处悬空引用`,
+            );
+          }
+        }
       }
     }
   }
