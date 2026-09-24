@@ -212,6 +212,33 @@ export function checkConfigReachability(input: ReachabilityInput): ReachabilityR
   const ok = tradable.length > 0;
   const names = tradable.map((v) => v.symbol);
 
+  /*
+   * ⚠️ **一个标的都没评到时，没有结论可下。**
+   *
+   * `ok = tradable.length > 0` 在"评了 N 个、0 个能开"时是对的 —— 那是一个结论
+   * （账户规模不够）。但**在"一个都没评"时它是错的**：这个检查什么都没看，
+   * 却会产出一句「一个都开不出来」。
+   *
+   * 实盘上就是这个形状：AI 的配置用动态候选池、静态列表为空 —— 启动时拿不到
+   * 池内标的，于是每轮报一次"没有可交易的标的"。**那句话会让人去改一个根本
+   * 没错的配置。**
+   *
+   * 所以空输入返回**中性的**结论：`ok: true`（它不是"不可达"，是"未评估"），
+   * 并且把原因说出来。调用方若要区分"真的一个标的都没有"，它自己知道配置 ——
+   * 见 `manager.ts` 里 `nothingEvaluated` 那一段。
+   */
+  if (input.symbols.length === 0) {
+    return {
+      ok: true,
+      tradable,
+      blocked,
+      summary:
+        '这次没有评估任何标的（候选集为空）—— **这不代表没有可交易的标的**，' +
+        '只代表本次检查没有覆盖面。常见原因是配置用动态候选池而静态列表为空，' +
+        '而池内标的要等启动后拉到行情才能确定。',
+    };
+  }
+
   return {
     ok,
     tradable,

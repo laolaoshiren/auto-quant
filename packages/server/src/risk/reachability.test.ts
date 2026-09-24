@@ -195,12 +195,6 @@ test('权益为 0 或负数时一律不可交易，且不抛异常', () => {
   }
 });
 
-test('空标的列表不炸', () => {
-  const r = checkConfigReachability(live({ symbols: [] }));
-  assert.equal(r.ok, false);
-  assert.deepEqual(r.tradable, []);
-});
-
 test('每个判定都给出理由 —— 一个静默的体检等于没有体检', () => {
   const r = checkConfigReachability(live());
   for (const v of [...r.tradable, ...r.blocked]) {
@@ -224,4 +218,42 @@ test('下限取"我们自己的"与"交易所的"里更高的那个', () => {
   const sol2 = verdict(r2, 'SOLUSDT');
   assert.ok(sol2.range);
   assert.ok(Math.abs(sol2.range.min - 5) < 1e-9, '交易所下限更高时应当用它');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  空候选集：「没评过」不等于「都不可交易」                                      */
+/* -------------------------------------------------------------------------- */
+
+test('★ 一个标的都没评到时，不能报「一个都开不出来」', () => {
+  /*
+   * 实盘日志每轮都在报这句：
+   *
+   *   机器人 #9 当前配置下没有可交易的标的：评到的 0 个候选里一个都开不出来
+   *
+   * 而**那时机器人正在正常交易**。AI 的配置用动态候选池（`useCoinPool`）、
+   * 静态列表为空，而动态池要等启动后拉到行情才能确定 —— 于是 `symbols` 是空集，
+   * 检查却把"没评"说成了"不可达"。
+   *
+   * `ok = tradable.length > 0` 在"评了 N 个、0 个能开"时是对的（那是一个结论：
+   * 账户规模不够），**在"一个都没评"时是错的** —— 它什么都没看。
+   *
+   * **一句没有覆盖面的结论，会让人去改一个根本没错的配置。**
+   */
+  const r = checkConfigReachability(live({ symbols: [] }));
+  assert.equal(r.ok, true, '没评过 ≠ 不可达：空候选集不能产出否定结论');
+  assert.deepEqual(r.tradable, [], '空输入也不该炸');
+  assert.deepEqual(r.blocked, []);
+  assert.match(r.summary, /没有评估任何标的/, '要说明这是"没评"，不是"不可达"');
+  assert.doesNotMatch(r.summary, /一个都开不出来/, '绝不能说"一个都开不出来"');
+});
+
+test('评了但都不可达 —— 那种情况仍然要报（这一半不能被上面那条吃掉）', () => {
+  /*
+   * 反面。没有这一条，把 `ok` 一律改成 `true` 也能让上面全绿 ——
+   * 而那会把真正的"规模不够"藏起来，**那正是这个检查存在的理由**。
+   */
+  const r = checkConfigReachability(live({ equity: 1, symbols: [sym('BTCUSDT')] }));
+  assert.equal(r.ok, false, '真的一个都开不出来时必须报');
+  assert.equal(r.blocked.length, 1);
+  assert.match(r.summary, /一个都开不出来/);
 });
