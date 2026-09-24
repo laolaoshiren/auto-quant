@@ -1057,6 +1057,42 @@ test('指标序列的渲染长度归 AI 调 —— 它以前是写死的 30', ()
   assert.ok(ratio > 1.5 && ratio < 6, `成本应当随点数放大约 3–4 倍，实际 ${ratio.toFixed(2)}`);
 });
 
+test('★ 60 点必须比 30 点更重 —— 上限不该在 30 处截断', () => {
+  /*
+   * 上面那条用例只测到 **30**，所以它发现不了这件事：`MAX_RENDER_POINTS`
+   * 原来就是 **30**，而 schema 允许 `promptPoints` 到 **120**。
+   *
+   * 后果是 AI 把 `promptPoints` 调到 60（它以为在"加厚历史依据"）时，
+   * **渲染出来的点数一根都不会变** —— 而 `prompt.ts` 上那段注释记着，
+   * 它会把这件事记成"我加厚了历史依据"并据此归因。**一个静默失效的参数
+   * 比一个不存在的参数更糟**：后者它不会去调。
+   *
+   * 那个 30 诞生于 `PROMPT_TOKEN_CEILING` 还是 20 万的年代；现在预算按模型能力
+   * 算（1M 的模型拿到 80 万），实测算过 20 个候选全给 120 点也仍在预算内。
+   * 所以上限抬到与配置允许范围一致，"撑爆"交给 `buildUserPromptParts()`
+   * 那道裁剪循环 —— **那一层才是唯一该管预算的地方**。
+   */
+  const base = configFromPreset('conservative');
+  const withConfig = (points: number): StrategyConfig => ({
+    ...base,
+    indicators: {
+      ...base.indicators,
+      /* `primaryCount` 要给足，否则被它先截断，测不到 `MAX_RENDER_POINTS` 这一层。 */
+      kline: { ...base.indicators.kline, promptPoints: points, primaryCount: 300 },
+    },
+  });
+
+  const at30 = estimateCandidateChars(withConfig(30));
+  const at60 = estimateCandidateChars(withConfig(60));
+  const at120 = estimateCandidateChars(withConfig(120));
+
+  assert.ok(
+    at60 > at30,
+    `60 点必须比 30 点更重（30 点 ${at30} 字、60 点 ${at60} 字）—— 否则上限仍卡在 30`,
+  );
+  assert.ok(at120 > at60, `120 点同理（60 点 ${at60} 字、120 点 ${at120} 字）`);
+});
+
 test('提示词要告诉 AI：输入长度本身是一笔可以权衡的成本', () => {
   const text = buildSystemPrompt(contextWith(blankMemory()));
   assert.match(text, /promptPoints/, '要写出参数名，否则模型不知道改什么');
