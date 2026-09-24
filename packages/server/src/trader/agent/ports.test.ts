@@ -313,8 +313,17 @@ test('★ repeatedFields 必须落在截断线之内 —— 所以它排在 rece
    * 它为此多花了一轮工具调用去重读 —— 而那一轮最后正是死在"剩余预算不足以再读
    * 一类新信息"上。**一条被自己撑爆的返回等于没给。**
    */
-  const fat = { riskControl: { minPositionSize: 5.1, note: 'x'.repeat(400) } };
-  for (let i = 0; i < 12; i += 1) {
+  const fat = { riskControl: { minPositionSize: 5.1, note: 'x'.repeat(2_000) } };
+  /*
+   * ⚠️ **条数与每条的大小都要跟着 `MAX_JSON_CHARS` 走。**
+   *
+   * 截断线从 6000 提到 40000（见 `tools.ts` 上那段：6000 字符只占新预算的 0.4%），
+   * 于是原来"12 条 × 400 字符"的构造够不到线，用例的前提断言会失败。
+   *
+   * 注意这里取的是 `experiments(20)` —— **`limit` 是 20**，所以条数给再多也只
+   * 读到 20 条；真正决定长度的是**每条的大小**，所以把 `note` 加长到 2,000 字符。
+   */
+  for (let i = 0; i < 40; i += 1) {
     agentExperiments.insert({
       traderId,
       trigger: 'losing_streak',

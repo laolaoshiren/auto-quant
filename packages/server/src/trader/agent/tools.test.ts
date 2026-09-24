@@ -273,10 +273,13 @@ test('结果过长时截断，并**说明**截断了', async () => {
   /*
    * 静默截断比不截断更糟：模型会以为自己看到了全部，然后基于一个残缺的
    * 图景下结论。所以截断必须自己说出来。
+   *
+   * ⚠️ **长度要跟着 `MAX_JSON_CHARS` 走**：截断线从 6000 提到 40000 之后，
+   * 原来那个 20000 字符的 blob 够不到线，这条用例就测不到东西了。
    */
   const { deps } = makeDeps({
     read: {
-      performance: () => ({ blob: 'x'.repeat(20000) }),
+      performance: () => ({ blob: 'x'.repeat(60_000) }),
       equityCurve: () => [],
       experiments: () => [],
       lessons: () => [],
@@ -285,9 +288,26 @@ test('结果过长时截断，并**说明**截断了', async () => {
       skippedOutcomes: async () => ({}),
     },
   });
-  const out = (await dispatchTool('get_performance', {}, deps)).result as { truncated?: boolean; note?: string };
+  const out = (await dispatchTool('get_performance', {}, deps)).result as {
+    truncated?: boolean;
+    note?: string;
+    original_length?: number;
+  };
   assert.equal(out.truncated, true);
   assert.match(out.note ?? '', /截断/, '必须说明被截断了');
+  /*
+   * ⚠️ **`preview` 是字符切片，通常在 JSON 中间断开。**
+   *
+   * 模型拿到一段以 `,{"id":31,"sym` 结尾的文本时，如果以为那是一个对象，
+   * 它会把解析失败归因于自己。所以说明里必须点出这一点 —— 它才知道该做的是
+   * "缩小 limit 再取一次"，而不是"我读不懂"。
+   */
+  assert.match(out.note ?? '', /不要把它当成可解析的 JSON/, '必须说清 preview 不是合法 JSON');
+  assert.match(out.note ?? '', /limit/, '要给出可执行的下一步');
+  assert.ok(
+    (out.original_length ?? 0) > 60_000,
+    '要报出原始长度，模型才能判断"差多少"',
+  );
 });
 
 /* -------------------------------------------------------------------------- */
