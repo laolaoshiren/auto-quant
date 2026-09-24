@@ -2120,17 +2120,58 @@ export const trades = {
      * 只可能有浮点末位差异。**单向持仓模式下，同一标的在同一价位平掉两笔真实回合，
      * 中间还要隔着再入场冷却** —— 所以"同标的 + 同数量 + 同出场价"落在冷却窗口里，
      * 就是同一个回合。数量容差沿用 20%（两条路径的数量口径本来就不同）。
+     *
+     * ## ⚠️ 但数量不能一票否决 —— 它才是最不可靠的那个维度
+     *
+     * 实测事故（用户的原话：「归属权益和收益，为什么和钱包实际余额对不上？」）：
+     *
+     *     平台记账净额 2.69503831
+     *     交易所流水   1.18510038      ← 逐位一致于钱包变化
+     *     ────────────────────────
+     *     平台多算了   1.50993793
+     *
+     * 六组重复，全都是同一个形状 —— **同一个平仓时刻、同一个入场价、同一个出场价**，
+     * 只是数量不同：
+     *
+     *     XRP 09-21 22:03  1.5038 → 1.5583   13.6 / 9.2 / 6.8    （虚增 +1.4579）
+     *     XRP 09-22 19:37  1.56   → 1.5817   12.7 / 8.3 / 5.9    （虚增 +0.3576）
+     *     XRP 09-22 08:34  1.513  → 1.5189   13   / 8.6 / 6.2    （虚增 +0.1337）
+     *
+     * 数量差 32%、50% —— **20% 的容差全部超出**，而它原来写在 WHERE 的**最外层**，
+     * 于是一票否决了下面对的那些判据：同一个真实回合被判成三个不同的回合，
+     * 运行期记一笔、对账重建又各插一笔，全留在账上。
+     *
+     * ### 修法：把数量收进各自的分支，并补一条**以平仓时刻 + 双侧价格为准**的判据
+     *
+     * 六组重复里 `closed_at` 是**毫秒级相同**的，入场价与出场价也完全相同 ——
+     * 那三项才是真正同源的：同一个平仓时刻、同一个入场均价、同一个出场均价，
+     * 在物理上就是**同一个回合**（单向持仓下不可能在毫秒级同时平掉两笔同价仓）。
+     *
+     * 所以：
+     *
+     *   ① 原有两条判据**各自**带上数量容差（行为与以前一致，只是不再跨分支否决）；
+     *   ② 新增一条：**平仓时刻落在 2 秒窗口内 + 入场价相同 + 出场价相同** ——
+     *      **不看数量**。
+     *
+     * 放宽的是"数量口径"这一个**本来就不同源**的维度，而判据的另一半
+     * （毫秒级的平仓时刻 + 两个价格）比原来更严 —— 它要求三样东西同时对得上。
      */
     const sql = `SELECT id FROM trades
        WHERE trader_id = ? AND symbol = ? AND quantity > 0
-         AND ABS(quantity - ?) <= MAX(1e-6, ABS(?) * ${DUPLICATE_QUANTITY_TOLERANCE})
          AND (
               (
-                ABS(exit_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_EXIT_PRICE_TOLERANCE})
+                ABS(quantity - ?) <= MAX(1e-6, ABS(?) * ${DUPLICATE_QUANTITY_TOLERANCE})
+            AND ABS(exit_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_EXIT_PRICE_TOLERANCE})
             AND ABS(julianday(opened_at) - julianday(?)) * 86400000 <= ${DUPLICATE_OPEN_TOLERANCE_MS}
               )
            OR (
+                ABS(quantity - ?) <= MAX(1e-6, ABS(?) * ${DUPLICATE_QUANTITY_TOLERANCE})
+            AND ABS(entry_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_PRICE_TOLERANCE})
+            AND ABS(julianday(closed_at) - julianday(?)) * 86400000 <= ${DUPLICATE_CLOSE_TOLERANCE_MS}
+              )
+           OR (
                 ABS(entry_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_PRICE_TOLERANCE})
+            AND ABS(exit_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_EXIT_PRICE_TOLERANCE})
             AND ABS(julianday(closed_at) - julianday(?)) * 86400000 <= ${DUPLICATE_CLOSE_TOLERANCE_MS}
               )
               ${byOrder}
@@ -2140,13 +2181,23 @@ export const trades = {
     const params: unknown[] = [
       input.traderId,
       input.symbol,
+      /* ① 出场价 + 开仓时刻（带数量） */
       input.quantity,
       input.quantity,
       input.exitPrice,
       input.exitPrice,
       input.openedAt,
+      /* ② 入场价 + 平仓时刻（带数量） */
+      input.quantity,
+      input.quantity,
       input.entryPrice,
       input.entryPrice,
+      input.closedAt,
+      /* ③ 平仓时刻 + 双价（**不带数量** —— 数量口径本来就不同源） */
+      input.entryPrice,
+      input.entryPrice,
+      input.exitPrice,
+      input.exitPrice,
       input.closedAt,
     ];
     if (byOrder) params.push(String(input.entryOrderId));
