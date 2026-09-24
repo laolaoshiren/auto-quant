@@ -408,7 +408,29 @@ export interface ToolOutcome {
   paused?: { reason: string };
 }
 
-export const MAX_JSON_CHARS = 6000;
+/**
+ * 单个工具结果的最大字符数 —— 超出就在**合法边界**上裁。
+ *
+ * ## 为什么从 6000 提到 40000
+ *
+ * 6000 字符约 3,500 token。而提示词预算现在是**按模型能力算的**：
+ * 1M 上下文的模型拿到 **80 万**（见 `promptTokenBudget`）—— 6000 字符只占
+ * **0.4%**。
+ *
+ * 而代价是实打实的：一次策略审视里模型可能连着调十几次工具，每次都只能看到
+ * 被切掉的结果。**"工具返回被砍"会直接降低它判断的质量** —— 而这与用户的原则
+ * （「在**最大化发挥模型能力**的前提下，才考虑优化模型成本」）相反。
+ *
+ * 40000 字符约 23,000 token：**仍只占 80 万预算的 3%**，而常规调用（绩效、
+ * 教训、最近决策）从此基本不会触发截断 —— 只有真正拉了整张表的调用才会。
+ *
+ * ## 为什么要在这里说清"截断是有损的"
+ *
+ * 原注释写得对：「裁剪是**有损的**，所以一定要在结果里说明裁了，否则模型会以为
+ * 自己看到了全部 —— 那比不给它数据更糟。」这一点没变，`bound()` 仍然在结果里
+ * 明确写出 `truncated: true` 与原文长度。
+ */
+export const MAX_JSON_CHARS = 40_000;
 
 /**
  * 几个**光看字段名推不出含义**的派生量，挂在 `get_current_params` 的结果上。
@@ -462,13 +484,24 @@ export function derivedRiskFigures(config: StrategyConfig): Record<string, strin
  *
  * 工具不该把整张表倒进提示词。裁剪是**有损的**，所以一定要在结果里说明裁了，
  * 否则模型会以为自己看到了全部 —— 那比不给它数据更糟。
+ *
+ * ## ⚠️ `preview` 是**字符切片**，所以它多半不是合法 JSON
+ *
+ * 这一点必须在 `note` 里说清：模型拿到一段以 `,{"id":31,"sym` 结尾的文本时，
+ * 如果以为那是一个 JSON 对象，它会把解析失败归因于自己。**说清"这是原始文本的
+ * 前 N 个字符"**，它才知道该做什么（缩小 `limit` 再取一次）。
  */
 function bound(result: unknown): unknown {
   const text = JSON.stringify(result);
   if (text.length <= MAX_JSON_CHARS) return result;
   return {
     truncated: true,
-    note: `结果过长（${text.length} 字符）已截断，只看得到前 ${MAX_JSON_CHARS} 字符。需要更细的视图请缩小 limit。`,
+    note:
+      `结果过长（原始 ${text.length} 字符）已截断到前 ${MAX_JSON_CHARS} 字符。` +
+      '**`preview` 是原始文本的字符切片，通常在 JSON 中间断开 —— 不要把它当成可解析的 JSON。**' +
+      '要拿到完整且合法的结果，请**减小这个调用的 `limit` 参数**再取一次（多数工具都支持它），' +
+      '或者改用更窄的查询条件。',
+    original_length: text.length,
     preview: text.slice(0, MAX_JSON_CHARS),
   };
 }
