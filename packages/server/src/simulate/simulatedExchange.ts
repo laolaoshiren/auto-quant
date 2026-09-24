@@ -781,6 +781,33 @@ export class SimulatedExchange {
     return this.marks.get(symbol) ?? 0;
   }
 
+  /**
+   * 这个标的的杠杆上界 —— 模拟环境里给一个**宽松的上界**。
+   *
+   * ## ⚠️ 这个方法曾经**不存在**，而 CI 抓不到
+   *
+   * `simulate.ts` 把它当作 `BinanceBroker` 用，靠的是一句
+   * `exchange as unknown as BinanceBroker` —— **类型断言把"缺方法"完全藏住了**：
+   * 类型检查通过、单元测试通过，一直到**端到端模拟**才炸：
+   *
+   *     第 69 轮失败：this.deps.broker.getMaxLeverage is not a function
+   *     7/18 项通过，11 项失败
+   *
+   * 补上它是为了**模拟能跑完**；但更该记住的是那个断言 —— 它让"这个桩不完整"
+   * 这件事没有任何静态证据。（单元测试侧的 `FakeBroker` 实现了完整接口，
+   * 所以它一直是对的。）
+   *
+   * ## 为什么返回 125 而不是 `null`
+   *
+   * 生产实现读 `leverageBracket` 的真实档位；读不到才返回 `null`（"不知道"），
+   * 调用方据此退回"只用配置的上限"。模拟环境**故意给一个偏乐观的上界** ——
+   * 那与生产注释里的取舍一致：「**宁可在这里给一个偏乐观的上界，也不要凭空
+   * 收紧模型的可用空间**」。返回 `null` 也能跑，但会让模拟测不到杠杆钳制那一段。
+   */
+  async getMaxLeverage(_symbol: string): Promise<number | null> {
+    return 125;
+  }
+
   /** Latest candle, so a test can inspect what price the bot just saw. */
   lastCandle(symbol: string): SimulatedPriceStep | undefined {
     return this.candles.get(symbol);
