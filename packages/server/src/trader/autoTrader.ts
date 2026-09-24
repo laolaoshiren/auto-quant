@@ -1840,6 +1840,27 @@ export class AutoTrader {
     progress.systemPrompt = systemPrompt;
     progress.userPrompt = userPrompt;
 
+    /*
+     * ── 临时诊断：stable / system 段是否真的逐字节稳定 ──────────────────
+     *
+     * 实测确定的事实（直接对 provider 做的实验）：**前缀不变就命中 97%，
+     * 前缀分叉就归零**。而线上命中率一直是 5–8% —— 也就是说
+     * `system` + `stable` 这两段里**一定有一处在每轮变化**。
+     *
+     * 三块 stable 内容（教训 / 最近平仓 / 绩效）都已经逐行读过、看起来都不含
+     * 易变字段，所以不能再靠"读代码猜" —— 这里把两个**哈希**打出来，
+     * 连续两轮一比就知道是哪一段在动。定位之后这段日志要删掉。
+     */
+    {
+      const { createHash } = await import('node:crypto');
+      const h = (s: string): string => createHash('sha256').update(s).digest('hex').slice(0, 12);
+      log.info(
+        `[cache-debug] system=${systemPrompt.length}(${h(systemPrompt)}) ` +
+          `stable=${stablePrompt.length}(${h(stablePrompt)}) ` +
+          `volatile=${volatilePrompt.length}(${h(volatilePrompt)})`,
+      );
+    }
+
     const startedAt = Date.now();
     state.phase = 'model';
     /*
