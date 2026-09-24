@@ -1414,20 +1414,44 @@ function renderPerformance(performance: PromptPerformance, config: StrategyConfi
  * 理由只留**一句话**（§2.4）：全文会让区块变成 O(n)，而理由的**形状**
  * （是"1M 突破"还是"RSI 超卖"）比全文更有诊断价值。
  */
-function renderRecentCloses(closes: PromptClose[], now: Date): string {
+/**
+ * 把一个时刻渲染成**绝对时间戳**（UTC，`MM-DD HH:mm`）。
+ *
+ * ## ⚠️ 为什么这里绝对不许用「X 小时前」
+ *
+ * 实测抓到的缓存杀手：这一块原来写的是
+ *
+ *     `(${humanDuration(minutesAgo)}前)`
+ *
+ * 而 `minutesAgo` 是 `now - closedAt` —— **`now` 每轮都在变**。于是 45 分钟之后
+ * 「3 小时前」变成「4 小时前」，**整个 stable 段从这一行起就与上一轮分叉**，
+ * 而缓存要求**前缀逐字节相同** —— 后面那几万 token 全部按全价计费。
+ *
+ * 证据在那份命中率里：**没有平仓记录时**（这一块是常量文案「还没有已平仓的交易」）
+ * 命中 **59,000**；**一旦有平仓记录**，命中掉到 **8,000**（只剩系统提示词）。
+ * 同一份提示词结构、同样的候选池，差别只在这一行。
+ *
+ * 绝对时间既**不随 `now` 变化**，又比"3 小时前"更有用 —— 模型可以拿它与
+ * `volatile` 段里那句「时间：…（UTC）」直接相减，而"3 小时前"只给了一个数。
+ *
+ * 口径与提示词里那句时间一致（UTC），避免模型在两个时区之间换算。
+ */
+function closeStamp(iso: string): string {
+  const at = new Date(iso);
+  if (!Number.isFinite(at.getTime())) return iso;
+  return at.toISOString().slice(5, 16).replace('T', ' ');
+}
+
+function renderRecentCloses(closes: PromptClose[]): string {
   if (closes.length === 0) {
     return '# 最近平仓\n还没有已平仓的交易。';
   }
 
   const blocks = closes.map((close) => {
-    const closedAt = new Date(close.closedAt).getTime();
-    const minutesAgo = Number.isFinite(closedAt)
-      ? Math.max(0, (now.getTime() - closedAt) / 60_000)
-      : 0;
     const head =
       `- ${close.symbol} ${close.side === 'long' ? '多' : '空'} ${close.leverage}x ` +
       `@${fmt(close.entryPrice)}→${fmt(close.exitPrice)}  净 ${fmtSigned(close.netPnl, 3)}  ` +
-      `${closeReasonLabel(close.closeReason, close.netPnl)}  (${humanDuration(minutesAgo)}前)`;
+      `${closeReasonLabel(close.closeReason, close.netPnl)}  (${closeStamp(close.closedAt)} UTC)`;
     return `${head}\n  你当时的理由：${oneLine(close.entryReason, 60)}`;
   });
 
@@ -1784,7 +1808,7 @@ function renderUserPrompt(
   const lessons = renderLessons(ctx.memory.lessons);
   if (lessons) stableParts.push(lessons);
 
-  stableParts.push(renderRecentCloses(ctx.memory.recentCloses, ctx.now));
+  stableParts.push(renderRecentCloses(ctx.memory.recentCloses));
   stableParts.push(renderPerformance(ctx.memory.performance, ctx.config));
 
   /* 2 — System status ---------------------------------------------------- */
