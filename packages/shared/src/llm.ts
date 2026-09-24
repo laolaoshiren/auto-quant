@@ -299,11 +299,12 @@ export const LLM_PROVIDERS: readonly LlmProviderDescriptor[] = [
     docsUrl: '',
     modelsPath: '/models',
     modelsAuth: 'bearer',
-    // 16k rather than 8k: a custom endpoint frequently fronts a reasoning model,
-    // and reasoning tokens are drawn from the same budget as the answer. With 8k
-    // a heavy prompt leaves nothing for the reply and the call returns empty —
-    // which looks like a broken key rather than an exhausted budget.
-    defaults: { temperature: 0.2, maxTokens: 16384, timeoutSeconds: 240, maxRetries: 2 },
+    // 64k：**推理与正文共用这个额度**，而本系统的提示词很大（实测 5 万–28 万
+    // tokens）且以 `reasoningEffort: high` 运行 —— 推理量随之增长。16k 实测会被
+    // 推理吃满、正文一个字不剩（`completion_tokens === reasoning_tokens === 16384`），
+    // 而那在操作台上看起来只是"这一轮没什么可做的"，不像一次截断。
+    // 这个数只是**上限**，不会让正常调用变贵。
+    defaults: { temperature: 0.2, maxTokens: 65536, timeoutSeconds: 240, maxRetries: 2 },
     supportsThinking: true,
   },
 ];
@@ -325,14 +326,16 @@ export function providerDefaults(id: LlmProviderId): {
     getProvider(id).defaults ?? {
       temperature: 0.2,
       /*
-       * 兜底值也与上面各 provider 对齐到 16384。
+       * 兜底值也与上面各 provider 对齐到 65536（原来是 16384）。
        *
        * 当前**用不到**它（10 个 provider 全都声明了 `defaults`），所以这里
        * 改的是一个"将来会生效"的值：有人加了新 provider 却忘了写 defaults 时，
-       * 8192 会让这个机器人的决策被截断成空响应 —— 而那种故障
+       * 一个偏小的值会让这个机器人的决策被推理吃空 —— 而那种故障
        * **看起来像密钥坏了**，不像是从这里的数字来的。
+       *
+       * 65536 而不是 16384：16384 已被实盘证明不够（见上面 `custom` 那条注释）。
        */
-      maxTokens: 16384,
+      maxTokens: 65536,
       timeoutSeconds: 180,
       maxRetries: 2,
     }
