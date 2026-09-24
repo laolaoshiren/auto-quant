@@ -613,10 +613,19 @@ export class TraderManager {
        * 用**配置里的候选池**而不是"全部合约"：体检要回答的是
        * "照这个配置能交易哪些标的"，所以标的集合必须与配置一致。
        */
-      const universe = new Set<string>([
-        ...effectiveConfig.coinSource.staticCoins,
-        ...(effectiveConfig.coinSource.useCoinPool ? [] : []),
-      ]);
+      const universe = new Set<string>([...effectiveConfig.coinSource.staticCoins]);
+      /*
+       * ⚠️ **动态候选池在启动时**无法**评估 —— 这里原来写的是
+       * `...(useCoinPool ? [] : [])`，两个分支都是空数组。**
+       *
+       * 那个写法读起来像"忘了写"，它其实是有意的（启动时还没有行情）。
+       * 但**有意降级写成了看不出意图的样子**，于是下一个人只会看到两个空分支。
+       * 现在把它变成一个有名有姓的事实，后面的报告按它决定措辞。
+       */
+      const usesDynamicUniverse =
+        effectiveConfig.coinSource.sourceType !== 'static' ||
+        effectiveConfig.coinSource.useCoinPool ||
+        effectiveConfig.coinSource.useOITop;
       const constraints = [...universe]
         .flatMap((symbol) => {
           try {
@@ -682,11 +691,33 @@ export class TraderManager {
       const poolNote = effectiveConfig.coinSource.useCoinPool
         ? `（只评了静态列表；动态币池需要行情，启动时不评估 —— 里面可能有可交易的标的）`
         : '';
+      /*
+       * ── 「一个都没评到」不等于「都不可交易」 ──────────────────────────────
+       *
+       * `checkConfigReachability` 的 `ok` 定义是 `tradable.length > 0` ——
+       * 那在"评了 N 个、0 个能开"时是对的（有结论：规模不够），但
+       * **在"一个都没评"时是错的**：它什么都没看，却产出了
+       * 「当前配置下没有可交易的标的」这句总结。
+       *
+       * 实盘就是这个形状：AI 的配置用动态币池、`staticCoins` 为空 —— 于是
+       * `universe` 是空集，而日志每轮报一次"没有可交易的标的"。
+       * 那句话会让人去改一个**根本没错**的配置。
+       *
+       * 所以分两种：
+       *   · **用动态池** → `ok`（中性）：这是"未评估"，不是"不可达"；
+       *   · **纯静态且列表为空** → 才是真的配置错误（它确实不会交易任何东西）。
+       */
+      const nothingEvaluated = universe.size === 0;
       checks.push({
         name: '可交易标的',
-        severity: reach.ok ? 'ok' : 'warn',
-        ok: reach.ok,
-        detail: reach.summary + poolNote,
+        severity: nothingEvaluated || reach.ok ? 'ok' : 'warn',
+        ok: nothingEvaluated || reach.ok,
+        detail: nothingEvaluated
+          ? usesDynamicUniverse
+            ? '这次没有评估任何标的：配置用的是动态候选池，而它要等到启动后拉到行情才能确定。' +
+              '**这不代表没有可交易的标的** —— 真正的候选池在第一个周期才成型。'
+            : '配置里一个标的都没有（静态列表为空，也没开动态候选池）—— 这个机器人不会交易任何东西。'
+          : reach.summary + poolNote,
         blocking: false,
       });
       // 被挡下的逐个列出（最多 5 个）—— 操作员需要知道是哪些、为什么。
@@ -699,8 +730,21 @@ export class TraderManager {
           blocking: false,
         });
       }
-      if (!reach.ok) {
+      /*
+       * ⚠️ **`nothingEvaluated` 时不报"没有可交易的标的"。**
+       *
+       * 那句总结在"评了 N 个、0 个能开"时是**结论**；在"一个都没评"时是**臆断** ——
+       * 而它每轮都会出现在日志里，把人引去改一个根本没错的配置。实盘上正是如此：
+       * AI 的配置用动态币池、静态列表为空，于是日志一直在报那句话。
+       *
+       * 只有**纯静态且列表为空**才是真的配置错误 —— 那种情况单独说，措辞也不同。
+       */
+      if (!reach.ok && !nothingEvaluated) {
         log.warn(`机器人 #${traderId} 当前配置下没有可交易的标的：${reach.summary}`);
+      } else if (nothingEvaluated && !usesDynamicUniverse) {
+        log.warn(
+          `机器人 #${traderId} 的配置里没有任何候选标的（静态列表为空、也没开动态候选池）—— 它不会交易任何东西。`,
+        );
       }
 
       const model: DecisionModel = {
