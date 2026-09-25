@@ -38,6 +38,7 @@ interface Deferred {
 }
 
 let pending: Deferred[] = [];
+let urls: string[] = [];
 let weightHeader: string | null = null;
 let originalFetch: typeof globalThis.fetch;
 let maxConcurrentlyOpen = 0;
@@ -51,13 +52,17 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   pending = [];
+  urls = [];
   weightHeader = null;
   opened = 0;
   maxConcurrentlyOpen = 0;
 
   originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => {
+  globalThis.fetch = (async (input: unknown) => {
     opened += 1;
+    // 记下 URL：用例要能认出"哪一个是校时探针"，否则它在 `pending` 里的位置
+    // 只能靠发出顺序去猜 —— 那会让测试与被测代码的实现细节耦合。
+    urls.push(String(input));
     maxConcurrentlyOpen = Math.max(maxConcurrentlyOpen, opened);
     return new Promise<Response>((resolve) => {
       pending.push({
@@ -235,4 +240,113 @@ test('a lower reading replaces the estimate instead of accumulating on top of it
     Date.now() - startedAt < 1_000,
     'a reading far below the soft limit must not inherit an old window and block',
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  时钟漂移与下单：两条会直接导致资金损失的路径                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 一个永不 resolve 的竞速对手。
+ *
+ * 用它把"死锁"变成**会失败的测试**，而不是一个挂住的 CI 进程 ——
+ * 一个挂住的测试比一个失败的测试更糟：它看起来像"还在跑"。
+ */
+function timeout(ms: number): Promise<'timeout'> {
+  return new Promise((resolve) => setTimeout(() => resolve('timeout'), ms));
+}
+
+function makeSignedRest(maxRetries: number, maxInFlight = 4): BinanceRest {
+  return new BinanceRest({
+    environment: 'production',
+    apiKey: 'test-key',
+    apiSecret: 'test-secret',
+    maxRetries,
+    maxInFlight,
+  });
+}
+
+test('★ 校时探针不占并发槽位 —— 否则一次时钟跳变会锁死整个 REST 客户端', async () => {
+  /*
+   * ## 这条测试钉的是一个**闭环死锁**
+   *
+   * `-1021`（时钟漂移）的处理是在**重试循环内部、持着并发槽位**时调用
+   * `syncTime(true)` 的。如果校时探针自己也要排队等槽位，那么：
+   *
+   *     maxInFlight 个在途签名请求同时被时钟跳变打成 -1021
+   *       → 每一个都持着槽位等第 (maxInFlight + 1) 个槽位
+   *       → 而槽位只能等它们自己返回才释放
+   *       → 谁都不会返回：交易、对账、撤单、挂保护单**全部永久停摆**
+   *
+   * 把宽度设成 1 就能确定性地复现这个闭环：唯一的槽位被占住时，
+   * 探针要么立刻发出（修复后），要么永远排不上（修复前）。
+   */
+  const rest = makeRest(1);
+
+  // 占住唯一的槽位。它不会自己返回，直到我们在测试末尾放行它。
+  const blocker = rest.publicGet('/fapi/v1/hold');
+  await settle();
+  assert.equal(rest.inFlightCount, 1, '前提：唯一的槽位已经被占住');
+
+  // 强制校时（`force=true` 绕过 60 秒短路）。
+  const syncing = rest.syncTime(true);
+  await settle();
+
+  const probeIndex = urls.findIndex((url) => url.includes('/fapi/v1/time'));
+  assert.ok(
+    probeIndex >= 0,
+    '校时探针必须能在槽位被占满时发出 —— 它要在持槽的重试路径里被调用',
+  );
+
+  pending[probeIndex]?.resolve(jsonResponse({ serverTime: Date.now() }));
+  const outcome = await Promise.race([syncing, timeout(2_000)]);
+  assert.notEqual(
+    outcome,
+    'timeout',
+    '校时在槽位被占满时也必须能完成；否则 -1021 重试路径会死锁整个客户端',
+  );
+
+  // 收尾：放行那个挂着的请求，让槽位归零（也证明槽位账本是平账的）。
+  pending[0]?.resolve(jsonResponse({ ok: true }));
+  await blocker;
+  assert.equal(rest.inFlightCount, 0);
+});
+
+test('★ 下单请求遇到"结果未知"时不重发 —— 一次超时不该变成两张仓单', async () => {
+  /*
+   * ## 为什么这条必须钉住
+   *
+   * `broker` 的类注释写着 "Never blind-retry an order … An ambiguous outcome is
+   * reconciled by client id rather than resent." —— 而实现里 `signedRequest`
+   * 对所有请求一视同仁地重试 `maxRetries` 次。
+   *
+   * 一次传输超时（`AbortSignal.timeout(15_000)`）**不表示"没成交"**，它表示"不知道"。
+   * 用同一个 `newClientOrderId` 重发一张市价单：若第一张其实已经成交，
+   * 币安不会因 id 重复而拒绝（它只要求 id 在**未成交委托**中唯一）——
+   * **仓位直接翻倍，而且多出来的那一半没有保护单。**
+   *
+   * 所以下单路径传 `avoidAmbiguousRetry: true`：只屏蔽"结果未知"的重试
+   * （传输层错误、5xx），而 `-1021` / 429 这类"明确未被接受"的错误仍然重试。
+   */
+  const attempts: string[] = [];
+  globalThis.fetch = (async (input: unknown) => {
+    attempts.push(String(input));
+    throw new Error('socket hang up');
+  }) as typeof globalThis.fetch;
+
+  const guarded = makeSignedRest(3);
+  await assert.rejects(
+    guarded.signedRequest('POST', '/fapi/v1/order', { symbol: 'BTCUSDT' }, { avoidAmbiguousRetry: true }),
+  );
+  assert.equal(
+    attempts.length,
+    1,
+    '传输错误是"结果未知"：下单必须只尝试一次（重发可能开出第二张无保护的仓位）',
+  );
+
+  /* 对照：同一个错误形态下，普通签名请求仍会重试满（这是只读调用，安全）。 */
+  attempts.length = 0;
+  const plain = makeSignedRest(1);
+  await assert.rejects(plain.signedRequest('GET', '/fapi/v1/openOrders', {}));
+  assert.equal(attempts.length, 2, '普通请求的重试行为不能被这次改动波及');
 });

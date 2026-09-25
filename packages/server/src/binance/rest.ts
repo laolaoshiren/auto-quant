@@ -59,6 +59,37 @@ interface RequestOptions {
   retries?: number;
   /** Skip the shared weight gate (used by the time-sync probe itself). */
   skipWeightGate?: boolean;
+  /**
+   * Do not take a concurrency slot for this request.
+   *
+   * 🔴 **Only the time-sync probe may use this, and it must.**
+   *
+   * A `-1021` (clock drift) is answered by re-syncing the clock *from inside the
+   * retry loop*, while that attempt is still holding its slot. If the probe also
+   * needed a slot, the pathological case is a closed cycle: six in-flight signed
+   * requests all get `-1021` at the same instant (a host clock step, a VM
+   * migration), all six hold their slot, all six wait for a **seventh** slot that
+   * can only be freed by themselves returning — and the whole REST client is
+   * bricked: trading, reconciliation, cancellation, protection orders.
+   *
+   * The probe is weight 1 and needs no slot to be safe, so giving it a path that
+   * cannot deadlock costs nothing.
+   */
+  skipSlot?: boolean;
+  /**
+   * Refuse to retry when the outcome of the first attempt is **unknown**.
+   *
+   * Order placement must use this. A transport timeout or a 5xx does not mean
+   * "the order was not accepted" — it means "we do not know". Resending a market
+   * order with the same `newClientOrderId` after the first one actually filled
+   * opens a **second, unprotected** position (Binance only requires the id to be
+   * unique among *open* orders, so a filled order does not block the resend).
+   *
+   * Errors that prove the request was **rejected before execution** (`-1021`
+   * clock drift, `429`/`418` throttling) are still retried — those are safe, and
+   * the `-1021` retry is what keeps a drifted clock from breaking every order.
+   */
+  avoidAmbiguousRetry?: boolean;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -195,9 +226,19 @@ export class BinanceRest {
       return this.timeOffset;
     }
     const before = Date.now();
+    /*
+     * `skipSlot: true` —— 它必须在**不占并发槽位**的前提下发出。
+     *
+     * 这个探针是在 `-1021` 的重试分支里被调用的，而那一刻调用方**正握着槽位**。
+     * 六个在途签名请求同时被时钟跳变打成 `-1021` 时，如果探针也要排队等槽位，
+     * 就会出现"六个都持槽等第七个槽位、而槽位要等它们自己返回才释放"的闭环 ——
+     * 整个 REST 客户端（交易、对账、撤单、挂保护单）永久卡死。
+     * 探针权重只有 1，不占槽位不会影响限流。
+     */
     const { serverTime } = await this.request<{ serverTime: number }>('GET', '/fapi/v1/time', {}, {
       retries: 2,
       skipWeightGate: true,
+      skipSlot: true,
     });
     const rtt = Date.now() - before;
     // Assume the response was generated roughly halfway through the round trip.
@@ -225,11 +266,16 @@ export class BinanceRest {
     method: HttpMethod,
     path: string,
     params: Record<string, unknown> = {},
+    options: { retries?: number; avoidAmbiguousRetry?: boolean } = {},
   ): Promise<T> {
     if (!this.hasCredentials) {
       throw new Error(`签名接口 ${path} 需要 API 凭据`);
     }
-    return this.request<T>(method, path, params, { signed: true, retries: this.maxRetries });
+    return this.request<T>(method, path, params, {
+      signed: true,
+      retries: options.retries ?? this.maxRetries,
+      ...(options.avoidAmbiguousRetry ? { avoidAmbiguousRetry: true } : {}),
+    });
   }
 
   /**
@@ -266,7 +312,11 @@ export class BinanceRest {
       // Take a concurrency slot *before* the weight gate. Reserving first means
       // the gate is consulted at admission time rather than by every member of a
       // fan-out simultaneously, which is what makes the soft limit real.
-      await this.acquireSlot();
+      //
+      // The time-sync probe is the one exception — see `skipSlot`. Holding a slot
+      // across it is what turns "clock drifted" into "client deadlocked".
+      const holdsSlot = options.skipSlot !== true;
+      if (holdsSlot) await this.acquireSlot();
       try {
         if (!options.skipWeightGate) await this.respectWeightBudget();
         try {
@@ -299,6 +349,16 @@ export class BinanceRest {
             }
 
             if (attempt < retries && (error.httpStatus === 500 || error.httpStatus === 503)) {
+              if (options.avoidAmbiguousRetry) {
+                /*
+                 * A 5xx may well have been executed before the gateway failed —
+                 * the answer is "unknown", not "rejected". Never resend an order on it.
+                 */
+                log.warn(
+                  `${path} 返回 ${error.httpStatus} —— 这是"结果未知"，按约定不重发（避免重复下单）。`,
+                );
+                throw error;
+              }
               await sleep(2 ** attempt * 500);
               continue;
             }
@@ -307,6 +367,16 @@ export class BinanceRest {
 
           // Transport-level failure (DNS, TLS, socket reset, timeout).
           if (attempt < retries) {
+            if (options.avoidAmbiguousRetry) {
+              /*
+               * The request may have reached Binance and been filled; only the
+               * response was lost. Resending is how one position becomes two.
+               */
+              log.warn(
+                `${path} 网络传输错误（${(error as Error).message}）—— 这是"结果未知"，按约定不重发（避免重复下单）。`,
+              );
+              throw error;
+            }
             const waitMs = 2 ** attempt * 500;
             log.warn(`${path} 网络传输错误（${(error as Error).message}）；${waitMs}ms 后重试`);
             await sleep(waitMs);
@@ -317,7 +387,7 @@ export class BinanceRest {
       } finally {
         // Released even on a retry path, so a retry waits its turn again rather
         // than holding a slot across the backoff sleep.
-        this.releaseSlot();
+        if (holdsSlot) this.releaseSlot();
       }
     }
 
