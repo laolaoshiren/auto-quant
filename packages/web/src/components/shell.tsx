@@ -202,6 +202,7 @@ export function Metric({
   label,
   value,
   sub,
+  subTitle,
   footer,
   tone = 'default',
   size = 'md',
@@ -211,6 +212,21 @@ export function Metric({
   value: ReactNode;
   /** 单行次要信息（基准、占比、一句说明）。会截断，所以**别放图形**。 */
   sub?: ReactNode;
+  /**
+   * `sub` 被截断时，鼠标放上去能看到的那句完整内容。
+   *
+   * ⚠️ **`sub` 带 `truncate`（`overflow:hidden; white-space:nowrap`），所以它一定会
+   * 在某个宽度上把内容切掉** —— 而切掉的部分**没有人能看到**，那比不显示更糟：
+   * 版面看起来完全正常，只是信息静默丢失。
+   *
+   * 这不是假想：`ui:check` 在真实浏览器里抓到过一次 —— 「交易盈亏」卡的副行
+   * `今日 +$0.13 · 总收益率 +6.26%` 被截断且没有 `title`，于是那半句话谁也读不到。
+   * 判据写在 `scripts/ui-check.mjs` 顶部：「有 `ellipsis` 但没有 `title` →
+   * 截掉的部分永远看不到，是**信息丢失**」。
+   *
+   * 所以：**凡是可能被截断的 `sub`，都该给它一个 `subTitle`**。
+   */
+  subTitle?: string;
   /**
    * 指标下方的图形或块级内容（表盘、迷你柱状图）。
    *
@@ -242,7 +258,11 @@ export function Metric({
       >
         {value}
       </div>
-      {sub !== undefined && <div className="num mt-0.5 truncate text-xs text-ink-faint">{sub}</div>}
+      {sub !== undefined && (
+        <div className="num mt-0.5 truncate text-xs text-ink-faint" title={subTitle}>
+          {sub}
+        </div>
+      )}
       {footer !== undefined && <div className="mt-1.5">{footer}</div>}
     </div>
   );

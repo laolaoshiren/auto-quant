@@ -777,6 +777,12 @@ export function TraderPage() {
               '读取中…'
             )
           }
+          /* ⚠️ `sub` 带 `truncate`，会静默切掉尾巴 —— 完整内容必须能从 title 读到。 */
+          subTitle={
+            account
+              ? `钱包余额 ${fmtNum(account.walletBalance, 2)} · 可用 ${fmtNum(account.availableBalance, 2)}`
+              : undefined
+          }
         />
       </MetricCard>
 
@@ -796,11 +802,26 @@ export function TraderPage() {
             stats ? (
               <>
                 今日 <span className={pnlColor(todayPnl)}>{fmtUsdSigned(todayPnl, 2)}</span>
-                {' · '}总收益率 <span className={pnlColor(stats.totalReturnPercent)}>{fmtPercent(stats.totalReturnPercent)}</span>
+                {' · '}总收益 <span className={pnlColor(stats.totalReturnPercent)}>{fmtPercent(stats.totalReturnPercent)}</span>
               </>
             ) : (
               '等待统计'
             )
+          }
+          /*
+           * ⚠️ **这一行被 `ui:check` 在真实浏览器里抓到过**：
+           *
+           *     ⚠️ 被截断且没有 title（内容读不到）:
+           *        "今日 +$0.13 · 总收益率 +6.26%"
+           *
+           * `sub` 带 `truncate`，五列布局下卡片只有约 290px —— 那一行被切掉尾巴，
+           * 而**切掉的部分谁也看不到**（`ui-check.mjs` 顶部把这种情况判为"信息丢失"，
+           * 而不是"版面正常"）。所以文案缩到「总收益」，并把完整句子放进 `subTitle`。
+           */
+          subTitle={
+            stats
+              ? `今日盈亏 ${fmtUsdSigned(todayPnl, 2)} · 总收益率 ${fmtPercent(stats.totalReturnPercent)}`
+              : undefined
           }
         />
       </MetricCard>
@@ -829,6 +850,18 @@ export function TraderPage() {
             ) : (
               '读取中…'
             )
+          }
+          subTitle={
+            account
+              ? [
+                  notional > 0 ? `名义敞口 ${fmtUsd(notional, 2)}` : '当前无持仓',
+                  account.unrealizedPnl !== 0
+                    ? `账户未实现盈亏 ${fmtUsdSigned(account.unrealizedPnl, 2)}`
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
+              : undefined
           }
         />
       </MetricCard>
