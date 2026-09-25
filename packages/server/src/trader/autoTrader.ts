@@ -109,6 +109,26 @@ const RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const FULL_RECONCILE_EVERY_PASSES = 24;
 
 /**
+ * 两条权益快照差在这以内就算"同一个数"（浮点末位不算变化）。
+ *
+ * 用绝对容差而不是相等：`equity` 是"初始 + Σ已实现 + 浮盈"算出来的，
+ * 浮盈那一路经过价格换算，同一个持仓在同一个价位上重算可能差在 1e-12 量级 ——
+ * 那不该被当成"账户动了"。
+ */
+const SNAPSHOT_SAME_TOLERANCE = 1e-9;
+
+/**
+ * 持仓与权益都没变时，最多隔多久记一条**心跳**快照。
+ *
+ * 没有心跳，长时间空仓会在权益曲线上留下断档 —— 那看起来像"机器人没在跑"，
+ * 而它其实一直在跑。2 小时对一台 45 分钟一轮的机器人是"每 2–3 轮一条"，
+ * 既保住了"我还在"的证据，又不会把曲线铺成一堆重复的点。
+ *
+ * 完整理由见 `recordEquity()`。
+ */
+const SNAPSHOT_HEARTBEAT_MS = 2 * 60 * 60 * 1000;
+
+/**
  * 结清一张本地委托之前，它至少要有多"老"。
  *
  * ## 为什么需要这个宽限
@@ -3937,7 +3957,18 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       try {
         const account = await this.deps.broker.getAccountState();
         const livePositions = await this.deps.broker.getPositions().catch(() => []);
-        equityStore.insert(this.buildEquitySnapshot(account, livePositions));
+        /*
+         * ⚠️ **走 `recordEquity()`，不要直接 `equityStore.insert()`。**
+         *
+         * 这里原来是直接插入的，于是它绕过了"完全重复的快照不记"那条判定 ——
+         * 而它**每一轮深对账都会跑**（`FULL_RECONCILE_EVERY_PASSES = 24`，
+         * 外加启动前与控制台按钮），所以它正是那些"连续 64 条一模一样的
+         * 21.9669"的主要来源之一。
+         *
+         * 统一走同一个方法还有第二个好处：它会发 `eventBus` 的 `equity` 事件，
+         * 而这条路径原来不发 —— 同一个动作在两个入口下行为不同，是下一类 bug 的温床。
+         */
+        await this.recordEquity(account, livePositions);
       } catch (error) {
         log.debug(`[${this.deps.trader.name}] 对账后写入权益快照失败：${(error as Error).message}`);
       }
@@ -7159,10 +7190,67 @@ reduceQuantity: null,
     };
   }
 
+  /**
+   * 记录一条权益快照 —— **但完全重复的不记**。
+   *
+   * ## 为什么（用户的原话）
+   *
+   * 「默认上面显示得是全部 …… 鼠标悬停在某个时间节点上，显示得信息也是全局来的
+   * 数据（现在显示的数据我感觉是基于今天的，导致了**除了今天以外的鼠标悬停都看
+   * 不到数据**）」
+   *
+   * 查下来的结论是**数据没错**：那一刻的快照确实是那个值（悬停在 24/09 07:08
+   * 显示 21.97，而那条快照的 `equity` 就是 21.96687；如果它读的是"今天的值"，
+   * 应该显示 22.23）。**但体验确实是坏的**，而根因在这里：
+   *
+   * 空仓期间权益一动不动，而系统仍然每 45 分钟记一条**逐字节相同**的快照。
+   * 实测线上 635 条里最长的一段是**连续 64 条都是 21.9669**：
+   *
+   *     09-21T02:35 → 连续 31 条都是 20.8021
+   *     09-21T22:14 → 连续 19 条都是 22.0523
+   *     09-23T11:09 → 连续 64 条都是 21.9669
+   *     09-24T18:39 → 连续 27 条都是 22.0601
+   *
+   * 于是曲线上是大片长平线，**悬停在任何一点看到的都是同一个数** ——
+   * 用户的感受完全正确，只是原因不在提示框、而在这里。
+   *
+   * ## 规则
+   *
+   *   · **有变化 → 一定记**（持仓数、浮动盈亏、权益任一不同）；
+   *   · **没变化 → 每 `SNAPSHOT_HEARTBEAT_MS` 记一条心跳**，其余跳过。
+   *
+   * 心跳是必要的：没有它，长时间空仓会在曲线上留下**断档**，那看起来像
+   * "机器人没在跑"。而重复的中间态**没有信息量** —— 去掉它不丢任何东西。
+   *
+   * ## 比哪几项
+   *
+   * `openPositions` / `unrealizedPnl` / `equity` 三项。前两项是"这个机器人在干什么"，
+   * 最后一项是"结果" —— 只比 `equity` 会让"开了仓但价格还没动"被误判成重复。
+   *
+   * ⚠️ **不比较 `availableBalance` / `accountEquity`**：那是**共享钱包**的读数，
+   * 同一个账户下别的机器人交易也会让它变。用它当判据会让这个机器人在自己什么都没做
+   * 的时候记下一堆"变化"，而那条曲线上讲的是**它自己的账**。
+   */
   private async recordEquity(account: AccountState, exchangePositions: ExchangePosition[]): Promise<void> {
     const snapshot = this.buildEquitySnapshot(account, exchangePositions);
+    if (this.isRedundantSnapshot(snapshot)) return;
     equityStore.insert(snapshot);
     eventBus.publish({ type: 'equity', traderId: this.deps.trader.id, snapshot });
+  }
+
+  /** 与上一条快照相比，这一条有没有新信息（判据见 `recordEquity`）。 */
+  private isRedundantSnapshot(next: EquitySnapshot): boolean {
+    const [prev] = equityStore.list(next.traderId, 1);
+    if (!prev) return false;
+
+    const same =
+      prev.openPositions === next.openPositions &&
+      Math.abs(prev.unrealizedPnl - next.unrealizedPnl) < SNAPSHOT_SAME_TOLERANCE &&
+      Math.abs(prev.equity - next.equity) < SNAPSHOT_SAME_TOLERANCE;
+    if (!same) return false;
+
+    const ageMs = Date.parse(next.timestamp) - Date.parse(prev.timestamp);
+    return Number.isFinite(ageMs) && ageMs < SNAPSHOT_HEARTBEAT_MS;
   }
 }
 

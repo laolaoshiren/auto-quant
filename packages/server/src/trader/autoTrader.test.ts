@@ -1075,6 +1075,40 @@ test('a cycle opens a position and places exchange-side protection', async () =>
   assert.ok(equityStore.list(traderId).length >= 1);
 });
 
+test('★ 空仓且权益没变时不重复记快照 —— 否则曲线上全是悬停看不出变化的长平线', async () => {
+  /*
+   * 用户的原话：「默认上面显示得是全部 …… 鼠标悬停在某个时间节点上，显示得信息
+   * 也是全局来的数据（现在显示的数据我感觉是基于今天的，导致了**除了今天以外的
+   * 鼠标悬停都看不到数据**）」。
+   *
+   * 查下来**数据没错**（那一刻的快照确实是那个值），但**体验确实是坏的** ——
+   * 根因是空仓期间权益一动不动，而系统仍然每轮记一条**逐字节相同**的快照。
+   * 实测线上最长的一段是**连续 64 条都是 21.9669**。
+   *
+   * 规则：有变化一定记；没变化时每 2 小时记一条心跳（保"我还在"的证据）。
+   * 单测里跨不过 2 小时，所以这里钉的是**前半条**：没变化就不记。
+   */
+  const broker = new FakeBroker();
+  const trader = buildTrader(
+    broker,
+    '<reasoning>Nothing to do.</reasoning><decision>[{"symbol":"BTCUSDT","action":"wait"}]</decision>',
+  );
+
+  await trader.runOnce();
+  const afterFirst = equityStore.list(traderId).length;
+  assert.ok(afterFirst >= 1, `第一轮必须记一条基线，实际 ${afterFirst}`);
+
+  /* 再跑两轮，什么都没发生 —— 一条都不该多。 */
+  await trader.runOnce();
+  await trader.runOnce();
+
+  assert.equal(
+    equityStore.list(traderId).length,
+    afterFirst,
+    '持仓、浮动盈亏、权益都没变时不该重复插快照（那正是"悬停看不到变化"的来源）',
+  );
+});
+
 test('a cycle that decides to wait places no orders', async () => {
   const broker = new FakeBroker();
   const trader = buildTrader(
