@@ -1107,34 +1107,70 @@ const ORDER_MARGIN_MODE_SOURCE_TITLE = {
  *
  * 抽成一个组件（而不是在行内写三元）是因为它有**三态 + 两种来源**，而行内那个位置
  * 已经被状态列的注释占满了；口径判断本身在 `orderMarginMode()` 里（纯函数、有测试）。
+ *
+ * ## 两种入参，对应两张表
+ *
+ * · **订单表**给 `order`：那里的问题"这张单当时是什么模式"存在**两种来源**
+ *   （落库快照优先、当前持仓兜底），走 `orderMarginMode()`；
+ * · **成交表**给 `mode`：后端已经 `LEFT JOIN orders` 把入场单的模式带出来了，
+ *   只有一个来源 —— **不做兜底**。补录的回合（进程没运行时平的仓）本来就没有
+ *   对应的本地订单行，用"当前配置"顶上会把"不知道"说成一个看起来很确定的值。
  */
 function MarginModeCell({
   order,
+  mode,
   liveBySymbol,
 }: {
-  order: OrderRecord;
+  order?: OrderRecord;
+  mode?: MarginMode;
   liveBySymbol?: ReadonlyMap<string, MarginMode> | null;
 }) {
-  const resolved = orderMarginMode(order, liveBySymbol);
-  if (resolved === null) {
+  if (order) {
+    const resolved = orderMarginMode(order, liveBySymbol);
+    if (resolved === null) {
+      return (
+        <span className="text-ink-faint" title={ORDER_MARGIN_MODE_SOURCE_TITLE.none}>
+          —
+        </span>
+      );
+    }
     return (
-      <span className="text-ink-faint" title={ORDER_MARGIN_MODE_SOURCE_TITLE.none}>
+      <span
+        title={
+          resolved.source === 'order'
+            ? ORDER_MARGIN_MODE_SOURCE_TITLE.order
+            : ORDER_MARGIN_MODE_SOURCE_TITLE.position
+        }
+      >
+        {marginModeLabel(resolved.mode)}
+      </span>
+    );
+  }
+
+  if (mode === undefined) {
+    return (
+      <span className="text-ink-faint" title={TRADE_MARGIN_MODE_TITLE.none}>
         —
       </span>
     );
   }
-  return (
-    <span
-      title={
-        resolved.source === 'order'
-          ? ORDER_MARGIN_MODE_SOURCE_TITLE.order
-          : ORDER_MARGIN_MODE_SOURCE_TITLE.position
-      }
-    >
-      {marginModeLabel(resolved.mode)}
-    </span>
-  );
+  return <span title={TRADE_MARGIN_MODE_TITLE.known}>{marginModeLabel(mode)}</span>;
 }
+
+/**
+ * 成交表那一格的措辞。
+ *
+ * 它必须说清"这是**当时**的配置"，而不是"现在的"—— 订单表有兜底值、措辞里
+ * 专门警告过"不能当历史证据"；成交这一格恰恰**是**历史，两个来源混着说的话
+ * 读者就分不清哪一行可信了。
+ */
+const TRADE_MARGIN_MODE_TITLE = {
+  known: '该回合入场时的保证金模式（取自入场订单落库的配置，是当时的值）。',
+  none:
+    '这一回合没有保证金模式的记录：入场订单在迁移之前（没有这一列），' +
+    '或者这一笔是补录的（机器人没运行时平的仓，没有对应的本地订单行）。' +
+    '— 表示"不知道"，不是"全仓"。',
+} as const;
 
 export function OrdersTable({
   paging,
@@ -1596,6 +1632,14 @@ export function TradesTable({
               <th className="th text-right" title={MARGIN_USED_TITLE}>
                 {BALANCE_LABEL.marginUsed}
               </th>
+              {/*
+                保证金模式紧跟在「保证金占用」后面 —— 与订单表同一处摆放、同一套措辞
+                （用户的原话是「历史成交里面也要显示保证金模式（全仓\逐仓）」）。
+                两者说的是同一件风险的两面：占了多少本金、以及这笔本金是全仓共担还是逐仓独担。
+              */}
+              <th className="th" title={TRADE_MARGIN_MODE_TITLE.known}>
+                保证金模式
+              </th>
               <th className="th text-right">开仓价</th>
               <th className="th text-right">平仓价</th>
               <th className="th text-right">盈亏（毛）</th>
@@ -1643,6 +1687,20 @@ export function TradesTable({
                   </td>
                   <td className="td num text-right">{fmtQty(trade.quantity)}</td>
                   <td className="td num text-right">{fmtUsd(marginUsed, 2)}</td>
+                  <td className="td">
+                    {/*
+                      保证金模式。数据来自后端 `LEFT JOIN orders`（入场订单那一行的
+                      `margin_type`）—— 取不到就是 `—`，**不默认成"全仓"**。
+
+                      这里**不做"当前持仓兜底"**：那是订单表才需要的东西。
+                      订单表要回答"这张单当时是什么模式"，而历史行的落库值可能缺失，
+                      所以用该标的**现在**的配置补一句、并在悬停说明里写明它不是快照。
+                      成交表这一格问的是"这一回合当时是什么模式"—— 补录的回合（进程
+                      没运行时平的仓）本来就没有对应的本地订单行，用当前配置顶上会把
+                      "不知道"说成一个看起来很确定的值。
+                    */}
+                    <MarginModeCell mode={trade.marginType} />
+                  </td>
                   <td className="td num text-right">{fmtPrice(trade.entryPrice)}</td>
                   <td className="td num text-right">{fmtPrice(trade.exitPrice)}</td>
                   {/* The gross stays visible but muted: it is the input to the

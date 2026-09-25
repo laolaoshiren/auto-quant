@@ -442,6 +442,19 @@ export interface TradeRecord {
    * `OrderRecord.marginUsed` 的说明。
    */
   marginUsed?: number;
+  /**
+   * 这一回合的**保证金模式**（`cross` = 全仓、`isolated` = 逐仓）。
+   *
+   * ⚠️ **它是从入场订单那一行 join 出来的**（`orders.margin_type`），不是 `trades`
+   * 自己的列 —— `trades` 没有、也不需要这一列：一张成交的保证金模式与它入场时
+   * 下单那一刻的账户配置是同一件事，重复落库只会多一处可能不一致的地方。
+   *
+   * 与 `OrderRecord.marginType` 同一套语义与取值：
+   *   · 迁移 v14 之前的入场订单没有记录 → `undefined`（界面显示 `—`）；
+   *   · 补录的回合（`source === 'reconciled'`）可能没有匹配的本地订单行 → 同样 `undefined`；
+   *   · **取不到就是取不到，绝不默认成 `'cross'`** —— 那等于编一个事实。
+   */
+  marginType?: MarginMode;
 }
 
 /**

@@ -1561,6 +1561,13 @@ interface TradeRow {
   source: string;
   entry_order_id: string | null;
   exit_order_id: string | null;
+  /**
+   * **JOIN 出来的列，不是 `trades` 自己的列** —— 见 `TradeRecord.marginType`。
+   *
+   * 查询里用 `LEFT JOIN orders`（按 `exchange_order_id = entry_order_id`）拿到
+   * 入场那一单的保证金模式。补录的回合或 v14 之前的订单没有匹配行时是 `null`。
+   */
+  entry_margin_type?: string | null;
 }
 
 function toTrade(row: TradeRow): TradeRecord {
@@ -1592,6 +1599,12 @@ function toTrade(row: TradeRow): TradeRecord {
      * 会随读它的地方而变。
      */
     marginUsed: marginUsedOrUndefined(row.entry_price, row.quantity, row.leverage),
+    /*
+     * 保证金模式来自**入场订单那一行**（SQL 里的 `LEFT JOIN orders`）。
+     * 取不到就是 `undefined`（界面显示 `—`），绝不回落到 `'cross'` —— 见
+     * `TradeRecord.marginType` 上的说明。
+     */
+    marginType: normalizeMarginMode(row.entry_margin_type) ?? undefined,
   };
 }
 
@@ -1994,9 +2007,12 @@ export const trades = {
        */
       return getDb()
         .all<TradeRow>(
-          `SELECT * FROM trades
-            WHERE trader_id = ? AND (closed_at < ? OR (closed_at = ? AND id < ?))
-            ORDER BY closed_at DESC, id DESC LIMIT ?`,
+          `SELECT t.*, o.margin_type AS entry_margin_type
+             FROM trades t
+             LEFT JOIN orders o
+               ON o.trader_id = t.trader_id AND o.exchange_order_id = t.entry_order_id
+            WHERE t.trader_id = ? AND (t.closed_at < ? OR (t.closed_at = ? AND t.id < ?))
+            ORDER BY t.closed_at DESC, t.id DESC LIMIT ?`,
           traderId,
           beforeClosedAt,
           beforeClosedAt,
@@ -2010,7 +2026,11 @@ export const trades = {
     if (cursor === null) {
       return getDb()
         .all<TradeRow>(
-          'SELECT * FROM trades WHERE trader_id = ? ORDER BY closed_at DESC, id DESC LIMIT ?',
+          `SELECT t.*, o.margin_type AS entry_margin_type
+             FROM trades t
+             LEFT JOIN orders o
+               ON o.trader_id = t.trader_id AND o.exchange_order_id = t.entry_order_id
+            WHERE t.trader_id = ? ORDER BY t.closed_at DESC, t.id DESC LIMIT ?`,
           traderId,
           pageSize,
         )
@@ -2019,7 +2039,11 @@ export const trades = {
 
     return getDb()
       .all<TradeRow>(
-        'SELECT * FROM trades WHERE trader_id = ? AND id < ? ORDER BY id DESC LIMIT ?',
+        `SELECT t.*, o.margin_type AS entry_margin_type
+           FROM trades t
+           LEFT JOIN orders o
+             ON o.trader_id = t.trader_id AND o.exchange_order_id = t.entry_order_id
+          WHERE t.trader_id = ? AND t.id < ? ORDER BY t.id DESC LIMIT ?`,
         traderId,
         cursor,
         pageSize,
