@@ -88,7 +88,18 @@ interface PolledPage<T> {
 /** 一页怎么取。两张表的差别只有一个 API 函数，所以做成参数。 */
 type PageFetcher<T> = (
   traderId: number,
-  options: { limit: number; before?: number | null; signal?: AbortSignal },
+  options: {
+    limit: number;
+    before?: number | null;
+    /**
+     * **时间游标**：只看成交表。它的 `id` 是插入顺序，而**对账补录的行 id 更大、
+     * 成交时刻更早** —— 按 id 排序会让日期看起来错乱（用户报过），所以服务端
+     * 改成按 `closed_at` 排序，而按时间排序之后只用 id 做游标会漏行。
+     * 订单表不传它，行为与以前完全一致。
+     */
+    beforeClosedAt?: string | null;
+    signal?: AbortSignal;
+  },
 ) => Promise<T[]>;
 
 interface TablePaging<T> {
@@ -165,6 +176,15 @@ function useTablePaging<T extends { id: number; traderId: number }>(
   fetchPage: PageFetcher<T>,
   polled: PolledPage<T>,
   live: T[] | undefined,
+  /**
+   * 这一行在**时间轴**上的位置。省略 = 按 `id` 排序（订单表就是对的：
+   * 订单的 id 顺序与创建顺序一致）。
+   *
+   * ⚠️ **成交表必须传**（`(row) => row.closedAt`）：成交的 `id` 是插入顺序，
+   * 而**对账补录的行 id 更大、成交时刻却更早** —— 实测 18 行里 4 处乱序，
+   * 界面上就是"日期显示错乱"（用户的原话）。
+   */
+  timeOf?: (row: T) => string,
 ): TablePaging<T> {
   /**
    * 服务端给过的、**已经显示出来的**行（按 id 去重；轮询的第一页与翻出来的每一页都并进来）。
@@ -230,8 +250,22 @@ function useTablePaging<T extends { id: number; traderId: number }>(
     for (const row of loaded) merged.set(row.id, row);
     for (const row of live ?? []) if (row.traderId === traderId) merged.set(row.id, row);
     for (const row of (polled.data ?? []).slice(0, PAGE_SIZE)) merged.set(row.id, row);
-    return [...merged.values()].sort((a, b) => b.id - a.id);
-  }, [loaded, polled.data, live, traderId]);
+    const all = [...merged.values()];
+    /*
+     * ⚠️ **成交表按时间排，订单表按 id 排。**
+     *
+     * 成交的 `id` 是插入顺序，而**对账补录的行 id 更大、成交时刻更早** ——
+     * 按 id 排会让界面上的日期跳来跳去（用户原话：「历史成交里面日期显示错乱」）。
+     * 订单没有这个问题：它的 id 顺序与创建顺序一致，补录也不改顺序。
+     */
+    return timeOf
+      ? all.sort((a, b) => {
+          const ta = timeOf(a);
+          const tb = timeOf(b);
+          return ta === tb ? b.id - a.id : tb.localeCompare(ta);
+        })
+      : all.sort((a, b) => b.id - a.id);
+  }, [loaded, polled.data, live, traderId, timeOf]);
 
   /**
    * 下一页的游标 = **手里最小的 id**，也就是"比我现在有的都更早"。
@@ -242,13 +276,23 @@ function useTablePaging<T extends { id: number; traderId: number }>(
    * 正常取回来 —— 不重不漏，代价只是每次多取一行。
    */
   const cursor = useMemo(() => {
-    let min: number | null = null;
-    for (const row of loaded) if (min === null || row.id < min) min = row.id;
-    for (const row of (polled.data ?? []).slice(0, PAGE_SIZE)) {
-      if (min === null || row.id < min) min = row.id;
-    }
-    return min;
-  }, [loaded, polled.data]);
+    /*
+     * 游标 = **手里最早的那一行**。按 id 排时取最小 id；按时间排时取最早的时刻
+     * （两者都要带上 id：同一毫秒上可能有多行，服务端的复合游标靠 id 破平）。
+     */
+    let earliest: T | null = null;
+    const consider = (row: T): void => {
+      if (earliest === null) {
+        earliest = row;
+        return;
+      }
+      const older = timeOf ? timeOf(row) < timeOf(earliest) : row.id < earliest.id;
+      if (older) earliest = row;
+    };
+    for (const row of loaded) consider(row);
+    for (const row of (polled.data ?? []).slice(0, PAGE_SIZE)) consider(row);
+    return earliest as T | null;
+  }, [loaded, polled.data, timeOf]);
 
   /**
    * 还有没有更早的。
@@ -262,8 +306,11 @@ function useTablePaging<T extends { id: number; traderId: number }>(
   /**
    * 取下一页（更早的 25 行），追加到下面。
    *
-   * 游标是"手里最小的 id"，不是偏移量，所以**不会**因为这会儿又落了一单而错位：
-   * 新行的 id 一定更大，永远落在游标之上。
+   * 游标是"手里**最旧的那一行**"，不是偏移量，所以**不会**因为这会儿又落了一单而错位：
+   * 新行一定落在游标**之上**（id 更大、时间更新）。
+   *
+   * ⚠️ **成交表要同时给 `beforeClosedAt`**：服务端按 `closed_at` 排序，
+   * 而补录行的 id 更大、时间更早 —— 只用 id 做游标会把它们整个跳过（页边界漏行）。
    */
   const loadMore = useCallback(async () => {
     if (moreState === 'loading' || moreState === 'done') return;
@@ -284,7 +331,8 @@ function useTablePaging<T extends { id: number; traderId: number }>(
     try {
       const page = await fetchRef.current(requestedFor, {
         limit: PAGE_LIMIT,
-        before: cursor,
+        before: cursor.id,
+        ...(timeOf ? { beforeClosedAt: timeOf(cursor) } : {}),
         signal: controller.signal,
       });
       // 机器人已经切走（或组件已卸载）：这一页属于上一个列表，直接丢掉。
@@ -301,7 +349,7 @@ function useTablePaging<T extends { id: number; traderId: number }>(
       setMoreError((error as Error).message);
       setMoreState('error');
     }
-  }, [cursor, moreState, traderId]);
+  }, [cursor, moreState, traderId, timeOf]);
 
   /** 观察器回调里用的永远是**最新一次渲染**的 `loadMore`（否则会拿着旧游标再请求一次）。 */
   const loadMoreRef = useRef(loadMore);
@@ -1115,7 +1163,22 @@ export function TradesTable({
     deps: [traderId, refreshToken],
   });
 
-  const paging = useTablePaging<TradeRecord>(traderId, api.traderTrades, query, live);
+  const paging = useTablePaging<TradeRecord>(
+    traderId,
+    api.traderTrades,
+    query,
+    live,
+    /*
+     * ⚠️ **成交表必须按 `closedAt` 排，不能按 id。**
+     *
+     * 用户的原话：「历史成交里面日期显示错乱（不是完全按时间排序）」。
+     * `trades.id` 是插入顺序，而**对账补录的行 id 更大、成交时刻更早** ——
+     * 实测 18 行里 4 处乱序，界面上就是日期跳来跳去。
+     *
+     * 订单表不传这个参数：它的 id 顺序与创建顺序一致，按 id 排本来就是对的。
+     */
+    (row) => row.closedAt,
+  );
 
   // 屏幕上要渲染的全部行 = 轮询的第一页 + 已经翻出来的更早的页 + 推送进来的实时行（按 id 去重）。
   const trades: TradeRecord[] = paging.rows;
