@@ -2304,7 +2304,7 @@ export const trades = {
            OR (
                 ABS(entry_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_PRICE_TOLERANCE})
             AND ABS(exit_price - ?) <= MAX(1e-9, ABS(?) * ${DUPLICATE_EXIT_PRICE_TOLERANCE})
-            AND ABS(julianday(closed_at) - julianday(?)) * 86400000 <= ${DUPLICATE_CLOSE_TOLERANCE_MS}
+            AND ABS(julianday(opened_at) - julianday(?)) * 86400000 <= ${DUPLICATE_OPEN_TOLERANCE_MS}
               )
               ${byOrder}
          )
@@ -2325,12 +2325,35 @@ export const trades = {
       input.entryPrice,
       input.entryPrice,
       input.closedAt,
-      /* ③ 平仓时刻 + 双价（**不带数量** —— 数量口径本来就不同源） */
+      /*
+       * ③ 双价 + **开仓时刻**（不带数量）—— 全表最强的一条。
+       *
+       * ⚠️ **这里原本挂的是 `closed_at`（2 秒窗口），那是个错误的选择。**
+       *
+       * 实盘漏网的那一对（用户报「我从未停止过机器人运行，为什么会提示机器人
+       * 未运行时平仓」）：
+       *
+       *     #130 bot         HYPEUSDT 0.21  94.05 → 92.878  closed_at 21:57:10.512
+       *     #131 reconciled  HYPEUSDT 0.14  94.05 → 92.878  closed_at 21:57:05.073
+       *
+       * **两个价格逐字节相同**、`opened_at` 只差 5.3 秒，但 `closed_at` 差了 **5.44 秒** ——
+       * 刚好越过 2 秒的窗口，于是同一回合被记了两行，账上多出 -0.2638。
+       *
+       * 而这两条路径的 `closed_at` **本来就不同源**（本项目自己的注释在上一个常量
+       * 那里写着：「一条是本地"察觉到仓位消失"的时刻（可能晚一整轮），另一条是
+       * 交易所成交记录里的时刻 —— **两个不同的时钟**」）。拿一个已知会漂到十几分钟的
+       * 字段去做 2 秒的判断，判据在它最该生效的场景里必然落空。
+       *
+       * `opened_at` 才是两条路径**同源**的那个（都锚在"这笔仓位什么时候开的",
+       * 中间只隔下单延迟），它的 5 分钟容差也正是按这个理由定的。
+       *
+       * 所以：**判据的强度不变**（仍要求双侧价格都对上），只是把它挂到正确的字段上。
+       */
       input.entryPrice,
       input.entryPrice,
       input.exitPrice,
       input.exitPrice,
-      input.closedAt,
+      input.openedAt,
     ];
     if (byOrder) params.push(String(input.entryOrderId));
 
