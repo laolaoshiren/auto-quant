@@ -645,6 +645,17 @@ export class TraderManager {
       }
     } finally {
       this.starting.delete(traderId);
+      /*
+       * 启动循环已经结束 —— 把那面"取消启动"的旗子**收掉**。
+       *
+       * `cancelledStarts` 原来只增不减（4 处 `add`、0 处 `delete`），于是
+       * "这个机器人被要求停止启动"这条信息会**永久留在集合里**，而它正是
+       * `startTrader` 判断能不能重试的依据之一（`!this.cancelledStarts.has(id)`）
+       * —— 一旦某个机器人被停止过一次，它以后就再也不会被开机重试恢复。
+       *
+       * 集合的语义是"**进行中**的启动被取消了"，所以生命周期只能到这里为止。
+       */
+      this.cancelledStarts.delete(traderId);
     }
   }
 

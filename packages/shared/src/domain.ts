@@ -413,7 +413,15 @@ export interface TradeRecord {
   fee: number;
   /** Funding paid or received while the position was open. */
   fundingFee: number;
-  /** `pnl − fee − fundingFee`: the real change to the account balance. */
+  /**
+   * `pnl − fee + fundingFee`: the real change to the account balance.
+   *
+   * ⚠️ **资金费是"加"，不是"减"** —— `fundingFee` 本身**带符号**（支付为负、
+   * 收取为正），所以恒等式里它是加上去的。这里原来写的是 `pnl − fee − fundingFee`
+   * （`TraderStats.totalFunding` 那一处写的是对的），而**一条错符号的注释会教出
+   * 第七份错实现** —— 这个项目已经为同一个符号问题踩过一次坑（见 `repositories.ts`
+   * 里 `netPnlOf()` 的说明）。
+   */
   netPnl: number;
   /** `netPnl` as a percentage of the margin committed. */
   pnlPercent: number;
