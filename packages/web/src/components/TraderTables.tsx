@@ -1442,6 +1442,7 @@ export function TradesTable({
   refreshToken,
   onSelectSymbol,
   collapsed = false,
+  paging: providedPaging,
 }: {
   traderId: number;
   refreshToken?: number;
@@ -1449,6 +1450,21 @@ export function TradesTable({
   onSelectSymbol?: (symbol: string) => void;
   /** 收起态：只把滚动框的 `max-height` 改小 —— 理由见 `COLLAPSED_MAX_H`。 */
   collapsed?: boolean;
+  /**
+   * 由**容器**预取好的分页实例。不传时组件内部自己建一套（向后兼容）。
+   *
+   * ⚠️ **为什么需要它：数据要是切过去才开始拉，就一定会闪。**
+   *
+   * 实测（headed 真实窗口，切到「历史成交」）：
+   *
+   *     23381ms  空白            ← 组件刚挂载
+   *     23732ms  转圈            ← ⚠️ 这时才在请求数据
+   *     24067ms  trades 25行
+   *
+   * 而「当前委托」不闪，因为它的数据在**容器**里、页面加载时就已经拿到了。
+   * 两者差的就是"什么时候开始请求"。
+   */
+  paging?: TablePaging<TradeRecord>;
 }) {
   const live = useEvents((s) => s.byTrader[traderId]?.trades);
   /*
@@ -1461,7 +1477,7 @@ export function TradesTable({
     deps: [traderId, refreshToken],
   });
 
-  const paging = useTablePaging<TradeRecord>(
+  const internalPaging = useTablePaging<TradeRecord>(
     traderId,
     api.traderTrades,
     query,
@@ -1477,6 +1493,9 @@ export function TradesTable({
      */
     (row) => row.closedAt,
   );
+
+  /* 容器给了就用容器的（数据早就到手，不会闪）；没给才用内部那份。 */
+  const paging = providedPaging ?? internalPaging;
 
   // 屏幕上要渲染的全部行 = 轮询的第一页 + 已经翻出来的更早的页 + 推送进来的实时行（按 id 去重）。
   const trades: TradeRecord[] = paging.rows;
@@ -1878,6 +1897,36 @@ export function TraderTables({
   );
   const openOrders = ordersPaging.rows.filter(isOpenOrder);
 
+  /*
+   * 成交数据**也在容器里预取**，理由同上面那一段 —— 但这里还有一条更直接的教训。
+   *
+   * ⚠️ 原来成交表的数据是**在 `TradesTable` 组件内部**拉的，于是：
+   * **数据要等你切过去那一刻才开始请求**，界面必然经历「空白 → 转圈 → 数据」三段跳。
+   *
+   * 实测（headed 真实窗口，切到「历史成交」）：
+   *
+   *     23381ms  空白      ← 组件刚挂载
+   *     23732ms  转圈      ← 这时才发起请求
+   *     24067ms  trades 25行
+   *
+   * 而「当前委托」不闪，因为它的数据一直在这里、页面加载时就已经拿到。
+   * 两者差的不是样式，是"**什么时候开始请求**"。
+   */
+  const liveTrades = useEvents((s) => s.byTrader[traderId]?.trades);
+  const tradesQuery = usePolled(
+    (signal) => api.traderTrades(traderId, { limit: PAGE_LIMIT, signal }),
+    { intervalMs: 15_000, deps: [traderId, token] },
+  );
+  const tradesPaging = useTablePaging<TradeRecord>(
+    traderId,
+    api.traderTrades,
+    tradesQuery,
+    liveTrades,
+    /* 成交按 `closedAt` 排 —— 理由见 `TradesTable` 里那一段（日期错乱的事故）。 */
+    (row) => row.closedAt,
+    tab,
+  );
+
   const tabs: Array<{ id: TraderTabId; label: string; count?: number }> = [
     { id: 'positions', label: '当前持仓', count: positionCount },
     // 与表格同一个数组，见上面 `ordersPaging` 的说明。
@@ -2018,6 +2067,8 @@ export function TraderTables({
             refreshToken={token}
             onSelectSymbol={onSelectSymbol}
             collapsed={historyCollapsed}
+            /* 容器预取好的那份 —— 切过来时数据已在手上，不会经历"空白 → 转圈"。 */
+            paging={tradesPaging}
           />
         )}
       </div>
