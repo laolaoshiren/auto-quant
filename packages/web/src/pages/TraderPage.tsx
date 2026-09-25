@@ -689,33 +689,115 @@ export function TraderPage() {
    * 3. **只放状态，不放诊断值** —— 没有 token 数、没有快照数、没有本地时钟。
    *    顶栏已经常驻显示推送状态，所以这里也不再重复一个「数据源」。
    */
+  /*
+   * B. 指标行：**用户点名要一眼看到的 5 个数字**，横排卡片。
+   *
+   * ## 这一版是按用户原话重排的
+   *
+   *   「首先说一下我自己觉得重要，也是第一眼想看到的信息（大板块显示的）：
+   *     **账户余额、交易盈亏（净利润）：总盈亏\今日盈亏（这两个可以放到一起）、
+   *     保证金占用、持仓数量、胜率**。这几个板块设计大方便一眼看到，
+   *     其他信息 UI 设计小，然后就是页面上信息不要重复、多余、杂乱、数据不对齐
+   *     等现象出现」
+   *
+   * ## 与上一版的差别（以及为什么）
+   *
+   * 上一版是「归属权益 / 今日盈亏 / 胜率 / 持仓」四张卡，外加下面
+   * 「交易所账户」一整条 strip 重复报钱包、可用、保证金、账户权益。
+   * 三处问题：
+   *
+   *   1. **用户要的 5 项里缺 2 项**：账户余额与保证金占用都只在小字 strip 里；
+   *   2. **同一个概念出现两次**：保证金占用同时属于"账户事实"与"用户想看的大数字"，
+   *      结果两处都有；归属权益与总盈亏其实是同一件事的两种表达（`初始 + 总盈亏`）；
+   *   3. **主次颠倒**：账户余额这种"我到底有多少钱"被压在 12px 的一行里，
+   *      而它旁边那些诊断性的数字却是 `text-2xl`。
+   *
+   * ## 现在的 5 张卡（顺序 = 用户列的顺序）
+   *
+   * | 卡 | 主数字 | 副行 |
+   * | --- | --- | --- |
+   * | 账户余额 | 账户权益（含未实现） | 钱包余额 · 可用 |
+   * | 交易盈亏 | **总盈亏**（已实现净额） | **今日盈亏** · 总收益率 |
+   * | 保证金占用 | 交易所账户的保证金 | 其中挂单占用 |
+   * | 持仓 | 持仓数量 | 浮动 · 有效杠杆表盘 |
+   * | 胜率 | 胜率 % | PF · 已平仓笔数 + 盈亏柱状 |
+   *
+   * **总盈亏与今日盈亏放同一张卡**是用户明确要求的（"这两个可以放到一起"），
+   * 而它们本来就该一起读：一个是账户的累计成绩，一个是"今天怎么样"。
+   *
+   * **归属权益不再是独立一张卡**：`归属权益 = 初始权益 + 总盈亏`（无持仓时逐字相等），
+   * 把它和总盈亏并列摆着，等于让用户看两个永远只差一个已知常数的数。
+   * 它降级成"交易盈亏"卡的 title 说明 —— 需要它的定义时仍然查得到。
+   *
+   * 五个数字都是 `size="lg"`，层次靠"卡片 vs 小字"来分（DESIGN.md §4：
+   * 不靠把字号抖成一排不一样大）。
+   */
+  /*
+   * ⚠️ **账户数字有两个来源，优先级不能搞反。**
+   *
+   * `accountState` 是**实时**读交易所的结果（只在机器人运行时才有）；
+   * `lastKnownAccount` 是最近一条快照里的交易所读数，是它在停机时的兜底。
+   * 拿不到实时读数时**必须回落到快照并标记出来** —— 显示 `—` 会让人以为
+   * 账户是空的，而显示一个没有出处的数字更糟。见 `TraderAccountStrip` 上
+   * 同一套处理。
+   */
+  const account = accountState ?? lastKnownAccount?.account ?? null;
+  const accountIsStale = accountState === null && lastKnownAccount !== null;
+  const accountNote = accountIsStale ? '（最近一次读数，机器人未运行）' : '';
+  const accountTitle =
+    `交易所账户（共享钱包）的数字。同一账户下的所有机器人读数是同一个 —— ` +
+    `它不等于本机器人的「归属权益」。` +
+    (accountIsStale ? '机器人当前未运行，这是最近一条快照里的读数。' : '');
+
   const metricCards = (
     /*
-     * 指标卡**等高**（不加 `items-start`），这是刻意的。
-     *
-     * 与决策卡的规则相反，原因也相反：
-     *
-     * · **决策卡**内容差异极大（有的只有一行标题、有的写满说明与数字），
-     *   撑等高会让短卡中间空出一大片 —— 那里用 `items-start` 是对的。
-     * · **指标卡**是一组 KPI 方块，是**一个视觉单元**。高低不齐本身就是错的：
-     *   操作者扫一眼这四个数，"胜率"那张因为多了进度条而比邻居高一截，
-     *   会让人觉得它们不属于同一组。
-     *
-     * 等高由这一行最高的那张决定，其余三张把多出来的空间留在底部。
+     * 指标卡**等高**（不加 `items-start`），这是刻意的 —— 它们是一组 KPI 方块、
+     * 是一个视觉单元，高低不齐会让人觉得它们不属于同一组。
      */
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+      {/* 1 — 账户余额：我到底有多少钱 ---------------------------------- */}
       <MetricCard>
         <Metric
-          label={`归属权益（${settleAsset}）`}
-          value={fmtNum(equity, 4)}
+          label={`账户余额（${settleAsset}）`}
+          value={account ? fmtNum(account.equity, 2) : '—'}
           size="lg"
           tone="strong"
-          title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。它只包含这个机器人自己的交易；共用的钱包见下面的「交易所账户」，起始权益见上方配置摘要。"
+          title={
+            account
+              ? `账户权益 = 钱包余额 + 未实现盈亏。这是交易所钱包里的钱（共享）。${accountTitle}`
+              : '暂时读不到交易所账户读数。'
+          }
+          sub={
+            account ? (
+              <>
+                钱包 {fmtNum(account.walletBalance, 2)} · 可用 {fmtNum(account.availableBalance, 2)}
+                {accountIsStale ? <span className="text-warn"> · 快照</span> : null}
+              </>
+            ) : (
+              '读取中…'
+            )
+          }
+        />
+      </MetricCard>
+
+      {/* 2 — 交易盈亏：总盈亏 + 今日盈亏（用户要求放一起）--------------- */}
+      <MetricCard>
+        <Metric
+          label="交易盈亏（净额）"
+          value={stats ? fmtUsdSigned(realized, 2) : '—'}
+          size="lg"
+          tone={toneOf(stats ? realized : 0)}
+          title={
+            '总盈亏 = 毛盈亏 − 手续费 − 资金费，**只含已平仓的交易**。' +
+            '它是这个机器人自己的账（归属口径）。' +
+            '「归属权益」= 初始权益 + 这个数 + 当前持仓浮盈。'
+          }
           sub={
             stats ? (
-              <span className={pnlColor(stats.totalReturnPercent)}>
-                总收益率 {fmtPercent(stats.totalReturnPercent)}
-              </span>
+              <>
+                今日 <span className={pnlColor(todayPnl)}>{fmtUsdSigned(todayPnl, 2)}</span>
+                {' · '}总收益率 <span className={pnlColor(stats.totalReturnPercent)}>{fmtPercent(stats.totalReturnPercent)}</span>
+              </>
             ) : (
               '等待统计'
             )
@@ -723,33 +805,68 @@ export function TraderPage() {
         />
       </MetricCard>
 
+      {/* 3 — 保证金占用 ---------------------------------------------- */}
       <MetricCard>
         <Metric
-          label="今日盈亏"
-          value={fmtUsdSigned(todayPnl, 2)}
+          label={`保证金占用（${settleAsset}）`}
+          value={account ? fmtNum(account.marginUsed, 2) : '—'}
           size="lg"
-          tone={toneOf(todayPnl)}
-          sub={`${todayIsPartial ? '自启动 ' : ''}${fmtPercent(todayPercent)} · 基准 ${fmtNum(todayBase ?? equity, 2)}`}
           title={
-            todayIsPartial
-              ? '这个机器人今天才开始记录，日界之前没有快照 —— 基准取的是最早一条，' +
-                '所以这里显示的是「自启动以来」的变化，不是完整的自然日。'
-              : '相对**北京时间今天 0:00** 那个时刻的权益变化。「基准」就是日界之前最后一条快照上的权益。' +
-                '用自然日而不是滚动 24 小时：凌晨看它时，得到的是「今天」而不是「昨天大半天加今天凌晨」。'
+            account
+              ? `交易所账户里被持仓占用的保证金。${accountTitle}`
+              : '暂时读不到交易所账户读数。'
+          }
+          sub={
+            account ? (
+              <>
+                {notional > 0 ? <>名义 {fmtUsd(notional, 2)}</> : '当前无持仓'}
+                {account.unrealizedPnl !== 0 && (
+                  <>
+                    {' · '}未实现 <span className={pnlColor(account.unrealizedPnl)}>{fmtUsdSigned(account.unrealizedPnl, 2)}</span>
+                  </>
+                )}
+              </>
+            ) : (
+              '读取中…'
+            )
           }
         />
       </MetricCard>
 
+      {/* 4 — 持仓 ----------------------------------------------------- */}
       <MetricCard>
-        {/*
-          没有已平仓交易时，**不摆一排零**。
-          
-          原来这里恒定显示 `胜率 0.0%` + `0 盈/0 亏` + `PF 0.00 · 0 笔已平仓` ——
-          对一个从未成交的机器人，这些零占了最显眼的一段，而它们不含任何信息：
-          0% 的胜率和"还没交易过"是完全不同的两件事，前者会让人以为策略很烂。
-          
-          有交易时按原来的显示；没有时只说一句实话。
-        */}
+        <Metric
+          label="持仓"
+          /*
+           * ⚠️ **读不到时显示 `—`，不显示 `0`。** `0` 会被读成"我已经空仓了"，
+           * 而真相可能是"我们没能问到交易所"。
+           */
+          value={liveUnavailable ? '—' : fmtInt(openPositionCount)}
+          size="lg"
+          title={
+            liveUnavailable
+              ? liveUnavailableWhy
+              : '当前持仓数量。仓位状态读不到时显示 —，而不是 0。'
+          }
+          sub={
+            liveUnavailable ? (
+              '仓位状态暂不可读'
+            ) : (
+              <>
+                浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
+              </>
+            )
+          }
+          footer={
+            liveUnavailable ? undefined : (
+              <LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} size={20} />
+            )
+          }
+        />
+      </MetricCard>
+
+      {/* 5 — 胜率 ----------------------------------------------------- */}
+      <MetricCard>
         {stats && stats.totalTrades > 0 ? (
           <Metric
             label="胜率"
@@ -770,105 +887,28 @@ export function TraderPage() {
           />
         )}
       </MetricCard>
-
-      <MetricCard>
-        <Metric
-          label="持仓"
-          /*
-           * 只显示持仓数，**不再显示挂单数**。
-           *
-           * 原来写「持仓 / 挂单」，而下面「当前委托」标签本来就报同一个数 ——
-           * 同一屏上同一个概念出现两次，一旦两处的判定或数据源有一点差别，
-           * 用户看到的就是两个互相矛盾的数（实测撞到过：挂单 4 与当前委托 2）。
-           *
-           * **多余的信息不只占地方，它会主动制造错误印象。**
-           */
-          /*
-           * ⚠️ **读不到时显示 `—`，不显示 `0`。** 理由见 `liveUnavailable` 的说明：
-           * `0` 会被读成"我已经空仓了"，而真相可能是"我们没能问到交易所"。
-           */
-          value={liveUnavailable ? '—' : fmtInt(openPositionCount)}
-          size="lg"
-          title={liveUnavailable ? liveUnavailableWhy : undefined}
-          /*
-           * ⚠️ **「浮动」与表盘放**同一行**，不换行。**
-           *
-           * 原来表盘单独占一行（在「浮动」下面），于是这一张卡的内容比同排另外
-           * 三张高 —— 而四张卡是等高的（grid 默认 stretch），多出来的高度就变成
-           * **另外三张卡下面的一大片空白**。实测：卡片都是 132px，而前三张的内容
-           * 只用了 64px，第 106px 高的那张把整排撑起来，剩下三张空着。
-           *
-           * 把两者并排之后，这一张的内容高度掉回和邻居一样，空白随之消失。
-           * 而「浮动」和「有效杠杆」本来就读在一起（"我在亏多少" + "我用了多大
-           * 敞口"），横排比竖排更顺。
-           *
-           * 用 `footer` 而不是 `sub` 装这个横向容器：`sub` 带 `truncate`
-           * （`overflow:hidden; white-space:nowrap`），会把表盘裁掉下半截。
-           */
-          /*
-           * ⚠️ **「浮动」与表盘放同一行，而且表盘要缩到与文字同高。**
-           *
-           * 两件事必须一起做，少一件都不齐：
-           *
-           * 1. **同一行。** 原来表盘单独占一行（在「浮动」下面），这一张卡的内容
-           *    就比邻居高。四张卡是等高的（grid 默认 stretch），多出来的高度变成
-           *    **另外三张下面的一大片空白**。
-           * 2. **同高。** `LeverageArc` 默认 `size={52}` —— 一个 52px 的图形配
-           *    16px 的文字，即使并排，这一行仍然比邻居的 `sub` 高 36px。
-           *    所以传 `size={20}`：弧的粗细是固定 4px，缩到 20 之后仍看得清弧度，
-           *    而整行高度落回文字行高附近。
-           *
-           * 实测（浏览器）：修之前底部空白是 `51 / 51 / 51 / 13 px`，
-           * 也就是前三张各空 51px —— 那就是被这一张撑出来的。
-           *
-           * 用 `footer` 而不是 `sub` 装这个横向容器：`sub` 带 `truncate`
-           * （`overflow:hidden; white-space:nowrap`），会把表盘裁掉下半截。
-           */
-          footer={
-            liveUnavailable ? (
-              <span className="text-xs text-ink-faint">仓位状态暂不可读</span>
-            ) : (
-              <span className="flex flex-wrap items-center gap-x-2.5">
-                <span className="num text-xs text-ink-faint">
-                  浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
-                </span>
-                <LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} size={20} />
-              </span>
-            )
-          }
-        />
-      </MetricCard>
     </div>
   );
 
   /*
-   * 指标行下面的一行次要事实。
+   * 指标行下面的一行次要事实 —— **只放"这个机器人是什么"，不放数字**。
    *
-   * ⚠️ **这一行原来有五个，其中两个与别处完全重复，已删。**
+   * ## 这一版又删了两个
    *
-   *   · **有效杠杆**（`1.95x`）—— 「持仓」卡里的表盘就是它，而那一行的注释
-   *     自己写着"有效杠杆不在这里"，实现却还在。
-   *   · **保证金**（`13.42`）—— 下面「交易所账户」那一行里有，而且那一处
-   *     口径更完整（账户视角 vs 机器人视角）。
+   *  · **名义**（`$X`）—— 它现在住在上面的「保证金占用」卡里（那一栏的副行），
+   *    而两者本来就是同一个口径的两个数（都由持仓推出）。**同一个数字在同一屏
+   *    出现两次，只会稀释真正该被看到的那几个。**
+   *  · **有效杠杆**与**保证金**早先已因同样理由删过（见 git 历史里那段注释：
+   *    表盘就是有效杠杆；保证金在账户那一组里）。
    *
    * 判据不是"能不能少一个"，而是**同一个数字在同一屏出现两次、又解释不了
-   * 为什么要看两遍**。前者是表盘（有刻度和颜色，回答"这个杠杆算不算高"），
-   * 后者是一行数字（回答"具体是多少"）—— 而"具体是多少"表盘上已经写着了。
-   * 浏览器实测：页面上 345 个数字里有 30 个重复，而重复本身没有信息量时，
-   * 它只是在稀释真正该被看到的那几个。
+   * 为什么要看两遍**。用户这次的原话是「页面上信息不要重复、多余、杂乱」。
    *
-   * **「名义」留着**：它是所有未平仓合约的合计，而下面持仓表里只有一个个
-   * 标的的数 —— 那个"总敞口是多少"要自己心算，放在这里是对的。
-   *
-   * 保证金与名义是**同一个口径的两个数**（都由持仓推出），加上"这个机器人是什么"
-   * （模型 / 策略）。都要常驻可见，但不该和归属权益一样大，所以降级成一行小字
-   * 而不是第 5、第 6 张卡（`LAYOUT.md` §0 规则 3：一行最多 4 个）。
+   * 留下的三样都是"这个机器人是什么"：模型、托管方式、以及推送异常时才出现的
+   * 那条警告 —— 它们都不是数字，也不与任何卡片重复。
    */
   const secondaryFacts = (
     <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 px-1 text-xs text-ink-lo">
-      <span title="所有未平仓合约的名义价值之和 —— 持仓表里是逐个标的的数字，这里是总敞口。">
-        名义 <span className="num text-ink-mid">{fmtUsd(notional, 2)}</span>
-      </span>
       <span>
         AI 模型{' '}
         <Link to="/models" className="text-accent hover:underline" title="决定它看什么、怎么下单的模型。">

@@ -300,6 +300,25 @@ export interface OrderRecord {
   filledQty: number;
   fee: number;
   error: string | null;
+  /**
+   * 这张单**对应占用的保证金**（USDT 本金）—— 与 `PositionView.marginUsed` 同名同义。
+   *
+   * 口径 = `|价 × 量| ÷ 杠杆`，两种情形：
+   *
+   *   · **开仓 / 加仓单**：这一笔**自己**的保证金，即下单那一刻写进
+   *     `positions.margin_used` 的同一个数（同一个 `marginOf()`）；
+   *   · **平仓 / 止损 / 止盈 / 保护单**：它所属**那张持仓**当时占用的保证金。
+   *     这些行上没有成交价（条件单只有触发价），自己重算只会算出另一个口径的数，
+   *     所以取持仓行的权威值（`positions.margin_used`）。
+   *
+   * 也就是说它是"**这一行涉及的仓位压了多少本金**"，而不是"这一张单锁了多少"——
+   * 被拒的订单本身当然什么都没锁。
+   *
+   * ⚠️ **拿不到就是 `undefined`**（界面显示 `—`），**绝不是 `0`**：
+   * `0` 会被读成"这笔没占保证金"，那是另一句话。缺失出现在：被拒的开仓单、
+   * 没有对应本地持仓的订单、算不出来的名义价值（见 `M13_ORDER_MARGIN_USED`）。
+   */
+  marginUsed?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -348,6 +367,17 @@ export interface TradeRecord {
   openedAt: string;
   closedAt: string;
   holdMinutes: number;
+  /**
+   * 这一回合占用的保证金（USDT 本金）= `|entryPrice × quantity| ÷ leverage`。
+   *
+   * 与 `OrderRecord.marginUsed` 同名同义，派生字段（不落库）：三个输入都在这一行上，
+   * 而它必须与建仓那一刻写进 `positions.margin_used`、以及 `pnlPercent` 的
+   * 分母是**同一个数** —— 三处共用 `marginOf()`。
+   *
+   * ⚠️ **算不出来时是 `undefined`**（界面显示 `—`），**不是 `0`** —— 见
+   * `OrderRecord.marginUsed` 的说明。
+   */
+  marginUsed?: number;
 }
 
 /**

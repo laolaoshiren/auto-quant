@@ -667,6 +667,35 @@ ALTER TABLE traders_new RENAME TO traders;
 CREATE INDEX idx_traders_status ON traders(status);
 `;
 
+/*
+ * 订单行上的「保证金占用」。
+ *
+ * ## 为什么需要这一列
+ *
+ * 操作者在「当前委托 / 订单记录」里看的是**每一张单**，而"这笔操作动了多大本金"
+ * 只有保证金那一列能回答。成交表算得出来（`quantity` / `entry_price` / `leverage`
+ * 三列都在，见 `toTrade`），**订单表算不出来**：这张表既没有杠杆，也没有对应持仓的
+ * 入场价；止损/止盈行上更没有成交价（条件单只有触发价）。前端拿不到就只能写 `0`
+ * 或者硬编一个分母 —— 两者都是编数。
+ *
+ * ## 为什么存金额，而不是存 leverage 让读取方自己乘
+ *
+ * 存 leverage 就必须在读取时挑一个价格去乘，而保护单行上只有**触发价**：用它算出来的
+ * 数与 `positions.margin_used` 不是同一个，"保证金"这一个口径就有了第二种算法。
+ * 而写入时那个数是**现成的** —— 开仓/加仓路径上它就是马上要写进 `positions.margin_used`
+ * 的同一个数（同一个 `marginOf()`），平仓/保护单路径上直接从持仓行取权威值。
+ *
+ * ## 为什么可空、且**不设 DEFAULT**
+ *
+ * `NULL` = 这一行算不出来（被拒的开仓单、没有对应持仓的单）。
+ * `0` 会被前端读成"这笔没占保证金" —— 与"不知道"的结论完全相反，
+ * 与 `M9_USAGE_DETAIL` 的 `cached_tokens` / `reasoning_tokens` 是同一条纪律：
+ * 两种相反的含义不能共用同一个默认值。
+ */
+const M13_ORDER_MARGIN_USED = /* sql */ `
+ALTER TABLE orders ADD COLUMN margin_used REAL;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -686,4 +715,5 @@ export const MIGRATIONS: readonly Migration[] = [
     /* 重建被引用的表 —— 必须在事务外关外键，否则 DROP 会级联删掉子表数据。 */
     detachForeignKeys: true,
   },
+  { version: 13, name: 'order-margin-used', sql: M13_ORDER_MARGIN_USED },
 ];
