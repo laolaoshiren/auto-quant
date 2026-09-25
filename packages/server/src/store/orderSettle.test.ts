@@ -218,36 +218,46 @@ test('★ 未平仓的入场成本：只算「入场 + 已成交 + 该标的仍�
    * （ETH `0.0118539` + HYPE `0.00837404` = `0.0202`）—— **一个纯粹的口径差被报成了
    * 「平台的账本可能有漏记或重复记账」**，而且每轮都报一次（上百条）。
    *
-   * 所以这个汇总的口径必须精确，四条边界各钉一条：
+   * ## ⚠️ 筛的是「这一笔持仓的入场单号」，不是 symbol
+   *
+   * 原来按 `symbol IN (当前持仓的标的)` 过滤 —— **同一标的历史上已平仓回合的
+   * 入场手续费会被重复计入**（那些回合的盈亏早已通过 `trades` 进了 `platformSelf`，
+   * 入场费再加一遍就是记两次）。而同一标的反复开平正是这个项目的常态，
+   * 所以这不是边角情况。③ 就是钉这一条的：它和 ① 同标的、同状态，
+   * 唯一区别是它属于**另一个（已平仓的）回合**。
    */
   traderId = seedTrader();
 
-  /* ① 要算的：入场 + 已成交 + 该标的仍持仓 */
+  /* ① 要算的：当前这笔持仓的入场单（EX-1、已成交、purpose=entry） */
   seedOrder({ index: 1, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 0.0118539 });
   /* ② 不算：那是保护单，不是入场费 */
   seedOrder({ index: 2, status: 'FILLED', purpose: 'stop_loss', symbol: 'ETHUSDT', fee: 9 });
-  /* ③ 不算：它是另一个标的的入场费，而那个标的已经不在持仓列表里 */
-  seedOrder({ index: 3, status: 'FILLED', purpose: 'entry', symbol: 'BNBUSDT', fee: 7 });
+  /* ③ 不算：**同一标的历史回合**的入场费（按 symbol 过滤会把 7 也算进来） */
+  seedOrder({ index: 3, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 7 });
   /* ④ 不算：还没成交的单没有手续费 */
   seedOrder({ index: 4, status: 'NEW', purpose: 'entry', symbol: 'ETHUSDT', fee: 5 });
 
-  const total = orderStore.openEntryCosts(traderId, ['ETHUSDT']);
+  const total = orderStore.openEntryCosts(traderId, ['EX-1']);
   assert.ok(
     Math.abs(total - 0.0118539) < 1e-9,
-    `只应汇总 ETHUSDT 那一笔入场费，实际 ${total}` +
-      '（把保护单、别的标的、或未成交的单算进来都会让总账校验反向误报）',
+    `只应汇总当前持仓那一笔入场费（EX-1），实际 ${total}` +
+      '（把保护单、未成交的单、或同标的历史回合的入场费算进来，都会让总账校验反向误报）',
   );
 });
 
 test('没有持仓时未平仓成本是 0，不是「全部入场费」', () => {
   /*
-   * 空标的列表必须短路返回 0。若不短路，SQL 里的 `IN ()` 会变成语法错误，
+   * 空列表必须短路返回 0。若不短路，SQL 里的 `IN ()` 会变成语法错误，
    * 而更糟的一种实现是"忘了过滤" —— 那样已平仓的入场费也会被加进平台侧，
    * 于是一个**已经对上的账**会被推成负差额。
+   *
+   * 空字符串同理：`positions.entry_order_id` 允许为 NULL（收养、迁移前的行），
+   * 调用方会把它过滤掉，但这一层也要能安全地接住。
    */
   traderId = seedTrader();
   seedOrder({ index: 1, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 3 });
   assert.equal(orderStore.openEntryCosts(traderId, []), 0);
+  assert.equal(orderStore.openEntryCosts(traderId, [''], ), 0);
 });
 
 test('未平仓成本只作用于本机器人', () => {
@@ -256,5 +266,6 @@ test('未平仓成本只作用于本机器人', () => {
   const other = seedTrader('other');
   seedOrder({ index: 1, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 1.5 });
   seedOrder({ forTrader: other, index: 2, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 99 });
-  assert.ok(Math.abs(orderStore.openEntryCosts(traderId, ['ETHUSDT']) - 1.5) < 1e-9);
+  // 两个单号都给进去，`trader_id` 那一条必须把别人的 99 挡在外面。
+  assert.ok(Math.abs(orderStore.openEntryCosts(traderId, ['EX-1', 'EX-2']) - 1.5) < 1e-9);
 });

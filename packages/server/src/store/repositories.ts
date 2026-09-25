@@ -1357,21 +1357,36 @@ export const orders = {
    *
    * 所以总账校验的两侧必须用**同一个口径**：把未平仓的持有成本加到平台侧。
    *
-   * @param symbols **当前仍持仓**的标的；不传就只按 `trader_id` 汇总所有入场单
-   *   （那样会把已平仓的入场费也算进来，反而造成反向误差 —— 所以要传）。
+   * @param entryOrderIds **当前仍然持仓**的那些仓位各自的入场订单号
+   *   （`positions.entry_order_id`）。
+   *
+   *   ⚠️ **必须是"这一笔持仓的入场单"，不能按 `symbol` 过滤。**
+   *
+   *   原来这里收的是 symbol 列表，于是**同一个标的历史上已平仓回合的入场手续费
+   *   会被重复计入**（那些回合的盈亏早已通过 `trades` 记进 `platformSelf`，
+   *   入场费再加一遍就是记两次）。函数自己的注释也写着"不传 symbols 会把已平仓的
+   *   入场费算进来，反而造成反向误差 —— 所以要传"，**但传 symbol 根本没解决它**：
+   *   同一标的反复开平是常态。
+   *
+   *   按入场订单号过滤之后，这一项才真的等于"手上这些仓位已经付掉的入场费"。
+   *
+   *   另：`orders` 表**没有资金费列**，持仓期间的资金费只存在于交易所流水
+   *   （`income`）那一侧。这一项仍然只覆盖手续费 —— 所以平台侧在跨过资金费
+   *   结算点时仍会偏小一点，这是**已知且方向固定**的残差，不要再靠猜口径去补。
    */
-  openEntryCosts(traderId: number, symbols: readonly string[]): number {
-    if (symbols.length === 0) return 0;
-    const placeholders = symbols.map(() => '?').join(', ');
+  openEntryCosts(traderId: number, entryOrderIds: readonly string[]): number {
+    const ids = entryOrderIds.filter((id) => id.length > 0);
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => '?').join(', ');
     const row = getDb().get<{ total: number | null }>(
       `SELECT SUM(COALESCE(fee, 0)) AS total
          FROM orders
         WHERE trader_id = ?
           AND purpose = 'entry'
           AND status = 'FILLED'
-          AND symbol IN (${placeholders})`,
+          AND exchange_order_id IN (${placeholders})`,
       traderId,
-      ...symbols,
+      ...ids,
     );
     return Number(row?.total ?? 0);
   },
