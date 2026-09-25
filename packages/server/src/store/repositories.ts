@@ -1030,6 +1030,8 @@ interface OrderRow {
   fee: number;
   error: string | null;
   raw_response: string | null;
+  /** 这一行对应占用的保证金。**可空**：`NULL` = 算不出来，见 `M13_ORDER_MARGIN_USED`。 */
+  margin_used: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -1052,9 +1054,64 @@ function toOrder(row: OrderRow): OrderRecord {
     filledQty: row.filled_qty,
     fee: row.fee,
     error: row.error,
+    /*
+     * ⚠️ `undefined`（界面显示 `—`）与 `0`（界面显示 `0.00`）在这里**必须是两件事**。
+     *
+     * `NULL` 是我们没有这个数；`0` 是"这笔没占保证金"。所以这里既不用 `?? 0`，
+     * 也顺手把 0 归到"不知道"那一类：写入侧（`orders.insert()` 与
+     * `resolveOrderMarginUsed()`）已经收过一次口，但这一列还可能被**绕过仓储**的行
+     * 写进来（迁移前的旧行、直接写 SQL 的脚本），而"前端一定不会看到 0"这条契约
+     * 值得在读出这一道再兜一次。
+     */
+    marginUsed: positiveOrNull(row.margin_used) ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * 把"也许是保证金"的输入收成 `number` 或 `null`。
+ *
+ * 保证金这一列只有两种合法取值：**一个正数**，或**不知道**（`NULL`）。
+ * `0` 不属于"不知道"那一类 —— 它在界面上读作"这笔没占保证金"，与"我们不知道"
+ * 是两句相反的话（见 `M13_ORDER_MARGIN_USED`）。而 `marginOf()` 在名义价值为 0 时
+ * 恰好回 `0`，所以这个收口必须在写入与读出两处都做一遍。
+ */
+function positiveOrNull(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * 一张订单行该写什么保证金 —— **这个判断只有这一份实现**。
+ *
+ * ## 取值顺序
+ *
+ *   ① `override`：调用方给的值。开仓 / 加仓单给的是**这一笔自己**的
+ *      `|价 × 量| ÷ 杠杆`（`marginOf()`），也就是同时写进 `positions.margin_used`
+ *      的同一个数；
+ *   ② 否则取 `positionMargin`（该标的**当前持仓行**的 `positions.margin_used`，
+ *      权威值，不重算）。平仓单与保护单都是为那张持仓下的单，它们落库时那张持仓
+ *      一定还开着（`executeClose` 在 `bookClosedPosition` 之前记订单、保护单在
+ *      持仓建好之后才挂）—— 所以这不是"按标的猜"，它就是那张持仓。
+ *      保护单行上只有触发价、没有成交价，自己乘一遍只会得到与持仓页不一致的第二个数；
+ *   ③ 都没有 → `null` → `OrderRecord.marginUsed` 是 `undefined` → 界面显示 `—`。
+ *      被拒的开仓单走的就是这条路（那时还没有持仓，也确实什么都没占用）。
+ *
+ * ## ⚠️ 为什么开仓单**不许**回落到 ②
+ *
+ * 开仓单要的是"这一笔自己"的保证金，而那一刻它要建的持仓还不存在 ——
+ * 若此时同标的上恰好还挂着一个别的持仓（重复开仓的守卫失效、或对账留下的行），
+ * 回落会把**别人的仓位**压的本金记到这一行上。宁可显示 `—`。
+ */
+export function resolveOrderMarginUsed(input: {
+  purpose: OrderRecord['purpose'];
+  override?: number | null;
+  positionMargin?: number | null;
+}): number | null {
+  const own = positiveOrNull(input.override);
+  if (own !== null) return own;
+  if (input.purpose === 'entry') return null;
+  return positiveOrNull(input.positionMargin);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1290,11 +1347,19 @@ export const orders = {
     fee?: number;
     error?: string | null;
     rawResponse?: unknown;
+    /**
+     * 这一行对应占用的保证金（USDT 本金）。
+     *
+     * **不传就是"不知道"**（落 `NULL`，读取时是 `undefined`）。
+     * ⚠️ 不要用 0 表达"不知道" —— 0 会被读成"这笔没占保证金"，
+     * 见 `M13_ORDER_MARGIN_USED` 与 `toOrder()`。
+     */
+    marginUsed?: number | null;
   }): number {
     const ts = now();
     const { lastInsertRowid } = getDb().run(
-      `INSERT INTO orders (trader_id, exchange_order_id, client_order_id, symbol, side, type, purpose, quantity, price, stop_price, status, avg_price, filled_qty, fee, error, raw_response, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO orders (trader_id, exchange_order_id, client_order_id, symbol, side, type, purpose, quantity, price, stop_price, status, avg_price, filled_qty, fee, error, raw_response, margin_used, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.traderId,
       input.exchangeOrderId,
       input.clientOrderId,
@@ -1311,6 +1376,8 @@ export const orders = {
       input.fee ?? 0,
       input.error ?? null,
       input.rawResponse === undefined ? null : JSON.stringify(input.rawResponse),
+      /* 落库前再收一次：这一列的值只有"正数"或"不知道"两种，见 `positiveOrNull()`。 */
+      positiveOrNull(input.marginUsed),
       ts,
       ts,
     );
@@ -1457,13 +1524,46 @@ function toTrade(row: TradeRow): TradeRecord {
     openedAt: row.opened_at,
     closedAt: row.closed_at,
     holdMinutes: row.hold_minutes,
+    /*
+     * 保证金是**派生**的，不落库：这一行的三个输入都在，而且建仓时写进
+     * `positions.margin_used` 用的就是同一个 `marginOf()`（`trades.insert()` 里
+     * 算 `pnl_percent` 用的也是它）—— 三处必须是同一个数，否则"这笔占了多少本金"
+     * 会随读它的地方而变。
+     */
+    marginUsed: marginUsedOrUndefined(row.entry_price, row.quantity, row.leverage),
   };
 }
 
-/** Margin committed by a round-trip, used to express net PnL as a percentage. */
-function marginOf(entryPrice: number, quantity: number, leverage: number): number {
+/**
+ * Margin committed by a round-trip, used to express net PnL as a percentage.
+ *
+ * 出口（`export`）是给 `AutoTrader` 用的：开仓 / 加仓那条路径要在**写订单行**时
+ * 把同一个数写进 `orders.margin_used`，而"名义价值 ÷ 杠杆"这个算式**只能有一份** ——
+ * 调用点各写一遍的话，两边迟早会分叉（仓库里已经有过"同一个算式五份副本"的教训）。
+ */
+export function marginOf(entryPrice: number, quantity: number, leverage: number): number {
   const notional = Math.abs(entryPrice * quantity);
   return notional > 0 ? notional / Math.max(leverage, 1) : 0;
+}
+
+/**
+ * `marginOf()` 的**可缺失版本**：算不出来时回 `undefined`，绝不回 `0`。
+ *
+ * 为什么要多一个名字：`marginOf()` 在名义价值为 0、或杠杆缺失时都会回一个数字
+ * （后者靠 `Math.max(leverage, 1)` 兜底，把 5x 的仓位算成 1x 的保证金，
+ * 金额直接放大 5 倍）。而"保证金占用"是要印在界面上的：`0` 读作"这笔没占保证金"，
+ * 那个 5 倍的数字读作一个具体金额 —— **两句都是编的**。所以这里在入口就把
+ * "缺输入"挡住，让它变成 `undefined`（界面显示 `—`）。
+ */
+function marginUsedOrUndefined(
+  entryPrice: number,
+  quantity: number,
+  leverage: number,
+): number | undefined {
+  if (!Number.isFinite(leverage) || leverage <= 0) return undefined;
+  if (!Number.isFinite(entryPrice) || !Number.isFinite(quantity)) return undefined;
+  if (entryPrice === 0 || quantity === 0) return undefined;
+  return marginOf(entryPrice, quantity, leverage);
 }
 
 /**
