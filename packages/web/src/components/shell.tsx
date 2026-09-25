@@ -277,7 +277,31 @@ export function Metric({
         {value}
       </div>
       {sub !== undefined && (
-        <div className="num mt-0.5 truncate text-xs text-ink-faint" title={subTitle}>
+        /*
+         * ⚠️ **没有 `footer` 时，`sub` 自己顶到底部**（`mt-auto`）。
+         *
+         * 这是"五张卡看起来齐"的最后一块。上一版只把 `footer` 推到了底部，于是
+         * 有图形的那两张（持仓 / 胜率）底边对齐，而**没图形的三张（账户余额 /
+         * 交易盈亏 / 保证金占用）副行紧贴在数字下面、底下空一大片**。用户的原话：
+         *
+         *   「下面那行小字能调整到底部吗？和图 3-4 底部这一行对齐……这样整体
+         *     5 个都看上去更舒服」
+         *
+         * 规则于是统一成：**每张卡最后一个元素贴底** ——
+         *
+         *   · 有 footer 的（持仓 / 胜率）→ footer 贴底，副行仍紧跟数字
+         *     （读者先看"浮动多少"，再看"杠杆用了几分"）；
+         *   · 没 footer 的（其余三张）→ 副行自己贴底。
+         *
+         * 两边都靠 `mt-auto`，所以**以后给哪张卡加图形都不必再改这里**。
+         */
+        <div
+          className={cn(
+            'num truncate text-xs text-ink-faint',
+            footer === undefined ? 'mt-auto pt-0.5' : 'mt-0.5',
+          )}
+          title={subTitle}
+        >
           {sub}
         </div>
       )}
