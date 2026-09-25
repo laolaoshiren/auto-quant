@@ -1407,6 +1407,19 @@ export function TraderPage() {
           }}
           positionSymbols={positions.map((p) => p.symbol)}
           /*
+           * ⚠️ **必须原样传 `positions`，不要 `.map()` 出一个新数组。**
+           *
+           * `TraderTables` 内部按 `useMemo(..., [positionMarginModes])` 建
+           * 「symbol → marginType」的映射；这里每次渲染都造一个新数组的话，引用
+           * 每次都变，那个 memo 就等于没有 —— 每渲染一次重建一次映射。
+           *
+           * 它只用于**兜底**：订单行自己落库的 `marginType` 优先（迁移 v14 起写入），
+           * 落库为空（v14 之前的历史行）且该 symbol 现在有持仓时才用实时值顶上，
+           * 并在悬停说明里写明「这是当前账户配置，不是下单那一刻的快照」。
+           * 两者都拿不到 → 显示 `—`，**绝不默认成"全仓"**。
+           */
+          positionMarginModes={positions}
+          /*
            * 手工平仓成功后**立刻重取持仓并写进 store**。
            *
            * 不能只靠 WebSocket 推送：用户实测过「平仓提示成功、持仓里还显示着」——

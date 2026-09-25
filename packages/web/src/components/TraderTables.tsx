@@ -9,7 +9,7 @@
  *    第一页 25 行，滚到表格底部才取下一页，一直翻到服务端返回不满一页为止 ——
  *    见 `useTablePaging`。这两张表以前每 15 秒无条件向服务端要 200 行并全部渲染。
  * 2. **Horizontal scrolling stays inside the table.** Every table sits in a
- *    `.scroll-x` box, so a 13-column order table never pushes the page wide
+ *    `.scroll-x` box, so a 14-column order table never pushes the page wide
  *    (the shell has `overflow-x-hidden` and would otherwise clip it).
  *
  * The close controls are deliberately *not* wired to an API call — the backend
@@ -26,7 +26,7 @@ import {
   type MutableRefObject,
 } from 'react';
 import { LoaderCircle } from 'lucide-react';
-import { exchangeErrorLabel, type OrderRecord, type PositionView, type TradeRecord } from '@aq/shared';
+import { exchangeErrorLabel, type MarginMode, type OrderRecord, type PositionView, type TradeRecord } from '@aq/shared';
 import { orderPurposeLabel, orderStatusLabel, orderTypeLabel } from '@aq/shared';
 import { api } from '../lib/api';
 import { needsReconcileFlag } from '../lib/orderFlags';
@@ -42,7 +42,7 @@ import {
   tradeCosts,
   type PnlCosts,
 } from './PnlBreakdown';
-import { BALANCE_LABEL, fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, pnlColor, symbolTone } from '../lib/format';
+import { BALANCE_LABEL, fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, marginModeLabel, orderMarginMode, pnlColor, symbolTone } from '../lib/format';
 
 /* -------------------------------------------------------------------------- */
 /*  Row caps                                                                   */
@@ -955,12 +955,73 @@ const MARGIN_USED_TITLE = '该仓位占用的保证金（本金）= 名义价值
 const ORDER_MARGIN_USED_TITLE =
   '该委托涉及的保证金（本金）：开仓单是这一笔自己占用的，平仓 / 保护单取所属持仓占用的。— 表示服务端算不出这个数（例如被拒的单、没有对应本地持仓的单），不是 0。';
 
+/**
+ * 「保证金模式」列的口径说明 —— 用户的原话是「订单记录里面显示：全仓\逐仓」。
+ *
+ * 两句话分别说清"这是什么"与"两种模式的区别"，不写"保证金模式"四个字了事：
+ * 全仓与逐仓的差别**是风险差别**（一个亏光整个钱包、一个只亏这一仓的保证金），
+ * 而这一列的存在意义就是让操作员一眼看出这个仓位是不是在动整个账户的钱。
+ */
+const ORDER_MARGIN_MODE_TITLE =
+  '该标的的保证金模式。全仓 = 整个合约钱包共同承担这一仓的亏损；逐仓 = 这一仓最多亏掉自己那份保证金。';
+
+/**
+ * 这一格的值是**哪来的** —— 两种口径不能共用一句话。
+ *
+ * `order` 是落库的历史快照（`orders.margin_type`，迁移 v14），可以当证据；
+ * `position` 是**此刻**从交易所读到的账户配置，**回答不了"那张单当时是什么模式"** ——
+ * 悬停说明必须把这件事说出来，否则以后有人会拿它当历史证据（这正是这个仓库
+ * 在 `marginUsed` 那次学到的：同一屏上两个口径长得一样，就会被当成同一个数）。
+ */
+const ORDER_MARGIN_MODE_SOURCE_TITLE = {
+  order: '下单当时该标的的保证金模式（下单那一刻由服务端记下，取自交易所确认过的配置）。',
+  position:
+    '这张单落库时没有记下保证金模式（迁移之前的历史行，或该标的的模式从未成功设置过）。这里显示的是该标的**当前**的账户配置 —— 实时读自交易所，不是下单那一刻的快照，不能当历史证据。',
+  /* 两个来源都没有 —— 说清为什么是空的，而不是让它看起来像一个渲染错误。 */
+  none: '这一行没有保证金模式的记录：它可能是迁移之前的历史行，该标的的模式也可能从未成功设置过，而且它现在没有持仓可供读取。— 表示"不知道"，不是"全仓"。',
+} as const;
+
+/**
+ * 「保证金模式」那一格：`全仓` / `逐仓` / `—`。
+ *
+ * 抽成一个组件（而不是在行内写三元）是因为它有**三态 + 两种来源**，而行内那个位置
+ * 已经被状态列的注释占满了；口径判断本身在 `orderMarginMode()` 里（纯函数、有测试）。
+ */
+function MarginModeCell({
+  order,
+  liveBySymbol,
+}: {
+  order: OrderRecord;
+  liveBySymbol?: ReadonlyMap<string, MarginMode> | null;
+}) {
+  const resolved = orderMarginMode(order, liveBySymbol);
+  if (resolved === null) {
+    return (
+      <span className="text-ink-faint" title={ORDER_MARGIN_MODE_SOURCE_TITLE.none}>
+        —
+      </span>
+    );
+  }
+  return (
+    <span
+      title={
+        resolved.source === 'order'
+          ? ORDER_MARGIN_MODE_SOURCE_TITLE.order
+          : ORDER_MARGIN_MODE_SOURCE_TITLE.position
+      }
+    >
+      {marginModeLabel(resolved.mode)}
+    </span>
+  );
+}
+
 export function OrdersTable({
   paging,
   onlyOpen,
   positionCount,
   onSelectSymbol,
   collapsed = false,
+  liveMarginModes,
 }: {
   /*
    * 行数据由**容器**（`TraderTables`）持有，不在这里自己拉。
@@ -988,6 +1049,13 @@ export function OrdersTable({
    * 「当前委托」不传（它是行动面板，默认就该看得全）。
    */
   collapsed?: boolean;
+  /**
+   * 保证金模式的**兜底来源**：当前持仓的 `symbol → marginType`（`PositionView.marginType`）。
+   *
+   * 只在 `order.marginType`（落库的历史快照）缺失时才被用到，见 `orderMarginMode()`。
+   * 映射由容器（`TraderTables`）建一次给两张订单表共用 —— 每行各建一次会变成 O(行数 × 持仓数)。
+   */
+  liveMarginModes?: ReadonlyMap<string, MarginMode> | null;
 }) {
   const all: OrderRecord[] = paging.rows;
   const orders = onlyOpen ? all.filter(isOpenOrder) : all;
@@ -1004,7 +1072,7 @@ export function OrdersTable({
   return (
     <div>
       {/*
-        13 columns: this is the table that most needs its own horizontal
+        14 columns: this is the table that most needs its own horizontal
         scroller rather than a page-wide one.
 
         `max-h-[34vh] overflow-y-auto` 同时是**分页观察器的 root**（`paging.scrollerRef`）：
@@ -1031,6 +1099,12 @@ export function OrdersTable({
                   隔着"触发价 / 已成交"去看会让人以为它属于后者。 */}
               <th className="th text-right" title={ORDER_MARGIN_USED_TITLE}>
                 {BALANCE_LABEL.marginUsed}
+              </th>
+              {/* 保证金模式紧跟在「保证金占用」后面：两者说的是同一件风险的两面
+                  （压了多少本金 / 这笔本金亏光之后会不会牵连别的仓位）。
+                  放在"交易对"旁边也说得通，但那里已经隔着一个用途徽章了。 */}
+              <th className="th" title={ORDER_MARGIN_MODE_TITLE}>
+                保证金模式
               </th>
               <th className="th text-right">价格</th>
               <th className="th text-right">触发价</th>
@@ -1122,6 +1196,17 @@ export function OrdersTable({
                       而不是 `0` —— `fmtUsd(undefined)` 是 `—`、`fmtUsd(0)` 是 `$0.00`，
                       这两件事在任何时候都不能混。 */}
                   <td className="td num text-right">{fmtUsd(order.marginUsed, 2)}</td>
+                  {/*
+                    保证金模式：落库值优先，当前持仓兜底（见 `orderMarginMode()`）。
+
+                    ⚠️ **`—` 不是「全仓」。** 币安的默认确实是全仓，但"默认是"与
+                    "我们读到了"是两件事 —— 把没读到的行渲染成「全仓」等于替交易所
+                    宣布一个我们没验证过的事实。所以两个来源都拿不到时只画 `—`，
+                    并用 `title` 说明为什么空。
+                  */}
+                  <td className="td">
+                    <MarginModeCell order={order} liveBySymbol={liveMarginModes} />
+                  </td>
                   <td className="td num text-right">{order.price ? fmtPrice(order.price) : '市价'}</td>
                   <td className="td num text-right text-ink-lo">{order.stopPrice ? fmtPrice(order.stopPrice) : '—'}</td>
                   <td className="td num text-right">{fmtQty(order.filledQty)}</td>
@@ -1494,6 +1579,7 @@ export function TraderTables({
   onSelectSymbol,
   positionSymbols,
   onPositionsChanged,
+  positionMarginModes,
 }: {
   traderId: number;
   tab: TraderTabId;
@@ -1524,9 +1610,44 @@ export function TraderTables({
   positionSymbols: string[];
   /** 平仓成功后通知页面立刻重取持仓 —— 否则界面还留着刚平掉的那一行。 */
   onPositionsChanged?: () => void;
+  /**
+   * 页面手上那份**当前持仓** —— 只用来给订单行的「保证金模式」兜底。
+   *
+   * ## 为什么是持仓数组而不是一个现成的 Map
+   *
+   * 页面已经有一份 `positions`（`/account` 的实时读数，30 秒轮询），直接把它原样传下来
+   * 最简单：调用处一行、不需要在渲染里 `new Map(...)`。映射在这里用 `useMemo` 建一次，
+   * 两张订单表共用。**请传稳定的数组引用**（同一份 state，不要在调用处 `.map()` 出新数组），
+   * 否则 `useMemo` 每次渲染都会重建。
+   *
+   * ## 为什么它只是"兜底"
+   *
+   * 这些值的口径是**当前账户配置**（实时读交易所），不是下单当时的快照 ——
+   * 历史问题由 `OrderRecord.marginType`（落库值）回答。两个来源的先后与措辞
+   * 都在 `orderMarginMode()` / `ORDER_MARGIN_MODE_SOURCE_TITLE` 里定死了。
+   *
+   * 不传 = 没有兜底（历史行显示 `—`），表格照常工作。
+   */
+  positionMarginModes?: ReadonlyArray<{ symbol: string; marginType?: MarginMode | null }>;
 }) {
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   const [ordersRefreshToken, setOrdersRefreshToken] = useState(0);
+
+  /**
+   * `positionMarginModes` → `symbol → marginType`，供两张订单表给「保证金模式」兜底。
+   *
+   * 认不出的值（`undefined`、或交易所将来给出的新写法）**不进这张表** ——
+   * 进不去就是"没有这个事实"，那张单显示 `—`。这里不补默认值。
+   */
+  const liveMarginModes = useMemo(() => {
+    const map = new Map<string, MarginMode>();
+    for (const position of positionMarginModes ?? []) {
+      if (position.marginType === 'cross' || position.marginType === 'isolated') {
+        map.set(position.symbol, position.marginType);
+      }
+    }
+    return map;
+  }, [positionMarginModes]);
   // One token drives both tables: the toolbar ⟳ and the caller's 对账 both mean
   // "these rows are stale".
   const token = (refreshToken ?? 0) + ordersRefreshToken;
@@ -1722,7 +1843,13 @@ export function TraderTables({
         {/* 两个标签共用同一个分页实例：它们读的是同一个端点，只是过滤条件不同；
             分开两套只会让翻出来的历史与"当前委托"的数字再次分家。 */}
         {tab === 'orders' && (
-          <OrdersTable paging={ordersPaging} onlyOpen positionCount={positionCount} onSelectSymbol={onSelectSymbol} />
+          <OrdersTable
+            paging={ordersPaging}
+            onlyOpen
+            positionCount={positionCount}
+            onSelectSymbol={onSelectSymbol}
+            liveMarginModes={liveMarginModes}
+          />
         )}
         {tab === 'trades' && (
           <TradesTable
@@ -1739,6 +1866,7 @@ export function TraderTables({
             positionCount={positionCount}
             onSelectSymbol={onSelectSymbol}
             collapsed={historyCollapsed}
+            liveMarginModes={liveMarginModes}
           />
         )}
       </div>

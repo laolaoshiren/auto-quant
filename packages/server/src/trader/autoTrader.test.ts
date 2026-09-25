@@ -983,6 +983,62 @@ test('★ 订单落库时带上保证金占用 —— 否则表格那一列永�
   }
 });
 
+test('★ 订单落库时带上保证金模式 —— 就是开仓前刚设成功的那个', async () => {
+  /*
+   * 用户要求「订单记录里面显示：全仓\逐仓」。
+   *
+   * 这条用例填的是这条链路上最容易断的一环：迁移 v14、仓储映射（`toOrder` / `insert`）、
+   * `normalizeMarginMode()` 的纯函数单测可以各自全绿，而"**真实的开仓流程到底有没有把
+   * 值写进去**"只有端到端能证明 —— 失败方式与上一条 `marginUsed` 一模一样：
+   * **界面显示 `—`，不报错、不告警**，谁都不会发现。
+   *
+   * 判据是**具体的 `'isolated'`**（默认配置 `riskControl.marginMode` 就是逐仓），
+   * 而不是"不等于 undefined"：真正要钉的是"写进去的是那个模式本身，而且是交易所口径的
+   * 机器码" —— 配置里写的是 `crossed`，若有人图省事直接落库，这一列就会有第二种写法，
+   * 而 `'cross' === 'crossed'` 是 `false`（比较失败不抛错，界面把那批单读成"不知道"）。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const entry = orderStore.list(traderId).find((o) => o.purpose === 'entry');
+  assert.ok(entry, '前提：这一轮真的开出了仓（否则这条用例什么都没测）');
+  assert.equal(
+    entry.marginType,
+    'isolated',
+    `开仓单必须带上保证金模式（默认配置是逐仓），实际 ${String(entry.marginType)} —— ` +
+      'undefined 会让界面那一列显示成 —，而这条链路的失败是静默的',
+  );
+});
+
+test('★ 保证金模式设不上时，订单行是「不知道」而不是默认的全仓', async () => {
+  /*
+   * 与上一条相对的那一半，也是这个交付里**唯一不能让步**的一条：**取不到就显示 `—`，
+   * 绝不允许默认成"全仓"。**
+   *
+   * 币安官方明文「All contracts and positions are defaulted to the Cross Margin mode」，
+   * 所以"设不上"的场景里默认值确实是全仓 —— 但那句话描述的是**交易所的默认行为**，
+   * 不是"这一行的事实"：`setMarginType` 失败意味着（`-4044`/`-4048` 之类）
+   * **我们根本没读到它现在是什么模式**。写成 `'cross'` 之后，界面上
+   * 「全仓」与「不知道」就再也分不开了，而这一列存在的意义恰恰是让人判断风险。
+   *
+   * 场景取自实际会发生的事：该标的已经有持仓或挂单时币安不允许改模式，
+   * 而那种情况下开仓**必须继续**（见 `executeOpen` 的注释）—— 于是这里同时钉住了
+   * "模式设不上不该阻断开仓"与"设不上要如实留空"。
+   */
+  const broker = new FakeBroker();
+  broker.marginTypeOk = false;
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const entry = orderStore.list(traderId).find((o) => o.purpose === 'entry');
+  assert.ok(entry, '设不上保证金模式不该阻断开仓 —— 这一轮仍然要开出仓');
+  assert.equal(
+    entry.marginType,
+    undefined,
+    `设不上模式时这一行必须是 undefined（界面 —），实际 ${String(entry.marginType)} —— ` +
+      '补一个 cross 等于替交易所宣布一个我们没读到的事实',
+  );
+});
+
 test('止损比往返手续费还近的开仓：在交易循环里被拒，且理由带具体数字', async () => {
   /*
    * Why this test exists —— §5 的门槛必须**在通往订单的那条路径上**，而不是只在风控的

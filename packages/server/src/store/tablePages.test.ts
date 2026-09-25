@@ -12,6 +12,7 @@ import {
   exchanges,
   ORDER_PAGE_DEFAULT,
   ORDER_PAGE_MAX,
+  normalizeMarginMode,
   orders as orderStore,
   resolveOrderMarginUsed,
   strategies,
@@ -97,7 +98,12 @@ function seedTrader(name = 'table-pages'): number {
 }
 
 /** 写一张订单。内容与本文件无关，只要求"一单一行"。 */
-function placeOrder(forTrader = traderId, index = 1, marginUsed?: number): number {
+function placeOrder(
+  forTrader = traderId,
+  index = 1,
+  marginUsed?: number,
+  marginType?: string,
+): number {
   return orderStore.insert({
     traderId: forTrader,
     exchangeOrderId: `EX-${forTrader}-${index}`,
@@ -114,6 +120,7 @@ function placeOrder(forTrader = traderId, index = 1, marginUsed?: number): numbe
     filledQty: 1 + index,
     fee: 0.01,
     ...(marginUsed === undefined ? {} : { marginUsed }),
+    ...(marginType === undefined ? {} : { marginType }),
   });
 }
 
@@ -506,6 +513,81 @@ test('订单：marginUsed 原样回读；没写过、或写了 0 的都是 undef
     byId.get(zeroed)!.marginUsed,
     undefined,
     '0 读作"这笔没占保证金"，所以它必须归到"不知道"那一类',
+  );
+});
+
+/**
+ * `normalizeMarginMode()` —— 「全仓 / 逐仓」这个概念的**唯一收口**。
+ *
+ * 它存在的理由是这个概念在系统里有**三个拼法**，全都是外部契约、改不动：
+ *
+ * | 来源 | 写法 |
+ * | --- | --- |
+ * | 交易所 `positionRisk`（读） | `cross` |
+ * | `POST /fapi/v1/marginType`（写） | `CROSSED` |
+ * | `StrategyConfigSchema.riskControl.marginMode` | `crossed` |
+ *
+ * 直接比较字符串会**静默失败**（`'cross' === 'crossed'` 是 `false`，不抛错、不报警），
+ * 所以收口必须在这里做一次，落库与读出各走一遍。
+ *
+ * 第二段钉的是"认不出 ≠ 全仓"：币安的默认确实是全仓，但那是"默认"，
+ * 不是"我们读到了"—— 不认识的值回 `null`（界面 `—`），**不回落到 `'cross'`**。
+ */
+test('normalizeMarginMode：三种写法收成同一个机器码；认不出的回 null，绝不回落成全仓', () => {
+  // ① 三种外部写法都收到同一对机器码上。
+  assert.equal(normalizeMarginMode('cross'), 'cross', '交易所 positionRisk 的写法');
+  assert.equal(normalizeMarginMode('crossed'), 'cross', '策略配置与写接口的写法');
+  assert.equal(normalizeMarginMode('CROSSED'), 'cross', '写接口全大写');
+  assert.equal(normalizeMarginMode('ISOLATED'), 'isolated');
+  assert.equal(normalizeMarginMode(' isolated '), 'isolated', '多一个空格不该变成"不知道"');
+
+  // ② 认不出的、以及根本没有值的一律是 null ——**不是** 'cross'。
+  for (const value of [null, undefined, '', 'both', 'hedge', 1, {}, []]) {
+    assert.equal(
+      normalizeMarginMode(value),
+      null,
+      `认不出的值必须回 null（界面 —），实际把 ${JSON.stringify(value)} 收成了别的 —— ` +
+        '回落到 cross 就是替交易所宣布一个没验证过的事实',
+    );
+  }
+});
+
+/**
+ * `orders.margin_type` —— 用户的原话是「订单记录里面显示：全仓\逐仓」。
+ *
+ * ## 这条用例钉的是什么（不是"能不能存字符串"）
+ *
+ * **没有这个事实时是 `undefined`（界面显示 `—`），绝不是 `'cross'`。**
+ * 币安的默认确实是全仓，但"默认是"与"我们读到了"是两件事：给读不到的行补一个 `'cross'`，
+ * 界面上「全仓」与「不知道」就长得一模一样了 —— 而这个仓库为这件事定过两次规矩
+ * （`marginUsed` 的 0 与 undefined、`M13_ORDER_MARGIN_USED` 的 NULL 与 0）。
+ *
+ * 覆盖三种缺失：迁移之前的历史行（这一列不存在）、调用方没传、以及传了一个脏字符串
+ * （写进 SQL 的是 `NULL`，不是那个字符串，也不是"全仓"）。
+ */
+test('订单：marginType 原样回读；没写过 / 认不出的行是 undefined 而不是默认的全仓', () => {
+  traderId = seedTrader();
+
+  const isolated = placeOrder(traderId, 1, undefined, 'isolated');
+  const crossed = placeOrder(traderId, 2, undefined, 'crossed'); // 配置里的写法
+  const upper = placeOrder(traderId, 3, undefined, 'CROSSED'); // 写接口的写法
+  const unset = placeOrder(traderId, 4); // 调用方没传（= 不知道）
+  const junk = placeOrder(traderId, 5, undefined, 'weird-mode'); // 脏数据
+
+  const byId = new Map(orderStore.list(traderId, 10).map((row) => [row.id, row]));
+
+  assert.equal(byId.get(isolated)!.marginType, 'isolated', '逐仓必须原样读回来');
+  assert.equal(byId.get(crossed)!.marginType, 'cross', '配置里的 crossed 落库必须是 cross');
+  assert.equal(byId.get(upper)!.marginType, 'cross', '写接口的 CROSSED 落库必须是 cross');
+  assert.equal(
+    byId.get(unset)!.marginType,
+    undefined,
+    '没写过这一列的行必须是 undefined（界面 —），不能是 cross —— 那是在编一个事实',
+  );
+  assert.equal(
+    byId.get(junk)!.marginType,
+    undefined,
+    '认不出的写法归到"不知道"，不能原样透出、更不能猜成全仓',
   );
 });
 

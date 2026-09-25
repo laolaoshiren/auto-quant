@@ -34,6 +34,8 @@ import {
   fmtSigned,
   fmtUsdSigned,
   isNum,
+  marginModeLabel,
+  orderMarginMode,
   safeJson,
   sideLabel,
   symbolTone,
@@ -242,4 +244,67 @@ test('★ symbolTone 对同一个币种永远给同一个颜色 —— 这是哈
   for (const symbol of majors) {
     assert.match(symbolTone(symbol), /^#[0-9a-f]{6}$/i, `${symbol} 的颜色不是合法十六进制`);
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/*  保证金模式（全仓 / 逐仓）                                                    */
+/* -------------------------------------------------------------------------- */
+
+test('★ marginModeLabel：认不出就是 — ，绝不渲染成「全仓」', () => {
+  /*
+   * 币安官方明文「All contracts and positions are defaulted to the Cross Margin mode」——
+   * 所以"没读到"最可能的真相**确实**是全仓。但"最可能是"不是"我们读到了"：
+   * 把它渲染成「全仓」，就等于替交易所宣布一个我们没验证过的事实，而且
+   * 「不知道」与「确实是全仓」在界面上从此再也分不开。
+   *
+   * 这个界面在别处已经反复做过同一个选择（`fmtUsd(undefined)` → `—`、
+   * 熔断读数缺失就不渲染那一行），这一列不能是例外。
+   */
+  assert.equal(marginModeLabel('cross'), '全仓');
+  assert.equal(marginModeLabel('isolated'), '逐仓');
+
+  for (const missing of [undefined, null, '', 'CROSSED', 'crossed', 'both', 'hedge']) {
+    assert.equal(
+      marginModeLabel(missing),
+      '—',
+      `${JSON.stringify(missing)} 必须显示 —：认不出不等于全仓（crossed 是服务端该收口的写法，` +
+        '漏到这里也只说明上游没归一，不能替它猜）',
+    );
+  }
+});
+
+test('★ orderMarginMode：落库值优先于当前持仓，且必须说清值是哪来的', () => {
+  /*
+   * 两个来源的口径**不同**，所以返回值必须带 `source`：
+   *
+   *   · `'order'`   —— `orders.margin_type`，下单当时的快照，能当历史证据；
+   *   · `'position'` —— 当前持仓实时读到的账户配置，**回答不了"那张单当时是什么模式"**。
+   *
+   * 界面据此写不同的悬停说明。少了这个字段，以后一定会有人拿兜底值当历史证据。
+   */
+  const live = new Map([['BTCUSDT', 'cross']]);
+
+  // ① 落库值优先 —— 即使当前持仓说的是另一个模式（那张单下完之后模式被改过）。
+  assert.deepEqual(
+    orderMarginMode({ symbol: 'BTCUSDT', marginType: 'isolated' }, live),
+    { mode: 'isolated', source: 'order' },
+    '落库的历史快照必须优先：当前持仓说的是"现在"，回答不了"这张单当时"',
+  );
+
+  // ② 落库缺失 → 用当前持仓兜底，并且**标出来源**是 position。
+  assert.deepEqual(
+    orderMarginMode({ symbol: 'BTCUSDT', marginType: undefined }, live),
+    { mode: 'cross', source: 'position' },
+  );
+  assert.deepEqual(orderMarginMode({ symbol: 'BTCUSDT' }, live), { mode: 'cross', source: 'position' });
+
+  // ③ 两个来源都没有 / 都不是合法机器码 → null（界面 `—`），不是"全仓"。
+  assert.equal(orderMarginMode({ symbol: 'ETHUSDT' }, live), null, '该标的没有持仓，就没有兜底');
+  assert.equal(orderMarginMode({ symbol: 'BTCUSDT' }, undefined), null, '没有兜底来源时不能凭空给值');
+  assert.equal(orderMarginMode({ symbol: 'BTCUSDT' }, new Map()), null);
+  assert.equal(
+    orderMarginMode({ symbol: 'BTCUSDT', marginType: 'crossed' }, new Map([['BTCUSDT', 'CROSSED']])),
+    null,
+    '两边都是没收口的写法时一律当"不知道" —— 前端不该替上游归一，更不该猜',
+  );
 });

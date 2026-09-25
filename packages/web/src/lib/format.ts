@@ -14,6 +14,8 @@
  * 里的余额，混用会让操作员把它当成"我的钱"。
  */
 
+import type { MarginMode } from '@aq/shared';
+
 export function isNum(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
@@ -77,6 +79,86 @@ export const BALANCE_LABEL = {
 
 /** Asset shown when a payload predates the `asset` field. */
 export const DEFAULT_SETTLE_ASSET = 'USDT';
+
+/* -------------------------------------------------------------------------- */
+/*  保证金模式（全仓 / 逐仓）                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 保证金模式的中文标签 —— **"全仓"/"逐仓"这两个词只在这里出现一次**。
+ *
+ * 与 `BALANCE_LABEL` / `TRADING_ENV_LABEL` 同一条纪律：同一屏上的同一个概念只能有一种
+ * 说法，否则"全仓"在一处、"交叉"在另一处，操作员会以为是两件事。
+ *
+ * 键是**机器码**：交易所 `positionRisk` 与 `orders.margin_type` 用的都是
+ * `cross` / `isolated`（配置里那个 `crossed` 在服务端就被 `normalizeMarginMode()`
+ * 收口成了 `cross`，到不了这里）。
+ */
+export const MARGIN_MODE_LABEL = {
+  cross: '全仓',
+  isolated: '逐仓',
+} as const;
+
+/**
+ * 保证金模式 → 中文。**认不出就是 `—`，绝不回落到「全仓」。**
+ *
+ * 币安官方明文「All contracts and positions are defaulted to the Cross Margin mode」——
+ * 也就是说"没读到"最可能的真相确实是全仓。但"最可能是"不是"我们读到了"：
+ * 把它渲染成「全仓」，就等于**替交易所宣布一个我们没验证过的事实**，
+ * 而这个界面在别处（`fmtUsd(undefined)` → `—`、熔断读数缺失 → 不渲染）
+ * 已经明确选择了"不知道就说不知道"。
+ *
+ * 认不出的值不原样回显（对比 `tradingEnvironmentLabel`）：那个是英文环境码，
+ * 原样显示至少不骗人；而这里一列的取值是中文的「全仓 / 逐仓」，
+ * 中间混进一个 `CROSSED` 只会被读成某个第三种模式。
+ */
+export function marginModeLabel(mode: string | null | undefined): string {
+  if (mode === 'cross') return MARGIN_MODE_LABEL.cross;
+  if (mode === 'isolated') return MARGIN_MODE_LABEL.isolated;
+  return '—';
+}
+
+/** 这一行显示的模式是**哪来的** —— 见 `orderMarginMode()`。 */
+export type MarginModeSource = 'order' | 'position';
+
+/**
+ * 订单行该显示哪一个保证金模式：**落库值优先，当前持仓兜底**。
+ *
+ * ## 为什么是两个来源（而不是只看一个）
+ *
+ * `OrderRecord.marginType` 是**下单当时的快照**（`orders.margin_type`，迁移 v14），
+ * 它才是历史问题的正确答案 —— 但它有三种如实为空的路径：迁移之前的历史行、
+ * 这台进程从未为该标的设成功过（`setMarginType` 被 `-4048` 挡回来）、
+ * 或者被人直接写 SQL 插进来。
+ *
+ * `PositionView.marginType` 是**此刻**从交易所 `positionRisk` 读到的逐标的配置。
+ * 它回答不了"那张单当时是什么模式"，但**能补上上面那些空洞**：一个还有持仓的标的，
+ * 它的模式现在就能读到 —— 而保证金模式在一张持仓的生命周期里本来就改不了
+ * （币安在零持仓、零挂单时才允许改），所以"当前值"对**还开着的那个标的**是可靠的。
+ *
+ * ## ⚠️ 返回 `source` 是必须的，不是锦上添花
+ *
+ * 两个来源的口径不同：`'order'` 是**历史快照**，`'position'` 是**当前账户配置**。
+ * 界面必须据此写不同的悬停说明 —— 否则以后有人会拿兜底来的那个值当历史证据
+ * （"这张单是全仓"这句话，兜底值支持不了）。
+ *
+ * ## 认不出的值一律当"不知道"
+ *
+ * 两个来源都可能带进脏数据（旧行、手写 SQL、交易所新写法），所以这里**逐字比较**
+ * `'cross'` / `'isolated'`，其余全是"没有这个事实" → 调用方显示 `—`。
+ */
+export function orderMarginMode(
+  order: { symbol: string; marginType?: string | null },
+  liveBySymbol?: ReadonlyMap<string, string> | null,
+): { mode: MarginMode; source: MarginModeSource } | null {
+  const recorded = order.marginType;
+  if (recorded === 'cross' || recorded === 'isolated') return { mode: recorded, source: 'order' };
+
+  const live = liveBySymbol?.get(order.symbol);
+  if (live === 'cross' || live === 'isolated') return { mode: live, source: 'position' };
+
+  return null;
+}
 
 /* -------------------------------------------------------------------------- */
 /*  金额                                                                       */

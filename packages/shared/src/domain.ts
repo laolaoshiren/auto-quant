@@ -229,6 +229,26 @@ export interface StrategyRecord {
 
 export type PositionSide = 'long' | 'short';
 
+/**
+ * 保证金模式 —— 币安 USDⓈ-M 的**逐标的账户配置**，不是某个仓位的属性。
+ *
+ * `'cross'` = 全仓、`'isolated'` = 逐仓。中文标签在展示层（`MARGIN_MODE_LABEL`），
+ * 这一层只存机器码（AGENTS §5.2：存机器码，翻译在展示层）。
+ *
+ * ⚠️ **这个概念的机器码在全仓库有两种写法，必须在一个地方收口。**
+ *
+ * | 来源 | 写法 |
+ * | --- | --- |
+ * | 交易所 `positionRisk` / `symbolConfig`（读） | `cross` / `isolated` |
+ * | `POST /fapi/v1/marginType`（写） | `CROSSED` / `ISOLATED` |
+ * | 本仓库策略配置 `riskControl.marginMode` | `crossed` / `isolated` |
+ *
+ * 收口在 `normalizeMarginMode()`（`store/repositories.ts`）。**不要**在别处直接比较
+ * 字符串：`'cross' === 'crossed'` 是 `false`，而这种比较失败不会抛错 ——
+ * 它只会让一个模式被读成"不知道"（或更糟：被读成另一个模式）。
+ */
+export type MarginMode = 'cross' | 'isolated';
+
 export interface PositionView {
   id: number;
   traderId: number;
@@ -255,6 +275,23 @@ export interface PositionView {
    */
   peakPnlPercent: number;
   marginUsed: number;
+  /**
+   * 该标的**当前**的保证金模式，实时读自交易所的 `positionRisk`（见 `liveExchangeView`）。
+   *
+   * ⚠️ **这是账户此刻的配置，不是历史快照。** 它是一次实时读数，而保证金模式是
+   * **逐标的的账户设置**：一个已经平掉的仓位在这里没有对应行，那个标的的模式也就
+   * 读不到（记 `undefined`）。**历史问题（"那张单当时是什么模式"）只能由
+   * `OrderRecord.marginType` 回答** —— 界面把两者分开用：落库值优先，缺失时才拿
+   * 这一份兜底，并且会明说"这是当前配置"（见 `orderMarginMode()`）。
+   *
+   * 选填：读不到时是 `undefined`（界面显示 `—`）。
+   *
+   * ⚠️ **绝不可回落成 `'cross'`。** 币安的默认确实是全仓（官方明文 "All contracts
+   * and positions are defaulted to the Cross Margin mode"），但"交易所的默认是 X"
+   * 与"我们读到了 X"是两件事 —— 把它填上去等于**替交易所宣布一个我们没验证过的事实**。
+   * 与本文件 `marginUsed` 那条（"0 与 undefined 不是一回事"）是同一条纪律。
+   */
+  marginType?: MarginMode;
   notional: number;
   stopLoss: number | null;
   takeProfit: number | null;
@@ -319,6 +356,33 @@ export interface OrderRecord {
    * 没有对应本地持仓的订单、算不出来的名义价值（见 `M13_ORDER_MARGIN_USED`）。
    */
   marginUsed?: number;
+  /**
+   * 这一行**下单时**该标的的保证金模式（全仓 / 逐仓）—— 落库字段
+   * （`orders.margin_type`，迁移 `M14_ORDER_MARGIN_TYPE`）。
+   *
+   * ## 它的口径
+   *
+   * 由 `AutoTrader.recordOrder()` 写入：取**本进程最近一次成功应用到该标的**的模式
+   * （`setMarginType()` 只有拿到交易所的 ok 才记进 `marginSet`），也就是交易所当时
+   * **确认过**的配置。它**不是**从交易所重新读回来的"当前值"。
+   *
+   * ## ⚠️ 三种取不到的情形 —— 都是 `undefined`（界面显示 `—`），绝不默认成 `'cross'`
+   *
+   *   · **迁移 v14 之前的历史行**：这一列当时还不存在，读出来是 `NULL`；
+   *   · **该标的的模式在这台进程里从未成功设过**：仓位是本进程启动前建的，
+   *     或 `setMarginType` 被 `-4048`（该标的有持仓/挂单时不能改模式）挡回来；
+   *   · 绕过仓储直接写 SQL 的行。
+   *
+   * 币安的默认是全仓，但那是"默认"，不是"这一行的事实" —— 补一个 `'cross'` 就是编数
+   * （与 `marginUsed` / `M13_ORDER_MARGIN_USED` 同一条纪律）。
+   *
+   * ## 界面上的兜底：`PositionView.marginType`
+   *
+   * 订单记录的表格在这一个字段缺失时，会拿该 symbol **当前持仓**的模式顶上去。
+   * 两者口径不同（一个是历史、一个是当前），所以界面**只在缺值时**用它，
+   * 并且把它标成"当前账户配置"而不是这张单的历史 —— 见 `orderMarginMode()`。
+   */
+  marginType?: MarginMode;
   createdAt: string;
   updatedAt: string;
 }

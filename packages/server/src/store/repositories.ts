@@ -6,6 +6,7 @@ import type {
   ExchangeId,
   ExecutionLogEntry,
   LlmProviderId,
+  MarginMode,
   OrderRecord,
   PositionView,
   StrategyConfig,
@@ -1032,6 +1033,8 @@ interface OrderRow {
   raw_response: string | null;
   /** 这一行对应占用的保证金。**可空**：`NULL` = 算不出来，见 `M13_ORDER_MARGIN_USED`。 */
   margin_used: number | null;
+  /** 下单时该标的的保证金模式。**可空**：`NULL` = 没有这个事实，见 `M14_ORDER_MARGIN_TYPE`。 */
+  margin_type: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1064,6 +1067,15 @@ function toOrder(row: OrderRow): OrderRecord {
      * 值得在读出这一道再兜一次。
      */
     marginUsed: positiveOrNull(row.margin_used) ?? undefined,
+    /*
+     * 保证金模式：**读出这一道也收一次口**，与 `marginUsed` 同一个理由。
+     *
+     * ⚠️ `undefined`（界面显示 `—`）与 `'cross'`（界面显示「全仓」）在这里是
+     * **两句相反的话**：前者是"我们不知道这张单当时是什么模式"，后者是"它就是全仓"。
+     * 所以这里既不用 `?? 'cross'`，也把认不出的写法归到"不知道"那一类 ——
+     * 历史行（`NULL`）、以及任何绕过 `orders.insert()` 的写入都从这里经过。
+     */
+    marginType: normalizeMarginMode(row.margin_type) ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1079,6 +1091,41 @@ function toOrder(row: OrderRow): OrderRecord {
  */
 function positiveOrNull(value: number | null | undefined): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * 保证金模式的**唯一收口**：把三种写法收成 `'cross' | 'isolated'`，认不出的回 `null`。
+ *
+ * ## 为什么必须有它
+ *
+ * "全仓"这一个概念在这个系统里有**三个拼法**（全都是外部契约，改不动）：
+ *
+ * | 来源 | 写法 |
+ * | --- | --- |
+ * | 交易所 `positionRisk` / `symbolConfig`（读） | `cross` |
+ * | `POST /fapi/v1/marginType`（写） | `CROSSED` |
+ * | 本仓库 `StrategyConfigSchema.riskControl.marginMode` | `crossed` |
+ *
+ * 直接比较字符串会**静默失败**：`'cross' === 'crossed'` 是 `false`，而它不抛错、
+ * 不报警，只会让一次"这个标的是全仓"的判断变成"不是全仓"（或反过来）。
+ * 所以入库前、读库后都从这里过一道 —— 与 `positiveOrNull()` 对保证金做的是同一件事。
+ *
+ * ## 为什么认不出是 `null` 而不是报错 / 也不回落到 `'cross'`
+ *
+ * 这一列的合法取值只有"两个模式之一"或"不知道"。币安的**默认**确实是全仓，
+ * 但"默认是"与"我们读到了"是两件事 —— 认不出的值（未来的新写法、脏数据）
+ * 回落到 `'cross'` 会让界面**替交易所宣布一个我们没验证过的事实**，
+ * 与 `M13_ORDER_MARGIN_USED` 里"0 不等于不知道"是同一条纪律。
+ *
+ * 大小写与空白一并容忍（`'CROSSED'` / `' isolated '` 都能收到），因为它们来自
+ * 不同的外部接口，而"多一个空格就变成不知道"是最难查的那类字段映射 bug。
+ */
+export function normalizeMarginMode(value: unknown): MarginMode | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'cross' || normalized === 'crossed') return 'cross';
+  if (normalized === 'isolated') return 'isolated';
+  return null;
 }
 
 /**
@@ -1355,11 +1402,23 @@ export const orders = {
      * 见 `M13_ORDER_MARGIN_USED` 与 `toOrder()`。
      */
     marginUsed?: number | null;
+    /**
+     * 下单时该标的的保证金模式（`cross` / `isolated`，也接受配置里那个 `crossed`）。
+     *
+     * **不传就是"不知道"**（落 `NULL`，读取时是 `undefined` → 界面 `—`）。
+     * ⚠️ 不要用 `'cross'` 表达"不知道" —— 币安的默认是全仓，但"默认是"不是
+     * "我们读到了"，见 `M14_ORDER_MARGIN_TYPE`。
+     *
+     * 收的是**原始拼法**（交易所读回来是 `cross`、策略配置里是 `crossed`），
+     * 由 `normalizeMarginMode()` 归一后落库；**认不出的拼法落 `NULL` 而不是报错** ——
+     * 好过让一个拼法差异悄悄变成"另一个模式"。
+     */
+    marginType?: MarginMode | string | null;
   }): number {
     const ts = now();
     const { lastInsertRowid } = getDb().run(
-      `INSERT INTO orders (trader_id, exchange_order_id, client_order_id, symbol, side, type, purpose, quantity, price, stop_price, status, avg_price, filled_qty, fee, error, raw_response, margin_used, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO orders (trader_id, exchange_order_id, client_order_id, symbol, side, type, purpose, quantity, price, stop_price, status, avg_price, filled_qty, fee, error, raw_response, margin_used, margin_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.traderId,
       input.exchangeOrderId,
       input.clientOrderId,
@@ -1378,6 +1437,8 @@ export const orders = {
       input.rawResponse === undefined ? null : JSON.stringify(input.rawResponse),
       /* 落库前再收一次：这一列的值只有"正数"或"不知道"两种，见 `positiveOrNull()`。 */
       positiveOrNull(input.marginUsed),
+      /* 同上：只有 `cross` / `isolated` 或"不知道"，见 `normalizeMarginMode()`。 */
+      normalizeMarginMode(input.marginType),
       ts,
       ts,
     );

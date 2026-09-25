@@ -11,6 +11,7 @@ import {
   StrategyConfigSchema,
   defaultStrategyConfig,
   providerDefaults,
+  type PositionView,
   type ServerEvent,
   type Trader,
   type TraderStatus,
@@ -31,6 +32,7 @@ import {
   decisions as decisionStore,
   equity as equityStore,
   exchanges,
+  normalizeMarginMode,
   ORDER_PAGE_DEFAULT,
   orders as orderStore,
   positions as positionStore,
@@ -1694,7 +1696,13 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       // top of the exchange's truth.
       const local = positionStore.open(traderId);
       const bySymbol = new Map(local.map((p) => [p.symbol, p]));
-      const positions = livePositions.map((live) => {
+      /*
+       * 显式标成 `PositionView[]`：这条路由的契约就是它（`docs/API.md`），
+       * 而内联对象字面量在 `app.get()` 里没有任何类型约束 —— 字段名写错（`marginTyp`）
+       * 只会静默多一个没人读的键，前端拿到的一直是 `undefined`（界面 `—`）。
+       * 加上这一层，`tsc` 就能替这条"改了但没接线"的路径把关。
+       */
+      const positions: PositionView[] = livePositions.map((live) => {
         const record = bySymbol.get(live.symbol);
         return {
           id: record?.id ?? 0,
@@ -1710,6 +1718,18 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
           unrealizedPnlPercent: live.unrealizedPnlPercent,
           peakPnlPercent: record?.peak_pnl_percent ?? 0,
           marginUsed: live.marginUsed,
+          /*
+           * 保证金模式（全仓 / 逐仓）—— 订单记录那列的**当前配置兜底来源**。
+           *
+           * 它读自交易所的 `positionRisk`（`broker.getPositions()`），是**实时**的账户配置，
+           * 而**不是这张单下单时的历史快照**（那是 `OrderRecord.marginType`）。
+           * 界面对这两个口径分得很清：落库值优先，缺失时才用这一份，并明说它是当前值。
+           *
+           * 再收一次口：`ExchangePosition.marginType` 的类型来自 `binance/types.ts` 的声明，
+           * 运行期拿到的是交易所原样的字符串 —— 认不出的写法宁可当"不知道"（前端显示 `—`），
+           * 也绝不猜成 `'cross'`。
+           */
+          marginType: normalizeMarginMode(live.marginType) ?? undefined,
           notional: live.notional,
           stopLoss: record?.stop_loss ?? null,
           takeProfit: record?.take_profit ?? null,
@@ -1808,6 +1828,17 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     }
 
     /* 机器人没在跑 —— 本地镜像是唯一的真相，照旧返回。 */
+    /*
+     * ⚠️ **这条路上没有 `marginType`，那是刻意的**（不是漏了）。
+     *
+     * 保证金模式只存在于**交易所的逐标的配置**里：本地 `positions` 表从来没有这一列，
+     * 而这条路径按设计**不读交易所**（机器人停了，读它没有意义）。所以这里给不出值，
+     * 结果是 `undefined` → 界面显示 `—`。
+     *
+     * **不要用币安的默认值把它填成 `'cross'`**：那会让"读不到"与"确实是全仓"在界面上
+     * 长得一模一样，而这个界面在别处（`marginUsed`、熔断读数、`dryRun`）已经明确
+     * 选择了"不知道就说不知道"。
+     */
     return positionStore.open(id).map((row) => ({
       id: row.id,
       traderId: row.trader_id,

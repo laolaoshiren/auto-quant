@@ -696,6 +696,39 @@ const M13_ORDER_MARGIN_USED = /* sql */ `
 ALTER TABLE orders ADD COLUMN margin_used REAL;
 `;
 
+/*
+ * 订单行上的「保证金模式」= 全仓 / 逐仓。
+ *
+ * ## 为什么挂在 orders 上
+ *
+ * 用户的原话是「订单记录里面显示：全仓\逐仓」—— 主语是**每一条订单**。而保证金模式
+ * 是**逐标的的账户配置**：同一张持仓上挂出的入场单、保护单、平仓单处在同一个模式下。
+ * 快照挂在订单行上，回答的才是"这张单当时是什么模式"；只放在 positions 上回答不了
+ * 平掉之后的历史行（而订单记录里绝大多数行恰恰是那些）。
+ *
+ * ## 为什么可空、且**不设 DEFAULT**
+ *
+ * `NULL` = 这一行没有这个事实（迁移之前的历史行、或这台进程从未为该标的设成功过）。
+ * 币安的默认值确实是全仓（官方明文 "All contracts and positions are defaulted to the
+ * Cross Margin mode"），但"交易所的默认是 X"与"我们读到了 X"是两件事 ——
+ * 给旧行补一个 `'cross'` 等于**替交易所宣布一个我们没验证过的事实**。
+ *
+ * 这与 `M9_USAGE_DETAIL` 的 `cached_tokens` / `reasoning_tokens`、以及
+ * `M13_ORDER_MARGIN_USED` 是同一条纪律：**两种相反的含义不能共用同一个默认值**。
+ * 界面据 `NULL` 显示 `—`。
+ *
+ * ## 存的机器码只有两个：`cross` / `isolated`
+ *
+ * 交易所 `positionRisk` 就是这么写的。而策略配置里那个 `riskControl.marginMode`
+ * 写的是 **`crossed`**、写接口要的是 **`CROSSED`** —— 三种写法在
+ * `repositories.ts` 的 `normalizeMarginMode()` 里收口。
+ * ⚠️ **不要把 `crossed` 直接写进这一列**：那样同一个模式会有两个机器码，
+ * 而 `'cross' === 'crossed'` 是 `false` —— 比较失败不抛错，只会静默读成"不知道"。
+ */
+const M14_ORDER_MARGIN_TYPE = /* sql */ `
+ALTER TABLE orders ADD COLUMN margin_type TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -716,4 +749,5 @@ export const MIGRATIONS: readonly Migration[] = [
     detachForeignKeys: true,
   },
   { version: 13, name: 'order-margin-used', sql: M13_ORDER_MARGIN_USED },
+  { version: 14, name: 'order-margin-type', sql: M14_ORDER_MARGIN_TYPE },
 ];

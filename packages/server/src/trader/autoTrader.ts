@@ -66,6 +66,7 @@ import {
   decisions as decisionStore,
   equity as equityStore,
   marginOf,
+  normalizeMarginMode,
   orders as orderStore,
   ownUnrealizedPnlOf,
   positions as positionStore,
@@ -7178,6 +7179,28 @@ reduceQuantity: null,
       positionMargin: position?.margin_used,
     });
 
+    /*
+     * ── 保证金模式（全仓 / 逐仓）──────────────────────────────────────────
+     *
+     * 取的是**本进程最近一次成功应用到该标的**的模式：`setMarginType()` 只有拿到交易所
+     * 的 ok 才写进 `marginSet`（见 `executeOpen` 里那一段），所以它记的是交易所**确认过**
+     * 的配置，而不是我们"想设成"的配置。
+     *
+     * ⚠️ **它不是从交易所重新读回来的当前值**，所以有两种如实为空的路径 ——
+     * 都由界面显示 `—`，**不要在这里补一个 `?? 'cross'`**（币安的默认是全仓，但
+     * "默认是"与"我们读到了"是两件事，与 `marginUsed` 那条"0 不等于不知道"同一纪律）：
+     *
+     *   · 这台进程从来没为该标的设成功过（仓位是进程启动前建的、或那次
+     *     `setMarginType` 被 `-4048` 挡回来）→ `NULL`；
+     *   · 进程设成功之后，有人在零持仓时手工把该标的改成别的模式 → 这一列记的仍然是
+     *     我们那次设置的结果。真正的"当前值"由 `/positions` 实时读 `positionRisk`
+     *     （`PositionView.marginType`），界面拿它**兜底**，所以这个偏差不会让界面说谎。
+     *
+     * `marginSet` 里存的是**配置的写法**（`'isolated' | 'crossed'`），而这一列只认
+     * `'cross' | 'isolated'` —— 收口在 `normalizeMarginMode()`。
+     */
+    const marginType = normalizeMarginMode(this.marginSet.get(input.symbol));
+
     const id = orderStore.insert({
       traderId: input.traderId,
       exchangeOrderId: input.exchangeOrderId,
@@ -7194,6 +7217,7 @@ reduceQuantity: null,
       filledQty: input.filledQty,
       fee: input.fee ?? 0,
       marginUsed,
+      marginType,
       ...(input.error !== undefined ? { error: input.error } : {}),
       ...(input.raw !== undefined ? { rawResponse: input.raw } : {}),
     });
@@ -7220,6 +7244,14 @@ reduceQuantity: null,
         error: input.error ?? null,
         /* 与刚落库的那一行是同一个数（`null` → 事件里用 `undefined`）。 */
         ...(marginUsed === null ? {} : { marginUsed }),
+        /*
+         * 同上：字段缺失 = "不知道"，界面显示 `—`。
+         *
+         * 事件里必须带上它：`useTablePaging` 只把**新 id** 的行并进列表、不按字段合并，
+         * 所以漏传会让刚推送进来的那一行在界面上是 `—`，直到 15 秒后那次轮询才补上 ——
+         * 而"同一行先空后满"正是操作员最容易读成"这张单的模式和别的不一样"的样子。
+         */
+        ...(marginType === null ? {} : { marginType }),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       },

@@ -162,6 +162,91 @@ test('★ M12 重建 traders 表时不会级联删掉子表数据', () => {
   }
 });
 
+/**
+ * `M14_ORDER_MARGIN_TYPE` —— 订单行上的「全仓 / 逐仓」。
+ *
+ * ## 这条用例钉的是"迁移不许编事实"
+ *
+ * 加一列最省事的写法是 `ADD COLUMN margin_type TEXT NOT NULL DEFAULT 'cross'` ——
+ * 它能让每一行立刻都有值、界面上一行 `—` 都不出现，看起来更"完整"。
+ * **而那是错的**：币安的默认确实是全仓，可这是"交易所的默认"，不是"这些历史行当时
+ * 的模式"。补上去之后，界面上「全仓」与「不知道」就再也分不开了 ——
+ * 一个拿这张表复盘的人会把一批没记录的行当成"当时跑的是全仓"。
+ *
+ * 所以这里用一个**真实形状的 v13 库**（`orders` 已经有 `margin_used`、还没有
+ * `margin_type`）走正式路径 `Db.migrate()` 升到 v14，断言：
+ *
+ *   ① 老行一条不少；
+ *   ② 老行的 `margin_type` 是 `NULL` —— **没有被补成 `'cross'`**；
+ *   ③ 新列确实可写（迁移不只是"加了一列名字"）。
+ */
+test('★ M14 给 orders 加 margin_type：老行保持 NULL，绝不补一个默认的「全仓」', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'aq-mig-margin-type-'));
+  const file = path.join(dir, 'margin-type.sqlite');
+  let db: Db | null = null;
+  try {
+    const raw = new DatabaseSync(file);
+    raw.exec('PRAGMA foreign_keys = ON');
+    pushTo(raw, 13);
+
+    raw.exec(`
+      INSERT INTO exchange_accounts (id, exchange, label, api_key, api_secret_enc, testnet, can_trade, created_at, updated_at)
+        VALUES (1, 'binance', 'acc', 'k', 'v1:00:00:00', 0, 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+      INSERT INTO ai_models (id, provider, label, model, base_url, api_key_enc, temperature, max_tokens, timeout_seconds, max_retries, created_at, updated_at)
+        VALUES (1, 'deepseek', 'm', 'm', 'https://example.invalid', '', 0.2, 4096, 60, 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+      INSERT INTO traders (id, name, exchange_account_id, ai_model_id, cycle_interval_minutes, initial_equity, status, last_cycle_number, consecutive_failures, created_at, updated_at, mode)
+        VALUES (1, '机器人', 1, 1, 15, 10, 'running', 1, 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 'ai_managed');
+
+      -- 升级前写下的订单行：有保证金占用（M13 已经加过），但那时还没有 margin_type 这一列。
+      INSERT INTO orders (id, trader_id, symbol, side, type, purpose, status, quantity, filled_qty, client_order_id, margin_used, created_at, updated_at)
+        VALUES (1, 1, 'BTCUSDT', 'BUY', 'MARKET', 'entry', 'FILLED', 0.01, 0.01, 'cid-legacy', 40.4, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    `);
+    raw.close();
+
+    /* 走正式路径升级（服务启动时就是这条）。 */
+    db = new Db(file);
+    db.migrate();
+
+    assert.equal(
+      db.get<{ user_version: number }>('PRAGMA user_version')!.user_version,
+      14,
+      '这个用例假定 M14 是这一版最高的迁移版本 —— 追加新迁移时请把它一起往上调',
+    );
+
+    /* ① 老行一条不少。 */
+    assert.equal(db.count('SELECT COUNT(*) AS n FROM orders'), 1, '加列不该动任何一行');
+
+    /* ② ★ 老行是 NULL，不是 'cross' —— 这是这条用例存在的全部理由。 */
+    const legacy = db.get<{ margin_type: string | null }>(
+      'SELECT margin_type FROM orders WHERE id = 1',
+    )!;
+    assert.equal(
+      legacy.margin_type,
+      null,
+      '历史行必须保持 NULL（界面显示 —）：补一个 cross 就是把"不知道"说成了"当时是全仓"',
+    );
+
+    /* ③ 新列可写 —— 迁移加的不是一个永远读不出值的名字。 */
+    db.run("UPDATE orders SET margin_type = 'isolated' WHERE id = 1");
+    assert.equal(
+      db.get<{ margin_type: string | null }>('SELECT margin_type FROM orders WHERE id = 1')!
+        .margin_type,
+      'isolated',
+    );
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* 已经关过就算了 —— 这里不该影响真正的断言结果。 */
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      console.warn(`[migration.test] 临时目录未能删除（不影响结论）：${(error as Error).message}`);
+    }
+  }
+});
+
 test('★ 没有数据的库上，M12 也能干净跑完（主路径）', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'aq-mig-empty-'));
   const file = path.join(dir, 'empty.sqlite');
