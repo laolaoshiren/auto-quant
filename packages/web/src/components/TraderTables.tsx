@@ -83,6 +83,11 @@ interface PolledPage<T> {
   data: T[] | null;
   loading: boolean;
   error: string | null;
+  /**
+   * 这个 hook **成功拿到过数据**的时刻（`usePolled` 里 `updatedAt`）。
+   * `null` = 从没成功过。用来区分"还没有数据"与"有数据但正在刷新"。
+   */
+  updatedAt: number | null;
 }
 
 /** 一页怎么取。两张表的差别只有一个 API 函数，所以做成参数。 */
