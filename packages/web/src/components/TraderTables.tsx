@@ -736,9 +736,14 @@ export function PositionsTable({
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
               <th className="th">合约 / 方向</th>
-              <th className="th text-right">数量 / 名义 / 保证金</th>
-              <th className="th text-right">开仓价格 / 标记价格</th>
-              <th className="th">止盈 / 止损</th>
+              <th className="th">保证金模式</th>
+              <th className="th text-right">数量</th>
+              <th className="th text-right">名义</th>
+              <th className="th text-right">保证金</th>
+              <th className="th text-right">开仓价</th>
+              <th className="th text-right">标记价</th>
+              <th className="th text-right">止盈</th>
+              <th className="th text-right">止损</th>
               <th className="th text-right">强平价</th>
               <th className="th text-right">未实现盈亏</th>
               <th className="th text-right">操作</th>
@@ -770,40 +775,65 @@ export function PositionsTable({
                     </div>
                   </td>
 
-                  <td className="td num text-right">
-                    {fmtQty(position.quantity)}
-                    <div className="text-xs text-ink-faint">
-                      名义 <span className="text-ink-lo">{fmtUsd(position.notional, 2)}</span>
-                    </div>
-                    {/*
-                      每个仓位占用多少保证金（本金）。
-
-                      操作员最常问的问题之一是「这笔压了多少钱进去」——
-                      而它此前只能从「名义 ÷ 杠杆」自己算。名义与保证金是两个不同的量
-                      （名义是敞口、保证金是真金），**摆在一起才看得懂杠杆在做什么**。
-                    */}
-                    <div
-                      className="text-xs text-ink-faint"
-                      title="该仓位占用的保证金（本金）= 名义价值 ÷ 杠杆。"
-                    >
-                      保证金 <span className="text-ink-lo">{fmtUsd(position.marginUsed, 2)}</span>
-                    </div>
-                  </td>
-
-                  <td className="td num text-right">
-                    {fmtPrice(position.entryPrice)}
-                    <div className="text-xs text-ink-faint">标记 {fmtPrice(position.markPrice)}</div>
-                  </td>
-
+                  {/*
+                    ⚠️ **这一列原来是「数量 / 名义 / 保证金」三行挤一格。**
+                    
+                    用户的原话：「不要弄成三列，每个类目**单独弄成一个项目（列）**。
+                    因为页面很空旷（左右空间很多），**能拆分就拆分**方便查看，
+                    而且不会导致空间不够用」。
+                    
+                    拆开是有道理的：三者是**三个不同的量**（数量是张数、名义是敞口、
+                    保证金是真金），挤在一格里时谁都无法一眼扫读、也没法纵向对比
+                    不同持仓的同项。拆成独立列后，每一列都能**沿着列往下比**。
+                  */}
                   <td className="td">
-                    <div className="num text-base text-up">
+                    {/*
+                      保证金模式（全仓 / 逐仓）—— 与订单记录那一列同源同措辞。
+                      
+                      ⚠️ `PositionView.marginType` 是**实时读自交易所**的当前配置
+                      （`/fapi/v2/positionRisk`），不是历史快照。持仓这里它就是
+                      "此刻的模式"，所以没有订单表那种"历史行取不到"的问题；
+                      读不到（机器人没跑、或该字段缺失）时显示 `—`，**不默认成全仓**。
+                    */}
+                    <Badge
+                      tone="muted"
+                      title={
+                        position.marginType
+                          ? `该持仓在交易所的保证金模式：${marginModeLabel(position.marginType)}。实时读自交易所。`
+                          : '暂时读不到该持仓的保证金模式（机器人未运行、或交易所未返回该字段）。'
+                      }
+                    >
+                      {position.marginType ? marginModeLabel(position.marginType) : '—'}
+                    </Badge>
+                  </td>
+
+                  <td className="td num text-right">{fmtQty(position.quantity)}</td>
+
+                  <td className="td num text-right">{fmtUsd(position.notional, 2)}</td>
+
+                  <td
+                    className="td num text-right"
+                    title="该仓位占用的保证金（本金）= 名义价值 ÷ 杠杆。"
+                  >
+                    {fmtUsd(position.marginUsed, 2)}
+                  </td>
+
+                  <td className="td num text-right">{fmtPrice(position.entryPrice)}</td>
+
+                  <td className="td num text-right">{fmtPrice(position.markPrice)}</td>
+
+                  <td className="td num text-right">
+                    <div className="text-base text-up">
                       {position.takeProfit ? fmtPrice(position.takeProfit) : '无'}
-                      {targetDistance && <span className="ml-1 text-xs text-ink-faint">{targetDistance}</span>}
                     </div>
-                    <div className={`num text-base ${missingStop ? 'font-semibold text-down' : 'text-down'}`}>
+                    {targetDistance && <div className="text-xs text-ink-faint">{targetDistance}</div>}
+                  </td>
+
+                  <td className="td num text-right">
+                    <div className={`text-base ${missingStop ? 'font-semibold' : ''} text-down`}>
                       {position.stopLoss ? fmtPrice(position.stopLoss) : '无'}
-                      {stopDistance && <span className="ml-1 text-xs text-ink-faint">{stopDistance}</span>}
                     </div>
+                    {stopDistance && <div className="text-xs text-ink-faint">{stopDistance}</div>}
                   </td>
 
                   <td className={`td num text-right ${position.liquidationPrice ? 'text-warn' : 'text-ink-faint'}`}>
