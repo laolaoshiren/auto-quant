@@ -1119,10 +1119,14 @@ const ORDER_MARGIN_MODE_SOURCE_TITLE = {
 function MarginModeCell({
   order,
   mode,
+  symbol,
   liveBySymbol,
 }: {
   order?: OrderRecord;
+  /** 后端已经带出来的值（成交表走这条）。可能缺失。 */
   mode?: MarginMode;
+  /** 该行对应的标的 —— 用于"当前持仓"兜底（成交表也走这条）。 */
+  symbol?: string;
   liveBySymbol?: ReadonlyMap<string, MarginMode> | null;
 }) {
   if (order) {
@@ -1147,29 +1151,48 @@ function MarginModeCell({
     );
   }
 
-  if (mode === undefined) {
-    return (
-      <span className="text-ink-faint" title={TRADE_MARGIN_MODE_TITLE.none}>
-        —
-      </span>
-    );
+  /* 后端带了值 → 那是**当时**的、可信的。 */
+  if (mode !== undefined) {
+    return <span title={TRADE_MARGIN_MODE_TITLE.known}>{marginModeLabel(mode)}</span>;
   }
-  return <span title={TRADE_MARGIN_MODE_TITLE.known}>{marginModeLabel(mode)}</span>;
+
+  /*
+   * 没有落库值 → 看该标的**现在**有没有持仓。
+   *
+   * ⚠️ 这一路和订单表共用同一套判断（`TRADE_MARGIN_MODE_TITLE.position` 明确写出
+   * "这是当前配置、不是快照"），理由是**用户看到一片 `—` 会以为功能坏了** ——
+   * 而这批历史行在迁移之前本来就没记过这个字段，全都取不到。
+   * 兜底能让他看到"这个标的现在是逐仓"，同时措辞里说清它不能当历史证据。
+   */
+  const fallback = symbol ? liveBySymbol?.get(symbol) : undefined;
+  if (fallback !== undefined) {
+    return <span title={TRADE_MARGIN_MODE_TITLE.position}>{marginModeLabel(fallback)}</span>;
+  }
+
+  return (
+    <span className="text-ink-faint" title={TRADE_MARGIN_MODE_TITLE.none}>
+      —
+    </span>
+  );
 }
 
 /**
  * 成交表那一格的措辞。
  *
- * 它必须说清"这是**当时**的配置"，而不是"现在的"—— 订单表有兜底值、措辞里
- * 专门警告过"不能当历史证据"；成交这一格恰恰**是**历史，两个来源混着说的话
- * 读者就分不清哪一行可信了。
+ * 三种来源必须**分别**说清，否则读者分不清哪一行可信：
+ *  · `known`    —— 入场订单落库的配置，**是当时的值**；
+ *  · `position` —— 落库值缺失时用该标的**当前**的配置兜底，**不是快照**；
+ *  · `none`     —— 两者都拿不到，`—` 表示"不知道"，不是"全仓"。
  */
 const TRADE_MARGIN_MODE_TITLE = {
-  known: '该回合入场时的保证金模式（取自入场订单落库的配置，是当时的值）。',
+  known: '该回合入场时的保证金模式，取自入场订单落库的配置 —— 这是**当时**的值。',
+  position:
+    '这张成交的入场订单没有记下保证金模式（迁移之前的历史行，或该标的的模式从未成功设置过）。' +
+    '这里显示的是该标的**当前**的账户配置 —— 实时读自交易所，不是成交当时的快照，不能当历史证据。',
   none:
-    '这一回合没有保证金模式的记录：入场订单在迁移之前（没有这一列），' +
-    '或者这一笔是补录的（机器人没运行时平的仓，没有对应的本地订单行）。' +
-    '— 表示"不知道"，不是"全仓"。',
+    '这一行没有保证金模式的记录：入场订单在迁移之前（没有这一列），' +
+    '或者这一笔是补录的（机器人没运行时平的仓，没有对应的本地订单行），' +
+    '而且该标的现在没有持仓可供读取。— 表示"不知道"，不是"全仓"。',
 } as const;
 
 export function OrdersTable({
@@ -1503,6 +1526,7 @@ export function TradesTable({
   onSelectSymbol,
   collapsed = false,
   paging: providedPaging,
+  liveMarginModes,
 }: {
   traderId: number;
   refreshToken?: number;
@@ -1525,6 +1549,14 @@ export function TradesTable({
    * 两者差的就是"什么时候开始请求"。
    */
   paging?: TablePaging<TradeRecord>;
+  /**
+   * 「保证金模式」的**兜底来源**：当前持仓的 `symbol → marginType`。
+   *
+   * 迁移 v14 之前的成交没有这一列，届时用该标的**现在**的配置顶一下（措辞里
+   * 写明"不是快照"）—— 否则整张历史表会是一片 `—`，用户会以为功能没生效。
+   * 与订单表共用容器里建好的那一份映射，不各自建。
+   */
+  liveMarginModes?: ReadonlyMap<string, MarginMode> | null;
 }) {
   const live = useEvents((s) => s.byTrader[traderId]?.trades);
   /*
@@ -1699,7 +1731,7 @@ export function TradesTable({
                       没运行时平的仓）本来就没有对应的本地订单行，用当前配置顶上会把
                       "不知道"说成一个看起来很确定的值。
                     */}
-                    <MarginModeCell mode={trade.marginType} />
+                    <MarginModeCell mode={trade.marginType} symbol={trade.symbol} liveBySymbol={liveMarginModes} />
                   </td>
                   <td className="td num text-right">{fmtPrice(trade.entryPrice)}</td>
                   <td className="td num text-right">{fmtPrice(trade.exitPrice)}</td>
@@ -2151,6 +2183,8 @@ export function TraderTables({
             collapsed={historyCollapsed}
             /* 容器预取好的那份 —— 切过来时数据已在手上，不会经历"空白 → 转圈"。 */
             paging={tradesPaging}
+            /* 「保证金模式」的兜底来源，与订单表共用同一份映射。 */
+            liveMarginModes={liveMarginModes}
           />
         )}
       </div>
