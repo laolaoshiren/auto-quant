@@ -781,7 +781,13 @@ export function PositionsTable({
    * 外面再套一层延迟：快的时候不显示转圈，避免"出现又消失"的跳变。
    */
   const showSpinner = useDelayedSpinner(query.loading && query.updatedAt === null && positions.length === 0);
-  if (showSpinner) return <Spinner3 label="正在加载持仓" />;
+
+  /* 同 `OrdersTable`：**没成功拿到过数据时不能断言"暂无"** —— 那是一个结论。 */
+  if (query.updatedAt === null && positions.length === 0) {
+    if (showSpinner) return <Spinner3 label="正在加载持仓" />;
+    return <div className="py-8" aria-hidden />;
+  }
+
   if (positions.length === 0) {
     return <TableEmpty message="暂无持仓。" hint="模型选择空仓 — 没有符合条件的标时不会下任何订单。" />;
   }
@@ -1152,16 +1158,36 @@ export function OrdersTable({
   const orders = onlyOpen ? all.filter(isOpenOrder) : all;
 
   /*
-   * ⚠️ **必须带上 `hasLoadedOnce`，否则会闪。**
+   * ⚠️ **"暂无"是一个结论，结论要有依据 —— 数据还在路上时不能说。**
    *
-   * 只用 `loading` 的话：组件重新挂载（刷新页面后第一次点进这个标签）时
-   * `loading` 从 true 重新开始，于是**即使数据其实已经在容器手里**，也会先显示
-   * 8 帧（约 400ms）的转圈，再被真实的行替换 —— 用户看到的就是"闪一下"。
+   * 实测的真实序列（MutationObserver 逐次记录，刷新后点「当前委托」）：
    *
-   * `hasLoadedOnce` 一旦为真就不再显示加载态：**有行就显示行**。
+   *     spinner                 400ms
+   *     1/LTCUSDT多|—|0.288     ← 默认标签的持仓表漏了一帧
+   *     empty-orders            ← ⚠️「暂无当前委托。」——**那时数据还在路上**
+   *     spinner                 又转圈
+   *     4/2026-09-|LTCUSDT|止盈  ← 这才是真正的委托
+   *
+   * 用户看到的就是 `empty-orders` ↔ 数据的跳变，加上持仓表的闪现 —— 他形容为
+   * 「错位 + 频率高，仿佛多个重叠」。
+   *
+   * 所以这里分三步，各自都有依据：
+   *   ① 还没成功拿到过数据 → **保留加载占位**（延迟 350ms 才显示转圈；
+   *      在此之前给一个撑住高度的空盒子，**没有视觉跳变**）；
+   *   ② 拿过数据、当前确实没有行 → 这时才可以显示「暂无」；
+   *   ③ 有行 → 显示表格。
    */
   const showSpinner = useDelayedSpinner(paging.loading && !paging.hasLoadedOnce && all.length === 0);
-  if (showSpinner) return <Spinner3 label="正在加载委托" />;
+
+  if (!paging.hasLoadedOnce && all.length === 0) {
+    if (showSpinner) return <Spinner3 label="正在加载委托" />;
+    /*
+     * 转圈还没到显示时机 —— 给一个**占位**而不是"暂无"。
+     * 高度与空状态接近，避免表格区域在数据到达时发生布局跳动。
+     */
+    return <div className="py-8" aria-hidden />;
+  }
+
   if (orders.length === 0) {
     return onlyOpen ? (
       <TableEmpty message="暂无当前委托。" hint="交易所侧的止损 / 止盈单在触发前会出现在这里。" />
@@ -1457,7 +1483,13 @@ export function TradesTable({
 
   /* 同 `OrdersTable`：只有"从没成功加载过"才显示转圈；再延迟一层，避免出现又消失。 */
   const showSpinner = useDelayedSpinner(query.loading && query.updatedAt === null && trades.length === 0);
-  if (showSpinner) return <Spinner3 label="正在加载成交记录" />;
+
+  /* 同 `OrdersTable`：数据还在路上时不能下"暂无"的结论。 */
+  if (query.updatedAt === null && trades.length === 0) {
+    if (showSpinner) return <Spinner3 label="正在加载成交记录" />;
+    return <div className="py-8" aria-hidden />;
+  }
+
   if (trades.length === 0) {
     return <TableEmpty message="暂无历史成交。" hint="每笔平仓都会连同平仓原因一起持久化。" />;
   }
