@@ -380,7 +380,7 @@ function useTablePaging<T extends { id: number; traderId: number }>(
    * ⚠️ **成交表要同时给 `beforeClosedAt`**：服务端按 `closed_at` 排序，
    * 而补录行的 id 更大、时间更早 —— 只用 id 做游标会把它们整个跳过（页边界漏行）。
    */
-  const loadMore = useCallback(async () => {
+  const loadMore = useCallback(async (opts?: { silent?: boolean }) => {
     if (moreState === 'loading' || moreState === 'done') return;
     if (cursor === null) {
       // 手里一行都没有 = 没有可翻的页（第一页还没到）。落一个终态而不只是 return：
@@ -393,7 +393,22 @@ function useTablePaging<T extends { id: number; traderId: number }>(
     moreAbortRef.current?.abort();
     const controller = new AbortController();
     moreAbortRef.current = controller;
-    setMoreState('loading');
+    /*
+     * ⚠️ **自动填充视口时不进入 `loading` 状态**（`silent`）。
+     *
+     * 这是用户报的那个"不停闪烁"的根因。表格刚挂上时只有 3 行、视口远没填满，
+     * 哨兵一直在观察范围内，于是：
+     *
+     *     观察器挂上 → 立刻 loadMore → moreState: idle→loading→idle
+     *       → effect 重跑 → 观察器又挂 → 又立刻 loadMore → …… 直到「已到最早一笔」
+     *
+     * 每循环一轮，底部那句「正在加载更早的订单…」就出现又消失一次 —— 用户的原话是
+     * 「页面不停闪烁／加载」。而他并没有滚，这个提示本来就不该出现。
+     *
+     * `silent` 只跳过 `loading` 这个**可见状态**，请求照发、防重入照旧
+     * （`moreAbortRef` 与下面的 abort 判断都不受影响）。
+     */
+    if (!opts?.silent) setMoreState('loading');
     setMoreError(null);
 
     try {
@@ -447,7 +462,14 @@ function useTablePaging<T extends { id: number; traderId: number }>(
 
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) void loadMoreRef.current();
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        /*
+         * 滚动框**还没被填满**（`scrollHeight <= clientHeight`）说明这不是"用户滚到底"，
+         * 而是"表格太短、哨兵一开始就可见"。那种情况下静默加载 —— 否则每轮都会让底部
+         * 那句「正在加载更早的订单…」闪一次（用户报的闪烁就是这么来的）。
+         */
+        const notScrollable = root.scrollHeight <= root.clientHeight + 2;
+        void loadMoreRef.current({ silent: notScrollable });
       },
       { root, rootMargin: '240px 0px' },
     );
@@ -505,7 +527,9 @@ function useTablePaging<T extends { id: number; traderId: number }>(
     hasMore,
     moreState,
     moreError,
-    retry: loadMore,
+    /* 重试是**用户明确点的**，所以不静默 —— 他要看到"正在加载"。包一层是因为
+       `loadMore` 现在收 `opts`，直接传引用会把点击事件当成参数塞进去。 */
+    retry: () => void loadMore(),
     scrollerRef,
     sentinelRef,
   };
