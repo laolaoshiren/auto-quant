@@ -2994,6 +2994,24 @@ export function clampDecisionLimit(limit: number): number {
   return clampPageLimit(limit, DECISION_PAGE_MAX, DECISION_PAGE_DEFAULT);
 }
 
+/**
+ * `decision_records` 的裁剪节流。
+ *
+ * ⚠️ **裁剪绝不能每写一行都做。** 这一段原来是"INSERT 之后立刻 DELETE 一次"，
+ * 而那条 DELETE 是 `WHERE id NOT IN (SELECT id FROM decision_records … LIMIT 500)`
+ * —— **一次全表扫描**，而 `decision_records` 的每一行都是几十 KB 的提示词全文。
+ * `node:sqlite` 是同步 API：这次扫描直接压在**跑交易循环的那个事件循环**上。
+ *
+ * 这违反的是本项目自己立下的契约：`runtimeLogs`（同文件）与 `agentStore`
+ * 早就改成了"每 N 次写裁剪一次"，只有这里漏了。
+ *
+ * 每 50 次写裁剪一次：表的上界变成 500 + 50 = 550 行，而任何读取路径都只要
+ * 最近 500 行 —— 多留的那部分是纯缓冲，没有消费者依赖它。
+ */
+const DECISION_TRIM_EVERY_WRITES = 50;
+/** 距离上次裁剪已写入的行数（裁剪是全局的，不区分 trader）。 */
+let decisionWritesSinceTrim = 0;
+
 export const decisions = {
   /**
    * 某机器人的决策记录，**最新在前**。`before` 是游标：只返回 `id < before` 的记录。
@@ -3088,13 +3106,18 @@ export const decisions = {
       input.reasoningTokens ?? null,
     );
     // Keep the audit trail bounded so the database does not grow without limit.
-    getDb().run(
-      `DELETE FROM decision_records
-        WHERE trader_id = ?
-          AND id NOT IN (SELECT id FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT 500)`,
-      input.traderId,
-      input.traderId,
-    );
+    // 每 50 次写才裁剪一次 —— 理由见 `DECISION_TRIM_EVERY_WRITES`。
+    decisionWritesSinceTrim += 1;
+    if (decisionWritesSinceTrim >= DECISION_TRIM_EVERY_WRITES) {
+      decisionWritesSinceTrim = 0;
+      getDb().run(
+        `DELETE FROM decision_records
+          WHERE trader_id = ?
+            AND id NOT IN (SELECT id FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT 500)`,
+        input.traderId,
+        input.traderId,
+      );
+    }
     return lastInsertRowid;
   },
 

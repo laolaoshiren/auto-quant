@@ -8,6 +8,7 @@ import { closeDb, getDb, initDb } from '../db/index.js';
 import {
   aiModels,
   computeTraderStats,
+  decisions,
   exchanges,
   RUNTIME_LOG_CAP,
   runtimeLogs,
@@ -393,4 +394,56 @@ test('★ 未结算的实验永远不裁：裁掉它，那笔调参的因果就�
     agentExperiments.pending(id).some((e) => e.id === stillPending),
     '未结算的那条必须还在 —— 裁掉它，那笔调参的因果就永远对不上',
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  decision_records                                                           */
+/* -------------------------------------------------------------------------- */
+
+test('★ decision_records 有界，而且不是每写一行就全表扫一次', () => {
+  /*
+   * 同一类缺陷的第三处（前两处是 `runtime_logs` 与 `trade_events`）：
+   * `decisions.log()` 原来在**每一行** INSERT 之后都跑一次
+   * `DELETE … WHERE id NOT IN (… LIMIT 500)` —— 一次全表扫描，而这张表的每一行
+   * 都是**几十 KB 的提示词全文**。`node:sqlite` 是同步 API，那次扫描直接压在
+   * 跑交易循环的事件循环上。
+   *
+   * 两条断言各钉一半：
+   *   · 上界仍然成立（表不会无限长）；
+   *   · 但不是逐行裁剪（否则剩下的会**恰好**是 500，没有缓冲）。
+   */
+  traderId = seedTrader();
+  const db = getDb();
+
+  const writeOne = (cycle: number): void => {
+    decisions.log({
+      traderId,
+      cycleNumber: cycle,
+      systemPrompt: 'system',
+      userPrompt: 'user',
+      cotTrace: '',
+      decisions: [],
+      rawResponse: '',
+      executionLog: [],
+      candidateSymbols: [],
+      success: true,
+      error: null,
+      aiLatencyMs: 1,
+      promptTokens: null,
+      completionTokens: null,
+    });
+  };
+
+  const writes = 540;
+  for (let i = 0; i < writes; i += 1) writeOne(i);
+
+  const count = db.count('SELECT COUNT(*) AS n FROM decision_records');
+  assert.ok(count <= 550, `表必须有界（上限 500 + 每 50 次一批），实际 ${count} 行`);
+  assert.ok(
+    count > 500,
+    `逐行裁剪会恰好留下 500 行；批量裁剪会留下缓冲，实际 ${count} 行`,
+  );
+
+  /* 控制台读的是最近那些行 —— 最新的那一条必须还在。 */
+  assert.equal(decisions.list(traderId, 1)[0]?.cycleNumber, writes - 1);
 });
