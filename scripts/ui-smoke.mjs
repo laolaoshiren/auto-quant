@@ -43,6 +43,8 @@ function arg(name, fallback) {
 const BASE_URL = arg('url', process.env.UI_SMOKE_URL ?? 'http://127.0.0.1:27137').replace(/\/$/, '');
 const USERNAME = arg('user', process.env.UI_SMOKE_USER ?? '');
 const PASSWORD = arg('pass', process.env.UI_SMOKE_PASS ?? '');
+/** 与 `ui-check.mjs` 同一套：有现成的 JWT 就不必知道密码。 */
+const TOKEN = process.env.AQ_TOKEN ?? '';
 const OUT_DIR = path.resolve(REPO_ROOT, arg('out', 'packages/web/ui-smoke'));
 
 /** 要检查的路由。带 `:id` 的会在运行时用第一条真实数据替换。 */
@@ -151,7 +153,27 @@ const loginPage = await context.newPage();
 attach(loginPage);
 await loginPage.goto(BASE_URL, { waitUntil: 'networkidle' });
 
-if (USERNAME && PASSWORD) {
+if (TOKEN) {
+  /*
+   * ⚠️ **有 token 就用 token，不要非得让调用方知道密码。**
+   *
+   * 密码只在"人现场操作"时拿得到；而在自动巡检里（比如本轮改版）我手上只有一枚
+   * 签发的 JWT —— 于是这个脚本要么跑不了、要么逼人去问密码。
+   * `ui-check.mjs` 早就支持 `AQ_TOKEN` 了，这里保持一致：**同一套环境变量，
+   * 两个脚本都认**。
+   *
+   * 顺序与 `ui-check` 一致：先进同源页面，再把 token 写进 `localStorage`，
+   * 之后导航才会带上登录态。
+   */
+  try {
+    await loginPage.goto(`${BASE_URL}/login`, { waitUntil: 'domcontentloaded' });
+    await loginPage.evaluate((t) => localStorage.setItem('aq.token', t), TOKEN);
+    await loginPage.goto(BASE_URL, { waitUntil: 'networkidle' });
+    ok('用 AQ_TOKEN 注入登录态');
+  } catch (error) {
+    problem('注入 AQ_TOKEN', error.message.split('\n')[0]);
+  }
+} else if (USERNAME && PASSWORD) {
   try {
     await loginPage.fill('input[autocomplete="username"], input[name="username"]', USERNAME);
     await loginPage.fill('input[type="password"]', PASSWORD);

@@ -802,7 +802,8 @@ export function TraderPage() {
             stats ? (
               <>
                 今日 <span className={pnlColor(todayPnl)}>{fmtUsdSigned(todayPnl, 2)}</span>
-                {' · '}总收益 <span className={pnlColor(stats.totalReturnPercent)}>{fmtPercent(stats.totalReturnPercent)}</span>
+                {' · '}
+                <span className={pnlColor(stats.totalReturnPercent)}>{fmtPercent(stats.totalReturnPercent)}</span>
               </>
             ) : (
               '等待统计'
