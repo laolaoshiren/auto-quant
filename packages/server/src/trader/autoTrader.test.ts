@@ -938,6 +938,51 @@ test('平仓之后，模型下一轮能看到自己当时的理由和真实结�
   assert.match(prompt, /上次平仓在 不到 1 分钟前（未启用再入场冷却）/);
 });
 
+test('★ 订单落库时带上保证金占用 —— 否则表格那一列永远是空的', async () => {
+  /*
+   * 用户要求「**当前委托、历史成交、订单记录里增加一栏显示每一单保证金占用**」。
+   *
+   * 这一列的值来自 `orders.margin_used`（迁移 v13 新增）。**这条用例填的是那次交付
+   * 唯一的证据缺口**：迁移、仓储映射与纯函数单测当时都已就绪，但"**真实的开仓流程
+   * 到底会不会把值写进去**"只有纯函数级证据 —— 而线上跑的那一刻 AI 恰好选择观望
+   * （`开仓 0`），一行订单都没产生，于是那一列在真实数据里全是 `NULL`。
+   *
+   * 一条只有单测、没有端到端证据的字段，和"我以为它接上了"没有区别 ——
+   * 而这一列的失败方式恰好是最安静的那种：**界面显示 `—`，不报错、不告警**。
+   *
+   * 判据用 `typeof === 'number' && > 0` 而不是 `!== undefined`：`0` 与 `undefined`
+   * 在这条链路上是两句相反的话（`0` = 没占保证金，`undefined` = 不知道），
+   * 服务端两侧都做了收口（`positiveOrNull`），这里一并钉住。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const entry = orderStore.list(traderId).find((o) => o.purpose === 'entry');
+  assert.ok(entry, '前提：这一轮真的开出了仓（否则这条用例什么都没测）');
+  assert.ok(
+    typeof entry.marginUsed === 'number' && entry.marginUsed > 0,
+    `开仓单必须带上保证金占用，实际 ${String(entry.marginUsed)} —— ` +
+      'undefined / 0 都会让界面那一列显示成 —（而它其实是有值的）',
+  );
+
+  /*
+   * 保护单与开仓单属于**同一张持仓**，所以服务端取的是同一个 `positions.margin_used`。
+   * 钉住这点有两个用处：
+   *
+   *  1. 证明"平仓/保护单不重算、直接取持仓行的权威值"这条路线真的接上了；
+   *  2. 证明界面那一列的语义是「**这笔仓位占了多少**」而不是「这张单锁了多少」
+   *     —— 后者在这里会得到另一个数（保护单没有成交价可言）。
+   */
+  const stop = orderStore.list(traderId).find((o) => o.purpose === 'stop_loss');
+  if (stop) {
+    assert.equal(
+      stop.marginUsed,
+      entry.marginUsed,
+      '保护单与开仓单是同一张持仓，保证金必须是同一个数',
+    );
+  }
+});
+
 test('止损比往返手续费还近的开仓：在交易循环里被拒，且理由带具体数字', async () => {
   /*
    * Why this test exists —— §5 的门槛必须**在通往订单的那条路径上**，而不是只在风控的
