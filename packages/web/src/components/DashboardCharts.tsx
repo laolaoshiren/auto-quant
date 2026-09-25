@@ -29,19 +29,20 @@ interface EquityTooltipProps {
   active?: boolean;
   payload?: Array<{ payload?: EquityPoint }>;
   /**
-   * 本段（当前时间窗）的**第一个**权益 —— 用来算"这一段里涨跌了多少"。
+   * 初始权益（图上那条虚线）—— 用来算"这个账户从开头到现在赚了多少"。
    *
-   * ⚠️ **提示框原来只给一个绝对权益值**，用户的原话是：
+   * ⚠️ **这里原来还有一行「本段变化」（相对窗口内第一个快照），已经删掉。**
    *
-   *   「鼠标停留在哪里，就能真实看到**那个时间段**到底对于**整个图表时间**
-   *     盈亏状况！！！而不是现在这样奇奇怪怪的，根本无法理解逻辑，毫无头绪，
-   *     看的人一头雾水」
+   * 用户的原话：「**不要本段变化（画蛇添足、多此一举）**」。
    *
-   * 一个孤零零的 `21.97 USDT` 回答不了"我赚了还是亏了" —— 而图上有两条基准线
-   * （初始、本段起点），悬停时却一个都不参与叙述。所以下面把**两个涨幅**都写出来。
+   * 他是对的，而且不是审美问题 —— 在"全部"这个默认窗口下**两个基准是同一个数**：
+   * 第一个快照的权益就是初始权益，于是提示框里出现两行**逐字相同**的
+   * `+$1.19（+5.70%）`。那不是"多一个视角"，是把同一句话说两遍 ——
+   * 而它恰好出现在最需要一眼看懂的地方。
+   *
+   * 图顶那一行「本段变化」仍然保留：那里没有别的数字，讲"这一段涨了多少"是它
+   * 唯一的职责。**同一个信息在一处出现是说明，在两处出现是噪音。**
    */
-  segmentStart?: number;
-  /** 初始权益（图上那条虚线）—— 用来算"这个账户从开头到现在赚了多少"。 */
   baseline?: number;
   asset?: string;
 }
@@ -76,16 +77,15 @@ function deltaText(delta: number, base: number | undefined, digits = 2): string 
  * ## 这个提示框要回答的问题
  *
  * 「**我在这一刻，相对整条时间线赚了多少**」。所以除了归属权益本身，还给出
- * 两个涨幅（相对初始、相对本段起点）—— 图上有两条基准线，提示框就要能把
- * 那条竖线和它们各自的关系说出来。
+ * 它相对**初始权益**（图上那条虚线）的涨幅 —— 一个孤零零的绝对值和曲线的关系，
+ * 用户没法自己看出来。
  */
-function EquityTooltip({ active, payload, segmentStart, baseline, asset = 'USDT' }: EquityTooltipProps) {
+function EquityTooltip({ active, payload, baseline, asset = 'USDT' }: EquityTooltipProps) {
   if (!active) return null;
   const point = payload?.[0]?.payload;
   if (!point) return null;
 
   const floating = point.unrealizedPnl ?? 0;
-  const sinceStart = segmentStart === undefined ? undefined : point.equity - segmentStart;
   const sinceBaseline = baseline === undefined ? undefined : point.equity - baseline;
 
   return (
@@ -107,7 +107,7 @@ function EquityTooltip({ active, payload, segmentStart, baseline, asset = 'USDT'
 
       {/* 相对**初始权益**：这个账户从开头到现在赚了多少（图上那条虚线）。 */}
       {sinceBaseline !== undefined && (
-        <div className="flex items-baseline justify-between gap-3">
+        <div className="mt-0.5 flex items-baseline justify-between gap-3 border-t border-base-750 pt-0.5">
           <span className="text-xs text-ink-lo">相对初始</span>
           <span className={`num text-sm ${deltaTone(sinceBaseline)}`}>
             {deltaText(sinceBaseline, baseline)}
@@ -115,18 +115,8 @@ function EquityTooltip({ active, payload, segmentStart, baseline, asset = 'USDT'
         </div>
       )}
 
-      {/* 相对**本段起点**：与图顶那行「本段变化」同一个口径。 */}
-      {sinceStart !== undefined && (
-        <div className="flex items-baseline justify-between gap-3">
-          <span className="text-xs text-ink-lo">本段变化</span>
-          <span className={`num text-sm ${deltaTone(sinceStart)}`}>
-            {deltaText(sinceStart, segmentStart)}
-          </span>
-        </div>
-      )}
-
       {point.unrealizedPnl !== undefined && (
-        <div className="mt-0.5 flex items-baseline justify-between gap-3 border-t border-base-750 pt-0.5">
+        <div className="flex items-baseline justify-between gap-3">
           <span className="text-xs text-ink-lo">其中浮动盈亏</span>
           {/* Sign always present: colour alone is not a signal every operator can read. */}
           <span className={`num text-xs ${deltaTone(floating)}`}>
@@ -270,11 +260,10 @@ export function DashboardEquityChart({
         />
         <Tooltip
           /*
-           * ⚠️ 两个基准值必须**传进去**，否则提示框只能给出一个孤零零的绝对权益，
-           * 回答不了"我在这一刻是赚还是亏"。`first` 是这段窗口的起点（与图顶那行
-           * 「本段变化」同一个口径），`baseline` 是账户的初始权益（图上那条虚线）。
+           * ⚠️ `baseline` 必须传进去，否则提示框只能给出一个孤零零的绝对权益，
+           * 回答不了"我在这一刻是赚还是亏"。它就是图上那条「初始」虚线。
            */
-          content={<EquityTooltip segmentStart={first} baseline={baseline} asset={unit} />}
+          content={<EquityTooltip baseline={baseline} asset={unit} />}
           cursor={<EquityCursor />}
           shared={false}
           isAnimationActive={false}
