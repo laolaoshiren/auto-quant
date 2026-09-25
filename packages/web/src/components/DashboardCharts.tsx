@@ -28,6 +28,42 @@ import {
 interface EquityTooltipProps {
   active?: boolean;
   payload?: Array<{ payload?: EquityPoint }>;
+  /**
+   * 本段（当前时间窗）的**第一个**权益 —— 用来算"这一段里涨跌了多少"。
+   *
+   * ⚠️ **提示框原来只给一个绝对权益值**，用户的原话是：
+   *
+   *   「鼠标停留在哪里，就能真实看到**那个时间段**到底对于**整个图表时间**
+   *     盈亏状况！！！而不是现在这样奇奇怪怪的，根本无法理解逻辑，毫无头绪，
+   *     看的人一头雾水」
+   *
+   * 一个孤零零的 `21.97 USDT` 回答不了"我赚了还是亏了" —— 而图上有两条基准线
+   * （初始、本段起点），悬停时却一个都不参与叙述。所以下面把**两个涨幅**都写出来。
+   */
+  segmentStart?: number;
+  /** 初始权益（图上那条虚线）—— 用来算"这个账户从开头到现在赚了多少"。 */
+  baseline?: number;
+  asset?: string;
+}
+
+/**
+ * 涨幅的着色：涨绿、跌红、**持平灰**。
+ *
+ * 持平单独一档是有意的：`0.00` 既不是好消息也不是坏消息，涂成绿色会让
+ * 一条完全走平的曲线看起来像在盈利。
+ */
+function deltaTone(delta: number): string {
+  if (Math.abs(delta) < 5e-9) return 'text-ink-mid';
+  return delta > 0 ? 'text-up' : 'text-down';
+}
+
+/** `+$1.19（+5.7%）` —— 金额与百分比一起给，单给一个都要用户自己换算。 */
+function deltaText(delta: number, base: number | undefined, digits = 2): string {
+  const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
+  const money = `${sign}$${fmtNum(Math.abs(delta), digits)}`;
+  if (base === undefined || !Number.isFinite(base) || Math.abs(base) < 1e-9) return money;
+  const percent = (delta / base) * 100;
+  return `${money}（${percent > 0 ? '+' : percent < 0 ? '-' : ''}${fmtNum(Math.abs(percent), 2)}%）`;
 }
 
 /**
@@ -36,38 +72,72 @@ interface EquityTooltipProps {
  * A plain div styled with the app's tokens rather than recharts' default white
  * box: the default is unreadable on a dark terminal, and `contentStyle` can only
  * reach the wrapper — the rows inside stay dark-on-dark.
+ *
+ * ## 这个提示框要回答的问题
+ *
+ * 「**我在这一刻，相对整条时间线赚了多少**」。所以除了归属权益本身，还给出
+ * 两个涨幅（相对初始、相对本段起点）—— 图上有两条基准线，提示框就要能把
+ * 那条竖线和它们各自的关系说出来。
  */
-function EquityTooltip({ active, payload }: EquityTooltipProps) {
+function EquityTooltip({ active, payload, segmentStart, baseline, asset = 'USDT' }: EquityTooltipProps) {
   if (!active) return null;
   const point = payload?.[0]?.payload;
   if (!point) return null;
 
   const floating = point.unrealizedPnl ?? 0;
+  const sinceStart = segmentStart === undefined ? undefined : point.equity - segmentStart;
+  const sinceBaseline = baseline === undefined ? undefined : point.equity - baseline;
+
   return (
     <div
-      className="pointer-events-none min-w-[10rem] rounded-md border border-base-600 px-2.5 py-1.5 shadow-overlay"
+      className="pointer-events-none min-w-[13rem] rounded-md border border-base-600 px-2.5 py-1.5 shadow-overlay"
       style={{ backgroundColor: CHART_INK.surface }}
     >
+      <div className="num mb-1 text-xs text-ink-faint">
+        {new Date(point.t).toLocaleString('en-GB', { hour12: false })}
+      </div>
+
       <div className="flex items-baseline justify-between gap-3">
         {/* 「归属权益」而不是「权益」：这条曲线是该机器人自己的账，不是共享钱包。 */}
         <span className="text-xs text-ink-lo">归属权益</span>
-        <span className="num text-sm text-ink-hi">{fmtNum(point.equity, 2)} USDT</span>
+        <span className="num text-sm text-ink-hi">
+          {fmtNum(point.equity, 2)} {asset}
+        </span>
       </div>
-      {point.unrealizedPnl !== undefined && (
+
+      {/* 相对**初始权益**：这个账户从开头到现在赚了多少（图上那条虚线）。 */}
+      {sinceBaseline !== undefined && (
         <div className="flex items-baseline justify-between gap-3">
-          <span className="text-xs text-ink-lo">浮动盈亏</span>
+          <span className="text-xs text-ink-lo">相对初始</span>
+          <span className={`num text-sm ${deltaTone(sinceBaseline)}`}>
+            {deltaText(sinceBaseline, baseline)}
+          </span>
+        </div>
+      )}
+
+      {/* 相对**本段起点**：与图顶那行「本段变化」同一个口径。 */}
+      {sinceStart !== undefined && (
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-xs text-ink-lo">本段变化</span>
+          <span className={`num text-sm ${deltaTone(sinceStart)}`}>
+            {deltaText(sinceStart, segmentStart)}
+          </span>
+        </div>
+      )}
+
+      {point.unrealizedPnl !== undefined && (
+        <div className="mt-0.5 flex items-baseline justify-between gap-3 border-t border-base-750 pt-0.5">
+          <span className="text-xs text-ink-lo">其中浮动盈亏</span>
           {/* Sign always present: colour alone is not a signal every operator can read. */}
-          <span className={`num text-sm ${floating >= 0 ? 'text-up' : 'text-down'}`}>
+          <span className={`num text-xs ${deltaTone(floating)}`}>
             {floating >= 0 ? '+' : '-'}${fmtNum(Math.abs(floating), 2)}
           </span>
         </div>
       )}
-      <div className="mt-0.5 flex items-baseline justify-between gap-3 border-t border-base-750 pt-0.5">
+
+      <div className="flex items-baseline justify-between gap-3">
         <span className="text-xs text-ink-lo">持仓</span>
         <span className="num text-xs text-ink-mid">{fmtInt(point.openPositions ?? 0)}</span>
-      </div>
-      <div className="num text-xs text-ink-faint">
-        {new Date(point.t).toLocaleString('en-GB', { hour12: false })}
       </div>
     </div>
   );
@@ -199,7 +269,12 @@ export function DashboardEquityChart({
           tickCount={5}
         />
         <Tooltip
-          content={<EquityTooltip />}
+          /*
+           * ⚠️ 两个基准值必须**传进去**，否则提示框只能给出一个孤零零的绝对权益，
+           * 回答不了"我在这一刻是赚还是亏"。`first` 是这段窗口的起点（与图顶那行
+           * 「本段变化」同一个口径），`baseline` 是账户的初始权益（图上那条虚线）。
+           */
+          content={<EquityTooltip segmentStart={first} baseline={baseline} asset={unit} />}
           cursor={<EquityCursor />}
           shared={false}
           isAnimationActive={false}
