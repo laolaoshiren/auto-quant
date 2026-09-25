@@ -42,7 +42,7 @@ import {
   tradeCosts,
   type PnlCosts,
 } from './PnlBreakdown';
-import { fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, pnlColor, symbolTone } from '../lib/format';
+import { BALANCE_LABEL, fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, pnlColor, symbolTone } from '../lib/format';
 
 /* -------------------------------------------------------------------------- */
 /*  Row caps                                                                   */
@@ -185,6 +185,21 @@ function useTablePaging<T extends { id: number; traderId: number }>(
    * 界面上就是"日期显示错乱"（用户的原话）。
    */
   timeOf?: (row: T) => string,
+  /**
+   * 「这张表的 DOM 会被**原样重挂**」的信号：值一变，观察器就重新挂一次。
+   *
+   * ⚠️ **为什么必须有它**（订单表就是这么坏的）：`TraderTables` 里两处 `OrdersTable`
+   * 写在 JSX 的两个不同位置上（「当前委托」与「订单记录」各一个），`tab` 一变，
+   * React 把其中一个**卸载**、另一个**新挂**—— 而 `paging` 状态在容器里，所以这件事
+   * 对容器是无声的：`scrollerRef` / `sentinelRef` 悄悄指到了新节点上，可观察器 effect
+   * 的依赖（`hasMore` / `moreState` / `traderId` / `listMounted`）一个都没变，
+   * **effect 不会重跑** → 新哨兵没有任何观察者 → 切一次标签，"滚到底加载更早的记录"
+   * 就静默失效（而它看起来只是"下面没有了"）。
+   *
+   * 同一个道理的另一面正是这次加收起交互时要躲开的坑：**任何让 ref 与观察器分家的改动，
+   * 都会让哨兵要么没人看，要么被误判成可见、一次把整段历史拉进来**。
+   */
+  remountKey?: unknown,
 ): TablePaging<T> {
   /**
    * 服务端给过的、**已经显示出来的**行（按 id 去重；轮询的第一页与翻出来的每一页都并进来）。
@@ -389,8 +404,11 @@ function useTablePaging<T extends { id: number; traderId: number }>(
      * `listMounted` 必须在依赖里：`hasMore` 变真的那一次提交里，表格可能还没挂上去
      * （数据先到、渲染列表用的状态后到），`scrollerRef.current` 还是 null，
      * 观察器就永远不会被创建。`traderId` 同理：换机器人之后要重新观察新的滚动框。
+     *
+     * `remountKey` 解决的是第三种情形：节点**被换掉了**而上面几个依赖都没变
+     * （切「当前委托」/「订单记录」标签）。见该参数上的说明。
      */
-  }, [hasMore, moreState, traderId, listMounted]);
+  }, [hasMore, moreState, traderId, listMounted, remountKey]);
 
   /*
    * 把视口钉住：新行插到表格**顶部**时不把正在读的内容顶走。
@@ -897,11 +915,52 @@ export function isOpenOrder(order: OrderRecord): boolean {
   return !TERMINAL_STATUSES.has(order.status.toUpperCase());
 }
 
+/* -------------------------------------------------------------------------- */
+/*  保证金占用（本金）                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 成交行的保证金占用：**服务端字段优先，行数据兜底**。
+ *
+ * `TradeRecord.marginUsed` 是**可选**的（服务端算不出来时干脆不给这个字段，见
+ * `domain.ts` 里那段说明），所以留一条兜底：`|数量 × 开仓价| ÷ 杠杆` ——
+ * 三个输入都在这一行上。优先用服务端那一份，是为了**报价来源唯一**：成交价最终以
+ * 交易所回报为准，前端再拿 `entryPrice` 自己乘一遍，等于让同一个量有两个算法 ——
+ * 而"两个算法"迟早会在某一笔上分岔，那时没人说得清哪个对。
+ *
+ * 兜底**也不把"算不出来"伪造成一个数字**：杠杆 ≤ 0、价格 / 数量为 0 或不是有限数时
+ * 回 `null` → 表格显示 `—`。判据与服务端 `marginUsedOrUndefined()` 逐条对齐 ——
+ * 否则服务端说"算不出来"、前端兜底却给出一个数，`—` 的含义就被前端自己破坏了。
+ */
+function tradeMarginUsed(trade: TradeRecord): number | null {
+  if (typeof trade.marginUsed === 'number' && Number.isFinite(trade.marginUsed)) return trade.marginUsed;
+  const { quantity, entryPrice, leverage } = trade;
+  if (!Number.isFinite(leverage) || leverage <= 0) return null;
+  if (!Number.isFinite(entryPrice) || !Number.isFinite(quantity)) return null;
+  if (entryPrice === 0 || quantity === 0) return null;
+  return Math.abs(entryPrice * quantity) / Math.max(leverage, 1);
+}
+
+/**
+ * 「保证金占用」列的口径说明 —— 与 `PositionsTable` 那一列**同一条措辞**。
+ * 同一屏里同一个量只能有一种说法，否则操作员会怀疑它们是不是两个东西。
+ */
+const MARGIN_USED_TITLE = '该仓位占用的保证金（本金）= 名义价值 ÷ 杠杆。';
+
+/**
+ * 委托那一列的主语是"委托"而不是"仓位"，所以按 `OrderRecord.marginUsed` 的口径另起一句：
+ * 开仓单是这一笔自己的保证金，平仓 / 保护单取它所属持仓的。后半句说明 `—` 的含义 ——
+ * 这个数由服务端给出，**没有这个数不等于这个数是 0**。
+ */
+const ORDER_MARGIN_USED_TITLE =
+  '该委托涉及的保证金（本金）：开仓单是这一笔自己占用的，平仓 / 保护单取所属持仓占用的。— 表示服务端算不出这个数（例如被拒的单、没有对应本地持仓的单），不是 0。';
+
 export function OrdersTable({
   paging,
   onlyOpen,
   positionCount,
   onSelectSymbol,
+  collapsed = false,
 }: {
   /*
    * 行数据由**容器**（`TraderTables`）持有，不在这里自己拉。
@@ -921,6 +980,14 @@ export function OrdersTable({
   positionCount: number;
   /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
   onSelectSymbol?: (symbol: string) => void;
+  /**
+   * 收起态：**只把滚动框的 `max-height` 改小**，不动 DOM 结构。
+   *
+   * 为什么不卸载表格，见 `COLLAPSED_MAX_H` 那段说明 —— 这个 `ref` 同时是分页观察器的
+   * `root`，卸载重挂会让哨兵失去观察者（或者反过来被误判为可见）。
+   * 「当前委托」不传（它是行动面板，默认就该看得全）。
+   */
+  collapsed?: boolean;
 }) {
   const all: OrderRecord[] = paging.rows;
   const orders = onlyOpen ? all.filter(isOpenOrder) : all;
@@ -937,14 +1004,20 @@ export function OrdersTable({
   return (
     <div>
       {/*
-        12 columns: this is the table that most needs its own horizontal
+        13 columns: this is the table that most needs its own horizontal
         scroller rather than a page-wide one.
 
         `max-h-[34vh] overflow-y-auto` 同时是**分页观察器的 root**（`paging.scrollerRef`）：
         行高超过 60vh 之后是**这个盒子**在滚，不是页面。观察错了对象，
         哨兵会在"没滚到底"时就被判为可见，于是一口气把整段历史拉进来。
+
+        收起态换的是**这一个 class**（`COLLAPSED_MAX_H`），节点、`ref`、观察器都不换 ——
+        理由见 `COLLAPSED_MAX_H`。
       */}
-      <div ref={paging.scrollerRef} className="scroll-x max-h-[34vh] overflow-y-auto">
+      <div
+        ref={paging.scrollerRef}
+        className={`scroll-x ${collapsed ? COLLAPSED_MAX_H : EXPANDED_MAX_H} overflow-y-auto`}
+      >
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
@@ -954,6 +1027,11 @@ export function OrdersTable({
               <th className="th">方向</th>
               <th className="th">类型</th>
               <th className="th text-right">数量</th>
+              {/* 保证金紧跟在"数量"后面：它和数量、价格是同一组的三个量，
+                  隔着"触发价 / 已成交"去看会让人以为它属于后者。 */}
+              <th className="th text-right" title={ORDER_MARGIN_USED_TITLE}>
+                {BALANCE_LABEL.marginUsed}
+              </th>
               <th className="th text-right">价格</th>
               <th className="th text-right">触发价</th>
               <th className="th text-right">已成交</th>
@@ -1039,6 +1117,11 @@ export function OrdersTable({
                   </td>
                   <td className="td text-ink-lo">{orderTypeLabel(order.type)}</td>
                   <td className="td num text-right">{fmtQty(order.quantity)}</td>
+                  {/* `OrderRecord.marginUsed` 是**可选**字段：服务端算不出这一行对应的保证金时
+                      就不给（被拒的单、没有对应本地持仓的单…）。所以这一格必须显示 `—`
+                      而不是 `0` —— `fmtUsd(undefined)` 是 `—`、`fmtUsd(0)` 是 `$0.00`，
+                      这两件事在任何时候都不能混。 */}
+                  <td className="td num text-right">{fmtUsd(order.marginUsed, 2)}</td>
                   <td className="td num text-right">{order.price ? fmtPrice(order.price) : '市价'}</td>
                   <td className="td num text-right text-ink-lo">{order.stopPrice ? fmtPrice(order.stopPrice) : '—'}</td>
                   <td className="td num text-right">{fmtQty(order.filledQty)}</td>
@@ -1146,11 +1229,14 @@ export function TradesTable({
   traderId,
   refreshToken,
   onSelectSymbol,
+  collapsed = false,
 }: {
   traderId: number;
   refreshToken?: number;
   /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
   onSelectSymbol?: (symbol: string) => void;
+  /** 收起态：只把滚动框的 `max-height` 改小 —— 理由见 `COLLAPSED_MAX_H`。 */
+  collapsed?: boolean;
 }) {
   const live = useEvents((s) => s.byTrader[traderId]?.trades);
   /*
@@ -1230,8 +1316,12 @@ export function TradesTable({
           净额 {fmtUsdSigned(totals.net, 2)}
         </span>
       </div>
-      {/* 与订单表同一个滚动框：它既是横向滚动盒，也是分页观察器的 root（见 `useTablePaging`）。 */}
-      <div ref={paging.scrollerRef} className="scroll-x max-h-[34vh] overflow-y-auto">
+      {/* 与订单表同一个滚动框：它既是横向滚动盒，也是分页观察器的 root（见 `useTablePaging`）。
+          收起态只换这一个 class（`COLLAPSED_MAX_H`），节点与 `ref` 都不换。 */}
+      <div
+        ref={paging.scrollerRef}
+        className={`scroll-x ${collapsed ? COLLAPSED_MAX_H : EXPANDED_MAX_H} overflow-y-auto`}
+      >
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
@@ -1239,6 +1329,10 @@ export function TradesTable({
               {/* 方向与杠杆合成一列（`空 5x`）——杠杆只在方向旁边有意义，拆开白占宽度。 */}
               <th className="th">方向 / 杠杆</th>
               <th className="th text-right">数量</th>
+              {/* 保证金紧跟在"数量"后面：数量 × 开仓价 ÷ 杠杆 就是它，三个量本来就该挨着。 */}
+              <th className="th text-right" title={MARGIN_USED_TITLE}>
+                {BALANCE_LABEL.marginUsed}
+              </th>
               <th className="th text-right">开仓价</th>
               <th className="th text-right">平仓价</th>
               <th className="th text-right">盈亏（毛）</th>
@@ -1249,7 +1343,7 @@ export function TradesTable({
               {/*
                 持仓时长与平仓时间合成一列。
 
-                两列都是"这笔是什么时候的"，拆开会把表格撑到 13 列 ——
+                两列都是"这笔是什么时候的"，拆开会把表格撑到 14 列（含新增的保证金占用）——
                 在常见分辨率下最后一列（平仓时间）需要左右拖动才看得全，
                 而那正是操作者最常核对的一列。合成 `3 分 · 09-17 01:44`
                 读起来更顺，且直接省掉一整列宽度。
@@ -1261,6 +1355,12 @@ export function TradesTable({
             {trades.map((trade) => {
               const costs = tradeCosts(trade);
               const reconciled = trade.source === 'reconciled' || trade.closeReason === 'reconciled';
+              /*
+               * 这一笔占用的保证金。成交行**能自己算**（服务端字段缺失时用行数据兜底），
+               * 因为 `quantity` / `entryPrice` / `leverage` 都在这行上；服务端有值时优先用它
+               * —— 见 `tradeMarginUsed`。
+               */
+              const marginUsed = tradeMarginUsed(trade);
               return (
                 // `data-row-id` 给滚动锚点用（见 `useTablePaging` 的 `useLayoutEffect`）。
                 <tr
@@ -1279,6 +1379,7 @@ export function TradesTable({
                     <span className="num ml-1 text-ink-faint">{trade.leverage}x</span>
                   </td>
                   <td className="td num text-right">{fmtQty(trade.quantity)}</td>
+                  <td className="td num text-right">{fmtUsd(marginUsed, 2)}</td>
                   <td className="td num text-right">{fmtPrice(trade.entryPrice)}</td>
                   <td className="td num text-right">{fmtPrice(trade.exitPrice)}</td>
                   {/* The gross stays visible but muted: it is the input to the
@@ -1344,6 +1445,45 @@ export function TradesTable({
 
 export type TraderTabId = 'positions' | 'orders' | 'trades' | 'history';
 
+/* -------------------------------------------------------------------------- */
+/*  历史区高度（收起 / 展开）                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 展开态与收起态的滚动框高度。
+ *
+ * ## 为什么是 `max-height`，而不是把表格卸载掉（`Collapsible` / `display:none`）
+ *
+ * 这两张表的滚动框（`paging.scrollerRef`）**同时是分页观察器的 `root`**：
+ * 哨兵与它比较，判断"滚到底了没有"。收起时把表格卸载掉的代价是**两次**真实故障：
+ *
+ *  1. 展开回来时 `sentinelRef` 指向的是一个**新**节点，而观察器 effect 的依赖
+ *     （`hasMore` / `moreState` / `traderId` / `listMounted`）一个都没变 → effect 不重跑
+ *     → 新哨兵**没有观察者**，"滚到底加载更早的记录"静默失效（下面的 `remountKey`
+ *     就是为了这个坑的另一半：节点被换掉时必须让观察器重挂）；
+ *  2. `ref` 落在已卸载的节点上时，哨兵会被判成可见 → **一次把整段历史拉进来**，
+ *     也就是这次分页改造要修的那个 bug。
+ *
+ * 所以收起**只改这一个 class**：同一个 DOM 节点、同一个 `ref`、同一个 `root`，
+ * React 只更新 `class`，不重挂。
+ *
+ * ## 而且缩小是**安全**的方向
+ *
+ * 观察器的 `rootMargin` 是往下 240px。盒子变矮之后，哨兵离 `root` 底边只会**更远**
+ * （`contentBottom − scrollTop − clientHeight` 随 `clientHeight` 减小而增大），
+ * 所以"收起"在结构上**不可能**多取一页；反过来"展开"才会让哨兵更近一步 ——
+ * 那也只是把盒子填满（本来就有的行为）。
+ */
+const EXPANDED_MAX_H = 'max-h-[34vh]';
+
+/**
+ * 收起态：表头 + 3~4 行（16vh 在 900px 高的屏上约 144px）。
+ *
+ * 够认出"这是哪张表、最近几笔是什么"，又不会把上面刚看过的行情/决策流顶出屏幕。
+ * **一行都不隐藏**：行仍然全在框里，往下滚就能看到（哨兵照旧工作）。
+ */
+const COLLAPSED_MAX_H = 'max-h-[16vh]';
+
 export function TraderTables({
   traderId,
   tab,
@@ -1391,6 +1531,66 @@ export function TraderTables({
   // "these rows are stale".
   const token = (refreshToken ?? 0) + ordersRefreshToken;
 
+  /**
+   * 这两张表就是用户抱怨的那两个栏目：行数**没有天然上界**（每下一单、每平一仓就多一行），
+   * 点开就占掉半个屏幕。所以只有它们有收起态。
+   *
+   * 「当前委托」刻意**不**给这个开关：它是**行动面板**（对着它撤单、确认保护单），
+   * 行数受挂单数约束，默认就该看得全；给每个标签都塞一个高度开关只会让人多想一步。
+   */
+  const isHeavyTab = tab === 'trades' || tab === 'history';
+
+  /**
+   * 历史区是不是收起了。**一个开关同时管两张表**：它们是同一个问题的两面，
+   * 操作者点一次「收起」要的是"这两栏都别再占半屏" —— 切标签时仍然紧凑，
+   * 不必每换一个标签再点一次。
+   */
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+
+  /**
+   * 「表格区域」的两个 DOM 范围 —— 工具栏与表格区，一起算作"里面"。
+   *
+   * 分成两个 `ref`（而不是把两者包进一个新 div）是刻意的：这一层的 DOM 结构不动，
+   * 就不会有任何一行布局跟着变。工具栏**必须**算在里面，否则点「刷新」会被当成
+   * "点了外面"，表格在操作者正要继续看它的时候缩掉。
+   */
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const tableAreaRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 点表格区域之外 → 历史区**自动收起**（用户建议的那条，但**不切标签**）。
+   *
+   * 用户的原话是"点开以后占太多高度，得手动点回当前持仓才能缩回去"。照他的建议
+   * 跳回「当前持仓」会把操作者正在看的那一栏**换掉** —— 他只是想让它矮一点，
+   * 不是想离开。所以这里做的是**收起**：位置还在、数据还在，一键就能展开回来。
+   *
+   * ## 什么情况下**不**收起（宁可不动，也不要打断正当操作）
+   *
+   *  · **只认左键**（`button !== 0` 一律忽略）：右键是"刚打开上下文菜单"或"正在拖拽"，
+   *    中键是滚动 —— 都不是"我看完了"；
+   *  · 按下的位置在面板**里面**（工具栏、表头、行、行内按钮、滚动条）→ 完全不管：
+   *    滚动、点币种跳行情图、按「平仓」、从表格里往外拖选文字，**起点都在里面**。
+   *    这也是为什么监听 `pointerdown`（按下的那一刻）而不是 `click`：拖选文字的
+   *    起点在表格里、终点在外面，`click` 会把它当成"点了外面"；
+   *  · **任何对话框开着**→ 不管：平仓确认框是 Radix 的 portal，DOM 上本来就落在面板之外，
+   *    点遮罩关掉它不该顺手把表格也收了；
+   *  · 本来就已经收起 / 当前不是历史类标签 → 监听器根本不挂。
+   */
+  useEffect(() => {
+    if (!isHeavyTab || historyCollapsed) return;
+    const onPointerDown = (event: PointerEvent): void => {
+      if (event.button !== 0) return;
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (toolbarRef.current?.contains(target) || tableAreaRef.current?.contains(target)) return;
+      if (document.querySelector('[role="dialog"]')) return;
+      setHistoryCollapsed(true);
+    };
+    // 捕获阶段挂：内层的 `stopPropagation` 管不到它，判断只看"按在了谁身上"。
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [isHeavyTab, historyCollapsed]);
+
   /*
    * 委托数据**唯一的一份**，容器持有。
    *
@@ -1407,7 +1607,19 @@ export function TraderTables({
     (signal) => api.traderOrders(traderId, { limit: PAGE_LIMIT, signal }),
     { intervalMs: 15_000, deps: [traderId, token] },
   );
-  const ordersPaging = useTablePaging<OrderRecord>(traderId, api.traderOrders, ordersQuery, liveOrders);
+  const ordersPaging = useTablePaging<OrderRecord>(
+    traderId,
+    api.traderOrders,
+    ordersQuery,
+    liveOrders,
+    /*
+     * 没有时间排序（订单的 id 顺序就是创建顺序），所以第 5 个参数不传 —— 但第 6 个
+     * （重挂信号）必须传：这张表在「当前委托」与「订单记录」两处各挂一次，
+     * `tab` 一变 DOM 就被换掉而观察器 effect 不会自己重跑。见 `useTablePaging` 的 `remountKey`。
+     */
+    undefined,
+    tab,
+  );
   const openOrders = ordersPaging.rows.filter(isOpenOrder);
 
   const tabs: Array<{ id: TraderTabId; label: string; count?: number }> = [
@@ -1420,7 +1632,10 @@ export function TraderTables({
 
   return (
     <Panel padded={false} bodyClassName="p-0">
-      <div className="flex flex-wrap items-center gap-2 border-b border-base-800 px-3 py-2">
+      <div
+        ref={toolbarRef}
+        className="flex flex-wrap items-center gap-2 border-b border-base-800 px-3 py-2"
+      >
         {/* Real tab semantics, so the arrow keys and the tab order work. */}
         <div role="tablist" aria-label="机器人数据表" className="flex items-center gap-0.5">
           {tabs.map((item) => (
@@ -1455,12 +1670,37 @@ export function TraderTables({
           <Button size="sm" variant="ghost" onClick={() => setOrdersRefreshToken((n) => n + 1)} title="立即刷新表格数据">
             刷新
           </Button>
+          {/*
+            历史区的收起 / 展开。与 `TraderPage.tsx` 权益曲线那个按钮**同一套交互语言**：
+            `variant="ghost" size="sm"` + `aria-expanded` + 文案跟着状态走。
+
+            放在工具栏而不是各表内部：两张历史表是**同一个开关**，而"同一屏上的同一个概念
+            只能有一个实现"是这个文件自己的纪律（四张表各写一遍币种单元格吃过一次亏）。
+            收起后的手上动作也只有一步 —— 不用点回「当前持仓」。
+          */}
+          {isHeavyTab && (
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-expanded={!historyCollapsed}
+              title={
+                historyCollapsed
+                  ? '把历史表展开到完整高度（更早的记录仍然在表格里往下滚）'
+                  : '把历史表收成几行，给上面的行情 / 决策流让出高度'
+              }
+              onClick={() => setHistoryCollapsed((collapsed) => !collapsed)}
+            >
+              {historyCollapsed ? '展开全部' : '收起'}
+            </Button>
+          )}
         </div>
       </div>
 
       {/* 空表格不占位：`min-h` 曾经给这一区留了 220px，于是"暂无持仓"下面跟着
-          一片空白。高度交给内容，有行时才需要滚动。 */}
-      <div>
+          一片空白。高度交给内容，有行时才需要滚动。
+
+          这个 `ref` 只用于"点击区域之外"的判断（见上面那个 `useEffect`），不参与布局。 */}
+      <div ref={tableAreaRef}>
         {/*
           ⚠️ **`onSelectSymbol` 必须传** —— 漏过一次。
 
@@ -1484,9 +1724,22 @@ export function TraderTables({
         {tab === 'orders' && (
           <OrdersTable paging={ordersPaging} onlyOpen positionCount={positionCount} onSelectSymbol={onSelectSymbol} />
         )}
-        {tab === 'trades' && <TradesTable traderId={traderId} refreshToken={token} onSelectSymbol={onSelectSymbol} />}
+        {tab === 'trades' && (
+          <TradesTable
+            traderId={traderId}
+            refreshToken={token}
+            onSelectSymbol={onSelectSymbol}
+            collapsed={historyCollapsed}
+          />
+        )}
         {tab === 'history' && (
-          <OrdersTable paging={ordersPaging} onlyOpen={false} positionCount={positionCount} onSelectSymbol={onSelectSymbol} />
+          <OrdersTable
+            paging={ordersPaging}
+            onlyOpen={false}
+            positionCount={positionCount}
+            onSelectSymbol={onSelectSymbol}
+            collapsed={historyCollapsed}
+          />
         )}
       </div>
 

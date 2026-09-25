@@ -13,6 +13,7 @@ import {
   ORDER_PAGE_DEFAULT,
   ORDER_PAGE_MAX,
   orders as orderStore,
+  resolveOrderMarginUsed,
   strategies,
   traders,
   TRADE_PAGE_DEFAULT,
@@ -96,7 +97,7 @@ function seedTrader(name = 'table-pages'): number {
 }
 
 /** 写一张订单。内容与本文件无关，只要求"一单一行"。 */
-function placeOrder(forTrader = traderId, index = 1): number {
+function placeOrder(forTrader = traderId, index = 1, marginUsed?: number): number {
   return orderStore.insert({
     traderId: forTrader,
     exchangeOrderId: `EX-${forTrader}-${index}`,
@@ -112,6 +113,7 @@ function placeOrder(forTrader = traderId, index = 1): number {
     avgPrice: 100 + index,
     filledQty: 1 + index,
     fee: 0.01,
+    ...(marginUsed === undefined ? {} : { marginUsed }),
   });
 }
 
@@ -122,7 +124,7 @@ function placeOrder(forTrader = traderId, index = 1): number {
  * **幂等**的（它按 `closed_at` 与入场订单号判定"同一个真实回合"），
  * fixture 里给两行相同的时间与数量就会被判成一行，用例会在测到分页之前先失败。
  */
-function bookTrade(forTrader = traderId, index = 1, closedAt?: string): number {
+function bookTrade(forTrader = traderId, index = 1, closedAt?: string, leverage = 5): number {
   const iso = closedAt ?? new Date(Date.UTC(2025, 0, 1, 0, index)).toISOString();
   return tradeStore.insert({
     traderId: forTrader,
@@ -131,7 +133,7 @@ function bookTrade(forTrader = traderId, index = 1, closedAt?: string): number {
     quantity: 1 + index,
     entryPrice: 100 + index,
     exitPrice: 101 + index,
-    leverage: 5,
+    leverage,
     grossPnl: index,
     entryFee: 0.1,
     exitFee: 0.1,
@@ -461,4 +463,118 @@ test('成交：游标只作用于本机器人', () => {
 
   const next = tradeStore.list(traderId, 10, mine[1]);
   assert.deepEqual(idsOf(next), [mine[0]]);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  保证金占用                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 订单行上的「保证金占用」。
+ *
+ * ## 这一列为什么必须由服务端给
+ *
+ * 操作者在「当前委托 / 订单记录」里看的是**每一张单**，而 `orders` 表里既没有杠杆，
+ * 也没有对应持仓的入场价 —— 止损/止盈行上只有触发价。前端拿不到就只能写 `0`
+ * 或是硬编一个分母，两者都是编数。
+ *
+ * ## 这条用例钉的是两个方向
+ *
+ *  · 写得进去、读得回来（原样）；
+ *  · **没写过的是 `undefined`，不是 `0`**。界面据 `undefined` 显示 `—`，
+ *    而 `0` 会被读成"这笔没占保证金" —— 两句相反的结论不能共用一个值。
+ *    写 `0` 进来的那条路也归到"不知道"：这一列只有
+ *    `AutoTrader.recordOrder()` 会写，而它写 0 的唯一可能是**算不出来**
+ *    （`marginOf()` 在名义价值为 0 时回 0）。
+ */
+test('订单：marginUsed 原样回读；没写过、或写了 0 的都是 undefined 而不是 0', () => {
+  traderId = seedTrader();
+
+  const withMargin = placeOrder(traderId, 1, 12.5);
+  const without = placeOrder(traderId, 2);
+  const zeroed = placeOrder(traderId, 3, 0);
+
+  const byId = new Map(orderStore.list(traderId, 10).map((row) => [row.id, row]));
+
+  assert.equal(byId.get(withMargin)!.marginUsed, 12.5, '落库的保证金必须原样读回来');
+  assert.equal(
+    byId.get(without)!.marginUsed,
+    undefined,
+    '没写过保证金的行必须是 undefined（界面显示 —），不能是 0',
+  );
+  assert.equal(
+    byId.get(zeroed)!.marginUsed,
+    undefined,
+    '0 读作"这笔没占保证金"，所以它必须归到"不知道"那一类',
+  );
+});
+
+/**
+ * `resolveOrderMarginUsed()` —— 「这一行该写什么保证金」的唯一那份判断。
+ *
+ * 这是 `AutoTrader.recordOrder()` 调用的纯函数，所以**不需要起交易循环**就能把
+ * 三条规则钉住（AGENTS §5.4：能被测的逻辑做成纯函数）：
+ *
+ *   ① 开仓 / 加仓：用这一笔自己的值；
+ *   ② 平仓 / 保护单：取它那张持仓的保证金（`positions.margin_used`，权威值）；
+ *   ③ 拿不到 → `null`（界面 `—`），而不是 0。
+ *
+ * 还有一条**防的是编数**：开仓单**不许**回落到持仓行。那一刻它要建的持仓还不存在，
+ * 若同标的上恰好还挂着一个别的持仓（重复开仓的守卫失效、或对账留下的行），
+ * 回落就会把**别人的仓位**压的本金记到这一行上。
+ */
+test('订单：保证金取值的三条规则（含"开仓单不许回落到别人的持仓"）', () => {
+  // ① 开仓单：用这一笔自己的值。
+  assert.equal(
+    resolveOrderMarginUsed({ purpose: 'entry', override: 40.4, positionMargin: 999 }),
+    40.4,
+    '开仓单必须用这一笔自己的保证金，而不是那个不相关的持仓行',
+  );
+  // ② 平仓 / 保护单：取持仓行的权威值。
+  for (const purpose of ['exit', 'stop_loss', 'take_profit', 'adjustment'] as const) {
+    assert.equal(
+      resolveOrderMarginUsed({ purpose, positionMargin: 123.45 }),
+      123.45,
+      `${purpose} 单应当取它那张持仓的 margin_used`,
+    );
+  }
+  // ③ 拿不到就是 null；0 也归到"不知道"（`marginOf()` 在名义价值为 0 时会回 0）。
+  assert.equal(resolveOrderMarginUsed({ purpose: 'exit' }), null);
+  assert.equal(resolveOrderMarginUsed({ purpose: 'exit', positionMargin: null }), null);
+  assert.equal(resolveOrderMarginUsed({ purpose: 'exit', positionMargin: 0 }), null);
+  assert.equal(resolveOrderMarginUsed({ purpose: 'entry' }), null, '被拒的开仓单什么都没占用');
+  assert.equal(resolveOrderMarginUsed({ purpose: 'entry', override: 0 }), null);
+  assert.equal(resolveOrderMarginUsed({ purpose: 'entry', override: Number.NaN }), null);
+  // ★ 开仓单**不回落**：这是这条规则里唯一会"编出别人的数"的分支。
+  assert.equal(
+    resolveOrderMarginUsed({ purpose: 'entry', override: undefined, positionMargin: 999 }),
+    null,
+    '开仓单不许继承同标的另一个持仓的保证金 —— 那是别人的本金',
+  );
+});
+
+/**
+ * 成交行上的「保证金占用」是**派生**的：`|entryPrice × quantity| ÷ leverage`。
+ *
+ * 它必须与建仓那一刻写进 `positions.margin_used`、以及 `pnlPercent` 的分母是
+ * 同一个数（三处共用 `marginOf()`）—— 否则"这笔占了多少本金"会随读它的地方而变。
+ *
+ * 后半段钉的是"算不出来时不是 0"：杠杆为 0 的行走 `marginUsedOrUndefined()` 回
+ * `undefined`。若有人图省事直接用 `marginOf()`，它内部的 `Math.max(leverage, 1)`
+ * 会把一笔 5x 的仓位按 1x 算 —— **保证金直接放大 5 倍**，而界面上看不出这是个假数。
+ */
+test('成交：marginUsed = |qty × entry| ÷ leverage；杠杆缺失时是 undefined 而不是 0', () => {
+  traderId = seedTrader();
+
+  const normal = bookTrade(traderId, 1); // qty 2 × entry 101 ÷ 5x
+  const noLeverage = bookTrade(traderId, 2, undefined, 0);
+
+  const byId = new Map(tradeStore.list(traderId, 10).map((row) => [row.id, row]));
+
+  assert.equal(byId.get(normal)!.marginUsed, (2 * 101) / 5, '保证金必须是 名义价值 ÷ 杠杆');
+  assert.equal(
+    byId.get(noLeverage)!.marginUsed,
+    undefined,
+    '杠杆缺失时必须回 undefined —— 凭空按 1x 算出来的金额是一个假数',
+  );
 });

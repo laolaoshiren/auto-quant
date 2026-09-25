@@ -224,27 +224,16 @@ export function TraderAccountStrip({
         ) : (
           <>
             {/*
-              有上次读数就先把数字摆出来 —— 见 `lastKnown` 的说明。
-              两个数字能不能当面对照，决定了操作员会不会以为其中一个算错了。
+              ⚠️ 这里原来还报一遍钱包与可用 —— 现在那两个数在上面的「账户余额」卡里
+              （用户的原话是「信息不要重复、多余」）。**这一行只剩它独有的两样**：
+              读数有多旧、以及账户上不属于本机器人的交易。
             */}
             {lastKnown ? (
               <>
                 <Badge tone="muted">上次读数</Badge>
                 <span className="text-ink-faint">{timeAgo(lastKnown.at)}</span>
-                <span>
-                  {BALANCE_LABEL.wallet}{" "}
-                  <span className="text-sm font-semibold text-ink-hi">
-                    {fmtAsset(lastKnown.account.walletBalance, unit)}
-                  </span>
-                </span>
-                <span>
-                  {BALANCE_LABEL.available}{" "}
-                  <span className="text-ink-hi">
-                    {fmtNum(lastKnown.account.availableBalance)}
-                  </span>
-                </span>
                 <span className="text-ink-faint">
-                  （机器人运行时记录的交易所真实余额，含同一账户下其它机器人的交易）
+                  （机器人运行时记录的交易所真实余额，完整读数见上方指标卡）
                 </span>
                 {/*
                   ⚠️ **两个分支都要有这一句。**
@@ -271,38 +260,48 @@ export function TraderAccountStrip({
   return (
     <div className="num flex flex-wrap items-baseline gap-x-4 gap-y-1 border-y border-base-800 bg-base-900/40 px-3 py-2 text-xs text-ink-lo">
       {heading}
-      {/* The settled balance is the number an operator checks most, so it gets
-          the size and weight rather than sitting in the same small type as the
-          rest of the strip. */}
-      <span>
-        {BALANCE_LABEL.wallet}{' '}
-        <span className="text-sm font-semibold text-ink-hi">{fmtAsset(account.walletBalance, unit)}</span>
-      </span>
-      <span>
-        {BALANCE_LABEL.available} <span className="text-ink-hi">{fmtNum(account.availableBalance)}</span>
-      </span>
-      {/* 未实现 is signed through `fmtSigned`, so the +/- is always rendered —
-          the colour is a second signal, never the only one. */}
-      <span>
-        {BALANCE_LABEL.unrealized}{' '}
-        <span className={pnlColor(account.unrealizedPnl)}>{fmtSigned(account.unrealizedPnl)}</span>
-      </span>
-      <span>
-        {BALANCE_LABEL.marginUsed} <span className="text-ink-hi">{fmtNum(account.marginUsed)}</span>
-      </span>
+      {/*
+        ⚠️ **这一行原来的五个数字，全部搬去了上面的指标卡。**
+
+        用户这一轮的原话是「页面上信息不要重复、多余、杂乱」，而他点名要一眼看到的
+        五项里有两项（**账户余额 / 保证金占用**）此前**只住在这一行里**、以 12px 的
+        字号出现 —— 主次是颠倒的。
+
+        于是做了一次搬家（`TraderPage.tsx` 的 `metricCards`）：
+
+          账户权益 → 「账户余额」卡的主数字
+          钱包余额 → 那张卡的副行
+          可用     → 那张卡的副行
+          未实现   → 「保证金占用」卡的副行
+          保证金占用 → 「保证金占用」卡的主数字
+
+        搬完之后这一行**不能再报一遍** —— 那正是用户说的"重复"。
+        这里只留**别处没有的东西**：
+
+          · **挂单占用** —— 它不属于任何一张卡（挂单不是持仓），却解释着"保证金
+            为什么比持仓占的多"，删掉会让那个差额变得无法解释；
+          · **读数时间** —— 快照兜底时最要紧的是"这个数有多旧"；
+          · **foreignNote** —— 账户上不属于本机器人的交易（一句安静的事实）；
+          · **刷新按钮** —— 唯一能手动重读账户的入口。
+
+        `title` 保留完整口径，需要时鼠标放上去仍然查得到。
+      */}
       <span
         className="text-ink-faint"
-        title="交易所账户（共享钱包）的权益 = 钱包 + 未实现盈亏。同一账户下的所有机器人共用这一个数，所以它不等于本机器人的归属权益。"
+        title={
+          `交易所账户（共享钱包）的权益 = 钱包 + 未实现盈亏。` +
+          `同一账户下的所有机器人共用这一个数，所以它不等于本机器人的归属权益。` +
+          `完整读数（钱包 / 可用 / 保证金 / 权益）见上方指标卡。`
+        }
       >
-        {BALANCE_LABEL.equity} <span className="text-ink-mid">{fmtAsset(account.equity, unit)}</span>
+        账户权益（共享钱包）
       </span>
-
-      {foreignNote}
       {openOrderMargin > 0 && (
-        <span className="text-ink-faint">
-          {BALANCE_LABEL.openOrderMargin} <span className="text-ink-mid">{fmtNum(openOrderMargin)}</span>
+        <span>
+          {BALANCE_LABEL.openOrderMargin} <span className="text-ink-hi">{fmtNum(openOrderMargin)}</span>
         </span>
       )}
+      {foreignNote}
       {onRefresh && (
         /* Label plus icon: a bare `⟳` glyph is unreadable to a screen reader and
            ambiguous to anyone who has not used this app before. */

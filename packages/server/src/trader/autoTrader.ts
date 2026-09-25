@@ -65,9 +65,11 @@ import {
   aiModels,
   decisions as decisionStore,
   equity as equityStore,
+  marginOf,
   orders as orderStore,
   ownUnrealizedPnlOf,
   positions as positionStore,
+  resolveOrderMarginUsed,
   settings,
   tradeEvents,
   traders as traderStore,
@@ -4978,6 +4980,17 @@ reduceQuantity: null,
         return this.executeOpen({ ...decision, entryType: 'market', limitPrice: null }, snapshot);
       }
 
+      /*
+       * 保证金在这里算一次，两个消费者用它：这一行订单（订单记录里那一列）与
+       * 下面那行 `pending` 持仓。两处各写一遍算式就是同一个金额有了两份公式
+       * —— 而它们会分叉，分叉之后"这一单占多少本金"会随看它的地方而变。
+       *
+       * 用**委托价 × 委托数量**：单还没成交，交易所那一刻锁的就是这个意向名义价值；
+       * 成交之后 `settlePendingEntries()` 会用真实成交价与成交量重算持仓那一份
+       * （订单行保留下单那一刻的意向值 —— 它说的是"这张单当初打算占多少"）。
+       */
+      const margin = marginOf(limitPrice, quantity, decision.leverage);
+
       /* 记进订单表（`NEW`，`limitPrice` 落进 `price` 而不是 `avgPrice`）。 */
       this.recordOrder({
         traderId,
@@ -4994,6 +5007,7 @@ reduceQuantity: null,
         avgPrice: 0,
         filledQty: 0,
         fee: 0,
+        marginUsed: margin,
       });
 
       /*
@@ -5008,7 +5022,7 @@ reduceQuantity: null,
         entryPrice: limitPrice,
         leverage: decision.leverage,
         liquidationPrice: null,
-        marginUsed: (quantity * limitPrice) / Math.max(decision.leverage, 1),
+        marginUsed: margin,
         stopLoss: decision.stopLoss,
         takeProfit: decision.takeProfit,
         stopOrderId: null,
@@ -5531,6 +5545,16 @@ reduceQuantity: null,
        */
       const entryFee = await this.entryFeeFor(symbol, clientOrderId);
 
+      /*
+       * 保证金在这一个地方算，两个消费者用它：这一行订单（订单记录里那一列）与
+       * 下面 `openPosition.marginUsed`。两边各写一遍就是同一个金额有了两份公式。
+       *
+       * 用**成交价 × 成交数量**（不是请求里的意向数量）：账本只记交易所确认的事实，
+       * 而 `filledQty > 0` 上面刚刚把没有确认成交的情形挡掉了。
+       */
+      const notional = filledQty * entryPrice;
+      const margin = marginOf(entryPrice, filledQty, decision.leverage);
+
       this.recordOrder({
         traderId,
         exchangeOrderId: filled.id,
@@ -5546,11 +5570,9 @@ reduceQuantity: null,
         avgPrice: entryPrice,
         filledQty,
         fee: entryFee,
+        marginUsed: margin,
         raw: filled.raw,
       });
-
-      const notional = filledQty * entryPrice;
-      const margin = notional / Math.max(decision.leverage, 1);
 
       /*
        * Record the position **before** protection is attempted.
@@ -6009,6 +6031,12 @@ reduceQuantity: null,
      * 与开仓同一处口径：手续费要另外查成交明细（下单响应里没有）。
      */
     const addFee = await this.entryFeeFor(decision.symbol, clientOrderId);
+    /*
+     * 这一笔加仓**自己**占用的保证金（与开仓同一口径：成交价 × 成交数量 ÷ 杠杆，
+     * 用 `local.leverage` —— 加仓不改杠杆）。不是加完之后整个持仓的保证金：
+     * 订单记录里每一行说的是**这一张单**，几张单各自的数加起来才是持仓那一行。
+     */
+    const addMargin = marginOf(fillPrice, filledAddQty, local.leverage);
     this.recordOrder({
       traderId,
       exchangeOrderId: filledId,
@@ -6024,6 +6052,7 @@ reduceQuantity: null,
       avgPrice: fillPrice,
       filledQty: filledAddQty,
       fee: addFee,
+      marginUsed: addMargin,
     });
 
     /* ③ 更新本地持仓：数量与**加权均价**一起改。 */
@@ -7091,7 +7120,40 @@ reduceQuantity: null,
     fee?: number;
     error?: string | null;
     raw?: unknown;
+    /**
+     * 这张单**对应占用的保证金**（USDT 本金），订单记录里那一列。
+     *
+     * 只有**开仓 / 加仓**要传：那是这一笔自己的 `|价 × 量| ÷ 杠杆`，也就是即将
+     * 写进 `positions.margin_used` 的同一个数（用 `marginOf()`，不要在这里另写算式）。
+     * 平仓 / 止损 / 止盈**不要传** —— 那些行上没有成交价，重算只会算出第二个口径；
+     * 它们由 `recordOrder` 从持仓行取权威值（见下面的说明）。
+     *
+     * ⚠️ **拿不到就别传，绝不传 0**：0 在界面上是"这笔没占保证金"，
+     * 与"我们不知道"是两句相反的话。
+     */
+    marginUsed?: number;
   }): void {
+    /*
+     * 保证金的那一个数**只在这里定**，insert 与下面的事件用同一个值 ——
+     * 否则"刷新后是 123、实时推送补进来的那一行却是空的"这种不一致会出现。
+     *
+     * 判断本身（谁能当保证金、开仓单为什么**不许**回落到持仓行、0 为什么等于
+     * "不知道"）在 `resolveOrderMarginUsed()` 里，那是纯函数、有单元测试；
+     * 这里只负责把**它需要的两样输入**取来：调用方给的值，与该标的当前持仓行的
+     * `margin_used`（`positions.margin_used` 是保证金的单一事实源，不改、不重算）。
+     *
+     * 开仓单不查持仓：那一刻它要建的持仓还不存在，查到的只会是**别人的仓位**。
+     */
+    const position =
+      input.purpose === 'entry'
+        ? undefined
+        : positionStore.getOpenBySymbol(input.traderId, input.symbol);
+    const marginUsed = resolveOrderMarginUsed({
+      purpose: input.purpose,
+      override: input.marginUsed,
+      positionMargin: position?.margin_used,
+    });
+
     const id = orderStore.insert({
       traderId: input.traderId,
       exchangeOrderId: input.exchangeOrderId,
@@ -7107,6 +7169,7 @@ reduceQuantity: null,
       avgPrice: input.avgPrice,
       filledQty: input.filledQty,
       fee: input.fee ?? 0,
+      marginUsed,
       ...(input.error !== undefined ? { error: input.error } : {}),
       ...(input.raw !== undefined ? { rawResponse: input.raw } : {}),
     });
@@ -7131,6 +7194,8 @@ reduceQuantity: null,
         filledQty: input.filledQty,
         fee: input.fee ?? 0,
         error: input.error ?? null,
+        /* 与刚落库的那一行是同一个数（`null` → 事件里用 `undefined`）。 */
+        ...(marginUsed === null ? {} : { marginUsed }),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       },
