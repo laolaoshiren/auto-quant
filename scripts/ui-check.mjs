@@ -43,7 +43,6 @@ if (!BASE || !CHROME) {
 const ROUTES = [
   ['/', '总览'],
   ['/traders', '机器人'],
-  ['/traders/8', '机器人详情'],
   ['/strategy', '策略工作室'],
   ['/market', '行情'],
   ['/data', '数据与日志'],
@@ -52,6 +51,28 @@ const ROUTES = [
   ['/account', '操作员账户'],
   ['/faq', '帮助'],
 ];
+
+/*
+ * 机器人详情页的 id **必须动态取**，不能写死。
+ *
+ * 这里原来是 `['/traders/8', '机器人详情']` —— 而机器人是会被删掉的：实测线上
+ * 只剩 `#9`，`#8` 早已删除，于是这一页每次都报「控制台错误 2 条 + 4xx 2 条」，
+ * **看起来像改版把页面改坏了**，实际只是脚本拿了一个不存在的 id 去撞。
+ *
+ * 一个会误报的检查工具比没有检查更糟：它训练人忽略它的红叉。
+ */
+let traderRoute = null;
+try {
+  const res = await fetch(`${BASE}/api/traders`, {
+    headers: TOKEN ? { authorization: `Bearer ${TOKEN}` } : {},
+  });
+  const rows = await res.json();
+  if (Array.isArray(rows) && rows[0]?.id) traderRoute = [`/traders/${rows[0].id}`, '机器人详情'];
+} catch {
+  /* 取不到就**不检查这一页** —— 拿一个猜的 id 去撞只会制造假故障。 */
+  console.error('⚠️ 读不到机器人列表，跳过「机器人详情」这一页');
+}
+if (traderRoute) ROUTES.splice(2, 0, traderRoute);
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 const ctx = await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true });
