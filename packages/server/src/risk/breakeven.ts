@@ -37,6 +37,33 @@ export interface BreakevenInput {
   unrealizedPnlPercent: number;
   /** 触发阈值（百分比）。**0 表示关闭这条规则**（与 `maxDailyLossPercent` 等字段同一约定）。 */
   triggerPercent: number;
+  /**
+   * **追踪距离**（百分比，按价格算）。达到阈值后，止损跟到"当前价往回退这么多"。
+   *
+   * ## 为什么需要它（实测的代价）
+   *
+   * 原来这里只会把止损移到**开仓价**（保本）。那保护的是"不亏"，**锁不住任何利润** ——
+   * 而实测 12 笔"保本离场"的账面是这样的：
+   *
+   *     峰值浮盈合计 52.3%  →  最终落袋 38.2%     回吐 14.1 个百分点（27%）
+   *     #113 NEARUSDT  峰值 5.81% → 最终 2.40%（回吐 3.41%）
+   *     #132 XRPUSDT   峰值 6.44% → 最终 3.63%（回吐 2.81%）
+   *
+   * 而同期**唯一一笔真正止盈的单赚了 +0.7204**，比 21 笔止损加起来（+0.2087）还多 ——
+   * 用户的原话是「**这不是白玩吗**」。
+   *
+   * 根因：止损停在成本价，**峰值 6% 的仓位中间那 6% 全是敞口**。
+   *
+   * ## 怎么实现的（不需要额外记峰值）
+   *
+   * 每轮算 `价格 × (1 ∓ 距离)`，再与**现有止损取更有利的那个**：
+   * 价格涨 → 这个候选值跟着涨 → 止损上移；价格回落 → 候选值回落，
+   * 但 `max` 让它**停在已经达到的最有利位置**。**棘轮是取 max 的自然结果**，
+   * 所以不必存峰值价，也就不存在"峰值记丢了"这一类状态错误。
+   *
+   * `0` 表示不追踪 —— 即**退回原来的纯保本行为**（移到开仓价），保持向后兼容。
+   */
+  trailPercent: number;
 }
 
 export interface BreakevenVerdict {
@@ -98,7 +125,18 @@ export function shouldMoveStopToBreakeven(input: BreakevenInput): BreakevenVerdi
   const stillAtRisk =
     input.side === 'long' ? input.currentStop < input.entryPrice : input.currentStop > input.entryPrice;
 
-  if (!stillAtRisk) {
+  /*
+   * 追踪距离的合法性：必须是正数且小于 100%。
+   *
+   * `>= 100` 会让候选止损落到价格另一侧（做多时退到 0 以下），
+   * 那是比"不追踪"危险得多的一种错 —— 所以这里回退到纯保本，而不是照单全收。
+   * `trailPercent = 0`（或 NaN）是**有意保留的旧行为**：只保本、不追踪。
+   */
+  const trail = Number.isFinite(input.trailPercent) && input.trailPercent > 0 && input.trailPercent < 100
+    ? input.trailPercent
+    : 0;
+
+  if (!stillAtRisk && trail === 0) {
     return {
       move: false,
       newStop: null,
@@ -106,11 +144,56 @@ export function shouldMoveStopToBreakeven(input: BreakevenInput): BreakevenVerdi
     };
   }
 
+  /*
+   * 候选止损：
+   *   · `breakeven` —— 开仓价，**永远是下限**（这条规则至少保证"不再亏"）；
+   *   · `trailed`   —— 价格往回退 `trail%` 的位置（只在开启追踪且距离合法时存在）。
+   *
+   * 两者取**更有利**的那个：做多取大的，做空取小的。
+   */
+  const breakeven = input.entryPrice;
+  const trailed =
+    trail > 0
+      ? input.side === 'long'
+        ? input.markPrice * (1 - trail / 100)
+        : input.markPrice * (1 + trail / 100)
+      : null;
+
+  const candidate =
+    trailed === null
+      ? breakeven
+      : input.side === 'long'
+        ? Math.max(breakeven, trailed)
+        : Math.min(breakeven, trailed);
+
+  /*
+   * 与现有止损取更有利的一个 —— **这一句就是棘轮**。
+   *
+   * 价格回落时 `candidate` 会跟着回落，但 `currentStop` 停在历史最有利的位置，
+   * 于是 `move` 变成 false：**止损不会往回退**。
+   */
+  const improved =
+    input.side === 'long' ? candidate > input.currentStop : candidate < input.currentStop;
+
+  if (!improved) {
+    return {
+      move: false,
+      newStop: null,
+      reason:
+        `浮盈 ${input.unrealizedPnlPercent.toFixed(2)}% 已达保本阈值 ${input.triggerPercent}%，` +
+        `但候选止损 ${candidate.toFixed(6)} 不比现有止损 ${input.currentStop} 更有利 —— ` +
+        '止损只往有利方向移（价格回落时不回退）。',
+    };
+  }
+
   return {
     move: true,
-    newStop: input.entryPrice,
+    newStop: candidate,
     reason:
       `浮盈 ${input.unrealizedPnlPercent.toFixed(2)}% 已达保本阈值 ${input.triggerPercent}%，` +
-      `把止损从 ${input.currentStop} 移到开仓价 ${input.entryPrice}（只往有利方向移，不再退回）。`,
+      (trail > 0
+        ? `按价格回撤 ${trail}% 追踪，把止损从 ${input.currentStop} 移到 ${candidate.toFixed(6)}`
+        : `把止损从 ${input.currentStop} 移到开仓价 ${breakeven}`) +
+      '（只往有利方向移，不再退回）。',
   };
 }

@@ -279,6 +279,8 @@ class FakeBroker {
 
   /** 用例设成 true 时，撤单请求会失败（模拟"撤的时候交易所说它已经没了"）。 */
   failCancel = false;
+  /** 让 `cancelAllOrders` 抛错 —— 见那条"撤不掉就不挂新的"用例。 */
+  failCancelAll = false;
 
   async getOrder(symbol: string, orderId: string | number): Promise<BinanceOrderResponse | null> {
     const order = this.restingOrders.get(Number(orderId));
@@ -526,6 +528,17 @@ class FakeBroker {
   }
 
   async cancelAllOrders(symbol: string) {
+    /*
+     * 用例可以设成 true，模拟"撤旧单这一步失败"。
+     *
+     * 这个开关是给一条**真实的 BUG** 加的（2026-09-22 ADAUSDT）：
+     * `executeAdjust` 撤单失败后**仍然去挂新单**，于是必然吃 `-4130`、
+     * `hasLiveStop` 判否、按 §2.6 把仓位平掉 —— 而那时旧止损其实还挂着。
+     * 见下面那条"撤不掉就不挂新的"的用例。
+     */
+    if (this.failCancelAll) {
+      throw new Error(symbol + ' 撤单被拒（模拟交易所侧失败）');
+    }
     this.cancelledSymbols.push(symbol);
     /*
      * 也进 `opLog` —— 那样才能断言**撤单与挂单的相对顺序**。
@@ -4691,6 +4704,68 @@ test('★ 开仓之后把真实成交价交回给模型，让它按实际价位�
     positionStore.open(traderId).filter((p) => p.symbol === 'ETHUSDT').length,
     0,
     '★ 也不许在本地凭空多出一个 ETHUSDT 持仓',
+  );
+});
+
+test('★ 调整保护位时撤旧单失败：必须放弃调整，不许把有保护的仓位平掉', async () => {
+  /*
+   * **这条用例对应一次真实的平仓**（2026-09-22 22:17:13 ADAUSDT）。
+   *
+   * `executeAdjust` 原来写的是：
+   *
+   *     await this.broker.cancelAllOrders(symbol).catch(() => { 继续挂新单 });
+   *
+   * 撤旧失败时**旧单还在交易所上**，此时去挂新单必然吃币安 `-4130`
+   * （同一仓位不允许两张条件单）→ `placeProtection` 返回 null →
+   * 下面的 `hasLiveStop` 判否 → 按 §2.6「不留无保护敞口」把仓位平掉。
+   *
+   * 而那一刻**旧的止损单其实还好好挂着** —— 平掉的是一个**有保护**的仓位，
+   * 只因为模型想优化一下止盈价位。实测：开仓仅 0.5 分钟、净 -0.0166 收场；
+   * 同一标的此前还被迫在 +1.197% 平过一次，只吃到最大浮盈 3.735% 的一小部分。
+   *
+   * 同一个文件里的 `applyBreakevenGuard` 早就把这条写对了 ——
+   * 「**撤不掉就不要挂新的**：那必然吃 `-4130`，只会多一条无用的拒绝记录」。
+   * 两处要求同一条顺序，`executeAdjust` 漏了。这条用例就是那条顺序的哨兵。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const opened = positionStore.getOpenBySymbol(traderId, SYMBOL);
+  assert.ok(opened, '前提：开出了一个仓位');
+  assert.ok(opened.stop_loss, '前提：开仓时挂上了止损 —— 否则"有保护"这个前提不成立');
+
+  /* 撤旧单这一步失败：旧保护单**仍在**交易所上。 */
+  broker.failCancelAll = true;
+  const placedBefore = broker.placed.length;
+
+  const newStop = (broker.markPrice * 0.995).toFixed(2);
+  await buildTrader(
+    broker,
+    `<decision>[{"symbol":"${SYMBOL}","action":"adjust_protection","stop_loss":${newStop},"reasoning":"把止损上移一点"}]</decision>`,
+  ).runOnce();
+
+  /* ① 仓位必须还在。旧保护单没撤掉，它**不是**无保护敞口。 */
+  assert.ok(
+    positionStore.getOpenBySymbol(traderId, SYMBOL),
+    '★ 撤旧单失败时绝不能平仓 —— 旧保护单仍在，仓位不是"无保护的敞口"',
+  );
+
+  /* ② 不许挂新单：旧单还在，挂上去必然 -4130，只会多一条无用的拒绝记录。 */
+  const newProtection = broker.placed
+    .slice(placedBefore)
+    .filter((p) => p.type === 'STOP_MARKET' || p.type === 'TAKE_PROFIT_MARKET');
+  assert.equal(
+    newProtection.length,
+    0,
+    `★ 撤不掉就不许挂新的（挂了 ${newProtection.length} 张）—— 旧单还在，必然 -4130`,
+  );
+
+  /* ③ 本地止损**不能被改成新的** —— 交易所上那张还是旧价，本地记新价会误导下一轮判断。 */
+  const after = positionStore.getOpenBySymbol(traderId, SYMBOL);
+  assert.equal(
+    after?.stop_loss,
+    opened.stop_loss,
+    '★ 放弃调整就必须把本地记录也留在旧值 —— 否则下一轮会拿一个交易所上不存在的价位去判断',
   );
 });
 

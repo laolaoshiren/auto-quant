@@ -4612,6 +4612,13 @@ reduceQuantity: null,
         markPrice: view.markPrice,
         unrealizedPnlPercent: view.unrealizedPnlPercent,
         triggerPercent: threshold,
+        /*
+         * 追踪距离。`0` = 退回旧的纯保本行为（止损停在开仓价）。
+         *
+         * ⚠️ 它必须与 `breakevenTriggerPercent` 一起读 —— 只配后者不配前者，
+         * 就是那条被实测证明会回吐 27% 浮盈的旧行为。
+         */
+        trailPercent: this.activeConfig.riskControl.trailingStopPercent,
       });
 
       if (!verdict.move || verdict.newStop === null) continue;
@@ -6567,13 +6574,45 @@ reduceQuantity: null,
       };
     }
 
-    /* ① 先撤旧单 —— 这一条不能颠倒。 */
-    await this.deps.broker.cancelAllOrders(decision.symbol).catch((error) => {
+    /*
+     * ① 先撤旧单 —— 这一条不能颠倒。
+     *
+     * 🔴 **这里曾经写的是 `.catch(() => 继续挂新单)`，那是一个会平掉盈利仓位的 BUG。**
+     *
+     * 撤旧失败时旧单还在，此时去挂新单**必然吃 `-4130`**（币安不允许同一仓位
+     * 存在两张条件单）→ `placeProtection` 返回 null → 下面的 `hasLiveStop` 判否
+     * → 按 §2.6「无保护敞口立刻平仓」把仓位平掉。
+     *
+     * **实测代价**（2026-09-22 22:17:13 ADAUSDT）：模型只是想调止盈
+     * （`0.259 → 0.271`），日志里先是一次 `algo STOP_MARKET`（挂新单），
+     * 紧接着 ERROR「调整保护位后没有有效的止损」→ 市价平掉，净 `-0.0166`；
+     * 而开仓才 0.5 分钟，**原来的止损单其实还好好挂在交易所上**。
+     *
+     * 同一个文件里的 `applyBreakevenGuard` 早就把这条写对了 ——
+     * 「**撤不掉就不要挂新的**：那必然吃 `-4130`，只会多一条无用的拒绝记录」。
+     * 两处要求的是同一条顺序，这里漏了。
+     *
+     * **为什么"放弃调整"是对的**：旧单撤不掉 = 仓位**仍然有保护**，
+     * 这是比"撤了却挂不上"好得多的状态。调整保护位只是优化，不值得拿
+     * 平仓去换。失败会如实回给模型（它能看到 detail），下一轮再试即可。
+     */
+    try {
+      await this.deps.broker.cancelAllOrders(decision.symbol);
+    } catch (error) {
+      const why = (error as Error).message;
       this.emit(
         'warn',
-        `${decision.symbol} 调整保护位时撤旧单失败（${(error as Error).message}），继续尝试挂新单。`,
+        `${decision.symbol} 调整保护位时撤旧单失败（${why}）—— 旧保护单仍在，本次调整放弃，不动仓位。`,
       );
-    });
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail:
+          `撤旧保护单失败，已放弃本次调整（${why}）。` +
+          '原保护单仍然有效，仓位没有被裸奔 —— 所以这里不按 §2.6 平仓，下一轮可重试。',
+      };
+    }
 
     /* ② 挂新单。止损与止盈各自独立，一个失败不影响另一个。 */
     const exitSide: 'BUY' | 'SELL' = local.side === 'long' ? 'SELL' : 'BUY';
