@@ -1568,7 +1568,13 @@ function ConfigSummary({ trader, asset }: { trader: TraderRow; asset: string }) 
  * 于是把一组本该成块的 KPI 拆成高低不齐的四块。所以这里改成陈述事实。
  */
 function MetricCard({ children }: { children: ReactNode }) {
-  return <div className="min-w-0 rounded-lg border border-base-750 bg-base-900 px-3.5 py-3">{children}</div>;
+  /*
+   * `h-full` 是**必须**的，不是装饰：grid 子项默认 `stretch` 只让外层 div 等高，
+   * 里面的 `Metric` 想用 `mt-auto` 把 footer 推到底，就得让高度真的传下去。
+   */
+  return (
+    <div className="h-full min-w-0 rounded-lg border border-base-750 bg-base-900 px-3.5 py-3">{children}</div>
+  );
 }
 
 /* -------------------------------------------------------------------------- */

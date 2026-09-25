@@ -247,7 +247,25 @@ export function Metric({
             : 'text-ink-hi';
 
   return (
-    <div className="min-w-0" title={title}>
+    /*
+     * ⚠️ **`flex h-full flex-col` + footer 上的 `mt-auto`：这是"一组卡看起来齐"的关键。**
+     *
+     * 指标卡在 grid 里默认 `stretch` → **卡片本身一定等高**。问题出在卡片**内部**：
+     * 有的卡只有「标签 + 数字 + 副行」三行，有的还多一个 `footer`（杠杆表盘、
+     * 盈亏柱状条）。等高之后，短的那几张**底下空一大片**，整排看起来重心不齐 ——
+     * 用户的原话就是「这个 UI 你给我弄整齐了啊，怎么不对齐呢？」。
+     *
+     * 实测（浏览器量出来的，1600px 视口）：
+     *
+     *     卡1-3  label 13 / value 29 / sub 61           内容止于 77px
+     *     卡4-5  label 13 / value 29 / sub 61 / footer 83   内容止于 105px
+     *     卡片高 118px  ← 前三张底部空 41px
+     *
+     * 三个 top 值其实**本来就是齐的** —— 但"齐"不是数字相等就够了，**视觉上的
+     * 空白分布也得齐**。`mt-auto` 把 footer 推到底部：前三行继续严格对齐，
+     * 图形统一贴底，中间那段空白变成**有意的留白**而不是"少了一块内容"。
+     */
+    <div className="flex h-full min-w-0 flex-col" title={title}>
       <div className="truncate text-xs font-medium uppercase tracking-wider text-ink-lo">{label}</div>
       <div
         className={cn(
@@ -263,7 +281,7 @@ export function Metric({
           {sub}
         </div>
       )}
-      {footer !== undefined && <div className="mt-1.5">{footer}</div>}
+      {footer !== undefined && <div className="mt-auto pt-1.5">{footer}</div>}
     </div>
   );
 }
