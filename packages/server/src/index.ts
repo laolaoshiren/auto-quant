@@ -166,6 +166,23 @@ async function main(): Promise<void> {
     log.error(`未处理的 Promise 拒绝：${String(reason)}`);
   });
   process.on('uncaughtException', (error) => {
+    /*
+     * ⚠️ **stdout 断掉时不能再写日志 —— 那是一个自我递归的循环。**
+     *
+     * `process.stdout.write` 没有 `error` 监听，管道被关掉（日志采集器重启、
+     * `docker logs` 的消费方退出）时 EPIPE 会变成 `uncaughtException` ——
+     * 而处理器第一件事就是 `log.error(...)`，**又是一次 stdout 写入 → 又一次 EPIPE**。
+     * 本地 `runtime_logs` 里那 **642 条完全相同的「未捕获的异常 EPIPE」**就是这个循环留下的。
+     * 而 `node:sqlite` 是同步 API：这条循环会堵住跑交易循环的事件循环。
+     *
+     * 所以 EPIPE 单独处理：写一行到 **stderr**（那条通道还在），然后退出，
+     * 交给容器的重启策略拉起一个日志通道正常的进程 ——
+     * 让一个"无法记录任何东西"的交易进程继续跑，比重启更危险。
+     */
+    if ((error as NodeJS.ErrnoException).code === 'EPIPE') {
+      process.stderr.write('stdout 已断开（EPIPE）—— 退出以等待重启，避免写日志的无限递归。\n');
+      process.exit(1);
+    }
     log.error(`未捕获的异常：${error.message}`, error);
   });
 }

@@ -1975,8 +1975,19 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   });
 
   app.get('/api/traders/:id/equity', authed, async (request) => {
-    const limit = Number((request.query as { limit?: string }).limit ?? 500);
-    return equityStore.list(traderIdOf(request), Number.isFinite(limit) ? limit : 500);
+    /*
+     * ⚠️ **`limit` 必须钳成正数。**
+     *
+     * 原来只做了 `Number.isFinite` 兜底，于是 `?limit=-1` 会原样透传到 SQL ——
+     * 而在 SQLite 里 **`LIMIT -1` 的意思是"不限行"**。`equity_snapshots`
+     * 又没有保留策略（3 分钟一个周期，半年约 8.6 万行），一次请求就能把
+     * 全部历史快照拉回来，压在**驱动交易循环的同一个事件循环**上。
+     *
+     * 上限与仓储层的窗口（`EQUITY_CURVE_WINDOW`）对齐：再多也没有消费者。
+     */
+    const raw = Number((request.query as { limit?: string }).limit ?? 500);
+    const limit = Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 1), 5000) : 500;
+    return equityStore.list(traderIdOf(request), limit);
   });
 
   /* --- Public market data ------------------------------------------------ */
