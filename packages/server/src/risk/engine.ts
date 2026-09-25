@@ -1122,10 +1122,29 @@ export class RiskEngine {
     }
 
     /* --- 13. Snap both protection levels to a valid side of the entry ------ */
-    const roundedStop = clampStopLoss(stopLoss, price, isLong);
-    const roundedTarget = clampTakeProfit(takeProfit, price, isLong);
+    /*
+     * ⚠️ **钳制的基准价必须是 `entryPrice`（这笔交易真正会成交的价），不是市价。**
+     *
+     * 第 6 / 6b / 7 步（方向、止损侧、盈亏比）用的都是 `entryPrice` ——
+     * 限价单取挂单价，因为**那张单要么在挂单价成交、要么不成交**。
+     * 而这里原来传的是 `price`（永远等于当前市价），于是同一个函数里
+     * 出现了两个口径，后果是**静默推翻刚刚校验过的盈亏比**：
+     *
+     *     空头限价卖 98、市价 100、止损 99、止盈 96、要求 R:R ≥ 2
+     *       第 7 步（按 98 算）：下行 1 / 上行 2 = 1:2  → 通过 ✅
+     *       第 13 步（按 100 算）：clampStopLoss(99, 100, false) = max(99, 100.0001) = 100.0001
+     *                            → 止损被静默挪远一倍，实际盈亏比变成 1:1，而且
+     *                              **没有任何一条 `adjustments` 留下痕迹**（违反 §2.1）
+     *
+     * 对称地，多头限价买 102、市价 100、止损 101 会被放宽到 99.9999。
+     * 用统一的 `entryPrice` 之后，"钳制"只在**取整把保护位推到了入场价的错误
+     * 一侧**时才起作用 —— 那正是这个函数唯一该做的事。
+     */
+    const roundedStop = clampStopLoss(stopLoss, entryPrice, isLong);
+    const roundedTarget = clampTakeProfit(takeProfit, entryPrice, isLong);
 
-    const finalRiskUsd = Math.abs(price - roundedStop) * quantity;
+    // 风险金额同样按 entryPrice 计量：它才是这笔交易的入场价（第 7 步的口径）。
+    const finalRiskUsd = Math.abs(entryPrice - roundedStop) * quantity;
     const riskPercentOfEquity = account.equity > 0 ? (finalRiskUsd / account.equity) * 100 : 0;
 
     return {
@@ -1188,6 +1207,21 @@ export function shouldCloseForDrawdown(
 ): { close: boolean; reason: string } {
   const guard = config.drawdownGuard;
   if (!guard.enabled) return { close: false, reason: '' };
+
+  /*
+   * ⚠️ **`activationPercent` 为 0（或负数）= 关闭这条守卫，而不是"见亏就平"。**
+   *
+   * 下面的判据是 `peak < guard.activationPercent` —— 当它是 0 时，任何
+   * `peak >= 0` 的仓位都会通过这道闸门，接着 `current < 0` 又满足，
+   * 于是**一个刚开仓、浮亏一点点、峰值只是 0 的仓位会被立刻平掉**。
+   * 而 schema 允许配 0（`z.number().min(0)`），"0 = 关闭"又是本项目其它
+   * 阈值（`breakevenTriggerPercent` / `trailingStopPercent`）的既有约定 ——
+   * 同一个约定在这里被读成了相反的意思。
+   *
+   * 所以在运行时把它当"关闭"处理（而不是去收紧 schema —— 那会让已有配置
+   * 在升级时校验失败，而它们本来是有意义的）。
+   */
+  if (!(guard.activationPercent > 0)) return { close: false, reason: '' };
 
   const peak = position.peakPnlPercent;
   if (peak < guard.activationPercent) return { close: false, reason: '' };
