@@ -384,8 +384,16 @@ test('成交：对账补录的行 closed_at 更旧，但排序键与游标键都
    * 这些行的 `closed_at` 比库里已有的行更旧。若继续按 `closed_at` 排，那么
    * "页面顺序"与"游标锚住的 id 顺序"是两套顺序 —— 翻页时必然漏行或重复。
    *
-   * 所以：排序键 = 游标键 = `id`（写入顺序，最新记进来的在最上面）。
-   * 下面用"补录一笔更旧的成交"把这件事演出来。
+   * ⚠️ **这条用例原来断言的是"补录行排在最上面"** —— 那个行为被推翻了。
+   *
+   * 原注释写着：「排序键 = 游标键 = `id`（写入顺序，最新记进来的在最上面）」，
+   * 理由是"页边界不重不漏优先于补录行插回历史中间"。**分页正确性当然重要**，
+   * 但它不是二选一 —— 用 `(closed_at, id)` 复合游标就能同时满足。
+   *
+   * 而只按 id 排的代价是用户直接看到的：**「历史成交里面日期显示错乱
+   * （不是完全按时间排序）」**。实测线上 18 行里有 **4 处**乱序。
+   *
+   * 所以现在：**排序按 `closed_at`，游标是复合的**。这条用例改过来钉新契约。
    */
   traderId = seedTrader();
   const ids = seedTrades(6);
@@ -398,13 +406,38 @@ test('成交：对账补录的行 closed_at 更旧，但排序键与游标键都
   const recovered = bookTrade(traderId, 99, '2024-12-31T00:00:00.000Z');
   assert.ok(recovered > cursor);
 
-  // 它排在最上面（"最近记进来的"），而不是按成交时间插回一天前的历史中间。
-  assert.equal(tradeStore.list(traderId, 10)[0]!.id, recovered);
+  /*
+   * ⚠️ **它必须排在最后**（时间最新 → 最旧），而不是按 id 排到最前面。
+   * 这一条就是"日期错乱"的回归测试。
+   */
+  const page = tradeStore.list(traderId, 10);
+  assert.equal(
+    page[page.length - 1]!.id,
+    recovered,
+    '按 closed_at 排序时，一天前那一笔该在最下面 —— 按 id 排会让它跳到最上面，那就是日期错乱',
+  );
+  for (let i = 1; i < page.length; i += 1) {
+    assert.ok(
+      page[i - 1]!.closedAt >= page[i]!.closedAt,
+      `closedAt 必须单调不增：#${page[i - 1]!.id}(${page[i - 1]!.closedAt}) 后面是 #${page[i]!.id}(${page[i]!.closedAt})`,
+    );
+  }
 
-  // 游标翻页不受它影响：第二页仍然是紧接着游标往下数的那三笔，没有重复、没有跳过。
-  const page2 = tradeStore.list(traderId, 3, cursor);
-  assert.deepEqual(idsOf(page2), [...ids].reverse().slice(3, 6));
-  assert.ok(!idsOf(page2).includes(recovered));
+  /*
+   * 复合游标：从最旧那一行继续翻，既不重复也不漏。
+   *
+   * 单靠 `id` 游标会**漏掉**这类补录行（它们 id 大、时间早）——
+   * 所以这里两个都传，证明新路径可用。
+   */
+  const oldest = page[page.length - 1]!;
+  assert.deepEqual(
+    tradeStore.list(traderId, 10, oldest.id, oldest.closedAt),
+    [],
+    '已经在最旧那一行上，翻下一页应当是空的',
+  );
+
+  /* 老契约仍然可用：只给 id 时退回按 id 分页，行为与以前一致。 */
+  assert.deepEqual(idsOf(tradeStore.list(traderId, 3, cursor)), [...ids].reverse().slice(3, 6));
 });
 
 test('成交：游标只作用于本机器人', () => {

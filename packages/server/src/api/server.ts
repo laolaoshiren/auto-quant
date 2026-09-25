@@ -1881,15 +1881,35 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   /**
    * 成交记录，**分页**返回；响应体是 `TradeRecord[]`，**形状没有变**。
    *
-   * 参数与 `/orders` 完全一致（`limit` 默认 100、上限 `TRADE_PAGE_MAX`，`before=id` 游标）。
-   * 成交行是最宽的一张表（毛/净盈亏、两侧手续费、资金费、两个订单号），
-   * 一次拉全量既是带宽也是渲染代价。
+   * 参数与 `/orders` 基本一致（`limit` 默认 100、上限 `TRADE_PAGE_MAX`），
+   * 但**多一个 `beforeClosedAt`** —— 见下。
+   *
+   * ## 为什么成交要多一个游标参数（`/orders` 不需要）
+   *
+   * 用户报过：「**历史成交里面日期显示错乱（不是完全按时间排序）**」。
+   *
+   * 根因是 `trades.id` 是**插入顺序**，而**对账补录的行 id 更大、成交时刻却更早**
+   * 实测 18 行里 4 处乱序。修法是**按 `closed_at` 排序**，而按时间排序之后，
+   * 只用 `id` 做游标会让页边界漏行（补录行 id 大、时间早，会被 `id < cursor`
+   * 整个跳过）。
+   *
+   * 所以成交列表用**复合游标** `(closed_at, id)`：`before` 给 id、
+   * `beforeClosedAt` 给那一行的成交时刻。**两个都给才启用新行为**，只给
+   * `before` 时退回按 id 分页 —— 老调用方（以及任何只发一个游标的脚本）
+   * 行为与以前完全一致。
    */
   app.get('/api/traders/:id/trades', authed, async (request) => {
-    const query = request.query as { limit?: string; before?: string };
+    const query = request.query as { limit?: string; before?: string; beforeClosedAt?: string };
     const limit = Number(query.limit ?? TRADE_PAGE_DEFAULT);
     const before = Number(query.before);
-    return tradeStore.list(traderIdOf(request), limit, Number.isFinite(before) ? before : null);
+    return tradeStore.list(
+      traderIdOf(request),
+      limit,
+      Number.isFinite(before) ? before : null,
+      typeof query.beforeClosedAt === 'string' && query.beforeClosedAt.length > 0
+        ? query.beforeClosedAt
+        : null,
+    );
   });
 
   /**

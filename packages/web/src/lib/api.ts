@@ -739,13 +739,34 @@ export const api = {
       query: { limit: options.limit ?? 100, before: options.before ?? undefined },
       signal: options.signal,
     }),
-  /** 一页成交记录，契约与 `traderOrders` 完全相同（同一套 `before=id` 游标）。 */
+  /**
+   * 一页成交记录。
+   *
+   * ⚠️ **游标是复合的**（`before` + `beforeClosedAt`）——
+   * 与 `traderOrders` **不一样**，别照抄。
+   *
+   * 成交行的 `id` 是插入顺序，而**对账补录的行 id 更大、成交时刻更早**：
+   * 按 id 排序会让界面上的日期看起来错乱（用户的原话：「历史成交里面日期显示
+   * 错乱（不是完全按时间排序）」）。服务端因此改成按 `closed_at` 排序，
+   * 而按时间排序之后只用 id 做游标会漏行 —— 所以翻页要同时给
+   * **那一行的 `closedAt`**。两个都给时服务端走新路径；只给 `before` 时
+   * 退回旧行为。
+   */
   traderTrades: (
     id: number,
-    options: { limit?: number; before?: number | null; signal?: AbortSignal } = {},
+    options: {
+      limit?: number;
+      before?: number | null;
+      beforeClosedAt?: string | null;
+      signal?: AbortSignal;
+    } = {},
   ) =>
     request<TradeRecord[]>(`/traders/${id}/trades`, {
-      query: { limit: options.limit ?? 100, before: options.before ?? undefined },
+      query: {
+        limit: options.limit ?? 100,
+        before: options.before ?? undefined,
+        beforeClosedAt: options.beforeClosedAt ?? undefined,
+      },
       signal: options.signal,
     }),
   /**

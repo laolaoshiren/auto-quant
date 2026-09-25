@@ -1785,15 +1785,71 @@ export const trades = {
    * （表格里带 `对账补录` 徽章），也让"重复执行对账只修正、不重复插入"这件事一眼可查。
    * 代价是补录行不再按它的成交时间插回历史中间；页边界不重不漏优先于这一点。
    */
-  list(traderId: number, limit = TRADE_PAGE_DEFAULT, before?: number | null): TradeRecord[] {
+  /**
+   * 历史成交列表。
+   *
+   * ## ⚠️ 排序必须按 `closed_at`，不能按 `id`
+   *
+   * 用户的原话：「**历史成交里面日期显示错乱（不是完全按时间排序）**」。
+   *
+   * 这是真 bug，而且根因很具体：`id` 是**插入顺序**，而**对账补录的行 id 更大、
+   * 成交时刻却更早**。实测那台机器人的列表（按 id 倒序）：
+   *
+   *     #131  09-24 21:57:05
+   *     #130  09-24 21:57:10   ← 更晚，却排在下一行
+   *     #127  09-22 11:04:18   ← 跳回两天前
+   *     #126  09-20 23:45:50   ← 又往前
+   *     #113  09-23 11:09:03   ← 又跳回来
+   *
+   * 18 行里有 **4 处**乱序。按 `closed_at` 排则是 **0 处**。
+   *
+   * ## 为什么原来会选 id（以及那个权衡为什么是错的）
+   *
+   * 这段代码原来的注释写着：「代价是补录行不再按它的成交时间插回历史中间；
+   * **页边界不重不漏优先于这一点**」。**分页正确性确实重要**，但那不是二选一：
+   * 用 `(closed_at, id)` **复合游标**就能同时满足 —— 排序按时间，而游标带上
+   * `closed_at` 之后，页边界仍然不重不漏。
+   *
+   * ## 游标
+   *
+   * `before` 仍是 id（老契约不破坏），但配合 `beforeClosedAt` 一起用：
+   * **只给 id 时退回旧行为**（按 id 分页），两个都给时按时间排序 + 复合游标。
+   * 控制台两个都传。
+   */
+  list(
+    traderId: number,
+    limit = TRADE_PAGE_DEFAULT,
+    before?: number | null,
+    beforeClosedAt?: string | null,
+  ): TradeRecord[] {
     const pageSize = clampTradeLimit(limit);
     const cursor = cursorOf(before);
 
-    // 两条 SQL 各自都能吃到索引，也不用把 `(? IS NULL OR id < ?)` 塞进热路径。
+    if (cursor !== null && beforeClosedAt) {
+      /*
+       * 复合游标：`closed_at` 更早的排在后面；同一毫秒的用 id 破平。
+       * 两个条件缺一不可 —— 只比 `closed_at` 会在同一毫秒上漏行，只比 id 就是
+       * 原来那个会错乱的写法。
+       */
+      return getDb()
+        .all<TradeRow>(
+          `SELECT * FROM trades
+            WHERE trader_id = ? AND (closed_at < ? OR (closed_at = ? AND id < ?))
+            ORDER BY closed_at DESC, id DESC LIMIT ?`,
+          traderId,
+          beforeClosedAt,
+          beforeClosedAt,
+          cursor,
+          pageSize,
+        )
+        .map(toTrade);
+    }
+
+    // 老契约：只给了 id 游标时按 id 分页（行为与以前完全一致）。
     if (cursor === null) {
       return getDb()
         .all<TradeRow>(
-          'SELECT * FROM trades WHERE trader_id = ? ORDER BY id DESC LIMIT ?',
+          'SELECT * FROM trades WHERE trader_id = ? ORDER BY closed_at DESC, id DESC LIMIT ?',
           traderId,
           pageSize,
         )
