@@ -106,6 +106,22 @@ interface TablePaging<T> {
   /** 屏幕上要渲染的全部行：轮询的第一页 + 翻出来的每一页 + 推送进来的实时行，按 id 倒序去重。 */
   rows: T[];
   loading: boolean;
+  /**
+   * **是否曾经成功拿到过数据**（一旦为 true 就永远是 true）。
+   *
+   * ⚠️ **它和 `loading` 是两件事，用途也不同。**
+   *
+   * `loading` 来自 `usePolled`，语义是"**本次请求还在飞**"—— 组件重新挂载时它会
+   * 从 `true` 重新开始。**拿它单独决定"要不要显示转圈"会闪**：
+   *
+   *   实测（刷新页面后在 150ms 内点「当前委托」）：转圈持续了 **8 帧（约 400ms）**
+   *   才被 3 行数据替代。用户的原话是「会错误、闪烁出现一些数据（闪太快看不清）」；
+   *   而在标签之间来回切时**不会**出现 —— 因为那时组件不重挂、`loading` 早已是 false。
+   *
+   * 有它之后，加载态只在**真的什么都没有**时出现：数据一旦到过手上，就算下一轮
+   * 轮询在飞，表格也照旧显示手里的行，而不是退回一个转圈。
+   */
+  hasLoadedOnce: boolean;
   error: string | null;
   /** 还有没有更早的行（决定要不要挂观察器、要不要显示「已到最早一笔」）。 */
   hasMore: boolean;
@@ -447,6 +463,7 @@ function useTablePaging<T extends { id: number; traderId: number }>(
   return {
     rows,
     loading: polled.loading,
+    hasLoadedOnce: polled.updatedAt !== null,
     error: polled.error,
     hasMore,
     moreState,
@@ -720,7 +737,14 @@ export function PositionsTable({
 
   const positions: PositionView[] = live ?? query.data ?? [];
 
-  if (query.loading && positions.length === 0) return <Spinner3 label="正在加载持仓" />;
+  /*
+   * 同 `OrdersTable` 的理由：**光看 `loading` 会闪**。
+   * `usePolled` 在组件重挂载时把 `loading` 从 true 重新开始，而 `updatedAt` 一旦
+   * 有值就说明"这个 hook 成功拿到过数据"——用后者当"从没加载过"的判据。
+   */
+  if (query.loading && query.updatedAt === null && positions.length === 0) {
+    return <Spinner3 label="正在加载持仓" />;
+  }
   if (positions.length === 0) {
     return <TableEmpty message="暂无持仓。" hint="模型选择空仓 — 没有符合条件的标时不会下任何订单。" />;
   }
@@ -1090,7 +1114,18 @@ export function OrdersTable({
   const all: OrderRecord[] = paging.rows;
   const orders = onlyOpen ? all.filter(isOpenOrder) : all;
 
-  if (paging.loading && all.length === 0) return <Spinner3 label="正在加载委托" />;
+  /*
+   * ⚠️ **必须带上 `hasLoadedOnce`，否则会闪。**
+   *
+   * 只用 `loading` 的话：组件重新挂载（刷新页面后第一次点进这个标签）时
+   * `loading` 从 true 重新开始，于是**即使数据其实已经在容器手里**，也会先显示
+   * 8 帧（约 400ms）的转圈，再被真实的行替换 —— 用户看到的就是"闪一下"。
+   *
+   * `hasLoadedOnce` 一旦为真就不再显示加载态：**有行就显示行**。
+   */
+  if (paging.loading && !paging.hasLoadedOnce && all.length === 0) {
+    return <Spinner3 label="正在加载委托" />;
+  }
   if (orders.length === 0) {
     return onlyOpen ? (
       <TableEmpty message="暂无当前委托。" hint="交易所侧的止损 / 止盈单在触发前会出现在这里。" />
@@ -1384,7 +1419,10 @@ export function TradesTable({
   // 屏幕上要渲染的全部行 = 轮询的第一页 + 已经翻出来的更早的页 + 推送进来的实时行（按 id 去重）。
   const trades: TradeRecord[] = paging.rows;
 
-  if (query.loading && trades.length === 0) return <Spinner3 label="正在加载成交记录" />;
+  /* 同 `OrdersTable`：只有"从没成功加载过"才显示转圈，避免重挂载时闪一下。 */
+  if (query.loading && query.updatedAt === null && trades.length === 0) {
+    return <Spinner3 label="正在加载成交记录" />;
+  }
   if (trades.length === 0) {
     return <TableEmpty message="暂无历史成交。" hint="每笔平仓都会连同平仓原因一起持久化。" />;
   }
