@@ -1870,14 +1870,40 @@ export function TraderTables({
             onSelectSymbol={onSelectSymbol}
           />
         )}
-        {/* 两个标签共用同一个分页实例：它们读的是同一个端点，只是过滤条件不同；
-            分开两套只会让翻出来的历史与"当前委托"的数字再次分家。 */}
-        {tab === 'orders' && (
+        {/*
+          两个标签共用同一个分页实例：它们读的是同一个端点，只是过滤条件不同；
+          分开两套只会让翻出来的历史与"当前委托"的数字再次分家。
+
+          ⚠️ **这里原来写成了两个并列的 `{tab === 'orders' && …}{tab === 'history' && …}`，
+          那会让两个标签之间有 25 行一闪而过的残留。**
+
+          实测（1600px 视口，点「当前委托」后每 30ms 采一次 DOM）：
+
+              0ms   行=25   ← 还是「订单记录」的内容
+              30ms  行= 2   ← 才换成「当前委托」
+
+          成因：两个 `&&` 分支虽然渲染的是同一个组件类型，但它们**在 JSX 里是两个不同的
+          位置** —— `tab` 一变，React 把旧的那个**卸载**、新的那个**挂载**，卸载发生在先，
+          而浏览器的下一帧仍可能画出旧 DOM。用户的描述是「点进去会快速闪烁出现一堆订单，
+          闪完以后又恢复正常」。
+
+          合并成一个条件之后，React 在同一个位置看到**同一个组件类型**，于是**复用同一个实例**
+          （只更新 props），中间不存在"旧表格还在、新表格还没上"的那一帧。
+
+          两处的差异只有 `onlyOpen` 与 `collapsed` —— 把它们写成 `tab` 的表达式即可，
+          不需要两个 JSX 分支。
+        */}
+        {(tab === 'orders' || tab === 'history') && (
           <OrdersTable
             paging={ordersPaging}
-            onlyOpen
+            onlyOpen={tab === 'orders'}
             positionCount={positionCount}
             onSelectSymbol={onSelectSymbol}
+            /*
+             * 只有「历史」那侧才有收起态：「当前委托」是行动面板（对着它撤单、
+             * 确认保护单），行数受挂单数约束，默认就该看得全 —— 见 `isHeavyTab`。
+             */
+            collapsed={tab === 'history' ? historyCollapsed : undefined}
             liveMarginModes={liveMarginModes}
           />
         )}
@@ -1887,16 +1913,6 @@ export function TraderTables({
             refreshToken={token}
             onSelectSymbol={onSelectSymbol}
             collapsed={historyCollapsed}
-          />
-        )}
-        {tab === 'history' && (
-          <OrdersTable
-            paging={ordersPaging}
-            onlyOpen={false}
-            positionCount={positionCount}
-            onSelectSymbol={onSelectSymbol}
-            collapsed={historyCollapsed}
-            liveMarginModes={liveMarginModes}
           />
         )}
       </div>
