@@ -90,8 +90,40 @@ interface PolledPage<T> {
   updatedAt: number | null;
 }
 
+/**
+ * 延迟显示加载转圈。
+ *
+ * ## 为什么需要它：**转圈"出现又消失"本身就是一种闪烁**
+ *
+ * 用户报的现象是「点进当前委托会闪一下，太快看不清」。逐帧实测量到的真实序列是：
+ *
+ *     2781ms  行=-1   ← 出现「正在加载委托…」
+ *     3575ms  行= 4   ← 800ms 后被真实的行替换
+ *
+ * 也就是说：转圈本身**没有错**（那一刻数据确实还没到），但**它存在过再消失**，
+ * 眼睛就会捕捉到这次跳变。而"加载很快"的场景里，这个转圈提供的信息远小于它造成的干扰。
+ *
+ * 做法：**只有加载真的超过阈值才显示它**。快的时候表格区域短暂空白 —— 人眼感知不到；
+ * 慢的时候才给出"正在加载"的反馈，否则用户会以为界面卡住了。
+ *
+ * 阈值 350ms 的取法：低于它，人会把"空白 → 内容"当成一次性出现；高于它，就该有反馈。
+ */
+function useDelayedSpinner(active: boolean, delayMs = 350): boolean {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    if (!active) {
+      setShow(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShow(true), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [active, delayMs]);
+  return show;
+}
+
 /** 一页怎么取。两张表的差别只有一个 API 函数，所以做成参数。 */
 type PageFetcher<T> = (
+
   traderId: number,
   options: {
     limit: number;
@@ -746,10 +778,10 @@ export function PositionsTable({
    * 同 `OrdersTable` 的理由：**光看 `loading` 会闪**。
    * `usePolled` 在组件重挂载时把 `loading` 从 true 重新开始，而 `updatedAt` 一旦
    * 有值就说明"这个 hook 成功拿到过数据"——用后者当"从没加载过"的判据。
+   * 外面再套一层延迟：快的时候不显示转圈，避免"出现又消失"的跳变。
    */
-  if (query.loading && query.updatedAt === null && positions.length === 0) {
-    return <Spinner3 label="正在加载持仓" />;
-  }
+  const showSpinner = useDelayedSpinner(query.loading && query.updatedAt === null && positions.length === 0);
+  if (showSpinner) return <Spinner3 label="正在加载持仓" />;
   if (positions.length === 0) {
     return <TableEmpty message="暂无持仓。" hint="模型选择空仓 — 没有符合条件的标时不会下任何订单。" />;
   }
@@ -1128,9 +1160,8 @@ export function OrdersTable({
    *
    * `hasLoadedOnce` 一旦为真就不再显示加载态：**有行就显示行**。
    */
-  if (paging.loading && !paging.hasLoadedOnce && all.length === 0) {
-    return <Spinner3 label="正在加载委托" />;
-  }
+  const showSpinner = useDelayedSpinner(paging.loading && !paging.hasLoadedOnce && all.length === 0);
+  if (showSpinner) return <Spinner3 label="正在加载委托" />;
   if (orders.length === 0) {
     return onlyOpen ? (
       <TableEmpty message="暂无当前委托。" hint="交易所侧的止损 / 止盈单在触发前会出现在这里。" />
@@ -1424,10 +1455,9 @@ export function TradesTable({
   // 屏幕上要渲染的全部行 = 轮询的第一页 + 已经翻出来的更早的页 + 推送进来的实时行（按 id 去重）。
   const trades: TradeRecord[] = paging.rows;
 
-  /* 同 `OrdersTable`：只有"从没成功加载过"才显示转圈，避免重挂载时闪一下。 */
-  if (query.loading && query.updatedAt === null && trades.length === 0) {
-    return <Spinner3 label="正在加载成交记录" />;
-  }
+  /* 同 `OrdersTable`：只有"从没成功加载过"才显示转圈；再延迟一层，避免出现又消失。 */
+  const showSpinner = useDelayedSpinner(query.loading && query.updatedAt === null && trades.length === 0);
+  if (showSpinner) return <Spinner3 label="正在加载成交记录" />;
   if (trades.length === 0) {
     return <TableEmpty message="暂无历史成交。" hint="每笔平仓都会连同平仓原因一起持久化。" />;
   }
