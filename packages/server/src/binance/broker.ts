@@ -185,8 +185,31 @@ export class BinanceBroker {
     if (!hedge) return { changed: false, warning: null };
 
     const positions = await this.getPositions();
-    const openOrders = (await this.getOpenOrders().catch(() => [])).length;
-    const openAlgo = (await this.getOpenAlgoOrders().catch(() => [])).length;
+    /*
+     * ⚠️ **读不到挂单 ≠ 没有挂单。**（与 `reconcileTradeHistory` 那个 P0 同一种形状）
+     *
+     * 这里原来对两个查询各挂一个 `.catch(() => [])`，于是**一次网络抖动**就让
+     * 计数变成 0，判定 `positions.length > 0 || openOrders > 0 || openAlgo > 0`
+     * 随之放行，去 POST 切换持仓模式 —— 而币安在"有持仓或挂单"时会用 `-4067`
+     * 拒绝；更糟的是这段代码之前的判断已经假设没有挂单了，**切换成功后所有单
+     * 都会因为 `positionSide: 'BOTH'` 与双向模式不兼容而吃 `-4061`**。
+     *
+     * 所以读不到时**保守地不切换**：返回 warning 而不是误判"账户是空的"。
+     * 这里**不抛**异常：切换失败只是少一次优化，绝不该让机器人起不来。
+     */
+    let openOrders: number;
+    let openAlgo: number;
+    try {
+      openOrders = (await this.getOpenOrders()).length;
+      openAlgo = (await this.getOpenAlgoOrders()).length;
+    } catch (error) {
+      return {
+        changed: false,
+        warning:
+          `无法确认账户上是否还有挂单（${(error as Error).message}）—— ` +
+          '因此本次不切换持仓模式（读不到不等于没有）。请稍后重启重试。',
+      };
+    }
     if (positions.length > 0 || openOrders > 0 || openAlgo > 0) {
       return {
         changed: false,
@@ -510,11 +533,25 @@ export class BinanceBroker {
        * 拿不到标记价时**放行而不是拒绝**：一个取不到价格的网络问题，
        * 不该让一笔合法订单下不出去 —— 那种情况交给交易所去判。
        */
+      /*
+       * ⚠️ **`reduceOnly` 也必须豁免 —— 它和 `closePosition` 是同一句话。**
+       *
+       * 币安原文是「unless you choose reduce only」：只减仓的委托不受名义下限
+       * 约束（它不会增加敞口）。这里原来只豁免了 `closePosition`，于是
+       * **一个部分平仓后剩下的残仓（名义 < 5/20/50 USDT）永远平不掉**：
+       * `executeClose` / `emergencyFlatten` 在发单**之前**就抛"名义价值不足"，
+       * 仓位 stranded 在交易所上，而系统只能打一条"需要人工介入"。
+       *
+       * 一个退不出去的仓位比一条被拒的委托危险得多 —— 所以豁免。
+       */
+      const exemptFromMinNotional =
+        request.closePosition === true || request.reduceOnly === true;
+
       let refPrice = request.price && request.price > 0 ? request.price : request.triggerPrice ?? 0;
-      if (!(refPrice > 0) && !request.closePosition) {
+      if (!(refPrice > 0) && !exemptFromMinNotional) {
         refPrice = await this.getMarkPrice(symbol).catch(() => 0);
       }
-      if (refPrice > 0 && !request.closePosition) {
+      if (refPrice > 0 && !exemptFromMinNotional) {
         const info = this.registry.require(symbol);
         const notional = rounded * refPrice;
         if (info.minNotional > 0 && notional < info.minNotional) {
@@ -599,6 +636,20 @@ export class BinanceBroker {
       'POST',
       '/fapi/v1/order',
       params,
+      /*
+       * ⚠️ **下单请求绝不因为"结果未知"而重发。**
+       *
+       * 类注释（见文件头）承诺的是 "Never blind-retry an order" —— 而这条承诺
+       * 原来只停在注释里：`signedRequest` 对所有请求一视同仁地重试 3 次，
+       * 于是**一次传输超时（`AbortSignal.timeout`）就会把同一张市价单再发一遍**。
+       * 若第一张其实已经成交，`newClientOrderId` 不会挡住它（币安只要求该 id 在
+       * **未成交委托**中唯一）→ **仓位翻倍，而且多出来的那一半没有保护单**。
+       *
+       * `avoidAmbiguousRetry` 只屏蔽"结果未知"的重试（传输层错误、5xx）；
+       * `-1021` 时钟漂移与 `429` 限流仍然重试 —— 那两个是**明确未被接受**，
+       * 重发是安全的，而时钟漂移的重试正是下单能正常工作所依赖的。
+       */
+      { avoidAmbiguousRetry: true },
     );
     log.debug(`order ${request.type} ${request.side} ${request.symbol} → ${response.status}`, {
       orderId: response.orderId,
@@ -641,6 +692,8 @@ export class BinanceBroker {
       'POST',
       '/fapi/v1/algoOrder',
       params,
+      // 与普通下单同理：条件单「结果未知」时重发，可能挂出两张保护单。
+      { avoidAmbiguousRetry: true },
     );
     log.debug(
       `algo ${request.type} ${request.side} ${request.symbol} trigger=${response.triggerPrice} → ${response.algoStatus}`,
@@ -795,6 +848,23 @@ export class BinanceBroker {
    * Called immediately before and after any manual exit. A leftover
    * `closePosition` algo order would otherwise fire into a flat book and open a
    * brand new position in the opposite direction.
+   *
+   * ## 契约：**撤不掉就抛**
+   *
+   * 这个方法原来把失败**吞成一行 `log.warn`**（`Promise.allSettled` + 只记日志），
+   * 于是所有按"它会抛"写出来的调用点都成了**死代码** —— 最典型的是
+   * `applyBreakevenGuard` / `executeAdjust` 里的「撤不掉就不要挂新的」：
+   * 撤单真的失败时 `catch` 永不触发 → 继续挂新单 → 必然吃 `-4130`
+   * （币安不允许同一仓位存在两张条件单）→ 判为"没有有效止损" →
+   * 按 §2.6 市价平掉一个**本来有保护、而且可能正在盈利**的仓位。
+   * 2026-09-22 那笔 ADAUSDT（净 −0.0166）就是这个形状。
+   *
+   * 同一条纪律在 `executeClose` 里写对了（`cancelOrder` 的返回值被检查），
+   * 在这里漏了：**适配层用"返回值"表达失败、调用层用"异常"表达失败，
+   * 两者之间没有类型约束**，编译器抓不到。所以这里统一成异常。
+   *
+   * `-2011`（Unknown order sent：单子已经成交或被撤）不算失败 —— 那正是
+   * "已经不在交易所了"这个我们要的结果。
    */
   async cancelAllOrders(symbol: string): Promise<void> {
     if (this.dryRun) return;
@@ -806,12 +876,19 @@ export class BinanceBroker {
       this.rest.signedRequest('DELETE', '/fapi/v1/algoOpenOrders', { symbol: normalized }),
     ]);
 
+    const failures: string[] = [];
     for (const result of results) {
       if (result.status === 'rejected') {
         const error = result.reason as BinanceApiError;
         if (error instanceof BinanceApiError && error.code === -2011) continue;
-        log.warn(`撤销 ${normalized} 的全部挂单时部分失败：${error.message ?? error}`);
+        const why = error?.message ?? String(error);
+        log.warn(`撤销 ${normalized} 的全部挂单时部分失败：${why}`);
+        failures.push(why);
       }
+    }
+
+    if (failures.length > 0) {
+      throw new Error(`撤销 ${normalized} 的挂单失败（${failures.join('；')}）—— 交易所侧可能仍有挂单。`);
     }
   }
 
