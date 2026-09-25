@@ -3004,6 +3004,151 @@ export class AutoTrader {
         );
       }
     }
+
+    /*
+     * 最后再统一检查一遍"持仓还在、但交易所侧没有止损"。
+     *
+     * 放在收养之后：收养路径刚刚挂过保护单，这一遍不会重复挂。
+     * 它同时覆盖了另外两种情况 —— 保护单**事后**被撤掉/过期，
+     * 以及下面这种实测事故（见方法的注释）。
+     */
+    await this.ensureStopsOnOpenPositions(exchangePositions);
+  }
+
+  /**
+   * ⚠️ **持仓还在、交易所侧却没有任何止损 —— 这件事必须有周期性检查。**
+   *
+   * ## 这条检查为什么存在（2026-09-26 实测事故）
+   *
+   * SOLUSDT 持仓 0.16 张、浮盈 +5%，交易所侧**一张保护单都不在**：逐张查
+   * `algoStatus` 全部是 `CANCELED`、`actualOrderId` 为空（= 从未触发，是被撤掉的），
+   * 而它就这样裸着跑了 **1 小时 25 分钟**，系统一句告警都没有。
+   *
+   * 系统原来的保护只覆盖"**挂的那一刻**失败"（`executeOpen` / `executeAdjust` /
+   * 收养路径里的 §2.6 分支）。而"挂上去之后因为任何原因消失"没有任何人管 ——
+   * 而 §2.6 存在的意义恰恰是**不让一个没有保护的杠杆仓位变得看不见**。
+   * 这次不是"变得看不见"，而是**它本来就没有任何东西在看**。
+   *
+   * ## 行为：自动重挂一次（方案 A），**不**自动平仓
+   *
+   * 发现缺失就按**本地记录的保护位**重挂（`restoreProtection`，它会一并回写单号），
+   * 失败只告警、绝不市价平仓 —— 把一笔可能正在盈利的仓位在浮盈时强平，
+   * 正是 ADAUSDT 那次净 −0.0166 的形态（用户的原话是"这不是白玩吗"）。
+   *
+   * ## 三条不肯定的地方都不动手
+   *
+   *   · **挂单列表读失败** → 跳过。读不到 ≠ 没有；据它重挂会挂出第二张止损。
+   *   · **止盈方向不对** → 只挂止损（止盈缺了不影响安全）。
+   *   · **止损落在标记价的错误一侧** → 告警而不挂：`STOP_MARKET` 挂上去会
+   *     **立即触发**，那等于一次没有经过任何决策的市价平仓。
+   *
+   * ## 幂等与代价
+   *
+   * 每轮对账跑一次；有止损就什么都不做。每个持仓标的每轮多读两次挂单
+   * （weight 1 + 1）；挂上之后的下一轮 `hasStop` 为真，稳态零额外调用。
+   */
+  private async ensureStopsOnOpenPositions(exchangePositions: ExchangePosition[]): Promise<void> {
+    const traderId = this.deps.trader.id;
+    const liveBySymbol = new Map(exchangePositions.map((position) => [position.symbol, position]));
+    /** 什么算"这个仓位有止损"。注意 `TRAILING_STOP_MARKET` 也是止损。 */
+    const STOP_TYPES = new Set(['STOP', 'STOP_MARKET', 'TRAILING_STOP_MARKET']);
+
+    for (const local of positionStore.open(traderId)) {
+      const live = liveBySymbol.get(local.symbol);
+      // 仓位已经不在交易所 —— 那是 `reconcilePositions()` 上面那一遍的事。
+      if (!live) continue;
+
+      let orderTypes: string[];
+      try {
+        const [regular, algo] = await Promise.all([
+          this.deps.broker.getOpenOrders(local.symbol),
+          this.deps.broker.getOpenAlgoOrders(local.symbol),
+        ]);
+        orderTypes = [...regular, ...algo].map((order) => {
+          /*
+           * ⚠️ **字段名有两个，必须都看。**
+           *
+           * 普通委托（`BinanceOrderResponse`）用 `type`；而 Algo 条件单
+           * （`BinanceAlgoOrderResponse`）用 **`orderType`**。
+           *
+           * 只看 `type` 会让**每一张 Algo 止损都被读成空字符串** → 每轮都判定
+           * "这个仓位没有止损" → 每个对账点重复挂一次止损（并被交易所 `-4130` 拒），
+           * 同时把本地 `stop_order_id` 越写越乱。
+           *
+           * 这个坑是在测试里抓到的：`algoAfter` 从 4 → 6 → 8 一路涨，
+           * 而代码还认为自己只是在"补挂一张缺失的止损"。
+           */
+          const type =
+            (order as { orderType?: unknown }).orderType ?? (order as { type?: unknown }).type;
+          return String(type ?? '');
+        });
+      } catch (error) {
+        log.warn(
+          `[${this.deps.trader.name}] ${local.symbol} 的挂单列表读取失败，本轮不检查保护单：${(error as Error).message}`,
+        );
+        continue;
+      }
+
+      if (orderTypes.some((type) => STOP_TYPES.has(type))) continue;
+
+      const isLong = local.side === 'long';
+      const mark = live.markPrice > 0 ? live.markPrice : live.entryPrice;
+
+      /* 本地记录的保护位优先（那是模型/系统当初认定的失效位）。 */
+      const recordedOk =
+        local.stop_loss !== null &&
+        local.stop_loss > 0 &&
+        (isLong ? local.stop_loss < mark : local.stop_loss > mark);
+
+      let stop: number;
+      if (recordedOk) {
+        stop = local.stop_loss as number;
+      } else {
+        const percent = this.activeConfig.riskControl.fallbackStopLossPercent;
+        stop = isLong
+          ? live.entryPrice * (1 - percent / 100)
+          : live.entryPrice * (1 + percent / 100);
+        if (!(isLong ? stop < mark : stop > mark)) {
+          this.emit(
+            'error',
+            `${local.symbol} 的持仓在交易所侧没有任何止损，而按兜底比例（${percent}%）算出的止损 ` +
+              `${stop.toFixed(6)} 已落在当前标记价 ${mark} 的**错误一侧** —— 挂上去会立即触发、等于未经决策的市价平仓，` +
+              '因此不挂。请人工确认这个仓位。',
+          );
+          continue;
+        }
+      }
+
+      /* 止盈是可选项：方向不对就只挂止损。 */
+      const targetOk =
+        local.take_profit !== null &&
+        local.take_profit > 0 &&
+        (isLong ? local.take_profit > mark : local.take_profit < mark);
+
+      const protection = await this.replaceProtection({
+        symbol: local.symbol,
+        side: isLong ? 'long' : 'short',
+        quantity: local.quantity,
+        stop,
+        target: targetOk ? local.take_profit : null,
+        traderId,
+      });
+
+      if (protection.stopPlaced) {
+        this.emit(
+          'warn',
+          `⚠️ ${local.symbol} 的持仓在交易所侧**没有止损**，已自动重挂 ${stop}` +
+            `（${recordedOk ? '用本地记录的保护位' : '用兜底比例'}${protection.targetPlaced ? '，止盈一并恢复' : ''}）` +
+            '—— 它此前为什么消失值得查（撤单失败/被替换/交易所侧过期）。',
+        );
+      } else {
+        this.emit(
+          'error',
+          `${local.symbol} 的持仓没有任何交易所侧止损，且**重挂失败**` +
+            `（${protection.failures.join('；') || '原因未知'}）—— 该仓位目前无保护，下一轮会再试。`,
+        );
+      }
+    }
   }
 
   /**
@@ -4354,24 +4499,32 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     if (candidates.length === 0) return 0;
 
     /*
-     * 还持仓的标的先排除。
+     * ⚠️ **只保护"当前正在生效的那张保护单"，不再按标的整体跳过。**
      *
-     * 那种情况不是"显示脏了"，而是"保护单真的没了"—— 一件更严重、也完全不同的故障
-     * （§2.6：一个没有交易所侧保护的杠杆仓位是最糟糕的状态）。把它混进这次记账修复里，
-     * 等于用一行状态更新掩盖一条真实的告警。持仓还在，这里就一行都不碰。
+     * 原来这里的判据是"这个标的还持仓 → 它的保护单一行都不碰"。理由是：
+     * 还持仓时保护单不在交易所，可能不是"显示脏了"而是"保护单真的没了"——
+     * 那是一件更严重、也完全不同的故障（§2.6），不该混进这次记账修复里。
      *
-     * ⚠️ **但入场单不受这条影响，它不是保护单。**
+     * **这个理由对"当前生效的那张保护单"成立，对被替换掉的旧保护单不成立。**
+     * 而追踪止损每上移一次就换一张：实测同一个 SOLUSDT 仓位在界面上挂着
+     * **4 条止损**（118.10 / 119.607 / 119.627 / 120.942），而交易所侧一张都没有 ——
+     * 旧的那三张早被撤掉，只是**永远没人结清**。用户据此问"这是不是 BUG"，
+     * 而它确实是。
      *
-     * 上面说的是保护单；而**入场单成交了，持仓才会存在** —— 用"这个标的还持仓"
-     * 把它一起排除掉，那张已成交的 entry 行就永远停在 `NEW`。实测就是：
-     * 持仓 `12.7 @ 1.5600` 好好挂在界面上，而「当前委托」里同一张开仓单写着
-     * 「已挂单」，用户据此问"到底是成交了还是没成交"。
+     * 现在的判据来自本地持仓行：`positions.stop_order_id` / `tp_order_id` 指向的
+     * 才是"现在生效的那一张"。它缺失 → 由 `ensureStopsOnOpenPositions()` 去重挂
+     * 并告警（那才是 §2.6 要的处置）；其余历史保护单行照常走交易所核对 → 结清。
      */
-    const held = new Set(positionStore.open(traderId).map((p) => p.symbol));
+    const activeProtectionIds = new Set<string>();
+    for (const position of positionStore.open(traderId)) {
+      if (position.stop_order_id) activeProtectionIds.add(String(position.stop_order_id));
+      if (position.tp_order_id) activeProtectionIds.add(String(position.tp_order_id));
+    }
+
     const symbols = [
       ...new Set(
         candidates
-          .filter((row) => row.purpose === 'entry' || !held.has(row.symbol))
+          .filter((row) => !activeProtectionIds.has(String(row.exchangeOrderId ?? '')))
           .map((row) => row.symbol),
       ),
     ];
@@ -4412,8 +4565,12 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     let settled = 0;
     const summary: string[] = [];
     for (const row of candidates) {
-      // 还持仓的标的上，**保护单**一行都不碰（理由见上面那段）；入场单照常结清。
-      if (held.has(row.symbol) && row.purpose !== 'entry') continue;
+      /*
+       * 只跳过**当前正在生效**的那张保护单：它不在交易所挂单列表里说明保护真的丢了，
+       * 那由 `ensureStopsOnOpenPositions()` 负责重挂并告警（§2.6），
+       * **不能在这里被静默写成终态** —— 那会把"仓位裸着"伪装成"历史脏行"。
+       */
+      if (activeProtectionIds.has(String(row.exchangeOrderId ?? ''))) continue;
 
       const live = liveBySymbol.get(row.symbol);
       // 三种情况都不是"可以结清"：这个标的一轮没读到、这行没有交易所单号、

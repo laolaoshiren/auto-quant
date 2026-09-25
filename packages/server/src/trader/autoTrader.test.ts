@@ -545,7 +545,7 @@ class FakeBroker {
    * 而测试里没有对应实现。之前测试不炸，只是因为配置里阈值默认为 0、
    * 那一行提前返回了：**没测的路径就是可能已经坏掉的路径。**
    */
-  async cancelOrder(symbol: string, orderId: number): Promise<boolean> {
+  async cancelOrder(symbol: string, orderId: number, kind: 'order' | 'algo' = 'order'): Promise<boolean> {
     /*
      * 与真实 `broker.cancelOrder` 保持**同一个契约**：
      *   · 成功 → `true`
@@ -560,6 +560,25 @@ class FakeBroker {
     }
     if (this.failCancel) return false;
     this.opLog.push(`cancel:${symbol}#${orderId}`);
+    /*
+     * ⚠️ **撤单必须在"交易所的账"上真的生效。**
+     *
+     * 这里原来只往 `opLog` 记一笔就返回 `true` —— 于是**单张撤单是假的**：
+     * 撤完之后那张条件单在 `getOpenAlgoOrders()` 里**仍然是 NEW**。
+     *
+     * 这藏住了一整类 bug：`settleStaleOrders()` 的判据正是"这一行还在不在
+     * 交易所的挂单列表里"，而假撤单让"被替换掉的旧保护单"看起来**还活着** ——
+     * 所以"旧行永远停在已挂单"这个真实缺陷在测试里根本造不出来
+     * （用户实测：同一个仓位挂出 4 条止损、交易所侧一张都没有）。
+     *
+     * 真实现里 `DELETE /fapi/v1/algoOrder` 成功之后，那张单就不再是 open order 了。
+     */
+    if (kind === 'algo') {
+      const existing = this.algoOrders.get(String(orderId));
+      if (existing && existing.algoStatus === 'NEW') {
+        this.algoOrders.set(String(orderId), { ...existing, algoStatus: 'CANCELED' });
+      }
+    }
     return true;
   }
 
@@ -3273,29 +3292,110 @@ test('刚下的单不会被宽限窗口误判：交易所那一读没报它，�
   assert.equal(orderRow(stop.id).status, 'CANCELED', '过了宽限期就该结清，否则脏行永远留着');
 });
 
-test('本地还持仓的标的：一行都不碰（那可能是保护单真的没了，不是显示脏了）', async () => {
+test('★ 本地还持仓、而保护单在交易所侧消失 → 自动重挂（不再放任裸仓）', async () => {
   /*
-   * 这一条守的是**修复的边界**，不是显示效果。
+   * 这一条守的是 2026-09-26 那次**实测事故**的形态。
    *
-   * 一个本地还持仓、而交易所挂单列表里没有它的保护单的标的，可能的真相是
-   * 「保护单真的没了」—— §2.6 里最糟糕的状态。把这种情况也顺手结清，等于用一行状态更新
-   * 把一个真实的告警盖掉；而本次修复的授权范围只是"交易所已经不挂了、本地还留着"的显示记账，
-   * 依据是"这个标的本地已经没有持仓"。所以持仓还在时，这里必须一行都不改。
+   * 一个本地还持仓、而交易所挂单列表里没有它的保护单的标的，真相通常是
+   * 「保护单真的没了」—— §2.6 里最糟糕的状态。
+   *
+   * 原来的处理是"持仓还在时，保护单一行都不碰"：既不改状态、**也不重挂** ——
+   * 那等于放任一个裸仓存在。实测 SOLUSDT 就这样裸跑了 **1 小时 25 分钟**
+   * （0.16 张、浮盈 +5%，交易所侧止损与止盈全是 `CANCELED`），系统一句告警都没有。
+   *
+   * 现在分成两件事，两件都要成立：
+   *   · 当前生效的那张保护单行**不结清**（它不在交易所 = 真事故，
+   *     不能靠一行状态更新把它伪装成"历史脏行"）；
+   *   · 同时**自动重挂**（方案 A），并告警说清它此前为什么值得查。
    */
   const broker = new FakeBroker();
   await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
   const stop = purposeRow('stop_loss');
   const target = purposeRow('take_profit');
 
-  // 保护单在交易所侧消失了（人工撤单 / 别的进程），仓位还在本地。
+  // 保护单在交易所侧消失了（被撤 / 过期 / 别的进程），仓位还在本地。
   await broker.cancelAllOrders(SYMBOL);
   ageOrders();
 
-  await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+  const before = positionStore.open(traderId).find((p) => p.symbol === SYMBOL)!;
+  // 走**周期路径**：生产上"结清 + 补挂"都发生在对账里（`runReconcile()` 只跑
+  // 历史成交那一遍，不经过 `reconcilePositions`）。
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
 
   assert.equal(positionStore.open(traderId).length, 1, '前提：本地仍然持仓');
-  assert.equal(orderRow(stop.id).status, 'NEW', '持仓还在时不得改写订单状态');
-  assert.equal(orderRow(target.id).status, 'NEW');
+  /*
+   * 旧的那两行会被结清 —— 而这是**对的**：`ensureStopsOnOpenPositions()` 已经把
+   * 保护单换成新的一张（`positions` 的单号指向新的），旧那张确实已经不在交易所了。
+   * 换句话说，"被结清"与"被重挂"是同一件事的两面：**先有替代者，才有历史行**。
+   */
+  assert.equal(
+    orderRow(stop.id).status,
+    'CANCELED',
+    '旧的止损行应被结清（它已经被重挂的那张取代，交易所侧也确实没有它了）',
+  );
+  assert.equal(orderRow(target.id).status, 'CANCELED');
+
+  const after = positionStore.open(traderId).find((p) => p.symbol === SYMBOL)!;
+  assert.ok(after.stop_order_id, '★ 必须自动重挂止损 —— 放任裸仓才是这次事故的根因');
+  assert.notEqual(
+    String(after.stop_order_id),
+    String(before.stop_order_id),
+    '★ 新单号必须不同于那张已经消失的',
+  );
+
+  const live = await broker.getOpenAlgoOrders(SYMBOL);
+  const typeOf = (order: unknown): string =>
+    String(
+      (order as { orderType?: string; type?: string }).orderType ??
+        (order as { type?: string }).type ??
+        '',
+    );
+  assert.ok(
+    live.some((order) => typeOf(order) === 'STOP_MARKET'),
+    '★ 交易所侧必须真的重新挂上了止损（不只是改了本地记录）',
+  );
+});
+
+test('★ 被替换掉的旧保护单行会被结清（不再永远显示「已挂单」）', async () => {
+  /*
+   * 用户实测的现象：同一个 SOLUSDT 仓位在「当前委托」里挂着 **4 条止损**
+   * （118.10 / 119.607 / 119.627 / 120.942），而交易所侧一张都没有。
+   *
+   * 成因：追踪止损每上移一次就撤旧挂新，于是每轮留下一行 `orders`；
+   * 而结清逻辑原来是"**这个标的还持仓 → 保护单一行都不碰**" ——
+   * 那些旧行于是**永远**停在"已挂单"。用户据此问"这是不是 BUG"，它确实是。
+   *
+   * 判据现在改成"只保护当前生效的那一张"（`positions.stop_order_id` /
+   * `tp_order_id` 指向的），被替换掉的旧单照常走交易所核对 → 结清。
+   */
+  const strategyRecord = strategyStore.list().find((s) => s.name === 'test')!;
+  strategyStore.update(strategyRecord.id, { config: breakevenConfig() });
+
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  const oldStop = purposeRow('stop_loss');
+
+  /* 抬价触发保本止损上移：撤旧、挂新 —— 于是旧的那张成了"历史行"。 */
+  broker.markPrice = 70_000;
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  const moved = positionStore.open(traderId).find((p) => p.symbol === SYMBOL)!;
+  assert.ok(moved.stop_order_id, '前提：止损已重挂');
+  assert.notEqual(
+    String(moved.stop_order_id),
+    String(oldStop.exchangeOrderId),
+    '前提：单号已经换成新的（旧的那张成了历史行）',
+  );
+  assert.equal(orderRow(oldStop.id).status, 'NEW', '前提：旧行仍停在挂单状态');
+
+  ageOrders();
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  assert.equal(
+    orderRow(oldStop.id).status,
+    'CANCELED',
+    '★ 被替换掉的旧保护单必须被结清 —— 否则界面上会堆出一排幽灵「已挂单」',
+  );
 });
 
 /* -------------------------------------------------------------------------- */
