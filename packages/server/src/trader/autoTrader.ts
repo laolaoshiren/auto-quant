@@ -72,6 +72,7 @@ import {
   positions as positionStore,
   resolveOrderMarginUsed,
   settings,
+  TERMINAL_ORDER_STATUSES,
   tradeEvents,
   traders as traderStore,
   trades as tradeStore,
@@ -2908,6 +2909,28 @@ export class AutoTrader {
 
       positionStore.close(row.id);
       expired += 1;
+
+      /*
+       * ⚠️ **撤单成功之后，那张入场单在本地必须立刻变成"已撤销"。**
+       *
+       * 这里原来只关掉 `positions` 的待成交行，而 `orders` 里那张 `entry` 行
+       * 仍然停在 `NEW` —— 于是「当前委托」里一直显示一张**交易所侧已经不存在的**
+       * 挂单。实测（2026-09-26 04:02）：LTCUSDT 的限价开仓单等满 55 分钟被自动撤掉，
+       * 交易所侧逐笔确认没有它，而界面上它仍写着「已挂单」。
+       *
+       * `settleStaleOrders()` 会在**下一轮对账**把它兜底结清，但那最多是一个周期
+       * （45 分钟）之后；而这里**就在撤单发生的这一刻知道事实** ——
+       * 按项目自己的原则（`orders.findByExchangeOrderId()` 的注释写过同一件事：
+       * "让'成交了'这件事在发生的地方写回订单行，而不是指望以后有人来收拾"），
+       * 知道事实的地方就该写它。
+       */
+      if (row.entry_order_id) {
+        const entryOrder = orderStore.findByExchangeOrderId(traderId, String(row.entry_order_id));
+        if (entryOrder && !TERMINAL_ORDER_STATUSES.includes(entryOrder.status)) {
+          orderStore.update(entryOrder.id, { status: 'CANCELED' });
+        }
+      }
+
       this.emit(
         'info',
         `${row.symbol} 的限价挂单已等满 ${Math.round(waitedMinutes)} 分钟（上限 ${limitMinutes}）仍未成交，已自动撤掉并释放该入场名额。`,
