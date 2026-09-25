@@ -9,6 +9,7 @@ import type { BinanceEnvironment } from '../binance/endpoints.js';
 import { BinanceUserDataStream } from '../binance/ws.js';
 import type { Vault } from '../crypto/vault.js';
 import { createLogger } from '../logger.js';
+import { env } from '../env.js';
 import { MarketDataService } from '../market/service.js';
 import { LlmClient } from '../llm/client.js';
 import { discoverModels } from '../llm/discovery.js';
@@ -138,6 +139,20 @@ export interface StartResult {
  */
 export class TraderManager {
   private readonly running = new Map<number, AutoTrader>();
+  /**
+   * 正在启动中的机器人（**跨 await 的互斥锁**）。
+   *
+   * `this.running.has(id)` 是**同步**判断，而 `this.running.set(id, autoTrader)`
+   * 发生在一长串 `await` 之后（连交易所、校时、`exchangeInfo`、LLM `testConnection`、
+   * 拉 N 个标的的标记价）。中间任何时刻到达的第二个 `POST /start` 都会看到
+   * "还没在运行" → **两个 `AutoTrader` 先后 `start()` 成功、后者覆盖前者**：
+   * 两个循环用同一份凭据重复下单、重复写同一批数据库行，而且其中一个
+   * `stopTrader` 根本停不掉（`running` 里只剩后写入的那一个）。
+   *
+   * 双击按钮、脚本重试、或者"操作员点启动时恰好有一次开机退避重试在等"，
+   * 都能凑成这个组合。所以启动必须**先占位、再干活**。
+   */
+  private readonly starting = new Set<number>();
   private readonly connections = new Map<number, ExchangeConnection>();
   private readonly userStreams = new Map<number, BinanceUserDataStream>();
   /**
@@ -558,42 +573,78 @@ export class TraderManager {
     dryRun: boolean,
     options: { retryTransient?: boolean } = {},
   ): Promise<StartResult> {
+    /*
+     * ⚠️ **全局熔断必须在"生命周期的最底层"判定，而不是只装在 HTTP 路由上。**
+     *
+     * `GLOBAL_TRADING_DISABLED` 原来只有两处判定：`/start` 与 `/run-once` 路由。
+     * 而开机恢复走的是 `resumePersisted()` → `startTrader()`，**中间没有任何开关判定**
+     * —— 于是操作员设了 `GLOBAL_TRADING_DISABLED=true` 并重启（改 env 只能靠重启，
+     * 这是唯一的变更途径）之后，**所有原本 running 的机器人会照常用 `dryRun=false`
+     * 恢复实盘交易**，而 `index.ts` 还会打印「任何机器人都无法启动」——
+     * 一句**事实错误**的日志，让操作员以为已经止血。
+     *
+     * 放在这里而不是只补在 `resumePersisted()`：这是所有启动路径的唯一收口
+     * （路由、开机恢复、以及任何未来的自动调用者），一行判定就能让开关真的生效。
+     */
+    if (env.globalTradingDisabled) {
+      log.warn(`机器人 ${traderId} 的启动被拒绝：GLOBAL_TRADING_DISABLED 已设置。`);
+      return {
+        ok: false,
+        error: 'GLOBAL_TRADING_DISABLED 已设置 —— 拒绝启动任何机器人（这是全局熔断，不是这一台的问题）。',
+        preflight: [],
+      };
+    }
+
     const trader = traders.get(traderId);
     if (!trader) return { ok: false, error: `找不到机器人 ${traderId}`, preflight: [] };
 
-    if (this.running.has(traderId)) {
-      return { ok: false, error: '该机器人已经在运行中', preflight: [] };
+    if (this.running.has(traderId) || this.starting.has(traderId)) {
+      return {
+        ok: false,
+        error: this.starting.has(traderId) ? '该机器人正在启动中' : '该机器人已经在运行中',
+        preflight: [],
+      };
     }
 
-    this.stopping = false;
-    const retry = options.retryTransient === true;
+    /*
+     * 占位必须在**第一个 await 之前**，否则并发 start 会双双通过上面那道检查
+     * （见 `starting` 的说明）。`finally` 保证任何出口都释放 —— 启动失败时
+     * 也要能重来，否则一次网络抖动就会让这台机器人**再也点不起来**。
+     */
+    this.starting.add(traderId);
+    try {
+      this.stopping = false;
+      const retry = options.retryTransient === true;
 
-    for (let attempt = 0; ; attempt += 1) {
-      const outcome = await this.attemptStart(traderId, trader, dryRun);
-      if (outcome.result.ok) return outcome.result;
+      for (let attempt = 0; ; attempt += 1) {
+        const outcome = await this.attemptStart(traderId, trader, dryRun);
+        if (outcome.result.ok) return outcome.result;
 
-      const message = outcome.result.error ?? '未知错误';
-      const canRetry =
-        retry &&
-        !outcome.permanent &&
-        !this.cancelledStarts.has(traderId) &&
-        !this.stopping &&
-        attempt < BOOT_RETRY_BACKOFF_MS.length;
+        const message = outcome.result.error ?? '未知错误';
+        const canRetry =
+          retry &&
+          !outcome.permanent &&
+          !this.cancelledStarts.has(traderId) &&
+          !this.stopping &&
+          attempt < BOOT_RETRY_BACKOFF_MS.length;
 
-      if (!canRetry) return outcome.result;
+        if (!canRetry) return outcome.result;
 
-      const waitMs = BOOT_RETRY_BACKOFF_MS[attempt] ?? 90_000;
-      log.warn(
-        `机器人 ${traderId} 启动失败（第 ${attempt + 1} 次）：${message}；${Math.round(waitMs / 1000)}s 后重试`,
-      );
-      runtimeLogs.write(
-        traderId,
-        'warn',
-        'manager',
-        `启动失败，${Math.round(waitMs / 1000)} 秒后自动重试（第 ${attempt + 1}/${BOOT_RETRY_BACKOFF_MS.length} 次）：${message}`,
-      );
-      await this.waitForRetry(waitMs, traderId);
-      if (this.cancelledStarts.has(traderId) || this.stopping) return outcome.result;
+        const waitMs = BOOT_RETRY_BACKOFF_MS[attempt] ?? 90_000;
+        log.warn(
+          `机器人 ${traderId} 启动失败（第 ${attempt + 1} 次）：${message}；${Math.round(waitMs / 1000)}s 后重试`,
+        );
+        runtimeLogs.write(
+          traderId,
+          'warn',
+          'manager',
+          `启动失败，${Math.round(waitMs / 1000)} 秒后自动重试（第 ${attempt + 1}/${BOOT_RETRY_BACKOFF_MS.length} 次）：${message}`,
+        );
+        await this.waitForRetry(waitMs, traderId);
+        if (this.cancelledStarts.has(traderId) || this.stopping) return outcome.result;
+      }
+    } finally {
+      this.starting.delete(traderId);
     }
   }
 
@@ -1446,6 +1497,17 @@ export class TraderManager {
      * starting it would be this code overriding a human.
      */
     const resumable = new Set(['running', 'safe_mode', 'error']);
+
+    /*
+     * 全局熔断期间**不恢复任何机器人**，而且不要把它们标成 `error` ——
+     * 那是"启动失败"的语义，会被下一次重启当成待恢复的故障，也会在界面上
+     * 误导操作员去排查一个不存在的问题。这里只留一条 warn，然后什么都不做。
+     * （真正的收口在 `startTrader()` 里，这一条只是别让状态被写坏。）
+     */
+    if (env.globalTradingDisabled) {
+      log.warn('GLOBAL_TRADING_DISABLED 已设置 —— 跳过开机恢复，不会启动任何机器人。');
+      return;
+    }
 
     for (const trader of traders.list()) {
       if (!resumable.has(trader.status)) continue;

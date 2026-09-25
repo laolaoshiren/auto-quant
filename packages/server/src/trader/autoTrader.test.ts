@@ -142,6 +142,16 @@ function permissiveConfig(): StrategyConfig {
  */
 class FakeBroker {
   readonly placed: Array<Parameters<BinanceBroker['placeOrder']>[0]> = [];
+  /**
+   * 每次 `placeOrder` 分配的**交易所订单号**，与 `placed` 同索引。
+   *
+   * 成交明细（`getUserTrades`）必须报同一个 `orderId` —— 开仓路径正是按它把佣金
+   * 查回来的。桩里原来那个 `orderId` 是从 `clientOrderId` 里**抠数字拼出来的**，
+   * 与真实契约不符（币安的 `orderId` 是交易所自己的编号，与客户单号没有数字关系），
+   * 于是"按 `orderId` 过滤"的代码在这个桩上恒不命中 ——
+   * **桩比实现更宽松，就会把 bug 藏起来**（这正是 `failCancel` 那条注释说的同一件事）。
+   */
+  readonly placedIds: string[] = [];
   readonly cancelledSymbols: string[] = [];
   /**
    * 下单与撤单的**交错顺序**。
@@ -277,8 +287,23 @@ class FakeBroker {
     if (order) order.status = 'CANCELED';
   }
 
-  /** 用例设成 true 时，撤单请求会失败（模拟"撤的时候交易所说它已经没了"）。 */
+  /**
+   * 用例设成 true 时，撤单请求会**失败**。
+   *
+   * ⚠️ **失败形态必须是"静默返回 false"，与真实 `broker.cancelOrder` 一致。**
+   *
+   * 真实实现是 `Promise<boolean>`：所有失败路径 `return false` 而**不抛**
+   * （只有 `-2011`「单子已经不在交易所了」返回 `true`）。
+   * 这个桩原来在失败时**抛异常**、成功时返回 `undefined` —— 两个方向都与真实契约
+   * 相反。后果是**测试假绿**：调用点里"看返回值"的代码从来没被测过，
+   * 而"只看异常"的代码反而总会走进 `catch`。
+   *
+   * 2026-09-26 的核查正是在这里发现了 P0-10/P0-11 两处 bug 能"通过测试"的原因：
+   * 桩会抛，生产不会 —— 于是「撤不掉就不要挂新的」在生产里是死代码。
+   */
   failCancel = false;
+  /** 撤单时**抛异常**（另一种真实形态：网络层错误）。用于覆盖 `catch` 分支。 */
+  throwOnCancel = false;
   /** 让 `cancelAllOrders` 抛错 —— 见那条"撤不掉就不挂新的"用例。 */
   failCancelAll = false;
 
@@ -310,6 +335,7 @@ class FakeBroker {
     this.placed.push(request);
     this.opLog.push(`place:${request.type}@${request.triggerPrice ?? request.price ?? '-'}`);
     const id = String(this.nextId++);
+    this.placedIds.push(id);
     const isConditional = request.type === 'STOP_MARKET' || request.type === 'TAKE_PROFIT_MARKET';
 
     /*
@@ -519,12 +545,22 @@ class FakeBroker {
    * 而测试里没有对应实现。之前测试不炸，只是因为配置里阈值默认为 0、
    * 那一行提前返回了：**没测的路径就是可能已经坏掉的路径。**
    */
-  async cancelOrder(symbol: string, orderId: number) {
-    /* 用例可以设成 true，模拟"撤的时候交易所说这张单已经没了"。 */
-    if (this.failCancel) {
-      throw new Error(symbol + ' 的订单 ' + orderId + ' 不存在或已终结');
+  async cancelOrder(symbol: string, orderId: number): Promise<boolean> {
+    /*
+     * 与真实 `broker.cancelOrder` 保持**同一个契约**：
+     *   · 成功 → `true`
+     *   · 被拒 → `false`（**不抛**）—— `failCancel`
+     *   · 网络层异常 → 抛 —— `throwOnCancel`
+     *
+     * 这条对齐是必须的：桩与实现的失败形态一旦不同，调用点里
+     * "检查返回值"的代码就永远不会被测到（见 `failCancel` 的注释）。
+     */
+    if (this.throwOnCancel) {
+      throw new Error(symbol + ' 的订单 ' + orderId + ' 撤销时网络中断');
     }
+    if (this.failCancel) return false;
     this.opLog.push(`cancel:${symbol}#${orderId}`);
+    return true;
   }
 
   async cancelAllOrders(symbol: string) {
@@ -568,19 +604,22 @@ class FakeBroker {
    *   · 或打开 `autoUserTrades` —— 那时每一笔**已下的市价单**会按 `commissionRate`
    *     生成一条成交，用于验证"运行期能不能把手续费读回来"。
    *
-   * 后者是必需的：开仓路径要按 `clientOrderId` 去成交明细里查佣金，而那个订单号
+   * 后者是必需的：开仓路径要按**交易所订单号**去成交明细里查佣金，而那个订单号
    * 是运行期生成的（`makeClientId` 带随机后缀），测试**没法预先知道**它。
+   * 所以这里报的是 `placedIds` 里那个与 `placeOrder` 同一次调用分配的 id。
    */
   async getUserTrades() {
     if (!this.autoUserTrades) return this.userTrades;
     return this.placed
-      .filter((r) => r.type === 'MARKET')
-      .map((r) => {
+      .map((request, index) => ({ request, id: this.placedIds[index] ?? '' }))
+      .filter(
+        ({ request }) => request.type === 'MARKET',
+      )
+      .map(({ request: r, id }) => {
         const qty = r.quantity ?? 0;
         const price = this.markPrice;
         return {
-          orderId: Number(r.clientOrderId?.replace(/\D/g, '') ?? 0) || 0,
-          clientOrderId: r.clientOrderId ?? '',
+          orderId: Number(id) || 0,
           symbol: r.symbol,
           side: r.side,
           price: String(price),

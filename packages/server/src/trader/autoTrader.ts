@@ -2873,7 +2873,26 @@ export class AutoTrader {
 
       try {
         if (row.entry_order_id) {
-          await this.deps.broker.cancelOrder(row.symbol, Number(row.entry_order_id), 'order');
+          /*
+           * ⚠️ **必须看返回值。**
+           *
+           * `cancelOrder` 失败时 `return false` 而**不抛**，所以只有 `try/catch`
+           * 接不住它 —— 下面那句「撤不掉就留着」就成了死代码，而
+           * `positionStore.close(row.id)` 会照常执行：**本地记录被销毁，
+           * 而交易所那张单还挂着**。它随后成交 = 一个既没有本地行、
+           * 也没有保护单的裸仓（§2.6 的最糟状态之一）。
+           */
+          const cancelled = await this.deps.broker.cancelOrder(
+            row.symbol,
+            Number(row.entry_order_id),
+            'order',
+          );
+          if (!cancelled) {
+            log.warn(
+              `[${this.deps.trader.name}] ${row.symbol} 的挂单超时但交易所拒绝撤销 —— 保留本地记录，等下一轮重试。`,
+            );
+            continue;
+          }
         }
       } catch (error) {
         /*
@@ -3128,17 +3147,29 @@ export class AutoTrader {
    *  2. **总账校验无法把"未平仓的持有成本"加到平台侧**（它要读这个字段），
    *     于是那个差额被报成"账本可能有漏记或重复记账"，而且每轮报一次。
    *
-   * 按 `clientOrderId` 筛而不是"取最后一笔"：市价单可能拆成多笔成交
+   * 按**交易所订单号**（`orderId`）筛而不是"取最后一笔"：市价单可能拆成多笔成交
    * （`lastFillFor` 只取最后一笔，对平仓够用，因为那里同时要的是最新价）。
    * 佣金是**支出**，币安报成负数，这里取绝对值 —— 与 `orders.fee` 的语义
    * （"付了多少"的正数）一致。
+   *
+   * ## ⚠️ 不能按 `clientOrderId` 筛 —— 那个字段在响应里根本不存在
+   *
+   * 这里原来按 `f.clientOrderId` 过滤，而 `BinanceUserTrade`（`types.ts`）
+   * **没有这个字段**（`/fapi/v1/userTrades` 的真实响应字段表里也没有它）。
+   * 于是 `mine.length` 恒为 0、函数**恒返回 0**：
+   *
+   *   · `orders.fee` 对每一张开仓单都是 0 → 订单列表的「手续费」列永远空着；
+   *   · 总账校验读不到"未平仓的持有成本"，那条差额告警每轮都报；
+   *   · 而且 `detectCloseReason` 里同一个 `clientOrderId` 过滤也恒不命中
+   *     （爆仓会被记成普通止损）。
+   *
+   * 换成 `f.orderId`（真实存在，且同一订单的多笔成交共用它）之后，
+   * "这笔开仓到底付了多少佣金"才第一次真的取得回来。
    */
-  private async entryFeeFor(symbol: string, clientOrderId: string): Promise<number> {
+  private async entryFeeFor(symbol: string, orderId: string): Promise<number> {
     try {
       const fills = await this.deps.broker.getUserTrades(symbol, 20);
-      const mine = fills.filter(
-        (f) => String((f as { clientOrderId?: string }).clientOrderId ?? '') === clientOrderId,
-      );
+      const mine = fills.filter((f) => String(f.orderId) === String(orderId));
       if (mine.length === 0) return 0;
       return Math.abs(mine.reduce((sum, f) => sum + (Number(f.commission) || 0), 0));
     } catch {
@@ -3928,11 +3959,41 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      * takes it out of `positionStore.open()`, so the later pass cannot book the
      * same round-trip twice.
      */
-    const livePositions = await this.deps.broker.getPositions().catch(() => []);
-    const liveSymbols = new Set(livePositions.map((p) => p.symbol));
-    for (const local of positionStore.open(traderId)) {
-      if (!liveSymbols.has(local.symbol)) {
-        await this.bookVanishedPosition(local);
+    /*
+     * ⚠️ **读不到持仓 ≠ 交易所上没有仓位。**
+     *
+     * 这一行原来是 `getPositions().catch(() => [])`，于是**一次网络抖动 / 一次 5xx**
+     * 就足以让 `liveSymbols` 变成空集，下面的循环随即把**每一个**本地持仓判成
+     * "已在交易所消失" → `bookVanishedPosition()` 给它们各写一行 `trades`
+     * （出场价取最近一笔成交、原因多半落到 `stop_loss`），再 `positionStore.close()`
+     * 把真实持仓从本地账本抹掉。
+     *
+     * 两个后果都很重，而且方向相反：
+     *   · **凭空记账**会永久污染账本，还会让后续对账的幂等判定（`findDuplicate`）
+     *     命中那行假记录 —— `docs/AGENTS.md` §2.3 专门写过「漏记会在下一轮自己修好，
+     *     而凭空记一笔会永久污染账本」；
+     *   · **本地持仓被抹掉**，而交易所上的敞口还在 —— 机器人下一轮按"空仓"决策，
+     *     那正是 §2.6 说的最糟状态。
+     *
+     * 所以拉不到就**整段跳过**：少记一轮没有代价（下一轮会补上），凭空记一笔没有救。
+     */
+    let livePositions: Awaited<ReturnType<typeof this.deps.broker.getPositions>> | null = null;
+    try {
+      livePositions = await this.deps.broker.getPositions();
+    } catch (error) {
+      this.emit(
+        'warn',
+        `读不到交易所持仓（${(error as Error).message}）—— 本轮跳过"持仓消失"的核对，` +
+          '避免把网络故障当成已平仓而凭空记账。',
+      );
+    }
+
+    if (livePositions !== null) {
+      const liveSymbols = new Set(livePositions.map((p) => p.symbol));
+      for (const local of positionStore.open(traderId)) {
+        if (!liveSymbols.has(local.symbol)) {
+          await this.bookVanishedPosition(local);
+        }
       }
     }
 
@@ -4092,8 +4153,16 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      */
     const openCosts = (() => {
       try {
-        const symbols = positionStore.open(traderId).map((p) => p.symbol);
-        return orderStore.openEntryCosts(traderId, symbols);
+        /*
+         * 传**入场订单号**而不是标的：同一标的反复开平时，按标的过滤会把
+         * 历史回合的入场费再加一遍（那些回合已经在 `platformSelf` 里了）。
+         * 详见 `openEntryCosts` 的注释。
+         */
+        const entryOrderIds = positionStore
+          .open(traderId)
+          .map((p) => p.entry_order_id)
+          .filter((id): id is string => typeof id === 'string' && id.length > 0);
+        return orderStore.openEntryCosts(traderId, entryOrderIds);
       } catch {
         /* 读不到就按 0：宁可这一轮差一点，也不要让对账整个失败。 */
         return 0;
@@ -4672,9 +4741,21 @@ reduceQuantity: null,
          * 它同时撤**普通单和条件单**，会把**止盈单一起撤掉** —— 而本函数只重挂止损，
          * 那个止盈就永久没了。**精选要撤的那一张**，而不是推倒重来。
          */
+        /*
+         * ⚠️ **不要用 `.then(() => true)` 把它"变成成功"。**
+         *
+         * `broker.cancelOrder()` 的签名是 `Promise<boolean>`，**所有失败路径都
+         * `return false` 而不抛**。这里原来写着 `.then(() => true)`，于是
+         * `cancelled` 恒为 `true` —— 下面那句「撤不掉就不要挂新的」成了**死代码**，
+         * 撤单失败照样去挂新止损 → 必然吃 `-4130` → `newStopId` 为 null →
+         * 按 §2.6 市价平掉一个本来有保护、而且可能正在盈利的仓位。
+         *
+         * 这正是 `executeAdjust` 里那个已经修好的 bug（2026-09-22 ADAUSDT）在
+         * **另一个函数里原样存在**：同一个文件里两处要求同一条顺序，只改了一处。
+         * 少一个 `.then` 就是全部差别。
+         */
         const cancelled = await this.deps.broker
           .cancelOrder(local.symbol, oldStopId, 'algo')
-          .then(() => true)
           .catch(() => false);
         if (!cancelled) {
           /*
@@ -4718,13 +4799,23 @@ reduceQuantity: null,
           traderId,
         ).catch(() => null);
         const still = positionStore.getOpenBySymbol(traderId, local.symbol);
-        if (still) {
+        /*
+         * ⚠️ **只有交易所确认成交了才记账**（`flatten === null` 表示"没确认"）。
+         * 未确认就 `bookClosedPosition` = 账本说已平、交易所上仓位还在。
+         * 漏记会在下一轮对账里补上，凭空记一笔不会自己消失（§2.3）。
+         */
+        if (still && flatten) {
           await this.bookClosedPosition(
             still,
             'protection_unavailable',
-            flatten?.avgPrice || view.markPrice,
-            flatten?.fee ?? 0,
+            flatten.avgPrice,
+            flatten.fee,
             new Date().toISOString(),
+          );
+        } else if (still) {
+          this.emit(
+            'warn',
+            `${local.symbol} 的紧急平仓未获确认，本轮不记账（本地持仓保留），交给下一轮对账处理。`,
           );
         }
         moved += 1;
@@ -4779,7 +4870,16 @@ reduceQuantity: null,
     // Cancel the resting stop/target FIRST. A `closePosition` algo order survives
     // a manual close and would fire into a flat book, opening a new position in
     // the opposite direction.
-    await this.deps.broker.cancelAllOrders(symbol);
+    //
+    // ⚠️ 撤单失败**不阻断平仓**：撤不掉的挂单是麻烦，而平不掉的亏损仓位是危险。
+    // 两害相权先平 —— 这里显式吞掉异常（`cancelAllOrders` 的契约是"撤不掉就抛"，
+    // 所以必须接住，否则一个网络抖动会让平仓指令根本发不出去）。
+    await this.deps.broker.cancelAllOrders(symbol).catch((error) => {
+      this.emit(
+        'warn',
+        `${symbol} 平仓前撤单失败（${(error as Error).message}），仍然继续平仓。`,
+      );
+    });
 
     try {
       const placed = await this.deps.broker.placeOrder({
@@ -5131,9 +5231,28 @@ reduceQuantity: null,
       };
     }
 
+    /*
+     * ⚠️ **两种失败形态都要接住：抛异常，以及"静默返回 false"。**
+     *
+     * `broker.cancelOrder()` 的契约是 `Promise<boolean>`，**失败时 `return false`
+     * 而不抛**（只有 `-2011` 例外，它表示"单子已经不在交易所了"= 成功）。
+     * 这里原来只写了 `try/catch` —— 于是撤单真的被拒时 `catch` 不触发，
+     * 代码继续走到下面的 `positionStore.close(row.id)`：**本地记录被销毁，
+     * 而交易所那张单还挂着**。它随后成交 = 一个既没有本地行、也没有保护单的裸仓。
+     *
+     * 这与 `expireStalePendingEntries()`（挂单超时撤）和 `applyBreakevenGuard()`
+     * （保本移损）里那两处是**同一个形状** —— 适配层用"返回值"表达失败、
+     * 调用层用"异常"表达失败，编译器抓不到，所以三处都要显式判断。
+     */
+    let cancelFailure: string | null = null;
     try {
-      await this.deps.broker.cancelOrder(symbol, Number(orderId), 'order');
+      const cancelled = await this.deps.broker.cancelOrder(symbol, Number(orderId), 'order');
+      if (!cancelled) cancelFailure = '交易所拒绝了撤单请求（返回 false，未抛错）';
     } catch (error) {
+      cancelFailure = (error as Error).message;
+    }
+
+    if (cancelFailure !== null) {
       /*
        * 撤不掉 —— **先查清楚那张单现在是什么状态**，而不是想当然。
        * 查不到（null）也不动：交给下一轮的对账，它每轮都会问一次。
@@ -5154,7 +5273,7 @@ reduceQuantity: null,
         action: decision.action,
         symbol,
         status: 'failed',
-        detail: `撤销 ${symbol} 的挂单失败（${(error as Error).message}）；本地记录保留，下一轮继续尝试。`,
+        detail: `撤销 ${symbol} 的挂单失败（${cancelFailure}）；本地记录保留，下一轮继续尝试。`,
       };
     }
 
@@ -5356,6 +5475,29 @@ reduceQuantity: null,
         .map((h) => `${h.status}:${h.action} ${h.symbol}`)
         .join('、')}`,
     );
+
+    /*
+     * ⚠️ **回执路径同样需要「有决策块」这道闸门 —— 主路径有，这里原来漏了。**
+     *
+     * `parseDecisionResponse` 找不到 `<decision>` 时会**逐步放宽**（先试围栏代码块、
+     * 再试第一个平衡的 JSON）。而这一次的回复里**带着系统提示词自己的范例**：
+     * 模型在 `<reasoning>` 里回显、引用、或改写示例 JSON 是常态（提示词里就有
+     * 三份完整的 `adjust_protection` / `cancel_pending` 范例）。
+     *
+     * 于是一段被截断的回复（回执输出很容易撞上长度上限）会让**推理文字里的
+     * 范例 JSON 变成真实指令**：`adjust_protection` 会去移保护位、`cancel_pending`
+     * 会真的撤单。白名单挡得住开仓，挡不住这两个 —— 而它们都会动真实挂单。
+     *
+     * 主路径（`analyze()`）早就用 `hasDecisionBlock()` 挡住了同一件事，
+     * 这里补上同一道判据：**没有决策块 = 这一轮没有任何指令**。
+     */
+    if (!hasDecisionBlock(text)) {
+      this.emit(
+        'info',
+        '执行回执的回复里没有决策块 —— 本轮不执行任何调整（避免把推理里回显的范例 JSON 当成指令）。',
+      );
+      return [];
+    }
 
     const parsed = parseDecisionResponse(text, {
       candidateSymbols: new Set(positionStore.open(traderId).map((p) => p.symbol)),
@@ -5575,7 +5717,7 @@ reduceQuantity: null,
        * ⚠️ **开仓手续费要自己查一次** —— 下单响应里没有它，而订单列表要显示、
        * 总账校验也要用它。见 `entryFeeFor` 的说明。
        */
-      const entryFee = await this.entryFeeFor(symbol, clientOrderId);
+      const entryFee = await this.entryFeeFor(symbol, filled.id);
 
       /*
        * 保证金在这一个地方算，两个消费者用它：这一行订单（订单记录里那一列）与
@@ -5739,13 +5881,22 @@ reduceQuantity: null,
          */
         const flatten = await this.emergencyFlatten(symbol, filledQty, exitSide, traderId);
         const localPosition = positionStore.getOpenBySymbol(traderId, symbol);
-        if (localPosition) {
+        if (localPosition && flatten) {
           await this.bookClosedPosition(
             localPosition,
             'protection_unavailable',
-            flatten?.avgPrice || entryPrice,
-            flatten?.fee ?? 0,
+            flatten.avgPrice,
+            flatten.fee,
             new Date().toISOString(),
+          );
+        } else if (localPosition) {
+          /*
+           * 平仓未获确认 —— **不记账**（见 `emergencyFlatten` 里的说明）。
+           * 上一轮的账本是"漏记会在下一轮自己修好"，凭空记一笔不会。
+           */
+          this.emit(
+            'warn',
+            `${symbol} 的紧急平仓未获确认，本轮不记账（本地持仓保留），交给下一轮对账处理。`,
           );
         } else {
           // Cannot happen while the insert above succeeded, but a missing row
@@ -6062,7 +6213,7 @@ reduceQuantity: null,
      *
      * 与开仓同一处口径：手续费要另外查成交明细（下单响应里没有）。
      */
-    const addFee = await this.entryFeeFor(decision.symbol, clientOrderId);
+    const addFee = await this.entryFeeFor(decision.symbol, filledId);
     /*
      * 这一笔加仓**自己**占用的保证金（与开仓同一口径：成交价 × 成交数量 ÷ 杠杆，
      * 用 `local.leverage` —— 加仓不改杠杆）。不是加完之后整个持仓的保证金：
@@ -6517,13 +6668,18 @@ reduceQuantity: null,
       () => null,
     );
     const still = positionStore.getOpenBySymbol(traderId, symbol);
-    if (still) {
+    if (still && flatten) {
       await this.bookClosedPosition(
         still,
         'protection_unavailable',
-        flatten?.avgPrice || fallbackPrice,
-        flatten?.fee ?? 0,
+        flatten.avgPrice,
+        flatten.fee,
         new Date().toISOString(),
+      );
+    } else if (still) {
+      this.emit(
+        'warn',
+        `${symbol} 的紧急平仓未获确认，本轮不记账（本地持仓保留），交给下一轮对账处理。`,
       );
     }
   }
@@ -6680,13 +6836,18 @@ reduceQuantity: null,
         traderId,
       ).catch(() => null);
       const still = positionStore.getOpenBySymbol(traderId, decision.symbol);
-      if (still) {
+      if (still && flatten) {
         await this.bookClosedPosition(
           still,
           'protection_unavailable',
-          flatten?.avgPrice || decision.takeProfit || 0,
-          flatten?.fee ?? 0,
+          flatten.avgPrice,
+          flatten.fee,
           new Date().toISOString(),
+        );
+      } else if (still) {
+        this.emit(
+          'warn',
+          `${decision.symbol} 的紧急平仓未获确认，本轮不记账（本地持仓保留），交给下一轮对账处理。`,
         );
       }
       return {
@@ -6872,6 +7033,33 @@ reduceQuantity: null,
       const filled = await this.deps.broker.waitForFill(placed);
 
       /*
+       * ⚠️ **"没成交"和"平掉了"是两句相反的话，这里必须挡住。**
+       *
+       * `waitForFill` 超时（默认 10s）后会返回**它最后一次轮询看到的东西** ——
+       * 可能是一张仍然挂着的单、也可能是 `executedQty = 0`。原来的代码不看这个
+       * 数字，照样返回 `{avgPrice, fee}`，而**5 处调用点都拿它当"已经平掉"的
+       * 凭据**去 `bookClosedPosition()`：写一行 `trades` + `positionStore.close()`。
+       *
+       * 结果是 §2.6 那个最糟状态的镜像：**交易所上仓位还在、保护单已经被撤掉、
+       * 而本地账本说已经平了** —— 机器人下一轮按"空仓"决策，敞口无人管。
+       *
+       * 对照：同文件 `executeClose` 有一整段注释写着「未确认的平仓绝不能记成
+       * 完成的回合」，并在 `filledQty <= 0` 时拒记。**同一条纪律原来只在平仓
+       * 路径实现了，而这里（保护单挂不上时的紧急退出）漏了。**
+       *
+       * 返回 `null` 让调用方**不记账**：漏记会在下一轮 `reconcilePositions` /
+       * 对账里自己修好，而凭空记一笔会永久污染账本（§2.3）。
+       */
+      if (!(Number(filled.executedQty) > 0)) {
+        this.emit(
+          'error',
+          `${symbol} 的紧急平仓没有被交易所确认成交（status=${filled.status}、executedQty=${filled.executedQty}）` +
+            '—— 仓位可能仍然是开的，这一笔不记账，留给下一轮对账处理。需要人工确认交易所侧状态。',
+        );
+        return null;
+      }
+
+      /*
        * Commission is captured here too. This exit is a pure cost — the entry
        * and the exit both paid a fee — and reporting a net PnL that omits it
        * would make the platform's books read better than the account's (§2.5).
@@ -6903,7 +7091,18 @@ reduceQuantity: null,
         fee,
         raw: filled.raw,
       });
-      await this.deps.broker.cancelAllOrders(symbol);
+      /*
+       * 撤掉刚才那张仓位的残余挂单。**这一步失败不能翻转"已经平掉"这个结论** ——
+       * 平仓单已经成交、账也已经记好了，只是还有一张挂单没撤干净。
+       * （`cancelAllOrders` 的契约是"撤不掉就抛"，所以这里必须显式接住，
+       * 否则异常会跑到外层 `catch`，让调用方以为平仓失败而拒绝记账。）
+       */
+      await this.deps.broker.cancelAllOrders(symbol).catch((error) => {
+        this.emit(
+          'warn',
+          `${symbol} 已市价平掉，但残余挂单未能撤净（${(error as Error).message}）—— 需要留意交易所侧。`,
+        );
+      });
       this.emit('warn', `因保护单挂单失败，已市价平掉 ${symbol}。`);
       return { avgPrice: filled.avgPrice, fee };
     } catch (error) {
