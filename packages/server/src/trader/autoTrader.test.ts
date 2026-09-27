@@ -331,12 +331,25 @@ class FakeBroker {
     return { changed: false, warning: null };
   }
 
+  /**
+   * 用例设成一句话时，**条件单挂单会被交易所拒绝**，错误信息就是这句话。
+   *
+   * 用来验证"失败原因必须透传到提示里"：实测 2026-09-27 ETHUSDT 的界面写着
+   * 「新保护单没挂上（…**没有挂单尝试**）」，而交易所其实明确回了
+   * `-4509 Time in Force (TIF) GTE can only be used with open positions`。
+   */
+  failAlgoPlacement: string | null = null;
+
   async placeOrder(request: Parameters<BinanceBroker['placeOrder']>[0]): Promise<PlacedOrder> {
     this.placed.push(request);
     this.opLog.push(`place:${request.type}@${request.triggerPrice ?? request.price ?? '-'}`);
     const id = String(this.nextId++);
     this.placedIds.push(id);
     const isConditional = request.type === 'STOP_MARKET' || request.type === 'TAKE_PROFIT_MARKET';
+
+    if (isConditional && this.failAlgoPlacement) {
+      throw new Error(this.failAlgoPlacement);
+    }
 
     /*
      * ⚠️ **限价单挂上不成交。**
@@ -3395,6 +3408,54 @@ test('★ 被替换掉的旧保护单行会被结清（不再永远显示「已�
     orderRow(oldStop.id).status,
     'CANCELED',
     '★ 被替换掉的旧保护单必须被结清 —— 否则界面上会堆出一排幽灵「已挂单」',
+  );
+});
+
+test('★ 保护单被交易所拒绝时，原因必须出现在提示里（不能写"没有挂单尝试"）', async () => {
+  /*
+   * 实测 2026-09-27 23:08 ETHUSDT 的界面原文：
+   *
+   *     ✗ 执行失败  调整保护 ETHUSDT — 新保护单没挂上（拟设止损=2673、止盈=null；
+   *       **没有挂单尝试**），已按 §2.6 立即平仓
+   *
+   * 而日志里交易所明确回了：
+   *
+   *     -4509 Time in Force (TIF) GTE can only be used with open positions
+   *
+   * 根因：`placeProtection()` **自己吞掉异常**（它要记一行 REJECTED 订单），
+   * 所以调用方的 `.catch()` 永远收不到 —— `failed` 数组是空的，于是渲染成
+   * "没有挂单尝试"。一句把可诊断问题变成不可诊断的话。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  broker.failAlgoPlacement =
+    '币安错误 -4509：Time in Force (TIF) GTE can only be used with open positions.';
+
+  const adjustResponse = `<decision>[{"symbol":"${SYMBOL}","action":"adjust_protection","stop_loss":66500,"confidence":70,"reasoning":"把止损上移。"}]</decision>`;
+  await buildTrader(broker, adjustResponse).runOnce();
+
+  /* ① 挂单**确实被尝试过** —— 所以"没有挂单尝试"这句话本身是错的。 */
+  assert.ok(
+    broker.opLog.some((op) => op.startsWith('place:STOP_MARKET')),
+    '前提：新止损确实被提交过（否则"没有挂单尝试"就不是措辞问题而是事实）',
+  );
+
+  /* ② 交易所的拒绝原因必须出现在这一轮的执行日志里。 */
+  const row = getDb().get<{ execution_log_json: string }>(
+    'SELECT execution_log_json FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT 1',
+    traderId,
+  );
+  assert.ok(row, '前提：这一轮落了一条决策记录');
+  assert.match(
+    String(row.execution_log_json),
+    /-4509/,
+    '★ 交易所的拒绝原因必须透传到提示里 —— 否则界面只会说"没有挂单尝试"',
+  );
+  assert.doesNotMatch(
+    String(row.execution_log_json),
+    /没有挂单尝试/,
+    '★ 这句话是错的：挂单尝试过了，是被交易所拒了',
   );
 });
 

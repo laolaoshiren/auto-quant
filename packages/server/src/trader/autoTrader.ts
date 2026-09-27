@@ -6241,6 +6241,17 @@ reduceQuantity: null,
     purpose: 'stop_loss' | 'take_profit';
     traderId: number;
     quantity: number;
+    /**
+     * 挂失败时把**原因**交回调用方。
+     *
+     * ⚠️ 这个方法**自己吞掉异常**（它要记一行 `REJECTED` 的订单、并让"止盈失败不
+     * 影响止损"成立），所以调用方的 `.catch()` **永远收不到** ——
+     * 实测 2026-09-27 ETHUSDT：交易所明确回了
+     * `-4509 Time in Force (TIF) GTE can only be used with open positions`，
+     * 而界面上写的是「**没有挂单尝试**」（`failed` 数组是空的）。
+     * 一句把"可诊断"变成"不可诊断"的话。
+     */
+    onFailure?: (reason: string) => void;
   }): Promise<string | null> {
     const clientOrderId = makeClientId(input.purpose, input.symbol);
     try {
@@ -6282,10 +6293,13 @@ reduceQuantity: null,
 
       return placed.id;
     } catch (error) {
+      const reason = (error as Error).message;
       this.emit(
         'error',
-        `为 ${input.symbol} 挂 ${input.purpose === 'stop_loss' ? '止损' : '止盈'}（触发价 ${input.triggerPrice}）失败：${(error as Error).message}`,
+        `为 ${input.symbol} 挂 ${input.purpose === 'stop_loss' ? '止损' : '止盈'}（触发价 ${input.triggerPrice}）失败：${reason}`,
       );
+      /* 把原因交回调用方 —— 界面要显示它，而不是"没有挂单尝试"。 */
+      input.onFailure?.(reason);
       this.recordOrder({
         traderId: input.traderId,
         exchangeOrderId: null,
@@ -6801,21 +6815,9 @@ reduceQuantity: null,
         purpose: 'stop_loss',
         traderId: input.traderId,
         quantity: input.quantity,
+        /* 原因要带回去，见 `onFailure` 的说明。 */
+        onFailure: (reason) => failures.push(`止损：${reason}`),
       }).catch((error) => {
-        /*
-         * ⚠️ **不能只 `catch(() => null)`。**
-         *
-         * 原来失败的原因被整个吞掉，调用方只能报"止损缺失"——
-         * 而**缺失的原因决定了操作员该做什么**：
-         *
-         *   · 触发价方向不对 → 模型的价位给错了
-         *   · 交易所拒单（-2021 会立即成交）→ 当前波动太大，该等
-         *   · 网络/限流 → 下一轮会好
-         *
-         * 三种都报成同一句话，等于把可诊断的问题变成了不可诊断的。
-         * 这条是在模拟回放里发现的：17 次调整保护位全部失败，
-         * 而日志只肯说"新保护单没挂上"。
-         */
         failures.push(`止损：${(error as Error).message}`);
         return null;
       });
@@ -6829,6 +6831,7 @@ reduceQuantity: null,
         purpose: 'take_profit',
         traderId: input.traderId,
         quantity: input.quantity,
+        onFailure: (reason) => failures.push(`止盈：${reason}`),
       }).catch((error) => {
         failures.push(`止盈：${(error as Error).message}`);
         return null;
@@ -6954,6 +6957,36 @@ reduceQuantity: null,
     }
 
     /*
+     * ⚠️ **撤旧单、挂新单之前，先问一句：交易所侧还有这个仓位吗？**
+     *
+     * 2026-09-27 23:08 ETHUSDT 实测：那张平仓单其实已经成交，只是本地这一轮
+     * 还没确认（`waitForFill` 超时 → 按 §2.6 的保守口径"不记账，等对账"），
+     * 紧接着模型的执行回执要求调整保护位 —— 于是系统去挂一张 `closePosition`
+     * 止损，币安回：
+     *
+     *     -4509 Time in Force (TIF) GTE can only be used with open positions
+     *
+     * 那句错误本身是**对的**（没有仓位当然挂不上）；错的是我们**没先问**。
+     * 系统随后判"调整后没有有效止损"→ 按 §2.6 **尝试市价平仓** → 又吃
+     * `-2022 ReduceOnly Order is rejected`（无仓可减）。界面上于是出现两条
+     * 互相矛盾的失败提示，而真相只有一句：**仓位早就不在了。**
+     *
+     * 所以先读一次交易所持仓：没有就**什么都不做**（不撤单、不挂单、不平仓），
+     * 把本地记录交给对账 —— 它会按交易所的实际持仓把这一回合正确结掉。
+     */
+    const livePositions = await this.deps.broker.getPositions(local.symbol).catch(() => null);
+    if (livePositions !== null && livePositions.length === 0) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'skipped',
+        detail:
+          `${decision.symbol} 在交易所侧已经没有持仓（可能刚被平掉）—— ` +
+          '不需要调整保护位，也**不会**留下无保护敞口；本地记录交给对账结清。',
+      };
+    }
+
+    /*
      * ① 先撤旧单 —— 这一条不能颠倒。
      *
      * 🔴 **这里曾经写的是 `.catch(() => 继续挂新单)`，那是一个会平掉盈利仓位的 BUG。**
@@ -7009,6 +7042,8 @@ reduceQuantity: null,
         purpose: 'stop_loss',
         traderId,
         quantity: local.quantity,
+        /* 失败原因必须带进 `failed` —— 否则界面只会写"没有挂单尝试"。 */
+        onFailure: (reason) => failed.push(`止损：${reason}`),
       }).catch((error) => {
         failed.push(`止损：${(error as Error).message}`);
         return null;
@@ -7025,6 +7060,7 @@ reduceQuantity: null,
         purpose: 'take_profit',
         traderId,
         quantity: local.quantity,
+        onFailure: (reason) => failed.push(`止盈：${reason}`),
       }).catch((error) => {
         failed.push(`止盈：${(error as Error).message}`);
         return null;
