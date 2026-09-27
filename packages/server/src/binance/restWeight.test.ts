@@ -4,6 +4,7 @@ import {
   BinanceRest,
   decayWeight,
   MAX_IN_FLIGHT_REQUESTS,
+  preserveBigIds,
   WEIGHT_LIMIT_DEFAULT,
   WEIGHT_WINDOW_MS,
 } from './rest.js';
@@ -349,4 +350,45 @@ test('★ 下单请求遇到"结果未知"时不重发 —— 一次超时不该
   const plain = makeSignedRest(1);
   await assert.rejects(plain.signedRequest('GET', '/fapi/v1/openOrders', {}));
   assert.equal(attempts.length, 2, '普通请求的重试行为不能被这次改动波及');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  大整数单号                                                                  */
+/* -------------------------------------------------------------------------- */
+
+test('★ 19 位订单号必须原样保留为字符串 —— 否则撤单会打到一个不存在的单号上', () => {
+  /*
+   * 实测（2026-09-27 ETHUSDT）：币安返回的订单号是 `8389766285736312000`，19 位。
+   * `Number.MAX_SAFE_INTEGER` 只有 `9007199254740991`（16 位），所以
+   * `JSON.parse` 会把它读成 `8389766285736310000` —— **末几位就错了**。
+   *
+   * 后果不是"显示不准"：拿它去 `DELETE /fapi/v1/order` 会打到不存在的单号，
+   * 币安回 `-2011`，而代码把 `-2011` 当成"它已经不在交易所了"= **撤单成功** ——
+   * 于是系统以为撤掉了，那张单其实还挂着（§2.6 的最糟状态）。
+   */
+  const payload =
+    '{"orderId":8389766285736312000,"updateTime":1790342871508,"orderType":"LIMIT","clientOrderId":"entry-abc-BTCUSDT"}';
+
+  const parsed = JSON.parse(preserveBigIds(payload)) as {
+    orderId: unknown;
+    updateTime: number;
+    orderType: string;
+  };
+  assert.equal(parsed.orderId, '8389766285736312000', '大整数单号必须一字不差地保留');
+  assert.equal(typeof parsed.updateTime, 'number', '时间戳（不以 Id 结尾）保持数字不动');
+  assert.equal(parsed.orderType, 'LIMIT');
+
+  /* 说明这个保护是必要的：对确实超出安全整数的值，不经保护就会变。 */
+  const unsafe = '{"orderId":9007199254740993}'; // 2^53 + 1
+  const naive = JSON.parse(unsafe) as { orderId: number };
+  assert.notEqual(
+    String(naive.orderId),
+    '9007199254740993',
+    '（对照）2^53+1 无法用 number 表示 —— 这就是这个函数存在的理由',
+  );
+  assert.equal(
+    (JSON.parse(preserveBigIds(unsafe)) as { orderId: string }).orderId,
+    '9007199254740993',
+    '经保护后原文一字不差',
+  );
 });

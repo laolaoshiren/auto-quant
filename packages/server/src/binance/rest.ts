@@ -96,6 +96,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * ⚠️ **15 位以上的 id 必须以字符串形式解析，否则精度在解析那一刻就丢了。**
+ *
+ * 币安新版订单号是 **19 位**数字（实测 ETHUSDT 限价单：`8389766285736312000`），
+ * 而 `Number.MAX_SAFE_INTEGER` 只有 `9007199254740991`（16 位）。
+ * `JSON.parse` 会把它读成 `8389766285736310000` —— **从末几位起就是错的**。
+ *
+ * 后果不是"显示不准"，而是**拿它去撤单/查询时全部失配**：
+ *
+ *   · `DELETE /fapi/v1/order {orderId}` → 币安找不到这个单号 → 返回 `-2011`，
+ *     而 `cancelOrder` 把 `-2011` 当成"它已经不在交易所了"= **撤单成功** ——
+ *     于是系统以为撤掉了，**那张单其实还挂着**（§2.6 的最糟状态）。
+ *   · `GET /fapi/v1/order {orderId}` → 查不到 → 对账结清不了 → **幽灵委托**。
+ *   · `waitForFill` 轮询 → 永远看不到终态 → 平仓单被判"未确认成交" → 不记账。
+ *
+ * 实测代价（2026-09-27 ETHUSDT）：限价单被判「未成交，已自动撤掉」而它其实成交了；
+ * 平仓单 10 秒内"没进入终态"；随后模型要调保护位时交易所直接回 `-4509
+ * TIF GTE can only be used with open positions`（因为仓位早平了）。
+ *
+ * 所以解析前给这些数字**加引号**：保留原文，不做任何数值转换。
+ * 字段名以 `Id`/`id` 结尾才处理 —— 时间戳（`updateTime`/`time`）保持数字不动。
+ */
+export function preserveBigIds(text: string): string {
+  return text.replace(/"([A-Za-z]*[Ii]d)":(\d{15,})/g, '"$1":"$2"');
+}
+
 /** Binance resets `X-MBX-USED-WEIGHT-1M` on its own one-minute boundary. */
 export const WEIGHT_WINDOW_MS = 60_000;
 
@@ -472,7 +498,7 @@ export class BinanceRest {
     if (!text) return undefined as T;
 
     try {
-      return JSON.parse(text) as T;
+      return JSON.parse(preserveBigIds(text)) as T;
     } catch {
       throw new Error(`Binance returned non-JSON payload from ${path}: ${text.slice(0, 200)}`);
     }

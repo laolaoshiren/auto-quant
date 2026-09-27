@@ -244,7 +244,18 @@ export interface BinanceOrderResponse {
   cumQty: string;
   cumQuote: string;
   executedQty: string;
-  orderId: number;
+  /**
+   * ⚠️ **可能是字符串。**
+   *
+   * 币安新版订单号是 19 位（实测 `8389766285736312000`），超过
+   * `Number.MAX_SAFE_INTEGER`（16 位）。`rest.ts` 的 `preserveBigIds()` 会在解析
+   * 前给这类数字加引号 —— 所以运行时它是**字符串**（精确），而旧的短单号仍是数字。
+   *
+   * 拿它去撤单/查询时**不要 `Number()` 转换**：19 位转成 number 会从末位起失真，
+   * 请求会打到一个不存在的单号上，币安回 `-2011`，而调用方把 `-2011` 当成
+   * "它已经不存在了" = 撤单成功 —— 于是系统以为撤掉了，**那张单其实还挂着**。
+   */
+  orderId: number | string;
   avgPrice: string;
   origQty: string;
   price: string;
@@ -296,7 +307,8 @@ export type BinanceOrderStatus =
  *    the stop is placed first and verified before the target.
  */
 export interface BinanceAlgoOrderResponse {
-  algoId: number;
+  /** 同 `BinanceOrderResponse.orderId`：可能是字符串（大整数保护），不要 `Number()`。 */
+  algoId: number | string;
   clientAlgoId: string;
   algoType: string;
   orderType: BinanceOrderType;
@@ -338,7 +350,8 @@ export type BinanceAlgoStatus =
 export interface BinanceUserTrade {
   symbol: string;
   id: number;
-  orderId: number;
+  /** 同 `BinanceOrderResponse.orderId`：可能是字符串（大整数保护），不要 `Number()`。 */
+  orderId: number | string;
   side: BinanceOrderSide;
   positionSide: 'BOTH' | 'LONG' | 'SHORT';
   price: string;

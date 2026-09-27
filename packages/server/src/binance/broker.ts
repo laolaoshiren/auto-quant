@@ -764,7 +764,7 @@ export class BinanceBroker {
    * their absence cannot distinguish them. The triggered order reports
    * `FINISHED` (or `TRIGGERED`); the other reports `CANCELED`/`EXPIRED`.
    */
-  async getAlgoOrder(algoId: number): Promise<BinanceAlgoOrderResponse | null> {
+  async getAlgoOrder(algoId: string | number): Promise<BinanceAlgoOrderResponse | null> {
     if (this.dryRun) return null;
     try {
       return await this.rest.signedRequest<BinanceAlgoOrderResponse>('GET', '/fapi/v1/algoOrder', {
@@ -793,12 +793,18 @@ export class BinanceBroker {
             ? normalizeStandard(
                 await this.rest.signedRequest<BinanceOrderResponse>('GET', '/fapi/v1/order', {
                   symbol: order.symbol,
-                  orderId: Number(order.id),
+                  /*
+                   * ⚠️ **用字符串，不要 `Number(order.id)`。**
+                   * 币安新版单号 19 位（超过 JS 安全整数）：`Number()` 之后
+                   * 末几位就变了，拿它去查会**永远查不到** → 这里会一路轮询到超时、
+                   * 把一张其实已经成交的单判成"未确认"。
+                   */
+                  orderId: order.id,
                 }),
               )
             : normalizeAlgo(
                 await this.rest.signedRequest<BinanceAlgoOrderResponse>('GET', '/fapi/v1/algoOrder', {
-                  algoId: Number(order.id),
+                  algoId: order.id,
                 }),
               );
       } catch (error) {
@@ -818,7 +824,19 @@ export class BinanceBroker {
   /*  Cancellation                                                           */
   /* ---------------------------------------------------------------------- */
 
-  async cancelOrder(symbol: string, orderId: number, kind: 'order' | 'algo' = 'order'): Promise<boolean> {
+  /**
+   * 撤一张单。
+   *
+   * ⚠️ `orderId` **按字符串原样发送**（接受 number 只为兼容旧调用点）——
+   * 19 位单号经 `Number()` 转换会丢精度，那样撤单请求会命中一个**不存在的单号**，
+   * 币安回 `-2011`，而这里把 `-2011` 当成"它已经不在交易所了"= 成功 ——
+   * 于是系统以为撤掉了，**那张单其实还挂着**。
+   */
+  async cancelOrder(
+    symbol: string,
+    orderId: string | number,
+    kind: 'order' | 'algo' = 'order',
+  ): Promise<boolean> {
     if (this.dryRun) return true;
     const normalized = normalizeSymbol(symbol);
     try {

@@ -109,7 +109,7 @@ function broker(response?: unknown) {
 
 test('MARKET orders go to /fapi/v1/order', async () => {
   const { broker: b, calls } = broker({
-    orderId: 1, clientOrderId: 'c', symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET',
+    orderId: '1', clientOrderId: 'c', symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET',
     status: 'FILLED', avgPrice: '68000', executedQty: '0.01', origQty: '0.01',
     price: '0', cumQty: '0.01', cumQuote: '680', reduceOnly: false, positionSide: 'BOTH',
     stopPrice: '0', closePosition: false, timeInForce: 'GTC', origType: 'MARKET',
@@ -126,7 +126,7 @@ test('MARKET orders go to /fapi/v1/order', async () => {
 
 test('STOP_MARKET orders go to /fapi/v1/algoOrder, never /fapi/v1/order', async () => {
   const { broker: b, calls } = broker({
-    algoId: 7, clientAlgoId: 'sl-1', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
+    algoId: '7', clientAlgoId: 'sl-1', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
     symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH', timeInForce: 'GTC',
     quantity: '0', algoStatus: 'NEW', triggerPrice: '64000', price: '0',
     closePosition: true, reduceOnly: false, workingType: 'MARK_PRICE', priceProtect: true,
@@ -150,7 +150,7 @@ test('STOP_MARKET orders go to /fapi/v1/algoOrder, never /fapi/v1/order', async 
 
 test('TAKE_PROFIT_MARKET orders also go to the Algo API', async () => {
   const { broker: b, calls } = broker({
-    algoId: 8, clientAlgoId: 'tp-1', algoType: 'CONDITIONAL', orderType: 'TAKE_PROFIT_MARKET',
+    algoId: '8', clientAlgoId: 'tp-1', algoType: 'CONDITIONAL', orderType: 'TAKE_PROFIT_MARKET',
     symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH', timeInForce: 'GTC',
     quantity: '0', algoStatus: 'NEW', triggerPrice: '74000', price: '0',
     closePosition: true, reduceOnly: false, workingType: 'MARK_PRICE', priceProtect: true,
@@ -171,7 +171,7 @@ test('TAKE_PROFIT_MARKET orders also go to the Algo API', async () => {
 
 test('closePosition strips quantity and reduceOnly, which Binance forbids combining', async () => {
   const { broker: b, calls } = broker({
-    algoId: 9, clientAlgoId: 'sl-2', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
+    algoId: '9', clientAlgoId: 'sl-2', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
     symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH', timeInForce: 'GTC',
     quantity: '0', algoStatus: 'NEW', triggerPrice: '64000', price: '0',
     closePosition: true, reduceOnly: false, workingType: 'MARK_PRICE', priceProtect: true,
@@ -195,7 +195,7 @@ test('closePosition strips quantity and reduceOnly, which Binance forbids combin
 
 test('a sized reduce-only conditional keeps its quantity', async () => {
   const { broker: b, calls } = broker({
-    algoId: 10, clientAlgoId: 'tp-2', algoType: 'CONDITIONAL', orderType: 'TAKE_PROFIT_MARKET',
+    algoId: '10', clientAlgoId: 'tp-2', algoType: 'CONDITIONAL', orderType: 'TAKE_PROFIT_MARKET',
     symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH', timeInForce: 'GTC',
     quantity: '0.005', algoStatus: 'NEW', triggerPrice: '74000', price: '0',
     closePosition: false, reduceOnly: true, workingType: 'MARK_PRICE', priceProtect: true,
@@ -249,7 +249,7 @@ test('cancelOrder targets the algo endpoint for an algo order', async () => {
 
 test('normalizeStandard reports terminal state for a filled order', () => {
   const order = normalizeStandard({
-    orderId: 1, clientOrderId: 'c', symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET',
+    orderId: '1', clientOrderId: 'c', symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET',
     status: 'FILLED', avgPrice: '68000', executedQty: '0.01', origQty: '0.01',
     price: '0', cumQty: '0.01', cumQuote: '680', reduceOnly: false, positionSide: 'BOTH',
     stopPrice: '0', closePosition: false, timeInForce: 'GTC', origType: 'MARKET',
@@ -265,7 +265,7 @@ test('normalizeStandard reports terminal state for a filled order', () => {
 
 test('an untriggered algo order is not terminal', () => {
   const order = normalizeAlgo({
-    algoId: 5, clientAlgoId: 'sl', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
+    algoId: '5', clientAlgoId: 'sl', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
     symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH', timeInForce: 'GTC',
     quantity: '0', algoStatus: 'NEW', triggerPrice: '64000', price: '0',
     closePosition: true, reduceOnly: false, workingType: 'MARK_PRICE', priceProtect: true,
@@ -280,7 +280,7 @@ test('an untriggered algo order is not terminal', () => {
 
 test('TRIGGERED is not terminal — the resulting order still has to fill', () => {
   const order = normalizeAlgo({
-    algoId: 6, clientAlgoId: 'sl', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
+    algoId: '6', clientAlgoId: 'sl', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
     symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH', timeInForce: 'GTC',
     quantity: '0', algoStatus: 'TRIGGERED', triggerPrice: '64000', price: '0',
     closePosition: true, reduceOnly: false, workingType: 'MARK_PRICE', priceProtect: true,
@@ -294,7 +294,7 @@ test('TRIGGERED is not terminal — the resulting order still has to fill', () =
 
 test('FINISHED is terminal for an algo order', () => {
   const order = normalizeAlgo({
-    algoId: 6, clientAlgoId: 'sl', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
+    algoId: '6', clientAlgoId: 'sl', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
     symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH', timeInForce: 'GTC',
     quantity: '0', algoStatus: 'FINISHED', triggerPrice: '64000', price: '0',
     closePosition: true, reduceOnly: false, workingType: 'MARK_PRICE', priceProtect: true,
@@ -417,7 +417,7 @@ test('a buy limit does not round up and a sell limit does not round down', () =>
 
 test('the broker normalises quantity and trigger before sending', async () => {
   const { broker: b, calls } = broker({
-    algoId: 11, clientAlgoId: 'sl', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
+    algoId: '11', clientAlgoId: 'sl', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
     symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH', timeInForce: 'GTC',
     quantity: '0', algoStatus: 'NEW', triggerPrice: '67200', price: '0',
     closePosition: true, reduceOnly: false, workingType: 'MARK_PRICE', priceProtect: true,
@@ -460,7 +460,7 @@ test('the broker refuses a trigger that would fire immediately', async () => {
 
 test('the broker floors an over-precise quantity before sending', async () => {
   const { broker: b, calls } = broker({
-    orderId: 1, clientOrderId: 'c', symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET',
+    orderId: '1', clientOrderId: 'c', symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET',
     status: 'FILLED', avgPrice: '68000', executedQty: '0.014', origQty: '0.014',
     price: '0', cumQty: '0.014', cumQuote: '952', reduceOnly: false, positionSide: 'BOTH',
     stopPrice: '0', closePosition: false, timeInForce: 'GTC', origType: 'MARKET',
@@ -574,7 +574,7 @@ test('取整后名义跌破交易所下限时，本地拒绝并说清三个数�
   const registry = SymbolRegistry.fromExchangeInfo(
     exchangeInfo({ stepSize: '1', minNotional: '50' }),
   );
-  const { rest, calls } = fakeRest({ orderId: 1 });
+  const { rest, calls } = fakeRest({ orderId: '1' });
   const b = new BinanceBroker(rest, fakeMarket, registry);
 
   // 数量 0.7 → 按步长 1 向下取整为 0……那就先撞到"取整为 0"。
@@ -595,7 +595,7 @@ test('取整后名义达标时正常放行', async () => {
   const registry = SymbolRegistry.fromExchangeInfo(
     exchangeInfo({ stepSize: '1', minNotional: '50' }),
   );
-  const { rest, calls } = fakeRest({ orderId: 1 });
+  const { rest, calls } = fakeRest({ orderId: '1' });
   const b = new BinanceBroker(rest, fakeMarket, registry);
 
   // 数量 2 → 取整仍为 2，价格 40 → 名义 80 ≥ 50
@@ -617,7 +617,7 @@ test('closePosition 的单一律豁免 —— 拒掉止损单会让仓位失去�
   const registry = SymbolRegistry.fromExchangeInfo(
     exchangeInfo({ stepSize: '1', minNotional: '50', tickSize: '0.10' }),
   );
-  const { rest, calls } = fakeRest({ orderId: 1 });
+  const { rest, calls } = fakeRest({ orderId: '1' });
   const b = new BinanceBroker(rest, fakeMarket, registry);
 
   // 名义 1 × 40 = 40 < 50，但因为是 closePosition，必须放行
@@ -659,7 +659,7 @@ test('市价单也要做名义检查 —— 它没有 price/triggerPrice，曾�
    * 于是把 `minNotional` 抬高：0.001 × 68000 = 68 < 100。
    */
   const registry = SymbolRegistry.fromExchangeInfo(exchangeInfo({ minNotional: '100' }));
-  const { rest, calls } = fakeRest({ orderId: 1 });
+  const { rest, calls } = fakeRest({ orderId: '1' });
   const b = new BinanceBroker(rest, fakeMarket, registry);
 
   // 市价单：不传 price、不传 triggerPrice。
@@ -675,7 +675,7 @@ test('市价单也要做名义检查 —— 它没有 price/triggerPrice，曾�
 
 test('市价单名义达标时正常放行 —— 检查不能把合法订单也拦掉', async () => {
   const registry = SymbolRegistry.fromExchangeInfo(exchangeInfo({ minNotional: '50' }));
-  const { rest, calls } = fakeRest({ orderId: 1 });
+  const { rest, calls } = fakeRest({ orderId: '1' });
   const b = new BinanceBroker(rest, fakeMarket, registry);
 
   // 0.001 × 68000 = 68 ≥ 50

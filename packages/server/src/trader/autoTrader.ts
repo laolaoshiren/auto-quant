@@ -2893,7 +2893,7 @@ export class AutoTrader {
        */
       if (row.entry_order_id) {
         const live = await this.deps.broker
-          .getOrder(row.symbol, Number(row.entry_order_id))
+          .getOrder(row.symbol, row.entry_order_id)
           .catch(() => null);
         if (live === null) {
           log.warn(
@@ -2924,7 +2924,7 @@ export class AutoTrader {
            */
           const cancelled = await this.deps.broker.cancelOrder(
             row.symbol,
-            Number(row.entry_order_id),
+            row.entry_order_id,
             'order',
           );
           if (!cancelled) {
@@ -4937,8 +4937,12 @@ reduceQuantity: null,
        * 所以挂新失败时**必须按 §2.6 处理** —— 立刻市价平仓并记账，
        * 而不是留一个没有止损的杠杆敞口等下一轮。
        */
-      const oldStopId = local.stop_order_id ? Number(local.stop_order_id) : null;
-      if (oldStopId && Number.isFinite(oldStopId)) {
+      /*
+       * ⚠️ **单号保持字符串**（不去 `Number()`）——19 位单号超过 JS 安全整数，
+       * 转换后末几位就变了，撤单会打到一个不存在的单号上（详见 `preserveBigIds()`）。
+       */
+      const oldStopId = local.stop_order_id ? String(local.stop_order_id) : null;
+      if (oldStopId && oldStopId.length > 0) {
         /*
          * ⚠️ **`kind` 必须传 `'algo'` —— 这是本次修的那个 bug。**
          *
@@ -5465,7 +5469,7 @@ reduceQuantity: null,
      */
     let cancelFailure: string | null = null;
     try {
-      const cancelled = await this.deps.broker.cancelOrder(symbol, Number(orderId), 'order');
+      const cancelled = await this.deps.broker.cancelOrder(symbol, orderId, 'order');
       if (!cancelled) cancelFailure = '交易所拒绝了撤单请求（返回 false，未抛错）';
     } catch (error) {
       cancelFailure = (error as Error).message;
