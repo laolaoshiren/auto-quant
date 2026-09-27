@@ -4709,6 +4709,41 @@ test('★ 挂太久的限价单会被自动撤掉 —— 不能一直占着持�
   );
 });
 
+test('★ 超时的限价单其实已经成交 → 不许撤，也不许写成已撤销', async () => {
+  /*
+   * 2026-09-27 ETHUSDT 的实测形态：限价单 @2698 等满 45 分钟被判「未成交，已自动撤掉」，
+   * 而它**其实成交了**（交易所侧 `executedQty > 0`）。仓位靠对账的"收养"才被捡回来，
+   * 但那张订单行被写成 `CANCELED`（实际 `FILLED`）—— 订单记录里就多出一个假状态。
+   *
+   * `cancelOrder` 返回 `true` 并不等于"撤掉了"：`-2011 Unknown order`（单子已经不存在，
+   * 最常见的原因就是**它成交了**）也被当成成功。所以撤之前必须先读一次权威状态。
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  const pendingRow = positionStore.pending(traderId)[0];
+  assert.ok(pendingRow, '前提：挂上了一张单');
+
+  /* 它其实成交了 —— 而我们这一轮才因为超时去看它。 */
+  broker.fillRestingOrder(Number(pendingRow.entry_order_id));
+  agePendingEntries(traderId, 100);
+
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  const entryRow = orderStore.list(traderId, 50).find((o) => o.purpose === 'entry');
+  assert.ok(entryRow, '前提：入场单有本地行（§2.2：每一张订单都要被记录）');
+  assert.notEqual(
+    entryRow.status,
+    'CANCELED',
+    '★ 它成交了 —— 订单行写成 CANCELED 就是假状态（用户看到的"订单记录不对"就是这个）',
+  );
+  assert.ok(
+    positionStore.open(traderId).length > 0 || positionStore.pending(traderId).length > 0,
+    '★ 成交的挂单必须变成持仓（或留给对账转正），不能被"超时撤单"关掉',
+  );
+});
+
 test('时限内的挂单不许动 —— 时间没到就撤等于让限价入场白做', async () => {
   /*
    * 反面，而且它比上面那条更要紧：**一条把正常挂单也撤掉的规则，会让限价入场

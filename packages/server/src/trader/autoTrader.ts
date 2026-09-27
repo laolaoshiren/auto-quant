@@ -2872,6 +2872,45 @@ export class AutoTrader {
       const waitedMinutes = (Date.now() - Date.parse(row.opened_at)) / 60_000;
       if (!(waitedMinutes >= limitMinutes)) continue;
 
+      /*
+       * ⚠️ **撤之前先问清楚：这张单真的还没成交吗？**
+       *
+       * `cancelOrder` 返回 `true` 有两种完全不同的含义：
+       *
+       *   · 撤掉了；
+       *   · **它本来就不存在** —— 币安 `-2011 Unknown order`，代码把它也当成功。
+       *     而"不存在"最常见的原因恰恰是**它已经成交了**。
+       *
+       * 于是一次"超时撤单"会把一张**已经成交**的入场单关掉：`positions` 行被 close，
+       * 而交易所上那笔仓位还在。实测 2026-09-27 ETHUSDT 就是这样：
+       * 限价单 @2698 在 22:20 被判「未成交，已自动撤掉」，22:24 才对账发现
+       * 「**未被记录的持仓**」把它收养回来 —— 而那张**订单行已经被写成 CANCELED**，
+       * 它实际是 FILLED。收养救回了仓位，但订单记录里留下一个假状态
+       * （用户看到的"订单记录不对"就是这个）。
+       *
+       * 所以撤之前先读一次交易所的权威状态。**读不到就不撤** —— 这一轮撤不掉
+       * 只是晚 45 分钟释放一个入场名额，而误关一张已成交的单要等对账去捡。
+       */
+      if (row.entry_order_id) {
+        const live = await this.deps.broker
+          .getOrder(row.symbol, Number(row.entry_order_id))
+          .catch(() => null);
+        if (live === null) {
+          log.warn(
+            `[${this.deps.trader.name}] ${row.symbol} 的挂单超时，但读不到它的状态 —— 本轮不撤，等下一轮确认。`,
+          );
+          continue;
+        }
+        if (Number(live.executedQty ?? 0) > 0) {
+          this.emit(
+            'info',
+            `${row.symbol} 的限价挂单虽然等满了 ${Math.round(waitedMinutes)} 分钟，但它**其实已经成交**` +
+              `（成交量 ${live.executedQty}）—— 不撤单、不关本地记录，交给对账把它转成持仓。`,
+          );
+          continue;
+        }
+      }
+
       try {
         if (row.entry_order_id) {
           /*
