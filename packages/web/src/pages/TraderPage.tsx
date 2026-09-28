@@ -475,6 +475,24 @@ export function TraderPage() {
   const effectiveLeverage = equity > 0 ? notional / equity : 0;
   const unrealized = stats?.unrealizedPnl ?? positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
   const realized = stats?.realizedPnl ?? 0;
+  /*
+   * ⚠️ **卡片上那个"总盈亏"必须与下面的权益曲线同口径 —— 含浮盈。**
+   *
+   * 用户实测到的矛盾：卡片写 **+$1.03**（`realizedPnl`，只含已平仓），
+   * 而曲线「本段变化」写 **+$1.32** —— 同一屏两个"盈亏"，差的 0.29
+   * 正好是当前持仓的浮盈。他的原话：
+   *
+   *   「这个就和下面的统一吧，不要净额了，把浮盈算上」
+   *
+   * `TraderStats.equity` 的定义就是 `initialEquity + realizedPnl + unrealizedPnl`
+   * （见 `domain.ts`），所以 `realized + unrealized` 与
+   * 「归属权益 − 起始权益」**严格相等**，两者不会随行情漂移出差异。
+   *
+   * 而同一张卡的副行（「今日」与「总收益率」）本来就是含浮盈的口径 ——
+   * `todayPnl = equity − 今日基线`、`totalReturnPercent` 也基于 `equity`。
+   * 也就是说：这一处是**全卡唯一的例外**，改完三者才一致。
+   */
+  const totalPnl = realized + unrealized;
   // Real counts straight from the API. Deriving them from `winRatePercent` was
   // both lossy and, once the unit was misread, wildly wrong.
   const wins = stats?.wins ?? 0;
@@ -786,17 +804,17 @@ export function TraderPage() {
         />
       </MetricCard>
 
-      {/* 2 — 交易盈亏：总盈亏 + 今日盈亏（用户要求放一起）--------------- */}
+      {/* 2 — 交易盈亏：总盈亏（含浮盈）+ 今日盈亏（用户要求放一起）------- */}
       <MetricCard>
         <Metric
-          label="交易盈亏（净额）"
-          value={stats ? fmtUsdSigned(realized, 2) : '—'}
+          label="交易盈亏"
+          value={stats ? fmtUsdSigned(totalPnl, 2) : '—'}
           size="lg"
-          tone={toneOf(stats ? realized : 0)}
+          tone={toneOf(stats ? totalPnl : 0)}
           title={
-            '总盈亏 = 毛盈亏 − 手续费 − 资金费，**只含已平仓的交易**。' +
-            '它是这个机器人自己的账（归属口径）。' +
-            '「归属权益」= 初始权益 + 这个数 + 当前持仓浮盈。'
+            '总盈亏 = 已平仓的净盈亏 + 当前持仓的浮动盈亏，**与下面曲线的「本段变化」同一个口径**。' +
+            '它等于「归属权益 − 起始权益」（归属口径：只算这个机器人自己的账）。' +
+            '只看已平仓那一部分，见「盈亏拆解」。'
           }
           sub={
             stats ? (
