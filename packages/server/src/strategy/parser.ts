@@ -213,7 +213,85 @@ export function extractDecisions(response: string): string | null {
     if (inner.startsWith('[') || inner.startsWith('{')) return inner;
   }
 
-  return findBalancedJson(text);
+  return findBalancedJson(text) ?? salvageTruncatedDecisions(text);
+}
+
+/**
+ * ⚠️ **截断抢救：从没写完的 JSON 里取回**已经完整的那些决策对象。
+ *
+ * ## 为什么需要它（实测：443 轮里 34 轮输出被截断）
+ *
+ * 2026-09-29 实测：`finish_reason=length`（输出被长度上限截断）出现 **34 次**，
+ * 而"调用成功但没有产出任何决策"的轮次有 **41 轮** —— 数量高度吻合。
+ *
+ * 输出预算**不是我们设小的**（`max_tokens` 已经是 131072），实际在 ~58K tokens
+ * 就被截断 —— 那是网关/模型侧的限制，**提高预算这条路走不通**。
+ *
+ * 而截断的形状是固定的：顶层数组没闭合，但**前面若干个 `{...}` 是完整的**：
+ *
+ * ```text
+ * [{"symbol":"BTCUSDT","action":"wait",…},{"symbol":"ETHUSDT","action":"open_long",
+ * ```
+ *
+ * `findBalancedJson()` 要求括号平衡，于是返回 `null` → **整轮一条决策都没有**。
+ * 而前面那几条是模型真金白银推理出来的，丢掉它们等于这次调用白花。
+ *
+ * ## 它不放宽任何语义
+ *
+ * 这里只救**结构**：把完整的顶层对象重新拼成一个数组。拼好之后**每一个对象
+ * 仍然要过与平时完全一样的语义校验**（未知 action、不在候选池、方向不符……
+ * 见 `validateDecisions`）。截断处那个残缺对象**不会被收进来**。
+ *
+ * 只有"确实没闭合"时才走这条路；正常响应仍然由 `findBalancedJson()` 处理。
+ */
+function salvageTruncatedDecisions(text: string): string | null {
+  const start = text.indexOf('[');
+  if (start === -1) return null;
+  /*
+   * 只处理"以 `[` 开头、但**从未闭合**"的形状。
+   * 如果它其实闭合了，`findBalancedJson()` 早就返回了，这里不该再插手。
+   */
+  const closed = findBalancedJson(text);
+  if (closed !== null) return closed;
+
+  const objects: string[] = [];
+  let depth = 0;
+  let objectStart = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start + 1; i < text.length; i += 1) {
+    const ch = text[i] as string;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === '{') {
+      if (depth === 0) objectStart = i;
+      depth += 1;
+    } else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0 && objectStart >= 0) {
+        objects.push(text.slice(objectStart, i + 1));
+        objectStart = -1;
+      }
+      /* 深度塌到负数 = 这个数组其实已经闭合，交给上面那条路处理。 */
+      if (depth < 0) return null;
+    }
+  }
+
+  if (objects.length === 0) return null;
+  return `[${objects.join(',')}]`;
 }
 
 /**

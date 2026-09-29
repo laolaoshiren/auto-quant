@@ -101,6 +101,40 @@ test('returns null when there is no JSON at all', () => {
   assert.equal(extractDecisions('just prose, nothing structured'), null);
 });
 
+test('★ 输出被截断时，已经完整的决策要被救回来（而不是整轮丢掉）', () => {
+  /*
+   * 实测（2026-09-29）：443 轮里 `finish_reason=length`（输出被长度上限截断）
+   * 出现 **34 次**，而"调用成功但没有产出任何决策"的轮次有 **41 轮** —— 高度吻合。
+   *
+   * 预算不是我们设小的（`max_tokens` 已是 131072），实际在 ~58K tokens 就被截断，
+   * 那是网关/模型侧的限制。截断的形状固定：顶层数组没闭合，但**前面若干个对象是完整的**。
+   * `findBalancedJson()` 要求括号平衡 → 返回 null → **整轮一条决策都没有**。
+   *
+   * 而前面那几条是模型真金白银推理出来的，丢掉它们等于这次调用白花。
+   */
+  const truncated =
+    '<decision>[{"symbol":"BTCUSDT","action":"wait","reasoning":"等回踩"},' +
+    '{"symbol":"ETHUSDT","action":"open_long","reasoning":"突破量能还没走完';
+  const extracted = extractDecisions(truncated);
+
+  assert.ok(extracted, '截断也必须能提取出东西 —— 否则整轮白花');
+  const parsed = JSON.parse(extracted) as Array<{ symbol: string; action: string }>;
+  assert.equal(parsed.length, 1, '★ 只救回完整的那一个：截断处那个残缺对象不能收');
+  assert.equal(parsed[0]!.symbol, 'BTCUSDT');
+  assert.equal(parsed[0]!.action, 'wait');
+
+  /* 反面：完整的响应仍然由原来的路径处理，长度不变。 */
+  const complete = '<decision>[{"symbol":"BTCUSDT","action":"wait","reasoning":"等"}]</decision>';
+  assert.equal((JSON.parse(extractDecisions(complete)!) as unknown[]).length, 1);
+
+  /* 反面：连一个完整对象都没有时，仍然返回 null（不凭空造）。 */
+  assert.equal(
+    extractDecisions('<decision>[{"symbol":"BTCUSDT","action":"wa'),
+    null,
+    '半个对象都算不上完整，不能硬塞进校验',
+  );
+});
+
 /* -------------------------------------------------------------------------- */
 /*  Encoding repair                                                            */
 /* -------------------------------------------------------------------------- */
