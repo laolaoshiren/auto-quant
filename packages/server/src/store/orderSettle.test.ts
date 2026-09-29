@@ -11,6 +11,7 @@ import {
   orderIdIn,
   orders as orderStore,
   positions as positionStore,
+  shouldTrustReconciledQuantity,
   strategies,
   traders,
   TERMINAL_ORDER_STATUSES,
@@ -300,6 +301,36 @@ test('★ 单号被精度改写过的历史行，归属判定仍要认得出', (
   assert.equal(orderIdIn('96310441696', ids), true, '16 位以内的单号精确匹配（不受影响）');
   assert.equal(orderIdIn('245217262410', ids), false, '★ 不相干的单号绝不能被放行');
   assert.equal(orderIdIn('', ids), false, '空单号永远不匹配');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  重建成交量是否可信                                                          */
+/* -------------------------------------------------------------------------- */
+
+test('★ 重建的成交量与本地差得太远时不可信 —— 错位会污染整本账', () => {
+  /*
+   * 实测（2026-09-29，HYPEUSDT）：`reconstructRoundTrips()` 的窗口起点落在持仓中间时，
+   * 整条成交序列错位 ——
+   *
+   *     真实：13:17 SELL 0.20（平掉更早的空头）→ 19:53 BUY 0.15（开新多头）
+   *     重建：13:17 → 21:37 short qty=0.35 毛=0.000000   ← 把"平 0.20"当成"开空"
+   *           21:37 → 23:25 long  qty=0.01  毛=0.089040   ← 真实 0.21，差 21 倍
+   *
+   * 而 `applyExchangeFigures()` 会把这个错数量覆盖进本地，**按数量计价的手续费**
+   * 跟着算小 → 净额偏大 → 本地合计比交易所多 **0.0596**（`ledger_check` 上那个 gap）。
+   *
+   * 本地数量来自**运行期持仓行**（当时真实下单的数量），不经过重建 —— 所以差得离谱时保留它。
+   */
+  assert.equal(shouldTrustReconciledQuantity(0.21, 0.21), true, '一致 → 可信');
+  assert.equal(shouldTrustReconciledQuantity(0.2, 0.21), true, '正常的部分成交/合并 → 可信');
+  assert.equal(
+    shouldTrustReconciledQuantity(0.21, 0.01),
+    false,
+    '★ 差 21 倍 → 不可信（保留本地，金额仍用交易所的）',
+  );
+  assert.equal(shouldTrustReconciledQuantity(0.01, 0.21), false, '★ 反过来同样不可信');
+  assert.equal(shouldTrustReconciledQuantity(0, 0.21), false, '本地为 0 时不该让重建把它覆盖掉');
+  assert.equal(shouldTrustReconciledQuantity(0.21, 0), false, '重建为 0 不可信');
 });
 
 /* -------------------------------------------------------------------------- */

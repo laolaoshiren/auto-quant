@@ -2055,6 +2055,35 @@ export function clampTradeLimit(limit: number): number {
   return clampPageLimit(limit, TRADE_PAGE_MAX, TRADE_PAGE_DEFAULT);
 }
 
+/**
+ * 重建出来的成交量**可信到可以覆盖本地**吗？
+ *
+ * ## 为什么要有这道判断（实测：账目凭空多出 0.0596）
+ *
+ * `reconstructRoundTrips()` 用**净头寸法**判断开/平，而它拿不到"窗口起点时的持仓"——
+ * 一旦起点落在某个持仓的中间，整条成交序列就会错位。实测（2026-09-29，HYPEUSDT）：
+ *
+ * ```text
+ * 真实成交： 13:17 SELL 0.20（是【平掉更早的空头】）→ 19:53 BUY 0.15（开新多头）→ …
+ * 重建结果： 13:17 → 21:37  short qty=0.35 毛=0.000000   ← 把"平 0.20"当成了"开空"
+ *            21:37 → 23:25  long  qty=0.01  毛=0.089040   ← 数量被带偏（真实 0.21）
+ * ```
+ *
+ * 而 `applyExchangeFigures()` 会把这个错数量覆盖进本地，**按数量计价的手续费**跟着算小
+ * → 净额偏大 → 本地合计比交易所多 **0.0596**（就是 `ledger_check` 上那个 gap）。
+ *
+ * 本地数量来自**运行期持仓行**（当时真实下单的数量），它**不经过重建**。
+ * 所以当两者差到"不可能是同一个回合"时，保留本地。
+ *
+ * 阈值 1.5 倍：正常的部分成交/合并都在这个量级内（0.20 vs 0.21 ✓）；
+ * 而错位那种是**几十倍**（0.01 vs 0.21 = 21 倍）。
+ */
+export function shouldTrustReconciledQuantity(localQuantity: number, reconciled: number): boolean {
+  if (!(localQuantity > 0) || !(reconciled > 0)) return false;
+  const ratio = Math.max(localQuantity, reconciled) / Math.min(localQuantity, reconciled);
+  return ratio <= 1.5;
+}
+
 export const trades = {
   /**
    * 某机器人的成交记录，**最新在前**，一次一页。`before` 是游标：只返回 `id < before` 的行。
@@ -2688,7 +2717,35 @@ export const trades = {
   }): void {
     const fee = input.entryFee + input.exitFee;
     const netPnl = netPnlOf({ grossPnl: input.grossPnl, fee, fundingFee: input.fundingFee });
-    const margin = marginOf(input.entryPrice, input.quantity, input.leverage);
+
+    /*
+     * ⚠️ **重建出来的"数量"不可信时，保留本地那一份。**
+     *
+     * 实测（2026-09-29，HYPEUSDT）：重建的**窗口起点落在持仓中间**时，整条成交序列会错位 ——
+     * 一个「先平 0.20 再开 0.15」的序列被算成「开空 0.35」，后续每个回合的数量于是全错：
+     *
+     *     #110 / #111 / #112 / #130   重建 0.01   真实 0.21   ← 差 21 倍
+     *
+     * 而这里原来无条件把 `quantity` 覆盖成本地 —— 连**按数量计价的手续费**也跟着算小，
+     * 净额于是偏大，账目凭空多出 **0.0596 USDT**（`ledger_check` 上就是那个 gap）。
+     *
+     * 本地数量来自**运行期持仓行**（就是当时真实下单的数量），它**不经过重建**；
+     * 当两者差到"不可能是同一个回合"时，保留本地。
+     * **金额（毛盈亏 / 手续费 / 资金费）仍然一律采用交易所的值** —— 那是权威的。
+     */
+    const local = getDb().get<{ quantity: number }>('SELECT quantity FROM trades WHERE id = ?', input.id);
+    const keepLocalQuantity =
+      local !== undefined && !shouldTrustReconciledQuantity(local.quantity, input.quantity);
+    const quantity = keepLocalQuantity ? local.quantity : input.quantity;
+    if (keepLocalQuantity) {
+      log.warn(
+        `对账算出的成交量（${input.quantity}）与本地记录（${local.quantity}）差得太远 —— ` +
+          '已保留本地数量（金额仍按交易所的值）。这通常意味着成交历史的窗口起点落在持仓中间，' +
+          '重建把开/平判反了，整条序列因此错位。',
+      );
+    }
+
+    const margin = marginOf(input.entryPrice, quantity, input.leverage);
     /*
      * `quantity` 与 `pnl_percent` 都由交易所在**同一笔成交记录**里给出，所以要一起写。
      *
@@ -2712,7 +2769,8 @@ export const trades = {
       margin > 0 ? (netPnl / margin) * 100 : 0,
       input.entryPrice,
       input.exitPrice,
-      input.quantity,
+      /* ⚠️ 用上面判定过的那个值：重建数量与本地差得太远时保留本地。 */
+      quantity,
       input.entryOrderId,
       input.exitOrderId,
       input.id,
