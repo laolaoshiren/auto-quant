@@ -130,6 +130,56 @@ function recordLlmHealth(aiModelId: number, health: LlmHealth): void {
   settings.set(`llm_health:${aiModelId}`, JSON.stringify(health));
 }
 
+/* -------------------------------------------------------------------------- */
+/*  启动守卫                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 启动一台机器人之前的三道守卫 —— **做成纯函数是为了能被单测钉住**。
+ *
+ * ## 为什么要把它们从 `startTrader()` 里抠出来
+ *
+ * `trader/manager.ts` 有一千六百多行、管着启动 / 停止 / 开机恢复，而它**一行行为测试都没有**
+ * （测试里只有 `import type`）。启动路径会真读库、真连交易所，夹具成本很高 ——
+ * 于是**恰恰是最该有覆盖的那几条守卫，一条都没被覆盖**。而它们各自都对应一次真实事故：
+ *
+ *   1. **全局熔断**（`GLOBAL_TRADING_DISABLED`）：它原来只装在 `/start` 与 `/run-once`
+ *      两个路由上，而**开机恢复没有看它** —— 操作员设了开关并重启（env 只能靠重启改），
+ *      原本 running 的机器人**照样用 `dryRun=false` 恢复实盘交易**，而启动日志还写着
+ *      「任何机器人都无法启动」——一句**事实错误**的话，让人以为已经止血。
+ *   2. **机器人不存在**：一个被删掉的 id 仍然能点"启动"，失败信息必须说清是"找不到"，
+ *      而不是别的什么。
+ *   3. **重复启动**：同一台机器人被启动两次会走两条完整的启动流程（重复对账、重复下单）。
+ *      占位（`this.starting`）必须**第一个 await 之前**就写进去，否则并发 start 会双双通过检查。
+ *
+ * 项目自己的风格要求就是"导出的纯函数优先于需要打桩的对象"（§5.4）—— 这里照它办。
+ * **判定顺序与错误文案都与原来一字不差**：这只是提取，不是改行为。
+ */
+export function startGuard(input: {
+  traderId: number;
+  globalTradingDisabled: boolean;
+  traderExists: boolean;
+  running: boolean;
+  starting: boolean;
+}): { ok: true } | { ok: false; error: string } {
+  if (input.globalTradingDisabled) {
+    return {
+      ok: false,
+      error: 'GLOBAL_TRADING_DISABLED 已设置 —— 拒绝启动任何机器人（这是全局熔断，不是这一台的问题）。',
+    };
+  }
+  if (!input.traderExists) {
+    return { ok: false, error: `找不到机器人 ${input.traderId}` };
+  }
+  if (input.running || input.starting) {
+    return {
+      ok: false,
+      error: input.starting ? '该机器人正在启动中' : '该机器人已经在运行中',
+    };
+  }
+  return { ok: true };
+}
+
 /**
  * 开机恢复的重试节奏（F2 + F4）。
  *
@@ -666,26 +716,26 @@ export class TraderManager {
      *
      * 放在这里而不是只补在 `resumePersisted()`：这是所有启动路径的唯一收口
      * （路由、开机恢复、以及任何未来的自动调用者），一行判定就能让开关真的生效。
+     *
+     * ⚠️ 三道守卫的**判定与文案**现在都在 `startGuard()` 里（纯函数，有单测钉住）——
+     * 改这里之前先看那个函数上面的说明。
      */
-    if (env.globalTradingDisabled) {
-      log.warn(`机器人 ${traderId} 的启动被拒绝：GLOBAL_TRADING_DISABLED 已设置。`);
-      return {
-        ok: false,
-        error: 'GLOBAL_TRADING_DISABLED 已设置 —— 拒绝启动任何机器人（这是全局熔断，不是这一台的问题）。',
-        preflight: [],
-      };
-    }
-
     const trader = traders.get(traderId);
-    if (!trader) return { ok: false, error: `找不到机器人 ${traderId}`, preflight: [] };
-
-    if (this.running.has(traderId) || this.starting.has(traderId)) {
-      return {
-        ok: false,
-        error: this.starting.has(traderId) ? '该机器人正在启动中' : '该机器人已经在运行中',
-        preflight: [],
-      };
+    const guard = startGuard({
+      traderId,
+      globalTradingDisabled: env.globalTradingDisabled,
+      traderExists: trader !== undefined,
+      running: this.running.has(traderId),
+      starting: this.starting.has(traderId),
+    });
+    if (!guard.ok) {
+      if (env.globalTradingDisabled) {
+        log.warn(`机器人 ${traderId} 的启动被拒绝：GLOBAL_TRADING_DISABLED 已设置。`);
+      }
+      return { ok: false, error: guard.error, preflight: [] };
     }
+
+    if (!trader) return { ok: false, error: `找不到机器人 ${traderId}`, preflight: [] };
 
     /*
      * 占位必须在**第一个 await 之前**，否则并发 start 会双双通过上面那道检查
