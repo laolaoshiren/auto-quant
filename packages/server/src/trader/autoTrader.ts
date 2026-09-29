@@ -3541,11 +3541,42 @@ export class AutoTrader {
          * 而把交易所的数字丢掉，账本里留下的就是那个较粗的口径 —— 与账户对不上，
          * 而 §2.5 要求账目必须能与交易所对得上。
          */
+        /*
+         * ⚠️ **重建错位时，手续费也要走交易所流水 —— 只保住数量是不够的。**
+         *
+         * 重建的窗口起点落在持仓中间时，整条序列错位，它算出的 fee 是按**错位后的数量**
+         * 计的（实测 HYPEUSDT：重建 0.000970 vs 交易所 0.010204）。只保留本地数量的话，
+         * 净额照样偏大、账目 gap 依旧（0.0596）。
+         *
+         * 只在"数量明显不可信"时才多取一次流水 —— 正常情况不多花这次请求。
+         */
+        let entryFee = authoritative.entryFee;
+        let exitFee = authoritative.exitFee;
+        const localQuantity = tradeStore.quantityOf(alreadyBooked);
+        if (
+          localQuantity !== undefined &&
+          !shouldTrustReconciledQuantity(localQuantity, authoritative.quantity)
+        ) {
+          const fees = await this.commissionsFor(
+            local.symbol,
+            authoritative.openedAt,
+            authoritative.closedAt,
+          );
+          if (fees) {
+            entryFee = fees.entryFee;
+            exitFee = fees.exitFee;
+            log.warn(
+              `[${this.deps.trader.name}] ${local.symbol} 的重建成交量（${authoritative.quantity}）与本地（${localQuantity}）差得太远 —— ` +
+                `本回合手续费改用交易所流水（${(entryFee + exitFee).toFixed(6)}，重建算的是 ${(authoritative.entryFee + authoritative.exitFee).toFixed(6)}）。`,
+            );
+          }
+        }
+
         tradeStore.applyExchangeFigures({
           id: alreadyBooked,
           grossPnl: authoritative.grossPnl,
-          entryFee: authoritative.entryFee,
-          exitFee: authoritative.exitFee,
+          entryFee,
+          exitFee,
           fundingFee,
           entryPrice: authoritative.entryPrice,
           exitPrice: authoritative.exitPrice,
@@ -3702,6 +3733,42 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         `[${this.deps.trader.name}] ${symbol} 的资金费读取失败，本次记 0，待对账时补齐：${(error as Error).message}`,
       );
       return 0;
+    }
+  }
+
+  /**
+   * 一个回合的**开仓侧与平仓侧手续费** —— 直接从交易所流水取。
+   *
+   * ## 为什么需要它（与 `fundingFor()` 同一个理由，但这次是被数量错位带出来的）
+   *
+   * `reconstructRoundTrips()` 的窗口起点落在持仓中间时整条成交序列会错位，
+   * 而它算出来的**手续费是按错位后的数量计的**。实测（2026-09-29，HYPEUSDT）：
+   *
+   * ```text
+   * 重建 0.000970   vs   交易所流水 0.010204      （同一个回合，差 10 倍）
+   * ```
+   *
+   * 只"保留本地数量"是**不够的** —— fee 还是错的，净额照样偏大、账目 gap 依旧是 0.0596。
+   * 所以当重建的数量明显不可信时，手续费也走这条**完全不受重建影响**的来源。
+   *
+   * 读不到时返回 `null`（**退回重建值，而不是记 0** —— 记 0 会让净额更偏）。
+   */
+  private async commissionsFor(
+    symbol: string,
+    openedAt: string,
+    closedAt: string,
+  ): Promise<{ entryFee: number; exitFee: number } | null> {
+    try {
+      const events = await this.deps.broker.getIncome({
+        startTime: new Date(openedAt).getTime(),
+        endTime: new Date(closedAt).getTime() + 60_000,
+      });
+      return commissionsInWindow(events, symbol, openedAt, closedAt);
+    } catch (error) {
+      log.warn(
+        `[${this.deps.trader.name}] ${symbol} 的手续费读取失败，本次沿用重建值：${(error as Error).message}`,
+      );
+      return null;
     }
   }
 
