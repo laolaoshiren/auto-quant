@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { BinanceIncome } from './types.js';
 import type { BinanceRest } from './rest.js';
-import { fetchIncome, fundingInWindow, summarizeIncome } from './income.js';
+import { commissionsInWindow, fetchIncome, fundingInWindow, summarizeIncome } from './income.js';
 
 /**
  * The income ledger is the only place funding fees appear — no fill mentions
@@ -198,6 +198,38 @@ test('★ 一片里满页时必须继续翻页 —— 否则多出来的流水�
     t0 + 999,
     '第二次的 startTime 取上一页最后一条的时间（含边界，靠 tranId 去重）',
   );
+});
+
+test('★ 一个回合的开/平手续费取自流水 —— 它不受"重建错位"影响', () => {
+  /*
+   * 实测（2026-09-29，HYPEUSDT）：重建的窗口起点落在持仓中间时整条序列错位，
+   * 它算出来的 fee 是按**错位后的数量**计的（重建 0.000970 vs 交易所 0.010204）。
+   * 只保住数量是不够的 —— fee 还是错的，账目 gap 依旧（0.0596）。
+   *
+   * 所以数量不可信时，手续费走这条**完全不受重建影响**的权威来源。
+   */
+  const t0 = 1_700_000_000_000;
+  const threeHours = t0 + 3 * 3600_000;
+  const events = [
+    income({ incomeType: 'COMMISSION', income: '-0.01015906', symbol: 'HYPEUSDT', time: t0 + 60_000 }),
+    income({ incomeType: 'REALIZED_PNL', income: '0.08904000', symbol: 'HYPEUSDT', time: threeHours }),
+    income({ incomeType: 'COMMISSION', income: '-0.01020358', symbol: 'HYPEUSDT', time: threeHours }),
+    /* 别的标的、别的类型、窗口之外 —— 都不该被算进来 */
+    income({ incomeType: 'COMMISSION', income: '-0.99999999', symbol: 'OTHERUSDT', time: t0 + 120_000 }),
+    income({ incomeType: 'FUNDING_FEE', income: '-0.5', symbol: 'HYPEUSDT', time: t0 + 180_000 }),
+    income({ incomeType: 'COMMISSION', income: '-0.5', symbol: 'HYPEUSDT', time: t0 - 60_000 }),
+  ];
+
+  const { entryFee, exitFee } = commissionsInWindow(
+    events,
+    'HYPEUSDT',
+    new Date(t0).toISOString(),
+    new Date(threeHours).toISOString(),
+  );
+
+  /* income 里是负数（支出），本仓库的 fee 是正数 —— 取绝对值。 */
+  assert.ok(Math.abs(entryFee - 0.01015906) < 1e-9, `前半段算开仓侧，实得 ${entryFee}`);
+  assert.ok(Math.abs(exitFee - 0.01020358) < 1e-9, `后半段算平仓侧，实得 ${exitFee}`);
 });
 
 test('★ 翻页重叠的那一条不会被记两次（tranId 去重）', async () => {

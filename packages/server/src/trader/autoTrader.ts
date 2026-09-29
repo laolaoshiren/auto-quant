@@ -68,6 +68,7 @@ import {
   marginOf,
   normalizeMarginMode,
   orderIdIn,
+  shouldTrustReconciledQuantity,
   orders as orderStore,
   ownUnrealizedPnlOf,
   positions as positionStore,
@@ -84,7 +85,7 @@ import {
   roundTripQueryKey,
   type ReconstructedTrade,
 } from './roundTrips.js';
-import { fundingInWindow, netPnlOf } from '../binance/income.js';
+import { commissionsInWindow, fundingInWindow, netPnlOf } from '../binance/income.js';
 
 const log = createLogger('trader');
 
@@ -4055,11 +4056,36 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
           );
 
         if (existingId !== undefined) {
+          /*
+           * ⚠️ **重建错位时，手续费也必须走 income 的权威值 —— 不能只挡住数量。**
+           *
+           * 实测（2026-09-29，HYPEUSDT）：重建的窗口起点落在持仓中间时，整条序列错位，
+           * 它算出来的 `fee` **是按错位后的数量计的**（重建 0.000970 vs 交易所 0.010204）。
+           * 只保留本地数量是不够的 —— fee 还是错的，净额照样偏大，gap 依然在（0.0596）。
+           *
+           * 所以数量不可信时，`entryFee/exitFee` 改从 income 流水取（它的 COMMISSION 是
+           * 结算资产计价、且**完全不受重建影响**）。数量本身由 `applyExchangeFigures()`
+           * 内部再挡一次（双保险）。
+           */
+          const localQuantity = tradeStore.quantityOf(existingId);
+          const trustQuantity =
+            localQuantity === undefined || shouldTrustReconciledQuantity(localQuantity, trip.quantity);
+          const fees = trustQuantity
+            ? { entryFee: trip.entryFee, exitFee: trip.exitFee }
+            : commissionsInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
+          if (!trustQuantity) {
+            log.warn(
+              `[${this.deps.trader.name}] ${symbol} 的重建成交量（${trip.quantity}）与本地（${localQuantity}）差得太远 —— ` +
+                `本回合的手续费改用交易所流水（${(fees.entryFee + fees.exitFee).toFixed(6)}，` +
+                `重建算的是 ${(trip.entryFee + trip.exitFee).toFixed(6)}）。`,
+            );
+          }
+
           tradeStore.applyExchangeFigures({
             id: existingId,
             grossPnl: trip.grossPnl,
-            entryFee: trip.entryFee,
-            exitFee: trip.exitFee,
+            entryFee: fees.entryFee,
+            exitFee: fees.exitFee,
             fundingFee: funding,
             entryPrice: trip.entryPrice,
             exitPrice: trip.exitPrice,

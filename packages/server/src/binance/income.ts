@@ -220,6 +220,54 @@ export function fundingInWindow(
 }
 
 /**
+ * 一个回合的**开仓侧与平仓侧手续费** —— 取自交易所的 income 流水。
+ *
+ * ## 为什么需要它（实测：重建错位会连带把手续费也算错）
+ *
+ * `reconstructRoundTrips()` 的窗口起点落在持仓中间时，整条成交序列会错位，
+ * 而它算出来的**手续费是按错位后的数量计的**。实测（2026-09-29，HYPEUSDT）：
+ *
+ * ```text
+ * 重建 0.000970   vs   交易所流水 0.010204      （同一个回合，差 10 倍）
+ * ```
+ *
+ * `applyExchangeFigures()` 把这个错的 fee 写进本地 → 净额偏大 →
+ * 账目凭空多出 **0.0596 USDT**。所以当"重建的数量明显不可信"时，
+ * 手续费要走这条**不受重建影响**的权威来源。
+ *
+ * ## 口径
+ *
+ * 交易所的 `COMMISSION` 是**结算资产计价**的（实测 HYPEUSDT 的
+ * `commissionAsset` 就是 `USDT`），与 §2.5 里 `fee` 的口径一致。
+ * 非结算资产（BNB 抵扣那种）不计入这里 —— 那本来就不该进 `fee`。
+ *
+ * 归属方式与 `fundingInWindow()` 相同：按回合自己的生命周期取。
+ * **两侧怎么分**：`time` 落在生命周期前半段的算开仓侧，其余算平仓侧；
+ * 一个回合恰好两次扣费，这个判据足够稳（实测每个回合都是两条）。
+ */
+export function commissionsInWindow(
+  events: readonly BinanceIncome[],
+  symbol: string,
+  openedAt: string,
+  closedAt: string,
+): { entryFee: number; exitFee: number } {
+  const from = new Date(openedAt).getTime();
+  const to = new Date(closedAt).getTime();
+  const mid = (from + to) / 2;
+  let entryFee = 0;
+  let exitFee = 0;
+  for (const event of events) {
+    if (event.incomeType !== 'COMMISSION' || event.symbol !== symbol) continue;
+    if (!(event.time >= from && event.time <= to)) continue;
+    /* income 里的 COMMISSION 是负数（支出），而本仓库的 fee 是正数。 */
+    const amount = Math.abs(Number(event.income) || 0);
+    if (event.time <= mid) entryFee += amount;
+    else exitFee += amount;
+  }
+  return { entryFee, exitFee };
+}
+
+/**
  * **净盈亏的唯一算式**：`毛 + 手续费 + 资金费`。
  *
  * ## ⚠️ 它是加法，而不是 `毛 − 手续费 − 资金费` —— 这一点是实测纠正过来的

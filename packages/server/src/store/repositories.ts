@@ -2085,6 +2085,11 @@ export function shouldTrustReconciledQuantity(localQuantity: number, reconciled:
 }
 
 export const trades = {
+  /** 某一笔的成交量 —— 供"重建数量是否可信"的判断使用（见 `shouldTrustReconciledQuantity`）。 */
+  quantityOf(id: number): number | undefined {
+    const row = getDb().get<{ quantity: number }>('SELECT quantity FROM trades WHERE id = ?', id);
+    return row?.quantity;
+  },
   /**
    * 某机器人的成交记录，**最新在前**，一次一页。`before` 是游标：只返回 `id < before` 的行。
    *
