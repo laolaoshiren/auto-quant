@@ -9,6 +9,7 @@ import {
   aiModels,
   exchanges,
   orders as orderStore,
+  positions as positionStore,
   strategies,
   traders,
   TERMINAL_ORDER_STATUSES,
@@ -268,4 +269,72 @@ test('未平仓成本只作用于本机器人', () => {
   seedOrder({ forTrader: other, index: 2, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 99 });
   // 两个单号都给进去，`trader_id` 那一条必须把别人的 99 挡在外面。
   assert.ok(Math.abs(orderStore.openEntryCosts(traderId, ['EX-1', 'EX-2']) - 1.5) < 1e-9);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  限价入场转正：已有一行 open 时的合并                                          */
+/* -------------------------------------------------------------------------- */
+
+test('★ 已有一行 open 时 promote 必须合并，不能撞唯一索引', () => {
+  /*
+   * 实测（2026-09-29 00:56 / 01:18 / 01:28，连续三轮）：
+   * `UNIQUE constraint failed: positions.trader_id, positions.symbol`
+   *
+   * 同一个标的**可以**同时存在「对账收养来的 `open` 行」和「还没成交的 `pending` 行」——
+   * 收养路径只检查了 `open()`，**没看 pending**。这时把 pending 行改成 open 就会撞上
+   * 部分唯一索引 `idx_positions_open_symbol`（`WHERE status = 'open'`）。
+   *
+   * 而抛出的异常被 `settlePendingEntries()` 的调用方接住、记成「待成交对账失败」——
+   * **那行 pending 永远不会消失**：每轮重试、每轮失败，日志一直刷，
+   * 那一笔限价入场也永远转不了正。
+   *
+   * 契约：合并 —— 关掉 pending 残留，把交易所报的成交数据写进已有的 open 行。
+   */
+  traderId = seedTrader();
+
+  const openId = positionStore.insert({
+    traderId,
+    symbol: 'BNBUSDT',
+    side: 'short',
+    quantity: 0.02,
+    entryPrice: 760,
+    leverage: 3,
+    liquidationPrice: null,
+    marginUsed: 5,
+    stopLoss: 768,
+    takeProfit: null,
+    stopOrderId: '111',
+    tpOrderId: null,
+    openReasoning: '对账收养',
+  });
+  positionStore.insert({
+    traderId,
+    symbol: 'BNBUSDT',
+    side: 'short',
+    quantity: 0.02,
+    entryPrice: 762,
+    leverage: 3,
+    liquidationPrice: null,
+    marginUsed: 5,
+    stopLoss: 768,
+    takeProfit: null,
+    stopOrderId: null,
+    tpOrderId: null,
+    openReasoning: '限价挂单',
+    status: 'pending',
+    entryOrderId: '96307711711',
+  });
+
+  const result = positionStore.promote(traderId, 'BNBUSDT', {
+    quantity: 0.02,
+    entryPrice: 762.2,
+    marginUsed: 5.08,
+  });
+
+  assert.equal(result.mergedIntoExisting, true, '★ 必须走合并，而不是抛唯一约束错误');
+  const open = positionStore.open(traderId);
+  assert.equal(open.length, 1, '★ 同一标的只能有一行 open');
+  assert.equal(open[0]!.id, openId, '合并写进的是原来那一行（绝不新增）');
+  assert.equal(open[0]!.entry_price, 762.2, '★ 用交易所报的成交价覆盖本地记录');
+  assert.equal(positionStore.pending(traderId).length, 0, '★ pending 残留必须被关掉');
 });

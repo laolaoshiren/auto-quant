@@ -894,8 +894,51 @@ export const positions = {
     traderId: number,
     symbol: string,
     fill: { quantity: number; entryPrice: number; marginUsed: number },
-  ): void {
-    getDb().run(
+  ): { mergedIntoExisting: boolean } {
+    const db = getDb();
+
+    /*
+     * ⚠️ **该标的可能已经有一行 `open` 了 —— 那就不能再把它变成第二行。**
+     *
+     * 表上有一条**部分唯一索引**（`schema.ts`）：
+     *
+     *     CREATE UNIQUE INDEX idx_positions_open_symbol
+     *       ON positions(trader_id, symbol) WHERE status = 'open';
+     *
+     * 而"限价单成交时已经有一行 open"是**真实会发生**的：对账的**收养路径**
+     * 只检查了 `positionStore.open()`，**没有看 pending 行** —— 于是同一个标的
+     * 可以同时存在「收养来的 open 行」和「还没成交的 pending 行」。这时下面那条
+     * UPDATE 会把 pending 行改成 open → **撞唯一索引**：
+     *
+     *     UNIQUE constraint failed: positions.trader_id, positions.symbol
+     *
+     * 实测（2026-09-29 00:56 / 01:18 / 01:28，连续三轮）：这个异常被
+     * `settlePendingEntries()` 的调用方接住、记成「待成交对账失败」，而**那行
+     * pending 永远不会消失** —— 每轮重试、每轮失败，日志一直刷，而那一笔
+     * 限价入场永远转不了正（只能靠收养兜底）。
+     *
+     * 所以这里**合并**：把那行 pending 关掉（它是同一笔的残留），把交易所报的
+     * 成交数据写进**已有的 open 行** —— 账本上仍然只有一行，数量与均价用权威值。
+     */
+    const existingOpen = this.getOpenBySymbol(traderId, symbol);
+    if (existingOpen) {
+      db.run(
+        `UPDATE positions SET status = 'closed' WHERE trader_id = ? AND symbol = ? AND status = 'pending'`,
+        traderId,
+        symbol,
+      );
+      db.run(
+        `UPDATE positions SET quantity = ?, entry_price = ?, margin_used = ?, opened_at = ? WHERE id = ?`,
+        fill.quantity,
+        fill.entryPrice,
+        fill.marginUsed,
+        now(),
+        existingOpen.id,
+      );
+      return { mergedIntoExisting: true };
+    }
+
+    db.run(
       `UPDATE positions
           SET status = 'open', quantity = ?, entry_price = ?, margin_used = ?, opened_at = ?
         WHERE trader_id = ? AND symbol = ? AND status = 'pending'`,
@@ -906,6 +949,7 @@ export const positions = {
       traderId,
       symbol,
     );
+    return { mergedIntoExisting: false };
   },
 
   updatePeak(traderId: number, symbol: string, peakPnlPercent: number): void {

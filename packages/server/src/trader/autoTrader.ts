@@ -2708,7 +2708,7 @@ export class AutoTrader {
      * 用**交易所报的**成交量与成交价覆盖挂单时的意向值：部分成交在限价单上
      * 很常见，而账本只能记实际发生的。
      */
-    positionStore.promote(traderId, symbol, {
+    const promoted = positionStore.promote(traderId, symbol, {
       quantity: executedQty,
       entryPrice: avgPrice,
       marginUsed: (executedQty * avgPrice) / Math.max(row.leverage, 1),
@@ -2746,6 +2746,25 @@ export class AutoTrader {
 
     const refresh = positionStore.getOpenBySymbol(traderId, symbol);
     if (!refresh) return;
+
+    if (promoted.mergedIntoExisting) {
+      /*
+       * ⚠️ **已经有一行 `open`（对账收养过）—— 成交数据合并完就收手，不要再挂保护单。**
+       *
+       * 那一行很可能**已经有止损挂在交易所上**（收养路径挂的兜底止损）。
+       * 再挂一张必吃 `-4130`（同一仓位不允许两张条件单）→ `stopOrderId` 为 null
+       * → 按 §2.6 **把一笔本来有保护的仓位平掉**。
+       *
+       * 而"它到底有没有保护"有专门的检查：`ensureStopsOnOpenPositions()`
+       * 每轮对账都会读交易所的挂单列表，缺了才补 —— 交给它，不在这里猜。
+       */
+      this.emit(
+        'warn',
+        `${symbol} 的限价单成交时，本地已经有一行持仓记录（对账收养过）—— ` +
+          '成交数据已合并到那一行（不再新增），保护单交给对账检查。',
+      );
+      return;
+    }
 
     /*
      * ⚠️ **必须把单号写回持仓 —— 丢了它，保本守卫就会把仓位平掉。**
