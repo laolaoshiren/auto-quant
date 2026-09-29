@@ -58,8 +58,28 @@ if (-not $Server) {
     exit 1
 }
 
-$excludes = @(
-    '--exclude=./.env',                 # ← 关键：绝不覆盖服务器的环境配置
+# --- 全量备份（AGENTS.md 要求："定期 git bundle 做全量备份，保证本地完整"）------
+#
+# 为什么放在这里：部署是这个项目里最频繁的"有意义的时刻"，而"记得手动备份"恰恰最
+# 容易忘 —— 实测这一次：仓库已经跑了 450 个提交，`.dsh/backups` 里**一个备份都没有**。
+#
+# 保留最近 5 个：bundle 只有 2–3 MB（本仓库实测），留几个不占地方；全留则无限增长。
+# 失败**不阻断部署** —— 备份是保险，不是部署的前置条件。
+$backupDir = Join-Path $repoRoot '.dsh\backups'
+New-Item -ItemType Directory -Force $backupDir | Out-Null
+$bundlePath = Join-Path $backupDir ('aq-' + (Get-Date -Format 'yyyyMMdd-HHmm') + '.bundle')
+git -C $repoRoot bundle create $bundlePath --all *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "    ⚠️  git bundle 备份失败（继续部署）" -ForegroundColor Yellow
+} else {
+    Write-Host "    ✓ 已备份 $(Split-Path $bundlePath -Leaf)" -ForegroundColor DarkGray
+    Get-ChildItem $backupDir -Filter '*.bundle' |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -Skip 5 |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
+$excludes = @(    '--exclude=./.env',                 # ← 关键：绝不覆盖服务器的环境配置
     '--exclude=./.env.local',
     '--exclude=./deploy.local.ps1',
     '--exclude=./node_modules',
