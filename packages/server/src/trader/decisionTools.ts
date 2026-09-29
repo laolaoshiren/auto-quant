@@ -67,6 +67,26 @@ export interface DecisionToolDeps {
    * 实现走全市场快照的缓存，**不产生额外请求**。
    */
   screenSymbols(criteria: ScreenCriteria): Promise<ScreenableSymbol[]>;
+  /**
+   * **点名**：模型说"下一轮把这几个给我完整行情"（第 3 层「索取」的下半段）。
+   *
+   * 返回 `accepted` 与 `rejected` —— **被拒的必须如实回报**：
+   * 假装全都记下会让它下一轮直接找不到，而它会以为自己看过了（比当场被拒更糟）。
+   */
+  requestDeepAnalysis(payload: DeepAnalysisRequest): Promise<DeepAnalysisAck>;
+}
+
+/** 模型点名要深看的标的。 */
+export interface DeepAnalysisRequest {
+  symbols: string[];
+  /** 它为什么想看（下一轮会一并提醒它）。 */
+  reason?: string;
+}
+
+/** 点名结果 —— 收下了哪些、哪些没收。 */
+export interface DeepAnalysisAck {
+  accepted: string[];
+  rejected: string[];
 }
 
 /**
@@ -110,6 +130,14 @@ export const DECISION_TOOL_CATALOGUE = `
     筛不出东西时会如实告诉你，**换个条件再要一次就行**。
   - 用途：上面的「全市场概览」与「市场聚焦」是**系统选好的视角**；
     这个工具让你按**自己的**想法找 —— 「哪些中盘币在放量」「哪些在阴跌但成交额还很大」都行。
+- \`request_deep_analysis(symbols, reason?)\` —— **点名**：让某几个标的下一轮进候选池
+  （拿到与候选一样的完整多周期指标序列）。
+  - \`symbols\`：标的数组，例如 \`["BTCUSDT","SOLUSDT"]\`。
+  - \`reason\`：可选，你为什么要盯它们（下一轮会一并提醒你）。
+  - 用途：候选池**每轮重选**。你这一轮从概览或筛选里发现的东西，若不点名，
+    下一轮就不在池子里了 —— **这个工具就是让它留下来**。
+  - 注意：名单有上限，也按轮数自动过期（默认几轮后消失）。**续点一次就会续期。**
+    超上限时系统会如实告诉你哪些没被收下。
 
 **什么时候该要数据（举几个真实的例子）：**
 
@@ -267,8 +295,52 @@ export async function runDecisionTool(
       };
     }
 
+    if (call.tool === 'request_deep_analysis') {
+      /*
+       * ⚠️ **点名** —— 候选池每轮重选，模型这一轮的发现若不点名，下一轮就不在池子里。
+       * 这个工具就是让它的发现**留下来**（用户原则：模型是大脑，系统只是手脚）。
+       */
+      const rawSymbols = Array.isArray(call.args.symbols) ? call.args.symbols : [];
+      const symbols = rawSymbols
+        .map((s) => (typeof s === 'string' ? s.trim().toUpperCase() : ''))
+        .filter((s) => s.length > 0);
+
+      if (symbols.length === 0) {
+        return {
+          text:
+            '`request_deep_analysis` 需要一个 `symbols` 数组，例如：\n' +
+            '<tool>{"tool":"request_deep_analysis","args":{"symbols":["BTCUSDT","SOLUSDT"],"reason":"放量突破"}}</tool>',
+          summary: 'request_deep_analysis 缺少 symbols',
+        };
+      }
+
+      const reason = typeof call.args.reason === 'string' ? call.args.reason.slice(0, 200) : undefined;
+      const ack = await deps.requestDeepAnalysis(reason ? { symbols, reason } : { symbols });
+
+      const lines = [
+        `已记下 ${ack.accepted.length} 个标的 —— **下一轮的候选池里会有它们的完整多周期行情**：`,
+        ack.accepted.length > 0 ? ack.accepted.join('、') : '（无）',
+      ];
+      if (ack.rejected.length > 0) {
+        /*
+         * ⚠️ **被拒的必须如实说**：假装全都记下会让它下一轮直接找不到，
+         * 而它会以为自己已经看过了 —— 那比当场被拒更糟。
+         */
+        lines.push(
+          '',
+          `⚠️ 这几个**没收下**：${ack.rejected.join('、')} —— 名单已满（或它们不在可交易范围）。`,
+          '**下一轮你不会看到它们，别以为已经看过了。** 真想看的话，这轮先用 `get_klines` 取。',
+        );
+      }
+      if (reason) lines.push('', `你给的理由（下一轮会一并提醒你）：${reason}`);
+      return {
+        text: lines.join('\n'),
+        summary: `request_deep_analysis → ${ack.accepted.length} 个`,
+      };
+    }
+
     return {
-      text: `没有名为 ${call.tool} 的工具。可用的是 get_klines、list_candidates 与 screen_symbols。`,
+      text: `没有名为 ${call.tool} 的工具。可用的是 get_klines、list_candidates、screen_symbols 与 request_deep_analysis。`,
       summary: `未知工具 ${call.tool}`,
     };
   } catch (error) {

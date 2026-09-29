@@ -17,6 +17,7 @@ function deps(overrides: Partial<DecisionToolDeps> = {}): DecisionToolDeps {
     klines: async () => [],
     candidates: async () => [],
     screenSymbols: async () => [],
+    requestDeepAnalysis: async () => ({ accepted: [], rejected: [] }),
     ...overrides,
   } as DecisionToolDeps;
 }
@@ -112,6 +113,66 @@ test('取数抛错时回一句可读的话，而不是让整轮失败', async ()
   );
   assert.match(out.text, /网络抖了一下/);
   assert.match(out.text, /再要一次|继续/, '要给它一条退路');
+});
+
+test('★ request_deep_analysis：模型点名之后，系统记下它下一轮要看的标的', async () => {
+  /*
+   * 用户 2026-09-30 的原话：「**模型是大脑，系统只是他的手脚**」。
+   *
+   * `screen_symbols` 让它**筛**，这个工具让它**记住**：筛出来之后说
+   * "下一轮把这几个给我完整行情"。没有它，它上一轮的发现**当场作废** ——
+   * 每轮都从零开始看系统选的那十几个候选。
+   */
+  const seen: Array<{ symbols: string[]; reason?: string }> = [];
+  const out = await runDecisionTool(
+    {
+      tool: 'request_deep_analysis',
+      args: { symbols: ['btcusdt', 'ETHUSDT'], reason: '成交额放大' },
+    },
+    deps({
+      requestDeepAnalysis: async (payload) => {
+        seen.push(payload);
+        return { accepted: ['BTCUSDT', 'ETHUSDT'], rejected: [] };
+      },
+    }),
+  );
+
+  assert.deepEqual(
+    seen[0],
+    { symbols: ['BTCUSDT', 'ETHUSDT'], reason: '成交额放大' },
+    '符号要规范化成大写后传下去',
+  );
+  assert.match(out.text, /BTCUSDT/, '要回显它点名的标的');
+  assert.match(out.text, /下一轮/, '要明确说"下一轮" —— 它得知道什么时候能看到');
+  assert.match(out.summary, /2 个/);
+});
+
+test('★ 超上限时如实说"只收下了前几个"，而不是假装全都记下了', async () => {
+  /*
+   * 假装全都记下会让它下一轮直接找不到 —— 那比"当场被拒"更糟：
+   * 它会以为自己看过了。所以这里必须如实说哪些没收。
+   */
+  const out = await runDecisionTool(
+    { tool: 'request_deep_analysis', args: { symbols: ['AUSDT', 'BUSDT', 'CUSDT'] } },
+    deps({
+      requestDeepAnalysis: async () => ({
+        accepted: ['AUSDT', 'BUSDT'],
+        rejected: ['CUSDT'],
+      }),
+    }),
+  );
+  assert.match(out.text, /AUSDT/);
+  assert.match(out.text, /CUSDT/, '★ 被拒的也要说出来');
+  assert.match(out.text, /没|未|超出|满/, '要说清为什么没收下');
+  assert.match(out.summary, /2 个/);
+});
+
+test('点名空清单时给可读的话，而不是静默成功', async () => {
+  const out = await runDecisionTool(
+    { tool: 'request_deep_analysis', args: { symbols: [] } },
+    deps({ requestDeepAnalysis: async () => ({ accepted: [], rejected: [] }) }),
+  );
+  assert.match(out.text, /symbols|标的/, '要告诉它这个工具该怎么用');
 });
 
 test('extractToolCalls 认得 <tool> 标签，认不出就不猜', () => {

@@ -81,6 +81,12 @@ import {
 } from '../store/repositories.js';
 import { rankPlatformHistory } from '../strategy/platformHistory.js';
 import {
+  addToWatchlist,
+  decayWatchlist,
+  watchlistSymbols,
+  type WatchlistEntry,
+} from '../strategy/watchlist.js';
+import {
   reconstructRoundTrips,
   roundTripKey,
   roundTripQueryKey,
@@ -1636,8 +1642,28 @@ export class AutoTrader {
     // 失败说明里的类别全靠这个阶段标记。
     state.phase = 'market';
     const held = localPositions.map((p) => p.symbol);
+    /*
+     * ⚠️ **模型上一轮点名的标的也进候选池**（第 3 层「索取」的下半段）。
+     *
+     * 候选池**每轮重选** —— 模型这一轮从「全景」或 `screen_symbols` 里发现的东西，
+     * 若不点名，下一轮就不在了。这个清单就是让**它的发现留下来**
+     * （用户的原则：模型是大脑，系统只是手脚）。
+     *
+     * 它和 `held`（持仓）走同一条路：都通过 `mustInclude` 强制进池，
+     * 并在 `selectCandidates` 的裁剪里被 `mustKeep` 保护 —— 否则"点名了却被预算裁掉"
+     * 与没点名完全一样，而模型无从知道。
+     */
+    const watchedBefore = readWatchlist(traderId);
+    const watched = watchlistSymbols(watchedBefore);
+    /*
+     * 用完就把这份清单往前推一轮：到期的（remaining 到 0）自动消失。
+     * **递减而不是清空**是有意的 —— 它连续几轮盯同一个标的是常态，
+     * 每轮都要求它重新点名是多余的（而且它不一定记得）。
+     */
+    if (watchedBefore.length > 0) writeWatchlist(traderId, decayWatchlist(watchedBefore));
+
     const selection = await selectCandidates(config, this.deps.marketData, {
-      mustInclude: held,
+      mustInclude: [...held, ...watched],
       /* 候选池的大小直接由它决定 —— 见构造函数里 `promptBudget` 的说明。 */
       budgetTokens: this.promptBudget,
     });
@@ -2028,6 +2054,34 @@ export class AutoTrader {
        * 走全市场快照的缓存，所以它每多要一次筛选，代价只有那几行文本。
        */
       screenSymbols: (criteria) => this.deps.marketData.screenSymbolsForModel(criteria),
+      /*
+       * 第 3 层「索取」的下半段：**点名**。
+       *
+       * 收下就写回 `settings`，下一轮 `selectCandidates` 会把它们并进 `mustInclude`。
+       * 装不下时如实回报 `rejected` —— 假装记下会让模型下一轮直接找不到，
+       * 而它会以为自己看过了（比当场被拒更糟）。
+       */
+      requestDeepAnalysis: async ({ symbols, reason }) => {
+        const current = readWatchlist(traderId);
+        const next = addToWatchlist({
+          current,
+          symbols,
+          ...(reason ? { reason } : {}),
+          ttlRounds: WATCHLIST_TTL_ROUNDS,
+          maxSize: WATCHLIST_MAX_SIZE,
+        });
+        writeWatchlist(traderId, next);
+
+        const acceptedSet = new Set(watchlistSymbols(next));
+        const accepted: string[] = [];
+        const rejected: string[] = [];
+        for (const raw of symbols) {
+          const symbol = raw.trim().toUpperCase();
+          if (!symbol) continue;
+          (acceptedSet.has(symbol) ? accepted : rejected).push(symbol);
+        }
+        return { accepted, rejected };
+      },
     };
 
     /*
@@ -8460,6 +8514,63 @@ export function describeBreaker(verdict: CircuitBreakerVerdict, config: Strategy
         '而空仓时权益不会自己变化，所以它不会自行恢复。' +
         '要不要继续交易需要操作员决定（例如入金，或调整这一上限）。'
     : `${verdict.reason}单日亏损熔断按日结算，跨过零点后自动恢复。`;
+}
+
+/**
+ * 模型的「点名清单」在 `settings` 里的键。
+ *
+ * 存 `settings` 而不是新表：它是**每机器人的一小段运行时状态**，
+ * 与 `ledger_check` / `llm_health` 同一类，不值得为它加一张表和一个迁移。
+ */
+export function watchlistKey(traderId: number): string {
+  return `watchlist:${traderId}`;
+}
+
+/**
+ * 点名清单的存活轮数。
+ *
+ * 3 轮 ≈ 1.5 小时（周期 30 分钟）：够模型"盯一会儿"，又不至于把一份**临时兴趣**
+ * 变成永久候选 —— 后者会让清单越积越满，最后每一轮都在看几天前的东西。
+ */
+const WATCHLIST_TTL_ROUNDS = 3;
+/**
+ * 点名清单的上限。
+ *
+ * 10 个 ≈ 与候选池同量级 —— 再多就会与系统选的候选抢位置，
+ * 而那是**系统的职责**（`selectCandidates` 的预算裁剪会先保 `mustInclude`）。
+ */
+const WATCHLIST_MAX_SIZE = 10;
+
+/**
+ * 读出模型的点名清单。
+ *
+ * ⚠️ 解析失败时返回空数组而**不是抛错**：这是模型自己的一份便签，
+ * 一个读不出来的便签不该让整个周期失败。但也不会装作"点过名"——
+ * 读不出来就等于没点过，下一轮它自然会再点一次。
+ */
+export function readWatchlist(traderId: number): WatchlistEntry[] {
+  try {
+    const raw = settings.get(watchlistKey(traderId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((row) => row as Partial<WatchlistEntry>)
+      .filter((row) => typeof row.symbol === 'string' && typeof row.remaining === 'number')
+      .map((row) => ({
+        symbol: String(row.symbol).toUpperCase(),
+        remaining: Number(row.remaining),
+        ...(typeof row.reason === 'string' ? { reason: row.reason } : {}),
+      }));
+  } catch (error) {
+    log.warn(`点名清单读取失败（按"还没点过名"处理）：${(error as Error).message}`);
+    return [];
+  }
+}
+
+/** 写回点名清单。空清单也照写（那是"轮空了"，与"没点过"在语义上一样）。 */
+export function writeWatchlist(traderId: number, rows: readonly WatchlistEntry[]): void {
+  settings.set(watchlistKey(traderId), JSON.stringify(rows));
 }
 
 /**
