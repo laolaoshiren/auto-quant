@@ -339,6 +339,13 @@ export type ReconcileResult =
 export interface AiModelRow extends AiModelConfig {
   apiKeyMasked: string;
   hasKey: boolean;
+  /**
+   * 这个模型**最近一次调用**的结果（服务端记在 `settings` 里）。
+   *
+   * `null` = 还没调用过。它存在的理由：网关连着回「余额不足」时，
+   * 界面上原本一个字都没有（见服务端 `LlmHealth` 的说明）。
+   */
+  health?: { ok: boolean; at: string; latencyMs?: number; error?: string } | null;
 }
 
 export interface PreflightCheck {

@@ -45,6 +45,7 @@ import {
   users,
 } from '../store/repositories.js';
 import type { TraderManager } from '../trader/manager.js';
+import { readLlmHealth } from '../trader/manager.js';
 import {
   requireAuth,
   signToken,
@@ -1080,7 +1081,19 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
           masked = 'unreadable';
         }
       }
-      return { ...model, apiKeyMasked: masked, hasKey: Boolean(row?.api_key_enc) };
+      return {
+        ...model,
+        apiKeyMasked: masked,
+        hasKey: Boolean(row?.api_key_enc),
+        /*
+         * ⚠️ **把"这个模型最近一次调用成没成"一起返回。**
+         *
+         * 2026-09-29 实测：网关连着 12 次回 `insufficient credits`（HTTP 400），
+         * 而界面上没有任何迹象 —— 只有服务器日志里有。这份 `health` 就是让
+         * 控制台能说出"模型现在不能用"（见 `LlmHealth` 的完整说明）。
+         */
+        health: readLlmHealth(model.id),
+      };
     }),
   );
 

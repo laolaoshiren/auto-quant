@@ -998,6 +998,26 @@ export function TraderPage() {
           {model ? model.label : `#${trader.aiModelId}`}
         </Link>
         {model?.model && <span className="ml-1 text-ink-faint">{model.model}</span>}
+        {/*
+          ⚠️ **模型最近一次调用失败了，就在这一行说出来。**
+          
+          实测（2026-09-29）：网关连着 12 次回「余额不足」（HTTP 400），
+          而页面上**没有任何迹象** —— 机器人看着"在运行"，实际上已经做不出决策，
+          用户只能去服务器翻日志才知道。
+          
+          只在**失败时**才出现（成功时这一行保持安静），原因放进 title。
+        */}
+        {model?.health && !model.health.ok && (
+          <span
+            className="ml-2 rounded bg-down/15 px-1.5 py-0.5 text-down"
+            title={
+              `模型最近一次调用失败（${new Date(model.health.at).toLocaleString()}）：` +
+              `${model.health.error ?? '原因未知'}`
+            }
+          >
+            ⚠️ 调用失败
+          </span>
+        )}
       </span>
       <span>
         {/*

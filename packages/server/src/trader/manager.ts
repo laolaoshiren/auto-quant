@@ -13,7 +13,7 @@ import { env } from '../env.js';
 import { MarketDataService } from '../market/service.js';
 import { LlmClient } from '../llm/client.js';
 import { discoverModels } from '../llm/discovery.js';
-import { aiModels, equity, exchanges, positions, runtimeLogs, strategies, traders } from '../store/repositories.js';
+import { aiModels, equity, exchanges, positions, runtimeLogs, settings, strategies, traders } from '../store/repositories.js';
 import { eventBus } from '../events.js';
 import { checkConfigReachability } from '../risk/reachability.js';
 import { AgentRuntime } from './agent/runtime.js';
@@ -75,6 +75,60 @@ const MIN_MAX_TOKENS_FOR_REASONING = 131_072;
  * 又短到操作员在界面上看不出延迟。
  */
 const FILL_RECONCILE_DEBOUNCE_MS = 5_000;
+
+/* -------------------------------------------------------------------------- */
+/*  AI 模型的健康快照                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 一个 AI 模型**最近一次调用**的结果。
+ *
+ * ## 为什么它必须存在（实测：控制台上什么都看不到）
+ *
+ * 2026-09-29 实测：网关连着 **12 次**回
+ *
+ * ```text
+ * You have insufficient credits to make this request.
+ * Please purchase more credits to continue using the service.   （HTTP 400）
+ * ```
+ *
+ * 而**控制台上完全看不出来** —— 页面那片「AI 模型」的字段还是那个样子，
+ * 用户只能去服务器上翻 `server.log` 才知道机器人已经断了十几分钟没做决策。
+ *
+ * 一个"正在运行、状态正常"的界面，配上一条只会写日志的失败路径，
+ * 就是这次要修的东西：**把`模型是否还能用`变成界面上的一个事实。**
+ */
+export interface LlmHealth {
+  ok: boolean;
+  /** 最近一次调用的时间（ISO）。 */
+  at: string;
+  latencyMs?: number;
+  /** 失败时的原因（已经截断，避免把整段 HTML 错误页塞进数据库）。 */
+  error?: string;
+}
+
+/** 读某个模型最近的调用健康度。没有记录时返回 `null`（= 还没调用过）。 */
+export function readLlmHealth(aiModelId: number): LlmHealth | null {
+  const raw = settings.get(`llm_health:${aiModelId}`);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<LlmHealth>;
+    if (typeof parsed?.ok !== 'boolean' || typeof parsed?.at !== 'string') return null;
+    return {
+      ok: parsed.ok,
+      at: parsed.at,
+      latencyMs: typeof parsed.latencyMs === 'number' ? parsed.latencyMs : undefined,
+      error: typeof parsed.error === 'string' ? parsed.error : undefined,
+    };
+  } catch {
+    /* 坏了就当没有记录 —— 它只是给界面看的，不值得阻断任何事。 */
+    return null;
+  }
+}
+
+function recordLlmHealth(aiModelId: number, health: LlmHealth): void {
+  settings.set(`llm_health:${aiModelId}`, JSON.stringify(health));
+}
 
 /**
  * 开机恢复的重试节奏（F2 + F4）。
@@ -553,7 +607,34 @@ export class TraderManager {
       `AI 模型「${row.label}」（${row.provider}/${row.model}）响应正常，耗时 ${probe.latencyMs}ms`,
     );
 
-    return { client, config: aiModels.get(aiModelId) };
+    /*
+     * ⚠️ **把每次调用的成败记下来 —— 否则它只活在日志里。**
+     *
+     * 见 `LlmHealth` 的注释：网关连着 12 次回"余额不足"时，界面上一个字都没有。
+     * 这里用 `Object.create(client)` 而不是展开（`{...client}`）—— 展开只复制
+     * **自有属性**，而 `chat` / `testConnection` 都在原型上，展开会把它们丢掉。
+     */
+    const tracked = Object.create(client) as LlmClient;
+    tracked.chat = async (...args: Parameters<LlmClient['chat']>) => {
+      try {
+        const result = await client.chat(...args);
+        recordLlmHealth(aiModelId, {
+          ok: true,
+          at: new Date().toISOString(),
+          latencyMs: result.latencyMs,
+        });
+        return result;
+      } catch (error) {
+        recordLlmHealth(aiModelId, {
+          ok: false,
+          at: new Date().toISOString(),
+          error: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+        });
+        throw error;
+      }
+    };
+
+    return { client: tracked, config: aiModels.get(aiModelId) };
   }
 
   /* ---------------------------------------------------------------------- */
