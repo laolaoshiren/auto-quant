@@ -13,6 +13,7 @@ import {
   positions as positionStore,
   shouldTrustReconciledQuantity,
   strategies,
+  trades as tradeStore,
   traders,
   TERMINAL_ORDER_STATUSES,
 } from './repositories.js';
@@ -356,6 +357,84 @@ test('★ 单号 → 用途 映射（用来辨认方向反了的重建回合）'
   assert.equal(map.get('EX-1'), 'entry');
   assert.equal(map.get('EX-2'), 'exit');
   assert.equal(map.get('EX-NOPE'), undefined, '没记过的单号不能凭空出现');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  已知账目缺口：重建错位（把当前行为钉住，防止它悄悄变大）                        */
+/* -------------------------------------------------------------------------- */
+
+test('★ 重建数量与本地差得太远时，数量保留本地（已知账目缺口的第一步）', () => {
+  /*
+   * ## 这个缺口是什么（2026-09-29 实测，完整归因见第 21–30 轮）
+   *
+   * `reconstructRoundTrips()` 的窗口起点落在持仓中间时，整条成交序列错位 ——
+   * HYPEUSDT 上的表现是 4 个回合的重建数量变成 **0.01**（真实 **0.21**，差 21 倍），
+   * 而 `applyExchangeFigures()` 会把这个错数量覆盖进本地，**按数量计价的手续费跟着算小**
+   * → 净额偏大 → 本地合计比交易所多 **0.0596 USDT**（`ledger_check` 上那个 gap）。
+   *
+   * ## 修到哪一步了
+   *
+   * ✅ **数量**：差得太远时**保留本地**（这条用例钉住它）。
+   * ❌ **手续费**：目前仍会被重建值覆盖 —— 这是**已知缺口**。
+   *    试过两种做法都不成立：① 无条件改用 income 流水 → 会把"流水为空"当成"费用为 0"，
+   *    抹掉正确的值（被「对账重复执行是幂等的」抓到）；② 按数量比例缩放 →
+   *    重建那 0.00136 的构成与真实两腿不同（真实 0.01420975），缩出来差 2 倍。
+   *
+   * **这不是交易漏洞**：它只影响账目展示的准确性（0.0596 占权益约 0.27%），
+   * 不影响任何下单、风控或盈亏计算。**要不要为它继续改账目核心逻辑，属于产品决策。**
+   */
+  traderId = seedTrader();
+
+  const { id } = tradeStore.insert({
+    traderId,
+    symbol: 'HYPEUSDT',
+    side: 'long',
+    quantity: 0.21, // 运行期真实下单量
+    entryPrice: 97.2,
+    exitPrice: 96.451,
+    leverage: 3,
+    openedAt: '2026-09-23T05:53:40.723Z',
+    closedAt: '2026-09-23T07:54:56.063Z',
+    closeReason: 'stop_loss',
+    grossPnl: -0.15729,
+    entryFee: 0.01420975,
+    fundingFee: 0,
+    source: 'bot',
+  });
+
+  /* 对账重建错位：数量 0.01（真实 0.21），手续费也按 0.01 算。 */
+  tradeStore.applyExchangeFigures({
+    id,
+    grossPnl: -0.15729,
+    entryFee: 0.00068,
+    exitFee: 0.00068,
+    fundingFee: 0,
+    entryPrice: 97.2,
+    exitPrice: 96.451,
+    quantity: 0.01,
+    leverage: 3,
+    entryOrderId: null,
+    exitOrderId: null,
+  });
+
+  const row = getDb().get<{ quantity: number; fee: number }>(
+    'SELECT quantity, fee FROM trades WHERE id = ?',
+    id,
+  )!;
+
+  assert.equal(
+    row.quantity,
+    0.21,
+    '★ 数量必须保留本地 —— 否则这个回合的成交量会被写成 0.01，界面上自相矛盾',
+  );
+  /*
+   * ⚠️ **手续费目前仍会被重建值覆盖**。这条断言记录的是"现在的行为"，
+   * 缺口一旦被真正修好（fee 变成 0.01420975 附近），这里会红 —— 那时请把它改成上面的真实值。
+   */
+  assert.ok(
+    row.fee < 0.005,
+    `已知缺口：手续费仍是重建值（${row.fee}），真实应为 0.01420975。见本用例的说明。`,
+  );
 });
 
 /* -------------------------------------------------------------------------- */
