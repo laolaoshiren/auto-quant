@@ -1133,8 +1133,61 @@ test('★ 限价单的盈亏比要按挂单价算 —— 按市价算会把它�
   assert.match(asMarket.rejected[0]!.reason, /盈亏比/, '拒绝理由应当还是盈亏比');
 });
 
-test('限价单的方向校验也按挂单价 —— 否则一笔正确的挂单会被判成"止损放反了"', () => {
+test('★ 限价单的数量必须按挂单价算 —— 否则引擎放行、交易所按挂单价拒绝', () => {
   /*
+   * 实测三次真实失败（2026-09-24 ~ 09-26），原文：
+   *
+   *     LTCUSDT 的名义价值不足：0.275 × 72.55 = 19.9513 USDT，
+   *     低于交易所下限 20 USDT。（数量 0.275 按步长取整为 0.275 之后才不足
+   *     —— 调整仓位时要把这一步算进去。）
+   *
+   * 而引擎当时是按**市价**（约 71.05）算的数量与名义：`floor(20 / 71.05)` 那一档
+   * 的名义是 $20.00 —— **引擎放行、交易所按挂单价拒绝**，同一个函数里两个口径。
+   * 第 13 步（钳制保护位）早就统一用 `entryPrice` 了，第 12 步漏了。
+   *
+   * 这个用例把两个口径的差异钉死：按市价会得到 0.281491、按挂单价才是 0.275673。
+   */
+  const symbol = 'LTCUSDT';
+  const env = environment({
+    snapshots: new Map([[symbol, snapshot(symbol, 71.05)]]), // 市价
+    minNotionalOf: () => 20,
+    config: configWith({
+      riskControl: { ...defaultStrategyConfig().riskControl, minStopLossFeeMultiple: 0 },
+    }),
+  });
+
+  const decision = openDecision({
+    symbol,
+    action: 'open_long',
+    entryType: 'limit',
+    limitPrice: 72.55, // 挂单价比市价高（等突破）
+    stopLoss: 71,
+    takeProfit: 78,
+    positionSizeUsd: 20,
+    leverage: 3,
+  });
+
+  const result = engine.review([decision], env);
+  assert.equal(
+    result.rejected.length,
+    0,
+    `不该被拒：${result.rejected[0]?.reason ?? '（无）'}`,
+  );
+
+  /*
+   * 引擎**不把数量放进裁决结果**（它只做校验），所以按 `adjustments` 里记下的
+   * 数量来断言 —— 那句话是它实际用来过门槛的那个数量。
+   * 按市价会写 0.281492，按挂单价才写 0.275673。
+   */
+  const adjustments = result.approved[0]!.adjustments.join(' ');
+  assert.match(
+    adjustments,
+    /数量 0\.275/,
+    `★ 数量必须按挂单价 72.55 算（实则：${adjustments}）—— 按市价会算成 0.281491，` +
+      '而实际下单按挂单价取整就只有 0.275，报给交易所的名义不够，整笔白丢一次机会',
+  );
+});
+test('限价单的方向校验也按挂单价 —— 否则一笔正确的挂单会被判成"止损放反了"', () => {  /*
    * 挂单价低于市价时，一个"贴在市价下方"的止损**相对挂单价是在正确的一侧**、
    * 相对市价却可能在错误的一侧。用市价校验会把一笔合规的挂单拒掉，
    * 而理由（"止损未低于当前价"）与"这笔亏不亏钱"毫无关系。

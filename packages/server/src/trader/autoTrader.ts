@@ -463,6 +463,20 @@ export class AutoTrader {
   private marginSet = new Map<string, string>();
 
   /**
+   * 已经**告警过**的"方向反了的重建回合"（键 = `入场单→出场单`）。
+   *
+   * ⚠️ 同一个反向回合**每一轮对账都会再遇到一次**：它的成因是"成交历史的窗口起点落在
+   * 持仓中间"（`getUserTrades(symbol, 500)` 拿不到窗口起点时的持仓），而这个起点
+   * 在我们能读到的历史里是**固定的** —— 所以每一轮都会重建出同一个反向回合、
+   * 每一轮都会被丢弃、每一轮都会想告警一次。
+   *
+   * 丢弃是对的（那种回合的价格/方向/盈亏全都不可信）；但**每轮刷一条 WARN**
+   * 会让日志看起来像在持续出错，而且会把真正的新问题淹掉。
+   * 所以：**同一个键只 WARN 一次**，之后降为 debug。
+   */
+  private reversedTripNotices = new Set<string>();
+
+  /**
    * 交易所允许的最大杠杆（symbol → 值）。**本进程缓存**，由周期开头预取。
    *
    * 为什么要有它：`RiskEnvironment` 的字段都是**同步**的（风控引擎不 await），
@@ -3999,11 +4013,22 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         const exitPurpose = trip.exitOrderId ? purposeById.get(trip.exitOrderId) : undefined;
         if (entryPurpose === 'exit' || exitPurpose === 'entry') {
           skipDiag.reversed += 1;
-          log.warn(
+          const notice =
             `[${this.deps.trader.name}] 重建出的 ${symbol} 回合方向是反的（所谓入场单 ${trip.entryOrderId} ` +
-              `实际用途 ${entryPurpose ?? '未知'}、所谓出场单 ${trip.exitOrderId} 实际用途 ${exitPurpose ?? '未知'}）` +
-              '—— 不记账。这通常说明成交历史的窗口起点落在持仓中间，净头寸法把开/平判反了。',
-          );
+            `实际用途 ${entryPurpose ?? '未知'}、所谓出场单 ${trip.exitOrderId} 实际用途 ${exitPurpose ?? '未知'}）` +
+            '—— 不记账。这通常说明成交历史的窗口起点落在持仓中间，净头寸法把开/平判反了。';
+          /*
+           * ⚠️ **只告警一次。** 这个回合的成因（窗口起点落在持仓中间）在我们能读到的
+           * 历史里是固定的，所以**每一轮都会重建出同一个反向回合** —— 每轮刷 WARN
+           * 会让日志像在持续出错，把真正的新问题淹掉。丢弃照旧，告警降噪。
+           */
+          const noticeKey = `${trip.entryOrderId}->${trip.exitOrderId}`;
+          if (this.reversedTripNotices.has(noticeKey)) {
+            log.debug(notice);
+          } else {
+            this.reversedTripNotices.add(noticeKey);
+            log.warn(notice);
+          }
           continue;
         }
         if (new Date(trip.closedAt).getTime() < since) {
@@ -5903,7 +5928,36 @@ reduceQuantity: null,
       return { action: decision.action, symbol, status: 'skipped', detail: '没有可用价格。' };
     }
 
-    const quantity = this.deps.registry.notionalToQuantity(symbol, decision.positionSizeUsd, price);
+    /*
+     * ⚠️ **向下取整掉到最低名义之下时，上取一档 —— 不要把这笔丢掉。**
+     *
+     * 实测三次真实失败（2026-09-24 ~ 09-26），交易所原文：
+     *
+     *     LTCUSDT 的名义价值不足：0.275 × 72.55 = 19.9513 USDT，
+     *     低于交易所下限 20 USDT。（数量 0.275 按步长取整为 0.275 之后才不足
+     *     —— 调整仓位时要把这一步算进去。）
+     *
+     * 成因是**两次向下取整**：风控引擎按挂单价放行时给的名义是 $20.02，
+     * 而这里又按挂单价 `floor(20.02 / 72.55)` → **0.275 → $19.95**，
+     * 恰好掉回门槛之下。引擎第 12 步早就为这种"差一档"做了进位
+     * （见 `reviewOpen` 里那段长注释），**下单这一层漏了**。
+     *
+     * 进位只加一个步长（这里约 $0.07），而且**只在确实能越过门槛时才加** ——
+     * 越不过就照原样交给交易所拒绝，不掩盖真实的"这个标的在当前规模下做不了"。
+     */
+    let quantity = this.deps.registry.notionalToQuantity(symbol, decision.positionSizeUsd, price);
+    const minNotional = this.deps.registry.minNotional(symbol);
+    if (minNotional > 0 && quantity > 0 && quantity * price < minNotional) {
+      const bumped = this.deps.registry.roundQuantityUp(symbol, quantity);
+      if (bumped > quantity && bumped * price >= minNotional) {
+        this.emit(
+          'info',
+          `${symbol} 的数量按挂单价 ${price} 向下取整后只有 $${(quantity * price).toFixed(4)}` +
+            `（低于交易所下限 $${minNotional}）—— 已上取一档到 ${bumped}（$${(bumped * price).toFixed(4)}）。`,
+        );
+        quantity = bumped;
+      }
+    }
     if (quantity <= 0) {
       return {
         action: decision.action,

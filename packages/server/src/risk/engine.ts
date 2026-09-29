@@ -1028,7 +1028,22 @@ export class RiskEngine {
     }
 
     /* --- 12. Tradability ------------------------------------------------- */
-    let quantity = env.quantityFor(symbol, notional, price);
+    /*
+     * ⚠️ **这里必须用 `entryPrice`（限价单 = 挂单价），不是市价。**
+     *
+     * 实测（三次真实失败，2026-09-24 ~ 09-26）：
+     *
+     *     LTCUSDT 报 $20 名义、市价 71.05 → 算出 0.281 张 = $19.97 ≥ $20 ✅ 引擎放行
+     *     而实际挂单价 72.55 → 0.275 × 72.55 = **$19.9513 < $20** → 交易所拒绝
+     *
+     *     错误原文：「LTCUSDT 的名义价值不足：0.275 × 72.55 = 19.9513 USDT，
+     *                低于交易所下限 20 USDT。」
+     *
+     * 也就是说：**引擎按市价放行、交易所按挂单价拒绝** —— 同一个函数里两个口径，
+     * 而唯一的后果就是这笔交易白丢一次机会。第 13 步（钳制保护位）早就统一用
+     * `entryPrice` 了（见上面的长注释），第 12 步漏了。
+     */
+    let quantity = env.quantityFor(symbol, notional, entryPrice);
     if (quantity <= 0) {
       return {
         ok: false,
@@ -1038,7 +1053,7 @@ export class RiskEngine {
 
     // Re-derive the notional from the actually-tradable quantity so that every
     // recorded figure matches what the exchange will really fill.
-    let finalNotional = quantity * price;
+    let finalNotional = quantity * entryPrice;
 
     /*
      * ⚠️ **向下取整掉到最低名义之下时，先试一档向上 —— 不要直接拒。**
@@ -1061,7 +1076,7 @@ export class RiskEngine {
      */
     if (finalNotional < effectiveMin && env.quantityUpFor) {
       const bumped = env.quantityUpFor(symbol, quantity);
-      const bumpedNotional = bumped * price;
+      const bumpedNotional = bumped * entryPrice;
       const withinRatio = bumpedNotional <= maxNotionalByRatio + 1e-9;
       const withinMargin = bumpedNotional / leverage <= spendable + 1e-9;
       if (bumped > quantity && withinRatio && withinMargin) {
