@@ -805,63 +805,98 @@ function snapshot(): MarketSnapshot {
   };
 }
 
-const fakeMarketData = {
-  async buildSnapshots() {
-    return [snapshot()];
-  },
-  async getOiRanking() {
-    return [];
-  },
-  /*
-   * 第 0 层「全景」—— 全市场一行摘要。
-   *
-   * 这里刻意给**两行**：一行是候选池里也有的 BTCUSDT，一行是**候选池里没有的
-   * OUTSIDEUSDT** —— 后者正是用来断言"模型能看见候选池之外的市场"。
-   */
-  async fullMarketOverview() {
-    return [
+/**
+ * `MarketDataService` 的测试替身 —— **默认实现集中在这一处**。
+ *
+ * ## 为什么要有它（还一笔债）
+ *
+ * 这个接口每加一个方法，测试里几处手写的替身就都要跟着补。已经连续踩过**两次**：
+ * `fullMarketOverview()` 与 `topRankings()` 加进来时，各处都报 `xxx is not a function` ——
+ * 而 `.catch()` **兜不住同步 TypeError**（它只接 Promise 的 rejection），
+ * 于是同一片用例集体失败，排查起来像是"功能写坏了"，其实是夹具缺一个方法。
+ *
+ * 现在默认实现只有这一份：**接口加方法只改这里**，用例只覆盖自己真正关心的那几个。
+ * `overrides` 用宽松类型是有意的 —— 这个函数整体就是 `as unknown as MarketDataService`，
+ * 逐字段写类型只会让每个用例都要多写一遍 import。
+ */
+function fakeMarketDataService(overrides: Record<string, unknown> = {}): MarketDataService {
+  return {
+    async buildSnapshots() {
+      return [snapshot()];
+    },
+    async getOiRanking() {
+      return [];
+    },
+    /* 第 0 层「全景」默认不渲染（给空数组）。 */
+    async fullMarketOverview() {
+      return [];
+    },
+    /* 第 1 层「聚焦」默认不渲染（给 undefined）。 */
+    async topRankings() {
+      return undefined;
+    },
+    async getKlines() {
+      return [];
+    },
+    ...overrides,
+  } as unknown as MarketDataService;
+}
+
+/*
+ * 共享替身：默认行为来自 `fakeMarketDataService()`，这里只覆盖本套用例要用的那几个。
+ */
+const fakeMarketData = Object.assign(
+  fakeMarketDataService({
+    /*
+     * 第 0 层「全景」—— 全市场一行摘要。
+     *
+     * 这里刻意给**两行**：一行是候选池里也有的 BTCUSDT，一行是**候选池里没有的
+     * OUTSIDEUSDT** —— 后者正是用来断言"模型能看见候选池之外的市场"。
+     */
+    fullMarketOverview: async () => [
       { symbol: 'BTCUSDT', price: 68_000, changePercent24h: -1.2, quoteVolume24h: 1_200_000_000 },
       { symbol: 'OUTSIDEUSDT', price: 0.5, changePercent24h: 25.5, quoteVolume24h: 8_000_000 },
-    ];
-  },
-  /*
-   * 第 1 层「聚焦」—— 各维度榜。刻意让**两个榜的头部是同标的之外的东西**，
-   * 这样"聚焦段真的被渲染了"可以被断言到具体符号。
-   */
-  async topRankings() {
-    const row = (symbol: string, value: number, change: number) => ({
-      symbol,
-      value,
-      changePercent24h: change,
-      quoteVolume24h: 300_000_000,
-    });
-    return {
-      quoteVolume: [row('RANKVOLUSDT', 900_000_000, 1.5)],
-      gainers: [row('PUMPERUSDT', 42.5, 42.5)],
-      losers: [row('DUMPERUSDT', -31.2, -31.2)],
-      volatility: [row('WILDUSDT', 0.45, 3.1)],
-      fundingExtreme: [row('FUNDINGUSDT', -0.019, 2.2)],
-    };
-  },
-  /** 按需取数走这里。默认给两根假 K 线，够断言"取到的数据被回喂了"。 */
-  async getKlines(_symbol: string, _timeframe: string, count: number) {
-    return Array.from({ length: Math.min(count, 2) }, (_, i) => ({
-      openTime: Date.UTC(2026, 8, 21, 12, i),
-      open: 2600 + i,
-      high: 2610 + i,
-      low: 2590 + i,
-      close: 2605 + i,
-      volume: 100 + i,
-      closeTime: Date.UTC(2026, 8, 21, 12, i, 59),
-      quoteVolume: 0,
-      trades: 0,
-      takerBuyBase: 0,
-      takerBuyQuote: 0,
-    }));
-  },
+    ],
+    /*
+     * 第 1 层「聚焦」—— 各维度榜。每个榜的头名都是**不同的符号**，
+     * 这样"聚焦段真的被渲染了"可以被断言到具体符号。
+     */
+    topRankings: async () => {
+      const row = (symbol: string, value: number, change: number) => ({
+        symbol,
+        value,
+        changePercent24h: change,
+        quoteVolume24h: 300_000_000,
+      });
+      return {
+        quoteVolume: [row('RANKVOLUSDT', 900_000_000, 1.5)],
+        gainers: [row('PUMPERUSDT', 42.5, 42.5)],
+        losers: [row('DUMPERUSDT', -31.2, -31.2)],
+        volatility: [row('WILDUSDT', 0.45, 3.1)],
+        fundingExtreme: [row('FUNDINGUSDT', -0.019, 2.2)],
+      };
+    },
+    /** 按需取数走这里。默认给两根假 K 线，够断言"取到的数据被回喂了"。 */
+    getKlines: async (_symbol: string, _timeframe: string, count: number) =>
+      Array.from({ length: Math.min(count, 2) }, (_, i) => ({
+        openTime: Date.UTC(2026, 8, 21, 12, i),
+        open: 2600 + i,
+        high: 2610 + i,
+        low: 2590 + i,
+        close: 2605 + i,
+        volume: 100 + i,
+        closeTime: Date.UTC(2026, 8, 21, 12, i, 59),
+        quoteVolume: 0,
+        trades: 0,
+        takerBuyBase: 0,
+        takerBuyQuote: 0,
+      })),
+  }),
   /** 记录每一次取数请求 —— 用例靠它证明"模型要什么、系统就取什么"。 */
-  klineRequests: [] as Array<{ symbol: string; timeframe: string; count: number }>,
-} as unknown as MarketDataService;
+  { klineRequests: [] as Array<{ symbol: string; timeframe: string; count: number }> },
+) as unknown as MarketDataService & {
+  klineRequests: Array<{ symbol: string; timeframe: string; count: number }>;
+};
 
 /** 带取数记录的版本。`fakeMarketData` 是共享单例，用例要用自己的。 */
 function recordingMarketData(): {
@@ -869,21 +904,7 @@ function recordingMarketData(): {
   requests: Array<{ symbol: string; timeframe: string; count: number }>;
 } {
   const requests: Array<{ symbol: string; timeframe: string; count: number }> = [];
-  const market = {
-    async buildSnapshots() {
-      return [snapshot()];
-    },
-    async getOiRanking() {
-      return [];
-    },
-    /* 第 0 层「全景」—— 这个用例不关心它，给空数组即可（不渲染那一段）。 */
-    async fullMarketOverview() {
-      return [];
-    },
-    /* 第 1 层「聚焦」—— 同样不关心，给 undefined 让它不渲染。 */
-    async topRankings() {
-      return undefined;
-    },
+  const market = fakeMarketDataService({
     async getKlines(symbol: string, timeframe: string, count: number) {
       requests.push({ symbol, timeframe, count });
       return [
@@ -902,7 +923,7 @@ function recordingMarketData(): {
         },
       ];
     },
-  } as unknown as MarketDataService;
+  });
   return { market, requests };
 }
 
@@ -3103,7 +3124,7 @@ test('行情为空的一轮：也留下恰好一条记录，但不推进连续�
    * 行情服务"连得上但什么都给不出"：选币返回空、快照也是空 —— 这正是行情接口
    * 大面积失败时真实的样子（`market/service.ts` 对单个标的失败是降级而不是抛错）。
    */
-  const emptyMarketData = {
+  const emptyMarketData = fakeMarketDataService({
     async screenUniverse() {
       return [];
     },
@@ -3113,18 +3134,7 @@ test('行情为空的一轮：也留下恰好一条记录，但不推进连续�
     async buildSnapshots() {
       return [];
     },
-    async getOiRanking() {
-      return [];
-    },
-    /* 第 0 层「全景」—— 空市场用例同样给空数组。 */
-    async fullMarketOverview() {
-      return [];
-    },
-    /* 第 1 层「聚焦」—— 空市场用例同样不渲染。 */
-    async topRankings() {
-      return undefined;
-    },
-  } as unknown as MarketDataService;
+  });
 
   const trader = new AutoTrader({
     trader: traders.get(traderId)!,
