@@ -80,6 +80,7 @@ import {
   trades as tradeStore,
 } from '../store/repositories.js';
 import { rankPlatformHistory } from '../strategy/platformHistory.js';
+import { rankConsensus } from '../strategy/consensus.js';
 import {
   addToWatchlist,
   decayWatchlist,
@@ -1642,6 +1643,51 @@ export class AutoTrader {
     // 失败说明里的类别全靠这个阶段标记。
     state.phase = 'market';
     const held = localPositions.map((p) => p.symbol);
+
+    /*
+     * --- 6.0 取全市场视图（**必须在选币之前**）----------------------------
+     *
+     * ⚠️ **顺序是有原因的**：第 2 层「深潜」只能放 15-20 个标的，而 8 个榜合起来
+     * 有几十个名字。所以"该给谁完整行情"需要一个依据 —— **多个榜同时指向的那个**
+     * （既在涨幅榜又在波动率榜 = 涨得多**且**在剧烈波动），比只在成交额榜里
+     * 出现（大盘币人人都能上）更值得看。
+     *
+     * 要算这个共识就得**先有榜**，而榜要并进候选池就得在 `selectCandidates` **之前**取。
+     * 两者都走 `getUniverse()` 的**缓存**，所以提前取**不产生额外请求**。
+     */
+    const marketOverview = await this.deps.marketData.fullMarketOverview().catch((error) => {
+      log.warn(`全市场概览拉取失败（本轮不渲染这一段）：${(error as Error).message}`);
+      return [];
+    });
+    const rankings = await this.deps.marketData
+      .topRankings({ minQuoteVolume24h: config.coinSource.minQuoteVolume24h })
+      .catch((error) => {
+        log.warn(`市场聚焦榜拉取失败（本轮不渲染这一段）：${(error as Error).message}`);
+        return undefined;
+      });
+
+    /*
+     * ⚠️ **共识标的** —— 出现在**两个以上**榜里的那些。
+     *
+     * 它只是**排序依据**，不是"推荐"：单榜标的仍然在候选池里（只是排在后面），
+     * 因为"哪些不值得看"该由模型决定（用户原则：**模型是大脑，系统只是手脚**）。
+     * 这里只把**共振度 ≥2 的几个**强制请进深潜层 —— 它们最可能在预算裁剪里被挤掉。
+     */
+    const consensusSymbols = rankings
+      ? rankConsensus({
+          boards: [
+            { label: '成交额', symbols: rankings.quoteVolume.map((r) => r.symbol) },
+            { label: '涨幅', symbols: rankings.gainers.map((r) => r.symbol) },
+            { label: '跌幅', symbols: rankings.losers.map((r) => r.symbol) },
+            { label: '波动率', symbols: rankings.volatility.map((r) => r.symbol) },
+            { label: '资金费极值', symbols: rankings.fundingExtreme.map((r) => r.symbol) },
+          ],
+          limit: CONSENSUS_LIMIT,
+        })
+          .filter((r) => r.boards >= 2)
+          .map((r) => r.symbol)
+      : [];
+
     /*
      * ⚠️ **模型上一轮点名的标的也进候选池**（第 3 层「索取」的下半段）。
      *
@@ -1649,9 +1695,9 @@ export class AutoTrader {
      * 若不点名，下一轮就不在了。这个清单就是让**它的发现留下来**
      * （用户的原则：模型是大脑，系统只是手脚）。
      *
-     * 它和 `held`（持仓）走同一条路：都通过 `mustInclude` 强制进池，
-     * 并在 `selectCandidates` 的裁剪里被 `mustKeep` 保护 —— 否则"点名了却被预算裁掉"
-     * 与没点名完全一样，而模型无从知道。
+     * 它和 `held`（持仓）、`consensusSymbols`（共识）走同一条路：都通过 `mustInclude`
+     * 强制进池，并在 `selectCandidates` 的裁剪里被 `mustKeep` 保护 ——
+     * 否则"点名了却被预算裁掉"与没点名完全一样，而模型无从知道。
      */
     const watchedBefore = readWatchlist(traderId);
     const watched = watchlistSymbols(watchedBefore);
@@ -1663,7 +1709,7 @@ export class AutoTrader {
     if (watchedBefore.length > 0) writeWatchlist(traderId, decayWatchlist(watchedBefore));
 
     const selection = await selectCandidates(config, this.deps.marketData, {
-      mustInclude: [...held, ...watched],
+      mustInclude: [...held, ...consensusSymbols, ...watched],
       /* 候选池的大小直接由它决定 —— 见构造函数里 `promptBudget` 的说明。 */
       budgetTokens: this.promptBudget,
     });
@@ -1799,37 +1845,10 @@ export class AutoTrader {
       : [];
 
     /*
-     * ⚠️ **第 0 层「全景」**：币安**全部可交易 USDT 永续**的一行摘要。
-     *
-     * 用户 2026-09-30 的原话：「币安支持的币种我觉得都应该在模型判断得范围
-     * （当然不是一次性给所有币种行情数据）」。
-     *
-     * 它走 `getUniverse()` 的**缓存** —— 同一轮里 `selectCandidates()` 已经拉过全市场
-     * ticker，所以这里**不产生额外请求**，只是把那份数据摊平成"每行一个标的"。
-     *
-     * 失败时给空数组：全景层是"锦上添花"的信息，缺了它这一轮照常决策 ——
-     * 但**不能让它的失败影响主流程**。
+     * ⚠️ 第 0 层「全景」与第 1 层「聚焦」的取数**已经在前面（6.0）做完了** ——
+     * 因为"共识标的"要用榜，而共识要在选币之前算出来。
+     * 两个都在 `marketOverview` / `rankings` 变量里，这里不再重复取。
      */
-    const marketOverview = await this.deps.marketData.fullMarketOverview().catch((error) => {
-      log.warn(`全市场概览拉取失败（本轮不渲染这一段）：${(error as Error).message}`);
-      return [];
-    });
-
-    /*
-     * ⚠️ **第 1 层「聚焦」**：各维度 Top 榜（成交额/涨幅/跌幅/波动率/资金费极值）。
-     *
-     * 第 0 层说"有什么"，这一层说"哪里在动"。两者共用同一份缓存的 universe，
-     * 所以**都不产生额外请求**。
-     *
-     * 门槛用**策略配置里的那个**（`coinSource.minQuoteVolume24h`）—— 门槛是策略参数，
-     * 不该由市场层自己拍一个值；AI 调了它，这一层就跟着变。
-     */
-    const rankings = await this.deps.marketData
-      .topRankings({ minQuoteVolume24h: config.coinSource.minQuoteVolume24h })
-      .catch((error) => {
-        log.warn(`市场聚焦榜拉取失败（本轮不渲染这一段）：${(error as Error).message}`);
-        return undefined;
-      });
 
     /*
      * ⚠️ **第 1 层第七个维度「本平台历史」**：按标的聚合本平台自己的成交。
@@ -8540,6 +8559,13 @@ const WATCHLIST_TTL_ROUNDS = 3;
  * 而那是**系统的职责**（`selectCandidates` 的预算裁剪会先保 `mustInclude`）。
  */
 const WATCHLIST_MAX_SIZE = 10;
+/**
+ * 「共识标的」（出现在 ≥2 个榜里的）一次最多请几个进深潜层。
+ *
+ * 6 是个刻意的克制数字：深潜层一共只能放 15-20 个，共识占 6 个已经不少 ——
+ * 再多就会把系统按成交额/评分选的候选挤掉，而**那些是另一条独立的信息**。
+ */
+const CONSENSUS_LIMIT = 6;
 
 /**
  * 读出模型的点名清单。

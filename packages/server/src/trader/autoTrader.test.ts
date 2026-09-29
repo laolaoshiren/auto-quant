@@ -848,6 +848,18 @@ function fakeMarketDataService(overrides: Record<string, unknown> = {}): MarketD
 const fakeMarketData = Object.assign(
   fakeMarketDataService({
     /*
+     * ⚠️ **按入参返回快照** —— 与真实实现一致：候选池里有什么，就给什么标的的快照。
+     *
+     * 这样"某个标的是不是**真的**进了候选池"就能从提示词里断言出来 ——
+     * 共识标的（多个榜同时指向的）与模型点名的标的都靠这条路径进池，
+     * 而它们最容易在重构里被悄悄丢掉。
+     */
+    buildSnapshots: async (symbols: string[] = [SYMBOL]) => {
+      const wanted = symbols.length > 0 ? symbols : [SYMBOL];
+      const base = snapshot();
+      return wanted.map((symbol) => ({ ...base, symbol }));
+    },
+    /*
      * 第 0 层「全景」—— 全市场一行摘要。
      *
      * 这里刻意给**两行**：一行是候选池里也有的 BTCUSDT，一行是**候选池里没有的
@@ -872,7 +884,12 @@ const fakeMarketData = Object.assign(
         quoteVolume: [row('RANKVOLUSDT', 900_000_000, 1.5)],
         gainers: [row('PUMPERUSDT', 42.5, 42.5)],
         losers: [row('DUMPERUSDT', -31.2, -31.2)],
-        volatility: [row('WILDUSDT', 0.45, 3.1)],
+        /*
+         * ⚠️ **`PUMPERUSDT` 刻意同时出现在涨幅榜与波动率榜** —— 它就是"共识标的"：
+         * 多个维度同时指向的那个。深潜层只能放十几个，而 8 个榜合起来有几十个名字，
+         * 所以共振度是"该给谁完整行情"的第一依据。
+         */
+        volatility: [row('PUMPERUSDT', 0.45, 42.5), row('WILDUSDT', 0.4, 3.1)],
         fundingExtreme: [row('FUNDINGUSDT', -0.019, 2.2)],
       };
     },
@@ -1031,6 +1048,33 @@ function capturingModel(response: string): {
     },
   };
 }
+
+test('★ 共识标的必须进候选池 —— 多个榜同时指向的，优先拿到完整行情', async () => {
+  /*
+   * ## 为什么这一条必须在端到端断言
+   *
+   * 第 1 层给出 8 个榜（每个 8 个标的），合起来几十个名字 —— 而深潜层
+   * （完整多周期指标序列）只能放 15-20 个。所以"该给谁完整行情"必须有依据：
+   * **多个榜同时指向的那个**（既在涨幅榜又在波动率榜 = 涨得多**且**在剧烈波动）。
+   *
+   * 夹具里 `PUMPERUSDT` **刻意只出现在涨幅榜与波动率榜**，不在成交额榜里；
+   * 而系统按成交额选出的候选是 `BTCUSDT`。所以它出现在候选区块里，
+   * **只能**是"共识"这条路径带来的 —— 这条接线最容易被以后的改动悄悄丢掉。
+   */
+  const captured = capturingModel(OPEN_LONG_RESPONSE);
+  const trader = buildTrader(new FakeBroker(), '', captured.model);
+
+  await trader.runOnce();
+
+  const { user } = captured.prompts[0]!;
+  assert.match(
+    user,
+    /### \d+\. PUMPERUSDT/,
+    '★ 共识标的（多个榜同时指向）必须进候选池，与系统按成交额选的候选并列',
+  );
+  /* 系统自己选的候选不能被挤掉 —— 这是"增量"，不是"替换"。 */
+  assert.match(user, /### \d+\. BTCUSDT/, '原来的候选仍要在');
+});
 
 test('每一轮的提示词里都带着绩效、最近平仓与行为余量三个区块', async () => {
   /*
@@ -1348,7 +1392,15 @@ test('a cycle opens a position and places exchange-side protection', async () =>
     (records[0]!.promptTokens ?? 0) >= 100,
     `用量必须记下来（含执行回执那一次），实际 ${records[0]!.promptTokens}`,
   );
-  assert.deepEqual(records[0]!.candidateSymbols, [SYMBOL]);
+  /*
+   * ⚠️ 用 `includes` 而不是 `deepEqual([SYMBOL])`：候选池里除了系统按成交额选的标的，
+   * 还会有**共识标的**（多个榜同时指向的，见 `rankConsensus`）与**模型点名的**标的 ——
+   * 那两条路径都是有意接进来的，所以"只有它一个"不再成立。
+   */
+  assert.ok(
+    records[0]!.candidateSymbols.includes(SYMBOL),
+    `系统按成交额选的候选必须在，实际 ${JSON.stringify(records[0]!.candidateSymbols)}`,
+  );
 
   // Equity snapshot for the curve.
   assert.ok(equityStore.list(traderId).length >= 1);
@@ -3033,7 +3085,14 @@ test('模型调用抛错的周期：仍然写出恰好一条失败记录，并�
   // 部分进度：提示词在发请求之前就写进了审计记录。
   assert.ok(record.systemPrompt.length > 500, '失败记录仍要带上系统提示词');
   assert.ok(record.userPrompt.length > 200, '失败记录仍要带上用户提示词');
-  assert.deepEqual(record.candidateSymbols, [SYMBOL]);
+  /*
+   * 同上：候选池里还可能有序共识标的（多个榜同时指向的）与模型点名的标的 ——
+   * 所以断言"包含"而不是"只有它"。
+   */
+  assert.ok(
+    record.candidateSymbols.includes(SYMBOL),
+    `失败记录也要带上候选池，实际 ${JSON.stringify(record.candidateSymbols)}`,
+  );
 
   // 失败没有下单，也没有留下持仓。
   assert.equal(broker.placed.length, 0);
