@@ -2023,6 +2023,11 @@ export class AutoTrader {
           count,
         ) as Promise<Kline[]>,
       candidates: async () => snapshots.map((s) => s.symbol),
+      /*
+       * 第 3 层「索取」：**按模型自己的条件筛全市场**。
+       * 走全市场快照的缓存，所以它每多要一次筛选，代价只有那几行文本。
+       */
+      screenSymbols: (criteria) => this.deps.marketData.screenSymbolsForModel(criteria),
     };
 
     /*

@@ -15,6 +15,11 @@ import type { BinancePremiumIndex, BinanceTicker24h } from '../binance/types.js'
 import { createLogger } from '../logger.js';
 import { computeTimeframeIndicators } from './indicators.js';
 import { rankUniverse, type RankableTicker, type UniverseRankings } from './rankings.js';
+import {
+  screenSymbols,
+  type ScreenableSymbol,
+  type ScreenCriteria,
+} from './screening.js';
 import { scoreSymbol } from '../strategy/scoring.js';
 
 const log = createLogger('market:service');
@@ -39,6 +44,16 @@ interface UniverseSnapshot {
 
 /** The universe-wide ticker/premium pair is reused for every symbol in a cycle. */
 const UNIVERSE_TTL_MS = 20_000;
+
+/**
+ * 模型用 `screen_symbols` 一次最多能要几个。
+ *
+ * 15 行约 900 字符（相对每轮二十几万是零头），而"看一批"这个用途足够了。
+ * 上限 30 是**系统把关的那条线**：它可能说"给我看全部"，那会把提示词预算挤爆、
+ * 把真正该看的东西挤掉 —— **要哪些由它决定，最多给几个由系统定**。
+ */
+const SCREEN_DEFAULT_LIMIT = 15;
+const SCREEN_MAX_LIMIT = 30;
 
 /* -------------------------------------------------------------------------- */
 /*  Service                                                                    */
@@ -515,6 +530,36 @@ export class MarketDataService {
       tickers,
       limit: options.limit ?? 8,
       minQuoteVolume24h: options.minQuoteVolume24h ?? 50_000_000,
+    });
+  }
+
+  /**
+   * 第 3 层「索取」：**按模型给的条件筛全市场**。
+   *
+   * ⚠️ 与 `fullMarketOverview()` / `topRankings()` 共用**同一份缓存的 universe**，
+   * 所以**不产生额外请求** —— 模型多要一次筛选的代价只有那几行文本。
+   *
+   * 上限由这里把关（见 `SCREEN_MAX_LIMIT`）：条件由模型决定，最多给几个由系统定。
+   */
+  async screenSymbolsForModel(criteria: ScreenCriteria): Promise<ScreenableSymbol[]> {
+    const universe = await this.getUniverse();
+    const symbols: ScreenableSymbol[] = [];
+    for (const [symbol, t] of universe.tickers) {
+      if (!this.registry.get(symbol)) continue;
+      const low = Number(t.lowPrice);
+      const high = Number(t.highPrice);
+      symbols.push({
+        symbol,
+        changePercent24h: Number(t.priceChangePercent),
+        quoteVolume24h: Number(t.quoteVolume),
+        amplitudePercent: low > 0 ? ((high - low) / low) * 100 : 0,
+      });
+    }
+    return screenSymbols({
+      symbols,
+      criteria,
+      defaultLimit: SCREEN_DEFAULT_LIMIT,
+      maxLimit: SCREEN_MAX_LIMIT,
     });
   }
 

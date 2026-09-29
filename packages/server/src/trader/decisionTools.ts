@@ -41,6 +41,7 @@
 import { TIMEFRAMES, type Kline } from '@aq/shared';
 
 import { createLogger } from '../logger.js';
+import type { ScreenableSymbol, ScreenCriteria } from '../market/screening.js';
 
 const log = createLogger('trader:decision-tools');
 
@@ -56,6 +57,16 @@ export interface DecisionToolDeps {
   klines(symbol: string, timeframe: string, count: number): Promise<Kline[]>;
   /** 当前候选池的标的（模型想不起来池子里有什么时用）。 */
   candidates(): Promise<string[]>;
+  /**
+   * **按条件筛全市场**（第 3 层「索取」）。
+   *
+   * ⚠️ 这是「**模型是大脑，系统只是手脚**」最直接的体现：条件由模型给，
+   * 系统只负责筛。它不必等系统把榜推给它 —— 它可以说
+   * 「我要成交额 5000 万–2 亿、波动大于 5% 的那一批」。
+   *
+   * 实现走全市场快照的缓存，**不产生额外请求**。
+   */
+  screenSymbols(criteria: ScreenCriteria): Promise<ScreenableSymbol[]>;
 }
 
 /**
@@ -89,6 +100,16 @@ export const DECISION_TOOL_CATALOGUE = `
   - \`count\`：1–${MAX_KLINE_COUNT} 根，默认 120。
   - 返回：每根 K 线的开高低收与成交量。
 - \`list_candidates()\` —— 列出这一轮的候选池（想不起池子里有什么时用）。
+- \`screen_symbols(...)\` —— **按你自己的条件筛全市场**（约 527 个 USDT 永续）。
+  - 参数**全部可选**，随便组合：\`min_quote_volume_24h\` / \`max_quote_volume_24h\`（成交额，USDT）、
+    \`min_change_percent\` / \`max_change_percent\`（24h 涨跌幅，%）、
+    \`min_amplitude_percent\` / \`max_amplitude_percent\`（24h 振幅，%）、\`limit\`（要几个，有上限）。
+  - 例：\`<tool>{"tool":"screen_symbols","args":{"min_quote_volume_24h":50000000,"min_amplitude_percent":5}}</tool>\`
+    —— 成交额大于 5000 万、且 24h 振幅大于 5% 的那一批。
+  - 返回：符合条件的符号 + 涨跌幅 + 振幅 + 成交额（按成交额降序）。
+    筛不出东西时会如实告诉你，**换个条件再要一次就行**。
+  - 用途：上面的「全市场概览」与「市场聚焦」是**系统选好的视角**；
+    这个工具让你按**自己的**想法找 —— 「哪些中盘币在放量」「哪些在阴跌但成交额还很大」都行。
 
 **什么时候该要数据（举几个真实的例子）：**
 
@@ -200,8 +221,54 @@ export async function runDecisionTool(
       };
     }
 
+    if (call.tool === 'screen_symbols') {
+      /*
+       * ⚠️ **「模型是大脑，系统只是手脚」最直接的体现** —— 条件由它给，系统只负责筛。
+       *
+       * 参数**同时接受下划线与驼峰**：与 `extractToolCalls` 的多格式识别同一个道理
+       * （多认格式、不放宽语义）—— 模型写成 `minQuoteVolume24h` 时不该整条调用作废，
+       * 那会白烧一轮。
+       */
+      const num = (...keys: string[]): number | undefined => {
+        for (const k of keys) {
+          const v = Number(call.args[k]);
+          if (Number.isFinite(v)) return v;
+        }
+        return undefined;
+      };
+      const criteria: ScreenCriteria = {};
+      const minVol = num('min_quote_volume_24h', 'minQuoteVolume24h');
+      const maxVol = num('max_quote_volume_24h', 'maxQuoteVolume24h');
+      const minChg = num('min_change_percent', 'minChangePercent');
+      const maxChg = num('max_change_percent', 'maxChangePercent');
+      const minAmp = num('min_amplitude_percent', 'minAmplitudePercent');
+      const maxAmp = num('max_amplitude_percent', 'maxAmplitudePercent');
+      const limit = num('limit');
+      if (minVol !== undefined) criteria.minQuoteVolume24h = minVol;
+      if (maxVol !== undefined) criteria.maxQuoteVolume24h = maxVol;
+      if (minChg !== undefined) criteria.minChangePercent = minChg;
+      if (maxChg !== undefined) criteria.maxChangePercent = maxChg;
+      if (minAmp !== undefined) criteria.minAmplitudePercent = minAmp;
+      if (maxAmp !== undefined) criteria.maxAmplitudePercent = maxAmp;
+      if (limit !== undefined) criteria.limit = limit;
+
+      const rows = await deps.screenSymbols(criteria);
+      if (rows.length === 0) {
+        return {
+          text:
+            '没有符合条件的标的 —— 这个条件现在筛不出东西（可能是门槛太严，或者市场确实没有）。\n' +
+            '**你可以放宽条件再要一次，或者直接用手上的数据继续判断** —— 这不影响你的权限。',
+          summary: 'screen_symbols → 0 个',
+        };
+      }
+      return {
+        text: renderScreenResult(rows),
+        summary: `screen_symbols → ${rows.length} 个`,
+      };
+    }
+
     return {
-      text: `没有名为 ${call.tool} 的工具。可用的是 get_klines 与 list_candidates。`,
+      text: `没有名为 ${call.tool} 的工具。可用的是 get_klines、list_candidates 与 screen_symbols。`,
       summary: `未知工具 ${call.tool}`,
     };
   } catch (error) {
@@ -230,6 +297,40 @@ function renderKlines(symbol: string, timeframe: string, candles: Kline[]): stri
     `${symbol} ${timeframe} 最近 ${candles.length} 根 K 线（UTC，O/H/L/C/V）：`,
     ...lines,
   ].join('\n');
+}
+
+/**
+ * 把 `screen_symbols` 的结果渲染成提示词片段。
+ *
+ * 每行一个标的、逗号分隔的数字 —— 与 K 线渲染同一个理由：这一段的读者是模型，
+ * 扁平的行比嵌套对象更不容易看错。
+ *
+ * ⚠️ 末尾两句是刻意的：**条件是它自己给的**（所以结果不合意时该换条件，而不是
+ * 怀疑系统），而**要看细节仍然用 `get_klines` 点名** —— 这一层只回答"有哪些"。
+ */
+function renderScreenResult(rows: readonly ScreenableSymbol[]): string {
+  const lines = rows.map(
+    (s) =>
+      `${s.symbol} ${s.changePercent24h >= 0 ? '+' : ''}${s.changePercent24h.toFixed(2)}% · ` +
+      `振幅 ${s.amplitudePercent.toFixed(1)}% · 成交额 ${fmtVolume(s.quoteVolume24h)}`,
+  );
+  return [
+    `**按你的条件筛出 ${rows.length} 个**（按成交额降序）：`,
+    ...lines,
+    '',
+    '条件是你自己给的 —— 结果不是你想看的，就换个条件再要一次。',
+    '要看其中某个的完整指标序列，用 `get_klines` 点名。',
+  ].join('\n');
+}
+
+/** 成交额的紧凑写法（工具回复里不该出现 1234567890.12 这种串）。 */
+function fmtVolume(usdt: number): string {
+  const abs = Math.abs(usdt);
+  if (!Number.isFinite(usdt)) return '0';
+  if (abs >= 1e9) return `${(usdt / 1e9).toFixed(1)}B`;
+  if (abs >= 1e6) return `${(usdt / 1e6).toFixed(0)}M`;
+  if (abs >= 1e3) return `${(usdt / 1e3).toFixed(0)}K`;
+  return usdt.toFixed(0);
 }
 
 /** 去掉浮点尾巴，但保留有意义的小数位（0.05208 不能被压成 0.05）。 */
