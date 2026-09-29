@@ -79,6 +79,7 @@ import {
   traders as traderStore,
   trades as tradeStore,
 } from '../store/repositories.js';
+import { rankPlatformHistory } from '../strategy/platformHistory.js';
 import {
   reconstructRoundTrips,
   roundTripKey,
@@ -1805,6 +1806,19 @@ export class AutoTrader {
       });
 
     /*
+     * ⚠️ **第 1 层第七个维度「本平台历史」**：按标的聚合本平台自己的成交。
+     *
+     * 它是八个维度里唯一"关于自己"的 —— 交易所只给市场数据，而"我在这里做过几笔、
+     * 结果如何"只有平台知道。样本量门槛 3 笔：更少的样本里，胜率只是噪声。
+     * 上限 6 行（两端各 3）：再多会挤掉真正该看的东西。
+     */
+    const platformHistory = rankPlatformHistory({
+      trades: tradeStore.list(traderId, 500).map((t) => ({ symbol: t.symbol, netPnl: t.netPnl })),
+      minTrades: 3,
+      limit: 6,
+    });
+
+    /*
      * 本小时的已开仓数只读一次，两处用同一个数：提示词的「本周期约束」区块与风控的
      * `entriesLastHour`。分头读会得到两个可能不一致的数字，而模型看到 2/3、风控按 3/3
      * 拒绝，正是"看不见的约束"换一种形态。
@@ -1868,6 +1882,7 @@ export class AutoTrader {
        * 这里如实传配置值：**不替模型打开它**（那是它的判断），只是不把能力藏起来。
        */
       oiRankingEnabled: config.indicators.enableOiRanking,
+      platformHistory,
       memory,
       /*
        * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**

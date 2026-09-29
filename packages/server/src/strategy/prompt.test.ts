@@ -1204,6 +1204,33 @@ test('★ 持仓量增长榜：关着的时候要告诉模型"它存在、你能
   assert.doesNotMatch(on, /当前是\*\*关闭\*\*/, '开着的时候不必再劝它开');
 });
 
+test('★ 本平台历史：告诉模型"你自己在哪些标的上赚过、哪些上总是亏"', () => {
+  /*
+   * 八个维度里唯一"关于自己"的一个 —— 交易所只给市场数据，
+   * 而"**我**在这个标的上做过几笔、结果如何"只有平台知道。
+   *
+   * ⚠️ 两个方向都要给：只列"我赚过的"会让模型反复扑向同一个标的（可能是运气），
+   * 而"我在这个标的上总是亏"同样有用（可能意味着它的波动特性与当前策略不合）。
+   */
+  const rows = [
+    { symbol: 'SOLUSDT', trades: 8, netPnl: 0.42, winRate: 0.625 },
+    { symbol: 'BNBUSDT', trades: 6, netPnl: -0.31, winRate: 0.333 },
+  ];
+  const text = buildUserPrompt({ ...contextWith(blankMemory()), platformHistory: rows });
+
+  assert.match(text, /# 本平台历史/, '要有这一段');
+  assert.match(text, /SOLUSDT/, '赚过的标的要在');
+  assert.match(text, /8 笔/, '★ 必须带笔数 —— 那是"这个胜率可不可信"的唯一线索');
+  assert.match(text, /BNBUSDT/, '★ 总是亏的标的也要在 —— 那是"该避开哪里"');
+  assert.match(text, /笔数越少/, '要提醒样本量的意义，免得它把噪声当规律');
+
+  /* 空数组不渲染（没有足够样本时不该凭空多一段）。 */
+  assert.doesNotMatch(
+    buildUserPrompt({ ...contextWith(blankMemory()), platformHistory: [] }),
+    /# 本平台历史/,
+  );
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：

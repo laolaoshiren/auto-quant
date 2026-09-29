@@ -12,6 +12,7 @@ import {
 import { SCORE_WEIGHTS } from './scoring.js';
 import { DECISION_TOOL_CATALOGUE } from '../trader/decisionTools.js';
 import type { RankingRow, UniverseRankings } from '../market/rankings.js';
+import type { PlatformHistoryRow } from './platformHistory.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Prompt context                                                             */
@@ -175,6 +176,15 @@ export interface PromptContext {
    * 那就成了"系统把能力藏起来"，与本项目的方向正相反。
    */
   oiRankingEnabled?: boolean;
+  /**
+   * ⚠️ **本平台历史**（第 1 层的第七个维度）—— 按标的聚合**本平台自己的成交**。
+   *
+   * 八个维度里唯一一个"关于自己"的维度：交易所只给市场数据，
+   * 而"**我**在这个标的上做过几笔、结果如何"只有平台知道。
+   *
+   * ⚠️ 两个方向都要给（赚过的 + 总是亏的），且每行带**笔数** —— 见 `platformHistory.ts`。
+   */
+  platformHistory?: PlatformHistoryRow[];
 }
 
 /** 「全市场概览」的一行 —— 见 `PromptContext.marketOverview`。 */
@@ -2162,6 +2172,17 @@ function renderUserPrompt(
     );
   }
 
+  /*
+   * 6.7 — **本平台历史**（第 1 层的第七个维度）------------------------------
+   *
+   * 放在聚焦层之后：先看"市场里哪里在动"，再看"我自己在哪些标的上做得怎么样"。
+   * 两者合起来才够模型做判断 —— 只看市场会忽略自己的实际表现，
+   * 只看自己会忽略市场正在发生的事。
+   */
+  if (ctx.platformHistory && ctx.platformHistory.length > 0) {
+    volatileParts.push(renderPlatformHistory(ctx.platformHistory));
+  }
+
   /* 7 — Candidate coins -------------------------------------------------- */
   if (candidates.length === 0) {
     volatileParts.push(
@@ -2907,6 +2928,30 @@ function renderRankings(
             '打开它就能看到 1 小时持仓量增长最快的一批标的（用 `set_params` 改，下一轮生效）。' +
             '持仓量异动常常先于价格异动，是另一种"哪里在动"的信号。',
         ]),
+  ].join('\n');
+}
+
+/**
+ * 「本平台历史」—— 按标的聚合**本平台自己的成交**（第 1 层的第七个维度）。
+ *
+ * ⚠️ **必须说明它是"我自己的历史"，不是"市场判断"。**
+ * 否则模型会把"我在 SOL 上赚过"读成"SOL 是个好标的" —— 那是两件事，
+ * 而它自己的记忆里已经有一份「最近平仓」，这一段的用途不同：
+ * 那一份是**逐笔**的因果，这一份是**按标的汇总**的倾向。
+ */
+function renderPlatformHistory(rows: readonly PlatformHistoryRow[]): string {
+  if (rows.length === 0) return '';
+  const lines = rows.map(
+    (r) =>
+      `${r.symbol} ${r.trades} 笔 · 净 ${fmtSigned(r.netPnl, 3)} · 胜率 ${(r.winRate * 100).toFixed(0)}%`,
+  );
+  return [
+    '# 本平台历史（按标的汇总 —— 这是**你自己**在这个标的上做过的事，不是市场判断）',
+    '',
+    '只列样本量达标的标的；**笔数越少，那个胜率越不可信**（3 笔里 2 胜可能是运气）。',
+    '按净额降序，**两端都列** —— 头部是你赚过的，尾部是你总是亏的，后者同样重要。',
+    '',
+    ...lines,
   ].join('\n');
 }
 
