@@ -467,6 +467,14 @@ export function TraderPage() {
         availableBalance: latest.availableBalance,
         unrealizedPnl: latest.accountUnrealizedPnl,
         marginUsed: latest.marginUsed,
+        /*
+         * ⚠️ **快照里没有「挂单占用」这一项**（它是交易所账户的实时读数，
+         * 而快照只存持仓侧的数字）。这里显式声明为 `undefined` 而不是省略，
+         * 是为了让这个兜底对象与 `TraderAccountState` 同形 —— 否则
+         * `account = accountState ?? lastKnownAccount?.account` 会推出一个
+         * **少一个字段的联合类型**，读 `account.openOrderMargin` 直接编译不过。
+         */
+        openOrderMargin: undefined,
       },
     };
   }, [snapshots]);
@@ -853,13 +861,32 @@ export function TraderPage() {
           size="lg"
           title={
             account
-              ? `交易所账户里被持仓占用的保证金。${accountTitle}`
+              ? `交易所账户里**被持仓与挂单**占用的保证金。${accountTitle}`
               : '暂时读不到交易所账户读数。'
           }
           sub={
             account ? (
               <>
-                {notional > 0 ? <>名义 {fmtUsd(notional, 2)}</> : '当前无持仓'}
+                {/*
+                 * ⚠️ **这个主数字含挂单占用 —— 挂单不是持仓，但它一样占着保证金。**
+                 *
+                 * 实测（2026-09-29）：两笔限价挂单在手（XRPUSDT $5.20 + SOLUSDT $5.04），
+                 * 卡片显示「保证金占用 10.24 / 当前无持仓」—— 两个数字看着互相矛盾，
+                 * 而真相是那 10.24 **全部来自挂单**。原来的副行只说"当前无持仓"，
+                 * 恰好把唯一能解释它的那半句（挂单占用）漏掉了。
+                 *
+                 * 口径在后端就写明了：`binance/account.ts` 的
+                 * `marginUsed = totalPositionInitialMargin + openOrderMargin`。
+                 * 而上面那张"5 张卡"的设计表里，这一格的副行本来就写着「其中挂单占用」。
+                 */}
+                {notional > 0 ? <>名义 {fmtUsd(notional, 2)}</> : null}
+                {(account.openOrderMargin ?? 0) > 0 ? (
+                  <>
+                    {notional > 0 ? ' · ' : ''}
+                    挂单占用 {fmtNum(account.openOrderMargin ?? 0, 2)}
+                  </>
+                ) : null}
+                {notional === 0 && !((account.openOrderMargin ?? 0) > 0) ? '当前无持仓' : null}
                 {account.unrealizedPnl !== 0 && (
                   <>
                     {' · '}未实现 <span className={pnlColor(account.unrealizedPnl)}>{fmtUsdSigned(account.unrealizedPnl, 2)}</span>
@@ -873,7 +900,11 @@ export function TraderPage() {
           subTitle={
             account
               ? [
-                  notional > 0 ? `名义敞口 ${fmtUsd(notional, 2)}` : '当前无持仓',
+                  notional > 0 ? `名义敞口 ${fmtUsd(notional, 2)}` : null,
+                  (account.openOrderMargin ?? 0) > 0
+                    ? `挂单占用 ${fmtNum(account.openOrderMargin ?? 0, 2)}`
+                    : null,
+                  notional === 0 && !((account.openOrderMargin ?? 0) > 0) ? '当前无持仓' : null,
                   account.unrealizedPnl !== 0
                     ? `账户未实现盈亏 ${fmtUsdSigned(account.unrealizedPnl, 2)}`
                     : null,
