@@ -2090,6 +2090,22 @@ export const trades = {
     const row = getDb().get<{ quantity: number }>('SELECT quantity FROM trades WHERE id = ?', id);
     return row?.quantity;
   },
+
+  /**
+   * 某一笔**已存**的费用（开仓侧/平仓侧）。
+   *
+   * ⚠️ 用途：**流水取不到时不要把它抹掉**。`commissionsInWindow()` 在窗口不对或流水为空时
+   * 返回 0，而 0 **不代表"这笔没有手续费"** —— 直接写 0 会把一个正确的数字（可能是运行期
+   * 记下的、甚至交易所退费的负数）覆盖掉。实测被测试抓到过一次
+   * （见 `autoTrader.test.ts` 的「对账重复执行是幂等的」）。
+   */
+  feesOf(id: number): { entryFee: number; exitFee: number } {
+    const row = getDb().get<{ entry_fee: number | null; exit_fee: number | null }>(
+      'SELECT entry_fee, exit_fee FROM trades WHERE id = ?',
+      id,
+    );
+    return { entryFee: Number(row?.entry_fee) || 0, exitFee: Number(row?.exit_fee) || 0 };
+  },
   /**
    * 某机器人的成交记录，**最新在前**，一次一页。`before` 是游标：只返回 `id < before` 的行。
    *
