@@ -1121,6 +1121,53 @@ test('★ 全市场概览：模型该看得见币安全部标的，而不只是�
   );
 });
 
+test('★ 市场聚焦：模型要一眼看到"哪里在动"（五个维度榜）', () => {
+  /*
+   * 用户 2026-09-30 的原则是「**模型是大脑，系统只是手脚**」：
+   * 第 0 层「全景」让它看见全部标的，这一层告诉它**哪里在动** ——
+   * 涨幅/跌幅/波动率/资金费极值/成交额，每个维度前几名。
+   *
+   * ⚠️ 这一层**不做任何筛选判断**：每个榜只按一个维度排序。
+   * 它是"快照"，不是"推荐" —— 选哪个深看仍然是模型的事。
+   */
+  const rankings = {
+    quoteVolume: [
+      { symbol: 'BTCUSDT', value: 10_400_000_000, changePercent24h: -0.41, quoteVolume24h: 10_400_000_000 },
+      { symbol: 'ETHUSDT', value: 9_600_000_000, changePercent24h: 0.02, quoteVolume24h: 9_600_000_000 },
+    ],
+    gainers: [
+      { symbol: 'XYZUSDT', value: 42.5, changePercent24h: 42.5, quoteVolume24h: 310_000_000 },
+    ],
+    losers: [{ symbol: 'ABCUSDT', value: -31.2, changePercent24h: -31.2, quoteVolume24h: 200_000_000 }],
+    volatility: [{ symbol: 'WILDUSDT', value: 0.45, changePercent24h: 3.1, quoteVolume24h: 150_000_000 }],
+    fundingExtreme: [
+      { symbol: 'FUNDUSDT', value: -0.019, changePercent24h: 2.2, quoteVolume24h: 120_000_000 },
+    ],
+  };
+  const text = buildUserPrompt({ ...contextWith(blankMemory()), rankings });
+
+  assert.match(text, /# 市场聚焦/, '要有这一段');
+  /* 五个榜都要在，且各自的标的要出现。 */
+  assert.match(text, /BTCUSDT/, '成交额榜');
+  assert.match(text, /XYZUSDT/, '涨幅榜');
+  assert.match(text, /ABCUSDT/, '跌幅榜');
+  assert.match(text, /WILDUSDT/, '波动率榜');
+  assert.match(text, /FUNDUSDT/, '资金费极值榜');
+  /* 数字要带上 —— 光有符号，模型没法判断"值不值得深看"。 */
+  assert.match(text, /42\.5/, '涨幅榜要带涨跌幅');
+  assert.match(text, /31\.2/, '跌幅榜要带跌跌幅');
+
+  /* 它只增信息：候选池必须原样还在。 */
+  assert.match(text, /# 候选标的/, '候选池不受影响');
+
+  /* 不传就不渲染 —— 向后兼容。 */
+  assert.doesNotMatch(
+    buildUserPrompt(contextWith(blankMemory())),
+    /# 市场聚焦/,
+    '不传 rankings 时不该凭空多出这一段',
+  );
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：

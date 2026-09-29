@@ -14,6 +14,7 @@ import { normalizeSymbol } from '../binance/symbols.js';
 import type { BinancePremiumIndex, BinanceTicker24h } from '../binance/types.js';
 import { createLogger } from '../logger.js';
 import { computeTimeframeIndicators } from './indicators.js';
+import { rankUniverse, type RankableTicker, type UniverseRankings } from './rankings.js';
 import { scoreSymbol } from '../strategy/scoring.js';
 
 const log = createLogger('market:service');
@@ -479,6 +480,42 @@ export class MarketDataService {
     }
     rows.sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
     return rows;
+  }
+
+  /**
+   * 第 1 层「聚焦」：各维度的 Top 榜（成交额/涨幅/跌幅/波动率/资金费极值）。
+   *
+   * ## 为什么是一个方法，而不是按维度调五次 `screenUniverse()`
+   *
+   * `screenUniverse()` 内部走 `getUniverse(true)` —— **强制刷新**。
+   * 按维度调五次 = **五次全市场 ticker 拉取（weight 40 × 5）**，纯浪费。
+   * 这里与 `fullMarketOverview()` 共用**同一份缓存的 universe**，所以**不产生额外请求**，
+   * 排序全部在内存里由纯函数 `rankUniverse()` 完成（可穷举测试）。
+   *
+   * `minQuoteVolume24h` 由**调用方**从策略配置传入：门槛是策略参数，不是市场层的判断。
+   */
+  async topRankings(
+    options: { limit?: number; minQuoteVolume24h?: number } = {},
+  ): Promise<UniverseRankings> {
+    const universe = await this.getUniverse();
+    const tickers: RankableTicker[] = [];
+    for (const [symbol, t] of universe.tickers) {
+      if (!this.registry.get(symbol)) continue;
+      tickers.push({
+        symbol,
+        price: Number(t.lastPrice),
+        low24h: Number(t.lowPrice),
+        high24h: Number(t.highPrice),
+        changePercent24h: Number(t.priceChangePercent),
+        quoteVolume24h: Number(t.quoteVolume),
+        fundingRate: Number(universe.premiums.get(symbol)?.lastFundingRate ?? 0),
+      });
+    }
+    return rankUniverse({
+      tickers,
+      limit: options.limit ?? 8,
+      minQuoteVolume24h: options.minQuoteVolume24h ?? 50_000_000,
+    });
   }
 
   /**

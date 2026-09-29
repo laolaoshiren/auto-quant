@@ -11,6 +11,7 @@ import {
 
 import { SCORE_WEIGHTS } from './scoring.js';
 import { DECISION_TOOL_CATALOGUE } from '../trader/decisionTools.js';
+import type { RankingRow, UniverseRankings } from '../market/rankings.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Prompt context                                                             */
@@ -151,6 +152,19 @@ export interface PromptContext {
    * 可选：不传就不渲染这一段（测试与回放路径不需要它）。
    */
   marketOverview?: MarketOverviewRow[];
+  /**
+   * ⚠️ **市场聚焦（第 1 层）—— 各维度的 Top 榜。**
+   *
+   * 第 0 层「全景」让模型**看见全部标的**；这一层告诉它**哪里在动**：
+   * 成交额 / 涨幅 / 跌幅 / 波动率 / 资金费极值，每个维度前几名。
+   *
+   * ⚠️ **它是"快照"而不是"推荐"** —— 每个榜只按一个维度排序，系统**没有做任何
+   * 筛选判断**。那句话也写进了提示词里：用户的原则是「**模型是大脑，系统只是手脚**」，
+   * 系统在这里没有资格替它决定"哪个值得做"。
+   *
+   * 可选：不传就不渲染（回放/测试路径不需要）。
+   */
+  rankings?: UniverseRankings;
 }
 
 /** 「全市场概览」的一行 —— 见 `PromptContext.marketOverview`。 */
@@ -424,6 +438,15 @@ function humanDuration(minutes: number): string {
 /* -------------------------------------------------------------------------- */
 /*  Trading-mode guidance                                                      */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * 「市场聚焦」里每个维度榜取前几名。
+ *
+ * 8 是"够看出格局、又不至于变成第二份候选池"的量：5 个榜 × 8 行 ≈ 1,000 字符，
+ * 相对每轮二十几万字符是零头。它的作用**不是给候选**，而是让模型知道
+ * **市场里哪些地方在动** —— 真正的深看仍然是它自己用 `get_klines` 点名。
+ */
+const RANKING_LIMIT = 8;
 
 const MODE_GUIDANCE: Record<StrategyConfig['tradingMode'], string> = {
   aggressive: [
@@ -2117,6 +2140,16 @@ function renderUserPrompt(
     volatileParts.push(renderMarketOverview(ctx.marketOverview));
   }
 
+  /*
+   * 6.6 — **市场聚焦**（第 1 层）--------------------------------------------
+   *
+   * 全景说"有什么"，聚焦说"哪里在动"。两者相邻，模型读起来是连贯的一件事：
+   * 先扫一遍全市场，再看各维度的头几名，然后自己决定要不要点名深看。
+   */
+  if (ctx.rankings) {
+    volatileParts.push(renderRankings(ctx.rankings, RANKING_LIMIT));
+  }
+
   /* 7 — Candidate coins -------------------------------------------------- */
   if (candidates.length === 0) {
     volatileParts.push(
@@ -2817,6 +2850,33 @@ function renderMarketOverview(rows: readonly MarketOverviewRow[]): string {
       `${r.symbol} ${fmt(r.price)} ${fmtPercent(r.changePercent24h)} ${fmtVolumeCompact(r.quoteVolume24h)}`,
   );
   return `${header}\n\n${lines.join('\n')}`;
+}
+
+/**
+ * 「市场聚焦」—— 各维度 Top 榜（第 1 层）。
+ *
+ * ⚠️ **它是"快照"，不是"推荐"。** 每个榜只按**一个**维度排序，系统**没有**做筛选判断。
+ * 这句话必须出现在提示词里：否则模型会把"涨幅榜第一"读成系统给的建议，
+ * 而系统在这里**没有资格**给建议 —— 用户的原则是「**模型是大脑，系统只是手脚**」。
+ */
+function renderRankings(r: UniverseRankings, limit: number): string {
+  const compact = (x: RankingRow): string =>
+    `${x.symbol} ${fmtPercent(x.changePercent24h)}（${fmtVolumeCompact(x.quoteVolume24h)}）`;
+  const join = (rows: readonly RankingRow[], render: (x: RankingRow) => string): string =>
+    rows.length === 0 ? '（本轮为空）' : rows.map(render).join(' · ');
+
+  return [
+    `# 市场聚焦（各维度前 ${limit} 名 —— **这不是推荐，只是"哪里在动"的快照**）`,
+    '',
+    '每个榜只按**一个**维度排序，系统**没有**做任何筛选判断 —— 哪个值得做是你的判断。',
+    '需要某个标的的完整指标序列，用 `get_klines` 点名（括号里是它 24h 成交额）。',
+    '',
+    `成交额：${join(r.quoteVolume, (x) => `${x.symbol} ${fmtVolumeCompact(x.quoteVolume24h)} ${fmtPercent(x.changePercent24h)}`)}`,
+    `涨幅：${join(r.gainers, compact)}`,
+    `跌幅：${join(r.losers, compact)}`,
+    `波动率：${join(r.volatility, (x) => `${x.symbol} 振幅 ${(x.value * 100).toFixed(1)}%（${fmtVolumeCompact(x.quoteVolume24h)}）`)}`,
+    `资金费极值：${join(r.fundingExtreme, (x) => `${x.symbol} ${(x.value * 100).toFixed(4)}%（${fmtVolumeCompact(x.quoteVolume24h)}）`)}`,
+  ].join('\n');
 }
 
 function renderTimeframeSummary(snap: MarketSnapshot): string {

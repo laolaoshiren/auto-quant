@@ -1789,6 +1789,22 @@ export class AutoTrader {
     });
 
     /*
+     * ⚠️ **第 1 层「聚焦」**：各维度 Top 榜（成交额/涨幅/跌幅/波动率/资金费极值）。
+     *
+     * 第 0 层说"有什么"，这一层说"哪里在动"。两者共用同一份缓存的 universe，
+     * 所以**都不产生额外请求**。
+     *
+     * 门槛用**策略配置里的那个**（`coinSource.minQuoteVolume24h`）—— 门槛是策略参数，
+     * 不该由市场层自己拍一个值；AI 调了它，这一层就跟着变。
+     */
+    const rankings = await this.deps.marketData
+      .topRankings({ minQuoteVolume24h: config.coinSource.minQuoteVolume24h })
+      .catch((error) => {
+        log.warn(`市场聚焦榜拉取失败（本轮不渲染这一段）：${(error as Error).message}`);
+        return undefined;
+      });
+
+    /*
      * 本小时的已开仓数只读一次，两处用同一个数：提示词的「本周期约束」区块与风控的
      * `entriesLastHour`。分头读会得到两个可能不一致的数字，而模型看到 2/3、风控按 3/3
      * 拒绝，正是"看不见的约束"换一种形态。
@@ -1846,6 +1862,7 @@ export class AutoTrader {
       candidates: snapshots,
       oiRanking,
       marketOverview,
+      rankings,
       memory,
       /*
        * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**

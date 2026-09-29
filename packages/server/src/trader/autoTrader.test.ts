@@ -824,6 +824,25 @@ const fakeMarketData = {
       { symbol: 'OUTSIDEUSDT', price: 0.5, changePercent24h: 25.5, quoteVolume24h: 8_000_000 },
     ];
   },
+  /*
+   * 第 1 层「聚焦」—— 各维度榜。刻意让**两个榜的头部是同标的之外的东西**，
+   * 这样"聚焦段真的被渲染了"可以被断言到具体符号。
+   */
+  async topRankings() {
+    const row = (symbol: string, value: number, change: number) => ({
+      symbol,
+      value,
+      changePercent24h: change,
+      quoteVolume24h: 300_000_000,
+    });
+    return {
+      quoteVolume: [row('RANKVOLUSDT', 900_000_000, 1.5)],
+      gainers: [row('PUMPERUSDT', 42.5, 42.5)],
+      losers: [row('DUMPERUSDT', -31.2, -31.2)],
+      volatility: [row('WILDUSDT', 0.45, 3.1)],
+      fundingExtreme: [row('FUNDINGUSDT', -0.019, 2.2)],
+    };
+  },
   /** 按需取数走这里。默认给两根假 K 线，够断言"取到的数据被回喂了"。 */
   async getKlines(_symbol: string, _timeframe: string, count: number) {
     return Array.from({ length: Math.min(count, 2) }, (_, i) => ({
@@ -860,6 +879,10 @@ function recordingMarketData(): {
     /* 第 0 层「全景」—— 这个用例不关心它，给空数组即可（不渲染那一段）。 */
     async fullMarketOverview() {
       return [];
+    },
+    /* 第 1 层「聚焦」—— 同样不关心，给 undefined 让它不渲染。 */
+    async topRankings() {
+      return undefined;
     },
     async getKlines(symbol: string, timeframe: string, count: number) {
       requests.push({ symbol, timeframe, count });
@@ -1036,6 +1059,13 @@ test('★ 全市场概览真的被接到了提示词上 —— 模型要能看�
   );
   /* 它不能顶掉候选池：两者必须同时存在。 */
   assert.match(user, /# 候选标的/, '概览是增量的，不能取代候选池');
+
+  /* 第 1 层「聚焦」同样必须被接上 —— 每个榜的头部符号都该看得见。 */
+  assert.match(user, /# 市场聚焦/, '★ 聚焦段必须被渲染出来');
+  assert.match(user, /PUMPERUSDT/, '涨幅榜的标的要在');
+  assert.match(user, /DUMPERUSDT/, '跌幅榜的标的要在');
+  assert.match(user, /WILDUSDT/, '波动率榜的标的要在');
+  assert.match(user, /FUNDINGUSDT/, '资金费极值榜的标的要在');
 });
 
 test('平仓之后，模型下一轮能看到自己当时的理由和真实结果并排出现', async () => {
@@ -3089,6 +3119,10 @@ test('行情为空的一轮：也留下恰好一条记录，但不推进连续�
     /* 第 0 层「全景」—— 空市场用例同样给空数组。 */
     async fullMarketOverview() {
       return [];
+    },
+    /* 第 1 层「聚焦」—— 空市场用例同样不渲染。 */
+    async topRankings() {
+      return undefined;
     },
   } as unknown as MarketDataService;
 
