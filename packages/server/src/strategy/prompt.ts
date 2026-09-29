@@ -165,6 +165,16 @@ export interface PromptContext {
    * 可选：不传就不渲染（回放/测试路径不需要）。
    */
   rankings?: UniverseRankings;
+  /**
+   * 「持仓量增长」这个维度**当前是否开启**（`indicators.enableOiRanking`）。
+   *
+   * ⚠️ 它关着的时候，渲染层会**明确告诉模型这个能力存在、以及怎么打开**。
+   *
+   * 为什么不直接替它打开：那属于**模型的判断**（它能用 `set_params` 自己改），
+   * 而用户的原则是「**模型是大脑，系统只是手脚**」。但"能开而不知道"等于没有 ——
+   * 那就成了"系统把能力藏起来"，与本项目的方向正相反。
+   */
+  oiRankingEnabled?: boolean;
 }
 
 /** 「全市场概览」的一行 —— 见 `PromptContext.marketOverview`。 */
@@ -2147,7 +2157,9 @@ function renderUserPrompt(
    * 先扫一遍全市场，再看各维度的头几名，然后自己决定要不要点名深看。
    */
   if (ctx.rankings) {
-    volatileParts.push(renderRankings(ctx.rankings, RANKING_LIMIT));
+    volatileParts.push(
+      renderRankings(ctx.rankings, RANKING_LIMIT, ctx.oiRankingEnabled === true),
+    );
   }
 
   /* 7 — Candidate coins -------------------------------------------------- */
@@ -2859,7 +2871,11 @@ function renderMarketOverview(rows: readonly MarketOverviewRow[]): string {
  * 这句话必须出现在提示词里：否则模型会把"涨幅榜第一"读成系统给的建议，
  * 而系统在这里**没有资格**给建议 —— 用户的原则是「**模型是大脑，系统只是手脚**」。
  */
-function renderRankings(r: UniverseRankings, limit: number): string {
+function renderRankings(
+  r: UniverseRankings,
+  limit: number,
+  oiRankingEnabled: boolean,
+): string {
   const compact = (x: RankingRow): string =>
     `${x.symbol} ${fmtPercent(x.changePercent24h)}（${fmtVolumeCompact(x.quoteVolume24h)}）`;
   const join = (rows: readonly RankingRow[], render: (x: RankingRow) => string): string =>
@@ -2876,6 +2892,21 @@ function renderRankings(r: UniverseRankings, limit: number): string {
     `跌幅：${join(r.losers, compact)}`,
     `波动率：${join(r.volatility, (x) => `${x.symbol} 振幅 ${(x.value * 100).toFixed(1)}%（${fmtVolumeCompact(x.quoteVolume24h)}）`)}`,
     `资金费极值：${join(r.fundingExtreme, (x) => `${x.symbol} ${(x.value * 100).toFixed(4)}%（${fmtVolumeCompact(x.quoteVolume24h)}）`)}`,
+    /*
+     * ⚠️ 第八个维度「持仓量增长」的能力**早已存在**（`getOiRanking()` +
+     * `screenOpenInterestGrowth()`），只是由 `indicators.enableOiRanking` 控制、当前关着。
+     *
+     * 按「模型是大脑」的原则**不替它打开**，但必须让它知道这个能力存在 ——
+     * 否则"能开而不知道"等于没有。
+     */
+    ...(oiRankingEnabled
+      ? []
+      : [
+          '',
+          '**持仓量增长榜**：策略参数 `indicators.enableOiRanking` 当前是**关闭**的 —— ' +
+            '打开它就能看到 1 小时持仓量增长最快的一批标的（用 `set_params` 改，下一轮生效）。' +
+            '持仓量异动常常先于价格异动，是另一种"哪里在动"的信号。',
+        ]),
   ].join('\n');
 }
 

@@ -1863,6 +1863,11 @@ export class AutoTrader {
       oiRanking,
       marketOverview,
       rankings,
+      /*
+       * 「持仓量增长」维度是否开着 —— 关着时渲染层会告诉模型"这个能力存在、怎么开"。
+       * 这里如实传配置值：**不替模型打开它**（那是它的判断），只是不把能力藏起来。
+       */
+      oiRankingEnabled: config.indicators.enableOiRanking,
       memory,
       /*
        * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**

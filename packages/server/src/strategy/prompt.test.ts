@@ -1168,6 +1168,42 @@ test('★ 市场聚焦：模型要一眼看到"哪里在动"（五个维度榜�
   );
 });
 
+test('★ 持仓量增长榜：关着的时候要告诉模型"它存在、你能开"', () => {
+  /*
+   * 「持仓量增长」是第 1 层八个维度之一，而它的能力**早已存在**
+   * （`getOiRanking()` + `screenOpenInterestGrowth()`），只是由策略参数
+   * `indicators.enableOiRanking` 控制、**当前是 false**。
+   *
+   * ⚠️ **我不替模型打开它** —— 按用户的原则「模型是大脑，系统只是手脚」，
+   * 那属于模型的判断（它能用 `set_params` 自己改）。
+   * 但**它必须知道这个能力存在**，否则"能开而不知道"等于没有 ——
+   * 那正是"系统把能力藏起来了"，与本项目的方向相反。
+   */
+  const empty = {
+    quoteVolume: [],
+    gainers: [],
+    losers: [],
+    volatility: [],
+    fundingExtreme: [],
+  };
+
+  const off = buildUserPrompt({
+    ...contextWith(blankMemory()),
+    rankings: empty,
+    oiRankingEnabled: false,
+  });
+  assert.match(off, /持仓量增长榜/, '要提到这个维度');
+  assert.match(off, /enableOiRanking/, '★ 要点名那个参数 —— 否则它无从下手');
+  assert.match(off, /关闭|false/i, '要如实说当前是关着的');
+
+  const on = buildUserPrompt({
+    ...contextWith(blankMemory()),
+    rankings: empty,
+    oiRankingEnabled: true,
+  });
+  assert.doesNotMatch(on, /当前是\*\*关闭\*\*/, '开着的时候不必再劝它开');
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：
