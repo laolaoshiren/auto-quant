@@ -1369,6 +1369,36 @@ export const orders = {
   },
 
   /**
+   * 本机器人的「交易所单号 → 用途」映射（`entry` / `exit` / `stop_loss` / …）。
+   *
+   * ## 它存在的理由：校验**重建出来的回合有没有把方向搞反**
+   *
+   * `reconstructRoundTrips()` 用的是**净头寸法** —— 按持仓数量的变化判断哪一笔
+   * 是开仓、哪一笔是平仓。而它的输入是 `getUserTrades(symbol, 500)`（最近 500 笔）
+   * 且**没有"起始持仓"这个信息**：如果窗口起点落在一个持仓的中间，第一笔
+   * （其实是平仓）会被当成开仓，**整个 leg 的 open/close 就此反向**。
+   *
+   * 实测（2026-09-29）：6 笔 `reconciled` 回合的 `entry_order_id` 在 `orders` 里
+   * 记的用途是 `exit`、而 `exit_order_id` 记的是 `entry`，两者甚至相隔 2 天 ——
+   * 合计 `-0.125559`，**正好等于账目校验的全部缺口**。也就是说：**账本没错，
+   * 是重建凭空造出了这 6 笔反向的回合**，还顺带让 `findDuplicate()` 的
+   * 单号去重判据失效。
+   *
+   * 运行期记下的 `purpose` 是我们**下单时的真实意图**，用它反查一次即可辨认。
+   */
+  purposeByExchangeOrderId(traderId: number): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const row of getDb().all<{ exchange_order_id: string | null; purpose: string }>(
+      'SELECT exchange_order_id, purpose FROM orders WHERE trader_id = ? AND exchange_order_id IS NOT NULL',
+      traderId,
+    )) {
+      if (row.exchange_order_id === null) continue;
+      map.set(String(row.exchange_order_id), String(row.purpose));
+    }
+    return map;
+  },
+
+  /**
    * 某机器人的订单记录，**最新在前**，一次一页。`before` 是游标：只返回 `id < before` 的行。
    *
    * ## 为什么用 `before=id` 而不是 `offset`

@@ -3960,7 +3960,12 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      * 还是归属闸门把它们判给了别的机器人、还是没有 `entryOrderId` 的成交。
      * 三种原因的修法完全不同，所以把它们分开数。
      */
-    const skipDiag = { beforeWindow: 0, otherTrader: 0, foreign: 0, foreignNoId: 0 };
+    const skipDiag = { beforeWindow: 0, otherTrader: 0, foreign: 0, foreignNoId: 0, reversed: 0 };
+    /*
+     * 本机器人下单时的**意图**（交易所单号 → 用途）—— 用来辨认重建出的回合有没有
+     * 把开/平方向搞反。详见 `orders.purposeByExchangeOrderId()` 与下面那段校验。
+     */
+    const purposeById = orderStore.purposeByExchangeOrderId(traderId);
 
     for (const symbol of symbols) {
       if (!this.deps.registry.get(symbol)) continue;
@@ -3972,6 +3977,35 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       }
 
       for (const trip of reconstructRoundTrips(fills)) {
+        /*
+         * ⚠️ **先校验方向 —— 反了的回合一个数都不许记。**
+         *
+         * `reconstructRoundTrips()` 用的是**净头寸法**：按持仓数量的变化判断哪一笔
+         * 是开仓、哪一笔是平仓。它拿的是 `getUserTrades(symbol, 500)`（最近 500 笔），
+         * 而**"窗口起点时的持仓"这个信息根本不存在** —— 一旦窗口起点落在一个持仓的
+         * 中间，第一笔（其实是平仓）会被当成开仓，**整个 leg 的 open/close 就此反向**，
+         * 把不同回合的单号配到一起。
+         *
+         * 实测（2026-09-29，6 笔 `reconciled`）：所谓 `entry_order_id` 在 `orders`
+         * 里记的用途是 `exit`、所谓 `exit_order_id` 记的是 `entry`，两者甚至相隔 2 天；
+         * 6 笔净额合计 `-0.125559`，**正好等于账目校验的全部缺口**。
+         * 也就是说：**账本没错，是重建凭空造出了这些反向回合**（还顺带让
+         * `findDuplicate()` 的单号去重判据失效）。
+         *
+         * 判据用**运行期记下的下单意图**（`orders.purpose`）—— 那是我们当时真正
+         * 想做的事，比重建的推测可信。找不到（外部活动/别的机器人）就照原路走。
+         */
+        const entryPurpose = trip.entryOrderId ? purposeById.get(trip.entryOrderId) : undefined;
+        const exitPurpose = trip.exitOrderId ? purposeById.get(trip.exitOrderId) : undefined;
+        if (entryPurpose === 'exit' || exitPurpose === 'entry') {
+          skipDiag.reversed += 1;
+          log.warn(
+            `[${this.deps.trader.name}] 重建出的 ${symbol} 回合方向是反的（所谓入场单 ${trip.entryOrderId} ` +
+              `实际用途 ${entryPurpose ?? '未知'}、所谓出场单 ${trip.exitOrderId} 实际用途 ${exitPurpose ?? '未知'}）` +
+              '—— 不记账。这通常说明成交历史的窗口起点落在持仓中间，净头寸法把开/平判反了。',
+          );
+          continue;
+        }
         if (new Date(trip.closedAt).getTime() < since) {
           skipDiag.beforeWindow += 1;
           continue;
