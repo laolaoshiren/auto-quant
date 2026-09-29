@@ -3116,6 +3116,28 @@ const DECISION_TRIM_EVERY_WRITES = 50;
 /** 距离上次裁剪已写入的行数（裁剪是全局的，不区分 trader）。 */
 let decisionWritesSinceTrim = 0;
 
+/**
+ * **提示词全文**只保留最近这么多条；更早的记录把提示词字段清空。
+ *
+ * ## 为什么要有这条（实测：一个字段占了这个库 90% 的体积）
+ *
+ * 2026-09-29 实测：`decision_records` 占 **88.77 MB**，其中
+ * **`user_prompt` 一个字段就占 68.59 MB**（单条最大 **220,295 字符** ——
+ * 它是 20 个候选 × 4 个周期 × 10 个指标序列的完整数组）。
+ * 保留 500 条 = **稳态约 100 MB**，而且每轮都要往 SQLite 里写 ~200 KB。
+ *
+ * 而"当时给模型看了什么"**只在复盘最近几轮时有价值**。更早的决策里，
+ * 真正有长期价值的是**决定了什么**（`decisions_json`）与**执行结果**
+ * （`execution_log_json`）—— 这两样一个字都不动。
+ *
+ * 所以超期之后**只清空提示词字段、不删行**：决策与执行仍可完整回看，
+ * 而体积回到每行不足 1 KB 的量级。
+ *
+ * 想回看更早的提示词时，值不值得付 100 MB 换，是个可以再讨论的取舍 ——
+ * 但默认值不该是"一直存着"。
+ */
+const DECISION_PROMPT_KEEP = 100;
+
 export const decisions = {
   /**
    * 某机器人的决策记录，**最新在前**。`before` 是游标：只返回 `id < before` 的记录。
@@ -3220,6 +3242,23 @@ export const decisions = {
             AND id NOT IN (SELECT id FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT 500)`,
         input.traderId,
         input.traderId,
+      );
+      /*
+       * ⚠️ **更早的记录只清提示词，不删行** —— 理由见 `DECISION_PROMPT_KEEP`。
+       *
+       * `LENGTH(user_prompt) > 0` 这个条件让重复执行几乎不花代价：
+       * 已经清空过的行不会被再次扫描写入。它同时也是**幂等**的 ——
+       * 这条 UPDATE 可以被安全地重复调用。
+       */
+      getDb().run(
+        `UPDATE decision_records
+            SET system_prompt = '', user_prompt = '', cot_trace = '', raw_response = ''
+          WHERE trader_id = ?
+            AND id NOT IN (SELECT id FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT ?)
+            AND LENGTH(user_prompt) > 0`,
+        input.traderId,
+        input.traderId,
+        DECISION_PROMPT_KEEP,
       );
     }
     return lastInsertRowid;

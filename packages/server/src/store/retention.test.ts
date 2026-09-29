@@ -447,3 +447,56 @@ test('★ decision_records 有界，而且不是每写一行就全表扫一次',
   /* 控制台读的是最近那些行 —— 最新的那一条必须还在。 */
   assert.equal(decisions.list(traderId, 1)[0]?.cycleNumber, writes - 1);
 });
+
+test('★ 提示词全文只保留最近若干条 —— 它是这个库 90% 的体积', () => {
+  /*
+   * 实测（2026-09-29）：`decision_records` 占 **88.77 MB**，其中 `user_prompt`
+   * 一个字段就占 **68.59 MB**（单条最大 **220,295 字符** —— 20 个候选 × 4 个周期
+   * × 10 个指标序列的完整数组）。保留 500 条 = **稳态约 100 MB**，
+   * 而且每轮都要往 SQLite 写 ~200 KB。
+   *
+   * 而"当时给模型看了什么"只在**复盘最近几轮**时有价值。更早的决策里真正有
+   * 长期价值的是**决定了什么**（`decisions_json`）与**执行结果**
+   * （`execution_log_json`）—— 所以超期之后**只清提示词字段、不删行**。
+   */
+  traderId = seedTrader();
+  const db = getDb();
+
+  const writeBig = (cycle: number): void => {
+    decisions.log({
+      traderId,
+      cycleNumber: cycle,
+      systemPrompt: 'S'.repeat(2000),
+      userPrompt: 'U'.repeat(20000), // 模拟"大提示词"（实盘单条最大 220KB）
+      cotTrace: '',
+      decisions: [],
+      rawResponse: 'R'.repeat(500),
+      executionLog: [],
+      candidateSymbols: [],
+      success: true,
+      error: null,
+      aiLatencyMs: 1,
+      promptTokens: null,
+      completionTokens: null,
+    });
+  };
+
+  const writes = 200;
+  for (let i = 0; i < writes; i += 1) writeBig(i);
+
+  const rows = db.all<{ id: number; len: number }>(
+    'SELECT id, LENGTH(user_prompt) AS len FROM decision_records WHERE trader_id = ? ORDER BY id',
+    traderId,
+  ).map((r) => ({ id: r.id, len: Number(r.len) }));
+  const kept = rows.filter((r) => r.len > 0).length;
+
+  assert.ok(kept >= 100, `最近 100 条必须保留全文，实际只留 ${kept} 条`);
+  assert.ok(
+    kept <= 150,
+    `更早的必须被清空（否则体积会回到 100 MB），实际留了 ${kept} 条`,
+  );
+  /* 行数不能少：决策与执行结果要完整可回看。 */
+  assert.equal(rows.length, writes, `清空提示词不等于删行，实际 ${rows.length} 行`);
+  /* 最新那条必须有全文 —— 复盘正在跑的这几轮靠它。 */
+  assert.ok(rows[rows.length - 1]!.len > 0, '最新一条必须有全文');
+});
