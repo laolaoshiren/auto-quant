@@ -4985,12 +4985,18 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       if (minNotional > 0 && cap > 0 && minNotional > cap) {
         snap.tradability = {
           ok: false,
+          minNotional,
           reason:
             `交易所最小名义 $${minNotional}，而权益 $${equity.toFixed(2)} × ${ratio} = ` +
             `$${cap.toFixed(2)} 是你这个账户规模的上限 —— 够不着`,
         };
       } else {
-        snap.tradability = { ok: true };
+        /*
+         * 可做 —— 但**把最小名义一起带上**。实测 `#1462`：模型对 BTCUSDT 提了 $20，
+         * 而交易所下限是 $50 → 被拒。BTC 对这个账户其实能做（上限 ≈ $110），
+         * 它只是不知道"起步就要 $50"。这句话属于**事实**，无条件写给它是正确的。
+         */
+        snap.tradability = { ok: true, minNotional: minNotional > 0 ? minNotional : undefined };
       }
     }
   }

@@ -1005,6 +1005,17 @@ test('★ 当前账户开不了的标的只给摘要、并写明原因（省 tok
     /=== [0-9]+[MH] 周期（由旧到新）===/,
     '正常标的仍要拿到完整序列',
   );
+
+  /* 4) 可交易的标的要写明它的最小名义 —— 这一条对 BTC 才真正有效。 */
+  const withMin = snapshot('BTCUSDT', 68_000);
+  withMin.timeframes = [tf()];
+  withMin.tradability = { ok: true, minNotional: 50 };
+  const minPrompt = buildUserPrompt(contextWith(blankMemory(), [withMin]), 200_000);
+  assert.match(
+    minPrompt,
+    /最小名义价值是 \$50/,
+    '★ 必须告诉模型这个标的的起步名义 —— 实测 #1462 就是因为它按 $20 的习惯提案而被拒',
+  );
 });
 
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
