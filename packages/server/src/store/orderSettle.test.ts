@@ -8,6 +8,7 @@ import { closeDb, getDb, initDb } from '../db/index.js';
 import {
   aiModels,
   exchanges,
+  orderIdIn,
   orders as orderStore,
   positions as positionStore,
   strategies,
@@ -269,6 +270,36 @@ test('未平仓成本只作用于本机器人', () => {
   seedOrder({ forTrader: other, index: 2, status: 'FILLED', purpose: 'entry', symbol: 'ETHUSDT', fee: 99 });
   // 两个单号都给进去，`trader_id` 那一条必须把别人的 99 挡在外面。
   assert.ok(Math.abs(orderStore.openEntryCosts(traderId, ['EX-1', 'EX-2']) - 1.5) < 1e-9);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  单号精度：历史坏行的归属判定                                                  */
+/* -------------------------------------------------------------------------- */
+
+test('★ 单号被精度改写过的历史行，归属判定仍要认得出', () => {
+  /*
+   * 实测（2026-09-27 ETHUSDT）：交易所成交里的真实入口单号是
+   * `8389766285736311569`（19 位），而 `orders` 表里存的是 `8389766285736312000`
+   * —— 2026-09-28 之前用 `Number()` 解析响应时**后三位被改写**了。
+   *
+   * 归属判定（"这一回合是不是本机器人的"）就是拿这两边做字符串相等比较，
+   * 于是那个回合**永远**被判成「不属于本平台的成交」→ 总账校验凭空多出一笔
+   * 外部净额（实测 `foreignNet = -0.256743`，与那笔真实成交一字不差）
+   * → 每轮都报「账目与交易所对不上」。
+   *
+   * 解析层已经修好（`preserveBigIds()`），但历史行改不回来 —— 所以判定宽容一次。
+   */
+  const ids = new Set(['8389766285736312000', '96310441696']);
+
+  assert.equal(
+    orderIdIn('8389766285736311569', ids),
+    true,
+    '★ 交易所的真实单号要能认出本地那行被改写过的记录',
+  );
+  assert.equal(orderIdIn('8389766285736312000', ids), true, '原样匹配照旧');
+  assert.equal(orderIdIn('96310441696', ids), true, '16 位以内的单号精确匹配（不受影响）');
+  assert.equal(orderIdIn('245217262410', ids), false, '★ 不相干的单号绝不能被放行');
+  assert.equal(orderIdIn('', ids), false, '空单号永远不匹配');
 });
 
 /* -------------------------------------------------------------------------- */

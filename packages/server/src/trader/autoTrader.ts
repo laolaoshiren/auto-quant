@@ -67,6 +67,7 @@ import {
   equity as equityStore,
   marginOf,
   normalizeMarginMode,
+  orderIdIn,
   orders as orderStore,
   ownUnrealizedPnlOf,
   positions as positionStore,
@@ -4050,7 +4051,16 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
          * `trades.insert()` 内部的身份判定负责（见 `trades.findDuplicate()`），
          * 而不是由这道闸门负责；两者的职责不要混。
          */
-        if (!trip.entryOrderId || !ownOrders.has(trip.entryOrderId)) {
+        /*
+         * ⚠️ **历史行的单号可能被 `Number()` 改写过后三位 —— 用 `orderIdIn` 宽容一次。**
+         *
+         * 币安新版单号 19 位，而 2026-09-28 之前的解析用 `Number()` → 写进 `orders`
+         * 的是被精度改写过的值（实测 `8389766285736312000` vs 真实 `8389766285736311569`）。
+         * 严格的字符串相等会让那些回合**永远**被判成「外部活动」→ 账目告警每轮误报。
+         * 详见 `orderIdIn()` 的注释。
+         */
+        const entryId = trip.entryOrderId ?? '';
+        if (!orderIdIn(entryId, ownOrders)) {
           /*
            * ⚠️ **这里原来是一句 debug 日志 —— 而 debug 级日志不会被显示。**
            *
@@ -4061,7 +4071,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
            * 现在按归属分两类，只有真正的外部活动才收集上报：
            * 属于别的机器人的是正常情况（共用账户），不该刷告警。
            */
-          if (!trip.entryOrderId || !allOrders.has(trip.entryOrderId)) {
+          if (!orderIdIn(entryId, allOrders)) {
             /*
              * ⚠️ **`net` 必须把资金费算进来 —— 它原来漏了，而那是 0.2 USDT 的假差额。**
              *
