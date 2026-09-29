@@ -198,22 +198,35 @@ function findBalancedJson(text: string): string | null {
 export function extractDecisions(response: string): string | null {
   const text = repairEncoding(stripInvisible(response));
 
+  /*
+   * ⚠️ **提取必须限定在 `<decision>` 之后 —— 这是实测出来的一条。**
+   *
+   * 案例（#1623，2026-09-28 周期 390）：响应被截断（`reasoning` 字符串写到一半
+   * 就没了，连 `</decision>` 都没有），而**响应前面还有别的 JSON 片段**
+   * （模型自己的分析草稿）。`findBalancedJson()` 从**第一个 `[`** 开始扫描，
+   * 于是从那个草稿开始、在**别处**凑巧找到了一个平衡点，返回一段
+   * **"看起来合法、其实是错的"**内容 —— `JSON.parse` 失败 → **整轮零决策**，
+   * 而模型真正要交付的内容就在下面几十行处。
+   *
+   * 模型承诺交付的东西一定写在 `<decision>` 之后，所以作用域先钉死在那里：
+   * 有完整块就用块内，**没有闭合标签（截断）就用到文末**。
+   */
+  const openTag = /<decision>/i.exec(text);
   const decisionBlock = /<decision>([\s\S]*?)<\/decision>/i.exec(text);
-  if (decisionBlock?.[1]) {
-    const inner = decisionBlock[1];
-    const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(inner);
-    if (fenced?.[1]?.trim()) return fenced[1].trim();
-    const balanced = findBalancedJson(inner);
-    if (balanced) return balanced;
-  }
+  const body = decisionBlock?.[1] ?? (openTag ? text.slice(openTag.index + openTag[0].length) : text);
 
-  const anyFence = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(body);
+  if (fenced?.[1]?.trim()) return fenced[1].trim();
+  const balanced = findBalancedJson(body);
+  if (balanced) return balanced;
+
+  const anyFence = /```(?:json)?\s*([\s\S]*?)```/i.exec(body);
   if (anyFence?.[1]?.trim()) {
     const inner = anyFence[1].trim();
     if (inner.startsWith('[') || inner.startsWith('{')) return inner;
   }
 
-  return findBalancedJson(text) ?? salvageTruncatedDecisions(text);
+  return findBalancedJson(body) ?? salvageTruncatedDecisions(body);
 }
 
 /**

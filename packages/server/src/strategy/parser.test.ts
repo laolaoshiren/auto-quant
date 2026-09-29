@@ -101,6 +101,33 @@ test('returns null when there is no JSON at all', () => {
   assert.equal(extractDecisions('just prose, nothing structured'), null);
 });
 
+test('★ 响应被截断、且前面还有别的 JSON 片段时，提取必须落在 <decision> 之后', () => {
+  /*
+   * 实测（#1623，2026-09-28 周期 390）：响应被截断（`reasoning` 字符串写到一半
+   * 就没了，连 `</decision>` 都没有），而**前面还有模型自己分析用的 JSON 片段**。
+   *
+   * `findBalancedJson()` 从**第一个 `[`** 开始扫描 —— 于是它从那个草稿开始、
+   * 在**别处**凑巧找到平衡点，返回一段"看起来合法、其实是错的"内容 →
+   * `JSON.parse` 失败 → **整轮零决策**，而模型真正要交付的内容就在几十行之下。
+   *
+   * 所以提取必须先限定在 `<decision>` 之后。
+   */
+  const truncated =
+    '分析如下：候选池 ["BTCUSDT","ETHUSDT"] 里 ETH 的结构更好。\n' +
+    '<decision>\n```json\n[\n  {"symbol":"XRPUSDT","action":"hold","reasoning":"结构未坏"},' +
+    '{"symbol":"SOLUSDT","action":"open_short","reasoning":"贴'; // ← 在这里被截断
+
+  const extracted = extractDecisions(truncated);
+  assert.ok(extracted, '必须能提取出东西');
+  assert.ok(
+    !extracted.includes('"BTCUSDT"'),
+    '★ 不能把 <decision> 之前那段草稿当成决策 —— 那是 #1623 里发生的事',
+  );
+  const parsed = JSON.parse(extracted) as Array<{ symbol: string }>;
+  assert.equal(parsed.length, 1, '只救回完整的那一条');
+  assert.equal(parsed[0]!.symbol, 'XRPUSDT', '救回的是模型真正交付的那一条');
+});
+
 test('★ 输出被截断时，已经完整的决策要被救回来（而不是整轮丢掉）', () => {
   /*
    * 实测（2026-09-29）：443 轮里 `finish_reason=length`（输出被长度上限截断）
