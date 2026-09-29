@@ -1171,6 +1171,13 @@ export class RiskEngine {
         stopLoss: roundedStop,
         takeProfit: roundedTarget,
         riskUsd: finalRiskUsd,
+        /*
+         * ⚠️ **把算好的数量交出去 —— 下单路径必须用它，不要再自己算一遍。**
+         *
+         * 详见 `Decision.quantity` 的注释：两处各算一遍就会分叉，而分叉的代价
+         * 已经实测过（引擎按市价放行、下单按挂单价取整 → 名义不够 → 整笔被拒）。
+         */
+        quantity,
         adjustments: [
           ...decision.adjustments,
           ...adjustments,

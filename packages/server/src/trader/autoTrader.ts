@@ -5945,7 +5945,24 @@ reduceQuantity: null,
      * 进位只加一个步长（这里约 $0.07），而且**只在确实能越过门槛时才加** ——
      * 越不过就照原样交给交易所拒绝，不掩盖真实的"这个标的在当前规模下做不了"。
      */
-    let quantity = this.deps.registry.notionalToQuantity(symbol, decision.positionSizeUsd, price);
+    /*
+     * ⚠️ **优先用风控引擎算好的数量（`decision.quantity`），不要在这里重算。**
+     *
+     * 这个系统里数量曾经由**两条路径各算一次**：引擎第 12 步算一遍（用它校验最低名义、
+     * 并把结果写进 `adjustments`），下单这里再拿 `positionSizeUsd` 除以价格算一遍。
+     * 两处口径一旦不同就分叉 —— 实测（2026-09-24 ~ 09-26，三次真实失败）：
+     * 引擎按市价放行、这里按挂单价向下取整，`0.275 × 72.55 = 19.9513 < 20`，
+     * 整笔被交易所拒绝，**白丢一次机会**。
+     *
+     * 所以引擎现在把 `quantity` 一起交出来，这里直接用。**回退路径保留**：
+     * 字段缺失时（回放数据、别的调用方）仍按原来的算法算，并保留"差一档就进位"的兜底。
+     */
+    let quantity: number;
+    if (decision.quantity && decision.quantity > 0) {
+      quantity = decision.quantity;
+    } else {
+      quantity = this.deps.registry.notionalToQuantity(symbol, decision.positionSizeUsd, price);
+    }
     const minNotional = this.deps.registry.minNotional(symbol);
     if (minNotional > 0 && quantity > 0 && quantity * price < minNotional) {
       const bumped = this.deps.registry.roundQuantityUp(symbol, quantity);

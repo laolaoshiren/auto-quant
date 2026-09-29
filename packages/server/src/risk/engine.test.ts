@@ -1133,6 +1133,44 @@ test('★ 限价单的盈亏比要按挂单价算 —— 按市价算会把它�
   assert.match(asMarket.rejected[0]!.reason, /盈亏比/, '拒绝理由应当还是盈亏比');
 });
 
+test('★ 裁决必须带上算好的数量 —— 下单路径不许再自己算一遍', () => {
+  /*
+   * 数量原来由**两条路径各算一次**：引擎第 12 步算一遍（校验最低名义、写进
+   * `adjustments`），下单路径再拿 `positionSizeUsd` 除以价格算一遍。
+   * 两处口径一旦不同就分叉 —— 实测三次真实失败：引擎按市价放行、下单按挂单价
+   * 取整，`0.275 × 72.55 = 19.9513 < 20`，整笔被交易所拒绝，白丢一次机会。
+   *
+   * 所以引擎必须把数量一起交出来（`Decision.quantity`），下单路径直接用它。
+   * 这条用例守的是"那个字段真的被填了" —— 它一消失，两条路径就又各算各的。
+   */
+  const verdict = engine.review(
+    [
+      openDecision({
+        symbol: 'BTCUSDT',
+        action: 'open_long',
+        positionSizeUsd: 100,
+        leverage: 3,
+        stopLoss: 66_000,
+        /* 入场 68000：跌 2000 / 涨 6000 = 1:3 —— 满足 `minRiskRewardRatio` 的前置条件。 */
+        takeProfit: 74_000,
+      }),
+    ],
+    environment(),
+  );
+
+  assert.equal(
+    verdict.rejected.length,
+    0,
+    `不该被拒：${verdict.rejected[0]?.reason ?? '（无）'}`,
+  );
+  const approved = verdict.approved[0]!;
+  assert.ok(
+    typeof approved.quantity === 'number' && approved.quantity > 0,
+    `★ 开仓裁决必须带 quantity（实得 ${String(approved.quantity)}）—— ` +
+      '否则下单路径只能自己再算一遍，两处口径会分叉',
+  );
+});
+
 test('★ 限价单的数量必须按挂单价算 —— 否则引擎放行、交易所按挂单价拒绝', () => {
   /*
    * 实测三次真实失败（2026-09-24 ~ 09-26），原文：
