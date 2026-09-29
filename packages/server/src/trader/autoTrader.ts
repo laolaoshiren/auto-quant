@@ -6498,7 +6498,32 @@ reduceQuantity: null,
     }
 
     /* ① 先撤旧保护单 —— 它们只覆盖旧数量。 */
-    await this.deps.broker.cancelAllOrders(decision.symbol).catch(() => undefined);
+    /*
+     * ⚠️ **撤不掉就不要往下走。**
+     *
+     * `cancelAllOrders()` 的失败形态是**抛错**（它内部把 `-2011`「单子已经不在交易所了」
+     * 当成功，其余失败一律抛）。这里原来写的是 `.catch(() => undefined)` ——
+     * **把失败整个吞掉，然后照样加仓**：
+     *
+     *   · 旧止损单还在，而它覆盖的是**加仓前**的数量 → 加完之后多出来的那部分
+     *     **没有任何保护**（§2.6 最糟的形状之一）；
+     *   · 接着按新数量重挂保护单，必然吃 `-4130`（同一仓位不允许重复挂条件单）。
+     *
+     * `executeAdjust()` 里早就是显式判断了 —— 这与它是**同一条纪律**：
+     * 适配层用"返回值 / 异常"表达失败，调用方必须**看得见**它。
+     */
+    try {
+      await this.deps.broker.cancelAllOrders(decision.symbol);
+    } catch (error) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail:
+          `撤不掉现有的保护单（${(error as Error).message}）—— 已放弃本次加仓：` +
+          '旧保护单只覆盖加仓前的数量，带着它加仓会让多出来的那部分没有保护。',
+      };
+    }
 
     /* ② 市价买入/卖出这一部分。 */
     const side: 'BUY' | 'SELL' = local.side === 'long' ? 'BUY' : 'SELL';
@@ -6726,7 +6751,26 @@ reduceQuantity: null,
     }
 
     /* ① 先撤保护单：它们覆盖的是全部数量。 */
-    await this.deps.broker.cancelAllOrders(decision.symbol).catch(() => undefined);
+    /*
+     * ⚠️ **撤不掉就不要往下走** —— 与加仓那一处同一条纪律（见上面的长注释）。
+     *
+     * 减仓这条的后果稍有不同：旧保护单覆盖的是**全部**数量，减完之后仓位变小，
+     * 那张单的 `closePosition` 语义还成立（它平的是当前持仓）—— 但紧接着按
+     * **剩余数量**重挂保护单会吃 `-4130`，那条路会走到 §2.6「没有有效止损 → 立刻平仓」，
+     * 把一笔本来有保护的仓位平掉。所以失败时**什么都不做**最安全。
+     */
+    try {
+      await this.deps.broker.cancelAllOrders(decision.symbol);
+    } catch (error) {
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'failed',
+        detail:
+          `撤不掉现有的保护单（${(error as Error).message}）—— 已放弃本次减仓：` +
+          '带着旧保护单重挂会吃 -4130，进而被误判成"没有有效止损"而平掉整个仓位。',
+      };
+    }
 
     /* ② reduceOnly 市价平掉这一部分。 */
     const side: 'BUY' | 'SELL' = local.side === 'long' ? 'SELL' : 'BUY';

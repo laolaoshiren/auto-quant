@@ -3748,6 +3748,55 @@ test('★ 加仓也要记订单 —— 它是一笔真实成交', async () => {
   );
 });
 
+test('★ 加仓时撤不掉旧保护单 → 不许下单（多出来的部分会没有保护）', async () => {
+  /*
+   * 与 `executeAdjust` 那条（"撤旧失败就不许挂新"）**同一条纪律**，但后果更重：
+   * 加仓必须先撤掉"只覆盖旧数量"的保护单 —— 撤不掉就加，多出来的那部分
+   * **没有任何保护**（§2.6 最糟的形状），而且接着按新数量重挂必然吃 `-4130`。
+   *
+   * 这里原来写的是 `cancelAllOrders(...).catch(() => undefined)`：
+   * 撤单失败被整个吞掉，然后照样市价加仓。
+   * （`cancelAllOrders` 的失败形态是**抛错**，那个 `.catch` 吞的就是它。）
+   */
+  const broker = new FakeBroker();
+  broker.autoUserTrades = true;
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const opened = positionStore.getOpenBySymbol(traderId, SYMBOL);
+  assert.ok(opened, '前提：开出了一个仓位');
+
+  /* 撤旧保护单这一步失败：那张单**仍在**交易所上，而且只覆盖旧数量。 */
+  broker.failCancelAll = true;
+  const placedBefore = broker.placed.length;
+
+  const addResponse = `<decision>
+\`\`\`json
+[
+  {
+    "symbol": "${SYMBOL}",
+    "action": "add_to_position",
+    "position_size_usd": 20,
+    "confidence": 80,
+    "reasoning": "结构仍成立，加一点。"
+  }
+]
+\`\`\`
+</decision>`;
+  await buildTrader(broker, addResponse).runOnce();
+
+  const marketAdds = broker.placed.slice(placedBefore).filter((p) => p.type === 'MARKET');
+  assert.equal(
+    marketAdds.length,
+    0,
+    '★ 撤不掉旧保护单时不许市价加仓 —— 多出来的那部分会暴露在没有保护的状态下',
+  );
+  assert.equal(
+    positionStore.getOpenBySymbol(traderId, SYMBOL)?.quantity,
+    opened.quantity,
+    '★ 没下单就不许改本地持仓（数量与交易所必须一致）',
+  );
+});
+
 test('★ 减仓也要记订单 —— 同上', async () => {
   /*
    * `reduce_position` 算出了 `exitFee`、写进了成交表、改了持仓，也没有 `recordOrder`。
