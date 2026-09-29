@@ -115,3 +115,6 @@ packages/web/ui-smoke/
 
 # 一次性的视觉方向对比页（给维护者看，不属于项目产物）
 _ui-directions.html
+
+# 本地个人协作约定 —— 含账号事故等私人内容，绝不入库、绝不推送
+/AGENTS.md
