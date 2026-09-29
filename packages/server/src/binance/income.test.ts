@@ -150,3 +150,73 @@ test('起始时间不是数字时必须抛错，而不是跳过整个窗口', as
     /不是有效数字/,
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  分片翻页：满页必须继续取（否则多出来的流水被静默丢掉）                          */
+/* -------------------------------------------------------------------------- */
+
+/** 一个按调用顺序返回不同页的 rest 替身，并把每次请求的参数记下来。 */
+function restPaging(pages: BinanceIncome[][]): {
+  rest: BinanceRest;
+  calls: Array<Record<string, unknown>>;
+} {
+  const calls: Array<Record<string, unknown>> = [];
+  let index = 0;
+  const rest = {
+    async signedRequest(_method: string, _path: string, params: Record<string, unknown>) {
+      calls.push(params);
+      return pages[index++] ?? [];
+    },
+  } as unknown as BinanceRest;
+  return { rest, calls };
+}
+
+test('★ 一片里满页时必须继续翻页 —— 否则多出来的流水被静默丢掉', async () => {
+  /*
+   * 币安 `/fapi/v1/income` **静默按 `limit` 截断**：一个 7 天片里超过 limit 条时，
+   * 多出来的部分不会以任何形式告诉你 —— 于是它被读成"这一片就这么些"。
+   *
+   * 实测（2026-09-29）：账目校验的差额 `-0.125559` 与 6 笔「对账补录」的净额合计
+   * **一字不差**，而那 6 笔都不是重复记账（600 秒内没有同标的的已有回合）——
+   * 说明是**交易所流水那一侧漏读**，而不是平台记错了账。
+   */
+  const t0 = 1_700_000_000_000;
+  const firstPage = Array.from({ length: 1000 }, (_, i) =>
+    income({ incomeType: 'COMMISSION', income: '-0.01', time: t0 + i, tranId: i }),
+  );
+  const secondPage = Array.from({ length: 5 }, (_, i) =>
+    income({ incomeType: 'COMMISSION', income: '-0.01', time: t0 + 1000 + i, tranId: 1000 + i }),
+  );
+
+  const { rest, calls } = restPaging([firstPage, secondPage]);
+  const events = await fetchIncome(rest, { startTime: t0, endTime: t0 + 3600_000, limit: 1000 });
+
+  assert.equal(events.length, 1005, '★ 满页之后必须继续取，不能把剩下的丢掉');
+  assert.equal(calls.length, 2, '应当是两次请求（第二次从上一页最后一条的时间继续）');
+  assert.equal(
+    Number(calls[1]!.startTime),
+    t0 + 999,
+    '第二次的 startTime 取上一页最后一条的时间（含边界，靠 tranId 去重）',
+  );
+});
+
+test('★ 翻页重叠的那一条不会被记两次（tranId 去重）', async () => {
+  /*
+   * 续取用的是"上一页最后一条的时间"，而 `startTime` 是**包含**的 ——
+   * 所以那一毫秒会被再取一次。**不能靠 `+1ms` 回避**：同一毫秒可能有多条记录，
+   * 加一会把它们一起漏掉。去重键用 `tranId`。
+   */
+  const t0 = 1_700_000_000_000;
+  const firstPage = Array.from({ length: 1000 }, (_, i) =>
+    income({ incomeType: 'COMMISSION', income: '-0.01', time: t0 + i, tranId: i }),
+  );
+  const secondPage = [
+    firstPage[999]!,
+    income({ incomeType: 'COMMISSION', income: '-0.01', time: t0 + 1000, tranId: 9999 }),
+  ];
+
+  const { rest } = restPaging([firstPage, secondPage]);
+  const events = await fetchIncome(rest, { startTime: t0, endTime: t0 + 3600_000, limit: 1000 });
+
+  assert.equal(events.length, 1001, '★ 重叠的那一条只能算一次');
+});

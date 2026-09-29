@@ -22,6 +22,9 @@
  */
 import type { BinanceRest } from './rest.js';
 import type { BinanceIncome } from './types.js';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('binance:income');
 
 export interface IncomeSummary {
   /** Gross realised PnL across every symbol. */
@@ -49,6 +52,7 @@ export async function fetchIncome(
   options: { startTime: number; endTime?: number; symbol?: string; incomeType?: string; limit?: number },
 ): Promise<BinanceIncome[]> {
   const endTime = options.endTime ?? Date.now();
+  const limit = options.limit ?? 1000;
   const events: BinanceIncome[] = [];
 
   /*
@@ -66,43 +70,93 @@ export async function fetchIncome(
   if (!Number.isFinite(cursor)) {
     throw new Error(`/fapi/v1/income 的起始时间不是有效数字：${String(options.startTime)}`);
   }
+
+  /*
+   * ⚠️ **同一条流水只能收一次。**
+   *
+   * 片内续取（见下）会用"上一页最后一条的时间"当新的 `startTime`，而那个点是
+   * **包含**的 —— 所以最后一毫秒的记录会被再取一次。用 `tranId` 去重即可；
+   * **不要**改成 `lastTime + 1`：同一毫秒可能有多条，加一会把它们一起漏掉。
+   */
+  const seen = new Set<string>();
+
   while (cursor < endTime) {
     const sliceEnd = Math.min(cursor + WINDOW, endTime);
-    const page = await rest.signedRequest<BinanceIncome[]>('GET', '/fapi/v1/income', {
-      startTime: cursor,
-      endTime: sliceEnd,
-      ...(options.symbol ? { symbol: options.symbol } : {}),
-      ...(options.incomeType ? { incomeType: options.incomeType } : {}),
-      limit: options.limit ?? 1000,
-    });
+
     /*
-     * ⚠️ **不是数组就抛错，不要当成空。**
+     * ⚠️ **满一页 ≠ 这一片取完了 —— 这是"读不到被当成没有"的又一例。**
      *
-     * 这一行原来写的是 `if (Array.isArray(page)) events.push(...page);` ——
-     * 一个"响应不是数组"的请求于是**静默变成零条流水**。而
-     * `rest.signedRequest()` 在**响应体为空**时正是返回 `undefined`
-     * （见 `rest.ts` 的 `if (!text) return undefined as T`）—— 一个 200 加空 body
-     * 的网关抽风，看起来和"这个账户什么都没做过"一模一样。
+     * 币安 `/fapi/v1/income` **静默按 `limit` 截断**：一个 7 天片里超过 1000 条时，
+     * 多出来的部分不会以任何形式告诉你 —— 于是它被读成"这一片就这么些"，
+     * **那些流水永远丢失**，而总账校验因此永远差一笔。
      *
-     * 实测代价（部署后立刻撞上）：
+     * 实测（2026-09-29）：账目校验的差额 `-0.125559` 与 6 笔「对账补录」的净额合计
+     * **一字不差**，而那 6 笔都不是重复记账（600 秒内没有同标的的已有回合）——
+     * 说明**交易所流水那一侧漏读了它们**，而不是平台记错了账。
      *
-     *     22:14:33 ERROR 账目与交易所对不上：平台记录 1.1063 USDT、
-     *                    交易所流水 0.0000 USDT，差 1.1063
-     *
-     * 而同一时刻直接问交易所，同一个窗口是 **58 条、合计 1.10634107** ——
-     * 平台记的账一分不差，报错的是**读取**。这条告警的文案是"请先核对再让
-     * 机器人继续交易"，也就是它会指着一个完全正确的账本要求人工介入。
-     *
-     * 抛错之后，`reconcileTradeHistory()` 的 `catch` 会把它记成
-     * `incomeReadFailed`，总账校验**整条跳过**（那个标志就是为这件事存在的）。
+     * 所以片内再套一层：满页就继续往前推，直到某页不满为止。
      */
-    if (!Array.isArray(page)) {
-      throw new Error(
-        `/fapi/v1/income 返回的不是数组（${page === undefined ? '空响应体' : typeof page}）：` +
-          `${JSON.stringify(page)?.slice(0, 200)}`,
-      );
+    let pageCursor = cursor;
+    for (;;) {
+      const page = await rest.signedRequest<BinanceIncome[]>('GET', '/fapi/v1/income', {
+        startTime: pageCursor,
+        endTime: sliceEnd,
+        ...(options.symbol ? { symbol: options.symbol } : {}),
+        ...(options.incomeType ? { incomeType: options.incomeType } : {}),
+        limit,
+      });
+      /*
+       * ⚠️ **不是数组就抛错，不要当成空。**
+       *
+       * 这一行原来写的是 `if (Array.isArray(page)) events.push(...page);` ——
+       * 一个"响应不是数组"的请求于是**静默变成零条流水**。而
+       * `rest.signedRequest()` 在**响应体为空**时正是返回 `undefined`
+       * （见 `rest.ts` 的 `if (!text) return undefined as T`）—— 一个 200 加空 body
+       * 的网关抽风，看起来和"这个账户什么都没做过"一模一样。
+       *
+       * 实测代价（部署后立刻撞上）：
+       *
+       *     22:14:33 ERROR 账目与交易所对不上：平台记录 1.1063 USDT、
+       *                    交易所流水 0.0000 USDT，差 1.1063
+       *
+       * 而同一时刻直接问交易所，同一个窗口是 **58 条、合计 1.10634107** ——
+       * 平台记的账一分不差，报错的是**读取**。这条告警的文案是"请先核对再让
+       * 机器人继续交易"，也就是它会指着一个完全正确的账本要求人工介入。
+       *
+       * 抛错之后，`reconcileTradeHistory()` 的 `catch` 会把它记成
+       * `incomeReadFailed`，总账校验**整条跳过**（那个标志就是为这件事存在的）。
+       */
+      if (!Array.isArray(page)) {
+        throw new Error(
+          `/fapi/v1/income 返回的不是数组（${page === undefined ? '空响应体' : typeof page}）：` +
+            `${JSON.stringify(page)?.slice(0, 200)}`,
+        );
+      }
+
+      for (const event of page) {
+        const key = `${event.tranId ?? ''}:${event.time ?? ''}:${event.incomeType ?? ''}:${event.income ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        events.push(event);
+      }
+
+      if (page.length < limit) break;
+
+      const lastTime = page.reduce((max, e) => Math.max(max, Number(e.time) || 0), 0);
+      if (lastTime <= pageCursor) {
+        /*
+         * 满页却推不动 —— 同一毫秒里有 `limit` 条以上，极罕见。
+         * **宁可少取这一片，也不要无限循环**；记一条 warning 让它可以被发现。
+         */
+        log.warn(
+          `/fapi/v1/income 在 ${new Date(pageCursor).toISOString()} 这一毫秒上有 ${page.length} 条 —— ` +
+            '无法继续翻页，该片可能少取。请检查账户流水量。',
+        );
+        break;
+      }
+      pageCursor = lastTime;
     }
-    events.push(...page);
+
     cursor = sliceEnd + 1;
   }
 
