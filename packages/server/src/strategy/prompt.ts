@@ -1935,8 +1935,20 @@ function renderUserPrompt(
    */
   const ledgerGapAbs = Math.abs(a.ledgerGap ?? 0);
   if (ledgerGapAbs > 0.01) {
+    /*
+     * ⚠️ **分母不能用固定下限 1 USDT —— 那会让"差异比绩效还大"的情况被判成小差异。**
+     *
+     * 实测（2026-09-30）：`gap = 0.01367`，而近 24h 净额只有 `0.0441` ——
+     * 差异是绩效的 **31%**，**确实该让模型警惕**。但第一版写的是
+     * `max(|净额|, 1)`，分母被抬到 1，算出来 1.37% → **错误地归入"小差异档"**。
+     *
+     * 改成 `max(|净额|, gap)`：分母永远不小于差额本身，于是
+     *   · 净额远大于差额 → 得到真实的相对占比（小 → 不吓人）；
+     *   · 净额很小甚至为 0 → 占比逼近 1 → **按大差异处理**（这正确：账上凭空
+     *     多出一笔与近期全部盈亏同量级的差额，本来就该警惕）。
+     */
     const netMagnitude = Math.abs(ctx.memory.performance.netPnl);
-    const share = ledgerGapAbs / Math.max(netMagnitude, 1);
+    const share = ledgerGapAbs / Math.max(netMagnitude, ledgerGapAbs);
     volatileParts.push(
       share >= 0.05
         ? [

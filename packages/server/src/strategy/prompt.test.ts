@@ -1033,6 +1033,15 @@ test('★ 账目差异按【相对大小】分级 —— 小差异不该让模�
    */
   const small = contextWith(blankMemory());
   small.account = { ...small.account, ledgerGap: 0.0137 };
+  /*
+   * ⚠️ **必须显式给出绩效量级** —— `blankMemory()` 的 `netPnl` 是 0，
+   * 而"净额为 0 却有差额"在新判据下**本来就该按大差异处理**（差异比绩效还大）。
+   * 实测那一轮净额是 `1.1757`，差额占 **1.2%** —— 那才是"小差异"的场景。
+   */
+  small.memory = {
+    ...small.memory,
+    performance: { ...small.memory.performance, netPnl: 1.1757 },
+  };
   /* ⚠️ 账目警告在 `volatileParts` 里 → 属于 `buildUserPrompt` 的输出，不是 system prompt。 */
   const smallText = buildUserPrompt(small);
 
@@ -1050,6 +1059,26 @@ test('★ 账目差异按【相对大小】分级 —— 小差异不该让模�
   const bigText = buildUserPrompt(big);
   assert.match(bigText, /数字本身可能不准/, '大差异必须保持强警告');
   assert.match(bigText, /0\.5/, '大差异的数额也要如实给出');
+
+  /*
+   * ★ 边界：**差额与近期绩效同量级时，必须按大差异处理。**
+   *
+   * 实测（2026-09-30）：`gap = 0.01367`，而近 24h 净额只有 `0.0441` ——
+   * 差异是绩效的 **31%**。第一版判据把分母固定为 `max(|净额|, 1)`，
+   * 于是算出 1.37% 并归入"小差异"，**把该有的警惕抹掉了**。
+   */
+  const comparable = contextWith(blankMemory());
+  comparable.account = { ...comparable.account, ledgerGap: 0.01367 };
+  comparable.memory = {
+    ...comparable.memory,
+    performance: { ...comparable.memory.performance, netPnl: 0.0441 },
+  };
+  const comparableText = buildUserPrompt(comparable);
+  assert.match(
+    comparableText,
+    /数字本身可能不准/,
+    '★ 差额占绩效 31% 时必须按大差异处理，不能用固定分母把它算成 1.37%',
+  );
 });
 
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
