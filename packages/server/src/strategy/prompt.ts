@@ -131,6 +131,36 @@ export interface PromptContext {
    * 非 null 表示这一轮真的裁过；null 表示没裁（那时不必占一行预算）。
    */
   universeTrimmedFrom: number | null;
+  /**
+   * ⚠️ **全市场概览 —— 币安全部可交易 USDT 永续的极简一行。**
+   *
+   * ## 为什么需要它（用户 2026-09-30 的原话）
+   *
+   * > 「币安支持的币种我觉得都应该在模型判断得范围（当然不是一次性给所有币种行情数据）」
+   *
+   * 在此之前模型的视野**只有候选池那 20 个**（占全市场约 527 个的 3.8%），
+   * 而它**无从知道外面还有什么** —— 那正是"只做大盘币、抓不住异动"的根源，
+   * 也是"系统替模型做了决定"（用户的原则：**模型是大脑，系统只是手脚**）。
+   *
+   * ## 与候选池的区别（很重要）
+   *
+   * 这一段**不是候选**：每条只有符号 + 三个数字，**没有指标序列**。
+   * 所以它极便宜（约 527 行 ≈ 6K tokens，占每轮 30 万的 2%），
+   * 而模型能据此发现"外面有什么值得看"，再用工具点名要完整行情。
+   *
+   * 可选：不传就不渲染这一段（测试与回放路径不需要它）。
+   */
+  marketOverview?: MarketOverviewRow[];
+}
+
+/** 「全市场概览」的一行 —— 见 `PromptContext.marketOverview`。 */
+export interface MarketOverviewRow {
+  symbol: string;
+  price: number;
+  /** 24 小时涨跌幅（百分数，例如 `-1.01`）。 */
+  changePercent24h: number;
+  /** 24 小时成交额（USDT）。 */
+  quoteVolume24h: number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2074,6 +2104,19 @@ function renderUserPrompt(
     );
   }
 
+  /*
+   * 6.5 — **全市场概览**（第 0 层）------------------------------------------
+   *
+   * ⚠️ 它放在候选池**之前**，且**独立于"有没有候选"** —— 阅读顺序是
+   * "先看见整个市场，再聚焦到这一轮的候选"；而即使这一轮一个候选都没选出来，
+   * 模型也该知道外面有什么（那正是它下一次能纠正自己的依据）。
+   *
+   * 它对缓存没有额外伤害：候选池那一段本来就每轮都变。
+   */
+  if (ctx.marketOverview && ctx.marketOverview.length > 0) {
+    volatileParts.push(renderMarketOverview(ctx.marketOverview));
+  }
+
   /* 7 — Candidate coins -------------------------------------------------- */
   if (candidates.length === 0) {
     volatileParts.push(
@@ -2726,6 +2769,56 @@ export function formatMarketData(
  *
  * 这一段是给"扫一遍 20 个标的、挑出值得深看的那一两个"用的。
  */
+/**
+ * 成交额的紧凑写法：`12.3B` / `1234M` / `45K`。
+ *
+ * 概览层要在**一行里装下一个标的**、而一共有 500 多个，所以不能写完整数字。
+ */
+function fmtVolumeCompact(usdt: number): string {
+  const abs = Math.abs(usdt);
+  if (!Number.isFinite(usdt)) return '0';
+  if (abs >= 1e9) return `${(usdt / 1e9).toFixed(1)}B`;
+  if (abs >= 1e6) return `${(usdt / 1e6).toFixed(0)}M`;
+  if (abs >= 1e3) return `${(usdt / 1e3).toFixed(0)}K`;
+  return usdt.toFixed(0);
+}
+
+/**
+ * 「全市场概览」—— 币安**全部可交易 USDT 永续**的极简一行。
+ *
+ * ## 为什么它必须存在（用户 2026-09-30 的原话）
+ *
+ * > 「币安支持的币种我觉得都应该在模型判断得范围（当然不是一次性给所有币种行情数据）」
+ *
+ * 在那之前模型的视野**只有候选池那 20 个**（约占全市场 527 个的 **3.8%**），
+ * 而它无从知道外面还有什么 —— 那是"只做大盘币、抓不住异动"的根源，
+ * 也是"系统替模型做了决定"（用户的原则：**模型是大脑，系统只是手脚**）。
+ *
+ * ## 它不是候选（这个区别很重要）
+ *
+ * 每条只有**四个字段**：符号、价格、24h 涨跌、24h 成交额 —— **没有指标序列**。
+ * 所以它便宜得多：527 行约 16,000 字符 ≈ 6K tokens，占每轮约 30 万的 2%。
+ * 模型据此**发现**外部世界，再用 `get_klines` 点名要完整行情（那才进候选池）。
+ *
+ * 排序按成交额降序：模型先看到活跃的，僵尸币自然沉底 —— 但它们**仍在清单里**，
+ * 因为用户要的是"币安支持的币种都在判断范围内"，而"这个标的成交额很小"
+ * 本身就是模型该知道的事实。
+ */
+function renderMarketOverview(rows: readonly MarketOverviewRow[]): string {
+  const header = [
+    `# 全市场概览（币安 ${rows.length} 个 USDT 永续，按 24h 成交额降序）`,
+    '',
+    '**这不是候选池** —— 每条只有符号、价格、24h 涨跌、24h 成交额，**没有指标序列**。',
+    '它存在的意义是让你**看见整个市场**：下面的候选池只有十几个，而市场里有这么多标的。',
+    '**看到这里值得深看的，用 `get_klines` 点名要它的完整序列** —— 不必等它排进候选。',
+  ].join('\n');
+  const lines = rows.map(
+    (r) =>
+      `${r.symbol} ${fmt(r.price)} ${fmtPercent(r.changePercent24h)} ${fmtVolumeCompact(r.quoteVolume24h)}`,
+  );
+  return `${header}\n\n${lines.join('\n')}`;
+}
+
 function renderTimeframeSummary(snap: MarketSnapshot): string {
   const lines: string[] = ['周期摘要（完整序列见 `get_klines`，需要哪个周期就点名要）：'];
   for (const tf of snap.timeframes) {

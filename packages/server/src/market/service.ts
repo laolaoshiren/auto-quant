@@ -434,6 +434,54 @@ export class MarketDataService {
   }
 
   /**
+   * ⚠️ **全市场概览** —— 币安**全部可交易 USDT 永续**的一行摘要（第 0 层「全景」）。
+   *
+   * ## 为什么需要它（用户 2026-09-30 的原话）
+   *
+   * > 「币安支持的币种我觉得都应该在模型判断得范围（当然不是一次性给所有币种行情数据）」
+   *
+   * 在此之前模型的视野**只有候选池那 20 个**（约占全市场 527 个的 **3.8%**），
+   * 它无从知道外面还有什么 —— 那正是"只做大盘币、抓不住异动"的根源，
+   * 也是"系统替模型做了决定"（用户原则：**模型是大脑，系统只是手脚**）。
+   *
+   * ## 与 `screenUniverse()` 的关键区别
+   *
+   * 那个会按成交额/持仓量**门槛过滤**，只留"够格当候选"的；而这里要的是**完整清单** ——
+   * 连成交额很小的也要在。因为"这个标的成交额很小"**本身就是模型该知道的事实**，
+   * 而不是系统替它藏起来的东西。排序按成交额降序，让它先看到活跃的。
+   *
+   * 走 `getUniverse()` 的**缓存**（不 force）：同一轮里 `screenUniverse()` 已经拉过一次，
+   * 所以这里**不产生额外请求**。
+   */
+  async fullMarketOverview(): Promise<
+    Array<{ symbol: string; price: number; changePercent24h: number; quoteVolume24h: number }>
+  > {
+    const universe = await this.getUniverse();
+    const rows: Array<{
+      symbol: string;
+      price: number;
+      changePercent24h: number;
+      quoteVolume24h: number;
+    }> = [];
+    for (const [symbol, ticker] of universe.tickers) {
+      /* 只保留**可交易的 USDT-M 永续** —— `registry` 是这件事的权威。 */
+      if (!this.registry.get(symbol)) continue;
+      const price = Number(ticker.lastPrice);
+      if (!Number.isFinite(price) || price <= 0) continue;
+      const changePercent24h = Number(ticker.priceChangePercent);
+      const quoteVolume24h = Number(ticker.quoteVolume);
+      rows.push({
+        symbol,
+        price,
+        changePercent24h: Number.isFinite(changePercent24h) ? changePercent24h : 0,
+        quoteVolume24h: Number.isFinite(quoteVolume24h) ? quoteVolume24h : 0,
+      });
+    }
+    rows.sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
+    return rows;
+  }
+
+  /**
    * Symbols with the fastest open-interest growth.
    *
    * Open-interest history costs one request per symbol, so this is deliberately

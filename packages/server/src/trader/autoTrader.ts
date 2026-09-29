@@ -1772,6 +1772,23 @@ export class AutoTrader {
       : [];
 
     /*
+     * ⚠️ **第 0 层「全景」**：币安**全部可交易 USDT 永续**的一行摘要。
+     *
+     * 用户 2026-09-30 的原话：「币安支持的币种我觉得都应该在模型判断得范围
+     * （当然不是一次性给所有币种行情数据）」。
+     *
+     * 它走 `getUniverse()` 的**缓存** —— 同一轮里 `selectCandidates()` 已经拉过全市场
+     * ticker，所以这里**不产生额外请求**，只是把那份数据摊平成"每行一个标的"。
+     *
+     * 失败时给空数组：全景层是"锦上添花"的信息，缺了它这一轮照常决策 ——
+     * 但**不能让它的失败影响主流程**。
+     */
+    const marketOverview = await this.deps.marketData.fullMarketOverview().catch((error) => {
+      log.warn(`全市场概览拉取失败（本轮不渲染这一段）：${(error as Error).message}`);
+      return [];
+    });
+
+    /*
      * 本小时的已开仓数只读一次，两处用同一个数：提示词的「本周期约束」区块与风控的
      * `entriesLastHour`。分头读会得到两个可能不一致的数字，而模型看到 2/3、风控按 3/3
      * 拒绝，正是"看不见的约束"换一种形态。
@@ -1828,6 +1845,7 @@ export class AutoTrader {
       positions: promptPositions,
       candidates: snapshots,
       oiRanking,
+      marketOverview,
       memory,
       /*
        * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**

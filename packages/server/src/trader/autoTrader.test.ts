@@ -812,6 +812,18 @@ const fakeMarketData = {
   async getOiRanking() {
     return [];
   },
+  /*
+   * 第 0 层「全景」—— 全市场一行摘要。
+   *
+   * 这里刻意给**两行**：一行是候选池里也有的 BTCUSDT，一行是**候选池里没有的
+   * OUTSIDEUSDT** —— 后者正是用来断言"模型能看见候选池之外的市场"。
+   */
+  async fullMarketOverview() {
+    return [
+      { symbol: 'BTCUSDT', price: 68_000, changePercent24h: -1.2, quoteVolume24h: 1_200_000_000 },
+      { symbol: 'OUTSIDEUSDT', price: 0.5, changePercent24h: 25.5, quoteVolume24h: 8_000_000 },
+    ];
+  },
   /** 按需取数走这里。默认给两根假 K 线，够断言"取到的数据被回喂了"。 */
   async getKlines(_symbol: string, _timeframe: string, count: number) {
     return Array.from({ length: Math.min(count, 2) }, (_, i) => ({
@@ -843,6 +855,10 @@ function recordingMarketData(): {
       return [snapshot()];
     },
     async getOiRanking() {
+      return [];
+    },
+    /* 第 0 层「全景」—— 这个用例不关心它，给空数组即可（不渲染那一段）。 */
+    async fullMarketOverview() {
       return [];
     },
     async getKlines(symbol: string, timeframe: string, count: number) {
@@ -993,6 +1009,33 @@ test('每一轮的提示词里都带着绩效、最近平仓与行为余量三�
   assert.match(user, /本小时已开仓 0 \/ 10 笔/);
   // 止损手续费门槛必须写进硬性约束（系统提示词）：看不见的约束等于不存在。
   assert.match(system, /必须至少是往返手续费的 3 倍/);
+});
+
+test('★ 全市场概览真的被接到了提示词上 —— 模型要能看见候选池之外的标的', async () => {
+  /*
+   * 渲染函数单测绿了**不代表**它被接到了 `runCycleBody` 组装的上下文上 ——
+   * 这条接线最容易被以后的改动误删，所以在这里钉一次端到端。
+   *
+   * `fakeMarketData.fullMarketOverview()` 刻意给了一行 **OUTSIDEUSDT**：
+   * 它**不在候选池里**（候选只有 `snapshot()` 那一个标的），所以它能出现在提示词里
+   * 就证明"模型的视野确实超出了候选池" —— 那正是用户 2026-09-30 要的东西：
+   * 「币安支持的币种我觉得都应该在模型判断得范围」。
+   */
+  const captured = capturingModel(OPEN_LONG_RESPONSE);
+  const trader = buildTrader(new FakeBroker(), '', captured.model);
+
+  await trader.runOnce();
+
+  const { user } = captured.prompts[0]!;
+  assert.match(user, /# 全市场概览/, '★ 全景段必须被渲染出来');
+  assert.match(user, /BTCUSDT/, '概览里要有大盘标的');
+  assert.match(
+    user,
+    /OUTSIDEUSDT/,
+    '★ 候选池【之外】的标的也必须出现 —— 否则"扩大视野"就是空的',
+  );
+  /* 它不能顶掉候选池：两者必须同时存在。 */
+  assert.match(user, /# 候选标的/, '概览是增量的，不能取代候选池');
 });
 
 test('平仓之后，模型下一轮能看到自己当时的理由和真实结果并排出现', async () => {
@@ -3041,6 +3084,10 @@ test('行情为空的一轮：也留下恰好一条记录，但不推进连续�
       return [];
     },
     async getOiRanking() {
+      return [];
+    },
+    /* 第 0 层「全景」—— 空市场用例同样给空数组。 */
+    async fullMarketOverview() {
       return [];
     },
   } as unknown as MarketDataService;

@@ -1081,6 +1081,46 @@ test('★ 账目差异按【相对大小】分级 —— 小差异不该让模�
   );
 });
 
+test('★ 全市场概览：模型该看得见币安全部标的，而不只是候选池那 20 个', () => {
+  /*
+   * 用户 2026-09-30 的原话：
+   *   「币安支持的币种我觉得都应该在模型判断得范围（当然不是一次性给所有币种行情数据）」
+   *
+   * 在此之前模型的视野**只有候选池那 20 个**（约占全市场 527 个的 3.8%），
+   * 而它无从知道外面还有什么 —— 那是"只做大盘币、抓不住异动"的根源，
+   * 也是"系统替模型做了决定"（用户原则：模型是大脑，系统只是手脚）。
+   *
+   * 这一段**不是候选**（只有符号 + 三个数字，没有指标序列），所以极便宜；
+   * 模型据此发现外部世界，再点名要完整行情。
+   */
+  const overview = [
+    { symbol: 'BTCUSDT', price: 83029.91, changePercent24h: -1.01, quoteVolume24h: 1_200_000_000 },
+    { symbol: 'XYZUSDT', price: 0.0123, changePercent24h: 42.5, quoteVolume24h: 310_000_000 },
+    { symbol: 'ZZZUSDT', price: 1.5, changePercent24h: -8.2, quoteVolume24h: 5_000_000 },
+  ];
+  const text = buildUserPrompt({ ...contextWith(blankMemory()), marketOverview: overview });
+
+  assert.match(text, /# 全市场概览/, '要有这一段');
+  /* ★ 关键：**不在候选池里的标的也必须出现** —— 这正是"扩大视野"的全部意义。 */
+  assert.match(text, /XYZUSDT/, '★ 非候选标的也要出现在概览里');
+  assert.match(
+    text,
+    /ZZZUSDT/,
+    '成交额小的也要在 —— 用户要求覆盖币安全部标的（它可能开不了仓，但模型该知道它存在）',
+  );
+  assert.match(text, /42\.5/, '要带 24h 涨跌幅，否则看不出哪里在动');
+
+  /* 它只增信息、不抢位置：候选区块必须原样还在。 */
+  assert.match(text, /# 候选标的/, '候选池区块不受影响');
+
+  /* 不传就不渲染 —— 向后兼容（回放/测试路径不需要它）。 */
+  assert.doesNotMatch(
+    buildUserPrompt(contextWith(blankMemory())),
+    /# 全市场概览/,
+    '不传 marketOverview 时不该凭空多出这一段',
+  );
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：
