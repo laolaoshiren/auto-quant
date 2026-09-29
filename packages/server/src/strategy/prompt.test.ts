@@ -1018,6 +1018,40 @@ test('★ 当前账户开不了的标的只给摘要、并写明原因（省 tok
   );
 });
 
+test('★ 账目差异按【相对大小】分级 —— 小差异不该让模型给自己的绩效打折', () => {
+  /*
+   * 实测（2026-09-30，线上真实提示词）：`gap = +0.0137`，而当时绩效净额 `1.1757` ——
+   * 差异只占 **1.2%**，但提示词写的是：
+   *
+   *     「这意味着**上面「你的交易绩效」里的数字本身可能不准**」
+   *
+   * 后果：模型会**无谓地给自己的绩效打折**，而它正照着那份绩效调整策略 ——
+   * 这正是用户说的"不能影响模型决策"（⑥）。
+   *
+   * 判据按**相对量级**分档：差异 / max(|净额|, 1) ≥ 5% 才说"数字可能不准"；
+   * 低于那一档时如实给数字，但明确告诉它"不必因此调整"。
+   */
+  const small = contextWith(blankMemory());
+  small.account = { ...small.account, ledgerGap: 0.0137 };
+  /* ⚠️ 账目警告在 `volatileParts` 里 → 属于 `buildUserPrompt` 的输出，不是 system prompt。 */
+  const smallText = buildUserPrompt(small);
+
+  assert.match(smallText, /0\.0137/, '差异数额仍要如实给出 —— 不能瞒');
+  assert.doesNotMatch(
+    smallText,
+    /数字本身可能不准/,
+    '★ 1.2% 的差异不能说"绩效数字可能不准"（那会让它无谓地打折）',
+  );
+  assert.match(smallText, /不必因此调整/, '要明确告诉它"不用管"');
+
+  /* 大差异（占绩效量级 ≥5%）才用强警告 —— 那种情况下绩效确实不能信。 */
+  const big = contextWith(blankMemory());
+  big.account = { ...big.account, ledgerGap: 0.5 };
+  const bigText = buildUserPrompt(big);
+  assert.match(bigText, /数字本身可能不准/, '大差异必须保持强警告');
+  assert.match(bigText, /0\.5/, '大差异的数额也要如实给出');
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：
