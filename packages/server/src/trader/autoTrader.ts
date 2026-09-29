@@ -1711,6 +1711,16 @@ export class AutoTrader {
       snapshots = kept;
     }
 
+    /*
+     * ⚠️ **标上"当前账户规模能不能开这个标的"** —— 见 `MarketSnapshot.tradability`。
+     *
+     * 实测（2026-09-30）：`#1462` 里模型提 BTCUSDT 被交易所下限直接拒掉
+     * （「仓位名义价值 $20.00 低于最低要求 $50.00」），而 BTC 每轮都在候选**第一位**、
+     * 拿着约 10KB 的完整多周期序列 —— 那些数据它永远用不上。
+     * 标上之后 `prompt.ts` 只给它摘要并写明原因：大盘背景还在，浪费没了。
+     */
+    this.annotateTradability(snapshots, account.equity);
+
     progress.candidateSymbols = snapshots.map((s) => s.symbol);
 
     if (snapshots.length === 0) {
@@ -4940,6 +4950,49 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     if (open && open.leverage > 0) return open.leverage;
     const risk = this.activeConfig.riskControl;
     return isMajorSymbol(symbol) ? risk.btcEthMaxLeverage : risk.altcoinMaxLeverage;
+  }
+
+  /**
+   * 给每个候选标上「**当前账户规模下能不能真的开出仓**」。
+   *
+   * ## 为什么需要它（实测：每轮都在给模型看一个它开不了的标的）
+   *
+   * BTCUSDT 的交易所最小名义是 **$50**，而账户约 22 USDT 时模型按风险算出的名义只有 **$20** ——
+   * 实测 `#1462` 就是被这句拒掉的：「仓位名义价值 $20.00 低于最低要求 $50.00」。
+   *
+   * 而 `coins.ts` 把 BTCUSDT **无条件**放进候选池（它提供「大盘背景」），于是它每轮都排在
+   * **第一位**、拿到约 10KB 的完整多周期序列 —— 那些数据模型永远用不上，
+   * 却占着提示词预算，还让它以为"BTC 是一个可以做的候选"。
+   *
+   * 判据是"**上限够不够得着下限**"：本账户对该标的的名义上限（`ratio × 权益`）
+   * 必须 ≥ 交易所的最小名义。够不着就标 `ok: false`，渲染层据此只给摘要 + 写明原因。
+   *
+   * 注意这**不是**在替模型设限（风控照旧独立裁决）：它只是把"一个已经确定的物理事实"
+   * 提前告诉模型，省掉一轮必然被拒的提案和那 10KB 的行情。
+   */
+  private annotateTradability(snaps: MarketSnapshot[], equity: number): void {
+    const rc = this.activeConfig.riskControl;
+    for (const snap of snaps) {
+      let minNotional = 0;
+      try {
+        minNotional = this.deps.registry.minNotional(snap.symbol);
+      } catch {
+        /* 查不到下限（标的刚下架等）→ 不标，按可交易处理，交给风控照常裁决。 */
+        continue;
+      }
+      const ratio = snap.isMajor ? rc.btcEthMaxPositionValueRatio : rc.altcoinMaxPositionValueRatio;
+      const cap = ratio * equity;
+      if (minNotional > 0 && cap > 0 && minNotional > cap) {
+        snap.tradability = {
+          ok: false,
+          reason:
+            `交易所最小名义 $${minNotional}，而权益 $${equity.toFixed(2)} × ${ratio} = ` +
+            `$${cap.toFixed(2)} 是你这个账户规模的上限 —— 够不着`,
+        };
+      } else {
+        snap.tradability = { ok: true };
+      }
+    }
   }
 
   /* ---------------------------------------------------------------------- */

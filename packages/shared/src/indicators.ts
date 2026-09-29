@@ -114,6 +114,28 @@ export interface MarketSnapshot {
     total: number;
     parts: { trend: number; breakoutVolume: number; consolidation: number; volatilityPenalty: number };
   };
+  /**
+   * ⚠️ **这个标的在"当前账户规模"下能不能真的开出仓。**
+   *
+   * ## 为什么要有它（实测：每轮都在给模型看一个它永远开不了的标的）
+   *
+   * BTCUSDT 的交易所最小名义是 **$50**，而账户约 22 USDT 时模型按风险算出的名义只有 **$20** ——
+   * 实测 `#1462` 就是被这句拒掉的：「仓位名义价值 $20.00 低于最低要求 $50.00」。
+   *
+   * 而 `coins.ts` 把 BTCUSDT **无条件**放进候选池（它提供「大盘背景」，`mustKeep` 还专门保护它），
+   * 于是它每轮都排在候选**第一位**、拿到约 **10KB** 的完整多周期序列 ——
+   * 那些数据模型永远用不上，却占着提示词预算，还让它以为"BTC 是一个可以做的候选"。
+   *
+   * 有了这个字段，渲染层就能**只给摘要 + 写明原因**：大盘背景仍然在，
+   * 但不再为一个做不了的仓位付 10KB 的 token。
+   *
+   * 可选：不经过账户规模判断的调用点（测试、回放）没有它，那种情况下按**可交易**处理。
+   */
+  tradability?: {
+    ok: boolean;
+    /** 不能交易时给模型看的一句话（要含具体数字）。 */
+    reason?: string;
+  };
 }
 
 /** One row of the cross-sectional open-interest ranking table. */

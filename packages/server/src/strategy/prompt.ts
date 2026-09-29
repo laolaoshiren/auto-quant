@@ -2071,7 +2071,18 @@ function renderUserPrompt(
     const detailed = detailedCandidateCount(ctx.config, budgetTokens, candidates.length);
     const blocks = candidates.map((snap, index) =>
       formatMarketData(snap, index, ctx.config, {
-        detailed: index < detailed || held.has(snap.symbol),
+        /*
+         * ⚠️ **开不了的标的只给摘要** —— 它拿不到完整的多周期序列。
+         *
+         * 实测（2026-09-30）：BTCUSDT 的交易所下限是 $50，而账户约 22 USDT 时模型按风险
+         * 算出的名义只有 $20（`#1462` 真实被拒：「仓位名义价值 $20.00 低于最低要求 $50.00」）。
+         * 而 BTC 每轮都排在候选第一位（`coins.ts` 无条件加入它作为大盘背景），
+         * 于是每轮白送 ~10KB 给它 —— 那些序列永远用不上，还让模型以为它能做 BTC。
+         *
+         * 摘要 + 一句「开不了」既保住了大盘背景，又不为做不了的仓位付 token。
+         */
+        detailed:
+          (index < detailed || held.has(snap.symbol)) && snap.tradability?.ok !== false,
       }),
     );
     const detailedCount = blocks.filter((_, i) => i < detailed).length;
@@ -2623,6 +2634,25 @@ export function formatMarketData(
     ];
     if (priceLine) rows.push(`价格变化：${priceLine}`);
     lines.push('', rows.join('\n'));
+  }
+
+  /*
+   * ⚠️ **开不了的标的：把原因说清楚，并且不给完整序列。**
+   *
+   * 实测（2026-09-30）：`#1462` 里模型提了 BTCUSDT open_short，被交易所下限直接拒掉
+   * （「仓位名义价值 $20.00 低于最低要求 $50.00」）。而它每轮都在候选里排第一位 ——
+   * 一个**永远开不了**的标的，却占着候选第一名和约 10KB 的完整多周期序列。
+   *
+   * 保留它是有价值的（它提供大盘背景），但必须**说清楚它开不了**：
+   * 不说的话模型会继续对它提案，那一轮决策就白花了。
+   */
+  if (snap.tradability && !snap.tradability.ok) {
+    lines.push(
+      '',
+      `⚠️ **这个标的在当前账户规模下开不了仓**：${snap.tradability.reason ?? '低于交易所最小名义'}。` +
+        '把它列出来只是让你看到大盘背景 —— **不要对它提开仓**，那会被风控直接拒掉、白费一轮。' +
+        '如果你想让这类标的变得可做，该调的是仓位比例参数或账户资金，不是这一轮的提案。',
+    );
   }
 
   /* Per-timeframe series -------------------------------------------------- */

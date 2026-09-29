@@ -8,6 +8,7 @@ import {
   defaultStrategyConfig,
   type MarketSnapshot,
   type StrategyConfig,
+  type TimeframeIndicators,
 } from '@aq/shared';
 import { closeDb, getDb, initDb } from '../db/index.js';
 import {
@@ -82,6 +83,20 @@ function snapshot(symbol: string, price: number): MarketSnapshot {
       indexPrice: price,
     },
     quant: null,
+  };
+}
+
+/** 一个最小但**完整**的周期数据块 —— 没有它，候选区块根本渲染不出序列，断言会假绿。 */
+function tf(): TimeframeIndicators {
+  return {
+    timeframe: '5m',
+    klines: [],
+    closes: [100, 101, 102],
+    volumes: [1, 2, 3],
+    ema: { '20': [100, 101], '50': [99, 100] },
+    rsi: { '7': [55, 54] },
+    atr: { '14': [1, 1.1] },
+    macd: null,
   };
 }
 
@@ -928,6 +943,68 @@ test('提示词大小不随历史成交数增长（§4 的 O(1) 性质）', () =
   // 聚合数字确实跟着历史变了（否则这个用例可能只是在测"两次都没读到数据"）。
   assert.match(short.text, new RegExp(`最近 24 小时：${PROMPT_RECENT_CLOSE_COUNT} 笔`));
   assert.match(long.text, /最近 24 小时：2000 笔/);
+});
+
+test('★ 当前账户开不了的标的只给摘要、并写明原因（省 token，也免得以假候选误导模型）', () => {
+  /*
+   * 实测（2026-09-30）：`#1462` 真实被拒 —— 模型提 BTCUSDT open_short，
+   * 交易所下限是 **$50**，而它按风险算出的名义只有 **$20**：
+   *
+   *     「仓位名义价值 $20.00 低于最低要求 $50.00」
+   *
+   * 而 `coins.ts` 把 BTCUSDT **无条件**放进候选池（它提供「大盘背景」，`mustKeep` 还保护它），
+   * 于是它每轮都排在候选**第一位**、拿到约 10KB 的完整多周期序列 ——
+   * 那些数据模型永远用不上（开不了这个仓位），却占着提示词预算，
+   * 还让它以为"BTC 是一个可以做的候选"。
+   *
+   * 修法：`tradability.ok === false` 时只给摘要，并在那一块里写明原因。
+   */
+  const blocked = snapshot('BTCUSDT', 68_000);
+  /*
+   * ⚠️ **必须给它真实的周期数据** —— `snapshot()` 夹具的 `timeframes` 是空数组，
+   * 那样**任何候选都渲染不出序列**，断言就会"假绿"（我第一次就踩了这个）。
+   */
+  blocked.timeframes = [tf()];
+  blocked.tradability = { ok: false, reason: '最小名义 $50，超过你这个账户规模的上限（约 $33）' };
+  const normal = snapshot('ETHUSDT', 2_500);
+  normal.timeframes = [tf()];
+
+  /* --- 对照组：没有 tradability 标记时，BTC 拿的是完整序列（那就是当时的浪费）--- */
+  const unmarked = snapshot('BTCUSDT', 68_000);
+  unmarked.timeframes = [tf()];
+  const before = buildUserPrompt(contextWith(blankMemory(), [unmarked, normal]), 200_000);
+  const beforeBtc = before.slice(before.indexOf('### 1. BTCUSDT'), before.indexOf('### 2. ETHUSDT'));
+  assert.match(
+    beforeBtc,
+    /=== [0-9]+[MH] 周期（由旧到新）===/,
+    '对照：标记之前 BTC 是拿完整序列的（这正是每轮约 10KB 的浪费）',
+  );
+
+  const prompt = buildUserPrompt(contextWith(blankMemory(), [blocked, normal]), 200_000);
+
+  /* 1) 标的本身还在（它提供大盘背景），并且写明了为什么开不了。 */
+  assert.match(prompt, /### 1\. BTCUSDT/, 'BTC 仍要出现在候选里（大盘背景）');
+  assert.match(prompt, /最小名义 \$50/, '★ 必须写明为什么开不了，否则模型还会去试');
+
+  /* 2) 它不该拿到完整的多周期序列 —— 那是约 10KB/轮的浪费。 */
+  const btcBlock = prompt.slice(
+    prompt.indexOf('### 1. BTCUSDT'),
+    prompt.indexOf('### 2. ETHUSDT'),
+  );
+  assert.ok(btcBlock.length > 0, '前提：能切出 BTC 那一段');
+  assert.doesNotMatch(
+    btcBlock,
+    /=== [0-9]+[MH] 周期（由旧到新）===/,
+    '★ 开不了的标的只给摘要，不给完整序列',
+  );
+
+  /* 3) 可交易的标的照旧给完整序列 —— 不能因为这条改动让大家都降级。 */
+  const ethBlock = prompt.slice(prompt.indexOf('### 2. ETHUSDT'));
+  assert.match(
+    ethBlock,
+    /=== [0-9]+[MH] 周期（由旧到新）===/,
+    '正常标的仍要拿到完整序列',
+  );
 });
 
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
