@@ -3,6 +3,21 @@
 面向**维护者**。贡献流程见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)，
 部署细节见 [`DEPLOYMENT.md`](DEPLOYMENT.md) 与 [`../deploy/README.md`](../deploy/README.md)。
 
+> ⚠️ **2026-09-30：本手册描述的部分自动化已被移除，读之前先看这一段。**
+>
+> 用户在这一天的决定是「GitHub 上那些自动化功能能不用的就不要用了，
+> 反正项目现在也就我自己在维护使用」。于是这些工作流被删掉：
+> `release-drafter.yml`、`pr-labeler.yml`、`stale.yml`、`welcome.yml`、
+> `main-guard.yml`、`ci.yml`（连同 `main` 的分支保护）。
+>
+> **仍然保留的是 `docker-publish.yml`** —— 它产出 `deploy/up.sh` 一键部署所拉取的镜像，
+> 删掉会让一键安装失效。它的触发条件已从"等 CI 成功"改成直接的 `push: branches: [main]`。
+>
+> 所以下面提到"发布说明草稿自动生成""标签自动打""CI 里被跳过"的地方**都不再成立**：
+> 现在没有任何自动运行的东西。**质量把关在本地**：
+> `npm run typecheck / lint / test` + `npm run build`；需要外部环境的验证手工跑 `npm run sim`。
+> 本文保留原样，是为了记录那套流程**当时**的形状 —— 哪天要重新引入自动化时，它是起点。
+
 本项目**下真实订单**，所以一次发布会影响正在跑着的机器人。
 本手册的目的不是走流程，而是让"这次发布要改什么"在发布之前就被看见。
 

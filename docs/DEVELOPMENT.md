@@ -256,10 +256,12 @@ ERROR [trader] 为 BTCUSDT 挂 止盈（触发价 79033.592）失败：
    （它断言真实 broker 发送前会取整）。放在模拟器里等于在测试另一条代码路径——
    模拟运行根本不会调用真实 broker。
 2. **没进 CI 的验证等于不存在。** 当时 `npm test` 全绿，因为单元测试走不到这条路径。
-   现在 `npm run sim` 已加入 CI（`.github/workflows/ci.yml`）。
-   ⚠️ 但在 GitHub 托管的 runner 上它会被**跳过**——币安返回
-   `Service unavailable from a restricted location`（runner 位于限制区域）。
-   CI 会先探测可达性并打出 warning，**不静默通过**。本地务必自己跑。
+   它曾是 CI 的一个步骤（`.github/workflows/ci.yml`）；**该工作流已于 2026-09-30 移除**
+   （用户决定：自动化能不用就不用，项目只有他一人维护）。所以这条验证现在要**手工跑**：
+   `npm run sim` —— 它需要能连上币安，本地连不上时在服务器上跑。
+   > 顺带记下当年在 GitHub runner 上的形状：币安返回
+   > `Service unavailable from a restricted location`（runner 在限制区域），
+   > 所以 CI 会先探测可达性并打 warning、**不静默通过**。本地务必自己跑。
 
 ---
 

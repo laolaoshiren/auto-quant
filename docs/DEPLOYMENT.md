@@ -56,11 +56,20 @@ cd /opt/autoquant/deploy && ./up.sh
 
 ## A2. 镜像从哪里来
 
-推送代码到 `main` → GitHub Actions 跑 CI → **CI 通过后**才构建并推送镜像到 GHCR。
+推送代码到 `main` → GitHub Actions **直接**构建并推送镜像到 GHCR
+（`.github/workflows/docker-publish.yml`，触发条件是 `push: branches: [main]` 与 `v*` 标签）。
 
-这一步的顺序是刻意的：`.github/workflows/docker-publish.yml` 用 `workflow_run`
-依赖 CI 成功，而不是与 CI 并行。如果并行构建，一次测试失败的提交可能已经把镜像
-推上去、服务器也可能已经拉到并部署了。
+> ⚠️ **2026-09-30 起不再经过 CI。**
+>
+> 原来这里是「先跑 CI，`workflow_run` 等它成功再构建」。那套设计对多人协作是对的
+> （镜像永远可部署），但它有一个不会报错的隐患：**镜像的产出依赖 CI 存在** ——
+> CI 一旦被拿掉，`workflow_run` 永不触发，镜像就安静地不再更新。
+>
+> 用户此时的决定是「自动化功能能不用就不用，项目只有我自己在维护」，于是
+> `ci.yml` 等 6 个工作流被移除，质量把关回到本地：
+> `npm run typecheck / lint / test`（779 个用例）+ `npm run build`。
+>
+> **日常部署仍然走 `scripts/deploy.ps1`（scp + ssh），根本不经过 GitHub。**
 
 镜像同时带 `sha-<短哈希>` 标签，所以任何一次部署都能追溯到确切的提交。
 

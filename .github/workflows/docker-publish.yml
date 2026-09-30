@@ -1,31 +1,36 @@
 # =============================================================================
 # 构建并推送 Docker 镜像到 GitHub Container Registry
 #
-#   push 到 main（且 CI 通过）→ ghcr.io/<owner>/auto-quant:latest
-#   推送 v* 标签           → 同时打上语义化版本标签
+#   push 到 main  → ghcr.io/<owner>/auto-quant:latest
+#   推送 v* 标签  → 同时打上语义化版本标签
+#
+# 这个镜像是 [`deploy/up.sh`](../deploy/up.sh) 一键部署的来源 —— 服务器上
+# `docker compose up` 拉的就是它。**所以它不能删**，否则一键安装会失效。
 #
 # -----------------------------------------------------------------------------
-# 为什么用 workflow_run 而不是 on: push
+# 为什么不再等 CI（2026-09-30 改）
 # -----------------------------------------------------------------------------
-# 直接用 `on: push` 会让镜像与检查**并行**开始构建：CI 还在跑，镜像可能已经推上去了。
-# 一旦那次提交的测试失败，产物就已经在仓库里，而服务器可能已经拉到它并部署了。
+# 原来这里是 `on: workflow_run: workflows: ["CI"]`，即"CI 通过之后才构建镜像"。
+# 那套设计对**多人协作的公开项目**是对的：镜像永远可部署。
 #
-# `workflow_run` 让本工作流在 CI **完成之后**才启动，并且用
-# `conclusion == 'success'` 卡住：**只有通过全部检查的提交才会产出镜像**。
-# 这是"镜像永远可部署"这条保证的实现方式。
+# 但它有两个代价，而本仓库现在只是单人维护：
+#   1. 每 push 一次就跑一整套 CI（装依赖、跑测试、构建前端）；
+#   2. **本工作流依赖 CI 存在** —— 一旦 CI 被拿掉，`workflow_run` 永不触发，
+#      镜像也就永远不再产出，而这一点不会报错，只会安静地不再更新。
 #
-# ⚠️ workflow_run 有一个已知细节：它在默认分支的上下文里运行，且
-#    `github.sha` 指向默认分支的最新提交而不是触发它的那次提交。
-#    所以下面用 `github.event.workflow_run.head_sha` 取真正被验证的那个提交。
+# 用户 2026-09-30 的指示：「github 上那些自动化功能能不用的就不要用了，
+# 反正项目现在也就我自己在维护使用」。于是：
+#   · 触发改成直接的 `push: branches: [main]`；
+#   · 原来的 `workflow_run` 上下文（以及为它写的那套 fork 安全闸门）不再需要 ——
+#     `push` 事件只可能由本仓库的写入者触发，没有"外部贡献者的代码"这条路径；
+#   · 质量把关回到本地：`npm run typecheck / lint / test`（779 个用例）+ `npm run build`，
+#     部署脚本 `scripts/deploy.ps1` 也仍然照旧走 scp/ssh，不经过 GitHub。
 # =============================================================================
 name: Docker 镜像
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
   push:
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
@@ -43,48 +48,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # CI 成功才构建；手动触发与标签推送不受此限。
-    #
-    # ⚠️ 第二个条件是这个工作流的**安全闸门**，不要删。
-    #
-    # 本工作流运行在默认分支的上下文里，却持有 `packages: write`，
-    # 并且会用 `head_sha` 检出**触发它的那次提交的代码**。对 PR 触发的
-    # CI 来说，那就是**外部贡献者的代码**。
-    #
-    # 没有这个判断时的攻击链：fork 仓库 → 建一个**名叫 `main`** 的分支 →
-    # 向上游开 PR。`on.workflow_run.branches` 按触发运行的 **head branch 名**
-    # 过滤，而这个名字由 PR 作者随便起，于是过滤形同虚设；接着本工作流
-    # 检出 fork 的提交、`docker build`（`npm ci` 的 postinstall 即任意代码
-    # 执行）、再用仓库令牌推镜像，`:latest` 被覆盖。自托管者跑 `./up.sh`
-    # 就会把攻击者的代码拉进**放着 data/（主密钥 + 交易所凭据）的容器**里。
-    #
-    # 所以：只信任来自本仓库自身的运行。fork 的 CI 仍然会跑（贡献者能看到
-    # 检查结果），但**永远不会产出镜像**。
-    if: >-
-      (github.event_name != 'workflow_run' ||
-       (github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.head_repository.full_name == github.repository))
-
     steps:
-      # 取真正通过检查的那个提交，而不是默认分支的最新提交。
-      #
-      # 上面的 if 已经保证这个 sha 来自本仓库；这里再断言一次，
-      # 是为了让"只检出本仓库代码"这件事在**这里**也读得出来 ——
-      # 安全条件散落在两处时，后来的人删掉其中一处不会觉得有问题。
-      - name: 断言代码来自本仓库
-        if: github.event_name == 'workflow_run'
-        run: |
-          set -euo pipefail
-          head_repo='${{ github.event.workflow_run.head_repository.full_name }}'
-          if [ "$head_repo" != '${{ github.repository }}' ]; then
-            echo "::error::拒绝构建来自 $head_repo 的代码（本仓库是 ${{ github.repository }}）"
-            exit 1
-          fi
-
       - name: 检出代码
         uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: 设置 Buildx
         uses: docker/setup-buildx-action@v3
@@ -104,13 +70,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # `:latest` 只在 main 上产出。
-            #
-            # 这里不用 `{{is_default_branch}}`：在 workflow_run 上下文里
-            # `github.ref` 指的是**默认分支**，那是个恒为真的条件，
-            # 读代码的人会以为它真的判断了"这次运行是不是 main"。
-            # 显式比较 head_branch，条件与实际含义一致。
-            type=raw,value=latest,enable=${{ github.event_name != 'workflow_run' || github.event.workflow_run.head_branch == 'main' }}
+            # `:latest` 跟着每次 main 的推送走（触发条件已经限定了 main 与 v* 标签，
+            # 所以这里不需要再判断分支）。
+            type=raw,value=latest
             type=sha,prefix=sha-,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -130,7 +92,7 @@ jobs:
           cache-to: type=gha,mode=max
           # 把提交信息写进镜像标签，便于从镜像反查来源
           build-args: |
-            GIT_SHA=${{ github.event.workflow_run.head_sha || github.sha }}
+            GIT_SHA=${{ github.sha }}
 
       - name: 输出结果
         run: |
@@ -140,6 +102,6 @@ jobs:
           echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "提交: \`${{ github.event.workflow_run.head_sha || github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "提交: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "在服务器上执行 \`./up.sh\` 即可部署这个镜像。" >> "$GITHUB_STEP_SUMMARY"
