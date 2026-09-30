@@ -1351,18 +1351,18 @@ test('★ 必须把「交易所对这个账户的实际杠杆授信」告诉模�
     leverageCaps: { BTCUSDT: 5, ETHUSDT: 5, SOLUSDT: 5 },
   });
 
-  assert.match(text, /交易所对这个账户的实际杠杆授信/, '要说明这是账户级授信，不是交易所的理论上限');
+  assert.match(text, /交易所对该标的的杠杆档位上限/, '措辞要准：leverageBracket 给的是档位上限，不是账户级授信');
   assert.match(text, /BTCUSDT 5x/, '要给出具体标的与数值');
   assert.match(
     text,
-    /子账户|主账户/,
-    '要解释这个数为什么低/高 —— 否则模型不知道它换个账户就会变',
+    /子账户/,
+    '要说明"调高后仍被压回 5x = 当前是子账户" —— 这是用户换主账户时唯一的自检依据',
   );
 });
 
-test('交易所杠杆授信读不到时不渲染那一行 —— 不猜', () => {
+test('交易所杠杆档位读不到时不渲染那一行 —— 不猜', () => {
   const text = buildUserPrompt({ ...contextWith(blankMemory()), leverageCaps: {} });
-  assert.doesNotMatch(text, /实际杠杆授信/);
+  assert.doesNotMatch(text, /杠杆档位上限/);
 });
 
 test('★ 挂单成交统计必须出现在提示词里 —— 模型看不到自己的挂单成效', () => {
