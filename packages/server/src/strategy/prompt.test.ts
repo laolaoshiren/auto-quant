@@ -1257,6 +1257,75 @@ test('★ 必须把"决策周期多长"告诉模型 —— 否则它的时间规
   assert.match(text, /30\s*分钟/, '要给出具体的分钟数 —— 否则模型无从换算');
 });
 
+test('★ 有持仓时，持仓区块必须给出「往返成本」与「止损距入场多远」', () => {
+  /*
+   * ## 这条用例是为 2026-09-30 的 ZECUSDT 写的
+   *
+   * 模型自己那类「保本/锁盈上移」规则（提示词 5.1/5.2）用**价格浮盈的百分比**做判据。
+   * 它把 ZECUSDT 空头的止损从结构位 1427.5 上移到 **1412.32** —— 相对入场价 1413
+   * 只锁住 **+0.048%**。而那笔的往返成本是 **0.070%**（手续费 0.0148 ÷ 名义 21.20）：
+   *
+   *     止损被扫掉 → 毛 +0.0042、手续费 0.0148 → **净 -0.0106**
+   *
+   * **数学上必然亏** —— 与方向判断对不对无关。
+   *
+   * 最刺眼的是模型**自己的复盘两次**都写下了正确结论
+   * （「保本止损必须设在覆盖往返成本之上」），但它**决策那一刻手里没有这两个数字**：
+   * 往返成本要它自己从历史成交反推，止损距离要它在脑子里换算。
+   * 它在 09-30 的复盘里甚至明说「具体是原止损还是移动止损被扫，数据不足无法确定」。
+   *
+   * 所以系统把两个**事实**摆到它面前，判据仍然是它的。
+   */
+  const position = {
+    position: {
+      symbol: 'ZECUSDT',
+      side: 'short' as const,
+      entryPrice: 1413,
+      markPrice: 1396.48,
+      quantity: 0.015,
+      notional: 21.2,
+      leverage: 4,
+      marginUsed: 5.3,
+      unrealizedPnlPercent: 4.93,
+      unrealizedPnl: 0.26,
+      peakPnlPercent: 5.82,
+      liquidationPrice: null,
+      stopLoss: 1412.32,
+      takeProfit: 1366,
+    },
+    snapshot: null,
+    holdingMinutes: 138.6,
+  };
+
+  const text = buildUserPrompt({
+    ...contextWith(blankMemory()),
+    positions: [position as unknown as PromptContext['positions'][number]],
+    roundTripCostPercent: 0.07,
+  });
+
+  assert.match(text, /往返成本 ≈0\.070%/, '★ 往返成本必须出现在持仓区块里');
+  assert.match(
+    text,
+    /止损 1412\.32.*距入场 \+0\.048% 价格口径，锁盈侧/,
+    '★ 止损距入场多远必须算好给它 —— 空头止损低于入场价，是锁盈侧',
+  );
+  /*
+   * 两个数字放在一起时，读者（模型）可以直接比较：0.048% < 0.070% → 必然净亏。
+   * 这正是它上一轮没能自己完成的那一步。
+   */
+  assert.match(text, /小于它时.*必然净亏/, '要说明这个数字的用途，而不只是罗列');
+});
+
+test('没有往返成本数据时不渲染那一行 —— 宁可不说，也不编一个默认值', () => {
+  /*
+   * `averageRoundTripCostPercent()` 在没有有效成交时返回 `null`。
+   * 此时**不渲染**比渲染一个"行业标准 0.1%"要好：那是别处的成本，不是这个账户的。
+   * 这条同样守住"不要为了好看而填充"（`docs/AGENTS.md` §3.2）。
+   */
+  const text = buildUserPrompt({ ...contextWith(blankMemory()), roundTripCostPercent: null });
+  assert.doesNotMatch(text, /往返成本/);
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：
