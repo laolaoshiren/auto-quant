@@ -236,7 +236,15 @@ test('长期零成交会唤醒 —— 这是唯一能发现"参数不可达"的�
 });
 
 test('零成交轮数没到门槛时不唤醒（不能每轮都醒）', () => {
-  assert.equal(decideWake(quiet({ idleCycles: 19 })).wake, false);
+  /*
+   * ⚠️ 用**策略里的阈值减一**，而不是写死 19。
+   * 阈值按真实周期长度调过（20 → 4），而写死的数字会在那次调整里**悄悄失效** ——
+   * 这条用例刚刚就因此失败了一次。
+   */
+  assert.equal(
+    decideWake(quiet({ idleCycles: DEFAULT_WAKE_POLICY.idleCycleThreshold - 1 })).wake,
+    false,
+  );
 });
 
 test('长期零成交的优先级高于"有新结果"', () => {
@@ -251,6 +259,33 @@ test('长期零成交的优先级高于"有新结果"', () => {
 test('但它排在回撤与连亏之后 —— 那两条更急', () => {
   assert.equal(decideWake(quiet({ idleCycles: 30, equityDriftPercent: -5 })).trigger, 'drawdown');
   assert.equal(decideWake(quiet({ idleCycles: 30, losingStreak: 5 })).trigger, 'losing_streak');
+});
+
+test('★ 阈值必须跟得上真实周期长度 —— 连续不开仓约 2 小时就该被审视', () => {
+  /*
+   * ## 这条用例是为一次真实的"大脑睡着"写的
+   *
+   * 阈值原来写的是 **20**，注释里的理由是「20 轮 ≈ 1 小时（**3 分钟周期**）」。
+   * 而**实际周期是 30 分钟** —— 于是 20 轮 = **10 小时**。
+   *
+   * 实测后果（2026-09-30 早晨）：市场低波动（15m 振幅腰斩），模型连续 10+ 轮 0 笔，
+   * 而大脑**根本没被唤醒**去审视"是不是我的参数太严了"：
+   * 它主要靠每笔成交触发的 `new_result`，而**没成交就永远没有它** ——
+   *
+   *     越不成交 → 越不被唤醒 → 越不成交      ← 一个自我强化的死循环
+   *
+   * 所以这里把"约 2 小时内不开仓"钉成必须唤醒（30 分钟周期 → 4 轮），
+   * 并把周期长度写进注释 —— 以后谁改周期，这条会提醒他一起改阈值。
+   */
+  assert.ok(
+    DEFAULT_WAKE_POLICY.idleCycleThreshold <= 4,
+    `阈值 ${DEFAULT_WAKE_POLICY.idleCycleThreshold} 太大：按 30 分钟周期，` +
+      '它意味着要等 ' +
+      `${(DEFAULT_WAKE_POLICY.idleCycleThreshold * 0.5).toFixed(1)} 小时才审视一次`,
+  );
+  const d = decideWake(quiet({ idleCycles: 4 }));
+  assert.equal(d.wake, true, '★ 连续 4 轮（约 2 小时）没开仓，必须唤醒大脑去审视');
+  assert.equal(d.trigger, 'idle');
 });
 
 test('idle 的理由必须如实报告窗口内真实发生的事 —— 不能断言没发生过的事', () => {
