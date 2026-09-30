@@ -13,6 +13,7 @@ import { SCORE_WEIGHTS } from './scoring.js';
 import { DECISION_TOOL_CATALOGUE } from '../trader/decisionTools.js';
 import type { RankingRow, UniverseRankings } from '../market/rankings.js';
 import type { PlatformHistoryRow } from './platformHistory.js';
+import type { EntryFillStats } from './entryStats.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Prompt context                                                             */
@@ -208,6 +209,36 @@ export interface PromptContext {
    * 「具体是原止损还是移动止损被扫，数据不足无法确定」）。这是信息缺口，不是能力缺口。
    */
   roundTripCostPercent?: number | null;
+  /**
+   * ⚠️ **交易所对【这个账户】的实际杠杆授信**（`symbol → 上限`，读自 `leverageBracket`）。
+   *
+   * 为什么必须告诉模型：币安的规则是
+   * `能设的最大杠杆 = min(名义价值档位的 initialLeverage, 账户级限制, symbol 上限)`，
+   * 而**账户级那一项对子账户是硬的** —— 官方 FAQ：新建子账户合约杠杆不超过 5x。
+   *
+   * 系统早就读了这个数（`broker.getMaxLeverage()`），但只喂给风控引擎做钳制
+   * （`autoTrader.ts` 的 `exchangeMaxLeverageOf`），**从没进过提示词**。
+   * 于是模型只看到配置里写死的 `最大杠杆 5x`，**永远不会想到**
+   * "其实交易所允许更高，我可以把配置调上去"。
+   *
+   * 用户 2026-10-01 的原话：「我准备用主账户交易了（没有合约 5X 限制，本金也会加到 100u 以上），
+   * 你确保我使用主账户，系统能正常运作（不要无法识别 5X 以上什么的和现在一样
+   * **AI 不知道能挂更高**）」。
+   */
+  leverageCaps?: Record<string, number>;
+  /**
+   * ⚠️ **挂单成交统计** —— 模型看不到的那个反馈。
+   *
+   * 用户 2026-10-01 观察到「每次开单都是限价单…经常挂了都无法成交…好像在浪费时间和 token」。
+   * 真实数据证实了他的判断：**限价入场单撤单率 64%**（78 撤 / 44 成交），而市价单 100% 成交。
+   *
+   * 系统**已经告诉过它**"挂满 `pendingEntryTimeoutMinutes` 分钟会自动撤"，
+   * 但它从没看到**"我过去挂的单六成都没成交"** —— 而这是它调整挂单方式的唯一依据。
+   * 于是它每轮都在重复"挂回踩位 → 超时撤掉 → 下一轮再挂"。
+   *
+   * 这里只给**事实**。要不要改挂法仍然是它的判断。
+   */
+  entryStats?: EntryFillStats;
 }
 
 /** 「全市场概览」的一行 —— 见 `PromptContext.marketOverview`。 */
@@ -832,6 +863,11 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       '- 最大同时持仓数：' + `${risk.maxPositions}`,
       `- 最大杠杆（BTC/ETH）：${risk.btcEthMaxLeverage}x`,
       `- 最大杠杆（其他所有标的）：${risk.altcoinMaxLeverage}x`,
+      /*
+       * ⚠️ **交易所对这个账户的实际授信不在这里渲染** —— 它是**每轮随候选池变化**的
+       * （见 `volatileParts` 的「系统状态」区）。放进系统提示词会破坏缓存前缀：
+       * 缓存按 system + user 拼接后匹配，而系统提示词一变，后面全部失效。
+       */
       /*
        * ⚠️ **保证金模式要告诉它 —— 它决定"一个仓位爆仓会不会吃掉别的仓位"。**
        *
@@ -1998,6 +2034,41 @@ function renderUserPrompt(
               `就是入场后约 ${ctx.cycleIntervalMinutes} 分钟，而不是几分钟后。这个周期本身你也能改。）`,
           ]
         : []),
+      /*
+       * ⚠️ **交易所对这个账户的实际授信 —— 必须让模型知道。**
+       *
+       * 币安：`能设的最大杠杆 = min(名义档位的 initialLeverage, 账户级限制, symbol 上限)`，
+       * 而**账户级那一项对子账户是硬的** —— 官方 FAQ：新建子账户合约杠杆不超过 5x。
+       * 同一份策略配置，跑在**主账户上能用 20x，跑在子账户上只能 5x**。
+       *
+       * 这个数系统**早就读到了**（`broker.getMaxLeverage()` → `leverageBracket`），
+       * 但原来只喂给风控引擎做钳制（`autoTrader.ts` 的 `exchangeMaxLeverageOf`），
+       * **从没进过提示词**。于是模型只看到「硬性约束」里那两行写死的配置值，
+       * 永远不会想到"交易所允许更高，我可以把配置调上去"。
+       *
+       * 用户 2026-10-01 的原话：「我准备用主账户交易了（没有合约 5X 限制，本金也会加到 100u 以上），
+       * 你确保我使用主账户，系统能正常运作（不要无法识别 5X 以上什么的和现在一样
+       * **AI 不知道能挂更高**）」。
+       *
+       * ⚠️ **它渲染在用户提示词里而不是系统提示词里**，因为它**每轮随候选池变化** ——
+       * 扔进系统提示词会让缓存前缀每次都失效（缓存按 system + user 拼接匹配）。
+       */
+      ...(ctx.leverageCaps && Object.keys(ctx.leverageCaps).length > 0
+        ? [
+            '',
+            '## 交易所对这个账户的实际杠杆授信',
+            Object.entries(ctx.leverageCaps)
+              .map(([symbol, cap]) => `${symbol} ${cap}x`)
+              .join('、'),
+            '（读自 `leverageBracket`，是**账户级**的授信，不是交易所的理论上限。）',
+            '**实际可用杠杆 = 「硬性约束」里的配置上限与该授信的较小者** —— 风控按它钳制。' +
+              '币安对**新建子账户**的合约杠杆有 5x 硬上限；**主账户**通常远高于此，' +
+              '但也会受名义价值档位影响，所以别把 symbol 的理论上限当成本账户的上限。',
+            '⚠️ **换账户 / 入金之后这个数会变。** 若你发现它明显高于配置里的上限，' +
+              '那说明把 `btcEthMaxLeverage` / `altcoinMaxLeverage` 调上去就能用更高杠杆 ——' +
+              '**要用多少仍然由你判断**（`set_params` 即可，下一轮生效）。',
+          ]
+        : []),
     ].join('\n'),
   );
 
@@ -2273,6 +2344,26 @@ function renderUserPrompt(
    */
   if (ctx.platformHistory && ctx.platformHistory.length > 0) {
     volatileParts.push(renderPlatformHistory(ctx.platformHistory));
+  }
+
+  /*
+   * 6.8 — **挂单成交统计** -------------------------------------------------
+   *
+   * ⚠️ **这是模型看不到的那个反馈。** 用户 2026-10-01 观察到「每次开单都是限价单…
+   * 经常挂了都无法成交…好像在浪费时间和 token」，而真实数据证实了他：
+   *
+   *     限价入场单：CANCELED 78 / FILLED 44  → **撤单率 64%**
+   *     市价入场单：FILLED 19                → 100% 成交
+   *
+   * 系统**已经告诉过它**"挂满 `pendingEntryTimeoutMinutes` 分钟会自动撤"，
+   * 但它从没看到"我过去挂的单六成都没成交" —— 而那是它调整挂单方式的唯一依据。
+   * 所以它每轮都在重复"挂回踩位 → 超时撤掉 → 下一轮再挂"。
+   *
+   * 放在「本平台历史」之后：一个说"我在哪些标的上做得怎么样"，
+   * 这个说"我的**挂单方式**本身好不好用"，两者都是关于它自己的事实。
+   */
+  if (ctx.entryStats && ctx.entryStats.fillRatePercent !== null) {
+    volatileParts.push(renderEntryStats(ctx.entryStats, ctx.config.riskControl.pendingEntryTimeoutMinutes));
   }
 
   /* 7 — Candidate coins -------------------------------------------------- */
@@ -3045,6 +3136,47 @@ function renderPlatformHistory(rows: readonly PlatformHistoryRow[]): string {
     '',
     ...lines,
   ].join('\n');
+}
+
+/**
+ * 「我的挂单方式好不好用」—— 成交率与撤单平均等待时长。
+ *
+ * ⚠️ 这一段存在的唯一理由是：**模型看不到自己的挂单成效**。
+ *
+ * 它已经知道"挂满 N 分钟会自动撤"这条规则，但不知道**自己过去挂的单六成都没成交**。
+ * 用户 2026-10-01 看到的就是这个循环：「挂了又取消根本没成交…浪费时间和 token」。
+ *
+ * 说法上刻意只给**统计**，不给建议 —— 挂近一点、用市价、还是继续等回踩，
+ * 是它的判断（用户的原则：**模型是大脑，系统只是手脚**）。
+ */
+function renderEntryStats(stats: EntryFillStats, timeoutMinutes: number): string {
+  const decided = stats.limitFilled + stats.limitCanceled;
+  const lines = [
+    '# 我的挂单成效（限价入场单的历史统计 —— 这是**你自己**的成交情况）',
+    '',
+    `- 限价单：**成交 ${stats.limitFilled} 张 / 撤单 ${stats.limitCanceled} 张**` +
+      `（共 ${decided} 张有结论）→ **成交率 ${stats.fillRatePercent!.toFixed(0)}%**`,
+  ];
+  if (stats.avgCanceledWaitMinutes !== null) {
+    lines.push(
+      `- 被撤的那些**平均等了 ${stats.avgCanceledWaitMinutes.toFixed(0)} 分钟**` +
+        `（系统上限是 ${timeoutMinutes} 分钟）—— 等满了还没到价，说明**挂价离当时的市价偏远**。`,
+    );
+  }
+  if (stats.marketFilled > 0) {
+    lines.push(
+      `- 市价单：成交 ${stats.marketFilled} 张（**市价单不会因为价格没到而失败**）。`,
+    );
+  }
+  if (stats.limitRejected > 0) {
+    lines.push(`- 另有 ${stats.limitRejected} 张限价单被交易所直接拒绝（那是"没挂上"，不算在成交率里）。`);
+  }
+  lines.push(
+    '',
+    '**这只是统计，不是建议** —— 挂得更近、直接吃单、还是继续等回踩，由你按当下行情决定。',
+    '但如果成交率长期偏低，而你又在反复挂同一个价位，那消耗的是**你自己的决策轮次**。',
+  );
+  return lines.join('\n');
 }
 
 function renderTimeframeSummary(snap: MarketSnapshot): string {

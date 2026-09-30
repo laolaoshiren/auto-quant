@@ -82,6 +82,7 @@ import {
 import { rankPlatformHistory } from '../strategy/platformHistory.js';
 import { rankConsensus } from '../strategy/consensus.js';
 import { averageRoundTripCostPercent } from '../strategy/costs.js';
+import { entryFillStats } from '../strategy/entryStats.js';
 import {
   addToWatchlist,
   decayWatchlist,
@@ -1747,6 +1748,25 @@ export class AutoTrader {
     await this.prefetchLeverageCaps(snapshots.map((s) => s.symbol));
 
     /*
+     * ⚠️ **把"交易所对这个账户的实际授信"交给模型**（不只是喂给风控钳制）。
+     *
+     * 币安：`能设的最大杠杆 = min(名义档位 initialLeverage, 账户级限制, symbol 上限)`，
+     * 而**账户级那一项对子账户是硬的** —— 新建子账户不超过 5x，主账户通常远高于此。
+     * 这个数原来只喂给风控引擎（下面的 `exchangeMaxLeverageOf`），**从没进过提示词**，
+     * 于是模型只看到配置里写死的 5x，永远不会想到"交易所允许更高，我可以调上去"。
+     *
+     * 用户 2026-10-01 准备换主账户，明确要求"不要 AI 不知道能挂更高"。
+     *
+     * 只报**本轮候选**的授信（不是缓存里所有历史标的）：提示词里多一行无关标的
+     * 就多一分噪声，而模型只会对候选下注。
+     */
+    const leverageCaps: Record<string, number> = {};
+    for (const s of snapshots) {
+      const cap = this.leverageCapCache.get(s.symbol);
+      if (cap !== undefined && cap > 0) leverageCaps[s.symbol] = cap;
+    }
+
+    /*
      * 候选评分门槛 —— 在**构建提示词之前**筛掉不值得看的标的。
      *
      * 实测单次决策的提示词是 69,678 字符 / 48,005 tokens，而其中相当一部分是陪跑的。
@@ -1897,6 +1917,28 @@ export class AutoTrader {
     );
 
     /*
+     * ⚠️ **挂单成交统计**：模型看不到自己的挂单成效。
+     *
+     * 用户 2026-10-01 观察到「每次开单都是限价单…经常挂了都无法成交…好像在浪费时间和 token」，
+     * 而真实数据证实了：**限价入场单撤单率 64%**（78 撤 / 44 成交），市价单 100% 成交。
+     *
+     * 它知道"挂满 N 分钟会自动撤"这条规则，但从没看到"我过去挂的单六成都没成交" ——
+     * 于是每轮都在重复"挂回踩位 → 超时撤掉 → 下一轮再挂"。
+     */
+    const entryOrders = orderStore
+      .list(traderId, 300)
+      .filter((o) => o.purpose === 'entry')
+      .map((o) => ({
+        type: o.type,
+        status: o.status,
+        waitMinutes:
+          o.createdAt && o.updatedAt
+            ? (Date.parse(o.updatedAt) - Date.parse(o.createdAt)) / 60_000
+            : null,
+      }));
+    const entryStats = entryFillStats(entryOrders);
+
+    /*
      * 本小时的已开仓数只读一次，两处用同一个数：提示词的「本周期约束」区块与风控的
      * `entriesLastHour`。分头读会得到两个可能不一致的数字，而模型看到 2/3、风控按 3/3
      * 拒绝，正是"看不见的约束"换一种形态。
@@ -1972,6 +2014,10 @@ export class AutoTrader {
        * 而"止损锁住的浮盈是否覆盖成本"决定了它是净赚还是净亏。见上面取数处的说明。
        */
       roundTripCostPercent,
+      /* 交易所对这个账户的实际杠杆授信 —— 换主账户后它会变高，模型要据此决定是否调高配置。 */
+      leverageCaps,
+      /* 挂单成交统计 —— 让它看见自己的挂单成效，而不是每轮重复同一个动作。 */
+      entryStats,
       memory,
       /*
        * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**

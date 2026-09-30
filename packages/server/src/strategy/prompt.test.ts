@@ -1326,6 +1326,92 @@ test('没有往返成本数据时不渲染那一行 —— 宁可不说，也不
   assert.doesNotMatch(text, /往返成本/);
 });
 
+test('★ 必须把「交易所对这个账户的实际杠杆授信」告诉模型 —— 否则换主账户后它不知道能上更高', () => {
+  /*
+   * ## 这条用例的来历（用户 2026-10-01 的原话）
+   *
+   * 「我准备用主账户交易了（没有合约 5X 限制，本金也会加到 100u 以上），
+   *   你确保我使用主账户，系统能正常运作（不要无法识别 5X 以上什么的和现在一样
+   *   AI 不知道能挂更高）」
+   *
+   * 币安的规则是：**能设的最大杠杆 = min(名义档位的 initialLeverage, 账户级限制, symbol 上限)**。
+   * 而**账户级那一项对子账户是硬的** —— 官方 FAQ：新建子账户合约杠杆不超过 5x。
+   * 所以同一份配置跑在主账户上能用 20x，跑在子账户上只能 5x。
+   *
+   * 系统其实**已经读了这个数**（`broker.getMaxLeverage()` → `leverageBracket`），
+   * 但它只喂给风控引擎做钳制（`autoTrader.ts` 的 `exchangeMaxLeverageOf`），
+   * **从没进过提示词**。于是模型只看到配置里写的 `最大杠杆 5x`，
+   * 就**永远不会**想到"其实交易所允许更高，我可以把配置调上去"。
+   *
+   * 修法是把**事实**摆给它：交易所对这个账户的实际授信是多少。
+   * 要不要据此调高 `btcEthMaxLeverage` / `altcoinMaxLeverage` 仍然是它的判断。
+   */
+  const text = buildUserPrompt({
+    ...contextWith(blankMemory()),
+    leverageCaps: { BTCUSDT: 5, ETHUSDT: 5, SOLUSDT: 5 },
+  });
+
+  assert.match(text, /交易所对这个账户的实际杠杆授信/, '要说明这是账户级授信，不是交易所的理论上限');
+  assert.match(text, /BTCUSDT 5x/, '要给出具体标的与数值');
+  assert.match(
+    text,
+    /子账户|主账户/,
+    '要解释这个数为什么低/高 —— 否则模型不知道它换个账户就会变',
+  );
+});
+
+test('交易所杠杆授信读不到时不渲染那一行 —— 不猜', () => {
+  const text = buildUserPrompt({ ...contextWith(blankMemory()), leverageCaps: {} });
+  assert.doesNotMatch(text, /实际杠杆授信/);
+});
+
+test('★ 挂单成交统计必须出现在提示词里 —— 模型看不到自己的挂单成效', () => {
+  /*
+   * ## 用户 2026-10-01 的观察
+   *
+   * 「为什么每次开单都是限价单…而且经常挂了都无法成交，因为看不了取消记录，
+   *   我估计都是挂了又取消根本没成交，怎么奇奇怪怪的感觉，
+   *   好像在浪费时间和 token，浪费服务器资源」
+   *
+   * **他的估计完全正确**：限价入场单 78 撤 / 44 成交 = **撤单率 64%**，市价单 100% 成交。
+   *
+   * 模型知道"挂满 45 分钟会自动撤"，但它**从没看到**"我过去挂的单六成都没成交"。
+   * 于是它每轮都在重复同一个动作 —— 而纠正它需要的只是把这个统计摆出来。
+   */
+  const text = buildUserPrompt({
+    ...contextWith(blankMemory()),
+    entryStats: {
+      limitFilled: 44,
+      limitCanceled: 78,
+      limitRejected: 0,
+      marketFilled: 19,
+      fillRatePercent: 36.065573770491806,
+      avgCanceledWaitMinutes: 45,
+    },
+  });
+
+  assert.match(text, /我的挂单成效/, '要有这一段');
+  assert.match(text, /成交 44 张 \/ 撤单 78 张/, '两个数字都要给，不能只给比例');
+  assert.match(text, /成交率 36%/, '给成交率');
+  assert.match(text, /平均等了 45 分钟/, '撤单等了多久 —— 判断"是不是差一点就成交"');
+  assert.match(text, /不是建议/, '要说明这只是统计，判据仍然是它的');
+});
+
+test('没有限价单样本时不渲染挂单成效 —— 0% 与"还没挂过"是两件事', () => {
+  const text = buildUserPrompt({
+    ...contextWith(blankMemory()),
+    entryStats: {
+      limitFilled: 0,
+      limitCanceled: 0,
+      limitRejected: 0,
+      marketFilled: 3,
+      fillRatePercent: null,
+      avgCanceledWaitMinutes: null,
+    },
+  });
+  assert.doesNotMatch(text, /我的挂单成效/);
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：
