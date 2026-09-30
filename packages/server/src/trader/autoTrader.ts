@@ -1941,6 +1941,12 @@ export class AutoTrader {
        */
       oiRankingEnabled: config.indicators.enableOiRanking,
       platformHistory,
+      /*
+       * ⚠️ **周期长度是"事实"，必须告诉模型** —— 它的时间类规则要按这个尺度换算。
+       * 实测（2026-09-30）：它写的「入场后第一次醒来检查」在本机器人 30 分钟周期下
+       * 变成了"开仓就平"（BTC 上 78.7% 的情况下 30 分钟内根本涨不到 0.25%）。
+       */
+      cycleIntervalMinutes: this.deps.trader.cycleIntervalMinutes,
       memory,
       /*
        * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**
