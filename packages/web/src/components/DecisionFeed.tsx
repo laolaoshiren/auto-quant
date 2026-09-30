@@ -985,9 +985,24 @@ export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbol
             */}
             {skippedRows.length > 0 && (
               <details className="rounded-md border border-base-800 px-2.5 py-1.5">
+                {/*
+                  ⚠️ **符号直接列在摘要行里 —— 不要让人展开才知道"它看了哪些币"。**
+                  用户的反馈（2026-09-30）：
+                  「我打开网页，就能方便快捷看到模型在做什么，而不是什么都不做，
+                    或者要我去点开看大段的思考过程、提示词」。
+                  折叠本身没错（十几条 skip 会把决策流刷满），但**"看了哪些标的"是
+                  一眼就该看到的东西** —— 那是这一页存在的意义。
+                */}
                 <summary className="cursor-pointer select-none text-xs text-ink-faint">
                   另有 {skippedRows.length} 个标的看过未做
-                  {topSkippedScore !== null ? `（最高 ${topSkippedScore} 分）` : ''}
+                  {topSkippedScore !== null ? `（最高 ${topSkippedScore} 分）` : ''}：
+                  <span className="text-ink-mid">
+                    {skippedRows
+                      .slice(0, 8)
+                      .map(({ decision }) => decision.symbol)
+                      .join('、')}
+                    {skippedRows.length > 8 ? ` 等 ${skippedRows.length} 个` : ''}
+                  </span>
                   {' '}—— 展开可见各自的评分与理由
                 </summary>
                 <div className="mt-2.5 space-y-2.5">
