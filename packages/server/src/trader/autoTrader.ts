@@ -1709,7 +1709,20 @@ export class AutoTrader {
     if (watchedBefore.length > 0) writeWatchlist(traderId, decayWatchlist(watchedBefore));
 
     const selection = await selectCandidates(config, this.deps.marketData, {
-      mustInclude: [...held, ...consensusSymbols, ...watched],
+      /*
+       * ⚠️ **只有持仓是"必保"的** —— 模型必须能管理自己手上的东西，
+       * 裁掉它就只能盲目持有。
+       */
+      mustInclude: held,
+      /*
+       * ⚠️ 共识标的与模型点名的是**优先**，不是必保 —— 见 `coins.ts` 里 `preferred`
+       * 的说明。第一版把它们塞进了 `mustInclude`，于是 `mustKeep` 替它们占位、
+       * 裁剪再也裁不到，候选池**无声膨胀**：实测 20 → 25 个、
+       * 提示词 229,567 → 288,523 字符、决策耗时 145 → 397 秒（6.6 分钟）。
+       *
+       * **优先 ≠ 必保**：它们排在最前、最可能进池，但预算不够时让位。
+       */
+      preferred: [...consensusSymbols, ...watched],
       /* 候选池的大小直接由它决定 —— 见构造函数里 `promptBudget` 的说明。 */
       budgetTokens: this.promptBudget,
     });

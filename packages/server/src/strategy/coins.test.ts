@@ -240,6 +240,49 @@ test('打分门槛关闭时不得静默丢弃标的（minScore = 0 表示不过�
   }
 });
 
+test('★ 点名/共识的标的是"优先入选"，不是"额外增加" —— 候选池不该因此膨胀', async () => {
+  /*
+   * ## 这条用例是为一个**真实的副作用**写的
+   *
+   * 第 3 层「索取」接上之后，共识标的与模型点名的标的被塞进了 `mustInclude` ——
+   * 而 `mustInclude` 是**必保**的（`mustKeep` 会让它们在裁剪时占位）。
+   *
+   * 实测后果：候选数 **20 → 25**、提示词 **229,567 → 288,523 字符**、
+   * 决策耗时 **145 秒 → 397 秒**（6.6 分钟）。
+   *
+   * **优先 ≠ 必保**：它们该排在候选池最前、最可能进池，但**预算不够时可以让位**。
+   * 这一条钉住那个区别 —— 否则下次谁再往 `mustInclude` 里塞东西，
+   * 候选池又会无声地膨胀。
+   */
+  const config = configWith({
+    coinSource: { ...defaultStrategyConfig().coinSource, sourceType: 'coinpool', coinPoolLimit: 200 },
+  });
+  const market = fakeMarket({ volumeRanked: rankedSymbols(200) });
+  const budget = PROMPT_TOKEN_BUDGET;
+  const max = candidateBudget(config, budget);
+
+  /* 20 个"点名的"—— 若按 mustInclude 处理，候选池会被它们撑爆。 */
+  const preferred = Array.from({ length: 20 }, (_, i) => `WANT${String(i).padStart(2, '0')}USDT`);
+
+  const plain = await selectCandidates(config, market, { budgetTokens: budget });
+  const withPreferred = await selectCandidates(config, market, { preferred, budgetTokens: budget });
+
+  assert.equal(
+    withPreferred.symbols.length,
+    plain.symbols.length,
+    '★ 优先入选不该改变候选总数 —— 它只改变"谁在里面"',
+  );
+  assert.ok(withPreferred.symbols.length <= max, '总数仍要在预算上限内');
+  assert.ok(
+    withPreferred.symbols.includes(preferred[0]!),
+    '★ 优先的必须进池 —— 那正是"优先"的意思',
+  );
+  assert.ok(
+    !plain.symbols.includes(preferred[0]!),
+    '对照组：不点名时它本来不在（否则这条断言什么也没验证）',
+  );
+});
+
 /* -------------------------------------------------------------------------- */
 /*  类型哨兵                                                                    */
 /* -------------------------------------------------------------------------- */

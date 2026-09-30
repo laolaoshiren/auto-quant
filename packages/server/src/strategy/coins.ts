@@ -41,6 +41,21 @@ export async function selectCandidates(
   options: {
     mustInclude?: Iterable<string>;
     /**
+     * ⚠️ **优先入选** —— 共识标的（多个榜同时指向的）与模型点名的标的。
+     *
+     * 与 `mustInclude` 的区别**很重要**：
+     *   · `mustInclude` 是**必保**（持仓）—— 模型必须能管理自己手上的东西，
+     *     裁掉它就只能盲目持有；
+     *   · 这一组是**优先** —— 排在候选池最前、最可能进池，但**预算不够时可以让位**。
+     *
+     * 把它们塞进 `mustInclude` 会让候选池**无声膨胀**：`mustKeep` 替它们占位，
+     * 裁剪就再也裁不到它们。实测后果 —— 候选数 20 → 25、
+     * 提示词 229,567 → 288,523 字符、决策耗时 145 秒 → 397 秒（6.6 分钟）。
+     *
+     * **优先 ≠ 必保。**
+     */
+    preferred?: Iterable<string>;
+    /**
      * 提示词 token 预算。省略 = 保守默认（6 万）。
      *
      * 调用方应当传 `promptTokenBudget(model.inputTokenLimit)` —— 候选池的大小
@@ -61,6 +76,13 @@ export async function selectCandidates(
       sourcesBySymbol.set(symbol, [source]);
     }
   };
+
+  /*
+   * ⚠️ **模型点名/共识的标的先加** —— `sourcesBySymbol` 的**顺序就是优先级**，
+   * 而 `symbols = [...sourcesBySymbol.keys()]` 与后续裁剪都按它走。
+   * 放在 switch 之前意味着它们排在系统选出的候选**前面**。
+   */
+  for (const symbol of options.preferred ?? []) add(symbol, 'ai_requested');
 
   const { coinSource } = config;
 
