@@ -195,6 +195,19 @@ export interface PromptContext {
    * 它也能自己用 `set_params` 改周期，所以这里给的是**事实**，不是约束。
    */
   cycleIntervalMinutes?: number;
+  /**
+   * ⚠️ **往返成本**（开+平手续费合计，占名义价值的百分比；从本账户的历史成交反推）。
+   *
+   * 模型自己那类「保本/锁盈上移」规则的判据是**价格浮盈的百分比**，而它把止损
+   * 移到"比入场价好一点点"时，那"一点点"必须覆盖这个数 —— 否则被扫掉就是净亏，
+   * 与方向判断对不对无关。
+   *
+   * 实测（2026-09-30 ZECUSDT）：止损被上移到只锁 **0.048%**，而往返成本 **0.070%**，
+   * 结果毛 +0.0042、手续费 0.0148 → 净 **-0.0106**。模型自己的复盘两次都指出了
+   * 这条教训，但**决策时手里没有这个数字**（它在 09-30 的复盘里明说
+   * 「具体是原止损还是移动止损被扫，数据不足无法确定」）。这是信息缺口，不是能力缺口。
+   */
+  roundTripCostPercent?: number | null;
 }
 
 /** 「全市场概览」的一行 —— 见 `PromptContext.marketOverview`。 */
@@ -445,6 +458,33 @@ function fmtSigned(value: number | null | undefined, decimals = 2): string {
 function fmtPercent(value: number | null | undefined, decimals = 2): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return 'N/A';
   return `${value >= 0 ? '+' : ''}${value.toFixed(decimals)}%`;
+}
+
+/**
+ * 「止损距入场价多远」——**价格口径**，正数表示已经在锁盈侧。
+ *
+ * 为什么值得渲染出来：模型那类「保本/锁盈上移」规则用的是**价格百分比**做判据，
+ * 它得自己在脑子里把"止损价 vs 入场价"换成百分比。它确实算过
+ * （`#1731` 的推理里写着"距现价 1.02%=1.65×ATR"），**但那一步在连续几轮的推理里
+ * 很容易被跳过** —— 2026-09-30 的 ZECUSDT 就是跳过它的那次：止损被移到只锁 0.048%，
+ * 而往返成本 0.070%，被扫掉后净亏 0.0106。
+ *
+ * 给出来只是省掉一次心算，判据仍然是模型的。
+ */
+function stopDistanceLabel(pos: {
+  side: 'long' | 'short';
+  entryPrice: number;
+  stopLoss: number | null;
+}): string {
+  const stop = pos.stopLoss;
+  if (stop === null || !Number.isFinite(stop) || !Number.isFinite(pos.entryPrice) || pos.entryPrice <= 0) {
+    return '';
+  }
+  /* 多头：止损在入场价**下方**时触发，损益为负；空头反之。正数 = 锁盈侧。 */
+  const signed = pos.side === 'long' ? stop - pos.entryPrice : pos.entryPrice - stop;
+  const pct = (signed / pos.entryPrice) * 100;
+  const side = pct >= 0 ? '锁盈侧' : '亏损侧';
+  return `（距入场 ${pct >= 0 ? '+' : ''}${pct.toFixed(3)}% 价格口径，${side}）`;
 }
 
 /** A compact JSON-ish array render, dropping `null` padding and trimming length. */
@@ -2136,10 +2176,29 @@ function renderUserPrompt(
           marginPercentToPricePercent(pos.peakPnlPercent, pos.leverage),
         )}）| 杠杆 ${pos.leverage}x`,
         `   保证金 ${fmtUsd(pos.marginUsed)} | 强平价 ${pos.liquidationPrice ? fmt(pos.liquidationPrice) : '无'}`,
-        pos.stopLoss ? `   止损 ${fmt(pos.stopLoss)}` : '   止损：未设置',
+        pos.stopLoss ? `   止损 ${fmt(pos.stopLoss)}${stopDistanceLabel(pos)}` : '   止损：未设置',
         pos.takeProfit ? `   止盈 ${fmt(pos.takeProfit)}` : '   止盈：未设置',
         `   已持仓 ${humanDuration(p.holdingMinutes)}`,
       ];
+      /*
+       * ⚠️ **往返成本：算"止损该放哪"时绕不过去的那个数。**
+       *
+       * 模型自己写的「保本/锁盈上移」规则用**价格浮盈 %** 做判据，而当止损被移到
+       * "比入场价好一点点"的位置时，那"一点点"必须覆盖往返成本，否则被扫掉就是净亏 ——
+       * 与方向判断对不对无关，是算术。
+       *
+       * 实测 2026-09-30 ZECUSDT：止损上移到只锁 **0.048%**，而往返成本 **0.070%** →
+       * 毛 +0.0042、手续费 0.0148 → **净 -0.0106**。
+       *
+       * 这里只给**事实**（本账户历史成交反推的均值）。是否因此把保护位放到覆盖成本之上，
+       * 仍然是模型的判断 —— 那是它的取舍，不是系统的（"模型是大脑，系统只是手脚"）。
+       */
+      if (ctx.roundTripCostPercent !== undefined && ctx.roundTripCostPercent !== null) {
+        rows.push(
+          `   往返成本 ≈${ctx.roundTripCostPercent.toFixed(3)}%（开+平手续费合计占名义价值；` +
+            '保护位与入场价的距离小于它时，被扫掉后**必然净亏**）',
+        );
+      }
       if (snap) {
         rows.push(`   行情：${summariseSnapshot(snap)}`);
       }

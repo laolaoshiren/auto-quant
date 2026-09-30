@@ -81,6 +81,7 @@ import {
 } from '../store/repositories.js';
 import { rankPlatformHistory } from '../strategy/platformHistory.js';
 import { rankConsensus } from '../strategy/consensus.js';
+import { averageRoundTripCostPercent } from '../strategy/costs.js';
 import {
   addToWatchlist,
   decayWatchlist,
@@ -1864,6 +1865,12 @@ export class AutoTrader {
      */
 
     /*
+     * 最近成交**只读一次**，两个用途共用：按标的聚合的「本平台历史」，以及往返成本。
+     * 分头读会多打一次库，而且两份数据理论上可能不一致。
+     */
+    const recentTrades = tradeStore.list(traderId, 500);
+
+    /*
      * ⚠️ **第 1 层第七个维度「本平台历史」**：按标的聚合本平台自己的成交。
      *
      * 它是八个维度里唯一"关于自己"的 —— 交易所只给市场数据，而"我在这里做过几笔、
@@ -1871,10 +1878,23 @@ export class AutoTrader {
      * 上限 6 行（两端各 3）：再多会挤掉真正该看的东西。
      */
     const platformHistory = rankPlatformHistory({
-      trades: tradeStore.list(traderId, 500).map((t) => ({ symbol: t.symbol, netPnl: t.netPnl })),
+      trades: recentTrades.map((t) => ({ symbol: t.symbol, netPnl: t.netPnl })),
       minTrades: 3,
       limit: 6,
     });
+
+    /*
+     * ⚠️ **往返成本**：模型那类「保本/锁盈上移」规则的判据是**价格浮盈 %**，
+     * 而它把止损移到"比入场价好一点点"时，那"一点点"必须覆盖这个数 ——
+     * 否则被扫掉就是净亏，与方向判断对不对无关（那是算术）。
+     *
+     * 实测 2026-09-30 ZECUSDT：止损上移到只锁 0.048%，而往返成本 0.070%
+     * → 毛 +0.0042、手续费 0.0148 → **净 -0.0106**。
+     * 模型自己的复盘两次都写了这条教训，但**决策那一刻它手里没有这个数字**。
+     */
+    const roundTripCostPercent = averageRoundTripCostPercent(
+      recentTrades.map((t) => ({ entryPrice: t.entryPrice, quantity: t.quantity, fee: t.fee })),
+    );
 
     /*
      * 本小时的已开仓数只读一次，两处用同一个数：提示词的「本周期约束」区块与风控的
@@ -1947,6 +1967,11 @@ export class AutoTrader {
        * 变成了"开仓就平"（BTC 上 78.7% 的情况下 30 分钟内根本涨不到 0.25%）。
        */
       cycleIntervalMinutes: this.deps.trader.cycleIntervalMinutes,
+      /*
+       * ⚠️ 往返成本要进提示词的**持仓区块**：模型的锁盈规则用价格 % 做判据，
+       * 而"止损锁住的浮盈是否覆盖成本"决定了它是净赚还是净亏。见上面取数处的说明。
+       */
+      roundTripCostPercent,
       memory,
       /*
        * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**
