@@ -1412,6 +1412,55 @@ test('没有限价单样本时不渲染挂单成效 —— 0% 与"还没挂过"�
   assert.doesNotMatch(text, /我的挂单成效/);
 });
 
+test('★ 挂单区块必须显示「挂价离现价多远」并告诉模型它【现在就能撤单】', () => {
+  /*
+   * ## 两个真缺陷（用户 2026-10-01：「13 小时 0 成交」）
+   *
+   * 实测：最近 20 轮里模型开单 6 次，**全部挂限价单、全部超时被撤**（撤单率 64%）。
+   * 日志里那句是典型：
+   *
+   *     06:04:18 SOLUSDT 的限价挂单已等满 62 分钟（上限 45）仍未成交，已自动撤掉
+   *
+   * ### 缺陷 1：提示词自相矛盾，把"能撤单"说成"下一步才给"
+   *
+   * 挂单区块原来的结尾写着「**下一步我会给你撤单的能力**；在那之前，用 `wait` 说明你的判断即可」。
+   * 而 `cancel_pending` **早就实现了**（同一个提示词的另一处就给了它的 JSON 范例）。
+   * 于是模型以为自己只能干等时限 —— 而它明明可以立刻撤掉、把名额让给别的机会。
+   *
+   * ### 缺陷 2：看不到"挂价离现价多远"
+   *
+   * 挂单区块只给了挂价、数量、已等多久。而**能不能成交**取决于
+   * "挂价与市价的距离 vs 这段时间市场能走多远" —— 后者它有 ATR，
+   * 前者系统从没给过。缺了它，模型无法判断"我这个挂法现不现实"。
+   */
+  const snapshotSol = snapshot('SOLUSDT', 120);
+  const text = buildUserPrompt({
+    ...contextWith(blankMemory(), [snapshotSol]),
+    pendingEntries: [
+      {
+        symbol: 'SOLUSDT',
+        side: 'long',
+        limitPrice: 118.53,
+        quantity: 1,
+        stopLoss: 116,
+        takeProfit: 126,
+        waitingMinutes: 62,
+        reasoning: '回踩 15m EMA20',
+      },
+    ] as unknown as PromptContext['pendingEntries'],
+  });
+
+  /*
+   * 措辞是「挂价**低于**现价 X%」而不是带正负号的「距现价 -X%」：
+   * 做多挂低价、做空挂高价都是"等价格回来"，用一个方向词比一个符号更难读错。
+   */
+  assert.match(text, /挂价低于现价 1\.2/, '★ 要算出"挂价离现价多远"');
+  assert.match(text, /价格要先走这么多才可能成交/, '要说明这个距离意味着什么');
+  assert.match(text, /`cancel_pending`/, '★ 要明确它现在就能撤单');
+  assert.doesNotMatch(text, /下一步我会给你撤单的能力/, '★ 那句过期的话必须删掉');
+  assert.doesNotMatch(text, /下一步我会给你撤单的能力/, '★ 那句过期的话必须删掉');
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：

@@ -2294,6 +2294,19 @@ function renderUserPrompt(
     const lines = ctx.pendingEntries.map((p, index) => {
       const rows = [
         `${index + 1}. ${p.symbol} ${p.side === 'long' ? '做多' : '做空'} | **挂单 ${fmt(p.limitPrice)}**（尚未成交）`,
+        /*
+         * ⚠️ **"挂价离现价多远"必须给出来。**
+         *
+         * 能不能成交取决于"挂价与市价的距离 vs 这段时间市场能走多远"：
+         * 后者模型自己有（ATR），**前者系统从没给过** —— 于是它无法判断
+         * "我这个挂法现不现实"，只能一轮一轮挂、一轮一轮被 45 分钟时限撤掉。
+         *
+         * 实测（2026-10-01）：限价入场单撤单率 64%，最近 20 轮开单 6 次全部被撤；
+         * 日志典型一行是"SOLUSDT 的限价挂单已等满 62 分钟仍未成交，已自动撤掉"。
+         *
+         * 只给**距离**，不给"该不该挂"的判断 —— 那是它的（"模型是大脑，系统只是手脚"）。
+         */
+        ...pendingDistanceRow(p, ctx),
         `   数量 ${fmt(p.quantity, 6)} | 已等 ${humanDuration(p.waitingMinutes)}`,
         `   成交后会用这两个价位挂保护单：止损 ${p.stopLoss ? fmt(p.stopLoss) : '无'} | 止盈 ${p.takeProfit ? fmt(p.takeProfit) : '无'}`,
       ];
@@ -2306,8 +2319,21 @@ function renderUserPrompt(
         '**这些是"已经在排队"的入场，不是"可以再开一个"的名额** —— 它们已经占着持仓上限。' +
         '所以：不要在同一个标的上再提一次入场（那张单还在等）；也不要以为仓位已经成立 —— ' +
         '**成交之前你无法管理它**（改不了它的止损，因为还没有仓位）。\n' +
+        /*
+         * ⚠️ **这一段原来写着「下一步我会给你撤单的能力」—— 那是过期的话，而且有害。**
+         *
+         * `cancel_pending` **早就实现了**（同一个提示词的另一处就给了它的 JSON 范例），
+         * 而这里却说"下一步才给"。模型读到它，就以为自己只能干等时限 ——
+         * 于是明明可以立刻撤掉、把名额让给别的机会，它却什么都不做。
+         *
+         * 实测（2026-10-01）：限价挂单撤单率 64%，最近 20 轮开单 6 次全部超时被撤；
+         * 用户看到的是「挂了又取消根本没成交…浪费时间和 token」。
+         *
+         * 现在明确写：**撤单是你现在就有的动作。**
+         */
         '如果你认为那张单已经**不该再等下去**（价位错了、逻辑变了、等太久了），' +
-        '下一步我会给你撤单的能力；在那之前，用 `wait` 说明你的判断即可。',
+        '**用 `cancel_pending` 现在就撤掉它**（范例见前面「撤单」那一节）—— ' +
+        '不必等系统那条时限，也不必用 `wait` 干等：撤掉之后名额立刻释放，你可以在同一轮里换个机会。',
     );
   }
 
@@ -3178,6 +3204,35 @@ function renderEntryStats(stats: EntryFillStats, timeoutMinutes: number): string
     '但如果成交率长期偏低，而你又在反复挂同一个价位，那消耗的是**你自己的决策轮次**。',
   );
   return lines.join('\n');
+}
+
+/**
+ * 「挂价离现价多远」—— 一行，给模型判断"这个挂法现不现实"。
+ *
+ * ⚠️ 只给**距离**。该不该继续挂、要不要改成市价，是模型的判断
+ * （用户的原则：**模型是大脑，系统只是手脚**）。
+ */
+function pendingDistanceRow(
+  pending: { symbol: string; limitPrice: number },
+  ctx: PromptContext,
+): string[] {
+  const snap = ctx.candidates.find((c) => c.symbol === pending.symbol);
+  /*
+   * 用 `snap.price`（快照自带的最新价），不要从 `timeframes[0].closes` 里取：
+   * 快照的 `timeframes` 在轻量场景下可能是空的，而 `price` 一定是有的 ——
+   * 第一版就是从序列里取，于是**这一行在夹具/轻量快照下静默不渲染**，
+   * 而那正是这条信息最该出现的时候。
+   */
+  const mark = snap && Number.isFinite(snap.price) && snap.price > 0 ? snap.price : null;
+  if (mark === null) return [];
+  if (!Number.isFinite(pending.limitPrice) || pending.limitPrice <= 0) return [];
+
+  const pct = ((pending.limitPrice - mark) / mark) * 100;
+  const direction = pct >= 0 ? '高于' : '低于';
+  return [
+    `   现价 ${fmt(mark)} | **挂价${direction}现价 ${Math.abs(pct).toFixed(3)}%**` +
+      `（价格要先走这么多才可能成交）`,
+  ];
 }
 
 function renderTimeframeSummary(snap: MarketSnapshot): string {
