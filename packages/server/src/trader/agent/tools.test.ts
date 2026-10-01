@@ -370,6 +370,43 @@ test('get_lessons 把复盘教训交给 AI —— 复盘能影响决策的唯一
   assert.deepEqual(out.result, { rows: 5 }, '必须真的走到 read.lessons，并把 limit 透传下去');
 });
 
+test('★ set_params 必须明说「规则可以删」—— 只说 change 是不够的', () => {
+  /*
+   * ## 用户 2026-10-02 的判断
+   *
+   *   「越更新迭代，感觉系统问题越多，越不智能越来不可用」
+   *   「还不如刚做智能模式第一版，虽然 BUG 问题很多，但起码有惊喜」
+   *
+   * 而数据支持这句话里最要紧的那一半 —— **它自己写的规则只增不减**：
+   *
+   *     09-20 13:12      78 字符
+   *     09-21 02:22     794 字符   ← 开单率 20%、净 +1.22（"有惊喜"的那几天）
+   *     09-27 01:26   5,080 字符   ← 开单率 58%
+   *     09-30 08:19   6,999 字符   ← 开单率 8%，此后连续 11 轮全 skip
+   *
+   * 它不删的原因是**理性**的：每一条规则都来自一次真实亏损，删掉它感觉像放松风控。
+   * 缺的不是意愿，是**许可** —— 这段工具说明原来只有 "if it no longer fits the market,
+   * change it"，**从来没有说过"那是一整段替换，所以你可以删"**。
+   *
+   * 所以这条用例钉住三件事：
+   *   1. 说明里明确"整段替换"（否则它以为只能追加）；
+   *   2. 说明里明确"删规则是合法且被期待的"；
+   *   3. 同时点明"硬上限由代码强制、与它写什么无关" —— 否则它会把"删规则"
+   *      误读成"放松风控"，而那正是它一直不敢删的原因。
+   */
+  const spec = AGENT_TOOLS.find((t) => t.name === 'set_params');
+  assert.ok(spec, 'set_params 必须还在工具清单里');
+  const text = spec.describe;
+
+  assert.match(text, /REPLACED WHOLE|full replacement/i, '★ 要说清 promptSections 是整段替换');
+  assert.match(text, /DELETE|delete|drop what/i, '★ 要明确"删"是合法动作');
+  assert.match(
+    text,
+    /code-enforced|unaffected by anything you write/i,
+    '要说明硬上限由代码强制 —— 否则它把"删规则"误读成"放松风控"',
+  );
+});
+
 test('renderToolCatalogue 会把每个工具与参数都渲染出来', () => {
   const text = renderToolCatalogue();
   for (const tool of AGENT_TOOLS) {

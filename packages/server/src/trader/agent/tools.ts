@@ -167,6 +167,36 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
       '(promptSections.roleDefinition / tradingFrequency / entryStandards / decisionProcess, and customPrompt). ' +
       'Your prompt is a parameter like any other: if it no longer fits the market, change it — ' +
       'a fixed prompt cannot be called intelligent. ' +
+      /*
+       * ⚠️ **"可以删"这件事必须说出来 —— 2026-10-02 新增。**
+       *
+       * 用户的判断：「越更新迭代，感觉系统问题越多，越不智能越来不可用」。
+       * 而数据支持这句话里最要紧的那一半：
+       *
+       *     它自己写的规则（`promptSections`）长度
+       *       09-20  13:12      78 字符
+       *       09-21  02:22     794 字符   ← 开单率 20%，净 +1.22（"有惊喜"的那几天）
+       *       09-27  01:26   5,080 字符   ← 开单率 58%
+       *       09-30  08:19   6,999 字符   ← 开单率 8%，此后连续 11 轮全 skip
+       *
+       * **规则只增不减，而新增的几乎全是"这种情况别做"。**
+       *
+       * 它不删的原因是**理性**的：删规则感觉像在放松风控，而它每次加规则都是
+       * 因为真的亏过钱。缺的不是意愿，是**许可与机制** ——
+       * 这段说明原来只说 "change it"，从没说过"`promptSections.X` 是**整体替换**的，
+       * 所以你完全可以重写一整个段落、把不再适用的旧条款删掉"。
+       *
+       * 所以下面这两句是这次改动里最要紧的部分：把"删"明确成一个**合法且被期待**的动作。
+       */
+      '**AND — YOUR PROMPT SECTIONS ARE REPLACED WHOLE, SO YOU CAN DELETE AS WELL AS ADD.** ' +
+      'Each `promptSections.*` field is a full replacement, not an append. ' +
+      'Every rule inside it was written in response to ONE loss — and none of them have ever been ' +
+      'removed, so your rulebook only grows. A rulebook that only grows eventually excludes every ' +
+      'market there is. **Periodically re-read your own `entryStandards` / `decisionProcess` and ' +
+      'rewrite them**: keep what still earns its place, drop what was true only for one symbol in ' +
+      'one week. Pruning your own rules is a legitimate and expected move — not a loosening of risk ' +
+      'control. (Hard limits — leverage, notional, margin, position count — are code-enforced and ' +
+      'unaffected by anything you write here.) ' +
       'You MUST give a reason — an unexplained change cannot be reviewed later. ' +
       'Anything the structural guard overrides is reported back in clamps.' +
       /*
