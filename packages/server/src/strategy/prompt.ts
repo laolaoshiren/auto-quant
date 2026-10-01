@@ -2485,34 +2485,58 @@ function renderUserPrompt(
    * 这一段只给事实。要不要放宽某条规则仍然是它的判断（用户的原则：模型是大脑）。
    */
   if (ctx.idleCycles !== undefined && ctx.idleCycles >= IDLE_CYCLES_NOTICE_THRESHOLD) {
-    volatileParts.push(
-      [
-        '# 连续观望提醒',
-        `⚠️ 你已经**连续 ${ctx.idleCycles} 轮没有开过一次仓**` +
-          (ctx.idleNetPnl !== undefined && Number.isFinite(ctx.idleNetPnl)
-            ? `（这段期间已平仓净额 ${fmtSigned(ctx.idleNetPnl, 4)}）`
-            : '') +
-          '。',
-        '**这不是系统故障** —— 你每一轮的排除理由单独看都成立。但请注意：',
-        '每一次亏损复盘都会给你**加**一条"这种情况别做"，而规则**只增不减** ——' +
-          '可做集合会随时间**单调收缩**，直到市场里没有东西满足全部条件。',
-        '回头看一遍你自己的规则：哪些是**当前市况下仍然成立**的，哪些是**当时那一次的特例**' +
-          '（某个标的、某段行情）。要不要松、松哪一条、松多少，**由你判断**。',
-        /*
-         * ⚠️ **给它刻度。** 模型只写规则、不删规则，而"我现在的规则有多大"
-         * 没有任何地方会告诉它。实测规则长度在 9 天内涨了 5.2 倍（1841 → 9618 字符），
-         * 而可做集合随之收缩到接近空 —— 这件事不该只靠它自己回忆。
-         */
-        ...(ctx.ruleSizeChars !== undefined && ctx.ruleSizeChars > 0
-          ? [
-              `📏 你当前写的决策规则合计 **${ctx.ruleSizeChars.toLocaleString('en-US')} 字符**` +
-                (ctx.ruleCount !== undefined ? `（${ctx.ruleCount} 条编号规则）` : '') +
-                '。这个数字**只会随每次复盘增长** —— 没有任何机制会替你删。' +
-                '它变大本身不是错，但它每长一点，可做的机会就少一点。',
-            ]
-          : []),
-      ].join('\n'),
-    );
+    /*
+     * ⚠️ **候选的波动率分布。**
+     *
+     * 它连续多轮全 skip，每轮把 20 个候选逐个排除，理由都成立。而实测
+     * （2026-10-01，真实行情）它最硬的那条门槛（`1.5×ATR ≤ 类别上限 1.4%`
+     * ⇒ ATR ≤ 0.93%）在成交额前 60 个标的里有 **43 个满足（72%）**，
+     * 中位 ATR 只有 **0.667%** —— **"市场里没有机会"这个隐含前提是错的**。
+     *
+     * 逐个排除让它看得见每个标的的毛病，却看不见**合格面有多宽**。
+     * 系统只给这个统计，不给结论。
+     */
+    const atrPcts = ctx.candidates
+      .map((c) => {
+        const atr = lastValue(c.primary?.atr?.['14']);
+        return atr !== null && Number.isFinite(c.price) && c.price > 0
+          ? (atr / c.price) * 100
+          : null;
+      })
+      .filter((x): x is number => x !== null)
+      .sort((a, b) => a - b);
+
+    const lines = [
+      '# 连续观望提醒',
+      `⚠️ 你已经**连续 ${ctx.idleCycles} 轮没有开过一次仓**` +
+        (ctx.idleNetPnl !== undefined && Number.isFinite(ctx.idleNetPnl)
+          ? `（这段期间已平仓净额 ${fmtSigned(ctx.idleNetPnl, 4)}）`
+          : '') +
+        '。',
+      '**这不是系统故障** —— 你每一轮的排除理由单独看都成立。但请注意：',
+      '每一次亏损复盘都会给你**加**一条"这种情况别做"，而规则**只增不减** ——' +
+        '可做集合会随时间**单调收缩**，直到市场里没有东西满足全部条件。',
+      '回头看一遍你自己的规则：哪些是**当前市况下仍然成立**的，哪些是**当时那一次的特例**' +
+        '（某个标的、某段行情）。要不要松、松哪一条、松多少，**由你判断**。',
+      ...(ctx.ruleSizeChars !== undefined && ctx.ruleSizeChars > 0
+        ? [
+            `📏 你当前写的决策规则合计 **${ctx.ruleSizeChars.toLocaleString('en-US')} 字符**` +
+              (ctx.ruleCount !== undefined ? `（${ctx.ruleCount} 条编号规则）` : '') +
+              '。这个数字**只会随每次复盘增长** —— 没有任何机制会替你删。' +
+              '它变大本身不是错，但它每长一点，可做的机会就少一点。',
+          ]
+        : []),
+      ...(atrPcts.length >= 5
+        ? [
+            `📊 本轮 ${atrPcts.length} 个候选的 **15m ATR 中位数 ` +
+              `${atrPcts[Math.floor(atrPcts.length / 2)]!.toFixed(3)}%**` +
+              `（最小 ${atrPcts[0]!.toFixed(3)}%、最大 ${atrPcts[atrPcts.length - 1]!.toFixed(3)}%）。` +
+              '你自己的止损带规则给出了一个 ATR 上限 —— **除一下就知道有多少个在带内**。' +
+              '逐个排除让你看得见每个标的的毛病，**但看不见合格面有多宽**。',
+          ]
+        : []),
+    ];
+    volatileParts.push(lines.join('\n'));
   }
 
   /* 7 — Candidate coins -------------------------------------------------- */
