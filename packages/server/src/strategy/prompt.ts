@@ -355,6 +355,36 @@ export interface PromptPerformance {
   /** 往返成本占名义价值的比例；窗口内没有成交时为 null（不编造）。 */
   roundTripFeeRate: number | null;
   /**
+   * ⚠️ **按平仓原因分组的绩效 —— "钱是在哪一类里漏掉的"。**
+   *
+   * ## 为什么单独给这一块（2026-10-02，用户的直觉指向了它）
+   *
+   * 用户的原话：「AI 是瞎子、傻子，**看不清订单**（开单又马上平仓，平白磨损）」。
+   *
+   * 而全历史 63 笔按原因摊开后，答案很清楚：
+   *
+   *     take_profit            3 笔  3胜  净 +2.2149  平均价格变动 3.648%
+   *     protection_unavailable 5 笔  5胜  净 +0.5433  平均 0.855%
+   *     stop_loss             38 笔 17胜  净 -0.8691  平均 0.658%（毛 -0.28 / 费 0.58）
+   *     model_decision        12 笔  4胜  净 -0.5524  平均 0.412%（毛 -0.37 / 费 0.18）
+   *     drawdown_guard         5 笔  3胜  净 -0.1956  平均 0.359%
+   *
+   * 在此之前它只看到"整体绩效"那一行聚合数字 —— **看不见钱是在哪一类里漏掉的**。
+   * 而这张表说明的不是"它平仓太快"，而是**它在没有优势的波动里进出**：
+   * 赚钱那类走了 3.6%，它主动平仓那类只走了 0.4%，而往返成本是 0.07–0.1%。
+   *
+   * 系统只给表，不下结论 —— 改不改退出规则是它的判断。
+   */
+  byCloseReason: Array<{
+    reason: string;
+    trades: number;
+    wins: number;
+    netPnl: number;
+    avgHoldMinutes: number;
+    /** 平均**价格口径**变动幅度（绝对值，方向无关）。与 `avgHoldMinutes` 一起看。 */
+    avgMovePercent: number;
+  }>;
+  /**
    * **连续有多少轮没有做出任何决策**（`decisions` 为空的周期数，从最近往前数）。
    *
    * ## 为什么这个数字必须单独给
@@ -480,6 +510,8 @@ export function emptyPromptMemory(config: StrategyConfig): PromptMemory {
       avgLoss: 0,
       realizedPayoffRatio: null,
       roundTripFeeRate: null,
+      /* 诊断路径没有成交历史 —— 空表，而不是编几个原因出来。 */
+      byCloseReason: [],
       /* 诊断路径没有决策历史 —— 如实填 0，而不是编一个"空转了很久"。 */
       idleCycles: 0,
     },
@@ -1628,6 +1660,12 @@ function renderPerformance(performance: PromptPerformance, config: StrategyConfi
           '这三样里有两样你可以直接用 `set_params` 改。',
       );
     }
+    /*
+     * ⚠️ 窗口内没有成交，**不代表没有账可看** —— 分组表是全历史的，
+     * 而"最近什么都没做、历史上钱是在某一类里漏掉的"正是最该看它的时候。
+     * （第一版漏了这一处，被单元测试抓出来。）
+     */
+    appendCloseReasonBreakdown(lines, performance);
     return lines.join('\n');
   }
 
@@ -1672,7 +1710,119 @@ function renderPerformance(performance: PromptPerformance, config: StrategyConfi
     );
   }
 
+  /*
+   * ⚠️ **按平仓原因分组 —— 钱是在哪一类里漏掉的。**
+   *
+   * 用户 2026-10-02：「AI 是瞎子、傻子，**看不清订单**（开单又马上平仓，平白磨损）」。
+   * 聚合后的绩效（毛/费/净）看不出答案；摊开之后（实测 63 笔）是：
+   *
+   *     take_profit     3 笔 平均价格变动 3.648%  → 净 +2.2149
+   *     model_decision 12 笔 平均价格变动 0.412%  → 净 -0.5524
+   *
+   * 也就是说：**不是"平仓太快"，是"在没有优势的波动里进出"**。
+   * 表只给事实，改不改退出规则是它自己的判断。
+   */
+  appendCloseReasonBreakdown(lines, performance);
+
   return lines.join('\n');
+}
+
+/**
+ * 按平仓原因分组表。
+ *
+ * ⚠️ **抽出来是因为它必须在"窗口内没有成交"那条早返回路径上**也**渲染。**
+ *
+ * 这张表是**全历史**的账（`closeReasonBreakdown(tradeStore.recent(traderId, 200))`），
+ * 而 `totalTrades` 只覆盖 `PROMPT_PERFORMANCE_WINDOW_HOURS` 这个窗口。
+ * 两者可以不一致 —— 而"窗口内 0 笔、全历史 63 笔"**恰恰是最需要看这张表的时候**：
+ * 那正是"最近什么都没做，而历史上钱是在某个类别里漏掉的"。第一版把它写在正常路径末尾，
+ * 于是那种情况下一行都看不到（**单元测试抓出来的**）。
+ */
+function appendCloseReasonBreakdown(lines: string[], performance: PromptPerformance): void {
+  if (performance.byCloseReason.length === 0) return;
+  const total = performance.byCloseReason.reduce((sum, r) => sum + r.trades, 0);
+  lines.push('', `**按平仓原因分组（全历史 ${total} 笔已平仓）**`);
+  lines.push('```');
+  lines.push('原因                 笔数  胜  净额      均持仓  平均价格变动');
+  for (const r of performance.byCloseReason) {
+    lines.push(
+      `${r.reason.padEnd(20)} ${String(r.trades).padStart(3)} ${String(r.wins).padStart(3)}  ` +
+        `${fmtSigned(r.netPnl, 4).padStart(9)} ${String(Math.round(r.avgHoldMinutes)).padStart(5)}分  ` +
+        `${r.avgMovePercent.toFixed(3)}%`,
+    );
+  }
+  lines.push('```');
+  /*
+   * 读到"平均价格变动"这一列时该注意什么 —— 只提示读法，不替它下结论。
+   * 依据是实打实的：往返成本就在上面几行（0.07–0.10%），
+   * 所以"平均只走了 0.x%"的那几类，净额天然是被手续费决定的。
+   */
+  lines.push(
+    '读这一列的方式：**平均价格变动**是每笔实际走出的幅度（方向无关）。' +
+      '把它和上面的往返成本比 —— **走的幅度越接近成本，那一类的净额就越是被手续费决定的**。',
+  );
+}
+
+/**
+ * 按平仓原因摊开绩效 —— "钱是在哪一类里漏掉的"。
+ *
+ * ⚠️ **这是 2026-10-02 为用户的直觉加的一层。** 他的原话：
+ *
+ *   「AI 是瞎子、傻子，**看不清订单**（开单又马上平仓，平白磨损）」
+ *
+ * 而聚合后的绩效（毛/费/净）看不出钱是在哪一类里漏的。摊开之后（实测 63 笔）：
+ *
+ *     take_profit            3 笔  平均价格变动 3.648%  → 净 +2.2149
+ *     model_decision        12 笔  平均价格变动 0.412%  → 净 -0.5524
+ *
+ * 也就是说：**不是"平仓太快"，是"在没有优势的波动里进出"** ——
+ * 走的幅度（0.4%）扣掉往返成本（0.07–0.1%）几乎不剩。
+ *
+ * 只统计**价格口径**的幅度（`|exit−entry|/entry`），方向无关 ——
+ * 这张表要回答的是"走了多远"，不是"走对了没有"（后者由净额那一列回答）。
+ *
+ * 输入上限由调用方给（固定常数），所以这一步是 O(1)（§4）。
+ */
+export function closeReasonBreakdown(
+  trades: ReadonlyArray<{
+    closeReason: string;
+    netPnl: number;
+    entryPrice: number;
+    exitPrice: number;
+    holdMinutes: number | null;
+  }>,
+  limit = 200,
+): PromptPerformance['byCloseReason'] {
+  const buckets = new Map<
+    string,
+    { trades: number; wins: number; netPnl: number; holdSum: number; holdCount: number; moveSum: number }
+  >();
+  for (const t of trades.slice(0, limit)) {
+    const reason = t.closeReason === '' ? '(未知)' : t.closeReason;
+    const b = buckets.get(reason) ?? { trades: 0, wins: 0, netPnl: 0, holdSum: 0, holdCount: 0, moveSum: 0 };
+    b.trades += 1;
+    if (t.netPnl > 0) b.wins += 1;
+    b.netPnl += t.netPnl;
+    if (typeof t.holdMinutes === 'number' && Number.isFinite(t.holdMinutes)) {
+      b.holdSum += t.holdMinutes;
+      b.holdCount += 1;
+    }
+    if (Number.isFinite(t.entryPrice) && t.entryPrice > 0 && Number.isFinite(t.exitPrice)) {
+      b.moveSum += (Math.abs(t.exitPrice - t.entryPrice) / t.entryPrice) * 100;
+    }
+    buckets.set(reason, b);
+  }
+  return [...buckets.entries()]
+    .map(([reason, b]) => ({
+      reason,
+      trades: b.trades,
+      wins: b.wins,
+      netPnl: b.netPnl,
+      avgHoldMinutes: b.holdCount > 0 ? b.holdSum / b.holdCount : 0,
+      avgMovePercent: b.trades > 0 ? b.moveSum / b.trades : 0,
+    }))
+    /* 笔数多的排前面 —— 它决定"钱主要在哪一类里漏掉"。 */
+    .sort((a, b) => b.trades - a.trades);
 }
 
 /**

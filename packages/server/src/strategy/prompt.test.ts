@@ -499,6 +499,7 @@ test('绩效区块：把"你在亏"翻译成"你该少做"，而倍数由真实�
     avgLoss: 0.18,
     realizedPayoffRatio: 0.83,
     roundTripFeeRate: 0.001,
+    byCloseReason: [],
     idleCycles: 0,
   };
 
@@ -622,6 +623,7 @@ test('绩效区块：账户真的在赚钱时，不会仍然说"减少交易次�
     avgLoss: 0.6,
     realizedPayoffRatio: 2,
     roundTripFeeRate: 0.001,
+    byCloseReason: [],
     idleCycles: 0,
   };
 
@@ -650,6 +652,7 @@ test('绩效区块：资金费非 0 时必须出现在行里，否则净额对�
     avgLoss: 0.35,
     realizedPayoffRatio: 1.71,
     roundTripFeeRate: 0.001,
+    byCloseReason: [],
     idleCycles: 0,
   };
 
@@ -911,6 +914,7 @@ function promptForHistory(count: number): { text: string; tokens: number } {
       avgLoss: performance.avgLoss,
       realizedPayoffRatio: performance.avgLoss > 0 ? performance.avgWin / performance.avgLoss : null,
       roundTripFeeRate: performance.roundTripFeeRate,
+      byCloseReason: [],
       idleCycles: 0,
     },
     recentCloses: tradeStore.recentWithReason(o1TraderId, PROMPT_RECENT_CLOSE_COUNT),
@@ -1823,6 +1827,45 @@ test('★ 系统要把「它自己规则联立后的解空间」算给它看', (
   );
 });
 
+test('★ 绩效里必须按「平仓原因」分组 —— 钱是在哪一类里漏掉的，它现在看不见', () => {
+  /*
+   * ## 用户 2026-10-02 的直观感受
+   *
+   *   「AI 是瞎子、傻子，**看不清订单**（开单又马上平仓，平白磨损）」
+   *
+   * 而实测（全历史 63 笔）数据是：
+   *
+   *     take_profit            3 笔  3胜  净 +2.2149  均持仓 77分  平均价格变动 3.648%
+   *     protection_unavailable 5 笔  5胜  净 +0.5433  均持仓 80分  平均 0.855%
+   *     stop_loss             38 笔 17胜  净 -0.8691  均持仓147分  平均 0.658%（毛 -0.28 / 费 0.58）
+   *     model_decision        12 笔  4胜  净 -0.5524  均持仓 81分  平均 0.412%（毛 -0.37 / 费 0.18）
+   *     drawdown_guard         5 笔  3胜  净 -0.1956  均持仓149分  平均 0.359%
+   *
+   * **它现在只看到"整体绩效"那一行数字** —— 看不到"钱是在哪一类里漏掉的"。
+   * 而这张表把答案摆得很清楚：**赚钱的单子是价格走得多的那些（3.6%）**，
+   * 而它主动平仓的单子平均只走了 0.4%，扣掉 0.07–0.1% 的往返成本所剩无几。
+   *
+   * 系统只给这张表，不给结论 —— 要不要改自己的退出规则是它的判断。
+   */
+  const memory = blankMemory();
+  memory.performance.byCloseReason = [
+    { reason: 'take_profit', trades: 3, wins: 3, netPnl: 2.2149, avgHoldMinutes: 77, avgMovePercent: 3.648 },
+    { reason: 'model_decision', trades: 12, wins: 4, netPnl: -0.5524, avgHoldMinutes: 81, avgMovePercent: 0.412 },
+    { reason: 'stop_loss', trades: 38, wins: 17, netPnl: -0.8691, avgHoldMinutes: 147, avgMovePercent: 0.658 },
+  ];
+  const text = buildUserPrompt(contextWith(memory));
+
+  assert.match(text, /平仓原因/, '要有按平仓原因的分组');
+  assert.match(text, /take_profit/, '要列出具体原因');
+  assert.match(text, /3\.6|3\.648/, '要给出"赚钱那类的价格变动"');
+  assert.match(text, /0\.4|0\.412/, '要给出"它主动平仓那类的价格变动" —— 对比才有信息量');
+});
+
+test('没有已平仓交易时不渲染分组表 —— 不编造', () => {
+  const text = buildUserPrompt(contextWith(blankMemory()));
+  assert.doesNotMatch(text, /按平仓原因/);
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：
@@ -1848,6 +1891,7 @@ test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）',
     avgLoss: 0.18,
     realizedPayoffRatio: 0.83,
     roundTripFeeRate: 0.001,
+    byCloseReason: [],
     idleCycles: 0,
   };
   memory.throttle = {

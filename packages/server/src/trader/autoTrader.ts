@@ -50,6 +50,7 @@ import {
   buildSystemPrompt,
   buildUserPrompt,
   buildUserPromptParts,
+  closeReasonBreakdown,
   PROMPT_PERFORMANCE_WINDOW_HOURS,
   PROMPT_RECENT_CLOSE_COUNT,
   promptTokenBudget,
@@ -8187,6 +8188,16 @@ reduceQuantity: null,
          * （改门槛 / 改标的池 / 承认账户规模不该交易）与"再等等"完全不同。
          */
         idleCycles: this.countIdleCycles(traderId),
+        /*
+         * ⚠️ **按平仓原因摊开 —— "钱是在哪一类里漏掉的"。**
+         *
+         * 用户 2026-10-02：「AI 是瞎子、傻子，**看不清订单**」。
+         * 聚合后的绩效看不出答案；摊开之后（实测 63 笔）是：
+         * 赚钱那类平均走 3.6%，而它主动平仓那类平均只走 0.4%（往返成本 0.07–0.1%）。
+         *
+         * 上限 200 笔是**固定常数**，所以这一步是 O(1)（§4）。
+         */
+        byCloseReason: closeReasonBreakdown(tradeStore.recent(traderId, 200)),
       },
       recentCloses: tradeStore.recentWithReason(traderId, PROMPT_RECENT_CLOSE_COUNT),
       throttle: {
