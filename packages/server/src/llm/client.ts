@@ -3,6 +3,7 @@ import { createLogger } from '../logger.js';
 import { maskSecret } from '../crypto/vault.js';
 import { LlmError, emptyCompletionError, isRetryable } from './errors.js';
 import { executeJsonRequest, executeStreamRequest } from './http.js';
+import { nextReasoningEffort } from './effortFallback.js';
 import * as openai from './openaiCompatible.js';
 import * as anthropic from './anthropic.js';
 import * as gemini from './gemini.js';
@@ -114,6 +115,18 @@ export class LlmClient {
    * 于是不降级就等于每轮都炸。
    */
   private streamDisabled = false;
+  /**
+   * 这一实例内已经发生过多少次"网关/请求超时"。
+   *
+   * ⚠️ 计入两类：我们自己的 `timeout`（`AbortSignal.timeout` 到期），
+   * 以及 `HTTP 524` —— 那是 **Cloudflare 的"源站超时"**：网关等 100 秒
+   * 没拿到响应头就放弃。实测一次 100K tokens 的请求要 220 秒、
+   * 一轮 8 轮里 4 次这样失败（见 `effortFallback.ts`）。
+   *
+   * 这个计数只增不减：振荡（降了→成功→升回去→又超时）会让成功率
+   * 取决于上一次的运气。
+   */
+  private timeoutCount = 0;
   private readonly maxRetries: number;
   private readonly jsonMode: boolean;
   private readonly jsonSchema: Record<string, unknown> | undefined;
@@ -346,6 +359,18 @@ export class LlmClient {
           throw error;
         }
 
+        /*
+         * ⚠️ **记下超时**：`524` 是 Cloudflare 的"源站超时"，`timeout` 是我们自己的
+         * `AbortSignal` 到期 —— 两者都说明"这一次请求的生成耗时超过了链路的忍耐上限"。
+         * 下一次请求会因此用更小的思考预算（见 `buildRequest` 与 `effortFallback.ts`）。
+         */
+        if (
+          error instanceof LlmError &&
+          (error.kind === 'timeout' || error.status === 524)
+        ) {
+          this.timeoutCount += 1;
+        }
+
         // Prefer the server's Retry-After over our own backoff when present.
         const retryAfterMs = error instanceof LlmError ? error.retryAfterMs : null;
         const delayMs = retryAfterMs ?? backoffDelayMs(attempt);
@@ -389,10 +414,17 @@ export class LlmClient {
            * 思考等级。探测请求（`probe`）刻意**不带**它 ——
            * 探测只回答"这个端点通不通、这把钥匙对不对"，
            * 让一次连通性检查也去花思考预算是浪费。
+           *
+           * ⚠️ **超时过就把这一档降下来**（`effortFallback.ts`）。
+           * 实测耗时几乎全在"想"上（一次 100K tokens 的请求 220 秒，
+           * 其中推理占 2 万 tokens），而链路上的网关等 100 秒就发 `HTTP 524`。
+           * 这不是"替模型决定想多深"，而是**把已经超时的那一轮救回来** ——
+           * 判断内容一点没变。
            */
-          ...(this.reasoningEffort !== undefined
-            ? { reasoningEffort: this.reasoningEffort }
-            : {}),
+          ...(() => {
+            const effort = nextReasoningEffort(this.reasoningEffort, this.timeoutCount);
+            return effort !== undefined ? { reasoningEffort: effort } : {};
+          })(),
         };
 
     if (this.descriptor.openAiCompatible) {
