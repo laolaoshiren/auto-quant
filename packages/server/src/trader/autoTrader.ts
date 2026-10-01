@@ -1964,6 +1964,30 @@ export class AutoTrader {
     const entryStats = entryFillStats(entryOrders);
 
     /*
+     * ⚠️ **连续多少轮没开过一次仓** —— 从最近的决策记录倒着数。
+     *
+     * 模型每次亏损复盘都会加一条"这种情况别做"（那是对的），而**规则只增不减**：
+     * 可做集合随时间单调收缩。实测 2026-10-01 连续 10+ 轮 0 开仓、最近一次成交在 21 小时前，
+     * 而它**看不见这件事** —— 每一轮的思考都是局部的。
+     *
+     * 上限 40 轮：再往前数没有意义（那超出了提示词要提醒的范围），
+     * 而且 `decisionStore.list` 本身有分页上限。
+     */
+    let idleCycles = 0;
+    for (const record of decisionStore.list(traderId, 40)) {
+      const taken = (record.decisions ?? []).some((x) => String(x.action).startsWith('open'));
+      if (taken) break;
+      idleCycles += 1;
+    }
+    const idleSince = decisionStore.list(traderId, Math.max(1, idleCycles))[idleCycles - 1];
+    const idleNetPnl =
+      idleSince === undefined
+        ? undefined
+        : recentTrades
+            .filter((t) => t.closedAt !== null && Date.parse(String(t.closedAt)) >= Date.parse(String(idleSince.timestamp)))
+            .reduce((sum, t) => sum + t.netPnl, 0);
+
+    /*
      * 本小时的已开仓数只读一次，两处用同一个数：提示词的「本周期约束」区块与风控的
      * `entriesLastHour`。分头读会得到两个可能不一致的数字，而模型看到 2/3、风控按 3/3
      * 拒绝，正是"看不见的约束"换一种形态。
@@ -2043,6 +2067,9 @@ export class AutoTrader {
       leverageCaps,
       /* 挂单成交统计 —— 让它看见自己的挂单成效，而不是每轮重复同一个动作。 */
       entryStats,
+      /* 连续观望的轮数 —— 规则只增不减会让它最终排除一切，这个事实要摆出来。 */
+      idleCycles,
+      ...(idleNetPnl === undefined ? {} : { idleNetPnl }),
       memory,
       /*
        * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**

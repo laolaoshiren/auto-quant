@@ -239,6 +239,23 @@ export interface PromptContext {
    * 这里只给**事实**。要不要改挂法仍然是它的判断。
    */
   entryStats?: EntryFillStats;
+  /**
+   * ⚠️ **连续多少轮没有开过一次仓**（从最近的决策记录倒着数）。
+   *
+   * ## 为什么这个事实必须说出来
+   *
+   * 模型逐轮排除候选，每一条理由都具体且站得住（"BTC 名义下限不够"、
+   * "RSI 90 动能 climax"、"1.5×ATR 超类别止损带"…）。而**每一条都是亏损复盘后加上的**，
+   * 规则**只增不减** —— 可做集合随时间**单调收缩**。
+   *
+   * 实测 2026-10-01：连续 10+ 轮 0 开仓，最近一次成交在 **21 小时前**。
+   * 而它看不见这件事 —— **每一轮的思考都是局部的**，没人告诉它"你已经很久什么都没做了"。
+   *
+   * 系统不替它删规则（那是它的判断），只把事实摆出来。≥5 轮（约 2.5 小时）才渲染。
+   */
+  idleCycles?: number;
+  /** 这段空转期间的已平仓净额（说明"什么都没做"的同时账户发生了什么）。 */
+  idleNetPnl?: number;
 }
 
 /** 「全市场概览」的一行 —— 见 `PromptContext.marketOverview`。 */
@@ -548,6 +565,14 @@ function humanDuration(minutes: number): string {
  * **市场里哪些地方在动** —— 真正的深看仍然是它自己用 `get_klines` 点名。
  */
 const RANKING_LIMIT = 8;
+
+/**
+ * 连续多少轮没开仓才渲染「连续观望提醒」（5 轮 ≈ 2.5 小时，默认周期下）。
+ *
+ * 低于这个数属于正常的"这段时间没机会"，提醒会变成噪声 ——
+ * **一个每轮都响的警告等于没有警告**（同 `coins.ts` 里裁剪通知的理由）。
+ */
+const IDLE_CYCLES_NOTICE_THRESHOLD = 5;
 
 const MODE_GUIDANCE: Record<StrategyConfig['tradingMode'], string> = {
   aggressive: [
@@ -2391,6 +2416,36 @@ function renderUserPrompt(
    */
   if (ctx.entryStats && ctx.entryStats.fillRatePercent !== null) {
     volatileParts.push(renderEntryStats(ctx.entryStats, ctx.config.riskControl.pendingEntryTimeoutMinutes));
+  }
+
+  /*
+   * 6.9 — **连续观望提醒** --------------------------------------------------
+   *
+   * ⚠️ **规则只增不减，会让可做集合单调收缩到空。**
+   *
+   * 模型每次亏损复盘都会加一条"这种情况别做"（那是对的），但它不会回头删规则。
+   * 实测 2026-10-01：连续 10+ 轮 0 开仓、最近一次成交在 21 小时前，
+   * 而它每一轮的排除理由单独看都成立 —— **它看不见"我已经很久什么都没做了"**，
+   * 因为每一轮的思考都是局部的。
+   *
+   * 这一段只给事实。要不要放宽某条规则仍然是它的判断（用户的原则：模型是大脑）。
+   */
+  if (ctx.idleCycles !== undefined && ctx.idleCycles >= IDLE_CYCLES_NOTICE_THRESHOLD) {
+    volatileParts.push(
+      [
+        '# 连续观望提醒',
+        `⚠️ 你已经**连续 ${ctx.idleCycles} 轮没有开过一次仓**` +
+          (ctx.idleNetPnl !== undefined && Number.isFinite(ctx.idleNetPnl)
+            ? `（这段期间已平仓净额 ${fmtSigned(ctx.idleNetPnl, 4)}）`
+            : '') +
+          '。',
+        '**这不是系统故障** —— 你每一轮的排除理由单独看都成立。但请注意：',
+        '每一次亏损复盘都会给你**加**一条"这种情况别做"，而规则**只增不减** ——' +
+          '可做集合会随时间**单调收缩**，直到市场里没有东西满足全部条件。',
+        '回头看一遍你自己的规则：哪些是**当前市况下仍然成立**的，哪些是**当时那一次的特例**' +
+          '（某个标的、某段行情）。要不要松、松哪一条、松多少，**由你判断**。',
+      ].join('\n'),
+    );
   }
 
   /* 7 — Candidate coins -------------------------------------------------- */
