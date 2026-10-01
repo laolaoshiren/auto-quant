@@ -27,7 +27,7 @@ import test from 'node:test';
 import { defaultStrategyConfig, type StrategyConfig } from '@aq/shared';
 
 import { candidateBudget, PROMPT_TOKEN_BUDGET } from './prompt.js';
-import { selectCandidates } from './coins.js';
+import { selectCandidates, CANDIDATE_HARD_CAP } from './coins.js';
 import type { MarketDataService } from '../market/service.js';
 
 /* -------------------------------------------------------------------------- */
@@ -281,6 +281,53 @@ test('★ 点名/共识的标的是"优先入选"，不是"额外增加" —— 
     !plain.symbols.includes(preferred[0]!),
     '对照组：不点名时它本来不在（否则这条断言什么也没验证）',
   );
+});
+
+test('★ 候选池数量必须有硬上限 —— 预算上限在"模型上下文很大"时形同虚设', async () => {
+  /*
+   * ## 这条用例是为一次真实的性能退化写的（2026-10-01）
+   *
+   * `promptTokenBudget()` 吃的是模型的 `input_token_limit`：
+   *
+   *     input_token_limit = 1,000,000
+   *     PROMPT_UTILISATION = 0.8        → 800,000
+   *     PROMPT_OUTPUT_RESERVE = 131,072 → 868,928
+   *     PROMPT_TOKEN_CEILING = 800,000
+   *     → **预算 = 800,000 tokens**
+   *
+   * 而一轮真实提示词只有 **190K tokens** —— 于是**裁剪永远不触发**，
+   * 候选池大小完全由"来源给了多少"决定：`coinPoolLimit` 的 20 个
+   * 加上共识标的与模型点名的 4 个 = **24 个**。
+   *
+   * 代价是实测出来的：
+   *
+   *     09-27  候选 20 个  提示词 213,559 字符  含开单 19/33 = 58%
+   *     10-01  候选 24 个  提示词 278,255 字符  含开单  0/7  =  0%
+   *
+   * 提示词 **92% 是候选池**（每个约 10,600 字符 = 4 周期 × 10 条序列 × 30 个点），
+   * 而提示词自己写着「**模型通常只深入看 1–2 个**」。
+   *
+   * 更大的请求还直接造成失败：`#1621` 的原始错误是
+   * **`request exceeded 240000ms`**（我方超时），被归类成了"上游不可用"——
+   * 而用户单独用 API 测试上游时它是好的。
+   *
+   * 所以：**数量上限必须独立于 token 预算**，锚在"人能审得过来"的量级上 ——
+   * 用户对候选池的要求一直是「15-20 个完整多周期行情」。
+   */
+  const config = configWith({
+    coinSource: { ...defaultStrategyConfig().coinSource, sourceType: 'coinpool', coinPoolLimit: 200 },
+  });
+  const market = fakeMarket({ volumeRanked: rankedSymbols(200) });
+
+  /* 一个"上下文巨大"的预算不该让一轮塞进几十个标的。 */
+  const huge = await selectCandidates(config, market, { budgetTokens: 10_000_000 });
+  assert.ok(
+    huge.symbols.length <= CANDIDATE_HARD_CAP,
+    `候选数 ${huge.symbols.length} 超过硬上限 ${CANDIDATE_HARD_CAP} —— ` +
+      '预算再大也不该让一轮塞进几十个标的',
+  );
+  assert.ok(CANDIDATE_HARD_CAP >= 15, '上限不能低于用户要求的 15 个');
+  assert.ok(CANDIDATE_HARD_CAP <= 20, '上限不能高于用户要求的 20 个');
 });
 
 /* -------------------------------------------------------------------------- */

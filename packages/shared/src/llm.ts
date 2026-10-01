@@ -304,7 +304,14 @@ export const LLM_PROVIDERS: readonly LlmProviderDescriptor[] = [
     // 推理吃满、正文一个字不剩（`completion_tokens === reasoning_tokens === 16384`），
     // 而那在操作台上看起来只是"这一轮没什么可做的"，不像一次截断。
     // 这个数只是**上限**，不会让正常调用变贵。
-    defaults: { temperature: 0.2, maxTokens: 65536, timeoutSeconds: 240, maxRetries: 2 },
+    //
+    // ⚠️ **超时从 240 提到 600（2026-10-01）。** 240 秒撞到过真实请求：
+    // 一轮提示词约 190K tokens + 2 万推理 tokens，实测单次耗时 45s–332s，
+    // 而超时被归类成"AI 服务不可用"（`#1621` 的原始错误是
+    // `commandcode request exceeded 240000ms`）—— 操作员读到的却是"上游故障"，
+    // 于是他单独用 API 测上游时发现它是好的。**"我们跑得慢"和"上游挂了"
+    // 是两条完全不同的诊断路径，不该共用一个错误文案。**
+    defaults: { temperature: 0.2, maxTokens: 65536, timeoutSeconds: 600, maxRetries: 2 },
     supportsThinking: true,
   },
 ];
@@ -336,7 +343,8 @@ export function providerDefaults(id: LlmProviderId): {
        * 65536 而不是 16384：16384 已被实盘证明不够（见上面 `custom` 那条注释）。
        */
       maxTokens: 65536,
-      timeoutSeconds: 180,
+      /* 兜底也提到 300：与各 provider 的实际取值（300–600）保持同一量级。 */
+      timeoutSeconds: 300,
       maxRetries: 2,
     }
   );

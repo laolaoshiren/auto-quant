@@ -11,8 +11,23 @@ import { checkOutboundUrl } from './urlGuard.js';
 
 const log = createLogger('llm');
 
-/** Anthropic and Gemini both publish long generation ceilings; 120s is a sane default. */
-const DEFAULT_TIMEOUT_SECONDS = 120;
+/**
+ * 默认的单次请求超时（秒）。
+ *
+ * ⚠️ **120 秒对"大提示词 + 推理模型"是不够的（2026-10-01 实测）。**
+ *
+ * 这个机器人的一轮请求是 **约 190K prompt tokens + 20K 推理 tokens**，
+ * 实测单次耗时在 45s–332s 之间波动。原来的 240 秒上限会被正常的大请求撞到，
+ * 而**超时被归类成"AI 服务不可用"**（`#1621` 的原始错误是
+ * `commandcode request exceeded 240000ms`）—— 于是：
+ *
+ *   · 操作员看到"上游故障"，而**他单独用 API 测上游时它是好的**；
+ *   · 系统在那一轮白白失败，等一整个周期才再试。
+ *
+ * 更大的超时不解决问题（真正的病根是提示词太大，见 `CANDIDATE_HARD_CAP`），
+ * 但它**避免把"我们跑得慢"误报成"上游挂了"** —— 那是两条完全不同的诊断路径。
+ */
+const DEFAULT_TIMEOUT_SECONDS = 300;
 const DEFAULT_MAX_RETRIES = 3;
 /** Full-jitter backoff bounds from B.14 (`base ≈ 500ms`, cap ≈ 30s). */
 const BACKOFF_BASE_MS = 500;

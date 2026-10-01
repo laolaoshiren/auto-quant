@@ -35,6 +35,43 @@ export interface CoinSelectionResult {
  * model must be able to see and manage what it already holds, even if the
  * symbol has dropped out of the screens.
  */
+/**
+ * ⚠️ **候选池数量的硬上限。**
+ *
+ * ## 为什么"token 预算"不能单独承担这件事（2026-10-01 实测）
+ *
+ * `candidateBudget()` 把上限算成 `promptTokenBudget(inputTokenLimit)` 允许的量，
+ * 而成本的上界由 `PROMPT_TOKEN_CEILING = 800,000` 负责。当模型的
+ * `input_token_limit` 是 1,000,000 时：
+ *
+ *     byUtilisation   = 1,000,000 × 0.8 = 800,000
+ *     byRoomForOutput = 1,000,000 − 131,072 = 868,928
+ *     → 预算 = min(800K, 868K, 800K) = **800,000 tokens**
+ *
+ * 而一轮真实提示词只有 **190K tokens** —— 于是**裁剪永不触发**，
+ * 候选池的大小完全由"来源给了多少"决定：`coinPoolLimit` 的 20 个
+ * 加上共识标的与模型点名的 4 个 = **24 个**。（把"必保"改成"优先"解决不了它：
+ * 优先只是"排前面、可被裁"，而**裁剪根本没有发生**。）
+ *
+ * 代价是实测出来的：
+ *
+ *     09-27  候选 20 个  提示词 213,559 字符  含开单 19/33 = 58%
+ *     10-01  候选 24 个  提示词 278,255 字符  含开单  0/7  =  0%
+ *
+ * 提示词 **92% 是候选池**（每个约 10,600 字符 = 4 周期 × 10 条序列 × 30 个点），
+ * 而提示词自己写着「**模型通常只深入看 1–2 个**」。
+ *
+ * 更大的请求还直接造成失败：`#1621` 的原始错误是 **`request exceeded 240000ms`**
+ * （我方超时），被归类成了"上游不可用" —— 而用户单独用 API 测上游时它是好的。
+ *
+ * ## 为什么是 20
+ *
+ * 用户对候选池的要求一直是「**15-20 个**完整多周期行情」，而 20 也正好
+ * 与 `coinSource.coinPoolLimit` 的常用取值一致 —— 上限不该比"来源本身"
+ * 还宽松，否则它就不是上限，只是又一次失效的兜底。
+ */
+export const CANDIDATE_HARD_CAP = 20;
+
 export async function selectCandidates(
   config: StrategyConfig,
   market: MarketDataService,
@@ -193,8 +230,13 @@ export async function selectCandidates(
    *
    * Position symbols are never dropped: the model must be able to manage what it
    * already holds, whatever the budget says.
+   *
+   * ⚠️ **但 `PROMPT_TOKEN_CEILING` 单独撑不住这件事 —— 见 `CANDIDATE_HARD_CAP`。**
    */
-  const maxCandidates = candidateBudget(config, options.budgetTokens);
+  const maxCandidates = Math.min(
+    candidateBudget(config, options.budgetTokens),
+    CANDIDATE_HARD_CAP,
+  );
   /*
    * ⚠️ **BTC 也要在 `mustKeep` 里，否则上面的"无条件加入"只做了一半。**
    *
