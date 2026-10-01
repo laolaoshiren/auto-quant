@@ -82,7 +82,7 @@ import {
 } from '../store/repositories.js';
 import { rankPlatformHistory } from '../strategy/platformHistory.js';
 import { rankConsensus } from '../strategy/consensus.js';
-import { nextCycleDelayMs } from './cycleSchedule.js';
+import { clampNextCheckMinutes, nextCycleDelayMs } from './cycleSchedule.js';
 import { pendingTimeoutMinutes } from './pendingTimeout.js';
 import { averageRoundTripCostPercent } from '../strategy/costs.js';
 import { entryFillStats } from '../strategy/entryStats.js';
@@ -2523,6 +2523,37 @@ export class AutoTrader {
     }));
     // 同一个数组对象：下面每 push 一条，进度对象里也是最新的（step 10 的失败条目同理）。
     progress.executionLog = executionLog;
+
+    /*
+     * ⚠️ **"它自己定了下次什么时候看盘"必须让操作员看得见。**
+     *
+     * 用户 2026-10-02 的两条要求是连在一起的：
+     *
+     *   「会像真人一样，**决定何时做什么事情**」（能力）
+     *   「我打开网页，就能方便快捷看到模型在做什么」（可见性）
+     *
+     * 这条新能力如果只写进服务器日志，操作员根本无从判断"它到底有没有在用这个自由" ——
+     * 而那正是用户抱怨过的情况：**"要我去点开看大段的思考过程"**。
+     *
+     * ## 为什么走 `emit` 而不是 `executionLog`
+     *
+     * 我第一版是往 `executionLog` 里 push 一条 `{status:'ok'}` 的 —— **那是错的**：
+     * `summarizeExecution` 把 `ok` 算作"开仓 N"，于是界面上会显示"开仓 1"
+     * 而实际上一笔单都没下。那正是这个项目反复在消灭的那类矛盾：
+     * **一个字段说"做成了"，另一个字段说"什么都没有"。**
+     *
+     * `emit('info', …)` 是**事件流**（界面实时日志），与执行结果完全解耦 ——
+     * 同一轮里"按需取数"那条通知走的就是这条路。
+     */
+    if (parsed.nextCheckInMinutes !== undefined) {
+      const clamped = clampNextCheckMinutes(parsed.nextCheckInMinutes);
+      this.emit(
+        'info',
+        `它自己定了下一轮的观察时间：${parsed.nextCheckInMinutes} 分钟后` +
+          (clamped !== parsed.nextCheckInMinutes ? `（已钳到 ${clamped} 分钟）` : '') +
+          ' —— 没有等配置的周期。',
+      );
+    }
 
     /* --- 9. Hard risk review --------------------------------------------- */
     state.phase = 'risk';
