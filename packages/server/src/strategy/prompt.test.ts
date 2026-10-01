@@ -1777,6 +1777,46 @@ test('它没写 entryStandards（用默认）时不该渲染那段 —— 没有
   assert.doesNotMatch(text, /覆盖了系统默认/);
 });
 
+test('★ 系统要把「它自己规则联立后的解空间」算给它看', () => {
+  /*
+   * ## 2026-10-02：这是"长期全观望"的算术成因
+   *
+   * 它的 `entryStandards` 里三条硬约束互相咬合：
+   *
+   *   1. 单笔风险 ≤ 权益 2%；
+   *   2. 止损 ≥ 1.5 × ATR14(15m)；
+   *   3. 止损上限 = 风险预算 ÷ (名义 × 1.5)。
+   *
+   * 联立 2 与 3 → **ATR ≤ 上限 ÷ 1.5**。
+   *
+   * 实测（权益 21.92）：上限 = 0.44 ÷ (21 × 1.5) = 1.40% → **ATR ≤ 0.93%**。
+   * 再叠加磁吸位缓冲 + 盈亏比 3 + 15m/1h 同向 + 两条独立证据，20 个候选里满足全部的是 **0 个**。
+   *
+   * 它每轮都在手算这道题，但**算到"这个不行"就停下** —— 看不见"空集是我自己的
+   * 规则与风险参数共同造成的，而这两样都在我权限里"。系统把这道账算完并写出来。
+   */
+  const config = defaultStrategyConfig();
+  /* 构造一批 ATR 普遍偏大的候选 —— 让它落在"几乎没有解"那一档。 */
+  const wide = Array.from({ length: 20 }, (_, i) => snapshot(`SYM${i}USDT`, 100));
+  const text = buildUserPrompt({
+    ...contextWith(blankMemory(), wide),
+    idleCycles: 11,
+    config: {
+      ...config,
+      promptSections: { ...config.promptSections, entryStandards: '我自己写的入场标准' },
+    },
+  });
+
+  assert.match(text, /把你自己那几条硬约束联立/, '要说明这是联立它自己的规则');
+  assert.match(text, /单笔风险预算/, '要给出风险预算这个数');
+  assert.match(text, /ATR 必须 ≤|ATR 在这个上限以内/, '要给出 ATR 上限这个结论');
+  assert.match(
+    text,
+    /都在你自己的权限里/,
+    '★ 关键：要点明"规则与风险参数都在它权限里" —— 否则它只会得出"市场没机会"',
+  );
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：

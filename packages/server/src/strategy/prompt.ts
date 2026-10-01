@@ -2586,6 +2586,62 @@ function renderUserPrompt(
               '但你现在的版本里没有它，而你大概不记得自己是什么时候去掉的。',
           ]
         : []),
+      /*
+       * ⚠️ **把你自己的规则联立起来算一遍 —— 这是 2026-10-02 加的最后一段。**
+       *
+       * ## 为什么要系统来算这道算术
+       *
+       * 它的 `entryStandards` 里有三条互相咬合的硬约束：
+       *
+       *   1. 单笔风险 ≤ 权益的 2%（实测它按此推导：权益 22 → 预算 0.44 USDT）；
+       *   2. 止损必须 ≥ 1.5 × ATR14(15m)（波动下限）；
+       *   3. 止损上限 = 风险预算 ÷ (名义 × 1.5)。
+       *
+       * 联立 2 与 3 给出一个它**每轮都在手算、但只算到"这个不行"就停下**的结论：
+       *
+       *     ATR ≤ 上限 ÷ 1.5
+       *
+       * 实测（2026-10-01/02，权益 21.92）：上限 = 0.44 ÷ (21 × 1.5) = **1.40%**，
+       * 于是 **ATR 必须 ≤ 0.93%**。再叠加它自己的"磁吸位缓冲 + 盈亏比 3 +
+       * 15m/1h 同向 + 两条独立证据 + 张数≥1"，20 个候选里满足**全部**的是 **0 个**，
+       * 而它连续 11+ 轮的结论都是"没有合格标的"。
+       *
+       * ## 系统算的是"事实"，不是"建议"
+       *
+       * 上面那几个数字**都是它自己规则里的**，权益是账户的真实值，ATR 是本轮候选的真实值。
+       * 系统只是**把这道它每轮都要做一遍的联立算完并写出来**，并指出一件它看不到的事：
+       *
+       *   **造成"空集"的两个变量 —— 规则、风险参数 —— 都在它自己的权限里。**
+       *   （权益不归它管，那是账户所有者的。）
+       *
+       * 怎么动、动不动，仍然是它的判断。系统不替它选。
+       */
+      ...(() => {
+        const equity = ctx.account.equity;
+        /* 它规则里的两个系数。写下来源，因为若它改了规则，这两个数就会过时。 */
+        const riskPerTradePercent = 2; // 「单笔亏损 ≤ 权益 2%」
+        const stopToRiskMultiple = 1.5; // 「实际亏损可达止损幅度的 1.5 倍」
+        const atrToStopMultiple = 1.5; // 「止损 ≥ 1.5 × ATR14(15m)」
+        /* 名义：取它规则里的山寨币目标档，与交易所下限取大者。 */
+        const notional = Math.max(ctx.config.riskControl.minPositionSize, 20);
+        if (!Number.isFinite(equity) || equity <= 0 || atrPcts.length < 5) return [];
+        const riskBudget = (equity * riskPerTradePercent) / 100;
+        const stopCapPercent = (riskBudget / (notional * stopToRiskMultiple)) * 100;
+        const atrCapPercent = stopCapPercent / atrToStopMultiple;
+        const within = atrPcts.filter((p) => p <= atrCapPercent).length;
+        return [
+          '🧮 **把你自己那几条硬约束联立一下**（数字全部来自你自己的规则与本轮真实行情）：',
+          `- 单笔风险预算 = 权益 ${equity.toFixed(2)} × ${riskPerTradePercent}% = **${riskBudget.toFixed(4)} USDT**`,
+          `- 止损上限 = ${riskBudget.toFixed(4)} ÷ (名义 ${notional} × ${stopToRiskMultiple}) = **${stopCapPercent.toFixed(2)}%**`,
+          `- 而你的止损下限是 ${atrToStopMultiple} × ATR14 → **可做标的的 15m ATR 必须 ≤ ${atrCapPercent.toFixed(2)}%**`,
+          `- 本轮 ${atrPcts.length} 个候选里，ATR 在这个上限以内的有 **${within} 个**。`,
+          within <= 2
+            ? `⚠️ 也就是说：**你自己的规则在当前权益下几乎没有解**。这**不是市场没机会** ——` +
+              '而"规则"和"风险参数"这两样**都在你自己的权限里**（权益不归你管）。' +
+              '要不要让可行集重新非空、以及怎么让，**是你的判断**。'
+            : '（这条只是把账算给你看 —— 上面的机会数量说明还有得做。）',
+        ];
+      })(),
     ];
     volatileParts.push(lines.join('\n'));
   }
