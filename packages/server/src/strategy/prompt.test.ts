@@ -24,6 +24,7 @@ import {
   buildUserPromptParts,
   candidateBudget,
   DETAILED_CANDIDATE_COUNT,
+  DETAILED_HARD_CAP,
   detailedCandidateCount,
   emptyPromptMemory,
   estimateCandidateChars,
@@ -325,16 +326,27 @@ test('★ 详细行情给几个，按预算算 —— 不再写死 5', () => {
    * 用户的原则：「**最大化利用模型能力、上下文**」。
    *
    * `DETAILED_CANDIDATE_COUNT = 5` 是照着**20 万**预算定的账（一个详细区块约
-   * 6,000 token）。而预算现在按模型能力算 —— 1M 上下文的模型拿到 **80 万**，
-   * 20 个候选全给详细也只有 12 万 token（占 15%）。
+   * 6,000 token）。而预算现在按模型能力算 —— 1M 上下文的模型拿到 **80 万**。
    *
-   * 那段注释里还有个循环论证：「模型实测通常只深入看 1–2 个」——
-   * **但它当时只能看到 5 个的详细序列**。把供给限制当成了需求证据。
+   * ⚠️ **但 2026-10-01 发现那个论证漏了一个约束：延迟。**
+   *
+   * 它只算了 token 预算（20 个候选全给详细约 12 万 token，占 15% —— 看起来绰绰有余），
+   * 而 19 万 token 的请求实测要 **60–205 秒**，链路上的网关（Cloudflare）等 **100 秒**
+   * 就以 `HTTP 524` 放弃 —— 实测一轮 8 轮里 **4 次**这样失败，**整轮作废**。
+   *
+   * 所以取向上限 10：**小预算仍保 5 个下限，大预算最多 10 个**。
+   * 那仍然是"按预算算"，只是多了一层天花板 —— 而天花板保护的是
+   * "这一轮能不能跑完"，比"多看几个完整序列"重要。
    */
   const config = defaultStrategyConfig();
+  assert.equal(
+    detailedCandidateCount(config, 800_000, 100),
+    DETAILED_HARD_CAP,
+    '预算再大也封顶在 DETAILED_HARD_CAP —— 见那里的 HTTP 524 说明',
+  );
   assert.ok(
-    detailedCandidateCount(config, 800_000, 100) > 20,
-    '80 万预算下应当能给出远多于 5 个完整序列',
+    DETAILED_HARD_CAP > DETAILED_CANDIDATE_COUNT,
+    '上限必须高于原来的写死值 5，否则"按预算算"这个改动就白做了',
   );
   assert.equal(
     detailedCandidateCount(config, 1, 100),
@@ -355,7 +367,15 @@ test('★ 大预算下提示词真的把更多候选给成完整序列（不只�
   const roomy = buildUserPrompt(contextWith(memory, many), 800_000);
   const bigNote = /前 (\d+) 个给出完整指标序列/.exec(roomy);
   assert.ok(bigNote, '候选区块必须说明给了几个完整序列');
-  assert.ok(Number(bigNote[1]) > 5, `80 万预算下应当给多于 5 个，实际 ${bigNote[1]}`);
+  assert.equal(
+    Number(bigNote[1]),
+    DETAILED_HARD_CAP,
+    '30 个候选 + 大预算时应给满 DETAILED_HARD_CAP —— 而不是全部（那会撞上网关超时）',
+  );
+  assert.ok(
+    Number(bigNote[1]) < 30,
+    '必须真的少于候选总数，否则这条上限没有任何作用',
+  );
 
   const tight = buildUserPrompt(contextWith(memory, many.slice(0, 3)), 10_000);
   const smallNote = /前 (\d+) 个给出完整指标序列/.exec(tight);
@@ -1573,6 +1593,45 @@ test('★ 连续观望时要把它自己的「规则规模」也报出来 ——
 test('没有规则规模数据时不渲染那一行 —— 不编数字', () => {
   const text = buildUserPrompt({ ...contextWith(blankMemory()), idleCycles: 8 });
   assert.doesNotMatch(text, /规则的规模|规则的字符/);
+});
+
+test('★ 完整序列的数量必须有硬上限 —— 否则大请求会撞上网关的 100 秒超时', () => {
+  /*
+   * ## 决定性证据（2026-10-01，`HTTP 524`）
+   *
+   * 线上连续出现 `AI 服务不可用：服务商 5xx（HTTP 524）`，一轮 8 轮里 4 次失败。
+   *
+   * **`524` 不是"服务商 5xx"** —— 它是 **Cloudflare 的"源站超时"**：
+   * 网关等了 **100 秒**都没拿到上游响应，于是放弃。而我们的请求实测耗时
+   * **60–205 秒**（`#1772` 332 秒）—— **撞上它几乎必然**。
+   *
+   * 所以把 `timeout_seconds` 提到 600 秒**没有用**：那个限制在客户端，
+   * 而中间的网关 100 秒就断了。**根因是请求太大 → 上游推理太久。**
+   *
+   * 一个 190K token 的请求里 **90% 是候选池**（每个候选的完整多周期序列约 10,600 字符），
+   * 而提示词自己写着「**模型通常只深入看 1–2 个**」。
+   *
+   * ## 为什么这样可以减而不损失能力
+   *
+   * 用户对候选池的要求是「15-20 个完整多周期行情」—— **20 个标的仍然全部在**，
+   * 只是"完整序列"给前 N 个，其余给**摘要**（最新值 + 最近 5 根走向），
+   * 并且明确告诉它**想要哪个就用 `get_klines` 点名**（那段说明本来就在）。
+   *
+   * 也就是说：**信息没删，深度按需**。而换来的是**一半的轮次不再白费**。
+   */
+  const config = defaultStrategyConfig();
+  /* 一个"上下文巨大、预算充裕"的配置不该让每个候选都吃完整序列。 */
+  const count = detailedCandidateCount(config, 10_000_000, 20);
+  assert.ok(
+    count <= DETAILED_HARD_CAP,
+    `完整序列数 ${count} 超过硬上限 ${DETAILED_HARD_CAP} —— ` +
+      '20 个候选 × 10.6K 字符的请求会撞上网关超时',
+  );
+  assert.ok(DETAILED_HARD_CAP >= 5, '不能低于原来的 5 —— 那会让这个改动变成纯削减');
+  assert.ok(
+    DETAILED_HARD_CAP < 20,
+    '必须真的低于候选池上限，否则这条约束没有任何作用',
+  );
 });
 
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {

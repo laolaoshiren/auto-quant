@@ -2748,6 +2748,35 @@ export const PROMPT_OUTPUT_RESERVE = 131_072;
 export const DETAILED_CANDIDATE_COUNT = 5;
 
 /**
+ * ⚠️ **"完整序列"候选数的硬上限（10）。**
+ *
+ * ## 为什么它必须独立于 token 预算（2026-10-01 实测 `HTTP 524`）
+ *
+ * `detailedCandidateCount()` 原来只吃预算 —— 而 1M 上下文的模型拿到 **800,000**，
+ * 于是 `roomFor` 算出来远大于候选总数，**全部 20 个都给了完整序列**：
+ *
+ *     20 个候选 × 约 10,600 字符 = 213,000 字符 = 一轮提示词的 **90%**
+ *
+ * 代价不是"贵"，是**一半的轮次直接失败**：
+ *
+ *     AI 服务不可用：服务商 5xx（**HTTP 524**）
+ *
+ * **`524` 是 Cloudflare 的"源站超时"** —— 网关等 **100 秒**拿不到响应就放弃。
+ * 而这么大的请求实测耗时 **60–205 秒**，撞上它几乎是必然。
+ * （把客户端 `timeout_seconds` 提到 600 秒**没有用** —— 限制在中间的网关那里。）
+ *
+ * ## 为什么减到 10 不损失能力
+ *
+ * 用户对候选池的要求是「15-20 个完整多周期行情」—— **20 个标的仍然全部在**，
+ * 只是"完整序列"给前 10 个，其余给**摘要**（最新值 + 最近 5 根走向），
+ * 而提示词本来就说清了「**想要哪个就用 `get_klines` 点名**」。
+ *
+ * 也就是 **信息没删、深度按需**，换来的是不再有一半轮次白费。
+ * 而排序是"按强弱"的（`selectCandidates` 把持仓放最前），所以前 10 个天然是最该看的那些。
+ */
+export const DETAILED_HARD_CAP = 10;
+
+/**
  * **详细区块能占预算的多大比例。**
  *
  * 剩下那部分要留给：固定的系统提示词、绩效与历史区块、候选概览、持仓区块，
@@ -2796,7 +2825,13 @@ export function detailedCandidateCount(
     DETAILED_CANDIDATE_COUNT,
     Math.floor((budgetTokens * DETAILED_BUDGET_SHARE) / perDetailed),
   );
-  return total > 0 ? Math.min(roomFor, total) : roomFor;
+  /*
+   * ⚠️ **再封一层硬上限** —— 理由见 `DETAILED_HARD_CAP` 的说明：
+   * 大请求会撞上网关 100 秒的源站超时（`HTTP 524`），而那是**整轮失败**，
+   * 比"少看几个完整序列"严重得多。
+   */
+  const capped = Math.min(roomFor, DETAILED_HARD_CAP);
+  return total > 0 ? Math.min(capped, total) : capped;
 }
 /**
  * **你愿意花多少** —— 提示词预算的成本上限，与模型能吃多少无关。
