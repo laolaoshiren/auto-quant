@@ -10,6 +10,9 @@ import {
 } from '@aq/shared';
 import type { SymbolRegistry } from '../binance/symbols.js';
 import type { MarketDataService } from '../market/service.js';
+import type { MarketOverviewRow } from '../strategy/prompt.js';
+import type { UniverseRankings } from '../market/rankings.js';
+import type { ScreenableSymbol } from '../market/screening.js';
 import { computeTimeframeIndicators } from '../market/indicators.js';
 
 /* -------------------------------------------------------------------------- */
@@ -170,15 +173,59 @@ export class ReplayMarketData {
     return [];
   }
 
+  /*
+   * ⚠️ **下面三个是"第 0/1/3 层"后加上来的，回放桩必须跟上。**
+   *
+   * 漏掉它们的后果**不是"少一段信息"**，而是每一轮决策都抛
+   * `this.deps.marketData.fullMarketOverview is not a function` ——
+   * 而那是**同步** TypeError，`autoTrader` 调用点的 `.catch()` **兜不住**
+   * （早先在 `autoTrader.test.ts` 里踩过同一个坑）。
+   *
+   * 实测 2026-10-01：`npm run sim` 从文档记载的"全部通过"退化成 **6/18** ——
+   * 80 轮决策全部失败、0 笔开仓，于是保护单、记账、权益曲线、风控拦截
+   * **一整套端到端校验同时失效**。也就是说：**我们失去了接缝验证能力，
+   * 而它退化的表现只是"分数变低"，看起来像市场安静。**
+   *
+   * 回放里这些屏幕**没有真实数据可用**，返回空/缺省即可 —— 它们只影响
+   * 提示词里那几段渲染，不影响交易路径。
+   */
+  async fullMarketOverview(): Promise<MarketOverviewRow[]> {
+    return [];
+  }
+
+  async topRankings(): Promise<UniverseRankings> {
+    return { quoteVolume: [], gainers: [], losers: [], volatility: [], fundingExtreme: [] };
+  }
+
+  async screenSymbolsForModel(): Promise<ScreenableSymbol[]> {
+    return [];
+  }
+
   invalidate(): void {
     /* nothing cached */
   }
 }
 
-/** Structural assertion: the replay service satisfies the live service's shape. */
-export type ReplayMarketDataIsCompatible = ReplayMarketData extends Pick<
-  MarketDataService,
-  'buildSnapshots' | 'getOiRanking' | 'screenUniverse' | 'screenOpenInterestGrowth'
->
-  ? true
-  : never;
+/**
+ * 结构性断言：回放服务必须满足实时服务的**完整形状**。
+ *
+ * ## 为什么不再是手写清单
+ *
+ * 这里原来写的是
+ *
+ *     ReplayMarketData extends Pick<MarketDataService,
+ *       'buildSnapshots' | 'getOiRanking' | 'screenUniverse' | 'screenOpenInterestGrowth'>
+ *
+ * —— 一份**手写的方法清单**。而 `MarketDataService` 会随功能长出新方法
+ * （第 0 层加 `fullMarketOverview`、第 1 层加 `topRankings`、第 3 层加 `screenSymbolsForModel`），
+ * 清单没人补。于是**类型检查一直绿，而 `npm run sim` 每轮在运行时抛
+ * `is not a function`**（2026-10-01：6/18、0 笔开仓）。
+ *
+ * 所以改成**全量断言**：`ReplayMarketData` 少实现任何一个 public 成员，
+ * 这里的 `Exclude` 就非 `never`，类型检查立刻失败。
+ *
+ * 这正是"一个永远不失败的校验会掩盖真正的回归"的反面用法 ——
+ * 让它**在编译期就失败**，而不是在模拟跑完之后。
+ */
+type MissingFromReplay = Exclude<keyof MarketDataService, keyof ReplayMarketData>;
+export type ReplayMarketDataIsCompatible = MissingFromReplay extends never ? true : never;
