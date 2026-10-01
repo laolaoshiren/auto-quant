@@ -1461,6 +1461,47 @@ test('★ 挂单区块必须显示「挂价离现价多远」并告诉模型它�
   assert.doesNotMatch(text, /下一步我会给你撤单的能力/, '★ 那句过期的话必须删掉');
 });
 
+test('★ 挂单区块必须把「挂价距离」与「这段时间价格预期能走多远」放在一起', () => {
+  /*
+   * ## 为什么光给"成交率 29%"不够（2026-10-01 实测）
+   *
+   * 上一轮我把「我的挂单成效」加进了提示词（成交 24 / 撤单 58 → 29%），
+   * 而**最近 6 轮的思考里一次都没提过它** —— 模型看到了数字，但照旧挂限价。
+   *
+   * 因为它缺的不是"结果"，是**那笔账**：
+   *
+   *     我挂的价位离现价 1.225%
+   *     而按当前 15m ATR，45 分钟内价格预期只能走约 0.3%
+   *     → 这个价位等不到
+   *
+   * 前一个数我上一轮给了，后一个数**它有 ATR 但没人替它换算**。
+   * 两个数放在同一行，比较就是一眼的事。
+   *
+   * ⚠️ 只给两个数字，**不给结论** —— "这个价位值不值得等"仍然是它的判断
+   * （用户的原则：模型是大脑，系统只是手脚）。
+   */
+  const snapshotSol = snapshot('SOLUSDT', 120);
+  const text = buildUserPrompt({
+    ...contextWith(blankMemory(), [snapshotSol]),
+    pendingEntries: [
+      {
+        symbol: 'SOLUSDT',
+        side: 'long',
+        limitPrice: 118.53,
+        quantity: 1,
+        stopLoss: 116,
+        takeProfit: 126,
+        waitingMinutes: 20,
+        reasoning: '回踩 15m EMA20',
+      },
+    ] as unknown as PromptContext['pendingEntries'],
+  });
+
+  assert.match(text, /挂价低于现价 1\.2/, '挂价距离');
+  assert.match(text, /预期.{0,12}能走约/, '★ 还要给它"这段时间价格能走多远"');
+  assert.match(text, /45 分钟/, '要把时限与预期行程绑在同一个句子里 —— 否则它没法比较');
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：

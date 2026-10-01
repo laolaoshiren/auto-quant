@@ -3229,10 +3229,40 @@ function pendingDistanceRow(
 
   const pct = ((pending.limitPrice - mark) / mark) * 100;
   const direction = pct >= 0 ? '高于' : '低于';
-  return [
+  const rows = [
     `   现价 ${fmt(mark)} | **挂价${direction}现价 ${Math.abs(pct).toFixed(3)}%**` +
       `（价格要先走这么多才可能成交）`,
   ];
+
+  /*
+   * ⚠️ **两个数必须放在一起：挂价距离 vs 这段时间价格预期能走多远。**
+   *
+   * 上一轮只给了"成交率 29%"（结果），而模型最近 6 轮的思考里**一次都没提过它** ——
+   * 它照旧挂限价。它缺的不是结果，是**那笔账**：
+   *
+   *     我挂的价位离现价 1.225%
+   *     而按当前 15m ATR，45 分钟内价格预期只能走约 0.3%
+   *
+   * 前一个数上一轮给了；后一个数**它有 ATR，但没人替它换算成"这段时间能走多远"**。
+   * 两个数挨着放，比较就是一眼的事。
+   *
+   * 口径用**随机游走**（`ATR × √N`）而不是线性外推（`ATR × N`）：
+   * 后者在 45 分钟（3 根）上会把预期行程夸大 1.7 倍，而那正是"让我以为挂得到"的方向 ——
+   * 一个鼓励继续挂远的数字比不给更糟。
+   */
+  const atr = lastValue(snap?.primary?.atr?.['14']);
+  if (atr !== null && Number.isFinite(atr) && atr > 0) {
+    const timeoutMinutes = ctx.config.riskControl.pendingEntryTimeoutMinutes;
+    const n = Math.max(1, timeoutMinutes / 15);
+    const expectedPct = ((atr * Math.sqrt(n)) / mark) * 100;
+    rows.push(
+      `   ⏱ 按当前 15m ATR(14) ≈ ${fmt(atr)} 估计，**${timeoutMinutes} 分钟内价格预期能走约 ` +
+        `${expectedPct.toFixed(2)}%**（随机游走口径：ATR × √根数）` +
+        ` —— 与上面那个距离比一比，就知道这个价位等不等得到。`,
+    );
+  }
+
+  return rows;
 }
 
 function renderTimeframeSummary(snap: MarketSnapshot): string {
