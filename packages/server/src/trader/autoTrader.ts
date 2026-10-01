@@ -454,6 +454,16 @@ const MARKET_DATA_UNAVAILABLE_MESSAGE =
 export class AutoTrader {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  /**
+   * 模型这一轮要求的"下次什么时候再看盘"（分钟）。
+   *
+   * ⚠️ **为什么要有实例字段**：它由**决策解析**产生（`tick` 的中段），
+   * 而真正用来排期的是 `finally` —— 那里拿不到 `parsed` 的局部作用域。
+   *
+   * 每轮开始前必须清空，否则"这一轮它没提要求"会**继承上一轮的要求**，
+   * 而那是一个很难在日志里看出来的错误（行为上表现为"偶尔莫名其妙地变慢"）。
+   */
+  private requestedNextCheckMinutes: number | undefined;
   private cycleInFlight = false;
 
   /**
@@ -688,7 +698,7 @@ export class AutoTrader {
    * 在周期比间隔还长时会**重叠执行** —— 那意味着同一时间有两个决策在跑，
    * 而它们会读同一份持仓、可能各下一单。**串行是这里唯一安全的选择。**
    */
-  private scheduleNextCycle(retrySoon = false): void {
+  private scheduleNextCycle(retrySoon = false, requestedMinutes?: number): void {
     if (this.timer) clearTimeout(this.timer);
     /*
      * 每次排期都**重新读**数据库里的值 —— 那是 AI 改完之后的真实值。
@@ -719,9 +729,25 @@ export class AutoTrader {
      * 这不是退避（那会掩盖问题、拖慢恢复），而是**只提前、不推后**：
      * 正常轮次仍按 AI 设定的周期走，见 `cycleSchedule.ts`。
      */
+    /*
+     * ⚠️ **模型自己要求的"下次什么时候再看"优先**（`requestedMinutes`）。
+     *
+     * 用户 2026-10-02 的原话：
+     *
+     *   「不是系统喂给 AI 什么，AI 就只能**定时定点**的去做，这不是智能，
+     *     也不是 AI，这是传统机器人了。」
+     *   「会像真人一样，**决定何时做什么事情**。」
+     *
+     * 在此之前这一行只有配置里的周期 —— 它没法说"这个突破正在形成，5 分钟后再叫我"，
+     * 也没法说"这行情没意思，一小时后再看"。而**这两件事都是交易判断本身**。
+     *
+     * 边界与"失败时取较小者"的规则都在 `nextCycleDelayMs` 里（单一处）。
+     * 传 `undefined` 表示它没提这个要求 —— 那是**不同的意图**，不能当成 0。
+     */
     this.timer = setTimeout(() => void this.tick(), nextCycleDelayMs({
       failed: retrySoon,
       cycleIntervalMinutes: minutes,
+      ...(requestedMinutes === undefined ? {} : { requestedMinutes }),
     }));
   }
   /**
@@ -1196,6 +1222,15 @@ export class AutoTrader {
      * 上游偶发的 5xx/限流不该让机器人白等一整个周期（见 `scheduleNextCycle`）。
      */
     let failed = false;
+    /*
+     * ⚠️ **每轮开始清空"它要求的下次间隔"。**
+     *
+     * 如果不清：这一轮在**解析之前**就失败时（模型调用失败、行情拉不到），
+     * `finally` 会读到**上一轮**留下的值 —— 于是"这轮什么都没问出来"却按
+     * 上一轮的要求排期。行为上表现为"偶尔莫名其妙地变快或变慢"，
+     * 而日志里看不出任何异常。
+     */
+    this.requestedNextCheckMinutes = undefined;
 
     try {
       await this.inCycle(async () => {
@@ -1272,7 +1307,18 @@ export class AutoTrader {
        * 排在这里（`finally`）而不是成功分支里：一轮失败也必须继续跑，
        * 否则一次网络抖动会让机器人永远停在那里，而状态还显示 `running`。
        */
-      if (this.running) this.scheduleNextCycle(failed);
+      /*
+       * ⚠️ **把"它要求的间隔"交给排期，并立刻清空。**
+       *
+       * 清空是必须的：下一轮如果它没提这个要求，`undefined` 应当意味着
+       * "退回配置周期"，而不是继承上一轮留下的值 —— 后者表现为
+       * "偶尔莫名其妙地变慢"，而那种 bug 在日志里几乎看不出来。
+       */
+      const requested = this.requestedNextCheckMinutes;
+      this.requestedNextCheckMinutes = undefined;
+      if (this.running) {
+        this.scheduleNextCycle(failed, requested);
+      }
     }
   }
 
@@ -2450,6 +2496,24 @@ export class AutoTrader {
     progress.cotTrace = parsed.cotTrace;
     progress.decisions = parsed.decisions;
     progress.rawResponse = parsed.rawResponse;
+
+    /*
+     * ⚠️ **模型自己要求的"下次什么时候再看盘"**（`next_check_in_minutes`）。
+     *
+     * 用户 2026-10-02：「不是系统喂给 AI 什么，AI 就只能定时定点的去做…
+     * 会像真人一样，**决定何时做什么事情**。」
+     *
+     * 赋值而不是 `??=`：`undefined`（它这轮没提）必须**覆盖**掉上一轮的值。
+     * 边界钳制在 `nextCycleDelayMs` 里做，这里只如实转交。
+     */
+    this.requestedNextCheckMinutes = parsed.nextCheckInMinutes;
+    if (parsed.nextCheckInMinutes !== undefined) {
+      /* 不在这里报"配置周期"是多少 —— 那一行会在 `scheduleNextCycle` 里重新读库，
+         这里拿到的可能是启动时的旧值，写进日志就是一条不准确的事实。 */
+      log.info(
+        `[${this.deps.trader.name}] 模型要求 ${parsed.nextCheckInMinutes} 分钟后再看盘。`,
+      );
+    }
 
     const executionLog: ExecutionLogEntry[] = parsed.rejected.map((r) => ({
       action: r.action,

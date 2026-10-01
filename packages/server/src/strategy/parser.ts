@@ -440,6 +440,46 @@ function coerceRawDecision(input: unknown): LenientDecision | null {
  * malformed order. Numeric policy limits (clamping, sizing) belong to the risk
  * engine; anything rejected here is structurally impossible to execute.
  */
+/**
+ * 从模型输出里提取**它自己要求的"下一次什么时候再看盘"**（分钟）。
+ *
+ * ## 为什么这是"智能"与"定时机器人"的分界线（2026-10-02）
+ *
+ * 用户的原话：
+ *
+ *   「不是系统喂给 AI 什么，AI 就只能**定时定点**的去做，这不是智能，
+ *     也不是 AI，这是传统机器人了。」
+ *
+ * 在此之前机器人只有一个节拍（配置里的 `cycleIntervalMinutes`）。
+ * `next_check_in_minutes` 把它交给模型 —— **"什么时候值得再看一眼"
+ * 本身就是交易判断的一部分**：等一个正在形成的突破要勤看，死水行情不必。
+ *
+ * ## 为什么从"任一元素"取、且取**最小**
+ *
+ * 决策输出是一个数组（每个标的一条），而这层语义是**轮级**的 ——
+ * 模型不会（也不该）为每个标的分别指定看盘时间。所以：
+ *
+ *  · 数组里**任何一个**元素带了它，就视为本轮的要求；
+ *  · 有多个时取**最小** —— 那是"最早醒"，也就是最保守的一侧。
+ *    取最大会让"某个标的想盯着"被另一条的"两小时后"吞掉，从而**错过**。
+ *
+ * 返回值**不做边界钳制**（那是 `cycleSchedule.clampNextCheckMinutes` 的职责）——
+ * 解析器只如实读出模型说了什么，钳制规则集中在一处。
+ */
+export function extractNextCheckMinutes(rawItems: readonly unknown[], root?: unknown): number | undefined {
+  const seen: number[] = [];
+  const read = (value: unknown): void => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return;
+    const record = value as Record<string, unknown>;
+    const raw = record['next_check_in_minutes'] ?? record['nextCheckInMinutes'];
+    if (typeof raw === 'number' && Number.isFinite(raw)) seen.push(raw);
+  };
+  read(root);
+  for (const item of rawItems) read(item);
+  if (seen.length === 0) return undefined;
+  return Math.min(...seen);
+}
+
 export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDecisionSet {
   const cotTrace = extractCoTTrace(raw);
   const rejected: RejectedDecision[] = [];
@@ -469,6 +509,13 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
     : typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as { decisions?: unknown }).decisions)
       ? ((parsed as { decisions: unknown[] }).decisions)
       : [parsed];
+
+  /*
+   * ⚠️ **轮级的"下次看盘时间"** —— 在遍历决策之前先提取，
+   * 因为它是整轮的属性，不属于任何一个标的（见 `extractNextCheckMinutes`）。
+   * 它**不参与**单条决策的风控校验，所以不能等着被判为未知字段而丢掉。
+   */
+  const nextCheckInMinutes = extractNextCheckMinutes(rawItems, parsed);
 
   for (const item of rawItems) {
     const coerced = coerceRawDecision(item);
@@ -608,7 +655,13 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
     });
   }
 
-  return { cotTrace, decisions, rawResponse: raw, rejected };
+  return {
+    cotTrace,
+    decisions,
+    rawResponse: raw,
+    rejected,
+    ...(nextCheckInMinutes === undefined ? {} : { nextCheckInMinutes }),
+  };
 }
 
 /* -------------------------------------------------------------------------- */
