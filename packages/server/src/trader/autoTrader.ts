@@ -81,6 +81,7 @@ import {
 } from '../store/repositories.js';
 import { rankPlatformHistory } from '../strategy/platformHistory.js';
 import { rankConsensus } from '../strategy/consensus.js';
+import { nextCycleDelayMs } from './cycleSchedule.js';
 import { averageRoundTripCostPercent } from '../strategy/costs.js';
 import { entryFillStats } from '../strategy/entryStats.js';
 import {
@@ -685,7 +686,7 @@ export class AutoTrader {
    * 在周期比间隔还长时会**重叠执行** —— 那意味着同一时间有两个决策在跑，
    * 而它们会读同一份持仓、可能各下一单。**串行是这里唯一安全的选择。**
    */
-  private scheduleNextCycle(): void {
+  private scheduleNextCycle(retrySoon = false): void {
     if (this.timer) clearTimeout(this.timer);
     /*
      * 每次排期都**重新读**数据库里的值 —— 那是 AI 改完之后的真实值。
@@ -702,8 +703,24 @@ export class AutoTrader {
     } catch {
       /* 用启动时那份 */
     }
-    const intervalMs = Math.max(1, minutes) * 60_000;
-    this.timer = setTimeout(() => void this.tick(), intervalMs);
+    /*
+     * ⚠️ **失败的轮次用短间隔重试**（`retrySoon`）——
+     *
+     * 用户 2026-10-01 的截图：控制台上连着两条「失败 · AI 服务不可用」（#542、#543），
+     * 而那是**上游偶发**故障（同轮内的 2 次重试都撞上同一段窗口）。
+     * 系统原来的行为是"失败 → 等一整个周期（30 分钟）"，
+     * 于是**服务商抖动几分钟，代价是一小时**。
+     *
+     * 实测同一份日志：`#1777` 下一轮就成功了 —— 上游恢复得很快，
+     * 只是没人早一点再问它一次。
+     *
+     * 这不是退避（那会掩盖问题、拖慢恢复），而是**只提前、不推后**：
+     * 正常轮次仍按 AI 设定的周期走，见 `cycleSchedule.ts`。
+     */
+    this.timer = setTimeout(() => void this.tick(), nextCycleDelayMs({
+      failed: retrySoon,
+      cycleIntervalMinutes: minutes,
+    }));
   }
   /**
    * Stop the loop and **wait for the cycle already running** to finish.
@@ -1172,6 +1189,11 @@ export class AutoTrader {
     }
 
     const traderId = this.deps.trader.id;
+    /*
+     * ⚠️ **这一轮是否失败** —— `finally` 里的排期据此决定用"正常周期"还是"短间隔重试"。
+     * 上游偶发的 5xx/限流不该让机器人白等一整个周期（见 `scheduleNextCycle`）。
+     */
+    let failed = false;
 
     try {
       await this.inCycle(async () => {
@@ -1218,6 +1240,8 @@ export class AutoTrader {
       });
     } catch (error) {
       this.consecutiveFailures += 1;
+      /* ⚠️ 标记这一轮失败了：`finally` 里据此用**短间隔**重试（见 `scheduleNextCycle`）。 */
+      failed = true;
       const message = (error as Error).message;
       this.emit('error', `第 #${this.cycleNumber} 轮决策失败：${message}`);
       traderStore.recordCycle(traderId, this.cycleNumber, this.consecutiveFailures);
@@ -1246,7 +1270,7 @@ export class AutoTrader {
        * 排在这里（`finally`）而不是成功分支里：一轮失败也必须继续跑，
        * 否则一次网络抖动会让机器人永远停在那里，而状态还显示 `running`。
        */
-      if (this.running) this.scheduleNextCycle();
+      if (this.running) this.scheduleNextCycle(failed);
     }
   }
 
