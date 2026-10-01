@@ -256,6 +256,23 @@ export interface PromptContext {
   idleCycles?: number;
   /** 这段空转期间的已平仓净额（说明"什么都没做"的同时账户发生了什么）。 */
   idleNetPnl?: number;
+  /**
+   * ⚠️ **模型自己写的规则有多少字符 / 多少条编号规则。**
+   *
+   * 它没有刻度：只写规则、不删规则，也看不到"我的规则现在有多大"。
+   *
+   * 量化证据（2026-10-01，`agent_experiments` 里记录的配置长度）：
+   *
+   *     #14  2026-09-20   1,841 字符
+   *     #46  2026-09-30   9,618 字符      ← **5.2 倍**
+   *
+   * 同期开单率：09-26 是 48% → 10-01 是 8%。
+   *
+   * 「每次亏损复盘加一条」本身是对的 —— 缺的是**反馈**：
+   * 规则多了以后，可做集合会单调收缩到空，而这件事没有任何地方会"响"。
+   */
+  ruleSizeChars?: number;
+  ruleCount?: number;
 }
 
 /** 「全市场概览」的一行 —— 见 `PromptContext.marketOverview`。 */
@@ -573,6 +590,43 @@ const RANKING_LIMIT = 8;
  * **一个每轮都响的警告等于没有警告**（同 `coins.ts` 里裁剪通知的理由）。
  */
 const IDLE_CYCLES_NOTICE_THRESHOLD = 5;
+
+/**
+ * 模型自己写的决策规则有多大 —— 字符数 + 编号规则条数。
+ *
+ * ⚠️ **这是"它没有刻度"这个问题的解法。**
+ *
+ * 模型每次亏损复盘都会往 `promptSections` 里加一条规则，而**没有任何地方会删**。
+ * 实测（2026-10-01，`agent_experiments` 记录的配置长度）：
+ *
+ *     2026-09-20   1,841 字符
+ *     2026-09-30   9,618 字符      ← 9 天涨 5.2 倍
+ *
+ * 同期开单率：09-26 是 48% → 10-01 是 8%。而它自己**看不见这个趋势** ——
+ * 每一轮读到的都是完整规则文本，没有"它比上周大了多少"这个信息。
+ *
+ * 只统计"策略段落"（`promptSections` 里那些模型可写的决策规则），
+ * 不含系统提示词与行情数据 —— 那些不是它的产物。
+ */
+export function summariseRules(
+  promptSections: Record<string, unknown> | undefined,
+): { ruleSizeChars?: number; ruleCount?: number } {
+  if (!promptSections) return {};
+  let chars = 0;
+  for (const value of Object.values(promptSections)) {
+    if (typeof value === 'string') chars += value.length;
+  }
+  if (chars === 0) return {};
+  /*
+   * 条数按"形如 N.M 的编号"数（`5.1` / `5.2` …）—— 那是这个仓库里
+   * 模型写规则的既有格式，实测它的 decisionProcess 就是这么编号的。
+   */
+  const all = Object.values(promptSections)
+    .filter((v): v is string => typeof v === 'string')
+    .join('\n');
+  const ruleCount = (all.match(/(?:^|\n)\s*\d+\.\d+\s/g) ?? []).length;
+  return { ruleSizeChars: chars, ...(ruleCount > 0 ? { ruleCount } : {}) };
+}
 
 const MODE_GUIDANCE: Record<StrategyConfig['tradingMode'], string> = {
   aggressive: [
@@ -2444,6 +2498,19 @@ function renderUserPrompt(
           '可做集合会随时间**单调收缩**，直到市场里没有东西满足全部条件。',
         '回头看一遍你自己的规则：哪些是**当前市况下仍然成立**的，哪些是**当时那一次的特例**' +
           '（某个标的、某段行情）。要不要松、松哪一条、松多少，**由你判断**。',
+        /*
+         * ⚠️ **给它刻度。** 模型只写规则、不删规则，而"我现在的规则有多大"
+         * 没有任何地方会告诉它。实测规则长度在 9 天内涨了 5.2 倍（1841 → 9618 字符），
+         * 而可做集合随之收缩到接近空 —— 这件事不该只靠它自己回忆。
+         */
+        ...(ctx.ruleSizeChars !== undefined && ctx.ruleSizeChars > 0
+          ? [
+              `📏 你当前写的决策规则合计 **${ctx.ruleSizeChars.toLocaleString('en-US')} 字符**` +
+                (ctx.ruleCount !== undefined ? `（${ctx.ruleCount} 条编号规则）` : '') +
+                '。这个数字**只会随每次复盘增长** —— 没有任何机制会替你删。' +
+                '它变大本身不是错，但它每长一点，可做的机会就少一点。',
+            ]
+          : []),
       ].join('\n'),
     );
   }

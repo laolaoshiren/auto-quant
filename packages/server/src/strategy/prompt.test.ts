@@ -1541,6 +1541,40 @@ test('没有连续空转时不渲染那一段 —— 不制造噪声', () => {
   assert.doesNotMatch(text, /连续 \d+ 轮/);
 });
 
+test('★ 连续观望时要把它自己的「规则规模」也报出来 —— 它没有刻度', () => {
+  /*
+   * ## 量化证据（2026-10-01）
+   *
+   * `agent_experiments` 每分钟记录一次"当前参数"，其中包含模型自己写的
+   * `promptSections`。它的长度是：
+   *
+   *     #14  2026-09-20   1,841 字符
+   *     ...
+   *     #46  2026-09-30   9,618 字符      ← 增长 5.2 倍
+   *
+   * 同期开单率：09-26 是 48% → 10-01 是 8%。
+   *
+   * 「每次亏损复盘加一条规则」本身是对的，但**模型没有刻度** ——
+   * 它看不到"我的规则已经比九天前大了五倍"，也看不到"这些规则合起来
+   * 已经把市场里几乎所有情况都排除了"。给出规模，它才能自己判断要不要瘦身。
+   */
+  const text = buildUserPrompt({
+    ...contextWith(blankMemory()),
+    idleCycles: 8,
+    ruleSizeChars: 6921,
+    ruleCount: 5,
+  });
+
+  assert.match(text, /6,?921/, '要给出规则的字符规模');
+  assert.match(text, /5 条/, '要给条数 —— 两个刻度比一个更难被忽略');
+  assert.match(text, /只增不减|没有刻度|瘦身/, '要说明这件事意味着什么');
+});
+
+test('没有规则规模数据时不渲染那一行 —— 不编数字', () => {
+  const text = buildUserPrompt({ ...contextWith(blankMemory()), idleCycles: 8 });
+  assert.doesNotMatch(text, /规则的规模|规则的字符/);
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：

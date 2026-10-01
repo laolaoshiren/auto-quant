@@ -53,6 +53,7 @@ import {
   PROMPT_PERFORMANCE_WINDOW_HOURS,
   PROMPT_RECENT_CLOSE_COUNT,
   promptTokenBudget,
+  summariseRules,
   type PromptMemory,
   type PromptLesson,
   type PromptPosition,
@@ -2070,6 +2071,11 @@ export class AutoTrader {
       /* 连续观望的轮数 —— 规则只增不减会让它最终排除一切，这个事实要摆出来。 */
       idleCycles,
       ...(idleNetPnl === undefined ? {} : { idleNetPnl }),
+      /*
+       * 它自己的规则规模 —— 模型没有刻度：只写不删，也看不到"我的规则多大了"。
+       * 实测 9 天内从 1,841 涨到 9,618 字符（5.2 倍），同期开单率 48% → 8%。
+       */
+      ...summariseRules(this.activeConfig.promptSections),
       memory,
       /*
        * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**
