@@ -1728,6 +1728,55 @@ test('★ 不许再给「不做也算合格」的免责出口，且结论处必�
   assert.match(task, /1–120|120 分钟/, '要给出允许范围，否则它会写一个越界的值');
 });
 
+test('★ 连续观望时要把「它覆盖掉的那条系统默认原则」摆回它面前', () => {
+  /*
+   * ## 2026-10-02：这是"长期全观望"的**机制性**成因
+   *
+   * 渲染逻辑是：
+   *
+   *     `# 入场标准\n${config.promptSections.entryStandards.trim() || DEFAULT_ENTRY_STANDARDS}`
+   *
+   * `||` 意味着**它自己写的那版会整个替换掉系统默认**（不是补充）。
+   *
+   * 而系统默认里有一条**专门为这个现象写下的**原则：
+   *
+   *   「**机会是分档的，不是"合格 / 不合格"两档。**」
+   *
+   * 它自己的注释里记着上一次同样的病 —— 连现象都逐字重合：
+   *
+   *   「实测：一个机器人连续 15 个周期、0 笔决策，而每一轮的推理都长达一千多字…
+   *     结论一律是"没有一个能让我有底气向风控经理辩护"。
+   *     **它的推理没问题，缺的是"小仓也是参与"这个选项。**」
+   *
+   * 那台机器人当时的 `entryStandards` 是空的（默认生效，所以有这一条）。
+   * 而现在这台**自己写了 3,041 字符**，把这一条覆盖掉了 —— 于是同样的病复发，
+   * 而它不可能记得自己什么时候去掉的那一条。
+   *
+   * 系统不替它改规则（用户的原则：模型是大脑），但**事实必须摆出来**。
+   */
+  const config = defaultStrategyConfig();
+  const text = buildUserPrompt({
+    ...contextWith(blankMemory()),
+    idleCycles: 11,
+    config: { ...config, promptSections: { ...config.promptSections, entryStandards: '我自己写的入场标准' } },
+  });
+
+  assert.match(text, /覆盖了系统默认/, '要指出它覆盖了默认那一版');
+  assert.match(text, /分档/, '要把被覆盖掉的那条原则本身给出来');
+  assert.match(text, /小仓|最小仓位/, '"小仓也是参与"是那条原则的核心');
+  assert.match(text, /你自己的判断/, '仍然由它决定要不要写回去 —— 系统只给事实');
+});
+
+test('它没写 entryStandards（用默认）时不该渲染那段 —— 没有覆盖就没有提醒', () => {
+  const config = defaultStrategyConfig();
+  const text = buildUserPrompt({
+    ...contextWith(blankMemory()),
+    idleCycles: 11,
+    config: { ...config, promptSections: { ...config.promptSections, entryStandards: '' } },
+  });
+  assert.doesNotMatch(text, /覆盖了系统默认/);
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：
