@@ -4933,8 +4933,19 @@ test('★ 挂太久的限价单会被自动撤掉 —— 不能一直占着持�
   await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
   assert.equal(positionStore.pending(traderId).length, 1, '前提：挂上了一张单');
 
-  /* 把它"挂出时刻"挪到 100 分钟前 —— 默认时限是 45 分钟。 */
-  agePendingEntries(traderId, 100);
+  /*
+   * 把它"挂出时刻"挪到 600 分钟前。
+   *
+   * ⚠️ **不再是 100 分钟。** `pendingEntryTimeoutMinutes = 45` 是**基准**，
+   * 实际时限会按"挂价距离 ÷ 15m ATR"（随机游走口径）延长，上限 8 小时。
+   * 本用例的挂价距现价 0.5%，而夹具的 ATR 与之同量级 —— 算出来的时限约 100+ 分钟，
+   * 于是"挪到 100 分钟前"不再能触发它。
+   *
+   * 挪到 600 分钟既超过了自适应结果、也仍在 480 分钟的硬上限之上 ——
+   * 这一条要验的是"**超过时限就必须撤**"这个意图，不是某个具体分钟数。
+   * 见 `pendingTimeout.test.ts` 对时限算法本身的用例。
+   */
+  agePendingEntries(traderId, 600);
 
   /* 再跑一轮，模型什么都不说 —— 撤销应当由机械规则完成。 */
   await buildTrader(broker, '<decision>[]</decision>').runOnce();

@@ -82,6 +82,7 @@ import {
 import { rankPlatformHistory } from '../strategy/platformHistory.js';
 import { rankConsensus } from '../strategy/consensus.js';
 import { nextCycleDelayMs } from './cycleSchedule.js';
+import { pendingTimeoutMinutes } from './pendingTimeout.js';
 import { averageRoundTripCostPercent } from '../strategy/costs.js';
 import { entryFillStats } from '../strategy/entryStats.js';
 import {
@@ -3153,15 +3154,55 @@ export class AutoTrader {
    */
   private async expireStalePendingEntries(): Promise<number> {
     const traderId = this.deps.trader.id;
-    const limitMinutes = this.activeConfig.riskControl.pendingEntryTimeoutMinutes;
-    if (limitMinutes <= 0) return 0;
+    const baseMinutes = this.activeConfig.riskControl.pendingEntryTimeoutMinutes;
+    if (baseMinutes <= 0) return 0;
 
     const rows = positionStore.pending(traderId);
     if (rows.length === 0) return 0;
 
+    /*
+     * ⚠️ **时限要跟着"挂价距离"走，不能是一个固定值。**
+     *
+     * 实测（2026-10-01）：DOGEUSDT 挂 0.095241、现价 0.095860 → 距离 **0.646%**，
+     * 而 15m ATR ≈ **0.212%**。按随机游走走到那个位置预期需要 **139 分钟**，
+     * 而固定时限是 **45 分钟** —— 那张单在数学上**必然**等不到就被撤，
+     * 模型下一轮再挂同一价位：**78 撤 / 44 成交，最近一次成交在 20 小时前**。
+     *
+     * 「挂多远」是模型的判断（结构位回踩是合理的交易方式）；系统该做的是
+     * **给那个判断足够的时间去验证**。见 `pendingTimeout.ts`。
+     *
+     * 行情读不到时退回配置值 —— 那只是"用回原来的行为"，不影响任何安全性。
+     */
+    const caps = await this.deps.marketData
+      .buildSnapshots(
+        rows.map((r) => r.symbol),
+        this.activeConfig.indicators,
+        /* 来源标记只影响提示词渲染，这里用不上。 */
+        new Map(),
+      )
+      .catch(() => null);
+
     let expired = 0;
     for (const row of rows) {
       const waitedMinutes = (Date.now() - Date.parse(row.opened_at)) / 60_000;
+
+      const snap = caps?.find((s) => s.symbol === row.symbol) ?? null;
+      const mark = snap && Number.isFinite(snap.price) && snap.price > 0 ? snap.price : null;
+      const atrSeries = snap?.primary?.atr?.['14'];
+      const atr =
+        atrSeries && atrSeries.length > 0
+          ? [...atrSeries].reverse().find((v): v is number => typeof v === 'number' && Number.isFinite(v)) ??
+            null
+          : null;
+      const limitMinutes =
+        mark !== null && atr !== null
+          ? pendingTimeoutMinutes({
+              baseMinutes,
+              distancePercent: (Math.abs(row.entry_price - mark) / mark) * 100,
+              atrPercent: (atr / mark) * 100,
+            })
+          : baseMinutes;
+
       if (!(waitedMinutes >= limitMinutes)) continue;
 
       /*
