@@ -34,6 +34,8 @@ import {
 import {
   AutoTrader,
   describeCycleFailure,
+  LEDGER_GAP_TOLERANCE_ABS,
+  ledgerGapTolerance,
   makeClientId,
   ORDER_SETTLE_GRACE_MS,
   readForeignActivity,
@@ -3265,6 +3267,42 @@ test('★ 失败文案要说清「具体是哪一种不可用」—— 而不是
   );
   assert.match(serverError, /^AI 服务不可用：/);
   assert.match(serverError, /HTTP 503/);
+});
+
+test('★ 账本容差必须随账户规模缩放 —— 固定 1 美分把小账户变成噪声、大账户变成瞎子', () => {
+  /*
+   * ## 实测（2026-10-02 03:00）
+   *
+   * 权益 21.92 的账户报出差额 **0.0101** —— 只比固定容差 0.01 多 **0.0001 美元**，
+   * 却挂起一条 ERROR 级"账目与交易所对不上"横幅。而它对应的相对偏差只有 **0.046%**，
+   * 远在噪声里（开仓那一刻的持有成本口径差就够产生它）。
+   *
+   * 固定阈值在两个方向上都失效：
+   *
+   *   · **小账户**：1 美分 = 0.046%（$21.92）→ 日常噪声就触发 →
+   *     告警变成背景噪声，**真漏记出现时没人再看它**；
+   *   · **大账户**：1 美分 = 0.0001%（$10,000）→ 一笔真漏记可能远大于它，
+   *     但"大于 1 美分"拦不住任何东西，**该报的没报**。
+   */
+  /* 小账户：0.0101 这种"开仓口径差"不该再触发。 */
+  assert.ok(
+    ledgerGapTolerance(21.92) > 0.0101,
+    '权益 21.92 时容差必须大于 0.0101，否则那条 ERROR 会一直响',
+  );
+  /* 大账户：容差必须真的随规模长上去，而不是永远停在 1 美分。 */
+  assert.ok(
+    ledgerGapTolerance(10_000) > 5,
+    '权益 1 万时容差应达到 10 美元量级 —— 否则大额漏记会被放过',
+  );
+  assert.ok(
+    ledgerGapTolerance(10_000) > ledgerGapTolerance(100),
+    '容差必须随权益单调增长',
+  );
+  /* 下限与退化输入。 */
+  assert.equal(ledgerGapTolerance(0), LEDGER_GAP_TOLERANCE_ABS, '读不到权益时退回绝对下限');
+  assert.equal(ledgerGapTolerance(Number.NaN), LEDGER_GAP_TOLERANCE_ABS);
+  assert.equal(ledgerGapTolerance(-5), LEDGER_GAP_TOLERANCE_ABS);
+  assert.equal(ledgerGapTolerance(1), LEDGER_GAP_TOLERANCE_ABS, '极小权益也不低于绝对下限');
 });
 
 test('describeCycleFailure：每一类失败都给一句可执行的中文说明，且类别写在第一个全角冒号之前', async () => {

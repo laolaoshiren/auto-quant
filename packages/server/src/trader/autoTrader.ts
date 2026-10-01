@@ -119,6 +119,34 @@ type PositionRow = ReturnType<typeof positionStore.open>[number];
 const RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
+ * 账本对账的容差 —— **绝对下限 + 权益的 0.1%，取较大者**。
+ *
+ * ## 为什么固定的 1 美分在两个方向上都是错的（2026-10-02 实测）
+ *
+ * 权益 21.92 的账户报出差额 **0.0101** —— 只比原来那个固定值多 **0.0001 美元**，
+ * 却挂起一条 ERROR 级"账目与交易所对不上"。而它对应的相对偏差是 **0.046%**，
+ * 远在噪声里（开仓那一刻的持有成本口径差就足够产生它）。
+ *
+ *   · **小账户**：1 美分是 0.046%（$21.92）→ 日常噪声就触发，
+ *     这条告警于是变成背景噪声，**真漏记出现时没人再看它**；
+ *   · **大账户**：1 美分是 0.0001%（$10,000）→ 一笔真实的漏记可能远大于它，
+ *     但"大于 1 美分"这条线拦不住任何东西，**该报的没报**。
+ *
+ * 相对分量取 0.1%：对 $21.92 是 0.022（比噪声高、比真漏记低），
+ * 对 $10,000 是 10 美元（与"一笔最小成交手续费 0.0005 的千倍量级"相称）。
+ *
+ * `equity <= 0`（读不到）时退回绝对下限 —— 宁可这一刻严一点，也不要让对账失去判据。
+ */
+export const LEDGER_GAP_TOLERANCE_ABS = 0.01;
+export const LEDGER_GAP_TOLERANCE_RELATIVE = 0.001;
+
+export function ledgerGapTolerance(equity: number): number {
+  const relative =
+    Number.isFinite(equity) && equity > 0 ? equity * LEDGER_GAP_TOLERANCE_RELATIVE : 0;
+  return Math.max(LEDGER_GAP_TOLERANCE_ABS, relative);
+}
+
+/**
  * 每多少个对账回合做一次覆盖全生命周期的深对账。
  *
  * 24 轮。以默认 15 分钟周期算约 6 小时一次，对「停机期间被交易所止损平掉」
@@ -4985,12 +5013,44 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     })();
     const platformNet = platformSelf + foreignNet + openCosts;
     const ledgerGap = Number((platformNet - exchangeNet).toFixed(6));
+
+    /*
+     * 权益 —— 容差要随账户规模缩放（见 `ledgerGapTolerance`）。读不到就退回 0，
+     * 那时只用绝对容差，而不是让对账本身失败。
+     */
+    const equityForTolerance = ((): number => {
+      try {
+        const [latest] = equityStore.list(traderId, 1);
+        return typeof latest?.equity === 'number' && Number.isFinite(latest.equity) ? latest.equity : 0;
+      } catch {
+        return 0;
+      }
+    })();
     
     /*
-     * 阈值 0.01 USDT：浮点误差远小于它，而任何一笔真实的漏记/错记都大于它
-     * （这个账户上最小的一笔成交手续费是 0.0005）。
+     * ⚠️ **容差必须随账户规模缩放 —— 固定 1 美分在两个方向上都是错的。**
+     *
+     * ## 实测（2026-10-02 03:00）
+     *
+     * 权益 21.92 的账户报出差额 **0.0101** —— 只比原来那个固定值 0.01 多
+     * **0.0001 美元**，却挂起一条 ERROR 级"账目与交易所对不上"。
+     * 而它对应的真实相对偏差是 **0.046%**，远在噪声范围里
+     * （开仓那一刻的持有成本口径差异就足够产生它）。
+     *
+     * ## 为什么固定阈值在两端都会失效
+     *
+     *   · **小账户**：1 美分是 0.046%（$21.92）—— 日常口径噪声就能触发，
+     *     于是这条告警变成背景噪声，**真的漏记出现时没人再看它**；
+     *   · **大账户**：1 美分是 0.0001%（$10,000）—— 一笔漏记可能远大于它，
+     *     但"大于 1 美分"这条线根本拦不住，**该报的没报**。
+     *
+     * 所以取"绝对 1 美分"与"权益的 0.1%"里**较大**的那个：
+     * 小账户按相对值放宽（消除噪声），大账户按相对值收紧（抓住真漏记）。
+     *
+     * 原来的注释说"任何一笔真实的漏记/错记都大于 0.01"—— 那句话在**这个账户规模**上
+     * 曾经成立，但它把"账户有 22 美元"这个前提写死进了阈值。
      */
-    const LEDGER_GAP_TOLERANCE = 0.01;
+    const LEDGER_GAP_TOLERANCE = ledgerGapTolerance(equityForTolerance);
     settings.set(
       `ledger_check:${traderId}`,
       JSON.stringify({
