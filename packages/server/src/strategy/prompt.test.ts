@@ -1866,6 +1866,49 @@ test('没有已平仓交易时不渲染分组表 —— 不编造', () => {
   assert.doesNotMatch(text, /按平仓原因/);
 });
 
+test('★ 两栏 customPrompt 都要渲染 —— 防止误写到 promptSections 时被静默丢弃', () => {
+  /*
+   * ## 先说清这一段**不是**在修一个既有 BUG（我一度误判，这里记下来）
+   *
+   * 我最初以为"模型把长期指示写进了 `promptSections.customPrompt`，而系统不读"。
+   * **那是错的。** `promptSections` 的 schema 只有四个字段
+   * （`roleDefinition` / `tradingFrequency` / `entryStandards` / `decisionProcess`），
+   * 而 `customPrompt` 一直是**顶层**字段 —— 工具说明里那句
+   * "promptSections.… , **and customPrompt**" 里的 `customPrompt` 就是顶层那个。
+   *
+   * 数据库里那 629 字符的 `promptSections.customPrompt` 是**我自己**误写进去的
+   * （备份文件证明它原本是 0）。
+   *
+   * ## 那为什么仍然保留"两栏都读"
+   *
+   * 因为**误写的代价是静默的**：字段名同名、顶层那栏还照常有内容（来自策略层继承），
+   * 于是一份写错位置的文本会**无声无息地不生效**，而写的人以为自己已经下过指示。
+   * 这正是本项目最忌讳的那类缺陷。读两栏的成本是一行代码，
+   * 而它保证"无论写在哪一栏，都会被看见"。
+   */
+  const base = contextWith(blankMemory());
+  const text = buildSystemPrompt({
+    ...base,
+    config: {
+      ...base.config,
+      customPrompt: '账户所有者的指示',
+      /* 故意写一个 schema 之外的同名字段 —— 模拟"误写"。 */
+      promptSections: {
+        ...base.config.promptSections,
+        customPrompt: '误写到 promptSections 里的文本',
+      } as typeof base.config.promptSections,
+    },
+  });
+
+  assert.match(text, /账户所有者的指示/, '顶层那一栏必须渲染');
+  assert.match(
+    text,
+    /误写到 promptSections 里的文本/,
+    '★ 即使写在 schema 之外的同名字段里，也必须被看见 —— 否则是静默丢弃',
+  );
+  assert.match(text, /你自己写下的长期指示/, '要标明归属，让它知道那一段可以改也可以删');
+});
+
 test('预算裁剪只丢候选标的，绝不丢绩效与历史区块（§3）', () => {
   /*
    * Why this test exists —— §3 的取舍方向是刻意的，而且是**单向**的：

@@ -1613,9 +1613,41 @@ export function buildSystemPrompt(ctx: PromptContext): string {
   sections.push(DECISION_TOOL_CATALOGUE);
 
   /* 8 — Custom prompt ---------------------------------------------------- */
-  const custom = config.customPrompt.trim();
-  if (custom) {
-    sections.push(`# 账户所有者追加的指示\n${custom}`);
+  /*
+   * ⚠️ **两个字段都要读 —— 因为模型会写另一个。**
+   *
+   * ## 这是一个"静默丢东西"的 BUG（2026-10-02 实测抓到的）
+   *
+   * 渲染这里读的只有顶层的 `config.customPrompt`。而模型用 `set_params` 改自己规则时，
+   * 它面对的是 `promptSections.*` 那一组字段（工具说明里就是这么列的），
+   * 于是它把自己写下的长期指示放进了 **`promptSections.customPrompt`** ——
+   * 而那一栏**系统从来不读**。
+   *
+   * 实测形态：`traders.agent_config_json` 里
+   *
+   *     顶层 config.customPrompt            = 643 字符（来自策略层，被渲染）
+   *     config.promptSections.customPrompt  = 629 字符（**模型写的，被丢弃**）
+   *
+   * 两栏都有内容、都叫 `customPrompt`，而只有一栏生效 —— **模型以为自己已经
+   * 给系统下了指示，而系统收到的是一份几百轮没变过的旧文本。**
+   * 这属于本项目最忌讳的那类缺陷：**一个字段说"我写了"，另一个字段说"我没收到"。**
+   *
+   * 修法不是"改 schema 去掉那一栏"（那会让它已经写下的内容凭空消失），
+   * 而是**两栏都读**：顶层在前（账户所有者的），模型自己写的在后（并标明归属，
+   * 以便它知道那一段是自己写的、可以改也可以删）。
+   */
+  const ownerCustom = config.customPrompt.trim();
+  const agentCustom = (config.promptSections as { customPrompt?: string }).customPrompt?.trim() ?? '';
+  if (ownerCustom) {
+    sections.push(`# 账户所有者追加的指示\n${ownerCustom}`);
+  }
+  if (agentCustom) {
+    sections.push(
+      '# 你自己写下的长期指示\n' +
+        '（这一栏是你用 `set_params` 写的 `promptSections.customPrompt` —— ' +
+        '**它是你自己的规则**，不再适用时直接改掉或清空。）\n\n' +
+        agentCustom,
+    );
   }
 
   return sections.join('\n\n');
