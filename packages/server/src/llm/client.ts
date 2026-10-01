@@ -2,7 +2,7 @@ import { getProvider, type LlmProviderId, type LlmProviderDescriptor } from '@aq
 import { createLogger } from '../logger.js';
 import { maskSecret } from '../crypto/vault.js';
 import { LlmError, emptyCompletionError, isRetryable } from './errors.js';
-import { executeJsonRequest } from './http.js';
+import { executeJsonRequest, executeStreamRequest } from './http.js';
 import * as openai from './openaiCompatible.js';
 import * as anthropic from './anthropic.js';
 import * as gemini from './gemini.js';
@@ -105,6 +105,15 @@ export class LlmClient {
   private readonly temperature: number | undefined;
   private readonly maxTokens: number | undefined;
   private readonly timeoutMs: number;
+  /**
+   * 流式请求被网关拒绝后置位 —— 此后这一实例退回非流式。
+   *
+   * ⚠️ **不能让一个可选优化变成"每一轮都失败"。** 参数名是 `stream`，
+   * 而 `OpenAI` 兼容网关的实现质量参差：有的不认 `stream_options`，
+   * 有的把流式当成不同的端点。而 400 被正确归为"不可重试"，
+   * 于是不降级就等于每轮都炸。
+   */
+  private streamDisabled = false;
   private readonly maxRetries: number;
   private readonly jsonMode: boolean;
   private readonly jsonSchema: Record<string, unknown> | undefined;
@@ -285,6 +294,37 @@ export class LlmClient {
           continue;
         }
 
+        /*
+         * ⚠️ **流式被网关拒绝 → 退回非流式重来一次。**
+         *
+         * 与上面 `reasoning_effort` 的降级同一类：`stream` 是一个**可选优化**
+         * （它解决网关 100 秒的源站超时，见 `stream.ts`），而某些 OpenAI 兼容
+         * 网关不认 `stream` 或 `stream_options`，会返回 400 ——
+         * 而 400 被正确归为"不可重试"，于是不降级就等于**每一轮都失败**。
+         *
+         * 只做一次（`streamDisabled` 守住），且**关掉就不再打开** ——
+         * 一个已经拒绝过流式的端点，下一轮再试只会再被拒一次。
+         * 这个标记活在客户端实例上，而实例是每个机器人一个、随进程存活。
+         *
+         * 注意：这里的 `continue` **会消耗一次重试预算**（见上面那条注释），
+         * 所以它只在 `maxRetries >= 1` 时才有第二次机会 —— 而这正是
+         * 本项目所有 provider 的默认值（2–3）。
+         */
+        if (
+          this.descriptor.openAiCompatible &&
+          !this.streamDisabled &&
+          error instanceof LlmError &&
+          error.kind === 'bad_request'
+        ) {
+          this.streamDisabled = true;
+          log.warn(
+            `${this.provider} 拒绝了流式请求（HTTP ${error.status}），已退回非流式并立即重试 —— ` +
+              '这次调用不会因为一个可选优化而失败。',
+            { provider: this.provider, model: this.model, status: error.status },
+          );
+          continue;
+        }
+
         const retryable = isRetryable(error);
         const canRetry = retryable && attempt < this.maxRetries;
 
@@ -387,13 +427,31 @@ export class LlmClient {
     probe: boolean,
   ): Promise<ChatResult> {
     const request = this.buildRequest(messages, probe);
-    const response = await executeJsonRequest(this.provider, request, {
-      signal: AbortSignal.timeout(this.timeoutMs),
-      timeoutMs: this.timeoutMs,
-      // MiniMax reports errors inside HTTP 200 bodies; every other provider
-      // leaves this off so a `base_resp`-shaped field is never mis-read.
-      failFastOnMinimaxBaseResp: this.provider === 'minimax',
-    });
+    /*
+     * ⚠️ **OpenAI 兼容的 provider 默认走流式**（探测请求除外）。
+     *
+     * 非流式要等整个响应生成完才返回响应头，而链路上的网关等 100 秒就发
+     * `HTTP 524`；我们的请求实测 60–205 秒 —— **整轮决策作废**
+     * （2026-10-01 实测：一轮 8 轮里 4 次）。见 `stream.ts`。
+     *
+     * `streamDisabled` 是一次性的自我降级：若某个网关**不接受**流式参数
+     * （返回 400），这一实例此后就退回非流式 —— 不能让一个可选优化
+     * 变成"每一轮都失败"。
+     */
+    const useStream =
+      this.descriptor.openAiCompatible && !probe && !this.streamDisabled;
+    const response = useStream
+      ? await executeStreamRequest(this.provider, request, {
+          signal: AbortSignal.timeout(this.timeoutMs),
+          timeoutMs: this.timeoutMs,
+        })
+      : await executeJsonRequest(this.provider, request, {
+          signal: AbortSignal.timeout(this.timeoutMs),
+          timeoutMs: this.timeoutMs,
+          // MiniMax reports errors inside HTTP 200 bodies; every other provider
+          // leaves this off so a `base_resp`-shaped field is never mis-read.
+          failFastOnMinimaxBaseResp: this.provider === 'minimax',
+        });
 
     const parsed = this.parse(response.body);
     const latencyMs = Date.now() - startedAt;

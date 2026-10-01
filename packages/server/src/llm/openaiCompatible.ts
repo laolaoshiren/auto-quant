@@ -36,6 +36,17 @@ export interface OpenAiBodyOptions {
    * 第一次带上，被拒就立刻去掉重来一次）。
    */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /**
+   * ⚠️ **是否用 SSE 流式请求（默认 false 保持原行为）。**
+   *
+   * 见 `stream.ts` 的说明：非流式要等**整个响应生成完**才返回响应头，
+   * 而链路上的网关（Cloudflare）等 **100 秒**没有响应头就发 `HTTP 524`。
+   * 我们的请求实测 60–205 秒，于是**整轮决策作废**（实测一轮 8 轮里 4 次）。
+   *
+   * 流式让源站**一连上就返回响应头**，网关的计时不再是问题；
+   * 而客户端仍然读到流结束才返回，对上层透明。
+   */
+  stream?: boolean;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -125,7 +136,18 @@ export function buildBody(
   const wireMessages: JsonObject[] = turns.map((m) => ({ role: m.role, content: m.content }));
   if (system !== undefined) wireMessages.unshift({ role: 'system', content: system });
 
-  const body: JsonObject = { model, messages: wireMessages, stream: false };
+  const body: JsonObject = {
+    model,
+    messages: wireMessages,
+    stream: options.stream === true,
+  };
+  /*
+   * 流式下 `usage` 默认**不返回**（OpenAI 的行为，多数兼容网关照抄）。
+   * 而用量是计费与"缓存命中率"展示的唯一来源 —— 所以显式要它。
+   */
+  if (options.stream === true) {
+    body['stream_options'] = { include_usage: true };
+  }
 
   if (options.temperature !== undefined && !rejectsSamplingParameters(provider)) {
     body['temperature'] = options.temperature;
