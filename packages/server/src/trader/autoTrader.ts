@@ -8617,8 +8617,42 @@ export function describeCycleFailure(error: unknown, phase: CycleFailurePhase): 
       case 'rate_limit':
       case 'overloaded':
       case 'server':
-      case 'timeout':
-        return `AI 服务不可用：${detail}。这是服务商侧的临时故障（限流 / 过载 / 超时 / 5xx），机器人下一轮会自动重试，通常不需要人工处理。`;
+      case 'timeout': {
+        /*
+         * ⚠️ **必须说清"具体是哪一种不可用"。**
+         *
+         * 用户 2026-10-01 的原话：「还有图示的报错（系统不能自己处理重试？
+         * **因为报错的时候我用 API 测试上游是可用的**）」。
+         *
+         * 他看到的是一句把四类原因混在一起的话，于是**无从判断该等还是该查**。
+         * 而这四类指向完全不同的处置：
+         *
+         *   · **超时**（`request exceeded 240000ms`）—— 是**我们**的请求跑太久，
+         *     该动的是提示词大小与超时配置，不是去服务商后台查；用户在那里单独测 API
+         *     会发现"上游是好的"，因为那是**另一个请求路径**（请求体小得多）。
+         *   · **限流**（429）—— 该退避，而不是立刻重试（那会加剧限流）。
+         *   · **5xx** —— 确实是上游，等一等就恢复。
+         *
+         * 格式约束：第一个全角冒号之前必须仍是类别 —— `DecisionFeed.failureCategory()`
+         * 靠它渲染元数据行。
+         */
+        const which =
+          error.kind === 'rate_limit'
+            ? '被限流'
+            : error.kind === 'overloaded'
+              ? '服务商过载'
+              : error.kind === 'server'
+                ? '服务商 5xx'
+                : '请求超时';
+        const http = typeof error.status === 'number' ? `HTTP ${error.status}` : '无 HTTP 状态';
+        const advice =
+          error.kind === 'timeout'
+            ? '**注意：这一类的责任在我们这边** —— 请求没有在配置的时限内拿到响应，' +
+              '通常意味着单次请求太大或模型推理太久，而不是上游挂了。' +
+              '机器人在下一轮会重试；若反复出现，可考虑调小候选池或提高该模型的超时配置。'
+            : '这是服务商侧的临时故障，机器人下一轮会自动重试，通常不需要人工处理。';
+        return `AI 服务不可用：${which}（${http}）—— ${detail}。${advice}`;
+      }
       case 'unknown':
         return looksLikeEmptyCompletion(error)
           ? `AI 响应无法解析：${detail}。模型返回了 HTTP 成功但没有任何可用文本（推理过程耗尽输出预算、或内容被审核掉都可能这样），本轮没有决策；机器人会在下一轮重新提问。`

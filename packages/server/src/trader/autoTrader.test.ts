@@ -3228,6 +3228,45 @@ test('行情为空的一轮：也留下恰好一条记录，但不推进连续�
   );
 });
 
+test('★ 失败文案要说清「具体是哪一种不可用」—— 而不是笼统的"服务商故障"', () => {
+  /*
+   * ## 用户 2026-10-01 的原话
+   *
+   * 「还有图示的报错（系统不能自己处理重试？**因为报错的时候我用 API 测试上游是可用的**）」
+   *
+   * 他看到的只有一句笼统的话：
+   *
+   *     AI 服务不可用：…这是服务商侧的临时故障（限流 / 过载 / 超时 / 5xx）…
+   *
+   * 四类原因被混在一句话里，于是**"上游到底怎么了"无法判断** ——
+   * 而实测里它们指向完全不同的处置：
+   *
+   *   · **超时**（`request exceeded 240000ms`）—— 是**我们**的请求跑太久，
+   *     该改的是提示词大小与超时配置，不是去服务商后台查；
+   *   · **限流**（429）—— 该退避，而不是立刻重试（那会加剧限流）；
+   *   · **5xx** —— 确实是上游，等一等就恢复。
+   *
+   * 用户去服务商后台单独测 API 会发现"上游是好的"，因为那是**另一个请求路径**
+   * （请求体小得多）。把类别与 HTTP 状态写在文案里，这个矛盾就不会再出现。
+   *
+   * 格式约束：第一个全角冒号之前必须是类别（`DecisionFeed.failureCategory()` 依赖它）。
+   */
+  const rateLimited = describeCycleFailure(
+    classifyHttpError('commandcode', 429, { message: 'too many requests' }),
+    'model',
+  );
+  assert.match(rateLimited, /^AI 服务不可用：/, '类别仍在第一个全角冒号前');
+  assert.match(rateLimited, /被限流/, '要说清是限流');
+  assert.match(rateLimited, /HTTP 429/, '要带上 HTTP 状态 —— 那是可查证的原始事实');
+
+  const serverError = describeCycleFailure(
+    classifyHttpError('commandcode', 503, { message: 'upstream error' }),
+    'model',
+  );
+  assert.match(serverError, /^AI 服务不可用：/);
+  assert.match(serverError, /HTTP 503/);
+});
+
 test('describeCycleFailure：每一类失败都给一句可执行的中文说明，且类别写在第一个全角冒号之前', async () => {
   /*
    * Why this test exists.
