@@ -119,6 +119,20 @@ type PositionRow = ReturnType<typeof positionStore.open>[number];
 const RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
+ * 一轮决策的硬上限（20 分钟）。超过它，执行锁被强制释放。
+ *
+ * ⚠️ **这是 2026-10-02 为一个"静默停摆 8.5 小时"的事故加的。**
+ *
+ * `tick()` 的第一句是 `if (this.cycleInFlight) return;` —— **它直接返回且不排下一次**。
+ * 所以只要有一个 `await` 永远不 resolve，机器人就再也不会产生任何一轮：
+ * 状态显示 `running`，日志里还在打上游重试，而 `decision_records` 一条新记录都没有。
+ *
+ * 20 分钟这个数：实测一轮正常耗时 1–9 分钟（含 524 重试 3×125 秒、取数追问、
+ * 回执追问），所以 20 分钟足够容纳**明显偏慢**的一轮，而不会把正常的长轮次误杀。
+ */
+export const CYCLE_HARD_TIMEOUT_MS = 20 * 60_000;
+
+/**
  * 账本对账的容差 —— **绝对下限 + 权益的 0.1%，取较大者**。
  *
  * ## 为什么固定的 1 美分在两个方向上都是错的（2026-10-02 实测）
@@ -1011,6 +1025,27 @@ export class AutoTrader {
    * is what stops the timer from overlapping itself, and the promise is what lets
    * `stop()` and the reconcile endpoint wait for the cycle to finish instead of
    * writing the books underneath it.
+   *
+   * ## ⚠️ 为什么必须有硬超时（2026-10-02 实测：卡了 8.5 小时）
+   *
+   * 在此之前这里是一个**无超时**的包装 —— 而 `tick()` 的第一句是
+   * `if (this.cycleInFlight) return;`：**它直接返回，并且不排下一次**。
+   *
+   * 所以只要有一个 `await` 永远不 resolve（网络连接半死、流读不到 EOS、
+   * 上游网关既不回包也不断开），就会发生这件事：
+   *
+   *   1. `cycleInFlight` 永远是 `true`；
+   *   2. 每次 `tick` 都在第一句返回，**不排下一次**；
+   *   3. 于是机器人"看起来在跑"（状态 `running`），而**实际上一轮都不再发生**。
+   *
+   * 实测形态：`decision_records` 从 02:06 起再没有新条目，而日志里
+   * 05:22 / 06:28 / 08:23 / 09:12 都还在打 "524 重试" ——
+   * **八小时半里它每 30 分钟只是"被叫醒、发现上一轮还在、然后什么都不做"。**
+   *
+   * `AbortSignal.timeout` 管得住 `fetch` 本身，但"读到流结束"那一步在某类连接上
+   * 不保证被 abort 唤醒。**一个无超时的等待没有义务去分辨是哪种情况** ——
+   * 所以这里给它一个上限：宁可让已经卡住的轮次被释放（最坏是两轮重叠，
+   * 而保护单在交易所侧兜底），也不要让整个机器人静默停摆。
    */
   private async inCycle<T>(work: () => Promise<T>): Promise<T> {
     this.cycleInFlight = true;
@@ -1018,9 +1053,26 @@ export class AutoTrader {
     this.cyclePromise = new Promise<void>((resolve) => {
       done = resolve;
     });
+    let timer: NodeJS.Timeout | null = null;
     try {
-      return await work();
+      /*
+       * `Promise.race`：正常跑完就走 `work()`；超过硬上限就抛出，
+       * 由下面的 `finally` 释放标志 —— 而 `work()` 本身仍在后台，
+       * 它的结果（如果有）会被后续的对账/持有检查发现。
+       */
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new Error(
+              `一轮决策超过 ${Math.round(CYCLE_HARD_TIMEOUT_MS / 60_000)} 分钟仍未结束，` +
+                '已强制释放执行锁以避免机器人永久停摆（下一轮照常排期）。',
+            ),
+          );
+        }, CYCLE_HARD_TIMEOUT_MS);
+      });
+      return await Promise.race([work(), timeout]);
     } finally {
+      if (timer !== null) clearTimeout(timer);
       this.cycleInFlight = false;
       this.cyclePromise = null;
       done();

@@ -33,6 +33,7 @@ import {
 } from '../store/repositories.js';
 import {
   AutoTrader,
+  CYCLE_HARD_TIMEOUT_MS,
   describeCycleFailure,
   LEDGER_GAP_TOLERANCE_ABS,
   ledgerGapTolerance,
@@ -3303,6 +3304,38 @@ test('★ 账本容差必须随账户规模缩放 —— 固定 1 美分把小�
   assert.equal(ledgerGapTolerance(Number.NaN), LEDGER_GAP_TOLERANCE_ABS);
   assert.equal(ledgerGapTolerance(-5), LEDGER_GAP_TOLERANCE_ABS);
   assert.equal(ledgerGapTolerance(1), LEDGER_GAP_TOLERANCE_ABS, '极小权益也不低于绝对下限');
+});
+
+test('★ 一轮决策必须有硬超时 —— 否则一个挂住的 await 会让机器人静默停摆', () => {
+  /*
+   * ## 实测事故（2026-10-02，静默停了 8.5 小时）
+   *
+   * `tick()` 的第一句是 `if (this.cycleInFlight) return;` —— **直接返回且不排下一次**。
+   * 而在给它加超时之前，`inCycle` 是一个**无超时**的包装：
+   *
+   *     1. 某个 `await` 永远不 resolve（连接半死、流读不到 EOS）；
+   *     2. `cycleInFlight` 永远是 true；
+   *     3. 每次 tick 都在第一句返回，**不再排期**；
+   *     4. 机器人状态显示 `running`、日志里还在打上游重试，
+   *        而 `decision_records` 从 02:06 起八小时半没有一条新记录。
+   *
+   * `AbortSignal.timeout` 管得住 `fetch` 本身，但"读到流结束"那一步在某类连接上
+   * 不保证被 abort 唤醒 —— 一个无超时的等待没有义务去分辨是哪种情况。
+   *
+   * ## 这条用例钉住什么
+   *
+   * 超时值必须**足够容纳一轮明显偏慢的轮次**（实测正常 1–9 分钟，含
+   * 524 重试 3×125 秒 + 取数追问 + 回执追问），所以不能定得太小 ——
+   * 那会把正常的轮次误杀成失败，比不设超时更糟。
+   */
+  assert.ok(
+    CYCLE_HARD_TIMEOUT_MS >= 10 * 60_000,
+    '硬超时不能小于 10 分钟 —— 正常一轮实测要 1–9 分钟，误杀比不停摆更糟',
+  );
+  assert.ok(
+    CYCLE_HARD_TIMEOUT_MS <= 60 * 60_000,
+    '硬超时也不能大到形同虚设 —— 一小时还不释放就失去意义了',
+  );
 });
 
 test('describeCycleFailure：每一类失败都给一句可执行的中文说明，且类别写在第一个全角冒号之前', async () => {
