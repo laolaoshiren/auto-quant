@@ -246,6 +246,83 @@ test('本小时调用次数从运行轨迹算', () => {
   assert.equal(ports().callsThisHour(), 1);
 });
 
+test('★ 复盘的最终结论必须落库 —— 否则"我打开网页看到模型在做什么"只看到"自行结束"', () => {
+  /*
+   * ## 实测（2026-10-02）
+   *
+   * 线上 26 次 `losing_streak` 复盘：均 4.1 步、**均输出 6,962 tokens**、
+   * 单次输入 85K–212K tokens —— 是很重的思考。而 `agent_runs` 里留下的
+   * `detail` 是「模型在第 4 步自行结束。」（13 个字符）。
+   *
+   * 原因：`LoopResult` 同时带 `detail`（**怎么结束的**）与 `conclusion`
+   * （**得出了什么**），而 `recordRun` 只写了前者 —— **结论被丢掉了**。
+   *
+   * 决策轮有 `cot_trace` 可看，而**复盘轮**（它"自我反思、迭代"的那一半）
+   * 在界面上是空的。事后也无法回答"它上次为什么决定不改那个参数"。
+   */
+  const p = ports();
+  const conclusion = JSON.stringify({
+    lesson: '峰值 6.1% 的仓位只拿到 0.6% —— 锁盈止损被"至少 1×ATR"这条推得太远',
+    tags: ['exit', 'trailing'],
+  });
+  p.recordRun({
+    kind: 'strategy',
+    trigger: 'losing_streak',
+    intensity: 'single',
+    result: {
+      outcome: 'ok',
+      steps: [
+        { step: 1, thought: '先看绩效分布', tool: 'get_performance', args: {}, result: {} },
+        { step: 2, thought: '再看锁盈规则', tool: 'get_current_params', args: {}, result: {} },
+      ],
+      conclusion,
+      detail: '模型在第 2 步自行结束。',
+      tokensIn: 100,
+      tokensOut: 200,
+      latencyMs: 300,
+    } as never,
+  });
+
+  const latest = agentRuns.recent(traderId, 5)[0]!;
+  assert.match(
+    String(latest.detail),
+    /峰值 6\.1%/,
+    '★ 最终结论必须出现在落库的 detail 里 —— 否则那 7,000 tokens 的思考全丢了',
+  );
+  assert.match(String(latest.detail), /自行结束/, '原有的"怎么结束"那半句要保留，两者信息互补');
+  /* 每一步的思考照旧要存（过程与结果都要）。 */
+  assert.equal(latest.steps, 2);
+});
+
+test('撞步数上限（degraded）时不要伪造结论', () => {
+  /*
+   * `degraded` 的含义是"没有结论"（撞了步数上限），那时 `conclusion` 是 null，
+   * 而 `detail` 里写着"达到步数上限…本轮没有结论"。
+   * 拼接时若补一个空结论，就把"没有结论"伪装成了"有一个空结论"。
+   */
+  const p = ports();
+  p.recordRun({
+    kind: 'strategy',
+    trigger: 'losing_streak',
+    intensity: 'single',
+    result: {
+      outcome: 'degraded',
+      steps: [],
+      conclusion: null,
+      detail: '达到步数上限（13 步）仍未结束，本轮没有结论。',
+      tokensIn: 1,
+      tokensOut: 1,
+      latencyMs: 1,
+    } as never,
+  });
+  const latest = agentRuns.recent(traderId, 1)[0]!;
+  assert.equal(
+    String(latest.detail),
+    '达到步数上限（13 步）仍未结束，本轮没有结论。',
+    '★ 没有结论时不要写"结论："这一行',
+  );
+});
+
 /* -------------------------------------------------------------------------- */
 /*  暂停与记忆                                                                 */
 /* -------------------------------------------------------------------------- */

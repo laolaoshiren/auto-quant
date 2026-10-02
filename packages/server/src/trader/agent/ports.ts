@@ -623,7 +623,36 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
         steps: row.result.steps.length,
         agents: row.result.steps.map((s) => ({ step: s.step, tool: s.tool, thought: s.thought })),
         outcome: row.result.outcome,
-        detail: row.result.detail,
+        /*
+         * ⚠️ **必须把最终结论一起写下来。**
+         *
+         * ## 实测（2026-10-02）：它每轮复盘输出约 7,000 tokens，而 DB 里只剩一句话
+         *
+         * 线上 26 次 `losing_streak` 复盘：均 4.1 步、均输出 **6,962 tokens**、
+         * 单次输入 85K–212K tokens —— 是很重的思考。而 `agent_runs.detail` 里
+         * 写的是"模型在第 4 步自行结束。"（13 个字符）。
+         *
+         * 原因就在这里：`LoopResult` 同时带 `detail`（**怎么结束的**）和
+         * `conclusion`（**得出了什么**），而这里只写了前者 —— **结论被丢掉了**。
+         *
+         * 后果正好撞在用户的要求上：「我打开网页就能看到模型在做什么」。
+         * 决策轮有 `cot_trace` 可看，而**复盘轮——它"自我反思、迭代"的那一半——看不见**。
+         * 更实际的损失：事后无法回答"它上次为什么决定不改那个参数"。
+         *
+         * 写成 `detail` 之后追加一段，而不是新加一列：`detail` 本来就是自由文本的
+         * 说明字段，这样零迁移、旧记录也照常读。
+         */
+        detail: (() => {
+          const conclusion = row.result.conclusion;
+          if (conclusion === null || conclusion === undefined || String(conclusion).trim() === '') {
+            /*
+             * `degraded`（撞步数上限）时 `conclusion` 就是 null —— 那时如实保持
+             * `detail` 里的"达到步数上限…没有结论"，不要伪造一个空结论。
+             */
+            return row.result.detail;
+          }
+          return `${row.result.detail}\n\n结论：${String(conclusion)}`;
+        })(),
         tokensIn: row.result.tokensIn,
         tokensOut: row.result.tokensOut,
         latencyMs: row.result.latencyMs,
