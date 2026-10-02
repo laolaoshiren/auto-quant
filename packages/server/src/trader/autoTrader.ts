@@ -145,6 +145,17 @@ export const CYCLE_HARD_TIMEOUT_MS = 20 * 60_000;
 export const MAX_ZOMBIE_CYCLES = 2;
 
 /**
+ * 两次参数改动之间至少隔多久。
+ *
+ * 30 分钟 = 它自己的一个决策周期。理由是**让每一次改动都经过一轮完整的
+ * 决策循环再被评估**：改完立刻再改，等于没有任何一次改动被检验过。
+ */
+export const PARAM_CHANGE_MIN_INTERVAL_MS = 30 * 60_000;
+
+/** 一小时内最多改几次参数。 */
+export const PARAM_CHANGE_MAX_PER_HOUR = 2;
+
+/**
  * 账本对账的容差 —— **绝对下限 + 权益的 0.1%，取较大者**。
  *
  * ## 为什么固定的 1 美分在两个方向上都是错的（2026-10-02 实测）
@@ -1089,6 +1100,61 @@ export class AutoTrader {
         if (cap !== null && cap > 0) this.leverageCapCache.set(symbol, cap);
       }),
     );
+  }
+
+  /**
+   * 参数改动的频率闸门：返回 `null` 表示放行，否则返回**要如实回喂给模型**的拒绝原因。
+   *
+   * 完整理由见 `applyPatch` 里那段说明 —— 一句话：决策轮每 30 分钟一轮、
+   * 每轮可调 3 次，没有闸门时一天能改 144 次，参数会振荡而任何改动都来不及被验证。
+   *
+   * 记账放在 `settings` 里（同一前缀 `param_change:`），所以**重启不清零** ——
+   * 否则一次重启就等于把配额重置，而那正是"频繁部署让抖动更严重"的形态。
+   */
+  private paramChangeGate(traderId: number): string | null {
+    const now = Date.now();
+    const recent = this.recentParamChanges(traderId, now);
+
+    const last = recent[0];
+    if (last !== undefined && now - last < PARAM_CHANGE_MIN_INTERVAL_MS) {
+      const waited = Math.round((now - last) / 60_000);
+      return (
+        `距离上一次参数改动只过了 ${waited} 分钟（下限 ` +
+        `${Math.round(PARAM_CHANGE_MIN_INTERVAL_MS / 60_000)} 分钟）—— ` +
+        '请先把上一次改动的结果看完再动它：改完立刻再改，等于两次都没被检验过。'
+      );
+    }
+    if (recent.length >= PARAM_CHANGE_MAX_PER_HOUR) {
+      return (
+        `这一小时已经改过 ${recent.length} 次参数（上限 ${PARAM_CHANGE_MAX_PER_HOUR}）—— ` +
+        '参数不是主要矛盾，先把注意力放回这一轮的行情上。'
+      );
+    }
+    return null;
+  }
+
+  /** 最近一小时内**成功**的参数改动时间戳（新→旧）。 */
+  private recentParamChanges(traderId: number, now: number): number[] {
+    try {
+      const raw = settings.get(`param_change_log:${traderId}`);
+      if (!raw) return [];
+      const parsed = JSON.parse(String(raw)) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .map((t) => Number(t))
+        .filter((t) => Number.isFinite(t) && now - t < 60 * 60_000)
+        .sort((a, b) => b - a);
+    } catch {
+      /* 读不到就当"没改过"—— 少一层限制好过让整个决策失败。 */
+      return [];
+    }
+  }
+
+  /** 记一次成功的参数改动（供下一轮的闸门判断）。 */
+  private noteParamChange(traderId: number): void {
+    const now = Date.now();
+    const recent = this.recentParamChanges(traderId, now);
+    settings.set(`param_change_log:${traderId}`, JSON.stringify([now, ...recent].slice(0, 20)));
   }
 
   private async ensurePositionMode(): Promise<void> {    const mode = await this.deps.broker.ensureOneWayMode().catch((error) => ({
@@ -2638,6 +2704,35 @@ export class AutoTrader {
        * 这不是给模型开旁路，而是把**它本来就有的权限**接到它做决策的地方。
        */
       applyPatch: async (patch, reason) => {
+        /*
+         * ⚠️ **配额：同一小时内最多改 N 次，且两次之间至少隔 M 分钟。**
+         *
+         * ## 为什么需要它
+         *
+         * 这条通道是 2026-10-02 才接到决策轮的（在那之前它只在复盘轮、
+         * 且受 `callsThisHour` 的小时预算约束）。决策轮的 `set_params`
+         * **本来没有任何频率限制**：它在按需取数的循环里，每轮最多 3 次，
+         * 每 30 分钟一轮 —— 一天理论上可以改 **144 次**。
+         *
+         * 复盘轮不存在这个问题：它一次审视改一次、然后**等结果**
+         * （`agent_experiments` 就是为验证那次改动而记的）。
+         * 决策轮如果每轮都顺手改一下，参数会**振荡** ——
+         * 而"改完立刻又改"让任何改动都来不及经过一轮完整交易去验证。
+         *
+         * ## 它不限制"能不能改"，只限制"改得多频繁"
+         *
+         * 用户的原则是"模型是大脑"，所以这里**不判断改什么、也不要求理由充分**
+         * （那是它自己的事）。拦的只是**频率** —— 与限流同类，
+         * 属于系统的职责，而不是对判断的干预。
+         *
+         * 被拦时**如实回喂**（与 `clamps` 同一个理由）：不告诉它，
+         * 它会以为改成了、并在下一轮基于一个错误前提继续推理。
+         */
+        const gate = this.paramChangeGate(traderId);
+        if (gate !== null) {
+          return { applied: false, rejected: gate, clamps: [] };
+        }
+
         const current = this.activeConfig;
         const result = applyAgentPatch(current, patch);
         if (result.rejected === null) {
@@ -2656,6 +2751,8 @@ export class AutoTrader {
             `param_change:${traderId}:${Date.now()}`,
             JSON.stringify({ at: new Date().toISOString(), reason, patch, clamps: result.clamps }),
           );
+          /* 记进频率闸门的账本 —— 只有**成功**的改动才算，被守卫拒绝的不占配额。 */
+          this.noteParamChange(traderId);
           log.info(`[${this.deps.trader.name}] 决策轮里改了参数：${reason}`, {
             patch,
             clamps: result.clamps,

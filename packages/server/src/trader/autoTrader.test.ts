@@ -3781,6 +3781,78 @@ test('教训条数不足上限时有几条给几条 —— 不要补空行', () 
   assert.equal(picked.length, 1);
 });
 
+test('★ 决策轮改参数有频率闸门 —— 防止它每轮微调把参数调成噪声', async () => {
+  /*
+   * ## 为什么需要（2026-10-02 复查自己新加的能力时发现的）
+   *
+   * `set_params` 在复盘轮**本来受 `callsThisHour` 的小时预算约束**。
+   * 而我把它接到决策轮时（`66dc0db`），那里**没有任何频率限制**：
+   * 它在按需取数的循环里，每轮最多 3 次，每 30 分钟一轮 ——
+   * 一天理论上能改 **144 次**。
+   *
+   * 复盘轮不存在这个问题：它一次审视改一次、然后**等结果**
+   * （`agent_experiments` 就是为验证那次改动而记的）。而决策轮如果每轮顺手改一下，
+   * 参数会**振荡**，且任何一次改动都来不及经过一轮完整交易被检验。
+   *
+   * ## 闸门只拦频率，不拦内容
+   *
+   * 用户的原则是"模型是大脑"——所以系统**不判断它改什么、也不要求理由充分**。
+   * 拦的只是"改得多频繁"，与限流同类。
+   *
+   * 而被拦时**必须如实告诉它**（与 `clamps` 同一个理由）：不告诉它，
+   * 它会以为改成了，并在下一轮基于一个错误前提继续推理。
+   */
+  const broker = new FakeBroker();
+  /* 两轮的 patch 不同，用来区分"被拦下"与"改了但值一样"。 */
+  const toolCall = (limit: string): string =>
+    '先把风险预算放宽。\n' +
+    `<tool>{"tool":"set_params","args":{"patch":{"promptSections":{"entryStandards":"止损上限 ${limit}"}},"reason":"低波动标的走不出止盈"}}</tool>`;
+  let call = 0;
+  let limit = '5%';
+  const model: DecisionModel = {
+    async complete() {
+      const text = call === 0 ? toolCall(limit) : '<decision>[]</decision>';
+      call += 1;
+      return { text, latencyMs: 1, usage: { promptTokens: 1, completionTokens: 1 } };
+    },
+  };
+
+  /* 第一轮：闸门放行，改动生效。 */
+  const first = buildTrader(broker, '', model);
+  await first.runOnce();
+  const afterFirst = JSON.parse(
+    String((traders.get(traderId) as { agentConfigJson?: string }).agentConfigJson ?? '{}'),
+  ) as { promptSections?: { entryStandards?: string } };
+  assert.match(
+    String(afterFirst.promptSections?.entryStandards ?? ''),
+    /止损上限 5%/,
+    '前提：第一次的改动确实落库了（否则测的不是闸门而是别的）',
+  );
+
+  /* 第二轮：换个值再改一次 —— 必须被闸门拦下。 */
+  call = 0;
+  limit = '9%';
+  const second = buildTrader(broker, '', model);
+  await second.runOnce();
+  const afterSecond = JSON.parse(
+    String((traders.get(traderId) as { agentConfigJson?: string }).agentConfigJson ?? '{}'),
+  ) as { promptSections?: { entryStandards?: string } };
+  /*
+   * 闸门的直接证据：第二次的 patch 与第一次不同（"止损上限 9%"），
+   * 而配置里**仍然是第一次的值** —— 说明第二次根本没落库。
+   */
+  assert.match(
+    String(afterSecond.promptSections?.entryStandards ?? ''),
+    /止损上限 5%/,
+    '★ 被闸门拦下时改动不能落库 —— 否则"每轮微调"的振荡照旧发生',
+  );
+  assert.doesNotMatch(
+    String(afterSecond.promptSections?.entryStandards ?? ''),
+    /止损上限 9%/,
+    '★ 第二次的 patch 不能生效',
+  );
+});
+
 test('★ 硬超时会真的中止那一轮 —— 信号必须到达模型层，而不是只放锁', async () => {
   /*
    * ## 这条用例守的是一个**我自己引入的**故障（2026-10-02）
