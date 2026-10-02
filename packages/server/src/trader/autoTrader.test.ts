@@ -994,6 +994,8 @@ function buildTrader(
   model?: DecisionModel,
   /** 默认是 `beforeEach` 建的那个机器人；共账户的用例需要给第二个机器人也建一个。 */
   id = traderId,
+  /** 硬超时（毫秒）—— 只有测超时路径时传，默认走生产值 20 分钟。 */
+  cycleHardTimeoutMs?: number,
 ): AutoTrader {
   const trader = traders.get(id);
   const strategy = strategyStore.get(trader!.strategyId!);
@@ -1005,6 +1007,7 @@ function buildTrader(
     marketData: fakeMarketData,
     broker: broker as unknown as BinanceBroker,
     model: model ?? modelReturning(text),
+    ...(cycleHardTimeoutMs === undefined ? {} : { cycleHardTimeoutMs }),
   });
 }
 
@@ -3776,6 +3779,60 @@ test('教训条数不足上限时有几条给几条 —— 不要补空行', () 
     8,
   );
   assert.equal(picked.length, 1);
+});
+
+test('★ 硬超时会真的中止那一轮 —— 信号必须到达模型层，而不是只放锁', async () => {
+  /*
+   * ## 这条用例守的是一个**我自己引入的**故障（2026-10-02）
+   *
+   * 硬超时的第一版是 `Promise.race([work(), timeout])`：超时后只释放执行锁，
+   * 而 `work()` 仍在后台跑。被判定为"卡住"的那一轮**很可能永远不结束**，
+   * 于是它永久持着 138K 字符量级的提示词与响应；**每超时一轮就再留一个**。
+   * 当天 524 频繁（47 轮里 6 次失败），僵尸累积到把服务器内存耗尽。
+   *
+   * 修法是给 `work()` 传 `AbortSignal` 并在超时时 `abort()`。而"传了 signal"
+   * 与"signal 真的到达模型层"是两件事 —— 中间隔着一整条链：
+   *
+   *     inCycle.abort() → runCycle → runCycleBody
+   *       → model.complete(system, user, { signal })
+   *       → manager 适配层 → client.complete → client.chat → attempt → fetch
+   *
+   * **少传一环，这个修复就是假的**（代码看起来做了取消，而请求照样挂着）。
+   * 所以这里用一个"永不 resolve"的模型替身，断言两点：
+   *   ① 它**收到了** signal；
+   *   ② 超时后那个 signal **被 abort 了**。
+   */
+  const broker = new FakeBroker();
+  let receivedSignal: AbortSignal | undefined;
+  let aborted = false;
+  const hangingModel: DecisionModel = {
+    complete: (_system, _user, options) => {
+      receivedSignal = options?.signal;
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(new Error('这一轮被硬超时中止'));
+        });
+        /* 刻意永不 resolve —— 模拟"连接半死、读不到流结束"。 */
+      });
+    },
+  };
+
+  const trader = buildTrader(
+    broker,
+    '',
+    hangingModel,
+    traderId,
+    80 /* 80ms 超时，用例不必等 20 分钟 */,
+  );
+  await assert.rejects(() => trader.runOnce(), /仍未结束|中止/);
+
+  assert.ok(receivedSignal, '★ signal 必须一路传到模型层 —— 少一环这个修复就是假的');
+  assert.equal(
+    aborted,
+    true,
+    '★ 超时必须真的 abort 那一轮 —— 只放锁会让它变成永久持着上下文的僵尸',
+  );
 });
 
 test('★ 僵尸轮次达到上限时不再开新轮 —— 停摆可见，内存被拖死不可见', () => {

@@ -232,7 +232,10 @@ export class LlmClient {
     }
   }
 
-  async chat(messages: ChatMessage[], options: { probe?: boolean } = {}): Promise<ChatResult> {
+  async chat(
+    messages: ChatMessage[],
+    options: { probe?: boolean; signal?: AbortSignal } = {},
+  ): Promise<ChatResult> {
     const startedAt = Date.now();
     const startedAtIso = new Date(startedAt).toISOString();
     let lastError: unknown;
@@ -251,7 +254,7 @@ export class LlmClient {
       });
 
       try {
-        const result = await this.attempt(messages, startedAt, startedAtIso, options.probe === true);
+        const result = await this.attempt(messages, startedAt, startedAtIso, options);
         log.info(`模型调用成功：${this.provider} / ${result.model}`, {
           provider: this.provider,
           model: result.model,
@@ -386,11 +389,18 @@ export class LlmClient {
   }
 
   /** Convenience wrapper matching how the strategy engine calls it. */
-  async complete(systemPrompt: string, userPrompt: string): Promise<ChatResult> {
-    return this.chat([
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ]);
+  async complete(
+    systemPrompt: string,
+    userPrompt: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ChatResult> {
+    return this.chat(
+      [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      options,
+    );
   }
 
   /* ---------------------------------------------------------------------- */
@@ -456,8 +466,9 @@ export class LlmClient {
     messages: ChatMessage[],
     startedAt: number,
     startedAtIso: string,
-    probe: boolean,
+    options: { probe?: boolean; signal?: AbortSignal } = {},
   ): Promise<ChatResult> {
+    const probe = options.probe === true;
     const request = this.buildRequest(messages, probe);
     /*
      * ⚠️ **OpenAI 兼容的 provider 默认走流式**（探测请求除外）。
@@ -472,13 +483,29 @@ export class LlmClient {
      */
     const useStream =
       this.descriptor.openAiCompatible && !probe && !this.streamDisabled;
+    /*
+     * ⚠️ **两个取消源要合并：本客户端自己的超时 + 调用方传来的 signal。**
+     *
+     * 只有前者时，调用方（`AutoTrader.inCycle` 的硬超时）`abort()` 了也没用 ——
+     * 请求会一直挂到 300 秒的单次上限。而那个硬超时正是为了把"卡住的轮次"
+     * 收掉（2026-10-02：这类僵尸轮次累积到把服务器内存耗尽），
+     * 所以它必须能真正打断网络等待。
+     *
+     * `AbortSignal.any` 是 Node 20.3+ 的能力，本项目要求 ≥22.5，可以用。
+     * 任一信号触发都会中止这一跳；重试循环会照常进入下一次尝试，
+     * 而那时 `signal.aborted` 仍为真 —— 上层会看到这一轮被判定为失败。
+     */
+    const signal =
+      options.signal === undefined
+        ? AbortSignal.timeout(this.timeoutMs)
+        : AbortSignal.any([AbortSignal.timeout(this.timeoutMs), options.signal]);
     const response = useStream
       ? await executeStreamRequest(this.provider, request, {
-          signal: AbortSignal.timeout(this.timeoutMs),
+          signal,
           timeoutMs: this.timeoutMs,
         })
       : await executeJsonRequest(this.provider, request, {
-          signal: AbortSignal.timeout(this.timeoutMs),
+          signal,
           timeoutMs: this.timeoutMs,
           // MiniMax reports errors inside HTTP 200 bodies; every other provider
           // leaves this off so a `base_resp`-shaped field is never mis-read.

@@ -350,6 +350,17 @@ export interface DecisionModel {
   complete(
     systemPrompt: string,
     userPrompt: string,
+    /**
+     * ⚠️ **可选的中止信号 —— 硬超时靠它真正取消在途请求。**
+     *
+     * 没有它时，"超时"只能做到"不再等"：那一轮仍在后台跑、并永久持着
+     * 138K 字符量级的上下文。今天（2026-10-02）服务器正是因为这类僵尸轮次
+     * 累积到内存耗尽。见 `inCycle` 的说明。
+     *
+     * **可选**是为了不破坏测试桩与回放器 —— 它们多数不实现这个参数，
+     * 而那没关系：生产实现（`manager.ts` 的适配层）会把它一路穿到 `fetch`。
+     */
+    options?: { signal?: AbortSignal },
   ): Promise<{
     text: string;
     latencyMs: number;
@@ -398,6 +409,15 @@ export interface AutoTraderDeps {
   marketData: MarketDataService;
   broker: BinanceBroker;
   model: DecisionModel;
+  /**
+   * 一轮决策的硬超时（毫秒）。默认 {@link CYCLE_HARD_TIMEOUT_MS}（20 分钟）。
+   *
+   * ⚠️ **存在的唯一理由是让超时路径可测。** 20 分钟的常量没法在用例里等 ——
+   * 而"超时之后会发生什么"（中止那一轮、僵尸计数、到上限就不再开新轮）
+   * 恰恰是最需要被测试钉住的部分：第一版就是因为没测这条路径，
+   * 才会把"只放锁不取消"这种会累积内存的写法发到线上。
+   */
+  cycleHardTimeoutMs?: number;
   /**
    * AI 智能托管接缝（**可选**）。
    *
@@ -1180,11 +1200,11 @@ export class AutoTrader {
           this.noteZombieCycle();
           reject(
             new Error(
-              `一轮决策超过 ${Math.round(CYCLE_HARD_TIMEOUT_MS / 60_000)} 分钟仍未结束，` +
-                '已中止该轮并释放执行锁（下一轮照常排期）。',
+              `一轮决策超过 ${Math.round((this.deps.cycleHardTimeoutMs ?? CYCLE_HARD_TIMEOUT_MS) / 60_000)} ` +
+                '分钟仍未结束，已中止该轮并释放执行锁（下一轮照常排期）。',
             ),
           );
-        }, CYCLE_HARD_TIMEOUT_MS);
+        }, this.deps.cycleHardTimeoutMs ?? CYCLE_HARD_TIMEOUT_MS);
       });
       return await Promise.race([
         work(signal).finally(() => {
@@ -1303,9 +1323,9 @@ export class AutoTrader {
    */
   async runOnce(): Promise<string> {
     if (this.cycleInFlight) throw new Error('上一轮决策尚未结束，请稍后再试。');
-    return this.inCycle(async () => {
+    return this.inCycle(async (signal) => {
       this.cycleNumber += 1;
-      const summary = await this.runCycle(this.cycleNumber);
+      const summary = await this.runCycle(this.cycleNumber, signal);
       traderStore.recordCycle(this.deps.trader.id, this.cycleNumber, 0);
       /*
        * ⚠️ 与 `tick()` 成功分支同一处遗漏 —— `error` 也必须能回到 `running`。
@@ -1478,7 +1498,7 @@ export class AutoTrader {
     this.requestedNextCheckMinutes = undefined;
 
     try {
-      await this.inCycle(async () => {
+      await this.inCycle(async (signal) => {
         this.cycleNumber += 1;
         eventBus.publish({
           type: 'cycle_start',
@@ -1487,7 +1507,7 @@ export class AutoTrader {
           timestamp: new Date().toISOString(),
         });
 
-        const summary = await this.runCycle(this.cycleNumber);
+        const summary = await this.runCycle(this.cycleNumber, signal);
         this.consecutiveFailures = 0;
         traderStore.recordCycle(traderId, this.cycleNumber, 0);
         /*
@@ -1594,7 +1614,7 @@ export class AutoTrader {
    * 因此排在落库之前执行；它只做对账与展示快照、不下任何单，所以
    * "先减少风险、后增加风险"的顺序（§2.9）没有变化。
    */
-  private async runCycle(cycleNumber: number): Promise<string> {
+  private async runCycle(cycleNumber: number, signal?: AbortSignal): Promise<string> {
     const traderId = this.deps.trader.id;
 
     /*
@@ -1629,7 +1649,7 @@ export class AutoTrader {
     let summary: string | null = null;
 
     try {
-      summary = await this.runCycleBody(cycleNumber, progress, state);
+      summary = await this.runCycleBody(cycleNumber, progress, state, signal);
     } catch (error) {
       thrown = error;
       progress.error = describeCycleFailure(error, state.phase);
@@ -1677,6 +1697,7 @@ export class AutoTrader {
     cycleNumber: number,
     progress: CycleProgress,
     state: { phase: CycleFailurePhase },
+    signal?: AbortSignal,
   ): Promise<string> {
     const traderId = this.deps.trader.id;
 
@@ -2534,7 +2555,7 @@ export class AutoTrader {
             : []),
           { role: 'user', content: volatilePrompt },
         ])
-      : await this.deps.model.complete(systemPrompt, userPrompt);
+      : await this.deps.model.complete(systemPrompt, userPrompt, { signal });
 
     /*
      * ── 按需取数：模型可以在给结论之前主动要数据 ─────────────────────────

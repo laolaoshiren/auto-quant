@@ -1093,8 +1093,8 @@ export class TraderManager {
       }
 
       const model: DecisionModel = {
-        complete: async (systemPrompt, userPrompt) => {
-          const result = await client.complete(systemPrompt, userPrompt);
+        complete: async (systemPrompt, userPrompt, options) => {
+          const result = await client.complete(systemPrompt, userPrompt, options);
           return {
             text: result.text,
             latencyMs: result.latencyMs,
