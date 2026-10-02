@@ -134,6 +134,17 @@ const RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 export const CYCLE_HARD_TIMEOUT_MS = 20 * 60_000;
 
 /**
+ * 允许"被中止但还没真正结束"的轮次上限。
+ *
+ * 达到它时 `tick()` **不再开始新轮** —— 见 `tick` 里那段说明：
+ * 短暂停摆（可见、可处理）好过内存被累积的僵尸轮次拖死（不可见）。
+ *
+ * 2 这个数：一轮正常 1–9 分钟，所以同时有 2 轮"超时未结束"已经是异常状态；
+ * 而 2 轮各持 138K 字符量级的上下文仍然安全，再多就开始危险了。
+ */
+export const MAX_ZOMBIE_CYCLES = 2;
+
+/**
  * 账本对账的容差 —— **绝对下限 + 权益的 0.1%，取较大者**。
  *
  * ## 为什么固定的 1 美分在两个方向上都是错的（2026-10-02 实测）
@@ -560,6 +571,25 @@ export class AutoTrader {
    */
   private requestedNextCheckMinutes: number | undefined;
   private cycleInFlight = false;
+  /**
+   * 当前那一轮的 `AbortController`。
+   *
+   * ⚠️ 存在的理由：**硬超时必须真的取消那一轮**，而不只是放弃等待它。
+   * 见 `inCycle` 里那段说明 —— 只放锁会让卡住的轮次变成永久持着
+   * 138K 字符提示词的僵尸，累积起来把进程拖死。
+   */
+  private abortCurrentCycle: AbortController | null = null;
+  /**
+   * 有多少轮"超时了但还没真正结束"。
+   *
+   * ## 为什么需要这个计数
+   *
+   * `abort()` 是请求取消，不是保证终止 —— 如果某个 `work()` 卡在非网络的
+   * `await` 上，它可能不理会 abort。那时唯一的安全阀是**不再开始新轮**：
+   * 宁可短暂停摆（状态可查、错误会写进记录），
+   * 也不要让一个不断累积的内存泄漏把整个进程拖死（**那在界面上看不见**）。
+   */
+  private zombieCycles = 0;
 
   /**
    * 每个"状态位"最近一次记下的文案。
@@ -1099,36 +1129,96 @@ export class AutoTrader {
    * 所以这里给它一个上限：宁可让已经卡住的轮次被释放（最坏是两轮重叠，
    * 而保护单在交易所侧兜底），也不要让整个机器人静默停摆。
    */
-  private async inCycle<T>(work: () => Promise<T>): Promise<T> {
+  private async inCycle<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
     this.cycleInFlight = true;
     let done: () => void = () => undefined;
     this.cyclePromise = new Promise<void>((resolve) => {
       done = resolve;
     });
+    /*
+     * ⚠️ **超时必须真的取消那一轮，而不是只放锁。**
+     *
+     * ## 第一版留下的隐患（2026-10-02 服务器故障当天发现）
+     *
+     * 第一版只是 `Promise.race([work(), timeout])` —— 超时后 `finally` 释放了
+     * `cycleInFlight`，**而 `work()` 仍在后台跑**。当时的注释写的是
+     * 「最坏是两轮重叠，而保护单在交易所侧兜底」—— 那句话只算了**交易风险**，
+     * 没算**内存**：
+     *
+     *   · 一轮的提示词是 138K 字符量级 + LLM 响应 + 工具数据；
+     *   · 若那一轮**永远不结束**（它正是被判定为"卡住"才超时的），
+     *     它就永久持着这些内存；
+     *   · 而每一轮超时都会再留下一个。今天 524 超时频繁 →
+     *     **僵尸轮次累积 → 内存耗尽**。
+     *
+     * 这与"释放执行锁"的初衷相反：加超时是为了**避免停摆**，
+     * 而它顺带引入了一条**新的崩溃路径**。
+     *
+     * ## 现在的做法
+     *
+     * 给 `work()` 传一个 `AbortSignal`，超时时 `abort()` ——
+     * LLM 客户端本来就接 `AbortSignal`（它用 `AbortSignal.timeout` 管单次调用），
+     * 所以这一次中止会真的把在途请求拆掉、让 `work()` 抛错并退出。
+     *
+     * `this.zombieCycles` 是**兜底**：即使某个 `work()` 仍然没有响应 `abort`
+     * （例如卡在非网络的位置），它也会被计数；达到上限时**不再开始新轮** ——
+     * 宁可短暂停摆（用户看得见、上一轮的错误会写进状态），
+     * 也不要让进程被一个不断累积的泄漏拖死（那是**看不见**的）。
+     */
+    this.abortCurrentCycle = new AbortController();
+    const signal = this.abortCurrentCycle.signal;
     let timer: NodeJS.Timeout | null = null;
     try {
-      /*
-       * `Promise.race`：正常跑完就走 `work()`；超过硬上限就抛出，
-       * 由下面的 `finally` 释放标志 —— 而 `work()` 本身仍在后台，
-       * 它的结果（如果有）会被后续的对账/持有检查发现。
-       */
       const timeout = new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
+          /* 真的取消在途请求 —— 不只是放弃等待。 */
+          this.abortCurrentCycle?.abort();
+          /*
+           * 记一笔"僵尸"：abort 是请求取消而不是保证终止。
+           * 若那一轮之后真的结束了，`work()` 的 `.finally` 会把它减回来。
+           */
+          this.noteZombieCycle();
           reject(
             new Error(
               `一轮决策超过 ${Math.round(CYCLE_HARD_TIMEOUT_MS / 60_000)} 分钟仍未结束，` +
-                '已强制释放执行锁以避免机器人永久停摆（下一轮照常排期）。',
+                '已中止该轮并释放执行锁（下一轮照常排期）。',
             ),
           );
         }, CYCLE_HARD_TIMEOUT_MS);
       });
-      return await Promise.race([work(), timeout]);
+      return await Promise.race([
+        work(signal).finally(() => {
+          /*
+           * 那一轮真的结束了 —— 如果它曾被记成僵尸，这里撤销。
+           * 正常路径下 `zombieCycles` 根本不会被加过，这个减法是无害的。
+           */
+          if (this.zombieCycles > 0) this.zombieCycles -= 1;
+        }),
+        timeout,
+      ]);
     } finally {
       if (timer !== null) clearTimeout(timer);
       this.cycleInFlight = false;
       this.cyclePromise = null;
+      this.abortCurrentCycle = null;
       done();
     }
+  }
+
+  /**
+   * 记账"一轮超时了、而它还在后台跑"。
+   *
+   * 与 `inCycle` 分开写，是因为它要在**超时那一刻**记账，
+   * 而 `inCycle` 的 `finally` 是**立刻**执行的（`Promise.race` 抛了就走到 finally）——
+   * 两者之间隔着"那一轮实际上还在不在"。
+   */
+  private noteZombieCycle(): void {
+    this.zombieCycles += 1;
+    this.emit(
+      'warn',
+      `有一轮决策被中止后仍未真正结束（当前 ${this.zombieCycles} 轮）。` +
+        '达到 2 轮时系统会暂停开启新轮 —— 短暂停摆好过内存被累积的僵尸轮次拖死。',
+    );
   }
 
   /**
@@ -1348,6 +1438,28 @@ export class AutoTrader {
       this.emit('warn', '上一轮决策仍在执行，跳过本次调度');
       return;
     }
+    /*
+     * ⚠️ **僵尸轮次太多时不要再开新轮。**
+     *
+     * `inCycle` 的硬超时会 `abort()` 掉在途请求并释放执行锁；而 `abort` 是
+     * **请求取消、不是保证终止**。如果某个 `work()` 卡在不理会 abort 的位置，
+     * 它就永久持着那一轮的提示词（138K 字符量级）与响应。
+     *
+     * 累积的后果是**进程被内存拖死** —— 而那种故障在界面上看不见
+     * （状态还是 running、日志还在打），比"暂停开新轮"危险得多。
+     * 所以这里宁可短暂停摆：错误会写进状态、你能看见并处理。
+     */
+    if (this.zombieCycles >= MAX_ZOMBIE_CYCLES) {
+      this.emitOnChange(
+        'zombie-cycles',
+        'error',
+        `已有 ${this.zombieCycles} 轮决策被中止后仍未结束（上限 ${MAX_ZOMBIE_CYCLES}），` +
+          '本轮不再开始新的决策 —— 继续累积会把进程的内存耗尽。' +
+          '请检查数据库日志里最近那几轮的中止记录，必要时重启服务。',
+      );
+      return;
+    }
+    this.clearStateNotice('zombie-cycles');
 
     const traderId = this.deps.trader.id;
     /*
