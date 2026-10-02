@@ -2121,18 +2121,24 @@ export class AutoTrader {
           o.price > 0 &&
           o.updatedAt,
       )
-      .slice(0, 3)) {
+      .slice(0, 5)) {
       try {
         const since = Date.parse(String(order.updatedAt));
         /*
-         * 拉最近 96 根 15m（= 24 小时），再**按时间过滤出撤单之后**的那些 ——
-         * `getKlines` 不接受起始时间，所以过滤必须自己做。撤单超过 24 小时的
-         * 单子过滤后为空，直接跳过（它已经太旧，参考价值也低）。
+         * 拉最近 500 根 15m（≈ 5 天），再**按时间过滤出撤单之后**的那些 ——
+         * `getKlines` 不接受起始时间，过滤必须自己做。
+         *
+         * ⚠️ **窗口为什么要 5 天而不是 1 天**：第一版只拉 96 根（24 小时），
+         * 实测线上"检查了最近 **1** 张" —— 因为那 63 张撤单大多发生在更早，
+         * 一根都没进窗口。**一个样本的统计等于没有统计**，而它会把
+         * "0%" 当成事实读进去（那比不显示更糟）。
+         *
+         * 500 根是一次请求（币安单次上限 1500 根），权重代价可以忽略。
          */
         const candles = await this.deps.marketData.getKlines(
           String(order.symbol),
           '15m' as Timeframe,
-          96,
+          500,
         );
         const after = candles.filter((k) => Number(k.closeTime) >= since);
         if (after.length === 0) continue;
