@@ -105,6 +105,7 @@ export const STATUS_TONE: Record<ExecutionLogEntry['status'], Tone> = {
   rejected: 'warn',
   failed: 'down',
   skipped: 'muted',
+  data: 'muted',
 };
 
 /** `executionLog[].status` is a stable machine code — never display it raw. */
@@ -114,6 +115,8 @@ export const STATUS_LABELS: Record<ExecutionLogEntry['status'], string> = {
   rejected: '已拒绝',
   failed: '失败',
   skipped: '已跳过',
+  /* 模型主动要了数据 —— 纯读取，不是一次交易动作（见 `domain.ts` 里的说明）。 */
+  data: '已取数',
 };
 
 export function statusLabel(status: string): string {
@@ -138,6 +141,8 @@ export const EXEC_ROW_CLASS: Record<ExecutionLogEntry['status'], string> = {
   rejected: 'border-warn/50 bg-warn/10',
   failed: 'border-down/50 bg-down/10',
   skipped: 'border-base-800 bg-base-850/40',
+  /* 取数是纯读取，不是结果 —— 用与"跳过"同级的低调样式。 */
+  data: 'border-base-800 bg-base-850/40',
 };
 
 export const EXEC_TEXT_CLASS: Record<ExecutionLogEntry['status'], string> = {
@@ -146,6 +151,7 @@ export const EXEC_TEXT_CLASS: Record<ExecutionLogEntry['status'], string> = {
   rejected: 'text-warn/90',
   failed: 'text-down/90',
   skipped: 'text-ink-faint',
+  data: 'text-ink-faint',
 };
 
 /* -------------------------------------------------------------------------- */

@@ -1119,6 +1119,7 @@ function planExecution(log: ExecutionLogEntry[], decisions: Decision[]): Executi
     rejected: 0,
     failed: 0,
     skipped: 0,
+    data: 0,
   };
   for (const entry of log) counts[entry.status] += 1;
 
@@ -1602,8 +1603,18 @@ function outcomeBadge(status: ExecutionLogEntry['status']): {
       return { key: status, label: `✕ 执行失败`, tone: 'down' };
     case 'skipped':
       return { key: status, label: `⊘ 未执行（${STATUS_LABELS.skipped}）`, tone: 'muted' };
+    /*
+     * ⚠️ **模型主动要了数据 —— 这是"它在主动工作"最直接的可见证据。**
+     *
+     * 用户 2026-10-02：「我打开网页，就能方便快捷**看到模型在做什么**」。
+     * 而在这之前，"它去要了 K 线"只活在实时事件流里，**翻历史一条都查不到** ——
+     * 于是操作员无法分辨"这一轮它只是把系统给的候选看了一遍"与
+     * "它自己动手去挖了数据"。
+     */
+    case 'data':
+      return { key: status, label: `⇣ ${STATUS_LABELS.data}`, tone: 'muted' };
     default: {
-      // 穷尽性检查：`status` 只能是上面五种。少写一种，这一行会编译报错。
+      // 穷尽性检查：`status` 只能是上面六种。少写一种，这一行会编译报错。
       const exhaustive: never = status;
       return { key: exhaustive, label: status, tone: 'muted' };
     }
@@ -1789,6 +1800,9 @@ function logLineStyle(status: ExecutionLogEntry['status']): { label: string; ton
       return { label: `✕ 执行失败`, tone: 'text-down' };
     case 'skipped':
       return { label: `⊘ 未执行`, tone: 'text-ink-lo' };
+    /* 模型主动取数 —— 它在主动工作，而不是只把系统给的候选看了一遍。 */
+    case 'data':
+      return { label: `⇣ ${STATUS_LABELS.data}`, tone: 'text-ink-lo' };
     default: {
       const exhaustive: never = status;
       return { label: exhaustive, tone: 'text-ink-lo' };

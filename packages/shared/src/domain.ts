@@ -1002,7 +1002,22 @@ export interface ExecutionLogEntry {
    *
    * 状态名要说实话，摘要才可能说实话。
    */
-  status: 'ok' | 'submitted' | 'rejected' | 'failed' | 'skipped';
+  /*
+   * ⚠️ **新增 `'data'`：它表示"模型主动要了数据"，不是一次交易动作。**
+   *
+   * ## 为什么不能复用 `'ok'`（2026-10-02）
+   *
+   * `'ok'` 在生成摘要时被算作"开仓 N"。而模型用 `get_klines` 取数是**纯读取** ——
+   * 记成 `'ok'` 会让界面显示"开仓 1"而实际上一笔单都没下，
+   * 那正是这个项目反复在消灭的矛盾：**一个字段说"做成了"，另一个字段说什么都没有。**
+   *
+   * ## 为什么它值得单独一类
+   *
+   * 用户 2026-10-02：「我打开网页，就能方便快捷**看到模型在做什么**」。
+   * "它主动去要了数据"是**最直接的"它在主动工作"的证据** ——
+   * 而在此之前它只活在实时事件流里，**翻历史一条都查不到**。
+   */
+  status: 'ok' | 'submitted' | 'rejected' | 'failed' | 'skipped' | 'data';
   detail: string;
   orderId?: string;
   /** Notional actually filled, when applicable. */
