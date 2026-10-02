@@ -3790,9 +3790,22 @@ function renderEntryStats(stats: EntryFillStats, timeoutMinutes: number): string
       `（共 ${decided} 张有结论）→ **成交率 ${stats.fillRatePercent!.toFixed(0)}%**`,
   ];
   if (stats.avgCanceledWaitMinutes !== null) {
+    /*
+     * ⚠️ **不要再说"系统上限是 N 分钟"。**
+     *
+     * 挂单时限早就是**自适应的**（`pendingTimeoutMinutes`：按挂价距离与该标的
+     * ATR 推算需要多久，取 max(base, needed) 并封顶 480 分钟）。而这段文案一直
+     * 写着配置里的那个固定值 —— 实测线上出现过这样的自相矛盾：
+     *
+     *     被撤的那些**平均等了 187 分钟**（系统上限是 45 分钟）
+     *
+     * 187 > 45，读起来像系统自己坏了。**模型据此判断"挂单该等多久"时会用错基准。**
+     * 所以只说事实（等了多久），时限的事交给 `pendingDistanceRow` 那一段讲
+     * —— 那里本来就写着"按当前 ATR 估计，N 分钟内价格预期能走约 Y%"。
+     */
     lines.push(
       `- 被撤的那些**平均等了 ${stats.avgCanceledWaitMinutes.toFixed(0)} 分钟**` +
-        `（系统上限是 ${timeoutMinutes} 分钟）。`,
+        '（挂单时限是按挂价距离与 ATR 自适应算的，所以这个平均值本身会波动）。',
     );
   }
   /*
