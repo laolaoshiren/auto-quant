@@ -144,7 +144,7 @@ import { useLiveCycle, useEvents, type LiveCycle } from '../lib/store';
 import { usePolled } from '../lib/hooks';
 import { Badge, Empty, Panel, Spinner3, cn } from './ui';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
-import { fmtInt, fmtLatency, fmtPriceUsd, fmtUsd, timeAgo } from '../lib/format';
+import { fmtInt, fmtLatency, fmtPriceUsd, fmtQty, fmtUsd, timeAgo } from '../lib/format';
 
 /**
  * 一页多少轮。
@@ -1682,7 +1682,7 @@ function outcomeBadge(status: ExecutionLogEntry['status']): {
   }
 }
 
-type FigureKey = 'size' | 'entry' | 'stop' | 'target' | 'reward' | 'leverage';
+type FigureKey = 'size' | 'entry' | 'stop' | 'target' | 'reward' | 'leverage' | 'reduce';
 
 /** 关键数字里的一个片段：`{ label: '止损', value: '0.174000' }`。 */
 interface Figure {
@@ -1706,6 +1706,8 @@ const FIGURE_TITLE: Record<FigureKey, string> = {
   target: '止盈价',
   reward: '风险回报比 = 到止盈的距离 ÷ 到止损的距离',
   leverage: '杠杆倍数',
+  /* ⚠️ `reducePercent` 是百分数（服务端的 `reducePercent / 100` 才是比例）。 */
+  reduce: '减仓幅度：百分比按持仓数量计，数值形式则是要卖出的数量',
 };
 
 /**
@@ -1743,6 +1745,60 @@ const FIGURE_TITLE: Record<FigureKey, string> = {
  * 那个动作根本不改变持仓数量（见 `decision.ts` 里 `adjust_protection` 的说明）。
  */
 export function figureParts(decision: Decision, price: number | null): Figure[] {
+  /*
+   * ## 另外两类"调整"也必须显示数字（2026-10-03）
+   *
+   * 用户的追问：「最近决策上面会不会显示**仓位调整**？（如果有）
+   * 就和我截图给你的别人平台的 UI 一样」。
+   *
+   * 核实：`add_to_position` / `reduce_position` 和 `adjust_protection` 一样，
+   * 都被 `isOpenAction` 挡在外面 —— **界面上一个字都不显示**。
+   *
+   * 而这三个动作**恰恰是"它正在动我的仓位"的那一类**：开仓是建立敞口，
+   * 这三个是**改变已有敞口**。操作员最需要看清的正是它们改成了什么 ——
+   * 一个"持有"徽章加一段散文说不清"它加了多少 / 减了多少 / 止损挪到哪"。
+   *
+   * ⚠️ 实测（2026-10-03）这两个动作**一次都没被用过**（今日 165 条决策里
+   * `add_to_position` = 0、`reduce_position` = 0）。所以这段渲染目前没有线上样本，
+   * 但**"没用过"不等于"不该显示"** —— 它一被用上，操作员就得看懂它。
+   */
+  if (decision.action === 'add_to_position') {
+    const parts: Figure[] = [
+      /* 加仓金额比"仓位"更贴切：它说的是"再投多少"。 */
+      { key: 'size', label: '加仓', value: fmtUsd(decision.positionSizeUsd, 2) },
+    ];
+    if (decision.leverage > 0) parts.push({ key: 'leverage', label: '', value: `${decision.leverage}x` });
+    if (decision.stopLoss !== null) parts.push({ key: 'stop', label: '止损', value: fmtPriceUsd(decision.stopLoss) });
+    if (decision.takeProfit !== null)
+      parts.push({ key: 'target', label: '止盈', value: fmtPriceUsd(decision.takeProfit) });
+    return parts;
+  }
+
+  if (decision.action === 'reduce_position') {
+    /*
+     * `reducePercent` 与 `reduceQuantity` 是**归一化后的二选一**（见 `decision.ts`）：
+     * 模型给任意一个，风控换算成两边的具体数值，另一个留空。
+     * 所以按"哪个有值显示哪个"来渲染 —— 两个都空就只显示保护位。
+     */
+    const parts: Figure[] = [];
+    if (decision.reducePercent !== null) {
+      /*
+       * ⚠️ `reducePercent` 是**百分数**，不是比例。
+       *
+       * 判据在服务端：`risk/engine.ts` 里 `fraction = reducePercent / 100` ——
+       * 所以模型给 `50` 表示"卖掉一半"。这里**不要再除 100**：
+       * 那会把 50% 显示成 0.50%，让操作员以为它只象征性地减了一点点。
+       */
+      parts.push({ key: 'reduce', label: '减仓', value: `${decision.reducePercent.toFixed(1)}%` });
+    } else if (decision.reduceQuantity !== null) {
+      parts.push({ key: 'reduce', label: '减仓', value: fmtQty(decision.reduceQuantity) });
+    }
+    if (decision.stopLoss !== null) parts.push({ key: 'stop', label: '止损', value: fmtPriceUsd(decision.stopLoss) });
+    if (decision.takeProfit !== null)
+      parts.push({ key: 'target', label: '止盈', value: fmtPriceUsd(decision.takeProfit) });
+    return parts;
+  }
+
   if (decision.action === 'adjust_protection') {
     const adjusted: Figure[] = [];
     if (decision.stopLoss !== null) {

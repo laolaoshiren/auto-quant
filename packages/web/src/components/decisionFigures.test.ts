@@ -35,6 +35,56 @@ function makeDecision(over: Partial<Decision>): Decision {
   } satisfies Decision;
 }
 
+test('★ 加仓要显示加了多少钱，减仓要显示减了多少 —— 那是"动仓位"的全部内容', () => {
+  /*
+   * 用户的追问（2026-10-03）：「最近决策上面会不会显示**仓位调整**？（如果有）
+   * 就和我截图给你的别人平台的 UI 一样」。
+   *
+   * 核实：这两个动作和 `adjust_protection` 一样被 `isOpenAction` 挡在外面，
+   * **界面上一个字都不显示**。实测它们**一次都没被用过**（今日 165 条决策里各 0 次），
+   * 但"没用过"不等于"不该显示" —— 一被用上，操作员就得看懂它动了多少。
+   */
+  const add = figureParts(
+    makeDecision({ action: 'add_to_position', positionSizeUsd: 30, leverage: 5 }),
+    null,
+  );
+  assert.equal(add.find((p) => p.key === 'size')?.label, '加仓', '加仓要标明这是"加仓"而不是"仓位"');
+  assert.match(add.find((p) => p.key === 'size')!.value, /30/);
+  assert.equal(add.find((p) => p.key === 'leverage')?.value, '5x');
+
+  const reduce = figureParts(
+    makeDecision({ action: 'reduce_position', reducePercent: 50 }),
+    null,
+  );
+  const cut = reduce.find((p) => p.key === 'reduce');
+  assert.ok(cut, '★ 减仓必须显示减了多少');
+  assert.equal(cut.value, '50.0%', '★ `reducePercent` 是【百分数】：50 就是"卖掉一半"');
+});
+
+test('★ 减仓比例的单位必须是百分数 —— 服务端是 `reducePercent / 100`', () => {
+  /*
+   * 判据在 `risk/engine.ts`：`fraction = reducePercent / 100`。
+   *
+   * 这条用例专门防一个我自己写出来的 bug：渲染时又除了一次 100，
+   * 于是"卖掉一半"显示成 **0.50%** —— 操作员会以为它只象征性减了一点点，
+   * 而实际是砍掉一半。**数字差 100 倍，方向听起来一样，后果完全相反。**
+   */
+  const parts = figureParts(makeDecision({ action: 'reduce_position', reducePercent: 100 }), null);
+  assert.equal(
+    parts.find((p) => p.key === 'reduce')?.value,
+    '100.0%',
+    '★ 100 表示全平，不能显示成 1.00%',
+  );
+});
+
+test('★ 减仓用数量表达时显示数量（归一化后二选一）', () => {
+  const parts = figureParts(
+    makeDecision({ action: 'reduce_position', reducePercent: null, reduceQuantity: 0.05 }),
+    null,
+  );
+  assert.ok(parts.some((p) => p.key === 'reduce'), '两个字段二选一，有一个就必须显示');
+});
+
 test('★ 调整保护位必须显示新的止损价 —— 那是这个动作的全部内容', () => {
   /*
    * ## 用户 2026-10-03 的反馈（附了另一个产品的截图）
