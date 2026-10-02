@@ -3903,6 +3903,63 @@ test('★ 「全部平仓」必须撤掉还没成交的挂单 —— 只有挂�
   );
 });
 
+test('★ 连续开仓也不能堆出重复保护单 —— 不变量在 placeProtection 最底层', async () => {
+  /*
+   * ## 用户实测（2026-10-02，附「当前委托」截图）
+   *
+   *   「有很多重复止盈止损（估计是调整后，老订单没取消）」
+   *
+   * 线上确实是：ETHUSDT 上 **3 张 STOP_MARKET + 3 张 TAKE_PROFIT_MARKET**，
+   * 来自 23:32:42 / 23:32:57 / 23:36:07 —— 同一轮里挂了两次、下一轮又一次。
+   *
+   * ## 根因：不变量散落在调用点
+   *
+   * `placeProtection` 在本文件里有 **6 处调用**，而"先撤旧的"只写在其中一两处
+   * （我下午修 `replaceProtection` 时补了它，却没覆盖开仓路径与另外几处）。
+   * **把不变量放在最底层是唯一不会漏的位置**，所以现在由 `placeProtection`
+   * 自己按 purpose 撤同类。
+   *
+   * ## 为什么"按 purpose 只撤同类"是必须的
+   *
+   * 这段代码的上文记着一个实测教训：**无差别撤单会毁掉刚挂好的单** ——
+   * "止损 + 止盈"成对出现，挂止盈时撤一次会把刚挂的止损一起撤掉。
+   * 按 purpose 分开之后两者互不干扰。
+   *
+   * ## 这条用例钉什么
+   *
+   * 开仓 → 平仓 → 再开仓（走的是"开仓路径"，正是原来漏掉撤单的那一条），
+   * 断言交易所侧始终只有 **1 张止损 + 1 张止盈**。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const count = async (): Promise<{ stops: number; targets: number }> => {
+    const live = await broker.getOpenAlgoOrders(SYMBOL);
+    const kindOf = (o: unknown): string => String((o as { orderType?: string }).orderType ?? '');
+    return {
+      stops: live.filter((o) => kindOf(o).includes('STOP')).length,
+      targets: live.filter((o) => kindOf(o).includes('TAKE_PROFIT')).length,
+    };
+  };
+
+  let after = await count();
+  assert.equal(after.stops, 1, '★ 开仓后只该有一张止损');
+  assert.equal(after.targets, 1, '★ 开仓后只该有一张止盈');
+
+  /* 平掉再开一次 —— 让保护单被"挂 → 撤 → 再挂"走一遍。 */
+  await buildTrader(broker, CLOSE_LONG_RESPONSE).runOnce();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  after = await count();
+  assert.equal(
+    after.stops,
+    1,
+    '★ 第二次开仓后仍然只该有一张止损 —— 重复的止损里价位更差的那张会先触发，' +
+      '于是"上移止损"根本没有生效',
+  );
+  assert.equal(after.targets, 1, '★ 止盈同理');
+});
+
 test('★ 硬超时会真的中止那一轮 —— 信号必须到达模型层，而不是只放锁', async () => {
   /*
    * ## 这条用例守的是一个**我自己引入的**故障（2026-10-02）

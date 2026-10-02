@@ -7631,6 +7631,42 @@ reduceQuantity: null,
      */
     onFailure?: (reason: string) => void;
   }): Promise<string | null> {
+    /*
+     * ⚠️ **挂之前先撤掉同类的旧单 —— 不变量放在最底层，调用点就不可能漏。**
+     *
+     * ## 为什么搬到这里（2026-10-02 用户报告 + 实测）
+     *
+     * 用户看到「当前委托」里有 **3 组重复的止盈/止损**（ETHUSDT 上
+     * 3 张 STOP_MARKET + 3 张 TAKE_PROFIT_MARKET，分别来自
+     * 23:32:42 / 23:32:57 / 23:36:07）。
+     *
+     * 根因是**"先撤旧的"这个不变量散落在各调用点**：本文件里
+     * `placeProtection` 有 6 处调用，而"先撤"只写在其中一两处。
+     * 我下午修 `replaceProtection` 时补了它，却没覆盖开仓路径与另外几处 ——
+     * 于是重复照旧累积。**把不变量写在最底层是唯一不会漏的位置。**
+     *
+     * ## 为什么按 `purpose` 只撤同类（否则会踩下面那个坑）
+     *
+     * 这段注释的上文记着一个实测教训：**在这个函数里无差别撤单会毁掉刚挂好的单** ——
+     * "止损 + 止盈"是成对出现的，挂止盈时撤一次会把刚挂的止损一起撤掉
+     * （测试当场报过「没有可触发的止损单」）。
+     *
+     * 解法不是"不在这里撤"，而是**按 purpose 精确撤**：
+     *
+     *   · 挂 `stop_loss`   → 只撤旧的 `stop_loss`（不碰止盈）
+     *   · 挂 `take_profit` → 只撤旧的 `take_profit`（不碰止损）
+     *
+     * 两者互不干扰，成对挂单时各自替换自己那一张。
+     *
+     * ## 代价
+     *
+     * 每次挂单前多两次只读查询（`getOpenOrders` + `getOpenAlgoOrders`），
+     * 以及若干撤单请求。**相对"账户上挂着一堆重复止损"这个后果，那是值得的** ——
+     * 重复止损里价位更差的那张会先触发，于是"上移止损"根本没有生效。
+     */
+    const isStop = input.purpose === 'stop_loss';
+    await this.cancelAllProtection(input.symbol, { stop: isStop, target: !isStop });
+
     const clientOrderId = makeClientId(input.purpose, input.symbol);
     try {
       const placed = await this.deps.broker.placeOrder({
@@ -8254,17 +8290,11 @@ reduceQuantity: null,
      *
      * 撤单失败**不阻断**：撤不掉的通常已经成交或过期，那时挂新单是对的。
      *
-     * ⚠️ **只撤"即将被重挂"的那一类。** 第一版这里无差别地撤掉全部保护单，
-     * 结果被测试当场抓住：`adjust_protection`（只调止损、不重挂止盈）走这条路时，
-     * **止盈被撤掉而不会重挂** —— 那个止盈就永久没了。
-     * 这正是本文件里另一段注释警告过的坑（"精选要撤的那一张，而不是推倒重来"），
-     * 我在另一个函数里原样踩了一遍。
+     * ⚠️ **"撤旧的"现在由 `placeProtection` 自己做（按 purpose 撤同类）** ——
+     * 这个不变量放在最底层，调用点就不可能漏。见那里的完整说明：
+     * 用户实测到 ETHUSDT 上堆了 **3 组**重复止盈/止损，根因正是
+     * "先撤"散落在 6 个调用点里、只覆盖了一两处。
      */
-    await this.cancelAllProtection(input.symbol, {
-      stop: input.stop !== null && input.stop > 0,
-      target: input.target !== null && input.target > 0,
-    });
-
     if (input.stop !== null && input.stop > 0) {
       stopOrderId = await this.placeProtection({
         symbol: input.symbol,

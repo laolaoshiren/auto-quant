@@ -240,58 +240,58 @@ test('★ symbolTone 对同一个币种永远给同一个颜色 —— 这是哈
   }
 });
 
-test('★ 候选池那一批币种必须几乎不撞色 —— 用户报的 ETH 与 DOGE 同色', () => {
+test('★ 候选池那一批币种必须【零撞色】—— 用户两次报到同色', () => {
   /*
-   * ## 用户报告（2026-10-02，附截图）
+   * ## 用户两次报告（2026-10-02，都附截图）
    *
-   *   「交易对颜色给我弄好了啊，不同币种要不同颜色区分啊」
+   *   ① 「交易对颜色给我弄好了啊，不同币种要不同颜色区分啊」→ ETHUSDT 与 DOGEUSDT 同色
+   *   ② 「颜色全一样了」→ ETHUSDT 与 PUMPUSDT 同色（那是 240 档版本之后）
    *
-   * 截图里 ETHUSDT 与 DOGEUSDT 是同一个蓝色。
+   * ## 三次试错才找到根因
    *
-   * ## 根因：只有 8 档
+   *   · 8 档硬编码 → 必然撞（20 个标的挤 8 档）；
+   *   · 112 档（±3° × 7）→ 实测撞 4 对；
+   *   · 240 档（±7° × 15）→ 20 币 20 色，但 ETH/PUMP 仍撞；
+   *   · 464 档（±14° × 29）→ **更糟**，ETH 301° 与 DOGE 300° 只差 1°
+   *     （微调幅度超过基础间距的一半 → 相邻档区间重叠）。
    *
-   * 旧实现是 `SYMBOL_TONES[hash % 8]`。而候选池一次就有 20 个标的 ——
-   * 数学上几乎必然撞色（3 个里至少一对同色的概率就约 18%）。
+   * 最后才看清：**问题不在档位数，而在哈希本身** ——
+   * 币种名几乎都是「若干字母 + USDT」，长度集中，简化版 FNV-1a 的
+   * 低位分布很差，三个币种取模后挤进同一档是常态。
+   * 加一遍 **murmur3 风格的 avalanche** 之后，24 个币种零撞色。
    *
-   * ## 现在的判据
+   * ## 这条用例钉什么
    *
-   * 档位提到 16 手挑色相 × 7 个微调 = 112 个取值之后，**20 个常见币种
-   * 允许极少量碰撞**（哈希终究是概率的），但不该像以前那样"看一眼全是同色"。
-   * 这里钉一个可接受的上界：20 个里最多 2 对同色。
+   * **零撞色**（不是"≤2 对"）—— 输入是固定列表，所以断言可以这么严；
+   * 而它正是用户要的"不同币种不同颜色"。
    */
   const pool = [
     'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT',
     'SUIUSDT', 'HYPEUSDT', '1000PEPEUSDT', 'ZECUSDT', 'NEARUSDT', 'AAVEUSDT',
     'UNIUSDT', 'ENAUSDT', 'WLDUSDT', 'MOVRUSDT', 'QNTUSDT', 'LINKUSDT',
-    'ADAUSDT', 'AVAXUSDT',
+    'ADAUSDT', 'AVAXUSDT', 'GTCUSDT', 'SCRUSDT', 'CTUSDT', 'PUMPUSDT',
   ];
   const tones = pool.map(symbolTone);
-
-  /* 不同的颜色种数：旧实现下 20 个标的挤在 8 档里。 */
   const distinct = new Set(tones).size;
-  assert.ok(
-    distinct >= 12,
-    `20 个币种只取到 ${distinct} 种颜色 —— 档位还是太少（旧实现是 8 档）`,
+  assert.equal(
+    distinct,
+    pool.length,
+    `${pool.length} 个币种只取到 ${distinct} 种颜色 —— 撞色了。` +
+      '注意：加档位救不了这个，先检查哈希有没有 avalanche 步骤',
   );
 
-  /* 撞色对数：允许少量（哈希是概率的），但最多 2 对。 */
-  let collisions = 0;
-  for (let i = 0; i < tones.length; i += 1) {
-    for (let j = i + 1; j < tones.length; j += 1) {
-      if (tones[i] === tones[j]) collisions += 1;
-    }
+  /* 用户报过的两对，现在必须是明显不同的色相（按数值判，而不是只判不等）。 */
+  const hueOf = (s: string): number => Number(/hsl\(([\d.]+)/.exec(symbolTone(s))![1]);
+  for (const [a, b] of [
+    ['ETHUSDT', 'DOGEUSDT'],
+    ['ETHUSDT', 'PUMPUSDT'],
+  ] as const) {
+    const gap = Math.abs(hueOf(a) - hueOf(b));
+    assert.ok(
+      Math.min(gap, 360 - gap) >= 20,
+      `${a} 与 ${b} 的色相只差 ${gap.toFixed(0)}° —— 肉眼看还是同色`,
+    );
   }
-  assert.ok(
-    collisions <= 2,
-    `20 个币种里有 ${collisions} 对同色 —— 用户要的是"不同币种不同颜色"`,
-  );
-
-  /* 用户截图里撞色的那两个，现在必须不同。 */
-  assert.notEqual(
-    symbolTone('ETHUSDT'),
-    symbolTone('DOGEUSDT'),
-    '★ ETHUSDT 与 DOGEUSDT 撞色正是用户报告的那一例',
-  );
 });
 
 test('★ 币种颜色绝不落进红/绿/琥珀语义区 —— 否则会制造假的涨跌信号', () => {
