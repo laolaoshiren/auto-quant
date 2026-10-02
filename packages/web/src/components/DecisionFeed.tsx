@@ -905,6 +905,30 @@ export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbol
   const visible = record.decisions
     .map((decision, index) => ({ decision, index }))
     .filter(({ decision }) => decision.action !== 'skip');
+
+  /*
+   * ## 同一标的出现多条时，标出"第几条 / 共几条"
+   *
+   * 用户 2026-10-03 的反馈（附截图）：「ETHUSDT 为什么一周期出现 2 次？」
+   *
+   * 核实：**那两条都是模型的真实输出** —— 一轮里它对 ETHUSDT 给了两条 `hold`
+   * （一条讲"止损离现价太近"、一条讲"持仓名额已满"）。渲染层如实显示了两条，
+   * 那是审计该有的行为，**不该被去重掉**：隐藏它等于替模型改写记录。
+   *
+   * 但"同一个币突然出现两行"确实让人以为界面出了 bug。所以补一个**计数标注** ——
+   * 一行解释成本，换来"这是模型给了两条，不是界面重复"。
+   */
+  const totalBySymbol = new Map<string, number>();
+  for (const { decision } of visible) {
+    totalBySymbol.set(decision.symbol, (totalBySymbol.get(decision.symbol) ?? 0) + 1);
+  }
+  const seenOrder = new Map<string, number>();
+  const visibleRows = visible.map(({ decision, index }) => {
+    const nth = (seenOrder.get(decision.symbol) ?? 0) + 1;
+    seenOrder.set(decision.symbol, nth);
+    return { decision, index, nth, total: totalBySymbol.get(decision.symbol) ?? 1 };
+  });
+
   const skippedRows = record.decisions
     .map((decision, index) => ({ decision, index }))
     .filter(({ decision }) => decision.action === 'skip');
@@ -987,12 +1011,14 @@ export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbol
           // 决策之间只用**间距**分隔（§3），不加分隔线：一条细线在深色底上会
           // 变成第二层边框，而这个盒子里只该有一层。
           <div className="space-y-2.5">
-            {visible.map(({ decision, index }) => (
+            {visibleRows.map(({ decision, index, nth, total }) => (
               <DecisionRow
                 key={`${decision.symbol}-${index}`}
                 decision={decision}
                 price={priceOf(symbols, decision.symbol)}
                 outcome={plan.outcomes[index] ?? null}
+                /* `total > 1` 才给计数 —— 单条时什么都不显示，保持安静。 */
+                duplicate={{ nth, total }}
               />
             ))}
             {/*
@@ -1333,10 +1359,17 @@ function DecisionRow({
   decision,
   price,
   outcome,
+  duplicate,
 }: {
   decision: Decision;
   price: number | null;
   outcome: ExecutionLogEntry | null;
+  /**
+   * 同一标的在这一轮的第几条（`total > 1` 时才渲染标注）。
+   * 见调用处 `visibleRows` 的说明：模型可以一轮给同一标的**多条**决策，
+   * 那是真实输出、不该去重，但需要让人知道"这不是界面重复"。
+   */
+  duplicate?: { nth: number; total: number };
 }) {
   const figures = figureParts(decision, price);
 
@@ -1345,6 +1378,17 @@ function DecisionRow({
       <div className="flex min-w-0 items-center gap-2">
         <CoinIcon symbol={decision.symbol} />
         <span className="min-w-0 truncate text-base font-semibold text-ink-hi">{decision.symbol}</span>
+        {duplicate && duplicate.total > 1 && (
+          <span
+            className="shrink-0 rounded bg-base-800 px-1.5 py-0.5 text-[10px] text-ink-lo"
+            title={
+              `模型这一轮对 ${decision.symbol} 给了 ${duplicate.total} 条决策 —— ` +
+              '下面这些是它的原话，没有被去重（去重等于替模型改写记录）。'
+            }
+          >
+            第 {duplicate.nth}/{duplicate.total} 条
+          </span>
+        )}
         <ActionBadge action={decision.action} className="ml-auto shrink-0" />
       </div>
 
@@ -1685,8 +1729,35 @@ const FIGURE_TITLE: Record<FigureKey, string> = {
  *
  * 只在实际开仓（`open_*`）时出现。观望 / 等待没有仓位可谈；平仓的数字属于成交
  * 记录，硬凑在理由下面只会让这一行变长而不增加信息。
+ *
+ * ## ⚠️ 例外：`adjust_protection` —— 它的**全部内容**就是两个新价位
+ *
+ * 2026-10-03 用户的反馈（附了另一个产品的截图）：
+ * 「调整止损/止盈一目了然，再看看我们系统感觉杂乱无章」。
+ *
+ * 核实：`adjust_protection` 走不进这里（`isOpenAction` 只认 `open_*`），于是界面上
+ * **只剩一个"持有"徽章加一段文字**，而模型给出的新止损/止盈价 —— **那个动作的全部
+ * 意义所在** —— 被丢掉了。用户只能去读理由里的散文才知道它把止损挪到了哪。
+ *
+ * 所以这里给它开一个分支：**只显示它真正改的那两个价**。不带仓位与杠杆，因为
+ * 那个动作根本不改变持仓数量（见 `decision.ts` 里 `adjust_protection` 的说明）。
  */
-function figureParts(decision: Decision, price: number | null): Figure[] {
+export function figureParts(decision: Decision, price: number | null): Figure[] {
+  if (decision.action === 'adjust_protection') {
+    const adjusted: Figure[] = [];
+    if (decision.stopLoss !== null) {
+      adjusted.push({ key: 'stop', label: '止损 →', value: fmtPriceUsd(decision.stopLoss) });
+    }
+    if (decision.takeProfit !== null) {
+      adjusted.push({ key: 'target', label: '止盈 →', value: fmtPriceUsd(decision.takeProfit) });
+    }
+    /*
+     * 一个价位都没有（模型只写了理由）时返回空数组 —— 那说明这次"调整"没有可显示的
+     * 内容，硬渲染一个空行比不渲染更糟。执行结果那一段会说明它到底做成了什么。
+     */
+    return adjusted;
+  }
+
   if (!isOpenAction(decision.action)) return [];
 
   const parts: Figure[] = [{ key: 'size', label: '', value: fmtUsd(decision.positionSizeUsd, 2) }];
