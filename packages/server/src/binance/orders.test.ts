@@ -705,6 +705,22 @@ test('★ 从「杠杆不允许」的报错里挖出交易所承认的上限', (
   );
   assert.equal(parseAdmittedLeverage('Leverage limit is 20x'), 20);
   assert.equal(parseAdmittedLeverage('maximum is 75x'), 75);
+  /*
+   * ★ `-4421`：子账户的账户级硬限制（2026-10-02 实测漏处理）。
+   *
+   * 线上原话：
+   *
+   *     open_long ETHUSDT 执行失败：币安错误 -4421：
+   *     Subaccounts are restricted from using leverage greater than 5x.
+   *
+   * 而它说的是 `greater than 5x` —— 老正则只认 `limit is / maximum is / allows`，
+   * 于是解析不出来，只能走逐级折半（20 → 10 → 5）：**两次注定被拒的往返**。
+   */
+  assert.equal(
+    parseAdmittedLeverage('Subaccounts are restricted from using leverage greater than 5x.'),
+    5,
+    '★ `-4421` 的消息里明说了上限，必须挖出来 —— 别去折半猜',
+  );
 
   /* 反面：挖不到就返回 null，由调用方退回降级 —— **不许猜**。 */
   assert.equal(

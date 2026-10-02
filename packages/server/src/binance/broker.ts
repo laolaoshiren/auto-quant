@@ -378,20 +378,34 @@ export class BinanceBroker {
         /*
          * ⚠️ **"你这个杠杆不允许"是一个可以挽救的失败，不该让整轮开仓白跑。**
          *
-         * 交易所拒绝杠杆有三个码，语义都是"太高了"，而**上限它自己会说出来**：
+         * 交易所拒绝杠杆有几个码，语义都是"太高了"，而**上限它自己会说出来**：
          *
          *   · `-4203` Change leverage failed（该账户/该档位不允许这个值）
-         *   · `-4205` 超出账户允许的最大杠杆（**子账户、开户未满 30 天**都在这一档）
+         *   · `-4205` 超出账户允许的最大杠杆（**开户未满 30 天**在这一档）
          *   · `-4209` Current symbol max leverage limit is %sx（**消息里带数字**）
+         *   · `-4421` **Subaccounts are restricted from using leverage greater than 5x**
+         *     —— **子账户的账户级硬限制**，消息里同样带数字。
          *
-         * `leverageBracket` 只能给出 **symbol 那一层**的上界（实测：BTC 150x、
-         * 山寨 75x），而**账户级那一层它不反映** —— 所以光靠档位缓存无法预先知道
-         * 账户真正的上限。这条路径就是那层信息唯一的来源。
+         * ## 为什么 `-4421` 必须在这里（2026-10-02 实测漏掉它）
          *
-         * 处理：**先从消息里解析出上限**（`-4209` 会明说），解析不出就**逐级降**。
-         * 降完仍然失败才抛 —— 那时是真的有别的毛病。
+         * 线上日志：
+         *
+         *     open_long ETHUSDT 执行失败：币安错误 -4421：
+         *     Subaccounts are restricted from using leverage greater than 5x.
+         *
+         * 币安自 2025-08-12 起对"普通用户创建的**子账户**"限制 5x。而 `leverageBracket`
+         * 只反映 **symbol 那一层**（实测 BTC 150x、山寨 75x）—— **账户级那一层它看不到**。
+         * 所以配置里写着 20x 时，事前没有任何本地信息能拦住它，**只有这条错误消息知道**。
+         *
+         * 漏掉它的后果是**整轮开仓作废**（模型提案合规、风控放行、交易所拒绝），
+         * 而模型下一轮会照样再试一次 —— 这正是用户说的那种"系统不会自己处理"。
          */
-        if (error.code === -4203 || error.code === -4205 || error.code === -4209) {
+        if (
+          error.code === -4203 ||
+          error.code === -4205 ||
+          error.code === -4209 ||
+          error.code === -4421
+        ) {
           const admitted = parseAdmittedLeverage(error.message);
           const target = admitted ?? Math.max(1, Math.floor(leverage / 2));
           if (target < leverage) {
@@ -1120,12 +1134,22 @@ function sleep(ms: number): Promise<void> {
 export function parseAdmittedLeverage(message: string | undefined): number | null {
   if (!message) return null;
   /*
-   * 匹配 `... limit is 5x` / `... maximum is 20x` / `... allows 5x` 这几种说法。
+   * 匹配这几种说法：
+   *
+   *   · `... limit is 5x` / `... maximum is 20x` / `... allows 5x`   （-4209 等）
+   *   · `... leverage greater than 5x`                              （**-4421 子账户限制**）
+   *
+   * ⚠️ `greater than` 这一支是 2026-10-02 补的：`-4421` 的原话是
+   * 「Subaccounts are restricted from using leverage **greater than 5x**」——
+   * 不加它就解析不出来，只能走"逐级折半"（20 → 10 → 5），
+   * 多两次注定被拒的往返请求。**上限它自己都说了，就不该去猜。**
+   *
    * 数字取 1–125（币安的上限区间），避免把消息里别的数字（比如 "30 days"）当成杠杆。
    */
-  const match = /(?:limit is|maximum is|allows|max leverage(?: limit)? is)\s*(\d{1,3})\s*x/i.exec(
-    message,
-  );
+  const match =
+    /(?:limit is|maximum is|allows|max leverage(?: limit)? is|greater than)\s*(\d{1,3})\s*x/i.exec(
+      message,
+    );
   if (!match || !match[1]) return null;
   const value = Number(match[1]);
   return Number.isFinite(value) && value >= 1 && value <= 125 ? value : null;
