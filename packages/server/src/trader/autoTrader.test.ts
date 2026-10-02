@@ -3723,6 +3723,62 @@ test('★ 保护单被交易所拒绝时，原因必须出现在提示里（不�
 /*  保本止损：顺序不变量                                                        */
 /* -------------------------------------------------------------------------- */
 
+test('★ 重挂保护位必须先把旧的全部撤掉 —— 否则「止损上移」实际不生效', async () => {
+  /*
+   * ## 实测（2026-10-02）
+   *
+   * HYPEUSDT 的持仓上**同时有两张 STOP_MARKET 存活**：`#788`（上移止损时挂的）
+   * 与 `#790`（保护单缺失检测挂的），而 `positionStore` 只记得其中一张。
+   * 历史上 LTCUSDT 在同一时刻挂过 **4 张**、NEARUSDT 与 ZECUSDT 各 3 张。
+   *
+   * ## 根因
+   *
+   * 这个函数叫 `replaceProtection`，而实现里**只有"挂"、没有"替代"**：
+   * 它直接挂新单、然后改写 `positionStore` 的 `stop_order_id`。
+   * 而上移过 N 次止损就会留下 N-1 张**不在 DB 里、却在交易所侧仍然有效**的孤儿单。
+   *
+   * ## 为什么这不是"无害的脏数据"
+   *
+   * `placeProtection` 传 `closePosition: true`，所以多余的止损**不会**反手开仓
+   * （第一张平掉仓位后第二张无仓可平）—— 这一点是真的。但：
+   *
+   *   · **旧的那张价位更差，可能先被触发** → 于是"止损上移"这件事在有重复单时
+   *     **根本没有生效**，而系统以为自己已经把风险收紧了；
+   *   · 本地账目与交易所长期不一致（日志里"对账结清了 3 张…"就是它）；
+   *   · 占用交易所的挂单额度。
+   *
+   * 所以这里钉的是**张数**：同一仓位、同一个标的，止损只该有一张。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const adjust = (stop: number): string =>
+    `<decision>[{"symbol":"${SYMBOL}","action":"adjust_protection","stop_loss":${stop},` +
+    `"confidence":70,"reasoning":"把止损上移。"}]</decision>`;
+
+  /* 连续两次上移 —— 生产上就是这样累积出重复单的。 */
+  await buildTrader(broker, adjust(66_500)).runOnce();
+  await buildTrader(broker, adjust(67_000)).runOnce();
+
+  const live = await broker.getOpenAlgoOrders(SYMBOL);
+  const kindOf = (order: unknown): string =>
+    String((order as { orderType?: string }).orderType ?? '');
+  const stops = live.filter((order) => kindOf(order).includes('STOP'));
+  const targets = live.filter((order) => kindOf(order).includes('TAKE_PROFIT'));
+
+  assert.equal(
+    stops.length,
+    1,
+    '★ 同一仓位只能有一张止损 —— 多出来的那张（价位更差）会先被触发，' +
+      '于是"上移止损"实际没有生效',
+  );
+  assert.ok(
+    targets.length <= 1,
+    `★ 止盈也不该重复（实际 ${targets.length} 张）；交易所侧现状：` +
+      live.map((o) => kindOf(o)).join('、'),
+  );
+});
+
 /** 与 `permissiveConfig()` 相同，但开了保本止损。 */
 function breakevenConfig(): StrategyConfig {
   const base = permissiveConfig();

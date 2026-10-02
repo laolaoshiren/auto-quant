@@ -3308,6 +3308,79 @@ export class AutoTrader {
   }
 
   /**
+  /**
+   * 撤掉某个标的上、**指定类别**的全部存活保护单，返回撤掉的张数。
+   *
+   * ⚠️ **为什么撤"全部同类"而不是"DB 里记的那一张"、以及它为什么必须存在**，
+   * 见 `replaceProtection` 顶部的说明。一句话：`positionStore` 只记得最后一次
+   * 的 `stop_order_id`，上移过 N 次就留下 N-1 张**不在 DB 里、却在交易所侧
+   * 仍然有效**的孤儿单。
+   *
+   * ⚠️ **`kinds` 是必需的，不能"全撤"。** 调用方可能只重挂止损（例如
+   * `adjust_protection`），那时撤掉止盈就等于**把它永久删掉**——
+   * 实测被测试当场抓住过（见 `replaceProtection` 里的说明）。
+   *
+   * ## 两个端点都要查
+   *
+   * 止损/止盈挂在币安的 **Algo** 端点（`/fapi/v1/algoOrder`），而历史上也出现过
+   * 落在普通端点上的保护单（见 `STOP_TYPES` 那一段的说明）。只查一个端点会漏。
+   *
+   * ## 这里的失败一律吞掉
+   *
+   * `broker.cancelOrder` 把"已经成交/已撤销"（`-2011`）当成成功返回 `true` ——
+   * 这对它是正确的语义，所以调用方拿到 `false` 通常意味着真正的网络问题。
+   * **但那不该阻断接下来挂新单**：旧单多半已经不在，挂新单才是把一个无保护
+   * 仓位救回来的动作。
+   */
+  private async cancelAllProtection(
+    symbol: string,
+    kinds: { stop: boolean; target: boolean },
+  ): Promise<number> {
+    const wanted = (kind: string): boolean =>
+      (kinds.stop && kind.includes('STOP')) || (kinds.target && kind.includes('TAKE_PROFIT'));
+    let cancelled = 0;
+    try {
+      const [regular, algo] = await Promise.all([
+        this.deps.broker.getOpenOrders(symbol),
+        this.deps.broker.getOpenAlgoOrders(symbol),
+      ]);
+
+      /* Algo 端点：用 `orderType` 判类型、用 `algoId` 撤单。 */
+      for (const order of algo) {
+        const kind = String((order as { orderType?: string }).orderType ?? '');
+        if (!wanted(kind)) continue;
+        const id = String((order as { algoId?: string | number }).algoId ?? '');
+        if (id === '') continue;
+        if (await this.deps.broker.cancelOrder(symbol, id, 'algo').catch(() => false)) {
+          cancelled += 1;
+        }
+      }
+
+      /* 普通端点：用 `type` 判类型、用 `orderId` 撤单。 */
+      for (const order of regular) {
+        const kind = String((order as { type?: string }).type ?? '');
+        if (!wanted(kind)) continue;
+        const id = String((order as { orderId?: string | number }).orderId ?? '');
+        if (id === '') continue;
+        if (await this.deps.broker.cancelOrder(symbol, id, 'order').catch(() => false)) {
+          cancelled += 1;
+        }
+      }
+    } catch {
+      /* 查不到就当作"没有旧单"—— 挂新单仍然是当前该做的事。 */
+    }
+    if (cancelled > 1) {
+      this.emitOnChange(
+        `protection-dupes:${symbol}`,
+        'warn',
+        `${symbol} 上原本有 ${cancelled} 张同类保护单同时存活，已一并撤掉后重挂 —— ` +
+          '重复会让"止损上移"实际不生效（更差的那张可能先被触发）。',
+      );
+    }
+    return cancelled;
+  }
+
+  /**
    * 把一行待成交转成真正的持仓，**并在同一段代码里挂上保护单**。
    *
    * 这两个动作必须连着做：中间任何 `await` 抛出去，都会留下一个**没有止损的
@@ -5851,40 +5924,28 @@ reduceQuantity: null,
        * 转换后末几位就变了，撤单会打到一个不存在的单号上（详见 `preserveBigIds()`）。
        */
       const oldStopId = local.stop_order_id ? String(local.stop_order_id) : null;
-      if (oldStopId && oldStopId.length > 0) {
+      /*
+       * ⚠️ **撤"该标的全部止损"，而不是"DB 里记的那一张"（2026-10-02 实测）。**
+       *
+       * 下面那段撤单逻辑原来只打 `oldStopId`。而 `positionStore` 只保存**最后一次**
+       * 的 `stop_order_id` —— 上移过 N 次止损就留下 N-1 张**不在 DB 里、却在交易所侧
+       * 仍然有效**的孤儿单。只撤 DB 里那张，撤完再挂一张，孤儿单就此累积。
+       *
+       * 实测形态（HYPEUSDT）：持仓上同时有两张 STOP_MARKET（`#788` 上移时挂的、
+       * `#790` 缺失检测挂的），历史上 LTCUSDT 同挂过 4 张。**旧的那张价位更差、
+       * 会先被触发** —— 于是"止损上移"这件事在有孤儿单时根本没有生效。
+       *
+       * 所以这里改用 `cancelAllProtection(symbol, { stop: true, target: false })`：
+       * **只撤止损、不碰止盈**（止盈本函数不重挂，撤掉就永久没了 —— 见下面那段注释）。
+       */
+      const oldStopCount = await this.cancelAllProtection(local.symbol, {
+        stop: true,
+        target: false,
+      });
+      if (oldStopCount === 0 && oldStopId && oldStopId.length > 0) {
         /*
-         * ⚠️ **`kind` 必须传 `'algo'` —— 这是本次修的那个 bug。**
-         *
-         * 止损/止盈是**条件单**，挂在币安的 Algo 端点上（`placeProtection` 返回的是
-         * `algoId`）。而 `cancelOrder` 的默认 `kind` 是 `'order'`，会去打：
-         *
-         *     DELETE /fapi/v1/order   { symbol, orderId: <algoId> }
-         *
-         * 那个端点不认 algoId → 返回 `-2011 Unknown order sent` → 而 `cancelOrder` 里
-         * **`-2011` 被当作"已经成交或被撤销"而无条件返回 `true`**
-         * （那个分支对普通订单是对的，详见 `broker.ts` 的注释）。
-         *
-         * 于是这里以为撤干净了，接着去挂新止损 —— 旧的那张**其实还占着名额**，
-         * 撞 `-4130`「该仓位已有止损单」→ `newStopId` 为 null → 按 §2.6 **立刻平仓**。
-         * 实测形态与 `protection_unavailable` 那几笔完全吻合。
-         *
-         * ## 为什么不用 `cancelAllOrders`
-         *
-         * 它同时撤**普通单和条件单**，会把**止盈单一起撤掉** —— 而本函数只重挂止损，
-         * 那个止盈就永久没了。**精选要撤的那一张**，而不是推倒重来。
-         */
-        /*
-         * ⚠️ **不要用 `.then(() => true)` 把它"变成成功"。**
-         *
-         * `broker.cancelOrder()` 的签名是 `Promise<boolean>`，**所有失败路径都
-         * `return false` 而不抛**。这里原来写着 `.then(() => true)`，于是
-         * `cancelled` 恒为 `true` —— 下面那句「撤不掉就不要挂新的」成了**死代码**，
-         * 撤单失败照样去挂新止损 → 必然吃 `-4130` → `newStopId` 为 null →
-         * 按 §2.6 市价平掉一个本来有保护、而且可能正在盈利的仓位。
-         *
-         * 这正是 `executeAdjust` 里那个已经修好的 bug（2026-09-22 ADAUSDT）在
-         * **另一个函数里原样存在**：同一个文件里两处要求同一条顺序，只改了一处。
-         * 少一个 `.then` 就是全部差别。
+         * 交易所侧查不到任何止损（可能是查询失败、也可能它真的已经不在）——
+         * 回退到"按 DB 里的单号撤一次"，与改动前的行为一致。
          */
         const cancelled = await this.deps.broker
           .cancelOrder(local.symbol, oldStopId, 'algo')
@@ -7804,6 +7865,43 @@ reduceQuantity: null,
     let tpOrderId: string | null = null;
     /** 挂单失败的原因。**必须带回去** —— 见下面的说明。 */
     const failures: string[] = [];
+
+    /*
+     * ⚠️ **先把这个标的的旧保护单撤干净，再挂新的。**
+     *
+     * ## 这个函数叫 `replaceProtection`，但原来只做了"挂"、没有"替代"
+     *
+     * 实测（2026-10-02）：HYPEUSDT 持仓上**同时有两张 STOP_MARKET 存活** ——
+     * `#788` 是上移止损时挂的、`#790` 是缺失检测时挂的，而 `positionStore`
+     * 只记得其中一张。历史上 LTCUSDT 在同一时刻挂过 4 张。
+     *
+     * 因为 `placeProtection` 传的是 `closePosition: true`，多余的止损**不会**
+     * 反手开仓（第一张平掉仓位后第二张无仓可平）—— 所以这不是致命风险，
+     * 但有三个真实代价：
+     *
+     *   1. 本地账目与交易所长期不一致（日志里"对账结清了 3 张…"就是它）；
+     *   2. 占用交易所的挂单额度；
+     *   3. **上移止损时新旧并存** —— 旧的那张（更差的价位）可能先被触发，
+     *      于是"止损上移"这件事在有重复单时是**没有生效**的。
+     *
+     * ## 为什么撤"全部"而不是"DB 里记的那一张"
+     *
+     * `positionStore` 只保存最后一次的 `stop_order_id`。上移过 N 次止损就会
+     * 留下 N-1 张**不在 DB 里、却在交易所侧仍然有效**的孤儿单。只撤 DB 里
+     * 那个 id 根本撤不干净 —— 那正是上面 `#788` 的来历。
+     *
+     * 撤单失败**不阻断**：撤不掉的通常已经成交或过期，那时挂新单是对的。
+     *
+     * ⚠️ **只撤"即将被重挂"的那一类。** 第一版这里无差别地撤掉全部保护单，
+     * 结果被测试当场抓住：`adjust_protection`（只调止损、不重挂止盈）走这条路时，
+     * **止盈被撤掉而不会重挂** —— 那个止盈就永久没了。
+     * 这正是本文件里另一段注释警告过的坑（"精选要撤的那一张，而不是推倒重来"），
+     * 我在另一个函数里原样踩了一遍。
+     */
+    await this.cancelAllProtection(input.symbol, {
+      stop: input.stop !== null && input.stop > 0,
+      target: input.target !== null && input.target > 0,
+    });
 
     if (input.stop !== null && input.stop > 0) {
       stopOrderId = await this.placeProtection({
