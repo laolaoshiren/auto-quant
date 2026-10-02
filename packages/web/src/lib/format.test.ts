@@ -235,14 +235,80 @@ test('★ symbolTone 对同一个币种永远给同一个颜色 —— 这是哈
   assert.equal(symbolTone('BTCUSDT'), symbolTone('BTCUSDT'));
   assert.equal(symbolTone('ETHUSDT'), symbolTone('ETHUSDT'));
 
-  // 不同币种**允许**撞色（只有 8 档），所以这里不能断言"必不相同" ——
-  // 能断言的是：同一批主流币里确实出现了多种颜色（哈希没有退化成常数）。
-  const majors = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT'];
-  const tones = new Set(majors.map(symbolTone));
-  assert.ok(tones.size >= 3, `主流币只取到 ${tones.size} 种颜色，哈希可能退化了`);
+  for (const symbol of ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT']) {
+    assert.match(symbolTone(symbol), /^hsl\([\d.]+ 72% 68%\)$/, `${symbol} 的颜色格式不对`);
+  }
+});
 
-  for (const symbol of majors) {
-    assert.match(symbolTone(symbol), /^#[0-9a-f]{6}$/i, `${symbol} 的颜色不是合法十六进制`);
+test('★ 候选池那一批币种必须几乎不撞色 —— 用户报的 ETH 与 DOGE 同色', () => {
+  /*
+   * ## 用户报告（2026-10-02，附截图）
+   *
+   *   「交易对颜色给我弄好了啊，不同币种要不同颜色区分啊」
+   *
+   * 截图里 ETHUSDT 与 DOGEUSDT 是同一个蓝色。
+   *
+   * ## 根因：只有 8 档
+   *
+   * 旧实现是 `SYMBOL_TONES[hash % 8]`。而候选池一次就有 20 个标的 ——
+   * 数学上几乎必然撞色（3 个里至少一对同色的概率就约 18%）。
+   *
+   * ## 现在的判据
+   *
+   * 档位提到 16 手挑色相 × 7 个微调 = 112 个取值之后，**20 个常见币种
+   * 允许极少量碰撞**（哈希终究是概率的），但不该像以前那样"看一眼全是同色"。
+   * 这里钉一个可接受的上界：20 个里最多 2 对同色。
+   */
+  const pool = [
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT',
+    'SUIUSDT', 'HYPEUSDT', '1000PEPEUSDT', 'ZECUSDT', 'NEARUSDT', 'AAVEUSDT',
+    'UNIUSDT', 'ENAUSDT', 'WLDUSDT', 'MOVRUSDT', 'QNTUSDT', 'LINKUSDT',
+    'ADAUSDT', 'AVAXUSDT',
+  ];
+  const tones = pool.map(symbolTone);
+
+  /* 不同的颜色种数：旧实现下 20 个标的挤在 8 档里。 */
+  const distinct = new Set(tones).size;
+  assert.ok(
+    distinct >= 12,
+    `20 个币种只取到 ${distinct} 种颜色 —— 档位还是太少（旧实现是 8 档）`,
+  );
+
+  /* 撞色对数：允许少量（哈希是概率的），但最多 2 对。 */
+  let collisions = 0;
+  for (let i = 0; i < tones.length; i += 1) {
+    for (let j = i + 1; j < tones.length; j += 1) {
+      if (tones[i] === tones[j]) collisions += 1;
+    }
+  }
+  assert.ok(
+    collisions <= 2,
+    `20 个币种里有 ${collisions} 对同色 —— 用户要的是"不同币种不同颜色"`,
+  );
+
+  /* 用户截图里撞色的那两个，现在必须不同。 */
+  assert.notEqual(
+    symbolTone('ETHUSDT'),
+    symbolTone('DOGEUSDT'),
+    '★ ETHUSDT 与 DOGEUSDT 撞色正是用户报告的那一例',
+  );
+});
+
+test('★ 币种颜色绝不落进红/绿/琥珀语义区 —— 否则会制造假的涨跌信号', () => {
+  /*
+   * `up`（绿）/ `down`（红）/ `warn`（琥珀）在这个界面里含义固定。
+   * 一个红色的 BTCUSDT 看起来像"BTC 在跌"，而它只是恰好排到了那一档。
+   * 所以色相必须避开：红（≤14 / ≥352）、绿（118–172）、琥珀（32–58）。
+   */
+  const pool: string[] = [];
+  for (const base of ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'SUI', 'HYPE', 'PEPE', 'ZEC', 'NEAR']) {
+    for (const q of ['', '1000', '2', 'X']) pool.push(`${q}${base}USDT`);
+  }
+  for (const symbol of pool) {
+    const hue = Number(/hsl\(([\d.]+)/.exec(symbolTone(symbol))![1]);
+    const bad =
+      hue <= 14 || hue >= 352 || (hue >= 118 && hue <= 172) || (hue >= 32 && hue <= 58);
+    assert.ok(!bad, `${symbol} 的色相 ${hue} 落在语义区里（红/绿/琥珀）`);
   }
 });
 
