@@ -82,6 +82,7 @@ import {
   trades as tradeStore,
 } from '../store/repositories.js';
 import { rankPlatformHistory } from '../strategy/platformHistory.js';
+import { applyAgentPatch } from './agent/patch.js';
 import { rankConsensus } from '../strategy/consensus.js';
 import { clampNextCheckMinutes, nextCycleDelayMs } from './cycleSchedule.js';
 import { pendingTimeoutMinutes } from './pendingTimeout.js';
@@ -2375,6 +2376,58 @@ export class AutoTrader {
           (acceptedSet.has(symbol) ? accepted : rejected).push(symbol);
         }
         return { accepted, rejected };
+      },
+      /*
+       * ⚠️ **改自己的参数 —— 决策轮的这条通道是 2026-10-02 为一个死锁加的。**
+       *
+       * 实测：账户所有者写了"单笔风险可以用到权益 5%"（见于 `customPrompt`），
+       * 而它在 `#1836` 的思考里说：
+       *
+       * > 「账户所有者要求把单笔风险预算改为 5%，**但本轮无 `set_params` 工具可用**，
+       * >   按现有 2% 预算执行」
+       *
+       * 决策轮看得到指示、却没有改规则的权限；复盘轮有权限、而它用另一套 system
+       * 提示词、看不到那份指示 —— **模型被夹在中间，只能一直用 2% 熬着。**
+       *
+       * **守卫与落库都走同一套既有路径**（`applyAgentPatch` + `traders.saveAgentConfig`），
+       * 所以结构性上限（杠杆/名义/保证金/持仓数）仍由代码强制，被钳制时如实回喂。
+       * 这不是给模型开旁路，而是把**它本来就有的权限**接到它做决策的地方。
+       */
+      applyPatch: async (patch, reason) => {
+        const current = this.activeConfig;
+        const result = applyAgentPatch(current, patch);
+        if (result.rejected === null) {
+          /*
+           * 落库走 `setAgentConfig`（AI 模式靠"这一列非空"判定），
+           * 与复盘轮的 `ports.saveConfig` 是同一条路径。
+           */
+          traderStore.setAgentConfig(traderId, JSON.stringify(result.config));
+          this.activeConfig = result.config;
+          /*
+           * ⚠️ **审计也要落一条** —— 否则它下一轮回看自己的历史时看不到这次调整，
+           * 而"AI 调了参但历史里没有"正是复盘轮 `recordExperiment` 存在的原因。
+           * 这里记进 `settings`（与账本检查同一个稳定键前缀），保证可追溯。
+           */
+          settings.set(
+            `param_change:${traderId}:${Date.now()}`,
+            JSON.stringify({ at: new Date().toISOString(), reason, patch, clamps: result.clamps }),
+          );
+          log.info(`[${this.deps.trader.name}] 决策轮里改了参数：${reason}`, {
+            patch,
+            clamps: result.clamps,
+          });
+        } else {
+          log.warn(`[${this.deps.trader.name}] 决策轮里的参数改动被守卫拒绝`, {
+            reason,
+            patch,
+            rejected: result.rejected,
+          });
+        }
+        return {
+          applied: result.rejected === null,
+          rejected: result.rejected,
+          clamps: result.clamps,
+        };
       },
     };
 

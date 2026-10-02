@@ -74,6 +74,31 @@ export interface DecisionToolDeps {
    * 假装全都记下会让它下一轮直接找不到，而它会以为自己看过了（比当场被拒更糟）。
    */
   requestDeepAnalysis(payload: DeepAnalysisRequest): Promise<DeepAnalysisAck>;
+  /**
+   * ⚠️ **改自己的参数 —— 决策轮也要有这条通道（2026-10-02 实测的死锁）。**
+   *
+   * ## 实测：它想改规则，而决策轮没有工具
+   *
+   * 账户所有者把"单笔风险可以用到权益 5%"写进了指示，而它在 `#1836` 的思考里说：
+   *
+   * > 「账户所有者要求把单笔风险预算改为 5%，**但本轮无 `set_params` 工具可用**，
+   * >   按现有 2% 预算执行」
+   *
+   * 这就是死锁：**决策轮看得到指示、却没有改规则的权限；复盘轮有权限、
+   * 但它用的是另一套 system 提示词、看不到账户所有者的取向。**
+   * 于是模型被夹在中间，只能一直用 2% 熬着 —— 而"改不动自己的参数"
+   * 正违背用户的判断：「系统要最大化为模型提供能力、配合模型的意图」。
+   *
+   * ## 安全边界不变
+   *
+   * 走的是**同一个 `applyAgentPatch`**：结构性守卫（杠杆/名义/保证金/持仓数）
+   * 仍由代码强制，被钳制时 `clamps` 会如实回喂 —— 所以这不是给模型开一条
+   * 绕过风控的旁路，而是把**它本来就有的权限**接到它做决策的地方。
+   */
+  applyPatch(
+    patch: Record<string, unknown>,
+    reason: string,
+  ): Promise<{ applied: boolean; rejected: string | null; clamps: unknown }>;
 }
 
 /** 模型点名要深看的标的。 */
@@ -138,6 +163,18 @@ export const DECISION_TOOL_CATALOGUE = `
     下一轮就不在池子里了 —— **这个工具就是让它留下来**。
   - 注意：名单有上限，也按轮数自动过期（默认几轮后消失）。**续点一次就会续期。**
     超上限时系统会如实告诉你哪些没被收下。
+- \`set_params(patch, reason)\` —— **改你自己的参数，包括你自己的规则文本。**
+  - \`patch\`：要改的字段（增量，只改你写进去的）。可改：\`coinSource.*\`（选币）、
+    \`indicators.*\`（看图方式）、\`riskControl.*\` / \`throttle.*\` / \`circuitBreaker.*\`（风控）、
+    **以及你自己的 \`promptSections.*\`**（\`roleDefinition\` / \`tradingFrequency\` /
+    \`entryStandards\` / \`decisionProcess\`）。\`promptSections.*\` 是**整段替换**的 ——
+    所以你可以**删掉**不再适用的旧条款，不只是往上加。
+  - \`reason\`：必填。一次说不清理由的改动，事后没人能复查它为什么发生。
+  - ⚠️ **结构性硬上限（杠杆、名义价值、保证金占用、持仓数）由代码强制，
+    与你在 patch 里写什么无关** —— 所以改参数**不是**绕过风控，你也改不动那些。
+  - 例：\`<tool>{"tool":"set_params","args":{"patch":{"coinSource":{"coinPoolLimit":30}},"reason":"最近候选池里的标的波动都太窄，放宽上限让更多中盘币进来"}}</tool>\`
+  - **为什么这条通道在决策轮**：你在做判断的这一刻，往往正是发现"我的某个参数
+    已经不适用"的时刻。要等到下一轮复盘才改，就白等了一个周期。
 
 **什么时候该要数据（举几个真实的例子）：**
 
@@ -292,6 +329,56 @@ export async function runDecisionTool(
       return {
         text: renderScreenResult(rows),
         summary: `screen_symbols → ${rows.length} 个`,
+      };
+    }
+
+    if (call.tool === 'set_params') {
+      /*
+       * ⚠️ **改自己的参数 —— 决策轮的这条通道是 2026-10-02 为一个死锁加的。**
+       *
+       * 实测：账户所有者写了"单笔风险可以用到权益 5%"，而它在 `#1836` 说
+       * 「**但本轮无 set_params 工具可用**，按现有 2% 预算执行」。
+       * 决策轮看得到指示、却没有改规则的权限；复盘轮有权限、却看不到那份指示 ——
+       * **模型被夹在中间，只能一直用 2% 熬着。**
+       *
+       * 参数同时接受 `patch` 包裹与直接平铺：与 `screen_symbols` 的多格式识别同理
+       * （多认格式、不放宽语义）—— 模型把字段直接写在顶层时不该整条调用作废。
+       *
+       * **守卫与落库都复用 `applyAgentPatch`**（`deps.applyPatch` 注入），
+       * 所以结构性上限仍由代码强制，被钳制时 `clamps` 会如实回喂。
+       */
+      const reason = typeof call.args.reason === 'string' ? call.args.reason : '';
+      const rawPatch =
+        call.args.patch !== undefined && typeof call.args.patch === 'object' && call.args.patch !== null
+          ? (call.args.patch as Record<string, unknown>)
+          : Object.fromEntries(Object.entries(call.args).filter(([k]) => k !== 'reason'));
+
+      if (Object.keys(rawPatch).length === 0) {
+        return {
+          text: 'set_params 需要给出要改的字段（例如 {"patch":{"coinSource":{"coinPoolLimit":25}}}）。',
+          summary: 'set_params 缺少 patch',
+        };
+      }
+      if (reason.trim() === '') {
+        return {
+          text:
+            'set_params 需要一个 reason —— 一次说不清理由的改动，事后没人能复查它为什么发生。\n' +
+            '**把理由补上再来一次，这一轮的时间不算浪费。**',
+          summary: 'set_params 缺少 reason',
+        };
+      }
+
+      const outcome = await deps.applyPatch(rawPatch, reason);
+      return {
+        text:
+          (outcome.applied
+            ? `已生效。`
+            : `**没有生效** —— 被结构性守卫拒绝：${outcome.rejected ?? '未知原因'}。`) +
+          (outcome.clamps && Object.keys(outcome.clamps as object).length > 0
+            ? ` 被钳制的项（实际生效值）：${JSON.stringify(outcome.clamps)}`
+            : '') +
+          '\n（改动下一轮生效；硬上限由代码强制，与这里写什么无关。）',
+        summary: `set_params → ${outcome.applied ? '已生效' : '被拒'}`,
       };
     }
 

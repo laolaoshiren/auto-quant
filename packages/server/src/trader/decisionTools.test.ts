@@ -18,9 +18,100 @@ function deps(overrides: Partial<DecisionToolDeps> = {}): DecisionToolDeps {
     candidates: async () => [],
     screenSymbols: async () => [],
     requestDeepAnalysis: async () => ({ accepted: [], rejected: [] }),
+    applyPatch: async () => ({ applied: true, rejected: null, clamps: [] }),
     ...overrides,
   } as DecisionToolDeps;
 }
+
+test('★ set_params：决策轮也必须能改自己的参数 —— 这一条为一个死锁而写', async () => {
+  /*
+   * ## 实测（2026-10-02，`#1836` 的思考原文）
+   *
+   *   「账户所有者要求把单笔风险预算改为 5%，**但本轮无 set_params 工具可用**，
+   *     按现有 2% 预算执行」
+   *
+   * 这就是死锁：**决策轮看得到指示、却没有改规则的权限；复盘轮有权限、
+   * 但它用另一套 system 提示词、看不到账户所有者的取向。**
+   * 模型被夹在中间，只能一直用 2% 熬着。
+   *
+   * 而"改不动自己的参数"正好违背用户的判断：
+   * 「系统要最大化为模型提供能力、配合模型的意图」。
+   *
+   * 安全边界不变 —— 真正生效与否由注入的 `applyPatch`（走 `applyAgentPatch`
+   * 的结构性守卫）决定，这里只钉住"这条通道存在、参数被正确转交"。
+   */
+  const seen: Array<{ patch: Record<string, unknown>; reason: string }> = [];
+  const out = await runDecisionTool(
+    {
+      tool: 'set_params',
+      args: {
+        patch: { promptSections: { entryStandards: '单笔风险 ≤ 权益 5%' } },
+        reason: '低波动标的走不出止盈所需的幅度',
+      },
+    },
+    deps({
+      applyPatch: async (patch, reason) => {
+        seen.push({ patch, reason });
+        return { applied: true, rejected: null, clamps: [] };
+      },
+    }),
+  );
+  assert.equal(seen.length, 1, '必须真的把 patch 交给注入的实现');
+  assert.deepEqual(seen[0]!.patch, { promptSections: { entryStandards: '单笔风险 ≤ 权益 5%' } });
+  assert.match(seen[0]!.reason, /低波动/, 'reason 必须透传 —— 无理由的改动事后无法复查');
+  assert.match(out.summary, /已生效/);
+});
+
+test('set_params 也接受平铺字段 —— 多认格式，不放宽语义', async () => {
+  /*
+   * 与 `screen_symbols` 同时认下划线与驼峰同一个道理：模型把字段写在顶层
+   * （而不是包在 `patch` 里）时，**整条调用不该作废** —— 那会白烧一轮。
+   */
+  let captured: Record<string, unknown> = {};
+  await runDecisionTool(
+    { tool: 'set_params', args: { coinSource: { coinPoolLimit: 30 }, reason: '拓宽候选' } },
+    deps({
+      applyPatch: async (patch) => {
+        captured = patch;
+        return { applied: true, rejected: null, clamps: [] };
+      },
+    }),
+  );
+  assert.deepEqual(captured, { coinSource: { coinPoolLimit: 30 } }, 'reason 不能混进 patch');
+});
+
+test('set_params 缺 reason 时拒绝执行，并说清为什么', async () => {
+  let called = false;
+  const out = await runDecisionTool(
+    { tool: 'set_params', args: { patch: { coinSource: { coinPoolLimit: 30 } } } },
+    deps({
+      applyPatch: async () => {
+        called = true;
+        return { applied: true, rejected: null, clamps: [] };
+      },
+    }),
+  );
+  assert.equal(called, false, '没有 reason 就不该真的改');
+  assert.match(out.text, /reason/);
+});
+
+test('set_params 被结构性守卫拒绝时如实回报 —— 不能假装改成了', async () => {
+  const out = await runDecisionTool(
+    {
+      tool: 'set_params',
+      args: { patch: { riskControl: { altcoinMaxLeverage: 200 } }, reason: '想更激进' },
+    },
+    deps({
+      applyPatch: async () => ({
+        applied: false,
+        rejected: 'altcoinMaxLeverage 上限 125',
+        clamps: [],
+      }),
+    }),
+  );
+  assert.match(out.text, /没有生效/, '★ 被拒必须如实说 —— 假装成功会让它基于错误前提继续推理');
+  assert.match(out.summary, /被拒/);
+});
 
 test('★ screen_symbols：条件由模型给，系统只负责筛', async () => {
   /*
