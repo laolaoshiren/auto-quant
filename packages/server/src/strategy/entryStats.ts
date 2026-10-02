@@ -52,10 +52,44 @@ export interface EntryFillStats {
   fillRatePercent: number | null;
   /** 被撤的限价单**平均等了多久** —— 判断"是不是差一点就成交"。 */
   avgCanceledWaitMinutes: number | null;
+  /**
+   * ⚠️ **被撤的限价单里，撤单之后价格又回到挂价位的比例（%）。**
+   *
+   * ## 为什么这个数最关键（2026-10-02 实测）
+   *
+   * 用户说「经常挂了都无法成交」。而把最近 10 张被撤的限价单拿去对照之后的行情：
+   *
+   *     未触及（撤对了）          2 张
+   *     撤单后价格又回到挂价位    8 张   ← **80%**
+   *
+   * 也就是说：**它挂的价大多数是对的，是它撤得太早。**
+   * 它撤单的理由永远是「45 分钟时限内预期走不到」—— 而现实给了 24 小时。
+   *
+   * 在此之前它只看得到"成交率 35%"，于是自然的结论是"回踩策略不行 / 我挂太远"。
+   * 加上这一列，结论才完整：**价挂对了，是耐心不够。**
+   *
+   * 没有任何被检查过的撤单样本时为 `null`（不是 0%）—— 与 `fillRatePercent` 同一个道理。
+   */
+  canceledWouldFillPercent: number | null;
+  /** 被检查过的撤单张数（分子分母都基于它）。 */
+  canceledChecked: number;
+}
+
+/** 一张被撤的限价单，以及"撤单之后价格有没有回到挂价位"的检查结果。 */
+export interface CanceledLimitSample {
+  /** 撤单**之后**，该标的的价格区间是否覆盖过挂价。 */
+  wouldFill: boolean;
 }
 
 /** 从入场单样本算出成交统计。 */
-export function entryFillStats(samples: readonly EntryOrderSample[]): EntryFillStats {
+export function entryFillStats(
+  samples: readonly EntryOrderSample[],
+  /**
+   * 可选：对"被撤的限价单"的事后检查结果（撤单后价格有没有回到挂价位）。
+   * 调用方拉 K 线算出来传进来 —— 纯函数不做网络请求。
+   */
+  canceledChecks: readonly CanceledLimitSample[] = [],
+): EntryFillStats {
   let limitFilled = 0;
   let limitCanceled = 0;
   let limitRejected = 0;
@@ -88,6 +122,12 @@ export function entryFillStats(samples: readonly EntryOrderSample[]): EntryFillS
   }
 
   const decided = limitFilled + limitCanceled;
+  /*
+   * "撤单后价格又回来"的比例。分母是**被检查过**的那些撤单 ——
+   * 调用方可能因为限制只查了最近几张，用总撤单数当分母会算出一个偏小的假比例。
+   */
+  const checked = canceledChecks.length;
+  const wouldFill = canceledChecks.filter((c) => c.wouldFill).length;
   return {
     limitFilled,
     limitCanceled,
@@ -95,5 +135,7 @@ export function entryFillStats(samples: readonly EntryOrderSample[]): EntryFillS
     marketFilled,
     fillRatePercent: decided > 0 ? (limitFilled / decided) * 100 : null,
     avgCanceledWaitMinutes: canceledWaitN > 0 ? canceledWaitSum / canceledWaitN : null,
+    canceledWouldFillPercent: checked > 0 ? (wouldFill / checked) * 100 : null,
+    canceledChecked: checked,
   };
 }

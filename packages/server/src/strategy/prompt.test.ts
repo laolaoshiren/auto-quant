@@ -1411,6 +1411,8 @@ test('★ 挂单成交统计必须出现在提示词里 —— 模型看不到�
       marketFilled: 19,
       fillRatePercent: 36.065573770491806,
       avgCanceledWaitMinutes: 45,
+      canceledWouldFillPercent: 80,
+      canceledChecked: 10,
     },
   });
 
@@ -1419,6 +1421,20 @@ test('★ 挂单成交统计必须出现在提示词里 —— 模型看不到�
   assert.match(text, /成交率 36%/, '给成交率');
   assert.match(text, /平均等了 45 分钟/, '撤单等了多久 —— 判断"是不是差一点就成交"');
   assert.match(text, /不是建议/, '要说明这只是统计，判据仍然是它的');
+  /*
+   * ★ 这一列推翻了原来那句话（"撤单是因为挂价离市价偏远"）。
+   *
+   * 实测最近 10 张被撤的限价单：8 张的价格**后来确实回到了挂价位**。
+   * 所以真正的结论是"价挂对了、撤得太早" —— 而一个错的归因会让它
+   * 去把挂价挪近，越改越偏。
+   */
+  assert.match(text, /后来又被价格碰到了/, '★ 要给出"撤单后价格又回来了"的比例');
+  assert.match(text, /撤得太早/, '★ 要点出真正的症结是耐心，不是挂价');
+  assert.doesNotMatch(
+    text,
+    /说明\*\*挂价离当时的市价偏远\*\*/,
+    '★ 那句被数据推翻的归因必须删掉',
+  );
 });
 
 test('没有限价单样本时不渲染挂单成效 —— 0% 与"还没挂过"是两件事', () => {
@@ -1431,6 +1447,8 @@ test('没有限价单样本时不渲染挂单成效 —— 0% 与"还没挂过"�
       marketFilled: 3,
       fillRatePercent: null,
       avgCanceledWaitMinutes: null,
+      canceledWouldFillPercent: null,
+      canceledChecked: 0,
     },
   });
   assert.doesNotMatch(text, /我的挂单成效/);

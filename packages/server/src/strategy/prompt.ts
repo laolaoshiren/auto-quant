@@ -3792,8 +3792,36 @@ function renderEntryStats(stats: EntryFillStats, timeoutMinutes: number): string
   if (stats.avgCanceledWaitMinutes !== null) {
     lines.push(
       `- 被撤的那些**平均等了 ${stats.avgCanceledWaitMinutes.toFixed(0)} 分钟**` +
-        `（系统上限是 ${timeoutMinutes} 分钟）—— 等满了还没到价，说明**挂价离当时的市价偏远**。`,
+        `（系统上限是 ${timeoutMinutes} 分钟）。`,
     );
+  }
+  /*
+   * ⚠️ **这一列是 2026-10-02 加的，它推翻了一句原来写在这里的结论。**
+   *
+   * 原文是：「等满了还没到价，说明**挂价离当时的市价偏远**」。
+   * 而把最近 10 张被撤的限价单拿去对照之后的行情：
+   *
+   *     未触及（撤对了）        2 张
+   *     撤后价格又回到挂价位    8 张   ← **80%**
+   *
+   * 也就是说：**它挂的价大多数是对的，是撤得太早。** 它撤单的理由永远是
+   * 「45 分钟时限内预期走不到」—— 而现实给了 24 小时。
+   *
+   * 原来那句话会让它去"把挂价挪近"，而真正的问题在**耐心**（或者"该不该
+   * 用市价"这个更根本的取舍）。**一个错的归因比不给结论更糟** ——
+   * 它会照着一条站不住的前提去改自己的规则。
+   */
+  if (stats.canceledWouldFillPercent !== null) {
+    lines.push(
+      `- ⚠️ **而被撤的单子里，有 ${stats.canceledWouldFillPercent.toFixed(0)}% 的挂价位` +
+        `「后来又被价格碰到了」**（检查了最近 ${stats.canceledChecked} 张，看的是**撤单之后**的行情）。`,
+    );
+    if (stats.canceledWouldFillPercent >= 50) {
+      lines.push(
+        '  也就是说：**你挂的价大多数是对的，是撤得太早** —— 撤单理由里成立的只有' +
+          '「45 分钟内走不到」，不成立的是「这个价位到不了」。',
+      );
+    }
   }
   if (stats.marketFilled > 0) {
     lines.push(

@@ -2090,7 +2090,61 @@ export class AutoTrader {
             ? (Date.parse(o.updatedAt) - Date.parse(o.createdAt)) / 60_000
             : null,
       }));
-    const entryStats = entryFillStats(entryOrders);
+    /*
+     * ⚠️ **被撤的限价单：撤单之后价格有没有回到那个挂价位。**
+     *
+     * ## 这是 2026-10-02 补的一列，它推翻了一句原来写在提示词里的结论
+     *
+     * 原文说被撤是因为"挂价离当时的市价偏远"。而实测最近 10 张被撤的限价单：
+     *
+     *     未触及（撤对了）        2 张
+     *     撤后价格又回到挂价位    8 张   ← **80%**
+     *
+     * **它挂的价大多数是对的，是撤得太早。** 它撤单的理由永远是「45 分钟时限内
+     * 预期走不到」—— 而现实给了 24 小时。
+     *
+     * ## 代价与上限
+     *
+     * 每张要一次 K 线请求，所以**只查最近 3 张**（一轮最多 3 个请求，
+     * 相对 2400/分钟的权重上限可以忽略）。查不到就跳过 —— 统计少一张样本，
+     * 也好过让这一轮因为一个附加统计而失败。
+     */
+    const canceledChecks: Array<{ wouldFill: boolean }> = [];
+    for (const order of orderStore
+      .list(traderId, 300)
+      .filter(
+        (o) =>
+          o.purpose === 'entry' &&
+          String(o.type).toUpperCase() === 'LIMIT' &&
+          String(o.status).toUpperCase() === 'CANCELED' &&
+          typeof o.price === 'number' &&
+          o.price > 0 &&
+          o.updatedAt,
+      )
+      .slice(0, 3)) {
+      try {
+        const since = Date.parse(String(order.updatedAt));
+        /*
+         * 拉最近 96 根 15m（= 24 小时），再**按时间过滤出撤单之后**的那些 ——
+         * `getKlines` 不接受起始时间，所以过滤必须自己做。撤单超过 24 小时的
+         * 单子过滤后为空，直接跳过（它已经太旧，参考价值也低）。
+         */
+        const candles = await this.deps.marketData.getKlines(
+          String(order.symbol),
+          '15m' as Timeframe,
+          96,
+        );
+        const after = candles.filter((k) => Number(k.closeTime) >= since);
+        if (after.length === 0) continue;
+        const limitPrice = Number(order.price);
+        canceledChecks.push({
+          wouldFill: after.some((k) => limitPrice >= k.low && limitPrice <= k.high),
+        });
+      } catch {
+        /* 读不到就少一个样本 —— 不让一个附加统计影响这一轮。 */
+      }
+    }
+    const entryStats = entryFillStats(entryOrders, canceledChecks);
 
     /*
      * ⚠️ **连续多少轮没开过一次仓** —— 从最近的决策记录倒着数。

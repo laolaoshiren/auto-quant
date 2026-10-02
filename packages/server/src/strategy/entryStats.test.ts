@@ -3,6 +3,66 @@ import assert from 'node:assert/strict';
 import { entryFillStats } from './entryStats.js';
 
 /* -------------------------------------------------------------------------- */
+/*  "撤单后价格又回来了" —— 那一列推翻了原来那句归因                              */
+/* -------------------------------------------------------------------------- */
+
+test('★ 被撤的单子里有多少"其实价格后来到了" —— 这决定它该改耐心还是改挂价', () => {
+  /*
+   * ## 实测（2026-10-02）
+   *
+   * 把最近 10 张被撤的限价单拿去对照**撤单之后**的行情：
+   *
+   *     未触及（撤对了）        2 张
+   *     撤后价格又回到挂价位    8 张   ← **80%**
+   *
+   * 而在此之前，提示词里写着「等满了还没到价，说明**挂价离当时的市价偏远**」——
+   * **那句话被这份数据推翻了**：它挂的价大多数是对的，是撤得太早。
+   *
+   * 一个错的归因会让它去"把挂价挪近"，越改越偏；所以这一列必须单独给出来。
+   */
+  const stats = entryFillStats(
+    [
+      { type: 'LIMIT', status: 'FILLED', waitMinutes: 20 },
+      { type: 'LIMIT', status: 'CANCELED', waitMinutes: 45 },
+      { type: 'LIMIT', status: 'CANCELED', waitMinutes: 45 },
+      { type: 'LIMIT', status: 'CANCELED', waitMinutes: 45 },
+      { type: 'LIMIT', status: 'CANCELED', waitMinutes: 45 },
+      { type: 'LIMIT', status: 'CANCELED', waitMinutes: 45 },
+    ],
+    [
+      { wouldFill: true },
+      { wouldFill: true },
+      { wouldFill: false },
+      { wouldFill: true },
+      { wouldFill: true },
+    ],
+  );
+  assert.equal(stats.canceledChecked, 5);
+  assert.equal(stats.canceledWouldFillPercent, 80, '5 张里 4 张后来到了 → 80%');
+  /* 原有字段不受影响。 */
+  assert.equal(stats.limitFilled, 1);
+  assert.equal(stats.limitCanceled, 5);
+});
+
+test('没做过事后检查时是 null，不是 0% —— 与"查过了、一张都没回来"是两件事', () => {
+  const stats = entryFillStats([{ type: 'LIMIT', status: 'CANCELED', waitMinutes: 45 }]);
+  assert.equal(stats.canceledWouldFillPercent, null);
+  assert.equal(stats.canceledChecked, 0);
+});
+
+test('分母是"被检查过的张数"，不是总撤单数 —— 否则会算出一个偏小的假比例', () => {
+  /*
+   * 调用方为了控制请求数只查最近几张。若用总撤单数（比如 80）当分母，
+   * 2/80 = 2.5% 会读成"几乎都撤对了"，而真实情况是 2/3。**那是一个假事实。**
+   */
+  const many: Array<{ type: string; status: string; waitMinutes: number }> = [];
+  for (let i = 0; i < 80; i += 1) many.push({ type: 'LIMIT', status: 'CANCELED', waitMinutes: 45 });
+  const stats = entryFillStats(many, [{ wouldFill: true }, { wouldFill: true }, { wouldFill: false }]);
+  assert.equal(stats.canceledChecked, 3);
+  assert.equal(stats.canceledWouldFillPercent, 66.66666666666666);
+});
+
+/* -------------------------------------------------------------------------- */
 /*  挂单成交率：模型看不到的那个反馈                                            */
 /* -------------------------------------------------------------------------- */
 
