@@ -6769,6 +6769,87 @@ reduceQuantity: null,
   }
 
   /**
+   * **撤掉这个机器人**全部**还没成交的限价入场单** —— 供「全部平仓」使用。
+   *
+   * ## 为什么需要它（2026-10-02 用户报告）
+   *
+   * 用户的原话：「全部平仓功能似乎不作用于委托挂单」。
+   *
+   * 核实后确认成立，而且是**两层都漏**：
+   *
+   *   · `manager.closeAllPositions()` 只遍历 `positions.open()` —— 那是
+   *     `status = 'open'` 的**已成交持仓**，`pending`（挂单）根本不在里面；
+   *   · 它调用的 `closeManually()` 第一句是 `getOpenBySymbol()`，
+   *     没有持仓就 `return null` —— **撤单那一行永远执行不到**。
+   *
+   * 于是"一个只有挂单、没有持仓的机器人"点全部平仓 = **什么都不发生**。
+   * 那正是"平仓"这个按钮最需要工作的场景之一：挂单成交就会变成持仓，
+   * 而操作员按它就是想把这个敞口收回来。
+   *
+   * ## 语义与 `executeCancelPending` 保持一致
+   *
+   * 撤单失败时**不猜**：查一次那张单的真实状态。已经成交的**不关本地记录** ——
+   * 它是一笔真实持仓，关掉等于把仓位从账本上抹掉（钱花了、仓位在）。
+   * 那种情况留给对账的 `settlePendingEntries` 走转正那条路。
+   *
+   * 返回实际撤掉的张数，供调用方如实汇报。
+   */
+  async cancelAllPendingEntries(): Promise<number> {
+    const traderId = this.deps.trader.id;
+    let cancelled = 0;
+
+    for (const row of positionStore.pending(traderId)) {
+      const symbol = row.symbol;
+      try {
+        /*
+         * 有单号就精确撤；没有单号（坏数据）直接作废本地行 ——
+         * 与 `executeCancelPending` 同一处理。
+         */
+        if (!row.entry_order_id) {
+          positionStore.close(row.id);
+          continue;
+        }
+        let cancelFailure: string | null = null;
+        try {
+          const ok = await this.deps.broker.cancelOrder(symbol, row.entry_order_id, 'order');
+          if (!ok) cancelFailure = '交易所拒绝了撤单请求（返回 false）';
+        } catch (error) {
+          cancelFailure = (error as Error).message;
+        }
+
+        if (cancelFailure !== null) {
+          /*
+           * 撤不掉 —— 查清楚它现在是"没了"还是"成了"。
+           * **已成交的不关本地记录**：那会丢掉一个真实仓位。
+           */
+          const order = await this.deps.broker.getOrder(symbol, row.entry_order_id).catch(() => null);
+          const executed = Number(order?.executedQty ?? 0) || 0;
+          if (executed > 0) {
+            this.emit(
+              'warn',
+              `全部平仓时发现 ${symbol} 的挂单**已经成交**（${executed}）—— ` +
+                '它现在是真实持仓，已留给对账转正并挂保护单（本次不平它）。',
+            );
+            continue;
+          }
+          this.emit('warn', `全部平仓时撤销 ${symbol} 的挂单失败（${cancelFailure}）—— 它仍然挂在交易所。`);
+          continue;
+        }
+
+        positionStore.close(row.id);
+        cancelled += 1;
+      } catch (error) {
+        this.emit('warn', `全部平仓时撤销 ${symbol} 的挂单出错：${(error as Error).message}`);
+      }
+    }
+
+    if (cancelled > 0) {
+      this.emit('info', `全部平仓：已撤掉 ${cancelled} 张还没成交的限价挂单。`);
+    }
+    return cancelled;
+  }
+
+  /**
    * **执行回执：把"刚才真的发生了什么"交回给模型，让它再决定一次。**
    *
    * ## 它补的是哪一环

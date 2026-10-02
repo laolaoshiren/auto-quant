@@ -672,7 +672,12 @@ function ClosePositionModal({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ closed: string[]; stillRunning: boolean } | null>(null);
+  const [result, setResult] = useState<{
+    closed: string[];
+    /** 「全部平仓」时顺带撤掉的待成交挂单张数（单标的平仓不用它）。 */
+    cancelledPending?: number;
+    stillRunning: boolean;
+  } | null>(null);
 
   // 每次打开都清掉上一次的结果 —— 否则会看到上一次的成交结果。
   useEffect(() => {
@@ -694,7 +699,11 @@ function ClosePositionModal({
     try {
       if (isAll) {
         const response = await api.closeAllPositions(traderId);
-        setResult({ closed: response.closed, stillRunning: response.stillRunning });
+        setResult({
+          closed: response.closed,
+          cancelledPending: response.cancelledPending,
+          stillRunning: response.stillRunning,
+        });
       } else {
         const response = await api.closePosition(traderId, target);
         setResult({ closed: [target], stillRunning: response.stillRunning });
@@ -732,9 +741,19 @@ function ClosePositionModal({
         {result ? (
           <>
             <div className="rounded-md border border-up/50 bg-up/10 px-3 py-2 text-base font-semibold text-up">
-              {result.closed.length === 0
-                ? '没有需要平掉的持仓。'
-                : `已平仓：${result.closed.join('、')}。`}
+              {result.closed.length === 0 && (result.cancelledPending ?? 0) === 0
+                ? '没有需要平掉的持仓，也没有等待成交的挂单。'
+                : `${
+                    result.closed.length === 0 ? '没有持仓。' : `已平仓：${result.closed.join('、')}。`
+                  }${
+                    /*
+                     * ⚠️ **挂单也要如实报出**（2026-10-02 用户报告"不作用于委托挂单"）。
+                     * 撤掉挂单是"把敞口收回来"的一部分，而操作员看不到它就会以为没生效。
+                     */
+                    (result.cancelledPending ?? 0) > 0
+                      ? `已撤掉 ${result.cancelledPending} 张等待成交的挂单。`
+                      : ''
+                  }`}
             </div>
             {result.stillRunning && (
               /*

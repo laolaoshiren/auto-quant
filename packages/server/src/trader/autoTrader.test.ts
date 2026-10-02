@@ -3853,6 +3853,56 @@ test('★ 决策轮改参数有频率闸门 —— 防止它每轮微调把参�
   );
 });
 
+test('★ 「全部平仓」必须撤掉还没成交的挂单 —— 只有挂单时它原来什么都不做', async () => {
+  /*
+   * ## 用户报告（2026-10-02）
+   *
+   *   「全部平仓功能似乎不作用于委托挂单」
+   *
+   * ## 核实：成立，而且两层都漏
+   *
+   *   · `manager.closeAllPositions()` 只遍历 `positions.open()`
+   *     —— 那是 `status='open'` 的**已成交持仓**，`pending` 不在里面；
+   *   · 它调用的 `closeManually()` 第一句 `getOpenBySymbol()`，
+   *     没有持仓就 `return null` —— **撤单那一行永远执行不到**。
+   *
+   * 于是「一个只有挂单、没有持仓的机器人」点全部平仓 = **什么都不发生**。
+   * 而挂单本来就是敞口：它一成交就变成持仓、份额已经许出去了。
+   * 操作员按这个按钮就是想把这个敞口收回来。
+   *
+   * ## 这条用例钉什么
+   *
+   * 造一个**只有 pending 挂单、没有持仓**的状态，调 `cancelAllPendingEntries()`，
+   * 断言：挂单在交易所侧真的被撤了、本地行也关掉了。
+   */
+  const broker = new FakeBroker();
+  /* 先挂一张限价入场单（不成交）—— 用模型给一个限价开仓。 */
+  const limitOpen = `<decision>[{"symbol":"BTCUSDT","action":"open_long","leverage":3,
+    "position_size_usd":600,"entry_type":"limit","entry_price":66000,
+    "stop_loss":64000,"take_profit":74000,"confidence":85,"risk_usd":20,
+    "reasoning":"挂回踩位等成交。"}]</decision>`;
+  await buildTrader(broker, limitOpen).runOnce();
+
+  const pendingBefore = positionStore.pending(traderId);
+  assert.ok(pendingBefore.length > 0, '前提：确实留下了一张待成交挂单');
+  assert.equal(positionStore.open(traderId).length, 0, '前提：还没有成交持仓');
+
+  const cancelled = await buildTrader(broker, '<decision>[]</decision>').cancelAllPendingEntries();
+
+  assert.ok(cancelled > 0, '★ 只有挂单时也必须撤 —— 那是这个按钮最需要工作的场景之一');
+  assert.equal(
+    positionStore.pending(traderId).length,
+    0,
+    '★ 本地待成交记录要关掉 —— 否则界面上那张单永远显示"等成交"',
+  );
+  const live = await broker.getOpenOrders();
+  assert.equal(
+    live.filter((o) => String((o as { status?: string }).status ?? '') === 'NEW').length,
+    0,
+    '★ 交易所侧也要真的撤掉 —— 只改本地记录等于把敞口留在市场上',
+  );
+});
+
 test('★ 硬超时会真的中止那一轮 —— 信号必须到达模型层，而不是只放锁', async () => {
   /*
    * ## 这条用例守的是一个**我自己引入的**故障（2026-10-02）

@@ -660,7 +660,7 @@ export const api = {
    * 并返回**实际平掉的币种列表** —— 界面靠这个列表说话，而不是靠一个哨兵值。
    */
   closeAllPositions: (id: number) =>
-    request<{ ok: boolean; closed: string[]; stillRunning: boolean }>(
+    request<{ ok: boolean; closed: string[]; cancelledPending: number; stillRunning: boolean }>(
       `/traders/${id}/positions/close-all`,
       { method: 'POST', body: {} },
     ),

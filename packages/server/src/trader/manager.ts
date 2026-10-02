@@ -1474,7 +1474,7 @@ export class TraderManager {
     return { ...result, stillRunning: false };
   }
   /**
-   * 平掉该机器人的**全部**持仓。
+   * 平掉该机器人的**全部**持仓，**并撤掉它全部还没成交的挂单**。
    *
    * ## 为什么不做成"把 `__all__` 当币种传下去"
    *
@@ -1485,6 +1485,21 @@ export class TraderManager {
    * （先撤单 → 市价平 → 记账，见 `closeManually`），
    * 并把**实际平掉的币种列表**返回给界面。
    *
+   * ## ⚠️ 挂单也是敞口 —— 这一半原来是漏的（2026-10-02 用户报告）
+   *
+   * 用户的原话：「全部平仓功能似乎不作用于委托挂单」。
+   *
+   * 核实后确认成立：这里原来只遍历 `positions.open()`（**已成交持仓**），
+   * 而 `closeManually()` 在没有持仓时第一句就 `return null` —— 于是
+   * **一个只有挂单、没有持仓的机器人点"全部平仓"，什么都不发生**。
+   *
+   * 而挂单本来就是敞口：它一旦成交就变成持仓，**份额已经许出去了**。
+   * 操作员按这个按钮的意思就是"把敞口收回来"，所以撤挂单是它的一部分，
+   * 不是附加功能。
+   *
+   * 撤单的语义走 `AutoTrader.cancelAllPendingEntries()`（与模型撤单同一个判据：
+   * **撤单失败时查清那张单是"没了"还是"成了"**，已成交的不关本地记录 —— 那是真仓位）。
+   *
    * ## 一个失败不该阻断其余的
    *
    * 平仓是操作员的退出手段。**某一个标的平不掉，不该让其他标的也平不掉** ——
@@ -1492,13 +1507,54 @@ export class TraderManager {
    */
   async closeAllPositions(
     traderId: number,
-  ): Promise<{ closed: string[]; failed: Array<{ symbol: string; error: string }>; stillRunning: boolean }> {
+  ): Promise<{
+    closed: string[];
+    cancelledPending: number;
+    failed: Array<{ symbol: string; error: string }>;
+    stillRunning: boolean;
+  }> {
     const trader = traders.get(traderId);
     if (!trader) throw new Error('机器人不存在。');
 
+    const failed: Array<{ symbol: string; error: string }> = [];
+
+    /*
+     * ① 先撤挂单。**放在平仓之前** —— 与 `closeManually` 里"先撤单再平仓"
+     * 同一个顺序理由：一个挂单在平仓之后成交，就留下一个没有本地记录的仓位。
+     */
+    let cancelledPending = 0;
+    try {
+      const running = this.running.get(traderId);
+      if (running) {
+        cancelledPending = await running.cancelAllPendingEntries();
+      } else {
+        /*
+         * 已停止：建一个一次性实例（与 `closePosition` 同一条路径）。
+         * 模型换成"永远拒绝"的桩 —— 撤单绝不该调用 LLM。
+         */
+        const connection = await this.connectionFor(traderId, trader.exchangeAccountId, false);
+        const strategyRecord =
+          trader.strategyId === null ? undefined : strategies.get(trader.strategyId);
+        const parsed = strategyRecord ? StrategyConfigSchema.safeParse(strategyRecord.config) : null;
+        const config: StrategyConfig = parsed?.success ? parsed.data : StrategyConfigSchema.parse({});
+        const autoTrader = new AutoTrader({
+          trader,
+          config,
+          registry: connection.registry,
+          market: connection.market,
+          marketData: new MarketDataService(connection.market, connection.registry),
+          broker: connection.broker,
+          model: { complete: () => Promise.reject(new Error('撤单不调用模型')) },
+        });
+        cancelledPending = await autoTrader.cancelAllPendingEntries();
+      }
+    } catch (error) {
+      failed.push({ symbol: '(挂单)', error: (error as Error).message });
+    }
+
+    /* ② 再平已成交的持仓。 */
     const symbols = [...new Set(positions.open(traderId).map((p) => p.symbol))];
     const closed: string[] = [];
-    const failed: Array<{ symbol: string; error: string }> = [];
 
     for (const symbol of symbols) {
       try {
@@ -1509,7 +1565,7 @@ export class TraderManager {
       }
     }
 
-    return { closed, failed, stillRunning: this.running.has(traderId) };
+    return { closed, cancelledPending, failed, stillRunning: this.running.has(traderId) };
   }
 
 
