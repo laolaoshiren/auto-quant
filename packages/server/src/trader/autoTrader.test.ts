@@ -40,6 +40,7 @@ import {
   makeClientId,
   ORDER_SETTLE_GRACE_MS,
   readForeignActivity,
+  selectPromptLessons,
   type DecisionModel,
 } from './autoTrader.js';
 
@@ -3722,6 +3723,59 @@ test('★ 保护单被交易所拒绝时，原因必须出现在提示里（不�
 /* -------------------------------------------------------------------------- */
 /*  保本止损：顺序不变量                                                        */
 /* -------------------------------------------------------------------------- */
+
+test('★ 最新的一条教训必须能进提示词 —— 旧口径下它被候选池顺序挤掉了', () => {
+  /*
+   * ## 实测（2026-10-02，两轮相隔 40 分钟）
+   *
+   *     #90（agent_memory）15:22 写下 HYPE 的回吐教训，里面有两句关键话：
+   *         「同类单应在浮盈约 0.5% 价格时部分止盈」
+   *         「保本/移动止损只解决不亏，不解决留利」
+   *     #1851（决策轮）16:02 的提示词里【完全找不到它】——
+   *         教训列表第一条是更早的 SUIUSDT 教训
+   *
+   * ## 旧实现的三个条件叠加
+   *
+   *     for (const symbol of symbols) {                     // 候选池顺序（按成交额降序）
+   *       for (const m of agentMemory.forSymbol(...)) {     // 每标的 2 条
+   *         if (out.length >= 8) return out;                // 满 8 条停
+   *       }
+   *     }
+   *
+   * → **只有候选池排名前 4 左右的标的**的教训能进来。而 HYPEUSDT 常排第 14 位，
+   *   于是它的教训永远进不了 —— 而区块标题写着"最新在前"，名不副实。
+   *
+   * **复盘员总结出一条能改变行为的结论，而它没有到达决策现场。**
+   *
+   * ## 这条用例钉什么
+   *
+   * 输入是"按 id DESC 排好的最近教训"（`agentMemory.recent` 的口径），
+   * 断言**最近的那条一定在输出里**——旧口径下这条会红。
+   */
+  const recent = Array.from({ length: 12 }, (_, i) => ({
+    symbol: i === 0 ? 'ZZZLATESTUSDT' : `COIN${i}USDT`,
+    closeReason: 'stop_loss',
+    netPnl: -0.1,
+    lesson: `教训编号 ${11 - i}`,
+  }));
+
+  const picked = selectPromptLessons(recent, 8);
+  assert.equal(picked.length, 8, '仍是 8 条 —— 变的是"取哪 8 条"，不是条数');
+  assert.equal(picked[0]!.symbol, 'ZZZLATESTUSDT', '★ 第一条必须是最新的那条');
+  assert.match(
+    picked[0]!.lesson,
+    /教训编号 11/,
+    '★ 最新的教训必须在里面 —— 否则复盘白做、那 7,000 tokens 的思考到不了现场',
+  );
+});
+
+test('教训条数不足上限时有几条给几条 —— 不要补空行', () => {
+  const picked = selectPromptLessons(
+    [{ symbol: 'A', closeReason: 'take_profit', netPnl: 1, lesson: 'x' }],
+    8,
+  );
+  assert.equal(picked.length, 1);
+});
 
 test('★ 重挂保护位必须先把旧的全部撤掉 —— 否则「止损上移」实际不生效', async () => {
   /*

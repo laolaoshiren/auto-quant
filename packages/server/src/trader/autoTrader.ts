@@ -222,6 +222,57 @@ export const ORDER_SETTLE_GRACE_MS = 2 * 60_000;
 export const MAX_DATA_ROUNDS = 3;
 
 /**
+ * 提示词里给模型看多少条**自己复盘出来的教训**。
+ *
+ * ⚠️ 这个数从"按候选池遍历到 8 条"改成了"按时间取最近 8 条"（见
+ * `buildPromptLessons` 的说明）：**条数没变，变的是"取哪 8 条"。**
+ * 旧口径下只有候选池排名前 4 的标的有机会，最新的教训常常一条都进不来。
+ */
+export const PROMPT_LESSON_LIMIT = 8;
+
+/** 提示词里"你自己复盘出来的教训"的一条。 */
+export interface PromptLessonLike {
+  symbol: string;
+  closeReason: string;
+  netPnl: number;
+  lesson: string;
+}
+
+/**
+ * 从 `agent_memory` 的**按时间倒序**快照里挑要进提示词的教训。
+ *
+ * ⚠️ 抽成纯函数是为了**可测**：这段逻辑出过一个很隐蔽的 BUG（见下），
+ * 而它藏在 `AutoTrader` 的私有方法里、又依赖数据库外键，很难写一条干净的用例。
+ *
+ * ## 那个 BUG（2026-10-02 实测）
+ *
+ * 旧实现是"遍历候选池顺序 → 每标的取 2 条 → 满 8 条停"：
+ *
+ *     for (const symbol of symbols) { ... }     // 候选池按 24h 成交额降序
+ *
+ * 三者叠加的后果：**只有候选池排名前 4 左右的标的**的教训能进提示词。
+ * HYPEUSDT 常排第 14 位，于是它的教训永远进不了 —— 而区块标题写"最新在前"。
+ *
+ * 实测：`#90`（15:22 写下 HYPE 的回吐教训，"不解决留利"那句）在 `#1851`
+ * （16:02 的决策轮）提示词里**完全找不到**。
+ *
+ * 所以现在的口径是：**按时间取最近 N 条**（输入即已按 id DESC 排好）。
+ * 这样"最新学到的"一定到达现场；代价只是老标的的旧教训可能被挤出 ——
+ * 而旧教训针对的是当时的行情，本来就更不相关。
+ */
+export function selectPromptLessons(
+  recent: readonly PromptLessonLike[],
+  limit: number = PROMPT_LESSON_LIMIT,
+): PromptLessonLike[] {
+  return recent.slice(0, Math.max(0, limit)).map((m) => ({
+    symbol: m.symbol,
+    closeReason: m.closeReason,
+    netPnl: m.netPnl,
+    lesson: m.lesson,
+  }));
+}
+
+/**
  * 「这张单**已经不存在了**」的交易所状态 —— 限价入场对账用。
  *
  * ⚠️ **判断顺序很重要**：调用方必须先看 `executedQty > 0`，再看这张表。
@@ -8571,7 +8622,7 @@ reduceQuantity: null,
        * 固定取最近 3 条（与最近平仓同样的 O(1) 纪律，见 §4）。
        */
       recentRejections: this.buildPromptRejections(traderId),
-      lessons: this.buildPromptLessons(traderId, symbols),
+      lessons: this.buildPromptLessons(traderId),
     };
   }
 
@@ -8597,20 +8648,39 @@ reduceQuantity: null,
    *
    * 按候选顺序取（候选已按评分排过），于是最值得看的标的的教训优先保留。
    */
-  private buildPromptLessons(traderId: number, symbols: readonly string[]): PromptLesson[] {
-    const out: PromptLesson[] = [];
-    for (const symbol of symbols) {
-      for (const m of agentMemory.forSymbol(traderId, symbol, 2)) {
-        out.push({
-          symbol: m.symbol,
-          closeReason: m.closeReason,
-          netPnl: m.netPnl,
-          lesson: m.lesson,
-        });
-        if (out.length >= 8) return out;
-      }
-    }
-    return out;
+  private buildPromptLessons(traderId: number): PromptLesson[] {
+    /*
+     * ⚠️ **【2026-10-02 修复】原来按"候选池顺序"遍历，把最新教训挤掉了。**
+     *
+     * 旧实现：
+     *
+     *     for (const symbol of symbols) {                     // 候选池顺序（按成交额降序）
+     *       for (const m of agentMemory.forSymbol(traderId, symbol, 2)) {  // 每标的 2 条
+     *         out.push(...);
+     *         if (out.length >= 8) return out;                // 满 8 条就停
+     *       }
+     *     }
+     *
+     * 三个条件叠在一起，后果是：**只有候选池排名前 4 左右的标的**的教训能进提示词。
+     * 而候选池按 24h 成交额降序 —— HYPEUSDT 常排第 14 位左右，于是它的教训
+     * **永远进不了**。而区块标题写的是"最新在前"，名不副实。
+     *
+     * 实测证据（两轮相隔 40 分钟）：
+     *
+     *     #90（agent_memory）15:22 写下 HYPE 的回吐教训，里面有
+     *         "同类单应在浮盈约 0.5% 价格时部分止盈" 与
+     *         "保本/移动止损只解决不亏，不解决留利"
+     *     #1851（决策轮）16:02 的提示词里【完全找不到它】，
+     *         教训列表第一条是更早的 SUIUSDT 教训
+     *
+     * 也就是说：**复盘员认真总结出一条能改变行为的结论，而它没有到达决策现场。**
+     * 而那句话（"不解决留利"）恰好是当时账户最需要的一条。
+     *
+     * 现在按**时间**取最近 N 条 —— 与标题一致，让每一次复盘都真的被看见。
+     * 代价是"候选池里某个老标的的旧教训"可能被挤出去；但旧教训针对的是当时的行情，
+     * 而"最新的教训"正是它刚学到的。
+     */
+    return selectPromptLessons(agentMemory.recent(traderId, PROMPT_LESSON_LIMIT));
   }
 
   /**
