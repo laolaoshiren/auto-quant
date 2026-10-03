@@ -87,6 +87,15 @@ $excludes = @(    '--exclude=./.env',                 # ← 关键：绝不覆�
     '--exclude=./data',                 # 数据库、主密钥、JWT 密钥、日志
     '--exclude=./docs/research/vendor', # 大体积可再生的供应商文档副本
     '--exclude=./.git',
+    # ⚠️ **`.dsh` 必须排除** —— 2026-10-03 实测发现的问题：
+    #
+    # 上面的 bundle 清理**只在本地跑**（`Select-Object -Skip 5`），而服务器上没有任何
+    # 清理。不排除 `.dsh` 时，每次部署都会把 5 个 bundle（约 15 MB）传上去并留在
+    # `/opt/autoquant/.dsh/backups/` 里 —— **只增不减**。实测一天部署约 10 次后
+    # 那里累积到 **87 个 · 247 MB**，而磁盘只剩 11 GB。
+    #
+    # 服务器需要的是**运行代码**，备份留在本地就够（它本来就是"本地完整"的保险）。
+    '--exclude=./.dsh',
     '--exclude=./_deploy.tar.gz'
     # 注意：dist **不排除** —— 本地构建好一起传，见文件顶部说明。
 )
