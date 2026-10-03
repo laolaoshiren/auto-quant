@@ -1449,7 +1449,37 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       // The live loop is the source of truth for status, not the stored value.
       status: running.has(trader.id) ? deps.manager.statusOf(trader.id) : ('stopped' as const),
       isRunning: running.has(trader.id),
+      /*
+       * ⚠️ **AI 主动停手的状态必须发出来，否则界面上看不出来。**
+       *
+       * 用户 2026-10-04 的原话：「**再也不会开新仓？你确定？那这个机器人存在意义是什么？**」
+       *
+       * 他的质疑是对的，而根因是这条链只写了一半：模型能调 `pause_trading` 设上开关，
+       * 交易循环也确实读它并拦下开仓，**而清除它的 `clearPause()` 只在测试里被调用过**
+       * —— 界面上既看不到"它停手了"，也没有任何地方能恢复。
+       *
+       * 表现就是用户遇到的那样：决策卡不断出现「开多 / 未执行（已跳过）」，
+       * 而人既找不到原因、也找不到出口。
+       * **一个只能收紧不能放松的开关，不是风控，是死锁。**
+       */
+      agentPaused: deps.manager.pausedInfo(trader.id),
     }));
+  });
+
+  /**
+   * **恢复交易** —— 撤掉 AI 主动设下的停手开关。
+   *
+   * 与手工平仓同为"操作员对自己资金的控制权"，所以**不检查机器人是否在运行**
+   * （理由与下面 `close-all` 那条路由相同）：停手是常见状态，恢复后它下一轮就能开新仓。
+   *
+   * 它**只**清掉那个开关：不改策略参数、不碰仓位、不触发任何平仓 ——
+   * AI 当初停手时明确写过「已有仓位保持原计划管理」，这里也不替它决定别的。
+   */
+  app.post('/api/traders/:id/resume', authed, async (request) => {
+    const id = Number((request.params as { id: string }).id);
+    if (!traders.get(id)) throw new Error('未知的机器人');
+    deps.manager.resumeAgent(id);
+    return { ok: true };
   });
 
   app.post('/api/traders', authed, guard(async (body: unknown) => {

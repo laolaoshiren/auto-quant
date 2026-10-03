@@ -276,6 +276,18 @@ export interface LogLine {
 
 export interface TraderRow extends Trader {
   isRunning: boolean;
+  /**
+   * **AI 主动停手**的状态（没停手时是 `null`）。
+   *
+   * 用户 2026-10-04 的原话：「**再也不会开新仓？你确定？那这个机器人存在意义是什么？**」
+   *
+   * 他说得对：模型能调 `pause_trading` 设上这个开关、交易循环也照它拦开仓，
+   * **而清除它的入口原本不存在**（`clearPause()` 只在测试里被调用）。
+   * 于是界面只显示「开多 / 未执行（已跳过）」，人既看不出原因、也找不到出口。
+   *
+   * 现在服务端把它发出来，界面据此显示"停手中 + 恢复按钮"。
+   */
+  agentPaused?: { at: string; reason: string } | null;
 }
 
 /**
@@ -642,6 +654,13 @@ export const api = {
   startTrader: (id: number, dryRun: boolean) =>
     request<StartResult>(`/traders/${id}/start`, { method: 'POST', body: { dryRun } }),
   stopTrader: (id: number) => request<{ ok: boolean }>(`/traders/${id}/stop`, { method: 'POST', body: {} }),
+  /**
+   * **恢复交易** —— 撤掉 AI 主动设下的停手开关（`pause_trading`）。
+   *
+   * 那个开关原本**没有任何撤销入口**：模型设得上、循环照它拦开仓，
+   * 而清除函数只在测试里被调用过 —— 机器人会永久停在新仓之外。
+   */
+  resumeTrader: (id: number) => request<{ ok: boolean }>(`/traders/${id}/resume`, { method: 'POST', body: {} }),
   /** Force one decision cycle now instead of waiting for the interval. */
   runTraderOnce: (id: number) =>
     request<{ ok: boolean; summary: string }>(`/traders/${id}/run-once`, { method: 'POST', body: {} }),

@@ -635,6 +635,30 @@ export function TraderPage() {
     }
   };
 
+  /**
+   * **恢复交易** —— 撤掉 AI 主动设下的停手开关。
+   *
+   * 用户 2026-10-04 的原话：「**再也不会开新仓？你确定？那这个机器人存在意义是什么？**」
+   *
+   * 他说得对。AI 的 `pause_trading` 能设上这个开关、交易循环也照它拦开仓，
+   * **而清除它的入口原本不存在** —— 界面只显示「开多 / 未执行（已跳过）」，
+   * 既看不出原因、也没有出口。所以这里补上那个出口。
+   */
+  const resume = async () => {
+    if (!trader) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await api.resumeTrader(trader.id);
+      await tradersQuery.reload();
+      void fetchStats(trader.id);
+    } catch (err) {
+      setActionError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /*
    * 这三个提前返回也要自己加内边距：外壳不再替页面留边（见文件末尾的注释），
    * 少了它，错误提示会贴着屏幕左上角。
@@ -1239,6 +1263,26 @@ export function TraderPage() {
               <Settings2 aria-hidden className="h-3.5 w-3.5" />
               配置
             </Button>
+            {/*
+              ⚠️ **只在真的停手时才出现**，而且要说清"为什么不开仓"。
+              那个状态是 AI 自己设的（`pause_trading`），原先没有任何撤销入口 ——
+              界面上就只剩「开多 / 未执行（已跳过）」这一句看得见的异常。
+            */}
+            {trader.agentPaused ? (
+              <Button
+                variant="warn"
+                onClick={() => void resume()}
+                disabled={busy}
+                title={
+                  `AI 已于 ${fmtDateTime(trader.agentPaused.at)} 主动停手：本轮不开新仓（平仓与减仓照常）。\n\n` +
+                  `它给的理由：${trader.agentPaused.reason}\n\n` +
+                  '点这里撤掉那个开关，它下一轮就能重新开新仓。'
+                }
+              >
+                <Play aria-hidden className="h-3.5 w-3.5" />
+                恢复开仓
+              </Button>
+            ) : null}
           </div>
         </header>
 
