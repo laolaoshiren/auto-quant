@@ -1155,8 +1155,51 @@ const ORDER_MARGIN_MODE_SOURCE_TITLE = {
  * 显示成 `5x`，与持仓表的「方向 / 杠杆」列完全一致 —— 同一个概念在两处必须是
  * 同一个写法，否则操作员会以为它们在说不同的东西。
  */
-function LeverageCell({ order }: { order: OrderRecord }) {
-  const leverage = order.leverage;
+/**
+ * 委托表的「方向」列。
+ *
+ * 用户 2026-10-03 的要求：「**开仓的单子，方向改成多/空；止损/止盈的不要显示方向**」。
+ *
+ * | 用途 | 显示 | 为什么 |
+ * | --- | --- | --- |
+ * | 开仓 / 加仓 | **做多 / 做空** | "买入/卖出"是交易所的动词；他要知道的是**这个仓位是多还是空**。而 `BUY` 在平空时也会出现，动词本身有歧义 |
+ * | 止损 / 止盈 | **`—`** | `closePosition` 条件单，**方向对它们没有意义** —— 印"买入"会让人以为"这是一笔要做多的单" |
+ * | 平仓 | 保持**买入 / 卖出** | 那是**动作**（平掉），不是方向；平多与平空的动词不同，恰好是他需要的区分 |
+ */
+function OrderSideCell({ order }: { order: OrderRecord }) {
+  const long = order.side === 'BUY';
+
+  if (order.purpose === 'stop_loss' || order.purpose === 'take_profit') {
+    return (
+      <span
+        className="text-ink-faint"
+        title="止损 / 止盈是「平掉这个仓位」的条件单，方向对它们没有意义 —— 买或卖只是交易所执行平仓用的动词。"
+      >
+        —
+      </span>
+    );
+  }
+
+  if (order.purpose === 'entry' || order.purpose === 'adjustment') {
+    return (
+      <span
+        className={long ? 'text-up' : 'text-down'}
+        title={long ? '买入开仓 = 做多' : '卖出开仓 = 做空'}
+      >
+        {long ? '做多' : '做空'}
+      </span>
+    );
+  }
+
+  /* 平仓：这是"动作"而不是"方向"，保留交易所的动词。 */
+  return (
+    <span className={long ? 'text-up' : 'text-down'} title={long ? '买入平仓（平掉空头）' : '卖出平仓（平掉多头）'}>
+      {long ? '买入' : '卖出'}
+    </span>
+  );
+}
+
+function LeverageCell({ order }: { order: OrderRecord }) {  const leverage = order.leverage;
   /*
    * ⚠️ **只有开仓单显示杠杆** —— 见调用点那段注释（用户指出的"倒反天罡"）。
    *
@@ -1491,8 +1534,24 @@ export function OrdersTable({
                   <td className="td">
                     <Badge tone={purposeTone(order.purpose)}>{orderPurposeLabel(order.purpose)}</Badge>
                   </td>
-                  <td className={`td font-semibold ${order.side === 'BUY' ? 'text-up' : 'text-down'}`}>
-                    {order.side === 'BUY' ? '买入' : '卖出'}
+                  {/*
+                    方向列：**只有"动仓位方向"的单子才显示方向，而且说人话。**
+
+                    用户 2026-10-03 的要求：「**开仓的单子，方向改成多/空；
+                    止损/止盈的不要显示方向**」—— 两条都对：
+
+                      · 开仓单写"买入/卖出"是**交易所的动词**，不是交易员的语言。
+                        "卖出"在开仓语境里就是**做空**、"买入"就是**做多** ——
+                        他看这一列想知道的是"这个仓位是多还是空"。
+                        （顺带：`BUY` 也可能是平空，动词本身还歧义。）
+                      · 止损 / 止盈单是 `closePosition` 条件单，**方向对它们没有意义** ——
+                        显示"买入"只会让人以为"这是一笔要做多的单"。
+
+                    平仓单（`exit`）保持"买入/卖出"：那是**动作**（平掉），不是方向，
+                    而平多与平空的动词不同，恰好是他需要的区分。
+                  */}
+                  <td className="td font-semibold">
+                    <OrderSideCell order={order} />
                   </td>
                   <td className="td text-ink-lo">{orderTypeLabel(order.type)}</td>
                   <td className="td num text-right">{fmtQty(order.quantity)}</td>

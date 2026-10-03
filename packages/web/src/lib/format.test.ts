@@ -236,9 +236,22 @@ test('★ symbolTone 对同一个币种永远给同一个颜色 —— 这是哈
   assert.equal(symbolTone('ETHUSDT'), symbolTone('ETHUSDT'));
 
   for (const symbol of ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT']) {
-    assert.match(symbolTone(symbol), /^hsl\([\d.]+ 72% 68%\)$/, `${symbol} 的颜色格式不对`);
+    assert.match(symbolTone(symbol), /^hsl\([\d.]+ \d+% \d+%\)$/, `${symbol} 的颜色格式不对`);
   }
 });
+
+/** 把一个 `hsl(H S% L%)` 解析成三个分量。 */
+function toneParts(tone: string): { h: number; s: number; l: number } {
+  const m = /^hsl\(([\d.]+) (\d+)% (\d+)%\)$/.exec(tone);
+  assert.ok(m, `颜色格式不认识：${tone}`);
+  return { h: Number(m[1]), s: Number(m[2]), l: Number(m[3]) };
+}
+
+/** 色相的环形最短距离。 */
+function hueGap(a: number, b: number): number {
+  const raw = Math.abs(a - b) % 360;
+  return raw > 180 ? 360 - raw : raw;
+}
 
 test('★ 候选池那一批币种必须【零撞色】—— 用户两次报到同色', () => {
   /*
@@ -292,6 +305,63 @@ test('★ 候选池那一批币种必须【零撞色】—— 用户两次报到
       `${a} 与 ${b} 的色相只差 ${gap.toFixed(0)}° —— 肉眼看还是同色`,
     );
   }
+});
+
+test('★ 24 个币种两两之间要有【可辨距离】—— 不只是"字符串不同"', () => {
+  /*
+   * ## 用户第三次报配色（2026-10-03）
+   *
+   * > 「**不同币种颜色区分你给弄好一点，颜色太相近了，相当于颜色都是一样**」
+   *
+   * 而量测证实他说的**比我想的更严重**：
+   *
+   * ```text
+   * QNTUSDT vs ENJUSDT   色相差 0.0°   ← 完全相同
+   * BNBUSDT vs 龙虾USDT   色相差 0.0°   ← 完全相同
+   * 色相差 < 8° 的组数：20（24 个币、276 对里）
+   * 而所有币的 亮度 68% / 饱和度 72% 完全一样
+   * ```
+   *
+   * 上一条用例（"零撞色"）当时是**绿的** —— 因为它只断言"颜色字符串互不相同"，
+   * 而 `hsl(287 ...)` 与 `hsl(288 ...)` 确实是两个不同的字符串，
+   * **在屏幕上却几乎看不出差别**。那条断言给了假的安心。
+   *
+   * ## 所以这条按【感知距离】判，而不是按字符串
+   *
+   * ```text
+   * d = ΔH / 4 + ΔL + ΔS / 2
+   * ```
+   *
+   * 权重反映人眼敏感度：**亮度最敏感**（系数 1），色相次之（1/4 —— 32° 才顶 8 点
+   * 亮度），饱和度最弱（1/2）。阈值 `d >= 5`：实测当前 24 币的最小值是 5.50，
+   * 留一点余量防止未来微调时悄悄退化。
+   *
+   * ⚠️ **这条能挡住"改回只有色相一个维度"的退化**：那样最小的几对 d 会掉到 0~2。
+   */
+  const pool = [
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT',
+    'SUIUSDT', 'HYPEUSDT', '1000PEPEUSDT', 'ZECUSDT', 'NEARUSDT', 'AAVEUSDT',
+    'UNIUSDT', 'ENAUSDT', 'WLDUSDT', 'MOVRUSDT', 'QNTUSDT', 'LINKUSDT',
+    'ADAUSDT', 'AVAXUSDT', 'GTCUSDT', 'SCRUSDT', 'CTUSDT', 'PUMPUSDT',
+  ];
+  const parts = pool.map((s) => ({ symbol: s, ...toneParts(symbolTone(s)) }));
+
+  let worst = { d: Number.POSITIVE_INFINITY, a: '', b: '' };
+  for (let i = 0; i < parts.length; i += 1) {
+    for (let j = i + 1; j < parts.length; j += 1) {
+      const A = parts[i]!;
+      const B = parts[j]!;
+      const d =
+        hueGap(A.h, B.h) / 4 + Math.abs(A.l - B.l) + Math.abs(A.s - B.s) / 2;
+      if (d < worst.d) worst = { d, a: A.symbol, b: B.symbol };
+    }
+  }
+
+  assert.ok(
+    worst.d >= 5,
+    `★ ${worst.a} 与 ${worst.b} 的可辨距离只有 ${worst.d.toFixed(2)}（要求 ≥ 5）—— ` +
+      '色相/亮度/饱和度三者太接近，屏幕上会看起来是同一个颜色',
+  );
 });
 
 test('★ 币种颜色绝不落进红/绿/琥珀语义区 —— 否则会制造假的涨跌信号', () => {
