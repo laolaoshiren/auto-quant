@@ -100,7 +100,7 @@ import {
   roundTripQueryKey,
   type ReconstructedTrade,
 } from './roundTrips.js';
-import { commissionsInWindow, fundingInWindow, netPnlOf } from '../binance/income.js';
+import { commissionsInWindow, fundingInWindow, netPnlOf, realizedInWindow } from '../binance/income.js';
 
 const log = createLogger('trader');
 
@@ -5044,6 +5044,13 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      * 三种原因的修法完全不同，所以把它们分开数。
      */
     const skipDiag = { beforeWindow: 0, otherTrader: 0, foreign: 0, foreignNoId: 0, reversed: 0 };
+    /**
+     * 反向回合**已经按交易所口径记进账本**的净额合计（2026-10-03 起不再丢弃）。
+     *
+     * 它只用于日志与诊断 —— 记进账本之后，这笔钱自然进了 `platformSelf`，
+     * 不需要在 `platformNet` 里再补一次（那会重复计）。
+     */
+    let reversedBookedNet = 0;
     /*
      * 本机器人下单时的**意图**（交易所单号 → 用途）—— 用来辨认重建出的回合有没有
      * 把开/平方向搞反。详见 `orders.purposeByExchangeOrderId()` 与下面那段校验。
@@ -5085,11 +5092,12 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
           const notice =
             `[${this.deps.trader.name}] 重建出的 ${symbol} 回合方向是反的（所谓入场单 ${trip.entryOrderId} ` +
             `实际用途 ${entryPurpose ?? '未知'}、所谓出场单 ${trip.exitOrderId} 实际用途 ${exitPurpose ?? '未知'}）` +
-            '—— 不记账。这通常说明成交历史的窗口起点落在持仓中间，净头寸法把开/平判反了。';
+            '—— 开/平方向、数量与价位都不可信，但**净额仍按交易所口径记账**（见下）。' +
+            '这通常说明成交历史的窗口起点落在持仓中间，净头寸法把开/平判反了。';
           /*
            * ⚠️ **只告警一次。** 这个回合的成因（窗口起点落在持仓中间）在我们能读到的
            * 历史里是固定的，所以**每一轮都会重建出同一个反向回合** —— 每轮刷 WARN
-           * 会让日志像在持续出错，把真正的新问题淹掉。丢弃照旧，告警降噪。
+           * 会让日志像在持续出错，把真正的新问题淹掉。
            */
           const noticeKey = `${trip.entryOrderId}->${trip.exitOrderId}`;
           if (this.reversedTripNotices.has(noticeKey)) {
@@ -5097,6 +5105,83 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
           } else {
             this.reversedTripNotices.add(noticeKey);
             log.warn(notice);
+          }
+
+          /*
+           * ── 2026-10-03：**不再整笔丢弃，而且金额改走 income 流水** ─────────────
+           *
+           * 用户在主账户上跑实盘，问「盈亏计算是否正确」。查到 `#9` 的账目与交易所
+           * 流水差 **-0.436177**，而差额全部来自这里：方向反了的回合被 `continue`
+           * 丢掉 ⇒ `platformSelf` 少了那部分已实现盈亏 ⇒ 页面上的「交易盈亏」偏低、
+           * 总账校验每轮报一条「账目与交易所对不上」。
+           *
+           * ⚠️ **但 `trip.grossPnl` 不能用** —— 这一点是测试当场纠正过来的：
+           * 交易所把 `realizedPnl` 记在**平仓那一笔成交**上，而方向一反，那笔就被
+           * 当成了开仓、它的 `realizedPnl` 于是走开腿分支被丢掉（实测构造出来的
+           * `grossPnl = 0`，而真实是 1.5）。**方向错的不只是元数据，金额也会错配。**
+           *
+           * 所以金额取**交易所流水**（`incomeEvents` 里的 `REALIZED_PNL`），
+           * 按该标的、该回合的生命周期窗口聚合 —— 那是**完全不受重建影响**的权威口径，
+           * 与上面 `!trustQuantity` 那条分支把手续费改走 `commissionsInWindow()` 同一个理由。
+           */
+          {
+            const realizedForTrip = realizedInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
+            const fundingForTrip = fundingInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
+            const feesForTrip =
+              commissionsInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
+            /*
+             * 窗口里一条 `REALIZED_PNL` 都没有 ⇒ 这一个"回合"在交易所流水里没有任何
+             * 已实现盈亏 —— 那它大概率是重建把两笔平仓拼出来的假回合（金额为 0），
+             * 记它只会往账本里塞一行噪声。**宁可不记。**
+             */
+            if (realizedForTrip === 0 && feesForTrip.entryFee + feesForTrip.exitFee === 0) {
+              log.debug(
+                `[${this.deps.trader.name}] ${symbol} 的反向回合在 income 里没有任何流水 —— 不记账。`,
+              );
+              continue;
+            }
+            const netForTrip = netPnlOf({
+              grossPnl: realizedForTrip,
+              fee: feesForTrip.entryFee + feesForTrip.exitFee,
+              fundingFee: fundingForTrip,
+            });
+            try {
+              tradeStore.insert({
+                traderId,
+                symbol,
+                side: trip.side,
+                quantity: trip.quantity,
+                entryPrice: trip.entryPrice,
+                exitPrice: trip.exitPrice,
+                leverage: this.leverageFor(symbol),
+                /* 金额来自交易所流水，**不是**重建的推测。 */
+                grossPnl: realizedForTrip,
+                entryFee: feesForTrip.entryFee,
+                exitFee: feesForTrip.exitFee,
+                fundingFee: fundingForTrip,
+                /* 独立原因码：方向字段不可信，金额来自流水。 */
+                closeReason: 'reconciled_reversed',
+                openedAt: trip.openedAt,
+                closedAt: trip.closedAt,
+                source: 'reconciled',
+                entryOrderId: trip.entryOrderId || null,
+                exitOrderId: trip.exitOrderId || null,
+                exitOrderIds: trip.exitOrderIds,
+                idempotent: true,
+              });
+              reversedBookedNet += netForTrip;
+              this.emit(
+                'info',
+                `${symbol} 的一个回合开/平方向不可信（成交历史窗口起点落在持仓中间），` +
+                  `已按【交易所流水】记账：净 ${netForTrip >= 0 ? '+' : ''}${netForTrip.toFixed(4)} USDT。` +
+                  '该行的方向与数量字段请勿用于胜率统计。',
+              );
+            } catch (error) {
+              log.warn(
+                `[${this.deps.trader.name}] ${symbol} 的反向回合记账失败（不影响本周期交易）：` +
+                  `${(error as Error).message}`,
+              );
+            }
           }
           continue;
         }
@@ -5627,6 +5712,15 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         /* 未平仓的持有成本（加在平台侧的那个数）—— 它长期是差额的主要来源。 */
         openCosts: Number(openCosts.toFixed(6)),
         skipDiag,
+        /*
+         * 反向回合**已记账**的净额合计（2026-10-03 起）。
+         *
+         * 这些钱已经落在 `platformSelf` 里，所以**不再**加到 `platformNet` 上
+         * （加了就是重复计）。它单独存下来只为回答一个问题：
+         * 「这一轮账本里有多少来自"方向不可信、金额可信"的行」——
+         * 那个数大，说明成交历史窗口覆盖不足，值得去查，而不是账目坏了。
+         */
+        reversedBookedNet: Number(reversedBookedNet.toFixed(6)),
         // 让落库的数据自己说清这一轮算不算数（读失败时 exchangeNet 是 0，不是"真的 0"）。
         incomeReadFailed,
         checkedAt: new Date().toISOString(),

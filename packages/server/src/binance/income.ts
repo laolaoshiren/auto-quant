@@ -220,6 +220,42 @@ export function fundingInWindow(
 }
 
 /**
+ * 一个回合在交易所流水里的**已实现毛盈亏**（`REALIZED_PNL`），按生命周期窗口聚合。
+ *
+ * ## 为什么需要它（2026-10-03，实盘账目差 0.436）
+ *
+ * `reconstructRoundTrips()` 的窗口起点落在持仓中间时，整个 leg 的 open/close 会反向，
+ * 而 `realizedPnl` 是**记在平仓那一笔成交上**的 —— 方向一反，那笔就被当成开仓、
+ * 它的 `realizedPnl` 走开腿分支被丢掉。
+ *
+ * 实测构造：真实是 `+1.5`，而重建给出的 `grossPnl` 是 **0**。
+ *
+ * **所以"方向反了但金额还对"是错的** —— 方向错的不只是元数据，金额也会错配。
+ * 唯一不受重建影响的已实现盈亏来源就是这里：交易所的 `REALIZED_PNL` 流水。
+ *
+ * 归属方式与 `fundingInWindow()` 相同：按回合自己的生命周期取
+ * （一个从 15:00 持有到 17:00 的仓位，只算这段时间里结算的那些）。
+ */
+export function realizedInWindow(
+  events: readonly BinanceIncome[],
+  symbol: string,
+  openedAt: string,
+  closedAt: string,
+): number {
+  const from = new Date(openedAt).getTime();
+  const to = new Date(closedAt).getTime();
+  return events
+    .filter(
+      (e) =>
+        e.incomeType === 'REALIZED_PNL' &&
+        e.symbol === symbol &&
+        e.time >= from &&
+        e.time <= to,
+    )
+    .reduce((sum, e) => sum + (Number(e.income) || 0), 0);
+}
+
+/**
  * 一个回合的**开仓侧与平仓侧手续费** —— 取自交易所的 income 流水。
  *
  * ## 为什么需要它（实测：重建错位会连带把手续费也算错）

@@ -2146,6 +2146,154 @@ test('★ 同标的、同数量、同入场价的两个回合：必须按开仓�
   );
 });
 
+test('★ 方向反了的重建回合【不再整笔丢弃】—— 按交易所口径记账，让账目能与流水对平', async () => {
+  /*
+   * ## 用户 2026-10-03 的实盘缺口
+   *
+   * 他在主账户上跑实盘，问「盈亏计算是否正确」。核对 `#9`：
+   *
+   * ```text
+   * 系统净额   -0.466010
+   * 交易所流水 -0.029833
+   * 差         -0.436177      ← 全部来自"方向反了的回合被丢掉"
+   * ```
+   *
+   * 而系统自己每轮都在 ERROR 里喊：「账目与交易所对不上……差 -0.4379」。
+   *
+   * ## 为什么原来会丢
+   *
+   * `reconstructRoundTrips()` 用**净头寸法**判断开/平，而
+   * `getUserTrades(symbol, 500)` **不包含"窗口起点时的持仓"** —— 一旦窗口起点落在
+   * 持仓中间，第一笔（其实是平仓）会被当成开仓，整个 leg 的 open/close 反向。
+   * 于是代码在校验出"方向反了"之后 `continue`，**一个数都不记**。
+   *
+   * ## 为什么现在可以记
+   *
+   * **错的是"哪笔是开、哪笔是平"这个判断，不是金额**：`trip.grossPnl` 是把交易所
+   * 每笔成交的 `realizedPnl` **原样累加**出来的，它不依赖方向判断。
+   * 手续费改走 `commissionsInWindow()`（按时间窗从 income 流水取），同样不受重建影响。
+   *
+   * 所以这条路径现在照记，并用 `close_reason: 'reconciled_reversed'` 标注来历 ——
+   * 操作员与 AI 一眼能看出"这行的方向字段不可信，别拿它算胜率"。
+   */
+  const broker = new FakeBroker();
+  const trader = buildTrader(broker, '<decision>[]</decision>');
+
+  const symbol = SYMBOL;
+  const nowMs = Date.now();
+
+  /*
+   * ⚠️ **先让这个符号进入对账的扫描范围。**
+   *
+   * `reconcileTradeHistory()` 扫的是 `allTradedSymbols() ∪ 开仓符号 ∪ income 流水里的符号`
+   * —— 一个从未交易过、也没有持仓的符号**根本不会被扫到**，那样这段代码永远不会被执行。
+   * 实盘上它当然是被扫到的（那笔成交就在历史里），所以这里先落一笔更早的历史成交。
+   */
+  tradeStore.insert({
+    traderId,
+    symbol,
+    side: 'long',
+    quantity: 1,
+    entryPrice: 1,
+    exitPrice: 1,
+    leverage: 5,
+    grossPnl: 0,
+    entryFee: 0,
+    exitFee: 0,
+    closeReason: 'stop_loss',
+    openedAt: new Date(nowMs - 7_200_000).toISOString(),
+    closedAt: new Date(nowMs - 7_000_000).toISOString(),
+    source: 'bot',
+  });
+
+  /* 时间顺序刻意让"平仓"在最前 —— 净头寸法就是这样把它当成开仓的。 */
+  const exitAt = nowMs - 1_800_000;
+  const entryAt = nowMs - 900_000;
+
+  const mkFill = (
+    id: number,
+    orderId: number,
+    side: 'BUY' | 'SELL',
+    price: number,
+    time: number,
+    realizedPnl: number,
+  ): BinanceUserTrade => ({
+    symbol,
+    id,
+    orderId,
+    side,
+    positionSide: 'BOTH',
+    price: String(price),
+    qty: '100',
+    quoteQty: String(price * 100),
+    realizedPnl: String(realizedPnl),
+    marginAsset: 'USDT',
+    commission: '0.05',
+    commissionAsset: 'USDT',
+    time,
+    maker: false,
+    buyer: side === 'BUY',
+  });
+
+  broker.userTrades = [
+    /* 重建会把它当成"开仓"——而本地账本记的是：这笔是**平仓**。 */
+    mkFill(1, 555001, 'SELL', 0.11, exitAt, 1.5),
+    /* 重建会把它当成"平仓"——而本地记的是：这笔是**开仓**。 */
+    mkFill(2, 555002, 'BUY', 0.1, entryAt, 0),
+  ];
+
+  /*
+   * ⚠️ **金额的唯一可信来源是交易所流水。**
+   *
+   * 交易所把 `realizedPnl` 记在**平仓那一笔成交**上，而方向一反，那笔被当成开仓、
+   * 它的 `realizedPnl` 就走开腿分支被丢掉 —— 实测重建给出的 `grossPnl` 是 **0**，
+   * 而真实是 1.5。所以这里喂进 income 流水（`REALIZED_PNL` + `COMMISSION`），
+   * 记账必须取它。
+   */
+  broker.income = [
+    { symbol, incomeType: 'REALIZED_PNL', income: '1.5', time: exitAt + 1 },
+    { symbol, incomeType: 'COMMISSION', income: '-0.05', time: exitAt + 1 },
+    { symbol, incomeType: 'COMMISSION', income: '-0.05', time: entryAt + 1 },
+  ] as typeof broker.income;
+
+  /*
+   * 运行期记下的**下单意图** —— 那是我们当时真正想做的事，比重建的推测可信。
+   * 两张单都先落进 `orders`，这样归属闸门会放行、而方向校验会命中。
+   */
+  for (const [oid, purpose] of [
+    ['555001', 'exit'],
+    ['555002', 'entry'],
+  ] as const) {
+    getDb().run(
+      `INSERT INTO orders (trader_id, exchange_order_id, client_order_id, symbol, side, type, purpose,
+                           quantity, price, stop_price, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'SELL', 'MARKET', ?, 100, 0.1, NULL, 'FILLED', ?, ?)`,
+      traderId,
+      oid,
+      `c-${oid}`,
+      symbol,
+      purpose,
+      new Date(nowMs).toISOString(),
+      new Date(nowMs).toISOString(),
+    );
+  }
+
+  await trader.runReconcile();
+
+  const rows = tradeStore.list(traderId);
+  const reversed = rows.filter((r) => r.closeReason === 'reconciled_reversed');
+  assert.equal(
+    reversed.length,
+    1,
+    '★ 方向反了的回合必须记账（原来是整笔丢弃）—— 否则账目永远比交易所少这一笔。' +
+      `实际账本：${JSON.stringify(rows.map((r) => ({ id: r.id, reason: r.closeReason, net: r.netPnl })))}`,
+  );
+  assert.ok(
+    Math.abs(reversed[0]!.pnl - 1.5) < 1e-9,
+    `毛盈亏必须按交易所口径原样记下（两个成交的 realizedPnl 之和 1.5）：实际 ${reversed[0]!.pnl}`,
+  );
+});
+
 test('对账重复执行是幂等的：第二遍不再插手', async () => {
   /*
    * Why this test exists —— §2.5 的原话是「对账是幂等的：重复执行只修正、不重复插入」。
