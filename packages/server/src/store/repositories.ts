@@ -1125,7 +1125,7 @@ interface OrderRow {
   updated_at: string;
 }
 
-function toOrder(row: OrderRow): OrderRecord {
+function toOrder(row: OrderRow, leverages?: ReadonlyMap<string, number>): OrderRecord {
   return {
     id: row.id,
     traderId: row.trader_id,
@@ -1143,6 +1143,14 @@ function toOrder(row: OrderRow): OrderRecord {
     filledQty: row.filled_qty,
     fee: row.fee,
     error: row.error,
+    /*
+     * ⚠️ 杠杆**不能**由界面按"标的的当前持仓"去读 —— 那份列表来自交易所的真实持仓，
+     * 而挂单还没成交、交易所没有持仓，于是**开仓单永远读不到**（用户看到的"倒反天罡"：
+     * 该显示的显示不出来、不该显示的保护单反而显示了）。
+     *
+     * 这里从本地 `positions`（**含 `pending` 行**）取，随订单一起发出去。
+     */
+    ...(leverages?.has(row.symbol) ? { leverage: leverages.get(row.symbol) } : {}),
     /*
      * ⚠️ `undefined`（界面显示 `—`）与 `0`（界面显示 `0.00`）在这里**必须是两件事**。
      *
@@ -1435,6 +1443,19 @@ export const orders = {
     const pageSize = clampOrderLimit(limit);
     const cursor = cursorOf(before);
 
+    /*
+     * 各标的的杠杆读数（**含 `pending` 行**）—— 挂单在本地是有持仓行的，
+     * 那张行上就记着杠杆。界面要靠它显示"开仓单的杠杆"：
+     * 不能按交易所的真实持仓读（挂单还没成交，那里没有）。
+     */
+    const leverages = new Map<string, number>();
+    for (const p of getDb().all<{ symbol: string; leverage: number }>(
+      'SELECT symbol, leverage FROM positions WHERE trader_id = ? ORDER BY id ASC',
+      traderId,
+    )) {
+      if (typeof p.leverage === 'number' && p.leverage > 0) leverages.set(p.symbol, p.leverage);
+    }
+
     // 第一页与后续页只有 WHERE 一段不同：分成两条 SQL 是为了两条都能吃到索引，
     // 也不用把 `(? IS NULL OR id < ?)` 这种对优化器不友好的写法塞进热路径。
     if (cursor === null) {
@@ -1444,7 +1465,7 @@ export const orders = {
           traderId,
           pageSize,
         )
-        .map(toOrder);
+        .map((row) => toOrder(row, leverages));
     }
 
     return getDb()
@@ -1454,7 +1475,7 @@ export const orders = {
         cursor,
         pageSize,
       )
-      .map(toOrder);
+      .map((row) => toOrder(row, leverages));
   },
 
   /**
@@ -1622,7 +1643,7 @@ export const orders = {
         createdBefore,
         ...TERMINAL_ORDER_STATUSES,
       )
-      .map(toOrder);
+      .map((row) => toOrder(row));
   },
 
   /**

@@ -1155,25 +1155,33 @@ const ORDER_MARGIN_MODE_SOURCE_TITLE = {
  * 显示成 `5x`，与持仓表的「方向 / 杠杆」列完全一致 —— 同一个概念在两处必须是
  * 同一个写法，否则操作员会以为它们在说不同的东西。
  */
-function LeverageCell({
-  symbol,
-  liveBySymbol,
-}: {
-  symbol: string;
-  liveBySymbol?: ReadonlyMap<string, number> | null;
-}) {
-  const leverage = liveBySymbol?.get(symbol);
+function LeverageCell({ order }: { order: OrderRecord }) {
+  const leverage = order.leverage;
+  /*
+   * ⚠️ **只有开仓单显示杠杆** —— 见调用点那段注释（用户指出的"倒反天罡"）。
+   *
+   * 保护单（止损 / 止盈）显示 `—` 不是因为"读不到"，而是因为**那个数字不属于它**：
+   * 杠杆是仓位的属性，把仓位的 3x 印在一张条件单上会让人以为"这张单是 3 倍杠杆"。
+   */
+  const owned = order.purpose === 'entry' || order.purpose === 'adjustment';
+  if (!owned) {
+    return (
+      <span className="text-ink-faint" title={`${order.type || '这张单'}不显示杠杆 —— 杠杆是它所属仓位的属性，印在保护单上会被误读成"这张单是 N 倍杠杆"。`}>
+        —
+      </span>
+    );
+  }
   if (typeof leverage !== 'number' || leverage <= 0) {
     return (
       <span
         className="text-ink-faint"
-        title={`没有 ${symbol} 的杠杆读数 —— 该标的当前没有持仓，而杠杆是持仓上的设置（委托单本身不带这个字段）。`}
+        title={`没有 ${order.symbol} 的杠杆读数 —— 本地既没有该标的的持仓行，也没有它的挂单行，所以这个数确实不存在（不补默认值）。`}
       >
         —
       </span>
     );
   }
-  return <span title={`${symbol} 当前的杠杆倍数（来自当前持仓读数，不是下单当时的快照）。`}>{leverage}x</span>;
+  return <span title={`${order.symbol} 的杠杆倍数 ${leverage}x（来自本地持仓/挂单行上的设置）。`}>{leverage}x</span>;
 }
 
 function MarginModeCell({
@@ -1499,12 +1507,23 @@ export function OrdersTable({
 
                     用户 2026-10-03 的要求：「当前委托里面的订单要显示 杠杆」。
 
-                    **委托单本身没有杠杆字段** —— 杠杆是该标的的持仓设置，所以这里按标的
-                    从当前持仓读数里取（`liveLeverages`）。取不到就是 `—`：
-                    一个既没成交、也没持仓的挂单确实没有这个读数，补个默认值就是编造。
+                    ⚠️ **两天后他指出了这里的"倒反天罡"**，而他说得对：
+
+                      · 这一格原来按**标的的当前持仓**读音杠杆，而那份列表来自**交易所
+                        的真实持仓** —— 挂单还没成交、交易所没有持仓，于是**开仓单
+                        永远显示 `—`**（该显示的显示不出来）；
+                      · 而保护单（止损/止盈）恰好属于一个已存在的仓位，反而"读得到"，
+                        显示出 `3x`（不该显示的显示了）。
+
+                    **杠杆是仓位的属性，不是那张条件单的属性** —— 在保护单那一行显示
+                    `3x`，会让人以为"这张止损单是 3 倍杠杆"。所以：
+
+                      · 读数改由**订单自己带上**（`order.leverage`，服务端从本地
+                        `positions` 取，**含 `pending` 行** —— 挂单在本地是有持仓行的）；
+                      · **只有开仓单显示**，其余一律 `—`。
                   */}
                   <td className="td num text-right">
-                    <LeverageCell symbol={order.symbol} liveBySymbol={liveLeverages} />
+                    <LeverageCell order={order} />
                   </td>
                   {/*
                     保证金模式：落库值优先，当前持仓兜底（见 `orderMarginMode()`）。

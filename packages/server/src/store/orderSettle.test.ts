@@ -606,3 +606,87 @@ test('★ 部分平仓累计的是【毛盈亏】—— 拿净额去减整段毛
   assert.equal(booked.qty, 168, '数量也要累加 —— 手续费按它分摊');
   assert.ok(positionId > 0);
 });
+
+/* -------------------------------------------------------------------------- */
+/*  委托列表里的杠杆：随订单一起来自【含 pending 的】本地持仓行                    */
+/* -------------------------------------------------------------------------- */
+
+test('★ 订单列表要带上标的杠杆 —— 挂单（pending）也要能取到，界面才显示得出来', () => {
+  /*
+   * ## 用户指出的"倒反天罡"（2026-10-03）
+   *
+   * 原话：「**开仓为什么不显示杠杆？止盈止损却显示杠杆（止盈止损按道理是不应该
+   * 显示才对？）倒反天罡了？**」
+   *
+   * 界面原来按**标的的当前持仓**读音杠杆，而那份列表来自**交易所的真实持仓** ——
+   * 挂单还没成交、交易所没有持仓，于是**开仓单永远显示 `—`**；而保护单恰好属于
+   * 一个已存在的仓位，反倒"读得到"。
+   *
+   * 修法是让**订单自己带上**这个读数，数据源是本地 `positions` ——
+   * 而它**含 `pending` 行**（挂单在系统里是有持仓行的）。
+   *
+   * 这条用例钉的是那个数据契约：**没成交的挂单也必须取到杠杆**。
+   * （展示规则——"只有开仓单显示"——由 `TraderTables.LeverageCell` 负责。）
+   */
+  traderId = seedTrader();
+
+  /* 一张还没成交的限价开仓单，杠杆 10x。 */
+  const pendingPositionId = positionStore.insert({
+    traderId,
+    symbol: 'NEARUSDT',
+    side: 'long',
+    quantity: 25,
+    entryPrice: 4.69,
+    leverage: 10,
+    liquidationPrice: null,
+    marginUsed: 11.73,
+    stopLoss: null,
+    takeProfit: null,
+    stopOrderId: null,
+    tpOrderId: null,
+    openReasoning: '测试挂单',
+    entryOrderId: null,
+    status: 'pending',
+  });
+  assert.ok(pendingPositionId > 0);
+  const order = orderStore.insert({
+    traderId,
+    exchangeOrderId: 'NEAR-1',
+    clientOrderId: 'c-near-1',
+    symbol: 'NEARUSDT',
+    side: 'BUY',
+    type: 'LIMIT',
+    purpose: 'entry',
+    quantity: 25,
+    price: 4.69,
+    stopPrice: null,
+    status: 'NEW',
+    marginUsed: 11.73,
+  });
+  assert.ok(order > 0);
+
+  const row = orderStore.list(traderId).find((o) => o.exchangeOrderId === 'NEAR-1');
+  assert.ok(row, '前提：订单在列表里');
+  assert.equal(
+    row.leverage,
+    10,
+    '★ 未成交的挂单也要带上杠杆（来自本地 pending 持仓行）—— 这正是界面显示开仓杠杆的唯一数据源',
+  );
+
+  /* 反面对照：没有本地持仓行的标的 → 没有杠杆 → 界面画 `—`（不补默认值）。 */
+  orderStore.insert({
+    traderId,
+    exchangeOrderId: 'GHOST-1',
+    clientOrderId: 'c-ghost-1',
+    symbol: 'GHOSTUSDT',
+    side: 'BUY',
+    type: 'LIMIT',
+    purpose: 'entry',
+    quantity: 1,
+    price: 1,
+    stopPrice: null,
+    status: 'NEW',
+  });
+  const ghost = orderStore.list(traderId).find((o) => o.exchangeOrderId === 'GHOST-1');
+  assert.equal(ghost?.leverage, undefined, '本地没有任何持仓行时不许编一个杠杆');
+});
