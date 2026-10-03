@@ -18,6 +18,7 @@ import { useSummaries } from '../lib/summaries';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useRunOnce, useAgentReview } from '../lib/actions';
 import { pickPositions } from '../lib/pickPositions';
+import { displayAvailable, displayMarginUsed } from '../lib/accountDisplay';
 import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import { TraderStatusBadge } from '../components/Badges';
 import { PageShell, Metric } from '../components/shell';
@@ -481,6 +482,35 @@ export function TraderPage() {
   }, [snapshots]);
   const marginUsed = positions.reduce((sum, p) => sum + p.marginUsed, 0);
   const notional = positions.reduce((sum, p) => sum + p.notional, 0);
+  /*
+   * ── 「空仓」时，保证金占用与可用余额该显示什么（2026-10-04 修的两个 BUG）────
+   *
+   * 用户的原话：「**明明现在没有持仓和挂单，但是居然显示：保证金占用（USDT）23.63**」，
+   * 以及「**可用 74.57，和交易所里面实际的也对不上**」。
+   *
+   * 现场两个数字**同源**：
+   *
+   * ```text
+   * 钱包 97.94 · 可用 74.57 · 快照      ← 而 97.94 − 74.57 = 23.37 ≈ 占用的 23.63
+   * ```
+   *
+   * 它们都来**20 分钟前的账户快照**（`account.marginUsed` / `account.availableBalance`），
+   * 而紧挨着的副行写「当前无持仓」（来自实时 `positions`）—— 一张卡上两个时效。
+   *
+   * ## 为什么可以直接推算，而不是"猜"
+   *
+   * 服务端口径是 `marginUsed = totalPositionInitialMargin + openOrderMargin` ——
+   * **两项都由持仓与挂单产生**。所以"实时持仓为空、挂单为空"时，
+   * **占用必然是 0**，而"可用 = 钱包 − 占用"也就等于钱包。
+   * 这是这个量的定义推出来的结论，**比一个陈旧快照更准确**。
+   *
+   * 判据要求**持仓与挂单都空** —— 只判持仓会把"只有挂单"的情形误报成 0
+   * （那正是 2026-09-29 踩过的坑，见「保证金占用」卡副行里"挂单占用"那半句的来历）。
+   *
+   * ⚠️ **读不到时仍然显示 `—`，不显示 0。** 与卡片其它格同一条纪律：
+   * `—` 是"我们不知道"，`0` 是"我们问过了，是零"。
+   */
+  const nothingOpen = positions.length === 0 && openOrders.length === 0;
   const effectiveLeverage = equity > 0 ? notional / equity : 0;
   const unrealized = stats?.unrealizedPnl ?? positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
   const realized = stats?.realizedPnl ?? 0;
@@ -771,6 +801,27 @@ export function TraderPage() {
   const account = accountState ?? lastKnownAccount?.account ?? null;
   const accountIsStale = accountState === null && lastKnownAccount !== null;
   const accountNote = accountIsStale ? '（最近一次读数，机器人未运行）' : '';
+  /*
+   * 「保证金占用」与「可用余额」这两个数字的判定 —— 见 `lib/accountDisplay.ts`
+   * 里那段"空仓时该显示什么"的说明（用户 2026-10-04 报的两个 BUG 其实是同一个）。
+   */
+  const displayInput = {
+    liveUnavailable,
+    positionCount: positions.length,
+    openOrderCount: openOrders.length,
+    snapshotMarginUsed: account?.marginUsed ?? null,
+    snapshotAvailableBalance: account?.availableBalance ?? null,
+    walletBalance: account?.walletBalance ?? null,
+  };
+  const fmtMarginUsed = (): string => {
+    const v = displayMarginUsed(displayInput);
+    return v === null ? '—' : fmtNum(v, 2);
+  };
+  /** 可用余额：空仓时等于钱包（占用为 0）。 */
+  const fmtAvailable = (): string => {
+    const v = displayAvailable(displayInput);
+    return v === null ? '—' : fmtNum(v, 2);
+  };
   const accountTitle =
     `交易所账户（共享钱包）的数字。同一账户下的所有机器人读数是同一个 —— ` +
     `它不等于本机器人的「归属权益」。` +
@@ -797,7 +848,7 @@ export function TraderPage() {
           sub={
             account ? (
               <>
-                钱包 {fmtNum(account.walletBalance, 2)} · 可用 {fmtNum(account.availableBalance, 2)}
+                钱包 {fmtNum(account.walletBalance, 2)} · 可用 {fmtAvailable()}
                 {accountIsStale ? <span className="text-warn"> · 快照</span> : null}
               </>
             ) : (
@@ -807,7 +858,7 @@ export function TraderPage() {
           /* ⚠️ `sub` 带 `truncate`，会静默切掉尾巴 —— 完整内容必须能从 title 读到。 */
           subTitle={
             account
-              ? `钱包余额 ${fmtNum(account.walletBalance, 2)} · 可用 ${fmtNum(account.availableBalance, 2)}`
+              ? `钱包余额 ${fmtNum(account.walletBalance, 2)} · 可用 ${fmtAvailable()}`
               : undefined
           }
         />
@@ -858,7 +909,7 @@ export function TraderPage() {
       <MetricCard>
         <Metric
           label={`保证金占用（${settleAsset}）`}
-          value={account ? fmtNum(account.marginUsed, 2) : '—'}
+          value={fmtMarginUsed()}
           size="lg"
           title={
             account
