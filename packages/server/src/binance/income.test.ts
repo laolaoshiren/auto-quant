@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { BinanceIncome } from './types.js';
 import type { BinanceRest } from './rest.js';
-import { commissionsInWindow, fetchIncome, fundingInWindow, summarizeIncome } from './income.js';
+import { commissionsInWindow, fetchIncome, fundingInWindow, fundingSince, summarizeIncome } from './income.js';
 
 /**
  * The income ledger is the only place funding fees appear — no fill mentions
@@ -251,4 +251,48 @@ test('★ 翻页重叠的那一条不会被记两次（tranId 去重）', async 
   const events = await fetchIncome(rest, { startTime: t0, endTime: t0 + 3600_000, limit: 1000 });
 
   assert.equal(events.length, 1001, '★ 重叠的那一条只能算一次');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  未平仓仓位的资金费 —— 总账校验的口径补齐                                      */
+/* -------------------------------------------------------------------------- */
+
+test('★ 未平仓仓位的资金费要能取到 —— 那是"已知残差"的最后一块', () => {
+  /*
+   * ## 为什么需要它（2026-10-03）
+   *
+   * 总账校验要求两侧同口径：交易所流水从**开仓那一刻**就有手续费与资金费，
+   * 而平台的 `trades` **只在平仓时**记一笔。所以只要有持仓，平台侧就天然少一个
+   * "未平仓的持有成本"。
+   *
+   * 未平仓的**手续费**早就补上了（`openEntryCosts()` 按入场订单号取 `orders.fee`），
+   * 而 `orders` 表**没有资金费列** —— 持仓跨过资金费结算点时平台侧仍会偏小。
+   *
+   * 代码里原来把它记成「**已知且方向固定的残差，不要再靠猜口径去补**」。
+   * 而它**不用猜**：资金费就在 `income` 流水里，按标的 + 开仓之后聚合即可。
+   */
+  const opened = 1_700_000_000_000;
+  const events = [
+    /* 开仓**之前**的资金费：属于上一个回合，不该算在这个仓位上。 */
+    income({ incomeType: 'FUNDING_FEE', income: '-0.5', symbol: 'POWERUSDT', time: opened - 3600_000 }),
+    income({ incomeType: 'FUNDING_FEE', income: '-0.0231', symbol: 'POWERUSDT', time: opened + 1000 }),
+    income({ incomeType: 'FUNDING_FEE', income: '-0.0119', symbol: 'POWERUSDT', time: opened + 2000 }),
+    /* 别的标的不能串进来。 */
+    income({ incomeType: 'FUNDING_FEE', income: '-9', symbol: 'OTHERUSDT', time: opened + 2000 }),
+    /* 别的类型也不能串进来。 */
+    income({ incomeType: 'COMMISSION', income: '-9', symbol: 'POWERUSDT', time: opened + 2000 }),
+  ];
+
+  const total = fundingSince(events, 'POWERUSDT', new Date(opened).toISOString());
+  assert.ok(
+    Math.abs(total - -0.035) < 1e-12,
+    `只该算开仓之后、同标的的 FUNDING_FEE（-0.0231 + -0.0119 = -0.035），实际 ${total}`,
+  );
+});
+
+test('开仓时刻之前没有流水时返回 0（不能因为读不到就把上一个回合的费用算进来）', () => {
+  const events = [
+    income({ incomeType: 'FUNDING_FEE', income: '-0.5', symbol: 'POWERUSDT', time: 1_700_000_000_000 }),
+  ];
+  assert.equal(fundingSince(events, 'POWERUSDT', new Date(1_700_000_100_000).toISOString()), 0);
 });

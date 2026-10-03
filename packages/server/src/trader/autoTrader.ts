@@ -100,7 +100,7 @@ import {
   roundTripQueryKey,
   type ReconstructedTrade,
 } from './roundTrips.js';
-import { commissionsInWindow, fundingInWindow, netPnlOf, realizedInWindow } from '../binance/income.js';
+import { commissionsInWindow, fundingInWindow, fundingSince, netPnlOf, realizedInWindow } from '../binance/income.js';
 
 const log = createLogger('trader');
 
@@ -5650,7 +5650,18 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
           .open(traderId)
           .map((p) => p.entry_order_id)
           .filter((id): id is string => typeof id === 'string' && id.length > 0);
-        return orderStore.openEntryCosts(traderId, entryOrderIds);
+        /*
+         * ⚠️ 还要加上**未平仓仓位的资金费**（2026-10-03）。
+         *
+         * `orders` 表没有资金费列，所以上面那一项只覆盖手续费 —— 持仓跨过资金费
+         * 结算点时平台侧会偏小。这里原来把那条偏差记成"已知且方向固定的残差，
+         * 不要再靠猜口径去补"。而它**不用猜**：资金费就在 `income` 流水里，
+         * 按标的 + 开仓之后聚合即可（见 `fundingSince()`）。
+         */
+        const openFunding = positionStore
+          .open(traderId)
+          .reduce((sum, p) => sum + fundingSince(incomeEvents, p.symbol, p.opened_at), 0);
+        return orderStore.openEntryCosts(traderId, entryOrderIds) + openFunding;
       } catch {
         /* 读不到就按 0：宁可这一轮差一点，也不要让对账整个失败。 */
         return 0;

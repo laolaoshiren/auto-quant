@@ -256,6 +256,41 @@ export function realizedInWindow(
 }
 
 /**
+ * **一个仍然持仓的仓位**从开仓到现在为止付出的资金费（`FUNDING_FEE`）。
+ *
+ * ## 为什么需要它（2026-10-03，最后一处"已知缺口"）
+ *
+ * 总账校验要求两侧**同口径**：
+ *
+ *   · 交易所流水（`income`）从**开仓那一刻**就有 `COMMISSION`，持仓期间还有 `FUNDING_FEE`；
+ *   · 平台的 `trades` **只在平仓时**记一笔。
+ *
+ * 所以只要有持仓，「平台净额」就天然比「交易所流水」少一个"还拿在手上的持仓的持有成本"。
+ * 未平仓的**手续费**已经由 `openEntryCosts()` 补上了（按入场订单号取 `orders.fee`），
+ * 但 **`orders` 表没有资金费列** —— 持仓期间跨过资金费结算点时，平台侧仍会偏小一点。
+ *
+ * 代码注释原来把它记成"**已知且方向固定的残差，不要再靠猜口径去补**"。
+ * 而它其实**不用猜**：资金费就在 `income` 流水里，按标的 + 开仓时刻之后聚合即可 ——
+ * 与 `fundingInWindow()` 同一个来源，只是窗口的右端是"现在"而不是平仓时刻。
+ *
+ * 补上之后，只要有持仓，那条「账目与交易所对不上」的告警就不会因为纯口径差而响 ——
+ * 而它是唯一能自动发现"账本真的错了"的地方，每一声假响都会训练操作员忽略它。
+ *
+ * 归属同样按**生命周期**：开仓之前的资金费属于上一个回合，不该算在这个仓位上。
+ */
+export function fundingSince(
+  events: readonly BinanceIncome[],
+  symbol: string,
+  openedAt: string,
+): number {
+  const from = new Date(openedAt).getTime();
+  if (!Number.isFinite(from)) return 0;
+  return events
+    .filter((e) => e.incomeType === 'FUNDING_FEE' && e.symbol === symbol && e.time >= from)
+    .reduce((sum, e) => sum + (Number(e.income) || 0), 0);
+}
+
+/**
  * 一个回合的**开仓侧与平仓侧手续费** —— 取自交易所的 income 流水。
  *
  * ## 为什么需要它（实测：重建错位会连带把手续费也算错）

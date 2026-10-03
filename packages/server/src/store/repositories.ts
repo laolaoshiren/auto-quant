@@ -1475,8 +1475,13 @@ export const orders = {
    *   按入场订单号过滤之后，这一项才真的等于"手上这些仓位已经付掉的入场费"。
    *
    *   另：`orders` 表**没有资金费列**，持仓期间的资金费只存在于交易所流水
-   *   （`income`）那一侧。这一项仍然只覆盖手续费 —— 所以平台侧在跨过资金费
-   *   结算点时仍会偏小一点，这是**已知且方向固定**的残差，不要再靠猜口径去补。
+   *   （`income`）那一侧。**这一项只覆盖手续费** —— 所以调用方还要另外把
+   *   未平仓仓位的资金费补上（`fundingSince()`）。
+   *
+   *   ✅ 2026-10-03：那条补充已经接上了（见 `reconcileTradeHistory` 里的 `openCosts`）。
+   *   这里原来写的是「平台侧在跨过资金费结算点时仍会偏小一点，这是**已知且方向固定的
+   *   残差，不要再靠猜口径去补**」—— 而它**不用猜**：资金费就在 `income` 流水里，
+   *   按标的 + 开仓之后聚合即可。留着那条注释会让人以为这个偏差是设计上接受的。
    */
   openEntryCosts(traderId: number, entryOrderIds: readonly string[]): number {
     const ids = entryOrderIds.filter((id) => id.length > 0);
