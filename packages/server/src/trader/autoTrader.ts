@@ -3688,6 +3688,28 @@ export class AutoTrader {
   }
 
   /**
+   * 某张订单的**成交手续费合计**（按结算资产计价，支出为正）。
+   *
+   * 币安的 `GET /fapi/v1/order` 不返回佣金，只有成交明细（`userTrades`）里有，
+   * 所以限价单成交后要回填 `orders.fee` 就只能从这里取。
+   *
+   * 匹配用 `orderIdIn()` —— 它宽容处理**历史行被 `Number()` 改写过后三位**的问题
+   * （见该函数的说明）。取不到返回 0：宁可这一项缺一点，也不要让调用方抛出去
+   * （它在"挂保护单"的主路径上，抛出去会留下一个没有止损的仓位）。
+   */
+  private async feeForOrder(symbol: string, orderId: string): Promise<number> {
+    try {
+      const fills = await this.deps.broker.getUserTrades(symbol, 50);
+      const wanted = new Set([orderId]);
+      return fills
+        .filter((fill) => orderIdIn(String(fill.orderId), wanted))
+        .reduce((sum, fill) => sum + (Number(fill.commission) || 0), 0);
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
    * 把一行待成交转成真正的持仓，**并在同一段代码里挂上保护单**。
    *
    * 这两个动作必须连着做：中间任何 `await` 抛出去，都会留下一个**没有止损的
@@ -3735,7 +3757,30 @@ export class AutoTrader {
       ? orderStore.findByExchangeOrderId(traderId, String(row.entry_order_id))
       : null;
     if (entryRow) {
-      orderStore.update(entryRow.id, { status: 'FILLED', filledQty: executedQty, avgPrice });
+      /*
+       * ⚠️ **成交手续费必须一起回填**（2026-10-03 实测的缺口）。
+       *
+       * 这里原来只写 `status` / `filledQty` / `avgPrice`，**不写 `fee`** ——
+       * 于是限价单成交后 `orders.fee` 永远是 0，界面上的手续费是空的，而
+       * 更要紧的是**总账校验取不到这一项**：
+       *
+       * `openEntryCosts()` 正是按"仍持仓那几笔的入场单号"去 `orders.fee` 求和的，
+       * 它用来把"未平仓的持有成本"加到平台侧。取到 0 的后果是总账校验**永久**
+       * 报一条差额 —— 实测 `ledger_check:10` 的 `gap` 恒为 **0.060055**
+       * （`openCosts: 0`，而三个持仓的真实开仓费合计正是 0.06）。而这条告警
+       * 是唯一能自动发现"账本真的错了"的地方，**每一声假响都在训练操作员忽略它**。
+       *
+       * 币安的 `GET /fapi/v1/order` **不返回佣金**，所以只能从成交明细取
+       * （`commission` 按结算资产计价）。取不到就保持 0 —— 对账的下一轮会
+       * 通过 income 流水修正账目，这里只影响那一项口径补充。
+       */
+      const entryFee = await this.feeForOrder(symbol, String(row.entry_order_id));
+      orderStore.update(entryRow.id, {
+        status: 'FILLED',
+        filledQty: executedQty,
+        avgPrice,
+        ...(entryFee > 0 ? { fee: entryFee } : {}),
+      });
     } else {
       /*
        * 找不到就**说一声**，不静默：这意味着 `orders` 里没有这张单的中间态记录，
