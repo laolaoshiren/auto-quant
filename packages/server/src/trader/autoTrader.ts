@@ -4491,8 +4491,30 @@ export class AutoTrader {
      *
      * 已记的部分存在 `positions.realized_partial_pnl`（迁移 M8）。
      * 没有减过仓时它是 0，行为与以前完全一致。
+     *
+     * ## ⚠️ 2026-10-03：扣的必须是**毛盈亏**，而且手续费也要按比例扣
+     *
+     * 这里原来是 `grossRaw - partialPnl`，而 `partialPnl` 是**净**盈亏
+     * （`grossPnl - exitFee`，见 `positionStore.resize` 的调用点）——
+     * **拿毛减净**，等于把已记那部分的平仓手续费**多扣了一次**：
+     *
+     * ```text
+     * 整段往返: 毛 G、开仓费 EF、平仓费 XF
+     * 部分平仓: 毛 g、平仓费 xf（已单独记过一行，净 g − xf）
+     * 正确:     grossPnl = G − g,  exitFee = XF − xf
+     * 原来:     grossPnl = G − (g − xf) = (G − g) + xf   ← 毛被高估 xf
+     * ```
+     *
+     * 同时 `entryFee`/`exitFee` 也一直是**整段**的值，于是那部分手续费
+     * 在账上出现两次（部分平仓那行一次、最终平仓这行一次）。
+     *
+     * 所以这里用**数量比例**把已记那部分的手续费也扣掉 —— `booked_partial_qty`
+     * 是同一笔部分平仓记下的数量，两条腿的费率本就一致，按它分摊足够准，
+     * 而且不需要新增列去存"那一笔的费"。
      */
-    const partialPnl = positionStore.partialBooked(traderId, local.symbol).pnl;
+    const partialBooked = positionStore.partialBooked(traderId, local.symbol);
+    const partialGross = partialBooked.gross;
+    const partialQty = partialBooked.qty;
 
     const grossRaw =
       authoritative?.grossPnl ??
@@ -4503,14 +4525,24 @@ export class AutoTrader {
      *
      * 而回退公式用的是 `local.quantity` —— 那个数量在减仓之后已经变小了，
      * 所以它本来只覆盖剩余部分，再减一次就会少记。
+     *
+     * ⚠️ 扣的是**毛**（`partialGross`），不是净 —— 详见上面那段 2026-10-03 的说明。
      */
-    const grossPnl = authoritative && partialPnl !== 0 ? grossRaw - partialPnl : grossRaw;
+    const grossPnl = authoritative && partialGross !== 0 ? grossRaw - partialGross : grossRaw;
 
     // When the fills are unavailable we know only the exit leg's commission, and
     // recording that as zero would be worse than recording half of it — the
     // reconciliation pass corrects it to the true total shortly afterwards.
-    const entryFee = authoritative?.entryFee ?? 0;
-    const exitFee = authoritative?.exitFee ?? exitFeeInput;
+    /*
+     * ⚠️ **已记那部分的手续费要按数量比例扣掉**，否则它在账上出现两次
+     * （部分平仓那行一次、这一行一次）。两条腿的费率一致，按数量分摊足够准。
+     */
+    const partialShare =
+      partialQty > 0 && local.quantity > 0 ? Math.min(partialQty / local.quantity, 1) : 0;
+    const entryFeeRaw = authoritative?.entryFee ?? 0;
+    const exitFeeRaw = authoritative?.exitFee ?? exitFeeInput;
+    const entryFee = entryFeeRaw * (1 - partialShare);
+    const exitFee = exitFeeRaw * (1 - partialShare);
 
     /*
      * Funding is read here, at the moment of closing, and not only during the
@@ -8321,6 +8353,13 @@ reduceQuantity: null,
      * `idempotent: false`：这不是"一个仓位的最终成交"，
      * 它没有可与交易所对齐的整段往返身份，也不该被重建逻辑覆盖。
      */
+    /*
+     * ⚠️ 这是**这一笔平仓自己**的净额（毛 − 平仓费），**不含开仓费** ——
+     * 开仓费在开仓那一刻就作为持仓成本付掉了，它不重复计在这一笔上。
+     *
+     * 所以日志里不要把它写成光秃秃的「净 X USDT」（那会让人以为已扣开仓费，
+     * 和账户对上时会发现差一点点）。这里明确标成"本笔平仓净额"。
+     */
     const netPnl = grossPnl - exitFee;
     tradeStore.insert({
       traderId,
@@ -8349,7 +8388,15 @@ reduceQuantity: null,
       quantity: remaining,
       entryPrice: local.entry_price,
       marginUsed: (remaining * local.entry_price) / Math.max(local.leverage, 1),
-      addRealizedPartialPnl: netPnl,
+      /*
+       * ⚠️ **累计的是毛盈亏，不是净。**
+       *
+       * 最终平仓时会用它去减交易所重建的**整段毛盈亏**（见 `bookClose` 的
+       * `grossRaw - partialGross`）—— 那里扣的必须是同一口径。这里若记净额，
+       * 最终的毛盈亏会凭空多出这一部分的平仓手续费（`G − (g − xf)` 而非 `G − g`），
+       * 而手续费那一侧还会再算一遍，账目因此偏高。
+       */
+      addRealizedPartialPnl: grossPnl,
       addBookedPartialQty: filledReduceQty,
     });
 
@@ -8398,7 +8445,7 @@ reduceQuantity: null,
       symbol: decision.symbol,
       status: 'ok',
       detail:
-        `减仓 ${reduceQty} @ ${exitPrice}，净 ${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(4)} USDT，` +
+        `减仓 ${reduceQty} @ ${exitPrice}，本笔平仓净 ${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(4)} USDT（不含开仓费），` +
         `剩余 ${remaining}，保护单已按剩余数量重挂。`,
     };
   }

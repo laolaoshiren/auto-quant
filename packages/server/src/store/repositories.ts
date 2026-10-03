@@ -1003,7 +1003,14 @@ export const positions = {
       entryPrice: number;
       /** 保证金随之变化 —— 它由数量与杠杆决定。 */
       marginUsed: number;
-      /** 部分平仓累计已记的净盈亏（只增不减）。 */
+      /**
+       * 部分平仓累计已记的**毛**盈亏（只增不减）。
+       *
+       * ⚠️ **2026-10-03 起语义是"毛"**（此前是"净"）。列名保持
+       * `realized_partial_pnl` 不变以免多一次迁移，但调用方要减的是
+       * **`grossPnl` 而不是 `netPnl`** —— 拿毛减净会把那一部分的平仓手续费
+       * 多扣一次。见 `partialBooked()` 与最终平仓处的说明。
+       */
       addRealizedPartialPnl?: number;
       /** 部分平仓累计已记的数量（只增不减）。 */
       addBookedPartialQty?: number;
@@ -1027,19 +1034,24 @@ export const positions = {
   },
 
   /**
-   * 部分平仓已经记了多少。
+   * 部分平仓已经记了多少（**毛**盈亏 + 数量）。
    *
    * 最终平仓时要把它从交易所重建的整段往返里**减掉** —— 见迁移 M8 的说明：
    * 重复记账会让账面比账户好看，而那正是 §2.5 禁止的方向。
+   *
+   * ⚠️ **`gross` 是毛盈亏**（2026-10-03 起）。这个函数曾经叫 `.pnl` 并返回净额，
+   * 而调用方拿它去减**毛** —— 口径不匹配，等于把已记那部分的平仓手续费多扣一次
+   * （`G − (g − xf)` 而不是 `G − g`，毛被高估 `xf`）。改名成 `gross` 就是为了
+   * 让调用点一眼看出它该配 `grossRaw`。
    */
-  partialBooked(traderId: number, symbol: string): { pnl: number; qty: number } {
+  partialBooked(traderId: number, symbol: string): { gross: number; qty: number } {
     const row = this.getOpenBySymbol(traderId, symbol);
-    if (!row) return { pnl: 0, qty: 0 };
+    if (!row) return { gross: 0, qty: 0 };
     const r = getDb().get(
-      'SELECT realized_partial_pnl AS pnl, booked_partial_qty AS qty FROM positions WHERE id = ?',
+      'SELECT realized_partial_pnl AS gross, booked_partial_qty AS qty FROM positions WHERE id = ?',
       row.id,
-    ) as { pnl: number | null; qty: number | null } | undefined;
-    return { pnl: Number(r?.pnl) || 0, qty: Number(r?.qty) || 0 };
+    ) as { gross: number | null; qty: number | null } | undefined;
+    return { gross: Number(r?.gross) || 0, qty: Number(r?.qty) || 0 };
   },
   close(id: number): void {
     getDb().run("UPDATE positions SET status = 'closed' WHERE id = ?", id);

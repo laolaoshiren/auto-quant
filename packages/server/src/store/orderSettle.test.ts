@@ -544,3 +544,65 @@ test('★ 已有一行 open 时 promote 必须合并，不能撞唯一索引', (
   assert.equal(open[0]!.entry_price, 762.2, '★ 用交易所报的成交价覆盖本地记录');
   assert.equal(positionStore.pending(traderId).length, 0, '★ pending 残留必须被关掉');
 });
+
+/* -------------------------------------------------------------------------- */
+/*  部分平仓累计的量：必须是【毛】                                                */
+/* -------------------------------------------------------------------------- */
+
+test('★ 部分平仓累计的是【毛盈亏】—— 拿净额去减整段毛盈亏会把手续费多扣一次', () => {
+  /*
+   * ## 这个口径错在哪（2026-10-03 审计发现）
+   *
+   * 「减仓」会当场记一笔（`manual_partial`），并把结果累加到
+   * `positions.realized_partial_pnl`。最终平仓时，`bookClose()` 用它去减
+   * `findRoundTrip()` 重建出的**整段往返毛盈亏**：
+   *
+   * ```text
+   * 整段往返: 毛 G、开仓费 EF、平仓费 XF
+   * 部分平仓: 毛 g、平仓费 xf（已单独记过一行，净 g − xf）
+   *
+   * 正确:  grossPnl = G − g            （同为【毛】口径）
+   * 错误:  grossPnl = G − (g − xf) = (G − g) + xf    ← 毛被高估 xf
+   * ```
+   *
+   * 而 `entryFee`/`exitFee` 那边还传着**整段**的值 —— 于是那部分手续费
+   * 在账上出现两次。两处叠加，账目比账户"好看"，正是 §2.5 禁止的方向。
+   *
+   * 所以这一列**存毛**，而且函数名从 `partialBooked().pnl` 改成
+   * `partialBooked().gross` —— 让调用点一眼看出它该配 `grossRaw`。
+   */
+  traderId = seedTrader();
+  const positionId = positionStore.insert({
+    traderId,
+    symbol: 'PARTUSDT',
+    side: 'long',
+    quantity: 336,
+    entryPrice: 0.104,
+    leverage: 5,
+    liquidationPrice: null,
+    marginUsed: (336 * 0.104) / 5,
+    stopLoss: 0.0968,
+    takeProfit: 0.113,
+    stopOrderId: null,
+    tpOrderId: null,
+    openReasoning: '测试',
+    entryOrderId: 'E-1',
+  });
+
+  /* 减掉一半：毛 +1.132320（平仓费 0.009302 那一笔已单独入账）。 */
+  positionStore.resize(traderId, 'PARTUSDT', {
+    quantity: 168,
+    entryPrice: 0.104,
+    marginUsed: (168 * 0.104) / 5,
+    addRealizedPartialPnl: 1.13232,
+    addBookedPartialQty: 168,
+  });
+
+  const booked = positionStore.partialBooked(traderId, 'PARTUSDT');
+  assert.ok(
+    Math.abs(booked.gross - 1.13232) < 1e-12,
+    `★ 累计的必须是毛盈亏 1.13232（若这里存的是净额 1.123018，最终平仓就会多扣 0.009302）。实际 ${booked.gross}`,
+  );
+  assert.equal(booked.qty, 168, '数量也要累加 —— 手续费按它分摊');
+  assert.ok(positionId > 0);
+});
