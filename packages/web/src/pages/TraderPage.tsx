@@ -1458,16 +1458,19 @@ export function TraderPage() {
           /*
            * ⚠️ **必须原样传 `positions`，不要 `.map()` 出一个新数组。**
            *
-           * `TraderTables` 内部按 `useMemo(..., [positionMarginModes])` 建
-           * 「symbol → marginType」的映射；这里每次渲染都造一个新数组的话，引用
-           * 每次都变，那个 memo 就等于没有 —— 每渲染一次重建一次映射。
+           * `TraderTables` 内部按 `useMemo(..., [positions])` 建两张映射
+           * （「symbol → marginType」与「symbol → leverage」）；这里每次渲染都造一个
+           * 新数组的话，引用每次都变，那两个 memo 就等于没有 —— 每渲染一次重建一次。
            *
-           * 它只用于**兜底**：订单行自己落库的 `marginType` 优先（迁移 v14 起写入），
+           * 它们只用于**兜底**：订单行自己落库的 `marginType` 优先（迁移 v14 起写入），
            * 落库为空（v14 之前的历史行）且该 symbol 现在有持仓时才用实时值顶上，
            * 并在悬停说明里写明「这是当前账户配置，不是下单那一刻的快照」。
-           * 两者都拿不到 → 显示 `—`，**绝不默认成"全仓"**。
+           * 两者都拿不到 → 显示 `—`，**绝不默认成"全仓"或某个杠杆**。
+           *
+           * 杠杆同理：**委托单本身没有杠杆字段**（它是该标的的持仓设置），
+           * 所以「当前委托」那一列也只能这样按标的取（用户 2026-10-03 的要求）。
            */
-          positionMarginModes={positions}
+          positions={positions}
           /*
            * 手工平仓成功后**立刻重取持仓并写进 store**。
            *

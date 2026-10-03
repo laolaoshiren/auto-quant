@@ -1135,6 +1135,47 @@ const ORDER_MARGIN_MODE_SOURCE_TITLE = {
  *   只有一个来源 —— **不做兜底**。补录的回合（进程没运行时平的仓）本来就没有
  *   对应的本地订单行，用"当前配置"顶上会把"不知道"说成一个看起来很确定的值。
  */
+/**
+ * 订单表里的**杠杆**单元格。
+ *
+ * ## 为什么它只是一个"按标的查表"的组件
+ *
+ * **委托单没有杠杆字段** —— 杠杆是**该标的的持仓设置**（属于仓位，不属于订单）。
+ * 一张还没成交的挂单，它的杠杆就是"这个标的现在设的杠杆"。所以数据只能来自
+ * 页面那份当前持仓读数（`liveLeverages`），和「保证金模式」的兜底走同一条路。
+ *
+ * ## 取不到时显示 `—`，不补默认值
+ *
+ * 一个既没成交、也没有持仓的挂单确实没有这个读数（系统手上没有交易所对该标的的
+ * 杠杆设置）。**补一个 1x 或 5x 都是编造** —— 与「保证金模式」列同一条约定：
+ * 没读到就画 `—`，并用 `title` 说清为什么空。
+ *
+ * ## 措辞
+ *
+ * 显示成 `5x`，与持仓表的「方向 / 杠杆」列完全一致 —— 同一个概念在两处必须是
+ * 同一个写法，否则操作员会以为它们在说不同的东西。
+ */
+function LeverageCell({
+  symbol,
+  liveBySymbol,
+}: {
+  symbol: string;
+  liveBySymbol?: ReadonlyMap<string, number> | null;
+}) {
+  const leverage = liveBySymbol?.get(symbol);
+  if (typeof leverage !== 'number' || leverage <= 0) {
+    return (
+      <span
+        className="text-ink-faint"
+        title={`没有 ${symbol} 的杠杆读数 —— 该标的当前没有持仓，而杠杆是持仓上的设置（委托单本身不带这个字段）。`}
+      >
+        —
+      </span>
+    );
+  }
+  return <span title={`${symbol} 当前的杠杆倍数（来自当前持仓读数，不是下单当时的快照）。`}>{leverage}x</span>;
+}
+
 function MarginModeCell({
   order,
   mode,
@@ -1221,6 +1262,7 @@ export function OrdersTable({
   onSelectSymbol,
   collapsed = false,
   liveMarginModes,
+  liveLeverages,
 }: {
   /*
    * 行数据由**容器**（`TraderTables`）持有，不在这里自己拉。
@@ -1255,6 +1297,23 @@ export function OrdersTable({
    * 映射由容器（`TraderTables`）建一次给两张订单表共用 —— 每行各建一次会变成 O(行数 × 持仓数)。
    */
   liveMarginModes?: ReadonlyMap<string, MarginMode> | null;
+  /**
+   * 杠杆的**兜底来源**：当前持仓的 `symbol → leverage`。
+   *
+   * ## 为什么订单的杠杆要从持仓取
+   *
+   * **委托单本身没有杠杆字段** —— 杠杆是**该标的的持仓设置**（属于仓位，不属于订单）。
+   * 一张还没成交的挂单，它的杠杆就是"这个标的现在设的杠杆"。
+   * 所以只能像保证金模式一样，按标的从当前持仓读数里取。
+   *
+   * ## 已知限制（数据的物理边界，不是 bug）
+   *
+   * 只有**当前有持仓**的标的能查到杠杆；一个既没成交、也没持仓的挂单显示 `—`。
+   * 这与「保证金模式」列的限制完全一致 —— 两列会一起缺，不会出现一个有、一个没有的怪象。
+   *
+   * 映射同样由容器建一次、两张订单表共用。
+   */
+  liveLeverages?: ReadonlyMap<string, number> | null;
 }) {
   const all: OrderRecord[] = paging.rows;
   const orders = onlyOpen ? all.filter(isOpenOrder) : all;
@@ -1328,6 +1387,15 @@ export function OrdersTable({
                   隔着"触发价 / 已成交"去看会让人以为它属于后者。 */}
               <th className="th text-right" title={ORDER_MARGIN_USED_TITLE}>
                 {BALANCE_LABEL.marginUsed}
+              </th>
+              {/*
+                杠杆紧跟在「保证金占用」后面 —— 占用 ≈ 数量 × 价格 ÷ 杠杆，
+                三个量是同一条式子的三项，本来就该挨着。
+
+                用户 2026-10-03：「当前委托里面的订单要显示 杠杆」。
+              */}
+              <th className="th text-right" title="该标的当前的杠杆倍数（来自当前持仓读数，不是下单当时的快照）">
+                杠杆
               </th>
               {/* 保证金模式紧跟在「保证金占用」后面：两者说的是同一件风险的两面
                   （压了多少本金 / 这笔本金亏光之后会不会牵连别的仓位）。
@@ -1425,6 +1493,19 @@ export function OrdersTable({
                       而不是 `0` —— `fmtUsd(undefined)` 是 `—`、`fmtUsd(0)` 是 `$0.00`，
                       这两件事在任何时候都不能混。 */}
                   <td className="td num text-right">{fmtUsd(order.marginUsed, 2)}</td>
+                  {/*
+                    ⚠️ 杠杆紧跟在「保证金占用」后面 —— 那三个量（数量 / 占用 / 杠杆）是同一条式子的三项
+                    （占用 ≈ 数量 × 价格 ÷ 杠杆），隔着别的列去看会让人以为它属于后者。
+
+                    用户 2026-10-03 的要求：「当前委托里面的订单要显示 杠杆」。
+
+                    **委托单本身没有杠杆字段** —— 杠杆是该标的的持仓设置，所以这里按标的
+                    从当前持仓读数里取（`liveLeverages`）。取不到就是 `—`：
+                    一个既没成交、也没持仓的挂单确实没有这个读数，补个默认值就是编造。
+                  */}
+                  <td className="td num text-right">
+                    <LeverageCell symbol={order.symbol} liveBySymbol={liveLeverages} />
+                  </td>
                   {/*
                     保证金模式：落库值优先，当前持仓兜底（见 `orderMarginMode()`）。
 
@@ -1866,7 +1947,7 @@ export function TraderTables({
   onSelectSymbol,
   positionSymbols,
   onPositionsChanged,
-  positionMarginModes,
+  positions,
 }: {
   traderId: number;
   tab: TraderTabId;
@@ -1898,7 +1979,7 @@ export function TraderTables({
   /** 平仓成功后通知页面立刻重取持仓 —— 否则界面还留着刚平掉的那一行。 */
   onPositionsChanged?: () => void;
   /**
-   * 页面手上那份**当前持仓** —— 只用来给订单行的「保证金模式」兜底。
+   * 页面手上那份**当前持仓** —— 给订单行的「保证金模式」与「杠杆」兜底。
    *
    * ## 为什么是持仓数组而不是一个现成的 Map
    *
@@ -1914,8 +1995,19 @@ export function TraderTables({
    * 都在 `orderMarginMode()` / `ORDER_MARGIN_MODE_SOURCE_TITLE` 里定死了。
    *
    * 不传 = 没有兜底（历史行显示 `—`），表格照常工作。
+   *
+   * ## 2026-10-03：它同时供「杠杆」列
+   *
+   * 用户的原话：「当前委托里面的订单要显示 杠杆」。
+   *
+   * **委托单（未成交）本身没有杠杆字段** —— 杠杆是**该标的的持仓设置**，
+   * 挂在持仓上、不属于某一张单。所以订单表要显示杠杆，只能像「保证金模式」
+   * 一样从这份持仓读数里按标的取。同一个数组供两列，避免调用方传两份。
+   *
+   * 于是这个 prop 从 `positionMarginModes` 改名成 `positions` —— 它本来就是
+   * 整个持仓数组，旧名字只说了它当初服务的唯一用途。
    */
-  positionMarginModes?: ReadonlyArray<{ symbol: string; marginType?: MarginMode | null }>;
+  positions?: ReadonlyArray<{ symbol: string; marginType?: MarginMode | null; leverage?: number | null }>;
 }) {
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   const [ordersRefreshToken, setOrdersRefreshToken] = useState(0);
@@ -1928,13 +2020,40 @@ export function TraderTables({
    */
   const liveMarginModes = useMemo(() => {
     const map = new Map<string, MarginMode>();
-    for (const position of positionMarginModes ?? []) {
+    for (const position of positions ?? []) {
       if (position.marginType === 'cross' || position.marginType === 'isolated') {
         map.set(position.symbol, position.marginType);
       }
     }
     return map;
-  }, [positionMarginModes]);
+  }, [positions]);
+
+  /**
+   * `positions` → `symbol → 杠杆`，供「当前委托」与「订单记录」显示杠杆。
+   *
+   * ## 为什么订单的杠杆要从持仓取
+   *
+   * **委托单本身没有杠杆字段** —— 杠杆是**该标的的持仓设置**，属于仓位而非订单。
+   * 一张还没成交的挂单，它的杠杆就是"这个标的现在设的杠杆"。
+   *
+   * 认不出的值（`undefined`、`null`、非正数）**不进这张表** ——
+   * 没有这个事实就让单元格显示 `—`，**不补默认值**（补个 1x 或 5x 都是编造）。
+   *
+   * ## 已知限制（不是 bug，是数据的物理边界）
+   *
+   * 只有**当前有持仓**的标的能查到杠杆。一个还没成交、也没有持仓的挂单会显示 `—` ——
+   * 因为系统手上确实没有"该标的的杠杆"这个读数。这与「保证金模式」列的限制一致，
+   * 所以两列会一起缺，不会出现一个有一个没有的怪象。
+   */
+  const liveLeverages = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const position of positions ?? []) {
+      if (typeof position.leverage === 'number' && position.leverage > 0) {
+        map.set(position.symbol, position.leverage);
+      }
+    }
+    return map;
+  }, [positions]);
   // One token drives both tables: the toolbar ⟳ and the caller's 对账 both mean
   // "these rows are stale".
   const token = (refreshToken ?? 0) + ordersRefreshToken;
@@ -2192,6 +2311,7 @@ export function TraderTables({
              */
             collapsed={tab === 'history' ? historyCollapsed : undefined}
             liveMarginModes={liveMarginModes}
+            liveLeverages={liveLeverages}
           />
         )}
         {tab === 'trades' && (
