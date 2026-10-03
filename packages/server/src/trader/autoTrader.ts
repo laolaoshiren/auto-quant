@@ -93,7 +93,7 @@ import { applyAgentPatch } from './agent/patch.js';
  * `readPause` 是纯 `settings` 读取，与 `positionStore` 同类，
  * 在这里直接调用比再往端口上加一个方法更少牵扯。
  */
-import { readPause } from './agent/ports.js';
+import { clearPause, readPause } from './agent/ports.js';
 import { rankConsensus } from '../strategy/consensus.js';
 import { clampNextCheckMinutes, nextCycleDelayMs } from './cycleSchedule.js';
 import { pendingTimeoutMinutes } from './pendingTimeout.js';
@@ -2821,6 +2821,29 @@ export class AutoTrader {
           rejected: result.rejected,
           clamps: result.clamps,
         };
+      },
+      /*
+       * ⚠️ **决策轮撤销停手**（2026-10-04）。
+       *
+       * 实盘：AI 于 20:05 停手，之后每轮继续分析、决策卡不断出现「开多 / 未执行」。
+       * 提示词告知它状态之后（`c73`/`c74` 起不再出现 `open_long`），
+       * 它在思维链里写「本轮用 `resume_trading` 恢复」—— **而那个工具当时只加在
+       * 觉醒轮**，那台机器人的觉醒轮自 20:29 起就没跑过，于是它**说得到、做不到**。
+       *
+       * 同一个教训第二次出现：**能力必须接在"它做判断的那一轮"上**。
+       */
+      resumeTrading: async (reason) => {
+        const was = readPause(traderId);
+        if (!was) {
+          return { resumed: false, note: '你当前并不处于停手状态（可能已经在别处恢复了）' };
+        }
+        clearPause(traderId);
+        this.emitOnChange(
+          'agent-resumed',
+          'info',
+          `AI 自己撤销了停手：${reason}（它当初停手于 ${was.at}）`,
+        );
+        return { resumed: true, note: reason };
       },
     };
 
