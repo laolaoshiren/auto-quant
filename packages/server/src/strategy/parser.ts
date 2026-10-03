@@ -140,6 +140,72 @@ function escapeControlCharsInsideStrings(text: string): string {
   return out;
 }
 
+/**
+ * **补上漏写的字符串闭合引号**（模型偶尔会在长 `reasoning` 里漏掉结尾的 `"`）。
+ *
+ * ## 实盘现场（2026-10-03，周期 #37，与控制字符是**同一轮**）
+ *
+ * 模型写成：
+ *
+ * ```text
+ * "reasoning": "...止损幅度 1.30%,RR 2.06,均过线。**
+ *   },                 ← 换行之后直接是 "}," —— 而值少了一个收尾的 "
+ *   {
+ *     "symbol": "WLDUSDT",
+ * ```
+ *
+ * 修掉控制字符之后，`JSON.parse` 就卡在这里：
+ * `Expected ',' or '}' after property value in JSON at position 724`。
+ *
+ * ## 为什么这个启发式是安全的
+ *
+ * 判据是「字符串**未闭合**的状态下，遇到了**行首的 JSON 结构**（`},` / `{` / `]`）」——
+ * 也就是"一个值的结束引号丢了"的典型形状。真正的字符串内容里几乎不会出现
+ * 「换行 + 两空格 + `},`」这种排版（模型的理由是连续中文散文）。
+ *
+ * ⚠️ **只在严格解析失败之后才用**（它排在 `candidates` 的最后），所以一个本来
+ * 就合法的响应永远不会走到这里；误判的代价被限制在"本已无法解析"的输入上。
+ */
+function closeUnterminatedStrings(text: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      out += ch;
+      continue;
+    }
+    if (inString && ch === '\n') {
+      /*
+       * 看**换行之后**那一行的开头是不是 JSON 结构 —— 是则说明引号丢了。
+       * （`\s*` 允许缩进；最多吃 8 个空格，避免把正常散文里的换行误判。）
+       */
+      const rest = text.slice(i + 1);
+      const m = /^[ \t]{0,8}([}\]])/.exec(rest);
+      if (m) {
+        out += '"'; // 补上闭合引号
+        inString = false;
+        out += ch;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
+}
+
 function safeParseJson(text: string): unknown {
   const candidates = [
     text,
@@ -149,6 +215,9 @@ function safeParseJson(text: string): unknown {
     escapeControlCharsInsideStrings(repairJsonStructure(text)),
     /* 全角标点也一并试一次（模型偶尔会用中文标点）。 */
     escapeControlCharsInsideStrings(repairEncoding(text)),
+    /* 最后才用启发式补引号：它可能改错内容，所以只当作"总比整轮丢掉好"。 */
+    closeUnterminatedStrings(escapeControlCharsInsideStrings(text)),
+    closeUnterminatedStrings(escapeControlCharsInsideStrings(repairEncoding(text))),
   ];
   for (const candidate of candidates) {
     try {
