@@ -80,6 +80,14 @@ export interface OrchestratorPorts {
   requestPause: (reason: string) => void;
 
   /**
+   * **撤销自己设下的暂停**（恢复开新仓）—— 与 `requestPause` 成对。
+   *
+   * 见 `tools.ts` 里 `resume_trading` 的说明：那个开关从前只能设不能撤，
+   * 机器人会永久停在新仓之外，而本系统是全自动的。
+   */
+  clearPause: () => void;
+
+  /**
    * AI 改自己的决策周期（分钟）。落库到 `traders.cycle_interval_minutes`。
    *
    * 它**不在** `StrategyConfig` 里 —— 那是调度器要在配置之外读的一列。
@@ -372,6 +380,7 @@ export async function reviewClosedTrade(input: {
           skippedOutcomes: async () => ({}),
         },
         requestPause: () => {},
+        clearPause: () => {},
         /*
          * 复盘用的桩：**它不该改周期**。
          *
@@ -475,6 +484,7 @@ function buildToolDeps(ports: OrchestratorPorts, context: { trigger: string; obs
     },
     read: ports.toolReads,
     requestPause: (reason) => ports.requestPause(reason),
+    clearPause: () => ports.clearPause(),
     cycleInterval: () => ports.cycleInterval(),
     setCycleInterval: (minutes, reason) => ports.setCycleInterval(minutes, reason),
   };

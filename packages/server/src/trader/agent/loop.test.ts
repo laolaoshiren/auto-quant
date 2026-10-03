@@ -45,6 +45,7 @@ function makeDeps() {
       skippedOutcomes: async () => ({}),
     },
     requestPause: (reason) => pauses.push(reason),
+    clearPause: () => {},
     /* 测试要能看到 AI 改周期这件事 —— 与 pauses 同一个形状。 */
     cycleInterval: () => 3,
     setCycleInterval: (minutes) => { cycleIntervals.push(minutes); return { minutes, clamped: false }; },

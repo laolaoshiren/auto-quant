@@ -83,6 +83,17 @@ import {
 } from '../store/repositories.js';
 import { rankPlatformHistory } from '../strategy/platformHistory.js';
 import { applyAgentPatch } from './agent/patch.js';
+/*
+ * ⚠️ 直接读停手状态，**不经过 `deps.agent` 端口**。
+ *
+ * 那个端口上只有 `paused: () => boolean`（给闸门用），而提示词需要的是
+ * **完整的 `{ at, reason }`** —— 理由必须一起给模型，否则它无法判断
+ * "当初为什么停手、现在还成立吗"（见 `strategy/prompt.ts` 里那一段）。
+ *
+ * `readPause` 是纯 `settings` 读取，与 `positionStore` 同类，
+ * 在这里直接调用比再往端口上加一个方法更少牵扯。
+ */
+import { readPause } from './agent/ports.js';
 import { rankConsensus } from '../strategy/consensus.js';
 import { clampNextCheckMinutes, nextCycleDelayMs } from './cycleSchedule.js';
 import { pendingTimeoutMinutes } from './pendingTimeout.js';
@@ -2507,6 +2518,21 @@ export class AutoTrader {
         ...readForeignActivity(traderId),
       },
       positions: promptPositions,
+      /*
+       * ⚠️ **AI 自己设的停手状态必须进提示词**（用户 2026-10-04 的批评）。
+       *
+       * 他说：「页面上显示了开多，又显示 AI 已主动停手：本轮不开新仓，
+       * 你完全就是自相矛盾 —— 既然 AI 要停手，那么为什么页面上要显示开仓了？」
+       *
+       * 那段矛盾的根因就是这一行原来不存在：模型调完 `pause_trading` 之后
+       * **后续每轮的提示词都没告诉它**，于是它继续认真给出开仓建议，
+       * 而下面的 `agentPaused` 闸门把它们全拦掉 ——
+       * 页面同时显示「开多」与「本轮不开新仓」，而且白烧一整轮决策。
+       *
+       * 传给它之后，提示词会明确要求"本轮不要提开仓"，并提示它可以用
+       * `resume_trading` 自己撤销（见 `strategy/prompt.ts` 里那一段）。
+       */
+      paused: readPause(traderId),
       candidates: snapshots,
       oiRanking,
       marketOverview,
