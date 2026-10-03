@@ -1709,9 +1709,32 @@ export class TraderManager {
 
     for (const trader of traders.list()) {
       if (!resumable.has(trader.status)) continue;
-      // A stop request that arrives while earlier traders are still starting must
-      // win: the operator may be shutting the instance down.
-      if (this.cancelledStarts.has(trader.id) || this.stopping) break;
+      /*
+       * ⚠️ **只在这一台被取消时跳过它，在真的停机时才 break —— 而且绝不让
+       * 一台机器人的失败拖垮后面的全部。**
+       *
+       * 2026-10-03 实盘事故：这次循环原来是
+       *
+       *     if (this.cancelledStarts.has(trader.id) || this.stopping) break;
+       *     const result = await this.startTrader(trader.id, dryRun, { retryTransient: true });
+       *
+       * 两个问题叠在一起：
+       *
+       *   · `cancelledStarts` 里有**任意一台**的取消，就 `break` 掉整个循环 ——
+       *     而它的语义只是"这一台别启动了"（见 `startTrader` 的取消钩子）；
+       *   · `startTrader` 的调用**没有 try/catch**，它一抛异常，循环就带着堆栈退出。
+       *
+       * 后果（实测）：`#9`「AI托管测试」排在前（id 小）并在启动途中出问题，
+       * 循环中断，**排在后面的 `#10`「赚大钱」一个日志都没留下**。而 `#10` 是
+       * 主账户上的实盘机器人，持有 3 个仓位、6 张保护单 —— **它静默停摆 8 小时**
+       * （09:07 最后一轮 → 17:11 人工发现）。这恰好就是这段代码上面那段注释
+       * 自己警告过的代价："一个持有杠杆仓位的机器人静默停摆是钱的问题"。
+       *
+       * 所以：**一台失败 = 标记它 + 继续下一台。**
+       * `stopping` 是**全局**停机信号，只有它还配得上 `break`。
+       */
+      if (this.cancelledStarts.has(trader.id)) continue;
+      if (this.stopping) break;
 
       const recovering = trader.status === 'error';
       log.info(
@@ -1743,7 +1766,21 @@ export class TraderManager {
        * 而收益的不对称很大：启动慢 2.5 分钟是体验问题，**一个持有杠杆仓位的机器人
        * 静默停摆**是钱的问题。
        */
-      const result = await this.startTrader(trader.id, dryRun, { retryTransient: true });
+      /*
+       * ⚠️ **整个恢复体包在 try/catch 里** —— `startTrader` 在成功路径上返回
+       * `{ok:false}`，但**异常路径同样存在**（网络层、数据库层、任何未预期的 throw），
+       * 而它一个异常就会让**后面所有机器人**都得不到恢复。见上面那段 2026-10-03 的说明。
+       */
+      let result: { ok: boolean; error?: string };
+      try {
+        result = await this.startTrader(trader.id, dryRun, { retryTransient: true });
+      } catch (error) {
+        result = { ok: false, error: (error as Error).message };
+        log.error(
+          `机器人「${trader.name}」的恢复过程抛出异常 —— 已跳过它并继续恢复其余机器人：` +
+            `${(error as Error).message}`,
+        );
+      }
       if (result.ok) continue;
 
       /*
