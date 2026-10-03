@@ -6146,3 +6146,196 @@ test('★ 走完一个限价成交周期后，账本不变量同样成立', asyn
 
 
 
+
+/* -------------------------------------------------------------------------- */
+/*  未平仓持有成本的【符号】：手续费减、资金费加                                  */
+/* -------------------------------------------------------------------------- */
+
+test('★ 未平仓仓位的持有成本符号不能混 —— 手续费【减】、资金费【加】', async () => {
+  /*
+   * ## 这个符号错在哪（2026-10-03，我自己引入并当场被线上数据抓到）
+   *
+   * 总账校验里，平台侧的构成是：
+   *
+   * ```text
+   * platformNet = platformSelf + foreignNet − openEntryFees + openFunding
+   *                                            ↑ 手续费是【支出、正数】
+   *                                                              ↑ 资金费在币安 income 里
+   *                                                                 【本身就是负数】
+   * ```
+   *
+   * 原来写的是 `+ openCosts`，而 `openCosts` 是"未平仓的入场手续费 + 资金费"**相加后的一个数**。
+   * 手续费被**加**了（应该减），于是平台侧高估了**两倍**手续费。
+   *
+   * 实测（`#10`，两个持仓）：
+   *
+   * ```text
+   * 交易所：毛 -0.6479 · 费 0.307327（其中未平仓开仓费 0.054795）
+   *         ⇒ 已平仓部分费用 = 0.252532，而本地账本的 fee 正是 0.252532 ✅
+   * 本地已平仓净额 = -0.900432
+   * 正确：-0.900432 − 0.054795 = -0.955227 = 交易所净额 ✅
+   * 实际：-0.900432 + 0.054795 = -0.845637 ⇒ gap 0.109590 = 【2 × 0.054795】❌
+   * ```
+   *
+   * **所以这里必须同时断言两件事**：`openCosts` 真的被算进去了（> 0），
+   * 而且 `gap` 是 0。只断言 gap 的话，一个"完全不算这一项"的实现
+   * 在某些夹具下也能凑出 0 —— 那就把修复测没了。
+   */
+  const stamp = Date.now();
+  const openedAt = new Date(stamp - 600_000).toISOString();
+
+  /* 一个仍持仓的仓位，入场单号已知。 */
+  positionStore.insert({
+    traderId,
+    symbol: 'HOLDUSDT',
+    side: 'long',
+    quantity: 10,
+    entryPrice: 100,
+    leverage: 2,
+    liquidationPrice: null,
+    marginUsed: 500,
+    stopLoss: 95,
+    takeProfit: 120,
+    stopOrderId: null,
+    tpOrderId: null,
+    openReasoning: '测试',
+    entryOrderId: '9001',
+  });
+
+  /* 那张入场单：手续费 0.5（**正数支出**）。 */
+  getDb().run(
+    `INSERT INTO orders (trader_id, exchange_order_id, client_order_id, symbol, side, type, purpose,
+                         quantity, price, stop_price, status, fee, created_at, updated_at)
+     VALUES (?, '9001', 'c-9001', 'HOLDUSDT', 'BUY', 'LIMIT', 'entry', 10, 100, NULL, 'FILLED', 0.5, ?, ?)`,
+    traderId,
+    openedAt,
+    openedAt,
+  );
+
+  /*
+   * 交易所流水：一笔已平仓的实现盈亏，加上**两个持仓费用**
+   * —— 本地账本只该覆盖前者，后者由 `openEntryFees` 补。
+   */
+  const broker = new FakeBroker();
+  /*
+   * ⚠️ **交易所侧必须也报这个持仓。**
+   *
+   * 对账会清点"本地有、交易所没有"的仓位（那是收养逻辑的另一半）——
+   * 只往本地插一行、而桩不报告它，这一行会**当场被结清**，
+   * 于是 `openEntryFees` 恒为 0，用例根本走不到被测的那条分支。
+   */
+  (broker as unknown as { positions: never }).positions = [
+    {
+      symbol: 'HOLDUSDT',
+      side: 'long',
+      quantity: 10,
+      entryPrice: 100,
+      leverage: 2,
+      liquidationPrice: 0,
+      marginType: 'isolated',
+      unrealizedPnl: 0,
+      unrealizedPnlPercent: 0,
+    },
+  ] as unknown as never;
+  /*
+   * ⚠️ **流水的时间必须在"开仓之后"** —— `positionStore.insert()` 用 `now()` 当
+   * `opened_at`，而 `fundingSince()` 只取"开仓之后"的资金费（开仓之前的属于上一个
+   * 回合）。夹具里若把事件写成"5 分钟前"，它会被**正确地**过滤掉，
+   * 用例于是测不到那条分支（第一版就是这么红的）。
+   */
+  const afterOpen = Date.now() + 1000;
+  broker.income = [
+    { symbol: 'HOLDUSDT', incomeType: 'REALIZED_PNL', income: '2', time: afterOpen },
+    { symbol: 'HOLDUSDT', incomeType: 'COMMISSION', income: '-0.5', time: afterOpen },
+    { symbol: 'HOLDUSDT', incomeType: 'COMMISSION', income: '-0.5', time: afterOpen + 1000 },
+    { symbol: 'HOLDUSDT', incomeType: 'FUNDING_FEE', income: '-0.25', time: afterOpen + 2000 },
+  ] as typeof broker.income;
+
+  /* 本地账本只记那笔已平仓的：毛 2 − 费 0.5 = 净 1.5。 */
+  tradeStore.insert({
+    traderId,
+    symbol: 'HOLDUSDT',
+    side: 'long',
+    quantity: 10,
+    entryPrice: 100,
+    exitPrice: 100.2,
+    leverage: 2,
+    grossPnl: 2,
+    entryFee: 0.25,
+    exitFee: 0.25,
+    closeReason: 'take_profit',
+    /*
+     * ⚠️ **时间要在 `since` 之后。**
+     *
+     * 总账校验的平台侧是 `netSince(sinceIso)` —— `since` 是**交易员创建时刻**。
+     * 夹具里若把成交写成"15 分钟前"，它会被正确地过滤掉，`platformSelf` 变成 0，
+     * 于是 `gap` 差一整笔净额（第一版就是这么红的：平台侧 -0.75 vs 交易所 0.75）。
+     */
+    openedAt: new Date(afterOpen + 3000).toISOString(),
+    closedAt: new Date(afterOpen + 4000).toISOString(),
+    source: 'bot',
+  });
+
+  await buildTrader(broker, '<decision>[]</decision>').runReconcile();
+
+  /* 中间断言：先确认夹具本身是对的，否则后面的 gap 断言证明不了任何事。 */
+  const heldRow = positionStore.open(traderId).find((p) => p.symbol === 'HOLDUSDT');
+  assert.ok(
+    heldRow,
+    '夹具前提：HOLDUSDT 持仓应当存在，实际 ' + JSON.stringify(positionStore.open(traderId).map((p) => p.symbol)),
+  );
+  assert.equal(heldRow.entry_order_id, '9001', '夹具前提：持仓带着入场单号');
+  const ordRow = getDb().get<{ n: number; total: number | null }>(
+    'SELECT COUNT(*) n, SUM(fee) total FROM orders WHERE trader_id=? AND purpose=\'entry\' AND status=\'FILLED\' AND exchange_order_id=\'9001\'',
+    traderId,
+  );
+  assert.equal(ordRow?.n, 1, '夹具前提：orders 里那张入场单存在且有 fee');
+  const localNet = getDb().get<{ n: number; net: number | null }>(
+    'SELECT COUNT(*) n, ROUND(SUM(net_pnl),6) net FROM trades WHERE trader_id=?',
+    traderId,
+  );
+  assert.ok(
+    Math.abs(Number(localNet?.net) - 1.5) < 1e-9,
+    '夹具前提：本地已平仓净额必须是 1.5（毛 2 − 费 0.5），实际 ' + String(localNet?.net) + '（' + String(localNet?.n) + ' 行）',
+  );
+
+  const row = getDb().get<{ value: string }>('SELECT value FROM settings WHERE key = ?', 'ledger_check:' + String(traderId));
+  assert.ok(row, '对账必须把校验结果落库');
+  const check = JSON.parse(row.value) as {
+    gap?: number;
+    openCosts?: number;
+    openEntryFees?: number;
+    openFunding?: number;
+    platformNet?: number;
+    exchangeNet?: number;
+  };
+
+  /*
+   * ① 那一项**真的被算进去了**（否则下面那条 gap=0 可能是"两边都没算"凑出来的）。
+   *    未平仓的入场手续费 0.5 + 资金费 -0.25 = 0.25。
+   */
+  assert.ok(
+    Math.abs(Number(check.openEntryFees) - 0.5) < 1e-9,
+    `未平仓入场手续费必须是 0.5（实际 ${check.openEntryFees}）`,
+  );
+  assert.ok(
+    Math.abs(Number(check.openFunding) - -0.25) < 1e-9,
+    `未平仓资金费必须是 -0.25（币安 income 本身就是负数，实际 ${check.openFunding}）`,
+  );
+
+  /*
+   * ② **符号正确 ⇒ gap 为 0。**
+   *
+   * 平台侧 = 本地净 1.5 − 手续费 0.5 + 资金费(−0.25) = 0.75
+   * 交易所 = REALIZED 2 − COMMISSION 0.5 − 0.5 + FUNDING −0.25 = 0.75
+   * 两者相等。
+   *
+   * ⚠️ 若把符号写成 `+ openCosts`（原缺陷），平台侧 = 1.5 + 0.25 = 1.75，
+   * gap 变成 **1.0**（= 2 × 0.5）。这条断言会立刻红。
+   */
+  assert.ok(
+    Math.abs(Number(check.gap)) < 1e-9,
+    `★ 符号正确时 gap 必须是 0（平台侧 ${check.platformNet} vs 交易所 ${check.exchangeNet}）—— ` +
+      `符号写反时它会是 2 × 未平仓手续费（这里应为 1.0）`,
+  );
+});

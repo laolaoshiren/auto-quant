@@ -5864,6 +5864,17 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         foreignRounds: foreign.length,
         /* 未平仓的持有成本（加在平台侧的那个数）—— 它长期是差额的主要来源。 */
         openCosts: Number(openCosts.toFixed(6)),
+        /*
+         * ⚠️ **两个分量要分开存**（2026-10-03）。
+         *
+         * `openCosts` 是"未平仓入场手续费 + 资金费"相加后的一个数，而**两项的符号
+         * 不同**（手续费正、资金费负）—— 只存汇总值时，`gap` 一旦不为 0，
+         * 看的人分不清是"这一项没算进去"还是"符号用错"（两者差一个因子 2）。
+         * 实测就是栽在这里：`+ openCosts` 让平台侧高估了两倍手续费，
+         * 而落库的 `openCosts: 0.054795` 看起来完全正常。
+         */
+        openEntryFees: Number(openEntryFees.toFixed(6)),
+        openFunding: Number(openFunding.toFixed(6)),
         skipDiag,
         /*
          * 反向回合**已记账**的净额合计（2026-10-03 起）。
