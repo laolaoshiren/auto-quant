@@ -207,17 +207,30 @@ function closeUnterminatedStrings(text: string): string {
 }
 
 function safeParseJson(text: string): unknown {
+  /*
+   * ⚠️ **顺序在这里是本质的，不是风格问题**（2026-10-03 踩过一次）。
+   *
+   * `closeUnterminatedStrings` 靠"**遇到真的换行符**"判断一个值是不是漏了收尾引号；
+   * 而 `escapeControlCharsInsideStrings` 会把那个换行**变成 `\`+`n` 两个字符**。
+   * 先转义再补引号 ⇒ 补引号那一步永远看不到换行 ⇒ **永远不触发**。
+   *
+   * 实测就是这么失败的：`#37` 的 `reasoning` 同时有「多行」与「漏收尾引号」两个瑕疵，
+   * 而两级修复按错误顺序排列，谁也救不回来。
+   *
+   * 所以**先补引号（要看到原始换行），再统一转义**。
+   */
   const candidates = [
     text,
     repairJsonStructure(text),
-    /* ⚠️ 必须排在中间：先修控制字符（局部、无损），再退化到结构性修复。 */
+    /* 先补漏写的收尾引号（必须在控制字符被转义之前）。 */
+    closeUnterminatedStrings(text),
+    escapeControlCharsInsideStrings(closeUnterminatedStrings(text)),
+    /* 只有换行、没有漏引号的情形。 */
     escapeControlCharsInsideStrings(text),
     escapeControlCharsInsideStrings(repairJsonStructure(text)),
-    /* 全角标点也一并试一次（模型偶尔会用中文标点）。 */
+    /* 全角标点也一并试（模型偶尔用中文标点）。 */
     escapeControlCharsInsideStrings(repairEncoding(text)),
-    /* 最后才用启发式补引号：它可能改错内容，所以只当作"总比整轮丢掉好"。 */
-    closeUnterminatedStrings(escapeControlCharsInsideStrings(text)),
-    closeUnterminatedStrings(escapeControlCharsInsideStrings(repairEncoding(text))),
+    escapeControlCharsInsideStrings(closeUnterminatedStrings(repairEncoding(text))),
   ];
   for (const candidate of candidates) {
     try {
