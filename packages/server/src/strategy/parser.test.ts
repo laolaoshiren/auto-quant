@@ -466,3 +466,88 @@ test('sorting is stable within a tier', () => {
     ['BTCUSDT', 'ETHUSDT'],
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  字符串里的【裸换行】：实盘曾让整轮决策被丢成 []                                */
+/* -------------------------------------------------------------------------- */
+
+test('★ 字符串内部的换行必须被转义 —— 否则整轮决策被判成"零决策"', () => {
+  /*
+   * ## 实盘现场（2026-10-03，周期 #37）
+   *
+   * 模型在 `reasoning` 字段里写了多行文字，于是 JSON 字符串里出现了**真的换行**：
+   *
+   * ```text
+   * "reasoning": "止损幅度 1.30%,RR 2.06,均过线。**
+   *   },                        ← 字符串内部的裸换行
+   * ```
+   *
+   * 那在 JSON 规范里非法，`JSON.parse` 抛：
+   * `Bad control character in string literal in JSON at position 706`。
+   *
+   * 而当时的修复链只有两条候选（原文、`repairJsonStructure`），**都不管控制字符** ——
+   * 于是**整轮决策被丢成 `[]`**，界面显示「本周期模型没有给出任何决策」。
+   * 而那一轮模型其实给出了 **2 笔开仓 + 十余条 skip**：它 40k tokens 的思考、
+   * 8.9k 字的结论全部白费，而且**没人知道它做过这些判断**。
+   *
+   * ## 这条同时钉住两边
+   *
+   * 字符串**外面**的换行是合法空白（格式化 JSON 全靠它），所以修复器必须"只看
+   * 引号之内"。下一条用例守的就是那一半。
+   */
+  const raw = [
+    '<decision>',
+    '```json',
+    '[',
+    '  {',
+    '    "symbol": "ZECUSDT",',
+    '    "action": "open_short",',
+    '    "reasoning": "第一行理由',
+    '第二行理由（这里是裸换行，JSON 里非法）',
+    '第三行理由"',
+    '  },',
+    '  {',
+    '    "symbol": "WLDUSDT",',
+    '    "action": "skip",',
+    '    "reasoning": "单行，没问题"',
+    '  }',
+    ']',
+    '```',
+    '</decision>',
+  ].join('\n');
+
+  const parsed = parseDecisionResponse(raw, context({ candidateSymbols: new Set(['ZECUSDT', 'WLDUSDT']) }));
+  assert.equal(
+    parsed.decisions.length,
+    2,
+    '★ 两条决策都必须被解出来 —— 修复前这里会是 0，而那正是"本周期没有给出任何决策"那句话的来源',
+  );
+  assert.equal(parsed.decisions[0]!.symbol, 'ZECUSDT');
+  assert.equal(parsed.decisions[0]!.action, 'open_short');
+  /* 换行要**保留在文本里**（转义只是为了让 JSON 合法，不该把内容吃掉）。 */
+  assert.ok(
+    parsed.decisions[0]!.reasoning.includes('第二行理由'),
+    '转义后内容必须完整保留（把 \\n 变成空串会把它的理由吃掉一半）',
+  );
+});
+
+test('★ 修复器不能碰字符串【外面】的换行 —— 那会把结构改坏', () => {
+  /*
+   * 反向守卫：`escapeControlCharsInsideStrings` 是逐字符状态机，只看引号之内。
+   * 若有人图省事把它换成"全局把 \n 换成 \\n"，格式化过的 JSON 会被压成一行 ——
+   * 而这在真实的模型输出里是**常态**（它们几乎总是缩进排版）。
+   */
+  const pretty = [
+    '[',
+    '  {',
+    '    "symbol": "BTCUSDT",',
+    '    "action": "hold",',
+    '    "reasoning": "正常的一行"',
+    '  }',
+    ']',
+  ].join('\n');
+
+  const parsed = parseDecisionResponse(`<decision>${pretty}</decision>`, context());
+  assert.equal(parsed.decisions.length, 1, '多行缩进的合法 JSON 必须照常解析');
+  assert.equal(parsed.decisions[0]!.symbol, 'BTCUSDT');
+});

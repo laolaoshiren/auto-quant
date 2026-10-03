@@ -72,8 +72,84 @@ function repairJsonStructure(text: string): string {
     .replace(/([}\]"])\s*\/\/[^\n]*$/gm, '$1');
 }
 
+/**
+ * **把 JSON 字符串内部的裸控制字符转义掉**（换行 / 回车 / 制表 / 其它 < 0x20）。
+ *
+ * ## 为什么需要它（2026-10-03，实盘抓到"整轮零决策"）
+ *
+ * 模型在 `reasoning` 字段里写了**多行文字**（它自己的思考习惯），于是那段 JSON
+ * 变成这样：
+ *
+ * ```text
+ * "reasoning": "止损幅度 1.30%,RR 2.06,均过线。**
+ *   },                        ← 字符串里出现了【真的换行】
+ * ```
+ *
+ * 这在 JSON 规范里是**非法**的（控制字符必须转义成 `\n`），`JSON.parse` 直接抛：
+ *
+ * ```text
+ * Bad control character in string literal in JSON at position 706
+ * ```
+ *
+ * 而 `safeParseJson()` 的两条候选（原文、`repairJsonStructure`）都不管这件事 ——
+ * 于是**整轮决策被丢成 `[]`**，界面显示「本周期模型没有给出任何决策」。
+ * 实测那一轮模型其实给出了 **2 笔开仓 + 十余条 skip**，全部被静默丢掉
+ * （它 40k tokens 的思考与 8.9k 字的结论都白费了）。
+ *
+ * ## 为什么必须"逐字符走状态机"而不是一条正则
+ *
+ * 字符串**外面**的换行是合法空白（格式化 JSON 全靠它），无差别替换会把结构改坏。
+ * 只有**引号之内**的才需要转义，而且要跳过已经转义过的 `\\` 与 `\"`。
+ * （`parser.test.ts` 里那条"字符串里带 `]`"的用例，就是同一类"必须看上下文"
+ * 的前车之鉴。）
+ */
+function escapeControlCharsInsideStrings(text: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      out += ch;
+      continue;
+    }
+    if (inString) {
+      const code = ch.charCodeAt(0);
+      if (code < 0x20) {
+        /* 常见三个写成可读的转义，其余按 \uXXXX —— 都是合法 JSON。 */
+        if (ch === '\n') out += '\\n';
+        else if (ch === '\r') out += '\\r';
+        else if (ch === '\t') out += '\\t';
+        else out += `\\u${code.toString(16).padStart(4, '0')}`;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
+}
+
 function safeParseJson(text: string): unknown {
-  const candidates = [text, repairJsonStructure(text)];
+  const candidates = [
+    text,
+    repairJsonStructure(text),
+    /* ⚠️ 必须排在中间：先修控制字符（局部、无损），再退化到结构性修复。 */
+    escapeControlCharsInsideStrings(text),
+    escapeControlCharsInsideStrings(repairJsonStructure(text)),
+    /* 全角标点也一并试一次（模型偶尔会用中文标点）。 */
+    escapeControlCharsInsideStrings(repairEncoding(text)),
+  ];
   for (const candidate of candidates) {
     try {
       return JSON.parse(candidate);
