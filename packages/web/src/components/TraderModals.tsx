@@ -21,6 +21,30 @@ import type { Catalog } from '../lib/api';
 /*  Create a trader                                                            */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * 提交时该给 `strategyId` 传什么 —— **AI 托管一律 `null`**。
+ *
+ * ## 为什么这行逻辑要单独抽出来
+ *
+ * 它原来内联在 `submit()` 里写的是 `Number(strategyId)`（无条件），而服务端
+ * 在 `mode === 'ai_managed'` 时**主动拒绝**非 null 的 `strategyId`：
+ *
+ *   throw new Error('智能托管模式不引用任何策略 —— 请不要为它选择策略。');
+ *
+ * 后果是 **AI 托管模式下创建机器人必定失败**（用户 2026-10-03 报的
+ * 「创建不了机器人」）。而这种"两处规则必须一致、却各自写一遍"的分歧，
+ * 靠人记住是防不住的 —— 抽成纯函数之后，`strategyIdFor` 有测试钉着，
+ * 谁改坏了都会红。
+ *
+ * ## 为什么不是"下拉框 disabled 就够了"
+ *
+ * `disabled` 只阻止**用户交互**，不改变 state 里那个值 —— 它仍然是一个真实
+ * 策略 id（`#9`），提交时照样会被带上。**界面上"选不了"不等于请求里"没有"。**
+ */
+export function strategyIdFor(mode: TraderMode, selected: number): number | null {
+  return mode === 'ai_managed' ? null : selected;
+}
+
 export function NewTraderModal({
   open,
   onClose,
@@ -262,7 +286,20 @@ export function NewTraderModal({
         name: name.trim(),
         exchangeAccountId: Number(exchangeAccountId),
         aiModelId: resolvedModelId,
-        strategyId: Number(strategyId),
+        /*
+         * ⚠️ **AI 托管必须传 `null`，不能传下拉框里选中的那个 id。**
+         *
+         * 服务端在 `mode === 'ai_managed'` 时**主动拒绝**任何非 null 的 `strategyId`：
+         *
+         *   throw new Error('智能托管模式不引用任何策略 —— 请不要为它选择策略。');
+         *
+         * 而这里原来无条件写 `Number(strategyId)` —— 下拉框虽然被 `disabled`，
+         * 它的值仍然是一个真实策略（`#9`），于是**AI 托管模式下创建机器人必定失败**。
+         * 用户 2026-10-03 报的「创建不了机器人」就是它（错误文字与上面一字不差）。
+         *
+         * 下拉框保留在界面上是为了"策略模式"能用它，不是为了给 AI 托管传值。
+         */
+        strategyId: strategyIdFor(mode, Number(strategyId)),
         mode,
         cycleIntervalMinutes,
         // Omitted unless the operator took over: the server then reads the real

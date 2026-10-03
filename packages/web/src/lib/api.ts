@@ -482,7 +482,28 @@ export interface TraderInput {
   name: string;
   exchangeAccountId: number;
   aiModelId: number;
-  strategyId: number;
+  /**
+   * 这只机器人的策略；**AI 托管时必须传 `null`**。
+   *
+   * ## ⚠️ 这里曾经与「已知事实」相反（2026-10-03 修）
+   *
+   * 原来是 `strategyId: number`，下面 `mode` 的注释还写着**解耦之前**的说法：
+   * 「`ai_managed` 时 `strategyId` 仍然要传（**服务端是 NOT NULL**），但不起作用」。
+   *
+   * **那句话早就过时了。** `d338b35`「智能托管与策略彻底解耦」把服务端的
+   * `traders.strategy_id` 改成可空（迁移后 `ON DELETE SET NULL`），并在创建时
+   * **主动拒绝**带策略的 AI 托管请求：
+   *
+   *   if (mode === 'ai_managed' && requestedStrategyId !== null)
+   *     throw new Error('智能托管模式不引用任何策略 —— 请不要为它选择策略。');
+   *
+   * 而前端**一直在传数字**（下拉框里那个 `#9`）—— 于是 **AI 托管模式下创建机器人
+   * 必定失败**，错误文字就是上面那句。用户 2026-10-03 撞上的正是它：
+   * 他现有的机器人是解耦**之前**建的，而那是他第一次用界面创建 AI 托管机器人。
+   *
+   * 类型放宽成可空，**提交处按 `mode` 决定传什么**（见 `TraderModals.tsx` 的 `submit`）。
+   */
+  strategyId: number | null;
   cycleIntervalMinutes: number;
   /**
    * Optional on purpose: omitting it (or sending 0) makes the server read the
@@ -493,8 +514,9 @@ export interface TraderInput {
   /**
    * 运行模式。
    *
-   * `'ai_managed'` 时参数由 AI 智能体自己设定并持续调整，**策略参数被忽略** ——
-   * 所以那种情况下 `strategyId` 仍然要传（服务端是 NOT NULL），但不起作用。
+   * `'ai_managed'` 时参数由 AI 智能体自己设定并持续调整，**策略参数被彻底忽略** ——
+   * 此时 `strategyId` 必须传 `null`（见上面那条字段说明：服务端会拒绝带策略的请求）。
+   * `'strategy'` 时 `strategyId` 必须是一个真实存在的策略 id。
    */
   mode?: TraderMode;
 }
