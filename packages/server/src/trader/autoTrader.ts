@@ -7647,6 +7647,22 @@ reduceQuantity: null,
         stopOrderId: null as string | null,
         tpOrderId: null as string | null,
         openReasoning: decision.reasoning,
+        /*
+         * ⚠️ **入场单号必须落在这里**（2026-10-03 实测抓到）。
+         *
+         * 这一行原来没有 `entryOrderId`，于是市价开的仓位在 `positions` 里
+         * `entry_order_id` 是 NULL。而总账校验的"未平仓持有成本"恰恰是**按它**
+         * 去 `orders.fee` 求和的（`openEntryCosts(traderId, entryOrderIds)`）——
+         * 取不到 ⇒ 那一项恒为 0 ⇒ 「账目与交易所对不上」每轮报一次**假差额**。
+         *
+         * 实测现场：`#286`（ZECUSDT 市价空）`entry_order_id = NULL`，而它对应的
+         * 订单 `#1010` 明明记着 `fee = 0.0393888` —— 而 `ledger_check` 的
+         * `openEntryFees = 0`、`gap = 0.039389`，**与那笔手续费一字不差**。
+         *
+         * （限价单那条路径（`promotePendingEntry`）本来就有单号，所以这个洞只在
+         * 市价开仓上；两处都写才是对的。）
+         */
+        entryOrderId: filled.id,
       };
       positionStore.insert(openPosition);
 
