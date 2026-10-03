@@ -42,7 +42,7 @@ import {
   tradeCosts,
   type PnlCosts,
 } from './PnlBreakdown';
-import { BALANCE_LABEL, fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, marginModeLabel, orderMarginMode, pnlColor, symbolTone } from '../lib/format';
+import { BALANCE_LABEL, fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, marginModeLabel, orderMarginMode, pnlColor, symbolTone, symbolToneWithAvoidance } from '../lib/format';
 
 /* -------------------------------------------------------------------------- */
 /*  Row caps                                                                   */
@@ -825,6 +825,15 @@ export function PositionsTable({
    */
   const showSpinner = useDelayedSpinner(query.loading && query.updatedAt === null && positions.length === 0);
 
+  /*
+   * ⚠️ **配色必须在所有 `return` 之前算**（Hooks 规则：每次渲染的调用顺序必须相同）。
+   *
+   * 原来它写在下面 `positions.length === 0` 那个 early return **之后** ——
+   * `eslint-plugin-react-hooks` 直接报 `rules-of-hooks`。
+   * 空仓时"少调一个 Hook"会让 React 的状态槽位错位，那是真正的 bug 而不只是规范问题。
+   */
+  const symbolTones = useSymbolTones(positions.slice(0, MAX_ROWS).map((p) => p.symbol));
+
   /* 同 `OrdersTable`：**没成功拿到过数据时不能断言"暂无"** —— 那是一个结论。 */
   if (query.updatedAt === null && positions.length === 0) {
     if (showSpinner) return <Spinner3 label="正在加载持仓" />;
@@ -869,7 +878,7 @@ export function PositionsTable({
                 <tr key={position.id} className="row-hover align-top">
                   <td className="td">
                     <div className="flex items-center gap-2">
-                  <SymbolCell symbol={position.symbol} onSelect={onSelectSymbol} />
+                  <SymbolCell symbol={position.symbol} onSelect={onSelectSymbol} tone={symbolTones.get(position.symbol)} />
                       <SideBadge side={position.side} />
                       <Badge tone="muted" title="该持仓在交易所使用的杠杆倍数。">
                         {position.leverage}x
@@ -1020,17 +1029,23 @@ const TERMINAL_STATUSES = new Set([
  *
  * ## 颜色是辅助，不是信息
  *
- * 色相由 `symbolTone` 按名称哈希得到：同一个币种永远是同一个颜色。
+ * 色相由 `symbolTone` 按名称哈希得到：同一个币种**在没有冲突时**永远是同一个颜色。
  * 但它只是帮眼睛定位，**身份仍然由文字承担** —— 所以颜色不参与任何判断，也不表示涨跌。
+ *
+ * ⚠️ **`tone` 这个可选 prop 存在的原因（2026-10-03）**：一屏最多 8 条，而调色板只有
+ * 10 个颜色 —— 纯哈希仍有约 98% 的概率撞出一对同色。所以表格用
+ * `useSymbolTones()` 先算一份"同屏不重复"的映射，再把它传进来。
  */
 function SymbolCell({
   symbol,
   onSelect,
+  tone: toneOverride,
 }: {
   symbol: string;
   onSelect?: (symbol: string) => void;
+  tone?: string;
 }) {
-  const tone = symbolTone(symbol);
+  const tone = toneOverride ?? symbolTone(symbol);
   /*
    * 没有回调时退化成纯文本：表格被用在不需要跳转的地方时（比如策略体检报告），
    * 一个点不动的按钮比一段文字更糟。
@@ -1197,6 +1212,42 @@ function OrderSideCell({ order }: { order: OrderRecord }) {
       {long ? '买入' : '卖出'}
     </span>
   );
+}
+
+/**
+ * 一张表的**同屏不重复配色**：按行序给每个币种分配一个还没被用过的颜色。
+ *
+ * 用户 2026-10-03 的原话：「**你这记录页也就最多显示 8 条，那是不是说最多找
+ * 10 个颜色，循环使用就能完美解决这个问题了呢？**」——他的方向是对的，这一层
+ * 就是把"循环使用"里会撞的那部分补掉。
+ *
+ * ## 为什么光靠哈希不行
+ *
+ * 调色板 10 个颜色、一屏 8 条，按生日问题**至少有一对同色的概率约 98%**。
+ * 所以这里按行序做一次贪心：每个币种从哈希给的位置起，找**第一个这一屏还没用过**
+ * 的颜色。10 > 8，所以一定找得到。
+ *
+ * ## 代价（写清楚，因为它是取舍而不是缺陷）
+ *
+ * 同一个币种的颜色**取决于同屏还有谁**，所以它在 A 页可能是蓝、在 B 页可能是青。
+ * 这是"同屏分得清"与"翻页颜色不变"之间必须选一个，而**用户看的正是同一屏里
+ * 这几行的区分度** —— 认错"这一行和那一行是不是同一个币"才是真正的误读来源。
+ *
+ * 表是分页/流式的，所以这里对**已经渲染出来的这一批**去重；同一批里互不相同，
+ * 那就够了。
+ */
+function useSymbolTones(symbols: readonly string[]): Map<string, string> {
+  return useMemo(() => {
+    const used = new Set<string>();
+    const map = new Map<string, string>();
+    for (const symbol of symbols) {
+      if (map.has(symbol)) continue;
+      const tone = symbolToneWithAvoidance(symbol, used);
+      used.add(tone);
+      map.set(symbol, tone);
+    }
+    return map;
+  }, [symbols]);
 }
 
 function LeverageCell({ order }: { order: OrderRecord }) {  const leverage = order.leverage;
@@ -1368,6 +1419,9 @@ export function OrdersTable({
 }) {
   const all: OrderRecord[] = paging.rows;
   const orders = onlyOpen ? all.filter(isOpenOrder) : all;
+  /* 同屏不重复的配色 —— 见 `useSymbolTones()`（探针行也在 `paging.rows` 里，
+     但它已经被 `isOpenOrder` 过滤掉了，不会占色）。 */
+  const symbolTones = useSymbolTones(orders.map((o) => o.symbol));
 
   /*
    * ⚠️ **"暂无"是一个结论，结论要有依据 —— 数据还在路上时不能说。**
@@ -1530,7 +1584,7 @@ export function OrdersTable({
                 // `useLayoutEffect`）：新订单插到顶部时要靠它量出"我正在读的那一行"被推了多远。
                 <tr key={order.id} className="row-hover" data-row-id={order.id}>
                   <td className="td num text-ink-faint">{fmtDateTime(order.createdAt)}</td>
-                    <td className="td font-semibold"><SymbolCell symbol={order.symbol} onSelect={onSelectSymbol} /></td>
+                    <td className="td font-semibold"><SymbolCell symbol={order.symbol} onSelect={onSelectSymbol} tone={symbolTones.get(order.symbol)} /></td>
                   <td className="td">
                     <Badge tone={purposeTone(order.purpose)}>{orderPurposeLabel(order.purpose)}</Badge>
                   </td>
@@ -1769,6 +1823,8 @@ export function TradesTable({
 
   // 屏幕上要渲染的全部行 = 轮询的第一页 + 已经翻出来的更早的页 + 推送进来的实时行（按 id 去重）。
   const trades: TradeRecord[] = paging.rows;
+  /* 同屏不重复的配色 —— 见 `useSymbolTones()`。 */
+  const symbolTones = useSymbolTones(trades.map((t) => t.symbol));
 
   /* 同 `OrdersTable`：只有"从没成功加载过"才显示转圈；再延迟一层，避免出现又消失。 */
   const showSpinner = useDelayedSpinner(query.loading && query.updatedAt === null && trades.length === 0);
@@ -1888,7 +1944,7 @@ export function TradesTable({
                 >
                   <td className="td font-semibold text-ink-hi">
                     <div className="flex items-center gap-1.5">
-                      <SymbolCell symbol={trade.symbol} onSelect={onSelectSymbol} />
+                      <SymbolCell symbol={trade.symbol} onSelect={onSelectSymbol} tone={symbolTones.get(trade.symbol)} />
                     </div>
                   </td>
                   <td className="td whitespace-nowrap">

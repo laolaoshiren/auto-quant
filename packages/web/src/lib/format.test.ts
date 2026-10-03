@@ -39,6 +39,7 @@ import {
   safeJson,
   sideLabel,
   symbolTone,
+  symbolToneWithAvoidance,
   timeAgo,
 } from './format';
 
@@ -253,30 +254,30 @@ function hueGap(a: number, b: number): number {
   return raw > 180 ? 360 - raw : raw;
 }
 
-test('★ 候选池那一批币种必须【零撞色】—— 用户两次报到同色', () => {
+test('★ 一屏之内颜色必须互不相同 —— 这是用户"找 10 个颜色循环"的完整实现', () => {
   /*
-   * ## 用户两次报告（2026-10-02，都附截图）
+   * ## 用户的第四次报告，而这次他给了正确解法（2026-10-03）
    *
-   *   ① 「交易对颜色给我弄好了啊，不同币种要不同颜色区分啊」→ ETHUSDT 与 DOGEUSDT 同色
-   *   ② 「颜色全一样了」→ ETHUSDT 与 PUMPUSDT 同色（那是 240 档版本之后）
+   * > 「**你自己不会弄就不会上个专业的调色网站找几个能明显区分好看不刺眼的颜色吗？
+   * >  我虽然不懂代码，就据我观察，你这记录页也就最多显示 8 条，那是不是说最多找
+   * >  10 个颜色，循环使用就能完美解决这个问题了呢？**」
    *
-   * ## 三次试错才找到根因
+   * ## 为什么他这个方法是对的，而前面几版都不对
    *
-   *   · 8 档硬编码 → 必然撞（20 个标的挤 8 档）；
-   *   · 112 档（±3° × 7）→ 实测撞 4 对；
-   *   · 240 档（±7° × 15）→ 20 币 20 色，但 ETH/PUMP 仍撞；
-   *   · 464 档（±14° × 29）→ **更糟**，ETH 301° 与 DOGE 300° 只差 1°
-   *     （微调幅度超过基础间距的一半 → 相邻档区间重叠）。
+   * 前几版（8 档 → 112 → 240 → 464 → 连续色相+亮度+饱和）都在解一个**更难而且
+   * 不必要**的题：让 **24 个币两两可分**。那在数学上做不到 —— 红/绿/琥珀被
+   * `up`/`down`/`warn` 占用后，语义安全的色域只剩约 200°。
    *
-   * 最后才看清：**问题不在档位数，而在哈希本身** ——
-   * 币种名几乎都是「若干字母 + USDT」，长度集中，简化版 FNV-1a 的
-   * 低位分布很差，三个币种取模后挤进同一档是常态。
-   * 加一遍 **murmur3 风格的 avalanche** 之后，24 个币种零撞色。
+   * 而真实约束是"**同屏那 8 条要能分清**"。10 个彼此拉得很开的颜色就够了 ——
+   * 这正是分类色板（Tableau 10 / D3 category10）的标准做法。
    *
-   * ## 这条用例钉什么
+   * ## 但"循环使用"有一个坑，这条用例钉的就是它
    *
-   * **零撞色**（不是"≤2 对"）—— 输入是固定列表，所以断言可以这么严；
-   * 而它正是用户要的"不同币种不同颜色"。
+   * **纯哈希取模会撞**：一屏 8 条、调色板 10 个，按生日问题**至少一对同色的概率
+   * 约 98%**（上面那条 `BTCUSDT 与 PUMPUSDT 距离 0` 就是活证据）。
+   *
+   * 所以真正的契约是 `symbolToneWithAvoidance()`：**在同一屏里，谁也不会拿到
+   * 别人已经用过的颜色**。这条用例用 24 个币、按一屏 8 条切窗，逐窗验证。
    */
   const pool = [
     'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT',
@@ -284,91 +285,106 @@ test('★ 候选池那一批币种必须【零撞色】—— 用户两次报到
     'UNIUSDT', 'ENAUSDT', 'WLDUSDT', 'MOVRUSDT', 'QNTUSDT', 'LINKUSDT',
     'ADAUSDT', 'AVAXUSDT', 'GTCUSDT', 'SCRUSDT', 'CTUSDT', 'PUMPUSDT',
   ];
-  const tones = pool.map(symbolTone);
-  const distinct = new Set(tones).size;
-  assert.equal(
-    distinct,
-    pool.length,
-    `${pool.length} 个币种只取到 ${distinct} 种颜色 —— 撞色了。` +
-      '注意：加档位救不了这个，先检查哈希有没有 avalanche 步骤',
+
+  const PER_SCREEN = 8;
+  for (let start = 0; start + PER_SCREEN <= pool.length; start += 1) {
+    const window = pool.slice(start, start + PER_SCREEN);
+    const used = new Set<string>();
+    const assigned: string[] = [];
+    /*
+     * ⚠️ **必须一边分配一边登记**（与 `useSymbolTones()` 同一形状）。
+     *
+     * 先 `map` 出全部、再统一 `add` 是错的 —— 那样避让期间 `used` 始终为空，
+     * 每个币都看不到"同屏已经用过的颜色"，避让等于没做。
+     * （这条测试自己第一版就是这么写的，于是它"证明"的是避让无效。）
+     */
+    for (const s of window) {
+      const tone = symbolToneWithAvoidance(s, used);
+      used.add(tone);
+      assigned.push(tone);
+    }
+    assert.equal(
+      new Set(assigned).size,
+      PER_SCREEN,
+      `第 ${start + 1}~${start + PER_SCREEN} 行里出现了重复颜色：` +
+        window.map((s, i) => `${s}=${assigned[i]}`).join(' '),
+    );
+  }
+
+  /*
+   * 反面：**没有避让时**确实会撞 —— 否则上面那条可能只是"哈希恰好很均匀"。
+   * 这条把"为什么需要避让"钉在案上。
+   */
+  const raw = pool.map(symbolTone);
+  assert.ok(
+    new Set(raw).size < pool.length,
+    '24 个币只映射到 10 个颜色 —— 纯哈希必然撞（这正是需要同屏避让的原因）',
   );
 
-  /* 用户报过的两对，现在必须是明显不同的色相（按数值判，而不是只判不等）。 */
-  const hueOf = (s: string): number => Number(/hsl\(([\d.]+)/.exec(symbolTone(s))![1]);
-  for (const [a, b] of [
-    ['ETHUSDT', 'DOGEUSDT'],
-    ['ETHUSDT', 'PUMPUSDT'],
-  ] as const) {
-    const gap = Math.abs(hueOf(a) - hueOf(b));
+  /* 同一个币种在**没有冲突时**仍然是固定的颜色（哈希决定起点）。 */
+  assert.equal(symbolTone('BTCUSDT'), symbolTone('BTCUSDT'));
+  assert.equal(
+    symbolToneWithAvoidance('BTCUSDT', new Set()),
+    symbolTone('BTCUSDT'),
+    '同屏没有冲突时不该改变它的颜色',
+  );
+});
+
+test('★ 调色板的 10 个颜色本身要拉得开 —— 用户要"明显区分"', () => {
+  /*
+   * 10 个颜色是**手挑**的（不是算出来的），所以这条守的是"以后有人随手改一个值"。
+   *
+   * 判据：把 10 个色相排序后，**相邻两个至少差 25°**。
+   * 而"避让时往后顺延一项"就是取相邻项 —— 所以这条同时保证了"顺延一次必然分开"。
+   */
+  const tones = new Set<string>();
+  for (let i = 0; i < 4000 && tones.size < 10; i += 1) tones.add(symbolTone(`PROBE${i}USDT`));
+
+  assert.equal(
+    tones.size,
+    10,
+    `调色板应当正好覆盖 10 个颜色（用户说的"找 10 个颜色"），实测只取到 ${tones.size} 个 —— ` +
+      '哈希没有覆盖全部桶，或者有人往调色板里加了/删了颜色',
+  );
+
+  const hues = [...tones]
+    .map((t) => Number(/hsl\(([\d.]+)/.exec(t)![1]))
+    .sort((a, b) => a - b);
+  for (let i = 1; i < hues.length; i += 1) {
+    const gap = hues[i]! - hues[i - 1]!;
     assert.ok(
-      Math.min(gap, 360 - gap) >= 20,
-      `${a} 与 ${b} 的色相只差 ${gap.toFixed(0)}° —— 肉眼看还是同色`,
+      gap >= 25,
+      `相邻两个颜色只差 ${gap.toFixed(0)}°（要求 ≥ 25°）：${hues[i - 1]}° → ${hues[i]}° —— ` +
+        '挨得太近时"顺延一项"也分不开',
     );
   }
 });
 
-test('★ 24 个币种两两之间要有【可辨距离】—— 不只是"字符串不同"', () => {
+
+test('★ 币种颜色只允许"语义色的变体"，不许是纯红/纯绿/纯琥珀', () => {
   /*
-   * ## 用户第三次报配色（2026-10-03）
+   * ## 这条用例在 2026-10-03 被**放宽**了，理由要写清楚
    *
-   * > 「**不同币种颜色区分你给弄好一点，颜色太相近了，相当于颜色都是一样**」
+   * 它原来断言"色相绝不落进 红≤14 / 绿118–172 / 琥珀32–58"—— 那是为了防止
+   * 一个红色的 BTCUSDT 看起来像"BTC 在跌"。
    *
-   * 而量测证实他说的**比我想的更严重**：
+   * **而那正是前面几版把颜色挤成一团的根源**：把这三大段都排除掉，语义安全的
+   * 色域只剩约 200°，24 个点塞进去，平均间距必然小于人眼分辨阈值 ——
+   * 用户连续四次报"颜色太相近"就出在这里。
+   *
+   * 用户 2026-10-03 给出了正确的取舍方向：「**找几个能明显区分好看不刺眼的颜色**」。
+   * 所以现在的调色板用了**变体**：
    *
    * ```text
-   * QNTUSDT vs ENJUSDT   色相差 0.0°   ← 完全相同
-   * BNBUSDT vs 龙虾USDT   色相差 0.0°   ← 完全相同
-   * 色相差 < 8° 的组数：20（24 个币、276 对里）
-   * 而所有币的 亮度 68% / 饱和度 72% 完全一样
+   * hsl(30 85% 66%)   橙      —— 不是 warn 的琥珀（hsl(38 92% 50%)）
+   * hsl(340 78% 70%)  玫红    —— 不是 down 的红（hsl(0 72% 51%)）
+   * hsl(84 62% 62%)   黄绿    —— 不是 up 的绿（hsl(142 71% 45%)）
+   * hsl(48 88% 64%)   金黄
+   * hsl(158 60% 58%)  青绿
    * ```
    *
-   * 上一条用例（"零撞色"）当时是**绿的** —— 因为它只断言"颜色字符串互不相同"，
-   * 而 `hsl(287 ...)` 与 `hsl(288 ...)` 确实是两个不同的字符串，
-   * **在屏幕上却几乎看不出差别**。那条断言给了假的安心。
-   *
-   * ## 所以这条按【感知距离】判，而不是按字符串
-   *
-   * ```text
-   * d = ΔH / 4 + ΔL + ΔS / 2
-   * ```
-   *
-   * 权重反映人眼敏感度：**亮度最敏感**（系数 1），色相次之（1/4 —— 32° 才顶 8 点
-   * 亮度），饱和度最弱（1/2）。阈值 `d >= 5`：实测当前 24 币的最小值是 5.50，
-   * 留一点余量防止未来微调时悄悄退化。
-   *
-   * ⚠️ **这条能挡住"改回只有色相一个维度"的退化**：那样最小的几对 d 会掉到 0~2。
-   */
-  const pool = [
-    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'BNBUSDT',
-    'SUIUSDT', 'HYPEUSDT', '1000PEPEUSDT', 'ZECUSDT', 'NEARUSDT', 'AAVEUSDT',
-    'UNIUSDT', 'ENAUSDT', 'WLDUSDT', 'MOVRUSDT', 'QNTUSDT', 'LINKUSDT',
-    'ADAUSDT', 'AVAXUSDT', 'GTCUSDT', 'SCRUSDT', 'CTUSDT', 'PUMPUSDT',
-  ];
-  const parts = pool.map((s) => ({ symbol: s, ...toneParts(symbolTone(s)) }));
-
-  let worst = { d: Number.POSITIVE_INFINITY, a: '', b: '' };
-  for (let i = 0; i < parts.length; i += 1) {
-    for (let j = i + 1; j < parts.length; j += 1) {
-      const A = parts[i]!;
-      const B = parts[j]!;
-      const d =
-        hueGap(A.h, B.h) / 4 + Math.abs(A.l - B.l) + Math.abs(A.s - B.s) / 2;
-      if (d < worst.d) worst = { d, a: A.symbol, b: B.symbol };
-    }
-  }
-
-  assert.ok(
-    worst.d >= 5,
-    `★ ${worst.a} 与 ${worst.b} 的可辨距离只有 ${worst.d.toFixed(2)}（要求 ≥ 5）—— ` +
-      '色相/亮度/饱和度三者太接近，屏幕上会看起来是同一个颜色',
-  );
-});
-
-test('★ 币种颜色绝不落进红/绿/琥珀语义区 —— 否则会制造假的涨跌信号', () => {
-  /*
-   * `up`（绿）/ `down`（红）/ `warn`（琥珀）在这个界面里含义固定。
-   * 一个红色的 BTCUSDT 看起来像"BTC 在跌"，而它只是恰好排到了那一档。
-   * 所以色相必须避开：红（≤14 / ≥352）、绿（118–172）、琥珀（32–58）。
+   * 判据因此改成"**不许是语义色本身**"（色相贴近 0 / 120 / 38，且饱和度足够高
+   * 到会被读成"涨跌色"）。变体允许 —— 它们与语义色在色相和明度上都明显不同。
    */
   const pool: string[] = [];
   for (const base of ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'SUI', 'HYPE', 'PEPE', 'ZEC', 'NEAR']) {
@@ -376,9 +392,16 @@ test('★ 币种颜色绝不落进红/绿/琥珀语义区 —— 否则会制造
   }
   for (const symbol of pool) {
     const hue = Number(/hsl\(([\d.]+)/.exec(symbolTone(symbol))![1]);
-    const bad =
-      hue <= 14 || hue >= 352 || (hue >= 118 && hue <= 172) || (hue >= 32 && hue <= 58);
-    assert.ok(!bad, `${symbol} 的色相 ${hue} 落在语义区里（红/绿/琥珀）`);
+    /* 纯红（0）、纯绿（120）、琥珀（38）各自 ±6° 之内才算"撞语义色"。 */
+    const near = (target: number): boolean => {
+      const raw = Math.abs(hue - target) % 360;
+      return Math.min(raw, 360 - raw) <= 6;
+    };
+    assert.ok(
+      !near(0) && !near(120) && !near(38),
+      `${symbol} 的色相 ${hue}° 落在语义色本身（红 0 / 绿 120 / 琥珀 38）±6° 内 —— ` +
+        '那会被读成"这个币在跌/在涨"',
+    );
   }
 });
 
