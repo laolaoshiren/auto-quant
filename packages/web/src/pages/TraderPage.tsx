@@ -17,6 +17,7 @@ import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useRunOnce, useAgentReview } from '../lib/actions';
+import { pickPositions } from '../lib/pickPositions';
 import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import { TraderStatusBadge } from '../components/Badges';
 import { PageShell, Metric } from '../components/shell';
@@ -386,7 +387,7 @@ export function TraderPage() {
    * 更荒谬的是：`accountQuery` **已经拿到了交易所的真实持仓**，只是没人用它。
    * 所以这里改成实时优先 —— 它回答的正是"**现在**交易所那边有什么"。
    */
-  const positions = accountView?.positions ?? live?.positions ?? [];
+  const positions = pickPositions(accountView?.positions, live?.positions);
 
   /*
    * 行情图表当前显示的币种。

@@ -43,6 +43,7 @@ import {
   type PnlCosts,
 } from './PnlBreakdown';
 import { BALANCE_LABEL, fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, marginModeLabel, orderMarginMode, pnlColor, symbolTone, symbolToneWithAvoidance } from '../lib/format';
+import { pickPositions } from '../lib/pickPositions';
 
 /* -------------------------------------------------------------------------- */
 /*  Row caps                                                                   */
@@ -815,7 +816,29 @@ export function PositionsTable({
     deps: [traderId],
   });
 
-  const positions: PositionView[] = live ?? query.data ?? [];
+  /*
+   * ⚠️ **实时查询优先，WebSocket 镜像只作兜底** —— 这个顺序在 2026-10-04 之前是反的。
+   *
+   * 这里原来是 `live ?? query.data ?? []`（**镜像优先**），于是在
+   * **机器人停止之后** `live` 是死的：WebSocket 不再推送，它永远停在停止那一刻。
+   * 用户凌晨打开页面就看到了**幽灵持仓**：
+   *
+   * > 「当前持仓这两笔，我都手动点了平仓（页面显示成功）但是我刷新页面后持仓又出现，
+   * >  又点击平仓后提示"本地没有 DOGEUSDT 的持仓"」
+   *
+   * 那两笔其实在他更早的时候（20:35）就真的平掉了 —— 交易所那边是空仓，
+   * 实时查询返回的就是空。
+   *
+   * 而 `TraderPage` 里那份 `positions`（卡片与 tab 的计数用它）**一直是实时优先的**，
+   * 于是同一页上出现了自相矛盾：**「当前持仓 0」旁边摆着两行仓位**。
+   * 两处必须同一个顺序 —— 那也正是那个文件里早就写下的原则
+   * （"实时查交易所，而不是 WebSocket 推送的本地镜像：后者在 socket 断开时给的是过期数据"）。
+   *
+   * 镜像仍然保留作兜底：服务刚重启、或页面刚打开而 HTTP 还没回来那几百毫秒里，
+   * 它是唯一的数据源。但它**永远不能盖过**已经拿到的实时结果 —— **哪怕是空数组**，
+   * 因为空数组正是"真的空仓"这个结论。
+   */
+  const positions: PositionView[] = pickPositions(query.data, live);
 
   /*
    * 同 `OrdersTable` 的理由：**光看 `loading` 会闪**。
