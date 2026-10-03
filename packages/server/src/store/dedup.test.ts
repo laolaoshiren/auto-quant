@@ -267,3 +267,105 @@ test('不同单号的两个回合不许被合并 —— 判据不是"永远匹�
   const bId = Math.max(...rows.map((r) => r.id));
   assert.equal(found, bId, '必须命中单号相同的 B，而不是靠价格/数量猜到的 A');
 });
+
+test('★ 一个腿的【任一】出场单号已记账 = 同一段成交，不能再插一行', () => {
+  /*
+   * ## 用户 2026-10-03 的第二次报告（同一个数字，同一种事故）
+   *
+   * 他在主账户上新建了机器人 `#10`，页面上「交易盈亏 +1.43」而钱包只少了 0.09 ——
+   * **账目虚高 1.52 USDT**。而这份文件开头记着的那次报告，数字是 **1.51**。
+   *
+   * ## 为什么上一轮的修复没挡住它
+   *
+   * 上一轮加的是"**平仓单号相同就是同一个回合**"（上面那条用例）—— 那条判据是对的，
+   * 但它有一个前提：**两边都拿得到单号**，而且**切法一致**。
+   *
+   * 这次两条都不成立。真实成交（MANAUSDT）：
+   *
+   * ```text
+   * 04:08:16  BUY  336 @ 0.104          ← 一次开仓 336 张
+   * 05:27:06  SELL 168 @ 0.11074  realized=+1.132320   orderId=14043907060
+   * 05:35:22  SELL 168 @ 0.10643  realized=+0.408240   orderId=14044221042
+   * ```
+   *
+   *   · **运行期**按**每次平仓**记一笔：`#191`(168, 单号 14043907060)
+   *     与 `#192`(168, **单号 null** —— 止损触发，没拿到成交单号)。
+   *   · **对账**按**开仓到清仓**合成一个腿：`#193`(336, 单号 = **最后一个** 14044221042)。
+   *
+   * 于是三条启发式判据全部落空（数量 336 ≠ 168、出场价加权 ≠ 单笔、
+   * `closed_at` 差 5 秒超窗口），而"单号相同"也查不到 —— 因为账上那笔的单号是
+   * **第一笔**的，而对账只带了**最后一笔**的。
+   *
+   * ## 这条用例钉住的新判据
+   *
+   * 一个腿带**全部**出场单号，**任意一个**已在账本里 ⇒ 这段成交已经记过。
+   * 这就是"只修正、不重复插入"该有的语义，也是唯一不受"切法"影响的身份。
+   */
+  traderId = seedTrader();
+
+  /* 运行期：两笔部分平仓。第一笔有单号，第二笔（止损）没拿到 —— 与实盘一模一样。 */
+  const first = book({
+    quantity: 168,
+    entryPrice: 0.104,
+    exitPrice: 0.11074,
+    grossPnl: 1.13232,
+    exitOrderId: '14043907060',
+    closeReason: 'manual_partial',
+  });
+  book({
+    quantity: 168,
+    entryPrice: 0.104,
+    exitPrice: 0.10643,
+    grossPnl: 0.40824,
+    exitOrderId: null,
+    closeReason: 'stop_loss',
+    /* 平仓时刻与对账那条差 5 秒 —— 刻意让 2 秒窗口落空。 */
+    closedAt: '2026-09-22T17:37:22.018Z',
+  });
+
+  /* 对账：把整段看成一个 336 的腿，带两个出场单号。 */
+  const found = tradeStore.findDuplicate({
+    traderId,
+    symbol: 'HEDGEUSDT',
+    quantity: 336,
+    entryPrice: 0.104,
+    exitPrice: 0.108585,
+    openedAt: '2026-09-22T16:59:47.151Z',
+    closedAt: '2026-09-22T17:37:17.018Z',
+    entryOrderId: '14041749974',
+    exitOrderId: '14044221042',
+    exitOrderIds: ['14043907060', '14044221042'],
+  });
+
+  assert.equal(
+    found,
+    first,
+    '★ 336 的腿含 168 那笔的单号 —— 必须判定"这段成交已经记过"，否则账上凭空多出 1.5153',
+  );
+  assert.equal(tradeStore.list(traderId, 10).length, 2, '前提：运行期那两笔仍在账上');
+});
+
+test('没有交集单号时仍然按启发式判断 —— 新判据不能吞掉真实成交', () => {
+  /*
+   * 反向守卫：新判据必须**只在单号真的相交时**命中。
+   * 两个回合各有自己的单号，即便数量/价格巧合也不能被合并 ——
+   * 那会把两笔真实成交记成一笔，比重复更严重。
+   */
+  traderId = seedTrader();
+  const a = book({ exitOrderId: 'MANA-A' });
+  book({ exitOrderId: 'MANA-B', closedAt: '2026-09-22T17:37:22.018Z' });
+
+  const found = tradeStore.findDuplicate({
+    traderId,
+    symbol: 'HEDGEUSDT',
+    quantity: 336,
+    entryPrice: 0.104,
+    exitPrice: 0.108585,
+    openedAt: '2026-09-22T16:59:47.151Z',
+    closedAt: '2026-09-22T18:00:00.000Z',
+    exitOrderIds: ['NOT-IN-BOOK-1', 'NOT-IN-BOOK-2'],
+  });
+
+  assert.equal(found, null, '单号没有交集、启发式也对不上，必须返回 null 而不是硬凑一个');
+  assert.notEqual(found, a);
+});

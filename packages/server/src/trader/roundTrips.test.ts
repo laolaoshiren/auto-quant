@@ -239,3 +239,80 @@ test('a row with no recorded entry order keys separately from an identified one'
     roundTripQueryKey({ symbol: 'POWERUSDT', quantity: 131, entryPrice: 0.18064 }),
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  一个腿的【全部】出场单号 —— 判重的身份                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **真实成交**（2026-10-03 从主账户 `#10` 拉下来的 MANAUSDT）。
+ *
+ * 这段成交造成了实盘账目虚高 **1.5153 USDT**：一个 336 张的开仓分两次平掉，
+ * 运行期按每次平仓各记了一笔（`#191` 168 + `#192` 168），而对账把整段看成
+ * **一个 336 的腿**又记了一笔（`#193`，pnl 恰好等于前两笔之和）。
+ *
+ * 判重失败的原因：三条启发式判据全部落空（数量 336 vs 168、出场价加权 vs 单笔、
+ * `closed_at` 差 5 秒超窗口），而 `#192`（止损触发）的 `exit_order_id` 是 null，
+ * 连"单号相同"那条确定性判据也查不到。
+ */
+const MANA: BinanceUserTrade[] = [
+  fill({
+    id: 1,
+    orderId: 14041749974,
+    time: T0,
+    symbol: 'MANAUSDT',
+    side: 'BUY',
+    qty: '336',
+    price: '0.104',
+    commission: '0.0069888',
+  }),
+  fill({
+    id: 2,
+    orderId: 14043907060,
+    time: T0 + 4_770_000,
+    symbol: 'MANAUSDT',
+    side: 'SELL',
+    qty: '168',
+    price: '0.11074',
+    realizedPnl: '1.132320',
+    commission: '0.009302',
+  }),
+  fill({
+    id: 3,
+    orderId: 14044221042,
+    time: T0 + 5_226_000,
+    symbol: 'MANAUSDT',
+    side: 'SELL',
+    qty: '168',
+    price: '0.10643',
+    realizedPnl: '0.408240',
+    commission: '0.008940',
+  }),
+];
+
+test('★ 一个腿必须带出【全部】出场单号 —— 只看最后一个会漏掉运行期已记的那一笔', () => {
+  /*
+   * 这段成交在交易所侧是"一次开仓、两次部分平仓"，所以重建出**一个** 336 的腿。
+   * 而它的两个出场单号都必须被带出来：运行期记账时用的可能是**第一笔**的单号，
+   * 只看"最后一个"（`exitOrderId`）就查不到它 —— 于是重复插入。
+   */
+  const trips = reconstructRoundTrips(MANA);
+  assert.equal(trips.length, 1, '一次开仓 + 两次平仓 = 一个腿（`reconstructRoundTrips` 的口径）');
+
+  const trip = trips[0]!;
+  assert.equal(trip.quantity, 336, '腿的数量是开仓量，不是单次平仓量');
+  assert.deepEqual(
+    trip.exitOrderIds,
+    ['14043907060', '14044221042'],
+    '★ 两次部分平仓的单号都要在 —— 判重与"运行期按次记账"的交集就在这两笔上',
+  );
+  assert.equal(trip.exitOrderId, '14044221042', '历史字段仍保留最后一个（旧调用方依赖它）');
+
+  /* 这个腿的毛盈亏恰好等于运行期那两笔之和 —— 重复记账就是这么被认出来的。 */
+  assert.ok(Math.abs(trip.grossPnl - (1.13232 + 0.40824)) < 1e-9);
+});
+
+test('没有平仓成交的腿不产生出场单号（半开仓不该被当成回合）', () => {
+  const onlyEntry = [MANA[0]!];
+  assert.deepEqual(reconstructRoundTrips(onlyEntry), [], '仓位没回到零就没有回合');
+});

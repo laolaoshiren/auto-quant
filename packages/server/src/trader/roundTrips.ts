@@ -63,7 +63,47 @@ export interface ReconstructedTrade {
   closedAt: string;
   holdMinutes: number;
   entryOrderId: string;
+  /**
+   * 最后一个出场成交的交易所单号（历史字段，保留给旧调用方）。
+   *
+   * ⚠️ **它不足以判重** —— 一个回合可以有**多次**部分平仓，而这个字段只留最后一次。
+   * 见 `exitOrderIds`。
+   */
   exitOrderId: string;
+  /**
+   * **这个回合里的每一个出场成交单号**（按时间顺序，含部分平仓）。
+   *
+   * ## 为什么必须有它（2026-10-03 实盘事故）
+   *
+   * 用户在主账户上跑 `#10`，账目虚高 **1.52 USDT**。定位到一笔重复：
+   *
+   * ```text
+   * 交易所真实成交（MANAUSDT）:
+   *   04:08:16  BUY  336 @ 0.104          ← 一次开仓 336 张
+   *   05:27:06  SELL 168 @ 0.11074  realized=+1.132320
+   *   05:35:22  SELL 168 @ 0.10643  realized=+0.408240
+   *
+   * 运行期记了两笔（每次平仓一笔）:
+   *   #191 qty=168 pnl=1.132320 exit_order_id=14043907060
+   *   #192 qty=168 pnl=0.408240 exit_order_id=null      ← 止损触发，没拿到单号
+   *
+   * 对账又记了一笔（把整段看成"一个 336 的回合"）:
+   *   #193 qty=336 pnl=1.540560 = #191.pnl + #192.pnl   ← 凭空多出来的
+   * ```
+   *
+   * 三条判据全部落空：数量 `336 ≠ 168`、出场价不同（加权 vs 单笔）、
+   * `closed_at` 差 5 秒（超出 2 秒窗口），而 `#192` 的 `exit_order_id` 是 null，
+   * 所以"单号相同就是同一回合"那条确定性判据**也查不到**。
+   *
+   * **根因是两条路对同一段成交的"切法"不同**：
+   *
+   *   · 运行期按**每次平仓**记一笔（本地持仓行消失一次就记一次）；
+   *   · `reconstructRoundTrips` 按**开仓到清仓**合成一个腿（只有仓位归零才 finalize）。
+   *
+   * 而**成交单号是唯一不受"切法"影响的身份**：336 的回合含两个出场单号，
+   * 其中任何一个出现在账本里，就说明这段成交已经被记过。
+   */
+  exitOrderIds: string[];
   /** Number of exchange fills that made up the round-trip. */
   fillCount: number;
 }
@@ -86,6 +126,11 @@ interface OpenLeg {
   openedAt: number;
   firstEntryOrderId: string | null;
   lastExitOrderId: string | null;
+  /**
+   * 这个腿里**每一个**出场成交的交易所单号（含部分平仓）—— 判重用，见
+   * `ReconstructedTrade.exitOrderIds` 的说明。
+   */
+  exitOrderIds: string[];
   fillCount: number;
 }
 
@@ -130,6 +175,7 @@ export function reconstructRoundTrips(
       holdMinutes: Math.max(0, (closedAt - current.openedAt) / 60_000),
       entryOrderId: current.firstEntryOrderId ?? '',
       exitOrderId: current.lastExitOrderId ?? '',
+      exitOrderIds: [...current.exitOrderIds],
       fillCount: current.fillCount,
     });
   };
@@ -158,6 +204,7 @@ export function reconstructRoundTrips(
         openedAt: fill.time,
         firstEntryOrderId: String(fill.orderId),
         lastExitOrderId: null,
+        exitOrderIds: [],
         fillCount: 0,
       };
       position = signed;
@@ -191,6 +238,8 @@ export function reconstructRoundTrips(
     leg.exitNotional += price * closing;
     leg.grossPnl += Number(fill.realizedPnl) || 0;
     leg.lastExitOrderId = String(fill.orderId);
+    /* 每一次出场都记下单号（含部分平仓）—— 判重靠的是这组身份。 */
+    leg.exitOrderIds.push(String(fill.orderId));
     leg.fillCount += 1;
     // The exchange reports commission for the whole fill; when a fill both
     // closes and flips, the closing part is what belongs to this leg.
@@ -220,6 +269,7 @@ export function reconstructRoundTrips(
         openedAt: fill.time,
         firstEntryOrderId: String(fill.orderId),
         lastExitOrderId: null,
+        exitOrderIds: [],
         fillCount: 1,
       };
       addCommission(leg, commission * (remainderQty / qty), fill.commissionAsset, settlementAsset, true);

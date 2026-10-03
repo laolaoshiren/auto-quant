@@ -2384,6 +2384,12 @@ export const trades = {
     entryOrderId?: string | null;
     exitOrderId?: string | null;
     /**
+     * 这一回合的**全部**出场成交单号（对账重建的腿会带多个）。
+     * 只参与查重，不落库 —— 落库的是最后一个（`exit_order_id`）。
+     * 见 `findDuplicate()` 里那段"两条路切法不同"的说明。
+     */
+    exitOrderIds?: readonly string[];
+    /**
      * 这次写入代表**一笔真实平仓**，因此必须先查重（§2.5 的幂等）。
      *
      * 只有 `bookClosedPosition()` 与 `reconcileTradeHistory()` 会打开它。默认关闭，
@@ -2422,6 +2428,12 @@ export const trades = {
           entryOrderId: input.entryOrderId,
           /* 确定性键 —— 同一笔平仓只有一个交易所单号，见 `findDuplicate()`。 */
           exitOrderId: input.exitOrderId,
+          /*
+           * 一个腿可以有**多个**出场单号（部分平仓）。只看最后一个会漏掉
+           * "运行期已按每次平仓分别记账"的情形 —— 那正是 2026-10-03 那笔
+           * 凭空多出 1.5153 的成因。见 `findDuplicate()`。
+           */
+          exitOrderIds: input.exitOrderIds,
         })
       : null;
     if (alreadyBooked !== null) return { id: alreadyBooked, created: false };
@@ -2540,6 +2552,29 @@ export const trades = {
      * 账上多出一笔。
      */
     exitOrderId?: string | null;
+    /**
+     * **这个回合的全部出场成交单号**（对账重建的腿会带多个：部分平仓各一笔）。
+     *
+     * ## 为什么单个 `exitOrderId` 不够（2026-10-03 实盘事故）
+     *
+     * 运行期与对账对同一段成交的"切法"不同：
+     *
+     *   · 运行期按**每次平仓**记一笔（本地持仓行消失一次记一次）；
+     *   · `reconstructRoundTrips` 按**开仓到清仓**合成一个腿。
+     *
+     * 实测 `#10` 的 MANAUSDT：交易所是 `BUY 336 → SELL 168 → SELL 168`，
+     * 运行期记了 `#191`（168）+ `#192`（168），对账又记了 `#193`（336，
+     * `pnl` 恰好等于前两笔之和）—— **凭空多出 1.5153 USDT**。
+     *
+     * 而三条启发式判据全部落空：数量 `336 ≠ 168`、出场价不同（加权 vs 单笔）、
+     * `closed_at` 差 5 秒（超窗口）；`#192` 的 `exit_order_id` 还是 null
+     * （止损触发时没拿到），所以连"单号相同"那条确定性判据也查不到。
+     *
+     * **成交单号是唯一不受"切法"影响的身份**：336 的回合含两个出场单号，
+     * 其中**任何一个**已出现在账本里，就说明这段成交已经被记过。
+     * 这也正是对账该有的语义 —— **只修正、不重复插入**。
+     */
+    exitOrderIds?: readonly string[];
   }): number | null {
     /*
      * 只有带交易所身份的（ISO 毫秒时间戳）才参与判定。`closed_at` 缺省时
@@ -2570,6 +2605,31 @@ export const trades = {
         input.exitOrderId,
       );
       if (exact) return exact.id;
+    }
+
+    /*
+     * ── 同一个"腿"的**任一**出场成交已记账 ⇒ 这段成交已经记过 ──────────────
+     *
+     * 这一条补的是"两条路切法不同"那个缝：一个 336 张的腿含两个出场单号
+     * （168 + 168），而运行期已经按每次平仓各记了一笔。只看**最后一个**
+     * 单号（`exitOrderId`）查不到那两笔 —— 因为记在账上的单号是**第一笔**的。
+     *
+     * 单号是交易所给的唯一身份，所以这里不做任何容差判断：命中就是命中。
+     * 顺序无关、数量无关、价格无关 —— 这正是这个 bug 需要的东西。
+     */
+    if (input.exitOrderIds && input.exitOrderIds.length > 0) {
+      const ids = input.exitOrderIds.filter((id) => typeof id === 'string' && id.length > 0);
+      if (ids.length > 0) {
+        const hit = getDb().get<{ id: number }>(
+          `SELECT id FROM trades WHERE trader_id = ? AND symbol = ? AND exit_order_id IN (${ids
+            .map(() => '?')
+            .join(', ')}) ORDER BY id ASC LIMIT 1`,
+          input.traderId,
+          input.symbol,
+          ...ids,
+        );
+        if (hit) return hit.id;
+      }
     }
 
     const byOrder =
