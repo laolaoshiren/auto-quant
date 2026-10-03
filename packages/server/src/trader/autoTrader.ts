@@ -5756,7 +5756,28 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      * 两侧必须同口径，否则这个校验的每一次响都是假的，而它本该是唯一能自动发现
      * "账本真的错了"的地方（实测它确实抓到过那次 0.17 的重复记账）。
      */
-    const openCosts = (() => {
+    /**
+     * 未平仓仓位的持有成本，**两个符号不同，必须分开返回**。
+     *
+     * ## ⚠️ 2026-10-03：这里原来把两者相加成一个 `openCosts`，然后在
+     * `platformNet` 里用 `+ openCosts` —— **符号对了一半，于是平台侧被高估
+     * 两倍的手续费**。
+     *
+     * 实测现场（`#10`，两个持仓）：
+     *
+     * ```text
+     * 交易所：毛 -0.6479 · 费 0.307327（含未平仓开仓费 0.054795）
+     *       ⇒ 已平仓部分费用 = 0.252532，而本地账本的 fee 正是 0.252532
+     * 本地已平仓净额 platformSelf = -0.900432
+     * 正确：-0.900432 − 0.054795 = -0.955227 = 交易所净额 ✅
+     * 实际：-0.900432 + 0.054795 = -0.845637 ⇒ gap 0.109590 = 2 × 0.054795 ❌
+     * ```
+     *
+     * **手续费是支出、正数** ⇒ 要从平台净额里**减**；
+     * **资金费在币安 `income` 里本身就是负数**（`FUNDING_FEE -0.013888`）⇒ 用**加**。
+     * 混在一个数里用一个符号，必错一个。
+     */
+    const openHoldings = ((): { entryFees: number; funding: number } => {
       try {
         /*
          * 传**入场订单号**而不是标的：同一标的反复开平时，按标的过滤会把
@@ -5768,23 +5789,27 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
           .map((p) => p.entry_order_id)
           .filter((id): id is string => typeof id === 'string' && id.length > 0);
         /*
-         * ⚠️ 还要加上**未平仓仓位的资金费**（2026-10-03）。
-         *
-         * `orders` 表没有资金费列，所以上面那一项只覆盖手续费 —— 持仓跨过资金费
-         * 结算点时平台侧会偏小。这里原来把那条偏差记成"已知且方向固定的残差，
-         * 不要再靠猜口径去补"。而它**不用猜**：资金费就在 `income` 流水里，
-         * 按标的 + 开仓之后聚合即可（见 `fundingSince()`）。
+         * 未平仓仓位的**资金费**（`orders` 表没有资金费列，只能从流水取）。
+         * 持仓跨过资金费结算点时平台侧会偏小 —— 代码注释原来把它记成
+         * "已知且方向固定的残差，不要再靠猜口径去补"，而它**不用猜**：
+         * 资金费就在 `income` 流水里，按标的 + 开仓之后聚合即可。
          */
-        const openFunding = positionStore
+        const funding = positionStore
           .open(traderId)
           .reduce((sum, p) => sum + fundingSince(incomeEvents, p.symbol, p.opened_at), 0);
-        return orderStore.openEntryCosts(traderId, entryOrderIds) + openFunding;
+        return { entryFees: orderStore.openEntryCosts(traderId, entryOrderIds), funding };
       } catch {
         /* 读不到就按 0：宁可这一轮差一点，也不要让对账整个失败。 */
-        return 0;
+        return { entryFees: 0, funding: 0 };
       }
     })();
-    const platformNet = platformSelf + foreignNet + openCosts;
+    const openEntryFees = openHoldings.entryFees;
+    const openFunding = openHoldings.funding;
+    const openCosts = openEntryFees + openFunding;
+    /*
+     * 手续费**减**、资金费**加**（它本身就是负数）—— 见 `openHoldings` 的说明。
+     */
+    const platformNet = platformSelf + foreignNet - openEntryFees + openFunding;
     const ledgerGap = Number((platformNet - exchangeNet).toFixed(6));
 
     /*
