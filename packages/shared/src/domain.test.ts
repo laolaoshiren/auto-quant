@@ -25,6 +25,7 @@ import {
   exchangeErrorLabel,
   marginPercentToPricePercent,
 } from './domain.js';
+import { defaultStrategyConfig, unboundedAiManagedConfig } from './strategy.js';
 
 test('实测撞到的 -4130 被翻译成可行动的一句话', () => {
   /*
@@ -257,4 +258,72 @@ test('杠杆不可用时原样返回，不猜也不除零', () => {
   assert.equal(marginPercentToPricePercent(3, 0), 3);
   assert.equal(marginPercentToPricePercent(3, Number.NaN), 3);
   assert.equal(marginPercentToPricePercent(3, -5), 3);
+});
+/* -------------------------------------------------------------------------- */
+/*  智能托管的起点：不替模型预设边界                                              */
+/* -------------------------------------------------------------------------- */
+
+test('★ 智能托管的起始配置不设边界 —— 上限顶格、门槛归零', () => {
+  /*
+   * ## 用户的直接要求（原话）
+   *
+   * > 「这是智能托管模式，我去哪里改？……如果非要顶一个默认值，我觉得系统别搞这么
+   * >  保守啊，持仓不限制，杠杆不限制，保证金模式也不限制才对，既然完全交给模型，
+   * >  那么怎么操作都由模型决定啊，而不是系统就提前写死了，模型改还有什么意义呢？？」
+   *
+   * ## 他指出的矛盾是真的
+   *
+   * 提示词对模型说「这些数字……**归你调**……它们不是"不可更改的规定"，而是
+   * **你当前选定的边界**」—— 而**选定它们的既不是模型、界面上也没有入口**：
+   * 智能托管的机器人不引用策略（`strategyId = null`），策略编辑页对它无效，
+   * 起点来自 `StrategyConfigSchema.parse({})` 那组保守默认值
+   * （3 个持仓 / 5x / 逐仓 / 75 分门槛）。**"能改"与"替你定死"互相矛盾。**
+   *
+   * 所以这条用例钉的是：`unboundedAiManagedConfig()` 必须**处处顶格**，
+   * 而不是又一组"看起来更合理"的保守值。
+   */
+  const rc = unboundedAiManagedConfig().riskControl;
+
+  /* 上限类：必须是 schema 允许的最大值 —— 少一格就是"系统又替它做了决定"。 */
+  assert.equal(rc.maxPositions, 20, '持仓数上限要顶格（schema max 20）');
+  assert.equal(rc.btcEthMaxLeverage, 125, 'BTC/ETH 杠杆上限要顶格（schema max 125）');
+  assert.equal(rc.altcoinMaxLeverage, 125, '山寨杠杆上限要顶格');
+  assert.equal(rc.btcEthMaxPositionValueRatio, 50, '名义敞口上限要顶格');
+  assert.equal(rc.altcoinMaxPositionValueRatio, 50, '山寨名义敞口上限要顶格');
+  assert.equal(rc.maxMarginUsage, 100, '保证金占用允许用满');
+
+  /* 门槛类：归零 —— "要不要出手"由模型判断，不由数字拦。 */
+  assert.equal(rc.minRiskRewardRatio, 0, '盈亏比门槛要归零');
+  assert.equal(rc.minConfidence, 0, '置信度门槛要归零');
+
+  /* 止盈是策略选择，交给模型。 */
+  assert.equal(rc.requireTakeProfit, false, '不该强制止盈');
+
+  /*
+   * ⚠️ **唯一保留的一条：`requireStopLoss`。**
+   *
+   * 一个没有保护的杠杆仓位可以在几秒内亏光全部保证金 —— 那**不是一种策略选择**
+   * （`patch.ts` 的 `STRUCTURAL_INVARIANTS` 同样把它列为唯一的结构不变量，
+   * 且模型改不动）。它限制的是"裸奔"，不是"怎么交易"。
+   */
+  assert.equal(
+    rc.requireStopLoss,
+    true,
+    '★ 止损必须保留 —— 那是结构要求（不许裸奔），不是替模型做交易决定',
+  );
+});
+
+test('出厂默认值本身不变 —— 传统策略模式仍然有它自己的保守起点', () => {
+  /*
+   * 这一条防的是"顺手把默认值也改了"。
+   *
+   * `defaultStrategyConfig()` 服务于**传统策略**模式：那里的参数是操作员在策略
+   * 编辑页里明确选的，保守是**有意**的起点。智能托管的"不设边界"是另一件事，
+   * 两者不该互相污染 —— 否则改一处会静默改变另一类机器人的行为。
+   */
+  const rc = defaultStrategyConfig().riskControl;
+  assert.equal(rc.maxPositions, 3, '传统策略的默认持仓数仍是 3');
+  assert.equal(rc.btcEthMaxLeverage, 5, '传统策略的默认杠杆仍是 5x');
+  assert.equal(rc.marginMode, 'isolated', '传统策略的默认保证金模式仍是逐仓');
+  assert.equal(rc.minConfidence, 75, '传统策略的默认置信度门槛仍是 75');
 });

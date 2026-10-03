@@ -415,6 +415,65 @@ export function defaultStrategyConfig(): StrategyConfig {
 }
 
 /**
+ * **智能托管（`ai_managed`）机器人的起始配置：不替模型预设边界。**
+ *
+ * ## 为什么它与 `defaultStrategyConfig()` 不同（用户的直接要求）
+ *
+ * 用户的原话：
+ *
+ * > 「这是智能托管模式，我去哪里改？……既然完全交给模型，那么怎么操作都由模型
+ * >  决定啊，而不是系统就提前写死了，模型改还有什么意义呢？？」
+ *
+ * 他的话是对的，而且矛盾就在代码里：提示词对模型说
+ * 「**这些数字全部来自你自己的策略配置，归你调 —— 用 `set_params` 改，下一轮就
+ * 生效**……它们列在这里不是"不可更改的规定"，而是**你当前选定的边界**」——
+ * **可"选定"这些边界的既不是模型，界面上也没有入口**：AI 托管的机器人不引用策略
+ * （`strategyId = null`），所以策略编辑页对它无效；它的起点来自
+ * `StrategyConfigSchema.parse({})`，也就是**一组保守的 schema 默认值**
+ * （3 个持仓、5x 杠杆、逐仓、75 分门槛）。**"能改"与"替你定死"是互相矛盾的。**
+ *
+ * 所以智能托管的起点改成**处处顶格**：上限放到 schema 允许的最大值，
+ * 门槛类字段归零（不设门槛），让"要不要保守"成为**模型自己每一轮的决定**，
+ * 而不是系统替它在第一轮就做掉的决定。
+ *
+ * ## 唯一保留的一条：`requireStopLoss`
+ *
+ * 一个没有保护的杠杆仓位可以在几秒内亏光全部保证金 —— 那**不是一种策略选择**
+ * （`patch.ts` 的 `STRUCTURAL_INVARIANTS` 也把它列为唯一的结构不变量，
+ * 且改不动）。它与"限制模型的自由度"不是一回事：**它限制的是"裸奔"，
+ * 不是"怎么交易"**。
+ *
+ * ## 保留在保守值的两项，以及为什么
+ *
+ * · `defaultLeverage` —— 只在模型**没有**给出杠杆时兜底。那是"没意见"的默认，
+ *   不是对它的限制；把兜底也顶格等于替它下了一个激进的决定。
+ * · `minPositionSize` / `fallbackStopLossPercent` / `fallbackTakeProfitPercent`
+ *   —— 前者的下限由**交易所的最小名义**决定（填小了会被拒），后者只在模型
+ *   没给保护位时用。它们都不是"边界"，改小没有意义。
+ */
+export function unboundedAiManagedConfig(): StrategyConfig {
+  return StrategyConfigSchema.parse({
+    riskControl: {
+      /* 持仓数与杠杆：顶格（交易所给该账户的授信是 BTC 150x / 山寨 100x）。 */
+      maxPositions: 20,
+      btcEthMaxLeverage: 125,
+      altcoinMaxLeverage: 125,
+      /* 名义敞口上限：顶格（配合上面的杠杆，真正的总闸是 maxMarginUsage）。 */
+      btcEthMaxPositionValueRatio: 50,
+      altcoinMaxPositionValueRatio: 50,
+      /* 保证金占用：允许用满。 */
+      maxMarginUsage: 100,
+      /* 门槛归零 —— "要不要出手"由模型判断，不由数字拦。 */
+      minRiskRewardRatio: 0,
+      minConfidence: 0,
+      /* 止盈是策略选择，交给模型；止损是结构要求，保留。 */
+      requireTakeProfit: false,
+      requireStopLoss: true,
+    },
+  });
+}
+
+/**
  * Style presets mirroring the three trading modes. These only seed the
  * *prompt* sections and a few numeric knobs — the user is free to edit
  * everything afterwards.

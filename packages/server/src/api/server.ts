@@ -11,6 +11,7 @@ import {
   StrategyConfigSchema,
   defaultStrategyConfig,
   providerDefaults,
+  unboundedAiManagedConfig,
   type PositionView,
   type ServerEvent,
   type Trader,
@@ -1515,12 +1516,26 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 它第一轮跑起来读的是**策略的配置**。于是"策略没了"就等于"它没有配置"，
      * 这正是用户要修的那个依赖。
      *
-     * 现在建号时就写入一份完整配置（所有字段走 schema 的默认值，与
-     * `manager.ts` 在策略不可用时的兜底用的是同一个表达式）。从这一刻起它
-     * 的参数只属于它自己，策略（乃至"没有任何策略"）与它再无关系。
+     * 现在建号时就写入一份完整配置。从这一刻起它的参数只属于它自己，
+     * 策略（乃至"没有任何策略"）与它再无关系。
+     *
+     * ⚠️ **用 `unboundedAiManagedConfig()` 而不是 `parse({})`**（2026-10-03）。
+     *
+     * `parse({})` 走的是 schema 的**保守默认值**（3 个持仓、5x 杠杆、逐仓、
+     * 75 分门槛）—— 而 AI 托管的机器人**不引用策略**，模型改这些只能靠自己
+     * 想起来改，界面上根本没有入口。于是"完全交给模型"实际变成了
+     * "系统先替它定死一组保守边界"。用户的原话：
+     *
+     *   「既然完全交给模型，那么怎么操作都由模型决定啊，而不是系统就提前写死了，
+     *     模型改还有什么意义呢？？」
+     *
+     * 所以智能托管的起点改成**不设边界**（见 `unboundedAiManagedConfig()`）：
+     * 上限顶格、门槛归零，唯一的例外是 `requireStopLoss`（那是结构要求，
+     * 不是策略偏好）。**已有机器人不会被追溯修改** —— 它们的参数已经在自己的
+     * `agent_config_json` 里，怎么调由模型与操作员决定。
      */
     if (isAiManaged) {
-      traders.setAgentConfig(trader.id, JSON.stringify(StrategyConfigSchema.parse({})));
+      traders.setAgentConfig(trader.id, JSON.stringify(unboundedAiManagedConfig()));
     }
 
     return { ...trader, equitySource };
