@@ -2812,7 +2812,30 @@ export const trades = {
      *
      * 本地数量来自**运行期持仓行**（就是当时真实下单的数量），它**不经过重建**；
      * 当两者差到"不可能是同一个回合"时，保留本地。
-     * **金额（毛盈亏 / 手续费 / 资金费）仍然一律采用交易所的值** —— 那是权威的。
+     *
+     * ## ⚠️ 2026-10-03：金额也**必须**一起保留
+     *
+     * 旧结论写的是"**金额（毛盈亏 / 手续费 / 资金费）仍然一律采用交易所的值 ——
+     * 那是权威的**"。**那条结论是错的**，实盘 `#10`（MANAUSDT）的现场：
+     *
+     * ```text
+     * 交易所成交: BUY 336 → SELL 168 (+1.132320) → SELL 168 (+0.408240)
+     * 运行期记账: #191 毛 1.132320（第一笔 168）
+     *             #192 毛 0.408240（第二笔 168，止损触发，exit_order_id 为 null）
+     * 对账重建:   把整段看成一个 336 的腿 ⇒ grossPnl = 1.540560 = 两笔之和
+     * ```
+     *
+     * 旧逻辑下 `keepLocalQuantity` 为真（336 vs 168 差得太远），**数量保住了**，
+     * 而金额被无条件覆盖成 `1.540560` —— 于是 `#191` 变成"两笔之和"，而 `#192` 还在，
+     * 账目凭空多出 **0.408240**（实测 `#10` 的净额从 -0.08742 变成 +0.31188）。
+     *
+     * **真相**：一个"腿"的 `grossPnl` 是这个腿里**所有**平仓成交的 `realizedPnl` 之和。
+     * 数量对不上就说明这个腿的**边界**是错的，它的金额自然不能写进任何一行。
+     *
+     * 而保留的本地金额**不是粗口径**：它来自运行期从**成交明细**取到的那一笔
+     * （见 `findRoundTrip()`），本身也是交易所的值，只是属于**正确的**那一笔。
+     *
+     * 所以数量不可信时，**金额与价位一并不覆盖**。
      */
     const local = getDb().get<{ quantity: number }>('SELECT quantity FROM trades WHERE id = ?', input.id);
     const keepLocalQuantity =
@@ -2821,8 +2844,8 @@ export const trades = {
     if (keepLocalQuantity) {
       log.warn(
         `对账算出的成交量（${input.quantity}）与本地记录（${local.quantity}）差得太远 —— ` +
-          '已保留本地数量（金额仍按交易所的值）。这通常意味着成交历史的窗口起点落在持仓中间，' +
-          '重建把开/平判反了，整条序列因此错位。',
+          '已保留本地数量**与本地金额**（重建那个腿的边界是错的，它的金额可能是多个回合的合计）。' +
+          '这通常意味着成交历史的窗口起点落在持仓中间，重建把开/平判反了，整条序列因此错位。',
       );
     }
 
@@ -2834,22 +2857,42 @@ export const trades = {
      * 权威成交量被**静默丢弃** —— 账本留下的仍是运行期那个较粗的口径（本地持仓量），
      * 与交易所的成交记录对不上，而 §2.5 要求的正是"平台记录能与交易所对得上"。
      * 本次修幂等时正是靠这一列才把同一回合的两条路径收敛到同一个数字上。
+     *
+     * ⚠️ **`keepLocalQuantity` 为真时整行都不覆盖**（金额 + 数量 + 价位）——
+     * 那个"腿"的边界是错的，它的金额可能是多个回合的合计，写进来就是重复记账。
+     * 见上面那段 2026-10-03 的说明。`CASE WHEN ?` 的写法避免在 JS 里拼两份语句。
      */
+    const keep = keepLocalQuantity ? 1 : 0;
     getDb().run(
       `UPDATE trades
-          SET pnl = ?, entry_fee = ?, fee = ?, funding_fee = ?, net_pnl = ?,
-              pnl_percent = ?, entry_price = ?, exit_price = ?, quantity = ?,
+          SET pnl = CASE WHEN ? THEN pnl ELSE ? END,
+              entry_fee = CASE WHEN ? THEN entry_fee ELSE ? END,
+              fee = CASE WHEN ? THEN fee ELSE ? END,
+              funding_fee = CASE WHEN ? THEN funding_fee ELSE ? END,
+              net_pnl = CASE WHEN ? THEN net_pnl ELSE ? END,
+              pnl_percent = CASE WHEN ? THEN pnl_percent ELSE ? END,
+              entry_price = CASE WHEN ? THEN entry_price ELSE ? END,
+              exit_price = CASE WHEN ? THEN exit_price ELSE ? END,
+              quantity = ?,
               entry_order_id = COALESCE(?, entry_order_id),
               exit_order_id = COALESCE(?, exit_order_id)
         WHERE id = ?`,
-      input.grossPnl,
-      input.entryFee,
-      fee,
-      input.fundingFee,
-      netPnl,
-      margin > 0 ? (netPnl / margin) * 100 : 0,
-      input.entryPrice,
-      input.exitPrice,
+      /* pnl */
+      keep, input.grossPnl,
+      /* entry_fee */
+      keep, input.entryFee,
+      /* fee */
+      keep, fee,
+      /* funding_fee */
+      keep, input.fundingFee,
+      /* net_pnl */
+      keep, netPnl,
+      /* pnl_percent */
+      keep, margin > 0 ? (netPnl / margin) * 100 : 0,
+      /* entry_price */
+      keep, input.entryPrice,
+      /* exit_price */
+      keep, input.exitPrice,
       /* ⚠️ 用上面判定过的那个值：重建数量与本地差得太远时保留本地。 */
       quantity,
       input.entryOrderId,
