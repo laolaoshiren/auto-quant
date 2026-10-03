@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, type AiModelRow, type ExchangeAccountRow, type TraderRow } from '../lib/api';
 import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, TextInput } from './ui';
 import { EquitySourceField, equityPayload, useExchangeEquity } from './EquitySourceField';
@@ -36,6 +36,11 @@ export function TraderConfigModal({
   const [cycleIntervalMinutes, setCycleIntervalMinutes] = useState(15);
   /** Set when the save left the trader with a 0 baseline. */
   const [baselineWarning, setBaselineWarning] = useState<string | null>(null);
+  /**
+   * 已经回填过表单的机器人 id —— 见下面那个 `useEffect` 里
+   * 「轮询刷新不该重填表单」的说明（用户 2026-10-04 报的那个 BUG）。
+   */
+  const prefilledFor = useRef<string | null>(null);
 
   const selectedAccount = accounts?.find((row) => row.id === exchangeAccountId) ?? null;
   const equity = useExchangeEquity({
@@ -49,6 +54,34 @@ export function TraderConfigModal({
 
   useEffect(() => {
     if (!open || !trader) return;
+    /*
+     * ⚠️ **回填只能在"刚打开 / 换了另一台机器人"时做一次。**
+     *
+     * 用户 2026-10-04 报的原话：
+     *
+     * > 「我修改赚大钱机器人的 AI 模型为 OPENCODE GO，**我什么都没做**，
+     * >  页面上选择框会自动变成 command code」
+     * > （补充）「**我还没点保存，页面上就自动变成 command code**」
+     *
+     * 根因就在这个 effect 的依赖：`[open, trader]` 里的 `trader` 是一个**对象**，
+     * 而父组件那份来自**每几秒一次的轮询** —— 每次刷新都是新对象、引用变化，
+     * 于是 effect 重跑，`setAiModelId(trader.aiModelId)` 把操作员刚选的模型**改回去**。
+     *
+     * 他选中 OpenCode GO 之后什么也没做，几秒后轮询到达，选择就自己变回了
+     * 数据库里那个值（Command Code）—— 看起来像"这个控件不听话"。
+     *
+     * **这个 BUG 比"界面跳一下"更危险**：若不注意而直接点保存，
+     * 会把机器人真的改回旧模型，而他以为自己改成功了。表单回填与"后台数据刷新"
+     * 是两件事，前者只该在**打开那一刻**发生。
+     *
+     * 用 `trader.id` 当标记：轮询刷新（同一个 id）不再重填，换机器人（id 变了）才重填。
+     * 依赖数组保持 `[open, trader]` 不动 —— 这样 `exhaustive-deps` 仍然满意，
+     * 而"什么时候真的重填"由这里显式决定，不靠引用相等这种偶然性质。
+     */
+    const fillKey = String(trader.id);
+    if (prefilledFor.current === fillKey) return;
+    prefilledFor.current = fillKey;
+
     setName(trader.name);
     setExchangeAccountId(trader.exchangeAccountId);
     setAiModelId(trader.aiModelId);
@@ -70,6 +103,11 @@ export function TraderConfigModal({
       alive = false;
     };
   }, [open, trader]);
+
+  /* 关闭时清掉标记：下次打开（哪怕还是同一台）必须重新回填。 */
+  useEffect(() => {
+    if (!open) prefilledFor.current = null;
+  }, [open]);
 
   if (!trader) return null;
 
