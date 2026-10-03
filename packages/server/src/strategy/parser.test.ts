@@ -551,3 +551,63 @@ test('★ 修复器不能碰字符串【外面】的换行 —— 那会把结�
   assert.equal(parsed.decisions.length, 1, '多行缩进的合法 JSON 必须照常解析');
   assert.equal(parsed.decisions[0]!.symbol, 'BTCUSDT');
 });
+
+test('★ 两个瑕疵同时出现时，修复顺序是本质的（多行 + 漏收尾引号）', () => {
+  /*
+   * ## 实盘现场（2026-10-03，周期 #37 真实形状）
+   *
+   * 那一轮的 `reasoning` 有**两个**瑕疵：
+   *
+   *   ① 值里有多行（控制字符非法）；
+   *   ② 值的**收尾引号漏了**（换行之后直接是 `},`）。
+   *
+   * ```text
+   * "reasoning": "...均过线。**
+   *   },                  ← 既跨了行，又少一个 "
+   * ```
+   *
+   * ## 为什么这条用例必须"两个一起"
+   *
+   * `closeUnterminatedStrings` 靠**遇到真的换行符**来判断漏引号；
+   * 而 `escapeControlCharsInsideStrings` 会把那个换行变成 `\`+`n`。
+   * **先转义、再补引号 ⇒ 补引号永远看不到换行 ⇒ 永不触发。**
+   *
+   * 实测就是这么失败的：两级修复都在，顺序错了，谁也救不回来 —— 整轮 20 条决策
+   * （含 2 笔开仓）被丢成 `"[]"`，界面显示「本周期模型没有给出任何决策」。
+   *
+   * 所以：**只测"多行"或只测"漏引号"都无法发现顺序错误**，必须同时给出。
+   */
+  const raw = [
+    '<decision>',
+    '```json',
+    '[',
+    '  {',
+    '    "symbol": "ZECUSDT",',
+    '    "action": "open_short",',
+    '    "reasoning": "第一行理由',
+    '第二行理由（裸换行）',
+    '第三行理由**', // ← 故意不写收尾引号
+    '  },',
+    '  {',
+    '    "symbol": "WLDUSDT",',
+    '    "action": "hold",',
+    '    "reasoning": "正常"',
+    '  }',
+    ']',
+    '```',
+    '</decision>',
+  ].join('\n');
+
+  const parsed = parseDecisionResponse(raw, context({ candidateSymbols: new Set(['ZECUSDT', 'WLDUSDT']) }));
+  assert.equal(
+    parsed.decisions.length,
+    2,
+    '★ 多行 + 漏引号必须同时被救回来 —— 顺序写错时这里会是 0，而那正是"没有给出任何决策"的来源',
+  );
+  assert.equal(parsed.decisions[0]!.symbol, 'ZECUSDT');
+  assert.equal(parsed.decisions[0]!.action, 'open_short');
+  assert.ok(
+    parsed.decisions[0]!.reasoning.includes('第三行理由'),
+    '补引号不能把内容截掉（它只能补上缺失的那一个引号）',
+  );
+});

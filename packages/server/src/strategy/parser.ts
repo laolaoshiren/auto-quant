@@ -222,7 +222,7 @@ function safeParseJson(text: string): unknown {
   const candidates = [
     text,
     repairJsonStructure(text),
-    /* 先补漏写的收尾引号（必须在控制字符被转义之前）。 */
+    /* 先补漏写的收尾引号（必须在控制字符被转义之前 —— 见上面那段顺序说明）。 */
     closeUnterminatedStrings(text),
     escapeControlCharsInsideStrings(closeUnterminatedStrings(text)),
     /* 只有换行、没有漏引号的情形。 */
