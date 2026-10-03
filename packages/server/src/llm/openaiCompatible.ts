@@ -209,12 +209,37 @@ export function buildRequest(
     headers['x-openrouter-title'] = 'auto-quant';
   }
 
+  /*
+   * OpenCode GO 要求 `x-opencode-session`。它的用途是**会话粘性路由** ——
+   * 把同一个会话的请求送到同一个后端（所以值是"任意稳定、非空的字符串"，
+   * 关键是每次请求都一样）。用一个固定串即可：单实例部署下所有请求本就是同一会话。
+   *
+   * ⚠️ 实测（2026-10-04）**不带这个头也能通**，但文档明确要求，而代价只是一个 header。
+   * 这类"上游随时可能收紧"的隐性要求，等它真变成硬要求才发现，表现会是
+   * "昨天还好好的" —— 而那时排查会从"我们的代码改了什么"开始，方向就是错的。
+   *
+   * 见 `packages/shared/src/llm.ts` 里 `opencode` 那段：用户上一次失败**其实**
+   * 是因为基础 URL 多写了 `/chat/completions`（路径被拼了两次），
+   * 而服务端回的却是那句关于 session 头的报错 —— **报错信息把人引向了错误的方向**。
+   */
+  if (provider === 'opencode') {
+    headers['x-opencode-session'] = OPENCODE_SESSION;
+  }
+
   return {
     url: joinUrl(baseUrl, 'chat/completions'),
     headers,
     body: buildBody(provider, model, messages, options),
   };
 }
+
+/**
+ * OpenCode GO 的会话标识 —— 固定值，见 `buildRequest` 里的说明。
+ *
+ * 不用随机 UUID：随机值会让**每次请求都被路由到不同的后端**，
+ * 那恰好是这个头要避免的事（会话粘性）。
+ */
+export const OPENCODE_SESSION = 'auto-quant';
 
 /* -------------------------------------------------------------------------- */
 /*  Response parsing                                                           */

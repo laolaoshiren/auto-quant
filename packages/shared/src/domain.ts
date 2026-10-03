@@ -28,6 +28,7 @@ export const EXCHANGES: ReadonlyArray<{
 
 export const LlmProviderIdSchema = z.enum([
   'deepseek',
+  'opencode',
   'openai',
   'anthropic',
   'gemini',

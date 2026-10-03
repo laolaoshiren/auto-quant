@@ -289,6 +289,77 @@ export const LLM_PROVIDERS: readonly LlmProviderDescriptor[] = [
     supportsThinking: true,
   },
   {
+    /*
+     * ── OpenCode GO（2026-10-04 内置）────────────────────────────────────
+     *
+     * 用户的原话：「**AI 提供商内置一个 opencode go** …… 如图所示，我使用自定义添加的
+     * 无法使用，**你根据文档内置一个，以后我只用填 KEY 就能正常使用**」。
+     *
+     * ## 为什么"自定义 OpenAI 兼容端点"填不出可用配置
+     *
+     * 他试过，报的是：
+     *
+     * ```text
+     * Request is missing x-opencode-session and cannot be routed efficiently.
+     * ```
+     *
+     * 那个头**自定义端点填不了** —— 那里只有 API Key + 基础 URL 两个输入框。
+     *
+     * ## 但那一轮排查还发现了一件更重要的事
+     *
+     * 他当时填的 `base_url` 是 **`https://opencode.ai/zen/go/v1/chat/completions`**，
+     * 而客户端会在这个基址后面**再拼一次** `/chat/completions` —— 于是变成
+     * `.../v1/chat/completions/chat/completions`。**路径错了，而服务端回的是
+     * 那句关于 session 头的报错，把人引向了错误的方向。**
+     *
+     * 我用 `https://opencode.ai/zen/go/v1` 直接实测（2026-10-04，用他当时存的那把 Key）：
+     *
+     * ```text
+     * GET  /v1/models             → 200（带与不带 session 头都通）
+     * POST /v1/chat/completions   → 200（带 session 头，正常返回 deepseek-flash）
+     * ```
+     *
+     * 所以内置值把**两件事都定好**：正确的基址 + 那个头。
+     * **用户只需要填 Key。**
+     *
+     * ## 关于 `x-opencode-session` 的值
+     *
+     * 它的用途是**会话粘性路由** —— 把同一个会话的请求送到同一个后端
+     * （多个上游实现都在补这个头，见 `earendil-works/pi#9230`、
+     * `openclaw/openclaw#137464`）。所以**任意稳定、非空的字符串**即可，
+     * 关键是"每次请求都一样"。这里用固定的 `auto-quant`：单实例部署下，
+     * 所有请求本就属于同一个会话，而且重启后仍然一致。
+     *
+     * ⚠️ 实测**不带这个头也能通**（至少在那天、那台服务器上）。但既然文档明确要求、
+     * 而代价只是多一个 header，就照文档带上 —— 这类"上游随时可能收紧"的隐性要求，
+     * 等它真的变成硬要求时才发现，表现会是"昨天还好好的"。
+     */
+    id: 'opencode',
+    label: 'OpenCode GO',
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+    authStyle: 'bearer',
+    /*
+     * 留给"还没填 Key"时展示。有 Key 时以 `/models` 的实时结果为准 ——
+     * 实测它返回的第一批是 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 等，
+     * 而 `deepseek-flash` 这个别名也是可用的（实测路径走通的就是它）。
+     */
+    models: ['deepseek-flash'],
+    openAiCompatible: true,
+    jsonMode: 'json_object',
+    docsUrl: 'https://opencode.ai/docs/go/',
+    modelsPath: '/models',
+    modelsAuth: 'bearer',
+    /* 与聊天请求同一个头 —— 见 `openaiCompatible.buildRequest` 里的说明。 */
+    modelsHeaders: { 'x-opencode-session': 'auto-quant' },
+    /*
+     * 与 `commandcode` / `custom` 同档：网关背后是推理模型，**思考与正文共用输出预算**，
+     * 而本系统的提示词很大（实测 5 万–28 万 tokens）且以 high 推理强度运行。
+     * 16k 会被思考吃满、正文一个字不剩，而那看起来像"这一轮没什么可做的"。
+     */
+    defaults: { temperature: 0.2, maxTokens: 65536, timeoutSeconds: 600, maxRetries: 2 },
+    supportsThinking: true,
+  },
+  {
     id: 'custom',
     label: '自定义 OpenAI 兼容端点',
     baseUrl: '',
