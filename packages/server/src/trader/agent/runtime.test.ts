@@ -106,6 +106,8 @@ const facts = (over: Record<string, unknown> = {}) => (
     tradeId: 1, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1,
     grossPnl: -0.08, fee: 0.02, peakPnlPercent: 0, leverage: 3, holdMinutes: 30,
     entryPrice: 100, exitPrice: 99,
+    /* 开仓时计划的保护位 —— 复盘员靠它区分"按计划被打掉"与"保护位挂错"。 */
+    stopLoss: 95, takeProfit: 110,
     openedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
     ...over,
   }
@@ -359,4 +361,66 @@ test('止损触发但整体盈利时必须说成「保本离场」—— 否则�
     !/平仓原因：stop_loss/.test(m.lastPrompt),
     '不能再把机器码当平仓原因印出去 —— 那正是"数据自相矛盾"的来源',
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  计划保护位：复盘员靠它区分"按计划被打掉"与"保护位挂错"                          */
+/* -------------------------------------------------------------------------- */
+
+test('★ 复盘事实里必须带上【计划的止损与止盈】—— 否则它会去历史记忆里猜，而那是别的交易', async () => {
+  /*
+   * ## 缺口是怎么被发现的（2026-10-03，AI 自己点名）
+   *
+   * 复盘员在 `#104`（WLDUSDT）里写下：
+   *
+   *   「记录的开仓止损应为 0.5440（-2.16%），实际平仓价却是 0.5516（-0.845%），
+   *    两者相差约 1.2%，说明实际止损位被收紧/挂错或成交记录有误，
+   *    **本次亏损无法区分是『趋势判断错』还是『止损设置/执行错』**。」
+   *
+   * 而事实是：那笔的止损**就是 0.552**（决策 `c15` 写的 0.552、挂单触发价 0.552、
+   * 成交 0.5516 只是 0.07% 的滑点）—— **没有挂错**。
+   * 它引用的 `0.544` 是**同一标的上一笔（#275）**的止损，**它把两笔混了**。
+   *
+   * 它为什么会混：平仓时喂给它的事实里**从来没有"计划的止损"**，
+   * 它只能从 `get_lessons` 的同标的历史记忆里翻一个数字 —— 而那个数属于别的交易。
+   *
+   * 这条用例钉住的正是调用方的责任（本文件顶部的原则）：
+   * **「让 AI 说『数据不足』是调用方的责任，不是它的。」**
+   */
+  traders.setAgentConfig(traderId, JSON.stringify(config()));
+  const m = stubModel();
+  runtime(m).reviewTrade(
+    facts({
+      symbol: 'WLDUSDT',
+      closeReason: 'stop_loss',
+      entryPrice: 0.5563,
+      exitPrice: 0.5516,
+      stopLoss: 0.552,
+      takeProfit: 0.59,
+    }),
+  );
+  await flush();
+
+  assert.match(
+    m.lastPrompt,
+    /计划保护位：止损 0\.552、止盈 0\.59/,
+    '★ 计划的止损/止盈必须出现在喂给复盘员的事实里 —— 否则它只能从同标的历史记忆里猜一个数',
+  );
+  assert.ok(
+    /止损 0\.552/.test(m.lastPrompt),
+    '必须是**本笔**的 0.552（它曾经误把上一笔的 0.544 当成本笔的）',
+  );
+});
+
+test('没有设置保护位时如实说"未设置"，不要漏掉这一行', async () => {
+  /*
+   * 漏掉一整行会让复盘员以为"这个字段不存在"，而它其实只是没设 ——
+   * 那是两种不同的结论（"没保护" vs "没数据"）。
+   */
+  traders.setAgentConfig(traderId, JSON.stringify(config()));
+  const m = stubModel();
+  runtime(m).reviewTrade(facts({ stopLoss: null, takeProfit: null }));
+  await flush();
+
+  assert.match(m.lastPrompt, /计划保护位：止损 （未设置）、止盈 （未设置）/);
 });

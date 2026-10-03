@@ -155,6 +155,8 @@ const facts = (over: Record<string, unknown> = {}) => (
     tradeId: 1, symbol: 'BTCUSDT', closeReason: 'stop_loss', netPnl: -0.1,
     grossPnl: -0.08, fee: 0.02, peakPnlPercent: 0, leverage: 3, holdMinutes: 30,
     entryPrice: 100, exitPrice: 99,
+    /* 开仓时计划的保护位 —— 复盘员靠它区分"按计划被打掉"与"保护位挂错"。 */
+    stopLoss: 95, takeProfit: 110,
     openedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
     ...over,
   }
