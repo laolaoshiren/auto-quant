@@ -202,16 +202,41 @@ test('netSince 只算窗口内的 —— 总账校验的两侧必须比同一段
   });
 
   const sinceIso = '2026-05-01T00:00:00.000Z';
-  const inWindow = trades.netSince(sinceIso);
+  /*
+   * ⚠️ **口径是【交易所账户】，不是单个机器人。**
+   *
+   * 总账校验拿平台侧净额比**交易所流水**，而流水是账户级的：它不区分"哪个机器人
+   * 下的单"，但**严格区分哪个账户**。所以这里也要按账户取。
+   */
+  const accountId = traders.get(t)!.exchangeAccountId;
+  const inWindow = trades.netSinceForAccount(accountId, sinceIso);
   assert.ok(inWindow < 5, `窗口内的净额应当只有那一笔（拿到 ${inWindow}）`);
   assert.ok(
-    trades.netSince('2020-01-01T00:00:00.000Z') > inWindow,
+    trades.netSinceForAccount(accountId, '2020-01-01T00:00:00.000Z') > inWindow,
     '把窗口放宽到全部历史时，净额必须更大 —— 否则说明 since 根本没生效',
   );
-  assert.equal(trades.netSince('2030-01-01T00:00:00.000Z'), 0, '窗口在未来时应当什么都没有');
+  assert.equal(trades.netSinceForAccount(accountId, '2030-01-01T00:00:00.000Z'), 0, '窗口在未来时应当什么都没有');
 });
 
-test('netSince 跨全部机器人求和 —— 交易所流水不区分是谁下的单', () => {
+test('★ netSince 按【交易所账户】求和 —— 同一账户的机器人合起来比流水，跨账户绝不混', () => {
+  /*
+   * ## 这条钉的是 2026-10-03 抓到的真 BUG
+   *
+   * 原来它叫「netSince 跨**全部机器人**求和」，理由是"交易所流水不区分是谁下的单"。
+   * **那句话只对了一半**：流水不区分机器人，但**严格区分账户**。
+   *
+   * 实测：`#9` 跑在子账户 #2、`#10` 跑在主账户 #3 —— 按"全部机器人"求和得到
+   * `platformSelf = -0.9387`（= #9 的 -0.0382 + #10 的 -0.9004），
+   * 而 `exchangeNet = -0.0298`（只有账户 #2 的流水），
+   * 于是 `#9` 每轮报一条 **-0.9088 的假告警**「账目与交易所对不上」。
+   * 而 `#9` 自己的账目与它自己的账户流水只差 0.0084。
+   *
+   * 假响会训练操作员忽略这条唯一能自动发现"账本真的错了"的告警 ——
+   * 所以口径必须与流水一致到**账户**这一级。
+   *
+   * ⚠️ 这里两个机器人各自建了**独立的交易所账户**（`seedTrader` 每次新建一个），
+   * 所以按账户取时它们**必须各归各的** —— 这正是修复的语义。
+   */
   const a = seedTrader('net-multi-a');
   const b = seedTrader('net-multi-b');
   for (const [t, pnl] of [[a, 2], [b, 3]] as Array<[number, number]>) {
@@ -232,6 +257,18 @@ test('netSince 跨全部机器人求和 —— 交易所流水不区分是谁下
       source: 'bot',
     });
   }
-  const total = trades.netSince('2026-05-01T00:00:00.000Z');
-  assert.ok(total >= 5, `两个机器人（2 + 3）都要算进来，拿到 ${total}`);
+  const accountA = traders.get(a)!.exchangeAccountId;
+  const accountB = traders.get(b)!.exchangeAccountId;
+  assert.notEqual(accountA, accountB, '前提：两个机器人跑在不同的交易所账户上');
+
+  assert.equal(
+    trades.netSinceForAccount(accountA, '2026-05-01T00:00:00.000Z'),
+    2,
+    '★ 账户 A 的净额只该含 A 上那个机器人的 2 —— 混进 B 的 3 就会让总账校验报假差额',
+  );
+  assert.equal(
+    trades.netSinceForAccount(accountB, '2026-05-01T00:00:00.000Z'),
+    3,
+    '★ 账户 B 同理',
+  );
 });

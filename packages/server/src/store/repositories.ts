@@ -3035,9 +3035,38 @@ export const trades = {
    * 实测：不加窗口时这个账户会报出 −0.86 的假差额，
    * 而真实差值是 0.0057（窗口边界的浮点误差）。
    */
-  netSince(sinceIso: string): number {
+  /**
+   * 某个**交易所账户**上、`since` 之后的已实现净额合计。
+   *
+   * ## 为什么按【账户】而不是按机器人（2026-10-03 抓到的真 BUG）
+   *
+   * 总账校验拿平台侧的净额去比**交易所流水** —— 而流水是**账户级**的：
+   * 它不区分"是哪个机器人下的单"，但**严格区分是哪个账户**。
+   *
+   * 所以平台侧也必须是"**同一个账户上的所有机器人**"：
+   *
+   *   · 按**单个机器人**求和 → 一个账户上跑两个机器人时，各自只看到自己那一半账目，
+   *     与整个账户的流水比 ⇒ 每个都报差额；
+   *   · 按**全部机器人**求和（原来的写法）→ 主账户与子账户的账目被混在一起，
+   *     却拿去比其中一个账户的流水 ⇒ 差额正好是**另一个账户的全部盈亏**。
+   *
+   * 实测（2026-10-03）：`#9` 跑在子账户 #2、`#10` 跑在主账户 #3，
+   * `#9` 的校验报 `platformSelf = -0.9387`（= #9 的 -0.0382 + #10 的 -0.9004），
+   * 而 `exchangeNet = -0.0298`（只有账户 #2 的流水）⇒ 假差额 **-0.9088**。
+   * 而 `#9` 自己的账目与它自己的账户流水只差 **0.0084**。
+   *
+   * 这条告警是唯一能自动发现"账本真的错了"的地方，假响会训练操作员忽略它
+   * （代码里那段注释自己就这么写着），所以口径必须与流水一致到账户这一级。
+   *
+   * @param exchangeAccountId 该机器人所用的交易所账户
+   */
+  netSinceForAccount(exchangeAccountId: number, sinceIso: string): number {
     const row = getDb().get<{ total: number | null }>(
-      'SELECT SUM(net_pnl) AS total FROM trades WHERE closed_at >= ?',
+      `SELECT SUM(t.net_pnl) AS total
+         FROM trades t
+         JOIN traders tr ON tr.id = t.trader_id
+        WHERE tr.exchange_account_id = ? AND t.closed_at >= ?`,
+      exchangeAccountId,
       sinceIso,
     );
     return row?.total ?? 0;

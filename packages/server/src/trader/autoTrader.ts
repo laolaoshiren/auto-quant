@@ -5741,7 +5741,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      * 是新的、`gap` 一模一样 —— **因为没有任何一项能告诉我改动到底作用在哪一侧**，
      * 只能再从头推一遍。把分项存下来，这个问题下次当场就答完了。
      */
-    const platformSelf = tradeStore.netSince(sinceIso);
+    const platformSelf = tradeStore.netSinceForAccount(this.deps.trader.exchangeAccountId, sinceIso);
     /*
      * ⚠️ **未平仓的持有成本必须加在平台侧，否则这个校验会永久误报。**
      *
