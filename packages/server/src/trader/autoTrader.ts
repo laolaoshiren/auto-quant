@@ -6201,6 +6201,31 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
   private leverageFor(symbol: string): number {
     const open = positionStore.open(this.deps.trader.id).find((p) => p.symbol === symbol);
     if (open && open.leverage > 0) return open.leverage;
+
+    /*
+     * ⚠️ **2026-10-05 修复：这一级原来缺失，百分比因此虚高约 40 倍。**
+     *
+     * 原来只有两级 —— "开着的仓位 → 配置上限"。而**"仓位已经平掉"正是对账的常态**
+     * （对账补录的就是**已经结束**的回合），所以绝大多数重建出来的成交都拿到
+     * `altcoinMaxLeverage` 去当杠杆。用户看到的就是那些百分比：
+     *
+     * ```text
+     * #217 SUIUSDT  net +0.44  显示 +156.05%   真实（3x）应为 +4.05%
+     * #215 QNTUSDT  net -1.19  显示 -278.75%   真实（3x）应为 -6.39%
+     * #214 SANDUSDT net -1.70  显示 -428.62%   真实（2x）应为 -6.86%
+     * ```
+     *
+     * **而这个错误被当天的另一处改动放大了**：`altcoinMaxLeverage` 从 5 改成 125
+     * （用户要求"智能托管不设边界"）→ 虚高倍数从约 2 倍变成约 40 倍，
+     * 他这才在界面上看出荒谬。
+     *
+     * `positions` 保留着**已平的行、且带着当时的真实杠杆** —— 那就是答案。
+     * 顺序因此是"开着的 → 最近一行（含已平）→ 配置上限"，
+     * 最后一级只在"这个标的从来没有过仓位"时才走到（真正的兜底）。
+     */
+    const last = positionStore.lastBySymbol(this.deps.trader.id, symbol);
+    if (last && last.leverage > 0) return last.leverage;
+
     const risk = this.activeConfig.riskControl;
     return isMajorSymbol(symbol) ? risk.btcEthMaxLeverage : risk.altcoinMaxLeverage;
   }

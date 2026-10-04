@@ -796,6 +796,36 @@ export const positions = {
   },
 
   /**
+   * **这个标的最近的一行持仓 —— 含已平掉的那些。**
+   *
+   * ## 为什么需要它（2026-10-05 实测：历史成交的百分比虚高约 40 倍）
+   *
+   * 用户看到「历史成交」里 `+$0.44 · +156.05%`、`-$1.70 · -428.62%` 这种数字，
+   * 问对不对 —— **不对**。反推每一笔的隐含保证金，全都指向一个 `leverage = 125`：
+   *
+   * ```text
+   * #214 SANDUSDT net -1.695 → -428.62%  ⇒ margin 0.3955 = 0.07446×664 / 【125】
+   * #215 QNTUSDT  net -1.1908 → -278.75% ⇒ margin 0.4272 = 267×0.2    / 【125】
+   * #217 SUIUSDT  net +0.4365 → +156.05% ⇒ margin 0.2797 = 1.1934×29.3 / 【125】
+   * ```
+   *
+   * 而它们的真实杠杆是 2 / 3 / 3。**125 正是配置里的 `altcoinMaxLeverage`。**
+   *
+   * 根因在 `autoTrader.leverageFor()`：仓位**已经被平掉**时，它查不到 `open` 行，
+   * 于是回落到"配置上限"。于是**所有由对账重建的成交**都按 125 倍算百分比。
+   *
+   * 而 `positions` 表**保留着已平的那些行、且带着当时的真实杠杆** ——
+   * 所以正确的答案是查"最近一行，不论状态"。
+   */
+  lastBySymbol(traderId: number, symbol: string): PositionRow | undefined {
+    return getDb().get<PositionRow>(
+      'SELECT * FROM positions WHERE trader_id = ? AND symbol = ? ORDER BY id DESC LIMIT 1',
+      traderId,
+      symbol,
+    );
+  },
+
+  /**
    * **账户级**：当前所有未平仓持仓的符号（不分机器人）。
    *
    * 与 `tradedSymbols` / `allTradedSymbols` 同一个理由：清点"账户上的外部活动"时，
