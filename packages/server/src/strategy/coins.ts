@@ -272,7 +272,18 @@ export async function selectCandidates(
     const notice =
       `候选池按提示词预算从 ${symbols.length} 个裁剪到 ${trimmed.length} 个` +
       `（该策略下每个标的约占 ${Math.round(estimateCandidateChars(config) / 1.7)} tokens，` +
-      `预算 ${PROMPT_TOKEN_BUDGET} tokens）`;
+      /*
+       * ⚠️ **这里原来写的是 `PROMPT_TOKEN_BUDGET`（硬编码 6 万），而它是错的。**
+       *
+       * 真正决定裁剪的是上面 `candidateBudget(config, options.budgetTokens)` 里的
+       * **调用方传进来的预算**（`autoTrader` 的 `this.promptBudget` =
+       * `promptTokenBudget(模型的 input_token_limit)`）。写死 6 万会让日志
+       * **在预算已经涨到几十万之后继续报 6 万** —— 2026-10-04 盯盘时我
+       * 就被它误导了一轮，以为"提高模型上下文"那个修复没生效，而去查了错的方向。
+       *
+       * 一个和现实不符的日志比没有日志更糟：它让人相信一个假结论。
+       */
+      `预算 ${options.budgetTokens ?? PROMPT_TOKEN_BUDGET} tokens）`;
     if (lastTrimNotice !== notice) {
       lastTrimNotice = notice;
       log.warn(notice);
