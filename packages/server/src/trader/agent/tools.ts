@@ -263,34 +263,6 @@ export const AGENT_TOOLS: readonly ToolSpec[] = [
     },
   },
   {
-    name: 'pause_trading',
-    describe:
-      'Stand aside: stop opening new positions while you keep managing what you already hold (protective orders, closes, reduces all continue). ' +
-      'Use it when the market or your own recent results say you should wait. ' +
-      // ⚠️ 这段原来是「This only ever TIGHTENS — there is no "resume" tool, because
-      // resuming is a decision the operator makes.」—— **那个前提是错的**：
-      // 它假设"操作员会替你恢复"，而这个系统是**全自动**的（用户 2026-10-04
-      // 的原话：「智能托管就是完全交给 AI 操作，AI 要能 24 小时全自动交易」）。
-      // 后果是那个开关**只能设不能撤**，机器人永久停在新仓之外。
-      'It is NOT permanent: you can lift it yourself with `resume_trading` once you judge the reason is gone. ' +
-      'Stopping is a decision about *right now*, not a verdict on the strategy — do not leave it on out of inertia.',
-    args: {
-      reason: { type: 'string', required: true, min: 1, max: 2000, describe: 'Why you are standing aside.' },
-    },
-  },
-  {
-    name: 'resume_trading',
-    describe:
-      'Lift a `pause_trading` you set earlier, so you can open new positions again. ' +
-      'Call it once the reason you stood aside no longer holds — the reason is echoed back to you every turn while the pause is on, ' +
-      'so you can compare it against what you see now. ' +
-      'Only lifts YOUR OWN pause; it cannot touch anything else (risk parameters, positions, orders). ' +
-      'Staying aside forever is a choice too — if the reason still holds, leave it on and say why in `finish`.',
-    args: {
-      reason: { type: 'string', required: true, min: 1, max: 2000, describe: 'What changed that makes opening new positions appropriate again.' },
-    },
-  },
-  {
     name: 'finish',
     describe:
       'End this turn. Call it when you are done — do not keep calling tools to look busy. If you found nothing worth changing, say so; "no change" is a valid and often correct conclusion.',
@@ -432,19 +404,6 @@ export interface AgentToolDeps {
      */
     skippedOutcomes: (cycles: number) => Promise<unknown>;
   };
-  /** 请求暂停交易（只收紧）。 */
-  requestPause: (reason: string) => void;
-  /**
-   * **撤销自己设下的暂停** —— 恢复开新仓。
-   *
-   * 与 `requestPause` 成对：停手是 AI 的自我约束，撤销它同样是 AI 的判断。
-   * 它**只**动那一个开关，不碰风控参数、不碰仓位（那些仍受"只能收紧"约束）。
-   *
-   * 从前没有这个能力，理由是"恢复由操作员决定" —— 而本系统是全自动的
-   * （用户 2026-10-04：「智能托管就是完全交给 AI 操作，AI 要能 24 小时全自动交易」），
-   * 于是那个开关**只能设不能撤**，机器人永久停在新仓之外。
-   */
-  clearPause: () => void;
   /**
    * 改变**自己的决策周期**（分钟）。
    *
@@ -682,40 +641,6 @@ export async function dispatchTool(
           note: applied.clamped
             ? `请求的 ${requested} 分钟超出允许范围（1–1440），实际设为 ${applied.minutes} 分钟。`
             : `决策周期已改为每 ${applied.minutes} 分钟一次，从下一轮起生效。`,
-        },
-      };
-    }
-    case 'pause_trading': {
-      const reason = a.reason as string;
-      deps.requestPause(reason);
-      return {
-        result: {
-          paused: true,
-          note:
-            '已停止开新仓（止损/止盈/平仓/减仓照常执行）。' +
-            '这不是永久决定 —— 等你判断当初的理由不再成立，可以自己调 resume_trading 恢复。',
-        },
-        paused: { reason },
-      };
-    }
-    case 'resume_trading': {
-      const reason = a.reason as string;
-      /*
-       * ⚠️ **恢复是 AI 自己的权限，不再需要操作员。**
-       *
-       * 原来那条路是死的：`pause_trading` 能设、交易循环也读它拦开仓，
-       * 而撤销它的函数在生产代码里零引用 —— 开关落下就撤不掉，
-       * 机器人永久停在新仓之外（用户 2026-10-04 发现的）。
-       *
-       * 而它**只**动这一个开关：不碰风控参数、不碰仓位、不下任何单。
-       * 停手是 AI 的自我约束，撤销它同样是 AI 的判断 —— 这与
-       * 「`set_params` 只能收紧」那条并不冲突（那条管的是**风控边界**）。
-       */
-      deps.clearPause();
-      return {
-        result: {
-          paused: false,
-          note: `已恢复开新仓（${reason}）。下一轮起可以正常建仓。`,
         },
       };
     }

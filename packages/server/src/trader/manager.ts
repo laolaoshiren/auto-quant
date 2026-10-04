@@ -17,7 +17,6 @@ import { aiModels, equity, exchanges, positions, runtimeLogs, settings, strategi
 import { eventBus } from '../events.js';
 import { checkConfigReachability } from '../risk/reachability.js';
 import { AgentRuntime } from './agent/runtime.js';
-import { clearPause, readPause } from './agent/ports.js';
 import { AutoTrader, type DecisionModel } from './autoTrader.js';
 
 const log = createLogger('manager');
@@ -431,48 +430,6 @@ export class TraderManager {
   }
 
   /**
-   * **AI 主动停手的详情**（没停手时是 `null`）。
-   *
-   * 供 `/api/traders` 把状态发给界面 —— 没有它，界面上根本看不出
-   * "这个机器人被自己叫停了、而且每一轮都在拦下开仓决策"。
-   *
-   * 直接读 `settings`（`readPause`），**不需要**那个机器人正在运行：
-   * 停手状态是持久的，机器人停着的时候它照样有意义。
-   */
-  pausedInfo(traderId: number): { at: string; reason: string } | null {
-    return readPause(traderId);
-  }
-
-  /**
-   * **恢复交易** —— 撤掉 AI 设下的停手开关，让它下一轮能重新开新仓。
-   *
-   * ## 为什么必须有这个入口（2026-10-04）
-   *
-   * 用户的原话：「**再也不会开新仓？你确定？那这个机器人存在意义是什么？**」
-   *
-   * 他说得对。这条链原本只写了一半：模型能调 `pause_trading` 设上开关、
-   * 交易循环也读它并拦开仓，**而清除它的 `clearPause()` 只在测试里被调用过** ——
-   * 生产代码里零引用。于是那个开关一旦落下就**再也撤不掉**，
-   * 机器人永久停在新仓之外，而人只看到决策卡上不断出现的
-   * 「开多 / 未执行（已跳过）」，既查不到原因也没有出口。
-   *
-   * **一个只能收紧、不能放松的开关不是风控，是死锁。**
-   *
-   * 这里只清开关：不改参数、不碰仓位。AI 当初停手时明确写了
-   * 「已有仓位保持原计划管理」，所以恢复也不该顺带做别的。
-   */
-  resumeAgent(traderId: number): void {
-    const was = readPause(traderId);
-    clearPause(traderId);
-    runtimeLogs.write(
-      traderId,
-      'info',
-      'manager',
-      was
-        ? `操作员已恢复交易（撤掉 AI 的停手开关；它当时停手于 ${was.at}）`
-        : '操作员请求恢复交易，但该机器人当时并未处于停手状态',
-    );
-  }
 
   /**
    * 某个机器人此刻是不是在纸面模式下跑。
@@ -1231,7 +1188,6 @@ export class TraderManager {
           triggerReview: (reason) => agentRuntime.triggerReview(reason),
           settleOnly: () => agentRuntime.settleOnly(),
           reviewTrade: (t) => agentRuntime.reviewTrade(t),
-          paused: () => agentRuntime.paused() !== null,
         },
       });
 

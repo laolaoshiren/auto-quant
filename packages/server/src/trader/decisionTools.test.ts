@@ -19,57 +19,11 @@ function deps(overrides: Partial<DecisionToolDeps> = {}): DecisionToolDeps {
     screenSymbols: async () => [],
     requestDeepAnalysis: async () => ({ accepted: [], rejected: [] }),
     applyPatch: async () => ({ applied: true, rejected: null, clamps: [] }),
-    resumeTrading: async (reason) => ({ resumed: true, note: reason }),
     ...overrides,
   } as DecisionToolDeps;
 }
 
-test('★ resume_trading：决策轮必须能撤销自己设的停手 —— 又一个死锁', async () => {
-  /*
-   * ## 2026-10-04 的实盘
-   *
-   * AI 于 20:05 停手，之后每轮继续分析，决策卡不断出现「开多 / 未执行（已跳过）」。
-   * 用户的原话：
-   *
-   * > 「**既然 AI 要停手，那么为什么页面上要显示开仓了**」
-   *
-   * 两处修：① 提示词告知它状态（已生效，`c73`/`c74` 起不再出现 `open_long`）；
-   * ② **给它撤销的能力** —— 而当时 `resume_trading` 只加在**觉醒轮**，
-   * 那台机器人的觉醒轮自 20:29 起就没跑过，而决策轮每 30 分钟在跑。
-   * 于是它在思维链里写「本轮用 resume_trading 恢复」，**实际做不到**。
-   *
-   * 与下面那条 `set_params` 是同一种死锁：**能力必须接在"它做判断的那一轮"上。**
-   */
-  const calls: string[] = [];
-  const out = await runDecisionTool(
-    { tool: 'resume_trading', args: { reason: '当时担心的持仓叠加已经不存在了，账户零敞口' } },
-    deps({
-      resumeTrading: async (reason) => {
-        calls.push(reason);
-        return { resumed: true, note: reason };
-      },
-    }),
-  );
-  assert.deepEqual(calls, ['当时担心的持仓叠加已经不存在了，账户零敞口']);
-  assert.match(out.text, /已恢复开新仓/);
-  /* 恢复 ≠ 必须开仓 —— 这句要在回喂里，否则它可能立刻乱开仓。 */
-  assert.match(out.text, /不等于必须开仓/);
-});
 
-test('resume_trading 缺 reason 会被拒 —— 说不清理由的恢复不给过', async () => {
-  let called = false;
-  const out = await runDecisionTool(
-    { tool: 'resume_trading', args: {} },
-    deps({
-      resumeTrading: async (reason) => {
-        called = true;
-        return { resumed: true, note: reason };
-      },
-    }),
-  );
-  assert.equal(called, false, '没有理由就不该真的执行');
-  assert.match(out.text, /需要一个 reason/);
-});
 
 test('★ set_params：决策轮也必须能改自己的参数 —— 这一条为一个死锁而写', async () => {
   /*

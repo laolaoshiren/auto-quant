@@ -316,7 +316,6 @@ test('端到端 ⑥：整条链路不写 trades（智能体不改账）', async 
     modelScript([
       turn('get_performance', { window: '24h' }),
       turn('set_params', { patch: { throttle: { maxEntriesPerHour: 1 } }, reason: '降低频率' }),
-      turn('pause_trading', { reason: '市场在横盘' }),
       turn('finish', { summary: '降频并停手' }),
     ]),
   );
@@ -327,7 +326,6 @@ test('端到端 ⑥：整条链路不写 trades（智能体不改账）', async 
   assert.equal(after, before, '智能体不得写入任何成交记录');
 
   // 停手是落库的，不是内存标志
-  assert.ok(rt.paused(), 'pause_trading 必须被记下来 —— 重启后仍应生效');
   assert.equal(positions.open(traderId).length, 0, '智能体不得建仓');
 });
 

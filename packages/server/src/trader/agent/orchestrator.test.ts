@@ -50,7 +50,6 @@ test('策略师的步数预算必须容得下"必读清单 + 决策"', () => {
    * 必读清单又多一步，而预算没跟着动，那等于把更多运行推进"必然撞限"的区间。
    *
    * 策略师的纪律要求它先读 get_experiments 与 get_lessons，再读绩效 / 权益曲线 /
-   * 最近决策 / 当前参数 —— **6 次只读调用**，之后还要 set_params（或 pause_trading）
    * 与 finish。**预算小于这个数，它必然撞上限、必然没有结论。**
    *
    * 实测代价：`agent_runs` 里 39 次 `degraded`（占 33%）的 detail 全是
@@ -122,8 +121,6 @@ function makePorts(over: Partial<OrchestratorPorts> = {}) {
     settleExperiment: (id, outcome) => settled.push({ id, ...outcome }),
     recordExperiment: (row) => experiments.push(row),
     recordRun: (row) => runs.push(row),
-    requestPause: (reason) => pauses.push(reason),
-    clearPause: () => {},
     /* 测试要能看到 AI 改周期这件事 —— 与 pauses 同一个形状。 */
     cycleInterval: () => 3,
     setCycleInterval: (minutes) => { cycleIntervals.push(minutes); return { minutes, clamped: false }; },

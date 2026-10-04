@@ -1462,24 +1462,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        * 而人既找不到原因、也找不到出口。
        * **一个只能收紧不能放松的开关，不是风控，是死锁。**
        */
-      agentPaused: deps.manager.pausedInfo(trader.id),
     }));
-  });
-
-  /**
-   * **恢复交易** —— 撤掉 AI 主动设下的停手开关。
-   *
-   * 与手工平仓同为"操作员对自己资金的控制权"，所以**不检查机器人是否在运行**
-   * （理由与下面 `close-all` 那条路由相同）：停手是常见状态，恢复后它下一轮就能开新仓。
-   *
-   * 它**只**清掉那个开关：不改策略参数、不碰仓位、不触发任何平仓 ——
-   * AI 当初停手时明确写过「已有仓位保持原计划管理」，这里也不替它决定别的。
-   */
-  app.post('/api/traders/:id/resume', authed, async (request) => {
-    const id = Number((request.params as { id: string }).id);
-    if (!traders.get(id)) throw new Error('未知的机器人');
-    deps.manager.resumeAgent(id);
-    return { ok: true };
   });
 
   app.post('/api/traders', authed, guard(async (body: unknown) => {

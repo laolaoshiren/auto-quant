@@ -129,7 +129,6 @@ test('没有 AI 配置时整个空转 —— 老机器人行为不变', async ()
 
   assert.equal(rt.isEnabled(), false);
   assert.equal(rt.configOverride(), null, '非 AI 模式不得提供配置覆盖');
-  assert.equal(rt.paused(), null);
 
   rt.triggerReview();
   rt.settleOnly();

@@ -289,7 +289,6 @@ promptSections（roleDefinition / tradingFrequency / entryStandards / decisionPr
 那是程序层的约束，写在代码里，不因为你改提示词而改变。
 （这不是限制，是让你改提示词时不用担心把安全边界一起改掉。）
 
-你同样可以用 pause_trading 主动停手 —— 但那只能收紧。
 
 ## 你怎么行动：你在跑一个工具循环
 

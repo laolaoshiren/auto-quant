@@ -99,27 +99,6 @@ export interface DecisionToolDeps {
     patch: Record<string, unknown>,
     reason: string,
   ): Promise<{ applied: boolean; rejected: string | null; clamps: unknown }>;
-  /**
-   * ⚠️ **撤掉自己设的停手开关 —— 决策轮也要有这条通道（2026-10-04）。**
-   *
-   * ## 与上面 `applyPatch` 是同一类死锁，同一个解法
-   *
-   * 2026-10-04 的实盘：AI 于 20:05 用 `pause_trading` 停手，之后每轮继续分析，
-   * 决策卡上不断出现「开多 / 未执行（已跳过）」—— 用户的原话是
-   * 「**既然 AI 要停手，那么为什么页面上要显示开仓了**」。
-   *
-   * 修法分两步：
-   *   ① 提示词告知它"你在停手状态"（已生效：`c73`/`c74` 起不再出现 `open_long`）；
-   *   ② **给它撤销的能力** —— 而 `resume_trading` 当时只加在了**觉醒轮**
-   *      （`agent/tools.ts`），那台机器人的觉醒轮自 20:29 起就没再跑过，
-   *      而决策轮每 30 分钟在跑。于是它只能在思维链里写
-   *      「本轮用 resume_trading 恢复」，**而实际上做不到**（开关一直没被撤）。
-   *
-   * 同一个教训第二次出现：**能力必须接在"它做判断的那一轮"上**。
-   *
-   * 它只清那一个开关 —— 不含任何参数或仓位操作。
-   */
-  resumeTrading(reason: string): Promise<{ resumed: boolean; note: string }>;
 }
 
 /** 模型点名要深看的标的。 */
@@ -184,7 +163,6 @@ export const DECISION_TOOL_CATALOGUE = `
     下一轮就不在池子里了 —— **这个工具就是让它留下来**。
   - 注意：名单有上限，也按轮数自动过期（默认几轮后消失）。**续点一次就会续期。**
     超上限时系统会如实告诉你哪些没被收下。
-- \`resume_trading(reason)\` —— **撤销你自己设的停手**（与 \`pause_trading\` 成对）。
   - 只在**处于停手状态**时才有意义：那种情况下你每轮的提示词里会带上
     「你当前处于停手状态 + 当初的理由」。
   - \`reason\`：必填。说清**当初那条理由为什么不再成立**（例如"当时担心的持仓叠加
@@ -411,29 +389,6 @@ export async function runDecisionTool(
             : '') +
           '\n（改动下一轮生效；硬上限由代码强制，与这里写什么无关。）',
         summary: `set_params → ${outcome.applied ? '已生效' : '被拒'}`,
-      };
-    }
-
-    if (call.tool === 'resume_trading') {
-      /*
-       * ⚠️ **决策轮撤销自己设的停手**（2026-10-04）—— 见 `DecisionToolDeps.resumeTrading`
-       * 上的说明：能力必须接在"它做判断的那一轮"上，而觉醒轮那次没跑。
-       */
-      const reason = typeof call.args.reason === 'string' && call.args.reason.trim() !== '' ? call.args.reason : '';
-      if (reason === '') {
-        return {
-          text:
-            'resume_trading 需要一个 reason —— 说清"当初停手的理由为什么不再成立"。\n' +
-            '那条理由原文会在你每轮的提示词里给出，照着它逐条对照即可。',
-          summary: 'resume_trading 缺少 reason',
-        };
-      }
-      const outcome = await deps.resumeTrading(reason);
-      return {
-        text: outcome.resumed
-          ? `已恢复开新仓（${outcome.note}）。下一轮起可以正常建仓 —— **恢复本身不等于必须开仓**，仍旧按你的入场标准挑。`
-          : `没有恢复：${outcome.note}`,
-        summary: `resume_trading → ${outcome.resumed ? '已恢复' : '未恢复'}`,
       };
     }
 

@@ -32,7 +32,7 @@ import { decisions as decisionStore } from '../../store/repositories.js';
 import { traders } from '../../store/repositories.js';
 import type { LoopModel } from './loop.js';
 import { hasAgentConfig, readAgentConfig } from './config.js';
-import { markStrategyReview, markWoken, makeAgentPorts, readPause } from './ports.js';
+import { markStrategyReview, markWoken, makeAgentPorts } from './ports.js';
 import { reviewClosedTrade, runStrategyReview, settlePending } from './orchestrator.js';
 import { DEFAULT_WAKE_POLICY, type WakePolicy } from './wake.js';
 
@@ -137,11 +137,6 @@ export class AgentRuntime {
      * 走同一条路 —— 行为与改动前一致，只是**多了一道 schema 校验**。
      */
     return readAgentConfig(this.deps.traderId, null);
-  }
-
-  /** 是否被 AI 主动停手。**恢复由操作员决定，模型没有这个工具。** */
-  paused(): { at: string; reason: string } | null {
-    return readPause(this.deps.traderId);
   }
 
   /**

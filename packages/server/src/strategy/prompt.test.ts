@@ -142,28 +142,7 @@ function contextWith(memory: PromptMemory, candidates?: MarketSnapshot[]): Promp
  *
  * 这几条钉住"告知"这件事：说了什么、以及有没有说清"你可以自己撤"。
  */
-test('★ 停手时提示词必须【明确要求本轮不要提开仓】', () => {
-  const ctx: PromptContext = {
-    ...contextWith(blankMemory()),
-    paused: { at: '2026-01-01T20:05:26.000Z', reason: '连续三笔亏损，等参数实验结算' },
-  };
-  const user = buildUserPrompt(ctx);
 
-  assert.match(user, /停手状态/, '要有一个显眼的标题，不能埋在段落里');
-  assert.match(user, /连续三笔亏损/, '★ 当初的理由必须给出来 —— 它要据此判断是否仍然成立');
-  assert.match(
-    user,
-    /不要提出任何 open_long/,
-    '★ 必须明说"本轮不要提开仓"：不写这句，它会照常输出 open_long 然后被拦下',
-  );
-  assert.match(user, /resume_trading/, '★ 要告诉它"你可以自己撤销" —— 否则那是一个只能收紧的锁');
-});
-
-test('没停手时提示词里不该出现那一段 —— 别给模型塞无关的警告', () => {
-  const user = buildUserPrompt(contextWith(blankMemory()));
-  assert.doesNotMatch(user, /停手状态/);
-  assert.doesNotMatch(user, /resume_trading/);
-});
 
 /** 一个"还没有任何成交"的记忆区块，用例在它上面改字段。 */
 function blankMemory(): PromptMemory {

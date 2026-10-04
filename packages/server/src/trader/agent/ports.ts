@@ -27,8 +27,6 @@ import { readAgentConfig } from './config.js';
 
 /** "上次唤醒"落库用的键。 */
 const lastWakeKey = (traderId: number) => `agent_last_wake:${traderId}`;
-/** 暂停标记落库用的键。 */
-const pausedKey = (traderId: number) => `agent_paused:${traderId}`;
 
 /* -------------------------------------------------------------------------- */
 /*  时间                                                                       */
@@ -658,31 +656,6 @@ export function makeAgentPorts(deps: AgentPortDeps): OrchestratorPorts {
         latencyMs: row.result.latencyMs,
       }),
 
-    /*
-     * 暂停是**落库**的，不是内存标志。
-     *
-     * 内存标志在进程重启后会消失 —— 一个"因为亏太多而主动停手"的决定，
-     * 不该被一次重启悄悄撤销。
-     */
-    requestPause: (reason) => {
-      settings.set(pausedKey(traderId), JSON.stringify({ at: new Date().toISOString(), reason }));
-    },
-
-    /*
-     * **撤销自己设下的暂停** —— 与 `requestPause` 成对。
-     *
-     * 从前没有它，理由是"恢复由操作员决定"（工具描述里写着这句话）。而本系统是
-     * **全自动**的（用户 2026-10-04：「智能托管就是完全交给 AI 操作，
-     * AI 要能 24 小时全自动交易」「别给我画蛇添足整这些按钮出来」）——
-     * 于是那个开关**只能设不能撤**，机器人永久停在新仓之外，
-     * 而它自己还不知道（提示词里也没告诉它），每轮仍在建议开仓。
-     *
-     * 这里只清开关。风控参数、仓位、订单都不受影响 ——
-     * "停手"是 AI 的自我约束，不是操作员的一道锁。
-     */
-    clearPause: () => {
-      settings.set(pausedKey(traderId), '');
-    },
 
     /*
      * AI 改自己的决策周期。
@@ -791,22 +764,6 @@ export function markWoken(traderId: number, equityNow: number | null): void {
 /** 记下"这一轮做了策略审视"。强度选择依赖它。 */
 export function markStrategyReview(traderId: number): void {
   settings.set(`agent_last_review:${traderId}`, new Date().toISOString());
-}
-
-/** 读取暂停状态。 */
-export function readPause(traderId: number): { at: string; reason: string } | null {
-  const raw = settings.get(pausedKey(traderId));
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as { at: string; reason: string };
-  } catch {
-    return null;
-  }
-}
-
-/** 清除暂停（由操作员决定恢复，模型没有这个工具）。 */
-export function clearPause(traderId: number): void {
-  settings.set(pausedKey(traderId), '');
 }
 
 /** 复盘写入记忆。 */

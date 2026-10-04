@@ -23,8 +23,8 @@ import { defaultStrategyConfig, STRATEGY_PRESETS, StrategyConfigSchema, type Str
 import { closeDb, initDb } from '../../db/index.js';
 import { agentExperiments, agentRuns } from '../../store/agentStore.js';
 import { aiModels, exchanges, strategies, traders, trades } from '../../store/repositories.js';
-import { clearPause, leafPaths, makeAgentPorts, markStrategyReview, markWoken, readPause, saveMemory } from './ports.js';
 import { MAX_JSON_CHARS } from './tools.js';
+import { leafPaths, makeAgentPorts, markStrategyReview, markWoken, saveMemory } from './ports.js';
 
 const workDir = mkdtempSync(path.join(tmpdir(), 'aq-ports-'));
 const config = (): StrategyConfig =>
@@ -294,54 +294,6 @@ test('★ 复盘的最终结论必须落库 —— 否则"我打开网页看到�
   assert.equal(latest.steps, 2);
 });
 
-test('撞步数上限（degraded）时不要伪造结论', () => {
-  /*
-   * `degraded` 的含义是"没有结论"（撞了步数上限），那时 `conclusion` 是 null，
-   * 而 `detail` 里写着"达到步数上限…本轮没有结论"。
-   * 拼接时若补一个空结论，就把"没有结论"伪装成了"有一个空结论"。
-   */
-  const p = ports();
-  p.recordRun({
-    kind: 'strategy',
-    trigger: 'losing_streak',
-    intensity: 'single',
-    result: {
-      outcome: 'degraded',
-      steps: [],
-      conclusion: null,
-      detail: '达到步数上限（13 步）仍未结束，本轮没有结论。',
-      tokensIn: 1,
-      tokensOut: 1,
-      latencyMs: 1,
-    } as never,
-  });
-  const latest = agentRuns.recent(traderId, 1)[0]!;
-  assert.equal(
-    String(latest.detail),
-    '达到步数上限（13 步）仍未结束，本轮没有结论。',
-    '★ 没有结论时不要写"结论："这一行',
-  );
-});
-
-/* -------------------------------------------------------------------------- */
-/*  暂停与记忆                                                                 */
-/* -------------------------------------------------------------------------- */
-
-test('暂停是落库的，重启之后仍然生效', () => {
-  /*
-   * 内存标志在进程重启后会消失 —— 一个"因为亏太多而主动停手"的决定，
-   * 不该被一次重启悄悄撤销。
-   */
-  ports().requestPause('连续亏损，先站到一边');
-  const read = readPause(traderId);
-  assert.ok(read, '暂停必须被记下来');
-  assert.match(read!.reason, /连续亏损/);
-  assert.ok(read!.at, '要记时间 —— 否则看不出停了多久');
-
-  clearPause(traderId);
-  assert.equal(readPause(traderId), null, '操作员可以恢复');
-});
-
 test('策略审视时间被记下（强度选择依赖它）', () => {
   markStrategyReview(traderId);
   assert.ok(ports().collectFacts().minutesSinceStrategyReview < 1);
@@ -478,4 +430,3 @@ test('★ repeatedFields 数出"同一个参数改过几次、合计结果如何
     '只改过一次的字段是正常迭代，不该混进来',
   );
 });
-

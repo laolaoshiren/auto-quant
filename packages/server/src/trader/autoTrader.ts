@@ -83,17 +83,6 @@ import {
 } from '../store/repositories.js';
 import { rankPlatformHistory } from '../strategy/platformHistory.js';
 import { applyAgentPatch } from './agent/patch.js';
-/*
- * ⚠️ 直接读停手状态，**不经过 `deps.agent` 端口**。
- *
- * 那个端口上只有 `paused: () => boolean`（给闸门用），而提示词需要的是
- * **完整的 `{ at, reason }`** —— 理由必须一起给模型，否则它无法判断
- * "当初为什么停手、现在还成立吗"（见 `strategy/prompt.ts` 里那一段）。
- *
- * `readPause` 是纯 `settings` 读取，与 `positionStore` 同类，
- * 在这里直接调用比再往端口上加一个方法更少牵扯。
- */
-import { clearPause, readPause } from './agent/ports.js';
 import { rankConsensus } from '../strategy/consensus.js';
 import { clampNextCheckMinutes, nextCycleDelayMs } from './cycleSchedule.js';
 import { pendingTimeoutMinutes } from './pendingTimeout.js';
@@ -552,8 +541,6 @@ export interface AgentHook {
   settleOnly: () => void;
   /** 一笔平仓之后请复盘员写因果结论。**不阻塞。** */
   reviewTrade: (trade: ReviewTradeFacts) => void;
-  /** AI 是否主动停手（停手时不开新仓，既有仓位的管理照常）。 */
-  paused: () => boolean;
 }
 
 /**
@@ -2518,21 +2505,6 @@ export class AutoTrader {
         ...readForeignActivity(traderId),
       },
       positions: promptPositions,
-      /*
-       * ⚠️ **AI 自己设的停手状态必须进提示词**（用户 2026-10-04 的批评）。
-       *
-       * 他说：「页面上显示了开多，又显示 AI 已主动停手：本轮不开新仓，
-       * 你完全就是自相矛盾 —— 既然 AI 要停手，那么为什么页面上要显示开仓了？」
-       *
-       * 那段矛盾的根因就是这一行原来不存在：模型调完 `pause_trading` 之后
-       * **后续每轮的提示词都没告诉它**，于是它继续认真给出开仓建议，
-       * 而下面的 `agentPaused` 闸门把它们全拦掉 ——
-       * 页面同时显示「开多」与「本轮不开新仓」，而且白烧一整轮决策。
-       *
-       * 传给它之后，提示词会明确要求"本轮不要提开仓"，并提示它可以用
-       * `resume_trading` 自己撤销（见 `strategy/prompt.ts` 里那一段）。
-       */
-      paused: readPause(traderId),
       candidates: snapshots,
       oiRanking,
       marketOverview,
@@ -2821,29 +2793,6 @@ export class AutoTrader {
           rejected: result.rejected,
           clamps: result.clamps,
         };
-      },
-      /*
-       * ⚠️ **决策轮撤销停手**（2026-10-04）。
-       *
-       * 实盘：AI 于 20:05 停手，之后每轮继续分析、决策卡不断出现「开多 / 未执行」。
-       * 提示词告知它状态之后（`c73`/`c74` 起不再出现 `open_long`），
-       * 它在思维链里写「本轮用 `resume_trading` 恢复」—— **而那个工具当时只加在
-       * 觉醒轮**，那台机器人的觉醒轮自 20:29 起就没跑过，于是它**说得到、做不到**。
-       *
-       * 同一个教训第二次出现：**能力必须接在"它做判断的那一轮"上**。
-       */
-      resumeTrading: async (reason) => {
-        const was = readPause(traderId);
-        if (!was) {
-          return { resumed: false, note: '你当前并不处于停手状态（可能已经在别处恢复了）' };
-        }
-        clearPause(traderId);
-        this.emitOnChange(
-          'agent-resumed',
-          'info',
-          `AI 自己撤销了停手：${reason}（它当初停手于 ${was.at}）`,
-        );
-        return { resumed: true, note: reason };
       },
     };
 
@@ -3134,48 +3083,8 @@ export class AutoTrader {
 
     /* --- 9. Hard risk review --------------------------------------------- */
     state.phase = 'risk';
-    /*
-     * ⚠️ **AI 主动停手时，只放行"减少风险"的决策。**
-     *
-     * `pause_trading` 工具从写下来那天起就没有生效过：它把状态写进
-     * `settings.agent_paused:<id>`，而**交易循环从来没有读过它** ——
-     * `deps.paused` 在整个文件里只出现在接口声明那一行。于是 AI 调用它之后
-     * 仓位照开，而工具回喂给它的是一句肯定句「已停止开新仓」：**AI 的上下文里
-     * 被写入了一个假事实**，下一轮的推理建立在"我已经停手了"之上。
-     *
-     * 这是 AI 除了调参之外**唯一能减少风险的动作**，而它对结果零影响 ——
-     * 比"工具不存在"更糟，因为它让模型以为自己已经做了该做的事。
-     *
-     * 闸门放在风控之前：开仓一律拦下（`open_long` / `open_short`），
-     * 平仓与减仓照常走 —— 与 §2.9「减少风险的工作先于增加风险的工作」一致。
-     * 拦下的每一条都进执行日志，**不是静默丢弃**（否则决策流上看不出
-     * "这一轮为什么没开仓"）。
-     */
     const orderedDecisions = sortDecisions(parsed.decisions);
-    const isOpening = (action: DecisionAction): boolean =>
-      action === 'open_long' || action === 'open_short';
-    const agentPaused = this.deps.agent?.paused() ?? false;
-    const gatedDecisions = agentPaused
-      ? orderedDecisions.filter((d) => !isOpening(d.action))
-      : orderedDecisions;
-    if (agentPaused) {
-      for (const d of orderedDecisions.filter((x) => isOpening(x.action))) {
-        executionLog.push({
-          action: d.action,
-          symbol: d.symbol,
-          status: 'skipped',
-          detail: 'AI 已主动停手（pause_trading）：本轮不开新仓；既有仓位的管理与平仓照常。',
-        });
-      }
-      const dropped = orderedDecisions.length - gatedDecisions.length;
-      if (dropped > 0) {
-        this.emitOnChange(
-          'agent-paused',
-          'info',
-          `AI 处于停手状态：拦下 ${dropped} 条开仓决策，平仓与减仓照常执行。恢复由操作员决定。`,
-        );
-      }
-    }
+    const gatedDecisions = orderedDecisions;
 
     const verdict = this.risk.review(gatedDecisions, {
       config,

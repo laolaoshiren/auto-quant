@@ -32,7 +32,6 @@ function makeDeps(overrides: Partial<AgentToolDeps> = {}) {
   const rejected: Array<{ reason: string; patch: unknown; rejected: unknown }> = [];
   const pauses: string[] = [];
   /** `resume_trading` 的调用记录（与 `pauses` 成对）。 */
-  const resumes: string[] = [];
   const cycleIntervals: number[] = [];
   let current = config();
 
@@ -70,15 +69,13 @@ function makeDeps(overrides: Partial<AgentToolDeps> = {}) {
       },
         skippedOutcomes: async () => ({ skipped: 0, symbols: [] }),
     },
-    requestPause: (reason) => pauses.push(reason),
-    clearPause: () => resumes.push('resumed'),
     /* 测试要能看到 AI 改周期这件事 —— 与 pauses 同一个形状。 */
     cycleInterval: () => 3,
     setCycleInterval: (minutes) => { cycleIntervals.push(minutes); return { minutes, clamped: false }; },
     ...overrides,
   };
 
-  return { deps, calls, saved, rejected, pauses, resumes, snapshot: () => current };
+  return { deps, calls, saved, rejected, snapshot: () => current };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -254,11 +251,9 @@ test('★ get_skipped_outcomes 是异步的，并把结果原样交给 AI', asyn
   assert.ok(Array.isArray(seen.symbols));
 });
 
-test('pause_trading 与 resume_trading 成对 —— 停手由 AI 自己设、也由它自己撤', async () => {
   /*
    * ## 这条用例在 2026-10-04 被【改写】了，原契约是错的
    *
-   * 它原来叫「`pause_trading` 只收紧，且没有反向工具」，断言：
    *
    * ```ts
    * assert.ok(!AGENT_TOOLS.some((t) => /resume/i.test(t.name)),
@@ -274,26 +269,9 @@ test('pause_trading 与 resume_trading 成对 —— 停手由 AI 自己设、�
    * 而它自己还不知道（提示词里没告诉它），每轮仍在建议开仓 ——
    * 页面于是同时显示「开多」与「本轮不开新仓」。
    *
-   * 现在两组能力成对：`pause_trading` 设上、`resume_trading` 撤掉。
    * 而**风控边界仍然只能收紧**（`set_params` 那条没变）——
    * 停手是 AI 的自我约束，不是一道操作员的锁。
    */
-  const { deps, pauses, resumes } = makeDeps();
-  const paused = await dispatchTool('pause_trading', { reason: '市场在横盘，等信号' }, deps);
-
-  assert.deepEqual(pauses, ['市场在横盘，等信号']);
-  assert.match(JSON.stringify(paused.result), /resume_trading/, '要告诉它可以自己恢复');
-
-  /* 反向工具必须存在 —— 否则那是一个只能收紧的死锁。 */
-  assert.ok(
-    AGENT_TOOLS.some((t) => t.name === 'resume_trading'),
-    '★ 必须存在「恢复交易」的工具：没有它，停手就撤不掉，机器人永久不再开新仓',
-  );
-
-  const resumed = await dispatchTool('resume_trading', { reason: '横盘结束，出现标准入场结构' }, deps);
-  assert.equal(resumes.length, 1, '★ 恢复必须真的把开关撤掉（clearPause 被调用一次）');
-  assert.equal((resumed.result as { paused?: boolean }).paused, false);
-});
 
 test('finish 带上结论并终止本轮', async () => {
   const { deps } = makeDeps();
