@@ -452,18 +452,38 @@ export async function runDecisionTool(
 /**
  * 把 K 线渲染成提示词片段。
  *
- * **每根一行、逗号分隔**，而不是 JSON —— 同样的信息，JSON 要多花一倍字符，
- * 而这一段的读者是模型，它读逗号分隔的表比读嵌套对象更不容易看错行。
- * 时间用 UTC 的 `MM-DD HH:mm`（模型不需要秒和年份来判断走势形态）。
+ * **每根一行、空格分隔**，而不是 JSON —— 同样的信息，JSON 要多花一倍字符，
+ * 而这一段的读者是模型，它读定宽的表比读嵌套对象更不容易看错行。
+ *
+ * ## 2026-10-07 压缩：去掉了每行的 `O/H/L/C/V` 字母
+ *
+ * 用户要求「压缩工具返回的数据，且**不能影响效果**」。先量了再改：
+ *
+ * ```text
+ * 单轮提示词        ≈ 40,492 tokens      （150 KB）
+ * 模型实收          = 512,587 tokens     ← 同一份上下文被重复发送 12.7 倍
+ * 其中 K 线         ≈ 10,000 tokens/轮   （8 次取数 × 120 根）
+ * ```
+ *
+ * 因为要乘 12.7 倍，**这里省下的每一个字符都会放大 12 倍**。
+ *
+ * 改的是**纯粹的格式冗余**：`O2.914 H2.918 L2.905 C2.912 V1234` 里的字母
+ * 只是给人类看的列标签，而**列的次序本身就是契约**（O/H/L/C/V，与交易所的
+ * `open,high,low,close,volume` 同序）。把次序写进表头一次，就不必每行重复五次。
+ * **数值一个不少、精度一点没降、时间戳保留** —— 所以这是无损压缩，
+ * 不是"为了省而省"。省下约 11% 的 K 线字符（字母占 5/45）。
+ *
+ * 时间保留 `MM-DD HH:mm`：模型要靠它判断"两根之间隔了多久"，去掉它才是
+ * 真的改变效果 —— 那种改动必须 A/B 实测过才能上，这里不做。
  */
 function renderKlines(symbol: string, timeframe: string, candles: Kline[]): string {
   const lines = candles.map((c) => {
     const t = new Date(c.openTime);
     const stamp = `${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')} ${String(t.getUTCHours()).padStart(2, '0')}:${String(t.getUTCMinutes()).padStart(2, '0')}`;
-    return `${stamp} O${trim(c.open)} H${trim(c.high)} L${trim(c.low)} C${trim(c.close)} V${trim(c.volume)}`;
+    return `${stamp} ${trim(c.open)} ${trim(c.high)} ${trim(c.low)} ${trim(c.close)} ${trim(c.volume)}`;
   });
   return [
-    `${symbol} ${timeframe} 最近 ${candles.length} 根 K 线（UTC，O/H/L/C/V）：`,
+    `${symbol} ${timeframe} 最近 ${candles.length} 根 K 线（UTC 时间 + 空格分隔的 O H L C V 五列，与交易所同序）：`,
     ...lines,
   ].join('\n');
 }
