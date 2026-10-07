@@ -911,11 +911,18 @@ export function TraderPage() {
           title={
             '总盈亏 = 已平仓的净盈亏 + 当前持仓的浮动盈亏，**与下面曲线的「本段变化」同一个口径**。' +
             '它等于「归属权益 − 起始权益」（归属口径：只算这个机器人自己的账）。' +
-            '只看已平仓那一部分，见「盈亏拆解」。'
+            '只看已平仓那一部分，见「盈亏拆解」。' +
+            (ledgerSuspect
+              ? ` ⚠️ 本地账本与交易所流水差 ${fmtUsdSigned(ledger!.gap, 2)}` +
+                `（账本 ${fmtUsdSigned(ledger!.platformNet, 2)} / 交易所 ${fmtUsdSigned(ledger!.exchangeNet, 2)}）——` +
+                '这个数字已按【交易所流水】校准显示。差额来源：本仓库的账本按"腿"记账，' +
+                '而交易所按"整回合"结算，共享账户下两者无法完全对齐。'
+              : '')
           }
           sub={
             stats ? (
               <>
+                {ledgerSuspect ? <span title="已按交易所流水校准">⚠️ </span> : null}
                 今日 <span className={pnlColor(todayPnl)}>{fmtUsdSigned(todayPnl, 2)}</span>
                 {' · '}
                 <span className={pnlColor(stats.totalReturnPercent)}>{fmtPercent(stats.totalReturnPercent)}</span>
