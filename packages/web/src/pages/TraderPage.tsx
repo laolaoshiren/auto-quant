@@ -567,6 +567,22 @@ export function TraderPage() {
    * 也就是说：这一处是**全卡唯一的例外**，改完三者才一致。
    */
   const totalPnl = realized + unrealized;
+  /*
+   * ⚠️ **卡片上的三个数必须同口径 —— 否则它们之差就是账本的那个 gap。**
+   *
+   * 2026-10-07 独立验收发现的第二处不自洽：主数字「交易盈亏」已经改用交易所校准值
+   * （`realized = ledger.exchangeNet`），而同一张卡的「今日盈亏」「总收益率」仍然
+   * 走未校准的账本权益（`stats.equity`，里面含 `platformNet`）。
+   * 三个数的差恰好等于 `ledger.gap`（当时 0.175728）。
+   *
+   * 修法：用**同一个** `realized`（已校准）与**同一个** `unrealized`（实时）
+   * 重算"归属权益"，让卡片的每个数都从它派生。
+   * 服务端的 `computeTraderStats` 本身没算错 —— 它只是不知道账本已被校准，
+   * 所以这一层校准只能在前端做（或者把校准下沉到服务端，那是更大的改动）。
+   */
+  const initialEquity = trader?.initialEquity ?? 0;
+  const calibratedEquity = initialEquity + realized + unrealized;
+  const cardReturnPercent = initialEquity > 0 ? ((calibratedEquity - initialEquity) / initialEquity) * 100 : 0;
   // Real counts straight from the API. Deriving them from `winRatePercent` was
   // both lossy and, once the unit was misread, wildly wrong.
   const wins = stats?.wins ?? 0;
@@ -630,7 +646,14 @@ export function TraderPage() {
         : undefined;
   }, [snapshots]);
 
-  const todayPnl = todayBaseline === undefined ? 0 : equity - todayBaseline.equity;
+  /*
+   * 当日盈亏用**校准后**的权益（与卡片主数字同源）。
+   *
+   * 日界基线是历史快照里的账本权益，它无法回溯校准（那时没有 gap 读数），
+   * 所以这一项仍带一点账本误差 —— 但比"当前也用账本"要小，而且
+   * **至少与上面的「交易盈亏」不会只差一个 gap**。
+   */
+  const todayPnl = todayBaseline === undefined ? 0 : calibratedEquity - todayBaseline.equity;
   const todayIsPartial = todayBaseline !== undefined && !todayBaseline.full;
   const todayBase = todayBaseline?.equity;
   const todayPercent = todayBase ? (todayPnl / Math.abs(todayBase)) * 100 : 0;
@@ -942,10 +965,9 @@ export function TraderPage() {
           sub={
             stats ? (
               <>
-                {ledgerSuspect ? <span title="已按交易所流水校准">⚠️ </span> : null}
                 今日 <span className={pnlColor(todayPnl)}>{fmtUsdSigned(todayPnl, 2)}</span>
                 {' · '}
-                <span className={pnlColor(stats.totalReturnPercent)}>{fmtPercent(stats.totalReturnPercent)}</span>
+                <span className={pnlColor(cardReturnPercent)}>{fmtPercent(cardReturnPercent)}</span>
               </>
             ) : (
               '等待统计'
@@ -963,7 +985,7 @@ export function TraderPage() {
            */
           subTitle={
             stats
-              ? `今日盈亏 ${fmtUsdSigned(todayPnl, 2)} · 总收益率 ${fmtPercent(stats.totalReturnPercent)}`
+              ? `今日盈亏 ${fmtUsdSigned(todayPnl, 2)} · 总收益率 ${fmtPercent(cardReturnPercent)}`
               : undefined
           }
         />
