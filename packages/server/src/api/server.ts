@@ -1823,7 +1823,25 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        * `positions` 列表保持原样：它是账户级视图，持仓卡与账户条都依赖它。
        */
       const markPriceOf = new Map(livePositions.map((live) => [live.symbol, live.markPrice]));
-      const ownUnrealizedPnl = ownUnrealizedPnlOf(local, (symbol) => markPriceOf.get(symbol)).unrealizedPnl;
+      const own = ownUnrealizedPnlOf(local, (symbol) => markPriceOf.get(symbol));
+      /*
+       * ⚠️ **缺标记价的标的必须说出来，不能静默按 0 计。**
+       *
+       * `ownUnrealizedPnlOf` 的返回值里专门有 `missingMarkPrice`，而它的注释
+       * （`repositories.ts:3604`）写明"必须有人能说出来"—— 快照那条路径
+       * （`autoTrader.ts:9619`）就解构并 `emit('warn')` 了。
+       * 独立验收 2026-10-07 抓到：这条新路由把那一半丢掉了 —— 同一个函数两处调用，
+       * 一处上报、一处静默。
+       *
+       * 触发条件：本地有 `open` 行、而交易所该 symbol 已无 `positionRisk`
+       * （外部平仓 / 本地未同步）→ 那个仓的浮盈会被当成 0，界面看不出异样。
+       */
+      if (own.missingMarkPrice.length > 0) {
+        log.warn(
+          `[trader ${traderId}] 这些标的有本地持仓但拿不到标记价，其浮盈未计入首页数字：${own.missingMarkPrice.join('、')}`,
+        );
+      }
+      const ownUnrealizedPnl = own.unrealizedPnl;
       return { live: true, account, positions, ownUnrealizedPnl, error: undefined as string | undefined };
     } catch (error) {
       /*
