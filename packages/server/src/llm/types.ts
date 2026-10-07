@@ -93,6 +93,23 @@ export interface WireUsage {
   completion_tokens_details?: {
     reasoning_tokens?: number | null;
   } | null;
+  /**
+   * ⚠️ **DeepSeek 原生把缓存命中放在【顶层】，不在上面那个嵌套对象里。**
+   *
+   * 用户 2026-10-07 问「为什么缓存一直是 0%」，并让我去看官方文档。官方新闻页
+   * （<https://api-docs.deepseek.com/zh-cn/news/news0802/>）写明：DeepSeek 的
+   * 上下文硬盘缓存按 **`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`**
+   * 报告，而**不是** OpenAI 的 `prompt_tokens_details.cached_tokens`。
+   *
+   * 这份代码原来只读后者，于是在 DeepSeek 系（含通过第三方网关跑的
+   * `deepseek-v4.1-flash`）上**永远读到 0** —— 界面上就一直显示「缓存 0%」，
+   * 即使服务商那边其实命中了。同类实现踩过一模一样的坑
+   * （见 Hermes 的 issue「direct DeepSeek API cache-hit tokens never extracted」）。
+   *
+   * 读不到仍然归一化成 `null`（不知道），不冒充 0。
+   */
+  prompt_cache_hit_tokens?: number | null;
+  prompt_cache_miss_tokens?: number | null;
 }
 
 /** A fully-formed HTTP call, ready for `fetch`. Produced by each adapter. */
@@ -179,7 +196,19 @@ export function normalizeUsage(usage: WireUsage | null | undefined): ChatUsage {
    * 而输出价是缓存命中输入价的 **200 倍**，所以"钱花在思考上还是花在正文上"
    * 是一个必须能分开看的账。
    */
-  const cached = toTokenCount(usage.prompt_tokens_details?.cached_tokens ?? null);
+  /*
+   * ⚠️ **两个口径都要读，顺序不能反。**
+   *
+   * OpenAI 系（以及多数网关）报告在 `prompt_tokens_details.cached_tokens`；
+   * **DeepSeek 原生报告在顶层的 `prompt_cache_hit_tokens`**（见上面接口的注释）。
+   * 只读前者的结果是：在 DeepSeek 上**永远显示缓存 0%**，而实际上服务商那边
+   * 可能已经命中了 —— 那会让人以为"缓存没生效"，进而去查错的方向。
+   *
+   * 用 `??` 而不是相加：同一个数不该被两个口径各算一次。
+   */
+  const cached = toTokenCount(
+    usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? null,
+  );
   const reasoning = toTokenCount(usage.completion_tokens_details?.reasoning_tokens ?? null);
 
   return {

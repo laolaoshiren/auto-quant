@@ -762,3 +762,32 @@ test('the availability exemption is case insensitive and covers common wordings'
     assert.equal(kindForStatus(400, phrase), 'overloaded', phrase);
   }
 });
+
+/*
+ * ⚠️ **DeepSeek 的原生缓存字段必须被读出来。**
+ *
+ * 用户 2026-10-07 问「为什么缓存一直是 0%」，并让我去看官方文档。官方写明
+ * DeepSeek 报告的是 `prompt_cache_hit_tokens`（顶层），而**不是** OpenAI 的
+ * `prompt_tokens_details.cached_tokens`。这份代码原来只读后者，于是在 DeepSeek
+ * 系（含通过第三方网关跑的 `deepseek-v4.1-flash`）上永远读到 0 —— 界面一直显示
+ * 「缓存 0%」，让人以为缓存没生效，进而去查错的方向。
+ *
+ * 这条用例把**两个口径**都钉住：谁被删掉都会红。
+ */
+test('★ 缓存 token：OpenAI 与 DeepSeek 两种口径都要读出来', () => {
+  // OpenAI 格式（嵌套对象）
+  assert.equal(
+    normalizeUsage({ prompt_tokens: 1000, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 640 } })
+      .cachedTokens,
+    640,
+    'OpenAI 口径：prompt_tokens_details.cached_tokens',
+  );
+  // DeepSeek 原生格式（顶层）
+  assert.equal(
+    normalizeUsage({ prompt_tokens: 1000, completion_tokens: 10, prompt_cache_hit_tokens: 768 }).cachedTokens,
+    768,
+    '★ DeepSeek 口径：prompt_cache_hit_tokens —— 少了这一条，DeepSeek 上缓存永远显示 0%',
+  );
+  // 两个都没有 → null（不知道），而不是伪装成 0
+  assert.equal(normalizeUsage({ prompt_tokens: 10, completion_tokens: 1 }).cachedTokens, null);
+});
