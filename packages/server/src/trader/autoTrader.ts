@@ -9523,14 +9523,46 @@ reduceQuantity: null,
       ...(input.raw !== undefined ? { rawResponse: input.raw } : {}),
     });
 
+    /*
+     * ⚠️ **手续费兜底：成交了却没带 fee 的单，异步去交易所查一次并回填。**
+     *
+     * ## 为什么必须有这一层（2026-10-07 实测：账本比交易所多算 0.496 USDT）
+     *
+     * 用户看到「起始 100.05、现在 100.84，却显示 +$1.29」——账本净额比交易所
+     * 流水少了整整 0.496。逐笔追下去，**33 张已成交的平仓单 `fee = 0`**
+     * （止损/止盈由**交易所**触发，系统只在事后对账里知道它成交了，那一刻没有
+     * 手续费数据）。而 `trades.fee` 又没有别的来源，只好拿开仓费顶替 ——
+     * 于是 11 笔呈现精确的 `fee = 2 × entry_fee`，净盈亏被多扣一份手续费。
+     *
+     * ## 为什么放在这里而不是各个调用点
+     *
+     * `recordOrder` 是**所有下单路径的唯一落库口**（开仓、平仓、止损、止盈、
+     * 对账补录都走它）。在调用点各补一次，就是同一个修复复制五份 ——
+     * 而本仓库已经因为"同一个算式有五份副本"吃过大亏（见 `netPnlOf` 的注释）。
+     *
+     * ## 为什么是异步的、而且不 await
+     *
+     * 它挂在一条**已经执行完的平仓**后面：手续费只是记账，取不到绝不能拖慢或
+     * 影响平仓本身。查到了就 UPDATE 回填（界面与总账校验下一轮都能看到），
+     * 查不到就维持 0 —— 与改动前的行为一致，只是**多了一次可能的修正**。
+     */
+    if (input.fee === undefined && input.exchangeOrderId && /FILLED/i.test(input.status)) {
+      void this.feeForOrder(input.symbol, String(input.exchangeOrderId))
+        .then((resolved) => {
+          if (resolved > 0) orderStore.update(id, { fee: resolved });
+        })
+        .catch(() => {
+          /* 查不到就保持 0：手续费不该让任何交易路径失败 */
+        });
+    }
+
     eventBus.publish({
       type: 'order',
       traderId: input.traderId,
       order: {
         id,
         traderId: input.traderId,
-        exchangeOrderId: input.exchangeOrderId,
-        clientOrderId: input.clientOrderId,
+        exchangeOrderId: input.exchangeOrderId,        clientOrderId: input.clientOrderId,
         symbol: input.symbol,
         side: input.side,
         type: input.type,
