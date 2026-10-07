@@ -3321,7 +3321,7 @@ function toDecisionRecord(row: DecisionRow): DecisionRecord {
     cotTrace: row.cot_trace,
     decisions: safeJsonParse(row.decisions_json, []),
     rawResponse: row.raw_response,
-    executionLog: safeJsonParse<ExecutionLogEntry[]>(row.execution_log_json, []),
+    executionLog: safeJsonParse<ExecutionLogEntry[]>(row.execution_log_json ?? '[]', []),
     candidateSymbols: safeJsonParse<string[]>(row.candidate_symbols_json, []),
     success: row.success === 1,
     error: row.error,
@@ -3418,6 +3418,45 @@ let decisionWritesSinceTrim = 0;
 const DECISION_PROMPT_KEEP = 100;
 
 export const decisions = {
+  /**
+   * **给某机器人最近一轮决策追加一条执行日志。**
+   *
+   * ## 为什么需要它（2026-10-08 用户实测）
+   *
+   * 用户的观察：
+   *
+   * > 「倒数第二轮有挂单开多，但是最新一轮没有提示撤单，但是挂单消失了？
+   * >   是最新一轮决策取消了挂单？？（如果是的话**你得显示上去啊**）」
+   *
+   * 查下来是**系统**超时撤的单（日志原文「RAYSOLUSDT 的限价挂单已等满 43 分钟
+   * （上限 15）仍未成交，已自动撤掉并释放该入场名额」），而它**只走了
+   * `this.emit('info', …)`** —— 那是**实时事件流**，页面一刷新就没了，
+   * 决策卡片的 `executionLog` 里一个字都没有。
+   *
+   * ## 这是同一个已知模式的第二个实例
+   *
+   * 本文件里 `autoTrader` 已经为**一模一样的事**写过注释：
+   * "模型主动去要了数据"必须落进审计日志，否则它翻历史查不到 ——
+   * 那之前也只走 `emit`。**当时的结论是"实时流 ≠ 审计日志"，而这次漏的是系统侧动作。**
+   *
+   * 所以补一个入口：把系统动作**追加到最新那一轮**的 `executionLog`，
+   * 于是它在决策流里可见、刷新后仍在。追加到最新一轮而不是"发起该挂单的那一轮"，
+   * 是因为**用户要回答的问题是"挂单去哪了"，而他是从最新一轮往下看的**。
+   */
+  appendExecutionLog(traderId: number, entry: ExecutionLogEntry): void {
+    const row = getDb().get<{ id: number; execution_log_json: string | null }>(
+      'SELECT id, execution_log_json FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT 1',
+      traderId,
+    );
+    if (!row) return;
+    const list = safeJsonParse<ExecutionLogEntry[]>(row.execution_log_json ?? '[]', []);
+    list.push(entry);
+    getDb().run(
+      'UPDATE decision_records SET execution_log_json = ? WHERE id = ?',
+      JSON.stringify(list),
+      row.id,
+    );
+  },
   /**
    * 某机器人的决策记录，**最新在前**。`before` 是游标：只返回 `id < before` 的记录。
    *

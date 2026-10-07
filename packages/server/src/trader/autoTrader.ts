@@ -4086,10 +4086,24 @@ export class AutoTrader {
         }
       }
 
-      this.emit(
-        'info',
-        `${row.symbol} 的限价挂单已等满 ${Math.round(waitedMinutes)} 分钟（上限 ${limitMinutes}）仍未成交，已自动撤掉并释放该入场名额。`,
-      );
+      /*
+       * ⚠️ **落进审计日志，不只走实时事件流。**
+       *
+       * 这条原来只有 `emit` —— 页面一刷新，操作员就再也查不到"那个挂单去哪了"。
+       * 用户 2026-10-08 就是这么发现的：「倒数第二轮有挂单开多，最新一轮没有提示撤单，
+       * 但挂单消失了？」。实时流是"现在发生了什么"，审计日志是"历史里能查到什么"，
+       * 两者不能互相替代（同一个结论在本文件里已经写过一次，见"模型主动取数"那条）。
+       */
+      const cancelDetail =
+        `${row.symbol} 的限价挂单已等满 ${Math.round(waitedMinutes)} 分钟（上限 ${limitMinutes}）` +
+        '仍未成交，已自动撤掉并释放该入场名额。';
+      decisionStore.appendExecutionLog(traderId, {
+        action: 'cancel_pending',
+        symbol: row.symbol,
+        status: 'ok',
+        detail: cancelDetail,
+      });
+      this.emit('info', cancelDetail);
     }
 
     return expired;
