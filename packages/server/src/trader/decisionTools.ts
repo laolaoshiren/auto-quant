@@ -278,6 +278,30 @@ export async function runDecisionTool(
     if (call.tool === 'get_klines') {
       if (!symbol) return { text: 'get_klines 需要 symbol。', summary: 'get_klines 缺少 symbol' };
       const timeframe = typeof call.args.timeframe === 'string' ? call.args.timeframe : '15m';
+      /*
+       * ⚠️ **无效周期必须在这一层拒掉，并告诉它哪些可用。**
+       *
+       * 2026-10-07 实测：日志里出现
+       *
+       * ```text
+       * 取数工具 get_klines 执行失败：币安错误 -1120：Invalid interval.
+       * ```
+       *
+       * 模型给了一个不存在的周期，请求打到币安才被拒 —— 而**回给它的只有一句
+       * `Invalid interval`**，既没说是哪个值错，也没说该用什么。于是它只能瞎猜，
+       * **白烧一轮**（而一轮现在要十几分钟）。
+       *
+       * 工具说明里本来就列了可用周期（`TIMEFRAMES`），但那是**给它看的**，
+       * 不是**对它强制的**。这一层是强制的：先在本地校验，错了就把可选值原样回喂。
+       */
+      if (!TIMEFRAMES.includes(timeframe as (typeof TIMEFRAMES)[number])) {
+        return {
+          text:
+            `周期 "${timeframe}" 不存在 —— 币安只接受这些：${TIMEFRAMES.join(' / ')}。` +
+            '请用其中一个重新调用 `get_klines`。',
+          summary: `get_klines 周期无效：${timeframe}`,
+        };
+      }
       const raw = Number(call.args.count);
       const count = Number.isFinite(raw)
         ? Math.max(1, Math.min(MAX_KLINE_COUNT, Math.trunc(raw)))

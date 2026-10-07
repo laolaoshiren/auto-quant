@@ -291,6 +291,47 @@ LOGCONF
     echo "    已配置日志落盘（drop-in）"
 fi
 
+#
+# ⚠️ **强制 Node 用 IPv4 —— 这台服务器的 IPv6 没有路由。**
+#
+# 2026-10-07 实测事故：机器人连续多轮 `Cannot reach opencode: fetch failed`，
+# 而同一台机器上 `curl https://opencode.ai/...` 一直是 200。
+#
+# 根因：`opencode.ai` 的 DNS **同时**返回 A（172.65.90.20）与 AAAA
+# （2606:4700:78::…），而这台机器 `curl -6` 是 **ENETUNREACH**（IPv6 不通）。
+# `curl` 有 Happy Eyeballs 会自动回退 IPv4，**Node 的 fetch 不会可靠回退** ——
+# 于是它优先试 IPv6、失败就报 `fetch failed`，表现为**间歇性**失败
+# （IPv6 路由时通时断），并且"测着正常、跑着不正常"。
+#
+# 用 **drop-in** 固化这一条：主单元文件不该被部署脚本覆盖，而重装/重建
+# 服务器时这条配置必须跟着回来 —— 之前它只存在于手改的 systemd 里，
+# 离开这台机器就丢了（我第一版还把它写成了
+# `Environment=NODE_OPTIONS=NODE_OPTIONS=...`，值多了一层前缀 → 选项被忽略、
+# 事故照旧。**所以这里连值一起断言。**）
+#
+# 幂等：内容一致就不重写。
+NETUNIT=/etc/systemd/system/autoquant.service.d/network.conf
+if ! grep -q 'dns-result-order=ipv4first' "`$NETUNIT" 2>/dev/null; then
+    mkdir -p /etc/systemd/system/autoquant.service.d
+    cat > "`$NETUNIT" <<'NETCONF'
+[Service]
+# IPv6 在这台机器上不可达（ENETUNREACH），而 DNS 同时给 A/AAAA。
+# Node 不做 Happy Eyeballs 回退，所以必须显式优先 IPv4。
+Environment="NODE_OPTIONS=--dns-result-order=ipv4first"
+NETCONF
+    systemctl daemon-reload
+    echo "    已配置 IPv4 优先（drop-in）"
+fi
+
+# 值写错了等于没写 —— 启动后核对**进程实际拿到的**环境变量。
+if [ -f "`$NETUNIT" ]; then
+    MAINPID=`$(systemctl show autoquant -p MainPID --value)
+    ACTUAL=`$(tr '\0' '\n' < /proc/`$MAINPID/environ 2>/dev/null | grep '^NODE_OPTIONS=' || true)
+    if [ "`$ACTUAL" != "NODE_OPTIONS=--dns-result-order=ipv4first" ]; then
+        echo "    ⚠️ NODE_OPTIONS 实际值不对：'`$ACTUAL'（期望 NODE_OPTIONS=--dns-result-order=ipv4first）"
+    fi
+fi
+
 systemctl restart autoquant
 sleep 15
 echo -n "    服务状态: "; systemctl is-active autoquant

@@ -279,3 +279,38 @@ test('extractToolCalls 认得 <tool> 标签，认不出就不猜', () => {
   assert.deepEqual(extractToolCalls('没有工具调用的普通回复'), []);
   assert.deepEqual(extractToolCalls('<tool>这不是 json</tool>'), [], '解析不出来就当没有');
 });
+/*
+ * ⚠️ **无效周期必须当场拒掉、并把可用值回喂。**
+ *
+ * 2026-10-07 实测日志：
+ *
+ *   取数工具 get_klines 执行失败：币安错误 -1120：Invalid interval.
+ *
+ * 模型给了一个不存在的周期，请求打到币安才被拒，而回给它的只有一句
+ * `Invalid interval` —— 既没说哪个值错、也没说该用什么。它只能瞎猜，
+ * **白烧一轮**（而现在一轮要十几分钟）。
+ *
+ * 工具说明里列了可用周期，但那是"给它看的"，不是"对它强制的"。
+ * 这条用例钉住"强制"那一层。
+ */
+test('★ get_klines：无效周期在本地就被拒，并回喂可用值', async () => {
+  const calls: string[] = [];
+  const d = deps({
+    klines: async (_symbol, timeframe) => {
+      calls.push(timeframe);
+      return [];
+    },
+  });
+
+  const bad = await runDecisionTool(
+    { tool: 'get_klines', args: { symbol: 'BTCUSDT', timeframe: '90m', count: 10 } },
+    d,
+  );
+  assert.match(bad.text, /90m/, '要点名是哪个值错了');
+  assert.match(bad.text, /1m/, '要把可用周期回喂给它');
+  assert.equal(calls.length, 0, '★ 无效周期不该打到币安 —— 那正是白烧一轮的来源');
+
+  // 合法周期照旧放行
+  await runDecisionTool({ tool: 'get_klines', args: { symbol: 'BTCUSDT', timeframe: '15m', count: 10 } }, d);
+  assert.deepEqual(calls, ['15m']);
+});
