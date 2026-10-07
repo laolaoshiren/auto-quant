@@ -4991,7 +4991,35 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     const deep = full || this.reconcilePasses % FULL_RECONCILE_EVERY_PASSES === 0;
     this.reconcilePasses += 1;
 
-    const createdSince = new Date(this.deps.trader.createdAt).getTime() - 60_000;
+    /*
+     * ⚠️ **窗口起点必须早于"机器人的第一笔成交"，否则会在持仓中间截断。**
+     *
+     * ## 为什么（2026-10-07：这条就是账本一直对不平的根因）
+     *
+     * 日志里刷了 **1323 次** 的 WARN：
+     *
+     * > 对账算出的成交量（336）与本地记录（168）差得太远 —— 已保留本地数量与本地金额。
+     * > 这通常意味着**成交历史的窗口起点落在持仓中间**，重建把开/平判反了，整条序列因此错位。
+     *
+     * 而窗口起点原来是 `trader.createdAt - 60s`。这个机器人建了之后**先收养了**
+     * 一批在平台之外开立的仓位（`positions` 里 14 行「收养：该仓位是在机器人之外开立的」），
+     * 其中最早的 `#278 MANAUSDT` 开于 **10-03 06:31**，而机器人创建于 **11:01** ——
+     * **它的开仓成交落在窗口之外**，重建只看到"平仓那一半"，于是方向判反。
+     *
+     * 系统对这种情况的处理是**降级**：放弃重建、保留本地记账（那是对的，
+     * 好过记错）。但代价是**账本与交易所永远差一截** —— 实测 `gap = 0.167777`。
+     *
+     * ## 修法：往前多留 7 天
+     *
+     * 收养的仓位可能开在机器人创建之前任意长的时间，但**不可能无限早** ——
+     * 30 天的对账窗口本身就是一个界。所以把下界放宽 7 天，
+     * 让"创建前后那段时间开、之后才平"的回合完整落进窗口。
+     *
+     * **成本**：每次对账多拉 7 天的成交与 income（几十条量级）。
+     * **收益**：那批被判反的回合能真正重建，`gap` 有机会收敛到 0。
+     */
+    const ADOPTION_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+    const createdSince = new Date(this.deps.trader.createdAt).getTime() - ADOPTION_LOOKBACK_MS;
     /*
      * The window floor. A deep pass keeps the original "since this trader
      * existed" bound; a routine pass narrows it. `Math.max` with the creation
