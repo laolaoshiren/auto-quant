@@ -512,7 +512,27 @@ export function TraderPage() {
    */
   const nothingOpen = positions.length === 0 && openOrders.length === 0;
   const effectiveLeverage = equity > 0 ? notional / equity : 0;
-  const unrealized = stats?.unrealizedPnl ?? positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
+  /*
+   * ⚠️ **浮盈优先用【实时持仓】，不能用快照 —— 否则同一屏两个数会打架。**
+   *
+   * 用户 2026-10-07 实测：卡片写 `交易盈亏 +$0.92`，而下方持仓行写「未实现 +$0.01」。
+   * 反推那个 0.92：`0.95872（账本已实现） + (−0.0387) = 0.920` —— 也就是说
+   * 卡片用的浮盈是 **-0.0387**，而它来自 `stats.unrealizedPnl`，即
+   * `equity_snapshots` 里**最近一条快照**的浮盈。快照每周期才写一次，
+   * 行情一动它就过期了。
+   *
+   * 而 `positions` 是**实时**从交易所读回来的（`live` 优先，见 `pickPositions`），
+   * 它的浮盈与持仓行显示的是**同一个数**。所以：
+   *
+   *  · 拿得到实时数据（`liveUnavailable === false`）→ 用持仓求和，**空仓就是 0**；
+   *  · 拿不到（机器人停了）→ 才回落到快照值。
+   *
+   * 原来反过来（快照优先），于是"卡片说亏 0.04、下面说赚 0.01"这种自相矛盾
+   * 会在每次行情波动后出现 —— 而这两个数在同一个屏幕上。
+   */
+  const unrealized = liveUnavailable
+    ? (stats?.unrealizedPnl ?? 0)
+    : positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
   /*
    * ⚠️ **账本可能不准 —— 与交易所差额显著时改用交易所的真实值。**
    *
