@@ -460,6 +460,17 @@ export class TraderManager {
     return this.running.get(traderId)?.currentStatus ?? 'stopped';
   }
 
+  /**
+   * **下一轮决策的预定触发时刻**（epoch 毫秒），没有排程时 `null`。
+   *
+   * 由 `AutoTrader.nextCycleAt` 提供 —— 它记的是**定时器真正被排到的那一刻**，
+   * 已经把"模型要求的间隔"和"失败短重试"都算进去了。界面据此显示倒计时，
+   * **不自己推算**（推算会忽略那两件事，从而显示错误的时间）。
+   */
+  nextCycleAtOf(traderId: number): number | null {
+    return this.running.get(traderId)?.nextCycleAt ?? null;
+  }
+
   /** Resolve an exchange account into a live connection, reusing it if present. */
   private async connectionFor(
     traderId: number,

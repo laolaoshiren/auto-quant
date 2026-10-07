@@ -1489,6 +1489,17 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        * 带出去，让界面能说"账本与交易所差了多少"，而不是继续假装账本是准的。
        */
       ledger: ledgerCheckOf(trader.id),
+      /*
+       * **下一轮决策的预定时刻**（epoch 毫秒）—— 界面据此显示倒计时。
+       *
+       * 用户 2026-10-07：「能在这里加入一个倒计时吗？让我明显知道下一轮决策剩余周期」。
+       *
+       * 由 `AutoTrader.nextCycleAt` 提供：它记的是**定时器真正被排到的那一刻**，
+       * 已经把"模型自己要求的间隔"（`requestedMinutes`）与"失败短重试"算进去了。
+       * **界面不要自己拿"上一轮时间 + 配置周期"推算** —— 那会忽略这两件事，
+       * 显示一个骗人的倒计时（模型说 5 分钟、界面显示 60 分钟）。
+       */
+      nextCycleAt: deps.manager.nextCycleAtOf(trader.id),
     }));
   });
 

@@ -296,6 +296,16 @@ export interface TraderRow extends Trader {
    * 两者之差就是 `gap`。界面对着它显示，而不是拿账本值冒充事实。
    */
   ledger?: { platformNet: number; exchangeNet: number; gap: number; checkedAt: string } | null;
+  /**
+   * **下一轮决策的预定触发时刻**（epoch 毫秒），没有排程时为 null。
+   *
+   * 用户 2026-10-07：「能在这里加入一个倒计时吗？让我明显知道下一轮决策剩余周期」。
+   *
+   * 由服务端给出（`AutoTrader.nextCycleAt`），它记的是**定时器真正被排到的那一刻**，
+   * 已经把"模型自己要求的间隔"和"失败短重试"都算进去了 ——
+   * **界面不要自己推算**，那会显示一个骗人的倒计时。
+   */
+  nextCycleAt?: number | null;
 }
 
 /**

@@ -335,14 +335,50 @@ function LiveCycleBlock({ live }: { live: LiveCycle }) {
  *   就不必知道 run-once 调的是哪个接口、忙的是哪个机器人；省略时面板头只剩刷新与
  *   全部记录（见 §7：这两个入口必须保留）。
  */
+/**
+ * 「下一轮决策」倒计时。
+ *
+ * ## 为什么不由界面自己算
+ *
+ * 界面能拿到的只有"上一轮的时间"和配置里的周期，而**实际延迟还取决于两件界面看不到的事**：
+ * 模型可以自己要求下次间隔（"这个突破正在形成，5 分钟后再叫我"），失败时系统会**短重试**
+ * 而不是白等一整个周期。两者都只在服务端的 `scheduleNextCycle()` 里算得出来。
+ *
+ * 所以这个组件**只负责显示**：拿服务端给的 `nextCycleAt` 每秒刷新一次。
+ * 自己推算会显示一个骗人的时间（模型说 5 分钟、界面显示 60 分钟），比没有更糟。
+ */
+function CycleCountdown({ nextCycleAt }: { nextCycleAt: number | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (nextCycleAt === null) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [nextCycleAt]);
+
+  if (nextCycleAt === null) return null;
+  const leftSec = Math.max(0, Math.round((nextCycleAt - now) / 1000));
+  const m = Math.floor(leftSec / 60);
+  const s = leftSec % 60;
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded border border-base-800 px-1.5 py-0.5 text-xs tabular-nums text-ink-lo"
+      title="下一轮决策的预定时刻（由服务端给出，已包含模型要求的间隔与失败后的短重试）"
+    >
+      下一轮 {m}:{String(s).padStart(2, '0')}
+    </span>
+  );
+}
+
 export function DecisionFeed({
   traderId,
   running,
   actions,
+  nextCycleAt = null,
 }: {
   traderId: number;
   running?: boolean;
   actions?: ReactNode;
+  nextCycleAt?: number | null;
 }) {
   const live = useEvents((s) => s.byTrader[traderId]?.decisions);
   const liveCycle = useLiveCycle(traderId);
@@ -631,7 +667,7 @@ export function DecisionFeed({
    */
   const headerActions = (
     <span className="flex items-center gap-1.5">
-      {actions}
+      <CycleCountdown nextCycleAt={nextCycleAt} />`r`n      {actions}
       <button
         type="button"
         onClick={() => query.reload()}

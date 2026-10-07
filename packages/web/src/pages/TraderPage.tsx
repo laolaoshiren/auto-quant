@@ -1251,6 +1251,8 @@ export function TraderPage() {
           <DecisionFeed
             traderId={traderId}
             running={running}
+            /* 下一轮决策的预定时刻 —— 由服务端给出，界面只显示倒计时（见 CycleCountdown）。 */
+            nextCycleAt={trader?.nextCycleAt ?? null}
             actions={
               <>
                 {runNowAction}

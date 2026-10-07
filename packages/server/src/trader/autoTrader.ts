@@ -880,6 +880,25 @@ export class AutoTrader {
   }
 
   /**
+   * **下一轮决策的预定触发时刻**（epoch 毫秒；没有排程时为 `null`）。
+   *
+   * ## 为什么由服务端给，而不是让界面自己算
+   *
+   * 用户 2026-10-07 的要求：「能在这里加入一个倒计时吗？让我明显知道下一轮决策剩余周期」。
+   *
+   * 界面自己算只能拿"上一轮的时间 + 配置里的周期"，而**实际延迟还取决于两件界面看不到的事**：
+   *
+   *   · **模型自己要求的间隔**（`requestedMinutes`）—— 它可以说"这个突破正在形成，5 分钟后再叫我"，
+   *     也可以说"这行情没意思，一小时后再看"。那**不是配置值**。
+   *   · **失败时的短重试** —— 上游 5xx 之后不该白等一整个周期。
+   *
+   * 两者都只在 `scheduleNextCycle()` 里算得出来。所以**在排出定时器的那一刻**把
+   * 真实触发时刻记下来，由 API 带给界面 —— 界面只负责每秒刷新显示，不做推算。
+   * **推算出来的倒计时会骗人**（模型说 5 分钟、界面显示 60 分钟），那比没有倒计时更糟。
+   */
+  public nextCycleAt: number | null = null;
+
+  /**
    * 排下一次周期 —— **用自续期的 `setTimeout` 链，不用 `setInterval`。**
    *
    * ## 为什么必须换掉 `setInterval`
@@ -945,11 +964,22 @@ export class AutoTrader {
      * 边界与"失败时取较小者"的规则都在 `nextCycleDelayMs` 里（单一处）。
      * 传 `undefined` 表示它没提这个要求 —— 那是**不同的意图**，不能当成 0。
      */
-    this.timer = setTimeout(() => void this.tick(), nextCycleDelayMs({
+    const delayMs = nextCycleDelayMs({
       failed: retrySoon,
       cycleIntervalMinutes: minutes,
       ...(requestedMinutes === undefined ? {} : { requestedMinutes }),
-    }));
+    });
+    /* 记下真实触发时刻供界面倒计时（见 `nextCycleAt` 的说明）。 */
+    this.nextCycleAt = Date.now() + delayMs;
+    this.timer = setTimeout(() => {
+      /*
+       * ⚠️ **触发时立刻清空** —— 否则一轮正在跑的时候，界面会拿"已经过去的那个时刻"
+       * 继续算，显示成 `0:00` 并一直不动。清空之后组件不渲染（`null` → 不显示），
+       * 等这一轮跑完排出下一次时再出现。
+       */
+      this.nextCycleAt = null;
+      void this.tick();
+    }, delayMs);
   }
   /**
    * Stop the loop and **wait for the cycle already running** to finish.
