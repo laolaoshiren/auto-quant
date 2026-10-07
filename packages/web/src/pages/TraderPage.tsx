@@ -530,9 +530,23 @@ export function TraderPage() {
    * 原来反过来（快照优先），于是"卡片说亏 0.04、下面说赚 0.01"这种自相矛盾
    * 会在每次行情波动后出现 —— 而这两个数在同一个屏幕上。
    */
-  const unrealized = liveUnavailable
-    ? (stats?.unrealizedPnl ?? 0)
-    : positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
+  /*
+   * ⚠️ **不能用"交易所账户的全部持仓"当本机器人的浮盈。**
+   *
+   * 独立验收（2026-10-07）指出：`positions` 来自 `/traders/:id/account`，而那条路由的
+   * `livePositions` 是**整个账户**的 `positionRisk`（共享钱包上所有机器人 + 手动仓）。
+   * 首页「交易盈亏」「今日盈亏」「总收益率」都拿它当自己的浮盈 —— 一旦这个账户下
+   * 跑第二个机器人，三个数字会全部被别人的仓位污染。**现在只有一个机器人，所以看不出来，
+   * 但那是运气。** 服务端现已单独给出 `ownUnrealizedPnl`（按本机器人持仓过滤）。
+   *
+   * 首屏（`accountView === null`）也走回落：那时 `ownUnrealizedPnl` 还没到，
+   * 若当成 0 会先闪一个"只有已实现"的数、随后跳变。
+   */
+  const ownUnrealized = accountView?.ownUnrealizedPnl;
+  const unrealized =
+    liveUnavailable || accountView === null || ownUnrealized == null
+      ? (stats?.unrealizedPnl ?? 0)
+      : ownUnrealized;
   /*
    * ⚠️ **账本可能不准 —— 与交易所差额显著时改用交易所的真实值。**
    *
@@ -640,9 +654,9 @@ export function TraderPage() {
      * 否则用最早那条（机器人今天才启动），此时**不能**叫它"今日"。
      */
     return before
-      ? { equity: before.equity, full: true }
+      ? { equity: before.accountEquity ?? before.equity, full: true }
       : snapshots[0]
-        ? { equity: snapshots[0].equity, full: false }
+        ? { equity: snapshots[0].accountEquity ?? snapshots[0].equity, full: false }
         : undefined;
   }, [snapshots]);
 
@@ -653,7 +667,7 @@ export function TraderPage() {
    * 所以这一项仍带一点账本误差 —— 但比"当前也用账本"要小，而且
    * **至少与上面的「交易盈亏」不会只差一个 gap**。
    */
-  const todayPnl = todayBaseline === undefined ? 0 : calibratedEquity - todayBaseline.equity;
+  const todayPnl = todayBaseline === undefined ? 0 : (snapshots[snapshots.length - 1]?.accountEquity ?? calibratedEquity) - todayBaseline.equity;
   const todayIsPartial = todayBaseline !== undefined && !todayBaseline.full;
   const todayBase = todayBaseline?.equity;
   const todayPercent = todayBase ? (todayPnl / Math.abs(todayBase)) * 100 : 0;

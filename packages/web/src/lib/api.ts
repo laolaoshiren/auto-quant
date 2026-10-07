@@ -744,6 +744,13 @@ export const api = {
        * 类型松一档，正确的那条路就没人走。
        */
       positions: PositionView[];
+      /**
+       * **本机器人自己**的浮动盈亏（服务端按它的持仓 symbol 过滤后算出）。
+       *
+       * `positions` 是**整个账户**的持仓（共享钱包上所有机器人 + 手动仓），
+       * 所以不能拿它求和当"我的浮盈" —— 独立验收 2026-10-07 指出的就是这一处。
+       */
+      ownUnrealizedPnl?: number;
       error?: string;
     }>(`/traders/${id}/account`, { signal }),
   /**

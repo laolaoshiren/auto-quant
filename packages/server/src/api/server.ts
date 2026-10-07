@@ -1804,7 +1804,23 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
           openReasoning: record?.open_reasoning ?? '',
         };
       });
-      return { live: true, account, positions, error: undefined as string | undefined };
+      /*
+       * ⚠️ **本机器人的浮盈必须单独算 —— 交易所返回的是【整个账户】的持仓。**
+       *
+       * 独立验收（2026-10-07）指出：`broker.getPositions()` 是无 symbol 的
+       * `positionRisk`，拿回来的是**共享钱包上所有**持仓（含别的机器人、手动仓）。
+       * 而首页「交易盈亏」「今日盈亏」「总收益率」都会把这个和当成自己的浮盈 ——
+       * 一旦这个账户下跑了第二个机器人，三个数字全部会被别人的仓位污染。
+       *
+       * 现在只有一个机器人，所以看不出来；但那是**运气**，不是设计。
+       * 这里按**本机器人自己的持仓 symbol**过滤后单独给一个字段，
+       * 而 `positions` 列表保持原样（它是账户级视图，持仓卡与 strip 都依赖它）。
+       */
+      const ownSymbols = new Set(local.map((p) => p.symbol));
+      const ownUnrealizedPnl = livePositions
+        .filter((live) => ownSymbols.has(live.symbol))
+        .reduce((sum, live) => sum + live.unrealizedPnl, 0);
+      return { live: true, account, positions, ownUnrealizedPnl, error: undefined as string | undefined };
     } catch (error) {
       /*
        * ⚠️ **这条日志是必须的，不是可选的。**
