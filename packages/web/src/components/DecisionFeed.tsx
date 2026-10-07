@@ -667,7 +667,8 @@ export function DecisionFeed({
    */
   const headerActions = (
     <span className="flex items-center gap-1.5">
-      <CycleCountdown nextCycleAt={nextCycleAt} />`r`n      {actions}
+      <CycleCountdown nextCycleAt={nextCycleAt} />
+      {actions}
       <button
         type="button"
         onClick={() => query.reload()}
