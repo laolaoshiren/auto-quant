@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
+/* `setHeaders` 拿到的是**原始** `ServerResponse`，不是 Fastify 的 reply。 */
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import {
@@ -2197,12 +2198,52 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   /* --- Static console ---------------------------------------------------- */
 
   if (existsSync(webDistDir)) {
+    /*
+     * ⚠️ **缓存策略必须显式设置 —— 否则"改好了用户却还看到旧的"。**
+     *
+     * ## 为什么（2026-10-07 实测踩到）
+     *
+     * 用户报「页面 BUG 还在」，而线上产物里**确实已经包含修复**
+     * （`TraderPage-*.js` 里能搜到新代码、磁盘上旧 chunk 已删）。
+     * 问题出在 `index.html` 被浏览器缓存了：它引用的是**懒加载 chunk 的文件名**，
+     * 而 chunk 名带 hash、每次构建都变 —— 于是"缓存住的 index.html + 已消失的旧 chunk"
+     * 让页面停在旧版本上。用户只能靠 Ctrl+F5 才能看到修复。
+     *
+     * ## 规则
+     *
+     *  · `index.html` —— **每次都回源验证**（`no-cache` 不等于不缓存，而是必须先问服务器）。
+     *    它是"版本指针"，必须永远是最新的。
+     *  · `assets/*` —— 文件名**带内容 hash**，内容一变文件名就变，所以可以**永久缓存**。
+     *    这既快又不会出现陈旧内容（陈旧的那个文件名已经不存在了）。
+     *
+     * 这套组合是标准做法：**入口不缓存、指纹资源永久缓存**。
+     * 它同时消掉了"每次部署都要用户手动硬刷新"和"白下载没变的资源"两个问题。
+     */
     await app.register(fastifyStatic, { root: webDistDir });
+    /*
+     * 缓存策略统一在这里下发（`@fastify/static` 的 `setHeaders` 选项在这版类型里
+     * 不被接受，而 `onSend` 钩子对静态文件同样生效、类型也干净）。
+     */
+    app.addHook('onSend', async (request, reply, payload) => {
+      const url = request.url.split('?')[0] ?? '';
+      if (url.includes('/assets/')) {
+        /* 文件名带内容 hash：内容一变名字就变，可以永久缓存。 */
+        reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+      } else {
+        /*
+         * 其余（`index.html` 与 SPA 回落到它的那些前端路由）都是**版本指针**，
+         * 必须每次回源验证 —— 否则"改好了用户却还看到旧页面"。
+         */
+        reply.header('Cache-Control', 'no-cache, must-revalidate');
+      }
+      return payload;
+    });
     app.setNotFoundHandler((request, reply) => {
       // SPA fallback: client-side routes must resolve to index.html.
       if (request.url.startsWith('/api')) {
         return reply.code(404).send({ error: '接口不存在' });
       }
+      reply.header('Cache-Control', 'no-cache, must-revalidate');
       return reply.sendFile('index.html');
     });
   }
