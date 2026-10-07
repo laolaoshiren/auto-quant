@@ -2084,8 +2084,8 @@ function CycleDetails({
             />
           ) : (
             <div className="space-y-2">
-              <PromptSection title="系统提示词" body={record.systemPrompt} />
-              <PromptSection title="用户提示词" body={record.userPrompt} />
+              <PromptSection title="系统提示词" body={record.systemPrompt} traderId={record.traderId} recordId={record.id} field="system" />
+              <PromptSection title="用户提示词" body={record.userPrompt} traderId={record.traderId} recordId={record.id} field="user" />
             </div>
           )}
         </div>
@@ -2094,11 +2094,50 @@ function CycleDetails({
   );
 }
 
-function PromptSection({ title, body }: { title: string; body: string }) {
+function PromptSection({
+  title,
+  body,
+  traderId,
+  recordId,
+  field,
+}: {
+  title: string;
+  body: string;
+  traderId: number;
+  recordId: number;
+  field: 'system' | 'user';
+}) {
+  /*
+   * ⚠️ **列表里没有全文了，展开时才去取单条详情。**
+   *
+   * 服务端列表为了不让一页 2.7 MB 的提示词卡死浏览器，把 `systemPrompt` /
+   * `userPrompt` 剥离成空串（见 `/api/traders/:id/decisions` 的注释）。
+   * 而这里**只在用户点开「提示词」标签时才渲染** —— 所以按需加载天然成立：
+   * 不点就一个字节都不传。
+   *
+   * `body` 有内容时直接用（兼容后端未剥离的情形，例如 `DecisionAudit`）；
+   * 为空且拿得到 id 时才发请求，失败显示空而不是把异常抛到界面上。
+   */
+  const [loaded, setLoaded] = useState<string | null>(body.trim() ? body : null);
+  useEffect(() => {
+    if (loaded !== null) return;
+    let alive = true;
+    api
+      .traderDecision(traderId, recordId)
+      .then((record) => {
+        if (alive) setLoaded(field === 'system' ? record.systemPrompt : record.userPrompt);
+      })
+      .catch(() => {
+        if (alive) setLoaded('');
+      });
+    return () => {
+      alive = false;
+    };
+  }, [loaded, traderId, recordId, field]);
   return (
     <section className="min-w-0">
       <h4 className="mb-1 text-xs font-semibold text-ink-lo">{title}</h4>
-      <ScrollArea body={body} empty="（空）" />
+      <ScrollArea body={loaded ?? '正在加载提示词…'} empty="（空）" />
     </section>
   );
 }

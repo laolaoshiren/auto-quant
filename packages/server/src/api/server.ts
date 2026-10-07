@@ -2067,7 +2067,21 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     // `before` 是新参数，非数字/缺失一律按"第一页"处理：发不出正确游标的调用方
     // 应该拿到最新的一页，而不是一个 400。
     const before = Number(query.before);
-    return decisionStore.list(traderIdOf(request), limit, Number.isFinite(before) ? before : null);
+    const records = decisionStore.list(traderIdOf(request), limit, Number.isFinite(before) ? before : null);
+    /*
+     * ⚠️ **列表绝不返回提示词全文。**
+     *
+     * 用户 2026-10-07 报"页面加载几十秒"。实测：`decision_records` 只有 910 行，
+     * 但 `user_prompt` 一个字段就 **81.6 MB**（单条最大 283 KB）。而这一页返回
+     * 30 条，每条约 90 KB → **一次列表 ≈ 2.7 MB JSON**，浏览器下载 + 解析几十秒。
+     *
+     * 数据库本身不慢（元数据 30 条 4ms、含全文 62ms，索引齐全）——
+     * 慢的是**把不该传的东西传到了浏览器**。
+     *
+     * 提示词只在用户点开「提示词」标签时才需要，那时由
+     * `GET /traders/:id/decisions/:recordId` 单条取（详情接口本来就有）。
+     */
+    return records.map((record) => ({ ...record, systemPrompt: '', userPrompt: '' }));
   });
 
   app.get('/api/traders/:id/decisions/:recordId', authed, async (request, reply) => {
