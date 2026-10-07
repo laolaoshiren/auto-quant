@@ -37,6 +37,7 @@ import {
   normalizeMarginMode,
   ORDER_PAGE_DEFAULT,
   orders as orderStore,
+  ownUnrealizedPnlOf,
   positions as positionStore,
   runtimeLogs,
   settings,
@@ -1805,21 +1806,24 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         };
       });
       /*
-       * ⚠️ **本机器人的浮盈必须单独算 —— 交易所返回的是【整个账户】的持仓。**
+       * ⚠️ **本机器人的浮盈必须按它自己的入场价算，不能拿交易所的合并持仓。**
        *
-       * 独立验收（2026-10-07）指出：`broker.getPositions()` 是无 symbol 的
-       * `positionRisk`，拿回来的是**共享钱包上所有**持仓（含别的机器人、手动仓）。
-       * 而首页「交易盈亏」「今日盈亏」「总收益率」都会把这个和当成自己的浮盈 ——
-       * 一旦这个账户下跑了第二个机器人，三个数字全部会被别人的仓位污染。
+       * 独立验收（2026-10-07）连着指出两次，第二次是对的：
        *
-       * 现在只有一个机器人，所以看不出来；但那是**运气**，不是设计。
-       * 这里按**本机器人自己的持仓 symbol**过滤后单独给一个字段，
-       * 而 `positions` 列表保持原样（它是账户级视图，持仓卡与 strip 都依赖它）。
+       *  · 第一版直接对 `livePositions` 求和 —— 那是**整个账户**的持仓。
+       *  · 第二版按 symbol 过滤后求和 —— 好一些，但同一账户里**两台机器人做同一个币**时，
+       *    交易所的 `positionRisk` 只给一条**合并净头寸**，浮盈照旧被合并、两者互相污染。
+       *
+       * 正确答案在仓库里已经有了：`ownUnrealizedPnlOf()` —— 它用**本机器人自己**的
+       * `entry_price × quantity × 标记价` 算，与交易所怎么合并无关，而且会回报
+       * "哪些标的缺标记价"（缺了就跳过，不拿 0 冒充）。快照写入路径（`autoTrader`）
+       * 一直在用它 —— 所以这里再自己写一遍的话，同屏会出现两个"本机器人浮盈"
+       * 且数值不同。**同一个算式只留一份。**
+       *
+       * `positions` 列表保持原样：它是账户级视图，持仓卡与账户条都依赖它。
        */
-      const ownSymbols = new Set(local.map((p) => p.symbol));
-      const ownUnrealizedPnl = livePositions
-        .filter((live) => ownSymbols.has(live.symbol))
-        .reduce((sum, live) => sum + live.unrealizedPnl, 0);
+      const markPriceOf = new Map(livePositions.map((live) => [live.symbol, live.markPrice]));
+      const ownUnrealizedPnl = ownUnrealizedPnlOf(local, (symbol) => markPriceOf.get(symbol)).unrealizedPnl;
       return { live: true, account, positions, ownUnrealizedPnl, error: undefined as string | undefined };
     } catch (error) {
       /*

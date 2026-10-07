@@ -667,7 +667,20 @@ export function TraderPage() {
    * 所以这一项仍带一点账本误差 —— 但比"当前也用账本"要小，而且
    * **至少与上面的「交易盈亏」不会只差一个 gap**。
    */
-  const todayPnl = todayBaseline === undefined ? 0 : (snapshots[snapshots.length - 1]?.accountEquity ?? calibratedEquity) - todayBaseline.equity;
+  /*
+   * 当前端取**实时**账户权益（60 秒轮询），与基线的快照口径同为"账户权益"。
+   *
+   * 独立验收 2026-10-07 指出：上一版当前端取**最新快照**的 `account_equity`，
+   * 而本机器人快照间隔实测 4.9–12.1 分钟，同卡「交易盈亏」的浮盈却是 60 秒轮询的
+   * 实时值 —— 于是"今日盈亏 − 交易盈亏"只在那一个瞬间是常数、周期内随行情漂移
+   * （13.9 张 ORCA 动 1% ≈ 0.4，比 1.17 还大）。**那是换口径换出来的新问题。**
+   */
+  const liveAccountEquity = num(accountQuery.data?.account?.equity);
+  const todayPnl =
+    todayBaseline === undefined
+      ? 0
+      : (liveAccountEquity ?? snapshots[snapshots.length - 1]?.accountEquity ?? calibratedEquity) -
+        todayBaseline.equity;
   const todayIsPartial = todayBaseline !== undefined && !todayBaseline.full;
   const todayBase = todayBaseline?.equity;
   const todayPercent = todayBase ? (todayPnl / Math.abs(todayBase)) * 100 : 0;
