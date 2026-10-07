@@ -513,7 +513,22 @@ export function TraderPage() {
   const nothingOpen = positions.length === 0 && openOrders.length === 0;
   const effectiveLeverage = equity > 0 ? notional / equity : 0;
   const unrealized = stats?.unrealizedPnl ?? positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
-  const realized = stats?.realizedPnl ?? 0;
+  /*
+   * ⚠️ **账本可能不准 —— 与交易所差额显著时改用交易所的真实值。**
+   *
+   * 用户 2026-10-07 报的：「起始权益 100.05，现在 100.84，为什么显示 +$1.29？」
+   *
+   * `stats.realizedPnl` 是 `trades.net_pnl` 求和（**账本**）。而交易循环每轮都在算
+   * 「账本净额 vs 交易所流水净额」并写进 `settings.ledger_check:<id>` ——
+   * 那个 gap 就是要给他看的。这个机器人**漏记了 33 张平仓单的手续费**，
+   * 账本只好拿开仓费顶上（11 笔呈现精确的 `fee = 2 × entry_fee`），
+   * 于是账本比真相**多了 0.496 USDT**，界面把它显示成 +1.29。
+   *
+   * 所以：**差值明显时，以交易所为准**。那才是他账户里真实的钱。
+   */
+  const ledger = trader?.ledger ?? null;
+  const ledgerSuspect = ledger !== null && Math.abs(ledger.gap) >= 0.01;
+  const realized = ledgerSuspect ? ledger!.exchangeNet : (stats?.realizedPnl ?? 0);
   /*
    * ⚠️ **卡片上那个"总盈亏"必须与下面的权益曲线同口径 —— 含浮盈。**
    *

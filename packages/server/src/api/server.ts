@@ -1442,6 +1442,29 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   /* --- Traders ----------------------------------------------------------- */
 
+  /**
+   * 最近一次账目校验的结论（`settings.ledger_check:<id>`）。
+   *
+   * 交易循环每轮都会把「账本净额 vs 交易所流水净额」算一遍并存下来，
+   * 但**从来没有送到界面上** —— 操作员因此只能看到一个可能错的值。
+   * 这里只做读取，不改变任何东西。
+   */
+  function ledgerCheckOf(traderId: number): { platformNet: number; exchangeNet: number; gap: number; checkedAt: string } | null {
+    const raw = settings.get(`ledger_check:${traderId}`);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      return {
+        platformNet: Number(parsed.platformNet ?? 0),
+        exchangeNet: Number(parsed.exchangeNet ?? 0),
+        gap: Number(parsed.gap ?? 0),
+        checkedAt: String(parsed.checkedAt ?? ''),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   app.get('/api/traders', authed, async () => {
     const running = new Set(deps.manager.runningIds());
     return traders.list().map((trader) => ({
@@ -1450,18 +1473,20 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       status: running.has(trader.id) ? deps.manager.statusOf(trader.id) : ('stopped' as const),
       isRunning: running.has(trader.id),
       /*
-       * ⚠️ **AI 主动停手的状态必须发出来，否则界面上看不出来。**
+       * ⚠️ **账本与交易所的差额必须发到界面上。**
        *
-       * 用户 2026-10-04 的原话：「**再也不会开新仓？你确定？那这个机器人存在意义是什么？**」
+       * 用户 2026-10-07 报的：「起始权益 100.05，现在 100.84，为什么显示 +$1.29？」
        *
-       * 他的质疑是对的，而根因是这条链只写了一半：模型能调 `pause_trading` 设上开关，
-       * 交易循环也确实读它并拦下开仓，**而清除它的 `clearPause()` 只在测试里被调用过**
-       * —— 界面上既看不到"它停手了"，也没有任何地方能恢复。
+       * 首页那个"交易盈亏"来自 `trades.net_pnl` 求和（账本），而这个机器人**一直在漏记
+       * 平仓手续费**（33 张已成交的平仓单 `fee=0`），账本只好拿开仓费顶上
+       * —— 11 笔呈现精确的 `fee = 2 × entry_fee`。差额就是这个字段。
        *
-       * 表现就是用户遇到的那样：决策卡不断出现「开多 / 未执行（已跳过）」，
-       * 而人既找不到原因、也找不到出口。
-       * **一个只能收紧不能放松的开关，不是风控，是死锁。**
+       * 系统的账目校验（`ledger_check:<id>`）**每轮都算出这个 gap 并写进 settings**，
+       * 却**从来没有一条路径把它送到界面上**。于是操作员看到一个错数、且没有任何提示。
+       *
+       * 带出去，让界面能说"账本与交易所差了多少"，而不是继续假装账本是准的。
        */
+      ledger: ledgerCheckOf(trader.id),
     }));
   });
 

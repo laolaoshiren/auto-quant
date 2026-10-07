@@ -288,6 +288,14 @@ export interface TraderRow extends Trader {
    * 现在服务端把它发出来，界面据此显示"停手中 + 恢复按钮"。
    */
   agentPaused?: { at: string; reason: string } | null;
+  /**
+   * 最近一次**账目校验**的结论（交易循环每轮自己算的）。
+   *
+   * 用户 2026-10-07 报的「起始 100.05，现在 100.84，为什么显示 +$1.29」——
+   * `platformNet` 是账本（可能错），`exchangeNet` 是交易所流水（真实），
+   * 两者之差就是 `gap`。界面对着它显示，而不是拿账本值冒充事实。
+   */
+  ledger?: { platformNet: number; exchangeNet: number; gap: number; checkedAt: string } | null;
 }
 
 /**
