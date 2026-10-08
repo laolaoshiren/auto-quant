@@ -1181,12 +1181,32 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       return reply.code(400).send({ ok: false, message: '自定义提供商必须填写基础 URL。', latencyMs: 0 });
     }
 
+    /*
+     * ⚠️ **编辑一个已存模型时，界面不会回传密钥（留空表示"不改它"）—— 所以这里必须回落。**
+     *
+     * 用户 2026-10-08 报的：「编辑一个已经添加过 key 的模型提供商时候需要重新填入 KEY，
+     * 不然无法测试通过」。根因就是这一行原来直接吃表单里的 `apiKey`，
+     * 而编辑态下它是空字符串 —— 拿空密钥去认证当然失败。
+     * **界面上的提示写着"留空则保留已存储的密钥"，而测试连接却把"留空"当成了"空密钥"**：
+     * 两句话互相矛盾，用户只能靠重新输入一遍来绕过。
+     *
+     * 修法：表单带了 `id`（编辑态）且 `apiKey` 为空时，**解密那条已存的密钥**用。
+     * 前端因此不必判断该调 `/test-draft` 还是 `/:id/test` —— 那是实现细节，
+     * 不该让用户（和界面的分支）去承担。
+     */
+    const draftId = Number((request.body as { id?: unknown } | null)?.id);
+    let effectiveKey = parsed.data.apiKey;
+    if (!effectiveKey && Number.isFinite(draftId) && draftId > 0) {
+      const existing = aiModels.getWithSecret(draftId);
+      if (existing) effectiveKey = deps.vault.decryptOptional(existing.api_key_enc);
+    }
+
     try {
       const { LlmClient } = await import('../llm/client.js');
       const defaults = providerDefaults(parsed.data.provider as never);
       const client = new LlmClient({
         provider: parsed.data.provider as never,
-        apiKey: parsed.data.apiKey,
+        apiKey: effectiveKey,
         model: parsed.data.model,
         baseUrl,
         temperature: parsed.data.temperature ?? defaults.temperature,
@@ -1197,9 +1217,34 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       });
       return await client.testConnection();
     } catch (error) {
-      return reply.code(400).send({ ok: false, message: (error as Error).message, latencyMs: 0 });
+      return reply.code(400).send({ ok: false, message: explainProbeError((error as Error).message), latencyMs: 0 });
     }
   });
+
+  /**
+   * 把探针的原始报错翻成**操作员能照做**的一句话。
+   *
+   * 用户 2026-10-08 在 OpenCode GO 上选了 `claude-haiku-5-5`，界面只说
+   * 「Model does not support this protocol.」—— 那句话既没说是**哪个**模型的问题，
+   * 也没说**该怎么办**。实测两种情况都试过（`/chat/completions` 400 不支持该协议、
+   * `/messages` 401 该模型不被支持），结论是**这个模型在那个网关上是不可用的**，
+   * 而不是我们的协议实现错了。
+   *
+   * 所以这里补一句指向"换模型"的话 —— 否则人会一直去查密钥和 URL（那是提示里让他查的
+   * 前三项），而真正的原因在第四项。
+   */
+  function explainProbeError(message: string): string {
+    if (/ModelProtocolUnsupported|does not support this protocol/i.test(message)) {
+      return (
+        `${message} —— 这个模型在你的服务商侧不提供 OpenAI 兼容接口，` +
+        '换个支持它的模型 id 再测（点「获取可用模型」从服务商报的清单里选）。'
+      );
+    }
+    if (/is not supported|ModelError/i.test(message)) {
+      return `${message} —— 该模型在你的账号上不可用，请换一个模型 id 再测。`;
+    }
+    return message;
+  }
 
   app.post('/api/ai-models', authed, guard(async (body: unknown) => {
     const parsed = AiModelInputSchema.safeParse(body);
