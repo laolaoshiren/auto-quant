@@ -657,10 +657,22 @@ export class LlmClient {
     model: string | null;
     isEmpty: boolean;
   } {
+    /*
+     * ⚠️ **顺序是契约：Anthropic 必须排在 `openAiCompatible` 之前。**
+     *
+     * `opencode` 的 `openAiCompatible` 是 true，所以只要那一行在前面，
+     * 这个分支**永远不会被执行** —— 它的形状（用 `anthropic.parseResponse`）
+     * 是真的，但永远不会被走到。**写了分支不等于接上了路径。**
+     *
+     * 2026-10-08 端到端实测就是这个症状：协议改对了、请求头也补齐了，
+     * HTTP 已经 200，而报错是「No assistant text in opencode response」——
+     * 因为响应用 OpenAI 的解析器去读 Anthropic 的
+     * `{content:[{type:'text',text:…}]}`，自然一个字都读不出来。
+     */
+    if (this.usesAnthropicProtocol()) return anthropic.parseResponse(body, this.model);
     if (this.descriptor.openAiCompatible) {
       return openai.parseResponse(this.provider, body, this.model);
     }
-    if (this.provider === 'anthropic' || this.usesAnthropicProtocol()) return anthropic.parseResponse(body, this.model);
     if (this.provider === 'gemini') return gemini.parseResponse(body, this.model);
     throw new LlmError(`No adapter for provider ${this.provider}`, null, this.provider, false);
   }
