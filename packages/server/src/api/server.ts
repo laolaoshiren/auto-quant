@@ -1841,9 +1841,24 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
          */
         quiet: true,
       });
-      const [account, livePositions] = await Promise.all([
+      const [account, livePositions, liveOrders] = await Promise.all([
         connection.broker.getAccountState(),
         connection.broker.getPositions(),
+        /*
+         * ⚠️ **挂单数必须由这里给，不能让界面用 WebSocket 镜像去数。**
+         *
+         * 用户 2026-10-08 报：「有 3 个挂单，为什么上面不显示保证金占用？」
+         * 卡片写 0.00、而下方「挂单占用」写 26.74。
+         *
+         * 根因：卡片判断"是否空仓"用的是 `live?.orders`（**WebSocket 镜像**），
+         * 那个镜像在推送断开/重连时是**空的**，于是它以为"没有任何挂单"，
+         * 走了"空仓 ⇒ 占用为 0"那条推算；而下方「当前委托」的角标是表格
+         * **自己调接口**数出来的 3。**同一屏两个数来自两个时效，于是自相矛盾。**
+         *
+         * 与持仓同一个道理（`positions` 也是从交易所实时读的）：
+         * 判断"有没有东西占着保证金"这件事，**必须问交易所，不能问镜像**。
+         */
+        connection.broker.getOpenOrders(),
       ]);
       // Layer the local records (stop/target ids, peak PnL, entry reasoning) on
       // top of the exchange's truth.
@@ -1927,7 +1942,18 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         );
       }
       const ownUnrealizedPnl = own.unrealizedPnl;
-      return { live: true, account, positions, ownUnrealizedPnl, error: undefined as string | undefined };
+      /*
+       * `openOrderCount` 是**交易所口径**的挂单数 —— 卡片用它判断"有没有东西占着保证金"。
+       * 只给数量、不传订单明细：界面要的只是"空不空"（明细由「当前委托」那张表自己查）。
+       */
+      return {
+        live: true,
+        account,
+        positions,
+        ownUnrealizedPnl,
+        openOrderCount: liveOrders.length,
+        error: undefined as string | undefined,
+      };
     } catch (error) {
       /*
        * ⚠️ **这条日志是必须的，不是可选的。**

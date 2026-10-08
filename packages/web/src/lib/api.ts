@@ -767,6 +767,14 @@ export const api = {
        * 所以不能拿它求和当"我的浮盈" —— 独立验收 2026-10-07 指出的就是这一处。
        */
       ownUnrealizedPnl?: number;
+      /**
+       * **交易所口径**的挂单数量（实时读回，不是 WebSocket 镜像）。
+       *
+       * 用户 2026-10-08：「有 3 个挂单，为什么上面不显示保证金占用？」
+       * 卡片原来用 `live?.orders`（镜像）去判断"是否空仓"，镜像在断线/重连时是空的，
+       * 于是它以为没有挂单、把占用算成 0，而下方「挂单占用」还写着 26.74。
+       */
+      openOrderCount?: number;
       error?: string;
     }>(`/traders/${id}/account`, { signal }),
   /**

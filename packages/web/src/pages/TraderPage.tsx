@@ -422,6 +422,17 @@ export function TraderPage() {
    * 结果就是两个都不可信。
    */
   const openOrders = (live?.orders ?? []).filter(isOpenOrder);
+  /*
+   * ⚠️ **判断"有没有东西占着保证金"必须用交易所给的数，不能用镜像。**
+   *
+   * `live` 是 WebSocket 镜像 —— 推送断开/重连时它是空的，于是 `nothingOpen`
+   * 会误判成"什么都没有"，把保证金占用算成 0，而下方「挂单占用」还显示着真实值
+   * （用户 2026-10-08 报的那一幕：3 个挂单、卡片 0.00、下面 26.74）。
+   *
+   * 与 `positions` 同一个取舍：**这类判断问交易所，不问镜像**。
+   * 交易所读数还没到（首屏）时才回落到镜像。
+   */
+  const openOrderTotal = accountView?.openOrderCount ?? openOrders.length;
 
   // A REST page wins, but the socket appends snapshots between polls, so both
   // are merged and de-duplicated by timestamp.
@@ -510,7 +521,7 @@ export function TraderPage() {
    * ⚠️ **读不到时仍然显示 `—`，不显示 0。** 与卡片其它格同一条纪律：
    * `—` 是"我们不知道"，`0` 是"我们问过了，是零"。
    */
-  const nothingOpen = positions.length === 0 && openOrders.length === 0;
+  const nothingOpen = positions.length === 0 && openOrderTotal === 0;
   const effectiveLeverage = equity > 0 ? notional / equity : 0;
   /*
    * ⚠️ **浮盈优先用【实时持仓】，不能用快照 —— 否则同一屏两个数会打架。**
@@ -915,7 +926,7 @@ export function TraderPage() {
   const displayInput = {
     liveUnavailable,
     positionCount: positions.length,
-    openOrderCount: openOrders.length,
+    openOrderCount: openOrderTotal,
     snapshotMarginUsed: account?.marginUsed ?? null,
     snapshotAvailableBalance: account?.availableBalance ?? null,
     walletBalance: account?.walletBalance ?? null,
