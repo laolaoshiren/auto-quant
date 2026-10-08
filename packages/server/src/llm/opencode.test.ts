@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { getProvider, LLM_PROVIDERS } from '@aq/shared';
 import { buildRequest, OPENCODE_SESSION } from './openaiCompatible.js';
+import { usesAnthropicProtocol } from './client.js';
 
 /**
  * OpenCode GO 内置配置（2026-10-04）—— 用户的原话：
@@ -71,4 +72,44 @@ test('供应商目录里 opencode 只出现一次（免得下拉里出现两行�
   const ids = LLM_PROVIDERS.map((p) => p.id);
   assert.equal(new Set(ids).size, ids.length, 'id 必须唯一');
   assert.equal(ids.filter((id) => id === 'opencode').length, 1);
+});
+
+/*
+ * ⚠️ **同一网关下按模型选协议 —— 这一条为用户的一个真实报错而写。**
+ *
+ * 用户 2026-10-08：「OpenCode GO 选 claude 用不了」。他的后台日志显示
+ * Claude Haiku 5.5 在他账号下**大量 200 成功**，所以问题不在订阅、不在密钥，
+ * 而在**我们把请求发错了端点**：文档的端点表写明 claude 走 `/v1/messages`，
+ * 而我们因为"供应商是 OpenAI 兼容"就一律发 `/chat/completions`。
+ *
+ * 这条用例直接钉住"模型 → 协议"的映射。实测三种请求的差异：
+ *
+ *   `/v1/messages` + `x-api-key`          → 200（claude / minimax-m3 / qwen3.8-max）
+ *   `/v1/messages` + `Authorization: Bearer` → 401 ModelError（认证方式不对）
+ *   `/v1/chat/completions` + claude        → 400 ModelProtocolUnsupported
+ */
+test('★ opencode 的 claude 系模型必须走 Anthropic Messages 协议', () => {
+  assert.equal(
+    usesAnthropicProtocol('opencode', 'claude-haiku-5-5'),
+    true,
+    '★ claude 发到 /chat/completions 会被网关拒收（Model does not support this protocol）',
+  );
+  assert.equal(
+    usesAnthropicProtocol('opencode', 'deepseek-v4.1-flash'),
+    false,
+    'deepseek 是 OpenAI 兼容那组，不能被改道',
+  );
+});
+
+test('★ 文档端点表里同属 /messages 的另外几族也要走 Anthropic', () => {
+  /* 这几条一起被这个 bug 影响（发错端点就报 ModelProtocolUnsupported），实测 /messages 均 200。 */
+  for (const model of ['minimax-m3', 'minimax-m2.7', 'qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-plus']) {
+    assert.equal(usesAnthropicProtocol('opencode', model), true, `${model} 在文档里属于 /v1/messages`);
+  }
+  /* /responses 那族（grok / gpt-luna / muse-spark）尚未实现适配器，这里不断言 —— 见函数的注释。 */
+  assert.equal(usesAnthropicProtocol('opencode', 'glm-5.3'), false);
+});
+
+test('provider 本身就是 anthropic 时，与模型 id 无关', () => {
+  assert.equal(usesAnthropicProtocol('anthropic', '任何模型'), true);
 });

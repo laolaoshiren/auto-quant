@@ -96,6 +96,47 @@ export function backoffDelayMs(attempt: number, random: () => number = Math.rand
  * shared policy for timeouts, retries and logging so every provider behaves
  * the same way under failure.
  */
+/**
+ * 这个**模型**该不该走 Anthropic Messages 协议。
+ *
+ * ## 为什么要有这个判断（2026-10-08 用户实测）
+ *
+ * 用户报「OpenCode GO 选 claude 用不了」。查它的文档
+ * （<https://opencode.ai/docs/zh-cn/go/>）有一张**端点表**：一个 baseUrl 下
+ * 按模型分三种协议 ——
+ *
+ * | 端点 | 模型 |
+ * | --- | --- |
+ * | `/v1/chat/completions` | DeepSeek / GLM / Kimi / MiMo / LongCat / Hy3 / Space Bunny |
+ * | **`/v1/messages`** | **Claude Haiku 5.5** / MiniMax M3 · M2.7 / Qwen3.8 Max · Flash / Qwen3.7 Plus |
+ * | `/v1/responses` | Grok 4.6 · 4.7 / GPT 6 Luna · GPT 5.6 Luna / Muse Spark |
+ *
+ * 而原来的分发**只看供应商**（`descriptor.openAiCompatible`）——
+ * `opencode` 是 OpenAI 兼容，于是**所有模型都被发到 `/chat/completions`**，
+ * claude 被网关拒收并回 `Model does not support this protocol.`。
+ * **端点表就在文档上，我们没照着实现。**（适配器 `llm/anthropic.ts` 早就写好了。）
+ *
+ * ## 为什么是纯函数
+ *
+ * 判定是"供应商 + 模型 id → 协议"的纯映射，与 `LlmClient` 实例无关。
+ * 抽出来就能**直接断言**，不必去 mock 网络 —— 而网络 mock 出来的绿勾
+ * 证明不了"真的发到了 `/messages`"（这一条正是被这个 bug 咬过的教训）。
+ *
+ * ## 尚未实现的一类
+ *
+ * `/v1/responses`（Grok / GPT Luna / Muse Spark）还没有适配器，
+ * 它们仍会走 `/chat/completions` 并失败。**那是已知缺口，不是静默容忍** ——
+ * 等有需求时在这里加第二条分支。
+ */
+export function usesAnthropicProtocol(provider: string, model: string): boolean {
+  if (provider === 'anthropic') return true;
+  /*
+   * 依据是**网关自己的模型 id**（文档逐条列了 id 与端点的对应），不是猜测。
+   * 用前缀匹配而不是穷举名单：网关新增同族模型时不必改代码，
+   * 而 `claude-` / `minimax-` / `qwen3.7-` / `qwen3.8-` 这几族在文档里**全部**属于 /messages。
+   */
+  return /^(claude-|minimax-|qwen3\.7-|qwen3\.8-)/i.test(model);
+}
 export class LlmClient {
   readonly provider: LlmProviderId;
   readonly descriptor: LlmProviderDescriptor;
@@ -407,6 +448,23 @@ export class LlmClient {
   /*  Internals                                                              */
   /* ---------------------------------------------------------------------- */
 
+  /**
+   * 这个**模型**是否该走 Anthropic Messages 协议。
+   *
+   * ## 为什么按模型判而不是按供应商
+   *
+   * OpenCode Go 一个 baseUrl 下按模型分三种协议（见文档的端点表）。
+   * 所以"供应商是不是 OpenAI 兼容"这个判断**粒度太粗** ——
+   * `opencode` 既发 OpenAI 兼容的 deepseek，也发 Anthropic 协议的 claude。
+   *
+   * 判定依据是**模型 id**：`claude-*` 走 `/messages`。这是网关自己的命名，
+   * 不是我们的猜测（文档的端点表逐条列了模型 ID 与端点的对应）。
+   * 以后若要接 `/v1/responses`（grok / gpt-6-luna），在这里加第二条分支即可。
+   */
+  private usesAnthropicProtocol(): boolean {
+    return usesAnthropicProtocol(this.provider, this.model);
+  }
+
   private buildRequest(messages: ChatMessage[], probe: boolean): OutboundRequest {
     // A probe must be as cheap as possible and must not request a schema. It
     // keeps the sampling temperature so it exercises the real request path.
@@ -437,6 +495,32 @@ export class LlmClient {
           })(),
         };
 
+    /*
+     * ⚠️ **同一个网关下，不同模型走不同协议 —— 必须按模型判，不能只看供应商。**
+     *
+     * 用户 2026-10-08 报「OpenCode GO 选 claude 用不了」。查它的文档
+     * （<https://opencode.ai/docs/zh-cn/go/>）有一张端点表：
+     *
+     *   · `/v1/chat/completions` —— DeepSeek / GLM / Kimi / MiMo / LongCat…
+     *   · `/v1/messages`         —— **Claude Haiku 5.5** / MiniMax / Qwen3.8
+     *   · `/v1/responses`        —— Grok / GPT-6 Luna / Muse Spark
+     *
+     * 而原来这一行只看 `descriptor.openAiCompatible`（`opencode` 是 true），
+     * 于是**所有模型都被发到 `/chat/completions`** —— claude 因此被网关拒收，
+     * 报 `Model does not support this protocol.`。**端点表就在文档里，我们没照着实现。**
+     *
+     * 适配器本身**早就有了**（`llm/anthropic.ts`，`x-api-key` + `anthropic-version`
+     * + `/messages`，与实测成功的请求完全一致）—— 缺的只是这一处分发。
+     */
+    if (this.usesAnthropicProtocol()) {
+      return anthropic.buildRequest(
+        this.apiKey,
+        this.baseUrl,
+        this.model,
+        messages,
+        bodyOptions,
+      );
+    }
     if (this.descriptor.openAiCompatible) {
       return openai.buildRequest(
         this.provider,
@@ -481,8 +565,23 @@ export class LlmClient {
      * （返回 400），这一实例此后就退回非流式 —— 不能让一个可选优化
      * 变成"每一轮都失败"。
      */
+    /*
+     * ⚠️ **Anthropic 路径必须排除在流式之外。**
+     *
+     * `executeStreamRequest(this.provider, …)` 是**按供应商**选解析器的 ——
+     * `opencode` 会拿到 OpenAI 的 SSE 解析器，而 `/v1/messages` 返回的是
+     * Anthropic 自己的事件格式（`content_block_delta` 等）。硬走流式会解析出空内容。
+     *
+     * 代价：claude 走非流式，而那条路要等整段生成完才回响应头 ——
+     * 链路上的网关等 100 秒会发 `HTTP 524`。Haiku 是快模型（实测 1.8–4.6 秒），
+     * 但**我们的提示词很大**，真撞上 524 时的正解是补 Anthropic 的 SSE 解析，
+     * 而不是把它塞进 OpenAI 的解析器。**先把协议发对，再谈流式。**
+     */
     const useStream =
-      this.descriptor.openAiCompatible && !probe && !this.streamDisabled;
+      this.descriptor.openAiCompatible &&
+      !probe &&
+      !this.streamDisabled &&
+      !this.usesAnthropicProtocol();
     /*
      * ⚠️ **两个取消源要合并：本客户端自己的超时 + 调用方传来的 signal。**
      *
@@ -559,7 +658,7 @@ export class LlmClient {
     if (this.descriptor.openAiCompatible) {
       return openai.parseResponse(this.provider, body, this.model);
     }
-    if (this.provider === 'anthropic') return anthropic.parseResponse(body, this.model);
+    if (this.provider === 'anthropic' || this.usesAnthropicProtocol()) return anthropic.parseResponse(body, this.model);
     if (this.provider === 'gemini') return gemini.parseResponse(body, this.model);
     throw new LlmError(`No adapter for provider ${this.provider}`, null, this.provider, false);
   }
