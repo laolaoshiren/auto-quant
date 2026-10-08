@@ -1570,8 +1570,69 @@ test('★ 挂单区块必须把「挂价距离」与「这段时间价格预期�
   });
 
   assert.match(text, /挂价低于现价 1\.2/, '挂价距离');
-  assert.match(text, /预期.{0,12}能走约/, '★ 还要给它"这段时间价格能走多远"');
-  assert.match(text, /45 分钟/, '要把时限与预期行程绑在同一个句子里 —— 否则它没法比较');
+  /*
+   * ⚠️ **断言口径在 2026-10-08 改了，因为原来那个数会骗人。**
+   *
+   * 原文是「45 分钟内价格预期能走约 0.3%」—— 而 45 只是**基础值**，
+   * 真正撤单时用的是 `max(基础值, 预期所需 × 1.5)` 封顶 480。
+   * 实测一张距离 1.56%、ATR 0.21% 的单真实上限顶到 480，而提示词告诉它 15 分钟 ——
+   * 那是把模型往"这价位等不到、改用市价"推，方向正好相反。
+   *
+   * 所以现在钉两件事：**预期需要多久**，以及**这张单实际会给多久**。
+   */
+  assert.match(text, /预期需要约/, '★ 要给它"走到这个价位预期需要多久"');
+  assert.match(text, /系统会给这张单/, '★ 还要给它"这张单实际会拿到多久"—— 否则那个基础值会骗它');
+});
+
+test('★ 时限必须按【这张单实际会拿到多久】说，而不是配置里的基础值', () => {
+  /*
+   * 用户 2026-10-08 的连环问题：「开单大多都是限价单，很多都是超时/超越预期价位，
+   * 导致错失机会，模型自己知道吗？如果知道他会改吗？」
+   *
+   * 查下来它知道（成交率与"撤后又被碰到"都写在提示词里），但它**改不动** ——
+   * 而且系统还在给它一个**错的时间预算**：说"基础值 N 分钟"，实际撤单器给的是
+   * `max(基础值, 预期所需 × 1.5)`（封顶 480）。
+   *
+   * 这条用例钉住：**两个数都要出现**（预期需要多久 + 这张单实际会给多久）。
+   */
+  const snapshotSol = snapshot('SOLUSDT', 120);
+  const base = buildUserPrompt({
+    ...contextWith(blankMemory(), [snapshotSol]),
+    pendingEntries: [
+      {
+        symbol: 'SOLUSDT',
+        side: 'long',
+        limitPrice: 118.53,
+        quantity: 1,
+        stopLoss: 116,
+        takeProfit: 126,
+        waitingMinutes: 20,
+        reasoning: '回踩 15m EMA20',
+        waitMinutes: null,
+      },
+    ] as unknown as PromptContext['pendingEntries'],
+  });
+  assert.match(base, /预期需要约/, '预期所需时间');
+  assert.match(base, /系统会给这张单/, '★ 有效时限（不是基础值）');
+
+  /* 模型自己申请了更久时，那个数要体现在"实际会给多久"里。 */
+  const asked = buildUserPrompt({
+    ...contextWith(blankMemory(), [snapshotSol]),
+    pendingEntries: [
+      {
+        symbol: 'SOLUSDT',
+        side: 'long',
+        limitPrice: 118.53,
+        quantity: 1,
+        stopLoss: 116,
+        takeProfit: 126,
+        waitingMinutes: 20,
+        reasoning: '回踩 15m EMA20',
+        waitMinutes: 300,
+      },
+    ] as unknown as PromptContext['pendingEntries'],
+  });
+  assert.match(asked, /你要求等 300 分钟/, '★ 它自己申请过的耐心要回显 —— 否则它记不住自己说过');
 });
 
 test('★ 连续多轮 0 开仓必须说出来 —— 规则只增不减会让它最终排除一切', () => {

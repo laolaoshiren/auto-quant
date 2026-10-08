@@ -2621,6 +2621,7 @@ export class AutoTrader {
         stopLoss: row.stop_loss,
         takeProfit: row.take_profit,
         reasoning: row.open_reasoning,
+        waitMinutes: row.wait_minutes ?? null,
       })),
     };
 
@@ -3937,8 +3938,12 @@ export class AutoTrader {
    */
   private async expireStalePendingEntries(): Promise<number> {
     const traderId = this.deps.trader.id;
-    const baseMinutes = this.activeConfig.riskControl.pendingEntryTimeoutMinutes;
-    if (baseMinutes <= 0) return 0;
+    const configBaseMinutes = this.activeConfig.riskControl.pendingEntryTimeoutMinutes;
+    /*
+     * ⚠️ `0` = 关闭这条兜底规则（本项目同类字段的既有约定）——
+     * **整条规则关闭**，而不是"只对没指定耐心的单生效"。关闭就该是关闭。
+     */
+    if (configBaseMinutes <= 0) return 0;
 
     const rows = positionStore.pending(traderId);
     if (rows.length === 0) return 0;
@@ -3977,14 +3982,23 @@ export class AutoTrader {
           ? [...atrSeries].reverse().find((v): v is number => typeof v === 'number' && Number.isFinite(v)) ??
             null
           : null;
+      /*
+       * ⚠️ **基础值取"配置值"与"模型为这一张指定的耐心"的较大者。**
+       *
+       * 模型说"我愿意等 120 分钟"时，不该被配置里的 15 分钟接管 ——
+       * 那正是它一直在经历的「错失机会」：判断是它做的，耐心却由系统定。
+       * 取 `max` 而不是直接用它的值：**它不能把耐心调到比系统配置更低**
+       *（那等于绕开这条兜底规则）。
+       */
+      const rowBaseMinutes = Math.max(configBaseMinutes, row.wait_minutes ?? 0);
       const limitMinutes =
         mark !== null && atr !== null
           ? pendingTimeoutMinutes({
-              baseMinutes,
+              baseMinutes: rowBaseMinutes,
               distancePercent: (Math.abs(row.entry_price - mark) / mark) * 100,
               atrPercent: (atr / mark) * 100,
             })
-          : baseMinutes;
+          : rowBaseMinutes;
 
       if (!(waitedMinutes >= limitMinutes)) continue;
 
@@ -6956,6 +6970,8 @@ reduceQuantity: null,
         openReasoning: decision.reasoning,
         status: 'pending',
         entryOrderId: placed.id,
+        /* 模型为这一张指定的耐心（没给就是 null = 用配置值）。 */
+        waitMinutes: decision.waitMinutes ?? null,
       });
 
       this.emit(

@@ -729,6 +729,26 @@ const M14_ORDER_MARGIN_TYPE = /* sql */ `
 ALTER TABLE orders ADD COLUMN margin_type TEXT;
 `;
 
+/*
+ * 模型可以为**这一张**挂单指定耐心（`wait_minutes`）。
+ *
+ * ## 为什么需要它（2026-10-08，用户定的迭代方向）
+ *
+ * 用户问：「开单大多都是限价单，很多都是超时/超越预期价位，导致错失机会，
+ * 模型自己知道吗？如果知道他会改吗？」——**它知道**：提示词每轮都告诉它
+ * 成交率 40%、被撤的单子 60% 后来又被价格碰到。而它**改不动**，
+ * 因为它只有 `limit` / `market` 两个选项，**没有表达"这一单我愿意多等"的地方**。
+ *
+ * 它在 `reasoning` 里写的"等回踩位"，被系统的自适应时限接管 ——
+ * **一个已经做出的判断，缺一个出口。**
+ *
+ * 存这一列而不是建新表：`positions` 已经是"挂出去的单"的单一事实源
+ * （`status='pending'`，见 `M11_PENDING_ENTRY`），加一列最省。
+ */
+const M15_PENDING_WAIT_MINUTES = /* sql */ `
+ALTER TABLE positions ADD COLUMN wait_minutes REAL;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -750,4 +770,5 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   { version: 13, name: 'order-margin-used', sql: M13_ORDER_MARGIN_USED },
   { version: 14, name: 'order-margin-type', sql: M14_ORDER_MARGIN_TYPE },
+  { version: 15, name: 'pending-wait-minutes', sql: M15_PENDING_WAIT_MINUTES },
 ];

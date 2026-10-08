@@ -209,8 +209,8 @@ test('★ M14 给 orders 加 margin_type：老行保持 NULL，绝不补一个�
 
     assert.equal(
       db.get<{ user_version: number }>('PRAGMA user_version')!.user_version,
-      14,
-      '这个用例假定 M14 是这一版最高的迁移版本 —— 追加新迁移时请把它一起往上调',
+      15,
+      '这个用例假定 M15 是这一版最高的迁移版本 —— 追加新迁移时请把它一起往上调',
     );
 
     /* ① 老行一条不少。 */

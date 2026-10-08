@@ -202,6 +202,22 @@ export const RawDecisionSchema = z.object({
   entry_type: z.enum(['market', 'limit']).optional(),
   limit_price: z.number().optional(),
   /*
+   * **这一张挂单，模型愿意等多久（分钟）。** 省略 = 用系统配置的基础时限。
+   *
+   * ## 为什么必须给这个出口（2026-10-08）
+   *
+   * 系统原来只让模型选 `limit` / `market`，而"挂多久"完全由系统的自适应规则决定。
+   * 于是模型在 `reasoning` 里写"等回踩位"、系统却按自己的时限把它撤掉 ——
+   * **判断是模型的，耐心却不是它的**。
+   *
+   * 给了这个字段之后：模型说"我愿意等 120 分钟"，系统就以 `max(配置值, 120)`
+   * 作为基础时限，再叠加原有的自适应延长（按挂价距离与 ATR），**仍然封顶 480 分钟**。
+   *
+   * 上限 1440（24 小时）只是**输入侧的合法范围**；真正的封顶在
+   * `PENDING_TIMEOUT_MAX_MINUTES`（480）—— 那里才是"一张单最多占用一个入场名额多久"。
+   */
+  wait_minutes: z.number().min(0).max(1440).optional(),
+  /*
    * **这个标的的评分（0–100）—— 标准由你自己定义。**
    *
    * ## 为什么是"你自己定义"，而不是系统给一把尺子
@@ -278,6 +294,13 @@ export interface Decision {
   entryType?: 'market' | 'limit';
   /** 限价入场的价格。`entryType === 'limit'` 时必填。 */
   limitPrice?: number | null;
+  /**
+   * 模型为**这一张**挂单指定的耐心（分钟）；`null`/省略 = 用系统配置的基础时限。
+   *
+   * 见 `RawDecisionSchema.wait_minutes` 的说明 —— 它是"模型判断"与
+   * "系统兜底"之间的接口：`max(配置值, 这个值)` 再叠加自适应延长。
+   */
+  waitMinutes?: number | null;
   stopLoss: number | null;
   takeProfit: number | null;
   /**

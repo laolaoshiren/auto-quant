@@ -14,6 +14,7 @@ import { DECISION_TOOL_CATALOGUE } from '../trader/decisionTools.js';
 import type { RankingRow, UniverseRankings } from '../market/rankings.js';
 import type { PlatformHistoryRow } from './platformHistory.js';
 import type { EntryFillStats } from './entryStats.js';
+import { BAR_MINUTES, PENDING_TIMEOUT_MAX_MINUTES, pendingTimeoutMinutes } from '../trader/pendingTimeout.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Prompt context                                                             */
@@ -68,6 +69,13 @@ export interface PromptPendingEntry {
   takeProfit: number | null;
   /** 当初为什么挂这一单。 */
   reasoning: string;
+  /**
+   * 模型为**这一张**指定的耐心（分钟）；`null` = 用系统配置的基础时限。
+   *
+   * 有了它，界面/提示词才能回答模型最关心的那句："我到底还有多久？"
+   * 而不是把一个配置里的基础值当成它的全部时间。
+   */
+  waitMinutes: number | null;
 }
 
 export interface PromptContext {
@@ -1342,6 +1350,13 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       '    "action": "open_long",',
       '    "entry_type": "limit",',
       `    "limit_price": 148.50,`,
+      /*
+       * ⚠️ **可选字段，但必须在范例里出现。**
+       *
+       * 本项目的既有规律（见下面"撤单也要有范例"那段）：**范例里没写过的字段，
+       * 模型不会写**。加了字段却不给例子，等于没加。
+       */
+      `    "wait_minutes": 180,`,
       `    "leverage": ${risk.altcoinMaxLeverage},`,
       '    "position_size_usd": 150.00,',
       '    "stop_loss": 144.20,',
@@ -1365,12 +1380,22 @@ export function buildSystemPrompt(ctx: PromptContext): string {
        * 同时要说清分工：**这条规则是兜底，不是它的替代品**。它看到理由不成立时
        * 应该立刻撤（那比等时限更早、更准）；时限只负责它没想到的情况。
        */
-      `⏱ **系统有一条兜底时限：挂满 ${risk.pendingEntryTimeoutMinutes} 分钟仍未成交的限价单会被自动撤掉**`
-        + (risk.pendingEntryTimeoutMinutes > 0
-          ? '（可在 `get_current_params` 里读到、也能通过 `set_params` 改）。'
-          : '。')
-        + '说清分工：**那条规则只负责你没想到的情况** —— 你看到理由不成立了应该立刻撤，'
-        + '比等时限更早；而当你没顾上看它时，时限保证它不会一直占着持仓名额。',
+      /*
+       * ⚠️ **这里原来写"挂满 N 分钟就撤"，而 N 只是基础值、不是真实时限（2026-10-08 修）。**
+       *
+       * 真实规则是**自适应**的：按挂价距离与该标的 ATR 推算"走到那儿要多久"，
+       * 取 `max(基础值, 预期所需 × 1.5)`，封顶 480 分钟。只说基础值会让模型
+       * 按一个远小于真实值的时间预算去做判断 —— 而它据此把成立的回踩位改掉。
+       */
+      `⏱ **挂单有兜底时限，而它是自适应算出来的（不是固定值）**：按挂价距离与当前 ATR 推算"走到挂价要多久"，` +
+        `取 \`max(基础 ${risk.pendingEntryTimeoutMinutes} 分钟, 预期所需 × 1.5)\`，封顶 ${PENDING_TIMEOUT_MAX_MINUTES} 分钟` +
+        (risk.pendingEntryTimeoutMinutes > 0
+          ? '（基础值可在 `get_current_params` 里读到、也能通过 `set_params` 改）。'
+          : '。') +
+        '**你也可以在某一单上直接写 `wait_minutes`** —— 表示"这一单我愿意等这么久"，' +
+        '系统会取它与基础值的**较大者**（同样封顶）。' +
+        '分工：**那条规则只负责你没想到的情况** —— 你看到理由不成立了应该立刻撤，' +
+        '比等时限更早；而当你没顾上看它时，时限保证它不会一直占着持仓名额。',
       '',
       /*
        * ⚠️ **撤单也要有范例 —— 否则"挂单"是一扇单向门。**
@@ -2596,7 +2621,9 @@ function renderUserPrompt(
   if (ctx.pendingEntries.length > 0) {
     const lines = ctx.pendingEntries.map((p, index) => {
       const rows = [
-        `${index + 1}. ${p.symbol} ${p.side === 'long' ? '做多' : '做空'} | **挂单 ${fmt(p.limitPrice)}**（尚未成交）`,
+        `${index + 1}. ${p.symbol} ${p.side === 'long' ? '做多' : '做空'} | **挂单 ${fmt(p.limitPrice)}**（尚未成交）` +
+          /* 把它自己要求过的耐心回显出来 —— 它才记得住自己说过"愿意等多久"。 */
+          (p.waitMinutes !== null && p.waitMinutes > 0 ? ` | 你要求等 ${p.waitMinutes} 分钟` : ''),
         /*
          * ⚠️ **"挂价离现价多远"必须给出来。**
          *
@@ -3903,10 +3930,7 @@ function renderEntryStats(stats: EntryFillStats): string {
  * ⚠️ 只给**距离**。该不该继续挂、要不要改成市价，是模型的判断
  * （用户的原则：**模型是大脑，系统只是手脚**）。
  */
-function pendingDistanceRow(
-  pending: { symbol: string; limitPrice: number },
-  ctx: PromptContext,
-): string[] {
+function pendingDistanceRow(pending: PromptPendingEntry, ctx: PromptContext): string[] {
   const snap = ctx.candidates.find((c) => c.symbol === pending.symbol);
   /*
    * 用 `snap.price`（快照自带的最新价），不要从 `timeframes[0].closes` 里取：
@@ -3943,14 +3967,56 @@ function pendingDistanceRow(
    */
   const atr = lastValue(snap?.primary?.atr?.['14']);
   if (atr !== null && Number.isFinite(atr) && atr > 0) {
-    const timeoutMinutes = ctx.config.riskControl.pendingEntryTimeoutMinutes;
-    const n = Math.max(1, timeoutMinutes / 15);
-    const expectedPct = ((atr * Math.sqrt(n)) / mark) * 100;
-    rows.push(
-      `   ⏱ 按当前 15m ATR(14) ≈ ${fmt(atr)} 估计，**${timeoutMinutes} 分钟内价格预期能走约 ` +
-        `${expectedPct.toFixed(2)}%**（随机游走口径：ATR × √根数）` +
-        ` —— 与上面那个距离比一比，就知道这个价位等不等得到。`,
+    const atrPercent = (atr / mark) * 100;
+    const distancePercent = Math.abs(pct);
+    /*
+     * ⚠️ **这里原来用的是配置里的基础值，而那是个会骗人的数（2026-10-08 修）。**
+     *
+     * 它说「15 分钟内价格预期能走约 0.30%」—— 而 15 只是**基础值**。
+     * 真正撤单时用的是 `pendingTimeoutMinutes`：`max(基础值, 预期所需 × 1.5)`，
+     * 封顶 480 分钟。实测一张挂价距离 1.56%、ATR 0.21% 的单，
+     * 真实上限是**顶到 480**，而提示词告诉它只有 15 分钟。
+     *
+     * **那是在主动把它推向"这价位等不到，改用市价或挪近"** —— 方向正好相反，
+     * 而它每次因此改掉的，是一个本来成立的回踩判断。
+     *
+     * 所以现在给两个数：**预期需要多久**（随机游走 x² 根）与**这张单实际会给多久**
+     * （含模型自己用 `wait_minutes` 申请的耐心）。两个数放一起才是那笔账。
+     */
+    const baseMinutes = Math.max(
+      ctx.config.riskControl.pendingEntryTimeoutMinutes,
+      pending.waitMinutes ?? 0,
     );
+    const limitMinutes = pendingTimeoutMinutes({
+      baseMinutes,
+      distancePercent,
+      atrPercent,
+    });
+    /* 随机游走：走到 `x` 倍 ATR 的距离，预期需要 `x²` 根 15m K 线。 */
+    const needMinutes = atrPercent > 0 ? (distancePercent / atrPercent) ** 2 * BAR_MINUTES : null;
+    const needText = needMinutes === null ? '未知' : `${Math.ceil(needMinutes)} 分钟`;
+    if (limitMinutes > 0) {
+      const capped = limitMinutes >= PENDING_TIMEOUT_MAX_MINUTES;
+      const enough = needMinutes !== null && limitMinutes >= needMinutes;
+      rows.push(
+        `   ⏱ 按当前 15m ATR(14) ≈ ${fmt(atr)}（占现价 ${atrPercent.toFixed(3)}%）估计：` +
+          `走到这个价位**预期需要约 ${needText}**（随机游走口径 x² 根 K 线）；` +
+          `而系统会给这张单 **${limitMinutes} 分钟**上限` +
+          `（取 max(基础 ${baseMinutes}, 预期×1.5)，封顶 ${PENDING_TIMEOUT_MAX_MINUTES}）` +
+          ` → ${enough || capped ? '' : '**时间可能不够**'}` +
+          (capped
+            ? `⚠️ 已顶到封顶值 —— 这张挂得偏远，${enough ? '时间够' : '**连封顶都可能不够**：要么把挂价挪近，要么这一单本就该放弃'}。`
+            : enough
+              ? '**时间够**。'
+              : '**时间不够**：把挂价挪近，或在决策里写 `wait_minutes` 申请更久（同样封顶）。'),
+      );
+    } else {
+      rows.push(
+        `   ⏱ 按当前 15m ATR(14) ≈ ${fmt(atr)}（占现价 ${atrPercent.toFixed(3)}%）估计，` +
+          `走到这个价位**预期需要约 ${needText}**（随机游走口径 x² 根 K 线）。` +
+          '系统当前**没有设自动撤单时限**，所以这张单会一直等着。',
+      );
+    }
   }
 
   return rows;

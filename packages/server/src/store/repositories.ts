@@ -720,6 +720,8 @@ interface PositionRow {
   status: string;
   /** 限价入场的交易所单号（`status='pending'` 时有值）。见 `M11_PENDING_ENTRY`。 */
   entry_order_id: string | null;
+  /** 模型为这一张挂单指定的耐心（分钟）；`null` = 用系统配置的基础时限。见 `M15_PENDING_WAIT_MINUTES`。 */
+  wait_minutes: number | null;
 }
 
 /**
@@ -873,10 +875,12 @@ export const positions = {
     status?: 'open' | 'pending';
     /** 限价入场那笔单的交易所单号 —— 对账靠它去问"成交了吗"。 */
     entryOrderId?: string | null;
+    /** 模型为这一张挂单指定的耐心（分钟）；不传 = 用配置的基础时限。 */
+    waitMinutes?: number | null;
   }): number {
     const { lastInsertRowid } = getDb().run(
-      `INSERT INTO positions (trader_id, symbol, side, quantity, entry_price, leverage, liquidation_price, margin_used, peak_pnl_percent, stop_loss, take_profit, stop_order_id, tp_order_id, open_reasoning, opened_at, status, entry_order_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO positions (trader_id, symbol, side, quantity, entry_price, leverage, liquidation_price, margin_used, peak_pnl_percent, stop_loss, take_profit, stop_order_id, tp_order_id, open_reasoning, opened_at, status, entry_order_id, wait_minutes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.traderId,
       input.symbol,
       input.side,
@@ -893,6 +897,7 @@ export const positions = {
       now(),
       input.status ?? 'open',
       input.entryOrderId ?? null,
+      input.waitMinutes ?? null,
     );
     return lastInsertRowid;
   },

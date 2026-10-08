@@ -24,7 +24,7 @@
  */
 
 /** 每根 K 线的分钟数（本函数的距离/ATR 都按 15m 口径）。 */
-const BAR_MINUTES = 15;
+export const BAR_MINUTES = 15;
 
 /**
  * 时限的硬上限（8 小时）。

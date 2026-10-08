@@ -566,6 +566,13 @@ function coerceRawDecision(input: unknown): LenientDecision | null {
     limit_price:
       toFiniteNumber(o.limit_price ?? o.limitPrice ?? o.entry_price ?? o.entryPrice) ?? undefined,
     /*
+     * 这一张挂单模型愿意等多久。**必须在 `coerced` 里搬一次** ——
+     * 这一段上方已经为 `entry_type` 与 `setup_score` 各写过一次同样的教训：
+     * zod 认、而这个白名单里没有的键会被**静默丢掉**，
+     * 表现成"模型给了、而统计里永远是 null"。
+     */
+    wait_minutes: toFiniteNumber(o.wait_minutes ?? o.waitMinutes) ?? undefined,
+    /*
      * ⚠️ **评分也要在这里搬一次 —— 上面那段注释说的就是这个坑，这是第二次踩。**
      *
      * 这里是解析的**入口**：`LenientDecisionSchema` 认哪些字段不算数，
@@ -799,6 +806,8 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
       /* 入场方式 —— 由上面那段算好（`entryAdjustments` 带说明）。 */
       entryType,
       limitPrice,
+      /* 只有限价单才有"等多久"可言 —— 市价单立即成交，等多久无意义。 */
+      waitMinutes: entryType === 'limit' ? (coerced.wait_minutes ?? null) : null,
       reasoning: coerced.reasoning ?? '',
       /*
        * 评分与它的依据 —— **原样带过去，不做任何加工**。

@@ -611,3 +611,34 @@ test('★ 两个瑕疵同时出现时，修复顺序是本质的（多行 + 漏�
     '补引号不能把内容截掉（它只能补上缺失的那一个引号）',
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  限价挂单的"耐心"（wait_minutes）                                            */
+/* -------------------------------------------------------------------------- */
+
+test('★ wait_minutes 必须活过解析入口 —— 这里栽过两次（entry_type / setup_score）', () => {
+  /*
+   * 针对本项目**踩过两次**的同一个坑：宽容转换函数 `coerced` 是解析入口，
+   * **它的白名单里没有的键会被静默丢掉** —— 表现成"zod 认、模型给了、
+   * 而下游永远是 null"，看起来像"模型不肯用这个字段"。
+   */
+  const raw = '<decision>[{"symbol":"BTCUSDT","action":"open_long","entry_type":"limit",' +
+    '"limit_price":80000,"wait_minutes":180,"stop_loss":78000,"reasoning":"回踩挂单"}]</decision>';
+  const parsed = parseDecisionResponse(raw, context());
+  assert.equal(parsed.decisions.length, 1, '该决策要能解析出来');
+  assert.equal(parsed.decisions[0]!.entryType, 'limit');
+  assert.equal(parsed.decisions[0]!.waitMinutes, 180, '★ 耐心必须跟着决策一起出来');
+});
+
+test('camelCase waitMinutes 同样接受（模型写法看当天习惯）', () => {
+  const raw = '<decision>[{"symbol":"BTCUSDT","action":"open_long","entryType":"limit",' +
+    '"limitPrice":80000,"waitMinutes":90,"reasoning":"回踩挂单"}]</decision>';
+  const parsed = parseDecisionResponse(raw, context());
+  assert.equal(parsed.decisions[0]!.waitMinutes, 90);
+});
+
+test('市价单没有"等多久"可言 —— waitMinutes 归 null', () => {
+  const raw = '<decision>[{"symbol":"BTCUSDT","action":"open_long","wait_minutes":180,"reasoning":"追突破"}]</decision>';
+  const parsed = parseDecisionResponse(raw, context());
+  assert.equal(parsed.decisions[0]!.waitMinutes, null, '市价立即成交，耐心无意义');
+});
