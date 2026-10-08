@@ -1234,14 +1234,36 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * 前三项），而真正的原因在第四项。
    */
   function explainProbeError(message: string): string {
+    /*
+     * ⚠️ **OpenCode Go 只覆盖【开源模型】，而它的 `/models` 返回的是网关全集。**
+     *
+     * 用户 2026-10-08 选了 `claude-haiku-5-5` 并报「连不上」。查官方文档
+     * （<https://opencode.ai/docs/zh-cn/go/>）：
+     *
+     * > Go 通过两种用量方案，稳定访问**开源编程模型**……我们测试了一组精选的**开源模型**
+     *
+     * 而 Claude 是 Anthropic 的**专有**模型 —— **不在 Go / Go Plus 的范围内**。
+     * 实测也印证：`chat/completions` 返 400「Model does not support this protocol」、
+     * `messages` 返 401「is not supported」；而**同一个 key、同一个端点**跑
+     * `deepseek-v4.1-flash` 是 **200**。所以不是协议实现的问题，是订阅没覆盖该模型。
+     *
+     * 而「获取可用模型」列的是**网关全集（37 个）**，没按订阅过滤 ——
+     * 界面上因此看不出"哪些真的能用"。至少要让报错把这层说破，否则人会一直去查
+     * 密钥和 URL（提示里让他查的前三项），而真正的原因在订阅范围上。
+     */
     if (/ModelProtocolUnsupported|does not support this protocol/i.test(message)) {
       return (
-        `${message} —— 这个模型在你的服务商侧不提供 OpenAI 兼容接口，` +
-        '换个支持它的模型 id 再测（点「获取可用模型」从服务商报的清单里选）。'
+        `${message} —— 这类模型在你的服务商侧不提供 OpenAI 兼容接口。` +
+        '若用的是 OpenCode Go，注意它只覆盖**开源模型**（如 deepseek 系），' +
+        'Claude / GPT 这类专有模型不在订阅范围内 —— 「获取可用模型」列的是网关全集，' +
+        '但不等于你的订阅能用。请换一个开源模型 id 再测。'
       );
     }
     if (/is not supported|ModelError/i.test(message)) {
-      return `${message} —— 该模型在你的账号上不可用，请换一个模型 id 再测。`;
+      return (
+        `${message} —— 该模型在你的订阅下不可用。` +
+        'OpenCode Go 只覆盖开源模型，专有模型需要另配 key。请换一个模型 id 再测。'
+      );
     }
     return message;
   }
