@@ -2693,7 +2693,7 @@ function renderUserPrompt(
    * 这个说"我的**挂单方式**本身好不好用"，两者都是关于它自己的事实。
    */
   if (ctx.entryStats && ctx.entryStats.fillRatePercent !== null) {
-    volatileParts.push(renderEntryStats(ctx.entryStats, ctx.config.riskControl.pendingEntryTimeoutMinutes));
+    volatileParts.push(renderEntryStats(ctx.entryStats));
   }
 
   /*
@@ -3801,7 +3801,17 @@ function renderPlatformHistory(rows: readonly PlatformHistoryRow[]): string {
  * 说法上刻意只给**统计**，不给建议 —— 挂近一点、用市价、还是继续等回踩，
  * 是它的判断（用户的原则：**模型是大脑，系统只是手脚**）。
  */
-function renderEntryStats(stats: EntryFillStats, timeoutMinutes: number): string {
+/*
+ * ⚠️ **不收 `timeoutMinutes` 参数了（2026-10-08）。**
+ *
+ * 原来收它、却只在文案里写死「45 分钟」—— 而挂单时限是**自适应**的
+ * （`pendingTimeoutMinutes`：按挂价距离与 ATR 取 max(base, needed)，封顶 480）。
+ * 任何固定数字都会误导"该等多久"这个判断，所以这段只讲事实（等了多久、撤后价格
+ * 有没有回来），时限的推算交给 `pendingDistanceRow`。
+ *
+ * **留一个没人用的参数是个陷阱** —— 下一个人会以为它生效了。要么用它，要么删掉。
+ */
+function renderEntryStats(stats: EntryFillStats): string {
   const decided = stats.limitFilled + stats.limitCanceled;
   const lines = [
     '# 我的挂单成效（限价入场单的历史统计 —— 这是**你自己**的成交情况）',
@@ -3851,8 +3861,23 @@ function renderEntryStats(stats: EntryFillStats, timeoutMinutes: number): string
     );
     if (stats.canceledWouldFillPercent >= 50) {
       lines.push(
+        /*
+         * ⚠️ **这句话里原来写死「45 分钟内走不到」—— 那是一个错数字（2026-10-08 修）。**
+         *
+         * 实测：trader #10 的 `pendingEntryTimeoutMinutes` 是 **15**，而模型读到的是 45；
+         * 而真正生效的时限还是**自适应**的（`pendingTimeoutMinutes`：按挂价距离与 ATR
+         * 推算，取 max(base, needed) 并封顶 480 分钟）—— 实测撤单等待中位 55 分钟、
+         * 最长 304 分钟。
+         *
+         * 而这一句**恰恰是整段里唯一在给"为什么被撤"下结论的地方**，其它句子已经
+         * 改成只说事实了（见上文那段警告）。**结论里带一个错数字，比不给结论更糟** ——
+         * 模型会照着"45 分钟"去校准自己的耐心，而它面对的真实基准是另一个数。
+         *
+         * 所以这里**不再报任何固定分钟数**：时限是自适应的，说任何一个固定值都会误导。
+         * "该等多久"这个判断交给它自己 + `pendingDistanceRow` 那一段的推算。
+         */
         '  也就是说：**你挂的价大多数是对的，是撤得太早** —— 撤单理由里成立的只有' +
-          '「45 分钟内走不到」，不成立的是「这个价位到不了」。',
+          '「到时限时价格还没走到」，不成立的是「这个价位到不了」。',
       );
     }
   }
