@@ -644,8 +644,14 @@ export const api = {
    */
   discoverModels: (input: { provider: string; baseUrl: string; apiKey: string; modelId?: number }) =>
     request<DiscoverModelsResult>('/ai-models/discover', { method: 'POST', body: input }),
-  /** Probe an unsaved model draft before committing it. */
-  testAiModelDraft: (input: AiModelInput) =>
+  /**
+   * Probe an unsaved model draft before committing it.
+   *
+   * `modelId` 与 `discoverModels` 同一个含义：**编辑已有模型时用那条记录的已存密钥**。
+   * 界面刻意不回显明文密钥（输入框留空 = "不改它"），所以只发 `apiKey: ''`
+   * 会被服务端当成"没提供密钥"而直接报 `Missing API key.`。
+   */
+  testAiModelDraft: (input: AiModelInput & { modelId?: number }) =>
     request<ModelTestResult>('/ai-models/test-draft', { method: 'POST', body: input }),
 
   /* --- strategies --- */

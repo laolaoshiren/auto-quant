@@ -1194,10 +1194,17 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 前端因此不必判断该调 `/test-draft` 还是 `/:id/test` —— 那是实现细节，
      * 不该让用户（和界面的分支）去承担。
      */
-    const draftId = Number((request.body as { id?: unknown } | null)?.id);
+    /*
+     * ⚠️ **字段名是 `modelId`，不是 `id`** —— 与同一族的 `/discover` 保持一致
+     * （那条路由的注释早就写明"`modelId` 是用已存密钥的唯一表达方式"）。
+     *
+     * 我第一版写成了 `id`，于是前端传的 `modelId` 被丢掉、回落逻辑永不触发，
+     * 用户看到的仍是 `Missing API key.`。**同一个东西两个名字，就是这种结果。**
+     */
+    const draftModelId = Number((request.body as { modelId?: unknown } | null)?.modelId);
     let effectiveKey = parsed.data.apiKey;
-    if (!effectiveKey && Number.isFinite(draftId) && draftId > 0) {
-      const existing = aiModels.getWithSecret(draftId);
+    if (!effectiveKey && Number.isFinite(draftModelId) && draftModelId > 0) {
+      const existing = aiModels.getWithSecret(draftModelId);
       if (existing) effectiveKey = deps.vault.decryptOptional(existing.api_key_enc);
     }
 

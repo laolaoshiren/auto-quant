@@ -488,7 +488,19 @@ export function AiModelsSection() {
     setTestingDraft(true);
     setDraftTest(null);
     try {
-      setDraftTest(await api.testAiModelDraft(buildPayload()));
+      /*
+       * ⚠️ **编辑态必须带上 `modelId`，否则服务端拿不到已存密钥。**
+       *
+       * 界面刻意不回显明文密钥（输入框留空 = "不改它"），所以 `buildPayload()` 里的
+       * `apiKey` 是空串 —— 服务端会当成"没提供密钥"，直接报 `Missing API key.`。
+       * 而**同一个文件里的 `discover` 调用早就传了 `modelId`**，只有这里漏了。
+       */
+      setDraftTest(
+        await api.testAiModelDraft({
+          ...buildPayload(),
+          ...(editing ? { modelId: editing.id } : {}),
+        }),
+      );
     } catch (err) {
       const payload = (err as Error & { payload?: ModelTestResult }).payload;
       setDraftTest({
