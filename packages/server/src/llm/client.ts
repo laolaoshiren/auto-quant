@@ -519,6 +519,8 @@ export class LlmClient {
         this.model,
         messages,
         bodyOptions,
+        /* 供应商自定义头必须跟着走 —— opencode 缺了 x-opencode-session 会被直接拒。 */
+        this.descriptor.modelsHeaders ?? {},
       );
     }
     if (this.descriptor.openAiCompatible) {

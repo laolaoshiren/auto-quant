@@ -115,6 +115,21 @@ export function buildRequest(
   model: string,
   messages: ChatMessage[],
   options: AnthropicBodyOptions = {},
+  /**
+   * 供应商自己要求的额外请求头（见 `LlmProviderDescriptor.modelsHeaders`）。
+   *
+   * ## 为什么必须有这个参数（2026-10-08 端到端实测）
+   *
+   * OpenCode Go 对**所有**端点都强制要求 `x-opencode-session`：缺了它回
+   * `400 MissingSessionID`（「Request is missing x-opencode-session and cannot be
+   * routed efficiently」）。而 OpenAI 兼容那条路一直带着它（走 `modelsHeaders`），
+   * **Anthropic 这条路没带** —— 于是 `claude-haiku-5-5` 改道到 `/v1/messages` 之后
+   * 仍然失败，报的还是一样的缺头错误。
+   *
+   * 换句话说：**协议改对了，但请求头没跟着搬过去。** 端到端实测（用应用自己的
+   * LlmClient 真发一次）才暴露出来 —— 单测和编译都不会。
+   */
+  extraHeaders: Record<string, string> = {},
 ): OutboundRequest {
   return {
     url: joinUrl(baseUrl, 'messages'),
@@ -122,6 +137,8 @@ export function buildRequest(
       'content-type': 'application/json',
       'x-api-key': apiKey,
       'anthropic-version': ANTHROPIC_VERSION,
+      /* 放在默认头之后：供应商要覆盖什么就覆盖什么（例如它自己的 anthropic-version）。 */
+      ...extraHeaders,
     },
     body: buildBody(model, messages, options),
   };
