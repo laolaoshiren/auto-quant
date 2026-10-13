@@ -741,3 +741,60 @@ test('★ 从「杠杆不允许」的报错里挖出交易所承认的上限', (
   );
 });
 
+
+/* -------------------------------------------------------------------------- */
+/*  Mark price unavailable                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 一台「两个行情源都取不到价」的 market：`getMarkPrice()` 于是返回 0。
+ *
+ * 这不是刁钻的夹具 —— `premiumIndex` 与 `ticker24h` 是**两次独立的网络请求**，
+ * 任何一次瞬时故障都会让标记价读不到，而那正是一台 7x24 在线的服务上最常发生的扰动。
+ */
+const priceblindMarket = {
+  async premiumIndex() {
+    throw new Error('premiumIndex 故障');
+  },
+  async ticker24h() {
+    throw new Error('ticker24h 故障');
+  },
+} as unknown as BinanceMarketData;
+
+test('★ 标记价取不到时，条件单放行（而不是被误判成「会立即触发」）', async () => {
+  const { rest, calls } = fakeRest({
+    algoId: '9', clientAlgoId: 'sl-2', algoType: 'CONDITIONAL', orderType: 'STOP_MARKET',
+    symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH', quantity: '0.01',
+    algoStatus: 'NEW', triggerPrice: '67000', price: '0', closePosition: true, reduceOnly: false,
+    workingType: 'MARK_PRICE', priceProtect: true, createTime: 0, updateTime: 0, triggerTime: 0,
+  } satisfies BinanceAlgoOrderResponse);
+  const registry = SymbolRegistry.fromExchangeInfo(exchangeInfo());
+  const b = new BinanceBroker(rest, priceblindMarket, registry);
+
+  const placed = await b.placeOrder({
+    symbol: 'BTCUSDT',
+    side: 'SELL',
+    type: 'STOP_MARKET',
+    quantity: 0.01,
+    triggerPrice: 67_000, // 远低于 68000，本来就是合法的一侧
+    closePosition: true,
+  });
+
+  assert.equal(placed.kind, 'algo', '条件单必须被送到 Algo 端点，而不是在本地被拒');
+  assert.equal(placed.status, 'NEW');
+  assert.equal(
+    calls.some((c) => c.path.includes('/fapi/v1/algoOrder')),
+    true,
+    '订单已经发出：取不到标记价时由交易所做权威判定（-2021），不由本地臆断',
+  );
+});
+
+/*
+ * 上面的用例钉住的是一个**真实缺陷**：`isValidTrigger()` 的第一行是
+ * `!(marketPrice > 0) → false`，而 `getMarkPrice()` 失败时返回 0，于是
+ * `placeOrder()` 对**任何**合法触发价都抛「会立即触发」。那是一个网络故障，
+ * 却会让 `autoTrader` 在 `requireStopLoss` 下把一笔健康持仓**不必要的紧急全平**
+ * —— 真实滑点 + taker 手续费，而审计里记的还是误导性的原因。
+ * 同一个函数 24 行之上的名义检查早就写着「拿不到标记价时放行而不是拒绝」
+ * （`if (refPrice > 0 && …)`），条件单分支漏掉了这层一致性。
+ */

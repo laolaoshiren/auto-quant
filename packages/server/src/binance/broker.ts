@@ -603,7 +603,23 @@ export class BinanceBroker {
         markPrice,
       );
 
-      if (!this.registry.isValidTrigger(normalised.triggerPrice, request.type, request.side, markPrice)) {
+      /*
+       * ⚠️ **标记价取不到时放行，而不是当成"会立即触发"拒绝** —— 与上面名义检查
+       * 的 `if (refPrice > 0 && …)` 是同一个模式，也与 `autoTrader` 调用方自己的
+       * `markNow > 0 &&` 守卫一致。
+       *
+       * `isValidTrigger()` 的第一行是 `!(marketPrice > 0) → false`，所以
+       * `markPrice === 0`（`getMarkPrice` 两个数据源都取不到）会让**任何**合法
+       * 触发价都被判成"会立即触发"。那是一个网络故障，却会把一笔健康的持仓
+       * 按 `requireStopLoss` 触发**不必要的紧急全平** —— 真实滑点 + taker 手续费，
+       * 而且审计里记的还是误导性的原因。
+       *
+       * 放行不等于不校验：交易所仍会用自己的标记价判 `-2021`，那是权威判定。
+       */
+      if (
+        markPrice > 0 &&
+        !this.registry.isValidTrigger(normalised.triggerPrice, request.type, request.side, markPrice)
+      ) {
         // Refuse locally with a clear message rather than letting Binance answer
         // `-2021 Order would immediately trigger`, which says nothing about why.
         throw new Error(
