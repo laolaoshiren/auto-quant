@@ -340,7 +340,20 @@ export function StrategyEditorPage() {
         config: { ...validation.config, name: state.name.trim(), description: state.description },
       };
 
-      if (isNew) {
+      /*
+       * ⚠️ **create 只能进一次** —— 判据必须与按钮 label（本文件 `:545` 的
+       * `isNew && state.id === 0`）**逐字一致**，否则两者会分叉：
+       *
+       * `isNew` 由 URL 派生（`params.id === 'new'`），create 分支又刻意不
+       * `navigate` 改 URL（体检需要那个 id），所以创建之后 `isNew` **永远为真**。
+       * 只看 `isNew` 的话，第二次保存会再 `createStrategy` 一条 #13，而 #12
+       * 上的这次编辑被静默丢弃 —— 用户在「保存修改」的提示下反复分裂出新策略、
+       * 最新改动落在一条再也打不开的副本上。
+       *
+       * 创建后 `state.id` 已被设成 #12，于是这里自动走 `updateStrategy`。
+       * 这正是按钮 label 早已采用的判据 —— 本修复只是让 save 与它对齐。
+       */
+      if (isNew && state.id === 0) {
         const created = await api.createStrategy(payload);
         setDirty(false);
         // Keep the editor mounted instead of navigating away: the health check
