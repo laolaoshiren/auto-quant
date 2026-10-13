@@ -49,14 +49,31 @@ export interface JsonResponse {
  * Parse `Retry-After` in both documented forms (delta-seconds and HTTP-date)
  * and clamp it, so a hostile or buggy value cannot stall the bot for hours
  * (B.14 rule 1).
+ *
+ * ⚠️ **delta-seconds 必须是纯十进制数字（`1*DIGIT`），其余一律不按秒、也不按日期。**
+ *
+ * 旧写法先 `Number(trimmed)`，于是 `-5` / `0x10` / `1e3` / `+7` / `12.5` 都被当成秒数接受；
+ * 而 `-5` 更糟：它 `Number` 有限但 `< 0`，于是落进**日期**分支，被 `Date.parse('-5')`
+ * 读成 2001 年——一个早已过去的时间，`max(过去, 0) = 0`。
+ * 结果是 `client.ts` 的 `retryAfterMs ?? backoffDelayMs(...)` 取到 **0**，退避形同不存在。
+ * 一个行为异常的网关就能让我们以最快节奏连续重打，**方向与全抖动防 IP 封禁的意图完全相反**。
+ *
+ * 非法数字返回 `null`，让调用点回落到全抖动退避——那才是"对方没给可用的等待提示"时该做的事。
+ * （`Retry-After: 0` 仍返回 0：那是 RFC 里合法的"立刻重试"，与 `-5` 这种垃圾值不同。）
  */
 export function parseRetryAfter(value: string | null, maxMs = 60_000): number | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (trimmed === '') return null;
 
-  const seconds = Number(trimmed);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, maxMs);
+  /* RFC 9110 的 delta-seconds 是 `1*DIGIT` —— 带符号、小数点、指数、十六进制的都不是。 */
+  if (/^\d+$/.test(trimmed)) return Math.min(Number(trimmed) * 1000, maxMs);
+
+  /*
+   * 能 `Number` 出有限值、又不是纯数字的串（`-5`、`0x10`、`1e3`、`12.5`…）是畸形秒数，
+   * **绝不能落进日期分支**（`Date.parse('-5')` 会把 `-5` 读成年份）。直接判非法。
+   */
+  if (Number.isFinite(Number(trimmed))) return null;
 
   const date = Date.parse(trimmed);
   if (Number.isFinite(date)) return Math.min(Math.max(date - Date.now(), 0), maxMs);

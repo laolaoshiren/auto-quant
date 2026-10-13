@@ -645,6 +645,32 @@ test('parseRetryAfter: seconds and HTTP-date forms, clamped', () => {
   assert.ok(parsed !== null && parsed > 0 && parsed <= 5000);
 });
 
+/*
+ * ★ 钉住 `-5` 被当成"等待提示"这条路径（真实缺陷，不是挑刺）。
+ *
+ * 旧实现 `Number.isFinite(seconds) && seconds >= 0` 在 `-5` 上是 false（负数），
+ * 于是落进**日期**分支：`Date.parse('-5')` 把 `-5` 读成 2001 年，一个早已过去的时间，
+ * `max(过去, 0) = 0`。`client.ts` 的 `retryAfterMs ?? backoffDelayMs(...)` 因此取到 **0**，
+ * 退避形同不存在 —— 与"全抖动防 IP 封禁"的意图相反。
+ *
+ * 修法：非纯十进制（`1*DIGIT`，RFC 9110 的 delta-seconds）的、且 `Number` 出有限值的串，
+ * 一律判非法返回 null，让调用点回落到全抖动退避。
+ */
+test('parseRetryAfter: 畸形的"秒数"绝不退化成 0 或误读成日期', () => {
+  /* 这些都能被 Number() 解析出有限值，但都不是合法 delta-seconds。 */
+  for (const bad of ['-5', '0x10', '1e3', '+7', '12.5', '-0', ' 1e3 ']) {
+    assert.equal(
+      parseRetryAfter(bad),
+      null,
+      `畸形值 ${JSON.stringify(bad)} 必须 null（→ 调用点用全抖动），不能是 0 或某个正数`,
+    );
+  }
+  /* 纯十进制才是秒。 */
+  assert.equal(parseRetryAfter('2'), 2000);
+  assert.equal(parseRetryAfter('0'), 0, 'Retry-After: 0 是合法的"立刻重试"');
+  assert.equal(parseRetryAfter('007'), 7000, '前导零仍属 1*DIGIT');
+});
+
 test('joinUrl: no doubled or missing separators', () => {
   assert.equal(joinUrl('https://api.deepseek.com', 'chat/completions'), 'https://api.deepseek.com/chat/completions');
   assert.equal(joinUrl('https://api.openai.com/v1/', '/chat/completions'), 'https://api.openai.com/v1/chat/completions');
