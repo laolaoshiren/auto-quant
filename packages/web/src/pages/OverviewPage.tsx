@@ -40,6 +40,7 @@ import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
 import { accountEquityContributor, fleetTotals } from '../lib/fleetTotals';
+import { pairEquityByTrader } from '../lib/equityPairing';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { Button, Empty, ErrorNote, Panel, Spinner3 } from '../components/ui';
 import { Metric, MetricGroup, PageShell, SectionLabel } from '../components/shell';
@@ -149,10 +150,28 @@ export function OverviewPage() {
    * so polling them at the trader-list cadence would spend one request per
    * trader every few seconds to redraw an identical curve.
    */
-  const equityQuery = usePolled<EquitySnapshot[][]>(
+  const equityQuery = usePolled<Record<number, EquitySnapshot[]>>(
     async (signal) => {
       const ids = traderIds ? traderIds.split(',').map(Number) : [];
-      return Promise.all(ids.map((id) => api.traderEquity(id, 360, signal)));
+      const pairs = await Promise.all(
+        ids.map(async (id) => ({ id, rows: await api.traderEquity(id, 360, signal) })),
+      );
+      /*
+       * ⚠️ **按 id 配对，而不是按数组下标。**
+       *
+       * 旧写法是 `Promise.all(ids.map(...))` —— 一个**位置数组**，`data[i]` 属于
+       * *发出那次请求时*的 ids。下游却按**当前** `traders` 的下标取用
+       * （`data[index]`），机器人增删/改序之后两者错位：A 的曲线被记到 B 头上。
+       *
+       * 而 `usePolled` 的 `setData` 只在**成功**时调用、失败时保留旧 data
+       * （`lib/hooks.ts` 的 catch 分支），所以一次失败的轮询会让这批旧顺序的数组
+       * 无限期地留在位置上，而 `traders` 已经是新的 —— 错配的窗口不是一瞬，是
+       * 直到下一次成功请求为止。这里代入的是**权益数字**，会直接错报舰队合计、
+       * 区间盈亏与曲线（首屏那几栏）。
+       *
+       * 走 id 之后，错配只剩"这一轮没请求到某个 id"（正确留空），不再有'张冠李戴'。
+       */
+      return pairEquityByTrader(pairs);
     },
     { intervalMs: 60_000, enabled: traders.length > 0, deps: [traderIds] },
   );
@@ -175,10 +194,12 @@ export function OverviewPage() {
    * （`accountEquityContributor` 用它把曲线在第一条快照之前垫平）。
    */
   const equitySnapshots: Record<number, EquitySnapshot[]> = {};
-  traders.forEach((trader, index) => {
-    const live = liveByTrader[trader.id]?.equity ?? [];
-    equitySnapshots[trader.id] = [...(equityQuery.data?.[index] ?? []), ...live];
-  });
+  for (const trader of traders) {
+    equitySnapshots[trader.id] = [
+      ...(equityQuery.data?.[trader.id] ?? []),
+      ...(liveByTrader[trader.id]?.equity ?? []),
+    ];
+  }
   const merged = mergeEquityCurves([accountEquityContributor(traders, equitySnapshots)]);
 
   /*
