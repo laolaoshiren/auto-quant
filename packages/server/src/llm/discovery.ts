@@ -1,6 +1,7 @@
 import { getProvider, type DiscoveredModel, type LlmProviderId } from '@aq/shared';
 import { createLogger } from '../logger.js';
 import { classifyHttpError } from './errors.js';
+import { fetchGuarded } from './http.js';
 import { checkOutboundUrl, parseHostAllowlist } from './urlGuard.js';
 import { env } from '../env.js';
 
@@ -115,7 +116,12 @@ export async function discoverModels(options: {
   }
 
   try {
-    const response = await fetch(url, {
+    /*
+     * 与对话请求共用 `fetchGuarded`：重定向的每一跳都重跑地址白名单。
+     * 上面那次前置校验挡的是"一开始就填内网地址"，而这一层挡的是
+     * "合法公网地址 302 跳到内网"—— 少了它，`checkOutboundUrl` 只保护了第一个 URL。
+     */
+    const response = await fetchGuarded(url.toString(), {
       method: 'GET',
       headers,
       signal: AbortSignal.timeout(30_000),

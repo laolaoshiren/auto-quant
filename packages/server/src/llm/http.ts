@@ -5,9 +5,83 @@ import {
   connectionError,
   timeoutError,
 } from './errors.js';
+import { checkOutboundUrl, parseHostAllowlist } from './urlGuard.js';
+import { env } from '../env.js';
 import type { LlmProviderId } from '@aq/shared';
 import type { OutboundRequest } from './types.js';
 import { mergeOpenAiStreamChunks, readOpenAiStreamLines } from './stream.js';
+
+/** 需要跟着走的重定向状态码。304 不在内 —— 它不是跳转。 */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * 重定向的上限。
+ *
+ * `fetch` 默认 `redirect: 'follow'`，而**每一次跳转都不再过 `urlGuard`** ——
+ * 那层校验只看了我们拼出来的第一个 URL。后果正是 `urlGuard.ts` 文件头要防的
+ * 那个升级路径：`baseUrl` 填一个**合法的公网地址**（校验通过），它回一个
+ * `302 Location: http://169.254.169.254/latest/meta-data/iam/security-credentials/`，
+ * undici 就带着我们的密钥打到云元数据服务上，而没有任何一道闸拦得住。
+ *
+ * 所以这里改成**手动跟随**：每一跳都重跑 `checkOutboundUrl`。
+ * 合法用途（网关换域名、http→https 归一）继续可用，因为它们的目标同样是公网地址；
+ * 打到回环 / 链路本地 / RFC1918 的那一跳会被拒绝，与直接填写该地址的结果一致。
+ *
+ * 上限的存在是为了不让一个互相指向的网关把我们挂死在重定向里。
+ */
+const MAX_REDIRECTS = 5;
+
+/**
+ * 发出一次出站请求，并**在每一跳重定向上都重跑出站地址白名单**。
+ *
+ * ⚠️ **跨主机跳转时不带原始请求头。**
+ *
+ * 不只是防止密钥进日志 —— 这里的风险是请求头被**转发到另一台主机**：
+ * `x-api-key` / `api-key` / `x-goog-api-key` / `Authorization` 都是各家鉴权头，
+ * 跳到 `169.254.169.254` 或 `127.0.0.1` 时，它们会被一起带过去。
+ * 同主机的 http→https 归一（同一组端点）保留鉴权头，否则那一跳会直接 401。
+ */
+export async function fetchGuarded(url: string, init: RequestInit): Promise<Response> {
+  const allowPrivateHosts = parseHostAllowlist(env.allowPrivateLlmHosts);
+  let current = url;
+  let headers = init.headers;
+
+  for (let hop = 0; ; hop += 1) {
+    const verdict = checkOutboundUrl(current, allowPrivateHosts);
+    if (!verdict.allowed) {
+      throw connectionError('outbound', new Error(`出站地址被拒绝：${verdict.reason ?? current}`));
+    }
+
+    const response = await fetch(current, { ...init, headers, redirect: 'manual' });
+
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+    /*
+     * 从这一行往下，`response` 只是我们要跟着走的中转站 —— 它的 body 必须丢掉：
+     * 不消费它，那一跳的连接就一直挂着不释放，而这是一台 7x24 常在的服务器，
+     * 跳转次数累积起来就是 fd 泄漏。`cancel()` 失败（已经结束）时忽略即可，
+     * 它只是清理，不是业务逻辑。
+     *
+     * **放在所有提前 return / throw 之前**，是为了让"带个响应体离开这个分支"的
+     * 每条路径都经过它 —— 否则迟早会有一条忘了 cancel。
+     */
+    void response.body?.cancel().catch(() => undefined);
+
+    const location = response.headers.get('location');
+    if (!location) return response;
+    if (hop >= MAX_REDIRECTS) {
+      throw connectionError('outbound', new Error(`重定向超过 ${MAX_REDIRECTS} 跳，已放弃`));
+    }
+
+    // 相对 Location 要按当前 URL 解析，否则换路径的网关会丢整段 base。
+    const next = new URL(location, current).toString();
+    if (new URL(next).host !== new URL(current).host) {
+      // 跨主机：丢掉全部请求头（见上面那段为什么）。
+      headers = undefined;
+    }
+    current = next;
+  }
+}
 
 /**
  * Shared HTTP plumbing for every adapter.
@@ -81,7 +155,7 @@ export async function executeJsonRequest(
 ): Promise<JsonResponse> {
   let response: Response;
   try {
-    response = await fetch(request.url, {
+    response = await fetchGuarded(request.url, {
       method: 'POST',
       headers: request.headers,
       body: JSON.stringify(request.body),
@@ -185,7 +259,7 @@ export async function executeStreamRequest(
 
   let response: Response;
   try {
-    response = await fetch(request.url, {
+    response = await fetchGuarded(request.url, {
       method: 'POST',
       headers: { ...request.headers, accept: 'text/event-stream' },
       body: JSON.stringify(request.body),
