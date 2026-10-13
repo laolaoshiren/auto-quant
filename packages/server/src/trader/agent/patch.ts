@@ -122,11 +122,45 @@ const STRUCTURAL_INVARIANTS: ReadonlyArray<{
  * 后者写进前者里面；若两者写同一个叶子，**嵌套写法优先**
  *（它是更明确的表达，而且先出现）。
  */
+/**
+ * 路径段里**永远不该被遍历或写入**的键。
+ *
+ * ⚠️ **原型污染（2026-10-14 外部审查发现，实测复现）。**
+ * 展开逻辑用 `node[part]` 遍历，而 `node['__proto__']` 返回的是 `Object.prototype`
+ * —— `typeof` 是 `'object'`、不是数组，**通过**原有的类型守卫，于是
+ * `{"riskControl.__proto__.isAdmin": 1}` 把 `isAdmin` 写进了**全局原型**：
+ *
+ * ```
+ *   before: ({}).isAdmin = undefined
+ *   after : ({}).isAdmin = 1        ← 整个进程里每个普通对象都继承了它
+ * ```
+ *
+ * 危害不止"改了一个怪键"：本文件的 `pickKnown` 用 `key in target` 做
+ * "只留已知字段"过滤，而 `in` **会看见原型链** —— 一旦某个名字被放上
+ * `Object.prototype`，`STRUCTURAL_INVARIANTS` 与未知字段过滤双双失效，
+ * 全进程任何 `x in obj` 判断都被静默改变。
+ *
+ * 而这是从**不可信输入**可达的：`set_params` 的 `patch` 只校验"是个对象"
+ * （`tools.ts` 的 `validateArgs`），键名不过滤；模型输出、乃至 webSearch
+ * 检索内容注入提示词后操纵策略师，都能触发。展开又发生在 `pickKnown` 之前
+ * （见下方注释），过滤救不了它。
+ *
+ * 修法从源头拒绝这三类段 —— 它们**不可能**是合法的配置字段名
+ * （schema 里没有任何一个字段叫这些名字，就算有 `pickKnown` 也会丢），
+ * 所以这不违反"多认格式、不放宽语义"：合法的点号写法行为逐字节不变。
+ */
+const UNSAFE_SEGMENT = /^(?:__proto__|constructor|prototype)$/;
+
 function expandDottedKeys(patch: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  /* ① 先放不含点的键（原样）。 */
+  /*
+   * `Object.create(null)`：连"顶层键就叫 `__proto__`"这种不含点的写法也一并废掉
+   * —— 普通对象字面量上 `out['__proto__'] = v` 走的是 setter（原型改指向），
+   * 无原型对象上它只是一个普通数据键。与上面的段拒绝互为双保险。
+   */
+  const out: Record<string, unknown> = Object.create(null);
+  /* ① 先放不含点的键（原样）。⚠️ 危险名一律丢弃（见上方 UNSAFE_SEGMENT）。 */
   for (const [key, value] of Object.entries(patch)) {
-    if (!key.includes('.')) out[key] = value;
+    if (!key.includes('.') && !UNSAFE_SEGMENT.test(key)) out[key] = value;
   }
   /* ② 再把含点的键写进去。 */
   for (const [key, value] of Object.entries(patch)) {
@@ -135,14 +169,16 @@ function expandDottedKeys(patch: Record<string, unknown>): Record<string, unknow
     /*
      * ⚠️ 空段（`"a..b"` / `".a"` / `"a."`）是坏输入 → 跳过这一个键，
      * 而不是整条拒绝。理由与"多认格式"一致：一个坏键不该让整个补丁作废。
+     * 危险段（`__proto__` 等）同样按"坏输入跳过这个键"处理 —— 一个坏键不作废整条补丁。
      */
     if (parts.some((p) => p.length === 0)) continue;
+    if (parts.some((p) => UNSAFE_SEGMENT.test(p))) continue;
     let node = out;
     let ok = true;
     for (const part of parts.slice(0, -1)) {
       const next = node[part];
       if (next === undefined) {
-        node[part] = {};
+        node[part] = Object.create(null);
       } else if (typeof next !== 'object' || next === null || Array.isArray(next)) {
         /* 与一个非对象值冲突（`{"a": 1, "a.b": 2}`）→ 跳过这个键。 */
         ok = false;

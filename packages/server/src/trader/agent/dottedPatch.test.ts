@@ -90,3 +90,72 @@ test('★ 坏输入（空段）被跳过，而不是整条拒绝', () => {
   assert.equal(r.rejected, null, '★ 不该整条拒绝');
   assert.equal(r.config.riskControl.maxPositions, 9, '★ 好的那个键仍要生效');
 });
+
+/*
+ * ★★ **原型污染（2026-10-14 外部审查，实测复现后修复）**
+ *
+ * `patch` 来自不可信的模型输出（`set_params` 的 `validateArgs` 只验"是个对象"，
+ * 键名不过滤），而旧版 `expandDottedKeys` 用 `node[part]` 遍历、
+ * `node['__proto__']` 返回 `Object.prototype`（typeof 是 'object'，通过类型守卫），
+ * 于是 `{"riskControl.__proto__.isAdmin": 1}` 把 `isAdmin` 写上**全局原型**：
+ *
+ * ```
+ *   before: ({}).isAdmin = undefined
+ *   after : ({}).isAdmin = 1     ← 进程里每个普通对象都继承了它
+ * ```
+ *
+ * 真正致命的不是那个怪键本身，而是它**反噬本文件的守卫**：`pickKnown` 的
+ * "只留已知字段"用 `key in target`，而 `in` 看得见原型链 —— 一个名字一旦上了
+ * `Object.prototype`，未知字段过滤与结构性不变量双双放行，全进程任何
+ * `x in obj` 都被改变。实测：污染后 `'isAdmin' in {} === true`。
+ *
+ * 这个用例在修复前会**永久污染测试进程的原型**（node:test 同进程跑多个文件，
+ * 危害会外溢到别的测试文件），修复后三类入口全部无效。
+ */
+test('★★★ 点号路径里的 __proto__ / constructor / prototype 段不得触到全局原型', () => {
+  const current = defaultStrategyConfig();
+
+  const probes: Array<[string, unknown]> = [
+    ['riskControl.__proto__.pollutedA', 'X'],
+    ['__proto__.pollutedB', 'X'],
+    ['a.__proto__.pollutedC', 'X'],
+    ['riskControl.constructor.prototype.pollutedD', 'X'],
+    ['riskControl.prototype.pollutedE', 'X'],
+  ];
+  for (const [path, value] of probes) {
+    applyAgentPatch(current, { [path]: value });
+  }
+
+  /* 决定性断言：全局原型上不允许出现任何一个探针键。 */
+  for (const [, , key] of [
+    ['riskControl.__proto__.pollutedA', 'X', 'pollutedA'],
+    ['__proto__.pollutedB', 'X', 'pollutedB'],
+    ['a.__proto__.pollutedC', 'X', 'pollutedC'],
+    ['riskControl.constructor.prototype.pollutedD', 'X', 'pollutedD'],
+    ['riskControl.prototype.pollutedE', 'X', 'pollutedE'],
+  ] as Array<[string, string, string]>) {
+    assert.equal(
+      (Object.prototype as unknown as Record<string, unknown>)[key],
+      undefined,
+      `Object.prototype.${key} 被污染了`,
+    );
+    assert.equal(key in {}, false, `'${key}' in {} 必须为 false（否则 pickKnown 的过滤被废）`);
+  }
+
+  /* 补丁本身要变成"无生效字段"而不是崩溃或生效。 */
+  const r = applyAgentPatch(current, { 'riskControl.__proto__.isAdmin': 1 });
+  assert.ok(
+    r.rejected === null || typeof r.rejected === 'string',
+    '坏键按"跳过这个键"处理：整条补丁其余部分照常（坏输入不作废全补丁的既有原则）',
+  );
+});
+
+test('★ 危险段只废自己那个键，不作废同批的合法键', () => {
+  const current = defaultStrategyConfig();
+  const r = applyAgentPatch(current, {
+    'riskControl.__proto__.isAdmin': 1,
+    'riskControl.minPositionSize': current.riskControl.minPositionSize, // 合法键同批到达
+  });
+  assert.equal(r.rejected, null, '一个坏键不该让整条补丁被拒');
+  assert.equal('isAdmin' in {}, false, '且污染没有发生');
+});
