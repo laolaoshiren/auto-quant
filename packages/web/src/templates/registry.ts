@@ -23,6 +23,7 @@
 import type { TemplateDefinition, TemplateId } from './types';
 import { ClassicShell } from './classic/ClassicShell';
 import { ConsoleShell } from './console/ConsoleShell';
+import { QuillShell } from './quill/QuillShell';
 
 export const BUILT_IN: TemplateDefinition[] = [
   {
@@ -39,6 +40,14 @@ export const BUILT_IN: TemplateDefinition[] = [
     hint: '桌面窗口外壳：标题栏 / 菜单栏 / 工具栏 / 侧栏 / 状态栏五层，页面动作统一收进工具栏。',
     rootClass: 'aq-console',
     Shell: ConsoleShell,
+    ownsPalette: true,
+  },
+  {
+    id: 'quill',
+    label: '静谧',
+    hint: '中性克制的桌面工具外观：左侧分组侧栏 + 分段控件双层导航，选中态用浮起而不是上色，深 / 浅两套主题。',
+    rootClass: 'aq-quill',
+    Shell: QuillShell,
     ownsPalette: true,
   },
 ];

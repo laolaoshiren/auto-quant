@@ -23,7 +23,7 @@
  *     <div className="my-root">
  *       <my-header>…</my-header>
  *       <main id={MAIN_SCROLL_ID}><Outlet /></main>
- *       <CommandPalette open={s.paletteOpen} onOpenChange={s.setPaletteOpen} />
+ *       // ⚠️ 命令面板与 toast **不在这里** —— ShellRuntime 已经渲染了（见 §3 ③）
  *     </div>
  *   );
  * }

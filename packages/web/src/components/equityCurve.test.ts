@@ -182,19 +182,26 @@ test('★ CHART_INK 的每个键都要有一份 CSS 变量映射，且值等于�
   }
 
   /*
-   * 4. 控制台模板的 `theme.css` 必须把这些变量**全部覆盖**。
+   * 4. **自带调色板的模板**必须把这些变量全部覆盖。
    *
-   * 这是"两套模板互不影响"的底线：漏掉一个变量，那个颜色在两套模板下
-   * 是同一个色 —— 属于"看起来对、其实没换"，而没有人会去数变量。
+   * 这是"多套模板互不影响"的底线：漏掉一个变量，那个颜色在该模板下
+   * 是原版的色 —— 属于"看起来对、其实没换"，而没有人会去数变量。
+   *
+   * ⚠️ 这张表要跟着内置模板一起长：它一度只列了 console，于是 quill 的
+   * 图表配色不在覆盖内（而 quill **确实**覆盖了全部 11 个 —— 但那是我
+   * 逐个核对出来的，不是测试保证的）。
    */
-  const consoleCss = readFileSync(new URL('../templates/console/theme.css', import.meta.url), 'utf8');
-  for (const key of keys) {
-    const name = CHART_INK_VARS[key];
-    assert.ok(
-      new RegExp(`${name}\\s*:`).test(consoleCss),
-      `控制台模板没有覆盖 ${name}（CHART_INK.${key} 用它取色）。` +
-        '—— 漏掉的变量会让那个颜色在换模板时留在原版配色上。',
-    );
+  const themedTemplates = ['console', 'quill'] as const;
+  for (const template of themedTemplates) {
+    const css = readFileSync(new URL(`../templates/${template}/theme.css`, import.meta.url), 'utf8');
+    for (const key of keys) {
+      const name = CHART_INK_VARS[key];
+      assert.ok(
+        new RegExp(`${name}\\s*:`).test(css),
+        `${template} 模板没有覆盖 ${name}（CHART_INK.${key} 用它取色）。` +
+          '—— 漏掉的变量会让那个颜色在换模板时留在原版配色上。',
+      );
+    }
   }
 });
 

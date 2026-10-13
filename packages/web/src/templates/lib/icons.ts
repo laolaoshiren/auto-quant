@@ -15,13 +15,19 @@
  * 兜底图标是 `PanelsTopLeft`（一个"面板"的中性形状），不是某一个具体模板的
  * 图标：第三方模板没登记图标时，它应该看起来"还没配图"，而不是看起来像经典模板。
  */
-import { LayoutDashboard, PanelTop, PanelsTopLeft } from 'lucide-react';
+import { LayoutDashboard, PanelLeft, PanelTop, PanelsTopLeft } from 'lucide-react';
 
 export type TemplateIconComponent = typeof PanelTop;
 
 const TEMPLATE_ICON: Record<string, TemplateIconComponent> = {
   classic: PanelTop,
   console: LayoutDashboard,
+  /*
+   * quill 的骨架是「左侧分组侧栏 + 分段控件」，`PanelLeft` 正好画的是
+   * "左边一栏 + 右边内容" —— 图标表存在的意义就是让外观页的卡片一眼能
+   * 看出那套模板长什么样，所以挑的是形状而不是隐喻。
+   */
+  quill: PanelLeft,
 };
 
 export function templateIcon(id: string): TemplateIconComponent {

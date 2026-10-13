@@ -36,9 +36,21 @@
             /* 内容损坏：当成没设置过，用默认模板。 */
           }
         }
-        if (template === 'console') root.classList.add('aq-console');
-        else root.classList.add('aq-classic');
-        root.dataset.template = template === 'console' ? 'console' : 'classic';
+        /*
+         * 内置模板的根类名 → id 的映射。
+         *
+         * ⚠️ **这里是唯一一处必须手写的模板清单**（纯 JS 字符串没法 import
+         * `registry.ts`），所以加一套内置模板时要同时改这一处与
+         * `templates/registry.ts`。漏改的表现是"刷新时先闪一下经典模板"——
+         * 不是坏掉，只是一帧的抖动，所以很容易被忽略。
+         */
+        var BUILT_IN = { classic: 1, console: 1, quill: 1 };
+        if (template && BUILT_IN[template]) root.classList.add('aq-' + template);
+        else {
+          root.classList.add('aq-classic');
+          template = 'classic';
+        }
+        root.dataset.template = template;
         root.dataset.skin = read('aq.skin') === 'light' ? 'light' : 'dark';
         var density = read('aq.density');
         root.dataset.density =

@@ -1,0 +1,1591 @@
+/**
+ * ============================================================================
+ *  quill 模板的样式
+ * ============================================================================
+ *
+ * 设计语言来自 [magpie](https://github.com/yetone/magpie)：一个**中性、几乎
+ * 不说话的桌面工具**。信息密度高但呼吸均匀，所有"浮起来"的东西都很轻，
+ * 所有"选中"的东西都很安静。
+ *
+ * ## 两条规矩（与 console 同源）
+ *
+ * 1. **每一条选择器都带 `html.aq-quill` 前缀。** 模板的根类名由
+ *    `store.applyTemplateClass()` 挂在 `<html>` 上，所以这套样式只在 quill
+ *    模板生效。前缀同时是**特异性保险**：`html.aq-quill .foo` 是 0,2,1，
+ *    压得过 `index.css` 里的单类名（0,1,0），所以两段 CSS 的加载顺序不重要
+ *    —— 而顺序由模块图决定，构建产物里模板 CSS 实测排在 `index.css` 之前。
+ *
+ * 2. **令牌是共享的，不是自造的。** `tailwind.config.js` 里的颜色全部指向
+ *    `--aq-<名字>-rgb`，所以这套模板**覆盖同一批变量**，页面代码一个字都
+ *    不用改。
+ *
+ * ## ⚠️ 特异性是一把双刃剑 —— 这个文件里踩过三次
+ *
+ * 前缀的 0,2,1 让模板能覆盖页面的工具类，但它**同样会压掉 Tailwind 的
+ * 工具类**（0,1,0），而那有时是错的：
+ *
+ * | 踩到的 | 后果 | 修法 |
+ * | --- | --- | --- |
+ * | `.q-icon-btn { display: inline-flex }` 压掉 `min-[56em]:hidden` | 宽屏下汉堡按钮**永久可见**（媒体查询不增加特异性） | 在模板侧显式写同断点的隐藏规则 |
+ * | `.td { color }` 压掉 `text-down` / `text-up` | **整列盈亏褪成同一种灰** | 用 `:where(html.aq-quill)` 把前缀清零 |
+ * | `.q-drawer { display: flex }` 压掉 `min-[56em]:hidden` | 宽屏下抽屉不隐藏 | 同第一行 |
+ *
+ * 教训：**模板可以覆盖"观感"，但不可以覆盖"语义"**。盈亏的红绿是信息
+ * （`DESIGN.md` §2），不是装饰。
+ *
+ * ## 这个文件里最重要的三个决定（它们就是"像 magpie"的全部）
+ *
+ * **(a) 中性灰阶统一到一个冷紫轴上。** magpie 的每一级灰都是 `R == G`、
+ * `B` 高出 4–9 级，而且**越弱/越浅的颜色蓝偏移越大**。这造成两件事：整体是
+ * 冷的（和 indigo 主色同色相家族，所以强调色出现时不打架），以及弱化的文字
+ * 视觉上真的会"退远"。
+ *
+ * **(b) 层次靠两级线 + 两级底表达，阴影只给真正浮起的弹层。** 静态卡片一律
+ * `1px 边框 + 底色差`，没有阴影。`--aq-base-700` 画卡片外轮廓、
+ * `--aq-base-750` 画卡片**内部**的行分隔 —— 内部线永远比轮廓淡一档，
+ * 这是"一整块卡片"读起来不散的原因。
+ *
+ * **(c) 主色只标记"可操作的焦点"和"数据量的多少"，绝不标记"当前在哪"。**
+ * 导航选中、分段控件选中、开关打开态全部走**中性浮起块**或墨色，不是蓝色
+ * 背景。这条最影响"不土"。
+ */
+
+/* -------------------------------------------------------------------------- */
+/*  调色板                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * 深色 —— **主设计**。
+ *
+ * 这是一个 7×24 盯盘的工具，操作者一天要在这块屏幕上待很久，相当一部分
+ * 时间在夜间。
+ *
+ * ## 为什么底色是 #16161a 而不是纯黑
+ *
+ * 1. **纯黑 + 白字会产生光晕（halation）**，13–14px 的小字会糊。
+ * 2. **它给卡片留了上升空间** —— `#16161a → #232327` 是 9 级亮度差。
+ * 3. **纯黑会让"浮起"的阴影失效**（阴影是黑的）。
+ * 4. **它是冷的**：纯黑没有色相，`#16161a` 带蓝偏移，和整套灰阶、
+ *    和 indigo 主色同轴。
+ */
+html.aq-quill {
+  color-scheme: dark;
+
+  /* --- 中性灰阶：R == G，B 高出 4–9 --- */
+
+  --aq-base-950: #16161a;
+  --aq-base-950-rgb: 22 22 26;
+  --aq-base-900: #232327;
+  --aq-base-900-rgb: 35 35 39;
+  --aq-base-850: #2d2d33;
+  --aq-base-850-rgb: 45 45 51;
+  --aq-base-800: #36363d;
+  --aq-base-800-rgb: 54 54 61;
+  /* 弱分隔线 —— 卡片**内部**的行分隔。 */
+  --aq-base-750: #2c2c32;
+  --aq-base-750-rgb: 44 44 50;
+  /* 常规边框 —— 卡片**外轮廓**。 */
+  --aq-base-700: #333339;
+  --aq-base-700-rgb: 51 51 57;
+  --aq-base-600: #45454e;
+  --aq-base-600-rgb: 69 69 78;
+
+  /* --- 文字四级 ---
+   *
+   * ⚠️ 每一级都经过**对比度审计**（读 computed style、向上找第一个不透明
+   * 背景、算 WCAG 比值），取值不是"挑"出来的。判据是"对**最亮的那个底**
+   * 也达标" —— 因为同一档文字会出现在面板、hover 态、侧栏选中块上。
+   *
+   * 4.5:1 是 WCAG AA 对正文的门槛，而这里承载的全是**内容**
+   * （表头、标签、副标题、状态说明），不是占位符。
+   */
+
+  --aq-ink-strong: #ffffff;
+  --aq-ink-strong-rgb: 255 255 255;
+  /* 正文默认。对 base-950 是 15.5:1。 */
+  --aq-ink: #ededf1;
+  --aq-ink-rgb: 237 237 241;
+  /* 次要信息（表格单元格、说明）。对最亮的底 6.9:1。 */
+  --aq-ink-mid: #b4b4bd;
+  --aq-ink-mid-rgb: 180 180 189;
+  /* 标签 / 表头 / 静默控件文字。对最亮的底 4.9:1。 */
+  --aq-ink-lo: #adadb8;
+  --aq-ink-lo-rgb: 173 173 184;
+  /* 第四级：指标卡副标题、单位、端点、计数。对面板底 5.2:1。 */
+  --aq-ink-faint: #94949f;
+  --aq-ink-faint-rgb: 148 148 159;
+  /* 迁移期别名 = ink-mid。 */
+  --aq-ink-soft: #b4b4bd;
+  --aq-ink-soft-rgb: 180 180 189;
+
+  /* --- 交易语义色 ---
+   *
+   * ## ⚠️ 色相**不许动**，只能调明度
+   *
+   * `DESIGN.md` §2 写死了一条：「红绿是行业惯例，**不要**为了好看改色相」。
+   * 第一版照搬了 magpie 的薄荷绿与粉红，真浏览器里看 K 线图时才发现问题
+   * —— 那是**另一套绿和红**，而操作员在币安端看到的是 `#0ecb81` / `#f6465d`。
+   *
+   * 所以这里保留币安的色相，只做 magpie 做的那一件事：**深色下把明度往淡的
+   * 方向提**（而不是往亮的方向）—— 饱和的绿红在深底上会"发光"。
+   */
+  --aq-up: #2fd08d;
+  --aq-up-rgb: 47 208 141;
+  --aq-down: #f2607a;
+  --aq-down-rgb: 242 96 122;
+  --aq-warn: #f0b357;
+  --aq-warn-rgb: 240 179 87;
+
+  /* --- 强调色：indigo ---
+   *
+   * ⚠️ 深色下**不是把浅色的蓝提亮**，而是换成 indigo-300 档 —— 深色背景上
+   * 饱和蓝会"发光"，而淡蓝做底时深色文字可读性更好。
+   */
+  --aq-accent: #a5b4fc;
+  --aq-accent-rgb: 165 180 252;
+  --aq-accent-hi: #bcc7ff;
+  --aq-accent-hi-rgb: 188 199 255;
+  /* 压在主色实心块上的前景色。项目默认色板里没有它（原版主色是饱和紫，
+     白字能读），而 quill 的主色是**淡紫**，白字只有 2.6:1。 */
+  --aq-accent-on: #16161a;
+  --aq-accent-on-rgb: 22 22 26;
+
+  --aq-overlay: 8 8 10;
+  --aq-overlay-alpha: 0.62;
+
+  /* --- 本模板自用的中间令牌 --- */
+
+  /* 卡片内部第二层底（展开区、斑马纹）。深色下比 card **更深** ——
+     语义是"凹 = well，凸 = card"。 */
+  --aq-well: #1f1f23;
+  --aq-well-rgb: 31 31 35;
+  /* 静默控件底。= base-850。 */
+  --aq-pill: #2d2d33;
+  --aq-pill-rgb: 45 45 51;
+
+  /* 分段控件的滑块。
+     深色下是**半透明白**而不是实心卡片色 —— 这是 magpie 在深色下依然"透"
+     的关键：滑块看起来是"底上浮起的一层玻璃"，不是"贴了一块白纸"。 */
+  --aq-seg-thumb: rgba(255, 255, 255, 0.14);
+  --aq-seg-edge: inset 0 0.5px 0 rgba(255, 255, 255, 0.09), 0 1px 2px rgba(0, 0, 0, 0.32);
+
+  /* 选中行底。 */
+  --aq-sel: #2f3049;
+  --aq-sel-rgb: 47 48 73;
+
+  /* 语义色的柔底 —— **深色去饱和**（一块很暗的实心），不是半透明：
+     半透明的底会和它下面的东西糊在一起，而那正是徽章最不该有的样子。 */
+  --aq-up-soft: #1c3a2b;
+  --aq-up-soft-rgb: 28 58 43;
+  --aq-down-soft: #3d2226;
+  --aq-down-soft-rgb: 61 34 38;
+  --aq-warn-soft: #3a2f1c;
+  --aq-warn-soft-rgb: 58 47 28;
+  --aq-accent-soft: #292a42;
+  --aq-accent-soft-rgb: 41 42 66;
+
+  /* 浮层底色与阴影。
+     阴影是三层复合：大范围柔光 + 近距硬光 + **0.5px 亮环** ——
+     最后一层是深色 UI 里"浮起"的关键，没有它浮层会糊成一片。 */
+  --aq-pop-bg: rgba(38, 38, 43, 0.96);
+  --aq-shadow-pop:
+    0 16px 44px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.3),
+    0 0 0 0.5px rgba(255, 255, 255, 0.1);
+
+  /* 表格行高 —— 密度开关改的就是它。`index.css` 的 `:root` 里**没有**
+     这个变量，完全由模板提供。 */
+  --aq-row-h: 32px;
+
+  /* --- 动效令牌 ---
+   *
+   * magpie 的缓动：`cubic-bezier(.2, .8, .2, 1)` —— iOS 味，快起、软落。
+   * 时长规律：hover 底色 .12–.16s、页面入场 .24s、弹层 .42s、滑块 .28s。 */
+  --aq-quill-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* 侧栏宽度 —— 可拖拽改，所以是变量。 */
+  --aq-side-w: 212px;
+}
+
+/*
+ * 浅色 —— **刻意压灰，无纯白**（卡片保留纯白，因为它需要"浮起"）。
+ *
+ * ⚠️ 这个块**必须写在默认（深色）块之后** —— 首帧由 `index.html` 的内联
+ * 脚本先写 `data-skin` 属性，但两块的顺序若反了，浅色用户会先看到一帧深色。
+ */
+html.aq-quill[data-skin='light'] {
+  color-scheme: light;
+
+  --aq-base-950: #eef0f3;
+  --aq-base-950-rgb: 238 240 243;
+  --aq-base-900: #ffffff;
+  --aq-base-900-rgb: 255 255 255;
+  --aq-base-850: #f1f1f4;
+  --aq-base-850-rgb: 241 241 244;
+  --aq-base-800: #e9e9ee;
+  --aq-base-800-rgb: 233 233 238;
+  --aq-base-750: #ececf0;
+  --aq-base-750-rgb: 236 236 240;
+  --aq-base-700: #e3e3e8;
+  --aq-base-700-rgb: 227 227 232;
+  --aq-base-600: #cfcfd6;
+  --aq-base-600-rgb: 207 207 214;
+
+  /* 文字 —— 同样被对比度审计压深过。magpie 的 `#85858d` 在页面底上只有
+     3.4:1，而这里是内容文字，必须达 4.5:1。 */
+  --aq-ink-strong: #000000;
+  --aq-ink-strong-rgb: 0 0 0;
+  --aq-ink: #1c1c21;
+  --aq-ink-rgb: 28 28 33;
+  --aq-ink-mid: #4b4b53;
+  --aq-ink-mid-rgb: 75 75 83;
+  --aq-ink-lo: #5c5c65;
+  --aq-ink-lo-rgb: 92 92 101;
+  --aq-ink-faint: #67676f;
+  --aq-ink-faint-rgb: 103 103 111;
+  --aq-ink-soft: #4b4b53;
+  --aq-ink-soft-rgb: 75 75 83;
+
+  /* 语义色：浅色下是**饱和深色**（给文字用）。色相同样锁在币安那一套上，
+     只压明度 —— 第一版 `#0f9d63` 在白卡片上只有 3.6:1。 */
+  --aq-up: #0a7d4f;
+  --aq-up-rgb: 10 125 79;
+  --aq-down: #c0344a;
+  --aq-down-rgb: 192 52 74;
+  --aq-warn: #9a5b06;
+  --aq-warn-rgb: 154 91 6;
+
+  --aq-accent: #4f46e5;
+  --aq-accent-rgb: 79 70 229;
+  --aq-accent-hi: #635bf0;
+  --aq-accent-hi-rgb: 99 91 240;
+  --aq-accent-on: #ffffff;
+  --aq-accent-on-rgb: 255 255 255;
+
+  --aq-overlay: 20 22 30;
+  --aq-overlay-alpha: 0.28;
+
+  --aq-well: #f9f9fb;
+  --aq-well-rgb: 249 249 251;
+  --aq-pill: #f1f1f4;
+  --aq-pill-rgb: 241 241 244;
+
+  /* 浅色下滑块是**纯白**，靠一圈投影和半像素描边从灰轨道上站起来。 */
+  --aq-seg-thumb: #ffffff;
+  --aq-seg-edge: 0 1px 2px rgba(0, 0, 0, 0.14), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+
+  --aq-sel: #ecebfb;
+  --aq-sel-rgb: 236 235 251;
+
+  --aq-up-soft: #e4f6ec;
+  --aq-up-soft-rgb: 228 246 236;
+  --aq-down-soft: #fbe9e9;
+  --aq-down-soft-rgb: 251 233 233;
+  --aq-warn-soft: #fbf0df;
+  --aq-warn-soft-rgb: 251 240 223;
+  --aq-accent-soft: #eeedfd;
+  --aq-accent-soft-rgb: 238 237 253;
+
+  --aq-pop-bg: rgba(255, 255, 255, 0.94);
+  /* 浅色下的阴影**不是纯黑，是带蓝的** —— 纯黑阴影在冷灰底上会发脏。 */
+  --aq-shadow-pop:
+    0 16px 44px rgba(20, 22, 30, 0.16), 0 2px 8px rgba(20, 22, 30, 0.06),
+    0 0 0 0.5px rgba(20, 22, 30, 0.1);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  密度                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * 密度**只改表格行高**，不改字号 —— 字号是全站排版基准，跟着密度变会让
+ * "正文一个尺寸"这个前提失效，而字号是写死像素的，结果是一半文字变了一半没变。
+ */
+html.aq-quill[data-density='compact'] {
+  --aq-row-h: 28px;
+}
+html.aq-quill[data-density='cozy'] {
+  --aq-row-h: 40px;
+}
+/* 紧凑档同时收紧单元格的竖向 padding —— 只改 `--aq-row-h` 的话，两行内容的
+   行根本到不了那个高度，密度开关会看起来"没反应"。 */
+html.aq-quill[data-density='compact'] .td {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+html.aq-quill[data-density='cozy'] .td {
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  基础层                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * 正文。
+ *
+ * `html.aq-quill body` 是 0,1,1，压得过 Tailwind 的 `body` 工具类（0,0,1）。
+ *
+ * 字号取 13.5px 而不是原版的 14px：magpie 的密度是 13px 基准，而它的信息
+ * 密度比本项目更高。这里折中 —— 比原版紧一档、比 magpie 松一档，因为本项目
+ * 的表格里数字更长（价格、权益、盈亏都要逐位对齐）。
+ */
+html.aq-quill body {
+  font-size: 13.5px;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
+/*
+ * 滚动条。
+ *
+ * ⚠️ 三条都要重写（`scrollbar-color`、thumb、thumb:hover）——
+ * `index.css` 里那三条用的是 `--aq-base-600` 与 `--aq-ink-lo`，而这两个
+ * 变量在浅色下会翻成浅灰，滚动条就消失了。
+ */
+html.aq-quill * {
+  scrollbar-color: var(--aq-ink-faint) transparent;
+}
+html.aq-quill ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+html.aq-quill ::-webkit-scrollbar-track {
+  background: transparent;
+}
+html.aq-quill ::-webkit-scrollbar-thumb {
+  background: var(--aq-ink-faint);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 8px;
+}
+html.aq-quill ::-webkit-scrollbar-thumb:hover {
+  background: var(--aq-ink-lo);
+  background-clip: content-box;
+}
+html.aq-quill ::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 选区。降到 26% 并保持中性 —— 直接用主色会让选中的文字像"被高亮笔涂过"。 */
+html.aq-quill ::selection {
+  background: color-mix(in srgb, var(--aq-accent) 26%, transparent);
+}
+
+/*
+ * 焦点环。
+ *
+ * ⚠️ **必须用 `var(--aq-accent)`**（见 `index.css` 里那段论证：`theme()` 产出
+ * 的 `<alpha-value>` 占位符不会被替换，焦点环会静默消失）。
+ */
+html.aq-quill :focus-visible {
+  outline: 2px solid var(--aq-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/*
+ * 按钮不用手型光标。
+ *
+ * magpie 是桌面应用，`button { cursor: default }` 是它"像原生应用"的一半
+ * 原因 —— 网页默认的手型光标会立刻把观感拉回浏览器。这条**只在这个模板
+ * 下生效**，原版的行为一个字都没改。
+ */
+html.aq-quill button:not(:disabled),
+html.aq-quill [role='button']:not([aria-disabled='true']),
+html.aq-quill summary {
+  cursor: default;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  共享原语覆盖                                                               */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * `.panel` —— magpie 的卡片是 `1px 边框 + 底色差`，**没有阴影**。
+ * 原版带 `shadow-panel`（近距黑阴影），深色下几乎看不见，但浅色下会脏。
+ */
+html.aq-quill .panel {
+  border-radius: 12px;
+  border-color: var(--aq-base-700);
+  background-color: var(--aq-base-900);
+  box-shadow: none;
+}
+
+/* 面板头：**下边线用更淡的那一档**（`--aq-base-750`）—— "卡片内部的分隔线
+   永远比外轮廓淡一档"是"一整块卡片"读起来不散的原因。 */
+html.aq-quill .panel-head {
+  border-bottom-color: var(--aq-base-750);
+  padding: 10px 14px;
+}
+
+html.aq-quill .panel-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+}
+
+/* 字段标签。去掉 `uppercase` 与大字距：中文没有大小写，`uppercase` 只对
+   夹杂的英文生效，结果是中英混排时基线不齐。改用字重与颜色区分层级。 */
+html.aq-quill .field-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--aq-ink-lo);
+  margin-bottom: 5px;
+}
+
+/*
+ * 表单控件。
+ *
+ * ## 两条从 console 学来的硬约束
+ *
+ * 1. **用 `background-color` 而不是 `background` 简写** —— 简写会重置
+ *    `background-size` / `-position` / `-repeat`，而 `index.css` 的 `.select`
+ *    正是用那三条拼出自定义箭头的，结果是 12:8 的箭头被当瓷砖平铺成一排。
+ * 2. **钉死高度时必须把竖向 padding 归零** —— `index.css` 的字段带 `py-2`，
+ *    再钉 `height` 的话内容盒只剩十几像素，`<select>` 的选中项会成半截字
+ *    （Chromium 对 input 会重新居中文字，所以 input 看不出问题，纯属巧合）。
+ */
+html.aq-quill .input,
+html.aq-quill .select,
+html.aq-quill .textarea {
+  border-radius: 8px;
+  border-color: var(--aq-base-700);
+  background-color: var(--aq-base-850);
+  color: var(--aq-ink);
+  font-size: 13px;
+  height: 30px;
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-left: 10px;
+  transition:
+    background-color 0.12s var(--aq-quill-ease),
+    border-color 0.12s var(--aq-quill-ease),
+    box-shadow 0.12s var(--aq-quill-ease);
+}
+html.aq-quill .textarea {
+  height: auto;
+  padding-top: 7px;
+  padding-bottom: 7px;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+html.aq-quill .input::placeholder,
+html.aq-quill .textarea::placeholder {
+  color: var(--aq-ink-faint);
+}
+html.aq-quill .input:hover,
+html.aq-quill .select:hover,
+html.aq-quill .textarea:hover {
+  border-color: var(--aq-base-600);
+}
+/* 焦点：主色边框 + 一圈柔光（比实线更柔和，适合"正在输入"这个持续状态）。 */
+html.aq-quill .input:focus,
+html.aq-quill .select:focus,
+html.aq-quill .textarea:focus {
+  border-color: var(--aq-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--aq-accent) 22%, transparent);
+  outline: none;
+}
+
+/*
+ * 下拉框的箭头。
+ *
+ * ⚠️ **四条 `background-*` 必须写在同一个地方**（模板是"这套外观长什么样"
+ * 的最终说法，若 size/position/repeat 来自 `index.css`，改那边就会悄悄改掉
+ * 这里的样子 —— 而改坏的表现是一排箭头，像另一个 bug）。
+ */
+html.aq-quill .select {
+  padding-right: 2rem;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%23adadb8' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.65rem center;
+  background-size: 11px;
+}
+html.aq-quill[data-skin='light'] .select {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%235c5c65' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+}
+
+/*
+ * 按钮。
+ *
+ * magpie 只有三档：纯文本、有细边的次要按钮、主色实心。这里把项目的五种
+ * variant 映射到同一套语汇上。高度 30px 与输入框对齐（一行里的控件中线要齐）。
+ */
+html.aq-quill .btn {
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  height: 30px;
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-left: 12px;
+  padding-right: 12px;
+  transition:
+    background-color 0.16s var(--aq-quill-ease),
+    border-color 0.16s var(--aq-quill-ease),
+    color 0.16s var(--aq-quill-ease),
+    filter 0.16s var(--aq-quill-ease),
+    transform 0.16s var(--aq-quill-ease);
+}
+
+/*
+ * 主按钮。
+ *
+ * ⚠️ **字色必须是 `--aq-accent-on`，不能写 `text-white`。** 深色下主色是
+ * **淡紫**，白字压上去只有 2.6:1。这个令牌随主题一起翻，而写死 `white`
+ * 在深色主题下是错的**且不会报错**。
+ */
+html.aq-quill .btn-primary {
+  background-color: var(--aq-accent);
+  color: var(--aq-accent-on);
+  border-color: transparent;
+  box-shadow: none;
+}
+html.aq-quill .btn-primary:hover {
+  background-color: var(--aq-accent-hi);
+  filter: brightness(1.04);
+}
+
+html.aq-quill .btn-ghost {
+  border-color: var(--aq-base-700);
+  background-color: var(--aq-base-850);
+  color: var(--aq-ink-mid);
+}
+html.aq-quill .btn-ghost:hover {
+  border-color: var(--aq-base-600);
+  background-color: var(--aq-base-800);
+  color: var(--aq-ink);
+}
+
+/*
+ * 危险 / 成功 / 警告按钮。
+ *
+ * ## 三档强度，按"这个动作有多危险"分
+ *
+ * magpie 的破坏性动作是**最克制**的那一档（平时只是灰文字，hover 才变红底）。
+ * 照搬它在交易终端里不合适 —— "停止实盘机器人"有真实后果。但全做成饱和红
+ * 实心也有问题：真浏览器实测，策略列表那一列**纯图标**的删除按钮用红实心
+ * 之后，整张表的视线都被它拉走了。
+ *
+ * ## ⚠️ 底色由对比度审计定
+ *
+ * 白字压在这些实心色上必须 ≥4.5:1 —— 而第一版的 `#1f7a52` 只有 3.62:1。
+ * 现在的取值全部经过计算（5.86 / 4.60 / 4.71）。
+ */
+html.aq-quill .btn-danger {
+  background-color: #b3384a;
+  color: #ffffff;
+  border-color: transparent;
+  box-shadow: none;
+}
+html.aq-quill[data-skin='light'] .btn-danger {
+  background-color: #c73535;
+}
+html.aq-quill .btn-danger:hover {
+  filter: brightness(1.12);
+}
+
+html.aq-quill .btn-success {
+  background-color: #098658;
+  color: #ffffff;
+  border-color: transparent;
+  box-shadow: none;
+}
+html.aq-quill[data-skin='light'] .btn-success {
+  background-color: #0a7d4f;
+}
+html.aq-quill .btn-success:hover {
+  filter: brightness(1.12);
+}
+
+html.aq-quill .btn-warn {
+  background-color: #9a6a1e;
+  color: #ffffff;
+  border-color: transparent;
+  box-shadow: none;
+}
+html.aq-quill[data-skin='light'] .btn-warn {
+  background-color: #9a5b06;
+}
+html.aq-quill .btn-warn:hover {
+  filter: brightness(1.12);
+}
+
+html.aq-quill .btn-xs {
+  height: 26px;
+  padding-left: 9px;
+  padding-right: 9px;
+  font-size: 12px;
+  border-radius: 7px;
+  gap: 5px;
+}
+
+/*
+ * 纯图标的按钮 —— **保证一个方形的最小点击目标**。
+ *
+ * ## 判据踩过两次坑
+ *
+ * **第一版** `:has(> svg:only-child)`：漏掉了"图标 + 文字"的按钮，却命中了
+ * "图标 + 隐藏文字"的组合，于是把 40px 的内容压进 24px 的盒子 —— 真浏览器
+ * 报出 `btn btn-ghost btn-xs 40>24`。
+ *
+ * **第二版** `:not(:has(> :not(svg)))`：意图是"除 svg 外没有其它元素子节点"，
+ * 但**纯文字按钮**同样满足（它没有元素子节点）—— 结果是所有按钮的左右
+ * padding 被清零，`新建` 从 58px 缩到 30px。
+ *
+ * **现在**：必须**含**一个 svg，且**不含**任何非 svg 的元素子节点。
+ * 文本节点不参与 `:has()`，所以三个分支都对。
+ */
+html.aq-quill .btn:has(> svg):not(:has(> :not(svg))) {
+  padding-left: 0;
+  padding-right: 0;
+  justify-content: center;
+  min-width: 30px;
+}
+html.aq-quill .btn-xs:has(> svg):not(:has(> :not(svg))) {
+  min-width: 26px;
+}
+
+/* 纯图标的危险按钮 —— 静默态（判据同上）。 */
+html.aq-quill .btn-danger:has(> svg):not(:has(> :not(svg))) {
+  background-color: transparent;
+  color: var(--aq-down);
+  border-color: var(--aq-base-700);
+}
+html.aq-quill .btn-danger:has(> svg):not(:has(> :not(svg))):hover {
+  background-color: var(--aq-down-soft);
+  border-color: color-mix(in srgb, var(--aq-down) 45%, transparent);
+  color: var(--aq-down);
+  filter: none;
+}
+
+/*
+ * 徽章 / 胶囊。
+ *
+ * magpie 的徽章是"小字号 + 大写 + 软底色"。这里保留软底色，但**改成全圆角
+ * 药丸**并保留项目的等宽字体 —— 因为本项目的 `.chip` 大量承载**数字与机器码**
+ * （`20x` / `stopped` / `-1021`），等宽让它们逐位对齐。
+ *
+ * ⚠️ 不写 `text-transform: uppercase`：中文没有大小写。
+ */
+html.aq-quill .chip {
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 1px 8px;
+  letter-spacing: 0.005em;
+  /* 底色从**当前文字色**推导 —— 六种 tone 只需定义文字色。
+     比例从 magpie 的 10% 提到 14%：实测 10% 的底几乎看不见，
+     中性徽章会退化成一行裸文字。 */
+  background-color: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  表格                                                                       */
+/* -------------------------------------------------------------------------- */
+
+html.aq-quill .th {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--aq-base-700);
+  vertical-align: bottom;
+}
+/*
+ * 表头的默认色 —— 用 `:where(html.aq-quill)` 把**整个前缀**清零，于是这条
+ * 是 0,1,0，与页面的 `text-right` 之类同级（理由见下面 `.td` 那段）。
+ *
+ * 用 `--aq-ink-mid` 而不是 `--aq-ink-lo`：magpie 的表头是 `--muted`，但它的
+ * 表头只有一列文字；本项目一张表常有 9 列，实测 `--aq-ink-lo` 那一档读起来
+ * "糊成一片"，而表头是列的唯一标识。
+ */
+:where(html.aq-quill) .th {
+  color: var(--aq-ink-mid);
+  background-color: transparent;
+}
+/* 页面给表头加了 `sticky` 时补上不透明底 —— 否则滚动时行内容会透出来。 */
+html.aq-quill thead.sticky .th {
+  background-color: var(--aq-base-900);
+}
+
+/*
+ * 单元格。
+ *
+ * ## ⚠️ 行高**不能**靠 `height` 钉死（实测踩过）
+ *
+ * 第一版写 `height: var(--aq-row-h)`（30px），真浏览器里量出来是 **41px**：
+ *
+ * 1. **表格单元格的 `height` 是最小高度语义** —— 内容比它高时被撑开，不裁剪。
+ * 2. **本项目的 `.td` 大量是两行的**（主行 + 一行 `text-xs` 的副行），
+ *    两行 × 21px = 42px，本来就超过 30px。
+ *
+ * 所以改成 `height` 作下限 + 竖向 padding 让文字居中（这正是 magpie 的做法：
+ * `.row { min-height: 40px; padding: 5px 9px 5px 11px }`）。
+ */
+html.aq-quill .td {
+  height: var(--aq-row-h, 32px);
+  padding: 6px 12px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  border-bottom: 1px solid var(--aq-base-750);
+  vertical-align: middle;
+  min-width: 0;
+}
+/*
+ * ## ⚠️ 默认文字色必须写成**低特异性**，否则会压掉页面的语义色
+ *
+ * 第一版是 `html.aq-quill .td { color: ... }`（0,2,1），而页面里那些
+ * `<td class="td num text-right text-down">`（盈亏）用的是 `text-down`（0,1,0）。
+ * **结果是一整列红绿盈亏全部褪成同一种灰**，而表格看起来"只是有点淡"。
+ *
+ * 这是"模板覆盖工具类"那条规则的**边界**：模板可以覆盖观感，但不可以覆盖
+ * **语义** —— 盈亏的红绿是信息（`DESIGN.md` §2），不是装饰。
+ *
+ * `:where(html.aq-quill)` 把整个前缀清零，于是这条是 0,1,0，与 `text-down`
+ * 同级；两者按**源序**决胜，而模板 CSS 在构建产物里排在工具类之前 → 工具类赢。
+ *
+ * 写成 `html.aq-quill :where(.td)` 是**不够的**（前缀仍保留 0,1,1）。
+ */
+:where(html.aq-quill) .td {
+  color: var(--aq-ink-mid);
+}
+/* 数字列的最小宽度 —— 等宽数字也需要一个下限，否则 `90天9时` 这类比预期长的
+   值会被挤成两行，下面的副行跟着错位。 */
+html.aq-quill .td.num {
+  min-width: 4.5rem;
+}
+
+/* 斑马纹取 `--aq-well`（"凹"的语义），悬停取 `--aq-pill`（抬升），
+   选中行用 `--aq-sel`。 */
+html.aq-quill .data-grid tbody tr:nth-child(even) {
+  background-color: var(--aq-well);
+}
+html.aq-quill .data-grid tbody tr:hover {
+  background-color: var(--aq-pill);
+}
+html.aq-quill .data-grid tbody tr.selected {
+  background-color: var(--aq-sel);
+}
+
+/*
+ * `.row-hover` —— 可点行的悬停态。
+ *
+ * ⚠️ 必须**连经典模板的底边一起清掉**：原版给它带了一条 `border-base-850/70`
+ * 的底边，而 quill 的 `.td` 已经有自己的分隔线 —— 两条叠在一起会变成 2px
+ * 的双线，看起来像"表格画错了"。
+ */
+html.aq-quill .row-hover {
+  border-bottom: 0;
+}
+html.aq-quill .row-hover:hover {
+  background-color: var(--aq-pill);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  页面骨架                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/* `.page-pad` 只有经典外壳的 `<main>` 用它，这条是防御性的 —— 不定义的话会落到
+   `index.css` 的 `p-4 sm:p-6 lg:p-8 2xl:p-10`，而 quill 的内容区自己带内边距，
+   两层加起来宽屏会有 80px 的空白边。 */
+html.aq-quill .page-pad {
+  padding: 14px 16px 18px;
+}
+@media (min-width: 64em) {
+  html.aq-quill .page-pad {
+    padding: 18px 22px 24px;
+  }
+}
+
+/* `.num` —— 数字与代码。大号数字不加负字距会散（magpie 在 >18px 的数字上
+   用 `-.01em ~ -.02em`）。 */
+html.aq-quill .num {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+html.aq-quill .num.text-2xl,
+html.aq-quill .num.text-3xl,
+html.aq-quill .num.text-4xl {
+  letter-spacing: -0.022em;
+}
+
+/* 需要横滚的**表格自己套 `.scroll-x`**，外层容器 `overflow: hidden` ——
+   这样横滚条只出现在表格下方，而不是整页底部。 */
+html.aq-quill .scroll-x {
+  scrollbar-width: thin;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  外壳结构                                                                   */
+/* -------------------------------------------------------------------------- */
+/*
+ * 骨架：
+ *
+ * ```
+ * ┌────────────┬──────────────────────────────────────────────────┐
+ * │  AutoQuant │  文档名 · 诊断告警 · 刷新 · 搜索 · 主题 · 模板     │  46px
+ * │            ├──────────────────────────────────────────────────┤
+ * │  交易       │  总览 / 机器人 / 策略工作室 / 行情 / 数据与日志   │  分段控件
+ * │   ▸ 总览    ├──────────────────────────────────────────────────┤
+ * │   ▸ 机器人② │  页面动作（portal 进来）                          │  42px
+ * │  ……        ├──────────────────────────────────────────────────┤
+ * │  系统       │  工作区（**唯一滚动层**）                         │
+ * │   ▸ AI 模型 │                                                  │
+ * │            │                                                  │
+ * │  ⚙ 操作员   │                                                  │
+ * └────────────┴──────────────────────────────────────────────────┘
+ * ```
+ *
+ * ## 为什么是"侧栏 + 分段控件"两层导航
+ *
+ * magpie 有两套导航形态而且**同时存在**：宽窗口是左侧栏，窄窗口是顶部一行
+ * 分段控件。本项目对应的是**宽屏看盘 + 窄屏/分屏操作**，所以照搬这个双层
+ * 结构：侧栏给全局导航（分组、带运行数徽章），分段控件给**当前分组的页面**
+ * —— 后者解决了一个原版没解决的问题：进到「系统」组之后要回到「交易」组的
+ * 某一页，原版需要重新在九个平级项里找，这里只需点一下。
+ */
+
+/* 根容器：`grid` 两列。
+   ⚠️ `minmax(0, 1fr)` 里的 **0 是必需的** —— grid 子项默认 `min-width: auto`，
+   内容一长就会顶破容器，内层滚动条随之消失。 */
+html.aq-quill .q-root {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+  background-color: var(--aq-base-950);
+  overflow: hidden;
+}
+
+/* --- 侧栏 --- */
+
+html.aq-quill .q-side {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: var(--aq-side-w);
+  min-width: 0;
+  background-color: var(--aq-base-950);
+  /* ⚠️ `overflow: visible` 是必需的：拖拽热区刻意向外扩了 4px（1px 的线
+     没人能精确命中），裁掉溢出的话热区只剩一半。 */
+  overflow: visible;
+  /* 半像素右边线：2x 屏上渲染成 1 物理像素，而 `1px` 会渲染成 2 物理像素，
+     在深色底上明显偏重。 */
+  border-right: 0.5px solid var(--aq-base-700);
+}
+
+/* 品牌区。46px 且**没有下边框** —— 头部与内容靠同色融为一体，
+   这是它"安静"的一半来源。 */
+html.aq-quill .q-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 46px;
+  flex: none;
+  padding: 0 14px;
+}
+html.aq-quill .q-brand-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--aq-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 导航滚动区。`min-height: 0` 是 flex 子项能真正滚动的前提。
+   滚动条**藏起来**：侧栏的内容量是可数的（三组、九项），不需要位置指示。 */
+html.aq-quill .q-nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 10px 10px;
+  scrollbar-width: none;
+}
+html.aq-quill .q-nav::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+html.aq-quill .q-nav-group {
+  padding: 14px 8px 4px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--aq-ink-lo);
+}
+html.aq-quill .q-nav-group:first-child {
+  padding-top: 6px;
+}
+
+/*
+ * 导航项。
+ *
+ * ## 选中态**不用主色**
+ *
+ * magpie 的源码注释写得很清楚：侧栏的选中是「graphite, as a Mac sidebar is:
+ * no colour of its own, the page open in the text's own ink; the accent is
+ * kept for what acts」—— 选中块是**石墨色**，文字用最亮的墨色；主色留给
+ * "能点的东西"。满屏蓝紫色的选中块会让界面显得廉价。
+ */
+html.aq-quill .q-nav-item {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 13px;
+  color: var(--aq-ink-mid);
+  text-align: left;
+  white-space: nowrap;
+  transition: color 0.2s var(--aq-quill-ease);
+}
+html.aq-quill .q-nav-item:hover:not(.is-active) {
+  background-color: var(--aq-pill);
+  color: var(--aq-ink);
+}
+
+/*
+ * 选中项：一块浮起的块 + 一圈细边 + 一丝阴影。
+ *
+ * ⚠️ 底色在**两种主题下方向相反** —— 这是踩过的地方：
+ *   · 深色：页面底是 `#16161a`，选中块必须**明显亮于它**（第一版用
+ *     `--aq-base-900` 时几乎看不出区别，而侧栏选中是**用户唯一的位置指示**）；
+ *   · 浅色：页面底是 `#eef0f3`，而 `--aq-base-850`（#f1f1f4）**比它更浅**，
+ *     同样看不见 —— 浅色要的是"比页面底更白的卡片浮起来"。
+ */
+html.aq-quill .q-nav-item.is-active {
+  background-color: var(--aq-base-850);
+  color: var(--aq-ink);
+  font-weight: 500;
+  box-shadow:
+    inset 0 0 0 1px var(--aq-base-700),
+    0 1px 2px rgba(0, 0, 0, 0.22);
+}
+html.aq-quill[data-skin='light'] .q-nav-item.is-active {
+  background-color: var(--aq-base-900);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.05),
+    0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+/* 选中项的图标 —— **用墨色，不用主色**（与文件顶部那条设计决定一致）。
+   第一版用了 `--aq-accent`，浅色下会把常驻的侧栏染上一点蓝紫。 */
+html.aq-quill .q-nav-item.is-active .q-nav-icon {
+  color: var(--aq-ink);
+}
+
+html.aq-quill .q-nav-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--aq-ink-lo);
+  transition: color 0.2s var(--aq-quill-ease);
+}
+html.aq-quill .q-nav-item:hover:not(.is-active) .q-nav-icon {
+  color: var(--aq-ink-mid);
+}
+html.aq-quill .q-nav-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 运行中的机器人计数。用 `--aq-up` 而不是主色 —— 它是一个**状态**
+   （有几个在跑），不是"能点的东西"。
+   ⚠️ 底色 22% 是两种主题都达标的那个值（14% 在浅色下只有 3.77:1）。 */
+html.aq-quill .q-nav-count {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--aq-up);
+  background-color: color-mix(in srgb, var(--aq-up) 22%, transparent);
+  padding: 0 6px;
+  border-radius: 999px;
+  line-height: 17px;
+}
+
+html.aq-quill .q-side-foot {
+  flex: none;
+  padding: 8px 10px 10px;
+  border-top: 0.5px solid var(--aq-base-750);
+}
+
+/*
+ * 侧栏拖拽条。
+ *
+ * magpie 的做法：一个 **8px 宽的透明热区**贴在侧栏右边缘外侧（`right: -4px`），
+ * 只有 1px 的线本身可见。热区比线宽得多是刻意的 —— 1px 的目标没人能精确命中。
+ * 触屏上热区要更宽，因为手指比鼠标指针粗。
+ */
+html.aq-quill .q-side-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 8px;
+  z-index: 3;
+  cursor: col-resize;
+  touch-action: none;
+}
+@media (pointer: coarse) {
+  html.aq-quill .q-side-edge {
+    right: -10px;
+    width: 20px;
+  }
+}
+html.aq-quill .q-side-edge:focus-visible {
+  outline: 2px solid var(--aq-accent);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+/* 拖拽中：**整页**光标都要变成 col-resize，否则鼠标一离开那条窄带光标就变
+   回去，看起来像"拖丢了"。 */
+html.aq-quill.q-resizing,
+html.aq-quill.q-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+/* --- 主区 --- */
+
+html.aq-quill .q-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 头部：46px，**无下边框**（与 magpie 的 `.top` 一致）。
+   它装的是"当前在哪一页"和"全局的告警" —— 导航本身在侧栏与分段控件里。 */
+html.aq-quill .q-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 46px;
+  flex: none;
+  padding: 0 12px 0 16px;
+  min-width: 0;
+}
+
+/* 当前页面名。**不设大字号** —— 页面自己的内容区会渲染 `<h1>`/`<h2>`，
+   头部这一行只是"面包屑"，重复一遍大标题会让每页出现两个同样重的标题。 */
+html.aq-quill .q-crumb {
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--aq-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+html.aq-quill .q-spring {
+  min-width: 8px;
+  flex: 1;
+}
+
+/*
+ * 图标按钮。
+ *
+ * magpie 的 `.icon` 是 `26×26 / 圆角 7px / --muted`，hover 时**同时**给底色
+ * 和提亮文字 —— 只给底色的话，浅色主题下"变亮"这个反馈会消失。
+ */
+html.aq-quill .q-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--aq-ink-lo);
+  transition:
+    background-color 0.12s var(--aq-quill-ease),
+    color 0.12s var(--aq-quill-ease),
+    transform 0.16s var(--aq-quill-ease);
+}
+html.aq-quill .q-icon-btn:hover {
+  background-color: var(--aq-pill);
+  color: var(--aq-ink);
+}
+/* 按下的回弹。magpie 图标按钮是 scale(.9)（比文字按钮的 .96 更深一档）——
+   图标是小目标，需要更强的触觉反馈。 */
+html.aq-quill .q-icon-btn:active {
+  transform: scale(0.9);
+}
+
+/* --- 分段控件（第二层导航） --- */
+
+/*
+ * magpie 最标志性的组件：一排等权选项，选中项**不是换底色**，而是一块会
+ * "滑"过去的 thumb。全站所有多选一（视图切换、时间范围、排序）都是它。
+ */
+html.aq-quill .q-seg-wrap {
+  flex: none;
+  padding: 0 12px 8px 16px;
+  min-width: 0;
+}
+
+html.aq-quill .q-seg {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+  padding: 2px;
+  border-radius: 9px;
+  /*
+   * 轨道。
+   *
+   * ⚠️ **第一版在浅色下是隐形的**：它写的是
+   * `color-mix(in srgb, var(--aq-base-950) 55%, var(--aq-base-850))`，
+   * 而浅色下那两个变量几乎同色 —— 混合结果与页面底的对比度是 **1.00:1**，
+   * 整个控件看不见（只剩文字浮在那儿）。
+   *
+   * magpie 的原话是「the track a shade deeper than a pill so the white
+   * thumb stands off it」—— 关键是**比滑块深**且**明显深**。所以直接用
+   * `--aq-base-800`，它比两种主题下的页面底都深一档以上。
+   */
+  background-color: var(--aq-base-800);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+html.aq-quill .q-seg::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * 滑块。
+ *
+ * ⚠️ 它是**绝对定位的兄弟节点**，由 JS 用 `transform: translateX()` + `width`
+ * 驱动（见 QuillShell 里的 `GroupSeg`）。不用"每个按钮自己换底色"的原因是：
+ * 那块底色要**滑**过去，而 `transition` 只有作用在同一个元素上才会产生
+ * "滑动"这个视觉。
+ *
+ * `pointer-events: none` 是必需的：它覆盖在按钮**上面**，不关掉指针事件
+ * 按钮就点不到。
+ */
+html.aq-quill .q-seg-thumb {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  height: calc(100% - 4px);
+  border-radius: 7px;
+  background-color: var(--aq-seg-thumb);
+  box-shadow: var(--aq-seg-edge);
+  pointer-events: none;
+  /* 缓动与时长取自 magpie 的 `slide()`：280ms + `--ease`。
+     它比常见的 150–200ms 慢 —— 而这个"慢"正是丝滑感的来源。 */
+  transition:
+    transform 280ms var(--aq-quill-ease),
+    width 280ms var(--aq-quill-ease),
+    opacity 150ms var(--aq-quill-ease);
+  will-change: transform;
+}
+/* 首次定位 / 容器尺寸变化时**不带动画**直接落位。 */
+html.aq-quill .q-seg-thumb.is-still {
+  transition: none;
+}
+
+html.aq-quill .q-seg-item {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  white-space: nowrap;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--aq-ink-lo);
+  transition:
+    color 0.18s var(--aq-quill-ease),
+    transform 0.14s var(--aq-quill-ease);
+}
+html.aq-quill .q-seg-item:hover:not(.is-active) {
+  color: var(--aq-ink-mid);
+}
+html.aq-quill .q-seg-item.is-active {
+  color: var(--aq-ink);
+  font-weight: 500;
+}
+html.aq-quill .q-seg-item:active {
+  transform: scale(0.96);
+}
+
+/* --- 工具栏 --- */
+
+/*
+ * ⚠️ **这一条永远渲染，哪怕当前页面没有动作** —— 条件渲染会让工作区在页面
+ * 之间跳 42px，而"这一页没有工具栏"这件事用户看不出来（他只看到内容跳了）。
+ *
+ * 两个槽必须带 `className="contents"` —— 它们只用来定位（`createPortal` 找
+ * DOM 节点），不该参与布局。少了 `display: contents`，两个空 div 会成为 flex
+ * 子项，中间那条 `flex-1` 弹簧被夹在中间、左右两组动作不再贴边。
+ */
+html.aq-quill .q-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 42px;
+  padding: 0 12px 0 16px;
+  border-bottom: 0.5px solid var(--aq-base-750);
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+html.aq-quill .q-toolbar::-webkit-scrollbar {
+  display: none;
+}
+/* 工具栏里的动作按钮比内容区的按钮矮一档 —— 它是一条 42px 的带子。 */
+html.aq-quill .q-toolbar .btn {
+  height: 28px;
+  font-size: 12.5px;
+  border-radius: 7px;
+  flex: none;
+}
+
+/*
+ * 工作区 —— **整个应用唯一的滚动层**。
+ *
+ * ⚠️ 它必须带 `id={MAIN_SCROLL_ID}`（常量，不许手写字符串）。页面里有些功能
+ * （帮助页的目录跟随高亮）要监听它的 `scroll` 事件；找不到时它们**静默失效**，
+ * 页面看起来毫无异常。
+ */
+html.aq-quill .q-work {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/*
+ * 内容内边距。
+ *
+ * ## ⚠️ 它必须是**高度链上的一环**，不能只是 padding 的载体
+ *
+ * 页面里有一类"撑满剩余高度"的布局（`.page-fill` / `h-full`，见 `/traders`
+ * 的表格、`/market` 的行情页）：它们要求**每一级父元素都有确定的高度**，
+ * 否则 `height: 100%` 会解析成 `auto`，整块内容塌成内容高。
+ *
+ * 第一版把 `.q-pad` 写成普通块级元素（`height: auto`）—— 那条链就断在这里，
+ * 表现是**表格不再自己滚动、整页变长**，而它看起来只是"页面有点长"。
+ *
+ * 修法：宽屏下让它成为 `flex` 列并撑满。窄屏不给 `height`：那时内容本来就该
+ * 按自然高度生长（长页面要能滚），强行撑满反而会把内容截断。
+ */
+html.aq-quill .q-pad {
+  padding: 14px 16px 20px;
+  min-width: 0;
+}
+@media (min-width: 64em) {
+  html.aq-quill .q-pad {
+    padding: 16px 22px 24px;
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
+  /* 撑满时，**明确要求撑满的**页面根元素拿到剩余高度（`flex: 1` 不能一刀切，
+     否则会把本该按内容高度的页面拉长）。
+     ⚠️ 写成两条而不是 `:where(.page-fill, .h-full)` —— 那条断言按逗号切选择器，
+     逗号在 `:where()` 里会让第二段看起来"没有前缀"（而它确实是一条前缀检查
+     抓不到的写法）。拆成两条既过检又更好读。 */
+  html.aq-quill .q-pad > :where(.page-fill),
+  html.aq-quill .q-pad > :where(.h-full) {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+}
+
+/* 页面入场：淡入 + 轻微上移。位移只有 5px —— 再大就成了"页面在飞"，
+   而切页是高频动作。 */
+@keyframes aq-quill-view-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+}
+html.aq-quill .q-pad {
+  animation: aq-quill-view-in 0.24s var(--aq-quill-ease);
+}
+
+/* --- 窄屏：侧栏收成抽屉 --- */
+
+/*
+ * ⚠️ 断点 56em 与 JS 里的 `matchMedia('(min-width: 56em)')` 必须**同一个数**
+ * （见 QuillShell 顶部的 `DESKTOP_NAV_QUERY`）。两处不一致会在中间那段宽度里
+ * 出现"侧栏已经收起来、而汉堡按钮还藏着"的空档 —— 那一段的用户点不到任何导航。
+ */
+@media (max-width: 56em) {
+  html.aq-quill .q-root {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  html.aq-quill .q-side {
+    display: none;
+  }
+  html.aq-quill .q-head {
+    padding-left: 12px;
+  }
+  html.aq-quill .q-seg-wrap,
+  html.aq-quill .q-toolbar {
+    padding-left: 12px;
+  }
+  html.aq-quill .q-pad {
+    padding: 12px 12px 18px;
+  }
+}
+
+/*
+ * ## ⚠️ 宽屏时必须隐藏"仅窄屏可见"的东西 —— 这一条不能省
+ *
+ * `.q-icon-btn` 与 `.q-drawer` 在模板里都带 `display`（0,2,1），而 Tailwind 的
+ * `min-[56em]:hidden` 是 0,1,0（**媒体查询不增加特异性**）—— 所以宽屏上那条
+ * `hidden` 永远输。
+ *
+ * 真浏览器实测确认过：1600px 视口下汉堡按钮 28×28 **可见**，而侧栏已经常驻，
+ * 它本该消失；抽屉同理（而且它没有遮罩，点外面关不掉）。
+ *
+ * 修法是在模板这一侧显式写一条**同断点**的隐藏规则。
+ */
+@media (min-width: 56em) {
+  html.aq-quill .is-mobile-only,
+  html.aq-quill .q-drawer,
+  html.aq-quill .q-drawer-overlay {
+    display: none;
+  }
+}
+
+/* --- 抽屉（窄屏的侧栏） --- */
+
+html.aq-quill .q-drawer {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  width: 272px;
+  max-width: 86vw;
+  background-color: var(--aq-base-950);
+  border-right: 1px solid var(--aq-base-700);
+  animation: aq-quill-drawer-in 0.22s var(--aq-quill-ease);
+}
+@keyframes aq-quill-drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  浮层                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * magpie 的浮层（`.pop`）有三个特征：
+ *
+ * 1. **毛玻璃**（`backdrop-filter: blur(24px)` + 半透明底）。这是允许的 ——
+ *    `LAYOUT.md` §4 禁的是**常驻**的模糊（顶栏/侧栏/sticky 工具条），
+ *    因为它在部分 GPU / 远程桌面环境下会把整页错误提升进滤镜图层。
+ *    浮层只在打开时存在，是安全的。
+ * 2. **从锚点长出来**：`transform-origin` 由 JS 按锚点中点算。
+ * 3. 圆角 11px、复合阴影（大柔光 + 近距硬光 + 0.5px 亮环）。
+ *
+ * ## ⚠️ 两类浮层，`.q-pop` 只覆盖了自己写的那一类
+ *
+ * 我自己写的（`UserMenu`）带 `.q-pop`；而**公共库里的那些**（`TemplateSwitcher`
+ * 的下拉、机器人行的溢出菜单）类名是**写死的工具类串**，不带模板钩子。
+ *
+ * 两条路：改公共库（共享文件），或者在这里用**属性选择器**补。后者更合适 ——
+ * 模板不该要求页面或公共库改代码。判据挑的是稳定且语义化的属性：
+ * `role="menu"` 与 Radix 的 `data-radix-popper-content-wrapper`。
+ */
+html.aq-quill .q-pop,
+html.aq-quill [data-radix-popper-content-wrapper] > [role='menu'],
+html.aq-quill [data-radix-popper-content-wrapper] > [role='listbox'] {
+  border-radius: 12px;
+  border: 0;
+  background-color: var(--aq-pop-bg);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  box-shadow: var(--aq-shadow-pop);
+  padding: 5px;
+  color: var(--aq-ink);
+}
+html.aq-quill .q-pop[data-state='open'],
+html.aq-quill [data-radix-popper-content-wrapper] > [role='menu'][data-state='open'],
+html.aq-quill [data-radix-popper-content-wrapper] > [role='listbox'][data-state='open'] {
+  animation: aq-quill-pop-in 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes aq-quill-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.96);
+  }
+}
+
+/* 浮层里的菜单项。鼠标悬停与键盘光标用**同一个底色**（magpie 的做法：
+   `li.onmousemove` 会把键盘光标一起移过去），这样两种输入方式不会出现
+   两种不同的高亮。 */
+html.aq-quill .q-pop-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 9px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--aq-ink);
+  text-align: left;
+  transition: background-color 0.12s var(--aq-quill-ease);
+}
+html.aq-quill .q-pop-item:hover,
+html.aq-quill .q-pop-item:focus {
+  background-color: var(--aq-pill);
+}
+html.aq-quill .q-pop-item.is-danger:hover {
+  background-color: var(--aq-down-soft);
+  color: var(--aq-down);
+}
+
+html.aq-quill .q-pop-sep {
+  height: 1px;
+  margin: 4px 7px;
+  background-color: var(--aq-base-750);
+}
+
+/* 公共库的菜单项也一起处理（同一类浮层该长一样）。 */
+html.aq-quill [role='menu'] [role='menuitem'],
+html.aq-quill [role='menu'] [role='menuitemradio'] {
+  border-radius: 7px;
+  transition: background-color 0.12s var(--aq-quill-ease);
+}
+html.aq-quill [role='menu'] [role='menuitem']:hover,
+html.aq-quill [role='menu'] [role='menuitemradio']:hover {
+  background-color: var(--aq-pill);
+}
+
+/*
+ * 浮层里的"当前项"高亮。
+ *
+ * ⚠️ 公共库用的是 `bg-accent-soft`，而**那个类在 Tailwind 配置里不存在**
+ * （`tailwind.config.js` 的 colors 只有 `accent` 与 `accent-hi`）——
+ * Tailwind 对不存在的类不报错、只是不生成样式，所以那 5 处"选中态底色"
+ * 从未生效过，视觉上只靠 `text-accent-hi` 变色。
+ *
+ * 这是上游的既有缺陷，不该在模板里改公共库。这里补一条：选中项用 `--aq-sel`
+ * ——**不是**主色底，因为主色只留给"能点的东西"。
+ */
+html.aq-quill .q-pop [role='menuitemradio'][aria-checked='true'],
+html.aq-quill [role='menu'] [role='menuitemradio'][aria-checked='true'] {
+  background-color: var(--aq-sel);
+  color: var(--aq-ink);
+}
+
+/* 模板切换器的触发按钮。
+   ⚠️ **它是公共库，不该为某一个模板改样式** —— 所以用属性选择器覆盖它。
+   挑 `aria-label` 是因为它语义稳定（类名是写死的工具类串，没有钩子）。 */
+html.aq-quill button[aria-label^='界面模板'] {
+  height: 28px;
+  border-radius: 8px;
+  border-color: transparent;
+  background-color: transparent;
+  color: var(--aq-ink-lo);
+  font-size: 12.5px;
+  padding-left: 8px;
+  padding-right: 8px;
+  gap: 6px;
+  transition:
+    background-color 0.12s var(--aq-quill-ease),
+    color 0.12s var(--aq-quill-ease);
+}
+html.aq-quill button[aria-label^='界面模板']:hover {
+  background-color: var(--aq-pill);
+  color: var(--aq-ink);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  动效                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * ## magpie 的动效哲学
+ *
+ * 它的 CSS 注释里有一句话概括了全部：「**一切都在 0.12–0.28s 内完成**」，
+ * 缓动统一是 `cubic-bezier(.2, .8, .2, 1)`（快起、软落）。
+ *
+ * 三个可迁移的做法：
+ * 1. **按下的回弹**：可点元素 `:active { transform: scale(.96) }`。没有它，
+ *    点击是"无声"的 —— 在这个无边框、无阴影的设计里，回弹是**唯一**的触觉反馈。
+ * 2. **hover 底色 + 提亮文字同时给**：只给底色的话，浅色主题下"变亮"这个
+ *    反馈会消失。
+ * 3. **过渡属性显式列出**，不用 `transition: all` —— 后者会把布局属性也做过渡。
+ */
+
+html.aq-quill .data-grid tbody tr,
+html.aq-quill .row-hover {
+  transition:
+    background-color 0.12s var(--aq-quill-ease),
+    color 0.12s var(--aq-quill-ease);
+}
+
+/*
+ * 折叠区。
+ *
+ * magpie 用 `grid-template-rows: 0fr → 1fr` 做高度动画，而不是 `max-height`
+ * 那种"猜一个大值"的老办法 —— 后者在内容比猜测值高时会**截断**。
+ *
+ * 本项目的 `Collapsible` 走 Radix，它把真实高度写进
+ * `--radix-collapsible-content-height`，`index.css` 已有正确的 keyframe。
+ * 这里只把时长与曲线调成 magpie 的取值。
+ */
+html.aq-quill .collapsible-panel[data-state='open'] {
+  animation-duration: 0.26s;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+html.aq-quill .collapsible-panel[data-state='closed'] {
+  animation-duration: 0.18s;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/*
+ * ## ⚠️ 不要关掉 `.animate-pulse-soft`
+ *
+ * 第一版写过一条 `html.aq-quill .animate-pulse-soft { animation: none }`，
+ * 本意是"magpie 的骨架屏不是呼吸的透明度"，但那个类是**状态圆点的呼吸**
+ * 而不是骨架屏 —— 关掉它等于让全站的"进行中"信号消失：
+ *
+ *   · `TraderStatusBadge` 给 running / starting 的机器人加它
+ *   · `DecisionFeed` 的"正在请求模型…"用它
+ *   · 头部「交易已禁用」的告警徽章用它
+ *
+ * 真浏览器实测确认过：`animationName` 是 `none` —— 那些圆点**永远不闪**了，
+ * 而这正是 `Badges.tsx` 里那段注释在讲的同一件事（"它看起来没问题，只是
+ * 永远不闪"）。本项目没有骨架屏模式，所以这里什么都不该写。
+ */
+
+/* 减少动态效果 —— `index.css` 已全局处理，这里额外关掉 thumb 的滑动
+   （它靠 transform 表达位置，关掉动画后会瞬间跳到位，那正是我们要的）。 */
+@media (prefers-reduced-motion: reduce) {
+  html.aq-quill .q-seg-thumb {
+    transition: none;
+  }
+  html.aq-quill .q-pad {
+    animation: none;
+  }
+}

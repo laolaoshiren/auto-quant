@@ -242,35 +242,49 @@ test('★ 每套外壳都要在顶栏渲染模板切换器 —— 漏了用户�
   }
 });
 
-test('★ 控制台外壳必须渲染两个工具栏槽，并带 className="contents"', () => {
-  const code = src('templates/console/ConsoleShell.tsx');
-  /* 同理：比的是常量名，不是它的值（见上一条用例里的说明）。 */
+test('★ 渲染了工具栏槽的外壳，槽必须带 className="contents"', () => {
+  /*
+   * ## 这条断言为什么遍历而不是写死一个文件
+   *
+   * 它一度只查 `console/ConsoleShell.tsx`，于是 quill 的槽完全不在覆盖内。
+   * 而这条抓的正是**最典型的静默失败**：
+   *
+   * 槽只用来定位（`createPortal` 找 DOM 节点），**不该参与布局** ——
+   * 少了 `display: contents`，两个空 div 会成为工具栏的 flex 子项，
+   * 于是那条 `flex-1` 弹簧被夹在中间、左右两组动作不再贴边，
+   * 而"按钮位置有点怪"没人会当成 bug 报。
+   *
+   * ## 为什么不强制每套外壳都渲染槽
+   *
+   * `classic` 刻意**不渲染**它 —— 那是原版行为（动作就地渲染，
+   * 见 `PageActions` 的兜底分支）。所以这条只对**渲染了槽的**外壳生效。
+   */
   const slots = [
     ['TOOLBAR_START_ID', '左槽（刷新 / 筛选）'],
     ['TOOLBAR_END_ID', '右槽（新建 / 危险动作）'],
   ] as const;
-  for (const [name, what] of slots) {
-    assert.ok(code.includes(`id={${name}}`), `缺少${what}：应该渲染 id={${name}}。`);
+
+  let checked = 0;
+  for (const rel of shellFiles()) {
+    const code = src(rel);
+    const rendersAny = slots.some(([name]) => code.includes(`id={${name}}`));
+    if (!rendersAny) continue; // 不渲染槽的外壳（classic）走就地渲染兜底，功能不丢。
+    checked += 1;
+
+    for (const [name, what] of slots) {
+      /* 同理：比的是常量名，不是它的值（见上面那条用例里的说明）。 */
+      assert.ok(code.includes(`id={${name}}`), `${rel} 缺少${what}：应该渲染 id={${name}}。`);
+      const line = code.split('\n').find((l) => l.includes(`id={${name}}`));
+      assert.match(line!, /className="contents"/, `${rel} 的 ${name} 必须带 className="contents"。`);
+    }
   }
 
-  /*
-   * 槽必须带 `contents`。
-   *
-   * 它们只用来定位（`createPortal` 找 DOM 节点），**不该参与布局**：
-   * 少了 `display: contents`，两个空 div 会成为工具栏的 flex 子项，
-   * 于是那条 `flex-1` 弹簧被夹在中间、左右两组动作不再贴边 ——
-   * 而"按钮位置有点怪"没人会当成 bug 报。
-   */
-  for (const name of ['TOOLBAR_START_ID', 'TOOLBAR_END_ID'] as const) {
-    const line = code.split('\n').find((l) => l.includes(`id={${name}}`));
-    assert.ok(line, `找不到 ${name} 的那一行。`);
-    assert.match(line!, /className="contents"/, `${name} 的容器必须带 className="contents"。`);
-  }
+  assert.ok(checked >= 1, '至少要有一套外壳渲染工具栏槽，实际一套都没有。');
 });
 
 test('★ 模板样式必须全部挂在根类名下面（不得裸写选择器）', () => {
   /*
-   * 这是"两套模板互不影响"的底线，也是"合并进上游时不污染原版"的底线。
+   * 这是"多套模板互不影响"的底线，也是"合并进上游时不污染原版"的底线。
    *
    * 一条不带 `html.aq-*` 前缀的选择器会**开始影响别的模板**，而且是静默的：
    * 写它的人在控制台模板下看，一切正常；切回原版才发现某个颜色变了 ——
@@ -278,8 +292,15 @@ test('★ 模板样式必须全部挂在根类名下面（不得裸写选择器�
    *
    * 顺带它也是"特异性保险"：`html.aq-console` 是 0,2,1，压得过 `index.css`
    * 里的单类名（0,1,0），所以两段 CSS 的加载顺序不再重要。
+   *
+   * ⚠️ **这张表要跟着内置模板一起长。** 它一度只列了 console，于是 quill
+   * 的 1600 行 CSS 完全不在覆盖内 —— 而这条断言抓的正是最难自查的一类
+   * 错误（漏前缀的选择器在写它的人眼里"一切正常"）。加一套模板就加一行。
    */
-  const themes = [['templates/console/theme.css', 'aq-console']] as const;
+  const themes = [
+    ['templates/console/theme.css', 'aq-console'],
+    ['templates/quill/theme.css', 'aq-quill'],
+  ] as const;
 
   for (const [rel, rootClass] of themes) {
     const code = stripComments(src(rel));
@@ -308,7 +329,18 @@ test('★ 模板样式必须全部挂在根类名下面（不得裸写选择器�
         if (!sel) continue;
         /* keyframes 的步进（`from` / `to` / `50%`）不是选择器。 */
         if (/^(from|to|[\d.]+%)$/.test(sel)) continue;
-        if (!sel.includes(`html.${rootClass}`)) offenders.push(sel);
+        /*
+         * `:where(html.aq-x)` 也是合规的写法 —— 它是**刻意的低特异性**：
+         * `:where()` 把整条规则的特异性清零，于是模板的默认色**不会**压掉
+         * 页面里的 `text-down` / `text-up` 这类语义工具类。
+         *
+         * 这条不是理论：quill 模板第一版给 `.td` 写了 `color`（0,2,1），
+         * 结果**整列盈亏褪成同一种灰** —— 而表格看起来"只是有点淡"。
+         * 所以这里必须同时接受两种前缀写法。
+         */
+        if (!sel.includes(`html.${rootClass}`) && !sel.includes(`:where(html.${rootClass})`)) {
+          offenders.push(sel);
+        }
       }
     }
 

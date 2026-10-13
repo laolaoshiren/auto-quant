@@ -144,7 +144,7 @@ import { useLiveCycle, useEvents, type LiveCycle } from '../lib/store';
 import { usePolled } from '../lib/hooks';
 import { Badge, Empty, Panel, Spinner3, cn } from './ui';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
-import { fmtInt, fmtLatency, fmtPriceUsd, fmtQty, fmtUsd, timeAgo } from '../lib/format';
+import { fmtInt, fmtLatency, fmtPriceUsd, fmtQty, fmtUsd, isNum, timeAgo } from '../lib/format';
 
 /**
  * 一页多少轮。
@@ -822,11 +822,12 @@ function cycleSignature(record: DecisionRecord): string | null {
   if (record.error !== null) return null;
 
   const log = record.executionLog ?? [];
+  const decisions = record.decisions ?? [];
   // 完全空白的一轮也不合并 —— 它本身信息就少，再折起来等于让它消失。
-  if (record.decisions.length === 0 && log.length === 0) return null;
+  if (decisions.length === 0 && log.length === 0) return null;
 
   return JSON.stringify([
-    record.decisions.map((decision) => [decision.action, decision.symbol, decision.confidence]),
+    decisions.map((decision) => [decision.action, decision.symbol, decision.confidence]),
     log.map((entry) => [entry.status, entry.action, entry.symbol, entry.detail]),
   ]);
 }
@@ -912,13 +913,30 @@ function priceOf(symbols: MarketSymbol[], symbol: string): number | null {
  */
 export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbols: MarketSymbol[] }) {
   /*
+   * ⚠️ **这两个字段要在这里兜一次底，不能假设它们一定存在。**
+   *
+   * 数据有两个来源，形状**不一样**：
+   *
+   *   · **库里的记录**（`GET /traders/:id/decisions`）—— `decisions` 与
+   *     `executionLog` 一定存在（服务端把 `NULL` 归一成了 `[]`）；
+   *   · **WebSocket 实时推送**的周期 —— 它由服务端在周期进行中逐段发出，
+   *     尚未落库，所以这两个字段都可能**还没有**。
+   *
+   * 实测（示例数据 + `/traders/:id`）：`undefined` 在这里抛
+   * `Cannot read properties of undefined`，而它抛在**渲染期** ——
+   * 整页白屏（`#root` 变空），连外壳都不剩，三套模板全部复现。
+   */
+  const decisions = record.decisions ?? [];
+  const executionLog = record.executionLog ?? [];
+
+  /*
    * 把执行日志按 `action` + `symbol` 配到各自的决策上。
    *
    * 为什么不是 `filter(status === 'skipped')` 那种写法：那样的结果是"结果"与"决策"
    * 分居盒子上下两处，操作者要把上面的提案和下面的小字自己对起来 ——
    * 而熔断真正拦下的是**那一条**提案，答案必须写在那一条旁边。
    */
-  const plan = planExecution(record.executionLog, record.decisions);
+  const plan = planExecution(executionLog, decisions);
   const skipped = plan.counts.skipped;
   const rejected = plan.counts.rejected;
   const failed = plan.counts.failed;
@@ -939,7 +957,7 @@ export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbol
    * 的下标对齐**的（见 `planExecution` 的说明），过滤之后下标会错位 ——
    * 那样"这张卡片的结果"就会挂到别的决策上去。折叠块里那批也一样要带。
    */
-  const visible = record.decisions
+  const visible = decisions
     .map((decision, index) => ({ decision, index }))
     .filter(({ decision }) => decision.action !== 'skip');
 
@@ -966,7 +984,7 @@ export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbol
     return { decision, index, nth, total: totalBySymbol.get(decision.symbol) ?? 1 };
   });
 
-  const skippedRows = record.decisions
+  const skippedRows = decisions
     .map((decision, index) => ({ decision, index }))
     .filter(({ decision }) => decision.action === 'skip');
   /** 被跳过的那批里分最高的一个 —— 折叠标题上给一个可比较的数，省得非展开不可。 */
@@ -1038,13 +1056,11 @@ export function CycleBlock({ record, symbols }: { record: DecisionRecord; symbol
           （回撤守卫平仓、失败重试），此时说"没有给出任何决策"是把一次**执行**
           说成了模型的沉默。
         */}
-        {record.error === null &&
-          record.decisions.length === 0 &&
-          record.executionLog.length === 0 && (
+        {record.error === null && decisions.length === 0 && executionLog.length === 0 && (
             <p className="text-xs text-ink-faint">本周期模型没有给出任何决策。</p>
           )}
 
-        {record.decisions.length > 0 && (
+        {decisions.length > 0 && (
           // 决策之间只用**间距**分隔（§3），不加分隔线：一条细线在深色底上会
           // 变成第二层边框，而这个盒子里只该有一层。
           <div className="space-y-2.5">
@@ -1168,10 +1184,31 @@ function pairKey(action: string, symbol: string): string {
  * 配不上的日志进 `leftover`（界面照旧列出来，一条都不丢）。
  */
 function planExecution(log: ExecutionLogEntry[], decisions: Decision[]): ExecutionPlan {
+  /*
+   * ⚠️ **两个参数都要防 `undefined`，不能只防一个。**
+   *
+   * 调用方在 826 行已经写了 `record.executionLog ?? []`，但那只保护了
+   * **库里读出来的记录**。而 `DecisionFeed` 还有第二条数据来源：
+   * **WebSocket 实时推送**的记录（`useEvents` 的 `byTrader[].decisions`）——
+   * 它由服务端在周期进行中逐段发出，**形状与库里那条不同**（尚未落库，
+   * 所以 `executionLog` / `decisions` 都可能还没填）。
+   *
+   * 实测（用示例数据打开 `/traders/:id`）：这里读到 `undefined` 就抛
+   * `Cannot read properties of undefined (reading 'length')`，而它在
+   * **渲染期**抛出 —— 整页白屏（`<div id="root">` 变空），连外壳都不剩。
+   * 三套模板**全都**复现，所以它不是某个模板的问题。
+   *
+   * 修在这里而不是调用处：`planExecution` 是一个纯函数，它的契约就该是
+   * "给什么都能算出结果"，而不是"调用方必须保证参数完整" ——
+   * 后者每加一条数据来源就要重新检查一遍。
+   */
+  const safeLog = log ?? [];
+  const safeDecisions = decisions ?? [];
+
   /** 每个配对键下**还没被认领**的日志下标，按出现顺序排队。 */
   const queue = new Map<string, number[]>();
-  for (let index = 0; index < log.length; index += 1) {
-    const entry = log[index];
+  for (let index = 0; index < safeLog.length; index += 1) {
+    const entry = safeLog[index];
     if (!entry) continue;
     const key = pairKey(entry.action, entry.symbol);
     const bucket = queue.get(key);
@@ -1181,7 +1218,7 @@ function planExecution(log: ExecutionLogEntry[], decisions: Decision[]): Executi
 
   const outcomes: Array<ExecutionLogEntry | null> = [];
   const claimed = new Set<number>();
-  for (const decision of decisions) {
+  for (const decision of safeDecisions) {
     const bucket = queue.get(pairKey(decision.action, decision.symbol));
     // 每认领一条就把它从队列头移走：同一个币种的第二条决策因此拿到**下一条**日志。
     const index = bucket?.shift();
@@ -1190,7 +1227,7 @@ function planExecution(log: ExecutionLogEntry[], decisions: Decision[]): Executi
       continue;
     }
     claimed.add(index);
-    outcomes.push(log[index] ?? null);
+    outcomes.push(safeLog[index] ?? null);
   }
 
   const counts: Record<ExecutionLogEntry['status'], number> = {
@@ -1201,11 +1238,11 @@ function planExecution(log: ExecutionLogEntry[], decisions: Decision[]): Executi
     skipped: 0,
     data: 0,
   };
-  for (const entry of log) counts[entry.status] += 1;
+  for (const entry of safeLog) counts[entry.status] += 1;
 
   return {
     outcomes,
-    leftover: log.filter((_, index) => !claimed.has(index)),
+    leftover: safeLog.filter((_, index) => !claimed.has(index)),
     counts,
   };
 }
@@ -1540,7 +1577,20 @@ function DecisionOutcome({
    * 都不会因为这次改动而消失。
    */
   const [expanded, setExpanded] = useState(false);
-  const notes = entry?.adjustments?.length ? entry.adjustments : decision.adjustments;
+  /*
+   * ⚠️ **回落到的那一份也要兜底。**
+   *
+   * 这一行的意图是"执行记录上那份优先，没有就用决策自己带的那份"。但两份
+   * **都可能没有**：WebSocket 实时推送的决策与执行条目尚未落库，字段是
+   * 缺的（见 `CycleBlock` 顶部那段）。第一版写成
+   * `entry?.adjustments?.length ? entry.adjustments : decision.adjustments`
+   * —— 前半段用可选链防了，后半段没有，于是 `undefined` 一路传下去，
+   * 在下面的 `notes.length` 处**渲染期抛出**，整页白屏。
+   *
+   * `?.length ?` 这个写法本身是对的（它要区分"空数组"与"有内容"），
+   * 缺的是最后那一层 `?? []`。
+   */
+  const notes = (entry?.adjustments?.length ? entry.adjustments : decision.adjustments) ?? [];
 
   if (!entry) {
     return (
@@ -1865,7 +1915,21 @@ export function figureParts(decision: Decision, price: number | null): Figure[] 
     const reward = Math.abs(decision.takeProfit - price);
     if (risk > 0) parts.push({ key: 'reward', label: '', value: `1:${(reward / risk).toFixed(2)}` });
   }
-  parts.push({ key: 'leverage', label: '', value: `${decision.leverage}x` });
+  /*
+   * ⚠️ **杠杆也要判一次，不能无条件拼。**
+   *
+   * 这一行的上面几行全都写着 `!== null` 的判断，只有它没有 —— 而模型**确实
+   * 会漏字段**：实测某次打开 `/traders/:id` 时这一格渲染成了字面量
+   * `undefinedx`（`${undefined}x` 的字符串拼接结果），就挂在"止盈 —"后面。
+   * 那看起来像界面出了故障，而实际是"模型这一条没给杠杆"。
+   *
+   * 判据用 `isNum` 而不是 `!== null`：实时推送的记录里缺字段时值是
+   * `undefined`，而 `undefined !== null` 为真 —— 上面那几行的判断在这个
+   * 来源下同样会漏（它们的 `fmtPriceUsd` 兜住了，所以没露出来）。
+   */
+  if (isNum(decision.leverage) && decision.leverage > 0) {
+    parts.push({ key: 'leverage', label: '', value: `${decision.leverage}x` });
+  }
 
   return parts;
 }
