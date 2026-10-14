@@ -1,7 +1,7 @@
 import { getProvider, type LlmProviderId, type LlmProviderDescriptor } from '@aq/shared';
 import { createLogger } from '../logger.js';
 import { maskSecret } from '../crypto/vault.js';
-import { LlmError, emptyCompletionError, isRetryable } from './errors.js';
+import { LlmError, emptyCompletionError, isRetryable, timeoutError } from './errors.js';
 import { executeJsonRequest, executeStreamRequest } from './http.js';
 import { nextReasoningEffort } from './effortFallback.js';
 import * as openai from './openaiCompatible.js';
@@ -44,6 +44,47 @@ const DEFAULT_TIMEOUT_SECONDS = 300;
  * 一次就结束；这里放宽的只有"网络抖动/限流/超时"那一类。
  */
 const DEFAULT_MAX_RETRIES = 10;
+
+/**
+ * **一次 `chat()` 的总时长上界**，与"单次尝试超时"是两件事。
+ *
+ * ## 为什么必须有它（2026-10-14 线上实测抓到的真问题）
+ *
+ * `timeoutSeconds` 只作用于**单次 HTTP 请求**（它被传给
+ * `executeJsonRequest({ timeoutMs })`），而 `chat()` 会按 `maxRetries` 重试。
+ * 于是**总时长完全不受那个配置约束**：
+ * ```
+ *   配置 timeout=600s、maxRetries=2
+ *   → 总时长上界 ≈ 600 + 退避 + 600 + 退避 + 600 ≈ 1830s（30 分钟）
+ * ```
+ * 线上实测到了这个后果：
+ * ```
+ *   >600s 的调用 39 次，最慢 900068ms（15 分钟）
+ *   而交易周期本身就是 15 分钟
+ *   → 【一次调用吃掉整个周期】，那一轮没有任何产出
+ * ```
+ * 而配置里写的是 600s —— 也就是说**运维看到的数字与他实际得到的行为不一致**，
+ * 那是比"慢"更糟的事（`docs/AGENTS.md` §3.2：不要把推测当成已验证，
+ * 反过来也一样：不要把一个**看起来**生效的配置当成真的生效）。
+ *
+ * ## 取值：单次超时的 `maxRetries + 1` 倍不够，改用一个**显式上界**
+ *
+ * ```
+ *   totalBudgetMs = timeoutMs × (maxRetries + 1)，但**封顶 20 分钟**
+ * ```
+ * ⚠️ 为什么不是严格"每次都能跑完"：重试的价值在于"上游偶发失败时能救回来"
+ *（见 `DEFAULT_MAX_RETRIES` 那段用户原话）。所以上界必须**容得下几次重试**，
+ * 但它也得**小于一个周期**，否则一轮永远跑不完。
+ *
+ * ⚠️ 20 分钟这个封顶与"周期 15 分钟"并不矛盾：周期到点会**先看这一轮跑完没有**
+ *（`cycleInFlight` 守卫），而这里保证的是"它不会无限拖下去"。
+ * 真正要防的是"配置 600s、实际 30 分钟"这种**失控**，不是"偶尔慢一点"。
+ *
+ * ⚠️ 触发时抛**可重试的超时错误**吗？不是 —— 到达总预算说明已经重试过了，
+ * 再重试只会更晚返回。所以它抛一个明确的错误**让上层换模型**（`ModelRouter`
+ * 有候选链降级），那比在这里继续等有价值。
+ */
+const MAX_TOTAL_CHAT_MS = 20 * 60_000;
 /** Full-jitter backoff bounds from B.14 (`base ≈ 500ms`, cap ≈ 30s). */
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 30_000;
@@ -351,7 +392,39 @@ export class LlmClient {
     const startedAtIso = new Date(startedAt).toISOString();
     let lastError: unknown;
 
+    /*
+     * **总时长预算**：`timeoutMs × (maxRetries + 1)`，但封顶 `MAX_TOTAL_CHAT_MS`。
+     * 完整理由见该常量的说明 —— 核心是"配置的单次超时不该被理解成总时长"。
+     */
+    const totalBudgetMs = Math.min(this.timeoutMs * (this.maxRetries + 1), MAX_TOTAL_CHAT_MS);
+
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+      /*
+       * ⚠️ **在发起下一次尝试【之前】检查预算**（而不是在失败之后）——
+       * 前者省掉一次注定超时的请求与它的退避等待，后者会把总时长再撑长一整轮。
+       */
+      const elapsedMs = Date.now() - startedAt;
+      if (attempt > 0 && elapsedMs >= totalBudgetMs) {
+        log.warn(
+          `模型调用已达本次总时长上界，不再重试：${this.provider} / ${this.model}`,
+          {
+            provider: this.provider,
+            model: this.model,
+            elapsedMs,
+            totalBudgetMs,
+            attempts: attempt,
+            maxRetries: this.maxRetries,
+            perAttemptTimeoutMs: this.timeoutMs,
+            /*
+             * ⚠️ 这条日志存在的意义：**让"配置的 600s"与"实际花了 20 分钟"
+             * 这件事在日志里对得上**。没有它，运维只会看到一堆"慢"。
+             */
+            hint: '单次超时 × 重试次数 = 实际总时长；这是刻意封顶的，不是失控。',
+          },
+        );
+        throw timeoutError(this.provider, elapsedMs);
+      }
+
       log.debug(`chat request → ${this.provider}`, {
         provider: this.provider,
         model: this.model,
