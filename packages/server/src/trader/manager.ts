@@ -11,7 +11,7 @@ import { connectExchange, preflight, type ExchangeConnection, type PreflightChec
 import type { BinanceEnvironment } from '../binance/endpoints.js';
 import { BinanceUserDataStream } from '../binance/ws.js';
 import type { Vault } from '../crypto/vault.js';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { createLogger } from '../logger.js';
 import { env } from '../env.js';
@@ -841,7 +841,7 @@ export function stopResearchRefresher(traderId: number): void {
  *   单独实测一个猎手任务： ok=true 耗时 **92.7 秒**
  *   线上并发跑四个：        **3 个未产出**（每个"超过 600 秒未返回"）
  * ```
- * 服务器只有 **2 核 / 1971MB（可用 822MB）**，而每个猎手是
+ * 服务器只有 **2 核 / 1971MB**，而每个猎手是
  * **一整个 claude code 进程**（150–250MB，自带 node 运行时）。
  * 2 核切成 5–6 份 → 每个慢 6 倍以上 → 全部超时。
  *
@@ -851,6 +851,39 @@ export function stopResearchRefresher(traderId: number): void {
  *   全部超时        → 团队永远拿不到新闻 → 功能失效
  * ```
  * 实测裁决官的原话：「材料**无新闻、无情绪**……数据不足无法判断」。
+ *
+ * ## ⚠️⚠️ 2026-10-14：真正的瓶颈是**内存**，而且它是被【僵尸进程】吃掉的
+ *
+ * 上面那个"并发四个 → 三个超时"的结论**方向是对的，但归因不全**。
+ * 那天实测服务器状态：
+ * ```
+ *   可用内存        696MB      ← 而每个猎手要 150–250MB
+ *   Swap 已用      1014MB / 2047MB   ← 已经被压到交换区上半场
+ *   僵尸进程        7 个，各 66–72MB，合计 ≈ 500MB
+ *                  （`/root/dsh_trade` 的 `src/bot.mjs`，目录已被删除、
+ *                    日志不存在、0 个网络连接、25 天只用 1.5 小时 CPU）
+ * ```
+ * **清掉那 7 个之后**：可用内存 **696MB → 1039MB**（+49%），swap 回落到 707MB。
+ *
+ * ⚠️ **教训**：当时把"并发超时"归因成"2 核 CPU 不够"，而实际上是
+ * **内存被不属于本项目的僵尸进程占着**。CPU 核数是那台机器买定离手的部分，
+ * 但**可用内存是会漂移的** —— 所以只看 `cpus().length` 会得出一个
+ * **过时的、偏保守的**上限，而且永远不会自己变好。
+ *
+ * ## 所以现在**同时看核数与可用内存**，取两者中更严的那个
+ *
+ * ```
+ *   byCores  = min(3, max(1, floor(核数 / 2)))          ← 原来唯一依据
+ *   byMemory = max(1, floor((可用内存 − 512MB 保留) / 250MB))
+ *   limit    = min(byCores, byMemory, 3)
+ * ```
+ * ⚠️ **保留 512MB 不是随手定的**：服务本体 ~95MB、magpie ~74MB、
+ * Node 堆与文件缓存会有波动，而**内存耗尽会触发 swap，进而让【所有】
+ * 猎手一起变慢** —— 那比"少开一个并发"糟糕得多（上面那条"全部超时"就是它）。
+ *
+ * ⚠️ **读不到内存时退回按核数算**（不要因为读不到就降到 1）——
+ * 与 `exchangeMaxLeverageOf` 返回 null 时退回旧行为是同一条纪律：
+ * **读不到某个事实，不该让功能停下来。**
  */
 function hunterConcurrency(): number {
   const explicit = Number(process.env.AQ_HUNTER_CONCURRENCY ?? '');
@@ -862,7 +895,74 @@ function hunterConcurrency(): number {
       return 1;
     }
   })();
-  return Math.min(3, Math.max(1, Math.floor(cores / 2)));
+  const byCores = Math.min(3, Math.max(1, cores));
+  return Math.min(byCores, hunterConcurrencyByMemory());
+}
+
+/**
+ * ⚠️ **核数这一项为什么是 `min(3, cores)` 而不是 `min(3, floor(cores/2))`**（2026-10-14）
+ *
+ * 原来除以 2 的依据是那句实测「2 核切成 5–6 份 → 每个慢 6 倍以上 → 全部超时」。
+ * 但**那次慢不是 CPU 造成的，是内存**（僵尸进程占了 500MB，可用只剩 696MB，
+ * swap 已被压到 1014MB/2047MB）—— 见 `hunterConcurrency` 上方那段完整证据。
+ *
+ * 而猎手这个工作负载**几乎不烧 CPU**：它的时间全花在等两件事上
+ * ```
+ *   ① claude code 进程启动（node 冷启动，一次性、毫秒级到秒级）
+ *   ② WebSearch / WebFetch 的网络往返（几秒到几十秒）
+ * ```
+ * 真正的 CPU 密集部分是**没有的** —— 所以按"核数 ÷ 2"给 I/O 密集任务定并发，
+ * 是把一个**不成立的模型**当成了依据。
+ *
+ * ⚠️ **所以真正的闸门交给内存**（`hunterConcurrencyByMemory`），
+ * 核数只保留一个**合理性封顶**（不许超过 3）。
+ *
+ * ⚠️ **这是一次基于证据的修正，但仍需实测确认** —— 部署后会看猎手的
+ * `ok` 比例与 `latencyMs`：若并发提到 2 之后完成率反而下降，就该退回。
+ * 判据写在 `refreshResearch` 的日志里（每个猎手都记了耗时与成败）。
+ */
+
+/**
+ * 按**当前可用内存**能开几个猎手（每个按 250MB 上界估）。
+ *
+ * ⚠️ 返回 `3`（而不是 1）当**读不到**内存时 —— 见 `hunterConcurrency()`
+ * 的说明：读不到事实不该让功能降级。真正的封顶由 `byCores` 做。
+ *
+ * ⚠️ 保留 512MB 给服务本体/网关/缓存 —— 理由见上面那段（swap 会让**所有**
+ * 猎手一起慢，那比少开一个并发糟得多）。
+ */
+function hunterConcurrencyByMemory(): number {
+  const availMb = availableMemoryMb();
+  if (availMb === null) return 3;
+  const usable = availMb - HUNTER_MEMORY_RESERVE_MB;
+  if (usable <= 0) return 1;
+  return Math.max(1, Math.min(3, Math.floor(usable / HUNTER_MEMORY_PER_TASK_MB)));
+}
+
+/** 给服务本体、magpie 网关与文件缓存留的余量（见 `hunterConcurrencyByMemory`）。 */
+const HUNTER_MEMORY_RESERVE_MB = 512;
+
+/** 单个猎手的内存上界（实测记录在 `hunterConcurrency` 上方：150–250MB）。 */
+const HUNTER_MEMORY_PER_TASK_MB = 250;
+
+/**
+ * Linux 上的**可用内存**（MB）—— 优先 `MemAvailable`。
+ *
+ * ⚠️ **用 `MemAvailable` 而不是 `MemFree`**：后者不把可回收的 page cache 算进去，
+ * 在 Linux 上通常小一个数量级（实测同一时刻 `free` 392MB vs `available` 1039MB）。
+ * 按 `MemFree` 算会得出"内存快没了"的错误结论，从而把并发降到 1。
+ *
+ * 读不到（非 Linux / 权限）时返回 `null` —— 调用方据此退回按核数算。
+ */
+function availableMemoryMb(): number | null {
+  try {
+    const text = readFileSync('/proc/meminfo', 'utf8');
+    const m = /^MemAvailable:\s+(\d+)\s+kB$/m.exec(text);
+    if (m === null) return null;
+    return Math.floor(Number(m[1]) / 1024);
+  } catch {
+    return null;
+  }
 }
 
 /**
