@@ -7,7 +7,14 @@ import type { EquitySnapshot, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries, type TraderSummary } from '../lib/summaries';
-import { committedCapitalOf, fleetTotals, groupTradersByAccount } from '../lib/fleetTotals';
+import {
+  attributedEquityOf,
+  committedCapitalOf,
+  fleetTotals,
+  groupTradersByAccount,
+  isLedgerSuspect,
+  realizedPnlOf,
+} from '../lib/fleetTotals';
 import { pairEquityByTrader } from '../lib/equityPairing';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useRunOnce } from '../lib/actions';
@@ -208,55 +215,31 @@ export function TradersPage() {
   const totalEquity = fleetTotal.accountEquityFleet;
   /** 读数已过期的账户（机器人全停了 → 没有新快照）。见上面那个 Metric 的说明。 */
   const staleAccounts = fleetTotal.accounts.filter((a) => a.accountEquityStale);
-  const isLedgerSuspect = (trader: TraderRow): boolean =>
-    trader.ledger != null && Math.abs(trader.ledger.gap) >= 0.01;
-
-  /**
-   * 这个机器人的权益 —— **账本可信时用账本、不可信时用交易所**。
+  /*
+   * WARNING: 这三个函数已移到 lib/fleetTotals.ts（2026-10-14）。
    *
-   * ⚠️ 返回值与详情页「账户余额」口径一致（详见上面的说明）。
+   * 原因：用户报「你做事情只做一半？？」—— 同一个"账本 vs 交易所"的判据
+   * 原先散在四个地方（本页两处、首页一处、详情页一处），我上一轮只修了
+   * 其中两处，首页就漏了。根因是判据被复制了四份。
+   *
+   * 现在它们是共享库里的单一实现：
+   *   isLedgerSuspect    -> fleetTotals.isLedgerSuspect(ledger)
+   *   realizedPnlOf      -> fleetTotals.realizedPnlOf(trader, stats)
+   *   attributedEquityOf -> fleetTotals.attributedEquityOf(trader, stats)
+   *
+   * 共享版比原来多一道判据：incomeReadFailed 为真时不校准 ——
+   * 那时 exchangeNet 是残缺读数，拿它校准比坏账本更离谱。
    */
-  const equityOf = (trader: TraderRow, stats: TraderSummary): number => {
-    if (!isLedgerSuspect(trader)) return stats.equity;
-    /*
-     * 交易所校准：`起始权益 + 交易所口径的已实现净额 + 本机器人浮盈`。
-     *
-     * ⚠️ 浮盈仍取 `stats.unrealizedPnl`（本机器人自己的，来自最近的标记价）——
-     * 交易所流水里没有"未实现"这个概念。
-     */
-    return trader.initialEquity + trader.ledger!.exchangeNet + stats.unrealizedPnl;
-  };
+  const equityOf = (trader: TraderRow, stats: TraderSummary): number =>
+    attributedEquityOf(trader, stats);
 
-  /**
-   * **一行里所有盈亏数字的统一来源**（2026-10-14，用户报"只做一半"）。
-   *
-   * ## 为什么需要它
-   *
-   * 我上一轮只校准了「归属权益」那一格，而同一行的「盈亏」列仍用服务端的
-   * `stats.totalReturnPercent`（按**坏账本**算）—— 于是同一行里两个数用两套口径：
-   * ```
-   *   #10 归属权益 已校准（$93.16）· 盈亏 未校准（+5.65% 而真实 -6.99%）
-   * ```
-   * 用户看到的正是这个矛盾：「盈亏计算也不对啊！！！你做事情只做一半？？」
-   *
-   * ## 判据与 `equityOf` 完全一致
-   *
-   * ```
-   *   ledger 可信 → 用账本（stats.realizedPnl / stats.totalReturnPercent）
-   *   ledger 有差 → 用交易所（ledger.exchangeNet / 由它算出的收益率）
-   * ```
-   * ⚠️ **收益率必须从校准后的净额算**，不能直接拿 `stats.totalReturnPercent` 减个差额 ——
-   * 后者会引入两个来源的舍入差。
-   */
   const calibratedOf = (
     trader: TraderRow,
     stats: TraderSummary,
   ): { realizedPnl: number; returnPercent: number } => {
-    if (!isLedgerSuspect(trader)) {
-      return { realizedPnl: stats.realizedPnl, returnPercent: stats.totalReturnPercent };
-    }
-    const realizedPnl = trader.ledger!.exchangeNet;
-    const returnPercent = trader.initialEquity > 0 ? (realizedPnl / trader.initialEquity) * 100 : 0;
+    const realizedPnl = realizedPnlOf(trader, stats);
+    const returnPercent =
+      trader.initialEquity > 0 ? (realizedPnl / trader.initialEquity) * 100 : 0;
     return { realizedPnl, returnPercent };
   };
 
@@ -642,7 +625,7 @@ export function TradersPage() {
                             ⚠️ 详细原因保留在 `title` 里（想深究的人能查到），
                             但**可见的那一行只放结论**。
                           */}
-                          {stats && isLedgerSuspect(trader) && (
+                          {stats && isLedgerSuspect(trader.ledger) && (
                             <div
                               className="text-xs text-ink-faint"
                               title={
@@ -701,7 +684,7 @@ export function TradersPage() {
                             <div
                               className="text-xs text-ink-faint"
                               title={
-                                (isLedgerSuspect(trader)
+                                (isLedgerSuspect(trader.ledger)
                                   ? '平台账本与交易所的成交流水对不上，所以这一行改用**交易所**的流水校准。'
                                   : `${pnlFormulaText(statsCosts(stats))}。`) +
                                 `浮动盈亏 ${fmtUsdSigned(stats.unrealizedPnl, 2)} 未计入本行。`

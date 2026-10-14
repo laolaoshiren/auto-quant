@@ -423,8 +423,27 @@ export interface TraderRow extends Trader {
    * 用户 2026-10-07 报的「起始 100.05，现在 100.84，为什么显示 +$1.29」——
    * `platformNet` 是账本（可能错），`exchangeNet` 是交易所流水（真实），
    * 两者之差就是 `gap`。界面对着它显示，而不是拿账本值冒充事实。
+   *
+   * ⚠️ **`incomeReadFailed` 是 2026-10-14 补上的** —— 服务端
+   * （`server.ts` 的 `readForeignActivityFor`）读不到交易所收入流水时
+   * **不返回 `exchangeNet`**，前端类型原来漏了这个字段，于是 web 侧
+   * 无法区分"真的没差额"和"这次没读到流水"。
+   *
+   * 那个区分至关重要：
+   * ```
+   *   exchangeNet 是【残缺读数】（少了几段流水）→ 拿它校准比坏账本更离谱
+   *   所以判据必须排除 incomeReadFailed 的情形
+   * ```
+   * 见 `fleetTotals.ts` 的 `isLedgerSuspect()`。
    */
-  ledger?: { platformNet: number; exchangeNet: number; gap: number; checkedAt: string } | null;
+  ledger?: {
+    platformNet: number;
+    exchangeNet: number;
+    gap: number;
+    checkedAt: string;
+    /** 读交易所收入流水失败时为 `true` —— 此时 `exchangeNet` 不可信。 */
+    incomeReadFailed?: boolean;
+  } | null;
   /**
    * **下一轮决策的预定触发时刻**（epoch 毫秒），没有排程时为 null。
    *

@@ -39,7 +39,7 @@ import type { EquitySnapshot, TraderMode, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
-import { accountEquityContributor, fleetTotals } from '../lib/fleetTotals';
+import { accountEquityContributor, attributedEquityOf, fleetTotals } from '../lib/fleetTotals';
 import { pairEquityByTrader } from '../lib/equityPairing';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { Button, Empty, ErrorNote, Panel, Spinner3 } from '../components/ui';
@@ -254,21 +254,33 @@ export function OverviewPage() {
    * 三处判据必须一致，而共享它们需要跨页面的模块 —— 那超出本次改动范围，
    * 但**不一致的代价更大**，所以先保证一致）。
    */
-  const equityOf = (trader: TraderRow): number => {
-    const stats = statsMap[trader.id];
-    if (!stats) return trader.initialEquity;
-    const suspect = trader.ledger != null && Math.abs(trader.ledger.gap) >= 0.01;
-    if (!suspect) return stats.equity;
-    /* 交易所校准：起始权益 + 交易所口径的已实现净额 + 本机器人浮盈。 */
-    return trader.initialEquity + trader.ledger!.exchangeNet + stats.unrealizedPnl;
-  };
+  /*
+   * ⚠️⚠️ **改用共享实现**（2026-10-14）。
+   *
+   * 原来这里是"账本 vs 交易所"判据的**第三个副本**，而且它漏了
+   * `incomeReadFailed` 那道判据（那时 `exchangeNet` 是残缺读数）。
+   *
+   * 用户报「你做事情只做一半？？」的直接原因就是这一类复制：
+   * 我修了机器人列表页两处，首页这一处没修。
+   * 现在判据只有一份（`lib/fleetTotals.ts`），**改一处即三处生效**。
+   */
+  const equityOf = (trader: TraderRow): number =>
+    attributedEquityOf(trader, statsMap[trader.id]);
 
   const accountEquity = fleet.accountEquityFleet;
   const committedCapital = fleet.committedCapitalFleet;
   const totalReturnPercent = fleet.accountReturnPercent;
   const totalOpen = fleet.openPositionsFleet;
   const unrealized = fleet.unrealizedPnlFleet;
-  /** Σ 各机器人自己的净已实现盈亏 —— 这一项本来就是可加的。 */
+  /*
+   * Σ 各机器人自己的净已实现盈亏 —— 这一项本来就是可加的。
+   *
+   * ⚠️ `fleet.realizedPnlFleet` 现在**已经按交易所校准过**（在 `fleetTotals`
+   * 里逐机器人调 `realizedPnlOf`）。所以这里直接用，不要再减一次：
+   * ```
+   *   #10 校准前 +5.66（坏账本）· 校准后 -7.00（交易所）· 差 12.6
+   * ```
+   */
   const realizedPnl = fleet.realizedPnlFleet;
   const withStats = fleet.tradersWithStats;
   const statsPending = fleet.traderCount > 0 && withStats < fleet.traderCount;

@@ -34,18 +34,24 @@ import { codeOnlyCss as codeOnly } from '../testUtils/cssText.js';
 const PAGE = readFileSync(new URL('./TradersPage.tsx', import.meta.url), 'utf8');
 const CODE = codeOnly(PAGE);
 
-test('★★★ 必须有 calibratedOf（一行里所有盈亏数字的统一来源）', () => {
+test('★★★ calibratedOf 必须从共享库的 realizedPnlOf 派生（不是本地判据）', () => {
+  /*
+   * ⚠️ 2026-10-14 重构：判据移到 `lib/fleetTotals.ts`（**一份实现**）。
+   * 本页的 `calibratedOf` 现在只负责"把净额换算成百分比"，
+   * **口径判断交给共享库** —— 否则又会变成"每个页面各写一遍"，
+   * 而那正是用户报「你做事情只做一半？？」的成因。
+   */
   assert.ok(
     /const calibratedOf = \(/.test(CODE),
     '★ 必须有 calibratedOf —— 否则每一列各算一套口径',
   );
   assert.ok(
-    /return \{ realizedPnl: stats\.realizedPnl, returnPercent: stats\.totalReturnPercent \}/.test(CODE),
-    '★ 账本可信时用服务端的数',
+    /const realizedPnl = realizedPnlOf\(trader, stats\);/.test(CODE),
+    '★ 净额必须来自共享库的 realizedPnlOf（不是本地判据）',
   );
   assert.ok(
-    /const realizedPnl = trader\.ledger!\.exchangeNet;/.test(CODE),
-    '★ 账本有差时用交易所的数',
+    /trader\.initialEquity > 0 \? \(realizedPnl \/ trader\.initialEquity\) \* 100 : 0/.test(CODE),
+    '★ 收益率必须从【校准后的净额】算 —— 不能拿两套来源相减',
   );
 });
 

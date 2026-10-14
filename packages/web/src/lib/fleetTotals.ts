@@ -234,10 +234,90 @@ function latestAccountReading(
  */
 const ACCOUNT_READING_STALE_MS = 60 * 60_000;
 
+/**
+ * **账本与交易所对不上** —— 判据的唯一实现（2026-10-14）。
+ *
+ * ```
+ *   |gap| ≥ 0.01 且不是"收入读不到" → true（要用交易所的数校准）
+ *   否则                            → false（账本可信，与交易所一致）
+ * ```
+ *
+ * ⚠️ `incomeReadFailed` 为真时**必须判 false**：那时的 `exchangeNet` 是
+ * **残缺读数**（少了几段流水），拿它去校准会比坏账本更离谱。
+ *
+ * ⚠️ 0.01 这个阈值是**实测定的**：账本与交易所的正常舍入差在 1e-4 量级，
+ * 而这次事故的差额是 12.55 —— 两者差两个数量级，所以 0.01 能干净地分开。
+ * 改它必须同时改 `TradersPage` / `OverviewPage` / `traderStats` 三处的测试
+ *（见 `equityAligned.test.ts` 钉住的那五条）。
+ */
+export function isLedgerSuspect(ledger: TraderRow['ledger']): boolean {
+  if (ledger == null) return false;
+  if (ledger.incomeReadFailed === true) return false;
+  return Math.abs(ledger.gap) >= 0.01;
+}
+
+/**
+ * **一个机器人的已实现净盈亏 —— 账本可信时用账本、否则用交易所**（2026-10-14）。
+ *
+ * ## 为什么要有这个函数
+ *
+ * 用户的原话：
+ * > 「盈亏计算也不对啊！！！你做事情只做一半？？」
+ *
+ * 事实是：同一个数在**四个地方**各算了一遍，而我上一轮只修了其中一处：
+ * ```
+ *   ① 机器人列表页「盈亏」列        ← 修了
+ *   ② 机器人列表页顶部汇总          ← 修了
+ *   ③ 首页总览「已实现盈亏」        ← 【漏了】
+ *   ④ 详情页「交易盈亏」            ← 之前修过
+ * ```
+ * ④ 与 ①②③ 用了两套代码 —— 那就是漏的原因。
+ * **现在只有一个实现**：这里。别处一律调它。
+ *
+ * ## 为什么"用交易所"是更准的那个
+ *
+ * `trades.net_pnl` 被对账重建写坏过（39 笔 `source='reconciled'` 里
+ * 16 笔 `pnl=0`，合计虚高 9.13）；而 `ledger.exchangeNet` 是**交易所自己的
+ * 成交流水**算出来的，没有重建逻辑可以搞错它。
+ *
+ * ⚠️ 退回 `row?.realizedPnl ?? 0` 而不是 `ledger.exchangeNet`：没有统计行时
+ * 连交易所流水都没读过，0 是"未知"而不是"没赚没亏"（页面会随后覆盖）。
+ */
+export function realizedPnlOf(
+  trader: TraderRow,
+  row: TraderStats | undefined,
+): number {
+  if (row === undefined) return 0;
+  if (!isLedgerSuspect(trader.ledger)) return row.realizedPnl;
+  return trader.ledger!.exchangeNet;
+}
+
+/**
+ * **一个机器人的归属权益 —— 与已实现盈亏同一套判据**（2026-10-14）。
+ *
+ * ```
+ *   账本可信 → stats.equity
+ *   账本有差 → 起始权益 + 交易所口径净额 + 本机器人浮盈
+ * ```
+ *
+ * ⚠️ 浮盈仍取 `row.unrealizedPnl`（本机器人自己的，来自最近的标记价）——
+ * 交易所流水里没有"未实现"这个概念。
+ *
+ * ⚠️ 与 `realizedPnlOf` **必须同步**：只改一个就会出现"权益校准了、
+ * 盈亏没校准"（那正是用户在机器人列表页看到的矛盾）。
+ */
+export function attributedEquityOf(
+  trader: TraderRow,
+  row: TraderStats | undefined,
+): number {
+  if (row === undefined) return trader.initialEquity;
+  if (!isLedgerSuspect(trader.ledger)) return row.equity;
+  return trader.initialEquity + trader.ledger!.exchangeNet + row.unrealizedPnl;
+}
+
 /** 舰队合计。见本文件顶部：账户口径与机器人归属口径在这一处分开。 */
 export function fleetTotals({ traders, stats, snapshots }: FleetInputs): FleetTotals {
   const accounts: FleetAccount[] = [];
-  const byTrader: Record<number, FleetAccount> = {};
 
   let accountEquityFleet = 0;
   let committedCapitalFleet = 0;
@@ -248,6 +328,12 @@ export function fleetTotals({ traders, stats, snapshots }: FleetInputs): FleetTo
   let lossesFleet = 0;
   let tradersWithStats = 0;
   let attributedEquitySumFleet = 0;
+
+  /*
+   * ⚠️ `byTrader` 把"某个机器人属于哪个账户"记下来，供页面按机器人反查账户口径
+   * （`FleetTotals.byTrader` 是公开字段）。
+   */
+  const byTrader: Record<number, FleetAccount> = {};
 
   for (const [exchangeAccountId, group] of groupTradersByAccount(traders)) {
     let realizedPnl = 0;
@@ -260,7 +346,44 @@ export function fleetTotals({ traders, stats, snapshots }: FleetInputs): FleetTo
     for (const trader of group) {
       const row = stats[trader.id];
       if (row) tradersWithStats += 1;
-      realizedPnl += row?.realizedPnl ?? 0;
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⚠️⚠️ **已实现盈亏也要按交易所校准**（2026-10-14 用户报"只做一半"）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * ## 事实（线上）
+       *
+       * ```
+       *   首页「已实现盈亏」+5.91（服务端按坏账本算的 Σ net_pnl）
+       *   交易所口径真实    -7.03
+       *   → 差 12.9 USDT：【显示盈利，实际亏损】
+       * ```
+       *
+       * ## 根因
+       *
+       * `row.realizedPnl` 来自服务端的 `trades.net_pnl` —— 而那份账本被
+       * 对账重建写坏过（39 笔 `source='reconciled'` 里 16 笔 `pnl=0`，
+       * 合计虚高 9.13）。同一个原因也让「归属权益」偏了 12.55。
+       *
+       * ## 为什么修在【这里】
+       *
+       * 这是舰队合计的**唯一计算点** —— 首页、机器人列表页的顶部汇总都读它。
+       * 上一轮我在 `TradersPage` 里各修了一遍，结果首页漏了。
+       * **根因在这里，就该在这里修一次。**
+       *
+       * ## 判据与别处一字不差
+       *
+       * ```
+       *   |ledger.gap| ≥ 0.01 且不是"收入读不到" → 用交易所的 exchangeNet
+       *   否则                                   → 用账本（它与交易所一致）
+       * ```
+       * ⚠️ `incomeReadFailed` 为真时**必须退回账本** —— 那时的 `exchangeNet`
+       * 是残缺读数（少了几段流水），拿它校准会比账本更离谱。
+       *
+       * ⚠️ 用 `realizedPnlOf()` 而不是直接写在这里：机器人列表页那一行也要
+       * 同一个数（`calibratedOf`），两处必须共用一份实现。
+       */
+      realizedPnl += realizedPnlOf(trader, row);
       unrealizedPnl += row?.unrealizedPnl ?? 0;
       openPositions += row?.openPositions ?? 0;
       wins += row?.wins ?? 0;
