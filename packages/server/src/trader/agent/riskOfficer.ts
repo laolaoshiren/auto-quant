@@ -297,18 +297,98 @@ function isRiskReducing(action: DecisionAction): boolean {
  * 平仓、减仓、调保护位是**降低风险**的，削它们等于让风控官帮倒忙
  *（把"该减的仓"减得更少）。
  */
+/**
+ * 这个动作**有没有仓位可以削**。
+ *
+ * ## ⚠️ 为什么必须与 `isRiskReducing` 分开（2026-10-15 修，一次真实留痕事故）
+ *
+ * 原来的削减分支只判了 `isRiskReducing`：
+ * ```
+ *   if (isRiskReducing(d.action)) return d;   // 降低风险的 → 不动
+ *   …                                         // 其余【全部】加"削减 50%"前缀
+ * ```
+ * 而 `isRiskReducing` 只认 `close_*` / `reduce_position` / `adjust_protection` ——
+ * 于是 **`skip` / `hold` / `wait` 也走进了削减分支**，被加上
+ * `[风控官削减 50%]` 前缀，而它们**根本没有仓位可削**。
+ *
+ * 线上实测：**20 条 `skip` 带这个前缀**。后果：
+ * ```
+ *   审计块显示"削减后放行"，而实际一个仓位都没削 ——
+ *   而"事后能说清当时为什么这么做"正是审计块唯一的用途。
+ * ```
+ * ⚠️ 它与上一条（否定式误判）**叠加**时会让人以为风控官真的在管仓位。
+ *
+ * ## 判据：只有"会占用保证金"的动作才谈得上削减
+ *
+ * ```
+ *   能削：open_long / open_short / add_to_position
+ *   不能削：skip / hold / wait（无仓位）· close_* / reduce_position（降风险）
+ * ```
+ */
+function canBeReduced(action: DecisionAction): boolean {
+  return action === 'open_long' || action === 'open_short' || action === 'add_to_position';
+}
+
 function reduceDecisions(decisions: readonly Decision[]): Decision[] {
   return decisions.map((d) => {
-    /* 降低风险的动作原样保留 —— 削减它们等于让仓位更危险。 */
-    if (isRiskReducing(d.action)) return d;
+    /*
+     * ⚠️ **只有"能削的动作"才进削减分支**（2026-10-15 修）。
+     * 原来只判 `isRiskReducing`，于是 `skip`/`hold` 也被加上了削减留痕
+     *（线上 20 条）—— 见 `canBeReduced` 的说明。
+     */
+    if (!canBeReduced(d.action)) return d;
 
     const next: Decision = { ...d };
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     *  ⚠️⚠️ **必须同时改 snake_case 与 camelCase**（2026-10-15 修，真钱事故）
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * ## 事故：数值没动，却留痕说"削了"
+     *
+     * `routedModel.ts` 把裁决官的**原始 JSON** 交给风控官，而模型惯用
+     * **snake_case**（`position_size_usd` / `risk_usd`）。而这里原来只改 camelCase：
+     * ```
+     *   裁决官用 snake_case → 11 USDT 原样通过（【没削】）
+     *   而 reasoning 已经被加上 "[风控官削减 50%]"
+     *   ⇒ 事后看审计块会以为"风控官削过了"，实际仓位是原值
+     * ```
+     * 实测线上：225 轮里裁决官 **10 轮用 snake_case**、26 轮用 camelCase；
+     * 削减生效的 5 轮**全部是 camelCase** —— 两种形状都已出现，
+     * 只是还没撞在一起，而 `#11` 正在频繁开仓。
+     *
+     * ## 修法：两个键名都改（并且**只有真的改到了才留痕**）
+     *
+     * 顺序很重要：**先看有没有可改的字段，改到了才写前缀**。
+     * 否则"没削成"仍然会留下假痕 —— 那正是这个 bug 最坏的部分。
+     */
+    let touched = false;
     if (typeof next.positionSizeUsd === 'number') {
       next.positionSizeUsd = next.positionSizeUsd / 2;
+      touched = true;
     }
     if (typeof next.riskUsd === 'number') {
       next.riskUsd = next.riskUsd / 2;
+      touched = true;
     }
+    /*
+     * snake_case 别名。类型上 `Decision` 没有这两个键，所以用一次显式收窄 ——
+     * 运行时它们确实可能出现（那是模型给的原始形状）。
+     */
+    const loose = next as unknown as Record<string, unknown>;
+    for (const key of ['position_size_usd', 'risk_usd'] as const) {
+      if (typeof loose[key] === 'number') {
+        loose[key] = (loose[key] as number) / 2;
+        touched = true;
+      }
+    }
+
+    /*
+     * ⚠️ **没改到任何字段就不留痕** —— 留一条"削减 50%"却说不出削了什么，
+     * 比不削更糟（它让审计块说谎）。
+     */
+    if (!touched) return d;
+
     /*
      * 在理由里**标明这是被削减过的** —— 否则事后看记录会以为
      * "AI 当时就想开这么小的仓"，而真相是风控官削了一半。
