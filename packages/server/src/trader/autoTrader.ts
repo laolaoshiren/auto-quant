@@ -24,6 +24,7 @@ import {
   type Timeframe,
 } from '@aq/shared';
 import type { BinanceBroker, ExchangePosition } from '../binance/broker.js';
+import type { PositionSide } from '@aq/shared';
 import type { AccountState } from '../binance/account.js';
 import type { BinanceMarketData } from '../binance/market.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
@@ -2370,7 +2371,7 @@ export class AutoTrader {
   async applyExchangeFill(): Promise<void> {
     if (!(await this.waitForIdle())) return;
 
-    const exchangePositions = await this.deps.broker.getPositions().catch((error) => {
+    const exchangePositions = await this.effectivePositions().catch((error) => {
       log.warn(
         `[${this.deps.trader.name}] 成交后对齐账本时读持仓失败（下一个周期仍会补上）：${(error as Error).message}`,
       );
@@ -2770,7 +2771,7 @@ export class AutoTrader {
      * `settleStaleOrders()`（结清陈旧保护单）挂在历史那一遍里，它的注释要求
      * "仓位先被处理" —— 对调之后这个前提**更强**了，仍然满足。
      */
-    const exchangePositions = await this.deps.broker.getPositions();
+    const exchangePositions = await this.effectivePositions();
     /*
      * ⚠️ **限价入场的对账必须排在仓位对账之前。**
      *
@@ -2858,7 +2859,7 @@ export class AutoTrader {
     }
 
     /* --- 5. Refresh state after the guard's closes ----------------------- */
-    const livePositions = await this.deps.broker.getPositions();
+    const livePositions = await this.effectivePositions();
     const localPositions = positionStore.open(traderId);
 
     /*
@@ -4447,7 +4448,7 @@ export class AutoTrader {
      * 失败，而不是"订单被拒"。
      */
     state.phase = 'bookkeeping';
-    const finalPositions = await this.deps.broker.getPositions().catch(() => livePositions);
+    const finalPositions = await this.effectivePositions().catch(() => livePositions);
     await this.reconcilePositions(finalPositions);
 
     const finalAccount = await this.deps.broker.getAccountState().catch(() => account);
@@ -5087,6 +5088,66 @@ export class AutoTrader {
 
   private async reconcilePositions(exchangePositions: ExchangePosition[]): Promise<void> {
     const traderId = this.deps.trader.id;
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  ⚠️⚠️ **模拟盘不能用交易所的持仓列表当真相**（2026-10-15 线上实测抓到）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 症状：团队模式的仓位**活不过一个周期**
+     *
+     * 实测 `#11`（`dry_run=1`，团队模式）37 笔平仓的持有时间：
+     * ```
+     *   最短 0.0 分 · p50 3.8 分 · p90 6.2 分 · 最长 7.3 分
+     *   持有 > 15 分钟（超过一个周期）的：【0 笔】
+     *
+     *   对照 #10（实盘）：p50 109 分 · 94% 超过 15 分钟 · 最长 9556 分
+     * ```
+     * 也就是说：**它开仓，然后在同一个周期里被自己对账平掉，再开仓，如此空转。**
+     *
+     * ## 机制（三个事实凑成的）
+     *
+     * ```
+     *   ① 模拟盘的成交是本地模拟的（`simulateStandard`）—— 从不真的下单
+     *   ② 而 `getPositions()` 【没有 dryRun 守卫】→ 真去查交易所
+     *      → 那个账户上从来没有它的仓位 → 返回空
+     *   ③ 这里于是看到"本地有、交易所没有" → `bookVanishedPosition()`
+     *      → 拿 `lastFillFor()`（可能是【同账户其他机器人】的成交价）当出场价
+     *      → `detectCloseReason()` 猜一个原因
+     *      → `positionStore.close()` 把仓位抹掉
+     * ```
+     *
+     * ## 实测的次生伤害（同一份数据）
+     *
+     * ```
+     *   · 保护单从未成交：stop_loss / take_profit 的 FILLED = 0（31 张 CANCELED）
+     *   · 31/32 笔的出场价【离所有保护单都 >0.5%】（最远 5.74%）
+     *     ⇒ close_reason 是"离谁近猜谁"，而那个"最近的"不是触发它的单
+     *   · 标 take_profit 却亏钱 5 笔（止盈单在有利方向，逻辑上不可能）
+     *   · 标 stop_loss 却赚钱 10 笔（这个在移动止损下是合法的，不算错）
+     * ```
+     * ⇒ 那些 `stop_loss` / `take_profit` 标签在模拟盘上**是噪声**，
+     *   而它们会经 `agent_memory` 变成模型的"教训"。
+     *
+     * ## 修法：模拟盘走自己的结算
+     *
+     * **模拟盘里，交易所不是真相来源** —— 本地持仓 + 标记价才是。
+     * 所以这里不再比对交易所列表，改为**对着标记价结算保护单**：
+     * ```
+     *   标记价碰到止损 → 以【止损价】平仓，原因 stop_loss
+     *   标记价碰到止盈 → 以【止盈价】平仓，原因 take_profit
+     *   都没碰到       → 继续持有（并更新回撤守卫用的峰值）
+     * ```
+     * 这让模拟盘**真的在模拟**：出场价是触发价（而不是别处的价），
+     * 原因是从触发事实推出来的（而不是猜的）。
+     *
+     * ⚠️ **实盘一行都不动** —— 那里交易所就是唯一真相来源，
+     * 而 `#10 赚大钱` 正在用真实资金跑（用户硬约束）。
+     */
+    if (this.isDryRun) {
+      await this.settleDryRunPositions();
+      return;
+    }
+
     const exchangeBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
     const localOpen = positionStore.open(traderId);
 
@@ -5181,6 +5242,190 @@ export class AutoTrader {
      * 以及下面这种实测事故（见方法的注释）。
      */
     await this.ensureStopsOnOpenPositions(exchangePositions);
+  }
+
+  /**
+   * **这个机器人当前的持仓 —— 按模式选真相来源。**
+   *
+   * ## 为什么必须有这一层（2026-10-15 线上实测抓到）
+   *
+   * `BinanceBroker.getPositions()` **没有 dryRun 守卫** —— 它直接查交易所。
+   * 而模拟盘的成交是本地模拟的、**从不真的下单**，所以那个账户上
+   * **从来没有它的仓位** → 恒返回空数组。
+   *
+   * 于是每一个读它的地方都在模拟盘上静默失效：
+   * ```
+   *   · reconcilePositions   → 把每个本地持仓判成"已消失"并平掉
+   *                            （实测持有时间 p50 仅 3.8 分钟，0/37 超过一个周期）
+   *   · applyDrawdownGuard   → 空列表 → 回撤守卫【从不触发】
+   *   · applyBreakevenGuard  → 空列表 → 保本/移动止损【从不触发】
+   *   · recordEquity         → 浮盈恒 0 → 权益曲线是平的
+   * ```
+   * 而这些都是**静默**的：没有报错、没有告警，界面上看起来一切正常。
+   *
+   * ## 修法：模拟盘用本地状态合成
+   *
+   * 模拟盘里"交易所有什么"这个问题的正确答案就是**本地持仓** ——
+   * 因为那些仓位本来就是本地模拟出来的。所以这里按本地 `positions` 行
+   * 加上**真实标记价**（行情是真实事实，不是模拟的）合成 `ExchangePosition[]`。
+   *
+   * ⚠️ 这样修的好处是**一处生效、处处生效**：上面四个调用点都改调它，
+   * 而不是各写一个 `if (isDryRun)` 分支（那正是"只做一半"的温床 ——
+   * 本项目为此吃过四次亏）。
+   *
+   * ⚠️ **实盘完全不变**：直接转发 `getPositions()`。
+   */
+  private async effectivePositions(symbol?: string): Promise<ExchangePosition[]> {
+    if (!this.isDryRun) return this.deps.broker.getPositions(symbol);
+
+    const open = positionStore
+      .open(this.deps.trader.id)
+      .filter((p) => symbol === undefined || p.symbol === normalizeSymbol(symbol));
+    if (open.length === 0) return [];
+
+    const out: ExchangePosition[] = [];
+    for (const local of open) {
+      let mark = 0;
+      try {
+        mark = await this.deps.broker.getMarkPrice(local.symbol);
+      } catch {
+        /* 读不到标记价：下面用入场价兜底（浮盈按 0），并让调用方看到这个仓位仍然存在。 */
+      }
+      const price = mark > 0 ? mark : local.entry_price;
+      const isLong = local.side === 'long';
+      const pnl = (isLong ? price - local.entry_price : local.entry_price - price) * local.quantity;
+      const margin =
+        local.margin_used > 0
+          ? local.margin_used
+          : (local.entry_price * local.quantity) / Math.max(1, local.leverage);
+
+      out.push({
+        symbol: local.symbol,
+        side: local.side as PositionSide,
+        quantity: local.quantity,
+        entryPrice: local.entry_price,
+        markPrice: price,
+        leverage: local.leverage,
+        liquidationPrice: local.liquidation_price ?? null,
+        unrealizedPnl: pnl,
+        unrealizedPnlPercent: margin > 0 ? (pnl / margin) * 100 : 0,
+        marginUsed: margin,
+        notional: price * local.quantity,
+        marginType: 'cross',
+      });
+    }
+    return out;
+  }
+
+  /**
+   * **模拟盘的持仓结算** —— 对着标记价判保护单有没有触发。
+   *
+   * 见 `reconcilePositions` 顶部那段事故说明：模拟盘**不能**拿交易所的持仓列表
+   * 当真相（那里从来没有它的仓位），否则每个仓位都会在同一轮被"发现已消失"
+   * 然后平掉 —— 实测持有时间 p50 只有 3.8 分钟。
+   *
+   * ## 判据
+   *
+   * ```
+   *   做多：标记价 ≤ 止损 → 触发止损（以【止损价】成交）
+   *         标记价 ≥ 止盈 → 触发止盈（以【止盈价】成交）
+   *   做空：反过来
+   * ```
+   *
+   * ⚠️ **成交价用触发价，不用标记价**：真实交易所的条件单触发后是以触发价
+   * （`STOP_MARKET` 是市价、但触发那一刻的价就是触发价附近）成交的。
+   * 用标记价会让"止损距离"看起来比实际更小，污染后续的归因。
+   *
+   * ⚠️ **两个都碰到时按"先碰到哪个"**：一次对账只看一个快照，无法知道先后。
+   * 那种情况在 1 个周期（15 分钟）内同时穿过止损与止盈，说明波动极大；
+   * 按**止损优先**处理（保守方向 —— 少赚好过多亏）。
+   *
+   * ⚠️ 标记价读不到时**跳过这个标的**，不猜。读不到 ≠ 没触发，
+   * 而据一个猜出来的价平仓会永久污染账本（§2.3）。
+   */
+  private async settleDryRunPositions(): Promise<void> {
+    const traderId = this.deps.trader.id;
+    const open = positionStore.open(traderId);
+    if (open.length === 0) return;
+
+    for (const local of open) {
+      let mark = 0;
+      try {
+        mark = await this.deps.broker.getMarkPrice(local.symbol);
+      } catch (error) {
+        this.emit(
+          'warn',
+          `模拟盘读不到 ${local.symbol} 的标记价（${(error as Error).message}），本轮不结算它。`,
+        );
+        continue;
+      }
+      if (!(mark > 0)) continue;
+
+      const isLong = local.side === 'long';
+      const stop = local.stop_loss;
+      const target = local.take_profit;
+
+      /*
+       * 触发判据。`<=` / `>=` 而不是 `<` / `>`：真实交易所的条件单在**等于**
+       * 触发价时就会触发，用严格不等会让恰好触到的那一笔永远不平。
+       */
+      const hitStop = stop !== null && stop > 0 && (isLong ? mark <= stop : mark >= stop);
+      const hitTarget =
+        target !== null && target > 0 && (isLong ? mark >= target : mark <= target);
+
+      if (!hitStop && !hitTarget) {
+        /*
+         * 都没触发 → 继续持有。仍然要**更新回撤守卫用的峰值** ——
+         * 那是"浮盈曾经到过多少"的记录，只有每轮更新才准。
+         */
+        positionStore.updatePeak(traderId, local.symbol, this.dryRunUnrealizedPercent(local, mark));
+        continue;
+      }
+
+      /* 止损优先（保守方向）。见方法注释里"两个都碰到"那段。 */
+      const reason: CloseReason = hitStop ? 'stop_loss' : 'take_profit';
+      const exitPrice = hitStop ? (stop as number) : (target as number);
+
+      this.emit(
+        'info',
+        `[模拟盘] ${local.symbol} ${isLong ? '多头' : '空头'} 的` +
+          `${hitStop ? '止损' : '止盈'} ${exitPrice} 已被标记价 ${mark} 触发，按触发价结算。`,
+      );
+
+      /*
+       * ⚠️ 走 `bookClosedPosition()` 而不是自己写 `trades` —— 那是**唯一**的
+       * 平仓记账路径（§2.3），它负责减仓扣减、手续费归属、`positions.close()`。
+       * 自己再写一遍会立刻产生"两处各记一次"的分歧。
+       *
+       * 手续费：模拟盘没有真实成交记录，按**名义价值 × 往返费率**估 ——
+       * 复用 `fallbackRoundTripFeeRate`（策略里已有的那个回退费率，
+       * 默认 0.001 = 0.1%，见 `strategy.ts`）。
+       *
+       * ⚠️ **不能用 0**：那会让模拟盘看起来比现实更容易赚 ——
+       * 而模拟盘的价值恰恰是"尽量像真的"。实测模拟盘的净额本来就是负的，
+       * 记 0 会把一个真实存在的成本藏起来。
+       */
+      const notional = exitPrice * local.quantity;
+      const exitFee = notional * this.activeConfig.riskControl.fallbackRoundTripFeeRate;
+
+      await this.bookClosedPosition(local, reason, exitPrice, exitFee);
+    }
+  }
+
+  /**
+   * 模拟盘某个持仓在给定标记价下的**浮盈百分比**（保证金口径）。
+   *
+   * 与真实交易所的 `unrealizedPnlPercent` 同一口径：盈亏 ÷ 保证金。
+   * 保证金用 `entry × qty ÷ leverage` —— 与 `marginOf()` 一致。
+   */
+  private dryRunUnrealizedPercent(local: PositionRow, mark: number): number {
+    const isLong = local.side === 'long';
+    const pnl = (isLong ? mark - local.entry_price : local.entry_price - mark) * local.quantity;
+    const margin =
+      local.margin_used > 0
+        ? local.margin_used
+        : (local.entry_price * local.quantity) / Math.max(1, local.leverage);
+    return margin > 0 ? (pnl / margin) * 100 : 0;
   }
 
   /**
@@ -6717,16 +6962,23 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      *     那正是 §2.6 说的最糟状态。
      *
      * 所以拉不到就**整段跳过**：少记一轮没有代价（下一轮会补上），凭空记一笔没有救。
+     *
+     * ⚠️ **模拟盘整段跳过**（2026-10-15）—— 见 `reconcilePositions` 顶部那段：
+     * 交易所的持仓列表在模拟盘上**不是真相来源**（那里从来没有它的仓位）。
+     * 拿它当判据会把每一个本地持仓都判成"已消失"。
+     * 模拟盘的持仓结算由 `settleDryRunPositions()` 负责（对着标记价判保护单）。
      */
     let livePositions: Awaited<ReturnType<typeof this.deps.broker.getPositions>> | null = null;
-    try {
-      livePositions = await this.deps.broker.getPositions();
-    } catch (error) {
-      this.emit(
-        'warn',
-        `读不到交易所持仓（${(error as Error).message}）—— 本轮跳过"持仓消失"的核对，` +
-          '避免把网络故障当成已平仓而凭空记账。',
-      );
+    if (!this.isDryRun) {
+      try {
+        livePositions = await this.deps.broker.getPositions();
+      } catch (error) {
+        this.emit(
+          'warn',
+          `读不到交易所持仓（${(error as Error).message}）—— 本轮跳过"持仓消失"的核对，` +
+            '避免把网络故障当成已平仓而凭空记账。',
+        );
+      }
     }
 
     if (livePositions !== null) {
@@ -7566,7 +7818,11 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
    */
   private async applyDrawdownGuard(): Promise<number> {
     const traderId = this.deps.trader.id;
-    const exchangePositions = await this.deps.broker.getPositions();
+    /*
+     * ⚠️ 走 `effectivePositions()` —— 直接读 `broker.getPositions()` 在模拟盘上
+     * **恒返回空**，于是回撤守卫会**从不触发**（静默失效）。见那个方法的说明。
+     */
+    const exchangePositions = await this.effectivePositions();
     const liveBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
     let closed = 0;
 
@@ -7663,7 +7919,8 @@ reduceQuantity: null,
     // 阈值为 0 表示关闭这条规则 —— 连行情都不必拉。
     if (!(threshold > 0)) return 0;
 
-    const exchangePositions = await this.deps.broker.getPositions();
+    /* ⚠️ 同 `applyDrawdownGuard`：模拟盘上直接读会恒空 → 保本止损从不触发。 */
+    const exchangePositions = await this.effectivePositions();
     const liveBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
     let moved = 0;
 
@@ -10297,7 +10554,7 @@ reduceQuantity: null,
      * 所以先读一次交易所持仓：没有就**什么都不做**（不撤单、不挂单、不平仓），
      * 把本地记录交给对账 —— 它会按交易所的实际持仓把这一回合正确结掉。
      */
-    const livePositions = await this.deps.broker.getPositions(local.symbol).catch(() => null);
+    const livePositions = await this.effectivePositions(local.symbol).catch(() => null);
     if (livePositions !== null && livePositions.length === 0) {
       return {
         action: decision.action,
