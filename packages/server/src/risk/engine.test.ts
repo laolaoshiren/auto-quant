@@ -589,6 +589,165 @@ test('enforces the hourly entry throttle', () => {
   assert.match(verdict.rejected[0]!.reason, /最近一小时内已开/);
 });
 
+/* -------------------------------------------------------------------------- */
+/*  小时节流必须在【同一批】里也生效（外部 issue #118）                          */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * ## 缺陷形状
+ *
+ * `review()` 的 `isOpenAction` 分支只把 `entriesThisCycle` 传下去，
+ * **漏了 `entriesLastHour`**：
+ *
+ * ```ts
+ * // 加仓分支（正确）
+ * entriesLastHour: env.entriesLastHour + entriesThisCycle,
+ * // 开仓分支（漏了）
+ * entriesThisCycle,
+ * ```
+ *
+ * 而 `reviewOpen` 的判据读的正是 `env.entriesLastHour`：
+ *
+ * ```ts
+ * if (env.entriesLastHour >= config.throttle.maxEntriesPerHour) { … 拒绝 … }
+ * ```
+ *
+ * 于是**同一批**里的每一笔开仓都读到同一个入口值（调用点给的是数据库里
+ * 已记的条数），**本批已经开出去的那些一笔都没算进去** ——
+ * 模型可以在一个周期里连开 N 笔，`maxEntriesPerHour` 一次都不拦。
+ *
+ * ## 为什么这个洞特别要紧
+ *
+ * `maxEntriesPerCycle` 与 `maxEntriesPerHour` 是**两道**节流：
+ * 前者挡"一轮开太多"，后者挡"一小时开太多"。而 `maxEntriesPerCycle`
+ * 可以被调大（甚至 0 = 关闭），此时**唯一还在挡的就是小时节流** ——
+ * 它不生效等于"这个账户一小时内想开多少开多少"。
+ *
+ * 而提示词明确告诉模型「加仓与新开仓共用同一批上限（…、节流）」——
+ * 它因此以为节流在替它兜底。**它没有。**
+ */
+test('★★★ 小时节流必须把【同一批里已经开出去的那些】算进去 —— 否则一轮连开 6 笔全放行', () => {
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      maxPositions: 20,
+      maxMarginUsage: 100,
+      minPositionSize: 1,
+      btcEthMaxLeverage: 5,
+      btcEthMaxPositionValueRatio: 100,
+      altcoinMaxLeverage: 5,
+      altcoinMaxPositionValueRatio: 100,
+    },
+    /*
+     * 把"每轮"那道放宽到本批放得下（10 > 6），只留"每小时"那道 2 ——
+     * 这样唯一能拦住它们的就只有小时节流。
+     *
+     * ⚠️ **不能用 `maxEntriesPerCycle: 0`**：本项目的判据是
+     * `entriesThisCycle >= maxEntriesPerCycle`，而 `0 >= 0` 为真
+     * → **每一笔都被拦**，于是测不到小时节流（我第二版就踩了这个）。
+     * 在节流字段上 `0` **不是**"关闭"。
+     */
+    throttle: { ...defaultStrategyConfig().throttle, maxEntriesPerCycle: 10, maxEntriesPerHour: 2 },
+  });
+
+  /*
+   * 同一批 6 笔开仓（issue #118 实测的"一轮连开 6 笔"）。
+   * 每笔都很小、都在限额内，所以**唯一**能拦住它们的只有小时节流。
+   *
+   * ⚠️ 止损/止盈必须与**入场价 68_000**（`openDecision` 不带 `entryPrice` 时引擎
+   * 用的就是这个基准）方向一致、且满足默认的 1:3 盈亏比要求。
+   *
+   * 我第一版踩了两次：`stopLoss: 0` → "止损无效"；`95/110`（1:2）→ "盈亏比不足"。
+   * 两次都是"**因为别的原因失败**"——测试看起来是红的，但它验证的**不是**节流判据。
+   * 一个测错东西的红测试比绿的更危险：它会让人以为"这个判据已被覆盖"。
+   */
+  const batch = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT'].map((symbol) =>
+    openDecision({
+      symbol,
+      positionSizeUsd: 10,
+      stopLoss: 67_320,
+      takeProfit: 70_040,
+    }),
+  );
+
+  const verdict = engine.review(
+    batch,
+    environment({
+      config,
+      account: { equity: 1000, availableBalance: 1000, marginUsed: 0, positionCount: 0 },
+      snapshots: new Map(
+        batch.map((d) => [d.symbol, snapshot(d.symbol, 68_000)] as const),
+      ),
+      entriesThisCycle: 0,
+      entriesLastHour: 0,
+    }),
+  );
+
+  assert.equal(
+    verdict.approved.length,
+    2,
+    `★★★ 小时上限 2 时，同一批最多只能放行 2 笔 —— 实际放行 ${verdict.approved.length} 笔。\n` +
+      '    修复前每笔都读到同一个入口值（0），于是 6 笔全放行、零拒绝记录（issue #118）。',
+  );
+  assert.ok(
+    verdict.rejected.some((r) => /最近一小时内已开/.test(r.reason)),
+    '★ 被拦下的那些必须留下**拒绝记录** —— 否则操作员看不到"节流生效过"',
+  );
+});
+
+test('★★ 入口已经有小时计数时，同一批同样要接着数', () => {
+  /*
+   * 反向守卫：`env.entriesLastHour` 不是 0 时也必须累加本批的量。
+   * 只修"入口为 0"那一种情形是不够的 —— 真实调用点给的就是数据库里已记的条数。
+   */
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      maxPositions: 20,
+      maxMarginUsage: 100,
+      minPositionSize: 1,
+      btcEthMaxLeverage: 5,
+      btcEthMaxPositionValueRatio: 100,
+      altcoinMaxLeverage: 5,
+      altcoinMaxPositionValueRatio: 100,
+    },
+    throttle: { ...defaultStrategyConfig().throttle, maxEntriesPerCycle: 10, maxEntriesPerHour: 3 },
+  });
+
+  const batch = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'].map((symbol) =>
+    openDecision({ symbol, positionSizeUsd: 10, stopLoss: 67_320, takeProfit: 70_040 }),
+  );
+
+  const verdict = engine.review(
+    batch,
+    environment({
+      config,
+      account: { equity: 1000, availableBalance: 1000, marginUsed: 0, positionCount: 0 },
+      snapshots: new Map(
+        batch.map((d) => [d.symbol, snapshot(d.symbol, 68_000)] as const),
+      ),
+      entriesThisCycle: 0,
+      /* 一小时内已经开了 2 笔 → 本批只剩 1 个名额。 */
+      entriesLastHour: 2,
+    }),
+  );
+
+  assert.equal(verdict.approved.length, 1, '★★ 入口已 2/3 → 本批只能再放 1 笔');
+});
+
+test('★ 每轮节流（maxEntriesPerCycle）的既有行为不变 —— 修复不得动它', () => {
+  /*
+   * 反向守卫：`entriesThisCycle` 那条路径本来就是对的（它一直在累加），
+   * 修 `entriesLastHour` 不能把它带坏。
+   */
+  const config = configWith({
+    throttle: { ...defaultStrategyConfig().throttle, maxEntriesPerCycle: 1, maxEntriesPerHour: 99 },
+  });
+  const verdict = engine.review([openDecision()], environment({ config, entriesThisCycle: 1 }));
+  assert.equal(verdict.approved.length, 0);
+  assert.match(verdict.rejected[0]!.reason, /本周期已开/);
+});
+
 test('a second open in the same batch sees the first one\'s margin consumption', () => {
   const config = configWith({
     riskControl: {

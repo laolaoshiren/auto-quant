@@ -609,6 +609,31 @@ export class RiskEngine {
           ...env,
           account: { ...env.account, positionCount, marginUsed },
           entriesThisCycle,
+          /*
+           * ⚠️ **小时计数必须带上本批已经开出去的那些**（外部 issue #118）。
+           *
+           * 这一行原来是**漏的** —— 而 `add_to_position` 分支（上面那处）有它。
+           * 于是 `reviewOpen` 的
+           *
+           * ```ts
+           * if (env.entriesLastHour >= config.throttle.maxEntriesPerHour) { … 拒绝 … }
+           * ```
+           *
+           * 在**同一批**里每一笔都读到同一个入口值（调用点给的是数据库里已记的条数），
+           * **本批已经开出去的一笔都没算进去**。
+           *
+           * 实测（issue #118）：`maxEntriesPerHour: 2` 时同一批 6 笔开仓
+           * **全部放行、零拒绝记录**。而调用点给 `entriesThisCycle: 0`，
+           * 所以那道"每轮"节流也数不到 —— **两道节流同时失效**。
+           *
+           * 提示词明确告诉模型「加仓与新开仓共用同一批上限（…、节流）」，
+           * 它因此以为节流在替它兜底。**它没有。**
+           *
+           * `entriesLastHour` 是入口值，加上本周期已用的部分才是真实的滚动小时数 ——
+           * 与 `add_to_position` 那处同一个算式（`entriesThisCycle` 是局部变量，
+           * 它在下面 `+= 1` 累加）。
+           */
+          entriesLastHour: env.entriesLastHour + entriesThisCycle,
         });
         if (verdict.ok) {
           approved.push(verdict.decision);
