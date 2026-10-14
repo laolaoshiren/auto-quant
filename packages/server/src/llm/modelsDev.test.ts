@@ -378,6 +378,99 @@ test('★ 解析真实的 `alibaba-cn/deepseek-v4.1-flash`（任务片段里的�
   assert.equal(entry?.reasoning, true);
 });
 
+/* -------------------------------------------------------------------------- */
+/*  ★★★ `null`（不知道）≠ `true`（支持）—— 变异测试发现的盲区                    */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 条目没写 tool_call 时必须是 null，不能当成 true', () => {
+  /*
+   * ## 这个盲区是怎么发现的
+   *
+   * 我把 `parseModelsDev` 里那行
+   *
+   * ```ts
+   * toolCall: typeof model['tool_call'] === 'boolean' ? model['tool_call'] : null,
+   * ```
+   *
+   * 改成 `toolCall: true`（**把"不知道"当成"支持"**）—— 本文件 **43 条测试全绿**。
+   *
+   * ## 为什么那是真错（不只是"少一条测试"）
+   *
+   * `toolCall` 的类型是 `boolean | null`，而 `null` 的语义是**明确的**
+   *（`modelsDev.ts:133` 的注释）：
+   *
+   * ```
+   *   true / false → 该条目写了这个字段
+   *   null         → 该条目【没写】这个字段（= 不知道）
+   * ```
+   *
+   * 而 `modeBool()`（归并多个同名条目）**正是靠这个区分**：
+   *
+   * ```ts
+   * const known = values.filter((v): v is boolean => v !== null);
+   * if (known.length === 0) return null;      // ← 全都没写 → 仍是"不知道"
+   * ```
+   *
+   * ⚠️ 把 `null` 变成 `true` 之后，`known.length === 0` 这条分支**永远不可达** ——
+   * 于是"目录里根本没写这个能力"会被读成"它支持"。
+   * 这与本项目反复强调的形态一致：**一个信号承载两种语义**（"不知道"与"支持"）。
+   *
+   * ## 为什么原有 43 条测试抓不到
+   *
+   * 它们断言的条目**本来就写了 `tool_call: true`**（第 377 / 826 行），
+   * 而第 909 行测的是 `mergeDiscovered` 之后的 `undefined`（"没补上"）——
+   * **没有一条测"parse 层遇到缺失字段时的 `null`"**。
+   */
+  const index = parseModelsDev({
+    p: {
+      id: 'p',
+      models: {
+        /* ① 明确写 true → true */
+        yes: { id: 'yes', tool_call: true },
+        /* ② 明确写 false → false（不能与"不知道"混为一谈） */
+        no: { id: 'no', tool_call: false },
+        /* ③ 完全没写 → **null**（不是 true，也不是 false） */
+        unknown: { id: 'unknown' },
+      },
+    },
+  });
+
+  assert.equal(index.byId.get('p/yes')?.toolCall, true, '★ 明确写了 true 就是 true');
+  assert.equal(index.byId.get('p/no')?.toolCall, false, '★★ 明确写了 false 必须保持 false');
+  assert.equal(
+    index.byId.get('p/unknown')?.toolCall,
+    null,
+    '★★★ 没写 tool_call 的条目必须是 `null`（不知道）——\n' +
+      '    当成 `true` 会让 `modeBool` 里"全都没写 → null"那条分支永远不可达，\n' +
+      '    于是"目录里没写这个能力"被读成"它支持"。',
+  );
+});
+
+test('★★★ 归并时若所有成员都没写 tool_call，结果仍是 null', () => {
+  /*
+   * 反向守卫：`modeBool` 的"全都没写 → null"分支。
+   * ⚠️ 上一条修的是 parse 层，这一条修的是**归并层** —— 两处都要对，
+   * 因为变异在任一层都能把"不知道"变成"支持"。
+   */
+  const index = parseModelsDev({
+    p: {
+      id: 'p',
+      models: {
+        a: { id: 'a' },
+        b: { id: 'b' },
+      },
+    },
+  });
+  /* 两条同名条目（归并成一条）都没写 → 归并结果必须是 null。 */
+  const merged = index.byId.get('p/a');
+  assert.ok(merged, '前提：条目应当被解析出来');
+  assert.equal(
+    merged.toolCall,
+    null,
+    '★★★ 所有成员都没写 → 归并结果必须仍是 `null`（不知道），不能变成 true',
+  );
+});
+
 test('★ 脏数据不会把整份目录变成空（防御性解析）', () => {
   /*
    * 这个项目反复栽在"静默地全线失效"上。一条畸形记录不该让
