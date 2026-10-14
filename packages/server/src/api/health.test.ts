@@ -65,10 +65,17 @@ test('a running trader inside its threshold keeps health green', () => {
 
 test('a running trader past its max(2 cycles, startup grace) threshold degrades health', () => {
   const now = Date.now();
+  /*
+   * ⚠️ **必须带上实例表**（外部 issue #119）：只有**当前进程真的持有实例**
+   * 的机器人才参与 stale 判定。不带它时这条测的其实是"库里写着 running"
+   * 而不是"循环卡住了" —— 而那正是 issue #119 里演示数据造成的假阳性。
+   */
+  const startedAt = new Map([[1, now - 60 * MINUTE]]);
   // 15-minute cycle → threshold is max(30 min, 5 min) = 30 min.
   const verdict = evaluateTraderHealth(
     [trader({ lastCycleAt: afterThreshold(15) })],
     now,
+    startedAt,
   );
   assert.equal(verdict.ok, false, 'a hung loop must make /api/health non-200');
   assert.equal(verdict.stale.length, 1);
@@ -175,22 +182,31 @@ test('a short-interval trader is still protected by the startup grace floor', ()
    * floor, a cold start would fail the container healthcheck before the first
    * cycle could possibly finish — fetching klines for 20 symbols and calling the
    * model takes longer than two minutes on a slow day.
+   *
+   * ⚠️ 实例表是必需的（外部 issue #119）—— 见上一条的说明。
    */
+  const startedAt = new Map([[1, now - 60 * MINUTE]]);
   const justInside = evaluateTraderHealth(
     [trader({ cycleIntervalMinutes: 1, lastCycleAt: new Date(now - 4 * MINUTE).toISOString() })],
     now,
+    startedAt,
   );
   assert.equal(justInside.ok, true);
 
   const justOutside = evaluateTraderHealth(
     [trader({ cycleIntervalMinutes: 1, lastCycleAt: new Date(now - 6 * MINUTE).toISOString() })],
     now,
+    startedAt,
   );
   assert.equal(justOutside.ok, false);
 });
 
 test('only the stale running traders are listed, and every trader is reported', () => {
   const now = Date.now();
+  /*
+   * ⚠️ 实例表是必需的（外部 issue #119）：1 与 2 都在跑，3 是 `stopped`。
+   * 只有"进程真的持有实例"的才会被判定。
+   */
   const verdict = evaluateTraderHealth(
     [
       trader({ id: 1, name: 'hung', lastCycleAt: new Date(now - 90 * MINUTE).toISOString() }),
@@ -198,6 +214,10 @@ test('only the stale running traders are listed, and every trader is reported', 
       trader({ id: 3, name: 'off', status: 'stopped', lastCycleAt: null }),
     ],
     now,
+    new Map([
+      [1, now - 120 * MINUTE],
+      [2, now - 120 * MINUTE],
+    ]),
   );
   assert.deepEqual(
     verdict.stale.map((entry) => entry.traderId),

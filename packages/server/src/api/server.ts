@@ -455,15 +455,63 @@ export function evaluateTraderHealth(
       };
     }
 
+    /*
+     * ⚠️ **`running` 还不够 —— 必须当前进程真的持有它的实例**（外部 issue #119）。
+     *
+     * `traders.status` 是**持久化状态**，它说的是"这个机器人被标记为运行中"，
+     * **不保证**当前进程里真有一个 `AutoTrader` 在转。两类假阳性都由此而来：
+     *
+     *   1. **演示数据**：`seed:demo` 把 62% 的示例机器人标成 `running`，
+     *      而种子脚本**只写库、不起运行时** —— 约 12 分钟后 `/api/health`
+     *      从 `ok: true` 翻成 `ok: false` 并**永久保持红色**
+     *      （实测另一台实例上 6 个示例机器人的 `staleForMs ≈ 6.8 小时`）。
+     *      于是 Docker / compose 的 HEALTHCHECK 判 unhealthy、配上 `restart`
+     *      会**反复重启**，而重启修不好它（数据还在库里，12 分钟后再红一次）。
+     *   2. **库里残留 `running` 但进程没起**：`GLOBAL_TRADING_DISABLED=true`
+     *      或启动失败时的中间窗口同样如此。
+     *
+     * ## 为什么这个假阳性比没有检查更糟
+     *
+     * 这个端点的立意是「决策循环挂死时容器必须告警」（本函数头部的边界清单，
+     * 还记着 8.5 小时的静默停摆事故）。一个**长期亮着**的假阳性会让运维
+     * 对它的告警脱敏 —— **真挂死那次反而没人看**。
+     *
+     * ## 判据：`startedAtByTrader` 里有它
+     *
+     * 那张表来自 `manager.runningSince()`，即**当前进程真正持有的实例**。
+     * 上游没提供它时（测试桩、第三方嵌入方）退化为"不判定" ——
+     * 而不是"把库里所有 `running` 都当成卡住"：后者会在缺能力时误报，
+     * 而"误报的检查比没有检查更糟"（同样见头部注释）。
+     */
+    if (!startedAtByTrader.has(trader.id)) {
+      return {
+        traderId: trader.id,
+        name: trader.name,
+        status: trader.status,
+        /*
+         * 仍然如实报出"库里记的最近一轮是什么时候" —— 控制台要能看到它，
+         * 只是**不拿它判红**。
+         */
+        staleForMs: valid ? now - (lastCycleMs as number) : null,
+        stale: false,
+        awaitingFirstCycle: false,
+      };
+    }
+
     if (!valid) {
       /*
        * Running but no completed cycle is tolerated only for the startup grace
        * period, measured from *this trader's* start. `start()` kicks the first
        * cycle off immediately, so either it finished and wrote the timestamp, or
        * it is wedged.
+       *
+       * `startedAt` 在这里**必然存在** —— 上面那道守卫已经确认
+       * `startedAtByTrader.has(trader.id)`（这是 issue #119 的修复）。
+       * 所以不再有 `undefined` 的分支：那曾经让一个"没有实例的 running"
+       * 被当成"宽限期内"，从而把演示数据判红。
        */
-      const startedAt = startedAtByTrader.get(trader.id);
-      const runningForMs = startedAt === undefined ? null : now - startedAt;
+      const startedAt = startedAtByTrader.get(trader.id)!;
+      const runningForMs = now - startedAt;
       return {
         traderId: trader.id,
         name: trader.name,
