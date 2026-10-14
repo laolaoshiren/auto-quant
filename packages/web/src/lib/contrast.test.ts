@@ -115,8 +115,7 @@ test('★★★ classic 深色的 ink-faint / ink-lo 必须在 panel 底上达�
 /*  ② console 深色                                                              */
 /* -------------------------------------------------------------------------- */
 
-test('★★★ console 深色的 ink-faint / ink-lo 必须在 panel 底上达到 AA', () => {
-  /*
+test('★★★ console 深色的 ink-faint / ink-lo 必须在 panel 底上达到 AA', () => {  /*
    * ⚠️ console 的 `ink-faint` 在文件里出现**两次**（深色块与浅色块）——
    * `tokenIn` 取最后一次出现，所以这里单独测浅色块由下面那条负责。
    * 深色块的值取**第一次**出现。
@@ -297,5 +296,60 @@ test('★ quill 的 ink-faint 本来就达标 —— 不该被"顺手也改一�
   assert.ok(
     contrast(faint, panel) >= 4.5,
     `★ quill 的 ink-faint ${faint} 实测 ${contrast(faint, panel).toFixed(3)}（issue #172 也确认它通过）`,
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ⑤ 同型漏网：`mid` 也是"三级一组"里的一级，也必须达标                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ⚠️ **这一条是变异测试发现的"同型漏网"**（与 `structuredOutput` 是同一类问题）。
+ *
+ * `theme.css` 的注释把 `mid` / `lo` / `faint` 写成**一组**：
+ *
+ * > 修法：三级一起按目标对比度反解（`mid` 6.2 / `lo` 5.3 / `faint` 4.6）——
+ * > 互不相同、间距 ≥0.68，**层级顺序不变**
+ *
+ * ⚠️ 而本文件原本**只测了 `lo` 与 `faint` 两级**：
+ * - `mid` 出现在"层级顺序"那条里，但那条只验**相对顺序与间距**，**不验达标**；
+ * - 于是把 `--aq-ink-muted` 改成极暗的 `#3a4550`（对比度远低于 4.5）→ **6 条全绿**。
+ *
+ * ⚠️ 与 `structuredOutput` 完全同型：**设计上是一组，测试只守住其中一部分**。
+ * 补法是"**把这一组补齐**"，而不是只补被发现的那一个。
+ */
+test('★★★ console 的 ink-mid（三级一组里的最高一级）也必须在 panel 底上达标', () => {
+  /*
+   * ⚠️ 两个块里 `mid` 的**命名不同**（与 lo/faint 一样）：
+   * - 深色块：`ink-muted`（第 104 行）与 `ink-mid`（第 194 行）—— 后者生效；
+   * - 浅色块：`ink-mid`。
+   * 所以取**生效的那一个**（`ink-mid`，它在同选择器里定义得更靠后）。
+   */
+  const panel = /--aq-base-900:\s*(#[0-9a-fA-F]{6})/.exec(CONSOLE)![1]!;
+  const page = /--aq-base-950:\s*(#[0-9a-fA-F]{6})/.exec(CONSOLE)![1]!;
+
+  const mid = /--aq-ink-mid:\s*(#[0-9a-fA-F]{6})/.exec(CONSOLE)![1]!;
+
+  for (const [name, bg] of [
+    ['page', page],
+    ['panel', panel],
+  ] as const) {
+    assert.ok(
+      contrast(mid, bg) >= 4.5,
+      `★★★ console 的 ink-mid ${mid} 在 ${name} ${bg} 上只有 ${contrast(mid, bg).toFixed(3)} ——\n` +
+        '    低于 4.5。它是注释里"三级一起反解"的**最高那一级**（目标 6.2），\n' +
+        '    ⚠️ 而本文件原本只测了 lo/faint 两级 —— 把它改暗不会让任何测试变红（同型漏网）。',
+    );
+  }
+
+  /*
+   * 反向守卫：确认我们取到的确实是**生效**的那一组。
+   * `ink-mid` 必须比 `ink-lo` 亮（层级顺序），否则取错了变量。
+   */
+  const lo = /--aq-ink-lo:\s*(#[0-9a-fA-F]{6})/.exec(CONSOLE)![1]!;
+  assert.ok(
+    contrast(mid, panel) > contrast(lo, panel),
+    `★ 前提：ink-mid(${contrast(mid, panel).toFixed(3)}) 必须比 ink-lo(${contrast(lo, panel).toFixed(3)}) 亮 —— ` +
+      '否则这条测的不是"最高那一级"',
   );
 });
