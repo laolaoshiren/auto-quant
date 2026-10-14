@@ -7890,13 +7890,26 @@ reduceQuantity: null,
       });
 
       /*
-       * ⚠️ **挂单也可能立刻成交**（价格刚好穿过去）。那种情况下 `placed` 回来就是
-       * 终态，而"等成交"的整条路径白走 —— 直接走市价那条收尾逻辑。
+       * ⚠️ **不能在这里"当成市价开仓再来一次"**（外部 issue #137）。
+       *
+       * 原来这一段是 `return this.executeOpen({ ...decision, entryType: 'market', ... })`，
+       * 它有两个后果，而且**都是那个 bug 的成因**：
+       *
+       * 1. **那张已经成交的 LIMIT 单永远没有账** —— `recordOrder` 与
+       *    `positionStore.insert` 都在那个 `return` **之后**，永不执行；
+       *    `settlePendingEntries` 也救不了：pending 行从未写入，这条成交在本地不存在；
+       * 2. **又多下一张市价单** —— `executeOpen` 里 `makeClientId('entry', symbol)`
+       *    带 `Math.random()` 后缀，所以币安**不会**当成重复单挡掉。
+       *
+       *     账户上：两份仓位（成交的 LIMIT + 新下的 MARKET）
+       *     本地账：只有后面那张市价单的那一份
+       *
+       * 复现条件：上面 `wouldFillImmediately` 那条是对的（它根本没下 LIMIT 单），
+       * 但**行情在"取到现价"与"发出 LIMIT"之间跳一下**就会绕过它。
+       * 低价山寨/meme 的 tick 极密，瞬间穿价很常见。
+       *
+       * 所以顺序改成：**先记账 → 再按"它已经成交了"收尾**（见下面 pending 插入之后）。
        */
-      if (placed.terminal && placed.executedQty > 0) {
-        this.emit('info', `${symbol} 的限价单已立即成交，按普通开仓继续。`);
-        return this.executeOpen({ ...decision, entryType: 'market', limitPrice: null }, snapshot);
-      }
 
       /*
        * 保证金在这里算一次，两个消费者用它：这一行订单（订单记录里那一列）与
@@ -7931,8 +7944,16 @@ reduceQuantity: null,
       /*
        * 插一行 `pending`：它**不是持仓**，只是"有一张挂出去的单要盯着"。
        * `stopLoss` / `takeProfit` 存在这一行上，成交时直接拿来挂保护单。
+       *
+       * ⚠️ **接住它的返回值（新行的 id）**：下面"立即成交"那条路要拿这一行去
+       * `promotePendingEntry`（转正 + 结清订单行 + 挂保护单）——
+       * 那是 issue #137 的修复点。
+       *
+       * `insert` 返回的是**自增 id** 而不是整行，所以这里用 `entry_order_id`
+       * 把刚插进去的那一行取回来（不能靠 `pending()[0]`：同一轮可能有多笔限价单，
+       * 顺序不保证）。
        */
-      positionStore.insert({
+      const insertedId = positionStore.insert({
         traderId,
         symbol,
         side: decision.action === 'open_long' ? 'long' : 'short',
@@ -7958,6 +7979,52 @@ reduceQuantity: null,
         /* 模型为这一张指定的耐心（没给就是 null = 用配置值）。 */
         waitMinutes: decision.waitMinutes ?? null,
       });
+
+      /*
+       * ⚠️ **挂单也可能立刻成交**（价格刚好穿过去）—— 但那**不是**"当成开仓再来一次"。
+       *
+       * 那张单**已经成交了**，要做的只是**把刚插进去的 pending 行转正**：
+       * `promotePendingEntry` 会一并做完三件事 —— 转正持仓、结清那张订单行、
+       * **在同一段代码里立刻挂上保护单**（那个窗口是整条路径里唯一有风险的地方）。
+       *
+       * ⚠️ **绝不能再下一次单**：`executeOpen` 会生成新的 `clientOrderId`
+       *（带随机后缀、币安不会去重）→ 账户上两份仓位、账本只记一份（issue #137）。
+       *
+       * 走到这里的前提是"上面已经把 `recordOrder` 与 pending 行都写好了" ——
+       * 那正是这次修复调整顺序的原因（原来它们在那个 `return` 之后，永不执行）。
+       */
+      if (placed.terminal && placed.executedQty > 0) {
+        const actualPrice = placed.avgPrice > 0 ? placed.avgPrice : limitPrice;
+        /*
+         * 把刚插进去那一行取回来（`insert` 只回 id）—— 按 `id` 匹配，
+         * 不用 `pending()[0]`：同一轮可能有多笔限价单。
+         */
+        const pendingRow = positionStore.pending(traderId).find((p) => p.id === insertedId);
+        if (!pendingRow) {
+          /*
+           * 理论上不可达（刚插进去）。真发生时**不能静默**：那张单已经成交、
+           * 而本地找不到它 —— 这正是"账本与账户不符"的起点，必须让对账去处理。
+           */
+          this.emit(
+            'error',
+            `${symbol} 的限价单已立即成交，但本地找不到刚写入的待成交行（id=${insertedId}）—— 已交给对账处理，请人工核对交易所持仓与账本。`,
+          );
+        } else {
+          this.emit(
+            'info',
+            `${symbol} 的限价单已立即成交（${placed.executedQty} @ ${actualPrice}），直接转正并挂保护单。`,
+          );
+          await this.promotePendingEntry(pendingRow, placed.executedQty, actualPrice);
+        }
+        return {
+          action: decision.action,
+          symbol,
+          status: pendingRow ? 'ok' : 'failed',
+          detail: pendingRow
+            ? `限价单 ${limitPrice} 已立即成交（${placed.executedQty} @ ${actualPrice}）。`
+            : `限价单已成交，但本地待成交行丢失（id=${insertedId}），已交给对账。`,
+        };
+      }
 
       this.emit(
         'info',
