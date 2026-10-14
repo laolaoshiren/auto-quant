@@ -3344,3 +3344,131 @@ npm test            → 60 + 1638 + 251，0 fail
 - **自驱下一步**：变异验证其余提交（`models.dev` 接入、猎手并发改内存决定等）
 
 累计关闭 **41 个**。
+
+---
+
+## 35. 第 29 轮：变异验证 5 处 → 第四处盲区（新形态：`null` 被当成 `true`）、v0.1.21
+
+本轮无新 PR、无新 issue，HEAD 未变。继续自驱的变异验证，并**扩展到另一维护者近期的提交**。
+
+### 一、⚠️ 发现第四处盲区 —— 而且是**新形态**（`75cc6ef`）
+
+**变异**：把 `modelsDev.ts` 里那行
+
+```ts
+toolCall: typeof model['tool_call'] === 'boolean' ? model['tool_call'] : null,
+```
+
+改成 `toolCall: true`（**把"不知道"当成"支持"**）→ `modelsDev.test.ts` **43 条全绿**。
+
+**为什么是真错**（不只是"少一条测试"）：`toolCall` 的类型是 `boolean | null`，
+而 `null` 的语义是明确的（`modelsDev.ts:133`）：
+
+```
+  true / false → 该条目写了这个字段
+  null         → 该条目【没写】这个字段（= 不知道）
+```
+
+而 `modeBool()`（归并同名条目）**正是靠这个区分**：
+
+```ts
+const known = values.filter((v): v is boolean => v !== null);
+if (known.length === 0) return null;      // ← 全都没写 → 仍是"不知道"
+```
+
+⚠️ 把 `null` 变成 `true` 后，`known.length === 0` **永远不可达** ——
+于是"目录里根本没写这个能力"被读成"它支持"。
+
+**为什么 43 条测试抓不到**：它们断言的条目**本来就写了 `tool_call: true`**；
+另一条测的是 `mergeDiscovered` 之后的 `undefined`（"没补上"）——
+**没有一条测"parse 层遇到缺失字段时的 `null`"**。
+
+**补法**（两层都要测，因为变异在任一层都能把"不知道"变成"支持"）：
+1. **parse 层**：写 `true` → `true`；写 `false` → **`false`**；没写 → **`null`**；
+2. **归并层**：所有成员都没写 → 结果仍是 `null`。
+
+**验证（双向）**：正常 45/45 通过（不误报）；变异时 **2 条失败**（抓到）。
+
+⚠️ **这是与前三处不同的形态**：
+- 前三处（#126 / #182 / #179）都是**"接线没接上"**；
+- 这一处是**"一个信号承载两种语义"**（"不知道"与"支持"被合并）——
+  而这**正是本仓库反复出现的一个模式**（401 vs 密码错误、空缓冲 vs 用户清空、
+  `liveLogs.length===0` vs 首次加载…）。
+
+### 二、本轮另 4 处验证：**全部守得住**（其中 3 处是另一维护者的）
+
+| 功能 | 作者 | 变异 | 结果 |
+| --- | --- | --- | --- |
+| 猎手并发由可用内存决定 | 另一维护者 | 回退成"只看核数" | ✅ 1 条失败 |
+| `models.dev` 转给网关 | 另一维护者 | 第 4 参传 `null` | ✅ 1 条失败 |
+| `models.dev` 单例装配 | 另一维护者 | 传 `modelsDev: null` | ✅ 1 条失败 |
+| panel 档并行分析师 | 另一维护者 | 接线改成恒空 | ✅ 2 条失败（上轮已验）|
+
+⚠️ **另一维护者的接线是有测试守着的** —— 这与 `clerk` / `funnelUniverseLimit`
+那两处"未接线"并不矛盾：**那两处是产品上还没决定要不要接线**，不是"接了但没测"。
+
+⚠️ 另注：`modelsDevWiring.test.ts` 的文件头**自己就写了**这个动机
+（引用 `engineer` 的案例："prompt 写好了、档位有了、生产零调用，结局是被删除"）——
+说明**这个模式是团队已知的**，而我的三处补丁是在它还没被系统化守住的地方补的。
+
+### 三、⚠️ 本轮遇到一次网络中断（记录处置）
+
+发布 `v0.1.21` 时 GitHub 出现 **SSL handshake failed**（`api.github.com` 与
+`github.com` 都不可达）：
+
+```
+gh release edit v0.1.21 --draft=false   → EOF（3 次）
+git push origin v0.1.21                 → schannel: failed to receive handshake
+```
+
+⚠️ **处置（严格遵守红线）**：
+- **没有把 `gh` 放进重试循环** —— 每次都是**单次调用**，之间用 `Start-Sleep` 等待；
+- 先做了一次**网络探测**（`Invoke-WebRequest` + `git ls-remote`）确认是网络问题而非权限；
+- 代码本身**早已推送成功**（`75cc6ef` 在 main 上），受影响的只有 tag 与 release；
+- 网络恢复后：tag 推送成功、release 发布成功（`isDraft: false`）、Docker 镜像 **success**。
+
+⚠️ 这值得记一条：**"发布步骤失败"与"代码没上去"是两件事** ——
+中断期间我先确认了后者，才没有做多余动作。
+
+### 四、累计进度（变异验证覆盖 19 处）
+
+已验：#137 ✅、#118 ✅、#126 ✅（**盲区已补**）、#119 ✅、#182 ✅（**盲区已补**）、
+#117 ✅（**断言已加强**）、#179 ✅（**盲区已补**）、#160 ✅、#123 ✅、#172 ✅、
+#173A ✅、#177 ✅、panel 接线 ✅、总时长预算 ✅、猎手并发 ✅、models.dev 网关 ✅、
+models.dev 单例 ✅、**tool_call 语义 ✅（盲区已补）**。
+
+**四处盲区的形态分布**：
+- **三处是"接线没接上"**（#126 / #182 / #179）；
+- **一处是"一个信号承载两种语义"**（`null` vs `true`）。
+
+### 五、发版 v0.1.21
+
+```
+① main 全绿      typecheck / test(60+1640+251) / build / lint /
+                check:links / check:routes / sim 18/18 → 全 0
+② notices 一致   184 依赖全宽松，git diff 空
+③ tag v0.1.21    已推送（网络中断后重试成功）
+④ 发布 release   isDraft=false
+⑤ Docker 镜像    success
+⑥ 红线核实       v0.1.20..HEAD 【无提交触及 risk/engine.ts】
+```
+
+### 六、本轮验证
+
+```
+npm run typecheck   → 0
+npm test            → 60 + 1640 + 251，0 fail
+npm run build       → 0
+npm run lint        → 0
+npm run check:links → 0
+npm run check:routes→ 0
+npm run sim         → 18/18
+Docker 镜像 (v0.1.21)→ success
+```
+
+### 七、剩余
+
+- **等拍板 4 条**：#173 B 项、#184、`funnel` 模式接线、`clerk` 岗位
+- **自驱下一步**：继续变异验证（`modelsDev` 其余字段、`modelDiscovery` 合并逻辑等）
+
+累计关闭 **41 个**。
