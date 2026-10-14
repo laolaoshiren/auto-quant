@@ -408,6 +408,49 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
 }
 
 /**
+ * **"这次调用来自 agent 层、不是交易决策"的标记**（2026-10-15 修）。
+ *
+ * ## 为什么需要它（一次真实事故）
+ *
+ * `ai_team` 的团队模型挂在机器人的**模型出口**上（`manager.ts` 的
+ * `DecisionModel.complete`），所以**任何**调用都会进来 —— 包括 agent 层的
+ * 工具循环与单次调用。而 `routedModel.complete()` 靠一段**文本特征**
+ * 区分"这是不是交易决策"，不是就转给单模型。
+ *
+ * 那个特征原来只存在于 `runToolLoop` 的 `PROTOCOL` 里：
+ * ```
+ *   TOOL_LOOP_MARKER = '你每一轮只能输出**一个 JSON 对象**'
+ * ```
+ * 而 **`runSingleShot` 不拼 `PROTOCOL`**（它是"不开工具循环"的档），
+ * 于是它的调用**被判成交易决策** → 跑整个交易台。
+ *
+ * ## 实测后果（`agent_runs`）
+ *
+ * ```
+ *   #833 ai_team strategy panel failed 29,058ms  tokens_in=0
+ *        detail：无法从回复里解析出 JSON 对象（前 120 字符：<decision>
+ *                [{"symbol":"BTCUSDT","action":"skip"…
+ *   #834 同上 32,935ms
+ * ```
+ * 也就是说：`performance_analyst` / `attribution_analyst` **每次只想要一个结论，
+ * 却触发了完整的 8 角色会议**（分析师→多空对抗→裁决），拿回 `<decision>` 文本
+ * 必然解析失败 —— **这两个岗位从接线那天起就没成功过一次**。
+ *
+ * 而对照 `#830`/`#831`（`ai_managed`，不走团队模型）：同一份代码 `ok`、有 token。
+ *
+ * ## 修法：两条路径都带上标记
+ *
+ * ```
+ *   runToolLoop   → 已含 PROTOCOL（保持原样）
+ *   runSingleShot → 显式拼上这个标记
+ * ```
+ * ⚠️ 标记**必须只在 agent 层出现** —— 交易循环给的那份 system 里没有它，
+ * 所以"是不是交易决策"这个判据不会误伤（`toolLoopRouting.test.ts` 钉住这一点）。
+ */
+export const AGENT_CALL_MARKER =
+  '本次调用来自交易系统的 agent 层（工具循环或单次结论），不是交易决策会议。';
+
+/**
  * 一次"单次调用"（不开工具循环）—— 给常规轮次用的廉价档。
  *
  * 用途：大多数周期里没有什么值得深挖的，开完整面板是浪费。
@@ -416,7 +459,9 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
  */
 export async function runSingleShot(input: Omit<LoopInput, 'maxSteps'>): Promise<LoopResult> {
   const spec = ROLES[input.role];
-  const system = `${spec.system}\n\n注意：本次你没有工具可用，只能依据下面给出的事实直接给结论。如果事实不足以判断，就明说数据不足。`;
+  const system =
+    `${spec.system}\n\n注意：本次你没有工具可用，只能依据下面给出的事实直接给结论。` +
+    `如果事实不足以判断，就明说数据不足。\n\n${AGENT_CALL_MARKER}`;
   const started = Date.now();
   const reply = await input.model.complete(system, `## 你的任务\n${input.task}\n\n## 已知事实\n${input.facts}`);
 

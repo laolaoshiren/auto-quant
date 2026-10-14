@@ -377,7 +377,37 @@ export class AgentRuntime {
             });
           },
         });
-        if (r.ok) log.info(`机器人 #${this.deps.traderId} 复盘 ${input.symbol}：${r.lesson}`);
+        /*
+         * ⚠️⚠️ **失败必须留痕**（2026-10-15 加）。
+         *
+         * ## 事故：团队模式的复盘 100% 静默死亡，而日志里一条错误都没有
+         *
+         * 这里原来只有 `if (r.ok)`，**没有 else** —— 于是复盘失败时：
+         * ```
+         *   库：agent_memory 恒为 0 行（实测 #11：39 笔平仓 / 0 行；
+         *       对照 #10：192 笔 / 111 行）
+         *   日志：「机器人 #11 复盘」0 条 · 「复盘失败」0 条
+         *   ⇒ 从任何界面与日志都看不出"它从未学习过"
+         * ```
+         * 而真正的根因（`runSingleShot` 缺 agent 层标记 → 被团队模型当成交易决策
+         * → 跑整场会议 → `<decision>` 解析不出 `lesson`）**在日志里完全不可见**。
+         *
+         * `catch` 那一支写的是 `log.warn('复盘失败')`，但它**只在抛异常时触发**；
+         * 而这里是 `runReviewTrade` **正常返回**了 `{ok:false, error}` ——
+         * 于是既没有异常、也没有日志。**"返回失败"和"抛异常"是两条不同的路，
+         * 只记其中一条等于半盲。**
+         *
+         * 这个仓库反复记过同一类教训：**一个静默失败的路径比一个会报错的路径危险得多**。
+         */
+        if (r.ok) {
+          log.info(`机器人 #${this.deps.traderId} 复盘 ${input.symbol}：${r.lesson}`);
+        } else {
+          log.warn(
+            `机器人 #${this.deps.traderId} 复盘 ${input.symbol} 未产出教训（不影响交易）：` +
+              `${r.error ?? '原因未知'} —— 这条不写进 agent_memory，` +
+              `所以"学不到东西"这件事必须在这里看得见。`,
+          );
+        }
       } catch (error) {
         log.warn(`复盘失败（不影响交易）：${(error as Error).message}`);
       }

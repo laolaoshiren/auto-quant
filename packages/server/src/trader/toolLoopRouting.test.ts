@@ -55,8 +55,13 @@ test('★★★ 团队模型必须能识别"这次是工具循环在调用"', ()
     /export const TOOL_LOOP_MARKER/.test(ROUTED),
     '★ 必须有那个可识别的标记',
   );
+  /*
+   * ⚠️ 2026-10-15 改：判据从"直接用 TOOL_LOOP_MARKER 比对"放宽为
+   * "经一个具名判据函数"，因为**单次结论档也要被认出来**（见下一条测试）。
+   */
   assert.ok(
-    /TOOL_LOOP_MARKER/.test(ROUTED) && /systemPrompt\.includes\(TOOL_LOOP_MARKER\)/.test(ROUTED),
+    /isAgentLayerCall\(systemPrompt\)/.test(ROUTED) ||
+      /systemPrompt\.includes\(TOOL_LOOP_MARKER\)/.test(ROUTED),
     '★ 必须在 complete() 里用它做判据',
   );
 });
@@ -78,14 +83,64 @@ test('★★★ 标记必须与 loop.ts 的协议说明【逐字一致】', () =
   );
 });
 
-test('★★★ 工具循环的调用必须转给单模型，而不是跑团队会议', () => {
+test('★★★ 单次结论档（`runSingleShot`）也必须被认出来 —— 否则它跑整个交易台', () => {
+  /*
+   * ## 事故（2026-10-15，两个独立审计各自独立抓到）
+   *
+   * `TOOL_LOOP_MARKER` 只存在于 `runToolLoop` 的 `PROTOCOL` 里，而
+   * **`runSingleShot` 不拼 `PROTOCOL`**（它是"不开工具循环"的档）——
+   * 于是它的调用被判成"交易决策" → **跑整个交易台**。
+   *
+   * 受影响的是 `performance_analyst` / `attribution_analyst`（panel 档）
+   * 与**复盘员**。实测后果：
+   * ```
+   *   #11（ai_team）: 39 笔成交 · agent_memory 【0 行】· 「复盘」日志 0 条
+   *   #10（ai_managed）: 192 笔 · agent_memory 111 行
+   *   ⇒ 团队模式【从未从自己的交易结果里学到任何东西】，而日志一条错误都没有
+   *
+   *   agent_runs #833/#834: failed 29s/33s tokens_in=0
+   *     detail：单次调用的输出无法解析：…（前 120 字符：<decision>
+   *   ↑ 这段文案是 runSingleShot 独有的 —— 直接证明它被劫持了
+   * ```
+   *
+   * ## 判据
+   *
+   * ```
+   *   ① loop.ts 必须导出一个 agent 层标记
+   *   ② runSingleShot 的 system 必须带上它
+   *   ③ complete() 的判据必须同时认两个标记
+   * ```
+   */
+  assert.ok(
+    /export const AGENT_CALL_MARKER/.test(LOOP),
+    '★ loop.ts 必须导出 agent 层标记（单一来源，不在两处各写一遍字面量）',
+  );
+  /*
+   * 取 runSingleShot 的函数体，确认它拼上了标记。
+   */
+  const at = LOOP.indexOf('export async function runSingleShot');
+  assert.ok(at > 0, '★ 应当能找到 runSingleShot');
+  const body = LOOP.slice(at, at + 900);
+  assert.ok(
+    /AGENT_CALL_MARKER/.test(body),
+    '★ runSingleShot 的 system 必须带上 agent 层标记 —— 否则它会被当成交易决策、跑整个交易台',
+  );
+  /* complete() 必须同时认两个标记。 */
+  assert.ok(
+    /systemPrompt\.includes\(TOOL_LOOP_MARKER\)/.test(ROUTED) &&
+      /systemPrompt\.includes\(AGENT_CALL_MARKER\)/.test(ROUTED),
+    '★ complete() 的判据必须同时认"工具循环"与"单次结论"两种 agent 调用',
+  );
+});
+
+test('★★★ agent 层的调用必须转给单模型，而不是跑团队会议', () => {
   /* 分支必须存在，且必须返回（不能继续往下走团队编排）。 */
   assert.ok(
-    /if \(isToolLoopCall\) \{[\s\S]{0,1200}?return /.test(ROUTED),
-    '★ 工具循环分支必须 return（否则会继续跑团队会议）',
+    /if \(agentLayerCall\) \{[\s\S]{0,1600}?return /.test(ROUTED),
+    '★ agent 层分支必须 return（否则会继续跑团队会议）',
   );
   /* 它必须走单模型调用（`callByTier`），而不是 `runTradingDesk`。 */
-  const branch = /if \(isToolLoopCall\) \{([\s\S]{0,2000}?)\n      \}/.exec(ROUTED);
+  const branch = /if \(agentLayerCall\) \{([\s\S]{0,2400}?)\n      \}/.exec(ROUTED);
   assert.ok(branch !== null, '★ 必须能定位那个分支');
   const body = branch[1] ?? '';
   assert.ok(

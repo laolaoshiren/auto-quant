@@ -34,6 +34,12 @@ import { ModelRouter, type CallModel } from '../llm/modelRouter.js';
 import { runTradingDesk, type AskRole, type DeskOutcome, type DeskRoleOutput } from './agent/tradingDesk.js';
 import { renderDeskOutcome, extractFirstJsonArray } from './agent/deskOutput.js';
 import { parseRiskOfficerVerdict } from './agent/riskOfficer.js';
+/*
+ * ⚠️ 从 `loop.ts` 导入标记（单一来源）—— 不在两处各写一遍字面量。
+ * 那正是 2026-10-15 那次事故的形状：`runToolLoop` 有标记、`runSingleShot` 漏了，
+ * 于是后者被判成"交易决策"、跑整个交易台、永久失败。
+ */
+import { AGENT_CALL_MARKER } from './agent/loop.js';
 
 /** 一次「向模型提问」要用的档位与角色。 */
 export interface RoleRequest {
@@ -574,6 +580,34 @@ function symbolsFromPrompt(prompt: string): string[] {
  */
 export const TOOL_LOOP_MARKER = '你每一轮只能输出**一个 JSON 对象**';
 
+/**
+ * **单次调用档（`runSingleShot`）的标记**（2026-10-15 加）。
+ *
+ * ## 为什么必须有第二个标记（真实事故）
+ *
+ * `TOOL_LOOP_MARKER` 只存在于 `runToolLoop` 的 `PROTOCOL` 里，而
+ * **`runSingleShot` 不拼 `PROTOCOL`** —— 于是它的调用被判成"交易决策"，
+ * 进而**跑整个交易台**：
+ * ```
+ *   #833 ai_team strategy panel failed 29,058ms  tokens_in=0
+ *        detail：无法从回复里解析出 JSON 对象（前 120 字符：<decision>
+ *                [{"symbol":"BTCUSDT","action":"skip"…
+ *   #834 同上 32,935ms
+ * ```
+ * `performance_analyst` / `attribution_analyst` 每次只想要一个结论，
+ * 却触发了完整的 8 角色会议（分析师→多空对抗→裁决）——
+ * **这两个岗位从接线那天起就没成功过一次**。
+ *
+ * ⚠️ 标记从 `loop.ts` 导入（单一来源），不在两处各写一遍字面量 ——
+ * 那正是这次事故的形状（一处有、一处漏）。
+ */
+export { AGENT_CALL_MARKER };
+
+/** 这次调用是不是来自 agent 层（工具循环 **或** 单次结论档）。 */
+function isAgentLayerCall(systemPrompt: string): boolean {
+  return systemPrompt.includes(TOOL_LOOP_MARKER) || systemPrompt.includes(AGENT_CALL_MARKER);
+}
+
 export function createTeamDecisionModel(options: {
   router: ModelRouter;
   /**
@@ -784,8 +818,19 @@ export function createTeamDecisionModel(options: {
        * ⚠️ 而这段文本**必须与 `loop.ts` 保持同步** —— 所以 `toolLoop.test.ts`
        * 里有一条断言钉住这两处的字面量（见那个测试文件的说明）。
        */
-      const isToolLoopCall = systemPrompt.includes(TOOL_LOOP_MARKER);
-      if (isToolLoopCall) {
+      /*
+       * ⚠️ **判据从"工具循环"放宽到"agent 层"**（2026-10-15 修）。
+       *
+       * 原来只认 `TOOL_LOOP_MARKER`，而 `runSingleShot`（单次结论档）不拼
+       * `PROTOCOL` —— 于是它的调用被判成交易决策、**跑整个交易台**，
+       * 拿回 `<decision>` 必然解析失败。实测 `agent_runs` #833/#834 就是这么 failed 的
+       * （29s / 33s、`tokens_in=0`），而对照 `ai_managed` 的 #830/#831 是 ok。
+       *
+       * 受影响的是 `performance_analyst` / `attribution_analyst`（panel 档并行跑）
+       * 与复盘员 —— **它们从接线那天起就没成功过一次**。
+       */
+      const agentLayerCall = isAgentLayerCall(systemPrompt);
+      if (agentLayerCall) {
         /*
          * 工具循环 —— **走普通单模型**（它自己有一套工具协议，
          * 不需要也不该由一个 8 人团队来回答"下一步调哪个工具"）。
