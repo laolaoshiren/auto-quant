@@ -6976,6 +6976,65 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       if (position.tp_order_id) activeProtectionIds.add(String(position.tp_order_id));
     }
 
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  ⚠️⚠️ **模拟盘：本地账就是唯一真相**（2026-10-14 线上实测抓到的死锁）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 事故：模拟盘 `#11` 的 44 条委托永远停在「已挂单」
+     *
+     * 用户截图：下面「当前委托 17」列着一堆"已挂单（待对账）"，
+     * 而上面「保证金占用 / 持仓」都是 0 —— **两边对不上**。
+     *
+     * ## 死锁的形状（三个事实凑成的）
+     *
+     * ```
+     *   ① 模拟盘（dry_run=1）的委托【从未真的发到交易所】
+     *   ② 但 getOpenOrders / getOpenAlgoOrders 【没有 dryRun 守卫】→ 真去查交易所
+     *      → 交易所返回 0 条（当然没有）
+     *   ③ 而 getAlgoOrder 【有】dryRun 守卫：`if (this.dryRun) return null`
+     *      → finalStatusOf 拿到 null → "这一轮不下结论" → 静默跳过
+     *   ⇒ settleStaleOrders 永远返回 0，那些行永远停在 NEW
+     * ```
+     * ⚠️ **两个方法对 dryRun 的处理不一致**正是这个死锁的成因 ——
+     * 一个去查交易所，另一个拒绝查。而**在模拟盘里，交易所本来就不该是真相来源**。
+     *
+     * ## 修法：模拟盘直接结清（依据是本地持仓行，不是交易所）
+     *
+     * ```
+     *   模拟盘：本地 positions 表说这个标的还有没有仓位 —— 那就是全部真相
+     *           没有持仓了 → 它的保护单行就该是终态
+     *   实盘  ：照旧问交易所（那是唯一的真相来源）
+     * ```
+     *
+     * ⚠️ **判据仍然用 `activeProtectionIds`**（上面刚算出来的）——
+     * 也就是"当前生效的保护单不碰"。所以即使模拟盘里还持有仓位，
+     * 它那张**正在生效**的保护单也不会被误写成终态。
+     *
+     * ⚠️ 写 `CANCELED` 而不是 `FILLED`：模拟盘里那张单**从未成交**
+     *（它根本没到交易所），说"已撤销"是准确的说法。写 `FILLED` 会编造一次成交。
+     */
+    if (this.isDryRun) {
+      let settled = 0;
+      const summary: string[] = [];
+      for (const row of candidates) {
+        /* 当前生效的保护单不碰（与实盘那条路径同一个判据）。 */
+        if (activeProtectionIds.has(String(row.exchangeOrderId ?? ''))) continue;
+        orderStore.update(row.id, { status: 'CANCELED' });
+        settled += 1;
+        summary.push(`${row.symbol} ${orderPurposeLabel(row.purpose)}`);
+      }
+      if (settled > 0) {
+        this.emit(
+          'info',
+          `模拟盘结清了 ${settled} 张本地委托（${summary.slice(0, 8).join('、')}` +
+            `${summary.length > 8 ? ' 等' : ''}）：模拟盘的单从未发到交易所，` +
+            '仓位平掉后它们的本地行应当收尾 —— 否则界面会一直显示"已挂单"。',
+        );
+      }
+      return settled;
+    }
+
     const symbols = [
       ...new Set(
         candidates
