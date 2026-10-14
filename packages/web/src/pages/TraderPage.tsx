@@ -1174,6 +1174,39 @@ export function TraderPage() {
   const accountIsStale = accountState === null && lastKnownAccount !== null;
   const accountNote = accountIsStale ? '（最近一次读数，机器人未运行）' : '';
   /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **模拟盘上「账户余额」不能用真实钱包**（2026-10-15 用户实测抓到）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 用户的原话：
+   * > 「详情的账户余额还是显示不对，但是详情页面似乎是对的」
+   *
+   * 他看到的（`#11`，模拟盘）：
+   * ```
+   *   账户余额（USDT）  20.75     ← 真实钱包，【一分没动】
+   *   交易盈亏          +$0.09    ← 它赚了 0.09
+   *   列表页「归属权益」 $20.84    ← 20.75 + 0.09（这里是对的）
+   * ```
+   * **"赚了钱、余额却不变"** —— 同一屏两个数互相矛盾。
+   *
+   * 根因与前两处（卡片 $0.00、曲线平线）**完全同源**：
+   * 模拟盘的成交是本地模拟的，**从不触碰真实钱包**，所以交易所那个
+   * `account.equity` 恒等于起始值（实测 45 条快照里只有 1 种值）。
+   *
+   * 所以模拟盘的「账户余额」必须显示**它自己的模拟权益**：
+   * ```
+   *   起始权益 + 已实现净额 + 浮盈  （= `calibratedEquity`，与列表页「归属权益」逐字相等）
+   * ```
+   *
+   * ⚠️ **实盘一律不变** —— 那里真实钱包就是答案，而且用户明确要求过
+   * "账户余额必须与交易所对得上"。
+   *
+   * ⚠️ 用 `calibratedEquity`（上面已经算好的那个）而不是重算一遍：
+   * 它就是 `初始权益 + realized + unrealized`，与列表页「归属权益」逐字相等。
+   * 重算一份等于又埋一个"两处各算一遍"的坑（本项目为此吃过四次亏）。
+   */
+  const useSimulatedBalance = isDryRun && stats !== undefined;
+  /*
    * 「保证金占用」与「可用余额」这两个数字的判定 —— 见 `lib/accountDisplay.ts`
    * 里那段"空仓时该显示什么"的说明（用户 2026-10-04 报的两个 BUG 其实是同一个）。
    */
@@ -1209,16 +1242,34 @@ export function TraderPage() {
       <MetricCard>
         <Metric
           label={`账户余额（${settleAsset}）`}
-          value={account ? fmtNum(account.equity, 2) : '—'}
+          /*
+           * ⚠️ 模拟盘显示**它自己的模拟权益**（`calibratedEquity`），不是真实钱包 ——
+           * 否则会出现"赚了 0.09、余额一分没动"的矛盾。见 `useSimulatedBalance`。
+           */
+          value={
+            useSimulatedBalance
+              ? fmtNum(calibratedEquity, 2)
+              : account
+                ? fmtNum(account.equity, 2)
+                : '—'
+          }
           size="lg"
           tone="strong"
           title={
-            account
-              ? `账户权益 = 钱包余额 + 未实现盈亏。这是交易所钱包里的钱（共享）。${accountTitle}`
-              : '暂时读不到交易所账户读数。'
+            useSimulatedBalance
+              ? '模拟盘：这里的余额是本机器人的**模拟权益**（起始权益 + 已实现净额 + 浮盈），' +
+                '与列表页的「归属权益」同一个数。' +
+                '模拟成交不会动真实钱包，所以不能拿交易所余额当这里的答案。'
+              : account
+                ? `账户权益 = 钱包余额 + 未实现盈亏。这是交易所钱包里的钱（共享）。${accountTitle}`
+                : '暂时读不到交易所账户读数。'
           }
           sub={
-            account ? (
+            useSimulatedBalance ? (
+              <>
+                模拟 · 起始 {fmtNum(initialEquity, 2)} · 净 {fmtUsdSigned(realized, 2)}
+              </>
+            ) : account ? (
               <>
                 钱包 {fmtNum(account.walletBalance, 2)} · 可用 {fmtAvailable()}
                 {accountIsStale ? <span className="text-warn"> · 快照</span> : null}
@@ -1229,9 +1280,11 @@ export function TraderPage() {
           }
           /* ⚠️ `sub` 带 `truncate`，会静默切掉尾巴 —— 完整内容必须能从 title 读到。 */
           subTitle={
-            account
-              ? `钱包余额 ${fmtNum(account.walletBalance, 2)} · 可用 ${fmtAvailable()}`
-              : undefined
+            useSimulatedBalance
+              ? `模拟权益 ${fmtNum(calibratedEquity, 2)} = 起始 ${fmtNum(initialEquity, 2)} + 已实现 ${fmtUsdSigned(realized, 2)} + 浮盈 ${fmtUsdSigned(unrealized, 2)}`
+              : account
+                ? `钱包余额 ${fmtNum(account.walletBalance, 2)} · 可用 ${fmtAvailable()}`
+                : undefined
           }
         />
       </MetricCard>

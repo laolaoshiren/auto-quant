@@ -39,6 +39,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { codeOnlyCss as codeOnly } from '../testUtils/cssText.js';
+
 const PAGE = readFileSync(new URL('./TraderPage.tsx', import.meta.url), 'utf8');
 const CHARTS = readFileSync(new URL('../components/DashboardCharts.tsx', import.meta.url), 'utf8');
 
@@ -135,5 +137,80 @@ test('★★★ 那一行必须只有【一行】（对照行已按用户要求�
   assert.ok(
     !/account:\s*\{/.test(body),
     '★ 不该再有 `account` 这个 prop（对照行已删除）',
+  );
+});
+
+
+/* -------------------------------------------------------------------------- */
+/*  模拟盘的「账户余额」必须与列表页「归属权益」一致（2026-10-15 用户实测）      */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 模拟盘必须显示模拟权益，不能显示没动过的真实钱包', () => {
+  /*
+   * ## 用户的原话
+   * > 「详情的账户余额还是显示不对，但是详情页面似乎是对的」
+   *
+   * ## 他看到的事实（`#11`，模拟盘）
+   * ```
+   *   详情页「账户余额」  20.75     ← 真实钱包，一分没动
+   *   详情页「交易盈亏」  +$0.09    ← 它赚了 0.09
+   *   列表页「归属权益」  $20.84    ← 20.75 + 0.09（这里是对的）
+   * ```
+   * **"赚了钱、余额却不变"** —— 同一屏两个数互相矛盾。
+   *
+   * ## 根因（与卡片 $0.00、曲线平线完全同源）
+   * 模拟盘的成交是本地模拟的，**从不触碰真实钱包**，
+   * 所以交易所那个 `account.equity` 恒等于起始值
+   *（实测 45 条快照里 `account_equity` 只有 **1 种值**，而 `equity` 有 23 种）。
+   *
+   * 所以模拟盘那一格必须显示 `calibratedEquity`（= 起始 + 已实现 + 浮盈），
+   * 它与列表页的「归属权益」**逐字相等**。
+   */
+  const page = codeOnly(PAGE);
+  assert.ok(
+    /const useSimulatedBalance = isDryRun && stats !== undefined;/.test(page),
+    '★ 必须有"模拟盘走模拟权益"的开关',
+  );
+  assert.ok(
+    /useSimulatedBalance\s*\?\s*fmtNum\(calibratedEquity, 2\)/.test(page),
+    '★ 模拟盘的账户余额必须是 `calibratedEquity`（与列表页「归属权益」同源）',
+  );
+  /*
+   * ⚠️ 实盘那一支必须还在（不能为了修模拟盘把实盘也换掉 ——
+   * 用户明确要求过"账户余额必须与交易所对得上"）。
+   */
+  assert.ok(
+    /account\s*\?\s*fmtNum\(account\.equity, 2\)/.test(page),
+    '★ 实盘仍必须显示交易所的真实账户权益',
+  );
+});
+
+test('★★★ `calibratedEquity` 与列表页「归属权益」必须是同一个算法', () => {
+  /*
+   * ⚠️ 两页显示同一个概念时，**算法必须只有一份**。
+   * 本项目为此吃过四次亏（用户原话：「你做事情只做一半？？」）。
+   *
+   * 服务端的 `attributedEquity()` 是：
+   * ```
+   *   initialEquity + netRealizedPnl + unrealizedPnl
+   * ```
+   * 而详情页的 `calibratedEquity` 是：
+   * ```
+   *   initialEquity + realized + unrealized
+   * ```
+   * 两者同构（`realized` 就是校准后的净额）。
+   */
+  const page = codeOnly(PAGE);
+  assert.ok(
+    /const calibratedEquity = initialEquity \+ realized \+ unrealized;/.test(page),
+    '★ calibratedEquity 必须与 attributedEquity 同构',
+  );
+  const repo = readFileSync(
+    new URL('../../../server/src/store/repositories.ts', import.meta.url),
+    'utf8',
+  );
+  assert.ok(
+    /return initialEquity \+ netRealizedPnl \+ unrealizedPnl;/.test(repo),
+    '★ 服务端的 attributedEquity 仍是同一个公式',
   );
 });
