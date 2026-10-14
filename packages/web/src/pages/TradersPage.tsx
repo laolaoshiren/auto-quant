@@ -208,7 +208,89 @@ export function TradersPage() {
   const totalEquity = fleetTotal.accountEquityFleet;
   /** 读数已过期的账户（机器人全停了 → 没有新快照）。见上面那个 Metric 的说明。 */
   const staleAccounts = fleetTotal.accounts.filter((a) => a.accountEquityStale);
-  const totalRealized = traders.reduce((sum, trader) => sum + (statsMap[trader.id]?.realizedPnl ?? 0), 0);
+  const isLedgerSuspect = (trader: TraderRow): boolean =>
+    trader.ledger != null && Math.abs(trader.ledger.gap) >= 0.01;
+
+  /**
+   * 这个机器人的权益 —— **账本可信时用账本、不可信时用交易所**。
+   *
+   * ⚠️ 返回值与详情页「账户余额」口径一致（详见上面的说明）。
+   */
+  const equityOf = (trader: TraderRow, stats: TraderSummary): number => {
+    if (!isLedgerSuspect(trader)) return stats.equity;
+    /*
+     * 交易所校准：`起始权益 + 交易所口径的已实现净额 + 本机器人浮盈`。
+     *
+     * ⚠️ 浮盈仍取 `stats.unrealizedPnl`（本机器人自己的，来自最近的标记价）——
+     * 交易所流水里没有"未实现"这个概念。
+     */
+    return trader.initialEquity + trader.ledger!.exchangeNet + stats.unrealizedPnl;
+  };
+
+  /**
+   * **一行里所有盈亏数字的统一来源**（2026-10-14，用户报"只做一半"）。
+   *
+   * ## 为什么需要它
+   *
+   * 我上一轮只校准了「归属权益」那一格，而同一行的「盈亏」列仍用服务端的
+   * `stats.totalReturnPercent`（按**坏账本**算）—— 于是同一行里两个数用两套口径：
+   * ```
+   *   #10 归属权益 已校准（$93.16）· 盈亏 未校准（+5.65% 而真实 -6.99%）
+   * ```
+   * 用户看到的正是这个矛盾：「盈亏计算也不对啊！！！你做事情只做一半？？」
+   *
+   * ## 判据与 `equityOf` 完全一致
+   *
+   * ```
+   *   ledger 可信 → 用账本（stats.realizedPnl / stats.totalReturnPercent）
+   *   ledger 有差 → 用交易所（ledger.exchangeNet / 由它算出的收益率）
+   * ```
+   * ⚠️ **收益率必须从校准后的净额算**，不能直接拿 `stats.totalReturnPercent` 减个差额 ——
+   * 后者会引入两个来源的舍入差。
+   */
+  const calibratedOf = (
+    trader: TraderRow,
+    stats: TraderSummary,
+  ): { realizedPnl: number; returnPercent: number } => {
+    if (!isLedgerSuspect(trader)) {
+      return { realizedPnl: stats.realizedPnl, returnPercent: stats.totalReturnPercent };
+    }
+    const realizedPnl = trader.ledger!.exchangeNet;
+    const returnPercent = trader.initialEquity > 0 ? (realizedPnl / trader.initialEquity) * 100 : 0;
+    return { realizedPnl, returnPercent };
+  };
+
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **顶部汇总也必须用同一套校准**（2026-10-14 用户报"只做一半"）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 事实（线上）
+   *
+   * ```
+   *   顶部「已实现盈亏」显示  +5.91（账本合计）
+   *   交易所口径真实          -7.03
+   *   → 差 12.9 USDT（显示盈利，实际亏损）
+   * ```
+   *
+   * ## 为什么这里要用 `calibratedOf`
+   *
+   * 它是**逐机器人**的校准（与本页表格那一列、详情页「交易盈亏」同一个判据）——
+   * 然后**求和**。这样：
+   * ```
+   *   顶部合计 = 各行之和（用户能自己加出来）
+   *   与本页每一行、与详情页三处一致
+   * ```
+   * ⚠️ 直接对 `equityOf` 求和是**错的**（共享账户会把本金数多遍，见 `fleetTotals`）；
+   * 而净已实现盈亏是可加的 —— 所以这一项可以求和。
+   */
+  const totalRealized = traders.reduce(
+    (sum, trader) => {
+      const s = statsMap[trader.id];
+      return sum + (s ? calibratedOf(trader, s).realizedPnl : 0);
+    },
+    0,
+  );
   const openPositions = traders.reduce((sum, trader) => sum + (statsMap[trader.id]?.openPositions ?? 0), 0);
 
   /*
@@ -247,24 +329,6 @@ export function TradersPage() {
    * 两个页面必须给出同一个数，而"同一个数"的唯一保证是**同一套判据**。
    * 阈值 0.01 与详情页的 `ledgerSuspect` 一字不差 —— 改一处必须改两处。
    */
-  const isLedgerSuspect = (trader: TraderRow): boolean =>
-    trader.ledger != null && Math.abs(trader.ledger.gap) >= 0.01;
-
-  /**
-   * 这个机器人的权益 —— **账本可信时用账本、不可信时用交易所**。
-   *
-   * ⚠️ 返回值与详情页「账户余额」口径一致（详见上面的说明）。
-   */
-  const equityOf = (trader: TraderRow, stats: TraderSummary): number => {
-    if (!isLedgerSuspect(trader)) return stats.equity;
-    /*
-     * 交易所校准：`起始权益 + 交易所口径的已实现净额 + 本机器人浮盈`。
-     *
-     * ⚠️ 浮盈仍取 `stats.unrealizedPnl`（本机器人自己的，来自最近的标记价）——
-     * 交易所流水里没有"未实现"这个概念。
-     */
-    return trader.initialEquity + trader.ledger!.exchangeNet + stats.unrealizedPnl;
-  };
 
   /*
    * Fleet-wide gross → net bridge.
@@ -553,21 +617,41 @@ export function TradersPage() {
                           */}
                           {stats ? fmtUsd(equityOf(trader, stats), 2) : '—'}
                           {/*
-                            ⚠️ 只在**账本与交易所对不上**时才提一句 ——
-                            那是"这个数为什么与账本不同"的唯一必要说明，
-                            而它**不是**并排的第二个数字（那正是用户说的"画蛇添足"）。
+                            ══════════════════════════════════════════════════════════
+                            ⚠️ **这里不能写行话**（2026-10-14 用户报）
+                            ══════════════════════════════════════════════════════════
+
+                            ## 用户的原话
+
+                            > 「『账本有差 · 已按交易所校准』什么鬼意思？这是做给人看的？」
+
+                            **他说得对**：`账本` / `交易所校准` 是我们内部的词，
+                            而这一行面对的是操作员 —— 他关心的不是"我怎么算的"，
+                            而是**"这个数准不准"**。
+
+                            ## 措辞的选择
+
+                            ```
+                            ✗ 账本有差 · 已按交易所校准    ← 内部词，且像一句警告
+                            ✓ 按交易所实际成交计            ← 说明"这个数从哪来"
+                            ```
+                            ⚠️ 用 `text-ink-faint` 而不是之前的 `text-warn`：
+                            这是**口径说明**，不是"出问题了" ——
+                            用警示色会让操作员以为账目坏了（而它恰恰是**更准**的那个数）。
+
+                            ⚠️ 详细原因保留在 `title` 里（想深究的人能查到），
+                            但**可见的那一行只放结论**。
                           */}
                           {stats && isLedgerSuspect(trader) && (
                             <div
-                              className="text-xs text-warn"
+                              className="text-xs text-ink-faint"
                               title={
-                                '平台账本与交易所的成交流水对不上（差 ' +
-                                `${fmtUsdSigned(trader.ledger!.gap, 4)}），` +
-                                '所以这一列改用**交易所**的流水校准 —— 账本里那几笔记错了。' +
-                                '详情页的「交易盈亏」用的是同一个校准值，两处一致。'
+                                '这个数按交易所的实际成交算，不是按平台自己的记录 —— ' +
+                                `平台记录与交易所差 ${fmtUsdSigned(trader.ledger!.gap, 4)}（平台有几笔记错了）。` +
+                                '详情页的「交易盈亏」用的是同一个数。'
                               }
                             >
-                              账本有差 · 已按交易所校准
+                              按交易所实际成交计
                             </div>
                           )}
                         </td>
@@ -576,17 +660,55 @@ export function TradersPage() {
                           它们是同一个口径下的三个数，分开摆既占宽度又要来回扫。
                           净 first：它才是余额真正发生的变化；毛是它的输入，退一档显示。
                         */}
-                        <td className={`td num text-right ${stats ? pnlColor(stats.totalReturnPercent) : ''}`}>
-                          {stats ? fmtPercent(stats.totalReturnPercent) : '—'}
+                        <td className={`td num text-right ${stats ? pnlColor(calibratedOf(trader, stats).returnPercent) : ''}`}>
+                          {/*
+                            ══════════════════════════════════════════════════════════
+                            ⚠️⚠️ **这一列也必须用交易所校准值**（2026-10-14 用户报）
+                            ══════════════════════════════════════════════════════════
+
+                            ## 用户的原话
+
+                            > 「盈亏计算也不对啊！！！你做事情只做一半？？」
+
+                            ## 事实（线上 `#10`）
+
+                            ```
+                              列表页显示  +5.65%（账本：净 +5.66）
+                              交易所真实   -6.99%（净 -7.00）
+                              → 差 12.6 个百分点：【显示盈利，实际亏损】
+                            ```
+                            而"归属权益"那一格我上一轮已经校准过了 ——
+                            **同一行里两个数用两套口径**，那就是"只做一半"。
+
+                            ## 根因：`stats.totalReturnPercent` 是服务端按**坏账本**算的
+
+                            ```
+                              repositories.ts:4209
+                                totalReturnPercent = (equityNow − initial) / initial × 100
+                              而 equityNow 用了 trades.net_pnl（对账重建写坏的那份）
+                            ```
+
+                            ## 修法：整行的收益率 / 净额 / 颜色都从**同一个校准值**派生
+
+                            ```
+                              校准后的净额 = ledger.exchangeNet（账本可信时用账本）
+                              校准后的收益率 = 校准净额 / 起始权益 × 100
+                            ```
+                            ⚠️ **必须整行一致**：只改收益率而留下面的净额，就是同一个错的另一面。
+                          */}
+                          {stats ? fmtPercent(calibratedOf(trader, stats).returnPercent) : '—'}
                           {stats && (
                             <div
                               className="text-xs text-ink-faint"
-                              title={`${pnlFormulaText(statsCosts(stats))}。浮动盈亏 ${fmtUsdSigned(
-                                stats.unrealizedPnl,
-                                2,
-                              )} 未计入本行。`}
+                              title={
+                                (isLedgerSuspect(trader)
+                                  ? '平台账本与交易所的成交流水对不上，所以这一行改用**交易所**的流水校准。'
+                                  : `${pnlFormulaText(statsCosts(stats))}。`) +
+                                `浮动盈亏 ${fmtUsdSigned(stats.unrealizedPnl, 2)} 未计入本行。`
+                              }
                             >
-                              净 {fmtUsdSigned(stats.realizedPnl, 2)} · 毛 {fmtUsdSigned(stats.grossRealizedPnl, 2)}
+                              净 {fmtUsdSigned(calibratedOf(trader, stats).realizedPnl, 2)} · 毛{' '}
+                              {fmtUsdSigned(stats.grossRealizedPnl, 2)}
                             </div>
                           )}
                         </td>

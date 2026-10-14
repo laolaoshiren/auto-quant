@@ -1,0 +1,124 @@
+/**
+ * **一页里所有盈亏数字必须用同一套口径**（2026-10-14 用户报"只做一半"）
+ *
+ * ## 事故
+ *
+ * 我上一轮只校准了「归属权益」那一格，而**同一行的「盈亏」列**、
+ * **顶部的「已实现盈亏」汇总**仍用服务端的 `stats.*`（按**坏账本**算）：
+ *
+ * ```
+ *   #10 归属权益 已校准（$93.16）· 盈亏 未校准（+5.65% 而真实 -6.99%）
+ *   顶部「已实现盈亏」+5.91 而真实 -7.03
+ * ```
+ * 用户的原话：
+ * > 「盈亏计算也不对啊！！！你做事情只做一半？？」
+ *
+ * ## 判据
+ *
+ * ```
+ *   账本可信（|gap| < 0.01）→ 用服务端的 stats.*
+ *   账本有差                → 用交易所的 ledger.exchangeNet
+ * ```
+ * 三处必须一致：**表格行（归属权益 / 盈亏 两列）+ 顶部汇总**。
+ *
+ * ⚠️ 汇总用 `calibratedOf` **逐机器人**求和的理由：
+ * 直接对 `equityOf` 求和是错的（共享账户会把本金数多遍）；
+ * 而净已实现盈亏**是可加的** —— 所以求和之后顶部与各行能对上。
+ */
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+import { codeOnlyCss as codeOnly } from '../testUtils/cssText.js';
+
+const PAGE = readFileSync(new URL('./TradersPage.tsx', import.meta.url), 'utf8');
+const CODE = codeOnly(PAGE);
+
+test('★★★ 必须有 calibratedOf（一行里所有盈亏数字的统一来源）', () => {
+  assert.ok(
+    /const calibratedOf = \(/.test(CODE),
+    '★ 必须有 calibratedOf —— 否则每一列各算一套口径',
+  );
+  assert.ok(
+    /return \{ realizedPnl: stats\.realizedPnl, returnPercent: stats\.totalReturnPercent \}/.test(CODE),
+    '★ 账本可信时用服务端的数',
+  );
+  assert.ok(
+    /const realizedPnl = trader\.ledger!\.exchangeNet;/.test(CODE),
+    '★ 账本有差时用交易所的数',
+  );
+});
+
+test('★★★ 「盈亏」列必须用 calibratedOf（不能直接读 stats.totalReturnPercent）', () => {
+  /*
+   * ⚠️ 判据：渲染那两处不得出现裸的 `stats.totalReturnPercent` / `stats.realizedPnl`。
+   */
+  assert.ok(
+    /pnlColor\(calibratedOf\(trader, stats\)\.returnPercent\)/.test(CODE),
+    '★ 颜色必须按校准后的收益率判（否则红绿也是错的）',
+  );
+  assert.ok(
+    /fmtPercent\(calibratedOf\(trader, stats\)\.returnPercent\)/.test(CODE),
+    '★ 显示的百分比必须来自 calibratedOf',
+  );
+  assert.ok(
+    /calibratedOf\(trader, stats\)\.realizedPnl/.test(CODE),
+    '★ 下面那行「净 …」也必须来自 calibratedOf',
+  );
+  assert.ok(
+    !/fmtPercent\(stats\.totalReturnPercent\)/.test(CODE),
+    '★ 不能再直接显示 stats.totalReturnPercent',
+  );
+});
+
+test('★★★ 顶部「已实现盈亏」必须逐机器人校准后求和', () => {
+  assert.ok(
+    /const totalRealized = traders\.reduce\(/.test(CODE),
+    '★ 顶部汇总必须逐机器人算',
+  );
+  assert.ok(
+    /calibratedOf\(trader, s\)\.realizedPnl/.test(CODE),
+    '★ 汇总里必须用 calibratedOf（否则顶部与各行对不上）',
+  );
+  assert.ok(
+    !/sum \+ \(statsMap\[trader\.id\]\?\.realizedPnl \?\? 0\)/.test(CODE),
+    '★ 不能再用服务端的 realizedPnl 直接求和',
+  );
+});
+
+test('★★★ 界面文案不能是内部行话（用户看不懂"账本/校准"）', () => {
+  /*
+   * ⚠️ 用户的原话：
+   * > 「『账本有差 · 已按交易所校准』什么鬼意思？这是做给人看的？」
+   *
+   * ⚠️ **必须扫剥掉注释后的代码** —— 我在那段修复的说明里**引用了**旧文案
+   * （"✗ 账本有差 · 已按交易所校准"），于是判据会命中注释、永远失败。
+   * 这是本项目反复踩的同一个坑（判据必须只扫代码）。
+   */
+  assert.ok(
+    !/账本有差 · 已按交易所校准/.test(CODE),
+    '★ 不能用"账本"这类内部词 —— 那一行面对的是操作员',
+  );
+  assert.ok(
+    /按交易所实际成交计/.test(CODE),
+    '★ 应该说清"这个数从哪来"（人话）',
+  );
+  /*
+   * ⚠️ 它是**口径说明**，不是告警 —— 用警示色会让操作员以为账目坏了
+   *（而它恰恰是**更准**的那个数）。
+   *
+   * ⚠️ 窗口要够大：`className` 与那句文案之间隔着整个 `title`（约 400 字符）。
+   * 我第一版只取 300 字符，于是判据永远失败 —— 而真因是窗口太小。
+   */
+  const at = CODE.indexOf('按交易所实际成交计');
+  assert.ok(at > 0, '★ 应当能找到那句说明的渲染位置');
+  const before = CODE.slice(Math.max(0, at - 800), at);
+  assert.ok(
+    before.includes('text-ink-faint'),
+    '★ 口径说明要用安静的色（text-ink-faint），不用警示色',
+  );
+  assert.ok(
+    !/text-warn(?![a-z-])/.test(before.slice(-600)),
+    '★ 那段里不能用警示色 —— 它说的是"这个数从哪来"，不是"出问题了"',
+  );
+});
