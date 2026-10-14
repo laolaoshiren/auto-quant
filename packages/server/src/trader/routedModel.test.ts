@@ -104,20 +104,144 @@ test('★★★ `FIRM_ROLES` 与 `ROLE_TIERS` 的档位必须逐条一致（防"
   );
 });
 
-test('★ 每个角色都登记了档位（加角色时不能忘）', () => {
+test('★★★ 走 `tierForRole` 的角色必须全部登记档位 —— 判据从类型取全集', () => {
   /*
-   * 这条防的是"加了角色但忘了登记" —— 那种角色会静默走 T2 默认值，
-   * 而它可能本该是 T3（裁决）或 T0（不该用 LLM）。
+   * ## ⚠️⚠️ 这条原来是**手写列表**，于是它抓不到它本该抓的东西（2026-10-15 修）
+   *
+   * 原判据：
+   * ```
+   *   const expected = ['supervisor', 'judge', ..., 'ops_watchdog'];  ← 硬编码 18 个
+   *   for (const role of expected) assert.ok(ROLE_TIERS[role], ...)
+   * ```
+   * 手写列表的**根本问题**是它会随代码漂移 —— 加角色的人不会记得改测试里的数组。
+   * 所以改成从 `AgentRole` 类型（`roles.ts`，唯一事实来源）解析全集。
+   *
+   * ## ⚠️ 但不是"所有 AgentRole 都必须在 ROLE_TIERS 里"（这条我一开始写错了）
+   *
+   * 实测 `tierForRole()` 的生产调用点**只有两处**：
+   * ```
+   *   manager.ts:4131      tierForRole('system_engineer')
+   *   routedModel.ts:1053  tierForRole('risk_officer')
+   * ```
+   * 而**交易台的角色**（`supervisor`/`judge`/`bull`/`bear`/…）的档位来自
+   * `firm.ts` 的 `FIRM_ROLES`，走的是 `ask({ role, tier, … })` 那条路 ——
+   * **不经过 `tierForRole`**。
+   *
+   * 反过来，**工具循环那批角色**（`strategist`/`performance_analyst`/
+   * `attribution_analyst`/`reviewer`/`trader`）走的是
+   * `createTeamDecisionModel` 里的 `isToolLoopCall` 分支 →
+   * 转给 `singleModel` 或 `router.callByTier('T2_mid')` ——
+   * **也不经过 `tierForRole`**，所以"它们没登记档位"是无害的。
+   *
+   * ⇒ 所以正确的不变量是：**两处显式 `tierForRole` 的角色必须在表里**
+   *   （少一个就会静默回退 `T2_mid`），而不是"所有角色都要在表里"。
+   *
+   * ## 为什么要从源码扫调用点
+   *
+   * 因为**"哪些角色会走这条路"本身是会变的** —— 今天只有两个显式调用，
+   * 明天可能有人给 `market_analyst` 也加上。手写"两个名字"会和手写 18 个
+   * 犯同一个错：**它记录的是写测试那一刻的状态，而不是不变量。**
    */
-  const expected = [
-    'supervisor', 'judge', 'bull', 'bear', 'portfolio_manager', 'red_team',
-    'market_analyst', 'onchain_analyst', 'memory_curator', 'risk_officer',
-    'newscaster', 'sentiment', 'technical', 'reporter', 'clerk',
-    'data_sentinel', 'execution', 'ops_watchdog',
+  const callers = tierForRoleCallers();
+  assert.ok(
+    callers.length >= 2,
+    `★ 至少该扫到 2 处 tierForRole 调用（risk_officer / system_engineer），实际 ${callers.length}`,
+  );
+
+  const missing = callers.filter((role) => !(role in ROLE_TIERS));
+  assert.deepEqual(
+    missing,
+    [],
+    `★ 这些角色调了 tierForRole 却没登记档位（会静默回退 T2_mid）：${missing.join('、')}`,
+  );
+});
+
+/**
+ * 扫出所有**字面量**形式的 `tierForRole('xxx')` 调用点。
+ *
+ * ⚠️ 只认字面量：变量形式（`tierForRole(someVar)`）扫不出来，
+ * 而那正是"从源码取事实"的边界 —— 所以下面那条测试同时钉住了
+ * `AgentRole` 全集与档位表的**覆盖关系**，两者互补。
+ */
+function tierForRoleCallers(): string[] {
+  const files = [
+    new URL('./routedModel.ts', import.meta.url),
+    new URL('./manager.ts', import.meta.url),
+    new URL('./agent/tradingDesk.ts', import.meta.url),
+    new URL('./agent/orchestrator.ts', import.meta.url),
   ];
-  for (const role of expected) {
-    assert.ok(ROLE_TIERS[role], `角色 ${role} 没有登记档位`);
+  const found = new Set<string>();
+  for (const url of files) {
+    const src = readFileSync(url, 'utf8');
+    /* 剥注释 —— 注释里出现过 `tierForRole('risk_officer')` 这种说明文字。 */
+    const noComments = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    for (const m of noComments.matchAll(/tierForRole\(\s*'([a-z_]+)'\s*\)/g)) {
+      found.add(m[1] as string);
+    }
   }
+  return [...found];
+}
+
+/**
+ * 从 `roles.ts` 的 `AgentRole` 类型里解析出角色全集。
+ *
+ * ⚠️ **为什么解析源码而不是 import**：`AgentRole` 是**类型**，运行时不存在，
+ * 所以没法 `import` 一个值来遍历。而"手写一份列表"正是这个测试原来失效的原因 ——
+ * 所以只能从类型的声明文本里取。
+ *
+ * 只扫 `export type AgentRole = ... ;` 这一段，并剥掉注释（注释里出现过
+ * `engineer` 这种**已删除**的角色名，不剥会把幽灵算进来）。
+ */
+function agentRolesFromType(): string[] {
+  const src = readFileSync(new URL('./agent/roles.ts', import.meta.url), 'utf8');
+  const start = src.indexOf('export type AgentRole');
+  assert.ok(start > 0, '★ 找不到 AgentRole 类型声明');
+  const end = src.indexOf(';', start);
+  const block = src.slice(start, end);
+  /* 剥注释：行注释与块注释都要剥 —— 注释里有已删除角色的名字。 */
+  const noComments = block.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  return [...noComments.matchAll(/'([a-z_]+)'/g)].map((m) => m[1] as string);
+}
+
+test('★★★ 每个 `AgentRole` 都必须明确"走哪条路" —— 不能靠静默回退', () => {
+  /*
+   * ## 这条补的是上一条的盲区
+   *
+   * 上一条只扫**字面量**调用点，所以它答不了"这个角色到底走哪条路"。
+   * 而**真正的风险是"它走了哪条路没人知道"** ——
+   * 一个既不在 `ROLE_TIERS`、也不在工具循环那批里的角色，
+   * 会静默拿到 `T2_mid`，而它可能本该是 T3（裁决类）或 T1（体力活）。
+   *
+   * ## 判据：两条路必须至少命中一条
+   *
+   * ```
+   *   ① 在 ROLE_TIERS 里              → 走 tierForRole（交易台/显式调用）
+   *   ② 在工具循环那批里               → 走 singleModel / callByTier('T2_mid')
+   * ```
+   * 都不在 ⇒ 它就是"没人知道走哪条路"的那个。
+   *
+   * ⚠️ 工具循环那批是**显式列出来的**，不是猜的 —— 它来自
+   * `orchestrator.ts` 的 `role: 'strategist'`、`runPanelAnalysts` 的
+   * `['performance_analyst','attribution_analyst']`、`runtime.ts` 的复盘员。
+   * 那个列表本身就是"会走工具循环的角色"的**唯一定义处**。
+   */
+  const TOOL_LOOP_ROLES = new Set([
+    'strategist',
+    'performance_analyst',
+    'attribution_analyst',
+    'reviewer',
+    'trader',
+  ]);
+
+  const unaccounted = agentRolesFromType().filter(
+    (role) => !(role in ROLE_TIERS) && !TOOL_LOOP_ROLES.has(role),
+  );
+  assert.deepEqual(
+    unaccounted,
+    [],
+    `★ 这些角色既没登记档位、也不在工具循环那批里 —— ` +
+      `它们会静默拿到 T2_mid，而没人知道那是否正确：${unaccounted.join('、')}`,
+  );
 });
 
 /* -------------------------------------------------------------------------- */
