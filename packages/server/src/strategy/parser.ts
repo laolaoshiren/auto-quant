@@ -554,7 +554,20 @@ function toFiniteNumber(value: unknown): number | null {
  * actually produce: numbers as strings, `size` instead of `position_size_usd`,
  * `sl`/`tp` abbreviations, and so on.
  */
-function coerceRawDecision(input: unknown): LenientDecision | null {
+function coerceRawDecision(
+  input: unknown,
+  /*
+   * ⚠️ **降级痕迹的出口**（2026-10-15 加）。
+   *
+   * 这个函数把"认不出的 `entry_type`"归一成 `undefined`（= 市价）来**保住整条决策**，
+   * 但那样一来"模型原本写了什么"就丢了 —— 而 `log.warn` 只进日志、**不进数据库与界面**。
+   *
+   * 所以这里用一个 out-param 把说明带出去，由调用点写进 `Decision.adjustments`
+   *（与"限价缺价退回市价"同一口径）——
+   * 否则就是**又一次"注释说留痕、代码没留痕"**（这个仓库反复记过的形态）。
+   */
+  notes: string[] = [],
+): LenientDecision | null {
   if (typeof input !== 'object' || input === null) return null;
   const o = input as Record<string, unknown>;
 
@@ -589,13 +602,70 @@ function coerceRawDecision(input: unknown): LenientDecision | null {
      * ⚠️ 这里的 `entry_type` 加得比字段本身更要紧 —— **宽容转换函数是解析的入口**，
      * 加在它后面的字段不会被它带出来。第一版我把它加在了调用点，于是 zod 认、
      * 而 `coerced` 里根本没有这两个键，限价入场永远是市价。
+     *
+     * ══════════════════════════════════════════════════════════════════════════
+     *  ⚠️⚠️ **非法值必须降级，不能让它把整条决策带走**（2026-10-15 修）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 事故：模型写错一个枚举值，**整条决策凭空消失**
+     *
+     * 原来这里原样透传字符串，而 `RawDecisionSchema.entry_type` 是
+     * `z.enum(['market','limit'])` —— 于是模型写 `"entryType":"skip"` 时：
+     * ```
+     *   LenientDecisionSchema.safeParse(candidate) 失败
+     *   → coerceRawDecision 返回 null
+     *   → 调用点 `if (!coerced) continue;`（只有一行 log.debug）
+     *   → 【既不入 decisions，也不入 rejected】
+     *   ⇒ 界面上只显示"本轮无动作"，而模型明明给了决策
+     * ```
+     * 实测线上 **12 条命中**（cyc 70 六条、cyc 84 六条，全是 `"entryType":"skip"`），
+     * 那两轮的 `decisions_json` 都是 `[]`。
+     *
+     * ⚠️ **线上恰好只命中 `skip`（损失为零）**，但同样的形状命中开仓就是**丢单**：
+     * ```
+     *   跑真实代码验证：open_long + entryType:"skip" → decisions=0 rejected=0
+     * ```
+     *
+     * ## 为什么"降级为市价"是正确方向
+     *
+     * `entry_type` 是"怎么进"的**提示**，不是"要不要进"的**决定**：
+     * ```
+     *   · 省略它      → 市价（既有行为，schema 注释写明了）
+     *   · 给它一个认不出的值 → 与"省略"最接近的语义就是【按默认的市价走】
+     *   · 而丢弃整条  → 把"怎么进"的分歧升级成"不进"，那是越权
+     * ```
+     * 一个 `open_long` 的意图不该因为一个入场方式的拼写问题而消失。
+     *
+     * ⚠️ 同时**必须留下痕迹** —— 否则"模型给了 skip 而我们按市价开了"
+     * 会变成另一件静默的事（这个仓库反复记过这条教训）。
+     * 痕迹走 `adjustments`，与"限价缺价退回市价"同一口径。
      */
-    entry_type:
-      typeof o.entry_type === 'string'
-        ? o.entry_type.toLowerCase().trim()
-        : typeof o.entryType === 'string'
-          ? o.entryType.toLowerCase().trim()
-          : undefined,
+    entry_type: (() => {
+      const raw =
+        typeof o.entry_type === 'string'
+          ? o.entry_type
+          : typeof o.entryType === 'string'
+            ? o.entryType
+            : undefined;
+      if (raw === undefined) return undefined;
+      const v = raw.toLowerCase().trim();
+      if (v === 'market' || v === 'limit') return v;
+      /*
+       * ⚠️ 认不出的值 → 归一成 `undefined`（= 市价）。
+       * **不能原样返回** —— 那会让 zod 失败、整条决策被丢。
+       */
+      log.warn('入场方式 entry_type 是认不出的值，已按市价处理', {
+        symbol: typeof o.symbol === 'string' ? o.symbol : undefined,
+        entry_type: raw,
+      });
+      /*
+       * ⚠️ 痕迹**同时**进 `adjustments`（那才走数据库与界面）——
+       * 只写日志等于静默：生产日志级别看不到 debug，而 warn 也不进审计记录。
+       * 这一条是我自己第一版的疏漏（注释写着"必须留下痕迹"，代码只写了日志）。
+       */
+      notes.push(`入场方式 "${raw}" 不是 market/limit 之一，已按市价开盘。`);
+      return undefined;
+    })(),
     limit_price:
       toFiniteNumber(o.limit_price ?? o.limitPrice ?? o.entry_price ?? o.entryPrice) ?? undefined,
     /*
@@ -774,9 +844,49 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
   const nextCheckInMinutes = extractNextCheckMinutes(rawItems, parsed);
 
   for (const item of rawItems) {
-    const coerced = coerceRawDecision(item);
+    /*
+     * ⚠️ `coerceNotes` 收集"宽容转换时做过的降级"（例如认不出的 `entry_type`
+     * 被归一成市价）—— 它们必须进 `Decision.adjustments`，**不能只写日志**。
+     * 见 `coerceRawDecision` 的 `notes` 参数说明。
+     */
+    const coerceNotes: string[] = [];
+    const coerced = coerceRawDecision(item, coerceNotes);
     if (!coerced) {
-      log.debug('丢弃了一条无法解析的决策项', { item });
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⚠️⚠️ **解析不出来的项也必须进 `rejected`**（2026-10-15 修）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * 原来这里只有一行 `log.debug(...)` + `continue` —— 于是那条决策
+       * **既不入 `decisions`，也不入 `rejected`**，在界面上表现为
+       * "本轮无动作"，而模型其实给了东西。
+       *
+       * 实测线上 12 条命中（`entryType: "skip"` 让 zod 失败）——
+       * 那两轮的 `decisions_json` 都是 `[]`，而 `<decision>` 块里明明有 6 条。
+       *
+       * ## 为什么这比"拒绝"更糟
+       *
+       * `rejected` 的用途就是"**说清模型要了什么、而系统为什么没做**"。
+       * 一条既不执行、也不解释的决策，让操作员**无法分辨**：
+       * ```
+       *   ① 模型这一轮没给决策（真的观望）
+       *   ② 模型给了，但被我们的解析器吃掉了（BUG）
+       * ```
+       * 而这两件事的处理方式完全相反。
+       *
+       * ⚠️ `log.debug` 在这里不够 —— 生产环境的日志级别看不到它，
+       * 而 `rejected` 是**进数据库、进界面**的那条路径。
+       */
+      const loose = (item ?? {}) as Record<string, unknown>;
+      const sym = typeof loose['symbol'] === 'string' ? loose['symbol'] : '（未给出标的）';
+      log.warn('丢弃了一条无法解析的决策项（已记入 rejected，不再是静默）', { item });
+      rejected.push({
+        symbol: sym,
+        action: typeof loose['action'] === 'string' ? loose['action'] : '（未给出操作）',
+        reason:
+          '这条决策的字段没能通过解析（例如 entry_type 之类的枚举值不在允许范围内）。' +
+          '它**没有被执行**，但也不是"模型没给" —— 原始内容见本轮 rawResponse。',
+      });
       continue;
     }
 
@@ -861,7 +971,13 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
      * 缺 `limit_price` 的限价单**在这里就退回市价并说明**，而不是让一个
      * 没有价格的 `LIMIT` 单走到执行层 —— 那样交易所会拒，而错误会更难读。
      */
-    const entryAdjustments: string[] = [];
+    const entryAdjustments: string[] = [
+      /*
+       * ⚠️ **宽容转换阶段做的降级排在最前**（2026-10-15）——
+       * 它们发生在解析的最早一步，所以顺序上也该最先被看到。
+       */
+      ...coerceNotes,
+    ];
     let entryType: 'market' | 'limit' = 'market';
     let limitPrice: number | null = null;
     if (isOpenAction(action)) {
