@@ -767,6 +767,24 @@ export function shouldEarlyWake(input: {
 const SHARP_MOVE_THRESHOLD_PERCENT = 3;
 
 /**
+ * **候选池异动的阈值**（2026-10-14 加）—— 比持仓那条高。
+ *
+ * ## 为什么两者必须不同
+ *
+ * 它们要回答的问题不一样：
+ * ```
+ *   持仓（3%）：「我这个仓位是不是要出事了」  → 该早看
+ *   候选（5%）：「市场里是不是出现了新机会」  → 值得打断当前节奏才看
+ * ```
+ * 用一个阈值会让**空仓的机器人被大量无关波动反复唤醒** ——
+ * 而每次唤醒都是一次真实调用 + 真实 token（`DEFAULT_WAKE_POLICY.hourlyBudget`
+ * 就是为这件事设的上限）。
+ *
+ * ⚠️ 可由 `AQ_CANDIDATE_MOVE_PERCENT` 覆盖（"多大的波动算机会"取决于行情）。
+ */
+const CANDIDATE_MOVE_THRESHOLD_PERCENT = 5;
+
+/**
  * **行情剧变检测**（2026-10-13 加）—— "持续工作"缺的最后一块。
  *
  * ## 之前缺的是什么
@@ -866,6 +884,19 @@ export class AutoTrader {
    * 而**1 分钟的噪音不是要重新评估的理由**。
    */
   private moveBaseline = new Map<string, number>();
+  /**
+   * **上一个周期算出来的候选池**（2026-10-14 加）—— 供 `candidateWatchSymbols()` 用。
+   *
+   * ⚠️ 为什么复用"上一轮算过的"而不是每 60 秒重算一次：
+   * 候选池的算法要拉币池成交额 + 持仓量（多次请求 + 排序），
+   * 而**"哪些标的值得看"在 15 分钟内几乎不会变**。
+   * 每 60 秒重算一次买不到任何新信息，只会烧权重
+   *（`rest.ts` 的 `weightLimitPerMinute` 是所有请求共享的）。
+   *
+   * ⚠️ 它是**快照、不是结论**：机器人刚启动时是空数组，
+   * 那时 `candidateWatchSymbols()` 会退回配置里的 `staticCoins`。
+   */
+  private lastCandidateSymbols: readonly string[] = [];
   private running = false;
   /**
    * 模型这一轮要求的"下次什么时候再看盘"（分钟）。
@@ -1432,6 +1463,36 @@ export class AutoTrader {
   }
 
   /**
+   * **这一轮该盯哪些候选标的**（2026-10-14 加）。
+   *
+   * ## 取哪个来源
+   *
+   * 优先用**上一个周期真正算过的候选池**（`lastCandidateSymbols`）——
+   * 那是"团队此刻认为值得看"的标的，比重新查一遍币池更准也更便宜。
+   *
+   * 装不满时再用配置里的 `staticCoins` 兜底：机器人**刚启动、还没跑过一轮**
+   * 时前者是空的，而那时恰恰需要盯住"配置里点名的标的"。
+   *
+   * ⚠️ **上限 20 个**：这不是性能约束（一次 `premiumIndex` 就能覆盖全市场），
+   * 而是**噪音约束** —— 盯 500 个标的时，任何一个涨 5% 都会唤醒团队，
+   * 而那种唤醒绝大多数没有价值。真正的候选池（`coinPoolLimit`）本来就 ≤15。
+   */
+  private candidateWatchSymbols(): string[] {
+    const seen = new Set<string>();
+    for (const s of this.lastCandidateSymbols) {
+      if (s.length > 0) seen.add(s);
+      if (seen.size >= 20) break;
+    }
+    if (seen.size === 0) {
+      for (const s of this.deps.config.coinSource?.staticCoins ?? []) {
+        if (s.length > 0) seen.add(s);
+        if (seen.size >= 20) break;
+      }
+    }
+    return [...seen];
+  }
+
+  /**
    * **检查一次持仓剧变** —— 有的话把决策循环提前叫醒。
    *
    * ⚠️ **不抛错**：这是一个后台监控，它失败不该影响任何东西
@@ -1442,41 +1503,124 @@ export class AutoTrader {
       if (!this.running) return;
       const traderId = this.deps.trader.id;
       const open = positionStore.open(traderId);
-      if (open.length === 0) {
-        /* 没持仓就没有"持仓剧变"可言 —— 清掉基准，避免拿旧基准比对。 */
-        this.moveBaseline.clear();
-        return;
+
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⚠️⚠️ **一次调用拿全市场价格，同时盯【持仓】与【候选池】**
+       *      （2026-10-14 扩展 —— 补上"持续工作"缺的那一半）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * ## 原来缺的是什么
+       *
+       * 原来这里在**没有持仓时直接 `return`**：
+       * ```
+       *   if (open.length === 0) { this.moveBaseline.clear(); return; }
+       * ```
+       * 理由是"没持仓就没有持仓剧变可言" —— 那句话本身对，但它**默认了
+       * 唯一值得唤醒的事就是"已有仓位的价格动了"**。
+       *
+       * 而这个文件上面的注释（`detectSharpMove` 的文件头）**自己就点出了相反的例子**：
+       * ```
+       *   · 一个候选突破 —— 该考虑开仓，但没成交就不唤醒
+       * ```
+       * 于是就出现了一个**结构性盲区**：
+       * ```
+       *   空仓时（最该找机会的时候）→ 监控什么都不做
+       *   → 只能等 15 分钟定时器 → 而"7×24 持续找机会"恰恰要求它别干等
+       * ```
+       *
+       * ## 为什么现在这样做是【零额外成本】的
+       *
+       * 实测（2026-10-14）：`GET /fapi/v1/premiumIndex` **不带 `symbol` 时
+       * 一次返回全市场 930 个标的**的标记价与资金费率（`market.ts` 的注释
+       * 也写着 "With no symbol, Binance returns the whole universe in one weighted call"）。
+       *
+       * 所以：
+       * ```
+       *   改前：逐个持仓调 getMarkPrice → N 次请求（N = 持仓数）
+       *   改后：一次 premiumIndex()     → 1 次请求（覆盖持仓 + 候选池 + 全市场）
+       * ```
+       * **盯的标的变多了，请求数反而变少了** —— 这是这次改动能成立的关键。
+       *
+       * ## 盯谁
+       *
+       * ```
+       *   · 已持仓的标的  → 阈值用 `SHARP_MOVE_THRESHOLD_PERCENT`（3%）—— 保护仓位
+       *   · 候选池的标的  → 阈值用 `AQ_CANDIDATE_MOVE_PERCENT`（默认 5%，更高）
+       * ```
+       * ⚠️ **候选的阈值必须比持仓高**，因为两者要回答的问题不同：
+       * ```
+       *   持仓："我这个仓位是不是要出事了"     → 3% 就该看一眼
+       *   候选："市场里是不是出现了新机会"     → 5% 才值得打断当前节奏
+       * ```
+       * 用同一个阈值会让空仓的机器人**被大量无关波动反复唤醒**（那是噪音，
+       * 而噪音的代价是真实调用 + 真实 token）。
+       *
+       * ⚠️ 无持仓时不再 `return` —— 但仍要清掉**已离场标的**的基准，
+       * 否则下次再持有它时会拿一个很旧的价格比对（那会误报"剧变"）。
+       */
+      const held = new Set(open.map((p) => p.symbol));
+      const watch = new Set<string>(held);
+      for (const s of this.candidateWatchSymbols()) watch.add(s);
+
+      /* 已不在盯的标的：清基准（避免下次持有它时拿旧价比对）。 */
+      for (const symbol of [...this.moveBaseline.keys()]) {
+        if (!watch.has(symbol)) this.moveBaseline.delete(symbol);
+      }
+      if (watch.size === 0) return;
+
+      /*
+       * ⚠️ 读全市场（一次请求）。失败时**什么都不做** —— 下一轮会重试，
+       * 而"用空价格表当成价格没动"会把基准悄悄清掉。
+       */
+      const universe = await this.deps.market.premiumIndex().catch(() => []);
+      if (universe.length === 0) return;
+      const priceOf = new Map<string, number>();
+      for (const row of universe) {
+        const price = Number(row.markPrice);
+        if (Number.isFinite(price) && price > 0) priceOf.set(row.symbol, price);
       }
 
-      const moves: Array<{ symbol: string; changePercent: number }> = [];
-      for (const p of open) {
-        const price = await this.deps.broker.getMarkPrice(p.symbol).catch(() => 0);
-        if (!(price > 0)) continue;
-        const base = this.moveBaseline.get(p.symbol);
+      const heldMoves: Array<{ symbol: string; changePercent: number }> = [];
+      const candidateMoves: Array<{ symbol: string; changePercent: number }> = [];
+      for (const symbol of watch) {
+        const price = priceOf.get(symbol);
+        if (price === undefined) continue;
+        const base = this.moveBaseline.get(symbol);
         /*
          * 第一次见到这个标的：只记基准，**不判断** ——
-         * 否则"刚开仓"会被误判成"剧变"（因为没有基准可比）。
+         * 否则"刚开仓/刚进候选"会被误判成"剧变"（因为没有基准可比）。
          */
         if (base === undefined || !(base > 0)) {
-          this.moveBaseline.set(p.symbol, price);
+          this.moveBaseline.set(symbol, price);
           continue;
         }
-        moves.push({ symbol: p.symbol, changePercent: ((price - base) / base) * 100 });
+        const changePercent = ((price - base) / base) * 100;
+        (held.has(symbol) ? heldMoves : candidateMoves).push({ symbol, changePercent });
       }
 
-      const threshold = Number(process.env.AQ_SHARP_MOVE_PERCENT ?? '') || SHARP_MOVE_THRESHOLD_PERCENT;
-      const reason = detectSharpMove({ moves, threshold });
+      const heldReason = detectSharpMove({
+        moves: heldMoves,
+        threshold: Number(process.env.AQ_SHARP_MOVE_PERCENT ?? '') || SHARP_MOVE_THRESHOLD_PERCENT,
+      });
+      const candidateReason = detectSharpMove({
+        moves: candidateMoves,
+        threshold: Number(process.env.AQ_CANDIDATE_MOVE_PERCENT ?? '') || CANDIDATE_MOVE_THRESHOLD_PERCENT,
+      });
+      const reason = heldReason ?? candidateReason;
       if (reason === null) return;
 
       /*
        * ⚠️ **触发后立刻重置基准** —— 否则价格持续偏离时会**反复触发**
        *（那是"同一件事重复唤醒"，而 `EARLY_WAKE_MIN_GAP_MS` 只能挡住其中一部分）。
        */
-      for (const m of moves) {
-        const price = await this.deps.broker.getMarkPrice(m.symbol).catch(() => 0);
-        if (price > 0) this.moveBaseline.set(m.symbol, price);
+      for (const symbol of watch) {
+        const price = priceOf.get(symbol);
+        if (price !== undefined) this.moveBaseline.set(symbol, price);
       }
-      this.requestEarlyCycle(`持仓剧变：${reason}`);
+      this.requestEarlyCycle(
+        `${heldReason !== null ? '持仓剧变' : '候选异动'}：${reason}`,
+      );
     } catch (error) {
       /* 后台监控失败不该影响任何东西 —— 下一轮决策仍会照常评估。 */
       this.emit('warn', `持仓剧变监控失败（不影响决策）：${(error as Error).message}`);
@@ -3019,6 +3163,12 @@ export class AutoTrader {
     this.annotateTradability(snapshots, account.equity);
 
     progress.candidateSymbols = snapshots.map((s) => s.symbol);
+    /*
+     * ⚠️ 同时记给**后台监控**用（`candidateWatchSymbols()`）——
+     * 它每 60 秒跑一次，而候选池每 15 分钟才算一次，所以这里存一份快照。
+     * 见 `lastCandidateSymbols` 的说明（为什么复用而不是重算）。
+     */
+    this.lastCandidateSymbols = progress.candidateSymbols;
 
     if (snapshots.length === 0) {
       await this.recordEquity(account, livePositions);

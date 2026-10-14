@@ -11,7 +11,7 @@ import { connectExchange, preflight, type ExchangeConnection, type PreflightChec
 import type { BinanceEnvironment } from '../binance/endpoints.js';
 import { BinanceUserDataStream } from '../binance/ws.js';
 import type { Vault } from '../crypto/vault.js';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
 import { createLogger } from '../logger.js';
 import { env } from '../env.js';
@@ -38,11 +38,79 @@ import {
   type HunterReport,
 } from './intel/hunters.js';
 import { mapConcurrent } from './agent/pool.js';
+import { ModelsDevStore } from '../llm/modelsDev.js';
+import type { ModelsDevLookup } from '../llm/modelDiscovery.js';
 import { runOutsideCritical } from './agent/resourceGate.js';
 import { runSelfCheck } from './selfcheckRunner.js';
 import { createRoutedDecisionModel, createTeamDecisionModel, tierForRole } from './routedModel.js';
 
 const log = createLogger('manager');
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════════
+ *  **models.dev 模型档案 store（进程级单例）**（2026-10-14 接上）
+ * ══════════════════════════════════════════════════════════════════════════════
+ *
+ * ## 它补什么
+ *
+ * 运行时 `GET /v1/models` **拿不到定价（`cost`）与知识截止（`knowledge`）** ——
+ * `modelDiscovery.ts` 文件头的表格已经把这两个缺口写清楚了。
+ * models.dev 用官方目录补上它们，以及 `tool_call` / `structured_output` /
+ * `canonical_model_id`。
+ *
+ * ## 为什么是单例，而不是"每个机器人一个"
+ *
+ * ```
+ *   · 快照是 5.6MB（gzip 0.54MB）—— 每个机器人存一份纯属浪费
+ *   · 刷新循环要带 ETag 做条件请求 —— 多个 store 会各自拉一遍
+ *   · 索引是纯数据（8,831 条），没有"每机器人不同"的部分
+ * ```
+ * ⚠️ 所以它放在**模块级**，在第一次装配时懒加载。
+ *
+ * ## 为什么 `load()` 是同步的、且失败不抛
+ *
+ * `discoverFromGateway` 在**装配路径**上（机器人启动时），而
+ * "启动时要等一次网络"是这个项目明确要避免的形态。
+ * 所以：
+ * ```
+ *   启动 → load() 同步读本地快照（有就有，没有就没有）→ 立刻可用
+ *   后台 → 每日刷新一次（带 ETag，304 就跳过）
+ * ```
+ * ⚠️ 读不到快照时返回 `null`，`buildCatalog` 会把它当成"这次不补参数" ——
+ * **不是错误**，机器人照常启动（与 `pluginProvidersPath` 读不到时同源）。
+ *
+ * ## 为什么刷新失败【绝不】清空
+ *
+ * 旧快照比"没有快照"好得多：定价与知识截止在一周内几乎不变，
+ * 而"因为一次网络抖动就把参数全丢"会让调度器立刻失去依据。
+ * 见 `ModelsDevStore.refresh` 的三态语义（`updated` / `not_modified` / `failed`）。
+ */
+let modelsDevStoreSingleton: ModelsDevStore | null = null;
+
+/**
+ * 取 models.dev 的查询函数（首次调用时同步装载快照并挂上刷新循环）。
+ *
+ * ⚠️ 返回 `null` 是**正常情况**（还没拉到过快照）—— 调用方照样传下去，
+ * `buildCatalog` 会按"不补参数"处理。
+ */
+function modelsDevLookup(): ModelsDevLookup | null {
+  if (modelsDevStoreSingleton === null) {
+    const store = new ModelsDevStore({ dataDir: env.dataDir });
+    const index = store.load();
+    if (index === null) {
+      /*
+       * ⚠️ **不在这里同步拉网络** —— 那是启动路径，会拖慢机器人启动。
+       * 直接挂上刷新循环：它会在后台拉第一次，拉到之后下一次装配就能用上。
+       */
+      log.info('models.dev 本地快照不存在，将在后台首次拉取（本次装配不补参数）。');
+    } else {
+      log.info(`models.dev 快照已装载：${index.byLeafName.size} 个叶子名。`);
+    }
+    store.startRefreshLoop();
+    modelsDevStoreSingleton = store;
+  }
+  return modelsDevStoreSingleton.lookup();
+}
 
 /**
  * 一次调用的输出上限**下限**（token）—— 保证推理有地方可写。
@@ -841,7 +909,7 @@ export function stopResearchRefresher(traderId: number): void {
  *   单独实测一个猎手任务： ok=true 耗时 **92.7 秒**
  *   线上并发跑四个：        **3 个未产出**（每个"超过 600 秒未返回"）
  * ```
- * 服务器只有 **2 核 / 1971MB（可用 822MB）**，而每个猎手是
+ * 服务器只有 **2 核 / 1971MB**，而每个猎手是
  * **一整个 claude code 进程**（150–250MB，自带 node 运行时）。
  * 2 核切成 5–6 份 → 每个慢 6 倍以上 → 全部超时。
  *
@@ -851,6 +919,39 @@ export function stopResearchRefresher(traderId: number): void {
  *   全部超时        → 团队永远拿不到新闻 → 功能失效
  * ```
  * 实测裁决官的原话：「材料**无新闻、无情绪**……数据不足无法判断」。
+ *
+ * ## ⚠️⚠️ 2026-10-14：真正的瓶颈是**内存**，而且它是被【僵尸进程】吃掉的
+ *
+ * 上面那个"并发四个 → 三个超时"的结论**方向是对的，但归因不全**。
+ * 那天实测服务器状态：
+ * ```
+ *   可用内存        696MB      ← 而每个猎手要 150–250MB
+ *   Swap 已用      1014MB / 2047MB   ← 已经被压到交换区上半场
+ *   僵尸进程        7 个，各 66–72MB，合计 ≈ 500MB
+ *                  （`/root/dsh_trade` 的 `src/bot.mjs`，目录已被删除、
+ *                    日志不存在、0 个网络连接、25 天只用 1.5 小时 CPU）
+ * ```
+ * **清掉那 7 个之后**：可用内存 **696MB → 1039MB**（+49%），swap 回落到 707MB。
+ *
+ * ⚠️ **教训**：当时把"并发超时"归因成"2 核 CPU 不够"，而实际上是
+ * **内存被不属于本项目的僵尸进程占着**。CPU 核数是那台机器买定离手的部分，
+ * 但**可用内存是会漂移的** —— 所以只看 `cpus().length` 会得出一个
+ * **过时的、偏保守的**上限，而且永远不会自己变好。
+ *
+ * ## 所以现在**同时看核数与可用内存**，取两者中更严的那个
+ *
+ * ```
+ *   byCores  = min(3, max(1, floor(核数 / 2)))          ← 原来唯一依据
+ *   byMemory = max(1, floor((可用内存 − 512MB 保留) / 250MB))
+ *   limit    = min(byCores, byMemory, 3)
+ * ```
+ * ⚠️ **保留 512MB 不是随手定的**：服务本体 ~95MB、magpie ~74MB、
+ * Node 堆与文件缓存会有波动，而**内存耗尽会触发 swap，进而让【所有】
+ * 猎手一起变慢** —— 那比"少开一个并发"糟糕得多（上面那条"全部超时"就是它）。
+ *
+ * ⚠️ **读不到内存时退回按核数算**（不要因为读不到就降到 1）——
+ * 与 `exchangeMaxLeverageOf` 返回 null 时退回旧行为是同一条纪律：
+ * **读不到某个事实，不该让功能停下来。**
  */
 function hunterConcurrency(): number {
   const explicit = Number(process.env.AQ_HUNTER_CONCURRENCY ?? '');
@@ -862,7 +963,74 @@ function hunterConcurrency(): number {
       return 1;
     }
   })();
-  return Math.min(3, Math.max(1, Math.floor(cores / 2)));
+  const byCores = Math.min(3, Math.max(1, cores));
+  return Math.min(byCores, hunterConcurrencyByMemory());
+}
+
+/**
+ * ⚠️ **核数这一项为什么是 `min(3, cores)` 而不是 `min(3, floor(cores/2))`**（2026-10-14）
+ *
+ * 原来除以 2 的依据是那句实测「2 核切成 5–6 份 → 每个慢 6 倍以上 → 全部超时」。
+ * 但**那次慢不是 CPU 造成的，是内存**（僵尸进程占了 500MB，可用只剩 696MB，
+ * swap 已被压到 1014MB/2047MB）—— 见 `hunterConcurrency` 上方那段完整证据。
+ *
+ * 而猎手这个工作负载**几乎不烧 CPU**：它的时间全花在等两件事上
+ * ```
+ *   ① claude code 进程启动（node 冷启动，一次性、毫秒级到秒级）
+ *   ② WebSearch / WebFetch 的网络往返（几秒到几十秒）
+ * ```
+ * 真正的 CPU 密集部分是**没有的** —— 所以按"核数 ÷ 2"给 I/O 密集任务定并发，
+ * 是把一个**不成立的模型**当成了依据。
+ *
+ * ⚠️ **所以真正的闸门交给内存**（`hunterConcurrencyByMemory`），
+ * 核数只保留一个**合理性封顶**（不许超过 3）。
+ *
+ * ⚠️ **这是一次基于证据的修正，但仍需实测确认** —— 部署后会看猎手的
+ * `ok` 比例与 `latencyMs`：若并发提到 2 之后完成率反而下降，就该退回。
+ * 判据写在 `refreshResearch` 的日志里（每个猎手都记了耗时与成败）。
+ */
+
+/**
+ * 按**当前可用内存**能开几个猎手（每个按 250MB 上界估）。
+ *
+ * ⚠️ 返回 `3`（而不是 1）当**读不到**内存时 —— 见 `hunterConcurrency()`
+ * 的说明：读不到事实不该让功能降级。真正的封顶由 `byCores` 做。
+ *
+ * ⚠️ 保留 512MB 给服务本体/网关/缓存 —— 理由见上面那段（swap 会让**所有**
+ * 猎手一起慢，那比少开一个并发糟得多）。
+ */
+function hunterConcurrencyByMemory(): number {
+  const availMb = availableMemoryMb();
+  if (availMb === null) return 3;
+  const usable = availMb - HUNTER_MEMORY_RESERVE_MB;
+  if (usable <= 0) return 1;
+  return Math.max(1, Math.min(3, Math.floor(usable / HUNTER_MEMORY_PER_TASK_MB)));
+}
+
+/** 给服务本体、magpie 网关与文件缓存留的余量（见 `hunterConcurrencyByMemory`）。 */
+const HUNTER_MEMORY_RESERVE_MB = 512;
+
+/** 单个猎手的内存上界（实测记录在 `hunterConcurrency` 上方：150–250MB）。 */
+const HUNTER_MEMORY_PER_TASK_MB = 250;
+
+/**
+ * Linux 上的**可用内存**（MB）—— 优先 `MemAvailable`。
+ *
+ * ⚠️ **用 `MemAvailable` 而不是 `MemFree`**：后者不把可回收的 page cache 算进去，
+ * 在 Linux 上通常小一个数量级（实测同一时刻 `free` 392MB vs `available` 1039MB）。
+ * 按 `MemFree` 算会得出"内存快没了"的错误结论，从而把并发降到 1。
+ *
+ * 读不到（非 Linux / 权限）时返回 `null` —— 调用方据此退回按核数算。
+ */
+function availableMemoryMb(): number | null {
+  try {
+    const text = readFileSync('/proc/meminfo', 'utf8');
+    const m = /^MemAvailable:\s+(\d+)\s+kB$/m.exec(text);
+    if (m === null) return null;
+    return Math.floor(Number(m[1]) / 1024);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1599,20 +1767,34 @@ export class TraderManager {
      * 这也是"合理安排使用"的落地点：`byTier` 的排序把 `free: 'all'` 排在前面，
      * 所以体力活（T1/T2）会优先走不限量的通道，把付费额度留给真正需要判断的环节。
      */
-    const catalog = await discoverFromGateway({
-      baseUrl,
-      apiKey,
-      timeoutSeconds: TEAM_GATEWAY_TIMEOUT_SECONDS,
-      maxRetries: TEAM_GATEWAY_MAX_RETRIES,
-      temperature: TEAM_GATEWAY_TEMPERATURE,
+    const catalog = await discoverFromGateway(
+      {
+        baseUrl,
+        apiKey,
+        timeoutSeconds: TEAM_GATEWAY_TIMEOUT_SECONDS,
+        maxRetries: TEAM_GATEWAY_MAX_RETRIES,
+        temperature: TEAM_GATEWAY_TEMPERATURE,
+        /*
+         * ⚠️ `plugin-providers.json` 是 **Docker 卷里的文件**，
+         * 只在同机部署时读得到。读不到就退化为"不知道免费与否"（`free: 'unknown'`），
+         * **绝不猜** —— 猜错的代价是把免费模型当付费的避开（白烧额度），
+         * 或者反过来（以为免费其实烧钱）。
+         */
+        pluginProvidersPath: process.env.MAGPIE_PLUGIN_PROVIDERS_PATH ?? null,
+      },
       /*
-       * ⚠️ `plugin-providers.json` 是 **Docker 卷里的文件**，
-       * 只在同机部署时读得到。读不到就退化为"不知道免费与否"（`free: 'unknown'`），
-       * **绝不猜** —— 猜错的代价是把免费模型当付费的避开（白烧额度），
-       * 或者反过来（以为免费其实烧钱）。
+       * ⚠️ **models.dev 的查询函数**（2026-10-14 接上）—— 补齐运行时拿不到的客观参数。
+       *
+       * 它是**进程级单例**（`modelsDevLookup()`）：快照只在第一次调用时同步读一次，
+       * 之后由它自己的每日刷新循环维护。所以这里传的是**同一个** store，
+       * 不会因为"每个机器人装配一次"而重复读盘或重复拉网络。
+       *
+       * ⚠️ **传 `null` 也完全合法** —— 还没拉到快照时它什么都不补，
+       * 而那正是"读不到某个事实不该让功能停下来"的既有纪律
+       *（与 `pluginProvidersPath` 读不到时退化为 `free: 'unknown'` 同源）。
        */
-      pluginProvidersPath: process.env.MAGPIE_PLUGIN_PROVIDERS_PATH ?? null,
-    });
+      { modelsDev: modelsDevLookup() },
+    );
 
     if (catalog !== null) {
       /*

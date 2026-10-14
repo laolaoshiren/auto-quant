@@ -48,6 +48,56 @@
 
 ---
 
+## 1b. 外部数据源 【可技术确证】
+
+> ⚠️ **这一节与 §1 分开写，是因为义务的性质不同。**
+> §1 管的是"分发第三方**代码**"（义务发生在**再分发**时，所以清单跟着依赖走）。
+> 本节管的是"**读取**第三方**数据**"（义务发生在**使用时**，与依赖清单无关）。
+> 两者不能混进同一份文件 —— `THIRD-PARTY-NOTICES.md` 是 `scripts/generate-notices.mjs`
+> **自动生成**的（它只扫 `package-lock.json` 的依赖闭包），手工往里面加数据源条目
+> 会被 CI 判为"与依赖不一致"。
+
+### models.dev（模型能力与定价数据）
+
+| 项 | 值 |
+| --- | --- |
+| 端点 | `https://models.dev/api.json` |
+| 仓库 | `https://github.com/anomalyco/models.dev` |
+| 许可 | **MIT License**，`Copyright (c) 2025 models.dev` |
+| 版权与许可全文 | `https://raw.githubusercontent.com/anomalyco/models.dev/dev/LICENSE` |
+| 我们用它做什么 | 补齐运行时拿不到的**客观参数**：`cost`（定价）、`knowledge`（知识截止）、`tool_call`、`structured_output`、`canonical_model_id` |
+| 不用于什么 | **不用它做模型分档**（T1/T2/T3 是本项目的业务判断，它不提供） |
+
+### MIT 的义务如何履行
+
+MIT 只要求一件事：**在副本或实质部分中保留版权声明与许可文本**。
+
+本项目**不再分发** models.dev 的数据文件（它是运行时按需拉取到本地缓存的，
+不进镜像、不进仓库）—— 所以严格来说再分发义务并未触发。但**既然用了它的数据，
+就在此写明出处与版权**，这是最低成本也最诚实的做法：
+
+```
+模型能力与定价数据来自 models.dev (https://models.dev)
+Copyright (c) 2025 models.dev — MIT License
+https://github.com/anomalyco/models.dev/blob/dev/LICENSE
+```
+
+⚠️ **如果将来把快照文件打进镜像或提交进仓库**（当前不这么做），那就从"使用"变成了
+"再分发"，届时必须把上面那段连同**完整 MIT 正文**放进 `THIRD-PARTY-NOTICES.md`
+的生成流程里（改 `scripts/generate-notices.mjs`，不要手工编辑其产物）。
+
+### 使用边界（不是法律问题，是正确性问题）
+
+- **数据是参考值，不是事实来源。** 最终以运行时 `GET /v1/models` 的实测值为准 ——
+  它反映的是**我们自己的网关此刻**的能力，而 models.dev 是上游目录。
+- **对不上就返回 `unknown`，不写入任何参数。** 理由见
+  `packages/server/src/llm/modelsDev.ts` 的说明：自建网关的模型名常常是路由别名
+  （例如 `group/auto-qfmodel`），模糊匹配只会产生噪声。
+- **无 rate limit 声明**（Cloudflare CDN 上的静态 JSON）。我们仍然带 `If-None-Match`
+  条件请求并使用每日一次的节奏 —— 这是基本礼貌，不是许可要求。
+
+---
+
 ## 2. 本项目自己的许可证 【需专业意见】
 
 本项目采用 **[Apache License 2.0](../LICENSE)**（此前为专有软件）。

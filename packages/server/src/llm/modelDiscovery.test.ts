@@ -154,7 +154,7 @@ test('★ 组里有付费成员时保守标为 false（不能把付费的当免�
 test('★ 自动分档：不会思考且输出小的 → 快档（体力活）', () => {
   const m: DiscoveredModel = {
     id: 'x/y', displayName: 'y', provider: 'x', contextTokens: 128_000, maxOutputTokens: 8_000,
-    reasoning: false, reasoningLevels: [], image: false, free: 'unknown', rate: null, released: '', fast: false,
+    reasoning: false, reasoningLevels: [], image: false, free: 'unknown', rate: null, released: '', fast: false, profileSource: 'runtime',
   };
   assert.equal(inferTier(m), 'T1_fast');
 });
@@ -162,7 +162,7 @@ test('★ 自动分档：不会思考且输出小的 → 快档（体力活）',
 test('★ 自动分档：标了 fast 的直接进快档', () => {
   const m: DiscoveredModel = {
     id: 'x/y', displayName: 'y', provider: 'x', contextTokens: 1_000_000, maxOutputTokens: 100_000,
-    reasoning: true, reasoningLevels: [], image: false, free: 'unknown', rate: null, released: '', fast: true,
+    reasoning: true, reasoningLevels: [], image: false, free: 'unknown', rate: null, released: '', fast: true, profileSource: 'runtime',
   };
   assert.equal(inferTier(m), 'T1_fast', '★ fast 标记优先于其他启发式');
 });
@@ -170,7 +170,7 @@ test('★ 自动分档：标了 fast 的直接进快档', () => {
 test('★ 自动分档：会思考 + 输出能力大 → 强推理档', () => {
   const m: DiscoveredModel = {
     id: 'x/y', displayName: 'y', provider: 'x', contextTokens: 1_000_000, maxOutputTokens: 128_000,
-    reasoning: true, reasoningLevels: ['low', 'high', 'medium', 'xhigh'], image: false, free: 'unknown', rate: null, released: '', fast: false,
+    reasoning: true, reasoningLevels: ['low', 'high', 'medium', 'xhigh'], image: false, free: 'unknown', rate: null, released: '', fast: false, profileSource: 'runtime',
   };
   assert.equal(inferTier(m), 'T3_deep');
 });
@@ -184,7 +184,7 @@ test('★ 名称里的 `flash` 优先级高于"输出大"（实测踩到的坑�
   const m: DiscoveredModel = {
     id: 'workbuddy-ai/deepseek-v4.1-flash', displayName: 'x', provider: 'workbuddy-ai',
     contextTokens: 1_000_000, maxOutputTokens: 128_000, reasoning: true,
-    reasoningLevels: ['low', 'high', 'medium', 'xhigh'], image: false, free: 'unknown', rate: null, released: '', fast: false,
+    reasoningLevels: ['low', 'high', 'medium', 'xhigh'], image: false, free: 'unknown', rate: null, released: '', fast: false, profileSource: 'runtime',
   };
   assert.equal(inferTier(m), 'T1_fast', '★ flash 就是快档，不能因为输出大就当旗舰');
 });
@@ -215,7 +215,7 @@ test('★ 自动分档：会思考但输出平常 + 思考档位少 → 中档�
    */
   const m: DiscoveredModel = {
     id: 'x/y', displayName: 'y', provider: 'x', contextTokens: 200_000, maxOutputTokens: 32_000,
-    reasoning: true, reasoningLevels: ['low', 'high'], image: false, free: 'unknown', rate: null, released: '', fast: false,
+    reasoning: true, reasoningLevels: ['low', 'high'], image: false, free: 'unknown', rate: null, released: '', fast: false, profileSource: 'runtime',
   };
   assert.equal(inferTier(m), 'T2_mid', '★ 不能一律塞进 T3');
 });
@@ -228,7 +228,7 @@ test('★ 自动分档：思考等级丰富（≥4 档）也算旗舰信号', ()
   const m: DiscoveredModel = {
     id: 'x/y', displayName: 'y', provider: 'x', contextTokens: 200_000, maxOutputTokens: 32_000,
     reasoning: true, reasoningLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-    image: false, free: 'unknown', rate: null, released: '', fast: false,
+    image: false, free: 'unknown', rate: null, released: '', fast: false, profileSource: 'runtime',
   };
   assert.equal(inferTier(m), 'T3_deep');
 });
@@ -236,7 +236,7 @@ test('★ 自动分档：思考等级丰富（≥4 档）也算旗舰信号', ()
 test('★ 自动分档：不会思考 → 体力活档（不管上下文多大）', () => {
   const m: DiscoveredModel = {
     id: 'x/y', displayName: 'y', provider: 'x', contextTokens: 2_000_000, maxOutputTokens: 500_000,
-    reasoning: false, reasoningLevels: [], image: false, free: 'unknown', rate: null, released: '', fast: false,
+    reasoning: false, reasoningLevels: [], image: false, free: 'unknown', rate: null, released: '', fast: false, profileSource: 'runtime',
   };
   assert.equal(inferTier(m), 'T1_fast', '★ 不会思考就是体力活，上下文大不代表聪明');
 });
@@ -337,7 +337,7 @@ test('★ 名称正则不能误伤 `minimax` / `mini-max` 之外的短词', () =
   const mk = (id: string): DiscoveredModel => ({
     id, displayName: id, provider: 'p', contextTokens: 200_000, maxOutputTokens: 32_000,
     reasoning: true, reasoningLevels: ['low', 'high'], image: false, free: 'unknown',
-    rate: null, released: '', fast: false,
+    rate: null, released: '', fast: false, profileSource: 'runtime',
   });
 
   /* 必须【不】被判成 T1（它们是正常/旗舰模型名） */
@@ -357,7 +357,7 @@ test('★ `mini-max` 不再被误判（这是复核点名的实例）', () => {
   const m: DiscoveredModel = {
     id: 'provider/mini-max', displayName: 'x', provider: 'provider', contextTokens: 200_000,
     maxOutputTokens: 32_000, reasoning: true, reasoningLevels: ['low', 'high'], image: false,
-    free: 'unknown', rate: null, released: '', fast: false,
+    free: 'unknown', rate: null, released: '', fast: false, profileSource: 'runtime',
   };
   assert.notEqual(inferTier(m), 'T1_fast', '★ mini-max 不是"迷你模型"，不该进快档');
 });
