@@ -44,6 +44,32 @@ test('计价资产不是判据 —— USDC 当计价时不得因此剔掉别的�
   assert.equal(isStableBaseAsset('BTCUSDC'), false, '计价是 USDC 的 BTC 合约不是稳定币');
 });
 
+test('★★ 法币外汇对不是稳定币 —— EURUSDT 是真实交易品种，不得被剔除', () => {
+  /*
+   * ## 这条用例防的是一次真实的误杀（2026-10-14 审查）
+   *
+   * 名单里曾经有一条 `'EUR', // Stably EUR`。而币安上的 `EURUSDT` 是
+   * **Euro / TetherUS** —— 欧元外汇交易对（币安有 FX 永续：EUR/USD、GBP/USD、
+   * USD/JPY 等，USDT 结算）。它是**真实的交易品种**，波动率远大于稳定币，
+   * 把它剔除等于**直接放弃一个机会**。
+   *
+   * 而「不误杀真实机会」正是这份白名单的取舍本身（见 `STABLE_BASE_ASSETS`
+   * 的注释：名单外放行、宁可放过新型稳定币）。单字母法币代码是**最容易把
+   * 这条取舍翻过来**的一类。
+   *
+   * ⚠️ 这条钉住的是"**法币外汇 ≠ 法币稳定币**"这个区分：
+   * `EURUSDT` 的标的（EUR）是**法币本身的价格**，会动；
+   * 而 `USDCUSDT` 的标的（USDC）是**锚定 1 美元的代币**，基本不动。
+   */
+  assert.equal(
+    isStableBaseAsset('EURUSDT'),
+    false,
+    '★★ EURUSDT 是欧元外汇（会动的真实品种），不是稳定币 —— 不得被剔除',
+  );
+  assert.equal(isStableBaseAsset('GBPUSDT'), false, '同理：英镑外汇');
+  assert.equal(isStableBaseAsset('JPYUSDT'), false, '同理：日元外汇');
+});
+
 test('与 isMajorSymbol 互不重叠 —— BTC/ETH 永远不是稳定币', () => {
   for (const s of ['BTCUSDT', 'ETHUSDT']) {
     assert.equal(isMajorSymbol(s), true);
