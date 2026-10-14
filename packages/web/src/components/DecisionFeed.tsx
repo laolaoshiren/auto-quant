@@ -163,6 +163,7 @@ import { TeamCycleBlock } from './TeamBoard/TeamCycleBlock';
 import { usePolled } from '../lib/hooks';
 import { Badge, Empty, Panel, Spinner3, cn } from './ui';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
+import { summarizeMemberOutput } from '../lib/memberSummary';
 import { fmtInt, fmtLatency, fmtPriceUsd, fmtQty, fmtUsd, isNum, timeAgo } from '../lib/format';
 
 /**
@@ -781,6 +782,7 @@ export function DecisionFeed({
   /** 列表（滚动容器与哨兵）有没有挂上去 —— 观察器要在它出现的那一次重新挂。 */
   const listMounted = records.length > 0 || showLive;
 
+
   /**
    * **最近一轮里各岗位的步骤** —— 没有在途轮次时，固定工作流区显示这个。
    *
@@ -811,44 +813,42 @@ export function DecisionFeed({
         level: 'info',
         /*
          * ══════════════════════════════════════════════════════════════════
-         *  ⚠️⚠️ **`message` 是"在做什么"，不是"产出了什么"**（2026-10-14 用户报）
+         *  ⚠️⚠️ **`message` 是一段【可读的摘要】**（2026-10-14 两次用户反馈）
          * ══════════════════════════════════════════════════════════════════
          *
-         * ## 事故：岗位行里显示出一段裸 JSON
+         * ## 第一次反馈：岗位行里显示出一段裸 JSON
          *
-         * 用户截图：
          * ```
          *   ● 裁决官  进行中  深度思考  汇总多空论证，给出**唯一**结论（有权决定"…
          *              ```json [ {"symbol":"BTWUSDT","action":"ski…  17:26:38
          * ```
-         * 那一行的末尾把**模型的原始输出**（JSON 数组）当成了摘要显示。
+         * 根因：`message` 被填成了**产出全文**（`member.text`）——
+         * 而它可能是 JSON、可能是一篇长文。
          *
-         * ## 根因：`message` 被填成了产出全文
-         *
-         * 这里原来写的是 `message: member.text` —— 而 `member.text` 是
-         * `parseTeamTrace` 从 `<team>` 块里解出的**角色产出正文**：
-         * ```
-         *   可能是 JSON（裁决官）、可能是一段长文（分析师）、可能是 markdown 表格
-         * ```
-         * 而 `TeamBoard` 用 `message` 当"这一行在做什么"的**单行摘要**
-         *（`truncate` + `title`）。两者是完全不同的东西：
-         * ```
-         *   message（该是）: "汇总辩论并裁决"        ← 一行、给人扫的
-         *   member.text   : 模型的全部产出            ← 几百到几千字，给详情看的
-         * ```
-         *
-         * ## 修法：这里只给"它在哪个阶段做了什么"，产出交给详情区
+         * ## 第二次反馈：我改成"完成"之后，信息全没了
          *
          * ```
-         *   有产出 → "完成"（那一行只说"这一步做完了"）
-         *   没产出 → 也不编造
+         *   用户：「全是完成，展开看到也是完成何意味？」
          * ```
-         * ⚠️ **不要截断产出当摘要**：截出来的开头（`{"symbol":…` 或
-         * ```` ```json ````）既不是信息也不可读 —— 用户看到的就是那个。
-         * 产出的完整内容本来就在「展开详情 → 各角色产出」里（那里有
-         * 「展开全文」按钮，见 `MemberLine`）。
+         * **他说得对，我上一版修过头了**：把产出换成两个字，等于把那一行的
+         * 信息量降到零 —— 用户看不到"它到底得出了什么"。
+         *
+         * ## 现在的做法：**提取**一段摘要（既不裸奔也不丢弃）
+         *
+         * ```
+         *   ① 剥掉机器标签（`<reasoning>` 等）与 markdown 装饰（`**`、`##`）
+         *   ② 跳过开场白（"让我…"、"我先…"、"以下是…"）—— 那不是结论
+         *   ③ 取第一句有实质内容的话，截到 ~72 字
+         *   ④ 实在提取不到 → 退回"完成"（而不是显示空）
+         * ```
+         * ⚠️ **摘要与全文的差别是"取舍"而不是"截断"**：
+         * 直接 `slice(0, 60)` 会切出 `{"symbol":…` 或 `让我按决策流程走一遍。**第一步` ——
+         * 那正是第一次反馈里的形态。所以必须先**跳过开场白**再取。
+         *
+         * ⚠️ 产出全文仍在「展开详情 → 各角色产出」（那里有「展开全文」按钮）——
+         * 这一行只负责"扫一眼就知道它得出了什么"。
          */
-        message: '完成',
+        message: summarizeMemberOutput(member.text),
         role: member.role,
         /*
          * 阶段：`<team>` 块里没有记阶段，所以**不编造** ——

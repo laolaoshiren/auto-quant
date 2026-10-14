@@ -55,15 +55,26 @@ function feedCodeBlock(): string {
   return code.slice(at, at + 2000);
 }
 
-test('★★★ 岗位行的 message 不能是角色产出全文', () => {
+test('★★★ 岗位行的 message 必须是【提取的摘要】（既不是全文也不是"完成"）', () => {
   const block = feedCodeBlock();
   assert.ok(
     !/message:\s*member\.text/.test(block),
     '★ 不能把产出全文当 message —— 那正是用户看到的裸 JSON',
   );
+  /*
+   * ⚠️ **也不能只写 `'完成'`** —— 那是我的第二版，用户当场反馈：
+   * > 「全是完成，展开看到也是完成何意味？」
+   *
+   * 正确的做法是 `summarizeMemberOutput(member.text)`：
+   * 从产出里**提取**一段可读的结论。
+   */
   assert.ok(
-    /message:\s*'完成'/.test(block),
-    "★ message 应该是'完成'（一行、给人扫的）",
+    /message:\s*summarizeMemberOutput\(member\.text\)/.test(block),
+    '★ message 必须是提取的摘要（不是全文、也不是"完成"）',
+  );
+  assert.ok(
+    !/message:\s*'完成'/.test(block),
+    '★ 不能退回"完成"两个字 —— 那等于把这一行的信息量降到零',
   );
 });
 
