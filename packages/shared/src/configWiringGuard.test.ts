@@ -190,7 +190,7 @@ const KNOWN_UNWIRED: ReadonlyMap<string, string> = new Map([
 ]);
 
 /* -------------------------------------------------------------------------- */
-/*  验收                                                                        */
+/*  验收：配置字段                                                               */
 /* -------------------------------------------------------------------------- */
 
 test('★★★ 每个配置字段都必须在 schema 之外有读取点 —— 否则是死配置', () => {
@@ -254,5 +254,200 @@ test('★★★ 判据必须能真的报出死配置 —— 用一个不存在�
   assert.ok(
     real.get('excludeStablecoins')!.length > 0,
     '★★ 有读取点的字段不能被误报（`excludeStablecoins` 在 coins.ts 里被消费）',
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  验收：AI 团队岗位（同一族缺口的第二个实例）                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ⚠️ **同一个"定义了但没接线"的形态，在角色层也发生过。**
+ *
+ * `docs/FINDING-clerk-unwired.md`（另一维护者 2026-10-14 的侦察）记录：
+ * `clerk`（文员）在**三个声明层**里都存在（组织架构 `firm.ts`、提示词 `roles.ts`、
+ * 模型档位 `routedModel.ts`），而**生产代码 0 处调用** —— 而且
+ * `roles.test.ts` 的角色清单检查**会覆盖它**（它在 `ROLES` 里），
+ * 所以"定义了但没人用"**不会让任何测试变红**。
+ *
+ * 那份文档同时指出 `engineer` 有过**完全相同的处置**（`roles.ts` 里留了记录）。
+ *
+ * ⚠️ 这两个都是**产品决策**（要不要这个岗位），不是 BUG —— 所以我**不改代码**，
+ * 只加守卫 + 显式豁免（与他自己写的"待决策，未修"一致）。
+ */
+/**
+ * 配平花括号取对象字面量（跳过字符串）。
+ *
+ * ⚠️ 与 `configSchemaGuard.test.ts` 里那两个辅助函数是**同一形状**，
+ * 但这里单独一份 —— 因为两个测试文件在**不同的 workspace**
+ *（这个在 `shared`，那个也在 `shared`… 若合并会有耦合）。
+ * 将来若第三个地方需要它，应当抽到 `src/` 下的非测试模块，而不是再抄一份。
+ */
+function balancedObject(code: string, openIndex: number): string | null {
+  let depth = 0;
+  let inString: string | null = null;
+  let escaped = false;
+  for (let i = openIndex; i < code.length; i += 1) {
+    const ch = code[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === inString) inString = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') { inString = ch; continue; }
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return code.slice(openIndex, i + 1);
+    }
+  }
+  return null;
+}
+
+/** 取当前层级的顶层键名（跳过嵌套内容与字符串）。 */
+function keysAtThisLevel(text: string): string[] {
+  const keys: string[] = [];
+  let depth = 0;
+  let inString: string | null = null;
+  let escaped = false;
+  let token = '';
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === inString) inString = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') { inString = ch; continue; }
+    if (ch === '{' || ch === '[' || ch === '(') { depth += 1; continue; }
+    if (ch === '}' || ch === ']' || ch === ')') { depth -= 1; continue; }
+    if (depth !== 0) continue;
+    if (ch === ':' && token.trim() !== '') { keys.push(token.trim()); token = ''; continue; }
+    if (ch === ',') { token = ''; continue; }
+    token += ch;
+  }
+  return keys.filter((k) => /^[A-Za-z_$][\w$]*$/.test(k));
+}
+
+const ROLES_SOURCE = readFileSync(join(PACKAGES, 'server', 'src', 'trader', 'agent', 'roles.ts'), 'utf8');
+
+/** `roles.ts` 自身 —— 那是**定义**，不是**消费**，所以要从"调用点"扫描里排除。 */
+const RolesFile = join(PACKAGES, 'server', 'src', 'trader', 'agent', 'roles.ts');
+
+/** 从 `ROLES` 声明里取角色 id。 */
+function roleIds(): string[] {
+  /*
+   * ⚠️ **不能用通用的 `keysAtThisLevel`**：`ROLES` 的值里含**模板字符串**，
+   * 而 `${COMMON}` 这种插值里的 `{` 会让"配平 + 取键"那套逻辑错乱 ——
+   * 实测它只解析出 7 个（实际 10 个），而我一开始没发现，是**前置断言**
+   *（"至少 8 个"）把它拦下来的。
+   *
+   * 改用一条**针对这份字面量的形态**的匹配：`ROLES` 里每个角色都是
+   * 「行首两个空格 + 标识符 + `: {`」。它比通用解析窄，但**准**，
+   * 而且下面有"至少 8 个"的断言兜住"格式变了"的情形。
+   */
+  const anchor = /export const ROLES\s*(?::[^=]+)?=\s*\{/.exec(ROLES_SOURCE);
+  if (!anchor) return [];
+  const literal = balancedObject(ROLES_SOURCE, anchor.index + anchor[0].length - 1);
+  if (!literal) return [];
+  return [...literal.matchAll(/^ {2}([A-Za-z_$][\w$]*):\s*\{/gm)].map((m) => m[1]!);
+}
+
+/** 已知的"已声明、未接线"岗位 —— 显式豁免，附理由与决策方。 */
+const KNOWN_UNWIRED_ROLES: ReadonlyMap<string, string> = new Map([
+  [
+    'clerk',
+    '⚠️ 产品决策，未修。`docs/FINDING-clerk-unwired.md` 记录：它在组织架构' +
+      '（`firm.ts`，`status: \'planned\'`）、提示词（`roles.ts`）、模型档位' +
+      '（`routedModel.ts`）三层都存在，而生产代码 0 处调用。' +
+      '⚠️ `roles.test.ts` 的角色清单检查**会覆盖它**，所以"没人用"不会让测试变红 ——' +
+      '这正是需要这条守卫的原因。要不要这个岗位、以什么形式存在，由人拍板。',
+  ],
+]);
+
+test('★★★ 每个声明的 AI 岗位都必须在生产代码里被调用 —— 否则是死角色', () => {
+  const ids = roleIds();
+
+  /*
+   * ⚠️ 前置断言：必须真的解析出角色。
+   * 没有它，"一个都没解析出来 → 没有问题"也会绿。
+   */
+  assert.ok(
+    ids.length >= 8,
+    `★ 只从 \`ROLES\` 解析出 ${ids.length} 个角色 —— 解析可能失效了`,
+  );
+
+  const files = walk(join(PACKAGES, 'server', 'src')).filter((f) => f !== RolesFile);
+  const usage = new Map<string, string[]>(ids.map((id) => [id, []]));
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8');
+    for (const id of ids) {
+      /*
+       * ⚠️ **调用形式不止一种** —— 我第一版只认 `role: 'xxx'`，于是把
+       * `performance_analyst` / `attribution_analyst` **误报成死角色**。
+       * 而它们其实是被调用的，只是形式不同：
+       *
+       * ```ts
+       * const roles: AgentRole[] = ['performance_analyst', 'attribution_analyst'];  // 数组字面量
+       * if (role === 'performance_analyst') { … }                                   // 相等判断
+       * createRoutedDecisionModel({ request: { role: 'clerk', … } })                // 对象属性
+       * ```
+       *
+       * 所以判据是「**这个 id 作为字符串字面量出现在生产代码里**」——
+       * 比"精确匹配某种调用形状"宽，但**不会漏**；而多认一种形状的代价
+       *（可能把"只在注释里提到"当成调用）由下面的注释剥离解决。
+       */
+      const withoutComments = text
+        .split('\n')
+        .filter((line) => {
+          const t = line.trim();
+          return !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*');
+        })
+        .join('\n');
+      if (new RegExp(`'${id}'`).test(withoutComments)) usage.get(id)!.push(file);
+    }
+  }
+
+  const unwired = ids.filter((id) => (usage.get(id) ?? []).length === 0);
+  const unexpected = unwired.filter((id) => !KNOWN_UNWIRED_ROLES.has(id));
+
+  assert.deepEqual(
+    unexpected,
+    [],
+    '★★★ 这些岗位在 `ROLES` 里声明了（有提示词、有模型档位），但**生产代码 0 处调用**：\n' +
+      unexpected.map((id) => `      · ${id}`).join('\n') +
+      '\n    ⚠️ 角色清单测试**会覆盖它们**，所以"定义了但没人用"不会让任何测试变红\n' +
+      '    （`docs/FINDING-clerk-unwired.md` 记的就是这个形态，`engineer` 有过同样一次）。\n' +
+      '    ✅ 若确实是"已设计、待产品决策"，请加进 `KNOWN_UNWIRED_ROLES` 并写明理由与决策方。',
+  );
+
+  /* 反向：豁免名单不能留下已经接线了的角色。 */
+  for (const id of KNOWN_UNWIRED_ROLES.keys()) {
+    if ((usage.get(id) ?? []).length > 0) {
+      assert.fail(
+        `★★ \`${id}\` 已经在生产代码里被调用了，请把它从 \`KNOWN_UNWIRED_ROLES\` 移除。`,
+      );
+    }
+  }
+});
+
+test('★★★ 角色判据必须真的能报出死角色 —— 用一个不存在的 id 校准', () => {
+  const files = walk(join(PACKAGES, 'server', 'src')).filter((f) => f !== RolesFile);
+  const fake = 'definitelyNotARoleIdAnywhere';
+  const hit = files.some((f) => {
+    const text = readFileSync(f, 'utf8');
+    return new RegExp(`role:\\s*'${fake}'`).test(text);
+  });
+  assert.equal(hit, false, '★★★ 判据必须能识别"没有调用点"的角色 —— 否则上面那条是空转');
+
+  /* 且它不会把真实被调用的角色误报。 */
+  const strategistCalled = files.some((f) =>
+    new RegExp(`role:\\s*'strategist'`).test(readFileSync(f, 'utf8')),
+  );
+  assert.ok(
+    strategistCalled,
+    '★★ 有调用点的角色不能被误报（`strategist` 在 orchestrator.ts 里被调用）',
   );
 });
