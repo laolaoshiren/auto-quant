@@ -45,6 +45,11 @@ interface EquityTooltipProps {
    */
   baseline?: number;
   asset?: string;
+  /**
+   * 曲线画的是哪个口径 —— 提示框的标签必须跟着它，见 `DashboardEquityChart` 的
+   * `metric` 说明。不传时按 `'account'`（既有行为）。
+   */
+  metric?: 'account' | 'attributed';
 }
 
 /**
@@ -85,6 +90,7 @@ function EquityTooltip({
   payload,
   baseline,
   asset = 'USDT',
+  metric = 'account',
   ink,
 }: EquityTooltipProps & { ink: ReturnType<typeof useChartInk> }) {
   if (!active) return null;
@@ -105,16 +111,23 @@ function EquityTooltip({
 
       <div className="flex items-baseline justify-between gap-3">
         {/*
-         * ⚠️ **「账户权益」而不是「归属权益」**（2026-10-13 用户要求）。
+         * ⚠️ **标签必须与实际画的口径一致**（2026-10-15 改成按 `metric` 取）。
          *
-         * 这条曲线现在画的是 `accountEquity`（共享钱包的真实权益）——
-         * 与上方「账户余额」指标卡同一个数。标签必须说对，
-         * 否则用户会以为在看另一个口径（那正是他两次反馈的困惑）。
+         * 实盘画 `accountEquity`（共享钱包的真实权益）→ 标「账户权益」，
+         * 与上方「账户余额」指标卡同一个数。
+         *
+         * ⚠️ **模拟盘画 `equity`（归属）** —— 它的成交是本地模拟的，
+         * **从不触碰真实钱包**，所以 `accountEquity` 恒为一个值（实测 #11：
+         * 45 条快照里只有 1 种值，而 `equity` 有 23 种）→ 用账户口径画出来
+         * **必然是一条平线**（用户实测报过「一点记录痕迹都没有」）。
+         * 那时标签必须是「归属权益」，否则等于换了个谎。
          *
          * ⚠️ 归属口径没有消失：它在「交易盈亏」指标卡里回答
-         * "这个机器人赚了多少"（那是另一个问题，不该画成曲线）。
+         * "这个机器人赚了多少"。
          */}
-        <span className="text-xs text-ink-lo">账户权益</span>
+        <span className="text-xs text-ink-lo">
+          {metric === 'account' ? '账户权益' : '归属权益'}
+        </span>
         <span className="num text-sm text-ink-hi">
           {fmtNum(point.equity, 2)} {asset}
         </span>
@@ -354,7 +367,7 @@ export function DashboardEquityChart({
            * ⚠️ `baseline` 必须传进去，否则提示框只能给出一个孤零零的绝对权益，
            * 回答不了"我在这一刻是赚还是亏"。它就是图上那条「初始」虚线。
            */
-          content={<EquityTooltip baseline={baseline} asset={unit} ink={ink} />}
+          content={<EquityTooltip baseline={baseline} asset={unit} metric={metric} ink={ink} />}
           cursor={<EquityCursor ink={ink} />}
           shared={false}
           isAnimationActive={false}

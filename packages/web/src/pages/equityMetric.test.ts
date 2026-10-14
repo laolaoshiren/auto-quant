@@ -65,7 +65,7 @@ test('★★★ 账户口径为 0 时必须回落到归属口径（否则曲线�
   );
 });
 
-test('★★★ 「本段变化」必须与曲线同口径（账户）', () => {
+test('★★★ 「本段变化」必须与曲线同口径（按模式选）', () => {
   assert.ok(
     /windowFirst\s*=/.test(PAGE) && /windowAccountFirst/.test(PAGE),
     '★ `windowFirst` 必须优先取账户口径',
@@ -78,14 +78,46 @@ test('★★★ 「本段变化」必须与曲线同口径（账户）', () => {
     /liveAccountEquityForCurve/.test(PAGE),
     '★ 末端必须优先用实时账户权益（与「账户余额」同源）',
   );
+  /*
+   * ⚠️ 2026-10-15：首末端都要**跟着 `curveMetric` 走** —— 否则模拟盘上
+   * "本段变化"算的是账户口径（恒 0），而线画的是归属口径（在变），两者对不上。
+   */
+  assert.ok(
+    /curveMetric === 'attributed'/.test(PAGE),
+    '★ 首末端必须按 `curveMetric` 分支（模拟盘走归属口径）',
+  );
 });
 
-test('★★★ 缩略条也必须用账户口径（否则收起态与展开态不一致）', () => {
+test('★★★ 缩略条必须与展开态【同一个口径】（2026-10-15 改成按模式选）', () => {
+  /*
+   * ## 原来这条钉的是"一律账户口径"
+   *
+   * 2026-10-13 用户要求曲线与「账户余额」指标卡对上，所以统一走 `accountEquity`。
+   * 那对**实盘**是对的。
+   *
+   * ## 但模拟盘上它必然是一条平线（用户实测报过）
+   *
+   * `#11`（模拟盘）的成交是本地模拟的、**从不触碰真实钱包**：
+   * ```
+   *   45 条快照：equity（归属）23 种值 · account_equity（账户）【1 种值】
+   * ```
+   * 所以口径必须按模式选，而**收起态与展开态必须选同一个** ——
+   * 否则同一个东西在两种视图下画的是两条不同的线。
+   */
   assert.ok(
-    /values=\{windowed\.map\(\(snapshot\) =>\s*snapshot\.accountEquity > 0 \? snapshot\.accountEquity : snapshot\.equity,?\s*\)\}/.test(
-      PAGE,
-    ),
-    '★ `EquityMiniStrip` 的 values 必须走账户口径',
+    /curveMetric === 'attributed'/.test(PAGE),
+    '★ 缩略条必须按 `curveMetric` 取口径',
+  );
+  assert.ok(
+    /const curveMetric: 'account' \| 'attributed' = isDryRun \? 'attributed' : 'account'/.test(PAGE),
+    '★ 口径的选择规则：模拟盘 → 归属，实盘 → 账户',
+  );
+  /*
+   * ⚠️ 展开态那个组件也要收到同一个 `metric`（不能写死 `"account"`）。
+   */
+  assert.ok(
+    /metric=\{curveMetric\}/.test(PAGE),
+    '★ `DashboardEquityChart` 必须收到 `metric={curveMetric}`（不能写死）',
   );
 });
 

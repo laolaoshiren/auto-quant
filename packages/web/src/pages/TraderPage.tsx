@@ -891,14 +891,42 @@ export function TraderPage() {
    * 用户第一反应必然是"对不上"。
    *
    * ⚠️ 归属口径没有消失：它仍在「交易盈亏」指标卡里（那是它该在的地方）。
+   *
+   * ## ⚠️⚠️ **但模拟盘必须用归属口径**（2026-10-15 用户实测抓到）
+   *
+   * 用户报 `#11`（模拟盘）：「**上面那块除了胜率其他一点记录痕迹都没有**」——
+   * 卡片是 $0.00，**曲线是一条平线**。
+   *
+   * 根因（与卡片那个 BUG 同源）：模拟盘的成交是**本地模拟**的，
+   * 它**从不触碰真实钱包**：
+   * ```
+   *   实测 #11 的 45 条快照：
+   *     equity（归属）       23 种不同的值   ← 在变
+   *     account_equity（账户） 1 种值（恒 20.7519）  ← 【完全不动】
+   *   对照 #10 实盘：equity 1258 种 · account_equity 1250 种（都正常）
+   * ```
+   * 而曲线原来一律画 `accountEquity` → **必然是一条平线**。
+   *
+   * 所以口径要**按模式选**：模拟盘画归属口径（那是它的"钱"），
+   * 实盘画账户口径（那是它真正在花的钱）。
+   *
+   * ⚠️ 标签也必须跟着换 —— 否则曲线画归属、却标着"账户权益"，那是新的谎。
    */
+  const isDryRun = stats?.dryRun === true;
+  const curveMetric: 'account' | 'attributed' = isDryRun ? 'attributed' : 'account';
   const windowAccountFirst = windowed[0]?.accountEquity ?? 0;
+  /*
+   * ⚠️ 首末端必须与曲线**同一个口径** —— 否则「本段变化」算的是账户口径、
+   * 而线画的是归属口径（模拟盘上两者差一个恒定的钱包值）。
+   */
   const windowFirst =
-    windowAccountFirst > 0
-      ? windowAccountFirst
-      : /* 旧快照没有账户口径（迁移前回填，缺值时是 0）→ 回落到归属口径，
-           否则曲线会砸到地板而看起来完全正常。 */
-        (windowed[0]?.equity ?? equity);
+    curveMetric === 'attributed'
+      ? (windowed[0]?.equity ?? equity)
+      : windowAccountFirst > 0
+        ? windowAccountFirst
+        : /* 旧快照没有账户口径（迁移前回填，缺值时是 0）→ 回落到归属口径，
+             否则曲线会砸到地板而看起来完全正常。 */
+          (windowed[0]?.equity ?? equity);
   /*
    * 末端用**实时账户权益**（60 秒轮询）优先 —— 与指标卡「账户余额」同源，
    * 这样曲线末端与卡片显示的数字**严格相等**，用户不会看到"差一点"。
@@ -908,11 +936,17 @@ export function TraderPage() {
    */
   const lastSnap = windowed[windowed.length - 1];
   const liveAccountEquityForCurve = num(accountQuery.data?.account?.equity);
+  /*
+   * ⚠️ 模拟盘**不能**用实时账户权益（`accountQuery`）—— 那读的是真实钱包，
+   * 而模拟盘的交易不改变它。用了就会在曲线末端接上一个和整条线无关的值。
+   */
   const windowLast =
-    liveAccountEquityForCurve ??
-    ((lastSnap?.accountEquity ?? 0) > 0 ? lastSnap?.accountEquity : undefined) ??
-    lastSnap?.equity ??
-    equity;
+    curveMetric === 'attributed'
+      ? (lastSnap?.equity ?? equity)
+      : (liveAccountEquityForCurve ??
+        ((lastSnap?.accountEquity ?? 0) > 0 ? lastSnap?.accountEquity : undefined) ??
+        lastSnap?.equity ??
+        equity);
   const windowDelta = windowLast - windowFirst;
   const windowPercent = windowFirst !== 0 ? (windowDelta / Math.abs(windowFirst)) * 100 : 0;
 
@@ -1961,9 +1995,10 @@ export function TraderPage() {
           title={
             <span className="flex items-center gap-1">
               <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
-                {/* ⚠️ 「账户权益」而不是「归属权益」—— 曲线画的是共享钱包的真实权益
-                    （与上方「账户余额」指标卡同一个数），标签必须说对。 */}
-                账户权益曲线
+                {/* ⚠️ 标签必须与**实际画的口径**一致（2026-10-15 改成按模式选）。
+                    实盘 → 账户权益（共享钱包真实权益，与「账户余额」指标卡同一个数）；
+                    模拟盘 → 归属权益（它的成交不改变真实钱包，账户口径恒为一个值）。 */}
+                {curveMetric === 'account' ? '账户权益曲线' : '归属权益曲线'}
               </ChartTabButton>
               <ChartTabButton active={chartTab === 'candles'} onClick={() => setChartTab('candles')}>
                 行情图表
@@ -2021,7 +2056,11 @@ export function TraderPage() {
                  * 见 `windowFirst` 那段说明。
                  */
                 values={windowed.map((snapshot) =>
-                  snapshot.accountEquity > 0 ? snapshot.accountEquity : snapshot.equity,
+                  curveMetric === 'attributed'
+                    ? snapshot.equity
+                    : snapshot.accountEquity > 0
+                      ? snapshot.accountEquity
+                      : snapshot.equity,
                 )}
                 delta={windowDelta}
                 percent={windowPercent}
@@ -2049,10 +2088,13 @@ export function TraderPage() {
                   baseline={trader.initialEquity}
                   height={equityChartHeight}
                   /*
-                   * ⚠️ **账户口径**（2026-10-13 用户要求）——
-                   * 曲线必须能和上方「账户余额」指标卡对上。见 `windowFirst` 那段。
+                   * ⚠️ **口径按模式选**（2026-10-15）——
+                   * 实盘画账户口径（与「账户余额」指标卡对上）；
+                   * 模拟盘画归属口径（它的成交不改变真实钱包，
+                   * 账户口径恒为一个值 → 必然平线，用户实测报过）。
+                   * 见 `curveMetric` 那段说明。
                    */
-                  metric="account"
+                  metric={curveMetric}
                 />
               </div>
             )
