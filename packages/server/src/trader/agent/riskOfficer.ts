@@ -168,7 +168,49 @@ export function parseRiskOfficerVerdict(text: string, decisions: readonly Decisi
 
   const approve = approveRe.test(scope);
   const reject = rejectRe.test(scope);
-  const reduce = /削减|减半|降低仓位|reduce/i.test(scope);
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **"削减"必须排除否定式**（2026-10-15 修，一次真实事故）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 原来这一行是：
+   * ```
+   *   const reduce = /削减|减半|降低仓位|reduce/i.test(scope);
+   * ```
+   * **没有否定式排除** —— 于是风控官明确说"不用削"时，仓位照样被砍一半：
+   * ```
+   *   ## 裁决：批准（无需削减）        → reduced=true → 11 USDT 砍成 5.5
+   *   ## 审批结论：批准，无需削减仓位   → reduced=true → 6 砍成 3
+   *   ## 风险审查结论：**批准**（不建议削减）→ reduced=true
+   * ```
+   * 实测线上 `cyc 153`（`2026-10-14T03:15:21Z`）：
+   * ```
+   *   <risk>  削减后放行：## 裁决：批准（无需削减）      ← 它说的是"无需"
+   *   <decision>  QUSDT open_long positionSizeUsd:5.5    ← 实际砍了一半
+   *   judge 原始:  QUSDT open_long positionSizeUsd:11
+   *   reasoning: "[风控官削减 50%] …"                     ← 还留了一条假痕
+   * ```
+   * `cyc 148` 同样（说"批准"、6 砍成 3）。
+   *
+   * ## 为什么这比"少削一次"严重
+   *
+   * ```
+   *   ① 直接后果：仓位被无故减半 —— 而这会改变真实盈亏（真钱）
+   *   ② 更糟的是【留痕是假的】：审计块写"削减后放行"，
+   *      而"事后能说清当时为什么这么做"正是审计块唯一的用途
+   *   ③ 它与 `approveRe` 的 `(?<!不)同意` 是**同一种缺陷**，
+   *      而那一处早就修了 —— 这一处被漏掉（"只做一半"的又一次）
+   * ```
+   *
+   * ## 判据：先用否定式消掉"无需削减/不建议削减"这类短语，再看有没有削减意图
+   *
+   * ⚠️ 用**消去法**（把否定短语从文本里去掉再匹配）而不是给每个动词加后顾断言：
+   * 后者要为「削减/减半/降低仓位/reduce」各写一份，漏一个就是同一个 bug 再来一次。
+   */
+  const withoutNegatedReduce = scope
+    .replace(/无需削减|无须削减|不必削减|不用削减|不建议削减|无须减半|不必减半/g, '')
+    .replace(/无需|无须|不必|不用|不建议/g, '');
+  const reduce = /削减|减半|降低仓位|reduce/i.test(withoutNegatedReduce);
 
   const reason = (firstLine ?? '（风控官未给出理由）').slice(0, 300);
 
