@@ -68,10 +68,40 @@
     --aq-ink-rgb: 234 233 244;
     --aq-ink-mid: #b0aec0;
     --aq-ink-mid-rgb: 176 174 192;
-    --aq-ink-lo: #7d7a8c;
-    --aq-ink-lo-rgb: 125 122 140;
-    --aq-ink-faint: #57545f;
-    --aq-ink-faint-rgb: 87 84 95;
+    /*
+     * ⚠️ **`ink-lo` 与 `ink-faint` 提到 WCAG AA（外部 issue #172）**。
+     *
+     * 原来的值只按"视觉层级够弱"挑，**没有按对比度下限挑**。实测：
+     *
+     * ```
+     *   ink-faint #57545f : page 2.676 / panel 2.532   ← 远低于 4.5
+     *   ink-lo    #7d7a8c : page 4.746 / panel 4.491   ← panel 上也差一点
+     * ```
+     *
+     * 而全仓 `text-ink-faint` 约 300 处，其中不少是 `text-xs`（11px）的说明文字 ——
+     * 属 WCAG 1.4.3 的**普通文本**（< 18pt）⇒ 硬要求 4.5。
+     *
+     * ## ⚠️ 为什么两级**一起**提亮（而不是只修 faint）
+     *
+     * 只把 `ink-faint` 提到 4.508 需要 `#7e7b84`，而 `ink-lo` 现值 `#7d7a8c`
+     * 的对比度是 **4.491** —— 两者几乎相同，**四级层级会退化成三级**
+     *（faint 与 lo 分不出来）。所以按同一比例提亮、保住间距：
+     *
+     * ```
+     *   ink-lo    #8f8d9c : page 6.088 / panel 5.761
+     *   ink-faint #7e7b84 : page 4.764 / panel 4.508   ← 刚过 4.5
+     * ```
+     *
+     * 用户拍板的口径是"**达标即止、层级顺序不变**" —— 所以只动最弱的两级、
+     * 且恰好提到过线（不去"多提亮一点更安全"，那会压缩层级差）。
+     *
+     * `contrast.test.ts` 钉住三件事：每级在 page/panel 上都 ≥ 4.5、
+     * 四级顺序严格递减、相邻两级间距 ≥ 0.4。
+     */
+    --aq-ink-lo: #8f8d9c;
+    --aq-ink-lo-rgb: 143 141 156;
+    --aq-ink-faint: #7e7b84;
+    --aq-ink-faint-rgb: 126 123 132;
     /*
      * `ink-soft` —— **迁移期兼容别名，等于 `ink-mid`**。
      *

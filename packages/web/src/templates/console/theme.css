@@ -103,10 +103,24 @@ html.aq-console {
   --aq-ink-rgb: 223 230 238;
   --aq-ink-muted: #9fb0c0;
   --aq-ink-muted-rgb: 159 176 192;
-  --aq-ink-dim: #78889a;
-  --aq-ink-dim-rgb: 120 136 154;
-  --aq-ink-faint: #5a6876;
-  --aq-ink-faint-rgb: 90 104 118;
+  /*
+   * ⚠️ **`ink-dim`（= `ink-lo`）与 `ink-faint` 提到 WCAG AA**（外部 issue #172）。
+   *
+   * 实测原来是 `ink-faint #5a6876` → page 3.000 / panel 2.769，
+   * `ink-dim #78889a` → page 4.722 / **panel 4.359**（面板底上不达 4.5）。
+   *
+   * 与 classic 同一个处理：两级**一起**提亮、恰好过线，保住四级间距。
+   * 只修 `ink-faint` 会让它与 `ink-dim` 的对比度几乎相同（层级退化）。
+   *
+   * ```
+   *   ink-dim   #8b99a8 : page 5.891 / panel 5.438
+   *   ink-faint #808b96 : page 4.937 / panel 4.558
+   * ```
+   */
+  --aq-ink-dim: #8b99a8;
+  --aq-ink-dim-rgb: 139 153 168;
+  --aq-ink-faint: #808b96;
+  --aq-ink-faint-rgb: 128 139 150;
 
   /* 语义色 */
   --aq-ok: #4ade80;
@@ -179,10 +193,19 @@ html.aq-console {
   --aq-ink-rgb: 223 230 238;
   --aq-ink-mid: #9fb0c0;
   --aq-ink-mid-rgb: 159 176 192;
-  --aq-ink-lo: #78889a;
-  --aq-ink-lo-rgb: 120 136 154;
-  --aq-ink-faint: #5a6876;
-  --aq-ink-faint-rgb: 90 104 118;
+  /*
+   * ⚠️ **`ink-lo` 与 `ink-faint` 提到 WCAG AA**（外部 issue #172）。
+   * 见上面那组 `ink-dim` / `ink-faint` 的说明 —— 这一组是**新命名**，
+   * 而在同一个 `html.aq-console` 块里它定义得更靠后，所以**它生效**。
+   *
+   * ⚠️ 同一个块里两套命名（`ink-dim`/`ink-muted` 与 `ink-lo`/`ink-mid`）
+   * 各定义一次，值必须保持一致 —— 否则"改了一处、漏了一处"会静默分叉。
+   * `contrast.test.ts` 取的是**第一次**出现（旧命名那组），所以两组都得改。
+   */
+  --aq-ink-lo: #8b99a8;
+  --aq-ink-lo-rgb: 139 153 168;
+  --aq-ink-faint: #808b96;
+  --aq-ink-faint-rgb: 128 139 150;
 
   --aq-up: #4ade80;
   --aq-up-rgb: 74 222 128;
@@ -241,12 +264,31 @@ html.aq-console[data-skin='light'] {
   --aq-ink-strong-rgb: 11 22 32;
   --aq-ink: #16212e;
   --aq-ink-rgb: 22 33 46;
-  --aq-ink-muted: #55677a;
-  --aq-ink-muted-rgb: 85 103 122;
-  --aq-ink-dim: #78889a;
-  --aq-ink-dim-rgb: 120 136 154;
-  --aq-ink-faint: #9aa7b4;
-  --aq-ink-faint-rgb: 154 167 180;
+  /*
+   * ⚠️ **浅色的辅助文字比深色更糟**（外部 issue #177）—— 三级一起压暗到达标。
+   *
+   * 实测原来（底色 `page #f1f4f7`）：
+   *
+   * ```
+   *   ink-faint #9aa7b4 : 2.222   ← 远低于 4.5（它是"更浅"，落在浅底上更看不清）
+   *   ink-dim   #78889a : 3.287
+   *   ink-muted #55677a : 5.273   ← 唯一达标的那一级
+   * ```
+   *
+   * 即浅色下**最弱的两级都不达标**，而"浅色下辅助文字更糟"正是 #177 的结论。
+   *
+   * 修法：三级一起按目标对比度反解（`mid` 6.2 / `lo` 5.3 / `faint` 4.6）——
+   * 互不相同、间距 ≥0.68，**层级顺序不变**（用户拍板"达标即止、层级顺序不变"）。
+   *
+   * ⚠️ `ink-muted` **也要动**：它原来 5.273 虽然达标，但 `lo`/`faint` 要在它
+   * 之下各占 4.5+ 且保持间距，空间不够 —— 所以三级一起重新分配。
+   */
+  --aq-ink-muted: #485767;
+  --aq-ink-muted-rgb: 72 87 103;
+  --aq-ink-dim: #56616e;
+  --aq-ink-dim-rgb: 86 97 110;
+  --aq-ink-faint: #626a72;
+  --aq-ink-faint-rgb: 98 106 114;
 
   --aq-ok: #107c41;
   --aq-ok-rgb: 16 124 65;
@@ -301,12 +343,16 @@ html.aq-console[data-skin='light'] {
   --aq-ink-strong-rgb: 11 22 32;
   --aq-ink: #16212e;
   --aq-ink-rgb: 22 33 46;
-  --aq-ink-mid: #55677a;
-  --aq-ink-mid-rgb: 85 103 122;
-  --aq-ink-lo: #6d7d8e;
-  --aq-ink-lo-rgb: 109 125 142;
-  --aq-ink-faint: #9aa7b4;
-  --aq-ink-faint-rgb: 154 167 180;
+  /*
+   * ⚠️ 与上面那组 `ink-muted` / `ink-dim` / `ink-faint` **必须一致**
+   *（同一块里两套命名各定义一次，后者生效）—— 见 issue #177 的说明。
+   */
+  --aq-ink-mid: #485767;
+  --aq-ink-mid-rgb: 72 87 103;
+  --aq-ink-lo: #56616e;
+  --aq-ink-lo-rgb: 86 97 110;
+  --aq-ink-faint: #626a72;
+  --aq-ink-faint-rgb: 98 106 114;
 
   --aq-up: #107c41;
   --aq-up-rgb: 16 124 65;
