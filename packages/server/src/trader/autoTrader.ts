@@ -4266,6 +4266,17 @@ export class AutoTrader {
       volatilePrompt,
       log: executionLog,
       progress,
+      snapshots: snapshotBySymbol,
+      /*
+       * ⚠️ 账户读数要传进去（外部 issue #117）：回执里的 `adjust_protection`
+       * 现在**要过风控引擎**，而引擎的判据需要账户（保证金占用等）。
+       * 用本轮刚读到的权威值，而不是在这里重新拉一遍。
+       */
+      account: {
+        equity: account.equity,
+        availableBalance: account.availableBalance,
+        marginUsed: account.marginUsed,
+      },
     }).catch((error) => {
       log.warn(`[${this.deps.trader.name}] 执行回执失败（不影响已完成的下单）：${(error as Error).message}`);
       return [] as ExecutionLogEntry[];
@@ -8201,6 +8212,23 @@ reduceQuantity: null,
     log: ExecutionLogEntry[];
     /** 本周期用过的行情快照，用来给回执里的价位提供上下文。 */
     progress: CycleProgress;
+    /**
+     * 本轮的行情快照（按 symbol）。
+     *
+     * ⚠️ **回执里的 `adjust_protection` 要过风控引擎**（外部 issue #117），
+     * 而引擎的棘轮校验需要 `positions`（当前止损）与 `snapshots`（现价）——
+     * 所以它必须传进来，而不是在这个方法里重新拉一遍（那会多一轮网络请求，
+     * 也可能与刚才执行时用的价格不一致）。
+     */
+    snapshots: Map<string, MarketSnapshot>;
+    /**
+     * 本轮的**权威**账户读数（交易所侧）。
+     *
+     * ⚠️ 回执里的 `adjust_protection` 要过风控引擎（外部 issue #117），
+     * 而引擎的判据需要账户（保证金占用、可用余额）。用它而不是在这里重拉 ——
+     * 重拉会多一次网络请求，也可能与刚才执行时用的读数不一致。
+     */
+    account: { equity: number; availableBalance: number; marginUsed: number };
   }): Promise<ExecutionLogEntry[]> {
     const traderId = this.deps.trader.id;
 
@@ -8272,11 +8300,14 @@ reduceQuantity: null,
       '',
       '## 你现在可以做什么',
       '',
-      '**只能用这两个动作**（它们只降低风险，所以这一轮不再走那批开仓上限）：',
+      '**只能用这两个动作**（它们不增加敞口，所以这一轮不再走那批开仓上限）：',
       '',
       '- `adjust_protection` —— **按上面的真实成交价**重新考虑止损止盈。',
       '  决策时的价位与成交价可能不同，止损距离跟着变；**这是你唯一一次在成交后',
       '  修正它的机会**，而它必须仍满足盈亏比与手续费门槛。',
+      '  ⚠️ **止损只能向有利方向移动**：多头只能往上、空头只能往下。',
+      '  反向移动是**主动扩大风险**（把已经锁到的浮盈交出去），风控会直接拒绝 ——',
+      '  所以不要把止损往回挪，那一次调用会被记成 `rejected` 并原样回给你看。',
       '- `cancel_pending` —— 撤掉上面的挂单（如果你认为它不该再等了）。',
       '',
       '**改不了的就别写**：不要开新仓、不要加仓、不要减仓平仓 —— 那些下一轮再说。',
@@ -8379,10 +8410,91 @@ reduceQuantity: null,
      * 没有产生任何后果 —— 记成 failed 反而会污染决策流。
      */
     const followed: ExecutionLogEntry[] = [];
-    for (const decision of parsed.decisions) {
+
+    /*
+     * ⚠️ **回执里的 `adjust_protection` 必须先过风控引擎**（外部 issue #117）。
+     *
+     * ## 这里原来跳过风控
+     *
+     * 主决策路径是 `this.risk.review(gatedDecisions, …)` → 只执行 `verdict.approved`。
+     * 而回执这一轮直接 `await this.executeAdjust(decision)` —— **从未经过风控**。
+     *
+     * ## 为什么这条特别要紧
+     *
+     * `RiskEngine.reviewAdjust()` 对 `adjust_protection` 有两条**别的层都没有**的校验 ——
+     * 棘轮（ratchet）：
+     *
+     * ```
+     *   多头止损只能往上移（往下 = 主动扩大风险）
+     *   空头止损只能往下移
+     * ```
+     *
+     * 它保护的是**已经锁到的浮盈**。允许反向移动意味着模型一句话就能把
+     * 靠 `applyBreakevenGuard` / 移动止损攒下来的保护**放松掉**。
+     *
+     * 而回执这一轮恰恰是"模型刚看完成交回报、情绪与上下文最浓"的时刻
+     *（见本方法的头部注释），也是**唯一能改动止损止盈的两条路之一** ——
+     * 它绕过了唯一一道方向校验。
+     *
+     * 且 `executeAdjust()` 内部**不记账 `adjustments`**，所以事后审计里
+     * 看不出"风控曾经钳制过它" —— 违反 README 的「每一次钳制都留下记录」。
+     *
+     * ## 为什么只审查 adjust（而不审 cancel）
+     *
+     * `cancel_pending` **只降低风险**（撤掉一张挂着的入场单 = 释放一个已承诺的敞口），
+     * 风控里也是"总是通过"（见 `review()` 里 `isCancelPendingAction` 那条）。
+     * 所以它不必过引擎 —— 但**前提是这个判断在提示词里是准的**，见下面那处修正。
+     */
+    const adjustDecisions = parsed.decisions.filter((d) => isAdjustAction(d.action));
+    const adjustVerdict =
+      adjustDecisions.length > 0
+        ? this.risk.review(adjustDecisions, {
+            config: this.activeConfig,
+            account: {
+              equity: input.account.equity,
+              availableBalance: input.account.availableBalance,
+              marginUsed: input.account.marginUsed,
+              /* 回执这一轮不开仓，持仓数只用于引擎内部的通用判据。 */
+              positionCount: positionStore.open(traderId).length,
+            },
+            positions: new Map(
+              positionStore.open(traderId).map((p) => [p.symbol, this.toPositionView(p, input.snapshots)]),
+            ),
+            snapshots: input.snapshots,
+            minNotionalOf: (symbol) => this.deps.registry.minNotional(symbol),
+            quantityFor: (symbol, notionalUsd, price) =>
+              this.deps.registry.notionalToQuantity(symbol, notionalUsd, price),
+            quantityUpFor: (symbol, quantity) => this.deps.registry.roundQuantityUp(symbol, quantity),
+            entriesThisCycle: 0,
+            entriesLastHour: 0,
+            /* 回执不涉及"入场"这一类判据，费率给 null 走引擎的兜底。 */
+            roundTripFeeRate: null,
+          })
+        : { approved: [], rejected: [] };
+
+    /* 被风控拒掉的调整要留痕 —— 模型下一轮能看见，操作员也能看见。 */
+    for (const rejection of adjustVerdict.rejected) {
+      followed.push({
+        action: rejection.decision.action,
+        symbol: rejection.decision.symbol,
+        status: 'rejected',
+        detail: rejection.reason,
+      } as ExecutionLogEntry);
+    }
+
+    /*
+     * ⚠️ **只执行风控放行的那一份** —— 与主路径同一个形状（`verdict.approved`），
+     * 而不是原始 `parsed.decisions`。
+     */
+    for (const decision of adjustVerdict.approved) {
       if (isAdjustAction(decision.action)) {
         followed.push(await this.executeAdjust(decision));
-      } else if (isCancelPendingAction(decision.action)) {
+      }
+    }
+
+    for (const decision of parsed.decisions) {
+      if (isAdjustAction(decision.action)) continue;
+      if (isCancelPendingAction(decision.action)) {
         followed.push(await this.executeCancelPending(decision));
       } else if (
         isSkipAction(decision.action) ||
