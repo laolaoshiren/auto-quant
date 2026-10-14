@@ -209,12 +209,12 @@ HAD_ENV=`$( [ -f .env ] && echo yes || echo no )
 
 # 前端产物目录先删干净再解包。
 #
-# `vite build` 给每个 chunk 起带内容哈希的名字，所以每次构建的文件名都不同。
-# 而 `tar -x` 只覆盖、不删除 —— 结果是**每次部署都在服务器上留下一批陈旧 chunk**：
+# ``vite build`` 给每个 chunk 起带内容哈希的名字，所以每次构建的文件名都不同。
+# 而 ``tar -x`` 只覆盖、不删除 —— 结果是**每次部署都在服务器上留下一批陈旧 chunk**：
 # 实测一次累积到 69 个文件，而本地构建只有 35 个。它们不会被 index.html 引用，
 # 但会一直占着磁盘，也让"服务器上到底是哪一版"变得难以判断。
 #
-# `dist` 完全由构建产出，删掉再解包是安全的；源码与 data 都不在这个目录里。
+# ``dist`` 完全由构建产出，删掉再解包是安全的；源码与 data 都不在这个目录里。
 rm -rf packages/web/dist
 
 tar -xzf /tmp/aq.tar.gz -C $RemoteDir
@@ -234,20 +234,20 @@ chmod 600 .env 2>/dev/null || true
 # ---------------------------------------------------------------------------
 # ## 为什么需要（实测踩到）
 #
-# `caller-keys.json` 权限同样是 `-rw-------`（属主 UID 65532，容器内用户），
-# 服务以 `autoquant` 身份跑，**读不到**它。
+# ``caller-keys.json`` 权限同样是 ``-rw-------``（属主 UID 65532，容器内用户），
+# 服务以 ``autoquant`` 身份跑，**读不到**它。
 #
 # 后果非常具体（实测日志）：
 #
 #     [error] AI 团队模式未启用：找不到 magpie 网关配置
 #
 # 也就是说：**AI 团队模式静默退回了单模型**，而界面上还写着"AI 团队"。
-# 与 `plugin-providers.json` 是同一类问题 —— 上一轮我只修了那个档案文件、
+# 与 ``plugin-providers.json`` 是同一类问题 —— 上一轮我只修了那个档案文件、
 # **漏了这个 key 文件**，于是同一个坑换个文件又踩一次。
 #
 # 团队模式的模型出口与联网搜索**都依赖这个 key**，所以它是硬依赖。
 #
-# ⚠️ 复制失败**不阻断部署**，但会在 `MAGPIE_GATEWAY_KEY` 缺席时
+# ⚠️ 复制失败**不阻断部署**，但会在 ``MAGPIE_GATEWAY_KEY`` 缺席时
 # 让团队模式明确报告"未启用"（而不是静默降级）。
 MAGPIE_KEY_SRC=/var/lib/docker/volumes/magpie-config/_data/magpie/caller-keys.json
 MAGPIE_KEY_DST=$RemoteDir/data/magpie-caller-keys.json
@@ -265,11 +265,11 @@ fi
 # ---------------------------------------------------------------------------
 # ## 为什么要复制一份，而不是直接读原文件
 #
-# magpie 的 `plugin-providers.json` 权限是 `-rw-------`（属主 UID 65532，
-# 那是容器内的用户）。服务以 `autoquant` 身份运行，**读不到它**（实测确认）。
+# magpie 的 ``plugin-providers.json`` 权限是 ``-rw-------``（属主 UID 65532，
+# 那是容器内的用户）。服务以 ``autoquant`` 身份运行，**读不到它**（实测确认）。
 #
 # 而这份文件是"哪些模型免费不限量、哪些要消耗积分"的**唯一来源** ——
-# `/v1/models` 只给 context/reasoning，**没有 `free` 也没有 `cost`**（实测）。
+# ``/v1/models`` 只给 context/reasoning，**没有 ``free`` 也没有 ``cost``**（实测）。
 #
 # 拿不到它的后果很具体：自动发现会把所有模型标成"未知免费状态"，
 # 于是"体力活优先用免费模型"的策略**静默失效**（实测日志：
@@ -280,7 +280,7 @@ fi
 # 改 magpie 的文件权限会影响容器内的 magpie 自身，且 magpie 每次写配置都可能重置它。
 # **复制一份只读副本**对 magpie 零影响，且部署脚本每次都刷新它。
 #
-# ⚠️ 复制失败**不阻断部署** —— 那只是让免费标注退化（`free: 'unknown'`），
+# ⚠️ 复制失败**不阻断部署** —— 那只是让免费标注退化（``free: 'unknown'``），
 # 团队模式仍能用静态档案跑，只是少了"优先用免费模型"这一层优化。
 MAGPIE_SRC=/var/lib/docker/volumes/magpie-config/_data/magpie/plugin-providers.json
 MAGPIE_DST=$RemoteDir/data/magpie-plugin-providers.json
@@ -300,13 +300,13 @@ $remote += @"
 # 远端只做"装依赖"，**不再构建前端**
 # ---------------------------------------------------------------------------
 # 前端产物（packages/web/dist）在本地构建、随包一起传过来。原因见文件顶部：
-# 目标机常常是 2 GB 且无 swap 的小机器，`vite build` 会把它打死。
+# 目标机常常是 2 GB 且无 swap 的小机器，``vite build`` 会把它打死。
 #
 # 依赖仍然要在服务器上装 —— node_modules 不适合跨平台传输。
 # 用 --omit=dev：服务器通过 tsx 直接跑 TypeScript，不需要 typescript / @types 这些。
 #
 # 只在 package-lock 变了的时候装。没有这一步时，项目一新增依赖服务器就缺包，
-# 而报错来自 vite（`Rollup failed to resolve import "@radix-ui/react-collapsible"`），
+# 而报错来自 vite（``Rollup failed to resolve import "@radix-ui/react-collapsible"``），
 # 完全指不到"依赖没装"这个真正的原因 —— UI 重设计加了一批 Radix 包之后就这么炸过。
 #
 # HOME 必须指向可写目录：autoquant 的 shell 是 nologin，npm 写 ~/.npm/_logs 会失败，
@@ -317,22 +317,22 @@ if [ "`$(cat `$STAMP_FILE 2>/dev/null)" != "`$LOCK_HASH" ]; then
     echo "==> 依赖有变化，正在安装（npm ci --omit=dev）"
     mkdir -p /tmp/aqhome
     chown autoquant:autoquant /tmp/aqhome 2>/dev/null || true
-    # ⚠️ **不能用 `npm ci … 2>&1 | tail -2` 放在 if 里（2026-10-11 审查发现）。**
+    # ⚠️ **不能用 ``npm ci … 2>&1 | tail -2`` 放在 if 里（2026-10-11 审查发现）。**
     #
-    # 管道的退出码是 `tail` 的 0，于是**安装失败也走 then 分支**、把 lock hash 写进 stamp，
+    # 管道的退出码是 ``tail`` 的 0，于是**安装失败也走 then 分支**、把 lock hash 写进 stamp，
     # 下次部署直接"依赖未变化，跳过安装" —— 服务带着缺包重启，而本地照常打印「完成」。
     #
-    # 修法是**先落到文件、再看退出码**，而不是给整个脚本加 `set -o pipefail`：
-    # 后者会改变脚本里**所有**管道的语义（实测直接把部署打断：`tail: option used in
-    # invalid context -- 2`，而本地不检查 ssh 退出码、照样打印「完成」）。
+    # 修法是**先落到文件、再看退出码**，而不是给整个脚本加 ``set -o pipefail``：
+    # 后者会改变脚本里**所有**管道的语义（实测直接把部署打断：``tail: option used in
+    # invalid context -- 2``，而本地不检查 ssh 退出码、照样打印「完成」）。
     # **只改有问题的那一行，别动全局语义。**
     if sudo -u autoquant env PATH=/usr/local/node22/bin:`$PATH HOME=/tmp/aqhome npm ci --omit=dev --no-audit --no-fund > /tmp/aq-npm.log 2>&1; then
-        tail -2 /tmp/aq-npm.log
+        tail -n 2 /tmp/aq-npm.log
         echo "`$LOCK_HASH" > `$STAMP_FILE
         chown autoquant:autoquant `$STAMP_FILE 2>/dev/null || true
     else
         echo "    ✗ 依赖安装失败 —— 服务会起不来。npm 输出："
-        tail -20 /tmp/aq-npm.log
+        tail -n 20 /tmp/aq-npm.log
         # **必须让部署失败**，不能带着缺包重启：写 stamp 的下一次会跳过安装。
         exit 1
     fi
@@ -348,9 +348,9 @@ echo "==> 重启服务"
 #
 # ⚠️ **这一条是 2026-09-22 加的，而它修的是一个让我误判了两次的问题。**
 #
-# 在那之前服务没配 `StandardOutput`，于是输出全交给 journald —— 而 journald
+# 在那之前服务没配 ``StandardOutput``，于是输出全交给 journald —— 而 journald
 # 有容量与限流（本机 journal 已占 964M 并在滚动丢旧记录）。排查时我 grep 的
-# `data/server.log` 其实是某次手工 tee 留下的**残留文件**，最后一行停在
+# ``data/server.log`` 其实是某次手工 tee 留下的**残留文件**，最后一行停在
 # 1.5 天前 —— 于是「某机制 0 次」这种判断**全是假信号**。
 #
 # 用 **drop-in** 而不是改主单元文件：不猜原文件是谁写的，升级也不丢。
@@ -382,10 +382,10 @@ fi
 #
 # 实测证据（生产日志）：
 #
-# ```
+# ````
 #   01:08:33  停止时上一轮决策未在时限内结束，可能留下未挂保护单的仓位
 #   01:08:41  机器人已启动（实盘）      ← 部署在 01:08 打断了一轮决策
-# ```
+# ````
 #
 # 一轮跑到"入场已成交、保护单还没挂"时被掐掉 → 循环也停了 →
 # **没有任何人会去补那张保护单**，直到下次启动对账。中间就是**裸奔窗口**。
@@ -394,11 +394,11 @@ fi
 #
 # | 侧 | 改动 |
 # |---|---|
-# | 应用 | `stop(persist=false)` **不掐断**在途轮次，最多等 `SHUTDOWN_DRAIN_TIMEOUT_MS`（3 分钟）|
-# | systemd | `TimeoutStopSec` 从默认 **90 秒** 提到 **210 秒** |
+# | 应用 | ``stop(persist=false)`` **不掐断**在途轮次，最多等 ``SHUTDOWN_DRAIN_TIMEOUT_MS``（3 分钟）|
+# | systemd | ``TimeoutStopSec`` 从默认 **90 秒** 提到 **210 秒** |
 #
 # ⚠️ **只改应用是没用的**：systemd 在 90 秒就 SIGKILL，
-# 那 3 分钟的等待**永远等不到**（实测 `TimeoutStopUSec=1min 30s`）。
+# 那 3 分钟的等待**永远等不到**（实测 ``TimeoutStopUSec=1min 30s``）。
 #
 # 210 秒 = 应用的 3 分钟 + 30 秒余量（留给进程收尾）。
 #
@@ -421,19 +421,19 @@ fi
 #
 # ⚠️ **强制 Node 用 IPv4 —— 这台服务器的 IPv6 没有路由。**
 #
-# 2026-10-07 实测事故：机器人连续多轮 `Cannot reach opencode: fetch failed`，
-# 而同一台机器上 `curl https://opencode.ai/...` 一直是 200。
+# 2026-10-07 实测事故：机器人连续多轮 ``Cannot reach opencode: fetch failed``，
+# 而同一台机器上 ``curl https://opencode.ai/...`` 一直是 200。
 #
-# 根因：`opencode.ai` 的 DNS **同时**返回 A（172.65.90.20）与 AAAA
-# （2606:4700:78::…），而这台机器 `curl -6` 是 **ENETUNREACH**（IPv6 不通）。
-# `curl` 有 Happy Eyeballs 会自动回退 IPv4，**Node 的 fetch 不会可靠回退** ——
-# 于是它优先试 IPv6、失败就报 `fetch failed`，表现为**间歇性**失败
+# 根因：``opencode.ai`` 的 DNS **同时**返回 A（172.65.90.20）与 AAAA
+# （2606:4700:78::…），而这台机器 ``curl -6`` 是 **ENETUNREACH**（IPv6 不通）。
+# ``curl`` 有 Happy Eyeballs 会自动回退 IPv4，**Node 的 fetch 不会可靠回退** ——
+# 于是它优先试 IPv6、失败就报 ``fetch failed``，表现为**间歇性**失败
 # （IPv6 路由时通时断），并且"测着正常、跑着不正常"。
 #
 # 用 **drop-in** 固化这一条：主单元文件不该被部署脚本覆盖，而重装/重建
 # 服务器时这条配置必须跟着回来 —— 之前它只存在于手改的 systemd 里，
 # 离开这台机器就丢了（我第一版还把它写成了
-# `Environment=NODE_OPTIONS=NODE_OPTIONS=...`，值多了一层前缀 → 选项被忽略、
+# ``Environment=NODE_OPTIONS=NODE_OPTIONS=...``，值多了一层前缀 → 选项被忽略、
 # 事故照旧。**所以这里连值一起断言。**）
 #
 # 幂等：内容一致就不重写。
@@ -494,5 +494,54 @@ echo ""
 Write-Host "==> 远端执行" -ForegroundColor Cyan
 $output = ssh -o BatchMode=yes $Server $remote 2>&1
 $output | ForEach-Object { "    $_" }
+
+#
+# ══════════════════════════════════════════════════════════════════════════════
+#  ⚠️⚠️ **必须检查远端退出码**（2026-10-15 实测抓到的真事故）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# ## 事故：一连几次"部署成功"，而服务【一次都没重启】
+#
+# 实测症状：
+# ```
+#   deploy.ps1 打印「==> 完成」，build-info.json 也已经是新的 commitShort
+#   而 systemctl 的 ExecMainStartTimestamp 停在【两小时前】
+#   ⇒ 代码文件更新了，但进程还在跑旧代码
+# ```
+# 手工回放定位到远端脚本在**重启之前**就失败了（那次的报错是
+# `tail: option used in invalid context -- 2`）。而本脚本**从不看 ssh 的退出码**，
+# 于是：失败 → 照样打印「完成」→ 我以为部署成功。
+#
+# ## 为什么"回读 build-info.json"没兜住它
+#
+# 那个校验问的是「线上代码是哪一版」，而本次事故的失败点在**重启之前** ——
+# `build-info.json` 那时**已经写好了**。所以：
+# ```
+#   版本号正确 ✅  服务在跑旧代码 ❌   ← 两个信号都"正常"，而系统是坏的
+# ```
+#
+# ## ⚠️ 这条纪律本文件早就写过，只是没落在代码上
+#
+# 上面 :327 的注释原文：
+# > 「……实测直接把部署打断：`tail: option used in invalid context -- 2`，
+# >  **而本地不检查 ssh 退出码、照样打印「完成」**。」
+#
+# 也就是说：**当时只修了那一行管道，没有修"不看退出码"这个根因** ——
+# 于是同一个事故换了个失败点又发生一次。这次把它落在代码上。
+#
+# ## 失败的判据取"非零即失败"
+#
+# 远端脚本在每一处致命错误上都 `exit 1`（见它的 `npm ci` 分支），
+# 所以非零就是失败。**不使用 `$ErrorActionPreference` 去捕获**：ssh 的非零退出
+# 在 PowerShell 里不是异常，只会写进 `$LASTEXITCODE`。
+#
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "==> ✗ 部署失败（远端退出码 $LASTEXITCODE）" -ForegroundColor Red
+    Write-Host "    上面最后几行是远端的报错。**服务很可能没有重启，仍在跑旧代码**：" -ForegroundColor Yellow
+    Write-Host "      ssh tx 'systemctl show autoquant -p ExecMainStartTimestamp'" -ForegroundColor Yellow
+    Write-Host "    修掉远端那一步再重跑；不要只看 build-info.json —— 它在重启【之前】就写好了。" -ForegroundColor Yellow
+    exit $LASTEXITCODE
+}
 
 Write-Host "==> 完成" -ForegroundColor Green
