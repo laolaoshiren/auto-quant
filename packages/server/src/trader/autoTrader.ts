@@ -8894,6 +8894,94 @@ reduceQuantity: null,
       });
     }
 
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  ⚠️⚠️ **开仓【之前】确认止损还没失效**（2026-10-15 线上实测抓到）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 事故：同一形状的浪费重复了 4 次
+     *
+     * 线上 `#11` 的日志（2026-10-14）：
+     * ```
+     *   QUSDT     止损 0.048537  vs 标记价 0.04901806  → 错误一侧 → 立即平仓
+     *   TRUTHUSDT 止损 0.022545  vs 标记价 0.02180561  → 错误一侧 → 立即平仓
+     *   BTWUSDT   止损 2.55126   vs 标记价 2.55684229  → 错误一侧 → 立即平仓
+     *   WALUSDT   止损 0.051833  vs 标记价 0.05188987  → 错误一侧 → 立即平仓
+     * ```
+     * 四笔全是 **`净 +0.0000`** —— 也就是说：**付了一次往返手续费，什么都没得到**。
+     *
+     * ## 根因：价格在"决策 → 执行"之间穿越了止损位
+     *
+     * ```
+     *   模型基于材料里的 current_price 算止损（那时是对的）
+     *   → 决策 → 风控 → 执行 之间隔了几十秒到几分钟
+     *   → 价格漂移 1.3–2.0%，而止损距离只 1.0%
+     *   → 实际成交时，止损已经落在标记价的【另一侧】
+     * ```
+     *
+     * ## 为什么现在的处置（开了再平）是次优的
+     *
+     * 现有逻辑（本文件下面那段）在**开仓之后**发现止损无效 → 立即市价平掉。
+     * 那在那个时刻是**唯一诚实的选择**（不能留一个没有保护的杠杆仓位），
+     * 但它有一个本可避免的代价：**白付一次往返手续费**。
+     *
+     * 而"止损已失效"这件事在**开仓之前就已经成立** —— 那时检查，
+     * 结果是**这一单根本不该开**（论点已经死了）。
+     *
+     * ## 为什么这不违反 §4.2（不许放宽风控）
+     *
+     * ```
+     *   ✗ 放宽：把止损挪到另一侧，好让这一单能挂上   ← 仍然禁止
+     *   ✓ 收紧：发现论点已死，这一单【不开】         ← 本次做的
+     * ```
+     * **它只减少风险，从不增加。** 而且它减少的是"一次注定白花的往返手续费"。
+     *
+     * ## 只在"已经失效"时拦住，不做别的判断
+     *
+     * ⚠️ **不因为"价格偏离了"就拦**（那会变成"用一个我没被授权的滑点阈值
+     * 去否决风控的裁决"）。判据只有一条，且它就是执行层后面用的那一条：
+     * ```
+     *   isValidTrigger(止损, 'STOP_MARKET', 平仓方向, 当前标记价) === false
+     * ```
+     * 也就是说：**同一个判据从"开了再平"提前到"根本不开"** ——
+     * 判定逻辑一字不改，只改了发现它的时机。
+     *
+     * ⚠️ 读不到标记价时**放行**（`markNow <= 0` → 不拦）——
+     * 与 `exchangeMaxLeverageOf` 读不到时退回旧行为同源：
+     * **读不到某个事实，不该让功能停下来。**
+     */
+    if (decision.stopLoss && decision.stopLoss > 0) {
+      const markBefore = await this.deps.broker.getMarkPrice(symbol).catch(() => 0);
+      const exitSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
+      if (
+        markBefore > 0 &&
+        !this.deps.registry.isValidTrigger(decision.stopLoss, 'STOP_MARKET', exitSide, markBefore)
+      ) {
+        const detail =
+          `开仓前止损已失效：触发价 ${decision.stopLoss} 位于当前标记价 ${markBefore} 的错误一侧` +
+          '（挂上去会立即触发），说明这笔的入场论点在执行前已被市场否定，**本次不开仓**。' +
+          '（这样比"开了再立刻平掉"少付一次往返手续费。）';
+        this.emit('warn', `${symbol} ${detail}`);
+        this.recordOrder({
+          traderId,
+          exchangeOrderId: null,
+          clientOrderId,
+          symbol,
+          side,
+          type: 'MARKET',
+          purpose: 'entry',
+          quantity,
+          price: null,
+          triggerPrice: null,
+          status: 'REJECTED',
+          avgPrice: null,
+          filledQty: 0,
+          error: detail,
+        });
+        return { action: decision.action, symbol, status: 'rejected', detail };
+      }
+    }
+
     try {
       const placed = await this.deps.broker.placeOrder({
         symbol,

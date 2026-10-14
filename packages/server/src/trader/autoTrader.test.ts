@@ -2515,7 +2515,7 @@ test('a response that violates the risk rules is rejected and recorded', async (
 /*  Protection that cannot be placed                                           */
 /* -------------------------------------------------------------------------- */
 
-test('an entry whose stop is already breached is flattened and booked, not left naked', async () => {
+test('an entry whose stop is already breached is never opened at all', async () => {
   /*
    * Why this test exists (D1).
    *
@@ -2524,16 +2524,39 @@ test('an entry whose stop is already breached is flattened and booked, not left 
    * the mark can move through the stop level — a normal stop becomes a trigger
    * that would fire the instant it is placed.
    *
-   * Binance refuses such an order with `-2021 Order would immediately trigger`,
-   * `placeProtection` returns null, and the runtime flattens the position. The
-   * bug was *how* it got there: `roundTriggerPrice` would happily nudge the
-   * trigger to the other side of the market to make it placeable, which silently
-   * turns the stop the risk engine sized the trade around into a different,
-   * wider one. A stop that immediately triggers protects nothing anyway, so the
-   * honest answer is: the thesis is dead, exit now.
+   * Binance refuses such an order with `-2021 Order would immediately trigger`.
+   * The original bug was *how* the runtime recovered: `roundTriggerPrice` would
+   * happily nudge the trigger to the other side of the market to make it
+   * placeable, which silently turns the stop the risk engine sized the trade
+   * around into a different, wider one. §4.2 forbids exactly that.
    *
-   * The observable contract this pins: the position is flat, the stop is
-   * **never** re-priced onto the safe side, and the account event is booked.
+   * ## What changed (2026-10-15)
+   *
+   * The runtime used to **open the position first**, discover the stop was
+   * unusable, and flatten immediately. That is the honest answer *at that
+   * moment* — but it costs a full round-trip in fees for nothing. Live evidence
+   * (`#11`, 2026-10-14) showed the same shape four times, every one of them
+   * booked at `净 +0.0000`:
+   *
+   *     QUSDT / TRUTHUSDT / BTWUSDT / WALUSDT — all "错误一侧 → 立即平仓"
+   *
+   * The stop is already invalid *before* the entry is sent, so the entry is
+   * simply not sent. This **only removes risk**: it never re-prices the stop,
+   * and it never widens anything.
+   *
+   * ## The contract this pins
+   *
+   * ```
+   *   · no position is ever opened
+   *   · no stop is ever placed (at any level — re-pricing stays forbidden)
+   *   · no market order is sent at all
+   *   · nothing is booked in `trades` (there was no round-trip)
+   *   · the refusal is recorded as a REJECTED order with a reason
+   * ```
+   *
+   * ⚠️ The "must not leave a naked position" guarantee is **stronger** now,
+   * not weaker: previously there was a window where a naked position existed
+   * before being flattened. Now the position never exists.
    */
   const broker = new FakeBroker();
   // The mark is below the approved stop by the time the stop would be placed.
@@ -2544,24 +2567,42 @@ test('an entry whose stop is already breached is flattened and booked, not left 
 
   assert.match(summary, /开仓 0/, 'an instantly-triggering entry must not count as a held entry');
 
-  // No stop was ever sent. Sending one at a moved level would be the silent
-  // stop-widening that §4.2 forbids.
+  /*
+   * No stop was ever sent. Sending one at a moved level would be the silent
+   * stop-widening that §4.2 forbids.
+   */
   assert.equal(
     broker.placed.filter((p) => p.type === 'STOP_MARKET').length,
     0,
     'a stop that would immediately trigger must not be placed at all',
   );
 
-  // The entry was flattened and the position is flat everywhere.
-  assert.equal(positionStore.open(traderId).length, 0);
-  const flatten = broker.placed.find((p) => p.type === 'MARKET' && p.reduceOnly === true);
-  assert.ok(flatten, 'the naked position must be market-closed immediately');
+  /* 新行为：连开仓单都不发 —— 没有仓位，也就没有裸仓窗口。 */
+  assert.equal(
+    broker.placed.filter((p) => p.type === 'MARKET').length,
+    0,
+    'the entry must not be sent at all — the stop was already invalid before it',
+  );
+  assert.equal(positionStore.open(traderId).length, 0, 'nothing may be opened');
 
-  // The exit is a real account event: it must exist in `trades`.
+  /*
+   * ⚠️ 没有往返 —— 所以 `trades` 必须是空的。
+   * 原断言是 `trades.length === 1`（那时确实开了又平）。
+   */
   const trades = tradeStore.list(traderId);
-  assert.equal(trades.length, 1, 'the flatten must be booked exactly once');
-  assert.equal(trades[0]!.symbol, SYMBOL);
-  assert.equal(trades[0]!.closeReason, 'protection_unavailable');
+  assert.equal(trades.length, 0, 'nothing was opened, so nothing may be booked as a closed trade');
+
+  /*
+   * ⚠️ **§2.2：被拒绝的订单也要留痕。** 这是"为什么这单没开"的唯一依据 ——
+   * 与 §2.1 的 "每一次运行时对模型的推翻都要留下痕迹" 同源。
+   */
+  const rejected = orderStore.list(traderId).filter((o) => o.status === 'REJECTED');
+  assert.ok(rejected.length > 0, 'the refusal must be recorded in `orders`');
+  assert.match(
+    String(rejected[0]!.error ?? ''),
+    /错误一侧/,
+    '理由要落库 —— 它解释了为什么这笔被风控批准的交易没有执行',
+  );
 });
 
 test('a failed stop placement still books the emergency flatten', async () => {
