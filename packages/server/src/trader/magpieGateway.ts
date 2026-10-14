@@ -34,7 +34,7 @@
 
 import { LlmClient } from '../llm/client.js';
 import type { CallModel } from '../llm/modelRouter.js';
-import { buildCatalog, type DiscoveredCatalog } from '../llm/modelDiscovery.js';
+import { buildCatalog, type DiscoveredCatalog, type ModelsDevLookup } from '../llm/modelDiscovery.js';
 
 /** magpie 网关的连接参数（来自一条 `ai_models` 记录）。 */
 export interface MagpieGatewayConfig {
@@ -82,7 +82,7 @@ export interface MagpieGatewayConfig {
  */
 export async function discoverFromGateway(
   gateway: MagpieGatewayConfig,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; modelsDev?: ModelsDevLookup | null } = {},
 ): Promise<DiscoveredCatalog | null> {
   try {
     /* `/v1/models` 的路径：baseUrl 可能带 `/v1` 也可能不带。 */
@@ -94,7 +94,27 @@ export async function discoverFromGateway(
     });
     if (!res.ok) return null;
     const payload: unknown = await res.json();
-    return buildCatalog(payload, gateway.pluginProvidersPath ?? null, null);
+    /*
+     * ⚠️ **第 4 个参数是 models.dev 的查询函数**（2026-10-14 接上）。
+     *
+     * 它补的是**运行时拿不到的客观参数**：`cost`（定价）、`knowledge`（知识截止）、
+     * `tool_call`、`structured_output`、`canonical_model_id`。
+     * `modelDiscovery.ts` 文件头的表格已经把缺口写清楚了：
+     * ```
+     *   GET /v1/models（运行时可达）| context / max_output / reasoning / modalities
+     *                             | 【没有 free、没有 cost】
+     * ```
+     *
+     * ⚠️ **它只填空缺，绝不覆盖 `/v1/models` 已给出的值** —— 那有实测代价为据：
+     * `opencode-go/omen-alpha` 在网关侧 `context=- maxOut=-`，若拿上游目录去
+     * "修正"网关值，会给一个**网关没申报预算能力**的模型算出安全预算，
+     * 结果是 `finish_reason=length` + 空内容 + 一个角色卡 242 秒。
+     * 见 `mergeDiscovered` 里 `applyModelsDev` 的注释。
+     *
+     * ⚠️ 传 `null` 是完全合法的（还没拉到快照时）—— 那只是"这次不补参数"，
+     * 不是错误。所以调用方不需要 try/catch，也不该因此让机器人起不来。
+     */
+    return buildCatalog(payload, gateway.pluginProvidersPath ?? null, null, options.modelsDev ?? null);
   } catch {
     return null;
   }

@@ -38,11 +38,79 @@ import {
   type HunterReport,
 } from './intel/hunters.js';
 import { mapConcurrent } from './agent/pool.js';
+import { ModelsDevStore } from '../llm/modelsDev.js';
+import type { ModelsDevLookup } from '../llm/modelDiscovery.js';
 import { runOutsideCritical } from './agent/resourceGate.js';
 import { runSelfCheck } from './selfcheckRunner.js';
 import { createRoutedDecisionModel, createTeamDecisionModel, tierForRole } from './routedModel.js';
 
 const log = createLogger('manager');
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════════
+ *  **models.dev 模型档案 store（进程级单例）**（2026-10-14 接上）
+ * ══════════════════════════════════════════════════════════════════════════════
+ *
+ * ## 它补什么
+ *
+ * 运行时 `GET /v1/models` **拿不到定价（`cost`）与知识截止（`knowledge`）** ——
+ * `modelDiscovery.ts` 文件头的表格已经把这两个缺口写清楚了。
+ * models.dev 用官方目录补上它们，以及 `tool_call` / `structured_output` /
+ * `canonical_model_id`。
+ *
+ * ## 为什么是单例，而不是"每个机器人一个"
+ *
+ * ```
+ *   · 快照是 5.6MB（gzip 0.54MB）—— 每个机器人存一份纯属浪费
+ *   · 刷新循环要带 ETag 做条件请求 —— 多个 store 会各自拉一遍
+ *   · 索引是纯数据（8,831 条），没有"每机器人不同"的部分
+ * ```
+ * ⚠️ 所以它放在**模块级**，在第一次装配时懒加载。
+ *
+ * ## 为什么 `load()` 是同步的、且失败不抛
+ *
+ * `discoverFromGateway` 在**装配路径**上（机器人启动时），而
+ * "启动时要等一次网络"是这个项目明确要避免的形态。
+ * 所以：
+ * ```
+ *   启动 → load() 同步读本地快照（有就有，没有就没有）→ 立刻可用
+ *   后台 → 每日刷新一次（带 ETag，304 就跳过）
+ * ```
+ * ⚠️ 读不到快照时返回 `null`，`buildCatalog` 会把它当成"这次不补参数" ——
+ * **不是错误**，机器人照常启动（与 `pluginProvidersPath` 读不到时同源）。
+ *
+ * ## 为什么刷新失败【绝不】清空
+ *
+ * 旧快照比"没有快照"好得多：定价与知识截止在一周内几乎不变，
+ * 而"因为一次网络抖动就把参数全丢"会让调度器立刻失去依据。
+ * 见 `ModelsDevStore.refresh` 的三态语义（`updated` / `not_modified` / `failed`）。
+ */
+let modelsDevStoreSingleton: ModelsDevStore | null = null;
+
+/**
+ * 取 models.dev 的查询函数（首次调用时同步装载快照并挂上刷新循环）。
+ *
+ * ⚠️ 返回 `null` 是**正常情况**（还没拉到过快照）—— 调用方照样传下去，
+ * `buildCatalog` 会按"不补参数"处理。
+ */
+function modelsDevLookup(): ModelsDevLookup | null {
+  if (modelsDevStoreSingleton === null) {
+    const store = new ModelsDevStore({ dataDir: env.dataDir });
+    const index = store.load();
+    if (index === null) {
+      /*
+       * ⚠️ **不在这里同步拉网络** —— 那是启动路径，会拖慢机器人启动。
+       * 直接挂上刷新循环：它会在后台拉第一次，拉到之后下一次装配就能用上。
+       */
+      log.info('models.dev 本地快照不存在，将在后台首次拉取（本次装配不补参数）。');
+    } else {
+      log.info(`models.dev 快照已装载：${index.byLeafName.size} 个叶子名。`);
+    }
+    store.startRefreshLoop();
+    modelsDevStoreSingleton = store;
+  }
+  return modelsDevStoreSingleton.lookup();
+}
 
 /**
  * 一次调用的输出上限**下限**（token）—— 保证推理有地方可写。
@@ -1699,20 +1767,34 @@ export class TraderManager {
      * 这也是"合理安排使用"的落地点：`byTier` 的排序把 `free: 'all'` 排在前面，
      * 所以体力活（T1/T2）会优先走不限量的通道，把付费额度留给真正需要判断的环节。
      */
-    const catalog = await discoverFromGateway({
-      baseUrl,
-      apiKey,
-      timeoutSeconds: TEAM_GATEWAY_TIMEOUT_SECONDS,
-      maxRetries: TEAM_GATEWAY_MAX_RETRIES,
-      temperature: TEAM_GATEWAY_TEMPERATURE,
+    const catalog = await discoverFromGateway(
+      {
+        baseUrl,
+        apiKey,
+        timeoutSeconds: TEAM_GATEWAY_TIMEOUT_SECONDS,
+        maxRetries: TEAM_GATEWAY_MAX_RETRIES,
+        temperature: TEAM_GATEWAY_TEMPERATURE,
+        /*
+         * ⚠️ `plugin-providers.json` 是 **Docker 卷里的文件**，
+         * 只在同机部署时读得到。读不到就退化为"不知道免费与否"（`free: 'unknown'`），
+         * **绝不猜** —— 猜错的代价是把免费模型当付费的避开（白烧额度），
+         * 或者反过来（以为免费其实烧钱）。
+         */
+        pluginProvidersPath: process.env.MAGPIE_PLUGIN_PROVIDERS_PATH ?? null,
+      },
       /*
-       * ⚠️ `plugin-providers.json` 是 **Docker 卷里的文件**，
-       * 只在同机部署时读得到。读不到就退化为"不知道免费与否"（`free: 'unknown'`），
-       * **绝不猜** —— 猜错的代价是把免费模型当付费的避开（白烧额度），
-       * 或者反过来（以为免费其实烧钱）。
+       * ⚠️ **models.dev 的查询函数**（2026-10-14 接上）—— 补齐运行时拿不到的客观参数。
+       *
+       * 它是**进程级单例**（`modelsDevLookup()`）：快照只在第一次调用时同步读一次，
+       * 之后由它自己的每日刷新循环维护。所以这里传的是**同一个** store，
+       * 不会因为"每个机器人装配一次"而重复读盘或重复拉网络。
+       *
+       * ⚠️ **传 `null` 也完全合法** —— 还没拉到快照时它什么都不补，
+       * 而那正是"读不到某个事实不该让功能停下来"的既有纪律
+       *（与 `pluginProvidersPath` 读不到时退化为 `free: 'unknown'` 同源）。
        */
-      pluginProvidersPath: process.env.MAGPIE_PLUGIN_PROVIDERS_PATH ?? null,
-    });
+      { modelsDev: modelsDevLookup() },
+    );
 
     if (catalog !== null) {
       /*
