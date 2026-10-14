@@ -23,6 +23,7 @@
 import type { StrategyConfig } from '@aq/shared';
 
 import { runSingleShot, runToolLoop, intensityFor, type Intensity, type LoopModel, type LoopResult } from './loop.js';
+import type { AgentRole } from './roles.js';
 import { decideSettle, decideWake, DEFAULT_WAKE_POLICY, type WakeDecision, type WakeFacts, type WakePolicy } from './wake.js';
 import type { AgentToolDeps } from './tools.js';
 
@@ -102,6 +103,17 @@ export interface StrategyReviewOutcome {
   loop: LoopResult | null;
   /** 调参之后的配置（没调就是原配置）。 */
   config: StrategyConfig | null;
+  /**
+   * **panel 档并行跑的分析角色产出**（2026-10-14 加）。
+   *
+   * ```
+   *   performance_analyst（绩效）+ attribution_analyst（归因）
+   * ```
+   * ⚠️ 只在 `intensity === 'panel'` 时非空，其它档是 `[]`。
+   * ⚠️ 它们**不是策略师的输入**（策略师自己会读同样的数据）——
+   * 它们是给操作员与后续归因用的旁证。所以其中一个失败不影响调参。
+   */
+  analysts: Array<{ role: AgentRole; result: LoopResult }>;
 }
 
 /**
@@ -248,7 +260,16 @@ export async function runStrategyReview(input: {
     : decideWake(facts, policy);
 
   if (!decision.wake) {
-    return { ran: false, skippedBecause: decision.why, trigger: decision.trigger, intensity: null, loop: null, config: null };
+    /* 没醒 → 什么都没跑，所以 `analysts` 是空数组（不是 `null`：调用方可以无脑遍历）。 */
+    return {
+      ran: false,
+      skippedBecause: decision.why,
+      trigger: decision.trigger,
+      intensity: null,
+      loop: null,
+      config: null,
+      analysts: [],
+    };
   }
 
   /*
@@ -353,6 +374,58 @@ export async function runStrategyReview(input: {
    * 给个结论。强度选择的真实含义是"要不要**额外**开并行分析"，
    * 而不是"要不要给它工具"。
    */
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⭐ **panel 档：并行跑两个分析角色**（2026-10-14 接线）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 为什么是这两个
+   *
+   * 用户需求⑤点名要有「**分析账户的**」岗位 —— 而 `performance_analyst`（绩效）
+   * 与 `attribution_analyst`（归因）的 prompt **早就写好了**，只是**没有任何代码
+   * 会去跑它们**：实测 149 个生产文件里零调用，只在 `.test.ts` 里被用过。
+   *
+   * 这与 `roles.ts` 记录过的 `engineer` 角色是**同一类缺口**：
+   * ```
+   *   typecheck 过 · 测试全绿 · 界面上也不报错 —— 只是它永远不会被调用
+   * ```
+   *（`docs/FINDING-unwired-roles.md` 有复核脚本与另外两个同类角色。）
+   *
+   * ## 为什么挂在 panel 档
+   *
+   * 上面那段注释（本文件 :352）**早就写明了意图**：
+   * > 「`single` 档只适用于**分析类**角色（绩效、归因）：那些角色确实只需要
+   * >  读一遍数据给个结论。强度选择的真实含义是"要不要**额外**开并行分析"。」
+   *
+   * **设计意图已经存在，只是实现没做。** 这里把它补上。
+   *
+   * ## 为什么【串行】放在策略师之后，而不是并行
+   *
+   * 我第一版写成并行（先启动 `analystRuns`、再 await），**测试立刻抓到了两个问题**：
+   * ```
+   *   ① 端到端②：轨迹条数从 1 变成 3（我给分析角色也各落了一条）
+   *   ② 端到端③：策略师的 `set_params` 没被执行
+   * ```
+   * 第二个是真问题，而它的根因是**调用顺序**：
+   * ```
+   *   测试用的 modelScript 按顺序返回预设响应
+   *   并行时分析角色【抢走了】本该给策略师的响应
+   *   → 策略师拿到空响应 → 调参从未发生
+   * ```
+   * 而这不只是测试的问题 —— **生产环境同样存在这个竞争**：
+   * ```
+   *   `LlmClient` 有【实例内状态】（timeoutCount 驱动思考等级降档、
+   *   streamDisabled 流式被拒后自我降级），三路并发共用同一个实例
+   *   → 分析角色的超时会推高 timeoutCount，从而【降低策略师的思考等级】
+   * ```
+   * 所以改成**串行**：策略师先跑完（关键路径），分析再跑。
+   *
+   * ⚠️ 代价可接受：分析是**旁证**，不阻塞调参。而且它本来就在
+   * `panel` 档（一轮几十秒），多两次单次调用不会改变量级。
+   *
+   * ⚠️ 更重要的：**策略师先跑完**意味着"调参已经生效"，
+   * 之后分析的产出只影响记录，不影响行为 —— 那是安全的顺序。
+   */
   const loop = await runToolLoop({
     role: 'strategist',
     task,
@@ -364,8 +437,19 @@ export async function runStrategyReview(input: {
     onStep: (step) => trace.steps.push(step),
   });
 
+  /* ⚠️ 在策略师【之后】跑 —— 理由见上面那段（调用竞争与实例内状态）。 */
+  const analysts = chosen.intensity === 'panel' ? await runPanelAnalysts(input, factsText) : [];
+
   // 5. 落运行轨迹
   ports.recordRun({ kind: 'strategy', trigger: decision.trigger, intensity: chosen.intensity, result: loop });
+  /*
+   * ⚠️ **分析角色也各落一条轨迹** —— "跑过"这件事必须留痕。
+   * 否则"接了线但看不出它在跑"与"没接线"在运维眼里完全一样
+   *（这正是这些角色藏了这么久没被发现的原因）。
+   */
+  for (const a of analysts) {
+    ports.recordRun({ kind: 'strategy', trigger: decision.trigger, intensity: chosen.intensity, result: a.result });
+  }
 
   return {
     ran: true,
@@ -374,7 +458,56 @@ export async function runStrategyReview(input: {
     intensity: chosen.intensity,
     loop,
     config: ports.readConfig(),
+    analysts,
   };
+}
+
+/**
+ * **并行跑两个分析类角色**（`performance_analyst` + `attribution_analyst`）。
+ *
+ * ## 为什么各自独立 catch
+ *
+ * 两个分析互不依赖，而"一个失败导致另一个也不跑"是纯粹的浪费 ——
+ * 它们的 prompt 都要求"数据不足时如实说"，所以**部分成功是有价值的**。
+ *
+ * ## 为什么用 `runSingleShot` 而不是 `runToolLoop`
+ *
+ * 见本文件 :352 那段注释：分析类角色「只需要读一遍数据给个结论」，
+ * 不需要工具循环。给它们工具只会让它们多花几步、更慢、更容易跑偏。
+ *
+ * ⚠️ 但**事实（`facts`）必须给全** —— 那是它们唯一的信息来源。
+ */
+async function runPanelAnalysts(
+  input: { model: LoopModel; ports: OrchestratorPorts },
+  factsText: string,
+): Promise<Array<{ role: AgentRole; result: LoopResult }>> {
+  const roles: AgentRole[] = ['performance_analyst', 'attribution_analyst'];
+  const settled = await Promise.all(
+    roles.map(async (role) => {
+      try {
+        const deps = buildToolDeps(input.ports, { trigger: 'panel', observed: factsText, steps: () => [] });
+        const result = await runSingleShot({
+          role,
+          task:
+            role === 'performance_analyst'
+              ? '梳理这个账户到目前为止的绩效。**数据不足时如实说**（`sampleAdequate: false` 是合法结论）。'
+              : '做一次归因：哪些信号/形态在赚、哪些在亏。**样本不够时如实说**，不要硬凑结论。',
+          facts: factsText,
+          deps,
+          model: input.model,
+        });
+        return { role, result };
+      } catch {
+        /*
+         * ⚠️ **不抛穿**：分析失败不该让整次审视失败。
+         * 也不在这里返回 error 字段 —— `runSingleShot` 自己会把失败写进 `LoopResult`
+         *（它有 `error`），再包一层会让调用方分不清"两个都失败"还是"一个失败两次"。
+         */
+        return null;
+      }
+    }),
+  );
+  return settled.filter((x): x is { role: AgentRole; result: LoopResult } => x !== null);
 }
 
 /* -------------------------------------------------------------------------- */

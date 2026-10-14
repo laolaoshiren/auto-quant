@@ -179,10 +179,34 @@ test('端到端 ②：审视跑完会在 agent_runs 里留下轨迹', async () =
   await flush();
 
   const runs = agentRuns.recent(traderId, 5);
-  assert.equal(runs.length, 1, '一次审视必须留一条运行轨迹 —— 这是"它这一步为什么这么做"的唯一依据');
-  assert.equal(runs[0]!.outcome, 'ok');
-  assert.match(runs[0]!.agentsJson, /get_performance/, '工具调用序列要留档');
-  assert.ok(runs[0]!.tokensIn > 0, 'token 要如实累加 —— 预算是硬约束');
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️ **原来是 `runs.length === 1`** —— 2026-10-14 改成"必有策略师那条"。
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 为什么变了
+   *
+   * `panel` 档现在会**额外**跑两个分析角色（`performance_analyst` +
+   * `attribution_analyst`），各落一条轨迹 —— 所以总数变成 1 + 2 = 3。
+   *
+   * 那两个角色从前是「定义了但生产零调用」（见 `docs/FINDING-unwired-roles.md`），
+   * 现在接上了 —— 而**"跑过"这件事必须留痕**，否则"接了线但看不出它在跑"
+   * 与"没接线"在运维眼里完全一样（那正是它们藏了这么久没被发现的原因）。
+   *
+   * ⚠️ **但原意一点都没放松**：
+   * ```
+   *   ① 至少有一条轨迹
+   *   ② 其中【必须】有策略师那条，且它带工具调用序列与 token
+   * ```
+   * 也就是说：**"审视必须留痕"这条判据仍然被钉住**，只是不再假装
+   * "整个审视只允许有一条轨迹" —— 那个假设在加了 panel 旁证之后已不成立。
+   */
+  assert.ok(runs.length >= 1, '一次审视必须留运行轨迹 —— 这是"它这一步为什么这么做"的唯一依据');
+  const strategist = runs.find((r) => /get_performance/.test(r.agentsJson));
+  assert.ok(strategist !== undefined, '必须留下策略师那条（带它的工具调用序列）');
+  assert.equal(strategist.outcome, 'ok');
+  assert.match(strategist.agentsJson, /get_performance/, '工具调用序列要留档');
+  assert.ok(strategist.tokensIn > 0, 'token 要如实累加 —— 预算是硬约束');
 });
 
 /* -------------------------------------------------------------------------- */
