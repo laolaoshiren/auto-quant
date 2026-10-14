@@ -36,6 +36,7 @@
  * 与 `screenSymbols`（`screening.ts`）是同一个做法。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { filterByMinOpenInterest, growthPercent } from './screening.js';
@@ -129,4 +130,74 @@ test('★ growthPercent 的既有语义不变 —— 分母为 0 或负时返回
   /* 非有限输入同样归 0，而不是把 NaN 传下去。 */
   assert.equal(growthPercent(Number.NaN, 100), 0);
   assert.equal(growthPercent(100, Number.NaN), 0);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ★★★ 接线：`service.ts` 必须真的调用它们（变异测试发现的盲区）                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ⚠️ **这个文件上面所有用例都只测纯函数，没有测"谁调用它"。**
+ *
+ * 我是用变异测试发现的：把 `service.ts` 里
+ * `return filterByMinOpenInterest(measured, options.minOpenInterestUsd)`
+ * 整行换回 `return measured`（即**把 issue #182 的修复完全回退**）——
+ * 本文件**仍然 6/6 全绿**。
+ *
+ * 原因在文件头那段"为什么抽成纯函数"里写得很清楚（`MarketDataService` 要真实网络
+ * 与交易所客户端才能构造）—— **那个取舍是合理的**，但代价是
+ * **"纯函数被抽出来了，而没人证明它被调用"**。
+ *
+ * ⚠️ 而 #182 的缺陷形状**正是**"函数/参数都在，就是没人拿来比" ——
+ * 所以这一环恰恰是最该被守住的。抽出来的判据 + 没守住的接线 = 同一个 bug 可以再回来一次。
+ *
+ * ## 为什么用结构断言
+ *
+ * 要功能性地测 `screenOpenInterestGrowth` 需要构造 `MarketDataService`
+ *（真实网络 + 交易所客户端 —— 正是文件头说的那个代价）。
+ * 而这里要验的只是"**调用点在不在**"，读源码足够，也正是 `fetchGuardedWiring.test.ts`
+ * 与 `receiptAdjustGate.test.ts` 用的同一手法：
+ * **接线用结构断言、逻辑用功能测试。**
+ *
+ * ⚠️ 断言前**剥掉注释** —— 本仓库注释会逐字引用被讨论的代码
+ *（本文件头部就引用了 `service.ts:459` 的那一行），不剥会被自己的注释命中。
+ */
+test('★★★ service.ts 必须真的调用 filterByMinOpenInterest —— 否则 #182 的修复可以无声回退', () => {
+  const source = readFileSync(new URL('./service.ts', import.meta.url), 'utf8');
+  const code = source
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      return !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*');
+    })
+    .join('\n');
+
+  /*
+   * ⚠️ 判据是"**以调用形式出现**"（`filterByMinOpenInterest(`）而不是"文件里提到它" ——
+   * 后者会被 `import { filterByMinOpenInterest } from './screening.js'` 那一行命中，
+   * 于是"导入了但不用"也会通过 —— 而那**恰好就是 #182 的形状**。
+   */
+  const callSites = [...code.matchAll(/filterByMinOpenInterest\(/g)];
+  assert.ok(
+    callSites.length >= 1,
+    '★★★ `service.ts` 里没有任何 `filterByMinOpenInterest(...)` 的**调用** ——\n' +
+      '    持仓量门槛又变成了"参数被接收、被转发、但没人读它"（issue #182 的原始形状）。\n' +
+      '    ⚠️ 这个回退**不会**让本文件其它用例变红（它们只测纯函数），所以必须由这条守着。',
+  );
+
+  /*
+   * ② 而且必须把**配置里的那个值**传进去 —— 传一个常量等于门槛被写死。
+   */
+  assert.match(
+    code,
+    /filterByMinOpenInterest\([^)]*minOpenInterestUsd/,
+    '★★ 调用时必须把 `minOpenInterestUsd` 传进去 —— 传常量等于门槛被写死，配置改了不起作用',
+  );
+
+  /* ③ 反向守卫：确认剥注释真的生效（注释里就引用了这一行）。 */
+  assert.doesNotMatch(
+    code,
+    /筛选循环只读 minQuoteVolume24h/,
+    '★ 注释必须被剥掉 —— 否则上面的判据会被文件头那段引用命中',
+  );
 });

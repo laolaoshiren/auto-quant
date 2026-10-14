@@ -203,6 +203,49 @@ test('★★★ 执行回执里的 adjust_protection 必须先过 risk.review（
       '    否则模型可以把已锁的浮盈保护**放松**（棘轮校验是唯一拦它的地方），\n' +
       '    而 `executeAdjust` 内部不做方向判断、也不记 `adjustments`（issue #117）。',
   );
+
+  /*
+   * ⚠️ **光有 `this.risk.review(` 这串字符串是不够的** —— 我用变异测试发现的：
+   *
+   * ```ts
+   * const adjustVerdict = false ? this.risk.review(adjustDecisions, { … }) : { approved: [], rejected: [] };
+   * ```
+   *
+   * 这样一改，**风控审查在运行时完全被短路**（回执里的 adjust 又不过风控了），
+   * 而"字符串存在、且在 `executeAdjust` 之前"两条判据**都仍然成立** ——
+   * 本文件 4 条用例**全绿**。
+   *
+   * ## ⚠️ 但判据不能是"它前面有 `?`"（我第一版就这么写，误报了）
+   *
+   * 生产代码**本来就是**三元表达式的一侧：
+   *
+   * ```ts
+   * const adjustVerdict =
+   *   adjustDecisions.length > 0                  // ← 条件：有没有可审的决策
+   *     ? this.risk.review(adjustDecisions, { … })
+   *     : { approved: [], rejected: [] };
+   * ```
+   *
+   * 而这个三元是**安全的**：条件为假 ⇒ 一条 adjust 都没有 ⇒ `approved` 为空 ⇒
+   * 下面那个"执行 approved"的循环根本不执行。**没有绕过。**
+   *
+   * 真正危险的是**条件恒为假**（`false ?`），因为那时"有决策"也会被短路。
+   *
+   * 所以判据是：**那个条件不能是常量**（`false` / `true` / `!0` 这类字面量）。
+   */
+  const conditional = /(\w[\w.?]*|\([^)]*\)|[a-zA-Z_$][\w$.]*)\s*\?\s*$/.exec(
+    body.slice(Math.max(0, reviewIdx - 60), reviewIdx),
+  );
+  if (conditional) {
+    const condition = conditional[1]!.trim();
+    assert.doesNotMatch(
+      condition,
+      /^(false|true|!0|!1)$/,
+      '★★★ `this.risk.review(...)` 的条件是**常量**（`' + condition + '`）——\n' +
+        '    那样**有决策时也会被短路**，等于回执里的 `adjust_protection` 又绕过了风控。\n' +
+        '    ⚠️ 这个变异**不会**让其它断言变红（字符串仍在、顺序仍对），必须由这一条守着。',
+    );
+  }
   assert.ok(
     reviewIdx < adjustIdx,
     '★★★ `risk.review` 必须在 `executeAdjust` **之前** —— 放后面等于先执行再审查',
