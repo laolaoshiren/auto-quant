@@ -30,6 +30,8 @@ import { collectMarketResearch, DEFAULT_SEARCH_ENDPOINT } from './agent/webSearc
 import { runAgentTask } from './agent/harness.js';
 import { parseIntelReport } from './intel/parseIntel.js';
 import { rankIntel } from './intel/freshness.js';
+/* ⚠️ 情报键的**唯一**构造函数 —— 不在别处另拼字符串（见 ResearchCache.keys）。 */
+import { signalKeyOf } from './intel/attribution.js';
 import {
   HUNTERS,
   buildHunterTask,
@@ -454,6 +456,30 @@ interface ResearchCache {
   at: number;
   /** 刷新是否正在进行 —— 防止并发轮次同时起多个 agent。 */
   refreshing: boolean;
+  /**
+   * **这一份调研材料里可选的情报键**（2026-10-15 加）。
+   *
+   * ## 为什么必须存它（断点②，一次真实事故）
+   *
+   * 裁决官要"标注这条决策依据了哪几条情报"，而**校验它没编造**需要
+   * "这次真的给过它哪些键"（见 `routedModel.ts` 的 `availableIntelKeys`）。
+   *
+   * 而本闭包原来**只返回 `string`** —— 于是 `routedModel` 里的
+   * `availableIntelKeys` 恒为 `[]`，`tradingDesk.ts:2010` 那段
+   * "必须标注 intel_keys"的要求**根本不进提示词**。实测线上：
+   * ```
+   *   225 轮 raw_response 里 `intel_keys` 出现 0 次
+   *   trades / positions 的 intel_keys 全部为 []
+   *   ⇒ signalHealth 永远 insufficient_data
+   * ```
+   *
+   * ## 键的格式
+   *
+   * `<来源域名>|<方向>|<标的们>`（见 `attribution.ts` 的 `signalKeyOf`）——
+   * 用**同一个构造函数**生成，不在这里另拼一遍字符串
+   *（两处各拼一次必然漂移，那正是 `signalKeyOf` 的注释记过的教训）。
+   */
+  keys: string[];
 }
 const researchCache = new Map<number, ResearchCache>();
 
@@ -511,12 +537,20 @@ function readPersistedResearch(traderId: number): ResearchCache | undefined {
   try {
     const raw = settings.get(`${RESEARCH_CACHE_SETTING_PREFIX}${traderId}`);
     if (raw === undefined || raw.length === 0) return undefined;
-    const parsed = JSON.parse(raw) as { text?: unknown; at?: unknown };
+    const parsed = JSON.parse(raw) as { text?: unknown; at?: unknown; keys?: unknown };
     const text = typeof parsed.text === 'string' ? parsed.text : '';
     const at = typeof parsed.at === 'number' ? parsed.at : 0;
     /* ⚠️ 空情报不认 —— 与内存那侧的判据一致（`at > 0 && text.length > 0`）。 */
     if (at <= 0 || text.length === 0) return undefined;
-    return { text, at, refreshing: false };
+    /*
+     * ⚠️ `keys` 是 2026-10-15 之后才写进库的 —— 旧记录没有它。
+     * 读不到就按 `[]`（**不猜**）：那会让裁决官"无从标注"，
+     * 而那比"给它一组可能过期的键"安全（后者会让归因记下错的键）。
+     */
+    const keys = Array.isArray(parsed.keys)
+      ? parsed.keys.filter((k): k is string => typeof k === 'string' && k.length > 0)
+      : [];
+    return { text, at, refreshing: false, keys };
   } catch {
     /* 库读不出来不该让决策失败 —— 当作"没有缓存"，照常走首次调研。 */
     return undefined;
@@ -524,11 +558,16 @@ function readPersistedResearch(traderId: number): ResearchCache | undefined {
 }
 
 /** 写一份到库里（失败不影响内存那侧）。 */
-function persistResearch(traderId: number, text: string, at: number): void {
+function persistResearch(traderId: number, text: string, at: number, keys: readonly string[]): void {
   /* ⚠️ 只持久化"真的有内容"的那一份 —— 占位（空串）不该进库。 */
   if (at <= 0 || text.length === 0) return;
   try {
-    settings.set(`${RESEARCH_CACHE_SETTING_PREFIX}${traderId}`, JSON.stringify({ text, at }));
+    /*
+     * ⚠️ `keys` 必须一起持久化（2026-10-15）—— 否则重启后
+     * `availableIntelKeys` 会变成 `[]`，裁决官**无从标注情报来源**，
+     * 而那份材料明明是有情报的（`text` 还在）。
+     */
+    settings.set(`${RESEARCH_CACHE_SETTING_PREFIX}${traderId}`, JSON.stringify({ text, at, keys }));
   } catch {
     /* 写不进去只是"重启后要重查一次"，不该让本轮失败。 */
   }
@@ -561,7 +600,7 @@ function getResearchCache(traderId: number): ResearchCache | undefined {
 /** 写缓存：**内存与库同时写**（见上面那段说明）。 */
 function setResearchCache(traderId: number, entry: ResearchCache): void {
   researchCache.set(traderId, entry);
-  persistResearch(traderId, entry.text, entry.at);
+  persistResearch(traderId, entry.text, entry.at, entry.keys);
 }
 
 /**
@@ -780,6 +819,8 @@ function ensureResearchRefresher(
       text: hasRealCache ? cached.text : '',
       at: hasRealCache ? cached.at : 0,
       refreshing: true,
+      /* 占位时沿用旧 keys（它属于那份旧 text）；没有旧缓存就是空。 */
+      keys: hasRealCache ? (cached?.keys ?? []) : [],
     });
     /*
      * 每次刷新一个**新的** controller（上一次的已经作废）——
@@ -1196,7 +1237,33 @@ async function refreshResearch(
             `  ${h} 小时前 · ${r.assessment.verdict}`;
         })
         .join('\n');
-      setResearchCache(traderId, { text, at: Date.now(), refreshing: false });
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⭐ **生成"这次给过哪些情报键"**（2026-10-15 修 —— 断点②）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * 裁决官要标注"这条决策依据了哪几条情报"，而**校验它没编造**需要
+       * "这次真的给过它哪些键"。本闭包原来只返回 `string`，于是
+       * `routedModel` 的 `availableIntelKeys` 恒为 `[]`、
+       * `tradingDesk` 那段"必须标注 intel_keys"的要求**根本不进提示词**。
+       *
+       * ⚠️ **键用 `signalKeyOf()` 构造，不在这里另拼字符串** ——
+       * 两处各拼一次必然漂移，而漂移的后果是"归因记下的键永远匹配不上成交"。
+       * `attribution.ts` 的注释里记过同一类教训（标的必须排序后拼接）。
+       *
+       * ⚠️ **一条情报可能涉及多个标的**：`signalKeyOf` 会把它们排序后拼成一个键，
+       * 所以这里对每条情报各生成**一个**键 —— 与 `trades.intel_keys` 的写入侧
+       *（`autoTrader` 存的是决策给的键）保持同一口径。
+       */
+      const keys = ranked.map((r) =>
+        signalKeyOf({
+          /* Intel.sourceHost 已经是域名（解析时就归一化过），不必再取一次。 */
+          sourceHost: r.intel.sourceHost,
+          direction: r.intel.direction,
+          symbols: r.intel.symbols,
+        }),
+      );
+      setResearchCache(traderId, { text, at: Date.now(), refreshing: false, keys });
       const unconfirmed = ranked.filter((r) => !r.assessment.confirmed).length;
       runtimeLogs.write(
         traderId, 'info', 'team',
@@ -1207,7 +1274,7 @@ async function refreshResearch(
       return;
     }
     const note = '（本轮没有可用的新鲜情报：查到的都过期了）';
-    setResearchCache(traderId, { text: note, at: Date.now(), refreshing: false });
+    setResearchCache(traderId, { text: note, at: Date.now(), refreshing: false, keys: [] });
     /*
      * ⚠️ **这里必须写日志**（2026-10-13 实测踩到）。
      *
@@ -1237,7 +1304,7 @@ async function refreshResearch(
   }
   /* 解析不出结构化情报 → 退回合并后的原文（格式没对上，但原文仍可能有信息）。 */
   runtimeLogs.write(traderId, 'warn', 'team', '[调研] 产出不是结构化格式 —— 退回原文使用');
-  setResearchCache(traderId, { text: merged, at: Date.now(), refreshing: false });
+  setResearchCache(traderId, { text: merged, at: Date.now(), refreshing: false, keys: [] });
 }
 export class TraderManager {
   private readonly running = new Map<number, AutoTrader>();
@@ -1940,7 +2007,16 @@ export class TraderManager {
             traderId, 'info', 'team',
             `[调研] 用缓存结果（${Math.round(age / 1000)}s 前查到，有效期 ${Math.round(researchTtlMs() / 60_000)} 分钟）`,
           );
-          return cached.text;
+          /*
+           * ⚠️ **必须把 `keys` 一起返回**（2026-10-15 修 —— 断点②）。
+           *
+           * 原来这里 `return cached.text`（只给字符串），于是
+           * `routedModel` 的 `availableIntelKeys` 恒为 `[]` ——
+           * 而它是"裁决官标注情报来源"与"校验它没编造"的**唯一依据**。
+           * 整条「情报归因 → 信号失效检测」因此从未通电（实测
+           * `trades.intel_keys` 三个机器人 500+ 行全为 `[]`）。
+           */
+          return { text: cached.text, keys: cached.keys };
         }
 
         /*
@@ -1990,13 +2066,22 @@ export class TraderManager {
             traderId, 'info', 'team',
             `[调研] 缓存已过期（${Math.round(age / 60_000)} 分钟前）—— 先用旧结果，后台正在刷新`,
           );
-          return cached.text;
+          /* ⚠️ 同上面那条：keys 必须一起给（否则裁决官无从标注）。 */
+          return { text: cached.text, keys: cached.keys };
         }
         runtimeLogs.write(
           traderId, 'info', 'team',
           '[调研] 首次调研在后台进行 —— 本轮**没有新闻材料**（下一轮就会有）',
         );
-        return '（本轮没有新闻材料：首次调研正在后台进行，下一轮就会有）';
+        /*
+         * ⚠️ 没有材料时 `keys` 是 `[]` —— 那会让 `tradingDesk` **不要求**
+         * 裁决官标注（见它那段"没有可选键时不该要求标注"的判据）。
+         * 这是对的：没有材料就没有键可标。
+         */
+        return {
+          text: '（本轮没有新闻材料：首次调研正在后台进行，下一轮就会有）',
+          keys: [],
+        };
 
         /* eslint-disable no-unreachable */
         /*
@@ -2284,7 +2369,7 @@ export class TraderManager {
                     `  ${h} 小时前 · ${r.assessment.verdict}`;
                 })
                 .join('\n');
-              setResearchCache(traderId, { text, at: Date.now(), refreshing: false });
+              setResearchCache(traderId, { text, at: Date.now(), refreshing: false, keys: [] });
               return text;
             }
             /*
@@ -2292,7 +2377,7 @@ export class TraderManager {
              * "本轮没有可用的新鲜情报"。明说，而不是给一段旧消息。
              */
             const note = '（本轮没有可用的新鲜情报：查到的都过期了）';
-            setResearchCache(traderId, { text: note, at: Date.now(), refreshing: false });
+            setResearchCache(traderId, { text: note, at: Date.now(), refreshing: false, keys: [] });
             return note;
           }
 
@@ -2301,7 +2386,7 @@ export class TraderManager {
             traderId, 'warn', 'team',
             `[调研] agent 的产出不是结构化格式（${parsed.dropped[0]?.reason ?? '未知'}）—— 退回原文使用`,
           );
-          setResearchCache(traderId, { text: agentResult.text, at: Date.now(), refreshing: false });
+          setResearchCache(traderId, { text: agentResult.text, at: Date.now(), refreshing: false, keys: [] });
           return agentResult.text;
         }
 
@@ -2334,7 +2419,7 @@ export class TraderManager {
         );
         /* 兜底结果也缓存 —— 它至少比"没有情报"好，且能省掉下一轮的搜索。 */
         if (result.ok) {
-          setResearchCache(traderId, { text: result.text, at: Date.now(), refreshing: false });
+          setResearchCache(traderId, { text: result.text, at: Date.now(), refreshing: false, keys: [] });
         }
         return result.text;
       },

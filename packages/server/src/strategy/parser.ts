@@ -624,6 +624,47 @@ function coerceRawDecision(input: unknown): LenientDecision | null {
           ? o.setupScoreBasis
           : undefined,
     reasoning: typeof o.reasoning === 'string' ? o.reasoning : typeof o.reason === 'string' ? o.reason : undefined,
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  ⚠️⚠️ **`intel_keys` 必须在这里搬一次**（2026-10-15 修 —— 第四次踩同一个坑）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 事故：整条「情报归因 → 信号失效检测」链**从未通电**
+     *
+     * 上游全都写好了：
+     * ```
+     *   `decision.ts:233`   RawDecisionSchema 收了 `intel_keys`
+     *   `parser.ts:874`     用它构造 `intelKeys`（有去重与过滤）
+     *   `repositories.ts`   positions.intel_keys / trades.intel_keys 两列都在
+     *   `tradingDesk.ts:2010` 提示词要求裁决官标注
+     *   `signalHealth.ts`  按 signalKey 分组算胜率崩塌 / 反应衰减
+     * ```
+     * 但**这个白名单里没有它** —— 于是 `coerced.intel_keys` 永远是 `undefined`，
+     * `parser.ts:874` 那个分支**永远不成立**。实测线上：
+     * ```
+     *   225 轮 raw_response 里 `intel_keys` 出现 0 次（提示词没要求，见断点②）
+     *   trades / positions 的 intel_keys：三个机器人共 500+ 行，【全部为 []】
+     *   ⇒ `signalHealth` 永远 insufficient_data
+     * ```
+     *
+     * ## 这正是上面那三段注释各自记过的坑（`entry_type` / `wait_minutes` / `setup_score`）
+     *
+     * 它们三段的原话都是同一句：
+     * > 「zod 认、而这个白名单里没有的键会被**静默丢掉**，
+     * >   表现成"模型给了、而统计里永远是 null"」
+     *
+     * **这是第四次**。所以这一次除了加字段，还加了一条测试从
+     * `RawDecisionSchema` 的键**反查**这个白名单（见 `parserCoerceCoverage.test.ts`）——
+     * 判据必须能从事实来源自动发现漏项，而不是靠下一个人记得。
+     *
+     * ⚠️ 它是**字符串数组**，与上面那些数字/字符串字段不同：
+     * 要收数组、逐个过滤成非空字符串、并**去重**（模型常重复列同一个键）。
+     */
+    intel_keys: Array.isArray(o.intel_keys)
+      ? o.intel_keys
+      : Array.isArray(o.intelKeys)
+        ? o.intelKeys
+        : undefined,
   };
 
   const parsed = LenientDecisionSchema.safeParse(candidate);
