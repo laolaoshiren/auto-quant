@@ -222,7 +222,13 @@ export function OverviewPage() {
   const runningCount = traders.filter((t) => t.isRunning).length;
 
   /** 舰队合计（账户口径与机器人归属口径分开算，见 `lib/fleetTotals.ts`）。 */
-  const fleet = fleetTotals({ traders, stats: statsMap, snapshots: equitySnapshots });
+  const fleet = fleetTotals({
+    traders,
+    stats: statsMap,
+    snapshots: equitySnapshots,
+    /* ⚠️ 模拟盘不校准（exchangeNet 恒为 0）—— 见 `isLedgerSuspect`。 */
+    dryRun: Object.fromEntries(traders.map((t) => [t.id, statsMap[t.id]?.dryRun ?? null])),
+  });
 
   /**
    * 单行的归属权益：**只是这个机器人自己的账**，不能相加。
@@ -263,9 +269,14 @@ export function OverviewPage() {
    * 用户报「你做事情只做一半？？」的直接原因就是这一类复制：
    * 我修了机器人列表页两处，首页这一处没修。
    * 现在判据只有一份（`lib/fleetTotals.ts`），**改一处即三处生效**。
+   *
+   * ⚠️ 2026-10-15 又加了一道：**模拟盘不校准**（那时 exchangeNet 恒为 0）。
+   * 所以 `dryRun` 也要一路传下去。
    */
+  const dryRunOf = (id: number): boolean | null | undefined => statsMap[id]?.dryRun;
+
   const equityOf = (trader: TraderRow): number =>
-    attributedEquityOf(trader, statsMap[trader.id]);
+    attributedEquityOf(trader, statsMap[trader.id], dryRunOf(trader.id));
 
   const accountEquity = fleet.accountEquityFleet;
   const committedCapital = fleet.committedCapitalFleet;

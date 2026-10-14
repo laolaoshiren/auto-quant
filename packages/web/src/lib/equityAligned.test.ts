@@ -79,12 +79,12 @@ test('★★★ 两个校准函数都在共享库里（权益 + 盈亏）', () =
 test('★★★ 机器人列表页必须调用共享实现（不能再有本地副本）', () => {
   const code = codeOnly(LIST);
   assert.ok(
-    /attributedEquityOf\(trader, stats\)/.test(code),
-    '★ 归属权益必须调共享库',
+    /attributedEquityOf\(trader, stats, dryRunOf\(trader\.id\)\)/.test(code),
+    '★ 归属权益必须调共享库（并把 dryRun 一起传下去 —— 模拟盘不能拿交易所校准）',
   );
   assert.ok(
-    /realizedPnlOf\(trader, stats\)/.test(code),
-    '★ 盈亏必须调共享库',
+    /realizedPnlOf\(trader, stats, dryRunOf\(trader\.id\)\)/.test(code),
+    '★ 盈亏必须调共享库（同样要传 dryRun）',
   );
   /*
    * ⚠️ 本地副本必须消失 —— 那正是"只做一半"的成因（副本会漂移）。
@@ -98,8 +98,8 @@ test('★★★ 机器人列表页必须调用共享实现（不能再有本地�
 test('★★★ 首页总览必须调用共享实现（它原来是第三个副本）', () => {
   const code = codeOnly(OVERVIEW);
   assert.ok(
-    /attributedEquityOf\(trader, statsMap\[trader\.id\]\)/.test(code),
-    '★ 首页必须调共享库 —— 它原来漏了 incomeReadFailed 那道判据',
+    /attributedEquityOf\(trader, statsMap\[trader\.id\], dryRunOf\(trader\.id\)\)/.test(code),
+    '★ 首页必须调共享库（并传 dryRun）—— 它原来漏了 incomeReadFailed 那道判据',
   );
   /*
    * ⚠️ 用户报「图4 也是一样」—— 首页那张图的权益必须与列表页一致。
@@ -110,14 +110,64 @@ test('★★★ 首页总览必须调用共享实现（它原来是第三个副�
   );
 });
 
-test('★★★ 详情页的判据没有被改坏（它是口径的基准）', () => {
+test('★★★ 详情页的判据必须来自共享库（它曾是唯一的本地副本）', () => {
+  /*
+   * ⚠️ 2026-10-15 改：这一页原来自己判 `Math.abs(ledger.gap) >= 0.01`，
+   * 于是"模拟盘不校准"那条新判据只修了共享库、漏了这一页 ——
+   * 而这一页正是用户报"卡片是 $0.00"的那一屏。
+   *
+   * 现在它必须调共享实现，并把 `dryRun` 传进去。
+   */
+  assert.ok(
+    /const ledgerSuspect = isLedgerSuspect\(ledger, stats\?\.dryRun\)/.test(DETAIL),
+    '★ 详情页必须调共享库的 isLedgerSuspect 并传 dryRun（不能再有本地副本）',
+  );
+  assert.ok(
+    !/const ledgerSuspect = ledger !== null && Math\.abs\(ledger\.gap\) >= 0\.01/.test(DETAIL),
+    '★ 那个本地副本必须消失 —— 它是「只做一半」的第四处形状',
+  );
+  /*
+   * ⚠️ 判据本身仍是 0.01（在共享库里），这一条保证"改共享库的阈值"仍被钉住。
+   */
+  assert.ok(
+    /Math\.abs\(ledger\.gap\) >= 0\.01/.test(codeOnly(SHARED)),
+    '★ 阈值 0.01 必须在共享库里',
+  );
   assert.ok(
     /const realized = ledgerSuspect \? ledger!\.exchangeNet : \(stats\?\.realizedPnl \?\? 0\)/.test(DETAIL),
     '★ 详情页仍必须用 exchangeNet（这是三处口径的基准）',
   );
+});
+
+test('★★★ 模拟盘绝不能拿 exchangeNet 校准（2026-10-15 用户实测）', () => {
+  /*
+   * ## 事故
+   * 用户报 `#11`（模拟盘）的「交易盈亏」卡是 `$0.00`，而同页历史成交有
+   * 25 笔、净额 −$0.58。根因：`SimulatedExchange.getIncome()` 返回空数组
+   * → `exchangeNet = 0` → `gap = platformNet` 恒成立 → 判"账本可疑"
+   * → 把**正确的账本**替换成 0。
+   *
+   * 所以判据里必须有 `dryRun === true → false` 这一条。
+   */
+  const code = codeOnly(SHARED);
   assert.ok(
-    /const ledgerSuspect = ledger !== null && Math\.abs\(ledger\.gap\) >= 0\.01/.test(DETAIL),
-    '★ 阈值必须是 0.01',
+    /if \(dryRun === true\) return false;/.test(code),
+    '★ 模拟盘必须一律判 false —— 交易所口径在模拟盘上不存在',
+  );
+  assert.ok(
+    /dryRun\?: boolean \| null,/.test(code),
+    '★ isLedgerSuspect 必须接收 dryRun',
+  );
+  /*
+   * ⚠️ 三个消费者都要把它传下去，否则判据在那一处失效。
+   */
+  assert.ok(
+    /export function realizedPnlOf\(\s*trader: TraderRow,\s*row: TraderStats \| undefined,\s*dryRun\?: boolean \| null,/.test(code),
+    '★ realizedPnlOf 必须接收 dryRun',
+  );
+  assert.ok(
+    /export function attributedEquityOf\(\s*trader: TraderRow,\s*row: TraderStats \| undefined,\s*dryRun\?: boolean \| null,/.test(code),
+    '★ attributedEquityOf 必须接收 dryRun',
   );
 });
 

@@ -29,7 +29,7 @@ import test from 'node:test';
 
 import type { EquitySnapshot, TraderStats } from '@aq/shared';
 
-import { committedCapitalOf, fleetTotals, groupTradersByAccount } from './fleetTotals';
+import { attributedEquityOf, committedCapitalOf, fleetTotals, groupTradersByAccount, realizedPnlOf } from './fleetTotals';
 import type { TraderRow } from './api';
 
 /* -------------------------------------------------------------------------- */
@@ -313,4 +313,103 @@ test('统计还没回来时，归属权益退回该机器人的初始权益 —�
   assert.equal(totals.tradersWithStats, 0, '没有任何统计回来');
   assert.equal(totals.attributedEquitySumFleet, 9.5, '退回初始权益，而不是 0');
   assert.equal(totals.accountEquityFleet, 11, '账户读数仍然可用');
+});
+
+
+/* -------------------------------------------------------------------------- */
+/*  模拟盘：不能用不存在的交易所口径去"校准"（2026-10-15 用户实测）            */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 模拟盘不能拿 exchangeNet 校准 —— 否则真实账本被替换成 0', () => {
+  /*
+   * ## 用户报的症状（`#11`，模拟盘）
+   * ```
+   *   历史成交区：25 笔 · 净额 -$0.58 · 6 盈 / 19 亏   ✅ 有数据
+   *   胜率卡：    31.3% · 32 笔已平仓                   ✅ 有数据
+   *   交易盈亏卡：$0.00                                  ❌ 空的
+   * ```
+   * **历史成交有数据而汇总卡是 0** —— 两者走不同判据。
+   *
+   * ## 根因
+   * `SimulatedExchange.getIncome()` 返回空数组（回放里不存在资金费结算）
+   * → `exchangeNet = 0`、`gap = platformNet - 0` 恒等于账本自身
+   * → `|gap| >= 0.01` 必然成立 → 判"账本可疑" → realized 被换成 `0`。
+   *
+   * 这不是"账本坏了"，而是**模拟盘根本没有交易接口的流水**。
+   */
+  const simulated = trader({
+    id: 11,
+    initialEquity: 20.75193739,
+    ledger: { platformNet: -0.052428, exchangeNet: 0, gap: -0.052428, checkedAt: '2026-10-14T19:17:04.565Z' },
+  });
+  const s = stats({ traderId: 11, realizedPnl: -0.052428, equity: 20.699509715479998 });
+
+  /* ❌ 不传 dryRun（旧行为）：会把正确账本换成 0。 */
+  assert.equal(
+    realizedPnlOf(simulated, s),
+    0,
+    '★ 不传 dryRun 时复现用户看到的 $0.00（这是修之前的行为）',
+  );
+
+  /* ✅ 传 dryRun: true：用回真实账本。 */
+  assert.equal(
+    realizedPnlOf(simulated, s, true),
+    -0.052428,
+    '★ 模拟盘必须用账本自己的值 —— 交易所口径在模拟盘上不存在',
+  );
+
+  /* ✅ 归属权益同理。 */
+  assert.equal(
+    attributedEquityOf(simulated, s, true),
+    s.equity,
+    '★ 权益也必须用账本口径（否则卡片与历史成交区矛盾）',
+  );
+});
+
+test('★★★ 实盘仍然会用 exchangeNet 校准（模拟盘分支不能误伤它）', () => {
+  /*
+   * ⚠️ 这条与上一条成对：修模拟盘时最容易顺手把实盘也关掉 ——
+   * 而实盘那 12.6 的差额正是靠 exchangeNet 才显示成正确值的。
+   */
+  const live = trader({
+    id: 10,
+    initialEquity: 100.05,
+    ledger: { platformNet: 5.657252, exchangeNet: -6.956285, gap: 12.613538, checkedAt: '2026-10-14T19:12:14.781Z' },
+  });
+  const s = stats({ traderId: 10, realizedPnl: 5.657252, equity: 105.707 });
+
+  assert.equal(
+    realizedPnlOf(live, s, false),
+    -6.956285,
+    '★ 实盘必须继续用交易所口径（账本虚增了 12.6，那是已修的 BUG）',
+  );
+  /* dryRun 传 null（没在跑）与 undefined（没给）都按"未知"处理 → 仍是实盘行为。 */
+  assert.equal(realizedPnlOf(live, s, null), -6.956285, '★ null = 未知 → 不排除校准');
+  assert.equal(realizedPnlOf(live, s, undefined), -6.956285, '★ undefined = 没给 → 不排除校准');
+});
+
+test('★★★ fleetTotals 也要把 dryRun 传下去（否则汇总页仍显示 0）', () => {
+  const simulated = trader({
+    id: 11,
+    initialEquity: 20.75,
+    ledger: { platformNet: -0.052428, exchangeNet: 0, gap: -0.052428, checkedAt: '2026-10-14T19:17:04.565Z' },
+  });
+  const s = stats({ traderId: 11, realizedPnl: -0.052428, equity: 20.70 });
+
+  const withDryRun = fleetTotals({
+    traders: [simulated],
+    stats: { 11: s },
+    dryRun: { 11: true },
+  });
+  assert.ok(
+    Math.abs((withDryRun.accounts[0]?.realizedPnl ?? 0) - -0.052428) < 1e-9,
+    '★ 传了 dryRun 之后，汇总里的已实现盈亏必须是账本值（不是 0）',
+  );
+
+  const without = fleetTotals({ traders: [simulated], stats: { 11: s } });
+  assert.equal(
+    without.accounts[0]?.realizedPnl,
+    0,
+    '★ 不传时仍是旧行为（0）—— 说明这个参数确实是判据的开关',
+  );
 });

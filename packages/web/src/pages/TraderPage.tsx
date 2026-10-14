@@ -19,6 +19,12 @@ import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useRunOnce, useAgentReview } from '../lib/actions';
 import { pickPositions } from '../lib/pickPositions';
 import { displayAvailable, displayMarginUsed } from '../lib/accountDisplay';
+/*
+ * ⚠️ 账本判据必须走**共享实现** —— 用户实测过"同一个数在四个地方各算了一遍，
+ * 而我只修了其中一处"。这里原来是一份本地副本（`Math.abs(ledger.gap) >= 0.01`），
+ * 于是模拟盘那条新分支（`dryRun === true` → 不校准）只修了共享库、漏了这一页。
+ */
+import { isLedgerSuspect } from '../lib/fleetTotals';
 import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import { TraderStatusBadge } from '../components/Badges';
 import { PageShell, Metric } from '../components/shell';
@@ -700,7 +706,25 @@ export function TraderPage() {
    * 所以：**差值明显时，以交易所为准**。那才是他账户里真实的钱。
    */
   const ledger = trader?.ledger ?? null;
-  const ledgerSuspect = ledger !== null && Math.abs(ledger.gap) >= 0.01;
+  /*
+   * ⚠️⚠️ **模拟盘不能拿交易所口径校准**（2026-10-15 用户实测抓到）
+   *
+   * 用户报（`#11`，模拟盘）：
+   * ```
+   *   历史成交区：25 笔 · 净额 −$0.58 · 6 盈 / 19 亏   ✅ 有数据
+   *   胜率卡：    31.3% · 32 笔已平仓                   ✅ 有数据
+   *   交易盈亏卡：$0.00                                  ❌ 空的
+   * ```
+   * 根因：`SimulatedExchange.getIncome()` **返回空数组**（回放里不存在资金费
+   * 结算），于是 `exchangeNet = 0`、`gap = platformNet − 0` **恒等于账本自身**
+   * → `|gap| ≥ 0.01` 必然成立 → 判定"账本可疑" → 把 realized 换成 `exchangeNet = 0`。
+   *
+   * **那不是"账本坏了"，而是"模拟盘根本没有交易接口的流水"** ——
+   * 用一个不存在的口径去校准，等于把正确的账本替换成 0。
+   *
+   * 判据走共享实现（`isLedgerSuspect` 现在收 `dryRun`），与列表页/首页同一份。
+   */
+  const ledgerSuspect = isLedgerSuspect(ledger, stats?.dryRun);
   const realized = ledgerSuspect ? ledger!.exchangeNet : (stats?.realizedPnl ?? 0);
   /*
    * ⚠️ **卡片上那个"总盈亏"必须与下面的权益曲线同口径 —— 含浮盈。**

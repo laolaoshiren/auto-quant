@@ -211,7 +211,18 @@ export function TradersPage() {
    *（`docs/MAINTENANCE.md` §3.4 记的就是这一类）。
    * 所以不再"修对这份手算"，而是**让它调用共享库**。
    */
-  const fleetTotal = fleetTotals({ traders, stats: statsMap, snapshots: equitySnapshots });
+  const fleetTotal = fleetTotals({
+    traders,
+    stats: statsMap,
+    snapshots: equitySnapshots,
+    /*
+     * ⚠️ `dryRun` 要传进来 —— 模拟盘上 exchangeNet 恒为 0，
+     * 拿它校准会把正确的账本替换成 0（见 `isLedgerSuspect`）。
+     */
+    dryRun: Object.fromEntries(
+      traders.map((t) => [t.id, statsMap[t.id]?.dryRun ?? null]),
+    ),
+  });
   const totalEquity = fleetTotal.accountEquityFleet;
   /** 读数已过期的账户（机器人全停了 → 没有新快照）。见上面那个 Metric 的说明。 */
   const staleAccounts = fleetTotal.accounts.filter((a) => a.accountEquityStale);
@@ -227,17 +238,21 @@ export function TradersPage() {
    *   realizedPnlOf      -> fleetTotals.realizedPnlOf(trader, stats)
    *   attributedEquityOf -> fleetTotals.attributedEquityOf(trader, stats)
    *
-   * 共享版比原来多一道判据：incomeReadFailed 为真时不校准 ——
-   * 那时 exchangeNet 是残缺读数，拿它校准比坏账本更离谱。
+   * 共享版比原来多两道判据：
+   *   · incomeReadFailed 为真时不校准 —— 那时 exchangeNet 是残缺读数；
+   *   · **模拟盘（dryRun）一律不校准**（2026-10-15 加）—— 那时 exchangeNet 恒为 0，
+   *     拿它校准会把正确的账本替换成 0。见 `isLedgerSuspect` 的事故说明。
    */
+  const dryRunOf = (id: number): boolean | null | undefined => statsMap[id]?.dryRun;
+
   const equityOf = (trader: TraderRow, stats: TraderSummary): number =>
-    attributedEquityOf(trader, stats);
+    attributedEquityOf(trader, stats, dryRunOf(trader.id));
 
   const calibratedOf = (
     trader: TraderRow,
     stats: TraderSummary,
   ): { realizedPnl: number; returnPercent: number } => {
-    const realizedPnl = realizedPnlOf(trader, stats);
+    const realizedPnl = realizedPnlOf(trader, stats, dryRunOf(trader.id));
     const returnPercent =
       trader.initialEquity > 0 ? (realizedPnl / trader.initialEquity) * 100 : 0;
     return { realizedPnl, returnPercent };

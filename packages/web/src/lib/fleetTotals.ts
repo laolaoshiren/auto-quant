@@ -175,6 +175,19 @@ export interface FleetInputs {
    * 账户权益。缺省时退回 `TraderStats.accountEquity`。
    */
   snapshots?: Record<number, EquitySnapshot[]>;
+  /**
+   * **每个机器人自己在不在模拟盘**（来自 `stats.dryRun`，`null` = 没在运行）。
+   *
+   * ## 为什么汇总层需要它（2026-10-15 用户实测抓到）
+   *
+   * 模拟盘的 `exchangeNet` **恒为 0**（`SimulatedExchange.getIncome()` 返回空数组，
+   * 因为回放里不存在资金费结算）—— 而"用交易所口径校准"在那种情况下会把
+   * **正确的账本替换成 0**。实测 `#11` 的「交易盈亏」卡显示 `$0.00`，
+   * 而同页的历史成交区有真实数据。
+   *
+   * 不传时按"未知"处理（既有行为：按 gap 判据走），所以旧调用点不会安静地变。
+   */
+  dryRun?: Record<number, boolean | null | undefined>;
 }
 
 /**
@@ -235,23 +248,60 @@ function latestAccountReading(
 const ACCOUNT_READING_STALE_MS = 60 * 60_000;
 
 /**
- * **账本与交易所对不上** —— 判据的唯一实现（2026-10-14）。
+ * **账本与交易所对不上** —— 判据的唯一实现（2026-10-14，2026-10-15 修模拟盘分支）。
  *
  * ```
- *   |gap| ≥ 0.01 且不是"收入读不到" → true（要用交易所的数校准）
- *   否则                            → false（账本可信，与交易所一致）
+ *   模拟盘（dryRun）      → 一律 false（交易所口径不存在，见下）
+ *   incomeReadFailed 为真 → false（exchangeNet 是残缺读数）
+ *   |gap| ≥ 0.01          → true（要用交易所的数校准）
+ *   否则                  → false（账本可信，与交易所一致）
  * ```
  *
- * ⚠️ `incomeReadFailed` 为真时**必须判 false**：那时的 `exchangeNet` 是
- * **残缺读数**（少了几段流水），拿它去校准会比坏账本更离谱。
+ * ## ⚠️ 为什么模拟盘必须先判掉（2026-10-15 用户实测抓到）
+ *
+ * 用户报（`#11`，模拟盘）：
+ * ```
+ *   历史成交区：25 笔 · 净额 -$0.58 · 6 盈 / 19 亏    ✅ 有数据
+ *   胜率卡：    31.3% · 32 笔已平仓                    ✅ 有数据
+ *   交易盈亏卡：$0.00                                   ❌ 空的
+ * ```
+ * **历史成交有数据、而汇总卡是 0** —— 因为两者走的是不同判据。
+ *
+ * 根因：`SimulatedExchange.getIncome()` **返回空数组**（模拟回放里不存在资金费
+ * 结算，见它的注释），于是：
+ * ```
+ *   exchangeNet = 0                          ← 恒为 0，不是"真的没盈亏"
+ *   gap = platformNet − 0 = platformNet      ← 恒等于账本自身
+ *   ⇒ |gap| ≥ 0.01 必然成立（只要账本非零）
+ *   ⇒ 判定"账本可疑" → 前端把 realized 换成 exchangeNet = 0
+ *   ⇒ 卡片显示 $0.00，而账本里的 −0.0524 是真的
+ * ```
+ * **这不是"账本坏了"，而是"模拟盘根本没有交易接口的流水"** ——
+ * 拿一个不存在的口径去"校准"，等于把正确的账本替换成 0。
+ *
+ * ⚠️ 判据改成"模拟盘一律 false"而不是"`exchangeNet === 0` 时 false"：
+ * 后者会误伤**真的把钱亏光/赚回零**的实盘账户（那是合法的 0）。
+ * 用 `dryRun` 这个**明确的模式标记**才是干净的判据。
  *
  * ⚠️ 0.01 这个阈值是**实测定的**：账本与交易所的正常舍入差在 1e-4 量级，
- * 而这次事故的差额是 12.55 —— 两者差两个数量级，所以 0.01 能干净地分开。
+ * 而那次事故的差额是 12.55 —— 两者差两个数量级，所以 0.01 能干净地分开。
  * 改它必须同时改 `TradersPage` / `OverviewPage` / `traderStats` 三处的测试
  *（见 `equityAligned.test.ts` 钉住的那五条）。
+ *
+ * @param ledger 服务端算出的账目校验结论
+ * @param dryRun 这个机器人**自己**在不在模拟盘（`stats.dryRun`）。
+ *   ⚠️ `null` = 它没在运行（读不到），按"未知"处理 —— 此时**不排除**，
+ *   因为既有行为（用交易所校准）对实盘是对的；而没在跑的机器人也不该有大差额。
  */
-export function isLedgerSuspect(ledger: TraderRow['ledger']): boolean {
+export function isLedgerSuspect(
+  ledger: TraderRow['ledger'],
+  dryRun?: boolean | null,
+): boolean {
   if (ledger == null) return false;
+  /*
+   * 模拟盘：没有交易所流水可校准。见上面那段事故说明。
+   */
+  if (dryRun === true) return false;
   if (ledger.incomeReadFailed === true) return false;
   return Math.abs(ledger.gap) >= 0.01;
 }
@@ -286,9 +336,14 @@ export function isLedgerSuspect(ledger: TraderRow['ledger']): boolean {
 export function realizedPnlOf(
   trader: TraderRow,
   row: TraderStats | undefined,
+  dryRun?: boolean | null,
 ): number {
   if (row === undefined) return 0;
-  if (!isLedgerSuspect(trader.ledger)) return row.realizedPnl;
+  /*
+   * ⚠️ `dryRun` 必须一路传进来 —— 模拟盘上 `exchangeNet` 恒为 0，
+   * 用它校准会把正确账本替换成 0（见 `isLedgerSuspect` 的事故说明）。
+   */
+  if (!isLedgerSuspect(trader.ledger, dryRun)) return row.realizedPnl;
   return trader.ledger!.exchangeNet;
 }
 
@@ -309,15 +364,23 @@ export function realizedPnlOf(
 export function attributedEquityOf(
   trader: TraderRow,
   row: TraderStats | undefined,
+  dryRun?: boolean | null,
 ): number {
   if (row === undefined) return trader.initialEquity;
-  if (!isLedgerSuspect(trader.ledger)) return row.equity;
+  if (!isLedgerSuspect(trader.ledger, dryRun)) return row.equity;
   return trader.initialEquity + trader.ledger!.exchangeNet + row.unrealizedPnl;
 }
 
 /** 舰队合计。见本文件顶部：账户口径与机器人归属口径在这一处分开。 */
-export function fleetTotals({ traders, stats, snapshots }: FleetInputs): FleetTotals {
+export function fleetTotals({ traders, stats, snapshots, dryRun }: FleetInputs): FleetTotals {
   const accounts: FleetAccount[] = [];
+  /**
+   * 这个机器人自己在不在模拟盘（`undefined` = 调用方没给 → 按"未知"处理）。
+   *
+   * 见 `FleetInputs.dryRun` 的说明：模拟盘的 `exchangeNet` 恒为 0，
+   * 拿它校准会把正确账本替换成 0。
+   */
+  const dryRunOf = (traderId: number): boolean | null | undefined => dryRun?.[traderId];
 
   let accountEquityFleet = 0;
   let committedCapitalFleet = 0;
@@ -382,8 +445,13 @@ export function fleetTotals({ traders, stats, snapshots }: FleetInputs): FleetTo
        *
        * ⚠️ 用 `realizedPnlOf()` 而不是直接写在这里：机器人列表页那一行也要
        * 同一个数（`calibratedOf`），两处必须共用一份实现。
+       *
+       * ⚠️ **`dryRun` 必须一起传**（2026-10-15）：模拟盘上 `exchangeNet` 恒为 0
+       *（`SimulatedExchange.getIncome()` 返回空数组），拿它校准会把**正确的账本**
+       * 替换成 0 —— 实测 `#11` 的「交易盈亏」卡因此显示 $0.00，而同页的历史成交区
+       * 有真实数据（那里走 trades 表，不经过这个判据）。见 `isLedgerSuspect`。
        */
-      realizedPnl += realizedPnlOf(trader, row);
+      realizedPnl += realizedPnlOf(trader, row, dryRunOf(trader.id));
       unrealizedPnl += row?.unrealizedPnl ?? 0;
       openPositions += row?.openPositions ?? 0;
       wins += row?.wins ?? 0;

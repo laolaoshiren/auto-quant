@@ -46,8 +46,9 @@ test('★★★ calibratedOf 必须从共享库的 realizedPnlOf 派生（不是
     '★ 必须有 calibratedOf —— 否则每一列各算一套口径',
   );
   assert.ok(
-    /const realizedPnl = realizedPnlOf\(trader, stats\);/.test(CODE),
-    '★ 净额必须来自共享库的 realizedPnlOf（不是本地判据）',
+    /const realizedPnl = realizedPnlOf\(trader, stats, dryRunOf\(trader\.id\)\);/.test(CODE),
+    '★ 净额必须来自共享库的 realizedPnlOf（不是本地判据）—— 且要把 dryRun 一起传，' +
+      '否则模拟盘上会拿到恒为 0 的 exchangeNet（2026-10-15 用户实测）',
   );
   assert.ok(
     /trader\.initialEquity > 0 \? \(realizedPnl \/ trader\.initialEquity\) \* 100 : 0/.test(CODE),
