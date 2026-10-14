@@ -2754,3 +2754,107 @@ Docker 镜像 (v0.1.15)→ success
 本轮已把核实证据与可选方向都留在 issue 里，等拍板后即可实现。
 
 累计关闭 **40 个**（本轮 -2）。
+
+---
+
+## 29. 第 23 轮：兑现 #145 的待办 —— "预设字段 ∈ schema" 守卫、v0.1.16
+
+本轮无新 PR、无新 issue（仅剩 #173/#184 两条等拍板）。所以本轮做的是
+**兑现一条历史待办**，而不是处理新报告。
+
+### 一、来源：#145 作者提的那条待办
+
+他在 #145 结尾写：
+
+> 另外呼应维护者说的那条待办：「预设里写的字段是否都在 schema 里」目前无自动检查 ——
+> 本条正是那个缺口的又一个实例（写在一句'别写错字段名'的注释紧邻处）。
+
+而这条待办被 **#182、#179、#180** 反复印证（同一个缺口的三次实例）。
+
+### 二、⚠️ 过程中发现的两个关键事实
+
+**① `parse()` 的输入是 `unknown` —— TS 在这一侧是瞎的**
+
+| 位置 | TS 检查字段名吗 | 为什么 |
+| --- | --- | --- |
+| `STRATEGY_PRESETS[].patch` | ✅ **会** | `Partial<StrategyConfigInput>` + 对象字面量 → excess property check |
+| `StrategyConfigSchema.parse({…})` | ❌ **不会** | zod 签名 `parse(data: unknown, …)` |
+
+**两条都实测过**：往 `patch` 塞 `definitelyNotARealField` → `npm run typecheck` 报
+`TS2353`；塞进 `defaultAiTeamConfig()` 的 `parse({…})` → **typecheck 通过**。
+
+⚠️ 而 `defaultAiTeamConfig()` **正是 #145 的现场**。所以这个缺口不是"没人想到"，
+而是**TS 覆盖不到** —— 那时只能靠注释提醒（#145 作者说的"写在一句别写错字段名的
+注释紧邻处"恰好印证）。
+
+**② 审计必须在【源码文本层】做 —— 审返回值永远绿**
+
+zod strip 模式让未知字段在 `parse()` 时就消失。实测：
+`'totallyFakeField' in parsed.coinSource === false`。
+
+⚠️ **我第一版审的就是 `defaultAiTeamConfig()` 的返回值** —— 它**永远绿**。
+是"用人造字面量校准、发现它抓不到东西"才让我改对的。
+**这与本仓库反复强调的纪律是同一条：先证明守卫在旧实现上会失败。**
+
+### 三、守卫本体（`configSchemaGuard.test.ts`）
+
+扫源码里每个 `StrategyConfigSchema.parse({…})` 的**字面量**（配平花括号 + 跳过字符串），
+逐层比对字段名与 schema（`zodShape` 会 unwrap `ZodDefault` —— 不做这步会
+**静默地什么都查不到**，我第一版也踩了）。
+
+⚠️ **两条前置断言防空转**（这是本轮最重要的设计）：
+- 必须真的找到 ≥3 处 `parse({…})` 字面量；
+- 必须真的检查到 ≥10 个字段。
+
+没有它们，"一处都没查到 → 没有问题"也会变绿 —— 而它什么都没验。
+
+⚠️ **验证覆盖 TS 盲区**：往 `defaultAiTeamConfig()` 的 `parse({…})` 里塞
+`totallyBogusFieldForGuardTest: true` → `typecheck` **通过**，
+守卫**报出** `第 624 行：coinSource.totallyBogusFieldForGuardTest`。
+
+⚠️ **不重复 TS 已覆盖的那一侧**（`STRATEGY_PRESETS[].patch`）——
+在子集里再做一遍就是"同一件事两套实现"，而这个仓库为此付出过多次代价。
+
+### 四、⚠️ 守卫的边界（写进了文件头与 issue 回复）
+
+它只保证**字段名存在**，**不保证字段被消费** —— 所以 **#182 那一类它抓不到**
+（"字段在 schema 里、但没有任何读取点"需要另一条守卫：
+"每个配置字段至少有一个非测试读取点"）。**已记为下一步。**
+
+这条边界很重要：如果不说清，下一个人会以为"配置问题已经全被守住了"。
+
+### 五、发版 v0.1.16
+
+```
+① main 全绿      typecheck / test(56+1559+251) / build / lint /
+                check:links / check:routes / sim 18/18 → 全 0
+② notices 一致   184 依赖全宽松，git diff 空
+③ tag v0.1.16    Docker 镜像构建 success
+④ 发布 release   isDraft=false
+⑤ 红线核实       v0.1.15..HEAD 【无提交触及 risk/engine.ts】
+```
+
+⚠️ 本次**不改运行时行为**（只加一个测试文件），所以发布说明里明确写了
+**§4 实盘冒烟不适用** —— 这是第一轮敢这么写的（前几轮都触及下单/解析路径）。
+
+### 六、本轮验证
+
+```
+npm run typecheck   → 0
+npm test            → 56 + 1559 + 251，0 fail
+npm run build       → 0
+npm run lint        → 0
+npm run check:links → 0
+npm run check:routes→ 0
+npm run sim         → 18/18
+Docker 镜像 (v0.1.16)→ success
+```
+
+### 七、剩余（**只剩 2 条，都等人拍板**）
+
+- **#173 B 项（字号）** —— 作者自标"取舍项，供讨论"
+- **#184（详情页两栏布局）** —— 作者自标"以设计判断为准"；两次 revert 均未写原因
+
+⚠️ 另有一条**我自己提出的下一步**（不是 issue）：
+"每个配置字段至少有一个非测试读取点"的守卫 —— 它接的是 #182 那一类。
+若下几轮仍无新 issue/PR，我会去做它。
