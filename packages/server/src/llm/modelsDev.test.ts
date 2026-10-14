@@ -28,7 +28,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -469,6 +469,79 @@ test('★★★ 归并时若所有成员都没写 tool_call，结果仍是 null'
     null,
     '★★★ 所有成员都没写 → 归并结果必须仍是 `null`（不知道），不能变成 true',
   );
+});
+
+test('★★★ structuredOutput 与 toolCall 同型 —— 缺失时同样必须是 null', () => {
+  /*
+   * ## 为什么单列一条（而不是"顺带在别的用例里加一句"）
+   *
+   * ⚠️ 我上一轮只给 `toolCall` 补了断言，而 `structuredOutput` **是同一个形状**：
+   *
+   * ```ts
+   * toolCall:         typeof model['tool_call']         === 'boolean' ? … : null,
+   * structuredOutput: typeof model['structured_output'] === 'boolean' ? … : null,
+   * ```
+   *
+   * 两者的**消费侧判据也一模一样**（`modelDiscovery.ts`）：
+   *
+   * ```ts
+   * if (out.toolCall         === undefined && entry.toolCall         !== null) { … }
+   * if (out.structuredOutput === undefined && entry.structuredOutput !== null) { … }
+   * ```
+   *
+   * ⚠️ 而**变异测试确认了它当时是漏网的**：把 `structuredOutput` 改成恒 `true`，
+   * 本文件 **45 条全绿**（含我上一轮新加的两条）——
+   * 即"**同一件事两处实现，只守住了其中一处**"。
+   *
+   * 所以这条按**对称**写：`toolCall` 有的断言，`structuredOutput` 也要有。
+   */
+  const index = parseModelsDev({
+    p: {
+      id: 'p',
+      models: {
+        yes: { id: 'yes', structured_output: true },
+        no: { id: 'no', structured_output: false },
+        unknown: { id: 'unknown' },
+      },
+    },
+  });
+
+  assert.equal(index.byId.get('p/yes')?.structuredOutput, true, '★ 明确写了 true 就是 true');
+  assert.equal(index.byId.get('p/no')?.structuredOutput, false, '★★ 明确写了 false 必须保持 false');
+  assert.equal(
+    index.byId.get('p/unknown')?.structuredOutput,
+    null,
+    '★★★ 没写 structured_output 的条目必须是 `null`（不知道）——\n' +
+      '    当成 `true` 会让消费侧的 `!== null` 判据失效，把"不知道"写成"支持"。',
+  );
+});
+
+test('★★★ 三个"X ? X : null"字段必须同型 —— 不能只守住其中一个', () => {
+  /*
+   * 结构守卫：`modelsDev.ts` 里用 `typeof model['…'] === '…' ? … : null` 这个形状的
+   * 字段只有三个（`toolCall` / `structuredOutput` / `canonicalId`）。
+   *
+   * ⚠️ 这条防的是"**再漏一个**"：`structuredOutput` 就是在上一次修复里漏掉的。
+   * 判据是"**这一串断言的覆盖面**"——三个字段都必须在上面的 parse 层用例里
+   * 被断言过"缺失时是 null"。
+   */
+  const source = readFileSync(new URL('./modelsDev.ts', import.meta.url), 'utf8');
+  const nullDefaulted = [...source.matchAll(/(\w+):\s*\n?\s*typeof model\['[^']+'\] === '[^']+' \? model\['[^']+'\] : null/g)].map(
+    (m) => m[1]!,
+  );
+
+  assert.ok(
+    nullDefaulted.length >= 3,
+    `★ 只找到 ${nullDefaulted.length} 个"缺失时默认 null"的字段 —— 结构变了，请更新本测试`,
+  );
+  for (const field of nullDefaulted) {
+    assert.ok(
+      ['toolCall', 'structuredOutput', 'canonicalId'].includes(field),
+      `★★ 新出现了一个"缺失时默认 null"的字段 \`${field}\` ——\n` +
+        '    它与 toolCall / structuredOutput 同型，**必须一并补上"缺失时是 null"的断言**。\n' +
+        '    ⚠️ structuredOutput 就是在上一轮修复里漏掉的那一个。',
+    );
+  }
 });
 
 test('★ 脏数据不会把整份目录变成空（防御性解析）', () => {
@@ -1000,6 +1073,12 @@ test('★ 对不上时绝不写入任何参数（unknown 路径）', () => {
   assert.equal(m.cost, undefined, '★ 不写参数 → 定价必须保持 undefined');
   assert.equal(m.knowledge, undefined);
   assert.equal(m.toolCall, undefined);
+  /*
+   * ⚠️ **`structuredOutput` 原本漏在这一串之外**（变异测试发现的）。
+   * 它与 `toolCall` 是**同型同判据**（`boolean | null` + `modeBool` +
+   * 消费侧的 `!== null`），只补一个就是"同一件事两处、修了一处"。
+   */
+  assert.equal(m.structuredOutput, undefined, '★ 不写参数 → 结构化输出能力必须保持 undefined');
   assert.equal(m.canonicalId, undefined);
   assert.equal(m.profileSource, 'runtime', '一个字段都没补 → 来源不该变成 modelsdev');
 });
