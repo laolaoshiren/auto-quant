@@ -1,4 +1,4 @@
-import { normalizeSymbol, type StrategyConfig } from '@aq/shared';
+import { isStableBaseAsset, normalizeSymbol, type StrategyConfig } from '@aq/shared';
 import { runFunnel, type FunnelStageReport } from '../market/funnel.js';
 import type { MarketDataService } from '../market/service.js';
 import { createLogger } from '../logger.js';
@@ -131,6 +131,26 @@ export async function selectCandidates(
 
   const { coinSource } = config;
 
+  /*
+   * ⚠️ **稳定币过滤**（`coinSource.excludeStablecoins`）。
+   *
+   * 这个字段曾经是**死配置**：`defaultAiTeamConfig()` 一直写着
+   * `excludeStablecoins: true`，而 `CoinSourceConfigSchema` 里**没有这个字段**，
+   * 于是 zod 在解析时把它静默丢掉 —— 注释说着"过滤掉稳定币"，
+   * 候选池却一直带着 `USDCUSDT` 这类锚定永续在跑。
+   *
+   * 为什么不能让 registry 顺手挡掉：它只按 `quoteAsset === 'USDT'` 过滤
+   * （`binance/symbols.ts`），挡的是**计价**资产，挡不住**标的**本身是
+   * 稳定币的合约。
+   *
+   * 实现上走**筛选后过滤**而不是 `screenUniverse` 的 `exclude` 参数：
+   * 那个管道要的是符号集合，而构造它需要枚举全市场 —— `MarketDataService`
+   * 没有暴露这样的接口（只有 `screenUniverseRows()`，且它已按自己的条件筛过）。
+   * 事后过滤拿到的就是同一批入选符号，行为等价，且不需要给 service 加新 API。
+   */
+  const isExcluded = (symbol: string): boolean =>
+    coinSource.excludeStablecoins && isStableBaseAsset(symbol);
+
   try {
     switch (coinSource.sourceType) {
       case 'static':
@@ -143,7 +163,7 @@ export async function selectCandidates(
           limit: coinSource.coinPoolLimit,
           minQuoteVolume24h: coinSource.minQuoteVolume24h,
         });
-        for (const symbol of symbols) add(symbol, 'coinpool');
+        for (const symbol of symbols) if (!isExcluded(symbol)) add(symbol, 'coinpool');
         break;
       }
 
@@ -172,12 +192,19 @@ export async function selectCandidates(
       case 'funnel': {
         const rows = await market.screenUniverseRows();
         const { survivors, stages } = runFunnel(rows);
-        for (const s of survivors) add(s.symbol, 'funnel');
+        const kept = survivors.filter((s) => !isExcluded(s.symbol));
+        for (const s of kept) add(s.symbol, 'funnel');
         /*
          * **把每层淘汰写进日志** —— 这是"每层可解释"的落地：
          * 操作员要能回答"我的币为什么没被看到"。
+         *
+         * ⚠️ 传的是**过滤稳定币之后**的数量：这一层是漏斗内部各阶段的口径，
+         * 而 `survivors` 是模型最终看到的池子。稳定币在漏斗里本会被"波动区间"
+         * 那层（`minAmplitudePercent`）顺手挡掉，但那是巧合不是意图 —— 一旦有人
+         * 调松波动门槛，`excludeStablecoins` 仍必须兑现，所以这里显式过滤，
+         * 并让日志说真话（报的是模型真的会看到多少个）。
          */
-        options.onFunnelReport?.(stages, survivors.length);
+        options.onFunnelReport?.(stages, kept.length);
         break;
       }
 
@@ -188,7 +215,7 @@ export async function selectCandidates(
           minQuoteVolume24h: coinSource.minQuoteVolume24h,
           minOpenInterestUsd: coinSource.minOpenInterestUsd,
         });
-        for (const symbol of symbols) add(symbol, 'oi_top');
+        for (const symbol of symbols) if (!isExcluded(symbol)) add(symbol, 'oi_top');
         break;
       }
 
@@ -204,7 +231,7 @@ export async function selectCandidates(
               log.warn(`按成交额筛选候选池失败：${(error as Error).message}`);
               return [] as string[];
             });
-          for (const symbol of symbols) add(symbol, 'coinpool');
+          for (const symbol of symbols) if (!isExcluded(symbol)) add(symbol, 'coinpool');
         }
 
         if (coinSource.useOITop) {
@@ -219,7 +246,7 @@ export async function selectCandidates(
               log.warn(`按持仓量增长筛选候选池失败：${(error as Error).message}`);
               return [] as string[];
             });
-          for (const symbol of symbols) add(symbol, 'oi_top');
+          for (const symbol of symbols) if (!isExcluded(symbol)) add(symbol, 'oi_top');
         }
 
         for (const symbol of coinSource.staticCoins) add(symbol, 'static');

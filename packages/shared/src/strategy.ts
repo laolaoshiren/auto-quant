@@ -49,8 +49,36 @@ export const CoinSourceConfigSchema = z.object({
   funnelUniverseLimit: z.number().int().min(1).max(1500).default(500),
   coinPoolRank: CoinPoolRankSchema.default('quote_volume'),
 
-  /** Drop stablecoin pairs and anything below this 24h turnover (USDT). */
+  /**
+   * Drop anything below this 24h turnover (USDT).
+   *
+   * ⚠️ **只挡成交额**，不挡稳定币 —— 稳定币是 `excludeStablecoins` 的事
+   * （下面那个字段）。这两个判据曾被挤在同一行注释里，于是下面那个字段
+   * 被写成了 schema 里不存在的名字，**被 zod 静默丢弃**，团队模式的
+   * 候选池一直带着稳定币在跑。
+   */
   minQuoteVolume24h: z.number().min(0).default(50_000_000),
+  /**
+   * 把**稳定币**（USDC / FDUSD / TUSD …）的永续从候选池里剔掉。
+   *
+   * ⚠️ 为什么需要一个显式开关而不是顺手过滤：`SymbolRegistry` 只按
+   * `quoteAsset === 'USDT'` 过滤（`binance/symbols.ts`），那只挡掉了
+   * **计价**资产是别的币的合约，挡不住**标的**本身是稳定币的
+   * （`USDCUSDT` 这类报价与波动都接近锚定值的永续）。
+   * 而它们不是无害的：名义波动接近 0、手续费与资金费占绝对主导，
+   * 放进一个 8–20 个位置的候选池就是**挤掉真实机会**。
+   *
+   * ⚠️ 判据是**白名单**：`STABLE_BASE_ASSETS` 里列出的那些（名单外 → 视作普通标的、
+   * 保留）。
+   *
+   * ⚠️ **默认 `false` 而不是 `true` —— 这是影响面的问题，不是风格问题。**
+   * 存量策略（conservative / aggressive）的 `config_json` 里**没有这个键**，
+   * 读出来时会落到 schema 默认值。若默认 `true`，那些**正在实盘跑**的策略
+   * 会在下一次读取时**静默开始过滤稳定币** —— 候选池变了，而没人做过这个决定。
+   * 本仓库对"另两种模式的选池行为逐字节不变"有明确要求（见 `coins.ts` funnel 分支的注释）。
+   * 真正想要过滤的 `defaultAiTeamConfig()` 显式写 `true`，所以团队模式照样生效。
+   */
+  excludeStablecoins: z.boolean().default(false),
   /** Only consider symbols whose open interest exceeds this (USDT). */
   minOpenInterestUsd: z.number().min(0).default(5_000_000),
 

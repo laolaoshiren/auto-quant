@@ -410,6 +410,56 @@ test('★★★ funnel 走分层漏斗，且每层的淘汰可解释', async () 
   );
 });
 
+test('★ funnel 也兑现 excludeStablecoins —— 开关开了就不能靠波动层顺手挡', async () => {
+  /*
+   * 漏斗默认有一层 `minAmplitudePercent: 2`，稳定币（波动接近 0）会被它【顺带】挡掉。
+   * 那是巧合不是意图：这里故意给稳定币高振幅，让波动层挡不住它 ——
+   * 于是能分辨"是开关在过滤"还是"是波动层在过滤"。
+   *
+   * 关掉开关时它必须在池里（证明是开关的功劳，不是漏斗结构），
+   * 开启时被剔除，且回调报的 survivors 是过滤后的数（日志说真话）。
+   */
+  const rows = Array.from({ length: 5 }, (_, i) => ({
+    symbol: ['USDCUSDT', 'SYM000USDT', 'SYM001USDT', 'SYM002USDT', 'SYM003USDT'][i]!,
+    quoteVolume24h: 500_000_000 - i * 1_000_000,
+    changePercent24h: 5,
+    amplitudePercent: 8, // 高振幅：波动层挡不住 USDCUSDT
+  }));
+  const market = {
+    async screenUniverseRows() {
+      return rows;
+    },
+  } as unknown as MarketDataService;
+
+  const run = async (exclude: boolean) => {
+    const reported: Array<{ survivors: number }> = [];
+    const picked = await selectCandidates(
+      configWith({
+        coinSource: {
+          ...defaultStrategyConfig().coinSource,
+          sourceType: 'funnel',
+          excludeStablecoins: exclude,
+        },
+      }),
+      market,
+      { budgetTokens: 200_000, onFunnelReport: (_s, survivors) => { reported.push({ survivors }); } },
+    );
+    return { picked, survivors: reported[0]?.survivors ?? -1 };
+  };
+
+  const off = await run(false);
+  assert.ok(off.picked.symbols.includes('USDCUSDT'), '开关关闭：USDCUSDT 必须在池里（不是波动层挡的）');
+
+  const on = await run(true);
+  assert.ok(!on.picked.symbols.includes('USDCUSDT'), '开关开启：即便波动层挡不住，也必须被剔除');
+  assert.ok(on.picked.symbols.includes('SYM000USDT'), '正常标的照常入选');
+  assert.ok(
+    on.survivors < off.survivors,
+    `回调 survivors 必须反映过滤后（开:${on.survivors} < 关:${off.survivors}）—— 否则日志说的数和模型看到的池子对不上`,
+  );
+});
+
+
 test('★★ coinpool 的行为【没有】被改动（增量更新的硬约束）', async () => {
   /*
    * 用户要求：「这次大更新做增量……现阶段得也得保留，用户可以自行切换」。
@@ -448,4 +498,125 @@ test('★★ coinpool 的行为【没有】被改动（增量更新的硬约束�
    */
   const fromSource = picked.symbols.filter((s) => rankedSymbols(20).includes(s));
   assert.ok(fromSource.length >= 5, `★ 来源标的应当大量进池（实际 ${fromSource.length} 个）`);
+});
+/* -------------------------------------------------------------------------- */
+/*  稳定币过滤（excludeStablecoins）                                            */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * ★★ `excludeStablecoins` 曾经是**死配置** —— 而它不是"没人用的旋钮"，
+ * 是**注释说要它生效、字段却根本不在 schema 里**。
+ *
+ * `defaultAiTeamConfig()`（团队模式的默认配置）一直写着：
+ * ```ts
+ * /* 过滤掉稳定币与成交额太小的（滑点会把利润吃光）。 *​/
+ * excludeStablecoins: true,
+ * ```
+ * 而 `CoinSourceConfigSchema` 里**没有这个字段**，zod 解析非 strict 对象时
+ * 静默丢弃未知键 —— 于是配置"成功"解析、意图被丢掉、没有任何报错。
+ * 更讽刺的是同一段注释里下一行正好写着：
+ * ```ts
+ * /* ⚠️ 字段名必须是 minQuoteVolume24h —— 写成 minQuoteVolume 会被 schema 静默丢弃。 *​/
+ * ```
+ *
+ * 为什么后果不只是"少个过滤器"：稳定币永续（USDCUSDT 这类）报价与波动都接近
+ * 锚定值，名义波动趋近 0 而手续费与资金费占绝对主导 —— 放进一个 8–20 个位置的
+ * 候选池就是**挤掉真实机会**。团队模式默认池只有 8 个，挤掉一个就是 12.5%。
+ *
+ * `SymbolRegistry` 挡不住它们：它只按 `quoteAsset === 'USDT'` 过滤，
+ * 那挡的是**计价**资产，`USDCUSDT` 的计价恰恰就是 USDT。
+ */
+test('★★ 团队模式的 excludeStablecoins 必须真的解析出来并生效', async () => {
+  const config = configWith({
+    coinSource: {
+      ...defaultStrategyConfig().coinSource,
+      sourceType: 'coinpool',
+      coinPoolLimit: 20,
+      excludeStablecoins: true,
+    },
+  });
+
+  /* 这个键必须活过 zod 解析 —— 原来它不在 schema 里，读出来是 undefined。 */
+  assert.equal(
+    config.coinSource.excludeStablecoins,
+    true,
+    '★★ 读出来不是 true —— 字段没进 schema，会被静默丢弃',
+  );
+
+  const market = fakeMarket({
+    volumeRanked: ['USDCUSDT', 'BTCUSDT', 'FDUSDUSDT', 'ETHUSDT', 'SOLUSDT'],
+  });
+
+  const result = await selectCandidates(config, market, { budgetTokens: 200_000 });
+
+  assert.ok(!result.symbols.includes('USDCUSDT'), 'USDCUSDT（标的本身锚定）必须被剔除');
+  assert.ok(!result.symbols.includes('FDUSDUSDT'), 'FDUSDUSDT 同理');
+  assert.ok(result.symbols.includes('BTCUSDT'), 'BTC 必须保留');
+  assert.ok(result.symbols.includes('ETHUSDT'), 'ETH 必须保留');
+  assert.ok(result.symbols.includes('SOLUSDT'), 'SOL 必须保留');
+});
+
+test('★★ 默认关闭 —— 存量非团队策略的选池不得因此改变', async () => {
+  /*
+   * ⚠️ 这是影响面的硬约束，不是偏好。
+   *
+   * 存量（conservative / aggressive）策略的 config_json 里**没有**这个键，
+   * 读出来落到 schema 默认值。若默认 `true`，这些正在实盘跑的策略会在下次读取时
+   * **静默开始过滤稳定币** —— 候选池变了，而没人做过这个决定。本仓库对
+   * "另两种模式的选池行为逐字节不变"有明确要求。真正想要过滤的
+   * `defaultAiTeamConfig()` 显式写 `true`，所以团队模式照常生效。
+   */
+  assert.equal(
+    defaultStrategyConfig().coinSource.excludeStablecoins,
+    false,
+    '★★ schema 默认必须是 false —— 否则存量非团队策略被静默改变行为',
+  );
+
+  const config = configWith({
+    coinSource: { ...defaultStrategyConfig().coinSource, sourceType: 'coinpool', coinPoolLimit: 20 },
+  });
+  const market = fakeMarket({ volumeRanked: ['USDCUSDT', 'BTCUSDT'] });
+  const result = await selectCandidates(config, market, { budgetTokens: 200_000 });
+  /* 默认关 → 稳定币保留，与改动前逐字节一致。 */
+  assert.ok(result.symbols.includes('USDCUSDT'), '默认关闭时不得过滤 —— 那是存量模式的既有行为');
+});
+
+test('★ 开关关掉后稳定币回到池里 —— 它必须真的可关，不是硬编码', async () => {
+  const config = configWith({
+    coinSource: {
+      ...defaultStrategyConfig().coinSource,
+      sourceType: 'coinpool',
+      coinPoolLimit: 20,
+      excludeStablecoins: false,
+    },
+  });
+  const market = fakeMarket({ volumeRanked: ['USDCUSDT', 'BTCUSDT'] });
+  const result = await selectCandidates(config, market, { budgetTokens: 200_000 });
+  assert.ok(result.symbols.includes('USDCUSDT'), '显式关闭后不过滤 —— 那是操作员的选择');
+});
+
+test('★ 白名单只列已知稳定币 —— 名单外的未知新币在开关开启时也不被误杀', async () => {
+  /*
+   * `isStableBaseAsset()` 用白名单：名单外的新锚定币会被判为"不是稳定币"→ 保留。
+   * 代价是可能放过新型稳定币（人补一行名单即可），换来的是不误杀真实标的
+   * （把活跃山寨当稳定币剔除 = 直接放弃机会）。
+   *
+   * 这条在 `excludeStablecoins: true` 下测，确认即便过滤开着，未知币也不被误杀。
+   * 它钉的是现状语义：若将来改成"名单外一律可疑"，这条会失败 —— 正是要语义变更
+   * 被显式决定一次。
+   */
+  const result = await selectCandidates(
+    configWith({
+      coinSource: {
+        ...defaultStrategyConfig().coinSource,
+        sourceType: 'coinpool',
+        coinPoolLimit: 20,
+        excludeStablecoins: true,
+      },
+    }),
+    fakeMarket({ volumeRanked: ['NEWPEGUSDT', 'USDCUSDT', 'BTCUSDT'] }),
+    { budgetTokens: 200_000 },
+  );
+  assert.ok(result.symbols.includes('NEWPEGUSDT'), '名单外的未知币：白名单语义下保留（不误杀）');
+  assert.ok(!result.symbols.includes('USDCUSDT'), '而名单内的已知稳定币照样被剔除');
 });
