@@ -33,6 +33,7 @@ const IPV4_BLOCKED_REASONS = {
   private192: '私有地址 192.168.0.0/16',
   linkLocal: '链路本地地址 169.254.0.0/16（云元数据服务 169.254.169.254 就在这里）',
   cgnat: '运营商级 NAT 地址 100.64.0.0/10（部分云元数据服务在此，如 100.100.100.200）',
+  ietfProtocolAssignments: 'IETF 协议分配段 192.0.0.0/24（Oracle Cloud 元数据服务 192.0.0.192 在这里）',
   reserved: '组播或保留地址 224.0.0.0/4 及以上',
 } as const;
 
@@ -58,6 +59,17 @@ function blockedIpv4Reason(bytes: readonly number[]): string | null {
   if (a === 10) return IPV4_BLOCKED_REASONS.private10;
   if (a === 172 && b >= 16 && b <= 31) return IPV4_BLOCKED_REASONS.private172;
   if (a === 192 && b === 168) return IPV4_BLOCKED_REASONS.private192;
+  /*
+   * 192.0.0.0/24 —— IETF 协议分配段。
+   *
+   * Oracle Cloud 的实例元数据服务（`192.0.0.192`）在这里，而它与 `169.254.169.254`
+   * 是同一类风险：**无需认证**就把实例凭据吐给本机上的请求者。AWS / 阿里 / GCP
+   * 三条都早已在表里（分别是 169.254.169.254 与 100.100.100.200），唯独 OCI 漏了 ——
+   * 而这个项目的部署文档并不限定云厂商。
+   *
+   * 整段都挡：`192.0.0.x` 之外这个段没有别的合法用途，逐个列端点反而会漏。
+   */
+  if (a === 192 && b === 0) return IPV4_BLOCKED_REASONS.ietfProtocolAssignments;
   if (a === 169 && b === 254) return IPV4_BLOCKED_REASONS.linkLocal;
   if (a === 100 && b >= 64 && b <= 127) return IPV4_BLOCKED_REASONS.cgnat;
   if (a >= 224) return IPV4_BLOCKED_REASONS.reserved;
@@ -119,10 +131,41 @@ function blockedIpv6Reason(bytes: readonly number[]): string | null {
   if (empty(0, 10) && bytes[10] === 0xff && bytes[11] === 0xff) {
     return blockedIpv4Reason(bytes.slice(12));
   }
-  if (empty(0, 12)) return blockedIpv4Reason(bytes.slice(12));
-  // NAT64 64:ff9b::/96 —— 前缀本身是公网地址，但内嵌的 IPv4 可以是 169.254.169.254
-  if (bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b && empty(4, 12)) {
+  /*
+   * SIIT 写法（`::ffff:0:a.b.c.d`）—— 同一个 IPv4 的另一种字节布局：ffff 落在
+   * byte 8-9 而不是 10-11（RFC 6145 的无状态转换形式）。常规协议栈**不会**把它
+   * 当回环落地（Windows/Linux 的 `ipv6_addr_v4mapped()` 都只认 byte 10-11），
+   * 但部署在真做 SIIT/NAT64 转换的网络里时它会路由 —— 纵深防御不该赌部署环境，
+   * 识别成本只是多一条分支。
+   */
+  if (empty(0, 8) && bytes[8] === 0xff && bytes[9] === 0xff && empty(10, 12)) {
     return blockedIpv4Reason(bytes.slice(12));
+  }
+  if (empty(0, 12)) return blockedIpv4Reason(bytes.slice(12));
+  /*
+   * NAT64 —— RFC 6052 允许嵌入位置随前缀长度移动：`64:ff9b::/96` 把 IPv4 放在
+   * 最后 32 位，RFC 8215 的本地用途前缀 `64:ff9b:1::/48` 放在 byte 6-9。
+   * 只认 /96 的话，写 `64:ff9b:1::/48` 前缀的部署就整段绕过。
+   *
+   * ⚠️ 「/96」与更短前缀必须分开判，因为「这一段全零」的含义不同：
+   *   · /96：byte 4-11 由前缀本身保证全零，IPv4 只会落在 byte 12-15，那一段
+   *     全零**确实代表内嵌了 0.0.0.0** → 该拒。
+   *   · 更短前缀（/48 等）：IPv4 可能落在 byte 6-9 **或** byte 12-15，一段全零
+   *     只意味着「IPv4 没放在这一段」，不是内嵌 0.0.0.0。若把全零也交给
+   *     `blockedIpv4Reason`，它会返回「未指定地址」，于是**误伤所有内嵌公网的
+   *     /48 地址**（`64:ff9b:1:8888:8888::` 内嵌 136.136.136.136 也被拒），
+   *     NAT64 部署下的 LLM 请求会全部失败。
+   *
+   * 这里不赌"操作员用的是哪种前缀"：**只要开头是 64:ff9b**（这个 /32 整段被
+   * IANA 保留给 NAT64，公网地址不会长这样），/96 走精确判定，其余按两个可能
+   * 嵌入位置查，且全零段视为「未内嵌」跳过。
+   */
+  if (bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b) {
+    if (empty(4, 12)) return blockedIpv4Reason(bytes.slice(12)); // /96：byte 12-15 全零确实该判 0.0.0.0
+    // 更短前缀：某段全零 = IPv4 不在这里，不是内嵌 0.0.0.0，必须跳过而非拒绝。
+    const embeddedIpv4Reason = (seg: readonly number[]): string | null =>
+      seg.every((x) => x === 0) ? null : blockedIpv4Reason(seg);
+    return embeddedIpv4Reason(bytes.slice(12)) ?? embeddedIpv4Reason(bytes.slice(6, 10));
   }
   if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return '链路本地地址 fe80::/10';
   if ((bytes[0]! & 0xfe) === 0xfc) return '唯一本地地址 fc00::/7';
