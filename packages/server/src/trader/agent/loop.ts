@@ -147,7 +147,7 @@ export function firstBalancedObject(text: string): string | null {
  * 宽容度与 §2.4 一致：允许围栏、允许前后有解释文字。
  * **但抽不出 `tool` 就是失败** —— 不猜它想干什么。
  */
-function parseTurn(text: string): { action: TurnAction | null; error: string | null } {
+export function parseTurn(text: string): { action: TurnAction | null; error: string | null } {
   type Shape = { thought?: unknown; tool?: unknown; args?: unknown };
 
   /*
@@ -181,8 +181,56 @@ function parseTurn(text: string): { action: TurnAction | null; error: string | n
    */
   const firstObject = firstBalancedObject(text);
   if (firstObject !== null) {
-    const single = toAction(parseRoleOutput<Shape>(firstObject).value);
+    const firstParsed = parseRoleOutput<Shape>(firstObject).value;
+    const single = toAction(firstParsed);
     if (single) return { action: single, error: null };
+    /*
+     * ⚠️⚠️ **这里必须报"没有 tool 字段"，不能沿用 `parsed.error`**（2026-10-15 修）
+     *
+     * ## 事故：错误信息在说谎，于是模型无法自我纠正
+     *
+     * 实测失败原文（`agent_runs` #820，`strategy/single`，烧掉 2–6 万 tokens 零产出）：
+     * ```
+     *   模型连续两轮没有输出可解析的工具调用：
+     *     无法从回复里解析出 JSON 对象（前 120 字符：
+     *     {"thought":"综合分析：1) 24h 30笔交易,胜率30%,SL均亏-3.98%,TP均赚+8.73%,
+     *      净PnL≈-0.048——数学上接近盈亏平衡,6连亏在70%失败率下概率11.8%,属统计噪声…"）
+     * ```
+     *
+     * ## 真实形状（复刻出来的，不是推测）
+     *
+     * 那个形状是「**多个对象、且第一个没有 `tool`**」：
+     * ```
+     *   parseRoleOutput(整段)  → value=null（多对象对它是歧义，必须失败）
+     *                            error="无法从回复里解析出 JSON 对象…"   ← 【就是这句在说谎】
+     *   firstBalancedObject()  → 取到第一个对象，但它【没有 tool 字段】
+     *   ⇒ 走到这里时，`parsed.error` 是"解析失败"，而真相是"JSON 好得很、只是没说要调什么"
+     * ```
+     *
+     * ## 为什么这比"报错不准确"严重得多
+     *
+     * ```
+     *   ① 给模型的纠正提示是错的
+     *      → 它读到"无法解析 JSON"，于是去**重新整理格式**（格式本来就没问题）
+     *      → 下一轮给出同样的形状 → 连续两轮 → failed
+     *   ② 给操作员的日志是错的
+     *      → "无法解析 JSON" 让人去查解析器 / 编码 / 转义
+     *      → 而真相是提示词里的协议（每轮必须带 tool）没被遵守
+     * ```
+     * 这个仓库反复记过同一类教训：**一个说错话的错误信息比没有信息更糟。**
+     *
+     * ## 修法
+     *
+     * 走到这里说明"对象取到了、JSON 也解析了，就是缺 tool" ⇒ 报这个事实。
+     * 只有**连对象都取不到**（`firstObject === null`）才用 `parsed.error`。
+     */
+    return {
+      action: null,
+      error:
+        'JSON 解析成功，但里面**没有 tool 字段** —— 你只写了 thought、没说要调哪个工具。' +
+        '每一轮都必须带 tool；要给结论就调用 finish。' +
+        `收到：${JSON.stringify(firstParsed ?? firstObject).slice(0, 200)}`,
+    };
   }
 
   /*
