@@ -14,9 +14,30 @@ import { isIP } from 'node:net';
  * `127.0.0.1` 同理：可以打到只监听本机的管理端口（Docker socket 代理、数据库、
  * 其他内部服务），而这些端口对操作员本人是**不可见**的。
  *
- * 已知不覆盖的情形：这里校验的是**字面主机**，不做 DNS 解析。
- * 一个公开域名如果解析到内网地址（DNS rebinding），本模块拦不住。
- * 要彻底封死需要在 socket 连接层校验解析结果，那是更大的改动，见报告中的说明。
+ * ## DNS rebinding —— 已在**连接层**封死（2026-10-14，外部 issue #126）
+ *
+ * ⚠️ **本模块（`checkOutboundUrl`）本身仍然只判字面主机** —— 这一点没变，
+ * 因为它在 `fetch` 之前运行，而真实 IP 要等连接时才确定。
+ *
+ * 但那条缺口不再敞着：`llm/http.ts` 的 `fetchGuarded` 给 undici 装了一个
+ * `connect.lookup` 钩子，**在真正建立连接前**拿到解析结果、用
+ * `checkResolvedAddress()`（就是下面那个函数）过同一套网段规则，
+ * 不通过就以 `ENOTFOUND` 失败。
+ *
+ * 为什么必须是连接层：方案 A（在 `checkOutboundUrl` 里额外 `dns.lookup` 一次）
+ * 挡不住 TTL=0 的经典 rebinding —— 它与连接是**两次独立的查询**，
+ * 中间可以换答案。只有在连接层校验才没有那个时间差。
+ *
+ * ## 仍然不覆盖的情形（诚实边界，别删）
+ *
+ * · **`allowPrivateHosts` 里显式登记的目标**：那是操作员的决定，连接层同样放行 ——
+ *   登记一个会 rebinding 的域名等于自己把门打开，这是配置问题不是代码问题；
+ * · **同一进程内其它不经 `fetchGuarded` 的出站**（若有）：本模块管不到。
+ *   新增出站路径时**必须**走 `fetchGuarded`，否则连接层校验不会被应用；
+ * · **TLS 层**：这里判的是"连到哪个 IP"，不管证书是谁签的。
+ *
+ * 保留这段边界说明是**刻意的**：它的价值在于让后来人知道防线画在哪 ——
+ * 删掉它比留着它危险。issue #126 的作者也专门叮嘱了这一点。
  */
 
 export interface UrlGuardVerdict {
@@ -322,4 +343,68 @@ export function assertOutboundUrlAllowed(raw: string, allowPrivateHosts: readonl
     throw new Error(`baseUrl 不被允许：${verdict.reason}`);
   }
   return raw.trim();
+}
+
+/* -------------------------------------------------------------------------- */
+/*  连接层校验（DNS rebinding 的正解）—— 外部 issue #126                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 一个**已经解析出来的 IP 字面量**是否允许连接。
+ *
+ * ## 为什么需要它：`checkOutboundUrl` 只判字面主机
+ *
+ * `checkOutboundUrl` 看的是 URL 里写的主机名。一个**公开域名**（`attacker.example.com`）
+ * 会被放行 —— 而它在 DNS 里解析到 `169.254.169.254` 时，请求会真的打到云元数据服务。
+ * 这就是 DNS rebinding：**字面主机在 `fetch` 之前检查，真实 IP 在连接时才确定**，
+ * 两者之间必然有时间差。
+ *
+ * ## 所以要有一个"按解析结果判"的入口
+ *
+ * 这个函数就是那套判据的复用点：它接受**解析后的地址字符串**，
+ * 走与 `checkOutboundUrl` **完全相同**的网段规则
+ *（`blockedIpv4Reason` / `blockedIpv6Reason` + 白名单）——
+ * 一套规则两个入口，而不是在连接层再写一份（那必然分叉）。
+ *
+ * ⚠️ 只判字面量：传进来的必须已经是 IP（`dns.lookup` 给的就是）。
+ * 传主机名会返回 `allowed: true` —— 那是**故意的**，因为主机名在这一层没有意义
+ *（它的解析结果才是要判的东西），而在这里再解析一次就会掉进"两次查询之间换答案"。
+ *
+ * `allowPrivateHosts` 沿用同一个**字面量/主机名**匹配（`hostIsAllowlisted`）。
+ * ⚠️ **`hostname`（可选）是原主机名**：操作员的白名单里可能写的是**主机名**
+ *（`AQ_ALLOW_PRIVATE_LLM_HOSTS=localhost` 或 `.corp.lan`），而这里拿到的是
+ * **解析结果**（`::1` / `127.0.0.1`）。不把原主机名带进来匹配的话，
+ * 白名单对此**完全失效** —— 实测形态：登记了 `localhost`，IPv4 那侧解析出
+ * `127.0.0.1` 恰好等于字面量所以碰巧放行，而 **IPv6 那侧解析出 `::1` 被拒**，
+ * 于是"登记了却连不上"，且报错完全指不到白名单。
+ */
+export function checkResolvedAddress(
+  address: string,
+  allowPrivateHosts: readonly string[] = [],
+  hostname?: string,
+): UrlGuardVerdict {
+  const literal = address.trim().replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+  if (!literal) return { allowed: false, reason: '解析结果为空。' };
+
+  const host = (hostname ?? literal).trim().toLowerCase().replace(/\.$/, '');
+
+  const family = isIP(literal);
+  /* 不是 IP（理论上不会发生）→ 放行，交给上面那层的字面校验。 */
+  if (family === 0) return { allowed: true };
+
+  if (family === 4) {
+    const bytes = parseIpv4(literal);
+    if (!bytes) return { allowed: true };
+    const reason = blockedIpv4Reason(bytes);
+    if (!reason) return { allowed: true };
+    if (hostIsAllowlisted(host, literal, 4, allowPrivateHosts)) return { allowed: true };
+    return { allowed: false, reason: `${literal} 解析到 ${reason}` };
+  }
+
+  const bytes = parseIpv6(literal);
+  if (!bytes) return { allowed: true };
+  const reason = blockedIpv6Reason(bytes);
+  if (!reason) return { allowed: true };
+  if (hostIsAllowlisted(host, literal, 6, allowPrivateHosts)) return { allowed: true };
+  return { allowed: false, reason: `${literal} 解析到 ${reason}` };
 }

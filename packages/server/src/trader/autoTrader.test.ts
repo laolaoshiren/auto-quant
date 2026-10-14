@@ -178,6 +178,21 @@ class FakeBroker {
   walletBalance = 1000;
   /** Set to make conditional orders fail, as a stop on the wrong side does. */
   rejectStops = false;
+  /**
+   * 让下一张 **LIMIT** 单在 `placeOrder` 回来时就已经是终态（立即成交）。
+   *
+   * ## 为什么必须能模拟这一档
+   *
+   * 这是 issue #137 的复现条件：行情在"取到现价"与"发出 LIMIT 单"之间跳一下，
+   * 于是挂单价**穿过了**市价、那张单一下去就成交。此时 `placeOrder` 返回
+   * `terminal: true` + `executedQty > 0`。
+   *
+   * ⚠️ 桩原来**恒返回 `terminal: false`**（见 `placeOrder` 里 LIMIT 那段注释：
+   * "限价单挂上不成交"），所以那条立即成交的分支**在测试里根本不可达** ——
+   * 而 issue #137 正是在那里漏掉了记账与 pending 插入。
+   * 一个不可达的分支就是一条可能已经坏掉的路径。
+   */
+  fillLimitImmediately = false;
   /** Set to make the next reduce-only market order fill only this fraction. */
   partialFillRatio: number | null = null;
   /** `/fapi/v1/income` events, for funding attribution. */
@@ -368,17 +383,24 @@ class FakeBroker {
      * "成交了吗"。默认**一直挂着**（最保守），用例想让它成交就改那张单的状态。
      */
     if (request.type === 'LIMIT') {
+      /*
+       * ⚠️ **立即成交那一档**（外部 issue #137 的复现条件）。
+       *
+       * 桩原来恒返回 `terminal: false`，所以"挂上去就成交"的分支不可达 ——
+       * 而那条分支里漏掉了这张单的记账与 pending 插入。
+       */
+      const immediatelyFilled = this.fillLimitImmediately;
       const resting: BinanceOrderResponse = {
         symbol: request.symbol,
         orderId: Number(id),
         clientOrderId: request.clientOrderId ?? id,
         side: request.side,
         type: 'LIMIT',
-        status: 'NEW',
+        status: immediatelyFilled ? 'FILLED' : 'NEW',
         price: String(request.price ?? 0),
         origQty: String(request.quantity ?? 0),
-        executedQty: '0',
-        avgPrice: '0',
+        executedQty: immediatelyFilled ? String(request.quantity ?? 0) : '0',
+        avgPrice: immediatelyFilled ? String(request.price ?? 0) : '0',
         timeInForce: 'GTC',
         reduceOnly: false,
         closePosition: false,
@@ -387,6 +409,34 @@ class FakeBroker {
         updateTime: 0,
       } as BinanceOrderResponse;
       this.restingOrders.set(Number(id), resting);
+      /*
+       * ⚠️ **立即成交时，交易所那一侧也必须真的出现仓位**（issue #137）。
+       *
+       * `getPositions()` 是"交易所有什么"的那一侧 —— 只把 `order` 标成 FILLED
+       * 而不建仓位，对账下一轮就会看到"本地有仓、交易所没有"，
+       * **把刚转正的那一行清掉**（实测：open 行建了又被删，`open=[]`）。
+       *
+       * 这正是 `fillRestingOrder()` 里那段注释说的同一件事；立即成交那条路
+       * 原来没有它，因为那条分支在桩上**根本不可达**（`terminal` 恒为 false）。
+       */
+      if (immediatelyFilled) {
+        const qty = Number(request.quantity ?? 0);
+        const px = Number(request.price ?? 0);
+        this.positions.push({
+          symbol: request.symbol,
+          side: request.side === 'BUY' ? 'long' : 'short',
+          quantity: qty,
+          entryPrice: px,
+          markPrice: this.markPrice,
+          leverage: 3,
+          liquidationPrice: null,
+          unrealizedPnl: 0,
+          unrealizedPnlPercent: 0,
+          marginUsed: (qty * px) / 3,
+          notional: qty * px,
+          marginType: 'cross',
+        });
+      }
       return {
         kind: 'order',
         id,
@@ -394,10 +444,10 @@ class FakeBroker {
         symbol: request.symbol,
         side: request.side,
         type: 'LIMIT',
-        status: 'NEW',
-        avgPrice: 0,
-        executedQty: 0,
-        terminal: false,
+        status: immediatelyFilled ? 'FILLED' : 'NEW',
+        avgPrice: immediatelyFilled ? (request.price ?? 0) : 0,
+        executedQty: immediatelyFilled ? (request.quantity ?? 0) : 0,
+        terminal: immediatelyFilled,
         raw: resting,
       };
     }
@@ -5358,6 +5408,100 @@ test('★ 限价入场：挂单后不建仓，成交后才转正并挂上保护�
     entryRow.filledQty > 0,
     `★ 成交量也必须回写（实际 ${entryRow.filledQty}）—— settleStaleOrders 判终态时读的就是它`,
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ★★★ 限价单【立即成交】那一档（外部 issue #137）                              */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 限价单立即成交时只下一张单，不得再补一张市价单', async () => {
+  /*
+   * ## 缺陷
+   *
+   * `submitLimitEntry` 在下完 LIMIT 单之后有这么一段：
+   *
+   * ```ts
+   * if (placed.terminal && placed.executedQty > 0) {
+   *   return this.executeOpen({ ...decision, entryType: 'market', limitPrice: null }, snapshot);
+   *   //                                                                ↑ 又下一张单
+   * }
+   * ```
+   *
+   * 而 `executeOpen` 里 `makeClientId('entry', symbol)` 带 `Math.random()` 后缀，
+   * 所以币安**不会**当成重复单挡掉 —— 账户上于是有**两份仓位**，
+   * 而本地只记了后面那张市价单。
+   *
+   * ## 复现条件（为什么正常路径会中）
+   *
+   * `wouldFillImmediately`（`limitPrice >= price` 买入）那条分支是**对的**
+   *（它根本没下 LIMIT 单）。但**行情在"取到现价"与"发出 LIMIT"之间跳一下**，
+   * 就会绕过那个判断、直接落到立即成交分支。低价山寨/meme 的 tick 极密，
+   * 这种瞬间穿价很常见。
+   *
+   * ## 为什么这条路径此前没有覆盖
+   *
+   * `FakeBroker.placeOrder` 对 LIMIT **恒返回 `terminal: false`** ——
+   * 于是这个分支在测试里**根本不可达**。桩比实现更宽松，就会把 bug 藏起来。
+   * 所以我给桩加了 `fillLimitImmediately`。
+   */
+  const broker = new FakeBroker();
+  /* 价格低于市价（不会触发 `wouldFillImmediately`），但让 LIMIT 单一下去就成交。 */
+  const limitPrice = broker.markPrice * 0.995;
+  broker.fillLimitImmediately = true;
+
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  /*
+   * ① **只能有一张入场单。** 两份仓位就是这么来的：第二张单是市价、会真的成交。
+   */
+  const entryOrders = broker.placed.filter(
+    (p) => p.type === 'LIMIT' || p.type === 'MARKET',
+  );
+  assert.equal(
+    entryOrders.length,
+    1,
+    `★★★ 立即成交时只该下【一张】入场单 —— 实际下了 ${entryOrders.length} 张：` +
+      `${entryOrders.map((p) => `${p.type}@${p.price ?? '市价'}`).join('、')}。\n` +
+      '    第二张会让账户上出现两份仓位，而本地只记得其中一份（issue #137）。',
+  );
+  assert.equal(entryOrders[0]!.type, 'LIMIT', '★ 那唯一一张必须是已经成交的 LIMIT 单');
+
+  /* ② 那张已成交的 LIMIT 单必须**有账**（`recordOrder` 在原来的 return 之后，永不执行）。 */
+  const rows = orderStore.list(traderId).filter((o) => o.purpose === 'entry');
+  assert.equal(
+    rows.length,
+    1,
+    `★★★ 成交了的入场单必须有【且只有】一行记录 —— 实际 ${rows.length} 行。\n` +
+      '    原实现里 recordOrder/pending 插入都在 `return` 之后，永远不会执行。',
+  );
+  assert.equal(rows[0]!.status, 'FILLED', `★ 它已经成交，状态必须是 FILLED，实际 ${rows[0]!.status}`);
+  assert.ok(rows[0]!.filledQty > 0, `★ 成交量要回写，实际 ${rows[0]!.filledQty}`);
+
+  /* ③ 本地持仓只能有**一份**，数量等于那张 LIMIT 单的数量。 */
+  const open = positionStore.open(traderId).filter((p) => p.symbol === SYMBOL);
+  assert.equal(
+    open.length,
+    1,
+    `★★★ 本地只能有一行持仓 —— 实际 ${open.length} 行（多出来的是第二张单建的）`,
+  );
+  assert.equal(
+    open[0]!.quantity,
+    Number(entryOrders[0]!.quantity),
+    '★ 持仓数量必须等于那张已成交 LIMIT 单的数量',
+  );
+
+  /* ④ **不留下 pending 行** —— 它已经成交了，不是"在等成交"。 */
+  assert.equal(
+    positionStore.pending(traderId).length,
+    0,
+    '★ 立刻成交的单不该留下一行待成交记录（那会让对账每轮去查一张早已成交的单）',
+  );
+
+  /* ⑤ 保护单仍然必须挂上 —— 这是整条路径里唯一有风险的窗口。 */
+  const stops = broker.placed.filter(
+    (p) => p.type === 'STOP_MARKET' && p.symbol === SYMBOL && (p.triggerPrice ?? 0) > 0,
+  );
+  assert.ok(stops.length > 0, '★★ 立即成交后同样必须挂上止损（§2.6）');
 });
 
 test('限价单未成交就被撤销时，本地不留任何痕迹', async () => {

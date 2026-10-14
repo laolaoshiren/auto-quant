@@ -2,7 +2,7 @@
 
 本项目的 Docker 镜像包含以下第三方软件包。它们的许可证要求**在再分发时保留版权声明与许可证文本**，本文件即为该义务的履行方式。
 
-运行时依赖共 **183** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
+运行时依赖共 **184** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
 
 > 本文件由 `node scripts/generate-notices.mjs` 自动生成，请勿手工编辑。
 > CI 会校验它与当前依赖一致。
@@ -11,7 +11,7 @@
 
 | 许可证 | 包数量 |
 | --- | --- |
-| MIT | 148 |
+| MIT | 149 |
 | ISC | 22 |
 | BSD-3-Clause | 5 |
 | BlueOak-1.0.0 | 3 |
@@ -199,6 +199,7 @@
 | toidentifier | 1.0.1 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
 | tslib | 2.8.1 | 0BSD | Microsoft Corp. |
 | tsx | 4.23.15 | MIT | Hiroki Osame |
+| undici | 8.12.1 | MIT | — |
 | uri-js | 4.4.1 | BSD-2-Clause | Gary Court <gary.court@gmail.com> |
 | use-callback-ref | 1.3.3 | MIT | theKashey <thekashey@gmail.com> |
 | use-sidecar | 1.1.3 | MIT | theKashey <thekashey@gmail.com> |

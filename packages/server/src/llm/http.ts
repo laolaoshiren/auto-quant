@@ -1,3 +1,5 @@
+import { lookup } from 'node:dns';
+import { Agent, type Dispatcher } from 'undici';
 import {
   abortError,
   classifyHttpError,
@@ -5,7 +7,7 @@ import {
   connectionError,
   timeoutError,
 } from './errors.js';
-import { checkOutboundUrl, parseHostAllowlist } from './urlGuard.js';
+import { checkOutboundUrl, checkResolvedAddress, parseHostAllowlist } from './urlGuard.js';
 import { env } from '../env.js';
 import type { LlmProviderId } from '@aq/shared';
 import type { OutboundRequest } from './types.js';
@@ -32,6 +34,142 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 5;
 
 /**
+ * **连接层校验：DNS rebinding 的正解**（外部 issue #126）。
+ *
+ * ## 为什么 `checkOutboundUrl` 不够
+ *
+ * 它判的是 URL 里的**字面主机**。一个公开域名（`attacker.example.com`）会被放行 ——
+ * 而它在 DNS 里解析到 `169.254.169.254` 时，请求会**真的**打到云元数据服务，
+ * 拿回实例临时凭据，再通过 `test-draft` 的探测结果或交易循环的报错信息回显出去。
+ *
+ * 根因是**时间差**：字面主机在 `fetch` 之前检查，真实 IP 在连接时才确定。
+ * 所以唯一封得死的位置就是**这里** —— 解析结果刚出来、socket 还没连上。
+ *
+ * ## 为什么不走"方案 A"（在 `checkOutboundUrl` 里再 `dns.lookup` 一次）
+ *
+ * 那是**两次独立的 DNS 查询**，TTL=0 的域名可以在两次之间换答案（经典 rebinding）。
+ * 它把门槛从"可控域名"提到"可控域名 + 会颤动的权威 DNS"，但没有封死。
+ *
+ * ## 这个钩子怎么工作
+ *
+ * undici 在建立连接前调用 `connect.lookup(hostname, options, cb)` 拿地址。
+ * 我们把默认实现换掉：先真的解析，然后**逐个地址**过
+ * `checkResolvedAddress()`（与 `checkOutboundUrl` 同一套网段规则）。
+ * 有一个地址落在内网就整体拒绝 —— 因为**我们无法控制 undici 选中哪一个**，
+ * 只要有一个可能是内网地址，这次连接就是不可信的。
+ *
+ * ⚠️ **不通过时用 `ENOTFOUND`**：那是 DNS 层的"查不到"，
+ * 比自定义错误码更不容易在链路上被当成可重试的服务端错误；
+ * 而"连不上"这个语义也正是我们要的（地址被拒绝 = 等效于它不存在）。
+ *
+ * ## 为什么按 `allowPrivateHosts` 缓存
+ *
+ * `Agent` 持有连接池，每次请求都新建一个会丢掉 keep-alive（而本项目的
+ * 模型调用很密集）。所以按**白名单内容**缓存：同一个白名单配置复用同一个 agent。
+ * 白名单在进程内是稳定的（来自环境变量），所以缓存不会失效 —— 但如果将来它变成
+ * 可热改的配置，这里必须跟着改，否则改动不会生效。
+ */
+const agentCache = new Map<string, Dispatcher>();
+
+/** 取一个带连接层校验的 undici `Dispatcher`。 */
+export function guardedDispatcher(allowPrivateHosts: readonly string[]): Dispatcher {
+  const key = [...allowPrivateHosts].sort().join(',');
+  const cached = agentCache.get(key);
+  if (cached) return cached;
+
+  const agent = new Agent({
+    connect: {
+      lookup: (hostname, options, callback) => {
+        /*
+         * 先把"字面主机"这一层再过一遍 —— 主机名后缀（`.internal` 等）
+         * 与 `localhost` 在这里同样该挡，而它们**不会**被解析结果判据覆盖
+         *（`localhost` 也解析到 127.0.0.1，所以两者重叠；但 `.internal`
+         * 可能解析到一个公网 IP，那时只有这一层能挡）。
+         */
+        const literalVerdict = checkOutboundUrl(`http://${hostname}/`, allowPrivateHosts);
+        if (!literalVerdict.allowed) {
+          const error: NodeJS.ErrnoException = new Error(
+            `出站地址被拒绝：${literalVerdict.reason ?? hostname}`,
+          );
+          error.code = 'ENOTFOUND';
+          callback(error, '', 4);
+          return;
+        }
+
+        lookupAll(hostname, options).then(
+          (addresses) => {
+            for (const { address } of addresses) {
+              /*
+               * ⚠️ **必须把原主机名带进白名单匹配**：操作员登记的可能是主机名
+               *（`AQ_ALLOW_PRIVATE_LLM_HOSTS=localhost`），而这里是解析结果
+               *（`::1` / `127.0.0.1`）。不带的话白名单"登记了却连不上"，
+               * 且报错完全指不到白名单（实测形态：IPv4 那侧碰巧放行、IPv6 那侧被拒）。
+               */
+              const verdict = checkResolvedAddress(address, allowPrivateHosts, hostname);
+              if (!verdict.allowed) {
+                const error: NodeJS.ErrnoException = new Error(
+                  `出站地址被拒绝：${hostname} ${verdict.reason ?? ''}`,
+                );
+                error.code = 'ENOTFOUND';
+                callback(error, '', 4);
+                return;
+              }
+            }
+            /*
+             * ⚠️ **把校验过的地址原样交给 undici，不让它再解析一次。**
+             * 再解析一次就是方案 A 的那个时间差 —— 校验与连接必须是**同一次**结果。
+             */
+            const first = addresses[0];
+            if (!first) {
+              const error: NodeJS.ErrnoException = new Error(`无法解析主机名：${hostname}`);
+              error.code = 'ENOTFOUND';
+              callback(error, '', 4);
+              return;
+            }
+            /*
+             * `all: true` 时 undici 要的是数组；否则要 (address, family) 两个参数。
+             * 两种形状都支持 —— 判断依据是 `options.all`，与 `dns.lookup` 的约定一致。
+             */
+            if (options.all) callback(null, addresses);
+            else callback(null, first.address, first.family);
+          },
+          (error: NodeJS.ErrnoException) => callback(error, '', 4),
+        );
+      },
+    },
+  });
+
+  agentCache.set(key, agent);
+  return agent;
+}
+
+/**
+ * 解析主机名的**全部**地址。
+ *
+ * 用 `all: true` 是刻意的：只校验第一个地址会漏掉"第二个是内网"的情形，
+ * 而 undici 会自己挑一个（Happy Eyeballs / 轮询）—— 我们无法预判它挑哪个。
+ * 所以**有一个内网就整体拒绝**。
+ *
+ * `verbatim` 保持 Node 默认（不重排），因为重排会改变 `addresses[0]`，
+ * 而那个值是我们要交给 undici 的。
+ */
+function lookupAll(
+  hostname: string,
+  options: { family?: number | 'IPv4' | 'IPv6' },
+): Promise<Array<{ address: string; family: number }>> {
+  return new Promise((resolve, reject) => {
+    lookup(
+      hostname,
+      { all: true, ...(options.family !== undefined ? { family: options.family as 0 | 4 | 6 } : {}) },
+      (error, addresses) => {
+        if (error) reject(error);
+        else resolve(addresses as Array<{ address: string; family: number }>);
+      },
+    );
+  });
+}
+
+/**
  * 发出一次出站请求，并**在每一跳重定向上都重跑出站地址白名单**。
  *
  * ⚠️ **跨主机跳转时不带原始请求头。**
@@ -43,6 +181,12 @@ const MAX_REDIRECTS = 5;
  */
 export async function fetchGuarded(url: string, init: RequestInit): Promise<Response> {
   const allowPrivateHosts = parseHostAllowlist(env.allowPrivateLlmHosts);
+  /*
+   * ⚠️ **每一次跳转都要带上这个 dispatcher**（外部 issue #126）——
+   * 它在**连接层**校验解析结果，那才是 DNS rebinding 唯一封得死的位置。
+   * 少了它，`checkOutboundUrl` 的字面校验对"公开域名解析到内网"完全无效。
+   */
+  const dispatcher = guardedDispatcher(allowPrivateHosts);
   let current = url;
   let headers = init.headers;
 
@@ -52,7 +196,17 @@ export async function fetchGuarded(url: string, init: RequestInit): Promise<Resp
       throw connectionError('outbound', new Error(`出站地址被拒绝：${verdict.reason ?? current}`));
     }
 
-    const response = await fetch(current, { ...init, headers, redirect: 'manual' });
+    /*
+     * ⚠️ `dispatcher` 是 **undici 的扩展**，不在标准 `RequestInit` 里 ——
+     * 所以要先 `as unknown`。Node 的全局 `fetch` 在运行时确实认这个字段
+     *（它就是 undici 的实现），但 `@types/node` 的签名里没有它。
+     */
+    const response = await fetch(current, {
+      ...init,
+      headers,
+      redirect: 'manual',
+      dispatcher,
+    } as unknown as RequestInit);
 
     if (!REDIRECT_STATUSES.has(response.status)) return response;
 

@@ -348,9 +348,9 @@ function findBalancedJson(text: string): string | null {
 
 /**
  * Extract the JSON payload from a model response, trying in order:
- *  1. a fenced block inside `<decision>`
+ *  1. a fenced block inside `<decision>`（裸 JSON）
  *  2. a bare array inside `<decision>`
- *  3. any fenced ```json block
+ *  3. 围栏内容**带前缀说明**时，在围栏内部再找一次平衡 JSON
  *  4. the first balanced JSON value in the whole response
  */
 export function extractDecisions(response: string): string | null {
@@ -374,15 +374,48 @@ export function extractDecisions(response: string): string | null {
   const body = decisionBlock?.[1] ?? (openTag ? text.slice(openTag.index + openTag[0].length) : text);
 
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(body);
-  if (fenced?.[1]?.trim()) return fenced[1].trim();
+  const fencedText = fenced?.[1]?.trim();
+  if (fencedText) {
+    /*
+     * ⚠️ **围栏里的内容不一定就是裸 JSON**（外部 issue #160）。
+     *
+     * 模型经常在围栏里先写一句说明再给 JSON：
+     *
+     * ```text
+     *   ```json
+     *   分析如下:
+     *   [{"symbol":"BTCUSDT","action":"wait"}]
+     *   ```
+     * ```
+     *
+     * 原实现把这一整段（含"分析如下:"）当作 JSON 返回，于是 `safeParseJson` 失败
+     * → **整轮零决策**，而模型真正要交付的内容就在下一行。
+     * 实测：`决策数 = 0`，日志写"模型返回的 JSON 在自动修复之后仍无法解析"。
+     *
+     * ## 这里原来有一层"死代码兜底"
+     *
+     * 原来的第 3 步是**同一个正则对同一个 `body`** 再求值一次：
+     *
+     * ```ts
+     * const anyFence = /```(?:json)?\s*([\s\S]*?)```/i.exec(body);   // ← 与第 1 步同一正则、同一输入
+     * if (anyFence?.[1]?.trim()) { … }                                // ← 永不可达
+     * ```
+     *
+     * `fenced[1] === anyFence[1]` 恒成立：第 1 步的非空判定一旦为假，
+     * 第 3 步的同一个判定也为假；一旦为真，第 1 步早已 return。
+     * 所以那层"兜底"**一层保护都没提供**，却让人以为容错有三层
+     *（issue #160 的原话：后续真要加抢救逻辑时，可能误以为这里已经处理过了）。
+     *
+     * 现在把**那层原本的意图真正实现**：围栏内容不是裸 JSON 时，
+     * **在围栏内部**再找一次平衡 JSON。作用域仍限定在围栏里 ——
+     * 不会退化成"去整份响应里乱找"（那正是本函数开头那段注释警告过的坑）。
+     */
+    if (fencedText.startsWith('[') || fencedText.startsWith('{')) return fencedText;
+    const insideFence = findBalancedJson(fencedText);
+    if (insideFence) return insideFence;
+  }
   const balanced = findBalancedJson(body);
   if (balanced) return balanced;
-
-  const anyFence = /```(?:json)?\s*([\s\S]*?)```/i.exec(body);
-  if (anyFence?.[1]?.trim()) {
-    const inner = anyFence[1].trim();
-    if (inner.startsWith('[') || inner.startsWith('{')) return inner;
-  }
 
   return findBalancedJson(body) ?? salvageTruncatedDecisions(body);
 }
