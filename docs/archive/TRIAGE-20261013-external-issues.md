@@ -3472,3 +3472,105 @@ Docker 镜像 (v0.1.21)→ success
 - **自驱下一步**：继续变异验证（`modelsDev` 其余字段、`modelDiscovery` 合并逻辑等）
 
 累计关闭 **41 个**。
+
+---
+
+## 36. 第 30 轮：同型漏网（`structuredOutput`）—— **我自己上一轮的失误**、v0.1.22
+
+本轮无新 PR、无新 issue，HEAD 未变。继续变异验证，扫第 29 轮修过的同一区域。
+
+### 一、⚠️ 发现"同型漏网"：`structuredOutput`（`1bfc775`）
+
+第 29 轮我给 `toolCall` 补了"`null`（不知道）≠ `true`（支持）"的断言。
+本轮扫同区域，发现**同型的 `structuredOutput` 完全没被守住**。
+
+**同型证据**（`modelsDev.ts`）：
+
+```ts
+toolCall:         typeof model['tool_call']         === 'boolean' ? model['tool_call']         : null,
+structuredOutput: typeof model['structured_output'] === 'boolean' ? model['structured_output'] : null,
+```
+
+**消费侧判据也一模一样**（`modelDiscovery.ts`）：
+
+```ts
+if (out.toolCall         === undefined && entry.toolCall         !== null) { … }
+if (out.structuredOutput === undefined && entry.structuredOutput !== null) { … }
+```
+
+⚠️ 把 `structuredOutput` 改成恒 `true` → **45 条全绿**（**包括我上一轮新加的那两条**）。
+
+⚠️ **根因是我的方法，不是这个字段**：上一轮我只盯着"`toolCall` 那一条"修，
+**没有检查同型字段** —— 这正是"**同一件事两处实现，只守住了其中一处**"，
+而这个仓库为它付出过多次代价（我自己的 TRIAGE 里记过好几回）。
+
+### 二、补法（三条，含防"再漏"的结构守卫）
+
+1. **parse 层**（对称于 `toolCall`）：写 `true` → `true`；写 `false` → **`false`**；没写 → **`null`**；
+2. **消费层**：`mergeDiscovered` 那条"不写参数 → 保持 `undefined`"的断言里
+   **补上 `structuredOutput`**（它原本就漏在这一串之外）；
+3. **⚠️ 结构守卫**：`modelsDev.ts` 里用 `typeof model['…'] === '…' ? … : null`
+   这个形状的字段**只有三个**（`toolCall` / `structuredOutput` / `canonicalId`）——
+   断言"**新出现同型字段时必须一并补断言**"。
+
+⚠️ 第 3 条是这一轮真正的方法论收获：**光补上漏掉的那一个是不够的** ——
+下一次有人加同型字段时会再漏一次。**把"同型集合"本身钉住**才是可复用的修法。
+
+### 三、验证
+
+| | 结果 |
+| --- | --- |
+| 正常代码 | ✅ 47/47 通过（**不误报**）|
+| 变异（`structuredOutput: true`）| ✅ **2 条失败**（抓到）|
+
+同区域另两个字段：`canonicalId` 变异 → ✅ 3 条失败（守得住）。
+
+**所以漏网的只有 `structuredOutput` 一个** —— 但它是被"**同型**"这个盲点漏掉的，
+不是被"这个字段没人管"漏掉的。两者的修法不同（前者要钉住集合，后者要接线）。
+
+### 四、累计进度（变异验证覆盖 21 处）
+
+已验：#137 ✅、#118 ✅、#126 ✅（**盲区已补**）、#119 ✅、#182 ✅（**盲区已补**）、
+#117 ✅（**断言已加强**）、#179 ✅（**盲区已补**）、#160 ✅、#123 ✅、#172 ✅、
+#173A ✅、#177 ✅、panel 接线 ✅、总时长预算 ✅、猎手并发 ✅、models.dev 网关 ✅、
+models.dev 单例 ✅、toolCall 语义 ✅（**盲区已补**）、
+**structuredOutput 语义 ✅（盲区已补）**、canonicalId ✅。
+
+**五处盲区的形态分布**：
+- **三处"接线没接上"**（#126 / #182 / #179）—— 修法：结构断言（调用点在不在、传的是不是配置）；
+- **一处"一个信号承载两种语义"**（`toolCall` 的 `null` vs `true`）—— 修法：补 `null` 语义断言；
+- **一处"同型漏网"**（`structuredOutput`）—— 修法：**钉住同型集合**，而不只是补那一个。
+
+⚠️ 这三种形态**修法不同** —— 把它们混为一谈会导致"补了但还是漏"。
+
+### 五、发版 v0.1.22
+
+```
+① main 全绿      typecheck / test(60+1642+251) / build / lint /
+                check:links / check:routes / sim 18/18 → 全 0
+② notices 一致   184 依赖全宽松，git diff 空
+③ tag v0.1.22    Docker 镜像构建 success
+④ 发布 release   isDraft=false
+⑤ 红线核实       v0.1.21..HEAD 【无提交触及 risk/engine.ts】
+```
+
+### 六、本轮验证
+
+```
+npm run typecheck   → 0
+npm test            → 60 + 1642 + 251，0 fail
+npm run build       → 0
+npm run lint        → 0
+npm run check:links → 0
+npm run check:routes→ 0
+npm run sim         → 18/18
+Docker 镜像 (v0.1.22)→ success
+```
+
+### 七、剩余
+
+- **等拍板 4 条**：#173 B 项、#184、`funnel` 模式接线、`clerk` 岗位
+- **自驱下一步**：按"同型集合"的思路回扫前几轮的修复
+  （例如 `#172`/`#177` 的色值是否还有同型漏网、`#119` 的同类守卫）
+
+累计关闭 **41 个**。
