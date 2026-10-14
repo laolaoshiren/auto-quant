@@ -195,8 +195,20 @@ class FakeBroker {
   fillLimitImmediately = false;
   /** Set to make the next reduce-only market order fill only this fraction. */
   partialFillRatio: number | null = null;
-  /** `/fapi/v1/income` events, for funding attribution. */
-  income: Array<{ symbol: string; incomeType: string; income: string; time: number }> = [];
+  /**
+   * `/fapi/v1/income` events，用于资金费与已实现盈亏的归属。
+   *
+   * ⚠️ **用真实的 `BinanceIncome`（含必填的 `tradeId`）**（2026-10-15 改）。
+   *
+   * 原来这里是手写的一个**子集类型**（没有 `tradeId`）。而记账现在按
+   * `tradeId` 精确归属已实现盈亏 —— 少这个字段，夹具就变成了一个
+   * **真实环境里不存在的形状**：`realizedInFills` 会跳过它（空 id 无法判断
+   * 归属），于是"反向回合金额取自交易所流水"这条契约在测试里永远测不出来。
+   *
+   * 这正是 §3.4 那条纪律的另一个方向：夹具必须与真实响应同形，
+   * 否则测试通过与否都与线上无关。
+   */
+  income: Array<{ symbol: string; incomeType: string; income: string; time: number; tradeId?: string }> = [];
   /**
    * 挂着的条件单，按算法单号索引。
    *
@@ -2300,11 +2312,19 @@ test('★ 方向反了的重建回合【不再整笔丢弃】—— 按交易所
    * 它的 `realizedPnl` 就走开腿分支被丢掉 —— 实测重建给出的 `grossPnl` 是 **0**，
    * 而真实是 1.5。所以这里喂进 income 流水（`REALIZED_PNL` + `COMMISSION`），
    * 记账必须取它。
+   *
+   * ⚠️⚠️ **`tradeId` 必须带上（2026-10-15 补）** —— 它是真实响应的**必填**字段
+   *（`BinanceIncome.tradeId`），而记账现在按它精确归属：实盘实测
+   * `income.tradeId` **等于**成交的 `id`（`NEARUSDT`：19/19 全部对上）。
+   *
+   * 少了它，`realizedInFills` 会跳过这条流水（空 id 无法判断归属，此时不归属
+   * 是唯一安全的选择），于是这个回合被记成 0 —— 而那不是这个测试想断言的东西。
+   * 夹具必须**照着真实响应造**，否则它测的是一个真实环境里不存在的形状。
    */
   broker.income = [
-    { symbol, incomeType: 'REALIZED_PNL', income: '1.5', time: exitAt + 1 },
-    { symbol, incomeType: 'COMMISSION', income: '-0.05', time: exitAt + 1 },
-    { symbol, incomeType: 'COMMISSION', income: '-0.05', time: entryAt + 1 },
+    { symbol, incomeType: 'REALIZED_PNL', income: '1.5', time: exitAt + 1, tradeId: '1' },
+    { symbol, incomeType: 'COMMISSION', income: '-0.05', time: exitAt + 1, tradeId: '1' },
+    { symbol, incomeType: 'COMMISSION', income: '-0.05', time: entryAt + 1, tradeId: '2' },
   ] as typeof broker.income;
 
   /*

@@ -106,6 +106,44 @@ export interface ReconstructedTrade {
   exitOrderIds: string[];
   /** Number of exchange fills that made up the round-trip. */
   fillCount: number;
+  /**
+   * **这个回合里每一笔成交的成交 id**（`BinanceUserTrade.id`）。
+   *
+   * ## 为什么需要它（2026-10-15 实盘账目差 12.61 的根因）
+   *
+   * `income` 流水的 `REALIZED_PNL` 事件带 `tradeId`，而它**等于**成交的 `id`
+   *（实测 `NEARUSDT`：19 条 `REALIZED_PNL` 与 33 笔成交里，**19/19 全部对上**）。
+   *
+   * 所以"这一笔已实现盈亏属于哪个回合"有一个**精确**答案：看它的 `tradeId`
+   * 在不在这段成交里。此前用的是「**按标的 + 时间窗口**」聚合
+   *（`realizedInWindow(events, symbol, openedAt, closedAt)`），而那对
+   * `reconciled_reversed` 这种**方向重建错了的回合**完全失效：
+   *
+   * ```
+   *   ADAUSDT #344 reconciled_reversed 的窗口 10-06T15:53 → 10-10T17:07（97 小时）
+   *   而 #250 stop_loss / #281~283 manual_partial / #288 drawdown_guard
+   *   全都落在这个窗口【内部】—— 它们的已实现盈亏被这个窗口又聚合了一遍，
+   *   而它们各自已经作为独立的 trades 记过账。
+   *   ⇒ platformSelf 虚增 13.06，正好是「账本 +5.66 vs 交易所 −6.96」那个差额。
+   * ```
+   * 实测那 38 个回合的窗口**平均 23.1 小时、最大 159.3 小时**（其他类只有 2–3 小时）。
+   *
+   * ⚠️ 代码里**已有这条纪律的先例**（`autoTrader.ts` 讲手续费）：
+   * > 「传**入场订单号**而不是标的：同一标的反复开平时，按标的过滤会把历史回合的
+   * >  入场费再加一遍（那些回合已经在 platformSelf 里了）。」
+   *
+   * 手续费那侧早就按单号修了，**盈亏那侧还是"按标的"**。这里补上。
+   */
+  fillIds: string[];
+  /**
+   * **开腿**那一组的成交 id（判断"这一笔成交是开还是平"用）。
+   *
+   * ⚠️ 对**方向重建错了**的回合，这个分组本身也是错的 —— 但**归属**不受影响：
+   * 只要"这些成交 id 里没有别人"，按 `fillIds` 过滤就是精确的。
+   */
+  openFillIds: string[];
+  /** **平腿**那一组的成交 id。 */
+  closeFillIds: string[];
 }
 
 const EPSILON = 1e-12;
@@ -132,6 +170,12 @@ interface OpenLeg {
    */
   exitOrderIds: string[];
   fillCount: number;
+  /** 这个腿里每一笔成交的成交 id（见 `ReconstructedTrade.fillIds`）。 */
+  fillIds: string[];
+  /** 开腿的成交 id。 */
+  openFillIds: string[];
+  /** 平腿的成交 id。 */
+  closeFillIds: string[];
 }
 
 /**
@@ -177,6 +221,9 @@ export function reconstructRoundTrips(
       exitOrderId: current.lastExitOrderId ?? '',
       exitOrderIds: [...current.exitOrderIds],
       fillCount: current.fillCount,
+      fillIds: [...current.fillIds],
+      openFillIds: [...current.openFillIds],
+      closeFillIds: [...current.closeFillIds],
     });
   };
 
@@ -206,12 +253,17 @@ export function reconstructRoundTrips(
         lastExitOrderId: null,
         exitOrderIds: [],
         fillCount: 0,
+        fillIds: [],
+        openFillIds: [],
+        closeFillIds: [],
       };
       position = signed;
       leg.signedPosition = position;
       leg.entryQty += qty;
       leg.entryNotional += price * qty;
       leg.fillCount += 1;
+      leg.fillIds.push(String(fill.id));
+      leg.openFillIds.push(String(fill.id));
       addCommission(leg, commission, fill.commissionAsset, settlementAsset, true);
       continue;
     }
@@ -226,6 +278,8 @@ export function reconstructRoundTrips(
       leg.entryQty += qty;
       leg.entryNotional += price * qty;
       leg.fillCount += 1;
+      leg.fillIds.push(String(fill.id));
+      leg.openFillIds.push(String(fill.id));
       addCommission(leg, commission, fill.commissionAsset, settlementAsset, true);
       continue;
     }
@@ -241,6 +295,13 @@ export function reconstructRoundTrips(
     /* 每一次出场都记下单号（含部分平仓）—— 判重靠的是这组身份。 */
     leg.exitOrderIds.push(String(fill.orderId));
     leg.fillCount += 1;
+    /*
+     * ⚠️ 成交 id 也要记：`income` 的 `REALIZED_PNL` 靠它精确归属
+     *（见 `ReconstructedTrade.fillIds`）。**即使这个回合的方向是错的**，
+     * 这组 id 仍然是"这段成交"的精确身份 —— 归属不依赖方向判断。
+     */
+    leg.fillIds.push(String(fill.id));
+    leg.closeFillIds.push(String(fill.id));
     // The exchange reports commission for the whole fill; when a fill both
     // closes and flips, the closing part is what belongs to this leg.
     addCommission(leg, commission * (closing / qty), fill.commissionAsset, settlementAsset, false);
@@ -271,6 +332,15 @@ export function reconstructRoundTrips(
         lastExitOrderId: null,
         exitOrderIds: [],
         fillCount: 1,
+        fillIds: [String(fill.id)],
+        /*
+         * 翻转后的剩余那部分，它的成交 id **同时**属于旧腿（作为平腿）与新腿
+         *（作为开腿）—— 这是同一笔成交被两个腿共用。金额归属时按 id 取，
+         * 所以这里两边都记是**正确**的（`realizedInFills` 按 id 过滤，
+         * 不会因为被两个腿引用就重复计入 `platformSelf`）。
+         */
+        openFillIds: [String(fill.id)],
+        closeFillIds: [],
       };
       addCommission(leg, commission * (remainderQty / qty), fill.commissionAsset, settlementAsset, true);
     }

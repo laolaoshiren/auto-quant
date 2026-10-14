@@ -256,6 +256,79 @@ export function realizedInWindow(
 }
 
 /**
+ * **按成交 id 归属已实现盈亏** —— 比 `realizedInWindow` 可靠。
+ *
+ * ## 为什么需要它（2026-10-15 实盘账目差 12.61 的根因）
+ *
+ * `income` 的 `REALIZED_PNL` 事件带 `tradeId`，而它**等于**成交的 `id`：
+ * 实测 `NEARUSDT`，19 条 `REALIZED_PNL` 与 33 笔成交里 **19/19 全部对上**。
+ *
+ * 而 `realizedInWindow` 用的是「**按标的 + 时间窗口**」。那对
+ * `reconciled_reversed`（方向重建错了的回合）完全失效 —— 实测那些窗口
+ * **平均 23.1 小时、最大 159.3 小时**（其他平仓类只有 2–3 小时）：
+ * ```
+ *   ADAUSDT #344 reconciled_reversed  10-06T15:53 → 10-10T17:07（97 小时）
+ *   而 #250 stop_loss / #281~283 manual_partial / #288 drawdown_guard
+ *   全都落在这个窗口【内部】—— 它们的已实现盈亏被这个窗口又聚合了一遍，
+ *   而它们各自已经作为独立的 trades 记过账。
+ *   ⇒ platformSelf 虚增 13.06，正好是「账本 +5.66 vs 交易所 −6.96」那个差额。
+ * ```
+ *
+ * ## ⚠️ 两个必须分清的集合
+ *
+ * | 集合 | 含义 | 用在哪 |
+ * | --- | --- | --- |
+ * | `closeFillIds` | **平腿**的成交 id | **方向正确**的回合 |
+ * | `fillIds` | 这个腿的**全部**成交 id | **方向反了**的回合 |
+ *
+ * 理由：`realizedPnl` 记在**平仓那一笔**上。方向正确时只有平腿那批能算；
+ * 而方向反了时"哪笔是平"这个判断本身就是错的（这正是 `reconciled_reversed`
+ * 的定义）—— 此时只能退回"这个腿的全部成交"，**不能**用 `closeFillIds`
+ *（那会一个数都匹配不到，实测：夹具里交易所把 1.5 记在被误判为开腿的那一笔上）。
+ *
+ * ## 去重靠调用方传入的 `claimed`
+ *
+ * `fillIds` 有一个已知的重叠：**穿过零的翻转成交**同时属于旧腿（平）与新腿（开），
+ * 所以它出现在两个腿的 `fillIds` 里。若两个腿各算一次，同一笔盈亏就重复入账。
+ *
+ * 实测对照（三个成交、两个腿）：正确总额是 `10 + 4 = 14`；
+ * 用 `closeFillIds` 得到 14 ✅；用 `fillIds` 不去重得到 24 ❌。
+ *
+ * 所以调用方必须传一个**每一轮对账内共享**的集合：本函数只结算"还没被认领"的
+ * 成交 id，并把它认领的那些写进去。这样**每一笔流水至多被计一次**。
+ *
+ * @param fillIds 该回合要认领的成交 id（方向正确 → `closeFillIds`；方向反了 → `fillIds`）
+ * @param claimed 本轮已认领的成交 id（会被就地更新）
+ */
+export function realizedInFills(
+  events: readonly BinanceIncome[],
+  fillIds: readonly string[],
+  claimed?: Set<string>,
+): number {
+  if (fillIds.length === 0) return 0;
+  const wanted = new Set(fillIds);
+  let sum = 0;
+  for (const e of events) {
+    /*
+     * ⚠️ **`tradeId` 为空/缺失时【跳过】，而不是"算给谁"**。
+     *
+     * 空 `tradeId` 意味着无法判断这笔盈亏属于哪个回合，此时不归属是唯一安全的
+     * 选择：算进来会重复计（这正是那 12.6 差额的成因），而漏算的后果是"账本略低"，
+     * 且下一轮对账还能补（窗口兜底路径仍在）。
+     *
+     * 反过来做（空 id 就按窗口算）会让这个函数退回它本来要修的那个行为。
+     */
+    if (e.incomeType !== 'REALIZED_PNL') continue;
+    const id = String(e.tradeId ?? '');
+    if (id.length === 0 || !wanted.has(id)) continue;
+    if (claimed?.has(id)) continue;
+    claimed?.add(id);
+    sum += Number(e.income) || 0;
+  }
+  return sum;
+}
+
+/**
  * **一个仍然持仓的仓位**从开仓到现在为止付出的资金费（`FUNDING_FEE`）。
  *
  * ## 为什么需要它（2026-10-03，最后一处"已知缺口"）

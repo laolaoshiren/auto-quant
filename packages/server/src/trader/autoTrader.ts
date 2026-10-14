@@ -105,7 +105,7 @@ import {
   roundTripQueryKey,
   type ReconstructedTrade,
 } from './roundTrips.js';
-import { commissionsInWindow, fundingInWindow, fundingSince, netPnlOf, realizedInWindow } from '../binance/income.js';
+import { commissionsInWindow, fundingInWindow, fundingSince, netPnlOf, realizedInFills, realizedInWindow } from '../binance/income.js';
 
 const log = createLogger('trader');
 
@@ -6242,6 +6242,22 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      */
     const purposeById = orderStore.purposeByExchangeOrderId(traderId);
 
+    /*
+     * ⚠️ **本轮对账里"已经被认领过"的成交 id**（2026-10-15 账目差 12.61 的修复）。
+     *
+     * 为什么需要它：一笔**穿过零的翻转成交**同时属于两个腿（旧腿的平、新腿的开），
+     * 所以它会出现在两个 `ReconstructedTrade.fillIds` 里。若两个腿各按自己的
+     * `fillIds` 去 `income` 里认领，同一笔 `REALIZED_PNL` 会被计两次 ——
+     * 那正是我们要修的那个"账本虚增"形状。
+     *
+     * 实测对照（三个成交、两个腿）：正确答案是 `10 + 4 = 14`；
+     * 不去重会得到 `10 + 10 + 4 = 24`。
+     *
+     * 范围是**一次对账**：下一轮重新从空集合开始，所以重复执行对账仍然幂等
+     *（`platformSelf` 是重算的，不是累加的）。
+     */
+    const claimedFillIds = new Set<string>();
+
     for (const symbol of symbols) {
       if (!this.deps.registry.get(symbol)) continue;
       let fills;
@@ -6310,7 +6326,59 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
            * 与上面 `!trustQuantity` 那条分支把手续费改走 `commissionsInWindow()` 同一个理由。
            */
           {
-            const realizedForTrip = realizedInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
+            /*
+             * ⚠️⚠️ **金额按【成交 id】归属，不按"标的 + 时间窗口"**（2026-10-15 修）
+             *
+             * ## 事故：实盘账本比交易所高 12.61 USDT（而本金只有 100）
+             *
+             * 实测 `#10`：
+             * ```
+             *   platformNet  +5.657252      ← 账本
+             *   exchangeNet  -6.956285      ← 交易所流水
+             *   gap          12.613538
+             *
+             *   逐项：reconciled_reversed 38 笔 · 净 +13.0577   ← 与 gap 量级吻合
+             *   platformSelf − reversedNet = -7.4004（与交易所只差 0.44，差两个数量级）
+             * ```
+             *
+             * ## 根因：窗口聚合把【别人的回合】算进了自己
+             *
+             * 原来这里是 `realizedInWindow(events, symbol, openedAt, closedAt)` ——
+             * 按**标的 + 时间窗口**。而这些回合的窗口**平均 23.1 小时、最大 159.3 小时**
+             *（其他平仓类只有 2–3 小时），因为方向判错时 `openedAt` 取自一笔
+             * "其实是平仓"的成交，窗口就此跨到别的回合里。实测：
+             * ```
+             *   ADAUSDT #344 reconciled_reversed  10-06T15:53 → 10-10T17:07（97 小时）
+             *   被它包住的真实回合：#250 stop_loss · #281/#283 manual_partial
+             *                       · #288 drawdown_guard（共 12 个回合落在别的窗口内部，
+             *                       净额合计 +4.5997）
+             *   ⇒ 那些盈亏各自已经记过账，却又被这个窗口聚合了一遍
+             * ```
+             *
+             * ## 修法：`income.tradeId` 就是成交的 `id`
+             *
+             * 实测确认（`NEARUSDT`）：19 条 `REALIZED_PNL` 与 33 笔成交里
+             * **19/19 的 `tradeId` 能在成交里找到**。所以"这笔盈亏属于哪个回合"
+             * 有精确答案 —— 与手续费那侧早就采用的"按单号而不是按标的"同源
+             *（见本文件讲 `openEntryCosts` 的那段）。
+             *
+             * ⚠️⚠️ **但归属必须用 `fillIds`，不能用 `closeFillIds`**（实测纠正）
+             *
+             * 这个分支的定义就是「**开/平判反了**」，所以"哪一笔是平腿"这个判断
+             * **本身就是错的**。用 `closeFillIds` 会一个数都匹配不到：
+             * ```
+             *   夹具实测：交易所把 1.5 记在成交 #1 上（那是真实的平仓），
+             *   而重建把它误判成【开腿】→ 它在 openFillIds 里
+             *   ⇒ 拿 closeFillIds=['2'] 去匹配 → 0（而正确答案是 1.5）
+             * ```
+             * 所以退回"这个腿的全部成交"，并用 `claimedFillIds` 去重 ——
+             * 一个穿过零的翻转成交同时属于两个腿，不去重会重复入账。
+             */
+            const realizedForTrip =
+              trip.fillIds.length > 0
+                ? realizedInFills(incomeEvents, trip.fillIds, claimedFillIds)
+                : /* 兜底：老版本重建出的回合没有 fillIds（回放/跨版本）→ 退回窗口口径。 */
+                  realizedInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
             const fundingForTrip = fundingInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
             const feesForTrip =
               commissionsInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
