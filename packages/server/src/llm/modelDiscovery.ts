@@ -12,19 +12,32 @@
  * > 「现在这么多模型，哪些不限量使用，哪些是限量的，其实**不用你手动探测，
  * >  你去 magpie 里面看，上面应该有些会标注**」
  *
- * ## 实测数据源（两个，缺一不可）
+ * ## 实测数据源（三个，各补各的缺口）
  *
  * | 来源 | 有什么 | 缺什么 |
  * |---|---|---|
  * | `GET /v1/models`（运行时可达）| context / max_output / **reasoning** / **supported_reasoning_levels** / modalities | **没有 `free`、没有 `cost`** |
  * | `plugin-providers.json`（配置文件）| **`free`** / **`rate`** / **`cost`** / `released` / `variants` / `fast` | 需要读文件 |
+ * | **models.dev**（上游目录，2026-10-14 接入）| **`cost`（USD/百万 token）** / **`knowledge`** / **`tool_call`** / **`structured_output`** / `canonical_model_id` | 是**上游**目录，与我们网关的实际能力无关 |
  *
- * **所以必须合并两处** —— 只用 `/v1/models` 就分不出"免费还是烧积分"，
+ * **所以必须合并** —— 只用 `/v1/models` 就分不出"免费还是烧积分"，
  * 而那正是用户要的"合理安排使用"的依据。
+ *
+ * ## ⚠️ 优先级不可覆盖（三个来源的取值口径完全不同）
+ *
+ * ```
+ *   运行时 /v1/models 实测  >  人工 MODEL_PROFILES  >  models.dev 补齐  >  保守默认
+ * ```
+ *
+ * `/v1/models` 反映的是**我们自己的网关此刻**的能力；models.dev 是上游挂牌的目录。
+ * 网关可能做了截断、代理了另一个版本、或干脆换了模型 —— 所以
+ * **models.dev 只填运行时拿不到的空缺，绝不覆盖实测值**。
+ *（这条规则的具体代价见 `mergeDiscovered` 的说明，那里有一次 242 秒的实测。）
  */
 
 import { readFileSync } from 'node:fs';
 import { filterSuperseded } from './modelFamilies.js';
+import type { ModelsDevMatch } from './modelsDev.js';
 
 /** 单个**成员**（某个供应商上的某个模型）的限额事实 —— 这里是布尔，因为成员是确定的。 */
 export interface MemberLimit {
@@ -90,6 +103,48 @@ export interface DiscoveredModel {
   released: string;
   /** 是否快速档（`fast`）。 */
   fast: boolean;
+
+  /* ────────────────────────────────────────────────────────────────────────
+   *  以下字段来自 **models.dev**（第三个数据源，2026-10-14 接入）
+   *
+   *  ⚠️ 全部是**可选**的。它们**只补 `/v1/models` 与 `MODEL_PROFILES` 都没有的空缺**，
+   *  绝不覆盖任何实测值 —— 优先级见 `mergeDiscovered` 的说明。
+   * ──────────────────────────────────────────────────────────────────────── */
+
+  /**
+   * 定价（**USD / 每百万 token**）。
+   *
+   * ⚠️ **只用于调度加权，绝不进入任何金额算术** —— 本项目的金额口径只有一处
+   *（`trades.insert()`），而真实交易成本来自交易所的成交记录。把上游目录的
+   * 挂牌价混进对账会让账目彻底对不上。
+   */
+  cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** 知识截止（`2025-07-31` 这类）；空 = 未知。 */
+  knowledge?: string;
+  /** 是否支持工具调用。**注意**：它不决定"我们要不要给它工具"，只是档案信息。 */
+  toolCall?: boolean;
+  /** 是否支持结构化输出（JSON schema）。 */
+  structuredOutput?: boolean;
+  /** 上游的规范 id（`canonical_model_id`），用于排查"这条参数来自哪个模型"。 */
+  canonicalId?: string;
+
+  /**
+   * **这个模型的档案是哪来的** —— 排查"参数为什么是这几个数"的唯一线索。
+   *
+   * | 值 | 含义 |
+   * |---|---|
+   * | `runtime` | `/v1/models` 的实测值（**最高优先级**）|
+   * | `manual` | 人工 `MODEL_PROFILES` |
+   * | `modelsdev` | models.dev 补齐（低置信时仍有值，但只补参考字段）|
+   * | `default` | 谁都没给，用的是保守默认 |
+   *
+   * ## 为什么必须有这一列（而不是"反正有值就行"）
+   *
+   * 这个项目反复栽在"**说了但不生效**"上。当某个模型的上下文窗口明显不对时，
+   * 第一个要回答的问题是"**这个数字是谁给的**" —— 没有这一列就只能靠猜，
+   * 而三个数据源的取值口径完全不同（实测值 / 人工档案 / 上游目录）。
+   */
+  profileSource: 'runtime' | 'manual' | 'modelsdev' | 'default';
 }
 
 /** `/v1/models` 里一条记录的形状（只声明我们用到的字段）。 */
@@ -170,6 +225,11 @@ export function parseWireModels(payload: unknown): DiscoveredModel[] {
       rate: null,
       released: '',
       fast: false,
+      /*
+       * ⚠️ 这一条是**运行时的实测值**，所以标 `runtime` ——
+       * 它是三个数据源里优先级最高的那个（见 `mergeDiscovered`）。
+       */
+      profileSource: 'runtime' as const,
     });
   }
   return out;
@@ -236,21 +296,66 @@ export function parsePluginLimits(payload: unknown): MemberLimits {
 }
 
 /**
- * 合并两处数据。
+ * **models.dev 的查询入口** —— 一个函数，而不是在 `mergeDiscovered` 内部联网。
  *
- * ## 为什么 `group/auto-*` 要单独处理
+ * ## 为什么必须注入（而不是让本模块自己去查）
  *
- * 实测：`group/auto-gpt-6-astra` 这类**路由组**的 id 与 `plugin-providers.json` 里的
- * 模型名对不上（后者是 `gpt-6-astra`，没有 `group/auto-` 前缀）。
- * 而组恰恰是最该用的调用入口（magpie 在多个供应商提供同名模型时自动建组，
- * 组内自带故障转移）。
+ * `mergeDiscovered` 是本仓库最核心的一处纯函数（两处数据源在此汇合），
+ * 而 `docs/AGENTS.md` §5.4 的既有约定是「**导出的纯函数优先于需要打桩的对象**」——
+ * 在这里 `fetch` 会把"合并规则"与"网络"耦合在一起，测试就必须打桩。
  *
- * 所以：**组的免费属性按"它的成员"推断** —— 若同名模型在配置里全是 free，
- * 组就是 free；有任何一个是付费的，就标 `false`（保守）。
+ * 传入函数之后：测试给一个查表函数即可，**不需要网络也不需要磁盘**
+ *（`modelsDev.test.ts` 就是这么测的）。
+ */
+export type ModelsDevLookup = (gatewayId: string) => ModelsDevMatch | null;
+
+/**
+ * 合并三处数据。
+ *
+ * ## 优先级（**不可覆盖**，这是本函数唯一的硬约束）
+ *
+ * ```
+ *   运行时 /v1/models 实测  >  人工 MODEL_PROFILES  >  models.dev 补齐  >  保守默认
+ * ```
+ *
+ * ### 为什么"绝不覆盖运行时实测值"
+ *
+ * `/v1/models` 反映的是**我们自己的网关此刻**的能力，而 models.dev 是**上游目录**。
+ * 两者测的不是同一件事：
+ *
+ * ```
+ *   网关可能做了上下文截断、代理了另一个版本、或者干脆把模型换掉了
+ * ```
+ *
+ * 实测佐证就在本文件里：`opencode-go/omen-alpha` 在网关的 `/v1/models` 里
+ * **既没有 context 也没有 max_output**（`context=- maxOut=-`），
+ * 而它在上游显然是有窗口的。如果我们反过来用上游值去"修正"网关，
+ * 就会给一个**网关侧没有申报预算能力**的模型算出安全预算 —— 而那次实测的
+ * 结局是 `finish_reason=length` + 空内容 + **一个角色 242 秒**。
+ *
+ * 所以：**实测值非空时一律不动它**；只有在它缺失（数值为 0 / 字段不存在，
+ * 即"网关没告诉我们"）时才允许低优先级来源补上。
+ *
+ * ### ⚠️ `fuzzy`（模糊匹配）只补*参考字段*，不补长度上限
+ *
+ * 实测：`deepseek-v4.1-flash` 与 `deepseek-v4.1-flash-sg` 的相似度是 **0.9189**
+ *（过了 0.85 的门槛），而它们是**不同资源** —— 网关上 `-sg` 是独立成员，
+ * 有独立的额度（`free=false, rate=0.03`，而主模型 `free=true`）。
+ *
+ * 相似度能认出"这是同一家族的写法变体"，但**认不出"它是不是同一个部署"**。
+ * 而长度上限填错的后果是实打实的（预算算错 → 输出被截断）：
+ *
+ * | 字段 | fuzzy 能否补 | 为什么 |
+ * |---|---|---|
+ * | `cost` / `knowledge` / `toolCall` / `structuredOutput` / `canonicalId` | **能** | 参考信息；错了最多是调度加权偏一点，不会让输出被截断 |
+ * | `contextTokens` / `maxOutputTokens` | **不能** | 直接决定 `budgetFor` 的输出预算；宁可留 0（走"元数据缺失"降权那条**已知安全**的路径）|
+ *
+ * 高置信的三级（`alias` / `exact` / `canonical`）则可以补长度上限。
  */
 export function mergeDiscovered(
   wire: readonly DiscoveredModel[],
   limits: MemberLimits,
+  modelsDev?: ModelsDevLookup | null,
 ): DiscoveredModel[] {
   /* 先按"模型名"（去掉 provider 前缀、归一化）索引免费信息，供组推断使用。 */
   const byModelName = new Map<string, MemberLimit[]>();
@@ -267,56 +372,141 @@ export function mergeDiscovered(
     const providerPart = slash >= 0 ? m.id.slice(0, slash) : '';
     const modelPart = slash >= 0 ? m.id.slice(slash + 1) : m.id;
 
-    /* ① 精确匹配（**归一化后**比 —— magpie 会用 `-` 替换 `.`）。 */
+    /*
+     * ① 精确匹配（**归一化后**比 —— magpie 会用 `-` 替换 `.`）。
+     *
+     * ⚠️ 这一步与 models.dev **无关**：它用的是网关自己的 `plugin-providers.json`，
+     * 也就是"我们自己的部署事实"，优先级高于上游目录。
+     */
     const exact = limits.get(`${providerPart}/${normalizeModelName(modelPart)}`);
+    let base: DiscoveredModel;
     if (exact) {
-      return {
+      base = {
         ...m,
         free: exact.free === true ? 'all' : exact.free === false ? 'none' : 'unknown',
         rate: exact.rate,
         released: exact.released,
         fast: exact.fast,
       };
+    } else {
+      /* ② 路由组：`group/auto-<name>` → 用 `<name>` 的成员信息推断。 */
+      const groupMembers = m.id.startsWith('group/auto-')
+        ? byModelName.get(normalizeModelName(m.id.slice('group/auto-'.length)))
+        : undefined;
+      base = groupMembers && groupMembers.length > 0 ? inferGroupFromMembers(m, groupMembers) : m;
     }
 
-    /* ② 路由组：`group/auto-<name>` → 用 `<name>` 的成员信息推断。 */
-    if (m.id.startsWith('group/auto-')) {
-      const name = normalizeModelName(m.id.slice('group/auto-'.length));
-      const members = byModelName.get(name) ?? [];
-      if (members.length > 0) {
-        /*
-         * 全部成员免费 → 组免费；只要有一个付费 → 标 false。
-         * **保守**：宁可把免费组当付费的（少用它），也不要把付费的当免费的（烧额度）。
-         */
-        const freeCount = members.filter((x) => x.free === true).length;
-        const paidCount = members.filter((x) => x.free === false).length;
-        const anyKnown = freeCount + paidCount > 0;
-        /*
-         * 四态判定：全免费 = `all`；有免费也有付费 = `some`（**有机会不烧额度**）；
-         * 全付费 = `none`；一个都没查到 = `unknown`。
-         */
-        const freeStatus: FreeStatus = !anyKnown
-          ? 'unknown'
-          : paidCount === 0
-            ? 'all'
-            : freeCount === 0
-              ? 'none'
-              : 'some';
-        const bestRate = members.reduce<number | null>((min, x) => {
-          if (x.rate === null) return min;
-          return min === null ? x.rate : Math.min(min, x.rate);
-        }, null);
-        return {
-          ...m,
-          free: freeStatus,
-          rate: bestRate,
-          released: members.map((x) => x.released).filter(Boolean).sort().pop() ?? '',
-          fast: members.some((x) => x.fast),
-        };
-      }
-    }
-    return m;
+    /* ③ models.dev 补齐 —— 只填空缺，且按置信度决定能填哪些字段。 */
+    if (!modelsDev) return base;
+    const match = modelsDev(base.id);
+    if (!match) return base;
+
+    return applyModelsDev(base, match);
   });
+}
+
+/**
+ * **从成员推断路由组（`group/auto-*`）的属性**。
+ *
+ * ## 为什么组要单独处理
+ *
+ * 实测：`group/auto-gpt-6-astra` 这类**路由组**的 id 与 `plugin-providers.json` 里的
+ * 模型名对不上（后者是 `gpt-6-astra`，没有 `group/auto-` 前缀）。
+ * 而组恰恰是最该用的调用入口（magpie 在多个供应商提供同名模型时自动建组）。
+ *
+ * 所以组的免费属性**按它的成员推断**，并且方向是**保守**的：
+ * 只要有一个成员是付费的，就不标"免费" —— 宁可少用一个免费组，
+ * 也不能把付费的当免费的用（那会烧额度，见 `FreeStatus` 的四态说明）。
+ */
+function inferGroupFromMembers(m: DiscoveredModel, members: readonly MemberLimit[]): DiscoveredModel {
+  const freeCount = members.filter((x) => x.free === true).length;
+  const paidCount = members.filter((x) => x.free === false).length;
+  const anyKnown = freeCount + paidCount > 0;
+  /*
+   * 四态判定：全免费 = `all`；有免费也有付费 = `some`（**有机会不烧额度**）；
+   * 全付费 = `none`；一个都没查到 = `unknown`。
+   */
+  const freeStatus: FreeStatus = !anyKnown
+    ? 'unknown'
+    : paidCount === 0
+      ? 'all'
+      : freeCount === 0
+        ? 'none'
+        : 'some';
+  const bestRate = members.reduce<number | null>((min, x) => {
+    if (x.rate === null) return min;
+    return min === null ? x.rate : Math.min(min, x.rate);
+  }, null);
+  return {
+    ...m,
+    free: freeStatus,
+    rate: bestRate,
+    released: members.map((x) => x.released).filter(Boolean).sort().pop() ?? '',
+    fast: members.some((x) => x.fast),
+  };
+}
+
+/**
+ * 把一次 models.dev 匹配的结果**补进**档案（只填空缺）。
+ *
+ * 单独抽出来是为了让"哪些字段能补"这条规则**只有一份**，
+ * 而且可以脱离 `mergeDiscovered` 的组推断逻辑单独测。
+ */
+function applyModelsDev(target: DiscoveredModel, match: ModelsDevMatch): DiscoveredModel {
+  const entry = match.entry;
+  const out: DiscoveredModel = { ...target };
+
+  /*
+   * 长度上限：**只有高置信匹配才能补**（理由见 `mergeDiscovered` 的 `fuzzy` 那一段）。
+   * 判据用 `<= 0` 而不是 `=== 0`：负数是畸形输入，按"没有"处理。
+   */
+  const highConfidence = match.source !== 'fuzzy';
+  let filledByModelsDev = false;
+
+  if (highConfidence && out.contextTokens <= 0 && entry.contextTokens > 0) {
+    out.contextTokens = entry.contextTokens;
+    filledByModelsDev = true;
+  }
+  if (highConfidence && out.maxOutputTokens <= 0 && entry.maxOutputTokens > 0) {
+    out.maxOutputTokens = entry.maxOutputTokens;
+    filledByModelsDev = true;
+  }
+
+  /*
+   * 参考字段：**没有就填**。它们与"网关此刻能不能输出"无关，
+   * 所以模糊匹配也可以填（错了只是调度加权偏一点）。
+   */
+  if (out.cost === undefined && entry.cost) {
+    out.cost = entry.cost;
+    filledByModelsDev = true;
+  }
+  if (out.knowledge === undefined && entry.knowledge.length > 0) {
+    out.knowledge = entry.knowledge;
+    filledByModelsDev = true;
+  }
+  if (out.toolCall === undefined && entry.toolCall !== null) {
+    out.toolCall = entry.toolCall;
+    filledByModelsDev = true;
+  }
+  if (out.structuredOutput === undefined && entry.structuredOutput !== null) {
+    out.structuredOutput = entry.structuredOutput;
+    filledByModelsDev = true;
+  }
+  if (out.canonicalId === undefined && entry.canonicalId !== null) {
+    out.canonicalId = entry.canonicalId;
+    filledByModelsDev = true;
+  }
+
+  /*
+   * `profileSource` 只在**真的补上了东西**时才改成 `modelsdev` ——
+   * 否则它仍是 `runtime`（这个模型的档案整体上来自网关实测）。
+   *
+   * ⚠️ 刻意**不做**"逐字段来源"的记账：那会让这个类型膨胀成
+   * `{ contextTokens: {value, source}, … }` 而收益很小 ——
+   * 真正要回答的问题是"这个模型的参数可信吗"，聚合到模型一级就够了。
+   */
+  if (filledByModelsDev) out.profileSource = 'modelsdev';
+  return out;
 }
 
 /**
@@ -425,16 +615,25 @@ export interface DiscoveredCatalog {
 }
 
 /**
- * 从两个数据源构建目录。
+ * 从**三个**数据源构建目录。
  *
  * @param wirePayload `GET /v1/models` 的响应体
  * @param pluginProvidersPath `plugin-providers.json` 的路径；读不到时降级为"只有基础信息"
  * @param previous 上一次的目录（用于算 `appeared` / `disappeared`）
+ * @param modelsDev **models.dev 的查询入口**（可选）。
+ *
+ * ## ⚠️ 为什么它排在最后且可选
+ *
+ * 它是**第三优先级**的来源（只补前两者拿不到的空缺），而"没有它"必须是一个
+ * **完全可用**的状态 —— 离线部署、拉取失败、还没建快照，都会走到这条路径。
+ * 所以它不能在参数表中间（那样会逼着所有调用点都传一个 `null`），
+ * 也不能影响任何既有行为（既有测试全部不传它，行为必须逐字不变）。
  */
 export function buildCatalog(
   wirePayload: unknown,
   pluginProvidersPath: string | null,
   previous?: DiscoveredCatalog | null,
+  modelsDev?: ModelsDevLookup | null,
 ): DiscoveredCatalog {
   const wire = parseWireModels(wirePayload);
   let limits = new Map<string, { free: boolean | null; rate: number | null; released: string; fast: boolean }>();
@@ -446,7 +645,7 @@ export function buildCatalog(
       limits = new Map();
     }
   }
-  const models = mergeDiscovered(wire, limits);
+  const models = mergeDiscovered(wire, limits, modelsDev ?? null);
 
   const byTier: DiscoveredCatalog['byTier'] = { T1_fast: [], T2_mid: [], T3_deep: [] };
   for (const m of models) {
