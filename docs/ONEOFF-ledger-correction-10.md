@@ -26,8 +26,8 @@
 范围：38 行，WHERE trader_id=10 AND close_reason='reconciled_reversed'
 列  ：只改 pnl / net_pnl / pnl_percent
       ⚠️ fee 与 funding_fee 【没动】—— 见第 4 节
-备份：/opt/autoquant/data/backups/autoquant-before-ledger-fix-2026-10-14T22-16-08.sqlite
-回滚：cp <备份> /opt/autoquant/data/autoquant.sqlite && systemctl restart autoquant
+备份：<数据目录>/backups/autoquant-before-ledger-fix-<时间戳>.sqlite
+回滚：cp <备份> <数据目录>/autoquant.sqlite && systemctl restart <服务名>
 脚本：scripts/oneoff/fix-ledger-reconciled-reversed.ts（默认 dry-run，--apply 才写）
 ```
 

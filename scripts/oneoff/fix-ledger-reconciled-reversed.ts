@@ -38,19 +38,28 @@
  */
 import { readFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { createHmac } from 'node:crypto';
-import { initDb, getDb } from './packages/server/src/db/index.js';
-import { exchanges } from './packages/server/src/store/repositories.js';
-import { Vault } from './packages/server/src/crypto/vault.js';
-import { reconstructRoundTrips } from './packages/server/src/trader/roundTrips.js';
-import { realizedInFills } from './packages/server/src/binance/income.js';
+import { initDb, getDb } from '../../packages/server/src/db/index.js';
+import { exchanges } from '../../packages/server/src/store/repositories.js';
+import { Vault } from '../../packages/server/src/crypto/vault.js';
+import { reconstructRoundTrips } from '../../packages/server/src/trader/roundTrips.js';
+import { realizedInFills } from '../../packages/server/src/binance/income.js';
 
 const APPLY = process.argv.includes('--apply');
-const DB = '/opt/autoquant/data/autoquant.sqlite';
+/*
+ * ⚠️ **站点专属值一律从环境变量取**（仓库约定 §4.4：不把主机、路径、凭据写进代码）。
+ * 用法：
+ * ` 
+ *   AQ_DB=<数据目录>/autoquant.sqlite `n *   AQ_MASTER_KEY_FILE=<数据目录>/.master.key `n *   AQ_ACCOUNT_ID=3 `n *   node tsx fix-ledger-reconciled-reversed.ts [--apply] 
+ * ` 
+ */
+const DB = process.env['AQ_DB'] ?? 'data/autoquant.sqlite';
+const MASTER_KEY_FILE = process.env['AQ_MASTER_KEY_FILE'] ?? '.master.key';
+const ACCOUNT_ID = Number(process.env['AQ_ACCOUNT_ID'] ?? '3');
 const L = (s: string): void => process.stdout.write(s + '\n');
 
 initDb(DB);
-const vault = new Vault(Buffer.from(readFileSync('/opt/autoquant/data/.master.key', 'utf8').trim(), 'hex'));
-const acc = exchanges.getWithSecret(3) as unknown as Record<string, unknown>;
+const vault = new Vault(Buffer.from(readFileSync(MASTER_KEY_FILE, 'utf8').trim(), 'hex'));
+const acc = exchanges.getWithSecret(ACCOUNT_ID) as unknown as Record<string, unknown>;
 const apiKey = String(acc['api_key']);
 const secret = vault.decrypt(String(acc['api_secret_enc']));
 
@@ -199,7 +208,7 @@ if (!APPLY) {
 }
 
 /* 备份 + 应用。 */
-const backupDir = '/opt/autoquant/data/backups';
+const backupDir = process.env['AQ_BACKUP_DIR'] ?? 'data/backups';
 mkdirSync(backupDir, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const backup = `${backupDir}/autoquant-before-ledger-fix-${stamp}.sqlite`;
