@@ -36,6 +36,7 @@
  * 所以挑周期这件事**只有一份实现**，三处共用。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { pickAtrSeries } from './atrPeriod.js';
@@ -110,4 +111,103 @@ test('★ 非整数 / 重复的配置项不会导致取错 —— 按 String(per
   assert.equal(picked.period, 14, '★ 7.5 不存在 → 继续找，取到 14');
   /* 重复项不影响结果。 */
   assert.equal(pickAtrSeries(atr, [14, 14]).period, 14);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ★★★ 接线：三处调用点必须真的调用它（变异测试发现的盲区）                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ⚠️ **这个文件上面所有用例都只测 `pickAtrSeries` 这个纯函数本身。**
+ *
+ * 我是用变异测试发现的：把 `autoTrader.ts` 里那处**回退成原来的写死写法**
+ *
+ * ```ts
+ * const atrSeries = snap?.primary?.atr?.['14'];   // ← issue #179 的原始形状
+ * ```
+ *
+ * —— 也就是**把修复完全回退**（真实撤单时限又只认周期 14）——
+ * `autoTrader.test.ts` + `atrPeriod.test.ts` **119 条全部通过**。
+ *
+ * ⚠️ 这与 #182 是**完全同型**的盲区：**纯函数测了，接线没测**。
+ * 而 #179 的缺陷形状恰恰就是"可配置的东西被代码当成常量" ——
+ * 所以"接线"正是它唯一会失效的地方。
+ *
+ * ## 三处调用点（issue #179 修复时改的）
+ *
+ * | 位置 | 用途 |
+ * | --- | --- |
+ * | `trader/autoTrader.ts` | **真实撤单时限**（自适应时限的 ATR）|
+ * | `strategy/prompt.ts`（连续观望提醒）| 提示词里的 ATR 统计 |
+ * | `strategy/prompt.ts`（挂单时限估算）| 提示词里的时限估算 |
+ *
+ * ## 为什么用结构断言
+ *
+ * 三处都要真实模型客户端 / 交易所 / 完整提示词上下文才能驱动，
+ * 而这里要验的只是"**调用点在不在、传的是不是配置**"。读源码足够 ——
+ * 与 `fetchGuardedWiring.test.ts`、`openInterestGate.test.ts` 是同一手法：
+ * **接线用结构断言、逻辑用功能测试。**
+ *
+ * ⚠️ 断言前**剥掉注释**（本仓库注释会逐字引用被讨论的代码，包括那个写死的 `['14']`）。
+ */
+test('★★★ 三处调用点都必须用 pickAtrSeries，且传入配置的 atrPeriods —— 不能写死 14', () => {
+  const files: Array<[string, string]> = [
+    ['trader/autoTrader.ts', readFileSync(new URL('../trader/autoTrader.ts', import.meta.url), 'utf8')],
+    ['strategy/prompt.ts', readFileSync(new URL('./prompt.ts', import.meta.url), 'utf8')],
+  ];
+
+  for (const [label, source] of files) {
+    const code = source
+      .split('\n')
+      .filter((line) => {
+        const t = line.trim();
+        return !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*');
+      })
+      .join('\n');
+
+    /* ① 必须有调用（不只是 import）。 */
+    const calls = [...code.matchAll(/pickAtrSeries\(/g)];
+    assert.ok(
+      calls.length >= 1,
+      `★★★ \`${label}\` 里没有任何 \`pickAtrSeries(...)\` 的**调用** ——\n` +
+        '    那是 issue #179 修复的核心：ATR 周期必须从配置挑，不能写死 14。\n' +
+        '    ⚠️ 这个回退**不会**让 `atrPeriod.test.ts` 变红（它只测纯函数），必须由这条守着。',
+    );
+
+    /* ② 调用时必须把配置里的周期列表传进去 —— 传 `[14]` 等于又写死了。 */
+    for (const call of calls) {
+      const open = code.indexOf('(', call.index);
+      let depth = 0;
+      let end = open;
+      for (let i = open; i < code.length; i += 1) {
+        const ch = code[i]!;
+        if (ch === '(') depth += 1;
+        else if (ch === ')') {
+          depth -= 1;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      const args = code.slice(open, end + 1);
+      assert.match(
+        args,
+        /atrPeriods/,
+        `★★ ${label}：调用 \`pickAtrSeries\` 时没有传 \`atrPeriods\` ——\n` +
+          '    传一个写死的数组等于把"可配置"又变成常量（#179 的原始形状）。\n' +
+          `    实际实参：${args.replace(/\s+/g, ' ').slice(0, 100)}`,
+      );
+    }
+
+    /* ③ 反向：不得残留写死的 `atr?.['14']` 取法。 */
+    assert.doesNotMatch(
+      code,
+      /\.atr\?\.\['14'\]/,
+      `★★★ ${label} 里还残留写死的 \`atr?.['14']\` —— 那正是 #179 的原始形状`,
+    );
+  }
+
+  /* 前置断言：确认两个文件都真的读到了（否则"零个问题"是因为没扫到东西）。 */
+  assert.ok(files[0]![1].length > 1000 && files[1]![1].length > 1000, '★ 源码语料没读到');
 });
