@@ -40,6 +40,9 @@ import { parseRiskOfficerVerdict } from './agent/riskOfficer.js';
  * 于是后者被判成"交易决策"、跑整个交易台、永久失败。
  */
 import { AGENT_CALL_MARKER } from './agent/loop.js';
+/* ⚠️ 角色提示词的唯一来源 —— sk() 必须用它，否则那份长文到不了模型。 */
+import { ROLES } from './agent/roles.js';
+import type { AgentRole } from './agent/roles.js';
 
 /** 一次「向模型提问」要用的档位与角色。 */
 export interface RoleRequest {
@@ -373,6 +376,38 @@ export const ROLE_MAX_TOKENS: Readonly<Record<string, number>> = {
   judge: 8192,
   risk_officer: 2048,
 };
+
+/**
+ * **`ROLES[role].system` 的查表**（2026-10-15 加 —— 修"6/10 角色提示词从未到达模型"）。
+ *
+ * ## 为什么需要它
+ *
+ * `ask()` 原来拼的是 `你是交易台的「${role}」。${task}`，而 `task` 是
+ * `tradingDesk.ts` 里的**内联短句** —— 于是 `roles.ts` 里那份精心写的
+ * `system`（含风控官的 `lossScenarios`、`symbol_scout` 的输出契约、
+ * `bull`/`bear` 的失效条件纪律）**只对 4 个走 `loop.ts` 的角色生效**。
+ *
+ * 线上印证：`decision_records` 里含 `<risk>` 的 **223 条**记录中，
+ * 含 `lossScenarios` 的 **0 条**、含 `checked` 的 **0 条** ——
+ * 而那两个字段只写在那份**从未到达**的提示词里。
+ *
+ * ## 为什么是"查表"而不是在 `ask()` 里直接 `ROLES[role].system`
+ *
+ * `ask()` 的 `role` 是 `string`（`AskRole` 的签名），而 `ROLES` 的键是
+ * `AgentRole` 联合类型 —— 直接索引需要一次类型收窄。这里用一个显式的
+ * `Record<string, string>` 映射，好处是：
+ * ```
+ *   ① 类型安全（`ROLES` 是封闭枚举，映射由类型检查保证不漏）
+ *   ② 未知角色自然落到 `undefined` → 退回原行为（不抛错）
+ * ```
+ *
+ * ⚠️ **它的正确性由 `roleSystemsWired.test.ts` 钉住**：那条测试从
+ * `ROLES` 的实际键反查，确保每个角色的 `system` 都能被这里取到 ——
+ * 判据从事实来源生成，不靠人记得（这个仓库为"手写清单会漂移"付过代价）。
+ */
+export const ROLE_SYSTEMS: Readonly<Record<string, string>> = Object.fromEntries(
+  (Object.keys(ROLES) as AgentRole[]).map((r) => [r, ROLES[r].system]),
+);
 /**
  * 构造一个**多模型**的 `DecisionModel`。
  *
@@ -703,7 +738,51 @@ export function createTeamDecisionModel(options: {
           {
             role: 'system',
             content:
-              `你是交易台的「${role}」。${task}\n\n` +
+              /*
+               * ══════════════════════════════════════════════════════════════════
+               *  ⚠️⚠️ **角色提示词必须真的送进模型**（2026-10-15 修）
+               * ══════════════════════════════════════════════════════════════════
+               *
+               * ## 事故：`ROLES` 里有的角色，提示词**从未到达模型**
+               *
+               * 这里原来拼的是：
+               * ```
+               *   `你是交易台的「${role}」。${task}`
+               * ```
+               * 而 `task` 全是 `tradingDesk.ts` 里的**内联短句**。于是
+               * `roles.ts` 里精心写的那份 `system`（风控官的 `lossScenarios`、
+               * `symbol_scout` 的输出契约…）**到不了模型**。
+               *
+               * 线上印证：`decision_records` 里含 `<risk>` 的 **223 条**记录中，
+               * 含 `lossScenarios` 的 **0 条**、含 `checked` 的 **0 条** ——
+               * 而那两个字段只写在那份**从未到达**的提示词里。
+               *
+               * ## 修法：**角色标识行 + 角色提示词 + 本次任务**，三段都要有
+               *
+               * ```
+               *   ① 你是交易台的「risk_officer」。   ← 标识行（谁在说话）
+               *   ② <ROLES[role].system>            ← 那份长文（纪律与输出契约）
+               *   ③ ## 本次任务 <task>              ← 这一次具体要它做什么
+               * ```
+               *
+               * ⚠️ **① 不能省**（我第一版就省了，立刻被 4 条既有测试抓到）：
+               * ```
+               *   · 模型需要知道自己的角色名（它会引用"作为风控官…"）
+               *   · 测试桩与审计日志靠 `「role」` 反推"这次问的是谁"
+               *   · 省掉它 → `teamModel.test.ts` 里 4 条断言全红
+               *     （包括"有真实动作时必须叫风控官"那条 fail-closed 守卫）
+               * ```
+               * 顺序也不能反：长文定义了输出格式与纪律，任务短句只是本次委托。
+               *
+               * ⚠️ **不在 `ROLES` 里的角色退回原行为**（只有标识行 + task）——
+               * 那 7 个角色（`judge`/`bull`/`bear`/`supervisor`/`technical`/
+               * `newscaster`/`sentiment`）**本来就没有 system 可送**。
+               * 它们是另一件事：编制表不完整（见 `roleSystemsWired.test.ts`）。
+               */
+              `你是交易台的「${role}」。\n\n` +
+              (ROLE_SYSTEMS[role] !== undefined
+                ? `${ROLE_SYSTEMS[role]}\n\n## 本次任务\n${task}\n\n`
+                : `${task}\n\n`) +
               /*
                * ⚠️ **必须明确说"你没有工具"**（2026-10-12 实测踩到）。
                *
