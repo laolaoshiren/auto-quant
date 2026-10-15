@@ -285,13 +285,69 @@ export const spawnClaudeCode: SpawnAgent = async (input) => {
        *
        * 不能静默当成完整成功：调用方需要知道"这份产出是在轮数用尽时截下来的"
        *（它可能少了最后那段结论）。所以 `ok: true` 而 `error` 仍写明原因。
+       *
+       * ══════════════════════════════════════════════════════════════════════════
+       *  ⚠️⚠️ **`text.length > 0` 这个判据是错的 —— 实测污染了所有下游**（2026-10-15）
+       * ══════════════════════════════════════════════════════════════════════════
+       *
+       * ## 事故：错误信息本身被当成了"产出"
+       *
+       * 线上 `research_cache:11` 的原文：
+       * ```
+       *   ## 消息面调研（4/4 个猎手有产出）      ← 标题说全部有产出
+       *   ### 新闻猎手（news_hunter）
+       *   Error: Reached max turns (12)          ← 而内容是一句错误
+       *   ### 资金猎手（flow_hunter）
+       *   Error: Reached max turns (12)
+       *   …
+       * ```
+       * 而 `mergeHunterReports` 的 `okCount` 就是数 `r.ok` —— 于是它写"4/4 有产出"。
+       *
+       * ## 为什么 `text.length > 0` 判不出来
+       *
+       * `claude --print` 在撞上限时把 `Error: Reached max turns (N)` **写到 stdout**，
+       * 于是 `text` 非空 —— 但它**一个字的情报都没有**。
+       * 用"有没有文本"当判据，等于"有没有报错"当判据。
+       *
+       * ## 正确的判据：文本里有没有**实质内容**
+       *
+       * 撞上限时那行错误的形状是稳定的（`Error: Reached max turns (N)`）。
+       * 所以判据是：**剥掉这类错误行之后，还剩不剩东西**。
+       *
+       * ⚠️ 这与本仓库反复记的那条同源：**"一个把故障说成正常的地方，比报错更危险"** ——
+       * 这里它是第四次（前三次：决策详情页、`<risk>` 块、猎手零产出）。
+       * 而这一次最靠底层：它让**下游所有角色**都以为"消息面调研成功了"。
        */
       const hitMaxTurns = /Reached max turns/i.test(err) || /Reached max turns/i.test(text);
-      if (hitMaxTurns && text.length > 0) {
+      /*
+       * 剥掉 harness 自己写的错误行，看还剩不剩**实质内容**。
+       * ⚠️ 只剥"看起来是 harness/CLI 的错误行"，不剥正常文本 ——
+       * 否则会把一份"恰好提到这个短语"的真实产出误判成空。
+       */
+      const substantive = text
+        .split('\n')
+        .filter((line) => !/^\s*(Error:\s*)?Reached max turns/i.test(line))
+        .join('\n')
+        .trim();
+      if (hitMaxTurns && substantive.length > 0) {
         finish({
           ok: true,
           text,
           error: `达到轮数上限（产出可能不完整）：${err.trim().slice(0, 200)}`,
+          latencyMs: latency,
+        });
+        return;
+      }
+      /*
+       * ⚠️ 撞了上限而**没有实质内容** ⇒ 那是失败，不是"截断的产出"。
+       * 原来这条会落到下面的 `ok: false`，但 `text` 仍是那句错误 ——
+       * 所以 `error` 要写清"它一个字都没写"，而不是把错误当产出带下去。
+       */
+      if (hitMaxTurns) {
+        finish({
+          ok: false,
+          text: '',
+          error: `达到轮数上限，且**没有任何实质产出**（只输出了错误行）：${err.trim().slice(0, 200)}`,
           latencyMs: latency,
         });
         return;

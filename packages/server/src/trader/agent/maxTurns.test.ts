@@ -54,10 +54,41 @@ test('★★★ "撞上轮数上限"不能一律判失败（那时可能已有�
     /Reached max turns/i.test(HARNESS),
     '★ 必须识别"撞上限"这个情形',
   );
-  /* 而它必须以 ok:true 收下有实质文本的产出（否则等于白跑一轮）。 */
+  /*
+   * ⚠️ **判据改过（2026-10-15）—— 原来的写法钉住了一个 bug。**
+   *
+   * 原来断言的是：
+   * ```
+   *   /hitMaxTurns && text\.length > 0[\s\S]{0,200}?ok: true/
+   * ```
+   * 而 **`text.length > 0` 正是"把错误当产出"的那个错判据** ——
+   * `claude --print` 撞上限时把 `Error: Reached max turns (N)` 写到 stdout，
+   * 于是 `text` 非空 ⇒ 判成 `ok: true` ⇒ 那句错误被当成有效产出。
+   *
+   * 线上后果（`research_cache:11`）：
+   * ```
+   *   ## 消息面调研（4/4 个猎手有产出）      ← 标题说全部有产出
+   *   ### 新闻猎手（news_hunter）
+   *   Error: Reached max turns (12)          ← 而内容是一句错误
+   * ```
+   * ⇒ 下游所有角色都以为"消息面调研成功了"。
+   *
+   * ## 所以现在断言的是【意图】，不是那个具体表达式
+   *
+   * 意图：**撞上限但有实质内容 → `ok: true`**（不能白跑一轮）；
+   *       **撞上限且只有错误行 → `ok: false`**（不能把错误当产出）。
+   *
+   * ⚠️ 这两条语义由 `hunterErrorNotOutput.test.ts` 做**行为级**验证
+   *（直接调 `mergeHunterReports` 看输出），比文本判据可靠 ——
+   * 这里只做"harness 源码里确实有这个分支"的结构性检查。
+   */
   assert.ok(
-    /hitMaxTurns && text\.length > 0[\s\S]{0,200}?ok: true/.test(HARNESS),
-    '★ 撞上限但有文本时应当收下（ok:true）',
+    /hitMaxTurns\s*&&\s*substantive\.length > 0[\s\S]{0,300}?ok: true/.test(HARNESS),
+    '★ 撞上限但【有实质内容】时应当收下（ok:true）—— 判据不能是"有没有文本"',
+  );
+  assert.ok(
+    /hitMaxTurns\)\s*\{[\s\S]{0,300}?ok: false/.test(HARNESS),
+    '★ 撞上限且【只有错误行】时必须是失败（ok:false）—— 否则错误会被当产出',
   );
   /* ⚠️ 但不能静默当成完整成功 —— 必须说明它是被截断的。 */
   assert.ok(

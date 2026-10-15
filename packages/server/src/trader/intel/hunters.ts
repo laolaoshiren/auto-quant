@@ -205,18 +205,54 @@ export interface HunterReport {
  */
 export function mergeHunterReports(reports: readonly HunterReport[]): string {
   if (reports.length === 0) return '';
-  const okCount = reports.filter((r) => r.ok).length;
+  /*
+   * ⚠️ **必须区分三件事，不能只分两类**（2026-10-15）。
+   *
+   * ```
+   *   ① ok:false                     → 「未产出」（它没跑成 —— 我们不知道那边有什么）
+   *   ② ok:true + 剥掉错误行后为空    → 「未查到相关消息」（它跑了，那边确实没消息）
+   *   ③ ok:true + 有实质内容          → 正常展示
+   * ```
+   * ① 与 ② 对下游是**完全不同的信息**：
+   * ```
+   *   "社区上没有讨论"  vs  "社区猎手挂了"   ← 两件完全不同的事
+   * ```
+   * 合并它们会让下游把"我不知道"当成"那边没事"。
+   *
+   * ## 而这次修的是"把错误当产出"（一个新的第 ④ 类）
+   *
+   * 线上 `research_cache` 的标题写着「**4/4 个猎手有产出**」，
+   * 而正文每一节都是 `Error: Reached max turns (12)` ——
+   * 因为 `harness.ts` 那时把"stdout 上有错误文本"当成了产出（`ok: true` + 非空 text）。
+   *
+   * 那一层已修（判据改成"剥掉错误行后还剩不剩实质内容"），
+   * 而这里**再独立判一次**：万一将来 `ok` 又被设宽，标题仍应如实反映。
+   * ⚠️ 那种情况（`ok:true` 但只有错误行）**不是** ② —— 它一个字都没写，
+   * 属于"没跑成"，所以走 ①。
+   */
+  const stripErrorLines = (t: string): string =>
+    t
+      .split('\n')
+      .filter((line) => !/^\s*(Error:\s*)?Reached max turns/i.test(line))
+      .join('\n')
+      .trim();
+  const substantive = (r: HunterReport): string => (r.ok ? stripErrorLines(r.text) : '');
+  const okCount = reports.filter((r) => substantive(r).length > 0).length;
   const lines: string[] = [
     `## 消息面调研（${okCount}/${reports.length} 个猎手有产出）`,
     '',
   ];
   for (const r of reports) {
     lines.push(`### ${r.label}（${r.hunterId}）`);
-    if (r.ok) {
-      lines.push(r.text.trim().length > 0 ? r.text.trim() : '（本次未查到相关消息）');
+    const body = substantive(r);
+    if (body.length > 0) {
+      lines.push(r.text.trim());
+    } else if (r.ok && r.text.trim().length === 0) {
+      /* ② 它跑了，只是那边确实没有消息。 */
+      lines.push('（本次未查到相关消息）');
     } else {
       /*
-       * ⚠️ 必须**显式写出失败** —— 那是"这个来源本轮缺失"的唯一证据。
+       * ① 没跑成 —— 必须**显式写出失败**，那是"这个来源本轮缺失"的唯一证据。
        */
       lines.push(`（本次**未产出**：${r.error ?? '未知原因'}）`);
     }
