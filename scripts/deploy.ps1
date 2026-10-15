@@ -186,17 +186,58 @@ $buildInfo = [ordered]@{
 Write-Host "    $($buildInfo.branch) @ $($buildInfo.commitShort)$(if ($buildInfo.dirty) { '（工作区有未提交改动）' })"
 
 Write-Host "==> 打包（排除 .env / data / node_modules；含前端产物）" -ForegroundColor Cyan
-$archive = Join-Path $repoRoot '_deploy.tar.gz'
-if (Test-Path $archive) { Remove-Item $archive -Force }
+<#
+  ⚠️ **归档文件名必须唯一（含 PID），不能是固定的 `_deploy.tar.gz`**（2026-10-15 修）
 
-& tar -czf $archive @excludes -C $repoRoot . 2>&1 | Out-Null
-$sizeKb = [math]::Round((Get-Item $archive).Length / 1KB, 1)
-Write-Host "    $sizeKb KB"
+  ## 事故：两次部署并行时，一个删掉归档、另一个正在传它
 
-Write-Host "==> 传输到 ${Server}:/tmp/aq.tar.gz" -ForegroundColor Cyan
-& scp -o BatchMode=yes $archive "${Server}:/tmp/aq.tar.gz" 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "scp 失败" }
-Remove-Item $archive -Force
+  原来的写法：
+  ```
+    $archive = Join-Path $repoRoot '_deploy.tar.gz'   # 固定名
+    …scp…
+    Remove-Item $archive -Force                       # 跑完就删
+  ```
+  而 `deploy.ps1` 一次要跑几分钟。**两次并行**（我连续重试时就发生了）会撞车：
+  ```
+    A: 打包 → _deploy.tar.gz 就位
+    B: 打包 → 覆盖同一个文件
+    A: scp → 成功
+    A: Remove-Item → 文件没了
+    B: scp → scp: stat local "_deploy.tar.gz": No such file or directory  ❌
+  ```
+  症状是 **scp 失败（退出码 1）而网络完全正常** —— 我为此把它误判成"scp 抖动"
+  并重试了好几轮，**而真相是并发竞争**。
+
+  ## 为什么用 PID 而不是时间戳
+
+  `$PID` 是**本进程**的 id，同一进程内重复执行会复用同一个名字（那是安全的，
+  因为同一进程不会并行跑两次自己）；不同进程必然不同 —— 正好是需要区分的粒度。
+
+  ## 附带：临时文件应当清理干净
+
+  `try/finally` 保证**即使 scp 抛错也删掉归档** —— 否则失败一次就在仓库根
+  留一个 8MB 的文件，而下一次 `git status` 会看到它。
+#>
+$archive = Join-Path $repoRoot "_deploy.$PID.tar.gz"
+try {
+  & tar -czf $archive @excludes -C $repoRoot . 2>&1 | Out-Null
+  $sizeKb = [math]::Round((Get-Item $archive).Length / 1KB, 1)
+  Write-Host "    $sizeKb KB"
+
+  Write-Host "==> 传输到 ${Server}:/tmp/aq.tar.gz" -ForegroundColor Cyan
+  <#
+    ⚠️ **scp 的失败原因必须打出来** —— 原来这行是 `2>&1 | Out-Null`，
+    于是 `throw "scp 失败"` 只说"失败了"，不说为什么。
+    实测代价：我把"文件不存在"误判成"网络抖动"，白重试了好几轮。
+  #>
+  $scpOut = & scp -o BatchMode=yes $archive "${Server}:/tmp/aq.tar.gz" 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    $scpOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+    throw "scp 失败（退出码 $LASTEXITCODE）—— 上面的输出是 scp 自己说的原因"
+  }
+} finally {
+  if (Test-Path $archive) { Remove-Item $archive -Force }
+}
 
 $remote = @"
 set -e
