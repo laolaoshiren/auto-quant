@@ -52,6 +52,7 @@ import { fmtInt, fmtLatency, timeAgo } from '../../lib/format';
  * 的注释），所以将来加动作时漏登记会**编译不过**，而不是静默漏出英文。
  */
 import { actionLabel } from '../DecisionAudit';
+import { plainText } from '../../lib/plainText';
 import { TeamDecisionRow } from './TeamDecisionRow';
 
 /**
@@ -246,7 +247,7 @@ export function TeamCycleBlock({
         {errorText !== null && (
           <p className="mb-1.5 flex items-start gap-1.5 text-xs leading-relaxed text-down">
             <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span className="min-w-0 break-words">{errorText}</span>
+            <span className="min-w-0 break-words">{plainText(errorText)}</span>
           </p>
         )}
 
@@ -320,7 +321,7 @@ export function TeamCycleBlock({
               <li key={`leftover-${index}`} className="flex min-w-0 items-start gap-1.5 text-xs">
                 <span className="shrink-0 text-ink-lo">{logActionLabel(entry.action)}</span>
                 <span className="num shrink-0 text-ink-mid">{entry.symbol}</span>
-                <span className="min-w-0 break-words text-ink-lo">{entry.detail ?? ''}</span>
+                <span className="min-w-0 break-words text-ink-lo">{plainText(entry.detail ?? '')}</span>
               </li>
             ))}
           </ul>
