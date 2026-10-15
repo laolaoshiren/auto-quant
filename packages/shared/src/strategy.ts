@@ -428,6 +428,27 @@ export const RiskControlConfigSchema = z.object({
    */
   fallbackRoundTripFeeRate: z.number().min(0).max(0.05).default(0.001),
 });
+/**
+ * ⚠️ **当前仓库内无人引用**（我全仓 grep 过）—— 但**刻意保留**。
+ *
+ * ## 为什么保留而不是删掉
+ *
+ * 1. **它属于跨端契约**：`@aq/shared` 的职责就是"zod schema + 领域类型"，
+ *    而这个类型与 `RiskControlConfigSchema` **成对**。删掉类型、只留 schema，
+ *    下一个要用它的人得自己再写一遍 `z.infer`。
+ * 2. **它不可能"腐化"**：它是 `z.infer<typeof Schema>` ——
+ *    schema 一改它**自动跟着改**，不存在"注释与实现漂移"那类风险。
+ *    ⚠️ 这正是它与"死代码"的关键区别：**死代码会误导人，它不会**。
+ * 3. **删除是不可逆的信息损失**，而保留的成本是零（类型不产生运行时代码）。
+ *
+ * ⚠️ 我核对了同类：全仓 13 个 `z.infer` 配套类型里 **10 个被引用**，
+ * 未被引用的只有 3 个（本文件里这 3 个）—— 所以"成对导出"是这里的惯例，
+ * 它们不是"忘了删"，是"暂时没人用"。
+ *
+ * ⚠️ 判断依据：`packages/shared/package.json` 是 `"private": true`
+ * —— 它**不对外发布**，所以"下游用户可能依赖它"这个理由**不成立**。
+ * 保留的理由是上面第 1–3 条，**不是**"怕破坏外部使用者"。
+ */
 export type RiskControlConfig = z.infer<typeof RiskControlConfigSchema>;
 
 /* -------------------------------------------------------------------------- */
@@ -441,6 +462,10 @@ export const DrawdownGuardSchema = z.object({
   /** Close when this fraction of the peak profit has been given back (0-1). */
   givebackRatio: z.number().min(0.05).max(1).default(0.5),
 });
+/**
+ * ⚠️ **当前仓库内无人引用** —— 刻意保留，理由同 `RiskControlConfig` 上面那段
+ *（成对的 schema 契约 / `z.infer` 不可能腐化 / 删除是不可逆的信息损失）。
+ */
 export type DrawdownGuard = z.infer<typeof DrawdownGuardSchema>;
 
 export const ThrottleConfigSchema = z.object({
@@ -494,6 +519,10 @@ export const PromptSectionsSchema = z.object({
   entryStandards: z.string().default(''),
   decisionProcess: z.string().default(''),
 });
+/**
+ * ⚠️ **当前仓库内无人引用** —— 刻意保留，理由同 `RiskControlConfig` 上面那段
+ *（成对的 schema 契约 / `z.infer` 不可能腐化 / 删除是不可逆的信息损失）。
+ */
 export type PromptSections = z.infer<typeof PromptSectionsSchema>;
 
 /* -------------------------------------------------------------------------- */

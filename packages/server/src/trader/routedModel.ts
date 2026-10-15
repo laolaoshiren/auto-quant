@@ -546,13 +546,24 @@ export function createRoutedDecisionModel(options: {
   };
 }
 
-/**
- * 默认的"调用一个具体模型"实现 —— 由 `manager` 注入真实的 `LlmClient` 工厂。
+/*
+ * ⚠️ 这里原来有一个 `export type ModelCallFactory = (modelId: string) => CallModel;`，
+ * **2026-10-15 删掉了**。理由（两条，都核实过）：
  *
- * 抽成类型别名只是为了让 `manager` 侧的那段胶水写得清楚：
- * **路由器不关心模型怎么调**，它只关心"选谁、失败了怎么办"。
+ * 1. **全仓无人引用** —— 它只出现在定义处那一行（`grep -r` 过，
+ *    含 `manager.ts` / 所有 `.test.ts`）。
+ * 2. ⚠️ **它的注释描述不实** —— 原文说
+ *    > 抽成类型别名只是为了让 `manager` 侧的那段胶水写得清楚
+ *
+ *    而 `manager.ts` **根本没有引用它**（它用的是 `ModelRouter` 这个**类**，
+ *    见 `manager.ts:1893` / `:4198`）。**注释指向了一个不存在的用途。**
+ *
+ * ⚠️ 这类"注释描述了一个从未存在的用途"比死代码更麻烦：
+ * 它会让下一个人以为"某处有胶水依赖它"，于是不敢删、也不去查。
+ *
+ * ⚠️ 删除是安全的：`@aq/server` 是 `"private": true`，不对外发布，
+ * 所以不存在"下游依赖"。
  */
-export type ModelCallFactory = (modelId: string) => CallModel;
 
 /* -------------------------------------------------------------------------- */
 /*  团队模式：跑整个交易台，返回 <decision> 文本                                 */

@@ -344,9 +344,16 @@ type AutoTraderMarketDataSurface = Pick<
 const _replayIsCompatible: MissingFromReplay extends never ? true : never = true;
 void _replayIsCompatible;
 
-/**
- * 保留这个名字（可能有外部引用），并把它绑到上面那个**真的会检查**的常量上。
+/*
+ * ⚠️ 这里原来还留了一个
  *
- * ⚠️ 单独保留一个 `type` 是**不够的** —— 见上面那段"从来没生效过"的说明。
+ *     export type ReplayMarketDataIsCompatible = typeof _replayIsCompatible;
+ *
+ * —— **2026-10-15 删掉了**。当时的理由是"可能有外部引用"，而核实结果是：
+ * 全仓（含所有 `.test.ts`）**只有定义处**，`@aq/server` 又是 `"private": true`。
+ *
+ * ⚠️ 更要紧的是：**真正的断言是上面那个 `const`**，不是这个 `type`。
+ * 留一个无人引用的 `type` 只会让人以为"兼容性由类型保证"，
+ * 而它和原来那个失效的写法**长得一样** —— 那正是第 45 轮踩过的坑。
+ * 一个名字也不该为"可能有人用"而留着；要用的人自己会加。
  */
-export type ReplayMarketDataIsCompatible = typeof _replayIsCompatible;

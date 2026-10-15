@@ -277,6 +277,19 @@ export const RawDecisionSchema = z.object({
   setup_score_basis: z.string().optional(),
   reasoning: z.string().optional(),
 });
+/**
+ * ⚠️ **代码里当前无人引用**（名字只出现在注释里：`parser.ts:23` / `:553`、
+ * 本文件 `:408`）—— 刻意保留，理由与 `strategy.ts` 里那三个 `z.infer` 相同：
+ *
+ * 1. **它属于跨端契约**：`@aq/shared` 的职责就是"zod schema + 领域类型"，
+ *    它与 `RawDecisionSchema` **成对**；
+ * 2. **它不可能腐化**：`z.infer` 会跟着 schema 自动改，不存在"注释与实现漂移"；
+ * 3. **删除是不可逆的信息损失**，保留成本为零（类型不产生运行时代码）。
+ *
+ * ⚠️ 而"解析层没 import 它"是**刻意的**：`parser.ts` 用的是**手写的宽松形状**
+ *（`action` 留作自由字符串，见那里的注释）—— 解析层刻意不把自己绑死在 schema 上。
+ * 所以**它不是漏删**。
+ */
 export type RawDecision = z.infer<typeof RawDecisionSchema>;
 
 /**
