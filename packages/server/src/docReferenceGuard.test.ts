@@ -92,56 +92,76 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** `docs/` 下全部 `.md` 的正文（用来查"这个编号在文档里有定义吗"）。 */
+/**
+ * `docs/` 下全部 `.md` 的正文（用来查"这个编号在文档里有定义吗"）。
+ *
+ * ⚠️ **不能用上面的 `walk()`** —— 它只收 `.ts`/`.tsx`，而 `docs/` 下**全是 `.md`**。
+ * 我第一版就是这么写的，于是 `docsText()` **永远返回空串**，
+ * 而"文档里有定义就算可查证"那条分支**永不成立** —— 守卫退化成"只看 KNOWN_EXTERNAL"。
+ *
+ * ⚠️ 这个缺陷是**用变异发现的**：我把 `KNOWN_EXTERNAL` 清空后守卫**仍然失败**
+ *（本该如此，因为文档没被读到）。若它当时"通过"了，说明判据在看别的东西。
+ *
+ * ⚠️ 教训与第 33 轮一致：**判据的实现本身也要验证** ——
+ * 一个"读了但读错文件类型"的辅助函数，会让整条判据静默退化。
+ */
 function docsText(): string {
-  return walk(join(ROOT, 'docs'))
-    .filter((f) => f.endsWith('.md'))
-    .map((f) => readFileSync(f, 'utf8'))
-    .join('\n');
+  const out: string[] = [];
+  const collect = (dir: string): void => {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry);
+      let isDir = false;
+      try {
+        isDir = statSync(full).isDirectory();
+      } catch {
+        continue;
+      }
+      if (isDir) collect(full);
+      else if (entry.endsWith('.md')) out.push(readFileSync(full, 'utf8'));
+    }
+  };
+  collect(join(ROOT, 'docs'));
+  /* 根目录的 README 也算文档。 */
+  try {
+    out.push(readFileSync(join(ROOT, 'README.md'), 'utf8'));
+  } catch {
+    /* 没有就没有。 */
+  }
+  return out.join('\n');
 }
 
 /**
  * 已知的"仓库外编号" —— 显式登记，附理由。
  *
- * ⚠️ 这份名单**不是垃圾桶**：每一条都要写清"它出自哪、为什么不在仓库里、
- * 以及读者该看什么替代"。
+ * ⚠️ **这份名单现在是空的** —— 因为 `docs/EXTERNAL-REFS.md` 已经登记了整族 `B.x`。
  *
- * ## ⚠️ 整族：`B.3` – `B.16`（11 处，全是同一份**仓库外的研究文档**）
+ * 判据是"**能在 `docs/` 里查到** **或** 在这份名单里登记"。文档存在时，名单就是**冗余**的
+ * —— 所以下面的反向检查会**报错**，提醒把它清掉（否则名单会腐化，
+ * 下一个人会以为"文档里查不到"）。
  *
- * 我原本只发现 `B.14`，写了守卫之后它**报出 11 处**（`B.3`/`B.4`/`B.7`/`B.8`/`B.12`/`B.14`/`B.16`）。
+ * ⚠️ 保留这个 `Map` 与反向检查，是为了**下一个**不可查证的引用：
+ * 它要么进 `docs/`，要么进这份名单，**二者必居其一**。
+ *
+ * ## 回顾：这一族是怎么被发现的（值得记）
+ *
+ * 我原本只发现 `B.14`（8 处），写了守卫之后它**报出 11 处**
+ *（`B.3`/`B.4`/`B.7`/`B.8`/`B.12`/`B.14`/`B.16`），补完登记后**又报出 3 处**
+ *（`B.1`/`B.15`）。最终穷尽统计是 **9 种编号、27 处引用**。
+ *
  * 关键线索在 `llm/errors.ts:242`：
- *
  * > dangerous provider behaviour **in the research document** (B.8).
  *
- * ⚠️ 即它们全部指向**同一份"研究文档"**，而那份文档**不在这个仓库里**
- *（`git log -S "B.14" --all` 显示从仓库初始化提交 `b03bd02` 就存在）。
- *
  * ⚠️ **这是"整族漏网"的又一例**（与 `structuredOutput`、`ink-mid`、
- * `#123` 的 9 处未转义同型）：**补一个不够，要把这一族数清**。
- *
- * ⚠️ 规则本身在代码里**有实现**（`llm/errors.ts` 的 `isRetryable` 分类、
- * `retryAfterMs` 优先于本地退避、`client.ts` 的 full-jitter 退避、
- * 各 provider 的兼容性处理）—— 所以**代码没坏，坏的是"出处不可查"**。
- *
- * ⚠️ 修法（**都要人定，因为它涉及"要不要把那份研究文档公开"**）：
- *   ① 把相关内容摘进 `docs/`（例如 `docs/LLM-PROVIDERS.md`），注释改成指向它；
- *   ② 若那份文档不打算公开，把注释里的编号换成**自包含的说明**
- *      （例如"指数退避 + 全抖动，优先用服务端 `Retry-After`"）—— 不依赖外部出处。
- *
- * ⚠️ 我**没有擅自改注释** —— 因为 ① 要动文档结构、② 要判断哪些内容可以公开，
- * 两者都超出"修一个引用"的范围。
+ * `#123` 的 9 处未转义同型）：**补一个不够，要把这一族数清** ——
+ * 而我这次是**靠守卫自己数清的**（它报出 11 处时我才知道不止一个）。
  */
-const KNOWN_EXTERNAL: ReadonlyMap<string, string> = new Map([
-  ['B.1', '仓库外的研究文档（provider 通用约定）—— `openaiCompatible.ts:363`'],
-  ['B.3', '仓库外的研究文档（Anthropic 参数兼容性：`temperature` 只接受 `1.0`、`top_p ≥ 0.99`）'],
-  ['B.4', '仓库外的研究文档（Gemini 原生 `generateContent` 调用形状）'],
-  ['B.7', '仓库外的研究文档（Kimi 用 HTML 错误页回答网关超时等 provider 怪癖）'],
-  ['B.8', '仓库外的研究文档（危险 provider 行为）—— `errors.ts:242` 自己写明是 "the research document"'],
-  ['B.12', '仓库外的研究文档（provider 差异，出现在 anthropic / gemini / 测试里）'],
-  ['B.14', '仓库外的研究文档（full-jitter 退避 + 重试策略）'],
-  ['B.15', '仓库外的研究文档（OpenAI 兼容层的差异）—— `openaiCompatible.ts:83` / `types.ts:22`'],
-  ['B.16', '仓库外的研究文档（启动预检的廉价能力探测）'],
-]);
+const KNOWN_EXTERNAL: ReadonlyMap<string, string> = new Map([]);
 
 /** 允许在"探针校准"用例里出现的人造编号（否则守卫会命中自己）。 */
 const CALIBRATION_REFS = new Set(['C.2', 'Z.99']);
@@ -196,8 +216,32 @@ test('★★★ 注释里引用的"外部编号"必须能在仓库里查到', ()
       '\n    ⚠️ `docs/AGENTS.md` §5.1 要求注释解释"**为什么**"——\n' +
       '    而"为什么"指向一个读者无法访问的出处时，那个"为什么"就**不可查证**：\n' +
       '    读者既不能确认它是否仍然成立，也不知道改它会不会违反某个约定。\n' +
-      '    ✅ 修法：把内容摘进 `docs/`，或把引用换成**自包含的说明**。\n' +
+      '    ✅ 修法：把内容摘进 `docs/`（见 `docs/EXTERNAL-REFS.md` 的做法），\n' +
+      '       或把引用换成**自包含的说明**。\n' +
       '       若确实是仓库外的规格且不打算公开，加进 `KNOWN_EXTERNAL` 并写明"读者该看什么替代"。',
+  );
+});
+
+test('★★★ `KNOWN_EXTERNAL` 不许留下已经进文档的条目（名单会腐化）', () => {
+  /*
+   * ⚠️ 判据是"能在 `docs/` 里查到 **或** 在名单里登记" —— 两者是**或**关系。
+   * 所以一旦某条编号进了 `docs/`，名单里那条就是**冗余**的，
+   * 留着会让下一个人以为"文档里查不到、只能看豁免"。
+   *
+   * ⚠️ 我这一轮就碰到了这个情形：写完 `docs/EXTERNAL-REFS.md` 之后，
+   * 那 9 条登记全部变成冗余 —— 靠这条反向检查才会被发现。
+   */
+  const docs = docsText();
+  const stale: string[] = [];
+  for (const [ref] of KNOWN_EXTERNAL) {
+    if (new RegExp(`\\b${ref.replace('.', '\\.')}\\b`).test(docs)) stale.push(ref);
+  }
+  assert.deepEqual(
+    stale,
+    [],
+    '★★★ 这些编号**已经在 `docs/` 里能查到了**，请从 `KNOWN_EXTERNAL` 移除：\n' +
+      stale.map((s) => `      · ${s}`).join('\n') +
+      '\n    ⚠️ 留在名单里会让下一个人以为"文档里查不到、只能看豁免"。',
   );
 });
 
@@ -223,7 +267,8 @@ test('★★★ 判据必须能真的报出不可查证的引用 —— 用人�
     ['Q.77'],
     '★★★ 判据必须能报出不可查证的编号 —— 否则上面那条是在空转',
   );
-  assert.deepEqual(check('// 见 B.14 的说明'), [], '★★ 已登记的不能误报');
+  /* ⚠️ `B.14` 现在**在文档里能查到**（`docs/EXTERNAL-REFS.md`），所以不该被报出。 */
+  assert.deepEqual(check('// 见 B.14 的说明'), [], '★★ 文档里登记过的不能误报');
   /* `§5.4` 这种不在判据里（它是已确认可查证的体系）—— 顺带确认不误报。 */
   assert.deepEqual(check('// 见 §5.4 的说明'), [], '★★ `§` 编号不该被这条判据碰到');
 });
