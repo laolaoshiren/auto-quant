@@ -31,12 +31,18 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { TeamBoard } from './TeamBoard.js';
+import type { TeamStep } from './roster.js';
 
-/** 渲染看板（本轮没有任何步骤 —— 正是"其余岗位"那一批要显示状态的场景）。 */
-function renderBoard(): string {
+/**
+ * 渲染看板。
+ *
+ * `steps` 可选 —— 传空是"其余岗位那一批要显示状态"的场景（默认）；
+ * 传一步人造产出则用来验证**产出**那一格的渲染（见 markdown 剥除那条测试）。
+ */
+function renderBoard(steps: readonly TeamStep[] = []): string {
   return renderToStaticMarkup(
     createElement(TeamBoard, {
-      steps: [],
+      steps,
       cycleNumber: 1,
       startedAt: null,
       /*
@@ -171,4 +177,86 @@ test('★★ 5 个真正没实现的岗位仍然显示"规划中"（不能顺手
     assert.ok(text.includes('规划中'), `★ ${id} 的职责确实没在跑 —— 必须仍然显示"规划中"：${text}`);
     assert.ok(!text.includes('代码在跑'), `★ ${id} 不是 by_code 岗位，不能显示"代码在跑"：${text}`);
   }
+});
+
+test('★★★ 行内（含 title 属性）不得残留 markdown 强调符', () => {
+  /*
+   * 用户 2026-10-15 的看板截图实测：界面上原样显示着
+   * ```
+   *   汇总多空论证，给出**唯一**结论（有权决定"不行动"）
+   *   尽最大努力论证**做多**（并给出失效条件）
+   * ```
+   * 那些 `**` 是 `firm.ts` 的 `duty` 字段里**写给模型看的强调标记** ——
+   * 而这里是给人读的纯文本，不是 markdown 渲染器。用户看到只会当成界面 bug。
+   *
+   * ⚠️ 判据取**整个行的 HTML**（不是剥完标签的文字）：职责现在挂在 `title` 属性上，
+   * 只判可见文字会把"悬浮提示里还带着 `**`"这个漏网之鱼放过去。
+   */
+  const html = renderBoard();
+  for (const id of ['judge', 'bull', 'bear', 'market_analyst', 'data_sentinel']) {
+    const row = rowOf(html, id);
+    assert.ok(row.length > 0, `★ 渲染结果里找不到 ${id} 那一行（判据失效，先修这个）`);
+    assert.ok(!row.includes('**'), `★ ${id} 那一行的 HTML 里还有 markdown 强调符：${row.slice(0, 180)}`);
+  }
+});
+
+test('★★★ 本轮产出里的强调符同样要剥掉（真实模型输出常带 `**`）', () => {
+  /*
+   * 上一条只覆盖了 `duty`。而**产出**是模型写的自然语言 ——
+   * 它带 `**` 的情形更多（`prompt.ts` 给模型的规则里就用 `**` 做强调）。
+   *
+   * 这条用一步**人造的**产出（带 `**`）渲染，直接证明 `plain()` 真的接在产出上：
+   * 它是"含 `**` 的输入 → 渲染后不含 `**`"的正向判据，
+   * 而不是"恰好那批数据里没有 `**`"的巧合。
+   */
+  const html = renderBoard([
+    { at: new Date().toISOString(), level: 'info', role: 'judge', message: '理由(i)：**位移**不足，判 **不行动**。' },
+  ]);
+  const judgeRow = rowOf(html, 'judge');
+  assert.ok(judgeRow.length > 0, '★ 切不到 judge 那一行（判据失效，先修这个）');
+  const text = textOf(judgeRow);
+  assert.ok(
+    text.includes('位移不足') || text.includes('不行动'),
+    `★ 这一步产出没有被渲染出来 —— 判据会退化成恒真：${text}`,
+  );
+  assert.ok(!text.includes('**'), `★ 产出里的强调符没被剥掉：${text}`);
+});
+
+test('★★★ 折叠态把横向空间让给"本轮产出"：行内不再渲染职责', () => {
+  /*
+   * ## 为什么这是一条**布局**守卫
+   *
+   * 2026-10-15 用真实浏览器量到的问题（`getBoundingClientRect` + `scrollWidth > clientWidth`）：
+   * 一行里三个 `flex-1` 平分剩余宽度时 ——
+   * ```
+   *   职责      可用 142px / 需要 272px
+   *   本轮产出  可用 142px / 需要 387px   ← 砍掉 63%
+   * ```
+   * 而"它这一轮在做什么"（产出）才是操作员看这个看板的目的。
+   *
+   * 改法是让职责让位：挂到 `role.label` 的 `title`（悬浮可见）、全文进展开态。
+   *
+   * SSR **量不到像素宽度**，但能钉住这个结构性决定：职责正文一旦回到行内，
+   * 就说明有人又把宽度分给了它。
+   *
+   * ⚠️ **边界（诚实说明）**：这条只证明"职责不在折叠行的可见文字里"，
+   * **不证明**产出的可见宽度真的变大了 —— 那要用真实浏览器量，SSR 做不到。
+   * 也不覆盖展开态（`allOpen` 是组件内部 state，SSR 无法触发展开）。
+   */
+  const html = renderBoard();
+  const judgeRow = rowOf(html, 'judge');
+  const judgeText = textOf(judgeRow);
+  assert.ok(judgeText.length > 0, '★ 切不到 judge 那一行（判据失效，先修这个）');
+  assert.ok(
+    !judgeText.includes('汇总多空论证'),
+    `★ 职责回到了折叠行的可见文字里 —— 它会重新跟"本轮产出"抢宽度：${judgeText}`,
+  );
+  /*
+   * 反方向：职责任然**可达** —— 它在 `title` 属性里（悬浮可见）。
+   * 少了这一条，上面那句"职责不在行内"用"把职责整个删掉"也能通过。
+   */
+  assert.ok(
+    judgeRow.includes('汇总多空论证'),
+    '★ 职责被整个删掉了 —— 它必须仍然挂在 role.label 的 title 上（悬浮可见）',
+  );
 });

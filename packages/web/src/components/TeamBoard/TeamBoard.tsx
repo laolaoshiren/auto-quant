@@ -302,7 +302,7 @@ export function TeamBoard({
             写"代码在跑"而不是"已由代码承担"，是因为这里回答的问题是"有没有人在干"。
           */}
           {byCode > 0 && (
-            <span className="text-accent" title={STATE_HINT.by_code}>
+            <span className="text-accent" title={plain(STATE_HINT.by_code)}>
               代码在跑 {byCode}
             </span>
           )}
@@ -476,16 +476,56 @@ function DeptGroup({
 }
 
 /**
+ * **把摘要里的 markdown 强调符号剥掉**（`**粗体**`）。
+ *
+ * ## 为什么（2026-10-15 用真实看板截图 + SSR 断言各抓到一次）
+ *
+ * 页面上原样显示着：
+ * ```
+ *   汇总多空论证，给出**唯一**结论（有权决定"不行动"）
+ *   尽最大努力论证**做多**（并给出失效条件）
+ * ```
+ * 那些 `**` 是 `firm.ts` 的 `duty` 字段与 `roster.ts` 的 `STATE_HINT` 里
+ * **写给模型/维护者看的强调标记**，而这里是给人看的纯文本、不是 markdown 渲染器 ——
+ * 用户看到只会当成界面 bug。
+ *
+ * ⚠️ **只剥 `**`，不剥 `__`**：`__` 在技术文案里更可能是**标识符的一部分**
+ *（模块名、字段名），误剥它会静默改掉一个可核对的事实 —— 那比漏剥更难发现。
+ *
+ * ⚠️ **也不引入 markdown 渲染器**：把可信文本渲染成 HTML 会开出一个注入面，
+ * 为这点收益不值得。
+ */
+function plain(text: string): string {
+  return text.replace(/\*\*/g, '');
+}
+
+/**
  * 一个岗位一行（可展开）。
  *
  * ## 折叠态回答的三个问题
  *
  * 1. **它在不在干活** → 状态圆点 + 中文状态词
- * 2. **它是干什么的** → 分工（`duty`）
- * 3. **它刚做出了什么** → 最近产出摘要 + 时刻
+ * 2. **它刚做出了什么** → 最近产出摘要 + 时刻（**主信息**）
+ * 3. **它是干什么的** → 分工（`duty`，见下面"为什么它不在这一行里"）
  *
- * 三样都在**一行之内**，因为用户原话是「固定展示各智能体工作状态和摘要」——
- * 需要点开才知道"它在不在干活"就等于没做到。
+ * 用户原话是「固定展示各智能体工作状态和摘要」——
+ * 需要点开才知道"它在不在干活"就等于没做到。所以状态与摘要**始终可见**。
+ *
+ * ## ⚠️ 2026-10-15 重排：职责从行内移走（先量、再改）
+ *
+ * 用户这一轮的反馈是「功能布局要合理，方便用户使用，**用户体验至上**」。
+ * 用真实页面量到的问题（`getBoundingClientRect` + `scrollWidth > clientWidth`）：
+ * ```
+ *   右栏总宽 597px（xl:flex-[2]），一行里三个 `flex-1` 平分剩余宽度
+ *   职责      可用 142px / 需要 272px   ← 砍掉 48%
+ *   本轮产出  可用 142px / 需要 387px   ← 砍掉 63%
+ * ```
+ * 而**产出才是"它这一轮在做什么"的答案**，却只剩开头几个字，
+ * 想看全只能鼠标悬浮 `title` —— 触屏不成立，扫一眼也不成立。
+ *
+ * 所以：产出拿剩余宽度并**允许两行**（`line-clamp-2`），职责让位
+ *（静态说明看一次就够，产出每一轮都在变）。职责仍然可达：
+ * `role.label` 的 `title` 悬浮可见，展开态里有全文。
  */
 function AgentRow({
   entry,
@@ -505,46 +545,57 @@ function AgentRow({
   const now = Date.now();
 
   const body = (
-    <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-      <span className="text-base font-medium text-ink-hi">{role.label}</span>
+    /*
+     * ⚠️ `items-start`（不是 `items-baseline`）：产出可能占两行，
+     * baseline 对齐会让左边的岗位名沉到第二行的基线上，整行看起来是歪的。
+     * 元信息一律 `shrink-0` —— 它们不该被产出挤掉（名字都没了就认不出这是谁）。
+     */
+    <div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-2 gap-y-0.5">
+      <span className="shrink-0 text-base font-medium leading-5 text-ink-hi" title={plain(role.duty)}>
+        {role.label}
+      </span>
       {/*
         ⚠️ **状态用文字写出来，不能只靠圆点颜色**（`DESIGN.md` §2，也是色盲用户的前提）。
         旧版只有一个圆点，而那个圆点的颜色类名根本不存在 —— 于是它连颜色都没有。
       */}
-      <span className={`text-xs font-medium ${STATE_TEXT_CLASS[state]}`} title={STATE_HINT[state]}>
+      <span
+        className={`shrink-0 text-xs font-medium leading-5 ${STATE_TEXT_CLASS[state]}`}
+        title={plain(STATE_HINT[state])}
+      >
         {STATE_LABEL[state]}
       </span>
-      <span className="text-[11px] text-ink-faint" title="这个岗位的思考深度档位（越深越贵、越影响结论）">
+      <span
+        className="shrink-0 text-[11px] leading-5 text-ink-faint"
+        title="这个岗位的思考深度档位（越深越贵、越影响结论）"
+      >
         {TIER_LABEL[role.tier]}
       </span>
-      {stepCount > 1 && <span className="num text-[11px] text-ink-faint">{stepCount} 步</span>}
-      <span className="min-w-0 flex-1 truncate text-xs text-ink-lo" title={role.duty}>
-        {role.duty}
-      </span>
-      {/*
-        ⚠️ **"由哪段代码承担"必须写出来，不能只说"已由代码承担"。**
-        操作员无法"打开一个模型"去核对它在不在跑，但可以去看那段代码/那个端点。
-        写上确切的模块之后，界面说的就是**可证伪的事实**（见 `firm.ts` 的 `carriedBy`）。
-      */}
-      {role.carriedBy !== undefined && (
-        <span
-          className="min-w-0 max-w-full flex-1 truncate text-[11px] text-accent"
-          title={`这个职能由确定性代码承担，没有模型出勤：${role.carriedBy}`}
-        >
-          由代码承担：{role.carriedBy}
-        </span>
+      {stepCount > 1 && (
+        <span className="num shrink-0 text-[11px] leading-5 text-ink-faint">{stepCount} 步</span>
       )}
+      {/*
+        ⚠️ **职责（`role.duty`）刻意不在这里渲染** —— 见 `body` 上方那段说明。
+        它是静态说明，与"本轮产出了什么"抢同一个 `flex-1` 时会把产出挤成一条缝。
+        现在它挂在 `role.label` 的 `title` 上，全文在展开态里。
+      */}
       {latest !== null ? (
         <>
-          <span className="min-w-0 max-w-full flex-1 truncate text-xs text-ink-mid" title={latest.message}>
+          {/*
+            产出是本行的**主信息**：`line-clamp-2` 给它两行、`basis-[14rem]` 保证它
+            被压到不能再压时换行独占一行（而不是缩成 60px 只看得见两个字）。
+          */}
+          <span
+            className="line-clamp-2 min-w-0 flex-1 basis-[14rem] text-xs leading-5 text-ink-mid"
+            title={`${plain(latest.message)}\n\n职责：${plain(role.duty)}`}
+          >
             {latest.phase !== null && PHASE_LABEL[latest.phase] !== undefined && (
               <span className="mr-1 rounded bg-base-800 px-1 text-[11px] text-ink-lo">
                 {PHASE_LABEL[latest.phase]}
               </span>
             )}
-            {latest.message}
+            {plain(latest.message)}
           </span>
-          <span className="num shrink-0 text-[11px] tabular-nums text-ink-faint">{clock(latest.at)}</span>
+          <span className="num shrink-0 text-[11px] leading-5 tabular-nums text-ink-faint">{clock(latest.at)}</span>
         </>
       ) : state === 'by_code' ? (
         /*
@@ -561,9 +612,22 @@ function AgentRow({
          * 它**不会**让 typecheck / build / 其它单测变红（它们只看常量表），
          * 只会在屏幕上多一句假话。
          *
-         * 承担者写在 `carriedBy` 那一行（上面已经渲染），这里不再重复。
+         * ## ⚠️ **"由哪段代码承担"必须写出来**，不能只说"已由代码承担"
+         *
+         * 操作员无法"打开一个模型"去核对它在不在跑，但可以去看那段代码/那个端点。
+         * 写上确切的模块之后，界面说的就是**可证伪的事实**（见 `firm.ts` 的 `carriedBy`）。
+         *
+         * （2026-10-15 重排：它原来与产出并列渲染在 `latest` 之前，会跟产出抢宽度；
+         *   移到这条分支里更贴合语义 —— `by_code` 岗位本来就没有"本轮产出"。）
          */
-        null
+        role.carriedBy !== undefined && (
+          <span
+            className="line-clamp-2 min-w-0 flex-1 basis-[14rem] text-[11px] leading-5 text-accent"
+            title={`这个职能由确定性代码承担，没有模型出勤：${plain(role.carriedBy)}`}
+          >
+            由代码承担：{plain(role.carriedBy)}
+          </span>
+        )
       ) : (
         /*
          * ══════════════════════════════════════════════════════════════════
@@ -649,20 +713,31 @@ function AgentRow({
       </div>
 
       {open && steps.length > 0 && (
-        <ol className="space-y-1 border-t border-base-750 bg-base-850/40 px-2.5 py-2 pl-8">
-          {steps.map((s, index) => (
-            <li key={`${s.at}-${index}`} className="flex min-w-0 items-start gap-2 text-xs">
-              <span className="num shrink-0 tabular-nums text-ink-faint">{clock(s.at)}</span>
-              <span
-                className={
-                  s.level === 'error' ? 'text-down' : s.level === 'warn' ? 'text-warn' : 'text-ink-mid'
-                }
-              >
-                {s.message}
-              </span>
-            </li>
-          ))}
-        </ol>
+        <div className="border-t border-base-750 bg-base-850/40 px-2.5 py-2 pl-8">
+          {/*
+            职责在这里补全 —— 折叠时它让位给"本轮产出"（理由见 `AgentRow` 的说明：
+            产出是每轮都在变的主信息，职责是看一次就够的静态说明）。
+            用户点开这一行，就说明他要细看这个岗位，这时"它是干什么的"才有用。
+          */}
+          <p className="mb-1.5 text-xs leading-5 text-ink-lo">
+            <span className="text-ink-faint">职责：</span>
+            {plain(role.duty)}
+          </p>
+          <ol className="space-y-1">
+            {steps.map((s, index) => (
+              <li key={`${s.at}-${index}`} className="flex min-w-0 items-start gap-2 text-xs">
+                <span className="num shrink-0 tabular-nums text-ink-faint">{clock(s.at)}</span>
+                <span
+                  className={
+                    s.level === 'error' ? 'text-down' : s.level === 'warn' ? 'text-warn' : 'text-ink-mid'
+                  }
+                >
+                  {s.message}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </div>
       )}
     </>
   );
