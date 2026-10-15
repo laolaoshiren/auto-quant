@@ -70,6 +70,21 @@ const REAL_MARKET_CONTEXT = [
   '1H: 148, 149, 150',
 ].join('\n');
 
+/**
+ * **情报材料**（让 `newscaster` / `sentiment` 真的被派）。
+ *
+ * ⚠️ 它必须通过 `research` 回调注入，**不是**拼在 `userPrompt` 里 ——
+ * `tradingDesk` 的判据是 `hasNews: input.newsContext.trim().length > 0`，
+ * 而 `newsContext` 只来自 `research()` 的返回。
+ * 我第一版把它拼在 userPrompt 里，于是总管判"没有新闻材料"、不派那两个角色，
+ * 测试报"未送达" —— 而真相又是**这一轮没问它**。
+ */
+const REAL_NEWS_CONTEXT = [
+  '- [bullish] 现货 ETF 单日净流入创纪录',
+  '  来源：https://example.com/etf-inflow（已确认（2 个独立来源））',
+  '  3.2 小时前 · 多条独立来源一致',
+].join('\n');
+
 /** 假 router：记下每次实际发出的 system。 */
 function captureSystems(): { systems: string[]; model: ReturnType<typeof createTeamDecisionModel> } {
   const systems: string[] = [];
@@ -81,6 +96,12 @@ function captureSystems(): { systems: string[]; model: ReturnType<typeof createT
       },
     },
     singleModel: { complete: async () => ({ text: '', usage: {}, latencyMs: 0 }) },
+    /*
+     * ⚠️ **必须注入情报材料**，否则总管判 `hasNews === false`、
+     * 不派 `newscaster` / `sentiment` —— 那两个角色就测不到
+     *（我第一版把情报拼在 userPrompt 里，正是这个错）。
+     */
+    research: async () => ({ text: REAL_NEWS_CONTEXT, keys: [] }),
   } as never);
   return { systems, model };
 }
@@ -192,28 +213,37 @@ test('★★★ 「你没有工具」的说明必须仍然在（那是另一条�
   }
 });
 
-test('★★★ tradingDesk 问的角色里，哪些不在 ROLES —— 如实记录这个缺口', () => {
+test('★★★ 缺口已填：tradingDesk 问的每个角色都必须在 ROLES 里', () => {
   /*
-   * ⚠️ 这条**不是**断言"没有缺口"，而是把缺口**钉成可见的事实**。
+   * ## 这条测试的历史（它记录了一次真实的修复）
    *
-   * 现状：`tradingDesk` 问 10 个角色，其中 7 个（`judge` / `bull` / `bear` /
-   * `supervisor` / `technical` / `newscaster` / `sentiment`）**不在 `ROLES` 里** ——
-   * 它们没有系统提示词，只有 `tradingDesk` 里的内联 task 短句。
+   * 它原来断言的是**缺口存在**：
+   * ```
+   *   missing === ['bear','bull','judge','newscaster','sentiment','supervisor','technical']
+   *   （tradingDesk 问 10 个角色，其中 7 个不在 ROLES 里 → 没有系统提示词）
+   * ```
+   * 那条断言的作用是"**缺口数量变化必须被看见**"——
+   * 而 2026-10-15 补上那 7 个角色的提示词后，它**如预期地失败了**，
+   * 提示语正是「若是补上了提示词，请更新这份预期（那是好消息）」。
    *
-   * 所以"6/10 角色的提示词没送到"这个说法**不准确**：真相是
-   * **那 7 个角色根本没有提示词可送**（编制表不完整），
-   * 而 `ROLES` 里有的那几个，本次修复后已经能送达。
+   * 现在改成断言**缺口为空** —— 这才是最终想要的状态：
+   * ```
+   *   tradingDesk 问的每一个角色，都必须能在 ROLES 里查到 system
+   * ```
+   * 若将来有人加了一个新角色却忘了登记 `ROLES`，这条会红。
    *
-   * 一旦将来给它们补上 `ROLES` 条目，这条测试会失败 → 提示把下面这个数字改掉。
-   * 那正是我们要的：**缺口数量变化必须被看见**。
+   * ⚠️ 用"从源码反查"而不是手写清单 —— 手写清单会漂移（这个仓库付过代价）。
    */
   const code = DESK.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
   const asked = new Set([...code.matchAll(/role:\s*'([a-z_]+)'/g)].map((m) => m[1] as string));
+  assert.ok(asked.size >= 8, `★ 从 tradingDesk 只解析出 ${asked.size} 个角色，太少了`);
   const missing = [...asked].filter((r) => !(r in ROLES)).sort();
   assert.deepEqual(
     missing,
-    ['bear', 'bull', 'judge', 'newscaster', 'sentiment', 'supervisor', 'technical'],
-    '★ 不在 ROLES 里的角色集合变了 —— 若是补上了提示词，请更新这份预期（那是好消息）',
+    [],
+    `★ 这些角色被 tradingDesk 问、却不在 ROLES 里 —— 它们只有内联短句，没有系统提示词：\n` +
+      `   ${missing.join('、')}\n` +
+      `   给它们在 roles.ts / deskRoles.ts 里登记 system（或写清为什么不登记）。`,
   );
 });
 
