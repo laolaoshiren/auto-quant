@@ -350,6 +350,82 @@ for (const [route, label] of discovered) {
   await page.close();
 }
 
+/* --- 7. 团队模式看板（ai_team 机器人） ---------------------------------------
+ *
+ * ## 为什么需要这一段
+ *
+ * 上面的详情页检查用的是**第一条机器人**，而团队看板只在
+ * `mode === 'ai_team'` 时才渲染（见 `DecisionFeed.tsx` 的判据）——
+ * 于是"团队模式界面坏了"在原有巡检里**永远显示绿色**：
+ * 它检查的那个机器人根本不是团队模式。
+ *
+ * 这与本仓库反复出现的"判据区分不了目标与噪声"是同一类错误，
+ * 所以这里改成**按数据找**：用 API 列出机器人，挑第一个 ai_team 的去看。
+ *
+ * ⚠️ 判据落在**具体词**上，而不是"页面不空" ——
+ * 后者对上面 10 条路由已经做过了，对团队看板等于没测。
+ */
+{
+  const page = await context.newPage();
+  consoleErrors = [];
+  pageErrors = [];
+  attach(page);
+  try {
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    const listed = await page.evaluate(async () => {
+      const token = localStorage.getItem('aq.token') ?? '';
+      const response = await fetch('/api/traders', { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) return { error: `HTTP ${response.status}` };
+      const body = await response.json();
+      const rows = Array.isArray(body) ? body : (body.traders ?? []);
+      return { rows: rows.map((t) => ({ id: t.id, name: t.name, mode: t.mode })) };
+    });
+
+    if (listed.error) {
+      problem('团队模式看板', `列机器人失败：${listed.error}`);
+    } else {
+      const team = (listed.rows ?? []).find((t) => t.mode === 'ai_team');
+      if (!team) {
+        console.log('  · 没有 ai_team 机器人，跳过团队模式看板检查');
+      } else {
+        await page.goto(`${BASE_URL}/traders/${team.id}`, { waitUntil: 'networkidle', timeout: 25_000 });
+        await page.waitForTimeout(800);
+
+        const text = ((await page.locator('main, body').first().innerText().catch(() => '')) || '').replace(/\s/g, '');
+        const boxes = await page.evaluate(
+          () => Array.from(document.querySelectorAll('*')).filter((el) => el.getBoundingClientRect().height > 0).length,
+        );
+        const overflow = await page.evaluate(() => ({
+          scroll: document.documentElement.scrollWidth,
+          client: document.documentElement.clientWidth,
+        }));
+
+        const phases = ['派发', '并行分析', '多空辩论', '裁决', '风控把关', '风控'];
+        const hit = phases.filter((p) => text.includes(p));
+        const planned = (text.match(/规划中/g) ?? []).length;
+        const byCode = (text.match(/已由代码承担/g) ?? []).length;
+
+        console.log(
+          `  · 团队机器人 #${team.id}（${team.name ?? '未命名'}）：可见 ${text.length} 字 · 有尺寸容器 ${boxes} 个 · ` +
+            `命中阶段词 ${hit.length}/${phases.length} · 「规划中」${planned} 处 · 「已由代码承担」${byCode} 处`,
+        );
+
+        if (pageErrors.length > 0) problem('团队模式看板', `未捕获异常: ${pageErrors[0].slice(0, 120)}`);
+        else if (consoleErrors.length > 0) problem('团队模式看板', `控制台报错: ${consoleErrors[0].slice(0, 120)}`);
+        else if (text.length < 300) problem('团队模式看板', `可见文本只有 ${text.length} 字，看板可能没渲染`);
+        else if (hit.length < 3) problem('团队模式看板', `只命中 ${hit.length} 个阶段词（${hit.join('/')}）—— 团队看板结构可能变了`);
+        else if (overflow.scroll - overflow.client > 2) problem('团队模式看板', `出现横向滚动（${overflow.scroll} > ${overflow.client}）`);
+        else ok(`团队模式看板正常（#${team.id}，命中阶段词 ${hit.join('/')}）`);
+
+        await page.screenshot({ path: path.join(OUT_DIR, 'team-board.png'), fullPage: false });
+      }
+    }
+  } catch (error) {
+    problem('团队模式看板', error.message.split('\n')[0]);
+  }
+  await page.close();
+}
+
 /* -------------------------------------------------------------------------- */
 /*  结论                                                                       */
 /* -------------------------------------------------------------------------- */
