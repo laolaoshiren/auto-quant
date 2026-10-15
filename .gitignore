@@ -113,6 +113,9 @@ docs/research/vendor/
 # UI 冒烟检查生成的截图（scripts/ui-smoke.mjs）
 packages/web/ui-smoke/
 
+# UI 可见度审计生成的截图（scripts/ui-audit.mjs）
+packages/web/ui-audit/
+
 # 一次性的视觉方向对比页（给维护者看，不属于项目产物）
 _ui-directions.html
 

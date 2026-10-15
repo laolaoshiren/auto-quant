@@ -27,6 +27,7 @@
     "check:links": "node scripts/check-links.mjs",
     "check:routes": "node scripts/check-api-routes.mjs",
     "ui:smoke": "node scripts/ui-smoke.mjs",
+    "ui:audit": "node scripts/ui-audit.mjs",
     "ui:check": "node scripts/ui-check.mjs",
     "ui:consistent": "node scripts/ui-consistency.mjs",
     "demo": "tsx packages/server/src/scripts/demoCycle.ts",
