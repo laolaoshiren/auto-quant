@@ -5134,3 +5134,124 @@ Docker 镜像 (v0.1.33)→ success
   （例如"同一件事两处实现"的更广扫描、"注释与实现漂移"）
 
 累计关闭 **41 个**。
+
+---
+
+## 51. 第 45 轮：⚠️ 修好一个**名存实亡的类型守卫**（sim 17/18 → 18/18）、v0.1.34
+
+本轮无新 PR、无新 issue。发版前跑 `sim` 时发现 **17/18** —— 由此挖出两个真实缺陷。
+
+### 一、⚠️ 根因链（两层，都不明显）
+
+**第一层**：另一维护者的 `c8e821c fix(account)` 把 `buildEquitySnapshot` 改成 `async`，
+并新增 `this.deps.marketData.markPricesOf(...)` 调用。
+⚠️ 而 `sim` 用的回放桩 `ReplayMarketData` **没有这个方法** →
+`recordEquity` 整个抛错 → **权益快照一行都写不进去**（「0 个权益快照」）。
+
+**第二层（更重要）**：`ReplayMarketData` 文件末尾**本来就有**一个类型级断言：
+
+```ts
+type MissingFromReplay = Exclude<keyof MarketDataService, keyof ReplayMarketData>;
+export type ReplayMarketDataIsCompatible = MissingFromReplay extends never ? true : never;
+```
+
+注释还写明了它防的是什么（2026-10-01 曾因漏实现方法导致 `sim` 掉到 **6/18**）。
+
+⚠️ **但它从来没生效过** —— **一个类型别名不产生任何编译错误**，
+而 `ReplayMarketDataIsCompatible` 全仓**只有定义处**（我 grep 过）。
+
+⚠️ **这与本仓库反复出现的形态完全同族**：
+**工具造好了、注释写清了"它会拦住 X"，而它从没接上** ——
+于是所有人以为有防线，实际上没有。
+⚠️ 而且这次特别讽刺：**那条注释本身就在讲"一个永远不失败的校验会掩盖真正的回归"**。
+
+### 二、修法
+
+1. **补桩**：
+   - `markPricesOf()` → 返回**空 Map**（回放里没有"行情标记价"，返回"查不到"是正确语义）；
+   - `getKlines()` → ⚠️ **返回真实回放 K 线**（`this.visible()` 里就有）——
+     因为它被 `AutoTrader` 用来回答"那张挂单在等待期间会不会成交"，
+     **返回空会让那个检查静默失效**（它包在 `try/catch` 里，连日志都没有）。
+2. **让断言真的会失败**：`const _check: Missing extends never ? true : never = true;`
+
+### 三、⚠️ 改成真断言之后立刻发现"口径过严"
+
+全量 `keyof` 会要求回放桩实现：
+- `buildSnapshot`（单数）—— **内部实现细节**，只在 `service.ts` 内部被调用；
+- `screenUniverseRows` —— 由 `strategy/coins.ts` 调用，**不在 `AutoTrader` 的依赖面上**；
+- `switch` —— 我的提取正则误抓（它不是 `MarketDataService` 的方法）。
+
+⚠️ **要求回放桩实现"内部实现细节"是错的** —— 它只需满足**调用方的形状**。
+所以口径收窄成"**`AutoTrader` 实际调用的那 6 个**"。
+
+⚠️ 而我自己在这一步**又写错了一次**：
+`Exclude<AutoTraderMarketDataSurface, …>` **漏了 `keyof`** ——
+`Exclude` 作用于对象类型（非联合）时**原样返回 T**，于是断言恒不成立。
+⚠️ 是 `typecheck` 的 `TS2322` 把它抓出来的 —— **类型系统在这一轮既是被修的对象，也是发现工具**。
+
+### 四、验证
+
+```
+① 删掉 markPricesOf 的实现 → typecheck 报 TS2322 ✅
+   （⚠️ 修复前不会报 —— 那正是 17/18 的根因）
+② npm run sim → 全部 18 项校验通过 ✅
+```
+
+### 五、本轮另加的两条守卫（第 ⑤ 条闸门 + 文档可查证）
+
+- **`commitMessageGuard.test.ts`**：提交信息必须一行、且不得含站点信息。
+  ⚠️ 后者是**交叉盲区**：`pre-commit.sh` 扫提交**内容**、CI 也只看 diff 新增行 ——
+  **"在提交信息里写服务器地址"现有两道防线都拦不住**，而提交信息永久留在历史里。
+- **`docReferenceGuard.test.ts`** + **`docs/EXTERNAL-REFS.md`**：
+  注释里有 **9 种、27 处**形如 `B.14` 的编号引用，而**全仓（含所有 `.md`）都没有定义**
+  —— `llm/errors.ts:242` 自己写明出自 "the research document"，而那份文档**不在仓库里**。
+  ⚠️ 规则本身在代码里都有实现，**所以不是 bug，是可维护性问题**。
+  ⚠️ 发现过程本身又是"整族漏网"：我先只发现 `B.14`（8 处），守卫报出 **11 处**，
+  补完又报出 **3 处**，最终穷尽统计 **9 种 / 27 处**。
+  ⚠️ 修守卫时还发现 `docsText()` **用了只收 `.ts/.tsx` 的 `walk()`** ——
+  于是"文档里查到就算可查证"那条分支**永不成立**，守卫静默退化成"只看豁免名单"。
+
+⚠️ 两条守卫都带**反向检查**（名单/豁免不许腐化），且都做过**双向校准**。
+
+### 六、发版 v0.1.34
+
+```
+① main 全绿      typecheck / test(65+1787+287) / build / lint /
+                check:links / check:routes / sim 18/18 → 全 0
+② notices 一致   184 依赖全宽松，git diff 空
+③ tag v0.1.34    Docker 镜像构建 success
+④ 发布 release   isDraft=false
+⑤ 红线核实       v0.1.33..HEAD 【零提交触及 risk/engine.ts】
+```
+
+### 七、本轮验证
+
+```
+npm run typecheck   → 0
+npm test            → 65 + 1787 + 287，0 fail
+npm run build       → 0
+npm run lint        → 0
+npm run check:links → 0
+npm run check:routes→ 0
+npm run sim         → 18/18（修复前 17/18）
+Docker 镜像 (v0.1.34)→ success
+```
+
+### 八、⚠️ 本轮的方法论沉淀
+
+> **"类型断言"也是一种守卫，而它同样会名存实亡。**
+> `type X = ...` **不产生任何编译错误** —— 只有**被用在某个值上**才会。
+> 这与本仓库反复出现的"接线漏网"是同一族，只是发生在**类型层**：
+> 表达式写好了、注释写清了，而它**没有接到任何会失败的地方**。
+
+⚠️ 检查方法：**全仓 grep 那个类型名**。只有定义处 = 它从未生效。
+
+### 九、剩余
+
+- **等拍板 5 条**：#173 B 项、#184、`funnel` 接线、`clerk` 岗位、两处裸 fetch
+- ⚠️ 已记录未推进：`.env.example` 缺 `ALLOW_PRIVATE_LLM_HOSTS`；
+  `B.x` 编号的**内容**仍不公开（我只让它们"可查证"，没有替那份研究文档写内容）
+- **自驱下一步**：按"类型断言也会名存实亡"这条线索回扫
+  —— 全仓找**声明了但从未被使用的类型断言**
+
+累计关闭 **41 个**。
