@@ -45,6 +45,7 @@ import {
   type RosterState,
   type TeamStep,
 } from './roster';
+import { plainText } from '../../lib/plainText';
 
 /** 从状态得到圆点的样式（全部是真实存在的类，见 `roster.ts` 的对照表）。 */
 const DOT_CLASS: Record<RosterState, string> = {
@@ -302,7 +303,7 @@ export function TeamBoard({
             写"代码在跑"而不是"已由代码承担"，是因为这里回答的问题是"有没有人在干"。
           */}
           {byCode > 0 && (
-            <span className="text-accent" title={plain(STATE_HINT.by_code)}>
+            <span className="text-accent" title={plainText(STATE_HINT.by_code)}>
               代码在跑 {byCode}
             </span>
           )}
@@ -476,30 +477,6 @@ function DeptGroup({
 }
 
 /**
- * **把摘要里的 markdown 强调符号剥掉**（`**粗体**`）。
- *
- * ## 为什么（2026-10-15 用真实看板截图 + SSR 断言各抓到一次）
- *
- * 页面上原样显示着：
- * ```
- *   汇总多空论证，给出**唯一**结论（有权决定"不行动"）
- *   尽最大努力论证**做多**（并给出失效条件）
- * ```
- * 那些 `**` 是 `firm.ts` 的 `duty` 字段与 `roster.ts` 的 `STATE_HINT` 里
- * **写给模型/维护者看的强调标记**，而这里是给人看的纯文本、不是 markdown 渲染器 ——
- * 用户看到只会当成界面 bug。
- *
- * ⚠️ **只剥 `**`，不剥 `__`**：`__` 在技术文案里更可能是**标识符的一部分**
- *（模块名、字段名），误剥它会静默改掉一个可核对的事实 —— 那比漏剥更难发现。
- *
- * ⚠️ **也不引入 markdown 渲染器**：把可信文本渲染成 HTML 会开出一个注入面，
- * 为这点收益不值得。
- */
-function plain(text: string): string {
-  return text.replace(/\*\*/g, '');
-}
-
-/**
  * 一个岗位一行（可展开）。
  *
  * ## 折叠态回答的三个问题
@@ -551,7 +528,7 @@ function AgentRow({
      * 元信息一律 `shrink-0` —— 它们不该被产出挤掉（名字都没了就认不出这是谁）。
      */
     <div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-2 gap-y-0.5">
-      <span className="shrink-0 text-base font-medium leading-5 text-ink-hi" title={plain(role.duty)}>
+      <span className="shrink-0 text-base font-medium leading-5 text-ink-hi" title={plainText(role.duty)}>
         {role.label}
       </span>
       {/*
@@ -560,7 +537,7 @@ function AgentRow({
       */}
       <span
         className={`shrink-0 text-xs font-medium leading-5 ${STATE_TEXT_CLASS[state]}`}
-        title={plain(STATE_HINT[state])}
+        title={plainText(STATE_HINT[state])}
       >
         {STATE_LABEL[state]}
       </span>
@@ -586,14 +563,14 @@ function AgentRow({
           */}
           <span
             className="line-clamp-2 min-w-0 flex-1 basis-[14rem] text-xs leading-5 text-ink-mid"
-            title={`${plain(latest.message)}\n\n职责：${plain(role.duty)}`}
+            title={`${plainText(latest.message)}\n\n职责：${plainText(role.duty)}`}
           >
             {latest.phase !== null && PHASE_LABEL[latest.phase] !== undefined && (
               <span className="mr-1 rounded bg-base-800 px-1 text-[11px] text-ink-lo">
                 {PHASE_LABEL[latest.phase]}
               </span>
             )}
-            {plain(latest.message)}
+            {plainText(latest.message)}
           </span>
           <span className="num shrink-0 text-[11px] leading-5 tabular-nums text-ink-faint">{clock(latest.at)}</span>
         </>
@@ -623,9 +600,9 @@ function AgentRow({
         role.carriedBy !== undefined && (
           <span
             className="line-clamp-2 min-w-0 flex-1 basis-[14rem] text-[11px] leading-5 text-accent"
-            title={`这个职能由确定性代码承担，没有模型出勤：${plain(role.carriedBy)}`}
+            title={`这个职能由确定性代码承担，没有模型出勤：${plainText(role.carriedBy)}`}
           >
-            由代码承担：{plain(role.carriedBy)}
+            由代码承担：{plainText(role.carriedBy)}
           </span>
         )
       ) : (
@@ -721,7 +698,7 @@ function AgentRow({
           */}
           <p className="mb-1.5 text-xs leading-5 text-ink-lo">
             <span className="text-ink-faint">职责：</span>
-            {plain(role.duty)}
+            {plainText(role.duty)}
           </p>
           <ol className="space-y-1">
             {steps.map((s, index) => (

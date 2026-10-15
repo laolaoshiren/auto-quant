@@ -51,6 +51,7 @@ import { api } from '../../lib/api';
 import { fmtPriceUsd, fmtUsd, timeAgo } from '../../lib/format';
 import { ActionBadge, statusLabel } from '../DecisionAudit';
 import { parseTeamTrace, type TeamMemberOutput } from '../../lib/teamTrace';
+import { plainText } from '../../lib/plainText';
 import { INK, SURFACE } from './roster';
 
 /* -------------------------------------------------------------------------- */
@@ -216,7 +217,7 @@ export function TeamDecisionRow({
       {/* ② 依据摘要 —— 允许折行，**不给它设固定列宽**（历史上有三轮溢出 bug 都源于此） */}
       {decision.reasoning && (
         <p className="mt-1 min-w-0 break-words text-xs leading-relaxed text-ink-mid">
-          {decision.reasoning}
+          {plainText(decision.reasoning)}
         </p>
       )}
 

@@ -164,6 +164,7 @@ import { usePolled } from '../lib/hooks';
 import { Badge, Empty, Panel, Spinner3, cn } from './ui';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
 import { summarizeMemberOutput } from '../lib/memberSummary';
+import { plainText } from '../lib/plainText';
 import { fmtInt, fmtLatency, fmtPriceUsd, fmtQty, fmtUsd, isNum, timeAgo } from '../lib/format';
 
 /**
@@ -2258,7 +2259,7 @@ function DecisionRow({
         <div className="mt-0.5 flex min-w-0 items-start gap-1.5 pl-5">
           {/* `shrink-0` + `mt-[3px]`：图标不能被文字挤扁，也要和第一行文字的视觉中线对齐。 */}
           <FileText aria-hidden className="mt-[3px] h-3.5 w-3.5 shrink-0 text-ink-lo" />
-          <p className="min-w-0 break-words text-xs leading-relaxed text-ink-mid">{decision.reasoning}</p>
+          <p className="min-w-0 break-words text-xs leading-relaxed text-ink-mid">{plainText(decision.reasoning)}</p>
         </div>
       )}
 

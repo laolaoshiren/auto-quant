@@ -35,6 +35,7 @@ import { useState } from 'react';
 import { api, type AgentAudit } from '../lib/api';
 import { fmtSigned, pnlColor } from '../lib/format';
 import { usePolled } from '../lib/hooks';
+import { plainText } from '../lib/plainText';
 import { Panel } from './ui';
 
 /** 把 ISO 时刻显示成 `MM-DD HH:MM`。 */
@@ -227,7 +228,7 @@ export function AgentAuditPanel({ traderId }: { traderId: number }): React.React
                         </span>
                       )}
                     </div>
-                    <div className="mt-0.5 text-xs text-ink-soft">{e.reason}</div>
+                    <div className="mt-0.5 text-xs text-ink-soft">{plainText(e.reason)}</div>
                   </li>
                 ))}
               </ul>
