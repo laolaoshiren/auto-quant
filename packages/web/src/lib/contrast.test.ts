@@ -353,3 +353,134 @@ test('★★★ console 的 ink-mid（三级一组里的最高一级）也必须
       '否则这条测的不是"最高那一级"',
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  ⑥ ★★★ 集合守卫：**每一个** ink 层级都必须有"达标"断言                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ⚠️ **这是"同型漏网"的元测试** —— 它不测某个颜色，它测"**这一组有没有被完整守住**"。
+ *
+ * ## 为什么需要它（两轮漏网的教训）
+ *
+ * | 轮次 | 组 | 被守住 | **漏网** |
+ * | --- | --- | --- | --- |
+ * | v0.1.22 | `modelsDev` 的 `X ? X : null` | `toolCall`、`canonicalId` | **`structuredOutput`** |
+ * | v0.1.23 | console 文字三级 | `lo`、`faint` | **`mid`** |
+ *
+ * 两次都**不是"字段没人管"**，而是"**设计上是一组、测试只守了其中一部分**"。
+ * 补上漏掉的那一个**并不能防止下一次**：有人加第六级、或者给某个主题加新层级时，
+ * 还会漏。所以真正可复用的修法是 —— **钉住"这一组有哪些成员"**。
+ *
+ * ## 判据
+ *
+ * 从 CSS 里解析出**每个主题每个色块**声明的 ink 层级集合，断言：
+ * 1. 该集合**非空**（解析没失效）；
+ * 2. 每一个层级名都**在本文件里被 `contrast(...)` 断言过**（用源码文本检查）。
+ *
+ * ⚠️ 第 2 条用**源码文本检查**而不是运行时值 —— 因为要验的是
+ * "**有没有人为这一级写过断言**"，那是**测试自身的覆盖面**，不是颜色值。
+ * 这与 `configWiringGuard.test.ts` 的"每个配置字段都有读取点"是同一个思路。
+ *
+ * ⚠️ **`ink-strong` / `ink` 不要求达标**：它们是正文与强调文字（对比度天然很高），
+ * 而这条守卫针对的是"**辅助文字**"那一组 —— 所以豁免名单要**显式列出并写明理由**，
+ * 不是默默跳过。
+ */
+test('★★★ 每一个 ink 层级都必须有对比度断言 —— 防止再漏一级（同型漏网的元测试）', () => {
+  /**
+   * 不做达标断言、但**显式豁免**的层级（附理由）。
+   *
+   * ⚠️ 键是 **`主题.层级`**（与下面 `missing` 的格式一致），**不是**光一个层级名 ——
+   * 光用层级名的话，将来某个主题新加一个**生效的** `ink-muted` 会被静默豁免掉，
+   * 而那正是这条守卫要防的事。
+   */
+  const EXEMPT: ReadonlyMap<string, string> = new Map([
+    ['classic.ink-strong', '强调文字，对比度天然很高（18.7）—— 不在"辅助文字"这一组里'],
+    ['classic.ink', '正文色，对比度天然很高（15.6）—— 同上'],
+    ['classic.ink-soft', '别名（`var(--aq-ink-mid)`），与 ink-mid 同值 —— 由 ink-mid 那条覆盖'],
+    ['console.ink-strong', '同 classic：强调文字，对比度天然很高（14.8）'],
+    ['console.ink', '同 classic：正文色（12.6）'],
+    /*
+     * ⚠️ console 的**旧命名**（`ink-muted` / `ink-dim`）—— 在同一选择器里
+     * 定义得**更靠后的是新命名**（`ink-mid` / `ink-lo`），所以**旧命名不生效**。
+     *
+     * 它们不需要"达标"断言（值根本用不上），但**必须**有"与新命名同值"的断言。
+     * ⚠️ 豁免的是"**达标**断言"，**不是**"一致性断言" —— 后者仍由
+     * "两套命名必须一致"那条守着（见下面那条 ★★ 用例）。
+     */
+    ['console.ink-muted', '旧命名（不生效，新命名 ink-mid 覆盖）—— 由"两套命名同值"那条覆盖'],
+    ['console.ink-dim', '旧命名（不生效，新命名 ink-lo 覆盖）—— 同上'],
+    ['quill.ink-strong', '同 classic：强调文字（15.7）'],
+    ['quill.ink', '同 classic：正文色（13.4）'],
+    ['quill.ink-soft', '别名（`var(--aq-ink-mid)`）—— 由 ink-mid 那条覆盖'],
+  ]);
+
+  const self = readFileSync(new URL('./contrast.test.ts', import.meta.url), 'utf8');
+  /*
+   * ⚠️ 剥掉注释再找断言 —— 本文件顶部就引用了大量 token 名（含那些漏网的例子），
+   * 不剥会让"注释里提过"被当成"断言过"。
+   */
+  const selfCode = self
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      return !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*');
+    })
+    .join('\n');
+
+  const themes: Array<[string, string]> = [
+    ['classic', INDEX],
+    ['console', CONSOLE],
+    ['quill', QUILL],
+  ];
+
+  const missing: string[] = [];
+  let checked = 0;
+
+  for (const [theme, css] of themes) {
+    /* 该主题声明的全部 ink 层级（去重）。 */
+    const levels = new Set<string>();
+    for (const m of css.matchAll(/--aq-(ink(?:-[a-z]+)?):\s*#[0-9a-fA-F]{6}/g)) {
+      levels.add(m[1]!);
+    }
+
+    /* 前置断言：每个主题都要解析出若干层级。 */
+    assert.ok(
+      levels.size >= 3,
+      `★ ${theme} 只解析出 ${levels.size} 个 ink 层级 —— 解析可能失效了`,
+    );
+
+    for (const level of levels) {
+      const key = `${theme}.${level}`;
+      if (EXEMPT.has(key)) continue;
+      checked += 1;
+      /*
+       * ⚠️ 判据：**这个层级名必须出现在某条 `contrast(...)` 断言里**。
+       * 用"该 token 名 + contrast"同现来判定，而不是只找 token 名 ——
+       * 因为 `theme.css` 的注释、以及"层级顺序"那条用例都会提到 token 名，
+       * 而**提到 ≠ 断言达标**（`ink-mid` 就是这样漏掉的）。
+       */
+      const asserted = new RegExp(`contrast\\(\\s*${level.replace('-', '\\-')}\\b`).test(selfCode)
+        /* 也接受"先取进变量、再断言变量"的写法（本文件的常见写法）。 */
+        || new RegExp(`const\\s+\\w+\\s*=\\s*[^;]*--aq-${level}:`).test(selfCode);
+      if (!asserted) missing.push(`${theme}.${level}`);
+    }
+  }
+
+  /* 第二个前置断言：必须真的检查到若干项。 */
+  assert.ok(
+    checked >= 8,
+    `★ 只检查到 ${checked} 个"辅助文字层级" —— 解析可能不完整`,
+  );
+
+  assert.deepEqual(
+    missing,
+    [],
+    '★★★ 这些 ink 层级**没有任何"达标"断言**：\n' +
+      missing.map((m) => `      · ${m}`).join('\n') +
+      '\n    ⚠️ 这是"同型漏网"：设计上它们是一组（辅助文字），而测试只守了其中一部分。\n' +
+      '    已经发生过两次（`structuredOutput`、`ink-mid`）——\n' +
+      '    **补一个不够，要钉住这一组。**\n' +
+      '    ✅ 若某级确实不该做达标断言，请加进 `EXEMPT` 并**写明理由**。',
+  );
+});
