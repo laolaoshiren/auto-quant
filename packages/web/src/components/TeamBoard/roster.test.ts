@@ -18,7 +18,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { FIRM_ROLES, firmRoleOf, type FirmRole } from '@aq/shared';
-import { clock, rosterEntries, stateOfLastStep, type TeamStep } from './roster.js';
+import {
+  STATE_HINT,
+  STATE_LABEL,
+  clock,
+  rosterEntries,
+  stateOfLastStep,
+  type TeamStep,
+} from './roster.js';
 
 /** 造一条 `cycle_step`。 */
 function step(role: string | null, message: string, phase?: string, level = 'info'): TeamStep {
@@ -105,9 +112,84 @@ test('★★★ 规划中的岗位必须与「在岗但本轮未参与」分开�
 test('★ 编制表里**每个**已实现岗位在没参与时都是 idle，不是 planned', () => {
   const entries = rosterEntries([], FIRM_ROLES);
   for (const entry of entries) {
-    const expected = entry.role.status === 'planned' ? 'planned' : 'idle';
+    /*
+     * ⚠️ 期望值写的是**三态映射**，不是 `planned ? planned : idle` 那个双分支。
+     * 双分支正是 2026-10-15 之前的样子：`firm.ts` 新增 `by_code` 之后，
+     * 新状态会静默落进 `idle`，于是"数据看门狗"被渲染成"在岗/待命/最近活跃" ——
+     * 全是模型出勤的措辞，而它没有模型。这条断言把映射表钉成它应有的形状。
+     */
+    const expected =
+      entry.role.status === 'planned'
+        ? 'planned'
+        : entry.role.status === 'by_code'
+          ? 'by_code'
+          : 'idle';
     assert.equal(entry.state, expected, `${entry.role.id} 的状态应当是 ${expected}`);
   }
+});
+
+test('★★★ 已由代码承担的岗位不得落进"规划中"，也不得落进"在岗"（判据探针）', () => {
+  /*
+   * ## 这个测试防的是什么
+   *
+   * `docs/FINDING-planned-roles-audit.md` §4 ④：`data_sentinel` / `ops_watchdog`
+   * 的职责已经在跑（`/api/health` 的 `staleTraders`、`selfcheck.ts` 每 30 分钟），
+   * 界面却写"规划中" —— **那是一种说谎**。改成 `staffed` 同样是说谎（会让操作员
+   * 以为有模型在盯着，实际是确定性查询）。
+   *
+   * ## 为什么要有"探针"那一半
+   *
+   * `docs/FINDING-clerk-unwired.md` 的 2026-10-14 补充记了一条关键教训：
+   * 那位维护者的**第一版守卫判据本身是错的**，把实际被调用的两个角色误报成死角色。
+   * 所以"守卫要能真的抓到东西"必须**用一个确定会失败的反例校准**。
+   * 这里用两个方向做校准：
+   *   ① 真正没实现的 `community_monitor` 必须仍然是 `planned`（不能全被改成 by_code）；
+   *   ② 在岗但本轮没参与的 `bull` 必须仍然是 `idle`（by_code 不能污染它）。
+   */
+  const entries = rosterEntries([step('technical', '完成', 'analysis')], FIRM_ROLES);
+
+  for (const id of ['data_sentinel', 'ops_watchdog']) {
+    const entry = entries.find((e) => e.role.id === id);
+    assert.ok(entry !== undefined, `★ 找不到岗位 ${id}`);
+    assert.equal(entry.state, 'by_code', `★ ${id} 的职责在跑（确定性代码承担）—— 不能是 ${entry.state}`);
+    assert.notEqual(entry.state, 'planned', `★ ${id} 显示"规划中"就是在说谎`);
+    assert.notEqual(entry.state, 'idle', `★ ${id} 没有模型出勤 —— "在岗/待命"是模型出勤的措辞`);
+  }
+
+  /* 探针 ①：真正没实现的岗位必须仍然是 planned。 */
+  assert.equal(
+    entries.find((e) => e.role.id === 'community_monitor')?.state,
+    'planned',
+    '★★ 社区监控确实还没做 —— 它必须仍然显示"规划中"',
+  );
+  /* 探针 ②：在岗但本轮没参与的模型岗位仍然是 idle。 */
+  assert.equal(
+    entries.find((e) => e.role.id === 'bull')?.state,
+    'idle',
+    '★★ 多头研究员已实现、本轮没叫它 —— 它必须仍然是"在岗未参与"',
+  );
+
+  /* 探针 ③（判据校准）：人造一个**不存在的**状态，断言它不会被算成 by_code。 */
+  const fake: FirmRole = { ...firmRoleOf('bull')!, status: 'some_unknown_status' as FirmRole['status'] };
+  assert.notEqual(
+    rosterEntries([], [fake])[0]!.state,
+    'by_code',
+    '★★ 判据必须能区分"真的 by_code"与"随便一个状态值" —— 否则上面那些断言是空转',
+  );
+});
+
+test('★ 状态词必须唯一：不能有两个状态渲染成同一句话', () => {
+  /*
+   * `by_code`（职责在跑、没有模型）与 `planned`（还没实现）是**相反**的结论。
+   * 若它们的文案碰撞，界面上就再也分不出"这个职能在跑"与"这个职能没做" ——
+   * 而这正是这次改动要修的那个谎。颜色可以相近，**字必须不同**。
+   */
+  const labels = Object.values(STATE_LABEL);
+  assert.equal(new Set(labels).size, labels.length, `★ 状态词有重复：${labels.join('、')}`);
+  assert.notEqual(STATE_LABEL.by_code, STATE_LABEL.planned, '★★ "代码在跑"与"规划中"不能同词');
+  assert.notEqual(STATE_LABEL.by_code, STATE_LABEL.idle, '★★ "代码在跑"不能与"在岗"同词');
+  assert.ok(STATE_HINT.by_code.includes('没有'), '★ by_code 的说明要点明"没有模型出勤"');
+  assert.ok(STATE_HINT.planned.includes('还没有实现'), '★ planned 的说明要点明"还没实现"');
 });
 
 /* -------------------------------------------------------------------------- */

@@ -96,3 +96,52 @@ test('★★★ 角色 id 必须唯一（重复 id 会让界面上两个位置�
   const ids = FIRM_ROLES.map((r) => r.id);
   assert.equal(new Set(ids).size, ids.length, `★ 有重复的角色 id：${ids.join(', ')}`);
 });
+
+/* -------------------------------------------------------------------------- */
+/*  第四处：实现状态（2026-10-15 新增 —— 这一格原来没人看）                        */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 岗位的实现状态分布（14 在岗 / 2 已由代码承担 / 5 规划中）', () => {
+  /*
+   * ## 为什么必须有这条
+   *
+   * 本文件开头记的事故是「我搜的地方不对，而我以为搜过了」——
+   * 那时能查的只有"岗位存不存在"与 `system_engineer` 一个特例。
+   * 2026-10-15 的审计（`docs/FINDING-planned-roles-audit.md`）发现**同一类错误还有第三种**：
+   * `data_sentinel` / `ops_watchdog` 的职责一直在跑，却标着 `planned` ——
+   * 界面于是显示"规划中"，而实际在跑。**那是一种说谎**（§4 ④ 的原话）。
+   *
+   * 所以这里把**实现状态的分布**也钉住：
+   * ```
+   *   14 在岗（有模型在承担）      ← 本轮参与由前端算，这里只看"有没有承担者"
+   *    2 已由代码承担（by_code）   ← data_sentinel / ops_watchdog，没有 LLM 出勤
+   *    5 规划中（真没做）          ← onchain_analyst / community_monitor / red_team
+   *                                 / portfolio_manager / clerk
+   * → 21 个岗位
+   * ```
+   *
+   * ⚠️ **它防的是"顺手改"的两个方向**：
+   *   · 把还没做的岗位标成在岗（让操作员以为有人管）→ 计数变了，红；
+   *   · 把 `by_code` 的两个改回 planned 或改成 staffed（复现原来的谎）→ 计数变了，红。
+   *   · 还有人**删掉一个岗位**（把 21 变 20）：别的测试各自只数自己那一类，
+   *     分布断言会同时抓住它。
+   */
+  const count = (s: 'staffed' | 'by_code' | 'planned'): number =>
+    FIRM_ROLES.filter((r) => r.status === s).length;
+
+  assert.equal(FIRM_ROLES.length, 21, '★ 岗位总数变了 —— 请确认是加/删岗位，并同步这条期望');
+  assert.deepEqual(
+    { staffed: count('staffed'), by_code: count('by_code'), planned: count('planned') },
+    { staffed: 14, by_code: 2, planned: 5 },
+    '★ 实现状态分布变了 —— 那是"谁在干活"的诚实清单，改它要同步 firm.ts 与这条期望',
+  );
+
+  /* 两个 by_code 必须**是**那两个（分布一样而成员不同也算漂移）。 */
+  assert.deepEqual(
+    FIRM_ROLES.filter((r) => r.status === 'by_code')
+      .map((r) => r.id)
+      .sort(),
+    ['data_sentinel', 'ops_watchdog'],
+    '★ by_code 的成员变了 —— 见 firmStatus.test.ts 里"carriedBy 指向的代码真的存在"那条',
+  );
+});

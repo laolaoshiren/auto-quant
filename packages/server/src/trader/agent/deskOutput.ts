@@ -45,18 +45,113 @@ export interface ExtractedDecisions {
   /**
    * 抽到的原因。
    *
-   * 三种情况必须区分（混在一起会让"模型没给决策"和"格式写错了"看起来一样）：
-   *   · `ok`        —— 正常抽到数组
-   *   · `no-block`  —— 文本里根本没有 JSON 数组（模型可能只写了散文）
-   *   · `bad-json`  —— 有像数组的片段但 JSON 解析失败
+   * 五种状态**各说一件事**（混在一起会让"模型判断不做"与"系统故障"看起来一样）：
+   *   · `ok`             —— 抽到数组，且每个元素都是带 `action` 的决策
+   *   · `empty`          —— 抽到 `[]` —— **这是合法结论**（模型明确说"不行动"），不是故障
+   *   · `not-decisions`  —— 解析出数组了，但它**不是决策数组**（见 `looksLikeDecision`）
+   *   · `no-block`       —— 文本里根本没有 `[`（模型只写了散文，或这一轮没产出）
+   *   · `bad-json`       —— 有未闭合的 `[`，或片段解析失败（可能是被截断）
+   *
+   * ⚠️ `not-decisions` / `empty` / `ok` 由 `extractDecisionArray` 产出；
+   * 通用的 `extractFirstJsonArray` 只会给 `ok` / `empty` / `no-block` / `bad-json`
+   *（它不知道"什么算决策"）。
    */
-  status: 'ok' | 'no-block' | 'bad-json';
-  /** `bad-json` 时的原始片段（截断，供排查）。 */
+  status: 'ok' | 'empty' | 'not-decisions' | 'no-block' | 'bad-json';
+  /** `bad-json` / `not-decisions` 时的原始片段（截断，供排查）。 */
   snippet?: string;
 }
 
 /**
- * 从任意文本里抽出**第一个 JSON 数组**。
+ * **这个数组看起来是不是"决策数组"** —— 判据只有一个：元素带 `action`。
+ *
+ * ## 为什么必须有这一条（2026-10-15，线上 `c192` 实测）
+ *
+ * ```
+ *   id=2761 · cycle=192 · decisions_json=[]
+ *   raw_response:  <decision>
+ *                  [-1]                                  ← 进了交易循环
+ *                  </decision>
+ * ```
+ *
+ * 而那个 `[-1]` **不是模型给的决策** —— 它是裁决官在推理里写的
+ * `close[-1]`（"最后一根收盘价"）被 `extractFirstJsonArray` 当成数组抓走了。
+ *
+ * 后果不在安全面（`strategy/parser.ts` 会拒掉这种元素，本轮仍然不行动），
+ * 而在**审计面**：汇报员拿着 `[-1]` 写出
+ * 「本轮团队唯一一条决策不带 action 字段……需操作员核实是否漏发动作」——
+ * **一条假告警，而操作员无从核实**（模型从来没给过那个"决策"）。
+ * 审计块唯一的作用就是"事后说清当时为什么这么做"，它不能自己造假线索。
+ *
+ * ⚠️ 全库统计：286 轮里只出现 1 次。但判据是**纯形态**的
+ *（推理里凡有 `xxx[-1]` / `[0]` / `[-6]` 这类下标写法都可能被抓），
+ * 而裁决官的推理里大量使用这种写法 —— 所以必须在这一层挡住。
+ *
+ * ⚠️ 判据刻意**只看形态、不看语义**：带 `action` 就交给下游
+ *（`strategy/parser.ts` 才是做语义校验的那一层：action 枚举、候选集、止损方向…）。
+ * 在这里顺手做语义校验会变成"两处各有一份校验规则"，而那正是本仓库反复踩过的坑。
+ */
+export function looksLikeDecision(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && 'action' in value;
+}
+
+/**
+ * **裁决文本 → 决策数组**（在通用抽取器之上加一层"这是不是决策"的形态判据）。
+ *
+ * ## 为什么不把形态判据写进 `extractFirstJsonArray`（我第一版就是这么写的，被测试打回）
+ *
+ * `extractFirstJsonArray` 的契约是**通用的**："从任意文本里抽出第一个 JSON 数组"。
+ * 现有测试钉着它，而且钉得有道理：
+ * ```
+ *   '[{"a":1},"多余的"]'                        → 依然是"抽到了数组"（ok）
+ *   '[{"symbol":"BTC","levels":[1,2,3]}]'       → 依然是"抽到了数组"（ok）
+ * ```
+ * 把"元素必须带 action"塞进去，会让这两个用例里 `status` 从 `ok` 变成别的 ——
+ * 也就是**改了一个通用函数的语义去服务一个专用调用点**。实测代价：9 个既有用例变红。
+ *
+ * ## 所以分层：通用抽取归通用，"这是不是决策"归这里
+ *
+ * ```
+ *   extractFirstJsonArray(text)  → 找到了吗？是不是坏 JSON？      （原样不动）
+ *   extractDecisionArray(text)   → 再问一句：它是不是【决策】数组？（本函数）
+ * ```
+ * 而这一层**只被裁决/决策的消费方用**（`renderDeskOutcome`）。
+ * ⚠️ 反过来，`askRiskOfficer` 用通用抽取器也**不会**出事 ——
+ * 它拿 `not-decisions` 之外的东西时 `decisions.length === 0`，直接跳过风控官，
+ * 结果与用本函数一致（都是"没决策、不叫风控官"）。
+ *
+ * ## 五种状态各说一件事（`empty` 与 `not-decisions` 是这次新增的两种）
+ *
+ * ```
+ *   ok             抽到真决策数组
+ *   empty          抽到 [] —— 模型明确"不行动"（合法结论，不是故障）
+ *   not-decisions  抽到了数组，但它不是决策（见上面 c192 的 [-1]）
+ *   no-block       压根没有数组
+ *   bad-json       有未闭合的 [ 或解析失败 —— 确凿的截断
+ * ```
+ */
+export function extractDecisionArray(text: string): ExtractedDecisions {
+  const base = extractFirstJsonArray(text);
+  if (base.status !== 'ok') {
+    /*
+     * ⚠️ `empty` 原样透传 —— 那是**合法结论**，绝不能与 `no-block` 混成一句
+     *（混了以后"模型说这轮不做"和"模型没给数组"在审计块里长得一样）。
+     */
+    return base;
+  }
+  const decisions = base.decisions ?? [];
+  /* 空数组由 `extractFirstJsonArray` 直接返回 `empty`，这里只需判"是不是决策"。 */
+  if (decisions.some((d) => !looksLikeDecision(d))) {
+    return {
+      decisions: null,
+      status: 'not-decisions',
+      snippet: JSON.stringify(decisions).slice(0, 200),
+    };
+  }
+  return { decisions, status: 'ok' };
+}
+
+/**
+ * 从任意文本里抽出**第一个 JSON 数组**（**通用**函数，不做"这是不是决策"的判断）。
  *
  * ## 为什么要自己扫括号而不是正则
  *
@@ -66,6 +161,15 @@ export interface ExtractedDecisions {
  *
  * 所以扫括号计数，且**跳过字符串内部的括号** —— 否则 `{"reasoning":"买[入]点"}`
  * 会让计数错位。
+ *
+ * ⚠️ **抽的是第一个平衡数组，不是最后一个** —— 这一条是实测定的，别顺手改（2026-10-15）：
+ * 裁决官的输出常被 4,000 字 clip 截断，而**推理里最后那个 `[` 往往是未闭合的
+ * `close[-1]` / `[` 残片**。我对着线上 `#11` 的**全部 287 条**记录量过两种策略：
+ * ```
+ *   改成"最后一个可解析数组" → 会改坏 **112 轮**
+ *     （把 6 条真决策读成 `close[-1]` 那 1 条残片；而"救回来"的轮次是 0）
+ * ```
+ * ⇒ "第一个"不是随手写的，是量过之后的选择。
  */
 export function extractFirstJsonArray(text: string): ExtractedDecisions {
   const start = text.indexOf('[');
@@ -97,7 +201,24 @@ export function extractFirstJsonArray(text: string): ExtractedDecisions {
         const slice = text.slice(start, i + 1);
         try {
           const parsed: unknown = JSON.parse(slice);
-          return Array.isArray(parsed) ? { decisions: parsed, status: 'ok' } : { decisions: null, status: 'bad-json', snippet: slice.slice(0, 200) };
+          if (!Array.isArray(parsed)) {
+            return { decisions: null, status: 'bad-json', snippet: slice.slice(0, 200) };
+          }
+          /*
+           * ⚠️ **空数组是合法结论** —— 它必须与"没抽到"分开报（2026-10-15）。
+           *
+           * 模型写 `[]` 的意思是"这一轮不行动"，而 `decisions: []` 与
+           * `decisions: null` 在调用方是**两种不同的分支**：
+           * ```
+           *   []     → 评过了，结论是不做（与"全是 skip"同源）
+           *   null   → 根本没抽到 —— 要报"这一轮是格式/预算问题"
+           * ```
+           * 两者原来都返回 `ok` + `[]`，于是渲染层**没有告警** ——
+           * 而"模型给了空数组"与"模型没给数组"混在一起时，
+           * 审计块无法回答"这一轮到底是有意不做，还是输出坏了"。
+           */
+          if (parsed.length === 0) return { decisions: [], status: 'empty' };
+          return { decisions: parsed, status: 'ok' };
         } catch {
           return { decisions: null, status: 'bad-json', snippet: slice.slice(0, 200) };
         }
@@ -182,7 +303,14 @@ export function renderDeskOutcome(
   extra?: { skipReason?: 'all_non_action' | 'call_failed' | 'not_enabled' | null },
 ): string {
   const verdict = outcome.verdict;
-  const extracted = verdict?.ok === true ? extractFirstJsonArray(verdict.raw) : { decisions: null, status: 'no-block' as const };
+  /*
+   * ⚠️ **决策消费方用 `extractDecisionArray`**（带"这是不是决策"的形态判据）——
+   * 而通用的 `extractFirstJsonArray` 保持原契约不变。见 `extractDecisionArray` 的说明。
+   */
+  const extracted =
+    verdict?.ok === true
+      ? extractDecisionArray(verdict.raw)
+      : { decisions: null, status: 'no-block' as const };
   /*
    * ⚠️ **"为什么没审"要自己推出来，不能等调用方传**（2026-10-15）。
    *
@@ -372,17 +500,151 @@ export function renderDeskOutcome(
   if (outcome.truncatedByBudget) {
     lines.push('⚠️ 本轮因预算/轮次上限提前收尾 —— 结论是在受限条件下得出的。');
   }
-  if (extracted.status !== 'ok') {
+  if (extracted.status !== 'ok' && extracted.status !== 'empty') {
     /*
-     * ⚠️ **失败要说清楚是哪一种失败**，不能只说"没有决策"。
-     * `no-block`（模型没给 JSON）与 `bad-json`（给了但写坏了）是两个不同的问题，
-     * 对应的修法也不同（前者要改提示词，后者可能是 token 被截断）。
+     * ══════════════════════════════════════════════════════════════════════════
+     * ⚠️⚠️ **失败必须【分级说】—— 一句"可能被截断"把 70 条说成了系统故障**
+     *     （2026-10-15，用当前抽取器对线上 108 条空决策逐条重放实测）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 实测分布（`#11`，108 条空决策，按"当前抽取器在 clip 文本上的状态"）
+     * ```
+     *   no-block         70 条（65%）← 裁决官全程没写 `[`
+     *                     · 其中 62 条：它以散文明确说"不行动"（是【判断】）
+     *                     · 其中  8 条：它根本没有产出（网关/冷却）（是【故障】）
+     *   ok               19 条（18%）← 抽到了真数组，是被旧版风控官解析误判清空的
+     *                     （已由 `6bf004f` 修，`riskLiveText.test.ts` 钉住）
+     *   bad-json（未闭合）5 条（ 5%）← **这才是真截断**
+     *   not-decisions     1 条（ 1%）← 抓错数组（`c192` 的 `[-1]`）
+     *   （另 5 条 `clipped_ok`：数组在 4,000 字 clip 之后，全量里其实抽得到 → 不算故障）
+     * ```
+     * ⇒ **"judge 的 JSON 被截断"在这个账号上只有 5 条（4.6%）**，
+     *   而任务描述里的前提（把 107 条都当成截断）不成立。
+     *
+     * ## 原来的文案错在哪
+     *
+     * ```
+     *   no-block → ⚠️ 裁决里没有找到 JSON 数组 —— 模型可能只写了散文。
+     *   bad-json → ⚠️ 裁决里的 JSON 解析失败（可能被截断）—— 片段：…
+     * ```
+     * ⚠️ 注意：这**不是**"两种失败说成一种" —— 文案本来就分了两句。错的是**方向**：
+     * ```
+     *   ✗ 把【判断】说成【故障】：no-block 那句的"模型可能只写了散文"太轻，
+     *     操作员读完不知道"这一轮到底是有意不做，还是输出坏了"；
+     *   ✗ 把【故障】混进【判断】：70 条 no-block 里那 8 条"裁决官没产出"
+     *     （`Cannot reach custom: fetch failed` / 档位冷却）与 62 条"主动说不做"
+     *     长得**一模一样**，而前者要查网关、后者什么都不用查。
+     * ```
+     * 于是操作员看到的是：**85% 的非空失败轮都不会被告知"该不该去查"**。
+     *
+     * ⚠️ 本仓库对此有明确纪律（`docs/AGENTS.md` §3.2 / §5.1）：
+     * **"一份说错了的文档比没有文档更糟"**。审计块就是那份文档。
+     *
+     * ## 现在四种失败各说各的事实
+     *
+     * ```
+     *   not-decisions  解析出了数组，但它不是决策数组（推理里的下标片段）
+     *   bad-json       有未闭合的 `[` → 确凿的截断 / 解析失败
+     *   no-block+有产出 裁决官以散文给出"不行动"（判断，不是故障）
+     *   no-block+无产出 裁决官这一轮没有产出（故障，要查网关）
+     * ```
+     *
+     * ## ⚠️ 一个必须说清的边界（不能假装能分辨）
+     *
+     * ②那 26 条"写完 ` ```json ` 就停"（模型自己停）在文本形态上**与"数组被截掉"
+     * 完全相同** —— 都是"有围栏、没有 `[`"。所以这里只说"没有闭合"，
+     * **不**断言"是 token 上限"（那会是我编的）。真要根治只能改输出契约
+     *（在提示词那一层，不在本文件）。
+     *
+     * ## ⚠️⚠️ **这几句是跨目录契约，不是普通文案**
+     *
+     * `packages/web/src/pages/decisionZeroState.ts` 的 `classifyZeroDecision()`
+     * 用**这几行的字样**判断"界面该说【观望】还是【故障】"，而它的判据
+     * 是从线上 264 条记录穷举出来的 —— 改错方向的后果是
+     * **"把故障显示成观望，于是没人去查"**（那个界面存在的唯一理由）。
+     *
+     * ## 契约的两条硬要求（前端 `decisionZeroState.test.ts` 会直接从**本文件源码**
+     *    抽这几行来验，抽不到或抽多都会变红）
+     *
+     * ```
+     *   ① 这 5 行必须是**独立的、单行的静态字面量**：
+     *      不要用 `+` 把内容拼起来，也不要把它们塞进同一个三元表达式 ——
+     *      前端的抽取器遇到 `+` 会把相邻字面量拼成一条，于是两个分支会被粘成一句
+     *      （实测症状：它只抽到 3 条而不是 5 条，且拼出来的句子读不通）。
+     *   ② 每行首必须是 `⚠️ 裁决…`（前端按这个前缀筛）。
+     * ```
+     *
+     * ## 五行各对应前端的哪一种
+     *
+     * ```
+     *   本文件这一行                                   前端 kind
+     *   ─────────────────────────────────────────────  ────────────────────
+     *   JSON 数组**没有闭合**（解析失败：输出被截断）    bad-json
+     *   JSON 数组**没有闭合**（裁决官写到 json 代码块…   no-block-truncated
+     *   裁决官这一轮**没有产出**（调用失败或超时/冷却）  no-block-no-output
+     *   但它**不是决策数组**（元素没有 action 字段）     not-decisions
+     *   JSON 解析失败 ——                                bad-json
+     *   （另有"判断"那一行 → no-block-judgment，**不是故障**）
+     * ```
+     *
+     * ⚠️ 「判断」那一行里含「不是截断」四个字 —— 那**不能**被当故障判据：
+     * 前端必须先过完上面 4 条故障正向判据，最后才落"判断"（先立后破），
+     * 不能用 `被截断|解析失败` 这种纯词根。见 `decisionZeroState.ts` 的说明。
+     *
+     * ## 为什么不再把片段拼进同一句
+     *
+     * 原来用模板字面量拼 `片段：${snippet}`。那会让这一行**不是静态字面量**，
+     * 前端的抽取器只能把它当成"拼接段"处理（见上面①）。
+     * 现在拆成两行：报告行（静态）+ 片段行（数据）—— 静态的判据与数据分离。
      */
-    lines.push(
-      extracted.status === 'no-block'
-        ? '⚠️ 裁决里没有找到 JSON 数组 —— 模型可能只写了散文。本轮按"不行动"处理。'
-        : `⚠️ 裁决里的 JSON 解析失败（可能被截断）—— 本轮按"不行动"处理。片段：${extracted.snippet ?? ''}`,
-    );
+    if (extracted.status === 'not-decisions') {
+      /*
+       * ⚠️ 这条特别重要：**不能让操作员以为"模型漏发了决策"**。
+       * 真相是我们抓错了一段文本 —— 见 `looksLikeDecision` 的 `c192` 实测。
+       * ⚠️ 它是**故障态**，但**不是截断** —— 所以措辞里不能出现"被截断"
+       *（那会把排查方向带向预算）。
+       */
+      lines.push(
+        '⚠️ 裁决里解析出一段像 JSON 数组的文本，但它**不是决策数组**（元素没有 action 字段）—— 那通常是裁决官推理里的下标片段，**不是它给出的决策**。本轮按"不行动"处理。',
+      );
+      lines.push(`（被误当成决策的片段：${extracted.snippet ?? ''}）`);
+    } else {
+      const judgeProducedNothing =
+        outcome.verdict === null || outcome.verdict.ok === false;
+      const raw = verdict?.ok === true ? verdict.raw : '';
+      /* 未闭合的 ``` 围栏计数为奇数 —— 模型开了个 json 块却没写完。 */
+      const fenceOpenedNotClosed = (raw.match(/```/g) ?? []).length % 2 === 1;
+      /* 有未闭合的 `[` —— 最确凿的截断形状（`bad-json` 里 `[` 开头的那一支）。 */
+      const arrayOpenedNotClosed =
+        extracted.status === 'bad-json' && (extracted.snippet ?? '').trimStart().startsWith('[');
+
+      if (arrayOpenedNotClosed) {
+        lines.push(
+          '⚠️ 裁决里的 JSON 数组**没有闭合**（解析失败：输出被截断）—— 本轮按"不行动"处理。',
+        );
+      } else if (extracted.status === 'bad-json') {
+        lines.push('⚠️ 裁决里的 JSON 解析失败 —— 本轮按"不行动"处理。');
+      } else if (judgeProducedNothing) {
+        lines.push(
+          '⚠️ 裁决官这一轮**没有产出**（调用失败或超时/冷却）—— 所以没有 JSON 数组可解析，本轮按"不行动"处理。**这是故障，不是它的判断。**',
+        );
+      } else if (fenceOpenedNotClosed) {
+        lines.push(
+          '⚠️ 裁决里的 JSON 数组**没有闭合**（裁决官写到 json 代码块就停了，没有输出数组）—— 说明它的输出被截断或者它没写完，本轮按"不行动"处理。**这不是它的判断。**',
+        );
+      } else {
+        /*
+         * ⚠️ 这是**唯一**的非故障分支，也是线上最多的一种（62 条 = 57%）。
+         * 它必须与上面三条故障**在文本上分得开** —— 靠的是它独有的正面措辞
+         * 「以文字给出「不行动」」（前端用它认"判断"）。
+         */
+        lines.push(
+          '⚠️ 裁决里没有找到 JSON 数组 —— 裁决官这一轮**以文字给出「不行动」**（模型只写了散文）。本轮按"不行动"处理，这是它的**判断**（不是截断，无需查预算）。',
+        );
+      }
+      /* 片段单独一行（数据与判据文案分离，见上面①）。 */
+      if (extracted.snippet !== undefined) lines.push(`（解析片段：${extracted.snippet}）`);
+    }
   }
   lines.push('');
   lines.push('## 各角色产出');

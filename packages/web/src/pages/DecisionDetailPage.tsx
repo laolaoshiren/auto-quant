@@ -17,8 +17,8 @@ import { fmtDateTime, fmtInt, fmtLatency, fmtPrice, fmtUsd } from '../lib/format
  * ⚠️「没有决策」是【判断】还是【故障】—— 那个判据的完整理由见该模块。
  * 一句话：一个把故障说成判断的界面，比一个报错的界面更危险。
  */
-import { looksLikeParseFailure } from './decisionZeroState';
-
+import { classifyZeroDecision } from './decisionZeroState';
+import { zeroDecisionCopy } from './decisionZeroStateCopy';
 /**
  * Candidate symbols are rendered as chips. The count comes from the strategy's
  * own symbol filter, which can be a few hundred on a permissive config — past
@@ -62,11 +62,33 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
   const executed = record.executionLog.filter((entry) => entry.status === 'ok');
   const candidates = record.candidateSymbols;
   /*
-   * ⚠️ **"没有决策"有两种截然不同的原因，界面必须分清**（2026-10-15）。
-   * 判据与它为什么不能用"长度""decisions 为空"等 —— 见 `decisionZeroState.ts` 的文件头。
-   * 一句话：**一个把故障说成判断的界面，比一个报错的界面更危险。**
+   * ⚠️ **"没有决策"要按成因说不同的话**（2026-10-15 第二次改：从"两支"改成"五态"）。
+   *
+   * ## 为什么原来那两支不够
+   *
+   * 原来说法只有：
+   * ```
+   *   故障 → "输出解析失败（模型回复可能被截断）…去查 max_tokens"
+   *   其余 → "没有可执行的决策 — 本周期模型选择观望或持仓。"
+   * ```
+   * 而分类器（`decisionZeroState.ts`）能分出**四种性质不同的故障**，
+   * 其中"裁决官这一轮没有产出（网关/冷却）"**根本不是预算问题**。
+   * 一律说"可能被截断"的后果是：**操作员去查一个不存在的 max_tokens 问题**，
+   * 而真因没人看 —— 与"把故障说成观望"是同一个病的两种方向。
+   *
+   * ⇒ 文案表在 `decisionZeroStateCopy.ts`（按 `ZeroDecisionKind` 穷尽映射，
+   *   将来加故障态会**编译不过**）。这里只负责把它的两句话放进版式。
    */
-  const parseFailure = looksLikeParseFailure(record.rawResponse);
+  const zeroDecisionKind = classifyZeroDecision(record.rawResponse);
+  const zeroDecision = zeroDecisionCopy(zeroDecisionKind);
+  /*
+   * 故障用警示色、判断用中性色。
+   *
+   * ⚠️ 这里用 `zeroDecisionKind !== 'no-block-judgment'` 而**不是**再判一次字符串 ——
+   * 判据只有 `classifyZeroDecision` 一份，这一行只是把它的结果映射到颜色
+   *（再加一条正则就会变成第二个漂移点）。
+   */
+  const isFailure = zeroDecisionKind !== 'no-block-judgment';
 
   /*
    * 左栏：这一轮的诊断读数。
@@ -175,24 +197,25 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
           <Panel bodyClassName="p-0" padded={false}>
             {record.decisions.length === 0 ? (
               /*
-               * ⚠️ 这里必须分清"判断"与"故障" —— 见上面 `parseFailure` 的说明。
-               * 说错话的界面比报错的界面更危险：它让人不去查。
+               * ⚠️ 四类故障 + 一类判断，各说各的话（文案表见 `decisionZeroStateCopy.ts`）。
+               *
+               * ## 为什么统一用 `text-warn` 而不是给"截断"配更重的颜色
+               *
+               * 这里是**审计页**：读者已经点进来了，四类都是"需要有人看一眼"的状态。
+               * 用一个统一的警示色 + **各不相同的事实陈述**（这才是关键）比
+               * 再造一个"严重度"维度更有用 —— 后者会诱使人按颜色分诊，而漏读那句话。
                */
-              parseFailure ? (
-                <div className="px-4 py-3">
-                  <p className="text-base text-warn">
-                    本轮**没有决策**，原因是**输出解析失败**（模型回复可能被截断）—— 这不是模型判断"不做"。
-                  </p>
-                  <p className="mt-1 text-sm text-ink-faint">
-                    原始回复里的报错原文见下方「模型输出」一节。这类失败会**整轮丢掉决策**，需要排查
-                    输出预算（`max_tokens`）或让模型把每条决策写短。
-                  </p>
-                </div>
-              ) : (
-                <p className="px-4 py-3 text-base text-ink-faint">
-                  没有可执行的决策 — 本周期模型选择观望或持仓。
+              <div className="px-4 py-3">
+                {/*
+                  ⚠️ 故障用 `text-warn`、判断用 `text-ink-faint` —— 颜色只表达
+                  "要不要看一眼"，**区分靠的是那句话本身**（色盲用户同样能读）。
+                  只按颜色分诊会诱使人漏读那句话。
+                */}
+                <p className={`text-base ${isFailure ? 'text-warn' : 'text-ink-faint'}`}>
+                  {zeroDecision.headline}
                 </p>
-              )
+                <p className="mt-1 text-sm text-ink-faint">{zeroDecision.detail}</p>
+              </div>
             ) : (
               /*
                 1px gaps over a border-coloured background, rather than per-item

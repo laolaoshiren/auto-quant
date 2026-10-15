@@ -52,6 +52,12 @@ const DOT_CLASS: Record<RosterState, string> = {
   done: 'bg-up',
   failed: 'bg-down',
   idle: 'border border-ink-faint',
+  /*
+   * `by_code` 用**空心 + accent 描边** —— 与 `idle` 的空心区分开：同样是空心，
+   * 但 `up`（实心绿，已完成）说的是"有一个模型刚交出产出"，这里没有模型。
+   * 空心还顺带表达了"它不是那种会亮起来的模型岗位"。
+   */
+  by_code: 'border-2 border-accent bg-accent/20',
   planned: 'bg-ink-faint/40',
 };
 
@@ -61,6 +67,7 @@ const STATE_TEXT_CLASS: Record<RosterState, string> = {
   done: 'text-up',
   failed: 'text-down',
   idle: 'text-ink-lo',
+  by_code: 'text-accent',
   planned: 'text-ink-faint',
 };
 
@@ -114,6 +121,7 @@ export function TeamBoard({
   startedAt,
   roster = FIRM_ROLES,
   history = [],
+  initialShowRest = false,
 }: {
   steps: readonly TeamStep[];
   cycleNumber: number;
@@ -130,6 +138,21 @@ export function TeamBoard({
    * ⚠️ 可选：拿不到历史时退回旧行为（不会崩）。
    */
   history?: ReadonlyArray<{ cotTrace: string | null | undefined; timestamp: string }>;
+  /**
+   * 「其余岗位」那一节**初始**是否摊开（默认收起，与线上行为一致）。
+   *
+   * ## 为什么这个 prop 存在（不是为了好看，是为了可测）
+   *
+   * 默认收起是刻意的（见下面 `showRest` 的注释：摊开会把决策区挤没）。
+   * 但那意味着"其余岗位"里那些行的状态词**根本不在 HTML 里** ——
+   * SSR 断言就看不见它们，而 `by_code` 这两个岗位（本轮没参与）正在那一批里。
+   *
+   * 于是"新状态有没有走对分支"变成了**只能靠肉眼看**的东西，而本仓库对此有明文规矩
+   * （`AGENTS.md`：对齐/错位这类问题要量，不要看）。加一个注入点，
+   * 让 `boardRender.test.ts` 能把那一节渲染出来并**断言真实的字**。
+   * 与 `roster` 参数同一个思路：**可注入 = 可测**。
+   */
+  initialShowRest?: boolean;
 }): React.ReactElement {
   /*
    * 计时器每秒刷新 —— 让"这一轮跑了多久"是活的。
@@ -168,7 +191,7 @@ export function TeamBoard({
    * 计数本身就把"这家公司还有多少人没上场"说清楚了 —— 那是诚实、
    * 而且不需要占 400px 的诚实。
    */
-  const [showRest, setShowRest] = useState(false);
+  const [showRest, setShowRest] = useState(initialShowRest);
 
   const isOpen = (id: string): boolean => (allOpen && !closed.has(id)) || (!allOpen && closed.has(id));
 
@@ -208,6 +231,12 @@ export function TeamBoard({
   const working = entries.filter((e) => e.state === 'active' || e.state === 'done').length;
   const failed = entries.filter((e) => e.state === 'failed').length;
   const idleStaffed = entries.filter((e) => e.state === 'idle').length;
+  /*
+   * `by_code` 与 `planned` 必须**分开计数**（2026-10-15）：
+   * 前者是"这个职能在跑、只是由代码承担"，后者是"还没实现"。
+   * 合并成一个数字会让"规划中 7"里混进两个**正在跑**的岗位 —— 那就是原本那个谎言。
+   */
+  const byCode = entries.filter((e) => e.state === 'by_code').length;
   const planned = entries.filter((e) => e.state === 'planned').length;
 
   const elapsedSec =
@@ -263,11 +292,20 @@ export function TeamBoard({
           })}
         </ol>
 
-        {/* 三个计数把"团队现在什么状况"压成一句话。 */}
+        {/* 四个计数把"团队现在什么状况"压成一句话。 */}
         <span className="ml-auto flex flex-wrap items-center gap-x-2 text-xs">
           <span className="text-up">本轮在干 {working}</span>
           {failed > 0 && <span className="text-down">失败 {failed}</span>}
           <span className="text-ink-lo">在岗未叫 {idleStaffed}</span>
+          {/*
+            ⚠️ 这一项不能省、也不能并进"规划中"：它是**在跑**的职能。
+            写"代码在跑"而不是"已由代码承担"，是因为这里回答的问题是"有没有人在干"。
+          */}
+          {byCode > 0 && (
+            <span className="text-accent" title={STATE_HINT.by_code}>
+              代码在跑 {byCode}
+            </span>
+          )}
           <span className="text-ink-faint">规划中 {planned}</span>
         </span>
 
@@ -356,7 +394,13 @@ export function TeamBoard({
                 <span className="num text-[11px] text-ink-faint">{rest.length} 个</span>
                 <span className="min-w-0 flex-1 truncate text-[11px] text-ink-faint">
                   {idleStaffed > 0 && `在岗未参与 ${idleStaffed}`}
-                  {idleStaffed > 0 && planned > 0 && ' · '}
+                  {idleStaffed > 0 && (byCode > 0 || planned > 0) && ' · '}
+                  {/*
+                    ⚠️ 措辞与"规划中"必须一眼可分：这里是"已由代码承担"（在跑），
+                    下一项才是"规划中（还没实现）"。写反了或合并了，这一行就在骗人。
+                  */}
+                  {byCode > 0 && `已由代码承担 ${byCode}`}
+                  {byCode > 0 && planned > 0 && ' · '}
                   {planned > 0 && `规划中 ${planned}（还没实现）`}
                 </span>
                 <span className="shrink-0 text-[11px] text-ink-lo">{showRest ? '收起' : '展开'}</span>
@@ -412,7 +456,12 @@ function DeptGroup({
       </div>
       <ul className="divide-y divide-base-800">
         {list.map((entry) => (
-          <li key={entry.role.id}>
+          /*
+           * ⚠️ `data-role` 不是装饰：SSR 回归测试要靠它把**这一行**切出来，
+           * 才能断言"这一行的状态词是什么"而不是"整页某个地方出现了那个词"
+           * （后者会把别的岗位、甚至头部计数里的同一个词误当成本行的证据）。
+           */
+          <li key={entry.role.id} data-role={entry.role.id}>
             <AgentRow
               entry={entry}
               open={isOpen(entry.role.id)}
@@ -472,6 +521,19 @@ function AgentRow({
       <span className="min-w-0 flex-1 truncate text-xs text-ink-lo" title={role.duty}>
         {role.duty}
       </span>
+      {/*
+        ⚠️ **"由哪段代码承担"必须写出来，不能只说"已由代码承担"。**
+        操作员无法"打开一个模型"去核对它在不在跑，但可以去看那段代码/那个端点。
+        写上确切的模块之后，界面说的就是**可证伪的事实**（见 `firm.ts` 的 `carriedBy`）。
+      */}
+      {role.carriedBy !== undefined && (
+        <span
+          className="min-w-0 max-w-full flex-1 truncate text-[11px] text-accent"
+          title={`这个职能由确定性代码承担，没有模型出勤：${role.carriedBy}`}
+        >
+          由代码承担：{role.carriedBy}
+        </span>
+      )}
       {latest !== null ? (
         <>
           <span className="min-w-0 max-w-full flex-1 truncate text-xs text-ink-mid" title={latest.message}>
@@ -484,6 +546,24 @@ function AgentRow({
           </span>
           <span className="num shrink-0 text-[11px] tabular-nums text-ink-faint">{clock(latest.at)}</span>
         </>
+      ) : state === 'by_code' ? (
+        /*
+         * ══════════════════════════════════════════════════════════════════
+         *  ⚠️ **`by_code` 不进"出勤"那条分支**（2026-10-15 · SSR 测试抓到）
+         * ══════════════════════════════════════════════════════════════════
+         *
+         * 这一行左边写着"代码在跑"，而下面这条分支原来会写"待命" ——
+         * 同一行里两句互相矛盾的话：一个说"在跑"，一个说"等着被叫"。
+         * 而 `by_code` 岗位**没有模型**，永远不会被"叫"，
+         * "待命 / 最近活跃于 X 分钟前"是从模型出勤那套语义里来的。
+         *
+         * ⚠️ 这个 bug 是 `boardRender.test.ts` 的 SSR 断言抓到的 ——
+         * 它**不会**让 typecheck / build / 其它单测变红（它们只看常量表），
+         * 只会在屏幕上多一句假话。
+         *
+         * 承担者写在 `carriedBy` 那一行（上面已经渲染），这里不再重复。
+         */
+        null
       ) : (
         /*
          * ══════════════════════════════════════════════════════════════════
@@ -499,7 +579,7 @@ function AgentRow({
          * ```
          *   最近活跃 X 分钟前   ← 有人、最近干过活（最常见 —— 显示它）
          *   待命                ← 有人、但从没见它跑过（如风控官，全 skip 时它休息）
-         *   （planned 岗位走它自己的徽章，不进这里）
+         *   （planned / by_code 岗位走它们自己的分支，不进这里）
          * ```
          * ⚠️ 判据是 `lastSeenAt`（历史轮里出现过）—— `idle` 只是"这轮没叫"。
          */

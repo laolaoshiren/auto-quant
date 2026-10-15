@@ -28,7 +28,7 @@
  * 本仓库为同一类问题付过代价（`animate-pulseSoft` 那个从不闪烁的状态徽章，
  * 见 `scripts/ui-smoke.mjs` 的注释），所以这里不再"改一改"，而是**重写**。
  *
- * ## 三态：在岗 / 忙碌 / 规划中（用户要"看清楚 AI 运行状态"）
+ * ## 岗位状态（用户要"看清楚 AI 运行状态"）
  *
  * 用户抱怨的核心是"看不出 AI 在不在干活"。所以每个岗位有**一个明确的状态**：
  *
@@ -38,10 +38,16 @@
  * | ✅ **已完成** | 本轮有它的步骤，且看到了完成类的措辞 | 实心绿点 |
  * | ⚠ **失败** | 本轮它的步骤里有 error / 失败措辞 | 红点 + 原因 |
  * | ⚪ **在岗（本轮未参与）** | 已实现，但这一轮没叫它 | 空心点 |
+ * | 🔵 **代码在跑** | 职责由**确定性代码**承担（`firm.ts` 的 `status: 'by_code'`） | 空心青点 |
  * | ⬜ **规划中** | **还没实现** | 灰点 + 明确标注 |
  *
- * 最后两态**必须区分**：把它们合成"未参与"会让操作员以为"社区监控有人在看，
- * 只是这轮没轮到" —— 而实际上**根本没有人在看**。那是两种完全不同的结论。
+ * 最后**三**态**必须区分**：把它们合成"未参与"会让操作员以为"社区监控有人在看，
+ * 只是这轮没轮到" —— 而实际上**根本没有人在看**；而把"代码在跑"叫成"规划中"
+ * 又会让他以为"这个职能还没做"。那是三种完全不同的结论。
+ *
+ * ⚠️ **`by_code` 与 `idle` 的区别是"有没有 LLM 出勤"**：
+ * `idle` 说"有个模型岗位在，这轮没叫它"（"最近活跃于 X 分钟前"那种措辞），
+ * 而 `by_code` 的岗位**压根没有模型** —— 说成"待命"会让操作员去等一个永远不会来的出勤。
  */
 
 import type { FirmRole } from '@aq/shared';
@@ -99,8 +105,32 @@ export const TONE = {
  *
  * `active` / `done` / `failed` 三态互斥，优先级 `failed > done > active`：
  * 一个角色**失败过**就绝不能再显示成"已完成"（那会让操作员以为它给了结论）。
+ *
+ * `by_code` 是**岗位层**的事实（职责由确定性代码承担，没有模型），
+ * 不是"这一轮"的运行态 —— 它与 `idle` 的区别见 `ROLE_STATE_BY_STATUS`。
  */
-export type RosterState = 'active' | 'done' | 'failed' | 'idle' | 'planned';
+export type RosterState = 'active' | 'done' | 'failed' | 'idle' | 'by_code' | 'planned';
+
+/**
+ * 岗位的**实现状态** → 它没参与本轮时该显示什么。
+ *
+ * ## 为什么写成映射表，而不是 `role.status === 'planned' ? 'planned' : 'idle'`
+ *
+ * 原来那个三元是**双分支**的：`firm.ts` 新增第三种状态（`by_code`，2026-10-15）时，
+ * 新状态会**静默落进 `idle`** —— 于是"代码看门狗"会被渲染成"在岗/待命/
+ * 最近活跃于 X 分钟前"，全部是模型出勤的措辞，而它**没有模型**。
+ * 那是本仓库最怕的那种失败：typecheck 全绿、测试全绿、屏幕上只是少了一句真话。
+ *
+ * 写成 `Record<FirmRole['status'], RosterState>` 之后，**漏一个取值就编译不过**
+ * （`tsc` 会指出这个对象缺少某个属性），把"静默降级"变成"编译期就红"。
+ *
+ * ⚠️ `staffed` → `idle` 是**必须的**：已实现但本轮没参与，正是"在岗未参与"。
+ */
+const ROLE_STATE_BY_STATUS: Record<FirmRole['status'], RosterState> = {
+  staffed: 'idle',
+  by_code: 'by_code',
+  planned: 'planned',
+};
 
 /** 一个岗位的完整呈现数据。 */
 export interface RosterEntry {
@@ -241,13 +271,17 @@ export function rosterEntries(
     const own = byRole.get(role.id);
     if (!own || own.length === 0) {
       /*
-       * 「没参与」还要分两种，而**这个区分是本文件最重要的判断**：
-       * `planned` 是"这个岗位根本没人"，`idle` 是"有人在，这轮没叫他"。
-       * 合并它们等于告诉操作员"社区监控有人在盯着，只是这轮没轮到"。
+       * 「没参与」还要分三种，而**这个区分是本文件最重要的判断**：
+       * `planned` 是"这个岗位根本没人"（还没有实现），
+       * `by_code` 是"职责在跑、但没有模型"（确定性代码承担），
+       * `idle`    是"有人在，这轮没叫他"。
+       * 合并其中任意两个都等于在骗操作员：把 `planned` 说成 `idle` =
+       * "社区监控有人在盯着，只是这轮没轮到"；把 `by_code` 说成 `planned` =
+       * "这个职能还没做"（而它一直在跑）。
        */
       return {
         role,
-        state: role.status === 'planned' ? 'planned' : 'idle',
+        state: ROLE_STATE_BY_STATUS[role.status],
         latest: null,
         stepCount: 0,
         inFlight: false,
@@ -332,12 +366,17 @@ export const TIER_LABEL: Record<FirmRole['tier'], string> = {
 
 /**
  * 状态的**文字**（不能只靠颜色 —— `DESIGN.md` §2 的硬要求，也是色盲用户的前提）。
+ *
+ * ⚠️ `by_code` 的文案刻意**不用"出勤"类措辞**（在岗/待命/最近活跃）：它没有模型，
+ * 用那些词等于让操作员等一个永远不来的出勤。它要说的是"这件事**确实在跑**"，
+ * 承担者是谁写在 `FirmRole.carriedBy` 里（那一行会跟在职责后面显示）。
  */
 export const STATE_LABEL: Record<RosterState, string> = {
   active: '进行中',
   done: '已完成',
   failed: '失败',
   idle: '在岗',
+  by_code: '代码在跑',
   planned: '规划中',
 };
 
@@ -347,6 +386,9 @@ export const STATE_HINT: Record<RosterState, string> = {
   done: '这一轮它已经交出了产出。',
   failed: '这一轮它出错了 —— 展开右侧「本轮流程」看具体原因。',
   idle: '这个岗位已实现，但这一轮没有叫它（例如只在特定条件下才启用）。',
+  by_code:
+    '这个职能**在跑**，但承担它的是确定性代码、不是模型 —— 所以既没有"出勤"也没有"待命"，' +
+    '它的产出在旁边那行写明的模块里（例如 /api/health 的 staleTraders）。',
   planned: '**这个岗位还没有实现** —— 不要以为有人在干这件事。',
 };
 

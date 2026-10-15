@@ -3474,6 +3474,20 @@ function renderUserPrompt(
         (universeNote ? `\n⚠️ ${universeNote} —— **你没看到的那些不是"市场里没有"，而是被配置的候选上限挡掉了。** 若因此觉得可选标的太少，该调的是 coinSource.coinPoolLimit 或门槛，不是选币逻辑。` : '')
       : `# 候选标的（${candidates.length} 个）\n` +
         `**前 ${Math.min(detailedCount, candidates.length)} 个给出完整指标序列**（按由旧到新排列，最后一个值就是最新值）；` +
+        /*
+         * ⚠️ **这一段结尾必须与 `tradingDesk.ts` 的定点替换逐字一致，不能顺手改措辞。**
+         *
+         * 团队模式那边对已渲染文本做了一次替换（`rewriteCandidateHeader`）：
+         * ```
+         *   /# 候选标的（\d+ 个）\n\*\*前 \d+ 个给出完整指标序列\*\*（[^）]*）；
+         *    \*\*其余只给摘要\*\*（最新值 \+ 最近 5 根的走向）—— 那足够用来筛掉它们，/
+         * ```
+         * 它被 `analystMaterial.test.ts` 用**线上原文**钉着，而那个测试的注释里
+         * 记着的教训正是"自己造简化样本会让测试通过而线上不中"。
+         *
+         * 所以这里**一个字都不动**（本轮的摘要在摘要行里自称带了什么，
+         * 见 `renderTimeframeSummary()` —— 模型读到的是那一行，而不是这句概述）。
+         */
         '**其余只给摘要**（最新值 + 最近 5 根的走向）—— 那足够用来筛掉它们，' +
         '而**任何一个你想深看的标的，都可以用 `get_klines` 点名要完整序列**，不必它排前面。' +
         (universeNote ? `\n⚠️ ${universeNote} —— **你没看到的那些不是"市场里没有"，而是被配置的候选上限挡掉了。**` : '');
@@ -4160,14 +4174,59 @@ export function formatMarketData(
 }
 
 /**
- * 概览模式下的周期摘要 —— 替代完整序列。
+ * 摘要里每个周期必须带上的**最近收盘价根数**。
  *
- * 每条序列只给**最新值 + 最近 5 根的走向**，而"走向"用**相对最新值的百分比**
- * 表示而不是把 5 个原始数字列出来：模型看"EMA20 在涨、价格刚站上去"这类判断时，
- * 百分比比裸数字更快、更省，而**原始数字它想看随时能要**。
+ * ## 为什么是 6（2026-10-15 线上实测逼出来的）
  *
- * 这一段是给"扫一遍 20 个标的、挑出值得深看的那一两个"用的。
+ * 策略师自己写的入场标准里，`D` 的定义是**「15m 连续 6 根收盘价的位移」**
+ *（门槛 0.8%、上限 3.5%），而要算它就必须同时看到 `close[-6]` 与 `close[-1]`。
+ *
+ * 而 `#11` 的材料里，**只有前 `detailedCandidateCount()` 个候选有完整序列**
+ *（默认预算下实测 = 5 个，硬上限 `DETAILED_HARD_CAP = 10`），
+ * 其余候选走的是 `renderTimeframeSummary()` —— 那一段原来**一个原始收盘价都没有**，
+ * 只有最新价与一个「最近 5 根的走向」百分比。
+ *
+ * 后果（策略师在 `agent_runs#889` 自己下的结论，以及多轮决策理由原文）：
+ * ```
+ *   「缺close[-6]/close[-1]序列无法算D」「缺15m连续收盘无法算D」
+ *   「材料未给close[-6]」「序列缺失，D不可算」
+ *   「This is a data pipeline issue (kline data not provided for all candidates),
+ *     not fixable by parameter change.」
+ * ```
+ * 它点名的正是 SUI / ENA / XRP / BNB / DOGE / HYPE / NEAR / PUMP / 1000PEPE ——
+ * 用真实材料实测（12 个候选、真实渲染链），**恰好是后 7 个没有任何收盘价数组**。
+ *
+ * ## 为什么是"摘要里补上"而不是"提高 keepLast"
+ *
+ * 被压缩掉的是前 5 个候选的**历史**（30 → 10 点），而它们仍然留着 `[-6]`；
+ * 真正缺的是**后 7 个候选的收盘价本身** —— 那是"渲染时被丢弃"（缺口类型 b），
+ * 不是"被压缩吃掉"（类型 c）。再把 `keepLast` 抬大只会让前 5 个更贵，
+ * 而后 7 个依旧是零。
+ *
+ * ## ⚠️ 为什么就取 6，而不是"摘要也给完整序列"
+ *
+ * 摘要存在的全部理由是**便宜**（一个候选约 800 字符）。实测把它放开到配置的 30 点
+ * 会让每个摘要候选从 792 涨到 2,037 字符（×2.6）、12 个候选的整体提示词
+ * 从 56,961 涨到 65,216 字符 —— 那就等于取消了"前 N 个详细、其余摘要"的分层，
+ * 而分层是为了**避开材料规模那条危险线**：
+ * ```
+ *   6 标的（26,281 字符）→ 15.1s · content= 434 字  ✅
+ *  12 标的（54,971 字符）→ mt=2048 时 content= 0 字  ❌
+ * ```
+ * `D` 的判据只需要 `close[-6]` 与 `close[-1]` **两个**数，所以给 6 个是
+ * **刚好够用**：既不丢掉判据，也不把摘要变成第二份详细区块。
+ *
+ * 想让摘要候选也看到摆动结构，正确的动作是**把它排进前几个详细候选**
+ *（那是排序与候选池的事），或者用 `get_klines` 点名 —— 不是把每个摘要都加厚。
+ *
+ * ## ⚠️ 固定 6，**不跟 `promptPoints` 走**
+ *
+ * `promptPoints` 是"历史给多厚"的参数（AI 会为了省 token 把它调小，schema 允许 5），
+ * 而"能不能算入场判据"**不该由成本参数决定** —— 调到 5 会让策略师自己的 `D`
+ * 重新变成不可算，而它只会以为自己看错了，不会去改 `promptPoints`。
  */
+const SUMMARY_CLOSES = 6;
+
 /**
  * 成交额的紧凑写法：`12.3B` / `1234M` / `45K`。
  *
@@ -4570,6 +4629,39 @@ function pendingDistanceRow(pending: PromptPendingEntry, ctx: PromptContext): st
   return rows;
 }
 
+/**
+ * 摘要里最近收盘价的渲染 —— **原始数字**，格式与详细区块的 `价格: [...]` 一致。
+ *
+ * 根数固定 `SUMMARY_CLOSES`（理由见它），所以这里不吃配置 —— 那正是这个修复的一部分。
+ */
+function summaryCloses(tf: TimeframeIndicators): string {
+  const usable = tf.closes.filter((v) => Number.isFinite(v));
+  if (usable.length === 0) return '';
+  const tail = usable.slice(-SUMMARY_CLOSES);
+  return `最近${tail.length}根收盘 [${tail.map((v) => v.toFixed(priceDecimalsFor(tf))).join(', ')}]`;
+}
+
+/**
+ * 概览模式下的周期摘要 —— 替代完整序列。
+ *
+ * 每条指标只给**最新值 + 最近几根的走向**，而"走向"用**相对最新值的百分比**
+ * 表示而不是把原始数字列出来：模型看"EMA20 在涨、价格刚站上去"这类判断时，
+ * 百分比比裸数字更快、更省，而**原始数字它想看随时能要**。
+ *
+ * ## ⚠️ 唯一的例外：**收盘价必须给原始数字**（2026-10-15 修复）
+ *
+ * 上面那条"百分比更快"对**指标**成立，对**收盘价不成立** —— 因为收盘价是
+ * **算术的输入**，不是一个可以读的结论。策略师的入场标准里写着
+ * 「15m 连续 6 根收盘价的位移 ≥0.8%」，那要的是 `close[-6]` 与 `close[-1]` 两个数；
+ * 给一个「↑0.3%」它**既不知道那是几根之间的位移**（`trendOf` 取的是最后 5 个值），
+ * 也无法核对或复算 —— 而"算不出 D"正是它连续多轮拒绝开仓的直接原因
+ *（`agent_runs#889` 与 `summaryCloses.test.ts` 里有完整证据）。
+ *
+ * ⚠️ 只对**收盘价**破例：成交量与指标仍然只给走向百分比（它们是"读的结论"，
+ * 全部展开会让这一段的规模翻好几倍，而收益远小于收盘价那一项）。
+ *
+ * 这一段是给"扫一遍 20 个标的、挑出值得深看的那一两个"用的。
+ */
 function renderTimeframeSummary(snap: MarketSnapshot): string {
   const lines: string[] = ['周期摘要（完整序列见 `get_klines`，需要哪个周期就点名要）：'];
   for (const tf of snap.timeframes) {
@@ -4578,6 +4670,13 @@ function renderTimeframeSummary(snap: MarketSnapshot): string {
 
     const price = lastValue(tf.closes);
     if (price !== null) parts.push(`价 ${fmt(price)}${trendOf(tf.closes, price)}`);
+    /*
+     * ⚠️ **收盘价给原始数字** —— 理由见 `SUMMARY_CLOSES` 与本函数的 JSDoc：
+     * 它是入场判据的算术输入，而"只给走向百分比"正是实测里后 7 个候选
+     * 算不出 `D` 的原因（`agent_runs#889` 的「缺close[-6]/close[-1]序列无法算D」）。
+     */
+    const closes = summaryCloses(tf);
+    if (closes.length > 0) parts.push(closes);
 
     for (const [period, values] of Object.entries(tf.ema)) {
       const v = lastValue(values);

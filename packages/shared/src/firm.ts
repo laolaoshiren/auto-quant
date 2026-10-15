@@ -32,10 +32,31 @@
  * 用户列的理想组织里有**还没实现的角色**（如"监控社区"、"维护系统的程序员"）。
  * 把它们标成"在岗"会让操作员以为有人在干那件事 —— 而实际上没有。
  *
- * 所以三态：
- *   · `active`   —— 已实现，**本轮参与了**
- *   · `staffed`  —— 已实现，但本轮没参与（如只在特定条件下才被叫）
+ * 所以**岗位实现状态**是三态（`FirmRole.status`）：
+ *   · `staffed`  —— 有模型（LLM 角色）在承担；界面上按出勤情况显示在岗/进行中/已完成
+ *   · `by_code`  —— **职责已由确定性代码承担，没有 LLM 出勤**（见下面的逐字解释）
  *   · `planned`  —— **还没实现**（诚实标注，不装）
+ *
+ * （界面上的"进行中 / 已完成 / 失败 / 在岗未参与"是**某一轮**的运行态，
+ *   由前端从实时步骤流里算出来，不是这里的 `status` 取值。）
+ *
+ * ## 为什么必须有 `by_code`，而不是把这两个岗位标成 `staffed`
+ *
+ * `staffed` 在界面上的含义是"**有一个模型岗位在跑**"（前端把它渲染成
+ * "在岗 / 待命 / 最近活跃于 X 分钟前"，全部是模型出勤的措辞）。
+ * `data_sentinel` / `ops_watchdog` 是 `T0_code` 岗位 —— **根本不存在模型出勤**，
+ * 它们的职责分别在 `/api/health` 的 `staleTraders` 与 `selfcheck.ts` 的
+ * `findDeterministicProblems()` 里（确定性的查询与判据）。
+ * 标成 `staffed` 会让操作员以为"有个哨兵模型在盯着"，那是**另一种说谎**。
+ *
+ * 反过来标 `planned` 也是错的：职责**确实在跑**，而且有实测证据
+ * （见 `docs/FINDING-planned-roles-audit.md` §2.1/2.2）——
+ * 界面写"规划中"而实际在跑，同样是在骗操作员。
+ *
+ * ⚠️ 也**不要**为了消掉这个状态去给它们硬接 LLM：那会造出"看起来在干活、
+ * 实际没人读"的空转角色。本仓库已为这个形状付过两次代价（`engineer` 被删、
+ * `clerk` 至今未接线，见 `docs/FINDING-clerk-unwired.md`）。
+ * 正解是**把承担它的代码模块写给操作员看**（`carriedBy`），而不是换一个承担者。
  *
  * ## ⚠️⚠️ **加新角色之前，先在这里查一遍**（2026-10-13 的真实教训）
  *
@@ -98,8 +119,24 @@ export interface FirmRole {
    *
    * ⚠️ `planned` 的角色**不会出现在任何编排里** —— 界面上必须标出来，
    * 否则操作员会以为"社区监控有人在看"，而实际上没有人在看。
+   *
+   * ⚠️ `by_code` 的角色**只在确定性代码里**（`tier: 'T0_code'`），
+   * 把它当成 `staffed` 会显示成"在岗/待命"（那是模型出勤的措辞）。
    */
-  status: 'staffed' | 'planned';
+  status: 'staffed' | 'by_code' | 'planned';
+  /**
+   * **承担这个岗位的代码模块** —— 只有 `status: 'by_code'` 时有意义，其余为 `undefined`。
+   *
+   * ## 为什么要把模块路径写给操作员看（而不是只写"已由代码承担"）
+   *
+   * 因为"已由代码承担"这句话**无法被核对**：操作员既不能打开一个模型看它在不在，
+   * 也看不到这段代码在不在跑。写上确切的模块与产出（例如
+   * `/api/health` 的 `staleTraders`）之后，他可以自己去查 —— 界面说的是**可证伪的事实**。
+   *
+   * ⚠️ 它必须与代码里的真实位置一致，否则这条文案自己变成了新的谎言
+   * （`firmStatus.test.ts` 会去那两个文件里核对）。
+   */
+  carriedBy?: string;
 }
 
 /** 部门（按"一家量化机构怎么分工"划分）。 */
@@ -292,7 +329,19 @@ export const FIRM_ROLES: readonly FirmRole[] = [
     duty: '盯行情/账户数据的新鲜度，发现断流立刻报警 —— **纯代码**',
     department: '技术',
     tier: 'T0_code',
-    status: 'planned',
+    /*
+     * ⚠️ **2026-10-15 从 `planned` 改为 `by_code`** —— 它一直在跑，只是没有模型出勤。
+     *
+     * 实测证据（`docs/FINDING-planned-roles-audit.md` §2.1）：`api/server.ts` 的
+     * `/api/health` 返回 `staleTraders`（线上实测 `"staleTraders":[]`），
+     * 判据 = `cycleIntervalMinutes × STALE_CYCLE_MULTIPLIER(2)`；
+     * Dockerfile 的 HEALTHCHECK 也以它为准。
+     *
+     * ⚠️ 它**不是**一个待接线的 LLM 岗位（`T0_code`，`roles.ts` 里没有它的提示词）。
+     * 详见 `FirmRole.status` 上那段"为什么必须有 `by_code`"。
+     */
+    status: 'by_code',
+    carriedBy: '/api/health 的 staleTraders（server.ts 从 last_cycle_at 推新鲜度，判据 = cycleIntervalMinutes × 2）',
   },
   {
     id: 'ops_watchdog',
@@ -300,7 +349,26 @@ export const FIRM_ROLES: readonly FirmRole[] = [
     duty: '盯进程、连接与错误率 —— **纯代码**',
     department: '技术',
     tier: 'T0_code',
-    status: 'planned',
+    /*
+     * ⚠️ **2026-10-15 从 `planned` 改为 `by_code`** —— 同上，职责已在跑。
+     *
+     * 实测证据（`docs/FINDING-planned-roles-audit.md` §2.2 + 2026-10-15 线上复核）：
+     * `trader/selfcheck.ts` 的 `findDeterministicProblems()`，由
+     * **周期性自检**（`selfcheckRunner.runSelfCheck`，由 `manager.ts` 的
+     * `startSelfCheckLoop()` 调度）调用；含"裸奔仓位（唯一会直接亏钱的一项）/
+     * 连续失败 ≥3 / 长时间无成功决策"等判据。
+     * 线上留痕实测：`runtime_logs` 里 `scope='selfcheck'` 有 26 条，最新一批含 AI 层产出。
+     *
+     * ⚠️ **间隔不要写进面向操作员的文案**：它是 `SELF_CHECK_INTERVAL_MINUTES` 的
+     * **默认值 30 分钟**（`manager.ts` 的三元），现场可被环境变量改掉 ——
+     * 复核时实测该变量**未设置**，所以当前确实是 30 分钟，但写死会在别的部署上变成
+     * 一句**不可核对且已过时**的话（见 `docs/VERIFY-task3-roster-honesty.md` §7.1）。
+     *
+     * ⚠️ 注意它与 `system_engineer` 的分工：那个是自检的 **AI 层**（T3，读证据找缺陷），
+     * 这个是被它调用的**确定性判据层**（T0）。两者都不是"待实现"。
+     */
+    status: 'by_code',
+    carriedBy: 'selfcheck.ts 的 findDeterministicProblems()（由 selfcheckRunner.ts 的周期性自检调用，间隔可配：裸奔仓位 / 连续失败 ≥3 / 长时间无成功决策）',
   },
   {
     id: 'clerk',

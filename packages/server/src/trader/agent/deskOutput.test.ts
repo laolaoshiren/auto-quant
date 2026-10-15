@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { extractFirstJsonArray, renderDeskOutcome } from './deskOutput.js';
+import { extractDecisionArray, extractFirstJsonArray, renderDeskOutcome } from './deskOutput.js';
 import type { DeskOutcome, DeskRoleOutput } from './tradingDesk.js';
 
 function role(name: string, raw: string, ok = true): DeskRoleOutput {
@@ -83,8 +83,14 @@ test('★ 没有数组 → no-block（与 bad-json 区分）', () => {
 });
 
 test('空数组是合法结论（"不行动"）', () => {
+  /*
+   * ⚠️ 2026-10-15：状态从 `ok` 细分成 **`empty`**。
+   * 理由：`decisions: []`（模型明确"不行动"）与 `decisions: null`（没抽到）
+   * 在调用方是**两种分支** —— 前者是判断，后者要在审计块里报"这一轮为什么没有数组"。
+   * 原来两者都返回 `ok`，渲染层于是无法区分，见 `ExtractedDecisions.status` 的说明。
+   */
   const r = extractFirstJsonArray('[]');
-  assert.equal(r.status, 'ok');
+  assert.equal(r.status, 'empty', '★ 空数组是【模型明确说不行动】，必须与"没抽到"分开');
   assert.deepEqual(r.decisions, []);
 });
 
@@ -172,7 +178,8 @@ test('★★ 风控官【否决】→ 决策被清空（本轮不行动）', () 
   });
 
   const extracted = extractFirstJsonArray(text.slice(text.indexOf('<decision>')));
-  assert.equal(extracted.status, 'ok');
+  /* ⚠️ 2026-10-15：空决策块的状态是 `empty`（模型/系统明确"不行动"），不再是 `ok`。 */
+  assert.equal(extracted.status, 'empty');
   assert.deepEqual(extracted.decisions, [], '★ 风控否决必须真的清空决策');
   assert.ok(text.includes('<risk>'), '要有风控审计块');
   assert.ok(text.includes('否决'), '★ 审计块要说清是"否决"');
@@ -217,4 +224,132 @@ test('风控官放行时不改动决策', () => {
   const extracted = extractFirstJsonArray(text.slice(text.indexOf('<decision>')));
   assert.equal(extracted.decisions?.length, 1);
   assert.ok(text.includes('放行'));
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ⚠️ 2026-10-15：空决策的【真实原文】与审计文案分级                          */
+/*                                                                            */
+/*  为什么这一组测试存在：线上 `#11` 有 37.8% 的轮次是空决策，而审计块曾经把   */
+/*  「模型判断不做」与「系统故障」写成同一句（或都没说清），操作员据此排查会    */
+/*  走错方向。下面每一条都用**线上 raw_response 的真实文本**，钉住             */
+/*  「哪一种失败说哪一句话」，并顺带钉住**不能伪造决策**这条安全底线。          */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 推理里的 `close[-1]` 不能被当成决策数组（线上 c192 的 `[-1]`）', () => {
+  /*
+   * ## 事故现场（`#11` · id=2761 · cycle=192 · 2026-10-14T14:57Z）
+   *
+   * ```
+   *   raw_response:  <decision>
+   *                  [-1]                     ← 进了交易循环
+   *                  </decision>
+   * ```
+   * 而那个 `[-1]` 根本不是模型给的决策 —— 它是裁决官论证 "最后一根收盘价" 时写的
+   * `close[-1]`，被 `extractFirstJsonArray` 当成了数组。
+   *
+   * ## 为什么这不是"无害的噪声"
+   * ```
+   *   ① 汇报员拿着它写出：「本轮团队唯一一条决策不带 action 字段……
+   *      需操作员核实是否漏发动作」→ 一条【假告警】，而操作员无从核实
+   *   ② 审计块唯一的用途是"事后说清当时为什么这么做"，它不能自己造假线索
+   * ```
+   * 下面这段就是 `c192` 裁决官原文的形状（论证 + 推理里的下标写法）。
+   */
+  const judgeRaw = [
+    '**SOLUSDT 现价 103.5100，开空：**',
+    '止损 = 103.5100 × 1.015 = **105.063**；止盈 = 103.5100 × 0.965 = **99.887**',
+    '- 序列取值：close[-1] = 2.4831、close[-2] = 2.4753、close[-6] = 2.5218',
+    '```json',
+    '[-1]',
+    '```',
+  ].join('\n');
+
+  /* 抽取器层：必须判成"这不是决策"，而不是"抽到了 1 条决策"。 */
+  const ex = extractDecisionArray(judgeRaw);
+  assert.equal(ex.status, 'not-decisions', '★ 元素没有 action 字段 → 不是决策数组');
+  assert.equal(ex.decisions, null, '★ 绝不能把 [-1] 当决策交出去');
+
+  /* 渲染层：决策块必须是空数组（不行动），且文案不能诬告"模型漏发决策"。 */
+  const text = renderDeskOutcome(outcome({ verdict: role('judge', judgeRaw) }));
+  assert.ok(text.includes('<decision>\n[]\n</decision>'), '★ 必须是空决策数组');
+  assert.ok(!text.includes('<decision>\n[-1]'), '★ 垃圾数组不得进入 <decision> 块');
+  assert.ok(text.includes('不是决策数组'), '★ 要说清"这段文本不是决策"，而不是"模型漏发了决策"');
+  assert.ok(text.includes('裁决') && text.includes('JSON'), '★ 跨目录契约：这两行字样是前端判据的词根');
+});
+
+test('★★★ 空决策的四种失败必须【各说各的事实】,不能都叫"可能被截断"', () => {
+  /*
+   * ## 事故：一句笼统文案把 70 条"判断"说成"故障嫌疑"
+   *
+   * 线上 108 条空决策逐条重放（见 `deskOutput.ts` 里那段实测分布）：
+   * ```
+   *   no-block 70 条（65%）← 裁决官全程没写 `[`：62 条是【文字判断不做】，8 条是【没产出】
+   *   bad-json  5 条（ 5%）← 真截断（有未闭合的 `[`）
+   * ```
+   * 而文案对 `bad-json` 一律写「JSON 解析失败（可能被截断）」，
+   * 又把"没产出"与"文字判断不做"说成同一句 —— 操作员无法判断该不该去查。
+   */
+  const text = (verdict: DeskRoleOutput | null): string =>
+    renderDeskOutcome(outcome(verdict === null ? { verdict: null } : { verdict }));
+
+  /* ① judge 写了 ` ```json ` 就停（线上 c137 的形状：模型自己停，不是 token 顶格）。 */
+  const fenceStop = text(role('judge', '我对 BAT 触发无异议。\n\n```json'));
+  assert.ok(/没有闭合|解析失败/.test(fenceStop), '★ 截断要说"没有闭合/解析失败"');
+  assert.ok(fenceStop.includes('被截断'), '★ 真截断必须明说"被截断"（让操作员去查预算）');
+  /*
+   * ⚠️ 这条是**跨目录契约**：前端 `decisionZeroState.ts` 用
+   * 「裁决官写到 json 代码块就停」把这一态认成 `no-block-truncated`。
+   * 只有能把"模型停在自己开的围栏前"与"输出被 token 截掉"分开，
+   * 才谈得上给操作员正确的排查方向。
+   */
+  assert.ok(fenceStop.includes('裁决官写到 json 代码块就停'), '★ 跨目录契约：这一态的判别词根');
+
+  /* ② 未闭合的 `[`（确凿的 token 截断，judgeBudget.test.ts 记录过的那种）。 */
+  const truncated = text(role('judge', '结论：\n[{"symbol":"WUSDT","action":"skip","reasoning":"急跌后短修复但1'));
+  assert.ok(truncated.includes('没有闭合'), '★ 有未闭合 `[` → 必须说"没有闭合"');
+
+  /* ③ 裁决官有产出、但以散文说"不行动" → 这是【判断】，不是故障。 */
+  const proseOnly = text(role('judge', '## Judge结论：**不行动**\n\n我不同意做多方…'));
+  assert.ok(proseOnly.includes('裁决里没有找到 JSON 数组'), '★ 保留既有词根（前端判据要用）');
+  assert.ok(proseOnly.includes('判断'), '★ 必须明说这是【判断】，不是故障');
+  assert.ok(!proseOnly.includes('被截断'), '★ 判断态【不能】说"被截断"（那会把操作员带去查预算）');
+
+  /* ④ 裁决官这一轮没有产出 → 这是【故障】，要查网关/冷却/额度。 */
+  const noOutput = text(role('judge', '档位 T2_mid 的候选链全部处于冷却期', false));
+  assert.ok(noOutput.includes('没有产出'), '★ 无产出必须与"文字判断"分开说');
+  assert.ok(noOutput.includes('故障'), '★ 定性为故障（否则操作员不会去查）');
+  assert.ok(!noOutput.includes('被截断'), '★ 无产出不能诬告成截断');
+
+  /* ⑤ 模型【真的】写了 `[]` → 合法结论，**不应该有任何告警**。 */
+  const emptyArray = text(role('judge', '```json\n[]\n```'));
+  assert.ok(!emptyArray.includes('没有找到 JSON 数组'), '★ 真空数组是合法结论，不该报警');
+  assert.ok(!emptyArray.includes('被截断'), '★ 更不该说截断');
+  assert.ok(emptyArray.includes('<decision>\n[]\n</decision>'));
+  /*
+   * ⚠️ 而 `verdict === null`（整条链路连裁决都没跑）也走"没有产出"这一支 ——
+   * 它与"裁决官说散文"必须分开，见 `outcome.verdict === null` 的判据。
+   */
+  const noVerdict = text(null);
+  assert.ok(noVerdict.includes('没有产出'), '★ 连裁决都没有 = 没产出（故障）');
+});
+
+test('★★ 形态校验失败时【绝不补一个动作】—— 它只能变成"没抽到"', () => {
+  /*
+   * ⚠️ 这是本次改动的安全红线。
+   *
+   * "把不是数组的东西丢掉"很容易顺手写成"丢掉之后补一个 hold/skip"——
+   * 那是**伪造一个模型从未做出的决定**，比空数组糟得多（审计块会说"模型决定不做"，
+   * 而模型其实什么都没说）。所以本条的断言是：
+   * ```
+   *   形态不合格 → <decision>[]</decision>（不行动）
+   *   ✗ 不允许出现任何 action（哪怕 hold/skip）
+   * ```
+   * 与既有的「裁决解析失败时返回空决策 + 说明原因，绝不编造动作」是同一条底线，
+   * 只是触发条件换成了"抽到的东西不像决策"。
+   */
+  const judgeRaw = '推理：close[-1]=2.4831、close[-6]=2.5218，位移 1.5%。\n```json\n[-1]\n```';
+  const text = renderDeskOutcome(outcome({ verdict: role('judge', judgeRaw) }));
+  assert.ok(text.includes('<decision>\n[]\n</decision>'), '★ 只能是不行动');
+  assert.ok(!/"action"/.test(text.slice(text.indexOf('<decision>'), text.indexOf('</decision>'))), '★ 决策块里绝不能有动作');
+  assert.ok(!text.includes('"hold"') && !text.includes('"skip"'), '★ 更不能补一个 hold/skip');
 });

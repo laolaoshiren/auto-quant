@@ -13,7 +13,7 @@
 
 | 层 | 文件:行 | 内容 |
 | --- | --- | --- |
-| 组织架构 | `packages/shared/src/firm.ts:306` | `id: 'clerk'`，`label: '文员'`，`status: 'planned'` |
+| 组织架构 | `packages/shared/src/firm.ts:306`（⚠️ 行号已漂到 `:374`，2026-10-15 核对） | `id: 'clerk'`，`label: '文员'`，`status: 'planned'` |
 | 提示词 | `packages/server/src/trader/agent/roles.ts:518` | 完整 system prompt（含输出 JSON 契约） |
 | 模型档位 | `packages/server/src/trader/routedModel.ts:110,319` | `tier: 'T1_fast'`、`maxTokens: 1024` |
 

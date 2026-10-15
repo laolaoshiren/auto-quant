@@ -195,7 +195,15 @@ test('★ 整条角色链失败时返回空决策块 —— 不抛出、不编�
 
   assert.ok(result.text.includes('<decision>'), '仍要有 decision 块');
   const extracted = extractFirstJsonArray(result.text.slice(result.text.indexOf('<decision>')));
-  assert.equal(extracted.status, 'ok');
+  /*
+   * ⚠️ 2026-10-15：断言的是**决策为空**，不再绑定具体状态字面量。
+   * `deskOutput` 把"空数组"从 `ok` 细分成 `empty`（`[]` 是模型明确的"不行动"，
+   * 与"没抽到"必须分开报）—— 本条测试要守的是"不编造动作"，不是那个字面量。
+   */
+  assert.ok(
+    extracted.status === 'empty' || extracted.status === 'ok',
+    `★ 空决策块必须是"解析成功但没动作"，实际 ${extracted.status}`,
+  );
   assert.deepEqual(extracted.decisions, [], '★ 全失败时必须是不行动，不能编造');
   assert.ok(!result.text.includes('open_long'), '★ 绝不能凭空造出开仓动作');
 });
