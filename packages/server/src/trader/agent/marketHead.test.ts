@@ -97,3 +97,45 @@ test('★ 切分用行首锚定（正文里偶然出现的 ### 1. 不该被当�
   /* 行内那处不该被当成候选起点 —— 所以 `totalCandidates` 应当是 0（没有真候选）。 */
   assert.equal(out.totalCandidates, 0, '★ 只认行首的 ### N. ');
 });
+
+test('★★★ 被预算挡掉的候选必须写进材料 —— 不能让模型以为"候选就这些"', () => {
+  /*
+   * ## 2026-10-15 用真实材料实测到的
+   *
+   * ```
+   *   headOfMarket(raw,     12_000) → candidatesShown = 1 / 12
+   *   headOfMarket(analyst, 24_000) → candidatesShown = 5 / 6
+   * ```
+   * 上面那个 `break` 会把超预算之后的候选**整段丢掉**，而材料里**没有任何交代** ——
+   * 模型读到的是"候选就这些"，真相是"还有 N 个被预算挡住了"。
+   *
+   * 这是本仓库明令的那类**假事实**（与 `compactUniverseOverview` 的
+   *「必须显式写出省略了多少行」是同一条纪律）。
+   *
+   * ⚠️ 它同时是"分析师分析过、裁决官却看不到"的通道：`analystContext` 取 6 片，
+   * 而裁决官那一份在 24k 预算下只列得出 5 个 —— 第 6 个从结论里消失。
+   */
+  const out = headOfMarket(material(12), 12_000);
+  assert.ok(
+    out.totalCandidates > out.candidatesShown,
+    '（前置）这个预算下确实该有候选被挡掉，否则这条测试什么都没验证',
+  );
+  assert.match(
+    out.text,
+    new RegExp(`另有 ${out.totalCandidates - out.candidatesShown} 个候选`),
+    `★ 材料里必须写出被省略的候选数。结尾是：${out.text.slice(-220)}`,
+  );
+});
+
+test('★ 没有候选被省略时，不该平白多出那句"另有 N 个"', () => {
+  /*
+   * 反方向守卫：一句**无条件**写上去的"另有 N 个候选"会让模型去追问一批
+   * 根本不存在的标的 —— 那是"假事实"的另一种形态。
+   */
+  const out = headOfMarket(material(2), 1_000_000);
+  assert.equal(out.candidatesShown, out.totalCandidates, '（前置）这个预算下不该有省略');
+  assert.ok(
+    !out.text.includes('另有'),
+    `★ 没有省略时不该写"另有 N 个"。结尾是：${out.text.slice(-220)}`,
+  );
+});

@@ -554,8 +554,38 @@ export function headOfMarket(marketContext: string, budgetChars: number): {
     }
   }
 
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️ **被预算挡掉的候选必须"说出来"**（2026-10-15 修）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 原来的行为：静默丢掉，而材料看起来是完整的
+   *
+   * 上面那个 `break` 会把超预算之后的候选整段丢掉，而 `text` 里**没有任何交代**。
+   * 用真实材料实测（`#11`）：
+   * ```
+   *   headOfMarket(raw,     12_000) → candidatesShown = 1 / 12
+   *   headOfMarket(analyst, 24_000) → candidatesShown = 5 / 6
+   * ```
+   * 模型读到的是"候选就这些"，而真相是"还有 N 个被预算挡住了"。
+   *
+   * 这正是本仓库反复强调的那类**假事实** —— 与 `compactUniverseOverview` 的
+   *「必须显式写出省略了多少行」是同一条纪律：**宁可说截断了，不能让它误以为完整**。
+   *
+   * ⚠️ 它同时解释了另一个真现象：`analystContext` 取 6 片，而裁决官那一份
+   * 在 24k 预算下只列得出 5 个 —— **第 6 个候选从结论里消失了**，
+   * 而分析师明明分析过它。
+   */
+  const omittedCandidates = Math.max(0, total - picked.length);
+  const omissionNote =
+    omittedCandidates > 0
+      ? `\n\n（⚠️ 另有 ${omittedCandidates} 个候选因**材料预算**没有列出 —— ` +
+        `不是"市场里没有它们"，而是这一次的材料放不下。` +
+        `需要看就用 get_klines 点名要，或把它们排进前几位。）\n`
+      : '';
+
   return {
-    text: [head, ...picked, rulesTail].join(''),
+    text: [head, ...picked, omissionNote, rulesTail].join(''),
     candidatesShown: picked.length,
     totalCandidates: total,
   };
