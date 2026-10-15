@@ -126,6 +126,62 @@ export function parseRiskOfficerVerdict(text: string, decisions: readonly Decisi
   /* ⚠️ 必须包含「不同意」—— 实测模型常用这个词，而它不含「否决」也不含「拒绝」。 */
   const rejectRe = /否决|拒绝|不同意|不批准|rejected|reject|denied/i;
 
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **先认结构化 `verdict` —— 那才是提示词要求的格式**（2026-10-15 修）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 事故：`tighten` 被判成「否决」，于是**有机会也不出手**
+   *
+   * `roles.ts` 的风控官输出契约是**结构化 JSON**：
+   * ```
+   *   {"verdict":"approve|tighten|reject",
+   *    "lossScenarios":[{"scenario":"…","likelihood":"…","severity":"…"}],
+   *    "checked":"…"}
+   * ```
+   * 并且明说：「你**只能**否决（reject）或要求收紧（tighten）。你没有"放宽"这个选项。」
+   *
+   * 而解析器只认**中文散文**（`approveRe` / `rejectRe`）——
+   * 于是 `"verdict":"tighten"` **两边都不命中** ⇒ 判不出表态 ⇒ 走保守兜底。
+   *
+   * ## 实测代价（最近 60 轮）
+   *
+   * ```
+   *   verdict 分布: tighten=5 · approve=5 · reject=1
+   *   而那 5 次 tighten 全部渲染成：
+   *     <risk> 否决（…）：（风控官未给出理由）      ← 判成"否决"
+   *     <decision> []                              ← 所有决策被清空
+   *   而 judge 原本提议的是: close_short / open_long / open_long …
+   * ```
+   * ⇒ **风控官说"要求收紧"，系统读成"否决"**，于是真实动作被全部拦下。
+   *
+   * ## 三个缺陷叠加
+   * ```
+   *   ① `tighten` 不在 approveRe/rejectRe 里      → 判不出表态
+   *   ② 判不出时走保守兜底，而渲染层写成「否决」  → 比实际更严重
+   *   ③ `reason` 取"第一行非空文本" —— 而它是 JSON 对象，取不到散文理由
+   * ```
+   *
+   * ## 语义（必须与提示词一致）
+   * ```
+   *   approve  → 放行（不削减）
+   *   tighten  → 【放行但要收紧】= 削减仓位（不是否决！）
+   *   reject   → 否决
+   * ```
+   * ⚠️ `tighten` 归到"批准 + 削减"这一支 —— 因为它的字面意思是
+   * "要求收紧"，而收紧在系统里就是 `reduceDecisions()`。
+   * 把它当成否决会让**每一次风控官想保守一点都变成完全不出手**。
+   */
+  const jsonVerdict = ((): 'approve' | 'tighten' | 'reject' | null => {
+    /*
+     * ⚠️ 从**任意位置**找 `"verdict"` —— 实测它出现在 `担心：{...}` 那一行里
+     *（渲染层把整段 JSON 塞进了 `concern`），不在行首。
+     */
+    const m = /"verdict"\s*:\s*"?(approve|tighten|reject)"?/i.exec(text);
+    if (m === null) return null;
+    return m[1]!.toLowerCase() as 'approve' | 'tighten' | 'reject';
+  })();
+
   /* 结论行：第一行非空、且不是 JSON/表格/标题装饰的文本。 */
   const firstLine = text
     .split('\n')
@@ -212,7 +268,28 @@ export function parseRiskOfficerVerdict(text: string, decisions: readonly Decisi
     .replace(/无需|无须|不必|不用|不建议/g, '');
   const reduce = /削减|减半|降低仓位|reduce/i.test(withoutNegatedReduce);
 
-  const reason = (firstLine ?? '（风控官未给出理由）').slice(0, 300);
+  /*
+   * ⚠️ **理由的提取要认 JSON 结构**（2026-10-15）。
+   *
+   * 原来是 `firstLine`（第一行非空文本）—— 而结构化输出时**第一行就是那个 JSON 对象**，
+   * 于是线上渲染成「（风控官未给出理由）」：
+   * ```
+   *   <risk> 否决（group/auto-qfmodel）：（风控官未给出理由）
+   * ```
+   * **它明明给了理由**（`lossScenarios` 里写得清清楚楚）。
+   *
+   * 现在：优先取 JSON 里的 `checked`（它自己写的"我查了什么"），
+   * 没有则用第一条 `lossScenarios[].scenario`（它担心的具体亏损场景）。
+   * 两者都没有才退回散文第一行。
+   */
+  const jsonReason = ((): string | null => {
+    const checked = /"checked"\s*:\s*"((?:[^"\\]|\\.){1,300})"/.exec(text);
+    if (checked !== null) return checked[1]!.replace(/\\"/g, '"');
+    const scenario = /"scenario"\s*:\s*"((?:[^"\\]|\\.){1,300})"/.exec(text);
+    if (scenario !== null) return scenario[1]!.replace(/\\"/g, '"');
+    return null;
+  })();
+  const reason = (jsonReason ?? firstLine ?? '（风控官未给出理由）').slice(0, 300);
 
   /* 担心点：找含"风险/担心/不确定"的那一句。 */
   const concernLine = text
@@ -220,6 +297,32 @@ export function parseRiskOfficerVerdict(text: string, decisions: readonly Decisi
     .map((l) => l.trim())
     .find((l) => /风险|担心|不确定|隐患/.test(l));
   const concern = concernLine === undefined ? null : concernLine.slice(0, 300);
+
+  /*
+   * ⚠️ **结构化 `verdict` 优先**（2026-10-15）—— 见上面 `jsonVerdict` 的完整说明。
+   *
+   * ```
+   *   approve  → 放行
+   *   tighten  → 放行 + 削减（**不是否决**）
+   *   reject   → 否决
+   * ```
+   * 它比散文正则可靠：那是**提示词要求模型输出的字段**，是机器契约（§5.2）。
+   */
+  if (jsonVerdict === 'reject') {
+    return { approved: false, reduced: false, adjusted: null, reason, concern };
+  }
+  if (jsonVerdict === 'tighten') {
+    return {
+      approved: true,
+      reduced: true,
+      adjusted: reduceDecisions(decisions),
+      reason,
+      concern,
+    };
+  }
+  if (jsonVerdict === 'approve') {
+    return { approved: true, reduced: false, adjusted: null, reason, concern };
+  }
 
   /*
    * ⚠️ **否决优先**（`reject` 为真就拦，不管 `approve` 是否也为真）。
@@ -230,6 +333,8 @@ export function parseRiskOfficerVerdict(text: string, decisions: readonly Decisi
    *
    * 纵深防御：正则已经修好了（`(?<!不)同意`），但**判断顺序也要对** ——
    * 两个都修，任一个出问题都还有另一个兜着。
+   *
+   * ⚠️ 这一支现在只服务**散文格式**的输出（没有 `verdict` 字段时）。
    */
   if (reject) {
     return { approved: false, reduced: false, adjusted: null, reason, concern };
