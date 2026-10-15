@@ -4423,3 +4423,126 @@ Docker 镜像 (v0.1.27)→ success
 - ⚠️ 另一条**已记录、可独立推进**（但连着产品口径）：`.env.example` 缺 `ALLOW_PRIVATE_LLM_HOSTS`
 
 累计关闭 **41 个**。
+
+---
+
+## 45. 第 39 轮：守卫"每条路由都要有鉴权"（56 条全覆盖）、v0.1.28
+
+本轮无新 PR、无新 issue，HEAD 未变。继续按"安全相关的组"回扫 —— 这次是**最关键的信任面：API 鉴权**。
+
+### 一、结构：56 条路由，鉴权**逐条显式声明**
+
+```ts
+const authed = { preHandler: requireAuth(deps.jwtSecret, tokenRevoked) };
+app.get('/api/market/symbols', authed, async () => { … });
+```
+
+⚠️ 这种"每条都要记得加"的结构**天生容易漏一条** —— 而漏掉的那条
+**不会报错、不会让测试变红**，只是"这个端点谁都能调"。
+**这正是本仓库反复出现的形态**（`#126` 的接线、`#123` 的转义、`clerk` 的岗位…）：
+**一组东西靠人逐个记，就一定会漏。**
+
+### 二、⚠️ 我第一版的判据是错的（误报）
+
+我先用"路由附近有没有 `authed`"扫了一遍，报出 **4 条**：
+`/api/health`、`/api/auth/register`、`/api/auth/login`、`/api/events`。
+
+⚠️ 前三条是**有意公开**的（健康检查/注册/登录）。
+而 `/api/events` 是 **WebSocket**（`{ websocket: true }`）—— 它**自己手动鉴权**：
+
+```ts
+const token = extractToken(request, { allowQueryToken: true });
+if (!token) { socket.close(1008, '需要登录'); return; }
+const payload = verifyToken(token, deps.jwtSecret);
+if (!payload || tokenRevoked(payload)) { socket.close(1008, 'Invalid session'); return; }
+```
+
+⚠️ 所以它是**安全的**，而我的判据**误报了** —— 因为"`authed` 中间件"只是**鉴权的一种形式**。
+**判据必须承认另外两种**：有意公开、手动鉴权。
+
+⚠️ 与第 24 轮"判据假阳性"（`performance_analyst` 误报）是**同一个教训的第三次出现**：
+**判据本身也要被校准** —— 一个误报的守卫会让人去改本来正确的代码。
+
+### 三、守卫本体（三类，每类显式）
+
+| 类别 | 覆盖 |
+| --- | --- |
+| **`authed` 中间件** | 默认，52 条 |
+| **`PUBLIC_ROUTES` 白名单** | `/api/health`、`/api/auth/register`、`/api/auth/login` —— 各附理由 |
+| **`MANUAL_AUTH` 白名单** | `/api/events`（WebSocket 拿不到中间件注入点）—— 附理由 |
+
+⚠️ 白名单**按路由精确匹配并附理由**，不是"整个文件豁免"。
+⚠️ 另加**反向检查**：白名单里的路由**不存在了**也要报错（否则名单会腐化）。
+
+### 四、额外一条：手动鉴权的**质量**
+
+⚠️ "有令牌"不等于"令牌有效" —— 只判前者等于没鉴权（伪造一个字符串就过了）。
+所以另加一条测试**逐项钉住** `/api/events` 的手动鉴权：
+必须 `verifyToken(`（验签）+ `tokenRevoked(`（查撤销）+ 失败时 `close(1008)`。
+
+⚠️ 这条防的是：将来有人为了"消掉误报"而把它加进 `PUBLIC_ROUTES` ——
+那是**打开**而不是**记录**。
+
+### 五、验证
+
+```
+变异（插入 app.get('/api/secret-admin', async () => …)）
+  → 守卫报出「第 665 行：GET /api/secret-admin」✅
+  → 而在此之前，新增一条无鉴权路由【不会让任何测试变红】
+```
+
+两条防"空转"保险：**前置断言**（必须真扫到 ≥40 条）+ **探针校准**
+（人造无鉴权路由 + 人造带 `authed` 路由，**双向**验证不误报）。
+
+### 六、本轮另外三项安全面扫描（都干净）
+
+| 面 | 结果 |
+| --- | --- |
+| XSS（`dangerouslySetInnerHTML`）| ✅ 全仓零使用 |
+| 路径穿越（`readFileSync` 拼接请求参数）| ✅ 无 |
+| SQL 注入（模板串 SQL / 动态表名）| ✅ 无 |
+
+### 七、⚠️ 安全组回扫的小结（第 36~39 轮）
+
+| 轮次 | 面 | 发现 |
+| --- | --- | --- |
+| 36 | 提示词注入 | **9 处未转义**（已修 + 集合守卫）|
+| 37 | 出站地址校验 | **2 处裸 fetch**（记录 + 待决策）|
+| 38 | （同上，把代价量清）| 否掉一个"零代价"错方案 |
+| 39 | **API 鉴权** | **56 条全覆盖，无缺口** + 新增守卫 |
+
+⚠️ 四轮里**只有一处是真缺口**（提示词注入的 9 处）—— 但这正是回扫的价值：
+**"查过且干净"与"以为干净"是两件事**，而前者才能写进交接。
+
+### 八、发版 v0.1.28
+
+```
+① main 全绿      typecheck / test(60+1649+253) / build / lint /
+                check:links / check:routes / sim 18/18 → 全 0
+② notices 一致   184 依赖全宽松，git diff 空
+③ tag v0.1.28    Docker 镜像构建 success
+④ 发布 release   isDraft=false
+⑤ 红线核实       v0.1.27..HEAD 【无提交触及 risk/engine.ts】
+```
+
+### 九、本轮验证
+
+```
+npm run typecheck   → 0
+npm test            → 60 + 1649 + 253，0 fail
+npm run build       → 0
+npm run lint        → 0
+npm run check:links → 0
+npm run check:routes→ 0
+npm run sim         → 18/18
+Docker 镜像 (v0.1.28)→ success
+```
+
+### 十、剩余
+
+- **等拍板 5 条**：#173 B 项、#184、`funnel` 接线、`clerk` 岗位、两处裸 fetch
+- ⚠️ 另一条已记录：`.env.example` 缺 `ALLOW_PRIVATE_LLM_HOSTS`
+- **自驱下一步**：安全面已扫完主要四类；下一轮转向**数据一致性/账目**面
+  （净额 = 毛额 − 手续费 − 资金费 这条不变量是否有守卫）
+
+累计关闭 **41 个**。
