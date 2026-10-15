@@ -2170,6 +2170,8 @@ export function TraderTables({
   positionSymbols,
   onPositionsChanged,
   positions,
+  visibleTabs,
+  hideTabBar,
 }: {
   traderId: number;
   tab: TraderTabId;
@@ -2217,6 +2219,29 @@ export function TraderTables({
    * 整个持仓数组，旧名字只说了它当初服务的唯一用途。
    */
   positions?: ReadonlyArray<{ symbol: string; marginType?: MarginMode | null; leverage?: number | null }>;
+  /**
+   * **只渲染这些标签页**（不传 = 四张全渲染，行为与以前一致）。
+   *
+   * ## 为什么需要它（issue #184：机器人详情页左下死区）
+   *
+   * 那一页的两栏是「左：账户卡+曲线+审计 / 右：决策流」。右栏决策流按用户要求
+   * **上下占满**（`h-full` + 内部滚动），于是两栏容器等高；而左栏内容在
+   *「智能体审计」就结束 —— 实测 2560 宽下留 **489px**、3840 宽下留 **1179px**
+   * 的空白，且下方表格通栏被那块整屏高的两栏推到很靠下。
+   *
+   * 修法是**把「当前持仓」这张最常看的表移进左列**（紧跟审计）：左列被填满、
+   * 死区消失，而它只有 8 列，放在主栏宽度里不需要横向滚动。
+   * 「历史成交」等 11–14 列的表**必须留在通栏** —— 主栏只占 60% 宽
+   *（见 `TraderPage` 里那段"表格为什么在两栏之外"的说明）。
+   */
+  visibleTabs?: readonly TraderTabId[];
+  /**
+   * **隐藏标签栏**（"全部平仓 / 刷新"那些工具按钮保留）。
+   *
+   * 用于"这一栏只放一张表"的场合：那时标签栏没有可切的东西，
+   * 而一排只有一个选中项的标签会让操作员以为"别处还有别的表"。
+   */
+  hideTabBar?: boolean;
 }) {
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   const [ordersRefreshToken, setOrdersRefreshToken] = useState(0);
@@ -2388,13 +2413,20 @@ export function TraderTables({
     tab,
   );
 
-  const tabs: Array<{ id: TraderTabId; label: string; count?: number }> = [
+  const ALL_TABS: Array<{ id: TraderTabId; label: string; count?: number }> = [
     { id: 'positions', label: '当前持仓', count: positionCount },
     // 与表格同一个数组，见上面 `ordersPaging` 的说明。
     { id: 'orders', label: '当前委托', count: openOrders.length },
     { id: 'trades', label: '历史成交' },
     { id: 'history', label: '订单记录' },
   ];
+  /*
+   * ⚠️ `visibleTabs` 只筛**标签栏**；"渲染哪张表"仍由调用方传的 `tab` 决定
+   *（见 `visibleTabs` 的说明）—— 调用方负责让两者一致。
+   * 分开是有意的："能显示哪些"是布局决定，"现在显示哪张"是状态。
+   */
+  const tabs =
+    visibleTabs === undefined ? ALL_TABS : ALL_TABS.filter((item) => visibleTabs.includes(item.id));
 
   return (
     <Panel padded={false} bodyClassName="p-0">
@@ -2403,25 +2435,27 @@ export function TraderTables({
         className="flex flex-wrap items-center gap-2 border-b border-base-800 px-3 py-2"
       >
         {/* Real tab semantics, so the arrow keys and the tab order work. */}
-        <div role="tablist" aria-label="机器人数据表" className="flex items-center gap-0.5">
-          {tabs.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === item.id}
-              onClick={() => onChange(item.id)}
-              className={
-                tab === item.id
-                  ? '-mb-px border-b-2 border-accent px-3 py-1.5 text-base font-semibold text-ink-hi'
-                  : '-mb-px border-b-2 border-transparent px-3 py-1.5 text-base text-ink-lo transition hover:text-ink-mid'
-              }
-            >
-              {item.label}
-              {item.count !== undefined && <span className="num ml-1.5 text-xs text-ink-faint">{item.count}</span>}
-            </button>
-          ))}
-        </div>
+        {!hideTabBar && (
+          <div role="tablist" aria-label="机器人数据表" className="flex items-center gap-0.5">
+            {tabs.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === item.id}
+                onClick={() => onChange(item.id)}
+                className={
+                  tab === item.id
+                    ? '-mb-px border-b-2 border-accent px-3 py-1.5 text-base font-semibold text-ink-hi'
+                    : '-mb-px border-b-2 border-transparent px-3 py-1.5 text-base text-ink-lo transition hover:text-ink-mid'
+                }
+              >
+                {item.label}
+                {item.count !== undefined && <span className="num ml-1.5 text-xs text-ink-faint">{item.count}</span>}
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="ml-auto flex items-center gap-1.5">
           <Button

@@ -2190,6 +2190,56 @@ export function TraderPage() {
         */}
         {trader.mode === 'ai_team' && <AgentAuditPanel traderId={traderId} />}
 
+        {/*
+          ══════════════════════════════════════════════════════════════════════
+           ⭐ **「当前持仓」放在左列**（issue #184：左下大片死区）
+          ══════════════════════════════════════════════════════════════════════
+
+          ## 为什么移到这里
+
+          右栏决策流按用户要求**上下占满**（`h-full` + 内部滚动），于是两栏容器等高；
+          而左栏内容在「智能体审计」就结束。实测（`getBoundingClientRect` 锚三处）：
+          ```
+            2560×1440 → 左栏容器 1143px，内容只到 750px → 空白 489px
+            3840×2160 → 左栏容器 1863px，内容只到 780px → 空白 1179px
+          ```
+          「当前持仓」补进来之后左列被填满，那块空白消失，而下方通栏也不再被
+          一个整屏高的两栏推到很靠下（那是同一件事的另一面）。
+
+          ## 为什么只移这一张
+
+          它只有 8 列，主栏宽度（60%）装得下；而「历史成交」11 列、「订单记录」14 列
+          **必须留在通栏** —— 放进主栏就永远要左右拖动（见下面表格区那段说明）。
+
+          ## 为什么不给它 `max-h` 到视口比例
+
+          它已经在左列里，而左列本身 `xl:overflow-y-auto`。再给一个固定上限会让
+          "持仓 1 个"和"持仓 8 个"占同样的高度 —— 那正是本节开头那类**死空白**的来源。
+          让它按内容长：内容多时由左列的滚动接管。
+        */}
+        <TraderTables
+          traderId={traderId}
+          tab="positions"
+          /* 只有一张表可看 —— 标签栏没有意义（见 `hideTabBar` 的说明）。 */
+          onChange={() => {}}
+          hideTabBar
+          positionCount={openPositionCount}
+          onSelectSymbol={(symbol) => {
+            /* 与下方那份一致：点币种顺手把图表切到「行情」，消除一步。 */
+            setPickedSymbol(symbol);
+            setChartTab('candles');
+          }}
+          positionSymbols={positions.map((p) => p.symbol)}
+          positions={positions}
+          onPositionsChanged={() => {
+            void api
+              .traderPositions(traderId)
+              .then((rows) => setLivePositions(traderId, rows))
+              .catch(() => undefined);
+            setPickedSymbol(undefined);
+          }}
+        />
+
       </PageShell>
       </div>
 
@@ -2268,8 +2318,14 @@ export function TraderPage() {
       <div className="min-h-0 max-h-[30vh] flex-none space-y-4 overflow-y-auto">
         <TraderTables
           traderId={traderId}
-          tab={tableTab}
+          /*
+           * ⚠️ **「当前持仓」已经移到左列了**（见上面那个实例与 issue #184）——
+           * 所以这一栏只留三张表；`tableTab` 若停在 `positions`（旧状态、或深链带进来的），
+           * 回落到 `orders`。否则下面会再渲染一张持仓表，**同一屏两份**。
+           */
+          tab={tableTab === 'positions' ? 'orders' : tableTab}
           onChange={setTableTab}
+          visibleTabs={['orders', 'trades', 'history']}
           positionCount={openPositionCount}
           onSelectSymbol={(symbol) => {
             /*
