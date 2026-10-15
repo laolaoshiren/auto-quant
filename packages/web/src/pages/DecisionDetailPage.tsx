@@ -13,6 +13,7 @@ import {
   actionLabel,
 } from '../components/DecisionAudit';
 import { fmtDateTime, fmtInt, fmtLatency, fmtPrice, fmtUsd } from '../lib/format';
+import { plainText } from '../lib/plainText';
 /*
  * ⚠️「没有决策」是【判断】还是【故障】—— 那个判据的完整理由见该模块。
  * 一句话：一个把故障说成判断的界面，比一个报错的界面更危险。
@@ -169,7 +170,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
                 <span className="num font-semibold" title={entry.action}>
                   {actionLabel(entry.action)} {entry.symbol}
                 </span>{' '}
-                — {entry.detail}
+                — {plainText(entry.detail)}
               </li>
             ))}
           </ul>
@@ -214,7 +215,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
                 <p className={`text-base ${isFailure ? 'text-warn' : 'text-ink-faint'}`}>
                   {zeroDecision.headline}
                 </p>
-                <p className="mt-1 text-sm text-ink-faint">{zeroDecision.detail}</p>
+                <p className="mt-1 text-sm text-ink-faint">{plainText(zeroDecision.detail)}</p>
               </div>
             ) : (
               /*

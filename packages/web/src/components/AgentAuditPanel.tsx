@@ -181,7 +181,7 @@ export function AgentAuditPanel({ traderId }: { traderId: number }): React.React
                       <td className="num py-1 whitespace-nowrap text-ink-faint">{stamp(r.createdAt)}</td>
                       <td className="py-1 text-ink-soft">{r.kind}</td>
                       <td className="py-1 text-ink-soft">{r.trigger}</td>
-                      <td className={`py-1 ${r.outcome === 'ok' ? 'text-up' : 'text-warn'}`} title={r.detail}>
+                      <td className={`py-1 ${r.outcome === 'ok' ? 'text-up' : 'text-warn'}`} title={plainText(r.detail)}>
                         {r.outcome}
                       </td>
                       <td className="num py-1 text-right text-ink-faint">

@@ -251,8 +251,12 @@ function OutcomeChip({
   /*
    * 第一句放在标记旁边（它是"为什么"的答案），其余收进 `title`。
    * 服务端写的这些句子本身就以中文句号断句（`单日亏损熔断：…（上限 5%）。`）。
+   *
+   * ⚠️ 末尾是 `plainText` 而不是裸 `detail`：这里显示的正是 `parser.ts` 写的拒单理由
+   *（`它**没有被执行**，但也不是"模型没给"`）—— 不剥的话用户会看到 `**`。
+   * 在**取值这一步**剥，`lead` 与 `title` 就都干净了（只此一处，不必改两遍）。
    */
-  const text = detail ?? '';
+  const text = plainText(detail ?? '');
   const cut = text.search(/[。；]/);
   const lead = cut >= 0 ? text.slice(0, cut + 1) : text;
   return (
@@ -278,7 +282,7 @@ function Adjustments({ notes }: { notes: readonly string[] }): React.ReactElemen
     <ul className="mt-1 space-y-0.5">
       {notes.map((note, index) => (
         <li key={index} className="break-words text-xs leading-relaxed text-warn">
-          • {note}
+          • {plainText(note)}
         </li>
       ))}
     </ul>
