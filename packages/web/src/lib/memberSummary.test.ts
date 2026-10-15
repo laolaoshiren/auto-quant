@@ -29,6 +29,23 @@ import test from 'node:test';
 
 import { EMPTY_SUMMARY, summarizeMemberOutput } from './memberSummary.js';
 
+test('★★★ 水平分隔线不能被当内容显示（界面上的孤儿横线）', () => {
+  /*
+   * 2026-10-15 用户截图里看到的：岗位产出末尾挂着一条**孤零零的横线**，
+   * 看起来像界面坏了一条边框。根因是模型常用 `---` 给产出分段，
+   * 而摘要提取剥了 `**`/`#`/反引号却**漏了分隔线**。
+   *
+   * 判据要求"整行只有 ≥3 个 - * _" —— 所以正文里的连字符与负数必须留着。
+   */
+  const out = summarizeMemberOutput('---\n市场偏空，样本不足，本轮不做。\n---');
+  assert.ok(!out.includes('---'), `★ 分隔线没被剥掉：${out}`);
+  assert.ok(out.includes('市场偏空'), `★ 正文不能被一起剥掉：${out}`);
+
+  /* 反方向：`-1.5%` 这类数值（连字符后面跟着数字）必须原样保留。 */
+  const num = summarizeMemberOutput('BTCUSDT 位移 -1.50%，ATR 2.1%，无合法触发。');
+  assert.ok(num.includes('-1.50%'), `★ 负号被误剥了：${num}`);
+});
+
 test('★★★ 不能把裸 JSON / 代码围栏当摘要（第一版的事故）', () => {
   const out = summarizeMemberOutput('```json [ {"symbol":"BTWUSDT","action":"skip"} ] ```');
   assert.ok(!out.includes('```'), '★ 不能有代码围栏');
