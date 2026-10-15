@@ -13,6 +13,11 @@ import {
   actionLabel,
 } from '../components/DecisionAudit';
 import { fmtDateTime, fmtInt, fmtLatency, fmtPrice, fmtUsd } from '../lib/format';
+/*
+ * ⚠️「没有决策」是【判断】还是【故障】—— 那个判据的完整理由见该模块。
+ * 一句话：一个把故障说成判断的界面，比一个报错的界面更危险。
+ */
+import { looksLikeParseFailure } from './decisionZeroState';
 
 /**
  * Candidate symbols are rendered as chips. The count comes from the strategy's
@@ -56,6 +61,12 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
   const failed = record.executionLog.filter((entry) => entry.status === 'failed');
   const executed = record.executionLog.filter((entry) => entry.status === 'ok');
   const candidates = record.candidateSymbols;
+  /*
+   * ⚠️ **"没有决策"有两种截然不同的原因，界面必须分清**（2026-10-15）。
+   * 判据与它为什么不能用"长度""decisions 为空"等 —— 见 `decisionZeroState.ts` 的文件头。
+   * 一句话：**一个把故障说成判断的界面，比一个报错的界面更危险。**
+   */
+  const parseFailure = looksLikeParseFailure(record.rawResponse);
 
   /*
    * 左栏：这一轮的诊断读数。
@@ -163,9 +174,25 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
           />
           <Panel bodyClassName="p-0" padded={false}>
             {record.decisions.length === 0 ? (
-              <p className="px-4 py-3 text-base text-ink-faint">
-                没有可执行的决策 — 本周期模型选择观望或持仓。
-              </p>
+              /*
+               * ⚠️ 这里必须分清"判断"与"故障" —— 见上面 `parseFailure` 的说明。
+               * 说错话的界面比报错的界面更危险：它让人不去查。
+               */
+              parseFailure ? (
+                <div className="px-4 py-3">
+                  <p className="text-base text-warn">
+                    本轮**没有决策**，原因是**输出解析失败**（模型回复可能被截断）—— 这不是模型判断"不做"。
+                  </p>
+                  <p className="mt-1 text-sm text-ink-faint">
+                    原始回复里的报错原文见下方「模型输出」一节。这类失败会**整轮丢掉决策**，需要排查
+                    输出预算（`max_tokens`）或让模型把每条决策写短。
+                  </p>
+                </div>
+              ) : (
+                <p className="px-4 py-3 text-base text-ink-faint">
+                  没有可执行的决策 — 本周期模型选择观望或持仓。
+                </p>
+              )
             ) : (
               /*
                 1px gaps over a border-coloured background, rather than per-item
