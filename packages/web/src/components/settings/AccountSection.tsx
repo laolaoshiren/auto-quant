@@ -119,6 +119,20 @@ export function AccountSection() {
   const build = system?.build ?? null;
   const update = usePolled((signal) => api.updateCheck(signal), { intervalMs: 0 });
 
+  /*
+   * ⚠️ **产品版本的权威来源是 GitHub 上的最新 release，不是 `package.json`**
+   *（2026-10-15 用户报的 BUG）。
+   *
+   * 原来这一格读 `system.version` / `health.version`，两者都来自 `package.json`
+   * 的 `version` —— 而那个字段**从 `0.1.0` 起就没再更新过**（发版走的是
+   * release-drafter 从提交推导 tag）。实测界面上写 `0.1.0`，
+   * 而 GitHub 上最新发布已经是 **`v0.1.32`** —— 差了 32 个版本。
+   *
+   * 取不到（没发过 release / 网络不通）时回落到本地那个值，并且**说明它是本地的** ——
+   * 不假装它是远端版本。
+   */
+  const latestRelease = update.data?.latestRelease ?? null;
+
   const updateLabel = update.error
     ? '检查失败'
     : update.loading
@@ -273,7 +287,15 @@ export function AccountSection() {
         </FactGroup>
 
         <FactGroup title="运行时">
-          <FactRow label="产品版本" value={system?.version ?? health?.version ?? '—'} />
+          <FactRow
+            label="产品版本"
+            value={latestRelease ?? system?.version ?? health?.version ?? '—'}
+            sub={
+              latestRelease !== null
+                ? 'GitHub 上最新发布的版本'
+                : '本地 package.json 的版本 —— GitHub 上的发布没取到'
+            }
+          />
           <FactRow label="数据库" value={health?.db ?? '—'} />
         </FactGroup>
       </Panel>

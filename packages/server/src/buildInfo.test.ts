@@ -300,10 +300,15 @@ test('HTTP 403 被说成"速率受限"，而不是一个裸的状态码', async 
 test('结果被缓存：反复查看这一页不会反复打 GitHub', async () => {
   resetBuildInfoCache();
   const local = info();
-  let calls = 0;
+  const urls: string[] = [];
   await withFetch(
-    () => {
-      calls += 1;
+    (url) => {
+      urls.push(url);
+      /*
+       * 两个端点的返回形状不同：提交端点看 `sha`、release 端点看 `tag_name`。
+       * 让它们返回同一种形状的话，断言在"两个请求其实打的是同一个地方"时也会通过。
+       */
+      if (url.includes('/releases/latest')) return { body: { tag_name: 'v9.9.9' } };
       return { body: { sha: local.commit, commit: { message: 'x' } } };
     },
     async () => {
@@ -312,8 +317,68 @@ test('结果被缓存：反复查看这一页不会反复打 GitHub', async () =
       await checkForUpdates(local);
     },
   );
-  // 未认证的 GitHub 限额是 60 次/小时/IP —— 每次刷新都打一次是会把限额烧完的。
-  assert.equal(calls, 1);
+  /*
+   * ⚠️ **两个请求是有意的**（2026-10-15 加）：提交端点回答"该不该部署"，
+   * `releases/latest` 回答"产品版本是什么"（见下一条测试 —— 它原来读
+   * `package.json`，而那个值长期停在 `0.1.0`）。缓存仍然生效：
+   * 这里看到的是 **3 次 `checkForUpdates` 只打了 2 次网络**。
+   *
+   * 未认证的 GitHub 限额是 **60 次/小时/IP**：10 分钟缓存 ⇒ 最坏 6 轮 × 2 = 12 次，
+   * 仍在限额内。再加端点前先算这个数。
+   */
+  assert.equal(urls.length, 2, `3 次调用只该打 2 次网络，实际打了 ${urls.length} 次`);
+  assert.ok(
+    urls.some((u) => u.includes('/releases/latest')),
+    '产品版本要从 GitHub 的 release 取',
+  );
+});
+
+test('★★★ 产品版本取的是 GitHub 上的 release tag（不是 package.json 里那个 0.1.0）', async () => {
+  /*
+   * ## 2026-10-15 用户报的界面 BUG
+   *
+   * `/account` 的「产品版本」显示 `0.1.0`，而 GitHub 上最新发布已经是 **`v0.1.32`**
+   * —— 差了 32 个版本。根因是那一格读 `package.json` 的 `version`，
+   * 而发版走的是 release-drafter 从提交推导 tag，从不写回 `package.json`。
+   *
+   * 这条钉住"取的是 release tag"这个口径。
+   */
+  resetBuildInfoCache();
+  const local = info();
+  await withFetch(
+    (url) =>
+      url.includes('/releases/latest')
+        ? { body: { tag_name: 'v0.1.32' } }
+        : { body: { sha: local.commit, commit: { message: 'x' } } },
+    async () => {
+      const result = await checkForUpdates(local);
+      assert.equal(result.latestRelease, 'v0.1.32');
+    },
+  );
+});
+
+test('★ 取不到 release 时是 null，且不把版本比对一起拖成 unknown', async () => {
+  /*
+   * 没发过 release 的仓库会 404，网络不通也一样 —— 两种都只该让这一格变成 `null`
+   *（由界面回落到本地版本、并**说明它是本地的**）。编一个版本号出来会让
+   *"这是什么版本"变成假话。
+   *
+   * 反向守卫是后半句：**"产品版本取不到"不该污染"该不该部署"** ——
+   * 那两件事的严重性完全不同，后者是运维要行动的信号。
+   */
+  resetBuildInfoCache();
+  const local = info();
+  await withFetch(
+    (url) => {
+      if (url.includes('/releases/latest')) return { status: 404, body: {} };
+      return { body: { sha: local.commit, commit: { message: 'x' } } };
+    },
+    async () => {
+      const result = await checkForUpdates(local);
+      assert.equal(result.latestRelease, null);
+      assert.equal(result.state, 'up-to-date', 'release 取不到不该影响"该不该部署"');
+    },
+  );
 });
 
 /* -------------------------------------------------------------------------- */

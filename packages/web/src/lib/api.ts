@@ -375,6 +375,14 @@ export interface UpdateCheck {
   latestSubject: string | null;
   latestCommittedAt: string | null;
   behindBy: number | null;
+  /**
+   * **GitHub 上最新 release 的 tag**（`v0.1.32`）—— "产品版本"的权威来源。
+   *
+   * 取不到（没发过 release / 网络不通）时为 `null`；那时界面回落到本地
+   * `package.json` 的版本并**说明它是本地的**。见 `buildInfo.ts` 的实现注释：
+   * 原来这一格读 `package.json`，而它从 `0.1.0` 起就没更新过。
+   */
+  latestRelease: string | null;
 }
 
 export interface SystemStatus {

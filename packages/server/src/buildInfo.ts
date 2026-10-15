@@ -169,6 +169,22 @@ export interface UpdateCheck {
   latestCommittedAt: string | null;
   /** 只在 `state === 'behind'` 且 compare 成功时给出。 */
   behindBy: number | null;
+  /**
+   * **GitHub 上最新 release 的 tag**（例如 `v0.1.32`）—— "产品版本"的权威来源。
+   *
+   * ## 为什么需要它（2026-10-15 用户报的界面 BUG）
+   *
+   * 操作员账户页的「产品版本」原来读 `package.json` 的 `version`，
+   * 而那个字段**从 `0.1.0` 起就没再更新过**（发版走的是 release-drafter
+   * 从提交推导 tag，不写 package.json）。
+   *
+   * 实测：界面上写着 `0.1.0`，而 GitHub 上最新发布已经是 **`v0.1.32`** ——
+   * 用户看到的就是一句**至少落后 32 个版本的假话**。
+   *
+   * 产品版本的权威来源是"发布"，而发布发生在 GitHub 上，所以到这里取。
+   * 取不到时为 `null`（网络不通、仓库没有 release）—— **不编一个版本号出来**。
+   */
+  latestRelease: string | null;
 }
 
 /** GitHub API 地址。可覆盖以指向企业实例；默认是公开 API。 */
@@ -262,6 +278,7 @@ export async function checkForUpdates(info: BuildInfo | null = readBuildInfo()):
     latestSubject: null,
     latestCommittedAt: null,
     behindBy: null,
+    latestRelease: null,
     ...extra,
   });
 
@@ -301,11 +318,24 @@ export async function checkForUpdates(info: BuildInfo | null = readBuildInfo()):
     const latestSubject = (head.commit?.message ?? '').split('\n')[0] ?? '';
     const latestCommittedAt = head.commit?.committer?.date ?? '';
 
+    /*
+     * GitHub 上最新的 release tag —— "产品版本"的权威来源（见 `UpdateCheck.latestRelease`）。
+     *
+     * ⚠️ **它失败不影响版本比对**：比对回答的是"该不该部署"，release 只回答
+     * "这是个什么版本"。为了后者把前者变成"未知"是本末倒置 —— 所以单独吞掉异常。
+     *
+     * ⚠️ 调用量：本函数整体**成功缓存 10 分钟** ⇒ 最多 6 次/小时，
+     * 每次最多 3 个请求（head + 可能的 compare + 本函数）⇒ 最坏 18 次/小时，
+     * 而未认证限额是 60 次/小时。**不要在这里再加请求。**
+     */
+    const latestRelease = await fetchLatestReleaseTag(slug).catch(() => null);
+
     const seen = {
       latestCommit: latestCommit || null,
       latestCommitShort,
       latestSubject: latestSubject || null,
       latestCommittedAt: latestCommittedAt || null,
+      latestRelease,
     };
 
     if (latestCommit && latestCommit === info.commit) {
@@ -428,4 +458,27 @@ async function githubGet<T>(url: string): Promise<T> {
     throw new Error(`GitHub 返回 HTTP ${response.status}`);
   }
   return (await response.json()) as T;
+}
+
+/**
+ * 取 GitHub 上**最新 release 的 tag**（`v0.1.32`）。取不到时返回 `null`。
+ *
+ * ## 为什么不复用 `githubGet` 的报错口径
+ *
+ * 一个**还没有发过 release** 的仓库会得到 404，而 `githubGet` 把 404 解释成
+ * "仓库或分支不存在（私有仓库需要 GITHUB_TOKEN）" —— 那句话在这里是**错的**，
+ * 会让人去查 token。所以 `null`（"没有 release"）与"接口失败"在这里分开：
+ * 调用方只看 tag 有没有拿到，不关心是哪一种。
+ *
+ * ⚠️ 调用量见 `checkForUpdates` 里那段（最坏 18 次/小时，限额 60）。
+ */
+async function fetchLatestReleaseTag(slug: string): Promise<string | null> {
+  try {
+    const body = await githubGet<{ tag_name?: string }>(`${GITHUB_API}/repos/${slug}/releases/latest`);
+    const tag = (body.tag_name ?? '').trim();
+    return tag.length > 0 ? tag : null;
+  } catch {
+    /* 没有 release、网络不通、限流 —— 对"产品版本"这一格都只是"取不到"。 */
+    return null;
+  }
 }
