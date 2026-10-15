@@ -4766,3 +4766,125 @@ Docker 镜像 (v0.1.30)→ success
 - **自驱下一步**：补最后一条不变量「**每一次平仓都必须入账**」的守卫
 
 累计关闭 **41 个**。
+
+---
+
+## 48. 第 42 轮：守卫"每个关仓点都必须入账"—— 五条不变量齐了、v0.1.31
+
+本轮无新 PR、无新 issue，HEAD 未变。执行第 41 轮的计划：补**最后一条**不变量。
+
+### 一、这条守卫接的是什么
+
+平仓要同时做两件事：**写一行 `trades`**（账）+ **关掉 `positions` 行**（状态）。
+前者只有 `bookClosedPosition` 会做。
+
+⚠️ 而 `positionStore.close(id)` 是**共用**的 —— 它既关"已成交的持仓行"，
+也关"未成交的挂单行"。所以**"有 close 调用"不能推出"这是一次平仓"** ——
+判据必须认得出区别。
+
+### 二、判据：把 `close` 的调用点分两类，每类显式登记
+
+| 类别 | 方法 |
+| --- | --- |
+| **入账口** | `bookClosedPosition`（先写账再关行）|
+| **只关挂单** | `settlePendingEntries`（坏数据作废）、`expireStalePendingEntries`（超时撤单）、`executeCancelPending`（模型撤单）、`cancelAllPendingEntries`（批量撤单）|
+
+⚠️ 任何**新的** `positionStore.close` 调用点都必须落进这两类之一 —— 落不进去就报错。
+这正是"每次平仓都必须入账"的落地方式：**新增关仓点时必须先想清楚"这笔账谁来记"**。
+
+⚠️ 那 4 处"只关挂单"我都**逐处读过**：关的是**未成交**的 pending 行
+（坏数据 / 超时撤掉 / 模型撤单 / 批量撤单），**未成交 ⇒ 无账可记**。
+其中 `expireStalePendingEntries` 还刻意在"撤不掉"时 `continue`
+（注释：*"若其实已成交，`settlePendingEntries` 会转正它"*）—— 那是**有意**的。
+
+### 三、额外一条：入账口的**内部顺序**
+
+`bookClosedPosition` 里必须**先 `tradeStore.insert(...)` 再 `positionStore.close(...)`** ——
+反过来的话，`close` 成功而 `insert` 抛错 ⇒ **仓位消失、账没记**。
+
+### 四、⚠️ 我第一版的判据**误报了**（第三次同类）
+
+我一开始直接断言"`insert` 的下标 < `close` 的下标"，结果**失败** ——
+因为 `bookClosedPosition` 里有**两个** `close`：
+
+```
+第 5746 行  positionStore.close(local.id);   ← 幂等分支：此前【已入账】，
+                                               所以只关行、不重复记账
+第 5761 行  const booked = tradeStore.insert({ … });   ← 正常路径：先写账
+第 5799 行  positionStore.close(local.id);             ← 再关行
+```
+
+⚠️ **第 5746 行那个是正确的** —— 它在"`alreadyBooked` 有值"的早退分支里，
+账**早就存在**，重复 `insert` 反而会记两次（§2.5 的幂等）。
+
+所以判据改成：**每一个 `close` 之前，要么已经 `insert` 过，要么这个分支
+已经证明"账已存在"**（用 `alreadyBooked` 判定）。
+
+⚠️ **这是第三次同类误报**：
+| 轮次 | 误报 | 根因 |
+| --- | --- | --- |
+| 24 | `performance_analyst` 被当成死角色 | 判据只认 `role: 'x'`，漏了**数组字面量**形式 |
+| 39 | `/api/events` 被当成无鉴权 | 判据只认 `authed` 中间件，漏了**手动鉴权** |
+| **42** | `bookClosedPosition` 被当成顺序错 | 判据只认"第一个 close"，漏了**幂等分支** |
+
+⚠️ 三次的根因**完全一样**：**判据只认一种形式，而代码里有两种。**
+这已经是本仓库的一条稳定规律 —— 写守卫时**必须先把"这件事有几种形态"数一遍**。
+
+### 五、验证
+
+```
+变异（新增 rogueClose(id) 方法，只 close 不记账）
+  → 守卫报出「rogueClose（第 4876 行）」✅
+  → 而在此之前，新增一个关仓点【不会让任何测试变红】
+```
+
+两条防"空转"保险：**前置断言**（必须真解析出 ≥20 个方法、≥4 个调 `close` 的方法）+
+**探针校准**（人造未知关仓点 / 已知入账口 / 已知"只关挂单"，**三向**验证）。
+
+### 六、📊 五道闸门第 ② 条（五条不变量）—— **全部有守卫了**
+
+| 不变量 | 守卫 |
+| --- | --- |
+| 风控引擎是下单的唯一路径 | ✅ `receiptAdjustGate.test.ts` |
+| 每一笔订单都必须被记录 | ✅ `orderRecordGuard.test.ts`（v0.1.30）|
+| 每一次平仓都必须入账 | ✅ **本轮** |
+| 模型输出是不可信输入 | ✅ `promptEscape.test.ts`（v0.1.25）|
+| 净额 = 毛 − 费 − 资金费 | ✅ `pnlArithmeticGuard.test.ts`（v0.1.29）|
+
+⚠️ 这是一个**里程碑**：五条不变量从"靠人记"变成"**有测试守着**"。
+⚠️ 但要诚实：这些守卫是**结构断言**（"调用点在不在、配对不配对"），
+**不能证明运行时行为正确** —— 它们防的是"**漏一处**"，不是"算错"。
+"算错"由各自的单元测试与 `sim` 管。
+
+### 七、发版 v0.1.31
+
+```
+① main 全绿      typecheck / test(60+1658+253) / build / lint /
+                check:links / check:routes / sim 18/18 → 全 0
+② notices 一致   184 依赖全宽松，git diff 空
+③ tag v0.1.31    Docker 镜像构建 success
+④ 发布 release   isDraft=false
+⑤ 红线核实       v0.1.30..HEAD 【无提交触及 risk/engine.ts】
+```
+
+### 八、本轮验证
+
+```
+npm run typecheck   → 0
+npm test            → 60 + 1658 + 253，0 fail
+npm run build       → 0
+npm run lint        → 0
+npm run check:links → 0
+npm run check:routes→ 0
+npm run sim         → 18/18
+Docker 镜像 (v0.1.31)→ success
+```
+
+### 九、剩余
+
+- **等拍板 5 条**：#173 B 项、#184、`funnel` 接线、`clerk` 岗位、两处裸 fetch
+- ⚠️ 已记录未推进：`.env.example` 缺 `ALLOW_PRIVATE_LLM_HOSTS`
+- **自驱下一步**：五条不变量已齐 → 转向**其余流程面**
+  （提交信息一行、无站点信息/凭据这两条流程性闸门是否有可自动化的部分）
+
+累计关闭 **41 个**。
