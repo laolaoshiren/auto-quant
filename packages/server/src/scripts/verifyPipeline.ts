@@ -181,8 +181,28 @@ async function main(): Promise<void> {
   process.stdout.write(`${systemPrompt.slice(0, 1800)}\n   …\n`);
 
   heading('6. 用户提示词 —— 一个候选标的区块');
-  const candidateStart = userPrompt.indexOf('# CANDIDATE COINS');
-  process.stdout.write(`${userPrompt.slice(candidateStart, candidateStart + 1500)}\n   …\n`);
+  /*
+   * ⚠️⚠️ **这里原来搜的是 `# CANDIDATE COINS`**（2026-10-15 实测抓到的假验证）。
+   *
+   * 提示词**早已中文化**成 `# 候选标的（N 个）`（见 `prompt.ts` 的 header 渲染），
+   * 于是 `indexOf` 恒返回 **-1**，而 `slice(-1, 1499)` 打印的是
+   * **提示词的末尾**（绩效/教训那些区块）—— 标题却写着"一个候选标的区块"。
+   *
+   * 也就是说：这一步**从来没验证过它声称要验证的东西**，而且看不出来 ——
+   * 正是本仓库最在意的那类失败形状（"看起来在验证、其实什么都没验证"）。
+   *
+   * 现在按**实际标题**找；找不到就**明说**，不再打印一段无关内容装作看到了。
+   */
+  const CANDIDATE_HEADING = '# 候选标的';
+  const candidateStart = userPrompt.indexOf(CANDIDATE_HEADING);
+  if (candidateStart < 0) {
+    process.stdout.write(
+      `   ⚠️ 提示词里找不到「${CANDIDATE_HEADING}」—— 标题格式可能又变了。\n` +
+        `      这一步因此什么都没验证；请先把这个常量与 prompt.ts 的 header 对齐。\n`,
+    );
+  } else {
+    process.stdout.write(`${userPrompt.slice(candidateStart, candidateStart + 1500)}\n   …\n`);
+  }
 
   heading('7. 解析一份真实的模型响应');
   const parsed = parseDecisionResponse(CANNED_MODEL_RESPONSE, {
