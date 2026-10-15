@@ -53,11 +53,30 @@ test('★ 唤醒的理由必须进审计日志（操作员要能看到"为什么
 });
 
 test('★ 现有的两个唤醒源不能被弄丢（成交/持仓剧变）', () => {
-  /* 情报是【新增】的第三个源，不是替换。
-   * ⚠️ 这条查【原始源码】而不是剥注释后的：`'有成交'` 出现在
-   * `requestEarlyCycle('有成交')` 的调用里，但剥注释工具可能因
-   * 行首匹配规则误伤它（实测假失败过一次）。 */
+  /*
+   * 情报是【新增】的第三个源，不是替换。
+   *
+   * ⚠️ **这条原来查的是 `manager.ts` 里的一句注释**（`/持仓剧变/.test(rawMgr)`），
+   * 而"持仓剧变"的**真正实现**在 `autoTrader.ts:1623`
+   *（`this.requestEarlyCycle(\`${heldReason !== null ? '持仓剧变' : '候选异动'}：…\`)`）。
+   *
+   * 后果：2026-10-16 我删掉 `manager.ts` 里一段**不可达代码**时，
+   * 这条断言跟着变红 —— 而**功能一点没坏**。**判据找错了文件**。
+   *
+   * ⚠️ 这与本仓库反复出现的形态同族：**判据看起来在守 A，实际守的是 A 的提及**。
+   * 注释可以随便改，实现才是要守的东西。
+   */
   const rawMgr = readFileSync(new URL('./manager.ts', import.meta.url), 'utf8');
-  assert.ok(rawMgr.includes("requestEarlyCycle('有成交')"), '★ 成交唤醒还在（manager.ts:1291）');
-  assert.ok(/持仓剧变/.test(rawMgr), '★ 持仓剧变唤醒还在');
+  assert.ok(
+    rawMgr.includes("requestEarlyCycle('有成交')"),
+    '★ 成交唤醒还在（`manager.ts` 的成交即时对账里）',
+  );
+
+  /* ⚠️ 持仓剧变查**实现文件**，不查注释。 */
+  const rawTrader = readFileSync(new URL('./autoTrader.ts', import.meta.url), 'utf8');
+  assert.ok(
+    rawTrader.includes("'持仓剧变'") && /this\.requestEarlyCycle\(/.test(rawTrader),
+    '★ 持仓剧变唤醒还在（`autoTrader.ts` 的持仓剧变监控里）——\n' +
+      '    ⚠️ 它**不该**去 `manager.ts` 里找：那里只有注释提过它。',
+  );
 });

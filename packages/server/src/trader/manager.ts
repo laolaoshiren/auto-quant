@@ -26,7 +26,6 @@ import { AutoTrader, type DecisionModel } from './autoTrader.js';
 import { ModelRouter } from '../llm/modelRouter.js';
 import { createMagpieCallFactory, discoverFromGateway } from './magpieGateway.js';
 import { resolveTeamGateway } from './teamGateway.js';
-import { collectMarketResearch, DEFAULT_SEARCH_ENDPOINT } from './agent/webSearch.js';
 import { runAgentTask } from './agent/harness.js';
 import { parseIntelReport } from './intel/parseIntel.js';
 import { rankIntel } from './intel/freshness.js';
@@ -747,6 +746,13 @@ function ensureResearchRefresher(
   traderId: number,
   symbols: readonly string[],
   apiKey: string,
+  /**
+   * ⚠️ **情报触发的提前唤醒**（去轮次化的第三个唤醒源）。
+   *
+   * 本函数是**模块级**的，拿不到 `this.running`，所以由调用方（类方法里）
+   * 注入这个回调，一路传给 `refreshResearch`。不传 = 只调研、不唤醒。
+   */
+  onHotIntel?: (why: string) => void,
 ): void {
   if (researchRefreshers.has(traderId)) return;
   /*
@@ -829,7 +835,7 @@ function ensureResearchRefresher(
     const controller = new AbortController();
     researchAborts.set(traderId, controller);
     void runOutsideCritical(async () =>
-      refreshResearch(traderId, symbols, apiKey, controller.signal),
+      refreshResearch(traderId, symbols, apiKey, controller.signal, onHotIntel),
     )
       /*
        * ⚠️⚠️ **不能写成 `.catch(() => undefined)`**（2026-10-13 实测抓到）。
@@ -1102,6 +1108,13 @@ async function refreshResearch(
   symbols: readonly string[],
   apiKey: string,
   signal?: AbortSignal,
+  /**
+   * ⚠️ **情报触发的提前唤醒**（去轮次化的第三个唤醒源）—— 见下面调用点那段注释。
+   *
+   * 模块级函数拿不到 `this.running`，所以由调用方注入这个回调。
+   * 不传 = 只调研、不唤醒（旧行为）。
+   */
+  onHotIntel?: (why: string) => void,
 ): Promise<void> {
   const { runAgentTask } = await import('./agent/harness.js');
   const { HUNTERS, buildHunterTask, mergeHunterReports, summariseHunters } = await import('./intel/hunters.js');
@@ -1271,6 +1284,55 @@ async function refreshResearch(
           (unconfirmed > 0 ? `；其中 ${unconfirmed} 条为单一来源未确认，已标注供裁决官自行权衡` : '') +
           '）',
       );
+
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⭐ **情报触发的提前唤醒**（2026-10-14 · 去轮次化的阶段 2）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * ## ⚠️ 这段功能**曾经从未生效过**（2026-10-16 发现并修复）
+       *
+       * 它原来写在 `buildTeamModel` 里的一个**深层闭包**中，位于一句
+       * `return` **之后** —— 即**不可达代码**。而 `intelWake.test.ts` 用
+       * **源码结构断言**钉住了它（"调研发现强情报时必须调 `requestEarlyCycle`"），
+       * 于是那个测试**一直绿着，而功能一次都没跑过**。
+       *
+       * 我按"注释说它该干什么"删掉那段不可达代码时，4 个测试同时变红 ——
+       * **那才是它的第一次生效**。教训：**结构断言能让"不可达的代码"看起来是活的**；
+       * 而"不可达"这件事只有 `no-unreachable` 那条 eslint 规则（被显式关掉了）会报。
+       *
+       * ## 判据：什么值得叫醒决策
+       *
+       * ```
+       *   direction 是 bullish/bearish（neutral 不算 —— 那不是信号）
+       *   且 confirmed（≥2 个独立来源 —— 单源传闻不值得打断）
+       *   且 freshness 是 fresh（"新鲜"档 —— 偏旧的不值得）
+       * ```
+       *
+       * ⚠️ 注意这三道判据**比上面缓存用的 `requireConfirmed: false` 更严**，
+       * 那是**刻意的**：写进材料供裁决官权衡可以放宽（决定权在 AI 手里），
+       * 但**主动打断决策循环**必须严格 —— 否则单源传闻就能反复叫醒它。
+       *
+       * ## 为什么只在这里"发现"，不在这里"决定醒不醒"
+       *
+       * `requestEarlyCycle` 内部有完整的四道闸（运行中/团队模式/最小间隔/
+       * 只提前不推后）—— 尤其"最小间隔"防的是
+       * "情报 → 唤醒 → 决策 → 又一条情报"的紧循环。
+       */
+      const hot = ranked.filter(
+        (r) =>
+          (r.intel.direction === 'bullish' || r.intel.direction === 'bearish') &&
+          r.assessment.confirmed &&
+          r.assessment.freshness === 'fresh',
+      );
+      if (hot.length > 0) {
+        const why = `情报唤醒：${hot.length} 条已确认的强方向情报（${hot
+          .slice(0, 3)
+          .map((h) => `[${h.intel.direction}] ${h.intel.summary.slice(0, 30)}`)
+          .join('；')}）`;
+        runtimeLogs.write(traderId, 'info', 'team', `[调研] ${why}`);
+        onHotIntel?.(why);
+      }
       return;
     }
     const note = '（本轮没有可用的新鲜情报：查到的都过期了）';
@@ -2046,7 +2108,21 @@ export class TraderManager {
          * ⚠️ 缓存**空**时（首次启动）也不阻塞等待 —— 立刻返回一句说明，
          * 让团队知道"这一轮没有新闻材料"。**不能让整轮卡在调研上。**
          */
-        ensureResearchRefresher(traderId, symbols, apiKey);
+        ensureResearchRefresher(traderId, symbols, apiKey, (why) => {
+          /*
+           * ⚠️ **情报触发的提前唤醒** —— 接线在这里，判据在 `refreshResearch` 里。
+           *
+           * `refreshResearch` / `ensureResearchRefresher` 都是**模块级**函数，
+           * 拿不到 `this.running`，所以在这一层（类方法内）注入。
+           *
+           * ⚠️ 用 optional chaining：机器人可能已经停了（调研是 20 分钟的后台节奏，
+           * 期间用户完全可能停掉它）—— 那时 `running` 里没有它，静默跳过是对的。
+           *
+           * ⚠️ **`requestEarlyCycle` 内部有四道闸**（运行中/团队模式/最小间隔/
+           * 只提前不推后）—— 这里只负责"发现值得唤醒的事"，要不要醒由那些闸决定。
+           */
+          this.running.get(traderId)?.requestEarlyCycle(why);
+        });
         /*
          * ⚠️ **判据是"有没有真的查到过东西"，不是"Map 里有没有这一项"**
          *（2026-10-13 实测踩到）。
@@ -2083,345 +2159,6 @@ export class TraderManager {
           keys: [],
         };
 
-        /* eslint-disable no-unreachable */
-        /*
-         * ══════════════════════════════════════════════════════════════════════
-         *  ⚠️ DEAD-CODE-SYNC-RESEARCH（待删，但**无害**）
-         * ══════════════════════════════════════════════════════════════════════
-         *
-         * 从这一行到本闭包结束的 `});`，是**原来的"同步调研"实现**。
-         *
-         * ## 它为什么不执行
-         *
-         * 上面那句 `return` 已经返回 —— 这一整段是**不可达代码**。
-         * 所以它**无害**（不会重复调研、不会多花额度），
-         * 但它**误导性很强**：读代码的人会以为"四猎手是在这里跑的"，
-         * 而实际上四猎手跑在**模块级的 `refreshResearch()`**（文件上方）。
-         *
-         * ## 为什么暂时留着
-         *
-         * 我为了删它已经**三次写坏这个文件**（两次 PowerShell 大段替换、
-         * 一次 edit 边界算错）。而它无害 —— **风险大于收益**。
-         *
-         * ## 正确的删法（留给下一次）
-         *
-         * **不要用 PowerShell 数组操作。** 用编辑器从这一行整段选中到
-         * 本闭包结束的 `});`，一次删除，然后立刻 `npm run typecheck`。
-         * 判据：删完之后 `manager.ts` 里不该再有 `collectMarketResearch` 的调用
-         *（模块级已经不需要它了）。
-         *
-         * ══════════════════════════════════════════════════════════════════════
-         *
-         * 下面是原注释（保留，因为其中"为什么用 agent 而不是直接调搜索"
-         * 那段论证仍然适用于**模块级的 `refreshResearch`**）：
-         */
-
-        /*
-         * ⚠️ **第一优先：让真 agent 自己去查**（2026-10-12 实测后改的）。
-         *
-         * ## 为什么换掉"直接调 MCP 搜索"
-         *
-         * 实测对照（同一个新闻调研任务）：
-         *
-         * | | 直接调搜索 / 单次模型调用 | harness agent |
-         * |---|---|---|
-         * | 情报产出 | 零（「我无法联网，没有工具」）| **3 条具体新闻 + 资金流 + 来源链接** |
-         *
-         * 差别在于 agent 会**自己决定查什么、查几轮、把结果综合成结论** ——
-         * 而"调一次搜索接口"只是把原始结果丢出来。
-         *
-         * 用户的原话：
-         * > 「智能体就像一个真人一样，公司干活的员工……能**自己上班干活**，
-         * >  而不是像机器人一样**问一次答一次**」
-         *
-         * ## 为什么仍然保留 MCP 搜索作为兜底
-         *
-         * harness 没装、超时、模型不认识 —— 任何一种都可能发生。
-         * **兜底不是"退化成没用"，而是"至少还有原始搜索数据"**。
-         */
-        /*
-         * ── **四个猎手并行调研**（2026-10-13 接线）─────────────────────────────
-         *
-         * ## 为什么从"一次调研"改成"四个猎手"
-         *
-         * 用户的要求：
-         * > 「总管委派子代理去做市场调研（查**新闻、各大交易所社区、
-         * >  **社交媒体、新闻源**等等）」
-         * > 「有**调查新闻的**、有**监控社区的**、有**查市场情绪的**」
-         *
-         * 而之前是**一段提示词 + 一次 agent 调用** ——
-         * **一个 agent 覆盖不了多个信息源**：它一次只能沿一个方向查，
-         * 结果必然是"查了新闻就没查社区"。
-         *
-         * ## 并行（墙钟不叠加）
-         *
-         * 实测一个 harness 调研约 **197 秒**，串行四个就是 13 分钟；
-         * 并行仍是约 200 秒。用户明确说过"不限制并发"（指 magpie 侧），
-         * 而**服务器侧的并发由闸门控**（`AQ_HUNTER_CONCURRENCY`，默认 2）。
-         *
-         * ## ⚠️ 失败者必须进结果（不能静默丢掉）
-         *
-         * 见 `hunters.ts`：把失败的猎手丢掉会让下游以为
-         * "**那个来源上什么都没有**" —— 而那是两件完全不同的事
-         *（"社区没有讨论" vs "社区猎手挂了"）。
-         */
-        const hunterLimit = hunterConcurrency();
-        const hunterTimeout = hunterTimeoutMs();
-        /*
-         * ⚠️ **每个猎手一个独立的工作目录**（2026-10-13 实测后加）。
-         *
-         * ## 为什么（一次真实的全部失败）
-         *
-         * 第一版四个猎手共用 `agentWorkdir(traderId)`，实测结果：
-         * ```
-         *   [调研] 4 个来源中 **4 个未产出**：新闻猎手、资金猎手、社区猎手、宏观猎手
-         * ```
-         * **而同一个 workdir 下单猎手是能跑成的**（实测约 197 秒、查到 3 条新闻）。
-         * 差别只有"并发 + 共用目录"。
-         *
-         * ## 根因在 `harness.ts` 的这两行
-         * ```
-         *   cwd:  input.workdir
-         *   HOME: process.env.AQ_HARNESS_HOME ?? `${input.workdir}/.home`
-         * ```
-         * 于是四个并发实例**共用一个 `HOME`** —— 而 claude code 会把
-         * 配置、会话与历史写进 `~/.claude`。多个进程同时写同一份状态，
-         * 正是"单跑能成、并发全败"的典型形状。
-         *
-         * 所以给每个猎手一个子目录（`mkdirSync` 是必须的：
-         * `cwd` 不存在时 `spawn` 直接 ENOENT）。
-         */
-        const hunterWorkdir = (hunterId: string): string => {
-          const dir = `${agentWorkdir(traderId)}/hunter-${hunterId}`;
-          try {
-            mkdirSync(dir, { recursive: true });
-          } catch {
-            /* 建不出来就退回共用目录 —— 至少不要因为它整个失败。 */
-            return agentWorkdir(traderId);
-          }
-          return dir;
-        };
-        const hunterResults = await mapConcurrent(
-          HUNTERS,
-          hunterLimit,
-          async (hunter): Promise<HunterReport> => {
-            const r = await runAgentTask({
-              task: buildHunterTask(hunter, symbols),
-              allowedTools: 'WebSearch,WebFetch',
-              model: process.env.AQ_RESEARCH_GROUP ?? 'group/team-news',
-              fastModel: process.env.AQ_GRUNT_GROUP ?? 'group/team-grunt',
-              workdir: hunterWorkdir(hunter.id),
-              timeoutMs: hunterTimeout,
-              authToken: apiKey,
-            });
-            return {
-              hunterId: hunter.id,
-              label: hunter.label,
-              ok: r.ok,
-              text: r.text,
-              ...(r.error === undefined ? {} : { error: r.error }),
-              latencyMs: r.latencyMs,
-            };
-          },
-        );
-        /*
-         * ⚠️ **`mapConcurrent` 从不抛错** —— 里面抛出的异常会变成
-         * `{ ok: false, error, index }`。这一层映射把那个形状**还原成猎手**，
-         * 于是"猎手函数自己炸了"与"agent 跑失败"走同一条可见路径
-         *（都进 `hunterReports`、都在合并结果里写明原因）。
-         *
-         * 若这里漏掉失败分支，那种情况会**静默少一个猎手** ——
-         * 而下游会以为"那个来源上没有消息"。
-         */
-        const hunterReports: HunterReport[] = hunterResults.map((res, i) => {
-          if (res.ok) return res.value;
-          const hunter = HUNTERS[i];
-          return {
-            hunterId: hunter?.id ?? `hunter_${i}`,
-            label: hunter?.label ?? `猎手 ${i}`,
-            ok: false,
-            text: '',
-            error: res.error,
-            latencyMs: 0,
-          };
-        });
-        const okReports = hunterReports.filter((rep) => rep.ok);
-        const mergedText = mergeHunterReports(hunterReports);
-        runtimeLogs.write(traderId, 'info', 'team', `[调研] ${summariseHunters(hunterReports)}`);
-        /*
-         * ⚠️ **失败原因必须写进日志**（2026-10-13 实测踩到）。
-         *
-         * 第一版只写了"4 个来源中 4 个未产出"——**没写为什么**。
-         * 于是排查时我无法回答"是超时、是 harness 没装、还是并发冲突"，
-         * 只能靠猜。**而"知道它失败了"和"知道它为什么失败"是两件事** ——
-         * 前者只是让人焦虑，后者才能修。
-         *
-         * ⚠️ 写在 `if (agentResult.ok)` **之前** —— 全部失败时也要留下来。
-         */
-        for (const rep of hunterReports.filter((x) => !x.ok)) {
-          runtimeLogs.write(traderId, 'warn', 'team', `[调研] ${rep.label} 未产出：${rep.error ?? '未知原因'}`);
-        }
-        /*
-         * ⚠️ 下面沿用原来的 `agentResult` 形状 —— 于是它后面的
-         * **时效过滤 / 交叉验证 / 退回原文**那三段一行都不用改。
-         *
-         * `text` 用**合并后的文本**（每个猎手一块，失败的写明原因）——
-         * 那样 `parseIntelReport` 能从成功的猎手块里解析出结构化情报，
-         * 而失败信息也不会丢。
-         */
-        const agentResult = {
-          ok: okReports.length > 0,
-          text: mergedText,
-          error: okReports.length > 0 ? undefined : '全部猎手都未产出',
-        };
-
-        if (agentResult.ok) {
-          /*
-           * ── **解析成结构化情报，并做时效/交叉验证过滤**（2026-10-12 接线）──
-           *
-           * ## 为什么要过滤（而不是把原文直接给下游）
-           *
-           * `intel/freshness.ts` 的规则是：
-           * · **过期**（> 48h）→ 权重 0，**不进决策**
-           * · **未确认**（只有一个独立来源）→ 默认**不进决策**
-           *
-           * 若不过滤，这两条规则就只是"写在代码里"而**从未生效** ——
-           * 而用户明确要求过：「消息面的东西常常有时效性，
-           * **如果消息面的策略失效后，应当会及时修正、调整、改变**」。
-           *
-           * ## ⚠️ 但解析失败时**不能丢原文**
-           *
-           * 模型可能没按 JSON 格式输出（尤其换模型之后）。
-           * 那时若我们只返回"解析失败"，团队就**一点情报都没有**了 ——
-           * 而原文里其实有可用信息（只是格式不对）。
-           *
-           * 所以：**解析成功 → 用过滤后的结构化文本；解析失败 → 退回原文**
-           * （并在日志里说明"格式没对上"）。
-           */
-          const parsed = parseIntelReport(agentResult.text, Date.now(), 'news_hunter');
-          if (parsed.intel.length > 0) {
-            const ranked = rankIntel(parsed.intel, Date.now());
-            const droppedByRule = parsed.intel.length - ranked.length;
-            runtimeLogs.write(
-              traderId, 'info', 'team',
-              `[调研] agent 查到 ${parsed.intel.length} 条情报 · ` +
-              `可用 ${ranked.length} 条（过期/未确认被剔除 ${droppedByRule} 条）` +
-              `${parsed.dropped.length > 0 ? ` · 格式不合规 ${parsed.dropped.length} 条` : ''}`,
-            );
-            if (ranked.length > 0) {
-              /*
-               * ══════════════════════════════════════════════════════════════════
-               *  ⭐ **情报触发的提前唤醒**（2026-10-14 · 去轮次化的阶段 2）
-               * ══════════════════════════════════════════════════════════════════
-               *
-               * ## 用户对"去轮次"的终态定义（原话）
-               *
-               * > 「要完全脱离轮次这个概念（起码整体是脱离的，只有内部几个
-               * >  干定时工作的 AI 智能体才需要用到轮次，其他都是不间断在干活的）」
-               *
-               * ## 现状与缺口
-               *
-               * 调研层已是独立 worker（20 分钟自己的节奏，与决策周期解耦），
-               * 但它查到强情报时**决策循环并不知道** —— 要等下一个定时心跳。
-               * 事件唤醒已有两个源（成交 / 持仓剧变），情报是缺的第三个。
-               *
-               * ## 判据：什么值得叫醒决策
-               *
-               * ```
-               *   direction 是 bullish/bearish（neutral 不算 —— 那不是信号）
-               *   且 confirmed（≥2 个独立来源 —— 单源传闻不值得打断）
-               *   且 freshness 是 fresh（"新鲜"档 —— 偏旧的不值得）
-               * ```
-               *
-               * ## ⚠️ 为什么用 `autoTrader?.requestEarlyCycle` 而不是直接调
-               *
-               * `shouldEarlyWake` 里有完整的四道闸（运行中/团队模式/最小间隔/
-               * 只提前不推后）—— 尤其"最小间隔"防的是
-               * "情报 → 唤醒 → 决策 → 又一条情报"的紧循环。
-               * 这里只负责"发现值得唤醒的事"，要不要醒由那些闸决定。
-               */
-              const hot = ranked.filter(
-                (r) =>
-                  (r.intel.direction === 'bullish' || r.intel.direction === 'bearish') &&
-                  r.assessment.confirmed &&
-                  r.assessment.freshness === 'fresh',
-              );
-              if (hot.length > 0) {
-                /*
-                 * ⚠️ 用 optional chaining 而不是先 get 再判 undefined：
-                 * 这段代码在 buildTeamModel 的深层闭包里，TypeScript 对
-                 * 跨闭包边界的 narrowing 有不保留的情况（实测此处就是）。
-                 * `?.` 的语义与"判 undefined 后调用"完全一致，且不依赖 narrowing。
-                 */
-                const why = `情报唤醒：${hot.length} 条已确认的强方向情报（${hot
-                  .slice(0, 3)
-                  .map((h) => `[${h.intel.direction}] ${h.intel.summary.slice(0, 30)}`)
-                  .join('；')}）`;
-                runtimeLogs.write(traderId, 'info', 'team', `[调研] ${why}`);
-                this.running.get(traderId)?.requestEarlyCycle(why);
-              }
-
-              const text = ranked
-                .map((r) => {
-                  const h = (r.assessment.ageMs / 3_600_000).toFixed(1);
-                  return `- [${r.intel.direction}] ${r.intel.summary}\n` +
-                    `  来源：${r.intel.sourceUrl}（${r.assessment.independentSources} 个独立来源）\n` +
-                    `  ${h} 小时前 · ${r.assessment.verdict}`;
-                })
-                .join('\n');
-              setResearchCache(traderId, { text, at: Date.now(), refreshing: false, keys: [] });
-              return text;
-            }
-            /*
-             * 全部被规则剔除（都过期或都未确认）—— 这也是**有效结论**：
-             * "本轮没有可用的新鲜情报"。明说，而不是给一段旧消息。
-             */
-            const note = '（本轮没有可用的新鲜情报：查到的都过期了）';
-            setResearchCache(traderId, { text: note, at: Date.now(), refreshing: false, keys: [] });
-            return note;
-          }
-
-          /* 解析不出结构化情报 → **退回原文**（格式没对上，但原文仍可能有信息）。 */
-          runtimeLogs.write(
-            traderId, 'warn', 'team',
-            `[调研] agent 的产出不是结构化格式（${parsed.dropped[0]?.reason ?? '未知'}）—— 退回原文使用`,
-          );
-          setResearchCache(traderId, { text: agentResult.text, at: Date.now(), refreshing: false, keys: [] });
-          return agentResult.text;
-        }
-
-        runtimeLogs.write(
-          traderId,
-          'warn',
-          'team',
-          `[调研] agent 未能完成（${agentResult.error ?? '未知'}）—— 退回直接搜索`,
-        );
-
-        const result = await collectMarketResearch(
-          {
-            endpoint: process.env.MAGPIE_SEARCH_URL ?? DEFAULT_SEARCH_ENDPOINT,
-            apiKey,
-          },
-          symbols,
-        );
-        /*
-         * 把"搜到了几条 / 为什么没搜到"写进日志 —— 用户要求看得见，
-         * 而"新闻数据没拿到"正是最该被看见的一件事
-         *（否则团队会一直基于行情做决策，而操作员以为它在查新闻）。
-         */
-        runtimeLogs.write(
-          traderId,
-          result.ok ? 'info' : 'warn',
-          'team',
-          result.ok
-            ? `市场调研完成：${symbols.length > 0 ? `针对 ${symbols.join('/')}` : '整体市场'}`
-            : `市场调研失败：${result.errors.join('；')}`,
-        );
-        /* 兜底结果也缓存 —— 它至少比"没有情报"好，且能省掉下一轮的搜索。 */
-        if (result.ok) {
-          setResearchCache(traderId, { text: result.text, at: Date.now(), refreshing: false, keys: [] });
-        }
-        return result.text;
       },
     });
 
