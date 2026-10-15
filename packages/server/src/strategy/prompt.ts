@@ -880,6 +880,41 @@ const DEFAULT_ENTRY_STANDARDS = [
 const MAX_RENDER_POINTS = 120;
 
 /**
+ * **每个序列渲染多少个点** —— `renderTimeframe` 与 `estimateCandidateChars` 的**唯一口径**。
+ *
+ * ## 为什么抽成一个函数，而不是两处各写一遍
+ *
+ * 这两处**必须逐字一致**：
+ * ```
+ *   估算偏大 → 砍掉本来放得下的候选标的（丢掉真实的机会）
+ *   估算偏小 → 提示词超预算、被模型截断
+ * ```
+ * 而它们**漂移过一次**：给渲染加了 `promptPoints` 之后忘了同步估算，
+ * 于是"调小点数省钱"这个动作在裁剪逻辑里完全看不见（`prompt.test.ts` 抓到的：
+ * 8 点与 30 点算出来都是 12760 字）。
+ *
+ * 所以把口径收进一个函数 —— 让"两处一致"由**代码结构**保证，而不是靠注释提醒。
+ *
+ * ## ⚠️ 下限 6（2026-10-15 修：不能再薄到算不出它自己的判据）
+ *
+ * `promptPoints` 的 schema 下限是 **5**，而策略师自己写的 `D` 判据是
+ * **「15m 连续 6 根收盘价的位移」** —— 它必须同时看到 `close[-6]` 与 `close[-1]`。
+ *
+ * 它为了省 token 把 `promptPoints` 调到 5 时，**自己的入场判据就变成不可算**，
+ * 而它只会报"数据不足"、**不会想到去改那个参数**（线上实测它逐轮抱怨
+ * `缺close[-6]序列无法算D` 正是这个形状）。
+ *
+ * ⇒ **历史给多厚仍由它决定，但不能薄到算不出它自己的判据。**
+ */
+const MIN_RENDER_POINTS = 6;
+function renderPointsFor(kline: StrategyConfig['indicators']['kline']): number {
+  return Math.max(
+    MIN_RENDER_POINTS,
+    Math.min(kline.promptPoints ?? 30, kline.primaryCount, MAX_RENDER_POINTS),
+  );
+}
+
+/**
  * **数据段的显式边界**（外部 issue #123）。
  *
  * 光转义不够：模型仍需要知道"这一整块是数据，不是我该服从的指令"。
@@ -3916,13 +3951,11 @@ export function estimateCandidateChars(config: StrategyConfig): number {
    * 这个动作在裁剪逻辑里完全看不见，估算值纹丝不动。
    * **用例抓到了它**（8 点与 30 点算出来都是 12760 字）。
    *
-   * 两处的取值口径现在完全相同：`min(promptPoints, primaryCount, MAX_RENDER_POINTS)`。
+   * ⚠️ 2026-10-15：口径不再"两处各写一遍"，而是**同一个 `renderPointsFor()`
+   *（它含下限 6，理由见它的 JSDoc）** —— 靠注释维持一致是不可靠的，
+   * 靠代码结构才可靠。
    */
-  const points = Math.min(
-    config.indicators.kline.promptPoints ?? 30,
-    config.indicators.kline.primaryCount,
-    MAX_RENDER_POINTS,
-  );
+  const points = renderPointsFor(config.indicators.kline);
   const timeframes = Math.max(1, indicators.kline.selectedTimeframes.length);
 
   let seriesPerTimeframe = 1; // prices
@@ -4727,13 +4760,15 @@ function lastValue(series: Array<number | null> | undefined): number | null {
 function renderTimeframe(tf: TimeframeIndicators, config: StrategyConfig['indicators']): string {
   const label = tf.timeframe.toUpperCase();
   /*
-   * 渲染多少个点由配置决定（`promptPoints`），**不再写死 30**。
+   * 渲染多少个点：**口径在 `renderPointsFor()` 里**（含下限 6 与上限 120）。
    *
-   * 上限仍取 `primaryCount` 与 `MAX_RENDER_POINTS` 的较小者：前者是"取了多少根"，
-   * 后者是"最多渲染多少根"（防一个异常大的配置把提示词撑爆）。
-   * 于是 `promptPoints` 只能**减**，不能凭空要求比取到的还多。
+   * ⚠️ **不要在这里再算一遍** —— `estimateCandidateChars()` 用的是同一个函数，
+   * 两边不一致会让"调小点数省钱"在预算裁剪里看不见（历史上漂移过一次，
+   * 那条用例的注释记着）。
+   *
+   * ⚠️ 它只影响**详细候选**这条路径；摘要候选不吃这个参数（见 `SUMMARY_CLOSES`）。
    */
-  const points = Math.min(config.kline.promptPoints ?? 30, config.kline.primaryCount, MAX_RENDER_POINTS);
+  const points = renderPointsFor(config.kline);
   const lines: string[] = [`=== ${label} 周期（由旧到新）===`];
 
   lines.push(`价格: ${series(tf.closes, priceDecimalsFor(tf), points)}`);

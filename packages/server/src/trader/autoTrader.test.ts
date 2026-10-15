@@ -906,6 +906,16 @@ function fakeMarketDataService(overrides: Record<string, unknown> = {}): MarketD
     async getKlines() {
       return [];
     },
+    /*
+     * **标记价回落**（2026-10-15 新增的那个方法）。
+     *
+     * 默认给"查不到"（空 Map）：这些用例的持仓都在交易所侧存在（或用例不关心浮盈），
+     * 而平白给一个价格会让"缺标记价"那条路径永远走不到 —— 那正是它有测试的价值所在。
+     * 需要它的用例用 `overrides` 自己给（见 `markPricesOf` 的调用点）。
+     */
+    async markPricesOf() {
+      return new Map<string, number>();
+    },
     ...overrides,
   } as unknown as MarketDataService;
 }

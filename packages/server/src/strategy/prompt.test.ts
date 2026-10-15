@@ -2174,6 +2174,40 @@ test('指标序列的渲染长度归 AI 调 —— 它以前是写死的 30', ()
   assert.ok(ratio > 1.5 && ratio < 6, `成本应当随点数放大约 3–4 倍，实际 ${ratio.toFixed(2)}`);
 });
 
+test('★★★ `promptPoints` 调到下限 5 也要渲染 6 根 —— 否则算不出它自己的 D', () => {
+  /*
+   * ## 2026-10-15 修：下限 6
+   *
+   * `promptPoints` 的 schema 下限是 **5**，而策略师自己写的 `D` 判据是
+   * **「15m 连续 6 根收盘价的位移」** —— 它必须同时看到 `close[-6]` 与 `close[-1]`。
+   *
+   * 它为了省 token 把 `promptPoints` 调到 5 时，**自己的入场判据就变成不可算**，
+   * 而它只会报"数据不足"、不会想到去改那个参数（线上实测它逐轮抱怨
+   * `缺close[-6]序列无法算D` 正是这个形状）。
+   *
+   * ⇒ 渲染口径有下限 6（`renderPointsFor()`）。这条钉住它，并且是**两侧**：
+   * 下限真的生效（5 与 6 同价），而上限方向仍跟着配置走。
+   */
+  const base = configFromPreset('conservative');
+  const withConfig = (points: number): StrategyConfig => ({
+    ...base,
+    indicators: {
+      ...base.indicators,
+      kline: { ...base.indicators.kline, promptPoints: points, primaryCount: 300 },
+    },
+  });
+
+  assert.equal(
+    estimateCandidateChars(withConfig(5)),
+    estimateCandidateChars(withConfig(6)),
+    '★ promptPoints=5 必须被抬到 6 —— 否则策略师算不出自己的 D 判据',
+  );
+  assert.ok(
+    estimateCandidateChars(withConfig(30)) > estimateCandidateChars(withConfig(6)),
+    '★ 上限方向仍要跟着配置走（下限不能把"调厚"也吃掉）',
+  );
+});
+
 test('★ 60 点必须比 30 点更重 —— 上限不该在 30 处截断', () => {
   /*
    * 上面那条用例只测到 **30**，所以它发现不了这件事：`MAX_RENDER_POINTS`

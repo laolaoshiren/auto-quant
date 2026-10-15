@@ -11416,13 +11416,41 @@ reduceQuantity: null,
    * 账户权益没有丢：`accountEquity` / `accountUnrealizedPnl` 两列记的就是它，
    * 风控的回撤高水位与「账户权益」展示读那两列（见 `realizedHighWaterMark`）。
    */
-  private buildEquitySnapshot(account: AccountState, exchangePositions: ExchangePosition[]): EquitySnapshot {
+  private async buildEquitySnapshot(account: AccountState, exchangePositions: ExchangePosition[]): Promise<EquitySnapshot> {
     const traderId = this.deps.trader.id;
     const openPositions = positionStore.open(traderId);
     const markPrices = new Map(exchangePositions.map((p) => [p.symbol, p.markPrice]));
 
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     *  ⚠️ **交易所没有的标的要回落到【行情】标记价**（2026-10-15 修）
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * ## 事故：模拟盘的浮盈恒被按 0 计入
+     *
+     * 上面那个 map 来自交易所的 `positionRisk` —— 而 `dry_run`（模拟盘）机器人的
+     * 本地持仓**在交易所根本不存在**，于是它**恒缺标记价**。线上实测（`#11`）：
+     * ```
+     *   每 5 秒一条 WARN
+     *   「这些标的有本地持仓但拿不到标记价，其浮盈未计入首页数字：SOLUSDT」
+     *   而那个 SOLUSDT 空头是模拟仓 —— 交易所侧本来就没有它。
+     * ```
+     * 后果：模拟盘的浮盈**永远少算那一块**，而界面上的数字看起来完全正常。
+     *
+     * ## 为什么回落是安全的
+     *
+     * 标记价是**行情事实**（对所有机器人相同），借它不引入归属错误 ——
+     * 与"借用交易所 `markPrice`"是同一条理由（见上面那段注释）。
+     *
+     * ⚠️ 只对**交易所没有的**标的去查行情：有的话优先用交易所那个数，
+     * 它是这个账户的实际结算依据。
+     */
+    const fromMarket = await this.deps.marketData.markPricesOf(
+      openPositions.map((p) => p.symbol).filter((symbol) => !markPrices.has(symbol)),
+    );
+
     const { unrealizedPnl, missingMarkPrice } = ownUnrealizedPnlOf(openPositions, (symbol) =>
-      markPrices.get(symbol),
+      markPrices.get(symbol) ?? fromMarket.get(symbol),
     );
     if (missingMarkPrice.length > 0) {
       this.emit(
@@ -11491,7 +11519,7 @@ reduceQuantity: null,
    * 的时候记下一堆"变化"，而那条曲线上讲的是**它自己的账**。
    */
   private async recordEquity(account: AccountState, exchangePositions: ExchangePosition[]): Promise<void> {
-    const snapshot = this.buildEquitySnapshot(account, exchangePositions);
+    const snapshot = await this.buildEquitySnapshot(account, exchangePositions);
     if (this.isRedundantSnapshot(snapshot)) return;
     equityStore.insert(snapshot);
     eventBus.publish({ type: 'equity', traderId: this.deps.trader.id, snapshot });

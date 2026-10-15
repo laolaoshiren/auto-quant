@@ -109,6 +109,44 @@ export class MarketDataService {
   }
 
   /**
+   * **一批标的的标记价**（来自全市场 `premiumIndex`，与行情快照同源）。
+   *
+   * ## 为什么需要它（2026-10-15 修：模拟盘的浮盈被漏算）
+   *
+   * 浮盈的算式（`ownUnrealizedPnlOf`，见 `store/repositories.ts`）要一个标记价，
+   * 而它原来**只从交易所的 `positionRisk` 取**。对 `dry_run`（模拟盘）机器人，
+   * 本地那条持仓在交易所**根本不存在** → 恒缺标记价 → 那个仓的浮盈被按 0 计入，
+   * 而界面上看不出异样。
+   *
+   * 线上实测（`#11`，`dry_run=1`）每 5 秒刷一条：
+   * ```
+   *   这些标的有本地持仓但拿不到标记价，其浮盈未计入首页数字：SOLUSDT
+   * ```
+   * 而那个 SOLUSDT 空头是**模拟仓** —— 交易所侧本来就没有它。
+   *
+   * 行情侧的标记价是**行情事实**（对所有机器人相同），借它不引入归属错误 ——
+   * 与 `buildEquitySnapshot` 借用交易所 `markPrice` 是同一条理由。
+   *
+   * ⚠️ 走的是 `getUniverse()` 的缓存（几十秒 TTL）⇒ 连续调用不会重复打币安。
+   * 取不到的标的**不进 map**（调用方本来就有"缺标记价"这条路径，不许拿 0 冒充）。
+   */
+  async markPricesOf(symbols: readonly string[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    if (symbols.length === 0) return out;
+    try {
+      const universe = await this.getUniverse();
+      for (const symbol of symbols) {
+        const premium = universe.premiums.get(symbol);
+        const value = premium ? Number(premium.markPrice) : NaN;
+        if (Number.isFinite(value) && value > 0) out.set(symbol, value);
+      }
+    } catch {
+      /* 取不到就返回已拿到的那些 —— "缺标记价"由调用方如实上报，不在这里吞掉。 */
+    }
+    return out;
+  }
+
+  /**
    * Closed klines with a short cache.
    *
    * The live candle is always excluded: feeding a partial candle into EMA/RSI

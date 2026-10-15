@@ -2198,6 +2198,33 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        * `positions` 列表保持原样：它是账户级视图，持仓卡与账户条都依赖它。
        */
       const markPriceOf = new Map(livePositions.map((live) => [live.symbol, live.markPrice]));
+      /*
+       * ⚠️ **交易所没有的标的要回落到【行情】标记价**（2026-10-15 修）
+       *
+       * `dry_run`（模拟盘）机器人的本地持仓**在交易所不存在** → 这里恒缺标记价 →
+       * 那个仓的浮盈被按 0 计入首页数字，而界面上看不出异样（数字看着正常）。
+       * 线上实测（`#11`）：每 5 秒一条
+       * ```
+       *   这些标的有本地持仓但拿不到标记价，其浮盈未计入首页数字：SOLUSDT
+       * ```
+       * 而那个 SOLUSDT 空头是**模拟仓** —— 交易所侧本来就没有它。
+       *
+       * 标记价是**行情事实**（对所有机器人相同），借它不引入归属错误 ——
+       * 与"借用交易所 `markPrice`"是同一条理由（见上面 `ownUnrealizedPnlOf` 那段）。
+       *
+       * ⚠️ 只对交易所**没有**的标的去查行情：有的话仍用交易所那个数 ——
+       * 它是这个账户的实际结算依据。
+       */
+      const missingMark = local.map((p) => p.symbol).filter((symbol) => !markPriceOf.has(symbol));
+      if (missingMark.length > 0) {
+        const want = new Set(missingMark);
+        const premiums = await connection.market.premiumIndex().catch(() => []);
+        for (const premium of premiums) {
+          if (!want.has(premium.symbol)) continue;
+          const value = Number(premium.markPrice);
+          if (Number.isFinite(value) && value > 0) markPriceOf.set(premium.symbol, value);
+        }
+      }
       const own = ownUnrealizedPnlOf(local, (symbol) => markPriceOf.get(symbol));
       /*
        * ⚠️ **缺标记价的标的必须说出来，不能静默按 0 计。**
