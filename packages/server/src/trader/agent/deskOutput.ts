@@ -32,6 +32,11 @@
 
 import { isCloseAction, type Decision, type DecisionAction } from '@aq/shared';
 import type { DeskOutcome } from './tradingDesk.js';
+/*
+ * ⚠️「全部不行动」的判据只有一份 —— 与 askRiskOfficer 共用（见该模块）。
+ * 各写一份会出现"跳过是因为全是 skip、文案却说调用失败"的自相矛盾审计记录。
+ */
+import { allNonAction } from './nonAction.js';
 
 /** 从裁决的原始文本里抽出决策数组。 */
 export interface ExtractedDecisions {
@@ -137,10 +142,64 @@ export function renderDeskOutcome(
     concern: string | null;
     /** 风控官用的模型（审计）。 */
     modelId?: string | null;
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  ⚠️ **为什么没审 —— 三种原因必须分开说**（2026-10-15 修）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * 原来的文案对**所有**"没审阅"的情况都写同一句：
+     * ```
+     *   ⚠️ 本轮未经风控官审阅（风控角色未启用或调用失败）—— 决策按裁决官结论直接放行。
+     * ```
+     * 而实测（`#11`，272 轮）**74% 的轮次**都是这一句，它们的真实原因是：
+     * ```
+     *   ① 裁决官给的决策【全是 skip】→ 设计内跳过（"没有动作就没有风险敞口可审"）
+     *      —— 这是【正常】，而且是省一次 ~120 秒调用的【有意优化】
+     *   ② 真的调用失败
+     *   ③ 角色未启用
+     * ```
+     * 而 ① 占了绝大多数。**把"设计内跳过"写成"未启用或调用失败"，
+     * 会让操作员去查一个不存在的问题** —— 与"把故障说成观望"是同一类病，
+     * 只是方向相反。
+     *
+     * ## 判据来源
+     *
+     * `askRiskOfficer` 本来就区分了这三种（它通过 `onStep` 分别写
+     * 「裁决结果全是"不行动"（N 条）—— 风控官无需审阅，省一次调用」与
+     * 「调用失败：…」），只是**渲染时把信息丢掉了**。
+     *
+     * ⚠️ `'all_non_action'` 是**唯一可以由代码确定**的那一种
+     *（它由 `NON_ACTION` 集合判定，不是猜的）；另外两种留给调用方传。
+     */
+    skipReason?: 'all_non_action' | 'call_failed' | 'not_enabled' | null;
   } | null,
+  /**
+   * 额外的渲染信息。
+   *
+   * ⚠️ 单独一个参数（而不是塞进 `risk`）—— 因为**它描述的是"`risk` 为 null 时
+   * 为什么是 null"**，而 `risk` 为 `null` 时没有对象可以挂字段。
+   */
+  extra?: { skipReason?: 'all_non_action' | 'call_failed' | 'not_enabled' | null },
 ): string {
   const verdict = outcome.verdict;
   const extracted = verdict?.ok === true ? extractFirstJsonArray(verdict.raw) : { decisions: null, status: 'no-block' as const };
+  /*
+   * ⚠️ **"为什么没审"要自己推出来，不能等调用方传**（2026-10-15）。
+   *
+   * `all_non_action` 这一种**完全由代码可判定** —— 它就是
+   * `askRiskOfficer` 里那条 `!hasAction` 分支的条件（用同一个 `NON_ACTION` 集合）。
+   * 若靠调用方传，一旦有人忘了传，文案就会退回那句笼统的
+   * "未启用或调用失败" —— 而它占 74%，等于没修。
+   *
+   * 另外两种（真失败 / 未启用）**这里判不出来**（失败信息在调用方手里），
+   * 所以只有调用方显式传了才用；否则如实说"原因未记录"，
+   * **不猜**（猜错比不写更糟）。
+   */
+  const decisionsForRisk = (extracted.decisions ?? []) as Decision[];
+  const riskSkipReason =
+    extra?.skipReason ??
+    risk?.skipReason ??
+    (allNonAction(decisionsForRisk) ? 'all_non_action' : null);
 
   /*
    * ══════════════════════════════════════════════════════════════════════════
@@ -251,7 +310,23 @@ export function renderDeskOutcome(
   } else {
     lines.push('');
     lines.push('<risk>');
-    lines.push('⚠️ 本轮**未经风控官审阅**（风控角色未启用或调用失败）—— 决策按裁决官结论直接放行。');
+    /*
+     * ⚠️ 三种原因分开说 —— 见 `skipReason` 的说明。
+     * 「全是 skip」是**正常且有意**的（省一次 ~120 秒调用），
+     * 而「调用失败」才需要查。把两者写成同一句会让操作员白查。
+     */
+    if (riskSkipReason === 'all_non_action') {
+      lines.push(
+        '✅ 本轮**无需风控官审阅** —— 裁决结果是"全部不行动"，' +
+          '没有风险敞口可审（这是设计内的省略，不是失败）。',
+      );
+    } else if (riskSkipReason === 'call_failed') {
+      lines.push('⚠️ 本轮**未经风控官审阅**（**调用失败**）—— 决策按裁决官结论直接放行。');
+    } else if (riskSkipReason === 'not_enabled') {
+      lines.push('⚠️ 本轮**未经风控官审阅**（风控角色**未启用**）—— 决策按裁决官结论直接放行。');
+    } else {
+      lines.push('⚠️ 本轮**未经风控官审阅**（原因未记录）—— 决策按裁决官结论直接放行。');
+    }
     lines.push('</risk>');
   }
   lines.push('');

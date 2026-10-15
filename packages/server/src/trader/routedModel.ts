@@ -621,7 +621,12 @@ export type ModelCallFactory = (modelId: string) => CallModel;
  * 只有明确属于"不行动"的三个才跳过，其余（含将来新增的动作）
  * **一律送去风控**（fail-closed）。
  */
-const NON_ACTION = new Set(['skip', 'hold', 'wait']);
+/*
+ * ⚠️ **`NON_ACTION` / `allNonAction` 已抽到 `agent/nonAction.ts`**（2026-10-15）——
+ * 因为渲染层（`deskOutput.ts`）也要用同一个判据，而各写一份会出现
+ * "跳过是因为全是 skip、文案却说调用失败"的自相矛盾审计记录。
+ */
+import { NON_ACTION, allNonAction } from './agent/nonAction.js';
 export function stripToolBlocks(text: string): string {
   return text.replace(/<tool>[\s\S]*?<\/tool>/g, '').replace(/\n{3,}/g, '\n\n');
 }
@@ -1102,6 +1107,14 @@ export function createTeamDecisionModel(options: {
        * 把"保证金够不够"交给会幻觉的模型判断，等于拿爆仓换"智能"。
        */
       const risk = await askRiskOfficer(ask, outcome, onStep);
+      /*
+       * ⚠️ **从裁决官产出里取决策，用于判断"为什么没审风控"**（2026-10-15）。
+       * 与 `askRiskOfficer` 内部用的是**同一个** `allNonAction()` —— 见
+       * `agent/nonAction.ts`（两处判据必须一致，否则审计块会自相矛盾）。
+       */
+      const decisionsForRiskCheck = (
+        (outcome.verdict?.ok === true ? extractFirstJsonArray(outcome.verdict.raw) : null)?.decisions ?? []
+      ) as Decision[];
 
       return {
         /*
@@ -1144,7 +1157,27 @@ export function createTeamDecisionModel(options: {
          * 顺带的好处：审计块里不再出现那段假的工具 JSON
          *（此前实测 `<team>` 块里混着 `{"tool":"l...`，读起来很困惑）。
          */
-        text: stripToolBlocks(renderDeskOutcome(outcome, risk)),
+        text: stripToolBlocks(
+          renderDeskOutcome(outcome, risk, {
+            /*
+             * ⚠️ **把"为什么没审"告诉渲染层**（2026-10-15）。
+             *
+             * 原来渲染层对所有"没审"都写同一句「风控角色未启用或调用失败」，
+             * 而实测 74% 的轮次其实是**设计内跳过**（裁决全是 skip）——
+             * 那句文案会让人去查一个不存在的问题。
+             *
+             * `risk === null` 有两种来源，这里能分辨：
+             * ```
+             *   allNonAction(...)  → 设计内跳过（正常）
+             *   否则                → 真的没跑成（失败/未启用）
+             * ```
+             * ⚠️ 第二种这里**不细分成"失败"还是"未启用"** —— 那两种的信息
+             * 在 `askRiskOfficer` 的 `onStep` 里，而它没有回传给调用方。
+             * 如实说"未审阅"比**猜**一个原因好（猜错比不写更糟）。
+             */
+            skipReason: allNonAction(decisionsForRiskCheck) ? 'all_non_action' : null,
+          }),
+        ),
         latencyMs: Date.now() - started,
         usage: { promptTokens: null, completionTokens: null },
       };
@@ -1221,7 +1254,6 @@ async function askRiskOfficer(
     });
     return null;
   }
-
   onStep?.({ role: 'risk_officer', phase: 'risk', note: `审阅 ${decisions.length} 条决策` });
 
   try {
