@@ -126,7 +126,17 @@ const result = await page.evaluate(() => {
     const n = (t.match(/\*\*/g) ?? []).length;
     if (n > 0) {
       mdHits += n;
-      if (mdSamples.length < 5) mdSamples.push(t.trim().slice(0, 60));
+      /*
+       * 记下**元素本身的 class 与父级 class** —— 只报一句文字定位不了它出自哪个组件，
+       * 而"界面漏了哪一处"正是这条审计要回答的问题。
+       */
+      if (mdSamples.length < 8) {
+        mdSamples.push({
+          text: t.trim().slice(0, 46),
+          cls: String(el.className ?? '').slice(0, 46),
+          parent: String(el.parentElement?.className ?? '').slice(0, 46),
+        });
+      }
     }
   }
 
@@ -185,7 +195,11 @@ if (consoleErrors.length > 0) problems.push(`控制台报错 ${consoleErrors.len
 
 console.log(`  可见文字 ${result.textLen} 字 · markdown 残留 ${result.mdHits} 处 · 无兜底截断 ${lostInfo.length} 处 · 有兜底截断 ${result.clipped.length - lostInfo.length} 处 · 横向滚动 ${result.overflowX}px · 控制台错误 ${consoleErrors.length} 条`);
 if (result.mdSamples.length > 0) {
-  for (const s of result.mdSamples) console.log(`    markdown 样本: ${s}`);
+  for (const s of result.mdSamples) {
+    console.log(`    markdown 残留: ${s.text}`);
+    console.log(`      元素 class: ${s.cls}`);
+    console.log(`      父级 class: ${s.parent}`);
+  }
 }
 for (const c of result.clipped) {
   console.log(`    截断${c.hasTitle ? '（有 title 兜底）' : '（无兜底）'}: ${c.text} — 需 ${c.need}px / 有 ${c.have}px`);

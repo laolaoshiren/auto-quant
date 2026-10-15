@@ -2394,7 +2394,8 @@ function DecisionOutcome({
    * （`单日亏损熔断：今日已实现亏损 $0.59，占权益 6.03%（上限 5%）。`）。
    * 一个断句符都找不到时整段都算第一句：短消息本来就不需要折叠。
    */
-  const detail = entry.detail ?? '';
+  /* ⚠️ `plainText`：理由里的 `**` 是写给模型/维护者的强调符，不该露给用户（见 `lib/plainText.ts`）。 */
+  const detail = plainText(entry.detail ?? '');
   const cut = detail.search(/[。；]/);
   const lead = cut >= 0 ? detail.slice(0, cut + 1) : detail;
   const rest = cut >= 0 ? detail.slice(cut + 1).trim() : '';
@@ -2820,7 +2821,8 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
    * 改这里之前先在那台跑着的控制台上看一眼右栏 —— 那次我改了 `DecisionOutcome`
    * 就以为完事了，而屏幕上的文字墙一行都没少。
    */
-  const detail = entry.detail ?? '';
+  /* ⚠️ `plainText`：理由里的 `**` 是写给模型/维护者的强调符，不该露给用户（见 `lib/plainText.ts`）。 */
+  const detail = plainText(entry.detail ?? '');
   const cut = detail.search(/[。；]/);
   const lead = cut >= 0 ? detail.slice(0, cut + 1) : detail;
   const rest = cut >= 0 ? detail.slice(cut + 1).trim() : '';
