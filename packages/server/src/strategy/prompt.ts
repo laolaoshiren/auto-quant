@@ -2039,7 +2039,8 @@ function renderRecentCloses(closes: PromptClose[]): string {
 
   const blocks = closes.map((close) => {
     const head =
-      `- ${close.symbol} ${close.side === 'long' ? '多' : '空'} ${close.leverage}x ` +
+      /* ⚠️ `symbol` 是外部数据（交易所）—— 见 issue #123 与文件末的"集合漏网"说明。 */
+      `- ${escapePromptText(close.symbol)} ${close.side === 'long' ? '多' : '空'} ${close.leverage}x ` +
       `@${fmt(close.entryPrice)}→${fmt(close.exitPrice)}  净 ${fmtSigned(close.netPnl, 3)}  ` +
       `${closeReasonLabel(close.closeReason, close.netPnl)}  (${closeStamp(close.closedAt)} UTC)`;
     return `${head}\n  你当时的理由：${oneLine(close.entryReason, 60)}`;
@@ -2096,7 +2097,8 @@ function renderRejections(rejections: PromptRejection[]): string | null {
   if (rejections.length === 0) return null;
 
   const lines = rejections.map(
-    (r) => `- ${r.symbol} 提议名义 $${r.positionSizeUsd.toFixed(2)}：${r.reason}`,
+    /* ⚠️ `symbol` 是外部数据（交易所）—— 见 issue #123 与文件末的"集合漏网"说明。 */
+    (r) => `- ${escapePromptText(r.symbol)} 提议名义 $${r.positionSizeUsd.toFixed(2)}：${r.reason}`,
   );
 
   return (
@@ -2128,8 +2130,9 @@ function renderLessons(lessons: PromptLesson[]): string | null {
   if (lessons.length === 0) return null;
 
   const lines = lessons.map(
+    /* ⚠️ `symbol` 是外部数据（交易所）—— 见 issue #123 与文件末的"集合漏网"说明。 */
     (l) =>
-      `- ${l.symbol}（平仓原因 ${l.closeReason}，净 ${l.netPnl >= 0 ? '+' : ''}${l.netPnl.toFixed(4)} USDT）：${oneLine(l.lesson, 200)}`,
+      `- ${escapePromptText(l.symbol)}（平仓原因 ${l.closeReason}，净 ${l.netPnl >= 0 ? '+' : ''}${l.netPnl.toFixed(4)} USDT）：${oneLine(l.lesson, 200)}`,
   );
 
   return (
@@ -2725,7 +2728,8 @@ function renderUserPrompt(
       const pos = p.position;
       const snap = p.snapshot;
       const rows = [
-        `${index + 1}. ${pos.symbol} ${pos.side === 'long' ? '多头' : '空头'} | 入场 ${fmt(pos.entryPrice)} 当前 ${fmt(
+        /* ⚠️ `symbol` 是外部数据（交易所）—— 见 issue #123 与文件末的"集合漏网"说明。 */
+        `${index + 1}. ${escapePromptText(pos.symbol)} ${pos.side === 'long' ? '多头' : '空头'} | 入场 ${fmt(pos.entryPrice)} 当前 ${fmt(
           pos.markPrice,
         )}`,
         `   数量 ${fmt(pos.quantity, 6)} | 名义价值 ${fmtUsd(pos.notional)}`,
@@ -2781,7 +2785,8 @@ function renderUserPrompt(
   if (ctx.pendingEntries.length > 0) {
     const lines = ctx.pendingEntries.map((p, index) => {
       const rows = [
-        `${index + 1}. ${p.symbol} ${p.side === 'long' ? '做多' : '做空'} | **挂单 ${fmt(p.limitPrice)}**（尚未成交）` +
+        /* ⚠️ `symbol` 是外部数据（交易所）—— 见 issue #123 与文件末的"集合漏网"说明。 */
+        `${index + 1}. ${escapePromptText(p.symbol)} ${p.side === 'long' ? '做多' : '做空'} | **挂单 ${fmt(p.limitPrice)}**（尚未成交）` +
           /* 把它自己要求过的耐心回显出来 —— 它才记得住自己说过"愿意等多久"。 */
           (p.waitMinutes !== null && p.waitMinutes > 0 ? ` | 你要求等 ${p.waitMinutes} 分钟` : ''),
         /*
@@ -4208,7 +4213,12 @@ function renderMarketOverview(rows: readonly MarketOverviewRow[]): string {
   ].join('\n');
   const lines = rows.map(
     (r) =>
-      `${r.symbol} ${fmt(r.price)} ${fmtPercent(r.changePercent24h)} ${fmtVolumeCompact(r.quoteVolume24h)}`,
+      /*
+       * ⚠️ **`symbol` 是外部数据**（交易所 `/exchangeInfo`）—— 见 issue #123。
+       * 这一处与 `formatMarketData` 的 `safeSymbol` 是同一个威胁面，
+       * 而 `#123` 第一版只修了 4 处、漏了这里（详见文件末的"集合漏网"说明）。
+       */
+      `${escapePromptText(r.symbol)} ${fmt(r.price)} ${fmtPercent(r.changePercent24h)} ${fmtVolumeCompact(r.quoteVolume24h)}`,
   );
   return `${header}\n\n${lines.join('\n')}`;
 }
@@ -4225,8 +4235,17 @@ function renderRankings(
   limit: number,
   oiRankingEnabled: boolean,
 ): string {
+  /*
+   * ⚠️ **`symbol` 是外部数据**（来自交易所 `/exchangeInfo`），与 `formatMarketData`
+   * 里那个 `safeSymbol` 是**同一个威胁面** —— 见 issue #123。
+   *
+   * 我把这一处单独提出来，是因为下面**四个榜**都在插值 `x.symbol`：
+   * 逐处 `escapePromptText` 容易漏（`#123` 第一版就漏了 9 处，见文件末的说明）。
+   * 所以这里把"取安全符号"集中成一个函数，四个榜都走它。
+   */
+  const safe = (x: RankingRow): string => escapePromptText(x.symbol);
   const compact = (x: RankingRow): string =>
-    `${x.symbol} ${fmtPercent(x.changePercent24h)}（${fmtVolumeCompact(x.quoteVolume24h)}）`;
+    `${safe(x)} ${fmtPercent(x.changePercent24h)}（${fmtVolumeCompact(x.quoteVolume24h)}）`;
   const join = (rows: readonly RankingRow[], render: (x: RankingRow) => string): string =>
     rows.length === 0 ? '（本轮为空）' : rows.map(render).join(' · ');
 
@@ -4236,11 +4255,11 @@ function renderRankings(
     '每个榜只按**一个**维度排序，系统**没有**做任何筛选判断 —— 哪个值得做是你的判断。',
     '需要某个标的的完整指标序列，用 `get_klines` 点名（括号里是它 24h 成交额）。',
     '',
-    `成交额：${join(r.quoteVolume, (x) => `${x.symbol} ${fmtVolumeCompact(x.quoteVolume24h)} ${fmtPercent(x.changePercent24h)}`)}`,
+    `成交额：${join(r.quoteVolume, (x) => `${safe(x)} ${fmtVolumeCompact(x.quoteVolume24h)} ${fmtPercent(x.changePercent24h)}`)}`,
     `涨幅：${join(r.gainers, compact)}`,
     `跌幅：${join(r.losers, compact)}`,
-    `波动率：${join(r.volatility, (x) => `${x.symbol} 振幅 ${(x.value * 100).toFixed(1)}%（${fmtVolumeCompact(x.quoteVolume24h)}）`)}`,
-    `资金费极值：${join(r.fundingExtreme, (x) => `${x.symbol} ${(x.value * 100).toFixed(4)}%（${fmtVolumeCompact(x.quoteVolume24h)}）`)}`,
+    `波动率：${join(r.volatility, (x) => `${safe(x)} 振幅 ${(x.value * 100).toFixed(1)}%（${fmtVolumeCompact(x.quoteVolume24h)}）`)}`,
+    `资金费极值：${join(r.fundingExtreme, (x) => `${safe(x)} ${(x.value * 100).toFixed(4)}%（${fmtVolumeCompact(x.quoteVolume24h)}）`)}`,
     /*
      * ⚠️ 第八个维度「持仓量增长」的能力**早已存在**（`getOiRanking()` +
      * `screenOpenInterestGrowth()`），只是由 `indicators.enableOiRanking` 控制、当前关着。
@@ -4270,8 +4289,9 @@ function renderRankings(
 function renderPlatformHistory(rows: readonly PlatformHistoryRow[]): string {
   if (rows.length === 0) return '';
   const lines = rows.map(
+    /* ⚠️ `symbol` 是外部数据（交易所）—— 见 issue #123 与文件末的"集合漏网"说明。 */
     (r) =>
-      `${r.symbol} ${r.trades} 笔 · 净 ${fmtSigned(r.netPnl, 3)} · 胜率 ${(r.winRate * 100).toFixed(0)}%`,
+      `${escapePromptText(r.symbol)} ${r.trades} 笔 · 净 ${fmtSigned(r.netPnl, 3)} · 胜率 ${(r.winRate * 100).toFixed(0)}%`,
   );
   return [
     '# 本平台历史（按标的汇总 —— 这是**你自己**在这个标的上做过的事，不是市场判断）',

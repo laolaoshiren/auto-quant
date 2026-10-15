@@ -40,6 +40,7 @@
  *    ⚠️ 标记与说明**必须成对** —— 只加标记模型不认识它，只加规则模型找不到那一段。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { defaultStrategyConfig } from '@aq/shared';
@@ -185,5 +186,112 @@ test('★★ 标记名不会出现在正常市场数据里（否则会提前闭�
     normal,
     /UNTRUSTED_MARKET_DATA/,
     '★ 单块市场数据里不该出现边界标记（标记由调用方在外层加）',
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ④ ★★★ 集合守卫：**每一处** `.symbol` 插值都必须过转义                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ⚠️ **这条是"集合漏网"的元测试** —— 它不测某个转义对不对，它测"**有没有漏的地方**"。
+ *
+ * ## 为什么需要它（真实漏网记录）
+ *
+ * `#123` 的第一版（commit `534f5c6`）只改了 **4 处**（`formatMarketData` 的
+ * `safeSymbol`、`sources`、OI 排名、候选分节）。而 `prompt.ts` 里
+ * 插值 `.symbol` 的地方**一共 11 处** —— 即 **9 处漏了**：
+ *
+ * | 函数 | 漏掉的场景 |
+ * | --- | --- |
+ * | `renderMarketOverview` | 全市场概览（模型"看见整个市场"那一段）|
+ * | `renderRankings` | **四个榜**（成交额 / 涨幅 / 跌幅 / 波动率 / 资金费极值）|
+ * | `renderRecentCloses` | 最近平仓 |
+ * | `renderRejections` | 最近被拒的提议 |
+ * | `renderLessons` | 模型自己写的教训 |
+ * | `renderUserPrompt` | 当前持仓 / 当前挂单 |
+ * | `renderPlatformHistory` | 按标的汇总的历史 |
+ *
+ * ⚠️ 而且本文件**开头就写着**这条修复的意图是"**每一个**来自市场/用户的值原先都是裸拼" ——
+ * 即**意图是全覆蓋，而实现只做了一部分**。这与 `structuredOutput`、`ink-mid`
+ * 是**同一类漏网**（一组里只守住了子集）。
+ *
+ * ## 判据
+ *
+ * 扫 `prompt.ts` 源码，找出**所有** `${…symbol…}` 形式的插值，断言每一处
+ * 都出现在 `escapePromptText(...)` 或本文件里那个 `safe(...)` 包装里。
+ *
+ * ⚠️ 断言前**剥注释** —— 本仓库注释会逐字引用被讨论的代码
+ *（本文件头部就引用了 `### ${index + 1}. ${tag}`），不剥会被自己的注释命中。
+ */
+test('★★★ 每一处 `.symbol` 插值都必须过转义 —— 防止再漏（同型漏网的元测试）', () => {
+  const source = readFileSync(new URL('./prompt.ts', import.meta.url), 'utf8');
+
+  /* 剥掉注释（行注释 + 块注释的行）。 */
+  const code = source
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      return !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*');
+    })
+    .join('\n');
+
+  /*
+   * 找出所有插值里带 `.symbol` 的位置。
+   * ⚠️ 用 `${` 到 `}` 的**同行**匹配（模板串在源码里都是单行的），
+   * 跨行匹配会把相邻的模板串混在一起。
+   */
+  const sites: Array<{ line: number; text: string }> = [];
+  code.split('\n').forEach((line, i) => {
+    for (const m of line.matchAll(/\$\{[^}]*\.symbol\b[^}]*\}/g)) {
+      sites.push({ line: i + 1, text: m[0] });
+    }
+  });
+
+  /*
+   * 前置断言：必须真的找到若干处。
+   * 没有它，"一处都没找到 → 没问题"也会绿 —— 而它什么都没验。
+   */
+  assert.ok(
+    sites.length >= 8,
+    `★ 只找到 ${sites.length} 处 \`.symbol\` 插值 —— 扫描可能失效了，那样这条什么都没验`,
+  );
+
+  const unescaped = sites.filter(
+    (s) => !/escapePromptText\s*\(/.test(s.text) && !/\bsafe\s*\(/.test(s.text),
+  );
+
+  assert.deepEqual(
+    unescaped.map((s) => `第 ${s.line} 行：${s.text.replace(/\s+/g, ' ').slice(0, 90)}`),
+    [],
+    '★★★ 这些 `.symbol` 插值**没有过转义** ——\n' +
+      unescaped.map((s) => `      · 第 ${s.line} 行：${s.text.replace(/\s+/g, ' ').slice(0, 80)}`).join('\n') +
+      '\n    ⚠️ `symbol` 来自交易所 `/exchangeInfo`（外部数据）。一个含 `\\n\\n### 系统指令覆盖` 的\n' +
+      '    名字会**伪造出一个与真实分节同层级的标题**（issue #123 实测）。\n' +
+      '    ⚠️ #123 第一版只改了 4 处、漏了 9 处 —— 所以补一个不够，**这条守卫钉住全集**。\n' +
+      '    修法：包一层 `escapePromptText(...)`。',
+  );
+});
+
+test('★★★ 转义守卫的判据必须能真的报出漏网 —— 用人造源码校准', () => {
+  /*
+   * ⚠️ "探针校准"：上面那条断言 `unescaped` 为空，而**一个什么都没查的实现
+   * 也返回空数组**。这里用同一套判据跑一段**故意漏转义**的源码，断言它会被报出。
+   */
+  const scan = (code: string): string[] =>
+    code
+      .split('\n')
+      .flatMap((line) => [...line.matchAll(/\$\{[^}]*\.symbol\b[^}]*\}/g)].map((m) => m[0]))
+      .filter((t) => !/escapePromptText\s*\(/.test(t) && !/\bsafe\s*\(/.test(t));
+
+  assert.deepEqual(
+    scan('const a = `- ${evil.symbol} 裸拼`;'),
+    ['${evil.symbol}'],
+    '★★★ 判据必须能报出未转义的插值 —— 否则上面那条是在空转',
+  );
+  assert.deepEqual(
+    scan('const a = `- ${escapePromptText(evil.symbol)} 已转义`;'),
+    [],
+    '★★ 已转义的不能被误报',
   );
 });
