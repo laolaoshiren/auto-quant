@@ -480,6 +480,11 @@ AUTOQUANT_IMAGE=ghcr.io/<owner>/<repo>:sha-1a2b3c4 ./up.sh
 
 - [ ] 工作树干净：`git status --porcelain` **输出为空**（有未提交改动就先 commit 或 stash）
 - [ ] 本地 HEAD == 你打算上线的提交；`git log -1 --oneline` 与台账里记的提交哈希一致
+- [ ] **打包排除项覆盖所有"含站点专属信息的目录"**：`deploy.ps1` 打包的是**整个工作树、
+      且不读 `.gitignore`**，它的排除列表是唯一防线。历史上漏掉一个目录就等于把
+      含主机别名 / 服务器路径的内容整包传到线上（`.dsh/` 曾被漏掉并累积到 87 个 bundle）。
+      **凡是新增这类目录（`.dsh/`、`.agent-teams/` 等），必须在同一次改动里把它加进排除列表**；
+      部署前用 `git check-ignore` 与排除列表**逐目录对照**，别只看 `.gitignore`；
 - [ ] 全量验证已过（§3.2 的清单；碰下单路径的含 `npm run sim`）
 - [ ] **离线备份包含当前 HEAD**：`.dsh/backups/` 里最近一个 bundle 必须含 HEAD
       （历史教训：备份链断档时，当前线上代码只存在于本地 `.git`，回滚就没有保险）
