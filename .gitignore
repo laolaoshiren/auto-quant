@@ -130,3 +130,9 @@ _ui-directions.html
 packages/server/src/tmpprobe/
 probe*.ts
 probe*.mjs
+
+# 团队协作状态目录 —— 内含凭团队 brief 生成的 team.json，其中有站点专属信息（SSH 别名/服务器路径），绝不入库
+.agent-teams/
+
+# 队员临时产物兜底（正式产物请放 .dsh/）
+.dsh_tmp_*
