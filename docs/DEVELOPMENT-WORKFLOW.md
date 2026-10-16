@@ -161,6 +161,7 @@ fix(account): 缺标记价时回落到行情价；渲染点数下限 6 并收进
 | 一行标题 | `packages/server/src/commitMessageGuard.test.ts`（`npm test`） | 最近 50 个提交里的多行信息、空主题 | 历史老提交；超过 50 个之前的违规 |
 | 不含站点信息 | 同上 | 裸 IPv4、形如真实域名的字符串 | "看起来不像站点信息的普通域名" |
 | 凭据格式 | `scripts/pre-commit.sh`（本地钩子）+ CI 密钥扫描 | `sk-…`、`ghp_…`、私钥块、硬编码密钥赋值 | 站点专属信息（需 `sensitive-patterns.txt`，本机 gitignored） |
+| 站点专属信息（别名/主机/路径） | **只靠本地** `sensitive-patterns.txt` | 该表里逐条登记的形状 | ⚠️ 两道结构性边界（实测）：① 那张表**每台机器各自维护**，换台机器就失效，CI 也拿不到它；② 钩子只扫**本次暂存的增量**（`git diff --cached`），**扫不到历史**。所以**已入库内容里的别名/主机名不会被任何一道自动检查拦下** —— 这类问题只能靠 review 与"归档/提交前脱敏"（§3.6） |
 | 长度、type/scope 合法性、语义质量 | **没有自动化** | —— | 只能靠 [`COLLABORATION.md`](COLLABORATION.md) 闸门⑤ 与人工 review |
 
 - 未推送的提交可以用 `git commit --amend` 修正标题；
@@ -371,6 +372,19 @@ NEW → DEFINED → READY → IN_PROGRESS → IMPLEMENTED → VERIFIED → REVIE
 - 所以：**长期有效的规则进 `docs/`，一次性的过程与证据进 `.dsh/`**。
   一份 `.dsh/` 报告里有价值的部分，沉淀成 `docs/` 文档或代码注释之后，
   才算是被"学到"。
+
+**归档/搬运前必须脱敏（硬规则）**：任何内容**从 `.dsh/`（不入库）搬进 `docs/`（入库）**，
+或把一次性报告**归档进 `docs/archive/`** 之前，必须把操作者环境信息替换成占位符 ——
+`ssh <SSH 别名>`、`/srv/<应用目录>`、`my-server`、`https://quant.example.com`。
+
+理由（两道防线在这里都失效）：
+
+- `scripts/pre-commit.sh` 只扫**本次暂存的增量**（`git diff --cached`），**扫不到历史内容**；
+- 本地脱敏表（`sensitive-patterns.txt`）是 **gitignore 的、每台机器各自维护**，换台机器就失效；
+- 实测教训：仓库里确实存在 **`ssh <操作者别名>` 形式的入库内容**（脚本与一份一次性报告各一处，
+  提交于引入时）—— 而操作者**早已**在本地脱敏表里登记了 SSH 别名。
+  规则"声明了"却没生效，原因正是上面两条结构性边界。
+  → 结论：**不要依赖"我有脱敏规则"这个错觉**；入库前逐处替换，是唯一可靠的环节。
 
 ---
 
