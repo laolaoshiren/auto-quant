@@ -15,6 +15,9 @@
 
 本文档只讲**协作流程**（分支、提交、PR、评审），不重复开发环境的内容，避免两处漂移。
 
+一轮工作怎么从"发现问题"走到"闭环 + 发版"（谁验证、谁审查、失败回到哪一步、
+会话中断后靠什么恢复）见 [`docs/DEVELOPMENT-WORKFLOW.md`](docs/DEVELOPMENT-WORKFLOW.md)。
+
 想理解**为什么这样设计** → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 想知道**某个功能该改哪个文件** → [`docs/MODULES.md`](docs/MODULES.md)
 如果你是**没有上下文的新 AI 会话** → [`docs/AGENTS.md`](docs/AGENTS.md)
@@ -48,10 +51,18 @@ npm test
 | Issue / PR 模板 | ✅ 已配置 |
 | `main` 分支保护 | ❌ **未启用**（见下）|
 
-> **为什么 CI 恢复于 2026-10-13**：之前（2026-09-30）因为维护者只有一个人、
-> 且担心 GitHub 自动化触发风控，把 CI 与发版自动化全部删掉，把关回到本地。
-> 现在有**外部协作者**（多台机器上的 AI 实例、另一个账号）提 PR ——
-> 本地把关证明不了别人的代码，所以 CI 是必需的。
+> **为什么 CI 恢复于 2026-10-13**：之前（2026-09-30）因为担心 GitHub 自动化触发风控，
+> 把 CI 与发版自动化全部删掉，把关回到本地。现在有**外部协作者**
+> （多台机器上的 AI 实例、另一个账号）提 PR —— 本地把关证明不了别人的代码，
+> 所以 CI 是必需的。
+>
+> **2026-10-17 用户进一步明确**：正常使用 GitHub 的全部功能（提交、推送、PR、
+> Release/Tag、CI、版本号与线上对齐）**是允许且需要的**，要像正规公司一样用；
+> 账号曾被 suspend 的真正原因是 AI **高频调用 `gh`**（几分钟里几十次、
+> 把 `gh pr checks` 放进循环）。仍然禁止的是那些形状：
+> **`gh` 进循环轮询、批量对多仓库操作、一分钟内连续 push、一次迭代开一堆 PR**
+> —— 见 [`docs/DEVELOPMENT-WORKFLOW.md`](docs/DEVELOPMENT-WORKFLOW.md) §4.6。
+>
 > 详见 [`docs/RELEASING.md`](docs/RELEASING.md) 开头那段。
 
 ### ⚠️ `main` 分支保护尚未启用（这是**有意**的）
@@ -108,42 +119,37 @@ gh api -X PUT repos/<owner>/<repo>/branches/main/protection \
   | `refactor/…` | 不改变行为的重构 |
   | `chore/…` | 构建、依赖、杂项 |
 
-- `main` 处于保护状态：CI 必须通过、至少一名 reviewer 批准后才能合并，
-  **禁止直接 push**。
+- `main` 的**期望**是：CI 通过 + 至少一名 reviewer 批准后才能合并。
+  ⚠️ 但分支保护**尚未启用**（原因见上「仓库设置」），所以直接 push 技术上仍然可行 ——
+  这也是为什么发版前必须由人确认 `main` 是绿的（见 [`docs/RELEASING.md`](docs/RELEASING.md)）。
 
 ---
 
 ## 提交信息
 
-使用 **Conventional Commits**：`feat:` `fix:` `docs:` `refactor:` `test:` `chore:` `perf:`
+使用 **Conventional Commits**，格式 `<type>(<scope>): <中文描述>`，
+**只有一行标题、没有正文**。type 与 scope 的完整取值清单、长度上限、正反例对照表见
+[`docs/DEVELOPMENT-WORKFLOW.md`](docs/DEVELOPMENT-WORKFLOW.md) §1。
 
-为什么要求这个格式：它让 `feat`/`fix` 能被工具**自动汇总成 changelog 与版本号**，
-也让 `git log --oneline` 在不打开任何 diff 的情况下就能读懂。手写"更新了一下"
-无法自动生成任何东西，也无法回答"这个功能是哪次提交引入的"。
+"为什么这么改"写在**代码注释**里（见 [`docs/AGENTS.md`](docs/AGENTS.md) §5.1）；
+过程性记录写在 PR 描述里 —— 提交信息只有一行。
 
-本项目域内的真实例子：
+为什么要求这个格式并且只有一行：`feat`/`fix` 能被工具**自动汇总成 changelog 与版本号**，
+`git log --oneline` 在不打开任何 diff 的情况下就能读懂；而正文会永久留在公开历史里
+（本仓库曾因 231 个提交合计 **20.9 万字符**的正文被迫重写全部历史）。
+手写"更新了一下"既无法自动生成任何东西，也无法回答"这个功能是哪次提交引入的"。
+
+本项目域内的真实例子（**都是一行**）：
 
 ```
 fix(binance): 条件单改走 /fapi/v1/algoOrder，参数名用 triggerPrice
-
-  /fapi/v1/order 对 STOP_MARKET 返回 -4120，之前开仓后止损其实没挂上。
-```
-
-```
 fix(risk): 拆分 clampStopLoss 与 clampTakeProfit，恢复止盈方向
-
-  合并成一个"钳到入场价安全侧"的函数会让每一笔止盈静默失效。
-```
-
-```
 fix(web): 胜率字段改用 winRatePercent，修掉 10000.0% 的显示
-
-  服务端返回的是 0–100 的百分比，三个页面当成 0–1 又乘了 100。
-```
-
-```
 feat(strategy): 提示词硬约束段由 RiskControlConfig 动态生成
 ```
+
+注意第一条写清了**改了什么与后果**（`-4120` 意味着开仓后止损根本没挂上）——
+标题要能让人不打开 diff 就明白发生了什么，而不是"修了一些问题"。
 
 ### 提交信息里**不写**什么
 
@@ -176,7 +182,7 @@ feat(strategy): 提示词硬约束段由 RiskControlConfig 动态生成
    原因，半年后没人能重建。
 5. **关联 issue**（`Closes #123`）。
 6. **CI 必须通过**（`npm run typecheck`、`npm test`、`npm run build`）。
-7. **至少一名 reviewer 批准**后才能合并。
+7. **至少一名 reviewer 批准**后才能合并（分支保护尚未启用，这一步靠人执行）。
 8. **使用 squash merge** 合入 `main`，保持历史线性、每个提交都可用。
 
 ---
