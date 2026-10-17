@@ -31,6 +31,7 @@
 import { useEffect, useState } from 'react';
 
 import type { TraderRow } from '../lib/api';
+import { HumanMessage } from './TeamBoard/humanText';
 
 /** 角色的展示信息（与后端 `ROLE_TIERS` 的角色名一一对应）。 */
 interface RoleMeta {
@@ -224,14 +225,19 @@ export function TeamRoster({
                 <td className="px-3 py-2 text-ink-soft">{meta?.duty ?? '（未登记分工）'}</td>
                 <td className="px-3 py-2 text-ink-soft">
                   {last ? (
-                    <span className={last.level === 'error' ? 'text-down' : undefined}>
+                    <div className={last.level === 'error' ? 'border-l-2 border-down pl-2' : last.level === 'warn' ? 'border-l-2 border-warn pl-2' : 'border-l-2 border-transparent pl-2'}>
                       {last.phase !== null && PHASE_LABEL[last.phase] !== undefined && (
                         <span className="mr-1.5 rounded bg-base-800 px-1 text-xs text-ink-faint">
                           {PHASE_LABEL[last.phase]}
                         </span>
                       )}
-                      {last.message}
-                    </span>
+                      {/*
+                        ⚠️ **这里原来是 `{last.message}`**（2026-10-17 · 用户实测同一族）：
+                        **连 `plainText()` 都没过** —— markdown 星号与 JSON 都原样显示。
+                        现在走共用渲染层（与 `TeamBoard` 同一个入口，避免两套实现漂移）。
+                      */}
+                      <HumanMessage text={last.message} level={last.level} />
+                    </div>
                   ) : (
                     '—'
                   )}

@@ -50,6 +50,7 @@ import {
 } from './roster';
 import { api } from '../../lib/api';
 import { plainText } from '../../lib/plainText';
+import { HumanMessage } from './humanText';
 
 /** 从状态得到圆点的样式（全部是真实存在的类，见 `roster.ts` 的对照表）。 */
 const DOT_CLASS: Record<RosterState, string> = {
@@ -1002,21 +1003,18 @@ function AgentRow({
           {steps.length > 0 && (
             <>
               <p className="mb-1 text-[11px] font-medium text-ink-lo">本轮 {steps.length} 步</p>
-              <ol className="space-y-1" data-role-steps="current">
+              <ol className="space-y-2" data-role-steps="current">
                 {steps.map((s, index) => (
                   <li key={`${s.at}-${index}`} className="flex min-w-0 items-start gap-2 text-xs">
                     <span className="num shrink-0 tabular-nums text-ink-faint">{clock(s.at)}</span>
-                    <span
-                      className={
-                        s.level === 'error'
-                          ? 'text-down'
-                          : s.level === 'warn'
-                            ? 'text-warn'
-                            : 'text-ink-mid'
-                      }
-                    >
-                      {s.message}
-                    </span>
+                    {/*
+                      ⚠️ **必须走 `HumanMessage`**（2026-10-17 · 用户实测）。
+                      这里原来是 `{s.message}` —— **连 `plainText()` 都没过**，
+                      于是 markdown 星号与 JSON 都原样画在屏幕上。
+                      现在由共用渲染层统一处理（JSON → 结构化 / 长文 → 折叠 / 强调符 → 剥掉），
+                      并且**颜色只上左侧竖条、正文保持中性**（用户要求"正文不要整段染色"）。
+                    */}
+                    <HumanMessage text={s.message} level={s.level} />
                   </li>
                 ))}
               </ol>
@@ -1069,7 +1067,7 @@ function AgentRow({
           )}
 
           {historyState !== undefined && historyState !== null && historyState.steps.length > 0 && (
-            <ol className="space-y-1" data-role-steps="history">
+            <ol className="space-y-2" data-role-steps="history">
               {historyState.steps.map((s, index) => (
                 <li key={`h-${s.at}-${index}`} className="flex min-w-0 items-start gap-2 text-xs">
                   <span className="num shrink-0 tabular-nums text-ink-faint">{clock(s.at)}</span>
@@ -1078,7 +1076,18 @@ function AgentRow({
                       {PHASE_LABEL[s.phase] ?? s.phase}
                     </span>
                   )}
-                  <span className="min-w-0 break-words text-ink-mid">{plainText(s.message)}</span>
+                  {/*
+                    ⚠️ **这一格就是用户截图里"一坨 JSON"的位置**（2026-10-17）。
+                    原来 `{plainText(s.message)}` —— 过了 markdown 剥除，但**不格式化 JSON**，
+                    于是一条 `[{"symbol":"WLDUSDT","action":"open_short",…}]` 原样铺满整行。
+                    现在走 `HumanMessage`：决策数组 → 每个标的一行；其余 → 纯文本 + 折叠。
+
+                    ⚠️ 历史条目**没有 `level` 字段**（服务端只回 `at/phase/message`，见上面的类型），
+                    所以这里不传 —— `HumanMessage` 会当 `info`（不染色）。
+                    **不要**为了"看起来一致"编一个 `level: 'info'` 出来：
+                    那会让"这条是历史、不知道级别"与"这条明确是 info"变成同一个东西。
+                  */}
+                  <HumanMessage text={s.message} />
                 </li>
               ))}
             </ol>
