@@ -142,6 +142,98 @@ export interface AgentTaskResult {
 }
 
 /**
+ * 失败信息里最多带多少字符的 stderr。
+ *
+ * ## ⚠️ 这个数从 200/300 提上来的理由（2026-10-17 实测）
+ *
+ * 线上出现「调研猎手 未产出」时，库里那一行只有 200 个字符的 stderr：
+ *
+ * ```
+ *   [调研] 社区猎手 未产出：harness 退出码 143 · [claude-code:unrecognized_model] {"model":"group/team-news",…}
+ *   We're changing auto mode to no longer charge for classifier requests in Claude Code. However, this session
+ *   isn't eligible because your requests go through 127.0.0.1:3425, … Nothin        ← 正好断在这里
+ * ```
+ *
+ * 而**真正的线索全在被截断的那半段里**：那两句是 Claude Code 自己的**通知**，
+ * 说明「模型名不被识别」只是遥测、以及「auto mode 的分类器请求」这件事 ——
+ * 排查时正因为看不到它们，才把一条无害的警告误当成了根因。
+ *
+ * 800 字符足以装下这两段通知（实测每段约 300–400 字符），
+ * 又不会把 `runtime_logs` 一行撑爆（那张表按行数封顶，不按字节）。
+ */
+export const HARNESS_STDERR_TAIL = 800;
+
+/**
+ * **被信号终止时的退出码 → 人话**（2026-10-17 实测加）。
+ *
+ * ## 为什么必须单独判这一支
+ *
+ * `143 = 128 + 15 = SIGTERM`。它**不是配置错、也不是猎手自己失败** ——
+ * 它是**有人把它杀了**。线上实测（2026-10-17 10:06:57）：
+ *
+ * ```
+ *   systemctl show autoquant.service -p KillMode     → KillMode=control-group
+ *                                       -p KillSignal → KillSignal=15
+ *   journal：Stopping autoquant.service …（部署重启）
+ * ```
+ *
+ * systemd 的默认 `KillMode=control-group` 会向**整个 cgroup** 发 `KillSignal`，
+ * 而猎手（claude 进程）正是这个 cgroup 里的子进程 —— 于是它和主进程一起被带走，
+ * 退出码 143。**与猎手本身没有任何关系。**
+ *
+ * ## 这一支为什么之前没有
+ *
+ * 我们自己的两条终止路径（超时、`AbortSignal`）都用 `SIGKILL` 并先 `finish()`，
+ * 所以它们**不会**走到这里；而"外部发的 SIGTERM"从来没被识别过 ——
+ * 于是在界面上表现为「harness 退出码 143」这种**把人引向错误方向**的说明：
+ * 操作员会去查猎手为什么坏，而真相是**平台刚重启过**。
+ *
+ * @returns 人话；**普通退出码返回 `null`**（保持原来那条通用分支不变）。
+ */
+export function describeTermination(code: number | null, signal: string | null): string | null {
+  if (signal === 'SIGTERM' || code === 143) {
+    return (
+      '被 SIGTERM 终止（143 = 128+15）—— 这是【外部】发来的停机信号，' +
+      '不是猎手自身的故障：systemd 停/重启本服务时（KillMode=control-group、KillSignal=15）' +
+      '会向整个 cgroup 发 SIGTERM，猎手是被一起带走的'
+    );
+  }
+  if (signal === 'SIGKILL' || code === 137) {
+    return '被 SIGKILL 终止（137 = 128+9）—— 进程被强杀（平台停机或内存压力）';
+  }
+  return null;
+}
+
+/**
+ * **从 stderr/stdout 里认出两类"看起来像故障、其实不是"的东西**。
+ *
+ * 两条都是 2026-10-17 实测确认的，写进注释是因为**它们的字面意思都在骗人**：
+ *
+ * | 屏幕上的字 | 真相 |
+ * |---|---|
+ * | `[claude-code:unrecognized_model]` | **只是遥测信号**（CLI 内部的 `tengu_api_unrecognized_model` 统计）。实测同一个模型名直接调网关返回 **200**，且会话记录里有真实 token 用量 —— 模型名**能用** |
+ * | `auto mode cannot determine the safety of …` | Claude Code 的 **auto mode 安全分类器**不可达：它要用的那个模型本网关没有（实测该模型名返回 401）。这是**间歇性**的 |
+ *
+ * ⚠️ 这两条都**不改变 `ok`**（不放松质量）—— 它们只让下一次排查不用再绕这一圈。
+ */
+export function harnessFailureHints(text: string): string {
+  const hints: string[] = [];
+  if (/auto mode cannot determine/i.test(text)) {
+    hints.push(
+      'Claude Code 的 auto mode 安全分类器不可达（网关不提供它要用的那个模型）—— ' +
+        '它会让需要审批的工具调用被拒；实测是间歇性的',
+    );
+  }
+  if (/unrecognized_model/i.test(text)) {
+    hints.push(
+      '[claude-code:unrecognized_model] 只是遥测信号，**不代表模型名不可用**' +
+        '（实测该模型名直接调网关返回 200 且有 token 用量）',
+    );
+  }
+  return hints.length > 0 ? `；提示：${hints.join('；')}` : '';
+}
+
+/**
  * 实际的进程执行 —— **抽成可注入的**。
  *
  * 两个原因：
@@ -259,9 +351,15 @@ export const spawnClaudeCode: SpawnAgent = async (input) => {
       });
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       const latency = Date.now() - started;
       const text = out.trim();
+      /*
+       * stderr 的留痕长度与"看起来像故障、其实不是"的提示 —— 见两个常量的说明。
+       * ⚠️ 它们**只影响 error 文本**，不影响 `ok`（不放松质量）。
+       */
+      const stderrTail = err.trim().slice(0, HARNESS_STDERR_TAIL);
+      const hints = harnessFailureHints(err);
       if (code === 0 && text.length > 0) {
         finish({ ok: true, text, latencyMs: latency });
         return;
@@ -333,7 +431,39 @@ export const spawnClaudeCode: SpawnAgent = async (input) => {
         finish({
           ok: true,
           text,
-          error: `达到轮数上限（产出可能不完整）：${err.trim().slice(0, 200)}`,
+          error: `达到轮数上限（产出可能不完整）：${stderrTail}${hints}`,
+          latencyMs: latency,
+        });
+        return;
+      }
+      /*
+       * ══════════════════════════════════════════════════════════════════════════
+       *  ⚠️ **被外部信号终止** —— 单独判，因为它的字面数字最容易被误读（2026-10-17）
+       * ══════════════════════════════════════════════════════════════════════════
+       *
+       * 线上原文：
+       * ```
+       *   [调研] 社区猎手 未产出：harness 退出码 143 · [claude-code:unrecognized_model] …
+       * ```
+       * `143` 看起来像"某个配置项写错了"，而它其实是 **SIGTERM（128+15）**：
+       * 那一刻 systemd 正在**停这个服务做部署**，`KillMode=control-group`
+       * 把 SIGTERM 发给了整个 cgroup —— 猎手是被**平台重启**带走的。
+       *
+       * 判据与依据都在 `describeTermination()` 里。这里只负责：
+       *   · 把"被杀"与"它自己失败"分开说；
+       *   · **仍然 `ok: false`**（被杀的一轮不该被当成一份产出）；
+       *   · 有实质文本时**保留在 `text` 里**（只作证据，不参与 ok 判定）。
+       */
+      const killed = describeTermination(code, signal);
+      if (killed !== null) {
+        finish({
+          ok: false,
+          text: substantive.length > 0 ? text : '',
+          error:
+            `${killed}` +
+            (hitMaxTurns ? '；另外它当时也已经撞上了轮数上限' : '') +
+            (stderrTail.length > 0 ? ` · ${stderrTail}` : '') +
+            hints,
           latencyMs: latency,
         });
         return;
@@ -347,7 +477,7 @@ export const spawnClaudeCode: SpawnAgent = async (input) => {
         finish({
           ok: false,
           text: '',
-          error: `达到轮数上限，且**没有任何实质产出**（只输出了错误行）：${err.trim().slice(0, 200)}`,
+          error: `达到轮数上限，且**没有任何实质产出**（只输出了错误行）：${stderrTail}${hints}`,
           latencyMs: latency,
         });
         return;
@@ -355,7 +485,9 @@ export const spawnClaudeCode: SpawnAgent = async (input) => {
       finish({
         ok: false,
         text,
-        error: `harness 退出码 ${code ?? 'null'}${err.trim().length > 0 ? ` · ${err.trim().slice(0, 300)}` : ''}`,
+        error: `harness 退出码 ${code ?? 'null'}${signal !== null ? `（信号 ${signal}）` : ''}${
+          stderrTail.length > 0 ? ` · ${stderrTail}` : ''
+        }${hints}`,
         latencyMs: latency,
       });
     });
