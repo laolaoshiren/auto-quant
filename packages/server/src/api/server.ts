@@ -286,6 +286,24 @@ export interface ApiDependencies {
   publicConnection: ExchangeConnection;
   /** Reads and caches exchange account balances for display. */
   balance: BalanceService;
+  /**
+   * **建一条只读交易所连接** —— 只给测试用，生产不传（不传就等于改动前的行为）。
+   *
+   * ## 为什么需要它
+   *
+   * `GET /api/traders/:id/positions` 与 `GET /api/traders/:id/account` 都会
+   * 现建一条只读连接去问交易所的真实持仓。而**"交易所读成功、返回的持仓列表为空"**
+   * 正是「模拟盘显示 0 持仓」那个 BUG 的形状 —— 没有这个注入口，那条路在测试里
+   * **不可达**：真去连交易所要网络、要凭据，而测试两样都不该有。
+   *
+   * 于是最容易出错的那条分支反而永远测不到（本仓反复出现的"看不出异常的失败"）。
+   * 有了它，测试可以注入一个假连接，逐条钉住：
+   * **模拟盘 → 本地台账**、**实盘 → 交易所**、**读失败 → 503 不冒充**。
+   *
+   * ⚠️ **不要把生产逻辑搬到这里**，也不要为了省一次网络调用而传它 ——
+   * 它存在的唯一理由是"让不可达的分支可达"。
+   */
+  openReadOnlyConnection?: () => Promise<ExchangeConnection>;
 }
 
 /**
@@ -2089,33 +2107,286 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   /* --- Trader data ------------------------------------------------------- */
 
   /**
+   * **这份 `positions` 是从哪儿来的** —— 前端据此区分「交易所真的没有仓」与「这是模拟仓」。
+   *
+   * ## 为什么必须有这个字段（用户实测 ×2 的 BUG）
+   *
+   * 模拟盘（`dry_run=1`）机器人的持仓**只存在于本地台账**：它的成交是本地模拟的，
+   * 从来不会真的发到交易所（`broker.ts:663` 的 `if (this.dryRun) return this.simulateStandard(...)`）。
+   * 而控制台卡片读的 `/account` 之前一律给交易所读数的 `positions` —— 于是它恒为
+   * 空数组，卡片显示「持仓 0 / 保证金占用 0.00 / 当前无持仓」，
+   * **而同一张卡里的「浮动」却有值**（那个数字走的是本地台账 + 行情标记价）。
+   *
+   * 「0 持仓却有浮盈」这个自相矛盾，根子就是这两路数字来源不同而界面上看不出来。
+   * 所以修完必须让调用方能判定：**不必猜**。
+   *
+   * · `'exchange'`     —— 交易所实时读数（实盘机器人在跑）
+   * · `'local_mirror'` —— 本机器人自己的**本地台账**（模拟盘；交易所对它本来就不存在这些仓）
+   * · `'none'`         —— 这次没有可用的持仓读数（机器人没在跑，或交易所读失败）
+   */
+  type PositionsSource = 'exchange' | 'local_mirror' | 'none';
+
+  /**
+   * **某个机器人此刻是不是纸面模式**（模拟盘）。
+   *
+   * 判据分两级，**顺序不能反**：
+   *
+   * 1. `deps.manager.dryRunOf(id)` —— 正在跑的那个实例用的就是它，这是**运行时事实**。
+   *    `null` 表示"它没在跑"，此时这个值此刻不存在（不是 `false` —— 见那个方法的说明）。
+   * 2. 落库的 `traders.dry_run`（迁移 18）—— 它是**机器人自己的属性**，跨重启有效。
+   *    三态：`true` / `false` / `undefined`（从未显式指定过）。
+   *
+   * ⚠️ `undefined` **不能**当成实盘：那时要回落到进程级的 `env.dryRun` ——
+   * 与 `manager.resumePersisted(env.dryRun)` 同一条口径。把它读成 `false`
+   * 会让一个"没在跑的模拟盘机器人"被当成实盘去读交易所，于是又回到空持仓。
+   */
+  const isPaperTrader = (traderId: number): boolean => {
+    const runtime = deps.manager.dryRunOf(traderId);
+    if (runtime !== null) return runtime;
+    return traders.get(traderId)?.dryRun ?? env.dryRun;
+  };
+
+  /**
+   * 本地台账 → `PositionView[]`。
+   *
+   * ## 为什么抽出来（而不是在调用点各写一份 map）
+   *
+   * 这条映射有**两个调用点**，而它们只差一件事：**拿不拿得到标记价**。
+   *
+   * · `/positions` 的"机器人没在跑"那条路**按设计不读交易所**，所以标记价与浮盈
+   *   都是**占位零**（见那段「一个会闪烁的表格比一个说读不到的表格更糟」的注释）；
+   * · 模拟盘机器人在跑时，标记价可以从**行情**拿到（行情是事实，与哪个机器人无关 ——
+   *   与 `ownUnrealizedPnlOf` 借用标记价同一条理由），于是浮盈是真值。
+   *
+   * 两处各写一份 map 的话，"哪些字段该给什么"迟早会在一边被改而另一边没跟上。
+   * 所以这里用**可选的 `markPriceOf`** 表达那唯一的差别：给得出就算真值，
+   * 给不出就回落成占位零（与改动前逐字段一致）。
+   */
+  const localPositionsFor = (
+    traderId: number,
+    markPriceOf?: ReadonlyMap<string, number>,
+  ): PositionView[] =>
+    positionStore.open(traderId).map((row) => {
+      const mark = markPriceOf?.get(row.symbol);
+      const hasMark = typeof mark === 'number' && Number.isFinite(mark) && mark > 0;
+      /*
+       * ⚠️ **不给标记价时，这里必须与改动前的 `/positions` 回退分支逐字段一致**
+       * （`markPrice = entry_price`、浮盈 0、`marginUsed = row.margin_used`、
+       * 名义按**入场价**算）。那条路径服务的是"机器人没在跑"，它按设计**不读
+       * 交易所、也不读行情** —— 自行推算保证金会静默改掉它的数字。
+       */
+      if (!hasMark) {
+        return {
+          id: row.id,
+          traderId,
+          symbol: row.symbol,
+          /*
+           * ⚠️ **`side` 必须显式收窄成 `'long' | 'short'`**（`PositionRow.side` 是
+           * `string`，而 `PositionView.side` 是联合类型）。
+           * 口径与 `autoTrader.ts` 的 `toPositionView()` 完全一致 —— 本表里这一列
+           * 只由交易循环写入，取值只有这两个；两处用同一种收法，将来才不会分叉。
+           */
+          side: row.side === 'long' ? 'long' : 'short',
+          quantity: row.quantity,
+          entryPrice: row.entry_price,
+          markPrice: row.entry_price,
+          leverage: row.leverage,
+          liquidationPrice: row.liquidation_price,
+          unrealizedPnl: 0,
+          unrealizedPnlPercent: 0,
+          peakPnlPercent: row.peak_pnl_percent,
+          marginUsed: row.margin_used,
+          notional: row.quantity * row.entry_price,
+          stopLoss: row.stop_loss,
+          takeProfit: row.take_profit,
+          openedAt: row.opened_at,
+          openReasoning: row.open_reasoning,
+        };
+      }
+      const markPrice = mark as number;
+      /*
+       * 方向由 `side` 承载、数量恒为正 —— 与 `ownUnrealizedPnlOf()` 同一个算式。
+       */
+      const isLong = row.side === 'long';
+      const unrealizedPnl =
+        (isLong ? markPrice - row.entry_price : row.entry_price - markPrice) * row.quantity;
+      /*
+       * 保证金口径：真实占用优先，缺失时按「价 × 量 ÷ 杠杆」推。
+       * 与 `liveExchangeView` 里那条（`live.marginUsed`）以及
+       * `unrealizedPnlPercent` 的分母保持一致 —— 界面同屏出现这三个数时口径必须相同。
+       */
+      const marginUsed =
+        row.margin_used > 0
+          ? row.margin_used
+          : (row.entry_price * row.quantity) / Math.max(1, row.leverage);
+      return {
+        id: row.id,
+        traderId,
+        symbol: row.symbol,
+        side: row.side === 'long' ? 'long' : 'short',
+        quantity: row.quantity,
+        entryPrice: row.entry_price,
+        markPrice,
+        leverage: row.leverage,
+        liquidationPrice: row.liquidation_price,
+        unrealizedPnl,
+        unrealizedPnlPercent: marginUsed > 0 ? (unrealizedPnl / marginUsed) * 100 : 0,
+        peakPnlPercent: row.peak_pnl_percent,
+        marginUsed,
+        notional: row.quantity * markPrice,
+        stopLoss: row.stop_loss,
+        takeProfit: row.take_profit,
+        openedAt: row.opened_at,
+        openReasoning: row.open_reasoning,
+      };
+    });
+
+  /** 这条只读连接拿到的账户读数形状（`AccountState` 不引新 import）。 */
+  type ExchangeAccountState = Awaited<ReturnType<ExchangeConnection['broker']['getAccountState']>>;
+
+  /**
+   * 建一条**只读**交易所连接 —— 默认实现用该机器人的凭据，测试可注入。
+   *
+   * 返回 `null` 表示**找不到凭据行**（`错误`那条路要如实说出来，而不是静默当空仓）。
+   */
+  const openReadOnlyFor = async (trader: Trader): Promise<ExchangeConnection | null> => {
+    if (deps.openReadOnlyConnection) return deps.openReadOnlyConnection();
+    const row = exchanges.getWithSecret(trader.exchangeAccountId);
+    if (!row) return null;
+    const { connectExchange } = await import('../binance/bootstrap.js');
+    return connectExchange({
+      environment: row.testnet === 1 ? 'demo' : 'production',
+      apiKey: row.api_key,
+      apiSecret: deps.vault.decrypt(row.api_secret_enc),
+      dryRun: true,
+      /*
+       * 这条连接是**一次性**的：控制台每次轮询都会重建它，只为拿到交易所
+       * 真实持仓（而不是本地镜像）。不加这个开关时，`loaded 528 tradable...`
+       * 会每 44 秒写一条 —— 30 分钟 41 条，而同期只有 11 个周期。
+       */
+      quiet: true,
+    });
+  };
+
+  /**
+   * **账户读数（尽力而为）** —— 读不到就 `null`，绝不让它影响持仓那一路。
+   *
+   * 为什么需要它：模拟盘的**持仓**不来自交易所，但**账户余额**仍然只能问交易所
+   * （那是账户级事实，与哪个机器人在跑无关）。两件事的来源不同，失败方式也就
+   * 必须分开 —— 一次网络抖动不该让"持仓"跟着变空（那正是用户报的那个 BUG）。
+   */
+  const readAccountBestEffort = async (trader: Trader): Promise<ExchangeAccountState | null> => {
+    try {
+      const connection = await openReadOnlyFor(trader);
+      if (!connection) return null;
+      return await connection.broker.getAccountState();
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * 用**公共行情**给本地台账配标记价（模拟盘专用）。
+   *
+   * ⚠️ 走 `deps.publicConnection` 而**不是**用凭据建的那条只读连接：标记价是
+   * **公开行情**，不需要签名，也不需要该账户有凭据。顺带避免"为了给一个模拟仓
+   * 算浮盈而去解密交易所密钥"这种越界。
+   *
+   * 读不到就让浮盈按 0 计，并由调用方把标的报出来（不静默 —— 见 `ownUnrealizedPnlOf`）。
+   */
+  const paperMarkPrices = async (
+    local: ReadonlyArray<{ symbol: string }>,
+  ): Promise<Map<string, number>> => {
+    const marks = new Map<string, number>();
+    if (local.length === 0) return marks;
+    const want = new Set(local.map((p) => p.symbol));
+    const premiums = await deps.publicConnection.market.premiumIndex().catch(() => []);
+    for (const premium of premiums) {
+      if (!want.has(premium.symbol)) continue;
+      const value = Number(premium.markPrice);
+      if (Number.isFinite(value) && value > 0) marks.set(premium.symbol, value);
+    }
+    return marks;
+  };
+
+  /**
    * Read the exchange directly for a trader's live account and positions.
    *
    * Uses a throwaway read-only connection so the console always shows what the
    * exchange actually holds, rather than our local mirror — the whole point of
    * having a reconciliation loop is that the mirror can be wrong.
+   *
+   * ⚠️ **一个例外：模拟盘（`dry_run`）机器人。** 交易所对它**不是**真相来源 ——
+   * 它的仓位在交易所根本不存在，用它只会得到"空持仓"。见 `PositionsSource` 的说明。
    */
   const liveExchangeView = async (traderId: number) => {
     const trader = traders.get(traderId);
     if (!trader || !deps.manager.isRunning(traderId)) {
-      return { live: false, account: null, positions: [], error: undefined as string | undefined };
+      return {
+        live: false,
+        account: null,
+        positions: [] as PositionView[],
+        positionsSource: 'none' as PositionsSource,
+        error: undefined as string | undefined,
+      };
+    }
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     * ⚠️⚠️ **模拟盘（`dry_run`）在这里就短路 —— 在解密凭据、建连接之前**
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 为什么必须短路（而不是连接成功之后再换持仓来源）
+     *
+     * 如果先连交易所、再按 `paper` 决定用哪份持仓，那么**交易所一抖动就会走
+     * `catch`**，于是模拟盘拿到 `live: false` → `/positions` 回 **503**。
+     * 那正是本仓最忌讳的形态：用户看到的是"读不到持仓"，而他手里的模拟仓
+     * **根本不需要交易所** —— 一次无关的网络故障让它闪烁，比不修还糟。
+     *
+     * ## 短路之后各字段从哪来
+     *
+     * · `positions`  —— **本地台账** + 公共行情的标记价（模拟盘的真相就是它）
+     * · `openOrderCount` —— 本地 `pending` 行数（模拟盘的委托从不出现在交易所）
+     * · `ownUnrealizedPnl` —— 同一个 `ownUnrealizedPnlOf`（与实盘同一个算式）
+     * · `account`   —— **仍然尽力问交易所**（账户余额是账户级事实）；
+     *                  读不到就 `null`，**不影响上面三个数字**
+     *
+     * ## 实盘一个字段都没动
+     *
+     * 下面 `try` 里那条路对 `paper === false` 的机器人是**逐字节原样**。
+     */
+    if (isPaperTrader(traderId)) {
+      const local = positionStore.open(traderId);
+      const marks = await paperMarkPrices(local);
+      const own = ownUnrealizedPnlOf(local, (symbol) => marks.get(symbol));
+      if (own.missingMarkPrice.length > 0) {
+        log.warn(
+          `[trader ${traderId}] 这些标的有本地持仓但拿不到标记价，其浮盈未计入首页数字：${own.missingMarkPrice.join('、')}`,
+        );
+      }
+      return {
+        live: true,
+        account: await readAccountBestEffort(trader),
+        positions: localPositionsFor(traderId, marks),
+        positionsSource: 'local_mirror' as PositionsSource,
+        ownUnrealizedPnl: own.unrealizedPnl,
+        openOrderCount: positionStore.pending(traderId).length,
+        error: undefined as string | undefined,
+      };
     }
     try {
-      const row = exchanges.getWithSecret(trader.exchangeAccountId);
-      if (!row) return { live: false, account: null, positions: [], error: '找不到该凭据' };
-      const { connectExchange } = await import('../binance/bootstrap.js');
-      const connection = await connectExchange({
-        environment: row.testnet === 1 ? 'demo' : 'production',
-        apiKey: row.api_key,
-        apiSecret: deps.vault.decrypt(row.api_secret_enc),
-        dryRun: true,
-        /*
-         * 这条连接是**一次性**的：控制台每次轮询都会重建它，只为拿到交易所
-         * 真实持仓（而不是本地镜像）。不加这个开关时，`loaded 528 tradable...`
-         * 会每 44 秒写一条 —— 30 分钟 41 条，而同期只有 11 个周期。
-         */
-        quiet: true,
-      });
+      /*
+       * 建一条**只读**交易所连接。`deps.openReadOnlyConnection` 是**测试用**的
+       * 注入口 —— 见 `ApiDependencies` 上那个字段的说明（不传时行为与改动前相同）。
+       */
+      const connection = await openReadOnlyFor(trader);
+      if (!connection)
+        return {
+          live: false,
+          account: null,
+          positions: [] as PositionView[],
+          positionsSource: 'none' as PositionsSource,
+          error: '找不到该凭据',
+        };
       const [account, livePositions, liveOrders] = await Promise.all([
         connection.broker.getAccountState(),
         connection.broker.getPositions(),
@@ -2145,7 +2416,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        * 只会静默多一个没人读的键，前端拿到的一直是 `undefined`（界面 `—`）。
        * 加上这一层，`tsc` 就能替这条"改了但没接线"的路径把关。
        */
-      const positions: PositionView[] = livePositions.map((live) => {
+      const exchangePositions: PositionView[] = livePositions.map((live) => {
         const record = bySymbol.get(live.symbol);
         return {
           id: record?.id ?? 0,
@@ -2245,15 +2516,55 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       }
       const ownUnrealizedPnl = own.unrealizedPnl;
       /*
-       * `openOrderCount` 是**交易所口径**的挂单数 —— 卡片用它判断"有没有东西占着保证金"。
+       * ── 持仓到底该问谁 ────────────────────────────────────────────────────
+       *
+       * ⚠️ **模拟盘（`dry_run`）机器人的持仓只存在于本地台账。**
+       *
+       * 上面那段注释（`dry_run` 机器人恒缺标记价）已经写明了这个事实的一半：
+       * 交易所侧**本来就没有**它的仓。当时只把"浮盈"那一路改成用本地台账算，
+       * 而 `positions` 被刻意留成账户级视图 —— 于是出现用户实测两次的那个矛盾：
+       * 卡片「持仓 0 / 保证金占用 0.00」，同一张卡里却有「浮动 +$0.32」。
+       *
+       * **浮盈不可能是 0 持仓** —— 两个数字来自不同的来源，而界面上看不出来。
+       * 所以这里按来源分流，并把来源随响应交给前端（`positionsSource`）：
+       * 前端再没有"猜"的余地。
+       *
+       * ⚠️ **实盘（非纸面）分支逐字节不变**：`paper === false` 时用的还是上面那份
+       * `exchangePositions`，一个字段都没动。
+       *
+       * ⚠️ 标记价用的是**同一个** `markPriceOf`（上面刚补过行情回落），
+       * 所以持仓数、保证金占用、浮动盈亏三个数字**同口径** —— 这正是
+       * 「同屏三个数字互相矛盾」那个老问题的解法。
+       */
+      const paper = isPaperTrader(traderId);
+      const positions: PositionView[] = paper
+        ? localPositionsFor(traderId, markPriceOf)
+        : exchangePositions;
+      /*
+       * ⚠️ **挂单数也要跟着来源走**（同一族的次生矛盾）。
+       *
+       * `openOrderCount` 的用途是让卡片回答"有没有东西占着保证金"，而模拟盘的
+       * 委托**从不出现在交易所**（`broker.ts` 的 `simulateStandard` 路径）——
+       * 问交易所只会恒得 0。本地那张 `status='pending'` 的行才是它的挂单。
+       *
+       * 实盘分支仍然问交易所：那个镜像在推送断开时可能是空的，而"有没有挂单"
+       * 必须问交易所（见上面 `getOpenOrders` 那段实测）。
+       */
+      const openOrderCount = paper ? positionStore.pending(traderId).length : liveOrders.length;
+      /*
+       * `openOrderCount` 是**挂单数** —— 卡片用它判断"有没有东西占着保证金"。
        * 只给数量、不传订单明细：界面要的只是"空不空"（明细由「当前委托」那张表自己查）。
+       *
+       * ⚠️ 它的**来源跟着 `positionsSource` 一起变**（模拟盘问本地、实盘问交易所）——
+       * 见上面 `openOrderCount` 那段的理由。混用会让"0 持仓却有挂单占用"再次出现。
        */
       return {
         live: true,
         account,
         positions,
+        positionsSource: (paper ? 'local_mirror' : 'exchange') as PositionsSource,
         ownUnrealizedPnl,
-        openOrderCount: liveOrders.length,
+        openOrderCount,
         error: undefined as string | undefined,
       };
     } catch (error) {
@@ -2269,7 +2580,13 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        * 是 30 秒一次，所以最坏也只是每 30 秒一行。
        */
       log.warn(`机器人 #${traderId} 的交易所读数失败，本轮不回退到本地镜像：${(error as Error).message}`);
-      return { live: false, account: null, positions: [], error: (error as Error).message };
+      return {
+        live: false,
+        account: null,
+        positions: [] as PositionView[],
+        positionsSource: 'none' as PositionsSource,
+        error: (error as Error).message,
+      };
     }
   };
 
@@ -2349,7 +2666,13 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 第二种情况下把镜像返回出去，界面就会**先显示一个已经不存在的持仓、几秒后又
      * 让它消失**（用户的原话：「会显示不存在的订单（实际是没有的，会出现几秒钟
      * 然后又突然消失）」）。而本地镜像是**回退值**：它的权益、标记价、浮盈全是
-     * 占位零（见下面那段 map），也就是说那份"持仓"从数字上就不可信。
+     * 占位零（见 `localPositionsFor` 不给标记价的那条回落），也就是说那份"持仓"
+     * 从数字上就不可信。
+     *
+     * ⚠️ **模拟盘（`dry_run`）不在"回退值"那一类里**：它的交易所读数恒为空，
+     * 本地台账才是**它自己的真相**。所以 `liveExchangeView` 在那种情况下直接返回
+     * 本地台账（`positionsSource: 'local_mirror'`），到这里 `live.live` 已经是 `true` ——
+     * 下面那条 503 与"没在跑"的分支都不该被走到。
      *
      * **一个会闪烁的表格比一个说"读不到"的表格更糟** —— 前者让人怀疑整张表，
      * 后者只说明这一次读数没成功。所以这里回 503：前端拿到非 2xx 会**保留上一次
@@ -2375,26 +2698,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 长得一模一样，而这个界面在别处（`marginUsed`、熔断读数、`dryRun`）已经明确
      * 选择了"不知道就说不知道"。
      */
-    return positionStore.open(id).map((row) => ({
-      id: row.id,
-      traderId: row.trader_id,
-      symbol: row.symbol,
-      side: row.side,
-      quantity: row.quantity,
-      entryPrice: row.entry_price,
-      markPrice: row.entry_price,
-      leverage: row.leverage,
-      liquidationPrice: row.liquidation_price,
-      unrealizedPnl: 0,
-      unrealizedPnlPercent: 0,
-      peakPnlPercent: row.peak_pnl_percent,
-      marginUsed: row.margin_used,
-      notional: row.quantity * row.entry_price,
-      stopLoss: row.stop_loss,
-      takeProfit: row.take_profit,
-      openedAt: row.opened_at,
-      openReasoning: row.open_reasoning,
-    }));
+    return localPositionsFor(id);
   });
 
   /** Live exchange view, so the console can show truth rather than our mirror. */
