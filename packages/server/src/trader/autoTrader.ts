@@ -279,6 +279,138 @@ export const MAX_DATA_ROUNDS = 3;
  */
 export const PROMPT_LESSON_LIMIT = 8;
 
+/**
+ * **正文一个字都没有**时的重试要求（实盘缺陷，2026-10-17）。
+ *
+ * ## 为什么与既有的"截断重试"那句分开
+ *
+ * 既有那句是"你上一条回复里**没有 `<decision>` 块**……请**先写 `<reasoning>`
+ * （简短即可）**，然后立刻写 `<decision>` 块" —— 它假设模型**写了一些东西**、
+ * 只是没写到决策块。
+ *
+ * 而 `ai_managed` 线上遇到的形态是**正文一个字都没有**（`finish_reason=length`
+ * + `content` 为空）：输出预算被思维链吃光。此时再要求它"先写 `<reasoning>`"
+ * 等于**让它再吃一遍预算** —— 思维链的长度不由指令控制（材料 21 万字符），
+ * 而重试用的是同一份预算。所以那种情况下重试**必然再次为空**。
+ *
+ * ## 这一条要求什么
+ *
+ * · **不要写 `<reasoning>` 块**（把它要输出的正文压到最小）；
+ * · **不要复述材料**（材料已在提示词里，复述是纯浪费）；
+ * · **立刻给 `<decision>`**，哪怕是一个空数组。
+ *
+ * ⚠️ **诚实标注**：对把思维链放在 `reasoning_content` 的模型，提示词**不能关掉
+ * 它的内部思考** —— 这一条只能压缩"它写出来的那部分"。真正的结构性修复是
+ * **加大输出预算**（见 `DecisionModel.outputBudgetTokens` 与
+ * `boostedOutputBudgetFor`）。两条一起用：预算拿得到就放大，拿不到就至少把
+ * "写出来的部分"压到最小。
+ */
+const EMPTY_CONTENT_RETRY_PROMPT =
+  '你上一条回复**正文是空的** —— 输出预算被思考吃光了，一个字都没写出来。' +
+  '这次**不要写 `<reasoning>` 块、也不要复述任何材料**。' +
+  '直接输出 `<decision>` 块（`<decision>` 与 `</decision>` 之间是一个 JSON 数组）：' +
+  '要做动作就写那几个对象，不做动作就写 `[]`。' +
+  '**这是硬要求：没有 `<decision>` 块这一轮就算失败，什么都不会被执行。**';
+
+/** 既有的"有内容、但没写出 `<decision>` 块"的重试要求（本次一字未改）。 */
+const TRUNCATED_RETRY_PROMPT =
+  '你上一条回复里**没有 `<decision>` 块**（很可能是因为思考太长、把输出预算用完了）。' +
+  '请**直接给出结论**：先写 `<reasoning>`（简短即可），然后立刻写 `<decision>` 块。' +
+  '如果你这一轮不打算做任何动作，`<decision>` 里写一个空数组 `[]` 就够了 —— **不要省略这个块**。';
+
+/**
+ * 空内容重试时把输出预算放大到**当前的多少倍**。
+ *
+ * `4` 与 `llm/modelRouter.ts` 的 `REASONING_BUDGET_MULTIPLIER` 同值：
+ * `ai_managed` 这条路径**从来没享受过** `budgetFor()` 对思维链模型的 4 倍放大
+ * （那个函数只被 `ModelRouter` 调用），所以这一次放大同时补上"缺失的那一次"
+ * 与"重试的加倍"。
+ *
+ * 不取更大：预算越大、思维链也越长（"步骤重复"的经典形状），
+ * 而且供应商报的上限之外没有意义。
+ */
+const EMPTY_CONTENT_BUDGET_MULTIPLIER = 4;
+
+/**
+ * 空内容重试能请求的**最大**输出预算 —— 一个硬上界，防止"预算越加越大"。
+ *
+ * 取值依据是本仓实测过的最高配置（`strategy/parser.ts` 里记着"max_tokens 已经是
+ * 131072、而实际在 ~58K 就被网关截断"）。再往上加没有意义，而且可能被供应商
+ * 直接以 400 拒掉 —— 那会让重试连"再用一次原预算"的机会都没有。
+ */
+const MAX_OUTPUT_BUDGET_TOKENS = 131_072;
+
+/**
+ * 空内容重试要用的输出预算；**给不出基准值时返回 `undefined`**（= 不覆盖）。
+ *
+ * 三条边界（都有用例）：
+ * · 拿不到基准（`undefined` / 0 / 负数 / NaN）→ `undefined`，**绝不猜**；
+ * · 正常放大 4 倍；
+ * · 撞上硬上界就取上界。
+ *
+ * 拆成导出的纯函数是为了让它可被直接单测 —— 这段判断错了会静默缩小预算，
+ * 而"静默缩小"正是这个缺陷本身。
+ */
+export function boostedOutputBudgetFor(currentBudget: number | undefined): number | undefined {
+  if (typeof currentBudget !== 'number' || !Number.isFinite(currentBudget) || currentBudget <= 0) {
+    return undefined;
+  }
+  return Math.min(currentBudget * EMPTY_CONTENT_BUDGET_MULTIPLIER, MAX_OUTPUT_BUDGET_TOKENS);
+}
+
+/**
+ * **正文为空时的重试计划** —— 提示词与预算覆盖一次算清（纯函数，可直接单测）。
+ *
+ * ## 为什么抽成纯函数
+ *
+ * 这段判断有**两个方向都会出错**的分支，而两条错了都不会报错、只会静默劣化：
+ *
+ * · 拿"有内容但没写完"的情形去要求"不要写 `<reasoning>`" → 削弱它的推理；
+ * · 拿不到基准预算却硬传一个值 → 可能把预算**缩小**（比不修更糟）。
+ *
+ * 抽出来之后它们各有断言（见 `autoTrader.test.ts` 里那一组用例），
+ * 而不必为了测这两句话去搭一整套交易循环夹具。
+ */
+export function emptyContentRetryPlan(input: {
+  /** 模型这一轮返回的正文。 */
+  text: string;
+  /** 实现当前的输出预算（`undefined` = 读不到）。 */
+  outputBudgetTokens: number | undefined;
+}): {
+  /** 正文是否**完全为空**（= 输出预算被思维链吃光的确证信号）。 */
+  firstTextEmpty: boolean;
+  /** 重试时用的 user 提示词。 */
+  retryPrompt: string;
+  /** 重试要请求的输出预算覆盖；`undefined` = 不传该字段（行为不变）。 */
+  maxTokens: number | undefined;
+  /** 给 `emit('warn', …)` 的一句话；**空串**表示这一轮不是空正文。 */
+  note: string;
+} {
+  const firstTextEmpty = input.text.trim().length === 0;
+  if (!firstTextEmpty) {
+    /* 有内容、只是没写到 `<decision>` 块 —— 沿用既有那句，**一个字都不改**。 */
+    return {
+      firstTextEmpty: false,
+      retryPrompt: TRUNCATED_RETRY_PROMPT,
+      maxTokens: undefined,
+      note: '',
+    };
+  }
+
+  const maxTokens = boostedOutputBudgetFor(input.outputBudgetTokens);
+  return {
+    firstTextEmpty: true,
+    retryPrompt: EMPTY_CONTENT_RETRY_PROMPT,
+    maxTokens,
+    note:
+      maxTokens === undefined
+        ? '模型这一轮正文为空（输出预算被思考吃光）—— 重试时会要求它跳过思维链直接给决策块。' +
+          '（读不到当前输出预算，所以这次没能加大它。）'
+        : `模型这一轮正文为空（输出预算被思考吃光）—— 重试时把输出预算从 ` +
+          `${input.outputBudgetTokens} 加到 ${maxTokens}，并要求它跳过思维链直接给决策块。`,
+  };
+}
+
 /** 提示词里"你自己复盘出来的教训"的一条。 */
 export interface PromptLessonLike {
   symbol: string;
@@ -398,7 +530,29 @@ export interface DecisionModel {
      * **可选**是为了不破坏测试桩与回放器 —— 它们多数不实现这个参数，
      * 而那没关系：生产实现（`manager.ts` 的适配层）会把它一路穿到 `fetch`。
      */
-    options?: { signal?: AbortSignal },
+    options?: {
+      signal?: AbortSignal;
+      /**
+       * **本次调用的输出预算覆盖**（不传 = 用实现自己的默认值）。
+       *
+       * ## 为什么交易循环需要它（实盘缺陷，2026-10-17）
+       *
+       * 思维链模型的 `reasoning_content` 与正文**共享**输出预算
+       * （`llm/client.ts` 的 `chat()` 有实测：`mt=16/128 → content=null`、
+       * `mt=512` 才有正文）。而 `budgetFor()` 那套"思维链模型放大 4 倍"
+       * **只被 `llm/modelRouter.ts` 调用** —— `ai_managed` 走的是
+       * `manager.ts` 里的 `client.complete(...)`，**根本不经过 `ModelRouter`**
+       * ⇒ 那 4 倍放大**完全不覆盖 `ai_managed`**（= 实盘 #10 的模式）。
+       *
+       * 后果：预算被思维链吃光 → `finish_reason=length` + **正文为空**
+       * → 这一轮零决策；而"用同一份预算再问一次"必然还是空（结构性截断）。
+       *
+       * 所以重试必须能**加大预算**。基准值由 `outputBudgetTokens` 提供
+       * （循环自己不知道实现在用多大的预算，也不该去猜 —— 猜小了会把预算
+       * 缩小，比不修更糟）。
+       */
+      maxTokens?: number;
+    },
   ): Promise<{
     text: string;
     latencyMs: number;
@@ -411,6 +565,21 @@ export interface DecisionModel {
       reasoningTokens?: number | null;
     };
   }>;
+
+  /**
+   * 这个模型**当前的输出预算**（token）—— 只在"空内容重试要加大预算"时用。
+   *
+   * 可选：不提供时，空内容重试退化为"同预算再问一次 + 更严格的重试要求"，
+   * **不会报错、也不会改变正常路径**（见 `boostedOutputBudgetFor`）。
+   *
+   * ⚠️ **为什么需要它、而不是循环自己去猜**：输出预算在 `LlmClient` 构造时定死
+   * （来自 `ai_models.max_tokens`）。循环若猜一个绝对值，猜小了会把预算**缩小**
+   * （比不修更糟），猜大了可能被供应商以 400 拒掉。只有实现自己知道那个数。
+   *
+   * 生产由 `manager.ts` 的适配层提供（那里的 `config.maxTokens` 就是构造
+   * `LlmClient` 时用的同一个值）。
+   */
+  outputBudgetTokens?: number;
 
   /**
    * 多消息版本 —— **缓存能不能命中就靠它**。
@@ -427,7 +596,11 @@ export interface DecisionModel {
    *
    * 可选：测试用的桩可以只实现 `complete`，调用方会回落到它。
    */
-  chat?(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>): Promise<{
+  chat?(
+    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+    /** 与 `complete` 同一套可选项（空内容重试要能加大预算）。 */
+    options?: { signal?: AbortSignal; maxTokens?: number },
+  ): Promise<{
     text: string;
     latencyMs: number;
     usage: {
@@ -3910,24 +4083,46 @@ export class AutoTrader {
        * 所以这里只是"多给一次机会"，不是"把失败藏起来"：两次都没有 `<decision>`
        * 就照旧抛错。用量两次都累加 —— 那两笔钱都花了。
        */
-      const retryPrompt =
-        '你上一条回复里**没有 `<decision>` 块**（很可能是因为思考太长、把输出预算用完了）。' +
-        '请**直接给出结论**：先写 `<reasoning>`（简短即可），然后立刻写 `<decision>` 块。' +
-        '如果你这一轮不打算做任何动作，`<decision>` 里写一个空数组 `[]` 就够了 —— **不要省略这个块**。';
+      /*
+       * ⚠️ **两种失败要模型做的事不一样，提示词与预算也必须分开。**
+       *
+       * 判断本身收在 `emptyContentRetryPlan()` 里（纯函数，可单测）：
+       * · 正文**完全为空** → 预算被思维链吃光 → 换 `EMPTY_CONTENT_RETRY_PROMPT`
+       *   （不写思维链、不复述材料、立刻给决策块）**并且放大输出预算**；
+       * · 有内容、只是没写到 `<decision>` → 沿用原来那句、**逐字节不变、不动预算**。
+       */
+      const plan = emptyContentRetryPlan({
+        text: response.text,
+        outputBudgetTokens: this.deps.model.outputBudgetTokens,
+      });
+      const retryPrompt = plan.retryPrompt;
+      const retryBudget = plan.maxTokens;
+      /* 空正文时把"预算从多少加到多少"如实说出来 —— 那是这一轮为什么失败的排障入口。 */
+      if (plan.firstTextEmpty) this.emit('warn', plan.note);
+      /* 只在真的算得出来时才覆盖；`undefined` 表示"不传这个字段"（行为不变）。 */
+      const retryOptions: { signal?: AbortSignal; maxTokens?: number } =
+        retryBudget === undefined ? { signal } : { signal, maxTokens: retryBudget };
 
       let retry: typeof response;
       try {
         retry = this.deps.model.chat
-          ? await this.deps.model.chat([
-              { role: 'system', content: systemPrompt },
-              ...(stablePrompt.length > 0
-                ? [{ role: 'user' as const, content: stablePrompt }]
-                : []),
-              { role: 'user', content: volatilePrompt },
-              { role: 'assistant', content: response.text || '（上一条回复为空。）' },
-              { role: 'user', content: retryPrompt },
-            ])
-          : await this.deps.model.complete(systemPrompt, `${userPrompt}\n\n${retryPrompt}`);
+          ? await this.deps.model.chat(
+              [
+                { role: 'system', content: systemPrompt },
+                ...(stablePrompt.length > 0
+                  ? [{ role: 'user' as const, content: stablePrompt }]
+                  : []),
+                { role: 'user', content: volatilePrompt },
+                { role: 'assistant', content: response.text || '（上一条回复为空。）' },
+                { role: 'user', content: retryPrompt },
+              ],
+              retryOptions,
+            )
+          : await this.deps.model.complete(
+              systemPrompt,
+              `${userPrompt}\n\n${retryPrompt}`,
+              retryOptions,
+            );
       } catch (error) {
         log.warn(`[${this.deps.trader.name}] 截断后的重试调用失败：${(error as Error).message}`);
         retry = response;

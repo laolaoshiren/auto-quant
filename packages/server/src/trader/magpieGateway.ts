@@ -58,6 +58,28 @@ export interface MagpieGatewayConfig {
    * `null` = 读不到（降级为"不知道"，`free` 为 `unknown`，不猜）。
    */
   pluginProvidersPath?: string | null;
+  /**
+   * **这个工厂属于哪个机器人**（`traders.id`）—— **只用于 llm 日志的归属**
+   * （2026-10-17 加，见 `LlmClientOptions.traderId`）。
+   *
+   * ## 为什么需要它
+   *
+   * 线上 `runtime_logs` 里 17 条「空内容（finish_reason=length）」警告，
+   * **14 条 `trader_id` 是 `null`** —— 而落库的 sink 只认 `meta.traderId`，
+   * 于是"是哪个机器人在空转"这个问题答不出来。而 `LlmClient` 正是在这个文件里
+   * new 出来的，所以**归属只能从这里传下去**。
+   *
+   * ## ⚠️ 共享实例不要传（这条比"不传"重要）
+   *
+   * 实测：`manager.buildSelfCheckAsk()` 造的那个工厂会被**整个自检 sweep 复用、
+   * 跨所有在跑的机器人**。给它构造级 `traderId` 会把 A 的空内容记到 B 头上 ——
+   * **错误归因比 `null` 更糟**（`null` 只是查不到，记错会把人引向一个不存在的故障）。
+   * 那种共享场景必须走 `chat()` 的按调用 `context`。
+   *
+   * ⚠️ **它不参与任何请求构造**：只被拼进日志 meta。加它前后，同一个输入发出的
+   * HTTP 请求**逐字节相同**（有测试钉住这一点）。
+   */
+  traderId?: number;
 }
 
 /**
@@ -161,6 +183,13 @@ export function createMagpieCallFactory(gateway: MagpieGatewayConfig): CallModel
       temperature: gateway.temperature,
       timeoutSeconds: gateway.timeoutSeconds,
       maxRetries: gateway.maxRetries,
+      /*
+       * ⚠️ **只用于日志归属**（见 `MagpieGatewayConfig.traderId` 的说明）：
+       * 加了它之后，"哪条链路在空转 / 哪个模型反复失败"才答得出来 ——
+       * 而它**不进请求体**。`undefined` 时 `LlmClient.logOwner()` 会直接省略这个键
+       * （不会写成 `traderId: null`，那会与"确实属于 null 号机器人"混淆）。
+       */
+      ...(gateway.traderId === undefined ? {} : { traderId: gateway.traderId }),
     });
     clients.set(modelId, client);
     return client;

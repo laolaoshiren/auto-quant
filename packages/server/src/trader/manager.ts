@@ -1368,6 +1368,81 @@ async function refreshResearch(
   runtimeLogs.write(traderId, 'warn', 'team', '[调研] 产出不是结构化格式 —— 退回原文使用');
   setResearchCache(traderId, { text: merged, at: Date.now(), refreshing: false, keys: [] });
 }
+/**
+ * **从"停摆判定"产出要记的日志**（纯函数 · 2026-10-17 · t99）。
+ *
+ * ## 为什么抽出来
+ *
+ * 与 `selfcheck.ts` 同一条理由：**判断逻辑是最该被断言的部分**，而它不该需要
+ * 一整个 `TraderManager` 实例（那要真库、真交易所连接）才测得到。
+ * 抽成纯函数之后，"实盘升级为 error / 模拟盘降为 warn / 消息必须带哪些事实"
+ * 都能直接断言，并且能反向守着"**不许另造第二套阈值**"（见下）。
+ *
+ * ## ⚠️ 阈值是**传进来的**，不是这里写死的
+ *
+ * `multiplier` / `graceMs` 由调用方从 `api/server.ts` 导入后传入 ——
+ * 它们就是 `/api/health` 判 `ok:false` 用的**同一批常量**。
+ * 测试传一组"不是 2/300"的值就能证明这里没有硬编码：
+ * **如果哪天有人把它写回 `× 2`，那条用例会红。**
+ *
+ * ## 分两级：只对会影响真实资金的事发强信号
+ *
+ * `dry_run=0` → `error`；其余（模拟盘、或不知道）→ `warn`。
+ * `dryRun` 的解析口径与 `resumePersisted` / `attemptStart` 一致：
+ * `row.dryRun ?? envDryRun`（机器人自己记的优先，没有才回落进程级环境变量）。
+ *
+ * ## 消息形状（**稳定、可检索**）
+ *
+ * ```
+ *   [停摆] #10「赚大钱」实盘 · 已 36 分钟没有完成一轮决策（判据：周期 15 分钟 × 2
+ *          与 300 秒起步宽限取较大者）· 连续失败 9 轮 · 最近错误：<前 300 字符>
+ * ```
+ * 前缀固定，字段顺序固定 —— 排查时 `grep '\[停摆\]'` 能把这一类全捞出来，
+ * 而且四个事实（trader_id / 停摆时长 / 连续失败轮数 / 最近错误）都在同一行上。
+ */
+export function buildStaleNotices(input: {
+  stale: ReadonlyArray<{
+    traderId: number;
+    staleForMs: number | null;
+    awaitingFirstCycle: boolean;
+  }>;
+  rows: ReadonlyArray<{
+    id: number;
+    name: string;
+    cycleIntervalMinutes: number;
+    dryRun?: boolean;
+    consecutiveFailures: number;
+    lastError: string | null;
+  }>;
+  envDryRun: boolean;
+  multiplier: number;
+  graceMs: number;
+}): Array<{ traderId: number; level: 'error' | 'warn'; message: string }> {
+  const byId = new Map(input.rows.map((row) => [row.id, row]));
+  const out: Array<{ traderId: number; level: 'error' | 'warn'; message: string }> = [];
+
+  for (const entry of input.stale) {
+    const row = byId.get(entry.traderId);
+    /* 判定里有、库里读不到（并发删除）→ 跳过，不去编一条没有名字的记录。 */
+    if (row === undefined) continue;
+
+    const realMoney = (row.dryRun ?? input.envDryRun) === false;
+    const level: 'error' | 'warn' = realMoney ? 'error' : 'warn';
+    const minutes = Math.round((entry.staleForMs ?? 0) / 60_000);
+    const errorSnippet = (row.lastError ?? '（没有错误信息）').slice(0, 300);
+
+    const message =
+      `[停摆] #${entry.traderId}「${row.name}」${realMoney ? '实盘' : '模拟盘'} · ` +
+      `已 ${minutes} 分钟没有完成一轮决策` +
+      `（判据：周期 ${row.cycleIntervalMinutes} 分钟 × ${input.multiplier}` +
+      ` 与 ${Math.round(input.graceMs / 1000)} 秒起步宽限取较大者）· ` +
+      `连续失败 ${row.consecutiveFailures} 轮 · 最近错误：${errorSnippet}`;
+
+    out.push({ traderId: entry.traderId, level, message });
+  }
+  return out;
+}
+
 export class TraderManager {
   private readonly running = new Map<number, AutoTrader>();
   /**
@@ -1960,6 +2035,18 @@ export class TraderManager {
         maxRetries: TEAM_GATEWAY_MAX_RETRIES,
         temperature: TEAM_GATEWAY_TEMPERATURE,
         pluginProvidersPath: process.env.MAGPIE_PLUGIN_PROVIDERS_PATH ?? null,
+        /*
+         * ⚠️ **只用于 llm 日志的归属**（2026-10-17 加，见 `MagpieGatewayConfig.traderId`）。
+         *
+         * 这个工厂是**每机器人一个**（`buildTeamModel(traderId)` 由 `startTrader`
+         * 调用），所以构造级归属在这里是**正确**的。而 `buildSelfCheckAsk()` 那个
+         * 工厂被整个自检 sweep 复用、**跨多个机器人** —— 它**故意不传**
+         *（错误归因比 `null` 更糟：`null` 只是查不到，记错会把人引向不存在的故障）。
+         *
+         * 线上实测代价：`llm` 域 17 条「空内容（finish_reason=length）」里
+         * **14 条 `trader_id` 是 `null`**，于是"哪个机器人在空转"答不出来。
+         */
+        traderId,
       }),
       /*
        * **把发现到的候选链交给路由器** —— 这就是"应用到相应的智能体中"那一步。
@@ -2502,7 +2589,16 @@ export class TraderManager {
       const config: StrategyConfig = this.configOf(strategyRecord);
 
       /* --- Model -------------------------------------------------------- */
-      const { client } = await this.buildModel(trader.aiModelId);
+      /*
+       * ⚠️ **把 `config` 一起解构出来**（2026-10-17）：它的 `maxTokens` 就是构造
+       * `LlmClient` 时用的那个输出预算，而交易循环的**空正文重试**要靠它放大预算
+       *（`DecisionModel.outputBudgetTokens`）。不传的话，那 4 倍放大**不生效** ——
+       * 见 `autoTrader.ts` 的 `emptyContentRetryPlan()` 与它上面那段说明。
+       *
+       * 别名 `modelConfig` 是必需的：上面几行的 `config` 是**策略配置**
+       *（`StrategyConfig`），两者同名会直接编译不过。
+       */
+      const { client, config: modelConfig } = await this.buildModel(trader.aiModelId);
       checks.push({
         name: '语言模型',
         severity: 'ok',
@@ -2808,6 +2904,22 @@ export class TraderManager {
       }
 
       const model: DecisionModel = {
+        /*
+         * ⚠️ **当前输出预算**（2026-10-17）：思维链模型的 `reasoning_content` 与正文
+         * **共享** `max_tokens`，而 `budgetFor()` 的 4 倍放大**只覆盖 `ModelRouter`
+         * 那条路（ai_team）** —— `ai_managed` 直连 `client.complete`，从来没享受过它。
+         *
+         * 于是"预算被思维链吃光 → `finish_reason=length` + **正文为空**"在 `ai_managed`
+         * 上没有兜底：用同一份预算再问一次**必然还是空**（那是结构性截断，不是偶发）。
+         *
+         * 这里把**构造 `client` 时那个模型记录的 `maxTokens`** 交给交易循环，
+         * 它才能在空正文重试时放大预算（`autoTrader.ts` 的 `emptyContentRetryPlan()`）。
+         *
+         * `?.` 是必要的：`aiModels.get()` 的返回类型可空（`buildModel` 内部已确认
+         * 那一行存在，但类型上仍要收一次）。传 `undefined` = **不放大**（行为与改动前
+         * 完全一致），所以这里读不到也不会有副作用。
+         */
+        outputBudgetTokens: modelConfig?.maxTokens,
         complete: async (systemPrompt, userPrompt, options) => {
           /*
            * ⚠️ **团队模式走路由模型；其余模式走原来那一条路（一字未改）。**
@@ -4079,6 +4191,84 @@ export class TraderManager {
     log.info(`自检循环已启动（每 ${minutes} 分钟一次，启动时已先跑一遍）。`);
   }
 
+  /**
+   * **停摆审计** —— 把 `/api/health` 已经算出来的 `staleTraders` 落成一条可检索的记录。
+   *
+   * ## 为什么不新建一套判据
+   *
+   * `evaluateTraderHealth`（`api/server.ts:437`）就是那个端点在用的纯函数，
+   * 判据 = `max(周期 × STALE_CYCLE_MULTIPLIER, STARTUP_GRACE_MS)`，而且它多一道
+   * 前提：**该机器人确实由当前进程持有**（否则库里一个残留的 `running` 会被误报 ——
+   * 外部 issue #119 就是这个问题）。自己再写一套阈值，迟早与它分叉，而分叉那天没人发现。
+   * 连**阈值常量也一起 import**，所以文案里写的是同一个 `2` 与同一个 `300 秒`。
+   *
+   * ⚠️ **动态导入而不是静态**：`api/server.ts:57` 从本文件导入（`TraderManager` /
+   * `readLlmHealth`），静态反向导入会成环。动态导入在本文件已有先例
+   * （`refreshResearch` 里对 harness 的那句），而且动态导入拿到的是**已求值完**的模块，
+   * `const` 导出不会踩 TDZ。
+   *
+   * ## 为什么分两级（实盘 / 模拟盘）
+   *
+   * 用户要的是"**只对会影响真实资金的事发强信号**"。`dry_run=0` 停摆 5.5 小时是钱；
+   * 模拟盘停摆同样值得留痕，但不该把真事的强度稀释掉 —— 所以前者 `error`、后者 `warn`。
+   * `dry_run` 的解析口径与 `resumePersisted` / `attemptStart` 一致：
+   * `trader.dryRun ?? env.dryRun`（机器人自己记的优先，没有才回落进程级环境变量）。
+   *
+   * ## 为什么"进入记一次、恢复记一次"
+   *
+   * 这个状态**每 30 分钟的 sweep 都成立**。按事件每轮记一次的结果是日志被同一句话填满 ——
+   * 而本项目反复记过那条："**一个每轮都响的告警等于没有告警**"（`emitOnChange` 的注释）。
+   * 所以只在**进入**与**解除**各记一条；**持续时长以控制台的常驻横幅为准**
+   * （横幅每次轮询都拿最新的 `staleForMs`）。
+   *
+   * ⚠️ 极端情形下最多晚一个 sweep（30 分钟）才写进日志 —— 实时性由控制台横幅承担，
+   * 这一条是**留痕**，不是通道。两者分工写在 `runSelfCheckSweep` 的调用点上。
+   */
+  private async auditStaleTraders(): Promise<void> {
+    const { evaluateTraderHealth, STALE_CYCLE_MULTIPLIER, STARTUP_GRACE_MS } = await import(
+      '../api/server.js'
+    );
+    const rows = traders.list();
+    const verdict = evaluateTraderHealth(rows, Date.now(), this.runningSince());
+    const staleIds = new Set(verdict.stale.map((entry) => entry.traderId));
+
+    /* ① 先处理"恢复"：清掉状态位，并留一条"什么时候恢复的"（与"什么时候开始"对称）。 */
+    for (const id of [...this.staleNotices.keys()]) {
+      if (staleIds.has(id)) continue;
+      this.staleNotices.delete(id);
+      const row = rows.find((r) => r.id === id);
+      const message = `[停摆恢复] #${id}「${row?.name ?? '?'}」已重新完成决策周期 —— 停摆状态解除。`;
+      log.info(message, { traderId: id, raw: message });
+    }
+
+    /*
+     * ② 进入停摆：**文案与级别由纯函数产出**（`buildStaleNotices`），
+     * 这里只负责"去重 + 落日志"。抽出去的理由与 `selfcheck.ts` 一样：
+     * 判断逻辑是最该被断言的部分，而它不需要一整个 manager 实例才能测。
+     */
+    for (const notice of buildStaleNotices({
+      stale: verdict.stale,
+      rows,
+      envDryRun: env.dryRun,
+      multiplier: STALE_CYCLE_MULTIPLIER,
+      graceMs: STARTUP_GRACE_MS,
+    })) {
+      /* 状态位用级别当值：实盘↔模拟盘之间切换也要重新记一条。 */
+      if (this.staleNotices.get(notice.traderId) === notice.level) continue;
+      this.staleNotices.set(notice.traderId, notice.level);
+      log[notice.level](notice.message, { traderId: notice.traderId, raw: notice.message });
+    }
+  }
+
+  /**
+   * **停摆状态位**（键 = traderId，值 = 记过的级别）。
+   *
+   * 只有一个用途：让 `auditStaleTraders` 在"**进入**停摆"与"**解除**"时各记一条，
+   * 而不是每个 sweep 都重复同一句话（见该方法的说明）。
+   * 进程重启后它自然为空 —— 而重启本身就该重新记一条。
+   */
+  private readonly staleNotices = new Map<number, 'error' | 'warn'>();
+
   /** 给所有**在跑**的机器人各跑一次自检。 */
   private async runSelfCheckSweep(): Promise<void> {
     /* 上一遍还没跑完就跳过 —— 自检不该自己叠起来。 */
@@ -4108,6 +4298,43 @@ export class TraderManager {
           log.info('自检的 AI 层已就绪（system_engineer 角色）。');
         }
       }
+
+      /*
+       * ══════════════════════════════════════════════════════════════════════════
+       *  ⭐ **把"停摆"这个已有信号推到人眼前**（2026-10-17 · t99）
+       * ══════════════════════════════════════════════════════════════════════════
+       *
+       * ## 现场（真实资金，本批最贵的一次教训）
+       *
+       * `#10`「赚大钱」（`dry_run=0`）**连续失败 9 轮 / 331 分钟 ≈ 5.5 小时**，零决策。
+       * 而系统**知道**这件事：
+       *
+       * ```
+       *   /api/health → {"ok":false,
+       *     "staleTraders":[{"id":10,"name":"赚大钱","staleForMs":2144782,…}],
+       *     "reason":"有 1 个正在运行的机器人已超过各自周期的 2 倍仍未完成一轮决策。"}
+       * ```
+       *
+       * **问题不是"没有信号"，而是信号在没人看的地方**：`ok:false` 只发给容器编排器
+       *（本部署是 systemd，没人读它），而控制台**连 `staleTraders` 这个字段都没有**。
+       * 队长是在做"部署后回读"时**偶然**发现那 5.5 小时的。
+       *
+       * ## 这一步做什么（范围刻意很小）
+       *
+       * **不新建第二套判据** —— 直接复用 `/api/health` 判 `ok:false` 用的那个纯函数
+       * `evaluateTraderHealth`（判据 = `周期 × 2` 与 `300s` 起步宽限取较大者，且要求
+       * 该机器人**确实由当前进程持有**）。另造一个阈值迟早与它分叉，而分叉那天没人会发现。
+       *
+       * 然后为每一个停摆的机器人留一条**形状稳定、可检索**的记录（见
+       * `auditStaleTraders`），并按"**只对会影响真实资金的事发强信号**"分两级：
+       * `dry_run=0` → `error`；模拟盘 → `warn`。
+       *
+       * ⚠️ 它放在 per-trader 循环**之前**：后面那串要读交易所、还要调模型（最慢的部分），
+       * 停摆检测不该排在它们后面才跑。
+       * ⚠️ 它**只读**（读库 + 读内存里的运行态），不下单、不改状态 ——
+       * 与 `settleStaleOrderRecords` 那种"改账"的动作不同。
+       */
+      await this.auditStaleTraders();
 
       for (const id of ids) {
         /*

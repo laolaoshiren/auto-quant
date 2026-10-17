@@ -121,6 +121,41 @@ export interface LlmClientOptions {
    * 设成 `undefined` 就完全不发这个参数（给"确认不支持"的 provider 用）。
    */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /**
+   * **这条客户端属于哪个机器人**（`traders.id`）—— **只用于日志归属**。
+   *
+   * ## 为什么需要它（2026-10-17 队长线上回读）
+   *
+   * `runtime_logs` 里 17 条「空内容（finish_reason=length）」警告，**14 条
+   * `trader_id` 是 `null`** —— 于是"是哪个机器人在空转"这个问题**无法回答**。
+   * 而当时正需要它：看到"重启后仍有 6 条空内容"时，第一反应是"修复没生效"，
+   * 直到去查归属才发现**那 14 条根本不能归因 ⇒ 那个样本支撑不了任何结论**。
+   *
+   * 而 `llm` 这一域的所有日志都缺它：`log.warn(…)` 的 meta 里只有
+   * `provider` / `model`，而落库的 sink（`api/server.ts` 的 `setLogSink`）
+   * **只认 `meta.traderId`** —— 没有它，`runtime_logs.trader_id` 就是 `null`。
+   *
+   * ## ⚠️ 语义边界：这是"归属"，不是"行为"
+   *
+   * 它**不参与任何请求构造**（不改 body、不改超时、不改重试、不改路由），
+   * 只被拼进日志的 meta。加它前后，同一个输入发出的 HTTP 请求**逐字节相同**。
+   *
+   * ## ⚠️ 共享实例不要用它
+   *
+   * 如果一个客户端实例会被**多个机器人**共用（实测：`buildSelfCheckAsk()` 造的
+   * 那个 magpie 工厂被整个自检 sweep 复用、跨所有在跑的机器人），那**不要**传
+   * 构造级 `traderId` —— 那会把 A 机器人的空内容记到 B 头上，比 `null` 更糟。
+   * 那种情形用 `chat()` 的**按调用**覆盖（`options.context.traderId`）。
+   */
+  traderId?: number;
+  /**
+   * 这个客户端"是谁在用"的**稳定短标签**（调用点自报，例如 `decision`、`team:bull`）。
+   *
+   * 与 `traderId` 同一条纪律：**只进日志 meta**，不改任何请求内容。
+   * 作用是把"同一个机器人的哪条链路在空转"也答出来 —— 团队模式下同一个机器人
+   * 会同时跑多个角色，只有 `traderId` 仍然分不清是哪一个。
+   */
+  callSite?: string;
 }
 
 export interface ConnectionProbe {
@@ -128,6 +163,48 @@ export interface ConnectionProbe {
   message: string;
   latencyMs: number;
   modelEcho?: string;
+}
+
+/**
+ * `chat()` 的**按调用**选项。
+ *
+ * ⚠️ 抽成具名类型（而不是两处各写一遍内联字面量）是因为 `chat()` 与 `attempt()`
+ * **必须接受同一份形状** —— 2026-10-17 加 `context` 时就因为 `attempt()` 那份
+ * 没同步而 `tsc` 报了两处 `Property 'context' does not exist`（这里记一笔）。
+ */
+export interface ChatCallOptions {
+  probe?: boolean;
+  signal?: AbortSignal;
+  /**
+   * **本次调用**的输出预算覆盖（不传则用构造时的 `maxTokens`）。
+   *
+   * ## 为什么需要它（2026-10-12，多智能体路由的必需能力）
+   *
+   * 实测：思维链模型（如 `gpt-6-astra`）的 `reasoning_content` 与正文**共享**
+   * `max_tokens`，预算太小会返回 `content: null` + `finish_reason: length`：
+   *
+   *     mt=16  → content=null · reasoning=435
+   *     mt=128 → content=null · reasoning=475
+   *     mt=512 → content="…"            ← 够用了
+   *
+   * 而 `maxTokens` 原来是**构造时定死的实例字段**，于是"这一轮预算不够、
+   * 加大重试"在结构上做不到 —— 只能整轮失败或换模型，而**换模型会白白丢掉
+   * 最强的那一个**（它只是这次说得多了一点）。
+   *
+   * 所以加这个可选的 per-call 覆盖：**默认行为完全不变**（不传就用实例值），
+   * 只有需要它的调用方（模型路由器的"空内容重试"）才传。
+   */
+  maxTokens?: number;
+  /**
+   * **本次调用的日志归属**（可选，覆盖构造级）—— 见 `logOwner()` 的说明。
+   *
+   * ⚠️ **共享实例必须用它**：一个被多个机器人共用的客户端（实测：自检那个
+   * magpie 工厂被整个 sweep 复用）如果只靠构造级 `traderId`，就会把 A 的空内容
+   * 记到 B 头上 —— **错误归因比 `null` 更糟**。
+   *
+   * ⚠️ 与 `maxTokens` 一样：**不传就完全不影响任何行为**（它只进日志 meta）。
+   */
+  context?: { traderId?: number; callSite?: string };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -260,6 +337,10 @@ export class LlmClient {
    * 同一件事重复 93 遍没有信息量，而"从 A 变成 B"有。
    */
   private lastServedModel: string | undefined;
+  /** 日志归属：这条客户端属于哪个机器人（见 `LlmClientOptions.traderId`）。 */
+  private readonly traderId: number | undefined;
+  /** 日志归属：这条客户端"是谁在用"的短标签（见 `LlmClientOptions.callSite`）。 */
+  private readonly callSite: string | undefined;
 
   constructor(options: LlmClientOptions) {
     this.descriptor = getProvider(options.provider);
@@ -274,6 +355,8 @@ export class LlmClient {
     this.jsonMode = options.jsonMode === true;
     this.jsonSchema = options.jsonSchema;
     this.reasoningEffort = options.reasoningEffort;
+    this.traderId = options.traderId;
+    this.callSite = options.callSite;
     this.keyHint = this.apiKey === '' ? '<empty>' : maskSecret(this.apiKey);
 
     if (this.baseUrl === '') {
@@ -309,6 +392,39 @@ export class LlmClient {
         { kind: 'bad_request' },
       );
     }
+  }
+
+  /**
+   * **所有 llm 域日志的归属字段**（2026-10-17 加）。
+   *
+   * ## 它解决的是"日志查不出是谁"
+   *
+   * 落库的 sink（`api/server.ts` 的 `setLogSink`）只从 meta 里读 `traderId`，
+   * 其余字段（`provider` / `model` / …）**只进 stdout 的 JSON 尾巴，不进库**。
+   * 所以"进库能不能归因"完全取决于这里有没有把 `traderId` 拼进去。
+   *
+   * ## 一层构造 + 一层按调用
+   *
+   * ```
+   *   构造级（LlmClientOptions.traderId）  —— 这条客户端属于谁（每机器人一个实例时用）
+   *   按调用（options.context.traderId）   —— 这一次调用是谁发起的（共享实例时必须用它）
+   * ```
+   * ⚠️ 按调用优先。共享实例（如自检那个跨机器人的 magpie 工厂）**必须**走按调用，
+   * 否则会把 A 的失败记到 B 头上 —— **比 `null` 更糟**（`null` 只是查不到，
+   * 记错会把人引向一个不存在的故障）。
+   *
+   * ⚠️ **它只影响日志**：返回值只被拼进 `log.*()` 的 meta，不参与请求构造。
+   */
+  private logOwner(override?: { traderId?: number; callSite?: string }): {
+    traderId?: number;
+    callSite?: string;
+  } {
+    const traderId = override?.traderId ?? this.traderId;
+    const callSite = override?.callSite ?? this.callSite;
+    return {
+      ...(traderId === undefined ? {} : { traderId }),
+      ...(callSite === undefined ? {} : { callSite }),
+    };
   }
 
   /**
@@ -350,7 +466,9 @@ export class LlmClient {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      /* ⚠️ 探测也会打 llm 域日志 —— 归属走构造级（探测没有"按调用"的上下文）。 */
       log.warn(`${this.provider} 的连通性探测失败`, {
+        ...this.logOwner(),
         provider: this.provider,
         model: this.model,
         baseUrl: this.baseUrl,
@@ -361,33 +479,7 @@ export class LlmClient {
     }
   }
 
-  async chat(
-    messages: ChatMessage[],
-    options: {
-      probe?: boolean;
-      signal?: AbortSignal;
-      /**
-       * **本次调用**的输出预算覆盖（不传则用构造时的 `maxTokens`）。
-       *
-       * ## 为什么需要它（2026-10-12，多智能体路由的必需能力）
-       *
-       * 实测：思维链模型（如 `gpt-6-astra`）的 `reasoning_content` 与正文**共享**
-       * `max_tokens`，预算太小会返回 `content: null` + `finish_reason: length`：
-       *
-       *     mt=16  → content=null · reasoning=435
-       *     mt=128 → content=null · reasoning=475
-       *     mt=512 → content="…"            ← 够用了
-       *
-       * 而 `maxTokens` 原来是**构造时定死的实例字段**，于是"这一轮预算不够、
-       * 加大重试"在结构上做不到 —— 只能整轮失败或换模型，而**换模型会白白丢掉
-       * 最强的那一个**（它只是这次说得多了一点）。
-       *
-       * 所以加这个可选的 per-call 覆盖：**默认行为完全不变**（不传就用实例值），
-       * 只有需要它的调用方（模型路由器的"空内容重试"）才传。
-       */
-      maxTokens?: number;
-    } = {},
-  ): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], options: ChatCallOptions = {}): Promise<ChatResult> {
     const startedAt = Date.now();
     const startedAtIso = new Date(startedAt).toISOString();
     let lastError: unknown;
@@ -408,6 +500,7 @@ export class LlmClient {
         log.warn(
           `模型调用已达本次总时长上界，不再重试：${this.provider} / ${this.model}`,
           {
+            ...this.logOwner(options.context),
             provider: this.provider,
             model: this.model,
             elapsedMs,
@@ -426,6 +519,7 @@ export class LlmClient {
       }
 
       log.debug(`chat request → ${this.provider}`, {
+        ...this.logOwner(options.context),
         provider: this.provider,
         model: this.model,
         baseUrl: this.baseUrl,
@@ -441,6 +535,7 @@ export class LlmClient {
         /* options 原样透传 —— 含 per-call maxTokens 覆盖（见 chat() 的说明）。 */
         const result = await this.attempt(messages, startedAt, startedAtIso, options);
         log.info(`模型调用成功：${this.provider} / ${result.model}`, {
+          ...this.logOwner(options.context),
           provider: this.provider,
           model: result.model,
           finishReason: result.finishReason,
@@ -475,7 +570,7 @@ export class LlmClient {
           log.warn(
             `${this.provider} 拒绝了 reasoning_effort=${dropped}，已去掉该参数并立即重试 —— ` +
               '这次调用不会因为一个可选的思考等级而失败。',
-            { provider: this.provider, model: this.model, status: error.status },
+            { ...this.logOwner(options.context), provider: this.provider, model: this.model, status: error.status },
           );
           /*
            * ⚠️ **`continue` 会消耗一次重试预算 —— 注释原来写反了。**
@@ -521,7 +616,7 @@ export class LlmClient {
           log.warn(
             `${this.provider} 拒绝了流式请求（HTTP ${error.status}），已退回非流式并立即重试 —— ` +
               '这次调用不会因为一个可选优化而失败。',
-            { provider: this.provider, model: this.model, status: error.status },
+            { ...this.logOwner(options.context), provider: this.provider, model: this.model, status: error.status },
           );
           continue;
         }
@@ -530,6 +625,7 @@ export class LlmClient {
         const canRetry = retryable && attempt < this.maxRetries;
 
         const detail = {
+          ...this.logOwner(options.context),
           provider: this.provider,
           model: this.model,
           attempt,
@@ -701,7 +797,7 @@ export class LlmClient {
     messages: ChatMessage[],
     startedAt: number,
     startedAtIso: string,
-    options: { probe?: boolean; signal?: AbortSignal; maxTokens?: number } = {},
+    options: ChatCallOptions = {},
   ): Promise<ChatResult> {
     const probe = options.probe === true;
     const request = this.buildRequest(messages, probe, options.maxTokens);
@@ -783,6 +879,7 @@ export class LlmClient {
 
     if (parsed.finishReason === 'length' && parsed.isEmpty) {
       log.warn(`${this.provider} 返回了空内容（finish_reason=length，输出被长度上限截断）`, {
+        ...this.logOwner(options.context),
         provider: this.provider,
         model: parsed.model ?? this.model,
         startedAt: startedAtIso,
@@ -809,6 +906,7 @@ export class LlmClient {
      */
     if (parsed.model && parsed.model !== this.model && parsed.model !== this.lastServedModel) {
       log.info(`${this.provider} 回显的模型名与请求的不一致`, {
+        ...this.logOwner(options.context),
         requested: this.model,
         served: parsed.model,
         previous: this.lastServedModel ?? null,
