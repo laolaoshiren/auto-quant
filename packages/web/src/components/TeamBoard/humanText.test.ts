@@ -54,6 +54,18 @@ const REAL_WORLD = JSON.stringify([
 const render = (text: string, level?: string): string =>
   renderToStaticMarkup(createElement(HumanMessage, { text, level }));
 
+/** 后端截断留痕（`deskOutput.ts:720`，有意留的 —— 不要改后端）。 */
+const TAIL = '…（已截断，完整 4750 字）';
+
+/**
+ * 在**第三个对象**（BTCUSDT）的 reasoning 字符串中间切开：
+ * 前两个对象（WLDUSDT / BTWUSDT）完整，第三个停在半个字符串上。
+ */
+const FIRST_REASONING = REAL_WORLD.indexOf('"reasoning":"结构不明"');
+const CUT_AT =
+  REAL_WORLD.indexOf('"reasoning":"结构不明"', FIRST_REASONING + 1) + '"reasoning":"'.length;
+const TRUNCATED_ARRAY = `${REAL_WORLD.slice(0, CUT_AT)}${TAIL}`;
+
 /* ══════════════════════════════════════════════════════════════════════════ */
 /*  ① 合法 JSON → 结构化（HTML 里没有 JSON 片段）                                */
 /* ══════════════════════════════════════════════════════════════════════════ */
@@ -247,4 +259,121 @@ test('★★★ 判据自证：把"结构化"退化成"直接显示原文"，上
   const good = render(REAL_WORLD);
   assert.equal((good.match(/<li/g) ?? []).length, 8);
   assert.ok(good.includes('这一轮对'));
+});
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+/*  ⑧ 截断留痕 + 截断的决策数组（2026-10-18 · 用户实测 4,016/4,750 字）          */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * 这次修的是**屏幕上的字**，所以必须在这里（而不是只在新模块的测试里）钉住：
+ * 解析层返回了条目，不等于组件真的用了它（见文件开头"变异 C"的教训）。
+ */
+
+test('[校准 a] 完整决策数组（无留痕）→ 结构化，且不出现截断说明', () => {
+  const html = render(REAL_WORLD);
+  assert.equal((html.match(/<li/g) ?? []).length, 8, '8 个标的 → 8 条');
+  assert.ok(html.includes('这一轮对'), '完整数组用"这一轮对 N 个标的"');
+  assert.ok(!html.includes('原文本已截断'), '没留痕就不该凭空说被截断');
+  assert.ok(!html.includes('{"symbol"') && !html.includes('&quot;symbol&quot;'), '不能漏出 JSON');
+});
+
+test('[校准 b] 截断的决策数组 + 留痕 → 显示前 2 个完整标的，屏上不出现 {"symbol"', () => {
+  /*
+   * ⚠️ 负向校准：把 `HumanMessage` 里的 `parseDecisionListDetailed` 换回
+   * `parseDecisionList`（或退回"不剥留痕"），这条必红 —— 会回落成原文，
+   * HTML 里出现 `[{&quot;symbol&quot;…`，且没有"只显示了前 N 个"。
+   */
+  assert.ok(FIRST_REASONING > 0 && CUT_AT > FIRST_REASONING, '夹具切点必须落在第三个对象的 reasoning 里');
+  const html = render(TRUNCATED_ARRAY);
+
+  /* ① 人话在场：前两个完整标的 + 中文动作。 */
+  assert.ok(html.includes('开空'), 'WLDUSDT 的动作必须译成「开空」');
+  assert.ok(html.includes('WLDUSDT') && html.includes('BTWUSDT'), '前两个完整标的必须在');
+  assert.equal((html.match(/<li/g) ?? []).length, 2, '只渲染 2 条完整决策');
+  assert.ok(!html.includes('BTCUSDT'), '不完整的第三个标的不能出现');
+
+  /* ② 屏幕上不出现 JSON 原文（本条的硬判据）。 */
+  assert.ok(!html.includes('{"symbol"'), '不能出现序列化片段 {"symbol"');
+  assert.ok(!html.includes('&quot;symbol&quot;'), '不能出现转义后的序列化片段');
+  assert.ok(!html.includes('"action":') && !html.includes('&quot;action&quot;'), '不能出现 "action":');
+  assert.ok(!html.includes('…（已截断'), '留痕尾巴不能原样漏出');
+
+  /* ③ **如实说明"被截断了、只显示了前 N 个"**（不许假装完整）。 */
+  assert.ok(html.includes('原文本已截断（完整 4750 字）'), '必须保留留痕的中文语义与原始字数');
+  assert.ok(html.includes('只显示了前 2 个完整的标的'), '必须说清只显示了前 N 个');
+  assert.ok(!html.includes('这一轮对'), '截断前能看到的不等于"这一轮的全部"');
+});
+
+test('[校准 c] 截断到一个完整对象都没有 → 回落纯文本、不白屏、不空表', () => {
+  const input = `[{"symbol":"X","act${TAIL}`;
+  assert.doesNotThrow(() => render(input), '任何形态都不许抛（否则整块会变错误卡）');
+  const html = render(input);
+
+  /* 原文在（一个字节都不丢），且**没有**走结构化分支。 */
+  assert.ok(
+    html.includes('[{&quot;symbol&quot;') || html.includes('[{"symbol"'),
+    '原文必须仍然可见（不白屏）',
+  );
+  assert.ok(!html.includes('<li'), '不能渲染成一张空表');
+  assert.ok(!html.includes('这一轮对'), '不能被当成决策数组');
+  assert.ok(!html.includes('原文本已截断'), '没有结构化就不加那条说明');
+  /* 留痕的中文文案仍然在（它是后端有意留的）。 */
+  assert.ok(html.includes('已截断，完整 4750 字'), '回落纯文本时留痕文案必须原样保留');
+});
+
+test('[校准 d] 非 JSON 普通文本 → 与改动前**逐字一致**（golden HTML）', () => {
+  const note = '正在分析 SOLUSDT 的回踩结构，等待确认。';
+  /*
+   * 这是**改动前**同一组件对同一输入的输出（`renderToStaticMarkup` 逐字）。
+   * 之所以比对整串而不是只判 `includes`：要求是"逐字一致" ——
+   * 多加一层包裹、多一行说明、多一个空格都会被这个断言抓到。
+   *
+   * ⚠️ 如果将来**有意**调整纯文本分支的样式（class），同步更新这条 golden；
+   * 但**不要**为了让测试变绿而放宽成 `includes`。
+   */
+  assert.equal(
+    render(note),
+    '<div class="min-w-0"><div class="border-l-2 border-transparent pl-2"><p class="min-w-0 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-mid">正在分析 SOLUSDT 的回踩结构，等待确认。</p></div></div>',
+  );
+});
+
+test('[校准 e] 完整数组但尾部没有留痕 → 与改动前一致', () => {
+  const html = render(REAL_WORLD);
+  assert.equal((html.match(/<li/g) ?? []).length, 8);
+  assert.ok(html.includes('这一轮对'));
+  assert.ok(html.includes('开空'));
+  assert.ok(!html.includes('原文本已截断'));
+  assert.ok(!html.includes('只显示了前'));
+});
+
+/* ── 另外两条边界：数组完整但截断在数组之后 / 单个对象 + 留痕 ─────────────── */
+
+test('★★ 完整数组 + 留痕（截断发生在数组之后）→ 照常 8 条，只说被截断不说丢条', () => {
+  const html = render(`${REAL_WORLD}${TAIL}`);
+  assert.equal((html.match(/<li/g) ?? []).length, 8, '8 条一条都不能少');
+  assert.ok(html.includes('原文本已截断（完整 4750 字）'), '仍要如实说明被截断过');
+  assert.ok(!html.includes('只显示了前'), '数组本身完整 → 不能说"只显示了前 N 个"');
+});
+
+test('★★ 真实形态：完整数组 + 尾部中文 + 留痕 → 8 条全在，不说"只显示了前 N 个"', () => {
+  /*
+   * 队长实测那条 tail 是「* 结论：**开空 WLDUSDT**，其余全部…（已截断，完整 4750 字）」：
+   * 决策数组后面还有一段中文，`JSON.parse` 从数组起点一直吃到中文必然失败。
+   * 这里钉住"数组本身完整"这个事实 —— **不能**谎称丢了几条。
+   */
+  const html = render(`${REAL_WORLD}\n* 结论：**开空 WLDUSDT**，其余全部观望${TAIL}`);
+  assert.equal((html.match(/<li/g) ?? []).length, 8, '8 条一条都不能少');
+  assert.ok(html.includes('这一轮对'), '数组完整 → 仍是"这一轮对 N 个标的给了决策"');
+  assert.ok(html.includes('原文本已截断（完整 4750 字）'), '必须保留截断说明');
+  assert.ok(!html.includes('只显示了前'), '数组完整 → 不能说"只显示了前 N 个"');
+  assert.ok(!html.includes('{"symbol"') && !html.includes('&quot;symbol&quot;'), '不能漏出 JSON');
+});
+
+test('★★ 单个对象 + 留痕 → 键值两列 + 截断说明（不回落原文）', () => {
+  const html = render(`{"action":"open_short","symbol":"WLDUSDT"}${TAIL}`);
+  assert.ok(html.includes('开空'), '动作码必须译成「开空」');
+  assert.ok(!html.includes('open_short'), '不该出现 open_short');
+  assert.ok(!html.includes('&quot;action&quot;'), '不该出现序列化片段');
+  assert.ok(html.includes('原文本已截断（完整 4750 字）'), '必须保留截断说明');
 });

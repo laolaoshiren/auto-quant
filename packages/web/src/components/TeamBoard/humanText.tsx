@@ -38,8 +38,9 @@ import { plainText } from '../../lib/plainText';
 import {
   fieldLabel,
   looksLikeActionCode,
-  parseDecisionList,
+  parseDecisionListDetailed,
   parseLooseObject,
+  stripTruncationTail,
   type ParsedDecisionItem,
 } from '../../lib/structuredMessage';
 
@@ -115,6 +116,41 @@ function DecisionLine({ item }: { item: ParsedDecisionItem }): React.ReactElemen
         </p>
       )}
     </li>
+  );
+}
+
+/**
+ * **"原文本被截断过"的如实说明**（2026-10-18 · 用户实测那条 4,016/4,750 字）。
+ *
+ * ## 为什么剥掉留痕之后还要把它说一遍
+ *
+ * 留痕（`…（已截断，完整 N 字）`）是**后端有意留的**：它在告诉读者"这不是全部"。
+ * 展示层解析前必须剥掉它（否则 JSON 永远解析不出来），但**不能连这个事实一起丢掉** ——
+ * 用户看到的应当是"这是前 N 个标的，原文还有更多"，而不是一段看起来完整的数据。
+ *
+ * ## 两种口径（都不许假装完整）
+ * ```
+ *   shown === null  → 决策数组本身是完整的，被截掉的是数组**之后**的内容
+ *   shown !== null  → 数组被截断：只抠出前 N 个完整对象，最后那个不完整的已丢弃
+ * ```
+ *
+ * ⚠️ 颜色按 `DecisionDetailPage` 的口径用**弱化色**而不是 `text-warn`：
+ * 截断是"数据不完整"这个**事实**，不是故障；红色会把真正的失败稀释掉。
+ */
+function TruncationNotice({
+  originalLength,
+  shown,
+}: {
+  /** 留痕里记录的原始字符数（`stripTruncationTail` 保证有留痕时非 null）。 */
+  originalLength: number;
+  /** 结构化后实际显示的标的数；`null` = 数组本身完整，只截掉了后面的内容。 */
+  shown: number | null;
+}): React.ReactElement {
+  return (
+    <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+      {`原文本已截断（完整 ${originalLength} 字）`}
+      {shown === null ? '。' : `，只显示了前 ${shown} 个完整的标的。`}
+    </p>
   );
 }
 
@@ -228,11 +264,18 @@ function ObjectRows({ rows }: { rows: Array<[string, string]> }): React.ReactEle
  *
  * 判据顺序（每一步都要）：
  * ```
- *   ① 是"决策数组"的 JSON？   → 每个标的一行（`parseDecisionList`）
+ *   ① 是"决策数组"的 JSON？   → 每个标的一行（`parseDecisionListDetailed`）
+ *      · 带截断留痕 → 先剥尾巴，再逐个抠完整对象；**如实说明被截断了**
  *   ② 是"单个对象"的 JSON？   → 键值两列，字段名与动作码都译成中文（`parseLooseObject`）
  *   ③ 否则                   → 纯文本（**仍要过 `plainText`**）+ 超长折叠
  * ```
- * 解析失败（截断、非 JSON、形状不对）自然落进 ③ —— **一个字节都不丢**。
+ * 解析失败（非 JSON、形状不对、截断到一个完整对象都没有）自然落进 ③ —— **一个字节都不丢**。
+ *
+ * ## ⚠️ 截断的决策数组（2026-10-18 · 用户实测）
+ *
+ * 被后端截断的数组**不是合法 JSON**，但前面若干个 `{…}` 是完整的。旧实现整条回落纯文本，
+ * 用户屏幕上就是一坨原始 JSON。现在：抠出完整对象 → 按决策数组渲染 → **把留痕那句
+ * "原文本已截断（完整 N 字）"照实显示出来**（见 `TruncationNotice`）。
  */
 export function HumanMessage({
   text,
@@ -242,21 +285,46 @@ export function HumanMessage({
   /** 宽松入参：`roster.ts` 的 `level` 是 `string`，认不出的按 `info`（不染色）。 */
   level?: string | null;
 }): React.ReactElement {
-  const items = parseDecisionList(text);
+  const detail = parseDecisionListDetailed(text);
   const tone = normalizeLevel(level);
 
-  if (items !== null) {
+  if (detail !== null) {
+    /*
+     * `true` = 数组真的被截断在中间（只抠出前 N 个完整对象）。
+     * 若数组本身完整、截断只发生在它后面的正文里（`arrayClosed`），
+     * 条目就是全的 —— 这时的文案**不能**说"只显示了前 N 个"。
+     */
+    const incomplete = detail.recovered && !detail.arrayClosed;
     return (
       <div className="min-w-0">
         {/*
           先说"有几个标的"—— 用户要能一眼看出这一轮扫了多少个，而不是一行塞满。
           数字用 `num` 等宽，与全仓数字口径一致。
+
+          ⚠️ 数组真的被截断在中间（`incomplete`）时**不能**说"这一轮对 N 个标的
+          给了决策" —— N 只是"截断前还完整的那几个"，不是这一轮的全部。
+          （若数组本身完整、截断只发生在它后面的正文里，N 就是全部，照常说。）
         */}
         <p className="mb-0.5 text-[11px] text-ink-faint">
-          这一轮对 <span className="num text-ink-lo">{items.length}</span> 个标的给了决策
+          {incomplete ? (
+            <>
+              截断前能看到 <span className="num text-ink-lo">{detail.items.length}</span> 个完整的标的
+            </>
+          ) : (
+            <>
+              这一轮对 <span className="num text-ink-lo">{detail.items.length}</span> 个标的给了决策
+            </>
+          )}
         </p>
+        {detail.truncated && detail.originalLength !== null && (
+          <TruncationNotice
+            originalLength={detail.originalLength}
+            /* 数组被截断 → 说清"只显示了前 N 个"；数组完整 → 只说被截断过。 */
+            shown={incomplete ? detail.items.length : null}
+          />
+        )}
         <ul className="min-w-0 space-y-1">
-          {items.map((item, index) => (
+          {detail.items.map((item, index) => (
             <DecisionLine key={`${item.symbol}-${item.action}-${index}`} item={item} />
           ))}
         </ul>
@@ -264,12 +332,19 @@ export function HumanMessage({
     );
   }
 
-  /* ② 单个对象 → 键值两列（字段名 + 动作码值都中文化）。 */
-  const rows = parseLooseObject(text);
+  /*
+   * ② 单个对象 → 键值两列（字段名 + 动作码值都中文化）。
+   * 解析前同样剥掉留痕（`parseLooseObject` 内部已经剥；这里再取一次是为了**说明**）。
+   */
+  const tail = stripTruncationTail(text);
+  const rows = parseLooseObject(tail.text);
   if (rows !== null) {
     return (
       <div className="min-w-0">
         <ObjectRows rows={rows} />
+        {tail.truncated && tail.originalLength !== null && (
+          <TruncationNotice originalLength={tail.originalLength} shown={null} />
+        )}
       </div>
     );
   }

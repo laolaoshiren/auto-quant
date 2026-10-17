@@ -85,6 +85,59 @@ export function parseJsonLoose(text: string): unknown {
   return null;
 }
 
+/* -------------------------------------------------------------------------- */
+/*  截断留痕：后端 `clip()` 追加的 `…（已截断，完整 N 字）`                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 后端截断留痕的形状（`deskOutput.ts` 的 `clip()`，**有意留的，不要改后端**）：
+ * ```
+ *   `${one.slice(0, limit)}…（已截断，完整 ${s.length} 字）`
+ * ```
+ *
+ * ## 为什么必须认识它（2026-10-18 · 用户实测）
+ *
+ * 一条 4,750 字的裁决官输出被截到 4,000 字，尾巴多了 `…（已截断，完整 4750 字）`。
+ * 那段被截下来的正文本身就是一个**不完整的 JSON 数组**，尾巴又接在它后面 ——
+ * 于是 `JSON.parse` 永远失败 → 整条 message 回落纯文本 → 用户屏幕上出现一坨原始 JSON。
+ *
+ * 这个留痕是**给人看的**（"这不是全部"），所以展示层要做两件事：
+ * ```
+ *   ① 解析前先剥掉它（它是人话，不是 JSON 的一部分）；
+ *   ② 结构化渲染时**把这句话再说一遍**，不能因为剥掉就丢了"被截断"这个事实。
+ * ```
+ */
+export interface TruncationInfo {
+  /** 剥掉留痕后的正文；**没有留痕时原样返回同一个字符串**。 */
+  text: string;
+  /** 原文是否被后端截断过。 */
+  truncated: boolean;
+  /** 留痕里记录的原始字符数（没有留痕 → `null`）。 */
+  originalLength: number | null;
+}
+
+/**
+ * 只认**末尾**那一条留痕（后端是把它追加在整条 message 的最后）。
+ *
+ * ⚠️ 末尾允许空白（`join('\n')` 之后可能带换行）。而**一条 message 里出现多条留痕**
+ * 说明它是多段内容拼起来的（例如整个 `<team>` 块，每个角色一段留痕）——
+ * 那种文本**不是"一个决策数组"**，调用方必须整段回落纯文本，不许从某一段里抠数组。
+ * 这条判据在 `parseDecisionListDetailed` 里用 `TRUNCATION_MARKER` 做。
+ */
+const TRUNCATION_MARKER = '…（已截断，完整 ';
+const TRUNCATION_TAIL = /…（已截断，完整 (\d+) 字）\s*$/;
+
+/** 剥掉截断留痕（没有留痕时返回**原字符串**，一个字节都不动）。 */
+export function stripTruncationTail(text: string): TruncationInfo {
+  const match = TRUNCATION_TAIL.exec(text);
+  if (match === null) return { text, truncated: false, originalLength: null };
+  return {
+    text: text.slice(0, match.index),
+    truncated: true,
+    originalLength: Number.parseInt(match[1]!, 10),
+  };
+}
+
 /** 决策数组里的一项 —— 只声明**我们会显示**的字段，其余原样忽略。 */
 export interface ParsedDecisionItem {
   symbol: string;
@@ -159,7 +212,8 @@ const ACTION_LIKE =
  * 两条都失败 → 调用方回落纯文本。**任一路径都不会抛**。
  */
 export function parseLooseObject(text: string): Array<[string, string]> | null {
-  const value = parseJsonLoose(text);
+  /* 截断留痕不是 JSON 的一部分 —— 先剥掉再解析（没有留痕时是恒等变换）。 */
+  const value = parseJsonLoose(stripTruncationTail(text).text);
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const rows: Array<[string, string]> = [];
   for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
@@ -211,34 +265,263 @@ const strOrNull = (value: unknown): string | null =>
  * 一条记录里混进一个形状不对的项（老版本字段、模型多写了个 null）不该让
  * **整段**退化成 JSON 字符串 —— 那会把另外 7 条可读的信息一起毁掉。
  * 所以：不合格的项**跳过**，但只要**至少有一项**合格就渲染。
+ *
+ * ## 截断的决策数组（2026-10-18 起）
+ *
+ * 后端会截断长输出并留痕（`…（已截断，完整 N 字）`），被截断的数组**不是合法 JSON**。
+ * 本函数不再直接返回 null，而是交给 `parseDecisionListDetailed` 做**容错提取**：
+ * 抠出前面完整的 `{…}`，最后那个不完整的丢弃。需要"这条被截断了"这个事实时
+ * 用带元信息的 `parseDecisionListDetailed`；只要条目时用本函数即可。
  */
 export function parseDecisionList(text: string): ParsedDecisionItem[] | null {
-  const value = parseJsonLoose(text);
-  if (!Array.isArray(value) || value.length === 0) return null;
+  return parseDecisionListDetailed(text)?.items ?? null;
+}
 
-  const items: ParsedDecisionItem[] = [];
-  for (const raw of value) {
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue;
-    const row = raw as Record<string, unknown>;
-    const symbol = strOrNull(row.symbol);
-    const action = strOrNull(row.action);
-    /* ② 两个字段同时存在，才是"一条决策"的形状。 */
-    if (symbol === null || action === null) continue;
-    items.push({
-      symbol,
-      action,
-      leverage: numOrNull(row.leverage),
-      positionSizeUsd: numOrNull(row.positionSizeUsd),
-      stopLoss: numOrNull(row.stopLoss),
-      takeProfit: numOrNull(row.takeProfit),
-      confidence: numOrNull(row.confidence),
-      riskUsd: numOrNull(row.riskUsd),
-      reasoning: strOrNull(row.reasoning),
-      intelKeys: Array.isArray(row.intel_keys)
-        ? row.intel_keys.filter((k): k is string => typeof k === 'string')
-        : [],
-    });
+/** 把数组里的一项收成可渲染的决策行；形状不对 → `null`（**不猜**）。 */
+function decisionItemOf(raw: unknown): ParsedDecisionItem | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const row = raw as Record<string, unknown>;
+  const symbol = strOrNull(row.symbol);
+  const action = strOrNull(row.action);
+  /* ② 两个字段同时存在，才是"一条决策"的形状。 */
+  if (symbol === null || action === null) return null;
+  return {
+    symbol,
+    action,
+    leverage: numOrNull(row.leverage),
+    positionSizeUsd: numOrNull(row.positionSizeUsd),
+    stopLoss: numOrNull(row.stopLoss),
+    takeProfit: numOrNull(row.takeProfit),
+    confidence: numOrNull(row.confidence),
+    riskUsd: numOrNull(row.riskUsd),
+    reasoning: strOrNull(row.reasoning),
+    intelKeys: Array.isArray(row.intel_keys)
+      ? row.intel_keys.filter((k): k is string => typeof k === 'string')
+      : [],
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  截断决策数组的**容错提取**（2026-10-18 · 用户实测的那条 4,016/4,750 字）      */
+/* -------------------------------------------------------------------------- */
+
+const isJsonSpace = (ch: string): boolean => ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+
+interface ObjectScan {
+  /** 按出现顺序抠出来的**完整**对象原文（最后那个不完整的**不在里面**）。 */
+  objects: string[];
+  /** 是否扫到了数组的 `]`（= 数组本身其实是完整的，截断发生在它后面）。 */
+  closed: boolean;
+}
+
+/**
+ * 从 `start` 处的 `[` 开始，按**大括号配对**逐个抠出完整的 `{…}`。
+ *
+ * ## 为什么不能"用逗号切"
+ *
+ * 决策对象的 `reasoning` 是模型写的长文本，里面**完全可能有逗号、引号、花括号**
+ * （实测有理据写 `[0.8,3.5]`、`D=-1.045%`）。所以扫描必须：
+ * ```
+ *   ① 只数**字符串外**的 `{` / `}`；
+ *   ② 认识 `"` 与 `\"` 转义（否则 reasoning 里的引号会让"字符串状态"跑偏）；
+ *   ③ 遇到没闭合的对象就**丢弃它**（它正是被截断的那一条），保留前面完整的。
+ * ```
+ *
+ * ## 返回 `null` 与返回 `{ objects: [] }` 的区别
+ *
+ * ```
+ *   null           → 这个 `[` 后面不是"对象数组"（`["a","b"]` / 区间 `[0.8,3.5]`）
+ *                    → 这个起点不成立，调用方换更靠左的 `[` 再试
+ *   objects: []    → 起点成立，但里面还没有一个完整对象（截断在最前面）
+ * ```
+ */
+function scanObjectsFrom(source: string, start: number): ObjectScan | null {
+  if (source[start] !== '[') return null;
+  let i = start + 1;
+  const objects: string[] = [];
+
+  for (;;) {
+    /* 元素之间的空白与逗号 —— 截断可能停在任意位置。 */
+    while (i < source.length && (isJsonSpace(source[i]!) || source[i] === ',')) i += 1;
+    if (i >= source.length) return { objects, closed: false };
+    if (source[i] === ']') return { objects, closed: true };
+    /*
+     * ⚠️ **不是 `{` 有两种情形，必须分开**（2026-10-18 独立验证打穿后修）：
+     *
+     * ```
+     *   ① 还没抠到任何对象就撞上非 `{`  → 这个起点不成立（`["a","b"]`、区间 `[0.8,3.5]`）
+     *                                      ⇒ 返回 null，让调用方换更靠左的 `[` 再试
+     *   ② 已经抠到 ≥1 个完整对象才撞上   → **保留已抠到的**，停止扫描
+     * ```
+     *
+     * 第 ② 种是**真实数据的常见形状**：数组被 4000 字上限截断，截断点后面直接接模型自己写的话
+     * （实测：`[{"symbol":"WLDUSDT",…},{"symbol":"BTWUSDT",…},* 结论：**开空 WLDUSDT**…（已截断，完整 4750 字）`）
+     * —— 数组没有 `]`，第 3 个元素是半句话 `* 结论：`。
+     *
+     * 老代码在这里一律 `return null`，把**前两个本来完好的对象一起丢掉** ⇒
+     * 上层回落纯文本 ⇒ **用户屏幕上又是一坨原始 JSON**（用户报的正是这个）。
+     */
+    if (source[i] !== '{') {
+      return objects.length > 0 ? { objects, closed: false } : null;
+    }
+
+    const objectStart = i;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (; i < source.length; i += 1) {
+      const ch = source[i]!;
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === '{') depth += 1;
+      else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          i += 1;
+          break;
+        }
+      }
+    }
+    /* 这个对象没闭合（被截断）→ 丢弃它以及后面的一切。 */
+    if (depth !== 0) return { objects, closed: false };
+    objects.push(source.slice(objectStart, i));
   }
-  /* ③ 一项都不合格 → 当普通文本（不渲染一张空表）。 */
-  return items.length > 0 ? items : null;
+}
+
+/** 容错提取的结果。 */
+interface DecisionExtraction {
+  items: ParsedDecisionItem[];
+  /**
+   * 是否扫到了数组的 `]`。
+   * ```
+   *   false → 数组被截断在中间：只抠出前 N 个，**必须**说"只显示了前 N 个"
+   *   true  → 数组本身完整（截断发生在它**之后**，例如后面还有一段中文）
+   *           → 条目是全的，只说"原文本被截断过"，不能谎称丢了几条
+   * ```
+   */
+  arrayClosed: boolean;
+}
+
+/**
+ * 从"被截断的输出"里尽量抠出**完整的**决策项。
+ *
+ * 候选起点**从右往左**试（与 `parseJsonLoose` 同一策略）：真正的数组通常是
+ * 最靠右那个"后面跟着 `{`"的方括号，而 reasoning 里的 `[0.8,3.5]` 这类区间
+ * 后面跟的不是 `{`，会被 `scanObjectsFrom` 判为"起点不成立"直接跳过。
+ *
+ * ⚠️ **只由 `parseDecisionListDetailed` 在"认出留痕"之后调用** ——
+ * 没有留痕的普通文本绝不走这里，保证"改动前怎么显示，现在还怎么显示"。
+ */
+function extractDecisionObjects(source: string): DecisionExtraction {
+  const starts: number[] = [];
+  for (let i = 0; i < source.length; i += 1) {
+    if (source[i] === '[') starts.push(i);
+  }
+
+  for (let k = starts.length - 1; k >= 0; k -= 1) {
+    const scan = scanObjectsFrom(source, starts[k]!);
+    if (scan === null || scan.objects.length === 0) continue;
+    const items: ParsedDecisionItem[] = [];
+    for (const fragment of scan.objects) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(fragment) as unknown;
+      } catch {
+        /* 单个对象抠出来却不是合法 JSON → 跳过它，不毁掉别的。 */
+        continue;
+      }
+      const item = decisionItemOf(parsed);
+      if (item !== null) items.push(item);
+    }
+    if (items.length > 0) return { items, arrayClosed: scan.closed };
+  }
+  return { items: [], arrayClosed: false };
+}
+
+/** `parseDecisionListDetailed` 的结果 —— 除条目外还带"这条被截断过"的元信息。 */
+export interface DecisionListDetail {
+  items: ParsedDecisionItem[];
+  /** 原文被后端截断过（末尾有留痕）。 */
+  truncated: boolean;
+  /** 留痕里记录的原始字符数；没有留痕 → `null`。 */
+  originalLength: number | null;
+  /**
+   * `true` = 原文**不是**合法 JSON，是靠"逐个抠完整对象"容错提取出来的。
+   * 此时显示层必须如实说明被截断过；`arrayClosed === false` 时还要说"只显示了前 N 个"。
+   */
+  recovered: boolean;
+  /**
+   * 决策数组本身是否完整。
+   * ```
+   *   false → 数组被截断在中间（最后那个对象不完整，已丢弃）
+   *   true  → 数组完整，被截掉的只是它后面的内容
+   * ```
+   * 非 `recovered` 路径恒为 `true`（原文就是完整 JSON）。
+   */
+  arrayClosed: boolean;
+}
+
+/**
+ * **`parseDecisionList` 的带元信息版**。
+ *
+ * 判据与 `parseDecisionList` 完全一致，只多两步：
+ * ```
+ *   ① 解析前剥掉留痕尾巴（`stripTruncationTail`）；
+ *   ② 若原文被截断、且整体解析失败 → 逐个抠完整对象（`extractDecisionObjects`）；
+ *      一个都抠不出来 → 返回 null（调用方回落纯文本，不白屏、不空表）。
+ * ```
+ *
+ * ⚠️ **没有留痕的输入不走 ②**：`[{"symbol":"X","act`（没尾巴）仍然返回 null，
+ * 与改动前逐字一致。
+ */
+export function parseDecisionListDetailed(text: string): DecisionListDetail | null {
+  const tail = stripTruncationTail(text);
+
+  /*
+   * 多条留痕 = 多段内容拼在同一条 message 里（各角色各被截断过一次）。
+   * 那不是"一个决策数组" —— 整段回落纯文本，**不从某一段里猜**。
+   */
+  if (tail.truncated && text.indexOf(TRUNCATION_MARKER) !== text.lastIndexOf(TRUNCATION_MARKER)) {
+    return null;
+  }
+
+  const value = parseJsonLoose(tail.text);
+  if (Array.isArray(value) && value.length > 0) {
+    const items: ParsedDecisionItem[] = [];
+    for (const raw of value) {
+      const item = decisionItemOf(raw);
+      if (item !== null) items.push(item);
+    }
+    /* ③ 一项都不合格 → 当普通文本（不渲染一张空表）—— 与改动前一致。 */
+    if (items.length === 0) return null;
+    return {
+      items,
+      truncated: tail.truncated,
+      originalLength: tail.originalLength,
+      recovered: false,
+      arrayClosed: true,
+    };
+  }
+
+  /*
+   * 只有**确实被截断过**才做容错提取。没有留痕 → 一律按原判据回落，
+   * 这样普通文本（哪怕碰巧含 `{`）的行为与改动前**逐字一致**。
+   */
+  if (!tail.truncated) return null;
+
+  const extracted = extractDecisionObjects(tail.text);
+  /* 连一个完整对象都提不出来 → 回落纯文本（不白屏、不空表）。 */
+  if (extracted.items.length === 0) return null;
+  return {
+    items: extracted.items,
+    truncated: true,
+    originalLength: tail.originalLength,
+    recovered: true,
+    arrayClosed: extracted.arrayClosed,
+  };
 }

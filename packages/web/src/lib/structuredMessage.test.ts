@@ -34,7 +34,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseDecisionList, parseJsonLoose } from './structuredMessage';
+import {
+  parseDecisionList,
+  parseDecisionListDetailed,
+  parseJsonLoose,
+  stripTruncationTail,
+} from './structuredMessage';
 
 /** 用户截图里那一条（8 个标的，含 open_short / skip）。 */
 const REAL_WORLD = JSON.stringify([
@@ -258,4 +263,214 @@ test('★★★ 判据自证：坏实现必须被判据抓到', () => {
   /* 正确实现：同一输入不抛、返回 null。 */
   assert.doesNotThrow(() => parseDecisionList('[{"symbol":"X","action":"op'));
   assert.equal(parseDecisionList('[{"symbol":"X","action":"op'), null);
+});
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+/*  ⑤ 截断留痕 + **截断的决策数组**（2026-10-18 · 用户实测 4,016/4,750 字）      */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * 后端 `clip()` 的留痕尾巴（`deskOutput.ts:720`，**有意留的，不要改后端**）：
+ * ```
+ *   `${one.slice(0, limit)}…（已截断，完整 ${s.length} 字）`
+ * ```
+ * 实测那条 message 长度 4,016、留痕写「完整 4750 字」。
+ */
+const TAIL = '…（已截断，完整 4750 字）';
+
+/**
+ * 真实截断形态：在**第三个对象的 reasoning 字符串中间**切开，再接留痕。
+ * 前两个对象完整 → 应提取出 2 条；第三个停在半个字符串上 → **丢弃**。
+ */
+const CUT_AT = REAL_WORLD.indexOf('盈亏比');
+const TRUNCATED_ARRAY = `${REAL_WORLD.slice(0, CUT_AT)}${TAIL}`;
+
+test('[校准 a] 完整决策数组（无留痕）→ 结构化，元信息是"没截断"', () => {
+  const detail = parseDecisionListDetailed(REAL_WORLD);
+  assert.ok(detail !== null, '完整数组必须解析成功');
+  assert.equal(detail.items.length, 8, '8 个标的 → 8 条');
+  assert.equal(detail.truncated, false, '没有留痕 → 不算被截断');
+  assert.equal(detail.originalLength, null, '没有留痕 → 没有原始字数');
+  assert.equal(detail.recovered, false, '完整 JSON → 不是容错提取');
+  assert.equal(detail.arrayClosed, true, '完整数组 → 数组是闭合的');
+  /* 与旧入口 `parseDecisionList` 完全一致（只是多了元信息，没有改判据）。 */
+  assert.deepEqual(detail.items, parseDecisionList(REAL_WORLD));
+});
+
+test('[校准 b] 截断的决策数组 + 留痕 → 只提取前 2 个完整标的，并标记"不完整"', () => {
+  assert.ok(CUT_AT > 0 && CUT_AT < REAL_WORLD.length, '夹具切点必须落在真实 JSON 内部');
+  /*
+   * ⚠️ 负向校准：把 `parseDecisionListDetailed` 改回"直接 parseJsonLoose"（不剥留痕、
+   * 不抠对象），这条必红 —— 那时 `detail` 是 null，显示层又会回落成一坨 JSON。
+   */
+  const detail = parseDecisionListDetailed(TRUNCATED_ARRAY);
+  assert.ok(detail !== null, '截断的决策数组必须能容错提取（不能回落成一坨 JSON）');
+  assert.deepEqual(
+    detail.items.map((item) => item.symbol),
+    ['WLDUSDT', 'BTWUSDT'],
+    '只保留前 2 个**完整**对象',
+  );
+  assert.equal(detail.recovered, true, '必须标记为"容错提取"，显示层才能如实说明');
+  assert.equal(detail.arrayClosed, false, '数组被截断在中间 → 必须标记"不完整"');
+  assert.equal(detail.truncated, true, '必须记住"这条被截断过"');
+  assert.equal(detail.originalLength, 4750, '留痕里的原始字数要原样带出来');
+  /* 不完整的第三个对象（BTCUSDT）不能变成一条决策。 */
+  assert.ok(!detail.items.some((item) => item.symbol === 'BTCUSDT'), '半个对象不能当成决策');
+  /* 留痕那半句不是字段内容 —— 不能漏进 symbol / action / reasoning。 */
+  for (const item of detail.items) {
+    for (const value of [item.symbol, item.action, item.reasoning ?? '']) {
+      assert.ok(!value.includes('已截断'), `留痕不该漏进字段：${value}`);
+      assert.ok(!value.includes('4750'), `原始字数不该漏进字段：${value}`);
+    }
+  }
+});
+
+test('[校准 b-1] 剥留痕：有留痕 → 剥掉并识别原始字数；没留痕 → 一个字都不动', () => {
+  const info = stripTruncationTail(`{"a":1}${TAIL}`);
+  assert.equal(info.text, '{"a":1}', '尾巴必须被剥掉');
+  assert.equal(info.truncated, true);
+  assert.equal(info.originalLength, 4750);
+
+  const plain = '普通文本 {不是} JSON';
+  const untouched = stripTruncationTail(plain);
+  assert.equal(untouched.text, plain, '没留痕时正文必须逐字不变');
+  assert.equal(untouched.truncated, false);
+  assert.equal(untouched.originalLength, null);
+});
+
+test('★★ 完整 JSON + 留痕尾巴 → 剥掉后照常结构化，但仍标记 truncated', () => {
+  /* 截断恰好落在数组 `]` 之后的情形（后续还有正文被切掉）。 */
+  const detail = parseDecisionListDetailed(`${REAL_WORLD}${TAIL}`);
+  assert.ok(detail !== null, '剥掉尾巴后就是完整 JSON，必须解析成功');
+  assert.equal(detail.items.length, 8);
+  assert.equal(detail.truncated, true, '留痕在 → 仍然要如实说明被截断过');
+  assert.equal(detail.recovered, false, '数组本身完整 → 不是容错提取');
+  assert.equal(detail.arrayClosed, true);
+});
+
+test('★★ 真实形态：完整数组 + 尾部还有中文 + 留痕 → 仍然给出全部 8 条', () => {
+  /*
+   * 队长实测那条 tail 是「* 结论：**开空 WLDUSDT**，其余全部…（已截断，完整 4750 字）」
+   * —— 决策数组**后面还有一段中文**，所以 `JSON.parse` 从数组起点一直吃到中文必然失败。
+   * 这里把同样的形状钉住：数组本身是闭合的，条目**一条都不能少**，只说"被截断过"。
+   */
+  const withProse = `${REAL_WORLD}\n* 结论：**开空 WLDUSDT**，其余全部观望${TAIL}`;
+  const detail = parseDecisionListDetailed(withProse);
+  assert.ok(detail !== null, '数组完整、只是后面还有正文 → 也必须能容错提取');
+  assert.equal(detail.items.length, 8, '8 条一条都不能少');
+  assert.equal(detail.recovered, true);
+  assert.equal(detail.arrayClosed, true, '数组是闭合的 → 显示层不能说"只显示了前 N 个"');
+});
+
+test('★★ 容错提取认识字符串里的花括号与转义引号（不能靠数 `}` 切）', () => {
+  const array = JSON.stringify([
+    { symbol: 'AAAUSDT', action: 'skip', reasoning: '含 } 与 { 和 " 引号' },
+    { symbol: 'BBBUSDT', action: 'skip', reasoning: '第二条' },
+    { symbol: 'CCCUSDT', action: 'skip', reasoning: '第三条' },
+  ]);
+  const cut = array.indexOf('{"symbol":"CCCUSDT"');
+  /* 第三个对象只留半个 `{`，模拟截断。 */
+  const truncated = `${array.slice(0, cut)}{"symbol":"CCCUSDT","act${TAIL}`;
+  const detail = parseDecisionListDetailed(truncated);
+  assert.ok(detail !== null);
+  assert.deepEqual(detail.items.map((item) => item.symbol), ['AAAUSDT', 'BBBUSDT']);
+  assert.ok(detail.items[0]!.reasoning!.includes('}'), 'reasoning 里的花括号必须原样保留');
+  assert.ok(detail.items[0]!.reasoning!.includes('"'), 'reasoning 里的引号必须原样保留');
+});
+
+test('[校准 c] 截断到一个完整对象都没有 → null（回落纯文本，不白屏）', () => {
+  /* 用户点名的那条：没有留痕、也没有一个完整对象。 */
+  assert.equal(parseDecisionListDetailed('[{"symbol":"X","act'), null);
+  /* 有留痕（= 被截断过）但一个完整对象都抠不出来 → 同样回落。 */
+  const withTail = `[{"symbol":"X","act${TAIL}`;
+  assert.doesNotThrow(() => parseDecisionListDetailed(withTail), '任何形态都不许抛');
+  assert.equal(parseDecisionListDetailed(withTail), null, '提不出对象 → 返回 null（调用方回落纯文本）');
+});
+
+test('★★ 一条 message 里有多条留痕（多段拼接）→ 不猜，整段回落纯文本', () => {
+  /*
+   * 整个 `<team>` 块里每个被截断的角色各留一条痕。那种文本**不是**一个决策数组，
+   * 从某一段里抠数组会把别的段落整个吞掉 —— 宁可回落纯文本（一个字节都不丢）。
+   */
+  const joined = `- analyst：${REAL_WORLD.slice(0, CUT_AT)}${TAIL}\n- judge：${REAL_WORLD}${TAIL}`;
+  assert.equal(parseDecisionListDetailed(joined), null, '多段拼接不许被当成一个决策数组');
+});
+
+test('[校准 d] 非 JSON 普通文本 → 与改动前逐字一致（null，文本不改）', () => {
+  const notes = [
+    '正在分析 SOLUSDT 的回踩结构',
+    '* 结论：**开空 WLDUSDT**，其余全部观望',
+    '注意 {这里} 不是 JSON',
+    '## 汇总\n- 第一条\n- 第二条',
+  ];
+  for (const note of notes) {
+    assert.equal(parseDecisionListDetailed(note), null, `普通文本必须回落：${note}`);
+    assert.equal(parseDecisionList(note), null, `旧入口同样回落：${note}`);
+    const info = stripTruncationTail(note);
+    assert.equal(info.text, note, '普通文本一个字都不许改');
+    assert.equal(info.truncated, false);
+  }
+});
+
+test('[校准 e] 完整数组但尾部没有留痕 → 与改动前完全一致', () => {
+  const detail = parseDecisionListDetailed(REAL_WORLD);
+  assert.ok(detail !== null);
+  assert.equal(detail.truncated, false);
+  assert.equal(detail.recovered, false);
+  assert.equal(detail.arrayClosed, true);
+  assert.deepEqual(detail.items, parseDecisionList(REAL_WORLD), '两条入口必须给同一批条目');
+  /* 与改动前的判据一致：8 条、WLDUSDT 打头、skip 原样保留。 */
+  assert.equal(detail.items.length, 8);
+  assert.equal(detail.items[0]!.symbol, 'WLDUSDT');
+  assert.equal(detail.items[1]!.action, 'skip');
+});
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  ★★★ 真实线上样本的回归（2026-10-18）
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * ## 为什么必须单独立这一条
+ *
+ * 上一版实现**通过了 415 条测试**，却在真实数据上完全不工作：
+ * 它的两个夹具都恰好让"截断点落在某个字符串中间"，于是扫描器走的是
+ * "未闭合对象"分支。而**真实数据的形状是另一种**：
+ *
+ * ```
+ *   [{...},{...},* 结论：**开空 WLDUSDT**，其余全部…（已截断，完整 4750 字）
+ *                 ↑ 第 3 个元素是半句话，而数组【没有】`]`
+ * ```
+ *
+ * 老代码在遇到 `*` 时一律 `return null`，把**前两个本来完好的对象一起丢掉**
+ * ⇒ 上层回落纯文本 ⇒ **用户屏幕上又是一坨原始 JSON**。
+ *
+ * ⇒ 这一条用**逐字复制的线上原文**做夹具。**不许改成"更顺手"的形状** ——
+ *   它存在的全部意义就是钉住这个真实形状。
+ */
+test('★★★ 真实线上样本：数组未闭合 + 截断点后直接接模型的话 → 仍能出前 N 个完整标的', () => {
+  const REAL =
+    '[{"symbol":"WLDUSDT","action":"open_short","leverage":5,"positionSizeUsd":11,"stopLoss":0.5380},' +
+    '{"symbol":"BTWUSDT","action":"skip","leverage":5},' +
+    '* 结论：**开空 WLDUSDT**，其余全部…（已截断，完整 4750 字）';
+
+  const detail = parseDecisionListDetailed(REAL);
+  assert.notEqual(detail, null, '★ 真实形状必须能解析 —— 回落纯文本就是这个缺陷本身');
+  assert.equal(detail!.items.length, 2, '★ 前两个完整标的都要出来（第三个是半句话，丢弃）');
+  assert.equal(detail!.items[0]!.symbol, 'WLDUSDT');
+  assert.equal(detail!.items[0]!.action, 'open_short');
+  assert.equal(detail!.items[1]!.symbol, 'BTWUSDT');
+  assert.equal(detail!.items[1]!.action, 'skip');
+  assert.equal(detail!.recovered, true, '★ 要如实标记"这是从容错路径恢复的"');
+  assert.equal(detail!.arrayClosed, false, '★ 数组确实没闭合 —— 界面据此说"只显示了前 N 个"');
+  assert.equal(detail!.originalLength, 4750, '★ 留痕里的原始字数要带出来');
+});
+
+test('★★ 只有半个对象时不硬渲染（真实形状的退化版）', () => {
+  const HALF =
+    '[{"symbol":"WLDUSDT","action":"open_short","leverage":5},' +
+    '{"symbol":"BTWUSDT","act…（已截断，完整 900 字）';
+  const detail = parseDecisionListDetailed(HALF);
+  assert.notEqual(detail, null);
+  assert.equal(detail!.items.length, 1, '★ 只有第 1 个是完整的；第 2 个半截必须丢');
+  assert.equal(detail!.items[0]!.symbol, 'WLDUSDT');
 });
