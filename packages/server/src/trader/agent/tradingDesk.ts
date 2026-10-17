@@ -114,6 +114,27 @@ const ANALYSIS_ROLE_DEFS: ReadonlyArray<{
 ];
 
 /** 一个角色的产出（结构化卡片）。 */
+/**
+ * **一次模型调用的用量**（团队模式要按角色收账）。
+ *
+ * ## 为什么 `null` 与 `0` 必须分开（照抄 `ChatUsage` 的纪律）
+ *
+ * `null` = **服务商没报这个字段（不知道）**；`0` = **报了，确实是 0**。
+ * 两者的结论完全相反 —— 见 `llm/types.ts:45-51` 的说明。
+ * 合并成一个数会让"没记账"看起来像"没花钱"。
+ *
+ * ⚠️ 与上面那条同源：**一个把故障说成正常的地方，比报错更危险。**
+ * 团队模式此前 482 轮决策的四列全是"不知道"，而界面上看起来像"零成本"。
+ */
+export interface RoleUsage {
+  promptTokens: number | null;
+  completionTokens: number | null;
+  /** `promptTokens` 里命中上下文缓存的部分。 */
+  cachedTokens: number | null;
+  /** `completionTokens` 里花在思考上的部分（计入 completion）。 */
+  reasoningTokens: number | null;
+}
+
 export interface DeskRoleOutput {
   role: string;
   /** 该角色用的模型（审计要记：**"谁用了什么模型"是排查质量问题的第一手信息**）。 */
@@ -126,6 +147,103 @@ export interface DeskRoleOutput {
   ok: boolean;
   /** 失败原因（ok=false 时有值）。 */
   error?: string;
+  /**
+   * **这次调用真的花了多少 token**（2026-10-17 补 —— 修"团队账目全空"）。
+   *
+   * ## 为什么是可选字段
+   *
+   * 它是**观测**，不是**判据**：`AskRole` 的注入实现（真实路由器 / 测试桩）
+   * 不报它时，编排必须照样跑完一轮。所以缺省 = `undefined` = "这次没收到用量"，
+   * 而不是"0"。
+   *
+   * ## 为什么加在这里而不是在 `routedModel` 里另算
+   *
+   * 因为**只有编排自己知道这一轮问了哪些角色** —— 总管、分析师、按币并行、
+   * 辩论、裁决、汇报分散在 `runTradingDeskInner` 的六段里，调用方拿不到的
+   * （尤其是按币并行的产出**不进 `analyses`**，见 `perSymbolResult`）。
+   * 所以在编排出口处汇总，是唯一不会漏的地方。
+   */
+  usage?: RoleUsage;
+}
+
+/**
+ * **把一轮里所有角色的用量加起来**（团队模式的 token 账目）。
+ *
+ * ## 语义（三条，缺一不可）
+ *
+ * | 输入 | 输出 | 为什么 |
+ * |---|---|---|
+ * | 全部角色的 `usage` 都是 `undefined` | `{ reported: false, usage: null }` | **不知道** ≠ 0。测试桩与"没接线"的调用方走这条 |
+ * | 至少一个角色报了 | `{ reported: true, usage: {…} }` | 每个字段**只累加非 null 的**；全为 null 的字段给 `null` |
+ * | 某个角色失败/超时（`usage: undefined`） | 不计入，但**不阻止** others 累加 | 失败角色本来就没花多少钱，不能因此把整轮说成"不知道" |
+ *
+ * ## 为什么不是"所有角色都报了才算"
+ *
+ * 因为团队一轮有 26–28 次调用，**总会有角色失败或超时**。要求"全报"
+ * 等于"永远不记账" —— 那正是这次要修的缺陷的形状。
+ */
+export function sumRoleUsage(
+  outputs: ReadonlyArray<DeskRoleOutput | null | undefined>,
+): { reported: boolean; usage: RoleUsage | null } {
+  let reported = false;
+  let sawPrompt = false;
+  let sawCompletion = false;
+  let sawCached = false;
+  let sawReasoning = false;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let cachedTokens = 0;
+  let reasoningTokens = 0;
+
+  for (const out of outputs) {
+    const u = out?.usage;
+    if (u === undefined) continue;
+    reported = true;
+    if (u.promptTokens !== null) { sawPrompt = true; promptTokens += u.promptTokens; }
+    if (u.completionTokens !== null) { sawCompletion = true; completionTokens += u.completionTokens; }
+    if (u.cachedTokens !== null) { sawCached = true; cachedTokens += u.cachedTokens; }
+    if (u.reasoningTokens !== null) { sawReasoning = true; reasoningTokens += u.reasoningTokens; }
+  }
+
+  if (!reported) return { reported: false, usage: null };
+  return {
+    reported: true,
+    usage: {
+      promptTokens: sawPrompt ? promptTokens : null,
+      completionTokens: sawCompletion ? completionTokens : null,
+      cachedTokens: sawCached ? cachedTokens : null,
+      reasoningTokens: sawReasoning ? reasoningTokens : null,
+    },
+  };
+}
+
+/**
+ * **把两份用量相加**（为"一次 `complete()` 跑多轮交易台"准备）。
+ *
+ * ## 为什么需要它（而不是让调用方自己写 `a + b`）
+ *
+ * 因为加法**不是**"对 null 取 0 然后相加"就完了。见 `sumRoleUsage` 的三条语义：
+ * `null + 5` 应当是 **5**（那个字段确实有真值），而**不是** `null`。
+ * 这个判断（"哪些字段见过真值"）已经在 `sumRoleUsage` 里写好 ——
+ * 这里只是把它套用到"两份用量"上，**不重写第二遍加法**
+ *（本仓库为"同一个算术写在两个地方，改一处等于没改"付过代价）。
+ *
+ * ## 谁需要它
+ *
+ * 团队模式的一次 `complete()` **可能跑多轮交易台**：`autoTrader` 的按需取数循环
+ *（`MAX_DATA_ROUNDS = 3`）里"再问一次模型"就等于把整个交易台重跑一遍。
+ * 所以团队模型返回给 `autoTrader` 的必须是**这些轮之和**，
+ * 而不是最后一轮 —— 也就是 `autoTrader.ts:3781-3783` 要的那个语义。
+ */
+export function mergeRoleUsage(
+  a: RoleUsage | null | undefined,
+  b: RoleUsage | null | undefined,
+): { reported: boolean; usage: RoleUsage | null } {
+  const wrap = (u: RoleUsage | null | undefined): DeskRoleOutput | null =>
+    u === null || u === undefined
+      ? null
+      : { role: '', modelId: '', data: null, raw: '', latencyMs: 0, ok: true, usage: u };
+  return sumRoleUsage([wrap(a), wrap(b)]);
 }
 
 /** 一次交易台会议的完整产出。 */
@@ -612,6 +730,39 @@ export interface DeskOutcome {
   truncatedByBudget: boolean;
   /** 一句话摘要（给日志与界面用）。 */
   summary: string;
+  /**
+   * **这一轮所有角色加起来的 token 用量**（2026-10-17 补）。
+   *
+   * ## 语义与"整轮 vs 最后一次"的关系（这一条是本次修复的核心）
+   *
+   * `autoTrader.ts:3781-3783` 明确区分过两件事：
+   * ```
+   *   「这一轮的真实用量」  vs  「最后一次调用的用量」
+   * ```
+   * 而团队模式**一次 `complete()` 背后是 26–28 次模型调用**
+   *（总管 1 + 分析师 4 + 按币并行 17~19 + 辩论 2 + 裁决 1 + 汇报 1；见 `DESK_LIMITS`）。
+   * 所以这里的值必须是**这些调用的【和】**，而不是其中任何一次。
+   *
+   * 它是**怎么保证是和的**：汇总点在 `runTradingDeskInner` 的出口，
+   * 而那一处的入参**包含全部六段**的产出（`analyses` / `perSymbol` / `bull` / `bear` /
+   * `verdict` / `report` 各自那次）。少收任何一段，数字就会小于真实的整轮成本 ——
+   * 签名的形状（接收全部产出）比注释更难写错。
+   *
+   * `null` = **这一轮的调用方没有报用量**（测试桩、或还没接线的路径）——
+   * 不是"零成本"。见 `sumRoleUsage` 的三条语义。
+   *
+   * ## ⚠️ 为什么这里是可选（`?:`）而不是必填
+   *
+   * 与 `DeskRoleOutput.usage` 同一个理由：它是**观测**，不是**判据**。
+   * 既有测试里有两处手工构造 `DeskOutcome` 的夹具
+   *（`deskOutput.test.ts` / `riskSkipReason.test.ts`）—— 它们不关心用量，
+   * 若把这里写成必填，就必须去改那两个文件（而它们不在本次改动的范围内）。
+   *
+   * **真正的生产者只有一个**：`runTradingDeskInner` 的出口，它**总是**给出这个值
+   *（`null` 或对象，不会是 `undefined`）。消费方（`routedModel`）按
+   * `usage ?? null` 处理 `undefined` —— 于是"没报"与"没这个字段"行为一致。
+   */
+  usage?: RoleUsage | null;
   /*
    * ══════════════════════════════════════════════════════════════════════════
    *  ⭐ **汇报员的产出**（2026-10-13 接线 —— 用户需求 ⑤ 点名的"汇报工作的"）
@@ -1050,6 +1201,13 @@ async function runTradingDeskInner(input: {
    */
   const universeSize = input.analystUniverseSize
     ?? (input.marketContext.match(/^### \d+\. /gm) ?? []).length;
+  /*
+   * **总管的用量要单独留一份**（2026-10-17）。
+   *
+   * 它的产出**不进 `analyses`**（见下面那句：它不是分析师，输出是"派谁"），
+   * 所以汇总时如果只看 `analyses`，**总管那一次调用就漏掉了**。
+   */
+  let supervisorOutput: DeskRoleOutput | null = null;
   if (canAsk()) {
     callsUsed += 1;
     try {
@@ -1069,6 +1227,7 @@ async function runTradingDeskInner(input: {
         context: q.user,
         task: q.system,
       });
+      supervisorOutput = out;
       if (out.ok) {
         requestedRoles = parseDispatch(out.raw, analystCandidates.map((c) => c.role));
       }
@@ -1652,6 +1811,18 @@ async function runTradingDeskInner(input: {
    * ⚠️ 但**超时仍然生效**（每个标的走 `safeAsk`，见 `input.ask` 的实现）。
    */
   let perSymbolResult: PerSymbolResult | null = null;
+  /*
+   * **按币并行的用量收在这里**（2026-10-17）。
+   *
+   * `analyzePerSymbol` 只回传 `digests` / `failed` / `peakConcurrency`
+   *（见 `perSymbol.ts:114-129`）—— 用量**不在它的返回形状里**，所以汇总时
+   * 拿不到。而按币并行是**整轮里最大的一块**（实测 17–19 次调用/轮），
+   * 漏掉它会让总额少掉一大半 —— 正是"只记了一部分"的形状。
+   *
+   * 解法是在**调用点**顺手收（那里正好拿得到 `safeAsk` 的返回值）。
+   * ⚠️ 不改 `perSymbol.ts`：它的职责是"编排 + 解析"，不该替调用方攒账。
+   */
+  const perSymbolUsages: DeskRoleOutput[] = [];
   if (process.env.AQ_PER_SYMBOL === 'on') {
     const compactedForPerSymbol = compactMarketContext(input.marketContext, 30 /* 完整序列 */);
     if (compactedForPerSymbol !== null && compactedForPerSymbol.slices.length > 0) {
@@ -1724,6 +1895,8 @@ async function runTradingDeskInner(input: {
               '规则：direction 只能是 bullish/bearish/neutral/unclear 之一；score 与 confidence 是 0-100 的整数；' +
               '数据不足时 direction 用 unclear、把缺的写进 dataGaps —— 不要编。',
           });
+          /* 用量先收着（`analyzePerSymbol` 的返回里没有它）—— 见 `perSymbolUsages`。 */
+          perSymbolUsages.push(out);
           if (!out.ok) return { ok: false as const, text: '', error: out.error ?? '调用失败' };
           return { ok: true as const, text: out.raw };
         },
@@ -2261,6 +2434,15 @@ async function runTradingDeskInner(input: {
    * 既烧钱又会让它去复述它本该压缩的东西。
    */
   let report: string | null | undefined;
+  /*
+   * ⚠️ **汇报员的产出要单独留一份**（2026-10-17）。
+   *
+   * 下面那行 `report = out.ok ? out.raw : null` **把 `DeskRoleOutput` 丢掉了** ——
+   * 于是它的用量也随之丢失。而它是 T1 档、每轮都会跑，漏掉它会让整轮总额
+   * **系统性偏小**（也就是本条要防的"只记了一部分"）。
+   * 所以额外记一个变量，只为了汇总用量时能带上它。
+   */
+  let reporterOutput: DeskRoleOutput | null = null;
   if (canAsk()) {
     callsUsed += 1;
     /*
@@ -2292,6 +2474,7 @@ async function runTradingDeskInner(input: {
       task: ROLES.reporter.system,
     });
     report = out.ok ? out.raw : null;
+    reporterOutput = out;
     note(
       'reporter',
       'report',
@@ -2322,7 +2505,57 @@ async function runTradingDeskInner(input: {
     `调用 ${callsUsed}/${limits.maxCalls}`,
   ].join(' · ');
 
-  return { analyses, bull, bear, verdict, callsUsed, truncatedByBudget, summary, report };
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⭐ **整轮 token 汇总**（2026-10-17 补 —— 修"团队账目全空"）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 这一处必须收到【全部六段】的产出，一段都不能少
+   *
+   * | 段 | 收在哪 | 漏掉它会怎样 |
+   * |---|---|---|
+   * | 总管 | `supervisorOutput` | 它的产出**不进 `analyses`**，只看 analyses 必漏 |
+   * | 4 个分析师 | `analyses`（含失败项） | —— |
+   * | 按币并行 17~19 次 | `perSymbolUsages`（调用点顺手收） | 那是整轮最大的一块，漏掉总额少一半 |
+   * | 辩论 bull/bear | `bull` / `bear` | T3 档，单价最高 |
+   * | 裁决 judge | `verdict` | T3 档 |
+   * | 汇报员 reporter | `reporterOutput` | 它被转成了 `string` 存进 `report`，原始对象会丢 |
+   *
+   * ## 为什么"漏一段"是这次要防的那个错误本身
+   *
+   * `autoTrader.ts:3781-3783` 的纪律是：**这一轮的真实用量 ≠ 最后一次调用的用量**。
+   * 而"少收一段"是同一个错误的另一种形态 —— 它不会报错，只会给出一个**偏小的数**，
+   * 看起来完全正常。所以汇总点的形状（接收全部产出）比注释更难写错：
+   * 漏掉任何一段，`sumRoleUsage` 的入参里就没有它。
+   *
+   * ## 失败/超时的角色
+   *
+   * 它们的 `usage` 是 `undefined`（`safeAsk` 的 catch 分支**不编造**用量），
+   * 于是不计入 —— 但不能因此把整轮说成"不知道"。
+   * 判据由 `sumRoleUsage` 给：**只报一个角色也算有账**（否则 26–28 次调用里
+   * 总有几次失败，就永远记不上账）。
+   */
+  const usageTotal = sumRoleUsage([
+    supervisorOutput,
+    ...analyses,
+    ...perSymbolUsages,
+    bull,
+    bear,
+    verdict,
+    reporterOutput,
+  ]);
+
+  return {
+    analyses,
+    bull,
+    bear,
+    verdict,
+    callsUsed,
+    truncatedByBudget,
+    summary,
+    report,
+    usage: usageTotal.usage,
+  };
 }
 
 /** 包一层：把抛错也变成 `DeskRoleOutput`（团队编排不该因为一个角色挂了整轮失败）。 */

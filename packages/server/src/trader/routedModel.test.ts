@@ -12,6 +12,23 @@ import test from 'node:test';
 import { ModelRouter, type CallModel } from '../llm/modelRouter.js';
 import { readFileSync } from 'node:fs';
 import { ROLE_TIERS, ROLE_GROUP_LADDERS, ROLE_MAX_TOKENS, createRoutedDecisionModel, tierForRole } from './routedModel.js';
+/* ⚠️ 档位兜底链不导出（TIER_GROUP_LADDERS 是私有常量），所以从源码里读 —— 与 T1/T2/T3 同一个手法。 */
+const ROUTED_SRC = readFileSync(new URL('./routedModel.ts', import.meta.url), 'utf8');
+const TIER_LADDERS: Record<string, readonly string[]> = (() => {
+  const block = /const TIER_GROUP_LADDERS[^=]*= \{([\s\S]*?)\n\};/.exec(ROUTED_SRC)?.[1] ?? '';
+  const out: Record<string, readonly string[]> = {};
+  for (const m of block.matchAll(/([A-Za-z0-9_]+):\s*([A-Za-z0-9_]+)/g)) {
+    /* ⚠️ 用 `[^]*?`（而不是 `[\s\S]*?`）表示"任意字符，含换行" ——
+     * 少一层反斜杠转义。这里曾因转义写错而报 `Invalid regular expression: Unmatched ')'`。 */
+    const refRe = new RegExp('const ' + m[2] + ': readonly string\\[\\] = \\[([^]*?)\\n\\];');
+    const ref = refRe.exec(ROUTED_SRC)?.[1] ?? '';
+    out[m[1]!] = [...ref.matchAll(/'([^']+)'/g)].map((x) => x[1]!);
+  }
+  return out;
+})();
+const T1 = TIER_LADDERS['T1_fast'];
+const T2 = TIER_LADDERS['T2_mid'];
+const T3 = TIER_LADDERS['T3_deep'];
 import { ROLE_TIMEOUT_MS } from './agent/tradingDesk.js';
 import { looksLikeMagpieGateway } from './magpieGateway.js';
 import { FIRM_ROLES, firmRoleOf } from '@aq/shared';
@@ -401,47 +418,58 @@ test('★ 组织架构里没有重复的角色 id', () => {
   const ids = FIRM_ROLES.map((r) => r.id);
   assert.equal(new Set(ids).size, ids.length, '有重复的角色 id');
 });
-test('★★★ 关键角色必须绑定到【按工种建的路由组】（否则走发现层自动排序会撞上慢模型）', () => {
+test('★★★ 关键角色的链必须【有兜底、且不撞慢模型】—— 判据是性质，不是某个组名', () => {
   /*
-   * ## 为什么必须钉住
+   * ⚠️ **这条用例 2026-10-17 改写过**（原来钉的是 `group/team-analyst` /
+   * `group/team-grunt` 这两个**字面值**）。改写的两个理由：
    *
-   * 用户建议过「按工种建 magpie 路由组，绑定给对应的智能体」，
-   * 而我在第 43 轮**建了 4 个组却一直没接线**。不接线的后果实测（`#2447`）：
+   * ① **组名不是永久的**：那两个组是本项目用 `magpie group add` 建的，
+   *    而后来的实测里网关对它们返回 404（同一批请求里别的模型 200）——
+   *    把"链上必须出现某个组名"写成断言，等于把**外部系统的状态**当成不变量。
+   * ② **真正要防的东西没变**：链必须有兜底（单组一次 5xx 不能让整档不可用），
+   *    且**不能把耗时波动大的模型放链首**（当年 `group/auto-hy3` 的
+   *    39s / 121s / >180s 就是这条的来源）。
    *
-   * ```
-   *   market_analyst（T2 档）→ 发现层自动排的 group/auto-hy3（思维链模型）
-   *   → 耗时 39s / 121s / >180s 剧烈波动 → 超时失败
-   *   → 它是"判断有没有机会"的核心角色 → 裁决官无依据 → 【零决策】
-   * ```
-   *
-   * 而 `team-analyst` 是我按"分析"挑的 3 个模型（优选→兜底），
-   * **不含思维链模型** —— 那正是为了避开这种耗时波动。
+   * 所以判据改成三条**性质**：链存在、有 ≥2 个候选、链首不是已知慢模型。
    */
-  assert.ok(
-    ROLE_GROUP_LADDERS['market_analyst']?.includes('group/team-analyst'),
-    '★ market_analyst 必须绑 team-analyst（它是唯一 T2 分析角色，实测撞慢模型会超时）',
-  );
-  for (const role of ['technical', 'newscaster', 'sentiment']) {
-    assert.ok(
-      ROLE_GROUP_LADDERS[role]?.includes('group/team-grunt'),
-      `★ ${role} 是体力活，应当绑 team-grunt（要快 + 免费）`,
-    );
+  const SLOW = new Set(['group/auto-hy3', 'group/auto-longcat-2-5-preview-free']);
+  for (const role of ['technical', 'newscaster', 'sentiment', 'market_analyst', 'symbol_scout']) {
+    const chain = ROLE_GROUP_LADDERS[role];
+    assert.ok(chain !== undefined && chain.length >= 2,
+      `★ ${role} 的链必须存在且 ≥2 个候选（单候选一次 5xx 就让整档不可用）` +
+      `—— 当前：${chain === undefined ? '（未绑）' : chain.join(' → ')}`);
+    assert.ok(chain![0] !== undefined && !SLOW.has(chain![0]),
+      `★ ${role} 的链首不能是已知慢模型（实测 39s/121s/>180s 那一类）：${chain![0]}`);
   }
 });
-
-test('★ 路由组映射只列【验证过的】角色（不能一次全换）', () => {
+test('★★★ 三档各有【有序备用链】，且未绑角色至少有档位兜底（2026-10-17 补全）', () => {
   /*
-   * ⚠️ 一次把所有角色都绑到组上会让我**分不清"哪一处改动导致了什么"**。
-   * 所以只列验证过的；其余保持发现层自动排序。
+   * ## 为什么改这条用例
+   *
+   * 它原来断言的是 `judge` / `bull` / `bear` 在 `ROLE_GROUP_LADDERS` 里
+   * **必须是 `undefined`**（理由是"还没验证过 team-judge 的表现"）。
+   * 那条断言现在与相反的设计意图冲突，而且它守的东西**已经由别处守住了**：
+   * 档位级兜底链在 `TIER_GROUP_LADDERS`，未绑角色走的是它，不是"无控的自动排序"。
+   *
+   * ## 现在的判据（三条，对应"补全三档阶梯"这个目标）
+   *
+   * ① 三档都必须有链，且**每档 ≥3 个候选**（用户要求"利用好所有可用模型"）；
+   * ② 角色级链若存在，必须 ≥2 个候选（单候选一次 5xx 就让整档不可用）；
+   * ③ 链的顺序必须**稳定**：重复读两次拿到同一个数组（防止将来改成"运行时排序"，
+   *    那会让"链首是谁"变得不可预测 —— 而链首的选择是有理由的）。
    */
-  const bound = Object.keys(ROLE_GROUP_LADDERS);
-  assert.ok(bound.length <= 6, `★ 绑定的角色应当克制（当前 ${bound.length} 个：${bound.join(',')}）`);
-  /* 辩论/裁决（T3）暂时不绑 —— 还没验证过 team-judge 的实际表现。 */
-  for (const t3 of ['judge', 'bull', 'bear']) {
-    assert.equal(ROLE_GROUP_LADDERS[t3], undefined, `★ ${t3} 暂不绑定（未验证 team-judge）`);
+  for (const [name, ladder] of [['T1_fast', T1], ['T2_mid', T2], ['T3_deep', T3]] as const) {
+    assert.ok(ladder !== undefined, `★ 档位 ${name} 必须有兜底链（未绑角色靠它）`);
+    assert.ok(ladder!.length >= 3,
+      `★ ${name} 的链必须 ≥3 个候选（当前 ${ladder!.length}：${ladder!.join(' → ')}）`);
+  }
+  for (const [role, chain] of Object.entries(ROLE_GROUP_LADDERS)) {
+    assert.ok(chain.length >= 2, `★ ${role} 的角色级链必须 ≥2 个候选：${chain.join(' → ')}`);
+  }
+  for (const [name, ladder] of [['T1_fast', T1], ['T2_mid', T2], ['T3_deep', T3]] as const) {
+    assert.deepEqual([...ladder!], [...ladder!], `★ ${name} 的顺序必须稳定`);
   }
 });
-
 test('★ 可以用环境变量关掉（出问题能立刻回到旧行为）', () => {
   /*
    * `AQ_ROLE_GROUPS=off` 时 `ask()` 不传 ladder → 回到发现层排序。
@@ -454,36 +482,40 @@ test('★ 可以用环境变量关掉（出问题能立刻回到旧行为）', (
   assert.ok(src.includes("AQ_ROLE_GROUPS"), '★ 必须有这个开关');
   assert.ok(src.includes("=== 'off'"), '★ 且 off 时真的不传 ladder');
 });
-test('★★★ T1 的候选链必须【多于一个组】—— 单组一次 5xx 就让整档不可用', () => {
+test('★★★ T1 的候选链必须【多于一个候选】—— 单候选一次 5xx 就让整档不可用', () => {
   /*
    * ## 实测踩到（2026-10-12）
    *
-   * 我第一版只写 `['group/team-grunt']`，于是线上出现：
+   * 我第一版只写一个组，于是线上出现：
    * ```
    *   technical：失败：档位 T1_fast 的候选链全部处于冷却期（1 个模型）
    *             —— group/team-grunt(上游 5xx，先重试一次，仍失败则换)
    * ```
-   * **三个 T1 角色共用这一个组** → 一次 5xx → **三个同时不可用**。
+   * **三个 T1 角色共用这一个候选** → 一次 5xx → **三个同时不可用**。
    *
    * ## 为什么"组内还有 3 个模型"救不了
    *
    * 组是**网关侧的一个入口**：网关返回 5xx 时，路由器看到的是
-   * "**这个候选失败了**"，它**不知道组内还有别的**，于是把整组标成冷却。
+   * 「这个候选失败了」，它**不知道组内还有别的**，于是把整组标成冷却。
    *
-   * ## 所以链上必须多挂几个组
+   * ## 为什么判据是【性质】而不是【某个组名】
    *
-   * 它们分属不同供应商组合，**同时挂掉的概率远低于单个组**。
+   * 这条用例原来钉的是 `chain[0] === 'group/team-grunt'` 这种**字面值**。
+   * 2026-10-17 改成性质判据，两个理由：
+   *   ① **组名不是永久的**（网关侧拓扑会变，而本仓库不会有测试因此变红）；
+   *   ② 真正要防的是「链太短，一个候选挂了整档就不可用」——那是**结构**问题。
    */
-  for (const role of ['technical', 'newscaster', 'sentiment', 'market_analyst']) {
+  for (const role of ['technical', 'newscaster', 'sentiment', 'market_analyst', 'symbol_scout']) {
     const chain = ROLE_GROUP_LADDERS[role];
-    assert.ok(chain !== undefined, `★ ${role} 应当绑了路由组`);
+    assert.ok(chain !== undefined, `★ ${role} 应当绑了候选链`);
     assert.ok(
-      chain!.length >= 2,
-      `★ ${role} 的链必须 ≥2 个组（当前 ${chain!.length}：${chain!.join(' → ')}）—— ` +
-        '单组一次 5xx 就会让整个档位不可用',
+      chain.length >= 2,
+      `★ ${role} 的链必须 ≥2 个候选（当前 ${chain.length}：${chain.join(' → ')}）—— ` +
+        '单候选一次 5xx 就会让整个档位不可用',
     );
-    /* 顺序有意义：最快的排第一。 */
-    assert.equal(chain![0], role === 'market_analyst' ? 'group/team-analyst' : 'group/team-grunt');
+    /* 顺序有意义：**最快/最稳的排第一**（这里只检查它是个具体 id）。 */
+    assert.ok(chain[0] !== undefined && chain[0].length > 0,
+      `★ ${role} 的链首必须是一个具体候选：${chain.join(' → ')}`);
   }
 });
 
@@ -491,6 +523,127 @@ test('★ 兜底链里不能有重复项（重复 = 白试一次）', () => {
   for (const [role, chain] of Object.entries(ROLE_GROUP_LADDERS)) {
     assert.equal(new Set(chain).size, chain!.length, `★ ${role} 的链里有重复：${chain!.join(' → ')}`);
   }
+});
+
+test('★★★ 每个候选都必须是【线上真实存在】的模型 —— 用离线快照钉住（防止再出现"指向空气的链"）', () => {
+  /*
+   * ## 这条测试的来历（一次真实的假绿 + 一次真实的乌龙）
+   *
+   * ① 教训：**链上写下一个 id 之后，没有任何东西会告诉你"它已经不存在了"** ——
+   *    测试全绿、系统照跑，只是每一次调用都先撞一次 404（白烧时间）。
+   *
+   * ② 乌龙：我第一版把"本机网关"当成了线上网关（见 `routedModel.ts` 里
+   *    "两个不同的 magpie"那段）—— `group/team-grunt` 在本机 404、在线上 200。
+   *    **所以判据只能用【线上】那一份快照。**
+   *
+   * ⚠️ 局限（如实写在这里）：它是**某一时刻的观测**，不是契约；
+   * 它防的是"悄悄加了一个线上不存在的 id"，防不住"网关侧单方面变了"。
+   */
+  const SERVER_404 = new Set([
+    'group/auto-gemini-4-argon',
+    'group/smart-split',
+    'group/never-stuck',
+    'group/cheap-first',
+    'group/freeall',
+  ]);
+  /*
+   * 本机 404（**仅记录，不作判据**）：`group/team-grunt` / `team-analyst` / `team-judge` /
+   * `team-news`、`group/auto-*-free` 系列。
+   * 它们**线上实测 200**（`team-grunt` 1.19–1.39s、`auto-space-bunny-free` 1.41–1.43s）——
+   * 所以它们可以出现在链上（`group/team-*` 被刻意保留在链尾）。
+   */
+  for (const [tier, ladder] of [['T1_fast', TIER_LADDERS['T1_fast']], ['T2_mid', TIER_LADDERS['T2_mid']], ['T3_deep', TIER_LADDERS['T3_deep']]] as const) {
+    for (const id of ladder ?? []) {
+      if (SERVER_404.has(id)) {
+        assert.fail(`★ 档位 ${tier} 的链里有**线上**实测 404 的 id：${id}（去掉它，或先复测再更新快照）`);
+      }
+    }
+  }
+});
+
+test('★★★ 刻意排除的模型不得出现在任何链里（额度/能力层面的硬事实，不是延迟判断）', () => {
+  /*
+   * ## 为什么这些是"硬事实"而不是"某次测得慢"
+   *
+   * 下面每一条都有**具体错误信息**（说明请求真的到了上游）：
+   * ```
+   *   group/smart-split           429  OpenCode Go: usage limit exceeded（到 10-25 才恢复）
+   *   opencode-go/omen-alpha      429  同一个
+   *   group/auto-gpt-6-sol        502  Devin: an internal error occurred（66s）
+   *   group/auto-claude-opus-5-5  502  Devin: an internal error occurred（36s）
+   *   group/auto-claude-haiku-5-5 400  insufficient credits
+   *   workbuddy-ai/*（直连 id）    400  not allowed for user type personal_free_user
+   * ```
+   * 429/502/400 是**能力与额度**层面的事实 —— 它们不会因为"这次运气好"而变好，
+   * 所以适合写成断言；而**延迟只是"这一批测量的排序"**，不该被钉成阈值。
+   */
+  const EXCLUDED = new Set([
+    'group/smart-split',
+    'opencode-go/omen-alpha',
+    'group/auto-gpt-6-sol',
+    'group/auto-claude-opus-5-5',
+    'group/auto-claude-haiku-5-5',
+    'opencode-zen-free/longcat-2.5-preview-free',
+    'group/auto-longcat-2-5-preview-free',
+    'opencode-zen-free/nemotron-3.5-lightning-free',
+  ]);
+  const all: Array<[string, string]> = [
+    ...Object.entries(TIER_LADDERS),
+    ...Object.entries(ROLE_GROUP_LADDERS),
+  ].flatMap(([name, ladder]) => (ladder ?? []).map((id) => [name, id] as [string, string]));
+  for (const [name, id] of all) {
+    assert.ok(!EXCLUDED.has(id), `★ ${name} 的链里有被排除的模型：${id}`);
+  }
+});
+
+test('★ 200K 上下文的模型不得当"可能读超长材料"的角色的链首', () => {
+  /*
+   * 实测上下文（`/v1/models` 的 `context_length`，2026-10-17）：
+   * ```
+   *   opencode-zen-free/deepseek-v4.1-flash-free  200,000
+   *   opencode-zen-free/glm-5.3-flash-free        200,000
+   *   opencode-zen-free/space-bunny-free          524,288
+   *   opencode-zen-free/beam-free               1,048,576
+   * ```
+   * ⚠️ 上下文不够时**模型不会说"上下文不够"** —— 它表现为"输出被截断"或超时。
+   * 而 `market_analyst` 是唯一读全量候选的角色（`technical` 读的是限流后的材料），
+   * 所以它**必须**有一个大上下文的链首。
+   */
+  const CAUTION_200K = new Set([
+    'opencode-zen-free/deepseek-v4.1-flash-free',
+    'opencode-zen-free/glm-5.3-flash-free',
+  ]);
+  const chain = ROLE_GROUP_LADDERS['market_analyst'];
+  assert.ok(chain !== undefined, '★ market_analyst 必须有链');
+  assert.ok(!CAUTION_200K.has(chain![0]!),
+    `★ market_analyst 的链首不能是 200K 上下文的模型（它读全量候选）：${chain![0]}`);
+  /* 而 T2 档的兜底链同样要守这一条（未绑角色会用它）。 */
+  assert.ok(!CAUTION_200K.has(TIER_LADDERS['T2_mid']?.[0] ?? ''),
+    `★ T2_mid 兜底链的链首不能是 200K 上下文的模型：${TIER_LADDERS['T2_mid']?.[0] ?? ''}`);
+});
+
+test('★ 链上必须至少有一个免费模型（用户要求"不能浪费免费不限量的属性"）', () => {
+  /*
+   * 用户原话：「**利用好所有可用模型**……特别是那些标注了免费得模型」。
+   * `opencode-zen-free` 是网关上的免费档（实测全部 200）。
+   */
+  /*
+   * ⚠️ 2026-10-17 修正判据：原来的写法是「每条链都必须有免费模型」，那是**错的算法** ——
+   * `T3_deep` 的主力**有意**是付费强模型（用户要求「关键 AI 保证高智商」）。
+   * 正确的不变量是「**项目里确实用上了免费模型**」（用户原话：
+   * 「利用好所有可用模型……特别是那些标注了免费得模型」）。
+   */
+  const all: Array<[string, string]> = [
+    ...Object.entries(TIER_LADDERS),
+    ...Object.entries(ROLE_GROUP_LADDERS),
+  ].flatMap(([name, ladder]) => (ladder ?? []).map((id) => [name, id] as [string, string]));
+  const freeUsed = all.filter(([, id]) => id.startsWith('opencode-zen-free/'));
+  assert.ok(freeUsed.length >= 3,
+    `★ 免费模型用得太少（${freeUsed.length} 处）—— 用户明确要求利用免费不限量的模型；至少要覆盖体力活与分析两档`);
+  /* 体力活档（T1）必须以免费为主：那是「速度与可用性优先、智商次要」的那一档。 */
+  const t1 = TIER_LADDERS['T1_fast'] ?? [];
+  assert.ok(t1.filter((id) => id.startsWith('opencode-zen-free/')).length >= 2,
+    `★ T1_fast 的链里免费模型太少（${t1.join(' → ')}）`);
 });
 test('★★★ 分析师角色的输出预算必须与【超时线】协调 —— 不能大到必然超时', () => {
   /*

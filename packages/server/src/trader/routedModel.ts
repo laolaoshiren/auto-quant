@@ -31,7 +31,7 @@ import type { Decision } from '@aq/shared';
 import type { DecisionModel } from './autoTrader.js';
 import type { ModelTier } from '../llm/modelCatalog.js';
 import { ModelRouter, type CallModel } from '../llm/modelRouter.js';
-import { runTradingDesk, type AskRole, type DeskOutcome, type DeskRoleOutput } from './agent/tradingDesk.js';
+import { runTradingDesk, mergeRoleUsage, type AskRole, type DeskOutcome, type DeskRoleOutput, type RoleUsage } from './agent/tradingDesk.js';
 import { renderDeskOutcome, extractFirstJsonArray } from './agent/deskOutput.js';
 import { parseRiskOfficerVerdict } from './agent/riskOfficer.js';
 /*
@@ -130,27 +130,239 @@ export function tierForRole(role: string): ModelTier {
 }
 
 /**
- * **角色 → magpie 路由组**（2026-10-12 接线）。
+ * **候选链（按档位/角色）** —— 2026-10-17 按实测重接过一次，完整理由见下面那段块注释。
  *
- * 这些组是第 43 轮按"工种"建的（`magpie group add`），当时**建了却没接线** ——
- * 于是角色走的是发现层自动排的链，实测 `market_analyst` 撞上
- * `group/auto-hy3`（思维链）→ 耗时 39s/121s/**
- * T1（体力活）的候选链 —— **组 + 兜底组**。
- *
- * 见 `ROLE_GROUP_LADDERS` 里"实测踩到"那段：单组一次 5xx 就让整档不可用。
+ * 这里只留一句最该记住的：**链上的 id 会失效，而不会有任何测试因此变红** ——
+ * 所以每一条候选都必须是**当前真的存在**的模型（本次实测：
+ * 免费快模型 200、等价旧组两种观测冲突 → 保留在链尾）。
  */
 const T1_LADDER: readonly string[] = [
+  /*
+   * 实测最快的一档（3 次 1.22 / 1.06 / 0.83s），且**三项测验全通过**
+   *（规则算术 3/3、JSON 数组契约 3/3）。它是"体力活"的第一选择。
+   */
+  'opencode-zen-free/beam-free',
+  /* 免费 + 524K；小 prompt 1.15–1.37s、2.2 万字符材料 1.54–2.50s；三项测验全通过。 */
+  'opencode-zen-free/space-bunny-free',
+  /*
+   * 免费路由组（`*-free` 后缀 = 只跑免费后端），实测 1.41–1.43s。
+   * ⚠️ 它**只在线上网关存在**（本机网关没有这个组）—— 见下面"两个 magpie"那段。
+   */
+  'group/auto-space-bunny-free',
+  /*
+   * 原来的体力活兜底组：线上实测 1.19–1.39s（三项测验只测了契约，通过）。
+   * 保留它是因为它自带网关级跨供应商故障转移 —— 那是我这三条免费模型没有的能力。
+   */
   'group/team-grunt',
-  /* 兜底：分析组里也有快模型，能用就用（有产出好过没有）。 */
+  /* 再兜一层：分析组（线上 1.15–1.51s；契约测验通过）。 */
   'group/team-analyst',
-  /* 再兜一层：新闻组是 3 对同名模型跨供应商配对，可用性最高。 */
-  'group/team-news',
 ];
-/**>180s** → 超时 → 零决策。
+
+/**
+ * **T2 分析链**（`market_analyst`）。
  *
- * ⚠️ **只列我验证过的三个**。其余角色保持原样（发现层自动排序）——
- * 一次全换会让我分不清"哪一处改动导致了什么"。
+ * 原则：**智商与速度平衡**。它是**唯一读全量候选**的角色，
+ * 所以链首要选**大上下文**的免费模型（压缩后材料实测可达 36–46K 字符）。
  */
+const T2_LADDER: readonly string[] = [
+  /*
+   * 免费 + **524K** 上下文。它是唯一读全量候选的角色（`market_analyst`）的首选：
+   * 收紧后的材料实测可达 3.6–4.6 万字符，只有大窗口的候选才容得下。
+   */
+  'opencode-zen-free/space-bunny-free',
+  /*
+   * 免费 + **200K**（实测 `context_length=200000`）。规则算术 3/3、契约 3/3，
+   * 线上 1.82–2.07s。⚠️ 因为只有 200K，它**不当"可能读超长材料"角色的链首**。
+   */
+  'opencode-zen-free/deepseek-v4.1-flash-free',
+  /* 免费组，1.41–1.43s；契约 3/3。 */
+  'group/auto-space-bunny-free',
+  /* 兜底：原来的分析组（线上 1.15–1.51s）。 */
+  'group/team-analyst',
+  /* 再兜一层：原来的体力活组（"单组一次 5xx 就让整档不可用"的教训仍成立）。 */
+  'group/team-grunt',
+];
+
+/**
+ * **T3 决策链**（`judge` / `bull` / `bear` / `symbol_scout`）—— **智商优先**。
+ *
+ * 辩论与裁决的质量直接决定盈亏，所以这一档**绝不放慢模型**
+ *（本轮实测把 `longcat` 与 `nemotron` 挡在外面就是这条）；
+ * 速度只是次要项 —— 它们的超时线是 T3（最宽）那一档。
+ */
+const T3_LADDER: readonly string[] = [
+  /*
+   * 首席：线上实测**又准又不慢**的那一个 —— 规则算术 3/3、JSON 数组契约 3/3，
+   * 小 prompt 1.54–2.40s、2.2 万字符材料 1.89–10.30s。
+   * 在它之前我原以为首席该是 `gpt-6-astra`，**那条结论建立在错的网关上了**（见下）。
+   */
+  'group/auto-glm-5-3',
+  /* 次席：契约 3/3、规则 3/3，小 2.07–4.85s、2.2 万字符 7.78–8.91s —— 比首席慢一档。 */
+  'group/auto-grok-4-7',
+  /*
+   * 第三：质量最稳（契约与规则各 3/3），但**慢** —— 小 4.49–5.59s、2.2 万字符 5.10–6.74s，
+   * 规则题上甚至出现 11.5 / 16.1 / **28.0s**。它是"前面都不可用时的质量兜底"，不该当首选。
+   */
+  'group/auto-kimi-k3',
+  /* 第四：免费兜底（保证最坏情况不烧付费额度），契约 3/3、小 2.46–2.88s、大 3.85–4.42s。 */
+  'group/auto-mimo-v2-6-pro',
+  /*
+   * ⚠️ **原来的"最强组"名字，保留在链尾** —— 它们在线上实测可用（`team-judge` 1.14–1.38s），
+   * 且自带网关级故障转移。它们排最后：只有前面四个都不行才会用到。
+   */
+  'group/team-judge',
+  'group/team-analyst',
+];
+
+/*
+ * ── ⚠️ **刻意不放进任何链的模型**（每条都是**服务器侧**实测）──────────────────
+ * ⚠️ `group/team-*` **不在这个表里** —— 它们被**保留在链尾**，理由见上方那段。
+ *
+ * | 模型 | 为什么不用 | 服务器侧实测（2026-10-17 11:26–11:38） |
+ * |---|---|---|
+ * | `group/auto-gpt-6-astra` | **额度已尽（原拟首席）** | 429 `Cline: out of credits ($-1.02)` —— 3/3 全失败 |
+ * | `group/auto-gpt-6-1-sol` / `group/auto-claude-opus-5-5` | 同上 | 429 同一个 `out of credits` |
+ * | `group/auto-claude-haiku-5-5` | 账号未授权 | 401 `Factory: User not affiliated with an …` |
+ * | `group/auto-claude-sonnet-5-5` | 账号未授权 | 401 同上 |
+ * | `group/auto-gpt-6-sol` | 上游错 + 不稳定 | 一次 **43.8s** + 429 `Trae Global`，两次 400 `WorkBuddy AI: request parameters` |
+ * | `group/auto-gemini-4-argon` | 不存在 | 404 `magpie knows no model`（3/3） |
+ * | `group/smart-split` / `group/never-stuck` / `group/cheap-first` / `group/freeall` | 不存在 | 404（各 3/3）—— ⚠️ 它们**在别处曾是研究线索**，但线上没有 |
+ * | `opencode-go/omen-alpha` | 额度已尽（本机测得） | 429 `OpenCode Go: usage limit exceeded`；⚠️ **未在服务器侧复测** |
+ * | `opencode-zen-free/glm-5.3-flash-free` | 额度波动 + 慢 | 一次 **429**（10.3s），成功两次 1.74 / 6.19s |
+ * | `group/auto-longcat-2-5-preview-free` | 任务明令 T3 不用它 | 服务器测 2.4–2.8s（**比预期快**），但仍有"偶尔极慢"的历史记录 → 不进 T3 |
+ * | `opencode-zen-free/longcat-2.5-preview-free` | 极慢 | 本机一次 **326.4s** 量级的同族模型；不进任何链 |
+ * | `group/auto-nemotron-3-5-super-vl-free` | **契约漏防** | 1/3 次没吐出数组（`NO_ARRAY`），一次 **60.2s**；不适合关键路径 |
+ * | `opencode-zen-free/nemotron-3.5-super-vl-free` | 同上 | 1/3 次空回复、一次 14.0s、规则题 1/3 失败 |
+ * | `opencode-zen-free/mimo-v2.6-flash-free` | 比同类慢 | 本机 2.1–6.7s（与 `mimo-v2-6-pro` 同族但无明显优势） |
+ * | `opencode-zen-free/big-pickle` | 输出上限小 + 波动 | 本机一次 11.9s；契约通过但无优势 |
+ * | `opencode-zen-free/step-5-preview-free` | 已下线 | 404 `not available as an OpenCode Zen free model now`（本机） |
+ * | `workbuddy-ai/*` 的**直连** id | 账号类型受限 | 400 `not allowed for user type personal_free_user`；**经 `group/` 转发可用** → 所以链上写组 id |
+ *
+ * ⚠️ **两处"本机 vs 服务器"结论相反的例子**（这就是为什么必须写明打哪个 magpie）：
+ * `group/auto-nemotron-3-5-super-vl-free` 与 `group/auto-space-bunny-free`
+ * **本机 404、服务器 200** —— 我第一版据本机结论把前者当"不存在"，是错的。
+ * 注意 `space-bunny-free` 最终**进了链**（免费组），而 `nemotron` 是因为**契约漏防**才不进。
+ */
+
+/**
+ * **两个 200K 上下文模型的"警戒线"**。
+ *
+ * ⚠️ 它们**不是**排除理由（它们确实在链上：免费 + 快那一档），
+ * 而是**使用约束**：任何"可能读到超长材料"的角色**不得**把它们当**首选**。
+ *
+ * 实测上下文（`/v1/models` 的 `context_length`，2026-10-17）：
+ * ```
+ *   opencode-zen-free/deepseek-v4.1-flash-free   200,000   ← 只有 20 万
+ *   opencode-zen-free/glm-5.3-flash-free         200,000   ← 同上
+ *   opencode-zen-free/space-bunny-free           524,288
+ *   opencode-zen-free/beam-free                1,048,576
+ * ```
+ * 为什么值得写成常量：**上下文不够时模型不会说"上下文不够"** ——
+ * 它会表现为"输出被截断"或干脆超时，而那时要从"材料多大"倒推。
+ */
+const CONTEXT_CAUTION_200K: ReadonlySet<string> = new Set([
+  'opencode-zen-free/deepseek-v4.1-flash-free',
+  'opencode-zen-free/glm-5.3-flash-free',
+]);
+
+/*
+ * ══════════════════════════════════════════════════════════════════════════════
+ *  ⚠️⚠️ **路由阶梯 2026-10-17 按【服务器侧实测】重接** —— 旧链只有 1 档、且漏用免费模型
+ * ══════════════════════════════════════════════════════════════════════════════
+ *
+ * ## ⚠️⚠️ 先说清一件事：**有两个不同的 magpie**（2026-10-17 查清）
+ *
+ * ```
+ *   线上项目用的：ssh tx → 服务器 127.0.0.1:3425     361 模型 / 57 group
+ *   Windows 本机：直接请求 127.0.0.1:3425            395 模型 / 55 group  ← DSH 自己的网关
+ * ```
+ * 两者的**模型集合不同**，例如：
+ * ```
+ *   group/team-grunt                    服务器：200（在 /v1/models 里）   本机：404
+ *   group/auto-nemotron-3-5-super-vl-free 服务器：200                       本机：404
+ *   group/auto-space-bunny-free           服务器：200                       本机：404
+ *   opencode-zen-free/*                   服务器：200                       本机：200
+ * ```
+ * ## ⚠️ 由此产生的一条硬纪律（本文件的所有数字都遵守它）
+ *
+ * > **一条在 Windows 上直接发出的 magpie 查询，证明不了任何关于线上的事。**
+ * > 测 LLM 的可用性/延迟时，必须写明"打的是哪个 magpie"：
+ * > ✅ 线上 = `ssh tx` → 服务器 `127.0.0.1:3425`；❌ 不要直接 curl 本机的 3425。
+ *
+ * 我第一版就踩了这个坑：在本机网关上测了一轮（并据此写了注释与排序），
+ * 那份数据**对线上不成立**。本文件现在的每个数字**都来自服务器侧复测**（见下）。
+ *
+ * ## 服务器侧实测汇总（2026-10-17 11:26–11:38，max_tokens=5 或 700）
+ *
+ * ```
+ *   opencode-zen-free/beam-free                 小 0.83–1.22s   2.2万字 1.06–1.25s   契约 3/3  规则 3/3
+ *   opencode-zen-free/space-bunny-free          小 1.15–1.38s   2.2万字 1.54–2.50s   契约 3/3  规则 3/3
+ *   group/auto-space-bunny-free                 小 1.41–1.43s   2.2万字 1.50–1.52s   契约 3/3
+ *   group/team-grunt                            小 1.19–1.39s                       契约通过
+ *   group/team-analyst                          小 1.15–1.51s
+ *   group/team-judge                            小 1.14–1.38s
+ *   opencode-zen-free/deepseek-v4.1-flash-free  小 1.82–2.07s   规则 3/3   契约 3/3
+ *   group/auto-qwen3-8-flash                    小 1.58–2.17s   规则 3/3
+ *   group/auto-glm-5-3                          小 1.54–2.40s   2.2万字 1.89–10.30s  契约 3/3  规则 3/3
+ *   group/auto-grok-4-7                         小 2.07–4.85s   2.2万字 7.78–8.91s   契约 3/3  规则 3/3
+ *   group/auto-mimo-v2-6-pro                    小 2.46–2.88s   契约 3/3  规则 3/3
+ *   group/auto-kimi-k3                          小 4.49–5.59s   规则 11.5/16.1/28.0s 契约 3/3
+ * ```
+ *
+ * ⚠️ **延迟是"这一批的排序"，不是永久值**（所以注释里只写排序关系，不写阈值）。
+ *
+ * ## 这条链的定位：**第一条与最后一条**
+ *
+ * 候选链的实际来源**不是**本文件，而是 `manager.ts` 的 `discoverFromGateway()`：
+ * 它每次启动时把**网关此刻真实存在的**模型按档位分好（`discoveredLadders`），
+ * 优先级是 **① 角色显式链 → ② 发现层 → ③ 静态档案**（`modelRouter.ts:199-210`）。
+ * 实测日志：「模型目录已刷新：共 319 个（免费 21 个）；T3 74 / T2 172 / T1 73」。
+ *
+ * ⇒ 对已绑角色本文件的链是**首选**，对未绑角色它是**兜底**；
+ * 而"网关有了新模型"这件事**本来就会被发现层自动吃到** ——
+ * 那正是用户问的「之前写的自动处理逻辑是否生效」的答案：**生效了**。
+ *
+ * ## 新原则：链上只写**当前真的存在**的模型 id
+ *
+ * ① 每个候选都对着网关此刻真实存在的 `provider/model` 或 `group/auto-*`；
+ * ② 健康记录按候选粒度累计，一次 5xx 只冷却它自己；
+ * ③ 候选的上下文/输出上限能从模型档案读到（组只能拿到组级属性）；
+ * ④ **保留 `group/team-*` 在链尾** —— 它们线上实测可用，且自带网关级故障转移
+ *   （那是我这三条单个 `provider/model` 没有的能力）。
+ *
+ * ## 但这件事的教训必须留下
+ *
+ * **写进代码的组名不是永久的**：网关侧拓扑变了，本仓库不会有任何测试变红 ——
+ * 测试全绿、系统照跑，只是**每一次调用都先撞一次失效候选**（白烧时间）。
+ * 所以文件末尾的测试里有一份"确认 404 的名字"快照（两侧网关的并集）。
+ *
+ * ## 发现层仍然是第一优先（决定了本改动的价值边界，必须写清）
+ *
+ * 候选链的实际来源**不是**本文件，而是 `manager.ts` 的 `discoverFromGateway()`：
+ * 它每次启动时把**网关此刻真实存在的**模型按档位分好（`discoveredLadders`），
+ * 优先级是 **① 角色显式链 → ② 发现层 → ③ 静态档案**（`modelRouter.ts:199-210`）。
+ * 实测日志：「模型目录已刷新：共 319 个（免费 21 个）；T3 74 / T2 172 / T1 73」。
+ *
+ * ⇒ 所以本文件里的链是**第一条**与**最后一条**：对已绑角色它是首选，对未绑角色它是兜底；
+ * 而"网关有了新免费模型"这件事**本来就会被发现层自动吃到** ——
+ * 那正是用户问的「之前写的自动处理逻辑是否生效」的答案：**生效了**。
+ *
+ * ## 新原则：链上只写**当前真的存在**的模型 id
+ *
+ * ① 每个候选都对着网关此刻真实存在的 `provider/model` 或 `group/auto-*`；
+ * ② 健康记录按候选粒度累计，一次 5xx 只冷却它自己；
+ * ③ 候选的上下文/输出上限能从模型档案读到（组只能拿到组级属性）。
+ *
+ * ⚠️ 代价（如实写下来，不让下一个人再猜）：**单个 `provider/model` 没有
+ * 网关侧故障转移**（`group/auto-*` 自带）。所以每条链的**末尾**都留一个
+ * 本地免费模型，保住"有产出好过没有产出"。
+ *
+ * ## 延迟纪律
+ *
+ * 注释里只记**排序关系**（谁比谁快一个量级），**不记绝对值** ——
+ * 延迟会波动，硬编码 "1.10s" 这种阈值下次波动就会误判。
+ */
+
 export const ROLE_GROUP_LADDERS: Readonly<Record<string, readonly string[]>> = {
   /*
    * 唯一的 T2 分析角色。用 `team-analyst`（我按"分析"挑的
@@ -161,7 +373,7 @@ export const ROLE_GROUP_LADDERS: Readonly<Record<string, readonly string[]>> = {
    *
    * ⚠️ 后面挂了 `team-grunt` 作为**兜底** —— 见下面 `T1_LADDER` 的说明。
    */
-  market_analyst: ['group/team-analyst', 'group/team-grunt'],
+  market_analyst: T2_LADDER,
   /*
    * ── 按币并行的侦查员：要【最强 + 最听话】（2026-10-14 新增）──────────────
    *
@@ -175,7 +387,7 @@ export const ROLE_GROUP_LADDERS: Readonly<Record<string, readonly string[]>> = {
    * ⚠️ 兜底挂 `team-analyst`（不是 team-grunt）：
    *    scout 失败的代价是"裁决官少一份逐币深看"，宁可稍慢也别没产出。
    */
-  symbol_scout: ['group/team-judge', 'group/team-analyst'],
+  symbol_scout: T3_LADDER,
   /*
    * ── 体力活：要快 + 免费。**必须有兜底** ──────────────────────────────
    *
@@ -218,7 +430,9 @@ export const ROLE_GROUP_LADDERS: Readonly<Record<string, readonly string[]>> = {
  * 贸然换掉会让我分不清"是路由组变好了还是模型变好了"。
  */
 const TIER_GROUP_LADDERS: Readonly<Record<string, readonly string[]>> = {
-  T1_fast: ['group/team-grunt'],
+  T1_fast: T1_LADDER,
+  T2_mid: T2_LADDER,
+  T3_deep: T3_LADDER,
 };
 
 /**
@@ -713,6 +927,108 @@ function isAgentLayerCall(systemPrompt: string): boolean {
   return systemPrompt.includes(TOOL_LOOP_MARKER) || systemPrompt.includes(AGENT_CALL_MARKER);
 }
 
+/**
+ * **`onStep` 上"这次调用真正属于谁"的兜底值**。
+ *
+ * ## 为什么不是 `'supervisor'`（t80 修的就是它）
+ *
+ * 路由步骤原来硬编码 `role: 'supervisor'`，而这条路径**与总管毫无关系** ——
+ * 它记的是"agent 层的某次调用被转给了单模型"（策略师、绩效分析师、归因分析师、复盘员…）。
+ *
+ * 而 `onStep` 的消费方**按 role 把步骤归并成编制表**：
+ * ```
+ *   TeamBoard/roster.ts  rosterEntries()   →  role 是归并键，未知 role 会被追加成一行
+ *   TeamRoster.tsx       groupByRole()     →  同上（另一份实现，同样按 role 归并）
+ * ```
+ * 于是两条实测后果（都由上面的实现推出来，不是猜的）：
+ * ```
+ *   ① 这一步骤被算进「总管」那一格 → 它显示"进行中"，而总管这一轮可能根本没跑；
+ *   ② 消息里出现「失败/超时/不可用」这类措辞时 → 总管被标成【失败】
+ *      （roster.ts 的 stateOfLastStep 与 TeamRoster.tsx 的 groupByRole 都用措辞判失败）
+ * ```
+ * 而 `supervisor` 那一格**必须只反映真总管**（它在 `tradingDesk.ts` 的派发阶段跑，
+ * 失败会写「主管 失败：<原因>」）—— 一个被别的角色撑起来的失败数，
+ * 会让操作员去查一个不存在的问题（本仓库记过多次同族事故）。
+ *
+ * ## 为什么兜底是一个**登记在册**的岗位，而不是一个临时字符串
+ *
+ * 界面侧的判据（`TeamBoard/roster.ts:330-353`）对**不在 `FIRM_ROLES` 里**的 role
+ * 会追加一行，标题写 `roleId` 本身、职责写「界面还没登记这个岗位的分工」——
+ * 于是每来一个临时字符串，编制表上就多一个**英文 id 的行**。
+ * 用户对界面的硬要求是"不要有英文"（见该文件头那段用户原话），
+ * 所以兜底必须是 `FIRM_ROLES` 里真实存在的 id。
+ *
+ * `system_engineer`（系统工程师）是唯一贴切的在册岗位：路由/选模型属于"系统自己在干活"，
+ * 不是任何一个交易岗位的活。它的 `status: 'staffed'`，职责在 `firm.ts:382-397`。
+ *
+ * ## 为什么能推断出真实角色、以及推断不出来的代价
+ *
+ * `LoopModel` 与 `DecisionModel` 是**同一个形状**（只有 `complete(system, user)`）——
+ * 加一个"我是谁"的参数会破坏那个通用性，而它是刻意的设计
+ * （见下面 `complete()` 里"为什么用文本特征而不是加一个参数"那段）。
+ * 所以只能从 **system 提示词**里认：`runToolLoop` / `runSingleShot` 都会把
+ * `ROLES[role].system` 整段拼在 system 的最前面（`loop.ts:411` / `loop.ts:593`）。
+ * 而 `ROLES` **就在本文件里**（`agent/roles.ts` 的 `ROLES`）—— 所以这是
+ * "拿同一份定义去认它自己"，不是另抄一份字面量。
+ *
+ * ⚠️ **推断不出来时返回 `null`**，调用方退到兜底岗位：那仍然是"不精确"，
+ * 但**绝不会把别人的失败记到总管头上**。宁可标注得粗一点，也不能标错归属。
+ *
+ * ── ⚠️ **实测到的界面侧副作用（t80 已上报，不在本文件能修的范围内）** ────────
+ *
+ * 这五个 agent 层角色**一个都不在编制表 `FIRM_ROLES` 里**（唯一来源
+ * `packages/shared/src/firm.ts`）。而界面侧对"不在册的 role"有两条各自正确的处理：
+ * ```
+ *   TeamBoard/roster.ts:330-353  追加一行（id 当标题、职责写"界面还没登记这个岗位的分工"）
+ *   TeamBoard.tsx:266-274        那一行被算进"本轮在干 N"，并且——如果措辞像失败——
+ *                                被算进**头部那个「失败 N」的计数**
+ * ```
+ * 所以用真实角色名之后，实测（`packages/web` 的 SSR）会看到：
+ * ```
+ *   role:'strategist'       → 头部出现「本轮在干 1 失败 1」（多了一行、且被记成失败）
+ *   role:'memory_curator'   → 顶部多出第二行「复盘员」（编制表里已经有一行）
+ * ```
+ * 两条都不是本文件能消掉的：要么把 agent 层角色登记进编制表，要么让界面认这五个 id。
+ * **但"归到总管名下"是更糟的那种错**（它会让操作员去查一个不存在的总管故障），
+ * 所以这里选择如实归到调用者，并把界面这一层留作独立的待修项。
+ */
+const ROUTE_CALLER_FALLBACK_ROLE = 'system_engineer';
+
+/** 会走 agent 层（工具循环 / 单次结论）的那批角色 —— `AgentRole` 的子集，见上面的说明。 */
+const AGENT_LAYER_ROLES: readonly AgentRole[] = [
+  'strategist',
+  'performance_analyst',
+  'attribution_analyst',
+  'reviewer',
+  'trader',
+];
+
+/**
+ * 从 agent 层给的 system 提示词里认出**这次是哪个角色在调用**。
+ *
+ * @returns 角色 id；认不出来返回 `null`（调用方用兜底岗位）。
+ */
+function inferCallerRole(systemPrompt: string): string | null {
+  let best: string | null = null;
+  let bestLen = -1;
+  for (const role of AGENT_LAYER_ROLES) {
+    const spec = ROLES[role];
+    if (spec === undefined) continue;
+    const system = spec.system;
+    /*
+     * ⚠️ 空串要显式排除：`'x'.includes('')` 是 `true`，
+     * 一个空的 system 会命中第一个角色 —— 那正是"猜一个"。
+     */
+    if (system.length === 0 || !systemPrompt.includes(system)) continue;
+    /* 取**最长**命中：万一将来某个角色的提示词变成了另一个的前缀，长的那个才是它。 */
+    if (system.length > bestLen) {
+      best = spec.role;
+      bestLen = system.length;
+    }
+  }
+  return best;
+}
+
 export function createTeamDecisionModel(options: {
   router: ModelRouter;
   /**
@@ -897,6 +1213,30 @@ export function createTeamDecisionModel(options: {
         raw: result.text,
         latencyMs: Date.now() - started,
         ok: true,
+        /*
+         * ⚠️ **把用量带出去**（2026-10-17 修"团队账目全空"）。
+         *
+         * ## 为什么必须在这里取
+         *
+         * `router.callByTier` 的返回**已经带 `usage`**（它从 `CallModel` 一路透传上来），
+         * 而这一行以前把它丢掉了 —— 于是`DeskRoleOutput` 上没有用量，
+         * 编排层再怎么汇总也拿不到东西。链路是
+         * ```
+         *   ModelRouter.callByTier().usage
+         *     → 这里 → safeAsk → runTradingDesk(sumRoleUsage) → TaskOutcome.usage
+         *     → routedModel.complete().usage → autoTrader.progress → decision_records
+         * ```
+         * **任何一环缺失，整条链就断在那一环上。**
+         *
+         * `?? null`：`callByTier` 的 usage 字段本身可空（提供商没报时就是 null）。
+         * 保持 `null`（不知道）而不是 `0`（确定没有）—— 见 `RoleUsage` 的说明。
+         */
+        usage: {
+          promptTokens: result.usage?.promptTokens ?? null,
+          completionTokens: result.usage?.completionTokens ?? null,
+          cachedTokens: result.usage?.cachedTokens ?? null,
+          reasoningTokens: result.usage?.reasoningTokens ?? null,
+        },
       };
     } catch (error) {
       return {
@@ -990,11 +1330,19 @@ export function createTeamDecisionModel(options: {
          * ⚠️ 而且**必须记一条日志**：`onStep` 让"这次调用被转给了单模型"
          * 在界面上可见。否则将来排查"策略师为什么不调参"时，
          * 会看到一个谜（团队模型明明在，工具循环却拿到了普通回答）。
+         *
+         * ⚠️ **role 必须是"真正发起调用的那个角色"**（t80 修，原来硬编码
+         * `'supervisor'`）：界面按 role 把步骤归并成编制表的一行，挂错归属会让
+         * 策略师的失败显示成「总管 失败」。为什么这样取值见 `inferCallerRole`。
          */
+        const callerRole = inferCallerRole(systemPrompt);
         onStep?.({
-          role: 'supervisor',
+          /* 认不出来时退到在册岗位 —— 标得粗可以，标错归属不可以。 */
+          role: callerRole ?? ROUTE_CALLER_FALLBACK_ROLE,
           phase: 'route',
-          note: '工具循环调用 → 转给单模型（团队会议只回答交易决策）',
+          note:
+            '工具循环调用 → 转给单模型（团队会议只回答交易决策）' +
+            (callerRole === null ? '（认不出具体角色，这是 agent 层的活）' : ''),
         });
         if (singleModel !== undefined) {
           return singleModel.complete(systemPrompt, userPrompt);
@@ -1100,6 +1448,41 @@ export function createTeamDecisionModel(options: {
       });
 
       /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⭐ **整轮用量累加**（2026-10-17 补 —— 修"团队账目 100% 全空"）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * ## 为什么这里要累加，而不是直接用 `outcome.usage`
+       *
+       * 因为**一次 `complete()` 背后可能不止一轮交易台** ——
+       * `autoTrader` 有一个**按需取数循环**（`MAX_DATA_ROUNDS = 3`），
+       * 团队模式下一轮"再问一次模型"就等于**把整个交易台重跑一遍**：
+       * ```
+       *   一次决策 = 最多 4 次交易台 = 最多 4 × (26~28) ≈ 112 次角色调用
+       * ```
+       * 若只返回 `outcome.usage`，**前几轮的开销会被后一轮覆盖** ——
+       * 那正是 `autoTrader.ts:3781-3783` 明确要避免的
+       * 「**这一轮的真实用量** ≠ **最后一次调用的用量**」的另一个实例。
+       *
+       * ## 与 `autoTrader` 那边的分工
+       *
+       * 那一边把 `dataRound` 的**追加调用**（`followUp`）累加进 `totalPrompt`；
+       * 而**每一轮交易台自身**（26~28 次角色调用）的账在这里合成**一个数**
+       * 交上去。两层相加才是整轮真值。少了这一层，团队模式交上去的永远是
+       * `null`（这正是缺陷）或"最后一次交易台"（这是更隐蔽的错）。
+       *
+       * ## 为什么用 `sumRoleUsage` 复用同一套语义
+       *
+       * `null`（不知道）与 `0`（确实是 0）必须分开 —— 见 `RoleUsage`。
+       * 这里不自己写加法，避免两处算术各写一遍（本仓库为"同一个算术写在两个
+       * 地方，改一处等于没改"付过代价）。
+       */
+      let teamUsage = outcome.usage;
+      const accumulate = (extra: typeof teamUsage): void => {
+        teamUsage = mergeRoleUsage(teamUsage, extra).usage;
+      };
+
+      /*
        * ── **风控官关卡**（用户需求 #3：风控由智能体负责，不是内置规则）──────
        *
        * 位置很关键：**在裁决之后、渲染之前**。
@@ -1118,6 +1501,14 @@ export function createTeamDecisionModel(options: {
        * 把"保证金够不够"交给会幻觉的模型判断，等于拿爆仓换"智能"。
        */
       const risk = await askRiskOfficer(ask, outcome, onStep);
+      /*
+       * ⚠️ **风控官那次调用也要记账**（2026-10-17）。
+       *
+       * 它是 T2 档、材料不小（待审决策 JSON + 讨论摘要 + 裁决结论），
+       * 而且**在真的开仓那一轮才会跑** —— 也就是最该被准确计量的那些轮。
+       * 漏掉它会让"有动作的轮"系统性少算一次调用。
+       */
+      accumulate(risk?.usage ?? null);
       /*
        * ⚠️ **从裁决官产出里取决策，用于判断"为什么没审风控"**（2026-10-15）。
        * 与 `askRiskOfficer` 内部用的是**同一个** `allNonAction()` —— 见
@@ -1190,7 +1581,32 @@ export function createTeamDecisionModel(options: {
           }),
         ),
         latencyMs: Date.now() - started,
-        usage: { promptTokens: null, completionTokens: null },
+        /*
+         * ⚠️⚠️ **这里原来是硬编码的 `{ promptTokens: null, completionTokens: null }`**
+         *（2026-10-17 修 —— 它让团队模式 482 轮决策的 token 账目**全是空的**）。
+         *
+         * ## 事故形状（线上只读实测）
+         *
+         * ```
+         *   decision_records 的 prompt_tokens > 0：
+         *     #9（strategy）   636/685  = 92.8%
+         *     #10（ai_managed）465/528  = 88.1%
+         *     #11（ai_team）     0/482  =  0.0%   ← 只有团队模式
+         * ```
+         * 而这一行**上面**的 agent 层分支（`singleModel.complete` / `router.callByTier`）
+         * 一直是**如实**返回 `res.usage?.promptTokens` 的 ——
+         * 所以丢掉的只有"团队交易台"这一条路。
+         *
+         * ## 现在的值是什么
+         *
+         * `teamUsage` = **这一轮交易台的全部角色调用之和**（总管 + 分析师 +
+         * 按币并行 + 辩论 + 裁决 + 汇报 + 风控官），再加上"取了数据之后重跑的交易台"
+         *（`accumulate`）。也就是 `autoTrader` 要的"整轮真实用量"。
+         *
+         * `null` 仍然可能出现 —— 那是**调用方没报用量**（测试桩、或还没接线的路径），
+         * 不是"零成本"。见 `RoleUsage`。
+         */
+        usage: teamUsage ?? { promptTokens: null, completionTokens: null },
       };
     },
   };
@@ -1220,6 +1636,13 @@ async function askRiskOfficer(
   reason: string;
   concern: string | null;
   modelId: string | null;
+  /**
+   * 风控官那次调用的用量（2026-10-17 加）。
+   *
+   * 上层要把**它**也算进"整轮用量"——否则"真有动作的轮"会系统性少算一次
+   * （而那种轮恰恰是最该被准确计量的）。`null` = 调用方没报用量，见 `RoleUsage`。
+   */
+  usage: RoleUsage | null;
 } | null> {
   const extracted = outcome.verdict?.ok === true ? extractFirstJsonArray(outcome.verdict.raw) : null;
   const decisions = (extracted?.decisions ?? []) as Decision[];
@@ -1299,6 +1722,8 @@ async function askRiskOfficer(
       reason: verdict.reason,
       concern: verdict.concern,
       modelId: out.modelId,
+      /* 把用量交回给调用方去汇总（`out.usage` 缺省 = 这次没收到用量，保持 null）。 */
+      usage: out.usage ?? null,
     };
   } catch (error) {
     onStep?.({ role: 'risk_officer', phase: 'risk', note: `调用失败：${(error as Error).message}` });
