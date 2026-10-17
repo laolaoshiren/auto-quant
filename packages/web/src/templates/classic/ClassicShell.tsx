@@ -234,8 +234,14 @@ export function ClassicShell() {
             与上面那条推送状态同类：正常时完全不出现，出现时带着"N 秒前的读数"
             这个**后果**。它回答的是"顶栏那句『实盘』『运行 1』还能不能信" ——
             在那之前，后端不可达之后这里什么都不说，页面看起来一切正常。
+
+            ⚠️ 判据是 `statusStaleLabel !== null` 而**不是** `statusStale`：
+            "从没成功过"（`systemsLoadedAt === null`）时 `stale` 是 `false`
+            （首屏本来就在加载，不该说"停更"），但**读取失败本身必须说出来** ——
+            那一句在 `label` 里。只判 `stale` 会让"服务端从第一秒就挂了"这种情形
+            静默无提示（自测抓到）。
           */}
-          {shell.statusStale && (
+          {shell.statusStaleLabel !== null && (
             <span
               className="hidden shrink-0 items-center gap-1.5 text-xs text-warn sm:flex"
               title={`最近一次读取系统状态失败${shell.statusError ? `：${shell.statusError}` : ''}。页面显示的是上一次成功读到的读数。`}

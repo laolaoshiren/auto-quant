@@ -272,8 +272,11 @@ export function QuillShell() {
             **系统状态停更**（2026-10-17 · 台账 FRD-01）。
             与上面几条同类：正常时不出现；出现时说的是"这些读数有多旧"，
             而不是只报一个状态词。
+
+            ⚠️ 判据是 `statusStaleLabel !== null`：它也覆盖"从第一秒就读不到"
+            的情形（那时 `statusStale` 为 false，但失败本身必须说）。
           */}
-          {shell.statusStale && (
+          {shell.statusStaleLabel !== null && (
             <Tooltip
               content={`最近一次读取系统状态失败${shell.statusError ? `：${shell.statusError}` : ''}。页面显示的是上一次成功读到的读数。`}
             >

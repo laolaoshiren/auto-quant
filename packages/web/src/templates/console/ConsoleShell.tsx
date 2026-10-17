@@ -588,8 +588,11 @@ function StatusBar() {
         **系统状态停更**（2026-10-17 · 台账 FRD-01）。
         状态栏只有 26px，所以这里只放这一句短话 —— 后果写在 `title` 里，
         与"越界项只变色、告警在标题栏"的既有约定一致（见上面那段注释）。
+
+        ⚠️ 判据是 `statusStaleLabel !== null`：它也覆盖"从第一秒就读不到"的情形
+        （那时 `statusStale` 为 false，但失败本身必须说）。
       */}
-      {shell.statusStale && (
+      {shell.statusStaleLabel !== null && (
         <span
           className="cell text-warn"
           title={`最近一次读取系统状态失败${shell.statusError ? `：${shell.statusError}` : ''}。下面这些读数（推送/环境/运行数）都是上一次成功读到的，可能已经过期。`}
