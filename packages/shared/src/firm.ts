@@ -125,16 +125,30 @@ export interface FirmRole {
    */
   status: 'staffed' | 'by_code' | 'planned';
   /**
-   * **承担这个岗位的代码模块** —— 只有 `status: 'by_code'` 时有意义，其余为 `undefined`。
+   * **承担这个岗位职责的东西** —— 代码模块，或"批量调研里的某个猎手"。
    *
-   * ## 为什么要把模块路径写给操作员看（而不是只写"已由代码承担"）
+   * ## 两种用法（2026-10-17 起有两种，不是一种）
+   *
+   * ```
+   *   status: 'by_code'  → 确定性代码承担（tier: T0_code，没有模型）
+   *   status: 'planned'  → ⚠️ 见下面：职责由**批量调研的猎手**顺带承担
+   * ```
+   * 第二种是 `t112` 加的，起因是用户观察：
+   * > 「我观察到**很多岗位，似乎从未真正运行过**」
+   *
+   * `community_monitor` / `onchain_analyst` 在 `status` 上是 `planned`（**没有专门为它们
+   * 出勤的模型** —— 那是事实，不能改），但它们的职责**确实由调研猎手在跑**
+   * （`community_hunter` / `flow_hunter`）。界面于是把这一类显示成「随批运行」而不是
+   * 「规划中（还没实现）」，**`status` 字段一个字没动**。
+   *
+   * ## 为什么要把承担物写给操作员看（而不是只写"已由代码承担"）
    *
    * 因为"已由代码承担"这句话**无法被核对**：操作员既不能打开一个模型看它在不在，
    * 也看不到这段代码在不在跑。写上确切的模块与产出（例如
    * `/api/health` 的 `staleTraders`）之后，他可以自己去查 —— 界面说的是**可证伪的事实**。
    *
    * ⚠️ 它必须与代码里的真实位置一致，否则这条文案自己变成了新的谎言
-   * （`firmStatus.test.ts` 会去那两个文件里核对）。
+   * （`firmStatus.test.ts` 会去那两个文件里核对 `by_code` 的那两个）。
    */
   carriedBy?: string;
 }
@@ -268,6 +282,25 @@ export const FIRM_ROLES: readonly FirmRole[] = [
     department: '研究',
     tier: 'T2_mid',
     status: 'planned',
+    /*
+     * ⚠️ **`planned` + `carriedBy`**（2026-10-17 · t112）：这个组合是**有意为之**。
+     *
+     * `status: 'planned'` 说的是"**没有专门为这个岗位出勤的模型**"——那是事实。
+     * 但它的**职责确实有人在跑**：四个调研猎手批量一起跑（`manager.ts:1138`
+     * 的 `mapConcurrent(HUNTERS, …)`），其中 `flow_hunter`（资金猎手）干的正是
+     * "资金费率、持仓量、ETF 净流入、大额转账"——**与本岗位的 `duty` 逐字对应**。
+     *
+     * 于是界面原来写「规划中（还没实现）」，操作员以为**根本没人干这件事**。
+     * 用户原话：「我观察到**很多岗位，似乎从未真正运行过**」。
+     *
+     * ⇒ 显示层据此把状态词换成「随批运行」（见 `web/.../roster.ts` 的 `isBatchedRole`），
+     *   **`status` 一个字没动**：在岗数统计、`FIRM_ROLES` 的条目数与其它字段全不变。
+     *
+     * ⚠️ 它与 `community_monitor` **必须同进退**：两者都由同一批猎手承担
+     * （`flow_hunter` / `community_hunter`），只点亮一个等于说"社区的活有人干、
+     * 链上的活没人干"——而它们跑在**同一次批量调研**里。
+     */
+    carriedBy: '资金猎手（flow_hunter）· 资金费率、持仓量、ETF 净流入、大额转账，随调研批次运行',
   },
   {
     id: 'community_monitor',
@@ -276,6 +309,19 @@ export const FIRM_ROLES: readonly FirmRole[] = [
     department: '研究',
     tier: 'T1_fast',
     status: 'planned',
+    /*
+     * ⚠️ **`planned` + `carriedBy`**（2026-10-17 · t112）：与 `onchain_analyst` 同源、同进退。
+     *
+     * `community_hunter`（社区猎手）的 focus 是「社区与社交上的讨论热度与情绪倾向
+     * （注意区分"真实讨论"与"喊单"）」——正是本岗位的 `duty`。
+     *
+     * ⚠️ 判据的**边界**（重要，别再往回改）：猎手是**批量一起跑**的，
+     * 所以"猎手在跑"这件事同时适用于四个猎手对应的岗位。
+     * 这也是为什么**不能**把它做成 `status`：一旦状态机允许"有东西在跑"就新增取值，
+     * 就没有判据能阻止下一个人把 `red_team` / `portfolio_manager` / `clerk` 也顺手改掉
+     * —— 而那三个**确实没有任何东西在替它们跑**。
+     */
+    carriedBy: '社区猎手（community_hunter）· 社区与社交讨论热度、情绪倾向，随调研批次运行',
   },
 
   /* ── 风控 ────────────────────────────────────────────────────────── */

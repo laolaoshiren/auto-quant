@@ -507,6 +507,88 @@ export function stateLabel(state: RosterState, replay: boolean): string {
   return replay ? STATE_LABEL_REPLAY[state] : STATE_LABEL[state];
 }
 
+/* -------------------------------------------------------------------------- */
+/*  「随批运行」—— 纯显示层的一个特殊状态词（2026-10-17 · t112）                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **`planned` 里有一类其实在跑：它的工作由批量调研猎手顺带完成。**
+ *
+ * ## 用户报的问题
+ *
+ * > 「我观察到**很多岗位，似乎从未真正运行过**，页面上也没有显示他们**最新运行时间**」
+ *
+ * 其中两个是**看板在低估自己**：
+ * ```
+ *   community_monitor（社区监控）  → community_hunter（社区猎手）真的在跑
+ *   onchain_analyst（链上分析）    → flow_hunter（资金猎手）真的在跑
+ * ```
+ * 而它们在 `firm.ts` 里是 `status: 'planned'` ⇒ 界面写「规划中（还没实现）」，
+ * 操作员于是以为**根本没人干这件事**。
+ *
+ * ## ⚠️ 为什么**不改 `status`、不新增枚举**（这是本轮最重要的一条判断）
+ *
+ * 看起来最干净的做法是给它们一个新的 `status`（例如 `'batched'`）。**但那会开一个坏口子**：
+ *
+ * 四个猎手是**一次批量一起跑**的，产出还**合并成一份**、统一记在 `news_hunter` 名下
+ * （`manager.ts:1138` 的 `mapConcurrent(HUNTERS, …)` + `:1195-1196` 的
+ * `mergeHunterReports` → `parseIntelReport(merged, …, 'news_hunter')`）。
+ * 于是"猎手在跑"这个判据**同时适用于四个岗位**：
+ * ```
+ *   news_hunter       → newscaster（已 staffed）
+ *   flow_hunter       → onchain_analyst      ← 与 community_monitor 同源
+ *   community_hunter  → community_monitor
+ *   macro_hunter      → （编制表里没有对应岗位）
+ * ```
+ * 如果把它做成 `status`，那 `onchain_analyst` **必须一起改**；再往下，
+ * `red_team` / `portfolio_manager` / `clerk` 也确实没有任何东西在替它们跑 ——
+ * **一旦状态机可以因为"有东西在跑"而新增取值，就没有判据能阻止下一个人顺手全改。**
+ *
+ * ⇒ 所以**状态字段一个字不动**（`planned` 仍是 `planned`、在岗数统计不变、
+ * `FIRM_ROLES` 不变），只在**显示层**把这一类岗位的状态词换成「随批运行」。
+ * 判据是 `firm.ts` 里已有的 `carriedBy`（"承担它的模块"）——
+ * **它本来就是为"职责在跑但不是模型出勤"这件事准备的**。
+ *
+ * ## 判据：`planned` **且** 写了 `carriedBy`
+ *
+ * 只有两个条件同时成立才算"随批运行"：
+ * ```
+ *   planned + 无 carriedBy  → 真的没人干（red_team / portfolio_manager / clerk）
+ *   planned + 有 carriedBy  → 有东西在替它跑（community_monitor / onchain_analyst）
+ * ```
+ * 这样"哪些真没跑"在数据里就是**可分辨的**，不靠代码里另写一份名单
+ * （那正是本仓库反复吃亏的"两份名单迟早分叉"）。
+ *
+ * @param role 编制表里的一行
+ * @returns 是不是"随批运行"这一类
+ */
+export function isBatchedRole(role: { status: string; carriedBy?: string }): boolean {
+  return role.status === 'planned' && typeof role.carriedBy === 'string' && role.carriedBy.trim().length > 0;
+}
+
+/** 「随批运行」的状态词。与 `STATE_LABEL.planned`（规划中）刻意不同 —— 它们不是一回事。 */
+export const BATCHED_STATE_LABEL = '随批运行';
+
+/**
+ * **带"随批运行"判据的状态词** —— 组件应当用这个，而不是裸 `stateLabel`。
+ *
+ * ⚠️ 回放态**不特殊化**：回放说的是"最近一轮它产出了什么"，
+ * 而随批运行的岗位**从来不在轮次里**（它们在轮次之外的调研批次里）——
+ * 那时说"随批运行"仍然成立，所以两个态都用同一个词。
+ */
+export function stateLabelFor(
+  state: RosterState,
+  replay: boolean,
+  role: { status: string; carriedBy?: string },
+): string {
+  if (state === 'planned' && isBatchedRole(role)) return BATCHED_STATE_LABEL;
+  return stateLabel(state, replay);
+}
+
+/** 悬停说明：为什么这个"规划中"的岗位其实在跑。 */
+export const BATCHED_STATE_HINT =
+  '这个岗位的职责由调研猎手随批次承担 —— 它不在轮次里，所以没有"出勤"记录，但确实在跑（见右侧承担说明）。';
+
 /** 状态的悬停说明（把"这意味着什么"写清楚，而不是让人猜）。 */
 export const STATE_HINT: Record<RosterState, string> = {
   active: '这一轮它正在工作 —— 还没有看到完成信号。',

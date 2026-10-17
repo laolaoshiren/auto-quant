@@ -163,19 +163,55 @@ test('★★★ 头部计数必须把"代码在跑"从"规划中"里分出来', 
   );
 });
 
-test('★★ 5 个真正没实现的岗位仍然显示"规划中"（不能顺手全改）', () => {
+test('★★★ 「随批运行」组：community_monitor / onchain_analyst 显示"随批运行"并写明承担物', () => {
   /*
-   * 反方向：这次改动只把**两个有实测证据**的岗位改成 `by_code`。
-   * 剩下的五个职责确实没在跑 —— 把它们也改掉就是另一种说谎，
-   * 正是任务里明确警告的"下一次有人顺手全改"。
+   * ⚠️ **2026-10-17（t112）拆组**：原来这两个与下面那三个写在**同一个数组**里，
+   * 一起断言"规划中" —— 而它们其实**真的在跑**（由批量调研的猎手承担）。
+   *
+   * 用户原话：「我观察到**很多岗位，似乎从未真正运行过**」——
+   * 对这两个岗位，界面在**低估自己**：说"规划中（还没实现）"，
+   * 而 `community_hunter` / `flow_hunter` 确实在做它们的活。
+   *
+   * 拆成两组之后守卫**比原来更精确**：原来那 5 个混在一起，
+   * 掩盖了"有的在跑、有的真没跑"这个事实。
    */
   const html = renderBoard();
-  for (const id of ['onchain_analyst', 'community_monitor', 'red_team', 'portfolio_manager', 'clerk']) {
+  const expected: Record<string, string> = {
+    community_monitor: 'community_hunter',
+    onchain_analyst: 'flow_hunter',
+  };
+  for (const [id, hunter] of Object.entries(expected)) {
+    const row = rowOf(html, id);
+    assert.ok(row.length > 0, `★ 渲染结果里找不到 ${id} 那一行（判据失效，先修这个）`);
+    const text = textOf(row);
+    assert.ok(text.includes('随批运行'), `★★★ ${id} 由调研猎手承担，必须显示"随批运行"：${text}`);
+    assert.ok(
+      !text.includes('规划中'),
+      `★★★ ${id} 还在显示"规划中" —— 那会让操作员以为根本没人干这件事：${text}`,
+    );
+    /* 承担物必须写出来（"随批运行"这句话本身无法被核对）。 */
+    assert.ok(text.includes(hunter), `★★ ${id} 必须写明由哪个猎手承担（${hunter}）：${text}`);
+  }
+});
+
+test('★★★ 「真未接线」组：red_team / portfolio_manager / clerk 仍显示"规划中"且无承担说明', () => {
+  /*
+   * 反方向：这三个**确实没有任何东西在替它们跑**（`t109` 的接线核对：0 调用点）。
+   * 把它们也点亮就是另一种说谎，正是任务里明确警告的"下一次有人顺手全改"。
+   *
+   * ⚠️ 判据从原来的"5 个一起"收窄成这 3 个 —— **不是放松，是精确化**：
+   * 那两个"随批运行"的由上面那条守，这里守的是"真没跑的那些不许被顺手点亮"。
+   */
+  const html = renderBoard();
+  for (const id of ['red_team', 'portfolio_manager', 'clerk']) {
     const row = rowOf(html, id);
     assert.ok(row.length > 0, `★ 渲染结果里找不到 ${id} 那一行（判据失效，先修这个）`);
     const text = textOf(row);
     assert.ok(text.includes('规划中'), `★ ${id} 的职责确实没在跑 —— 必须仍然显示"规划中"：${text}`);
     assert.ok(!text.includes('代码在跑'), `★ ${id} 不是 by_code 岗位，不能显示"代码在跑"：${text}`);
+    assert.ok(!text.includes('随批运行'), `★★ ${id} 没有任何东西替它跑，不能显示"随批运行"：${text}`);
+    /* 它也不该有承担说明 —— 有就说明有人顺手给它编了一个承担者。 */
+    assert.ok(!text.includes('由猎手承担'), `★★ ${id} 没有承担者，不能有"由猎手承担"：${text}`);
   }
 });
 
@@ -386,7 +422,17 @@ test('★★★ 每个已实现的岗位都有「历史详情」展开按钮，p
   for (const id of ['supervisor', 'risk_officer', 'reporter', 'memory_curator']) expectButton(id);
   /* `by_code`：职责在跑、没有模型出勤 —— 也应该能点开（展开态会说明由哪段代码承担）。 */
   for (const id of ['data_sentinel', 'ops_watchdog']) expectButton(id);
-  /* `planned`：5 个真没实现的。 */
+  /*
+   * `planned`：5 个 —— ⚠️ **2026-10-17（t112）起它们分成两类，但这条判据对两类都成立**：
+   * ```
+   *   随批运行（community_monitor / onchain_analyst）：职责由猎手承担，但**没有模型出勤记录**
+   *   真未接线（red_team / portfolio_manager / clerk）：什么都没有
+   * ```
+   * 两类的 `status` **都是 `planned`**，而"能不能点开历史详情"的判据是
+   * `role.status !== 'planned'`（`TeamBoard.tsx:711`）—— 所以两者都不给按钮。
+   * **这是刻意的**：随批运行的岗位没有"轮次里的出勤"，点开只会是一个空面板。
+   * 它的承担物已经写在行内（「由猎手承担：…」），不需要再开一个详情去说明。
+   */
   for (const id of ['onchain_analyst', 'community_monitor', 'red_team', 'portfolio_manager', 'clerk']) {
     expectNoButton(id);
   }

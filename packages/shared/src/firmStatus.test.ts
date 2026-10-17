@@ -312,3 +312,70 @@ test('★★ `by_code` 必须是"没有 LLM 出勤"的岗位（tier 为 T0_code�
     `★ 这些岗位标了 by_code 但 tier 不是 T0_code（状态说"没有模型"，档位却在排模型）：${wrongTier.join('、')}`,
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  ★ t112：planned + carriedBy 的组合必须被约束（防有人删了字段而界面不变）      */
+/* -------------------------------------------------------------------------- */
+
+test('★★ planned 岗位的 carriedBy 只能是"随批运行"那一类，且必须写清承担者', () => {
+  /*
+   * ## 这个组合是 2026-10-17（t112）新加的，必须钉死边界
+   *
+   * `status: planned` + `carriedBy` 的语义是：
+   * 「**没有专门为它出勤的模型**，但职责由**批量调研的猎手**顺带承担」。
+   * 界面对这一类显示「随批运行」而不是「规划中（还没实现）」——
+   * 因为后者会让操作员以为"根本没人干这件事"
+   *（用户原话：「我观察到很多岗位，似乎从未真正运行过」）。
+   *
+   * ## 为什么这条断言必须存在
+   *
+   * 界面侧的判据是 `isBatchedRole()`（`web/.../roster.ts`），它读的就是 `carriedBy`。
+   * 于是有两种漂移会让界面**悄悄说错话**而没有任何测试变红：
+   * ```
+   *   ① 有人删了 carriedBy                → 状态词变回"规划中"，但没人发现
+   *   ② 有人给真未接线的岗位也加上 carriedBy → 它被点亮成"随批运行"（那是说谎）
+   * ```
+   * 这里把**允许的集合写死**：只有这两个岗位可以有 `planned + carriedBy`。
+   * 新增一个必须同时改这条断言 —— 那是刻意的摩擦。
+   */
+  const BATCHED = ['community_monitor', 'onchain_analyst'];
+  const actually = FIRM_ROLES.filter((r) => r.status === 'planned' && r.carriedBy !== undefined)
+    .map((r) => r.id)
+    .sort();
+  assert.deepEqual(
+    actually,
+    [...BATCHED].sort(),
+    `★ planned + carriedBy 的岗位集合变了：实际 [${actually.join('、')}]，期望 [${BATCHED.join('、')}] —— ` +
+      '界面会把这一类显示成"随批运行"，所以每加一个都必须有真实承担者（否则就是点亮了没在跑的岗位）',
+  );
+  for (const id of BATCHED) {
+    const role = FIRM_ROLES.find((r) => r.id === id);
+    assert.ok(role, `★ 找不到 ${id}`);
+    assert.ok(
+      (role.carriedBy ?? '').trim().length >= 10,
+      `★ ${id} 标了随批运行，却没写清由谁承担（carriedBy）—— 那句话无法被操作员核对`,
+    );
+    assert.ok(
+      /猎手|hunter/.test(role.carriedBy ?? ''),
+      `★ ${id} 的承担者必须点名到具体猎手（community_hunter / flow_hunter），实际：${role.carriedBy}`,
+    );
+  }
+});
+
+test('★★ 真未接线的三个岗位不得有 carriedBy（防止被顺手点亮）', () => {
+  const UNWIRED = ['red_team', 'portfolio_manager', 'clerk'];
+  for (const id of UNWIRED) {
+    const role = FIRM_ROLES.find((r) => r.id === id);
+    assert.ok(role, `★ 找不到 ${id}`);
+    assert.equal(
+      role.status,
+      'planned',
+      `★ ${id} 确实没有任何东西在替它跑（0 调用点）—— 必须仍是 planned`,
+    );
+    assert.equal(
+      role.carriedBy,
+      undefined,
+      `★ ${id} 没有承担者，不能有 carriedBy —— 有的话界面会把它点亮成"随批运行"（那是说谎）`,
+    );
+  }
+});

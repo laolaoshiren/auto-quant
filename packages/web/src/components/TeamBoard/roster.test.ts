@@ -19,12 +19,15 @@ import test from 'node:test';
 
 import { FIRM_ROLES, firmRoleOf, type FirmRole } from '@aq/shared';
 import {
+  BATCHED_STATE_LABEL,
   STATE_HINT,
   STATE_LABEL,
   clock,
+  isBatchedRole,
   lastSeenFromServer,
   lastSeenOf,
   rosterEntries,
+  stateLabelFor,
   stateOfLastStep,
   type TeamStep,
 } from './roster.js';
@@ -426,4 +429,92 @@ test('★ 服务端形状的容错：坏行被跳过，不能让整块时刻变�
   /* 完全没有数据时也必须给出一个可用的空 Map（`undefined` 会让调用方崩）。 */
   assert.equal(lastSeenFromServer(undefined).size, 0);
   assert.equal(lastSeenFromServer(null).size, 0);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ⑥ 「随批运行」—— planned 里有一类其实在跑（2026-10-17 · t112）              */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 随批运行的判据：planned + carriedBy，缺一不可', () => {
+  /*
+   * 用户原话：「我观察到**很多岗位，似乎从未真正运行过**」——
+   * 其中 `community_monitor` / `onchain_analyst` 是**看板在低估自己**：
+   * 它们的职责由批量调研的猎手在跑（`community_hunter` / `flow_hunter`）。
+   *
+   * 判据是"两个条件同时成立"，这里逐条钉住：
+   * ```
+   *   planned + 有 carriedBy  → 随批运行（有东西在替它跑）
+   *   planned + 无 carriedBy  → 规划中（真的没人干）
+   *   staffed / by_code       → 与"随批"无关（走它们自己的分支）
+   * ```
+   */
+  assert.equal(
+    isBatchedRole({ status: 'planned', carriedBy: '社区猎手（community_hunter）承担' }),
+    true,
+    '★ planned + carriedBy 必须是"随批运行"',
+  );
+  assert.equal(
+    isBatchedRole({ status: 'planned' }),
+    false,
+    '★ planned 但没有承担者 —— 真的没人干，不能算随批运行',
+  );
+  assert.equal(
+    isBatchedRole({ status: 'planned', carriedBy: '   ' }),
+    false,
+    '★ 空白字符串不算承担者（那会让一个没写清的字段点亮整个岗位）',
+  );
+  assert.equal(
+    isBatchedRole({ status: 'by_code', carriedBy: 'selfcheck.ts 的 findDeterministicProblems()' }),
+    false,
+    '★ by_code 走它自己的分支（"代码在跑"），不要与随批运行混为一谈',
+  );
+  assert.equal(
+    isBatchedRole({ status: 'staffed', carriedBy: '随便写的' }),
+    false,
+    '★ staffed 有模型出勤，不算随批运行',
+  );
+});
+
+test('★★★ 状态词：随批运行显示「随批运行」，真未接线仍显示「规划中」', () => {
+  /*
+   * ⚠️ 这是 t112 的**用户可见结果**：原来两者都写「规划中」，
+   * 而"规划中"这三个字让操作员以为**根本没人干这件事**。
+   */
+  const batched = { status: 'planned', carriedBy: '社区猎手（community_hunter）承担' };
+  const unwired = { status: 'planned' };
+  assert.equal(stateLabelFor('planned', false, batched), BATCHED_STATE_LABEL);
+  assert.equal(stateLabelFor('planned', true, batched), BATCHED_STATE_LABEL, '★ 回放态也一样（随批运行与轮次无关）');
+  assert.equal(stateLabelFor('planned', false, unwired), '规划中');
+  assert.notEqual(BATCHED_STATE_LABEL, '规划中', '★ 两个词必须是不同的 —— 否则改了等于没改');
+
+  /* 非 planned 态**不受** carriedBy 影响（by_code 仍显示"代码在跑"）。 */
+  assert.equal(stateLabelFor('by_code', false, { status: 'by_code', carriedBy: 'x'.repeat(20) }), '代码在跑');
+  assert.equal(stateLabelFor('idle', false, { status: 'staffed' }), '在岗');
+});
+
+test('★★ 真实编制表：恰好这两个岗位是随批运行（其余真未接线的不许被点亮）', () => {
+  const batched = FIRM_ROLES.filter(isBatchedRole).map((r) => r.id).sort();
+  assert.deepEqual(
+    batched,
+    ['community_monitor', 'onchain_analyst'],
+    `★ 随批运行的岗位集合变了：实际 [${batched.join('、')}] —— 每加一个都必须有真实承担者`,
+  );
+  /* 三个真未接线的：状态词必须仍是「规划中」。 */
+  for (const id of ['red_team', 'portfolio_manager', 'clerk']) {
+    const role = FIRM_ROLES.find((r) => r.id === id);
+    assert.ok(role, `★ 找不到 ${id}`);
+    assert.equal(stateLabelFor('planned', false, role), '规划中', `★★ ${id} 没有任何东西在跑，必须仍是"规划中"`);
+  }
+});
+
+test('★★ 负向校准：随批运行的判据本身就是可证伪的', () => {
+  /*
+   * 防止把判据写成恒真（本仓库清过一轮恒真断言）。
+   * 人造一个"有 carriedBy 但 status 不是 planned"的岗位 → 必须**不**被判成随批运行；
+   * 再把人造岗位的 status 改成 planned → 必须**判成**随批运行。
+   * ⇒ 证明 `status` 这一维真的在起作用，不是只看 carriedBy。
+   */
+  const fabric = { status: 'staffed', carriedBy: '社区猎手（community_hunter）承担' };
+  assert.equal(isBatchedRole(fabric), false, '★ status 不是 planned 时，carriedBy 再长也不该点亮');
+  assert.equal(isBatchedRole({ ...fabric, status: 'planned' }), true, '★ 同一份 carriedBy，status 改成 planned 后应当点亮');
 });

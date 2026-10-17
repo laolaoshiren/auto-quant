@@ -34,9 +34,11 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 import { DEPARTMENT_ORDER, FIRM_ROLES, type FirmRole } from '@aq/shared';
 
 import {
+  BATCHED_STATE_HINT,
   PHASE_LABEL,
   STATE_HINT,
-  stateLabel,
+  isBatchedRole,
+  stateLabelFor,
   TIER_LABEL,
   clock,
   lastSeenFromServer,
@@ -795,9 +797,9 @@ function AgentRow({
       */}
       <span
         className={`shrink-0 text-xs font-medium leading-5 ${STATE_TEXT_CLASS[state]}`}
-        title={plainText(STATE_HINT[state])}
+        title={plainText(state === 'planned' && isBatchedRole(role) ? BATCHED_STATE_HINT : STATE_HINT[state])}
       >
-        {stateLabel(state, replay)}
+        {stateLabelFor(state, replay, role)}
       </span>
       <span
         className="shrink-0 text-[11px] leading-5 text-ink-faint"
@@ -861,6 +863,34 @@ function AgentRow({
             title={`这个职能由确定性代码承担，没有模型出勤：${plainText(role.carriedBy)}`}
           >
             由代码承担：{plainText(role.carriedBy)}
+          </span>
+        )
+      ) : state === 'planned' && isBatchedRole(role) ? (
+        /*
+         * ══════════════════════════════════════════════════════════════════
+         *  **「随批运行」** —— planned 里有一类其实在跑（2026-10-17 · t112）
+         * ══════════════════════════════════════════════════════════════════
+         *
+         * 用户原话：
+         * > 「我观察到**很多岗位，似乎从未真正运行过**，页面上也没有显示他们**最新运行时间**」
+         *
+         * `community_monitor` / `onchain_analyst` 在 `firm.ts` 里是 `planned`，
+         * 但它们的职责**真的由调研猎手在跑**（`community_hunter` / `flow_hunter`）。
+         * 原来这一行走通用分支 → 状态「规划中（还没实现）」+ 没有承担说明，
+         * 操作员于是以为**根本没人干这件事** —— 那是界面在低估自己。
+         *
+         * ⚠️ **状态字段没改**（仍是 `planned`，在岗数统计不变，`FIRM_ROLES` 不变），
+         * 这里只是**显示层**把这一类分出来。判据与理由见 `roster.ts` 的 `isBatchedRole`。
+         *
+         * ⚠️ 承担说明**必须写出来**（与 `by_code` 那条分支同一个道理）：
+         * "随批运行"这句话本身**无法被核对**，写上猎手名之后操作员可以自己去查。
+         */
+        role.carriedBy !== undefined && (
+          <span
+            className="line-clamp-2 min-w-0 flex-1 basis-[14rem] text-[11px] leading-5 text-accent"
+            title={`这个岗位的职责由调研猎手随批次承担（不在轮次里）：${plainText(role.carriedBy)}`}
+          >
+            由猎手承担：{plainText(role.carriedBy)}
           </span>
         )
       ) : (
