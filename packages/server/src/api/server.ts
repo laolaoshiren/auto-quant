@@ -3244,7 +3244,14 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     if (role === 'symbol_scout' || role === 'per_symbol') {
       for (const line of runtimeLogs.list(RUNTIME_LOG_CAP)) {
         if (line.traderId !== traderId && line.traderId !== null) continue;
-        if (line.scope !== 'dispatch') continue;
+        /*
+         * ⚠️ **它的 scope 是 `team`，`[dispatch]` 只是消息前缀**（2026-10-18 实测纠正）。
+         *
+         * 我第一版写成 `line.scope !== 'dispatch'`，于是永远匹配不到 —— 实测
+         * `SELECT scope FROM runtime_logs WHERE message LIKE '%按币并行%'` 得到的
+         * 20 条全部是 `team`。判据要按**消息前缀**，不是 scope。
+         */
+        if (!line.message.startsWith('[dispatch]')) continue;
         steps.push({ at: line.createdAt, phase: 'dispatch', message: line.message, source: 'log' });
       }
     }
