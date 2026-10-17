@@ -2464,21 +2464,29 @@ export function TraderTables({
    *   这里：持仓表 —— **两个方向都跟点击走**（用户原话"点外面收缩、点里面放大"）
    * ```
    *
-   * ## 判据与上面同一套（照抄它的四条理由，不另造）
+   * ## ⚠️ 判据只认【表格区】为"里面"，**工具栏不算**（2026-10-17 实测修正）
+   *
+   * 第一版把工具栏也算成"里面"，于是每个工具栏按钮的 `pointerdown` 都会先写一次
+   * `setPositionsCollapsed(false)`，紧接着按钮自己的 `onClick` 又做一次 `!collapsed` ——
+   * **两个更新写同一个 state**。实测（事件探针，见 `.dsh/t68-事件顺序.json`）：
+   * 连点开关时高度确实在 306↔144 之间正确翻转，但那依赖 React 对这两次更新的
+   * 批处理顺序 —— 属于"**结果对、但依赖一件没被保证的事**"。
+   *
+   * 现在：**只在表格区**里按下才放大。工具栏里的按钮（收起/展开、刷新、全部平仓、
+   * 四个标签）各自管自己的行为，`pointerdown` **完全不碰 state** —— 冲突在结构上消失。
+   *
+   * 这也更贴用户的话："点击**区域**内放大" —— 他指的是那块表格，不是工具栏。
+   *
+   * ## 其余判据与上面同一套（照抄它的理由，不另造）
    *
    *  · 只认**左键**：右键/中键不是"我看完了"；
-   *  · 起点在面板**里面**（工具栏 / 表头 / 行 / 行内按钮 / 滚动条）→ **放大**，
-   *    并且**不拦截**这次点击本身（不 `preventDefault`，不 `stopPropagation`）——
-   *    按「平仓」、点币种跳行情、翻页、切标签都照常工作；
+   *  · 按下点在里面 → **放大**；按在外面 → **收缩**；
+   *  · **不拦截**这次点击本身（不 `preventDefault`、不 `stopPropagation`）——
+   *    点币种跳行情、按「平仓」、翻页、切标签都照常工作；
    *  · **任何对话框开着** → 不管（Radix 的 portal 在 DOM 上落在面板外，
    *    点遮罩关对话框不该顺手把表格收了）；
    *  · 监听 `pointerdown`（按下的那一刻）而不是 `click`：从表格里往外拖选文字，
    *    起点在里面、终点在外面，`click` 会把它误判成"点了外面"。
-   *
-   * ## 为什么挂在捕获阶段
-   *
-   * 与上面那个 effect 同一条：内层组件的 `stopPropagation` 管不到捕获阶段的监听，
-   * 而这里判断只看"按在了谁身上"，不需要事件继续冒泡。
    *
    * ## 只在这个标签页挂
    *
@@ -2493,11 +2501,11 @@ export function TraderTables({
       if (!(target instanceof Node)) return;
       /* 对话框开着 → 完全不管（同上一条理由）。 */
       if (document.querySelector('[role="dialog"]')) return;
-      const inside =
-        (toolbarRef.current?.contains(target) ?? false) ||
-        (tableAreaRef.current?.contains(target) ?? false);
-      /* 点在区域**里面** → 放大；点在**外面** → 收缩。 */
-      setPositionsCollapsed(!inside);
+      /* 工具栏里按下 → **两件事都不做**：那些按钮自己有 onClick，见上面那段。 */
+      if (toolbarRef.current?.contains(target)) return;
+      const inTable = tableAreaRef.current?.contains(target) ?? false;
+      /* 点在表格**里面** → 放大；点在**外面** → 收缩。 */
+      setPositionsCollapsed(!inTable);
     };
     document.addEventListener('pointerdown', onPointerDown, true);
     return () => document.removeEventListener('pointerdown', onPointerDown, true);
