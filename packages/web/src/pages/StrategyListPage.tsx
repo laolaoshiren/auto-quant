@@ -17,11 +17,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Pencil, Plus, Search, X } from 'lucide-react';
 import type { StrategyRecord, TradingMode } from '@aq/shared';
-import { STRATEGY_PRESETS, TRADING_MODE_LABELS, coinSourceTypeLabel } from '@aq/shared';
+import { STRATEGY_PRESETS, TRADING_MODE_LABELS, coinSourceTypeLabel, resolvePreset } from '@aq/shared';
 import { api } from '../lib/api';
 import { useApp } from '../lib/store';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
-import { applyPreset, cloneConfig } from '../lib/strategy';
+import { cloneConfig } from '../lib/strategy';
 import { Badge, Button, Empty, ErrorNote, Modal, Panel, Spinner3, TextInput } from '../components/ui';
 import { SectionHeading } from '../components/Badges';
 import { PageShell, SectionLabel } from '../components/shell';
@@ -124,9 +124,20 @@ export function StrategyListPage() {
       setBusy({ kind: 'create', id: 0 });
       setError(null);
       try {
+        /*
+         * ⚠️ **这是"套预设"的第二条入口，必须与编辑器给出同一份配置。**
+         *
+         * 这里原来走 `applyPreset(cloneConfig(base), preset)` —— 那条路以**当前默认
+         * 策略**为底再叠 patch，而编辑器的那条以 schema 默认值为底。同一份"稳健"
+         * 从两个入口点进去会得到两份不同参数（未在 `patch` 里声明的字段一个继承
+         * 默认策略、一个继承 schema 默认），而它们在列表里长得一模一样。
+         *
+         * 现在两条入口都调共享包的 `resolvePreset()`：**声明即生效、其余回到
+         * schema 默认值**。`catalog.defaultStrategy` 因此不再参与（它只是"新策略"
+         * 从空白开始时的底稿，不是套模板的底稿）。
+         */
         const preset = STRATEGY_PRESETS.find((item) => item.id === presetId);
-        const base = catalog?.defaultStrategy ?? null;
-        const config = preset && base ? applyPreset(cloneConfig(base), preset) : base;
+        const config = preset ? resolvePreset(preset) : (catalog?.defaultStrategy ?? null);
         if (!config) throw new Error('默认策略尚未加载完成 — 请稍后重试。');
 
         const record = await api.createStrategy({

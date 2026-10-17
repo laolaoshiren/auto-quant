@@ -550,6 +550,24 @@ export const StrategyConfigSchema = z.object({
 export type StrategyConfig = z.infer<typeof StrategyConfigSchema>;
 export type StrategyConfigInput = z.input<typeof StrategyConfigSchema>;
 
+/**
+ * `StrategyConfig` 的**顶层键**（从 schema 派生，不手抄）——
+ * 它回答的是「一份配置由哪几块组成」。
+ *
+ * ## 为什么要导出它
+ *
+ * 「套预设」与「这份配置还等于哪个预设」这两件事都必须**遍历同一份分区清单**，
+ * 而两处各手写一遍就是同一件事有了两份定义 —— 加了新分区之后，漏掉的那一份
+ * 会**静默地不参与比较**（于是徽章显示"稳健"，而某一块其实是别的预设留下的）。
+ * 这正是本文件这一族缺陷的形状（`configSchemaGuard.test.ts` 记的就是"两套口径分叉"）。
+ *
+ * ⚠️ `name` / `description` 也在其中：预设模板**确实**声明了它们，
+ * 所以套用时必须一起生效（否则"套了稳健"却留着上一份预设的描述）。
+ */
+export const STRATEGY_CONFIG_KEYS = Object.keys(
+  StrategyConfigSchema._def.shape(),
+) as ReadonlyArray<keyof StrategyConfig>;
+
 /* -------------------------------------------------------------------------- */
 /*  Factory defaults + presets                                                 */
 /* -------------------------------------------------------------------------- */
@@ -799,7 +817,25 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
         fallbackTakeProfitPercent: 7.5,
         minStopLossFeeMultiple: 3,
         fallbackRoundTripFeeRate: 0.001,
-        breakevenTriggerPercent: 8,
+        /*
+         * ⚠️ **这里刻意不写 `breakevenTriggerPercent`。**
+         *
+         * 它原来写的是 `8`，而那是**一个 templates 自己声明、解析后却对不上的值**：
+         * `RiskControlConfigSchema` 里它的默认是 **0 = 关闭**（`strategy.ts:366`），
+         * 于是同一份预设有两个互相矛盾的说法 ——
+         *   · 模板字面量说「浮盈 8% 把止损移到成本价」；
+         *   · 解析后的真实配置是 **0（关闭）**，那条行为根本不生效。
+         * 而它是**唯一一个只有模板声明、schema 默认却是另一个值**的风控字段
+         * （其余"模板 → 解析后"逐字相等），所以修法就是让它与 schema 一致。
+         *
+         * **为什么是「删掉这一行」而不是「给模板加一个开关」**：
+         * 用户对这个域的要求是「只修 BUG，不开发新功能」。删掉之后：
+         *   · schema 默认（0）就是模板的实际值，声明与生效**逐字相等**；
+         *   · 想开它的操作员可以在界面上打开（候选面见台账 `TPL-01`，需用户拍板）；
+         *   · 与 `aggressive` / `scalping` 两套模板的口径一致（它们都没写这个字段）。
+         *
+         * 换言之：**不改任何数值、不新增任何字段**，只是不再声明一个"说了却不生效"的值。
+         */
       },
       throttle: {
         minHoldMinutes: 30,
@@ -955,3 +991,132 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
     },
   },
 ];
+
+/* -------------------------------------------------------------------------- */
+/*  预设的解析（"套上预设"到底得到哪一份配置）                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 把一份预设**解析成完整配置**：以 schema 默认值为底，再叠该预设的 `patch`。
+ *
+ * ## ⚠️ 为什么必须是「先重置、再叠 patch」，而不是「叠在当前配置上」
+ *
+ * 控制台原来那版是后者（`web/src/lib/strategy.ts` 的 `applyPreset`：拿**当前草稿**
+ * 当底、用 `{ ...current, ...patch }` 合并）。后果是**未在 `patch` 里出现的字段
+ * 一律继承上一份配置**，而三套预设声明的字段集合**并不相同**：
+ *
+ * | 字段 | conservative | aggressive | scalping |
+ * |---|---|---|---|
+ * | `indicators` | — | — | ✅ |
+ * | `drawdownGuard` | — | — | ✅ |
+ * | `breakevenTriggerPercent` | ✅（8） | — | — |
+ *
+ * 于是「短线 → 稳健」之后，用户拿到的是**稳健的提示词 + 短线的指标与回撤守卫**
+ * （`drawdownGuard.activationPercent = 0.4%`，而保守档的 schema 默认是 `1.5%`）。
+ * 三处证据都指向同一个判断：
+ *   · 提示词里写进了「交易模式：conservative」（`strategy/prompt.ts:2537`）；
+ *   · 徽章写着「预设：稳健」（`StrategyEditorPage.tsx` 的 `presetById(state.presetId)`）；
+ *   · 而 `drawdownGuard` 与 `indicators` 是短线那一套。
+ * **界面在三个地方说了同一件事的三分之一，而参数是第四件事。**
+ *
+ * ## 为什么"保留用户已改的字段"不是这里要的语义
+ *
+ * 预设（preset）在用户语言里是「模板」—— 它的含义是"照这一套来"。
+ * 而"在现有配置上叠加几项"是另一种操作，它的正确名字是"合并"，且**必须逐项
+ * 让用户确认改了哪些**。把两者混成一个下拉框，就是本缺陷的来源。
+ * 所以这里把"套模板"的定义收窄成**可判定**的那一种：
+ *   `resolvePreset(p).<任意键>` 恒等于 `p.patch` 里声明且有值的那一项，
+ *   其余恒等于 schema 默认值。**与传入什么无关 —— 这个函数根本不接受"当前配置"。**
+ *
+ * ## 与"保留用户手改"的关系（诚实说明）
+ *
+ * 套预设会丢弃用户在这份草稿上的手改。控制台因此把应用预设做成**显式动作**，
+ * 并在提示里说清"应用了哪些字段"（见 `StrategyEditorPage.tsx` 的
+ * `applyPresetToDraft`）。这比"静默保留一半"要好 —— 后者得到的状态
+ * 用户和系统都描述不出来。
+ *
+ * `unknown` 入参而不是 `StrategyPreset`：控制台从 `<select>` 只拿得到 id，
+ * 这一层不该逼调用方先自己 `find`（那是同一个查找的三份实现）。
+ */
+export function resolvePreset(preset: StrategyPreset | string): StrategyConfig {
+  const found =
+    typeof preset === 'string' ? STRATEGY_PRESETS.find((p) => p.id === preset) : preset;
+  /*
+   * 找不到就抛，不回落。回落成"默认配置"会让一个拼错的/已删除的预设 id
+   * **静默地变成一套合法但完全不同的参数** —— 而调用方以为自己套上了预设。
+   */
+  if (!found) throw new Error(`未知的策略预设：${String(preset)}`);
+  const resolved = StrategyConfigSchema.parse(found.patch);
+  /*
+   * ⚠️ **自证**：`parse` 只接受 `unknown`，所以"patch 里写了但 schema 没有"的键
+   * 会被 zod **静默丢掉**（`configSchemaGuard.test.ts` 记的就是这一族）。
+   * 「声明即生效」是这三套模板的验收标准，所以这里把丢弃变成**当场可见的失败** ——
+   * 一条永远不会被发现的静默丢弃，与"模板说了却不生效"是同一件事。
+   *
+   * ⚠️ **只在真的做了这个动作时才检查**：`resolvePreset` 是 `presetOfConfig`
+   * 的内层循环（每份预设一次），所以这段必须保持 O(1) 的字段遍历。
+   */
+  for (const section of Object.keys(found.patch) as Array<keyof StrategyConfig>) {
+    const claimed = found.patch[section];
+    if (typeof claimed !== 'object' || claimed === null || Array.isArray(claimed)) continue;
+    const actual = resolved[section] as unknown;
+    if (typeof actual !== 'object' || actual === null) continue;
+    /*
+     * 两侧都收窄成 `Record<string, unknown>` 再取键：`patch` 的分区类型是
+     * 各分区 `Input` 的联合（没有索引签名），直接 `claimed[field]` 过不了 TS
+     * —— 而这里要的正是"**按名字**看这个键在不在"，与类型无关。
+     */
+    const claimedFields = claimed as Record<string, unknown>;
+    const actualFields = actual as Record<string, unknown>;
+    for (const field of Object.keys(claimedFields)) {
+      if (claimedFields[field] === undefined) continue;
+      if (!(field in actualFields)) {
+        throw new Error(
+          `预设 ${found.id} 的 patch.${String(section)}.${field} 不在 schema 里 —— ` +
+            'zod 会静默丢弃它，于是模板声明了一个不会生效的值',
+        );
+      }
+    }
+  }
+  return resolved;
+}
+
+/**
+ * 这份配置**是不是就等于**该预设的定义（逐分区深度相等）。
+ *
+ * ## 为什么需要它：`presetId` 是一个会过期的标签
+ *
+ * `strategies.preset_id` 只回答"这条策略是**从哪份模板克隆来的**"，它**不随配置改动更新**：
+ *   · `PATCH /api/strategies/:id` 只收 `name` / `description` / `config`
+ *     （`api/server.ts:1662-1667`）—— `presetId` 传了也会被丢掉；
+ *   · 所以用户"套稳健 → 手改两个字段 → 保存"之后，库里 `preset_id` 仍是
+ *     `conservative`，而配置已经**不等于** conservative 的定义。
+ * 界面上那颗「预设：稳健」徽章于是变成一句**假事实**（列表页的那一行
+ * 「稳健 | 短线 | 10×」就是这么来的）。
+ *
+ * 判据必须落在**配置本身**上，而不是落在那个字段上：本函数是"还能不能这样称呼它"
+ * 的唯一实现，任何显示 `presetId` 的地方都应当先过它。
+ *
+ * ## `name` / `description` 为什么也参与比较
+ *
+ * 它们是预设定义的一部分（模板声明了自己的名字与说明），所以"手改了名字"
+ * 确实意味着"这份配置不再等于那份模板"。控制台的头部两个输入框改的就是它们，
+ * 而那正是"用户把它改成自己的策略了"这个语义。
+ *
+ * ⚠️ 比较用 `JSON.stringify` 而不是逐字段 `===`：配置里有数组与嵌套对象
+ * （`selectedTimeframes`、`staticCoins`、`kline`…），逐字段写会漏掉嵌套，
+ * 而"漏掉的那一块不参与比较"正是本函数要消灭的失效模式。
+ * 键的**顺序**在两边都来自 zod 的解析结果，所以同样的值一定得到同样的字符串。
+ */
+export function presetOfConfig(
+  config: StrategyConfig,
+  presets: readonly StrategyPreset[] = STRATEGY_PRESETS,
+): StrategyPreset | null {
+  for (const preset of presets) {
+    const canonical = resolvePreset(preset);
+    if (STRATEGY_CONFIG_KEYS.every((key) => JSON.stringify(canonical[key]) === JSON.stringify(config[key]))) {
+      return preset;
+    }
+  }
+  return null;
+}

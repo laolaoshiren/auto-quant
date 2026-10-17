@@ -15,11 +15,11 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import * as TabsPrimitive from '@radix-ui/react-tabs';
 import { Activity, Coins, FileText, LoaderCircle, ShieldAlert, ShieldCheck, Tag, TriangleAlert } from 'lucide-react';
 import type { StrategyConfig } from '@aq/shared';
-import { STRATEGY_PRESETS } from '@aq/shared';
+import { STRATEGY_PRESETS, resolvePreset } from '@aq/shared';
 import { api } from '../lib/api';
 import { useApp } from '../lib/store';
 import { useCopy, useDocumentTitle, usePolled } from '../lib/hooks';
-import { applyPreset, cloneConfig, presetById, validateStrategy } from '../lib/strategy';
+import { activePreset, cloneConfig, presetById, validateStrategy } from '../lib/strategy';
 import { Badge, Button, CopyButton, ErrorNote, Panel, Select, Spinner3, cn } from '../components/ui';
 import { CoinSourceSection, IndicatorsSection } from '../components/StrategyFields';
 import { PromptSection, ProtectionSection, RiskSection, StrategyHeaderSection } from '../components/StrategyRiskFields';
@@ -251,8 +251,24 @@ export function StrategyEditorPage() {
 
   /* --- dirty / clean ---------------------------------------------------- */
 
+  /*
+   * 手动改任何一处配置 = 不再等于任何一份预设。
+   *
+   * 清掉 `presetId` 是**为了那句提示不撒谎**：徽章与下拉框读的都是它，而预设的
+   * 完整定义已经在这次编辑之后不成立了（旧实现在这里什么都不做，于是"预设：稳健"
+   * 会一直挂在一份已经被改成别的参数的配置上）。
+   *
+   * ⚠️ 这只是**界面层**的真相：`strategies.preset_id` 是列、且
+   * `PATCH /api/strategies/:id` 不收它（`api/server.ts:1662-1667`），
+   * 所以库里那个字段仍然停在克隆时的值 —— 显示层因此**不读它**，
+   * 改读 `activePreset(state.config)`（见下面的 `activePresetNow`）。
+   */
   const patchConfig = useCallback((patch: Partial<StrategyConfig>) => {
-    setState((current) => (current.kind === 'ready' ? { ...current, config: { ...current.config, ...patch } } : current));
+    setState((current) =>
+      current.kind === 'ready'
+        ? { ...current, presetId: null, config: { ...current.config, ...patch } }
+        : current,
+    );
     setDirty(true);
     setNotice(null);
   }, []);
@@ -262,6 +278,7 @@ export function StrategyEditorPage() {
       current.kind === 'ready'
         ? {
             ...current,
+            presetId: null,
             name: patch.name ?? current.name,
             description: patch.description ?? current.description,
             config: { ...current.config, ...patch },
@@ -397,14 +414,50 @@ export function StrategyEditorPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  /**
+   * 套预设 = **得到这份预设的完整定义**（不是"在草稿上叠加几项"）。
+   *
+   * ## 三件事必须一起做，而且顺序有意
+   *
+   * 1. `resolvePreset(preset)` —— 以 schema 默认值为底、叠该预设的 `patch`。
+   *    **不传当前草稿**：传了就会把上一份预设留下的 `indicators` / `drawdownGuard`
+   *    一起继承（"短线 → 稳健"之后拿到稳健的提示词 + 短线的守卫，见
+   *    `resolvePreset()` 的注释）。旧实现正是那样，而提示词与徽章都按"稳健"渲染。
+   * 2. **`name` 与 `description` 也要跟着改**：它们是模板定义的一部分
+   *    （预设声明了自己的名字与说明），而这一个动作的语义就是"换成这套模板"。
+   *    只改描述、不改名字会留下"名字是上一份模板、参数是这一份"的混合体。
+   * 3. `presetId = preset.id` —— 用来自证的锚点，并且**下面显示时仍会再核对一次**
+   *    （`activePresetNow`），所以它过期也不会导致徽章撒谎。
+   *
+   * ## 提示语为什么必须说清"整份替换"
+   *
+   * 这是会覆盖用户手改的破坏性动作，而旧提示是「已将预设"稳健"应用到草稿」
+   * ——读起来像"只加了几项"。说清"已替换为整套"之后，用户才知道刚才那些手改不在了。
+   */
   const applyPresetToDraft = (presetId: string) => {
     if (state.kind !== 'ready') return;
     const preset = STRATEGY_PRESETS.find((item) => item.id === presetId);
     if (!preset) return;
-    const next = applyPreset(state.config, preset);
-    setState({ ...state, presetId: preset.id, config: next, description: state.description || preset.summary });
+    let next: StrategyConfig;
+    try {
+      next = resolvePreset(preset);
+    } catch (err) {
+      /*
+       * 解析失败**必须说出来**。旧实现是 `safeParse` 失败时静默 `return current`
+       * ——草稿一个字都不变，而提示仍然弹"已应用"。那是"它告诉你成功了"那一类失败。
+       */
+      setError(`预设“${preset.label}”无法应用：${(err as Error).message}`);
+      return;
+    }
+    setState({
+      ...state,
+      presetId: preset.id,
+      name: next.name,
+      description: next.description,
+      config: next,
+    });
     setDirty(true);
-    setNotice(`已将预设“${preset.label}”应用到草稿。`);
+    setNotice(`已把草稿替换为预设“${preset.label}”的完整定义（未在模板里的字段回到默认值）。`);
   };
 
   const remove = async () => {
@@ -457,7 +510,20 @@ export function StrategyEditorPage() {
 
   const errors = showErrors ? (validation?.errors ?? {}) : {};
   const errorCount = Object.keys(validation?.errors ?? {}).length;
-  const preset = presetById(state.presetId);
+  /*
+   * 徽章说的话必须来自**配置本身**，不是那个会过期的 `presetId`。
+   *
+   * `strategies.preset_id` 只记"从哪份模板克隆来的"，而且 `PATCH /api/strategies/:id`
+   * **根本不收它**（`api/server.ts:1662-1667`）—— 所以"套稳健 → 手改两处 → 保存"之后，
+   * 库里仍是 `conservative` 而配置已经不等于是它。列表页那行「稳健 | 短线 | 10×」
+   * 就是读那个字段读出来的（那一处属批次 B4，不在这里改）。
+   *
+   * 这里改读配置：`activePresetNow` 为 null 时**不显示预设徽章**，
+   * 配置与克隆来源不一致时显示「已偏离预设」而不是接着写预设名。
+   */
+  const activePresetNow = activePreset(state.config);
+  const clonedFrom = presetById(state.presetId);
+  const driftedFromPreset = clonedFrom !== undefined && activePresetNow === null;
   const risk = state.config.riskControl;
 
   return (
@@ -488,7 +554,15 @@ export function StrategyEditorPage() {
 
           {state.id > 0 ? <Badge tone="muted">#{state.id}</Badge> : <Badge tone="accent">未创建</Badge>}
           <SaveState saving={saving} dirty={dirty} isNew={isNew && state.id === 0} />
-          {preset && <Badge tone="muted">预设：{preset.label}</Badge>}
+          {activePresetNow && <Badge tone="muted">预设：{activePresetNow.label}</Badge>}
+          {driftedFromPreset && (
+            <Badge
+              tone="warn"
+              title={`这份配置是从“${clonedFrom.label}”克隆来的，但它的参数已经被改成不等于该模板了 —— 列表页会继续显示克隆来源，这里的参数才是真实生效的那一份。`}
+            >
+              已偏离预设：{clonedFrom.label}
+            </Badge>
+          )}
           {errorCount > 0 && (
             <Badge tone={validation?.ok ? 'muted' : 'down'} title="点击下方任意分区查看具体字段">
               {errorCount} 处校验问题
@@ -518,7 +592,20 @@ export function StrategyEditorPage() {
             )}
             <Select
               className="w-36"
-              value={state.presetId ?? ''}
+              /*
+               * ⚠️ **回显的是"配置还等于哪份预设"，不是 `state.presetId`。**
+               *
+               * 两者会分叉，而且分叉时下拉框读 `presetId` 是**说假话**：
+               * 用户手改一处之后草稿已经不等于"稳健"了，而 `presetId` 还停在它上面
+               * （库里的那列更是 `PATCH` 根本不会更新，见 `api/server.ts:1662-1667`）。
+               * 于是下拉框显示"稳健"，而参数是混合体 —— 正是列表页
+               * 「稳健 | 短线 | 10×」那一族矛盾的来源。
+               *
+               * 用派生值之后：配置仍等于某份预设 → 回显它；不等于 → 回到
+               * 「— 应用预设 —」占位，且徽章会提示"已偏离预设"。
+               * 这一处也是**用户唯一的线索**："我刚才改的那一下把它变成自定义配置了。"
+               */
+              value={activePresetNow?.id ?? ''}
               aria-label="应用预设"
               onChange={(event) => event.target.value && applyPresetToDraft(event.target.value)}
             >
