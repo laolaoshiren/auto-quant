@@ -35,6 +35,7 @@ import { ChevronRight } from 'lucide-react';
 
 import { actionLabel } from '../DecisionAudit';
 import { plainText } from '../../lib/plainText';
+import { formatForeignText, looksForeign, translateDiagnostic } from '../../lib/diagnosticText';
 import {
   fieldLabel,
   looksLikeActionCode,
@@ -176,11 +177,29 @@ function normalizeLevel(level: string | null | undefined): HumanLevel {
  */
 function CollapsibleText({ text, level }: { text: string; level: HumanLevel }): React.ReactElement {
   const [open, setOpen] = useState(false);
-  const tooLong = text.length > COLLAPSE_AT;
-  const shown = tooLong && !open ? `${text.slice(0, COLLAPSE_AT)}…` : text;
+  /*
+   * ⚠️ **上游 SDK 的英文诊断先译成人话**（2026-10-18 · 用户截图里那条反复出现的
+   * `(The model called a tool this agent doesn't have: "bash"…)`）。
+   *
+   * `translateDiagnostic` 只认**已知的固定句式**，认不出就返回 null ⇒ 原文照旧。
+   * 它**不会**碰模型自己写的推理正文 —— 那个的边界见该文件的说明。
+   */
+  const translated = translateDiagnostic(text);
+  const display = translated ?? text;
+  /*
+   * **整段外文**（模型用英文思考）→ 加一行中文说明。
+   * 不翻译（会失真），但必须标注 —— 否则操作员以为系统坏了。
+   */
+  const foreign = translated === null && looksForeign(text) ? formatForeignText(text) : null;
+
+  const tooLong = display.length > COLLAPSE_AT;
+  const shown = tooLong && !open ? `${display.slice(0, COLLAPSE_AT)}…` : display;
 
   return (
     <div className="min-w-0">
+      {foreign !== null && (
+        <p className="mb-0.5 text-[10px] uppercase tracking-wide text-ink-faint">{foreign.label}</p>
+      )}
       {/*
         ⚠️ **颜色只上左侧竖条，正文保持中性**（用户要求"正文不要整段染色"）。
         整段染红会让 8 条历史里只要有一条 error，整块看起来都像故障。

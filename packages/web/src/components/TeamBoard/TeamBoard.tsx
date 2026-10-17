@@ -1077,27 +1077,61 @@ function AgentRow({
           )}
 
           {historyState !== undefined && historyState !== null && historyState.steps.length > 0 && (
-            <ol className="space-y-2" data-role-steps="history">
+            /*
+             * ══════════════════════════════════════════════════════════════════
+             *  历史记录的排版（2026-10-18 重做 · 用户：「这东倒西歪，到处错位，
+             *  大片空白的，是给人看的吗？」）
+             * ══════════════════════════════════════════════════════════════════
+             *
+             * ## 原来为什么错位
+             *
+             * ```tsx
+             *   <li className="flex min-w-0 items-start gap-2 text-xs">
+             *     <span className="num shrink-0">{clock(...)}</span>   ← 固定宽
+             *     <span className="shrink-0">{阶段标签}</span>          ← 有的条目有、有的没有
+             *     <HumanMessage text={...} />                          ← ★ 没有 flex-1 / min-w-0
+             *   </li>
+             * ```
+             *
+             * 三个问题：
+             * 1. **阶段标签时有时无** ⇒ 正文的左边缘逐条跳动（就是截图里"东倒西歪"）。
+             * 2. `HumanMessage` 没有 `flex-1` ⇒ 内容不撑满，右边留下大片空白。
+             * 3. 时间戳只 `shrink-0` 没定宽 ⇒ `9:05:07` 与 `14:44:24` 宽度不同，继续抖。
+             *
+             * ## 现在
+             *
+             * **两列网格**：左列固定宽度放时间（+阶段），右列 `minmax(0,1fr)` 放正文。
+             * 时间列宽度固定 ⇒ 正文左边缘对齐；正文用 `1fr` ⇒ 撑满不空；`min-w-0` ⇒
+             * 长串（URL、英文整段）能换行而不是把容器撑破。
+             *
+             * 阶段标签**移到时间下方**，不再夹在中间 —— 这样有没有标签都不影响正文的对齐。
+             */
+            <ol className="space-y-2.5" data-role-steps="history">
               {historyState.steps.map((s, index) => (
-                <li key={`h-${s.at}-${index}`} className="flex min-w-0 items-start gap-2 text-xs">
-                  <span className="num shrink-0 tabular-nums text-ink-faint">{clock(s.at)}</span>
-                  {s.phase !== null && (
-                    <span className="shrink-0 rounded bg-base-800 px-1 text-[11px] text-ink-lo">
-                      {PHASE_LABEL[s.phase] ?? s.phase}
-                    </span>
-                  )}
+                <li
+                  key={`h-${s.at}-${index}`}
+                  className="grid grid-cols-[5.25rem_minmax(0,1fr)] items-start gap-x-3 text-xs"
+                >
+                  {/* 左列：时间在上、阶段在下。固定宽度 → 所有条目的正文左边缘一致。 */}
+                  <div className="flex flex-col items-end gap-0.5 pt-px">
+                    <span className="num tabular-nums leading-5 text-ink-faint">{clock(s.at)}</span>
+                    {s.phase !== null && (
+                      <span className="rounded bg-base-800 px-1 text-[10px] leading-4 text-ink-lo">
+                        {PHASE_LABEL[s.phase] ?? s.phase}
+                      </span>
+                    )}
+                  </div>
                   {/*
-                    ⚠️ **这一格就是用户截图里"一坨 JSON"的位置**（2026-10-17）。
-                    原来 `{plainText(s.message)}` —— 过了 markdown 剥除，但**不格式化 JSON**，
-                    于是一条 `[{"symbol":"WLDUSDT","action":"open_short",…}]` 原样铺满整行。
-                    现在走 `HumanMessage`：决策数组 → 每个标的一行；其余 → 纯文本 + 折叠。
+                    右列：正文。`min-w-0` 是必须的 —— 没有它，`grid` 的 `1fr` 会被
+                    最长的一行（例如整段英文）撑破，横向滚动条就出来了。
 
-                    ⚠️ 历史条目**没有 `level` 字段**（服务端只回 `at/phase/message`，见上面的类型），
+                    ⚠️ 历史条目**没有 `level` 字段**（服务端只回 `at/phase/message`），
                     所以这里不传 —— `HumanMessage` 会当 `info`（不染色）。
-                    **不要**为了"看起来一致"编一个 `level: 'info'` 出来：
-                    那会让"这条是历史、不知道级别"与"这条明确是 info"变成同一个东西。
+                    不要为了"看起来一致"编一个 `level: 'info'` 出来。
                   */}
-                  <HumanMessage text={s.message} />
+                  <div className="min-w-0">
+                    <HumanMessage text={s.message} />
+                  </div>
                 </li>
               ))}
             </ol>

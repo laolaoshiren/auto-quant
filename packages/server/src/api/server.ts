@@ -3302,14 +3302,34 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       }
     }
 
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     *  ⚠️ **丢掉正文为空的条目**（2026-10-18 · 用户：「大片空白的，是给人看的吗？」）
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * `cotTrace` 里有一批行是 `- judge（模型）：` 后面**什么都没有**（模型这一轮
+     * 只调了工具、没产出文字）。端点把它们当正常条目推出去，界面上就只剩一个时间戳 ——
+     * 实测 12 条里有 9 条是空的，整页几乎全是空白。
+     *
+     * ⇒ 在这里过滤，**不要靠前端隐藏**：空条目会占掉 `limit` 的名额，
+     *   把真正有内容的记录挤出去（用户看到的是"最近 12 条"，
+     *   而其中 9 条是空的、更早的有内容的反而看不到）。
+     *
+     * 判据是"去掉空白后长度为 0" —— 只含换行/空格的也算空。
+     */
+    const nonEmpty = steps.filter((s) => s.message.trim().length > 0);
+
     /* 新的在前 —— 界面点开先看"最近发生了什么"。 */
-    steps.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
-    const trimmed = steps.slice(0, limit);
+    nonEmpty.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+    const trimmed = nonEmpty.slice(0, limit);
 
     return {
       role,
-      /* `total` 让界面能如实说"还有 N 条更早的"（而不是假装这就是全部）。 */
-      total: steps.length,
+      /*
+       * `total` 让界面能如实说"还有 N 条更早的"（而不是假装这就是全部）。
+       * **它数的是过滤后的**：空条目不是"看不到的内容"，它本来就没内容。
+       */
+      total: nonEmpty.length,
       steps: trimmed,
       lastSeenAt: trimmed.length > 0 ? trimmed[0]!.at : null,
     };
