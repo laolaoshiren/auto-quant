@@ -33,6 +33,7 @@ import {
 } from '../store/repositories.js';
 import {
   AutoTrader,
+  boostedOutputBudgetFor,
   CYCLE_HARD_TIMEOUT_MS,
   detectSharpMove,
   describeCycleFailure,
@@ -2539,6 +2540,203 @@ test('a response that violates the risk rules is rejected and recorded', async (
   const record = decisionStore.list(traderId)[0]!;
   assert.ok(record.executionLog.length > 0, 'the rejection must be recorded in the audit trail');
   assert.equal(record.executionLog[0]!.status, 'rejected');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ai_managed 绕过了 budgetFor 的思维链预算放大（空正文 → 零决策）             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **背景（2026-10-17，实盘缺陷）**
+ *
+ * `budgetFor()` 那套"思维链模型放大 4 倍"**只被 `llm/modelRouter.ts` 调用**；
+ * 而 `ai_managed` 走的是 `manager.ts` 里的 `client.complete(...)`，
+ * **根本不经过 `ModelRouter`** ⇒ 那 4 倍放大完全不覆盖它。
+ *
+ * 后果：思维链把输出预算吃光 → `finish_reason=length` + **正文为空** →
+ * 这一轮零决策；而既有的重试用的是**同一份预算**（且仍要求"先写 `<reasoning>`"）
+ * ⇒ 必然再次为空。
+ *
+ * 这一组用例钉住：
+ *   ① 空正文 + 能拿到当前预算 → 重试**放大预算**并把决策拿回来；
+ *   ② 空正文 + 拿不到预算 → **不许猜**（不传覆盖），但仍换用"跳过思维链"的要求；
+ *   ③ 正常回复 → 一次调用结束、不传预算覆盖（行为逐字节不变）；
+ *   ④ 有内容但缺 `<decision>` 块 → 沿用原提示词、不动预算（既有行为不变）。
+ */
+
+/** 桩：按"有没有被要求放大预算"返回空 or 正常内容，并记录每次入参。 */
+function emptyThenFilledBudgetModel(options: { budget?: number }): {
+  model: DecisionModel;
+  budgets: Array<number | undefined>;
+  userPrompts: string[];
+} {
+  const budgets: Array<number | undefined> = [];
+  const userPrompts: string[] = [];
+  const model: DecisionModel = {
+    ...(options.budget === undefined ? {} : { outputBudgetTokens: options.budget }),
+    async complete(_systemPrompt, userPrompt, opts) {
+      budgets.push(opts?.maxTokens);
+      userPrompts.push(userPrompt);
+      /*
+       * 现实里的因果：预算被思维链吃光 → 正文为空。
+       * 所以"带放大预算的那次调用"才会拿到正文（与 `client.ts` 的实测一致：
+       * `mt=16/128 → content=null`、`mt=512` 就有正文）。
+       */
+      return opts?.maxTokens === undefined
+        ? { text: '', latencyMs: 11, usage: { promptTokens: 120_000, completionTokens: 4096 } }
+        : {
+            text: OPEN_LONG_RESPONSE,
+            latencyMs: 12,
+            usage: { promptTokens: 120_000, completionTokens: 900 },
+          };
+    },
+  };
+  return { model, budgets, userPrompts };
+}
+
+test('★★★ 空正文 + 能拿到当前预算 → 重试放大预算（×4），决策被拿回来', async () => {
+  const broker = new FakeBroker();
+  const { model, budgets, userPrompts } = emptyThenFilledBudgetModel({ budget: 4096 });
+  const trader = buildTrader(broker, '', model);
+
+  await trader.runOnce();
+
+  /*
+   * ⚠️ **只断言前两次**：这一轮在决策之后还会有**执行回执**那一次调用
+   *（`followUpAfterExecution`），它当然不该带预算覆盖 —— 所以第三项（及以后）
+   * 单独断言。第一版写成 `deepEqual(budgets, [undefined, 16384])` 就是被它绊倒的。
+   */
+  assert.equal(budgets[0], undefined, '首次调用不覆盖（用实现自己的实例值）');
+  assert.equal(
+    budgets[1],
+    4096 * 4,
+    '★ ai_managed 的空正文重试必须请求更大的输出预算 —— 同预算再问一次必然再次被截断' +
+      '（那正是 budgetFor 的 4 倍放大没覆盖它造成的）',
+  );
+  assert.ok(
+    budgets.slice(2).every((b) => b === undefined),
+    '后续调用（执行回执）不该带预算覆盖',
+  );
+  assert.match(
+    userPrompts[1]!,
+    /不要写 `?<reasoning>`?/,
+    '★ 空正文的重试必须明确要求不写思维链（否则它会把仅剩的预算再吃一遍）',
+  );
+
+  const record = decisionStore.list(traderId)[0]!;
+  assert.equal(record.success, true, `这一轮本该成功：${record.error ?? ''}`);
+  assert.ok(
+    (record.decisions ?? []).length > 0,
+    '★ 重试后必须真的解析出决策（修复前这里是空数组 → 连续多轮零决策）',
+  );
+});
+
+test('★★ 空正文 + 拿不到当前预算 → 不猜（不传覆盖），但仍换用"跳过思维链"的要求', async () => {
+  const broker = new FakeBroker();
+  const { model, budgets, userPrompts } = emptyThenFilledBudgetModel({});
+  const trader = buildTrader(broker, '', model);
+
+  /* 桩拿不到放大预算就永远返回空 → 两次都空 → 照旧按失败计数。 */
+  await assert.rejects(() => trader.runOnce(), /输出被截断/);
+
+  assert.deepEqual(
+    budgets,
+    [undefined, undefined],
+    '★ 读不到基准预算时**不许**瞎传一个值 —— 传小了会把预算缩小（比不修更糟）',
+  );
+  assert.match(
+    userPrompts[1]!,
+    /不要写 `?<reasoning>`?/,
+    '★ 即便如此，重试仍要换用"跳过思维链"的要求（不依赖预算的那一半缓解）',
+  );
+});
+
+test('★★ 正常回复 → 只调一次模型、不传预算覆盖（行为逐字节不变）', async () => {
+  const broker = new FakeBroker();
+  let calls = 0;
+  const seenBudget: Array<number | undefined> = [];
+  const trader = buildTrader(broker, '', {
+    outputBudgetTokens: 4096,
+    async complete(_systemPrompt, _userPrompt, opts) {
+      calls += 1;
+      seenBudget.push(opts?.maxTokens);
+      return {
+        text: OPEN_LONG_RESPONSE,
+        latencyMs: 9,
+        usage: { promptTokens: 120_000, completionTokens: 900 },
+      };
+    },
+  });
+
+  await trader.runOnce();
+
+  /*
+   * ⚠️ **不能断言"只调一次"**：有决策之后还会有**执行回执**那一次调用
+   *（`followUpAfterExecution`，它在有执行结果时才发生）。这里要钉的是
+   * "**没有任何一次**调用带预算覆盖" —— 那才是本缺陷的判据。
+   */
+  assert.ok(calls >= 1, '这一轮至少要有一次决策调用');
+  assert.ok(
+    seenBudget.every((b) => b === undefined),
+    '★ 正常路径（含执行回执）任何一次调用都不该带预算覆盖 —— 那会让每次正常决策都多花预算',
+  );
+  assert.equal(decisionStore.list(traderId)[0]!.success, true);
+});
+
+test('★★★ 只放大"完全空"：有内容但缺 <decision> 块 → 沿用原提示词、不动预算', async () => {
+  /*
+   * 两种情况**要模型做的事不一样**：
+   *   · 完全空       → 预算被吃光 → 换"跳过思维链" + 放大预算
+   *   · 有内容但没写完 → 写得太多 → 沿用原来那句（既有行为，本次刻意不动）
+   * 合成一条会让其中一种失效 —— 所以这条把边界钉住。
+   */
+  const broker = new FakeBroker();
+  const budgets: Array<number | undefined> = [];
+  const userPrompts: string[] = [];
+  let calls = 0;
+  const trader = buildTrader(broker, '', {
+    outputBudgetTokens: 4096,
+    async complete(_systemPrompt, userPrompt, opts) {
+      calls += 1;
+      budgets.push(opts?.maxTokens);
+      userPrompts.push(userPrompt);
+      return calls === 1
+        ? {
+            text: '<reasoning>我看了很久，但结论还没写出来……',
+            latencyMs: 10,
+            usage: { promptTokens: 1, completionTokens: 16_384 },
+          }
+        : {
+            text: OPEN_LONG_RESPONSE,
+            latencyMs: 10,
+            usage: { promptTokens: 1, completionTokens: 100 },
+          };
+    },
+  });
+
+  await trader.runOnce();
+
+  assert.deepEqual(
+    budgets.slice(0, 2),
+    [undefined, undefined],
+    '★ 非空内容的重试不许动预算（既有行为不变）',
+  );
+  assert.match(userPrompts[1]!, /先写 `?<reasoning>`?（简短即可）/, '★ 非空情形仍用原来那句');
+  assert.doesNotMatch(userPrompts[1]!, /不要写 `?<reasoning>`?/, '★ 不要把它也换成"跳过思维链"');
+});
+
+test('★★ boostedOutputBudgetFor 的边界：拿不到基准不覆盖；放大 4 倍；撞硬上界', async () => {
+  assert.equal(boostedOutputBudgetFor(undefined), undefined, '没有基准值 → 不覆盖');
+  assert.equal(boostedOutputBudgetFor(0), undefined, '0 不是有效基准');
+  assert.equal(boostedOutputBudgetFor(-1), undefined);
+  assert.equal(boostedOutputBudgetFor(Number.NaN), undefined, 'NaN 会让请求畸形');
+  assert.equal(boostedOutputBudgetFor(1), 4);
+  assert.equal(boostedOutputBudgetFor(4096), 16_384, '与 budgetFor 的 4 倍同值');
+  assert.equal(
+    boostedOutputBudgetFor(131_072),
+    131_072,
+    '★ 硬上界：再往上加没有意义（本仓实测网关在 ~58K 就截断），还可能被供应商 400 拒掉',
+  );
 });
 
 /* -------------------------------------------------------------------------- */
