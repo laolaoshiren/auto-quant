@@ -55,6 +55,14 @@ export interface StaleEntry {
   name: string;
   minutes: number;
   awaitingFirstCycle: boolean;
+  /**
+   * 这个机器人**这一次**用的停摆阈值（毫秒，2026-10-17 · t114）。
+   *
+   * 分布驱动之后阈值**因机器人而异**（`max(周期×2, 300秒, P95×2)`），
+   * 所以横幅把具体数字写出来 —— 操作员不必读源码就能回答
+   * "为什么 40 分钟了它还没被判红"。
+   */
+  thresholdMs: number | null;
 }
 
 /**
@@ -63,6 +71,12 @@ export interface StaleEntry {
  * ⚠️ 两个来源缺一不可：
  *   · `health.staleTraders` —— 谁卡住了、卡了多久（服务端算好的判据）；
  *   · `traders` 的 `dryRun` —— **是不是真钱**（`health` 里没有这个信息）。
+ *
+ * ## ⚠️ `t114`：这里**不要**再自己判一次"在跑"
+ *
+ * "一轮正在进行中"（新鲜 pending 行）已经由服务端 `evaluateTraderHealth` 排除，
+ * 这类机器人**根本不会出现在 `staleTraders` 里**。前端再判一次就等于造第二套判据 ——
+ * 而 `t99` 付出过代价的正是"两处各自判、某天分叉"。
  */
 export function staleEntriesFrom(
   health: Health | null | undefined,
@@ -89,6 +103,7 @@ export function staleEntriesFrom(
       name: entry.name,
       minutes: Math.round((entry.staleForMs ?? 0) / 60_000),
       awaitingFirstCycle: entry.awaitingFirstCycle,
+      thresholdMs: entry.thresholdMs ?? null,
     });
   }
   return out;
@@ -97,7 +112,10 @@ export function staleEntriesFrom(
 /** 一条停摆的短句（`#10 赚大钱 · 36 分钟未完成一轮决策`）。 */
 export function staleEntryText(entry: StaleEntry): string {
   const what = entry.awaitingFirstCycle ? '启动后一直没有跑完一轮' : '没有完成一轮决策';
-  return `#${entry.id} ${entry.name} · ${entry.minutes} 分钟${what}`;
+  /* 把"这个机器人自己的阈值"写出来（`t114`）—— 否则读者会拿 30 分钟去对。 */
+  const limit =
+    entry.thresholdMs === null ? '' : `（阈值 ${Math.round(entry.thresholdMs / 60_000)} 分钟）`;
+  return `#${entry.id} ${entry.name} · ${entry.minutes} 分钟${what}${limit}`;
 }
 
 /**

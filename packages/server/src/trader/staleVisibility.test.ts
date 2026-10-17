@@ -219,11 +219,21 @@ test('★★ 生产调用点必须把常量**传进去**（而不是自己再写
    * 纯函数那条用例照样绿（它总是收到传进来的值）——所以必须单独守这一处。
    */
   const code = codeOnly(readFileSync(new URL('./manager.ts', import.meta.url), 'utf8'));
-  assert.match(
-    code,
-    /const \{\s*evaluateTraderHealth,\s*STALE_CYCLE_MULTIPLIER,\s*STARTUP_GRACE_MS\s*\} = await import\(/,
-    '★★★ 必须从 api/server.js 取那批常量（同一个判据的来源）',
-  );
+  /*
+   * ⚠️ **解构名单会变**（`t114` 加了 `healthContext`）—— 所以判据只认
+   * "**这三个名字都在那次动态导入的解构里**"，不锁死顺序与集合。
+   * 第一版写死了完整名单，于是 `t114` 合法地加一个名字就把它弄红了：
+   * **那是守卫在报"我认不出了"，不是代码坏了。**
+   */
+  const importLine = /const \{([^}]*)\} =\s*\n?\s*await import\('\.\.\/api\/server\.js'\)/.exec(code);
+  assert.ok(importLine, '★★★ 必须从 api/server.js 动态导入（同一个判据的来源）');
+  const destructured = importLine![1]!;
+  for (const name of ['evaluateTraderHealth', 'STALE_CYCLE_MULTIPLIER', 'STARTUP_GRACE_MS']) {
+    assert.ok(
+      new RegExp(`\\b${name}\\b`).test(destructured),
+      `★★★ 解构里必须有 ${name}（同一个判据的来源）`,
+    );
+  }
   assert.match(
     code,
     /multiplier: STALE_CYCLE_MULTIPLIER/,

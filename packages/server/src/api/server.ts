@@ -49,7 +49,9 @@ import {
   TRADE_PAGE_DEFAULT,
   trades as tradeStore,
   users,
+  decisions,
 } from '../store/repositories.js';
+import { recentCycleStats, staleThresholdMs } from './staleThreshold.js';
 /*
  * 智能体审计三张表（运行轨迹 / 参数实验 / 教训记忆）。
  * 它们此前**没有任何 API 暴露** —— 见 `/api/traders/:id/agent-audit` 的说明。
@@ -394,6 +396,75 @@ export const STALE_CYCLE_MULTIPLIER = 2;
  */
 export const STARTUP_GRACE_MS = 300_000;
 
+/**
+ * **`evaluateTraderHealth` 的可选上下文**（2026-10-17 · t114）。
+ *
+ * ## 为什么需要它（P0 假警报：`t99` 的横幅今天响了两次，两次都在正常跑）
+ *
+ * 原来的阈值是 `max(周期 × 2, 300 秒)` = **30 分钟**（`#10` 周期 15 分钟）。
+ * 而 `staleForMs` 量的是"**距上一轮结束**"——`last_cycle_at` 是一轮**结束时**
+ * 才写的，所以它把"正在进行的那一轮"整个算进去了。
+ * 线上实测（只读查库，2026-10-17 16:3x）：
+ *
+ * ```
+ *   #10  468 轮 | 均值 5.2 分钟 | 最长 26.5 分钟
+ *   今天节拍：805→806 26.0 分 · 813→814 68.4 分 · 815→816 35.6 分 · 816→817 22.7 分
+ * ```
+ * ⇒ **一轮从开始到完成经常超过 30 分钟**，于是"正常的长轮次"必然被判成停摆。
+ *
+ * ## 两个字段各自解决一半
+ *
+ * | 字段 | 作用 |
+ * |---|---|
+ * | `stats` | 阈值改成 `max(周期×2, 300 秒, P95(已完成轮次时长) × 2)` —— **跟着真实分布走** |
+ * | `pendingAt` | 最新一行是 pending 且**足够新** ⇒ 它明明在跑，**不算停摆** |
+ *
+ * ⚠️ `pendingAt` 也带年龄上限（由调用方用同一个阈值比）：`finish()` 落库时
+ * `ai_latency_ms` 可能**确实是 0**，那种行会永远"看起来 pending"——
+ * 一条两小时前的 pending 行必须**继续报警**。
+ */
+export interface HealthContext {
+  /** 某机器人最近轮次时长分布（`api/staleThreshold.ts`）；缺省 = 无样本，退回原判据。 */
+  statsByTrader?: ReadonlyMap<number, { samples: number; p95Ms: number | null; maxMs: number | null }>;
+  /**
+   * 某机器人**最新那一行** `decision_records` 的时间戳（ISO）**当且仅当它是 pending**。
+   * 没有 pending 行（或该机器人没有记录）时 absence 即可 —— 不传或 `undefined`。
+   */
+  pendingAtByTrader?: ReadonlyMap<number, string>;
+}
+
+/**
+ * **组装 `HealthContext`** —— `/api/health` 与 `manager` 的停摆审计**共用这一个**。
+ *
+ * ## 为什么抽成一个函数而不是各写一遍
+ *
+ * 两处必须看到**同一份证据**：控制台的横幅读 `/api/health`，而 `[停摆]` 日志由
+ * `manager.auditStaleTraders()` 写 —— 若各自拼一遍，迟早一处算了分布、另一处没算，
+ * 于是同一个机器人"在横幅里健康、在日志里停摆"。
+ * 这正是 `t99` 里已经付出过一次代价的那类问题（两个真相互相矛盾）。
+ *
+ * ⚠️ 每一步都**不抛**：这是 `/api/health` 的必经路径，它抛一次就等于把实例判死。
+ * 读不到就退回"没有证据"（阈值回到地板），而不是让端点 500。
+ */
+export function healthContext(now: number = Date.now()): HealthContext {
+  const statsByTrader = new Map<number, { samples: number; p95Ms: number | null; maxMs: number | null }>();
+  const pendingAtByTrader = new Map<number, string>();
+  for (const trader of traders.list()) {
+    try {
+      statsByTrader.set(trader.id, recentCycleStats(trader.id, now));
+    } catch {
+      /* 统计读不到 ⇒ 这个机器人退回地板阈值（不会因此不判停摆）。 */
+    }
+    try {
+      const latest = decisions.latestWithPending(trader.id);
+      if (latest !== undefined && latest.pending) pendingAtByTrader.set(trader.id, latest.timestamp);
+    } catch {
+      /* 读不到 pending ⇒ 当作"没有证据"，行为与改动前一致。 */
+    }
+  }
+  return { statsByTrader, pendingAtByTrader };
+}
+
 /* -------------------------------------------------------------------------- */
 /*  团队岗位出勤：从日志文本里认出"谁干了活"（2026-10-17 · t111）                  */
 /* -------------------------------------------------------------------------- */
@@ -514,6 +585,19 @@ export interface TraderHealth {
   stale: boolean;
   /** 已在运行但还没有任何一轮的完成记录（首轮仍在跑）。 */
   awaitingFirstCycle: boolean;
+  /**
+   * **"一轮正在进行中"**（2026-10-17 · t114）—— 存在一条**足够新的 pending 行**。
+   *
+   * `true` 时 `stale` 必然为 `false`：卡住的另一面是"明明在跑"，而
+   * 旧判据分不出这两者（`last_cycle_at` 只在一轮**结束时**写）。
+   * 详见 `HealthContext` 与 `evaluateTraderHealth` 里那一段。
+   */
+  cycleInProgress?: boolean;
+  /**
+   * 这个机器人**这一次**用的停摆阈值（毫秒）—— 让操作员能自己核对
+   * "为什么它没被判红"，而不必去读源码。分布驱动之后这个数**因机器人而异**。
+   */
+  thresholdMs?: number;
 }
 
 export interface HealthVerdict {
@@ -563,12 +647,32 @@ export function evaluateTraderHealth(
    * 缺省为空时退化为"用进程启动时间"，只是为了让纯函数好测。
    */
   startedAtByTrader: ReadonlyMap<number, number> = new Map(),
+  /**
+   * **可选上下文**（2026-10-17 · t114）：分布阈值 + "正在跑"的证据。
+   *
+   * 不传 = 行为与改动前**逐字节一致**（阈值仍是 `max(周期 × 2, 300 秒)`）——
+   * 这让老调用方（测试桩、第三方嵌入）不受影响，也让"放宽"只发生在
+   * **真的读到了证据**的地方。见 `HealthContext` 的说明。
+   */
+  context: HealthContext = {},
 ): HealthVerdict {
   const traders: TraderHealth[] = traderRows.map((trader) => {
-    const thresholdMs = Math.max(
-      Math.max(1, trader.cycleIntervalMinutes) * 60_000 * STALE_CYCLE_MULTIPLIER,
-      STARTUP_GRACE_MS,
-    );
+    /*
+     * ┌─────────────────────────────────────────────────────────────────────┐
+     * │ ⚠️ 阈值：三层取最大（2026-10-17 · t114）                            │
+     * ├─────────────────────────────────────────────────────────────────────┤
+     * │  周期 × 2      —— 原判据，仍是地板                                  │
+     * │  300 秒        —— 起步宽限，仍是地板                                │
+     * │  P95 × 2       —— **新增**：跟着该机器人真实分布走（读出样本才有）   │
+     * └─────────────────────────────────────────────────────────────────────┘
+     * 放宽**只发生在确有长轮次证据的机器人上**：没有样本时退回原来那 30 分钟。
+     */
+    const thresholdMs = staleThresholdMs({
+      cycleIntervalMinutes: trader.cycleIntervalMinutes,
+      stats: context.statsByTrader?.get(trader.id) ?? { samples: 0, p95Ms: null, maxMs: null },
+      multiplier: STALE_CYCLE_MULTIPLIER,
+      floorMs: STARTUP_GRACE_MS,
+    });
     const lastCycleMs = trader.lastCycleAt ? new Date(trader.lastCycleAt).getTime() : null;
     const valid = lastCycleMs !== null && Number.isFinite(lastCycleMs);
 
@@ -581,6 +685,8 @@ export function evaluateTraderHealth(
         staleForMs: valid ? now - (lastCycleMs as number) : null,
         stale: false,
         awaitingFirstCycle: false,
+        /* 不参与判定的分支也如实报出阈值（控制台用来说明"为什么没判它"）。 */
+        thresholdMs,
       };
     }
 
@@ -624,6 +730,7 @@ export function evaluateTraderHealth(
         staleForMs: valid ? now - (lastCycleMs as number) : null,
         stale: false,
         awaitingFirstCycle: false,
+        thresholdMs,
       };
     }
 
@@ -648,17 +755,48 @@ export function evaluateTraderHealth(
         staleForMs: runningForMs,
         stale: runningForMs !== null && runningForMs > thresholdMs,
         awaitingFirstCycle: true,
+        thresholdMs,
       };
     }
 
     const staleForMs = now - (lastCycleMs as number);
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     *  ⭐ **"正在进行的一轮"要能被看见**（2026-10-17 · t114）
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * `staleForMs` 量的是"距上一轮**结束**"，而一轮正在跑时 `last_cycle_at`
+     * 还停在上一次 —— 于是**正在跑**与**卡死**在旧判据下长得一模一样。
+     * 唯一的区分线索是 `decision_records` 里那条 **pending 行**
+     *（`begin()` 写的 `ai_latency_ms = 0 && error IS NULL && decisions_json` 空）。
+     *
+     * ## ⚠️ 必须带年龄上限（这一步是"不放过真停摆"的关键）
+     *
+     * pending 判据在 `finish()` 落库时 `ai_latency_ms` 可能**确实是 0**
+     *（模型几乎瞬回）—— 那种行会**永远**"看起来 pending"。
+     * 若只看"有没有 pending"，一个真死掉的机器人会**永不报警**。
+     *
+     * 所以只认**年龄 < 阈值**的 pending：它开始于阈值之内 ⇒ 这一轮确实在进行中；
+     * 一条 2 小时前的 pending 行说明进程在那一轮里就没了 ⇒ **照常判红**。
+     */
+    const pendingAt = context.pendingAtByTrader?.get(trader.id);
+    const pendingMs = pendingAt === undefined ? null : new Date(pendingAt).getTime();
+    const cycleInProgress =
+      pendingMs !== null && Number.isFinite(pendingMs) && now - pendingMs < thresholdMs;
+
     return {
       traderId: trader.id,
       name: trader.name,
       status: trader.status,
       staleForMs,
-      stale: staleForMs > thresholdMs,
+      stale: !cycleInProgress && staleForMs > thresholdMs,
       awaitingFirstCycle: false,
+      /*
+       * 让控制台能说清"它是在跑还是卡住了" —— 这正是本批反复出现的
+       * 「信号在没人看的地方」的反面：**同一个判据，把区分依据一起报出去**。
+       */
+      cycleInProgress,
+      thresholdMs,
     };
   });
 
@@ -808,7 +946,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       typeof deps.manager.runningSince === 'function'
         ? deps.manager.runningSince()
         : new Map<number, number>();
-    const health = evaluateTraderHealth(traders.list(), Date.now(), runningSince);
+    const health = evaluateTraderHealth(traders.list(), Date.now(), runningSince, healthContext());
     const body = {
       ok: health.ok,
       /*
@@ -848,6 +986,16 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         name: entry.name,
         staleForMs: entry.staleForMs,
         awaitingFirstCycle: entry.awaitingFirstCycle,
+        /*
+         * ⚠️ **`t114` 之后必须把它带出去**：阈值是分布驱动的，**因机器人而异**
+         *（`max(周期×2, 300 秒, P95×2)`）。不带出去，控制台只能干看着一个
+         * "已 45 分钟没跑完"，却不知道**这一台**的阈值是多少。
+         *
+         * 实测缺口：加完 `thresholdMs` 之后忘了在这里放行，横幅那一行就只能显示
+         * `（阈值 NaN 分钟）` —— 而类型检查**抓不到**（它是可选字段）。
+         * 所以 `staleRegression.test.ts` 有一条源码守卫盯着这个映射。
+         */
+        thresholdMs: entry.thresholdMs,
       })),
       runningTraders: health.traders.filter((entry) => entry.status === 'running').length,
     };

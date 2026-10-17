@@ -359,6 +359,18 @@ export interface Health {
     staleForMs: number | null;
     /** 在跑但还没有任何一轮的完成记录（首轮仍在跑）。 */
     awaitingFirstCycle: boolean;
+    /**
+     * 这个机器人**这一次**用的停摆阈值（毫秒，2026-10-17 · t114）。
+     *
+     * 阈值不再是固定的"30 分钟"：它是 `max(周期 × 2, 300 秒, 实测轮次 P95 × 2)`，
+     * 所以**因机器人而异**。横幅把它显示出来，读者才不用拿旧数字去对。
+     */
+    thresholdMs?: number;
+    /**
+     * 一轮**正在进行中**（存在足够新的 pending 行）。
+     * ⚠️ 这类机器人**不会出现在 `staleTraders` 里** —— 字段只为将来展示"在跑"用。
+     */
+    cycleInProgress?: boolean;
   }>;
 }
 

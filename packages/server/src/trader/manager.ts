@@ -1405,6 +1405,16 @@ export function buildStaleNotices(input: {
     traderId: number;
     staleForMs: number | null;
     awaitingFirstCycle: boolean;
+    /*
+     * ⚠️ **`t114` 之后这两个字段由判定函数一并带出**（`evaluateTraderHealth`）：
+     *   · `thresholdMs` —— 这个机器人**这一次**用的阈值（分布驱动，因机器人而异）
+     *   · `cycleInProgress` —— 是否有"足够新的 pending 行"（真在跑）
+     * 都是可选的：老调用方（测试夹具）不传时文案退回"周期 × 倍数 与 宽限取较大者"。
+     * ⚠️ `cycleInProgress === true` 的条目**不该出现在 `stale` 里**
+     *（判定函数已经排除它）；这里再多一道防御，见下面。
+     */
+    thresholdMs?: number;
+    cycleInProgress?: boolean;
   }>;
   rows: ReadonlyArray<{
     id: number;
@@ -1425,17 +1435,32 @@ export function buildStaleNotices(input: {
     const row = byId.get(entry.traderId);
     /* 判定里有、库里读不到（并发删除）→ 跳过，不去编一条没有名字的记录。 */
     if (row === undefined) continue;
+    /*
+     * ⚠️ **防御**：判定函数已经把"一轮在跑"的排除了。这里再挡一次，
+     * 是因为**"误报一条停摆"的代价今天已经量过**（`t114`：响了两次，
+     * 两次 `#10` 都在正常工作）。多一道守卫比多一条假警报便宜。
+     */
+    if (entry.cycleInProgress === true) continue;
 
     const realMoney = (row.dryRun ?? input.envDryRun) === false;
     const level: 'error' | 'warn' = realMoney ? 'error' : 'warn';
     const minutes = Math.round((entry.staleForMs ?? 0) / 60_000);
     const errorSnippet = (row.lastError ?? '（没有错误信息）').slice(0, 300);
 
+    /*
+     * 判据描述：优先用判定函数带回来的**这一个机器人自己的阈值**
+     *（分布驱动之后它因机器人而异）；没有时退回"周期 × 倍数 与 宽限取较大者"。
+     */
+    const rule =
+      entry.thresholdMs !== undefined
+        ? `${Math.round(entry.thresholdMs / 60_000)} 分钟（周期 ${row.cycleIntervalMinutes} 分钟 × ${input.multiplier}` +
+          `、${Math.round(input.graceMs / 1000)} 秒起步宽限、与实测轮次 P95 × 2 取较大者）`
+        : `周期 ${row.cycleIntervalMinutes} 分钟 × ${input.multiplier}` +
+          ` 与 ${Math.round(input.graceMs / 1000)} 秒起步宽限取较大者`;
+
     const message =
       `[停摆] #${entry.traderId}「${row.name}」${realMoney ? '实盘' : '模拟盘'} · ` +
-      `已 ${minutes} 分钟没有完成一轮决策` +
-      `（判据：周期 ${row.cycleIntervalMinutes} 分钟 × ${input.multiplier}` +
-      ` 与 ${Math.round(input.graceMs / 1000)} 秒起步宽限取较大者）· ` +
+      `已 ${minutes} 分钟没有完成一轮决策（判据：${rule}）· ` +
       `连续失败 ${row.consecutiveFailures} 轮 · 最近错误：${errorSnippet}`;
 
     out.push({ traderId: entry.traderId, level, message });
@@ -4225,11 +4250,18 @@ export class TraderManager {
    * 这一条是**留痕**，不是通道。两者分工写在 `runSelfCheckSweep` 的调用点上。
    */
   private async auditStaleTraders(): Promise<void> {
-    const { evaluateTraderHealth, STALE_CYCLE_MULTIPLIER, STARTUP_GRACE_MS } = await import(
-      '../api/server.js'
-    );
+    const { evaluateTraderHealth, healthContext, STALE_CYCLE_MULTIPLIER, STARTUP_GRACE_MS } =
+      await import('../api/server.js');
     const rows = traders.list();
-    const verdict = evaluateTraderHealth(rows, Date.now(), this.runningSince());
+    /*
+     * ⚠️ **必须传 `healthContext()`，否则横幅与日志会各说各话**（2026-10-17 · t114）。
+     *
+     * 这个 context 里有"最近轮次时长分布"与"最新一行是不是**新鲜的** pending"——
+     * 正是 `/api/health` 用来区分"一轮正在跑"与"真卡住"的两份证据。
+     * 不传的话阈值会退回老的 30 分钟：**横幅不再误报，而 `[停摆]` 日志照样误报**，
+     * 那正是 `t99` 之前付出过代价的"两个真相互相矛盾"。
+     */
+    const verdict = evaluateTraderHealth(rows, Date.now(), this.runningSince(), healthContext());
     const staleIds = new Set(verdict.stale.map((entry) => entry.traderId));
 
     /* ① 先处理"恢复"：清掉状态位，并留一条"什么时候恢复的"（与"什么时候开始"对称）。 */
