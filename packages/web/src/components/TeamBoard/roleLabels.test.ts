@@ -35,10 +35,112 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { FIRM_ROLES } from '@aq/shared';
 import { registeredRoleIds, roleLabel } from './TeamDecisionRow.js';
+
+/* -------------------------------------------------------------------------- */
+/*  ★ 第三个权威来源：agent 层角色（2026-10-17 · t108 用户实测）                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **从服务端源码里读 `AgentRole` 联合的成员。**
+ *
+ * ## 为什么必须读源码，而不是只相信 `FIRM_ROLES`
+ *
+ * 原来本文件只遍历 `FIRM_ROLES`，于是守卫**看起来是穷尽的，实际上漏了一整层**：
+ * ```
+ *   ① FIRM_ROLES   编制表（shared/firm.ts，21 个）—— 本文件原来只守这个
+ *   ② ROLE_TIERS   模型路由（server/routedModel.ts，20 个）
+ *   ③ AgentRole    ★ **agent 层真正会产出的角色**（server/agent/roles.ts，17 个）
+ * ```
+ * `strategist` / `reviewer` / `performance_analyst` / `attribution_analyst` / `trader`
+ * **只在 ③ 里**。它们不在编制表里（老板没给它们排工位），但 agent 层以它们的名义产出，
+ * 看板于是走"编制表之外的角色"分支 —— 用户就看到了英文 id 与那句占位文案。
+ *
+ * ⇒ 用户报的那个缺陷，**恰恰是"只守 ①"漏掉的那一层**。所以守卫要读 ③。
+ *
+ * ## 为什么读源码而不是 import
+ *
+ * `packages/web` 不依赖 `packages/server`（那是分层纪律），`AgentRole` 是**类型**、
+ * 运行时也不存在。所以按既有做法读源码文本 ——
+ * 与 `equityMetric.test.ts` 读 `repositories.ts`、`memberFold.test.ts` 读
+ * `deskOutput.ts` 是同一个手法。
+ */
+const AGENT_ROLES_SRC = readFileSync(
+  new URL('../../../../server/src/trader/agent/roles.ts', import.meta.url),
+  'utf8',
+);
+
+/** `export type AgentRole = 'a' | 'b' | …;` 里的全部成员。 */
+function agentRoleIds(): string[] {
+  const at = AGENT_ROLES_SRC.indexOf('export type AgentRole =');
+  assert.ok(at >= 0, '★ 找不到 `export type AgentRole` —— 服务端结构变了，这条守卫必须跟着改');
+  const semi = AGENT_ROLES_SRC.indexOf(';', at);
+  assert.ok(semi > at, '★ `AgentRole` 联合没有以 `;` 结尾 —— 解析会读到别的代码');
+  const block = AGENT_ROLES_SRC.slice(at, semi);
+  /*
+   * ⚠️ 只取 `| 'xxx'` 形状。块里有大段注释（解释每个角色为什么存在），
+   * 而注释里的引号串**不是成员** —— 但 `[a-z_]+` 的形状又能匹配上，
+   * 所以这里要求它**紧跟在一个 `|` 后面**（成员在联合里的唯一合法位置）。
+   */
+  return [...block.matchAll(/\|\s*'([a-z_]+)'/g)].flatMap((m) => (m[1] === undefined ? [] : [m[1]]));
+}
+
+test('★★★ agent 层角色（AgentRole 联合）的每一个 id 都必须在界面标签表里登记', () => {
+  const ids = agentRoleIds();
+  /*
+   * 防"解析失效导致恒真"：真实是 17 个，这里给个下界。
+   * 如果哪天真少于 10，说明解析读错了文件 —— 那时这条守卫先红，比放过好。
+   */
+  assert.ok(ids.length >= 10, `★ 只解析出 ${ids.length} 个 agent 角色 —— 解析失效，下面的断言会恒真`);
+
+  const registered = new Set(registeredRoleIds());
+  const unregistered = ids.filter((id) => !registered.has(id));
+
+  assert.deepEqual(
+    unregistered,
+    [],
+    `★★★ 这些 agent 层角色在界面上没有中文名：${unregistered.join('、')} —— ` +
+      '它们一产出，看板就会把**英文 id 当标题**、并配上"这个岗位不在编制表里"的兜底文案。' +
+      '用户 2026-10-17 实测报的正是这个形状（strategist / reviewer 等）。',
+  );
+});
+
+test('★★ 已知的 5 个 agent 层角色必须有**具体**中文名（不是 id 自己）', () => {
+  /*
+   * 用户截图里点名的那 5 个。期望值**独立写死** —— 不从实现派生，
+   * 否则这条断言就是恒真的装饰。
+   */
+  const expected: Record<string, string> = {
+    strategist: '策略师',
+    reviewer: '复核员',
+    performance_analyst: '绩效分析',
+    attribution_analyst: '归因分析',
+    trader: '交易员',
+  };
+  for (const [id, want] of Object.entries(expected)) {
+    assert.equal(roleLabel(id), want, `★ ${id} 的中文名应为「${want}」`);
+  }
+});
+
+test('★★ `trader` 与 `execution` 的中文名必须能分辨', () => {
+  /*
+   * 数据里是两个不同的 id：
+   * ```
+   *   execution = T0 代码节点，做下单/撤单的机械动作 → 「交易员（执行层）」
+   *   trader    = agent 层的 LLM 角色，做下单前的判断   → 「交易员」
+   * ```
+   * 同名会让人以为"同一个岗位在界面上出现了两次"。
+   */
+  assert.notEqual(
+    roleLabel('trader'),
+    roleLabel('execution'),
+    '★ 「交易员」与「交易员（执行层）」必须是两个不同的名字 —— 它们是两个不同的角色',
+  );
+});
 
 test('★★★ FIRM_ROLES 的每一个角色 id 都必须在界面标签表里登记', () => {
   assert.ok(
@@ -82,22 +184,32 @@ test('★★★ 每个已登记角色的中文名都真的翻译过（不是把 
   }
 });
 
-test('★★ 标签表里不该有 FIRM_ROLES 不认识的 id —— 那会在界面留一个永远不动的空位', () => {
+test('★★ 标签表里不该有人类名单都不认识的 id —— 那会在界面留一个永远不动的空位', () => {
   /*
    * `firm.ts` 的文件头注释点明了两种漂移，这是第二种：
    * > ② 界面写了某个角色、服务端没有 → **界面上有个永远不动的空位**
    *
    * 反向断言（表 ⊆ 权威名单）把它变成可执行的判据。
    * 注意**方向**：只允许"表里的都在名单里"，不允许反推
-   *（名单里多一个由上面第一条守）。
+   *（名单里多一个由上面几条守）。
+   *
+   * ⚠️ **2026-10-17（t108）修正了"权威名单"的定义**：原来只拿 `FIRM_ROLES` 比，
+   * 于是补上 agent 层那 5 个角色后**这条会假红** —— 它们确实是合法的界面角色，
+   * 只是不在编制表里。权威集合必须是**两者并集**：
+   * ```
+   *   FIRM_ROLES ∪ AgentRole
+   * ```
+   * 改成并集**没有放松判据**：真正的陌生人（谁的名单里都没有）照样红。
+   * 这一条同时兼作防"手滑打了个错字"（`stratagist` 之类）的守卫。
    */
-  const known = new Set(FIRM_ROLES.map((role) => role.id));
+  const known = new Set<string>([...FIRM_ROLES.map((role) => role.id), ...agentRoleIds()]);
+  assert.ok(known.size >= 20, `★ 权威名单只有 ${known.size} 项 —— 读取失效，下面的断言会恒真`);
   const strangers = registeredRoleIds().filter((id) => !known.has(id));
   assert.deepEqual(
     strangers,
     [],
-    `★★ 界面登记了 firm.ts 里不存在的角色：${strangers.join('、')} —— ` +
-      '看板上会多出一个永远没有产出的岗位',
+    `★★ 界面登记了服务端两个名单都不存在的角色：${strangers.join('、')} —— ` +
+      '看板上会多出一个永远没有产出的岗位（或者是一个拼错的 id）',
   );
 });
 

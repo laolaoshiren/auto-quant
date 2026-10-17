@@ -120,40 +120,23 @@ function outcomeStyle(status: ExecutionLogEntry['status']): {
  * `symbol_scout（界面未登记这个角色）`：屏幕上出现一串英文 id，
  * 而它其实是"标的侦查员"。用户报的「出现英文字符」正是这一个形状。
  */
-const ROLE_LABEL: Record<string, string> = {
-  supervisor: '总管',
-  judge: '裁决官',
-  reporter: '汇报员',
-  market_analyst: '市场分析师',
-  technical: '技术面分析',
-  newscaster: '新闻调查员',
-  sentiment: '市场情绪',
-  bull: '多头研究员',
-  bear: '空头研究员',
-  /* ⚠️ 2026-10-17 补：漏登记的正式岗位，见上面那段。 */
-  symbol_scout: '标的侦查员',
-  onchain_analyst: '链上分析',
-  community_monitor: '社区监控',
-  risk_officer: '风控官',
-  red_team: '红队',
-  portfolio_manager: '组合经理',
-  execution: '交易员（执行层）',
-  memory_curator: '复盘员',
-  data_sentinel: '数据看门狗',
-  ops_watchdog: '运维看门狗',
-  clerk: '文员',
-  system_engineer: '系统工程师',
-};
+/*
+ * 角色名表已**搬到** `./roleLabels.ts`（2026-10-17 · t108）。
+ *
+ * 因为 `roster.ts` 也要用它（看板编制表 **+ 编制表之外的兜底行**），
+ * 而本文件已经 import 了 `roster`（要 `INK` / `SURFACE`）——
+ * 反向 import 会成**循环依赖**。抽成独立模块后两个使用方都从那里拿，
+ * 「角色名只有一份」这件事就在文件层面成立了。
+ *
+ * 这里保留同名导出，是为了让既有调用点与测试（`roleLabels.test.ts`）一个字都不用改。
+ *
+ * ⚠️ `import` 与 `export` **两行都要写**：`export { x } from '...'` 只把名字**转发出去**，
+ * **不会**把它带进本文件的作用域 —— 只写那一行，下面 `MemberLine` 里的 `roleLabel()`
+ * 会直接 `TS2304: Cannot find name`（我第一次就只写了一行，typecheck 当场抓到）。
+ */
+import { registeredRoleIds, roleLabel } from './roleLabels';
 
-/** 给测试用：这张表登记了哪些角色 id（**不导出表本身**，避免被别处改）。 */
-export function registeredRoleIds(): string[] {
-  return Object.keys(ROLE_LABEL);
-}
-
-/** 角色 id → 界面标签（未登记的返回 `null`，由调用处决定怎么显示）。 */
-export function roleLabel(role: string): string | null {
-  return ROLE_LABEL[role] ?? null;
-}
+export { registeredRoleIds, roleLabel };
 
 /**
  * 取一个**真的有值**的数值，否则 `null`。
@@ -506,7 +489,18 @@ export function TeamDecisionDetails({
             <div className="flex flex-wrap items-center gap-1">
               <RawTabButton icon={<Sparkles aria-hidden className="h-3 w-3" />} label="思考过程" active={tab === 'cot'} onClick={() => setTab('cot')} />
               <RawTabButton icon={<Lock aria-hidden className="h-3 w-3" />} label="提示词" active={tab === 'prompt'} onClick={() => setTab('prompt')} />
-              <RawTabButton icon={<FileText aria-hidden className="h-3 w-3" />} label="原始响应" active={tab === 'raw'} onClick={() => setTab('raw')} />
+              {/*
+                ⚠️ **这一格不叫「原始响应」**（2026-10-17 · 用户实测）。
+                它渲染的是 `deskOutput.ts` 在后端拼好的 `<decision>/<risk>/<team>` 三块，
+                **不是模型的原始输出**。叫"原始响应"是把"我们的渲染结果"说成"模型的话"。
+                改成如实的名字，并把内容按块拆开（见 `splitRawResponse`）。
+              */}
+              <RawTabButton
+                icon={<FileText aria-hidden className="h-3 w-3" />}
+                label="服务端拼出的完整响应"
+                active={tab === 'raw'}
+                onClick={() => setTab('raw')}
+              />
             </div>
             <div className="mt-1.5">
               {tab === 'cot' && <LazyPre title="思考过程" field="cot" record={record} empty="这一轮没有留下思维链。" />}
@@ -516,7 +510,7 @@ export function TeamDecisionDetails({
                   <LazyPre title="用户提示词" field="user" record={record} empty="（空）" />
                 </div>
               )}
-              {tab === 'raw' && <Pre body={record.rawResponse} empty="（空）" />}
+              {tab === 'raw' && <ReadableResponse rawResponse={record.rawResponse} />}
             </div>
           </section>
         </div>
@@ -684,6 +678,223 @@ function Pre({ body, empty }: { body: string; empty: string }): React.ReactEleme
       {body}
     </pre>
   );
+}
+
+/**
+ * **「服务端拼出的完整响应」的人话版**（2026-10-17 · 用户实测）。
+ *
+ * ## 它替代了什么
+ *
+ * 原来这里是一整块 `<Pre>{record.rawResponse}</Pre>` —— 屏幕上就是
+ * `<decision>[]</decision><risk>…</risk><team>## 本轮汇报（给人看）{"account":…}</team>`
+ * 一坨。用户原话是"根本不可读"。
+ *
+ * ## 现在长什么样
+ * ```
+ *   本轮决策      [ ]（没有决策 → 一句人话）
+ *   团队过程      ## 本轮汇报（给人看）
+ *                 ┌─────────┬──────────────────────────────┐
+ *                 │ account │ 权益 20.7519，可用 20.7519（100%） │
+ *                 │ decision│ 按不行动处理——裁决 judge 超时未返回… │
+ *                 └─────────┴──────────────────────────────┘
+ *                 （其余行照常显示）
+ *   ▸ 查看原始    ← 默认收起，原始字节一个不丢
+ * ```
+ *
+ * ## 三条纪律
+ *  ① **解析失败回落纯文本**：汇报被 `oneLine` 截断到 2000 字符后不是合法 JSON，
+ *     那时按原文显示（`parseReportObject` 返回 `null`），**绝不丢内容**；
+ *  ② **渲染前过 `plainText()`**：内部文本里带 `**`（`deskOutput` 的模板就有），
+ *     JSX 不解析 markdown，不剥就会把星号画在屏幕上；
+ *  ③ **原始字节可查**：底部「查看原始」默认收起 —— 排查时仍然要看得到原文。
+ */
+function ReadableResponse({ rawResponse }: { rawResponse: string }): React.ReactElement {
+  if (!rawResponse.trim()) return <p className="px-1 py-2 text-xs text-ink-faint">（空）</p>;
+
+  const blocks = splitRawResponse(rawResponse);
+
+  return (
+    <div className="space-y-2">
+      {blocks.map((block) => {
+        /* 「团队过程」里那一行汇报 JSON 单独抽出来做键值表。 */
+        const reportLine = block.title === '团队过程' ? extractReportLine(block.body) : null;
+        const rows = reportLine === null ? null : parseReportObject(reportLine.report);
+
+        return (
+          <section key={block.title} className="min-w-0">
+            <h5 className="mb-1 text-[11px] font-semibold text-ink-lo">{block.title}</h5>
+
+            {reportLine !== null && rows !== null ? (
+              <>
+                {reportLine.before !== '' && (
+                  <p className="mb-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-mid">
+                    {plainText(reportLine.before)}
+                  </p>
+                )}
+                <table className="w-full table-fixed border-collapse text-xs">
+                  <tbody>
+                    {rows.map(([key, value]) => (
+                      <tr key={key} className="border-b border-base-800 last:border-b-0">
+                        <th
+                          scope="row"
+                          className="w-[7.5rem] shrink-0 whitespace-nowrap py-1 pr-2 text-left align-top font-normal text-ink-faint"
+                        >
+                          {plainText(key)}
+                        </th>
+                        <td className="break-words py-1 align-top text-ink-mid">{value}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {reportLine.after !== '' && (
+                  <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-mid">
+                    {plainText(reportLine.after)}
+                  </p>
+                )}
+              </>
+            ) : reportLine !== null ? (
+              /*
+               * ⚠️ **解析失败分支**（最容易漏的那条）：汇报被截断/本来就不是 JSON。
+               * 按原文显示 —— 用户至少能看到"它说了什么"，而不是一个空白或一张错误卡。
+               */
+              <>
+                {reportLine.before !== '' && (
+                  <p className="mb-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-mid">
+                    {plainText(reportLine.before)}
+                  </p>
+                )}
+                <Pre body={plainText(reportLine.report)} empty="（空）" />
+                <p className="mt-1 text-[11px] text-ink-faint">
+                  这段汇报不是完整的 JSON 对象（可能被服务端的 2000 字上限截断），按原文显示。
+                </p>
+                {reportLine.after !== '' && (
+                  <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-mid">
+                    {plainText(reportLine.after)}
+                  </p>
+                )}
+              </>
+            ) : (
+              <Pre body={plainText(block.body)} empty="（空）" />
+            )}
+          </section>
+        );
+      })}
+
+      {/* 原始字节仍然可查：默认收起，点开就是服务端写进来的原文（一个字节都不少）。 */}
+      <details className="rounded border border-base-800 px-2 py-1.5">
+        <summary className="cursor-pointer select-none text-[11px] text-ink-faint">
+          查看原始（服务端写入的完整文本，未加工）
+        </summary>
+        <div className="mt-1.5">
+          <Pre body={rawResponse} empty="（空）" />
+        </div>
+      </details>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  内部拼接 → 人话（2026-10-17 · 用户实测：这一格原来叫「原始响应」）           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **一个 JSON 对象 → 键值两列表格**；不是合法 JSON 就 `null`（由调用方回落纯文本）。
+ *
+ * ## 为什么必须容忍"不是合法 JSON"
+ *
+ * `deskOutput.ts` 的 `oneLine(outcome.report, 2_000)` **先压单行、再截断到 2000 字符**。
+ * 被截断的那一份**不是合法 JSON**（末尾停在半个值上），`JSON.parse` 会抛。
+ * 这是本函数唯一容易写错的地方：不 `try/catch` 的话，一条长汇报会让整块详情
+ * **渲染崩掉**（被 `FeedErrorBoundary` 换成一张错误卡）。
+ *
+ * 所以解析失败**不是错误**，是"这份内容不适合做表格"——调用方回落纯文本。
+ * 与 `teamTrace.ts` 的 `parseTeamTrace` 返回 `null` 是同一套契约。
+ */
+export function parseReportObject(text: string): Array<[string, string]> | null {
+  const trimmed = text.trim();
+  /* 只有对象才做表格：数组/标量即便合法，摊成两列也没有意义。 */
+  if (!trimmed.startsWith('{')) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const rows: Array<[string, string]> = [];
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    /* 值可能是对象/数组（汇报里偶尔有）—— 原样 JSON 化，**不丢信息**。 */
+    const shown = typeof raw === 'string' ? raw : JSON.stringify(raw);
+    rows.push([key, plainText(shown ?? '')]);
+  }
+  return rows.length > 0 ? rows : null;
+}
+
+/**
+ * **把内部拼接的 `rawResponse` 按块拆开**，每块给人话。
+ *
+ * ## 这一格原来叫什么、为什么叫错了
+ *
+ * 原来的标签是「**原始响应**」，渲染 `record.rawResponse` 全文 ——
+ * 而那一整段**全是后端 `deskOutput.ts` 渲染出来的**：
+ * ```
+ *   <decision>[…]</decision>   ← deskOutput 重新排过（不是模型的原文）
+ *   <risk>…</risk>             ← deskOutput 拼的
+ *   <team>…</team>             ← deskOutput 拼的，report 还被 oneLine 压成单行
+ * ```
+ * 于是屏幕上是一串 `<decision>` / `<risk>` / `<team>` 标签 + 一段压成一行的 JSON：
+ * 既不是"原始输出"，也不像人话。
+ *
+ * ## 拆成几块（顺序 = 这一轮怎么走过来的）
+ * ```
+ *   本轮决策   ← <decision> 块
+ *   团队过程   ← <team> 块（其中的汇报 JSON 由调用方单独做键值表）
+ * ```
+ * 没有 XML 骨架（老记录 / 非团队模式）时**整段作为一块**，不编结构。
+ *
+ * ⚠️ **只做展示**：不改 `rawResponse` 的存储格式，解析失败原样回落，一个字节都不丢。
+ */
+export function splitRawResponse(rawResponse: string): Array<{ title: string; body: string }> {
+  const blocks: Array<{ title: string; body: string }> = [];
+  const grab = (tag: string): string | null => {
+    const open = rawResponse.indexOf(`<${tag}>`);
+    if (open < 0) return null;
+    const start = open + tag.length + 2;
+    const close = rawResponse.indexOf(`</${tag}>`, start);
+    const body = (close < 0 ? rawResponse.slice(start) : rawResponse.slice(start, close)).trim();
+    return body.length > 0 ? body : null;
+  };
+
+  const decision = grab('decision');
+  if (decision !== null) blocks.push({ title: '本轮决策', body: decision });
+
+  const team = grab('team');
+  if (team !== null) blocks.push({ title: '团队过程', body: team });
+
+  if (blocks.length === 0) {
+    const plain = rawResponse.trim();
+    if (plain.length > 0) blocks.push({ title: '服务端渲染的完整响应', body: plain });
+  }
+  return blocks;
+}
+
+/**
+ * **「团队过程」里那段汇报 JSON** —— 抽出来单独做键值表。
+ *
+ * 形态（`deskOutput.ts`）：`## 本轮汇报（给人看）` 之后有一行压成单行的 JSON。
+ * 找不到就返回 `null`（调用方按普通文本渲染整块）。
+ */
+export function extractReportLine(
+  teamBody: string,
+): { before: string; report: string; after: string } | null {
+  const lines = teamBody.split('\n');
+  const at = lines.findIndex((line) => line.trim().startsWith('{'));
+  if (at < 0) return null;
+  return {
+    before: lines.slice(0, at).join('\n').trim(),
+    report: lines[at]!.trim(),
+    after: lines.slice(at + 1).join('\n').trim(),
+  };
 }
 
 /* -------------------------------------------------------------------------- */

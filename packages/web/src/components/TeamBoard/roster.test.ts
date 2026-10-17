@@ -246,7 +246,44 @@ test('★★ 编制表之外的新角色不会被丢掉（后端加岗位、前�
   const extra = entries.find((e) => e.role.id === 'quantum_analyst');
   assert.ok(extra, '★ 未登记的岗位也要显示出来');
   assert.equal(extra?.state, 'done');
-  assert.match(extra?.role.duty ?? '', /还没登记/, '★ 并且要诚实说明"界面还没登记它的分工"');
+  /*
+   * ⚠️ 2026-10-17（t108）：文案改过了 —— 原来断言的是 `/还没登记/`。
+   *
+   * 用户截图里显示的是「界面还没登记这个岗位的分工 —— 但它在工作」：
+   * 它把"我们的界面没跟上"这件**内部缺口**推到了操作员面前，
+   * 而他真正关心的只有两件事：**它是谁**、**它到底在不在干活**。
+   * 所以改成中性表述，并保留"正在工作"这个事实。
+   * 这里同时断言**旧措辞不许回来**（那是用户明确报过的形状）。
+   */
+  assert.match(
+    extra?.role.duty ?? '',
+    /不在编制表里.*正在工作/,
+    '★ 兜底要中性地说"不在编制表里但正在工作"，并指向它的最近动作',
+  );
+  assert.doesNotMatch(
+    extra?.role.duty ?? '',
+    /界面还没登记|界面未登记/,
+    '★ 旧措辞（把内部缺口暴露给用户）不得回来 —— 用户截图报的就是它',
+  );
+});
+
+test('★★★ 编制表之外的角色也要给中文名（如果名表里有它）', () => {
+  /*
+   * 这一条直接对应用户实测（t108）：
+   * ```
+   *   ▼ strategist  进行中  分析  6 步
+   *   ▼ reviewer    进行中  分析  工具…
+   * ```
+   * 它们**不在 `FIRM_ROLES` 里**（编制表没给它们排工位），但 agent 层会以它们的
+   * 名义产出 —— 于是走"编制表之外"这条分支，而那条分支以前把 **id 当标题**。
+   *
+   * 修法：`label: roleLabel(roleId) ?? roleId`。这里验的就是它真的被用上了。
+   */
+  const entries = rosterEntries([step('strategist', '定方向', 'analysis')], FIRM_ROLES);
+  const strategist = entries.find((e) => e.role.id === 'strategist');
+  assert.ok(strategist, '★ strategist 必须在看板上出现（它在干活）');
+  assert.equal(strategist?.role.label, '策略师', '★ 标题必须是中文名，不能是英文 id');
+  assert.notEqual(strategist?.role.label, 'strategist', '★ 屏幕上不能再出现裸 id');
 });
 
 test('★ 用自定义编制表时结果只包含那张表里的岗位（可注入 = 可测）', () => {
