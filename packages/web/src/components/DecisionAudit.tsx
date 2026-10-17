@@ -13,6 +13,7 @@ import { Badge, Button, Collapsible, CopyButton, type Tone } from './ui';
 import { useCopy } from '../lib/hooks';
 import { fmtInt, fmtUsd } from '../lib/format';
 import { plainText } from '../lib/plainText';
+import { parseTeamTrace } from '../lib/teamTrace';
 
 /* -------------------------------------------------------------------------- */
 /*  Action vocabulary                                                          */
@@ -356,11 +357,42 @@ export function PromptBlock({
 
 /** The full set of prompt/response blocks for a persisted decision record. */
 export function PromptBlocks({ record, onExpand }: { record: DecisionRecord; onExpand?: () => void }) {
+  /*
+   * ⚠️ **第三块的标题不能叫「原始模型响应」**（2026-10-17 · 用户实测 · 与
+   * `TeamDecisionRow` 里那一格是同一条错）。
+   *
+   * 团队模式下，`rawResponse` 里的 `<decision>` / `<risk>` / `<team>` 三块
+   * **全是服务端 `deskOutput.ts` 渲染出来的**，汇报 JSON 还被 `oneLine` 压成单行、
+   * 截断到 2000 字符 —— 它不是模型的原话，是"我们怎么把模型的话整理成这个样子"。
+   * 把它叫"原始模型响应"，等于让排查的人拿一份二手材料当一手证据。
+   *
+   * 团队模式用如实的名字 + 一行说明；非团队模式保持原名（那边的 `rawResponse`
+   * 就是模型原样输出，没有这三块骨架 —— 逐字节不变）。
+   */
+  const isTeam = parseTeamTrace(record.rawResponse) !== null;
   return (
     <div className="space-y-2">
       <PromptBlock title="系统提示词" body={record.systemPrompt} onExpand={onExpand} />
       <PromptBlock title="用户提示词" body={record.userPrompt} onExpand={onExpand} />
-      <PromptBlock title="原始模型响应" body={record.rawResponse} defaultOpen={false} onExpand={onExpand} />
+      <PromptBlock
+        title={
+          isTeam ? (
+            <span className="flex flex-wrap items-baseline gap-x-2">
+              服务端拼出的完整响应
+              <span className="text-[11px] font-normal text-ink-faint">
+                —— 团队模式：<span className="font-mono">{'<decision>'}</span>/
+                <span className="font-mono">{'<risk>'}</span>/
+                <span className="font-mono">{'<team>'}</span> 三块由服务端渲染，不是模型原文
+              </span>
+            </span>
+          ) : (
+            '原始模型响应'
+          )
+        }
+        body={record.rawResponse}
+        defaultOpen={false}
+        onExpand={onExpand}
+      />
     </div>
   );
 }
