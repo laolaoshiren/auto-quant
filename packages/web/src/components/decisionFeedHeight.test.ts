@@ -1,50 +1,29 @@
 /**
- * **决策区的高度不能对非团队模式生效**（2026-10-13 实测回归）。
+ * **决策区的高度契约** —— 四条判据 + 一条人造校准。
  *
- * ## 事故：`#10 赚大钱`（ai_managed）的右栏变成一大片空白
+ * ## 这份守卫守的是什么（2026-10-17 重写）
  *
- * 用户截图：右栏「最近决策」里只有一行 `NEARUSDT`，下面是整屏空白。
+ * 这块版面先后试过四种分配方式，**前三种都失败了，原因不是数值**：
+ * ```
+ *   ① max-h-[38vh]   → 工作流 429px、决策区 123px（装不下一条）
+ *   ② max-h-[45%]    → 决策区仍是"一条装饰"
+ *   ③ min-h-[180px]  → 决策区 180px，而面板内容区 556px（32%）
+ * ```
+ * 根因是**结构性的**：两者是同一个纵向 flex 里的兄弟节点，
+ * 一方多拿一分高度，另一方就少一分 —— **任何百分比都只是换个牺牲者**。
  *
- * ## 根因：我为团队模式压决策区，却压到了所有模式
+ * ## 现行契约：二选一（同一时间只渲染一个）
  *
- * 上一轮为了让「AI 工作流」占主导，我把决策记录区改成：
  * ```
- *   max-h-[10%] + flex-none
- * ```
- * 而**工作流区只在 `ai_team` 渲染** —— 于是：
- * ```
- *   ai_team    : 工作流 flex-1（吃满）+ 决策区 10%   ✅ 符合预期
- *   ai_managed : 工作流【不存在】+ 决策区 10%        ❌ 90% 空白
- * ```
- * 浏览器实测（`#4` 非团队模式）：
- * ```
- *   修前：子节点 h=66（视口的 10%）→ 空白
- *   修后：子节点 h=656（满高）· 3 条决策卡正常渲染
+ *   团队模式：pane === 'decisions'  → 只渲染决策区，拿 flex-1（全部高度）
+ *            pane === 'workflow'   → 只渲染工作流，决策区**不渲染**
+ *   其它模式：决策区无条件 flex-1（**逐字节不变** —— 见下面那个事故）
  * ```
  *
- * ## 教训
- *
- * **「只在某模式下存在的东西，不能让它在别的模式下产生副作用」** ——
- * 这个面板是**三种模式共用**的（`strategy` / `ai_managed` / `ai_team`），
- * 改它时必须逐模式想一遍。
- *
- * ## ⚠️ 2026-10-17 第二次修正：`10%` 本身也是错的（台账 UI-02）
- *
- * 上面那条修好之后，"团队模式压到 10%" 被当成了正确答案。t3 用真实浏览器量到：
- * ```
- *   面板内容区 560px → 决策区 h=56px（=10%）
- *   而一轮决策卡高 82–300px，展开一轮后内容 1040px
- *   → 用户要的"下面滚动展示最终决策"变成了"露出两个字"
- *   → Playwright 连被裁出滚动区的卡片按钮都判成 not visible（60 次重试超时）
- * ```
- * 所以契约从"**按模式分开**"升级为"**按模式分开 + 团队模式要有内容下限**"：
- * ```
- *   非团队   : flex-1                        （吃掉全部高度，和改动前一致）
- *   团队模式 : min-h-[Npx]（N ≥ 168）        （不再是一个纯百分比）
- * ```
- * 下面三条断言按**新契约**写：三元必须还在、非团队必须仍是 `flex-1`、
- * 团队分支必须有 ≥168px 的下限、且**旧的纯 `max-h-[10%]` 形态不得回来**。
+ * ⚠️ **为什么必须有这条守卫**：`#10`（ai_managed）曾因为"只想着团队模式"被压成 10%、
+ * 下面一大片空白。那条事故的教训是「**只在某模式下存在的东西，不能让它在别的模式下产生副作用**」。
  */
+
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -53,66 +32,84 @@ import { codeOnlyCss as codeOnly } from '../testUtils/cssText.js';
 
 const SRC = readFileSync(new URL('./DecisionFeed.tsx', import.meta.url), 'utf8');
 
-/** 验收里的下限（台账 UI-02：`clientHeight ≥ 168`）；期望值独立写死，不从实现派生。 */
+/** 验收里的下限（一条最简决策行 72px + 标题 + 提示）；期望值独立写死，不从实现派生。 */
 const MIN_HEIGHT_FLOOR_PX = 168;
 
-/** 从源码里取出团队分支的 `min-h-[Npx]`。 */
-function teamMinHeight(code: string): number | null {
-  const teamBranch = code.slice(code.indexOf("mode === 'ai_team' ?"));
-  const m = teamBranch.match(/min-h-\[(\d+)px\]/);
-  return m ? Number(m[1]) : null;
-}
-
-test('★★★ 决策区的高度必须按 `mode` 分开（不能无条件压）', () => {
+test('★★★ 团队模式必须按 `pane` 二选一 —— 两块不能同时渲染', () => {
   const code = codeOnly(SRC);
+
+  /*
+   * 决策区必须有 `pane` 条件（否则它就和工作流区同时存在于 DOM 里 ⇒ 回到"争高度"）。
+   * 两种合法写法都在代码里出现过：
+   *   `!(mode === 'ai_team' && pane !== 'decisions')`  —— 早一版
+   *   `pane === 'decisions'`                            —— 现版
+   * 这里断言的是**语义**：代码里必须出现 `pane` 这个变量参与决策区的条件。
+   */
   assert.ok(
-    /mode === 'ai_team' \?\s*'[^']*min-h-\[/.test(code),
-    '★ 必须是"团队模式（带下限）、其它模式 flex-1"的三元 —— 无条件压会让非团队模式空出 90%',
+    /pane\s*[!=]==\s*'decisions'/.test(code),
+    '★ 决策区的渲染条件里必须出现 `pane` —— 否则它会和工作流区同时渲染，回到"两块争高度"',
   );
 });
 
-test('★★★ 团队模式的决策区必须有 ≥168px 的内容下限（台账 UI-02）', () => {
+test('★★★ 团队模式的工作流区必须有反向条件 —— 否则两块同时渲染', () => {
   const code = codeOnly(SRC);
-  const floor = teamMinHeight(code);
-  assert.ok(floor !== null, '★ 团队分支必须写 `min-h-[Npx]` —— 纯百分比在 900px 视口上只剩 56px');
   assert.ok(
-    floor >= MIN_HEIGHT_FLOOR_PX,
-    `★ 下限 ${floor}px 太小：验收要求 ≥ ${MIN_HEIGHT_FLOOR_PX}px（一条最简决策行 72px + 标题 + 提示）`,
+    /pane\s*[!=]==\s*'workflow'/.test(code),
+    '★ 工作流区的渲染条件里必须出现 `pane` —— 否则它和决策区会一起渲染',
   );
 });
 
-test('★★★ 旧的纯 `max-h-[10%]` 形态不得回来（那是 UI-02 的缺陷形态）', () => {
+test('★★★ 旧的纯 `max-h-[10%]` / `max-h-[max(10%` 形态不得回来（那是 UI-02 的缺陷形态）', () => {
   const code = codeOnly(SRC);
+  /*
+   * 这两串出现过两次，两次都让决策区只剩 56–180px：
+   *   `max-h-[10%]`            → 900px 视口上 56px
+   *   `max-h-[max(10%,180px)]` → 180px（32%）
+   * 二选一之后**不需要任何百分比**（各拿全部高度），所以这两串都不该再出现。
+   */
+  assert.equal(code.includes('max-h-[10%]'), false, '★ `max-h-[10%]` 是"决策区只剩 56px"的原始形态');
+  assert.equal(code.includes('max-h-[max(10%'), false, '★ `max-h-[max(10%,180px)]` 是 180px 的中间形态');
+});
+
+test('★★★ 决策区必须拿 `flex-1`（全部可用高度），不能是 `flex-none`', () => {
+  const code = codeOnly(SRC);
+  /*
+   * 二选一之后决策区独占那一片，所以它必须是 `flex-1`。
+   * `flex-none` 会让它按内容高度收缩 —— 那一轮没决策时就是一条缝（正是 UI-02 的形态）。
+   */
+  const idx = code.indexOf("'flex-1'");
+  assert.ok(idx >= 0, '★ 找不到 `flex-1` —— 决策区应当吃掉全部可用高度');
   assert.equal(
-    code.includes('max-h-[10%]'),
+    /'flex-none[^']*'/.test(code),
     false,
-    '★ `max-h-[10%]` 是"决策区只剩 56px"的原始形态 —— 不要退回纯百分比',
-  );
-});
-
-test('★★★ 非团队模式必须仍是 `flex-1`（吃掉全部高度）', () => {
-  const code = codeOnly(SRC);
-  assert.ok(
-    code.includes(": 'flex-1'"),
-    "★ 非团队模式的分支必须是 `flex-1`（否则决策区不会长高）",
+    '★ 不得出现 `flex-none` —— 那是"决策区按内容收缩"的旧形态',
   );
 });
 
 test('★★ 判据必须真的能报出缺陷形态 —— 用人造源码校准', () => {
-  /* ① 旧形态（纯 10%，没有下限）→ 两条断言都必须报出来。 */
-  const oldForm = "mode === 'ai_team' ? 'flex-none max-h-[10%]' : 'flex-1'";
-  assert.equal(teamMinHeight(oldForm), null, '★ 旧形态必须被判成"没有下限"');
-  assert.equal(/mode === 'ai_team' \?\s*'[^']*min-h-\[/.test(oldForm), false, '★ 旧形态必须判成不合格的三元');
-  assert.equal(oldForm.includes('max-h-[10%]'), true, '★ 旧形态必须被"纯百分比"判据抓到');
+  /*
+   * ⚠️ 校准的意义：如果上面四条对任何输入都为真，它们就是**恒真的装饰**。
+   * 这里把历史缺陷形态人造出来，断言「守卫会拒绝它」。
+   *
+   * 注意：校准对象是**字符串**，不读真实文件 —— 所以它不会因为实现改动而失效。
+   */
+  const badSamples = [
+    // ① 纯百分比（900px 视口上 56px）
+    `className={cn('min-h-0 space-y-2.5 overflow-y-auto p-2.5', mode === 'ai_team' ? 'flex-none max-h-[10%]' : 'flex-1')}`,
+    // ② 中间形态（180px / 32%）
+    `className={cn('min-h-0', mode === 'ai_team' ? 'flex-none min-h-[180px] max-h-[max(10%,180px)]' : 'flex-1')}`,
+    // ③ 没有 pane 条件（两块同时渲染）
+    `{mode === 'ai_team' && (<div>工作流</div>)}<div className="flex-1">决策</div>`,
+  ];
 
-  /* ② 下限太小 → 必须报（否则"随便写个 px"就能过）。 */
-  const tooSmall = "mode === 'ai_team' ? 'flex-none min-h-[40px]' : 'flex-1'";
-  assert.equal(teamMinHeight(tooSmall), 40, '★ 要能读出实际值');
-  assert.ok(40 < MIN_HEIGHT_FLOOR_PX, '★ 40px 必须判成不合格（校准的是比较逻辑）');
-
-  /* ③ 新形态 → 必须放过（不能把正确写法误判成违规）。 */
-  const good = "mode === 'ai_team' ? 'flex-none min-h-[180px] max-h-[max(10%,180px)]' : 'flex-1'";
-  assert.equal(teamMinHeight(good), 180);
-  assert.equal(/mode === 'ai_team' \?\s*'[^']*min-h-\[/.test(good), true);
-  assert.equal(good.includes('max-h-[10%]'), false, '★ 正确写法里不含纯百分比形态');
+  for (const bad of badSamples) {
+    const code = codeOnly(bad);
+    const hasOldPercent = code.includes('max-h-[10%]') || code.includes('max-h-[max(10%');
+    const hasFlexNone = /'flex-none[^']*'/.test(code);
+    const hasPane = /pane\s*[!=]==\s*'decisions'/.test(code);
+    assert.ok(
+      hasOldPercent || hasFlexNone || !hasPane,
+      `★★ 人造缺陷没有被任何判据拒绝 —— 判据失效了：\n${bad}`,
+    );
+  }
 });
