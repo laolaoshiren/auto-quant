@@ -38,6 +38,7 @@ import {
   parseDecisionList,
   parseDecisionListDetailed,
   parseJsonLoose,
+  parseLooseObject,
   stripTruncationTail,
 } from './structuredMessage';
 
@@ -528,4 +529,56 @@ test('★★ 放宽后仍然不误伤普通文本（形状守卫必须还在）'
       `★ 普通文本不该被结构化成决策数组：${p}`,
     );
   }
+});
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  ★★★ 数组/嵌套对象不能 JSON.stringify 塞进单元格
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * 线上真实形状（market_analyst 的产出，JSON.parse 成功）：
+ * ```
+ *   {"hypothesis":"…","matches":[{"symbol":"QUSDT","strength":"weak","evidence":"…"}]}
+ * ```
+ * 老实现解析**成功**，但 `matches` 是数组 ⇒ `JSON.stringify` ⇒ 单元格里
+ * 就是 `[{"symbol":"QUSDT","strength":…` —— **用户看到的就是这个**。
+ */
+test('★★★ 对象里的数组值要摘要成人话，不能吐原始 JSON', () => {
+  const M =
+    '{"hypothesis":"当前市场整体偏空。","matches":[' +
+    '{"symbol":"QUSDT","strength":"weak","evidence":"唯一结构完整的多头标的"},' +
+    '{"symbol":"ZECUSDT","strength":"moderate","evidence":"RSI 偏低但趋势未破"}],' +
+    '"summary":"偏空"}';
+
+  const rows = parseLooseObject(M);
+  assert.notEqual(rows, null);
+  const byKey = new Map(rows!);
+
+  assert.equal(byKey.get('hypothesis'), '当前市场整体偏空。');
+  assert.equal(byKey.get('summary'), '偏空');
+  /* ★ 关键断言：数组要列出能认出的 symbol，而不是一坨 JSON。 */
+  assert.equal(byKey.get('matches'), '2 项 · QUSDT、ZECUSDT');
+
+  /* ★★ 整表都不许出现 JSON 语法符号 —— 这正是用户报的现象。 */
+  for (const [k, v] of rows!) {
+    assert.ok(!v.includes('{"'), `★ 字段 ${k} 的值里还有 JSON 对象开头：${v.slice(0, 60)}`);
+    assert.ok(!v.includes('[{'), `★ 字段 ${k} 的值里还有 JSON 数组开头：${v.slice(0, 60)}`);
+    assert.ok(!v.includes('":"'), `★ 字段 ${k} 的值里还有 JSON 键值语法：${v.slice(0, 60)}`);
+  }
+});
+
+test('★★ 数组里认不出 symbol 时只说项数（不硬凑）', () => {
+  const rows = parseLooseObject('{"items":[1,2,3],"note":"三个数"}');
+  assert.notEqual(rows, null);
+  const byKey = new Map(rows!);
+  assert.equal(byKey.get('items'), '3 项');
+  assert.equal(byKey.get('note'), '三个数');
+});
+
+test('★★ 嵌套对象只说字段名（不吐 JSON）', () => {
+  const rows = parseLooseObject('{"indicators":{"macdHist":-0.002,"rsi14":42.1},"symbol":"AGTUSDT"}');
+  assert.notEqual(rows, null);
+  const byKey = new Map(rows!);
+  assert.equal(byKey.get('indicators'), '2 个字段：macdHist、rsi14');
+  assert.equal(byKey.get('symbol'), 'AGTUSDT');
 });

@@ -221,7 +221,28 @@ export function parseLooseObject(text: string): Array<[string, string]> | null {
     let shown: string;
     if (typeof raw === 'string') shown = raw;
     else if (typeof raw === 'number' || typeof raw === 'boolean') shown = String(raw);
-    else shown = JSON.stringify(raw);
+    /*
+     * ⚠️⚠️ **数组/嵌套对象不能 `JSON.stringify` 塞进单元格**（2026-10-18 线上实测修正）。
+     *
+     * 那正是"这一格还是一坨 JSON"的来源：一个完全正常的分析产出
+     * ```
+     *   {"hypothesis":"…","matches":[{"symbol":"QUSDT","strength":"weak","evidence":"…"}]}
+     * ```
+     * 解析是**成功**的，但 `matches` 是数组 ⇒ 老代码 `JSON.stringify` 它 ⇒
+     * 单元格里就是 `[{"symbol":"QUSDT","strength":…` —— 用户看到的就是这个。
+     *
+     * ⇒ 现在**摘要成人话**：数组列出它里面能认出的 `symbol`（这是最有信息量的那部分），
+     *   认不出就只说几项；对象只说几个字段。**都不再吐原始 JSON。**
+     */
+    else if (Array.isArray(raw)) {
+      const symbols = raw
+        .map((x) => (x !== null && typeof x === 'object' && 'symbol' in x ? String((x as { symbol: unknown }).symbol) : null))
+        .filter((s): s is string => s !== null && s.length > 0);
+      shown = symbols.length > 0 ? `${raw.length} 项 · ${symbols.join('、')}` : `${raw.length} 项`;
+    } else {
+      const keys = Object.keys(raw as Record<string, unknown>);
+      shown = keys.length > 0 ? `${keys.length} 个字段：${keys.join('、')}` : '（空对象）';
+    }
     /*
      * 值本身是动作码时**也译掉**（`{"action":"open_short"}` → 「动作 | 开空」）。
      * 这里只做"值看起来像动作码"的**形态判据**，真正的中文来自调用方注入的
