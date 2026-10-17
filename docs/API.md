@@ -44,7 +44,7 @@
 ```json
 {
   "ok": true,
-  "version": "0.1.0",
+  "version": "<当前发布版本>",
   "uptimeSeconds": 128,
   "hasOwner": true,
   "dryRun": false,
