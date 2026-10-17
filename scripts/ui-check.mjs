@@ -189,15 +189,21 @@ for (const [route, label] of ROUTES) {
 
   const errs = consoleErrors.length - errBefore;
   const bad = badResponses.length - badBefore;
-  /* 旧判据（保持逐字不变）+ markdown 维度（默认只报、`--markdown-gate` 才计入判决）。 */
-  const ok = m.text > 300 && m.realOverflow.length === 0 && m.docOverflow <= 0 && errs === 0 && bad === 0;
-  const judged = ok && (!mdHit || mdGate);
-  if (!judged || m.clippedWithoutTitle.length > 0) problems++;
+  /*
+   * 判决分两层，**逐字保留旧判据**（这样"有凭据时行为不变"是可核对的）：
+   *   · `okOld` —— 改动前那五个条件，一个不动；
+   *   · `fails` —— 再加上 markdown 维度，而它**只在 `--markdown-gate` 时才算失败**。
+   * 页头那个字符与 `problems` 用同一个判据算，避免出现"显示 ✅ 却计入 problems"
+   * 那种自相矛盾（旧版有这种形态，今天 0 处触发）。
+   */
+  const okOld = m.text > 300 && m.realOverflow.length === 0 && m.docOverflow <= 0 && errs === 0 && bad === 0;
+  const fails = !okOld || m.clippedWithoutTitle.length > 0 || (mdHit && mdGate);
+  if (fails) problems++;
   if (mdHit) mdPages.push({ route, ...markdown });
 
   console.log(
     `  ${route.padEnd(13)} ${label.padEnd(7)} 正文 ${String(m.text).padStart(6)} 字  可滚 ${String(m.scrollable).padStart(5)}px  ${
-      judged ? (mdHit ? '⚠️' : '✅') : '❌'
+      fails ? '❌' : mdHit ? '⚠️' : '✅'
     }`,
   );
   for (const o of m.realOverflow) console.log(`      ⚠️ <${o.tag}> 溢出 ${o.over}px  ${o.cls}`);
