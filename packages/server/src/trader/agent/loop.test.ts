@@ -184,6 +184,47 @@ test('token 与延迟被累加（预算是硬约束，不能估）', async () =>
 /*  单次调用档                                                                 */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * 线上真实失败形状（t69）：模型一次吐了**两个** JSON 对象。
+ *
+ * 线上 `agent_runs` 的 detail 原文就是它：
+ * ```
+ *   单次调用的输出无法解析：无法从回复里解析出 JSON 对象（前 120 字符：{"thought":"先看绩效…
+ *   {"thought":"同时看最近的决策与拒绝记录…
+ * ```
+ */
+const TWO_OBJECTS =
+  '{"thought":"先看绩效与权益曲线…","state":"亏损中","sampleAdequate":true}\n' +
+  '{"thought":"同时看最近的决策与拒绝记录…","state":"亏损中","sampleAdequate":false}';
+
+/** 另一种实测形状：JSON 后面跟了含 `}` 的说明文字（切片会拼出非法 JSON）。 */
+const TRAILING_BRACE = '{"state":"亏损中","sampleAdequate":true}\n补充：若权益曲线 {下降} 则另论。';
+
+const GOOD_OBJECT = '{"state":"正常","sampleAdequate":true}';
+
+/** 记下**每一次调用的 user 消息** —— 重试指令只在第二次出现，这要靠它证明。 */
+function recording(replies: readonly string[]): {
+  model: LoopModel;
+  calls: () => number;
+  users: string[];
+  systems: string[];
+} {
+  let i = 0;
+  const users: string[] = [];
+  const systems: string[] = [];
+  const model: LoopModel = {
+    complete: async (system, user) => {
+      systems.push(system);
+      users.push(user);
+      const text = replies[Math.min(i, replies.length - 1)];
+      i += 1;
+      if (text === undefined) throw new Error('桩模型没有脚本了');
+      return { text, usage: { promptTokens: 1000, completionTokens: 200 }, latencyMs: 500 };
+    },
+  };
+  return { model, calls: () => i, users, systems };
+}
+
 test('单次调用：直接给结论，不给工具', async () => {
   const { deps } = makeDeps();
   const { model } = scripted([JSON.stringify({ state: '亏损中', sampleAdequate: false })]);
@@ -197,12 +238,131 @@ test('单次调用：直接给结论，不给工具', async () => {
 
 test('单次调用输出坏掉时标记 failed，不编造结论', async () => {
   const { deps } = makeDeps();
-  const { model } = scripted(['我无法判断。']);
+  /*
+   * ⚠️ 两条脚本（t69）：解析失败会**重试一次**，所以桩必须准备第二次回复。
+   * 这条用例守的是"**两次都坏**时不许编造结论"—— 语义与原来完全一致，只是多给一次机会。
+   */
+  const { model } = scripted(['我无法判断。', '我仍然无法判断。']);
 
   const r = await runSingleShot({ role: 'performance_analyst', task: 'x', facts: 'y', deps, model });
 
   assert.equal(r.outcome, 'failed');
   assert.equal(r.conclusion, null);
+});
+
+/* --- ★ 负向校准 ①（t69）：两个对象 → 必须触发重试，且重试 prompt 含明确要求 --- */
+
+test('★★★ 负向校准①：解析失败必须重试一次，且重试 prompt 要求「只输出一个 JSON 对象」', async () => {
+  const { deps } = makeDeps();
+  const { model, calls, users } = recording([TWO_OBJECTS, GOOD_OBJECT]);
+
+  const r = await runSingleShot({ role: 'performance_analyst', task: 'x', facts: 'y', deps, model });
+
+  /* ① 重试被触发：**恰好 2 次**调用（不是 1 次"直接放弃"，也不是 3 次"无限重试"）。 */
+  assert.equal(calls(), 2, `★★★ 解析失败后应**恰好重试 1 次**（共 2 次调用），实际 ${calls()} 次`);
+  /* ② 重试的那条 user 消息必须含那三句要求（每一句防一种实测形状）。 */
+  const retryUser = users[1] ?? '';
+  assert.match(retryUser, /只输出一个 JSON 对象/, '重试 prompt 必须要求"只输出一个 JSON 对象"（防多对象）');
+  assert.match(retryUser, /不要重复输出/, '重试 prompt 必须要求"不要重复输出"');
+  assert.match(retryUser, /不要在 JSON 前后加任何文字/, '重试 prompt 必须要求"不要在 JSON 前后加任何文字"（防切片拼坏）');
+  /* ③ **首次** prompt 不许带这段指令 —— 否则正常轮次会多背一段噪音。 */
+  assert.doesNotMatch(users[0] ?? '', /只输出一个 JSON 对象/, '首次调用不该带重试指令');
+  /* ④ 重试救回来之后，结论与"第一次就成功"完全一致。 */
+  assert.equal(r.outcome, 'ok', '★★★ 重试成功后必须是 ok —— 这正是本修复要换来的结果');
+  assert.equal(r.conclusion, GOOD_OBJECT, '结论必须来自第二次（成功的那次）');
+  assert.equal(r.detail, '单次调用完成。', '成功路径的 detail 必须逐字节不变');
+});
+
+test('★★★ 负向校准①b：JSON 后跟含 } 的文字也走同一条重试路径', async () => {
+  const { deps } = makeDeps();
+  const { model, calls } = recording([TRAILING_BRACE, GOOD_OBJECT]);
+
+  const r = await runSingleShot({ role: 'performance_analyst', task: 'x', facts: 'y', deps, model });
+
+  assert.equal(calls(), 2, `★ 这种形状同样应重试一次，实际调用 ${calls()} 次`);
+  assert.equal(r.outcome, 'ok');
+});
+
+/* --- ★ 负向校准 ②（t69）：重试仍失败 → failed 且 detail 必须说清"已重试" --- */
+
+test('★★★ 负向校准②：重试仍失败时 detail 必须含「已重试」，不许让人以为第一次就死了', async () => {
+  const { deps } = makeDeps();
+  const { model, calls } = recording([TWO_OBJECTS, TWO_OBJECTS]);
+
+  const r = await runSingleShot({ role: 'performance_analyst', task: 'x', facts: 'y', deps, model });
+
+  assert.equal(calls(), 2, '★ 重试仍失败也要**恰好 2 次**，不许退化成 3 次以上');
+  assert.equal(r.outcome, 'failed');
+  assert.equal(r.conclusion, null, '失败时不许编造结论');
+  assert.match(r.detail, /已重试 1 次仍失败/, `★★★ detail 必须写明已重试，实际：${r.detail.slice(0, 80)}`);
+  assert.match(r.detail, /无法从回复里解析出 JSON 对象/, '★ 底层原因仍要保留（否则排查时看不到真实形状）');
+});
+
+/* --- ★ 负向校准 ③（t69）：去掉重试逻辑后测试必须变红（防恒真） --- */
+
+test('★★★ 负向校准③：把一个"不重试"的实现跑同一套判据，必须报出问题（防恒真）', async () => {
+  /*
+   * ## 为什么这条不能省
+   *
+   * 上面两条断言的是"重试**发生了**"。而一个**什么都没做**的实现（或者说：
+   * 有人把这轮的重试逻辑删掉）会让 `calls() === 1`、`detail` 里没有"已重试" ——
+   * 但那两条断言**本身仍然是有效的**（它们会红）。这一条把"红"这件事**显式证明一遍**：
+   *
+   * ```
+   *   ✗ 只断言"重试发生了" → 读者无从知道"不重试会不会也通过"（万一断言写松了呢）
+   *   ✓ 同时对人造的不重试实现断言"必须红" → 判据的有效性被钉住
+   * ```
+   *
+   * ⚠️ 这里**不复刻一份 loop.ts 的实现**（那会立刻漂移）。做法是：用一个
+   * **只调一次模型、失败即返回**的桩"实现"，把它喂给同一组判据函数。
+   */
+  const singleAttempt = async (): Promise<{ calls: number; detail: string }> => {
+    const { model, calls } = recording([TWO_OBJECTS]);
+    await model.complete('s', 'u'); /* 只调一次，模拟"没有重试" */
+    return { calls: calls(), detail: '单次调用的输出无法解析：无法从回复里解析出 JSON 对象' };
+  };
+  const broken = await singleAttempt();
+
+  /* 同一组判据（与上面两条测试同形）在人造实现上必须失败。 */
+  assert.notEqual(broken.calls, 2, '★★★ 校准夹具本身要能演示"不重试"：调用次数不该是 2');
+  assert.doesNotMatch(
+    broken.detail,
+    /已重试 1 次仍失败/,
+    '★★★ 校准夹具本身要能演示"detail 里没有已重试"',
+  );
+
+  /* 并且：真实实现**不能**是那个形状 —— 这三条一起把"重试真的在"钉死。 */
+  const { deps } = makeDeps();
+  const { model, calls } = recording([TWO_OBJECTS, TWO_OBJECTS]);
+  const real = await runSingleShot({ role: 'performance_analyst', task: 'x', facts: 'y', deps, model });
+  assert.equal(calls(), 2, '真实实现必须是 2 次 —— 与上面的"不重试夹具（1 次）"形成对照');
+  assert.match(real.detail, /已重试 1 次仍失败/, '真实实现的 detail 必须含"已重试"');
+});
+
+test('★★★ token 与 latency 必须**包含**重试那一次（它确实花了钱与时间）', async () => {
+  const { deps } = makeDeps();
+  const { model } = recording([TWO_OBJECTS, GOOD_OBJECT]);
+
+  const r = await runSingleShot({ role: 'performance_analyst', task: 'x', facts: 'y', deps, model });
+
+  /* 桩每次 1000/200 tokens、500ms ⇒ 两次调用应累加成 2000/400/1000。 */
+  assert.equal(r.tokensIn, 2000, `★★ token 必须累计两次调用（实际 ${r.tokensIn}）—— 它决定预算判断`);
+  assert.equal(r.tokensOut, 400, `★★ 同上（实际 ${r.tokensOut}）`);
+  assert.equal(r.latencyMs, 1000, `★★ 延迟也必须累计（实际 ${r.latencyMs}）`);
+  assert.equal(r.steps.length, 0, '★ 重试不产生工具步骤 —— 单次调用档的语义不变');
+});
+
+test('★★★ 第一次就成功时只调用一次（重试不能变成"每轮都多烧一次"）', async () => {
+  const { deps } = makeDeps();
+  const { model, calls, users } = recording([GOOD_OBJECT]);
+
+  const r = await runSingleShot({ role: 'performance_analyst', task: 'x', facts: 'y', deps, model });
+
+  assert.equal(calls(), 1, `★★★ 正常轮次必须只调用 1 次，实际 ${calls()} 次 —— 否则每一轮都多花一倍 token`);
+  assert.equal(r.outcome, 'ok');
+  assert.equal(r.detail, '单次调用完成。', '成功路径 detail 逐字节不变');
+  assert.equal(r.tokensIn, 1000, '★ token 就是一次调用的量');
+  assert.doesNotMatch(users[0] ?? '', /只输出一个 JSON 对象/, '首次 prompt 不带重试指令');
 });
 
 /* -------------------------------------------------------------------------- */

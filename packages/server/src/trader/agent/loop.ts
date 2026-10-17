@@ -451,11 +451,56 @@ export const AGENT_CALL_MARKER =
   '本次调用来自交易系统的 agent 层（工具循环或单次结论），不是交易决策会议。';
 
 /**
+ * **解析失败时追加到 user 消息末尾的重试指令**（t69）。
+ *
+ * ## 为什么需要它（线上实测 31%–36% 的失败都死在这一条）
+ *
+ * `runSingleShot` 原来在解析失败时**直接返回 failed**，没有任何挽回动作：
+ * ```
+ *   agent_runs: strategy|ok|7   strategy|failed|4    ⇒ 36%
+ *   失败 detail 全是同一个形状：
+ *     单次调用的输出无法解析：无法从回复里解析出 JSON 对象（前 120 字符：{...}）
+ * ```
+ * 而 `loop.ts:170` 的历史注释已经写过同一件事（**37 次 failed 全是这个形状，占 31%**）——
+ * 当时只修了"错误信息在说谎"，**没修"失败后不重试"**。
+ *
+ * ## 为什么重试能救回来（而不是白烧一次 token）
+ *
+ * 失败的真实形状是「**模型一次吐了多个对象**」或「JSON 后跟了含 `}` 的文字」。
+ * 这两者都不是"模型不会答"，而是"**它多写了一段**" —— 明确要求之后，
+ * 它收敛到单个对象的概率很高。而代价只是多一次调用。
+ *
+ * ## ⚠️ 措辞里每一句都在防一种实测形状
+ *
+ * ```
+ *   只输出一个 JSON 对象        ← 防「多对象」（线上主形状）
+ *   不要重复输出                ← 防「同一个对象写两遍」
+ *   不要在 JSON 前后加任何文字   ← 防「JSON 后跟含 } 的说明」（切片会拼出非法 JSON）
+ * ```
+ *
+ * ⚠️ **这不改变解析层的严格性**：`parseRoleOutput` 对多对象仍然**必须失败**
+ * （`roles.ts:751-753`：取错对象会把一个角色的结论当成另一个角色的）。
+ * 重试只是**给模型一次改口的机会**，判据一点没松。
+ */
+const SINGLE_SHOT_RETRY_INSTRUCTION =
+  '\n\n## ⚠️ 上一次回复无法解析（可能有多个 JSON 对象，或 JSON 前后带了文字）\n' +
+  '请**只输出一个 JSON 对象**，不要重复输出、不要在 JSON 前后加任何文字。';
+
+/**
  * 一次"单次调用"（不开工具循环）—— 给常规轮次用的廉价档。
  *
  * 用途：大多数周期里没有什么值得深挖的，开完整面板是浪费。
  * 这一档让模型直接给结论，**不允许调工具**；需要查数据时它只能基于 `facts` 判断。
  * 由程序决定用哪一档（见 `intensityFor`），不让模型自己选 —— 否则它永远选最贵的那档。
+ *
+ * ## 解析失败会**重试恰好一次**（t69，修线上 36% 失败）
+ *
+ * 见 `SINGLE_SHOT_RETRY_INSTRUCTION` 的说明。三条纪律：
+ * ```
+ *   ① 只重试一次 —— 重试无限次会把一次失败放大成 N 次 token 消耗；
+ *   ② 重试仍失败时 detail 必须说清"已重试" —— 否则操作员会以为第一次就死了；
+ *   ③ token 计数与 latencyMs **包含重试那一次**（它确实花了钱/时间）。
+ * ```
  */
 export async function runSingleShot(input: Omit<LoopInput, 'maxSteps'>): Promise<LoopResult> {
   const spec = ROLES[input.role];
@@ -463,29 +508,56 @@ export async function runSingleShot(input: Omit<LoopInput, 'maxSteps'>): Promise
     `${spec.system}\n\n注意：本次你没有工具可用，只能依据下面给出的事实直接给结论。` +
     `如果事实不足以判断，就明说数据不足。\n\n${AGENT_CALL_MARKER}`;
   const started = Date.now();
-  const reply = await input.model.complete(system, `## 你的任务\n${input.task}\n\n## 已知事实\n${input.facts}`);
 
-  const parsed = parseRoleOutput<Record<string, unknown>>(reply.text);
-  if (parsed.error || !parsed.value) {
-    return {
-      outcome: 'failed',
-      steps: [],
-      conclusion: null,
-      detail: `单次调用的输出无法解析：${parsed.error}`,
-      tokensIn: reply.usage.promptTokens ?? 0,
-      tokensOut: reply.usage.completionTokens ?? 0,
-      latencyMs: reply.latencyMs || Date.now() - started,
-    };
+  /** user 消息。⚠️ 第一次与重试的**唯一区别**是末尾那段指令。 */
+  const baseUser = `## 你的任务\n${input.task}\n\n## 已知事实\n${input.facts}`;
+  const MAX_ATTEMPTS = 2; /* 原始 + 重试 1 次 —— 上限写死在这里，不参数化（见上面第 ① 条）。 */
+
+  let tokensIn = 0;
+  let tokensOut = 0;
+  let latency = 0;
+  let lastError: string | null = null;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const user = attempt === 1 ? baseUser : `${baseUser}${SINGLE_SHOT_RETRY_INSTRUCTION}`;
+    const reply = await input.model.complete(system, user);
+    tokensIn += reply.usage.promptTokens ?? 0;
+    tokensOut += reply.usage.completionTokens ?? 0;
+    latency += reply.latencyMs || 0;
+
+    const parsed = parseRoleOutput<Record<string, unknown>>(reply.text);
+    if (!parsed.error && parsed.value) {
+      return {
+        outcome: 'ok',
+        steps: [],
+        conclusion: JSON.stringify(parsed.value),
+        /*
+         * ⚠️ 第一次就成功时 detail **逐字节不变**（"单次调用完成。"）——
+         * 上游有测试与界面在读它，不能因为"加了重试"就让成功路径的话变了。
+         */
+        detail: '单次调用完成。',
+        tokensIn,
+        tokensOut,
+        latencyMs: latency || Date.now() - started,
+      };
+    }
+    lastError = parsed.error ?? '（无错误信息）';
   }
 
+  /*
+   * 走到这里 = 两次都解析失败。
+   *
+   * ⚠️ **detail 必须写明"已重试"**：不然操作员看到"单次调用的输出无法解析"
+   * 会以为第一次就失败了、去查模型/网关 —— 而真相是我们已经让它重写过一遍。
+   */
   return {
-    outcome: 'ok',
+    outcome: 'failed',
     steps: [],
-    conclusion: JSON.stringify(parsed.value),
-    detail: '单次调用完成。',
-    tokensIn: reply.usage.promptTokens ?? 0,
-    tokensOut: reply.usage.completionTokens ?? 0,
-    latencyMs: reply.latencyMs || Date.now() - started,
+    conclusion: null,
+    detail: `单次调用的输出无法解析（已重试 ${MAX_ATTEMPTS - 1} 次仍失败）：${lastError}`,
+    tokensIn,
+    tokensOut,
+    latencyMs: latency || Date.now() - started,
   };
 }
 
