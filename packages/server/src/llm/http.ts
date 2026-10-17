@@ -34,6 +34,43 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 5;
 
 /**
+ * **undici 自己的"响应头 / 响应体"超时**（毫秒）—— 实盘 P0，2026-10-17。
+ *
+ * ## 为什么必须设它（不改的话，错误信息会说谎）
+ *
+ * `new Agent({...})` 不传这两个值时，undici 用**自己的默认值 300 秒**。
+ * 而本项目的模型超时来自 `ai_models.timeout_seconds`（线上那个 `#10` 是 **600 秒**）
+ * —— 于是 **undici 比应用层先 abort**：
+ *
+ * ```
+ *   ① undici 在 300s 掐断连接 → 抛 TypeError: fetch failed
+ *   ② 应用层把它归类成"连不上" → 日志写「AI 服务不可用」
+ *   ③ 自检再概括成「AI 服务持续失联近 5 小时」
+ * ```
+ *
+ * 而真相是"**这次推理比 300 秒慢**"：同一时刻 `curl` 直连那个网关是 200 / 2.3 秒，
+ * 团队模式的机器人（提示词只有它的 1/2）也成功。**一条说错方向的错误信息，
+ * 让排查绕了整整一圈** —— 这正是本仓反复强调"错误信息必须说实话"的那种代价。
+ *
+ * ## 为什么是 900 秒（而不是 301 秒）
+ *
+ * 取值必须**严格大于任何可能的 `timeout_seconds`**：只要应用层的
+ * `AbortSignal.timeout(600s)` 先触发，抛出的就是**语义正确**的超时错误
+ * （可重试、日志里写"超时"而不是"连不上"）。900 秒给 600 秒留了 50% 余量。
+ *
+ * ⚠️ **如果哪天把 `ai_models.timeout_seconds` 配到 900 秒以上，这个值必须一起调大** ——
+ * 否则又会出现"undici 先断、错误信息说谎"。`undiciResponseTimeout.test.ts`
+ * 里有一条判据把这个关系钉住（它断言这里 **大于** 线上实测的 600 秒）。
+ *
+ * ⚠️ **它不该被理解成"放松了超时闸门"**：
+ *   · `connectTimeout`（连接建立）**保持 undici 默认的 10 秒** —— 真连不上的端点
+ *     仍然在 10 秒内快速失败，报 `Cannot reach`（负向校准用例二钉住这一条）；
+ *   · 真正的"这次调用最多等多久"仍由应用层的 `AbortSignal.timeout` 决定，
+ *     而这个值只负责"别比应用层先动手"。
+ */
+export const GUARDED_RESPONSE_TIMEOUT_MS = 900_000;
+
+/**
  * **连接层校验：DNS rebinding 的正解**（外部 issue #126）。
  *
  * ## 为什么 `checkOutboundUrl` 不够
@@ -72,12 +109,31 @@ const MAX_REDIRECTS = 5;
 const agentCache = new Map<string, Dispatcher>();
 
 /** 取一个带连接层校验的 undici `Dispatcher`。 */
-export function guardedDispatcher(allowPrivateHosts: readonly string[]): Dispatcher {
-  const key = [...allowPrivateHosts].sort().join(',');
+export function guardedDispatcher(
+  allowPrivateHosts: readonly string[],
+  /**
+   * 仅用于测试与将来的"按应用超时联动"：覆盖 `headersTimeout` / `bodyTimeout`。
+   * 不传 = `GUARDED_RESPONSE_TIMEOUT_MS`（见它上面那段为什么不设会让错误信息说谎）。
+   */
+  options: { responseTimeoutMs?: number } = {},
+): Dispatcher {
+  const responseTimeoutMs = options.responseTimeoutMs ?? GUARDED_RESPONSE_TIMEOUT_MS;
+  /*
+   * ⚠️ **缓存键必须带上超时值**：同一个白名单配不同超时会拿到同一个 agent，
+   * 于是"传了参数却不生效"——那正是本仓最忌讳的那种静默失效。
+   */
+  const key = `${[...allowPrivateHosts].sort().join(',')}|${responseTimeoutMs}`;
   const cached = agentCache.get(key);
   if (cached) return cached;
 
   const agent = new Agent({
+    /*
+     * ⚠️⚠️ **这两个值必须由我们给**（见 `GUARDED_RESPONSE_TIMEOUT_MS` 的长注释）：
+     * undici 的默认是 300 秒，而应用的模型超时是 600 秒 ⇒ undici 先 abort ⇒
+     * `TypeError: fetch failed` ⇒ 日志写"AI 服务不可用" ⇒ 排查方向被带偏。
+     */
+    headersTimeout: responseTimeoutMs,
+    bodyTimeout: responseTimeoutMs,
     connect: {
       lookup: (hostname, options, callback) => {
         /*
