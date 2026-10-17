@@ -23,7 +23,7 @@ import { useApp, useEvents } from '../../lib/store';
 import { CommandPalette } from '../../components/CommandPalette';
 import { Toaster } from '../../components/Toaster';
 import type { ShellState } from '../types';
-import { useShellData } from './useShellData';
+import { systemPollMs, useShellData } from './useShellData';
 
 const ShellContext = createContext<ShellState | null>(null);
 
@@ -75,6 +75,7 @@ export function ShellRuntime({
   const logout = useApp((s) => s.logout);
   const refreshSystem = useApp((s) => s.refreshSystem);
   const refreshTraders = useApp((s) => s.refreshTraders);
+  const sessionStatus = useApp((s) => s.status);
   const connect = useEvents((s) => s.connect);
   const disconnect = useEvents((s) => s.disconnect);
   const socketStatus = data.socketStatus;
@@ -95,9 +96,27 @@ export function ShellRuntime({
   }, [connect, disconnect]);
 
   /*
+   * ⚠️ **登录成功之后必须再叫一次 `connect()`**（2026-10-17 · 台账 FRD-03）。
+   *
+   * 上面那个 effect 只在挂载时跑一次（`connect`/`disconnect` 是 zustand 的稳定引用），
+   * 而它跑的时候**可能还没有 token**：首屏的 `bootstrap()` 还在路上，或者用户是
+   * 从"会话失效"里重新登录回来的。那时 `connect()` 会因为没有 token 早返回，
+   * 而**之后再没有任何东西会叫它** —— 推送永久冻结，页面却显示"轮询兜底"。
+   *
+   * 认证状态是那个"再叫一次"的信号：`authenticated` 出现时连，
+   * 掉回 `anonymous` 时由 401/登出路径负责 `disconnect()`。
+   */
+  useEffect(() => {
+    if (sessionStatus === 'authenticated') connect();
+  }, [sessionStatus, connect]);
+
+  /*
    * 兜底轮询。推送正常时 10 秒一次，断了就 4 秒一次 ——
    * 断线时页面**什么都没说**会让人以为数据是新的，快一点翻新比弹一个
    * "连接断开"的横幅更省事（横幅在标题栏/状态栏里已经有了）。
+   *
+   * 间隔取自 `useShellData` 的同一个常量：状态栏那句话里的"N 秒"是按同一个数
+   * 算阈值的（3 × 间隔）。
    */
   useEffect(() => {
     const timer = window.setInterval(
@@ -105,7 +124,7 @@ export function ShellRuntime({
         void refreshSystem();
         void refreshTraders();
       },
-      socketStatus === 'open' ? 10_000 : 4_000,
+      systemPollMs(socketStatus === 'open'),
     );
     return () => window.clearInterval(timer);
   }, [refreshSystem, refreshTraders, socketStatus]);

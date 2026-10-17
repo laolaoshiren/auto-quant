@@ -564,14 +564,40 @@ function StatusBar() {
       <span
         className="cell"
         title={
-          online
-            ? '实时事件推送已连接，行情与委托变化会立即推到这个页面。'
-            : '实时推送不可用，页面已自动降级为轮询：数据仍会更新，只是延迟更大。无需手动操作，系统会自动重连。'
+          shell.socketBlockedReason !== null
+            ? `${shell.socketBlockedReason}。登录之后会自动重新连接。`
+            : online
+              ? '实时事件推送已连接，行情与委托变化会立即推到这个页面。'
+              : '实时推送不可用，页面已自动降级为轮询：数据仍会更新，只是延迟更大。无需手动操作，系统会自动重连。'
         }
       >
-        <Dot tone={online ? 'up' : shell.socketStatus === 'connecting' ? 'warn' : 'down'} pulse={!online} />
-        {online ? '推送在线' : shell.socketStatus === 'connecting' ? '连接中' : '轮询兜底'}
+        <Dot
+          tone={online ? 'up' : shell.socketStatus === 'connecting' ? 'warn' : 'down'}
+          pulse={online === false && shell.socketBlockedReason === null}
+        />
+        {shell.socketBlockedReason !== null
+          ? shell.socketBlockedReason
+          : online
+            ? '推送在线'
+            : shell.socketStatus === 'connecting'
+              ? '连接中'
+              : '轮询兜底'}
       </span>
+
+      {/*
+        **系统状态停更**（2026-10-17 · 台账 FRD-01）。
+        状态栏只有 26px，所以这里只放这一句短话 —— 后果写在 `title` 里，
+        与"越界项只变色、告警在标题栏"的既有约定一致（见上面那段注释）。
+      */}
+      {shell.statusStale && (
+        <span
+          className="cell text-warn"
+          title={`最近一次读取系统状态失败${shell.statusError ? `：${shell.statusError}` : ''}。下面这些读数（推送/环境/运行数）都是上一次成功读到的，可能已经过期。`}
+        >
+          <TriangleAlert aria-hidden className="h-3.5 w-3.5" />
+          {shell.statusStaleLabel}
+        </span>
+      )}
 
       <span className="cell" title={`接口端点：${shell.system?.environmentLabel ?? '连接中…'}`}>
         <Dot tone={shell.system?.dryRun ? 'accent' : 'warn'} />

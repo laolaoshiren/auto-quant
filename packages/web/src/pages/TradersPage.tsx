@@ -90,6 +90,16 @@ export function TradersPage() {
   const traders = tradersQuery.data ?? [];
 
   const statsMap = useSummaries((s) => s.stats);
+  /*
+   * ⚠️ **`errors` 必须有人消费**（2026-10-17 · 台账 FRD-01 验收 ③）。
+   *
+   * `useSummaries.fetchOne` 失败时一直只写 `errors[id]`，而**全仓没有一处读它** ——
+   * 那意味着"这台机器人的统计读不到"这件事在界面上完全不存在：列表里那一行的
+   * 权益/收益率停在最后一次成功的值上，看起来和"刚更新过"一模一样。
+   *
+   * 现在它在这里消费（列表是"一眼看全舰队"的地方，陈旧读数必须能一眼看出）。
+   */
+  const summaryErrors = useSummaries((s) => s.errors);
   const refreshMany = useSummaries((s) => s.refreshMany);
 
   /*
@@ -425,7 +435,7 @@ export function TradersPage() {
           }
           title={
             staleAccounts.length > 0
-              ? `⚠️ 其中 ${staleAccounts.map((a) => `#${a.exchangeAccountId}`).join('、')} 的权益读数是**旧的** —— ` +
+              ? `⚠️ 其中 ${staleAccounts.map((a) => `#${a.exchangeAccountId}`).join('、')} 的权益读数是旧的 —— ` +
                 '那些账户下的机器人都不在运行，所以没有新快照。这个数字是最后一次读到的值，不代表现在的钱包。'
               : '按交易所账户合计的权益：同一账户下的多个机器人共用同一个钱包，只算一次；账户之间再相加。表格每一行的「归属权益」是那个机器人自己的贡献。'
           }
@@ -561,6 +571,14 @@ export function TradersPage() {
                           {trader.consecutiveFailures > 0 && (
                             <div className="mt-0.5 text-xs text-warn">{trader.consecutiveFailures} 次连续失败</div>
                           )}
+                          {summaryErrors[trader.id] ? (
+                            <div
+                              className="mt-0.5 text-xs text-warn"
+                              title={`读取这台机器人的统计失败：${summaryErrors[trader.id]}。这一行的权益/收益率是上一次成功读到的值。`}
+                            >
+                              统计读不到（显示的是旧值）
+                            </div>
+                          ) : null}
                         </td>
                         <td className={`td num text-right ${stats ? 'text-ink-hi' : 'text-ink-faint'}`}>
                           {/*
@@ -700,7 +718,7 @@ export function TradersPage() {
                               className="text-xs text-ink-faint"
                               title={
                                 (isLedgerSuspect(trader.ledger)
-                                  ? '平台账本与交易所的成交流水对不上，所以这一行改用**交易所**的流水校准。'
+                                  ? '平台账本与交易所的成交流水对不上，所以这一行改用交易所的流水校准。'
                                   : `${pnlFormulaText(statsCosts(stats))}。`) +
                                 `浮动盈亏 ${fmtUsdSigned(stats.unrealizedPnl, 2)} 未计入本行。`
                               }

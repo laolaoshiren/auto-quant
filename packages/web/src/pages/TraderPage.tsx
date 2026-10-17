@@ -31,6 +31,7 @@ import { PageShell, Metric } from '../components/shell';
 import { DecisionFeed } from '../components/DecisionFeed';
 import { AgentAuditPanel } from '../components/AgentAuditPanel';
 import { isOpenOrder, TraderTables, type TraderTabId } from '../components/TraderTables';
+import { MODE_HINT, MODE_LABEL, isPaperView, paperLabel } from '../lib/glossary';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import { DashboardEquityChart, WinLossBar } from '../components/DashboardCharts';
 import { LeverageArc } from '../components/LeverageArc';
@@ -1264,7 +1265,7 @@ export function TraderPage() {
           tone="strong"
           title={
             useSimulatedBalance
-              ? '模拟盘：这里的余额是本机器人的**模拟权益**（起始权益 + 已实现净额 + 浮盈），' +
+              ? '模拟盘：这里的余额是本机器人的模拟权益（起始权益 + 已实现净额 + 浮盈），' +
                 '与列表页的「归属权益」同一个数。' +
                 '模拟成交不会动真实钱包，所以不能拿交易所余额当这里的答案。'
               : account
@@ -1319,9 +1320,9 @@ export function TraderPage() {
                 `已平仓净额（交易所校准 ${fmtUsdSigned(ledger!.exchangeNet, 2)}）+ 本机器人当前浮盈。` +
                 `本地账本记的是 ${fmtUsdSigned(ledger!.platformNet, 2)}，与交易所差 ${fmtUsdSigned(ledger!.gap, 2)}` +
                 '（账本按"腿"记、交易所按"整回合"结算，共享账户下无法完全对齐）。' +
-                '下面的权益曲线画的是**本地账本**口径，所以它的「本段变化」会比这张卡片多出这个差额 ——' +
+                '下面的权益曲线画的是本地账本口径，所以它的「本段变化」会比这张卡片多出这个差额 ——' +
                 '以卡片为准。'
-              : '总盈亏 = 已平仓的净盈亏 + 当前持仓的浮动盈亏，**与下面曲线的「本段变化」同一个口径**。' +
+              : '总盈亏 = 已平仓的净盈亏 + 当前持仓的浮动盈亏，与下面曲线的「本段变化」同一个口径。' +
                 '它等于「归属权益 − 起始权益」（归属口径：只算这个机器人自己的账）。' +
                 '只看已平仓那一部分，见「盈亏拆解」。'
           }
@@ -1362,7 +1363,7 @@ export function TraderPage() {
           size="lg"
           title={
             account
-              ? `交易所账户里**被持仓与挂单**占用的保证金。${accountTitle}`
+              ? `交易所账户里被持仓与挂单占用的保证金。${accountTitle}`
               : '暂时读不到交易所账户读数。'
           }
           sub={
@@ -1498,8 +1499,71 @@ export function TraderPage() {
    * 留下的三样都是"这个机器人是什么"：模型、托管方式、以及推送异常时才出现的
    * 那条警告 —— 它们都不是数字，也不与任何卡片重复。
    */
+  /*
+   * ── 这台机器人自己的资金口径（台账 UI-11）────────────────────────────────
+   *
+   * 三个事实源，取值顺序与 `isPaperView()` / 服务端 `isPaperTrader()` 完全一致：
+   * ```
+   *   ① stats.dryRun    —— 运行时事实（正在跑的那个实例用的就是它）
+   *   ② trader.dryRun   —— 落库的操作员选择（停止时只有这一份）
+   *   ③ system.dryRun   —— 进程级默认（**不在这里用**：它属于顶栏那个徽章）
+   * ```
+   * ⚠️ 三态：`null` = "未知"（既没在运行、也从未指定过）。
+   * 把"未知"显示成"实盘"会让操作员以为一台停着的机器人在花真钱；
+   * 显示成"模拟"更危险 —— 他在花真钱时以为是纸面。两侧都是真钱事故。
+   */
+  const runtimePaper = stats?.dryRun ?? null;
+  const persistedPaper = trader?.dryRun ?? null;
+  const ownPaper = runtimePaper ?? persistedPaper;
+  const paperFactText =
+    ownPaper === null ? '模拟/实盘 未知（未在运行）' : ownPaper ? '模拟盘（不动真钱）' : '实盘（真实资金）';
+  const paperTone = ownPaper === null ? 'text-ink-faint' : ownPaper ? 'text-accent' : 'text-warn';
+  const paperFactTitle =
+    runtimePaper !== null
+      ? `运行时读数：${runtimePaper ? '模拟盘' : '实盘'}（来自正在跑的这个实例）`
+      : persistedPaper !== null
+        ? `落库的操作员选择：${persistedPaper ? '模拟盘' : '实盘'}（它现在没在运行；重启后按这一份恢复）`
+        : `从未指定过（它现在没在运行）：下次启动时按进程级默认，当前默认是${system?.dryRun ? '模拟盘' : system ? '实盘' : '未知'}`;
+
   const secondaryFacts = (
     <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 px-1 text-xs text-ink-lo">
+      {/*
+        ══════════════════════════════════════════════════════════════════════
+         **这台机器人是哪种模式 + 在跑模拟还是实盘**（2026-10-17 · 台账 UI-11 / 用户实测 U-2）
+        ══════════════════════════════════════════════════════════════════════
+
+        用户原话：「**智能托管模式 / 普通模式不清楚**」。而"不清楚"其实有两层：
+        ```
+          ① 它是【哪种模式】—— 三个名字散落在徽章、页头、创建弹窗里；
+          ② 它在【跑模拟还是实盘】—— 这件事此前**只在两个条件下**才显示，
+             而且从不与模式并列出现（见下面那段"越界状态才渲染"的说明）。
+        ```
+        所以这里把两件事**放在同一个视觉单元里**（一段文字、一个位置），
+        一眼读完就知道"这台是什么 + 花不花真钱"。
+
+        ⚠️ **两个事实源必须分开说**（`server.ts:2328-2331` 的硬约束）：
+        ```
+          这一格 → 这台机器人自己的口径：运行时 stats.dryRun → 落库 trader.dryRun
+          顶栏   → 进程级 env.dryRun（默认值），它**可以**与上面那个不一致
+        ```
+        取值顺序由 `isPaperView()` 统一提供（与服务端 `isPaperTrader` 同一条），
+        这里不自己拼。两个口径的**不一致**另有专门告警（见下面 `stats?.dryRun` 那一段），
+        所以这一格只负责"如实说它自己"。
+      */}
+      <span
+        className="flex flex-wrap items-baseline gap-x-1"
+        title={[
+          `运行模式：${MODE_LABEL[trader.mode]} —— ${MODE_HINT[trader.mode]}`,
+          `资金口径：${paperFactTitle}`,
+          `顶栏那个徽章说的是进程级默认（当前为${system?.dryRun ? '模拟盘' : system ? '实盘' : '未知'}），`,
+          '它与这一格说的不是同一个事实，两者可以不一致（启动参数是每次单独传的）。',
+        ].join('\n')}
+      >
+        <span className="text-ink-faint">运行模式</span>
+        <span className="font-medium text-ink-hi">{MODE_LABEL[trader.mode]}</span>
+        <span className="text-ink-faint">·</span>
+        <span className={`font-medium ${paperTone}`}>{paperFactText}</span>
+      </span>
       <span>
         {/*
           ⚠️ **团队模式不显示「AI 模型」**（用户 2026-10-12 明确要求）。
@@ -1543,7 +1607,7 @@ export function TraderPage() {
         */}
         {trader.mode === 'ai_managed' ? (
           <span title="参数与交易提示词由 AI 自主设定并持续调整；生效的配置不在策略里。">
-            智能托管
+            {MODE_LABEL.ai_managed}
           </span>
         ) : trader.mode === 'ai_team' ? (
           /*
@@ -1554,7 +1618,7 @@ export function TraderPage() {
            * 把 `null` 渲染成「策略 #null」并链到 `/strategy/null` ——
            * 一个**指向不存在页面的链接**，浏览器实测确实看到了「策略 #null」。
            */
-          <span title="AI 团队模式不引用策略；参数由团队按角色自行管理。">AI 团队（多智能体）</span>
+          <span title="AI 团队模式不引用策略；参数由团队按角色自行管理。">{`${MODE_LABEL.ai_team}（多智能体）`}</span>
         ) : (
           <>
             策略{' '}
@@ -1861,7 +1925,7 @@ export function TraderPage() {
           {stats?.dryRun === true && (
             <Badge
               tone="accent"
-              title="这个机器人此刻在模拟模式下运行：订单只在本地撮合，不会发到交易所。注意顶栏那个徽章说的是**平台**，不是它。"
+              title="这个机器人此刻在模拟模式下运行：订单只在本地撮合，不会发到交易所。注意顶栏那个徽章说的是平台，不是它。"
             >
               模拟模式 —— 不会真的下单
             </Badge>
@@ -1869,7 +1933,7 @@ export function TraderPage() {
           {stats?.dryRun === false && system?.dryRun === true && (
             <Badge
               tone="warn"
-              title="这个机器人是**实盘**启动的：订单会用真实资金发到交易所。顶栏那个「模拟」说的是平台默认值，不是它。"
+              title="这个机器人是实盘启动的：订单会用真实资金发到交易所。顶栏那个「模拟」说的是平台默认值，不是它。"
             >
               实盘 —— 真实资金
             </Badge>
@@ -2271,6 +2335,16 @@ export function TraderPage() {
           tab={tableTab}
           onChange={setTableTab}
           positionCount={openPositionCount}
+          /*
+           * **模拟盘判断的唯一入口**（台账 ORD-01）：三个事实源的取值顺序写在
+           * `isPaperView()` 里，与**服务端** `isPaperTrader()` 同一条 ——
+           * 这里不许自己拼一个布尔值（那会是第二份实现，改一处等于没改）。
+           */
+          paper={isPaperView({
+            runtimeDryRun: stats?.dryRun,
+            persistedDryRun: trader?.dryRun,
+            processDryRun: system?.dryRun,
+          })}
           onSelectSymbol={(symbol) => {
             /*
              * ⚠️ **点币种要同时把图表切到「行情」** —— 只设币种是不够的。

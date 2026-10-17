@@ -36,7 +36,7 @@ import { DEPARTMENT_ORDER, FIRM_ROLES, type FirmRole } from '@aq/shared';
 import {
   PHASE_LABEL,
   STATE_HINT,
-  STATE_LABEL,
+  stateLabel,
   TIER_LABEL,
   clock,
   lastSeenOf,
@@ -109,12 +109,34 @@ function lastSeenLabel(at: string | null, now: number): string | null {
 }
 
 /**
+ * **"多久之前"的一句话**（回放态头部用）：`刚刚` / `42 分钟前` / `3 小时前`。
+ *
+ * 与 `lastSeenLabel` 分开：那个说的是"这个岗位最近一次干活是什么时候"，
+ * 这里说的是"**这一轮**是什么时候跑的"。两者都要相对量 —— 绝对时刻
+ * （`clock()` 的 `HH:MM:SS`）在这里反而要操作员心算。
+ */
+function agoLabel(at: string | null, now: number): string | null {
+  if (at === null) return null;
+  const t = Date.parse(at);
+  if (!Number.isFinite(t)) return null;
+  const sec = Math.max(0, Math.round((now - t) / 1000));
+  if (sec < 60) return '刚刚';
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
+  if (sec < 86_400) return `${Math.floor(sec / 3600)} 小时前`;
+  return `${Math.floor(sec / 86_400)} 天前`;
+}
+
+/**
  * **工作流看板**。
  *
  * @param steps 本轮的实时步骤流（`LiveCycle.steps`）
  * @param cycleNumber 本轮编号
  * @param startedAt 本轮开始时刻（epoch ms），用于算"已用时"
  * @param roster 编制表（默认 `FIRM_ROLES`；注入是为了可测）
+ * @param replay **这不是在途轮次，而是最近一轮的历史回放**（台账 UI-01）。
+ *   为真时：头部写「最近一轮 #N · X 分钟前」、状态词用「已产出（上一轮）」、
+ *   阶段轨隐藏（`<team>` 块里根本没有阶段信息，编一个出来就是假事实）。
+ * @param replayAt 被回放的那一轮的时刻（ISO）；`null` = 不知道。
  */
 export function TeamBoard({
   steps,
@@ -123,12 +145,24 @@ export function TeamBoard({
   roster = FIRM_ROLES,
   history = [],
   initialShowRest = false,
+  replay = false,
+  replayAt = null,
 }: {
   steps: readonly TeamStep[];
   cycleNumber: number;
   /** `null` = 不知道开始时刻（例如页面刚连上），此时不显示计时器。 */
   startedAt: number | null;
   roster?: readonly FirmRole[];
+  /**
+   * **这不是在途轮次，而是最近一轮的历史回放**（台账 UI-01）。
+   *
+   * 为真时三处都变：头部写「最近一轮 #N · X 分钟前」、岗位状态词走
+   * `stateLabel(state, true)`（→「已产出（上一轮）」）、阶段轨整条不渲染。
+   * 默认 `false` = 实时态（逐字节与改动前一致）。
+   */
+  replay?: boolean;
+  /** 被回放的那一轮的时刻（ISO）；`null` = 不知道（头部就不显示"多久之前"）。 */
+  replayAt?: string | null;
   /**
    * **历史决策记录**（从旧到新）—— 用于"最近活跃于 X 分钟前"。
    *
@@ -170,7 +204,7 @@ export function TeamBoard({
   }, [startedAt]);
 
   const seen = useMemo(() => lastSeenOf(history), [history]);
-  const entries = useMemo(() => rosterEntries(steps, roster, seen), [steps, roster, seen]);
+  const entries = useMemo(() => rosterEntries(steps, roster, seen, replay), [steps, roster, seen, replay]);
 
   /** 一键"展开全部详情" —— 用户说"用户有需要可以手动点击打开查看详情"。 */
   const [allOpen, setAllOpen] = useState(false);
@@ -270,32 +304,58 @@ export function TeamBoard({
           <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse-soft" />
           AI 工作流
         </span>
-        <span className="num text-xs text-ink-lo">第 {cycleNumber} 轮</span>
+        {/*
+          ⚠️ **在途 / 回放，两句话**（台账 UI-01）。
+          ```
+            在途：「第 103 轮」           —— 现在正在跑第 103 轮
+            回放：「最近一轮 #103 · 42 分钟前」 —— 没有在途轮次，这是上一轮的产出
+          ```
+          原来的文案只有前者，于是没有在途轮次时界面上写着「第 103 轮」
+          与「本轮在干 4」—— 而那一轮 42 分钟前就结束了（真实浏览器实测）。
+        */}
+        <span className="num text-xs text-ink-lo">
+          {replay ? `最近一轮 #${cycleNumber}` : `第 ${cycleNumber} 轮`}
+        </span>
+        {replay && agoLabel(replayAt, now) !== null && (
+          <span className="num text-xs text-ink-faint" title="这一轮是什么时候跑完的（相对时间）。">
+            · {agoLabel(replayAt, now)}
+          </span>
+        )}
 
         {/*
           进度轨：走到过哪些阶段。
           `text-ink-hi` 表示"到过"，`text-ink-faint` 表示"还没到" ——
           用颜色之外还有**箭头方向**表达顺序，不依赖颜色。
-        */}
-        <ol className="flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs" aria-label="本轮编排进度">
-          {PHASE_FLOW.map((phase, index) => {
-            const seen = seenPhases.has(phase);
-            return (
-              <li key={phase} className="flex items-center gap-1">
-                {index > 0 && (
-                  <span aria-hidden className="text-ink-faint">
-                    →
-                  </span>
-                )}
-                <span className={seen ? 'text-ink-hi' : 'text-ink-faint'}>{PHASE_LABEL[phase] ?? phase}</span>
-              </li>
-            );
-          })}
-        </ol>
 
-        {/* 四个计数把"团队现在什么状况"压成一句话。 */}
+          ⚠️ **回放态整条不渲染**（台账 UI-01 验收 ③）。
+          回放的数据来自已落库的 `<team>` 块，那里**没有阶段信息**
+          （`latestTeamSteps` 的 `phase` 恒为 `null`），于是这条轨在回放态
+          **永远全灰** —— 读起来像"一步都没走到"，而那一轮其实跑完了。
+          全灰与全亮都是编的，所以不显示。
+        */}
+        {!replay && (
+          <ol className="flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs" aria-label="本轮编排进度">
+            {PHASE_FLOW.map((phase, index) => {
+              const seen = seenPhases.has(phase);
+              return (
+                <li key={phase} className="flex items-center gap-1">
+                  {index > 0 && (
+                    <span aria-hidden className="text-ink-faint">
+                      →
+                    </span>
+                  )}
+                  <span className={seen ? 'text-ink-hi' : 'text-ink-faint'}>{PHASE_LABEL[phase] ?? phase}</span>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+
+        {/* 四个计数把"团队现在什么状况"压成一句话 —— 回放态说的是**上一轮产出**。 */}
         <span className="ml-auto flex flex-wrap items-center gap-x-2 text-xs">
-          <span className="text-up">本轮在干 {working}</span>
+          <span className="text-up">
+            {replay ? `上一轮产出 ${working}` : `本轮在干 ${working}`}
+          </span>
           {failed > 0 && <span className="text-down">失败 {failed}</span>}
           <span className="text-ink-lo">在岗未叫 {idleStaffed}</span>
           {/*
@@ -362,6 +422,7 @@ export function TeamBoard({
               dept={dept}
               list={list}
               steps={steps}
+              replay={replay}
               isOpen={isOpen}
               onToggle={(id) =>
                 setClosed((prev) => {
@@ -414,6 +475,7 @@ export function TeamBoard({
                       dept={dept}
                       list={list}
                       steps={steps}
+                      replay={replay}
                       isOpen={isOpen}
                       onToggle={(id) =>
                         setClosed((prev) => {
@@ -440,12 +502,15 @@ function DeptGroup({
   dept,
   list,
   steps,
+  replay,
   isOpen,
   onToggle,
 }: {
   dept: string;
   list: RosterEntry[];
   steps: readonly TeamStep[];
+  /** 透传给 `AgentRow`：回放态的状态词与实时态不同（见 `stateLabel`）。 */
+  replay: boolean;
   isOpen: (id: string) => boolean;
   onToggle: (id: string) => void;
 }): React.ReactElement {
@@ -465,6 +530,7 @@ function DeptGroup({
           <li key={entry.role.id} data-role={entry.role.id}>
             <AgentRow
               entry={entry}
+              replay={replay}
               open={isOpen(entry.role.id)}
               onToggle={() => onToggle(entry.role.id)}
               steps={steps.filter((s) => s.role === entry.role.id)}
@@ -506,11 +572,14 @@ function DeptGroup({
  */
 function AgentRow({
   entry,
+  replay,
   open,
   onToggle,
   steps,
 }: {
   entry: RosterEntry;
+  /** 回放态：状态词换成「已产出（上一轮）」（见 `stateLabel`）。 */
+  replay: boolean;
   open: boolean;
   onToggle: () => void;
   steps: readonly TeamStep[];
@@ -534,12 +603,16 @@ function AgentRow({
       {/*
         ⚠️ **状态用文字写出来，不能只靠圆点颜色**（`DESIGN.md` §2，也是色盲用户的前提）。
         旧版只有一个圆点，而那个圆点的颜色类名根本不存在 —— 于是它连颜色都没有。
+
+        ⚠️ 2026-10-17：**必须走 `stateLabel(state, replay)`**，不能直接读 `STATE_LABEL[state]`
+        —— 回放态下"已完成"要写成「已产出（上一轮）」（台账 UI-01）。
+        直接读表的写法在回放态会说"这一轮还在干"，而那一轮可能十几分钟前就结束了。
       */}
       <span
         className={`shrink-0 text-xs font-medium leading-5 ${STATE_TEXT_CLASS[state]}`}
         title={plainText(STATE_HINT[state])}
       >
-        {STATE_LABEL[state]}
+        {stateLabel(state, replay)}
       </span>
       <span
         className="shrink-0 text-[11px] leading-5 text-ink-faint"

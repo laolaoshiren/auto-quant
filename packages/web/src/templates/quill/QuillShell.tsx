@@ -269,6 +269,22 @@ export function QuillShell() {
           )}
 
           {/*
+            **系统状态停更**（2026-10-17 · 台账 FRD-01）。
+            与上面几条同类：正常时不出现；出现时说的是"这些读数有多旧"，
+            而不是只报一个状态词。
+          */}
+          {shell.statusStale && (
+            <Tooltip
+              content={`最近一次读取系统状态失败${shell.statusError ? `：${shell.statusError}` : ''}。页面显示的是上一次成功读到的读数。`}
+            >
+              <Badge tone="warn" className="hidden shrink-0 md:inline-flex">
+                <TriangleAlert aria-hidden className="h-3.5 w-3.5" />
+                {shell.statusStaleLabel}
+              </Badge>
+            </Tooltip>
+          )}
+
+          {/*
             刷新。全局动作 —— 它不属于任何单独一页，而"数据是不是最新的"
             是盯盘时最常问的问题。放在头部而不是工具栏，是因为工具栏属于
             页面（页面自己的动作在那里）。

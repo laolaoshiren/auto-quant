@@ -20,6 +20,7 @@ import { api } from '../lib/api';
 import { useApp } from '../lib/store';
 import { useCopy, useDocumentTitle, usePolled } from '../lib/hooks';
 import { activePreset, cloneConfig, presetById, validateStrategy } from '../lib/strategy';
+import { PAGE_LABEL } from '../lib/glossary';
 import { Badge, Button, CopyButton, ErrorNote, Panel, Select, Spinner3, cn } from '../components/ui';
 import { CoinSourceSection, IndicatorsSection } from '../components/StrategyFields';
 import { PromptSection, ProtectionSection, RiskSection, StrategyHeaderSection } from '../components/StrategyRiskFields';
@@ -502,7 +503,7 @@ export function StrategyEditorPage() {
       <Panel title="未找到策略">
         <p className="text-base text-ink-lo">{recordQuery.error ?? '它可能已被删除。'}</p>
         <Link to="/strategy" className="btn btn-ghost mt-3 inline-flex">
-          返回策略工坊
+          返回{PAGE_LABEL.strategy}
         </Link>
       </Panel>
     );
@@ -546,7 +547,7 @@ export function StrategyEditorPage() {
             className="shrink-0 text-base text-ink-lo transition hover:text-accent"
             title={dirty ? '有未保存的修改' : undefined}
           >
-            ← 策略工坊
+            ← {PAGE_LABEL.strategy}
           </Link>
           <h1 className="min-w-0 max-w-[40vw] truncate text-lg font-semibold tracking-wide text-ink-hi">
             {state.name || '未命名策略'}

@@ -17,6 +17,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useDocumentTitle } from '../lib/hooks';
+import { PAGE_LABEL } from '../lib/glossary';
 import { Badge, Button, Panel, cn } from '../components/ui';
 import { SectionHeading } from '../components/Badges';
 import { PageShell, SectionLabel, PAGE_MAIN_ID } from '../components/shell';
@@ -72,7 +73,7 @@ const FAQ: Array<{ id: string; q: string; short: string; a: string }> = [
     id: 'faq-symbols',
     q: '币种从哪里来？',
     short: '币种从哪里来',
-    a: '四种来源，可在策略工坊中选择：你手写的静态列表、动态排名的币种池（按成交额、涨幅、跌幅、波动率或极端资金费率）、持仓量增长筛选，或以上几者的并集。成交额与持仓量下限始终生效，因此即使某个交易对在你的静态列表里，一旦流动性流失也会被剔除。',
+    a: `四种来源，可在${PAGE_LABEL.strategy}中选择：你手写的静态列表、动态排名的币种池（按成交额、涨幅、跌幅、波动率或极端资金费率）、持仓量增长筛选，或以上几者的并集。成交额与持仓量下限始终生效，因此即使某个交易对在你的静态列表里，一旦流动性流失也会被剔除。`,
   },
   {
     id: 'faq-audit',
@@ -104,7 +105,7 @@ const CHECKLIST: ReactNode[] = [
     添加后立刻点<span className="text-ink-hi">测试连接</span>，确认余额能读出来。
   </>,
   <>
-    在<span className="text-ink-hi">策略工坊</span>中从预设开始，然后逐段阅读并修改每一个提示词段落。
+    在<span className="text-ink-hi">{PAGE_LABEL.strategy}</span>中从预设开始，然后逐段阅读并修改每一个提示词段落。
     数字约束模型，文字引导模型。
   </>,
   <>

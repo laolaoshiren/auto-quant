@@ -6,6 +6,14 @@ export interface QueryState<T> {
   loading: boolean;
   /** Milliseconds epoch of the last successful load. */
   updatedAt: number | null;
+  /**
+   * **手里这份 `data` 是"上一次成功的、可能已经过期"的读数**（`data !== null && error !== null`）。
+   *
+   * 界面据此把话说清楚：「最新一次读取失败，下面是 N 秒前的数据」——
+   * 而不是把上一次的成功读数当成当前状态（那正是本仓库反复禁止的
+   * 「查不到 ≠ 没有」的展示面）。
+   */
+  stale: boolean;
   reload: () => void;
 }
 
@@ -15,6 +23,21 @@ export interface QueryState<T> {
  * Every fetch is abortable, so switching symbols or unmounting a trader page
  * cannot land a stale response in the UI. In-flight requests are skipped rather
  * than queued when a poll fires while the previous one is still running.
+ *
+ * ## 谁来"清旧数据"（2026-10-17 · 台账 FRD-05）
+ *
+ * 这里**必须**由协议层清，而不是让每个调用点自己 `filter` 一遍：
+ * ```
+ *   · deps 变（换机器人 / 换筛选）→ 旧 data 不属于新主体 → 清掉
+ *   · enabled 由 true 变 false     → 这个查询现在不成立 → 清掉
+ * ```
+ * 原来两条都不做，于是调用点各自打了补丁（`DecisionFeed.tsx` 的
+ * `filter(record => record.traderId === traderId)`、`TraderTables.tsx` 的同款）——
+ * **补丁的存在本身就是协议层该清而未清的证据**，而且只要有一个调用点忘了打，
+ * 屏幕上就会出现上一个机器人的持仓/决策。现在这两处补丁已删。
+ *
+ * ⚠️ **不因 `intervalMs`/`nonce` 变化清 data**：手动 `reload()` 与轮询节奏变化
+ * 都不改变"这是谁的数"，清掉只会让表格闪一下白。
  */
 export function usePolled<T>(
   loader: (signal: AbortSignal) => Promise<T>,
@@ -22,6 +45,16 @@ export function usePolled<T>(
 ): QueryState<T> {
   const { intervalMs = 0, enabled = true } = options;
   const deps = options.deps ?? [];
+  /*
+   * 依赖用**序列化后的字符串**参与 effect 依赖数组。
+   *
+   * 直接把 `deps` 展开进依赖数组（`[...deps]`）要求调用方保证长度恒定 ——
+   * 那是一条没人检查的纪律（见 `usePolledDeps.test.ts`）。而这里既要用它做
+   * "换主体了"的判据，又不能让长度变化把 React 的依赖位置挪位，
+   * 所以收敛成一个**恒为一元**的字符串依赖。
+   */
+  const depsKey = JSON.stringify(deps);
+  const depsKeyRef = useRef(depsKey);
 
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -34,10 +67,24 @@ export function usePolled<T>(
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
+  const clear = useCallback(() => {
+    setData(null);
+    setError(null);
+    setUpdatedAt(null);
+  }, []);
+
   useEffect(() => {
     if (!enabled) {
       setLoading(false);
+      /* 这个查询现在不成立：留着旧 data 只会让下一个使用它的人读到别人的数。 */
+      clear();
       return;
+    }
+
+    /* 换主体（deps 变）→ 旧读数与错误都不属于新主体。 */
+    if (depsKeyRef.current !== depsKey) {
+      depsKeyRef.current = depsKey;
+      clear();
     }
 
     const controller = new AbortController();
@@ -76,10 +123,9 @@ export function usePolled<T>(
       controller.abort();
       if (timer !== null) window.clearInterval(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, intervalMs, nonce, ...deps]);
+  }, [enabled, intervalMs, nonce, depsKey, clear]);
 
-  return { data, error, loading, updatedAt, reload };
+  return { data, error, loading, updatedAt, stale: data !== null && error !== null, reload };
 }
 
 /** Poll interval that lengthens while the socket is delivering live data. */

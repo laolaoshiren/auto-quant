@@ -11,6 +11,7 @@ import {
   type TraderRow,
 } from '../lib/api';
 import { useApp } from '../lib/store';
+import { MODE_LABEL } from '../lib/glossary';
 import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, TextInput } from './ui';
 import { CheckList } from './Badges';
 import { SectionLabel } from './shell';
@@ -573,7 +574,7 @@ export function NewTraderModal({
                   onChange={() => setMode('strategy')}
                 />
                 <span>
-                  <span className="font-medium">按策略参数</span>
+                  <span className="font-medium">{MODE_LABEL.strategy}</span>
                   <span className="block text-xs text-ink-faint">
                     用下面选中的策略里的固定参数跑。行为与以前完全一致。
                   </span>
@@ -588,7 +589,7 @@ export function NewTraderModal({
                   onChange={() => setMode('ai_managed')}
                 />
                 <span>
-                  <span className="font-medium">AI 智能托管（全自动）</span>
+                  <span className="font-medium">{MODE_LABEL.ai_managed}（全自动）</span>
                   <span className="block text-xs text-ink-faint">
                     参数与交易提示词全部由 AI 自主设定并实时调整：周期、标的池、杠杆、仓位、
                     止损止盈、节流与冷却。以盈利为唯一目标，并根据真实交易结果不断反思、迭代。
@@ -612,7 +613,7 @@ export function NewTraderModal({
                   onChange={() => setMode('ai_team')}
                 />
                 <span>
-                  <span className="font-medium">AI 团队（多智能体 · 7×24）</span>
+                  <span className="font-medium">{MODE_LABEL.ai_team}（多智能体 · 7×24）</span>
                   <span className="block text-xs text-ink-faint">
                     一支分工协作的智能体团队：调度官统筹，分析师并行调研（行情、新闻、社区情绪），
                     多空研究员对抗辩论，风控官把关，交易员执行。持续工作、事件驱动，

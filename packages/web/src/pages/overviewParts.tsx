@@ -346,7 +346,7 @@ export function TradersSnapshotTable({
                   状态
                 </th>
                 <th scope="col" className="th px-2 py-1.5 text-right">
-                  <span title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。**只是这个机器人自己的账**，同一账户下其他机器人挣的钱不算在内；反过来，共用同一个账户的机器人各自都带着同一笔本金，所以这一列**不能相加**（相加会把钱包数 N 遍）。账户里的钱看左栏「账户权益合计」。">
+                  <span title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。只是这个机器人自己的账，同一账户下其他机器人挣的钱不算在内；反过来，共用同一个账户的机器人各自都带着同一笔本金，所以这一列不能相加（相加会把钱包数 N 遍）。账户里的钱看左栏「账户权益合计」。">
                     归属权益
                   </span>
                 </th>
@@ -416,7 +416,7 @@ export function TradersSnapshotTable({
                       className="td px-2 py-1.5 text-right"
                       title={
                         stats
-                          ? `归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈（**只是这个机器人自己的账**）。${accountNote}${pnlFormulaText(
+                          ? `归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈（只是这个机器人自己的账）。${accountNote}${pnlFormulaText(
                               statsCosts(stats),
                             )}。浮动盈亏 ${fmtUsdSigned(stats.unrealizedPnl, 2)} 未计入本行。`
                           : undefined

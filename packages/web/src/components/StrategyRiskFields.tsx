@@ -7,6 +7,7 @@
  */
 import type { ReactNode } from 'react';
 import type { StrategyConfig } from '@aq/shared';
+import { presetLabel } from '../lib/glossary';
 import { Badge, Field, TextArea, TextInput, Toggle, cn } from './ui';
 import { FieldError, NumField, Section } from './StrategyFieldKit';
 
@@ -427,10 +428,18 @@ export function PromptSection({
 /*  Identity                                                                   */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * 三套模板的中文名**必须来自 `@aq/shared` 的 `STRATEGY_PRESETS[].label`**
+ * （2026-10-17 · 台账 UI-10 ④）。
+ *
+ * 原来这里写死了「保守 / 激进 / 短线」，而列表页、策略编辑器顶部与系统提示词里
+ * 用的是共享包那份 **「稳健 / 进取 / 短线」** —— 同一份模板两个名字，
+ * 用户会以为"我选的那套模板是不是被换了"（而「三套模板都要正常」是本批硬要求）。
+ */
 const MODES: Array<{ id: StrategyConfig['tradingMode']; label: string; hint: string }> = [
-  { id: 'conservative', label: '保守', hint: '更少但质量更高的交易' },
-  { id: 'aggressive', label: '激进', hint: '突破为主，换手更快' },
-  { id: 'scalping', label: '短线', hint: '分钟级动量' },
+  { id: 'conservative', label: presetLabel('conservative'), hint: '更少但质量更高的交易' },
+  { id: 'aggressive', label: presetLabel('aggressive'), hint: '突破为主，换手更快' },
+  { id: 'scalping', label: presetLabel('scalping'), hint: '分钟级动量' },
 ];
 
 export function StrategyHeaderSection({

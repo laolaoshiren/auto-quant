@@ -48,6 +48,22 @@ interface SessionState {
   system: SystemStatus | null;
   traders: TraderRow[];
   lastError: string | null;
+  /**
+   * **上一次成功读到 `system` 的时刻**（epoch ms）；`null` = 从来没成功过。
+   *
+   * ## 为什么要有它（2026-10-17 · 台账 FRD-01）
+   *
+   * `refreshSystem()` 失败时**保留上一份快照**是刻意的（弹一个"读不到"比把顶栏
+   * 清空更接近事实），但它原来连**失败这件事**都不记：`catch {}` 里什么都不写。
+   * 于是后端不可达之后，顶栏继续显示「实盘」「推送在线」、状态栏继续显示「运行 1」——
+   * **真实资金场景下「看起来还活着」**，而界面自己不知道它手里的数是旧的。
+   *
+   * 现在失败写 `systemError`、成功清它；外壳据此算"停更了多少秒"（见
+   * `lib/staleness.ts`，阈值是 3 × 轮询间隔）。
+   */
+  systemsLoadedAt: number | null;
+  /** 最近一次系统状态刷新失败的原因；`null` = 最近一次是成功的。 */
+  systemError: string | null;
 
   bootstrap: () => Promise<void>;
   login: (username: string, password: string) => Promise<void>;
@@ -66,12 +82,25 @@ export const useApp = create<SessionState>((set, get) => ({
   system: null,
   traders: [],
   lastError: null,
+  systemsLoadedAt: null,
+  systemError: null,
 
   /** Verify a stored token and load the shell prerequisites in one pass. */
   bootstrap: async () => {
     setUnauthorizedHandler(() => {
       clearToken();
       set({ status: 'anonymous', user: null });
+      /*
+       * ⚠️ **会话失效时把推送也关掉**（台账 FRD-03）。
+       *
+       * 401 原来只清 token、不动 socket，于是 `socket.status` 停在 `'closed'`
+       * （`onclose` 里那句 `if (!getToken()) return;` 让重连**永远不发生**）——
+       * 界面显示"推送断开 · 轮询兜底"，而实际上**没有任何机制能让它恢复**：
+       * 重新登录后 `bootstrap()` 也不会再 `connect()`。
+       * 这里显式 disconnect：状态回到 `idle`（= 还没连、不是"连过又断了"），
+       * 并给出原因，登录成功后由下面的 `connect()` 重新建立。
+       */
+      useEvents.getState().disconnect('会话已失效，请重新登录');
     });
 
     if (!getToken()) {
@@ -89,6 +118,13 @@ export const useApp = create<SessionState>((set, get) => ({
       set({ user, health, status: 'authenticated' });
       setStoredUser(user);
       await Promise.all([get().loadCatalog(), get().refreshSystem(), get().refreshTraders()]);
+      /*
+       * 认证成功 = "现在可以连推送了"。**这里必须主动连**：那个连接的生命周期
+       * 归外壳的 `useEffect`（`[connect, disconnect]` 引用稳定 → 只跑一次），
+       * 而它跑的时候可能还没有 token（首屏 `bootstrap()` 还没回来）——
+       * 那种情况下 `connect()` 会早返回，之后就再也没人叫它了（台账 FRD-03）。
+       */
+      useEvents.getState().connect();
     } catch {
       clearToken();
       let health: Health | null = null;
@@ -111,6 +147,8 @@ export const useApp = create<SessionState>((set, get) => ({
 
   logout: () => {
     clearToken();
+    /* 登出必须把推送也关掉并说明原因 —— 否则界面会一直显示"正在重连"（台账 FRD-03）。 */
+    useEvents.getState().disconnect('已退出登录，推送已关闭');
     set({ status: 'anonymous', user: null, traders: [], catalog: null, system: null });
   },
 
@@ -126,9 +164,14 @@ export const useApp = create<SessionState>((set, get) => ({
   refreshSystem: async () => {
     try {
       const system = await api.system();
-      set({ system });
-    } catch {
-      /* keep the previous snapshot; the banner will show a stale reading */
+      /* 成功：清错误并记下时刻 —— 外壳据此回答"这份读数有多旧"。 */
+      set({ system, systemsLoadedAt: Date.now(), systemError: null });
+    } catch (error) {
+      /*
+       * 保留上一份快照（刻意），但**必须把失败记下来** —— 见 `systemsLoadedAt`
+       * 的说明。只留一份"看起来正常"的旧快照是本条缺陷的全部内容。
+       */
+      set({ systemError: (error as Error).message });
     }
   },
 
@@ -136,8 +179,9 @@ export const useApp = create<SessionState>((set, get) => ({
     try {
       const traders = await api.traders();
       set({ traders });
-    } catch {
-      /* transient — the next poll will retry */
+    } catch (error) {
+      /* 与 `refreshSystem` 同一条纪律：失败必须留痕（同一个轮询周期里两者一起失败）。 */
+      set({ systemError: (error as Error).message });
     }
   },
 
@@ -282,9 +326,19 @@ interface EventState {
   toasts: Toast[];
   byTrader: Record<number, TraderLive>;
   lastEventAt: number | null;
+  /**
+   * **"没能连上"的原因**（`null` = 没这回事）。
+   *
+   * 台账 FRD-03：`connect()` 原来在拿不到 token 时**静默 return** ——
+   * 不置状态、不发事件、不留痕迹。于是界面显示的是"推送断开 · 轮询兜底"，
+   * 而真相是"**根本还没登录**，连都没连过"。这两句话对操作员的意义相反：
+   * 前者意味着等一会儿会自己好，后者意味着需要他去登录。
+   */
+  blockedReason: string | null;
 
   connect: () => void;
-  disconnect: () => void;
+  /** `reason` = 这次断开是**有原因**的（会话失效 / 登出），界面上要说出来。 */
+  disconnect: (reason?: string | null) => void;
   ingest: (event: ServerEvent) => void;
   /**
    * 用一份 REST 拿到的持仓**覆盖**某个机器人的持仓。
@@ -314,13 +368,24 @@ export const useEvents = create<EventState>((set, get) => ({
   toasts: [],
   byTrader: {},
   lastEventAt: null,
+  blockedReason: null,
 
   connect: () => {
     if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
     const token = getToken();
-    if (!token) return;
+    if (!token) {
+      /*
+       * ⚠️ **不能静默 return**（台账 FRD-03）。
+       *
+       * 这是"从未连过"与"连过又断了"的分界：前者要操作员去登录，后者等重连即可。
+       * 状态置 `closed` 而不是留在 `idle`：`idle` 表示"还没打算连"，
+       * 而这里已经打算连了、只是缺凭据。
+       */
+      set({ status: 'closed', blockedReason: '未登录，推送不可用' });
+      return;
+    }
 
-    set({ status: 'connecting' });
+    set({ status: 'connecting', blockedReason: null });
     let ws: WebSocket;
     try {
       ws = new WebSocket(eventStreamUrl());
@@ -355,10 +420,14 @@ export const useEvents = create<EventState>((set, get) => ({
         byTrader: clearAllLiveCycles(state.byTrader),
       }));
       socket = null;
-      if (!getToken()) return;
+      if (!getToken()) {
+        /* 没凭据了（会话失效 / 登出）：说清原因，别显示成"等重连就好"。 */
+        set({ blockedReason: '未登录，推送不可用' });
+        return;
+      }
       // Exponential backoff capped at 15s, so a backend restart is transparent.
       const attempts = get().attempts + 1;
-      set({ attempts });
+      set({ attempts, blockedReason: null });
       const delay = Math.min(15_000, 800 * 2 ** Math.min(attempts, 5));
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       reconnectTimer = window.setTimeout(() => {
@@ -372,7 +441,7 @@ export const useEvents = create<EventState>((set, get) => ({
     };
   },
 
-  disconnect: () => {
+  disconnect: (reason = null) => {
     if (reconnectTimer !== null) {
       window.clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -382,7 +451,12 @@ export const useEvents = create<EventState>((set, get) => ({
       socket.close();
       socket = null;
     }
-    set({ status: 'idle', attempts: 0, byTrader: clearAllLiveCycles(get().byTrader) });
+    set({
+      status: 'idle',
+      attempts: 0,
+      blockedReason: reason,
+      byTrader: clearAllLiveCycles(get().byTrader),
+    });
   },
 
   /*

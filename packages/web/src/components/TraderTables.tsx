@@ -29,7 +29,7 @@ import { LoaderCircle } from 'lucide-react';
 import { exchangeErrorLabel, type MarginMode, type OrderRecord, type PositionView, type TradeRecord } from '@aq/shared';
 import { orderPurposeLabel, orderStatusLabel, orderTypeLabel } from '@aq/shared';
 import { api } from '../lib/api';
-import { needsReconcileFlag } from '../lib/orderFlags';
+import { needsReconcileFlag, reconcileNoteTitle } from '../lib/orderFlags';
 import { useEvents } from '../lib/store';
 import { usePolled } from '../lib/hooks';
 import { Badge, Button, ErrorNote, Modal, Panel, Spinner3 } from './ui';
@@ -293,13 +293,15 @@ function useTablePaging<T extends { id: number; traderId: number }>(
    * 轮询拿到的第一页并进来。
    *
    * 第一页同样是"多要一条"：最后那一条只是探针（回答"还有没有更早的"），不显示，
-   * 所以这里切掉。`traderId` 过滤不是多余的：换机器人时 `usePolled` 不会立刻清空
-   * 旧数据，不挡一下，上一家的订单会被并进新列表（它自己不知道换了人）。
+   * 所以这里切掉。
+   *
+   * ⚠️ **`traderId` 过滤已删**（2026-10-17 · 台账 FRD-05）：`usePolled` 现在在
+   * `deps` 变化时自己清 `data`，"上一家的订单被并进新列表"从协议层就不可能发生。
    */
   useEffect(() => {
     const page = polled.data;
     if (!page) return;
-    const rows = page.slice(0, PAGE_SIZE).filter((row) => row.traderId === traderId);
+    const rows = page.slice(0, PAGE_SIZE);
     if (rows.length === 0) return;
     setLoaded((prev) => mergeById(prev, rows));
   }, [polled.data, traderId]);
@@ -912,8 +914,25 @@ export function PositionsTable({
 
   const shown = positions.slice(0, MAX_ROWS);
 
+  /*
+   * ⚠️ **读不到时必须说，而且要说清"下面是几秒前的读数"**（2026-10-17 · 台账 FRD-02）。
+   *
+   * 这一格里的数（未实现盈亏、止损价、强平价）是**真钱读数**：它们停在上一次成功
+   * 的值上时，页面看起来和"刚更新过"一模一样 —— 操作员会据此判断要不要止损。
+   * 同一文件的「订单/成交」表早就把 `error` 传进了 `useTablePaging`（那是另一套纪律），
+   * 这里原来连 `query.error` 都没读过，两个分支判的都是 `updatedAt === null` 与
+   * `positions.length === 0`。**"查不到"与"没有"是两件事**，这一行就是那条分界。
+   */
+  const ageSeconds =
+    query.updatedAt === null ? null : Math.max(0, Math.round((Date.now() - query.updatedAt) / 1000));
+
   return (
     <div>
+      {query.error !== null && (
+        <ErrorNote className="mb-2">
+          持仓读不到{ageSeconds === null ? '' : `，下面是 ${ageSeconds} 秒前的读数`}：{query.error}
+        </ErrorNote>
+      )}
       {/* max-h as well as the cap: 100 position rows is still taller than any
           screen, and the tab bar above must stay reachable. */}
       <div className="scroll-x max-h-[34vh] overflow-y-auto">
@@ -1197,7 +1216,7 @@ const ORDER_MARGIN_MODE_TITLE =
 const ORDER_MARGIN_MODE_SOURCE_TITLE = {
   order: '下单当时该标的的保证金模式（下单那一刻由服务端记下，取自交易所确认过的配置）。',
   position:
-    '这张单落库时没有记下保证金模式（迁移之前的历史行，或该标的的模式从未成功设置过）。这里显示的是该标的**当前**的账户配置 —— 实时读自交易所，不是下单那一刻的快照，不能当历史证据。',
+    '这张单落库时没有记下保证金模式（迁移之前的历史行，或该标的的模式从未成功设置过）。这里显示的是该标的当前的账户配置 —— 实时读自交易所，不是下单那一刻的快照，不能当历史证据。',
   /* 两个来源都没有 —— 说清为什么是空的，而不是让它看起来像一个渲染错误。 */
   none: '这一行没有保证金模式的记录：它可能是迁移之前的历史行，该标的的模式也可能从未成功设置过，而且它现在没有持仓可供读取。— 表示"不知道"，不是"全仓"。',
 } as const;
@@ -1413,10 +1432,10 @@ function MarginModeCell({
  *  · `none`     —— 两者都拿不到，`—` 表示"不知道"，不是"全仓"。
  */
 const TRADE_MARGIN_MODE_TITLE = {
-  known: '该回合入场时的保证金模式，取自入场订单落库的配置 —— 这是**当时**的值。',
+  known: '该回合入场时的保证金模式，取自入场订单落库的配置 —— 这是当时的值。',
   position:
     '这张成交的入场订单没有记下保证金模式（迁移之前的历史行，或该标的的模式从未成功设置过）。' +
-    '这里显示的是该标的**当前**的账户配置 —— 实时读自交易所，不是成交当时的快照，不能当历史证据。',
+    '这里显示的是该标的当前的账户配置 —— 实时读自交易所，不是成交当时的快照，不能当历史证据。',
   none:
     '这一行没有保证金模式的记录：入场订单在迁移之前（没有这一列），' +
     '或者这一笔是补录的（机器人没运行时平的仓，没有对应的本地订单行），' +
@@ -1427,6 +1446,7 @@ export function OrdersTable({
   paging,
   onlyOpen,
   positionCount,
+  paper,
   onSelectSymbol,
   collapsed = false,
   liveMarginModes,
@@ -1448,6 +1468,15 @@ export function OrdersTable({
   onlyOpen: boolean;
   /** 本地持仓数：判断"这张看起来还挂着的单"能不能被相信，见状态列上的标注。 */
   positionCount: number;
+  /**
+   * **这台机器人在不在模拟盘**（`lib/glossary.ts` 的 `isPaperView`）。
+   *
+   * 模拟盘的订单从不出现在交易所（`broker.ts` 的 `simulateStandard`），
+   * 所以"本地挂单 ↔ 交易所读数对不上"这个判据对模拟盘**必须整个关掉** ——
+   * 否则每一张保护单都会被标成"读可能对不上"，那正是用户实测 `U-3` 报上来的
+   * 「已挂单（待对账）」（台账 `ORD-01`）。必填：漏传应当编译不过。
+   */
+  paper: boolean;
   /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
   onSelectSymbol?: (symbol: string) => void;
   /**
@@ -1530,6 +1559,18 @@ export function OrdersTable({
 
   return (
     <div>
+      {/*
+        ⚠️ **第一页读取失败必须可见**（2026-10-17 · 台账 FRD-02 的同一族）。
+
+        `useTablePaging` 一直把首屏的 `polled.error` 传出来（`error`），而**没有任何
+        一处渲染它** —— 翻页失败有 `PageTail` 说，首屏失败却静默，这是同一份纪律
+        只做了一半。表格里剩下的行是上一次成功读到的，必须说清它有多旧。
+      */}
+      {paging.error !== null && (
+        <ErrorNote className="mb-2">
+          读取失败，下面是上一次成功读到的记录：{paging.error}
+        </ErrorNote>
+      )}
       {/*
         14 columns: this is the table that most needs its own horizontal
         scroller rather than a page-wide one.
@@ -1619,6 +1660,7 @@ export function OrdersTable({
                 stillOpen: isOpenOrder(order),
                 purpose: order.purpose,
                 positionCount,
+                paper,
               });
 
               /*
@@ -1720,16 +1762,28 @@ export function OrdersTable({
                   <td className="td num text-right">{fmtQty(order.filledQty)}</td>
                   <td className="td num text-right">{order.avgPrice ? fmtPrice(order.avgPrice) : '—'}</td>
                   <td className="td">
-                    {/* `order.status` 是币安自己的机器码（NEW / FILLED / …），
-                        中文标签在 `@aq/shared` 的 ORDER_STATUS_LABELS —— 之前这里
-                        直接把英文码打在表格里。
+                    {/*
+                      `order.status` 是币安自己的机器码（NEW / FILLED / …），
+                      中文标签在 `@aq/shared` 的 ORDER_STATUS_LABELS —— 之前这里
+                      直接把英文码打在表格里。
 
-                        `pendingReconcile` 的那一行不写「已挂单」而写「待对账」：
-                        本地这一列可能比交易所落后一轮，界面没有资格替交易所打包票。 */}
+                      ⚠️⚠️ **这一格只说委托自己的事实，不再写「（待对账）」**
+                      （2026-10-17 · 台账 ORD-01 / 用户实测 U-3）。用户原话：
+                      「（待对账）这个是设计之初就明确说过**不需要也不能出现**的」。
+
+                      `pendingReconcile` 表达的那个安全关切**没有丢**，但它换了位置：
+                      ① 颜色仍然是 `text-warn`；② `title` 说清"交易所上一次说的是什么、
+                      为什么值得注意、谁去弄明白"；③ 服务端日志与审计面板里本来就有
+                      这件事（`settleStaleOrders` 走的路径）。
+
+                      把内部处理过程摆成一个**订单状态词**，等于给每一行挂上
+                      "账实不符"的告警 —— 那是虚假的对账告警，而假警报会让操作员
+                      学会忽略这一列的颜色（本文件反复写过同一条教训）。
+                    */}
                     <span
                       title={
                         pendingReconcile
-                          ? `交易所状态 ${order.status}（由上一次对账写入）。当前本地没有任何持仓记录，这张委托可能已经成交或被撤销，等下一次对账确认。`
+                          ? reconcileNoteTitle(order.status)
                           : fullyFilled
                             ? `成交数量 ${fmtQty(order.filledQty)} 已等于下单数量 ${fmtQty(order.quantity)}，所以这一单实质已成交 —— 尽管交易所那一刻返回的状态是 ${order.status}。`
                             : order.status
@@ -1744,11 +1798,7 @@ export function OrdersTable({
                               : 'text-ink-mid'
                       }
                     >
-                      {pendingReconcile
-                        ? `${orderStatusLabel(order.status)}（待对账）`
-                        : fullyFilled
-                          ? '已成交'
-                          : orderStatusLabel(order.status)}
+                      {fullyFilled ? '已成交' : orderStatusLabel(order.status)}
                     </span>
                   </td>
                   <td className="td max-w-[240px] truncate text-down" title={order.error ?? undefined}>
@@ -1931,6 +1981,12 @@ export function TradesTable({
 
   return (
     <div>
+      {/* 首屏读取失败与订单表同一条纪律：不说的话，下面的行看起来像刚更新的。 */}
+      {paging.error !== null && (
+        <ErrorNote className="mb-2">
+          读取失败，下面是上一次成功读到的记录：{paging.error}
+        </ErrorNote>
+      )}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-base-800 px-3 py-2 text-xs">
         <span className="text-ink-lo">
           {paging.hasMore ? `已加载 ${trades.length} 笔` : `${trades.length} 笔成交`} ·{' '}
@@ -2165,6 +2221,7 @@ export function TraderTables({
   tab,
   onChange,
   positionCount,
+  paper,
   refreshToken,
   onSelectSymbol,
   positionSymbols,
@@ -2175,6 +2232,13 @@ export function TraderTables({
   tab: TraderTabId;
   onChange: (tab: TraderTabId) => void;
   positionCount: number;
+  /**
+   * **这台机器人在不在模拟盘** —— 见 `OrdersTable` 的同名 prop。
+   *
+   * 由页面按 `isPaperView()` 算好传下来（三个事实源的取值顺序在那条函数里，
+   * 不允许在这里再推一遍 —— 那正是"两处必须一致、没人检查"的形态）。
+   */
+  paper: boolean;
   /**
    * Bumped by the caller after a manual 对账, so the tables refetch instead of
    * waiting out their 15-second poll — the numbers the operator just changed
@@ -2513,6 +2577,7 @@ export function TraderTables({
             paging={ordersPaging}
             onlyOpen={tab === 'orders'}
             positionCount={positionCount}
+            paper={paper}
             onSelectSymbol={onSelectSymbol}
             /*
              * 只有「历史」那侧才有收起态：「当前委托」是行动面板（对着它撤单、

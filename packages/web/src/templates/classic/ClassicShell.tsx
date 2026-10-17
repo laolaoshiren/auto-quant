@@ -210,10 +210,38 @@ export function ClassicShell() {
           {shell.socketStatus !== 'open' && (
             <span
               className="hidden shrink-0 items-center gap-1.5 text-xs text-warn sm:flex"
-              title="实时事件连接异常。页面已自动降级为轮询，数据仍会更新，只是延迟更大；无需手动操作，系统会自动重连。"
+              title={
+                shell.socketBlockedReason !== null
+                  ? `${shell.socketBlockedReason}。登录之后会自动重新连接。`
+                  : '实时事件连接异常。页面已自动降级为轮询，数据仍会更新，只是延迟更大；无需手动操作，系统会自动重连。'
+              }
             >
-              <Dot tone={shell.socketStatus === 'connecting' ? 'warn' : 'down'} pulse />
-              {shell.socketStatus === 'connecting' ? '连接中 · 轮询兜底' : '推送断开 · 轮询兜底'}
+              <Dot
+                tone={shell.socketBlockedReason !== null ? 'down' : shell.socketStatus === 'connecting' ? 'warn' : 'down'}
+                pulse={shell.socketBlockedReason === null}
+              />
+              {shell.socketBlockedReason !== null
+                ? shell.socketBlockedReason
+                : shell.socketStatus === 'connecting'
+                  ? '连接中 · 轮询兜底'
+                  : '推送断开 · 轮询兜底'}
+            </span>
+          )}
+
+          {/*
+            **系统状态停更**（2026-10-17 · 台账 FRD-01）。
+
+            与上面那条推送状态同类：正常时完全不出现，出现时带着"N 秒前的读数"
+            这个**后果**。它回答的是"顶栏那句『实盘』『运行 1』还能不能信" ——
+            在那之前，后端不可达之后这里什么都不说，页面看起来一切正常。
+          */}
+          {shell.statusStale && (
+            <span
+              className="hidden shrink-0 items-center gap-1.5 text-xs text-warn sm:flex"
+              title={`最近一次读取系统状态失败${shell.statusError ? `：${shell.statusError}` : ''}。页面显示的是上一次成功读到的读数。`}
+            >
+              <TriangleAlert aria-hidden className="h-3.5 w-3.5" />
+              {shell.statusStaleLabel}
             </span>
           )}
 

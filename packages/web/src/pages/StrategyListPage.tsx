@@ -22,6 +22,7 @@ import { api } from '../lib/api';
 import { useApp } from '../lib/store';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { cloneConfig } from '../lib/strategy';
+import { PAGE_LABEL } from '../lib/glossary';
 import { Badge, Button, Empty, ErrorNote, Modal, Panel, Spinner3, TextInput } from '../components/ui';
 import { SectionHeading } from '../components/Badges';
 import { PageShell, SectionLabel } from '../components/shell';
@@ -44,7 +45,7 @@ function tradingModeLabel(mode: string): string {
 }
 
 export function StrategyListPage() {
-  useDocumentTitle('策略工坊');
+  useDocumentTitle(PAGE_LABEL.strategy);
   const navigate = useNavigate();
   const catalog = useApp((s) => s.catalog);
   const traders = useApp((s) => s.traders);
@@ -206,7 +207,7 @@ export function StrategyListPage() {
   return (
     <PageShell>
       <SectionHeading
-        title="策略工坊"
+        title={PAGE_LABEL.strategy}
         sub="策略是一整套交易法则：币种池、指标、硬性风控限制以及提示词本身。整行可点即可编辑。"
         right={
           /* 页面级动作 → 统一接口（控制台模板收进工具栏，经典模板就地显示）。 */

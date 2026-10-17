@@ -187,8 +187,24 @@ export interface TeamStep {
  *
  * ⚠️ **不要把"没有后续步骤"当成"已完成"**：那会把一个**卡住的**角色
  * 显示成"做完了"，而卡住正是最需要被看见的情况。
+ *
+ * ## ⚠️⚠️ 2026-10-17：`replay` = "这不是实时流，而是最近一轮的历史回放"（台账 UI-01）
+ *
+ * 上面那条纪律成立的前提是**步骤是实时的**。而没有在途轮次时，看板渲染的是
+ * `DecisionFeed` 从**已落库的 `<team>` 块**重建出来的步骤（`latestTeamSteps`）——
+ * 那里的 `message` 是"这一轮它产出了什么"的摘要，几乎不会含"完成"字样，
+ * `phase` 也是 `null`。于是实测（t3 · 真实浏览器）：
+ * ```
+ *   4 个岗位显示「进行中」+ 呼吸动画、1 个「失败」，头部写着「本轮在干 4 失败 1」
+ *   而那一轮 42 分钟前就结束了、机器人状态是 stopped
+ * ```
+ * 判据没错，错在**把回放当成实时**。所以回放态下"有产出"就是"已产出"，
+ * 不再返回 `active`（呼吸动画正是"正在动"的语义）。
  */
-export function stateOfLastStep(steps: readonly TeamStep[]): 'active' | 'done' | 'failed' {
+export function stateOfLastStep(
+  steps: readonly TeamStep[],
+  replay = false,
+): 'active' | 'done' | 'failed' {
   let failed = false;
   let done = false;
   for (const s of steps) {
@@ -197,7 +213,7 @@ export function stateOfLastStep(steps: readonly TeamStep[]): 'active' | 'done' |
   }
   if (failed) return 'failed';
   if (done) return 'done';
-  return 'active';
+  return replay ? 'done' : 'active';
 }
 
 /**
@@ -256,6 +272,7 @@ export function rosterEntries(
   steps: readonly TeamStep[],
   roster: readonly FirmRole[],
   seen: ReadonlyMap<string, string> = new Map(),
+  replay = false,
 ): RosterEntry[] {
   /** role → 它这一轮的所有步骤 */
   const byRole = new Map<string, TeamStep[]>();
@@ -291,7 +308,7 @@ export function rosterEntries(
     const last = own[own.length - 1]!;
     return {
       role,
-      state: stateOfLastStep(own),
+      state: stateOfLastStep(own, replay),
       latest: {
         at: last.at,
         message: last.message,
@@ -299,7 +316,8 @@ export function rosterEntries(
         phase: last.phase ?? null,
       },
       stepCount: own.length,
-      inFlight: true,
+      /* 回放态不是"在途" —— 呼吸动画只在真有在途步骤时挂。 */
+      inFlight: !replay,
       lastSeenAt: seen.get(role.id) ?? null,
     };
   });
@@ -325,10 +343,10 @@ export function rosterEntries(
         tier: 'T2_mid',
         status: 'staffed',
       },
-      state: stateOfLastStep(own),
+      state: stateOfLastStep(own, replay),
       latest: { at: last.at, message: last.message, level: last.level, phase: last.phase ?? null },
       stepCount: own.length,
-      inFlight: true,
+      inFlight: !replay,
       /* 它有实时步骤在跑 —— "最近活跃"就是现在。 */
       lastSeenAt: last.at,
     });
@@ -380,6 +398,35 @@ export const STATE_LABEL: Record<RosterState, string> = {
   planned: '规划中',
 };
 
+/**
+ * **回放态**下的状态词（台账 UI-01 验收 ②）。
+ *
+ * 回放说的是"最近一轮它产出了什么"，不是"它现在在不在动"：
+ * ```
+ *   实时态  「进行中」   → 它在干活，且还没看到完成信号
+ *   回放态  「已产出（上一轮）」 → 这一轮的产出在这里，现在没有在途轮次
+ * ```
+ * 两句话都是真的，但**只有一句是当时的真相** —— 把回放说成"进行中"，
+ * 操作员会以为团队正在干活（而它可能已经停了 40 分钟，实测就是这个形状）。
+ *
+ * ⚠️ `failed` 在回放态改成「失败（上一轮）」：失败是那一轮的**事实**，要保留；
+ * 但必须与"现在正在失败"分开说。`idle` / `by_code` / `planned` 与轮次无关，
+ * 沿用原词。
+ */
+export const STATE_LABEL_REPLAY: Record<RosterState, string> = {
+  active: '已产出（上一轮）',
+  done: '已产出（上一轮）',
+  failed: '失败（上一轮）',
+  idle: '在岗',
+  by_code: '代码在跑',
+  planned: '规划中',
+};
+
+/** 按"实时 / 回放"取状态词 —— 组件不许直接读 `STATE_LABEL`（漏判回放就会说假话）。 */
+export function stateLabel(state: RosterState, replay: boolean): string {
+  return replay ? STATE_LABEL_REPLAY[state] : STATE_LABEL[state];
+}
+
 /** 状态的悬停说明（把"这意味着什么"写清楚，而不是让人猜）。 */
 export const STATE_HINT: Record<RosterState, string> = {
   active: '这一轮它正在工作 —— 还没有看到完成信号。',
@@ -387,9 +434,9 @@ export const STATE_HINT: Record<RosterState, string> = {
   failed: '这一轮它出错了 —— 展开右侧「本轮流程」看具体原因。',
   idle: '这个岗位已实现，但这一轮没有叫它（例如只在特定条件下才启用）。',
   by_code:
-    '这个职能**在跑**，但承担它的是确定性代码、不是模型 —— 所以既没有"出勤"也没有"待命"，' +
+    '这个职能在跑，但承担它的是确定性代码、不是模型 —— 所以既没有"出勤"也没有"待命"，' +
     '它的产出在旁边那行写明的模块里（例如 /api/health 的 staleTraders）。',
-  planned: '**这个岗位还没有实现** —— 不要以为有人在干这件事。',
+  planned: '这个岗位还没有实现 —— 不要以为有人在干这件事。',
 };
 
 /**

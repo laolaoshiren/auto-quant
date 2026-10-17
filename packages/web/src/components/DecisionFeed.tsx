@@ -161,7 +161,7 @@ import { DebateView } from './DebateView';
 import { TeamBoard } from './TeamBoard/TeamBoard';
 import { TeamCycleBlock } from './TeamBoard/TeamCycleBlock';
 import { usePolled } from '../lib/hooks';
-import { Badge, Empty, Panel, Spinner3, cn } from './ui';
+import { Badge, Empty, ErrorNote, Panel, Spinner3, cn } from './ui';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
 import { summarizeMemberOutput } from '../lib/memberSummary';
 import { plainText } from '../lib/plainText';
@@ -693,13 +693,17 @@ export function DecisionFeed({
    * 轮询拿到的第一页并进来。
    *
    * 第一页同样是"多要一条"：最后那一条只是探针（回答"还有没有更早的"），不显示，
-   * 所以这里切掉。`traderId` 过滤不是多余的：换机器人时 `usePolled` 不会立刻清空
-   * 旧数据，不挡一下，上一家的记录会被并进新列表（它自己不知道换了人）。
+   * 所以这里切掉。
+   *
+   * ⚠️ **这里原来还有一个 `traderId` 过滤**（"换机器人时 `usePolled` 不会立刻清空
+   * 旧数据，不挡一下，上一家的记录会被并进新列表"）。2026-10-17（台账 FRD-05）那个
+   * **补丁已删**：`usePolled` 现在在 `deps` 变化时自己清 `data`，所以"上一家的记录"
+   * 根本不会出现在这里 —— 补丁式过滤的存在本身就是协议层该清而未清的证据。
    */
   useEffect(() => {
     const page = query.data;
     if (!page) return;
-    const rows = page.slice(0, FEED_PAGE_SIZE).filter((record) => record.traderId === traderId);
+    const rows = page.slice(0, FEED_PAGE_SIZE);
     if (rows.length === 0) return;
     setLoaded((prev) => mergeFresh(prev, rows));
   }, [query.data, traderId]);
@@ -1044,7 +1048,11 @@ export function DecisionFeed({
     </span>
   );
 
-  if (query.loading && records.length === 0 && !showLive) {
+  /*
+   * ⚠️ **加载态只在"还没有过任何数据、也没失败"时显示**（2026-10-17 · 台账 UI-04）。
+   * 失败时走下面的错误条 —— 否则一次 500 会被显示成"正在加载"，然后跳到"暂无"。
+   */
+  if (query.loading && records.length === 0 && !showLive && query.error === null) {
     return (
       // 加载态也占满整栏：否则数据一到位，这一栏会突然从一小条跳成整屏高。
       <Panel
@@ -1059,6 +1067,16 @@ export function DecisionFeed({
     );
   }
 
+  /*
+   * ── 三态分离：loading / **error（可重试）** / empty（台账 UI-04 / FRD-04）──
+   *
+   * 原来看的只有 `records.length === 0`，于是**一次读取失败被显示成"暂无决策记录。
+   * 每个周期都会…运行一次后这里就会填满"** —— 那是把故障说成"这台还没跑过"，
+   * 与本仓库明文禁止的「查不到 ≠ 没有」正相反。翻页路径（`moreState === 'error'`）
+   * 早就写对了（失败可见 + 重试），这里只是把同一份纪律接到第一页上。
+   */
+  const feedError = query.error;
+
   return (
     <Panel
       padded={false}
@@ -1069,7 +1087,24 @@ export function DecisionFeed({
       title="最近决策"
       actions={headerActions}
     >
-      {records.length === 0 && !showLive ? (
+      {feedError !== null && (
+        <div className="px-2.5 pt-2.5">
+          <ErrorNote>
+            {records.length > 0
+              ? '最新周期读取失败，下面是上一次成功读到的数据'
+              : '决策记录读取失败（这不等于"没有记录"）'}
+            ：{feedError}
+            <button
+              type="button"
+              onClick={query.reload}
+              className="ml-1 shrink-0 text-accent hover:underline"
+            >
+              重试
+            </button>
+          </ErrorNote>
+        </div>
+      )}
+      {records.length === 0 && !showLive && feedError === null ? (
         <Empty
           message="暂无决策记录。"
           hint="每个周期都会连同完整提示词与原始响应一起持久化 — 运行一次后这里就会填满。"
@@ -1283,7 +1318,19 @@ export function DecisionFeed({
                    * 只取 `cotTrace` 与 `timestamp` 两个字段（`lastSeenOf` 只要这两样）。
                    */
                   history={records.map((r) => ({ cotTrace: r.cotTrace, timestamp: r.timestamp }))}
+                  /*
+                   * ── **回放态**（2026-10-17 · 台账 UI-01）────────────────────────
+                   *
+                   * `liveCycle` 为空 = 现在没有任何一轮在跑；这时看板渲染的是
+                   * **最近一轮的历史产出**，而不是"正在干活的人"。两者必须分开说：
+                   * 实测（t3）在没有在途轮次的页面上，看板写着「本轮在干 4 失败 1」、
+                   * 4 个岗位显示「进行中」+ 呼吸动画、阶段轨 5 段全灰 ——
+                   * 而那一轮 42 分钟前就结束了、机器人状态是"已停止"。
+                   */
+                  replay={liveCycle === undefined}
+                  replayAt={liveCycle === undefined ? (records[0]?.timestamp ?? null) : null}
                 />
+
               </div>
             </div>
           )}
@@ -1348,8 +1395,22 @@ export function DecisionFeed({
                * ⚠️ 这正是一条本项目反复记录过的教训：
                * **「只在某模式下存在的东西，不能让它在别的模式下产生副作用」**。
                * 我上一轮改的时候只想着团队模式，忘了这个面板是**三种模式共用**的。
+               *
+               * ## ⚠️⚠️ 2026-10-17 修正：`10%` 在 900px 视口上只剩 **56px**（台账 UI-02）
+               *
+               * t3 用真实浏览器量到：面板内容区 560px → 决策区 `h=56`，
+               * 而**一轮决策卡高 82–300px**（展开一轮后内容 1040px）——
+               * 用户要的"下面滚动展示最终决策"实际变成了"露出两个字"。
+               * 而且被裁出滚动区的卡片，Playwright 连按钮都判成 `not visible`
+               * （60 次重试后超时）——**真实用户也得先精确滚动才能点中**。
+               *
+               * 所以这里给了一个**内容下限**：`min-h-[180px]`。
+               * 为什么是 180：足够显示"一条最简决策行（时间/动作/标的/置信度/结果，
+               * 实测约 72px）+ 上一轮标题 + 一行提示"，也大于验收里的 168px。
+               * `max-h` 仍然保留百分比：**面板再高的时候决策区跟着变高**，
+               * 而不是把它钉死成一个数（那样在 4K 屏上又浪费掉了）。
                */
-              mode === 'ai_team' ? 'flex-none max-h-[10%]' : 'flex-1',
+              mode === 'ai_team' ? 'flex-none min-h-[180px] max-h-[max(10%,180px)]' : 'flex-1',
             )}
           >
           {/*

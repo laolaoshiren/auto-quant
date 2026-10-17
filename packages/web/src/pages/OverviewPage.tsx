@@ -37,6 +37,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Bot, CircleAlert, RefreshCw } from 'lucide-react';
 import type { EquitySnapshot, TraderMode, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
+import { MODE_HINT, MODE_LABEL } from '../lib/glossary';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
 import { accountEquityContributor, attributedEquityOf, fleetTotals } from '../lib/fleetTotals';
@@ -419,7 +420,7 @@ export function OverviewPage() {
           tone="strong"
           value={accountCount > 0 ? fmtAsset(accountEquity, 'USDT', 2) : '—'}
           sub={accountCount > 0 ? `按账户口径 · ${fmtInt(accountCount)} 个账户` : '还没有交易所账户'}
-          title={`所有交易所账户（共享钱包）的${BALANCE_LABEL.equity}之和 —— **每个账户只算一次**。共用同一个账户的机器人读的是同一个钱包，所以它们的「归属权益」不能相加：实盘实测三个机器人 Σ归属权益 30.6690、Σ初始权益 30.2316，而账户里只有 10.4180，其中 19.81 是被数了三遍的同一笔本金。各机器人自己挣了多少见下表「归属权益」列，单个账户的钱见「交易所」页。`}
+          title={`所有交易所账户（共享钱包）的${BALANCE_LABEL.equity}之和 —— 每个账户只算一次。共用同一个账户的机器人读的是同一个钱包，所以它们的「归属权益」不能相加：实盘实测三个机器人 Σ归属权益 30.6690、Σ初始权益 30.2316，而账户里只有 10.4180，其中 19.81 是被数了三遍的同一笔本金。各机器人自己挣了多少见下表「归属权益」列，单个账户的钱见「交易所」页。`}
         />
 
         <Metric
@@ -427,7 +428,7 @@ export function OverviewPage() {
           tone={pnlTone(realizedPnl)}
           value={fmtUsdSigned(realizedPnl, 2)}
           sub="各机器人自己的净额之和"
-          title="Σ(每个机器人自己的已平仓净盈亏)，净 = 毛 − 手续费 − 资金费。这一项**可以相加**：每个机器人只认自己挂过的订单对应的回合（归属闸门），共享账户不会让它重复计入别人的盈亏。它不含持仓浮盈。"
+          title="Σ(每个机器人自己的已平仓净盈亏)，净 = 毛 − 手续费 − 资金费。这一项可以相加：每个机器人只认自己挂过的订单对应的回合（归属闸门），共享账户不会让它重复计入别人的盈亏。它不含持仓浮盈。"
         />
 
         <Metric
@@ -462,7 +463,7 @@ export function OverviewPage() {
           tone={committedCapital > 0 ? pnlTone(totalReturnPercent) : 'default'}
           value={committedCapital > 0 ? fmtPercent(totalReturnPercent) : '—'}
           sub={`初始投入 ${fmtUsd(committedCapital, 2)}`}
-          title="（账户权益合计 − 账户起始资金）÷ 账户起始资金。本金按**账户**算：共享账户取该账户被接入时的起始资金（最早那个机器人建号时从交易所读到的钱包余额），不是各机器人 initialEquity 之和 —— 后者在同一账户下会把同一笔本金数很多遍（实测 Σ初始权益 30.2316 vs 账户里 10.4180，多算 19.81 USDT）。各机器人自己的收益率见下表。入金/出金也计入本比率。"
+          title="（账户权益合计 − 账户起始资金）÷ 账户起始资金。本金按账户算：共享账户取该账户被接入时的起始资金（最早那个机器人建号时从交易所读到的钱包余额），不是各机器人 initialEquity 之和 —— 后者在同一账户下会把同一笔本金数很多遍（实测 Σ初始权益 30.2316 vs 账户里 10.4180，多算 19.81 USDT）。各机器人自己的收益率见下表。入金/出金也计入本比率。"
         />
       </MetricGroup>
 
@@ -478,14 +479,14 @@ export function OverviewPage() {
           label="持仓（个）"
           value={fmtInt(totalOpen)}
           sub="各机器人自己的持仓合计"
-          title="所有机器人**自己的**持仓个数之和。同一账户下多个机器人看到的是同一个钱包，但持仓归属各自独立。"
+          title="所有机器人自己的持仓个数之和。同一账户下多个机器人看到的是同一个钱包，但持仓归属各自独立。"
         />
         <Metric
           label="浮动盈亏"
           tone={pnlTone(unrealized)}
           value={fmtUsdSigned(unrealized, 2)}
           sub={`${fmtInt(totalOpen)} 个持仓 · 未落袋`}
-          title="所有机器人**自己的**持仓的未实现盈亏合计（不是交易所账户的总浮盈 —— 账户的总浮盈在同一账户下的每个机器人身上都是同一个数）。它随时在变，且尚未计入已实现盈亏。"
+          title="所有机器人自己的持仓的未实现盈亏合计（不是交易所账户的总浮盈 —— 账户的总浮盈在同一账户下的每个机器人身上都是同一个数）。它随时在变，且尚未计入已实现盈亏。"
         />
         <Metric
           label="平仓记录"
@@ -848,9 +849,10 @@ function ModeBreakdown({
   onOpen: (id: number) => void;
 }): React.ReactElement {
   const groups: Array<{ mode: TraderMode; label: string; hint: string }> = [
-    { mode: 'strategy', label: '普通', hint: '固定策略，不用 AI' },
-    { mode: 'ai_managed', label: '智能托管', hint: '一个模型决策' },
-    { mode: 'ai_team', label: 'AI 团队', hint: '一队模型开会' },
+    /* 名字登记在 `lib/glossary.ts`（唯一登记处）—— 这里不许再写字面量。 */
+    { mode: 'strategy', label: MODE_LABEL.strategy, hint: MODE_HINT.strategy },
+    { mode: 'ai_managed', label: MODE_LABEL.ai_managed, hint: MODE_HINT.ai_managed },
+    { mode: 'ai_team', label: MODE_LABEL.ai_team, hint: MODE_HINT.ai_team },
   ];
 
   return (
