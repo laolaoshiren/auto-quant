@@ -2,6 +2,7 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { lazy, Suspense, useEffect, type ReactNode } from 'react';
 import { Layout } from './components/Layout';
 import { FeedErrorBoundary } from './components/FeedErrorBoundary';
+import { StaleTraderBanner } from './components/StaleTraderBanner';
 import { Spinner, Spinner3 } from './components/ui';
 import { useApp } from './lib/store';
 import { boundaryKeyFor } from './lib/routeBoundary';
@@ -59,7 +60,15 @@ export function App() {
   }
 
   return (
-    <Routes>
+    <>
+      {/*
+        ⚠️ **全局停摆横幅挂在最顶层**（2026-10-17 · t99）—— 它是**跨页面**的事：
+        挂在某个页面顶部的话，人停在别的页面就看不见，那等于没解决
+        "信号在没人看的地方"（`#10` 真实资金停摆 5.5 小时就是这么发生的）。
+        放在 `<Routes>` **外面**：所有路由（含登录页）都会渲染它。
+      */}
+      <StaleTraderBanner />
+      <Routes>
       <Route
         path="/login"
         element={
@@ -202,6 +211,7 @@ export function App() {
         />
       </Route>
     </Routes>
+    </>
   );
 }
 
