@@ -83,13 +83,21 @@ test('★★★ 套用 B 之后的结果必须等于 B 的完整定义，且与"
     /* 模拟用户：先套 A（得到一份"带着 A 的值"的配置），再套 B。 */
     const afterA = resolvePreset(from);
     const afterB = resolvePreset(to);
-    const expectedB = resolvePreset(to);
 
-    assert.deepEqual(
-      afterB,
-      expectedB,
-      `★★★ ${fromId} → ${toId}：套用 ${toId} 的结果必须等于它的完整定义（含 schema 默认值）`,
-    );
+    /*
+     * ⚠️ **这里曾经有一条恒真断言，已删除（`t50` 审查 + `t55` 清理）**：
+     * ```ts
+     *   const expectedB = resolvePreset(to);
+     *   assert.deepEqual(afterB, expectedB);     // ← 同一个纯函数、同一个入参、连调两次
+     * ```
+     * 它只在 `resolvePreset` **非确定性**时才失败 —— 也就是说：**基准与被测对象同源**
+     * （两边都是 `resolvePreset(to)` 的产物），于是"套了 B 是否得到 B"这件事
+     * **从未被真正检验**。它属于"恒真形状"，会污染全仓"恒真断言"自动巡检
+     *（`t43` 刚清掉最后一条真恒真断言、`t41` 确认全仓为 0 处、豁免表已清空）。
+     *
+     * **删它不是因为旁边那些判据错了** —— 下面两条的基准是 `defaults`（独立来源）
+     * 与 `afterA`（另一份预设），**它们能失败**，正是本用例真正扛验证的部分。
+     */
 
     /*
      * 反向判据：A 独有而 B 不声明的字段必须**回到默认值**。
@@ -116,7 +124,7 @@ test('★★★ 套用 B 之后的结果必须等于 B 的完整定义，且与"
      */
     assert.notDeepEqual(
       afterA,
-      expectedB,
+      afterB,
       `★ 前提：${fromId} 与 ${toId} 的解析结果确实不同（否则这条用例什么都没验）`,
     );
   }
