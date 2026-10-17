@@ -136,6 +136,18 @@ if (-not $SkipBuild) {
 
     $buildLog = Join-Path $env:TEMP 'aq-build.log'
     Write-Host "==> 本地构建前端" -ForegroundColor Cyan
+    # -----------------------------------------------------------------------
+    # 把 HEAD 与构建时刻注入前端（Vite 只暴露 VITE_* 前缀的变量）
+    # -----------------------------------------------------------------------
+    # 为什么需要：控制台上原来只显示 package.json 的 version（`0.1.32`），
+    # 那个值**在两次部署之间不变** —— 用户因此无法判断「我看到的是不是最新一版」，
+    # 只能来问队长，而队长还要 SSH 回读 build-info.json。本批已多次因此产生
+    # 「你改的没生效？」/「其实还没部署」的来回。
+    #
+    # 现在页面会显示 `9b88931 · 10-17 10:05`，部署完刷新即可核对。
+    # ⚠️ 必须在 `npm run build` **之前**设置：Vite 在构建期把值内联进产物。
+    $env:VITE_BUILD_COMMIT = (& git -C $repoRoot rev-parse --short HEAD).Trim()
+    $env:VITE_BUILD_TIME = (Get-Date).ToString('MM-dd HH:mm')
     & npm run build *> $buildLog
     if ($LASTEXITCODE -ne 0) {
         Get-Content $buildLog | Select-String -Pattern 'error|✗' | Select-Object -First 12 | ForEach-Object { Write-Host "    $($_.Line.Trim())" -ForegroundColor Red }
