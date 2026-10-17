@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { defaultStrategyConfig } from '@aq/shared';
+import { defaultStrategyConfig, type WakeTrigger } from '@aq/shared';
 import { closeDb, getDb, initDb } from '../db/index.js';
 import {
   aiModels,
@@ -368,7 +368,12 @@ test('★ AI 的运行记录表也有界，不会随交易量无限增长', () =
       traderId: id,
       kind: 'strategy',
       trigger: 'manual',
-      intensity: 'normal',
+      /*
+       * ⚠️ 原值 `'normal'` 是**早于 `single|panel` 的旧档位名**，现在不在 `Intensity` 里
+       * （t61 收窄 `insert()` 时当场变成 TS2322）。
+       * 这条用例测的是**表的上界与裁剪批次**，与档位取哪个值无关 —— 换成 `single` 语义不变。
+       */
+      intensity: 'single',
       steps: 1,
       agents: {},
       outcome: 'ok',
@@ -405,7 +410,14 @@ test('★ 未结算的实验永远不裁：裁掉它，那笔调参的因果就�
    * 所以裁剪只作用于已结算的行，且上限只对已结算的那些计数。
    */
   const id = seedTrader();
-  const seed = (trigger: string) => ({
+  /*
+   * ⚠️ `trigger` 的类型是 `WakeTrigger`（t61），所以参数不能是裸 `string`。
+   * 原夹具调用处给的是 `'timeout'`（合法）与 `'periodic'`（**不合法**，
+   * 不在那 8 个取值里）。这里把类型收窄到联合类型 —— 于是 `'periodic'`
+   * 这个非法调用点**当场编译不过**，必须改成合法值。
+   * 语义不变：这条用例测的是"裁剪不得动未结算的行"，与触发原因无关。
+   */
+  const seed = (trigger: WakeTrigger) => ({
     traderId: id,
     trigger,
     observed: {},
@@ -420,7 +432,7 @@ test('★ 未结算的实验永远不裁：裁掉它，那笔调参的因果就�
 
   /* 一批**已结算**的实验，把已结算那部分顶过上限。 */
   for (let i = 0; i < AGENT_EXPERIMENTS_CAP + 30; i++) {
-    const settled = agentExperiments.insert(seed('periodic'));
+    const settled = agentExperiments.insert(seed('new_result'));
     agentExperiments.settle(settled, { trades: 1, netPnl: 0 });
   }
 

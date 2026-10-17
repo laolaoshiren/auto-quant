@@ -19,6 +19,19 @@
  */
 
 import { getDb } from '../db/index.js';
+import type { AgentRunKind, AgentRunOutcome, WakeTrigger } from '@aq/shared';
+/*
+ * ⚠️ **`Intensity` 从 `loop.ts` 引入，而不是在这里再定义一份**（t61）。
+ *
+ * 那份联合的唯一权威是 `trader/agent/loop.ts`（`export type Intensity = 'single' | 'panel'`），
+ * 而"档位"这个概念不属于存储层 —— 存储层只是把它的一个字符串写进一列。
+ * 在这里重抄一份正是本仓库反复吃亏的「两处各定义一份」：分叉那天没人会发现，
+ * 因为两边的取值都只是 `string`。
+ *
+ * 这是一条**纯类型导入**（`import type`，编译后整行消失），所以
+ * `store → trader` 不产生任何运行时依赖，也不改变模块加载顺序。
+ */
+import type { Intensity } from '../trader/agent/loop.js';
 
 /* -------------------------------------------------------------------------- */
 /*  行类型                                                                     */
@@ -57,12 +70,23 @@ export interface AgentRunRow {
   id: number;
   traderId: number;
   createdAt: string;
-  kind: string;
-  trigger: string;
-  intensity: string;
+  /**
+   * 运行类型。
+   *
+   * ⚠️ **这是"我们只会写这几个值"的契约，不是"库里一定只有这几个值"的保证**（t61）。
+   * 走 `agentRuns.insert()` 的写入点由类型检查兜住；而**历史行**是完全另一回事
+   * （这一列在收窄之前一直是裸 `string`，所以老库里可能存在别的值）。
+   * 因此 `toRun()` 里的 `as` 是一次**声明**而不是**校验** ——
+   * 展示层必须保留"认不出的码原样显示"的兜底（`agentRunKindLabel()` 的 `?? 原码`）。
+   *
+   * 把读侧也收窄，是为了让**消费者**能穷举、能测；不是为了假装数据干净。
+   */
+  kind: AgentRunKind;
+  trigger: WakeTrigger;
+  intensity: Intensity;
   steps: number;
   agentsJson: string;
-  outcome: string;
+  outcome: AgentRunOutcome;
   detail: string;
   tokensIn: number;
   tokensOut: number;
@@ -145,16 +169,33 @@ const toMemory = (r: RawMemory): AgentMemoryRow => ({
   tagsJson: r.tags_json,
 });
 
+/**
+ * 库行 → `AgentRunRow`。
+ *
+ * ## ⚠️ 这三个 `as` 是**声明**，不是校验（t61）
+ *
+ * `RawRun` 的 `kind` / `trigger` / `intensity` / `outcome` 收的是 `string` —— 那是
+ * **诚实的**：SQLite 这一列没有 CHECK 约束，而历史行是在类型收窄之前写进去的
+ * （实测夹具里就出现过 `intensity: 'normal'`，那是早于 `single|panel` 的旧值）。
+ *
+ * 所以这里**不做运行时校验**：把一行旧数据标成 `'normal'` 会让整条读取路径抛错，
+ * 而那正是 `agentRunKindLabel()` 那层 `?? 原码` 兜底要处理的情形 ——
+ * 读侧崩掉比显示一个英文码糟得多。
+ *
+ * 收窄在这里的意义是：**让消费者能穷举**（标签表 `Record<Union, string>`、
+ * 渲染层的穷尽断言）。写入侧的保证由 `agentRuns.insert()` 的签名承担，
+ * 两条路各管各的，不要混。
+ */
 const toRun = (r: RawRun): AgentRunRow => ({
   id: r.id,
   traderId: r.trader_id,
   createdAt: r.created_at,
-  kind: r.kind,
-  trigger: r.trigger,
-  intensity: r.intensity,
+  kind: r.kind as AgentRunKind,
+  trigger: r.trigger as WakeTrigger,
+  intensity: r.intensity as Intensity,
   steps: r.steps,
   agentsJson: r.agents_json,
-  outcome: r.outcome,
+  outcome: r.outcome as AgentRunOutcome,
   detail: r.detail,
   tokensIn: r.tokens_in,
   tokensOut: r.tokens_out,
@@ -258,7 +299,19 @@ export const agentExperiments = {
    */
   insert(input: {
     traderId: number;
-    trigger: string;
+    /**
+     * 为什么被唤醒。
+     *
+     * ⚠️ **`WakeTrigger` 而不是 `string`**（t61）：这一列的含义是**枚举**，
+     * 而枚举一旦在写入点被放宽，界面上就会多出一个没有中文标签的英文码，
+     * 且"每个取值都有标签"的穷尽性测试**仍然是绿的**（它遍历的是联合类型，
+     * 而端口早就把类型放宽了 —— 测试遍历的是一个比真实数据更窄的集合）。
+     *
+     * 本条收窄当场抓到过一个真实缺陷：`orchestrator.ts` 曾经把档位值
+     * `trigger: 'panel'` 传进这条链（`'panel'` 属于 `Intensity`，不属于唤醒原因），
+     * 而收 `string` 时它编译得过、落库、什么都不报。
+     */
+    trigger: WakeTrigger;
     observed: unknown;
     patch: unknown;
     applied: unknown;
@@ -409,14 +462,32 @@ export const agentMemory = {
 /* -------------------------------------------------------------------------- */
 
 export const agentRuns = {
+  /**
+   * 落一条运行轨迹。
+   *
+   * ## ⚠️ 四个枚举字段全部收联合类型（t61）
+   *
+   * 这是**写入侧的唯一保证**：调用方传一个未登记的取值时，编译不过。
+   *
+   * 在收窄之前这一层收的是 `string`，于是缺陷可以从任何一处进入：
+   *
+   * ```
+   *   kinds 名单里没有 'incident' → 有人写了 kind: 'incident'
+   *     → 这里编译通过 → 落库 → 界面回落到裸码
+   *     → 而"每个 AgentRunKind 都有标签"的穷尽性测试仍然绿
+   * ```
+   *
+   * 现在同样的改动**在写入点就报错**（实测 TS2322，见任务报告）。
+   * `intensity` 用的 `Intensity` 来自 `loop.ts`（唯一权威），不在这里重抄一份。
+   */
   insert(input: {
     traderId: number;
-    kind: string;
-    trigger: string;
-    intensity: string;
+    kind: AgentRunKind;
+    trigger: WakeTrigger;
+    intensity: Intensity;
     steps: number;
     agents: unknown;
-    outcome: string;
+    outcome: AgentRunOutcome;
     detail: string;
     tokensIn: number;
     tokensOut: number;

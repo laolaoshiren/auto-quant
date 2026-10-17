@@ -935,21 +935,29 @@ export function logScopeKind(scope: string | null | undefined): LogScopeKind {
  * 提示词、以及别的界面复用。表在 shared，**漏一个取值就编译不过**（下面的
  * `Record<联合类型, string>`），而不是等用户在截图上发现。
  *
- * ## ⚠️ 这三张表的穷尽性由测试守着，不在类型层
+ * ## ⚠️ 这三张表的穷尽性由两层一起守（t61 之后）
  *
- * `kind` 与 `trigger` 在**服务端**的端口签名里被放宽成了 `string`
- * （`orchestrator.ts` 的 `recordRun` 收 `kind: string` / `trigger: string`），
- * 所以类型层拦不住"服务端加了一个新码"。那半边的收口归服务端任务；
- * 这半边由 `agentRunLabels.test.ts` 用**源码一致性守卫**兜住：
- * 服务端新增一个 `WakeTrigger` / `outcome` 取值而这里没跟上，测试当场变红。
+ * **类型层**：`kind` 与 `trigger` 在服务端的**写入点**已经收窄成联合类型
+ * （`orchestrator.ts` 的 `recordRun` / `recordExperiment` 收 `AgentRunKind` /
+ * `WakeTrigger`，`agentStore.ts` 的 `insert()` 同样收窄）。所以"服务端加了一个
+ * 新码"这件事**在写入点就编译不过** —— 那才是根治。
+ *
+ * 这段注释原先写的是「服务端端口签名被放宽成了 `string`，所以类型层拦不住，
+ * 那半边的收口归服务端任务」——**那个任务（t61）已经做完了**，留着旧话会让
+ * 下一个人以为这道闸还没接上，从而去加一层多余的运行时校验。
+ *
+ * **测试层**：`agentRunLabels.test.ts` 用**源码一致性守卫**兜住"重抄的两份名单
+ * 会不会分叉" —— 服务端新增一个 `WakeTrigger` / `outcome` 取值而这里没跟上，
+ * 测试当场变红（因为 `@aq/shared` 不能反向依赖服务端包，名单只能重抄一份）。
  */
 
 /**
  * `agent_runs.kind` 的**已知取值**。
  *
- * ⚠️ **它不是从类型里抄来的，是从写入点抄来的** —— 服务端没有为这一列定义联合
- * （`agentStore.ts` 的行类型是裸 `string`），所以这里的名单就是"实际会被写进去的
- * 那些值"，并由守卫测试对着写入点核对。
+ * ⚠️ **它是这一列的类型权威**（t61 之后）：服务端的写入点与存储层行类型都
+ * 从这里取类型（`orchestrator.ts` 的 `recordRun`、`agentStore.ts` 的
+ * `AgentRunRow` 与 `insert()`），所以往写入点塞一个未登记的 `kind`
+ * **会当场编译不过** —— 本文件就是那个"名单"。
  *
  * 两个生产写入点都是 `kind: 'strategy'`（`orchestrator.ts` 的 `recordRun` 两处：
  * 策略师一条、每个分析角色各一条）。`team_cycle` / `review` 是**别的调用形态**

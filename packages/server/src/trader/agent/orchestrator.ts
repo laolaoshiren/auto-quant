@@ -20,7 +20,7 @@
  *    它坏了不该让机器人停止交易。
  */
 
-import type { StrategyConfig } from '@aq/shared';
+import type { AgentRunKind, StrategyConfig, WakeTrigger } from '@aq/shared';
 
 import { runSingleShot, runToolLoop, intensityFor, type Intensity, type LoopModel, type LoopResult } from './loop.js';
 import type { AgentRole } from './roles.js';
@@ -60,7 +60,18 @@ export interface OrchestratorPorts {
 
   /** 落一次实验记录（调参的完整上下文）。 */
   recordExperiment: (row: {
-    trigger: string;
+    /*
+     * ⚠️ **必须是 `WakeTrigger`，不是 `string`**（t61）。
+     *
+     * 这一列（`agent_experiments.trigger`）的取值域就是"为什么被唤醒"，
+     * 而那张名单的唯一权威是 `wake.ts` 的 `WakeTrigger` —— `@aq/shared` 里
+     * `WAKE_TRIGGERS` 与它逐字一致（由 `agentRunLabels.test.ts` 的跨包守卫钉住）。
+     *
+     * 收 `string` 时，往这里塞一个未登记的触发原因**编译得过**、落库、然后
+     * 界面上回落到裸码 —— 而"每个触发原因都有中文标签"的穷尽性测试**仍然是绿的**，
+     * 因为它遍历的是联合类型，而端口早就把类型放宽了。
+     */
+    trigger: WakeTrigger;
     observed: unknown;
     patch: unknown;
     applied: unknown;
@@ -69,10 +80,29 @@ export interface OrchestratorPorts {
     toolCalls: unknown;
   }) => void;
 
-  /** 落一次运行轨迹。 */
+  /**
+   * 落一次运行轨迹。
+   *
+   * ## ⚠️ 三个字段都必须收**联合类型**，不能收 `string`（t61）
+   *
+   * 这是本任务存在的全部理由。原来的签名是 `kind: string` / `trigger: string`，
+   * 于是这条链**每一环都是宽的**：
+   *
+   * ```
+   *   写入点 `kind: 'incident'`  →  端口收 string（编译通过）
+   *      →  agent_runs.kind 落库  →  界面 `?? 原码` 回落到英文
+   *      →  而"每个 AgentRunKind 都有标签"的穷尽测试仍然是绿的
+   * ```
+   *
+   * 收窄之后，同一个改动**在写入点就编译不过** —— 缺陷族被堵在源头，
+   * 而不是等用户在截图上看到一个新英文词。
+   *
+   * `intensity` 本来就是 `Intensity`（`loop.ts`），它一直是安全的；
+   * 真正被放宽的只有 `kind` 与 `trigger` 两个。
+   */
   recordRun: (row: {
-    kind: string;
-    trigger: string;
+    kind: AgentRunKind;
+    trigger: WakeTrigger;
     intensity: Intensity;
     result: LoopResult;
   }) => void;
@@ -98,7 +128,14 @@ export interface StrategyReviewOutcome {
   ran: boolean;
   /** 没跑的原因（预算/冷却/没有值得醒的事件）。**必须能说清为什么没跑**。 */
   skippedBecause: string | null;
-  trigger: string;
+  /**
+   * 这一轮的唤醒触发原因。
+   *
+   * ⚠️ `WakeTrigger` 而不是 `string`（t61）：它直接来自 `decideWake()` 的
+   * `WakeDecision.trigger`，而那个字段本来就已经是联合类型 —— 这里写 `string`
+   * 是在**出口处白白丢掉了类型信息**，于是调用方（以及它的调用方）谁都拿不到约束。
+   */
+  trigger: WakeTrigger;
   intensity: Intensity | null;
   loop: LoopResult | null;
   /** 调参之后的配置（没调就是原配置）。 */
@@ -512,7 +549,7 @@ export async function runStrategyReview(input: {
   });
 
   /* ⚠️ 在策略师【之后】跑 —— 理由见上面那段（调用竞争与实例内状态）。 */
-  const analysts = chosen.intensity === 'panel' ? await runPanelAnalysts(input, factsText) : [];
+  const analysts = chosen.intensity === 'panel' ? await runPanelAnalysts(input, factsText, decision.trigger) : [];
 
   // 5. 落运行轨迹
   ports.recordRun({ kind: 'strategy', trigger: decision.trigger, intensity: chosen.intensity, result: loop });
@@ -554,12 +591,31 @@ export async function runStrategyReview(input: {
 async function runPanelAnalysts(
   input: { model: LoopModel; ports: OrchestratorPorts },
   factsText: string,
+  /**
+   * **真实的那一次唤醒原因** —— 由调用方把 `decision.trigger` 传进来。
+   *
+   * ## ⚠️ 这里原本硬编码 `trigger: 'panel'`（t61 收窄类型时抓到）
+   *
+   * `'panel'` **不在** `WakeTrigger` 名单里 —— 它是"档位"（`Intensity`），
+   * 不是"为什么被唤醒"。而 `agent_experiments.trigger` 这一列的含义是后者。
+   *
+   * 为什么它一直没被发现：写入侧（`recordExperiment` 端口）收货的是 `string`，
+   * 所以一个语义上根本不属于该列的取值**编译得过、落库、然后什么都不报错**。
+   * 界面上的 `agent_experiments` 是策略师的输入（`get_experiments`），
+   * 于是它会读到一条 `trigger: 'panel'` 的实验记录 —— 一个它无法解释的唤醒理由。
+   *
+   * 这条路径**只在 `panel` 档且分析角色真的调了 `set_params`/被拒补丁时才落库**
+   * （`runSingleShot` 没有工具，`dispatchTool` 在单次调用里其实走不到），
+   * 所以它是个**潜伏**缺陷而不是线上正在发生的故障 —— 但类型收窄让它当场现形，
+   * 这正是本任务要找的东西：**类型放宽会掩盖语义错误**。
+   */
+  trigger: WakeTrigger,
 ): Promise<Array<{ role: AgentRole; result: LoopResult }>> {
   const roles: AgentRole[] = ['performance_analyst', 'attribution_analyst'];
   const settled = await Promise.all(
     roles.map(async (role) => {
       try {
-        const deps = buildToolDeps(input.ports, { trigger: 'panel', observed: factsText, steps: () => [] });
+        const deps = buildToolDeps(input.ports, { trigger, observed: factsText, steps: () => [] });
         const result = await runSingleShot({
           role,
           task:
@@ -721,7 +777,7 @@ export async function reviewClosedTrade(input: {
  *
  * 所以两件事必须在同一个地方发生：**配置改了却没有记录，等于这次改动不存在。**
  */
-function buildToolDeps(ports: OrchestratorPorts, context: { trigger: string; observed: unknown; steps: () => unknown }): AgentToolDeps {
+function buildToolDeps(ports: OrchestratorPorts, context: { trigger: WakeTrigger; observed: unknown; steps: () => unknown }): AgentToolDeps {
   return {
     currentConfig: () => ports.readConfig(),
     saveConfig: (config, meta) => {

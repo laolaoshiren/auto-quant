@@ -200,7 +200,8 @@ test('待结算实验算的是"那次调整之后"的成交，不是全部', () 
    */
   const id = agentExperiments.insert({
     traderId,
-    trigger: 't',
+    /* 原值 `'t'` 不在 `WakeTrigger` 里（t61 收窄 `insert()` 时变成 TS2322）；换成真实取值。 */
+    trigger: 'new_result',
     observed: {},
     patch: {},
     applied: {},
@@ -233,7 +234,8 @@ test('本小时调用次数从运行轨迹算', () => {
   agentRuns.insert({
     traderId,
     kind: 'strategy',
-    trigger: 't',
+    /* 原值 `'t'` 不在 `WakeTrigger` 里（t61）；这条只验证计数，换真实取值语义不变。 */
+    trigger: 'new_result',
     intensity: 'single',
     steps: 1,
     agents: [],

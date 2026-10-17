@@ -117,7 +117,12 @@ function seedAgentRows(): void {
 
   agentExperiments.insert({
     traderId,
-    trigger: 'periodic',
+    /*
+     * ⚠️ 原值是 `'periodic'` —— 它**不是** `WakeTrigger` 的取值（t61 收窄类型时暴露）。
+     * 这条夹具的目的只是"每个子表各插一行，然后验证级联删除时都被删掉"，
+     * 与触发原因具体是哪个无关。换成真实存在的 `manual`，语义不变。
+     */
+    trigger: 'manual',
     observed: {},
     patch: {},
     applied: {},
@@ -137,8 +142,13 @@ function seedAgentRows(): void {
   agentRuns.insert({
     traderId,
     kind: 'review',
-    trigger: 'periodic',
-    intensity: 'normal',
+    /* 原值 `'periodic'` 不在 `WakeTrigger` 里；换成真实存在的 `manual`（t61）。 */
+    trigger: 'manual',
+    /*
+     * 原值 `'normal'` 是**早于 `single|panel` 的旧档位名**，现在不在 `Intensity` 里（t61）。
+     * 换成 `single` —— 与这条夹具无关的语义（它只验证级联删除）。
+     */
+    intensity: 'single',
     steps: 1,
     agents: {},
     outcome: 'ok',

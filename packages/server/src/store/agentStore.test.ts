@@ -170,18 +170,26 @@ test('实验记录：patch 与 applied 分开存，钳制时两者不同且看�
 });
 
 test('实验记录：按时间倒序返回，最近的在前', () => {
-  for (const n of [1, 2, 3]) {
+  /*
+   * ⚠️ 原夹具写的是 `` trigger: `t${n}` `` —— 一个纯粹为了"三条不同的值"而编的字符串。
+   * 它能编译，只因为 `insert()` 当时收 `string`（t61）。
+   *
+   * 语义不变：这条用例测的是**倒序与条数**，与触发原因无关。
+   * 换成三个真实取值，顺带覆盖多个合法 trigger 的写入路径。
+   */
+  const triggers = ['new_result', 'drawdown', 'timeout'] as const;
+  triggers.forEach((trigger, index) => {
     agentExperiments.insert({
       traderId,
-      trigger: `t${n}`,
+      trigger,
       observed: {},
       patch: {},
       applied: {},
       clamps: [],
-      reason: `第 ${n} 次`,
+      reason: `第 ${index + 1} 次`,
       toolCalls: [],
     });
-  }
+  });
   const recent = agentExperiments.recent(traderId, 2);
   assert.equal(recent.length, 2);
   assert.match(recent[0]!.reason, /第 3 次/, '最近的必须排在最前 —— 喂给模型的是"最近发生了什么"');
@@ -235,10 +243,21 @@ test('运行轨迹：本小时计数是预算的判据', () => {
   const hourAgo = new Date(now.getTime() - 3_600_000).toISOString();
   const twoHoursAgo = new Date(now.getTime() - 7_200_000).toISOString();
 
+  /*
+   * ⚠️ `kind` 原先是 `'decision'`，**那是这个漏洞的证据**（t61）。
+   *
+   * `'decision'` 不在 `AgentRunKind`（`strategy | team_cycle | review`）里，
+   * 也不在任何历史写入点出现过 —— 它能编译，**只因为 `insert()` 当时收 `string`**。
+   * 收窄成联合类型之后它当场变成 TS2322。
+   *
+   * 语义不变：这条用例测的是"本小时计数是预算的判据"，与 `kind` 具体是哪个值无关。
+   * 换成真实存在的 `strategy` / `team_cycle` / `review` 各一条，覆盖面反而更宽
+   * （三个 kind 都走一遍写入路径）。
+   */
   for (const [kind, intensity] of [
-    ['decision', 'single'],
-    ['decision', 'panel'],
-    ['strategy', 'panel'],
+    ['strategy', 'single'],
+    ['team_cycle', 'panel'],
+    ['review', 'panel'],
   ] as const) {
     agentRuns.insert({
       traderId,
