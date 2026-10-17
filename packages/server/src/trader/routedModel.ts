@@ -30,6 +30,8 @@
 import type { Decision } from '@aq/shared';
 import type { DecisionModel } from './autoTrader.js';
 import type { ModelTier } from '../llm/modelCatalog.js';
+import { resolveLadder } from './ladderResolve.js';
+import { createLogger } from '../logger.js';
 import { ModelRouter, type CallModel } from '../llm/modelRouter.js';
 import { runTradingDesk, mergeRoleUsage, type AskRole, type DeskOutcome, type DeskRoleOutput, type RoleUsage } from './agent/tradingDesk.js';
 import { renderDeskOutcome, extractFirstJsonArray } from './agent/deskOutput.js';
@@ -43,6 +45,8 @@ import { AGENT_CALL_MARKER } from './agent/loop.js';
 /* ⚠️ 角色提示词的唯一来源 —— sk() 必须用它，否则那份长文到不了模型。 */
 import { ROLES } from './agent/roles.js';
 import type { AgentRole } from './agent/roles.js';
+
+const log = createLogger('routed-model');
 
 /** 一次「向模型提问」要用的档位与角色。 */
 export interface RoleRequest {
@@ -145,10 +149,29 @@ const T1_LADDER: readonly string[] = [
   /* 免费 + 524K；小 prompt 1.15–1.37s、2.2 万字符材料 1.54–2.50s；三项测验全通过。 */
   'opencode-zen-free/space-bunny-free',
   /*
-   * 免费路由组（`*-free` 后缀 = 只跑免费后端），实测 1.41–1.43s。
-   * ⚠️ 它**只在线上网关存在**（本机网关没有这个组）—— 见下面"两个 magpie"那段。
+   * 免费路由组，实测 1.41–1.43s。
+   *
+   * ⚠️ **id 从 `group/auto-space-bunny-free` 改成了 `group/auto-space-bunny`**
+   * （2026-10-18 实测 · 线上网关）。
+   *
+   * 带 `-free` 的那个**在线上已经不存在了**：
+   * ```
+   *   线上网关（172.19.0.1:3425）329 个模型里，含 space-bunny 的只有：
+   *     group/auto-space-bunny        ← 现名
+   *     opencode-go/space-bunny
+   *     workbuddy/space-bunny
+   *     opencode-zen-free/space-bunny-free
+   *   `group/auto-space-bunny-free` 查无此项。
+   * ```
+   *
+   * ## 这个改动**必须**配着 `resolveLadder()` 一起用
+   *
+   * 手工维护 id 会一直这样烂下去（这正是本文件开头那段"链上的 id 会失效，
+   * 而不会有任何测试因此变红"说的事）。现在启动时会用 `/v1/models` 过滤掉
+   * 不存在的 id 并写 warn —— 这条改动只是把**已知**的那个修对，
+   * **真正的防线是那次过滤**。
    */
-  'group/auto-space-bunny-free',
+  'group/auto-space-bunny',
   /*
    * 原来的体力活兜底组：线上实测 1.19–1.39s（三项测验只测了契约，通过）。
    * 保留它是因为它自带网关级跨供应商故障转移 —— 那是我这三条免费模型没有的能力。
@@ -175,8 +198,8 @@ const T2_LADDER: readonly string[] = [
    * 线上 1.82–2.07s。⚠️ 因为只有 200K，它**不当"可能读超长材料"角色的链首**。
    */
   'opencode-zen-free/deepseek-v4.1-flash-free',
-  /* 免费组，1.41–1.43s；契约 3/3。 */
-  'group/auto-space-bunny-free',
+  /* 免费组，1.41–1.43s；契约 3/3。**id 见 T1 链上那段说明**（`-free` 后缀已不存在）。 */
+  'group/auto-space-bunny',
   /* 兜底：原来的分析组（线上 1.15–1.51s）。 */
   'group/team-analyst',
   /* 再兜一层：原来的体力活组（"单组一次 5xx 就让整档不可用"的教训仍成立）。 */
@@ -363,8 +386,52 @@ const CONTEXT_CAUTION_200K: ReadonlySet<string> = new Set([
  * 延迟会波动，硬编码 "1.10s" 这种阈值下次波动就会误判。
  */
 
-export const ROLE_GROUP_LADDERS: Readonly<Record<string, readonly string[]>> = {
-  /*
+/* -------------------------------------------------------------------------- */
+/*  候选链的"死 id"过滤（2026-10-18）                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 网关 `/v1/models` 报出的全部 id。**由启动流程注入一次**，之后只读。
+ *
+ * `null` = 还没拿到（或拿不到）⇒ `resolveLadder()` 会原样返回，不筛。
+ */
+let availableModelIds: readonly string[] | null = null;
+
+/** 已经算过的链（键 = 角色 + 链内容的哈希，链本身是常量所以实际按角色缓存）。 */
+const filteredLadderCache = new Map<string, readonly string[]>();
+
+/**
+ * 注入网关的真实模型清单。启动时调用一次。
+ *
+ * ⚠️ **拿不到就传 `null`**，不要传空数组装作"网关什么都没有" ——
+ * 那会让每条链都被判成"全都不存在"。
+ */
+export function setAvailableModelIds(ids: readonly string[] | null): void {
+  availableModelIds = ids;
+  filteredLadderCache.clear();
+}
+
+/** 取（并缓存）经过死 id 过滤的链。 */
+function filterLadderOnce(role: string, ladder: readonly string[]): readonly string[] {
+  const cached = filteredLadderCache.get(role);
+  if (cached !== undefined) return cached;
+  const resolved = resolveLadder(ladder, availableModelIds);
+  if (resolved.dropped.length > 0) {
+    /*
+     * 写一条 warn，**每次进程生命周期只写一次**（缓存保证）。
+     * 这条日志是"升级后模型 id 漂移了"的唯一可见信号 —— 别删。
+     */
+    log.warn('候选链里有网关不存在的模型 id，已跳过', {
+      role,
+      dropped: resolved.dropped,
+      remaining: resolved.ladder,
+    });
+  }
+  filteredLadderCache.set(role, resolved.ladder);
+  return resolved.ladder;
+}
+
+export const ROLE_GROUP_LADDERS: Readonly<Record<string, readonly string[]>> = {  /*
    * 唯一的 T2 分析角色。用 `team-analyst`（我按"分析"挑的
    * mimo-flash-free / deepseek-flash / nemotron-ultra，优选→兜底）。
    *
@@ -1115,9 +1182,28 @@ export function createTeamDecisionModel(options: {
        *
        * ⚠️ 可用环境变量关掉（`AQ_ROLE_GROUPS=off`）—— 出问题能立刻回到旧行为。
        */
-      const roleLadder = process.env.AQ_ROLE_GROUPS === 'off'
+      const rawLadder = process.env.AQ_ROLE_GROUPS === 'off'
         ? undefined
         : ROLE_GROUP_LADDERS[role] ?? TIER_GROUP_LADDERS[tier];
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⚠️ **用网关的真实清单过滤死 id**（2026-10-18）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * 本文件开头自己写着「链上的 id 会失效，而不会有任何测试因此变红」——
+       * 2026-10-18 实测就打脸了：`group/auto-space-bunny-free` 在线上网关已不存在
+       * （现名 `group/auto-space-bunny`），而 T1/T2 两条链各挂着它 ⇒
+       * **每轮决策都要先撞一次 404 才轮到下一个候选。**
+       *
+       * ⇒ 现在每次取链时过一遍 `resolveLadder()`。它拿不到清单就原样返回（不筛），
+       *   一个都不剩时也原样返回 —— 那条边界在 `ladderResolve.ts` 里写清了。
+       *
+       * ⚠️ **不要在这里 `await` 网络请求**：这段在一个同步的取值路径上。
+       *   可用清单由 `setAvailableModelIds()` 在启动时注入一次（拿不到就是 `null`）。
+       */
+      const roleLadder = rawLadder === undefined
+        ? undefined
+        : filterLadderOnce(role, rawLadder);
       const result = await router.callByTier(
         tier,
         [

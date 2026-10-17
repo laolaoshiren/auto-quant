@@ -40,10 +40,17 @@
  */
 
 import type { ModelTier } from '../../llm/modelCatalog.js';
+import {
+  prefilterSymbols,
+  readJevConfig,
+  type JevFallbackReason,
+  type JevInput,
+} from '../../llm/jev.js';
+import { createLogger } from '../../logger.js';
 import { mapConcurrent } from './pool.js';
 import { analyzePerSymbol, type PerSymbolResult } from './perSymbol.js';
 import { enterCritical, leaveCritical } from './resourceGate.js';
-import { compactMarketContext } from './symbolSlices.js';
+import { compactMarketContext, compactSeriesLines } from './symbolSlices.js';
 import { pickForAnalysis } from './analystSampling.js';
 import {
   BUDGET_SKIP_REASON,
@@ -68,6 +75,39 @@ import {
  */
 import { extractFirstJsonArray } from './deskOutput.js';
 import { ROLES } from './roles.js';
+
+/**
+ * **Jev 初筛的观测日志**（scope=`jev`）。
+ *
+ * ⚠️ 走 `logger` 而不是本地 `console`：只有 `logger` 的 sink 会把日志写进
+ * `runtime_logs`（`api/server.ts` 的 `setLogSink`），界面才看得见。
+ */
+const jevLog = createLogger('jev');
+
+/** 把回落原因翻译成一句能直接读的话（写进 `runtime_logs` 的 warn）。 */
+function jevFallbackText(
+  reason: JevFallbackReason | null,
+  count: number,
+  minScore: number,
+  highest: number | null,
+): string {
+  switch (reason) {
+    case 'scorer-failed':
+      return '初筛调用失败（网络/超时/返回无法解析）';
+    case 'count-mismatch':
+      return '初筛返回数量与输入不符';
+    case 'format-error':
+      return '初筛返回格式不对（分数/置信度/标的对不上）';
+    case 'all-below-threshold':
+      return `全部 ${count} 个标的低于门槛 ${minScore}（最高 ${highest === null ? '—' : highest.toFixed(2)}）`;
+    case 'empty':
+      return '没有可打分的标的';
+    case 'disabled':
+      return '初筛未启用';
+    default:
+      return '初筛结果不可用';
+  }
+}
 
 /**
  * **分析师的静态定义**（2026-10-13 提取为常量）。
@@ -1826,7 +1866,96 @@ async function runTradingDeskInner(input: {
   if (process.env.AQ_PER_SYMBOL === 'on') {
     const compactedForPerSymbol = compactMarketContext(input.marketContext, 30 /* 完整序列 */);
     if (compactedForPerSymbol !== null && compactedForPerSymbol.slices.length > 0) {
-      const tasks = compactedForPerSymbol.slices.map((s) => ({
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  **Jev 初筛**（`AQ_JEV_PREFILTER=on` 才启用，默认关闭）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * ## 为什么在"逐币分析之前"加这一层
+       *
+       * 按币并行会对**每个**切片发起一次 `symbol_scout` 深看调用。
+       * 候选多的时候（实测 17–19 次/轮），其中相当一部分标的
+       * 一眼就没有机会 —— 用 Jev 先花 ~1/300 的成本打分，
+       * 只让前 N 个进大模型，省下的是**最贵的那一段**。
+       *
+       * ## ⚠️ 降级铁律（比省成本重要得多）
+       *
+       * Jev 是**实验功能**。它失败、返回半份、或"说都不值得"时，
+       * **必须原样把全部切片交给 LLM** —— 绝不允许一个初筛组件
+       * 把整个团队的分析对象掐成 0 个。
+       *
+       * 具体回落条件在 `jev.ts` 的 `prefilterSymbols` 里（有 5 条测试钉住），
+       * 这里只负责：**拿结果、写 `runtime_logs`、把切片换掉**。
+       *
+       * ## 开关
+       *
+       * `AQ_JEV_PREFILTER` 未设置 → `readJevConfig().enabled === false`
+       * → **不读环境变量以外的任何东西、一个请求都不发**，原路径逐字不变。
+       */
+      const allSlices = compactedForPerSymbol.slices;
+      let slicesForLlm = allSlices;
+      const jevConfig = readJevConfig();
+      if (jevConfig.enabled) {
+        /*
+         * 喂给 Jev 的是**压缩后的摘要**，不是给 LLM 的完整序列：
+         * · `compactSeriesLines(..., 5)` 把每个周期的 30 个点压到 5 个，
+         *   而 headline（current_ema20 / current_rsi7 / 24h_change …）原样保留；
+         * · 客户端还有 4000 字符的硬上限兜底。
+         *
+         * ⚠️ 绝不复用 `s.text` 原文：单个切片约 1 万字符，18 个就是 18 万，
+         * 对 Jev 是浪费，也会让单次调用逼近它的输入上限。
+         */
+        const jevInputs: JevInput[] = allSlices.map((s) => ({
+          symbol: s.symbol ?? 'UNKNOWN',
+          digest: compactSeriesLines(s.text, 5),
+        }));
+        const picked = await prefilterSymbols(jevInputs, {
+          enabled: true,
+          topN: jevConfig.topN,
+          minScore: jevConfig.minScore,
+          baseUrl: jevConfig.baseUrl,
+          model: jevConfig.model,
+        });
+
+        if (picked.applied && picked.keep.length > 0) {
+          slicesForLlm = picked.keep.map((i) => allSlices[i]!);
+          const highest = picked.highest === null ? '—' : picked.highest.toFixed(2);
+          const lowest = picked.lowest === null ? '—' : picked.lowest.toFixed(2);
+          jevLog.info(
+            `[Jev] ${allSlices.length} 个标的 → 保留 ${slicesForLlm.length} 个` +
+              ` · 最高 ${highest} 最低 ${lowest} · 耗时 ${picked.elapsedMs}ms`,
+          );
+          if (picked.dropped.length > 0) {
+            /*
+             * 被筛掉的标的**逐个点名**（最多 12 个，其余用总数带过）：
+             * 只写"筛掉 12 个"的话，出问题时无法回答"到底筛掉了谁"。
+             */
+            const desc = [...picked.dropped].sort((a, b) => b.score - a.score);
+            const shown = desc.slice(0, 12);
+            const suffix =
+              desc.length > shown.length ? ` …等 ${desc.length} 个` : '';
+            jevLog.info(
+              `[Jev] 筛除：${shown.map((s) => `${s.symbol}(${s.score.toFixed(2)})`).join(' ')}${suffix}`,
+            );
+          }
+        } else {
+          /*
+           * **回落**：`slicesForLlm` 仍是全部切片（上面的赋值没发生）。
+           * 这里必须留下一条 warn —— 否则线上只会看到"这轮变慢了 15 秒"，
+           * 却不知道是 Jev 失败导致的。
+           */
+          jevLog.warn(
+            `[Jev] ${jevFallbackText(
+              picked.reason,
+              allSlices.length,
+              jevConfig.minScore,
+              picked.highest,
+            )} —— 回落到不筛（全部 ${allSlices.length} 个标的照常进 LLM）`,
+          );
+        }
+      }
+
+      const tasks = slicesForLlm.map((s) => ({
         symbol: s.symbol ?? 'UNKNOWN',
         context: [compactedForPerSymbol.shared, s.text].join('\n\n'),
       }));

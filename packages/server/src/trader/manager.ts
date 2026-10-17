@@ -44,6 +44,7 @@ import type { ModelsDevLookup } from '../llm/modelDiscovery.js';
 import { runOutsideCritical } from './agent/resourceGate.js';
 import { runSelfCheck } from './selfcheckRunner.js';
 import { createRoutedDecisionModel, createTeamDecisionModel, tierForRole } from './routedModel.js';
+import { setAvailableModelIds } from './routedModel.js';
 
 const log = createLogger('manager');
 
@@ -2129,6 +2130,49 @@ export class TraderManager {
      *
      * 这也是"不碰交易循环"的具体形态 —— 见 `routedModel.ts` 的文件头说明。
      */
+    /*
+     * ⚠️ **把网关的真实模型清单交给候选链过滤器**（2026-10-18）。
+     *
+     * ## 为什么在这里
+     *
+     * `routedModel.ts` 的 T1/T2/T3 候选链是手工维护的字符串数组，而**链上的 id 会失效**
+     * （本文件 2026-10-18 实测：`group/auto-space-bunny-free` 在线上网关已不存在，
+     * 现名 `group/auto-space-bunny`）。失效时没有任何测试会变红，只会让每轮决策
+     * 先撞一次 404 再轮到下一个候选 —— 静默变慢，最难发现的那一类。
+     *
+     * ## 为什么用 `discoverModels` 而不是自己再打一次 `/v1/models`
+     *
+     * 那个函数**已经**在别处被用来发现上下文长度了，而且自带 baseUrl/key 的处理与
+     * 缓存。这里再打一次只会多一份要维护的代码。
+     *
+     * ## 拿不到会怎样
+     *
+     * `setAvailableModelIds(null)` ⇒ `resolveLadder()` 原样返回（不筛）。
+     * **宁可用可能失效的链，也不能让机器人没有候选** —— 见 `ladderResolve.ts`。
+     * 整段包 try/catch：这是"让链更准"的优化，**不能因为它的失败让机器人起不来**。
+     */
+    try {
+      /*
+       * `gateway` 是 `TeamGatewayConfig`（`{ baseUrl, apiKey, source }`）——
+       * key 与地址它自己已经解析好了，**不需要再去查库/解密**。
+       */
+      const discovered = await discoverModels({
+        provider: 'magpie' as never,
+        apiKey: gateway.apiKey,
+        baseUrl: gateway.baseUrl,
+      });
+      if (discovered.ok && discovered.models.length > 0) {
+        setAvailableModelIds(discovered.models.map((m) => m.id));
+      } else {
+        setAvailableModelIds(null);
+      }
+    } catch (error) {
+      setAvailableModelIds(null);
+      log.warn('取网关模型清单失败，候选链不做死 id 过滤（这只会让慢一点，不影响正确性）', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     const model = createTeamDecisionModel({
       router,
       baseMaxTokens: TEAM_BASE_MAX_TOKENS,
