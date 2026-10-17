@@ -39,8 +39,9 @@ import {
   fieldLabel,
   looksLikeActionCode,
   parseDecisionListDetailed,
-  parseLooseObject,
-  stripTruncationTail,
+  parseLooseObjectDetailed,
+  valueLabel,
+  type ObjectRow,
   type ParsedDecisionItem,
 } from '../../lib/structuredMessage';
 
@@ -213,29 +214,39 @@ function CollapsibleText({ text, level }: { text: string; level: HumanLevel }): 
 }
 
 /**
- * **一个 JSON 对象** → 键值两列（字段名译成中文，动作码值也译掉）。
+ * **一个 JSON 对象** → 键值两列（字段名译成中文，值里的英文枚举也译掉）。
  *
  * 这是用户截图里"英文占位符"的第二半：`note` 里除了决策数组，
  * 也可能写进来**单个对象**（`{"action":"open_short","symbol":"WLDUSDT",…}`）。
  * 那种形态既不是数组、也不该原样显示。
+ *
+ * ## 2026-10-18：**完整对象与被截断对象共用这一个渲染器**
+ *
+ * `parseLooseObjectDetailed` 对两种输入给出一致的 `ObjectRow[]`，所以中文化只有这一处：
+ * ```
+ *   字段名   → `fieldLabel`（`DECISION_FIELD_LABELS`）
+ *   枚举值   → `valueLabel`（强/弱/只空或不交易…）+ `actionLabel`（开空/跳过…）
+ *   数组值   → `items` → **每个元素一行**（`symbol` 加粗，后面跟 `structure`/`要点`）
+ * ```
  */
-function ObjectRows({ rows }: { rows: Array<[string, string]> }): React.ReactElement {
+function ObjectRows({ rows }: { rows: ObjectRow[] }): React.ReactElement {
   return (
     <table className="w-full table-fixed border-collapse text-xs">
       <tbody>
-        {rows.map(([key, value]) => {
-          const label = fieldLabel(key);
+        {rows.map((row) => {
+          const label = fieldLabel(row.key);
           /* 未登记的字段名 → 等宽弱色（让人看出这是标识符，不是人话）。 */
-          const unmappedField = label === key;
+          const unmappedField = label === row.key;
           /*
-           * 值本身是动作码 → 也译成中文（`open_short` → 开空）。
+           * 值本身是动作码/英文枚举 → 也译成中文（`open_short` → 开空，`strong` → 强）。
            * 未登记的动作码保留原词 + 等宽弱色（与 `DecisionLine` 同一口径）。
            */
-          const translated = looksLikeActionCode(value) ? actionLabel(value) : value;
-          const unmappedValue = looksLikeActionCode(value) && translated === value;
+          const isAction = looksLikeActionCode(row.text);
+          const translated = valueLabel(isAction ? actionLabel(row.text) : row.text);
+          const unmappedValue = isAction && translated === row.text;
 
           return (
-            <tr key={key} className="border-b border-base-800 last:border-b-0">
+            <tr key={row.key} className="border-b border-base-800 last:border-b-0">
               <th
                 scope="row"
                 className={`w-[7rem] whitespace-nowrap py-1 pr-2 text-left align-top font-normal ${
@@ -249,7 +260,23 @@ function ObjectRows({ rows }: { rows: Array<[string, string]> }): React.ReactEle
                   unmappedValue ? 'font-mono text-[11px] text-ink-faint' : 'text-ink-mid'
                 }`}
               >
-                {plainText(translated)}
+                {row.items !== undefined && row.items.length > 0 ? (
+                  <ul className="min-w-0 space-y-0.5">
+                    {row.items.map((item, index) => (
+                      <li key={`${item.symbol ?? ''}-${index}`} className="min-w-0 break-words">
+                        {item.symbol !== null && (
+                          <span className="num font-semibold text-ink-hi">{plainText(item.symbol)}</span>
+                        )}
+                        {item.symbol !== null && item.detail.length > 0 && (
+                          <span className="text-ink-faint"> · </span>
+                        )}
+                        <span>{plainText(valueLabel(item.detail))}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  plainText(translated)
+                )}
               </td>
             </tr>
           );
@@ -260,22 +287,57 @@ function ObjectRows({ rows }: { rows: Array<[string, string]> }): React.ReactEle
 }
 
 /**
+ * **"这个对象被截断了、表里只有完整的部分"** 的如实说明（2026-10-18）。
+ *
+ * 用户截图里那三类对象（①分析产出 ②裁决产出 ③调研产出）都是被后端截断的：
+ * 展示层必须让人知道"这不是全部"，**不能把半张表伪装成完整结论**。
+ *
+ * ⚠️ 颜色仍用弱化色（`text-ink-faint`）而不是警示色 —— 截断是"数据不完整"这个
+ * **事实**，不是故障；红色会把真正的失败稀释掉（与 `TruncationNotice` 同一口径）。
+ */
+function PartialObjectNotice({
+  originalLength,
+  incomplete,
+}: {
+  /** 留痕里记录的原始字符数；没有留痕 → `null`（**不知道就不编数字**）。 */
+  originalLength: number | null;
+  /** 对象本身没闭合（内容在末尾被切断）。 */
+  incomplete: boolean;
+}): React.ReactElement {
+  return (
+    <p className="mt-0.5 text-[11px] leading-relaxed text-ink-faint">
+      {originalLength === null ? '原文本被截断' : `原文本已截断（完整 ${originalLength} 字）`}
+      {incomplete ? '，只显示了完整的部分。' : '。'}
+    </p>
+  );
+}
+
+/**
  * **一条 message 的人话版** —— 所有 step / note 的统一入口。
  *
  * 判据顺序（每一步都要）：
  * ```
  *   ① 是"决策数组"的 JSON？   → 每个标的一行（`parseDecisionListDetailed`）
  *      · 带截断留痕 → 先剥尾巴，再逐个抠完整对象；**如实说明被截断了**
- *   ② 是"单个对象"的 JSON？   → 键值两列，字段名与动作码都译成中文（`parseLooseObject`）
+ *   ② 是"对象"的 JSON（完整**或被截断**）？ → 键值两列，字段名/枚举值都译成中文
+ *      · 完整对象   → `parseLooseObjectDetailed` 的严格路径（与改动前逐字一致）
+ *      · 被截断对象 → 同一函数的容错路径；**如实说明"只显示了完整的部分"**
  *   ③ 否则                   → 纯文本（**仍要过 `plainText`**）+ 超长折叠
  * ```
- * 解析失败（非 JSON、形状不对、截断到一个完整对象都没有）自然落进 ③ —— **一个字节都不丢**。
+ * 解析失败（非 JSON、形状不对、一条键值对都提不出来）自然落进 ③ —— **一个字节都不丢**。
  *
  * ## ⚠️ 截断的决策数组（2026-10-18 · 用户实测）
  *
  * 被后端截断的数组**不是合法 JSON**，但前面若干个 `{…}` 是完整的。旧实现整条回落纯文本，
  * 用户屏幕上就是一坨原始 JSON。现在：抠出完整对象 → 按决策数组渲染 → **把留痕那句
  * "原文本已截断（完整 N 字）"照实显示出来**（见 `TruncationNotice`）。
+ *
+ * ## ⚠️ 截断的**对象**（2026-10-18 · 用户截图里的 ①②③）
+ *
+ * `{"symbols":[{"symbol":"AGTUSDT",…` / `{"side":"short_or_no_trade",…` /
+ * `{"hypothesis":"当前市场整体处于普跌…` —— 这三类 `JSON.parse` 必然失败，
+ * 旧实现整条回落纯文本，用户看到的就是原始 JSON。现在走容错提取，
+ * **只渲染完整收下的键值对**，并在表下方说明「原文本被截断，只显示了完整的部分」。
  */
 export function HumanMessage({
   text,
@@ -333,17 +395,25 @@ export function HumanMessage({
   }
 
   /*
-   * ② 单个对象 → 键值两列（字段名 + 动作码值都中文化）。
-   * 解析前同样剥掉留痕（`parseLooseObject` 内部已经剥；这里再取一次是为了**说明**）。
+   * ② 对象 → 键值两列（字段名 + 值里的英文枚举都中文化）。
+   *
+   * `parseLooseObjectDetailed` 内部有两条路径：
+   * ```
+   *   · 完整对象   → 与改动前逐字相同的键值行
+   *   · 被截断对象 → 只保留完整收下的键值对 / 子对象 / 子数组（① ② ③）
+   * ```
+   * 被截断时**必须如实说明**（见 `PartialObjectNotice`），不能把半张表伪装成完整结论。
    */
-  const tail = stripTruncationTail(text);
-  const rows = parseLooseObject(tail.text);
-  if (rows !== null) {
+  const objectDetail = parseLooseObjectDetailed(text);
+  if (objectDetail !== null) {
     return (
       <div className="min-w-0">
-        <ObjectRows rows={rows} />
-        {tail.truncated && tail.originalLength !== null && (
-          <TruncationNotice originalLength={tail.originalLength} shown={null} />
+        <ObjectRows rows={objectDetail.rows} />
+        {(objectDetail.incomplete || objectDetail.truncated) && (
+          <PartialObjectNotice
+            originalLength={objectDetail.originalLength}
+            incomplete={objectDetail.incomplete}
+          />
         )}
       </div>
     );

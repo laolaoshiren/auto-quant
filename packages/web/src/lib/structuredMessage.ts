@@ -190,7 +190,59 @@ export const DECISION_FIELD_LABELS: Record<string, string> = {
   reduce_percent: '减仓比例',
   reduce_quantity: '减仓数量',
   risk_reward: '盈亏比',
+  /*
+   * 2026-10-18 · 用户截图里被截断的那三类对象（分析产出 / 裁决产出 / 调研产出）
+   * 用到的字段名。**不认识的键仍然保留原词**（见本表上方纪律），这里只补
+   * "确认要显示、且有确定中文"的那些。
+   */
+  side: '方向',
+  strength: '强度',
+  arguments: '论据',
+  invalidates: '失效条件',
+  summary: '小结',
+  symbols: '标的',
+  structure: '结构',
+  support: '支撑',
+  resistance: '阻力',
+  evidence: '依据',
+  point: '要点',
+  why: '原因',
+  matches: '匹配',
+  dataGaps: '数据缺口',
+  indicators: '指标',
+  patterns: '形态',
+  hypothesis: '假设',
 };
+
+/**
+ * **值里的英文枚举 → 中文**（用户原话："页面上不要出现英文占位符"）。
+ *
+ * 与 `DECISION_FIELD_LABELS`（键）分工相同、纪律相同：
+ * ```
+ *   认识的枚举 → 译成中文
+ *   不认识的词 → **原样返回**（编一个中文名比显示英文更危险）
+ * ```
+ *
+ * ⚠️ 只做**整串精确匹配**（`valueLabel('short')` 才译），不做子串替换 ——
+ * 否则一句正常英文/中文正文里的 `short` 会被悄悄改掉，那是**篡改内容**。
+ */
+export const VALUE_LABELS: Record<string, string> = {
+  short_or_no_trade: '只空或不交易',
+  strong: '强',
+  moderate: '中',
+  weak: '弱',
+  long: '多',
+  short: '空',
+  open_long: '开多',
+  open_short: '开空',
+  skip: '跳过',
+  hold: '持有',
+};
+
+/** 值的人话；未登记的枚举原样返回。 */
+export function valueLabel(value: string): string {
+  return VALUE_LABELS[value.trim()] ?? value;
+}
 
 /** 字段名的人话；未登记的原样返回（调用方据此用等宽弱色）。 */
 export function fieldLabel(key: string): string {
@@ -570,5 +622,685 @@ export function parseDecisionListDetailed(text: string): DecisionListDetail | nu
     originalLength: tail.originalLength,
     recovered: true,
     arrayClosed: extracted.arrayClosed,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  被截断的【对象】的容错提取（2026-10-18 · 用户截图里仍在原样显示的 ①②③）      */
+/* -------------------------------------------------------------------------- */
+/**
+ * ## 这一节补的是哪一块（用户原话）
+ *
+ * > 「这是给人看的格式吗？…我能看出来这里面很多是原封不动的 json 格式吧？
+ * >  前端没有做 json 解析提取对吗？」
+ *
+ * 当时已有的能力只覆盖**完整** JSON：
+ * ```
+ *   parseDecisionListDetailed  → 数组（含被截断的数组）
+ *   parseLooseObject           → 完整对象（`JSON.parse` 成功才算）
+ * ```
+ * 而用户截图里那三类都是**被后端截断过的对象**：
+ * ```
+ *   ① {"symbols":[{"symbol":"AGTUSDT",…          分析产出
+ *   ② {"side":"short_or_no_trade","strength":…    裁决产出
+ *   ③ {"hypothesis":"当前市场整体处于普跌…         调研产出
+ * ```
+ * 它们 `JSON.parse` **必然失败** ⇒ `parseLooseObject` 返回 null ⇒ 整条回落纯文本
+ * ⇒ 屏幕上就是一坨原始 JSON。本节让它们也能进键值表。
+ *
+ * ## 算法（只做三件事）
+ * ```
+ *   ① 定位：收集文本里所有 `{` 作为候选起点（中文前缀自然被跳过）；
+ *   ② 容错扫描：按**大括号配对**逐个值往下读，只数**字符串外**的括号，认识 `\"` / `\\`；
+ *      没闭合时**保留已经完整收下的键值对 / 子对象 / 子数组**，丢掉最后那个半截值；
+ *   ③ 选最像"那段 JSON"的候选：覆盖原文最多（`end` 最远）→ 并列时取更外层（起点更左）。
+ * ```
+ *
+ * ## 为什么"接受判据"要比"能解析出来"更严（宁可回落，不要乱猜）
+ *
+ * 已有 28 条测试钉住"普通文本不许被误判"。所以容错提取**不接收**这种形状：
+ * ```
+ *   '[{"symbol":"WLDUSDT","action":"op'   ← 只有一个完整标量对
+ * ```
+ * 它要满足下面任一条才算"值得成表"：
+ * ```
+ *   · ≥2 条有内容的键值对                    （② ③、大多数分析产出）
+ *   · 或有 1 条"值是带内容的容器"             （① 的 symbols 数组）
+ * ```
+ * 都不满足 → 返回 null → 调用方回落纯文本，**一个字节都不丢**。
+ */
+
+/** 容错解析出来的一个 JSON 值（允许不完整）。 */
+interface PartialValue {
+  kind: 'string' | 'number' | 'boolean' | 'null' | 'array' | 'object' | 'invalid';
+  /** 标量的可读值（布尔已译成 `是`/`否`）；容器为 `null`。 */
+  scalar: string | null;
+  /** 对象的键值对（键一定完整）；非对象为 `null`。 */
+  pairs: Array<{ key: string; value: PartialValue }> | null;
+  /** 数组元素；非数组为 `null`。 */
+  items: PartialValue[] | null;
+  /** 这个值在原文本里是否完整闭合。 */
+  complete: boolean;
+}
+
+const INVALID_VALUE: PartialValue = {
+  kind: 'invalid',
+  scalar: null,
+  pairs: null,
+  items: null,
+  complete: false,
+};
+
+function scalarValue(
+  kind: 'string' | 'number' | 'boolean' | 'null',
+  scalar: string,
+  complete: boolean,
+): PartialValue {
+  return { kind, scalar, pairs: null, items: null, complete };
+}
+
+function objectValue(
+  pairs: Array<{ key: string; value: PartialValue }>,
+  complete: boolean,
+): PartialValue {
+  return { kind: 'object', scalar: null, pairs, items: null, complete };
+}
+
+function arrayValue(items: PartialValue[], complete: boolean): PartialValue {
+  return { kind: 'array', scalar: null, pairs: null, items, complete };
+}
+
+/** 跳过量 JSON 空白（**只认 JSON 的空白**；中文标点说明结构到这儿就断了）。 */
+function skipJsonBlank(source: string, start: number): number {
+  let i = start;
+  while (i < source.length && isJsonSpace(source[i]!)) i += 1;
+  return i;
+}
+
+interface StringScan {
+  value: string;
+  next: number;
+  complete: boolean;
+}
+
+/**
+ * 扫一个字符串字面量（`start` 处必须是 `"`）。
+ *
+ * ⚠️ 必须认识 `\"` 与 `\\` 转义：模型写的 `structure` / `reasoning` 里
+ * 完全可能有引号、花括号、反斜杠 —— 不认识转义就会把"字符串状态"算错，
+ * 后面的配对全乱（这正是"只数大括号"会翻车的地方）。
+ */
+function scanString(source: string, start: number): StringScan {
+  let i = start + 1;
+  let escaped = false;
+  for (; i < source.length; i += 1) {
+    const ch = source[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      const literal = source.slice(start, i + 1);
+      let value: string;
+      try {
+        value = JSON.parse(literal) as string;
+      } catch {
+        /* 转义不合法（模型写坏了）→ 退回字面内容，别让整段解析崩掉。 */
+        value = literal.slice(1, -1);
+      }
+      return { value, next: i + 1, complete: true };
+    }
+  }
+  /* 没闭合：已经能看见的那段就是"半截值"，要不要显示由上层决定。 */
+  return {
+    value: source.slice(start + 1).replace(/\\(["\\/])/g, '$1'),
+    next: source.length,
+    complete: false,
+  };
+}
+
+/** 数字字面量的形状（sticky：只在当前位置匹配）。 */
+const NUMBER_LITERAL = /-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+
+/** 从 `start` 起读一个值（标量 / 对象 / 数组）。**任何输入都不抛**。 */
+function scanValue(source: string, start: number): { value: PartialValue; next: number } {
+  const i = skipJsonBlank(source, start);
+  if (i >= source.length) return { value: INVALID_VALUE, next: source.length };
+
+  const ch = source[i]!;
+  if (ch === '"') {
+    const scanned = scanString(source, i);
+    return { value: scalarValue('string', scanned.value, scanned.complete), next: scanned.next };
+  }
+  if (ch === '{') return scanObject(source, i);
+  if (ch === '[') return scanArray(source, i);
+
+  const literals: Array<[string, 'boolean' | 'null', string]> = [
+    ['true', 'boolean', '是'],
+    ['false', 'boolean', '否'],
+    ['null', 'null', '—'],
+  ];
+  for (const [word, kind, shown] of literals) {
+    if (source.startsWith(word, i)) {
+      const next = i + word.length;
+      /*
+       * 贴着文末的字面量**视为不完整**：它可能是 `true` 被截成 `true`，
+       * 也可能是更长的词被截断（`tru…` 已被上面的 startsWith 挡掉）。
+       * 宁可少显示一个值，也不要显示一个可能被截错的值。
+       */
+      return { value: scalarValue(kind, shown, next < source.length), next };
+    }
+  }
+
+  NUMBER_LITERAL.lastIndex = i;
+  const numeric = NUMBER_LITERAL.exec(source);
+  if (numeric !== null) {
+    const next = i + numeric[0].length;
+    /* 贴着文末的数字同样视为不完整（`0.0720` 可能本应是 `0.072088`）。 */
+    return { value: scalarValue('number', numeric[0], next < source.length), next };
+  }
+
+  return { value: INVALID_VALUE, next: i + 1 };
+}
+
+/** 扫一个对象（`start` 处必须是 `{`）；没闭合时保留已经收下的键值对。 */
+function scanObject(source: string, start: number): { value: PartialValue; next: number } {
+  let i = start + 1;
+  const pairs: Array<{ key: string; value: PartialValue }> = [];
+
+  for (;;) {
+    i = skipJsonBlank(source, i);
+    if (i >= source.length) return { value: objectValue(pairs, false), next: source.length };
+    if (source[i] === '}') return { value: objectValue(pairs, true), next: i + 1 };
+    if (source[i] === ',') {
+      i += 1;
+      continue;
+    }
+    if (source[i] !== '"') {
+      /*
+       * 这里不是键 ⇒ 结构在被截断的尾部坏掉了。真实数据里截断点后面可能直接接
+       * 模型自己的话（`…,"confidence":60}* 结论：…`）—— 保留已收下的，停止。
+       */
+      return { value: objectValue(pairs, false), next: i };
+    }
+
+    const key = scanString(source, i);
+    if (!key.complete) return { value: objectValue(pairs, false), next: key.next };
+
+    i = skipJsonBlank(source, key.next);
+    if (i >= source.length) return { value: objectValue(pairs, false), next: source.length };
+    if (source[i] !== ':') return { value: objectValue(pairs, false), next: i };
+
+    const parsed = scanValue(source, i + 1);
+    if (parsed.value !== INVALID_VALUE) pairs.push({ key: key.value, value: parsed.value });
+    i = parsed.next;
+  }
+}
+
+/** 扫一个数组（`start` 处必须是 `[`）；没闭合时保留已经收下的元素。 */
+function scanArray(source: string, start: number): { value: PartialValue; next: number } {
+  let i = start + 1;
+  const items: PartialValue[] = [];
+
+  for (;;) {
+    i = skipJsonBlank(source, i);
+    if (i >= source.length) return { value: arrayValue(items, false), next: source.length };
+    if (source[i] === ']') return { value: arrayValue(items, true), next: i + 1 };
+    if (source[i] === ',') {
+      i += 1;
+      continue;
+    }
+
+    const parsed = scanValue(source, i);
+    if (parsed.value === INVALID_VALUE) return { value: arrayValue(items, false), next: parsed.next };
+    items.push(parsed.value);
+    i = parsed.next;
+  }
+}
+
+/**
+ * 这个值是否**有内容可显示**。
+ * ```
+ *   半截的标量（字符串没收尾 / 数字贴着文末）→ 不可用（它就是"要丢弃的最后那个值"）
+ *   半截的容器 → 只要里面**已经收下了东西**就可用（① 的 symbols 数组正是这样）
+ * ```
+ */
+function hasContent(value: PartialValue): boolean {
+  if (value.kind === 'invalid') return false;
+  if (value.kind === 'array') {
+    return value.complete || (value.items ?? []).some(hasContent);
+  }
+  if (value.kind === 'object') {
+    return value.complete || (value.pairs ?? []).some((pair) => hasContent(pair.value));
+  }
+  return value.complete && value.scalar !== null;
+}
+
+/** 数组元素的一行（`symbol` 单独出来，显示层据此加粗）。 */
+export interface ObjectRowItem {
+  symbol: string | null;
+  detail: string;
+}
+
+/** 对象里的一个字段 —— 完整对象与截断对象**共用同一个显示形状**（`ObjectRows`）。 */
+export interface ObjectRow {
+  key: string;
+  /** 单行值（已经是人话：字段值里的英文枚举已中文化）。 */
+  text: string;
+  /** 数组元素：有它时显示层**每个元素一行**；没有时显示 `text`。 */
+  items?: ObjectRowItem[];
+}
+
+interface HumanValue {
+  text: string;
+  items?: ObjectRowItem[];
+}
+
+/**
+ * 数组元素里优先摘出来当"一行摘要"的字段（按信息量排序）。
+ * `structure` 打头是因为 ① 的每个标的第一句就是结构描述；`point` 是 ② 的论据。
+ */
+const ELEMENT_DETAIL_KEYS = [
+  'structure',
+  'point',
+  'summary',
+  'hypothesis',
+  'evidence',
+  'why',
+  'reasoning',
+  'note',
+  'description',
+];
+
+/** 数组里的一个元素 → 一行人话。 */
+function humanizeElement(value: PartialValue): ObjectRowItem {
+  if (value.kind === 'object') {
+    const pairs = (value.pairs ?? []).filter((pair) => hasContent(pair.value));
+    const symbolPair = pairs.find(
+      (pair) => (pair.key === 'symbol' || pair.key === 'name') && pair.value.kind === 'string',
+    );
+    const symbol = symbolPair?.value.scalar ?? null;
+
+    let detail = '';
+    for (const key of ELEMENT_DETAIL_KEYS) {
+      const found = pairs.find((pair) => pair.key === key && pair.value.kind === 'string');
+      if (found !== undefined) {
+        detail = found.value.scalar ?? '';
+        break;
+      }
+    }
+    /* 认不出"摘要字段"→ 把能看见的标量按 `字段 值` 串起来（仍然不出 JSON）。 */
+    if (detail.length === 0) {
+      detail = pairs
+        .filter((pair) => pair.value.kind === 'string' || pair.value.kind === 'number')
+        .map((pair) => `${fieldLabel(pair.key)} ${valueLabel(pair.value.scalar ?? '')}`)
+        .join(' · ');
+    }
+    return { symbol, detail };
+  }
+  return { symbol: null, detail: valueLabel(value.scalar ?? '') };
+}
+
+/** 一个值 → 人话（数组元素逐行；嵌套对象只说字段名，**绝不吐原始 JSON**）。 */
+function humanizeValue(value: PartialValue): HumanValue {
+  switch (value.kind) {
+    case 'string':
+      return { text: valueLabel(value.scalar ?? '') };
+    case 'number':
+    case 'boolean':
+    case 'null':
+      return { text: value.scalar ?? '' };
+    case 'array': {
+      const items = (value.items ?? []).filter(hasContent);
+      if (items.length === 0) return { text: '（内容被截断）' };
+      return { text: `${items.length} 项`, items: items.map(humanizeElement) };
+    }
+    case 'object': {
+      const pairs = (value.pairs ?? []).filter((pair) => hasContent(pair.value));
+      if (pairs.length === 0) return { text: '（内容被截断）' };
+      return {
+        text: `${pairs.length} 个字段：${pairs.map((pair) => fieldLabel(pair.key)).join('、')}`,
+      };
+    }
+    default:
+      return { text: '' };
+  }
+}
+
+/** 一个候选对象起点扫出来的结果。 */
+interface ObjectCandidate {
+  start: number;
+  /** 扫描到达的最远位置（用于"哪一段最像正文里那段 JSON"）。 */
+  end: number;
+  value: PartialValue;
+  /** 有内容的顶层键值对。 */
+  strong: Array<{ key: string; value: PartialValue }>;
+  /** 键完整、值是**半截字符串**的顶层对（只在一条完整对都没有时降级使用）。 */
+  partialStrings: Array<{ key: string; value: PartialValue }>;
+  /** `true` = 走正常路径；`false` = 降级路径（③）。 */
+  normal: boolean;
+}
+
+/** 从某个 `{` 起扫一遍，按判据决定它是否值得成表。 */
+function objectCandidateAt(source: string, start: number): ObjectCandidate | null {
+  const scanned = scanObject(source, start);
+  if (scanned.value.kind !== 'object') return null;
+
+  const pairs = scanned.value.pairs ?? [];
+  const strong = pairs.filter((pair) => hasContent(pair.value));
+  const partialStrings = pairs.filter(
+    (pair) => pair.value.kind === 'string' && !pair.value.complete && (pair.value.scalar ?? '').length > 0,
+  );
+  const hasContainerPair = strong.some(
+    (pair) => pair.value.kind === 'array' || pair.value.kind === 'object',
+  );
+
+  /*
+   * ⚠️ **曾经这里是 `strong.length >= 2 || hasContainerPair`** —— 要求至少两条键值对
+   * 才成表。2026-10-18 独立验证用线上真实数据推翻了它：
+   *
+   * ```
+   *   market_analyst 的真实产出：一个 hypothesis 对象，后面还接了中文
+   *   ↑ 只有【一条】键值对 ⇒ 老门槛拒绝 ⇒ 屏幕上原样显示这坨 JSON 原文
+   * ```
+   *
+   * ⇒ 现在放开到 **1 条**，但加一道**内容门槛**挡住误伤：
+   *   唯一的那条键值对，其值必须"像正文"（≥12 字符）。
+   *   `{a:1}` / `{"debug":true}` 这类普通文本里偶发的对象，值都短 ⇒ 仍然回落。
+   *
+   * 为什么阈值取 12：用户真实数据里最短的一条是 `{"symbol":"AGTUSDT"}`（19 字符）——
+   * 12 在它之下、在所有"配置片段"之上。
+   */
+  const MIN_SINGLE_VALUE_LEN = 12;
+  const longEnoughSingle =
+    strong.length === 1 &&
+    (strong[0]!.value.kind !== 'string' || (strong[0]!.value.scalar ?? '').trim().length >= MIN_SINGLE_VALUE_LEN) &&
+    (strong[0]!.value.kind === 'string' || strong[0]!.value.kind === 'array' || strong[0]!.value.kind === 'object');
+  const normal = strong.length >= 2 || hasContainerPair || longEnoughSingle;
+  /*
+   * 降级路径只服务一种真实形态（用户截图 ③）：
+   * ```
+   *   {"hypothesis":"当前市场整体处于普跌…   ← 半截字符串，一条完整对都没有
+   * ```
+   * 这种文本**提取不出一条完整键值对**，按"宁可回落"本该回落纯文本 ——
+   * 但那样屏幕上又会出现 `{"`，正是用户报的现象。折中：显示**完整键名 + 半截字符串的
+   * 可见前缀**，并在表下方如实标注"原文本被截断，只显示了完整的部分"。
+   * 判据刻意很窄（`strong` 必须为 0），所以它不会抢走正常路径的输入。
+   */
+  const degraded = !normal && strong.length === 0 && partialStrings.length > 0;
+
+  if (!normal && !degraded) return null;
+
+  return { start, end: scanned.next, value: scanned.value, strong, partialStrings, normal };
+}
+
+/** 候选偏好：覆盖原文更远优先；并列时取更外层（起点更左）。 */
+function prefers(candidate: ObjectCandidate, current: ObjectCandidate | null): boolean {
+  if (current === null) return true;
+  if (candidate.end !== current.end) return candidate.end > current.end;
+  return candidate.start < current.start;
+}
+
+/**
+ * 在整段文本里挑出"最像正文那段 JSON"的对象起点。
+ *
+ * 候选**从每个 `{` 都试一遍**（中文前缀因此自然被跳过），不依赖"整串必须以 `{` 开头"
+ * —— `note` 是自由文本，前缀可能是「让我先理清我的角色：…输出必须是 JSON 对象：」。
+ * 正常路径优先于降级路径（有能成表的对象时，不用半截字符串兜底）。
+ */
+function pickObjectCandidate(source: string): ObjectCandidate | null {
+  let normalBest: ObjectCandidate | null = null;
+  let degradedBest: ObjectCandidate | null = null;
+
+  for (let i = 0; i < source.length; i += 1) {
+    if (source[i] !== '{') continue;
+    const candidate = objectCandidateAt(source, i);
+    if (candidate === null) continue;
+    if (candidate.normal) {
+      if (prefers(candidate, normalBest)) normalBest = candidate;
+    } else if (prefers(candidate, degradedBest)) {
+      degradedBest = candidate;
+    }
+  }
+
+  return normalBest ?? degradedBest;
+}
+
+/** 把候选渲染成显示层共用的键值行。 */
+function rowsOfCandidate(candidate: ObjectCandidate): ObjectRow[] {
+  /*
+   * 正常路径只显示"有内容"的键值对（半截的标量值丢弃 —— 它就是被截断的那一个）。
+   * 降级路径显示完整键 + 半截字符串的可见前缀（理由见 `objectCandidateAt`）。
+   */
+  const chosen = candidate.normal ? candidate.strong : candidate.partialStrings;
+  const rows: ObjectRow[] = [];
+  const seen = new Set<string>();
+  for (const pair of chosen) {
+    if (seen.has(pair.key)) continue;
+    seen.add(pair.key);
+    const human = humanizeValue(pair.value);
+    rows.push(
+      human.items === undefined
+        ? { key: pair.key, text: human.text }
+        : { key: pair.key, text: human.text, items: human.items },
+    );
+  }
+  return rows;
+}
+
+/** `parseLooseObjectDetailed` 的结果。 */
+export interface ObjectDetail {
+  rows: ObjectRow[];
+  /** 原文被后端截断过（末尾有留痕）。 */
+  truncated: boolean;
+  /** 留痕里记录的原始字符数；没有留痕 → `null`。 */
+  originalLength: number | null;
+  /**
+   * 对象本身**没闭合**（内容在末尾被切断）。
+   * 显示层据此说「原文本被截断，只显示了完整的部分」。
+   */
+  incomplete: boolean;
+}
+
+/**
+ * **对象 → 键值行（完整对象与被截断对象共用）**。
+ *
+ * ```
+ *   ① 完整对象 → 与 `parseLooseObject` 完全同一条路径（行为逐字不变）
+ *   ② 被截断的对象 → 容错扫描，只保留完整收下的键值对 / 子对象 / 子数组
+ * ```
+ *
+ * ## 为什么"完整对象"也走这里（而不是让调用方分两次判断）
+ *
+ * 两条路径的**输出形状必须一致**（同一个 `ObjectRows` 渲染），分开判断迟早漂移。
+ * 本函数内部仍先调 `parseLooseObject`，所以完整对象的行内容与改动前**逐字相同**。
+ *
+ * ## 为什么完整闭合的对象在这里可能返回 null
+ *
+ * 容错路径**只接管"确实被截断"的形态**：
+ * ```
+ *   · 扫描没闭合                                   → 接管
+ *   · 或后端留了截断留痕（被截掉的是对象后面的正文） → 接管
+ *   · 完整闭合且没有留痕                            → 不接管
+ * ```
+ * 最后一种在改动前就是"解析失败 → 回落纯文本"（例如 `{"a":1} 然后这是解释`）。
+ * 保持它不变，是为了满足"普通文本行为与改动前逐字一致"。
+ */
+/** 从 `start` 起是否是一个**能 `JSON.parse` 的完整对象**。 */
+function parsesObjectAt(source: string, start: number): boolean {
+  try {
+    const value = JSON.parse(source.slice(start)) as unknown;
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+  } catch {
+    return false;
+  }
+}
+
+export function parseLooseObjectDetailed(text: string): ObjectDetail | null {
+  const tail = stripTruncationTail(text);
+  if (tail.text.trim().length === 0) return null;
+
+  /*
+   * 多条留痕 = 多段内容拼在同一条 message 里（各角色各被截断过一次）。
+   * 那不是"一个对象" —— 整段回落纯文本，**不从某一段里猜**（与决策数组同一纪律）。
+   */
+  if (
+    tail.truncated &&
+    text.indexOf(TRUNCATION_MARKER) !== text.lastIndexOf(TRUNCATION_MARKER)
+  ) {
+    return null;
+  }
+
+  const candidate = pickObjectCandidate(tail.text);
+  const strict = parseLooseObject(tail.text);
+
+  /*
+   * ## ⚠️ 为什么不能"先试严格路径，成功就用"（2026-10-18 自测抓到的真 BUG）
+   *
+   * `parseJsonLoose` 从**最靠右**的 `{` 开始试。而截断的 ① 长这样：
+   * ```
+   *   {"symbols":[{"symbol":"A",…},{"symbol":"B",…},{"symbol":"C",…   ← 外层没闭合
+   *                                                        ↑ 若最后这个元素恰好完整闭合，
+   *                                                          JSON.parse 会成功 —— 但只解析出
+   *                                                          **最后一个元素**，前面全丢。
+   * ```
+   * 实测：`{"symbols":[{"symbol":"A","structure":"x"},{"symbol":"B","structure":"y"}]`
+   * （外层缺 `}`）会被严格路径当成 `{"symbol":"B",…}`，屏幕上只剩 B。
+   *
+   * ⇒ 判据改成：**严格路径解析到的必须就是"候选里那个最外层对象"**才用它。
+   *   否则走容错（扫描从最外层 `{` 开始，前几个元素一个不丢）。
+   */
+  const strictIsOutermost =
+    strict !== null &&
+    (candidate === null || (candidate.value.complete && parsesObjectAt(tail.text, candidate.start)));
+
+  /* ① 完整对象：与 `parseLooseObject` 同一条路径（行内容逐字不变）。 */
+  if (strict !== null && strictIsOutermost) {
+    /*
+     * ⚠️ **完整对象后面还跟着中文时，要标 `incomplete`**（2026-10-18 · 用户报的那一类）。
+     *
+     * 线上真实形状：`{"hypothesis":"…"} 材料不足，无法出结论。以下是我能确认的：…`
+     * —— 对象本身完整，但**后面那段中文没有进表**。
+     * 不标 `incomplete` 的话，界面会当成"这就是全部"，用户看不到那半段。
+     *
+     * 判据：候选对象**结束位置 < 正文长度**（说明后面还有内容）。
+     * 用 `candidate?.end` 而不是 `JSON.parse` 的位置 —— 因为 `parseJsonLoose` 可能从
+     * 更靠右的 `{` 起解析，`end` 由容错扫描给出，才是"最外层对象的真实结束"。
+     */
+    const bodyEnd = tail.text.trimEnd().length;
+    const hasTrailingText = candidate !== null ? candidate.end < bodyEnd : false;
+    return {
+      rows: strict.map(([key, value]) => ({ key, text: value })),
+      truncated: tail.truncated,
+      originalLength: tail.originalLength,
+      incomplete: hasTrailingText,
+    };
+  }
+
+  /* ② 被截断的对象：容错提取。 */
+  if (candidate === null) return null;
+
+  /*
+   * ⚠️⚠️ **曾经这里有一条 `if (candidate.value.complete && !tail.truncated) return null;`**
+   * —— 意思是"完整闭合又没留痕的对象不接管"。**2026-10-18 独立验证用线上真实数据推翻了它**：
+   *
+   * ```
+   *   market_analyst 的一条真实产出（799 字）：
+   *   {"hypothesis":"当前市场整体处于普跌/风险偏好收缩状态，…集中于'已走出极端幅度'的标的。"
+   *    材料不足，无法出结论。以下是我能确认的：…三项判定。
+   *                 ↑ 对象【完整闭合】了，后面又接了中文
+   *   ⇒ 老判据"不接管" ⇒ 屏幕上原样显示这坨 JSON（用户报的正是这个）
+   * ```
+   *
+   * 那条判据当初是为了让 `[0.8,3.5]`、`见 {a:1}` 这类普通文本不被误伤。
+   * **但识别"是不是一坨正经对象"的守卫在 `objectCandidateAt` 里已经足够严**
+   * （≥2 条有内容的键值对，或有 1 条容器值）——
+   * `{a:1}`（单字段、值 1 字）过不了它，所以这里放开是安全的。
+   *
+   * ⇒ 现在：**只要能提取出 ≥2 行，就接管**，不论是否完整闭合、有没有留痕。
+   *   尾部那段中文不丢：它在 `rows` 里没有位置，由调用方按"截断"提示带出来
+   *   （`incomplete` 为真时界面会说"原文本被截断，只显示了完整的部分"）。
+   */
+  const rows = rowsOfCandidate(candidate);
+  /* 一行都提不出来 → 回落纯文本（不白屏、不空表）。 */
+  if (rows.length === 0) return null;
+
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  "值不值得成表"的唯一判据：**表里的内容有没有实质信息量**
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 我在这里反复错过两次，记下来免得第三次：
+   *
+   * | 判据 | 失败原因 |
+   * |---|---|
+   * | `rows.length >= 2` | 线上真有一条 `{"hypothesis":"29 字的正文"} 后面还有中文` 只有 1 行 ⇒ 被拦 |
+   * | `rows.length < 2 && 无尾巴 → 回落` | `{"a":1,"b":2} 后面还有解释`（值各 1 字）反而接管了 |
+   *
+   * ⇒ 数**行数**区分不了「一条长正文」和「两条垃圾」。要看**内容长度**：
+   *   把每行的值拼起来，**有效字符 ≥ `MIN_TABLE_DETAIL_CHARS`** 才值得占一张表。
+   *
+   * 校准过两端（都是线上真实数据）：
+   * ```
+   *   {"hypothesis":"当前市场整体处于普跌、风险偏好收缩状态…"}  ⇒ 值 29 字  ⇒ 成表 ✅
+   *   {"a":1,"b":2} 后面还有解释                                  ⇒ 值 2 字   ⇒ 回落 ✅
+   *   {"symbol":"AGTUSDT"}（散文里被引用的片段）                   ⇒ 值 7 字   ⇒ 回落 ✅
+   * ```
+   */
+  const MIN_TABLE_DETAIL_CHARS = 12;
+  /*
+   * ⚠️ **"信息量"要把【键名】和【半截值】一起算**（2026-10-18 修正两次）。
+   *
+   * 前两版的错误：
+   * | 判据 | 失败原因 |
+   * |---|---|
+   * | 只累加 `row.text` | 数组行（`symbols`/`arguments`）的 `text` 是空串、内容在 `items` 里 ⇒ 判成 0 分 |
+   * | 累加 `text + items` | `{"side":"short_or_no_trade","strength":"strong","arguments":[{"point":"…` ——
+   * |                    | `arguments` 里那个元素是**半截的**，被 `humanizeValue` 丢了 ⇒ items 空 ⇒ 仍然 0 分 |
+   *
+   * ⇒ 现在算三样：**键名长度 + 值的可见长度 + 容器的元素个数×6**。
+   *   理由是键名本身就是信息（`side`/`strength`/`arguments` 三个键名已经说明"这是什么"），
+   *   而容器里有几个元素（哪怕内容半截）也说明"这一项有多少条"。
+   *
+   * 校准过两端（线上真实数据）：
+   * ```
+   *   {"hypothesis":"…29 字正文…"}                 ⇒ 键 10 + 值 29 = 39  ⇒ 成表 ✅
+   *   {"side":"short_or_no_trade","strength":"strong","arguments":[{…}
+   *                                                 ⇒ 键 25 + 值 23 + 元素 6 = 54 ⇒ 成表 ✅
+   *   {"a":1,"b":2} 后面还有解释                     ⇒ 键 2 + 值 2 = 4        ⇒ 回落 ✅
+   *   {"symbol":"AGTUSDT"}（散文里被引用）           ⇒ 键 6 + 值 7 = 13 …… ⚠ 偏高，见下
+   * ```
+   * 最后那条是个真实风险：`{"symbol":"AGTUSDT"}` 会被判 13 ≥ 12 而成表。
+   * **但它只在"没有尾巴、且对象完整"时才有意义** —— 那种情形实际是"散文里引用了一小段 JSON"，
+   * 成表反而是好事（比显示 `{"symbol":"AGTUSDT"}` 好）。真正的垃圾（`{"a":1}`）仍然 3 分。
+   */
+  const detailChars = rows.reduce(
+    (sum, row) =>
+      sum +
+      row.key.length +
+      row.text.trim().length +
+      (row.items ?? []).reduce((n, item) => n + (item.symbol ?? '').length + item.detail.trim().length, 0) +
+      (row.items?.length ?? 0) * 6,
+    0,
+  );
+  if (detailChars < MIN_TABLE_DETAIL_CHARS) return null;
+
+  const bodyLength = tail.text.trimEnd().length;
+  const hasTrailingText = candidate.end < bodyLength;
+
+  return {
+    rows,
+    truncated: tail.truncated,
+    originalLength: tail.originalLength,
+    /*
+     * `incomplete` 现在有两个来源：① 对象本身没闭合；② 对象闭合了但**后面还有尾巴**
+     *（`candidate.end < 文本长度`）—— 后者就是 `{"hypothesis":"…"} 后面还有一段中文`。
+     * 两者对用户是同一件事：「你看到的不是全文」。
+     */
+    incomplete: !candidate.value.complete || hasTrailingText,
   };
 }

@@ -377,3 +377,128 @@ test('★★ 单个对象 + 留痕 → 键值两列 + 截断说明（不回落�
   assert.ok(!html.includes('&quot;action&quot;'), '不该出现序列化片段');
   assert.ok(html.includes('原文本已截断（完整 4750 字）'), '必须保留截断说明');
 });
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+/*  ⑨ 被截断的【对象】—— 用户截图里仍在原样显示的 ①②③（2026-10-18）            */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * 三段夹具**逐字复制**用户截图原文（①分析产出 ②裁决产出 ③调研产出）。
+ * 它们的共同点：都是被后端截断过的 JSON ⇒ `JSON.parse` 失败 ⇒ 老实现回落纯文本
+ * ⇒ 屏幕上原样显示 `{"symbols":…`。这个文件测的是"**屏幕上出现的字**"。
+ */
+
+/** ① 分析产出：`symbols` 数组里第一个标的的 `indicators` 被截断。 */
+const TRUNCATED_OBJ_1 =
+  '{"symbols":[{"symbol":"AGTUSDT","structure":"15m: 现价 0.079220 高于 EMA20 0.075848 与 EMA50 0.075082，EMA20>EMA50，MACD 0.001206 且柱 0.000331 为正，RSI14 58.2。","support":0.072088,"resistance":0.080739,"indicators":{"macdHist":"0.00…';
+
+/** ② 裁决产出：`arguments` 数组里第一个论据的 `point` 被截断。 */
+const TRUNCATED_OBJ_2 =
+  '{"side":"short_or_no_trade","strength":"strong","arguments":[{"point":"GTCUSDT 空头信号是本轮唯一三项机械门槛全通过…';
+
+/** ③ 调研产出：`hypothesis` 字符串被截断（一条完整键值对都没有）。 */
+const TRUNCATED_OBJ_3 =
+  '{"hypothesis":"当前市场整体处于普跌/风险偏好收缩状态，多数标的同步走弱；…（截断）';
+
+/** 屏幕上**不该出现**的 JSON 语法残片（含 HTML 转义后的形态）。 */
+const JSON_LEAKS = ['{"', '&quot;{', '":[', '&quot;:[', '":"', '&quot;:&quot;'];
+
+/** 断言 HTML 里没有任何"整块 JSON 漏出来"的痕迹。 */
+function assertNoJsonLeak(html: string, name: string): void {
+  for (const token of JSON_LEAKS) {
+    assert.ok(!html.includes(token), `${name}：屏幕上出现了 JSON 语法残片 ${token}`);
+  }
+}
+
+test('★★★ [校准 ①] 被截断的分析产出 ①：标的逐行 + 结构摘要，不出现 {" / ":[', () => {
+  /*
+   * ⚠️ 负向校准：把 `HumanMessage` 的对象分支换回 `parseLooseObject`（只认完整 JSON），
+   * 这条必红 —— HTML 里会出现 `{&quot;symbols&quot;` 与整段原始 JSON。
+   */
+  const html = render(TRUNCATED_OBJ_1);
+
+  /* 人话在场：字段名中文化、标的一行、结构摘要带上。 */
+  assert.ok(html.includes('标的'), '字段名 symbols → 「标的」');
+  assert.ok(html.includes('AGTUSDT'), '标的必须在');
+  assert.ok(html.includes('15m: 现价 0.079220'), 'structure 摘要必须在');
+  assert.equal((html.match(/<li/g) ?? []).length, 1, 'symbols 里一个标的 → 一行');
+
+  /* 截断必须如实标注。 */
+  assert.ok(html.includes('原文本被截断，只显示了完整的部分'), '必须说明只显示了完整的部分');
+
+  /* 屏幕上不出现 JSON。 */
+  assertNoJsonLeak(html, '①');
+});
+
+test('★★★ [校准 ②] 被截断的裁决产出 ②：方向/强度中文化，不出现英文枚举', () => {
+  const html = render(TRUNCATED_OBJ_2);
+
+  /* 字段名 + 值里的枚举都必须是中文。 */
+  assert.ok(html.includes('方向'), 'side → 方向');
+  assert.ok(html.includes('只空或不交易'), 'short_or_no_trade → 只空或不交易');
+  assert.ok(html.includes('强度'), 'strength → 强度');
+  assert.ok(html.includes('>强<'), 'strong → 强');
+  assert.ok(!html.includes('short_or_no_trade'), '不该再出现 short_or_no_trade');
+  assert.ok(!html.includes('>strong<'), '不该再出现英文枚举 strong');
+
+  /* 截断说明 + 无 JSON 泄漏。 */
+  assert.ok(html.includes('原文本被截断，只显示了完整的部分'));
+  assertNoJsonLeak(html, '②');
+});
+
+test('★★★ [校准 ③] 被截断的调研产出 ③：完整键名 + 可见前缀，不出现 {"', () => {
+  const html = render(TRUNCATED_OBJ_3);
+
+  assert.ok(html.includes('假设'), 'hypothesis → 假设');
+  assert.ok(html.includes('当前市场整体处于普跌'), '半截字符串的可见内容必须显示');
+  assert.ok(html.includes('原文本被截断，只显示了完整的部分'));
+  assertNoJsonLeak(html, '③');
+});
+
+test('★★ [校准 ②b] 普通文本（区间/单字段对象）→ 屏幕上仍是原文，行为与改动前一致', () => {
+  /*
+   * 这一条钉的是"不许误伤"：含区间、含 `{a:1}` 这类普通文本**不能**被当成对象成表。
+   * 判据看屏幕：原文在、没有任何表格骨架。
+   */
+  const notes = [
+    'D=-1.045%∈[0.8,3.5]，ATR≈1.0%≤3.5%，机械条件全过',
+    '[0.8,3.5] 这个区间是位移门槛',
+    '[1,2,3] 候选池已按评分排序',
+    '见 {a:1} 这种不是标准 JSON',
+  ];
+  for (const note of notes) {
+    const html = render(note);
+    assert.ok(html.includes(note.slice(0, 8)), `原文必须仍然可见：${note}`);
+    assert.ok(!html.includes('<table'), `普通文本不该被渲染成表：${note}`);
+    assert.ok(!html.includes('只显示了完整的部分'), `普通文本不该加截断说明：${note}`);
+  }
+
+  /*
+   * **单字段对象**：改动前就能走键值表（`parseLooseObject`），现在必须一模一样 ——
+   * 中文化的字段名/动作码都在，且**不能**多出"被截断"的说明。
+   */
+  const single = render('说明：{"action":"skip"}');
+  assert.ok(single.includes('动作') && single.includes('跳过'), '单字段对象照常中文化');
+  assert.ok(!single.includes('&quot;action&quot;'), '不能漏出序列化片段');
+  assert.ok(!single.includes('只显示了完整的部分'), '完整对象不该加截断说明');
+
+  /* 逐字一致：与改动前同一条 golden（多一层包裹/多一句说明都会被这条抓到）。 */
+  const plain = '正在分析 SOLUSDT 的回踩结构，等待确认。';
+  assert.equal(
+    render(plain),
+    '<div class="min-w-0"><div class="border-l-2 border-transparent pl-2"><p class="min-w-0 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-mid">正在分析 SOLUSDT 的回踩结构，等待确认。</p></div></div>',
+  );
+});
+
+test('★★★ [校准 ③b] 完全无法提取的坏文本 → 回落纯文本、不白屏、不空表', () => {
+  const bad = ['{"a":', '{{{{', '{"a":"'];
+  for (const input of bad) {
+    assert.doesNotThrow(() => render(input), `坏文本不许抛：${input}`);
+    const html = render(input);
+    /* 原文仍然可见（转义后），且没有表格骨架 / 空表。 */
+    assert.ok(html.includes('&quot;') || html.includes(input), `原文必须仍然可见：${input}`);
+    assert.ok(!html.includes('<table'), `不能渲染成空表：${input}`);
+    assert.ok(!html.includes('<tbody'), `不能渲染成空表：${input}`);
+    assert.ok(!html.includes('只显示了完整的部分'), `没结构化就不加截断说明：${input}`);
+  }
+});

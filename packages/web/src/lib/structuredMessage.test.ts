@@ -39,6 +39,7 @@ import {
   parseDecisionListDetailed,
   parseJsonLoose,
   parseLooseObject,
+  parseLooseObjectDetailed,
   stripTruncationTail,
 } from './structuredMessage';
 
@@ -581,4 +582,231 @@ test('★★ 嵌套对象只说字段名（不吐 JSON）', () => {
   const byKey = new Map(rows!);
   assert.equal(byKey.get('indicators'), '2 个字段：macdHist、rsi14');
   assert.equal(byKey.get('symbol'), 'AGTUSDT');
+});
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  ⑥ 被截断的【对象】—— 用户截图里仍在原样显示的 ①②③（2026-10-18）
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * 用户原话：
+ * ```
+ *   「这是给人看的格式吗？虽然我不懂技术，但是我也能看出来这里面很多是
+ *     原封不动的 json 格式吧？前端没有做 json 解析提取对吗？」
+ * ```
+ *
+ * ①②③ 都是**被后端截断过的对象**：`JSON.parse` 必然失败 ⇒ 旧实现直接回落纯文本
+ * ⇒ 屏幕上就是原始 JSON。下面三段是**逐字复制**的用户截图原文 ——
+ * **不许改成"更顺手"的形状**，它们存在的意义就是钉住这个真实形状。
+ */
+
+/** ① 分析产出：`symbols` 数组里第一个标的的 `indicators` 被截断。 */
+const TRUNCATED_OBJ_1 =
+  '{"symbols":[{"symbol":"AGTUSDT","structure":"15m: 现价 0.079220 高于 EMA20 0.075848 与 EMA50 0.075082，EMA20>EMA50，MACD 0.001206 且柱 0.000331 为正，RSI14 58.2。","support":0.072088,"resistance":0.080739,"indicators":{"macdHist":"0.00…';
+
+/** ② 裁决产出：`arguments` 数组里第一个论据的 `point` 被截断。 */
+const TRUNCATED_OBJ_2 =
+  '{"side":"short_or_no_trade","strength":"strong","arguments":[{"point":"GTCUSDT 空头信号是本轮唯一三项机械门槛全通过…';
+
+/** ③ 调研产出：`hypothesis` 字符串被截断（一条完整键值对都没有）。 */
+const TRUNCATED_OBJ_3 =
+  '{"hypothesis":"当前市场整体处于普跌/风险偏好收缩状态，多数标的同步走弱；…（截断）';
+
+/** 把结果摊平成"屏幕上会出现的一串字"，用来做"不出现 JSON 语法"的判据。 */
+function displayedText(detail: NonNullable<ReturnType<typeof parseLooseObjectDetailed>>): string[] {
+  return detail.rows.flatMap((row) => [
+    row.key,
+    row.text,
+    ...(row.items ?? []).flatMap((item) => [item.symbol ?? '', item.detail]),
+  ]);
+}
+
+test('★★★ [校准 ①②③] 被截断的对象也能进键值表，且只保留完整收下的内容', () => {
+  /*
+   * ⚠️ 负向校准：把 `HumanMessage` / 本函数改回"只走 parseLooseObject"，
+   * 这三条全部返回 null ⇒ 屏幕上又是原始 JSON ⇒ 用户报的现象照旧。
+   */
+
+  /* ① symbols 数组里第一个标的：symbol + structure 完整，indicators 半截 → 丢弃。 */
+  const one = parseLooseObjectDetailed(TRUNCATED_OBJ_1);
+  assert.notEqual(one, null, '① 必须能提取（不能回落成一坨 JSON）');
+  assert.equal(one!.incomplete, true, '① 外层没闭合 → 必须标记"内容不完整"');
+  assert.equal(one!.rows.length, 1, '① 顶层只有一个字段 symbols');
+  assert.equal(one!.rows[0]!.key, 'symbols');
+  assert.equal(one!.rows[0]!.items?.length, 1, '① symbols 里有一个还能认出的标的');
+  assert.equal(one!.rows[0]!.items?.[0]!.symbol, 'AGTUSDT');
+  assert.ok(
+    one!.rows[0]!.items?.[0]!.detail.includes('现价 0.079220'),
+    '① 每个标的一行，摘要要带上 structure',
+  );
+  assert.equal(one!.truncated, false, '① 没有留痕 → 不编原始字数');
+
+  /* ② 两条完整键值对；值里的英文枚举必须中文化。 */
+  const two = parseLooseObjectDetailed(TRUNCATED_OBJ_2);
+  assert.notEqual(two, null, '② 必须能提取');
+  assert.equal(two!.incomplete, true);
+  const twoByKey = new Map(two!.rows.map((row) => [row.key, row.text]));
+  assert.equal(twoByKey.get('side'), '只空或不交易', 'short_or_no_trade 必须译成中文');
+  assert.equal(twoByKey.get('strength'), '强', 'strong 必须译成中文');
+
+  /* ③ 一条完整键值对都没有，只剩半截字符串 —— 显示完整键 + 可见前缀。 */
+  const three = parseLooseObjectDetailed(TRUNCATED_OBJ_3);
+  assert.notEqual(three, null, '③ 必须能提取（否则屏幕上又出现 {"）');
+  assert.equal(three!.incomplete, true);
+  assert.equal(three!.rows.length, 1);
+  assert.equal(three!.rows[0]!.key, 'hypothesis');
+  assert.ok(
+    three!.rows[0]!.text.startsWith('当前市场整体处于普跌'),
+    '③ 半截字符串的可见前缀要显示出来',
+  );
+});
+
+test('★★★ [校准 ①②③] 屏幕上不出现 {" 与 ":[（三种真实形态逐个判）', () => {
+  for (const [name, input] of [
+    ['①', TRUNCATED_OBJ_1],
+    ['②', TRUNCATED_OBJ_2],
+    ['③', TRUNCATED_OBJ_3],
+  ] as Array<[string, string]>) {
+    const detail = parseLooseObjectDetailed(input);
+    assert.notEqual(detail, null, `${name} 必须被结构化`);
+    for (const shown of displayedText(detail!)) {
+      assert.ok(!shown.includes('{"'), `${name} 的显示内容里还有 JSON 对象开头：${shown.slice(0, 60)}`);
+      assert.ok(!shown.includes('":['), `${name} 的显示内容里还有 JSON 数组语法：${shown.slice(0, 60)}`);
+      assert.ok(!shown.includes('":"'), `${name} 的显示内容里还有 JSON 键值语法：${shown.slice(0, 60)}`);
+    }
+  }
+});
+
+test('★★ 外层被截断、但最后一个内层对象恰好完整 → 仍要显示全部元素（不能只剩最后一个）', () => {
+  /*
+   * 真 BUG（自测抓到）：`JSON.parse` 从最靠右的 `{` 开始试，若最后一个元素恰好完整，
+   * 严格路径会成功 —— 屏幕就只剩最后一个标的，前面的全丢。
+   * 夹具故意让外层缺一个 `}`（`[{"A"},{"B"}]` 之后没有 `}`）。
+   *
+   * ⚠️ 负向校准：把 `parseLooseObjectDetailed` 改回"先试严格路径、成功就用"，这条必红。
+   */
+  const outerBroken = '{"symbols":[{"symbol":"A","structure":"x"},{"symbol":"B","structure":"y"}]';
+  const detail = parseLooseObjectDetailed(outerBroken);
+  assert.notEqual(detail, null);
+  assert.deepEqual(detail!.rows[0]!.items?.map((item) => item.symbol), ['A', 'B']);
+  assert.equal(detail!.incomplete, true, '外层没闭合 → 必须如实标记');
+});
+
+test('★★ 中文前缀不影响定位最外层对象的 `{`', () => {
+  /* 用户描述的真实前缀形态：「让我先理清我的角色：…输出必须是 JSON 对象：{」。 */
+  const prefixed =
+    '让我先理清我的角色：只做分析，不下单。输出必须是 JSON 对象：' +
+    '{"symbols":[{"symbol":"AGTUSDT","structure":"15m 结构","support":0.072088,"resistance":0.080739}';
+  const detail = parseLooseObjectDetailed(prefixed);
+  assert.notEqual(detail, null, '带中文前缀的对象必须能提取');
+  assert.equal(detail!.rows[0]!.key, 'symbols', '必须认最外层那个对象，不是内层元素');
+  assert.equal(detail!.rows[0]!.items?.[0]!.symbol, 'AGTUSDT');
+  assert.equal(detail!.incomplete, true);
+});
+
+test('★★ 完整对象走严格路径：与 `parseLooseObject` 的行内容逐字一致', () => {
+  /*
+   * 覆盖三种"改动前就能显示"的形态：多字段对象、**单字段对象**、带中文前缀的单字段对象。
+   * 它们**必须**与 `parseLooseObject` 给出一模一样的行 —— 新增容错路径不许悄悄换形状。
+   */
+  const completes = [
+    '{"action":"open_short","symbol":"WLDUSDT","leverage":5}',
+    '{"action":"skip"}',
+    '说明：{"a":1}',
+  ];
+  for (const complete of completes) {
+    const detail = parseLooseObjectDetailed(complete);
+    assert.notEqual(detail, null, `完整对象必须照常解析：${complete}`);
+    assert.deepEqual(
+      detail!.rows,
+      parseLooseObject(complete)!.map(([key, text]) => ({ key, text })),
+      `完整对象不许改变行为：${complete}`,
+    );
+    assert.equal(detail!.incomplete, false);
+    assert.equal(detail!.truncated, false);
+  }
+});
+
+test('★★ 完整对象 + 留痕 → 照常键值表，但仍标记 truncated', () => {
+  const detail = parseLooseObjectDetailed(`{"action":"open_short","symbol":"WLDUSDT"}${TAIL}`);
+  assert.notEqual(detail, null);
+  assert.equal(detail!.rows.length, 2);
+  assert.equal(detail!.truncated, true, '留痕在 → 必须如实说明被截断过');
+  assert.equal(detail!.originalLength, 4750);
+  assert.equal(detail!.incomplete, false, '对象本身是闭合的 → 不能说"只显示了完整的部分"');
+});
+
+test('★★★ [校准 ②] 普通文本与"只有单个标量对"的坏 JSON → 一律回落（与改动前逐字一致）', () => {
+  /*
+   * 这一条是"不许破坏已有 28 条测试"的边界：
+   * ```
+   *   [0.8,3.5] / [1,2,3] / 见 {a:1}  → 没有可用的键值对
+   *   [{"symbol":"X","act…            → 只有一个完整标量对，**不足以成表**
+   * ```
+   * 任何一条被结构化成表，都说明判据松了（用户屏幕上会出现半张莫名其妙的表）。
+   */
+  const notes = [
+    '正在分析 SOLUSDT 的回踩结构',
+    'D=-1.045%∈[0.8,3.5]，ATR≈1.0%≤3.5%，机械条件全过',
+    '[0.8,3.5] 这个区间是位移门槛',
+    '[1,2,3] 候选池',
+    '见 {a:1} 这种不是标准 JSON',
+    '注意 {这里} 不是 JSON',
+    '## 汇总\n- 第一条\n- 第二条',
+    '[{"symbol":"WLDUSDT","action":"op',
+    `[{"symbol":"X","act${TAIL}`,
+    /*
+     * ⚠️ `'{"a":1,"b":2} 后面还有解释'` 曾经在这张表里，**2026-10-18 移走**。
+     *
+     * 它不是一个"普通文本"，而是**一个正经的 JSON 对象后面跟了中文** ——
+     * 与线上那条真实的 `{"hypothesis":"…"} 材料不足，无法出结论。…`（799 字）**同形**。
+     * 用户报的"还是一坨 JSON"正是这一类。
+     *
+     * 旧断言把它钉在"必须回落"，等于**把缺陷钉成了规格**。现在它有专门的一条断言（见下）。
+     */
+  ];
+  for (const note of notes) {
+    assert.equal(parseLooseObjectDetailed(note), null, `必须回落纯文本：${note}`);
+    assert.doesNotThrow(() => parseLooseObjectDetailed(note), '任何形态都不许抛');
+  }
+});
+
+test('★★★ 完整对象 + 后面跟中文 → 必须接管（这是用户报的那一类，不再是"回落"）', () => {
+  /*
+   * 线上真实形状（`market_analyst` 的一条 799 字产出，独立验证者从 API 抄下来的）：
+   * ```
+   *   {"hypothesis":"当前市场整体处于普跌/风险偏好收缩状态，…"}
+   *    材料不足，无法出结论。以下是我能确认的：…三项判定。
+   *   ↑ 对象完整闭合，后面又接了中文
+   * ```
+   * 老判据（`complete && !truncated → 不接管`）让它在屏幕上原样显示 JSON。
+   */
+  const detail = parseLooseObjectDetailed(
+    '{"hypothesis":"当前市场整体处于普跌、风险偏好收缩状态，多数标的同步走弱，"}' +
+      ' 材料不足，无法出结论。以下是我能确认的三项判定。',
+  );
+  assert.notEqual(detail, null, '★ 完整对象 + 尾随中文 必须接管（这是用户报的那一类）');
+  assert.equal(detail!.rows.length, 1);
+  assert.equal(detail!.rows[0]!.key, 'hypothesis');
+  assert.equal(
+    detail!.incomplete,
+    true,
+    '★ 后面还有没进表的中文 ⇒ 必须如实标"你看到的不是全文"',
+  );
+
+  /* 普通文本里的短对象仍然回落（值太短，够不上"像正文"这道门）。 */
+  assert.equal(parseLooseObjectDetailed('{"a":1,"b":2} 后面还有解释'), null, '值只有 1 字 ⇒ 回落');
+});
+
+test('★★★ [校准 ③] 完全无法提取的坏文本 → null（回落纯文本、不白屏、不空表）', () => {
+  const bad = ['{"a":', '{"a":,}', '{{{{', '{', '{"', '{"a":"', '<<<>>>', ''];
+  for (const input of bad) {
+    assert.doesNotThrow(() => parseLooseObjectDetailed(input), `坏文本不许抛：${input}`);
+    assert.equal(parseLooseObjectDetailed(input), null, `提不出键值对 → 回落：${input}`);
+  }
+});
+
+test('★★ 多条留痕（多段拼接）→ 不从一个对象里猜', () => {
+  const joined = `{"a":1,"b":2}${TAIL}\n另一段：{"c":3,"d":4}${TAIL}`;
+  assert.equal(parseLooseObjectDetailed(joined), null, '多段拼接不是"一个对象"');
 });
