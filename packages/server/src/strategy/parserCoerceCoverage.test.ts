@@ -66,7 +66,28 @@ test('★★★ coerce 白名单必须覆盖 RawDecisionSchema 的每个键（�
    */
   const fnAt = PARSER.indexOf('function coerceRawDecision');
   assert.ok(fnAt > 0, '★ 找不到 coerceRawDecision');
-  const body = PARSER.slice(fnAt, fnAt + 7000);
+  /*
+   * ⚠️ **窗口必须覆盖整个函数，不能写死 7000 字符**（2026-10-18 修）。
+   *
+   * 原来这里是 `PARSER.slice(fnAt, fnAt + 7000)`。而 `coerceRawDecision` 的
+   * 注释越写越长（每条都记着一类踩过的坑），函数体已经**超过 7000 字符** ——
+   * 于是排在后面的键掉出窗口，测试报"这些键不在白名单里"。
+   *
+   * 实测：`intel_keys` 明明在 `:776` 就在白名单里，却因为我们加了 `margin_mode`
+   * 把函数撑长之后变成**假警报**。假警报比漏报更糟 —— 它教人忽略这条测试。
+   *
+   * ⇒ 判据改成**用下一个顶层函数声明作边界**，与"函数多长"无关。
+   */
+  /*
+   * 边界优先取「下一个顶层 `function` 声明」；**它也可能是文件最后一个函数**
+   * （实测就是这样：`coerceRawDecision` 排在 `parser.ts` 末尾），那时取到文件结尾。
+   */
+  const nextFnAt = PARSER.indexOf('\nfunction ', fnAt + 1);
+  const body = nextFnAt > fnAt ? PARSER.slice(fnAt, nextFnAt) : PARSER.slice(fnAt);
+  assert.ok(
+    body.length > 7000,
+    `★ 函数体现在是 ${body.length} 字符（旧的 7000 字符窗口会截断它）—— 这条断言本身就是为了提醒这一点`,
+  );
   const candidateAt = body.indexOf('const candidate');
   assert.ok(candidateAt > 0, '★ 找不到 candidate 对象字面量');
   const candidateBlock = body.slice(candidateAt, body.indexOf('const parsed', candidateAt));
@@ -106,7 +127,9 @@ test('★★★ `intel_keys` 必须在白名单里（它是被漏掉的那一个
    * 的数据来源，而它已经静默失效过一次。
    */
   const fnAt = PARSER.indexOf('function coerceRawDecision');
-  const body = PARSER.slice(fnAt, fnAt + 7000);
+  /* 同上：不能用固定 7000 的窗口（函数已经比它长了）。 */
+  const nextFnAt2 = PARSER.indexOf('\nfunction ', fnAt + 1);
+  const body = nextFnAt2 > fnAt ? PARSER.slice(fnAt, nextFnAt2) : PARSER.slice(fnAt);
   assert.ok(
     /intel_keys:/.test(body),
     '★ `intel_keys` 必须在 coerce 白名单里 —— 否则 signalHealth 永远拿不到数据',

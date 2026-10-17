@@ -238,6 +238,12 @@ export const RawDecisionSchema = z.object({
    * 而不是让一个缺价的限价单走到执行层去。
    */
   entry_type: z.enum(['market', 'limit']).optional(),
+  /*
+   * **保证金模式**（模型可选）—— `isolated`（逐仓）/ `cross`（全仓）。
+   * 省略 = 用策略配置。解析器会把认不出的值归一成省略（不丢整条决策）。
+   * 见 `Decision.marginMode` 的完整说明。
+   */
+  margin_mode: z.enum(['isolated', 'cross']).optional(),
   limit_price: z.number().optional(),
   /*
    * **这一张挂单，模型愿意等多久（分钟）。** 省略 = 用系统配置的基础时限。
@@ -343,6 +349,33 @@ export interface Decision {
    *   但**成交那一刻要立刻用它们挂保护单** —— 不给的话仓位会有一段裸奔窗口。
    */
   entryType?: 'market' | 'limit';
+  /**
+   * **这一笔**开仓用逐仓还是全仓。省略 = 用策略配置（`riskControl.marginMode`）。
+   *
+   * ## 为什么要有它（2026-10-18 · 用户实测）
+   *
+   * > 「② 不能写死，用什么模式 AI 决定」
+   *
+   * 在此之前 `marginMode` 只有一个来源：策略配置里的一个全局值
+   * （默认 `isolated`）。于是线上 #11 跑了 519 轮、335 张单**全部逐仓** ——
+   * 不是因为每笔都该逐仓，而是因为模型根本没有这个旋钮。
+   *
+   * ## 两者的含义（说给操作员，也是提示词里那句的同一套话）
+   *
+   * ```
+   *   isolated  逐仓：这笔亏损封顶在这笔保证金，账户其它钱不受影响
+   *   cross     全仓：整个账户余额共担，更抗短期波动、但可能拖累整个账户
+   * ```
+   *
+   * ## 安全边界（重要）
+   *
+   * · **只对开仓 / 加仓有意义**；平仓与保护单不需要它，传了也会被忽略。
+   * · 省略时行为与改动前**逐字一致**（回落到 `activeConfig.riskControl.marginMode`）——
+   *   所以模型不写这个字段时，风险特征没有任何变化。
+   * · 它是"偏好"不是"命令"：`setMarginType()` 拿不到交易所的 ok 时，
+   *   实际模式仍是交易所的现状（`recordOrder` 的 `marginSet` 只记成功的那次）。
+   */
+  marginMode?: 'isolated' | 'cross';
   /** 限价入场的价格。`entryType === 'limit'` 时必填。 */
   limitPrice?: number | null;
   /**

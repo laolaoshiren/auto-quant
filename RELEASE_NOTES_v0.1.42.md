@@ -1,41 +1,11 @@
-## 这一版只做一件事：**把 AI 工作流里剩下的原始 JSON 清干净**
+## Bug Fixes
 
-上一版修了一部分，但用户又截图指出「分析产出还是一坨 JSON」。这一版是那个问题的收尾。
+- 修复 AI 工作流里被截断的 JSON 仍显示原文。
+- 完整对象后跟中文、单字段长文本现在都能提取成表，不再回落原始 JSON。
+- 数组元素（`symbols` / `arguments` / `matches`）每个元素一行。
+- 字段名与英文枚举中文化：补 `side` / `strength` / `arguments` / `invalidates` / `summary` / `symbols` / `structure` / `support` / `resistance` / `evidence` / `point` / `why` / `matches` / `dataGaps` / `indicators` / `patterns`。
+- 值里的英文枚举中文化：`short_or_no_trade` / `strong` / `moderate` / `weak` / `long` / `short`。
 
-## 🐛 修复
+### Install
 
-### 被截断的 JSON 现在也能变成人话表
-上一版只处理「决策数组」和「完整对象」，而线上真实数据里最多的是这一类：
-
-```
-{"hypothesis":"当前市场整体处于普跌…"}
-  材料不足，无法出结论。以下是我能确认的：…
-  ↑ 对象完整闭合了，但后面还跟着中文
-```
-
-以前它被判成"不知道该不该显示" → 原样显示 JSON。现在：
-- **完整对象 + 尾巴** → 照样进表，并在表下注明「原文本被截断，只显示了完整的部分」
-- **只有一条键值对但正文够长**（例如整段 `hypothesis` 分析）→ 也进表，不再因为"只有一行"被拒
-- **数组里的元素**（`symbols` / `arguments` / `matches`）→ 每个元素一行，不再吐 JSON
-
-判据从"数行数"改成"看内容有没有实质信息量"，因此 `{"a":1,"b":2}` 这类垃圾仍然回落纯文本。
-
-### 字段名与英文枚举全部中文化（补 16 个字段）
-新增：`side`→方向、`strength`→强度、`arguments`→论据、`invalidates`→失效条件、`summary`→小结、`symbols`→标的、`structure`→结构、`support`→支撑、`resistance`→阻力、`evidence`→依据、`point`→要点、`why`→原因、`matches`→匹配、`dataGaps`→数据缺口、`indicators`→指标、`patterns`→形态。
-值里的英文：`short_or_no_trade`→只空或不交易、`strong`→强、`moderate`→中、`weak`→弱。
-
-## 实测效果（真实浏览器，同一页面同一条记录）
-
-| 指标 | 改前 | 改后 |
-|---|---|---|
-| 屏幕上的原始 JSON | 89 处 | **6 处（且都是模型写的中文说明，非 JSON）** |
-| 渲染成表格 | 133 张 | **217 张** |
-| 截断提示 | 无 | **有** |
-
-## 已知未解
-
-- 一部分极短的分析产出（例如只有 `{"symbol":"X"}` 这种片段）仍回落原文 —— 这是有意的：**一条孤零零的键值对不值得占一张表**
-
----
-
-> ⚠️ 这个项目下的是**真实订单**。这一版没有破坏性变更。
+`pwsh -File scripts/deploy.ps1`（本项目不走 Docker）。

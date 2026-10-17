@@ -666,6 +666,32 @@ function coerceRawDecision(
       notes.push(`入场方式 "${raw}" 不是 market/limit 之一，已按市价开盘。`);
       return undefined;
     })(),
+    /*
+     * **保证金模式**（2026-10-18 新增）—— 与 `entry_type` 同一套宽容策略。
+     *
+     * 认两种写法：`isolated` / `cross`（大小写不敏感，`crossed` 也收 —— 币安配置里
+     * 这个值的拼法是 `crossed`，模型很容易照抄过去）。
+     *
+     * ⚠️ 认不出 → 归一成 `undefined`（= 用策略配置），**不能原样透传**：
+     * 那会让 zod 校验失败、整条决策被丢掉。而"被丢掉的决策"比"用默认模式"糟得多。
+     *
+     * ⚠️ 不要在这里把中文「全仓」「逐仓」映射过来 —— 提示词里已经给了英文枚举，
+     * 多做一层猜测只会让"模型写错了但看起来成功"变得更隐蔽。
+     */
+    margin_mode: (() => {
+      const raw =
+        typeof o.margin_mode === 'string'
+          ? o.margin_mode
+          : typeof o.marginMode === 'string'
+            ? o.marginMode
+            : undefined;
+      if (raw === undefined) return undefined;
+      const v = raw.toLowerCase().trim();
+      if (v === 'isolated') return 'isolated';
+      if (v === 'cross' || v === 'crossed') return 'cross';
+      notes.push(`保证金模式 "${raw}" 不是 isolated/cross 之一，已按策略配置处理。`);
+      return undefined;
+    })(),
     limit_price:
       toFiniteNumber(o.limit_price ?? o.limitPrice ?? o.entry_price ?? o.entryPrice) ?? undefined,
     /*
@@ -1012,6 +1038,17 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
       reduceQuantity: coerced.reduce_quantity ?? null,
       /* 入场方式 —— 由上面那段算好（`entryAdjustments` 带说明）。 */
       entryType,
+      /*
+       * 保证金模式（2026-10-18 新增）—— 模型可选。
+       *
+       * 只认这两个词，其它一律当"没给"。**不要猜**（例如把 `CROSSED` / `全仓`
+       * 也映射过来）：写错一个词就悄悄改了这笔仓位的风险特征，
+       * 而 `null` 只是回落到策略配置 —— 后者是安全的那一边。
+       */
+      marginMode:
+        coerced.margin_mode === 'isolated' || coerced.margin_mode === 'cross'
+          ? coerced.margin_mode
+          : undefined,
       limitPrice,
       /* 只有限价单才有"等多久"可言 —— 市价单立即成交，等多久无意义。 */
       waitMinutes: entryType === 'limit' ? (coerced.wait_minutes ?? null) : null,

@@ -1227,7 +1227,33 @@ export class AutoTrader {
      * 在这里算一次而不是每轮算：`aiModelId` 是机器人的属性，运行期不会变。
      */
     const modelLimit = aiModels.get(deps.trader.aiModelId)?.inputTokenLimit ?? 0;
-    this.promptBudget = promptTokenBudget(modelLimit);  }
+    this.promptBudget = promptTokenBudget(modelLimit);
+
+    /*
+     * ⚠️ **把"每个标的已确认的保证金模式"从数据库恢复**（2026-10-18 修）。
+     *
+     * `marginSet` 原本只活在内存里，重启就清空。而 `recordOrder` 用它决定订单记录里
+     * 「保证金模式」那一列写什么 —— 于是**每次部署之后，平仓/止损单的模式列就变成空白**。
+     * 实测（线上 #11）：exit 37 笔缺 21、stop_loss 132 笔缺 12、entry 103 笔缺 0；
+     * 同一标的 TIAUSDT 19 笔有值 9 笔无值 —— 正是"重启前 / 重启后"的分界。
+     *
+     * ## 这条只影响显示，不改变任何设置行为
+     *
+     * · `executeOpen` 里那段 `if (this.marginSet.get(symbol) !== wantedMode)` 仍然照旧：
+     *   恢复出来的值等于想设的值时**跳过那次调用**（省一次权重）——
+     *   而如果交易所侧被别处改过，下一次真正想改时仍会打到交易所。
+     * · 拿不到（新标的、或历史订单里没有该标的）就保持空 Map，行为与改动前一致。
+     *
+     * 用 try/catch 兜住：**启动流程不能因为一个"显示用的缓存"而失败**。
+     */
+    try {
+      for (const [symbol, mode] of orderStore.latestMarginTypeBySymbol(deps.trader.id)) {
+        this.marginSet.set(symbol, mode === 'cross' ? 'crossed' : 'isolated');
+      }
+    } catch {
+      /* 读不到就当作空 —— 与改动前一致，只是那一列会空。 */
+    }
+  }
 
   /**
    * 这一轮组装提示词用的 token 预算（见构造函数里的说明）。
@@ -9552,7 +9578,21 @@ reduceQuantity: null,
      * `marginSet` 是进程内的"这个标的已经设过"缓存。跨进程重启会重新设一次 ——
      * 那正是我们要的：交易所侧可能被别的东西改回去。
      */
-    const wantedMode = this.activeConfig.riskControl.marginMode;
+    /*
+     * ⚠️ **模式来源：模型给了就用模型的，没给才用策略配置**（2026-10-18 新增）。
+     *
+     * 用户的原话：「② 不能写死，用什么模式 AI 决定」。
+     * 在此之前这里只有 `activeConfig.riskControl.marginMode` 一个来源，
+     * 于是线上 #11 的 335 张单**全部逐仓** —— 不是因为每笔都该逐仓，
+     * 而是因为模型根本没有这个旋钮。
+     *
+     * ## 为什么"不写时回落配置"是安全的
+     *
+     * `decision.marginMode` 是 `optional`，解析器对认不出的值也归一成 `undefined`
+     * ⇒ **模型不写 / 写错 = 行为与改动前逐字一致**。这条保证很重要：
+     * 团队模式在持续盈利，任何一次发版都不该悄悄改变它的风险特征。
+     */
+    const wantedMode = decision.marginMode ?? this.activeConfig.riskControl.marginMode;
     if (this.marginSet.get(symbol) !== wantedMode) {
       const ok = await this.deps.broker.setMarginType(
         symbol,

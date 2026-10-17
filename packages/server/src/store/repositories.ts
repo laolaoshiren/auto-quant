@@ -1529,6 +1529,49 @@ export const orders = {
   },
 
   /**
+   * **每个标的最近一次被交易所确认过的保证金模式**（`symbol → 'isolated' | 'cross'`）。
+   *
+   * ## 为什么需要它（2026-10-18 · 用户实测）
+   *
+   * 用户看到订单记录里「保证金模式」这一列**有一部分是空的**：
+   * ```
+   *   entry      103 笔 → 0 笔缺 ✓
+   *   exit        37 笔 → 21 笔缺
+   *   stop_loss  132 笔 → 12 笔缺
+   * ```
+   *
+   * 根因不是写库漏了，而是 `AutoTrader.marginSet` 是**进程内内存**：
+   * 每次部署重启后就清空，于是"本进程没为这个标的设过" ⇒ `recordOrder` 如实写 `NULL`。
+   * 实测同一标的（`TIAUSDT`）19 笔有值、9 笔无值 —— 正是"重启前 / 重启后"的分界。
+   *
+   * ⇒ 启动时用这张表把内存填回来。**它只影响显示，不改变任何设置行为**
+   *   （`executeOpen` 仍会照常 `setMarginType`，`marginSet` 依旧只记成功的那次）。
+   *
+   * ## 为什么取 `MAX(id)` 而不是"最后一次设置时间"
+   *
+   * `orders` 里没有"设置模式"这个动作的记录，只有下单记录。所以"该标的最新的那条
+   * 带模式的订单"就是最接近事实的近似 —— 而且它**只会更保守**：
+   * 如果之后有人在交易所手工改了模式，这里记的仍是旧值，界面那列的 `title`
+   * 与 `/positions` 的实时读取会兜底（见 `recordOrder` 的说明）。
+   */
+  latestMarginTypeBySymbol(traderId: number): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const row of getDb().all<{ symbol: string; margin_type: string }>(
+      `SELECT o.symbol, o.margin_type
+         FROM orders o
+         JOIN (SELECT symbol, MAX(id) AS mid
+                 FROM orders
+                WHERE trader_id = ? AND margin_type IS NOT NULL AND margin_type <> ''
+                GROUP BY symbol) latest
+           ON o.id = latest.mid`,
+      traderId,
+    )) {
+      map.set(String(row.symbol), String(row.margin_type));
+    }
+    return map;
+  },
+
+  /**
    * 某机器人的订单记录，**最新在前**，一次一页。`before` 是游标：只返回 `id < before` 的行。
    *
    * ## 为什么用 `before=id` 而不是 `offset`

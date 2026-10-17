@@ -1378,7 +1378,8 @@ function useSymbolTones(symbols: readonly string[]): Map<string, string> {
   }, [symbols]);
 }
 
-function LeverageCell({ order }: { order: OrderRecord }) {  const leverage = order.leverage;
+function LeverageCell({ order }: { order: OrderRecord }) {
+  const leverage = order.leverage;
   /*
    * ⚠️ **只有开仓单显示杠杆** —— 见调用点那段注释（用户指出的"倒反天罡"）。
    *

@@ -415,9 +415,38 @@ export const DESK_ROLE_SPECS: Record<DeskRole, RoleSpec> = {
 20 个候选 × 每条 60 字 ≈ 1,200 字，那是安全的。
 
 数组里每个元素：
-{"symbol":"...","action":"open_long|open_short|close_long|close_short|hold|wait|skip",
+{"symbol":"...","action":"open_long|open_short|close_long|close_short|add_to_position|reduce_position|adjust_protection|hold|wait|skip",
  "leverage":数字,"positionSizeUsd":数字,"stopLoss":数字或null,"takeProfit":数字或null,
  "confidence":0到100,"riskUsd":数字,
- "reasoning":"依据（引用材料里的数值，**一句话**）"}`,
+ "reasoning":"依据（引用材料里的数值，**一句话**）"}
+
+## 加仓与减仓：你有这个能力，请主动使用
+
+「add_to_position」（加仓，同方向加）与 「reduce_position」（减仓，先落袋一部分）。
+**这两个动作执行层与风控层都已实现**，你只需要在数组里写出来。
+
+什么时候该用：
+
+- **加仓**：已有浮盈、结构没被破坏、而且你判断行情还有空间。
+  典型情形是"首个目标位已到但趋势仍在"，此时比"平掉再开"更省手续费、也更不容易被噪音洗出去。
+  加仓要给出**加多少**（「positionSizeUsd」）与**新的保护位**（「stopLoss」 / 「takeProfit」）。
+- **减仓**：已有浮盈但你认为风险在上升（例如动量钝化、接近目标位、波动放大）。
+  减仓要给出**减多少比例**：用 「reducePercent」 字段（1–100）。
+  减仓不是看空 —— 它是"把确定的一部分落袋，剩下的继续跑"，通常比一次性平仓更优。
+
+两条纪律：
+
+1. **不要在亏损时加仓**（摊平成本是最容易把小亏变大亏的动作）。
+2. **加仓之后必须重新给保护位** —— 否则新加的那部分敞口没有止损。
+
+## 保证金模式：由你决定
+
+数组里可以带 「"marginMode":"isolated"」（逐仓）或 「"cross"」（全仓），只对**开仓 / 加仓**有意义。
+
+- **逐仓**：这笔亏损封顶在这笔的保证金，账户其它钱不受影响 —— 波动大、把握中等时用它。
+- **全仓**：整个账户余额共担，更抗短期波动、但也可能拖累整个账户 —— 把握高、杠杆低时可以考虑。
+
+不给就用策略默认值。**不要无脑选逐仓** —— 它是更保守的一边，但如果你认为这个标的值得用账户整体去扛，就写 「cross」。
+`,
   },
 };
