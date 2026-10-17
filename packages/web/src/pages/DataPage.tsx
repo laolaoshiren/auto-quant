@@ -628,7 +628,18 @@ export function DataPage() {
                       'shrink-0 rounded px-1 text-xs',
                       SCOPE_TONE[logScopeKind(line.scope)] ?? SCOPE_TONE.other,
                     )}
-                    title={`来源：${line.scope}`}
+                    /*
+                      ⚠️ **悬浮提示里的来源也要翻译**（2026-10-17，t52 的 B1）。
+                      
+                      这一格的**可见文字**早就走了 `logScopeLabel`（中文 ✅），
+                      而 `title` 里原来直接写 `来源：${line.scope}` ——
+                      于是鼠标一停，浮出来的是 `来源：trader` / `来源：binance:rest`。
+                      
+                      这一行代码**同时管着页面上每一个日志行**（149 个实例实测），
+                      所以改这一处就等于改全部。原始码留在括号里 ——
+                      按 scope 去库里筛日志时要靠它（与面板那边同一个做法）。
+                     */
+                    title={`来源：${logScopeLabel(line.scope)}（原始码：${line.scope}）`}
                   >
                     {LOG_SCOPE_ICONS[line.scope] ? `${LOG_SCOPE_ICONS[line.scope]} ` : ''}
                     {logScopeLabel(line.scope)}

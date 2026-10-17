@@ -9,6 +9,8 @@
  * consume it, which keeps polling/refresh logic out of the render tree.
  */
 import type {
+  AgentRunKind,
+  AgentRunOutcome,
   AiModelConfig,
   Decision,
   DecisionRecord,
@@ -28,6 +30,7 @@ import type {
   TraderMode,
   TraderStats,
   User,
+  WakeTrigger,
 } from '@aq/shared';
 
 /* -------------------------------------------------------------------------- */
@@ -50,12 +53,25 @@ export interface AgentAudit {
   /** 每次角色运行（字段与 `AgentRunRow` 一一对应）。 */
   runs?: Array<{
     id: number;
-    kind: string;
-    trigger: string;
+    /*
+     * ⚠️ **三个字段都用 `@aq/shared` 的联合类型收窄，而不是裸 `string`**
+     * （2026-10-17 · t53，队长裁定 3）。
+     *
+     * 理由：界面要**穷举**这三个码域并给出中文标签，而"裸 string"既不能穷举、
+     * 也不能测试（`agentRunLabels.test.ts` 的穷尽断言必须有一个有限的取值集合
+     * 可遍历）。收窄之后，标签表的 `Record<Union, string>` 才真的有约束力。
+     *
+     * ⚠️ **服务端仍然写 `string`**（`orchestrator.ts` 的 `recordRun` 端口签名），
+     * 那半边的收口归另一个任务。所以这里的收窄是"**前端消费端的契约**"，
+     * 不是"服务端保证只会发这几个值" —— 因此**运行时兜底（`?? 原码`）必须保留**：
+     * 真收到联合之外的码时，界面显示原码而不是崩掉。
+     */
+    kind: AgentRunKind;
+    trigger: WakeTrigger;
     intensity: string;
     steps: number;
-    /** 这一步的结果分类（如 `ok` / `failed`）。 */
-    outcome: string;
+    /** 这一步的结果分类。 */
+    outcome: AgentRunOutcome;
     /** 给人看的说明。 */
     detail: string;
     tokensIn: number;

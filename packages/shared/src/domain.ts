@@ -908,6 +908,172 @@ export function logScopeKind(scope: string | null | undefined): LogScopeKind {
   return 'other';
 }
 
+/* -------------------------------------------------------------------------- */
+/*  智能体审计：三类机器码的中文标签                                            */
+/* -------------------------------------------------------------------------- */
+/*
+ * ## 为什么需要这三张表（用户实测，2026-10-17）
+ *
+ * 用户截图指出「**智能体审计里面出现英文字符（整个前端UI都应该是中文表述）**」，
+ * 屏幕上看到的是 `strategy` / `idle` / `timeout` / `new result` / `ok` / `failed`。
+ *
+ * 那**不是**"机器契约用了英文"—— 那三个码（`agent_runs.kind` / `.trigger` /
+ * `.outcome`）存进库时本来就该是英文，这一点没有错。错的是**它们被直接渲染到了
+ * 界面上，而没有经过一次「码 → 中文标签」的映射**。
+ *
+ * ## 与其它标签表同一条纪律（照抄 `LOG_SCOPE_LABELS` 上方那段）
+ *
+ * 与 `CLOSE_REASON_LABELS` / `TRADER_STATUS_LABELS` / `ORDER_PURPOSE_LABELS` /
+ * `LOG_SCOPE_LABELS` 一样：**存进库的永远是原码**（`kind` / `trigger` / `outcome`
+ * 三列，筛选与排查靠它），**翻译只发生在展示层**。
+ * 翻译表变化不影响历史数据；认不出的码**原样显示** —— 不猜。
+ *
+ * ## 为什么放在 `@aq/shared` 而不是面板组件里
+ *
+ * 与 `TRADER_STATUS_LABELS` 同一个理由（那张表的注释里写着"以前这张表住在徽章
+ * 组件里，于是组件之外的任何地方都渲染裸码"）：这三列将来还会被服务端日志、
+ * 提示词、以及别的界面复用。表在 shared，**漏一个取值就编译不过**（下面的
+ * `Record<联合类型, string>`），而不是等用户在截图上发现。
+ *
+ * ## ⚠️ 这三张表的穷尽性由测试守着，不在类型层
+ *
+ * `kind` 与 `trigger` 在**服务端**的端口签名里被放宽成了 `string`
+ * （`orchestrator.ts` 的 `recordRun` 收 `kind: string` / `trigger: string`），
+ * 所以类型层拦不住"服务端加了一个新码"。那半边的收口归服务端任务；
+ * 这半边由 `agentRunLabels.test.ts` 用**源码一致性守卫**兜住：
+ * 服务端新增一个 `WakeTrigger` / `outcome` 取值而这里没跟上，测试当场变红。
+ */
+
+/**
+ * `agent_runs.kind` 的**已知取值**。
+ *
+ * ⚠️ **它不是从类型里抄来的，是从写入点抄来的** —— 服务端没有为这一列定义联合
+ * （`agentStore.ts` 的行类型是裸 `string`），所以这里的名单就是"实际会被写进去的
+ * 那些值"，并由守卫测试对着写入点核对。
+ *
+ * 两个生产写入点都是 `kind: 'strategy'`（`orchestrator.ts` 的 `recordRun` 两处：
+ * 策略师一条、每个分析角色各一条）。`team_cycle` / `review` 是**别的调用形态**
+ * （夹具与历史记录里出现过，`traderDelete.test.ts` 就写了 `kind: 'review'`）——
+ * 一并登记，这样它们上屏时也是中文，而不是靠兜底露码。
+ */
+export const AGENT_RUN_KINDS = ['strategy', 'team_cycle', 'review'] as const;
+export type AgentRunKind = (typeof AGENT_RUN_KINDS)[number];
+
+/**
+ * `agent_runs.kind` 的中文标签。
+ *
+ * `Record<AgentRunKind, string>` 而不是 `Record<string, string>`：**漏一个取值
+ * 就编译不过**（与 `TRADING_MODE_LABELS` / `MODE_LABEL` 同一条纪律）。
+ */
+export const AGENT_RUN_KIND_LABELS: Record<AgentRunKind, string> = {
+  strategy: '策略轮',
+  team_cycle: '团队轮',
+  review: '复盘轮',
+};
+
+/** 智能体运行类型的中文标签，**认不出的码原样返回**（不猜）。 */
+export function agentRunKindLabel(kind: string): string {
+  return AGENT_RUN_KIND_LABELS[kind as AgentRunKind] ?? kind;
+}
+
+/**
+ * 唤醒**触发原因**的取值（`agent_runs.trigger`）。
+ *
+ * ## 这份名单必须与服务端的 `WakeTrigger` 逐字一致
+ *
+ * 权威定义在 `packages/server/src/trader/agent/wake.ts`（`export type WakeTrigger`）。
+ * 这里**重抄一份**是因为 `@aq/shared` 不能反向依赖服务端包（依赖方向是单向的）。
+ * 代价是"两份名单会分叉"—— 而这个代价由 `agentRunLabels.test.ts` 的一条
+ * **源码一致性守卫**抵掉：它读服务端的那个 `export type`，把成员抽出来与这里
+ * 逐字比对。服务端加一个触发原因而这里没跟上 → **测试变红**，而不是等用户在
+ * 截图上看到一个新英文词。
+ */
+export const WAKE_TRIGGERS = [
+  'new_result',
+  'losing_streak',
+  'drawdown',
+  'rejections',
+  'timeout',
+  'idle',
+  'manual',
+  'none',
+] as const;
+export type WakeTrigger = (typeof WAKE_TRIGGERS)[number];
+
+/**
+ * 唤醒原因的中文标签。
+ *
+ * ## ⚠️ 措辞必须与 `wake.ts` 里那条分支的真实语义对齐
+ *
+ * 标签是给操作员读的，而**读错标签比读英文码更糟**（英文码至少不会骗人）。
+ * 三处刻意不照字面直译：
+ *
+ * · `drawdown` —— 那条分支的触发条件是"权益相对上次判断变化超过阈值"，
+ *   而它**既覆盖回撤也覆盖新高**（`wake.ts` 的 `why` 里两种情形都写了）。
+ *   写成"回撤触发"会让一个因新高而醒的轮次被读成"账户在亏"。
+ * · `timeout` —— 它是**防饿死的兜底**（"即使没有新事件也要审视一次"），
+ *   不是某种调用超时。写成"超时"会让人去查一个不存在的故障。
+ * · `none` —— 它是"**没有值得唤醒的事件**"，而不是"唤醒了但没触发原因"。
+ */
+export const WAKE_TRIGGER_LABELS: Record<WakeTrigger, string> = {
+  new_result: '成交后唤醒',
+  losing_streak: '连续亏损',
+  drawdown: '权益显著变化',
+  rejections: '被拒过多',
+  timeout: '兜底唤醒',
+  idle: '长时间没开仓',
+  manual: '人工触发',
+  none: '未触发',
+};
+
+/** 唤醒原因的中文标签，**认不出的码原样返回**（不猜）。 */
+export function wakeTriggerLabel(trigger: string): string {
+  return WAKE_TRIGGER_LABELS[trigger as WakeTrigger] ?? trigger;
+}
+
+/**
+ * `agent_runs.outcome` 的取值（服务端 `LoopResult['outcome']`）。
+ *
+ * 权威定义在 `packages/server/src/trader/agent/loop.ts`。同上，这里重抄一份并由
+ * 守卫测试对着那个文件核对。
+ */
+export const AGENT_RUN_OUTCOMES = ['ok', 'degraded', 'failed'] as const;
+export type AgentRunOutcome = (typeof AGENT_RUN_OUTCOMES)[number];
+
+/**
+ * 运行结果的中文标签。
+ *
+ * ## ⚠️ `degraded` 不得译成「失败」
+ *
+ * `loop.ts` 的注释把三者分得很清楚：
+ *
+ * ```
+ *   ok       —— 模型自己调了 finish，这是一个【结论】
+ *   degraded —— 撞上步数上限，【没有结论】，只是停下来了
+ *   failed   —— 模型输出坏掉且无法恢复
+ * ```
+ *
+ * 把 `degraded` 写成"失败"会让操作员以为这一轮坏了（该去查），而真相是
+ * "它烧完了步数预算、还没来得及给结论"—— 两种情形的处置完全不同
+ * （后者该放宽步数预算或精简必读清单）。
+ * 所以标签直接说清"没有结论"，而不是给一个笼统的褒贬词。
+ */
+export const AGENT_RUN_OUTCOME_LABELS: Record<AgentRunOutcome, string> = {
+  ok: '已得出结论',
+  /*
+   * ⚠️ 用**逗号**而不是括号：面板会在标签后面再跟一个 `（原码）`，
+   * 写成「未跑完（撞步数上限）」渲染出来就是双括号
+   *「未跑完（撞步数上限）（degraded）」—— 实测看到的，读起来很啰嗦。
+   */
+  degraded: '未跑完，撞到步数上限',
+  failed: '失败',
+};
+
+/** 运行结果的中文标签，**认不出的码原样返回**（不猜）。 */
+export function agentRunOutcomeLabel(outcome: string): string {
+  return AGENT_RUN_OUTCOME_LABELS[outcome as AgentRunOutcome] ?? outcome;
+}
+
 /**
  * 交易所拒单错误的**中文人话**。
  *

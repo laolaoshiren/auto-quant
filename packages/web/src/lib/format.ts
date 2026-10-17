@@ -814,9 +814,9 @@ function avoidSemanticHues(hue: number): number {
 /**
  * 交易环境的**中文标签**。
  *
- * `system.environment` 是 `'production' | 'demo'` —— 一个**稳定机器码**，
- * 由服务端按交易所端点算出。而「数据与日志」页原来把它**原样显示**：
- * 操作员看到的是一张写着 `production` 的卡片。
+ * `system.environment` 是 `'production' | 'demo' | 'legacy-testnet'` ——
+ * 一个**稳定机器码**，由服务端按交易所端点算出。而「数据与日志」页原来把它
+ * **原样显示**：操作员看到的是一张写着 `production` 的卡片。
  *
  * 与本文件里其它标签函数同一条纪律：**存的是机器码，翻译在展示层。**
  * 认不出的值原样返回 —— 不猜。
@@ -824,10 +824,27 @@ function avoidSemanticHues(hue: number): number {
  * 注意它与 `environmentLabel`（「币安 USDT 本位合约（实盘）」）的区别：
  * 后者是**交易所端点**的名字，这个概念是**"真钱还是假钱"**。
  * 两个都放在卡片上：一个是主语，一个是定语。
+ *
+ * ## ⚠️ `legacy-testnet` 曾经漏掉（2026-10-17，t52 的 A5）
+ *
+ * 权威取值集合是服务端 `binance/endpoints.ts` 的
+ * `BinanceEnvironment = 'production' | 'demo' | 'legacy-testnet'`。
+ * 这个函数原来只认前两个，于是**第三种环境会直接回落到原码**、在卡片上显示
+ * `legacy-testnet`。漏掉的原因是这里写成了一条条 `if` 而不是**查表**：
+ * 加一个取值时没有任何东西会提醒写它的人。
+ *
+ * 所以现在改成表 + `?? 原码` 兜底（与 `TRADER_STATUS_LABELS` 同一个写法），
+ * 并由 `agentRunLabels.test.ts` 里的源码一致性守卫盯着服务端那个联合类型：
+ * 那边加一个环境而这里没跟上 → **测试变红**。
  */
+export const TRADING_ENVIRONMENT_LABELS: Record<string, string> = {
+  production: '实盘',
+  demo: '模拟盘',
+  /* ⚠️ 键必须加引号：`legacy-testnet` 里的连字符会被解析成减法表达式。 */
+  'legacy-testnet': '遗留测试网',
+};
+
 export function tradingEnvironmentLabel(environment: string | null | undefined): string {
   if (!environment) return '—';
-  if (environment === 'production') return '实盘';
-  if (environment === 'demo') return '模拟盘';
-  return environment;
+  return TRADING_ENVIRONMENT_LABELS[environment] ?? environment;
 }

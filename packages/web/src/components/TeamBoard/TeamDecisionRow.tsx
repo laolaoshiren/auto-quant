@@ -101,6 +101,24 @@ function outcomeStyle(status: ExecutionLogEntry['status']): {
  * ⚠️ **必须有一份兜底，而且兜底不能吞掉信息**：后端将来加了角色、这张表还没跟上时，
  * 界面上要能看出"这是个还没登记的角色"（显示 id + 提示），**绝不能显示成空白**
  * （那会让操作员以为"这一轮没人说话"）。
+ *
+ * ## ⚠️ 这张表**必须覆盖 `FIRM_ROLES` 的每一个 id**（2026-10-17，t52 的 B3）
+ *
+ * t52 的清单本来建议把它收紧成 `Record<FirmRole['id'], string>` 让 typecheck 兜住 ——
+ * **但 `FirmRole.id` 的类型是 `string`，不是字面量联合**（`firm.ts` 的接口定义），
+ * 所以那个写法**没有任何收紧效果**（`Record<string, string>` 与之等价）。
+ * 收紧 id 的类型属 `shared/firm.ts`，超出本任务范围。
+ *
+ * 于是改用**测试**承担同一件事（`roleLabels.test.ts`）：遍历 `FIRM_ROLES`，
+ * 断言每个 id 都在这里登记过。后端加角色而这里漏登记 → **测试变红**。
+ *
+ * ## 实测：`symbol_scout` 曾经就是漏的那个
+ *
+ * 它是 `firm.ts` 里 `status: 'staffed'` 的正式岗位（2026-10-14 接线，
+ * `AQ_PER_SYMBOL=on` 时按币并行），**但这张表里没有它** ——
+ * 于是它一产出，成员行就渲染成
+ * `symbol_scout（界面未登记这个角色）`：屏幕上出现一串英文 id，
+ * 而它其实是"标的侦查员"。用户报的「出现英文字符」正是这一个形状。
  */
 const ROLE_LABEL: Record<string, string> = {
   supervisor: '总管',
@@ -112,6 +130,8 @@ const ROLE_LABEL: Record<string, string> = {
   sentiment: '市场情绪',
   bull: '多头研究员',
   bear: '空头研究员',
+  /* ⚠️ 2026-10-17 补：漏登记的正式岗位，见上面那段。 */
+  symbol_scout: '标的侦查员',
   onchain_analyst: '链上分析',
   community_monitor: '社区监控',
   risk_officer: '风控官',
@@ -124,6 +144,11 @@ const ROLE_LABEL: Record<string, string> = {
   clerk: '文员',
   system_engineer: '系统工程师',
 };
+
+/** 给测试用：这张表登记了哪些角色 id（**不导出表本身**，避免被别处改）。 */
+export function registeredRoleIds(): string[] {
+  return Object.keys(ROLE_LABEL);
+}
 
 /** 角色 id → 界面标签（未登记的返回 `null`，由调用处决定怎么显示）。 */
 export function roleLabel(role: string): string | null {

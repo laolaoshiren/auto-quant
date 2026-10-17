@@ -32,6 +32,8 @@
 
 import { useState } from 'react';
 
+import { agentRunKindLabel, agentRunOutcomeLabel, wakeTriggerLabel } from '@aq/shared';
+
 import { api, type AgentAudit } from '../lib/api';
 import { fmtSigned, pnlColor } from '../lib/format';
 import { usePolled } from '../lib/hooks';
@@ -61,6 +63,66 @@ function fmtMs(ms: number | null | undefined): string {
   if (ms >= 60_000) return `${(ms / 60_000).toFixed(1)}分`;
   if (ms >= 1_000) return `${(ms / 1_000).toFixed(1)}秒`;
   return `${Math.round(ms)}毫秒`;
+}
+
+/**
+ * **码 → 中文标签，并把原始码留在旁边**（用户实测 2026-10-17）。
+ *
+ * ## 为什么要有这个小组件
+ *
+ * 面板里三处（`kind` / `trigger` / `outcome`）原来**直接渲染原始机器码**，
+ * 于是屏幕上出现的是 `strategy` / `idle` / `ok` —— 用户的原话是
+ * 「**智能体审计里面出现英文字符（整个前端UI都应该是中文表述）**」。
+ *
+ * ## 两条纪律都在这一个组件里落地
+ *
+ * · **中文在前、为主**：操作员一眼读到的是「策略轮」「成交后唤醒」；
+ * · **原始码保留在旁**（小字、灰色）：`agent_runs` 的这三列是**排查依据** ——
+ *   想按 `new_result` 去库里筛日志时，界面上得有这个码可抄。
+ *   这是本仓库的既有做法（决策详情页那一行「存储值 action = skip」）。
+ *
+ * ⚠️ **不做"只留中文、丢掉码"**：那会让界面与库对不上，
+ * 而这三个码正是"这一轮为什么醒 / 结果算不算结论"的原始事实。
+ * ⚠️ **也不做"只留码"**：那正是这次要修的缺陷。
+ *
+ * ## 为什么导出它
+ *
+ * 让 `agentRunLabels.test.ts` 能**真的把它渲染成 HTML** 再断言 ——
+ * "源码里调了标签函数"与"屏幕上真的变成了中文"是两件事
+ *（表漏一个取值时会经 `?? 原码` 回落，而源码看起来完全正确）。
+ *
+ * ## ⚠️ 原码外面必须有可读的边界（实测抓到的）
+ *
+ * 第一版把原码直接贴在标签后面，SSR 渲染出来的可见文本是
+ * **`策略轮strategy`** —— 中文与英文连成一串，读起来像一句坏掉的文案
+ *（`长时间没开仓idle` 更糟）。所以原码包进**圆括号**：
+ *
+ * ```
+ *   策略轮（strategy）      成交后唤醒（new_result）
+ * ```
+ *
+ * 括号是"这是附注、不是正文"的通用视觉语言，也正是本仓库别处的做法
+ *（决策详情页的「存储值 action = skip」同样把码标成附注）。
+ */
+export function CodeLabel({ label, code }: { label: string; code: string }): React.ReactElement {
+  /*
+   * 原码**只在跟标签不同的时候才显示**。
+   *
+   * 未知码（跨版本新值）会经 `?? 原码` 回落 —— 那时 `label === code`，
+   * 再显示一次括号就是「incident（incident）」。直接只显示一个，
+   * 而 `title` 里仍然说明它是存储值（悬停可查）。
+   */
+  const showCode = label !== code;
+  return (
+    <>
+      {label}
+      {showCode && (
+        <span className="num ml-1 text-ink-faint" title={`存储值 ${code}`}>
+          （{code}）
+        </span>
+      )}
+    </>
+  );
 }
 
 /** 一张小表。 */
@@ -179,10 +241,14 @@ export function AgentAuditPanel({ traderId }: { traderId: number }): React.React
                   {runs.map((r) => (
                     <tr key={r.id} className="border-t border-base-700/40">
                       <td className="num py-1 whitespace-nowrap text-ink-faint">{stamp(r.createdAt)}</td>
-                      <td className="py-1 text-ink-soft">{r.kind}</td>
-                      <td className="py-1 text-ink-soft">{r.trigger}</td>
+                      <td className="py-1 text-ink-soft">
+                        <CodeLabel label={agentRunKindLabel(r.kind)} code={r.kind} />
+                      </td>
+                      <td className="py-1 text-ink-soft">
+                        <CodeLabel label={wakeTriggerLabel(r.trigger)} code={r.trigger} />
+                      </td>
                       <td className={`py-1 ${r.outcome === 'ok' ? 'text-up' : 'text-warn'}`} title={plainText(r.detail)}>
-                        {r.outcome}
+                        <CodeLabel label={agentRunOutcomeLabel(r.outcome)} code={r.outcome} />
                       </td>
                       <td className="num py-1 text-right text-ink-faint">
                         {fmtTokens(r.tokensIn)}/{fmtTokens(r.tokensOut)}
@@ -208,7 +274,9 @@ export function AgentAuditPanel({ traderId }: { traderId: number }): React.React
                   <li key={e.id} className="rounded border border-base-700/50 px-2 py-1.5">
                     <div className="flex flex-wrap items-baseline gap-x-3 text-xs">
                       <span className="num text-ink-faint">{stamp(e.createdAt)}</span>
-                      <span className="text-ink-soft">{e.trigger}</span>
+                      <span className="text-ink-soft">
+                        <CodeLabel label={wakeTriggerLabel(e.trigger)} code={e.trigger} />
+                      </span>
                       {/*
                         结果**必须区分"还没结算"与"结算了是 0"** ——
                         `outcomeTrades` 为 null 是"等结果中"，而 0 是"结果就是没交易"。

@@ -19,6 +19,7 @@ import { Button, ErrorNote, Field, TextInput } from '../components/ui';
 import { SectionLabel } from '../components/shell';
 import { useApp } from '../lib/store';
 import { useDocumentTitle } from '../lib/hooks';
+import { tradingEnvironmentLabel } from '../lib/format';
 
 const FIRST_RUN_HINT = 'docker logs autoquant | grep FIRST_RUN_CREDENTIALS';
 
@@ -202,7 +203,18 @@ export function LoginPage() {
           <div className="mt-5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-base-800 pt-3 text-xs text-ink-faint">
             {health ? (
               <>
-                <span className="num">{health.environment.toUpperCase()}</span>
+                {/*
+                  ⚠️ **这一格原来是大写的机器码**（`DEMO` / `PRODUCTION`）。
+                  
+                  用户实测（2026-10-17）：登录页页脚整行读起来是
+                  `DEMO · 版本 0.1.32 · 已运行 8 分` —— 而这一页要解决的正是
+                  **信任**问题，第一屏就给一个看不懂的英文词恰好相反。
+                  
+                  **大写化不是需求，是机器码的视觉语言**：`.toUpperCase()` 让
+                  `production` 看起来像常量，而它其实只是"这台上跑的是真钱还是假钱"。
+                  改用与「数据与日志」页同一个标签函数 —— 两处说同一件事、同一套词。
+                */}
+                <span className="num">{tradingEnvironmentLabel(health.environment)}</span>
                 <span aria-hidden>·</span>
                 <span className="num">版本 {health.version}</span>
                 <span aria-hidden>·</span>

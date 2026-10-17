@@ -27,7 +27,7 @@ import { useApp } from '../../lib/store';
 import { usePolled } from '../../lib/hooks';
 import { Button, ErrorNote, Field, Panel, TextInput } from '../ui';
 import { PageShell, SectionLabel } from '../shell';
-import { fmtDateTime } from '../../lib/format';
+import { fmtDateTime, tradingEnvironmentLabel } from '../../lib/format';
 
 /**
  * 只读的「键 — 值」一行。
@@ -260,10 +260,23 @@ export function AccountSection() {
         </FactGroup>
 
         <FactGroup title="运行环境">
+          {/*
+            ⚠️ **兜底那一支也要翻译**（2026-10-17，t52 的 B2）。
+
+            这一格的 `sub` 有两个来源：`environmentLabel`（交易所端点名，中文）
+            与 `environment`（机器码）。老服务端不给前者时，第二个来源就直接
+            渲染成 `production` / `demo` —— 一个兜底路径上的露码，
+            而它恰好出现在一次**跨版本升级**之后（最容易让人困惑的时刻）。
+
+            改成过 `tradingEnvironmentLabel`：与「数据与日志」页、登录页同一套词。
+          */}
           <FactRow
             label="模式"
             value={system?.dryRun ? '模拟' : '实盘'}
-            sub={system?.environmentLabel ?? system?.environment ?? undefined}
+            sub={
+              system?.environmentLabel ??
+              (system?.environment ? tradingEnvironmentLabel(system.environment) : undefined)
+            }
             tone={system?.dryRun ? undefined : 'warn'}
           />
         </FactGroup>
