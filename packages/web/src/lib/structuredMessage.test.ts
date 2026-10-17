@@ -154,6 +154,44 @@ test('★★ 数组里混进坏项：跳过坏项、保留好的（不因一项�
 });
 
 /* ══════════════════════════════════════════════════════════════════════════ */
+/*  ②b ★ 带中文前缀的 JSON（自测抓到的真 BUG：整串以 `[` 开头时只试位置 0）      */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+test('★★★ 带中文前缀的决策数组必须能解析（前缀里的方括号不能骗过判据）', () => {
+  /*
+   * 真实形状（`note` 是自由文本，服务端各处 `note()` 没有"必须以 `{` 开头"的约定）：
+   * ```
+   *   '[夹具] 决策数组（8 个标的） [{"symbol":…}]'
+   *    ↑ 整串确实以 `[` 开头 —— 但那只是前缀里的方括号
+   * ```
+   * 第一版实现写成 `if (startsWith('[')) starts.push(0)`，于是**带前缀的行全部回落纯文本**。
+   * 这条用例就是钉住它。
+   *
+   * ⚠️ 负向校准：把 `parseJsonLoose` 改回"整串开头是 `{`/`[` 就只试 0"，这条必红。
+   */
+  const prefixed = '[夹具] 决策数组（8 个标的） [{"symbol":"WLDUSDT","action":"open_short"}]';
+  const items = parseDecisionList(prefixed);
+  assert.ok(items !== null, '带前缀的 JSON 必须解析出来（不能回落纯文本）');
+  assert.equal(items.length, 1);
+  assert.equal(items[0]!.symbol, 'WLDUSDT');
+  assert.equal(items[0]!.action, 'open_short');
+});
+
+test('★★ 前缀里带 `{` 的中文句子也不能骗过判据', () => {
+  const tricky = '注意 {这里} 不是 JSON：[{"symbol":"BTCUSDT","action":"skip"}]';
+  const items = parseDecisionList(tricky);
+  assert.ok(items !== null, '必须找到最靠右的那个真 JSON');
+  assert.equal(items[0]!.symbol, 'BTCUSDT');
+});
+
+test('★★ 前缀 + 单个对象也要能解析', () => {
+  const prefixed = '[调研] 决策如下：{"action":"open_short","symbol":"WLDUSDT"}';
+  const items = parseDecisionList(prefixed);
+  /* 单个对象不是数组 → `parseDecisionList` 返回 null（由 `parseLooseObject` 接）。 */
+  assert.equal(items, null, '单个对象不该被当成决策数组');
+});
+
+/* ══════════════════════════════════════════════════════════════════════════ */
 /*  ③ 英文 id → 中文（映射在 DecisionAudit 的 ACTION_LABELS，全仓唯一一份）      */
 /* ══════════════════════════════════════════════════════════════════════════ */
 

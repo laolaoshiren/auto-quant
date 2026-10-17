@@ -32,16 +32,57 @@
  * **安全解析**：能解析就返回结果，否则 `null`（**绝不抛**）。
  *
  * `null` 是"这不是 JSON"，不是"内容是空的" —— 调用方据此决定回落纯文本。
+ *
+ * ## ⚠️ 为什么容忍"前面有中文前缀"（2026-10-17 自测发现）
+ *
+ * 用户截图里那条是**纯 JSON**（`[{"symbol":"WLDUSDT",…}]`），但同一张表的
+ * `note` 也可能写成 `[调研] 决策如下：[…]`、`这一轮的结果：{…}` 这类**带前缀**的形态
+ * —— 服务端各处的 `note()` 是自由文本，没有任何人保证"必须以 `{` 开头"。
+ *
+ * 所以判据从"**整串**必须是 JSON"放宽成"**从第一个 `{` 或 `[` 起**能解析成 JSON"：
+ * ```
+ *   '[{"a":1}]'              → 解析 ✓
+ *   '决策如下：[{"a":1}]'     → 从前缀后的 `[` 起解析 ✓（前缀不丢，调用方保留）
+ *   '正在分析 [1,2] 的区间'   → 解析成功但形状不对 → 上层判据仍返回 null ✓
+ * ```
+ * 放宽是**安全**的：真正的形状判据（`symbol` + `action`）在后面，一条普通中文
+ * 即使碰巧含 `[`，也过不了那道判据。
  */
 export function parseJsonLoose(text: string): unknown {
   const trimmed = text.trim();
-  /* 便宜的预筛：不是 `{` / `[` 开头的一定不是我们要的结构，省掉一次解析。 */
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    return null;
+  if (trimmed.length === 0) return null;
+
+  /*
+   * 候选起点：**收集所有** `{` / `[` 的位置，从后往前逐个试。
+   *
+   * ⚠️ **不能写成"整串以 `[` 开头就只试 0"**（2026-10-17 自测抓到的真 BUG）：
+   * ```
+   *   '[夹具] 决策数组（8 个标的） [{"symbol":…}]'
+   *    ↑ 整串确实以 `[` 开头 —— 但它只是**前缀里的方括号**，
+   *      从 0 解析必然失败，而真正的 JSON 在 17。
+   * ```
+   * 第一版就是那样写的（`if (startsWith) starts.push(0)`），于是**带中文前缀的行
+   * 全部回落纯文本** —— 而用户截图里那一类 note 恰恰常有前缀。
+   *
+   * 从后往前试 = 优先命中"最靠右、最完整的那个 JSON"，而**真正的内容通常在最后**。
+   * 代价可忽略（一条 note 里 `{`/`[` 通常个位数）。
+   */
+  const starts: number[] = [];
+  for (let i = 0; i < trimmed.length; i += 1) {
+    if (trimmed[i] === '{' || trimmed[i] === '[') starts.push(i);
   }
+  /* 整串就是 JSON 时，`0` 已经在 `starts` 里（且是最后一个被试的）。 */
+  if (starts.length === 0) return null;
+
+  for (let i = starts.length - 1; i >= 0; i -= 1) {
+    const start = starts[i]!;
+    try {
+      return JSON.parse(trimmed.slice(start)) as unknown;
+    } catch {
+      /* 这个起点不行，试更靠左的。 */
+    }
+  }
+  return null;
 }
 
 /** 决策数组里的一项 —— 只声明**我们会显示**的字段，其余原样忽略。 */
