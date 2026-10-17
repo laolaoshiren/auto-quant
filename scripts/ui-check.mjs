@@ -24,11 +24,11 @@
  *
  * 那种绿灯证明的是"**登录页渲染正常**"，而不是"被检查的页面正常"。在一个跑真实
  * 资金的仓库里，"验证通过"不能有这种含义 —— 所以缺凭据（或 token 已过期）时
- * 会非零退出并说明原因。闸门在 `ui-probe-lib.mjs`。
+ * 会非零退出并说明原因。闸门在 `ui-audit.mjs`。
  *
  * ## ⚠️ markdown 判据有**两条**，少一条就漏
  *
- * 判据本身（页面级 + `title` 属性）在 `ui-probe-lib.mjs`，三个脚本共用一份 ——
+ * 判据本身（页面级 + `title` 属性）在 `ui-audit.mjs`，三个脚本共用一份 ——
  * 于是不会出现"两个工具对同一处一处报一处不报"。**抓不到什么**也在那里列成表，
  * 每次运行都会原样打出来：读一个绿灯的人必须同时知道它没证明什么。
  *
@@ -61,7 +61,7 @@ import {
   markdownGateEnabled,
   probeMarkdown,
   requireCredentials,
-} from './ui-probe-lib.mjs';
+} from './ui-audit.mjs';
 
 const BASE = process.env.AQ_BASE;
 const CHROME = process.env.AQ_CHROME;
@@ -143,7 +143,7 @@ let problems = 0;
 const mdPages = [];
 /**
  * markdown 维度是否计入退出码。**默认不计入** —— 理由（含代价与翻转方式）
- * 写在 `ui-probe-lib.mjs` 的 `markdownGateEnabled` 上：这 28 处 `title` 与 1 处正文
+ * 写在 `ui-audit.mjs` 的 `markdownGateEnabled` 上：这 28 处 `title` 与 1 处正文
  * 都是真阳性，但都是已跟踪的待修项；让"每次 UI 改动的固定动作"在那之前一直红，
  * 只会训练人忽略红叉。`--markdown-gate` / `AQ_UI_MARKDOWN_GATE=1` 可让它失败。
  */

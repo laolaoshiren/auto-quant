@@ -30,7 +30,7 @@
  * 这个脚本原来也吃同一种假绿：没有凭据时应用把访问重定向到 `/login`，
  * 而登录页上**一条规则都不会触发**（没有持仓表、没有数字、没有通知），
  * 于是它报「✅ 五条一致性规则全部通过」—— 那句通过证明的是"登录页没有矛盾"。
- * 现在缺凭据（或 token 已过期）会非零退出并说明原因，见 `ui-probe-lib.mjs`。
+ * 现在缺凭据（或 token 已过期）会非零退出并说明原因，见 `ui-audit.mjs` 的「共用库」。
  *
  * ## 用法
  *
@@ -38,7 +38,11 @@
  *   # 也认表单登录：UI_SMOKE_USER=<用户名> UI_SMOKE_PASS=<密码>
  */
 import { chromium } from 'playwright-core';
-import { assertLoggedIn, login, requireCredentials } from './ui-probe-lib.mjs';
+/*
+ * 凭据闸门与登录都从 `ui-audit.mjs` 取 —— 那是三个 UI 自检脚本共用的库
+ *（同一件事只写一遍：三个脚本各写一份登录逻辑，迟早会漂）。
+ */
+import { assertLoggedIn, login, requireCredentials } from './ui-audit.mjs';
 
 const BASE = process.env.AQ_BASE;
 const CHROME = process.env.AQ_CHROME;
