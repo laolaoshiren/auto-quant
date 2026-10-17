@@ -215,6 +215,16 @@ const AUTO_TRADER_RAW = readFileSync(new URL('./autoTrader.ts', import.meta.url)
  * `plainCode()` 定义在下方（函数声明会提升），复用同一份实现。
  */
 const AUTO_TRADER = plainCode(AUTO_TRADER_RAW);
+/**
+ * **同一份源码、但保留字符串内容**（t63）。
+ *
+ * ⚠️ 为什么需要第二份：`(this as …)['executeOpen'](…)` 这种拼写的**方法名在字符串里**，
+ * 而默认的 `plainCode()` 会把字符串内容抹成空格 —— 那份扫描**一条都看不到它**
+ * （本仓库为"字符串被抹掉导致守卫静默失效"付过代价：端点守卫当年因此把 1 报成 0）。
+ *
+ * ⚠️ 两份都是**长度保持**的，所以行号一致；报出来的行号仍然就是文件行号。
+ */
+const AUTO_TRADER_STR = plainCode(AUTO_TRADER_RAW, true);
 
 /** `packages/server/src` 的绝对路径（从本文件往上找，不依赖 cwd）。 */
 const SERVER_SRC = (() => {
@@ -328,6 +338,255 @@ function balancedFrom(text: string, startIndex: number): string {
   throw new Error(`从位置 ${startIndex} 开始的 ${open} 没有闭合 —— 源码被改了形状，守卫必须报错而不是沉默`);
 }
 
+/* -------------------------------------------------------------------------- */
+/*  接收者归一化：内联类型断言取成员（t63 —— 补 t58 的 F1/F2/F3）                  */
+/* -------------------------------------------------------------------------- */
+/*                                                                             */
+/* ## 为什么需要这一层（t58 复审抓到的新隐身形状）                                 */
+/*                                                                             */
+/* t57 让判据认得了「`this` 存进变量」那一族（别名 / 解构 / `this[…]`），           */
+/* 但**内联**写法仍然全隐身 —— 它连变量都没有：                                   */
+/* ```                                                                          */
+/*   await (this as unknown as { executeOpen: … }).executeOpen(d);   ← F1 high   */
+/*   await (this as unknown as Record<string, …>)['executeOpen'](d);  ← F2        */
+/*   await (this.deps.broker as unknown as { placeOrder: … }).placeOrder({}); ← F3 */
+/* ```                                                                          */
+/* 三种写法**全部通过 `tsc --noEmit --strict`**（t58 建过 `compileProbe.ts` 验证）， */
+/* 而旧判据（要求接收者字面就是 `this` / `this.deps.broker`）**一条都不报**。        */
+/*                                                                             */
+/* ## 修法：不再要求"字面相等"，改成"**归一化后必须恰好等于那个接收者**"            */
+/*                                                                             */
+/* 分两个口径（这是这套判据的关键设计）：                                          */
+/* ```                                                                          */
+/*   normalized —— 剥掉 await/void/return/yield 前缀、外层括号、顶层 as/satisfies、 */
+/*                 尾 !、三元前缀 → 用来**认得出这是谁在调用**（可归因）              */
+/*   bare       —— 只剥"语句前缀"（await/return/三元/尾 !），**保留括号与 as**        */
+/*                 → 用来**判断它是不是被伪装过**（括号/断言一律算伪装）              */
+/* ```                                                                          */
+/* 判据：每个敏感方法的成员调用，`bare` 必须**恰好等于**该方法的合法接收者；            */
+/* 只要 `bare !== normalized`（说明中间夹了括号/`as`/`!`）就报 —— **fail-closed**。  */
+/*                                                                             */
+/* ⚠️ 基线实测（`.dsh/t63-probe.txt`）：敏感方法的非调用引用 **0 处**、               */
+/* 括号取成员调用 **0 处**、内联断言 **0 处** —— 所以这套判据**不改变任何现有代码**， */
+/* 只堵住"换个拼写就隐身"这条路。                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** 从 `closeIndex` 处的 `)`/`]`/`}` 往回找配对的 `(`/`[`/`{`（找不到返回 `-1`）。 */
+function matchBack(code: string, closeIndex: number): number {
+  const ch = code[closeIndex];
+  const open = ch === ')' ? '(' : ch === ']' ? '[' : ch === '}' ? '{' : null;
+  if (open === null) return -1;
+  let depth = 0;
+  for (let i = closeIndex; i >= 0; i -= 1) {
+    const c = code[i] as string;
+    if (c === ch) depth += 1;
+    else if (c === open) {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * 取「`accessIndex` 处的 `.` 或 `[` 的**接收者表达式**」。
+ *
+ * ⚠️ **必须往回走整个表达式，不能只取紧邻的标识符** ——
+ * `(this as unknown as {…}).executeOpen(` 里紧邻 `.` 的是一个 `)`，
+ * 只看标识符会拿到空串（那正是 t58 的 F1 能隐身的机理）。
+ */
+function receiverAt(code: string, accessIndex: number): string {
+  let i = accessIndex - 1;
+  while (i >= 0) {
+    const ch = code[i] as string;
+    if (/\s/.test(ch)) {
+      i -= 1;
+      continue;
+    }
+    if (ch === ')' || ch === ']' || ch === '}') {
+      const open = matchBack(code, i);
+      if (open < 0) break;
+      i = open - 1;
+      continue;
+    }
+    /* `.` 也要一起吃掉：`this.deps.broker.placeOrder(` 的接收者是整条链。 */
+    if (/[A-Za-z0-9_$?.]/.test(ch)) {
+      i -= 1;
+      continue;
+    }
+    break;
+  }
+  return code.slice(i + 1, accessIndex);
+}
+
+/** 归一化：剥语句前缀 → 外层括号 → 顶层 `as`/`satisfies` → 尾 `!`（反复到不动为止）。 */
+function normalizeReceiver(raw: string): string {
+  let s = raw.trim();
+  for (let guard = 0; guard < 12; guard += 1) {
+    const before = s;
+    s = s.replace(/^(?:await|void|return|yield)\s+/, '');
+    const wrapped = /^\(([\s\S]*)\)$/.exec(s);
+    if (wrapped !== null) s = wrapped[1]!;
+    /* 三元：`cond ? a : b` 里接收者是最后一段（只处理"`?` 之后没有 `:`"的前缀形态）。 */
+    const q = s.lastIndexOf('?');
+    if (q >= 0 && !s.slice(q).includes(':')) s = s.slice(q + 1);
+    s = s.trim();
+    if (s === before) break;
+  }
+  /* 顶层 `as` / `satisfies`：按 `()[]{}` 深度找，避免切到类型里的尖括号/花括号。 */
+  let depth = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i] as string;
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+    else if (depth === 0 && /^\s+(?:as|satisfies)\s/.test(s.slice(i))) {
+      s = s.slice(0, i);
+      break;
+    }
+  }
+  return s.trim().replace(/!$/, '').replace(/\s+/g, '');
+}
+
+/**
+ * `bare`：**只**剥语句前缀（`await`/`void`/`return`/`yield`、三元前缀、尾 `!`）。
+ *
+ * ⚠️ **刻意不剥括号、不剥 `as`** —— 那两个正是"伪装"的标记：
+ * `(this as …).executeOpen(` 的 `bare` 是 `(thisas…)`，与 `this` 不等 ⇒ 报出来。
+ */
+function bareReceiver(raw: string): string {
+  let s = raw.trim();
+  for (let guard = 0; guard < 6; guard += 1) {
+    const before = s;
+    s = s.replace(/^(?:await|void|return|yield)\s+/, '').trim();
+    const q = s.lastIndexOf('?');
+    if (q >= 0 && !s.slice(q).includes(':')) s = s.slice(q + 1).trim();
+    if (s === before) break;
+  }
+  return s.replace(/!$/, '').replace(/\s+/g, '');
+}
+
+interface MemberAccess {
+  line: number;
+  /** `dot` = `.name(`；`bracket` = `['name'](`。 */
+  kind: 'dot' | 'bracket';
+  /** 方法名（`bracket` 形态的名字来自字符串字面量）。 */
+  name: string;
+  /** 原样接收者（未归一化）。 */
+  receiver: string;
+  /** 归一化后的接收者 —— 用来**认得出这是谁在调用**。 */
+  normalized: string;
+  /** 只剥语句前缀的接收者 —— 用来**判断有没有被伪装**。 */
+  bare: string;
+  /** 实参左括号 `(` 的下标（配平取载荷时要它）。 */
+  callIndex: number;
+}
+
+/**
+ * 扫出全部**成员调用**（`.` 与 `['name']` 两种拼写），并给出接收者的两种口径。
+ *
+ * @param code        剥掉注释/字符串/正则的源码（用于 `.name(` —— 名字在代码里）
+ * @param codeStrings **保留字符串内容**的同一份源码（用于 `['name'](` —— 名字在字符串里）
+ * @param names       只收这些方法名的调用
+ *
+ * ⚠️ 两份源码都是**长度保持**的（`plainCode()` 的两种模式），所以行号一致。
+ * ⚠️ `['name'](` 必须在"保留字符串"的那份上扫 —— 否则名字被抹成空格，
+ *    那种拼写会**一条都扫不到**（本仓库为"字符串被抹掉导致守卫静默失效"付过代价，
+ *    见端点守卫那段 `keepStrings = true` 的说明）。
+ */
+function memberAccessesOf(code: string, codeStrings: string, names: readonly string[]): MemberAccess[] {
+  const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const nameSet = new Set(names);
+  const out: MemberAccess[] = [];
+
+  /* ① `.name(` —— 在**剥字符串**的那份上扫（避免把文案里的 `.foo(` 当成调用）。 */
+  for (const m of code.matchAll(/(\??\.)\s*([A-Za-z_$][\w$]*)\s*(?=\()/g)) {
+    const name = m[2]!;
+    if (!nameSet.has(name)) continue;
+    const dotIndex = (m.index ?? 0) + m[1]!.length - 1;
+    const receiver = receiverAt(code, dotIndex);
+    const callIndex = (m.index ?? 0) + m[0].length;
+    out.push({
+      line: lineAt(code, m.index ?? 0),
+      kind: 'dot',
+      name,
+      receiver,
+      normalized: normalizeReceiver(receiver),
+      bare: bareReceiver(receiver),
+      callIndex,
+    });
+  }
+
+  /* ② `['name'](` —— 在**保留字符串**的那份上扫（名字在字符串里）。 */
+  for (const m of codeStrings.matchAll(/\[\s*(['"`])([A-Za-z_$][\w$]*)\1\s*\]\s*(?=\()/g)) {
+    const name = m[2]!;
+    if (!nameSet.has(name)) continue;
+    const bracketIndex = m.index ?? 0;
+    const receiver = receiverAt(codeStrings, bracketIndex);
+    out.push({
+      line: lineAt(codeStrings, bracketIndex),
+      kind: 'bracket',
+      name,
+      receiver,
+      normalized: normalizeReceiver(receiver),
+      bare: bareReceiver(receiver),
+      callIndex: (m.index ?? 0) + m[0].length,
+    });
+  }
+
+  return out.sort((a, b) => a.line - b.line);
+}
+
+/**
+ * **敏感方法的接收者必须是字面 `this`**（t63，补 F1/F2）。
+ *
+ * 判据：对每个敏感方法名，取全部成员调用（`.` 与 `['name']` 两种拼写），
+ * 要求 `bare === 'this'`。任何**括号包裹 / 类型断言 / `!`** 都会让 `bare !== 'this'` ⇒ 报。
+ *
+ * ⚠️ 这不是"多报一点"，而是把口径从**字面匹配**换成**结构匹配**：
+ * 字面匹配的前提是"作者会照着我们期待的样子写"，而 t58 证明了**换个拼写就隐身**。
+ */
+function sensitiveReceiverProblems(code: string, codeStrings: string, names: readonly string[]): string[] {
+  const problems: string[] = [];
+  for (const access of memberAccessesOf(code, codeStrings, names)) {
+    if (access.bare === 'this') continue;
+    const disguised = access.bare !== access.normalized;
+    problems.push(
+      `第 ${access.line} 行：\`${access.name}\` 的接收者是「${access.receiver.trim()}」` +
+        (disguised
+          ? `—— **它归一化之后就是 \`this\`，却被括号/类型断言包了一层**。` +
+            '这种写法让所有"接收者字面是 this"的扫描全部隐身（t58 的 F1/F2）。'
+          : `—— 敏感方法只许写成 \`this.${access.name}(…)\`。`),
+    );
+  }
+  return problems;
+}
+
+/**
+ * **`placeOrder` 的接收者必须是字面 `this.deps.broker`**（t63，补 F3）。
+ *
+ * 与上面同一个口径，只是接收者换成 `this.deps.broker`：
+ * `(this.deps.broker as …).placeOrder({})` 的 `bare` 是 `(this.deps.brokeras…)` ≠ `this.deps.broker` ⇒ 报。
+ *
+ * ⚠️ 这条**同时**把"换了接收者的 placeOrder"堵住：任何 `.placeOrder(` 若接收者不是
+ * `this.deps.broker`（例如 `(someOther as any).placeOrder(`），也会在这里被报出来 ——
+ * 那正是"下单点穷举"要防的形状（它数的是 `this.deps.broker.placeOrder(` 的字面出现次数）。
+ */
+function placeOrderReceiverProblems(code: string, codeStrings: string): string[] {
+  const problems: string[] = [];
+  for (const access of memberAccessesOf(code, codeStrings, ['placeOrder'])) {
+    if (access.bare === 'this.deps.broker') continue;
+    const disguised = access.bare !== access.normalized;
+    problems.push(
+      `第 ${access.line} 行：\`placeOrder\` 的接收者是「${access.receiver.trim()}」` +
+        (disguised
+          ? '—— **它归一化之后就是 `this.deps.broker`，却被括号/类型断言包了一层**。' +
+            '那样"`this.deps.broker.placeOrder(` 出现几次"这条穷举判据会数不到它（t58 的 F3）。'
+          : '—— 下单点只许写成 `this.deps.broker.placeOrder(…)`（§2.1：唯一的下单入口）。'),
+    );
+  }
+  return problems;
+}
+
 interface CallSite {
   /** 1-based 行号。 */
   line: number;
@@ -338,20 +597,23 @@ interface CallSite {
 }
 
 /**
- * 找出代码里所有 `this.<name>(` 的调用点（以及**登记过的 `this` 别名**上的同名调用）。
+ * 找出代码里所有「接收者是 `this`（或**已登记的 `this` 别名**）的 `<name>(` 调用」。
  *
  * ⚠️ **空白容忍**（`this.deps.broker\n  .placeOrder(` 这种折行在 `autoTrader.ts` 里真实存在，
  * 实测 3 处）：用字面 `indexOf` 去找会**漏掉折行的调用点** —— 而"漏掉"在这里
  * 正是最坏的失效形态（守卫静默通过）。
  *
- * ## ⚠️ 为什么加了 `aliases` 参数（t57，补 `GRD-A1/A2/A3`）
+ * ## 接收者判据的两次升级（都因为"换个拼写就隐身"）
  *
- * 只认 `this.` 前缀时，下面这种**一行改动**就能让全部按名字的扫描一起瞎掉：
- * ```
- *   const self = this;          self.executeOpen(decision);   ← 没有 this. 前缀
- * ```
- * 所以调用点扫描必须能接收"别名集合"。生产路径上把 `thisAliasesOf()` 的结果传进来
- * （别名本身**同时**被禁止 —— 两道：一道让它红，一道保证即使登记了别名也看得见调用）。
+ * · **t57**：加了 `aliases` 参数 —— 只认 `this.` 前缀时，`const self = this; self.executeOpen(…)`
+ *   这一行改动就能让全部扫描瞎掉。
+ * · **t63**：接收者改成**归一化**比对（`normalizeReceiver`）—— 于是
+ *   `(this as unknown as {…}).executeOpen(d)` 与 `(this as …)['executeOpen'](d)`
+ *   也被算作"`this` 上的调用"（t58 的 F1/F2）。它们同时会被
+ *   `sensitiveReceiverProblems()` 报成"伪装"——**归因**与**报警**两条都补上。
+ *
+ * @param code        剥掉注释/字符串/正则的源码
+ * @param codeStrings 保留字符串内容的同一份源码（`['name'](` 形态需要它）
  */
 function callSitesOf(
   code: string,
@@ -359,22 +621,63 @@ function callSitesOf(
   members: readonly Member[],
   /** 额外的接收者名（已登记的 `this` 别名）。 */
   aliases: readonly string[] = [],
+  codeStrings: string = code,
 ): CallSite[] {
+  /*
+   * ⚠️⚠️ **`name` 可以是两级成员访问**（`risk.review`）—— t63 修的一个**假红**。
+   *
+   * 第一版我把接收者改成「归一化后必须恰好等于 `this`」，而 `risk.review` 这条
+   * 用例传的 `name` 是**两段**：它的真实写法是 `this.risk.review(`，
+   * 接收者是 `this.risk`（不是 `this`）⇒ 判据一条都匹配不上 ⇒
+   * **一条真实存在的调用被数成 0 ⇒ 假红**（实测：那条断言报"实际 0 处，应 2 处"）。
+   *
+   * 修法：按 `.` 拆开 —— 最后一段是**方法名**，前面那几段是**接收者的尾部**。
+   * 于是 `risk.review` ⇒ 方法名 `review`、要求的接收者 `this.risk`。
+   * 而「接收者字面必须是 `this`（或其别名）」这条红线**只对单段名成立**
+   * （`this.executeOpen(` / `self.executeOpen(`）；两段名的接收者本来就带一层属性。
+   *
+   * ⚠️ 校准纪律：**假红与假绿一样有害** —— 一条恒返回 0 的检查会被当成"检查通过"，
+   * 而一条真实调用被数成 0 会训练人忽略红色。所以这条改动**必须**有
+   * "基线对照"（在未修改的 `autoTrader.ts` 上全部判据必须全绿）。
+   */
+  const parts = name.split('.');
+  const methodName = parts[parts.length - 1]!;
+  const receiverPrefix = parts.slice(0, -1).join('.');
+  const wanted = new Set(['this', ...aliases].map((r) => (receiverPrefix.length > 0 ? `${r}.${receiverPrefix}` : r)));
   const out: CallSite[] = [];
-  const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  /* `\b` 必须保留：否则别名 `self` 会命中 `myself.executeOpen(`。 */
-  const receivers = ['this', ...aliases].map((r) => `\\b${escape(r)}\\b`).join('|');
-  const re = new RegExp(`(?:${receivers})\\s*\\.\\s*${escape(name)}\\s*\\(`, 'g');
-  for (const m of code.matchAll(re)) {
-    const at = (m.index ?? 0) + m[0].length - 1;
-    const line = code.slice(0, m.index ?? 0).split('\n').length;
+  for (const access of memberAccessesOf(code, codeStrings, [methodName])) {
+    /*
+     * ⚠️ **接收者用 `normalized` 比对**（t63）：于是
+     *   `(this as …).executeOpen(` / `(this as …)['executeOpen'](`
+     * 也算作"`this` 上的调用" —— 它们会被归因到正确的调用者（而不是凭空消失），
+     * 同时由 `sensitiveReceiverProblems()` 报成"伪装"。
+     */
+    if (!wanted.has(access.normalized)) continue;
     out.push({
-      line,
-      args: balancedFrom(code, at),
-      inMember: enclosingMember(members, line),
+      line: access.line,
+      args: balancedFrom(code, access.callIndex),
+      inMember: enclosingMember(members, access.line),
     });
   }
   return out;
+}
+
+/**
+ * 取某一行上「`name` 的成员调用」的实参块（配平、含括号）。
+ *
+ * ⚠️ 取不到时返回 `'()'` 而不是空串：空串会让"载荷性质"判据（`reduceOnly: true`）
+ * 一律判成 `entry` —— 那是**误报**，比不报更糟（会让人去改一张本来正确的表）。
+ */
+function argsAtMemberCall(code: string, line: number, name: string): string {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(?:\\.\\s*${escaped}|\\[\\s*['"\`]${escaped}['"\`]\\s*\\])\\s*\\(`, 'g');
+  const lineStart = line === 1 ? 0 : code.split('\n').slice(0, line - 1).join('\n').length + 1;
+  const lineEnd = lineStart + (code.slice(lineStart).split('\n')[0]?.length ?? 0);
+  for (const m of code.slice(lineStart, lineEnd).matchAll(re)) {
+    const at = lineStart + (m.index ?? 0) + m[0].length - 1;
+    return balancedFrom(code, at);
+  }
+  return '()';
 }
 
 /* -------------------------------------------------------------------------- */
@@ -791,6 +1094,119 @@ function callerProblems(
 /* -------------------------------------------------------------------------- */
 /*  ① 下单点穷举：7 处，全在登记的方法体内，载荷性质一致                          */
 /* -------------------------------------------------------------------------- */
+
+/** 会下单 / 直接通往下单的方法名（`sensitiveReceiverProblems` 用它）。 */
+const SENSITIVE_METHODS: readonly string[] = [
+  'executeOpen',
+  'executeClose',
+  'executeAdd',
+  'executeReduce',
+  'executeAdjust',
+  'submitLimitEntry',
+  'placeProtection',
+  'emergencyFlatten',
+  'flattenAndBook',
+  'replaceProtection',
+  'restoreProtection',
+];
+
+test('★★★ 接收者不许被"伪装"：内联类型断言取成员一律红灯（t63 补 t58 的 F1/F2/F3）', () => {
+  /*
+   * ## 这条测试补的是什么
+   *
+   * `t58` 复审抓到的形状（**四种拼写，全部通过 `tsc --noEmit --strict`**）：
+   * ```
+   *   (this as unknown as { executeOpen: … }).executeOpen(d)      ← F1 high
+   *   (this as unknown as Record<string, …>)['executeOpen'](d)    ← F2
+   *   (this.deps.broker as unknown as { placeOrder: … }).placeOrder({})  ← F3
+   * ```
+   * 它们在旧判据下**全 0 报**：接收者字面不是 `this` / `this.deps.broker`，
+   * 而「别名禁令」要求先有一条**赋值语句**（内联式连变量都没有）。
+   *
+   * ## 判据（与上面同一个口径，只是从"字面"升级为"结构"）
+   *
+   * `bare`（只剥语句前缀）必须**恰好等于**该方法的合法接收者：
+   *   · 敏感方法 → `this`（或其登记别名）
+   *   · `placeOrder` → `this.deps.broker`
+   * 任何括号包裹 / 类型断言 / `!` 都会让 `bare` 带上这些字符 ⇒ 报。
+   *
+   * ⚠️ **基线实测 0 处**（`.dsh/t63-probe.txt`：非调用引用 0、括号取成员调用 0、
+   * 内联断言 0）—— 所以这条判据**不改变任何现有代码**。
+   */
+  const problems = [
+    ...sensitiveReceiverProblems(AUTO_TRADER, AUTO_TRADER_STR, SENSITIVE_METHODS),
+    ...placeOrderReceiverProblems(AUTO_TRADER, AUTO_TRADER_STR),
+  ];
+  assert.deepEqual(
+    problems,
+    [],
+    '★★★ 这些调用点的接收者被"伪装"过（括号/类型断言/`!`）：\n' +
+      problems.map((p) => `      · ${p}`).join('\n') +
+      '\n    ⚠️ 伪装会让所有"接收者字面是 this"的扫描一起隐身（t58 的 F1/F2/F3）。\n' +
+      '    ✅ 直接写 `this.xxx(…)` / `this.deps.broker.placeOrder(…)`。',
+  );
+
+  /* 非空性：这两条判据必须真的扫到了东西（否则"零问题"是空转）。 */
+  const sensitiveCalls = memberAccessesOf(AUTO_TRADER, AUTO_TRADER_STR, SENSITIVE_METHODS);
+  assert.ok(
+    sensitiveCalls.length >= 30,
+    `★ 只扫到 ${sensitiveCalls.length} 处敏感方法调用 —— 扫描口径失效（实测基线应 ≥30 处）`,
+  );
+  const orderCalls = memberAccessesOf(AUTO_TRADER, AUTO_TRADER_STR, ['placeOrder']);
+  assert.equal(orderCalls.length, 7, `★ 只扫到 ${orderCalls.length} 处 placeOrder 调用（应 7 处）—— 扫描口径失效`);
+});
+
+test('★★★ 基线对照：改造后的全部判据在未修改的 autoTrader.ts 上必须全绿（不许假红）', () => {
+  /*
+   * ## 为什么这条单独存在（本批的一条硬纪律）
+   *
+   * t63 的第一次改造**制造过一条假红**：`callSitesOf(AUTO_TRADER, 'risk.review', …)`
+   * 因为 `risk.review` 是**两级成员访问**，接收者归一化后是 `this.risk` 而不是 `this`
+   * ⇒ 那条判据把**真实存在的 2 处调用数成了 0** ⇒ `not ok 5`。
+   *
+   * ⚠️ **假红与假绿同样有害**：假绿让人以为检查过了；假红**训练人忽略红色**
+   * （同一批里 `t59` 抓到过反面 —— 一个恒返回 0 的检查被当成"检查通过"）。
+   *
+   * 所以这里把"基线全绿"**变成一条常驻断言**：任何一个判据在未变异的源码上
+   * 报出问题，都必须在这里被看见 —— 而不是等到某天有人以为"这守卫本来就是红的"。
+   */
+  const baseline: Array<[string, string[]]> = [
+    ['orderSiteProblems', orderSiteProblems(scanOrderSites(AUTO_TRADER, MEMBERS, PLACE_ORDER_SITES))],
+    ['callerProblems', callerProblems(AUTO_TRADER, MEMBERS, CALLERS, []).offenders],
+    ['dispatchOwnershipProblems', dispatchOwnershipProblems(AUTO_TRADER)],
+    ['aliasProblems', aliasProblems(AUTO_TRADER)],
+    ['sensitiveReceiverProblems', sensitiveReceiverProblems(AUTO_TRADER, AUTO_TRADER_STR, SENSITIVE_METHODS)],
+    ['placeOrderReceiverProblems', placeOrderReceiverProblems(AUTO_TRADER, AUTO_TRADER_STR)],
+  ];
+  const reds = baseline.filter(([, problems]) => problems.length > 0).map(([n]) => n);
+  assert.deepEqual(
+    reds,
+    [],
+    '★★★ 未修改的 `autoTrader.ts` 上不该有任何判据报错（**假红**）：\n' +
+      baseline
+        .filter(([, p]) => p.length > 0)
+        .map(([n, p]) => `      · ${n}：${p.length} 条 —— ${p[0]}`)
+        .join('\n') +
+      '\n    ⚠️ 假红会训练人忽略红色；出现它时**先怀疑判据**，不要改业务代码。',
+  );
+
+  /*
+   * ② 两级成员访问的正向用例（`t63` 那条假红的形状本身）——
+   * 显式断言它数得出 **2 处**，而不是 0 处。
+   */
+  const reviews = callSitesOf(AUTO_TRADER, 'risk.review', MEMBERS);
+  assert.equal(
+    reviews.length,
+    2,
+    `★★★ \`this.risk.review(\` 应有且只有 2 处（主路径 + 执行回执），实际 ${reviews.length} 处。\n` +
+      '    ⚠️ 若这里是 0：说明**接收者归一化对两级成员访问失效** —— 那正是 t63 修过的那条假红。',
+  );
+  assert.deepEqual(
+    reviews.map((s) => s.inMember).sort(),
+    ['followUpAfterExecution', 'runCycleBody'],
+    '★★ `risk.review(` 的归属必须分别是主路径与回执轮',
+  );
+});
 
 test('★★★ 红线上游：broker.placeOrder 只能出现在登记的 7 个方法体里，载荷性质不许变', () => {
   /* 前置断言：解析真的拿到方法了（否则"零个问题"是因为没解析到东西）。 */
