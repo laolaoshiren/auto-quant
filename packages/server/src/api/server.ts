@@ -3220,7 +3220,72 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       }
     }
 
-    /* ② 审计块里的角色产出（那一轮它交出的原文摘要）。 */
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     *  ②-b **`dispatch` scope 的按币并行产出**（2026-10-18 · 用户实测）
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * ## 用户看到的现象
+     *
+     * > 「标的侦查员」在岗，历史工作详情显示「共 0 条」「它在岗，但确实一次都没被叫到过」
+     *
+     * ## 真相
+     *
+     * 它**每一轮都在跑**，`runtime_logs` 里明确写着：
+     * ```
+     *   [dispatch] supervisor：按币并行：18 个标的，并发 4
+     *   [dispatch] supervisor：按币并行完成：成功 16 · 失败 2 · 并发峰值 4
+     * ```
+     * 但这个端点只扫 `scope IN ('team','selfcheck')` ⇒ 把 `dispatch` 全漏了。
+     *
+     * ⇒ **"0 条"是查询漏了一张表，不是它没工作。** 这类假警报比没有面板更糟：
+     *   它让人去查一个不存在的问题。
+     */
+    if (role === 'symbol_scout' || role === 'per_symbol') {
+      for (const line of runtimeLogs.list(RUNTIME_LOG_CAP)) {
+        if (line.traderId !== traderId && line.traderId !== null) continue;
+        if (line.scope !== 'dispatch') continue;
+        steps.push({ at: line.createdAt, phase: 'dispatch', message: line.message, source: 'log' });
+      }
+    }
+
+    /*
+     * ②-c 复盘员的产出在 `agent_memory`（每笔平仓后的教训），不在 `agent_runs`。
+     *      实测 #11 有 52 条，而面板显示 0 —— 同一个"查错表"问题。
+     */
+    if (role === 'reviewer' || role === 'memory_curator') {
+      for (const m of agentStoreMemory.recent(traderId, 50)) {
+        steps.push({
+          at: m.createdAt,
+          phase: 'lesson',
+          message:
+            `${m.symbol} · ${m.closeReason} · 净 ${m.netPnl >= 0 ? '+' : ''}${m.netPnl.toFixed(4)} USDT\n` +
+            m.lesson,
+          source: 'log',
+        });
+      }
+    }
+
+    /*
+     * ②-d 策略师的产出在 `agent_experiments`（每次调参与者与结果），不在 `agent_runs`。
+     *      实测 #11 有 29 条实验。
+     */
+    if (role === 'strategist') {
+      for (const e of agentStoreExperiments.recent(traderId, 50)) {
+        const outcome =
+          e.outcomeNetPnl === null
+            ? ''
+            : `（${e.outcomeTrades ?? 0} 笔后结果 ${e.outcomeNetPnl >= 0 ? '+' : ''}${e.outcomeNetPnl.toFixed(4)} USDT）`;
+        steps.push({
+          at: e.createdAt,
+          phase: 'experiment',
+          message: `${e.reason || e.trigger || '参数实验'}${outcome}`,
+          source: 'log',
+        });
+      }
+    }
+
+    /* ③ 审计块里的角色产出（那一轮它交出的原文摘要）。 */
     for (const record of decisionStore.list(traderId, DECISION_PAGE_DEFAULT)) {
       if (typeof record.cotTrace !== 'string' || record.cotTrace.length === 0) continue;
       for (const line of record.cotTrace.split('\n')) {
