@@ -2798,6 +2798,64 @@ export class AutoTrader {
     let thrown: unknown = null;
     let summary: string | null = null;
 
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  ⚠️ **先落一行"本轮已开始"，轮次末尾再补成终态**（2026-10-17，方案 A）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 事故：订单真实存在，审计记录不存在
+     *
+     * 实测（`#10`，两个部署窗口）：
+     *
+     * ```text
+     *   05:49:16 SIGTERM ← 部署；该轮已下 ZECUSDT SELL LIMIT（orders #2005, 05:46:47）
+     *   06:04:02 SIGTERM ← 部署；该轮已下 INJUSDT BUY LIMIT（orders #2012, 06:00:14）
+     *   decision_records ：停在 813（05:21:04）      ← 两个真实订单、零条审计记录
+     * ```
+     *
+     * 机制：落库原来**只在轮次末尾**（本方法第 11 步，全文件唯一一次
+     * `decisionStore.log()`），而一轮实测 **1304 秒（21.7 分钟）**
+     * （`decision_records.ai_latency_ms`），`SHUTDOWN_DRAIN_TIMEOUT_MS` 只有 **3 分钟** ——
+     * 排空等不到一轮跑完。于是**每次部署都吃掉一整轮 + 丢那一轮的全部审计**，
+     * 而订单是真的发出去了。事后无法回答"这笔单为什么下"（§2.2 的留痕）。
+     *
+     * ## 为什么这样改（而不是改调度器或拉长排空）
+     *
+     * · **不改 `tick()` / `scheduleNextCycle()`**：动态验证已证明"早退 + 无条件排下一次"
+     *   是对的（`void this.tick()` 之后紧跟 `scheduleNextCycle()`）；动它只会引入重复调度。
+     * · **不拉长 `SHUTDOWN_DRAIN_TIMEOUT_MS`**：一轮 21.7 分钟，拉长会让**部署挂 21 分钟**，
+     *   而 systemd 的 `TimeoutStopSec` 会先杀掉进程 —— 等于把问题从"丢记录"换成"部署卡住"。
+     * · 所以**只改落库时机**：先写一行 pending，末尾 UPDATE 成终态。
+     *
+     * ## 三个必须守住的点
+     *
+     * ① **一轮一行**：`begin()` 用 `(trader_id, cycle_number)` 作幂等键
+     *    （`decisions.findByCycle()`）；末尾只 `finish()` 那一行，**不再 insert**。
+     * ② **终态更新失败不得静默**：`finish()` 返回 `{ updated }`，`false` 说明那一行
+     *    已经不在了（被裁剪 / id 拿错）—— 见下面那段 warn。
+     * ③ **正常路径逐字段等价**：`finish()` 的入参与原来 `log()` 的入参一一对应，
+     *    写的是同一批列。区别只有一个：`timestamp` 现在记的是**轮次开始时刻**
+     *    （原来记的是结束时刻），这恰恰是更准确的口径 —— 它让"这一轮什么时候开始的"
+     *    在提前落库那一刻就确定下来，也让 `last_cycle_at` 与它不再混为一谈。
+     *
+     * ⚠️ **`pending` 行本身的价值**：一次消掉两个观测空洞 ——
+     *   · 审计链：订单与"它属于哪一轮"能对上（`cycle_number` 已在行里）；
+     *   · 停摆判据：能看到"这一轮正在进行中"，而不是"八小时没有新记录"。
+     */
+    const audit = decisionStore.begin({ traderId, cycleNumber });
+    if (!audit.created) {
+      /*
+       * 同一 `cycle_number` 已经有行了。正常路径不该发生（周期号单调递增），
+       * 它意味着**上一轮没用 `finish()` 收尾就被打断、而本轮复用了同一个号**
+       * （例如进程重启后从 `last_cycle_number` 继续）。这时**复用那一行**而不是插第二行 ——
+       * "一轮一行"是不变量，宁可覆盖一个未完成的形状。
+       */
+      log.warn(
+        `[${this.deps.trader.name}] 第 #${cycleNumber} 轮已有一行审计记录（#${audit.id}），本次复用它而不是新增一行 —— ` +
+          '通常意味着上一轮在收尾之前就被打断了（进程重启 / SIGTERM）。',
+      );
+    }
+
     try {
       summary = await this.runCycleBody(cycleNumber, progress, state, signal);
     } catch (error) {
@@ -2808,13 +2866,34 @@ export class AutoTrader {
     /* --- 11. Persist the audit record ------------------------------------ */
     // 没有硬编码的 `success`：`progress.error` 非空就是失败。"一个周期恰好一条"
     // 由"本方法只有一个写入点"保证，而不是靠调用方自觉。
-    const recordId = decisionStore.log({
-      traderId,
-      cycleNumber,
+    //
+    // ⚠️ 2026-10-17 起这里**不再 insert**，而是把开头那一行补成终态 —— 见上面
+    // `decisionStore.begin()` 那段事故说明。字段与入参逐项对应，没有少任何一列。
+    const finished = decisionStore.finish({
+      id: audit.id,
       ...progress,
       success: progress.error === null,
     });
+    if (!finished.updated) {
+      /*
+       * ⚠️ **这一行没能被补完 —— 必须留痕，不能静默。**
+       *
+       * 两种成因：① 它被裁剪掉了（保留上限 500 行 + 每 50 次写裁一次，
+       * 一轮 21 分钟的机器人不会撞上，但长期卡死再恢复时可能）；
+       * ② id 被别处改写。
+       *
+       * 无论哪种，事实都是**这一轮的终态（决策/执行/耗时）没有落库**，
+       * 而 `begin()` 那行会永久停在"进行中"的形状。用 warn 说出来，
+       * 否则又变成"审计记录悄悄不完整"—— 那正是本任务要消灭的东西。
+       */
+      log.warn(
+        `[${this.deps.trader.name}] 第 #${cycleNumber} 轮的审计记录（#${audit.id}）在收尾时已不存在 —— ` +
+          '本轮的决策与执行日志**没有落库**。通常是这一行被保留策略裁掉了；' +
+          '若反复出现，请检查 decision_records 的保留上限与实际周期长度。',
+      );
+    }
 
+    const recordId = audit.id;
     const record = decisionStore.get(recordId);
     if (record) eventBus.publish({ type: 'decision', traderId, record });
 

@@ -1,6 +1,6 @@
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -1369,6 +1369,217 @@ test('止损比往返手续费还近的开仓：在交易循环里被拒，且�
   assert.match(rejection.detail, /往返手续费/);
   assert.match(rejection.detail, /0\.100%/);
   assert.match(rejection.detail, /0\.3000%/, '理由要给出这个费率下允许的最小止损幅度');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ★ 审计链：轮次被切断时，决策记录必须已经存在                                  */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 轮次中途被切断（SIGTERM）时，pending 审计行必须已经在库里 —— 订单与记录能对上', async () => {
+  /*
+   * ## 这条接的是什么（2026-10-17 线上实测：订单真实存在、审计记录不存在）
+   *
+   * `decision_records` 原来**只在轮次末尾**落库（`runCycle()` 第 11 步，全文件唯一一次）。
+   * 而一轮实测 **1304 秒（21.7 分钟）**，`SHUTDOWN_DRAIN_TIMEOUT_MS` 只有 **3 分钟** ——
+   * 于是每次部署（SIGTERM）都等不到一轮跑完：
+   *
+   * ```text
+   *   05:49:16 SIGTERM ← 部署；该轮已下 ZECUSDT SELL LIMIT（orders #2005, 05:46:47）
+   *   06:04:02 SIGTERM ← 部署；该轮已下 INJUSDT BUY LIMIT（orders #2012, 06:00:14）
+   *   decision_records ：停在 813（05:21:04）      ← 两个真实订单、零条审计记录
+   * ```
+   *
+   * ⇒ **审计链断裂**：事后无法解释"这笔单为什么下"。
+   *
+   * ## 修法（方案 A）：先落一行 pending，末尾 UPDATE 成终态
+   *
+   * 本用例钉的是"先落"这一半：**模型还在思考（轮次没跑完）时，那一行就已经存在**。
+   * 它用一个永不 resolve 的模型（模拟真实形态：模型调用是最长的一段，
+   * 也是 SIGTERM 最常落在的地方），然后在**轮次仍在进行中**的那一刻去查库。
+   */
+  const broker = new FakeBroker();
+
+  /*
+   * 模型**可控地阻塞**，而不是"永不 resolve"。
+   *
+   * ## ⚠️ 为什么不能让它永远挂着（我第一版就栽在这）
+   *
+   * 永不 resolve 的模型会同时踩两个坑：
+   *   ① 生产默认硬超时是 20 分钟 —— 那条定时器会把**整个测试进程**吊住；
+   *   ② 就算把硬超时调短到 400ms，`Promise.race` 抛了之后**本体仍在后台跑**（僵尸轮次），
+   *      它在用例结束之后还在动数据库，于是后续用例与事件循环都被它干扰 ——
+   *      实测表现是 `autoTrader.test.ts` 整文件 "test timed out"。
+   *
+   * 所以这里用**可放行**的阻塞：先在"模型调用中"那一刻查库（等价于 SIGTERM 落下的瞬间），
+   * 再 resolve 让它正常跑完。用例既证明"轮次中途已有 pending 行"，又不留僵尸。
+   */
+  let releaseModel: (text: string) => void = () => {};
+  const modelGate = new Promise<string>((resolve) => {
+    releaseModel = resolve;
+  });
+  let modelEntered: () => void = () => {};
+  const entered = new Promise<void>((resolve) => {
+    modelEntered = resolve;
+  });
+  const blockingModel: DecisionModel = {
+    async complete() {
+      modelEntered();
+      return {
+        text: await modelGate,
+        latencyMs: 42,
+        /* 与 `modelReturning` 一致的用量形状 —— 生产代码会读 `usage.promptTokens`。 */
+        usage: { promptTokens: 100, completionTokens: 50 },
+      };
+    },
+  };
+
+  const trader = buildTrader(broker, '', blockingModel);
+
+  /* 不 await：我们要在"轮次仍在进行中"的那一刻查库。 */
+  const running = trader.runOnce();
+  await entered;
+  /* 让 `begin()` 之后的异步链再走一拍（落库是同步的，但 `runCycle` 是 async）。 */
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const pendingRow = decisionStore.latestWithPending(traderId);
+  assert.ok(
+    pendingRow,
+    '★★★ 轮次进行中就必须已经有一行审计记录 —— 否则 SIGTERM 一到，这一轮（以及它下的单）' +
+      '就永久没有审计记录（线上实测：orders #2005/#2012 真实存在，decision_records 停在 813）',
+  );
+  assert.equal(
+    pendingRow.pending,
+    true,
+    '★★ 这一行的形状必须是"未完成"的（ai_latency_ms=0 / error 为空 / decisions 空）—— ' +
+      '它不是终态，轮次末尾会被 finish() 补齐',
+  );
+  assert.equal(
+    decisionStore.count(traderId),
+    1,
+    '★★★ 而且**恰好一行**（不是每次检查插一行）—— 幂等键 (trader_id, cycle_number)',
+  );
+
+  /*
+   * ⚠️ **这一刻就是 SIGTERM 的现场**：库里有一行 pending（说明这一轮存在、订单属于哪一轮
+   * 有据可查），而终态字段还是空的。改动之前，这里**一行都没有**。
+   */
+
+  /* 放行，让那一轮正常跑完 —— 顺带证明收尾是 UPDATE 而不是再插一行。 */
+  releaseModel('<reasoning>done</reasoning><decision>[]</decision>');
+  await running;
+
+  assert.equal(
+    decisionStore.count(traderId),
+    1,
+    '★★ 跑完之后仍是一行 —— 收尾是 UPDATE，不是再插一行',
+  );
+  const finished = decisionStore.list(traderId)[0]!;
+  assert.equal(finished.success, true, '★ 正常跑完的一轮 success 必须是 true');
+  assert.equal(
+    decisionStore.latestWithPending(traderId)?.pending,
+    false,
+    '★★ 跑完之后不得停在 pending 形状（否则界面上这一轮永远像"没跑完"）',
+  );
+});
+
+test('★★★ 正常跑完一轮：仍然恰好一行，且字段逐项等价于"末尾一次性落库"', async () => {
+  /*
+   * 改成"先落 pending + 末尾 UPDATE"之后，**最危险的回归**是：
+   *   · 变成两行（begin 插一行、finish 又 insert 一行）；
+   *   · 或者终态字段没被补上（停在 pending 形状 = 看起来这一轮永远没跑完）。
+   *
+   * 本用例把这两件都钉住，并逐项核对**改动前那批列**都有值。
+   */
+  const broker = new FakeBroker();
+  const trader = buildTrader(broker, OPEN_LONG_RESPONSE);
+  await trader.runOnce();
+
+  const rows = decisionStore.list(traderId);
+  assert.equal(
+    rows.length,
+    1,
+    `★★★ 一轮必须恰好一行（实际 ${rows.length} 行）—— "begin 插一行 + finish 再插一行"就是两行`,
+  );
+
+  const record = rows[0]!;
+  /*
+   * 逐项等价：这些都是改动前 `decisionStore.log({...progress, success})` 写进去的字段。
+   * 少任何一项都说明 `finish()` 的 UPDATE 漏了列。
+   */
+  assert.equal(record.success, true, '成功的一轮 success 必须是 true');
+  assert.equal(record.error, null, '成功的一轮 error 必须是 null');
+  assert.ok(record.aiLatencyMs >= 0, '★ ai_latency_ms 必须被写上（停在 pending 时它是 0）');
+  assert.ok(record.systemPrompt.length > 0, '★ 系统提示词必须落库（改动前就是这样）');
+  assert.ok(record.userPrompt.length > 0, '★ 用户提示词必须落库');
+  assert.ok(record.rawResponse.length > 0, '★ 原始回复必须落库');
+  assert.ok(record.decisions.length > 0, '★ 决策必须落库');
+  assert.ok(
+    record.candidateSymbols.length > 0,
+    '★ 候选标的必须落库（提示词渲染的输入，事后回看得靠它）',
+  );
+  assert.ok(record.executionLog.length > 0, '★ 执行日志必须落库（下单/拒绝都在这）');
+
+  /* 反向：不得停在 pending 形状。 */
+  const latest = decisionStore.latestWithPending(traderId);
+  assert.equal(latest?.pending, false, '★★ 正常跑完的一轮不得留在 pending 形状');
+});
+
+test('★★★ 去掉修复后上面两条会变红 —— 用源码顺序判据做的负向校准', async () => {
+  /*
+   * ⚠️ **为什么用源码判据而不是再跑一遍"删掉修复"的代码**：
+   * 删掉 `begin()` 再跑确实能证明，但那是一个**改坏仓库**的校准，与本仓库
+   * "临时改动必须撤销、不要做全树操作"的纪律冲突，并发跑测试时还会把别人的用例弄红。
+   *
+   * 所以这里钉四件事，合起来等价于"修复还在且顺序正确"：
+   *   ① `runCycle()` 调了 `decisionStore.begin(`；
+   *   ② 它排在 `runCycleBody(` **之前**（否则就是"跑完才落库"，正是事故形状）；
+   *   ③ `decisionStore.finish(` 排在 `runCycleBody(` **之后**；
+   *   ④ `runCycle()` 里**不再**出现 `decisionStore.log(`（否则会写成两行）。
+   *
+   * ⚠️ 判据边界（诚实说明）：它证明"接线与顺序还在"，**不**证明"真的先落库了"。
+   * 后者由上面两条**行为**用例证明。两者互补：行为用例易被"看起来跑完了"骗过，
+   * 源码判据易被"写了但没调"骗过。
+   */
+  const src = readFileSync(new URL('./autoTrader.ts', import.meta.url), 'utf8');
+  const beginAt = src.indexOf('decisionStore.begin({');
+  const finishAt = src.indexOf('decisionStore.finish({');
+  const bodyAt = src.indexOf('await this.runCycleBody(');
+
+  assert.ok(beginAt > 0, '★★★ `runCycle()` 必须调用 `decisionStore.begin(` —— 否则轮次中途没有审计行');
+  assert.ok(finishAt > 0, '★★★ `runCycle()` 必须调用 `decisionStore.finish(` —— 否则终态字段永远补不上');
+  assert.ok(
+    beginAt < bodyAt,
+    '★★★ `begin(` 必须排在 `runCycleBody(` **之前** —— ' +
+      '排在之后等于"跑完才落库"，SIGTERM 切在中间就一条记录都没有（这正是本次要修的事故形状）',
+  );
+  assert.ok(
+    finishAt > bodyAt,
+    '★★★ `finish(` 必须排在 `runCycleBody(` **之后** —— 排之前会把终态写死在本体运行前',
+  );
+
+  const runCycleStart = src.indexOf('private async runCycle(');
+  const runCycleEnd = src.indexOf('private async runCycleBody(', runCycleStart);
+  assert.ok(runCycleStart > 0 && runCycleEnd > runCycleStart, '★ 找不到 runCycle 的边界');
+  /*
+   * ⚠️ 必须先剥注释再数 —— 我的实现里 `begin()` 上方那段事故说明**引用了**
+   * `decisionStore.log()` 这个字符串（"原来只在末尾落库"）。不剥就会数到它，
+   * 而那正好是"判据被自己的注释命中"的经典形态（`fetchGuardedWiring.test.ts`
+   * 里有一条专门的用例守这个坑）。
+   */
+  const runCycleSrc = src
+    .slice(runCycleStart, runCycleEnd)
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      return !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*');
+    })
+    .join('\n');
+  assert.equal(
+    (runCycleSrc.match(/decisionStore\.log\(/g) ?? []).length,
+    0,
+    '★★★ `runCycle()` 里不得再出现 `decisionStore.log(`（注释里的引用不算）—— ' +
+      '那会与 `begin()` 一起写成两行',
+  );
 });
 
 /* -------------------------------------------------------------------------- */

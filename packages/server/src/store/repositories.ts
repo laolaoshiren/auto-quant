@@ -3592,6 +3592,43 @@ let decisionWritesSinceTrim = 0;
  */
 const DECISION_PROMPT_KEEP = 100;
 
+/**
+ * 到点就裁剪 `decision_records`（每 `DECISION_TRIM_EVERY_WRITES` 次新增行一次）。
+ *
+ * 抽成函数而不是内联：2026-10-17 起**有两个插入点**（`begin()` 与 `log()`），
+ * 而裁剪只该跟着"新增行"走 —— 两处复制一份逻辑迟早会漂移（本仓库为此吃过多次亏：
+ * 同一个算式曾有五处副本，见 `binance/income.ts` 的 `netPnlOf` 注释）。
+ */
+function trimDecisionsIfDue(traderId: number): void {
+  decisionWritesSinceTrim += 1;
+  if (decisionWritesSinceTrim < DECISION_TRIM_EVERY_WRITES) return;
+  decisionWritesSinceTrim = 0;
+  getDb().run(
+    `DELETE FROM decision_records
+      WHERE trader_id = ?
+        AND id NOT IN (SELECT id FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT 500)`,
+    traderId,
+    traderId,
+  );
+  /*
+   * ⚠️ **更早的记录只清提示词，不删行** —— 理由见 `DECISION_PROMPT_KEEP`。
+   *
+   * `LENGTH(user_prompt) > 0` 这个条件让重复执行几乎不花代价：
+   * 已经清空过的行不会被再次扫描写入。它同时也是**幂等**的 ——
+   * 这条 UPDATE 可以被安全地重复调用。
+   */
+  getDb().run(
+    `UPDATE decision_records
+        SET system_prompt = '', user_prompt = '', cot_trace = '', raw_response = ''
+      WHERE trader_id = ?
+        AND id NOT IN (SELECT id FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT ?)
+        AND LENGTH(user_prompt) > 0`,
+    traderId,
+    traderId,
+    DECISION_PROMPT_KEEP,
+  );
+}
+
 export const decisions = {
   /**
    * **给某机器人最近一轮决策追加一条执行日志。**
@@ -3726,39 +3763,209 @@ export const decisions = {
     );
     // Keep the audit trail bounded so the database does not grow without limit.
     // 每 50 次写才裁剪一次 —— 理由见 `DECISION_TRIM_EVERY_WRITES`。
-    decisionWritesSinceTrim += 1;
-    if (decisionWritesSinceTrim >= DECISION_TRIM_EVERY_WRITES) {
-      decisionWritesSinceTrim = 0;
-      getDb().run(
-        `DELETE FROM decision_records
-          WHERE trader_id = ?
-            AND id NOT IN (SELECT id FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT 500)`,
-        input.traderId,
-        input.traderId,
-      );
-      /*
-       * ⚠️ **更早的记录只清提示词，不删行** —— 理由见 `DECISION_PROMPT_KEEP`。
-       *
-       * `LENGTH(user_prompt) > 0` 这个条件让重复执行几乎不花代价：
-       * 已经清空过的行不会被再次扫描写入。它同时也是**幂等**的 ——
-       * 这条 UPDATE 可以被安全地重复调用。
-       */
-      getDb().run(
-        `UPDATE decision_records
-            SET system_prompt = '', user_prompt = '', cot_trace = '', raw_response = ''
-          WHERE trader_id = ?
-            AND id NOT IN (SELECT id FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT ?)
-            AND LENGTH(user_prompt) > 0`,
-        input.traderId,
-        input.traderId,
-        DECISION_PROMPT_KEEP,
-      );
-    }
+    // （与 `begin()` 共用同一个实现，见 `trimDecisionsIfDue`。）
+    trimDecisionsIfDue(input.traderId);
     return lastInsertRowid;
   },
 
   count(traderId: number): number {
     return getDb().count('SELECT COUNT(*) AS n FROM decision_records WHERE trader_id = ?', traderId);
+  },
+
+  /**
+   * **提前落一行"本轮已开始"的审计记录**，并返回它的 id。
+   *
+   * ## 为什么需要它（2026-10-17 线上实测：订单真实存在、审计记录不存在）
+   *
+   * `decisionStore.log()` 原来只在**轮次末尾**调用一次（`autoTrader.ts` 的
+   * `runCycle()` 第 11 步）。而一轮的长度实测到 **1304 秒（21.7 分钟）**
+   * （`decision_records.ai_latency_ms`），`SHUTDOWN_DRAIN_TIMEOUT_MS` 只有 **3 分钟** ——
+   * 于是每次部署（SIGTERM）都等不到一轮跑完就退出：
+   *
+   * ```text
+   *   05:49:16 SIGTERM  ← 部署；该轮已下 ZECUSDT SELL LIMIT（orders 2005, 05:46:47）
+   *   06:04:02 SIGTERM  ← 部署；该轮已下 INJUSDT BUY LIMIT（orders 2012, 06:00:14）
+   *   decision_records  ：停在 813（05:21:04）        ← 两个真实订单，零条审计记录
+   * ```
+   *
+   * ⇒ **审计链断裂**：订单真实存在，事后无法解释"这笔单为什么下"。
+   *
+   * ## 契约
+   *
+   * 1. **一行一轮**：`(trader_id, cycle_number)` 上有唯一性语义 —— 见
+   *    `findByCycle()`。调用方拿到 `recordId` 后，轮次末尾走 `finish()` 更新它，
+   *    **不再插第二行**。
+   * 2. **字段全部可后补**：这里只写"已经知道的东西"（周期号、开始时间、空占位），
+   *    提示词/思维链/决策/执行日志由 `finish()` 补齐。所以提前落库**不会**
+   *    让最终记录少任何字段。
+   * 3. **`success` 先写 1**：语义是"目前没有失败"。真正的失败由 `finish()` 写 ——
+   *    而**轮次被切断时它停在 1**，这恰好是诚实的：那一轮确实没抛错，
+   *    它只是**没有跑完**。调用方另有 `pendingSinceMs` 判据（见 `health`
+   *    与 `findUnfinished()`）来区分"完成"与"没跑完"。
+   */
+  begin(input: {
+    traderId: number;
+    cycleNumber: number;
+    /**
+     * 幂等键的载体：同一 `(traderId, cycleNumber)` 已经有一行时**不再插新行**，
+     * 直接返回既有那一行的 id。
+     *
+     * ⚠️ 由调用方决定是否走这个判据：正常路径要靠它防"重试一轮 → 两行"，
+     * 而测试/回放里可能刻意要造重复行（见 `log()` 的同族说明）。
+     */
+    idempotent?: boolean;
+  }): { id: number; created: boolean } {
+    if (input.idempotent !== false) {
+      const existing = this.findByCycle(input.traderId, input.cycleNumber);
+      if (existing !== undefined) {
+        /*
+         * ⚠️ **复用那一行时必须把它"重置成全新的 pending"**，不能原样留着。
+         *
+         * 复用的真实场景就是本任务要修的那个：上一轮被 SIGTERM 切断 ⇒
+         * `traders.last_cycle_number` 没被推进（`recordCycle()` 只在跑完之后调）⇒
+         * 重启后 `cycleNumber` 又走上同一个号 ⇒ 撞上那一行残留的 pending。
+         *
+         * 如果只返回它的 id 而不重置，最终记录会是**新一轮的数据配上一轮的
+         * `timestamp`**（以及上一轮可能已经写进去的零散字段）—— 一张自相矛盾的行：
+         * 时间是旧的、内容却是新的。重置之后语义干净：**这一行代表"第 N 轮最近一次尝试"**，
+         * 而"曾经有过一次被切断的尝试"由下面那条 warn 与 `warnUnfinishedAudit` 记录。
+         */
+        getDb().run(
+          `UPDATE decision_records
+              SET timestamp = ?, system_prompt = '', user_prompt = '', cot_trace = '',
+                  decisions_json = '[]', raw_response = '', execution_log_json = '[]',
+                  candidate_symbols_json = '[]', success = 1, error = NULL,
+                  ai_latency_ms = 0, prompt_tokens = NULL, completion_tokens = NULL,
+                  cached_tokens = NULL, reasoning_tokens = NULL
+            WHERE id = ?`,
+          now(),
+          existing,
+        );
+        return { id: existing, created: false };
+      }
+    }
+    const { lastInsertRowid } = getDb().run(
+      `INSERT INTO decision_records (trader_id, cycle_number, timestamp, success)
+       VALUES (?, ?, ?, 1)`,
+      input.traderId,
+      input.cycleNumber,
+      now(),
+    );
+    /*
+     * ⚠️ **裁剪必须跟着"新增行"走，不能跟着"补完"走。**
+     *
+     * 保留策略（500 行 + 每 50 次写裁一次）原来写在 `log()` 里 —— 因为那时
+     * `log()` 就是唯一的写入点。2026-10-17 改成"`begin()` 插入 + `finish()` 更新"之后，
+     * **插入点变成了 `begin()`**：裁剪留在这里才是对的。
+     *
+     * 留在 `finish()` 里会有两个后果：
+     *   · 行数只在"轮次跑完"时才被裁 —— 一个不断被打断的机器人（正是本任务要修的场景）
+     *     会一直只增不裁；
+     *   · 更糟的是**自相矛盾**：`finish()` 可能把刚插入、又被裁剪掉的那一行判成"更新失败"
+     *     （`{ updated: false }`），于是每次收尾都报一条假 warn。
+     */
+    trimDecisionsIfDue(input.traderId);
+    return { id: lastInsertRowid, created: true };
+  },
+
+  /**
+   * 把 `begin()` 那一行补成终态。
+   *
+   * ⚠️ **这是"提前落库 + 后补"唯一允许的收尾入口** —— 不要在别处再写一次
+   * `INSERT`，否则一轮两行又会回来（那正是 `runCycle()` 把落库点收敛到一处的理由）。
+   *
+   * 返回 `{ updated }`：`false` 表示**那一行已经不在了**（被裁剪，或调用方拿错了 id）。
+   * 调用方必须把它当真 —— 静默吞掉会让"审计记录丢了"这件事无从发现，
+   * 而那正是本任务要消灭的那类观测空洞（参见 `autoTrader.ts` 的 `warnUnfinishedAudit`）。
+   */
+  finish(input: {
+    id: number;
+    systemPrompt: string;
+    userPrompt: string;
+    cotTrace: string;
+    decisions: unknown;
+    rawResponse: string;
+    executionLog: ExecutionLogEntry[];
+    candidateSymbols: string[];
+    success: boolean;
+    error: string | null;
+    aiLatencyMs: number;
+    promptTokens: number | null;
+    completionTokens: number | null;
+    cachedTokens?: number | null;
+    reasoningTokens?: number | null;
+  }): { updated: boolean } {
+    const { changes } = getDb().run(
+      `UPDATE decision_records
+          SET system_prompt = ?, user_prompt = ?, cot_trace = ?, decisions_json = ?,
+              raw_response = ?, execution_log_json = ?, candidate_symbols_json = ?,
+              success = ?, error = ?, ai_latency_ms = ?,
+              prompt_tokens = ?, completion_tokens = ?, cached_tokens = ?, reasoning_tokens = ?
+        WHERE id = ?`,
+      input.systemPrompt,
+      input.userPrompt,
+      input.cotTrace,
+      JSON.stringify(input.decisions),
+      input.rawResponse,
+      JSON.stringify(input.executionLog),
+      JSON.stringify(input.candidateSymbols),
+      input.success ? 1 : 0,
+      input.error,
+      input.aiLatencyMs,
+      input.promptTokens,
+      input.completionTokens,
+      input.cachedTokens ?? null,
+      input.reasoningTokens ?? null,
+      input.id,
+    );
+    return { updated: changes > 0 };
+  },
+
+  /** 某机器人某一轮的那一行（幂等键的读取侧）。 */
+  findByCycle(traderId: number, cycleNumber: number): number | undefined {
+    const row = getDb().get<{ id: number }>(
+      'SELECT id FROM decision_records WHERE trader_id = ? AND cycle_number = ? ORDER BY id DESC LIMIT 1',
+      traderId,
+      cycleNumber,
+    );
+    return row?.id;
+  },
+
+  /**
+   * 某机器人**最新那一行**，连同"它是不是还没补完"。
+   *
+   * `pending` 的判据：`ai_latency_ms = 0` 且 `error IS NULL` 且 `decisions_json` 为空。
+   * `begin()` 写的就是这个形状；`finish()` 之后至少会填上 `ai_latency_ms`
+   * （最短的一轮也有几毫秒）或把 `decisions_json` 写成 `[]` 以外的内容 ——
+   * 但**真正可靠的那条**是 `ai_latency_ms`：正常路径即使一轮 0 决策也会写实话时。
+   *
+   * ⚠️ 只用来回答"最近这一轮跑完了吗"，**不要**拿它去改 `traders.last_cycle_at`
+   * 之外的任何状态（那是调度器的事，本任务明令不碰）。
+   */
+  latestWithPending(traderId: number): { id: number; cycleNumber: number; timestamp: string; pending: boolean } | undefined {
+    const row = getDb().get<{
+      id: number;
+      cycle_number: number;
+      timestamp: string;
+      ai_latency_ms: number;
+      error: string | null;
+      decisions_json: string;
+    }>(
+      `SELECT id, cycle_number, timestamp, ai_latency_ms, error, decisions_json
+         FROM decision_records WHERE trader_id = ? ORDER BY id DESC LIMIT 1`,
+      traderId,
+    );
+    if (!row) return undefined;
+    const pending =
+      Number(row.ai_latency_ms) === 0 &&
+      row.error === null &&
+      (row.decisions_json === '' || row.decisions_json === '[]');
+    return {
+      id: row.id,
+      cycleNumber: row.cycle_number,
+      timestamp: row.timestamp,
+      pending,
+    };
   },
 };
 

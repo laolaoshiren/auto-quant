@@ -255,3 +255,110 @@ test('游标只作用于本机器人', () => {
   const next = decisionStore.list(traderId, 10, mine[1]);
   assert.deepEqual(idsOf(next), [mine[0]]);
 });
+
+/* -------------------------------------------------------------------------- */
+/*  begin / finish：提前落库 + 收尾（2026-10-17，SIGTERM 吃轮的修复）              */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ begin() 幂等：同一 (trader, cycle) 只插一行，且复用时必须重置成全新 pending', () => {
+  /*
+   * ## 为什么要"重置"而不是"原样返回"
+   *
+   * 复用的真实场景正是这次要修的事故：上一轮被 SIGTERM 切断 ⇒
+   * `traders.last_cycle_number` 没被推进（`recordCycle()` 只在跑完之后调）⇒
+   * 重启后 `cycleNumber` 又走上同一个号 ⇒ 撞上那一行残留的 pending。
+   *
+   * 只返回 id 而不重置的话，最终记录会是**新一轮的内容 + 上一轮的 timestamp**
+   * （以及上一轮零散写进去的字段）—— 一张自相矛盾的行：时间旧、内容新。
+   *
+   * 契约：`begin()` 之后那一行的形状必须是**干净的 pending**
+   * （当前时间、空提示词/决策/执行、success=1、ai_latency_ms=0）。
+   */
+  traderId = seedTrader();
+
+  const first = decisionStore.begin({ traderId, cycleNumber: 7 });
+  assert.equal(first.created, true, '第一次必须是新建');
+  assert.equal(decisionStore.count(traderId), 1);
+
+  /* 让那一行看起来像"上一轮写到一半"：塞进内容与一个旧时间戳。 */
+  getDb().run(
+    `UPDATE decision_records
+        SET system_prompt = 'old-system', user_prompt = 'old-user', decisions_json = '[{"x":1}]',
+            execution_log_json = '[{"action":"open_long","symbol":"BTCUSDT","status":"ok","detail":"old"}]',
+            ai_latency_ms = 1304200, error = 'old error', success = 0,
+            timestamp = '2026-10-17T03:00:00.000Z'
+      WHERE id = ?`,
+    first.id,
+  );
+
+  /* 重启后复用同一个周期号。 */
+  const again = decisionStore.begin({ traderId, cycleNumber: 7 });
+  assert.equal(again.created, false, '★★ 同一 (trader, cycle) 不得插第二行');
+  assert.equal(again.id, first.id, '★★ 必须复用同一行');
+  assert.equal(decisionStore.count(traderId), 1, '★★★ 账上仍然只有一行');
+
+  const row = decisionStore.get(first.id)!;
+  assert.equal(row.systemPrompt, '', '★★ 复用时必须清掉上一轮残留的提示词');
+  assert.deepEqual(row.decisions, [], '★★ 决策必须清空 —— 否则新一轮会带着上一轮的决策');
+  assert.deepEqual(row.executionLog, [], '★★ 执行日志必须清空');
+  assert.equal(row.error, null, '★★ 上一轮的错误不能留在新一轮的 pending 上');
+  assert.equal(row.success, true, '★★ pending 的语义是"目前没有失败"');
+  assert.equal(row.aiLatencyMs, 0, '★★ pending 的判据之一');
+  assert.notEqual(
+    row.timestamp,
+    '2026-10-17T03:00:00.000Z',
+    '★★★ 时间戳必须被刷新成"这一次的开始" —— 否则最终记录会是"时间旧、内容新"的自相矛盾行',
+  );
+
+  /* 而且 `latestWithPending` 必须把它认成 pending。 */
+  assert.equal(decisionStore.latestWithPending(traderId)?.pending, true);
+});
+
+test('★★★ finish() 补完终态；行不存在时必须返回 updated=false（调用方才能留痕）', () => {
+  /*
+   * 两个方向都要：
+   *  ① 正常 → 真的写进去了（否则终态永远停在 pending 形状）；
+   *  ② 那一行不在了 → **必须如实说 `updated: false`**。
+   *     静默成功会让"审计记录丢了"无从发现 —— 那正是本任务要消灭的观测空洞。
+   */
+  traderId = seedTrader();
+  const { id } = decisionStore.begin({ traderId, cycleNumber: 3 });
+
+  const ok = decisionStore.finish({
+    id,
+    systemPrompt: 'sys',
+    userPrompt: 'usr',
+    cotTrace: 'cot',
+    decisions: [{ action: 'wait' }],
+    rawResponse: 'raw',
+    executionLog: [],
+    candidateSymbols: ['BTCUSDT'],
+    success: false,
+    error: '这一轮失败了',
+    aiLatencyMs: 1234,
+    promptTokens: 10,
+    completionTokens: 5,
+  });
+  assert.equal(ok.updated, true, '★ 正常收尾必须报告"已更新"');
+
+  const row = decisionStore.get(id)!;
+  assert.equal(row.systemPrompt, 'sys');
+  assert.equal(row.error, '这一轮失败了');
+  assert.equal(row.success, false, '★ 失败的一轮 success 必须是 false');
+  assert.equal(row.aiLatencyMs, 1234, '★ 耗时必须被写上（它是 pending 判据的另一半）');
+  assert.deepEqual(row.candidateSymbols, ['BTCUSDT']);
+  assert.equal(decisionStore.latestWithPending(traderId)?.pending, false, '★ 补完之后不再是 pending');
+
+  /* 不存在的 id：必须如实返回 false。 */
+  const missing = decisionStore.finish({
+    id: 999_999,
+    systemPrompt: '', userPrompt: '', cotTrace: '', decisions: [], rawResponse: '',
+    executionLog: [], candidateSymbols: [], success: true, error: null,
+    aiLatencyMs: 1, promptTokens: null, completionTokens: null,
+  });
+  assert.equal(
+    missing.updated,
+    false,
+    '★★★ 行不存在时必须返回 updated=false —— 否则"这一轮的决策与执行没落库"会被静默吞掉',
+  );
+});
