@@ -860,7 +860,7 @@ export function PositionsTable({
    *
    * ## 为什么这个 prop 直到今天才有（诚实记录）
    *
-   * 两档高度常量（`EXPANDED_MAX_H` = `34vh` / `COLLAPSED_MAX_H` = `16vh`）
+   * 两档高度常量（`EXPANDED_MAX_H` = `34vh` / `COLLAPSED_MAX_H` = `max(16vh,144px)`）
    * 早就存在，也早被订单表/成交表用着（它们接的是 `historyCollapsed`）；
    * **唯独持仓表这一格写死了 `max-h-[34vh]`** —— 而持仓表恰恰是用户盯着看的那张
    * （截图里 6 条持仓把区域顶满，把上面的行情与决策流挤出去）。
@@ -2252,12 +2252,25 @@ export type TraderTabId = 'positions' | 'orders' | 'trades' | 'history';
 const EXPANDED_MAX_H = 'max-h-[34vh]';
 
 /**
- * 收起态：表头 + 3~4 行（16vh 在 900px 高的屏上约 144px）。
+ * 收起态：表头 + **至少 2 行**。
  *
- * 够认出"这是哪张表、最近几笔是什么"，又不会把上面刚看过的行情/决策流顶出屏幕。
+ * ## 为什么是 `max(16vh, 144px)` 而不是纯 `16vh`
+ *
+ * 纯 `16vh` 在 900px 屏上是 144px（表头约 33px ⇒ 够 3 行），**但在 150% 缩放下
+ * 等效视口只有 600px ⇒ 16vh = 96px ⇒ 减掉表头只剩 1 行**。
+ *
+ * 而"收起"的用途是「**认得出这是哪张表、最近两笔是什么**」——
+ * **只剩一行时它就退化成"只看到最新一条"，与用户要的"收缩成 2 栏"不符。**
+ *
+ * `max()` 让它在小视口上**不再按比例缩小**，而是保底 144px；
+ * 大视口上仍然是 16vh（跟着屏幕变，不钉死）。
+ *
+ * ## 不变量（别为了让它更矮而改掉）
+ *
  * **一行都不隐藏**：行仍然全在框里，往下滚就能看到（哨兵照旧工作）。
+ * 收缩只改 `max-height`，节点、`ref`、分页观察器都不换 —— 见 `EXPANDED_MAX_H` 的说明。
  */
-const COLLAPSED_MAX_H = 'max-h-[16vh]';
+const COLLAPSED_MAX_H = 'max-h-[max(16vh,144px)]';
 
 export function TraderTables({
   traderId,
