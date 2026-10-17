@@ -904,11 +904,30 @@ export function PositionsTable({
 
   /* 同 `OrdersTable`：**没成功拿到过数据时不能断言"暂无"** —— 那是一个结论。 */
   if (query.updatedAt === null && positions.length === 0) {
+    /*
+     * ⚠️ **读失败时不能落进"正在加载"那条分支**（2026-10-17 · 台账 FRD-02 的补充）。
+     * 没有这一条，`/positions` 返回 500 的页面会一直显示转圈（或一个空盒子），
+     * 而操作员唯一能读到的信息是"还没好" —— 真相是"读不到，这不等于没有持仓"。
+     */
+    if (query.error !== null) {
+      return (
+        <ErrorNote>持仓读不到（这不等于"没有持仓"）：{query.error}</ErrorNote>
+      );
+    }
     if (showSpinner) return <Spinner3 label="正在加载持仓" />;
     return <div className="py-8" aria-hidden />;
   }
 
   if (positions.length === 0) {
+    /*
+     * 同上：**"读不到"与"没有"必须分开说**。否则一次 500 会被渲染成
+     * 「暂无持仓。模型选择空仓 — …」，那是把故障说成模型的判断。
+     */
+    if (query.error !== null) {
+      return (
+        <ErrorNote>持仓读不到（这不等于"没有持仓"）：{query.error}</ErrorNote>
+      );
+    }
     return <TableEmpty message="暂无持仓。" hint="模型选择空仓 — 没有符合条件的标时不会下任何订单。" />;
   }
 
