@@ -6846,6 +6846,65 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         const exitPurpose = trip.exitOrderId ? purposeById.get(trip.exitOrderId) : undefined;
         if (entryPurpose === 'exit' || exitPurpose === 'entry') {
           skipDiag.reversed += 1;
+          /*
+           * ══════════════════════════════════════════════════════════════════════
+           *  ⚠️ **两个单号要按"用途证据"逐个纠正，而不是无条件对调**（2026-10-17）
+           * ══════════════════════════════════════════════════════════════════════
+           *
+           * ## 为什么必须纠正（ACC-07 的剩余危害）
+           *
+           * 这个分支的定义是"开/平判反了"，所以 `trip.entryOrderId` 其实是**平仓**单、
+           * `trip.exitOrderId` 其实是**开仓**单。而 `trades.insert(..., idempotent: true)`
+           * 会走 `findDuplicate()`，它的**确定性判据只看 `exit_order_id`**
+           *（`repositories.ts:2782-2790`，不看 `entry_order_id`）。
+           *
+           * 于是：
+           *   · 首次记这个反向回合 → 查不到 → 正常插入（没问题）；
+           *   · **同一段成交被再次重建** → 拿"所谓的 exitOrderId"（实际是开仓单号）
+           *     去查 `trades.exit_order_id` → **查不到**（账本里那个号在 `entry_order_id`）
+           *     → **重复插入**。
+           *
+           * ## 为什么不是"无条件对调"
+           *
+           * 无条件 `entryOrderId: trip.exitOrderId, exitOrderId: trip.entryOrderId`
+           * 在**两个用途都查得到**时是对的（那是铁证：两个单号恰好互换）。
+           * 但实测的四例里有**两例只有一半能查到**：
+           *
+           * ```text
+           *   WLDUSDT  入场 23687788340 用途【未知】  出场 23919030401 用途 entry
+           *   HYPEUSDT 入场 14270293462 用途【未知】  出场 14295439869 用途 entry
+           * ```
+           *
+           * 这时 `trip.entryOrderId`（那个"未知"的号）**未必**是平仓单 —— 它可能属于
+           * 别的机器人、或者被 `Number()` 改写过精度（见 `orderIdIn()` 的注释）。
+           * 无条件对调会把一个**来源不明的单号**写进 `exit_order_id`（判重身份），
+           * 那就是"用一个猜测去替换一个已知错误"。
+           *
+           * ## 所以：每个单号**只有拿到正面证据时才改写**
+           *
+           *   · `exitPurpose === 'entry'` ⇒ 重建的"出场单"确实是开仓单 ⇒ 它才是 `entry_order_id`；
+           *   · `entryPurpose === 'exit'` ⇒ 重建的"入场单"确实是平仓单 ⇒ 它才是 `exit_order_id`；
+           *   · 用途未知的那一半**保持原样** —— 不引入新的错误（宁可少一条判据，
+           *     也不要写一个假身份进去）。
+           *
+           * ## `exitOrderIds`（复数）为什么不能原样传
+           *
+           * 它是"这个腿的全部**出场**单号"，而方向反了 ⇒ 它装的是**开仓**单号。
+           * 拿它去查 `exit_order_id IN (...)` 只会落空（那些号在 `entry_order_id` 里），
+           * 白跑一条 SQL 且给出"没有重复"的假信心。
+           * 所以：只有当我们**确知**了真正的平仓单（`entryPurpose === 'exit'`）时，
+           * 才把它作为单元素数组传进去；否则传空数组（= 这条判据本轮不参与）。
+           */
+          const correctedEntryOrderId =
+            exitPurpose === 'entry' ? trip.exitOrderId : trip.entryOrderId;
+          const correctedExitOrderId =
+            entryPurpose === 'exit' ? trip.entryOrderId : trip.exitOrderId;
+          /*
+           * ⚠️ 只有"真正的平仓单"才进 `exitOrderIds`。`entryPurpose === 'exit'` 时
+           * `trip.entryOrderId` 就是它；否则没有可靠来源，传空（不参与判重）。
+           */
+          const correctedExitOrderIds: string[] =
+            entryPurpose === 'exit' && trip.entryOrderId ? [trip.entryOrderId] : [];
           const notice =
             `[${this.deps.trader.name}] 重建出的 ${symbol} 回合方向是反的（所谓入场单 ${trip.entryOrderId} ` +
             `实际用途 ${entryPurpose ?? '未知'}、所谓出场单 ${trip.exitOrderId} 实际用途 ${exitPurpose ?? '未知'}）` +
@@ -6973,9 +7032,14 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
                 openedAt: trip.openedAt,
                 closedAt: trip.closedAt,
                 source: 'reconciled',
-                entryOrderId: trip.entryOrderId || null,
-                exitOrderId: trip.exitOrderId || null,
-                exitOrderIds: trip.exitOrderIds,
+                /*
+                 * ⚠️ **用纠正过的单号**（见上面那段"逐个纠正"的说明）——
+                 * 直接传 `trip.*` 会让 `findDuplicate()` 的确定性判据（只看
+                 * `exit_order_id`）永远查不到，于是同一段成交被再次重建时重复插入。
+                 */
+                entryOrderId: correctedEntryOrderId || null,
+                exitOrderId: correctedExitOrderId || null,
+                exitOrderIds: correctedExitOrderIds,
                 idempotent: true,
               });
               reversedBookedNet += netForTrip;

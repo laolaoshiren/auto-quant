@@ -2587,6 +2587,279 @@ test('★ 方向反了的重建回合【不再整笔丢弃】—— 按交易所
   );
 });
 
+test('★★★ 反向回合的单号必须按用途纠正 —— 否则 findDuplicate 的确定性判据永远查不到', async () => {
+  /*
+   * ## 这条接的是什么（ACC-07 的剩余危害）
+   *
+   * 方向反了时 `trip.entryOrderId` 其实是**平仓**单、`trip.exitOrderId` 其实是**开仓**单。
+   * 而 `trades.insert(..., idempotent: true)` 走的 `findDuplicate()`，它的
+   * **确定性判据只看 `exit_order_id`**（`repositories.ts:2782-2790`）。
+   *
+   * 于是把 `trip.*` 原样写进去的后果是：
+   *   · 首次记这个反向回合 → 查不到 → 正常插入（没问题）；
+   *   · **同一段成交被再次重建** → 拿"所谓的 exitOrderId"（实际是开仓单号）
+   *     去查 `trades.exit_order_id` → **查不到**（账本里那个号在 `entry_order_id`）
+   *     → **重复插入**。
+   *
+   * ## 修法：按**用途证据**逐个纠正，而不是无条件对调
+   *
+   * 实测四例里有两例只有一半查得到（`入场单 用途【未知】、出场单 用途 entry`）。
+   * 无条件对调会把一个**来源不明**的单号写进判重身份列 —— 那是用一个猜测替换一个
+   * 已知错误。所以：有正面证据的那个才改写，未知的那一半保持原样。
+   *
+   * 本用例钉的就是"两个都有证据"这一档（最干净、也是唯一能要求完全正确的形态），
+   * 并额外验证：**第二次对账不再插第二行**。
+   */
+  const broker = new FakeBroker();
+  const trader = buildTrader(broker, '<decision>[]</decision>');
+
+  const symbol = SYMBOL;
+  const nowMs = Date.now();
+
+  /* 让这个符号进入对账的扫描范围（否则永远不会被扫到）。 */
+  tradeStore.insert({
+    traderId,
+    symbol,
+    side: 'long',
+    quantity: 1,
+    entryPrice: 1,
+    exitPrice: 1,
+    leverage: 5,
+    grossPnl: 0,
+    entryFee: 0,
+    exitFee: 0,
+    closeReason: 'stop_loss',
+    openedAt: new Date(nowMs - 7_200_000).toISOString(),
+    closedAt: new Date(nowMs - 7_000_000).toISOString(),
+    source: 'bot',
+  });
+
+  /* 时间顺序刻意让"平仓"在最前 —— 净头寸法就是这样把它当成开仓的。 */
+  const exitAt = nowMs - 1_800_000;
+  const entryAt = nowMs - 900_000;
+
+  const mkFill = (
+    id: number,
+    orderId: number,
+    side: 'BUY' | 'SELL',
+    price: number,
+    time: number,
+    realizedPnl: number,
+  ): BinanceUserTrade => ({
+    symbol,
+    id,
+    orderId,
+    side,
+    positionSide: 'BOTH',
+    price: String(price),
+    qty: '100',
+    quoteQty: String(price * 100),
+    realizedPnl: String(realizedPnl),
+    marginAsset: 'USDT',
+    commission: '0.05',
+    commissionAsset: 'USDT',
+    time,
+    maker: false,
+    buyer: side === 'BUY',
+  });
+
+  /*
+   * 重建会把 555001 当成"入场"、555002 当成"出场"（因为它按时间顺序看净头寸）。
+   * 而真实用途恰好相反 —— 这正是线上那四例的形状。
+   */
+  const REAL_EXIT_ORDER = 555001; // 重建的"入场单"，实际是平仓
+  const REAL_ENTRY_ORDER = 555002; // 重建的"出场单"，实际是开仓
+  broker.userTrades = [
+    mkFill(1, REAL_EXIT_ORDER, 'SELL', 0.11, exitAt, 1.5),
+    mkFill(2, REAL_ENTRY_ORDER, 'BUY', 0.1, entryAt, 0),
+  ];
+
+  broker.income = [
+    { symbol, incomeType: 'REALIZED_PNL', income: '1.5', time: exitAt + 1, tradeId: '1' },
+    { symbol, incomeType: 'COMMISSION', income: '-0.05', time: exitAt + 1, tradeId: '1' },
+    { symbol, incomeType: 'COMMISSION', income: '-0.05', time: entryAt + 1, tradeId: '2' },
+  ] as typeof broker.income;
+
+  /* 运行期记下的**真实意图**：555001 是 exit、555002 是 entry（两个都有证据）。 */
+  for (const [oid, purpose] of [
+    [String(REAL_EXIT_ORDER), 'exit'],
+    [String(REAL_ENTRY_ORDER), 'entry'],
+  ] as const) {
+    getDb().run(
+      `INSERT INTO orders (trader_id, exchange_order_id, client_order_id, symbol, side, type, purpose,
+                           quantity, price, stop_price, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'SELL', 'MARKET', ?, 100, 0.1, NULL, 'FILLED', ?, ?)`,
+      traderId,
+      oid,
+      `c-${oid}`,
+      symbol,
+      purpose,
+      new Date(nowMs).toISOString(),
+      new Date(nowMs).toISOString(),
+    );
+  }
+
+  await trader.runReconcile();
+
+  const first = tradeStore.list(traderId).filter((r) => r.closeReason === 'reconciled_reversed');
+  assert.equal(first.length, 1, '前提：反向回合被记了一行');
+  const row = first[0]!;
+  /*
+   * ⚠️ 单号**不在** `TradeRecord` 里（`toTrade()` 不映射它们），所以直接查库。
+   * 这也顺带说明：这两个字段的唯一消费者就是 `findDuplicate()` 与重复行报告。
+   */
+  const ids = getDb().get<{ entry_order_id: string | null; exit_order_id: string | null }>(
+    'SELECT entry_order_id, exit_order_id FROM trades WHERE id = ?',
+    row.id,
+  )!;
+  /*
+   * ★★★ 核心断言：写进账本的两个单号必须是**真实用途**，不是重建的猜测。
+   */
+  assert.equal(
+    ids.exit_order_id,
+    String(REAL_EXIT_ORDER),
+    '★★★ `exit_order_id` 必须是**真正的平仓单**（重建说的"入场单"）—— ' +
+      '它是 `findDuplicate()` 唯一的确定性判据，写错就等于把这一行永久排除在去重之外',
+  );
+  assert.equal(
+    ids.entry_order_id,
+    String(REAL_ENTRY_ORDER),
+    '★★★ `entry_order_id` 必须是**真正的开仓单**（重建说的"出场单"）',
+  );
+
+  /*
+   * ★★★ 决定性验证：**同一段成交再重建一遍**，`findDuplicate()` 必须命中，
+   * 账本不得多出第二行。这正是修复前会失败的地方。
+   */
+  await trader.runReconcile();
+  const afterSecond = tradeStore.list(traderId).filter(
+    (r) => r.closeReason === 'reconciled_reversed',
+  );
+  assert.equal(
+    afterSecond.length,
+    1,
+    `★★★ 第二次重建同一段成交不得再插一行（实际 ${afterSecond.length} 行）。` +
+      '修复前 `findDuplicate()` 拿"重建以为的出场单"（实际是开仓单）去查 `exit_order_id`，' +
+      '必然查不到 ⇒ 重复记账。',
+  );
+  assert.equal(afterSecond[0]!.id, row.id, '★★ 命中的必须是同一行（不是替换）');
+});
+
+test('★★★ 反向回合只有一半用途证据时：只改有证据的那一半，另一半保持原样（不猜）', async () => {
+  /*
+   * 线上四例里有**两例只有一半查得到**：
+   *
+   * ```text
+   *   WLDUSDT  入场 23687788340 用途【未知】  出场 23919030401 用途 entry
+   *   HYPEUSDT 入场 14270293462 用途【未知】  出场 14295439869 用途 entry
+   * ```
+   *
+   * 这时"未知"的那个单号**未必**是平仓单（可能属于别的机器人、或精度被改写）。
+   * 无条件对调会把一个来源不明的号写进 `exit_order_id`（判重身份）——
+   * 那是**用一个猜测替换一个已知错误**，比不改更糟。
+   *
+   * 契约：`exitPurpose === 'entry'` 时，重建的"出场单"才是真正的开仓单 ⇒ 它被写进
+   * `entry_order_id`；`exit_order_id` 保持重建给的值（仍然不可信，但**没有引入新的假身份**）。
+   */
+  const broker = new FakeBroker();
+  const trader = buildTrader(broker, '<decision>[]</decision>');
+
+  const symbol = SYMBOL;
+  const nowMs = Date.now();
+
+  tradeStore.insert({
+    traderId,
+    symbol,
+    side: 'long',
+    quantity: 1,
+    entryPrice: 1,
+    exitPrice: 1,
+    leverage: 5,
+    grossPnl: 0,
+    entryFee: 0,
+    exitFee: 0,
+    closeReason: 'stop_loss',
+    openedAt: new Date(nowMs - 7_200_000).toISOString(),
+    closedAt: new Date(nowMs - 7_000_000).toISOString(),
+    source: 'bot',
+  });
+
+  const exitAt = nowMs - 1_800_000;
+  const entryAt = nowMs - 900_000;
+  const mkFill = (
+    id: number,
+    orderId: number,
+    side: 'BUY' | 'SELL',
+    price: number,
+    time: number,
+    realizedPnl: number,
+  ): BinanceUserTrade => ({
+    symbol,
+    id,
+    orderId,
+    side,
+    positionSide: 'BOTH',
+    price: String(price),
+    qty: '100',
+    quoteQty: String(price * 100),
+    realizedPnl: String(realizedPnl),
+    marginAsset: 'USDT',
+    commission: '0.05',
+    commissionAsset: 'USDT',
+    time,
+    maker: false,
+    buyer: side === 'BUY',
+  });
+
+  /* 555011 = 重建的"入场单"（用途**未知**）；555012 = 重建的"出场单"（用途 entry）。 */
+  broker.userTrades = [
+    mkFill(1, 555011, 'SELL', 0.11, exitAt, 1.5),
+    mkFill(2, 555012, 'BUY', 0.1, entryAt, 0),
+  ];
+  broker.income = [
+    { symbol, incomeType: 'REALIZED_PNL', income: '1.5', time: exitAt + 1, tradeId: '1' },
+    { symbol, incomeType: 'COMMISSION', income: '-0.05', time: exitAt + 1, tradeId: '1' },
+    { symbol, incomeType: 'COMMISSION', income: '-0.05', time: entryAt + 1, tradeId: '2' },
+  ] as typeof broker.income;
+
+  /* ⚠️ 只登记 555012（entry）。555011 不登记 ⇒ 用途查不到（线上"未知"的形状）。 */
+  getDb().run(
+    `INSERT INTO orders (trader_id, exchange_order_id, client_order_id, symbol, side, type, purpose,
+                         quantity, price, stop_price, status, created_at, updated_at)
+     VALUES (?, '555012', 'c-555012', ?, 'SELL', 'MARKET', 'entry', 100, 0.1, NULL, 'FILLED', ?, ?)`,
+    traderId,
+    symbol,
+    new Date(nowMs).toISOString(),
+    new Date(nowMs).toISOString(),
+  );
+
+  await trader.runReconcile();
+
+  const row = tradeStore
+    .list(traderId)
+    .find((r) => r.closeReason === 'reconciled_reversed');
+  assert.ok(row, '前提：这一例被判成方向反了（exitPurpose === entry 就够）');
+  /*
+   * ⚠️ 单号**不在** `TradeRecord` 里（`toTrade()` 不映射它们），所以直接查库 ——
+   * 与上一个用例同一手法。这两个字段的唯一消费者是 `findDuplicate()` 与重复行报告。
+   */
+  const ids = getDb().get<{ entry_order_id: string | null; exit_order_id: string | null }>(
+    'SELECT entry_order_id, exit_order_id FROM trades WHERE id = ?',
+    row.id,
+  )!;
+  assert.equal(
+    ids.entry_order_id,
+    '555012',
+    '★ 有证据的那一半必须被改对：真正的开仓单是重建说的"出场单"',
+  );
+  assert.equal(
+    ids.exit_order_id,
+    '555012',
+    '★ 未知的那一半**保持原样**（不猜）—— `exit_order_id` 仍是重建给它的 555012；' +
+      '来源不明的 555011 没有被写进任何一列',
+  );
+});
+
 test('对账重复执行是幂等的：第二遍不再插手', async () => {
   /*
    * Why this test exists —— §2.5 的原话是「对账是幂等的：重复执行只修正、不重复插入」。
