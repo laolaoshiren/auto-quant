@@ -39,12 +39,14 @@ import {
   stateLabel,
   TIER_LABEL,
   clock,
+  lastSeenFromServer,
   lastSeenOf,
   rosterEntries,
   type RosterEntry,
   type RosterState,
   type TeamStep,
 } from './roster';
+import { api } from '../../lib/api';
 import { plainText } from '../../lib/plainText';
 
 /** 从状态得到圆点的样式（全部是真实存在的类，见 `roster.ts` 的对照表）。 */
@@ -147,6 +149,7 @@ export function TeamBoard({
   initialShowRest = false,
   replay = false,
   replayAt = null,
+  traderId,
 }: {
   steps: readonly TeamStep[];
   cycleNumber: number;
@@ -173,6 +176,25 @@ export function TeamBoard({
    * ⚠️ 可选：拿不到历史时退回旧行为（不会崩）。
    */
   history?: ReadonlyArray<{ cotTrace: string | null | undefined; timestamp: string }>;
+  /**
+   * **这个看板属于哪个机器人** —— 用于拉"各岗位最近露面时刻"与"岗位历史详情"。
+   *
+   * ## 为什么需要它（2026-10-17 · t111 · 用户实测报的问题）
+   *
+   * 用户原话：
+   * > 「很多岗位，似乎**从未真正运行过**，页面上也没有显示他们**最新运行时间**」
+   *
+   * 根因是**数据源只读了一半**：`history` 里的 `cotTrace` 只有进了 `<team>` 块的
+   * 角色（分析师 / bull / bear / judge），而 `supervisor` / `risk_officer` /
+   * `reporter` 的步骤写在 `runtime_logs`（scope='team'）里 —— 界面从没读过那张表。
+   *
+   * 有了 `traderId` 才能去 `/api/traders/:id/agent/last-seen` 补上那一半。
+   *
+   * ⚠️ **可选**：不传时行为与改动前**逐字一致**（不拉网络、只用 `cotTrace`）。
+   * 这一条不是客套 —— `boardRender.test.ts` 用 `renderToStaticMarkup` 直接渲染本组件
+   * （**没有 Router、也没有后端**），required prop 会让那些 SSR 断言全部崩掉。
+   */
+  traderId?: number;
   /**
    * 「其余岗位」那一节**初始**是否摊开（默认收起，与线上行为一致）。
    *
@@ -203,7 +225,47 @@ export function TeamBoard({
     return () => window.clearInterval(timer);
   }, [startedAt]);
 
-  const seen = useMemo(() => lastSeenOf(history), [history]);
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⭐ **"各岗位最近露面时刻" = cotTrace ∪ 服务端步骤日志**（2026-10-17 · t111）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * `history`（cotTrace）只是**一半**：里面只有进了 `<team>` 块的角色。
+   * `supervisor` / `risk_officer` / `reporter` 的步骤写在 `runtime_logs`
+   * （`scope='team'`，格式 `[phase] role：note`），而界面从来没读过那张表 ——
+   * 于是那三个角色在界面上**永远"待命"**，而线上 supervisor 出现 31 次。
+   *
+   * `traderId` 缺省时不发请求（SSR 测试没有后端，也不该有副作用），
+   * 行为与改动前逐字一致。
+   */
+  const [serverSeen, setServerSeen] = useState<ReadonlyMap<string, string>>(() => new Map());
+  useEffect(() => {
+    if (traderId === undefined) return;
+    /*
+     * ⚠️ **`live` 守卫 + `AbortController`**：切机器人时旧请求可能后到，
+     * 把 A 机器人的时刻写到 B 机器人的看板上 —— 那会造出"B 的某个岗位
+     * 3 分钟前活跃过"的假事实。
+     */
+    let live = true;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const res = await api.traderAgentLastSeen(traderId, controller.signal);
+        if (live) setServerSeen(lastSeenFromServer(res.roles));
+      } catch {
+        /*
+         * 拉不到就**保持空**（退回只用 cotTrace）—— 这是**降级**，不是失败：
+         * 界面仍然显示"待命"，与改动前一致。绝不拿一个猜的时刻去点亮编制表。
+         */
+      }
+    })();
+    return () => {
+      live = false;
+      controller.abort();
+    };
+  }, [traderId]);
+
+  const seen = useMemo(() => lastSeenOf(history, serverSeen), [history, serverSeen]);
   const entries = useMemo(() => rosterEntries(steps, roster, seen, replay), [steps, roster, seen, replay]);
 
   /** 一键"展开全部详情" —— 用户说"用户有需要可以手动点击打开查看详情"。 */
@@ -456,6 +518,7 @@ export function TeamBoard({
               steps={steps}
               replay={replay}
               isOpen={isOpen}
+              traderId={traderId}
               onToggle={(id) =>
                 setClosed((prev) => {
                   const next = new Set(prev);
@@ -509,6 +572,7 @@ export function TeamBoard({
                       steps={steps}
                       replay={replay}
                       isOpen={isOpen}
+                      traderId={traderId}
                       onToggle={(id) =>
                         setClosed((prev) => {
                           const next = new Set(prev);
@@ -537,6 +601,7 @@ function DeptGroup({
   replay,
   isOpen,
   onToggle,
+  traderId,
 }: {
   dept: string;
   list: RosterEntry[];
@@ -545,6 +610,8 @@ function DeptGroup({
   replay: boolean;
   isOpen: (id: string) => boolean;
   onToggle: (id: string) => void;
+  /** 透传给 `AgentRow`：拉"历史工作详情"用（`undefined` = 不拉）。 */
+  traderId?: number;
 }): React.ReactElement {
   return (
     <div className="overflow-hidden rounded-md border border-base-750">
@@ -566,6 +633,7 @@ function DeptGroup({
               open={isOpen(entry.role.id)}
               onToggle={() => onToggle(entry.role.id)}
               steps={steps.filter((s) => s.role === entry.role.id)}
+              traderId={traderId}
             />
           </li>
         ))}
@@ -608,6 +676,7 @@ function AgentRow({
   open,
   onToggle,
   steps,
+  traderId,
 }: {
   entry: RosterEntry;
   /** 回放态：状态词换成「已产出（上一轮）」（见 `stateLabel`）。 */
@@ -615,12 +684,96 @@ function AgentRow({
   open: boolean;
   onToggle: () => void;
   steps: readonly TeamStep[];
+  /** 透传给历史详情请求（`undefined` = 不拉历史，只显示本轮）。 */
+  traderId?: number;
 }): React.ReactElement {
   const { role, state, latest, stepCount, lastSeenAt } = entry;
-  const expandable = stepCount > 0;
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⭐ **按钮对所有"已实现"的岗位都要有**（2026-10-17 · t111 · 用户原话）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 用户原话：「每个角色**增加一个可点击按钮，点击去以后能看他历史工作详情**」。
+   *
+   * 原来的判据是 `stepCount > 0` —— 只有**本轮真跑过**的岗位才有按钮。
+   * 于是"这一轮没叫它"的岗位（团队是按需出勤的，这是常态）**连点都点不了**，
+   * 而用户恰恰最想查的就是那些"看起来从未运行过"的岗位。
+   *
+   * 新判据 `role.status !== 'planned'`：
+   * ```
+   *   staffed  → 有按钮（历史可能有内容）
+   *   by_code  → 有按钮（历史为空，但展开态会说明"由代码承担"，不是死路）
+   *   planned  → 没有按钮 —— 它**根本不存在**，点开一个永远空的面板是在骗人
+   * ```
+   * ⚠️ `planned` 不给按钮是刻意的：给一个点了永远没内容的按钮，
+   * 等于让操作员以为"再等等就有数据"。而真相是这个岗位没人实现。
+   */
+  const expandable = role.status !== 'planned';
+  /*
+   * 状态词里的"待命"对 **`by_code`** 岗位是错的措辞（它们没有模型、不会被叫），
+   * 但那条分支已经在 `body` 里单独处理过（见下面的 `state === 'by_code'` 分支）。
+   */
   /* "最近活跃于 X 分钟前"是相对量 —— 用渲染时刻算，不挂计时器
    *（分钟级精度不值得每秒跳；轮次刷新时自然会重算）。 */
   const now = Date.now();
+
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⭐ **历史工作详情**（用户要的"点开能看他历史"）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 为什么是"点开才拉"（而不是随看板一起拉）
+   *
+   * 编制表 21 个岗位，而这个组件**每次轮询都渲染**。随看板一次拉 21 份历史
+   * 会让"看板"变成"每 15 秒 21 个请求"。用户点开一个岗位时才知道他要看谁 ——
+   * 那就那时再拉。
+   *
+   * ## 三态必须可区分（这是本仓库反复强调的那条）
+   *
+   * ```
+   *   undefined → 还没点开（不显示任何历史区块）
+   *   null      → 点了、拉取失败（**要说"取不到"，不能说"没有历史"**）
+   *   []        → 拉到了、确实一条都没有（这时才可以说"没有历史记录"）
+   * ```
+   * 把 `null` 与 `[]` 混成一句"暂无历史"是本仓库记过多次的那种失败：
+   * **一个静默降级比一个会报错的路径危险得多**。
+   */
+  const [historyState, setHistoryState] = useState<
+    | undefined
+    | null
+    | { total: number; steps: Array<{ at: string; phase: string | null; message: string }> }
+  >(undefined);
+
+  useEffect(() => {
+    /*
+     * 收起来就**清空** —— 否则下次点开时先闪一下旧的（可能还是别的岗位的）
+     * 历史，那是假事实。
+     */
+    if (!open || traderId === undefined) {
+      setHistoryState(undefined);
+      return;
+    }
+    if (role.status === 'planned') return; /* 不存在的岗位不发请求 */
+
+    let live = true;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const res = await api.traderAgentSteps(traderId, role.id, 50, controller.signal);
+        if (!live) return;
+        setHistoryState({
+          total: res.total,
+          steps: res.steps.map((s) => ({ at: s.at, phase: s.phase, message: s.message })),
+        });
+      } catch {
+        if (live) setHistoryState(null);
+      }
+    })();
+    return () => {
+      live = false;
+      controller.abort();
+    };
+  }, [open, traderId, role.id, role.status]);
 
   const body = (
     /*
@@ -754,13 +907,22 @@ function AgentRow({
   return (
     <>
       <div className="flex min-w-0 items-center gap-2 px-2.5 py-1.5">
-        {/* 展开箭头：**只有真的有步骤可看时才可点** —— 空按钮比没有按钮更让人困惑。 */}
+        {/*
+          展开箭头：**对每个"已实现"的岗位都在**（判据见 `expandable` 上方那段）。
+          `planned` 仍不给按钮 —— 点开一个永远空的详情是在骗人。
+        */}
         {expandable ? (
           <button
             type="button"
             onClick={onToggle}
             aria-expanded={open}
-            title={open ? '收起这个岗位的步骤' : '展开这个岗位这一轮的每一步'}
+            title={
+              open
+                ? '收起这个岗位的工作详情'
+                : stepCount > 0
+                  ? '展开：本轮的每一步 + 历史工作详情'
+                  : '展开：看他历史上的工作详情（本轮没参与）'
+            }
             /*
              * ⚠️ **`w-4` + 居中**，与下面那个"没有箭头"的空位**同宽** ——
              * 否则有箭头与没箭头的两行会错开，整张表看起来是歪的
@@ -794,7 +956,7 @@ function AgentRow({
         {body}
       </div>
 
-      {open && steps.length > 0 && (
+      {open && expandable && (
         <div className="border-t border-base-750 bg-base-850/40 px-2.5 py-2 pl-8">
           {/*
             职责在这里补全 —— 折叠时它让位给"本轮产出"（理由见 `AgentRow` 的说明：
@@ -805,20 +967,92 @@ function AgentRow({
             <span className="text-ink-faint">职责：</span>
             {plainText(role.duty)}
           </p>
-          <ol className="space-y-1">
-            {steps.map((s, index) => (
-              <li key={`${s.at}-${index}`} className="flex min-w-0 items-start gap-2 text-xs">
-                <span className="num shrink-0 tabular-nums text-ink-faint">{clock(s.at)}</span>
-                <span
-                  className={
-                    s.level === 'error' ? 'text-down' : s.level === 'warn' ? 'text-warn' : 'text-ink-mid'
-                  }
-                >
-                  {s.message}
+
+          {/* ── ① 本轮（有才显示）────────────────────────────────────────── */}
+          {steps.length > 0 && (
+            <>
+              <p className="mb-1 text-[11px] font-medium text-ink-lo">本轮 {steps.length} 步</p>
+              <ol className="space-y-1" data-role-steps="current">
+                {steps.map((s, index) => (
+                  <li key={`${s.at}-${index}`} className="flex min-w-0 items-start gap-2 text-xs">
+                    <span className="num shrink-0 tabular-nums text-ink-faint">{clock(s.at)}</span>
+                    <span
+                      className={
+                        s.level === 'error'
+                          ? 'text-down'
+                          : s.level === 'warn'
+                            ? 'text-warn'
+                            : 'text-ink-mid'
+                      }
+                    >
+                      {s.message}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+
+          {/*
+            ── ② 历史（用户要的"点开能看他历史工作详情"）────────────────────
+            三态必须分开说（见 `historyState` 上方的说明）：
+            `undefined` 还没拉 / `null` 拉取失败 / `[]` 确实没有。
+          */}
+          {steps.length > 0 && <div className="my-2 border-t border-base-800" />}
+          <p className="mb-1 text-[11px] font-medium text-ink-lo">
+            历史工作详情
+            {historyState !== undefined && historyState !== null && (
+              <>
+                {/* `total > steps.length` 时**如实说还有更多** —— 不把截断当全部。 */}
+                <span className="ml-1 font-normal text-ink-faint">
+                  （共 {historyState.total} 条
+                  {historyState.total > historyState.steps.length
+                    ? `，显示最近 ${historyState.steps.length} 条`
+                    : ''}
+                  ）
                 </span>
-              </li>
-            ))}
-          </ol>
+              </>
+            )}
+          </p>
+
+          {historyState === undefined && (
+            <p className="text-xs text-ink-faint">
+              {traderId === undefined ? '（拿不到机器人编号，无法读取历史）' : '正在读取历史…'}
+            </p>
+          )}
+
+          {historyState === null && (
+            /*
+             * ⚠️ **拉取失败不能说成"没有历史"**。两者对操作员的意义完全相反：
+             * 前者说明"服务或网络有问题"（该去查），后者说明"这个岗位确实没干过活"。
+             * 这正是本仓库反复记的那类失败：静默降级比报错危险。
+             */
+            <p className="text-xs text-warn">历史读取失败 —— 这不代表它没有历史（可能是服务或网络问题）。</p>
+          )}
+
+          {historyState !== undefined && historyState !== null && historyState.steps.length === 0 && (
+            <p className="text-xs text-ink-faint">
+              {role.status === 'by_code'
+                ? `这一职能由确定性代码承担，没有模型出勤记录。承担物：${plainText(role.carriedBy ?? '见职责说明')}`
+                : '还没有历史工作记录 —— 它在岗，但确实一次都没被叫到过。'}
+            </p>
+          )}
+
+          {historyState !== undefined && historyState !== null && historyState.steps.length > 0 && (
+            <ol className="space-y-1" data-role-steps="history">
+              {historyState.steps.map((s, index) => (
+                <li key={`h-${s.at}-${index}`} className="flex min-w-0 items-start gap-2 text-xs">
+                  <span className="num shrink-0 tabular-nums text-ink-faint">{clock(s.at)}</span>
+                  {s.phase !== null && (
+                    <span className="shrink-0 rounded bg-base-800 px-1 text-[11px] text-ink-lo">
+                      {PHASE_LABEL[s.phase] ?? s.phase}
+                    </span>
+                  )}
+                  <span className="min-w-0 break-words text-ink-mid">{plainText(s.message)}</span>
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
       )}
     </>

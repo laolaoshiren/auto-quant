@@ -1511,6 +1511,18 @@ export function DecisionFeed({
                    */
                   replay={liveCycle === undefined}
                   replayAt={liveCycle === undefined ? (records[0]?.timestamp ?? null) : null}
+                  /*
+                   * ⚠️ **`traderId` 必须往下传**（2026-10-17 · t111）。
+                   *
+                   * 用户报「很多岗位似乎从未真正运行过，页面上也没有显示他们最新运行时间」。
+                   * 根因是看板的"最近活跃"只读 `cotTrace`，而 `supervisor` /
+                   * `risk_officer` / `reporter` 的出勤记在 `runtime_logs`（scope='team'）——
+                   * 拿不到 `traderId` 就去不了 `/api/traders/:id/agent/last-seen`，
+                   * 那三个角色会永远显示"待命"（线上 supervisor 实际出现 31 次）。
+                   *
+                   * 它当初没传下去不是设计取舍，是**漏了**（见 t111 报告）。
+                   */
+                  traderId={traderId}
                 />
               </div>
             </div>

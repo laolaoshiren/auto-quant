@@ -259,9 +259,32 @@ export function stateOfLastStep(
  * cotTrace 一条就 4–5k 字符，扫全部历史是 O(轮数 × 5k)。
  * 取最近 12 条（约 3 小时 @15 分钟周期）已覆盖"最近活跃于"的语义 ——
  * 更早的活跃对操作员没有操作意义。
+ *
+ * ## ⚠️⚠️ **2026-10-17（t111）：这个数据源是【不完整】的，必须叠加服务端日志**
+ *
+ * 用户实测报的是「**很多岗位似乎从未真正运行过**，页面上也没有显示他们最新运行时间」，
+ * 而实测那三个角色**跑得很频繁**：
+ * ```
+ *   supervisor     线上 team 域 31 次（全系统最多）  ← 界面写"待命"
+ *   risk_officer   12 次                            ← 界面写"待命"
+ *   reporter       14 次                            ← 界面写"待命"
+ * ```
+ *
+ * 根因：`cot_trace` 里**只有进了 `<team>` 块的角色**才有 `- <role>（…）：` 行，
+ * 而 `deskOutput.ts` 只给分析师 / `bull` / `bear` / `judge` 写了这种行。
+ * 上面那三个角色的出勤记在 `runtime_logs`（`scope='team'`，格式 `[phase] role：note`）
+ * —— **那是另一个数据源，本函数原来完全没看它**。
+ *
+ * 所以现在接受第二份输入 `fromServer`（服务端 `/agent/last-seen` 的产物），
+ * 与 `cotTrace` 的结果**合并取较晚者**。`fromServer` 缺省时行为与旧版逐字一致
+ * （SSR 测试、回放态都不受影响）。
+ *
+ * @param history     历史决策记录（只需 `cotTrace` 与 `timestamp`）
+ * @param fromServer  服务端日志给出的"角色 → 最后露面时刻"（可选；缺省 = 只用 cotTrace）
  */
 export function lastSeenOf(
   history: ReadonlyArray<{ cotTrace: string | null | undefined; timestamp: string }>,
+  fromServer: ReadonlyMap<string, string> = new Map(),
 ): Map<string, string> {
   const seen = new Map<string, string>();
   /* 从旧到新扫 —— 后面的覆盖前面的，留下的就是"最近一次"。 */
@@ -272,7 +295,38 @@ export function lastSeenOf(
       seen.set(m[1]!, r.timestamp);
     }
   }
+  /*
+   * 合并服务端日志：**取较晚者**，不做"无条件覆盖"。
+   *
+   * ⚠️ 顺序不能反：`history` 覆盖最近 12 轮，而服务端日志表有 500 行上限、
+   * 里面可能混着更旧的行 —— 无条件覆盖会把"刚刚活跃"改写成"3 天前"，
+   * 那正是这次要修的那类"界面说谎"。
+   */
+  for (const [role, at] of fromServer) {
+    const prev = seen.get(role);
+    if (prev === undefined || at > prev) seen.set(role, at);
+  }
   return seen;
+}
+
+/**
+ * 把服务端 `/agent/last-seen` 的响应形状转成 `lastSeenOf` 要的 Map。
+ *
+ * 单独一个函数是为了**可测**：`roster.test.ts` 与 SSR 渲染都能直接构造它，
+ * 不必起 HTTP。
+ */
+export function lastSeenFromServer(
+  roles: ReadonlyArray<{ role: string; at: string }> | undefined | null,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  if (roles === undefined || roles === null) return map;
+  for (const row of roles) {
+    if (typeof row?.role !== 'string' || row.role.length === 0) continue;
+    if (typeof row.at !== 'string' || row.at.length === 0) continue;
+    const prev = map.get(row.role);
+    if (prev === undefined || row.at > prev) map.set(row.role, row.at);
+  }
+  return map;
 }
 
 export function rosterEntries(

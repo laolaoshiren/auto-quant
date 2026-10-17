@@ -22,6 +22,8 @@ import {
   STATE_HINT,
   STATE_LABEL,
   clock,
+  lastSeenFromServer,
+  lastSeenOf,
   rosterEntries,
   stateOfLastStep,
   type TeamStep,
@@ -304,4 +306,124 @@ test('★ 时刻是 24 小时制 HH:MM:SS，取不到时是破折号（不是 19
   assert.equal(clock(iso), '09:05:03');
   assert.equal(clock(null), '—', '★ 没有时刻就说"没有"，不要显示 08:00:00 那种假值');
   assert.equal(clock('不是时间'), '—');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ⑥ 「最近活跃」的数据源必须两路合一（2026-10-17 · t111）                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **★★★ 负向校准：角色跑了、但它没有 cotTrace 标签 → 改前拿不到时间、改后拿得到。**
+ *
+ * ## 这是 t111 那条用户投诉的**可复现最小场景**
+ *
+ * 用户原话：
+ * > 「很多岗位，似乎**从未真正运行过**，页面上也没有显示他们**最新运行时间**」
+ *
+ * 而线上实测 `supervisor` 在 `team` 域出现 **31 次**（全系统最多）。
+ *
+ * ## 为什么会这样（机制，不是猜测）
+ *
+ * `cot_trace` 里只有**进了 `<team>` 块的角色**才有 `- <role>（<model>）：` 行，
+ * 而 `deskOutput.ts` 只给分析师 / `bull` / `bear` / `judge` 写了这种行。
+ * `supervisor` / `risk_officer` / `reporter` 的步骤在 `runtime_logs`（scope='team'），
+ * 格式是 `[phase] role：note` —— **界面原来根本没读那张表**。
+ *
+ * ## 这条测试的判据（两段，缺一不可）
+ *
+ * ```
+ *   ① 只用 cotTrace（旧行为） → 那三个角色**必须拿不到**时刻  ← 复现 bug
+ *   ② 叠加服务端 last-seen   → 它们**必须拿得到**            ← 证明修好了
+ * ```
+ * ⚠️ 只写 ② 是不够的：那只能证明"新参数有用"，证明不了"旧路径确实是坏的"。
+ * 而"旧路径是坏的"才是用户报的那个现象。两段都写，这条测试才**可证伪**。
+ */
+test('★★★ 负向校准：角色跑了但 cotTrace 没有它的标签 —— 改前拿不到时间，改后拿得到', () => {
+  /*
+   * 编造一轮 cotTrace：**只有**分析师与 judge（这正是 `deskOutput` 的实际形状）。
+   * supervisor / risk_officer / reporter **刻意一个都不出现**。
+   */
+  const cotTrace = [
+    '- market_analyst（group/team-analyst）：市场整体震荡，无明确结构',
+    '- technical（group/team-grunt）：15m 与 1H 方向矛盾',
+    '- bull（group/team-judge）：做多论证已出',
+    '- bear（group/team-judge）：做空论证已出',
+    '- judge（group/team-judge）：本轮不行动',
+  ].join('\n');
+  const history = [{ cotTrace, timestamp: '2026-10-17T06:00:00.000Z' }];
+
+  /* ① 旧行为：只喂 cotTrace —— 那三个角色**拿不到**（这就是用户看到的现象）。 */
+  const before = lastSeenOf(history);
+  for (const role of ['supervisor', 'risk_officer', 'reporter']) {
+    assert.equal(
+      before.get(role),
+      undefined,
+      `★ 前提断言：${role} 在 cotTrace 里本来就没有标签 —— 否则这条测试复现不了用户报的现象`,
+    );
+  }
+  /* 对照组：进过 `<team>` 块的角色**必须**能拿到（证明判据本身没坏）。 */
+  for (const role of ['market_analyst', 'technical', 'bull', 'bear', 'judge']) {
+    assert.equal(before.get(role), '2026-10-17T06:00:00.000Z', `★ ${role} 在 cotTrace 里，必须能拿到时刻`);
+  }
+
+  /* ② 叠加服务端 `/agent/last-seen` 的产物 —— 那三个角色**必须拿得到**。 */
+  const fromServer = lastSeenFromServer([
+    { role: 'supervisor', at: '2026-10-17T06:05:00.000Z' },
+    { role: 'risk_officer', at: '2026-10-17T06:04:00.000Z' },
+    { role: 'reporter', at: '2026-10-17T06:06:00.000Z' },
+  ]);
+  const after = lastSeenOf(history, fromServer);
+  assert.equal(
+    after.get('supervisor'),
+    '2026-10-17T06:05:00.000Z',
+    '★ 改后 supervisor 必须有最近时刻 —— 否则界面上它还是"待命"，用户报的问题没修',
+  );
+  assert.equal(after.get('risk_officer'), '2026-10-17T06:04:00.000Z');
+  assert.equal(after.get('reporter'), '2026-10-17T06:06:00.000Z');
+  /* 对照组不能被服务端那一路覆盖坏。 */
+  assert.equal(after.get('judge'), '2026-10-17T06:00:00.000Z');
+});
+
+test('★★ 两路数据源合并取【较晚者】（不能无条件用服务端覆盖）', () => {
+  /*
+   * ⚠️ 这一条防的是**修法本身引入的新谎**：
+   * 服务端 `runtime_logs` 表有 500 行上限，里面可能混着**更旧**的行。
+   * 若无条件覆盖，会把"刚刚活跃"改写成"3 天前" —— 症状与本次要修的一样，
+   * 只是方向相反。所以判据必须是"取较晚者"。
+   */
+  const history = [{ cotTrace: '- judge（group/x）：已裁决', timestamp: '2026-10-17T06:00:00.000Z' }];
+  const olderFromServer = lastSeenFromServer([{ role: 'judge', at: '2026-10-14T06:00:00.000Z' }]);
+  assert.equal(
+    lastSeenOf(history, olderFromServer).get('judge'),
+    '2026-10-17T06:00:00.000Z',
+    '★ 服务端给出更旧的时刻时，不能把 cotTrace 的较新时刻盖掉',
+  );
+
+  const newerFromServer = lastSeenFromServer([{ role: 'judge', at: '2026-10-17T07:00:00.000Z' }]);
+  assert.equal(
+    lastSeenOf(history, newerFromServer).get('judge'),
+    '2026-10-17T07:00:00.000Z',
+    '★ 服务端给出更新时刻时必须采用它（它是"刚刚出勤"的直接证据）',
+  );
+});
+
+test('★ 服务端形状的容错：坏行被跳过，不能让整块时刻变成脏数据', () => {
+  /*
+   * 服务端响应是**网络来的东西**，不能假设它符合预期形状
+   * （旧版本服务、代理截断、字段改名…）。这一条钉住"坏行跳过、好行照收"。
+   */
+  const map = lastSeenFromServer([
+    { role: 'supervisor', at: '2026-10-17T06:05:00.000Z' },
+    { role: '', at: '2026-10-17T06:05:00.000Z' },
+    { role: 'risk_officer', at: '' },
+    { role: 'reporter', at: '2026-10-17T06:06:00.000Z' },
+  ]);
+  assert.deepEqual(
+    [...map.keys()].sort(),
+    ['reporter', 'supervisor'],
+    '★ 空 role / 空时刻的行必须被丢掉',
+  );
+  /* 完全没有数据时也必须给出一个可用的空 Map（`undefined` 会让调用方崩）。 */
+  assert.equal(lastSeenFromServer(undefined).size, 0);
+  assert.equal(lastSeenFromServer(null).size, 0);
 });

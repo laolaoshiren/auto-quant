@@ -41,6 +41,7 @@ import {
   ownUnrealizedPnlOf,
   positions as positionStore,
   runtimeLogs,
+  RUNTIME_LOG_CAP,
   RUNTIME_LOG_PAGE_DEFAULT,
   settings,
   strategies,
@@ -392,6 +393,116 @@ export const STALE_CYCLE_MULTIPLIER = 2;
  * 下界（`max(周期 × 2, 300s)`），所以它对周期 1 分钟的机器人同样有效。
  */
 export const STARTUP_GRACE_MS = 300_000;
+
+/* -------------------------------------------------------------------------- */
+/*  团队岗位出勤：从日志文本里认出"谁干了活"（2026-10-17 · t111）                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 从一条团队步骤日志里抽出 `{ role, phase, note }`。
+ *
+ * 形如 `[dispatch] supervisor：派出 4 个分析师并行调研`
+ * （由 `manager.ts` 的 `onStep` 写成 `[${phase}] ${role}：${note}`）。
+ *
+ * 解析不出返回 `null` —— **不猜**。
+ *
+ * ## ⚠️ 为什么 `role` 段必须限定成 `[a-z][a-z_]*`
+ *
+ * 角色 id 全是小写下划线（`market_analyst` / `risk_officer`）。
+ * 若用 `.+?`，中文也会被吃进去 —— 而 `runtime_logs` 里**另有**一种以 `[` 开头的行：
+ * ```
+ *   [调研] 新闻未产出：<原因>            ← manager.ts 的猎手日志
+ *   [自检/ai] 模型输出未能解析…          ← selfcheckRunner
+ * ```
+ * 用宽判据会把它们认成"一个叫「新闻未产出」的角色"，然后**点亮编制表上不存在的一行**。
+ * 那是凭空造出一次假出勤，比漏报更糟。
+ */
+export function parseTeamStepLine(
+  message: string,
+): { phase: string; role: string; note: string } | null {
+  const m = /^\[([a-z_]+)\] ([a-z][a-z_]*)[：:]([\s\S]*)$/.exec(message);
+  if (m === null) return null;
+  /*
+   * `note` 去首尾空白：中文冒号写法（`role：note`）本来就没有空格，
+   * 而英文冒号写法（`role: note`）会留下一个 —— 那个前导空格到了界面上
+   * 会让 `[阶段] 产出` 之间多一个缝。两种写法都该得到同一个形状。
+   */
+  return { phase: m[1]!, role: m[2]!, note: m[3]!.trim() };
+}
+
+/**
+ * 从 `cot_trace` 里抽出各角色行的角色名。
+ *
+ * 形如 `- technical（group/team-grunt）：…`（`agent/deskOutput.ts` 造的格式）。
+ *
+ * ⚠️ **与前端 `roster.ts` 的 `lastSeenOf` 是同一个正则，但刻意各写一遍**：
+ * `@aq/web` 与 `@aq/server` 之间没有依赖方向（谁 import 谁都是错的），
+ * 所以没法共用。两边各有一条测试钉住这个格式 —— 改格式时两边都会红。
+ */
+export function parseCotTraceRoles(trace: string): string[] {
+  const roles: string[] = [];
+  for (const m of trace.matchAll(/^- ([a-z_]+)（[^）]*）：/gm)) roles.push(m[1]!);
+  return roles;
+}
+
+/** 一个岗位最近一次被观察到干活的时刻（含来源，便于核对）。 */
+export interface RoleLastSeen {
+  role: string;
+  at: string;
+  source: 'log' | 'cot';
+}
+
+/**
+ * 把两路数据源**合并**成"每个岗位最后一次露面"。
+ *
+ * ## 为什么要两路（这是 t111 那条用户投诉的根因）
+ *
+ * ```
+ *   cot_trace        → 只有进了 <team> 块的角色：分析师 / bull / bear / judge
+ *   runtime_logs     → supervisor / risk_officer / reporter / system_engineer
+ * ```
+ * 只读前者，那后三个角色在界面上**永远显示"待命"** ——
+ * 而线上实测 `supervisor` 在 team 域出现 **31 次**（全系统最多）。
+ *
+ * ## 合并规则：**取较晚者**，同一时刻偏好 `log`
+ *
+ * `log` 是服务端直写的出勤证据（精确到步）；`cot` 是渲染进审计块的文本（精确到轮）。
+ * 同一时刻时用 `log` 更准确。
+ *
+ * ⚠️ **不能"log 无条件覆盖 cot"**：`runtime_logs` 表只有 500 行上限，
+ * 里面可能混着比 `cot` 更旧的行 —— 无条件覆盖会把"刚刚活跃"改写成"3 天前"，
+ * 症状与本次要修的完全一样，只是方向相反。
+ *
+ * @param logs  `runtime_logs` 里与**这一个机器人**相关的行（调用方负责过滤 traderId/scope）
+ * @param cots  `[{ trace, at }]` —— 每条决策记录的 cotTrace 与时刻
+ * @param systemEngineerAt 自检行的时刻（自检日志没有角色名，但确实是 `system_engineer` 在干活）。
+ *   由调用方从 `scope='selfcheck'` 的行里取最大时刻；`null` = 没有自检记录。
+ */
+export function mergeRoleLastSeen(
+  logs: ReadonlyArray<{ message: string; createdAt: string }>,
+  cots: ReadonlyArray<{ trace: string; timestamp: string }>,
+  systemEngineerAt: string | null = null,
+): RoleLastSeen[] {
+  const latest = new Map<string, RoleLastSeen>();
+  const bump = (role: string, at: string, source: 'log' | 'cot'): void => {
+    const prev = latest.get(role);
+    if (prev === undefined || at > prev.at || (at === prev.at && source === 'log')) {
+      latest.set(role, { role, at, source });
+    }
+  };
+
+  for (const line of logs) {
+    const step = parseTeamStepLine(line.message);
+    if (step !== null) bump(step.role, line.createdAt, 'log');
+  }
+  if (systemEngineerAt !== null) bump('system_engineer', systemEngineerAt, 'log');
+
+  for (const c of cots) {
+    for (const role of parseCotTraceRoles(c.trace)) bump(role, c.timestamp, 'cot');
+  }
+
+  return [...latest.values()].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+}
 
 export interface TraderHealth {
   traderId: number;
@@ -2808,6 +2919,179 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       pendingExperiments: agentStoreExperiments.pending(traderId).length,
       /** 累计运行次数 —— 判断"这个机器人到底跑过多少次"。 */
       runCount: agentStoreRuns.countSince(traderId, '1970-01-01T00:00:00Z'),
+    };
+  });
+
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⭐ **一个岗位"最近什么时候干过活" + "它干过的历史"**（2026-10-17 · t111）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 用户报的问题（这是他看到的原话）
+   *
+   * > 「我观察到**很多岗位，似乎从未真正运行过**，页面上也没有显示他们**最新运行时间**」
+   *
+   * ## 根因：界面只读了**一半**的数据源
+   *
+   * `TeamBoard` 的"最近活跃于 X 分钟前"原来只从 `decision_records.cot_trace` 里抽
+   * （`lastSeenOf` 的正则 `- <role>（<model>）：`）。而**只有进了 `<team>` 块的角色**
+   * 才有那种行 —— 实测只有分析师 / `bull` / `bear` / `judge`
+   * （`agent/deskOutput.ts` 里 `lines.push` 的那四处）。
+   *
+   * 于是这三类角色在界面上**永远显示"待命"**，而它们在 `runtime_logs` 里出现得很频繁：
+   * ```
+   *   supervisor     ← 派发阶段，写的是 note('supervisor', …) → runtime_logs(scope='team')
+   *   risk_officer   ← 风控阶段，onStep → runtime_logs(scope='team')
+   *   reporter       ← 汇报阶段，onStep → runtime_logs(scope='team')
+   * ```
+   * 线上实测 `supervisor` 在 team 域出现 **31 次**（全系统最多），界面上却写"待命" ——
+   * **界面在说谎，不是角色没跑**。
+   *
+   * ## 为什么在这里解析 `runtime_logs` 的文本，而不是新加一张表
+   *
+   * 团队每一步都会写一行 `[<phase>] <role>：<note>`（见 `manager.ts` 的 `onStep`），
+   * 自检写的是 `[自检/<source>] …`（`scope='selfcheck'`）。
+   * **两个数据源都已经存在、都已经带 traderId 与时刻** —— 加表或加列意味着迁移，
+   * 而这次要的只是"把已有的东西读出来"。
+   *
+   * ⚠️ 代价是**解析文本**，所以下面两个正则都写成了**锚定形状**而不是"包含子串"：
+   * 团队行的 `role` 段只允许 `[a-z_]+`（角色 id 的既有形状），
+   * 这样 `[调研] 新闻未产出：…`（同样以 `[` 开头的另一种行）不会被误认成角色。
+   *
+   * ## 负向校准（这条判据本身也要可证伪）
+   *
+   * 只有"能解析出角色"才算数：解析不出就**返回空**，让界面退回它原来的判断，
+   * 而不是拿一个猜出来的角色名去点亮编制表 —— 那会造出新的假出勤。
+   */
+
+  /*
+   * 解析与合并逻辑都在**模块级**（`parseTeamStepLine` / `parseCotTraceRoles` /
+   * `mergeRoleLastSeen`）—— 那里是纯函数、可被单元测试直接调用。
+   * 这里不再重复定义（重复就会有两份判据，迟早漂移）。
+   */
+
+  /** 一个岗位最近一次被观察到干活的时刻（含来源，便于核对）。 */
+  type RoleLastSeenLocal = RoleLastSeen;
+
+  /**
+   * 汇总"每个岗位最后一次露面"。
+   *
+   * 合并规则见模块级 `mergeRoleLastSeen()`（那里是纯函数、有单元测试）。
+   * 这里只负责**取数**：把 `runtime_logs` 与 `decision_records` 里
+   * 与本机器人相关的部分挑出来。
+   */
+  const collectLastSeen = (traderId: number, logLimit: number): RoleLastSeenLocal[] => {
+    /*
+     * ① `runtime_logs`：团队步骤 + 自检。
+     *
+     * ⚠️ `runtimeLogs.list()` 是**全局**的（全表最近 N 条），所以必须按
+     * `traderId` 过滤 —— 多机器人共用一个进程时不过滤会把别人的出勤算到这个头上。
+     * 同时接受 `traderId === null` 的行（进程级日志），与 `selfcheckRunner` 的口径一致。
+     */
+    const logs: Array<{ message: string; createdAt: string }> = [];
+    let systemEngineerAt: string | null = null;
+    for (const line of runtimeLogs.list(logLimit)) {
+      if (line.traderId !== traderId && line.traderId !== null) continue;
+      if (line.scope !== 'team' && line.scope !== 'selfcheck') continue;
+      if (line.scope === 'selfcheck') {
+        /*
+         * 自检行没有角色名，但**它确实是 `system_engineer` 在干活**
+         * （`manager.buildSelfCheckAsk()` 用 `tierForRole('system_engineer')`）。
+         * 单独取最大时刻 —— 不能把整行文本塞给 `parseTeamStepLine`，
+         * 那会命中 `[自检/ai] …` → 解析成 null，白跑一遍。
+         */
+        if (systemEngineerAt === null || line.createdAt > systemEngineerAt) {
+          systemEngineerAt = line.createdAt;
+        }
+        continue;
+      }
+      logs.push({ message: line.message, createdAt: line.createdAt });
+    }
+
+    /* ② `decision_records.cot_trace`：进了 `<team>` 块的那些角色。 */
+    const cots: Array<{ trace: string; timestamp: string }> = [];
+    for (const record of decisionStore.list(traderId, DECISION_PAGE_DEFAULT)) {
+      if (typeof record.cotTrace !== 'string' || record.cotTrace.length === 0) continue;
+      cots.push({ trace: record.cotTrace, timestamp: record.timestamp });
+    }
+
+    return mergeRoleLastSeen(logs, cots, systemEngineerAt);
+  };
+
+  /**
+   * 一个岗位的历史工作详情（**只读**）。
+   *
+   * 用户原话：「每个角色**增加一个可点击按钮，点击去以后能看他历史工作详情**」。
+   *
+   * 数据源与 `collectLastSeen` 同两个，但这里**保留全部条目**（不只是最后一次），
+   * 且标明来源：`log` = 服务端直写的步骤日志；`cot` = 那一轮审计块里的产出摘要。
+   */
+  app.get('/api/traders/:id/agent/last-seen', authed, (request) => {
+    const traderId = idOf(request);
+    const parsed = Number((request.query as { limit?: string }).limit ?? RUNTIME_LOG_PAGE_DEFAULT);
+    /* 钳制而不报错 —— 与其它端点同一原则（界面传错不该 500）。 */
+    const logLimit = Number.isFinite(parsed)
+      ? Math.min(Math.max(1, Math.trunc(parsed)), RUNTIME_LOG_CAP)
+      : RUNTIME_LOG_PAGE_DEFAULT;
+
+    return { roles: collectLastSeen(traderId, logLimit) };
+  });
+
+  app.get('/api/traders/:id/agent/:role/steps', authed, (request) => {
+    const traderId = idOf(request);
+    const role = String((request.params as { role: string }).role);
+    /*
+     * 角色 id 只允许 `[a-z_]+`：这条**不是安全边界**（参数是走 SQL 参数化的），
+     * 而是**判据的诚实性** —— 一个含中文/空格的 role 必然匹配不到任何真实行，
+     * 提前返回空比让它去扫一遍表更清楚。
+     */
+    if (!/^[a-z][a-z_]*$/.test(role)) {
+      return { role, steps: [], lastSeenAt: null };
+    }
+
+    const parsed = Number((request.query as { limit?: string }).limit ?? 50);
+    const limit = Number.isFinite(parsed) ? Math.min(Math.max(1, Math.trunc(parsed)), 200) : 50;
+
+    type Step = { at: string; phase: string | null; message: string; source: 'log' | 'cot' };
+    const steps: Step[] = [];
+
+    /* ① 服务端步骤日志（团队 + 自检）。 */
+    for (const line of runtimeLogs.list(RUNTIME_LOG_CAP)) {
+      if (line.traderId !== traderId && line.traderId !== null) continue;
+      if (line.scope !== 'team' && line.scope !== 'selfcheck') continue;
+      const step = parseTeamStepLine(line.message);
+      if (step !== null) {
+        if (step.role === role) {
+          steps.push({ at: line.createdAt, phase: step.phase, message: step.note, source: 'log' });
+        }
+        continue;
+      }
+      /* 自检行归到 `system_engineer`（理由见 `collectLastSeen`）。 */
+      if (line.scope === 'selfcheck' && role === 'system_engineer') {
+        steps.push({ at: line.createdAt, phase: 'selfcheck', message: line.message, source: 'log' });
+      }
+    }
+
+    /* ② 审计块里的角色产出（那一轮它交出的原文摘要）。 */
+    for (const record of decisionStore.list(traderId, DECISION_PAGE_DEFAULT)) {
+      if (typeof record.cotTrace !== 'string' || record.cotTrace.length === 0) continue;
+      for (const line of record.cotTrace.split('\n')) {
+        const m = /^- ([a-z_]+)（[^）]*）：([\s\S]*)$/.exec(line);
+        if (m === null || m[1] !== role) continue;
+        steps.push({ at: record.timestamp, phase: null, message: m[2]!, source: 'cot' });
+      }
+    }
+
+    /* 新的在前 —— 界面点开先看"最近发生了什么"。 */
+    steps.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+    const trimmed = steps.slice(0, limit);
+
+    return {
+      role,
+      /* `total` 让界面能如实说"还有 N 条更早的"（而不是假装这就是全部）。 */
+      total: steps.length,
+      steps: trimmed,
+      lastSeenAt: trimmed.length > 0 ? trimmed[0]!.at : null,
     };
   });
 

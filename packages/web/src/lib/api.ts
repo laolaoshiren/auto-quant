@@ -1012,6 +1012,44 @@ export const api = {
    */
   traderAgentAudit: (id: number, limit = 20, signal?: AbortSignal) =>
     request<AgentAudit>(`/traders/${id}/agent-audit?limit=${limit}`, { signal }),
+  /**
+   * **各岗位"最近一次露面"的时刻**（2026-10-17 · t111）。
+   *
+   * ## 为什么需要这个端点（用户实测报的问题）
+   *
+   * 用户原话：「很多岗位，似乎**从未真正运行过**，页面上也没有显示他们**最新运行时间**」。
+   *
+   * 界面原来只从 `decision_records.cot_trace` 抽角色时刻，而那里**只有进了
+   * `<team>` 块的角色**（分析师 / bull / bear / judge）。`supervisor` /
+   * `risk_officer` / `reporter` 的出勤记在 `runtime_logs`（`scope='team'`）——
+   * 线上 supervisor 出现 31 次，界面上却写"待命"。
+   *
+   * ## 为什么不做成"每个角色一个请求"
+   *
+   * 编制表有 21 个岗位。21 个请求会把这个每次轮询都渲染的组件变成自我 DDoS。
+   * 一次拿全表，前端在内存里按 role 查。
+   */
+  traderAgentLastSeen: (id: number, signal?: AbortSignal) =>
+    request<{ roles: Array<{ role: string; at: string; source: 'log' | 'cot' }> }>(
+      `/traders/${id}/agent/last-seen`,
+      { signal },
+    ),
+  /**
+   * **一个岗位的历史工作详情**（用户要的"可点击按钮 → 看他历史工作详情"）。
+   *
+   * `total` 是**未截断的总数** —— 界面据此如实说"还有 N 条更早的"，
+   * 而不是把 `limit` 截断后的条数当成全部（那是微型的谎）。
+   */
+  traderAgentSteps: (id: number, role: string, limit = 50, signal?: AbortSignal) =>
+    request<{
+      role: string;
+      total: number;
+      steps: Array<{ at: string; phase: string | null; message: string; source: 'log' | 'cot' }>;
+      lastSeenAt: string | null;
+    }>(`/traders/${id}/agent/${encodeURIComponent(role)}/steps`, {
+      query: { limit },
+      signal,
+    }),
   traderAccount: (id: number, signal?: AbortSignal) =>
     request<{
       live: boolean;
