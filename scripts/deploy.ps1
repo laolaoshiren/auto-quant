@@ -35,7 +35,9 @@ param(
     [string]$Server,
     [string]$RemoteDir,
     [string]$PublicUrl,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    # 允许在工作树不干净时部署（见下面「检查工作树是否干净」那段的原因）。
+    [switch]$AllowDirty
 )
 
 $ErrorActionPreference = 'Stop'
@@ -162,6 +164,35 @@ if (-not $SkipBuild) {
     if (-not (Test-Path (Join-Path $repoRoot 'packages/web/dist/index.html'))) {
         throw "packages/web/dist 不存在，无法跳过构建。去掉 -SkipBuild 或先手动构建一次。"
     }
+}
+
+Write-Host "==> 检查工作树是否干净" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# 为什么部署前必须干净（2026-10-17 加，起因是一次真实事故）
+# ---------------------------------------------------------------------------
+# `deploy.ps1` 打包的是**整个工作树**（`tar -C $repoRoot .`），不是 HEAD。
+# 所以工作树脏的时候，线上跑的东西 ≠ `build-info.json` 里的 `commitShort`
+# —— 而 `commitShort` 正是「线上到底是哪一版」的**唯一**答案（服务器没有 .git）。
+#
+# 2026-10-17 15:53 就撞上了：部署时 `t111` 正在工作树里写两个测试文件，
+# 结果线上 `dirty=true`。事后 `t93` 的独立核验不得不**逐个比 8 个文件的 sha256**
+# 才能证明"线上确实等于 303967a"—— 把最硬的判据降级成了人工比对。
+#
+# 默认中止（而不是只告警）：一旦放行过一次，下一次就会变成"反正也能过"。
+# 确实要在脏树上部署时用 `-AllowDirty`，并且那一次的 `dirty` 会如实记进 build-info。
+if (-not $AllowDirty) {
+    $dirtyPaths = @(& git -C $repoRoot status --porcelain)
+    if ($dirtyPaths.Count -gt 0) {
+        Write-Host ""
+        Write-Host "    ✗ 工作树不干净，共 $($dirtyPaths.Count) 项：" -ForegroundColor Red
+        $dirtyPaths | Select-Object -First 12 | ForEach-Object { Write-Host "        $_" -ForegroundColor Red }
+        if ($dirtyPaths.Count -gt 12) { Write-Host "        …（还有 $($dirtyPaths.Count - 12) 项）" -ForegroundColor Red }
+        Write-Host ""
+        Write-Host "    这些改动会一起上线，而 build-info 里的 commitShort 只指向 HEAD。" -ForegroundColor Yellow
+        Write-Host "    先 commit（或 stash）再部署；确实要带着改动上线用 -AllowDirty。" -ForegroundColor Yellow
+        throw "工作树不干净，已中止部署。"
+    }
+    Write-Host "    ✓ 工作树干净"
 }
 
 Write-Host "==> 生成构建信息（build-info.json）" -ForegroundColor Cyan
