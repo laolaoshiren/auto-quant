@@ -2055,6 +2055,13 @@ export function TradesTable({
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
+              {/*
+                ⚠️ **时间列必须在最左**（2026-10-18 · 用户实测）。
+                用户的观察：「历史成交，列表中的时间显示改到最左边，和当前委托、订单记录保持一样」。
+                三张表说的是同一批东西，**同一列在三个标签页里的位置必须一致**，
+                否则切换标签时眼睛要重新找一遍 —— 这是可读性，不是洁癖。
+              */}
+              <th className="th">时间</th>
               <th className="th">交易对</th>
               {/* 方向与杠杆合成一列（`空 5x`）——杠杆只在方向旁边有意义，拆开白占宽度。 */}
               <th className="th">方向 / 杠杆</th>
@@ -2078,15 +2085,6 @@ export function TradesTable({
               {/* 净盈亏与百分比合成一列 —— 它们永远一起看。 */}
               <th className="th text-right">净盈亏 / %</th>
               <th className="th">平仓原因</th>
-              {/*
-                持仓时长与平仓时间合成一列。
-
-                两列都是"这笔是什么时候的"，拆开会把表格撑到 14 列（含新增的保证金占用）——
-                在常见分辨率下最后一列（平仓时间）需要左右拖动才看得全，
-                而那正是操作者最常核对的一列。合成 `3 分 · 09-17 01:44`
-                读起来更顺，且直接省掉一整列宽度。
-              */}
-              <th className="th text-right">持仓 / 平仓时间</th>
             </tr>
           </thead>
           <tbody>
@@ -2107,6 +2105,16 @@ export function TradesTable({
                   className="row-hover"
                   data-row-id={trade.id}
                 >
+                  {/*
+                    ★ 时间列在第一（与「当前委托」「订单记录」两个标签页一致）。
+                    原先它合并在最后一列（`持仓 / 平仓时间`），但用户实测后要求统一到最左：
+                    「历史成交，列表中的时间显示改到最左边，和当前委托、订单记录保持一样」。
+                    持仓时长仍然保留在这格（`3 时 42 分 · 10-18 04:14:04`），信息没丢。
+                  */}
+                  <td className="td whitespace-nowrap text-ink-mid">
+                    {fmtDuration(trade.holdMinutes)}
+                    <span className="text-ink-faint"> · {fmtDateTime(trade.closedAt)}</span>
+                  </td>
                   <td className="td font-semibold text-ink-hi">
                     <div className="flex items-center gap-1.5">
                       <SymbolCell symbol={trade.symbol} onSelect={onSelectSymbol} tone={symbolTones.get(trade.symbol)} />
@@ -2191,10 +2199,7 @@ export function TradesTable({
                       {closeReasonLabel(trade.closeReason, trade.netPnl)}
                     </span>
                   </td>
-                  <td className="td num text-right whitespace-nowrap">
-                    {fmtDuration(trade.holdMinutes)}
-                    <span className="text-ink-faint"> · {fmtDateTime(trade.closedAt)}</span>
-                  </td>
+                  {/* 时间列已挪到最左（见 tbody 第一格）—— 这里不再重复。 */}
                 </tr>
               );
             })}
