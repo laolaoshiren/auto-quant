@@ -478,6 +478,210 @@ test('★ 重建数量与本地差得太远时，数量【与金额】都保留�
 });
 
 /* -------------------------------------------------------------------------- */
+/*  「修正 N 笔」不能虚报：内部拒绝了改动时，调用方也不许 +1                        */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 边界存疑时 `applyExchangeFigures` 必须自报"什么都没改" —— 否则对账计数虚报', () => {
+  /*
+   * ## 线上实测（用户报：「每次都是修正 50 笔」）
+   *
+   * `bookClosedPosition()` 与 `reconcileTradeHistory()` 都会调 `applyExchangeFigures()`
+   * 去"把交易所的权威口径修正到已有那一行上"，然后 `corrected += 1`。而那个函数**有权
+   * 整笔拒绝**：当重建出的"腿"边界不可信时（见它自己的注释与 `#10 MANAUSDT` 的现场），
+   * 它把数量、金额、价位**全部保留本地**，一行都不覆盖。
+   *
+   * 于是：**内部拒绝了改动，外部却照样记了一笔"已修正"** —— 每一轮对账都报同一个数，
+   * 而账本一个字都没变。这比不计更糟：操作员以为对账在正常工作，就没有动机去追
+   * 「为什么每一轮都要修正同样那 50 笔」。
+   *
+   * ## 契约
+   *
+   * 返回值必须是**观测事实**：`applied: false` 表示"这一行没被改动"，
+   * 调用方只能据此计数。本用例用 `#10` 的真实形状（`336 → 168+168` 的部分平仓腿）
+   * 钉住它 —— 那个形状正是"重建把整段看成一个 336 的腿，而本地只有 168"。
+   */
+  traderId = seedTrader();
+
+  /* 运行期记下的那一行：本地成交量 168（真实成交的第一笔部分平仓）。 */
+  const { id } = tradeStore.insert({
+    traderId,
+    symbol: 'MANAUSDT',
+    side: 'long',
+    quantity: 168,
+    entryPrice: 0.104,
+    exitPrice: 0.11074,
+    leverage: 3,
+    openedAt: '2026-10-03T04:08:16.000Z',
+    closedAt: '2026-10-03T05:27:06.000Z',
+    closeReason: 'stop_loss',
+    grossPnl: 1.13232,
+    entryFee: 0.0,
+    exitFee: 0.0,
+    fundingFee: 0,
+    source: 'bot',
+  });
+
+  /* 重建给出的整段腿：336（= 168 + 168，即两笔部分平仓之和）。 */
+  const write = tradeStore.applyExchangeFigures({
+    id,
+    grossPnl: 1.54056,
+    entryFee: 0.1,
+    exitFee: 0.1,
+    fundingFee: 0,
+    entryPrice: 0.104,
+    exitPrice: 0.10859,
+    quantity: 336,
+    leverage: 3,
+    entryOrderId: null,
+    exitOrderId: null,
+  });
+
+  assert.equal(
+    write.applied,
+    false,
+    '★★★ 336 vs 168 差 2 倍 ⇒ 内部保留本地、整行不覆盖，返回值必须说"没改"',
+  );
+  assert.equal(write.keptLocalQuantity, 168, '保留下来的是本地成交量，调用方要能把它报出来');
+
+  const row = getDb().get<{ quantity: number; fee: number; pnl: number; net_pnl: number }>(
+    'SELECT quantity, fee, pnl, net_pnl FROM trades WHERE id = ?',
+    id,
+  )!;
+  assert.equal(row.quantity, 168, '数量必须仍是本地值（没被 336 覆盖）');
+  assert.ok(Math.abs(row.fee - 0) < 1e-12, '手续费也必须仍是本地值（没被重建的 0.2 覆盖）');
+  assert.ok(Math.abs(row.pnl - 1.13232) < 1e-9, '毛盈亏必须仍是本地值（不得变成两笔之和 1.54056）');
+
+  /*
+   * 对照：**数量可信**（1.5 倍以内）时它必须自报"改了" ——
+   * 否则这条守卫会变成"无论如何都说没改"，那只是把虚报换成漏报。
+   */
+  const changed = tradeStore.applyExchangeFigures({
+    id,
+    grossPnl: 1.14056,
+    entryFee: 0.05,
+    exitFee: 0.05,
+    fundingFee: 0,
+    entryPrice: 0.104,
+    exitPrice: 0.11074,
+    quantity: 168,
+    leverage: 3,
+    entryOrderId: null,
+    exitOrderId: null,
+  });
+  assert.equal(changed.applied, true, '★ 数量一致时必须说"改了"，否则调用方的计数会反向虚报');
+  const after = getDb().get<{ fee: number; pnl: number }>('SELECT fee, pnl FROM trades WHERE id = ?', id)!;
+  assert.ok(Math.abs(after.fee - 0.1) < 1e-12, '这一次应当真的被覆盖成 0.1');
+  assert.ok(Math.abs(after.pnl - 1.14056) < 1e-9, '毛盈亏也应当真的被覆盖');
+});
+
+test('★★★ 边界存疑的行【也必须】落 exit_order_id —— 早退会让判重身份永久丢失（P0 回归）', () => {
+  /*
+   * ## 这条接的是什么（t84 交叉巡检抓到的、我自己引入的回归）
+   *
+   * 修「修正 N 笔」虚报时，我给 `applyExchangeFigures()` 加了一句**早退**：
+   *
+   * ```ts
+   *   if (keepLocalQuantity) return { applied: false, … };   // ❌ 第一版
+   * ```
+   *
+   * 而那段 UPDATE 的最后两行是：
+   *
+   * ```sql
+   *     entry_order_id = COALESCE(?, entry_order_id),
+   *     exit_order_id  = COALESCE(?, exit_order_id)
+   * ```
+   *
+   * 早退 ⇒ 这两行**永不可达** ⇒ "边界存疑"的行**永久失去身份**。
+   * 而 `exit_order_id` 是 `findDuplicate()` 里**唯一确定性的判重身份**，也是
+   * `trades.insert({ idempotent: true })` 唯一的去重入口 —— 失去它，
+   * 同一回合就可能被记两次。**这正是 `exit_order_id` 当年被引入要关掉的东西**：
+   * `dedup.test.ts:24-34` 记着「平台记的净额比交易所流水多出 **1.51 USDT**，六组重复」，
+   * 以及 ZECUSDT `#107`/`#120` 那对共用同一个 `exit_order_id`、却因时间窗差 6 秒被判成两个回合的行。
+   *
+   * ## 契约
+   *
+   * 「边界存疑」只拒绝 **金额 / 数量 / 价位**（那个"腿"的边界是错的）；
+   * **两个单号列必须照常回填** —— `COALESCE` 本来就是"有值才覆盖"，回填永远安全。
+   */
+  traderId = seedTrader();
+  seedOrder({ index: 1, status: 'FILLED', purpose: 'entry' });
+
+  /* 运行期记下的那一行：本地 168，`exit_order_id` 当时还没拿到（止损触发时是常态）。 */
+  const { id } = tradeStore.insert({
+    traderId,
+    symbol: 'MANAUSDT',
+    side: 'long',
+    quantity: 168,
+    entryPrice: 0.104,
+    exitPrice: 0.11074,
+    leverage: 3,
+    openedAt: '2026-10-03T04:08:16.000Z',
+    closedAt: '2026-10-03T05:27:06.000Z',
+    closeReason: 'stop_loss',
+    grossPnl: 1.13232,
+    entryFee: 0,
+    exitFee: 0,
+    fundingFee: 0,
+    source: 'bot',
+    entryOrderId: 'EX-1',
+    exitOrderId: null,
+  });
+
+  /* 重建把整段看成一个 336 的腿（数量差 2 倍 ⇒ 边界存疑），但它带着交易所的两个单号。 */
+  const write = tradeStore.applyExchangeFigures({
+    id,
+    grossPnl: 1.54056,
+    entryFee: 0.1,
+    exitFee: 0.1,
+    fundingFee: 0,
+    entryPrice: 0.104,
+    exitPrice: 0.10859,
+    quantity: 336,
+    leverage: 3,
+    entryOrderId: 'EX-1',
+    exitOrderId: 'EX-2',
+  });
+
+  assert.equal(write.applied, false, '前提：336 vs 168 差 2 倍 ⇒ 边界存疑（金额/数量/价位拒绝）');
+
+  const row = getDb().get<{ exit_order_id: string | null; entry_order_id: string | null; quantity: number }>(
+    'SELECT exit_order_id, entry_order_id, quantity FROM trades WHERE id = ?',
+    id,
+  )!;
+  assert.equal(
+    row.exit_order_id,
+    'EX-2',
+    '★★★ 边界存疑的行也必须落 `exit_order_id` —— 它是 `findDuplicate()` 唯一的确定性判重身份，' +
+      '丢了它就等于把这一行永久排除在去重之外（重复记账 = 凭空多出一份盈亏）',
+  );
+  assert.equal(row.entry_order_id, 'EX-1', '★ 入场单号同样要保住（它进 `byKey` 严格键）');
+  assert.equal(row.quantity, 168, '★ 数量仍保留本地（拒绝只针对金额/数量/价位）');
+
+  /* ---- 决定性的对照：同一个形状，带单号 vs 不带单号 ---- */
+  const shared = {
+    traderId,
+    symbol: 'MANAUSDT',
+    quantity: 100,
+    entryPrice: 1,
+    exitPrice: 0.11074,
+    openedAt: '2026-01-01T00:00:00.000Z',
+    closedAt: '2026-01-01T01:00:00.000Z',
+    /* ⚠️ 时间窗与价格刻意**全部落在容差之外** —— 逼着判据只能靠单号命中。 */
+  } as const;
+
+  assert.equal(
+    tradeStore.findDuplicate({ ...shared, exitOrderId: 'EX-2' }),
+    id,
+    '★★★ 有单号时：必须命中那一行（这就是上面那条回填的价值）',
+  );
+  assert.equal(
+    tradeStore.findDuplicate({ ...shared, exitOrderId: null, entryOrderId: null }),
+    null,
+    '★★ 对照组：同一个形状**不带单号**时判据落空 ⇒ 它会插成第二行（t84 报的 B/C 形状）',
+  );
+});
+
+/* -------------------------------------------------------------------------- */
 /*  限价入场转正：已有一行 open 时的合并                                          */
 /* -------------------------------------------------------------------------- */
 

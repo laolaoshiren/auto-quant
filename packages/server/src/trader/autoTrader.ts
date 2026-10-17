@@ -2269,7 +2269,13 @@ export class AutoTrader {
    * book) before the correction pass reads the ledger — so the pass corrects
    * rather than races.
    */
-  async runReconcile(): Promise<{ recovered: number; corrected: number; funding: number }> {
+  async runReconcile(): Promise<{
+    recovered: number;
+    corrected: number;
+    correctedAttempted: number;
+    correctedKept: number;
+    funding: number;
+  }> {
     const idle = await this.waitForIdle();
     if (!idle) {
       // The cycle is stuck on something slow rather than finished. Skipping is
@@ -2329,7 +2335,7 @@ export class AutoTrader {
           `[${this.deps.trader.name}] 对账被跳过时结清陈旧委托失败（不影响本周期交易）：${(error as Error).message}`,
         );
       });
-      return { recovered: 0, corrected: 0, funding: 0 };
+      return { recovered: 0, corrected: 0, correctedAttempted: 0, correctedKept: 0, funding: 0 };
     }
     return this.reconcileTradeHistory();
   }
@@ -6314,7 +6320,18 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     full = true,
   ): Promise<{
     recovered: number;
+    /** **真的**按交易所口径覆盖了已有行的笔数（不是"尝试过"的笔数）。 */
     corrected: number;
+    /**
+     * 尝试修正的总笔数（撞上已有行的次数）。
+     *
+     * ⚠️ 与 `corrected` 分开：`applyExchangeFigures` 在"重建腿边界不可信"时会**整笔
+     * 拒绝**，那种情况计入 `correctedKept`。三者满足
+     * `correctedAttempted === corrected + correctedKept`。
+     */
+    correctedAttempted: number;
+    /** 因"腿边界存疑、保留本地口径"而**没能覆盖**的笔数（判不出来的那些）。 */
+    correctedKept: number;
     funding: number;
     /** 不属于本平台任何机器人的成交笔数（外部活动）。 */
     foreignRounds: number;
@@ -6465,6 +6482,26 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
 
     let recovered = 0;
     let corrected = 0;
+    /**
+     * 本轮**尝试**修正的笔数，与其中**被判"边界存疑、保留本地"**的笔数。
+     *
+     * ## 为什么必须分开数（2026-10-17，用户报「每次都是修正 50 笔」）
+     *
+     * `corrected` 原来数的是"调用过 `applyExchangeFigures` 几次"，而那个函数**有权
+     * 整笔拒绝**（重建出的"腿"边界不可信时不覆盖数量、金额与价位）。于是线上每轮
+     * 都报"修正 50 笔"，实际一行都没变 —— 一个恒定的假数字，把"每一轮都在重复
+     * 尝试同一批判不出来的回合"这件真事藏了整整一轮迭代。
+     *
+     * 现在三个数各有意义：
+     *   · `correctedAttempted` —— 撞上已有行的次数（**尝试**）；
+     *   · `corrected`          —— 真的按交易所口径覆盖了的（**生效**）；
+     *   · `keptForBoundary`    —— 因边界存疑整行保留本地的（**判不出来**）。
+     *
+     * ⚠️ 第三个数是**结论的一部分**，不是噪音：`attempted == keptForBoundary` 意味着
+     * 这一轮的修正全军覆没，而日志必须让操作员一眼看见这一点（见函数末尾那条日志）。
+     */
+    let correctedAttempted = 0;
+    let keptForBoundary = 0;
     let fundingTotal = 0;
     /*
      * 诊断计数器 —— 定位"外部净额"与交易所流水那 0.2 差额到底丢在哪一步。
@@ -6732,7 +6769,21 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
             );
           }
 
-          tradeStore.applyExchangeFigures({
+          /*
+           * ⚠️ **「修正」的计数必须是"真的改了"，不是"试过了"。**
+           *
+           * 线上实测（用户报「每次都是修正 50 笔」）：这一行原来无条件 `corrected += 1`，
+           * 而 `applyExchangeFigures` 在 `keepLocalQuantity` 为真时**整行都不覆盖**（内部
+           * 早退）—— 于是日志每次都说"修正了 50 笔"，而账本一个字都没变。
+           * 计数虚报比不计更糟：操作员以为对账在正常工作，就没动机去追
+           * 「为什么每一轮都要修正同样那 50 笔」（那 50 笔的"腿边界"每次都不可信）。
+           *
+           * 所以分成两个数：`corrected` = 真正生效的，`keptForBoundary` = 被判"边界存疑、
+           * 保留本地"的。后者不是失败，而是**必须上报的第三种结果** ——
+           * 操作员要知道"有多少笔是判不出来的"。
+           */
+          correctedAttempted += 1;
+          const figureWrite = tradeStore.applyExchangeFigures({
             id: existingId,
             grossPnl: trip.grossPnl,
             entryFee: fees.entryFee,
@@ -6745,7 +6796,8 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
             entryOrderId: trip.entryOrderId || null,
             exitOrderId: trip.exitOrderId || null,
           });
-          corrected += 1;
+          if (figureWrite.applied) corrected += 1;
+          else keptForBoundary += 1;
           /*
            * The row now owns this entry order, so it moves out of the
            * description-only index — otherwise a later identical-looking
@@ -6893,7 +6945,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
            * 持仓行记的，数量与手续费口径都比成交记录粗；不修正，账本就停在一个
            * 与账户对不上的数字上。
            */
-          tradeStore.applyExchangeFigures({
+          const figureWrite = tradeStore.applyExchangeFigures({
             id: booked.id,
             grossPnl: trip.grossPnl,
             entryFee: trip.entryFee,
@@ -6906,8 +6958,19 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
             entryOrderId: trip.entryOrderId || null,
             exitOrderId: trip.exitOrderId || null,
           });
+          /*
+           * ⚠️ 与上面那条 `applyExchangeFigures` 同一个口径（见 `correctedAttempted` 的说明）：
+           * **只有真的覆盖了才算"生效"**。这一条的日志原来固定说"只修正不重复插入"，
+           * 而在"边界存疑"时它其实一个字都没改 —— 一句话把两种完全不同的结果说成了一种。
+           */
+          correctedAttempted += 1;
+          if (figureWrite.applied) corrected += 1;
+          else keptForBoundary += 1;
           log.debug(
-            `[${this.deps.trader.name}] 对账发现 ${symbol} 的这一回合已在账上（第 #${booked.id} 笔），只修正不重复插入。`,
+            `[${this.deps.trader.name}] 对账发现 ${symbol} 的这一回合已在账上（第 #${booked.id} 笔）：` +
+              (figureWrite.applied
+                ? '已按交易所口径修正，不重复插入。'
+                : `重建出的腿边界不可信（重建 ${trip.quantity} vs 本地 ${figureWrite.keptLocalQuantity}）—— 本轮未覆盖它，继续保留本地口径。`),
           );
           continue;
         }
@@ -7031,9 +7094,34 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       }
     }
 
-    if (recovered > 0 || corrected > 0) {
+    /*
+     * ⚠️ **这条日志必须能区分三种结果，而不是只报一个笼统的"修正 N 笔"。**
+     *
+     * 线上实测的形状（用户报「每次都是修正 50 笔」）：`corrected` 原本数的是"试过几次"，
+     * 而其中**每一笔都被内部拒掉**（重建腿边界不可信 ⇒ 整行保留本地）—— 于是操作员
+     * 看到的是一个恒定的假数字，而真相是"这 50 笔每一轮都判不出来"。
+     *
+     * 所以：尝试 / 生效 / 判不出来，三个数都要在日志里。第三个数不是失败，而是
+     * **需要人来判断的边界**（要么重建窗口不够，要么本地那一行才是对的）——
+     * 只要它非零，下一轮还会撞上同一批，这条日志就该让人一眼看出"账本没有被修正"。
+     */
+    if (recovered > 0 || corrected > 0 || keptForBoundary > 0) {
       log.info(
-        `[${this.deps.trader.name}] 对账完成：补录 ${recovered} 笔，修正 ${corrected} 笔，资金费合计 ${fundingTotal.toFixed(6)} USDT`,
+        `[${this.deps.trader.name}] 对账完成：补录 ${recovered} 笔，` +
+          `尝试修正 ${correctedAttempted} 笔（生效 ${corrected} 笔 · 因边界存疑保留本地 ${keptForBoundary} 笔），` +
+          `资金费合计 ${fundingTotal.toFixed(6)} USDT`,
+      );
+    }
+    if (keptForBoundary > 0 && corrected === 0) {
+      /*
+       * 全军覆没才升级成 warn：这一轮**号称在修正、实际一笔都没改**。
+       * 只报 info 会让它混在正常的"修正 N 笔"里看不出异常（那正是这次要修的病灶）。
+       */
+      log.warn(
+        `[${this.deps.trader.name}] 本轮对账尝试修正 ${correctedAttempted} 笔，` +
+          `但**一笔都没真的生效** —— 全部因"重建腿边界存疑"保留本地口径。` +
+          '这通常意味着成交历史的窗口起点落在持仓中间（重建把开/平判反、整条序列错位），' +
+          '或是这些行本来就是对的而重建是错的。请对照交易所成交明细核查，不要当它已经修好了。',
       );
     }
 
@@ -7382,6 +7470,8 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     return {
       recovered,
       corrected,
+      correctedAttempted,
+      correctedKept: keptForBoundary,
       funding: fundingTotal,
       foreignRounds: foreign.length,
       foreignNet,

@@ -2964,6 +2964,21 @@ export const trades = {
    * costs it only partly captured: the live path records the exit commission at
    * the moment of closing, so the entry leg's commission was missing and every
    * historical fee was understated by roughly half.
+   *
+   * ## 返回值：**它到底改没改**（2026-10-17 修「修正 N 笔」虚报）
+   *
+   * 这个函数**有权拒绝整笔改动**（见下面 `keepLocalQuantity` 那段：重建出的"腿"
+   * 边界不可信时，数量与金额一并不覆盖）。而调用方原来把它当"改过了"来计数，
+   * 于是线上每次对账都报「修正 50 笔」，实际账本一个字都没变 ——
+   * 操作员误以为对账在工作，也没动机去追"为什么每轮都要修正同样那 50 笔"。
+   *
+   * 所以它现在返回**观测到的结果**：
+   *   · `applied: true`  → 这一行的金额/数量/价位确实按交易所口径覆盖了；
+   *   · `applied: false` → 因为 `keepLocalQuantity`（边界存疑）整行没动，
+   *     `keptLocalQuantity` 是保留下来的本地成交量，供调用方把 `K` 报清楚。
+   *
+   * ⚠️ 调用方只能拿它**计数**，不能把它当成"这笔回合已经处理完了"的信号 ——
+   * 被拒的那一行下一轮还会再撞一次同样的判断（那正是它值得被上报的原因）。
    */
   applyExchangeFigures(input: {
     id: number;
@@ -2977,7 +2992,7 @@ export const trades = {
     leverage: number;
     entryOrderId: string | null;
     exitOrderId: string | null;
-  }): void {
+  }): { applied: boolean; keptLocalQuantity: number } {
     const fee = input.entryFee + input.exitFee;
     const netPnl = netPnlOf({ grossPnl: input.grossPnl, fee, fundingFee: input.fundingFee });
 
@@ -3031,6 +3046,37 @@ export const trades = {
       );
     }
 
+    /*
+     * ⚠️ **`keepLocalQuantity` 为真时这一行什么都没改** —— 所以要把它**报出去**。
+     *
+     * 线上实测的形状（用户报「每次都是修正 50 笔」）：本函数内部把改动整个拒掉，
+     * 而调用方仍然 `corrected += 1` —— 于是那条日志每次都说"修正了 50 笔"，
+     * 而账本**一个字都没变**。计数虚报比不计更糟：它让操作员以为对账在工作，
+     * 于是没有动机去查"为什么每轮都要修正同样 50 笔"。
+     *
+     * 返回值是**观测事实**（`applied` = 是否真的执行了覆盖），不是"调用与否"：
+     * 调用方只能用它来计数，不能反过来把它当成成功标志。
+     *
+     * ## ⚠️⚠️ 边界存疑时也**必须**跑 UPDATE —— 那里还回填着两个单号（P0 回归的教训）
+     *
+     * 我第一版把"拒绝"写成**早退**（`if (keepLocalQuantity) return …;`），
+     * 结果那段 UPDATE 里最后两行**永不可达**：
+     *
+     * ```sql
+     *     entry_order_id = COALESCE(?, entry_order_id),
+     *     exit_order_id  = COALESCE(?, exit_order_id)
+     * ```
+     *
+     * 而 `exit_order_id` 是 `findDuplicate()` 里**唯一确定性的判重身份**
+     * （见 `findDuplicate()` 的说明与 `dedup.test.ts:24-34`：「平台记的净额比交易所
+     * 流水多出 1.51 USDT，六组重复」），也是 `trades.insert({ idempotent: true })`
+     * 唯一的去重入口。**旧代码在这条路上仍然回填单号**；早退之后这一类行永久失去身份
+     * ⇒ 去重失效 ⇒ 同一回合可能被记两次 —— 这正是 `exit_order_id` 当年被引入要关掉的东西。
+     *
+     * 所以"拒绝"只作用在**金额/数量/价位**这些列上（用 `keep` 开关），
+     * 单号两列**照常回填**：`COALESCE` 本来就是"有值才覆盖"，回填永远是安全的。
+     */
+
     const margin = marginOf(input.entryPrice, quantity, input.leverage);
     /*
      * `quantity` 与 `pnl_percent` 都由交易所在**同一笔成交记录**里给出，所以要一起写。
@@ -3040,9 +3086,12 @@ export const trades = {
      * 与交易所的成交记录对不上，而 §2.5 要求的正是"平台记录能与交易所对得上"。
      * 本次修幂等时正是靠这一列才把同一回合的两条路径收敛到同一个数字上。
      *
-     * ⚠️ **`keepLocalQuantity` 为真时整行都不覆盖**（金额 + 数量 + 价位）——
+     * ⚠️ **`keepLocalQuantity` 为真时金额/数量/价位不覆盖** ——
      * 那个"腿"的边界是错的，它的金额可能是多个回合的合计，写进来就是重复记账。
      * 见上面那段 2026-10-03 的说明。`CASE WHEN ?` 的写法避免在 JS 里拼两份语句。
+     *
+     * ⚠️ 但**两个单号列不在 `keep` 的控制范围内**（见方法头那段 P0 说明）：
+     * 它们是判重身份，边界存疑时必须照常回填。
      */
     const keep = keepLocalQuantity ? 1 : 0;
     getDb().run(
@@ -3081,6 +3130,18 @@ export const trades = {
       input.exitOrderId,
       input.id,
     );
+
+    /*
+     * ⚠️ 这条返回语句**必须在 UPDATE 之后**（不能再写成早退）——
+     * UPDATE 里除了金额/数量/价位，还回填着 `entry_order_id` / `exit_order_id`，
+     * 而后者是 `findDuplicate()` 唯一的确定性判重身份。早退会让那两行永不可达，
+     * 于是"边界存疑"的行永久失去身份 ⇒ 去重失效（见方法头那段 P0 回归的说明）。
+     *
+     * 计数语义：`applied` 回答的是"**这一轮有没有被拒掉**"，不是"字节有没有变" ——
+     * 写进去的值刚好与原来逐字段相同时也算生效（账本确实被写成了交易所口径）。
+     */
+    if (keepLocalQuantity) return { applied: false, keptLocalQuantity: quantity };
+    return { applied: true, keptLocalQuantity: 0 };
   },
 
   /**

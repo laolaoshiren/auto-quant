@@ -3346,7 +3346,21 @@ export class TraderManager {
    */
   async reconcileTrader(
     traderId: number,
-  ): Promise<{ recovered: number; corrected: number; funding: number }> {
+  ): Promise<{
+    recovered: number;
+    corrected: number;
+    /**
+     * 尝试修正的笔数与其中"因边界存疑保留本地"的笔数 —— 见
+     * `AutoTrader.reconcileTradeHistory()` 的返回值说明。
+     *
+     * ⚠️ 这两个数必须一路透传到操作员看得见的那条日志：只报 `corrected` 时，
+     * 一个恒定的假数字（"每次都是修正 50 笔"）会把"每一轮都在重复尝试同一批
+     * 判不出来的回合"这件事藏起来。
+     */
+    correctedAttempted: number;
+    correctedKept: number;
+    funding: number;
+  }> {
     const trader = traders.get(traderId);
     if (!trader) throw new Error('机器人不存在。');
 
@@ -3562,9 +3576,17 @@ export class TraderManager {
    * One trader failing must not stop the others — a single bad credential would
    * otherwise leave every other book uncorrected.
    */
-  async reconcileAllTraders(): Promise<{ traders: number; recovered: number; corrected: number }> {
+  async reconcileAllTraders(): Promise<{
+    traders: number;
+    recovered: number;
+    corrected: number;
+    correctedAttempted: number;
+    correctedKept: number;
+  }> {
     let recovered = 0;
     let corrected = 0;
+    let correctedAttempted = 0;
+    let correctedKept = 0;
     let count = 0;
 
     for (const trader of traders.list()) {
@@ -3572,18 +3594,54 @@ export class TraderManager {
         const result = await this.reconcileTrader(trader.id);
         recovered += result.recovered;
         corrected += result.corrected;
+        correctedAttempted += result.correctedAttempted;
+        correctedKept += result.correctedKept;
         count += 1;
       } catch (error) {
         log.warn(`机器人「${trader.name}」启动对账跳过：${(error as Error).message}`);
       }
     }
 
-    if (recovered > 0 || corrected > 0) {
-      log.warn(`启动对账完成：${count} 个机器人，补录 ${recovered} 笔，修正 ${corrected} 笔`);
+    /*
+     * ⚠️ **这条是操作员真正看到的那条**（启动时 + 控制台「立即对账」）。
+     *
+     * 2026-10-17 之前它写的是「修正 ${corrected} 笔」，而 `corrected` 当时数的是
+     * "调用过 `applyExchangeFigures` 几次" —— 那些调用**每一笔都可能被内部整笔拒绝**
+     * （重建腿边界不可信 ⇒ 保留本地口径）。于是它长期显示一个恒定的
+     * 「修正 50 笔」，而账本一个字都没变（用户原话：「每次都是修正 50 笔」）。
+     *
+     * ## ⚠️ 为什么"只改日志"也值得单独一个提交（这段理由必须留着）
+     *
+     * 这次改动**不改变账本数字**（被拒的行仍然被拒）—— 它只修"报告"，不改"判定"。
+     * 换句话说：
+     *
+     * > **这不是新故障，而是把一直存在的故障第一次说明白。**
+     *
+     * 报告与实际动作不符，本身就是一类缺陷（"报了一个没有发生的动作"），
+     * 而它的代价恰恰是**让真正的问题不可见**：一个恒定的「修正 50 笔」读起来像
+     * "对账在正常工作"，于是没有人会去追「为什么每一轮都要修正同样那 50 笔」。
+     * 先把真相说出来，再决定要不要动判定 —— 两者是不同严重度的问题，不要混在一个提交里。
+     *
+     * 现在三个数分开：尝试 / 生效 / 判不出来。第三种必须显式出现 ——
+     * 它不是失败，而是"需要人来判断的边界"，且下一轮还会撞上同一批。
+     */
+    if (recovered > 0 || corrected > 0 || correctedKept > 0) {
+      log.warn(
+        `启动对账完成：${count} 个机器人，补录 ${recovered} 笔，` +
+          `尝试修正 ${correctedAttempted} 笔（生效 ${corrected} 笔 · 因边界存疑保留本地 ${correctedKept} 笔）`,
+      );
     } else {
       log.info(`启动对账完成：${count} 个机器人，账目无需修正`);
     }
-    return { traders: count, recovered, corrected };
+    if (correctedKept > 0 && corrected === 0) {
+      log.warn(
+        `启动对账：尝试修正 ${correctedAttempted} 笔，**一笔都没真的生效** —— ` +
+          '全部因"重建腿边界存疑"保留本地口径。这通常意味着成交历史的窗口起点落在持仓中间' +
+          '（重建把开/平判反、整条序列错位），或这些行本来就是对的而重建是错的；' +
+          '请对照交易所成交明细核查，不要当成已经修好了。',
+      );
+    }
+    return { traders: count, recovered, corrected, correctedAttempted, correctedKept };
   }
 
   /** Stop everything — used on shutdown, and by the global kill switch. */
