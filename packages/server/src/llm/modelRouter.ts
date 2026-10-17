@@ -129,6 +129,50 @@ export interface ModelRouterOptions {
  * **实测依据**：`gpt-6-astra` 在 `max_tokens=16/128` 时返回 `content: null` +
  * `reasoning=435/475`（思维链把预算吃光了），到 512 才正常吐字。
  * 所以对 `reasoning: true` 的模型，预算必须放大。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ *  ⚠️⚠️ **放大的前提是"知道它是思维链模型" —— 而 T1_fast 链上的候选不在档案里**
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * 线上实测（2026-10-17 16:37:36，团队 #11，`T1_fast` 档 4 个候选全灭）：
+ * ```
+ *   opencode-zen-free/beam-free         → 输出被 token 上限截断（思维链占满了预算）
+ *   opencode-zen-free/beam-free         → 同上（重试一次仍失败）
+ *   opencode-zen-free/space-bunny-free  → 同上
+ *   group/auto-space-bunny-free         → 同上
+ * ```
+ *
+ * ## 根因：**`profileOf()` 对不在 `MODEL_PROFILES` 里的模型返回 `undefined`**
+ *
+ * 而 `budgetFor()` 的第一行是 `if (profile?.reasoning !== true) return baseMaxTokens;`
+ * ⇒ **未登记的模型一律不放大**，不管它实际上是不是思维链模型。
+ *
+ * `T1_fast` 链上 5 个候选里，**只有 `space-bunny-free` 在 `MODEL_PROFILES` 里**；
+ * 其余 4 个（`beam-free` / `group/auto-space-bunny-free` / `group/team-grunt` /
+ * `group/team-analyst`）都不在 —— 而它们**全部会写思维链**。
+ *
+ * ## 服务器侧量化（2026-10-17，28,500 字符材料，`beam-free`）
+ *
+ * ```
+ *   max_tokens=1024 → finish=length · ct=1024 · reasoning=1023 · content=  0 字  ← 线上实际发的预算
+ *   max_tokens=2048 → finish=length · ct=2048 · reasoning=2047 · content=  0 字  ← 重试翻倍后
+ *   max_tokens=4096 → finish=stop   · ct=3654 · reasoning=2336 · content=2244 字  ✅
+ * ```
+ * **⇒ 1024 与 2048 都被思维链吃光（content=0），4096 才写出正文。**
+ * 而 T1 的基础预算正是 1024（`newscaster`/`sentiment`）或 2048（`technical`），
+ * 重试翻倍后是 2048 或 4096 —— **对 `beam-free` 来说 2048 仍然不够**。
+ *
+ * ## 修法：**未知档案的模型按"可能带思维链"处理**
+ *
+ * 代价与收益：
+ * ```
+ *   放大错的代价：给一个非思维链模型多一倍预算 —— 它自己会 stop，不多花时间
+ *   不放大错的代价：整条链 4 个候选全灭 → 角色缺席 → 决策少一份材料（线上现状）
+ * ```
+ * 这个不对称非常明显，所以默认放大。**宁可多给预算，也不要角色缺席。**
+ *
+ * ⚠️ 只有**明确知道**它不是思维链模型（`reasoning === false`）时才不放大 ——
+ * 那仍然走原路径，行为不变。
  */
 const REASONING_BUDGET_MULTIPLIER = 4;
 
@@ -138,8 +182,24 @@ const REASONING_BUDGET_MULTIPLIER = 4;
  * **只乘一次**（`budgetBoosted` 是单次标记）。不设"反复加倍直到成功"的理由：
  * 那是 MAST 分类法里"步骤重复 15.7%"的形状 —— 预算越大思维链可能写得越长，
  * 收敛不了。**宁可这一次拿不到内容，也不要陷进无界重试。**
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ *  ⚠️ **从 2 提到 4**（2026-10-17 服务器侧实测）
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * 同一材料（28,500 字符）、同一个模型（`beam-free`）：
+ * ```
+ *   1024（线上首次）      → content=  0 字
+ *   2048（×2 重试）       → content=  0 字   ← 旧倍数救不回来
+ *   4096（×4 重试）       → content=2244 字  ✅
+ * ```
+ * ⇒ 旧倍数 2 **在真实材料规模下必然失败**：它把预算从 1024 抬到 2048，
+ * 而思维链本身就要 2047 —— 一个字符的正文都剩不下。
+ *
+ * ⚠️ 仍然**只重试一次**（不改成"反复加倍"）：上面那段 MAST 的理由仍然成立。
+ * 变的是"这一次给多少"，不是"可以试几次"。
  */
-const EMPTY_CONTENT_RETRY_MULTIPLIER = 2;
+const EMPTY_CONTENT_RETRY_MULTIPLIER = 4;
 
 export class ModelRouter {
   private readonly health: ModelHealthRegistry;
@@ -387,8 +447,29 @@ export class ModelRouter {
  *     （`Math.max(base, …)` 保证**永不小于 base**）
  */
 export function budgetFor(profile: ModelProfile | undefined, baseMaxTokens: number): number {
-  if (profile?.reasoning !== true) return baseMaxTokens;
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **`profile === undefined` 时也必须放大**（2026-10-17 修，线上 4 候选全灭）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 原来这一行是 `if (profile?.reasoning !== true) return baseMaxTokens;` ——
+   * 于是**不在 `MODEL_PROFILES` 里的模型一律不放大**，而 `T1_fast` 链上
+   * 5 个候选里有 4 个不在档案里（只有 `space-bunny-free` 在），
+   * 它们**全都写思维链** ⇒ 预算被推理吃光 ⇒ `content=0` ⇒ 整链失败。
+   *
+   * ## 为什么"未知就放大"是对的（代价不对称）
+   *
+   * ```
+   *   放大错的代价：给非思维链模型多一倍预算 —— 它自己 stop，几乎不多花时间
+   *   不放大错的代价：整条链全灭 → 角色缺席 → 决策少一份材料（线上现状）
+   * ```
+   * 所以默认按"可能带思维链"处理。**只有明确 `reasoning === false` 才不放大。**
+   *
+   * ⚠️ 未登记时拿不到 `maxOutputTokens`，所以不夹上限（供应商会自己拒超限请求）。
+   */
+  if (profile !== undefined && profile.reasoning === false) return baseMaxTokens;
   const amplified = baseMaxTokens * REASONING_BUDGET_MULTIPLIER;
+  if (profile === undefined) return amplified;
   if (profile.maxOutputTokens <= 0) return amplified;
   /*
    * `Math.max(baseMaxTokens, …)` 是关键那一半：**下限是原值**。

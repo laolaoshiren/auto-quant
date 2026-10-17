@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 
 import { MODEL_PROFILES, ladderForTier, profileOf, type ModelProfile } from './modelCatalog.js';
 import { ModelHealthRegistry, classifyFailure, pickAvailable } from './modelHealth.js';
@@ -352,6 +353,97 @@ test('★ budgetFor 对【报了上限】的思维链模型仍然放大，但不
   const budget = budgetFor(withLimit, 1000);
   assert.ok(budget > 1000, '★ 应当放大');
   assert.ok(budget <= withLimit.maxOutputTokens, '★ 不超过供应商声明的上限');
+});
+/* -------------------------------------------------------------------------- */
+/*  T1_fast 整链全灭（2026-10-17 线上实测）—— 未登记模型的预算放大               */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 未登记档案的模型【也必须放大】预算 —— 否则整条 T1 链被思维链吃光', () => {
+  /*
+   * ## 线上事故（2026-10-17 16:37:36，团队 #11）
+   *
+   * ```
+   *   并行分析 失败：档位 T1_fast 试了 4 个模型都失败：
+   *     opencode-zen-free/beam-free         → 输出被 token 上限截断（思维链占满了预算）
+   *     opencode-zen-free/beam-free         → 同上（第二次）
+   *     opencode-zen-free/space-bunny-free  → 同上
+   *     group/auto-space-bunny-free         → 同上
+   * ```
+   *
+   * ## 根因
+   *
+   * `budgetFor` 原来是 `if (profile?.reasoning !== true) return baseMaxTokens;` ——
+   * **`profileOf()` 对不在 `MODEL_PROFILES` 里的模型返回 `undefined`，于是一律不放大。**
+   * 而 `T1_fast` 链上 5 个候选里**只有 `space-bunny-free` 在档案里**，
+   * 其余 4 个（`beam-free` / `group/auto-space-bunny-free` / `group/team-grunt` /
+   * `group/team-analyst`）都不在 —— 而它们**全都写思维链**。
+   *
+   * ## 服务器侧量化（28,500 字符材料，`beam-free`）
+   *
+   * ```
+   *   max_tokens=1024 → finish=length · reasoning=1023 · content=  0 字  ← 线上实际发的
+   *   max_tokens=2048 → finish=length · reasoning=2047 · content=  0 字  ← 旧重试倍数(×2)
+   *   max_tokens=4096 → finish=stop   · reasoning=2336 · content=2244 字  ✅
+   * ```
+   */
+  const base = 1024;
+  assert.equal(
+    budgetFor(undefined, base),
+    base * 4,
+    '★ 未知档案必须按"可能带思维链"放大（否则 1024 全被推理吃光）',
+  );
+});
+
+test('★★★ 只有【明确 reasoning=false】才不放大（已知非思维链模型的行为不变）', () => {
+  /*
+   * ⚠️ 反向守卫：不能为了修 T1 而把所有模型的预算都翻倍 ——
+   * 那会让已知的非思维链模型（如 `workbuddy-ai/fast-model`）白烧一倍额度。
+   * 判据是"**明确知道**它不是思维链"才算数，`undefined` 不算。
+   */
+  const plain = { ...MODEL_PROFILES.find((m) => !m.reasoning)! };
+  assert.equal(budgetFor(plain, 1024), 1024, '★ 明确 reasoning=false 时不放大');
+});
+
+test('★★★ 截断重试的倍数必须 ≥4 —— ×2 在真实材料规模下必然救不回来', () => {
+  /*
+   * 实测（同一材料、同一模型）：
+   * ```
+   *   1024（首次）  → content=0
+   *   2048（×2）    → content=0     ← 旧倍数
+   *   4096（×4）    → content=2244  ✅
+   * ```
+   * 而"只重试一次"这条纪律不变（不改成反复加倍）——
+   * 变的是"这一次给多少"，不是"可以试几次"。
+   */
+  const src = readFileSync(new URL('./modelRouter.ts', import.meta.url), 'utf8');
+  const m = /const EMPTY_CONTENT_RETRY_MULTIPLIER = (\d+);/.exec(src);
+  assert.ok(m, '★ 必须能找到这个常量');
+  assert.ok(
+    Number(m[1]) >= 4,
+    `★ 截断重试倍数必须 ≥4（实测 ×2 = 2048 时 content 仍是 0 字），实际 ${m[1]}`,
+  );
+  /* 仍然只重试一次（不许变成"反复加倍"）。 */
+  assert.ok(
+    /budgetBoosted === null/.test(src),
+    '★ 必须仍然只在"还没放大过"时重试一次（防无界重试）',
+  );
+});
+
+test('★★ 反向校准：把 budgetFor 改回"未登记不放大"，这套判据必须报错', () => {
+  /*
+   * ⚠️ 防"恒真断言"：如果 `budgetFor(undefined, x)` 恰好总是等于 `x*4`，
+   * 那上面那条测试就没有意义。这里用一个人造实现跑同一套判据，
+   * 确认它**会**失败。
+   */
+  const oldBehavior = (profile: { reasoning?: boolean } | undefined, base: number): number =>
+    profile?.reasoning !== true ? base : base * 4;
+  const base = 1024;
+  assert.equal(oldBehavior(undefined, base), base, '旧实现确实不放大（这就是被修掉的行为）');
+  assert.notEqual(
+    oldBehavior(undefined, base),
+    budgetFor(undefined, base),
+    '★ 新旧实现必须不同 —— 否则这条守卫是空的',
+  );
 });
 
 test('★ 冷却【到期后会清零失败计数】（复核发现的 P1-E）', () => {
