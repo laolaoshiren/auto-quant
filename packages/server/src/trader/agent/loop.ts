@@ -142,6 +142,62 @@ export function firstBalancedObject(text: string): string | null {
 }
 
 /**
+ * **交易决策 / 交易台格式的标签**（t72）。
+ *
+ * `runToolLoop` 与 `runSingleShot` 的契约是
+ * `{"thought":…,"tool":…,"args":{…}}`（见本文件头部）。
+ * 而下面这些标签属于**另外两套契约**：
+ * ```
+ *   <reasoning> + <decision>   ← 交易循环的决策格式（strategy/prompt.ts）
+ *   <decision> + <risk> + <team>  ← 交易台的渲染输出（agent/deskOutput.ts）
+ * ```
+ * ⚠️ 判据**只在"已经确定拿不到 action"之后**才用（见 `parseTurn` 的调用点）：
+ * 一个**合法的**工具调用里完全可能**在字符串里**带上这些标签
+ * （策略师可以改 `promptSections` / `customPrompt`，那里面就可能写着 `<decision>`）。
+ * 先让"能解析成工具调用"的分支走完，再来判断"这是不是另一个格式"。
+ */
+const TRADING_FORMAT_TAGS = /<(?:reasoning|decision|risk|team)>/i;
+
+/**
+ * 「这次回复属于**另一个契约**」的说明（t72）。
+ *
+ * ## 为什么必须单独说这一句（线上 15 条 + 历史 17 条的真形状）
+ *
+ * 线上失败 detail 的原文：
+ * ```
+ *   模型连续两轮没有输出可解析的工具调用：无法从回复里解析出 JSON 对象
+ *   （前 120 字符：<decision>
+ *   []
+ *   </decision>
+ *
+ *   <risk>
+ *   ⚠️ 本轮**未经风…
+ * ```
+ * **"无法从回复里解析出 JSON 对象"这句话在这里是错的** —— 那段文本根本不是
+ * 模型想输出的 JSON：`<decision>` 与 `<risk>` 是**渲染层产出的**
+ * （`deskOutput.ts` 里那句 `⚠️ 本轮**未经风控官审阅**（原因未记录）` 是**字面量**），
+ * 也就是说**这次 agent 层调用被交易台接走了**，模型没有参与格式选择。
+ *
+ * 本仓库为这种错误付过代价（本文件 :188-226 记的就是"错误信息在说谎"）：
+ * **一个说错话的错误信息比没有信息更糟** —— 它会让人去查解析器/编码，
+ * 而真相是"调用被别的路径回答了"。
+ *
+ * ⚠️ **这条只改"怎么说"，不改"怎么判"**：`action` 仍然是 `null`、
+ * 仍然只宽容两轮、仍然判 `failed`。把交易台的输出当成策略师的结论收下，
+ * 才是真正的错（那会把一个角色的结论记到另一个角色名下）。
+ */
+function crossContractHint(text: string): string {
+  return (
+    '⚠️ 这次回复用的是**另一个契约的格式**（含 `<reasoning>`/`<decision>`/`<risk>`/`<team>` 标签）。\n' +
+    '    工具循环只认 `{"thought":…,"tool":…,"args":{…}}`；**要给结论就调用 finish**。\n' +
+    '    而 `<decision>` 与 `<risk>` 是**渲染层产出**的（不是模型写的）⇒ ' +
+    '**这通常意味着这次调用被交易台接走了**（走的是团队决策那条路，不是 agent 层的工具循环）。\n' +
+    `    收到：${text.trim().slice(0, 120)}`
+  );
+}
+
+
+/**
  * 抽出一轮的动作。
  *
  * 宽容度与 §2.4 一致：允许围栏、允许前后有解释文字。
@@ -229,7 +285,8 @@ export function parseTurn(text: string): { action: TurnAction | null; error: str
       error:
         'JSON 解析成功，但里面**没有 tool 字段** —— 你只写了 thought、没说要调哪个工具。' +
         '每一轮都必须带 tool；要给结论就调用 finish。' +
-        `收到：${JSON.stringify(firstParsed ?? firstObject).slice(0, 200)}`,
+        (TRADING_FORMAT_TAGS.test(text) ? `\n    ${crossContractHint(text)}` : '') +
+        `\n    收到：${JSON.stringify(firstParsed ?? firstObject).slice(0, 200)}`,
     };
   }
 
@@ -255,6 +312,20 @@ export function parseTurn(text: string): { action: TurnAction | null; error: str
      * 剩下的会被忽略 —— 如果模型反复这样，它会在 `thought` 与后续轮次里暴露出来。
      */
     return { action: { thought: '', tool: first.tool, args: first.args }, error: null };
+  }
+
+  /*
+   * ⚠️ **最后一道判断：这是不是"另一个契约"的回复**（t72）。
+   *
+   * 走到这里 = 没有任何一条路径能抽出一个动作。此时若文本里出现交易决策/交易台的标签，
+   * 那么"无法从回复里解析出 JSON 对象"这句话就是**错的** —— 真相是
+   * "这次调用被交易台接走了"（线上 15 条的实测形状，见 `crossContractHint`）。
+   *
+   * ⚠️ 判据放在**最后**：合法的工具调用在上面两个分支已经返回了，
+   * 而它们的字符串里完全可能带 `<decision>`（策略师能改提示词）。
+   */
+  if (TRADING_FORMAT_TAGS.test(text)) {
+    return { action: null, error: crossContractHint(text) };
   }
 
   return {
@@ -299,7 +370,18 @@ const PROTOCOL = `
 {"thought":"你这一步为什么这么做","tool":"工具名","args":{...}}
 
 系统会执行这个工具，把结果回给你，然后你再输出下一个。
-当你得出最终结论时，调用 finish 工具结束（不要一直调工具来显得在干活）。
+
+## ⚠️ 本轮不需要工具时，也必须用 finish 收尾（t72）
+
+**"不需要再调工具"不等于"可以换一种格式回答"** —— 工具循环只认上面那一个形状。
+如果你想说的已经是结论了，就**调用 finish** 把它放进 args.summary 字段：
+
+{"thought":"信息够了，给出结论","tool":"finish","args":{"summary":"你的结论"}}
+
+**不要**用下面这些方式代替 finish（它们都不是工具调用，会被判失败）：
+· 直接写一段散文/总结（只有 thought、没有 tool）；
+· 用**别的模式的格式**回答 —— 例如交易循环的 \`<reasoning>\` + \`<decision>\` 块，
+  或交易台的 \`<decision>\` + \`<risk>\` + \`<team>\` 块。
 
 可用工具：
 
@@ -358,7 +440,11 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
         };
       }
       badOutputRetries += 1;
-      transcript += `\n\n## 第 ${step} 轮：你的输出无法解析\n${error}\n请只输出一个 JSON 对象，形如 {"thought":"...","tool":"...","args":{...}}。`;
+      transcript +=
+        `\n\n## 第 ${step} 轮：你的输出无法解析\n${error}\n` +
+        '请只输出一个 JSON 对象，形如 {"thought":"...","tool":"...","args":{...}}。\n' +
+        '⚠️ **如果你已经可以给结论，就用 finish 收尾**（`{"thought":"...","tool":"finish","args":{"summary":"..."}}`）——' +
+        '不要用散文或别的模式的格式（如 `<decision>` 块）代替工具调用。';
       continue;
     }
 

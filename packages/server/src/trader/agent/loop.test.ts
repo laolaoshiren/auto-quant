@@ -11,11 +11,12 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { defaultStrategyConfig, STRATEGY_PRESETS, StrategyConfigSchema, type StrategyConfig } from '@aq/shared';
 
-import { firstBalancedObject, intensityFor, runSingleShot, runToolLoop, type LoopModel } from './loop.js';
+import { firstBalancedObject, intensityFor, parseTurn, runSingleShot, runToolLoop, type LoopModel } from './loop.js';
 import type { AgentToolDeps } from './tools.js';
 
 const config = (): StrategyConfig =>
@@ -510,4 +511,171 @@ test('原生格式里的工具名同样过校验 —— 只多认格式，不放
   const r = await runToolLoop({ role: 'strategist', task: 'x', facts: 'y', deps, model, maxSteps: 4 });
   assert.equal(r.outcome, 'ok');
   assert.match(JSON.stringify(r.steps[0]!.result as unknown), /没有名为/, '原生格式下的坏工具名照样要被拒');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  t72：另一个契约的格式（<decision>/<risk>）                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 线上失败量最大一类的**真实形状**（`agent_runs` id 670–712，15 条）。
+ *
+ * ⚠️ 逐字取自线上 `detail` 的「前 120 字符」，包括 `<risk>` 里那句
+ * `⚠️ 本轮**未经风控官审阅**（原因未记录）` —— 而那句话是
+ * **`deskOutput.ts` 里的字面量**（渲染层产出），**不是模型写的**。
+ */
+const DESK_OUTPUT =
+  '<decision>\n[]\n</decision>\n\n<risk>\n⚠️ 本轮**未经风控官审阅**（原因未记录）—— 决策按裁决官结论直接放行。\n</risk>';
+
+/** 另一种交易格式：`<decision>` 里带决策对象、`<risk>` 里带 JSON。 */
+const DECISION_WITH_BODY =
+  '<decision>\n[{"symbol":"BTCUSDT","action":"skip","leverage":3,"positionSizeUsd":0}]\n</decision>\n\n<risk>\n否决\n担心：{"verdict":"reject","lossScenarios":[]}\n</risk>';
+
+test('★★★ t72 负向校准①：交易台格式的回复必须被**如实说明**，不再说"无法解析 JSON"', () => {
+  /*
+   * ## 为什么这条重要（错误信息在说谎）
+   *
+   * 线上原文：
+   * ```
+   *   模型连续两轮没有输出可解析的工具调用：无法从回复里解析出 JSON 对象
+   *   （前 120 字符：<decision>\n[]\n</decision>\n\n<risk>\n⚠️ 本轮**未经风…
+   * ```
+   * **"无法解析出 JSON 对象"是错的** —— 那段文本根本不是模型想输出的 JSON：
+   * `<decision>` 与 `<risk>` 是**渲染层产出的**（`deskOutput.ts:452-456` 的字面量），
+   * 真相是**这次 agent 层调用被交易台接走了**。
+   * 一个说错话的错误信息会让人去查解析器 —— 本仓库为这件事付过代价（见本文件其它用例）。
+   */
+  const r = parseTurn(DESK_OUTPUT);
+
+  /* ★ 判据一点没松：仍然不产生动作。 */
+  assert.equal(r.action, null, '★★★ 交易台的输出**绝不能**被当成工具调用 —— 那会把一个角色的结论记到另一个角色名下');
+  assert.ok(r.error !== null, '必须有说明');
+  assert.match(r.error, /另一个契约的格式/, '★ 必须说清"这是另一个契约的格式"');
+  assert.match(r.error, /被交易台接走/, '★ 必须指出真正的原因（调用被交易台接走了）');
+  assert.doesNotMatch(
+    r.error,
+    /无法从回复里解析出 JSON 对象/,
+    `★★★ 【不能说谎】那段文本不是模型想输出的 JSON。实际：${r.error.split('\n')[0]}`,
+  );
+  /* 纠正提示必须给出**可执行的下一步**。 */
+  assert.match(r.error, /finish/, '★ 必须告诉它"要给结论就调用 finish"');
+});
+
+test('★★★ t72 负向校准①b：<decision> 里带决策对象时，也要指出是另一个契约', () => {
+  const r = parseTurn(DECISION_WITH_BODY);
+  assert.equal(r.action, null);
+  /* 这一支走的是"对象取到了但没有 tool"（`firstBalancedObject` 会切出决策对象）——
+   * 原判据（没有 tool 字段）保留，但**必须补上**"另一个契约"的事实。 */
+  assert.match(r.error ?? '', /没有 tool 字段/, '★ 原有判据保留（缺 tool 仍是失败）');
+  assert.match(r.error ?? '', /另一个契约的格式/, '★ 但要补上真正的原因');
+});
+
+test('★★★ t72 负向校准②：真正"不听话"的输出（纯散文）必须**仍然失败**，判据不许被放松', () => {
+  /*
+   * 防的是"把判据放松成永远通过"：散文不属于任何契约，它**没有**"被交易台接走"
+   * 这种解释，所以错误信息必须仍然是那句老话（模型没给可解析的 JSON）。
+   */
+  const r = parseTurn('我看了一下最近的绩效，感觉不太行，建议先观望。');
+  assert.equal(r.action, null, '散文不许被当成动作');
+  assert.match(r.error ?? '', /无法从回复里解析出 JSON 对象/, '★ 散文仍然是"没输出可解析的 JSON"');
+  assert.doesNotMatch(r.error ?? '', /被交易台接走/, '★ 不许把散文也解释成"被交易台接走"（那是编原因）');
+});
+
+test('★★★ t72 负向校准②b：端到端 —— 交易台格式两次后仍然 failed（不收编、不静默）', async () => {
+  const { deps } = makeDeps();
+  const { model, calls, users } = recording([DESK_OUTPUT, DESK_OUTPUT]);
+
+  const r = await runToolLoop({ role: 'strategist', task: 'x', facts: 'y', deps, model, maxSteps: 5 });
+
+  assert.equal(calls(), 2, '★ 坏输出只宽容一次（第二次仍坏就结束）—— 上限没被改');
+  assert.equal(r.outcome, 'failed', '★★★ 仍然 failed：交易台的输出不是策略师的结论，不许当成功收下');
+  assert.equal(r.steps.length, 0);
+  assert.match(r.detail, /另一个契约的格式/, `★ detail 必须带上真实原因，实际：${r.detail.slice(0, 80)}`);
+  /* 第二次的纠正提示必须明确"用 finish 收尾 / 不要用别的模式格式"。 */
+  assert.match(users[1] ?? '', /用 finish 收尾/, '★ 纠正提示必须给出正确出路（finish）');
+  assert.match(users[1] ?? '', /不要用散文或别的模式的格式/, '★ 并明确禁止换格式');
+});
+
+test('★★★ t72 负向校准③：去掉"另一个契约"判据后，上面两条必须变红（防恒真）', () => {
+  /*
+   * ## 为什么必须证明"去掉会红"
+   *
+   * 上面两条断言"错误信息里含『另一个契约的格式』"。而**一个什么都没做的实现**
+   * 会让错误信息仍是老话 —— 但我不能只靠"读代码觉得它不会"，得把"红"演示一遍：
+   * 这里用**旧判据的等价形状**（只有"没有 tool 字段/无法解析 JSON"两条出路）
+   * 跑同一个输入，断言它**给不出**那句诊断。
+   */
+  const OLD_STYLE_ERROR = (text: string): string => {
+    /* 旧实现的最后一条出路：parsed.error ?? 没有 tool 字段。这里直接取 parsed.error 的形状。 */
+    const parsed = parseRoleOutputForTest(text);
+    return parsed ?? `输出里没有 tool 字段（收到 ${text.slice(0, 120)}）`;
+  };
+  const oldError = OLD_STYLE_ERROR(DESK_OUTPUT);
+
+  assert.doesNotMatch(
+    oldError,
+    /另一个契约的格式/,
+    '★★★ 旧判据给不出"另一个契约"的诊断 —— 所以上面那两条断言确实在测新行为（不是恒真）',
+  );
+  assert.match(oldError, /无法从回复里解析出 JSON 对象/, '★★ 而旧判据正是那句"说谎"的话');
+
+  /* 真实实现必须给出新诊断 —— 与旧形状形成对照。 */
+  const realError = parseTurn(DESK_OUTPUT).error ?? '';
+  assert.match(realError, /另一个契约的格式/, '★ 真实实现必须给新诊断');
+  assert.notEqual(realError, oldError, '★★ 两者必须是不同的输出 —— 否则说明新判据没生效');
+});
+
+/** 测试用的极简复刻：只取"整段/首尾括号"两条旧出路，用来演示旧行为。 */
+function parseRoleOutputForTest(text: string): string | null {
+  const cleaned = text.replace(/```(?:json)?/gi, '').trim();
+  const whole = tryParseObject(cleaned);
+  if (whole !== null) return null; /* 旧实现：解析成功但没 tool → 走"没有 tool 字段"，不是 parsed.error */
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start >= 0 && end > start && tryParseObject(cleaned.slice(start, end + 1)) !== null) return null;
+  return `无法从回复里解析出 JSON 对象（前 120 字符：${cleaned.slice(0, 120)}）`;
+}
+
+function tryParseObject(text: string): unknown {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+test('★★★ t72 保住宿主链路：正常工具调用与原生方言仍逐字节不变', () => {
+  /* 正常的工具调用不许被新的"另一个契约"判据误伤。 */
+  const ok = parseTurn(turn('get_performance', { window: '7d' }));
+  assert.ok(ok.action !== null, '★ 正常调用被判失败：' + String(ok.error));
+  assert.equal(ok.action!.tool, 'get_performance');
+
+  /*
+   * ⚠️ **合法的工具调用里可以带 `<decision>`**（策略师能改 `promptSections`/`customPrompt`）。
+   * 判据必须在"能抽出动作"之后才生效 —— 否则会误伤。
+   */
+  const withTag = parseTurn(
+    JSON.stringify({ thought: '把入场标准改成 <decision> 那段', tool: 'set_params', args: { patch: {} } }),
+  );
+  assert.ok(withTag.action !== null, '★★ 字符串里带 <decision> 的**合法调用**不许被误判：' + String(withTag.error));
+  assert.equal(withTag.action!.tool, 'set_params');
+});
+
+test('★★★ t72：PROTOCOL 必须说清"本轮不需要工具时"该输出什么（H2 的提示词修法）', () => {
+  /*
+   * H2 判定（见任务 output）：模型套用了另一个模式的格式 ⇒ 修**工具循环的提示词**，
+   * 明确说明「本轮不需要工具时该输出什么」。这条钉住那句话真的在协议里。
+   */
+  const loopSrc = readFileSync(new URL('./loop.ts', import.meta.url), 'utf8');
+  assert.match(loopSrc, /本轮不需要工具时/, '★ 协议里必须有"本轮不需要工具时"这一节');
+  assert.match(loopSrc, /调用 finish/, '★ 并给出正确出路：调用 finish');
+  assert.match(loopSrc, /不要\*\*用下面这些方式代替 finish/, '★ 并明确禁止换格式');
+  /* ⚠️ 不能放宽"多对象必须失败"——那不是本层该改的（roles.ts 的判据保持原样）。 */
+  const rolesSrc = readFileSync(new URL('./roles.ts', import.meta.url), 'utf8');
+  assert.match(
+    rolesSrc,
+    /多对象在这里\*\*必须失败\*\*/,
+    '★★ roles.ts 的"多对象必须失败"必须原样保留（本任务不得放宽解析层）',
+  );
 });
