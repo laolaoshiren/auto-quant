@@ -71,19 +71,121 @@ test('★★★ 旧的纯 `max-h-[10%]` / `max-h-[max(10%` 形态不得回来（
   assert.equal(code.includes('max-h-[max(10%'), false, '★ `max-h-[max(10%,180px)]` 是 180px 的中间形态');
 });
 
+/**
+ * 取「决策滚动区的 class 表达式」那一段源码。
+ *
+ * ## 为什么必须**先定位**，不能全文 `code.includes("'flex-1'")`
+ *
+ * 那是本仓库踩过两次的**同族坑**：判据锚在**源码文本的写法**上。
+ * `t89` 给这个滚动区补回高度上限时，那句 class 从裸 `'flex-1'`
+ * 变成了 `'max-h-[calc(100dvh-16rem)] flex-1 xl:max-h-none'` ——
+ * **语义一点没变**（还是吃满全部可用高度），但断言找不到字面量 `'flex-1'` 就直接报红。
+ * （同族：`t80` 改了 `routedModel.ts` 的 `onStep`，`toolLoopRouting.test.ts` 的正则失效。）
+ *
+ * 所以改成：先按**签名类**定位（`space-y-2.5` + `overflow-y-auto` —— 全文件只有
+ * 决策滚动区同时有这两个），再取**那一个 `cn(...)` 调用**，在它里面按类名语义判 flex。
+ * 定位不到就**响亮地失败**（`assert.ok(... !== null)`），而不是悄悄放过。
+ *
+ * ## 为什么是括号配对，而不是"往后取 N 个字符"
+ *
+ * ⚠️ `codeOnlyCss()` 把注释**原位替换成等长空白**（保留换行，好让报错行号对得上）——
+ * 实测：决策区那句 `cn(...)` 里夹着一段约 2.5KB 的注释，于是"往后取 200 字符"
+ * **根本够不到** `flex-1` 那个字符串（第一次写就是栽在这里，test 4 假红）。
+ * 而简单地放大到 4000 字符又会越过这个调用的边界、把**别的**元素（比如工作流区）
+ * 的 `flex-1` 也算进来 —— 那会让判据**恒真**。
+ * 所以按括号配对**只取这一个调用**，并且**跳过字符串内部**（`calc(` 里的括号
+ * 不能参与配对）。
+ */
+function feedClassWindow(code: string): string | null {
+  const at = code.indexOf('space-y-2.5 overflow-y-auto');
+  if (at < 0) return null;
+  const open = code.lastIndexOf('cn(', at);
+  if (open < 0) return null;
+
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = open + 3; i < code.length; i += 1) {
+    const ch = code[i];
+    if (quote !== null) {
+      /* 字符串内部：括号不算括号，只等它的收尾引号。 */
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') depth += 1;
+    else if (ch === ')') {
+      if (depth === 0) return code.slice(at, i);
+      depth -= 1;
+    }
+  }
+  return null;
+}
+
+/** 类名必须**独立成词**才算命中（`flex-1` 不能被 `flex-10` 之类蒙混过去）。 */
+function hasClassToken(window: string, cls: string): boolean {
+  return new RegExp(`(^|[\\s'"])${cls}([\\s'"]|$)`).test(window);
+}
+
 test('★★★ 决策区必须拿 `flex-1`（全部可用高度），不能是 `flex-none`', () => {
   const code = codeOnly(SRC);
   /*
    * 二选一之后决策区独占那一片，所以它必须是 `flex-1`。
    * `flex-none` 会让它按内容高度收缩 —— 那一轮没决策时就是一条缝（正是 UI-02 的形态）。
+   *
+   * ⚠️ **判据按语义，不按写法**（见 `feedClassWindow` 的说明）：
+   * `'flex-1'` 和 `'max-h-[…] flex-1 xl:max-h-none'` **都算通过** ——
+   * 前者是"父级已给确定高度"的形态，后者是"父级高度是 auto"时的形态，
+   * 两者都让决策区吃满全部可用高度。**判的是"有没有 flex-1 这一类"**。
    */
-  const idx = code.indexOf("'flex-1'");
-  assert.ok(idx >= 0, '★ 找不到 `flex-1` —— 决策区应当吃掉全部可用高度');
-  assert.equal(
-    /'flex-none[^']*'/.test(code),
-    false,
-    '★ 不得出现 `flex-none` —— 那是"决策区按内容收缩"的旧形态',
+  const window = feedClassWindow(code);
+  assert.ok(
+    window !== null,
+    '★ 找不到决策滚动区的 class 表达式（签名类 `space-y-2.5 overflow-y-auto`）—— 结构变了就必须更新这条守卫',
   );
+  assert.ok(hasClassToken(window, 'flex-1'), '★ 决策区的 class 里必须有 `flex-1` —— 它要吃掉全部可用高度');
+  assert.equal(
+    hasClassToken(window, 'flex-none'),
+    false,
+    '★ 决策区的 class 里不得有 `flex-none` —— 那是"决策区按内容收缩"的旧形态',
+  );
+});
+
+test('★★★ 新判据（按语义判 flex）必须对"变成 flex-none"变红 —— 人造源码校准', () => {
+  /*
+   * ⚠️ **这一条是为了防止我把真守卫换成一个恒真判据**（本轮改判据时必做的校准）。
+   *
+   * 三个方向都要验到：
+   *   ① 缺陷形态（决策区 `flex-none`）→ 必须**判红**
+   *   ② 两种合法写法 → 必须**判过**（否则守卫会误伤正确实现）
+   *   ③ `flex-10` 不能被当成 `flex-1`（防"子串命中"型恒真）
+   */
+  const windowOf = (src: string): string | null => feedClassWindow(codeOnly(src));
+
+  /* ① 决策区变成 flex-none（"按内容收缩"的旧形态） */
+  const flexNone = windowOf(`className={cn('min-h-0 space-y-2.5 overflow-y-auto p-2.5', 'flex-none')}`);
+  assert.ok(flexNone !== null, '★ 定位必须能找到决策滚动区');
+  assert.equal(hasClassToken(flexNone, 'flex-1'), false, '★ flex-none 形态必须判成"没有 flex-1"');
+  assert.equal(hasClassToken(flexNone, 'flex-none'), true, '★ flex-none 形态必须被判红');
+
+  /* ② 两种合法写法都过：裸 `'flex-1'`（父级有确定高度）与带高度上限的那种 */
+  const goodSamples = [
+    `className={cn('min-h-0 space-y-2.5 overflow-y-auto p-2.5', 'flex-1')}`,
+    `className={cn('min-h-0 space-y-2.5 overflow-y-auto p-2.5', 'max-h-[calc(100dvh-16rem)] flex-1 xl:max-h-none')}`,
+  ];
+  for (const good of goodSamples) {
+    const w = windowOf(good);
+    assert.ok(w !== null, '★ 定位必须能找到决策滚动区');
+    assert.ok(hasClassToken(w, 'flex-1'), `★ 合法写法必须通过：${good}`);
+    assert.equal(hasClassToken(w, 'flex-none'), false, `★ 合法写法不得被判成 flex-none：${good}`);
+  }
+
+  /* ③ 子串陷阱：`flex-10` 含 `flex-1` 四个字符，但不是 `flex-1` */
+  const flexTen = windowOf(`className={cn('min-h-0 space-y-2.5 overflow-y-auto p-2.5', 'flex-10')}`);
+  assert.ok(flexTen !== null, '★ 定位必须能找到决策滚动区');
+  assert.equal(hasClassToken(flexTen, 'flex-1'), false, '★ `flex-10` 不是 `flex-1`（判据必须按类名整词匹配）');
 });
 
 test('★★ 判据必须真的能报出缺陷形态 —— 用人造源码校准', () => {

@@ -16,7 +16,8 @@ import test from 'node:test';
 
 import { defaultStrategyConfig, STRATEGY_PRESETS, StrategyConfigSchema, type StrategyConfig } from '@aq/shared';
 
-import { firstBalancedObject, intensityFor, parseTurn, runSingleShot, runToolLoop, type LoopModel } from './loop.js';
+import { firstBalancedObject, intensityFor, packContext, parseTurn, runSingleShot, runToolLoop, TOOL_LOOP_KEEP_RECENT_RESULTS, type LoopModel } from './loop.js';
+import { estimateTokens, PROMPT_TOKEN_BUDGET } from '../../strategy/prompt.js';
 import type { AgentToolDeps } from './tools.js';
 
 const config = (): StrategyConfig =>
@@ -678,4 +679,503 @@ test('★★★ t72：PROTOCOL 必须说清"本轮不需要工具时"该输出�
     /多对象在这里\*\*必须失败\*\*/,
     '★★ roles.ts 的"多对象必须失败"必须原样保留（本任务不得放宽解析层）',
   );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  t81：解析失败的重试指令必须与真实病因匹配                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 线上真实形状（t81，两条都来自 `agent_runs` 的 detail 原文）。
+ *
+ * ```
+ *   ① 工具循环档（15 条，最新 2026-10-16T12:21Z）：
+ *      模型连续两轮没有输出可解析的工具调用：JSON 解析成功，但里面**没有 tool 字段** …
+ *        收到：{"limit":20}
+ *   ② 单次结论档（t69 加过重试之后仍在失败，2026-10-17T03:24Z）：
+ *      单次调用的输出无法解析（已重试 1 次仍失败）：无法从回复里解析出 JSON 对象
+ *        （前 120 字符：{"primaryCause":...
+ * ```
+ *
+ * ⚠️ **两条回复本来都是"单个对象"**：① 是**只有工具参数**、没有 `tool` 外壳的对象；
+ * ② 是**没写完**的对象（那段时间 `runtime_logs` 里有 18 条 `finish_reason=length`）。
+ * 而 t69 的指令只针对"**多个对象**"—— 所以重试打不中病因，模型只会再给一遍同样的形状。
+ */
+const LIVE_PARAMS_ONLY = '{"limit":20}';
+const LIVE_TRUNCATED_OBJECT = '{"primaryCause":"出场","evidence":["止损组亏损集中","样本 25 笔"]';
+const PURE_PROSE = '结论：本轮不行动 —— 看不到可执行的失效位，不值得下注。';
+
+test('★★★ t81 负向校准①：工具循环里"只有参数、没有 tool 外壳"，纠正指令必须点名真实病因', async () => {
+  const { deps } = makeDeps();
+  /* 第一次 = 线上形状；第二次 = 纯散文（用来证明"两次都坏仍然 failed"）。 */
+  const { model, users } = recording([LIVE_PARAMS_ONLY, PURE_PROSE]);
+
+  const r = await runToolLoop({ role: 'strategist', task: 'x', facts: 'y', deps, model, maxSteps: 3 });
+
+  const correction = users[1] ?? '';
+  /* ① 真实病因必须被**指令**点名（不是只把原始 error 贴上去）。 */
+  assert.match(
+    correction,
+    /没有 ?`?tool`? ?字段/,
+    `★ 纠正指令必须点名"缺 tool 字段"，实际：${correction.slice(0, 240)}`,
+  );
+  /* ② 必须补上 t69 漏掉的那一条：单独输出参数不算一次调用。 */
+  assert.match(
+    correction,
+    /单独输出工具参数|只有参数|参数对象/,
+    '★ 必须说明"单独输出工具参数不算一次调用"（这正是 t69 漏掉的）',
+  );
+  /* ③ 原有要求一条都不许丢。 */
+  assert.match(correction, /请只输出一个 JSON 对象/, '★ 原有的"只输出一个对象"要求必须保留');
+  assert.match(correction, /finish/, '★ "要给结论就调 finish"必须保留');
+  /* ④ 判据没有被放松：两次都坏仍然是 failed、仍然不编造结论。 */
+  assert.equal(r.outcome, 'failed', '★ 第二次是纯散文 → 仍必须 failed');
+  assert.equal(r.conclusion, null, '★ 失败时不许编造结论');
+});
+
+test('★★★ t81 负向校准②：单次档的重试指令要覆盖"本来就是单个对象"这一真实形状', async () => {
+  const { deps } = makeDeps();
+  const { model, calls, users } = recording([LIVE_TRUNCATED_OBJECT, GOOD_OBJECT]);
+
+  const r = await runSingleShot({ role: 'performance_analyst', task: 'x', facts: 'y', deps, model });
+
+  assert.equal(calls(), 2, `★ 重试次数不变（恰好 2 次），实际 ${calls()} 次`);
+  const retryUser = users[1] ?? '';
+  /* 原有三条要求**逐字**保留（t69 的用例仍然钉着它们，这里再钉一遍防止漂移）。 */
+  assert.match(retryUser, /只输出一个 JSON 对象/);
+  assert.match(retryUser, /不要重复输出/);
+  assert.match(retryUser, /不要在 JSON 前后加任何文字/);
+  /* 新增：病因不止"多对象"，还要点名"只写了参数/片段、没写完"。 */
+  assert.match(retryUser, /只写了参数|只有参数|片段/, '★ 必须覆盖"只写了参数/片段"这一真实形状');
+  assert.match(retryUser, /完整/, '★ 必须要求"一个完整的对象"（线上 18 次 length 截断就是没写完）');
+  /* ⚠️ 新增段落**不许给可照抄的 JSON 例子**（few-shot 会让模型把示例当模板）。 */
+  const added = retryUser.slice(retryUser.indexOf('上一次回复'));
+  assert.doesNotMatch(added, /"[a-zA-Z]+"\s*:/, '★ 新增段落不许给可照抄的 JSON 例子');
+  assert.equal(r.outcome, 'ok', '★ 重试救回来之后仍然是 ok（重试的语义不变）');
+});
+
+test('★★★ t81 负向校准③：把"旧指令"喂给同一组判据必须变红（防恒真）', () => {
+  /*
+   * ## 为什么必须证明"去掉修复会红"
+   *
+   * 上面两条断言的是"指令里含针对缺 tool 字段的说明"。而一个**什么都没做**的实现
+   * 会让指令还是老话 —— 这里用**旧指令的逐字原文**（不是复刻一份实现，避免漂移）
+   * 跑同一组判据，断言它**给不出**那句诊断。
+   */
+  const OLD_TOOL_CORRECTION =
+    '请只输出一个 JSON 对象，形如 {"thought":"...","tool":"...","args":{...}}。\n' +
+    '⚠️ **如果你已经可以给结论，就用 finish 收尾** —— 不要用散文或别的模式的格式代替工具调用。';
+  const OLD_SINGLE_RETRY =
+    '\n\n## ⚠️ 上一次回复无法解析（可能有多个 JSON 对象，或 JSON 前后带了文字）\n' +
+    '请**只输出一个 JSON 对象**，不要重复输出、不要在 JSON 前后加任何文字。';
+
+  assert.doesNotMatch(
+    OLD_TOOL_CORRECTION,
+    /没有 ?`?tool`? ?字段|单独输出工具参数|只有参数/,
+    '★★★ 旧指令确实给不出真实病因 —— 所以上面那两条断言在测新行为，不是恒真',
+  );
+  assert.doesNotMatch(
+    OLD_SINGLE_RETRY,
+    /只写了参数|片段|完整/,
+    '★★★ 旧的单次档指令只猜"多对象/前后带文字"，覆盖不了"单个对象没写完"',
+  );
+
+  /* 对照：真实源码里现在必须有新内容。 */
+  const loopSrc = readFileSync(new URL('./loop.ts', import.meta.url), 'utf8');
+  assert.match(loopSrc, /单独输出工具参数/, '★ 工具循环协议必须补上"单独输出参数不算一次调用"');
+  assert.match(loopSrc, /没有 ?`?tool`? ?字段/, '★ 纠正指令必须点名"缺 tool 字段"');
+
+  /* ⚠️ acceptance 4：解析层的严格性一个字都不许动。 */
+  const rolesSrc = readFileSync(new URL('./roles.ts', import.meta.url), 'utf8');
+  assert.match(rolesSrc, /多对象在这里\*\*必须失败\*\*/, '★★ roles.ts 的"多对象必须失败"必须原样保留');
+
+  /* 判据没被放松：裸参数对象**仍然不是**一次调用，而且原因如实说出。 */
+  const parsed = parseTurn(LIVE_PARAMS_ONLY);
+  assert.equal(parsed.action, null, '★ 裸参数对象不许被当成调用');
+  assert.match(parsed.error ?? '', /没有 ?`?tool`? ?字段/, '★ 且病因如实说出');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  输入侧预算（t82）                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ## 这一组防的是什么（线上实测）
+ *
+ * `agent_runs` + `runtime_logs` 取样：**18 条 `finish_reason=length` 而正文为空**，
+ * 其中 7 条在最新部署之后仍在发生。成因不是模型不会答，而是循环**只增不减**地把
+ * 每一份工具结果都追加进对话记录（实测单结果 40,000 字符、步数上限 8）——
+ * 最坏约 32 万字符（≈19 万 token）喂给一次调用，模型把与思维链共享的 8192
+ * 输出预算全花在"读+想"上，正文就空了。
+ *
+ * ⚠️ 这里**不会**去调 `TEAM_BASE_MAX_TOKENS`（8192）：那个数就是被思维链吃掉的，
+ * 调它只会让思维链吃更多。要修的是**喂进去的东西**。
+ */
+const BIG_RESULT_CHARS = 40_000; /* 线上实测"单个结果 40,000 字符" */
+
+/** 每次 read 都返回同样大的载荷 —— 复现"最坏输入"。 */
+function makeBigDeps(payloadChars: number) {
+  const big = 'x'.repeat(payloadChars);
+  const base = makeDeps();
+  return {
+    ...base.deps,
+    read: {
+      performance: () => big,
+      equityCurve: () => big,
+      experiments: () => big,
+      lessons: () => big,
+      recentDecisions: () => big,
+      marketOverview: () => big,
+      skippedOutcomes: async () => big,
+    },
+  };
+}
+
+/**
+ * 一个**记录输入规模**的桩：每轮返回"再调一次工具"，最后一轮 finish。
+ *
+ * 它不给"模型会怎么反应"下结论 —— 它只回答"我们把多大的东西喂出去了"，
+ * 而那个数是本任务能直接测量的东西（真正的 `finish_reason` 只有真模型能给）。
+ */
+function sizeRecorder(maxSteps: number): {
+  model: LoopModel;
+  maxUserTokens: () => number;
+  maxUserChars: () => number;
+  lastUser: () => string;
+} {
+  let i = 0;
+  let maxTokens = 0;
+  let maxChars = 0;
+  let last = '';
+  const model: LoopModel = {
+    complete: async (_system, user) => {
+      i += 1;
+      last = user;
+      maxTokens = Math.max(maxTokens, estimateTokens(user));
+      maxChars = Math.max(maxChars, user.length);
+      const text =
+        i >= maxSteps
+          ? turn('finish', { summary: '够了' })
+          : turn('get_performance', { window: '24h' });
+      return { text, usage: { promptTokens: estimateTokens(user), completionTokens: 20 }, latencyMs: 1 };
+    },
+  };
+  return { model, maxUserTokens: () => maxTokens, maxUserChars: () => maxChars, lastUser: () => last };
+}
+
+test('★★★ 输入预算：8 步大结果之下，喂给模型的输入仍在上限内（改前会翻倍）', async () => {
+  /*
+   * ## 改前实测（同一份桩、同一份 deps）
+   *
+   * 用 `.dsh/t82-measure.ts` 在**真实循环**上量到的数：
+   * ```
+   *   步数=1  最大输入≈     23 tokens
+   *   步数=2  最大输入≈  23703 tokens
+   *   步数=3  最大输入≈  47384 tokens
+   *   步数=4  最大输入≈  71065 tokens   ← 越过 6 万，模型开始返回空内容
+   *   步数=5+ 最大输入≈  71208 tokens   ← 两轮空内容 ⇒ failed，零结论
+   * ```
+   * 而 `maxSteps` 的默认值是 8（`DEFAULT_MAX_STEPS`）——
+   * 也就是说**最坏情形比上面这个还大**，而它只要发生过一次就是一个
+   * "这一轮白跑、且看不到原因"的失败。
+   *
+   * ## 改后：不得越过总预算
+   *
+   * 预算 = `PROMPT_TOKEN_BUDGET`（6 万，与策略层同一个数、同一个理由）。
+   * 这里断言的是**上限**，不是"越小越好" —— 越小的预算意味着模型看到的证据越少。
+   */
+  const STEPS = 8;
+  const { model, maxUserTokens } = sizeRecorder(STEPS);
+
+  const r = await runToolLoop({
+    role: 'strategist',
+    task: '审视参数',
+    facts: '绩效：净 +0.31',
+    deps: makeBigDeps(BIG_RESULT_CHARS),
+    model,
+    maxSteps: STEPS,
+  });
+
+  assert.equal(r.outcome, 'ok', '★ 大输入下这一轮必须仍然能拿到结论（改前这里是 failed）');
+  assert.ok(
+    maxUserTokens() <= PROMPT_TOKEN_BUDGET,
+    `★★★ 最坏输入 ${maxUserTokens()} tokens 越过了 ${PROMPT_TOKEN_BUDGET} 的预算 —— ` +
+      '那就是线上 18 条 finish_reason=length 空内容的成因',
+  );
+  assert.ok(r.contextTrimmed, '★ 这一轮确实裁了东西（否则上面的断言是"因为输入本来就不大"而恒真）');
+});
+
+test('★★ 输入预算：被省掉的是【更老】的那些，最近的几条留在提示词里', async () => {
+  /*
+   * 取舍方向必须能被测出来 —— 否则"裁最老的结果"只是一句注释。
+   *
+   * ⚠️ 判据分两层（这里只断第一层，第二层是分辨率所限，如实说明）：
+   * ```
+   *   ① 被省掉的都**早于**保留的  ← 本用例断言这一层
+   *   ② 保留的那几条里，越新的保留得越多  ← 默认预算下**做不到**：
+   *      3 条 4 万字符的结果合计约 7 万 tokens > 记录预算 5.2 万，
+   *      所以"最近 3 条整条进"必然退让 —— 退让的实现见 packContext 的兜底档
+   * ```
+   */
+  const STEPS = 8;
+  const { model, lastUser } = sizeRecorder(STEPS);
+
+  const r = await runToolLoop({
+    role: 'strategist',
+    task: '审视参数',
+    facts: '绩效：净 +0.31',
+    deps: makeBigDeps(BIG_RESULT_CHARS),
+    model,
+    maxSteps: STEPS,
+  });
+
+  const user = lastUser();
+  const keptSteps: number[] = [];
+  for (const step of r.steps) {
+    if (user.includes(`## 第 ${step.step} 轮\n你想调用`)) keptSteps.push(step.step);
+  }
+  assert.ok(keptSteps.length > 0, '★ 至少要有几条结果留在提示词里（不能只剩空壳）');
+  const firstKept = Math.min(...keptSteps);
+  const droppedSteps = r.steps
+    .map((s) => s.step)
+    .filter((n) => n < firstKept);
+  assert.ok(
+    droppedSteps.length > 0,
+    `★★★ 必须有更老的被省掉（否则"裁最老"这条判据没被走到）：kept=${keptSteps.join(',')}`,
+  );
+  assert.ok(r.contextTrimmed, '★ 返回值必须如实说"裁过"');
+});
+
+test('★ 输入预算：模型能看到"哪一条结果被省略了、原有多大"', async () => {
+  /*
+   * 省略**必须可见**。模型若只看到"少了几步"，它会以为那些步骤没发生过；
+   * 操作员也看不出这一轮的账目被省过 —— 而"看不见的省略"正是本仓库反复吃亏的形态。
+   */
+  const STEPS = 8;
+  const { model, lastUser } = sizeRecorder(STEPS);
+
+  await runToolLoop({
+    role: 'strategist',
+    task: '审视参数',
+    facts: '绩效：净 +0.31',
+    deps: makeBigDeps(BIG_RESULT_CHARS),
+    model,
+    maxSteps: STEPS,
+  });
+
+  const user = lastUser();
+  assert.match(user, /因【输入预算】被省略|结果已被省略/, '★ 省略必须在提示词里说清（不是只写进日志）');
+  assert.match(user, /结果约 \d+ 字符，已省略/, '★ 必须如实报被省掉的那一条原来有多大');
+  assert.match(user, /不要猜/, '★ 必须告诉模型"缺的部分不要猜"');
+});
+
+test('★★ 输入预算：小输入一个字节都不省（行为逐字节不变）', async () => {
+  /*
+   * ## 这条守的是"别把预算做成行为改动"
+   *
+   * 绝大多数轮次的工具结果都很小（几百到几千字符）。若预算逻辑顺手改写了它们，
+   * 那等于**悄悄换掉了模型看到的证据** —— 而这一轮本来没有任何预算问题。
+   *
+   * 判据：`packContext` 的产出的 transcript 必须与"改动前的拼接方式"**逐字节相同**。
+   */
+  const steps = [
+    { step: 1, thought: 't1', tool: 'get_performance', args: { window: '24h' }, result: { net: 0.31 } },
+    { step: 2, thought: 't2', tool: 'get_lessons', args: {}, result: [{ lesson: '止损过紧' }] },
+  ];
+  const packed = packContext('审视参数', '绩效：净 +0.31', steps);
+
+  const LEGACY =
+    '## 你的任务\n审视参数\n\n## 已知事实\n绩效：净 +0.31\n\n请开始。' +
+    '\n\n## 第 1 轮\n你想调用：get_performance({"window":"24h"})' +
+    '\n结果：{"net":0.31}' +
+    '\n\n## 第 2 轮\n你想调用：get_lessons({})' +
+    '\n结果：[{"lesson":"止损过紧"}]';
+
+  assert.equal(packed.transcript, LEGACY, '★★ 小输入下的提示词必须与改动前逐字节一致');
+  assert.deepEqual(packed.dropped, [], '★ 不许省');
+  assert.deepEqual(packed.truncated, [], '★ 不许截');
+  assert.equal(packed.prefixOverBudget, false);
+});
+
+test('★★ 负向校准：这一组判据真的能抓到缺陷（去掉修复会红）', async () => {
+  /*
+   * ## 为什么必须校准
+   *
+   * 上面三条都在断言"预算生效了"。而一个**什么都没做**的实现也可能让它们通过
+   * （例如 `PROMPT_TOKEN_BUDGET` 恰好比测试输入大）—— 那就是恒真判据。
+   *
+   * 这里用**改动前的拼接方式**（`transcript += 第 N 轮 + 完整结果`，逐字复刻，
+   * 不是另写一份实现）跑同一套判据，断言它**越界**。
+   */
+  const steps = Array.from({ length: 8 }, (_, i) => ({
+    step: i + 1,
+    thought: 't',
+    tool: 'get_performance',
+    args: {},
+    result: 'x'.repeat(BIG_RESULT_CHARS),
+  }));
+
+  /* 改动前的形状：固定段 + 每步完整追加。 */
+  const legacy =
+    '## 你的任务\n审视参数\n\n## 已知事实\n绩效：净 +0.31\n\n请开始。' +
+    steps
+      .map((s) => `\n\n## 第 ${s.step} 轮\n你想调用：${s.tool}({})\n结果：${JSON.stringify(s.result)}`)
+      .join('');
+
+  const legacyTokens = estimateTokens(legacy);
+  assert.ok(
+    legacyTokens > PROMPT_TOKEN_BUDGET,
+    `★★★ 改动前的形状必须越界（实测 ${legacyTokens} tokens）—— 否则上面那些断言证明不了任何事`,
+  );
+
+  /* 对照：真实实现压得进去。 */
+  const packed = packContext('审视参数', '绩效：净 +0.31', steps);
+  assert.ok(
+    estimateTokens(packed.transcript) <= PROMPT_TOKEN_BUDGET,
+    `★ 真实实现必须压得进预算（实测 ${estimateTokens(packed.transcript)} tokens）`,
+  );
+
+  /*
+   * 取舍方向：**省略从最老的开始，最新那条必须保住**。
+   *
+   * ⚠️ "最近那 3 条一个字节都不动"这条**不能在默认记录预算下断言** ——
+   * 3 条 4 万字符的结果合计约 7 万 tokens > 记录预算 5.2 万，
+   * 所以"整条进"必然退让（退让规则见 `packContext` 的兜底档）。
+   * 那种"预算够装下最近 3 条"的情形由上面那条 3,800 预算的用例覆盖。
+   */
+  const droppedSteps = packed.dropped.map((d) => d.step);
+  assert.ok(droppedSteps.length > 0, '★ 必须有被省掉的（否则"从最老的省起"没被走到）');
+  assert.ok(droppedSteps.includes(1), `★ 第 1 步（最老）必须被省（实际被省：${droppedSteps.join(',')}）`);
+  assert.ok(
+    !droppedSteps.includes(steps.length),
+    '★ 最新的那一步不许被整条省掉（它是下一步唯一要用的证据）',
+  );
+  assert.ok(
+    Math.max(...droppedSteps) < Math.min(...steps.map((s) => s.step).filter((n) => !droppedSteps.includes(n))),
+    `★ 取舍方向必须"先老后新"（被省：${droppedSteps.join(',')}）`,
+  );
+});
+
+test('★★ 取舍方向：给足预算时，最近的 3 条结果**一个字节都不动**', () => {
+  /*
+   * 把预算放到"装得下 3 条 4 万字符的结果"那么大，于是省略只发生更老的步骤上 ——
+   * 这才是 `TOOL_LOOP_KEEP_RECENT_RESULTS` 那条规则的**可测形态**。
+   */
+  const steps = Array.from({ length: 5 }, (_, i) => ({
+    step: i + 1,
+    thought: 't',
+    tool: 'get_performance',
+    args: {},
+    result: 'x'.repeat(2_000),
+  }));
+  /*
+   * 预算怎么选（这三条数的关系必须成立，否则用例会退化成恒真或恒假）：
+   * ```
+   *   固定段 ≈ 50 tokens；每条结果 ≈ 1,210 tokens
+   *   最近的 3 条（3、4、5）预留 ≈ 3,630
+   *   ⇒ 更老的那些只剩 3,800 − 3,630 = 170 tokens
+   *   ⇒ 第 1、2 步**整条放不下**，都被省略（这正是"取舍从最老开始"）
+   * ```
+   * 给 8,000 则 5 条全装得下（第 1 步不会被省）；给 3,000 则连最近那三条都要退让 ——
+   * 两种都会让本用例失去意义。
+   */
+  const packed = packContext('任务', '事实', steps, 3_800);
+
+  for (const s of steps.slice(-TOOL_LOOP_KEEP_RECENT_RESULTS)) {
+    assert.ok(
+      !packed.dropped.some((d) => d.step === s.step),
+      `★ 最近的 3 条不许被省略，而第 ${s.step} 条被省了`,
+    );
+    assert.ok(
+      !packed.truncated.some((t) => t.step === s.step),
+      `★ 最近的 3 条不许被截断，而第 ${s.step} 条被截了`,
+    );
+    assert.ok(packed.transcript.includes(`第 ${s.step} 轮`), `★ 第 ${s.step} 轮必须还在提示词里`);
+  }
+  assert.ok(
+    packed.dropped.some((d) => d.step === 1),
+    '★ 更老的那些才该被省略（第 1 步）',
+  );
+  assert.ok(
+    estimateTokens(packed.transcript) <= 3_800,
+    `★ 给多少预算就用多少（实测 ${estimateTokens(packed.transcript)}）`,
+  );
+});
+
+test('★ 取舍方向：预算真的不够时，**最新的**那一条必须保住', () => {
+  /*
+   * 默认记录预算（≈5.2 万 tokens）下，4 条 4 万字符的结果本身就装不下 ——
+   * 那时"最近 3 条豁免"**做不到**，能做的是**顺序**：先省最老的那些，
+   * 而**最新那条一定留在提示词里**（它是模型下一步唯一要用的证据）。
+   */
+  const steps = Array.from({ length: 4 }, (_, i) => ({
+    step: i + 1,
+    thought: 't',
+    tool: 'get_performance',
+    args: {},
+    result: 'x'.repeat(40_000),
+  }));
+  const packed = packContext('任务', '事实', steps);
+
+  assert.ok(packed.dropped.length > 0, '★ 4 条 4 万字符的结果必然装不下，必须有被省掉的');
+  assert.ok(
+    packed.dropped.some((d) => d.step === 1),
+    `★ 最老的（第 1 步）必须是被省掉的那条之一（实际：${packed.dropped.map((d) => d.step).join(',')}）`,
+  );
+  /* 最新那条：不许被**省掉**（要么原样、要么带"被截断"说明）。 */
+  assert.ok(
+    !packed.dropped.some((d) => d.step === 4),
+    '★ 最新的那条不许被整条省掉 —— 它是下一步唯一要用的证据',
+  );
+  assert.ok(packed.transcript.includes('第 4 轮'), '★ 第 4 轮必须在提示词里有一席之地');
+  assert.ok(
+    estimateTokens(packed.transcript) <= PROMPT_TOKEN_BUDGET,
+    `★ 仍然不许越界（实测 ${estimateTokens(packed.transcript)}）`,
+  );
+});
+
+test('★ 单条超大结果也压得住（否则"一个结果"就能把预算撑破）', () => {
+  /*
+   * 线上 `list_candidates` 一个结果就能有十几万字符。
+   * 若只做"省略最老的若干条"，一条超大结果仍会把预算撑破 ——
+   * 所以必须有**截断**这一档，而且截断要说明。
+   */
+  const huge = 'y'.repeat(200_000);
+  const steps = [{ step: 1, thought: 't', tool: 'list_candidates', args: {}, result: huge }];
+  const packed = packContext('x', 'y', steps);
+
+  assert.ok(
+    estimateTokens(packed.transcript) <= PROMPT_TOKEN_BUDGET,
+    `★ 单条 20 万字符的结果也必须压进预算（实测 ${estimateTokens(packed.transcript)}）`,
+  );
+  assert.ok(
+    packed.truncated.length > 0 || packed.dropped.length > 0,
+    '★ 必须有"被截断/被省略"的痕迹',
+  );
+  assert.match(packed.transcript, /截断|省略/, '★ 痕迹要写在提示词里（模型能看到）');
+});
+
+test('★ 固定段（任务 + 事实）永不裁 —— 但超预算时必须如实报出去', () => {
+  /*
+   * 裁任务或事实等于**换一个任务**。所以那种情况只能**如实上报**
+   *（`prefixOverBudget`），由上游决定怎么办 —— 不能在这里静默裁掉。
+   */
+  const steps = [{ step: 1, thought: 't', tool: 'get_performance', args: {}, result: 'z' }];
+
+  /* 预算充裕：固定段原样、`prefixOverBudget=false`。 */
+  const ok = packContext('任务', '事实', steps, 1_000);
+  assert.equal(ok.prefixOverBudget, false);
+
+  /* 预算小于固定段自己：**照样原样发出**，但标志为真。 */
+  const tiny = packContext('任'.repeat(200), '事'.repeat(200), steps, 10);
+  assert.equal(tiny.prefixOverBudget, true, '★ 固定段自己超预算必须如实上报');
+  assert.match(tiny.transcript, /任{10}/, '★ 而且不许把任务裁掉（那等于换一个任务）');
+});
+
+test('★ 空步数：第一次调用的提示词逐字节与改动前一致', () => {
+  const packed = packContext('审视参数', '绩效：净 +0.31', []);
+  assert.equal(packed.transcript, '## 你的任务\n审视参数\n\n## 已知事实\n绩效：净 +0.31\n\n请开始。');
+  assert.deepEqual(packed.dropped, []);
+  assert.deepEqual(packed.truncated, []);
+  assert.equal(packed.prefixOverBudget, false);
 });

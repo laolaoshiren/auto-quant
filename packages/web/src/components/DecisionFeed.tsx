@@ -85,6 +85,15 @@
  *   没有它，几十个周期会把整页撑成一条长条，正是 §2 要避免的。
  *   `xl:max-h-none` 把上限交还给上面那条 flex 高度链。
  *
+ *   ⚠️ **这条兜底曾经被删掉过，而注释没跟着改**（2026-10-17 实测发现）：
+ *   `c750fd3` 里它确实在决策滚动框的 `className` 里，`9ad1503` 把它删了
+ *   （那次提交的目标是"团队工作流区改为占满主导高度"），**这句注释却一直说它还在**。
+ *   后果不只是"页面变长"：箱体不可滚 ⇒ 哨兵永远在 root 内 ⇒ **打开页面就自动翻页**
+ *   （实测 `/decisions` 2 次请求，`xl` 以上对照 1 次）。已由 `t89` 补回，
+ *   并在下面那个观察器上加了一条结构性保险（root 不可滚就不创建观察器）。
+ *   **教训**：注释描述"代码里有什么"时，它就是一个**会被静默证伪的断言** ——
+ *   改代码时删掉那句注释，比留着它安全。
+ *
  * ## 一次加载多少：默认 20 条，滚到最后一条再取下一页
  *
  * 这个面板原来一次向服务端要 50 条、并把 50 条**全部**渲染出来。而每条决策记录都
@@ -713,6 +722,15 @@ export function DecisionFeed({
   const traderIdRef = useRef(traderId);
   traderIdRef.current = traderId;
 
+  /**
+   * **切标签页时记住的决策流滚动偏移量**（2026-10-17 · 回归 UI-T74-02）。
+   *
+   * 声明在这里（而不是挨着用它那个 `useLayoutEffect`）是因为**换机器人的清理
+   * effect 就要清它** —— 两个地方都要用，而"属于上一个机器人的状态"与
+   * `loaded` / `moreState` 是同一类东西，放在一起才不会漏。
+   */
+  const restoreScrollRef = useRef<number | null>(null);
+
   useEffect(() => {
     // 换机器人：已加载的旧页、错误与终点标记都属于上一个机器人，整套丢掉。
     // 清理函数把在途请求也 abort 掉 —— 否则它回来时会追加到新机器人的列表里。
@@ -720,6 +738,18 @@ export function DecisionFeed({
     setMoreState('idle');
     setMoreError(null);
     setDeeperFull(false);
+    /*
+     * ⚠️ **记住的滚动位置也必须丢掉**（2026-10-17 · 台账回归 UI-T74-02 的第二半）。
+     *
+     * `restoreScrollRef` 是"切标签页时记住的偏移量"，它属于**上一个机器人**：A 机器人
+     * 滚到 500px → 切到 B（`<DecisionFeed>` 没有被 `key` 住，组件是同一个实例）→
+     * 切回决策页时那个 500px 会被还原到 **B 的列表**上，B 一进来就停在半空 ——
+     * 而 B 的记录数、高度、甚至有没有那么多历史都和 A 不同。
+     *
+     * 这就是本仓库那条老纪律的又一次实例：**属于"上一个 X"的状态，在 X 变化时
+     * 必须一起清掉**（同 `loaded` / `moreState` / `moreError` / `deeperFull`）。
+     */
+    restoreScrollRef.current = null;
     return () => moreAbortRef.current?.abort();
   }, [traderId]);
 
@@ -970,6 +1000,45 @@ export function DecisionFeed({
     const sentinel = sentinelRef.current;
     if (!root || !sentinel) return;
 
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     *  ⚠️⚠️ **`root` 不可滚时【不要创建观察器】**（2026-10-17 实测缺陷的保险）
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * ## 这条保险防的是什么（一次真实发生的 P1）
+     *
+     * 决策滚动框的高度上限（`max-h-[calc(100dvh-16rem)] xl:max-h-none`）在
+     * `9ad1503` 那次改动里被从 `className` 删掉了 —— 于是 `xl` 宽度以下
+     * （**含 150% 缩放**，那是本仓库 UI 验收的硬判据档位）这个框的高度
+     * 等于**内容高度**（实测 `clientHeight === scrollHeight === 5559`）。
+     *
+     * 而 `root` 就是它自己 ⇒ 哨兵**永远落在 root 内** ⇒ 观察器一创建就立刻回调
+     * ⇒ **用户还没滚动，页面打开就自动取下一页**（实测 `/decisions` 2 次请求：
+     * `limit=21` 与 `limit=21&before=29`；`xl` 以上对照只有 1 次）。
+     *
+     * 这直接违反本文件上面写死的契约：「只有操作者读到最下面时才会触发」。
+     *
+     * ## 为什么"不可滚 ⇒ 不观察"是对的（而不是把合法行为也堵掉）
+     *
+     * 只有 `hasMore` 为真才会走到这里，而 `hasMore` 为真意味着服务端**给满了一页**
+     * （`FEED_PAGE_SIZE` = 20 条，每条都带提示词与思维链，实测一屏 3–4 张卡）。
+     * **满满一页绝不可能装进一个不可滚的框里** —— 所以"箱体不可滚"只有两种可能：
+     * ```
+     *   ① 高度上限丢了（就是上面那次 P1）→ 此时**不该**自动拉，修上限才是正解
+     *   ② 内容真的很少              → 此时 hasMore 为假，根本走不到这里
+     * ```
+     * 换句话说：这条保险只在"出故障"的那一支上生效，**不改合法路径的分页语义**。
+     *
+     * ## 它为什么必须存在（而不是"把 max-h 加回去就够了"）
+     *
+     * `max-h` 是**一条 CSS 约定**，谁都能再删一次（事实上已经删过一次，且删它的
+     * 那次提交并不知道自己删了什么）。而这条判断是**结构性的**：
+     * 只要箱体不可滚，就没人能"滚到底"，也就不该有"滚到底才加载"。
+     * 两条一起才叫修好 —— 上限管"看起来对不对"，这条管"故障时不雪崩"。
+     */
+    const scrollable = root.scrollHeight > root.clientHeight + 1;
+    if (!scrollable) return;
+
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) void loadMoreRef.current();
@@ -982,8 +1051,26 @@ export function DecisionFeed({
      * `listMounted` 必须在依赖里：`hasMore` 变真的那一次提交里，列表可能还没挂上去
      * （数据先到、渲染列表用的状态后到），`scrollerRef.current` 还是 null，
      * 观察器就永远不会被创建。`traderId` 同理：换机器人之后要重新观察新的滚动容器。
+     *
+     * ⚠️ **`records.length` 也必须在**：上面那条"不可滚就返回"是**在这一次提交时**
+     * 做的判断 —— 如果列表后来长高了（翻页 / 推送），箱体才变得可滚，
+     * 而依赖没变的话这个 effect 不会再跑，观察器就永远不存在了
+     * （症状：能滚，但滚到底没有任何反应）。加上它，箱体一变可滚就重新挂上。
+     *
+     * ⚠️⚠️ **`pane` 必须在**（2026-10-17 · 台账回归 F1，`t86` 报告）：切到
+     * 「AI 工作流」时决策区**整块卸载**，`scrollerRef` / `sentinelRef` 的节点随之消失；
+     * 切回来是**两个新节点**，而上面那几个依赖一个都没变 ⇒ 这个 effect 不会重跑
+     * ⇒ **新哨兵没有观察者，「滚到底加载更早的周期」静默失效**。
+     * 症状很坏：`records.length` 在依赖里，所以**下一个新周期落库时会自己好** ——
+     * 操作者看到的是"切回来以后几分钟内滚到底没反应，然后自己恢复了"，
+     * 而那几分钟恰好是他在翻历史的时候，**全程没有任何提示**。
+     *
+     * 这正是本仓库 `useTablePaging` 里 `remountKey` 那条注释写的同一件事
+     * （`TraderTables.tsx:487`：「节点被换掉了而上面几个依赖都没变」）。
+     * 这里不引入一个新的 `remountKey` 形参，是因为分页逻辑就写在本组件里、
+     * 没有外部调用者能传 key 进来 —— **`pane` 本身就是那个 key**，直接进依赖最短。
      */
-  }, [hasMore, moreState, traderId, listMounted]);
+  }, [hasMore, moreState, traderId, listMounted, records.length, pane]);
 
   /*
    * 把视口钉住：新周期插到列表**顶部**时不把正在读的内容顶走。
@@ -1024,6 +1111,92 @@ export function DecisionFeed({
     geomRef.current = first ? { id: Number(first.dataset.recordId), top: first.offsetTop } : null;
     scrollTopRef.current = el.scrollTop;
   }, [records]);
+
+  /**
+   * ── **切标签页时保住决策流的滚动位置**（2026-10-17 · 台账回归 UI-T74-02）──
+   *
+   * ## 症状（t74 实测，三套模板全中）
+   *
+   * ```
+   *   classic  可滚 59  → 切到「AI 工作流」→ 切回：scrollTop = 0
+   *   console  可滚 159 → 同上              → 切回：scrollTop = 0
+   *   quill    可滚 107 → 同上              → 切回：scrollTop = 0
+   * ```
+   * 滚到某一轮 → 去对面看一眼运行态 → 回来**回到顶部**，那一轮得重新找。
+   * 用户对这个组件的要求是「**原有功能样式保持不变**，只是把他们分离开」——
+   * 而"切走再切回原地不动"正是原有行为（改动前决策区一直在 DOM 里，`scrollTop` 自然还在）。
+   *
+   * ## 为什么不去改成 `hidden`
+   *
+   * `hidden`（`display:none`）能让节点留在 DOM 从而保住 `scrollTop`，但代价是
+   * **推翻了这个标签栏设计的前提**：
+   * ```
+   *   ① t60 的目标就是"同一时间只渲染一个"——两块同时在 DOM 正是要消除的结构；
+   *   ② 决策卡每张都带提示词与思维链（单条几十 KB），留着就是几十个重型节点
+   *      常驻；这个组件顶部专门记过"成千上万数据一次加载出来导致系统卡死"；
+   *   ③ `display:none` 的箱子 `clientHeight === 0`，哨兵几何变得没有意义 ——
+   *      而本文件刚给观察器加了一条"不可滚就不观察"的判断，两者会互相打架。
+   * ```
+   * 所以选择**保持卸载语义，把偏移量记下来再还原**：卸载/挂载的行为一个字没变，
+   * 只是"回来的时候站回原来的位置"。
+   *
+   * ⚠️ `geomRef` 必须清掉：锚定 effect（上面那个）会拿旧锚点再补偿一次，
+   * 而 `scrollTop` 已经由这里设好了 —— 不清就会**补偿两遍**、滚过头。
+   */
+  /** 两个标签的统一切换入口：**离开决策页时先记住位置**。 */
+  const switchPane = (next: 'decisions' | 'workflow') => {
+    if (pane === 'decisions' && next !== 'decisions') {
+      restoreScrollRef.current = scrollerRef.current?.scrollTop ?? null;
+    }
+    setPane(next);
+  };
+
+  /**
+   * ── 标签栏的**键盘操作**（2026-10-17 · 台账 F3）────────────────────────────
+   *
+   * ## 为什么要有
+   *
+   * `role="tablist"` / `role="tab"` / `aria-selected` 只把**语义**说清楚了；
+   * 一个真正的 tab 组件还必须能用键盘操作 —— 否则对键盘与读屏用户来说，
+   * 那两个"标签"就是**两个普通按钮**，而它们宣称自己是标签。
+   * 页面上另一个标签栏（`TraderTables` 的机器人数据表）同样缺这一块，
+   * 属仓库级既有缺口；本轮只补本组件这一处（`TraderTables` 不在本次写作用域）。
+   *
+   * ## 键位照 WAI-ARIA 的 tabs 模式
+   *
+   * ```
+   *   ← / →  在同一个 tablist 里切换（两端循环）
+   *   Home   第一个（最终决策）
+   *   End    最后一个（AI 工作流）
+   * ```
+   * 选中即切换（`aria-selected` 与面板同步）—— 本标签栏面板很轻（都是本地状态，
+   * 没有网络请求），所以按"自动激活"处理，不需要 Enter/Space 二次确认。
+   *
+   * ⚠️ 焦点也要跟着走（roving tabindex 的标准做法）：两个标签里只有选中的那个
+   * `tabIndex=0`，所以 `focus()` 必须显式调用，否则焦点会留在旧的（已变 -1 的）按钮上。
+   */
+  const onTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next: 'decisions' | 'workflow' =
+      event.key === 'ArrowLeft' || event.key === 'Home' ? 'decisions' : 'workflow';
+    switchPane(next);
+    /* 等 roving tabindex 落到新按钮上再聚焦（同一提交内 ref 还没换）。 */
+    requestAnimationFrame(() => {
+      document.getElementById(next === 'decisions' ? 'feed-tab-decisions' : 'feed-tab-workflow')?.focus();
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (pane !== 'decisions') return;
+    const el = scrollerRef.current;
+    const want = restoreScrollRef.current;
+    if (!el || want === null) return;
+    el.scrollTop = want;
+    scrollTopRef.current = want;
+    geomRef.current = null;
+    restoreScrollRef.current = null;
+  }, [pane]);
 
   /*
    * 面板头右侧那一行：**动作（立即分析）→ 刷新 → 全部记录**，顺序照参考产品的
@@ -1211,6 +1384,7 @@ export function DecisionFeed({
             <div
               role="tablist"
               aria-label="决策与工作流"
+              onKeyDown={onTabKeyDown}
               className="flex shrink-0 items-center gap-0.5 border-b border-base-800 px-2.5"
             >
               {/*
@@ -1219,10 +1393,14 @@ export function DecisionFeed({
                 而"谁在干活"属于按需查看的运行态。
               */}
               <button
+                id="feed-tab-decisions"
                 type="button"
                 role="tab"
                 aria-selected={pane === 'decisions'}
-                onClick={() => setPane('decisions')}
+                aria-controls="feed-panel-decisions"
+                /* roving tabindex：只有选中的那个进 Tab 键序列（WAI-ARIA tabs 的标准做法） */
+                tabIndex={pane === 'decisions' ? 0 : -1}
+                onClick={() => switchPane('decisions')}
                 className={cn(
                   '-mb-px border-b-2 px-2.5 py-1 text-base transition',
                   pane === 'decisions'
@@ -1233,10 +1411,13 @@ export function DecisionFeed({
                 最终决策
               </button>
               <button
+                id="feed-tab-workflow"
                 type="button"
                 role="tab"
                 aria-selected={pane === 'workflow'}
-                onClick={() => setPane('workflow')}
+                aria-controls="feed-panel-workflow"
+                tabIndex={pane === 'workflow' ? 0 : -1}
+                onClick={() => switchPane('workflow')}
                 className={cn(
                   '-mb-px border-b-2 px-2.5 py-1 text-base transition',
                   pane === 'workflow'
@@ -1299,6 +1480,10 @@ export function DecisionFeed({
                * （这条在本文件里被记录过两次，`TeamBoard` 也是同一个前提）。
                */
               className="flex min-h-0 flex-1 flex-col p-2.5"
+              /* 与决策区配对的那一半（同一套 `aria-controls` / `aria-labelledby` 关系）。 */
+              role="tabpanel"
+              id="feed-panel-workflow"
+              aria-labelledby="feed-tab-workflow"
             >
               <div className="flex min-h-0 flex-1 flex-col">
                 <TeamBoard
@@ -1371,6 +1556,17 @@ export function DecisionFeed({
           {!(mode === 'ai_team' && pane !== 'decisions') && (
           <div
             /*
+             * ⚠️ **`role="tabpanel"` 只在团队模式加**（2026-10-17 · 台账 F3）。
+             *
+             * 另两种模式**没有标签栏**（工作流区只属于团队模式）—— 那时给这一块挂
+             * `role="tabpanel"` 就是一个**没有对应 tab 的 panel**，比不加更糟
+             *（读屏用户会去找那个不存在的 tablist）。
+             * 所以这里按模式给：有标签栏才有 tabpanel。
+             */
+            {...(mode === 'ai_team'
+              ? { role: 'tabpanel', id: 'feed-panel-decisions', 'aria-labelledby': 'feed-tab-decisions' }
+              : {})}
+            /*
              * `ref` + `onScroll` 是**分页与滚动位置**要的两样东西：
              * 前者给 `IntersectionObserver` 当 `root`（哨兵必须在容器里比较，不能和窗口比），
              * 也给那个把视口钉住的 `useLayoutEffect` 当测量对象；
@@ -1442,8 +1638,32 @@ export function DecisionFeed({
                * 高度不再被分配，也就不再有牺牲者。
                *
                * ⚠️ 非团队模式仍然是 `flex-1` —— **逐字节不变**（见上面那个事故）。
+               *
+               * ## ⚠️⚠️⚠️ 2026-10-17（t89）**补回高度上限**：`flex-1` 单独不够
+               *
+               * `flex-1` 只在**父级有确定高度**时才有意义（`xl` 及以上：右栏在
+               * `h-full` 的高度链上）。`xl` 以下两栏塌成一列、父级高度是 `auto`，
+               * 那时 `flex-1` 解析出来的就是**内容高度** ——
+               * t74 用真实浏览器量到：`clientHeight === scrollHeight === 5559px`。
+               *
+               * 后果不只是"整页变长"：
+               * ```
+               *   箱体不可滚 ⇒ 哨兵永远落在 root 内 ⇒ 观察器一创建就回调
+               *   ⇒ 用户还没滚动，打开页面就自动取下一页（实测 2 次请求）
+               * ```
+               * 这违反本文件写死的「只有操作者读到最下面时才会触发」。
+               *
+               * **根因可溯源**：这段上限原来就在这行 className 里
+               * （`c750fd3`：`… overflow-y-auto p-2.5 max-h-[calc(100dvh-16rem)] xl:max-h-none`），
+               * `9ad1503` 把它删掉了（那次提交的目标是"团队工作流区改为占满主导高度"），
+               * 而**组件顶部第 84 行的注释一直宣称它还在** —— 注释与代码分叉了两个月，
+               * 于是没人发现。现在两者重新对齐（见顶部注释的补充）。
+               *
+               * ⚠️ `xl:max-h-none` 不能省：`xl` 以上要**把上限交还**给
+               * `h-full` 那条 flex 高度链，否则 `calc(100dvh-16rem)` 会盖掉正确的高度，
+               * 面板在矮视口上会比它该有的更矮。
                */
-              'flex-1',
+              'max-h-[calc(100dvh-16rem)] flex-1 xl:max-h-none',
             )}
           >
           {/*

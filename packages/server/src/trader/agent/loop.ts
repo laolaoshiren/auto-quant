@@ -30,6 +30,15 @@ import { parseNativeToolCalls } from './nativeToolCall.js';
 import { contextFor, parseRoleOutput, renderPriorFailures, ROLES, type AgentRole } from './roles.js';
 import { dispatchTool, renderToolCatalogue, type AgentToolDeps } from './tools.js';
 import type { AgentMemoryRow } from '../../store/agentStore.js';
+/*
+ * **输入侧预算**（t82）—— 复用策略层那一套 token 换算与 6 万上限。
+ *
+ * ⚠️ 为什么用 `estimateTokens` 而不是自己写一个除法：那个函数的注释里记着一次实测
+ * （207,328 字符 → 128,073 tokens，约 **1.62 字符/token**，不是英文散文的 4）。
+ * 自己估一个"4 字符/token"会让真值**低估一倍以上** —— 这个仓库正是这样让一个
+ * 12.8 万 token 的请求溜过了一道"以为只有 6 万"的检查。
+ */
+import { estimateTokens, PROMPT_TOKEN_BUDGET } from '../../strategy/prompt.js';
 
 /* -------------------------------------------------------------------------- */
 /*  注入的模型                                                                 */
@@ -81,6 +90,291 @@ export interface LoopResult {
   tokensIn: number;
   tokensOut: number;
   latencyMs: number;
+  /**
+   * **有没有工具结果因为输入预算被省略**（t82）。
+   *
+   * 它回答的是"这一轮的账目里，有没有东西被我省掉了" ——
+   * 省略本身是**必须的**（见 `packContext`），但**省略得看不见**才是本仓库反复吃亏的形态。
+   * `false` = 一个字节都没省（此时行为与改动前逐字节一致）。
+   */
+  contextTrimmed: boolean;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  输入侧预算（t82）                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **会走工具循环的那批角色**在提示词里最多能看到的输入（token）。
+ *
+ * ## 为什么需要它（线上实测的失败形状）
+ *
+ * `agent_runs` + `runtime_logs` 取样（2026-10-17）：**18 条 `finish_reason=length`
+ * 而正文为空**，其中 7 条在最新部署之后仍在发生。成因不是模型不会答，而是：
+ * ```
+ *   输出预算（`TEAM_BASE_MAX_TOKENS = 8192`）与【思维链】共享
+ *   而输入侧【没有预算】—— 工具循环的 transcript 每步追加一份完整工具结果
+ *   实测单结果 40,000 字符 × 最多 8 步 ⇒ 最坏约 32 万字符 ≈ 19 万 token
+ *   ⇒ 模型把 8192 全花在"想"上 ⇒ 正文为空 ⇒ 两轮都空 ⇒ failed，零结论
+ * ```
+ * ⚠️ **绝不能靠调 `TEAM_BASE_MAX_TOKENS` 来修**：那个数就是被思维链吃掉的，
+ * 调它只会让思维链吃更多。要修的是**喂进去的东西**。
+ *
+ * ## 为什么取 `PROMPT_TOKEN_BUDGET`（6 万）而不是另定一个数
+ *
+ * 同一个仓库里，**策略层**已经为同一件事定过这个数，而且理由是实测的
+ * （`strategy/prompt.ts:3683-3685`）：
+ * ```
+ *   "The failure this constant exists to prevent was a prompt at 128k tokens:
+ *    the model consumed its entire output budget reasoning about the input
+ *    and returned nothing. 60k is less than half of that."
+ * ```
+ * **同一个失败形状，同一个数** —— 不再造第二个口径（本仓库为"同一件事两处各算一遍"
+ * 已经付过多次代价）。
+ *
+ * ⚠️ 与模型自己的上下文上限（≥128k）的关系：6 万是**不到一半**，
+ * 留出的那部分正是模型"想 + 答"的地方 —— 那两件事共享的预算越小越容易被烧光。
+ */
+const TOOL_LOOP_INPUT_BUDGET_TOKENS = PROMPT_TOKEN_BUDGET;
+
+/**
+ * **最近几个工具结果必须原样保留**（不裁、不省）。
+ *
+ * 理由是工具循环的语义：模型**下一步要基于刚才那个结果**做判断。
+ * 只保留"最近一次"就够它走一步，但不够它做**交叉核对**
+ *（例如拿 `get_performance` 与 `get_lessons` 对读 —— 那正是策略师提示词要求它做的事）。
+ *
+ * 3 这个数：一次工具循环里"当前正在用的结论链"通常不超过 3 环，
+ * 再往前的结果已经**体现在后续步骤的 thought 里**（模型自己引用过它）。
+ */
+export const TOOL_LOOP_KEEP_RECENT_RESULTS = 3;
+
+/** 被省略的工具结果在提示词里留下的**一行说明**（让模型知道"这里少了东西"）。 */
+export interface OmittedToolResult {
+  step: number;
+  tool: string;
+  /** 原始字符数（如实报，不压低）。 */
+  chars: number;
+}
+
+/** `packContext` 的产出：提示词 + 它到底省了什么。 */
+export interface PackedContext {
+  transcript: string;
+  /** 被**整条省略**的结果（按被省掉的顺序）。 */
+  dropped: OmittedToolResult[];
+  /** 被**截断**的结果（整条省略还不够时才会发生）。 */
+  truncated: OmittedToolResult[];
+  /** 固定段（任务 + 事实）自己就已经超预算 —— 那种情况必须让人看见。 */
+  prefixOverBudget: boolean;
+}
+
+/** 固定段（任务 + 已知事实）：**任何情况下都不裁** —— 它是这一轮的全部输入。 */
+function fixedPrefix(task: string, facts: string): string {
+  return `## 你的任务\n${task}\n\n## 已知事实\n${facts}`;
+}
+
+/** 把一步渲染成提示词里的一段（与被省略时留下的那行共用同一套字段）。 */
+function renderStep(step: LoopStep): string {
+  return (
+    `\n\n## 第 ${step.step} 轮\n你想调用：${step.tool}(${JSON.stringify(step.args)})` +
+    `\n结果：${JSON.stringify(step.result)}`
+  );
+}
+
+/**
+ * **系统提示词要留出的余量**（token）。
+ *
+ * ## 为什么预算不能全给 transcript
+ *
+ * 真正发出去的是 `system + transcript` 两段，而 `system` 也要占 token：
+ * ```
+ *   角色提示词（strategist 那份约 5 千字符）+ PROTOCOL（协议说明）+ 历史失败块
+ * ```
+ * 若把 6 万全给 transcript，则**实际输入 = 6 万 + system** —— 预算就不是预算了。
+ * 实测（`.dsh/t82-measure.ts`）第一版就是这样：transcript 压到 6 万，
+ * 而 stub 看到的输入是 **60,202 tokens**，刚刚越过阈值 —— **差一点点，等于没修**。
+ *
+ * ## 为什么是 8 千而不是"量一下 system 有多大"
+ *
+ * 量它是可行的（`estimateTokens(system)`），但那样预算会随角色的提示词长度浮动 ——
+ * 而"这一轮最多能喂多少"应当是**稳定**的。固定留 8 千（远大于实测最长的那份
+ * 角色提示词）既够用又好解释。
+ */
+const SYSTEM_PROMPT_RESERVE_TOKENS = 8_000;
+
+/**
+ * **把工具循环的对话记录压进输入预算**（纯函数，t82）。
+ *
+ * ## 策略（每一档都有取舍，按"先省最不要紧的"排序）
+ *
+ * ```
+ *   ① 任务 + 已知事实        —— 永不裁。裁了就不是同一个任务了。
+ *   ② 最近 3 个工具结果      —— 永不裁。模型下一步要基于它判断（见常量说明）。
+ *   ③ 更早的结果：整条换一行说明（省最多，信息损失最小 —— 模型早就引用过它）
+ *   ④ 还不够？逐个截断（连最近 3 个也会被截）—— 最后一道，必须有，
+ *      否则一个 20 万字符的结果仍能把预算撑破（线上 `list_candidates` 就是这一类）
+ * ```
+ *
+ * ## ⚠️ 为什么不能"直接 slice 字符串"
+ *
+ * 切在 JSON 中间会让模型看到**半截结果**，而它没有"这是半截"的线索 ——
+ * 会基于残缺数据下结论。这与 `tradingDesk` 的 `headOfMarket` 记过的是同一个教训：
+ * **材料要按"谁需要什么"给，切的时候必须把"切了"这件事说清楚**。
+ *
+ * ## ⚠️ 判据是**估算**，不是真的 token 计数
+ *
+ * 所以它是**保守**的：`estimateTokens` 按实测的 1.62 字符/token 换算，
+ * 留出余量给"模型数 token 的方式与我们不同"这件事。
+ *
+ * @param budgetTokens 这段**记录**能用的预算（默认已经是"总预算 − system 余量"）
+ */
+export function packContext(
+  task: string,
+  facts: string,
+  steps: readonly LoopStep[],
+  budgetTokens: number = TOOL_LOOP_INPUT_BUDGET_TOKENS - SYSTEM_PROMPT_RESERVE_TOKENS,
+): PackedContext {
+  const prefix = `${fixedPrefix(task, facts)}\n\n请开始。`;
+  const dropped: OmittedToolResult[] = [];
+  const truncated: OmittedToolResult[] = [];
+  /*
+   * 固定段自己就超预算：**照样原样发出**（裁它等于换一个任务），
+   * 但把这件事报出去 —— 上游要知道"这一轮的输入预算本来就是破的"。
+   */
+  if (estimateTokens(prefix) >= budgetTokens) {
+    return {
+      transcript: prefix + steps.map(renderStep).join(''),
+      dropped,
+      truncated,
+      prefixOverBudget: true,
+    };
+  }
+
+  const recentFrom = Math.max(0, steps.length - TOOL_LOOP_KEEP_RECENT_RESULTS);
+  const older = steps.slice(0, recentFrom);
+  const recent = steps.slice(recentFrom);
+
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **分配口径**（t82 的第五版；前四版都栽在"谁先拿额度"上）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 四版实测（`.dsh/t82-debug-pack.ts`）踩到的都是同一件事：
+   * ```
+   *   ① 先塞满老结果             → 最新的两条被截到 0 字符（最要紧的证据死了）
+   *   ② 按"预算 / 4"预留        → 老结果吃不满、结余还不回尾部 ⇒ 最新那条仍被截断
+   *   ③ 从最新往回平均分配       → 放不下的被误记进 dropped ⇒ "取舍从最老开始"的判据失效
+   *   ④ 只给"最新那条"留额度     → 老证据整条整条活着，而最近那几条被压成几十字符
+   *                              （**恰好反了**：第 1、2 步完整，第 3–5 步只剩零头）
+   * ```
+   * 现在只有**一条**口径，按"谁更可能被下一步用到"排序：
+   * ```
+   *   ① 最近那 3 条整条进（它们是要用的证据）—— 装不下就截断其中最老的一条，退让重算
+   *   ② 更老的那些只用剩下的额度，且**整条放不下就整条省略**（不切）
+   *   ③ 最后再兜一次：若连"最近那几条"都装不下，截断其中**最老**的一条并重试
+   * ```
+   * ⚠️ "整条放不下就整条省略"（只针对更老的那些）是刻意的：切一半的 JSON 会让模型
+   * **基于残缺数据下结论**，那比"明确告诉你这一条没装进来"更糟
+   *（`tradingDesk` 的 `headOfMarket` 记过同一个教训）。
+   */
+  const KEEP_RECENT = TOOL_LOOP_KEEP_RECENT_RESULTS;
+  const newestNote = (chars: number, keptChars: number): string =>
+    `\n…（**结果被截断**：这一条原始 ${chars} 字符，为装进输入预算只保留了前 ${keptChars} 字符）` +
+    '\n⚠️ 上面是不完整的结果 —— 缺的部分不要猜；需要就再调一次工具（可以缩小参数，例如更短的时间窗）。';
+
+  let keepRecent = Math.min(KEEP_RECENT, recent.length);
+  let keptOlder: string[] = [];
+  let head = prefix;
+  let dropNote = '';
+  let tail = '';
+
+  for (;;) {
+    const recentKept = recent.slice(recent.length - keepRecent);
+    const olderAll = steps.slice(0, steps.length - keepRecent);
+
+    /* ① 最近那几条整条进（截断与占位只在兜底里发生）。 */
+    const recentTexts = recentKept.map(renderStep);
+    const reserved = recentTexts.reduce((sum, t) => sum + estimateTokens(t), 0);
+    const capForOlder = Math.max(estimateTokens(prefix), budgetTokens - reserved);
+
+    /* ② 更老的那些：整条放不下就整条省略。 */
+    const droppedHere: OmittedToolResult[] = [];
+    keptOlder = [];
+    for (const step of olderAll) {
+      const text = renderStep(step);
+      if (estimateTokens(prefix + keptOlder.join('') + text) > capForOlder) {
+        droppedHere.push({ step: step.step, tool: step.tool, chars: text.length });
+        continue;
+      }
+      keptOlder.push(text);
+    }
+    dropNote =
+      droppedHere.length === 0
+        ? ''
+        : `\n\n## ⚠️ 有 ${droppedHere.length} 条更早的工具结果因【输入预算】被省略\n` +
+          droppedHere.map((d) => `- 第 ${d.step} 步 ${d.tool}：结果约 ${d.chars} 字符，已省略。`).join('\n') +
+          '\n⚠️ 缺的部分不要猜；需要就再调一次工具（可以缩小参数，例如更短的时间窗）。';
+    /* ⚠️ 说明本身可能把头部顶出 `capForOlder` —— 从末尾往回丢，直到装得下。 */
+    while (keptOlder.length > 0 && estimateTokens(prefix + keptOlder.join('') + dropNote) > capForOlder) {
+      keptOlder.pop();
+    }
+    head = prefix + keptOlder.join('') + dropNote;
+    dropped.length = 0;
+    dropped.push(...droppedHere);
+
+    /* ③ 最近那几条真的装得下吗？装不下就**截断其中最老的一条**再算一次。 */
+    const tailCost = estimateTokens(recentKept.map(renderStep).join(''));
+    if (estimateTokens(head) + tailCost <= budgetTokens || keepRecent <= 1) {
+      tail = recentKept.map(renderStep).join('');
+      break;
+    }
+    keepRecent -= 1;
+  }
+
+  /*
+   * 兜底：`keepRecent === 1` 时仍装不下 → 只保留"最新那条"允许被截断。
+   * 它是模型下一步唯一要用的证据，给一半（并明说被截断、不要猜）好过什么都不给。
+   */
+  if (estimateTokens(head + tail) > budgetTokens && recent.length > 0) {
+    const last = recent[recent.length - 1]!;
+    const lastText = renderStep(last);
+    const room = budgetTokens - estimateTokens(head);
+    let cut = Math.min(lastText.length, Math.max(0, Math.floor(room * 1.7)));
+    let chosen: string | null = null;
+    while (cut > 0) {
+      const withNote = lastText.slice(0, cut) + newestNote(lastText.length, cut);
+      if (estimateTokens(withNote) <= room) {
+        chosen = withNote;
+        break;
+      }
+      cut = Math.floor(cut * 0.9);
+    }
+    truncated.push({ step: last.step, tool: last.tool, chars: lastText.length });
+    tail = chosen ?? '';
+  }
+
+  /*
+   * ── 最后一道：**硬保证** ──────────────────────────────────────────────
+   *
+   * 上面每一档都是"保守估算 + 收紧"，但估算与真实之间总有取整误差（实测差 36 tokens）。
+   * 而这条预算存在的理由就是"不许越界"，所以最后无条件收一次。
+   */
+  if (estimateTokens(head + tail) > budgetTokens) {
+    const note = '\n…（本段因输入预算被截断）';
+    let cut = tail.length;
+    while (cut > 0 && estimateTokens(head + tail.slice(0, cut) + note) > budgetTokens) {
+      cut = Math.floor(cut * 0.95);
+    }
+    tail = tail.slice(0, cut) + note;
+    truncated.push({ step: 0, tool: '（输入预算硬截断）', chars: cut });
+  }
+
+  return {
+    transcript: head + tail,
+    dropped,
+    truncated,
+    prefixOverBudget: false,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -380,6 +674,8 @@ const PROTOCOL = `
 
 **不要**用下面这些方式代替 finish（它们都不是工具调用，会被判失败）：
 · 直接写一段散文/总结（只有 thought、没有 tool）；
+· **单独输出工具参数**（只有参数、没有 \`thought\`/\`tool\` 外壳的对象）——
+  那些参数**不是一次调用**，系统不会执行它们（t81：线上 15 条失败就是这个形状）；
 · 用**别的模式的格式**回答 —— 例如交易循环的 \`<reasoning>\` + \`<decision>\` 块，
   或交易台的 \`<decision>\` + \`<risk>\` + \`<team>\` 块。
 
@@ -414,8 +710,58 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
   let tokensIn = 0;
   let tokensOut = 0;
   let latencyMs = 0;
-  /** 对话记录 —— 每轮把"上一次想干什么 + 结果"追加进去，模型据此决定下一步。 */
-  let transcript = `## 你的任务\n${input.task}\n\n## 已知事实\n${input.facts}\n\n请开始。`;
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **对话记录必须每轮按输入预算重打包**（t82）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 原来它是**只增不减**的一个字符串：
+   * ```
+   *   let transcript = `## 你的任务…`;
+   *   …
+   *   transcript += `\n\n## 第 N 轮\n…\n结果：${JSON.stringify(outcome.result)}`;
+   * ```
+   * 而工具结果**可以很大**（线上实测单结果 40,000 字符，`list_candidates` 更大），
+   * 步数上限是 8 —— 最坏就是把约 32 万字符（≈19 万 token）喂给一次调用。
+   *
+   * 后果实测两种，都会让这一轮**白跑**：
+   * ```
+   *   ① 超出模型上下文 ⇒ 请求直接被拒 / 被裁（那是坏的，因为裁剪发生在网关侧，我们看不见）
+   *   ② 没超上下文，但输出预算（8192，与思维链共享）被"读大材料"吃光 ⇒ 正文为空
+   *      ⇒ agent_runs 里 18 条 finish_reason=length、content 为空的形状
+   * ```
+   *
+   * 所以每次调用前用 `packContext()` 重打包：**最近的工具结果保原样，更老的换成一行说明**，
+   * 总量压在 `TOOL_LOOP_INPUT_BUDGET_TOKENS` 以内。取舍与理由写在那个函数上。
+   *
+   * ⚠️ `dropped` / `truncated` **必须累积着传进下一次打包**：省略本身要**可见**，
+   * 否则模型会以为"那些步骤不存在"，而操作员也不知道这一轮的账目被省过。
+   */
+  let dropped: OmittedToolResult[] = [];
+  let truncated: OmittedToolResult[] = [];
+  let packed = packContext(input.task, input.facts, steps);
+  let transcript = packed.transcript;
+  /** 把 `packContext` 的结果接过来（含它累积的省略清单）。 */
+  const repack = (): void => {
+    packed = packContext(input.task, input.facts, steps);
+    /*
+     * ⚠️ 只**累积已省略过的**，不把"这次新省略的"丢掉：
+     * `packContext` 每次都从完整 steps 重算，所以它返回的清单已经包含全部历史省略。
+     */
+    dropped = packed.dropped;
+    truncated = packed.truncated;
+    transcript = packed.transcript;
+  };
+  /** 这一轮到底省没省东西（给调用方看）。 */
+  const contextTrimmed = (): boolean => dropped.length > 0 || truncated.length > 0;
+  /** 省略情况的**一句话**（附在返回的 `detail` 上，让操作员不必去翻日志）。 */
+  const trimNote = (): string => {
+    if (!contextTrimmed()) return '';
+    const parts: string[] = [];
+    if (dropped.length > 0) parts.push(`省略 ${dropped.length} 条旧工具结果`);
+    if (truncated.length > 0) parts.push(`截断 ${truncated.length} 条结果`);
+    return `（输入预算：${parts.join('、')}；最近的 ${TOOL_LOOP_KEEP_RECENT_RESULTS} 条保持原样）`;
+  };
   /** 坏输出只宽容一次：给模型一次自我纠正的机会，但不成环。 */
   let badOutputRetries = 0;
 
@@ -433,15 +779,42 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
           outcome: 'failed',
           steps,
           conclusion: null,
-          detail: `模型连续两轮没有输出可解析的工具调用：${error}`,
+          detail: `模型连续两轮没有输出可解析的工具调用：${error}${trimNote()}`,
           tokensIn,
           tokensOut,
           latencyMs,
+          contextTrimmed: contextTrimmed(),
         };
       }
       badOutputRetries += 1;
+      /*
+       * ⚠️⚠️ **纠正指令必须与真实病因匹配**（t81）。
+       *
+       * ## 事故：指令只说"只输出一个对象"，而线上那条回复**本来就是一个对象**
+       *
+       * `agent_runs` 15 条的 detail 原文：
+       * ```
+       *   模型连续两轮没有输出可解析的工具调用：JSON 解析成功，
+       *   但里面**没有 tool 字段** … 收到：{"limit":20}
+       * ```
+       * `{"limit":20}` 是工具的**参数**，缺的是 `thought`/`tool` 外壳。
+       * 而原来那段纠正只说"请只输出一个 JSON 对象…" —— 模型读到的是"你写多了"，
+       * 于是**同一个形状再来一遍** ⇒ 两轮都坏 ⇒ `failed`。
+       *
+       * `parseTurn` 已经把两类病因分开了（"缺 tool 字段" vs "根本解析不出 JSON"），
+       * 这里就按它给的那一类**分别**说 —— 指令里的每一句都要对应一种真实形状。
+       *
+       * ⚠️ 新句子**不给可照抄的 JSON 例子**：few-shot 会让模型把示例当模板，
+       * 而这里要它做的是"补上外壳"，不是"照抄一个例子"。
+       */
+      const missingTool = (error ?? '').includes('没有 tool 字段');
       transcript +=
-        `\n\n## 第 ${step} 轮：你的输出无法解析\n${error}\n` +
+        `\n\n## 第 ${step} 轮：${missingTool ? '你的输出不是一次工具调用' : '你的输出无法解析'}\n${error}\n` +
+        (missingTool
+          ? '⚠️ 你的 JSON 本身**是合法的**，缺的只是 `tool` 字段 —— ' +
+            '**单独输出工具参数**（只有参数、没有 `thought`/`tool` 外壳的对象）**不算一次调用**，' +
+            '系统不会执行它。\n'
+          : '') +
         '请只输出一个 JSON 对象，形如 {"thought":"...","tool":"...","args":{...}}。\n' +
         '⚠️ **如果你已经可以给结论，就用 finish 收尾**（`{"thought":"...","tool":"finish","args":{"summary":"..."}}`）——' +
         '不要用散文或别的模式的格式（如 `<decision>` 块）代替工具调用。';
@@ -465,14 +838,20 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
         outcome: 'ok',
         steps,
         conclusion: outcome.finished.summary,
-        detail: `模型在第 ${step} 步自行结束。`,
+        detail: `模型在第 ${step} 步自行结束。${trimNote()}`,
         tokensIn,
         tokensOut,
         latencyMs,
+        contextTrimmed: contextTrimmed(),
       };
     }
 
-    transcript += `\n\n## 第 ${step} 轮\n你想调用：${action.tool}(${JSON.stringify(action.args)})\n结果：${JSON.stringify(outcome.result)}`;
+    /*
+     * ⚠️ **不是 `transcript += …`**（t82）：每步都按输入预算**重打包**，
+     * 见上面 `repack()` 那段说明 —— 只增不减的记录会把 8 步的工具结果
+     * （最坏约 32 万字符）全喂给下一次调用。
+     */
+    repack();
   }
 
   /*
@@ -486,10 +865,11 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
     outcome: 'degraded',
     steps,
     conclusion: null,
-    detail: `达到步数上限（${maxSteps} 步）仍未结束，本轮没有结论。`,
+    detail: `达到步数上限（${maxSteps} 步）仍未结束，本轮没有结论。${trimNote()}`,
     tokensIn,
     tokensOut,
     latencyMs,
+    contextTrimmed: contextTrimmed(),
   };
 }
 
@@ -562,15 +942,22 @@ export const AGENT_CALL_MARKER =
  *   只输出一个 JSON 对象        ← 防「多对象」（线上主形状）
  *   不要重复输出                ← 防「同一个对象写两遍」
  *   不要在 JSON 前后加任何文字   ← 防「JSON 后跟含 } 的说明」（切片会拼出非法 JSON）
+ *   该有的字段一次写全           ← 防「单个对象没写完 / 只写了参数片段」（t81 补：15 条与 4 条都栽在这）
  * ```
+ *
+ * ⚠️ **最后一条是 t81 补的，而它纠正了上面那句"失败的真实形状是…"**：
+ * 线上实测里失败的回复**本来就是单个对象** —— 工具循环那一档是"只有参数、没有 `tool` 外壳"
+ * （`收到：{"limit":20}`），单次结论档是"对象没写完"（同期 `runtime_logs` 有 18 条
+ * `finish_reason=length`）。而原来的指令只猜"多对象/前后带文字"，**打不中病因，所以重试也救不回来**。
  *
  * ⚠️ **这不改变解析层的严格性**：`parseRoleOutput` 对多对象仍然**必须失败**
  * （`roles.ts:751-753`：取错对象会把一个角色的结论当成另一个角色的）。
  * 重试只是**给模型一次改口的机会**，判据一点没松。
  */
 const SINGLE_SHOT_RETRY_INSTRUCTION =
-  '\n\n## ⚠️ 上一次回复无法解析（可能有多个 JSON 对象，或 JSON 前后带了文字）\n' +
-  '请**只输出一个 JSON 对象**，不要重复输出、不要在 JSON 前后加任何文字。';
+  '\n\n## ⚠️ 上一次回复无法解析成**一个完整的结论对象**\n' +
+  '病因不止"多个对象 / JSON 前后带文字"：也可能**只写了参数或片段、对象没写完**。\n' +
+  '请**只输出一个 JSON 对象**，不要重复输出、不要在 JSON 前后加任何文字，并把该有的字段一次写全。';
 
 /**
  * 一次"单次调用"（不开工具循环）—— 给常规轮次用的廉价档。
@@ -625,6 +1012,13 @@ export async function runSingleShot(input: Omit<LoopInput, 'maxSteps'>): Promise
         tokensIn,
         tokensOut,
         latencyMs: latency || Date.now() - started,
+        /*
+         * ⚠️ 这一档**没有工具结果**（它不开工具循环），所以输入侧没什么可裁的。
+         * 恒 `false` 是**如实**的：它没有省略任何东西。
+         * 唯一能让它超预算的是 `task` / `facts` 本身 —— 那属于调用方该管的事
+         *（`autoTrader` 用 `promptTokenBudget()` 管提示词预算），不在这里静默裁。
+         */
+        contextTrimmed: false,
       };
     }
     lastError = parsed.error ?? '（无错误信息）';
@@ -644,6 +1038,7 @@ export async function runSingleShot(input: Omit<LoopInput, 'maxSteps'>): Promise
     tokensIn,
     tokensOut,
     latencyMs: latency || Date.now() - started,
+    contextTrimmed: false,
   };
 }
 

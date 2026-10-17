@@ -263,16 +263,48 @@ export function TeamBoard({
     return [...map.entries()].filter(([, items]) => items.length > 0);
   };
 
-  const working = entries.filter((e) => e.state === 'active' || e.state === 'done').length;
-  const failed = entries.filter((e) => e.state === 'failed').length;
-  const idleStaffed = entries.filter((e) => e.state === 'idle').length;
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️ **头部计数只数【编制表里登记过的】岗位**（t80 修）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * `rosterEntries` 会把**不在册**的 role 追加成一行（那是对的：丢掉它会让
+   * "某个角色在干活但界面看不到"），但**计数是另一回事**：
+   *
+   * ```
+   *   在册岗位        → 用户能在编制表里对上号，"本轮在干 N / 失败 N"说的是这家公司
+   *   不在册的 role   → 只能写"界面还没登记"（`roster.ts:338-352`），
+   *                     把它算进"在干/失败"，说的就是**界面自己不认识的东西**
+   * ```
+   *
+   * 实测形态（t80，`routedModel` 的 agent 层路由步骤归到真实角色 `strategist` 之后）：
+   * ```
+   *   头部「本轮在干 1 失败 1」+ 一行 `strategist 失败`
+   *   —— 而"策略师"这个岗位**编制表里根本没有**，操作员无从对上号
+   * ```
+   * ⚠️ 这是**误报**（与"把别人的失败记到总管头上"同族，只是换了一格）：
+   * 一个界面认不出的角色占着"失败"这个最该被信任的计数。
+   *
+   * 所以：**行仍然照常渲染**（那是"看得见"的保证），
+   * 但**计数只统计登记过的岗位** —— 数字必须能对上编制表。
+   *
+   * ⚠️ 判据用 `FIRM_ROLES` 里的 id，不看 `entry.role.label === id` ——
+   * 那是一个"看起来等价"的巧合（未登记岗位的 label 恰好是 id），
+   * 而将来若有人给它们补了中文 label，那个判据会**静默失效**（本仓库付过多次这种代价）。
+   */
+  const registeredIds = new Set(roster.map((r) => r.id));
+  const counted = entries.filter((e) => registeredIds.has(e.role.id));
+
+  const working = counted.filter((e) => e.state === 'active' || e.state === 'done').length;
+  const failed = counted.filter((e) => e.state === 'failed').length;
+  const idleStaffed = counted.filter((e) => e.state === 'idle').length;
   /*
    * `by_code` 与 `planned` 必须**分开计数**（2026-10-15）：
    * 前者是"这个职能在跑、只是由代码承担"，后者是"还没实现"。
    * 合并成一个数字会让"规划中 7"里混进两个**正在跑**的岗位 —— 那就是原本那个谎言。
    */
-  const byCode = entries.filter((e) => e.state === 'by_code').length;
-  const planned = entries.filter((e) => e.state === 'planned').length;
+  const byCode = counted.filter((e) => e.state === 'by_code').length;
+  const planned = counted.filter((e) => e.state === 'planned').length;
 
   const elapsedSec =
     startedAt === null ? null : Math.max(0, Math.floor((now - startedAt) / 1000));
