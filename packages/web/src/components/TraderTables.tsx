@@ -849,11 +849,30 @@ export function PositionsTable({
   traderId,
   onCloseRequest,
   onSelectSymbol,
+  collapsed = false,
 }: {
   traderId: number;
   onCloseRequest: (symbol: string) => void;
   /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
   onSelectSymbol?: (symbol: string) => void;
+  /**
+   * **收起态**（2026-10-17 · 用户要求"弹性伸缩"）。
+   *
+   * ## 为什么这个 prop 直到今天才有（诚实记录）
+   *
+   * 两档高度常量（`EXPANDED_MAX_H` = `34vh` / `COLLAPSED_MAX_H` = `16vh`）
+   * 早就存在，也早被订单表/成交表用着（它们接的是 `historyCollapsed`）；
+   * **唯独持仓表这一格写死了 `max-h-[34vh]`** —— 而持仓表恰恰是用户盯着看的那张
+   * （截图里 6 条持仓把区域顶满，把上面的行情与决策流挤出去）。
+   *
+   * 所以缺的不是"新机制"，是**这一格没接上那两个常量**。现在接上：
+   * `collapsed` 只影响**一个 class**，节点、`ref`、滚动容器全都不变。
+   *
+   * ⚠️ 与订单/成交表同一条纪律：**收起只换 class，绝不卸载表格** ——
+   * 那张表的滚动框同时是分页观察器的 `root`（见 `COLLAPSED_MAX_H` 的注释）。
+   * 持仓表不分页，但保持同一个写法，避免"同一概念两种实现"。
+   */
+  collapsed?: boolean;
 }) {
   const live = useEvents((s) => s.byTrader[traderId]?.positions);
   const query = usePolled((signal) => api.traderPositions(traderId, signal), {
@@ -953,8 +972,13 @@ export function PositionsTable({
         </ErrorNote>
       )}
       {/* max-h as well as the cap: 100 position rows is still taller than any
-          screen, and the tab bar above must stay reachable. */}
-      <div className="scroll-x max-h-[34vh] overflow-y-auto">
+          screen, and the tab bar above must stay reachable.
+
+          ⚠️ 两档高度走**同一对常量**（`EXPANDED_MAX_H` / `COLLAPSED_MAX_H`），
+          与订单表、成交表逐字一致 —— 原来这里写死 `max-h-[34vh]`，
+          于是"收起"对持仓表**从来没生效过**（用户截图里那张表正是它）。
+          收起态**只换这一个 class**：节点、`ref`、观察器都不换。 */}
+      <div className={`scroll-x ${collapsed ? COLLAPSED_MAX_H : EXPANDED_MAX_H} overflow-y-auto`}>
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
@@ -2367,6 +2391,27 @@ export function TraderTables({
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
 
   /**
+   * **持仓表的弹性伸缩**（2026-10-17 · 用户要求）。
+   *
+   * 用户原话：
+   * > 「下面这块区域增加弹性伸缩：就是像现在（顶满4个的情况下），
+   * >  **点击这块区域外，会自动收缩成2栏，点击区域内又可以放大到4栏**」
+   *
+   * ## 为什么它与 `historyCollapsed` 是两个 state
+   *
+   * 两件事的**触发方式不同**：
+   * ```
+   *   historyCollapsed（历史表）：只有"收起"是自动的（点外面），展开要按按钮
+   *   positionsCollapsed（持仓表）：**两个方向都跟着点击走** —— 这正是用户描述的
+   *                                 "点外面收缩、点里面放大"
+   * ```
+   * 合成一个 state 会让"点历史表里面"也把它展开，那改变了既有行为。
+   *
+   * 默认 `false`（展开）：用户第一眼要看的就是持仓，不该先看到两行。
+   */
+  const [positionsCollapsed, setPositionsCollapsed] = useState(false);
+
+  /**
    * 「表格区域」的两个 DOM 范围 —— 工具栏与表格区，一起算作"里面"。
    *
    * 分成两个 `ref`（而不是把两者包进一个新 div）是刻意的：这一层的 DOM 结构不动，
@@ -2409,6 +2454,54 @@ export function TraderTables({
     document.addEventListener('pointerdown', onPointerDown, true);
     return () => document.removeEventListener('pointerdown', onPointerDown, true);
   }, [isHeavyTab, historyCollapsed]);
+
+  /**
+   * **持仓表的"点外收缩 / 点内放大"**（2026-10-17 · 用户要求）。
+   *
+   * 与上面那个 effect 是**两件事**，所以两个 effect：
+   * ```
+   *   上面：历史表 —— 只自动"收起"，展开要靠按钮（既有行为，不动）
+   *   这里：持仓表 —— **两个方向都跟点击走**（用户原话"点外面收缩、点里面放大"）
+   * ```
+   *
+   * ## 判据与上面同一套（照抄它的四条理由，不另造）
+   *
+   *  · 只认**左键**：右键/中键不是"我看完了"；
+   *  · 起点在面板**里面**（工具栏 / 表头 / 行 / 行内按钮 / 滚动条）→ **放大**，
+   *    并且**不拦截**这次点击本身（不 `preventDefault`，不 `stopPropagation`）——
+   *    按「平仓」、点币种跳行情、翻页、切标签都照常工作；
+   *  · **任何对话框开着** → 不管（Radix 的 portal 在 DOM 上落在面板外，
+   *    点遮罩关对话框不该顺手把表格收了）；
+   *  · 监听 `pointerdown`（按下的那一刻）而不是 `click`：从表格里往外拖选文字，
+   *    起点在里面、终点在外面，`click` 会把它误判成"点了外面"。
+   *
+   * ## 为什么挂在捕获阶段
+   *
+   * 与上面那个 effect 同一条：内层组件的 `stopPropagation` 管不到捕获阶段的监听，
+   * 而这里判断只看"按在了谁身上"，不需要事件继续冒泡。
+   *
+   * ## 只在这个标签页挂
+   *
+   * `tab !== 'positions'` 时根本不挂监听器 —— 在「历史成交」页点外面，
+   * 不该把持仓表的展开态也一起改掉（那是看不见的副作用）。
+   */
+  useEffect(() => {
+    if (tab !== 'positions') return;
+    const onPointerDown = (event: PointerEvent): void => {
+      if (event.button !== 0) return;
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      /* 对话框开着 → 完全不管（同上一条理由）。 */
+      if (document.querySelector('[role="dialog"]')) return;
+      const inside =
+        (toolbarRef.current?.contains(target) ?? false) ||
+        (tableAreaRef.current?.contains(target) ?? false);
+      /* 点在区域**里面** → 放大；点在**外面** → 收缩。 */
+      setPositionsCollapsed(!inside);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [tab]);
 
   /*
    * 委托数据**唯一的一份**，容器持有。
@@ -2542,6 +2635,35 @@ export function TraderTables({
               {historyCollapsed ? '展开全部' : '收起'}
             </Button>
           )}
+          {/*
+            **持仓表的显式开关**（2026-10-17 · 用户要求的"弹性伸缩"）。
+
+            用户描述的是**点区域外收缩、点区域内放大**，那套已经实现在上面的
+            `pointerdown` 监听里。但**只用点击是不够的**：
+            ```
+              · 键盘用户没法"点区域外"（焦点移动不产生 pointerdown）；
+              · 屏幕阅读器读不到"这块可以伸缩"；
+              · 触屏上"点外面"很容易被当成误触。
+            ```
+            所以补一个**显式按钮**：它与点击**同一个 state**，两条路等价。
+            这一条也是 `AGENTS.md` 里"不能只靠鼠标手势表达一个状态"的落实
+            （颜色不能单独表达状态 → 手势同样不能）。
+          */}
+          {tab === 'positions' && (
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-expanded={!positionsCollapsed}
+              title={
+                positionsCollapsed
+                  ? '展开持仓表（也会在点击表格区域时自动展开）'
+                  : '把持仓表收成几行，给上面的行情 / 决策流让出高度（点击表格区域外也会自动收起）'
+              }
+              onClick={() => setPositionsCollapsed((collapsed) => !collapsed)}
+            >
+              {positionsCollapsed ? '展开' : '收起'}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -2566,6 +2688,8 @@ export function TraderTables({
             traderId={traderId}
             onCloseRequest={setCloseTarget}
             onSelectSymbol={onSelectSymbol}
+            /* 收起态（用户要求的"弹性伸缩"）：只换 class，不卸载表格。 */
+            collapsed={positionsCollapsed}
           />
         )}
         {/*
