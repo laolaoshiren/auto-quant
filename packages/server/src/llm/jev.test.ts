@@ -256,6 +256,11 @@ test('★ 环境变量解析：未设置 / 非法值都退回安全默认，且�
     minScore: 0.7,
     model: 'jev-test',
     baseUrl: 'http://127.0.0.1:9999',
+    /*
+     * ⚠️ **必须为 `''`**：这个配置里没给 `MAGPIE_GATEWAY_KEY_FILE`，
+     * 所以读不到 key。空串会让 `scoreSymbols()` 不发请求（而不是发一个必然 401 的）。
+     */
+    apiKey: '',
   });
 });
 
@@ -444,4 +449,79 @@ test('★★★ 接线：Jev 全部低于门槛 → 全部 5 个照常进 LLM，
     ),
     `★ 必须留一条 warn 说明原因（实际：${logs.map((l) => l.message).join(' | ')}）`,
   );
+});
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  ★★★ 请求必须带 Authorization（2026-10-18 线上实测打脸）
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * ## 事故
+ *
+ * 第一版的 `scoreSymbols()` 只发 `Content-Type`，**没有 Authorization**：
+ * ```
+ *   线上 runtime_logs(scope=jev)  warn | [Jev] 初筛调用失败（网络/超时/返回无法解析）
+ *                                      —— 回落到不筛（全部 18 个标的照常进 LLM）
+ * ```
+ * 降级是对的，但**功能等于没接上**。而那 13 条用例一条都没发现 ——
+ * 因为它们**全部注入桩 `fetchImpl`，从不检查请求头**。
+ *
+ * ⇒ 这条断言把"请求头里必须有 Bearer"钉死，用桩捕获实际发出的 headers。
+ */
+test('★★★ Jev 请求必须带 Authorization: Bearer（否则线上 401）', async () => {
+  const seen: Array<Record<string, string>> = [];
+  const fetchImpl = (async (_url: string, init: { headers: Record<string, string> }) => {
+    seen.push(init.headers);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        answers: {
+          worth: { type: 'score', score: 3, confidence: 0.8, probabilities: {} },
+        },
+      }),
+    };
+  }) as never;
+
+  await scoreSymbols([{ symbol: 'BTCUSDT', digest: 'd' }], {
+    fetchImpl,
+    apiKey: 'mk-test-key-123',
+  });
+
+  assert.equal(seen.length, 1, '★ 应该发了一次请求');
+  const headers = seen[0]!;
+  assert.equal(
+    headers['Authorization'],
+    'Bearer mk-test-key-123',
+    '★ 没有 Authorization 的请求在线上必然 401 —— 这正是第一版的事故',
+  );
+  assert.equal(headers['Content-Type'], 'application/json');
+});
+
+test('★★ 没给 apiKey 时不发请求（不发无效请求）', async () => {
+  let called = 0;
+  const fetchImpl = (async () => {
+    called += 1;
+    return { ok: false, status: 401, json: async () => ({}) };
+  }) as never;
+  /*
+   * ⚠️ 实际实现里"没有 key"由调用方（`readJevConfig`）决定 —— 这里只钉住
+   * "**不带 key 的请求不会被当成成功**"：桩返回 401 ⇒ 整批 null ⇒ 调用方回落。
+   */
+  const r = await scoreSymbols([{ symbol: 'BTCUSDT', digest: 'd' }], { fetchImpl });
+  assert.equal(r, null, '★ 401 ⇒ 整批 null（调用方据此回落到不筛）');
+  assert.equal(called, 1);
+});
+
+test('★★ readJevConfig 在开关关闭时不去读 key 文件', () => {
+  /*
+   * 关着的时候连文件都不碰 —— 这是"默认行为零变化"的一部分。
+   * 传一个不存在的路径也不会出问题（因为它根本不去读）。
+   */
+  const cfg = readJevConfig({
+    AQ_JEV_PREFILTER: 'off',
+    MAGPIE_GATEWAY_KEY_FILE: '/nonexistent/path/that/should/not/be/read.json',
+  } as NodeJS.ProcessEnv);
+  assert.equal(cfg.enabled, false);
+  assert.equal(cfg.apiKey, '', '★ 关着 ⇒ 不读 key');
 });

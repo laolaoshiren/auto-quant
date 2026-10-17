@@ -45,6 +45,8 @@
  *    不能把一整轮的周期拖住（团队模式一轮还有辩论与裁决要跑）。
  */
 
+import { readFileSync } from 'node:fs';
+
 /** 一个待打分的标的：`digest` 是一段紧凑行情摘要（调用方负责裁剪）。 */
 export interface JevInput {
   symbol: string;
@@ -90,6 +92,13 @@ export interface JevClientOptions {
   maxDigestChars?: number;
   /** 测试注入用的 fetch（默认全局 `fetch`）。 */
   fetchImpl?: JevFetch;
+  /**
+   * 网关的 Bearer token。
+   *
+   * ⚠️ **不传就用不了**（第一版就是没这个字段，线上每轮 401 —— 见 `JevConfig.apiKey`）。
+   * 空串时 `scoreSymbols()` 直接返回 `null`，**不发无效请求**。
+   */
+  apiKey?: string;
 }
 
 /** 只依赖"够用"的响应形状，便于测试注入普通对象。 */
@@ -126,6 +135,25 @@ export interface JevConfig {
   minScore: number;
   model: string;
   baseUrl: string;
+  /**
+   * 网关的 Bearer token。
+   *
+   * ⚠️ **2026-10-18 线上实测补上** —— 第一版根本没有这个字段，请求只带了
+   * `Content-Type`，于是线上每一轮都 401：
+   * ```
+   *   runtime_logs(scope=jev)  warn | [Jev] 初筛调用失败（网络/超时/返回无法解析）
+   *                                    —— 回落到不筛（全部 18 个标的照常进 LLM）
+   * ```
+   * 降级是对的（没有因为 Jev 挂了就少看标的），但功能等于没接上。
+   * 而**测试全是桩**，所以那 13 条用例一条都没发现。
+   *
+   * ## 来源
+   *
+   * 与团队模式主 LLM **同一个网关、同一份凭据** —— 读 `MAGPIE_GATEWAY_KEY_FILE`
+   * 指向的文件（部署脚本同步过来的 `caller-keys.json` 副本，格式 `[{secret:…}]`）。
+   * 拿不到就是空串 ⇒ `scoreSymbols()` 直接返回 `null`（不白发请求）。
+   */
+  apiKey: string;
 }
 
 /**
@@ -162,7 +190,46 @@ export function readJevConfig(env: NodeJS.ProcessEnv = process.env): JevConfig {
     minScore,
     model,
     baseUrl,
+    apiKey: readGatewayKey(env),
   };
+}
+
+/**
+ * 从 `MAGPIE_GATEWAY_KEY_FILE` 读网关 key（与团队主 LLM 同一份）。
+ *
+ * 文件格式（magpie 的 `caller-keys.json`，部署脚本同步的那份）：
+ * ```json
+ *   [{ "secret": "mk-…" }, …]
+ * ```
+ * 也兼容 `{"secret":"…"}` 与裸字符串。**任何异常都返回空串**（调用方据此跳过，不发无效请求）。
+ *
+ * ⚠️ 只在**开关打开时**才读 —— 关着的时候连文件都不碰。
+ */
+function readGatewayKey(env: NodeJS.ProcessEnv): string {
+  if (env.AQ_JEV_PREFILTER !== 'on') return '';
+  const path = (env.MAGPIE_GATEWAY_KEY_FILE ?? '').trim();
+  if (path === '') return '';
+  try {
+    const raw = readFileSync(path, 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (item !== null && typeof item === 'object' && typeof (item as { secret?: unknown }).secret === 'string') {
+          const s = (item as { secret: string }).secret.trim();
+          if (s.length > 0) return s;
+        }
+      }
+      return '';
+    }
+    if (parsed !== null && typeof parsed === 'object' && typeof (parsed as { secret?: unknown }).secret === 'string') {
+      return (parsed as { secret: string }).secret.trim();
+    }
+    if (typeof parsed === 'string') return parsed.trim();
+    return '';
+  } catch {
+    /* 读不到（文件不存在 / 权限 / JSON 坏了）⇒ 空串，调用方会跳过。 */
+    return '';
+  }
 }
 
 function clamp01(n: number): number {
@@ -250,6 +317,7 @@ export async function scoreSymbols(
 
   const baseUrl = options.baseUrl?.trim() || JEV_DEFAULT_BASE;
   const model = options.model?.trim() || JEV_DEFAULT_MODEL;
+  const apiKey = options.apiKey?.trim() ?? '';
   const requestTimeoutMs = positiveInt(
     options.requestTimeoutMs,
     JEV_DEFAULT_REQUEST_TIMEOUT_MS,
@@ -309,7 +377,11 @@ export async function scoreSymbols(
       const response = await Promise.race([
         doFetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            /* ⚠️ 必须带 —— 第一版漏了，线上每轮 401（见 JevConfig.apiKey 的说明）。 */
+            ...(apiKey !== '' ? { Authorization: `Bearer ${apiKey}` } : {}),
+          },
           body,
           signal,
         }),
@@ -409,6 +481,8 @@ export interface JevPrefilterOptions {
   minScore: number;
   baseUrl?: string;
   model?: string;
+  /** 网关 Bearer token（见 `JevClientOptions.apiKey`）。不传 = 请求会 401。 */
+  apiKey?: string;
   /** 测试注入；默认 `scoreSymbols`。 */
   scorer?: (
     inputs: readonly JevInput[],
@@ -472,6 +546,13 @@ export async function prefilterSymbols(
   const clientOptions: JevClientOptions = { ...options.clientOptions };
   if (options.baseUrl !== undefined) clientOptions.baseUrl = options.baseUrl;
   if (options.model !== undefined) clientOptions.model = options.model;
+  /*
+   * ⚠️ **apiKey 必须一路传下去**（2026-10-18 线上实测）。
+   * 第一版 `JevPrefilterOptions` 里没有这个字段，于是即使 `JevConfig.apiKey` 读到了 key，
+   * `scoreSymbols()` 收到的 `options.apiKey` 仍是 undefined ⇒ 请求不带 Authorization ⇒ 401。
+   * 这类"读了但没传"的断链，只有真的打一次线上才发现得了。
+   */
+  if (options.apiKey !== undefined) clientOptions.apiKey = options.apiKey;
 
   let scores: JevScore[] | null = null;
   try {

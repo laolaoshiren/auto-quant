@@ -1915,6 +1915,8 @@ async function runTradingDeskInner(input: {
           minScore: jevConfig.minScore,
           baseUrl: jevConfig.baseUrl,
           model: jevConfig.model,
+          /* ⚠️ 必须传 —— 不传则请求不带 Authorization，线上每轮 401（2026-10-18 实测）。 */
+          apiKey: jevConfig.apiKey,
         });
 
         if (picked.applied && picked.keep.length > 0) {
