@@ -4345,6 +4345,18 @@ export class AutoTrader {
     const orderedDecisions = sortDecisions(parsed.decisions);
     const gatedDecisions = orderedDecisions;
 
+    /*
+     * 待成交的挂单（`status='pending'`）。
+     *
+     * ⚠️ **必须单独递给风控**：它们**不是持仓**，`positionStore.open()` 看不到，
+     * 所以 `positions` 里没有它们。不递的话风控对"这个标的已经有一张单在等成交"
+     * 一无所知 —— 于是下一轮模型可以对同一标的再开一笔，成交后撞唯一索引
+     *（交易所两份敞口、本地一行账）。判据与理由见 `risk/engine.ts` 第 0b 步。
+     *
+     * 查一次、两处用：下面 `positionCount`（挂单也占名额）与 `pendingSymbols`。
+     */
+    const pendingRows = positionStore.pending(traderId);
+
     const verdict = this.risk.review(gatedDecisions, {
       config,
       account: {
@@ -4352,11 +4364,13 @@ export class AutoTrader {
         availableBalance: account.availableBalance,
         marginUsed: account.marginUsed,
         /* 待成交的挂单也占名额 —— 见上面 `PromptAccountInfo` 那处的完整说明。 */
-        positionCount: livePositions.length + positionStore.pending(traderId).length,
+        positionCount: livePositions.length + pendingRows.length,
       },
       positions: new Map(
         localPositions.map((p) => [p.symbol, this.toPositionView(p, snapshotBySymbol)]),
       ),
+      /* 挂单不是持仓 —— `positions` 里没有它们，风控判"同标的重入"要这个集合。 */
+      pendingSymbols: new Set(pendingRows.map((p) => p.symbol)),
       snapshots: snapshotBySymbol,
       minNotionalOf: (symbol) => this.deps.registry.minNotional(symbol),
       quantityFor: (symbol, notionalUsd, price) =>

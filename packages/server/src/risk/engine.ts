@@ -32,6 +32,25 @@ export interface RiskEnvironment {
   account: RiskAccount;
   /** Open positions keyed by symbol. */
   positions: ReadonlyMap<string, PositionView>;
+  /**
+   * 还挂着的**限价入场单**的标的（`positions.status = 'pending'`）。
+   *
+   * ⚠️ **它们不是持仓，所以不在 `positions` 里 —— 但风控判"同标的重入"时必须看见它们。**
+   *
+   * `positionStore.open()` 刻意不返回 `pending`（它不是持仓），于是原来的风控
+   * 对"这个标的已经有一张单在等成交"一无所知。实测形态：
+   *
+   *     周期 N   ：open_long BTCUSDT（limit）→ 挂单成功，本地一行 `pending`
+   *     周期 N+1 ：模型对同一标的再提 open_long → 解析层与风控层都看不见 pending
+   *                → 市价单真的发出去 → 交易所两份敞口
+   *                → 成交后 `positionStore.insert` 撞唯一索引
+   *                  （`idx_positions_open_symbol` 只覆盖 `status='open'`）
+   *                → 被记成 REJECTED，账本只留一行
+   *
+   * **可选**：不传时引擎退回旧行为（只按 `positions` 判），所以新增调用点
+   * 可以逐个接；但每一条真实会下单的路径都应当传（主路径见 `autoTrader.ts`）。
+   */
+  pendingSymbols?: ReadonlySet<string>;
   /** Current market snapshot keyed by symbol, used for fallback stop distances. */
   snapshots: ReadonlyMap<string, MarketSnapshot>;
   /** Exchange-imposed minimum notional for a symbol. */
@@ -227,6 +246,15 @@ export class RiskEngine {
         account: { ...env.account, positionCount: Math.max(0, env.account.positionCount - 1) },
         /* 加仓不占新的"开仓节流"额度的一部分吗？占 —— 它确实是一笔新的入场。 */
       },
+      /*
+       * ⚠️ **加仓必须豁免"同标的重入"里"已有持仓"那一半。**
+       *
+       * 加仓的语义就是"在已有持仓上再买一部分"，不豁免的话这条新判据会把
+       * 每一笔加仓都拦死。`pending` 那一半**不豁免**：同标的既有持仓又有挂单
+       * 本身就是缺口留下的异常状态，这时再加仓会让两笔敞口叠加，
+       * 绕过上面按 `position.notional` 算的单仓名义上限。
+       */
+      { allowExistingPosition: true },
     );
 
     if (!verdict.ok) return verdict;
@@ -483,6 +511,14 @@ export class RiskEngine {
     let positionCount = env.account.positionCount;
     let marginUsed = env.account.marginUsed;
     let entriesThisCycle = env.entriesThisCycle;
+    /*
+     * 本批**已经放行**的开仓标的。
+     *
+     * `env.positions` 是进入本批时的快照，不会因为上面刚批了一笔就更新 ——
+     * 于是同一批里对同一标的的第二次 open 会一路放行到执行层，然后撞唯一索引。
+     * 这个集合补的就是这个缺口（见 `reviewOpen` 第 0b 步）。
+     */
+    const openedSymbolsThisBatch = new Set<string>();
 
     const ordered = [
       ...decisions.filter((d) => isCloseAction(d.action)),
@@ -634,11 +670,15 @@ export class RiskEngine {
            * 它在下面 `+= 1` 累加）。
            */
           entriesLastHour: env.entriesLastHour + entriesThisCycle,
+        }, {
+          reservedSymbols: openedSymbolsThisBatch,
         });
         if (verdict.ok) {
           approved.push(verdict.decision);
           positionCount += 1;
           entriesThisCycle += 1;
+          /* 本批后面若再提同一标的，`reviewOpen` 0b 会据这个集合拒绝。 */
+          openedSymbolsThisBatch.add(decision.symbol);
           // Charge the prospective margin so the next open in this batch sees it.
           const snapshot = env.snapshots.get(decision.symbol);
           const price = snapshot?.price ?? 0;
@@ -691,6 +731,24 @@ export class RiskEngine {
   private reviewOpen(
     decision: Decision,
     env: RiskEnvironment,
+    options: {
+      /**
+       * 允许该标的**已经有持仓**（= 这是加仓，不是新开）。
+       *
+       * 只有 `reviewAdd` 会传它：加仓的定义就是"在已有持仓上再买一部分"，
+       * 不豁免的话它会先被"同标的重入"这条判据全部拦死。
+       * 新开仓的调用方一律不传 —— 默认拒绝，避免漏改一处就放行一条危险路径。
+       */
+      allowExistingPosition?: boolean;
+      /**
+       * **本批次里已经放行过开仓的标的**（由 `review()` 逐笔累加）。
+       *
+       * 同一批里模型对同一标的提两次 `open_long` 时，`env.positions` 还是
+       * 进入本批之前的那份快照 —— 只看它的话，第二笔会一路放行到执行层，
+       * 然后撞唯一索引。这个集合补上"本批已经开出去的那一笔"。
+       */
+      reservedSymbols?: ReadonlySet<string>;
+    } = {},
   ): { ok: true; decision: Decision } | { ok: false; reason: string } {
     const { config, account } = env;
     const risk = config.riskControl;
@@ -701,6 +759,69 @@ export class RiskEngine {
     /* --- 0. Preconditions ------------------------------------------------ */
     if (account.equity <= 0) {
       return { ok: false, reason: '账户权益为 0，无法计算仓位大小。' };
+    }
+
+    /*
+     * --- 0b. 同标的重入：已有持仓，或已有一张还没成交的挂单 --------------
+     *
+     * ⚠️ **这条判据必须在这里，而不是只靠解析层。**
+     *
+     * 解析层（`strategy/parser.ts`）只拦"已有**已成交**持仓时再 open"：
+     * 它拿到的 `openPositions` 来自 `positionStore.open()`，而 `pending`
+     * （还没成交的限价入场单）**不在里面**。真实发生过的序列：
+     *
+     *     周期 N   ：模型提 open_long BTCUSDT（limit）→ 挂单成功 → 本地一行 pending
+     *     周期 N+1 ：模型对同一标的再提 open_long → 解析层看不到 pending，放行
+     *                → 风控只看 positionCount，也放行
+     *                → 市价单真的发出去，交易所那侧两份敞口
+     *                → 成交后 `positionStore.insert` 撞唯一索引
+     *                  （`idx_positions_open_symbol` 只覆盖 `status='open'`）
+     *                → 抛错被 `executeOpen` 的 catch 记成 REJECTED，账本只留一行
+     *
+     * 两张限价单的情形更硬：`promote()` 的
+     * `UPDATE … WHERE symbol=? AND status='pending'` 会把**两行一起**改成 open，
+     * 同样撞那个唯一索引。所以这里的拒绝是**最后一道**、也是唯一覆盖所有
+     * 下单路径（市价 / 限价 / 加仓）的一道。
+     *
+     * 三个分句按"根因"分别给出可区分的理由（运维要能在日志里一眼定位）：
+     *   ① 已有持仓      → 这是重复入场，要反手先平仓
+     *   ② 已有 pending  → 这是"账上看不见的第二笔"，先等成交或撤单
+     *   ③ 本批已放行    → 同一批里的重复提案，执行层会插两行
+     *
+     * 顺序上先报"已有持仓"：它是唯一索引直接冲突的那一半，也是最该先修的意图。
+     */
+    if (!options.allowExistingPosition) {
+      const existing = env.positions.get(symbol);
+      if (existing) {
+        return {
+          ok: false,
+          reason:
+            `同标的重入被拒：${symbol} 已有${existing.side === 'long' ? '多头' : '空头'}持仓` +
+            `（${existing.quantity} @ ${existing.entryPrice}）。每个标的只允许一个仓位 —— ` +
+            `要反手请先用 close_${existing.side} 平掉再开，不要在同一标的上叠加第二笔入场。`,
+        };
+      }
+    }
+
+    if (env.pendingSymbols?.has(symbol)) {
+      return {
+        ok: false,
+        reason:
+          `同标的重入被拒：${symbol} 还有一张**未成交的限价入场单**（status=pending，不是持仓）。` +
+          `再开一笔会在那张单成交后撞上"每个标的只允许一个持仓"的唯一约束 —— ` +
+          `交易所会有两份敞口而本地账本只留得下一行。` +
+          `要继续等它成交就不要再开；要换方向或换价位请先 cancel_pending 撤掉那张挂单。`,
+      };
+    }
+
+    if (options.reservedSymbols?.has(symbol)) {
+      return {
+        ok: false,
+        reason:
+          `同标的重入被拒：${symbol} 在本批次里已经放行过一笔开仓，这笔是重复提案。` +
+          `同一批对同一标的开两次会在执行层插入两行持仓、在交易所留下两份敞口 —— ` +
+          `每个标的只允许一笔入场，请只保留其中一笔。`,
+      };
     }
 
     const snapshot = env.snapshots.get(symbol);

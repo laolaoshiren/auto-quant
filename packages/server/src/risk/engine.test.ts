@@ -1189,6 +1189,136 @@ test('加仓：持仓数已满时仍然放行 —— 它不占新的仓位名额
   );
 });
 
+/* -------------------------------------------------------------------------- */
+/*  同标的重入（含 pending）                                                   */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * ⚠️ **下面五条是一组负向校准**，对应 P1「同一标的可以开出第二笔入场」。
+ *
+ * 核对过的证据链（2026-10-17，行号以修改前为准）：
+ *   · `strategy/parser.ts` 只在**已成交持仓**存在时拒 open，`pending` 不在
+ *     `openPositions` 里（它只用于撤单豁免）；
+ *   · `risk/engine.ts` 原来只比 `account.positionCount`，全文没有同标的重入判据；
+ *   · `autoTrader.submitLimitEntry` 无条件插一行 `status='pending'`；
+ *   · 唯一索引只覆盖 `WHERE status='open'`（`schema.ts`）。
+ *
+ * 所以校准必须同时覆盖"已有 open""已有 pending"与"同一批重复提案"，
+ * 并证明**没有误伤**不同标的、也没有把"平仓后重开"一起锁死。
+ */
+
+test('★ 同标的重入①：已有 open 时，再开同一标的必须被拒', () => {
+  const verdict = engine.review(
+    [openDecision()],
+    environment({
+      /* 真实场景里有一条 open 行，positionCount 自然 ≥ 1。 */
+      account: { equity: 1000, availableBalance: 900, marginUsed: 136, positionCount: 1 },
+      positions: new Map([['BTCUSDT', position({ side: 'long' })]]),
+    }),
+  );
+  assert.equal(verdict.approved.length, 0, '已有持仓时不该再放行第二笔入场');
+  assert.match(verdict.rejected[0]!.reason, /同标的重入被拒/);
+  assert.match(verdict.rejected[0]!.reason, /已有多头持仓/);
+});
+
+test('★ 同标的重入②：只有 pending 挂单（没有持仓）时，再开同一标的必须被拒', () => {
+  /*
+   * 这正是真实触发链的形态：`positions` 是空的（挂单不是持仓），
+   * `positionCount` 因为挂单也占名额所以是 1 —— 但 `maxPositions` 默认 3，
+   * 所以"持仓数"那一条拦不住它，必须靠 `pendingSymbols`。
+   */
+  const verdict = engine.review(
+    [openDecision()],
+    environment({
+      account: { equity: 1000, availableBalance: 900, marginUsed: 100, positionCount: 1 },
+      positions: new Map(),
+      pendingSymbols: new Set(['BTCUSDT']),
+    }),
+  );
+  assert.equal(verdict.approved.length, 0, '已有 pending 挂单时不该再放行第二笔入场');
+  assert.match(verdict.rejected[0]!.reason, /同标的重入被拒/);
+  assert.match(verdict.rejected[0]!.reason, /未成交的限价入场单/);
+  /* 理由里要给出下一步动作 —— 运维与模型都能据此处理，而不是只看到"不允许"。 */
+  assert.match(verdict.rejected[0]!.reason, /cancel_pending/);
+});
+
+test('★ 同标的重入③：不同标的照原样放行 —— 这条判据不能误伤正常的分散开仓', () => {
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      btcEthMaxPositionValueRatio: 50,
+      maxPositions: 5,
+    },
+    throttle: { ...defaultStrategyConfig().throttle, maxEntriesPerCycle: 5, maxEntriesPerHour: 5 },
+  });
+  const env = environment({
+    config,
+    /* 另一个标的正挂着单 —— 只要不是本笔的标的，就不该有任何影响。 */
+    pendingSymbols: new Set(['SOLUSDT']),
+    snapshots: new Map([
+      ['BTCUSDT', snapshot('BTCUSDT', 68_000)],
+      ['ETHUSDT', snapshot('ETHUSDT', 2_500)],
+    ]),
+  });
+  const verdict = engine.review(
+    [
+      openDecision({
+        symbol: 'ETHUSDT',
+        stopLoss: 2_400,
+        takeProfit: 2_800,
+        positionSizeUsd: 400,
+      }),
+    ],
+    env,
+  );
+  assert.equal(
+    verdict.approved.length,
+    1,
+    `不同标的必须照原样放行：${JSON.stringify(verdict.rejected)}`,
+  );
+});
+
+test('★ 同标的重入④：平仓之后同标的再开必须放行 —— 去重不能变成"永远不能重开"', () => {
+  /* 第一步：平掉 BTCUSDT（这时它确实有持仓，平仓只降低风险）。 */
+  const closed = engine.review(
+    [openDecision({ action: 'close_long' })],
+    environment({
+      positions: new Map([['BTCUSDT', position({ side: 'long' })]]),
+      account: { equity: 1000, availableBalance: 900, marginUsed: 136, positionCount: 1 },
+    }),
+  );
+  assert.equal(closed.approved.length, 1, `平仓不该被拦：${JSON.stringify(closed.rejected)}`);
+
+  /* 第二步：账上已经没有该标的持仓、也没有挂单 —— 重新开仓必须放行。 */
+  const reopened = engine.review(
+    [openDecision()],
+    environment({
+      account: { equity: 1000, availableBalance: 900, marginUsed: 0, positionCount: 0 },
+    }),
+  );
+  assert.equal(
+    reopened.approved.length,
+    1,
+    `平仓后重开必须放行：${JSON.stringify(reopened.rejected)}`,
+  );
+});
+
+test('★ 同标的重入⑤：同一批里对同一标的提两次 open，第二笔必须被拒', () => {
+  /*
+   * `env.positions` 是进入本批之前的快照，不会因为第一笔刚放行就更新 ——
+   * 所以这一条只能靠 `reviewOpen` 的 `reservedSymbols`（本批已放行集合）。
+   * 不拦的话，执行层会收到两笔同标的开仓，最终同样撞唯一索引。
+   */
+  const verdict = engine.review([openDecision(), openDecision()], environment());
+  assert.equal(
+    verdict.approved.length,
+    1,
+    `同一批里同标的只允许一笔：${JSON.stringify(verdict.rejected)}`,
+  );
+  assert.equal(verdict.rejected.length, 1);
+  assert.match(verdict.rejected[0]!.reason, /本批次里已经放行过一笔开仓/);
+});
+
 test('减仓：给出比例时放行，并把要减的名义算出来', () => {
   const verdict = engine.review([reduceDecision({ reducePercent: 50 })], withPosition());
   assert.equal(verdict.approved.length, 1, `应当放行：${JSON.stringify(verdict.rejected)}`);
