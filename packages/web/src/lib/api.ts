@@ -336,6 +336,30 @@ export interface Health {
   tradingDisabled: boolean;
   environment: string;
   db: string;
+  /**
+   * **正在运行、但已经卡住的机器人**（2026-10-17 · t99 追加）。
+   *
+   * ## 为什么必须把它带到界面上
+   *
+   * `ok:false` 与这个数组**一直都在服务端算**（`api/server.ts` 的
+   * `evaluateTraderHealth`，判据 = `周期 × 2` 与 `300 秒` 起步宽限取较大者），
+   * 而它原来的消费者只有容器编排器 —— 于是 `#10`（`dry_run=0`，真实资金）
+   * **停摆 5.5 小时**，队长是在做"部署后回读"时偶然发现的。
+   *
+   * ⇒ 这是 `t28` 那条「不存在任何主动告警机制」的现场印证：
+   * **信号在没人看的地方**。字段补上之后，控制台顶部的常驻横幅才有数据可渲染。
+   *
+   * ⚠️ **可选**（`?`）而不是必填：老服务端（或某次部署的中间态）不发这个字段时，
+   * 界面应当"什么都不显示"，而不是崩掉或误报。
+   */
+  staleTraders?: Array<{
+    id: number;
+    name: string;
+    /** 距上一轮结束的毫秒数（从未跑完过一轮时是"已运行时长"）。 */
+    staleForMs: number | null;
+    /** 在跑但还没有任何一轮的完成记录（首轮仍在跑）。 */
+    awaitingFirstCycle: boolean;
+  }>;
 }
 
 export interface AuthResult {
@@ -533,9 +557,49 @@ export type EquitySource = 'exchange' | 'manual' | 'unavailable';
  * is deliberately allowed while the bot is stopped — that is exactly when the
  * books need correcting. Like the balance endpoint it can answer **HTTP 400
  * with `ok: false`**, so callers must branch on `ok`.
+ *
+ * ## ⚠️ `corrected` 是**生效**笔数，不是"尝试"笔数（2026-10-17 · 后端 `6a39c46`）
+ *
+ * 那一次改动把 `corrected` 的语义从"尝试修正几次"改成"**真的改成了几笔**"，
+ * 并新增 `correctedAttempted` / `correctedKept`。三者满足
+ * `correctedAttempted === corrected + correctedKept`（后端 `autoTrader.ts` 写明）。
+ *
+ * **前端类型当时没跟上**，于是 `actions.ts` 的 `reconcileSummary()` 看不到
+ * "有 3 笔被保留"这个事实：`corrected` 为 0 ⇒ 它落到兜底句，对操作员说
+ * 「账本与交易所一致，无需补录或修正」——而**后端同一场景说的是
+ * 「尝试修正 3 笔，一笔都没真的生效」**。**两句相反**，属于本批反复出现的
+ * 「报了一个没有发生的动作」那一族里更严重的一种：它报了相反的事。
+ *
+ * ⚠️ 所以这两个字段在这里是**必填**（不是可选）：它们是"能不能说'一致'"的
+ * **必要输入**。做成可选会让下一个调用点顺手漏传、于是又退回"说反话"——
+ * 而那正是本条缺陷的成因。服务端一直在发它们（路由是 `{ ok: true, ...result }`
+ * 透传，见 `api/server.ts` 的 `/reconcile`）。
  */
 export type ReconcileResult =
-  | { ok: true; recovered: number; corrected: number; funding: number }
+  | {
+      ok: true;
+      /** 补录进来的成交笔数。 */
+      recovered: number;
+      /** **生效**的修正笔数（不含被保留的那些）。 */
+      corrected: number;
+      /**
+       * **尝试**修正的笔数 = `corrected + correctedKept`。
+       *
+       * 只报 `corrected` 时，"撞上已有行（于是必然尝试过）却一笔都没改成"
+       * 会与"什么都没发生"长得一模一样 —— 那正是本条缺陷的形状。
+       */
+      correctedAttempted: number;
+      /**
+       * **因"重建腿边界存疑"而保留本地口径**的笔数（判不出来，不是失败）。
+       *
+       * ⚠️ 它 > 0 时**绝不能说"账本与交易所一致"** —— 差异还在，只是系统
+       * 不敢擅自改。后端为此专门写了一条 warn（「一笔都没真的生效 … 不要当成
+       * 已经修好了」）。
+       */
+      correctedKept: number;
+      /** 资金费（金额，不是笔数）。 */
+      funding: number;
+    }
   | { ok: false; error: string };
 
 export interface AiModelRow extends AiModelConfig {
