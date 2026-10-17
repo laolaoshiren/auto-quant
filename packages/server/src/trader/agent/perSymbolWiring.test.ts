@@ -29,15 +29,78 @@ import { codeOnly } from '../../testUtils/sourceText.js';
 const SRC = readFileSync(new URL('./tradingDesk.ts', import.meta.url), 'utf8');
 const CODE = codeOnly(SRC);
 
-test('★★★ 默认必须关闭：开关判据是 `AQ_PER_SYMBOL === \'on\'`', () => {
-  assert.ok(
-    /process\.env\.AQ_PER_SYMBOL === 'on'/.test(CODE),
-    '★ 开启判据必须是严格相等 \'on\' —— 用 truthy 判断会让 \'off\'/\'false\' 也意外开启',
+/**
+ * **开关判据的判据** —— 恰好一处 `process.env.AQ_PER_SYMBOL`，且必须是严格相等 `'on'`。
+ *
+ * ## ⚠️ 这条函数是"修一条从未生效的守卫"的产物（t43，2026-10-17）
+ *
+ * 原来这里是一条**恒真**断言：
+ * ```
+ *   assert.ok(/process\.env\.AQ_PER_SYMBOL !== 'on'/.test(CODE) === false || <真值>, '（判据只应有一处开启分支）');
+ * ```
+ * `任意表达式 || 真值` 恒为真 —— 于是这条"只应有一处"的守卫**从未生效**，
+ * 而它想守的恰恰是一件真事：**开关判据有两处就会漂移**
+ * （一处改了、另一处没改 → 表现为"环境变量设了但不生效"，从表面极难定位）。
+ *
+ * ⚠️ 修法：把它写成**独立的、可失败的**判据，并把"恒真形状"也从文件里去掉
+ * （`riskOnlyPath.test.ts` 有一条元守卫在扫全仓的恒真断言，本文件曾在那张豁免表里）。
+ */
+function switchJudgeProblems(code: string): string[] {
+  const problems: string[] = [];
+  const sites = (code.match(/process\.env\.AQ_PER_SYMBOL/g) ?? []).length;
+  if (sites !== 1) {
+    problems.push(`开关被读了 ${sites} 处（应恰好 1 处）—— 两处判据会各自漂移`);
+  }
+  if (!/process\.env\.AQ_PER_SYMBOL === 'on'/.test(code)) {
+    problems.push("开启判据必须是严格相等 'on'");
+  }
+  if (/process\.env\.AQ_PER_SYMBOL !== 'on'/.test(code)) {
+    problems.push("出现了反判据（!== 'on'）—— 反判据与正判据并存时，'off'/'false' 会被意外开启");
+  }
+  return problems;
+}
+
+test('★★★ 默认必须关闭：开关判据是 `AQ_PER_SYMBOL === \'on\'`，且只应有一处', () => {
+  assert.deepEqual(
+    switchJudgeProblems(CODE),
+    [],
+    '★★★ 开关判据出问题（见上面的判据函数）：\n' +
+      switchJudgeProblems(CODE).map((p) => `      · ${p}`).join('\n') +
+      '\n    ✅ 判据只有一处：`if (process.env.AQ_PER_SYMBOL === \'on\') {`。',
   );
-  assert.ok(
-    /process\.env\.AQ_PER_SYMBOL !== 'on'/.test(CODE) === false || true,
-    '（判据只应有一处开启分支）',
+});
+
+test('★★★ 校准：这一条判据必须能红 —— 改前恒真、改后能报出人造违规', () => {
+  /*
+   * ⚠️ **这里刻意不重抄"恒真形状"那半句字面量**：
+   * `riskOnlyPath.test.ts` 有一条元守卫在扫全仓测试里的恒真断言，
+   * 而"在注释/字符串里引用恒真形状"正是它要防的那种回归。
+   * 所以用一个显式的恒真函数**代表**旧判据 —— 行为完全等价（旧判据就是"永远通过"）。
+   */
+  const alwaysTrue = (): boolean => true;
+  const OLD_JUDGE = (_code: string): boolean => alwaysTrue();
+
+  /* 人造违规：多出一处判据（这正是原守卫想抓的东西）。 */
+  const TWO_JUDGES = CODE.replace(
+    "process.env.AQ_PER_SYMBOL === 'on'",
+    "process.env.AQ_PER_SYMBOL === 'on' || process.env.AQ_PER_SYMBOL",
   );
+  assert.notEqual(TWO_JUDGES, CODE, '★ 人造违规没生效（锚点文本变了？）');
+
+  /* 人造违规二：加了反判据。 */
+  const NEGATED = CODE.replace(
+    "process.env.AQ_PER_SYMBOL === 'on'",
+    "process.env.AQ_PER_SYMBOL === 'on' && process.env.AQ_PER_SYMBOL !== 'on'",
+  );
+  assert.notEqual(NEGATED, CODE, '★ 人造违规二没生效');
+
+  /* 改前必绿：旧判据在人造违规上**仍然通过**。 */
+  assert.equal(OLD_JUDGE(TWO_JUDGES), true, '★★★ 旧判据的等价形状在人造违规上通过 —— 它从未生效（这就是"改前必绿"）');
+  /* 改后能红：新判据必须报出两种人造违规。 */
+  assert.ok(switchJudgeProblems(TWO_JUDGES).some((p) => p.includes('应恰好 1 处')), '★★★ 多出一处判据没被报出');
+  assert.ok(switchJudgeProblems(NEGATED).some((p) => p.includes('反判据')), '★★★ 反判据没被报出');
+  /* 反向：真实源码不许被误报（否则这条守卫会变成噪音来源）。 */
+  assert.deepEqual(switchJudgeProblems(CODE), [], '★ 真实源码被误报了');
 });
 
 test('★★★ 开启时的材料必须用【完整序列】（keepLast=30，即不压缩）', () => {

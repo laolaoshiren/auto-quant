@@ -31,11 +31,27 @@
  *    必须出现全部 6 个执行分派；两处 `this.risk.review(` 必须各自落在
  *    `runCycleBody` / `followUpAfterExecution` 里；`risk/engine.ts` 不许碰 broker。
  *
- * 外加三条横向守卫：
+ * 外加四条横向守卫：
  *   · **broker 表面被钉住** —— `autoTrader.ts` 用到的适配器方法集合必须与登记表精确相等
  *     （新增一个 `placeOrderXxx` 之类的适配器方法会让它响），且不许把 `broker` 别名/解构；
- *   · **下单端点只有适配器能打**（`/fapi/v1/order` 与 `/fapi/v1/algoOrder` 的 POST 各一处）；
+ *   · **`this` 不许被存进变量**（别名 `const self = this`、从 `this` 解构、类型断言后
+ *     括号取成员）—— 这三种形状会让所有按 `this.<方法>(` 的扫描一起失效（t41 `GRD-A1/A2/A3`）；
+ *   · **下单端点只有适配器能打**（`/fapi/v1/order` 与 `/fapi/v1/algoOrder` 的 POST 各一处），
+ *     且端点的**字面量**只许出现在登记过的文件里（t42 `S3`）；
  *   · **恒真断言一律禁止**（见文件末尾 —— 本仓库已有一条这样失效的守卫）。
+ *
+ * ## 2026-10-17（t57）：四处"少报"缺口已补，补的是覆盖面而不是措辞
+ *
+ * `t41` 独立验证判 `needs_revision`、`t42` 审查记了 `S2/S3`，两份工作指向同一批形状。
+ * 本轮把它们**逐条变成能红的判据**（并有负向校准）：
+ *
+ * | 缺口 | 形状 | 现在的处理 |
+ * | --- | --- | --- |
+ * | `GRD-A3` | `const self = this; self.executeOpen(…)` | **扩大覆盖面**：`this` 别名一律禁止（别名没有正当理由）；且 `callSitesOf` 可登记别名并解析（证明"看见"这件事真的做得到） |
+ * | `GRD-A2` | `const t = this as unknown as Record<…>; t['executeOpen'](…)` | **扩大覆盖面**：`= this as …` 被识别为别名；`别名[` 动态取成员一律禁止 |
+ * | `GRD-A1` | `const { executeOpen } = this; executeOpen(…)`（t42 `S2`） | **扩大覆盖面**：从 `this` 解构一律禁止（解构出来的方法调用**没有接收者**，静态文本里连名字归属都丢了） |
+ * | `GRD-B1` | 把 `await this.executeOpen(…)` 插进 `runCycleBody` 循环**之外**的另一分支 | **扩大覆盖面**：判据③ 从"存在性"升级为**计数 + 行区间归属**（`runCycleBody` 内恰好 1 处、且必须落在循环的行区间里） |
+ * | t42 `S3` | `fetch(BASE + '/fapi/v1/order')`、`'/fapi/v1/' + 'order'` | **扩大覆盖面**：端点**字面量/前缀**只许出现在登记文件里，且"请求上下文 + 端点字面量"必须落在适配器内 |
  *
  * ## 人造校准（为什么这些断言不是空转）
  *
@@ -46,16 +62,25 @@
  *
  * ## 它抓不到什么（诚实说明，别把它当成比它更强的保证）
  *
- * · **不做控制流分析**：把 `this.executeOpen(` 留在**同一个已登记的方法体里**、
- *   但用一个新的条件分支（`if (某条件) { … }`）绕开 approved 循环 —— 抓不到。
- *   本守卫防的是"**新增/挪动调用点**"，不是"篡改已有分支的条件"。
+ * · **不做控制流分析（残余）**：判据③ 现在守得住"把分派挪到 `runCycleBody` 里循环之外"
+ *   （计数 + 行区间），但**守不住**"在循环体内再加一个新的 `if` 分支"——
+ *   那仍然是 approved 之后的执行，安全性没有变化；而"改掉循环本身"
+ *   （换成 `for…of approved` 之外的形式）会让循环锚点找不到 → **红灯**，不是静默通过。
+ * · **别名这一族只覆盖"声明形式"**（残余）：`const self = this`、`= this as …`、
+ *   `const { x } = this`、`this[…]`、`self[…]` 全部禁止（今天实测 0 处）。
+ *   仍抓不到的是**把 `this` 当参数传出去**（`helper(this)` 后在 helper 里 `x.executeOpen(…)`）
+ *   与**把方法当值传出去**（`const f = this.executeOpen; f(d)`）——
+ *   它们都跨了方法边界，静态文本里没有接收者绑定可依。
  * · **不做类型/绑定分析**：它读的是源码文本（`plainCode()` 把注释/字符串/正则抹成空格后）。
  *   通过 `import` 拿一个 `AutoTrader` 实例、再用 `as any` 调私有方法**不会**被这里挡住
  *   —— 但会被"跨文件调用"那条与 TypeScript 的 `private` 一起挡住。
  * · 模板字面量里的 `${…}` 插值也一并被抹掉了 —— 所以"在模板字符串里调用下单方法"
  *   这种形态（今天不存在，也没有正当理由）看不见。
- * · 动态字符串调用（`this['execute' + 'Open']`）无法穷举 —— 所以额外**禁止**
- *   `this[` 这种括号取成员形式出现在 `autoTrader.ts` 里（当前实测 0 处）。
+ * · **动态字符串调用**无法穷举 —— 所以额外**禁止** `this[…]` 与 `<this 别名>[…]`
+ *   这两种括号取成员形式（当前实测 0 处）。运行时拼接出的方法名仍然看不见。
+ * · **端点守卫的残余**：它现在盯的是 `/fapi/v1/…` 这个**前缀**（含拼接式），
+ *   但把路径拆成不含该前缀的片段（`BASE + '/order'`）够不着；
+ *   扫描范围仍是 `packages/server/src`（仓库根的 `scripts/` 不走这里）。
  * · 它不证明"approved 数组里的决策真的过了 `review()`" ——
  *   那是 `risk/engine.test.ts` 与 `receiptAdjustGate.test.ts` 的事。
  * · 它不覆盖 `binance/broker.ts` **内部**新增的下单逻辑（只覆盖"谁能打下单端点"）。
@@ -313,16 +338,33 @@ interface CallSite {
 }
 
 /**
- * 找出代码里所有 `this.<name>(` 的调用点。
+ * 找出代码里所有 `this.<name>(` 的调用点（以及**登记过的 `this` 别名**上的同名调用）。
  *
  * ⚠️ **空白容忍**（`this.deps.broker\n  .placeOrder(` 这种折行在 `autoTrader.ts` 里真实存在，
  * 实测 3 处）：用字面 `indexOf` 去找会**漏掉折行的调用点** —— 而"漏掉"在这里
  * 正是最坏的失效形态（守卫静默通过）。
+ *
+ * ## ⚠️ 为什么加了 `aliases` 参数（t57，补 `GRD-A1/A2/A3`）
+ *
+ * 只认 `this.` 前缀时，下面这种**一行改动**就能让全部按名字的扫描一起瞎掉：
+ * ```
+ *   const self = this;          self.executeOpen(decision);   ← 没有 this. 前缀
+ * ```
+ * 所以调用点扫描必须能接收"别名集合"。生产路径上把 `thisAliasesOf()` 的结果传进来
+ * （别名本身**同时**被禁止 —— 两道：一道让它红，一道保证即使登记了别名也看得见调用）。
  */
-function callSitesOf(code: string, name: string, members: readonly Member[]): CallSite[] {
+function callSitesOf(
+  code: string,
+  name: string,
+  members: readonly Member[],
+  /** 额外的接收者名（已登记的 `this` 别名）。 */
+  aliases: readonly string[] = [],
+): CallSite[] {
   const out: CallSite[] = [];
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`this\\s*\\.\\s*${escaped}\\s*\\(`, 'g');
+  const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  /* `\b` 必须保留：否则别名 `self` 会命中 `myself.executeOpen(`。 */
+  const receivers = ['this', ...aliases].map((r) => `\\b${escape(r)}\\b`).join('|');
+  const re = new RegExp(`(?:${receivers})\\s*\\.\\s*${escape(name)}\\s*\\(`, 'g');
   for (const m of code.matchAll(re)) {
     const at = (m.index ?? 0) + m[0].length - 1;
     const line = code.slice(0, m.index ?? 0).split('\n').length;
@@ -333,6 +375,183 @@ function callSitesOf(code: string, name: string, members: readonly Member[]): Ca
     });
   }
   return out;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  `this` 别名 / 解构 / 括号取成员（t41 GRD-A1/A2/A3、t42 S2）                  */
+/* -------------------------------------------------------------------------- */
+
+/** 一行文本的 1-based 行号。 */
+function lineAt(code: string, index: number): number {
+  return code.slice(0, index).split('\n').length;
+}
+
+interface ThisAlias {
+  name: string;
+  line: number;
+  how: 'alias' | 'destructure';
+  /** `how === 'destructure'` 时被取出来的那些名字。 */
+  names: string[];
+}
+
+/**
+ * 找出**把 `this` 本身存进变量**的地方 —— 别名、解构、类型断言后索引的共同入口。
+ *
+ * ## 判据为什么是 `=\s*this(?!\s*\.)`
+ *
+ * `(?!\s*\.)` 而不是 `(?!\.)`：本仓库里 `this.deps...` 的链式调用会**折行**
+ * （`const live = await this.deps.broker\n  .getOrder(…)`，实测 3 处），
+ * 只否掉紧邻的点会让 `\s*` 退一步吃掉一个空格、回溯成功 —— 把真实的链式调用误判成别名
+ * （这个坑在 `broker` 别名判据那里已经踩过一次，见下文 `ALIAS_PATTERNS` 的注释）。
+ *
+ * ⚠️ 判据**只认"裸 this"**：`= this.deps.agent` 这类（把依赖存进变量）不在这里，
+ * 它们由 `broker` 别名判据单独管。
+ */
+function thisAliasesOf(code: string): ThisAlias[] {
+  const out: ThisAlias[] = [];
+  /* ① 别名：`const self = this;`、`let t = this as unknown as Record<…>`、`x = this;` */
+  const aliasRe = /(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?this(?!\s*\.)/g;
+  for (const m of code.matchAll(aliasRe)) {
+    out.push({ name: m[1]!, line: lineAt(code, m.index ?? 0), how: 'alias', names: [] });
+  }
+  /* ② 解构：`const { executeOpen, executeClose } = this;` */
+  const destructureRe = /\{\s*([^{}]*)\}\s*=\s*(?:await\s+)?this(?!\s*\.)/g;
+  for (const m of code.matchAll(destructureRe)) {
+    const names = (m[1] ?? '')
+      .split(/[,:\s]+/)
+      .map((s) => s.trim())
+      .filter((s) => /^[A-Za-z_$][\w$]*$/.test(s));
+    out.push({ name: '(解构)', line: lineAt(code, m.index ?? 0), how: 'destructure', names });
+  }
+  return out;
+}
+
+/** `this[` / `<别名>[` 这类**括号取成员**（动态名字在静态文本里已经不存在了）。 */
+function dynamicMemberAccesses(code: string, receivers: readonly string[]): Array<{ line: number; text: string }> {
+  const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\b(?:${receivers.map(escape).join('|')})\\b\\s*\\[`, 'g');
+  return [...code.matchAll(re)].map((m) => ({
+    line: lineAt(code, m.index ?? 0),
+    text: code
+      .slice(m.index ?? 0, (m.index ?? 0) + 40)
+      .split('\n')[0]!
+      .trim(),
+  }));
+}
+
+/**
+ * `this` 别名这一族的**全部问题**（别名 / 解构 / 括号取成员）。
+ *
+ * 返回空数组 = 今天 `autoTrader.ts` 的常态（实测三种形状各 0 处）。
+ */
+function aliasProblems(code: string): string[] {
+  const out: string[] = [];
+  const aliases = thisAliasesOf(code);
+  const aliasNames: string[] = [];
+  for (const a of aliases) {
+    if (a.how === 'alias') {
+      aliasNames.push(a.name);
+      out.push(
+        `第 ${a.line} 行：\`${a.name} = this\` —— **把 this 存进了变量**。` +
+          '本守卫所有按 `this.<方法>(` 的扫描都会因此失效（看不见真正的调用点）。',
+      );
+      continue;
+    }
+    out.push(
+      `第 ${a.line} 行：从 this 解构出 [${a.names.join(', ') || '?'}] —— ` +
+        '解构出来的方法**调用时没有接收者**，静态文本里连"是谁调的"都丢了。',
+    );
+  }
+  /*
+   * ⚠️ 括号取成员**单独报**（而不是只依赖上面的别名报告）：
+   *   · `this['execute' + 'Open'](…)` 根本没有别名语句；
+   *   · `t['executeOpen'](…)`（类型断言后的索引）里那个名字是**字符串**，
+   *     而 `plainCode()` 会把字符串内容抹成空格 —— 名字在静态文本里已经不存在了。
+   */
+  for (const m of dynamicMemberAccesses(code, ['this', ...aliasNames])) {
+    out.push(`第 ${m.line} 行：\`${m.text}\` —— 括号取成员（动态名）。静态扫描看不见这个名字。`);
+  }
+  return out;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  判据③的升级：分派的「计数 + 行区间归属」（t41 GRD-B1）                        */
+/* -------------------------------------------------------------------------- */
+
+const APPROVED_LOOP_NEEDLE = 'for (const decision of verdict.approved) {';
+
+/** approved 循环体内必须出现的 6 个执行分派。 */
+const DISPATCH_METHODS: readonly string[] = [
+  'executeCancelPending',
+  'executeClose',
+  'executeAdjust',
+  'executeAdd',
+  'executeReduce',
+  'executeOpen',
+];
+
+/**
+ * approved 消费路径的**归属判据**。
+ *
+ * ## 为什么"存在性"不够（`GRD-B1`）
+ *
+ * 旧判据是 `loopBody.includes('this.executeOpen(')` —— 它只问"循环里**有没有**这个词"。
+ * 于是把分派**插到循环之外**、同时**保留**循环里那一处，判据照样全绿：
+ * ```
+ *   if (someFlag) { await this.executeOpen(decision); }   ← 循环之外，没有经过 verdict.approved
+ *   for (const decision of verdict.approved) { … }        ← 原来那一处还在
+ * ```
+ * 两条路径都能下单，而守卫一声不响 —— 这正是"少报"。
+ *
+ * ## 现在的判据（计数 + 行区间）
+ *
+ * 对 6 个分派逐一：
+ *   ① `runCycleBody` 里**恰好 1 处**调用（0 处 = 分派丢了；2 处 = 多了一条执行路径）；
+ *   ② 那一处必须落在 approved 循环的**行区间内**（`balancedFrom` 给出区间，
+ *      见 `t41` 的建议）。
+ */
+function dispatchOwnershipProblems(code: string, aliases: readonly string[] = []): string[] {
+  const problems: string[] = [];
+  const members = membersOf(code);
+  const loopAt = code.indexOf(APPROVED_LOOP_NEEDLE);
+  if (loopAt < 0) {
+    return [
+      `找不到 \`${APPROVED_LOOP_NEEDLE}\` —— §2.1 要求 AutoTrader 只执行 approved 里的决策，` +
+        '这个循环是那句话的实现；锚点没了，本判据无法工作（必须报错而不是沉默）',
+    ];
+  }
+  if (code.split(APPROVED_LOOP_NEEDLE).length - 1 !== 1) {
+    problems.push(`approved 消费循环出现了不止一次 —— 执行路径必须只有一个（多出来的那一处要单独审）`);
+  }
+  const loopBody = balancedFrom(code, loopAt + APPROVED_LOOP_NEEDLE.length - 1);
+  const loopStart = lineAt(code, loopAt);
+  const loopEnd = lineAt(code, loopAt + loopBody.length - 1);
+
+  for (const name of DISPATCH_METHODS) {
+    const sites = callSitesOf(code, name, members, aliases);
+    const inCycle = sites.filter((s) => s.inMember === 'runCycleBody');
+    if (inCycle.length === 0) {      problems.push(
+        `${name}：runCycleBody 里**一处调用都没有** —— 分派丢了（或它被挪到了别的方法里，` +
+          '那是一条新的执行入口，要单独审）',
+      );
+      continue;
+    }
+    if (inCycle.length > 1) {
+      problems.push(
+        `${name}：runCycleBody 里有 ${inCycle.length} 处调用（第 ${inCycle.map((s) => s.line).join('、')} 行）—— ` +
+          '应**恰好 1 处**：多出来的那一处是一条**没有经过 approved 消费**的执行路径。',
+      );
+      continue;
+    }
+    const only = inCycle[0]!;
+    if (only.line < loopStart || only.line > loopEnd) {
+      problems.push(
+        `第 ${only.line} 行：${name} 的调用落在 approved 循环**之外**` +
+          `（循环是第 ${loopStart}–${loopEnd} 行）—— 那条路径没有消费 verdict.approved。`,
+      );
+    }
+  }
+  return problems;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -539,11 +758,13 @@ function callerProblems(
   code: string,
   members: readonly Member[],
   table: typeof CALLERS,
+  /** 已登记的 `this` 别名（生产路径传 `thisAliasesOf()` 的结果，今天为空）。 */
+  aliases: readonly string[] = [],
 ): { offenders: string[]; actual: Map<string, Set<string | null>> } {
   const offenders: string[] = [];
   const actual = new Map<string, Set<string | null>>();
   for (const entry of table) {
-    const sites = callSitesOf(code, entry.callee, members);
+    const sites = callSitesOf(code, entry.callee, members, aliases);
     const callers = new Set(sites.map((s) => s.inMember));
     actual.set(entry.callee, callers);
     const allowedNames = new Set(entry.allowed.map((a) => a.caller));
@@ -602,7 +823,8 @@ test('★★★ 红线上游：broker.placeOrder 只能出现在登记的 7 个�
 /* -------------------------------------------------------------------------- */
 
 test('★★★ 红线中游：会下单的方法只能从 approved 消费路径 / §2.1 只减敞口例外到达', () => {
-  const { offenders, actual } = callerProblems(AUTO_TRADER, MEMBERS, CALLERS);
+  const THIS_ALIASES = thisAliasesOf(AUTO_TRADER).filter((a) => a.how === 'alias').map((a) => a.name);
+  const { offenders, actual } = callerProblems(AUTO_TRADER, MEMBERS, CALLERS, THIS_ALIASES);
 
   assert.deepEqual(
     offenders,
@@ -648,36 +870,31 @@ test('★★★ 红线最锋利的一句：增加敞口的下单，唯一外部�
 /*  ③ approved 消费路径：分派必须在循环体内，风控必须先于执行                     */
 /* -------------------------------------------------------------------------- */
 
-test('★★★ 红线下游：6 个执行分派必须都在 `for (const decision of verdict.approved)` 的循环体内', () => {
-  const LOOP_NEEDLE = 'for (const decision of verdict.approved) {';
-  const loopAt = AUTO_TRADER.indexOf(LOOP_NEEDLE);
-  assert.ok(
-    loopAt > 0,
-    '★★★ 找不到 `for (const decision of verdict.approved) {` —— ' +
-      '§2.1 要求 `AutoTrader` **只执行 `RiskVerdict.approved` 里的决策**，这个循环是那句话的实现。',
-  );
-  assert.equal(
-    AUTO_TRADER.split(LOOP_NEEDLE).length - 1,
-    1,
-    '★ 这个循环出现了不止一次 —— 执行路径必须只有一个（多出来的那一处要单独审）',
+test('★★★ 红线下游：6 个执行分派必须都在 `for (const decision of verdict.approved)` 的循环体内（计数 + 行区间归属）', () => {
+  /*
+   * ⚠️ 这条判据在 t57 之前只做 `loopBody.includes(needle)` 的**存在性**检查 ——
+   * 于是"把分派插到循环之外、同时保留循环里那一处"是**静默通过**的（t41 `GRD-B1`）。
+   * 现在改成"`runCycleBody` 里恰好 1 处 + 行号落在循环区间里"，见 `dispatchOwnershipProblems`。
+   */
+  const THIS_ALIASES = thisAliasesOf(AUTO_TRADER).filter((a) => a.how === 'alias').map((a) => a.name);
+  const problems = dispatchOwnershipProblems(AUTO_TRADER, THIS_ALIASES);
+
+  assert.deepEqual(
+    problems,
+    [],
+    '★★★ 执行分派的归属被破坏了：\n' +
+      problems.map((p) => `      · ${p}`).join('\n') +
+      '\n    把它们移出这个循环 = 让一条没有经过风控裁决的决策走到下单。',
   );
 
-  const loopBody = balancedFrom(AUTO_TRADER, loopAt + LOOP_NEEDLE.length - 1);
-  const mustBeInside = [
-    'this.executeCancelPending(',
-    'this.executeClose(',
-    'this.executeAdjust(',
-    'this.executeAdd(',
-    'this.executeReduce(',
-    'this.executeOpen(',
-  ];
-  const missing = mustBeInside.filter((needle) => !loopBody.includes(needle));
-  assert.deepEqual(
-    missing,
-    [],
-    '★★★ 这些执行分派**不在** approved 循环体内了：\n' +
-      missing.map((m) => `      · ${m}`).join('\n') +
-      '\n    把它们移出这个循环 = 让一条没有经过风控裁决的决策走到下单。',
+  /* 非空性：这条判据必须真的找到了那个循环与那几个分派（否则"零问题"是空转）。 */
+  assert.ok(
+    MEMBERS.some((m) => m.name === 'runCycleBody'),
+    '★ 找不到 runCycleBody —— 结构变了，请更新本测试',
+  );
+  assert.ok(
+    DISPATCH_METHODS.length === 6,
+    `★ 分派名单应当是 6 个，现在是 ${DISPATCH_METHODS.length} 个`,
   );
 });
 
@@ -712,12 +929,69 @@ test('★★★ 风控裁决必须先于执行，且两处 `risk.review(` 只允
       '外部 issue #117 的修复正是"回执里的 adjust 必须先过 risk.review"，这条断言钉住它',
   );
 
-  /* 禁用括号取成员：动态字符串调用无法穷举，所以直接把这种形状禁掉。 */
-  assert.equal(
-    (AUTO_TRADER.match(/this\[/g) ?? []).length,
-    0,
-    '★★★ `autoTrader.ts` 里出现了 `this[` —— 动态成员调用会绕过上面全部静态扫描。\n' +
-      '    若确有正当理由（例如遍历一堆同名方法），请在本守卫里显式登记并说明它为什么到不了下单。',
+  /*
+   * ⚠️ 括号取成员（`this[…]`）与 `this` 别名/解构的禁令**不在这里**——
+   * 它们集中在下面那条测试里（`aliasProblems` 一份实现，四处形状一个入口）。
+   *
+   * ⚠️ 回执轮那一条的**归属判据**也升级过了：`adjustVerdict.approved` 循环里的
+   * `executeAdjust` 由 `dispatchOwnershipProblems` 用"计数 + 行区间"守着。
+   */
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ④.4 `this` 不许被存进变量：别名 / 解构 / 括号取成员（t41 GRD-A1/A2/A3）        */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ `this` 不许被存进变量，也不许括号取成员（别名/解构/类型断言后索引）', () => {
+  /*
+   * ## 为什么这一条比"某个方法多了一次调用"更值得单独守
+   *
+   * 下面这些形状**只改一行、不加新方法、不触发任何其它守卫**，却能让本文件里
+   * 每一处按 `this.<方法>(` 的扫描同时瞎掉：
+   * ```
+   *   const self = this;                          self.executeOpen(decision);      ← GRD-A3
+   *   const t = this as unknown as Record<…>;     t['executeOpen'](decision);      ← GRD-A2
+   *   const { executeOpen } = this;               executeOpen(decision);           ← GRD-A1（t42 S2）
+   *   this['execute' + 'Open'](decision);                                          ← 动态名
+   * ```
+   * 它们今天**一处都没有**（实测：裸 this 别名 0、解构 0、`this as` 0、`this[` 0）。
+   * 也就是说，这条禁令**不改变任何现有代码**，只堵住"一行改动带走整份守卫"这条路。
+   *
+   * ⚠️ 若将来确有正当理由（例如要把 `this` 传给一个 helper），**不要放宽这条**：
+   *   先在 `callSitesOf` 的 `aliases` 参数上登记别名（那条通路已经实现并有校准，
+   *   见校准测试里的 `self.executeOpen()` 夹具），再在这里放行。
+   */
+  const problems = aliasProblems(AUTO_TRADER);
+  assert.deepEqual(
+    problems,
+    [],
+    '★★★ `autoTrader.ts` 里出现了 `this` 别名 / 解构 / 括号取成员：\n' +
+      problems.map((p) => `      · ${p}`).join('\n') +
+      '\n    ⚠️ 这几种形状会让本守卫**全部**按名字的扫描一起失效（"少报"到"零报"）。\n' +
+      '    ✅ 直接写 `this.xxx(…)`；确有正当理由时先登记别名（`callSitesOf` 已支持解析）。',
+  );
+
+  /*
+   * ⚠️ 校准：这条判据必须真的能报出那三种形状，且**不许误报**折行的链式调用
+   * （`const live = await this.deps.broker\n  .getOrder(…)` 在本仓库真实存在 3 处）。
+   */
+  const CAL_ALIAS = 'class Fake {\n  run() { const self = this; self.executeOpen(); }\n}';
+  const CAL_DESTRUCTURE = 'class Fake {\n  run() { const { executeOpen } = this; executeOpen(); }\n}';
+  const CAL_ASSERT = "class Fake {\n  run() { const t = this as unknown as Record<string, unknown>; t['executeOpen'](); }\n}";
+  const CAL_BRACKET = "class Fake {\n  run() { this['execute' + 'Open'](); }\n}";
+  const CAL_CHAINED = 'class Fake {\n  async run() { const live = await this.deps.broker\n    .getOrder(s, id); return live; }\n}';
+  assert.ok(aliasProblems(CAL_ALIAS).some((p) => p.includes('self = this')), '★★★ 校准：`const self = this` 没被报出');
+  assert.ok(aliasProblems(CAL_DESTRUCTURE).some((p) => p.includes('解构')), '★★★ 校准：从 this 解构没被报出');
+  assert.ok(aliasProblems(CAL_ASSERT).some((p) => p.includes('t = this')), '★★★ 校准：类型断言后的别名没被报出');
+  assert.ok(
+    aliasProblems(CAL_ASSERT).some((p) => p.includes('括号取成员')),
+    '★★★ 校准：`t[「executeOpen」]` 这种索引取成员没被报出',
+  );
+  assert.ok(aliasProblems(CAL_BRACKET).some((p) => p.includes('括号取成员')), '★★★ 校准：`this[…]` 没被报出');
+  assert.deepEqual(
+    aliasProblems(CAL_CHAINED),
+    [],
+    '★★ 折行的链式调用（`this.deps.broker\\n  .getOrder(…)`）不该被误判成别名',
   );
 });
 
@@ -868,10 +1142,106 @@ test('★★★ broker 表面被钉住：新增任何适配器方法调用都必
 });
 
 /* -------------------------------------------------------------------------- */
-/*  ⑤ 下单端点：只有适配器能打                                                  */
+/*  ⑤ 下单端点：只有适配器能打（含字面量/拼接前缀）                              */
 /* -------------------------------------------------------------------------- */
 
-test('★★★ 下单 HTTP 端点只有 binance/broker.ts 能打，且下单请求恰好两条', () => {
+/** 一份待扫描的源码（`rel` 是相对 `packages/server/src` 的 POSIX 路径）。 */
+interface SourceFile {
+  rel: string;
+  /** ⚠️ 必须是 `plainCode(raw, /* keepStrings *\/ true)` 的结果 —— 端点是**字符串字面量**。 */
+  code: string;
+}
+
+/**
+ * 允许出现"下单端点字面量"的文件 —— **显式登记，附理由**。
+ *
+ * ## 为什么端点守卫要管到"字面量"，而不只是"谁发了请求"（t42 `S3`）
+ *
+ * 旧判据要求**方法名与端点字面量紧邻**（`signedRequest('POST', '/fapi/v1/order'`），
+ * 于是下面这些写法一律看不见：
+ * ```
+ *   await fetch(BASE + '/fapi/v1/order', { … });        ← 没有 signedRequest 紧邻
+ *   const path = '/fapi/v1/' + 'order';                 ← 拼接式路径
+ *   const url = '/fapi/v1/order'; await http.post(url); ← 名字在变量里
+ * ```
+ * 现在的判据从"怎么发"退回到"**这个名字出现在哪**"：端点的字面量/前缀
+ * 只许出现在登记过的文件里 —— 那是一条**更低、更难绕过**的门槛。
+ *
+ * ⚠️ 登记一条 = 承认"这个文件里会写端点名"。写日志文案也算，但必须写清理由。
+ */
+const ENDPOINT_LITERAL_ALLOWED: ReadonlyArray<{ file: string; why: string }> = [
+  {
+    file: 'binance/broker.ts',
+    why: '**唯一的适配器**：下单/撤单请求只由它发出（`placeStandardOrder` / `placeAlgoOrder`）。',
+  },
+  {
+    file: 'scripts/liveSmokeTest.ts',
+    why: '只把端点名写进**日志文案**（人工确认过的冒烟脚本），它不构造请求 —— 走的是 `broker` 的方法。',
+  },
+];
+
+/** 下单/撤单系列的端点名（`/fapi/v1/<这些>` 就是"能改交易所状态"的那一族）。 */
+const ORDER_ENDPOINT_FAMILY = 'order|algoOrder|allOpenOrders|algoOpenOrders';
+
+/** 请求上下文的关键词：端点名与它们同一条语句时，说明这个文件真的在发请求。 */
+const REQUEST_CONTEXT = /\b(?:fetch|signedRequest|request|axios|http\.(?:get|post|delete|put))\b/;
+
+/**
+ * 端点字面量的判据（纯函数，可被人造源码校准）。
+ *
+ * 三条：
+ *   ① 任何一个 `/fapi/v1/<下单族>` **字面量**都必须落在登记文件里；
+ *   ② `/fapi/v1/` 这个**前缀**（拼接式路径的兜底）也不许出现在未登记的文件里；
+ *   ③ 端点字面量若与请求上下文（`fetch`/`signedRequest`/…）在同一语句里，
+ *      那个文件必须是登记文件 —— 这条防的是"以后有人新写一个发请求的地方，
+ *      顺手把端点名抄过去"（旧判据看不见这种）。
+ */
+function endpointLiteralProblems(files: readonly SourceFile[]): string[] {
+  const allowed = new Set(ENDPOINT_LITERAL_ALLOWED.map((a) => a.file));
+  const problems: string[] = [];
+  const literalRe = new RegExp(`/fapi/v1/(?:${ORDER_ENDPOINT_FAMILY})\\b`, 'g');
+
+  for (const file of files) {
+    if (allowed.has(file.rel)) continue;
+    for (const m of file.code.matchAll(literalRe)) {
+      const line = lineAt(file.code, m.index ?? 0);
+      const statement = statementAround(file.code, m.index ?? 0);
+      const requestish = REQUEST_CONTEXT.test(statement);
+      problems.push(
+        `第 ${line} 行：${file.rel} 里出现了下单端点字面量 \`${m[0]}\`` +
+          (requestish ? '（**且处于请求上下文里**）' : '（只是字面量，但也没登记）') +
+          ' —— 端点的字面量只许出现在登记文件里（见 ENDPOINT_LITERAL_ALLOWED）',
+      );
+    }
+    /*
+     * ② 拼接兜底：`'/fapi/v1/' + 'order'` 这种写法**没有任何一处完整的端点名**，
+     *    但它必然把 `/fapi/v1/` 这个前缀**拿去拼接** —— 所以盯"前缀出现在拼接里"。
+     *
+     * ⚠️ **不能退化成"任何 `/fapi/v1/` 前缀都不许出现"**（第一版就是这么写的，当场误报 5 个文件）：
+     *    `binance/` 下还有一大批**只读**端点（klines / income / ws 订阅…），
+     *    它们用同一个前缀、与"能不能改交易所状态"无关。判据必须钉在**下单族**上。
+     */
+    const concatHits = [
+      ...file.code.matchAll(/\/fapi\/v1\/['"`]\s*\+|\+\s*['"`]\/fapi\/v1\//g),
+    ].map((m) => lineAt(file.code, m.index ?? 0));
+    if (concatHits.length > 0) {
+      problems.push(
+        `第 ${concatHits[0]} 行：${file.rel} 把 \`/fapi/v1/\` 前缀与别的内容**拼接**` +
+          `（${concatHits.length} 处）—— 拼接式路径也不能绕开登记表`,
+      );
+    }
+  }
+  return problems;
+}
+
+/** 取 `index` 所在的那条语句（粗略：往前找到最近的 `;`/`{`/`}`，往后取 160 字符）。 */
+function statementAround(code: string, index: number): string {
+  let start = index;
+  while (start > 0 && !/[;{}]/.test(code[start - 1] as string)) start -= 1;
+  return code.slice(start, index + 160);
+}
+
+test('★★★ 下单 HTTP 端点只有 binance/broker.ts 能打：字面量登记 + 请求上下文 + POST 计数', () => {
   const walk = (dir: string, out: string[] = []): string[] => {
     for (const entry of readdirSync(dir)) {
       if (entry === 'node_modules' || entry === 'dist') continue;
@@ -887,9 +1257,7 @@ test('★★★ 下单 HTTP 端点只有 binance/broker.ts 能打，且下单请
     `signedRequest(?:<[^>]*>)?\\(\\s*['"](?:POST|DELETE|PUT)['"]\\s*,\\s*['"]/fapi/v1/${ORDER_ENDPOINTS}['"]`,
   );
 
-  const offenders: string[] = [];
-  let postOrder = 0;
-  let postAlgo = 0;
+  const files: SourceFile[] = [];
   for (const file of walk(SERVER_SRC)) {
     const rel = file.slice(SERVER_SRC.length + 1).replace(/\\/g, '/');
     /*
@@ -897,7 +1265,31 @@ test('★★★ 下单 HTTP 端点只有 binance/broker.ts 能打，且下单请
      * 而 `plainCode` 默认会把字符串内容抹掉 —— 那样这里会一条都查不到，
      * 表现为"零个越权调用"（实测踩到：计数从 1 变成 0）。
      */
-    const code = plainCode(readFileSync(file, 'utf8'), true);
+    files.push({ rel, code: plainCode(readFileSync(file, 'utf8'), true) });
+  }
+
+  /* --- ③ 端点字面量 / 前缀只许出现在登记文件里（t42 S3） --- */
+  const literalProblems = endpointLiteralProblems(files);
+  assert.deepEqual(
+    literalProblems,
+    [],
+    '★★★ 下单端点的字面量出现在未登记的文件里：\n' +
+      literalProblems.map((p) => `      · ${p}`).join('\n') +
+      '\n    适配器（`binance/broker.ts`）是**唯一**同时知道合约过滤器、又在下单路径上的层；' +
+      '在别处拼路径打端点等于绕过它的归一化与预检（历史上因此吃过 `-1111` / `-4164`）。',
+  );
+  /* 非空性：登记表必须有内容，且扫描必须真的看到那个适配器。 */
+  assert.ok(ENDPOINT_LITERAL_ALLOWED.length >= 1, '★ 端点登记表空了 —— 判据会退化成"哪里都不许出现"');
+  assert.ok(
+    files.some((f) => f.rel === 'binance/broker.ts' && new RegExp(`/fapi/v1/${ORDER_ENDPOINTS}`).test(f.code)),
+    '★ 扫描没有看到适配器里的端点字面量 —— 口径失效',
+  );
+
+  /* --- 旧判据（保留）：谁在紧邻地发请求 + POST 恰好各一处 --- */
+  const offenders: string[] = [];
+  let postOrder = 0;
+  let postAlgo = 0;
+  for (const { rel, code } of files) {
     const hits = code.match(re) ?? [];
     if (hits.length === 0) continue;
     if (rel !== 'binance/broker.ts') offenders.push(`${rel}（${hits.length} 处）`);
@@ -915,6 +1307,37 @@ test('★★★ 下单 HTTP 端点只有 binance/broker.ts 能打，且下单请
   );
   assert.equal(postOrder, 1, `★ /fapi/v1/order 的 POST 应有且只有 1 处（placeStandardOrder），实际 ${postOrder}`);
   assert.equal(postAlgo, 1, `★ /fapi/v1/algoOrder 的 POST 应有且只有 1 处（placeAlgoOrder），实际 ${postAlgo}`);
+
+  /*
+   * --- ④ 校准：字面量判据必须报出"拼接式路径 / 别处发请求"，且不许误报登记过的两处 ---
+   *（夹具是 t42 `S3` 点名的两种形状。）
+   */
+  const EVIL_FETCH: SourceFile[] = [
+    { rel: 'trader/evil.ts', code: plainCode("export async function x() { await fetch(BASE + '/fapi/v1/order', {}); }", true) },
+  ];
+  const EVIL_CONCAT: SourceFile[] = [
+    { rel: 'trader/evil2.ts', code: plainCode("const path = '/fapi/v1/' + 'order';", true) },
+  ];
+  const OK_BROKER: SourceFile[] = [
+    { rel: 'binance/broker.ts', code: plainCode("await this.rest.signedRequest('POST', '/fapi/v1/order', {});", true) },
+  ];
+  const OK_SMOKE: SourceFile[] = [
+    { rel: 'scripts/liveSmokeTest.ts', code: plainCode('info(`（走的是 /fapi/v1/order）`);', true) },
+  ];
+  assert.ok(
+    endpointLiteralProblems(EVIL_FETCH).some((p) => p.includes('请求上下文')),
+    '★★★ 校准：`fetch(BASE + \'/fapi/v1/order\')`（不与 signedRequest 紧邻）没被报出 —— 旧判据正是这里漏',
+  );
+  assert.ok(
+    endpointLiteralProblems(EVIL_CONCAT).some((p) => p.includes('拼接式路径')),
+    '★★★ 校准：`\'/fapi/v1/\' + \'order\'` 这种拼接没被报出',
+  );
+  assert.deepEqual(endpointLiteralProblems(OK_BROKER), [], '★★ 登记过的适配器不该被误报');
+  assert.deepEqual(
+    endpointLiteralProblems(OK_SMOKE),
+    [],
+    '★★ 登记过的冒烟脚本（只写日志文案）不该被误报',
+  );
 });
 
 /* -------------------------------------------------------------------------- */
@@ -992,6 +1415,291 @@ test('★★★ 判据必须能真的报出绕过（人造源码校准）—— 
     [],
     '★★ 真实的 `autoTrader.ts` 不许被误报（改了业务代码就要回头看这张登记表）',
   );
+
+  /* ======================================================================== */
+  /*  ⑦⑧⑨ t57：把 t41/t42 的**原始变异**逐个重放（在内存里改真实源码，不碰文件）  */
+  /* ======================================================================== */
+
+  /*
+   * 重放用的手术刀：在**真实源码文本**上插一行/换一段，然后跑与生产完全相同的判据。
+   * ⚠️ 全部在内存里 —— 不写文件、不碰业务代码（本任务的硬边界）。
+   */
+  const inject = (src: string, anchor: string, text: string): string => src.replace(anchor, `${text}\n${anchor}`);
+  const mustChange = (after: string, before: string, label: string): void => {
+    assert.notEqual(after, before, `★ 变异「${label}」没有生效（锚点文本变了？）`);
+  };
+
+  /* --- ⑦ `GRD-A3`（t41/t42 S2 最锋利的那条）：`const self = this; self.executeOpen(…)` --- */
+  const A3_MUTATED_RAW = inject(
+    AUTO_TRADER_RAW,
+    '  private async executeOpen(',
+    '  private async t57AliasEntry(decision: Decision): Promise<void> {\n' +
+      '    const self = this;\n' +
+      '    await self.executeOpen(decision, undefined);\n' +
+      '  }',
+  );
+  mustChange(A3_MUTATED_RAW, AUTO_TRADER_RAW, 'GRD-A3 别名 this');
+  const A3_CODE = plainCode(A3_MUTATED_RAW);
+  assert.ok(
+    aliasProblems(A3_CODE).some((p) => p.includes('self = this')),
+    '★★★ 重放 GRD-A3：`const self = this; self.executeOpen(…)` 必须被报出（改前 exit=0）',
+  );
+  /*
+   * 而且**即使别名被登记放行**，`callSitesOf` 解析别名后也必须把这次调用归到
+   * `t57AliasEntry` 上 —— 那是"扩大覆盖面"的第二层：不是只喊"禁止别名"，
+   * 而是真的**看得见**别名上的调用（登记通路有校准才可信）。
+   */
+  const A3_ALIAS_NAMES = thisAliasesOf(A3_CODE).filter((a) => a.how === 'alias').map((a) => a.name);
+  assert.ok(A3_ALIAS_NAMES.includes('self'), '★ 别名解析没有认出 `self`');
+  const a3Cal = callerProblems(A3_CODE, membersOf(A3_CODE), CALLERS, A3_ALIAS_NAMES);
+  assert.ok(
+    a3Cal.offenders.some((o) => o.includes('t57AliasEntry')),
+    '★★★ 重放 GRD-A3：别名上的 `self.executeOpen(…)` 必须被"调用者穷举"报出（改前它完全看不见）',
+  );
+
+  /* --- ⑧ `GRD-A2`：类型断言后索引 `const t = this as …; t['executeOpen'](…)` --- */
+  const A2_MUTATED_RAW = inject(
+    AUTO_TRADER_RAW,
+    '  private async executeOpen(',
+    '  private async t57AssertEntry(decision: Decision): Promise<void> {\n' +
+      '    const t = this as unknown as Record<string, (d: Decision) => Promise<void>>;\n' +
+      "    await t['executeOpen'](decision);\n" +
+      '  }',
+  );
+  mustChange(A2_MUTATED_RAW, AUTO_TRADER_RAW, 'GRD-A2 类型断言后索引');
+  const a2Problems = aliasProblems(plainCode(A2_MUTATED_RAW));
+  assert.ok(
+    a2Problems.some((p) => p.includes('t = this')),
+    '★★★ 重放 GRD-A2：类型断言出来的 `this` 别名必须被报出（改前 exit=0）',
+  );
+  assert.ok(
+    a2Problems.some((p) => p.includes('括号取成员')),
+    '★★★ 重放 GRD-A2：`t[「executeOpen」]` 这种索引取成员必须被报出（改前 exit=0）',
+  );
+
+  /* --- ⑨ `GRD-A1`（t42 S2）：从 this 解构方法引用 --- */
+  const A1_MUTATED_RAW = inject(
+    AUTO_TRADER_RAW,
+    '  private async executeOpen(',
+    '  private async t57DestructuredEntry(decision: Decision): Promise<void> {\n' +
+      '    const { executeOpen } = this;\n' +
+      '    await executeOpen(decision, undefined);\n' +
+      '  }',
+  );
+  mustChange(A1_MUTATED_RAW, AUTO_TRADER_RAW, 'GRD-A1 解构方法引用');
+  assert.ok(
+    aliasProblems(plainCode(A1_MUTATED_RAW)).some((p) => p.includes('解构')),
+    '★★★ 重放 GRD-A1/t42 S2：`const { executeOpen } = this` 必须被报出（改前 exit=0）',
+  );
+
+  /* --- ⑩ `GRD-B1`：把分派插进 runCycleBody（循环之外），同时保留循环里那一处 --- */
+  const LOOP_LINE = '    for (const decision of verdict.approved) {';
+  const B1_MUTATED_RAW = inject(
+    AUTO_TRADER_RAW,
+    LOOP_LINE,
+    '    if (this.t57OpportunisticFlag) {\n' +
+      '      await this.executeOpen({ symbol: "BTCUSDT" } as never, undefined);\n' +
+      '    }',
+  );
+  mustChange(B1_MUTATED_RAW, AUTO_TRADER_RAW, 'GRD-B1 循环外分派');
+  const b1Problems = dispatchOwnershipProblems(plainCode(B1_MUTATED_RAW));
+  assert.ok(
+    b1Problems.some((p) => p.includes('executeOpen') && p.includes('2 处')),
+    '★★★ 重放 GRD-B1：runCycleBody 里出现第二处 `executeOpen` 必须被报出（旧判据只做存在性检查，因此 exit=0）',
+  );
+  /*
+   * 第二个重放：**把循环里那一处挪到循环之外**（另一分支形态）——
+   * 此时 `runCycleBody` 里仍然"恰好 1 处"，所以**只有行区间归属能抓住它**：
+   * 旧判据（`loopBody.includes`）与"计数"判据在这里都是 exit=0。
+   */
+  const B1_MOVED_RAW = AUTO_TRADER_RAW.replace(
+    '          const outcome = await this.executeOpen(decision, snapshotBySymbol.get(decision.symbol));',
+    '          // t57 校准：把这一处分派挪到循环之外',
+  ).replace(
+    LOOP_LINE,
+    '    if (this.t57SecondPath) {\n      await this.executeOpen({ symbol: "TIAUSDT" } as never, undefined);\n    }\n' + LOOP_LINE,
+  );
+  mustChange(B1_MOVED_RAW, AUTO_TRADER_RAW, 'GRD-B1 分派挪到循环之外');
+  const b1Moved = dispatchOwnershipProblems(plainCode(B1_MOVED_RAW));
+  assert.ok(
+    b1Moved.some((p) => p.includes('executeOpen') && p.includes('之外')),
+    '★★★ 重放 GRD-B1（第二形态）：分派落在循环**之外**必须被"行区间归属"报出（旧判据与计数判据都看不见）',
+  );
+
+  /* --- ⑪ `S3`：端点字面量的两种绕法（已在上一条测试里校准，这里再钉一次"改前看不见"） --- */
+  const S3_FILES: SourceFile[] = [
+    {
+      rel: 'trader/t57Endpoints.ts',
+      code: plainCode("export const p = BASE + '/fapi/v1/order'; fetch(p);", true),
+    },
+  ];
+  assert.ok(
+    endpointLiteralProblems(S3_FILES).length > 0,
+    '★★★ 重放 t42 S3：拼接式的下单端点路径必须被报出（改前它与 signedRequest 不紧邻 → exit=0）',
+  );
+
+  /* 收尾：四处重放**全部在真实源码的副本上**做过，而真实文件一个字节都没动（见下方断言）。 */
+  assert.equal(
+    AUTO_TRADER_RAW,
+    readFileSync(new URL('./autoTrader.ts', import.meta.url), 'utf8'),
+    '★★★ 校准过程不许改到真实文件 —— 这里的重放必须发生在内存副本上',
+  );
+});
+
+/* -------------------------------------------------------------------------- */
+/*  ⑥.5 改前 vs 改后：同一个变异，旧判据看不见、新判据必须红                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **这条测试的存在理由**（t57）：`t41`/`t42` 指出的四个缺口都是"**少报**"——
+ * 今天没有坏代码被放行，但**未来的一行改动会静默通过**。
+ *
+ * 于是"改后能红"这个证据必须成对出现，否则它证明不了任何东西：
+ * ```
+ *   ✗ 只证明"新判据报出了变异" → 可能旧判据本来也会报（那这个补丁多余）
+ *   ✓ 同时证明"旧判据在同一变异上一条都不报" → 补丁真的补上了那个缺口
+ * ```
+ *
+ * ⚠️ 这里**故意把旧判据原样重写一遍**（而不是从 git 取 HEAD 的文件）：
+ * 从 git 取会让这条测试依赖工作树之外的提交历史（"测试读 git"是个坏味道，
+ * 而且 rebase/浅克隆会把它弄坏）。旧判据的形态在下面每条里都写清楚了，
+ * 它们与 `t41`/`t42` 描述的形状一一对应。
+ */
+test('★★★ 改前看不见、改后必须红：四个缺口的旧判据 vs 新判据（同一变异）', () => {
+  const inject = (src: string, anchor: string, text: string): string => src.replace(anchor, `${text}\n${anchor}`);
+  const LOOP_LINE = '    for (const decision of verdict.approved) {';
+
+  /* ---------------- 缺口 A（GRD-A3）：别名 `this` ---------------- */
+  const A_MUTATED = inject(
+    AUTO_TRADER_RAW,
+    '  private async executeOpen(',
+    '  private async t57AliasEntry(decision: Decision): Promise<void> {\n' +
+      '    const self = this;\n' +
+      '    await self.executeOpen(decision, undefined);\n' +
+      '  }',
+  );
+  assert.notEqual(A_MUTATED, AUTO_TRADER_RAW, '★ 变异没生效');
+  const A_CODE = plainCode(A_MUTATED);
+
+  /* 旧判据：`callSitesOf` 只认 `this.<name>(`（t41 报告里的原话）。 */
+  const OLD_SCAN = /this\s*\.\s*executeOpen\s*\(/g;
+  assert.equal(
+    (A_CODE.match(OLD_SCAN) ?? []).length,
+    (AUTO_TRADER.match(OLD_SCAN) ?? []).length,
+    '★★ 旧判据（只认 `this.` 前缀）本该**完全看不见**别名上的调用 —— 它看见了说明我对旧判据的复述错了',
+  );
+  const oldCallers = callerProblems(A_CODE, membersOf(A_CODE), CALLERS); /* 不传别名 = 旧行为 */
+  assert.equal(
+    oldCallers.offenders.length,
+    0,
+    '★★ 旧判据在 `const self = this; self.executeOpen(…)` 上是 **exit=0** —— 这正是 GRD-A3 那条缺口',
+  );
+
+  /* 新判据：两道都要红（禁止别名 + 别名解析后归到调用者）。 */
+  assert.ok(aliasProblems(A_CODE).length > 0, '★★★ 改后：别名必须被禁止（红灯）');
+  const newCallers = callerProblems(
+    A_CODE,
+    membersOf(A_CODE),
+    CALLERS,
+    thisAliasesOf(A_CODE).filter((a) => a.how === 'alias').map((a) => a.name),
+  );
+  assert.ok(
+    newCallers.offenders.some((o) => o.includes('t57AliasEntry')),
+    '★★★ 改后：别名解析必须把这处调用归到 `t57AliasEntry`（红灯）',
+  );
+
+  /* ---------------- 缺口 B（GRD-B1）：循环之外多一条执行路径 ---------------- */
+  /*
+   * ⚠️ 这里必须把两种形态分清楚，否则会把"精度提升"说成"覆盖面扩大"：
+   *
+   *   B1-a **保留**循环里那一处、**另加**一处到循环之外 → 旧判据（存在性）**完全瞎**（真正的缺口）
+   *   B1-b **把**循环里那一处**挪走**（循环里没有了）        → 旧判据会报"缺了"（不是瞎，是说不清位置）
+   *
+   * 新判据（计数 + 行区间）对两种形态都给出**准确**结论：前者报"2 处"，后者报"落在循环之外"。
+   */
+  const B1A_MUTATED = inject(
+    AUTO_TRADER_RAW,
+    LOOP_LINE,
+    '    if (this.t57SecondPath) {\n      await this.executeOpen({ symbol: "TIAUSDT" } as never, undefined);\n    }',
+  );
+  assert.notEqual(B1A_MUTATED, AUTO_TRADER_RAW, '★ 变异 B1-a 没生效');
+  const B1A_CODE = plainCode(B1A_MUTATED);
+  const b1aLoopAt = B1A_CODE.indexOf(APPROVED_LOOP_NEEDLE);
+  const b1aLoopBody = balancedFrom(B1A_CODE, b1aLoopAt + APPROVED_LOOP_NEEDLE.length - 1);
+
+  /* 旧判据：`loopBody.includes('this.executeOpen(')` —— 循环里那一处还在，所以它一条都不报。 */
+  const OLD_NEEDLES = DISPATCH_METHODS.map((m) => `this.${m}(`);
+  const oldMissingB1a = OLD_NEEDLES.filter((n) => !b1aLoopBody.includes(n));
+  assert.deepEqual(
+    oldMissingB1a,
+    [],
+    '★★ 旧判据（存在性）在"循环里保留、循环外另加一条"上是 **exit=0** —— 这正是 GRD-B1 的缺口形状',
+  );
+  /* 新判据：计数必须报"2 处"。 */
+  assert.ok(
+    dispatchOwnershipProblems(B1A_CODE).some((p) => p.includes('executeOpen') && p.includes('2 处')),
+    '★★★ 改后：runCycleBody 里出现第二处 executeOpen 必须被"计数"报出（红灯）',
+  );
+
+  /* B1-b：把循环里那一处挪到循环之外 —— 旧判据会报"缺了"，但说不清它**在哪**。 */
+  const B1B_MUTATED = AUTO_TRADER_RAW.replace(
+    '          const outcome = await this.executeOpen(decision, snapshotBySymbol.get(decision.symbol));',
+    '          // t57 校准：把这一处分派挪到循环之外',
+  ).replace(
+    LOOP_LINE,
+    '    if (this.t57MovedPath) {\n      await this.executeOpen({ symbol: "TIAUSDT" } as never, undefined);\n    }\n' + LOOP_LINE,
+  );
+  assert.notEqual(B1B_MUTATED, AUTO_TRADER_RAW, '★ 变异 B1-b 没生效（锚点文本变了？）');
+  const B1B_CODE = plainCode(B1B_MUTATED);
+  const b1bLoopBody = balancedFrom(
+    B1B_CODE,
+    B1B_CODE.indexOf(APPROVED_LOOP_NEEDLE) + APPROVED_LOOP_NEEDLE.length - 1,
+  );
+  assert.equal(
+    b1bLoopBody.includes('this.executeOpen('),
+    false,
+    '★ 变异 B1-b 没做到位 —— 循环里那一处应当已经被挪走（否则这条对照说明不了什么）',
+  );
+  assert.ok(
+    dispatchOwnershipProblems(B1B_CODE).some((p) => p.includes('executeOpen') && p.includes('之外')),
+    '★★★ 改后：分派落在循环之外必须被"行区间归属"报出（旧判据只能说"缺了"，说不出它在哪里）',
+  );
+
+  /* ---------------- 缺口 C（GRD-A2）：类型断言后索引 ---------------- */
+  const C_MUTATED = inject(
+    AUTO_TRADER_RAW,
+    '  private async executeOpen(',
+    '  private async t57AssertEntry(decision: Decision): Promise<void> {\n' +
+      '    const t = this as unknown as Record<string, (d: Decision) => Promise<void>>;\n' +
+      "    await t['executeOpen'](decision);\n" +
+      '  }',
+  );
+  assert.notEqual(C_MUTATED, AUTO_TRADER_RAW, '★ 变异没生效');
+  const C_CODE = plainCode(C_MUTATED);
+  /* 旧判据：唯一相关的是"禁止 `this[`"这一条 —— 而它在 `as …)` 之后，看不见。 */
+  assert.equal(
+    (C_CODE.match(/this\[/g) ?? []).length,
+    0,
+    '★★ 旧判据（`this[` 计数）在类型断言 + 索引这条形状上是 **exit=0** —— 这正是 GRD-A2',
+  );
+  assert.ok(
+    aliasProblems(C_CODE).some((p) => p.includes('括号取成员')),
+    '★★★ 改后：`t[「executeOpen」]` 必须被报出（红灯）',
+  );
+
+  /* ---------------- 缺口 D（t42 S3）：拼接式下单端点 ---------------- */
+  const D_FILE: SourceFile = {
+    rel: 'trader/t57Endpoints.ts',
+    code: plainCode("export async function go() { await fetch(BASE + '/fapi/v1/order', {}); }", true),
+  };
+  /* 旧判据：要求 `signedRequest('POST', '/fapi/v1/order'` **紧邻**。 */
+  const OLD_ENDPOINT = /signedRequest(?:<[^>]*>)?\(\s*['"](?:POST|DELETE|PUT)['"]\s*,\s*['"]\/fapi\/v1\/(?:order|algoOrder|allOpenOrders|algoOpenOrders)['"]/;
+  assert.equal(
+    (D_FILE.code.match(OLD_ENDPOINT) ?? []).length,
+    0,
+    '★★ 旧判据（要求端点与 signedRequest 紧邻）在拼接式路径上是 **exit=0** —— 这正是 t42 S3',
+  );
+  assert.ok(endpointLiteralProblems([D_FILE]).length > 0, '★★★ 改后：拼接式下单端点必须被报出（红灯）');
 });
 
 /* -------------------------------------------------------------------------- */
@@ -999,15 +1707,20 @@ test('★★★ 判据必须能真的报出绕过（人造源码校准）—— 
 /* -------------------------------------------------------------------------- */
 
 /**
- * 已知的恒真断言。**这是一张"待还的债"清单，不是一个白名单**：
- * 里面每一条都已由别的任务承接修复（修好后把这一行删掉，本守卫不需要同步改）。
+ * 已知的恒真断言。**这是一张"待还的债"清单，不是一个白名单** ——
+ * 里面每一条都必须由某个任务承接修复，修好后把这一行删掉（本守卫不需要同步改）。
+ *
+ * ## 现在是空的（2026-10-17，t43 已还清）
+ *
+ * 唯一一条是 `trader/agent/perSymbolWiring.test.ts` 里那条"左半句等于 false
+ * **再接一个恒真的尾巴**"的断言（整条恒真、守卫从未生效）。t43 已把它改成
+ * **独立的、可失败的判据**，并从本表移除 —— 于是本守卫现在会**真的扫那个文件**。
+ * （⚠️ 这里刻意不把那半句吞掉判据的字面量抄一遍：抄一遍又会被裸 grep 当成一处新的恒真形状。）
+ *
+ * ⚠️ 这张表留着的意义：下一次出现恒真断言时，把它记在这里**只是登记债务**
+ * （带上下承接它的任务），而不是放行 —— 否则"豁免"会变成永久的白名单。
  */
-const KNOWN_VACUOUS: ReadonlyArray<{ file: string; why: string }> = [
-  {
-    file: 'trader/agent/perSymbolWiring.test.ts',
-    why: '`/regex/.test(CODE) === false || true` —— 整条断言恒真（已由 t43 承接修复）',
-  },
-];
+const KNOWN_VACUOUS: ReadonlyArray<{ file: string; why: string }> = [];
 
 /** 恒真形状：无论左侧是什么，整个表达式都是 true。 */
 const VACUOUS_PATTERNS: ReadonlyArray<{ re: RegExp; why: string }> = [
@@ -1076,8 +1789,9 @@ test('★★★ 禁止恒真断言：`|| true` / `&& true` / `? true : true` 一
     [],
     '★★★ 这些测试里有**恒真断言**（无论被测代码怎样都会通过）：\n' +
       offenders.map((o) => `      · ${o}`).join('\n') +
-      '\n    ⚠️ 本仓库已经有过一次真实教训：`trader/agent/perSymbolWiring.test.ts:38` 的' +
-      '`=== false || true` 让整条用例永远为真（已知项记在 `KNOWN_VACUOUS` 里，已由 t43 承接）。\n' +
+      '\n    ⚠️ 本仓库已经有过一次真实教训：`trader/agent/perSymbolWiring.test.ts` 曾用' +
+      '"左半句比 false 再接一个恒真尾巴"的形状让整条用例永远为真（**t43 已修**，' +
+      '豁免表因此清空 —— 所以现在这个文件也在被本守卫真扫）。\n' +
       '    ✅ 修法：把左侧那半句写成**独立的 `assert`**（它本来就是想断言"只应有一处"）。',
   );
 });

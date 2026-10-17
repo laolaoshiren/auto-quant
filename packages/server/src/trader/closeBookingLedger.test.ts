@@ -23,6 +23,7 @@
  * | ② | 关行点穷举：`positionStore.close(` 只允许出现在登记的方法里 | 新增关仓点（与 closeBookingGuard 同一份事实，重复断言是**故意的**：两份判据都必须基于同一张表） |
  * | ③ | **"只关挂单"的方法里不许出现写账** | 把一次真实平仓误分类成"挂单作废"（那正是账号消失的形状） |
  * | ④ | **消失路径必须能走到入账口**（调用图可达性） | 把 `reconcilePositions → bookVanishedPosition → bookClosedPosition` 这条链**断掉** |
+ * | ⑤ | **真实通路必须存在**（可达性时避开"只在 dryRun 走"的结算通路） | 第 ④ 层被一条**实盘根本不会走**的通路救活（"静默失效"的经典形状） |
  *
  * ⚠️ 第 ④ 层是这份守卫**独有的价值**：前三层都是"逐点登记"，
  * 只有它守的是**"停了的那条路"** —— 停机期间交易所平仓、模拟盘结算、
@@ -174,11 +175,16 @@ function calleesOf(member: Member, all: readonly Member[]): string[] {
   return found;
 }
 
-/** 调用图可达性：`from` 能否（经 0..N 跳）走到 `to`。 */
-function reaches(code: string, from: string, to: string): boolean {
+/** 调用图可达性：`from` 能否（经 0..N 跳）走到 `to`；`avoid` 里的方法**不许经过**。 */
+function reachesAvoiding(
+  code: string,
+  from: string,
+  to: string,
+  avoid: ReadonlySet<string> = new Set(),
+): boolean {
   const all = methodsOf(code);
   const byName = new Map(all.map((m) => [m.name, m]));
-  if (!byName.has(from) || !byName.has(to)) return false;
+  if (!byName.has(from) || !byName.has(to) || avoid.has(from)) return false;
   const seen = new Set<string>([from]);
   const queue = [from];
   while (queue.length > 0) {
@@ -187,13 +193,39 @@ function reaches(code: string, from: string, to: string): boolean {
     const member = byName.get(cur);
     if (member === undefined) continue;
     for (const next of calleesOf(member, all)) {
-      if (seen.has(next)) continue;
+      if (seen.has(next) || avoid.has(next)) continue;
       seen.add(next);
       queue.push(next);
     }
   }
   return false;
 }
+
+function reaches(code: string, from: string, to: string): boolean {
+  return reachesAvoiding(code, from, to);
+}
+
+/**
+ * **真实（非模拟盘）平仓路径** —— 必须存在一条**不经过模拟盘结算**的入账通路。
+ *
+ * ## 为什么需要"避让"这一层（否则判据会被一条假通路救活）
+ *
+ * `reconcilePositions` 同时挂着两条关仓通路：
+ * ```
+ *   ① 交易所已平、本地还在 → bookVanishedPosition() → bookClosedPosition()   ← 实盘走这条
+ *   ② 模拟盘结算           → settleDryRunPositions() → bookClosedPosition()  ← 只在 dryRun 走
+ * ```
+ * 若只判"能到达入账口"，那么**把 ① 删掉**之后 ② 仍然让它通过 ——
+ * 判据被一条**实盘根本不会走**的通路救活（"静默失效"的经典形状）。
+ * 所以这两条路径必须**避开 `settleDryRunPositions`** 也能到达入账口。
+ */
+const REAL_PATH_MUST_REACH_BOOKING: ReadonlyMap<string, string> = new Map([
+  ['reconcilePositions', '**停机期间被交易所平掉**的仓位必须入账 —— 而模拟盘结算通路在实盘不会走。'],
+  ['reconcileTradeHistory', '停机期间的成交只能靠流水重建 → 真实通路也必须能入账。'],
+]);
+
+/** 模拟盘专用通路（判"真实通路"时要避开它）。 */
+const DRY_RUN_ONLY: ReadonlySet<string> = new Set(['settleDryRunPositions']);
 
 /** 跑一遍全部判据，返回问题清单（`行号：说明`）。 */
 function ledgerProblems(code: string): string[] {
@@ -253,6 +285,19 @@ function ledgerProblems(code: string): string[] {
     }
     if (!reaches(code, from, 'bookClosedPosition')) {
       problems.push(`第 ${all.find((m) => m.name === from)!.startLine} 行：${from} 到不了入账口 —— ${why}`);
+    }
+  }
+
+  /* ── ⑤ 真实通路必须存在（不许被"只在 dryRun 走的路"救活） ───────── */
+  for (const [from, why] of REAL_PATH_MUST_REACH_BOOKING) {
+    if (!names.has(from)) {
+      problems.push(`登记表 REAL_PATH_MUST_REACH_BOOKING 里的 ${from} 已经不存在了 —— 请移除`);
+      continue;
+    }
+    if (!reachesAvoiding(code, from, 'bookClosedPosition', DRY_RUN_ONLY)) {
+      problems.push(
+        `第 ${all.find((m) => m.name === from)!.startLine} 行：${from} 只有"经过模拟盘结算"的通路能到入账口 —— ${why}`,
+      );
     }
   }
 
@@ -373,6 +418,20 @@ test('★★★ 判据必须能真的报出问题 —— 四种人造变异逐�
   assert.ok(
     ledgerProblems(mutatedD).some((p) => p.includes('tick') && p.includes('写了 trades，但没有登记')),
     '★★★ 变异 D（未登记的写账点）没被报出 —— 第 ① 层判据是空转',
+  );
+
+  /*
+   * 变异 E：把"实盘那条消失路径"删掉（`reconcilePositions` 不再调 `bookVanishedPosition`）。
+   *
+   * ⚠️ 这是**历史事故的原形状**：此时 `reconcilePositions` 仍然"能到达入账口"
+   * ——但它只剩模拟盘结算那条通路（`settleDryRunPositions` → `bookClosedPosition`），
+   * 而**实盘根本不会走它**。第 ⑤ 层判据就是为这一条存在的。
+   */
+  const mutatedE = dropLinesWith(CODE, 'reconcilePositions', 'await this.bookVanishedPosition(');
+  assert.notEqual(mutatedE, CODE, '★ 变异 E 没有生效（锚点文本变了？）');
+  assert.ok(
+    ledgerProblems(mutatedE).some((p) => p.includes('reconcilePositions') && p.includes('只有"经过模拟盘结算"的通路')),
+    '★★★ 变异 E（实盘消失路径被删、只剩模拟盘通路）没被报出 —— 第 ⑤ 层判据是空转',
   );
 
   /* 反向：合法输入不许被误报（否则"报出的问题"里全是噪音）。 */
