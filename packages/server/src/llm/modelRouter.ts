@@ -23,6 +23,7 @@
 import {
   ladderForTier,
   profileOf,
+  registerDiscoveredProfiles,
   type ModelProfile,
   type ModelTier,
 } from './modelCatalog.js';
@@ -121,6 +122,34 @@ export interface ModelRouterOptions {
    * 所以以**发现结果为准**、档案只作兜底。
    */
   discoveredLadders?: Partial<Record<ModelTier, readonly string[]>>;
+  /**
+   * **发现到的模型的元数据**（`reasoning` / 上下文 / 输出上限）—— 2026-10-17 加。
+   *
+   * ## 为什么需要它（一次整链全灭）
+   *
+   * `budgetFor()` 靠 `profile.reasoning` 决定放大几倍，而 `profileOf()` 只看
+   * **静态档案**（14 个模型）。T1/T2/T3 链上的候选**大部分是动态发现的** ——
+   * 于是 `profileOf()` 返回 `undefined` ⇒ 以前**一律不放大** ⇒
+   * 预算被思维链吃光 ⇒ `content=0` ⇒ 整链全灭（用户截图 2026-10-17 16:37:36）。
+   *
+   * ## 为什么单独一个参数，而不是塞进 `discoveredLadders`
+   *
+   * `discoveredLadders` 是**档位 → id 列表**（排序结果），而这里要的是
+   * **id → 元数据**（`/v1/models` 的原始字段）。两者来源不同、用途不同：
+   * ```
+   *   discoveredLadders   → "先试谁"（顺序）
+   *   discoveredProfiles  → "给它多少预算"（reasoning / maxOutputTokens）
+   * ```
+   * 合在一起会让"链的排序"与"预算的依据"耦合 —— 而它们**本来没有关系**。
+   *
+   * ⚠️ **不传 = 行为与改动前完全一致**（静态档案 + t117 的盲放大兜底）。
+   */
+  discoveredProfiles?: ReadonlyArray<{
+    id: string;
+    reasoning: boolean;
+    contextTokens: number;
+    maxOutputTokens: number;
+  }>;
 }
 
 /**
@@ -208,6 +237,16 @@ export class ModelRouter {
   constructor(private readonly options: ModelRouterOptions) {
     this.health = options.health ?? new ModelHealthRegistry();
     this.maxFallbacks = options.maxFallbacks ?? 3;
+    /*
+     * ⚠️ **构造时注册一次**（不是每次调用）—— 发现结果在网关重启之间不变，
+     * 而 `callByTier` 是热路径（一轮决策要调 9 次）。每轮重注册是纯浪费。
+     *
+     * 不传时**什么都不做** ⇒ 行为与改动前一致（`profileOf` 仍只查静态档案，
+     * `budgetFor` 走 t117 的盲放大兜底）。
+     */
+    if (options.discoveredProfiles !== undefined && options.discoveredProfiles.length > 0) {
+      registerDiscoveredProfiles(options.discoveredProfiles);
+    }
   }
 
   /** 暴露健康状态（界面/日志用）。 */

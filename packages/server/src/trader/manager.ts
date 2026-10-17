@@ -2053,6 +2053,31 @@ export class TraderManager {
     }
 
     const router = new ModelRouter({
+      /*
+       * **把网关报的模型元数据交给路由器**（2026-10-17 · `t118` 的接线，`t118` 自己不在 inScope）。
+       *
+       * 为什么要传：`profileOf()` 只在**静态档案** `MODEL_PROFILES` 里找，而 T1 链的 5 个候选里
+       * **4 个不在档案里**（`beam-free` / `group/auto-space-bunny-free` / `team-grunt` / `team-analyst`）
+       * ⇒ 返回 `undefined` ⇒ 以前**一律不放大预算**。
+       *
+       * 2026-10-17 服务器实测（28,500 字符 = 生产规模，`newscaster` 的 base 是 1024）：
+       * ```
+       *   beam-free mt=1024 → reasoning=1023 · content=  0 字
+       *   beam-free mt=2048 → reasoning=2047 · content=  0 字   ← 旧的 ×2 重试救不回来
+       *   beam-free mt=4096 → reasoning=2336 · content=2244 字 ✅
+       * ```
+       * ⇒ **不是"思维链太长"，是基准 1024 太小**。`t117` 已用"未登记也 ×4"兜住；
+       * 本条让路由器**知道**这些模型的 `reasoning`/`maxOutputTokens`，从"盲放大"变成"有依据的放大"。
+       *
+       * `catalog` 为 `null`（没拉到快照）时传 `undefined` —— 与不传等价，退回 `t117` 的兜底。
+       */
+      discoveredProfiles:
+        catalog?.models.map((m) => ({
+          id: m.id,
+          reasoning: m.reasoning,
+          contextTokens: m.contextTokens,
+          maxOutputTokens: m.maxOutputTokens,
+        })) ?? undefined,
       call: createMagpieCallFactory({
         baseUrl,
         apiKey,

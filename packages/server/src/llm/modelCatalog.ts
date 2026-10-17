@@ -363,7 +363,108 @@ function isStrongest(m: ModelProfile): boolean {
   return m.reasoning && (m.measuredMs ?? 0) >= 6_000;
 }
 
-/** 按 id 取档案。 */
+/* -------------------------------------------------------------------------- */
+/*  运行期档案：把"动态发现的模型"补进档案（2026-10-17，修 T1 整链全灭）          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **运行期补进来的档案**（来自 `modelDiscovery` 的 `/v1/models` 元数据）。
+ *
+ * ## 为什么需要它（一次真实的整链全灭）
+ *
+ * `MODEL_PROFILES` 是**人写的静态档案**，只收了 14 个模型。
+ * 而 `T1_fast` / `T2_mid` / `T3_deep` 的候选链里**大部分是动态发现的**：
+ *
+ * ```
+ *   T1_fast 链 5 个候选 → 只有 1 个（space-bunny-free）在静态档案里
+ *   其余 4 个（beam-free / group/auto-space-bunny-free /
+ *              group/team-grunt / group/team-analyst）→ profileOf() = undefined
+ * ```
+ *
+ * 而 `budgetFor()` 需要 `profile.reasoning` 才能决定放大几倍。
+ * `undefined` 在**修 t117 之前**意味着"不放大" ⇒ 预算 1024 被思维链吃光
+ * ⇒ `content=0` ⇒ 4 个候选全灭（用户截图 2026-10-17 16:37:36）。
+ *
+ * ## 为什么不能只靠"未登记就放大"（t117 的兜底）
+ *
+ * t117 让 `undefined` 也 ×4 —— 那是**必要的兜底**，但它是**盲放大**：
+ * ```
+ *   它不知道 maxOutputTokens ⇒ 无法夹上限
+ *   它不知道 contextTokens  ⇒ 无法在选模型时避开窗口不够的候选
+ * ```
+ * 而 `/v1/models` **本来就返回这些字段**（实测 2026-10-17）：
+ * ```
+ *   opencode-zen-free/beam-free         ctx=1048576  maxOut=131072  reasoning=true  levels=5
+ *   group/auto-space-bunny-free         ctx= 524288  maxOut=524288  reasoning=true  levels=0
+ *   group/team-grunt                    ctx=1000000  maxOut=384000  reasoning=true  levels=3
+ * ```
+ * ⇒ **信息一直在，只是没被接到 `profileOf` 上。** 这就是本函数补的那一环。
+ *
+ * ## 为什么是"注册"而不是"改静态表"
+ *
+ * 静态表是**人写的**（含 `measuredMs` / `goodFor` 这些只有人能判断的字段）；
+ * 而动态模型的元数据是**网关报的**、会随网关变化。两者生命周期不同，不能混写。
+ * 所以：**静态表优先，动态注册只补空缺**（`profileOf` 里先查静态表）。
+ */
+const runtimeProfiles = new Map<string, ModelProfile>();
+
+/**
+ * 把**发现到的模型**注册进运行期档案（幂等，可重复调用）。
+ *
+ * @param models 发现层给出的模型（`DiscoveredModel` 的最小结构 —— 只取这里要用的字段，
+ *               避免 `modelCatalog` 反向依赖 `modelDiscovery` 造成循环 import）
+ *
+ * ⚠️ **不覆盖静态档案里的模型** —— 那是人写的，含实测耗时与用途说明。
+ * ⚠️ 只补 `reasoning` / `maxOutputTokens` / `contextTokens` 三列 ——
+ *    其余列（`measuredMs` / `goodFor`）对动态模型**没有可信来源**，宁可留空。
+ */
+export function registerDiscoveredProfiles(
+  models: ReadonlyArray<{
+    id: string;
+    reasoning: boolean;
+    contextTokens: number;
+    maxOutputTokens: number;
+  }>,
+): void {
+  for (const m of models) {
+    if (typeof m.id !== 'string' || m.id.length === 0) continue;
+    /* 静态档案优先：人写的字段（measuredMs/goodFor）比网关报的更可信。 */
+    if (MODEL_PROFILES.some((p) => p.id === m.id)) continue;
+    runtimeProfiles.set(m.id, {
+      id: m.id,
+      /*
+       * 档位对 `budgetFor` **没有影响**（它只看 reasoning 与 maxOutputTokens），
+       * 所以这里不猜档位 —— 档位由发现层的 `inferTier` 单独算。
+       * 给 `T1_fast` 只是"最保守的中性值"，且这个字段在运行期档案里不被消费。
+       */
+      tier: 'T1_fast',
+      measuredMs: null,
+      contextTokens: m.contextTokens,
+      maxOutputTokens: m.maxOutputTokens,
+      reasoning: m.reasoning,
+      free: true,
+      verified: true,
+      goodFor: '（动态发现）',
+    });
+  }
+}
+
+/** 清空运行期档案（测试用；生产不调用）。 */
+export function clearRuntimeProfiles(): void {
+  runtimeProfiles.clear();
+}
+
+/** 运行期档案的当前条目数（观测/测试用）。 */
+export function runtimeProfileCount(): number {
+  return runtimeProfiles.size;
+}
+
+/**
+ * 按 id 取档案 —— **静态优先，其次运行期注册的**。
+ *
+ * ⚠️ 顺序不能反：静态档案里有人写的 `measuredMs` 与 `goodFor`，
+ * 那是排序（`scoreFor`）与提示词要用的；运行期档案只有网关报的三列。
+ */
 export function profileOf(modelId: string): ModelProfile | undefined {
-  return MODEL_PROFILES.find((m) => m.id === modelId);
+  return MODEL_PROFILES.find((m) => m.id === modelId) ?? runtimeProfiles.get(modelId);
 }
