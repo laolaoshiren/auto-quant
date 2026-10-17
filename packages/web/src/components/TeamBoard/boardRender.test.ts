@@ -335,3 +335,59 @@ test('★★ 兜底文案不自责：不再对操作员说「界面还没登记�
    */
   assert.ok(html.includes('见右侧最近动作'), '★ 探针失效：根本搜不到 duty 文案所在的属性，那三条断言是恒真的');
 });
+
+/* -------------------------------------------------------------------------- */
+/*  ⑥ 「历史工作详情」入口（2026-10-17 · t111 · 用户原话）                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * **★★★ 用户要的那个按钮：每个已实现的岗位都要有，`planned` 不许有。**
+ *
+ * 用户原话：
+ * > 「每个角色**增加一个可点击按钮，点击去以后能看他历史工作详情**」
+ *
+ * 原判据是 `stepCount > 0`（只有本轮跑过才有按钮），于是**本轮没叫到**的岗位
+ * 连点都点不了 —— 而团队是按需出勤的，"这轮没叫它"是常态，
+ * 用户最想查的恰恰是那些"看起来从未运行过"的岗位。
+ *
+ * ## 为什么 `planned` 不给按钮
+ *
+ * 给一个点开永远没有内容的按钮，等于让操作员以为"再等等就有数据"。
+ * 而真相是这个岗位**没人实现**。所以它是唯一被排除的一类。
+ *
+ * ⚠️ 判据用 `aria-expanded` 属性而不是"有没有 `button` 元素"：
+ * 一行里可能有别的按钮（未来的），而展开控件必须能被读屏识别。
+ */
+test('★★★ 每个已实现的岗位都有「历史详情」展开按钮，planed 的没有', () => {
+  /*
+   * 传空步骤 = **本轮谁都没跑**，这正是用户报"从未运行过"的那个场景。
+   * 若判据还是 `stepCount > 0`，这里一个按钮都不会有 —— 那就是 bug 的形状。
+   */
+  const html = renderBoard();
+
+  const expectButton = (id: string): void => {
+    const row = rowOf(html, id);
+    assert.ok(row.length > 0, `★ 找不到 ${id} 那一行（判据失效，先修这个）`);
+    assert.ok(
+      row.includes('aria-expanded'),
+      `★ ${id} 是本轮没参与但**已实现**的岗位 —— 它必须有展开按钮（用户要"点开看历史"）`,
+    );
+  };
+  const expectNoButton = (id: string): void => {
+    const row = rowOf(html, id);
+    assert.ok(row.length > 0, `★ 找不到 ${id} 那一行（判据失效，先修这个）`);
+    assert.ok(
+      !row.includes('aria-expanded'),
+      `★ ${id} 是 planned（根本没实现）—— 不该给它按钮：点开永远是空的，那是在骗操作员`,
+    );
+  };
+
+  /* `staffed`：抽查那几个用户点名"似乎从未运行过"的。 */
+  for (const id of ['supervisor', 'risk_officer', 'reporter', 'memory_curator']) expectButton(id);
+  /* `by_code`：职责在跑、没有模型出勤 —— 也应该能点开（展开态会说明由哪段代码承担）。 */
+  for (const id of ['data_sentinel', 'ops_watchdog']) expectButton(id);
+  /* `planned`：5 个真没实现的。 */
+  for (const id of ['onchain_analyst', 'community_monitor', 'red_team', 'portfolio_manager', 'clerk']) {
+    expectNoButton(id);
+  }
+});
