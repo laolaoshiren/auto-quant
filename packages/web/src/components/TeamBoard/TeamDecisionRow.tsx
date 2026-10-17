@@ -378,8 +378,13 @@ type RawTab = 'cot' | 'prompt' | 'raw';
  *
  * 前两项来自 `rawResponse` 里本来就有的 `<team>` / `<risk>` 块，
  * **不需要给数据库加列**（迁移要动挂着实盘的 `traders` 表，风险不值得）。
+ *
+ * ⚠️ 2026-10-17：**它被导出给 `TeamCycleBlock` 用**（台账 UI-03）。
+ * 本轮**没有任何决策**时（典型的失败轮：`record.error !== null`），
+ * 界面上原来一个"展开详情"按钮都没有 —— 因为那个按钮挂在**决策行**上。
+ * 于是团队模式最需要排查的那一轮，恰恰看不到各角色产出。
  */
-function TeamDecisionDetails({
+export function TeamDecisionDetails({
   record,
   outcome,
 }: {
@@ -438,7 +443,16 @@ function TeamDecisionDetails({
                   risk.approved ? 'text-ink-mid' : 'text-down'
                 }`}
               >
-                {risk.text}
+                {/*
+                  ⚠️ **数据里的 markdown 强调符必须在这里剥掉**（台账 UI-08 的"正文"那一半）。
+                  这段文字来自**服务端写进 `raw_response` 的 `<risk>` 块**，而
+                  `deskOutput.ts` 的模板里本来就有 `**`（例如「本轮**未经风控官审阅**」）——
+                  界面是纯文本、不是 markdown 渲染器。实测（t47 浏览器取证）：
+                  不剥的话这一块原样显示星号。
+                  `plainText` 是**数据侧**的统一出口（我们自己写的字面量由
+                  `lib/markdownLiteral.test.ts` 守着，两道各管一半）。
+                */}
+                {plainText(risk.text)}
               </p>
             </section>
           )}
@@ -543,7 +557,17 @@ function MemberLine({ member }: { member: TeamMemberOutput }): React.ReactElemen
           </button>
         )}
       </div>
-      <p className="min-w-0 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-mid">{body}</p>
+      {/*
+        ⚠️ **角色产出是"数据"，里面会有 markdown 强调符** —— 必须过 `plainText`
+        （台账 UI-08 的"正文"那一半；t3 实测这些星号原样显示在屏幕上）。
+
+        `preview` / `body` 是**摘要与全文的取舍**（那部分由 `memberSummary` 与
+        这里的留痕判据负责），而 `plainText` 只做一件事：把不属于纯文本的
+        装饰符号去掉。两者职责不同，**都要做**。
+      */}
+      <p className="min-w-0 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-mid">
+        {plainText(body)}
+      </p>
     </li>
   );
 }

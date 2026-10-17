@@ -53,7 +53,7 @@ import { fmtInt, fmtLatency, timeAgo } from '../../lib/format';
  */
 import { actionLabel } from '../DecisionAudit';
 import { plainText } from '../../lib/plainText';
-import { TeamDecisionRow } from './TeamDecisionRow';
+import { TeamDecisionDetails, TeamDecisionRow } from './TeamDecisionRow';
 
 /**
  * 孤立日志里那个动作码的中文标签。
@@ -258,8 +258,31 @@ export function TeamCycleBlock({
         */}
         {errorText === null && decisions.length === 0 && log.length === 0 && (
           <p className="text-xs text-ink-faint">
-            本轮团队没有给出任何决策 —— 展开上面的「AI 工作流」看各岗位这一轮做了什么。
+            本轮团队没有给出任何决策 —— 展开下面的「本轮过程」看各岗位这一轮做了什么。
           </p>
+        )}
+
+        {/*
+          ══════════════════════════════════════════════════════════════════════
+           **轮次级「本轮过程」**（2026-10-17 · 台账 UI-03）
+          ══════════════════════════════════════════════════════════════════════
+
+          用户实测抓到的形状（t3 用真实浏览器量到）：
+          ```
+            失败轮（周期 #102）：这个卡片 buttons = []（一个按钮都没有）
+            而同一记录 raw_response 里有 <team> 与 4 条角色产出（2 条是失败原因）
+          ```
+          **根因**：那个「展开详情」按钮挂在**决策行**上（`TeamDecisionRow` 里），
+          而失败轮**一条决策都没有** —— 于是团队模式最需要排查的那一轮，
+          界面上一片空白，只有一句"团队轮次失败：…"。
+
+          **修法**：把同一段渲染提到**轮次**这一级。数据本来就在 `rawResponse` 里
+          （`<team>` / `<risk>` 块），**不加列、不迁移**。
+          `TeamDecisionDetails` 自己没有可展内容时会返回 `null`（不渲染死按钮），
+          所以这里无条件挂上也不会出现"点开是空的"那种按钮。
+        */}
+        {actionable.length === 0 && skipped.length === 0 && (
+          <TeamDecisionDetails record={record} outcome={leftover[0] ?? null} />
         )}
 
         {actionable.length > 0 && (
