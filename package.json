@@ -1,6 +1,6 @@
 {
   "name": "auto-quant",
-  "version": "0.1.42",
+  "version": "0.1.43",
   "private": true,
   "description": "7x24 fully-automated LLM-driven crypto futures trading terminal (Binance USDⓈ-M)",
   "license": "Apache-2.0",
