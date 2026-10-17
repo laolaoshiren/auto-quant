@@ -9,8 +9,28 @@
  *
  * ## 它判什么、不判什么
  *
- * 判的是**客观异常**，不是"好不好看"：横向溢出、控制台报错、4xx/5xx、空白页。
- * 版面美观仍然要人看截图 —— 这个脚本只负责挡住"明显坏了"的那一类。
+ * 判的是**客观异常**，不是"好不好看"：横向溢出、控制台报错、4xx/5xx、空白页、
+ * **界面把 markdown 强调符当纯文本显示出来**。版面美观仍然要人看截图 ——
+ * 这个脚本只负责挡住"明显坏了"的那一类。
+ *
+ * ## ⚠️ 缺凭据时**直接非零退出**（2026-10-17）
+ *
+ * 这是本次最要紧的一条修复。原来没有凭据也照跑：
+ *
+ *   1. 应用把未登录的访问**重定向到 `/login`**；
+ *   2. 脚本量的就是**登录页** —— 实测正文长度**固定 496 字**，而判据是 `> 300`；
+ *   3. 于是它报「**10 个页面没有客观异常**」全绿。带真 token 重跑，同一批页面
+ *      正文是 **616–18,995 字**。
+ *
+ * 那种绿灯证明的是"**登录页渲染正常**"，而不是"被检查的页面正常"。在一个跑真实
+ * 资金的仓库里，"验证通过"不能有这种含义 —— 所以缺凭据（或 token 已过期）时
+ * 会非零退出并说明原因。闸门在 `ui-probe-lib.mjs`。
+ *
+ * ## ⚠️ markdown 判据有**两条**，少一条就漏
+ *
+ * 判据本身（页面级 + `title` 属性）在 `ui-probe-lib.mjs`，三个脚本共用一份 ——
+ * 于是不会出现"两个工具对同一处一处报一处不报"。**抓不到什么**也在那里列成表，
+ * 每次运行都会原样打出来：读一个绿灯的人必须同时知道它没证明什么。
  *
  * ## ⚠️ 横向溢出必须排除 `text-overflow: ellipsis`
  *
@@ -26,19 +46,32 @@
  * ## 用法
  *
  *   AQ_BASE=https://... AQ_TOKEN=<jwt> AQ_CHROME=<chrome 路径> npm run ui:check
+ *   # 也认表单登录：UI_SMOKE_USER=<用户名> UI_SMOKE_PASS=<密码>
  *
  * 需要登录态，所以**不能进 CI**（CI 里没有真实部署与凭据）。它是本地/服务器上
  * 手动核对的工具，用于在每次 UI 改动之后快速过一遍全部页面。
  */
 import { chromium } from 'playwright-core';
+import {
+  MARKDOWN_BLIND_SPOTS,
+  assertLoggedIn,
+  formatMarkdownReport,
+  hasMarkdown,
+  login,
+  markdownGateEnabled,
+  probeMarkdown,
+  requireCredentials,
+} from './ui-probe-lib.mjs';
 
 const BASE = process.env.AQ_BASE;
-const TOKEN = process.env.AQ_TOKEN ?? '';
 const CHROME = process.env.AQ_CHROME;
 if (!BASE || !CHROME) {
   console.error('需要 AQ_BASE 与 AQ_CHROME 环境变量（见本文件顶部用法）。');
   process.exit(2);
 }
+
+/* 凭据是**前置条件**：没有它就会去量登录页，然后报一整套假绿。 */
+const credentials = requireCredentials('ui-check');
 
 const ROUTES = [
   ['/', '总览'],
@@ -61,19 +94,12 @@ const ROUTES = [
  * **看起来像改版把页面改坏了**，实际只是脚本拿了一个不存在的 id 去撞。
  *
  * 一个会误报的检查工具比没有检查更糟：它训练人忽略它的红叉。
+ *
+ * ⚠️ **这个探测移到「登录之后」**（2026-10-17）：它原来在 `fetch` 里手拼
+ * `authorization` 头，于是只支持 `AQ_TOKEN` 那条路径 —— 表单登录时这个请求没有
+ * 凭据、返回 401，工具会**静默少查一页**（还打一句看不出严重性的提示）。
+ * 现在改成在**页面里**用已建立的登录态去取（浏览器自己会带 token）。
  */
-let traderRoute = null;
-try {
-  const res = await fetch(`${BASE}/api/traders`, {
-    headers: TOKEN ? { authorization: `Bearer ${TOKEN}` } : {},
-  });
-  const rows = await res.json();
-  if (Array.isArray(rows) && rows[0]?.id) traderRoute = [`/traders/${rows[0].id}`, '机器人详情'];
-} catch {
-  /* 取不到就**不检查这一页** —— 拿一个猜的 id 去撞只会制造假故障。 */
-  console.error('⚠️ 读不到机器人列表，跳过「机器人详情」这一页');
-}
-if (traderRoute) ROUTES.splice(2, 0, traderRoute);
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 const ctx = await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true });
@@ -85,10 +111,43 @@ page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text(
 const badResponses = [];
 page.on('response', (r) => { if (r.status() >= 400) badResponses.push(`${r.status()} ${r.url().slice(-50)}`); });
 
-await page.goto(`${BASE}/login`, { waitUntil: 'domcontentloaded' });
-await page.evaluate((t) => localStorage.setItem('aq.token', t), TOKEN);
+await login(page, BASE, credentials);
+/*
+ * ⚠️ **必须先把登录态"落地"到站内一个页面，再断言。**
+ * token 路径下 `login()` 结束时人还停在 `/login`（它只往 localStorage 写了 token），
+ * 此时断言必然失败 —— 而那是断言用错了位置，不是真的没登录。
+ */
+await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' });
+await assertLoggedIn(page, 'ui-check', credentials);
+
+try {
+  const rows = await page.evaluate(async () => {
+    const token = localStorage.getItem('aq.token') ?? '';
+    const res = await fetch('/api/traders', {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return Array.isArray(body) ? body : (body.traders ?? []);
+  });
+  const first = Array.isArray(rows) ? rows[0] : null;
+  if (first?.id) ROUTES.splice(2, 0, [`/traders/${first.id}`, '机器人详情']);
+  else console.error('⚠️ 读不到机器人列表，跳过「机器人详情」这一页');
+} catch {
+  /* 取不到就**不检查这一页** —— 拿一个猜的 id 去撞只会制造假故障。 */
+  console.error('⚠️ 读不到机器人列表，跳过「机器人详情」这一页');
+}
 
 let problems = 0;
+/** 有 markdown 残留的页面（单列出来，免得被摘要遮掉）。 */
+const mdPages = [];
+/**
+ * markdown 维度是否计入退出码。**默认不计入** —— 理由（含代价与翻转方式）
+ * 写在 `ui-probe-lib.mjs` 的 `markdownGateEnabled` 上：这 28 处 `title` 与 1 处正文
+ * 都是真阳性，但都是已跟踪的待修项；让"每次 UI 改动的固定动作"在那之前一直红，
+ * 只会训练人忽略红叉。`--markdown-gate` / `AQ_UI_MARKDOWN_GATE=1` 可让它失败。
+ */
+const mdGate = markdownGateEnabled();
 
 for (const [route, label] of ROUTES) {
   const errBefore = consoleErrors.length;
@@ -124,18 +183,29 @@ for (const [route, label] of ROUTES) {
     };
   });
 
+  /* markdown 判据：与 `ui-audit` 共用同一份实现（页面级 + title）。 */
+  const markdown = await page.evaluate(probeMarkdown);
+  const mdHit = hasMarkdown(markdown);
+
   const errs = consoleErrors.length - errBefore;
   const bad = badResponses.length - badBefore;
-  const ok =
-    m.text > 300 && m.realOverflow.length === 0 && m.docOverflow <= 0 && errs === 0 && bad === 0;
-  if (!ok || m.clippedWithoutTitle.length > 0) problems++;
+  /* 旧判据（保持逐字不变）+ markdown 维度（默认只报、`--markdown-gate` 才计入判决）。 */
+  const ok = m.text > 300 && m.realOverflow.length === 0 && m.docOverflow <= 0 && errs === 0 && bad === 0;
+  const judged = ok && (!mdHit || mdGate);
+  if (!judged || m.clippedWithoutTitle.length > 0) problems++;
+  if (mdHit) mdPages.push({ route, ...markdown });
 
   console.log(
-    `  ${route.padEnd(13)} ${label.padEnd(7)} 正文 ${String(m.text).padStart(6)} 字  可滚 ${String(m.scrollable).padStart(5)}px  ${ok ? '✅' : '❌'}`,
+    `  ${route.padEnd(13)} ${label.padEnd(7)} 正文 ${String(m.text).padStart(6)} 字  可滚 ${String(m.scrollable).padStart(5)}px  ${
+      judged ? (mdHit ? '⚠️' : '✅') : '❌'
+    }`,
   );
   for (const o of m.realOverflow) console.log(`      ⚠️ <${o.tag}> 溢出 ${o.over}px  ${o.cls}`);
   for (const c of m.clippedWithoutTitle) {
     console.log(`      ⚠️ 被截断且没有 title（内容读不到）: ${c.cls} — "${c.text}"`);
+  }
+  if (mdHit) {
+    for (const line of formatMarkdownReport(markdown, '      ')) console.log(line);
   }
   if (errs > 0) console.log(`      ❌ 控制台错误 ${errs} 条`);
   if (bad > 0) console.log(`      ❌ 4xx/5xx ${bad} 条`);
@@ -146,5 +216,25 @@ console.log(
     ? `\n✅ ${ROUTES.length} 个页面没有客观异常`
     : `\n❌ ${problems} 个页面有问题（见上）`,
 );
+/*
+ * markdown 维度**单列一行**：即使它默认不参与退出码，也绝不允许它被摘要遮掉 ——
+ * "不明说"正是这次要修掉的那类假绿。
+ */
+if (mdPages.length > 0) {
+  const detail = mdPages
+    .map((p) => `${p.route} title ${p.titleHits}${p.innerTextMatches > 0 ? ` / 正文 ${p.innerTextMatches}` : ''}`)
+    .join(' · ');
+  const total = mdPages.reduce((n, p) => n + p.titleHits + p.innerTextMatches, 0);
+  console.log(`\n⚠️ markdown 残留：${mdPages.length} 个页面、共 ${total} 处 —— ${detail}`);
+  console.log(
+    mdGate
+      ? '    （已计入退出码：--markdown-gate / AQ_UI_MARKDOWN_GATE 生效中）'
+      : '    （**默认不计入退出码**：判据本身有效，加 --markdown-gate 或 AQ_UI_MARKDOWN_GATE=1 即可让它失败）',
+  );
+}
+/* 判据抓不到什么，每次都说一遍 —— 读一个绿灯的人必须同时知道它没证明什么。 */
+console.log('\n  本判据仍**抓不到**：');
+for (const s of MARKDOWN_BLIND_SPOTS) console.log(`    · ${s}`);
+console.log('');
 await browser.close();
 process.exit(problems === 0 ? 0 : 1);

@@ -19,25 +19,36 @@
  *
  * ## 与 `ui-check.mjs` 的分工
  *
- *   · `ui:check`       —— 版面客观异常（溢出、报错、空白），10 个页面都过一遍；
+ *   · `ui:check`       —— 版面客观异常（溢出、报错、空白、markdown 残留），10 个页面都过一遍；
  *   · `ui:consistent`  —— **跨字段语义矛盾**（本文件），只打开有数字的页面。
  *
  * 两者都需要登录态，所以都**不能进 CI**（CI 里没有真实部署与凭据）。
  * 它们是"改完之后自己过一遍"的工具，而这一轮之后应当成为**每次 UI 改动的固定动作**。
  *
+ * ## ⚠️ 缺凭据时**直接非零退出**（2026-10-17）
+ *
+ * 这个脚本原来也吃同一种假绿：没有凭据时应用把访问重定向到 `/login`，
+ * 而登录页上**一条规则都不会触发**（没有持仓表、没有数字、没有通知），
+ * 于是它报「✅ 五条一致性规则全部通过」—— 那句通过证明的是"登录页没有矛盾"。
+ * 现在缺凭据（或 token 已过期）会非零退出并说明原因，见 `ui-probe-lib.mjs`。
+ *
  * ## 用法
  *
  *   AQ_BASE=https://... AQ_TOKEN=<jwt> AQ_CHROME=<chrome 路径> npm run ui:consistent
+ *   # 也认表单登录：UI_SMOKE_USER=<用户名> UI_SMOKE_PASS=<密码>
  */
 import { chromium } from 'playwright-core';
+import { assertLoggedIn, login, requireCredentials } from './ui-probe-lib.mjs';
 
 const BASE = process.env.AQ_BASE;
-const TOKEN = process.env.AQ_TOKEN ?? '';
 const CHROME = process.env.AQ_CHROME;
 if (!BASE || !CHROME) {
   console.error('需要 AQ_BASE 与 AQ_CHROME 环境变量（见本文件顶部用法）。');
   process.exit(2);
 }
+
+/* 凭据是**前置条件**：没有它就会去量登录页，然后报一整套假绿。 */
+const credentials = requireCredentials('ui-consistency');
 
 /** 要进去看的机器人。用第一个在跑的；找不到就用 1。 */
 const TRADER_ID = process.env.AQ_TRADER_ID ?? '9';
@@ -45,8 +56,7 @@ const TRADER_ID = process.env.AQ_TRADER_ID ?? '9';
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 const ctx = await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true });
 const page = await ctx.newPage();
-await page.goto(`${BASE}/login`, { waitUntil: 'domcontentloaded' });
-await page.evaluate((t) => localStorage.setItem('aq.token', t), TOKEN);
+await login(page, BASE, credentials);
 
 const fails = [];
 const warns = [];
@@ -82,6 +92,8 @@ console.log(`\n界面一致性自检  ${BASE}  机器人 #${TRADER_ID}\n`);
  * 只有首屏那几秒真发生的事件才该弹 —— 而测试环境里通常没有）。
  * ──────────────────────────────────────────────────────────────────────────── */
 await openTrader();
+/* 第一次导航之后断言登录态**真的建立了**（token 过期也会被踢回 /login）。 */
+await assertLoggedIn(page, 'ui-consistency', credentials);
 const firstToasts = await toastCount();
 await openTrader();
 const secondToasts = await toastCount();
