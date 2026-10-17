@@ -195,8 +195,44 @@ function plainCode(text: string, keepStrings = false): string {
         i = end;
         continue;
       }
-      /* 保留首尾两个字符（引号或斜杠），中间抹成空格。 */
-      out += ch + ' '.repeat(Math.max(0, end - i - 2)) + (end > i ? (text[end - 1] ?? '') : '');
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⚠️⚠️ **抹内容时必须保留其中的换行**（t63 第 2 轮，修一个系统性坐标缺陷）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * ## 事故：报出的行号系统性偏小 2（`t64` 量到的）
+       *
+       * 原来这一行是把中间**一律**抹成空格 —— 连字符串内部的换行也一起抹掉。
+       * 而本仓库有大量**跨行模板字面量**（提示词），于是：
+       * ```
+       *   raw                   = 11,897 行
+       *   plainCode(raw)        = 11,895 行   ← 丢了 2 行
+       *   plainCode(raw, true)  = 11,897 行   ← 不丢（它原样保留字符串）
+       * ```
+       * 首个分歧点在**第 25 行**（`} from '@aq/shared';` 那个跨行 import 字面量）。
+       * 后果实测（7 处 `placeOrder`）：
+       * ```
+       *   报出：8146, 8357, 9309, 9746, 9916, 10160, 10862
+       *   真实：8146, 8357, 9311, 9748, 9918, 10162, 10864
+       *   偏差：0, 0, -2, -2, -2, -2, -2
+       * ```
+       * **"报出第 9309 行"而问题在 9311 行** —— 维护者会去错的位置排查。
+       * 本仓库对此有先例：`codeOnly()` 曾让行号偏 5000 行，正是它逼出了这个 `plainCode()`。
+       *
+       * ## 修法：**保留 `\n`**（其余字符仍抹成空格）⇒ 两个坐标空间自然对齐
+       *
+       * ```
+       *   ✓ 行号 = 文件行号（长度仍保持：1 首字符 + 中间空白/换行 + 1 尾字符）
+       *   ✓ plainCode(raw) 与 plainCode(raw, true) 行数一致 ⇒
+       *     memberAccessesOf 里"用 codeStrings 算行号、用 code 的 members 查归属"
+       *     **不再跨坐标空间**（t64 报的第二条：括号写法的归因错位）
+       * ```
+       *
+       * ⚠️ **不要退回 `' '.repeat(...)`**：那样每加一个跨行模板行号就再歪一点，
+       * 歪多少取决于模板里有几个换行 —— 不可预测，且报错会指向错的地方。
+       */
+      const inner = text.slice(i + 1, Math.max(i + 1, end - 1));
+      out += ch + inner.replace(/[^\n]/g, ' ') + (end > i + 1 ? (text[end - 1] ?? '') : '');
       i = end;
       continue;
     }
@@ -813,7 +849,18 @@ const DISPATCH_METHODS: readonly string[] = [
  *   ② 那一处必须落在 approved 循环的**行区间内**（`balancedFrom` 给出区间，
  *      见 `t41` 的建议）。
  */
-function dispatchOwnershipProblems(code: string, aliases: readonly string[] = []): string[] {
+function dispatchOwnershipProblems(
+  code: string,
+  aliases: readonly string[] = [],
+  /**
+   * 保留字符串内容的同一份源码（`['name'](` 形态需要它）。
+   *
+   * ⚠️ **必须传**（t63 第 2 轮）：`['executeOpen']` 的**名字在字符串里**，
+   * 默认的 `plainCode()` 会把它抹成空格 ⇒ 不传时**括号写法的分派一条都扫不到**
+   * ⇒ 只做存在性/计数的这道防线对它完全沉默（`t64` 量到"三道防线降到一道"）。
+   */
+  codeStrings: string = code,
+): string[] {
   const problems: string[] = [];
   const members = membersOf(code);
   const loopAt = code.indexOf(APPROVED_LOOP_NEEDLE);
@@ -831,7 +878,8 @@ function dispatchOwnershipProblems(code: string, aliases: readonly string[] = []
   const loopEnd = lineAt(code, loopAt + loopBody.length - 1);
 
   for (const name of DISPATCH_METHODS) {
-    const sites = callSitesOf(code, name, members, aliases);
+    /* ⚠️ `codeStrings` 必须传下去 —— 否则 `['executeOpen'](` 这种括号写法一条都扫不到。 */
+    const sites = callSitesOf(code, name, members, aliases, codeStrings);
     const inCycle = sites.filter((s) => s.inMember === 'runCycleBody');
     if (inCycle.length === 0) {      problems.push(
         `${name}：runCycleBody 里**一处调用都没有** —— 分派丢了（或它被挪到了别的方法里，` +
@@ -1063,11 +1111,18 @@ function callerProblems(
   table: typeof CALLERS,
   /** 已登记的 `this` 别名（生产路径传 `thisAliasesOf()` 的结果，今天为空）。 */
   aliases: readonly string[] = [],
+  /**
+   * 保留字符串内容的同一份源码（`['name'](` 形态需要它）。
+   *
+   * ⚠️ **必须传**（t63 第 2 轮）：不传时括号写法的调用**归因不到任何方法**
+   * ⇒ 调用者穷举这道防线对它完全沉默（`t64` 量到落点 X 只剩 1/3 道防线）。
+   */
+  codeStrings: string = code,
 ): { offenders: string[]; actual: Map<string, Set<string | null>> } {
   const offenders: string[] = [];
   const actual = new Map<string, Set<string | null>>();
   for (const entry of table) {
-    const sites = callSitesOf(code, entry.callee, members, aliases);
+    const sites = callSitesOf(code, entry.callee, members, aliases, codeStrings);
     const callers = new Set(sites.map((s) => s.inMember));
     actual.set(entry.callee, callers);
     const allowedNames = new Set(entry.allowed.map((a) => a.caller));
@@ -1172,8 +1227,8 @@ test('★★★ 基线对照：改造后的全部判据在未修改的 autoTrade
    */
   const baseline: Array<[string, string[]]> = [
     ['orderSiteProblems', orderSiteProblems(scanOrderSites(AUTO_TRADER, MEMBERS, PLACE_ORDER_SITES))],
-    ['callerProblems', callerProblems(AUTO_TRADER, MEMBERS, CALLERS, []).offenders],
-    ['dispatchOwnershipProblems', dispatchOwnershipProblems(AUTO_TRADER)],
+    ['callerProblems', callerProblems(AUTO_TRADER, MEMBERS, CALLERS, [], AUTO_TRADER_STR).offenders],
+    ['dispatchOwnershipProblems', dispatchOwnershipProblems(AUTO_TRADER, [], AUTO_TRADER_STR)],
     ['aliasProblems', aliasProblems(AUTO_TRADER)],
     ['sensitiveReceiverProblems', sensitiveReceiverProblems(AUTO_TRADER, AUTO_TRADER_STR, SENSITIVE_METHODS)],
     ['placeOrderReceiverProblems', placeOrderReceiverProblems(AUTO_TRADER, AUTO_TRADER_STR)],
@@ -1205,6 +1260,48 @@ test('★★★ 基线对照：改造后的全部判据在未修改的 autoTrade
     reviews.map((s) => s.inMember).sort(),
     ['followUpAfterExecution', 'runCycleBody'],
     '★★ `risk.review(` 的归属必须分别是主路径与回执轮',
+  );
+});
+
+test('★★★ 报出的行号必须等于文件行号（坐标空间不许漂移）', () => {
+  /*
+   * ## 为什么这条必须常驻（`t64` 报的系统性缺陷）
+   *
+   * `plainCode()` 早先把**字符串内部的换行也抹成空格**，于是：
+   * ```
+   *   raw = 11,897 行    plainCode(raw) = 11,895 行    plainCode(raw, true) = 11,897 行
+   * ```
+   * 偏差 2 行 —— 而**报出来的行号就是错的**（`placeOrder` 的第 3–7 处全报小 2）。
+   * 维护者拿"第 9309 行"去排查，问题却在 9311 行。
+   *
+   * ⚠️ 本仓库对行号漂移有先例：`codeOnly()` 曾让行号偏 5000 行 —— 正是那次逼出了 `plainCode()`。
+   * 所以这条不是洁癖，是**报错可用的前提**。
+   */
+  const rawLines = AUTO_TRADER_RAW.split('\n').length;
+  assert.equal(
+    AUTO_TRADER.split('\n').length,
+    rawLines,
+    `★★★ \`plainCode(raw)\` 丢行：${AUTO_TRADER.split('\n').length} vs 原文 ${rawLines}。\n` +
+      '    抹字符串内容时**必须保留 `\\n`** —— 否则所有报出的行号都会偏小。',
+  );
+  assert.equal(
+    AUTO_TRADER_STR.split('\n').length,
+    rawLines,
+    `★★★ \`plainCode(raw, true)\` 行数与原文不一致（${AUTO_TRADER_STR.split('\n').length} vs ${rawLines}）`,
+  );
+
+  /* 逐点核对：报出行号 == 从原文直接算出的行号（比"行数相等"更强，能抓整体平移）。 */
+  const reported = scanOrderSites(AUTO_TRADER, MEMBERS, PLACE_ORDER_SITES).map((s) => s.line);
+  const truth = [...AUTO_TRADER_RAW.matchAll(/this\s*\.\s*deps\s*\.\s*broker\s*\.\s*placeOrder\s*\(/g)].map(
+    (m) => lineAt(AUTO_TRADER_RAW, m.index ?? 0),
+  );
+  assert.equal(reported.length, 7, `★ 应报出 7 处 placeOrder，实际 ${reported.length}`);
+  assert.deepEqual(
+    reported,
+    truth,
+    '★★★ `placeOrder` 的报出行号与原文行号不一致：\n' +
+      `      报出：${reported.join(', ')}\n      真实：${truth.join(', ')}\n` +
+      '    ⚠️ 报错指向错的行 = 维护者去错的地方排查。',
   );
 });
 
@@ -1240,7 +1337,7 @@ test('★★★ 红线上游：broker.placeOrder 只能出现在登记的 7 个�
 
 test('★★★ 红线中游：会下单的方法只能从 approved 消费路径 / §2.1 只减敞口例外到达', () => {
   const THIS_ALIASES = thisAliasesOf(AUTO_TRADER).filter((a) => a.how === 'alias').map((a) => a.name);
-  const { offenders, actual } = callerProblems(AUTO_TRADER, MEMBERS, CALLERS, THIS_ALIASES);
+  const { offenders, actual } = callerProblems(AUTO_TRADER, MEMBERS, CALLERS, THIS_ALIASES, AUTO_TRADER_STR);
 
   assert.deepEqual(
     offenders,
@@ -1293,7 +1390,7 @@ test('★★★ 红线下游：6 个执行分派必须都在 `for (const decisio
    * 现在改成"`runCycleBody` 里恰好 1 处 + 行号落在循环区间里"，见 `dispatchOwnershipProblems`。
    */
   const THIS_ALIASES = thisAliasesOf(AUTO_TRADER).filter((a) => a.how === 'alias').map((a) => a.name);
-  const problems = dispatchOwnershipProblems(AUTO_TRADER, THIS_ALIASES);
+  const problems = dispatchOwnershipProblems(AUTO_TRADER, THIS_ALIASES, AUTO_TRADER_STR);
 
   assert.deepEqual(
     problems,
@@ -2118,6 +2215,132 @@ test('★★★ 改前看不见、改后必须红：四个缺口的旧判据 vs 
   assert.ok(endpointLiteralProblems([D_FILE]).length > 0, '★★★ 改后：拼接式下单端点必须被报出（红灯）');
 });
 
+/* -------------------------------------------------------------------------- */
+/*  ⑥.9 三道防线不许降到一道（t64 报的那条最严重的）                              */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 三道防线计数：同一个落点至少要有两道判据同时命中（不许只靠一道兜底）', () => {
+  /*
+   * ## 为什么这条比"行号偏 2"更严重（`t64` 的定性，我认可）
+   *
+   * 行号偏 2 是"**报错了位置**"；"三道防线同时沉默"是"**根本没人报**" ——
+   * 那正是 `t58` 当初报 F1 的形态（**绕过了绕过**）。
+   *
+   * ## 实测（`.dsh/t63b-threelines3.txt`，本轮修复前后各一次）
+   *
+   * 落点 X = `(this as …)['executeOpen'](…)` 插在 `runCycleBody` 的 approved 循环**之外**：
+   * ```
+   *   修复前：A callerProblems = 0   B dispatchOwnershipProblems = 0   C 伪装 = 1  ⇒ 只剩 1/3
+   *   修复后：A callerProblems = 0   B dispatchOwnershipProblems = 1   C 伪装 = 1  ⇒ 2/3
+   * ```
+   * **根因**：`dispatchOwnershipProblems` / `callerProblems` 没把 `codeStrings` 传给
+   * `callSitesOf` —— 而 `['executeOpen']` 的**名字在字符串里**，默认 `plainCode()` 会把它
+   * 抹成空格 ⇒ 那两条判据**永远看不见括号写法**。
+   *
+   * ⚠️ 这条测试守的是**机制**：逐个变异**数**各道判据报了几条，少于 2 就红。
+   * 于是将来任何一处"某道防线悄悄失效"都会在这里被看见。
+   */
+  const inject = (src: string, anchor: string, text: string): string => src.replace(anchor, `${text}\n${anchor}`);
+  const LOOP_LINE = '    for (const decision of verdict.approved) {';
+
+  /**
+   * 对一份变异源码，返回**四道**判据各自报出几条。
+   *
+   * ⚠️ 第四道 `placeOrderReceiverProblems` 是 `placeOrder` **专属**的接收者判据
+   * （它的合法接收者是 `this.deps.broker` 而不是 `this`），必须单列 ——
+   * 少列它会把"broker 内联断言"那个落点误判成"一条都没报"。
+   */
+  const countDefenses = (raw: string): { a: number; b: number; c: number; d: number } => {
+    const code = plainCode(raw);
+    const codeStr = plainCode(raw, true);
+    const ms = membersOf(code);
+    return {
+      a: callerProblems(code, ms, CALLERS, [], codeStr).offenders.length,
+      b: dispatchOwnershipProblems(code, [], codeStr).length,
+      c: sensitiveReceiverProblems(code, codeStr, SENSITIVE_METHODS).length,
+      d: placeOrderReceiverProblems(code, codeStr).length,
+    };
+  };
+  /** 命中了几道（c 与 d 同属"接收者伪装"这一族）。 */
+  const hitLines = (n: { a: number; b: number; c: number; d: number }): number =>
+    [n.a > 0, n.b > 0, n.c > 0 || n.d > 0].filter(Boolean).length;
+
+  const LANDING_X = inject(
+    AUTO_TRADER_RAW,
+    LOOP_LINE,
+    '    if (this.t63BracketPath) {\n' +
+      "      await (this as unknown as Record<string, (d: unknown) => Promise<void>>)['executeOpen']({ symbol: \"TIAUSDT\" });\n" +
+      '    }',
+  );
+  assert.notEqual(LANDING_X, AUTO_TRADER_RAW, '★ 落点 X 的变异没生效（锚点文本变了？）');
+  const x = countDefenses(LANDING_X);
+  assert.ok(
+    hitLines(x) >= 2,
+    '★★★ 落点 X（括号写法 + approved 循环之外）只剩 ' +
+      `${hitLines(x)} 道防线：` +
+      `callerProblems=${x.a} · dispatchOwnershipProblems=${x.b} · sensitiveReceiver=${x.c} · placeOrderReceiver=${x.d}。\n` +
+      '    ⚠️ 至少两道 —— 只靠一道兜底时，那道一旦失效就等于**没有人报**（t58 的 F1 形态）。\n' +
+      '    ✅ 常见根因：判据没把 `codeStrings` 传给 `callSitesOf`。',
+  );
+  assert.ok(x.b > 0, '★★★ 落点 X：**计数 + 行区间归属**必须命中（它才是最直接的那道）');
+  assert.ok(x.c > 0, '★★ 落点 X：接收者伪装判据也必须命中');
+
+  const LANDINGS: ReadonlyArray<{ label: string; raw: string; expectA?: boolean; expectB?: boolean }> = [
+    {
+      label: '括号写法插在新方法里',
+      raw: inject(
+        AUTO_TRADER_RAW,
+        '  private async executeOpen(',
+        '  private async t63BracketNewMethod(decision: Decision): Promise<void> {\n' +
+          "    await (this as unknown as Record<string, (d: Decision) => Promise<void>>)['executeOpen'](decision);\n" +
+          '  }',
+      ),
+      expectA: true,
+    },
+    {
+      label: '`(this as …).executeOpen(` 点断言写法插在循环之外',
+      raw: inject(
+        AUTO_TRADER_RAW,
+        LOOP_LINE,
+        '    if (this.t63CastPath) {\n' +
+          '      await (this as unknown as { executeOpen: (d: unknown) => Promise<void> }).executeOpen({ symbol: "TIAUSDT" });\n' +
+          '    }',
+      ),
+      expectB: true,
+    },
+    {
+      label: '`(this.deps.broker as …).placeOrder({})` 插在新方法里',
+      raw: inject(
+        AUTO_TRADER_RAW,
+        '  private async executeOpen(',
+        '  private async t63CastOrder(): Promise<void> {\n' +
+          '    await (this.deps.broker as unknown as { placeOrder: (r: unknown) => Promise<unknown> }).placeOrder({});\n' +
+          '  }',
+      ),
+    },
+  ];
+  for (const landing of LANDINGS) {
+    assert.notEqual(landing.raw, AUTO_TRADER_RAW, `★ 落点「${landing.label}」的变异没生效`);
+    const n = countDefenses(landing.raw);
+    assert.ok(
+      hitLines(n) >= 1,
+      `★★★ 落点「${landing.label}」四道判据**一条都没报**（A=${n.a} B=${n.b} C=${n.c} D=${n.d}）`,
+    );
+    if (landing.expectA === true) {
+      assert.ok(n.a > 0, `★★★ 落点「${landing.label}」必须被**调用者穷举**抓住（A=${n.a}）`);
+    }
+    if (landing.expectB === true) {
+      assert.ok(n.b > 0, `★★★ 落点「${landing.label}」必须被**计数+行区间**抓住（B=${n.b}）`);
+    }
+  }
+
+  /* 收尾：全部变异在内存副本上 —— 真实文件必须逐字节未变。 */
+  assert.equal(
+    AUTO_TRADER_RAW,
+    readFileSync(new URL('./autoTrader.ts', import.meta.url), 'utf8'),
+    '★★★ 校准过程不许改到真实文件',
+  );
+});
 /* -------------------------------------------------------------------------- */
 /*  ⑦ 元守卫：禁止恒真断言（本仓库已有一条这样失效的守卫）                        */
 /* -------------------------------------------------------------------------- */
