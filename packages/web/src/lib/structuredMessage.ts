@@ -509,17 +509,43 @@ export function parseDecisionListDetailed(text: string): DecisionListDetail | nu
   }
 
   /*
-   * 只有**确实被截断过**才做容错提取。没有留痕 → 一律按原判据回落，
-   * 这样普通文本（哪怕碰巧含 `{`）的行为与改动前**逐字一致**。
+   * ⚠️⚠️ **没有留痕也要试**（2026-10-18 线上实测修正 —— 这条是"用户屏幕上仍是一坨 JSON"的真因）。
+   *
+   * 旧实现在这里 `if (!tail.truncated) return null;`，理由是"与改动前逐字一致、不误伤普通文本"。
+   * 但**真实数据里还有第二种坏法**：JSON 不是被后端截断的，而是**模型自己写坏的**：
+   *
+   * ```
+   *   实测（/api/traders/11/agent/judge/steps）：一条 3935 字的裁决产出，
+   *   `JSON.parse` 在 **position 3175** 失败（少了一个引号/括号），
+   *   而**尾部没有任何留痕** —— 因为它没超过 4000 的 clip 上限。
+   * ```
+   *
+   * ⇒ 这类内容旧实现**永远回落纯文本**，用户屏幕上就是开头那 200 字原始 JSON
+   *   （`[ {"symbol":"SIRENUSDT","action":"open_long",…`），正是用户报的现象。
+   *
+   * ## 为什么放宽是安全的
+   *
+   * `extractDecisionObjects` → `scanObjectsFrom` 自带**形状守卫**：
+   * 它只在 `[` 后面（允许空白）紧跟 `{` 时才认；而且每个抠出来的对象都要过
+   * `decisionItemOf`（必须同时有 `symbol` 与 `action`）。
+   *
+   * ⇒ 普通文本一律不受影响：`区间 [0.8,3.5]`（`[` 后是数字）、`[1,2,3]`、
+   *   `见 {a:1}`（`[` 后不是 `{`）都会被守卫挡掉，仍然回落纯文本。
    */
-  if (!tail.truncated) return null;
-
   const extracted = extractDecisionObjects(tail.text);
   /* 连一个完整对象都提不出来 → 回落纯文本（不白屏、不空表）。 */
   if (extracted.items.length === 0) return null;
   return {
     items: extracted.items,
-    truncated: true,
+    /*
+     * `truncated` 的语义**保持"后端留了痕"**，不改成"内容不完整" ——
+     * 因为界面上的「原文本已截断（完整 N 字）」那句需要 `originalLength`，
+     * 而没留痕时我们**不知道**原始长度，编一个数字就是假话。
+     *
+     * 没留痕但提取成功的情形，界面靠 `recovered && !arrayClosed` 说
+     * 「只显示了前 N 个完整的标的」—— 那句不需要长度，且同样如实。
+     */
+    truncated: tail.truncated,
     originalLength: tail.originalLength,
     recovered: true,
     arrayClosed: extracted.arrayClosed,

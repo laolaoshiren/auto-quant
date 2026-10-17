@@ -474,3 +474,58 @@ test('★★ 只有半个对象时不硬渲染（真实形状的退化版）', (
   assert.equal(detail!.items.length, 1, '★ 只有第 1 个是完整的；第 2 个半截必须丢');
   assert.equal(detail!.items[0]!.symbol, 'WLDUSDT');
 });
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  ★★★ 第二种坏法：JSON 是【模型自己写坏的】，尾部没有留痕
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * 旧实现只对"认出后端留痕"的走容错提取（`if (!tail.truncated) return null`），
+ * 而线上真实数据里还有这一类：
+ *
+ * ```
+ *   /api/traders/11/agent/judge/steps 的一条裁决产出，3935 字，
+ *   JSON.parse 在 position 3175 失败（少了个引号/括号），
+ *   尾部**没有**「…（已截断，完整 N 字）」—— 因为它没超过 4000 的 clip 上限。
+ * ```
+ *
+ * ⇒ 这类内容旧实现永远回落纯文本，用户屏幕上就是开头那 200 字原始 JSON。
+ *   **用户报的"还是一坨 JSON"就是它。**
+ */
+test('★★★ 模型自己写坏的 JSON（无留痕）也要能抠出完整对象', () => {
+  /* 形状取自线上：前一个对象完整，后一个对象里少了个引号 ⇒ 整体 JSON.parse 失败。 */
+  const BROKEN =
+    '[ {"symbol":"SIRENUSDT","action":"open_long","leverage":5,"positionSizeUsd":11,' +
+    '"stopLoss":0.0776,"takeProfit":0.0815,"confidence":70,' +
+    '"reasoning":"D=1.21%在窗ATR2.55%≤3.5%"},' +
+    '{"symbol":"NEARUSDT","action":"skip","leverage":0,"reasoning":"坏在这里了"" }';
+
+  /* 先确认它确实是坏的 —— 否则这条测试没有意义。 */
+  assert.throws(() => JSON.parse(BROKEN), '夹具必须是 JSON.parse 会失败的 —— 否则测的不是这一类');
+
+  const detail = parseDecisionListDetailed(BROKEN);
+  assert.notEqual(detail, null, '★ 模型写坏的 JSON 也必须能救回前面的完整对象');
+  assert.equal(detail!.items.length, 1, '★ 只有第 1 个对象是完整的');
+  assert.equal(detail!.items[0]!.symbol, 'SIRENUSDT');
+  assert.equal(detail!.items[0]!.action, 'open_long');
+  assert.equal(detail!.recovered, true);
+  assert.equal(detail!.arrayClosed, false, '★ 数组没闭合 —— 界面据此说"只显示了前 N 个"');
+  assert.equal(detail!.truncated, false, '★ 没留痕 ⇒ 不说"原文本已截断（完整 N 字）"（不知道长度就不编）');
+  assert.equal(detail!.originalLength, null);
+});
+
+test('★★ 放宽后仍然不误伤普通文本（形状守卫必须还在）', () => {
+  const plain = [
+    'D=-1.045%∈[0.8,3.5]，ATR≈1.0%≤3.5%，机械条件全过',
+    '候选池 [1,2,3] 已按评分排序，最高 64 分',
+    '[0.8,3.5] 这个区间是位移门槛',
+    '见 {a:1} 这种不是标准 JSON',
+  ];
+  for (const p of plain) {
+    assert.equal(
+      parseDecisionListDetailed(p),
+      null,
+      `★ 普通文本不该被结构化成决策数组：${p}`,
+    );
+  }
+});
