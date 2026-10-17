@@ -40,6 +40,7 @@ import {
   presetOfConfig,
   resolvePreset,
   type StrategyConfig,
+  type StrategyPreset,
 } from './strategy.js';
 
 /** 三套模板的 id（缺一套就应该变红 —— 用户明确要求"3 套模板都要保证正常"）。 */
@@ -205,36 +206,41 @@ test('★★★ 一份预设没声明的字段，解析后必须等于 schema �
   );
 });
 
-test('★★★ breakevenTriggerPercent 不得由 conservative 单方面声明（声明与生效必须一致）', () => {
+test('★★★ conservative 的 breakevenTriggerPercent 必须解析后仍为 8（声明即生效，行为级）', () => {
   /*
-   * 这条用例是**针对那次真实缺陷**的：conservative.patch 曾写 `breakevenTriggerPercent: 8`，
-   * 而 `RiskControlConfigSchema` 的默认是 0（关闭）——
-   * 也就是"模板说浮盈 8% 移止损、实际这条规则根本没开"。
+   * ## 这条用例的前身是错的，且它保护了一次误删 —— 记在这里，别再犯
    *
-   * 判据写成"三套模板在这个字段上的说法必须一致"（要么都别声明，要么都声明同一个值）：
-   * 这样将来任何"只有一套模板偷偷开了一条风控行为"都会在这里变红，
-   * 而不必把某个具体数值钉死 —— 数值是产品决定，**一致性**才是缺陷与否。
+   * 它原来叫「`breakevenTriggerPercent` **不得**由 conservative 单方面声明」，
+   * 判据是"三套模板在这个字段上的说法必须一致"。那个判据**编码了一个假的不变量**：
+   * 它的前提是"模板声明 8、而解析后是 0，所以声明不生效"——**实测为假**：
+   *
+   * ```
+   *   StrategyConfigSchema.parse({ riskControl: { breakevenTriggerPercent: 8 } })
+   *     .riskControl.breakevenTriggerPercent   → 8     ← 真的解析出来了
+   * ```
+   * 它写在 `patch.riskControl` **内**（层级正确），zod 不会 strip 它；而运行时真的读它
+   * （`applyBreakevenGuard()`：`if (!(threshold > 0)) return 0;`）⇒ 8 让这条守卫**在工作**。
+   *
+   * 更根本的错在**处方方向**：「模板声明值 ≠ schema 默认值」是 patch 的**正常形态**
+   * （实测 129 个声明字段里有 82 个与默认值不同）——预设的意义就是在默认值之上做选择。
+   * 于是那条"必须一致"的断言**把一次真实生效的保护动作钉死成不允许存在**，
+   * 而它当初正是为那次误删背书的。**判据应当是"声明值解析后逐字保留"，不是"不许与默认值不同"。**
+   *
+   * 所以这条用例改写成**行为级**断言：读真实的解析产物，值必须是 8。
+   * 它同时是那次误删的回归守卫 —— 删掉 `conservative.patch.riskControl.breakevenTriggerPercent`
+   * 会让它当场变红（已用变异实测）。
+   *
+   * ⚠️ 通用那一半（**全部**声明字段的"声明 vs 解析后"逐字比对）由上面的
+   * 「patch 声明且有值的每一项，解析后逐字相等」承担，本条只钉这一个字段的**行为语义**。
    */
-  const claims = STRATEGY_PRESETS.map((preset) => ({
-    id: preset.id,
-    value: preset.patch.riskControl?.breakevenTriggerPercent,
-  })).filter((c) => c.value !== undefined);
-
-  const distinct = [...new Set(claims.map((c) => c.value))];
-  assert.ok(
-    distinct.length <= 1,
-    '★★★ 三套模板对 `breakevenTriggerPercent`（浮盈多少把止损移到成本价）的说法不一致：' +
-      claims.map((c) => `${c.id}=${String(c.value)}`).join('、') +
-      '。它决定真实风控行为，而另外两套模板不声明它 → 解析后它们拿到的是 schema 默认值 0（关闭）。\n' +
-      '    要么三套都不声明（与 schema 默认一致），要么三套各自写明 —— 不能只有一套悄悄开启。',
-  );
-
-  const resolved = resolvePreset(byId.get('conservative')!);
+  const resolved = resolvePreset('conservative');
   assert.equal(
     resolved.riskControl.breakevenTriggerPercent,
-    byId.get('conservative')!.patch.riskControl?.breakevenTriggerPercent ??
-      defaultStrategyConfig().riskControl.breakevenTriggerPercent,
-    '★★★ conservative 的 breakevenTriggerPercent 解析后必须与它声明的值（或 schema 默认）一致',
+    8,
+    '★★★ `resolvePreset(\'conservative\').riskControl.breakevenTriggerPercent` 必须是 8 —— ' +
+      '它是真实生效的保本止损阈值（浮盈 8% 把止损移到成本价）。' +
+      '若这里变成 0，说明有人又把它当成"声明了却不生效的值"删掉了：' +
+      '`patch.riskControl` 内的声明**会**被 zod 保留，运行时 `applyBreakevenGuard()` 也真的读它。',
   );
 });
 
@@ -253,37 +259,47 @@ test('★★★ 套用 B 之后的结果必须与"A 曾存在过"无关（A→B 
    * `drawdownGuard`）。只测 (scalping → conservative) 会漏掉反过来那一对，
    * 而那一对同样是真实操作路径（用户两个方向都会点）。所以遍历全部有序对。
    *
-   * ## 它与 `resolvePreset(preset)` 只有单参数的关系
+   * ## ⚠️ 这条用例的**第一版是恒真断言**，已重写（t50 审查抓出）
    *
-   * `resolvePreset` **不接受**"当前配置"，所以这里在类型层面就调不出旧行为。
-   * 这条用例的价值在于：它把"输出只由预设决定"写成**可执行**的断言 ——
-   * 将来若有人为了让"保留用户手改"而复活 `resolvePreset(preset, current)` 那种签名，
-   * 就必须同时让这条用例失败（它断言的是 B 的完整定义，而不是"A∪B"）。
+   * 第一版断言的是：
+   * ```ts
+   *   const afterB   = resolvePreset(to);
+   *   const expectedB = resolvePreset(to);
+   *   assert.deepEqual(afterB, expectedB);      // ← 同一个纯函数、同一个入参、连调两次
+   * ```
+   * 它只能在 `resolvePreset` **非确定性**时才失败 —— 而"A 曾存在过"这个前提**从未被喂进
+   * 任何被断言的表达式**。也就是说：它看起来在验证"A→B 不留残留"，实际上什么都没验
+   * （与 `perSymbolWiring.test.ts:38` 同族）。
+   *
+   * 现在改成**会让混合体重现的形状**：显式构造"上一份预设的残留"，把它当作**输入**
+   * 交给判据，再断言结果回到 B 的定义。这样 `resolvePreset` 一旦被改回
+   * "待在当前配置上叠 patch"，判据就会看到残留并变红（已用变异实测）。
    */
+  const defaults = defaultStrategyConfig();
+
+  /** A 在 `section.field` 上声明的值（B 未声明该字段时，这就是"残留"的来源）。 */
+  const declaredValueOf = (preset: StrategyPreset, section: string, field: string): unknown =>
+    (preset.patch[section as keyof StrategyConfig] as Record<string, unknown> | undefined)?.[field];
+
   let checked = 0;
+  /** 至少有一对能构造出\"与默认值不同的残留\"—— 否则下面那条判据一处在空转。 */
+  let residuePairs = 0;
   for (const from of STRATEGY_PRESETS) {
     for (const to of STRATEGY_PRESETS) {
       if (from.id === to.id) continue;
       const afterA = resolvePreset(from);
-      /* 旧实现的口径：拿 A 的结果当底再叠 B 的 patch。这里刻意不复用它，只看结果。 */
-      assert.equal(
-        sameConfig(afterA, resolvePreset(from)),
-        true,
-        '★ 前提：同一份预设重复解析必须得到同一个结果（解析不能有隐藏状态）',
-      );
       const afterB = resolvePreset(to);
-      const target = resolvePreset(to);
-      checked += 1;
+
+      /* 前置：A 与 B 必须真的不同，否则下面"不得残留"的判据会自然成立、什么都验不到。 */
       assert.equal(
-        sameConfig(afterB, target),
-        true,
-        `★★★ ${from.id} → ${to.id}：结果必须**等于 ${to.id} 的完整定义**（含 schema 默认值），` +
-          '而不是"上一次的参数 + 这一次的 patch"的混合体',
+        sameConfig(afterA, afterB),
+        false,
+        `★ 前提：${from.id} 与 ${to.id} 的解析结果必须不同（否则本用例空转）`,
       );
+
       /*
-       * 反向断言：**A 独有而 B 不声明的字段，必须回到默认值**。
-       * 这一条才是"渗漏"的直接判据 —— 没有它，`sameConfig(afterB, target)` 在
-       * "两边都带着 A 的残留"时也可能成立（因为 target 是从同一份实现算出来的）。
+       * ── 判据一：A 独有而 B 不声明的字段，在 afterB 里必须回到 schema 默认值 ────
+       * 这是"渗漏"的直接判据。
        */
       for (const [section, patchSection] of Object.entries(from.patch)) {
         if (patchSection === undefined) continue;
@@ -292,7 +308,7 @@ test('★★★ 套用 B 之后的结果必须与"A 曾存在过"无关（A→B 
           if (toPatch !== undefined) continue;
           assert.deepEqual(
             afterB[section as keyof StrategyConfig],
-            defaultStrategyConfig()[section as keyof StrategyConfig],
+            defaults[section as keyof StrategyConfig],
             `★★★ ${from.id} → ${to.id}：${section} 只有 ${from.id} 声明，` +
               `套用 ${to.id} 之后必须回到 schema 默认值`,
           );
@@ -302,9 +318,7 @@ test('★★★ 套用 B 之后的结果必须与"A 曾存在过"无关（A→B 
           const declaredByTo =
             typeof toPatch === 'object' && toPatch !== null && field in (toPatch as object);
           if (declaredByTo) continue;
-          const def = (defaultStrategyConfig()[section as keyof StrategyConfig] as Record<string, unknown>)[
-            field
-          ];
+          const def = (defaults[section as keyof StrategyConfig] as Record<string, unknown>)[field];
           assert.deepEqual(
             (afterB[section as keyof StrategyConfig] as Record<string, unknown>)[field],
             def,
@@ -315,9 +329,72 @@ test('★★★ 套用 B 之后的结果必须与"A 曾存在过"无关（A→B 
           );
         }
       }
+
+      /*
+       * ── 判据二：把"上一份预设的残留"当成**输入**喂给判据，它必须看得见 ────────
+       *
+       * `leaked` = B 的完整定义 + A 独有而 B 不声明、且**取值与 schema 默认不同**的字段
+       * （真实渗漏的形状）。断言 `presetOfConfig(leaked)` **不得**是 B。
+       *
+       * ⚠️ 这一条是**能让第一版恒真断言失败的替代品**：第一版断言的是
+       * `deepEqual(resolvePreset(to), resolvePreset(to))` —— 同一个纯函数、同一个入参、
+       * 连调两次，只能在 `resolvePreset` 非确定性时失败（`t50` 审查抓出）。
+       * 现在"残留"是**喂进去的输入**，所以 `resolvePreset` 一旦被改回
+       * "待在当前配置上叠 patch"，判据就会看到残留并变红（已用变异实测）。
+       *
+       * ⚠️ 只收"与默认值不同"的残留：若 A 声明的值恰好等于默认值，把它写进 `leaked`
+       * 得到的仍是 B 本身，那时 `presetOfConfig(leaked) === to` 是**正确的**，
+       * 拿它当失败会变成假红。
+       */
+      const leaked = clone(afterB);
+      let leakedFields = 0;
+      for (const [section, patchSection] of Object.entries(from.patch)) {
+        if (patchSection === undefined) continue;
+        const toPatch = (to.patch as Record<string, unknown>)[section];
+        if (typeof patchSection !== 'object' || patchSection === null) continue;
+        for (const field of Object.keys(patchSection as Record<string, unknown>)) {
+          const declaredByTo =
+            typeof toPatch === 'object' && toPatch !== null && field in (toPatch as object);
+          if (declaredByTo) continue;
+          const value = declaredValueOf(from, section, field);
+          if (value === undefined) continue;
+          const def = (defaults[section as keyof StrategyConfig] as Record<string, unknown>)[field];
+          if (JSON.stringify(value) === JSON.stringify(def)) continue;
+          (leaked[section as keyof StrategyConfig] as Record<string, unknown>)[field] = value;
+          leakedFields += 1;
+        }
+      }
+      /*
+       * ⚠️ **不是每一对都有残留可构造**：`conservative` 的字段集覆盖 `aggressive` 的，
+       * 所以 aggressive → conservative 没有任何"A 独有而 B 不声明"的字段。
+       * 那种对里 `leaked === afterB`，判据自然成立 —— 拿它当失败会变成**假红**。
+       * 所以这里按"有残留才断言"处理，并在循环外用 `residuePairs` 证明**确实存在**
+       * 能发力的对（否则整条判据可能一处在空转）。
+       */
+      if (leakedFields > 0) {
+        assert.equal(
+          presetOfConfig(leaked),
+          null,
+          `★★★ ${from.id} → ${to.id}：一份"${to.id} 的参数 + ${from.id} 的残留字段"的配置` +
+            `**不得**被认定为 ${to.id} —— 判据必须看得见残留`,
+        );
+        residuePairs += 1;
+      }
+
+      checked += 1;
     }
   }
   assert.equal(checked, STRATEGY_PRESETS.length * (STRATEGY_PRESETS.length - 1), '★ 有序对应当全部覆盖');
+  /*
+   * ⚠️ **前置断言**：必须有对能构造残留。
+   * 没有它，\"每一对都没有残留可构造\"时整条判据会**静默空转**（一次都没断言），
+   * 而那正是这条用例第一版的病（看起来在验、实际没验）。
+   */
+  assert.ok(
+    residuePairs >= 4,
+    `★ 至少要有 4 对能构造\"上一份预设的残留\"（实测 ${residuePairs} 对）—— ` +
+      '否则\"判据必须看得见残留\"这条断言一处在空转',
+  );
 });
 
 /* -------------------------------------------------------------------------- */

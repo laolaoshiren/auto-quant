@@ -561,8 +561,12 @@ export type StrategyConfigInput = z.input<typeof StrategyConfigSchema>;
  * 会**静默地不参与比较**（于是徽章显示"稳健"，而某一块其实是别的预设留下的）。
  * 这正是本文件这一族缺陷的形状（`configSchemaGuard.test.ts` 记的就是"两套口径分叉"）。
  *
- * ⚠️ `name` / `description` 也在其中：预设模板**确实**声明了它们，
- * 所以套用时必须一起生效（否则"套了稳健"却留着上一份预设的描述）。
+ * ⚠️ **`name` / `description` 也在其中，但那是"配置由哪几块组成"的事实，不是判据的一部分。**
+ *
+ * 三套预设的 `patch` 里**都没有** `name` / `description`（实测 `'name' in preset.patch === false` ×3）
+ * —— 它们是**用户给策略起的名字**，而保存路径会把用户名写进 `config.name`。
+ * 所以"还等于哪份预设"的判据必须**排除**这两个键，见 `PRESET_IDENTITY_EXCLUDED_KEYS`
+ * 与 `presetOfConfig()` 的说明（把名字纳入比较会让每一条经界面保存的策略都显示"已偏离预设"）。
  */
 export const STRATEGY_CONFIG_KEYS = Object.keys(
   StrategyConfigSchema._def.shape(),
@@ -818,24 +822,33 @@ export const STRATEGY_PRESETS: StrategyPreset[] = [
         minStopLossFeeMultiple: 3,
         fallbackRoundTripFeeRate: 0.001,
         /*
-         * ⚠️ **这里刻意不写 `breakevenTriggerPercent`。**
+         * ⚠️ **这一行是一段真实生效的保护动作，不要再删它。**
          *
-         * 它原来写的是 `8`，而那是**一个 templates 自己声明、解析后却对不上的值**：
-         * `RiskControlConfigSchema` 里它的默认是 **0 = 关闭**（`strategy.ts:366`），
-         * 于是同一份预设有两个互相矛盾的说法 ——
-         *   · 模板字面量说「浮盈 8% 把止损移到成本价」；
-         *   · 解析后的真实配置是 **0（关闭）**，那条行为根本不生效。
-         * 而它是**唯一一个只有模板声明、schema 默认却是另一个值**的风控字段
-         * （其余"模板 → 解析后"逐字相等），所以修法就是让它与 schema 一致。
+         * 它曾经被删过一次，理由是"模板声明了 8、而 schema 默认是 0，所以声明不生效"
+         * —— **那条理由是假的，已实测推翻**（`t50` 审查抓出、队长复核）：
          *
-         * **为什么是「删掉这一行」而不是「给模板加一个开关」**：
-         * 用户对这个域的要求是「只修 BUG，不开发新功能」。删掉之后：
-         *   · schema 默认（0）就是模板的实际值，声明与生效**逐字相等**；
-         *   · 想开它的操作员可以在界面上打开（候选面见台账 `TPL-01`，需用户拍板）；
-         *   · 与 `aggressive` / `scalping` 两套模板的口径一致（它们都没写这个字段）。
+         * ```
+         *   StrategyConfigSchema.parse({ riskControl: { breakevenTriggerPercent: 8 } })
+         *     .riskControl.breakevenTriggerPercent   → 8     ← 真的解析出来了，没被丢掉
+         * ```
          *
-         * 换言之：**不改任何数值、不新增任何字段**，只是不再声明一个"说了却不生效"的值。
+         * 两个事实叠在一起才看清它：
+         *   · 它写在 `patch.riskControl` **内**（层级正确），所以 zod 不会 strip 它；
+         *   · 运行时**真的读它**：`autoTrader.ts` 的 `applyBreakevenGuard()` 取
+         *     `activeConfig.riskControl.breakevenTriggerPercent`，`if (!(threshold > 0)) return 0;`
+         *     ⇒ 8 让这条守卫**在工作**（浮盈 8% 把止损移到成本价）。
+         *
+         * ## 「模板声明值 ≠ schema 默认值」是 patch 的正常形态，不是缺陷
+         *
+         * 整套预设里**绝大多数**声明字段都如此（实测 129 个声明字段里，
+         * 与 schema 默认值不同的有 82 个）—— 预设的意义本来就是"在默认值之上做选择"。
+         * 判据应当是**声明值解析后逐字保留**，而不是"不许与默认值不同"。
+         *
+         * ⚠️ **改这个值之前先读 `strategyPresets.test.ts` 里那条行为级用例**
+         * （它断言 `resolvePreset('conservative').riskControl.breakevenTriggerPercent === 8`）：
+         * 那条用例就是为这次误删加的，删值会让它当场变红。
          */
+        breakevenTriggerPercent: 8,
       },
       throttle: {
         minHoldMinutes: 30,
@@ -1082,7 +1095,33 @@ export function resolvePreset(preset: StrategyPreset | string): StrategyConfig {
 }
 
 /**
- * 这份配置**是不是就等于**该预设的定义（逐分区深度相等）。
+ * 「还等于哪份预设」的判据**不看**的两个键。
+ *
+ * ## 为什么必须排除它们（一次真实的"界面说假话"）
+ *
+ * 它们**不属于模板**：三套预设的 `patch` 里都**没有** `name` / `description`
+ * （实测：`'name' in preset.patch === false` ×3）。它们是**用户给这条策略起的名字**。
+ *
+ * 而配置里那个 `name` 会被**保存路径写成用户名**：
+ *   · 编辑器保存：`config: { ...validation.config, name: state.name.trim(), … }`；
+ *   · 列表页"从预设新建"：`config.name = name ?? preset.label`（默认就是中文 `稳健/进取/短线`）。
+ *
+ * 于是把 `name` 纳入比较会出现这个荒谬结果：
+ * ```
+ *   resolvePreset('conservative')          → name = 'Default strategy'
+ *   用户从列表页"从稳健新建"           → config.name = '稳健'
+ *   参数逐字等于 conservative，但 name 不同 → presetOfConfig 返回 null
+ * ```
+ * ⇒ **任何经界面创建/保存的策略，参数明明就是那份模板，徽章却永不出现**，
+ * 反而恒显示「已偏离预设」。**这正是本批要消灭的"界面说假话"本身。**
+ *
+ * 判据只比**模板真正声明过的字段**（参数分区），这才是"这套参数还是不是那套模板"
+ * 该回答的问题。用户改名字 = 给策略命名，**不是**把它改成了另一套参数。
+ */
+export const PRESET_IDENTITY_EXCLUDED_KEYS = ['name', 'description'] as const;
+
+/**
+ * 这份配置**是不是就等于**该预设的定义（逐分区深度相等，**排除 name/description**）。
  *
  * ## 为什么需要它：`presetId` 是一个会过期的标签
  *
@@ -1097,12 +1136,6 @@ export function resolvePreset(preset: StrategyPreset | string): StrategyConfig {
  * 判据必须落在**配置本身**上，而不是落在那个字段上：本函数是"还能不能这样称呼它"
  * 的唯一实现，任何显示 `presetId` 的地方都应当先过它。
  *
- * ## `name` / `description` 为什么也参与比较
- *
- * 它们是预设定义的一部分（模板声明了自己的名字与说明），所以"手改了名字"
- * 确实意味着"这份配置不再等于那份模板"。控制台的头部两个输入框改的就是它们，
- * 而那正是"用户把它改成自己的策略了"这个语义。
- *
  * ⚠️ 比较用 `JSON.stringify` 而不是逐字段 `===`：配置里有数组与嵌套对象
  * （`selectedTimeframes`、`staticCoins`、`kline`…），逐字段写会漏掉嵌套，
  * 而"漏掉的那一块不参与比较"正是本函数要消灭的失效模式。
@@ -1112,9 +1145,12 @@ export function presetOfConfig(
   config: StrategyConfig,
   presets: readonly StrategyPreset[] = STRATEGY_PRESETS,
 ): StrategyPreset | null {
+  const compared = STRATEGY_CONFIG_KEYS.filter(
+    (key) => !(PRESET_IDENTITY_EXCLUDED_KEYS as readonly string[]).includes(key),
+  );
   for (const preset of presets) {
     const canonical = resolvePreset(preset);
-    if (STRATEGY_CONFIG_KEYS.every((key) => JSON.stringify(canonical[key]) === JSON.stringify(config[key]))) {
+    if (compared.every((key) => JSON.stringify(canonical[key]) === JSON.stringify(config[key]))) {
       return preset;
     }
   }
