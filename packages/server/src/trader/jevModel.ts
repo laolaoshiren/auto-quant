@@ -477,8 +477,28 @@ export async function decideForCandidate(
       ? `${answers.setup.score.toFixed(2)}/4（${answers.setup.legend?.[String(Math.round(answers.setup.score))] ?? '—'}）`
       : '未给';
 
+  /*
+   * ⚠️ **Jev 判"执行"但置信度很低时必须说清**（2026-10-19 实测发现）。
+   *
+   * 实测 DOGEUSDT：Jev 答 `open`，但 `probabilities` 是
+   * `{open: 0.50, skip: 0.50}`、`confidence: 0` —— 那是**平局**，
+   * 而它仍然选了一边（`choice` 类型必须给一个答案）。
+   *
+   * ## 为什么不在本文件里拒掉它
+   *
+   * 门槛是**策略配置**（`minConfidence`），而风控引擎已经有一处统一实现
+   *（`risk/engine.ts:901`：`decision.confidence < risk.minConfidence` ⇒ 拒绝并带理由）。
+   * 在这里再造一个门槛会让"最低置信度"有两个定义处 —— 那正是
+   * `docs/AGENTS.md` §2.1「风控是通往订单的唯一路径」要避免的分叉。
+   *
+   * ⇒ 正确做法：**照常产出 Decision**（把 `confidence` 如实填进去），
+   *   让风控按策略配置拒。这里只负责把"它是平局"这件事**写进 reasoning**，
+   *   这样日志里看得见"为什么这一笔被拒了"。
+   */
+  const isTie = probText.includes('skip 50%') || (confidence !== null && confidence < 20);
   const reasoning =
-    `Jev 判执行（置信 ${confidence ?? '—'}%${probText === '' ? '' : `；${probText}`}）；` +
+    `Jev 判执行（置信 ${confidence ?? '—'}%${probText === '' ? '' : `；${probText}`}）` +
+    `${isTie ? '⚠️ 接近平局，可能被最低置信度拦下' : ''}；` +
     `机会强度 ${setupText}；` +
     `仓位 ${sizeTier} 档 ${tiers.size[sizeTier].toFixed(2)}U；` +
     `止损 ${stopTier} 档 ${tiers.stop[stopTier].toFixed(6)}（${stopTier === 'A' ? '1.0' : stopTier === 'B' ? '1.5' : '2.0'}×ATR）；` +
