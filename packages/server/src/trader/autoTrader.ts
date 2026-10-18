@@ -4506,8 +4506,61 @@ export class AutoTrader {
      */
     const pendingRows = positionStore.pending(traderId);
 
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  ⚠️⚠️ **JEV 模式的「出手门槛」必须注入风控配置**（2026-10-19 线上抓到）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 症状
+     *
+     * 用户在「JEV 模式」标签里把「出手门槛」设成「有机会就做」（= 20），
+     * 但决策仍然被风控拒掉：
+     * ```
+     *   AGTUSDT 置信 46 → rejected
+     *   AVAUSDT 置信 22 → rejected
+     *   GTCUSDT 置信 20 → rejected
+     * ```
+     *
+     * ## 根因
+     *
+     * 风控读的是 `config.riskControl.minConfidence`（来自 `defaultJevConfig()`，
+     * 值是 **40**）—— 而那个值**只有策略配置能改，界面上改不了**。
+     *
+     * `jevModel.ts` 里的 `readMinConfidence()` 只在**决策阶段**提前放弃，
+     * 但它管不到风控那道门 ⇒ 于是出现"我设了 20，但 20 还是被拒"。
+     *
+     * ## 修法
+     *
+     * 在把 config 交给风控之前，**用 JEV 选项覆盖 `minConfidence`**。
+     *
+     * ⚠️ **只在 `mode === 'jev'` 时覆盖** —— 其它三种模式的配置必须逐字节不变
+     *（`#10` 那台实盘在上面跑）。
+     *
+     * ⚠️ 这不是"绕过风控" —— 风控仍然是唯一执行路径，只是**它的输入来自
+     *   用户刚设的那个值**，而不是一个他看不到的策略默认值。
+     */
+    const riskConfig =
+      this.deps.trader.mode === 'jev'
+        ? {
+            ...config,
+            riskControl: {
+              ...config.riskControl,
+              minConfidence: jevNumber('min_confidence'),
+              /*
+               * 盈亏比门槛同样来自 JEV 选项 —— 否则用户把「止盈止损比」
+               * 设成 1.5 而风控仍要求 1.5 以上（恰好相等时浮点误差会误拒）。
+               * 减 0.01 给浮点留余量。
+               */
+              minRiskRewardRatio: Math.max(
+                0,
+                jevNumber('min_rr') - 0.01,
+              ),
+            },
+          }
+        : config;
+
     const verdict = this.risk.review(gatedDecisions, {
-      config,
+      config: riskConfig,
       account: {
         equity: account.equity,
         availableBalance: account.availableBalance,
