@@ -523,6 +523,20 @@ test('★ 连续被截断时【只放大一次】，不无限重试（防死循�
   /*
    * MAST 分类法实测「步骤重复」是最高频失败模式（15.7%）。
    * "预算越大、思维链写得越长"会收敛不了 —— 所以只放大一次。
+   *
+   * ## ⚠️ 这条断言 2026-10-18 改过一次，理由要记住
+   *
+   * 原来写的是 `assert.ok(callCount <= 5)`，隐含假设：
+   * ```
+   *   maxFallbacks=2 ⇒ 至多试 3 个候选 + 1 次放大重试 = 5 次
+   * ```
+   * 而 `callByTier` 现在**让链上每个候选都有机会**（线上实测：T3 链有 6 个候选，
+   * 而 maxFallbacks=3 只试 4 个 ⇒ `group/team-judge` / `group/team-analyst`
+   * 明明在线却永远轮不到 ⇒ 逐币深看整批失败 `成功 1 · 失败 5`）。
+   *
+   * ⇒ 调用次数现在由**链长**决定，不再由 `maxFallbacks` 决定。
+   *   这条测试的本意是**防死循环**，那就该断言"有界"而不是一个魔数：
+   *   `候选数 × (1 次正常 + 1 次放大重试)` 是上界。
    */
   let callCount = 0;
   const router = new ModelRouter({
@@ -534,11 +548,19 @@ test('★ 连续被截断时【只放大一次】，不无限重试（防死循�
   });
   await assert.rejects(
     () => router.callByTier('T1_fast', [{ role: 'user', content: 'x' }], { baseMaxTokens: 512 }),
-    /都失败/,
+    /都失败|处于冷却期/,
     '★ 应当以失败收场，而不是无限重试',
   );
-  /* 4 个候选（maxFallbacks=2 → 至多 3 个）+ 至多 1 次放大重试 */
-  assert.ok(callCount <= 5, `★ 调用次数必须有界，实际 ${callCount}`);
+  /*
+   * 上界 = 链上候选数 × 2（每个候选：首次 + 最多一次放大重试）。
+   * 拿到实际链长而不是写死 —— 否则表一成这测试就会误报。
+   */
+  const ladderSize = ladderForTier('T1_fast').length;
+  assert.ok(
+    callCount <= ladderSize * 2,
+    `★ 调用次数必须有界（上界 ${ladderSize * 2}），实际 ${callCount}`,
+  );
+  assert.ok(callCount >= 2, `★ 至少要试过放大重试（实际 ${callCount}）`);
 });
 /* -------------------------------------------------------------------------- */
 /*  自动发现真的驱动模型选择（复核发现 P2-L：发现曾是"孤岛"）                     */

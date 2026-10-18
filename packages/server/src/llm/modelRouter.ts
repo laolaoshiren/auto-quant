@@ -320,7 +320,41 @@ export class ModelRouter {
      */
     let budgetBoosted: number | null = null;
 
-    for (let i = 0; i <= this.maxFallbacks; i += 1) {
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     *  ⚠️ **降级次数不能少于候选链长度**（2026-10-18 线上实测）
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * `maxFallbacks` 默认 3（至多试 4 个），而 T3 链有 **6** 个候选。线上实测：
+     * ```
+     *   [dispatch] 按币并行失败 AGTUSDT：档位 T3_deep 试了 4 个模型都失败：
+     *     group/auto-glm-5-3  → 认证或权限失败
+     *     group/auto-grok-4-7 → 认证或权限失败
+     *     group/auto-kimi-k3  → 上游端点不可用或额度已尽
+     *     group/auto-mimo-v2-6-pro → 失败
+     *   ⇒ 放弃。而 **group/team-judge / group/team-analyst 明明在线**，永远轮不到。
+     * ```
+     * 于是"逐币深看"整批失败（`成功 1 · 失败 5`）—— 链上明明是好的，只是没被尝试。
+     *
+     * ⇒ 判据改成：**只要链上还有没试过的候选，就给它机会**（那才是"降级"的定义），
+     *   `maxFallbacks` 退化为下限。
+     *
+     * ## ⚠️ 为什么不能用 `i -= 1` 给截断重试"还配额"
+     *
+     * 我第一版那样写，结果循环**卡在同一个位置**（测试 403 实测 `callCount` 5 → 10 → 11）：
+     * 截断重试把 `i` 还回去后，下一轮又选中同一个模型、又截断、又还回去 —— 无界。
+     *
+     * ⇒ 用**独立的计数器**分开两类：`fallbackCount` 只数"换候选"，`budgetBoosted`
+     *   只管"同候选放大重试一次"。循环本身由 `tried` 集合自然收敛（每个候选至多一次）。
+     */
+    let fallbackCount = 0;
+
+    for (let i = 0; ; i += 1) {
+      /*
+       * 退出条件写在循环内（因为"截断重试"不增加 `fallbackCount`）：
+       * 换候选次数用完 ⇒ 停。
+       */
+      if (fallbackCount > Math.max(this.maxFallbacks, ladder.length - 1)) break;
       const modelId = pickAvailable(ladder, this.health, tried);
       if (modelId === null) {
         /*
@@ -402,6 +436,11 @@ export class ModelRouter {
             budgetBoosted = firstBudget * EMPTY_CONTENT_RETRY_MULTIPLIER;
             tried.pop(); /* 允许重选同一个模型 */
             previousModel = modelId;
+            /*
+             * ⚠️ **不增加 `fallbackCount`**：截断重试不是"降级到下一个候选"，
+             * 而是"同一个候选换个预算再来一次"。它由 `budgetBoosted` 单次标记
+             * 自己收敛（第二次走到这里时标记已非空，进不来）。
+             */
             continue;
           }
 
@@ -438,11 +477,14 @@ export class ModelRouter {
           this.health.recordFailure(modelId, verdict.reason);
           this.options.onFallback?.({ from: previousModel, to: modelId, verdict });
           previousModel = modelId;
+          /* 换候选 = 一次降级（这是 `fallbackCount` 唯一递增的地方）。 */
+          fallbackCount += 1;
           continue;
         }
-        if (verdict.shouldRetry && i < this.maxFallbacks) {
+        if (verdict.shouldRetry) {
           /* 可重试：不退避（退避在 LlmClient 内部已做），换下一个候选继续试。 */
           previousModel = modelId;
+          fallbackCount += 1;
           continue;
         }
         /* 既不该降级也不该重试（例如 400 格式错）—— **原样抛出**，不掩盖 bug。 */
