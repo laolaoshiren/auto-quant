@@ -89,6 +89,15 @@ export interface ProbeInput {
   fetchImpl?: typeof fetch;
   /** 测试注入：版本读取函数（默认读 `last-version` 文件）。 */
   versionReader?: () => string | null;
+  /**
+   * **Jev 初筛是否开启**（`AQ_JEV_PREFILTER=on`）。
+   *
+   * 只有开启时才探 `/v1/systemone` —— 没开的时候那个端点与我们无关，
+   * 探它只会多打一次请求（而"多打请求"本身就是这一层的纪律要防的事）。
+   */
+  jevEnabled?: boolean;
+  /** Jev 的模型名（默认 `jev-latest`）。 */
+  jevModel?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 8_000;
@@ -316,6 +325,92 @@ export async function probeGatewayContract(input: ProbeInput): Promise<ContractR
       detail: 'GET /v1/magpie/quotas 失败（超时或不可达）。',
       hint: '同上 —— 只影响提示词里的额度提示。',
     });
+  }
+
+  /*
+   * ── 探针 5：**Jev 的 `/v1/systemone`**（只要开关打开就探） ──────────────────
+   *
+   * ## 为什么这条最重要
+   *
+   * 它是**非标准端点**（不是 OpenAI 兼容协议，是 TypeSafe 自己的 Decisions API）。
+   * magpie 一天多版，任何"顺手重构路由"都可能把它改掉 —— 而那时：
+   * ```
+   *   Jev 初筛失效 → 降级到"不筛" → 每轮重新分析全部 20 个标的
+   *   ⇒ 耗时从 110s 回到 300s+，而且【不会报错】
+   * ```
+   * 这正是本仓库反复记录的那类失败：**静默变差，不是报错**。
+   *
+   * ## 成本
+   *
+   * 一次 `noul` 问句，实测 `input_tokens≈268 / output_tokens≈20`，按 Jev 的
+   * $42/十亿 token 算 **≈ 0.00001 美分**。可以忽略。
+   *
+   * ## 判据
+   *
+   * 只验"形状还在"：
+   * ```
+   *   HTTP 200 且 answers.<任意键>.type 是字符串  ⇒ 端点活着
+   * ```
+   * **不验分数质量** —— 那是 `jevVerdict` 的职责（它需要真实行情上下文）。
+   */
+  if (input.jevEnabled === true) {
+    try {
+      requests += 1;
+      const res = await doFetch(`${base}/v1/systemone`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          state: 'contract probe',
+          model: input.jevModel ?? 'jev-latest',
+          questions: {
+            ok: {
+              type: 'noul',
+              instructions: 'Is this a probe?',
+              criteria: { yes: 'probe', no: 'not a probe' },
+            },
+          },
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) {
+        mismatches.push({
+          probe: 'systemone.shape',
+          severity: 'warn',
+          detail: `POST /v1/systemone 返回 HTTP ${res.status}。`,
+          hint:
+            'Jev 初筛会降级为"不筛"（仍能工作，但每轮会多花 2-3 倍时间）。' +
+            '检查 magpie 是否改了决策端点的路径或协议。',
+        });
+      } else {
+        const json = (await res.json().catch(() => null)) as
+          | { answers?: Record<string, { type?: unknown }> }
+          | null;
+        const answers = json?.answers;
+        const shapeOk =
+          answers !== null &&
+          answers !== undefined &&
+          typeof answers === 'object' &&
+          Object.values(answers).some((a) => typeof a?.type === 'string');
+        if (!shapeOk) {
+          mismatches.push({
+            probe: 'systemone.shape',
+            severity: 'warn',
+            detail: 'POST /v1/systemone 返回 200，但 `answers.<key>.type` 形状不对。',
+            hint: '响应结构变了 ⇒ Jev 的解析会失败 ⇒ 降级为"不筛"。检查 TypeSafe Decisions API 是否有新版。',
+          });
+        }
+      }
+    } catch {
+      mismatches.push({
+        probe: 'systemone.shape',
+        severity: 'warn',
+        detail: 'POST /v1/systemone 失败（超时或不可达）。',
+        hint: 'Jev 初筛降级为"不筛"（不影响交易，只是变慢）。',
+      });
+    }
   }
 
   /* 指纹：只由"哪些探针报了什么问题"决定，与具体数字无关（数字每次都变）。 */

@@ -274,6 +274,18 @@ async function runGatewayContractCheck(): Promise<void> {
     baseUrl: gateway.baseUrl,
     apiKey: gateway.apiKey,
     ladderIds: collectLadderIds(),
+    /*
+     * ⚠️ **Jev 开着才探 `/v1/systemone`**（2026-10-18）。
+     *
+     * 那个端点是**非标准协议**（TypeSafe 自己的 Decisions API），
+     * magpie 改路由时最容易被打掉 —— 而它一坏，初筛静默降级为"不筛"，
+     * 每轮耗时从 110s 回到 300s+，**不会报任何错**。
+     *
+     * 没开 Jev 时不探：那时那个端点与我们无关，多打一次请求就违背了
+     * "这一层只花必须花的额度"的纪律。
+     */
+    jevEnabled: process.env.AQ_JEV_PREFILTER === 'on',
+    jevModel: process.env.AQ_JEV_MODEL,
   });
 
   const messages = contractMessages(report);
