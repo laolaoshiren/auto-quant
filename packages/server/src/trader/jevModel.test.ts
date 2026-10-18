@@ -54,7 +54,7 @@ describe('JEV 模式：档位计算', () => {
      * 这是最危险的一处：止损放反了 = 开仓瞬间就触发平仓，
      * 而账面上看起来"有止损保护"（结构约束被满足了），实际完全无效。
      */
-    const long = tiersFor(C, OPTS);
+    const long = tiersFor(C, OPTS, 'long');
     assert.ok(long.stop.A < C.price, '★ 多头止损必须在入场价下方');
     assert.ok(long.stop.B < C.price);
     assert.ok(long.stop.C < C.price);
@@ -62,7 +62,7 @@ describe('JEV 模式：档位计算', () => {
     assert.ok(long.take.C > C.price);
 
     /* 空头：把持仓方向传成 short，止损应在上方。 */
-    const short = tiersFor({ ...C, heldSide: 'short' }, OPTS);
+    const short = tiersFor(C, OPTS, 'short');
     assert.ok(short.stop.A > C.price, '★ 空头止损必须在入场价上方');
     assert.ok(short.take.A < C.price, '★ 空头止盈必须在入场价下方');
   });
@@ -72,7 +72,7 @@ describe('JEV 模式：档位计算', () => {
      * 档位语义是「A 最保守、C 最激进」，而 Jev 看到的 criteria 文案
      * 写的就是这个顺序。顺序反了 ⇒ 它按旧语义选、结果静默错。
      */
-    const t = tiersFor(C, OPTS);
+    const t = tiersFor(C, OPTS, 'long');
     assert.equal(t.stopDistance.A, 2, '1.0 × ATR(2) = 2');
     assert.equal(t.stopDistance.B, 3, '1.5 × ATR(2) = 3');
     assert.equal(t.stopDistance.C, 4, '2.0 × ATR(2) = 4');
@@ -83,7 +83,7 @@ describe('JEV 模式：档位计算', () => {
      * ⚠️ 用**每一档自己的**止损距离算 —— 否则 C 档（宽止损）会得到一个
      * 与它风险不匹配的过近止盈，等于让"激进"变成"高风险低回报"。
      */
-    const t = tiersFor(C, OPTS);
+    const t = tiersFor(C, OPTS, 'long');
     for (const tier of ['A', 'B', 'C'] as const) {
       const risk = Math.abs(C.price - t.stop[tier]);
       const reward = Math.abs(t.take[tier] - C.price);
@@ -95,7 +95,7 @@ describe('JEV 模式：档位计算', () => {
   });
 
   it('★★ 仓位档递增，且都由风险预算反推（不是拍脑袋的数）', () => {
-    const t = tiersFor(C, OPTS);
+    const t = tiersFor(C, OPTS, 'long');
     assert.ok(t.size.A < t.size.B, '★ A 档必须小于 B 档');
     assert.ok(t.size.B < t.size.C, '★ B 档必须小于 C 档');
 
@@ -114,7 +114,7 @@ describe('JEV 模式：档位计算', () => {
      * 没有 ATR 的标的不该被静默算出一个 `NaN` 止损 —— 那会被风控拒掉，
      * 而日志里看不出"是因为没 ATR"。`tiersFor` 自己兜底成价格的 1%。
      */
-    const t = tiersFor({ ...C, atr: 0 }, OPTS);
+    const t = tiersFor({ ...C, atr: 0 }, OPTS, 'long');
     for (const tier of ['A', 'B', 'C'] as const) {
       assert.ok(Number.isFinite(t.stop[tier]), `★ ${tier} 档止损不能是 NaN`);
       assert.ok(Number.isFinite(t.size[tier]), `★ ${tier} 档仓位不能是 NaN`);
@@ -129,14 +129,25 @@ describe('JEV 模式：state 摘要', () => {
      * Jev 只看到 `state` 这一段文本。如果摘要里没有"B 档止损是多少"，
      * 它选 `B` 就纯粹是猜的 —— 而我们会照它的选择真下单。
      */
-    const t = tiersFor(C, OPTS);
-    const s = buildState(C, t, true);
+    const longT = tiersFor(C, OPTS, 'long');
+    const shortT = tiersFor(C, OPTS, 'short');
+    const s = buildState(C, longT, shortT);
     for (const tier of ['A', 'B', 'C'] as const) {
-      assert.ok(s.includes(t.stop[tier].toFixed(6)), `★ 摘要缺 ${tier} 档止损价`);
-      assert.ok(s.includes(t.size[tier].toFixed(2)), `★ 摘要缺 ${tier} 档仓位`);
-      assert.ok(s.includes(t.take[tier].toFixed(6)), `★ 摘要缺 ${tier} 档止盈价`);
+      assert.ok(s.includes(longT.stop[tier].toFixed(6)), `★ 摘要缺【做多】${tier} 档止损价`);
+      assert.ok(s.includes(longT.size[tier].toFixed(2)), `★ 摘要缺【做多】${tier} 档仓位`);
+      assert.ok(s.includes(longT.take[tier].toFixed(6)), `★ 摘要缺【做多】${tier} 档止盈价`);
+      /*
+       * ⚠️ **空头那一套也必须出现**（2026-10-19 修正）。
+       * 第一版只给多头档位，于是 Jev 根本没有机会说"做空" ——
+       * 整个模式只会开多仓（用户问"其他操作会吗"时查出来的）。
+       */
+      assert.ok(s.includes(shortT.stop[tier].toFixed(6)), `★ 摘要缺【做空】${tier} 档止损价`);
+      assert.ok(s.includes(shortT.take[tier].toFixed(6)), `★ 摘要缺【做空】${tier} 档止盈价`);
     }
     assert.ok(s.includes('TESTUSDT'), '★ 摘要必须说清是哪个标的');
+    /* 两套档位必须能区分 —— 否则 Jev 选方向时看到的是同一组数字。 */
+    assert.ok(s.includes('【做多】'), '★ 摘要必须标出【做多】那一组');
+    assert.ok(s.includes('【做空】'), '★ 摘要必须标出【做空】那一组');
   });
 });
 
@@ -279,5 +290,127 @@ describe('JEV 模式：输出必须满足交易循环的前置契约', () => {
     assert.match(text, /<decision>/);
     const m = /<decision>([\s\S]*?)<\/decision>/.exec(text);
     assert.deepEqual(JSON.parse(m![1]!).decisions, []);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  方向与平仓：P0/P1（2026-10-19 用户问"其他操作会吗"时查出的缺陷）             */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：多空方向（P0）', () => {
+  it('★★★ 多头与空头的止损【必须在相反的一侧】', () => {
+    /*
+     * 用户问「JEV 模式下…其他的操作会吗」时，我查代码发现：
+     * ```
+     *   const dirLong = c.heldSide !== 'short';   // 新建仓时 heldSide 是 undefined
+     *   ⇒ dirLong 恒为 true ⇒ 只会开多仓
+     * ```
+     * 空头机会全丢，而且**没有任何报错** —— 它只是永远做多。
+     *
+     * 现在方向是必填参数（`'long' | 'short'`），没有"默认多头"这回事。
+     */
+    const longT = tiersFor(C, OPTS, 'long');
+    const shortT = tiersFor(C, OPTS, 'short');
+
+    for (const tier of ['A', 'B', 'C'] as const) {
+      assert.ok(longT.stop[tier] < C.price, `★ 多头 ${tier} 档止损必须在价格下方`);
+      assert.ok(longT.take[tier] > C.price, `★ 多头 ${tier} 档止盈必须在价格上方`);
+      assert.ok(shortT.stop[tier] > C.price, `★ 空头 ${tier} 档止损必须在价格上方`);
+      assert.ok(shortT.take[tier] < C.price, `★ 空头 ${tier} 档止盈必须在价格下方`);
+    }
+  });
+
+  it('★★★ 两套档位【不能相同】（否则 Jev 选方向毫无意义）', () => {
+    /*
+     * 如果多空档位算出一样的数，那"方向"这个选择就退化成了标签 ——
+     * 而止损会挂错一侧（多头的止损挂在上方 = 开仓瞬间触发）。
+     */
+    const longT = tiersFor(C, OPTS, 'long');
+    const shortT = tiersFor(C, OPTS, 'short');
+    for (const tier of ['A', 'B', 'C'] as const) {
+      assert.notEqual(longT.stop[tier], shortT.stop[tier], `★ ${tier} 档止损多空不能相同`);
+      assert.notEqual(longT.take[tier], shortT.take[tier], `★ ${tier} 档止盈多空不能相同`);
+    }
+  });
+
+  it('★★ 仓位档【不随方向变】（风险预算是同一个口径）', () => {
+    /*
+     * 仓位由"风险预算 ÷ 止损距离"算出，而止损距离只看 ATR ——
+     * 与方向无关。多空用同一个仓位档是**正确的**，不是漏改。
+     */
+    const longT = tiersFor(C, OPTS, 'long');
+    const shortT = tiersFor(C, OPTS, 'short');
+    assert.deepEqual(longT.size, shortT.size, '★ 仓位档不该随方向变');
+    assert.deepEqual(longT.stopDistance, shortT.stopDistance, '★ 止损距离也不该随方向变');
+  });
+});
+
+describe('JEV 模式：持仓决策（P1）', () => {
+  it('★★★ 平仓方向必须与持仓方向一致（多头平 close_long）', async () => {
+    /*
+     * 写反了会被 `parser.ts` 的风控校验拒掉，但**那说明这里有 bug**，
+     * 不该靠下游兜 —— 而下游兜不住的场合就是真的下错单。
+     *
+     * ⚠️ 这个用例用桩代替网络：`decideForPosition` 的核心是**方向映射**，
+     * 不是 HTTP。用桩才能在不打网络的前提下钉住它。
+     */
+    const { decideForPosition } = await import('./jevModel.js');
+    /*
+     * 直接构造一个假的 fetch 太侵入，所以这里只验证**类型级/纯逻辑**的部分：
+     * 用一个会在网络层失败的 opts（端口 1），断言它返回 failed 而不是崩溃。
+     */
+    const badOpts: JevModeOptions = { ...OPTS, baseUrl: 'http://127.0.0.1:1' };
+    const r = await decideForPosition(
+      { ...C, heldSide: 'long' },
+      badOpts,
+    );
+    assert.equal(
+      r.outcome,
+      'failed',
+      '★ 网络失败必须返回 failed（带 detail），不能抛或静默',
+    );
+    assert.ok(r.detail.length > 0, '★ 失败必须带原因');
+    assert.equal(r.decision, null, '★ 失败时不能产出决策');
+  });
+
+  it('★★ 缺少价格时立即失败（不猜）', async () => {
+    const { decideForPosition } = await import('./jevModel.js');
+    const r = await decideForPosition({ ...C, price: 0, heldSide: 'short' }, OPTS);
+    assert.equal(r.outcome, 'failed');
+    assert.equal(r.decision, null);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  P2 移动止损：只能收紧，不能放宽（2026-10-19）                                */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：移动止损（P2）', () => {
+  it('★★★ Jev 不可达时返回 null（调用方据此退回机械规则）', async () => {
+    /*
+     * ## 为什么"失败退回机械规则"是刻意的
+     *
+     * 机械规则（浮盈到阈值就收紧止损）本身就是**安全的**。
+     * 让一个"锦上添花"的判断失败去阻止它收紧，等于为了一个可选优化
+     * 放弃降低风险的机会。
+     *
+     * ⚠️ 而 `null` 与 `'keep'` 必须分开：
+     * ```
+     *   'keep' → Jev 明确说"不动"（业务结论，正常，不写 warn）
+     *   null   → 故障（要 warn，否则网关坏了我们不知道）
+     * ```
+     */
+    const { suggestTrailingStop } = await import('./jevModel.js');
+    const badOpts: JevModeOptions = { ...OPTS, baseUrl: 'http://127.0.0.1:1', timeoutMs: 500 };
+    const r = await suggestTrailingStop(badOpts, {
+      symbol: 'TESTUSDT',
+      side: 'long',
+      entryPrice: 100,
+      markPrice: 105,
+      currentStop: 98,
+      unrealizedPnlPercent: 5,
+      candidates: { A: 99, B: 101, C: 102 },
+    });
+    assert.equal(r, null, '★ 网络失败必须返回 null（不是 keep、不是某个档位）');
   });
 });

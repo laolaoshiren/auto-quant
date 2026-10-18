@@ -8415,6 +8415,67 @@ reduceQuantity: null,
    * 那个止盈就永久没了。**精选要撤的那一张**，而不是推倒重来。
    * 用 `cancelOrder(symbol, id, 'algo')` —— `kind` 必须传 `'algo'`，理由见调用处的注释。
    */
+  /**
+   * **把一个止损价往当前价方向收紧**（P2 · 2026-10-19）。
+   *
+   * ## 用途
+   *
+   * 给 Jev 提供"更紧的候选档"。它不自己算数（Jev 弱于算术），
+   * 而是从算好的三档里选 —— 与开仓档位同一个设计。
+   *
+   * ## 口径
+   *
+   * ```
+   *   多头：新止损 = 当前价 - (当前价 - 原止损) × factor   ← 更靠近当前价
+   *   空头：新止损 = 当前价 + (原止损 - 当前价) × factor
+   * ```
+   * `factor < 1` ⇒ 止损离当前价更近 ⇒ **更紧**（风险更小）。
+   *
+   * ⚠️ **`factor` 必须 < 1**。`≥ 1` 会算出一个更远（更宽松）的止损，
+   * 而放宽止损等于增加风险 —— 那不是本函数该做的事。
+   */
+  private tightenStop(
+    side: 'long' | 'short',
+    markPrice: number,
+    stop: number,
+    factor: number,
+  ): number {
+    /* 防御：`factor >= 1` 会让止损变宽，直接钳到 0.99（仍比原来紧一点点）。 */
+    const f = factor >= 1 ? 0.99 : Math.max(0.01, factor);
+    if (side === 'long') {
+      return markPrice - (markPrice - stop) * f;
+    }
+    return markPrice + (stop - markPrice) * f;
+  }
+
+  /**
+   * **判断新止损是否【比旧止损更紧】**（P2 的最后一道闸 · 2026-10-19）。
+   *
+   * ## 为什么需要它（不能信任上游）
+   *
+   * 上游有两个来源：机械规则与 Jev。**两者都可能算出更宽松的值** ——
+   * 机械规则理论上不会（`breakeven.ts` 有保证），但 Jev 的答案完全不可控
+   *（它是个概率模型，可能选错档、也可能在某个边界上给出奇怪的值）。
+   *
+   * ⇒ 在真正下单之前**再判一次**：
+   * ```
+   *   多头：新止损 > 旧止损（更靠近上方当前价）⇒ 更紧
+   *   空头：新止损 < 旧止损（更靠近下方当前价）⇒ 更紧
+   * ```
+   * 旧止损为 `null`（仓位没有止损？）时**一律拒绝移动** ——
+   * 那种情况应该走"补挂保护单"那条路径，不是这里。
+   */
+  private isStopTighter(
+    side: 'long' | 'short',
+    oldStop: number | null,
+    newStop: number,
+    _markPrice: number,
+  ): boolean {
+    if (oldStop === null || !Number.isFinite(oldStop)) return false;
+    if (!Number.isFinite(newStop) || newStop <= 0) return false;
+    return side === 'long' ? newStop > oldStop : newStop < oldStop;
+  }
+
   private async applyBreakevenGuard(): Promise<number> {
     const traderId = this.deps.trader.id;
     const threshold = this.activeConfig.riskControl.breakevenTriggerPercent;
@@ -8463,6 +8524,110 @@ reduceQuantity: null,
       });
 
       if (!verdict.move || verdict.newStop === null) continue;
+
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  **JEV 模式：让 Jev 决定"要不要收紧、收到哪一档"**（P2 · 2026-10-19）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * ## 为什么在机械规则之上再加一层
+       *
+       * 机械规则（浮盈到阈值就收紧、跟到回退 trailPercent）是**无条件执行**的。
+       * 用户希望这个判断也由 Jev 做（「一切由 JEV 自主」），代价是每个持仓
+       * 每轮多一次调用（约 300ms + token）。
+       *
+       * ## ⚠️ 三层硬约束（缺一条都不能上线）
+       *
+       * ```
+       * ① 只有 mode === 'jev' 才问 —— 其余三种模式的执行路径逐字节不变
+       * ② Jev 只能【收紧】，不能放宽 —— 放宽止损 = 增加风险，必须由人决定
+       * ③ 新止损必须在【盈利方向】上 —— 绝不接受把止损移回不利一侧
+       * ```
+       *
+       * ②③ 在这里**由代码强制**，不是靠 Jev 的自觉：
+       * `shouldMoveStopToBreakeven()` 已经保证"只往有利方向移"，
+       * 而下面再比一次（新止损必须比旧止损更靠近当前价）。
+       *
+       * ## 失败时怎么办
+       *
+       * Jev 调不通 → **退回机械规则**（`verdict` 照常执行）。
+       * 理由：机械规则本身就是安全的，不该因为一个"锦上添花"的判断失败
+       * 而放弃收紧止损的机会。
+       */
+      let effectiveStop = verdict.newStop;
+      /*
+       * ⚠️ **Jev 的移动止损判断走 `deps.model`** —— 它就是
+       * `createJevDecisionModel()` 造出来的那个 `DecisionModel`
+       *（见 `manager.ts` 的 `buildJevModeModel`）。
+       *
+       * **不给 `AutoTrader` 加新字段**：那会让"决策模型"有两个来源，
+       * 而"哪个才是权威"这种问题一旦出现就会在某个分支里写错。
+       * 用可选方法探测（`typeof === 'function'`）保证：
+       * ```
+       *   其它模式的 model 没有这个方法 ⇒ 整段跳过 ⇒ 行为逐字节不变
+       * ```
+       */
+      const jevTrailing = this.deps.model as {
+        suggestTrailingStop?: (input: {
+          symbol: string;
+          side: 'long' | 'short';
+          entryPrice: number;
+          markPrice: number;
+          currentStop: number | null;
+          unrealizedPnlPercent: number;
+          candidates: { A: number; B: number; C: number };
+        }) => Promise<number | 'keep' | null>;
+      };
+      if (
+        this.deps.trader.mode === 'jev' &&
+        typeof jevTrailing.suggestTrailingStop === 'function'
+      ) {
+        try {
+          const asked = await jevTrailing.suggestTrailingStop({
+            symbol: view.symbol,
+            side: view.side,
+            entryPrice: view.entryPrice,
+            markPrice: view.markPrice,
+            currentStop: view.stopLoss,
+            unrealizedPnlPercent: view.unrealizedPnlPercent,
+            /* 三档候选：机械值 / 更紧 / 最紧。都由既有算式算出，Jev 只选。 */
+            candidates: {
+              A: verdict.newStop,
+              B: this.tightenStop(view.side, view.markPrice, verdict.newStop, 0.5),
+              C: this.tightenStop(view.side, view.markPrice, verdict.newStop, 0.25),
+            },
+          });
+          if (asked === 'keep') {
+            this.emitOnChange(
+              `jev-keep-stop:${local.id}`,
+              'info',
+              `${local.symbol} Jev 判断保持原止损不动（机械规则本可收紧到 ${verdict.newStop}）。`,
+            );
+            continue;
+          }
+          if (asked !== null) effectiveStop = asked;
+        } catch (err) {
+          /* 失败退回机械规则 —— 见上面"失败时怎么办"。 */
+          log.warn(
+            `[JEV 模式] ${local.symbol} 的移动止损判断失败，退回机械规则：${(err as Error).message}`,
+          );
+        }
+      }
+
+      /*
+       * ⚠️ **最后一道闸：只接受"比旧止损更靠近当前价"的值**（约束 ③）。
+       *
+       * 这一步不信任任何上游（包括 Jev）—— 放宽止损等于增加风险，
+       * 而那段逻辑绝不能靠"上游会算对"来保证。
+       */
+      if (!this.isStopTighter(view.side, view.stopLoss ?? null, effectiveStop, view.markPrice)) {
+        this.emitOnChange(
+          `stop-not-tighter:${local.id}`,
+          'warn',
+          `${local.symbol} 算出的新止损 ${effectiveStop} 并不比原止损更紧，本轮不移动（防止放宽风险）。`,
+        );
+        continue;
+      }
 
       /*
        * ⚠️ **先撤旧止损，再挂新的 —— 顺序与我最初的实现相反。**
@@ -8539,7 +8704,7 @@ reduceQuantity: null,
         symbol: local.symbol,
         side: local.side === 'long' ? 'SELL' : 'BUY',
         type: 'STOP_MARKET',
-        triggerPrice: verdict.newStop,
+        triggerPrice: effectiveStop,
         purpose: 'stop_loss',
         traderId,
         quantity: local.quantity,
@@ -8552,7 +8717,7 @@ reduceQuantity: null,
          */
         this.emit(
           'error',
-          `为 ${local.symbol} 移动止损时，旧止损已撤但新止损（开仓价 ${verdict.newStop}）没挂上。` +
+          `为 ${local.symbol} 移动止损时，旧止损已撤但新止损（开仓价 ${effectiveStop}）没挂上。` +
             '为避免留下无保护的敞口，立即平掉该仓位。',
         );
         const exitSide: 'BUY' | 'SELL' = local.side === 'long' ? 'SELL' : 'BUY';
@@ -8596,7 +8761,7 @@ reduceQuantity: null,
       positionStore.setProtection(
         traderId,
         local.symbol,
-        verdict.newStop,
+        effectiveStop,
         local.take_profit,
         String(newStopId),
         local.tp_order_id,
