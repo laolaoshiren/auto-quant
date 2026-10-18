@@ -396,9 +396,34 @@ test('★★★ 接线：打开开关后只有前 N 个切片进 LLM，并写观
     logs.some((l) => l.level === 'info' && l.message.includes('[Jev] 5 个标的 → 保留 2 个')),
     `★ 必须有汇总日志（实际：${logs.map((l) => l.message).join(' | ')}）`,
   );
+  /*
+   * ⚠️ **2026-10-18 改过断言**：日志从三行合并成两行。
+   *
+   * 原来：
+   * ```
+   *   [Jev] 20 个标的 → 保留 6 个 · 最高 … 最低 … · 耗时 …
+   *   [Jev] 保留：A B C
+   *   [Jev] 筛除：X(0.46) Y(0.42) …
+   * ```
+   * 而 `runtime_logs` 是环形缓冲（500 条 ≈ 100 分钟），采集脚本靠"保留行 + 下一行筛除行"
+   * 配对 —— 只要中间被挤掉一行，那一轮就**永久采不到**（实测：seen 记了 132634，
+   * 132635 成了孤儿）。
+   *
+   * 现在合并成一行（用 `|` 分隔）：
+   * ```
+   *   [Jev] 保留：A B C | 筛除：X(0.46) Y(0.42) …
+   *   [Jev] 20 个标的 → 保留 6 个 · 最高 … 最低 … · 耗时 …
+   * ```
+   * ⇒ 采集脚本只需一行就能拿到完整配对，不怕被冲散。
+   */
   assert.ok(
-    logs.some((l) => l.message.includes('[Jev] 筛除：') && l.message.includes('BBBUSDT')),
-    '★ 被筛掉的标的必须点名',
+    logs.some(
+      (l) =>
+        l.message.includes('[Jev] 保留：') &&
+        l.message.includes('| 筛除：') &&
+        l.message.includes('BBBUSDT'),
+    ),
+    `★ 被筛掉的标的必须点名（且保留/筛除在同一行里，避免被环形缓冲冲散）；实际：${logs.map((l) => l.message).join(' | ')}`,
   );
 });
 

@@ -1923,37 +1923,47 @@ async function runTradingDeskInner(input: {
           slicesForLlm = picked.keep.map((i) => allSlices[i]!);
           const highest = picked.highest === null ? '—' : picked.highest.toFixed(2);
           const lowest = picked.lowest === null ? '—' : picked.lowest.toFixed(2);
+          /*
+           * ══════════════════════════════════════════════════════════════════
+           *  ⚠️⚠️ **一轮的判定必须写在一条日志里**（2026-10-18 实测修正）
+           * ══════════════════════════════════════════════════════════════════
+           *
+           * ## 事故
+           *
+           * 原来写三行：
+           * ```
+           *   132633  [Jev] 20 个标的 → 保留 6 个 · 最高 0.61 最低 0.26 · 耗时 1482ms
+           *   132634  [Jev] 保留：QUSDT AGTUSDT BRUSDT AVAUSDT BTWUSDT SANDUSDT
+           *   132635  [Jev] 筛除：EPICUSDT(0.50) GTCUSDT(0.49) …
+           * ```
+           *
+           * 而 `runtime_logs` 是**环形缓冲**（500 条 ≈ 100 分钟）。样本采集脚本每 30 分钟
+           * 跑一次，靠"保留行 + 下一行筛除行"配对 —— 只要这中间被别的日志挤掉一行，
+           * 那一轮就**永久采不到**了（实测：`seen` 记了 132634，132635 成了孤儿）。
+           *
+           * ## 现在
+           *
+           * 一行搞定，用 `|` 分隔两段：
+           * ```
+           *   [Jev] 保留：A B C | 筛除：X(0.46) Y(0.42) …
+           * ```
+           *
+           * ⇒ 采集脚本只需**一行**就能拿到完整配对，不再怕被冲散。
+           * ⇒ 数量/最高/最低/耗时另起一行（那是给人看的心跳，不参与判据）。
+           */
+          const keptNames = slicesForLlm.map((s) => s.symbol ?? 'UNKNOWN');
+          const desc = [...picked.dropped].sort((a, b) => b.score - a.score);
+          const shown = desc.slice(0, 12);
+          const suffix = desc.length > shown.length ? ` …等 ${desc.length} 个` : '';
+          const droppedText = shown.map((s) => `${s.symbol}(${s.score.toFixed(2)})`).join(' ');
+          jevLog.info(
+            `[Jev] 保留：${keptNames.join(' ')}` +
+              (droppedText === '' ? ' | 筛除：（无）' : ` | 筛除：${droppedText}${suffix}`),
+          );
           jevLog.info(
             `[Jev] ${allSlices.length} 个标的 → 保留 ${slicesForLlm.length} 个` +
               ` · 最高 ${highest} 最低 ${lowest} · 耗时 ${picked.elapsedMs}ms`,
           );
-          /*
-           * ⚠️ **保留名单也必须逐个点名**（2026-10-18）。
-           *
-           * 原来只写了"保留 6 个"这个数字。于是**无法回答那个唯一重要的问题**：
-           * > Jev 保留的这 6 个，是不是真的比它筛掉的 13 个更有机会？
-           *
-           * 要算这个，必须知道两边**各自是谁**。只有"筛除"那一半有名单、
-           * "保留"这一半只有个数，判据就永远算不准 —— 我实测时不得不手工补近似值，
-           * 而那个近似（QUSDT 76.66%）把结论从 neutral 拉成了 positive。
-           *
-           * ⇒ 现在两边都有名单。样本采集脚本（`scripts/jev-sample.sh`）据此配对行情。
-           */
-          const keptNames = slicesForLlm.map((s) => s.symbol ?? 'UNKNOWN');
-          jevLog.info(`[Jev] 保留：${keptNames.join(' ')}`);
-          if (picked.dropped.length > 0) {
-            /*
-             * 被筛掉的标的**逐个点名**（最多 12 个，其余用总数带过）：
-             * 只写"筛掉 12 个"的话，出问题时无法回答"到底筛掉了谁"。
-             */
-            const desc = [...picked.dropped].sort((a, b) => b.score - a.score);
-            const shown = desc.slice(0, 12);
-            const suffix =
-              desc.length > shown.length ? ` …等 ${desc.length} 个` : '';
-            jevLog.info(
-              `[Jev] 筛除：${shown.map((s) => `${s.symbol}(${s.score.toFixed(2)})`).join(' ')}${suffix}`,
-            );
-          }
         } else {
           /*
            * **回落**：`slicesForLlm` 仍是全部切片（上面的赋值没发生）。
