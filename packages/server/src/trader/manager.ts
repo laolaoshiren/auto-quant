@@ -3208,6 +3208,38 @@ export class TraderManager {
             },
           };
         },
+        /*
+         * ══════════════════════════════════════════════════════════════════
+         *  ⚠️⚠️ **P3 选币必须透传到这个包装对象上**（2026-10-19 实测抓到）
+         * ══════════════════════════════════════════════════════════════════
+         *
+         * ## 症状
+         *
+         * 用户在「JEV 模式」标签里把「选币方式」设成「让 Jev 从全市场自己选」，
+         * 但日志里**从来没有** `[Jev模式] 选币（jev）：…` 那一条 ——
+         * 说明 `autoTrader` 里那段 P3 代码**整段被跳过**。
+         *
+         * ## 根因
+         *
+         * `AutoTrader` 拿到的 `deps.model` 是**这个包装对象**，不是
+         * `createJevDecisionModel()` 返回的那个。而包装对象原来**只有
+         * `complete`** —— 于是 `autoTrader` 里的
+         * `typeof jevRerank.rerankByJev === 'function'` 探测永远为假。
+         *
+         * 那是我上一版的设计疏漏：我以为 `deps.model` 就是 `jevModel`，
+         * 但它被包了一层。
+         *
+         * ## 修法
+         *
+         * 把 `jevModel.rerankByJev` 透传到包装对象上。
+         * ⚠️ 只在 `jevModel` 存在时挂（其它三种模式这个属性不存在，
+         * `typeof` 探测自然为假，行为逐字节不变）。
+         */
+        ...(jevModel !== null && jevModel !== undefined
+          ? {
+              rerankByJev: (jevModel as unknown as { rerankByJev: unknown }).rerankByJev,
+            }
+          : {}),
       };
 
       /*

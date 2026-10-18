@@ -62,7 +62,7 @@ import {
   type PromptContext,
   type PromptRejection,
 } from '../strategy/prompt.js';
-import { getJevOptionRaw, jevBool, jevEnum, jevNumber } from './control.js';
+import { jevBool, jevEnum, jevNumber } from './control.js';
 import { last } from '../market/indicators.js';
 import { isMajorSymbol, type DecisionAction } from '@aq/shared';
 import { agentMemory } from '../store/agentStore.js';
@@ -3394,11 +3394,7 @@ export class AutoTrader {
      */
     if (this.deps.trader.mode === 'jev') {
       const selectMode = jevEnum('coin_select');
-      /*
-       * ⚠️ **诊断日志**（2026-10-19）：P3 实测没触发，先确认读到了什么。
-       * 排查完可以删。
-       */
-      this.emit('info', `[Jev模式] 选币配置 = ${selectMode}（原始值 ${JSON.stringify(getJevOptionRaw('coin_select'))}）`);
+      
       if (selectMode !== 'code') {
         const jevRerank = this.deps.model as {
           rerankByJev?: (
