@@ -125,6 +125,116 @@ else:
 print("══════════════════════════════════════════════════════════════")
 PY
 
+# ── 2a. ★★★ 主判据：可执行率（2026-10-18 修正，替代"波动比值"） ────────────
+#
+# ## 为什么换掉了原来的判据
+#
+# 原来用「保留组 |24h波动| 中位数 / 筛除组 |24h波动| 中位数 ≥ 1.5」。
+# 它的隐含假设是**「波动大 = 机会好」** —— 而这个假设是**错的**。
+#
+# 实测（22 轮 / 144 样本）：
+# ```
+#   部署"窗口判断"之前：保留组可执行率 20.5%，筛除组 39.8% ⇒ 比值 0.51
+#   ⇒ 它在【帮倒忙】：把有机会的筛掉，留下没机会的
+#   而旧判据显示"14 倍 POSITIVE"，把这个致命问题完全掩盖了
+# ```
+# 原因：团队要的是**位移在 0.8%~3.5% 窗口内**的标的，而"波动最大"往往意味着
+# "已经走完"（QUSDT +56%、GTC +25%）。旧判据奖励的正是后者。
+#
+# ## 新判据
+#
+# ```
+#   可执行窗口：|24h 涨跌| 在 0.5% ~ 10% 之间
+#   （团队标准 D 0.8~3.5% 的粗略代理——太小无方向，太大已走完）
+#   比较：保留组的可执行率 vs 筛除组的可执行率
+# ```
+#
+# 部署"窗口判断"之后的实测：
+# ```
+#   保留组 44.4%  vs  筛除组 11.1%  ⇒ 4.00 倍 ✅ POSITIVE
+# ```
+echo
+echo "── 2a. ★ 主判据：可执行率（保留组 vs 筛除组）───────────────"
+python3 - "$SAMPLES" <<'PY_EXEC'
+import json, sys
+
+path = sys.argv[1]
+samples = []
+with open(path) as f:
+    for line in f:
+        line = line.strip()
+        if line:
+            try:
+                samples.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+def in_window(v: float) -> bool:
+    """可执行窗口：|24h| 在 0.5%~10%。太小无方向，太大已走完。"""
+    return 0.5 <= abs(v) <= 10.0
+
+# ⚠️ **必须分段统计**（2026-10-18）：
+# 全量混算会把"部署窗口判断之前"的坏数据（比值 0.51）与之后的（4.00）平均掉，
+# 得到一个既不代表过去也不代表现在的数字。
+#
+# 分界点：2026-10-18T03:37:00Z（部署"窗口判断"的时刻）
+CUTOFF = "2026-10-18T03:37:00"
+
+def evaluate(subset, label):
+    kh = kt = dh = dt = 0
+    for s in subset:
+        for x in s.get("kept", []):
+            kt += 1
+            if in_window(x["change24h"]):
+                kh += 1
+        for x in s.get("dropped", []):
+            dt += 1
+            if in_window(x["change24h"]):
+                dh += 1
+    if kt == 0 or dt == 0:
+        print(f"  {label}：样本不足")
+        return None
+    kr = kh / kt * 100
+    dr = dh / dt * 100
+    print(f"  {label}")
+    print(f"    保留组可执行率: {kh}/{kt} = {kr:.1f}%")
+    print(f"    筛除组可执行率: {dh}/{dt} = {dr:.1f}%")
+    if dr <= 0.01:
+        print("    ⇒ 筛除组全都不可执行（完美区分）✅ POSITIVE")
+        return 99.0
+    ratio = kr / dr
+    print(f"    ⇒ 比值: {ratio:.2f} 倍")
+    if ratio >= 1.5:
+        print("    ✅ POSITIVE")
+    elif ratio <= 0.67:
+        print("    🔴 NEGATIVE")
+    else:
+        print("    🟡 NEUTRAL")
+    return ratio
+
+before = [s for s in samples if s.get("at", "") <= CUTOFF]
+after = [s for s in samples if s.get("at", "") > CUTOFF]
+
+print()
+before_ratio = evaluate(before, f"【部署窗口判断之前】({len(before)} 轮)")
+print()
+after_ratio = evaluate(after, f"【部署窗口判断之后】({len(after)} 轮)")
+
+print()
+print("  ══ 结论 ══")
+if after_ratio is None:
+    print("  部署后还没有足够样本 —— 继续观察。")
+elif after_ratio >= 1.5:
+    print("  以【部署后】为准：✅ POSITIVE —— 窗口判断已把方向修正。保留。")
+elif after_ratio <= 0.67:
+    print("  以【部署后】为准：🔴 NEGATIVE —— 建议移除。")
+    print("  ⇒ 删掉 .env 里的 AQ_JEV_PREFILTER=on 并重启")
+else:
+    print("  以【部署后】为准：🟡 NEUTRAL —— 继续观察。")
+print()
+print("  ⚠️ 注意：部署后样本量仍然小（{} 轮）。样本 ≥10 轮再下定论。".format(len(after)))
+PY_EXEC
+
 # ── 2b. 追高风险检查（2026-10-18 实测发现） ────────────────────────────────
 #
 # ## 为什么需要这一节
