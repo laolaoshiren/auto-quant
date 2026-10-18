@@ -1695,10 +1695,33 @@ export function createJevDecisionModel(opts: JevModeOptions): JevDecisionModel {
 
       if (candidates.length === 0) {
         /*
-         * 真的一个候选都没有（主 prompt 也没带）⇒ 这才是接线问题。
-         * **这不是"没有候选"** —— 那种情况块里是个空数组。
+         * ⚠️ **降级为 info**（2026-10-19 实测后修正）。
+         *
+         * ## 原来为什么是 warn
+         *
+         * 我以为"没有块"一定意味着 `autoTrader` 忘了追加 `<JEV_INPUT>` ——
+         * 那是接线断了，必须看得见。
+         *
+         * ## 实测发现它不是故障
+         *
+         * 线上日志（`22:43:44`）：
+         * ```
+         *   jev | 拿不到候选（×2）
+         *   trader:agent | 机器人 #13 完成策略审视（触发 rejections / single）：failed，0 步
+         *   jev | 候选 8 · 开仓 6 · ...        ← 4 秒后正常
+         * ```
+         * 那两次来自**策略审视**（`trader:agent` 的复盘调用）——
+         * 它复用同一个 `JevDecisionModel`，但它的 prompt **本来就不含候选块**
+         *（它不是在做开仓决策）。
+         *
+         * ⇒ 那是**正常调用路径**，报 warn 会让操作员以为出故障了。
+         *   改成 info，并在文案里说清"复盘/审视路径"。
+         *
+         * ⚠️ 真正的接线断掉会以**另一种形式**暴露：`autoTrader` 那侧的
+         *   `extractJevInput()` 返回空数组，而本轮候选池非空 —— 那会在
+         *   决策日志里表现为"候选 0"，比这条更直接。
          */
-        log.warn('[Jev模式] 拿不到候选（prompt 无块、也没有上一轮的缓存）—— 本轮无决策');
+        log.info('[Jev模式] 本次调用无候选块（复盘/审视路径的正常情况）—— 本轮无决策');
         return {
           /*
            * ⚠️ **空决策也要带 `<decision>` 块**（理由见下面正常路径那段）：
