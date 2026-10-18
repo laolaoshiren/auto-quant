@@ -122,6 +122,49 @@ const TRANSIENT_BAD_REQUEST_MARKERS = [
   'busy',
 ];
 
+/**
+ * **未归类的网关错误文案**的被动观测钩子（2026-10-18 · magpie 依赖治理）。
+ *
+ * ## 它解决什么问题
+ *
+ * magpie 自动更新、一天多版。如果它把某句错误文案换了措辞（例如把
+ * `模型不可用` 改成 `该模型暂不可用`），上面那个 `TRANSIENT_BAD_REQUEST_MARKERS`
+ * 就会匹配不上 —— 于是一个**本可重试**的 400 被判成 `bad_request`（不可重试），
+ * 那一次请求被放弃，操作员看到硬失败。
+ *
+ * **这个仓库已经为此付过两次代价**（见上面那段注释）。
+ *
+ * ## 为什么是"被动"而不是"主动探测"
+ *
+ * 主动探测要制造故障（发一个必然失败的请求），那既花额度又会污染日志。
+ * 而**真实流量里本来就有失败** —— 只需要在分类的那一刻顺手记一笔：
+ * **"这条 4xx 落到了 bad_request，但它的文案我们一个都不认识"**。
+ *
+ * 这正是性价比最高的一条：
+ * ```
+ *   不需要制造故障  →  零成本
+ *   文案一改就能发现 →  升级当天就有信号
+ *   不改任何判定     →  零风险
+ * ```
+ *
+ * ## 为什么默认关闭
+ *
+ * 它会在**每一次未归类的 4xx** 上调用回调。虽然只是记日志，但"多写几行日志"
+ * 本身就是行为变化（这个仓库的纪律：默认值必须让"什么都没设"等于"完全不动"）。
+ */
+let unrecognizedErrorSink: ((detail: { status: number; body: string }) => void) | null = null;
+
+/**
+ * 注册"未归类的网关错误文案"的接收器。
+ *
+ * ⚠️ 传 `null` 取消注册。**不注册时完全不产生副作用**（连字符串拼接都不做）。
+ */
+export function setUnrecognizedErrorSink(
+  sink: ((detail: { status: number; body: string }) => void) | null,
+): void {
+  unrecognizedErrorSink = sink;
+}
+
 export function kindForStatus(status: number | null, haystack = ''): LlmErrorKind {
   if (status === null) return 'unknown';
   if (status === 401) return 'auth';
@@ -147,7 +190,17 @@ export function kindForStatus(status: number | null, haystack = ''): LlmErrorKin
   if (status >= 400) {
     const lower = haystack.toLowerCase();
     const transient = TRANSIENT_BAD_REQUEST_MARKERS.some((m) => lower.includes(m.toLowerCase()));
-    return transient ? 'overloaded' : 'bad_request';
+    if (transient) return 'overloaded';
+    /*
+     * ⚠️ **落进 bad_request 说明"这句文案我们不认识"**（2026-10-18）。
+     *
+     * 这是"magpie 换了措辞"的唯一被动信号：如果它本来是可用性短语
+     *（该重试），改成我们没登记的写法后就会掉进这里，被当成不可重试。
+     *
+     * 只在注册了 sink 时才做事（默认不注册 ⇒ 零开销、零行为变化）。
+     */
+    unrecognizedErrorSink?.({ status, body: haystack.slice(0, 200) });
+    return 'bad_request';
   }
   return 'unknown';
 }

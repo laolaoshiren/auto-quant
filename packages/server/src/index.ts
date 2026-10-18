@@ -4,6 +4,7 @@ import { Vault } from './crypto/vault.js';
 import { closeDb, initDb } from './db/index.js';
 import { dbPath, ensureDataDir, env, resolveJwtSecret, resolveMasterKey } from './env.js';
 import { createLogger } from './logger.js';
+import { setUnrecognizedErrorSink } from './llm/errors.js';
 import { buildServer, bootstrapOwnerAccount } from './api/server.js';
 import { BalanceService } from './services/balance.js';
 import { TraderManager } from './trader/manager.js';
@@ -166,6 +167,28 @@ async function main(): Promise<void> {
           log.warn(`网关契约自检失败（不影响服务）：${(error as Error).message}`);
         });
       }, 60_000);
+
+      /*
+       * ⚠️ **同时挂上"未归类错误文案"的被动接收器**（2026-10-18）。
+       *
+       * 契约自检是**主动探针**（每 60 分钟打两个 GET），能发现"端点没了 / 形状变了"；
+       * 但它**发现不了"错误文案换了措辞"** —— 那需要真实失败才会显现。
+       *
+       * 这个接收器补上那一块：真实流量里出现"4xx 但文案一个都不认识"时记一笔。
+       * 两者合起来才完整：主动查形状、被动查文案。
+       *
+       * 同一个开关控制（`AQ_GATEWAY_CONTRACT=on`）—— 它们都是"诊断"，别拆成两个概念。
+       */
+      setUnrecognizedErrorSink(({ status, body }) => {
+        runtimeLogs.write(
+          null,
+          'warn',
+          'gateway_contract',
+          `[网关契约] 未归类的网关错误文案（HTTP ${status}）：${body} —— ` +
+            '如果这是"临时不可用"类的话术，它会被当成不可重试而放弃那次请求。' +
+            '检查 llm/errors.ts 的 TRANSIENT_BAD_REQUEST_MARKERS 是否需要补上它。',
+        );
+      });
     }
   }, 2000);
 
