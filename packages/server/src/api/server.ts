@@ -2421,11 +2421,51 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * 所以这里用**可选的 `markPriceOf`** 表达那唯一的差别：给得出就算真值，
    * 给不出就回落成占位零（与改动前逐字段一致）。
    */
+  /*
+   * ⚠️⚠️ **模拟盘的保证金模式从开仓单里取**（2026-10-18 修）
+   *
+   * ## 用户报的问题
+   *
+   * 持仓页「保证金模式」一列永远显示 `—`（用户截图指出）。
+   *
+   * ## 根因
+   *
+   * 真实盘走 `liveExchangeView`，那里的 `marginType` 读自交易所
+   * （`/fapi/v2/positionRisk`，实时值）。**而模拟盘走这条 `localPositionsFor`，
+   * 它只读本地 `positions` 表 —— 那张表没有 `margin_type` 列**（只有 `margin_used`），
+   * 所以 `marginType` 恒为 `undefined`，前端只能显示 `—`。
+   *
+   * ## 为什么 `#11` 一直是 `—`
+   *
+   * `#11`（团队测试）= `dry_run = 1` ⇒ 它是**模拟盘**，交易所那边**根本没有持仓**
+   * （实测账户 2「gaoshou3」在 `positionRisk` 里返回空）。
+   * 所以"实时读交易所"这条路对它永远读不到东西 —— 不是交易所没返回，
+   * 而是**这条路径压根不该用它**。
+   *
+   * ## 取值来源
+   *
+   * `orders.margin_type` —— 开仓那一刻由服务端记下的值（`setMarginType` 成功后才写）。
+   * `orderStore.latestMarginTypeBySymbol()` 取每个标的**最新一条带模式的订单**，
+   * 这正是"该标的当前的模式"最接近的事实。
+   *
+   * ⚠️ 取不到时保持 `undefined`（界面 `—`），**绝不默认成 `'cross'`** ——
+   * 与 `normalizeMarginMode()` 的约定一致：认不出就是不知道。
+   */
+  const paperMarginTypes = (traderId: number): Map<string, string> => {
+    try {
+      return orderStore.latestMarginTypeBySymbol(traderId);
+    } catch {
+      /* 读不到就当没有 —— 界面显示 `—`，比显示一个猜的值好。 */
+      return new Map<string, string>();
+    }
+  };
+
   const localPositionsFor = (
     traderId: number,
     markPriceOf?: ReadonlyMap<string, number>,
-  ): PositionView[] =>
-    positionStore.open(traderId).map((row) => {
+  ): PositionView[] => {
+    const marginBySymbol = paperMarginTypes(traderId);
+    return positionStore.open(traderId).map((row) => {
       const mark = markPriceOf?.get(row.symbol);
       const hasMark = typeof mark === 'number' && Number.isFinite(mark) && mark > 0;
       /*
@@ -2455,6 +2495,8 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
           unrealizedPnlPercent: 0,
           peakPnlPercent: row.peak_pnl_percent,
           marginUsed: row.margin_used,
+          /* 模拟盘的保证金模式来自开仓单 —— 见 `localPositionsFor` 函数头那段说明。 */
+          marginType: normalizeMarginMode(marginBySymbol.get(row.symbol)) ?? undefined,
           notional: row.quantity * row.entry_price,
           stopLoss: row.stop_loss,
           takeProfit: row.take_profit,
@@ -2492,6 +2534,8 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         unrealizedPnlPercent: marginUsed > 0 ? (unrealizedPnl / marginUsed) * 100 : 0,
         peakPnlPercent: row.peak_pnl_percent,
         marginUsed,
+        /* 模拟盘的保证金模式来自开仓单 —— 见 `localPositionsFor` 函数头那段说明。 */
+        marginType: normalizeMarginMode(marginBySymbol.get(row.symbol)) ?? undefined,
         notional: row.quantity * markPrice,
         stopLoss: row.stop_loss,
         takeProfit: row.take_profit,
@@ -2499,6 +2543,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         openReasoning: row.open_reasoning,
       };
     });
+  };
 
   /** 这条只读连接拿到的账户读数形状（`AccountState` 不引新 import）。 */
   type ExchangeAccountState = Awaited<ReturnType<ExchangeConnection['broker']['getAccountState']>>;

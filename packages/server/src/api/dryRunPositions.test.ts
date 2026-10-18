@@ -61,7 +61,7 @@ import { defaultStrategyConfig } from '@aq/shared';
 
 import type { ExchangeConnection } from '../binance/bootstrap.js';
 import { Vault, hashPassword } from '../crypto/vault.js';
-import { closeDb, initDb } from '../db/index.js';
+import { closeDb, getDb, initDb } from '../db/index.js';
 import { aiModels, exchanges, positions, strategies, traders, users } from '../store/repositories.js';
 import { signToken } from './auth.js';
 import { buildServer, type ApiDependencies } from './server.js';
@@ -568,5 +568,74 @@ describe('dryRun 判据的两级回落（运行期事实优先，落库值兜底
 
     assert.equal(body.positionsSource, 'exchange');
     assert.equal(asArray(body.positions)[0]!.symbol, LIVE_SYMBOL);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  4) 模拟盘的「保证金模式」必须显示出来（2026-10-18 用户截图指出）              */
+/* -------------------------------------------------------------------------- */
+
+describe('模拟盘：保证金模式从开仓单里取（不该恒为 —）', () => {
+  /*
+   * ## 这个用例防的是什么
+   *
+   * 用户截图指出：持仓页「保证金模式」一列**永远显示 `—`**。
+   *
+   * 根因：真实盘走 `liveExchangeView`，`marginType` 读自交易所的
+   * `/fapi/v2/positionRisk`（实时值）；**而模拟盘走 `localPositionsFor`，
+   * 它只读本地 `positions` 表 —— 那张表根本没有 `margin_type` 列**
+   * （只有 `margin_used`），于是 `marginType` 恒为 `undefined`。
+   *
+   * 而模拟盘在交易所侧**本来就没有仓位**（实测 `#11` 用的账户「gaoshou3」
+   * 在 `positionRisk` 里返回空），所以"实时读交易所"这条路对它永远读不到东西。
+   *
+   * ⇒ 正确来源是 `orders.margin_type` —— 开仓那一刻由服务端记下的值。
+   */
+  it('★★★ 模拟仓能显示全仓/逐仓（来自开仓单的 margin_type）', async () => {
+    /*
+     * 造一条带 `isolated` 的开仓单 —— 真实世界里它由 `recordOrder()` 在
+     * `setMarginType` 成功之后写入。
+     */
+    /* 列名照真实 schema：`orders` 里是 `price` / `margin_used` / `margin_type`，
+     * **没有** `leverage`（杠杆在 `positions` 表上）。 */
+    const at = new Date().toISOString();
+    getDb().run(
+      `INSERT INTO orders
+         (trader_id, exchange_order_id, client_order_id, symbol, side, type,
+          purpose, status, quantity, price, margin_used, margin_type,
+          created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'BUY', 'MARKET', 'entry', 'FILLED', ?, ?, ?, 'isolated', ?, ?)`,
+      traderId,
+      `paper-ex-${Date.now()}`,
+      `paper-cl-${Date.now()}`,
+      PAPER_SYMBOL,
+      PAPER_QTY,
+      PAPER_ENTRY,
+      PAPER_MARGIN,
+      at,
+      at,
+    );
+
+    const result = await get(positionsUrl());
+    assert.equal(result.statusCode, 200, JSON.stringify(result.body));
+    const rows = asArray(result.body);
+    assert.equal(rows.length, 1, JSON.stringify(result.body));
+    assert.equal(
+      rows[0]!.marginType,
+      'isolated',
+      '★ 模拟盘的保证金模式必须显示出来（来源是开仓单的 margin_type）；' +
+        `实际 ${JSON.stringify(rows[0]!.marginType)} —— 这一格恒为 undefined 时界面只能是 —`,
+    );
+  });
+
+  it('★★ 没有开仓单时仍显示 —（绝不猜成 cross）', async () => {
+    /* 表里没有任何带 margin_type 的订单 ⇒ 应当保持 undefined，不编造。 */
+    const result = await get(positionsUrl());
+    const rows = asArray(result.body);
+    assert.equal(
+      rows[0]!.marginType,
+      undefined,
+      '★ 认不出就必须是「不知道」—— 编一个 cross 会让用户以为仓位是全仓',
+    );
   });
 });
