@@ -500,3 +500,12 @@ export function listJevOptions(): JevOptionState[] {
     };
   });
 }
+
+/** 诊断用：原始读取（不回落默认值）。 */
+export function getJevOptionRaw(key: string): string | undefined {
+  try {
+    return settings.get(`jev:${key}`);
+  } catch {
+    return undefined;
+  }
+}
