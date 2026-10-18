@@ -34,7 +34,14 @@ sqlite3 -readonly "file:$DB?mode=ro" "
   SELECT id || '~' || created_at || '~' || message
     FROM runtime_logs
    WHERE scope='jev' AND level='info'
-     AND (message LIKE '%[Jev] 保留：%' OR message LIKE '%[Jev] 筛除：%')
+     -- ⚠️ 这里用 保留：/筛除： 作条件，不要加 [Jev] 前缀（2026-10-18 修）
+     -- 因为格式演进后前缀变了：
+     --   旧格式 A: [Jev] 保留：A B C            <- 有 [Jev] 前缀
+     --   旧格式 B: [Jev] 保留：A B C | 筛除：X  <- 有 [Jev] 前缀
+     --   新格式 C: [Jev] 20->6 个 · ... · 保留：A B C | 筛除：X  <- 没有 [Jev] 保留：这个连续串
+     -- 用带前缀的条件会把新格式全部漏掉 —— 实测：7 条日志里只匹配到 3 条，
+     -- 而漏掉的正是部署后的新格式，于是样本卡在 8 轮不动。
+     AND (message LIKE '%保留：%' OR message LIKE '%筛除：%')
    ORDER BY id ASC LIMIT 60;
 " > "$tmp"
 
