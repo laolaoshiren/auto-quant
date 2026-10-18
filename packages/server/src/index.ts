@@ -292,7 +292,7 @@ async function runGatewayContractCheck(): Promise<void> {
       null,
       'info',
       'gateway_contract',
-      `[网关契约] 自检通过（${report.modelCount ?? 0} 个模型 · ${report.requests} 次请求 · ${Date.now() - report.at}ms）。`,
+      `[网关契约] 自检通过（${report.modelCount ?? 0} 个模型 · ${report.requests} 次请求 · ${Date.now() - report.at}ms · magpie ${report.gatewayVersion ?? '未知'}）。`,
     );
     return;
   }

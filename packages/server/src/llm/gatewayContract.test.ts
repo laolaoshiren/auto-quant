@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { contractMessages, probeGatewayContract, type ContractReport } from './gatewayContract.js';
+import { contractMessages, probeGatewayContract, readGatewayVersion, type ContractReport } from './gatewayContract.js';
 
 const BASE = 'http://gw.test:3425/v1';
 const KEY = 'mk-test';
@@ -164,4 +164,39 @@ test('★★ 指纹只由"哪些探针报了什么问题"决定（同问题不�
     b.fingerprint,
     '★ 都是"models.shape 坏了"⇒ 指纹相同（去重才不会每次刷一条）',
   );
+});
+
+/*
+ * ★★ 网关版本读取（2026-10-18 · "magpie 自动更新"的预警信号）
+ *
+ * ## 为什么值得一条测试
+ *
+ * 用户提醒过 magpie 一天多版。**"版本变了"是唯一能提前预警的信号** ——
+ * 某天开始出问题时，翻日志能看到"问题是从 0.1.X → 0.1.Y 那次开始的"。
+ *
+ * 而如果这个函数在"读不到"时**编一个默认版本号**，那条线索就变成假的：
+ * 所有日志都会显示同一个版本，永远看不出变化。
+ * ⇒ 所以"读不到必须返回 null"是这条测试的核心。
+ */
+test('★★★ 读不到版本时返回 null（绝不编默认值）', () => {
+  assert.equal(
+    readGatewayVersion(() => { throw new Error('ENOENT'); }, ['/nope/1', '/nope/2']),
+    null,
+    '★ 编一个版本号会让"版本变化"这条线索永远消失',
+  );
+  assert.equal(readGatewayVersion(() => '   ', ['/empty']), null, '空白也算读不到');
+});
+
+test('★★ 读到就用它；多个候选路径按顺序取第一个有效的', () => {
+  const files: Record<string, string> = {
+    '/a': '',
+    '/b': 'v0.1.1285\n',
+    '/c': 'v0.1.9999',
+  };
+  const read = (p: string): string => {
+    if (!(p in files)) throw new Error('ENOENT');
+    return files[p]!;
+  };
+  assert.equal(readGatewayVersion(read, ['/a', '/b', '/c']), 'v0.1.1285', '★ 跳过空文件，取第一个有效的');
+  assert.equal(readGatewayVersion(read, ['/missing', '/c']), 'v0.1.9999', '★ 跳过读不到的路径');
 });

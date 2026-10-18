@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 /**
  * **magpie 网关的契约自检**（P0 免费层）。
  *
@@ -57,6 +59,20 @@ export interface ContractReport {
   fingerprint: string;
   /** 网关报出的模型总数（`null` = 没拿到）。 */
   modelCount: number | null;
+  /**
+   * **网关版本**（来自 magpie 的 `last-version` 文件）。
+   *
+   * ## 为什么要它
+   *
+   * 用户提醒过：magpie 自动更新、一天多版。而"版本变了"是**唯一**能提前预警的信号 ——
+   * 新版发布当天就可能改掉某个端点或字段。
+   *
+   * ⇒ 每次自检都带上版本号写进日志。这样"某天开始出问题"时，
+   *   翻日志就能看到"问题是从 0.1.1285 → 0.1.1286 那次开始的"，而不必猜。
+   *
+   * `null` = 读不到（容器内路径可能不同，或没挂载）。**读不到不算错。**
+   */
+  gatewayVersion: string | null;
 }
 
 export interface ProbeInput {
@@ -70,9 +86,47 @@ export interface ProbeInput {
   timeoutMs?: number;
   /** 测试注入。 */
   fetchImpl?: typeof fetch;
+  /** 测试注入：版本读取函数（默认读 `last-version` 文件）。 */
+  versionReader?: () => string | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 8_000;
+
+/**
+ * **读 magpie 的版本号**（`last-version` 文件，9 字节的纯文本）。
+ *
+ * 候选路径按顺序试（容器挂载点与原生安装各一个）：
+ * ```
+ *   /var/lib/docker/volumes/magpie-config/_data/magpie/last-version   ← Docker 卷
+ *   ~/.config/magpie/last-version                                      ← 原生安装
+ * ```
+ *
+ * ⚠️ **读不到返回 `null`，绝不编一个版本号** —— 与"未知不等于默认值"同一纪律。
+ * 这个函数**永不抛**。
+ */
+export function readGatewayVersion(
+  readFile: (path: string) => string = (p) => {
+    try {
+      return readFileSync(p, 'utf8');
+    } catch {
+      return '';
+    }
+  },
+  candidates: readonly string[] = [
+    '/var/lib/docker/volumes/magpie-config/_data/magpie/last-version',
+    `${process.env['HOME'] ?? '/root'}/.config/magpie/last-version`,
+  ],
+): string | null {
+  for (const path of candidates) {
+    try {
+      const raw = readFile(path).trim();
+      if (raw.length > 0 && raw.length <= 32) return raw;
+    } catch {
+      /* 这个路径读不到，试下一个。 */
+    }
+  }
+  return null;
+}
 
 /** 把 baseUrl 规范化成"不带尾斜杠"，并给出到 `/v1` 为止的根。 */
 function normalizeBase(baseUrl: string): string {
@@ -147,6 +201,7 @@ export async function probeGatewayContract(input: ProbeInput): Promise<ContractR
       ],
       fingerprint: 'config',
       modelCount: null,
+      gatewayVersion: (input.versionReader ?? readGatewayVersion)(),
     };
   }
 
@@ -263,6 +318,7 @@ export async function probeGatewayContract(input: ProbeInput): Promise<ContractR
     mismatches,
     fingerprint,
     modelCount,
+    gatewayVersion: (input.versionReader ?? readGatewayVersion)(),
   };
 }
 
