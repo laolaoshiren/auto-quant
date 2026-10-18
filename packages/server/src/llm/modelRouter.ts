@@ -541,7 +541,20 @@ export class ModelRouter {
          * ⇒ `recordProviderFailure` 按 `provider/` 前缀匹配，直接用 **30 分钟**冷却
          *   （不是模型级的 5 分钟），一次 403 就把整家的候选一起冷下来。
          */
-        if (statusOf(error) === 403) {
+        /*
+         * ⚠️ 临时诊断（验证完删掉）：确认 `statusOf` 到底读到了什么。
+         *
+         * 现象：部署后 403 仍在同一模型上反复出现（`beam-free` 在 6 分钟内撞了 5 次），
+         * 说明熔断没生效 —— 要么 `statusOf` 拿不到 403（error 被包装了），
+         * 要么 `recordProviderFailure` 的前缀匹配没命中。
+         */
+        const diagStatus = statusOf(error);
+        if (verdict.kind === 'auth' || diagStatus === 403) {
+          console.log(
+            `[DIAG-403] model=${modelId} statusOf=${String(diagStatus)} kind=${verdict.kind}`,
+          );
+        }
+        if (diagStatus === 403) {
           this.health.recordProviderFailure(modelId, verdict.reason, ladder);
         }
 
