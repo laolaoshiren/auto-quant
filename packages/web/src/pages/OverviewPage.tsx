@@ -848,17 +848,29 @@ function ModeBreakdown({
   traders: TraderRow[];
   onOpen: (id: number) => void;
 }): React.ReactElement {
+  /*
+   * ⚠️ **这里必须列出每一种 TraderMode**（2026-10-19 用户报"显示不对"）。
+   *
+   * 原来只有三种，加 `'jev'` 之后：一台 `mode=jev` 的机器人（`#13 JEV测试`）
+   * **不会出现在任何分组里** —— 总览页看起来像"少了一台机器人"，
+   * 而它其实正在运行。这类"数据在、界面看不见"的缺陷比报错更危险。
+   */
   const groups: Array<{ mode: TraderMode; label: string; hint: string }> = [
     /* 名字登记在 `lib/glossary.ts`（唯一登记处）—— 这里不许再写字面量。 */
     { mode: 'strategy', label: MODE_LABEL.strategy, hint: MODE_HINT.strategy },
     { mode: 'ai_managed', label: MODE_LABEL.ai_managed, hint: MODE_HINT.ai_managed },
     { mode: 'ai_team', label: MODE_LABEL.ai_team, hint: MODE_HINT.ai_team },
+    { mode: 'jev', label: MODE_LABEL.jev, hint: MODE_HINT.jev },
   ];
 
   return (
     <section aria-labelledby="overview-modes">
       <SectionLabel title="运行模式" />
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      {/*
+        ⚠️ 四列而不是三列（加 `jev` 之后）——
+        沿用 `sm:grid-cols-3` 会让第四项单独占一整行，看起来很怪。
+      */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {groups.map((g) => {
           const mine = traders.filter((t) => t.mode === g.mode);
           const running = mine.filter((t) => t.status === 'running');

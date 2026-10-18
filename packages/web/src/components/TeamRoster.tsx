@@ -255,25 +255,48 @@ export function TeamRoster({
   );
 }
 
-/** 模式徽章 —— 三种模式在界面上要能一眼区分（用户要求）。 */
+/**
+ * 模式徽章 —— **每种模式在界面上都要能一眼区分**（用户要求）。
+ *
+ * ## ⚠️ 这里曾经是 `if/if/return` 的兜底写法（2026-10-19 用户报 BUG）
+ *
+ * 原实现：
+ * ```tsx
+ *   if (mode === 'ai_team') → 「团队」
+ *   if (mode === 'ai_managed') → 「智能托管」
+ *   return 「固定策略」          ← 所有其它值都落到这里
+ * ```
+ * 加 `'jev'` 之后，一台 `mode=jev` 的机器人（线上实测 `#13 JEV测试`）
+ * **被显示成「固定策略」** —— 用户截图指出「显示不对啊」。
+ *
+ * ## 为什么现在用 `Record<TraderMode, …>` 而不是继续 if 链
+ *
+ * 兜底 `return` 是**静默错误**：它让"没处理的新值"看起来像"固定策略"，
+ * 而那是一个**语义完全不同**的模式。改成 `Record` 之后，
+ * 少写一个键就**编译不过** —— 与 `glossary.ts` 的 `MODE_LABEL` 同一条纪律
+ *（那里写着"把静默降级变成编译期就红"）。
+ *
+ * ⚠️ 徽章的**视觉样式**仍按模式区分（团队用 accent、托管用 ink-soft、
+ * 其余用 ink-faint），所以不能直接复用 `MODE_LABEL` 的字符串
+ *（那个是给下拉框用的长名字，徽章里要短）。
+ */
+export const MODE_BADGE: Record<TraderRow['mode'], { text: string; className: string }> = {
+  ai_team: { text: '团队', className: 'bg-accent/15 text-accent' },
+  ai_managed: { text: '智能托管', className: 'bg-base-800 text-ink-soft' },
+  strategy: { text: '固定策略', className: 'bg-base-800 text-ink-faint' },
+  /*
+   * ⚠️ **必须标明实验性**（用户明确要求这个模式是实验性）。
+   * 用 warn 色让它在列表里显眼 —— 它的盈利表现完全未知，
+   * 不该和另外三种看起来一样。
+   */
+  jev: { text: 'JEV 实验', className: 'bg-warn/15 text-warn' },
+};
+
 export function ModeBadge({ mode }: { mode: TraderRow['mode'] }): React.ReactElement {
-  if (mode === 'ai_team') {
-    return (
-      <span className="rounded bg-accent/15 px-1.5 py-0.5 text-xs font-medium text-accent">
-        团队
-      </span>
-    );
-  }
-  if (mode === 'ai_managed') {
-    return (
-      <span className="rounded bg-base-800 px-1.5 py-0.5 text-xs font-medium text-ink-soft">
-        智能托管
-      </span>
-    );
-  }
+  const badge = MODE_BADGE[mode];
   return (
-    <span className="rounded bg-base-800 px-1.5 py-0.5 text-xs font-medium text-ink-faint">
-      固定策略
+    <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${badge.className}`}>
+      {badge.text}
     </span>
   );
 }

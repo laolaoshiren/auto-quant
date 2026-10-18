@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { groupByRole } from './TeamRoster.js';
+import { MODE_BADGE, groupByRole } from './TeamRoster.js';
 
 /** 造一条 cycle_step。 */
 function step(role: string | null, message: string, phase?: string, level = 'info') {
@@ -100,4 +100,55 @@ test('★ lastAt 是最后一步的时刻（界面显示"最近动作时间"）'
     { at: '2026-01-01T12:00:05.000Z', message: 'b', role: 'bull', phase: 'debate', level: 'info' },
   ]);
   assert.equal(grouped[0]!.lastAt, '2026-01-01T12:00:05.000Z');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  模式徽章：每一种模式都要有自己的名字（2026-10-19 用户报"显示不对"）           */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 每一种 TraderMode 都必须有自己的徽章（不许落到兜底分支）', () => {
+  /*
+   * ## 这个用例防的是什么
+   *
+   * 用户截图指出：`#13 JEV测试` 的模式徽章显示成「固定策略」。
+   *
+   * 根因是原来的实现用 `if/if/return` 兜底：
+   * ```
+   *   if (mode === 'ai_team')    → 「团队」
+   *   if (mode === 'ai_managed') → 「智能托管」
+   *   return 「固定策略」           ← jev 落到这里
+   * ```
+   * 兜底 `return` 是**静默错误**：它让"没处理的新值"看起来像另一个模式，
+   * 而那个模式的语义完全不同（固定策略 vs Jev 自主判断）。
+   *
+   * ⇒ 现在用 `Record<TraderMode, …>`，少写一个键就编译不过；
+   *   这个用例再从**运行时**钉一遍，防止有人改回 if 链。
+   */
+  const modes = ['strategy', 'ai_managed', 'ai_team', 'jev'] as const;
+  for (const mode of modes) {
+    const badge = MODE_BADGE[mode];
+    assert.ok(badge !== undefined, `★ ${mode} 没有徽章定义`);
+    assert.ok(badge.text.trim().length > 0, `★ ${mode} 的徽章文案不能为空`);
+    assert.ok(badge.className.trim().length > 0, `★ ${mode} 的徽章样式不能为空`);
+  }
+
+  /*
+   * ⚠️ **徽章文案必须互不相同** —— 两个模式显示同一个名字，
+   * 等于界面上分不出它们（那正是这个 bug 的本质）。
+   */
+  const texts = modes.map((m) => MODE_BADGE[m].text);
+  assert.equal(
+    new Set(texts).size,
+    texts.length,
+    `★ 徽章文案重复了：${texts.join(' / ')}`,
+  );
+
+  /*
+   * ⚠️ JEV 模式的徽章**必须标明实验性** —— 用户明确要求这个模式是实验性的，
+   * 而它的盈利表现完全未知（`docs/JEV-MODE-DESIGN.md` §八）。
+   */
+  assert.ok(
+    /实验/.test(MODE_BADGE.jev.text),
+    '★ JEV 模式的徽章必须标明它是实验性的',
+  );
 });
