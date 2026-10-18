@@ -1905,10 +1905,72 @@ async function runTradingDeskInner(input: {
          * ⚠️ 绝不复用 `s.text` 原文：单个切片约 1 万字符，18 个就是 18 万，
          * 对 Jev 是浪费，也会让单次调用逼近它的输入上限。
          */
-        const jevInputs: JevInput[] = allSlices.map((s) => ({
-          symbol: s.symbol ?? 'UNKNOWN',
-          digest: compactSeriesLines(s.text, 5),
-        }));
+        /*
+         * ⚠️⚠️ **在 digest 前面显式写一行"窗口判断"**（2026-10-18 实测后加）
+         *
+         * ## 为什么
+         *
+         * 实测 21 轮后发现 Jev 有**系统性追高**：保留组里 82% 的标的是
+         * 24h |涨跌| > 10%（已经走完的行情）。例：
+         * ```
+         *   Jev 保留：QUSDT +56%  GTCUSDT +25%  BTWUSDT +16%  ETHUSDT -0.4%  NEARUSDT -1.5%  ICNTUSDT -19%
+         *   而按团队的入场标准（D 0.8~3.5%、ATR ≤3.5%），6 个里只有 NEAR 可执行
+         * ```
+         * 原因不是 Jev 差 —— 我给的问题是「挑出**今天有波动**的标的」，而"波动大"
+         * 在 24h 尺度上**同时包含**「刚启动」与「已经走完」。它分不清，而分不清是信息不足。
+         *
+         * ## 做法
+         *
+         * 把团队自己的判据**算好**放在 digest 最前面，让 Jev 不用自己推：
+         * ```
+         *   窗口判断：24h 涨跌 -1.51%（在合理区间内）· ATR 未知
+         * ```
+         * ⚠️ **这是"给 Jev 更多信息"，不是"让它算"** —— TypeSafe 官方明确说
+         * Jev 的弱点是算术与计数，而"算好再喂"正是规避它的正确姿势。
+         *
+         * ⚠️ **只在能可靠解析出数字时才加这一行**；解析不出来就不加（宁可少一句提示，
+         * 也不要给一个错的判断）。
+         */
+        const windowHint = (text: string): string => {
+          /* 从 headline 里抠 `24h_change` 与 `atr_percent`（存在才用）。 */
+          const pct = /24h[_ ]change[^-\d+]{0,10}([-+]?\d+(?:\.\d+)?)\s*%/i.exec(text);
+          const atr = /\batr(?:14)?[_ ]?(?:percent|pct)?[^-\d+]{0,10}([-+]?\d+(?:\.\d+)?)\s*%/i.exec(text);
+          if (pct === null && atr === null) return '';
+          const parts: string[] = [];
+          if (pct !== null) {
+            const v = Number(pct[1]);
+            if (Number.isFinite(v)) {
+              /*
+               * 团队的可执行窗口（来自策略）：位移 0.8%~3.5%。
+               * 这里用 **24h 涨跌** 作代理（精确的 D 值在切片里，但格式不固定）——
+               * 它足够区分"刚启动"（通常 <10%）、"已经走完"（>20%）、"死水"（<0.5%）。
+               */
+              const verdict =
+                Math.abs(v) < 0.5
+                  ? '几乎不动（无方向）'
+                  : Math.abs(v) <= 10
+                    ? '在合理区间内'
+                    : '已大幅移动（机会可能已过去）';
+              parts.push(`24h 涨跌 ${v >= 0 ? '+' : ''}${v.toFixed(2)}%（${verdict}）`);
+            }
+          }
+          if (atr !== null) {
+            const a = Number(atr[1]);
+            if (Number.isFinite(a)) {
+              const verdict = a <= 3.5 ? '可执行' : '过高（风险失控）';
+              parts.push(`ATR ${a.toFixed(2)}%（${verdict}）`);
+            }
+          }
+          return parts.length > 0 ? `窗口判断：${parts.join(' · ')}\n` : '';
+        };
+        const jevInputs: JevInput[] = allSlices.map((s) => {
+          const digest = compactSeriesLines(s.text, 5);
+          const hint = windowHint(digest);
+          return {
+            symbol: s.symbol ?? 'UNKNOWN',
+            digest: hint === '' ? digest : `${hint}${digest}`,
+          };
+        });
         const picked = await prefilterSymbols(jevInputs, {
           enabled: true,
           topN: jevConfig.topN,
