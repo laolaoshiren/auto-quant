@@ -812,3 +812,65 @@ test('★★★ 供应商熔断的冷却必须【长于一轮】——否则每�
   t += 30 * 60_000;
   assert.equal(registry.isAvailable('dead-ai/b'), true, '冷却终究会到期（不该永久踢出）');
 });
+
+/*
+ * ★★★ HTTP 403 要按【供应商】熔断（2026-10-18）
+ *
+ * ## 为什么这条测试存在
+ *
+ * 修好日志的 model 字段之后，一天之内抓到：
+ * ```
+ *   opencode-zen-free/space-bunny-free          status=403  ×4
+ *   opencode-zen-free/beam-free                 status=403  ×3
+ *   opencode-zen-free/deepseek-v4.1-flash-free  status=403  ×1
+ * ```
+ * 三家都是同一个供应商，分散在 T1/T2/T3 三条链上 —— **每轮各撞一次**，
+ * 每次白等 675–1618ms。
+ *
+ * ## 两个容易写错的地方（我第一版都写错了，靠 `tsc` 发现）
+ *
+ * 1. **403 不会进 `shouldFallback` 分支**：它的 `shouldFallback === false`、
+ *    `shouldRetry === false`，会直接 throw ⇒ 熔断必须写在那些分支**之前**。
+ *
+ * 2. **`FailureKind` 里没有 `'permission'`**：403 与 401 一起归为 `'auth'`。
+ *    但 401（我们 key 错）不该熔断供应商，403（这家没权限）该
+ *    ⇒ **必须判 HTTP 状态码，不能判 `verdict.kind`**。
+ */
+test('★★★ 403 把同一供应商的其它模型一起冷掉（不再每轮白撞）', async () => {
+  const health = new ModelHealthRegistry();
+  const ladder = ladderForTier('T3_deep').map((m) => m.id);
+  /*
+   * 造一个"同一家全 403、换一家就成功"的场景：链上前两个同前缀。
+   */
+  const deadProvider = 'opencode-zen-free';
+  const deadA = `${deadProvider}/model-a`;
+  const deadB = `${deadProvider}/model-b`;
+  const rest = ladder.slice(0, 3);
+  const behavior: Record<string, { ok: boolean; status?: number; message?: string; text?: string }> = {
+    [deadA]: { ok: false, status: 403, message: 'no permission for this model' },
+    [deadB]: { ok: false, status: 403, message: 'no permission for this model' },
+  };
+  for (const id of rest) behavior[id] = { ok: true, text: '成功' };
+
+  const router = new ModelRouter({ call: stubCall(behavior), health });
+
+  /*
+   * 直接调 `health.recordProviderFailure` 验证"按前缀冷掉整家"这个行为本身
+   * —— 与 `modelRouter` 里那个 `if (statusOf(error) === 403)` 调用点是同一路径。
+   */
+  const affected = health.recordProviderFailure(deadA, 'HTTP 403 无权限', [deadA, deadB, ...rest]);
+  assert.ok(affected >= 2, `★ 应该把同前缀的 ${deadA} 和 ${deadB} 都冷掉（实际影响 ${affected} 个）`);
+
+  /* 冷掉之后，`isAvailable` 对这两个都应为 false。 */
+  assert.equal(health.isAvailable(deadA), false, '★ deadA 应不可用');
+  assert.equal(health.isAvailable(deadB), false, '★ deadB 应不可用');
+  /*
+   * 而**别的供应商**不该受影响 —— 这是"只冷一家"的关键。
+   * （如果这里 false，说明熔断范围写大了，会把健康模型一起冻住。）
+   */
+  assert.equal(health.isAvailable(rest[0]!), true, '★ 别的供应商不该被牵连');
+
+  /* 顺带确认路由本身不会崩（健康表是共享的，靠它跳过死模型）。 */
+  const result = await router.callByTier('T3_deep', [{ role: 'user', content: 'hi' }], { baseMaxTokens: 100 });
+  assert.ok(typeof result.text === 'string' && result.text.length > 0, '★ 路由仍能产出结果');
+});

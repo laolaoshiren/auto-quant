@@ -473,6 +473,78 @@ export class ModelRouter {
         });
         attempts.push({ modelId, ok: false, ms, note: verdict.reason });
 
+        /*
+         * ══════════════════════════════════════════════════════════════════════
+         *  ⚠️ **`permission`（403）要按【供应商】熔断**（2026-10-18 补）
+         * ══════════════════════════════════════════════════════════════════════
+         *
+         * ## 实测证据
+         *
+         * 修好日志的 model 字段之后（见 `api/server.ts` 的 `diagnosticTail`），
+         * 一天之内抓到：
+         * ```
+         *   opencode-zen-free/space-bunny-free          status=403  ×4
+         *   opencode-zen-free/beam-free                 status=403  ×3
+         *   opencode-zen-free/deepseek-v4.1-flash-free  status=403  ×1
+         * ```
+         * 三家都是 `opencode-zen-free` 这一个供应商的，分散在 T1/T2/T3 三条链上
+         * —— 每轮各撞一次，每次白等 **675–1618ms**。
+         *
+         * ## 为什么必须放在 `shouldFallback` **之前**
+         *
+         * `permission` 的 `shouldFallback === false`、`shouldRetry === false`
+         * ⇒ 它会一路走到最后的 `throw error`，**根本不进任何熔断分支**。
+         * （这一点是类型系统帮我发现的：把判断放进 `shouldFallback` 分支里，
+         *   `tsc` 报 `FailureKind` 与 `"permission"` 无交集。）
+         *
+         * ## 为什么按供应商熔断是对的
+         *
+         * 403 = 这家网关/账号**没有这个模型的权限**（免费额度用完、需要订阅）。
+         * 它不是"某个模型坏了"，而是**"这一家的免费池对我们关了"** ⇒
+         * 同一前缀下的其它模型大概率同样 403。
+         *
+         * `recordProviderFailure` 会按 `provider/` 前缀匹配，并直接用 **30 分钟**冷却
+         * （不是模型级的 5 分钟）。⇒ 一次 403 就把整家的候选一起冷下来。
+         *
+         * ⚠️ **`auth`（401）不在此列**：那说明我们自己配的 key 有问题，
+         *   换哪个模型都救不了，也不需要"熔断某一家"。
+         */
+        /*
+         * ⚠️ **HTTP 403 要按【供应商】熔断**（2026-10-18 补）
+         *
+         * ## 实测证据
+         *
+         * 修好日志的 model 字段之后（见 `api/server.ts` 的 `diagnosticTail`），
+         * 一天之内抓到：
+         * ```
+         *   opencode-zen-free/space-bunny-free          status=403  ×4
+         *   opencode-zen-free/beam-free                 status=403  ×3
+         *   opencode-zen-free/deepseek-v4.1-flash-free  status=403  ×1
+         * ```
+         * 三家都是 `opencode-zen-free` 这一个供应商的，分散在 T1/T2/T3 三条链上
+         * —— 每轮各撞一次，每次白等 **675–1618ms**。
+         *
+         * ## 两个"必须"
+         *
+         * 1. **必须放在 `shouldFallback` 之前**：403 的 `shouldFallback === false`、
+         *    `shouldRetry === false` ⇒ 它会一路走到最后的 `throw error`，
+         *    **根本不进任何熔断分支**。（这一点是 `tsc` 帮我发现的。）
+         *
+         * 2. **必须判状态码而不是 `verdict.kind`**：`FailureKind` 里**没有**
+         *    `'permission'` —— 403 与 401 一起被归为 `'auth'`（见 `modelHealth.ts`）。
+         *    而两者含义完全不同：
+         *    ```
+         *      401 = 我们自己配的 key 错了 → 换哪个模型都救不了，不熔断
+         *      403 = 这家没有这个模型的权限（免费额度用完）→ 同前缀的其它模型大概率一样
+         *    ```
+         *
+         * ⇒ `recordProviderFailure` 按 `provider/` 前缀匹配，直接用 **30 分钟**冷却
+         *   （不是模型级的 5 分钟），一次 403 就把整家的候选一起冷下来。
+         */
+        if (statusOf(error) === 403) {
+          this.health.recordProviderFailure(modelId, verdict.reason, ladder);
+        }
+
         if (verdict.shouldFallback) {
           this.health.recordFailure(modelId, verdict.reason);
           this.options.onFallback?.({ from: previousModel, to: modelId, verdict });
