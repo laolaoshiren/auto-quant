@@ -1557,6 +1557,13 @@ export function createJevDecisionModel(opts: JevModeOptions): JevDecisionModel {
    * 它必须在 `return` **外面** —— 否则每次调用 `complete()` 都重新从 0 开始。
    */
   let askCounter = 0;
+  /**
+   * 上一次解析到的候选（追问时复用 —— 见 complete() 里那段说明）。
+   *
+   * ⚠️ 它是**闭包变量**：同一台机器人的多次 complete() 共享它，
+   * 但主 prompt 一到就覆盖 ⇒ 不会串轮。
+   */
+  let lastCandidates: JevCandidate[] = [];
   return {
     /*
      * ⚠️ **`suggestTrailingStop` 不是 `DecisionModel` 的成员** —— 它是本模式
@@ -1575,13 +1582,46 @@ export function createJevDecisionModel(opts: JevModeOptions): JevDecisionModel {
       rerankByJev(opts, candidates, keepTop, signal),
     complete: async (_systemPrompt, userPrompt, options) => {
       const t0 = Date.now();
-      const candidates = extractJevInput(userPrompt);
+      const fromPrompt = extractJevInput(userPrompt);
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⚠️⚠️ **没有 `<JEV_INPUT>` 块时复用上一次的候选**（2026-10-19 实测抓到）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * ## 症状（线上日志）
+       *
+       * 同一秒里出现两条互相矛盾的日志：
+       * ```
+       *   21:25:32 [Jev模式] 候选 8 · 开仓 2 · 跳过 6 · 失败 0 · 2627ms   ✅
+       *   21:25:32 [Jev模式] prompt 里没有 <JEV_INPUT> 块 —— 本轮无决策    ⚠️
+       * ```
+       *
+       * ## 根因
+       *
+       * 交易循环在一轮决策之后会**追问**（日志里那句
+       * 「执行回执已追问（N 条结果交回给模型）」）—— 它把执行结果拼成
+       * **一条新的 prompt** 再问一次。
+       *
+       * 而 `<JEV_INPUT>` 块是 `autoTrader` 在**主 prompt** 上追加的，
+       * 追问那条 prompt **不含它** ⇒ 本函数拿到空候选 ⇒ 报"接线断了"。
+       *
+       * 那**不是接线断了** —— 是我误判了自己的正常调用路径。
+       *
+       * ## 修法
+       *
+       * 缓存上一次解析到的候选，追问时复用。
+       * ⚠️ 只在**同一台机器人**内复用（`lastCandidates` 是闭包变量），
+       *    而且**主 prompt 一到就覆盖** —— 所以不会串到下一轮。
+       */
+      const candidates = fromPrompt.length > 0 ? fromPrompt : lastCandidates;
+      if (fromPrompt.length > 0) lastCandidates = fromPrompt;
+
       if (candidates.length === 0) {
         /*
-         * 没有块 = 接线错了（`autoTrader` 忘了追加）。**这不是"没有候选"** ——
-         * 那种情况块里是个空数组。所以这里要 warn，让人看得见。
+         * 真的一个候选都没有（主 prompt 也没带）⇒ 这才是接线问题。
+         * **这不是"没有候选"** —— 那种情况块里是个空数组。
          */
-        log.warn('[Jev模式] prompt 里没有 <JEV_INPUT> 块 —— 接线可能断了，本轮无决策');
+        log.warn('[Jev模式] 拿不到候选（prompt 无块、也没有上一轮的缓存）—— 本轮无决策');
         return {
           /*
            * ⚠️ **空决策也要带 `<decision>` 块**（理由见下面正常路径那段）：
@@ -1589,7 +1629,7 @@ export function createJevDecisionModel(opts: JevModeOptions): JevDecisionModel {
            * 触发一次无意义的重试，最后抛一条误导性的错误。
            * "这轮没有机会"是**合法结论**，不该报成故障。
            */
-          text: '<reasoning>\nJev 模式：prompt 里没有候选块。\n</reasoning>\n<decision>\n{"decisions":[]}\n</decision>',
+          text: '<reasoning>\nJev 模式：拿不到候选。\n</reasoning>\n<decision>\n{"decisions":[]}\n</decision>',
           latencyMs: Date.now() - t0,
           usage: { promptTokens: null, completionTokens: null },
         };

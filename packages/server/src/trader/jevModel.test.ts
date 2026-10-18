@@ -666,3 +666,40 @@ describe('JEV 模式：持仓的 4 个动作', () => {
     assert.equal(r.decision, null, '★ 失败时不能产出决策');
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/*  追问时复用候选（2026-10-19 线上日志抓到的假警告）                             */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：追问复用候选', () => {
+  it('★★★ 追问的 prompt 不含 <JEV_INPUT> 块时，必须复用上一轮候选', () => {
+    /*
+     * ## 这个用例防的是什么（线上日志）
+     *
+     * 同一秒里出现两条互相矛盾的日志：
+     * ```
+     *   21:25:32 [Jev模式] 候选 8 · 开仓 2 · 跳过 6 · 失败 0 · 2627ms   ✅
+     *   21:25:32 [Jev模式] prompt 里没有 <JEV_INPUT> 块 —— 本轮无决策    ⚠️
+     * ```
+     *
+     * 根因：交易循环在一轮决策后会**追问**（把执行结果拼成新 prompt 再问一次），
+     * 而 `<JEV_INPUT>` 块只在主 prompt 上 —— 追问那条不含它。
+     *
+     * ⇒ 现在缓存上一轮候选，追问时复用。
+     *
+     * ⚠️ 这里测的是**纯函数语义**（`extractJevInput` 对两种 prompt 的返回），
+     * 缓存逻辑本身在 `createJevDecisionModel` 的闭包里，需要桩掉网络才能测。
+     */
+    const mainPrompt = `一些散文\n\n<JEV_INPUT>${JSON.stringify([
+      { symbol: 'AUSDT', price: 1, atr: 0.1 },
+    ])}</JEV_INPUT>`;
+    const followUpPrompt = '执行回执已追问：rejected:open_short AGTUSDT…';
+
+    assert.equal(extractJevInput(mainPrompt).length, 1, '★ 主 prompt 必须能解析出候选');
+    assert.equal(
+      extractJevInput(followUpPrompt).length,
+      0,
+      '★ 追问的 prompt 确实不含块 —— 这正是需要缓存的原因',
+    );
+  });
+});
