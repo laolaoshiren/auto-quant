@@ -1927,6 +1927,20 @@ async function runTradingDeskInner(input: {
             `[Jev] ${allSlices.length} 个标的 → 保留 ${slicesForLlm.length} 个` +
               ` · 最高 ${highest} 最低 ${lowest} · 耗时 ${picked.elapsedMs}ms`,
           );
+          /*
+           * ⚠️ **保留名单也必须逐个点名**（2026-10-18）。
+           *
+           * 原来只写了"保留 6 个"这个数字。于是**无法回答那个唯一重要的问题**：
+           * > Jev 保留的这 6 个，是不是真的比它筛掉的 13 个更有机会？
+           *
+           * 要算这个，必须知道两边**各自是谁**。只有"筛除"那一半有名单、
+           * "保留"这一半只有个数，判据就永远算不准 —— 我实测时不得不手工补近似值，
+           * 而那个近似（QUSDT 76.66%）把结论从 neutral 拉成了 positive。
+           *
+           * ⇒ 现在两边都有名单。样本采集脚本（`scripts/jev-sample.sh`）据此配对行情。
+           */
+          const keptNames = slicesForLlm.map((s) => s.symbol ?? 'UNKNOWN');
+          jevLog.info(`[Jev] 保留：${keptNames.join(' ')}`);
           if (picked.dropped.length > 0) {
             /*
              * 被筛掉的标的**逐个点名**（最多 12 个，其余用总数带过）：
