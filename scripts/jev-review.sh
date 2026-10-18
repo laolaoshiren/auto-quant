@@ -185,6 +185,70 @@ else:
     print("  ✅ 追高占比正常（≤30%）。")
 PY_CHASE
 
+# ── 2c. 系统性歧视检查（2026-10-18 实测发现） ──────────────────────────────
+#
+# ## 现象
+#
+# Jev 对同一个标的给出几乎相同的分数 —— 14 轮里 SOL/WLD/TIA/ETH 是 0% 保留率（14/14 被筛），
+# 而 QUSDT/GTCUSDT 是 100%（9/9 保留）。
+# **它不是"每天重新判断"，而是"按标的固有属性打固定分"。**
+#
+# ## 为什么这是个风险
+#
+# 被 0% 保留的标的，其逐币深度分析**永久缺失**。
+# 实测漏掉了两个历史赢家：TIA（+0.5113）、WLD（+0.3252）。
+#
+# ## 但也有正面
+#
+#   高保留率组(≥50%) 平均净盈亏 +0.1408
+#   低保留率组(<50%) 平均净盈亏 +0.0327 ⇒ 高保留率组更赚 4.3 倍
+#
+# ⇒ 所以只告警，不自动关。**触发条件**：0% 保留率的标的超过总数一半
+#   （说明它的偏好已经覆盖不了市场，那时该重新审视，或换成"随机抽样"做对照）。
+echo
+echo "── 2c. 系统性歧视（0% 保留率的标的占比）───────────────────"
+python3 - "$SAMPLES" <<'PY_BIAS'
+import json, sys
+
+path = sys.argv[1]
+samples = []
+with open(path) as f:
+    for line in f:
+        line = line.strip()
+        if line:
+            try:
+                samples.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+kept_cnt, drop_cnt = {}, {}
+for s in samples:
+    for k in s.get("kept", []):
+        kept_cnt[k["symbol"]] = kept_cnt.get(k["symbol"], 0) + 1
+    for d in s.get("dropped", []):
+        drop_cnt[d["symbol"]] = drop_cnt.get(d["symbol"], 0) + 1
+
+all_syms = set(kept_cnt) | set(drop_cnt)
+if not all_syms:
+    print("  没有样本")
+    sys.exit(0)
+
+zeros = [s for s in all_syms if kept_cnt.get(s, 0) == 0 and drop_cnt.get(s, 0) >= 3]
+zero_ratio = len(zeros) / len(all_syms)
+
+print(f"  共 {len(all_syms)} 个标的，其中 {len(zeros)} 个是 0% 保留率（出现≥3次从未保留）")
+if zeros:
+    print(f"    被永久筛掉: {' '.join(sorted(zeros)[:10])}" + (" …" if len(zeros) > 10 else ""))
+
+if zero_ratio > 0.5:
+    print("  ⚠️  超过一半的标的是 0% 保留率 —— Jev 的偏好可能已经覆盖不了市场。")
+    print("     建议：加一组'随机保留'做对照，确认它的筛选是否还有正向价值。")
+elif zero_ratio > 0.3:
+    print("  🟡 30%-50% 的标的被永久筛掉 —— 有偏好但还留有余地。")
+else:
+    print("  ✅ 0% 保留率的标的占比正常（≤30%）。")
+PY_BIAS
+
 # ── 3. 同时报一下运行健康 ───────────────────────────────────────────────────
 echo
 echo "── 3. 运行健康 ─────────────────────────────────────────────"
