@@ -265,6 +265,15 @@ function withQuery(path: string, query?: Query): string {
   return qs ? `${path}?${qs}` : path;
 }
 
+/**
+ * 单次 HTTP 请求的最长等待（12 秒）。
+ *
+ * 依据：最慢的接口（`/positions`，要问交易所）实测 P99 在 2-3 秒。
+ * 12 秒足够宽松，而不会让一次卡住的请求长时间不结束 ——
+ * 那正是"页面数据不更新、然后突然闪一条错误"的成因之一。
+ */
+const REQUEST_TIMEOUT_MS = 12_000;
+
 interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   body?: unknown;
@@ -284,13 +293,29 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     if (token) headers.Authorization = `Bearer ${token}`;
   }
 
+  /*
+   * ⚠️ **必须有超时**（2026-10-18 补）。
+   *
+   * 原来这里直接 `fetch(...)` 不设超时 —— 一个卡住的请求会**一直挂着**，
+   * 而轮询的下一次又发出去。表现上就是"页面数据不更新，然后突然闪一条错误"：
+   * 那次挂住的请求最终超时/断开时才报错，而那时界面可能已经好了。
+   *
+   * `AbortSignal.timeout` 让失败**及时且确定**：最多等 12 秒。
+   * 配合 `hooks.ts` 的"单次失败静默"，抖动就不会再闪成红条。
+   *
+   * ⚠️ 12 秒的依据：这些接口里最慢的是 `/positions`（要问交易所），
+   * 实测 P99 在 2-3 秒；12 秒足够宽松，而不会让人等太久。
+   */
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const mergedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
+
   let response: Response;
   try {
     response = await fetch(withQuery(`/api${path}`, query), {
       method,
       headers,
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      ...(signal ? { signal } : {}),
+      signal: mergedSignal,
     });
   } catch (error) {
     if ((error as Error).name === 'AbortError') throw error;
