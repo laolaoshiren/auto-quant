@@ -144,3 +144,62 @@ test('★★ 缺市场数据的标的被跳过，不算进平均（不编造 0%�
   assert.equal(v.droppedCount, 3);
   assert.equal(v.outcome, 'positive');
 });
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  ★★★ 必须用中位数，不能用平均值（2026-10-18 线上实测打脸）
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * ## 真实数据
+ *
+ * ```
+ *   保留组：Q +92.66%  BR +24.02%  GTC +21.05%  SAND +8.24%  ZEC -1.22%  BTC +0.16%
+ *   筛除组：AGT +41.75%  AVA +34.59%  EPIC +21.64%  BTW +17.97%  ICNT -19.09% …
+ * ```
+ *
+ * 三个算法给出三个不同结论：
+ * ```
+ *   平均值（含极值）   ：24.56% vs 12.65% ⇒ 1.94 倍 ⇒ positive
+ *   剔除 Q 这个极值    ：10.94% vs 12.65% ⇒ 0.86 倍 ⇒ NEGATIVE
+ *   中位数             ： 8.24% vs  7.81% ⇒ 1.06 倍 ⇒ neutral   ← 真相
+ * ```
+ *
+ * **一个人的翻倍行情就能把"该移除"变成"该保留"。** 加密市场里这很常见。
+ *
+ * ⇒ 这条测试钉住：**同样的数据，用中位数算必须得出 neutral，不能是 positive**。
+ */
+test('★★★ 单点极值不能改变结论（平均值会给错答案，中位数不会）', () => {
+  const v = computeVerdict({
+    keptSymbols: ['QUSDT', 'BRUSDT', 'GTCUSDT', 'SANDUSDT', 'ZECUSDT', 'BTCUSDT'],
+    dropped: [
+      { symbol: 'AGTUSDT', score: 0.34 },
+      { symbol: 'AVAUSDT', score: 0.51 },
+      { symbol: 'EPICUSDT', score: 0.52 },
+      { symbol: 'BTWUSDT', score: 0.46 },
+      { symbol: 'ICNTUSDT', score: 0.43 },
+      { symbol: 'TIAUSDT', score: 0.38 },
+    ],
+    outcomes: mkMap([
+      /* 保留组：一个极端值 +92.66%，其余中等 */
+      out('QUSDT', 92.66), out('BRUSDT', 24.02), out('GTCUSDT', 21.05),
+      out('SANDUSDT', 8.24), out('ZECUSDT', -1.22), out('BTCUSDT', 0.16),
+      /* 筛除组：好几个大波动 */
+      out('AGTUSDT', 41.75), out('AVAUSDT', 34.59), out('EPICUSDT', 21.64),
+      out('BTWUSDT', 17.97), out('ICNTUSDT', -19.09), out('TIAUSDT', -7.81),
+    ]),
+  });
+  /*
+   * 中位数：保留组 = (8.24+21.05)/2 = 14.645；筛除组 = (21.64+17.97)/2 = 19.805
+   * 比值 ≈ 0.74 —— 这其实是"筛除组略强"，落在 neutral 区（0.67~1.5）。
+   * **关键是它绝不能是 positive。**
+   */
+  assert.notEqual(
+    v.outcome,
+    'positive',
+    '★ 一个 +92.66% 的极端值不能把结论拉成 positive —— 那正是平均值犯的错',
+  );
+  assert.ok(
+    v.keptAvgAbsChange !== null && v.keptAvgAbsChange < 24.56,
+    `★ 保留组的值应该是中位数（≈14.6），不是平均值（24.56）；实际 ${v.keptAvgAbsChange}`,
+  );
+});

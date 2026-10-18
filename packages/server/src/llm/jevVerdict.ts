@@ -84,7 +84,7 @@ export interface Verdict {
  *
  * ## 阈值为什么是 1.5 倍
  *
- * 两组平均 |涨跌幅| 相差不到 1.5 倍时，那点差别完全可能来自"当天行情随机分布"。
+ * 两组 |涨跌幅| 中位数相差不到 1.5 倍时，那点差别完全可能来自"当天行情随机分布"。
  * 1.5 倍是个**保守**的门槛：宁可说"没价值"，也不要因为噪音把实验功能留下。
  *
  * ## 为什么用 |涨幅| 而不是净收益
@@ -112,14 +112,37 @@ export function computeVerdict(
     .map((d) => inputs.outcomes.get(d.symbol))
     .filter((x): x is SymbolOutcome => x !== undefined);
 
-  const avgAbs = (rows: readonly SymbolOutcome[]): number | null => {
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **用中位数，不用平均值**（2026-10-18 · 被一次实测打脸后改）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 第一版用平均值，而线上真实数据里有一个 +92.66% 的标的（QUSDT）——
+   * 它一个人就把保留组的平均从 10.94% 拉到 24.56%，于是：
+   *
+   * ```
+   *   平均值（含极值）：保留 24.56% vs 筛除 12.65% ⇒ 1.94 倍 ⇒ positive
+   *   剔除那个极值    ：保留 10.94% vs 筛除 12.65% ⇒ 0.86 倍 ⇒ NEGATIVE
+   *   中位数          ：保留  8.24% vs 筛除  7.81% ⇒ 1.06 倍 ⇒ neutral
+   * ```
+   *
+   * **三个算法三个结论**，而真相是中位数那个（两组几乎相同）。
+   * 加密行情里单日翻倍的标的很常见 ⇒ **平均值在这个场景下是不可用的统计量**。
+   *
+   * ⇒ 改用中位数：它对极值天然免疫，且"典型标的的波动"正是我们要比的东西。
+   */
+  const medianAbs = (rows: readonly SymbolOutcome[]): number | null => {
     if (rows.length === 0) return null;
-    const sum = rows.reduce((n, r) => n + Math.abs(r.change24hPercent), 0);
-    return sum / rows.length;
+    const values = rows.map((r) => Math.abs(r.change24hPercent)).sort((a, b) => a - b);
+    const mid = Math.floor(values.length / 2);
+    /* 偶数个取中间两个的均值（标准中位数定义）。 */
+    return values.length % 2 === 1
+      ? values[mid]!
+      : (values[mid - 1]! + values[mid]!) / 2;
   };
 
-  const keptAvg = avgAbs(keptOut);
-  const droppedAvg = avgAbs(droppedOut);
+  const keptAvg = medianAbs(keptOut);
+  const droppedAvg = medianAbs(droppedOut);
 
   /*
    * 样本不足：两组都至少要有 `minSamples` 个带数据的标的。
@@ -150,7 +173,7 @@ export function computeVerdict(
       keptAvgAbsChange: keptAvg,
       droppedAvgAbsChange: droppedAvg,
       outcome: 'neutral',
-      reason: '两组都几乎没有波动（平均 |24h 涨跌| 都 < 0.05%）—— 这段行情本身没有可比较的信息。',
+      reason: '两组都几乎没有波动（|24h 涨跌| 中位数 都 < 0.05%）—— 这段行情本身没有可比较的信息。',
     };
   }
 
@@ -164,7 +187,7 @@ export function computeVerdict(
       droppedAvgAbsChange: droppedAvg,
       outcome: 'positive',
       reason:
-        `保留组平均波动 ${keptAvg!.toFixed(2)}%，筛除组 ${droppedAvg!.toFixed(2)}% —— ` +
+        `保留组波动中位数 ${keptAvg!.toFixed(2)}%，筛除组 ${droppedAvg!.toFixed(2)}% —— ` +
         `保留组是筛除组的 ${ratio === Number.POSITIVE_INFINITY ? '∞' : ratio.toFixed(2)} 倍` +
         `（阈值 ${ratioThreshold} 倍）⇒ Jev 确实在挑更有机会的标的。`,
     };
@@ -178,7 +201,7 @@ export function computeVerdict(
       droppedAvgAbsChange: droppedAvg,
       outcome: 'negative',
       reason:
-        `筛除组平均波动 ${droppedAvg!.toFixed(2)}% 反而高于保留组 ${keptAvg!.toFixed(2)}% —— ` +
+        `筛除组波动中位数 ${droppedAvg!.toFixed(2)}% 反而高于保留组 ${keptAvg!.toFixed(2)}% —— ` +
         `Jev 在丢掉更有机会的标的 ⇒ **建议移除**。`,
     };
   }
