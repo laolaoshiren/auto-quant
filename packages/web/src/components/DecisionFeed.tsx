@@ -1482,6 +1482,7 @@ export function DecisionFeed({
                 )}
               >
                 机器人控制
+              </button>
               {/*
                 ── 「JEV 模式」标签（2026-10-19 用户要求）────────────────────
 
@@ -1514,7 +1515,6 @@ export function DecisionFeed({
                   JEV 模式
                 </button>
               )}
-              </button>
             </div>
           )}
 
@@ -1696,9 +1696,6 @@ export function DecisionFeed({
             `!(mode === 'ai_team' && pane !== 'decisions')` ——
             JEV 模式**不在那个判断里**，于是切到「JEV 模式」标签时
             决策流**照样渲染**，把配置面板挤到下面看不见。
-
-            ⇒ 用 `isTeamLike`（团队 + JEV）才符合原意：
-              这两种模式都有标签栏，非"最终决策"页时决策流不该占位。
 
             ⚠️ `strategy` / `ai_managed` **逐字节不变** —— `isTeamLike` 对它们恒假。
           */}
