@@ -224,6 +224,30 @@ export function buildState(c: JevCandidate, t: Tiers, dirLong: boolean): string 
 }
 
 /**
+ * **把 baseUrl 拼成 `/v1/systemone` 的完整地址**。
+ *
+ * ## 为什么要单独抽成一个函数（2026-10-19 线上实测踩到）
+ *
+ * `resolveTeamGateway()` 返回的 baseUrl **已经带 `/v1`**：
+ * ```
+ *   实测值：http://127.0.0.1:3425/v1
+ *   我的第一版：`${baseUrl}/v1/systemone`  ⇒  /v1/v1/systemone  ⇒  HTTP 404
+ * ```
+ *
+ * 而那个 404 的正文把正确路径列了出来（"magpie serves … /v1/systemone …"）
+ * —— 错误信息里已经有答案，只是拼接重复了。
+ *
+ * ⚠️ 这个 bug 的类型是**最容易漏的那种**：单元测试全绿、typecheck 全绿、
+ * 构建全绿，**只有真的打一次网络才会现形**。所以把它抽成纯函数，
+ * 让 `jevModel.test.ts` 能钉住"带不带 `/v1` 都拼成同一个地址"。
+ */
+export function jevEndpointUrl(baseUrl: string): string {
+  /* 先剥尾部斜杠，再剥尾部的 `/v1`，最后自己加一次 —— 两种形状都对。 */
+  const origin = baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
+  return `${origin}/v1/systemone`;
+}
+
+/**
  * 一次 HTTP 问五个问题。
  *
  * ## ⚠️ `criteria` 的形状**因 type 而异**（实测踩过两次 422）
@@ -284,17 +308,21 @@ export async function askJev(
   const merged = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
 
   /*
-   * ⚠️ **必须走 `fetchGuarded`**（不是裸 `fetch`）—— 本仓库的硬约束。
+   * ⚠️⚠️ **`baseUrl` 可能已经带 `/v1`**（2026-10-19 实测踩到）。
    *
-   * `llm/urlGuard.ts` 的文件头写着：「新增出站路径时**必须**走 `fetchGuarded`，
-   * 否则连接层校验不会被应用」。字面层校验（`checkOutboundUrl`）**挡不住
-   * DNS rebinding** —— 那是 #126 的结论，而 rebinding 能让一个通过字面校验的
-   * 地址在解析时指向内网。
+   * `resolveTeamGateway()` 返回的是**团队模式用的出口**，而团队调的是
+   * `/v1/chat/completions` —— 所以它给的 baseUrl 已经含 `/v1`：
+   * ```
+   *   实测：http://127.0.0.1:3425/v1
+   *   我的第一版：`${baseUrl}/v1/systemone` ⇒ /v1/v1/systemone ⇒ HTTP 404
+   * ```
+   * 而 404 的正文是「magpie serves /v1/chat/completions, …, /v1/systemone, …」
+   * —— 它明确告诉我正确路径是 `/v1/systemone`，只是我拼重复了。
    *
-   * 我第一版写的是裸 `fetch`，被 `outboundFetchGuard.test.ts` 当场抓红
-   *（那条测试扫源码、列出所有没走守卫的出站调用）—— 这正是它存在的理由。
+   * ⇒ 统一成"**先剥掉尾部的 `/v1`，再自己加 `/v1/systemone`**"。
+   *   这样两种形状（带或不带 `/v1`）都对。
    */
-  const res = await fetchGuarded(`${opts.baseUrl.replace(/\/+$/, '')}/v1/systemone`, {
+  const res = await fetchGuarded(jevEndpointUrl(opts.baseUrl), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

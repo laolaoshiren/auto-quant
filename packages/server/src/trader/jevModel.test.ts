@@ -23,7 +23,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { buildState, extractJevInput, tiersFor, type JevCandidate, type JevModeOptions } from './jevModel.js';
+import {
+  buildState,
+  extractJevInput,
+  jevEndpointUrl,
+  tiersFor,
+  type JevCandidate,
+  type JevModeOptions,
+} from './jevModel.js';
 
 const OPTS: JevModeOptions = {
   baseUrl: 'http://127.0.0.1:1',
@@ -132,8 +139,7 @@ describe('JEV 模式：state 摘要', () => {
   });
 });
 
-describe('JEV 模式：<JEV_INPUT> 块解析', () => {
-  it('★★★ 能取回块里的候选（这是 prompt 与决策模型之间唯一的契约）', () => {
+describe('JEV 模式：<JEV_INPUT> 块解析', () => {  it('★★★ 能取回块里的候选（这是 prompt 与决策模型之间唯一的契约）', () => {
     const block = `<JEV_INPUT>${JSON.stringify([
       { symbol: 'AUSDT', price: 1.5, atr: 0.03, displacementPercent: 1.2, rsi7: 55 },
       { symbol: 'BUSDT', price: 20, atr: 0.5, heldSide: 'long' },
@@ -163,5 +169,41 @@ describe('JEV 模式：<JEV_INPUT> 块解析', () => {
     const got = extractJevInput(block);
     assert.equal(got.length, 1);
     assert.equal(got[0]!.symbol, 'OKUSDT');
+  });
+});
+
+describe('JEV 模式：端点 URL 拼接', () => {
+  it('★★★ baseUrl 带不带 /v1 都要拼成同一个 /v1/systemone', () => {
+    /*
+     * ## 这个用例防的是什么（2026-10-19 线上实测踩到）
+     *
+     * `resolveTeamGateway()` 返回的 baseUrl **已经带 `/v1`**
+     *（它原本是给团队模式调 `/v1/chat/completions` 用的，实测值是
+     * `http://127.0.0.1:3425/v1`）。
+     *
+     * 我第一版写的是 `${baseUrl}/v1/systemone` ⇒ `/v1/v1/systemone` ⇒ **HTTP 404**。
+     * 而那个 404 的正文还把正确路径列了出来（"magpie serves … /v1/systemone …"）
+     * —— 错误信息里已经有答案，只是拼接重复了。
+     *
+     * ⚠️ 这个 bug 的类型是**最容易漏的那种**：单元测试全绿（没人测 URL 形状）、
+     * typecheck 全绿、构建全绿，**只有真的打一次网络才会现形**。
+     */
+    assert.equal(jevEndpointUrl('http://127.0.0.1:3425/v1'), 'http://127.0.0.1:3425/v1/systemone');
+    assert.equal(jevEndpointUrl('http://127.0.0.1:3425/v1/'), 'http://127.0.0.1:3425/v1/systemone');
+    assert.equal(jevEndpointUrl('http://127.0.0.1:3425'), 'http://127.0.0.1:3425/v1/systemone');
+    assert.equal(jevEndpointUrl('http://127.0.0.1:3425/'), 'http://127.0.0.1:3425/v1/systemone');
+    assert.equal(
+      jevEndpointUrl('https://gw.example.com/v1'),
+      'https://gw.example.com/v1/systemone',
+    );
+  });
+
+  it('★★ 不允许出现重复的 /v1（那正是 404 的原因）', () => {
+    for (const baseUrl of ['http://h:1/v1', 'http://h:1', 'http://h:1/v1/']) {
+      assert.ok(
+        !jevEndpointUrl(baseUrl).includes('/v1/v1'),
+        `★ 「${baseUrl}」拼出了重复的 /v1 —— 那会 404`,
+      );
+    }
   });
 });
