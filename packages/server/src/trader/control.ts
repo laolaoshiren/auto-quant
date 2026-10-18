@@ -224,6 +224,22 @@ export const JEV_OPTIONS: readonly JevOptionSpec[] = [
     fallback: '1',
   },
   {
+    key: 'min_rr',
+    label: '止盈止损比',
+    why:
+      '止盈距离 ÷ 止损距离。设「2:1」时，赚一次抵两次亏。' +
+      '设得越高，单笔赚得越多但越难达到（可能一直不成交）；' +
+      '设「1.5:1」容易成交，但长期要靠更高胜率才赚钱。',
+    kind: 'enum',
+    options: [
+      { value: '1.5', label: '1.5 : 1（容易成交）' },
+      { value: '2', label: '2 : 1（默认，推荐）' },
+      { value: '2.5', label: '2.5 : 1（要求更高）' },
+      { value: '3', label: '3 : 1（很难成交）' },
+    ],
+    fallback: '2',
+  },
+  {
     key: 'max_candidates',
     label: '每轮看几个标的',
     why:

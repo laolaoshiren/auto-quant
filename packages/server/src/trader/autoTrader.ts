@@ -62,7 +62,7 @@ import {
   type PromptContext,
   type PromptRejection,
 } from '../strategy/prompt.js';
-import { jevEnum, jevNumber } from './control.js';
+import { jevBool, jevEnum, jevNumber } from './control.js';
 import { last } from '../market/indicators.js';
 import { isMajorSymbol, type DecisionAction } from '@aq/shared';
 import { agentMemory } from '../store/agentStore.js';
@@ -8571,6 +8571,17 @@ reduceQuantity: null,
     // 阈值为 0 表示关闭这条规则 —— 连行情都不必拉。
     if (!(threshold > 0)) return 0;
 
+    /*
+     * ⚠️ **JEV 模式的「允许移动止损」关掉时整段跳过**（2026-10-19 补）。
+     *
+     * 用户关这个开关的意思是「**不要让止损自己动**」——
+     * 而不是"不要问 Jev，但仍然按机械规则动"。
+     *
+     * ⇒ 在入口就返回，连行情都不拉（省一次交易所请求）。
+     *   ⚠️ 其它模式**逐字节不变**（`mode !== 'jev'` 时这个条件恒假）。
+     */
+    if (this.deps.trader.mode === 'jev' && !jevBool('allow_trailing')) return 0;
+
     /* ⚠️ 同 `applyDrawdownGuard`：模拟盘上直接读会恒空 → 保本止损从不触发。 */
     const exchangePositions = await this.effectivePositions();
     const liveBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
@@ -8666,8 +8677,20 @@ reduceQuantity: null,
           candidates: { A: number; B: number; C: number };
         }) => Promise<number | 'keep' | null>;
       };
+      /*
+       * ⚠️ **「允许移动止损」关掉时，Jev 不参与判断**（2026-10-19 补）。
+       *
+       * 只关掉"问 Jev"是不够的 —— 用户关这个开关的意思是
+       * **「不要让止损自己动」**，所以整段（含机械规则）都不该执行。
+       *
+       * 那个判断在函数入口（见 `applyBreakevenGuard` 开头）——
+       * 这里再判一次是防御：将来若有人改了入口，这里仍然不会误动。
+       */
+      const jevTrailingAllowed =
+        this.deps.trader.mode !== 'jev' || jevBool('allow_trailing');
       if (
         this.deps.trader.mode === 'jev' &&
+        jevTrailingAllowed &&
         typeof jevTrailing.suggestTrailingStop === 'function'
       ) {
         try {

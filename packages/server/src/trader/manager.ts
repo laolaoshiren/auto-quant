@@ -2033,6 +2033,7 @@ export class TraderManager {
         readAllowResize: () => jevBool('allow_resize'),
         readAllowTrailing: () => jevBool('allow_trailing'),
         readMinConfidence: () => jevNumber('min_confidence'),
+        readMinRiskRewardRatio: () => jevNumber('min_rr'),
         readHoldAskEvery: () => Math.max(1, Math.floor(jevNumber('hold_ask_every'))),
         /* 权益也每轮现读 —— 余额会变，写死会让档位基于旧余额。 */
         readEquity: () => traders.get(traderId)?.initialEquity ?? equity,

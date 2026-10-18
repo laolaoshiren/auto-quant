@@ -154,6 +154,8 @@ export interface JevModeOptions {
   readAllowResize: () => boolean;
   /** 是否允许移动止损。 */
   readAllowTrailing: () => boolean;
+  /** 止盈止损比（止盈距离 ÷ 止损距离）。 */
+  readMinRiskRewardRatio: () => number;
   /** 最低置信度（0–100）。 */
   readMinConfidence: () => number;
   /** 每 N 轮问一次持仓（省 token）。 */
@@ -234,10 +236,21 @@ export function tiersFor(
    * ⚠️ 用每一档**自己的**止损距离算 —— 否则 C 档（宽止损）会得到一个
    * 与它风险不匹配的过近止盈，等于让"激进"变成了"高风险低回报"。
    */
+  /*
+   * ⚠️ **盈亏比由用户配置决定，不再是写死的 2**（2026-10-19 用户要求）。
+   *
+   * 用户截图指出「盈亏比 1:1.33 低于要求的 1:1.5」而**设置里没有这一项** ——
+   * 那个值来自策略配置（`minRiskRewardRatio: 1.5`），界面上改不了。
+   *
+   * ⇒ 现在它进了「JEV 模式」标签（`min_rr`），而且**止盈价按它算**：
+   *   止盈距离 = 止损距离 × 该比值。
+   *   于是盈亏比**恒等于用户设的值**，不可能再组合出 1:1.33 这种。
+   */
+  const rr = Math.max(0.5, opts.readMinRiskRewardRatio());
   const take: Record<Tier, number> = {
-    A: dirLong ? c.price + stopDistance.A * 2 : c.price - stopDistance.A * 2,
-    B: dirLong ? c.price + stopDistance.B * 2 : c.price - stopDistance.B * 2,
-    C: dirLong ? c.price + stopDistance.C * 2 : c.price - stopDistance.C * 2,
+    A: dirLong ? c.price + stopDistance.A * rr : c.price - stopDistance.A * rr,
+    B: dirLong ? c.price + stopDistance.B * rr : c.price - stopDistance.B * rr,
+    C: dirLong ? c.price + stopDistance.C * rr : c.price - stopDistance.C * rr,
   };
 
   /*
@@ -507,14 +520,25 @@ export async function askJevForPosition(
     state,
     model: opts.model,
     questions: {
-      hold_or_close: {
+      /*
+       * ⚠️ **动作从 2 个扩展到 4 个**（2026-10-19 补「允许加减仓」）。
+       *
+       * 用户要求加减仓能力。系统本来就支持（`DecisionActionSchema` 有
+       * `add_to_position` / `reduce_position`），只是 Jev 从来没被问过。
+       *
+       * ⚠️ **顺序很重要**：`hold` 放第一位。Jev 的 `choice` 在平局时倾向
+       * 选第一个 —— 而"什么都不做"是**最安全的默认**。
+       */
+      action: {
         type: 'choice',
         instructions:
-          '这个仓位现在应该继续持有，还是平掉？' +
-          '注意：止损止盈单已经在交易所挂着，平掉意味着主动放弃它们。',
+          '这个仓位现在该怎么做？' +
+          '注意：止损止盈单已经在交易所挂着。',
         criteria: {
           hold: '继续持有（让止损止盈单继续工作）',
-          close: '主动平掉（理由已经不存在了）',
+          add: '加仓（这个机会还在，值得加）',
+          reduce: '减仓（锁定一部分利润，但留着仓位）',
+          close: '全部平掉（理由已经不存在了）',
         },
       },
       conviction: {
@@ -616,6 +640,24 @@ export async function askJevForTrailingStop(
   return (await res.json()) as JevResponse;
 }
 
+/**
+ * **标的名的稳定哈希**（2026-10-19）。
+ *
+ * 用途：让「持仓检查频率」在多持仓时**错开问询** ——
+ * 用 `(轮次 + 哈希) % N` 而不是所有持仓同一个节奏。
+ *
+ * ⚠️ 必须是**确定性**的（同一标的名永远同一个值），否则节奏会乱跳。
+ * 这里用一个简单的 FNV-1a 变体 —— 只需要分布均匀，不需要密码学强度。
+ */
+function hashSymbol(symbol: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < symbol.length; i += 1) {
+    h ^= symbol.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h);
+}
+
 /** `choice` 的答案收窄成 `Tier`；认不出就返回 `null`（**不猜**）。 */
 function asTier(v: string | undefined): Tier | null {
   if (v === 'A' || v === 'B' || v === 'C') return v;
@@ -648,7 +690,13 @@ export interface JevDecisionOutcome {
   /** 组装好的决策（`null` = 跳过）。 */
   decision: {
     symbol: string;
-    action: 'open_long' | 'open_short' | 'close_long' | 'close_short';
+    action:
+      | 'open_long'
+      | 'open_short'
+      | 'close_long'
+      | 'close_short'
+      | 'add_to_position'
+      | 'reduce_position';
     leverage: number;
     positionSizeUsd: number;
     /**
@@ -660,6 +708,15 @@ export interface JevDecisionOutcome {
      */
     stopLoss: number | null;
     takeProfit: number | null;
+    /**
+     * 减仓百分比（`reduce_position` 用）。
+     *
+     * ⚠️ 与 `reduceQuantity` **二选一** —— 风控会把它换算成数量。
+     * 见 `packages/shared/src/decision.ts` 的说明。
+     */
+    reducePercent?: number | null;
+    /** 减仓数量（与 `reducePercent` 二选一）。 */
+    reduceQuantity?: number | null;
     confidence: number | null;
     setupScore: number | null;
     setupScoreBasis: string;
@@ -766,7 +823,37 @@ export async function decideForCandidate(
   const sizeTier = asTier(answers.size_tier?.choice);
   const stopTier = asTier(answers.stop_tier?.choice);
   const takeTier = asTier(answers.take_tier?.choice);
-  if (sizeTier === null || stopTier === null || takeTier === null) {
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **止盈档必须跟止损档同档**（2026-10-19 用户截图抓到的设计 bug）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 症状
+   *
+   * 用户截图：「被风控拒绝 —— 盈亏比 1:1.33 低于要求的 1:1.5。」
+   *
+   * ## 根因
+   *
+   * 止损与止盈是**两个独立的 choice**，于是可能组合出：
+   * ```
+   *   止损 C 档（2.0×ATR，很宽） + 止盈 A 档（最近）  ⇒  1:1.33  ❌
+   *   止损 A 档（1.0×ATR，很窄） + 止盈 C 档（最远）  ⇒  1:6     ✅
+   * ```
+   * 而 `tiersFor()` 里**每一档的止盈本来就是按该档自己的止损距离算 2:1 的**
+   * —— 也就是说"档位"这个设计里已经包含了正确的盈亏比，
+   * **让 Jev 再独立选一次止盈档是多余的，而且会破坏那个保证**。
+   *
+   * ## 修法
+   *
+   * **止盈档 = 止损档**。Jev 仍然选"要多激进"（通过止损档），
+   * 但盈亏比恒为 2:1 —— 那是结构保证，不是它的判断。
+   *
+   * ⚠️ 那个 `take_tier` 问题保留在请求里（不删），因为：
+   *   ① 删了会改变 state 的 token 数（缓存/成本口径变化）
+   *   ② 它的答案仍然写进 `reasoning`，便于事后核对 Jev 当时怎么想的
+   *   **但代码只用 `stopTier` 决定止盈。**
+   */
+  if (sizeTier === null || stopTier === null) {
     return {
       decision: null,
       outcome: 'failed',
@@ -777,6 +864,14 @@ export async function decideForCandidate(
         `take=${JSON.stringify(answers.take_tier?.choice)}`,
     };
   }
+
+  /*
+   * ⚠️ **必须放在上面的 null 检查【之后】**（2026-10-19）。
+   *
+   * 放在之前会被 tsc 拒：`Type 'null' cannot be used as an index type`
+   * —— 那是类型在提醒我 `stopTier` 此时还没被收窄。
+   */
+  const effectiveTakeTier: Tier = stopTier;
 
   const confidence = confidenceToPercent(dir?.confidence);
   const setupScore = setupScoreToPercent(answers.setup);
@@ -838,7 +933,7 @@ export async function decideForCandidate(
     `机会强度 ${setupText}；` +
     `仓位 ${sizeTier} 档 ${tiers.size[sizeTier].toFixed(2)}U；` +
     `止损 ${stopTier} 档 ${tiers.stop[stopTier].toFixed(6)}（${stopTier === 'A' ? '1.0' : stopTier === 'B' ? '1.5' : '2.0'}×ATR）；` +
-    `止盈 ${takeTier} 档 ${tiers.take[takeTier].toFixed(6)}`;
+    `止盈 ${effectiveTakeTier} 档 ${tiers.take[effectiveTakeTier].toFixed(6)}`;
 
   return {
     decision: {
@@ -854,7 +949,7 @@ export async function decideForCandidate(
       leverage: opts.leverage,
       positionSizeUsd: tiers.size[sizeTier],
       stopLoss: tiers.stop[stopTier],
-      takeProfit: tiers.take[takeTier],
+      takeProfit: tiers.take[effectiveTakeTier],
       confidence,
       setupScore,
       setupScoreBasis: `Jev setup ${setupText}`,
@@ -940,20 +1035,87 @@ export async function decideForPosition(
     };
   }
 
-  const a = resp.answers?.hold_or_close;
-  if (a?.choice === 'hold') {
-    return { decision: null, outcome: 'skip', detail: 'Jev 判断继续持有' };
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  **4 个动作：hold / add / reduce / close**（2026-10-19 补「允许加减仓」）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 用户要求加减仓能力。系统本来就支持（`DecisionActionSchema` 有
+   * `add_to_position` / `reduce_position`），只是 Jev 从来没被问过。
+   *
+   * ⚠️ **「允许加减仓」关掉时，add/reduce 降级成 hold** ——
+   * 不是"报错"，因为那是一个合法的用户偏好（只要开仓与平仓）。
+   */
+  const a = resp.answers?.action;
+  const allowResize = opts.readAllowResize();
+  const rawAction = a?.choice;
+  const action =
+    (rawAction === 'add' || rawAction === 'reduce') && !allowResize ? 'hold' : rawAction;
+
+  if (action === 'hold') {
+    return {
+      decision: null,
+      outcome: 'skip',
+      detail:
+        rawAction === 'hold'
+          ? 'Jev 判断继续持有'
+          : `Jev 判「${String(rawAction)}」，但「允许加减仓」已关闭 ⇒ 保持不动`,
+    };
   }
-  if (a?.choice !== 'close') {
+  if (action !== 'close' && action !== 'add' && action !== 'reduce') {
     return {
       decision: null,
       outcome: 'failed',
-      detail: `Jev 的 hold_or_close 答案无法识别：${JSON.stringify(a?.choice)}`,
+      detail: `Jev 的 action 答案无法识别：${JSON.stringify(rawAction)}`,
     };
   }
 
-  const confidence = confidenceToPercent(a.confidence);
+  const confidence = confidenceToPercent(a?.confidence);
   const conviction = setupScoreToPercent(resp.answers?.conviction);
+  const sideLabel = c.heldSide === 'long' ? '多' : '空';
+
+  /*
+   * ── 加仓 / 减仓 ────────────────────────────────────────────────────────
+   *
+   * ⚠️ **加仓走 `add_to_position`、减仓走 `reduce_position`** ——
+   * 这两个动作由风控引擎的 `reviewOpen` / `reviewClose` 裁决，
+   * 本函数只负责"提议"（`docs/AGENTS.md` §2.1：风控是唯一路径）。
+   *
+   * ⚠️ **加仓大小用与开仓同一套档位表**（`tiersFor`）——
+   * 那保证加仓后的总仓位也受"权益×30%"上限约束。
+   */
+  if (action === 'add' || action === 'reduce') {
+    const tiers = tiersFor(c, opts, c.heldSide);
+    const sizeTier = asTier(resp.answers?.size_tier?.choice) ?? 'A';
+    const amount = tiers.size[sizeTier];
+    return {
+      decision: {
+        symbol: c.symbol,
+        action: action === 'add' ? 'add_to_position' : 'reduce_position',
+        leverage: opts.leverage,
+        positionSizeUsd: amount,
+        /*
+         * ⚠️ **减仓用百分比而不是绝对量** —— `Decision` 的 `reducePercent`
+         * 就是为此存在的（见 `decision.ts` 的说明）。
+         */
+        reducePercent: action === 'reduce' ? 50 : null,
+        reduceQuantity: null,
+        stopLoss: null,
+        takeProfit: null,
+        confidence,
+        setupScore: conviction,
+        setupScoreBasis: `Jev ${action === 'add' ? '加仓' : '减仓'}信心 ${conviction ?? '—'}/100`,
+        reasoning:
+          `Jev 判${action === 'add' ? '加仓' : '减仓'}${sideLabel}头（置信 ${confidence ?? '—'}%）；` +
+          `${action === 'add' ? `加 ${amount.toFixed(2)}U（${sizeTier} 档）` : '减掉一半仓位'}`,
+        riskUsd: 0,
+        marginMode: opts.marginMode,
+      },
+      outcome: 'open',
+      detail: `Jev 判${action === 'add' ? '加仓' : '减仓'}${sideLabel}头`,
+    };
+  }
+
 
   return {
     decision: {
@@ -1371,6 +1533,13 @@ export async function rerankByJev(
 }
 
 export function createJevDecisionModel(opts: JevModeOptions): JevDecisionModel {
+  /*
+   * ⚠️ **跨轮次的问询计数**（2026-10-19）。
+   *
+   * 用于「持仓检查频率」：`(askCounter + hash) % N === 0` 时才问。
+   * 它必须在 `return` **外面** —— 否则每次调用 `complete()` 都重新从 0 开始。
+   */
+  let askCounter = 0;
   return {
     /*
      * ⚠️ **`suggestTrailingStop` 不是 `DecisionModel` 的成员** —— 它是本模式
@@ -1414,6 +1583,13 @@ export function createJevDecisionModel(opts: JevModeOptions): JevDecisionModel {
       let skipped = 0;
       let opened = 0;
       let closed = 0;
+      /*
+       * 跨轮次的问询计数（用于「持仓检查频率」）。
+       *
+       * ⚠️ 它必须**在闭包外**（`createJevDecisionModel` 的作用域里），
+       * 否则每轮都从 0 开始，取模永远是同一个值 ⇒ 那个开关不会生效。
+       */
+      askCounter += 1;
 
       for (const c of candidates.slice(0, opts.readMaxCandidates())) {
         /*
@@ -1422,13 +1598,34 @@ export function createJevDecisionModel(opts: JevModeOptions): JevDecisionModel {
          * 第一版对持仓直接 `skip` —— 那让机器人开完仓就再也不思考，
          * 只能等交易所侧的止损止盈。现在持仓会问 Jev「继续持有还是平掉」（P1）。
          */
+        /*
+         * ⚠️ **「持仓检查频率」必须真的生效**（2026-10-19 补）。
+         *
+         * 原来 `readHoldAskEvery` 只在类型与装配里出现，**从没被调用过** ——
+         * 用户把它设成「三轮一次」，实际仍然每轮都问。那是个假开关。
+         *
+         * ## 怎么判断"这一轮该不该问"
+         *
+         * 用**轮次序号取模**。轮次号从 `cycleNumber` 拿不到（`complete()` 只
+         * 收 prompt），所以用 `askCounter` 自增 —— 它跨轮次保留在闭包里。
+         *
+         * ⚠️ 不是"每 N 轮问一次"，而是"**每个持仓每 N 轮问一次**"：
+         * 用 `(askCounter + 该标的的哈希) % N` 让不同持仓错开问询，
+         * 避免"这一轮问全部、下两轮都不问"的锯齿。
+         */
+        const holdEvery = opts.readHoldAskEvery();
+        const shouldAskHold =
+          holdEvery <= 1 || (askCounter + hashSymbol(c.symbol)) % holdEvery === 0;
+
         const r =
           c.heldSide !== undefined
-            ? await decideForPosition(
-                { ...c, heldSide: c.heldSide },
-                opts,
-                options?.signal,
-              )
+            ? shouldAskHold
+              ? await decideForPosition(
+                  { ...c, heldSide: c.heldSide },
+                  opts,
+                  options?.signal,
+                )
+              : { decision: null, outcome: 'skip' as const, detail: `按设置跳过（每 ${holdEvery} 轮问一次）` }
             : await decideForCandidate(c, opts, options?.signal);
 
         if ((r.outcome === 'open' || r.outcome === 'close') && r.decision !== null) {

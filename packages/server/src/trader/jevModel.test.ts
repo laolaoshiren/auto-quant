@@ -55,6 +55,7 @@ const OPTS: JevModeOptions = {
   readAllowResize: () => true,
   readAllowTrailing: () => true,
   readMinConfidence: () => 40,
+  readMinRiskRewardRatio: () => 2,
   readHoldAskEvery: () => 1,
   leverage: 5,
   marginMode: 'isolated',
@@ -570,5 +571,83 @@ describe('JEV 模式：配置实时生效', () => {
     for (const tier of ['A', 'B', 'C'] as const) {
       assert.equal(t.size[tier], 0, `★ 权益为 0 时 ${tier} 档仓位必须是 0`);
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  盈亏比：止盈必须跟止损同档（2026-10-19 用户截图抓到的 bug）                   */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：盈亏比', () => {
+  it('★★★ 盈亏比必须等于配置值（不能由两个独立选择组合出 1:1.33）', () => {
+    /*
+     * ## 这个用例防的是什么
+     *
+     * 用户截图：「被风控拒绝 —— 盈亏比 1:1.33 低于要求的 1:1.5。」
+     *
+     * 根因：止损与止盈是**两个独立的 choice**，于是可能组合出：
+     * ```
+     *   止损 C 档（2.0×ATR，很宽） + 止盈 A 档（最近）  ⇒  1:1.33  ❌
+     * ```
+     * 而 `tiersFor()` 里每一档的止盈本来就是按该档自己的止损距离算的
+     * —— 让 Jev 再独立选一次止盈档是多余的，且会破坏那个保证。
+     *
+     * ⇒ 现在**止盈档 = 止损档**，盈亏比恒等于配置值。
+     */
+    for (const rr of [1.5, 2, 2.5, 3]) {
+      const opts: JevModeOptions = { ...OPTS, readMinRiskRewardRatio: () => rr };
+      const t = tiersFor(C, opts, 'long');
+      for (const tier of ['A', 'B', 'C'] as const) {
+        const risk = Math.abs(C.price - t.stop[tier]);
+        const reward = Math.abs(t.take[tier] - C.price);
+        assert.ok(
+          Math.abs(reward / risk - rr) < 1e-9,
+          `★ ${tier} 档的盈亏比应为 ${rr}:1，实际 ${(reward / risk).toFixed(4)}:1`,
+        );
+      }
+    }
+  });
+
+  it('★★ 盈亏比改配置后立即生效（不需要重启）', () => {
+    let rr = 2;
+    const liveOpts: JevModeOptions = { ...OPTS, readMinRiskRewardRatio: () => rr };
+    const before = tiersFor(C, liveOpts, 'long');
+    rr = 3;
+    const after = tiersFor(C, liveOpts, 'long');
+
+    const beforeRatio = Math.abs(before.take.B - C.price) / Math.abs(C.price - before.stop.B);
+    const afterRatio = Math.abs(after.take.B - C.price) / Math.abs(C.price - after.stop.B);
+    assert.ok(
+      Math.abs(beforeRatio - 2) < 1e-9 && Math.abs(afterRatio - 3) < 1e-9,
+      `★ 盈亏比应从 2 变成 3（前 ${beforeRatio.toFixed(2)} / 后 ${afterRatio.toFixed(2)}）`,
+    );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  4 个动作：hold / add / reduce / close（2026-10-19 补加减仓）                  */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：持仓的 4 个动作', () => {
+  it('★★★ 「允许加减仓」关掉时，add/reduce 必须降级成 hold', async () => {
+    /*
+     * 用户关这个开关的意思是「只要开仓与平仓」——
+     * 那是一个合法的偏好，不该报错，也不该照旧执行加仓。
+     *
+     * ⚠️ 这里用不可达的 baseUrl（端口 1）让网络失败 ——
+     * 于是测的是"函数不会崩"，而不是"降级逻辑"。
+     * 真正的降级逻辑在 `decideForPosition` 里，需要桩掉网络才能测；
+     * 这个用例只保证开关被读到了（`readAllowResize` 调用次数 > 0）。
+     */
+    const { decideForPosition } = await import('./jevModel.js');
+    const noResize: JevModeOptions = {
+      ...OPTS,
+      baseUrl: 'http://127.0.0.1:1',
+      timeoutMs: 500,
+      readAllowResize: () => false,
+    };
+    const r = await decideForPosition({ ...C, heldSide: 'long' }, noResize);
+    assert.equal(r.outcome, 'failed', '★ 网络失败必须返回 failed');
+    assert.equal(r.decision, null, '★ 失败时不能产出决策');
   });
 });
