@@ -895,8 +895,28 @@ function resolveEntryType(
   return jevChoice === 'limit' ? 'limit' : 'market';
 }
 
-function resolveLeverage(opts: JevModeOptions, score: number | undefined): number {
-  const cap = Math.max(1, Math.floor(opts.readLeverageCap()));
+function resolveLeverage(
+  opts: JevModeOptions,
+  score: number | undefined,
+  symbol?: string,
+): number {
+  /*
+   * ⚠️ **逐标的收紧**（2026-10-19）。
+   *
+   * `readLeverageCap()` 给的是**两类中较宽的那个**（20x）——
+   * 因为 `buildJevModeModel()` 拿不到具体标的。
+   * 而策略里 BTC/ETH 是 20x、山寨币是 10x：
+   * ```
+   *   若只按 20x 走，一个山寨币会被允许开到 20x —— 那是策略配置的两倍
+   * ```
+   * ⇒ 在这里按 `symbol` 再收一次。
+   *
+   * ⚠️ 山寨币的 10x 是**硬编码的保守值**，与 `defaultJevConfig()` 的
+   * `altcoinMaxLeverage: 10` 对齐。它不随用户改策略而变 ——
+   * 因为 JEV 模式用的是 `defaultJevConfig()`，不引用 `strategies` 表。
+   */
+  const isMajor = symbol !== undefined && /^(BTC|ETH)USDT$/.test(symbol);
+  const cap = Math.max(1, Math.floor(isMajor ? opts.readLeverageCap() : Math.min(10, opts.readLeverageCap())));
   const mode = opts.readLeverageMode();
 
   if (mode !== 'jev') {
@@ -1228,7 +1248,7 @@ export async function decideForCandidate(
        * 手动模式用滑杆值，自动模式用 Jev 的 score 换算 —— 两者都会被夹到
        * `[1, min(策略上限, 币种级上限)]`。
        */
-      leverage: resolveLeverage(opts, answers.leverage?.score),
+      leverage: resolveLeverage(opts, answers.leverage?.score, c.symbol),
       positionSizeUsd: tiers.size[sizeTier],
       stopLoss: tiers.stop[stopTier],
       takeProfit: tiers.take[effectiveTakeTier],
@@ -1375,7 +1395,7 @@ export async function decideForPosition(
         symbol: c.symbol,
         action: action === 'add' ? 'add_to_position' : 'reduce_position',
         /* 加减仓沿用**该持仓已有的杠杆**，不重新选 —— 改杠杆会让保证金占用跳变。 */
-        leverage: resolveLeverage(opts, undefined),
+        leverage: resolveLeverage(opts, undefined, c.symbol),
         positionSizeUsd: amount,
         /*
          * ⚠️ **减仓用百分比而不是绝对量** —— `Decision` 的 `reducePercent`
@@ -1409,7 +1429,7 @@ export async function decideForPosition(
        */
       action: c.heldSide === 'long' ? 'close_long' : 'close_short',
       /* 平仓不需要杠杆 —— 给一个合法值即可（风控不读它）。 */
-      leverage: resolveLeverage(opts, undefined),
+      leverage: resolveLeverage(opts, undefined, c.symbol),
       positionSizeUsd: 0,
       stopLoss: null,
       takeProfit: null,

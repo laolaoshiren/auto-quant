@@ -191,10 +191,23 @@ export const JEV_OPTIONS: readonly JevOptionSpec[] = [
     key: 'leverage_manual',
     label: '杠杆倍数',
     why:
-      '手动模式下的杠杆。数值越大，同样保证金能开的名义越大，' +
-      '但爆仓距离也越近。实际生效值不会超过「策略上限」和「交易所对该币种的上限」。',
+      '手动模式下的杠杆。数值越大，同样保证金能开的名义越大，但爆仓距离也越近。' +
+      '上限来自「策略配置」——JEV 模式的默认策略里山寨币 10x、BTC/ETH 20x。' +
+      '⚠️ 账户级限制可能更低（例如币安对子账户限 5x），' +
+      '那种情况实际会用交易所允许的最高值，并在日志里写明。',
     kind: 'number',
-    range: { min: 1, max: 125, step: 1, unit: 'x' },
+    /*
+     * ⚠️ **上限取 20 而不是 125**（2026-10-19 修正）。
+     *
+     * `defaultJevConfig()` 里 `btcEthMaxLeverage: 20`、`altcoinMaxLeverage: 10`。
+     * 滑杆原来给到 125（币安的绝对上限），但**用户拖到 30x 也不会生效**
+     *（`resolveLeverage` 会夹到 10 或 20）—— 那是一个"假的可选范围"，
+     * 比不显示更糟：用户会以为拖上去真的变了。
+     *
+     * ⇒ 滑杆上限 = 策略里最宽的那一档（20x）。
+     * 具体标的仍会按 `btcEthMaxLeverage` / `altcoinMaxLeverage` 二次收紧。
+     */
+    range: { min: 1, max: 20, step: 1, unit: 'x' },
     fallback: '5',
   },
   {

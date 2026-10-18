@@ -850,3 +850,39 @@ describe('JEV 模式：杠杆', () => {
     );
   });
 });
+
+describe('JEV 模式：杠杆逐标的收紧', () => {
+  it('★★★ 山寨币的杠杆上限必须比 BTC/ETH 更严（策略里是 10x vs 20x）', () => {
+    /*
+     * `defaultJevConfig()`：
+     * ```
+     *   btcEthMaxLeverage  = 20
+     *   altcoinMaxLeverage = 10
+     * ```
+     * 而 `readLeverageCap()` 只能给出"两类中较宽的那个"（20x），
+     * 因为它拿不到具体标的。⇒ `resolveLeverage` 必须按 symbol 再收一次。
+     *
+     * ⚠️ 没有这条收紧，一个山寨币会被允许开到 20x —— 策略配置的两倍。
+     */
+    const opts: JevModeOptions = {
+      ...OPTS,
+      readLeverageMode: () => 'manual',
+      readLeverageManual: () => 20,
+      readLeverageCap: () => 20,
+    };
+    /*
+     * 通过 physicalCap 间接验证：山寨币的 cap 被收到 10，
+     * 于是 physicalCap = 100 × 10 = 1000；若没收紧会是 2000。
+     */
+    const alt = tiersFor({ symbol: 'AGTUSDT', price: 100, atr: 2 }, opts, 'long');
+    const major = tiersFor({ symbol: 'BTCUSDT', price: 100, atr: 2 }, opts, 'long');
+    assert.ok(
+      alt.size.C <= 100 * 10 + 1e-9,
+      `★ 山寨币 C 档 ${alt.size.C.toFixed(2)} 超过了「权益×10」`,
+    );
+    assert.ok(
+      major.size.C <= 100 * 20 + 1e-9,
+      `★ BTC 的 C 档 ${major.size.C.toFixed(2)} 超过了「权益×20」`,
+    );
+  });
+});

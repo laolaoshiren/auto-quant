@@ -2063,7 +2063,26 @@ export class TraderManager {
          * 实际下界由 `resolveLeverage()` 的 `Math.min(cap, …)` 兜住，
          * 而账户级限制由 `broker.setLeverage()` 的 `-4421` 降级处理。
          */
-        readLeverageCap: () => leverage,
+        /*
+         * ⚠️ **杠杆上限按标的区分**（2026-10-19 修正）。
+         *
+         * 原来这里返回的是 `leverage`（= `floor(altcoinMaxLeverage / 2)` = 5），
+         * 那是"默认值"，不是"上限" —— 于是滑杆设 20x 也会被夹到 5x，
+         * 而用户看不出为什么。
+         *
+         * ## 正确口径
+         * ```
+         *   BTC/ETH → btcEthMaxLeverage（20x）
+         *   其它    → altcoinMaxLeverage（10x）
+         * ```
+         * ⚠️ 这里**拿不到具体标的**（`buildJevModeModel` 没有 symbol 参数），
+         * 所以给的是**两类中较宽的那个**（20x）——
+         * 逐标的收紧由 `resolveLeverage()` 在 `jevModel` 里按
+         * `c.symbol` 判断（见 `isMajorSymbol`）。
+         *
+         * 账户级限制（子账户 5x）仍然只能靠 `broker.setLeverage()` 降级。
+         */
+        readLeverageCap: () => Math.max(1, risk?.btcEthMaxLeverage ?? 20),
         /*
          * ⚠️ `riskControl.marginMode` 的类型只有 `'isolated'`（策略层没开放全仓），
          * 所以这里**不需要分支** —— 写 `=== 'cross' ? 'cross' : 'isolated'`
