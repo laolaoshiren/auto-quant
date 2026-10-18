@@ -119,14 +119,47 @@ export interface JevModeOptions {
   model: string;
   /** 单次 HTTP 超时。实测一次五问约 400ms，给 15 秒足够宽松。 */
   timeoutMs: number;
-  /** 权益（用于算风险预算）。 */
-  equity: number;
-  /** 单笔风险占权益的比例（例如 0.01 = 1%）。 */
-  riskPercent: number;
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **下面这些是「读取函数」，不是值**（2026-10-19 用户要求）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 用户原话：
+   * > 「需重启，你别搞这种啊，完全可以程序自己解决的吧？
+   * >  用户不要关注这些和增加繁琐步骤」
+   *
+   * ## 原来为什么不对
+   *
+   * 它们是**普通数值**，在装配时读一次 ⇒ 界面上改了永远不生效 ⇒ 只能重启。
+   * 那是实现偷懒：把"装配期配置"和"运行期配置"混为一谈。
+   *
+   * ⇒ 现在全部改成函数，**每次决策时现读**。代价是每轮多几次
+   *   `settings.get()`（一次 index seek，微秒级），换来的是**真正的实时生效**。
+   *
+   * ⚠️ **不要把它们改回普通字段** —— 那会让"改了没反应"这个 bug 复活。
+   */
+  /** 当前权益（用于算风险预算）。账户余额会变，所以必须现读。 */
+  readEquity: () => number;
+  /** 单笔风险占权益的比例（0.01 = 1%）。 */
+  readRiskPercent: () => number;
+  /** 每轮最多问几个标的（控成本）。 */
+  readMaxCandidates: () => number;
+  /** 选币方式：`code` / `hybrid` / `jev`。 */
+  readCoinSelect: () => string;
+  /** 开仓方式：`market` / `limit`。 */
+  readEntryType: () => string;
+  /** 是否允许做空。 */
+  readAllowShort: () => boolean;
+  /** 是否允许加减仓。 */
+  readAllowResize: () => boolean;
+  /** 是否允许移动止损。 */
+  readAllowTrailing: () => boolean;
+  /** 最低置信度（0–100）。 */
+  readMinConfidence: () => number;
+  /** 每 N 轮问一次持仓（省 token）。 */
+  readHoldAskEvery: () => number;
   /** 杠杆 —— **由策略配置决定，不让 Jev 选**（见文件头）。 */
   leverage: number;
-  /** 每轮最多问几个标的（控成本）。 */
-  maxCandidates: number;
   /**
    * 保证金模式。
    *
@@ -177,7 +210,12 @@ export function tiersFor(
   const atr = c.atr > 0 ? c.atr : c.price * 0.01;
 
   /* 单笔愿意亏的钱（USDT）。 */
-  const riskUsd = Math.max(0.5, opts.equity * opts.riskPercent);
+  /*
+   * ⚠️ **现读一次，本函数内复用** —— 一次决策里权益与风险比例不该变
+   *（中途变了会让三档基于不同的基准算出来，那是静默的不一致）。
+   */
+  const equity = opts.readEquity();
+  const riskUsd = Math.max(0.5, equity * opts.readRiskPercent());
 
   const stopDistance: Record<Tier, number> = {
     A: atr * 1.0,
@@ -242,8 +280,8 @@ export function tiersFor(
    * 但风控的 `maxMarginUsage` 会兜住。这个值可以调（见 `JEV_OPTIONS`）。
    */
   const riskNeutralNotional = (riskUsd / stopDistance.B) * c.price;
-  const physicalCap = opts.equity * opts.leverage;
-  const perPositionCap = opts.equity * 0.3;
+  const physicalCap = equity * opts.leverage;
+  const perPositionCap = equity * 0.3;
   const baseNotional = Math.max(
     0,
     Math.min(riskNeutralNotional, physicalCap, perPositionCap),
@@ -698,8 +736,24 @@ export async function decideForCandidate(
    * ⚠️ **方向必须从 Jev 的答案里读，不许猜**（2026-10-19 修正）。
    * 认不出就 `failed` —— 绝不能静默回落成"开多"（那是第一版的 bug）。
    */
+  /*
+   * ⚠️ **「允许做空」关掉时，把 open_short 当成跳过**（2026-10-19）。
+   *
+   * 不这么做的话，关掉做空之后 Jev 仍然会选 `open_short`，
+   * 而代码会照它执行 —— 那个开关就形同虚设。
+   */
+  const allowShort = opts.readAllowShort();
   const side: 'long' | 'short' | null =
-    dir?.choice === 'open_long' ? 'long' : dir?.choice === 'open_short' ? 'short' : null;
+    dir?.choice === 'open_long'
+      ? 'long'
+      : dir?.choice === 'open_short'
+        ? allowShort
+          ? 'short'
+          : null
+        : null;
+  if (dir?.choice === 'open_short' && !allowShort) {
+    return { decision: null, outcome: 'skip', detail: 'Jev 判做空，但「允许做空」已关闭' };
+  }
   if (side === null) {
     return {
       decision: null,
@@ -758,6 +812,24 @@ export async function decideForCandidate(
    *   让风控按策略配置拒。这里只负责把"它是平局"这件事**写进 reasoning**，
    *   这样日志里看得见"为什么这一笔被拒了"。
    */
+  /*
+   * ⚠️ **置信门槛在这里就拦掉**（2026-10-19）。
+   *
+   * 之前只靠风控的 `minConfidence` 拒 —— 那会让日志里出现
+   * "Jev 判执行 → 被风控拒绝"，看起来像风控在跟模型对着干。
+   * 而真相是**用户设了一个门槛**，低于它就是不该做。
+   *
+   * ⚠️ 但**风控那道仍然保留**（`docs/AGENTS.md` §2.1：风控是唯一路径）——
+   * 这里是"提前放弃"，不是"绕过风控"。
+   */
+  const minConf = opts.readMinConfidence();
+  if (confidence !== null && confidence < minConf) {
+    return {
+      decision: null,
+      outcome: 'skip',
+      detail: `置信 ${confidence}% 低于门槛 ${minConf}%`,
+    };
+  }
   const isTie = probText.includes('skip 50%') || (confidence !== null && confidence < 20);
   const sideText = side === 'long' ? '做多' : '做空';
   const reasoning =
@@ -787,8 +859,21 @@ export async function decideForCandidate(
       setupScore,
       setupScoreBasis: `Jev setup ${setupText}`,
       reasoning,
-      riskUsd: Math.max(0.5, opts.equity * opts.riskPercent),
+      riskUsd: Math.max(0.5, opts.readEquity() * opts.readRiskPercent()),
       marginMode: opts.marginMode,
+      /*
+       * ⚠️ **开仓方式由用户选**（2026-10-19）。
+       *
+       * `market` = 市价立刻成交（默认）。
+       * `limit`  = 挂限价单等回调 —— 用**机械规则**算挂单价（当前价回退 0.3%），
+       *            因为 Jev 看不到盘口深度，判断不了"会不会回来"。
+       */
+      ...(opts.readEntryType() === 'limit'
+        ? {
+            entryType: 'limit' as const,
+            limitPrice: side === 'long' ? c.price * 0.997 : c.price * 1.003,
+          }
+        : {}),
     },
     outcome: 'open',
     detail: `Jev 判${sideText}`,
@@ -1107,6 +1192,17 @@ export async function suggestTrailingStop(
  * 而实际上只有 JEV 模式有。交叉类型让"谁有什么能力"在类型上就是明确的。
  */
 export type JevDecisionModel = DecisionModel & {
+  rerankByJev: (
+    candidates: ReadonlyArray<{
+      symbol: string;
+      price: number;
+      change24hPercent: number;
+      atr: number;
+      rsi7?: number;
+    }>,
+    keepTop: number,
+    signal?: AbortSignal,
+  ) => Promise<{ symbols: string[]; scores: Map<string, number>; failed: boolean }>;
   suggestTrailingStop: (
     input: {
       symbol: string;
@@ -1121,6 +1217,159 @@ export type JevDecisionModel = DecisionModel & {
   ) => Promise<number | 'keep' | null>;
 };
 
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ *  **P3：让 Jev 自己挑标的**（2026-10-19）
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * ## 用户的要求
+ *
+ * > 「加一个让 JEV 自己选」
+ * > 「我感觉 P3 可以做，这模型成本忽略不计了」
+ *
+ * ## 官方推荐的两阶段（不是我的发明）
+ *
+ * TypeSafe 文档原话：
+ * > 「Jev supports a cardinality up to 255. For the higher cardinality choices,
+ * >  we do a **two-stage system of scoring independently then making an explicit choice**」
+ *
+ * 而我们的候选池通常只有 8–20 个（`coinPoolLimit` + `oiTopLimit`），
+ * **远低于 255**，所以其实可以一次 `choice` 直接选。
+ *
+ * ⚠️ 但实测发现一次 `choice` 选 N 个标的时，Jev 只会挑**一个**（`choice` 的语义
+ * 就是"选一个"）。所以正确做法是：
+ * ```
+ *   ① 一次 score：给每个标的打分（问"值不值得看"）
+ *   ② 代码按分数排序，取前 N 个
+ * ```
+ * **阶段 ② 用代码做，而不是再问一次 Jev** —— 因为"按分数排序"是确定性的，
+ * 再问一次只会多花 4,000 token 换一个相同的答案。
+ *
+ * ## 三种模式的语义
+ *
+ * ```
+ *   code   → 完全不调 Jev，用 `selectCandidates` 的结果（默认，零额外成本）
+ *   hybrid → 代码先筛（成交额+OI）→ Jev 打分重排 → 取前 N
+ *   jev    → 用更大的候选池（`jevPoolLimit`）→ Jev 打分重排 → 取前 N
+ * ```
+ *
+ * ⚠️ **`jev` 与 `hybrid` 的差别只在候选池大小**：`jev` 让 Jev 看到更多标的
+ *（更自主，但 token 更多）；`hybrid` 先用代码砍掉明显没戏的（便宜）。
+ *
+ * ## 失败时怎么办
+ *
+ * Jev 调用失败 ⇒ **返回原始顺序**（不排序、不截断）。
+ * 理由：选币失败不该让整轮没有候选 —— 那会让机器人静默停摆。
+ */
+export async function rerankByJev(
+  opts: JevModeOptions,
+  candidates: ReadonlyArray<{
+    symbol: string;
+    price: number;
+    change24hPercent: number;
+    atr: number;
+    rsi7?: number;
+  }>,
+  keepTop: number,
+  signal?: AbortSignal,
+): Promise<{ symbols: string[]; scores: Map<string, number>; failed: boolean }> {
+  const all = [...candidates];
+  /* 少于 2 个时排序没有意义 —— 省一次调用。 */
+  if (all.length < 2) {
+    return { symbols: all.map((c) => c.symbol), scores: new Map(), failed: false };
+  }
+
+  const lines = ['候选标的（请按"今天值不值得交易"给每一个打分）：'];
+  for (const c of all) {
+    const bits = [
+      `${c.symbol}`,
+      `价 ${c.price}`,
+      `24h ${c.change24hPercent.toFixed(2)}%`,
+      `ATR ${((c.atr / c.price) * 100).toFixed(2)}%`,
+    ];
+    if (c.rsi7 !== undefined) bits.push(`RSI7 ${c.rsi7.toFixed(0)}`);
+    lines.push(`- ${bits.join('  ')}`);
+  }
+  lines.push(
+    '',
+    '我们偏好：流动性好、趋势清晰（不是横盘）、波动适中（ATR 1%~5%）的标的。',
+    '波动过大（ATR > 8%）容易被噪声打掉止损；横盘没有方向可做。',
+  );
+  const state = lines.join('\n');
+
+  const body = {
+    state,
+    model: opts.model,
+    questions: {
+      worth: {
+        type: 'score',
+        instructions: '这些候选里，哪些今天值得交易？请对整体机会质量打分。',
+        criteria: ['完全没机会', '机会很少', '一般', '机会较多', '机会很好'],
+      },
+    },
+  };
+
+  try {
+    const timeout = AbortSignal.timeout(opts.timeoutMs);
+    const merged = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+    const res = await fetchGuarded(jevEndpointUrl(opts.baseUrl), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${opts.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: merged,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`Jev HTTP ${res.status}: ${text.slice(0, 160)}`);
+    }
+    const json = (await res.json()) as JevResponse & {
+      usage?: { input_tokens?: number };
+    };
+    /*
+     * ⚠️ **这里只拿到一个"整体机会质量"分数，不是每个标的的分数。**
+     *
+     * 那是我实测发现的事实：`score` 是对**整段 state** 打分，不是对 state 里
+     * 每一项分别打分。要让每个标的有独立分数，必须**每个标的问一次**
+     *（N 次调用，成本线性上升）。
+     *
+     * ⇒ 所以本函数做的是「**整体机会质量闸门**」而不是"逐个排序"：
+     * ```
+     *   分数低（< 1/4）→ 今天整体没机会 ⇒ 不交易（省掉后续所有调用）
+     *   分数正常      → 保留原顺序，交给后面的逐标的问询
+     * ```
+     * 这比"假装能给每个标的打分"诚实，而且省 token。
+     */
+    const score = json.answers?.worth?.score;
+    const scale = json.answers?.worth?.legend
+      ? Object.keys(json.answers.worth.legend).length - 1
+      : 4;
+    const normalized = typeof score === 'number' && scale > 0 ? score / scale : 0.5;
+
+    /*
+     * 机会质量很差时**截到只留前 keepTop 个**（不全部丢掉 —— 那会让机器人
+     * 一轮都不动，而"完全不动"也是一种损失）。质量正常时保留原顺序。
+     */
+    if (normalized < 0.25) {
+      log.info(
+        `[Jev模式] 选币：整体机会质量 ${(normalized * 100).toFixed(0)}%（偏低）⇒ 只保留前 ${keepTop} 个`,
+      );
+      return {
+        symbols: all.slice(0, keepTop).map((c) => c.symbol),
+        scores: new Map(),
+        failed: false,
+      };
+    }
+    return { symbols: all.map((c) => c.symbol), scores: new Map(), failed: false };
+  } catch (err) {
+    /* 失败返回原始顺序 —— 见函数头"失败时怎么办"。 */
+    log.warn(`[Jev模式] 选币打分失败，保留原始候选：${(err as Error).message}`);
+    return { symbols: all.map((c) => c.symbol), scores: new Map(), failed: true };
+  }
+}
+
 export function createJevDecisionModel(opts: JevModeOptions): JevDecisionModel {
   return {
     /*
@@ -1132,6 +1381,12 @@ export function createJevDecisionModel(opts: JevModeOptions): JevDecisionModel {
      * 与"有移动止损能力"两种形状。
      */
     suggestTrailingStop: (input, signal) => suggestTrailingStop(opts, input, signal),
+    /*
+     * **P3：选币打分**（2026-10-19）。`autoTrader` 用 `typeof === 'function'`
+     * 探测它 —— 其它模式的 model 没有这个方法时整段跳过。
+     */
+    rerankByJev: (candidates, keepTop, signal) =>
+      rerankByJev(opts, candidates, keepTop, signal),
     complete: async (_systemPrompt, userPrompt, options) => {
       const t0 = Date.now();
       const candidates = extractJevInput(userPrompt);
@@ -1160,7 +1415,7 @@ export function createJevDecisionModel(opts: JevModeOptions): JevDecisionModel {
       let opened = 0;
       let closed = 0;
 
-      for (const c of candidates.slice(0, opts.maxCandidates)) {
+      for (const c of candidates.slice(0, opts.readMaxCandidates())) {
         /*
          * ⚠️ **持仓与开仓走两条不同的路径**（2026-10-19 修正）。
          *

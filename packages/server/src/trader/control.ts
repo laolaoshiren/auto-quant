@@ -137,7 +137,6 @@ export interface JevOptionSpec {
    * `buildJevModeModel()` 装配时读的（例如 `maxCandidates`），
    * 那些必须重启。界面上要如实标注 —— 否则用户改完以为生效了。
    */
-  requiresRestart?: boolean;
 }
 
 export const JEV_OPTIONS: readonly JevOptionSpec[] = [
@@ -150,9 +149,9 @@ export const JEV_OPTIONS: readonly JevOptionSpec[] = [
       '混合 = 代码先筛 20 个、Jev 再从中挑（推荐）。',
     kind: 'enum',
     options: [
-      { value: 'code', label: '代码筛选（默认，不花 token）' },
-      { value: 'hybrid', label: '混合：代码筛 20 → Jev 挑（推荐）' },
-      { value: 'jev', label: '纯 Jev：从全市场 100 个里挑' },
+      { value: 'code', label: '按成交额自动筛（默认，不花额外费用）' },
+      { value: 'hybrid', label: '自动筛 20 个 → 让 Jev 自己挑（推荐）' },
+      { value: 'jev', label: '让 Jev 从全市场 100 个里自己选' },
     ],
     fallback: 'code',
   },
@@ -195,44 +194,62 @@ export const JEV_OPTIONS: readonly JevOptionSpec[] = [
   },
   {
     key: 'min_confidence',
-    label: '最低置信度',
+    label: '出手门槛',
     why:
-      '低于这个值的机会直接放弃。实测 Jev 的置信分布在 9–68 之间，' +
-      '设 40 会拒掉一半左右；设 0 则全都要（包括 50:50 的平局）。',
-    kind: 'number',
-    range: { min: 0, max: 100, step: 5, unit: '分' },
+      'Jev 有多确定才允许开仓。' +
+      '「只做有把握的」会放弃约一半机会（实测 Jev 置信多在 25–65 之间）；' +
+      '「有机会就做」连 50:50 的平局也会执行。',
+    kind: 'enum',
+    options: [
+      { value: '55', label: '只做有把握的（约一半机会）' },
+      { value: '40', label: '平衡（默认）' },
+      { value: '20', label: '有机会就做' },
+      { value: '0', label: '全部都做（含平局）' },
+    ],
     fallback: '40',
   },
   {
     key: 'risk_percent',
-    label: '单笔风险比例',
+    label: '单笔风险',
     why:
-      '一笔最多亏掉权益的百分之几。它是**仓位档位表的上限来源** —— ' +
-      '设 1% 时，一笔亏光止损也只损失 1% 的账户。',
-    kind: 'number',
-    range: { min: 0.1, max: 5, step: 0.1, unit: '%' },
+      '一笔最多亏掉账户的多少。它同时决定仓位大小 —— ' +
+      '设「1%」时，一笔打止损只损失账户的 1%。',
+    kind: 'enum',
+    options: [
+      { value: '0.5', label: '很小（0.5%/笔）' },
+      { value: '1', label: '平衡（1%/笔，默认）' },
+      { value: '2', label: '较大（2%/笔）' },
+      { value: '3', label: '激进（3%/笔）' },
+    ],
     fallback: '1',
-    requiresRestart: true,
   },
   {
     key: 'max_candidates',
-    label: '每轮最多问几个标的',
+    label: '每轮看几个标的',
     why:
-      '直接决定 token 成本（每个标的约 1,200 token）。8 个约 $0.05/天，' +
-      '4 个减半。也决定一轮的耗时（每个约 360ms）。',
-    kind: 'number',
-    range: { min: 1, max: 20, step: 1, unit: '个' },
+      '决定成本与耗时。越少越省，但也可能错过机会。' +
+      '（界面上会实时显示每天大约花多少钱。）',
+    kind: 'enum',
+    options: [
+      { value: '4', label: '省（4 个）' },
+      { value: '8', label: '标准（8 个，默认）' },
+      { value: '12', label: '多（12 个）' },
+      { value: '20', label: '全力（20 个）' },
+    ],
     fallback: '8',
-    requiresRestart: true,
   },
   {
     key: 'hold_ask_every',
-    label: '持仓问询间隔',
+    label: '持仓检查频率',
     why:
-      '每 N 轮问一次「继续持有还是平掉」。设 1 = 每轮都问（最灵敏但最贵）；' +
-      '设 3 = 三轮回一次（省 2/3 token，代价是反应慢一点）。',
-    kind: 'number',
-    range: { min: 1, max: 10, step: 1, unit: '轮' },
+      '多久问一次 Jev「这个仓位还该拿着吗」。' +
+      '问得越勤反应越快、越贵；问得稀省 token，但可能错过平仓时机。',
+    kind: 'enum',
+    options: [
+      { value: '1', label: '每轮都问（默认，最灵敏）' },
+      { value: '2', label: '两轮一次' },
+      { value: '3', label: '三轮一次（省 2/3）' },
+    ],
     fallback: '1',
   },
 ];
@@ -442,7 +459,7 @@ export interface JevOptionState {
   /** `ui` = 界面上设过；`default` = 用代码默认值。 */
   source: 'ui' | 'default';
   /** 改它是否要重启机器人才生效。 */
-  requiresRestart: boolean;
+
 }
 
 export function listJevOptions(): JevOptionState[] {
@@ -463,7 +480,7 @@ export function listJevOptions(): JevOptionState[] {
       ...(spec.range !== undefined ? { range: spec.range } : {}),
       value: hasUi ? stored! : spec.fallback,
       source: hasUi ? 'ui' : 'default',
-      requiresRestart: spec.requiresRestart === true,
+
     };
   });
 }

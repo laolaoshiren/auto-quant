@@ -13,6 +13,7 @@ import { BinanceUserDataStream } from '../binance/ws.js';
 import type { Vault } from '../crypto/vault.js';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
+import { jevBool, jevEnum, jevNumber } from './control.js';
 import { createJevDecisionModel } from './jevModel.js';
 import { createLogger } from '../logger.js';
 import { env } from '../env.js';
@@ -2008,14 +2009,34 @@ export class TraderManager {
          */
         model: 'jev-latest',
         timeoutMs: 20_000,
-        equity,
         /*
-         * 单笔风险 1%：与团队模式的默认口径一致。
-         * 档位表会在它之上做 0.6/1.0/1.4 的缩放。
+         * ⚠️⚠️ **这些参数传的是「读取函数」，不是值**（2026-10-19 用户要求）。
+         *
+         * ## 原来为什么不对
+         *
+         * 用户原话：
+         * > 「需重启，你别搞这种啊，完全可以程序自己解决的吧？
+         * >  用户不要关注这些和增加繁琐步骤」
+         *
+         * 原来的写法是 `riskPercent: 0.01` —— 在**装配时读一次**，
+         * 之后界面上改了它**永远不会生效**，只能重启机器人。
+         * 那是我的实现偷懒，不是必然。
+         *
+         * ⇒ 现在传函数，`jevModel` 在**每次决策时**调用它现读。
+         *   于是界面上改完，**下一轮就用新值**，用户不需要知道"重启"这回事。
          */
-        riskPercent: 0.01,
+        readRiskPercent: () => Math.max(0.001, jevNumber('risk_percent') / 100),
+        readMaxCandidates: () => Math.max(1, Math.floor(jevNumber('max_candidates'))),
+        readCoinSelect: () => jevEnum('coin_select'),
+        readEntryType: () => jevEnum('entry_type'),
+        readAllowShort: () => jevBool('allow_short'),
+        readAllowResize: () => jevBool('allow_resize'),
+        readAllowTrailing: () => jevBool('allow_trailing'),
+        readMinConfidence: () => jevNumber('min_confidence'),
+        readHoldAskEvery: () => Math.max(1, Math.floor(jevNumber('hold_ask_every'))),
+        /* 权益也每轮现读 —— 余额会变，写死会让档位基于旧余额。 */
+        readEquity: () => traders.get(traderId)?.initialEquity ?? equity,
         leverage,
-        maxCandidates: 8,
         /*
          * ⚠️ `riskControl.marginMode` 的类型只有 `'isolated'`（策略层没开放全仓），
          * 所以这里**不需要分支** —— 写 `=== 'cross' ? 'cross' : 'isolated'`

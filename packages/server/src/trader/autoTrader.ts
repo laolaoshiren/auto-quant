@@ -62,6 +62,7 @@ import {
   type PromptContext,
   type PromptRejection,
 } from '../strategy/prompt.js';
+import { jevEnum, jevNumber } from './control.js';
 import { last } from '../market/indicators.js';
 import { isMajorSymbol, type DecisionAction } from '@aq/shared';
 import { agentMemory } from '../store/agentStore.js';
@@ -3355,6 +3356,93 @@ export class AutoTrader {
       config.indicators,
       selection.sourcesBySymbol,
     );
+
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  **P3：让 Jev 参与选币**（2026-10-19 用户要求）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * 用户原话：
+     * > 「加一个让 JEV 自己选」
+     * > 「我感觉 P3 可以做，这模型成本忽略不计了」
+     *
+     * ## 三种模式（用户可在「JEV 模式」标签里切换）
+     *
+     * ```
+     *   code   → 完全不调 Jev（默认，零额外成本）
+     *   hybrid → 代码先筛（成交额+OI）→ Jev 打分 → 机会差时收缩候选
+     *   jev    → 同上（候选池已由策略决定）
+     * ```
+     *
+     * ## ⚠️ 为什么做的是「整体机会闸门」而不是"逐个挑选"
+     *
+     * 实测发现：`score` 是对**整段 state** 打分，不是对 state 里每一项分别打分。
+     * 要让每个标的有独立分数必须**每个问一次**（N 次调用，成本线性上升）。
+     *
+     * ⇒ 本实现做「整体机会质量闸门」：
+     * ```
+     *   Jev 说"今天整体没机会" ⇒ 收缩候选（省掉后续 N 次逐币问询）
+     *   Jev 说"有机会"        ⇒ 保留原顺序
+     * ```
+     * 真正的"逐个挑选"仍然发生在后面的 `decideForCandidate`（每标的问 5 个问题）。
+     * 这比"假装能给每个标的打分"诚实，而且省 token。
+     *
+     * ## 失败时
+     *
+     * Jev 调用失败 ⇒ **保留原始候选**（不收缩、不中断）。
+     * 选币失败不该让整轮没有候选 —— 那会让机器人静默停摆。
+     */
+    if (this.deps.trader.mode === 'jev') {
+      const selectMode = jevEnum('coin_select');
+      if (selectMode !== 'code') {
+        const jevRerank = this.deps.model as {
+          rerankByJev?: (
+            candidates: ReadonlyArray<{
+              symbol: string;
+              price: number;
+              change24hPercent: number;
+              atr: number;
+              rsi7?: number;
+            }>,
+            keepTop: number,
+          ) => Promise<{ symbols: string[]; failed: boolean }>;
+        };
+        if (typeof jevRerank.rerankByJev === 'function') {
+          const keepTop = Math.max(1, Math.floor(jevNumber('max_candidates')));
+          const result = await jevRerank.rerankByJev(
+            snapshots.map((snap) => {
+              const atrKey = Object.keys(snap.primary.atr)[0];
+              const rsiKey = Object.keys(snap.primary.rsi)[0];
+              return {
+                symbol: snap.symbol,
+                price: snap.price,
+                change24hPercent: snap.priceChangePercent24h,
+                atr: atrKey !== undefined ? (last(snap.primary.atr[atrKey] ?? []) ?? 0) : 0,
+                rsi7:
+                  rsiKey !== undefined
+                    ? (last(snap.primary.rsi[rsiKey] ?? []) ?? undefined)
+                    : undefined,
+              };
+            }),
+            keepTop,
+          );
+          if (result.symbols.length > 0 && result.symbols.length < snapshots.length) {
+            const kept = new Set(result.symbols);
+            const before = snapshots.length;
+            snapshots = snapshots.filter((snap) => kept.has(snap.symbol));
+            this.emit(
+              'info',
+              `[Jev模式] 选币（${selectMode}）：${before} 个候选 → ${snapshots.length} 个`,
+            );
+          } else if (!result.failed) {
+            this.emit(
+              'info',
+              `[Jev模式] 选币（${selectMode}）：Jev 认为整体有机会，保留全部 ${snapshots.length} 个候选`,
+            );
+          }
+        }
+      }
+    }
 
     /*
      * --- 预取交易所的杠杆上限 --------------------------------------------

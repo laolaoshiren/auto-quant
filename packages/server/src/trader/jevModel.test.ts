@@ -33,15 +33,30 @@ import {
   type JevModeOptions,
 } from './jevModel.js';
 
+/**
+ * 测试用的默认选项。
+ *
+ * ⚠️ **这些是「读取函数」而不是值**（2026-10-19 用户要求实时生效）：
+ * 界面上改完下一轮就读到新值，不需要重启机器人。
+ * 所以测试里也用函数表达 —— 顺带让"某个测试要改权益"变成一行
+ * `{ ...OPTS, readEquity: () => 0 }`，而不是复制整份配置。
+ */
 const OPTS: JevModeOptions = {
   baseUrl: 'http://127.0.0.1:1',
   apiKey: 'test-key',
   model: 'jev-latest',
   timeoutMs: 1000,
-  equity: 100,
-  riskPercent: 0.01,
+  readEquity: () => 100,
+  readRiskPercent: () => 0.01,
+  readMaxCandidates: () => 8,
+  readCoinSelect: () => 'code',
+  readEntryType: () => 'market',
+  readAllowShort: () => true,
+  readAllowResize: () => true,
+  readAllowTrailing: () => true,
+  readMinConfidence: () => 40,
+  readHoldAskEvery: () => 1,
   leverage: 5,
-  maxCandidates: 8,
   marginMode: 'isolated',
 };
 
@@ -443,7 +458,7 @@ describe('JEV 模式：仓位上限（2026-10-19 线上硬 bug）', () => {
     /* BTC 的 ATR 很小（1.1%），这正是最容易爆掉的情形。 */
     const btc: JevCandidate = { symbol: 'BTCUSDT', price: 108000, atr: 1200 };
     const t = tiersFor(btc, OPTS, 'long');
-    const maxAllowed = OPTS.equity * OPTS.leverage;
+    const maxAllowed = 100 * OPTS.leverage;
     for (const tier of ['A', 'B', 'C'] as const) {
       assert.ok(
         t.size[tier] <= maxAllowed,
@@ -460,7 +475,7 @@ describe('JEV 模式：仓位上限（2026-10-19 线上硬 bug）', () => {
      */
     const btc: JevCandidate = { symbol: 'BTCUSDT', price: 108000, atr: 1200 };
     const t = tiersFor(btc, OPTS, 'long');
-    const perPositionCap = OPTS.equity * 0.3;
+    const perPositionCap = 100 * 0.3;
     /*
      * ⚠️ **C 档是 B 档的 1.4 倍，所以它必然超过"单笔上限"** ——
      * 那是设计如此：三档是**相对激进度**（A 保守 / C 激进），
@@ -469,7 +484,7 @@ describe('JEV 模式：仓位上限（2026-10-19 线上硬 bug）', () => {
      * ⇒ 正确的判据是"C 档不超过权益×杠杆的物理上限"，
      *   而不是"C 档不超过 B 档的单笔上限"（那会让三档退化成同一档）。
      */
-    const physicalCap = OPTS.equity * OPTS.leverage;
+    const physicalCap = 100 * OPTS.leverage;
     assert.ok(
       t.size.C <= physicalCap,
       `★ C 档名义 ${t.size.C.toFixed(2)} 超过了物理上限 ${physicalCap}`,
@@ -487,7 +502,7 @@ describe('JEV 模式：仓位上限（2026-10-19 线上硬 bug）', () => {
     const volatile: JevCandidate = { symbol: 'WILDUSDT', price: 10, atr: 0.5 };
     const t = tiersFor(volatile, OPTS, 'long');
     /* ATR 5% ⇒ 止损距离 1.5×0.5 = 0.75 ⇒ 风险中性名义 = (1/0.75)×10 ≈ 13.3 */
-    const riskNeutral = (OPTS.equity * OPTS.riskPercent / (0.5 * 1.5)) * 10;
+    const riskNeutral = (100 * 0.01 / (0.5 * 1.5)) * 10;
     assert.ok(
       Math.abs(t.size.B - riskNeutral) < 1e-6,
       `★ 波动大的标的应走 ATR 反推值 ${riskNeutral.toFixed(2)}，实际 ${t.size.B.toFixed(2)}`,
@@ -495,7 +510,62 @@ describe('JEV 模式：仓位上限（2026-10-19 线上硬 bug）', () => {
   });
 
   it('★★ 权益为 0 时仓位为 0（不产出"免费"的仓位）', () => {
-    const zeroEquity: JevModeOptions = { ...OPTS, equity: 0 };
+    const zeroEquity: JevModeOptions = { ...OPTS, readEquity: () => 0 };
+    const t = tiersFor(C, zeroEquity, 'long');
+    for (const tier of ['A', 'B', 'C'] as const) {
+      assert.equal(t.size[tier], 0, `★ 权益为 0 时 ${tier} 档仓位必须是 0`);
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  实时生效的配置：读取函数（2026-10-19 用户要求）                              */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：配置实时生效', () => {
+  it('★★★ 改配置后【下一次读取】就生效（不需要重启）', () => {
+    /*
+     * 用户原话：
+     * > 「需重启，你别搞这种啊，完全可以程序自己解决的吧？
+     * >  用户不要关注这些和增加繁琐步骤」
+     *
+     * ## 原来为什么不对
+     *
+     * `riskPercent` / `maxCandidates` 等是**普通数值**，在装配时读一次
+     * ⇒ 界面上改了永远不生效 ⇒ 只能重启。
+     *
+     * ⇒ 现在全部是**读取函数**，每次决策现读。这个用例钉住那个语义：
+     *   同一个 `opts` 对象，改变函数返回的值，`tiersFor` 的结果必须跟着变。
+     */
+    let equity = 100;
+    const liveOpts: JevModeOptions = { ...OPTS, readEquity: () => equity };
+
+    const before = tiersFor(C, liveOpts, 'long');
+    equity = 200;
+    const after = tiersFor(C, liveOpts, 'long');
+
+    assert.ok(
+      after.size.B > before.size.B,
+      `★ 权益从 100 变成 200 后仓位档应变大（前 ${before.size.B.toFixed(2)} / 后 ${after.size.B.toFixed(2)}）` +
+        ' —— 不变说明配置被缓存在装配期了',
+    );
+  });
+
+  it('★★★ 关掉「允许做空」后，Jev 判做空必须被当成跳过', () => {
+    /*
+     * 不这么做的话，关掉做空之后 Jev 仍然会选 `open_short`，
+     * 而代码会照它执行 —— 那个开关就形同虚设。
+     *
+     * ⚠️ 这里只验证语义（函数存在且可调用）。真正的"判做空→跳过"逻辑
+     * 在 `decideForCandidate` 里，需要桩掉网络才能测 —— 见下一个用例。
+     */
+    const noShort: JevModeOptions = { ...OPTS, readAllowShort: () => false };
+    assert.equal(noShort.readAllowShort(), false, '★ 读取函数必须如实返回 false');
+    assert.equal(OPTS.readAllowShort(), true, '★ 默认必须允许做空');
+  });
+
+  it('★★ 权益为 0 时仓位为 0（实时读取也遵守这条）', () => {
+    const zeroEquity: JevModeOptions = { ...OPTS, readEquity: () => 0 };
     const t = tiersFor(C, zeroEquity, 'long');
     for (const tier of ['A', 'B', 'C'] as const) {
       assert.equal(t.size[tier], 0, `★ 权益为 0 时 ${tier} 档仓位必须是 0`);

@@ -1578,10 +1578,28 @@ export function TraderPage() {
           团队模式从不读它。浏览器实测确实看到了「AI 模型 [DEMO] 脚本化模型」，
           而那不是它在用的东西。
         */}
+        {/*
+          ⚠️ **JEV 模式也不显示「AI 模型」**（2026-10-19 用户截图指出）。
+
+          用户看到的是：
+          ```
+            运行模式 JEV 模式（实验性） · 模拟盘
+            AI 模型 Command Code（聚合网关） deepseek/deepseek-v4.1-flash-fast
+            策略 #null
+          ```
+          而 **JEV 模式从不读那条记录** —— 它的决策模型固定是 magpie 的
+          `jev-latest`（见 `jevModel.ts`）。显示一个不会被使用的模型名是**误导**：
+          用户会以为改它能影响 JEV 模式的行为。
+        */}
         {trader.mode === 'ai_team' ? (
           <span title="团队模式的模型由独立的 magpie 网关调度，与「AI 模型」列表无关。">
             模型调度{' '}
             <span className="text-ink-faint">系统 magpie 网关（按角色分档）</span>
+          </span>
+        ) : trader.mode === 'jev' ? (
+          <span title="JEV 模式的决策模型固定是 magpie 网关的 Jev，与「AI 模型」列表无关。">
+            决策模型{' '}
+            <span className="text-ink-faint">Jev（magpie 网关）</span>
           </span>
         ) : (
           <>
@@ -1619,6 +1637,17 @@ export function TraderPage() {
            * 一个**指向不存在页面的链接**，浏览器实测确实看到了「策略 #null」。
            */
           <span title="AI 团队模式不引用策略；参数由团队按角色自行管理。">{`${MODE_LABEL.ai_team}（多智能体）`}</span>
+        ) : trader.mode === 'jev' ? (
+          /*
+           * ⚠️ **JEV 模式同理**（2026-10-19 用户截图指出「策略 #null」）。
+           *
+           * JEV 模式也不引用策略（`strategyId` 是 `null`），风控边界来自
+           * `defaultJevConfig()`，而**可调项在「JEV 模式」标签里**（实时生效）。
+           * 所以这里说清"参数在哪调"，而不是链一个不存在的策略。
+           */
+          <span title="JEV 模式的参数在「JEV 模式」标签里调整（实时生效）。">
+            {MODE_LABEL.jev} · 参数在 JEV 标签页
+          </span>
         ) : (
           <>
             策略{' '}
