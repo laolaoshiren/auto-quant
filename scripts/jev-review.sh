@@ -125,6 +125,66 @@ else:
 print("══════════════════════════════════════════════════════════════")
 PY
 
+# ── 2b. 追高风险检查（2026-10-18 实测发现） ────────────────────────────────
+#
+# ## 为什么需要这一节
+#
+# 实测发现：Jev 的保留名单高度重复（QUSDT 6/12 次，而它 24h 已 +109%）。
+# 原因不是 Jev 差，而是我给的问题太粗：**"波动大"同时包含"刚启动"与"已走完"**。
+#
+# ## 但实测表明风险被下游挡住了
+#
+#   团队实际决策：ZECUSDT（不是 Q 也不是 AVA）
+#   这些标的的成交：GTC +0.1268、AGT -0.0055 —— LLM 深看后正确地放弃了
+#
+# ⇒ 所以这一节只**告警**，不自动关闭。判据是：
+#   「保留组里 24h |涨跌| > 10% 的占比」—— 占比高说明它在挑"已经走完"的。
+echo
+echo "── 2b. 追高风险（保留组里已走完的占比）─────────────────────"
+python3 - "$SAMPLES" <<'PY_CHASE'
+import json, sys
+
+path = sys.argv[1]
+samples = []
+with open(path) as f:
+    for line in f:
+        line = line.strip()
+        if line:
+            try:
+                samples.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+# 只看最近 10 轮（老样本的行情已经过时，不代表现在的风格）
+recent = samples[-10:]
+if not recent:
+    print("  没有样本")
+    sys.exit(0)
+
+big = 0
+total = 0
+for s in recent:
+    for k in s.get("kept", []):
+        total += 1
+        if abs(k["change24h"]) > 10:
+            big += 1
+
+if total == 0:
+    print("  没有保留样本")
+    sys.exit(0)
+
+ratio = big / total
+print(f"  最近 {len(recent)} 轮：保留组 {total} 个标的里，{big} 个的 24h |涨跌| > 10%（{ratio*100:.0f}%）")
+
+if ratio > 0.5:
+    print("  ⚠️  超过一半的保留标的是'已走完'的行情 —— Jev 在系统性追高。")
+    print("     这不构成移除理由（下游 LLM+风控会挡住），但如果发现团队真的跟进，就关掉它。")
+elif ratio > 0.3:
+    print("  🟡 有一定追高倾向（30%-50%），继续观察。")
+else:
+    print("  ✅ 追高占比正常（≤30%）。")
+PY_CHASE
+
 # ── 3. 同时报一下运行健康 ───────────────────────────────────────────────────
 echo
 echo "── 3. 运行健康 ─────────────────────────────────────────────"
