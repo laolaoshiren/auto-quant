@@ -59,8 +59,10 @@ import {
   type PromptMemory,
   type PromptLesson,
   type PromptPosition,
+  type PromptContext,
   type PromptRejection,
 } from '../strategy/prompt.js';
+import { last } from '../market/indicators.js';
 import { isMajorSymbol, type DecisionAction } from '@aq/shared';
 import { agentMemory } from '../store/agentStore.js';
 import {
@@ -3857,11 +3859,44 @@ export class AutoTrader {
     const userPrompt = stablePrompt.length > 0 ? `${stablePrompt}\n\n${volatilePrompt}` : volatilePrompt;
 
     /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  **JEV 模式专用：附加结构化输入块**（2026-10-19）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 为什么要有这个块
+     *
+     * Jev **不读散文** —— 它的输入是一段紧凑摘要，输出是三种类型化答案
+     *（`choice` / `score` / `noul`，见 `docs/JEV-MODE-DESIGN.md`）。
+     * 而 `renderUserPrompt()` 产出的是**给 LLM 读的中文散文**，
+     * 从里面用正则抠"价格是多少"是脆弱的（配置一变就静默抠错）。
+     *
+     * ⇒ 在**仅 Jev 模式**下追加一个结构化 JSON 块，由 `jevModel.ts` 解析。
+     *
+     * ## ⚠️ 三条硬约束
+     *
+     * ```
+     * ① 只在 mode === 'jev' 时追加 —— 其余三种模式的 prompt 逐字节不变
+     * ② 追加在【末尾】—— 不破坏前缀缓存（那段 4.7 万 token 的稳定段）
+     * ③ 块内只放"算档位需要的最小字段"—— 不是行情全集
+     * ```
+     *
+     * ## 为什么 `heldSide` 要在这里算
+     *
+     * 本模式只做"开仓 / 跳过"，已有持仓的标的要跳过（不叠加）。
+     * 那个判断需要**持仓列表**，而 `jevModel` 只拿得到 prompt 文本。
+     */
+    const jevInput =
+      this.deps.trader.mode === 'jev'
+        ? buildJevInputBlock(promptContext, this.promptBudget)
+        : '';
+    const promptForModel = jevInput === '' ? userPrompt : `${userPrompt}\n\n${jevInput}`;
+
+    /*
      * 提示词在**发请求之前**就填进进度对象：这是"部分成功也留痕"的关键一步 ——
      * 模型调用抛错（欠费 / 被拒 / 网络）时，操作员仍然能拿到这一轮原本要问什么。
      */
     progress.systemPrompt = systemPrompt;
-    progress.userPrompt = userPrompt;
+    progress.userPrompt = promptForModel;
 
     /*
      * ⚠️ **前缀稳定性是缓存命中的全部前提** —— 这里曾经用一段临时诊断
@@ -3908,7 +3943,7 @@ export class AutoTrader {
             : []),
           { role: 'user', content: volatilePrompt },
         ])
-      : await this.deps.model.complete(systemPrompt, userPrompt, { signal });
+      : await this.deps.model.complete(systemPrompt, promptForModel, { signal });
 
     /*
      * ── 按需取数：模型可以在给结论之前主动要数据 ─────────────────────────
@@ -12376,4 +12411,92 @@ export function readForeignActivity(traderId: number): {
     /* 同上：留空，不要假装是 0。 */
   }
   return out;
+}
+
+/**
+ * **JEV 模式的 `<JEV_INPUT>` 块**（2026-10-19）。
+ *
+ * ## 这个块是什么
+ *
+ * 一段结构化 JSON，附在 prompt **末尾**，只被 `jevModel.ts` 读取。
+ * 它承载"算候选档位需要的最小字段" —— 不是行情全集。
+ *
+ * ## ⚠️ 为什么不用解析散文
+ *
+ * `renderUserPrompt()` 的段落随策略配置变化（有些有、有些没有）。
+ * 用正则从中文散文里抠"价格是多少"会在某个配置下**静默抠错** ——
+ * 而错的档位会真的下单。
+ *
+ * ## ⚠️ 三条约束（改这里之前先读）
+ *
+ * ```
+ * ① 只在 mode === 'jev' 时调用 —— 其余模式的 prompt 逐字节不变
+ * ② 追加在末尾 —— 不破坏前缀缓存（那段 4.7 万 token 的稳定段命中率靠它）
+ * ③ 字段只放最小集 —— 每多一个字段就多一份"它变了但没人更新"的风险
+ * ```
+ *
+ * ## `heldSide` 为什么在这里算
+ *
+ * 本模式只做"开仓 / 跳过"，已有持仓的标的要跳过（不叠加仓位）。
+ * 那个判断需要**持仓列表**，而 `jevModel` 只拿得到 prompt 文本。
+ *
+ * ## `maxCandidates` 为什么在这里也生效
+ *
+ * 候选太多会：① 每标的 400ms ⇒ 线性变慢；② token 成本线性上升。
+ * 上限在这里就截断，`jevModel` 那边再截一次（双重保险，不会因为
+ * 一处改动就失控）。
+ */
+function buildJevInputBlock(ctx: PromptContext, _budgetTokens: number): string {
+  const held = new Map<string, 'long' | 'short'>();
+  for (const p of ctx.positions) {
+    const side = p.position.side;
+    if (side === 'long' || side === 'short') held.set(p.position.symbol, side);
+  }
+
+  /*
+   * ⚠️ 上限 8：与 `defaultJevConfig()` 的 `coinPoolLimit(8) + oiTopLimit(4)`
+   * 量级一致。再多的标的对"这一轮做不做"的判断帮助很小，而成本是线性的。
+   */
+  const MAX = 8;
+
+  const items = ctx.candidates.slice(0, MAX).map((c) => {
+    const primary = c.primary;
+    /* 指标序列取末值 —— 与 `verifyPipeline.ts` 同一取法（键名由数据决定）。 */
+    const atrKey = Object.keys(primary.atr)[0];
+    const rsiKey = Object.keys(primary.rsi)[0];
+    const emaKey = Object.keys(primary.ema)[0];
+    const atr = atrKey !== undefined ? (last(primary.atr[atrKey] ?? []) ?? 0) : 0;
+    const rsi7 = rsiKey !== undefined ? (last(primary.rsi[rsiKey] ?? []) ?? undefined) : undefined;
+    const ema20 = emaKey !== undefined ? (last(primary.ema[emaKey] ?? []) ?? undefined) : undefined;
+
+    /*
+     * 近 3 根位移百分比（策略里的 D）：
+     * `(收盘[-1] - 收盘[-4]) / 收盘[-4] × 100` —— 与团队模式 `windowHint`
+     * 用的那个 D 是同一个口径（那里实测过它的语义：0.8%~3.5% 是可执行窗口）。
+     */
+    const closes = primary.closes;
+    let displacementPercent: number | undefined;
+    if (closes.length >= 4) {
+      const a = closes[closes.length - 4];
+      const b = closes[closes.length - 1];
+      if (typeof a === 'number' && typeof b === 'number' && a > 0) {
+        displacementPercent = ((b - a) / a) * 100;
+      }
+    }
+
+    return {
+      symbol: c.symbol,
+      price: c.price,
+      atr,
+      ...(displacementPercent !== undefined ? { displacementPercent } : {}),
+      ...(Number.isFinite(c.priceChangePercent24h)
+        ? { change24hPercent: c.priceChangePercent24h }
+        : {}),
+      ...(rsi7 !== undefined && Number.isFinite(rsi7) ? { rsi7 } : {}),
+      ...(ema20 !== undefined && Number.isFinite(ema20) ? { ema20 } : {}),
+      ...(held.has(c.symbol) ? { heldSide: held.get(c.symbol) } : {}),
+    };
+  });
+
+  return `<JEV_INPUT>${JSON.stringify(items)}</JEV_INPUT>`;
 }

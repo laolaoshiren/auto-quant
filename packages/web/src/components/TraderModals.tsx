@@ -621,6 +621,43 @@ export function NewTraderModal({
                   </span>
                 </span>
               </label>
+              {/*
+                ⚠️ **JEV 模式（实验性）** —— 2026-10-19 用户要求新增。
+
+                原话：「帮我增加一种模式（实验性），JEV 模式，该模式所有操作都
+                采用 JEV 模型来实现，从选币到交易，一切都由 JEV 自主完成」。
+
+                ## 说明文案为什么这么写
+
+                用户要的是「一切由 JEV 自主」，但实测发现 Jev **不产生文字、
+                弱于算术**（只有 choice/score/noul 三种答案）。
+                ⇒ 真实的形态是「代码算好候选档位 → Jev 选 → 代码翻译成决策」。
+
+                这段话必须把这一点说清（`docs/AGENTS.md` §3.2：不确定就说不确定），
+                否则用户会以为"它能自己算仓位"。同时**必须标明实验性** ——
+                它的盈利表现完全未知。
+              */}
+              <label className="flex cursor-pointer items-start gap-2 text-base">
+                <input
+                  type="radio"
+                  name="trader-mode"
+                  className="mt-0.5"
+                  checked={mode === 'jev'}
+                  onChange={() => setMode('jev')}
+                />
+                <span>
+                  <span className="font-medium">{MODE_LABEL.jev}</span>
+                  <span className="block text-xs text-ink-faint">
+                    每一个判断都交给 Jev 决策模型：选哪些标的、做多做空、用哪一档仓位与止损止盈。
+                    Jev 只回答"选哪个"（它不产生文字、也不擅长算数），
+                    所以具体价位与档位由系统按 ATR 与风险预算**先算好**，再由它挑 ——
+                    挑完照常过风控、照常挂保护单。
+                    <strong className="mt-1 block font-medium text-warn">
+                      ⚠️ 实验性：盈利能力尚未验证，建议先用模拟盘观察。
+                    </strong>
+                  </span>
+                </span>
+              </label>
             </div>
           </Field>
 

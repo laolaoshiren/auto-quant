@@ -13,6 +13,7 @@ import { BinanceUserDataStream } from '../binance/ws.js';
 import type { Vault } from '../crypto/vault.js';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
+import { createJevDecisionModel } from './jevModel.js';
 import { createLogger } from '../logger.js';
 import { env } from '../env.js';
 import { MarketDataService } from '../market/service.js';
@@ -1940,8 +1941,93 @@ export class TraderManager {
    * 「模型用尽那你启动以后页面上提示就行了」）：
    * 出口不通用 `error` 状态说清，而不是让机器人起不来。
    */
-  private async buildTeamModel(traderId: number): Promise<TeamModelBuild> {
+  /**
+   * **装配 JEV 模式（实验性）的决策模型**（2026-10-19）。
+   *
+   * ## 它与 `buildTeamModel` 的关系
+   *
+   * 两者都需要**一个 magpie 网关出口**（baseUrl + key），但用途完全不同：
+   * ```
+   *   团队模式 → 用网关调很多 LLM，做辩论与裁决
+   *   JEV 模式 → 用网关调 Jev（/v1/systemone），做类型化判断
+   * ```
+   * ⚠️ 所以**复用 `resolveTeamGateway()` 找出口**（同一套 `.env`/自动发现逻辑），
+   * 但**不复用 `buildTeamModel`** —— 那会把模型档位、角色路由一起拖进来，
+   * 而那些东西对 Jev 毫无意义（它只有 `jev-latest` 一个入口）。
+   *
+   * ## 失败时返回 `reason`，不抛
+   *
+   * 与 `buildTeamModel` 同一条纪律：装配失败**不阻断启动**，
+   * 由调用方 push 一条 `severity: 'error'` 的 preflight check + 写日志。
+   * 见 `buildTeamModel` 上方那段关于"静默退回单模型"的 P0 记录。
+   */
+  private buildJevModeModel(traderId: number): {
+    model: DecisionModel | null;
+    reason: string | null;
+  } {
+    const gateway = resolveTeamGateway(process.env);
+    if (gateway === null) {
+      return {
+        model: null,
+        reason:
+          '找不到 magpie 网关配置。请在服务器 `.env` 里设置 `MAGPIE_GATEWAY_URL` 与 `MAGPIE_GATEWAY_KEY`' +
+          '（或确保 magpie 的 caller-keys.json 可被本服务读取）。',
+      };
+    }
+
     /*
+     * 策略配置里与风险有关的量 —— 它们是**代码算档位的输入**，
+     * 不是 Jev 的判断对象（见 `jevModel.ts` 文件头：杠杆不给 Jev 选）。
+     *
+     * ⚠️ `strategies.get()` 要的是 **strategyId**，不是 traderId
+     *（本文件 2736 行同一条写法）。`strategyId` 可空 —— AI 驱动模式的
+     * 机器人可以不挂策略，那时用 `defaultJevConfig()` 的口径兜底。
+     */
+    const config = traders.get(traderId);
+    const strategyRecord =
+      config?.strategyId == null ? undefined : strategies.get(config.strategyId);
+    const risk = strategyRecord?.config.riskControl;
+    const equity = config?.initialEquity ?? 0;
+
+    /*
+     * ⚠️ **杠杆取策略上限的一半**：本模式是实验性的，先保守起步。
+     * 直接取上限会让第一笔就用满，而 Jev 的表现**完全未知**
+     *（`docs/JEV-MODE-DESIGN.md` §八 明确写了"盈利表现未验证"）。
+     */
+    const leverageCap = risk?.altcoinMaxLeverage ?? 10;
+    const leverage = Math.max(1, Math.floor(leverageCap / 2));
+
+    return {
+      model: createJevDecisionModel({
+        baseUrl: gateway.baseUrl,
+        apiKey: gateway.apiKey,
+        /*
+         * 模型名固定 `jev-latest`：网关侧那个别名指向当前可用的 Jev 版本
+         *（实测返回 `jev-1.13.0`）。**不要在客户端钉版本号** ——
+         * 那会让网关升级后我们还在请求旧版本，与 `AGENTS.md` 的网关边界相反。
+         */
+        model: 'jev-latest',
+        timeoutMs: 20_000,
+        equity,
+        /*
+         * 单笔风险 1%：与团队模式的默认口径一致。
+         * 档位表会在它之上做 0.6/1.0/1.4 的缩放。
+         */
+        riskPercent: 0.01,
+        leverage,
+        maxCandidates: 8,
+        /*
+         * ⚠️ `riskControl.marginMode` 的类型只有 `'isolated'`（策略层没开放全仓），
+         * 所以这里**不需要分支** —— 写 `=== 'cross' ? 'cross' : 'isolated'`
+         * 会被 tsc 判成"这个比较不可能成立"，那正是类型在提醒我它不存在。
+         */
+        marginMode: risk?.marginMode ?? 'isolated',
+      }),
+      reason: null,
+    };
+  }
+
+  private async buildTeamModel(traderId: number): Promise<TeamModelBuild> {    /*
      * ⚠️ **团队模式【不】使用「AI 模型」列表里的任何记录**（用户 2026-10-12 明确要求）。
      *
      * 用户原话：
@@ -2728,6 +2814,23 @@ export class TraderManager {
       const routedTeamModel = teamBuild.model;
 
       /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  **JEV 模式（实验性）** —— 2026-10-19
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * 与团队模式同一套「显式报告失败」纪律：Jev 端点不可用 / key 读不到时
+       * **不能静默退回单模型**（那会让一台标着「JEV 模式」的机器人实际在用
+       * 别的模型跑，而界面看不出异常 —— 正是团队模式踩过的那个坑）。
+       *
+       * ⚠️ **`jevBuild.model === null` 时也必须让机器人能起来**
+       *（与「模型不可达不阻止启动」同一条：说清楚，但别卡住启动）。
+       * 那种情况下本轮会产出空决策，而 preflight 里有一条 error 让人看得见。
+       */
+      const jevBuild =
+        trader.mode === 'jev' ? this.buildJevModeModel(trader.id) : { model: null, reason: null };
+      const jevModel = jevBuild.model;
+
+      /*
        * ⚠️ **团队模式没能启用时必须【显式报告】，不能静默走回单模型。**
        *
        * ## 复核发现的 P0（2026-10-12）
@@ -2756,6 +2859,26 @@ export class TraderManager {
         const detail = `AI 团队模式未启用：${teamBuild.reason} 当前这台机器人会按**单模型**运行（不是团队）。`;
         checks.push({
           name: 'AI 团队模式',
+          severity: 'error',
+          ok: false,
+          detail,
+          blocking: false,
+        });
+        runtimeLogs.write(trader.id, 'error', 'manager', detail);
+        log.warn(`机器人 #${trader.id} ${detail}`);
+      }
+
+      /*
+       * ⚠️ **JEV 模式失败也必须显式报告**（同团队模式那条纪律）。
+       *
+       * 后果比团队模式更直接：Jev 是这台机器人**唯一**的决策来源，
+       * 没有它 ⇒ 本轮零决策 ⇒ 一台"运行中"的机器人**永远不会开仓**。
+       * 如果不说清，用户会以为是"没有机会"，而真相是"决策模型没接上"。
+       */
+      if (trader.mode === 'jev' && jevBuild.reason !== null) {
+        const detail = `JEV 模式未启用：${jevBuild.reason} 这台机器人本轮不会产生任何决策。`;
+        checks.push({
+          name: 'JEV 模式',
           severity: 'error',
           ok: false,
           detail,
@@ -3024,6 +3147,15 @@ export class TraderManager {
            */
           if (routedTeamModel) {
             return routedTeamModel.complete(systemPrompt, userPrompt, options);
+          }
+          /*
+           * **JEV 模式**：决策完全由 Jev 做出（见 `jevModel.ts` 的文件头）。
+           * ⚠️ 放在 `routedTeamModel` 之后、`client.complete()` 之前 ——
+           * 前两者互斥（`mode` 只有一个值），所以顺序不影响正确性；
+           * 但**必须在 `client` 之前**，否则 Jev 模式会静默走回普通 LLM。
+           */
+          if (jevModel) {
+            return jevModel.complete(systemPrompt, userPrompt, options);
           }
           const result = await client.complete(systemPrompt, userPrompt, options);
           return {

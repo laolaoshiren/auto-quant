@@ -13,7 +13,9 @@ import {
   StrategyConfigSchema,
   defaultStrategyConfig,
   providerDefaults,
+  defaultJevConfig,
   defaultAiTeamConfig,
+  isAiDriven,
   unboundedAiManagedConfig,
   type PositionView,
   type ServerEvent,
@@ -275,7 +277,7 @@ const TraderInputSchema = z.object({
    *
    * 默认 `'strategy'`，所以既有调用点（前端与脚本）行为完全不变。
    */
-  mode: z.enum(['strategy', 'ai_managed', 'ai_team']).default('strategy'),
+  mode: z.enum(['strategy', 'ai_managed', 'ai_team', 'jev']).default('strategy'),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -2069,7 +2071,18 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 这正是共享包把 `AI_DRIVEN_MODES` 导出来的理由：**让"哪些模式由 AI 驱动"
      * 只有一个定义处**，而不是散在各层的字符串比较里。
      */
-    const isAiDrivenMode = parsed.data.mode === 'ai_managed' || parsed.data.mode === 'ai_team';
+    /*
+     * ⚠️ **用共享包的 `isAiDriven()`，不要再写死枚举**（2026-10-19）。
+     *
+     * 上面那段注释自己就写着「让"哪些模式由 AI 驱动"只有一个定义处」，
+     * 而这里原本仍然是 `mode === 'ai_managed' || mode === 'ai_team'` ——
+     * 加 `'jev'` 时它**正好会掉进 `else`**，于是新建 JEV 模式的机器人会报
+     * 「固定策略模式必须选择一个策略」，而 JEV 模式压根不需要策略。
+     *
+     * ⇒ 判据必须是 `AI_DRIVEN_MODES` 那份唯一清单（`isAiDriven()`），
+     *   加新模式时只改 `domain.ts` 一处。
+     */
+    const isAiDrivenMode = isAiDriven(parsed.data.mode);
     const requestedStrategyId = parsed.data.strategyId ?? null;
     if (isAiDrivenMode) {
       if (requestedStrategyId !== null) {
@@ -2116,7 +2129,21 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        *
        * 一条模型都没有时（全新库）→ 抛一个说人话的错误，而不是外键报错。
        */
-      aiModelId: parsed.data.mode === 'ai_team' ? requireAnyModelIdForTeam() : parsed.data.aiModelId,
+      /*
+       * ⚠️ **`jev` 与 `ai_team` 一样：不读 `aiModelId`**（2026-10-19）。
+       *
+       * 两者的决策模型都不来自「AI 模型」列表：
+       * ```
+       *   ai_team → 角色路由在运行时决定模型名（走 magpie 网关）
+       *   jev     → 固定调 `jev-latest`（走 magpie 网关）
+       * ```
+       * 所以这里都只需要"一个真实存在的外键值"，取哪条都行。
+       * 不这么处理的话，用户会被要求给一台根本不读模型的机器人挑一个模型。
+       */
+      aiModelId:
+        parsed.data.mode === 'ai_team' || parsed.data.mode === 'jev'
+          ? requireAnyModelIdForTeam()
+          : parsed.data.aiModelId,
       strategyId: requestedStrategyId,
       cycleIntervalMinutes: parsed.data.cycleIntervalMinutes,
       initialEquity,
@@ -2166,14 +2193,21 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 也就是说：团队模式**跑得起来、界面显示"运行中"，但永远不会开任何仓**。
      * 而用户要的正是「然后做相应的动作（**开仓、平仓、调仓**等等）」。
      *
-     * 所以现在两种模式**各自播种自己那份**：
+     * 所以现在**每种 AI 驱动模式各自播种自己那份**：
      *   · `ai_managed` → `unboundedAiManagedConfig()`（单智能体口径）
      *   · `ai_team`    → `defaultAiTeamConfig()`（含**动态标的池**）
+     *   · `jev`        → `defaultJevConfig()`（动态标的池 + 实验性的收紧风控）
      */
     if (parsed.data.mode === 'ai_managed') {
       traders.setAgentConfig(trader.id, JSON.stringify(unboundedAiManagedConfig()));
     } else if (parsed.data.mode === 'ai_team') {
       traders.setAgentConfig(trader.id, JSON.stringify(defaultAiTeamConfig()));
+    } else if (parsed.data.mode === 'jev') {
+      /*
+       * ⚠️ 与团队模式同一类坑：**不播种就会空转**（策略配置全空 ⇒ 没有候选标的
+       * ⇒ Jev 永远收到空数组 ⇒ 一台"运行中"的机器人永远不开仓）。
+       */
+      traders.setAgentConfig(trader.id, JSON.stringify(defaultJevConfig()));
     }
 
     return { ...trader, equitySource };

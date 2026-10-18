@@ -772,6 +772,77 @@ export function defaultAiTeamConfig(): StrategyConfig {
 }
 
 /**
+ * **JEV 模式（实验性）的初始配置**（2026-10-19）。
+ *
+ * ## 它与 `defaultAiTeamConfig()` 的关键差异
+ *
+ * | 项 | 团队模式 | JEV 模式 | 为什么 |
+ * |---|---|---|---|
+ * | 候选池 | 动态 `coinpool` 8 + OI 4 | **同团队** | 选币本来就是 Jev 的强项，给它足够的候选 |
+ * | `minRiskRewardRatio` | 0 | **1.5** | Jev 不产生数字，盈亏比由**档位表**保证；给个下限兜住 |
+ * | `minConfidence` | 0 | **40** | Jev 的 `confidence` 实测在 0.25–0.88 之间，40 是"略低于中位"的保守线 |
+ * | `maxPositions` | 20 | **4** | 实验性模式，先小步验证 |
+ *
+ * ## ⚠️ 为什么 `requireStopLoss` 必须是 `true`
+ *
+ * 这不是策略偏好，是**结构要求**（`docs/AGENTS.md` §2.6）：一个没有止损的
+ * 杠杆仓位是最糟糕的状态。Jev 选的是"止损档位"，而**挂单这件事由代码保证** ——
+ * 两者不冲突，但下限不能放开。
+ *
+ * ## ⚠️ 为什么不给 `promptSections` 写交易指引
+ *
+ * 团队模式那套 prompt 是**给 LLM 读的散文**。Jev **不读散文、也不产生散文**
+ *（实测：它的输入是结构化摘要，输出是三种类型化答案）。
+ * 给它写"你是首席决策者"这种话是**无效的** —— 它不会因此改变行为。
+ *
+ * ⇒ 本模式真正影响 Jev 的"指引"是**问题怎么问**（`jevModel.ts` 里的
+ *   `instructions` 与 `criteria`），不是 `promptSections`。
+ *   所以这里留空，避免留下一个"看起来在起作用、实际没人读"的配置。
+ */
+export function defaultJevConfig(): StrategyConfig {
+  return StrategyConfigSchema.parse({
+    coinSource: {
+      /* 与团队模式同一套动态池 —— 候选质量是 Jev 能发挥作用的前提。 */
+      sourceType: 'coinpool',
+      useCoinPool: true,
+      coinPoolLimit: 8,
+      coinPoolRank: 'quote_volume',
+      useOITop: true,
+      oiTopLimit: 4,
+      excludeStablecoins: true,
+      minQuoteVolume24h: 50_000_000,
+    },
+    riskControl: {
+      /* 实验性：先限制在 4 个仓位，验证行为之后再放宽。 */
+      maxPositions: 4,
+      btcEthMaxLeverage: 20,
+      altcoinMaxLeverage: 10,
+      btcEthMaxPositionValueRatio: 5,
+      altcoinMaxPositionValueRatio: 3,
+      maxMarginUsage: 30,
+      /*
+       * ⚠️ **1.5 而不是 0**：Jev 的止盈档由代码按 2:1 算好，
+       * 但万一它选了最近的一档，这个下限会替我们挡住"赚一点点就跑"。
+       */
+      minRiskRewardRatio: 1.5,
+      /*
+       * ⚠️ **40 而不是 0**：实测 Jev 的 confidence 分布是 0.25–0.88。
+       * 40 分位略低于中位 —— 既不会把大部分机会挡掉，也不会放行最没把握的那些。
+       * 这个值**是实验参数，不是定论**，观察后再调。
+       */
+      minConfidence: 40,
+      requireTakeProfit: true,
+      /* 结构要求，不可放宽（见上面的说明）。 */
+      requireStopLoss: true,
+    },
+    /*
+     * `promptSections` **刻意留空** —— 理由见函数头那段：
+     * Jev 不读散文。写了也只是让配置看起来更完整，实际没人读。
+     */
+  });
+}
+
+/**
  * Style presets mirroring the three trading modes. These only seed the
  * *prompt* sections and a few numeric knobs — the user is free to edit
  * everything afterwards.

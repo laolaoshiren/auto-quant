@@ -113,17 +113,33 @@ function aliasOffendersIn(bodies: readonly string[]): string[] {
   return hits;
 }
 
-test('★ 三种模式的用户可见名称必须唯一且齐全', () => {
+test('★ 所有模式的用户可见名称必须唯一且齐全', () => {
   assert.deepEqual(
     Object.keys(MODE_LABEL).sort(),
-    ['ai_managed', 'ai_team', 'strategy'],
+    /*
+     * ⚠️ **期望值写死在这里是刻意的**（见文件头第 1 条判据）：
+     * 从 `MODE_LABEL` 自身派生会让"改了名字测试跟着改"，等于没测。
+     *
+     * 2026-10-19 新增 `'jev'`（JEV 模式，实验性）。加它的时候这条测试**红了**
+     * —— 那正是它该做的事：新模式的用户可见名称不能悄悄漏掉。
+     */
+    ['ai_managed', 'ai_team', 'jev', 'strategy'],
     '★ `MODE_LABEL` 必须覆盖全部 TraderMode（VALUE 顺序无关，键必须齐全）',
   );
   assert.equal(MODE_LABEL.strategy, '固定策略', 'strategy 的名字由本用例钉住（改名字要改这里）');
   assert.equal(MODE_LABEL.ai_managed, '智能托管');
   assert.equal(MODE_LABEL.ai_team, 'AI 团队');
+  /*
+   * ⚠️ JEV 模式的名字里**必须带「实验性」** —— 用户明确要求这个模式是实验性的，
+   * 而它的盈利表现完全未知（`docs/JEV-MODE-DESIGN.md` §八）。
+   * 界面上不写清，用户会以为它和另外三种一样是验证过的。
+   */
+  assert.ok(
+    MODE_LABEL.jev.includes('实验性'),
+    '★ JEV 模式的名字必须标明它是实验性的',
+  );
   /* 每种模式都要有一句"代价"说明 —— 用户靠它决定要不要一直开着。 */
-  for (const mode of ['strategy', 'ai_managed', 'ai_team'] as const) {
+  for (const mode of ['strategy', 'ai_managed', 'ai_team', 'jev'] as const) {
     assert.ok(MODE_HINT[mode].length > 6, `★ ${mode} 的 hint 不能是空话`);
   }
 });

@@ -163,15 +163,34 @@ export interface DiscoveredModel {
  * |---|---|---|
  * | `strategy` | 固定策略：参数由人对策略配置决定 | — |
  * | `ai_managed` | **智能托管**：单智能体 + 定时轮询，AI 自己调参 | 实盘机器人 #10 `赚大钱` |
- * | `ai_team` | **多智能体团队**（本次新增）：7×24 事件驱动、分工协作、辩论裁决 | 待建 |
+ * | `ai_team` | **多智能体团队**：7×24 事件驱动、分工协作、辩论裁决 | `[团队测试] 多智能体` #11 |
+ * | `jev` | **JEV 模式（实验性）**：由 Jev 决策模型做**每一个判断** | 待建 |
  *
- * ⚠️ **隔离纪律**：`ai_team` 必须走**独立代码路径**。
- * 前两个模式的语义一个字都不能改 —— 它们上面挂着用户的真金白银。
+ * ⚠️ **隔离纪律**：每个新加入的模式必须走**独立代码路径**。
+ * 前几个模式的语义一个字都不能改 —— 它们上面挂着用户的真金白银。
+ *
+ * ## 关于 `jev`（2026-10-19 新增，实验性）
+ *
+ * 用户的要求是「所有操作都采用 JEV 模型来实现，从选币到交易，一切都由 JEV 自主完成」。
+ *
+ * ⚠️ **实测发现字面实现不可能**：Jev 的答案只有 `choice` / `score` / `noul`
+ * 三种类型化形状，**不产生任何文字、且弱于算术**；而 `Decision` 需要
+ * `positionSizeUsd` / `stopLoss` / `takeProfit`（精确数字）与 `reasoning`（必需的文字）。
+ *
+ * ⇒ 本模式的实际形态是：**代码算好候选档位 → Jev 从档位里选 → 代码把答案翻译成 Decision**。
+ *   每一个**判断**都由 Jev 做出，代码只负责算数（Jev 的弱项）与翻译。
+ *   完整设计见 `docs/JEV-MODE-DESIGN.md`。
  */
-export type TraderMode = 'strategy' | 'ai_managed' | 'ai_team';
+export type TraderMode = 'strategy' | 'ai_managed' | 'ai_team' | 'jev';
 
-/** 需要 AI 自己决策（而不是按固定策略执行）的模式 —— 加新模式时**必须**在这里登记。 */
-export const AI_DRIVEN_MODES: readonly TraderMode[] = ['ai_managed', 'ai_team'];
+/**
+ * 需要 AI 自己决策（而不是按固定策略执行）的模式 —— 加新模式时**必须**在这里登记。
+ *
+ * ⚠️ `jev` **也是 AI 驱动的**：它的每一个判断都来自 Jev 模型。
+ * 漏登记会让 `isAiDriven()` 返回 false，进而走到"固定策略"那条路径上
+ *（那是完全不同的语义，而且会静默地用一个不存在的策略）。
+ */
+export const AI_DRIVEN_MODES: readonly TraderMode[] = ['ai_managed', 'ai_team', 'jev'];
 
 /** 这个模式是不是由 AI 驱动。 */
 export function isAiDriven(mode: TraderMode): boolean {

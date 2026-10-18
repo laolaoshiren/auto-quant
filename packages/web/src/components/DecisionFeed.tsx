@@ -577,7 +577,7 @@ function LatestConclusion({
 }: {
   record: DecisionRecord | null;
   symbols: readonly MarketSymbol[];
-  mode: 'strategy' | 'ai_managed' | 'ai_team';
+  mode: TraderMode;
 }): React.ReactElement {
   if (record === null) {
     return (
@@ -625,7 +625,7 @@ export function DecisionFeed({
    * ⚠️ 默认值是 `'strategy'`，所以**既有调用点（另两种模式）行为完全不变** ——
    * 不传 `mode` 就与改动前逐字节一致。
    */
-  mode?: 'strategy' | 'ai_managed' | 'ai_team';
+  mode?: TraderMode;
   /**
    * **是否处于"决策流占满整页"的聚焦模式**（2026-10-13 用户要求）。
    *
