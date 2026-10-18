@@ -160,6 +160,13 @@ export interface JevModeOptions {
   readMinConfidence: () => number;
   /** 每 N 轮问一次持仓（省 token）。 */
   readHoldAskEvery: () => number;
+  /**
+   * 交易所对该标的的**最小名义价值**（USDT）。
+   *
+   * ⚠️ 不同标的不同：BTC 是 100 U，多数山寨币是 5 U。
+   * 仓位档位低于它就无法下单（交易所直接拒）。
+   */
+  readMinNotional: () => number;
   /** 杠杆 —— **由策略配置决定，不让 Jev 选**（见文件头）。 */
   leverage: number;
   /**
@@ -347,11 +354,49 @@ export function tiersFor(
    *   那是**正确的取舍** —— 宁可两档相同，也不要突破风险上限。
    *   账户规模变大之后（上限不再生效）三档自然恢复区分。
    */
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **仓位必须同时满足"上限"和"交易所最小名义"**（2026-10-19 线上抓到）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 症状
+   *
+   * 决策名义 **3.74 U**，交易所对 AGTUSDT/QUSDT/GTCUSDT 的
+   * `MIN_NOTIONAL` 都是 **5 U** ⇒ **3.74 < 5 ⇒ 下单被拒**。
+   * 日志里只写 `rejected`，看不到原因。
+   *
+   * ## 为什么算出 3.74
+   *
+   * ```
+   *   21.2 U × 30%（单笔上限）= 6.36 U   ← B 档
+   *   6.36 × 0.6（A 档缩放）= 3.82 U    ← 低于 5 U
+   * ```
+   * **小账户 + 三档缩放**必然产生"低于交易所门槛"的档位。
+   *
+   * ## 修法
+   *
+   * 三档都抬到 `max(缩放值, 交易所最小名义)`。
+   * ⚠️ 但**抬升不能突破 `perPositionCap`** —— 否则小账户会为了"够最小名义"
+   * 而超配。两者冲突时**宁可不交易**（返回 0，让风控拒绝）。
+   *
+   * ⚠️ 交易所最小名义用 `readMinNotional()` 现读（不同标的不同：
+   * BTC 是 100 U，山寨币多为 5 U）。拿不到时退回 5 U（主流值）。
+   */
+  const minNotional = Math.max(1, opts.readMinNotional());
   const scale = { A: 0.6, B: 1.0, C: 1.4 } as const;
-  const size: Record<Tier, number> = {
+  const scaled: Record<Tier, number> = {
     A: Math.min(baseNotional * scale.A, perPositionCap),
     B: Math.min(baseNotional * scale.B, perPositionCap),
     C: Math.min(baseNotional * scale.C, perPositionCap),
+  };
+  const size: Record<Tier, number> = {
+    /*
+     * 抬到最小名义，但**不超过单笔上限** —— 两者冲突时给 0
+     *（= 这个档位开不了仓，比"下了单被交易所拒"更早暴露）。
+     */
+    A: scaled.A >= minNotional ? scaled.A : perPositionCap >= minNotional ? Math.min(minNotional, perPositionCap) : 0,
+    B: scaled.B >= minNotional ? scaled.B : perPositionCap >= minNotional ? Math.min(minNotional, perPositionCap) : 0,
+    C: scaled.C >= minNotional ? scaled.C : perPositionCap >= minNotional ? Math.min(minNotional, perPositionCap) : 0,
   };
 
   return { size, stop, take, stopDistance, atr };

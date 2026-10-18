@@ -2034,6 +2034,18 @@ export class TraderManager {
         readAllowTrailing: () => jevBool('allow_trailing'),
         readMinConfidence: () => jevNumber('min_confidence'),
         readMinRiskRewardRatio: () => jevNumber('min_rr'),
+        /*
+         * ⚠️ 最小名义给一个**保守的固定值 5 U**。
+         *
+         * `buildJevModeModel()` 拿不到"当前在算哪个标的"，所以无法按标的读。
+         * 而真正的逐标的判断由 `registry.minNotional(symbol)` 在**下单层**做
+         *（`autoTrader` 的 `minNotionalOf`）—— 那里才是权威。
+         *
+         * 这里的作用只是"别让档位算出一个连 5 U 都不到的仓位"：
+         * 线上实测 `AGTUSDT/QUSDT/GTCUSDT` 的 `MIN_NOTIONAL` 都是 5 U，
+         * 而决策名义只有 3.74 U ⇒ 全被交易所拒。
+         */
+        readMinNotional: () => 5,
         readHoldAskEvery: () => Math.max(1, Math.floor(jevNumber('hold_ask_every'))),
         /* 权益也每轮现读 —— 余额会变，写死会让档位基于旧余额。 */
         readEquity: () => traders.get(traderId)?.initialEquity ?? equity,

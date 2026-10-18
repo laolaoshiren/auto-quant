@@ -56,6 +56,7 @@ const OPTS: JevModeOptions = {
   readAllowTrailing: () => true,
   readMinConfidence: () => 40,
   readMinRiskRewardRatio: () => 2,
+  readMinNotional: () => 5,
   readHoldAskEvery: () => 1,
   leverage: 5,
   marginMode: 'isolated',
