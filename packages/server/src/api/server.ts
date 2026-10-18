@@ -3564,12 +3564,81 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * （不带机器人名前缀 —— 归属已经由 `trader_id` 表达，名字不必再写一遍）。
    * 不存在时：是服务器级日志，`trader_id` 留空，并按 `[scope]` 加前缀区分来源。
    */
+  /*
+   * ── 把日志 meta 里几个"诊断必需"的字段拼成短尾巴 ────────────────────────
+   *
+   * `runtime_logs` 只有 `message` 一列（没有 meta 列，加列要迁移，而它是环形缓冲，
+   * 收益不值）。所以关键上下文只能拼进正文。
+   *
+   * ⚠️ **只挑必需字段**，不把整个 meta 序列化：
+   * 那会把提示词、响应体之类的大对象也塞进日志，既撑爆环形缓冲，又可能泄露内容。
+   *
+   * ⚠️ **值要截断到 60 字符**：模型 id 可能很长（`group/auto-xxx`），
+   * 而错误信息可能带整段 HTML。截断保长度可控。
+   */
+  const diagnosticTail = (meta: Record<string, unknown>): string => {
+    const picked: string[] = [];
+    const add = (key: string): void => {
+      const v = meta[key];
+      if (v === undefined || v === null) return;
+      if (typeof v === 'string') {
+        const s = v.trim();
+        if (s === '') return;
+        picked.push(`${key}=${s.length > 60 ? `${s.slice(0, 60)}…` : s}`);
+      } else if (typeof v === 'number' || typeof v === 'boolean') {
+        picked.push(`${key}=${String(v)}`);
+      }
+    };
+    /* 顺序即重要性：先说"哪个模型"，再说"什么错"。 */
+    for (const key of ['model', 'provider', 'status', 'kind', 'attempt', 'elapsedMs', 'error']) {
+      add(key);
+    }
+    return picked.join(' ');
+  };
+
   setLogSink((level, scope, message, meta) => {
     if (level === 'debug') return;
     const m = (meta ?? {}) as { traderId?: number; raw?: string };
     const traderId = typeof m.traderId === 'number' ? m.traderId : null;
     const text = traderId !== null && typeof m.raw === 'string' ? m.raw : message;
-    runtimeLogs.write(traderId, level, scope, text);
+    /*
+     * ⚠️⚠️ **把关键结构化上下文补进正文**（2026-10-18 修）
+     *
+     * ## 事故
+     *
+     * `llm/client.ts` 记录失败时是这样调的：
+     * ```ts
+     * log.error(`${this.provider} 的模型调用失败 —— 这类错误不会因重试而成功`, {
+     *   provider, model, attempt, status, kind, retryable, elapsedMs, error,
+     * });
+     * ```
+     * 而这条 sink **只从 meta 里读 `traderId` 和 `raw`**，其余全部丢弃。
+     * 再加上 `runtime_logs` 表只有 `message` 列、没有 meta 列 ⇒
+     * **落库的正文只有「custom 的模型调用失败」，看不到是哪个模型、什么状态码。**
+     *
+     * 实测后果：近 2 小时 83 条 `llm` error，全部长得一模一样，
+     * 想回答"哪个模型在挂"时**查不到** —— 只能看到"出事了 83 次"。
+     *
+     * 同一个教训在本仓库已经出现过一次（`errors.ts` 里那条
+     * 「模型不可用：deepseek-flash」）：**日志要能回答"是哪个"，
+     * 否则它只能回答"出事了"。**
+     *
+     * ## 做法
+     *
+     * 不新增数据库列（那要迁移，且 `runtime_logs` 是环形缓冲，收益不值）。
+     * 改为在写库/推事件时，把几个**诊断必需的**字段拼成一个短尾巴：
+     * ```
+     *   custom 的模型调用失败 —— 这类错误不会因重试而成功
+     *     ｜model=group/auto-glm-5-3 status=400 kind=bad_request
+     * ```
+     *
+     * ⚠️ **只挑必需字段**（model / status / kind / attempt / elapsedMs）。
+     * 不把整个 meta 序列化进去 —— 那会把提示词、响应体之类的大对象也塞进日志，
+     * 既撑爆环形缓冲，又可能泄露内容。
+     */
+    const diag = diagnosticTail(m);
+    const withDiag = diag === '' ? text : `${text} ｜${diag}`;
+    runtimeLogs.write(traderId, level, scope, withDiag);
     eventBus.publish({
       type: 'log',
       traderId,
@@ -3585,7 +3654,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        * 连"把来源翻译成中文"都做不到。所以来源单独传，
        * 由展示层翻译（`logScopeLabel`）。原始码完整保留，筛选靠它。
        */
-      message: text,
+      message: withDiag,
       scope,
       timestamp: new Date().toISOString(),
     });
