@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { REPO_ROOT } from '../env.js';
 
 /**
  * **magpie 网关的契约自检**（P0 免费层）。
@@ -97,9 +98,17 @@ const DEFAULT_TIMEOUT_MS = 8_000;
  *
  * 候选路径按顺序试（容器挂载点与原生安装各一个）：
  * ```
- *   /var/lib/docker/volumes/magpie-config/_data/magpie/last-version   ← Docker 卷
- *   ~/.config/magpie/last-version                                      ← 原生安装
+ * ## 候选路径的顺序（重要）
+ *
  * ```
+ *   ① <应用根>/data/magpie-last-version                             ← 部署脚本同步的副本
+ *   ② /var/lib/docker/volumes/magpie-config/_data/magpie/last-version  ← Docker 卷（root 可读）
+ *   ③ ~/.config/magpie/last-version                                    ← 原生安装
+ * ```
+ *
+ * ⚠️ **① 必须是第一位**：线上服务以 `autoquant` 用户运行，而 ②③ 都是 root 可读、
+ * 它读不到 —— 实测契约自检里那一格一直是「未知」就是因为它只试了 ②③。
+ * 部署脚本（`scripts/deploy.ps1`）会把 ② 复制成 ① 并 chown 给 autoquant。
  *
  * ⚠️ **读不到返回 `null`，绝不编一个版本号** —— 与"未知不等于默认值"同一纪律。
  * 这个函数**永不抛**。
@@ -113,7 +122,11 @@ export function readGatewayVersion(
     }
   },
   candidates: readonly string[] = [
+    /* ① 部署脚本同步的副本（服务用户可读）—— 线上唯一能成功的那条。 */
+    `${REPO_ROOT}/data/magpie-last-version`,
+    /* ② Docker 卷（root 可读，服务读不到；本机开发时能读到）。 */
     '/var/lib/docker/volumes/magpie-config/_data/magpie/last-version',
+    /* ③ 原生安装。 */
     `${process.env['HOME'] ?? '/root'}/.config/magpie/last-version`,
   ],
 ): string | null {

@@ -345,6 +345,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# magpie 版本号副本（契约自检用它回答"问题是从哪一版开始的"）
+# ---------------------------------------------------------------------------
+# ## 为什么需要（2026-10-18）
+#
+# magpie **自动更新、一天多版**。而 ``last-version`` 同样是 root 可读、autoquant 读不到
+# ⇒ 契约自检日志里那一格一直是"未知"（实测确认）。
+#
+# 那一格的价值很具体：某天开始出问题时，翻日志能看到
+#
+#     问题是从 magpie v0.1.1285 → v0.1.1286 那次开始的
+#
+# 少了它，就只能靠"感觉最近好像变慢了"。
+#
+# ⚠️ 复制失败**不阻断部署**（读不到版本不是交易问题）。
+MAGPIE_VER_SRC=/var/lib/docker/volumes/magpie-config/_data/magpie/last-version
+MAGPIE_VER_DST=$RemoteDir/data/magpie-last-version
+if [ -r "`$MAGPIE_VER_SRC" ]; then
+  mkdir -p $RemoteDir/data
+  cp "`$MAGPIE_VER_SRC" "`$MAGPIE_VER_DST" 2>/dev/null && chown autoquant:autoquant "`$MAGPIE_VER_DST" 2>/dev/null || true
+  chmod 644 "`$MAGPIE_VER_DST" 2>/dev/null || true
+  echo "  magpie 版本号已同步（`$(cat "`$MAGPIE_VER_DST" 2>/dev/null)）"
+else
+  echo "  提示：读不到 magpie 版本文件（`$MAGPIE_VER_SRC）—— 契约自检里那一格会是'未知'，不影响交易"
+fi
+
+# ---------------------------------------------------------------------------
 # magpie 模型档案副本（供"自动发现"读免费/付费标注）
 # ---------------------------------------------------------------------------
 # ## 为什么要复制一份，而不是直接读原文件
