@@ -487,7 +487,22 @@ export function NewTraderModal({
               第二种**必须来自接口**而不是内置静态列表：聚合网关的内置列表是空的，
               照静态列表做出来的下拉在那些厂商上会一个模型都不显示。
             */}
-            {mode !== 'ai_team' && (
+            {/*
+              ⚠️ **JEV 模式同样不显示模型选择**（2026-10-19 用户实测踩到）。
+
+              用户报：「第一次我是直接创建，模型乱写的（应该是不可用的），
+              运行的时候说失败」—— 而他当时选的模型**根本不会被 JEV 模式使用**：
+              ```
+                JEV 模式 → 只用 magpie 网关调 /v1/systemone（固定 jev-latest）
+                         → 完全不读「AI 模型」列表里的任何记录
+              ```
+              所以显示那个选择框是**误导**：它让用户以为必须挑一个模型，
+              挑错了又会在启动时"看起来失败"（实际那次失败是别的原因，
+              但用户无从分辨 —— 这正是"界面说了假话"的典型）。
+
+              ⇒ 与团队模式同一条纪律：**不渲染**，而不是渲染了再禁用。
+            */}
+            {mode !== 'ai_team' && mode !== 'jev' && (
             <Field label="模型厂商">
               <Select
                 value={providerId}
@@ -545,7 +560,22 @@ export function NewTraderModal({
               禁用会让用户以为"这里有个选项只是现在不能改"，
               而真相是**这个字段与团队模式无关**。
             */}
-            {mode !== 'ai_team' && (
+            {/*
+              ⚠️ **JEV 模式同样不显示模型选择**（2026-10-19 用户实测踩到）。
+
+              用户报：「第一次我是直接创建，模型乱写的（应该是不可用的），
+              运行的时候说失败」—— 而他当时选的模型**根本不会被 JEV 模式使用**：
+              ```
+                JEV 模式 → 只用 magpie 网关调 /v1/systemone（固定 jev-latest）
+                         → 完全不读「AI 模型」列表里的任何记录
+              ```
+              所以显示那个选择框是**误导**：它让用户以为必须挑一个模型，
+              挑错了又会在启动时"看起来失败"（实际那次失败是别的原因，
+              但用户无从分辨 —— 这正是"界面说了假话"的典型）。
+
+              ⇒ 与团队模式同一条纪律：**不渲染**，而不是渲染了再禁用。
+            */}
+            {mode !== 'ai_team' && mode !== 'jev' && (
             <Field
               label="模型"
               hint={
@@ -741,12 +771,32 @@ export function NewTraderModal({
             </div>
           )}
 
+          {/*
+            ⚠️ **JEV 模式的模型出口说明**（2026-10-19）。
+
+            与团队模式同一条纪律：它**不读「AI 模型」列表**。
+            但两者调的东西不同，必须说清 —— 用户报过一次"模型乱写导致失败"，
+            而真相是那个模型压根不会被用到。
+          */}
+          {mode === 'jev' && (
+            <div className="rounded-md border border-base-700 bg-base-850 px-3 py-2 text-base text-ink-soft">
+              <span className="font-medium">决策模型由系统 magpie 网关提供（Jev）</span>
+              <span className="block text-xs text-ink-faint">
+                JEV 模式不使用「AI 模型」列表里的任何记录 —— 它固定调用 magpie 网关的
+                <code>jev-latest</code>（在服务器 <code>.env</code> 里配置网关地址与密钥，
+                或自动从 magpie 发现）。所以上面不需要、也不会让你选模型。
+              </span>
+            </div>
+          )}
+
           <Field
             label="策略"
             hint={
               mode === 'ai_managed' || mode === 'ai_team'
                 ? 'AI 模式下这项被忽略 —— 参数来自 AI 自己（每个机器人独立一份）。'
-                : undefined
+                : mode === 'jev'
+                  ? 'JEV 模式下这项只提供风控边界与标的池；交易判断由 Jev 做出。'
+                  : undefined
             }
           >
             <Select
