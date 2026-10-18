@@ -1164,6 +1164,31 @@ export function DecisionFeed({
   };
 
   /**
+   * ⚠️ **`pane` 停在一个当前模式没有的标签上时必须回落**（2026-10-19）。
+   *
+   * ## 什么情况下会发生
+   *
+   * 用户在一台**团队模式**的机器人上切到「AI 工作流」，然后去看另一台
+   * **JEV 模式**的机器人 —— 如果 `pane` 被复用（同一个组件实例），
+   * 它会停在 `'workflow'`，而 JEV 模式下**那个面板不渲染**
+   * ⇒ 整块区域**一片空白**，用户不知道发生了什么。
+   *
+   * 反过来也一样（JEV 的「JEV 模式」标签在团队模式里不存在）。
+   *
+   * ⇒ 用一个 `useEffect` 在模式变化时把它拉回 `'decisions'`。
+   *   选 `'decisions'` 而不是"第一个可用标签"，是因为它**在所有模式里都存在**。
+   */
+  useEffect(() => {
+    const allowed: ReadonlyArray<typeof pane> =
+      mode === 'ai_team'
+        ? ['decisions', 'workflow', 'control']
+        : mode === 'jev'
+          ? ['decisions', 'control', 'jev']
+          : ['decisions'];
+    if (!allowed.includes(pane)) setPane('decisions');
+  }, [mode, pane]);
+
+  /**
    * ── 标签栏的**键盘操作**（2026-10-17 · 台账 F3）────────────────────────────
    *
    * ## 为什么要有
@@ -1422,6 +1447,30 @@ export function DecisionFeed({
               >
                 最终决策
               </button>
+              {/*
+                ⚠️ **「AI 工作流」只对团队模式出现**（2026-10-19 用户截图指出）
+
+                ## 症状
+
+                JEV 模式下这个标签**能点，但点进去一片空白**。
+
+                ## 根因（我自己引入的）
+
+                我把标签栏的整体条件从 `mode === 'ai_team'` 改成了 `isTeamLike`
+                （团队 + JEV），于是**这个按钮跟着出现了**；但它的面板条件是
+                `mode === 'ai_team' && pane === 'workflow'` —— JEV 模式不满足
+                ⇒ **按钮在、面板没有** ⇒ 点进去空白。
+
+                ## 为什么 JEV 模式确实不该有它
+
+                「AI 工作流」显示的是**一支团队的分工与辩论**：调度官派活、
+                分析师并行调研、多空对抗、风控把关、裁决官下结论。
+                JEV 模式**只有一个模型**（Jev），没有分工、没有辩论、没有角色
+                —— 所以它没有"工作流"可看。
+
+                ⇒ 标签按钮与面板必须**同一个条件**，不能一个宽一个窄。
+              */}
+              {mode === 'ai_team' && (
               <button
                 id="feed-tab-workflow"
                 type="button"
@@ -1448,6 +1497,7 @@ export function DecisionFeed({
                 */}
                 {liveCycle !== undefined && <span className="ml-1.5 text-xs text-accent">进行中</span>}
               </button>
+              )}
               {/*
                 ── 「机器人控制」标签（2026-10-18 用户要求）────────────────────
 
