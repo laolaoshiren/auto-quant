@@ -930,7 +930,7 @@ export function PositionsTable({
      */
     if (query.error !== null) {
       return (
-        <ErrorNote>持仓读不到（这不等于"没有持仓"）：{query.error}</ErrorNote>
+        <ErrorNote>持仓暂时读不到（不代表没有持仓）：{query.error}</ErrorNote>
       );
     }
     if (showSpinner) return <Spinner3 label="正在加载持仓" />;
@@ -944,7 +944,7 @@ export function PositionsTable({
      */
     if (query.error !== null) {
       return (
-        <ErrorNote>持仓读不到（这不等于"没有持仓"）：{query.error}</ErrorNote>
+        <ErrorNote>持仓暂时读不到（不代表没有持仓）：{query.error}</ErrorNote>
       );
     }
     return <TableEmpty message="暂无持仓。" hint="模型选择空仓 — 没有符合条件的标时不会下任何订单。" />;
@@ -968,7 +968,7 @@ export function PositionsTable({
     <div>
       {query.error !== null && (
         <ErrorNote className="mb-2">
-          持仓读不到{ageSeconds === null ? '' : `，下面是 ${ageSeconds} 秒前的读数`}：{query.error}
+          持仓暂时读不到{ageSeconds === null ? '' : `，下面是 ${ageSeconds} 秒前的读数`}：{query.error}
         </ErrorNote>
       )}
       {/* max-h as well as the cap: 100 position rows is still taller than any

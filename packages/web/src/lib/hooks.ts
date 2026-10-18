@@ -1,5 +1,66 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+/**
+ * 把底层异常翻译成**用户看得懂的一句话**。
+ *
+ * ## 为什么必须有这一层（2026-10-18 · 用户截图指出）
+ *
+ * 用户看到界面上红着一行：
+ * ```
+ *   ⚠ 持仓读不到，下面是 8 秒前的读数：Failed to fetch
+ * ```
+ * 原话是「别老整一些莫名其妙，对用户无意义的东西上 UI」。
+ *
+ * **`Failed to fetch` 是浏览器 `fetch` 的原始错误文案** —— 它对操作员毫无意义：
+ * 既不是中文、也没说清"发生了什么"、更没说"该怎么办"。
+ *
+ * ## 它实际意味着什么
+ *
+ * `fetch` 抛 `TypeError: Failed to fetch` 只有几种原因，而且**都不是业务错误**：
+ * ```
+ *   ① 网络断了 / Wi-Fi 切换 / 手机信号弱
+ *   ② 服务正在重启（部署的那十几秒）
+ *   ③ CORS 或证书问题（首次访问域名时）
+ *   ④ 浏览器插件拦截
+ * ```
+ * **共同点：这是一次临时性的连接失败，下一次轮询很可能就好了。**
+ *
+ * ⇒ 所以文案要说的不是"失败"，而是「**暂时连不上，正在重试**」。
+ *
+ * ⚠️ **本来就有意义的文案保留原文**（例如 401 的"登录已过期"、
+ *   后端返回的业务错误）—— 翻译掉反而丢失信息。
+ *   只有"看起来像底层异常"的才翻译。
+ */
+export function humanErrorText(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const trimmed = raw.trim();
+
+  /*
+   * 浏览器 fetch 的原始文案（Chrome / Safari / Firefox 各有一种写法）。
+   * 它们共同的特征是：**原文是英文且对操作员零信息量**。
+   */
+  if (
+    trimmed === 'Failed to fetch' ||
+    trimmed === 'Load failed' ||
+    trimmed === 'NetworkError when attempting to fetch resource.' ||
+    trimmed === 'The operation was aborted.' ||
+    trimmed === 'fetch failed'
+  ) {
+    return '暂时连不上服务（网络或服务正在重启）—— 页面会自动重试';
+  }
+
+  /*
+   * `ApiError(0, …)` 是"根本没拿到响应"那条路（见 `api.ts`），同样属于临时性。
+   * 后端绝不会返回 status 0，所以这个判定是准的。
+   */
+  if (/无法连接后端/.test(trimmed)) {
+    return '暂时连不上服务（网络或服务正在重启）—— 页面会自动重试';
+  }
+
+  /* 其余（后端业务错误、401 等）**保留原文** —— 那些是有意义的信息。 */
+  return trimmed === '' ? '读取失败（原因未返回）' : trimmed;
+}
+
 export interface QueryState<T> {
   data: T | null;
   error: string | null;
@@ -105,7 +166,7 @@ export function usePolled<T>(
         setUpdatedAt(Date.now());
       } catch (err) {
         if (disposed || (err as Error).name === 'AbortError') return;
-        setError((err as Error).message);
+        setError(humanErrorText(err));
       } finally {
         busy = false;
         if (!disposed) setLoading(false);

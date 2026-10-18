@@ -279,7 +279,23 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     });
   } catch (error) {
     if ((error as Error).name === 'AbortError') throw error;
-    throw new ApiError(0, '无法连接后端。端口 27137 上的服务是否在运行？', null);
+    /*
+     * ⚠️ **不要把端口号、内部实现写进给用户看的文案**（2026-10-18 修）。
+     *
+     * 原来这里写的是：
+     * ```
+     *   '无法连接后端。端口 27137 上的服务是否在运行？'
+     * ```
+     * 两个问题：
+     * ① `27137` 是**开发端口**，线上不是它 —— 这句话在线上是错的，
+     *    会让操作员去查一个不存在的东西；
+     * ② 操作员不该关心端口号，他要知道的是"现在能不能看数、要不要等"。
+     *
+     * 这句会被 `hooks.ts` 的 `humanErrorText()` 识别并翻译成
+     * 「暂时连不上服务（网络或服务正在重启）—— 页面会自动重试」。
+     * 这里保留一句**技术上准确、但不含站点细节**的描述。
+     */
+    throw new ApiError(0, '无法连接后端', null);
   }
 
   const text = await response.text();
