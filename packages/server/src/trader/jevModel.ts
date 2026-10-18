@@ -219,10 +219,42 @@ export function tiersFor(
   const equity = opts.readEquity();
   const riskUsd = Math.max(0.5, equity * opts.readRiskPercent());
 
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **止损距离必须有下限**（2026-10-19 实测抓到的真缺陷）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 事故
+   *
+   * 线上 `#13` 实测的决策（BTC 现价 81,094）：
+   * ```
+   *   止损距离 = 127.32  =  0.16% of price
+   * ```
+   * 而**单边手续费 + 滑点约 0.06%**（taker 0.05% + 滑点 0.01%）——
+   * 一来一回就是 0.12%。**止损距离 0.16% 意味着价格稍微抖一下
+   * 就打到止损，而那时连手续费都没赚回来。**
+   *
+   * ## 为什么 ATR 会这么小
+   *
+   * 不是 bug：**BTC 当时真的横盘**（实测真实 ATR(14) = 156.7 = 0.19%）。
+   * ATR 是对的，错的是"直接用 ATR 当止损距离"这个做法 ——
+   * **它假设波动永远大于交易成本，而横盘时那个假设不成立。**
+   *
+   * ## 修法
+   *
+   * 止损距离取 `max(ATR × 倍数, 价格 × 最小百分比)`。
+   * 最小百分比定 **0.5%** —— 那是"覆盖 0.12% 成本后还剩 0.38% 缓冲"，
+   * 且小于常见波动（1%~3%），不会把正常止损推得太远。
+   *
+   * ⚠️ **横盘时这个下限会让止损变宽**，于是仓位（按风险预算反推）会变小 ——
+   * 那是正确的取舍：**横盘时要么不交易，要么用更小的仓位换更宽的止损。**
+   */
+  const MIN_STOP_PERCENT = 0.5;
+  const minStopDistance = c.price * (MIN_STOP_PERCENT / 100);
   const stopDistance: Record<Tier, number> = {
-    A: atr * 1.0,
-    B: atr * 1.5,
-    C: atr * 2.0,
+    A: Math.max(atr * 1.0, minStopDistance),
+    B: Math.max(atr * 1.5, minStopDistance),
+    C: Math.max(atr * 2.0, minStopDistance),
   };
 
   const stop: Record<Tier, number> = {

@@ -703,3 +703,75 @@ describe('JEV 模式：追问复用候选', () => {
     );
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/*  止损距离下限（2026-10-19 线上实测抓到的真缺陷）                               */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：止损距离下限', () => {
+  it('★★★ 横盘时止损距离不能小于 0.5%（否则连手续费都赚不回）', () => {
+    /*
+     * ## 事故（线上 #13 实测）
+     *
+     * BTC 现价 81,094，算出的止损距离只有 **127.32（0.16%）**：
+     * ```
+     *   单边手续费 + 滑点 ≈ 0.06%，一来一回 0.12%
+     *   ⇒ 止损距离 0.16% 意味着价格稍抖就打掉，连成本都没赚回
+     * ```
+     *
+     * ## 为什么 ATR 会这么小
+     *
+     * 不是 bug：**BTC 当时真的横盘**（实测真实 ATR(14) = 156.7 = 0.19%）。
+     * 错的是"直接用 ATR 当止损距离"这个做法 —— 它假设波动永远大于成本。
+     *
+     * ⇒ 现在止损距离取 `max(ATR × 倍数, 价格 × 0.5%)`。
+     */
+    /* ATR 极小（0.1% of price）—— 这正是横盘时会发生的事。 */
+    const flat: JevCandidate = { symbol: 'BTCUSDT', price: 81000, atr: 81 };
+    const t = tiersFor(flat, OPTS, 'long');
+    for (const tier of ['A', 'B', 'C'] as const) {
+      const dist = Math.abs(flat.price - t.stop[tier]);
+      const pct = (dist / flat.price) * 100;
+      assert.ok(
+        pct >= 0.5 - 1e-9,
+        `★ ${tier} 档止损距离 ${pct.toFixed(3)}% 小于下限 0.5% ` +
+          '—— 这正是线上算出 0.16% 止损的那个缺陷',
+      );
+    }
+  });
+
+  it('★★ 波动正常时【不被下限截断】（下限不该吃掉合理的止损）', () => {
+    /*
+     * 反向校准：ATR 占价 2% 时，1.0×ATR = 2% 远大于 0.5% 下限
+     * ⇒ 止损距离应该仍是 2%，不是 0.5%。
+     *
+     * ⚠️ 没有这条，上一个用例会变成"只要断言 ≥ 0.5% 就通过"的空转测试。
+     */
+    const volatile: JevCandidate = { symbol: 'WILDUSDT', price: 100, atr: 2 };
+    const t = tiersFor(volatile, OPTS, 'long');
+    const distA = Math.abs(volatile.price - t.stop.A);
+    assert.ok(
+      Math.abs(distA - 2) < 1e-9,
+      `★ A 档止损距离应为 1.0×ATR = 2，实际 ${distA.toFixed(4)}`,
+    );
+  });
+
+  it('★★ 止损距离下限生效后，仓位自动变小（风险预算不变）', () => {
+    /*
+     * 这是下限的**必然推论**，也是它安全的原因：
+     * 止损变宽 ⇒ 同样风险预算下数量变少 ⇒ 实际亏损仍不超过 1%。
+     *
+     * ⚠️ 如果这个关系被破坏（止损变宽而仓位没变小），
+     * 那"单笔风险 1%"就是假的。
+     */
+    const flat: JevCandidate = { symbol: 'BTCUSDT', price: 81000, atr: 81 };
+    const volatile: JevCandidate = { symbol: 'BTCUSDT', price: 81000, atr: 1620 };
+    const tFlat = tiersFor(flat, OPTS, 'long');
+    const tVol = tiersFor(volatile, OPTS, 'long');
+
+    assert.ok(
+      tFlat.size.B <= tVol.size.B + 1e-9,
+      `★ 横盘（止损宽）的仓位 ${tFlat.size.B.toFixed(2)} 应 ≤ 波动大（止损窄）的 ${tVol.size.B.toFixed(2)}`,
+    );
+  });
+});
