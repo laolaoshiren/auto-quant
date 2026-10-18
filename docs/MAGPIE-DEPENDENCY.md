@@ -188,3 +188,114 @@ magpie 0.1.1283 → 0.1.1285（自动更新 2 个版本，发生在几小时内�
 2. **协议适配层没完全收口** —— `/v1/models`、`/v1/systemone`、MCP 搜索仍然分散在多个文件。
 3. **版本感知没做** —— 目前靠人来发现"magpie 更新了"。
 4. **Jev 不在 `/v1/models` 里** —— 意味着它无法被能力探测发现，只能靠端点探测。这是 magpie 的现状，不是我们能改的。
+
+---
+
+## 六、一个契约自检**抓不到**的坑（2026-10-18 实测发现）
+
+### 现象
+
+修好日志之后（见下），`llm` 的 error 终于带上了模型名：
+
+```
+custom 的模型调用失败 —— 这类错误不会因重试而成功
+  ｜model=opencode-zen-free/deepseek-v4.1-flash-free provider=custom status=403 kind=permission
+```
+
+聚合结果：
+| 模型 | 次数 | 状态码 |
+|---|---|---|
+| `opencode-zen-free/space-bunny-free` | 4 | 40x |
+| `opencode-zen-free/beam-free` | 3 | **403** |
+| `opencode-zen-free/deepseek-v4.1-flash-free` | 1 | **403** |
+| `workbuddy-ai/kimi-k3` | 1 | 429（限流，正常） |
+
+### 关键发现：**它们在 `/v1/models` 里是"存在"的**
+
+```
+opencode-zen-free/space-bunny-free:          ✓ 清单里有
+opencode-zen-free/beam-free:                 ✓ 清单里有
+opencode-zen-free/deepseek-v4.1-flash-free:  ✓ 清单里有
+     但实测调用全部 403（无权限）
+```
+
+**⇒ `/v1/models` 说"有"，实际"不能用"。**
+
+### 这意味着什么
+
+我原来以为"按 `/v1/models` 过滤死 id"就能防住模型失效。**这个假设是错的。**
+
+| 失效方式 | `/v1/models` 能发现吗 | 契约自检能发现吗 |
+|---|---|---|
+| id 改名（`-free` 后缀消失） | ✅ 能 | ✅ 能 |
+| id 被删除 | ✅ 能 | ✅ 能 |
+| **id 还在，但 403 无权限** | ❌ **不能** | ❌ **不能** |
+| id 还在，但 429 限流 | ❌ 不能 | ❌ 不能 |
+
+**⇒ 前两种是"契约变了"，后两种是"额度/权限变了"。后者只能靠真实调用发现。**
+
+### 为什么这个坑不致命（但要记住）
+
+```
+模型失败 → fallback 自动换下一个 → 最终成功
+⇒ 业务零影响（实测：35 条 llm error，同时段逐币并行失败 0 次）
+```
+
+**⇒ 代价不是"交易出错"，而是"每轮多花几次无效请求 + 决策变慢一点"。**
+
+### 如果以后要根治，方向是
+
+**加一条"真实调用"健康检查**：对候选链上的每个 id 发一次极小请求（1 token），
+把 403/404 的从链里摘掉。
+
+**但这条要谨慎**：
+- 它会**花钱**（虽然极少）
+- 它和 `docs/AGENTS.md` §6 的"升级阶梯"冲突（那是给交易路径定的，模型路径可以放宽）
+- 而且 403 可能是**临时的**（额度每天重置）⇒ 摘掉之后要能自动恢复
+
+**⇒ 所以这条记为"待评估"，不在本轮做。**
+
+---
+
+## 七、顺手修了一个日志缺陷（2026-10-18）
+
+### 问题
+
+`llm` 的 83 条 error **全部长得一模一样**：
+```
+custom 的模型调用失败 —— 这类错误不会因重试而成功
+```
+**看不到是哪个模型、什么状态码。** 想回答"哪个在挂"时查不到。
+
+### 根因
+
+```ts
+// llm/client.ts —— 记录时带了完整 detail
+log.error(`... 模型调用失败 ...`, { provider, model, attempt, status, kind, retryable, elapsedMs, error });
+
+// api/server.ts —— 但 sink 只读两个字段
+const m = meta as { traderId?: number; raw?: string };
+runtimeLogs.write(traderId, level, scope, text);   // ← 其余全部丢弃
+```
+
+而 `runtime_logs` 表只有 `message` 一列 ⇒ **结构化上下文彻底消失。**
+
+### 修法
+
+不新增数据库列（那要迁移，而它是环形缓冲，收益不值）。
+改为在写库时把**诊断必需的**几个字段拼成短尾巴：
+
+```
+custom 的模型调用失败 —— 这类错误不会因重试而成功 ｜model=xxx provider=custom status=403 kind=permission
+```
+
+⚠️ **只挑必需字段**（model / provider / status / kind / attempt / elapsedMs / error），
+**不序列化整个 meta** —— 那会把提示词、响应体塞进日志，既撑爆环形缓冲又可能泄露内容。
+⚠️ **每个值截断到 60 字符**。
+
+### 同一条教训在本仓库出现过第二次
+
+`errors.ts` 里记过：「一个网关在 HTTP 400 里返回 `模型不可用：deepseek-flash`，
+而 400 被正确判为不可重试 ⇒ 一次本可成功的请求被放弃」。
+
+**两次都是同一个问题：日志要能回答"是哪个"，否则它只能回答"出事了"。**
