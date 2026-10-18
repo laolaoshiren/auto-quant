@@ -193,7 +193,51 @@ export function NewTraderModal({
    *   · `configuredModels` —— 该厂商**已配置的**记录（用户自定义的）
    *   · `availableModels`  —— **从厂商接口读回来的**、还没有记录的那些
    */
-  const providers = catalog?.providers ?? [];
+  const allProviders = catalog?.providers ?? [];
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **厂商下拉只列「实际添加过的」**（2026-10-19 用户报 BUG）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 用户原话
+   *
+   * > 「新建机器人页面 模型厂商BUG了，根本没有读实际的模型厂商……
+   * >   新建机器人和修改机器人配置里面模型厂商选项应该保持一致，
+   * >   并且**只读取 AI 模型里面添加过的**（也就是说和 /models 里面的保持一致才对，
+   * >   不应该出现那些没添加的和缺少添加的）」
+   *
+   * ## 原来的 bug（已实测确认）
+   *
+   * 下拉用的是 `catalog.providers`，而它来自服务端的 **`LLM_PROVIDERS` 静态常量**
+   *（`api/server.ts:1287`）—— 一份**代码里写死的 15 个厂商清单**，
+   * 与 `ai_models` 表里实际有什么**毫无关系**。
+   *
+   * 线上实测的后果（`ai_models` 实际只有 4 个厂商：`commandcode` / `deepseek` /
+   * `custom` / `opencode`）：
+   * ```
+   *   ❌ 下拉里出现了 DeepSeek / OpenAI / Claude / Gemini / Grok / Kimi / MiniMax /
+   *      OpenRouter / 通义千问 —— 用户一个都没添加
+   *   ❌ 用户的 magpie 与 CPA 模型（都在 `custom` 下）没有独立条目
+   *   ⇒ 用户根本找不到自己配过的那个厂商
+   * ```
+   *
+   * ## 现在的口径
+   *
+   * **`(models ?? [])` 里出现过的 provider，才算可选。** 顺序按静态清单排
+   *（让熟悉的厂商在前），清单里没有的（例如纯自定义）排后面。
+   *
+   * ⚠️ **一个模型都没配置时不显示空的厂商列表** —— 那会让用户对着一个
+   * 空下拉发呆。下面会提示"请先去 AI 模型里添加"。
+   */
+  const configuredProviderIds = new Set((models ?? []).map((m) => m.provider));
+  const providers = allProviders
+    .filter((p) => configuredProviderIds.has(p.id))
+    .concat(
+      /* 静态清单里没有、但数据库里有的（防御性：将来加了新 provider 也不会被藏起来）。 */
+      [...configuredProviderIds]
+        .filter((id) => !allProviders.some((p) => p.id === id))
+        .map((id) => ({ id, label: id, models: [] as string[] })) as typeof allProviders,
+    );
   const descriptor = providers.find((p) => p.id === providerId);
   const configuredModels = (models ?? []).filter((m) => m.provider === providerId);
   const providerDiscovery = providerId ? discovered[providerId] : undefined;
@@ -457,10 +501,30 @@ export function NewTraderModal({
                 <option value="">请选择厂商</option>
                 {providers.map((provider) => (
                   <option key={provider.id} value={provider.id}>
+                    {/*
+                     * ⚠️ **带上该厂商已有的模型数**（2026-10-19）。
+                     *
+                     * 用户的 magpie 与 CPA 模型都记在 `custom`（「自定义 OpenAI 兼容端点」）
+                     * 下面 —— 光看这个名字他认不出"这就是我配的 magpie"。
+                     * 显示数量至少让他能对上："哦，这个下面有 4 个，那是我的"。
+                     */}
                     {provider.label}
+                    {(() => {
+                      const n = (models ?? []).filter((m) => m.provider === provider.id).length;
+                      return n > 0 ? `（已配 ${n} 个）` : '';
+                    })()}
                   </option>
                 ))}
               </Select>
+              {/*
+                ⚠️ **一个模型都没配时要说清"去哪里加"**，而不是让用户对着空下拉发呆。
+                这是本仓库一贯的纪律：空状态必须解释原因（不是"没有数据"就完了）。
+              */}
+              {providers.length === 0 && (
+                <p className="mt-1 text-xs text-warn">
+                  还没有任何 AI 模型 —— 请先到「AI 模型」页面添加一个，再回来新建机器人。
+                </p>
+              )}
             </Field>
             )}
 

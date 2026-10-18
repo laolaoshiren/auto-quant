@@ -27,6 +27,7 @@ import {
   buildState,
   extractJevInput,
   jevEndpointUrl,
+  buildJevResponseText,
   tiersFor,
   type JevCandidate,
   type JevModeOptions,
@@ -205,5 +206,78 @@ describe('JEV 模式：端点 URL 拼接', () => {
         `★ 「${baseUrl}」拼出了重复的 /v1 —— 那会 404`,
       );
     }
+  });
+});
+
+describe('JEV 模式：输出必须满足交易循环的前置契约', () => {
+  it('★★★ 输出必须带 <decision> 块（否则被误判为"输出被截断"）', () => {
+    /*
+     * ## 这个用例防的是什么（2026-10-19 线上实测事故）
+     *
+     * 第一版返回纯 JSON `{"decisions":[…]}`，线上第一轮就报：
+     * ```
+     *   第 #1 轮决策失败：这一轮模型的输出被截断了，没有形成任何交易决策
+     *   （重试一次仍然如此）—— 已安全跳过。两次输出分别 1180 与 16 字符
+     * ```
+     *
+     * 根因：`autoTrader.ts` 在解析前有一道前置检查
+     * `if (!hasDecisionBlock(text))` → 判定"被截断"，
+     * 而 `hasDecisionBlock()`（`parser.ts:509`）**只认 `<decision>` 标签**：
+     * ```
+     *   return /<decision>/i.test(...)
+     * ```
+     *
+     * ⚠️ 而真正解析的 `parseDecisionResponse()` 认的是 `{"decisions":[…]}` ——
+     * **两道判据的契约不一致，前置那道更严**。这个 bug 单元测试抓不到，
+     * 因为没人测"我的输出能否通过前置检查"。
+     */
+    const text = buildJevResponseText({
+      candidates: 3,
+      decisions: [],
+      skipped: 3,
+      failed: 0,
+    });
+    assert.match(text, /<decision>/, '★ 必须带 <decision> 开标签');
+    assert.match(text, /<\/decision>/, '★ 必须带 </decision> 闭标签');
+    assert.match(text, /<reasoning>/, '★ 应带 <reasoning>（审计里人能读）');
+  });
+
+  it('★★ <decision> 块里必须是解析器认的 {"decisions":[…]} 形状', () => {
+    const text = buildJevResponseText({
+      candidates: 1,
+      decisions: [
+        {
+          symbol: 'XUSDT',
+          action: 'open_long',
+          leverage: 5,
+          positionSizeUsd: 30,
+          stopLoss: 95,
+          takeProfit: 110,
+          confidence: 70,
+          setupScore: 60,
+          setupScoreBasis: 'Jev setup 2.4/4',
+          reasoning: '测试',
+          riskUsd: 1,
+          marginMode: 'isolated',
+        },
+      ],
+      skipped: 0,
+      failed: 0,
+    });
+    const m = /<decision>([\s\S]*?)<\/decision>/.exec(text);
+    assert.ok(m !== null, '★ 必须能取出 decision 块');
+    const parsed = JSON.parse(m![1]!) as { decisions: unknown[] };
+    assert.equal(parsed.decisions.length, 1, '★ 块内 JSON 必须可解析且含 decisions');
+  });
+
+  it('★★ 空决策也带块（"没有机会"是合法结论，不该报成故障）', () => {
+    /*
+     * 没有块 ⇒ 前置检查判"被截断" ⇒ 触发一次无意义的重试
+     * ⇒ 最后抛一条误导性的错误。而真相是"这轮没有机会"。
+     */
+    const text = buildJevResponseText({ candidates: 0, decisions: [], skipped: 0, failed: 0 });
+    assert.match(text, /<decision>/);
+    const m = /<decision>([\s\S]*?)<\/decision>/.exec(text);
+    assert.deepEqual(JSON.parse(m![1]!).decisions, []);
   });
 });

@@ -573,6 +573,59 @@ export function extractJevInput(userPrompt: string): JevCandidate[] {
 }
 
 /**
+ * **把一轮的决策拼成交易循环要的文本**（2026-10-19）。
+ *
+ * ## ⚠️ 为什么必须带 `<decision>` 块
+ *
+ * `autoTrader.ts` 在解析之前有一道前置检查：
+ * ```
+ *   if (!hasDecisionBlock(response.text)) → 判定"输出被截断" → 重试 → 再失败抛错
+ * ```
+ * 而 `hasDecisionBlock()`（`parser.ts:509`）只做一件事：
+ * ```
+ *   return /<decision>/i.test(stripInvisible(response))
+ * ```
+ * ⇒ **它只认 `<decision>` 标签**，不认 JSON 形状。
+ *
+ * ## 我第一版踩的坑（线上实测）
+ *
+ * 返回纯 JSON `{"decisions":[…]}` ⇒ 第一轮就报：
+ * ```
+ *   这一轮模型的输出被截断了，没有形成任何交易决策（重试一次仍然如此）
+ *   两次输出分别 1180 与 16 字符
+ * ```
+ * 而真正解析的 `parseDecisionResponse()` 是认 `{"decisions":[…]}` 的 ——
+ * **两道判据的契约不一致，前置那道更严**。
+ *
+ * ## 为什么改我这边而不是改前置检查
+ *
+ * 改 `hasDecisionBlock` 会影响**所有模式**（那三个上面挂着真金白银）。
+ * JEV 模式是新的，让它**产出符合既有契约的输出**是零风险的解法。
+ *
+ * ## `reasoning` 块的作用
+ *
+ * 它不是给解析器看的（解析器只认 `<decision>`），而是给**审计记录**看的：
+ * 操作员在决策详情页能读到"这轮问了多少、开仓几个、跳过几个"，
+ * 而不只是一段 JSON。
+ */
+export function buildJevResponseText(input: {
+  candidates: number;
+  decisions: readonly unknown[];
+  skipped: number;
+  failed: number;
+}): string {
+  return [
+    '<reasoning>',
+    `Jev 模式：本轮问询 ${input.candidates} 个候选，开仓 ${input.decisions.length} 个，` +
+      `跳过 ${input.skipped} 个，失败 ${input.failed} 个。`,
+    '</reasoning>',
+    '<decision>',
+    JSON.stringify({ decisions: input.decisions }),
+    '</decision>',
+  ].join('\n');
+}
+
+/**
  * 造一个 `DecisionModel` —— 交易循环只要求 `complete()` 返回 `text`。
  *
  * ## 为什么返回 JSON 文本而不是直接造 `Decision[]`
@@ -599,7 +652,13 @@ export function createJevDecisionModel(opts: JevModeOptions): DecisionModel {
          */
         log.warn('[Jev模式] prompt 里没有 <JEV_INPUT> 块 —— 接线可能断了，本轮无决策');
         return {
-          text: JSON.stringify({ decisions: [] }),
+          /*
+           * ⚠️ **空决策也要带 `<decision>` 块**（理由见下面正常路径那段）：
+           * 否则 `hasDecisionBlock()` 会把它判成"输出被截断"，
+           * 触发一次无意义的重试，最后抛一条误导性的错误。
+           * "这轮没有机会"是**合法结论**，不该报成故障。
+           */
+          text: '<reasoning>\nJev 模式：prompt 里没有候选块。\n</reasoning>\n<decision>\n{"decisions":[]}\n</decision>',
           latencyMs: Date.now() - t0,
           usage: { promptTokens: null, completionTokens: null },
         };
@@ -631,11 +690,46 @@ export function createJevDecisionModel(opts: JevModeOptions): DecisionModel {
       );
 
       /*
-       * 输出形状照 `parser.ts` 认的契约：`{"decisions":[…]}`。
-       * `action` 用英文枚举（`open_long`）—— 机器契约，不翻译。
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⚠️⚠️ **输出必须带 `<decision>` 块**（2026-10-19 线上实测抓到）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * ## 事故
+       *
+       * 第一版返回的是纯 JSON `{"decisions":[…]}`，结果线上第一轮就报：
+       * ```
+       *   第 #1 轮决策失败：这一轮模型的输出被截断了，没有形成任何交易决策
+       *   （重试一次仍然如此）—— 已安全跳过。两次输出分别 1180 与 16 字符
+       * ```
+       *
+       * ## 根因
+       *
+       * `autoTrader.ts` 在解析之前有一道**前置检查**：
+       * ```
+       *   if (!hasDecisionBlock(response.text)) → 判定"输出被截断" → 重试 → 再失败就抛错
+       * ```
+       * 而 `hasDecisionBlock()`（`parser.ts:509`）只做一件事：
+       * ```
+       *   return /<decision>/i.test(...)
+       * ```
+       * ⇒ **它只认 `<decision>` 标签**，不认 JSON 形状。
+       *
+       * 而真正解析用的 `parseDecisionResponse()` 是认 `{"decisions":[…]}` 的
+       * —— 也就是说**两道判据的契约不一致**，前置那道更严。
+       *
+       * ## 为什么现在加块而不是改前置检查
+       *
+       * 改 `hasDecisionBlock` 会影响**所有模式**（那三个上面挂着真金白银）。
+       * 而 JEV 模式是新的，让它**产出符合既有契约的输出**是零风险的解法 ——
+       * 顺带也让审计记录里有一份人能读的东西。
        */
       return {
-        text: JSON.stringify({ decisions }),
+        text: buildJevResponseText({
+          candidates: candidates.length,
+          decisions,
+          skipped,
+          failed,
+        }),
         latencyMs: Date.now() - t0,
         usage: { promptTokens: null, completionTokens: null },
       };
