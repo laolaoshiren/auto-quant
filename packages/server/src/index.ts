@@ -10,7 +10,7 @@ import { TraderManager } from './trader/manager.js';
 import { ROLE_GROUP_LADDERS } from './trader/routedModel.js';
 import { resolveTeamGateway } from './trader/teamGateway.js';
 import { contractMessages, probeGatewayContract } from './llm/gatewayContract.js';
-import { strategies } from './store/repositories.js';
+import { runtimeLogs, strategies } from './store/repositories.js';
 import { defaultStrategyConfig } from '@aq/shared';
 
 const log = createLogger('main');
@@ -255,7 +255,20 @@ async function runGatewayContractCheck(): Promise<void> {
 
   const messages = contractMessages(report);
   if (messages.length === 0) {
-    log.info(
+    /*
+     * ⚠️ **成功也要留一条**，但要落在可检索的地方。
+     *
+     * 第一版只 `log.info` —— 而 `log` 的 scope 是 `main`，写进 `runtime_logs`
+     * 之后混在一堆启动日志里，排查时**根本找不到**（我实测过：grep journalctl
+     * 一条都没有，因为日志通道是 `runtime_logs` 而不是 stdout）。
+     *
+     * ⇒ 用独立 scope `gateway_contract`，控制台的「数据与日志」页可以按 scope 过滤。
+     *   `traderId = null` 表示这是全局事件（不属于某个机器人）。
+     */
+    runtimeLogs.write(
+      null,
+      'info',
+      'gateway_contract',
       `[网关契约] 自检通过（${report.modelCount ?? 0} 个模型 · ${report.requests} 次请求 · ${Date.now() - report.at}ms）。`,
     );
     return;
@@ -270,8 +283,11 @@ async function runGatewayContractCheck(): Promise<void> {
   reportedFingerprints.set(report.fingerprint, now);
 
   for (const m of messages) {
-    if (m.level === 'error') log.error(m.text);
-    else log.warn(m.text);
+    const text = m.text;
+    if (m.level === 'error') log.error(text);
+    else log.warn(text);
+    /* 同时进 `runtime_logs`（scope 独立），让界面能查到。 */
+    runtimeLogs.write(null, m.level, 'gateway_contract', text);
   }
 }
 
