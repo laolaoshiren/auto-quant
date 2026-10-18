@@ -392,38 +392,28 @@ test('★★★ 接线：打开开关后只有前 N 个切片进 LLM，并写观
   assert.ok(scouts.some((x) => x.context.includes('AAAUSDT')), 'AAA(0.9) 必须在');
   assert.ok(scouts.some((x) => x.context.includes('CCCUSDT')), 'CCC(0.8) 必须在');
   assert.ok(!scouts.some((x) => x.context.includes('BBBUSDT')), 'BBB(0.4) 应被筛掉');
-  assert.ok(
-    logs.some((l) => l.level === 'info' && l.message.includes('[Jev] 5 个标的 → 保留 2 个')),
-    `★ 必须有汇总日志（实际：${logs.map((l) => l.message).join(' | ')}）`,
-  );
   /*
-   * ⚠️ **2026-10-18 改过断言**：日志从三行合并成两行。
+   * ⚠️ **断言改过三次**（2026-10-18 的日志格式演进）：
    *
-   * 原来：
-   * ```
-   *   [Jev] 20 个标的 → 保留 6 个 · 最高 … 最低 … · 耗时 …
-   *   [Jev] 保留：A B C
-   *   [Jev] 筛除：X(0.46) Y(0.42) …
-   * ```
-   * 而 `runtime_logs` 是环形缓冲（500 条 ≈ 100 分钟），采集脚本靠"保留行 + 下一行筛除行"
-   * 配对 —— 只要中间被挤掉一行，那一轮就**永久采不到**（实测：seen 记了 132634，
-   * 132635 成了孤儿）。
+   * | 版本 | 格式 | 改的原因 |
+   * |---|---|---|
+   * | ① 三行 | `20 个标的 → 保留 6 个` / `保留：A B` / `筛除：X(0.46)` | 初版 |
+   * | ② 两行 | 保留+筛除合并成一行（用 `|` 分隔） | 环形缓冲把"保留行"和"筛除行"冲散，配对失败 ⇒ 样本永久采不到 |
+   * | ③ **一行** | 全部信息压进一行 | 实测 scope 分布 `llm 202 / store 138 / team 114 / jev 10` ⇒ Jev 时间跨度只剩 40 分钟，而 cron 每 30 分钟采一次 ⇒ 大量轮次被冲掉 |
    *
-   * 现在合并成一行（用 `|` 分隔）：
-   * ```
-   *   [Jev] 保留：A B C | 筛除：X(0.46) Y(0.42) …
-   *   [Jev] 20 个标的 → 保留 6 个 · 最高 … 最低 … · 耗时 …
-   * ```
-   * ⇒ 采集脚本只需一行就能拿到完整配对，不怕被冲散。
+   * ⇒ 现在只认一条日志，所有信息都在里面。
    */
   assert.ok(
     logs.some(
       (l) =>
-        l.message.includes('[Jev] 保留：') &&
+        l.level === 'info' &&
+        l.message.includes('[Jev]') &&
+        l.message.includes('→2 个') &&
+        l.message.includes('保留：') &&
         l.message.includes('| 筛除：') &&
         l.message.includes('BBBUSDT'),
     ),
-    `★ 被筛掉的标的必须点名（且保留/筛除在同一行里，避免被环形缓冲冲散）；实际：${logs.map((l) => l.message).join(' | ')}`,
+    `★ 必须有一条含汇总 + 保留 + 筛除的日志（实际：${logs.map((l) => l.message).join(' | ')}）`,
   );
 });
 

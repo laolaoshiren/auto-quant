@@ -2018,13 +2018,31 @@ async function runTradingDeskInner(input: {
           const shown = desc.slice(0, 12);
           const suffix = desc.length > shown.length ? ` …等 ${desc.length} 个` : '';
           const droppedText = shown.map((s) => `${s.symbol}(${s.score.toFixed(2)})`).join(' ');
+          /*
+           * ⚠️⚠️ **只写一条日志**（2026-10-18 第二次修正）
+           *
+           * ## 事故
+           *
+           * 上一版合并成一条之后，又另起了一条"心跳"：
+           * ```
+           *   [Jev] 保留：A B C | 筛除：X(0.46) …
+           *   [Jev] 20 个标的 → 保留 6 个 · 最高 0.61 最低 0.26 · 耗时 1482ms
+           * ```
+           * 而实测发现 `runtime_logs` 是**环形缓冲（500 条）**，而 `#10`（赚大钱）
+           * 每分钟产出大量 `llm` 日志 —— 实测 scope 分布：
+           * ```
+           *   llm 202 · store 138 · team 114 · jev 只有 10
+           *   ⇒ jev 的时间跨度只有 40 分钟（03:50 ~ 04:30）
+           *   ⇒ 而 cron 每 30 分钟才采一次，正好卡在边界上
+           *   ⇒ 大部分轮次还没被采到就被冲掉了
+           * ```
+           *
+           * ⇒ **每轮只写一条**，把所有信息压进去。缓冲压力减半，采样窗口翻倍。
+           */
           jevLog.info(
-            `[Jev] 保留：${keptNames.join(' ')}` +
+            `[Jev] ${allSlices.length}→${slicesForLlm.length} 个 · 最高 ${highest} 最低 ${lowest}` +
+              ` · ${picked.elapsedMs}ms · 保留：${keptNames.join(' ')}` +
               (droppedText === '' ? ' | 筛除：（无）' : ` | 筛除：${droppedText}${suffix}`),
-          );
-          jevLog.info(
-            `[Jev] ${allSlices.length} 个标的 → 保留 ${slicesForLlm.length} 个` +
-              ` · 最高 ${highest} 最低 ${lowest} · 耗时 ${picked.elapsedMs}ms`,
           );
         } else {
           /*
