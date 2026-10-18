@@ -167,8 +167,21 @@ export interface JevModeOptions {
    * 仓位档位低于它就无法下单（交易所直接拒）。
    */
   readMinNotional: () => number;
-  /** 杠杆 —— **由策略配置决定，不让 Jev 选**（见文件头）。 */
-  leverage: number;
+  /**
+   * 杠杆模式：`manual`（用 `readLeverageManual`）或 `jev`（让 Jev 选）。
+   *
+   * ⚠️ 2026-10-19 用户要求：「自动模式：让JEV自己去判断要用多少杠杆」。
+   * 原来这里是 `leverage: number`（写死的），现在拆成模式 + 手动值。
+   */
+  readLeverageMode: () => string;
+  /** 手动模式下的杠杆倍数（会被 `leverageCap` 夹住）。 */
+  readLeverageManual: () => number;
+  /**
+   * 该标的的**可用杠杆上限**（`min(策略上限, 币种级上限)`）。
+   *
+   * ⚠️ 每次决策现读 —— 币种级上限是交易所返回的，随标的不同。
+   */
+  readLeverageCap: () => number;
   /**
    * 保证金模式。
    *
@@ -332,7 +345,8 @@ export function tiersFor(
    * 但风控的 `maxMarginUsage` 会兜住。这个值可以调（见 `JEV_OPTIONS`）。
    */
   const riskNeutralNotional = (riskUsd / stopDistance.B) * c.price;
-  const physicalCap = equity * opts.leverage;
+  /* ⚠️ 用【杠杆上限】而不是当前设定值 —— 物理上限是"最多能开多大"。 */
+  const physicalCap = equity * Math.max(1, Math.floor(opts.readLeverageCap()));
   const perPositionCap = equity * 0.3;
   const baseNotional = Math.max(
     0,
@@ -422,6 +436,14 @@ export function buildState(
   c: JevCandidate,
   longTiers: Tiers,
   shortTiers: Tiers,
+  /**
+   * 可用杠杆范围（2026-10-19 用户要求）。
+   *
+   * ⚠️ **必须是"已经夹过"的真实范围**：`min(策略上限, 币种级上限)`。
+   * 账户级限制（子账户 5x）事前读不到，只能靠 `setLeverage` 降级兜底 ——
+   * 所以这里给的是一个**可能偏乐观的上界**，但**绝不会低于 1**。
+   */
+  leverageRange?: { min: number; max: number },
 ): string {
   const lines = [
     `标的 ${c.symbol}`,
@@ -445,6 +467,18 @@ export function buildState(
   ];
 
   lines.push('', ...tierLine('做多', longTiers, '【做多】'), '', ...tierLine('做空', shortTiers, '【做空】'));
+
+  /*
+   * 杠杆范围放**最后一行**：它是"你能选多少"的约束，
+   * 而前面都是"这个标的长什么样"的事实。先事实、后约束。
+   */
+  if (leverageRange !== undefined) {
+    lines.push(
+      '',
+      `可用杠杆 ${leverageRange.min}–${leverageRange.max}x` +
+        `（取「策略上限」与「交易所对该币种上限」中较小的那个；账户级限制可能更低）`,
+    );
+  }
   return lines.join('\n');
 }
 
@@ -521,11 +555,78 @@ export async function askJev(
           skip: '跳过（这次不做）',
         },
       },
-      size_tier: {
-        type: 'choice',
-        instructions: '如果要做，用哪一个仓位档？A 最保守，C 最激进。',
-        criteria: { A: 'A 档（最保守）', B: 'B 档（中等）', C: 'C 档（最激进）' },
-      },
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  **开仓方式：让 Jev 判断**（2026-10-19 用户要求）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * 用户原话：「要加一个 让JEV判断」（指着「开仓方式」那个下拉框）。
+       *
+       * ## 它为什么值得问
+       *
+       * ```
+       *   市价   → 立刻成交，付 taker 手续费 + 滑点
+       *   限价   → 挂单等回调，省手续费（maker），但可能等不到
+       * ```
+       * 两者的差别是**「这个机会会不会自己回来」** —— 而那是能从
+       * 「动量强度 / 离均线多远 / 24h 涨跌幅」里读出来的判断：
+       * ```
+       *   已经涨了 5%、远离均线 ⇒ 大概会回调，值得等（限价）
+       *   刚突破、动量强       ⇒ 不会回来了，别等（市价）
+       * ```
+       *
+       * ⚠️ 我之前的说法（「Jev 看不到盘口深度，判断不了」）**只对了一半**：
+       * 它确实看不到盘口，但"会不会回调"更多取决于**趋势强度**而不是盘口。
+       * 用户要的是让 Jev 试，那就问它 —— 并且**在文案里说清它不知道什么**。
+       */
+      ...(opts.readEntryType() === 'jev'
+        ? {
+            entry_style: {
+              type: 'choice' as const,
+        instructions:
+          '如果要开仓，用哪种下单方式？' +
+          '【市价】立刻成交，付手续费和滑点，但一定进得去；' +
+          '【限价】挂在当前价回退 0.3% 的位置等回调，省手续费，但可能等不到而错过。' +
+          '判断依据：如果这波动量很强（刚突破、24h 涨跌大、远离均线），回调概率低，该用市价；' +
+          '如果已经涨/跌了很多、离均线很远，回调概率高，值得等。',
+        criteria: {
+          market: '市价（立刻成交，不等回调）',
+              limit: '限价（等回调 0.3%，可能等不到）',
+            },
+          },
+        }
+        : {}),
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  **杠杆：让 Jev 判断**（2026-10-19 用户要求）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * 用户原话：「自动模式：让JEV自己去判断要用多少杠杆，
+       *           当然系统也要把当前币种\钱包可用杠杆范围告诉JEV」
+       *
+       * ## ⚠️ 这一问只在「自动模式」下才发
+       *
+       * 手动模式时杠杆由用户滑杆决定，问它没有意义（还会浪费 token）。
+       * 由调用方在 `buildQuestions()` 里按配置决定要不要加这一问。
+       *
+       * ## ⚠️ 它看到的范围是【已经夹过的】
+       *
+       * `state` 里的「可用杠杆 1–Nx」里的 N = `min(策略上限, 币种级上限)`。
+       * 所以 Jev 不可能选出一个"账户不允许"的值 ——
+       * 账户级限制（子账户 5x）仍然靠 `setLeverage` 的降级兜底。
+       */
+      ...(opts.readLeverageMode() === 'jev'
+        ? {
+            leverage: {
+              type: 'score' as const,
+              instructions:
+                '这个标的该用多大的杠杆？分数越高越激进。' +
+                '杠杆放大盈亏，也放大爆仓风险 —— 波动大的标的要用小杠杆。' +
+                '【可用杠杆范围见上面 state 的最后一行，不要超出它】',
+              criteria: ['最保守（最低档）', '偏保守', '中等', '偏激进', '最激进（最高档）'],
+            },
+          }
+        : {}),
       stop_tier: {
         type: 'choice',
         instructions: '如果要做，止损放在哪一个档？A 最近（1.0×ATR），C 最远（2.0×ATR）。',
@@ -752,6 +853,73 @@ function hashSymbol(symbol: string): number {
   return Math.abs(h);
 }
 
+/**
+ * **解析本轮该用的杠杆**（2026-10-19 用户要求）。
+ *
+ * ## 两种模式
+ *
+ * ```
+ *   manual → 用用户滑杆设的值
+ *   jev    → 用 Jev 的 score 换算成范围内的档位
+ * ```
+ *
+ * ## ⚠️ 无论哪种模式，最后都 `clamp` 到 `[1, cap]`
+ *
+ * `cap = min(策略上限, 币种级上限)`。
+ * 用户把滑杆拉到 20x 而交易所只允许 10x 时，这里就会降到 10x ——
+ * **不靠"界面上限"来保证正确性**（那可以被绕过），而在这里兜住。
+ *
+ * ⚠️ 账户级限制（子账户 5x）这里**看不到** —— 它由 `broker.setLeverage()`
+ * 的 `-4421` 降级处理（`parseAdmittedLeverage` 从报错里挖真实上限）。
+ *
+ * @param score Jev 的 score（0–4）；手动模式传 `undefined`
+ */
+/**
+ * **解析本轮该用的开仓方式**（2026-10-19 用户要求「让 JEV 判断」）。
+ *
+ * ```
+ *   market → 市价（立刻成交）
+ *   limit  → 限价（等回调 0.3%）
+ *   jev    → 看 Jev 对 `entry_style` 的答案
+ * ```
+ *
+ * ⚠️ Jev 没给答案时**退回市价** —— "一定进得去"比"省一点手续费"更重要：
+ * 一个没成交的限价单等于什么都没做，而机会已经过去了。
+ */
+function resolveEntryType(
+  opts: JevModeOptions,
+  jevChoice: string | undefined,
+): 'market' | 'limit' {
+  const configured = opts.readEntryType();
+  if (configured !== 'jev') return configured === 'limit' ? 'limit' : 'market';
+  return jevChoice === 'limit' ? 'limit' : 'market';
+}
+
+function resolveLeverage(opts: JevModeOptions, score: number | undefined): number {
+  const cap = Math.max(1, Math.floor(opts.readLeverageCap()));
+  const mode = opts.readLeverageMode();
+
+  if (mode !== 'jev') {
+    return Math.min(cap, Math.max(1, Math.floor(opts.readLeverageManual())));
+  }
+
+  /*
+   * Jev 的 `score` 是 0–4（5 档）。换算成范围内的等分档：
+   * ```
+   *   score 0 → 1x（最保守）
+   *   score 4 → cap（最激进）
+   * ```
+   * ⚠️ 用 `round` 而不是 `floor` —— 否则 score=4 时永远到不了 cap。
+   */
+  if (score === undefined || !Number.isFinite(score)) {
+    /* Jev 没给分数 ⇒ 退到中间偏保守，不猜"最激进"。 */
+    return Math.max(1, Math.round(cap * 0.4));
+  }
+  const clamped = Math.min(4, Math.max(0, score));
+  const raw = 1 + (cap - 1) * (clamped / 4);
+  return Math.min(cap, Math.max(1, Math.round(raw)));
+}
+
 /** `choice` 的答案收窄成 `Tier`；认不出就返回 `null`（**不猜**）。 */
 function asTier(v: string | undefined): Tier | null {
   if (v === 'A' || v === 'B' || v === 'C') return v;
@@ -861,7 +1029,25 @@ export async function decideForCandidate(
    */
   const longTiers = tiersFor(c, opts, 'long');
   const shortTiers = tiersFor(c, opts, 'short');
-  const state = buildState(c, longTiers, shortTiers);
+  /*
+   * ⚠️ **把可用杠杆范围交给 Jev**（2026-10-19 用户要求）。
+   *
+   * 用户原话：「系统也要把当前币种\钱包可用杠杆范围告诉JEV」。
+   *
+   * 范围 = `[1, min(策略上限, 币种级上限)]` —— 账户级限制（子账户 5x）
+   * 事前读不到，所以那个上界可能偏乐观；实际下单时 `setLeverage`
+   * 会在被拒后降级，并把真实值写进日志。
+   *
+   * ⚠️ **只在自动模式加这一行** —— 手动模式下杠杆由滑杆决定，
+   * 告诉 Jev 一个它用不到的区间只是浪费 token。
+   */
+  const leverageCap = Math.max(1, Math.floor(opts.readLeverageCap()));
+  const state = buildState(
+    c,
+    longTiers,
+    shortTiers,
+    opts.readLeverageMode() === 'jev' ? { min: 1, max: leverageCap } : undefined,
+  );
 
   let resp: JevResponse;
   try {
@@ -1038,9 +1224,11 @@ export async function decideForCandidate(
        */
       action: side === 'long' ? 'open_long' : 'open_short',
       /*
-       * ⚠️ 杠杆来自策略配置，**不是 Jev 选的** —— 理由见文件头。
+       * ⚠️ **杠杆由 `resolveLeverage()` 决定**（2026-10-19 用户要求）：
+       * 手动模式用滑杆值，自动模式用 Jev 的 score 换算 —— 两者都会被夹到
+       * `[1, min(策略上限, 币种级上限)]`。
        */
-      leverage: opts.leverage,
+      leverage: resolveLeverage(opts, answers.leverage?.score),
       positionSizeUsd: tiers.size[sizeTier],
       stopLoss: tiers.stop[stopTier],
       takeProfit: tiers.take[effectiveTakeTier],
@@ -1057,7 +1245,7 @@ export async function decideForCandidate(
        * `limit`  = 挂限价单等回调 —— 用**机械规则**算挂单价（当前价回退 0.3%），
        *            因为 Jev 看不到盘口深度，判断不了"会不会回来"。
        */
-      ...(opts.readEntryType() === 'limit'
+      ...(resolveEntryType(opts, answers.entry_style?.choice) === 'limit'
         ? {
             entryType: 'limit' as const,
             limitPrice: side === 'long' ? c.price * 0.997 : c.price * 1.003,
@@ -1186,7 +1374,8 @@ export async function decideForPosition(
       decision: {
         symbol: c.symbol,
         action: action === 'add' ? 'add_to_position' : 'reduce_position',
-        leverage: opts.leverage,
+        /* 加减仓沿用**该持仓已有的杠杆**，不重新选 —— 改杠杆会让保证金占用跳变。 */
+        leverage: resolveLeverage(opts, undefined),
         positionSizeUsd: amount,
         /*
          * ⚠️ **减仓用百分比而不是绝对量** —— `Decision` 的 `reducePercent`
@@ -1219,8 +1408,8 @@ export async function decideForPosition(
        * 写反了会被风控拒（`parser.ts` 有校验），但那说明这里有 bug，不该靠下游兜。
        */
       action: c.heldSide === 'long' ? 'close_long' : 'close_short',
-      leverage: opts.leverage,
-      /* 平仓不需要仓位大小 —— 但 `Decision` 的类型要求这个字段，给 0。 */
+      /* 平仓不需要杠杆 —— 给一个合法值即可（风控不读它）。 */
+      leverage: resolveLeverage(opts, undefined),
       positionSizeUsd: 0,
       stopLoss: null,
       takeProfit: null,

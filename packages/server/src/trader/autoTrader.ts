@@ -12861,6 +12861,7 @@ function buildJevInputBlock(ctx: PromptContext, _budgetTokens: number): string {
       ...(rsi7 !== undefined && Number.isFinite(rsi7) ? { rsi7 } : {}),
       ...(ema20 !== undefined && Number.isFinite(ema20) ? { ema20 } : {}),
       ...(held.has(c.symbol) ? { heldSide: held.get(c.symbol) } : {}),
+      
     };
   });
 

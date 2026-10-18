@@ -246,7 +246,45 @@ export function JevSettings({ traderId }: { traderId: number }) {
                       ))}
                     </select>
                   ) : (
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1.5">
+                      {/*
+                        ⚠️ **滑杆 + 数字框**（2026-10-19 用户要求）。
+
+                        用户原话：「1手动设置：用一个**滑动杆**设置调节」。
+
+                        ## 为什么两个都要
+                        ```
+                          滑杆   → 快速试「拉到 20x 会怎样」，不需要打字
+                          数字框 → 精确输入（滑杆的步长在 125 档时不好对准）
+                        ```
+                        两者**共享同一个值**：拖滑杆数字框跟着变，
+                        改数字框滑杆跟着动。
+
+                        ## ⚠️ 滑杆的 max 来自服务端的 `range.max`
+                        那是「策略上限」与「币种级上限」的较小者 ——
+                        **用户不可能拖到交易所不允许的值**。
+                        账户级限制（子账户 5x）事前读不到，由
+                        `broker.setLeverage()` 被拒后自动降级兜底。
+                      */}
+                      <input
+                        type="range"
+                        value={o.value}
+                        min={o.range?.min ?? 1}
+                        max={o.range?.max ?? 125}
+                        step={o.range?.step ?? 1}
+                        disabled={busy}
+                        aria-label={o.label}
+                        onChange={(e) => {
+                          const next = e.target.value;
+                          setOptions((prev) =>
+                            (prev ?? []).map((x) => (x.key === o.key ? { ...x, value: next } : x)),
+                          );
+                        }}
+                        /* 拖完才保存 —— 拖动过程中每一帧都写库毫无意义。 */
+                        onPointerUp={(e) => void save(o.key, (e.target as HTMLInputElement).value)}
+                        onKeyUp={(e) => void save(o.key, (e.target as HTMLInputElement).value)}
+                        className="h-1 w-20 cursor-pointer appearance-none rounded-full bg-base-700 accent-accent"
+                      />
                       <input
                         type="number"
                         value={o.value}
@@ -262,13 +300,11 @@ export function JevSettings({ traderId }: { traderId: number }) {
                         onChange={(e) => {
                           const next = e.target.value;
                           setOptions((prev) =>
-                            (prev ?? []).map((x) =>
-                              x.key === o.key ? { ...x, value: next } : x,
-                            ),
+                            (prev ?? []).map((x) => (x.key === o.key ? { ...x, value: next } : x)),
                           );
                         }}
                         onBlur={(e) => void save(o.key, e.target.value)}
-                        className="w-16 rounded border border-base-700 bg-base-900 px-1.5 py-1 text-right text-[11px] tabular-nums text-ink-hi"
+                        className="w-12 rounded border border-base-700 bg-base-900 px-1 py-1 text-right text-[11px] tabular-nums text-ink-hi"
                       />
                       <span className="text-[10px] text-ink-faint">{o.range?.unit ?? ''}</span>
                     </div>

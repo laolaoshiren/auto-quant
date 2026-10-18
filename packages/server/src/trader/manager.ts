@@ -2049,7 +2049,21 @@ export class TraderManager {
         readHoldAskEvery: () => Math.max(1, Math.floor(jevNumber('hold_ask_every'))),
         /* 权益也每轮现读 —— 余额会变，写死会让档位基于旧余额。 */
         readEquity: () => traders.get(traderId)?.initialEquity ?? equity,
-        leverage,
+        readLeverageMode: () => jevEnum('leverage_mode'),
+        readLeverageManual: () => jevNumber('leverage_manual'),
+        /*
+         * ⚠️ **杠杆上限 = min(策略上限, 币种级上限)**（2026-10-19）。
+         *
+         * 用户原话：「滑动范围是不能大于账户本身限制」。
+         *
+         * 但 `buildJevModeModel()` 拿不到"当前在算哪个标的"，所以这里用
+         * **策略上限**作为保守值 —— 真正的逐标的判断在 `autoTrader` 里
+         * 通过 `leverageCapCache`（`getMaxLeverage` 的缓存）做。
+         *
+         * 实际下界由 `resolveLeverage()` 的 `Math.min(cap, …)` 兜住，
+         * 而账户级限制由 `broker.setLeverage()` 的 `-4421` 降级处理。
+         */
+        readLeverageCap: () => leverage,
         /*
          * ⚠️ `riskControl.marginMode` 的类型只有 `'isolated'`（策略层没开放全仓），
          * 所以这里**不需要分支** —— 写 `=== 'cross' ? 'cross' : 'isolated'`

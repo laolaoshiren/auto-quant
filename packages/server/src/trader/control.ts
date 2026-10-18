@@ -166,8 +166,36 @@ export const JEV_OPTIONS: readonly JevOptionSpec[] = [
     options: [
       { value: 'market', label: '市价（默认，立刻成交）' },
       { value: 'limit', label: '限价等待（回退 0.3% 挂单）' },
+      { value: 'jev', label: '让 Jev 判断（看动量强度决定要不要等）' },
     ],
     fallback: 'market',
+  },
+  {
+    key: 'leverage_mode',
+    label: '杠杆',
+    why:
+      '决定用多大杠杆。' +
+      '「手动」由你设定（滑杆上限 = 策略上限与交易所对该币种上限中较小的那个）；' +
+      '「让 Jev 判断」把可用范围交给它选 —— 它看得到 ATR 和 24h 涨跌，' +
+      '波动大时会选小杠杆。' +
+      '⚠️ 两种模式都受账户级限制约束（例如子账户可能被币安限制在 5x），' +
+      '超了会自动降级并在日志里写明。',
+    kind: 'enum',
+    options: [
+      { value: 'manual', label: '手动设定（用滑杆）' },
+      { value: 'jev', label: '让 Jev 判断' },
+    ],
+    fallback: 'manual',
+  },
+  {
+    key: 'leverage_manual',
+    label: '杠杆倍数',
+    why:
+      '手动模式下的杠杆。数值越大，同样保证金能开的名义越大，' +
+      '但爆仓距离也越近。实际生效值不会超过「策略上限」和「交易所对该币种的上限」。',
+    kind: 'number',
+    range: { min: 1, max: 125, step: 1, unit: 'x' },
+    fallback: '5',
   },
   {
     key: 'allow_short',

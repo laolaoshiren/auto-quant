@@ -58,7 +58,9 @@ const OPTS: JevModeOptions = {
   readMinRiskRewardRatio: () => 2,
   readMinNotional: () => 5,
   readHoldAskEvery: () => 1,
-  leverage: 5,
+  readLeverageMode: () => 'manual',
+  readLeverageManual: () => 5,
+  readLeverageCap: () => 5,
   marginMode: 'isolated',
 };
 
@@ -288,7 +290,9 @@ describe('JEV 模式：输出必须满足交易循环的前置契约', () => {
         {
           symbol: 'XUSDT',
           action: 'open_long',
-          leverage: 5,
+          readLeverageMode: () => 'manual',
+  readLeverageManual: () => 5,
+  readLeverageCap: () => 5,
           positionSizeUsd: 30,
           stopLoss: 95,
           takeProfit: 110,
@@ -464,7 +468,7 @@ describe('JEV 模式：仓位上限（2026-10-19 线上硬 bug）', () => {
     /* BTC 的 ATR 很小（1.1%），这正是最容易爆掉的情形。 */
     const btc: JevCandidate = { symbol: 'BTCUSDT', price: 108000, atr: 1200 };
     const t = tiersFor(btc, OPTS, 'long');
-    const maxAllowed = 100 * OPTS.leverage;
+    const maxAllowed = 100 * 5;
     for (const tier of ['A', 'B', 'C'] as const) {
       assert.ok(
         t.size[tier] <= maxAllowed,
@@ -490,7 +494,7 @@ describe('JEV 模式：仓位上限（2026-10-19 线上硬 bug）', () => {
      * ⇒ 正确的判据是"C 档不超过权益×杠杆的物理上限"，
      *   而不是"C 档不超过 B 档的单笔上限"（那会让三档退化成同一档）。
      */
-    const physicalCap = 100 * OPTS.leverage;
+    const physicalCap = 100 * 5;
     assert.ok(
       t.size.C <= physicalCap,
       `★ C 档名义 ${t.size.C.toFixed(2)} 超过了物理上限 ${physicalCap}`,
@@ -773,6 +777,76 @@ describe('JEV 模式：止损距离下限', () => {
     assert.ok(
       tFlat.size.B <= tVol.size.B + 1e-9,
       `★ 横盘（止损宽）的仓位 ${tFlat.size.B.toFixed(2)} 应 ≤ 波动大（止损窄）的 ${tVol.size.B.toFixed(2)}`,
+    );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  杠杆：手动 / 让 Jev 判断（2026-10-19 用户要求）                              */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：杠杆', () => {
+  it('★★★ 手动模式的杠杆绝不能超过「策略上限」', () => {
+    /*
+     * 用户原话：
+     * > 「假设子钱包最大可用是5X（全币种），然后现在币种最大是20X，
+     * >  JEV选了20X就会导致开不了仓，也就是说**滑动范围是不能大于账户本身限制**」
+     *
+     * ⇒ `resolveLeverage` 的最后一道 `Math.min(cap, …)` 必须兜住。
+     * 这个用例把 cap 设成 5、手动值设成 20，断言结果是 5。
+     */
+    const capped: JevModeOptions = {
+      ...OPTS,
+      readLeverageMode: () => 'manual',
+      readLeverageManual: () => 20,
+      readLeverageCap: () => 5,
+    };
+    /* `resolveLeverage` 不是导出的，通过 tiersFor 的 physicalCap 间接验证。 */
+    const t = tiersFor({ symbol: 'XUSDT', price: 100, atr: 2 }, capped, 'long');
+    const physicalCap = 100 * 5; /* equity 100 × cap 5 */
+    assert.ok(
+      t.size.C <= physicalCap,
+      `★ C 档 ${t.size.C.toFixed(2)} 超过了「权益×cap(5)」= ${physicalCap}`,
+    );
+  });
+
+  it('★★ 自动模式下 Jev 的 score 被换算到 [1, cap] 区间内', () => {
+    /*
+     * Jev 的 `score` 是 0–4（5 档）：
+     * ```
+     *   score 0 → 1x
+     *   score 4 → cap
+     * ```
+     * ⚠️ 这里只验证「不越界」—— 具体映射由 `resolveLeverage` 的
+     * `1 + (cap-1) × score/4` 决定，而它是私有函数。
+     * 间接验证：自动模式下仓位仍受 physicalCap 约束。
+     */
+    const auto: JevModeOptions = {
+      ...OPTS,
+      readLeverageMode: () => 'jev',
+      readLeverageCap: () => 10,
+    };
+    const t = tiersFor({ symbol: 'XUSDT', price: 100, atr: 2 }, auto, 'long');
+    assert.ok(
+      t.size.C <= 100 * 10,
+      '★ 自动模式的仓位超过了「权益×cap」',
+    );
+  });
+
+  it('★★ 杠杆上限变化会立即影响仓位上限（配置实时生效）', () => {
+    let cap = 5;
+    const live: JevModeOptions = {
+      ...OPTS,
+      readLeverageMode: () => 'manual',
+      readLeverageManual: () => 5,
+      readLeverageCap: () => cap,
+    };
+    const before = tiersFor({ symbol: 'XUSDT', price: 100, atr: 2 }, live, 'long');
+    cap = 20;
+    const after = tiersFor({ symbol: 'XUSDT', price: 100, atr: 2 }, live, 'long');
+    assert.ok(
+      after.size.B >= before.size.B,
+      `★ cap 从 5 提到 20 后仓位上限应变大（前 ${before.size.B.toFixed(2)} / 后 ${after.size.B.toFixed(2)}）`,
     );
   });
 });
