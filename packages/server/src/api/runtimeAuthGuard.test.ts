@@ -240,6 +240,21 @@ function sensitiveEndpoints(): SensitiveEndpoint[] {
     },
     {
       method: 'POST',
+      route: '/api/traders/:id/jev-options/:key',
+      url: `/api/traders/${traderId}/jev-options/min_confidence`,
+      payload: { value: '0' },
+      /*
+       * ⚠️ **不走 `manager`**（所以没有 `expectsManagerCall`）——
+       * 它写 `settings` 表，改的是 JEV 模式下一轮的判断门槛。
+       *
+       * 为什么敏感：把 `min_confidence` 设成 0 会让**所有** Jev 判断都被执行
+       *（包括 50:50 的平局）；把 `risk_percent` 设成 5 会让单笔风险放大 5 倍。
+       * 能把这种东西拨来拨去的端点，未认证时必须 401 且零副作用。
+       */
+      why: '改 JEV 模式的风险参数（置信门槛、单笔风险比例等）—— 会立刻改变交易行为',
+    },
+    {
+      method: 'POST',
       route: '/api/traders/:id/control/:key',
       url: `/api/traders/${traderId}/control/jev_prefilter`,
       payload: { on: false },

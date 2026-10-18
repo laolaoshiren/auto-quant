@@ -172,6 +172,7 @@ import { TeamCycleBlock } from './TeamBoard/TeamCycleBlock';
 import { usePolled } from '../lib/hooks';
 import { Badge, Empty, ErrorNote, Panel, Spinner3, cn } from './ui';
 import { RobotControl } from './TeamBoard/RobotControl';
+import { JevSettings } from './TeamBoard/JevSettings';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
 import { summarizeMemberOutput } from '../lib/memberSummary';
 import { plainText } from '../lib/plainText';
@@ -713,7 +714,17 @@ export function DecisionFeed({
    * ⚠️ **只有团队模式有标签栏**：另两种模式本来就没有工作流区，
    * 它们的决策流一直是独占全部高度 —— 给它们加一个只有一项的标签栏是纯噪音。
    */
-  const [pane, setPane] = useState<'decisions' | 'workflow' | 'control'>('decisions');
+  const [pane, setPane] = useState<'decisions' | 'workflow' | 'control' | 'jev'>('decisions');
+  /**
+   * **哪些模式需要这套标签栏**（2026-10-19）。
+   *
+   * `ai_team` 有「AI 工作流 + 机器人控制」；`jev` 有「机器人控制 + JEV 模式」。
+   * 两者都需要标签栏，但**不需要彼此的面板** —— 所以下面每个面板各自判模式。
+   *
+   * ⚠️ 另两种模式（`strategy` / `ai_managed`）**不渲染标签栏** ——
+   * 它们的界面必须逐字节不变（那上面挂着实盘）。
+   */
+  const isTeamLike = mode === 'ai_team' || mode === 'jev';
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -1145,7 +1156,7 @@ export function DecisionFeed({
    * 而 `scrollTop` 已经由这里设好了 —— 不清就会**补偿两遍**、滚过头。
    */
   /** 两个标签的统一切换入口：**离开决策页时先记住位置**。 */
-  const switchPane = (next: 'decisions' | 'workflow' | 'control') => {
+  const switchPane = (next: 'decisions' | 'workflow' | 'control' | 'jev') => {
     if (pane === 'decisions' && next !== 'decisions') {
       restoreScrollRef.current = scrollerRef.current?.scrollTop ?? null;
     }
@@ -1381,7 +1392,7 @@ export function DecisionFeed({
             它就是一行文字加下边框（实测 30px，见交付说明里的量测），
             与它替代掉的那个"工作流区最大 45%"完全不是一个量级。
           */}
-          {mode === 'ai_team' && (
+          {isTeamLike && (
             <div
               role="tablist"
               aria-label="决策与工作流"
@@ -1471,6 +1482,38 @@ export function DecisionFeed({
                 )}
               >
                 机器人控制
+              {/*
+                ── 「JEV 模式」标签（2026-10-19 用户要求）────────────────────
+
+                用户原话：
+                > 「我感觉 P3 可以做…但是**要有开关**（像团队模式一样，
+                >  这边增加 P3 选项和其他你觉得必要的选项，**不要全部写死**）」
+
+                ## 为什么它只对 JEV 模式出现
+
+                这些选项（选币方式、开仓方式、置信门槛…）只影响 `mode === 'jev'`
+                的机器人。给另外三种模式显示它们等于**让人以为能改**，
+                而实际上一个字节都不会被读到。
+              */}
+              {mode === 'jev' && (
+                <button
+                  id="feed-tab-jev"
+                  type="button"
+                  role="tab"
+                  aria-selected={pane === 'jev'}
+                  aria-controls="feed-panel-jev"
+                  tabIndex={pane === 'jev' ? 0 : -1}
+                  onClick={() => switchPane('jev')}
+                  className={cn(
+                    '-mb-px border-b-2 px-2.5 py-1 text-base transition',
+                    pane === 'jev'
+                      ? 'border-accent font-semibold text-ink-hi'
+                      : 'border-transparent text-ink-lo hover:text-ink-mid',
+                  )}
+                >
+                  JEV 模式
+                </button>
+              )}
               </button>
             </div>
           )}
@@ -1574,7 +1617,7 @@ export function DecisionFeed({
             ⚠️ **只在这个标签被选中时渲染**（`pane === 'control'`），
             与决策流同一条纪律：不在 DOM 里留一份"被压扁的"副本。
           */}
-          {mode === 'ai_team' && pane === 'control' && (
+          {isTeamLike && pane === 'control' && (
             <div
               role="tabpanel"
               id="feed-panel-control"
@@ -1582,6 +1625,30 @@ export function DecisionFeed({
               className="min-h-0 flex-1 overflow-y-auto"
             >
               <RobotControl traderId={traderId} />
+            </div>
+          )}
+
+          {/*
+            **JEV 模式专属选项**（2026-10-19 用户要求）。
+
+            原话：
+            > 「我感觉 P3 可以做…但是**要有开关**（像团队模式一样，这边增加 P3 选项
+            >  和其他你觉得必要的选项，**不要全部写死**）」
+
+            这些项从服务端的 `JEV_OPTIONS` 拉，前端不硬编码任何一项 ——
+            以后加一个新选项只改 `control.ts` 一处。
+
+            ⚠️ **只在 `mode === 'jev'` 时出现**：这些选项只影响 JEV 模式的机器人，
+            给另外三种显示它们等于让人以为能改，而实际一个字节都不会被读到。
+          */}
+          {mode === 'jev' && pane === 'jev' && (
+            <div
+              role="tabpanel"
+              id="feed-panel-jev"
+              aria-labelledby="feed-tab-jev"
+              className="min-h-0 flex-1 overflow-y-auto"
+            >
+              <JevSettings traderId={traderId} />
             </div>
           )}
 
@@ -1622,7 +1689,20 @@ export function DecisionFeed({
             "只想着团队模式"被压成 10%、下面一大片空白（见 `max-h-[10%]` 那段事故）。
             **同一个坑不踩第二次。**
           */}
-          {!(mode === 'ai_team' && pane !== 'decisions') && (
+          {/*
+            ⚠️ **`isTeamLike` 而不是 `mode === 'ai_team'`**（2026-10-19 加 JEV 模式时修正）。
+
+            这个条件决定"决策流是否独占整块高度"。原来写的是
+            `!(mode === 'ai_team' && pane !== 'decisions')` ——
+            JEV 模式**不在那个判断里**，于是切到「JEV 模式」标签时
+            决策流**照样渲染**，把配置面板挤到下面看不见。
+
+            ⇒ 用 `isTeamLike`（团队 + JEV）才符合原意：
+              这两种模式都有标签栏，非"最终决策"页时决策流不该占位。
+
+            ⚠️ `strategy` / `ai_managed` **逐字节不变** —— `isTeamLike` 对它们恒假。
+          */}
+          {!(isTeamLike && pane !== 'decisions') && (
           <div
             /*
              * ⚠️ **`role="tabpanel"` 只在团队模式加**（2026-10-17 · 台账 F3）。
@@ -1632,7 +1712,7 @@ export function DecisionFeed({
              *（读屏用户会去找那个不存在的 tablist）。
              * 所以这里按模式给：有标签栏才有 tabpanel。
              */
-            {...(mode === 'ai_team'
+            {...(isTeamLike
               ? { role: 'tabpanel', id: 'feed-panel-decisions', 'aria-labelledby': 'feed-tab-decisions' }
               : {})}
             /*

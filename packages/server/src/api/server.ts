@@ -5,7 +5,14 @@ import fastifyStatic from '@fastify/static';
 /* `setHeaders` 拿到的是**原始** `ServerResponse`，不是 Fastify 的 reply。 */
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
-import { listSwitches, setSwitch, switchSpec } from '../trader/control.js';
+import {
+  jevOptionSpec,
+  listJevOptions,
+  listSwitches,
+  setJevOption,
+  setSwitch,
+  switchSpec,
+} from '../trader/control.js';
 import {
   EXCHANGES,
   LLM_PROVIDERS,
@@ -3292,6 +3299,77 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     /* `idOf` 仍要调：它校验 id 是正整数（否则 400），与其它端点同一套纪律。 */
     idOf(request);
     return { switches: listSwitches() };
+  });
+
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  **JEV 模式的可调选项**（2026-10-19）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 用户要求：「要有开关（像团队模式一样，这边增加 P3 选项和其他你觉得必要的
+   * 选项，**不要全部写死**）」。
+   *
+   * 与 `/control` 那组的分工：
+   * ```
+   *   /control        → 布尔开关（Jev 初筛开/关）
+   *   /jev-options    → JEV 模式专属的枚举/数字/布尔配置
+   * ```
+   * 分成两组是因为**它们的作用域不同**：初筛开关影响整个团队模式，
+   * 而这里的选项只影响 `mode === 'jev'` 的机器人。
+   */
+  app.get('/api/traders/:id/jev-options', authed, (request) => {
+    idOf(request);
+    return { options: listJevOptions() };
+  });
+
+  app.post('/api/traders/:id/jev-options/:key', authed, async (request, reply) => {
+    idOf(request);
+    const key = String((request.params as { key: string }).key);
+    const body = (request.body ?? {}) as { value?: unknown };
+
+    const spec = jevOptionSpec(key);
+    if (spec === null) {
+      return reply.code(400).send({ error: `没有这个选项：${key}` });
+    }
+    if (typeof body.value !== 'string' && typeof body.value !== 'number') {
+      return reply.code(400).send({ error: '需要 { value: "…" }' });
+    }
+    const raw = String(body.value);
+
+    /*
+     * ⚠️ **逐类型校验，并且说清哪里不对**。
+     *
+     * 静默接受一个非法值（例如把置信度设成 500）会让"界面显示 500、实际行为
+     * 是 100"这种事发生 —— 而那是最难查的一类不一致。
+     */
+    if (spec.kind === 'enum') {
+      const allowed = spec.options?.map((o) => o.value) ?? [];
+      if (!allowed.includes(raw)) {
+        return reply
+          .code(400)
+          .send({ error: `「${spec.label}」只能是：${allowed.join(' / ')}` });
+      }
+    } else if (spec.kind === 'number') {
+      const n = Number(raw);
+      if (!Number.isFinite(n)) {
+        return reply.code(400).send({ error: `「${spec.label}」必须是数字` });
+      }
+      if (spec.range !== undefined && (n < spec.range.min || n > spec.range.max)) {
+        return reply
+          .code(400)
+          .send({
+            error: `「${spec.label}」必须在 ${spec.range.min} ~ ${spec.range.max} ${spec.range.unit} 之间`,
+          });
+      }
+    } else {
+      if (raw !== 'on' && raw !== 'off') {
+        return reply.code(400).send({ error: `「${spec.label}」只能是 on / off` });
+      }
+    }
+
+    setJevOption(key, raw);
+    /* 回读一次 —— 与 `/control` 同一条纪律：界面显示的必须是此刻的值。 */
+    return { options: listJevOptions() };
   });
 
   app.post('/api/traders/:id/control/:key', authed, async (request, reply) => {

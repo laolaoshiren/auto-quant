@@ -100,12 +100,19 @@ describe('JEV 模式：档位计算', () => {
     assert.ok(t.size.B < t.size.C, '★ B 档必须小于 C 档');
 
     /*
-     * B 档的口径：风险预算 = 100 × 1% = 1 USDT；止损距离 = 3；
-     * 数量 = 1/3；名义 = (1/3) × 100 = 33.33。
+     * B 档的口径（2026-10-19 修正后）：
+     * ```
+     *   ATR 反推：风险预算 1 U ÷ 止损距离 3 × 价格 100 = 33.33
+     *   权益×杠杆：100 × 5 = 500
+     *   单笔上限：100 × 30% = 30        ← 这一条最小，生效
+     *   ⇒ B 档 = 30
+     * ```
+     * ⚠️ **原期望是 33.33（只有 ATR 反推）** —— 那个期望正是线上算出
+     * "BTC 244U / 账户 21U" 的那个 bug。上限生效后 B 档被压到 30。
      */
     assert.ok(
-      Math.abs(t.size.B - 100 / 3) < 1e-6,
-      `★ B 档名义应按「风险预算 ÷ 止损距离 × 价格」算出，实际 ${t.size.B.toFixed(4)}`,
+      Math.abs(t.size.B - 30) < 1e-6,
+      `★ B 档名义应被「权益×30%」上限截到 30，实际 ${t.size.B.toFixed(4)}`,
     );
   });
 
@@ -412,5 +419,86 @@ describe('JEV 模式：移动止损（P2）', () => {
       candidates: { A: 99, B: 101, C: 102 },
     });
     assert.equal(r, null, '★ 网络失败必须返回 null（不是 keep、不是某个档位）');
+  });
+});
+
+describe('JEV 模式：仓位上限（2026-10-19 线上硬 bug）', () => {
+  it('★★★ 名义价值绝不能超过「权益 × 杠杆」（账户买不起就是买不起）', () => {
+    /*
+     * ## 这个用例防的是什么（线上实测抓到的硬 bug）
+     *
+     * `#13` 实跑时算出（账户只有 **21 USDT**）：
+     * ```
+     *   BTCUSDT  名义 244.47 U   ← 账户的 11.6 倍
+     *   ETHUSDT  名义  97.60 U   ← 4.6 倍
+     * ```
+     * 幸好风控拒了，否则就是**用 21U 的账户下 244U 的单**。
+     *
+     * 根因：仓位只按 ATR 反推，**完全没有上限**。而波动小的标的
+     *（BTC 的 ATR 只占价 1.1%）会被反推出**更大**的仓位 ——
+     * 那正是那个算式最危险的形状。
+     *
+     * ⇒ 现在取三个上限的最小值：ATR 反推 / 权益×杠杆 / 权益×30%。
+     */
+    /* BTC 的 ATR 很小（1.1%），这正是最容易爆掉的情形。 */
+    const btc: JevCandidate = { symbol: 'BTCUSDT', price: 108000, atr: 1200 };
+    const t = tiersFor(btc, OPTS, 'long');
+    const maxAllowed = OPTS.equity * OPTS.leverage;
+    for (const tier of ['A', 'B', 'C'] as const) {
+      assert.ok(
+        t.size[tier] <= maxAllowed,
+        `★ ${tier} 档名义 ${t.size[tier].toFixed(2)} 超过了「权益×杠杆」${maxAllowed} —— ` +
+          '这正是线上算出 BTC 244U（账户 21U）的那个 bug',
+      );
+    }
+  });
+
+  it('★★ 单笔名义不超过权益的 30%（不把鸡蛋放一个篮子）', () => {
+    /*
+     * 这是**新增的产品判断**，不是数学必然 —— 取 30% 是因为 `maxPositions: 4`。
+     * 它的作用：即使 ATR 反推值与物理上限都很宽松，也不让单笔吃掉整个账户。
+     */
+    const btc: JevCandidate = { symbol: 'BTCUSDT', price: 108000, atr: 1200 };
+    const t = tiersFor(btc, OPTS, 'long');
+    const perPositionCap = OPTS.equity * 0.3;
+    /*
+     * ⚠️ **C 档是 B 档的 1.4 倍，所以它必然超过"单笔上限"** ——
+     * 那是设计如此：三档是**相对激进度**（A 保守 / C 激进），
+     * 而 30% 是 **B 档（基准档）** 的上限。
+     *
+     * ⇒ 正确的判据是"C 档不超过权益×杠杆的物理上限"，
+     *   而不是"C 档不超过 B 档的单笔上限"（那会让三档退化成同一档）。
+     */
+    const physicalCap = OPTS.equity * OPTS.leverage;
+    assert.ok(
+      t.size.C <= physicalCap,
+      `★ C 档名义 ${t.size.C.toFixed(2)} 超过了物理上限 ${physicalCap}`,
+    );
+    /* 但三档必须仍有区分度 —— 否则"选档"这件事就失去了意义。 */
+    assert.ok(t.size.A < t.size.B && t.size.B < t.size.C, '★ 三档必须仍有区分度');
+  });
+
+  it('★★ ATR 很大时【不被上限截断】（上限不该吃掉合理的仓位）', () => {
+    /*
+     * 反向校准：如果一个标的波动很大（ATR 占价 5%），ATR 反推出来的名义
+     * 本来就很小，这时上限**不该**再把它压下去 —— 否则本用例会变成
+     * "只要断言不超过上限就通过"的空转测试。
+     */
+    const volatile: JevCandidate = { symbol: 'WILDUSDT', price: 10, atr: 0.5 };
+    const t = tiersFor(volatile, OPTS, 'long');
+    /* ATR 5% ⇒ 止损距离 1.5×0.5 = 0.75 ⇒ 风险中性名义 = (1/0.75)×10 ≈ 13.3 */
+    const riskNeutral = (OPTS.equity * OPTS.riskPercent / (0.5 * 1.5)) * 10;
+    assert.ok(
+      Math.abs(t.size.B - riskNeutral) < 1e-6,
+      `★ 波动大的标的应走 ATR 反推值 ${riskNeutral.toFixed(2)}，实际 ${t.size.B.toFixed(2)}`,
+    );
+  });
+
+  it('★★ 权益为 0 时仓位为 0（不产出"免费"的仓位）', () => {
+    const zeroEquity: JevModeOptions = { ...OPTS, equity: 0 };
+    const t = tiersFor(C, zeroEquity, 'long');
+    for (const tier of ['A', 'B', 'C'] as const) {
+      assert.equal(t.size[tier], 0, `★ 权益为 0 时 ${tier} 档仓位必须是 0`);
+    }
   });
 });

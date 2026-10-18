@@ -205,8 +205,49 @@ export function tiersFor(
   /*
    * 仓位：数量 = 风险预算 ÷ 止损距离，名义 = 数量 × 价格。
    * 再按 0.6 / 1.0 / 1.4 缩放成三档。
+   *
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **必须有账户规模上限**（2026-10-19 线上实测抓到的硬 bug）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 事故
+   *
+   * `#13` 实跑时算出这些名义价值（账户只有 **21 USDT**）：
+   * ```
+   *   BTCUSDT  名义 244.47 U   ← 账户的 11.6 倍
+   *   ETHUSDT  名义  97.60 U   ← 4.6 倍
+   * ```
+   * 幸好风控拒了，否则就是**用 21U 的账户下 244U 的单**。
+   *
+   * ## 根因
+   *
+   * 上面那个算式只按 ATR 反推，**完全没有上限**：
+   * ```
+   *   风险预算 0.21 U ÷ 止损距离(BTC 的 1.5×ATR = 1800) × 价格 108000
+   *   = 0.21 / 1800 × 108000 ≈ 12.6 U 的"风险中性"仓位
+   * ```
+   * 但 BTC 的 ATR 相对价格很小（1.1%），所以"止损距离"小 ⇒ 反推出的名义巨大。
+   * **波动小的标的会被反推出更大的仓位** —— 这正是该算式最危险的形状。
+   *
+   * ## 修法
+   *
+   * 取三个上限的最小值：
+   * ```
+   *   ① ATR 反推值（风险中性）
+   *   ② 可用余额 × 杠杆（物理上限：买不起就是买不起）
+   *   ③ 权益 × 30%（单笔占比上限：不把鸡蛋放一个篮子）
+   * ```
+   * ⚠️ 第 ③ 条是**新增的产品判断**，不是数学必然 —— 取 30% 是因为
+   * `maxPositions: 4`，4 × 30% > 100% 意味着仍可能超配，
+   * 但风控的 `maxMarginUsage` 会兜住。这个值可以调（见 `JEV_OPTIONS`）。
    */
-  const baseNotional = (riskUsd / stopDistance.B) * c.price;
+  const riskNeutralNotional = (riskUsd / stopDistance.B) * c.price;
+  const physicalCap = opts.equity * opts.leverage;
+  const perPositionCap = opts.equity * 0.3;
+  const baseNotional = Math.max(
+    0,
+    Math.min(riskNeutralNotional, physicalCap, perPositionCap),
+  );
   const size: Record<Tier, number> = {
     A: baseNotional * 0.6,
     B: baseNotional * 1.0,

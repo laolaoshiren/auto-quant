@@ -97,6 +97,147 @@ export const RUNTIME_SWITCHES: readonly RuntimeSwitchSpec[] = [
 ];
 
 /**
+ * ══════════════════════════════════════════════════════════════════════════
+ *  **JEV 模式的可调选项**（2026-10-19）
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * 用户的原话：
+ * > 「我感觉 P3 可以做，这模型成本忽略不计了，但是**要有开关**（像团队模式一样，
+ * >   这边增加 P3 选项和其他你觉得必要的选项，**不要全部写死**）」
+ *
+ * ## 为什么单独一张表，而不是塞进 `RUNTIME_SWITCHES`
+ *
+ * `RUNTIME_SWITCHES` 是**布尔开关**（开/关）。而这里有的是**枚举**
+ *（选币方式：代码筛选 / Jev 两阶段 / 混合）、有的是**数字**（置信门槛、风险比例）。
+ *
+ * 强行塞进布尔表会让类型变成 `boolean | string | number` ——
+ * 而那种联合类型在读取处必然要写一堆 `typeof` 判断，正是缺陷温床。
+ *
+ * ## ⚠️ 每一项都必须有 `why`
+ *
+ * 用户不懂 JEV 的实际用法，所以界面上**必须解释这一项在做什么**、
+ * 改了会有什么后果。只给一个下拉框等于让他瞎猜。
+ */
+export interface JevOptionSpec {
+  key: string;
+  label: string;
+  /** 一句话说明「它是什么、改了会怎样」—— 用户靠它做决定。 */
+  why: string;
+  kind: 'boolean' | 'enum' | 'number';
+  /** `enum` 的候选值（`value` 存库，`label` 给人看）。 */
+  options?: ReadonlyArray<{ value: string; label: string }>;
+  /** `number` 的取值范围与单位。 */
+  range?: { min: number; max: number; step: number; unit: string };
+  /** 默认值（字符串形式，落库统一用字符串）。 */
+  fallback: string;
+  /**
+   * ⚠️ **改这一项需要重启机器人才生效**吗？
+   *
+   * 大多数项是**下一轮就读到**（实时生效），但有几项是在
+   * `buildJevModeModel()` 装配时读的（例如 `maxCandidates`），
+   * 那些必须重启。界面上要如实标注 —— 否则用户改完以为生效了。
+   */
+  requiresRestart?: boolean;
+}
+
+export const JEV_OPTIONS: readonly JevOptionSpec[] = [
+  {
+    key: 'coin_select',
+    label: '选币方式',
+    why:
+      '决定「谁来挑标的」。代码筛选用成交额 + 持仓量榜（快、稳、免费）；' +
+      'Jev 两阶段让 Jev 从全市场里挑（更自主，但 Jev 只看得到价格/RSI/ATR 等几个数字）；' +
+      '混合 = 代码先筛 20 个、Jev 再从中挑（推荐）。',
+    kind: 'enum',
+    options: [
+      { value: 'code', label: '代码筛选（默认，不花 token）' },
+      { value: 'hybrid', label: '混合：代码筛 20 → Jev 挑（推荐）' },
+      { value: 'jev', label: '纯 Jev：从全市场 100 个里挑' },
+    ],
+    fallback: 'code',
+  },
+  {
+    key: 'entry_type',
+    label: '开仓方式',
+    why:
+      '市价 = 立刻成交（滑点大一点，但一定进得去）；' +
+      '限价 = 挂单等回调（省手续费，但可能等不到、错过机会）。' +
+      'Jev 看不到盘口深度，所以「等回调」这件事它判断不了 —— 限价用的是机械规则（当前价回退 0.3%）。',
+    kind: 'enum',
+    options: [
+      { value: 'market', label: '市价（默认，立刻成交）' },
+      { value: 'limit', label: '限价等待（回退 0.3% 挂单）' },
+    ],
+    fallback: 'market',
+  },
+  {
+    key: 'allow_short',
+    label: '允许做空',
+    why: '关掉之后 Jev 只能选做多 —— 下跌行情里会一直跳过。',
+    kind: 'boolean',
+    fallback: 'on',
+  },
+  {
+    key: 'allow_resize',
+    label: '允许加减仓',
+    why: '开仓之后 Jev 可以判断「加仓 / 减仓 / 保持 / 平掉」。关掉则只做开仓与平仓。',
+    kind: 'boolean',
+    fallback: 'on',
+  },
+  {
+    key: 'allow_trailing',
+    label: '允许移动止损',
+    why:
+      '浮盈达标后把止损往盈利方向收紧（只收紧、绝不放宽）。' +
+      '关掉则止损挂上后永不动 —— 实测那样会回吐大部分浮盈。',
+    kind: 'boolean',
+    fallback: 'on',
+  },
+  {
+    key: 'min_confidence',
+    label: '最低置信度',
+    why:
+      '低于这个值的机会直接放弃。实测 Jev 的置信分布在 9–68 之间，' +
+      '设 40 会拒掉一半左右；设 0 则全都要（包括 50:50 的平局）。',
+    kind: 'number',
+    range: { min: 0, max: 100, step: 5, unit: '分' },
+    fallback: '40',
+  },
+  {
+    key: 'risk_percent',
+    label: '单笔风险比例',
+    why:
+      '一笔最多亏掉权益的百分之几。它是**仓位档位表的上限来源** —— ' +
+      '设 1% 时，一笔亏光止损也只损失 1% 的账户。',
+    kind: 'number',
+    range: { min: 0.1, max: 5, step: 0.1, unit: '%' },
+    fallback: '1',
+    requiresRestart: true,
+  },
+  {
+    key: 'max_candidates',
+    label: '每轮最多问几个标的',
+    why:
+      '直接决定 token 成本（每个标的约 1,200 token）。8 个约 $0.05/天，' +
+      '4 个减半。也决定一轮的耗时（每个约 360ms）。',
+    kind: 'number',
+    range: { min: 1, max: 20, step: 1, unit: '个' },
+    fallback: '8',
+    requiresRestart: true,
+  },
+  {
+    key: 'hold_ask_every',
+    label: '持仓问询间隔',
+    why:
+      '每 N 轮问一次「继续持有还是平掉」。设 1 = 每轮都问（最灵敏但最贵）；' +
+      '设 3 = 三轮回一次（省 2/3 token，代价是反应慢一点）。',
+    kind: 'number',
+    range: { min: 1, max: 10, step: 1, unit: '轮' },
+    fallback: '1',
+  },
+];
+
+/**
  * 按 key 找到规格。找不到返回 `null`（**不抛**）。
  *
  * 调用方拿到的 `null` 应当当成"这个开关不存在"，而不是"关着"——
@@ -215,6 +356,114 @@ export function listSwitches(env: NodeJS.ProcessEnv = process.env): SwitchState[
       effect: spec.effect,
       on: spec.fallback,
       source: 'default',
+    };
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+/*  JEV 选项的读写                                                           */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+/** 按 key 找 JEV 选项的规格。找不到返回 `null`（**不抛**）。 */
+export function jevOptionSpec(key: string): JevOptionSpec | null {
+  return JEV_OPTIONS.find((s) => s.key === key) ?? null;
+}
+
+/**
+ * **读一个 JEV 选项的当前值**（字符串形式，与落库一致）。
+ *
+ * 三层取值与 `isSwitchOn` 同一条纪律：
+ * ```
+ *   ① 界面上设的（settings 表）   ← 最高
+ *   ② 代码默认值（fallback）
+ * ```
+ * ⚠️ JEV 选项**不读 `.env`** —— 它们是新模式专属的，没有"老部署兼容"的问题，
+ * 多一层只会让"这个值到底从哪来"更难回答。
+ */
+export function getJevOption(key: string): string {
+  const spec = jevOptionSpec(key);
+  if (spec === null) return '';
+  try {
+    const stored = settings.get(`jev:${spec.key}`);
+    if (stored !== undefined && stored !== '') return stored;
+  } catch {
+    /* 读不到就用默认值 —— 一个读配置失败不该让整轮决策崩掉。 */
+  }
+  return spec.fallback;
+}
+
+/** 读一个布尔型 JEV 选项。 */
+export function jevBool(key: string): boolean {
+  const v = getJevOption(key).trim().toLowerCase();
+  return v === 'on' || v === 'true' || v === '1' || v === 'yes';
+}
+
+/** 读一个数字型 JEV 选项。超出范围时**钳制**（不抛）。 */
+export function jevNumber(key: string): number {
+  const spec = jevOptionSpec(key);
+  const raw = Number(getJevOption(key));
+  if (!Number.isFinite(raw)) return spec?.fallback !== undefined ? Number(spec.fallback) : 0;
+  if (spec?.range === undefined) return raw;
+  return Math.min(spec.range.max, Math.max(spec.range.min, raw));
+}
+
+/**
+ * 读一个枚举型 JEV 选项。
+ *
+ * ⚠️ **不在候选里就回落到默认值**（不猜、不抛）——
+ * 那可能是有人手工改了库，或者枚举项被删了。
+ */
+export function jevEnum(key: string): string {
+  const spec = jevOptionSpec(key);
+  if (spec === null) return '';
+  const v = getJevOption(key);
+  const allowed = spec.options?.map((o) => o.value) ?? [];
+  return allowed.includes(v) ? v : spec.fallback;
+}
+
+/**
+ * **写一个 JEV 选项**（界面点保存时调）。
+ *
+ * ⚠️ 校验在路由层做（它要返回 400 和中文原因）。这里只负责落库。
+ */
+export function setJevOption(key: string, value: string): void {
+  settings.set(`jev:${key}`, value);
+}
+
+/** 界面要展示的 JEV 选项状态（含「从哪来」）。 */
+export interface JevOptionState {
+  key: string;
+  label: string;
+  why: string;
+  kind: 'boolean' | 'enum' | 'number';
+  options?: ReadonlyArray<{ value: string; label: string }>;
+  range?: { min: number; max: number; step: number; unit: string };
+  value: string;
+  /** `ui` = 界面上设过；`default` = 用代码默认值。 */
+  source: 'ui' | 'default';
+  /** 改它是否要重启机器人才生效。 */
+  requiresRestart: boolean;
+}
+
+export function listJevOptions(): JevOptionState[] {
+  return JEV_OPTIONS.map((spec) => {
+    let stored: string | undefined;
+    try {
+      stored = settings.get(`jev:${spec.key}`);
+    } catch {
+      stored = undefined;
+    }
+    const hasUi = stored !== undefined && stored !== '';
+    return {
+      key: spec.key,
+      label: spec.label,
+      why: spec.why,
+      kind: spec.kind,
+      ...(spec.options !== undefined ? { options: spec.options } : {}),
+      ...(spec.range !== undefined ? { range: spec.range } : {}),
+      value: hasUi ? stored! : spec.fallback,
+      source: hasUi ? 'ui' : 'default',
+      requiresRestart: spec.requiresRestart === true,
     };
   });
 }

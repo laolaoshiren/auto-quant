@@ -54,6 +54,26 @@ import type {
  *
  * `source` 是重点：它回答"这个值是谁定的"。
  */
+/**
+ * 一个 **JEV 模式选项**（`/traders/:id/jev-options`）。
+ *
+ * 与 `ControlSwitch` 的区别：那个是**布尔开关**（整个团队共享），
+ * 这个有枚举/数字类型，且只影响 `mode === 'jev'` 的机器人。
+ */
+export interface JevOption {
+  key: string;
+  label: string;
+  /** 一句话说明「它是什么、改了会怎样」—— 用户不懂 JEV，靠它做决定。 */
+  why: string;
+  kind: 'boolean' | 'enum' | 'number';
+  options?: Array<{ value: string; label: string }>;
+  range?: { min: number; max: number; step: number; unit: string };
+  value: string;
+  source: 'ui' | 'default';
+  /** 改它要不要重启机器人才生效（界面上要如实标注）。 */
+  requiresRestart: boolean;
+}
+
 export interface ControlSwitch {
   key: string;
   /** 给人看的标题（服务端 `RUNTIME_SWITCHES` 里定义，前端不重复一份）。 */
@@ -1137,6 +1157,17 @@ export const api = {
     request<{ switches: ControlSwitch[] }>(`/traders/${id}/control/${key}`, {
       method: 'POST',
       body: { on },
+    }),
+
+  /** 读 JEV 模式的全部可调选项。 */
+  traderJevOptions: (id: number, signal?: AbortSignal) =>
+    request<{ options: JevOption[] }>(`/traders/${id}/jev-options`, { signal }),
+
+  /** 改一个 JEV 选项。返回回读后的全表。 */
+  setTraderJevOption: (id: number, key: string, value: string) =>
+    request<{ options: JevOption[] }>(`/traders/${id}/jev-options/${key}`, {
+      method: 'POST',
+      body: { value },
     }),
 
   traderAgentSteps: (id: number, role: string, limit = 50, signal?: AbortSignal) =>
