@@ -240,6 +240,21 @@ function sensitiveEndpoints(): SensitiveEndpoint[] {
     },
     {
       method: 'POST',
+      route: '/api/traders/:id/control/:key',
+      url: `/api/traders/${traderId}/control/jev_prefilter`,
+      payload: { on: false },
+      /*
+       * ⚠️ **不走 `manager`**（所以没有 `expectsManagerCall`）——
+       * 它直接写 `settings` 表，改的是"下一轮决策怎么跑"。
+       *
+       * 但它**确实是敏感的**：关掉 Jev 会让整个团队不再调用那个模型，
+       * 进而改变每轮的标的范围与耗时。能把这种开关拨来拨去的端点，
+       * 未认证时必须 401 且零副作用。
+       */
+      why: '改运行期开关（例如关掉 Jev 初筛）—— 会立刻改变整个团队下一轮的调用行为',
+    },
+    {
+      method: 'POST',
       route: '/api/traders/:id/reconcile',
       url: `/api/traders/${traderId}/reconcile`,
       expectsManagerCall: 'reconcileTrader',

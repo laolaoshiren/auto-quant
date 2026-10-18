@@ -47,6 +47,8 @@
 
 import { readFileSync } from 'node:fs';
 
+import { isSwitchOn } from '../trader/control.js';
+
 /** 一个待打分的标的：`digest` 是一段紧凑行情摘要（调用方负责裁剪）。 */
 export interface JevInput {
   symbol: string;
@@ -185,7 +187,26 @@ export function readJevConfig(env: NodeJS.ProcessEnv = process.env): JevConfig {
   const baseUrl = (env.AQ_JEV_BASE ?? '').trim() || JEV_DEFAULT_BASE;
 
   return {
-    enabled: env.AQ_JEV_PREFILTER === 'on',
+    /*
+     * ⚠️⚠️ **开关走运行期配置，不再直接读 `.env`**（2026-10-18）
+     *
+     * 用户要一个「机器人控制」标签，里面的开关**实时生效**：
+     * > 「运行中机器人改了这里配置也会马上生效」
+     *
+     * 而原来这里是 `env.AQ_JEV_PREFILTER === 'on'` —— 改它要 SSH 改 `.env`
+     * 再重启进程，而**重启会打断正在跑的决策周期**。那不是实时生效。
+     *
+     * `isSwitchOn('jev_prefilter')` 的取值顺序（见 `trader/control.ts`）：
+     * ```
+     *   ③ 界面设的值（最高）  ← 操作员点开关时写进 settings 表
+     *   ② .env 的初始意图      ← 老部署靠它，行为不变
+     *   ① 代码默认 false       ← 新部署不会悄悄调用外部模型
+     * ```
+     *
+     * ⚠️ **它必须在每次调用时重新读**（不能提到模块顶层）——
+     * 否则"实时生效"就变成了"重启生效"。这就是这个函数在每轮决策里被调用的原因。
+     */
+    enabled: isSwitchOn('jev_prefilter', env),
     topN,
     minScore,
     model,

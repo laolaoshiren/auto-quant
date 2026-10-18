@@ -171,6 +171,7 @@ import { TeamBoard } from './TeamBoard/TeamBoard';
 import { TeamCycleBlock } from './TeamBoard/TeamCycleBlock';
 import { usePolled } from '../lib/hooks';
 import { Badge, Empty, ErrorNote, Panel, Spinner3, cn } from './ui';
+import { RobotControl } from './TeamBoard/RobotControl';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
 import { summarizeMemberOutput } from '../lib/memberSummary';
 import { plainText } from '../lib/plainText';
@@ -712,7 +713,7 @@ export function DecisionFeed({
    * ⚠️ **只有团队模式有标签栏**：另两种模式本来就没有工作流区，
    * 它们的决策流一直是独占全部高度 —— 给它们加一个只有一项的标签栏是纯噪音。
    */
-  const [pane, setPane] = useState<'decisions' | 'workflow'>('decisions');
+  const [pane, setPane] = useState<'decisions' | 'workflow' | 'control'>('decisions');
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -1144,7 +1145,7 @@ export function DecisionFeed({
    * 而 `scrollTop` 已经由这里设好了 —— 不清就会**补偿两遍**、滚过头。
    */
   /** 两个标签的统一切换入口：**离开决策页时先记住位置**。 */
-  const switchPane = (next: 'decisions' | 'workflow') => {
+  const switchPane = (next: 'decisions' | 'workflow' | 'control') => {
     if (pane === 'decisions' && next !== 'decisions') {
       restoreScrollRef.current = scrollerRef.current?.scrollTop ?? null;
     }
@@ -1436,6 +1437,41 @@ export function DecisionFeed({
                 */}
                 {liveCycle !== undefined && <span className="ml-1.5 text-xs text-accent">进行中</span>}
               </button>
+              {/*
+                ── 「机器人控制」标签（2026-10-18 用户要求）────────────────────
+
+                用户原话：
+                > 「在这边加一个新标签，专门放机器人控制：是实时生效的那种
+                >  （不受机器人运行影响），运行中机器人改了这里配置也会马上生效的，
+                >  以后我计划放很多功能进去，目前只需要做一个功能：JEV 模型开关」
+
+                ## 为什么它和另外两个标签不同类
+
+                「最终决策」与「AI 工作流」是**看**运行结果；这个标签是**改**运行配置。
+                所以它排第三（最右）—— 看与改分开，符合"先看清再动手"的顺序。
+
+                ## 为什么不放在设置页
+
+                用户明确说「在这边加」：操作员看盘时就在这个页面，
+                要关掉某个拖慢决策的功能时不该跳去另一个页面再跳回来。
+              */}
+              <button
+                id="feed-tab-control"
+                type="button"
+                role="tab"
+                aria-selected={pane === 'control'}
+                aria-controls="feed-panel-control"
+                tabIndex={pane === 'control' ? 0 : -1}
+                onClick={() => switchPane('control')}
+                className={cn(
+                  '-mb-px border-b-2 px-2.5 py-1 text-base transition',
+                  pane === 'control'
+                    ? 'border-accent font-semibold text-ink-hi'
+                    : 'border-transparent text-ink-lo hover:text-ink-mid',
+                )}
+              >
+                机器人控制
+              </button>
             </div>
           )}
 
@@ -1525,6 +1561,27 @@ export function DecisionFeed({
                   traderId={traderId}
                 />
               </div>
+            </div>
+          )}
+
+          {/*
+            ══════════════════════════════════════════════════════════════════
+             **机器人控制（标签页之三）** —— 团队模式专属（2026-10-18）
+            ══════════════════════════════════════════════════════════════════
+
+            与前两个标签的本质区别：那两个是**看**运行结果，这个是**改**运行配置。
+
+            ⚠️ **只在这个标签被选中时渲染**（`pane === 'control'`），
+            与决策流同一条纪律：不在 DOM 里留一份"被压扁的"副本。
+          */}
+          {mode === 'ai_team' && pane === 'control' && (
+            <div
+              role="tabpanel"
+              id="feed-panel-control"
+              aria-labelledby="feed-tab-control"
+              className="min-h-0 flex-1 overflow-y-auto"
+            >
+              <RobotControl traderId={traderId} />
             </div>
           )}
 

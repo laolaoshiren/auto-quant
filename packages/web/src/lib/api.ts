@@ -49,6 +49,21 @@ import type {
  * 老服务端（或某张表为空）不该让整个面板崩掉 —— 与决策看板那个
  * "一条坏数据白屏"的教训一致。
  */
+/**
+ * 一个**运行期开关**的完整状态（`/traders/:id/control`）。
+ *
+ * `source` 是重点：它回答"这个值是谁定的"。
+ */
+export interface ControlSwitch {
+  key: string;
+  /** 给人看的标题（服务端 `RUNTIME_SWITCHES` 里定义，前端不重复一份）。 */
+  label: string;
+  /** **关掉之后会发生什么** —— 用户关心的是后果，不是实现。 */
+  effect: string;
+  on: boolean;
+  source: 'ui' | 'env' | 'default';
+}
+
 export interface AgentAudit {
   /** 每次角色运行（字段与 `AgentRunRow` 一一对应）。 */
   runs?: Array<{
@@ -1068,6 +1083,37 @@ export const api = {
    * `total` 是**未截断的总数** —— 界面据此如实说"还有 N 条更早的"，
    * 而不是把 `limit` 截断后的条数当成全部（那是微型的谎）。
    */
+  /**
+   * **机器人控制：实时生效的开关**（2026-10-18）。
+   *
+   * ## 与 `.env` 的区别（这是这个标签存在的全部理由）
+   *
+   * ```
+   *   .env       → 改完要重启进程，而重启会打断正在跑的决策周期
+   *   这个端点   → 点一下立刻生效（下一次读取就拿到新值）
+   * ```
+   *
+   * `source` 字段告诉操作员这个值**是从哪来的**：
+   * ```
+   *   'ui'      → 界面上设的（重启也保持）
+   *   'env'     → .env 里的初始值（界面上从没点过）
+   *   'default' → 代码默认值
+   * ```
+   * 少了它，操作员无法判断"我改了会不会影响别人 / 重启后会不会变回去"。
+   */
+  traderControl: (id: number, signal?: AbortSignal) =>
+    request<{ switches: ControlSwitch[] }>(`/traders/${id}/control`, { signal }),
+
+  /**
+   * 切换一个开关。返回**回读后的完整状态** —— 前端直接用它刷新，
+   * 不必再发一次 GET（两次之间可能被别人改掉）。
+   */
+  setTraderControl: (id: number, key: string, on: boolean) =>
+    request<{ switches: ControlSwitch[] }>(`/traders/${id}/control/${key}`, {
+      method: 'POST',
+      body: { on },
+    }),
+
   traderAgentSteps: (id: number, role: string, limit = 50, signal?: AbortSignal) =>
     request<{
       role: string;

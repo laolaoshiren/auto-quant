@@ -5,6 +5,7 @@ import fastifyStatic from '@fastify/static';
 /* `setHeaders` 拿到的是**原始** `ServerResponse`，不是 Fastify 的 reply。 */
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
+import { listSwitches, setSwitch, switchSpec } from '../trader/control.js';
 import {
   EXCHANGES,
   LLM_PROVIDERS,
@@ -3228,6 +3229,64 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       : RUNTIME_LOG_PAGE_DEFAULT;
 
     return { roles: collectLastSeen(traderId, logLimit) };
+  });
+
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  **机器人控制**（2026-10-18）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 用户要一个标签，专门放**实时生效**（不需要重启机器人）的配置：
+   * > 「是实时生效的那种（不受机器人运行影响），运行中机器人改了这里配置也会更
+   * >   马上生效的，以后我计划放很多功能进去，目前只需要做一个功能：JEV 模型开关」
+   *
+   * ## 为什么是独立一组端点，而不是塞进 `/api/settings`
+   *
+   * `settings` 表是**通用 key-value**（`agent_last_wake`、`foreign_activity:8` 都在里面），
+   * 那组端点没有"这是哪个机器人的开关"的概念。而这里的开关：
+   * ```
+   *   ① 有明确的语义（每个都在 `RUNTIME_SWITCHES` 里定义了 label + effect）
+   *   ② 要能回答"现在这个值是界面设的、还是 .env 带来的"
+   * ```
+   * 后者对操作员很重要 —— 见 `SwitchState.source` 的注释。
+   *
+   * ## 加新功能时不用改这里
+   *
+   * 往 `trader/control.ts` 的 `RUNTIME_SWITCHES` 加一行，这两个端点自动支持。
+   */
+  app.get('/api/traders/:id/control', authed, (request) => {
+    /* `idOf` 仍要调：它校验 id 是正整数（否则 400），与其它端点同一套纪律。 */
+    idOf(request);
+    return { switches: listSwitches() };
+  });
+
+  app.post('/api/traders/:id/control/:key', authed, async (request, reply) => {
+    /*
+     * ⚠️ **`idOf` 的校验结果不参与"改哪个开关"** —— 开关是全局的（
+     * 与机器人无关：Jev 一旦关掉，任何机器人都不会再调用它）。
+     * 但 id 仍要合法，否则说明前端传错了。
+     */
+    idOf(request);
+    const key = String((request.params as { key: string }).key);
+    const body = (request.body ?? {}) as { on?: unknown };
+
+    if (typeof body.on !== 'boolean') {
+      return reply.code(400).send({ error: '需要 { on: true|false }' });
+    }
+    /*
+     * 未知 key → **400 并说清是哪个**。
+     * 不要静默接受：那会让前端以为开关生效了（而实际什么都没改）。
+     */
+    if (switchSpec(key) === null) {
+      return reply.code(400).send({ error: `没有这个开关：${key}` });
+    }
+
+    setSwitch(key, body.on);
+    /*
+     * 回读一次当前状态 —— 前端直接用返回值刷新，不必再发一次 GET
+     * （两次请求之间可能被别人改掉，回读保证"界面显示的一定是此刻的值"）。
+     */
+    return { switches: listSwitches() };
   });
 
   app.get('/api/traders/:id/agent/:role/steps', authed, (request) => {
