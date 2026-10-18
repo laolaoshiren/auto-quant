@@ -747,6 +747,41 @@ function AgentRow({
     | { total: number; steps: Array<{ at: string; phase: string | null; message: string }> }
   >(undefined);
 
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️ **历史里去掉「本轮已经有了的那一条」**（2026-10-18 用户报「UI 还是乱」）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 症状
+   *
+   * 展开一个岗位会看到**同一件事出现两遍**：
+   * ```
+   *   本轮 1 步
+   *     15:14:27  D=0.855%∈[0.8,3.5]…（共 6 条判定）
+   *   历史工作详情（共 19 条）
+   *     15:15:59  汇总辩论并裁决
+   *     15:14:27  这一轮对 6 个标的给了决策   ← 与上面那条是同一件事
+   * ```
+   *
+   * ## 根因
+   *
+   * 「本轮」来自实时事件流（props 的 `steps`），「历史」来自数据库
+   * （`/agent/:role/steps`，按时间倒序取最近 50 条）。
+   * **本轮刚产生的步骤同时存在于两边** —— 后端当然会把刚写进去的那条也取出来。
+   *
+   * ## 做法
+   *
+   * 按**时间戳**去重：历史里凡是与本轮某一步 `at` 相同的，就不再重复显示。
+   *
+   * ⚠️ **只按 `at` 去重，不按正文**：实时流那条带 `level`、历史那条不带，
+   * 正文比对会漏。
+   */
+  const currentStamps = new Set(steps.map((s) => String(s.at)));
+  const historyWithoutCurrent =
+    historyState === undefined || historyState === null
+      ? []
+      : historyState.steps.filter((s) => !currentStamps.has(String(s.at)));
+
   useEffect(() => {
     /*
      * 收起来就**清空** —— 否则下次点开时先闪一下旧的（可能还是别的岗位的）
@@ -1058,7 +1093,7 @@ function AgentRow({
             <p className="text-xs text-warn">历史读取失败 —— 这不代表它没有历史（可能是服务或网络问题）。</p>
           )}
 
-          {historyState !== undefined && historyState !== null && historyState.steps.length === 0 && (
+          {historyState !== undefined && historyState !== null && historyWithoutCurrent.length === 0 && (
             <p className="text-xs text-ink-faint">
               {role.status === 'by_code'
                 ? `这一职能由确定性代码承担，没有模型出勤记录。承担物：${plainText(role.carriedBy ?? '见职责说明')}`
@@ -1076,7 +1111,7 @@ function AgentRow({
             </p>
           )}
 
-          {historyState !== undefined && historyState !== null && historyState.steps.length > 0 && (
+          {historyState !== undefined && historyState !== null && historyWithoutCurrent.length > 0 && (
             /*
              * ══════════════════════════════════════════════════════════════════
              *  历史记录的排版（2026-10-18 重做 · 用户：「这东倒西歪，到处错位，
@@ -1107,7 +1142,7 @@ function AgentRow({
              * 阶段标签**移到时间下方**，不再夹在中间 —— 这样有没有标签都不影响正文的对齐。
              */
             <ol className="space-y-2.5" data-role-steps="history">
-              {historyState.steps.map((s, index) => (
+              {historyWithoutCurrent.map((s, index) => (
                 <li
                   key={`h-${s.at}-${index}`}
                   className="grid grid-cols-[5.25rem_minmax(0,1fr)] items-start gap-x-3 text-xs"
