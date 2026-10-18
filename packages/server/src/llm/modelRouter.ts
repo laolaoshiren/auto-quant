@@ -33,6 +33,19 @@ import {
   pickAvailable,
   type FailureVerdict,
 } from './modelHealth.js';
+import { createLogger } from '../logger.js';
+
+/**
+ * 本文件的日志出口。
+ *
+ * ⚠️ **不要用 `console.log`**（2026-10-18 实测踩到）：
+ * systemd 单元没有 `StandardOutput=journal`，所以 `console.log` 的输出
+ * **根本进不了 `journalctl`**（`journalctl -u autoquant` 显示 `-- No entries --`）。
+ * 我加了一条 `console.log` 诊断，白等 8 分钟什么都没看到。
+ *
+ * `createLogger` 的输出走 `runtime_logs`（落库，能查）与 sink。
+ */
+const log = createLogger('llm:router');
 
 /** 一次模型调用的结果。 */
 export interface RouterCallResult {
@@ -550,7 +563,16 @@ export class ModelRouter {
          */
         const diagStatus = statusOf(error);
         if (verdict.kind === 'auth' || diagStatus === 403) {
-          console.log(
+          /*
+           * ⚠️ **必须用项目 logger，不能用 `console.log`**（2026-10-18 实测）
+           *
+           * systemd 单元没有 `StandardOutput=journal`，所以 `console.log` 的输出
+           * **根本进不了 `journalctl`** —— 我先用 console.log 加了诊断，
+           * 部署后 `journalctl` 显示 `-- No entries --`，白等 8 分钟。
+           *
+           * `createLogger` 的输出走 `runtime_logs`（落库，能查）与 sink。
+           */
+          log.warn(
             `[DIAG-403] model=${modelId} statusOf=${String(diagStatus)} kind=${verdict.kind}`,
           );
         }
