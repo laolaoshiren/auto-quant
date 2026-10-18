@@ -7,6 +7,9 @@ import { createLogger } from './logger.js';
 import { buildServer, bootstrapOwnerAccount } from './api/server.js';
 import { BalanceService } from './services/balance.js';
 import { TraderManager } from './trader/manager.js';
+import { ROLE_GROUP_LADDERS } from './trader/routedModel.js';
+import { resolveTeamGateway } from './trader/teamGateway.js';
+import { contractMessages, probeGatewayContract } from './llm/gatewayContract.js';
 import { strategies } from './store/repositories.js';
 import { defaultStrategyConfig } from '@aq/shared';
 
@@ -133,6 +136,37 @@ async function main(): Promise<void> {
         .reconcileAllTraders()
         .catch((error) => log.warn(`启动对账失败：${(error as Error).message}`));
     }, 4000);
+
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     *  **magpie 网关契约自检**（2026-10-18 · 用户要求"不让 magpie 更新成为包袱"）
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * ## 为什么要有它
+     *
+     * 团队模式对 magpie 的依赖是 4 个非标准端点面 + 3 类自由文本契约 + 2 个内部配置文件，
+     * 而 magpie **自动更新、一天多版**。真正危险的不是"网关挂了"（那会报错、看得见），
+     * 而是**静默降质**：链上模型 id 悄悄失效、错误文案改了让降级判据失效、
+     * `/v1/models` 字段改名让预算算不出来 —— 这三类都不会让测试变红。
+     *
+     * ## 三条纪律
+     *
+     * 1. **默认关闭**（`AQ_GATEWAY_CONTRACT=on` 才跑）—— "多打几个请求"本身是行为变化；
+     * 2. **绝不阻塞启动**：延迟 60 秒、`void` 掉、任何失败只写日志；
+     * 3. **零 token**：只打 GET `/v1/models` 与 `/v1/magpie/quotas`。
+     *
+     * ## 为什么延迟 60 秒
+     *
+     * 启动瞬间要做的事已经排满了（恢复机器人、对账、模型发现）。契约自检是**诊断**，
+     * 它排在所有"让交易跑起来"的事情之后。
+     */
+    if (process.env.AQ_GATEWAY_CONTRACT === 'on') {
+      setTimeout(() => {
+        void runGatewayContractCheck().catch((error) => {
+          log.warn(`网关契约自检失败（不影响服务）：${(error as Error).message}`);
+        });
+      }, 60_000);
+    }
   }, 2000);
 
   /* --- Graceful shutdown ------------------------------------------------- */
@@ -185,6 +219,69 @@ async function main(): Promise<void> {
     }
     log.error(`未捕获的异常：${error.message}`, error);
   });
+}
+
+/**
+ * **跑一轮 magpie 网关契约自检，并把不符项写进日志。**
+ *
+ * ## 为什么"同一份问题 24 小时只写一次"
+ *
+ * 契约漂移是**持续状态**（除非有人改配置，否则每一轮探都会发现同一件事）。
+ * 每 60 分钟写一条相同的 warn，会把它变成噪音 —— 而噪音的最后归宿是被忽略，
+ * 那等于没有自检。所以用 `fingerprint` 去重：**问题种类变了才再写一条**。
+ *
+ * 去重状态放在模块级 Map 里（进程内）。重启会重置 —— 那是可接受的：
+ * 重启后重新提醒一次反而是对的（有人刚动过配置）。
+ */
+const reportedFingerprints = new Map<string, number>();
+const CONTRACT_REPORT_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function runGatewayContractCheck(): Promise<void> {
+  /*
+   * 网关地址与 key 从**团队模式的同一处来源**读 —— 不另立一套配置，
+   * 否则"自检说没问题、而团队用的是另一个地址"这种假阴性就会出现。
+   */
+  const gateway = resolveTeamGateway(process.env);
+  if (gateway === null) {
+    log.info('[网关契约] 没有配置 magpie 网关，跳过自检。');
+    return;
+  }
+
+  const report = await probeGatewayContract({
+    baseUrl: gateway.baseUrl,
+    apiKey: gateway.apiKey,
+    ladderIds: collectLadderIds(),
+  });
+
+  const messages = contractMessages(report);
+  if (messages.length === 0) {
+    log.info(
+      `[网关契约] 自检通过（${report.modelCount ?? 0} 个模型 · ${report.requests} 次请求 · ${Date.now() - report.at}ms）。`,
+    );
+    return;
+  }
+
+  /* 去重：同一份问题 24 小时内只写一次。 */
+  const last = reportedFingerprints.get(report.fingerprint);
+  const now = Date.now();
+  if (last !== undefined && now - last < CONTRACT_REPORT_TTL_MS) {
+    return;
+  }
+  reportedFingerprints.set(report.fingerprint, now);
+
+  for (const m of messages) {
+    if (m.level === 'error') log.error(m.text);
+    else log.warn(m.text);
+  }
+}
+
+/** 收集候选链上出现的全部模型 id（去重），用于"它们还在不在"的检查。 */
+function collectLadderIds(): string[] {
+  const ids = new Set<string>();
+  for (const ladder of Object.values(ROLE_GROUP_LADDERS)) {
+    for (const id of ladder) ids.add(id);
+  }
+  return [...ids];
 }
 
 main().catch((error) => {
