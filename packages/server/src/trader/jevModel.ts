@@ -299,10 +299,27 @@ export function tiersFor(
     0,
     Math.min(riskNeutralNotional, physicalCap, perPositionCap),
   );
+  /*
+   * ⚠️ **每一档都必须单独受上限约束**（2026-10-19 实测抓到）。
+   *
+   * 实测（账户 21U、上限 21×30% = 6.3U）：
+   * ```
+   *   A=3.78  B=6.30  C=8.82   ← C 档冲破了上限
+   * ```
+   * 因为 `baseNotional` 只把 **B 档** 截到上限，而 C 档是它的 1.4 倍。
+   *
+   * ⇒ 三档各自 `min(缩放值, 上限)`。这样 C 档最多等于上限，
+   *   而 A/B 仍然保持"保守/中等"的相对关系。
+   *
+   * ⚠️ 代价：当上限生效时 C 档会等于 B 档（失去区分度）。
+   *   那是**正确的取舍** —— 宁可两档相同，也不要突破风险上限。
+   *   账户规模变大之后（上限不再生效）三档自然恢复区分。
+   */
+  const scale = { A: 0.6, B: 1.0, C: 1.4 } as const;
   const size: Record<Tier, number> = {
-    A: baseNotional * 0.6,
-    B: baseNotional * 1.0,
-    C: baseNotional * 1.4,
+    A: Math.min(baseNotional * scale.A, perPositionCap),
+    B: Math.min(baseNotional * scale.B, perPositionCap),
+    C: Math.min(baseNotional * scale.C, perPositionCap),
   };
 
   return { size, stop, take, stopDistance, atr };

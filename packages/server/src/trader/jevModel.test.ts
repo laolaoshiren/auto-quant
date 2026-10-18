@@ -112,8 +112,12 @@ describe('JEV 模式：档位计算', () => {
 
   it('★★ 仓位档递增，且都由风险预算反推（不是拍脑袋的数）', () => {
     const t = tiersFor(C, OPTS, 'long');
+    /*
+     * ⚠️ **上限生效时 B == C**（见下面"仓位上限"那组用例的说明）——
+     * 所以判据是 `A < B` 与 `B <= C`，不是严格递增。
+     */
     assert.ok(t.size.A < t.size.B, '★ A 档必须小于 B 档');
-    assert.ok(t.size.B < t.size.C, '★ B 档必须小于 C 档');
+    assert.ok(t.size.C >= t.size.B, '★ C 档不能小于 B 档');
 
     /*
      * B 档的口径（2026-10-19 修正后）：
@@ -490,8 +494,19 @@ describe('JEV 模式：仓位上限（2026-10-19 线上硬 bug）', () => {
       t.size.C <= physicalCap,
       `★ C 档名义 ${t.size.C.toFixed(2)} 超过了物理上限 ${physicalCap}`,
     );
-    /* 但三档必须仍有区分度 —— 否则"选档"这件事就失去了意义。 */
-    assert.ok(t.size.A < t.size.B && t.size.B < t.size.C, '★ 三档必须仍有区分度');
+    /*
+     * ⚠️ **上限生效时 C 档会等于 B 档** —— 那是刻意的取舍。
+     *
+     * 实测（账户 21U、上限 6.3U）曾出现 `C=8.82` 冲破上限，
+     * 因为只有 B 档被截、C 是它的 1.4 倍。
+     * ⇒ 现在三档各自受上限约束，于是上限生效时 B == C。
+     *
+     * 判据改成：**A < B，且 B <= C <= 上限**。
+     * 不要求 C > B —— 那会在上限生效时变成假测试。
+     */
+    assert.ok(t.size.A < t.size.B, '★ A 档必须小于 B 档');
+    assert.ok(t.size.C >= t.size.B, '★ C 档不能小于 B 档');
+    assert.ok(t.size.C <= physicalCap, '★ C 档不能超过物理上限');
   });
 
   it('★★ ATR 很大时【不被上限截断】（上限不该吃掉合理的仓位）', () => {
