@@ -189,7 +189,7 @@ gh pr merge <n> --squash --delete-branch
 | --- | --- |
 | [`ci.yml`](../.github/workflows/ci.yml) | PR 与 main 的验证 |
 | [`pr-labeler.yml`](../.github/workflows/pr-labeler.yml) | 自动打标签 |
-| [`release-drafter.yml`](../.github/workflows/release-drafter.yml) + [`../release-drafter.yml`](../.github/release-drafter.yml) | 发布说明草稿与版本号推导 |
+| `release-drafter.yml`（workflow 当前未启用） + [`.github/release-drafter.yml`](../.github/release-drafter.yml) | 发布说明草稿与版本号推导 |
 | [`../labeler.yml`](../.github/labeler.yml) | 路径 → 标签 |
 | [`RELEASING.md`](RELEASING.md) | 发版流程 |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | 贡献者规则（外部协作者看的那份）|

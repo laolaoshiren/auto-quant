@@ -30,7 +30,7 @@
 > | --- | --- | --- |
 > | [`ci.yml`](../.github/workflows/ci.yml) | PR / push main | 类型检查 · Lint · 文档链接 · 接口一致性 · 测试 · 构建 · 密钥扫描 |
 > | [`pr-labeler.yml`](../.github/workflows/pr-labeler.yml) | PR | 路径标签（`labeler.yml`）+ 类型标签（Conventional Commits 前缀）|
-> | [`release-drafter.yml`](../.github/workflows/release-drafter.yml) | push main | 增量维护发布说明草稿，并按标签推导版本号 |
+> | `release-drafter.yml`（该 workflow 当前**未启用**，见下方说明） | push main | 增量维护发布说明草稿，并按标签推导版本号 |
 
 ---
 
@@ -398,7 +398,7 @@ git push origin v0.2.0
 > ⚠️ **不要在打标签后一分钟内再连推别的分支**（§4.6 的禁令之一）。
 
 推送 `v*` 标签会触发
-[`docker-publish.yml`](../.github/workflows/docker-publish.yml)，它**无条件构建**（不要求先跑 CI），
+`docker-publish.yml`（该 workflow 当前**未启用**），它**无条件构建**（不要求先跑 CI），
 产出这些镜像标签：
 
 | 触发 | 产出的镜像标签 |
@@ -602,8 +602,8 @@ pwsh -File scripts/deploy.ps1
 | 文件 | 作用 |
 | --- | --- |
 | [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) | 每次 PR 与 push main 的验证 |
-| [`../.github/workflows/docker-publish.yml`](../.github/workflows/docker-publish.yml) | 构建并推送镜像到 GHCR |
-| [`../.github/workflows/release-drafter.yml`](../.github/workflows/release-drafter.yml) | 在每次合入 `main` 时更新发布说明草稿 |
+| `docker-publish.yml`（未启用） | 构建并推送镜像到 GHCR |
+| `release-drafter.yml`（未启用） | 在每次合入 `main` 时更新发布说明草稿 |
 | [`../.github/release-drafter.yml`](../.github/release-drafter.yml) | 分类规则、版本增量规则、发布说明模板 |
 | [`../.github/workflows/pr-labeler.yml`](../.github/workflows/pr-labeler.yml) | 打标签（路径 + 标题前缀），草稿分类的依据 |
 | [`../.github/labeler.yml`](../.github/labeler.yml) | 路径 → 标签的映射 |

@@ -2,6 +2,8 @@
 
 **用自然语言定义策略的加密货币自动交易终端。**
 
+[English](README.en.md) · **简体中文**
+
 [![Node](https://img.shields.io/badge/node-%E2%89%A522.5-blue)](package.json)
 [![Dependencies](https://img.shields.io/badge/dependencies-no%20copyleft-brightgreen)](THIRD-PARTY-NOTICES.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
