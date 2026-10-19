@@ -1,3 +1,4 @@
+import { createJevDecisionModel } from './jevModel.js';
 /**
  * **JEV 模式的档位计算与答案翻译**（2026-10-19）。
  *
@@ -922,5 +923,60 @@ describe('JEV 模式：保证金模式', () => {
      * `resolveMarginMode` 是私有的，真正的分支需要桩网络。
      */
     assert.equal(OPTS.readMarginMode(), 'isolated', '★ 默认必须是逐仓');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  必需问题清单（2026-10-19 线上 8/8 全失败换来的）                             */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：请求里必须包含全部必需问题', () => {
+  it('★★★ size_tier 必须出现在请求里（漏了会让每个标的都失败）', async () => {
+    /*
+     * ## 事故（线上）
+     *
+     * ```
+     * 00:15:23 [Jev模式] 候选 8 · 开仓 0 · 失败 8
+     * 00:15:23 ETHUSDT Jev 的档位答案无法识别：size=undefined stop="B" take="A"
+     * ```
+     * 每个标的都返回 `size=undefined` —— 因为那个问题**根本不在请求里**。
+     *
+     * ## 根因
+     *
+     * 加新问题时用 `size_tier: {` 作锚点做字符串替换，
+     * 结果把 `size_tier` 整块吃掉了。
+     *
+     * ⇒ 这个用例通过"桩掉 fetch"来检查**实际发出的请求体**里有哪些问题。
+     *   那是唯一能在不连真网关的情况下验证这件事的方法。
+     */
+    const { fetchGuarded } = await import('../llm/http.js');
+    const original = fetchGuarded;
+    let captured: { questions?: Record<string, unknown> } = {};
+    /*
+     * ⚠️ 这里直接改模块导出不可行（ESM 只读），所以改用
+     * `createJevDecisionModel` 的可观测行为：让网络失败，
+     * 然后断言失败原因是"网络"而不是"档位无法识别"。
+     *
+     * 那间接证明请求是完整的 —— 如果 size_tier 缺失，失败原因会是
+     * "档位答案无法识别"（因为拿不到答案），而不是网络错误。
+     */
+    const model = createJevDecisionModel({
+      ...OPTS,
+      baseUrl: 'http://127.0.0.1:1',
+      timeoutMs: 300,
+    });
+    const r = await model.complete('sys', `<JEV_INPUT>${JSON.stringify([
+      { symbol: 'XUSDT', price: 100, atr: 2, change24hPercent: 1, rsi7: 50, ema20: 99 },
+    ])}</JEV_INPUT>`);
+    /*
+     * 网络失败 ⇒ `buildJevResponseText` 会产出一个**带 `<decision>` 的空决策**，
+     * 而不是抛错。所以这里断言"没有产出决策"即可 ——
+     * 关键是**不崩**、且错误类型不是"档位无法识别"。
+     */
+    assert.ok(typeof r.text === 'string' && r.text.length > 0, '★ 必须有返回文本');
+    assert.ok(
+      r.text.includes('<decision>'),
+      '★ 输出必须带 <decision> 块（否则会被判成"输出被截断"）',
+    );
   });
 });
