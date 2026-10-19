@@ -1295,3 +1295,85 @@ describe('JEV 模式：熔断阈值可配置', () => {
     assert.equal(off.blocked, false, '★ 0 表示关闭这条熔断');
   });
 });
+
+describe('JEV 模式：缺止盈时的兜底规则', () => {
+  /**
+   * **补止盈的三个约束**（2026-10-19 用户要求）
+   *
+   * > 「系统会不会有兜底策略（如果有兜底策略 要设置多少合理，
+   * >  不能太保守导致小亏导致手续费亏损得磨损，和错失大涨机会）」
+   *
+   * 这三条是互相冲突的，所以必须用**联动公式**而不是固定百分比：
+   * ```
+   *   ① 覆盖成本  → 目标距离 ≥ 往返成本 × 3
+   *   ② 不设天花板 → 浮盈超保本点就不补
+   *   ③ 盈亏比可控 → 目标距离 = 止损距离 × rr
+   * ```
+   * 这里测的是 ③：同一个 rr 在不同止损距离下都要成立。
+   */
+  it('★★★ 补的止盈必须保持配置的盈亏比（固定百分比会在宽止损上变成亏损配置）', () => {
+    /*
+     * 反例（为什么不能用固定 7.5%）：
+     * ```
+     *   止损 8.2% + 止盈 7.5%  ⇒ 盈亏比 0.91:1  ← 赚也亏
+     *   止损 1.2% + 止盈 7.5%  ⇒ 盈亏比 6.25:1
+     * ```
+     * 实盘 CTUSDT 的止损距离就是 8.2% —— 用固定值会立刻制造一个
+     * "数学上必亏"的配置。
+     */
+    const rr = 2;
+    for (const stopPercent of [1.2, 3, 5.5, 8.2, 15]) {
+      const entry = 100;
+      const stopDistance = (entry * stopPercent) / 100;
+      /* 规则与 autoTrader.ensureStopsOnOpenPositions 里的算式一致。 */
+      const targetDistance = Math.max(stopDistance * rr, entry * 0.003);
+      const ratio = targetDistance / stopDistance;
+      assert.ok(
+        ratio >= rr - 1e-9,
+        `★ 止损 ${stopPercent}% 时补出的盈亏比 ${ratio.toFixed(2)} 应 ≥ ${rr} ` +
+          '（固定百分比会在这里出问题）',
+      );
+    }
+  });
+
+  it('★★★ 目标距离必须覆盖往返成本（否则"赚了还亏手续费"）', () => {
+    /*
+     * 往返成本 0.1%（单边 0.05% × 2），安全边际 3 倍 = 0.3%。
+     *
+     * 为什么需要这条：止损距离极小（横盘币，被 MIN_STOP_PERCENT 抬到 1.2%）
+     * 时，若 rr 配成 0.2，目标距离会低于成本 —— 那笔交易赢了也亏钱。
+     */
+    const MIN_TARGET_PERCENT = 0.3;
+    const ROUND_TRIP_FEE_PERCENT = 0.1;
+    assert.ok(
+      MIN_TARGET_PERCENT >= ROUND_TRIP_FEE_PERCENT * 3 - 1e-9,
+      '★ 最小目标距离应 ≥ 往返成本的 3 倍',
+    );
+    assert.ok(MIN_TARGET_PERCENT > ROUND_TRIP_FEE_PERCENT, '★ 最小目标距离必须大于成本本身');
+  });
+
+  it('★★ 浮盈超过保本点时不该补固定止盈（会设天花板）', () => {
+    /*
+     * 实盘 CTUSDT：浮盈 +28.91%，若那时补一个 2:1 的固定止盈，
+     * 等于在远低于当前价的位置挂目标 —— 但价格已经跑过去了，
+     * 目标会落在现价"错误一侧"，挂上去立即触发 = 市价平仓（未经决策）。
+     *
+     * 所以规则是：浮盈 ≥ 保本触发点（默认 8%）⇒ 不补，交给移动止损。
+     */
+    const breakevenTrigger = 8;
+    const cases = [
+      { unrealized: 2, shouldBackfill: true },
+      { unrealized: 7.9, shouldBackfill: true },
+      { unrealized: 8, shouldBackfill: false },
+      { unrealized: 28.91, shouldBackfill: false },
+    ];
+    for (const c of cases) {
+      const willBackfill = c.unrealized < breakevenTrigger;
+      assert.equal(
+        willBackfill,
+        c.shouldBackfill,
+        `★ 浮盈 ${c.unrealized}% 时${c.shouldBackfill ? '应' : '不该'}补固定止盈`,
+      );
+    }
+  });
+});

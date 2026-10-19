@@ -6245,6 +6245,22 @@ export class AutoTrader {
     const liveBySymbol = new Map(exchangePositions.map((position) => [position.symbol, position]));
     /** 什么算"这个仓位有止损"。注意 `TRAILING_STOP_MARKET` 也是止损。 */
     const STOP_TYPES = new Set(['STOP', 'STOP_MARKET', 'TRAILING_STOP_MARKET']);
+    /**
+     * 什么算"这个仓位有止盈"。
+     *
+     * ## 为什么必须单独判（2026-10-19 实盘抓到）
+     *
+     * 这个方法原来只有一行判据：
+     * ```ts
+     * if (orderTypes.some((type) => STOP_TYPES.has(type))) continue;
+     * ```
+     * **只要有任何止损就整段跳过** —— 于是"有止损但没止盈"的仓位
+     * （CTUSDT 实测就是这样）永远不会被补上目标位。
+     *
+     * 用户问得很准：「系统会不会有兜底策略？」——
+     * 答案是**原来只有止损兜底，止盈完全没有**。
+     */
+    const TARGET_TYPES = new Set(['TAKE_PROFIT', 'TAKE_PROFIT_MARKET']);
 
     for (const local of positionStore.open(traderId)) {
       const live = liveBySymbol.get(local.symbol);
@@ -6282,10 +6298,38 @@ export class AutoTrader {
         continue;
       }
 
-      if (orderTypes.some((type) => STOP_TYPES.has(type))) continue;
+      const hasStop = orderTypes.some((type) => STOP_TYPES.has(type));
+      const hasTarget = orderTypes.some((type) => TARGET_TYPES.has(type));
 
       const isLong = local.side === 'long';
       const mark = live.markPrice > 0 ? live.markPrice : live.entryPrice;
+
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  **止损与止盈分开判**（2026-10-19 用户要求，修"只有止损没止盈"）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * ## 原来为什么不对
+       *
+       * ```
+       *   if (有任何止损) continue;   ⇒ 有止损没止盈的仓位永远不补目标
+       * ```
+       * 实盘 CTUSDT 就是这样：有止损、无止盈、浮盈跑到 +28% 仍无目标位。
+       *
+       * ## 现在的四种情况
+       *
+       * ```
+       *   ① 有止损 + 有止盈  → continue（健康，什么都不做）
+       *   ② 有止损 + 无止盈  → 只补止盈（用下面的 deriveTarget 规则）
+       *   ③ 无止损 + 有止盈  → 补止损（原有逻辑），止盈保留
+       *   ④ 都没有           → 两者都补（原有逻辑 + 新规则）
+       * ```
+       *
+       * ⚠️ **补止盈不总是对的** —— 见 `deriveTarget()` 的说明：
+       * 已经浮盈超过保本点的仓位**不该**补一个固定目标（那会把
+       * 本来能跑的单锁死在半路）。判断在那个函数里。
+       */
+      if (hasStop && hasTarget) continue;
 
       /* 本地记录的保护位优先（那是模型/系统当初认定的失效位）。 */
       const recordedOk =
@@ -6311,19 +6355,92 @@ export class AutoTrader {
           continue;
         }
       }
-
-      /* 止盈是可选项：方向不对就只挂止损。 */
-      const targetOk =
+      /*
+       * ══════════════════════════════════════════════════════════════════
+       *  **补止盈的两条规则**（2026-10-19 用户要求）
+       * ══════════════════════════════════════════════════════════════════
+       *
+       * 用户原话：
+       * > 「系统会不会有兜底策略（如果有兜底策略 要设置多少合理，
+       * >  不能太保守导致小亏导致手续费亏损得磨损，和错失大涨机会）」
+       *
+       * 三个约束：① 不能太保守 ② 不能磨损手续费 ③ 不错失大涨。
+       *
+       * 规则：
+       * ```
+       *   A. 本地有 take_profit 且方向正确 → 用它（Jev 算的，最优先）
+       *   B. 没有可用 take_profit →
+       *        浮盈 < 保本触发点 → 按「止损距离 × 盈亏比」补
+       *        浮盈 ≥ 保本触发点 → 不补，交给移动止损
+       * ```
+       *
+       * 为什么用「止损距离 × 盈亏比」而不是固定百分比：
+       * ```
+       *   固定 7.5% + 止损 8.2% ⇒ 盈亏比 0.91:1  ← 必亏
+       *   固定 7.5% + 止损 1.2% ⇒ 盈亏比 6.25:1
+       * ```
+       * 同一个固定值在波动不同的标的上含义相反。
+       */
+      const rr = Math.max(0.5, jevNumber('min_rr'));
+      /* 往返成本约 0.1%（单边 0.05% × 2），乘 3 倍安全边际 = 0.3%。 */
+      const minTargetPercent = 0.3;
+      /* 浮盈百分比 —— 决定该不该补固定目标（用标记价，不是成本价）。 */
+      const unrealizedPercent = isLong
+        ? ((mark - local.entry_price) / local.entry_price) * 100
+        : ((local.entry_price - mark) / local.entry_price) * 100;
+      const breakevenTrigger = Math.max(
+        1,
+        this.deps.trader.mode === 'jev'
+          ? jevNumber('breakeven_trigger_percent')
+          : this.activeConfig.riskControl.breakevenTriggerPercent,
+      );
+      /** 本地记录的目标位（方向必须还在现价之外）。 */
+      const recordedTargetOk =
         local.take_profit !== null &&
         local.take_profit > 0 &&
         (isLong ? local.take_profit > mark : local.take_profit < mark);
+
+      let target: number | null = recordedTargetOk ? (local.take_profit as number) : null;
+
+      if (target === null && !hasTarget) {
+        /*
+         * 浮盈已超保本点就不补：那种仓位正在奔跑，补固定目标等于设天花板。
+         * 移动止损会跟着上移 —— 既保护利润又不封顶，那才是"不错失大涨"。
+         */
+        if (unrealizedPercent < breakevenTrigger) {
+          const stopDistancePercent = (Math.abs(stop - local.entry_price) / local.entry_price) * 100;
+          const targetDistancePercent = Math.max(stopDistancePercent * rr, minTargetPercent);
+          const candidate = isLong
+            ? local.entry_price * (1 + targetDistancePercent / 100)
+            : local.entry_price * (1 - targetDistancePercent / 100);
+          if (isLong ? candidate > mark : candidate < mark) {
+            target = candidate;
+            this.emit(
+              'info',
+              `${local.symbol} 缺止盈，已按「止损 ${stopDistancePercent.toFixed(2)}% × 盈亏比 ${rr.toFixed(1)}」` +
+                `补目标 ${candidate.toFixed(6)}（距离 ${targetDistancePercent.toFixed(2)}%，已确保覆盖往返成本）`,
+            );
+          } else {
+            this.emit(
+              'info',
+              `${local.symbol} 缺止盈，但算出的目标落在现价错误一侧 —— 不补，交给移动止损。`,
+            );
+          }
+        } else {
+          this.emit(
+            'info',
+            `${local.symbol} 缺止盈，但浮盈 ${unrealizedPercent.toFixed(2)}% 已超保本点 ${breakevenTrigger}% —— ` +
+              '不补固定目标（避免设天花板），交给移动止损跟随。',
+          );
+        }
+      }
 
       const protection = await this.replaceProtection({
         symbol: local.symbol,
         side: isLong ? 'long' : 'short',
         quantity: local.quantity,
         stop,
-        target: targetOk ? local.take_profit : null,
+        target,
         traderId,
       });
 
