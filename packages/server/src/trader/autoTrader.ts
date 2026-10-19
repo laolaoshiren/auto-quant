@@ -2358,7 +2358,26 @@ export class AutoTrader {
 
     const drawdownPercent =
       input.highWater > 0 ? Math.max(0, ((input.highWater - input.equity) / input.highWater) * 100) : 0;
-    const verdict = checkCircuitBreakers(this.activeConfig, input.equity, {
+    /*
+     * ⚠️⚠️ **必须用 `effectiveConfig()` 而不是 `activeConfig`**（2026-10-19）。
+     *
+     * ## 实盘症状
+     *
+     * ```
+     *   界面横幅：「已触发熔断，暂不开新仓…（上限 5%）」
+     *   同一时刻：周期 #19 正常开仓 3 个
+     * ```
+     * **两处说的是不同的事** —— 因为：
+     * ```
+     *   决策循环（能交易）  → 用 config（JEV 覆盖后的 30%）✅
+     *   这个读方法（横幅）  → 用 activeConfig（原始 5%）     ❌
+     * ```
+     * 用户看到横幅以为停摆，实际在交易 —— 比"真的停摆"更让人困惑。
+     *
+     * ⇒ 两处统一走 `effectiveConfig()`，它们从此说同一件事。
+     */
+    const config = this.effectiveConfig();
+    const verdict = checkCircuitBreakers(config, input.equity, {
       dailyRealizedPnl: tradeStore.realizedPnlToday(this.deps.trader.id),
       highWaterEquity: input.highWater,
     });
@@ -2367,8 +2386,35 @@ export class AutoTrader {
       blocked: verdict.blocked,
       kind: verdict.kind,
       // 与 `executionLog` 用的是同一个函数 —— 两处必须说同一件事。
-      reason: describeBreaker(verdict, this.activeConfig),
+      reason: describeBreaker(verdict, config),
       drawdownPercent: Math.round(drawdownPercent * 100) / 100,
+    };
+  }
+
+  /**
+   * **本轮真正生效的配置** —— 所有地方都该读它，而不是 `activeConfig`。
+   *
+   * ## 为什么需要这个函数（2026-10-19 实盘两次踩坑）
+   *
+   * 我先后把 JEV 的覆盖写在两个地方，两次都漏了别的消费者：
+   * ```
+   *   第一次写在 riskConfig  → 熔断读 config，没生效（连续 4 轮白跳）
+   *   第二次写在决策循环里  → circuitBreakerReading 读 activeConfig，横幅仍显示旧值
+   * ```
+   * 根因是同一个：**"覆盖配置"这件事没有一个统一入口**，
+   * 于是每个读配置的地方都得记得自己覆盖一次 —— 漏一处就是一个 bug。
+   *
+   * ⇒ 现在有唯一入口：`effectiveConfig()`。
+   *   `activeConfig` 只在"装配期"用，运行期一律走这里。
+   */
+  private effectiveConfig(): StrategyConfig {
+    if (this.deps.trader.mode !== 'jev') return this.activeConfig;
+    return {
+      ...this.activeConfig,
+      circuitBreaker: {
+        ...this.activeConfig.circuitBreaker,
+        maxDailyLossPercent: Math.max(0, jevNumber('max_daily_loss_percent')),
+      },
     };
   }
 
@@ -3002,17 +3048,7 @@ export class AutoTrader {
      * 在 `config` 这一层就覆盖 —— 它是本轮所有下游（熔断、风控、提示词）
      * 共同的源头。**覆盖在源头，就不会有"某条路径忘了"的洞。**
      */
-    const config: StrategyConfig =
-      this.deps.trader.mode === 'jev'
-        ? {
-            ...this.activeConfig,
-            circuitBreaker: {
-              ...this.activeConfig.circuitBreaker,
-              /* 0 = 关闭这条熔断（与既有约定一致）。 */
-              maxDailyLossPercent: Math.max(0, jevNumber('max_daily_loss_percent')),
-            },
-          }
-        : this.activeConfig;
+    const config = this.effectiveConfig();
 
     /* --- 1. Authoritative account state ---------------------------------- */
     const account = await this.deps.broker.getAccountState();
@@ -5431,14 +5467,72 @@ export class AutoTrader {
 
     if (promoted.mergedIntoExisting) {
       /*
-       * ⚠️ **已经有一行 `open`（对账收养过）—— 成交数据合并完就收手，不要再挂保护单。**
+       * ══════════════════════════════════════════════════════════════════════
+       *  ⚠️⚠️ **收养抢先时，必须用 pending 行里的 Jev 价位补挂止盈**
+       *      （2026-10-19 实盘抓到：CTUSDT 丢了止盈，成了单边裸仓）
+       * ══════════════════════════════════════════════════════════════════════
        *
-       * 那一行很可能**已经有止损挂在交易所上**（收养路径挂的兜底止损）。
-       * 再挂一张必吃 `-4130`（同一仓位不允许两张条件单）→ `stopOrderId` 为 null
-       * → 按 §2.6 **把一笔本来有保护的仓位平掉**。
+       * ## 事故时间线（#14，CTUSDT）
        *
-       * 而"它到底有没有保护"有专门的检查：`ensureStopsOnOpenPositions()`
-       * 每轮对账都会读交易所的挂单列表，缺了才补 —— 交给它，不在这里猜。
+       * ```
+       *   11:40:13  挂限价单 214 @ 0.351296（pending 行存了 stop=0.362579 take=0.325577）
+       *   11:40:14  成交
+       *   11:40:17  对账**先**收养 → 创建 open 行 → 挂兜底止损 0.360083（2.5%）
+       *   11:40:19  这里（promotePendingEntry）发现已有 open 行 → 直接 return
+       *   ⇒ 结果：持仓 stop=0.348495（兜底值×移动止损） take=0.0（**没有止盈**）
+       * ```
+       * **Jev 算好的 3.21% 止损 / 2:1 止盈全部作废，仓位变成"只有止损、没有目标"。**
+       *
+       * ## 为什么原来要 return
+       *
+       * 收养路径已经挂了一张兜底止损，再挂一张会吃 `-4130`
+       *（同一仓位不允许两张条件单）→ `stopOrderId` 为 null → 按 §2.6 平仓。
+       * 那个顾虑是**对的**，所以不能盲目重挂。
+       *
+       * ## 修法：把 Jev 的价位【写回本地并替换】已有的兜底保护
+       *
+       * ```
+       *   ① 把 pending 行的 stop_loss / take_profit 写进 open 行（账本正确）
+       *   ② 用 replaceProtection() 原子替换交易所上的保护单
+       *      —— 它内部先撤旧的再挂新的，不会撞 -4130
+       *   ③ 只在 pending 行**确实有** take_profit 时才做（手工开的仓没有，
+       *      那种仍然交给 ensureStopsOnOpenPositions 兜底）
+       * ```
+       *
+       * ⚠️ **`replaceProtection` 失败不抛** —— 那时仓位仍有收养挂的兜底止损，
+       *   属于"有保护但不理想"，比"为了改止盈而把仓位平掉"好。
+       */
+      const jevStop = row.stop_loss;
+      const jevTarget = row.take_profit;
+      if (jevStop !== null && jevTarget !== null) {
+        /*
+         * ⚠️ **只写账本，不在这里直接挂单。**
+         *
+         * §2.1 规定「没有任何代码可以绕过 `risk/engine.ts` 直接下单」，
+         * 而 `replaceProtection` 的允许调用者有明确白名单
+         *（`riskOnlyPath.test.ts` 里逐行校验）。本方法不在其中。
+         *
+         * ⇒ 把 Jev 的价位写进持仓行，**交给 `ensureStopsOnOpenPositions()`**：
+         * ```
+         *   它每轮对账都读交易所的挂单列表，缺止盈才补；
+         *   而它读的正是这一行的 stop_loss / take_profit
+         *   ⇒ 写对账本 = 下一轮会自动把保护单纠正成 Jev 的价位
+         * ```
+         * 代价是**最多晚一轮（15 分钟）**才纠正 —— 那可以接受：
+         * 仓位此刻仍有收养时挂的兜底止损，不是裸奔。
+         */
+        positionStore.setProtection(traderId, symbol, jevStop, jevTarget);
+        this.emit(
+          'info',
+          `${symbol} 的限价单成交时先被对账收养了 —— 已把 Jev 的价位写进账本` +
+            `（止损 ${jevStop.toFixed(6)}、止盈 ${jevTarget.toFixed(6)}），` +
+            '下一轮对账会据此替换兜底保护单。',
+        );
+        return;
+      }
+      /*
+       * 没有 Jev 价位（真是操作员手工开的仓）—— 原来的判断仍然成立：
+       * 交给 `ensureStopsOnOpenPositions()`，不在这里猜。
        */
       this.emit(
         'warn',
