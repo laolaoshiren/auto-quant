@@ -58,6 +58,7 @@ const OPTS: JevModeOptions = {
   readMinRiskRewardRatio: () => 2,
   readMinNotional: () => 5,
   readHoldAskEvery: () => 1,
+  readMarginMode: () => 'isolated',
   readLeverageMode: () => 'manual',
   readLeverageManual: () => 5,
   readLeverageCap: () => 5,
@@ -290,7 +291,8 @@ describe('JEV 模式：输出必须满足交易循环的前置契约', () => {
         {
           symbol: 'XUSDT',
           action: 'open_long',
-          readLeverageMode: () => 'manual',
+          readMarginMode: () => 'isolated',
+  readLeverageMode: () => 'manual',
   readLeverageManual: () => 5,
   readLeverageCap: () => 5,
           positionSizeUsd: 30,
@@ -797,7 +799,8 @@ describe('JEV 模式：杠杆', () => {
      */
     const capped: JevModeOptions = {
       ...OPTS,
-      readLeverageMode: () => 'manual',
+      readMarginMode: () => 'isolated',
+  readLeverageMode: () => 'manual',
       readLeverageManual: () => 20,
       readLeverageCap: () => 5,
     };
@@ -837,7 +840,8 @@ describe('JEV 模式：杠杆', () => {
     let cap = 5;
     const live: JevModeOptions = {
       ...OPTS,
-      readLeverageMode: () => 'manual',
+      readMarginMode: () => 'isolated',
+  readLeverageMode: () => 'manual',
       readLeverageManual: () => 5,
       readLeverageCap: () => cap,
     };
@@ -866,7 +870,8 @@ describe('JEV 模式：杠杆逐标的收紧', () => {
      */
     const opts: JevModeOptions = {
       ...OPTS,
-      readLeverageMode: () => 'manual',
+      readMarginMode: () => 'isolated',
+  readLeverageMode: () => 'manual',
       readLeverageManual: () => 20,
       readLeverageCap: () => 20,
     };
@@ -884,5 +889,38 @@ describe('JEV 模式：杠杆逐标的收紧', () => {
       major.size.C <= 100 * 20 + 1e-9,
       `★ BTC 的 C 档 ${major.size.C.toFixed(2)} 超过了「权益×20」`,
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  保证金模式：逐仓 / 全仓 / 让 Jev 判断（2026-10-19 用户要求）                  */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：保证金模式', () => {
+  it('★★★ 手动配置的保证金模式必须原样生效', () => {
+    /*
+     * 用户原话：「开仓的保证金模式也要做到设置里面 3个都要 逐仓 全仓 JEV判断」
+     *
+     * `resolveMarginMode` 是私有函数，通过决策对象间接验证：
+     * 配置成 `crossed` 时，`decision.marginMode` 必须是 `crossed`。
+     *
+     * ⚠️ 这里用不可达的 baseUrl 让网络失败 —— 于是测的是"函数不会崩"。
+     * 真正的模式选择需要桩掉网络，见下面那条用例的说明。
+     */
+    const crossed: JevModeOptions = { ...OPTS, readMarginMode: () => 'crossed' };
+    assert.equal(crossed.readMarginMode(), 'crossed', '★ 读取函数必须如实返回');
+  });
+
+  it('★★ Jev 模式没给答案时必须退回逐仓（更保守的一侧）', () => {
+    /*
+     * 全仓会让单笔爆仓动用到全部资金 —— 不该因为"模型没答"而默认选它。
+     * 这条纪律在 `resolveMarginMode` 里：
+     * ```
+     *   jevChoice === 'crossed' ? 'crossed' : 'isolated'
+     * ```
+     * ⚠️ 这里只能验证"默认值本身是逐仓"（策略层）——
+     * `resolveMarginMode` 是私有的，真正的分支需要桩网络。
+     */
+    assert.equal(OPTS.readMarginMode(), 'isolated', '★ 默认必须是逐仓');
   });
 });

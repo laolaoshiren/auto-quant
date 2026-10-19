@@ -2049,6 +2049,7 @@ export class TraderManager {
         readHoldAskEvery: () => Math.max(1, Math.floor(jevNumber('hold_ask_every'))),
         /* 权益也每轮现读 —— 余额会变，写死会让档位基于旧余额。 */
         readEquity: () => traders.get(traderId)?.initialEquity ?? equity,
+        readMarginMode: () => jevEnum('margin_mode'),
         readLeverageMode: () => jevEnum('leverage_mode'),
         readLeverageManual: () => jevNumber('leverage_manual'),
         /*

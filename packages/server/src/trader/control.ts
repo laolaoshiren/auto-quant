@@ -211,6 +211,22 @@ export const JEV_OPTIONS: readonly JevOptionSpec[] = [
     fallback: '5',
   },
   {
+    key: 'margin_mode',
+    label: '保证金模式',
+    why:
+      '逐仓 = 每个仓位独立结算，一个仓爆仓只亏那一笔的保证金（推荐）；' +
+      '全仓 = 所有仓位共用账户余额，单笔爆仓会动用到全部资金。' +
+      '「让 Jev 判断」会按波动和把握程度选 —— 波动大时它应该选逐仓。' +
+      '⚠️ 切换只在**该标的没有持仓和挂单**时能生效，否则本轮继续用原模式。',
+    kind: 'enum',
+    options: [
+      { value: 'isolated', label: '逐仓（默认，风险隔离）' },
+      { value: 'crossed', label: '全仓（共用余额）' },
+      { value: 'jev', label: '让 Jev 判断' },
+    ],
+    fallback: 'isolated',
+  },
+  {
     key: 'allow_short',
     label: '允许做空',
     why: '关掉之后 Jev 只能选做多 —— 下跌行情里会一直跳过。',

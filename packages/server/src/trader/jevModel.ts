@@ -46,7 +46,8 @@ const log = createLogger('jev');
  * 一次 Jev 应答里，单个问题的答案。
  *
  * 形状照抄线上实测（`/v1/systemone` 的 `answers.<name>`）：
- * `choice` / `score` / `noul` 三选一，但**只有 `choice` 与 `score` 在这里有用**。
+ * `choice` / `score` / 
+oul` 三选一，但**只有 `choice` 与 `score` 在这里有用**。
  */
 interface JevAnswer {
   type?: string;
@@ -54,7 +55,8 @@ interface JevAnswer {
   choice?: string;
   /** `score` 的答案（0..N-1 的浮点）。 */
   score?: number;
-  /** `noul` 的概率值（本模式暂不使用）。 */
+  /** 
+oul` 的概率值（本模式暂不使用）。 */
   noul?: number;
   /** **0–1 的小数**（不是 0–100）。 */
   confidence?: number;
@@ -174,6 +176,10 @@ export interface JevModeOptions {
    * 原来这里是 `leverage: number`（写死的），现在拆成模式 + 手动值。
    */
   readLeverageMode: () => string;
+  /**
+   * 保证金模式：`isolated` / `crossed` / `jev`（让 Jev 判断）。
+   */
+  readMarginMode: () => string;
   /** 手动模式下的杠杆倍数（会被 `leverageCap` 夹住）。 */
   readLeverageManual: () => number;
   /**
@@ -615,6 +621,40 @@ export async function askJev(
        * 所以 Jev 不可能选出一个"账户不允许"的值 ——
        * 账户级限制（子账户 5x）仍然靠 `setLeverage` 的降级兜底。
        */
+      /*
+       * ══════════════════════════════════════════════════════════════════════
+       *  **保证金模式：让 Jev 判断**（2026-10-19 用户要求）
+       * ══════════════════════════════════════════════════════════════════════
+       *
+       * 用户原话：「开仓的保证金模式也要做到设置里面 3个都要 逐仓 全仓 JEV判断」
+       *
+       * ## 它该看什么
+       *
+       * ```
+       *   逐仓 → 一个仓爆仓只亏那一笔保证金（隔离风险）
+       *   全仓 → 所有仓位共用账户余额（单笔爆仓会动用全部资金）
+       * ```
+       * ⇒ 波动大（ATR 占比高）时该选逐仓；波动小、把握大时可以选全仓
+       *（全仓能用上更多可用余额，不容易被单笔强平）。
+       *
+       * ⚠️ **只在配置是 `jev` 时才问** —— 手动模式问它没有意义。
+       */
+      ...(opts.readMarginMode() === 'jev'
+        ? {
+            margin_style: {
+              type: 'choice' as const,
+              instructions:
+                '这个标的该用逐仓还是全仓？' +
+                '【逐仓】每个仓位独立结算，一个仓爆仓只亏那一笔的保证金；' +
+                '【全仓】所有仓位共用账户余额，单笔爆仓会动用到全部资金，但也不容易被单笔强平。' +
+                '判断依据：波动大（ATR 占比高）、把握不大时用逐仓；波动小、把握大时全仓更抗噪。',
+              criteria: {
+                isolated: '逐仓（风险隔离，推荐）',
+                crossed: '全仓（共用余额）',
+              },
+            },
+          }
+        : {}),
       ...(opts.readLeverageMode() === 'jev'
         ? {
             leverage: {
@@ -895,6 +935,27 @@ function resolveEntryType(
   return jevChoice === 'limit' ? 'limit' : 'market';
 }
 
+/**
+ * **解析本轮该用的保证金模式**（2026-10-19 用户要求）。
+ *
+ * ```
+ *   isolated → 逐仓
+ *   crossed  → 全仓
+ *   jev      → 看 Jev 对 `margin_style` 的答案
+ * ```
+ *
+ * ⚠️ Jev 没给答案时**退回逐仓** —— 那是更保守的一侧：
+ * 全仓会让单笔爆仓动用到全部资金，不该因为"模型没答"而默认选它。
+ */
+function resolveMarginMode(
+  opts: JevModeOptions,
+  jevChoice: string | undefined,
+): 'isolated' | 'crossed' {
+  const configured = opts.readMarginMode();
+  if (configured !== 'jev') return configured === 'crossed' ? 'crossed' : 'isolated';
+  return jevChoice === 'crossed' ? 'crossed' : 'isolated';
+}
+
 function resolveLeverage(
   opts: JevModeOptions,
   score: number | undefined,
@@ -940,7 +1001,8 @@ function resolveLeverage(
   return Math.min(cap, Math.max(1, Math.round(raw)));
 }
 
-/** `choice` 的答案收窄成 `Tier`；认不出就返回 `null`（**不猜**）。 */
+/** `choice` 的答案收窄成 `Tier`；认不出就返回 
+ull`（**不猜**）。 */
 function asTier(v: string | undefined): Tier | null {
   if (v === 'A' || v === 'B' || v === 'C') return v;
   return null;
@@ -965,11 +1027,13 @@ function setupScoreToPercent(a: JevAnswer | undefined): number | null {
 /**
  * 一个标的的完整决策。
  *
- * 返回 `null` = **本轮不开仓**（Jev 说跳过，或它的答案形状不对）。
+ * 返回 
+ull` = **本轮不开仓**（Jev 说跳过，或它的答案形状不对）。
  * 后者要写 warn —— 那是"网关侧形状变了"，不是业务结论。
  */
 export interface JevDecisionOutcome {
-  /** 组装好的决策（`null` = 跳过）。 */
+  /** 组装好的决策（
+ull` = 跳过）。 */
   decision: {
     symbol: string;
     action:
@@ -986,7 +1050,8 @@ export interface JevDecisionOutcome {
      *
      * ⚠️ **平仓决策不需要它们** —— `close_long` / `close_short` 不带保护单
      *（平仓之后原来的保护单会被撤掉，见 `docs/AGENTS.md` §2.7）。
-     * 所以类型是 `number | null`，而不是强制要求一个数。
+     * 所以类型是 
+umber | null`，而不是强制要求一个数。
      */
     stopLoss: number | null;
     takeProfit: number | null;
@@ -1257,7 +1322,8 @@ export async function decideForCandidate(
       setupScoreBasis: `Jev setup ${setupText}`,
       reasoning,
       riskUsd: Math.max(0.5, opts.readEquity() * opts.readRiskPercent()),
-      marginMode: opts.marginMode,
+      /* 保证金模式：手动配置或 Jev 判断（2026-10-19 用户要求）。 */
+      marginMode: resolveMarginMode(opts, answers.margin_style?.choice),
       /*
        * ⚠️ **开仓方式由用户选**（2026-10-19）。
        *
@@ -1412,7 +1478,8 @@ export async function decideForPosition(
           `Jev 判${action === 'add' ? '加仓' : '减仓'}${sideLabel}头（置信 ${confidence ?? '—'}%）；` +
           `${action === 'add' ? `加 ${amount.toFixed(2)}U（${sizeTier} 档）` : '减掉一半仓位'}`,
         riskUsd: 0,
-        marginMode: opts.marginMode,
+        /* 保证金模式：手动配置或 Jev 判断（2026-10-19）。 */
+        marginMode: resolveMarginMode(opts, resp.answers?.margin_style?.choice),
       },
       outcome: 'open',
       detail: `Jev 判${action === 'add' ? '加仓' : '减仓'}${sideLabel}头`,
@@ -1440,7 +1507,8 @@ export async function decideForPosition(
         `Jev 判主动平掉${sideText}头（置信 ${confidence ?? '—'}%）；` +
         `继续持有的信心 ${conviction ?? '—'}/100`,
       riskUsd: 0,
-      marginMode: opts.marginMode,
+      /* 保证金模式：手动配置或 Jev 判断（2026-10-19）。 */
+      marginMode: resolveMarginMode(opts, resp.answers?.margin_style?.choice),
     },
     outcome: 'close',
     detail: `Jev 判平掉${sideText}头`,
@@ -1576,14 +1644,16 @@ export function buildJevResponseText(input: {
  * `complete()` 服务的是"一轮决策"，而移动止损发生在**持仓管理**阶段
  *（`applyBreakevenGuard`，每轮单独跑）。两者时机不同、输入不同。
  *
- * ## 为什么返回 `number | 'keep' | null`
+ * ## 为什么返回 
+umber | 'keep' | null`
  *
  * ```
  *   一个数     → Jev 选了那一档，用它
  *   'keep'     → Jev 明确说"不动"
  *   null       → 失败/形状不对 ⇒ 调用方退回机械规则
  * ```
- * 把 `'keep'` 与 `null` 分开是刻意的：前者是**业务结论**（正常），
+ * 把 `'keep'` 与 
+ull` 分开是刻意的：前者是**业务结论**（正常），
  * 后者是**故障**（要 warn）。混在一起会让"Jev 说不动"和"Jev 挂了"
  * 在日志里长得一样。
  *
