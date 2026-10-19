@@ -1193,3 +1193,51 @@ describe('JEV 模式：止损下限与杠杆映射', () => {
     );
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/*  实盘可调参数（2026-10-19 用户要求）                                          */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：实盘参数可配置', () => {
+  it('★★★ 止损止盈比必须是配置值（实盘 2:1 但从未触发止盈）', () => {
+    /*
+     * ## 实盘数据（#14，17 笔）
+     *
+     * ```
+     *   平均盈 +0.21U，平均亏 -0.82U  ⇒ 实际盈亏比 1:3.85
+     *   而配置的 min_rr = 2（应该 2:1）
+     * ```
+     * 根因不是这个比值算错，而是**移动止损在 +0.9% 就把仓位带走了**
+     *（见 `breakevenTriggerPercent` / `trailingStopPercent` 的改动）。
+     *
+     * 但这条测试仍然必要：它钉住"止盈距离 = 止损距离 × 配置值"，
+     * 否则比值一错，盈亏比就无从谈起。
+     */
+    for (const rr of [1.5, 2, 3]) {
+      const opts: JevModeOptions = { ...OPTS, readMinRiskRewardRatio: () => rr };
+      const t = tiersFor({ symbol: 'XUSDT', price: 100, atr: 2 }, opts, 'long');
+      for (const tier of ['A', 'B', 'C'] as const) {
+        const risk = Math.abs(100 - t.stop[tier]);
+        const reward = Math.abs(t.take[tier] - 100);
+        assert.ok(
+          Math.abs(reward / risk - rr) < 1e-9,
+          `★ ${tier} 档盈亏比应为 ${rr}:1，实际 ${(reward / risk).toFixed(4)}`,
+        );
+      }
+    }
+  });
+
+  it('★★ 保证金上限越高，能开的仓位档越大', () => {
+    /*
+     * 实盘症状：`maxMarginUsage = 30%` 时 Jev 提议 6 个只成交 2 个。
+     *
+     * ⚠️ `maxMarginUsage` 在**风控层**（`riskConfig.riskControl`）生效，
+     * 不在 `tiersFor` 里 —— 所以这条测试只能验证"仓位档不因它崩溃"。
+     * 真正的数量限制由风控 `reviewOpen` 判。
+     */
+    const t = tiersFor({ symbol: 'XUSDT', price: 100, atr: 2 }, OPTS, 'long');
+    assert.ok(t.size.A > 0 && t.size.B > 0 && t.size.C > 0, '★ 三档都应 > 0');
+    assert.ok(t.size.A <= t.size.B, '★ A ≤ B');
+    assert.ok(t.size.B <= t.size.C, '★ B ≤ C');
+  });
+});

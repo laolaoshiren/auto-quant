@@ -4648,6 +4648,25 @@ export class AutoTrader {
               ),
               /* 最大同时持仓数也来自 JEV 选项（2026-10-19 用户要求）。 */
               maxPositions: Math.max(1, Math.floor(jevNumber('max_positions'))),
+              /* 保证金占用上限也来自 JEV 选项（2026-10-19，解决"想开却开不了"）。 */
+              maxMarginUsage: Math.min(100, Math.max(1, jevNumber('max_margin_usage'))),
+              /*
+               * ⚠️ **移动止损的两个参数也来自 JEV 选项**（2026-10-19 实盘数据驱动）。
+               *
+               * ## 为什么必须可调
+               *
+               * 实盘 17 笔**全部是止损离场，止盈 0 次触发**：
+               * ```
+               *   平均盈 +0.21U，平均亏 -0.82U  ⇒ 盈亏比 1:3.85（应该 2:1）
+               * ```
+               * 根因是 `breakevenTriggerPercent: 3` + `trailingStopPercent: 1`：
+               * 浮盈刚过 3% 就把止损移到保本，价格回落 1% 就离场 ——
+               * 赚 0.9% 就跑，而止盈设在 +5%~11% 永远到不了。
+               *
+               * ⇒ 默认改成 8% / 3%，并允许操作员按行情调。
+               */
+              breakevenTriggerPercent: Math.max(0, jevNumber('breakeven_trigger_percent')),
+              trailingStopPercent: Math.max(0, jevNumber('trailing_stop_percent')),
             },
             /*
              * ⚠️ **开仓节流也来自 JEV 选项**（2026-10-19 用户要求）。
@@ -4663,6 +4682,25 @@ export class AutoTrader {
               ...config.throttle,
               maxEntriesPerCycle: Math.max(1, Math.floor(jevNumber('max_entries_per_cycle'))),
               maxEntriesPerHour: Math.max(1, Math.floor(jevNumber('max_entries_per_hour'))),
+            },
+            /*
+             * ⚠️ **单日亏损熔断阈值也来自 JEV 选项**（2026-10-19 用户要求）。
+             *
+             * 用户原话：「熔断改成可配置的，设立一个30%先」
+             *
+             * ## 原来为什么不行
+             *
+             * 那个 5% 写死在 `defaultJevConfig().circuitBreaker.maxDailyLossPercent`，
+             * **界面上改不了**。实盘一天亏到 11% 就触发熔断停摆 ——
+             * 而用户要的是「激进能好测试他能力」，5% 让他一天只能看十几个样本。
+             *
+             * ⚠️ **0 = 关闭**（与 `maxDailyLossPercent` 的既有约定一致）。
+             *   用户设 0 时这条熔断完全不生效 —— 那是他的选择，但代码里
+             *   必须如实传 0，不能偷偷兜底成某个安全值。
+             */
+            circuitBreaker: {
+              ...config.circuitBreaker,
+              maxDailyLossPercent: Math.max(0, jevNumber('max_daily_loss_percent')),
             },
           }
         : config;
