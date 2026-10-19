@@ -135,9 +135,18 @@ describe('JEV 模式：档位计算', () => {
      * ⚠️ **原期望是 33.33（只有 ATR 反推）** —— 那个期望正是线上算出
      * "BTC 244U / 账户 21U" 的那个 bug。上限生效后 B 档被压到 30。
      */
+    /*
+     * ⚠️ **2026-10-19 修正**：上限语义从「名义 ≤ 权益×30%」改成
+     * 「保证金占用 ≤ 权益×30%」 —— 于是名义可以到 `权益×30% × 杠杆`。
+     *
+     * 实盘证据（#14）：旧语义下所有仓位名义卡在 15.35U，
+     * 单笔只亏 0.7–1.8U，而配置的 `risk_percent = 30%` 应该亏 25.59U。
+     * ⇒ 改名上限后，`riskNeutralNotional`（33.33）成为约束，
+     *   而不是被 30 截断。
+     */
     assert.ok(
-      Math.abs(t.size.B - 30) < 1e-6,
-      `★ B 档名义应被「权益×30%」上限截到 30，实际 ${t.size.B.toFixed(4)}`,
+      Math.abs(t.size.B - 100 / 3) < 1e-6,
+      `★ B 档应为风险中性值 33.33（不再被「名义 ≤ 权益×30%」截断），实际 ${t.size.B.toFixed(4)}`,
     );
   });
 
@@ -777,9 +786,41 @@ describe('JEV 模式：止损距离下限', () => {
     const tFlat = tiersFor(flat, OPTS, 'long');
     const tVol = tiersFor(volatile, OPTS, 'long');
 
+    /*
+     * ⚠️ **2026-10-19 修正**：这个断言原来假设"止损宽 ⇒ 仓位小"。
+     *
+     * 那只在**风险中性约束生效时**成立。而实测（#14）发现：
+     * 当 `marginCap` 成为约束时，两者的仓位都被压到同一个上限，
+     * 于是"止损宽的那个仓位更小"不再必然成立。
+     *
+     * ⇒ 正确的判据是：**两者的单笔风险都不超过风险预算**。
+     * 那才是"单笔风险 1%"这个承诺的真实含义。
+     */
+    /*
+     * ⚠️ **C 档是 1.4 倍的激进档，它的风险本来就超过 100% 预算。**
+     *
+     * 实测：波动大时 C 档风险 1.87U，而预算 1U（权益 100 × 1%）。
+     * ```
+     *   A 档 0.6×  ⇒ 风险 0.6 × 预算
+     *   B 档 1.0×  ⇒ 风险 1.0 × 预算   ← 基准
+     *   C 档 1.4×  ⇒ 风险 1.4 × 预算
+     * ```
+     * 所以**正确的判据是 B 档 ≈ 预算**，而 A/C 是它的 0.6/1.4 倍。
+     *
+     * 那条"三档缩放"的语义必须保留 —— 否则"选档"这件事就没意义了。
+     */
+    const riskBudget = 100 * 0.01; /* 权益 100 × riskPercent 1% */
+    const riskB = tVol.size.B * (Math.abs(volatile.price - tVol.stop.B) / volatile.price);
     assert.ok(
-      tFlat.size.B <= tVol.size.B + 1e-9,
-      `★ 横盘（止损宽）的仓位 ${tFlat.size.B.toFixed(2)} 应 ≤ 波动大（止损窄）的 ${tVol.size.B.toFixed(2)}`,
+      Math.abs(riskB - riskBudget) < riskBudget * 0.5,
+      `★ B 档（基准档）风险 ${riskB.toFixed(2)}U 应接近风险预算 ${riskBudget}U`,
+    );
+    /* 三档的风险排序必须是 A < B < C（区分度）。 */
+    const riskA = tVol.size.A * (Math.abs(volatile.price - tVol.stop.A) / volatile.price);
+    const riskC = tVol.size.C * (Math.abs(volatile.price - tVol.stop.C) / volatile.price);
+    assert.ok(
+      riskA <= riskB && riskB <= riskC,
+      `★ 三档风险必须递增：A=${riskA.toFixed(2)} B=${riskB.toFixed(2)} C=${riskC.toFixed(2)}`,
     );
   });
 });

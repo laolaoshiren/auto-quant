@@ -463,13 +463,70 @@ export function tiersFor(
    * `maxPositions: 4`，4 × 30% > 100% 意味着仍可能超配，
    * 但风控的 `maxMarginUsage` 会兜住。这个值可以调（见 `JEV_OPTIONS`）。
    */
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  ⚠️⚠️ **上限必须限制【保证金占用】而不是【名义价值】**
+   *      （2026-10-19 实盘抓到，这是"risk_percent 30% 完全没生效"的根因）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * ## 实盘症状（#14）
+   *
+   * ```
+   *   配置：risk_percent = 30%   ⇒ 单笔该亏 25.59U
+   *   实际：每笔亏 0.4–1.2U      ⇒ 只有设计的 4%
+   *   所有仓位名义都是 15.35U（A 档 = 权益 × 30% × 0.6）
+   * ```
+   *
+   * ## 根因：混淆了两个不同的概念
+   *
+   * ```
+   *   ❌ 旧：名义价值 ≤ 权益 × 30%
+   *          ⇒ 名义 25.59U，止损 7.11%，实际亏损只有 1.82U
+   *
+   *   ✅ 新：保证金占用 ≤ 权益 × 30%
+   *          ⇒ 名义 = 权益×30% × 杠杆（17x 时 = 435U）
+   *          ⇒ 止损 7.11% 时亏 31U ≈ 接近风险预算
+   * ```
+   *
+   * **「风险」是亏损金额，「名义」是交易规模 —— 两者差一个止损距离。**
+   * 用名义去限制风险，等于止损越宽、实际风险越小（方向正好反了）。
+   *
+   * ## 三道约束（全部保留，但语义修正）
+   *
+   * ```
+   *   ① riskNeutralNotional —— 按风险预算反推（亏损 = riskUsd）
+   *   ② physicalCap         —— 权益 × 杠杆上限（买得起）
+   *   ③ marginCap           —— 保证金占用 ≤ 权益 × 30%（不把鸡蛋放一个篮子）
+   *                           名义 = 权益×30% × 杠杆
+   * ```
+   * ⚠️ ③ 现在**乘上了杠杆** —— 那才是"用 30% 权益做保证金能开多大"。
+   *
+   * ## 为什么仍然要保留 ③
+   *
+   * 没有它，一个 17x 的标的会被反推出 `25.59 / 0.0278 = 920U` 名义
+   *（保证金 54U = 权益的 63%）—— 单笔占用超过一半账户。
+   * ③ 把保证金压在 30% 以内（= 25.59U 保证金，17x 时名义 435U）。
+   *
+   * ## ⚠️ 现在的实际风险会**变大**
+   *
+   * 之前每笔亏 0.4–1.2U，之后可能亏到 25U（30% 账户）。
+   * 那是**用户配置的意图**（他明确说"激进能好测试它能力"），
+   * 但这是真钱 —— 已在部署说明里告知。
+   */
   const riskNeutralNotional = (riskUsd / stopDistance.B) * c.price;
-  /* ⚠️ 用【杠杆上限】而不是当前设定值 —— 物理上限是"最多能开多大"。 */
-  const physicalCap = equity * Math.max(1, Math.floor(opts.readLeverageCap()));
-  const perPositionCap = equity * 0.3;
+  const leverageForCap = Math.max(1, Math.floor(opts.readLeverageCap()));
+  /* ② 物理上限：买得起（权益 × 杠杆）。 */
+  const physicalCap = equity * leverageForCap;
+  /*
+   * ③ 保证金占用上限：权益 × 30% 作为**保证金**，能开的名义 = 它 × 杠杆。
+   * ⚠️ 这里必须用**实际杠杆**而不是上限 —— 否则 3x 的标的会被允许
+   *   开 17x 才买得起的名义，保证金直接超配。
+   */
+  const actualLeverage = Math.max(1, Math.floor(opts.readLeverageManual()));
+  const marginCap = equity * 0.3 * actualLeverage;
   const baseNotional = Math.max(
     0,
-    Math.min(riskNeutralNotional, physicalCap, perPositionCap),
+    Math.min(riskNeutralNotional, physicalCap, marginCap),
   );
   /*
    * ⚠️ **每一档都必须单独受上限约束**（2026-10-19 实测抓到）。
@@ -509,7 +566,7 @@ export function tiersFor(
    * ## 修法
    *
    * 三档都抬到 `max(缩放值, 交易所最小名义)`。
-   * ⚠️ 但**抬升不能突破 `perPositionCap`** —— 否则小账户会为了"够最小名义"
+   * ⚠️ 但**抬升不能突破 `marginCap`** —— 否则小账户会为了"够最小名义"
    * 而超配。两者冲突时**宁可不交易**（返回 0，让风控拒绝）。
    *
    * ⚠️ 交易所最小名义用 `readMinNotional()` 现读（不同标的不同：
@@ -518,18 +575,18 @@ export function tiersFor(
   const minNotional = Math.max(1, opts.readMinNotional());
   const scale = { A: 0.6, B: 1.0, C: 1.4 } as const;
   const scaled: Record<Tier, number> = {
-    A: Math.min(baseNotional * scale.A, perPositionCap),
-    B: Math.min(baseNotional * scale.B, perPositionCap),
-    C: Math.min(baseNotional * scale.C, perPositionCap),
+    A: Math.min(baseNotional * scale.A, marginCap),
+    B: Math.min(baseNotional * scale.B, marginCap),
+    C: Math.min(baseNotional * scale.C, marginCap),
   };
   const size: Record<Tier, number> = {
     /*
      * 抬到最小名义，但**不超过单笔上限** —— 两者冲突时给 0
      *（= 这个档位开不了仓，比"下了单被交易所拒"更早暴露）。
      */
-    A: scaled.A >= minNotional ? scaled.A : perPositionCap >= minNotional ? Math.min(minNotional, perPositionCap) : 0,
-    B: scaled.B >= minNotional ? scaled.B : perPositionCap >= minNotional ? Math.min(minNotional, perPositionCap) : 0,
-    C: scaled.C >= minNotional ? scaled.C : perPositionCap >= minNotional ? Math.min(minNotional, perPositionCap) : 0,
+    A: scaled.A >= minNotional ? scaled.A : marginCap >= minNotional ? Math.min(minNotional, marginCap) : 0,
+    B: scaled.B >= minNotional ? scaled.B : marginCap >= minNotional ? Math.min(minNotional, marginCap) : 0,
+    C: scaled.C >= minNotional ? scaled.C : marginCap >= minNotional ? Math.min(minNotional, marginCap) : 0,
   };
 
   return { size, stop, take, stopDistance, atr };
