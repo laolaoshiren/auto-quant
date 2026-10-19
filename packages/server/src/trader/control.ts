@@ -328,6 +328,28 @@ export const JEV_OPTIONS: readonly JevOptionSpec[] = [
     fallback: '8',
   },
   {
+    key: 'max_entries_per_cycle',
+    label: '每周期开仓上限',
+    why:
+      '一个周期（15 分钟）最多新开几个仓。设 2 意味着即使 Jev 判了 6 个机会，' +
+      '也只会执行前 2 个。' +
+      '⚠️ 这是**防止一轮行情里同时踩进多个相关标的**的保护 —— ' +
+      '同一板块的几个币往往一起涨跌，开满会变成一笔大赌注。',
+    kind: 'number',
+    range: { min: 1, max: 20, step: 1, unit: '个' },
+    fallback: '2',
+  },
+  {
+    key: 'max_entries_per_hour',
+    label: '每小时开仓上限',
+    why:
+      '一小时内的总开仓数上限（跨周期累计）。' +
+      '它防止"连续几轮都在开仓"导致一天开几十笔、手续费吃掉利润。',
+    kind: 'number',
+    range: { min: 1, max: 50, step: 1, unit: '个' },
+    fallback: '6',
+  },
+  {
     key: 'hold_ask_every',
     label: '持仓检查频率',
     why:

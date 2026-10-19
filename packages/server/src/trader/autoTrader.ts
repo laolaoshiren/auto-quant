@@ -4593,6 +4593,21 @@ export class AutoTrader {
                 Math.min(config.riskControl.minPositionSize, account.equity * 0.1),
               ),
             },
+            /*
+             * ⚠️ **开仓节流也来自 JEV 选项**（2026-10-19 用户要求）。
+             *
+             * 用户截图指出「开仓节流：本周期已开 2 仓（上限 2）」——
+             * 那个 2 来自 `defaultJevConfig().throttle.maxEntriesPerCycle`，
+             * **界面上改不了**。
+             *
+             * ⚠️ `throttle` 是 `riskControl` 的**兄弟字段**（不是子字段），
+             * 所以要在这一层展开，而不是塞进 `riskControl` 里。
+             */
+            throttle: {
+              ...config.throttle,
+              maxEntriesPerCycle: Math.max(1, Math.floor(jevNumber('max_entries_per_cycle'))),
+              maxEntriesPerHour: Math.max(1, Math.floor(jevNumber('max_entries_per_hour'))),
+            },
           }
         : config;
 
