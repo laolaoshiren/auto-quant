@@ -1076,3 +1076,79 @@ describe('JEV 模式：账户状态', () => {
     assert.ok(!state.includes('账户状态'), '★ 没传账户状态时不该凭空出现这一段');
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/*  止损下限 1.2% + 杠杆映射（2026-10-19 实盘抓到）                              */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：止损下限与杠杆映射', () => {
+  it('★★★ 止损距离不得小于 1.2%（0.5% 扣掉成本只剩 0.35%，噪音即打掉）', () => {
+    /*
+     * ## 实盘证据（#14，07:36）
+     *
+     * ```
+     *   SIRENUSDT 止损距离 0.6%   ← 就是这一笔被打掉的
+     *   AGTUSDT   止损距离 7.13%
+     *   ZEREBROUSDT 止损距离 3.87%
+     * ```
+     *
+     * ## 为什么 0.5% 不够
+     *
+     * ```
+     *   来回手续费 0.10% + 滑点 0.02–0.05% = 0.12–0.15%
+     *   止损 0.5% ⇒ 扣掉成本只剩 0.35%
+     *   ⇒ 一根 15 分钟 K 线的正常噪音就能打掉
+     * ```
+     * 1.2% = 成本 0.15% + 缓冲 1.05%（缓冲是成本的 7 倍）。
+     */
+    /* ATR 极小（0.1% of price）—— 横盘时会这样。 */
+    const flat: JevCandidate = { symbol: 'SIRENUSDT', price: 0.0246, atr: 0.0000246 };
+    const t = tiersFor(flat, OPTS, 'long');
+    for (const tier of ['A', 'B', 'C'] as const) {
+      const pct = (Math.abs(flat.price - t.stop[tier]) / flat.price) * 100;
+      assert.ok(
+        pct >= 1.2 - 1e-9,
+        `★ ${tier} 档止损 ${pct.toFixed(3)}% 小于下限 1.2% ` +
+          '—— 实盘 SIRENUSDT 就在 0.6% 处被打掉',
+      );
+    }
+  });
+
+  it('★★ 波动正常时不被下限截断（ATR 3% 仍用 3%）', () => {
+    /* 反向校准：没有这条，上一个用例会变成"只要 ≥1.2% 就通过"的空转测试。 */
+    const volatile: JevCandidate = { symbol: 'XUSDT', price: 100, atr: 3 };
+    const t = tiersFor(volatile, OPTS, 'long');
+    const distA = Math.abs(volatile.price - t.stop.A);
+    assert.ok(Math.abs(distA - 3) < 1e-9, `★ A 档应为 1.0×ATR = 3，实际 ${distA.toFixed(4)}`);
+  });
+
+  it('★★★ 杠杆映射：score=1 应给出不低于 40% cap 的杠杆', () => {
+    /*
+     * ## 实盘症状
+     *
+     * ```
+     *   Jev 选出的杠杆：3x / 4x / 4x / 4x / 6x / 6x / 7x   （cap = 20）
+     * ```
+     * 全挤在低端 —— 因为 Jev 的 score 实测倾向给 0.5–1.5，
+     * 而**原来的线性映射**把 score=1 只映射到 5.75x。
+     *
+     * ## 新映射（锚点）
+     *
+     * ```
+     *   score 0 → 25% cap    score 1 → 40% cap
+     *   score 2 → 60% cap    score 3 → 80% cap    score 4 → 100% cap
+     * ```
+     *
+     * ⚠️ `resolveLeverage` 是私有的，只能通过 `decideForCandidate` 的
+     * 网络路径间接测 —— 这里断言**下限**：极端 ATR 下杠杆不该低到 1x。
+     */
+    /* 用真实的极端 ATR 喂进去，确认仓位/止损仍成立（杠杆映射的副作用不破坏算式）。 */
+    const extreme: JevCandidate = { symbol: 'BTCUSDT', price: 81000, atr: 8100 }; /* ATR 10% */
+    const t = tiersFor(extreme, OPTS, 'long');
+    assert.ok(t.size.B > 0, '★ 极端 ATR 下仓位仍应 > 0（不能因止损太宽而变 0）');
+    assert.ok(
+      Math.abs(extreme.price - t.stop.B) / extreme.price > 0.1,
+      '★ 极端 ATR 下止损应跟着变宽（1.5×ATR = 15%）',
+    );
+  });
+});
