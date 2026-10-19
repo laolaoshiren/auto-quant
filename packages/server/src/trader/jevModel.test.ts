@@ -24,6 +24,10 @@ import { createJevDecisionModel } from './jevModel.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { defaultJevConfig } from '@aq/shared';
+
+import { checkCircuitBreakers } from '../risk/engine.js';
+
 import {
   buildState,
   extractJevInput,
@@ -1239,5 +1243,55 @@ describe('JEV 模式：实盘参数可配置', () => {
     assert.ok(t.size.A > 0 && t.size.B > 0 && t.size.C > 0, '★ 三档都应 > 0');
     assert.ok(t.size.A <= t.size.B, '★ A ≤ B');
     assert.ok(t.size.B <= t.size.C, '★ B ≤ C');
+  });
+});
+
+describe('JEV 模式：熔断阈值可配置', () => {
+  it('★★★ 熔断配置必须从 JEV 选项读，且 0 表示关闭', () => {
+    /*
+     * ## 2026-10-19 实盘 BUG
+     *
+     * 我把 `circuitBreaker.maxDailyLossPercent` 的覆盖写进了 `riskConfig`
+     *（风控引擎用的那份），而**熔断读的是 `config`** —— 两个不同的对象。
+     *
+     * ```
+     *   界面上显示：30%（用户设的）
+     *   实际拦截：  5%（defaultJevConfig 里写死的）
+     *   ⇒ 连续 4 轮 skip_cycle，Jev 一次都没被问
+     * ```
+     *
+     * ## 这条测试钉住什么
+     *
+     * `checkCircuitBreakers` 读的是传进去的那个 config 的
+     * `circuitBreaker.maxDailyLossPercent`。所以只要断言
+     * "改配置能改变熔断判定"，就能防住"覆盖写错地方"这个洞。
+     */
+    const base = defaultJevConfig();
+    /* 今日亏 11%（实盘那一刻的真实数字）。 */
+    const input = { dailyRealizedPnl: -9.4, highWaterEquity: 85 };
+
+    /* 5%（默认）：应熔断。 */
+    const strict = checkCircuitBreakers(
+      { ...base, circuitBreaker: { ...base.circuitBreaker, maxDailyLossPercent: 5 } },
+      85,
+      input,
+    );
+    assert.equal(strict.blocked, true, '★ 上限 5% 且已亏 11% 时应熔断');
+
+    /* 30%（用户设的）：不应熔断。 */
+    const loose = checkCircuitBreakers(
+      { ...base, circuitBreaker: { ...base.circuitBreaker, maxDailyLossPercent: 30 } },
+      85,
+      input,
+    );
+    assert.equal(loose.blocked, false, '★ 上限改成 30% 后不该再熔断（实盘 4 轮白跳的根因）');
+
+    /* 0 = 关闭：亏多少都不熔断。 */
+    const off = checkCircuitBreakers(
+      { ...base, circuitBreaker: { ...base.circuitBreaker, maxDailyLossPercent: 0 } },
+      85,
+      { dailyRealizedPnl: -84, highWaterEquity: 85 },
+    );
+    assert.equal(off.blocked, false, '★ 0 表示关闭这条熔断');
   });
 });

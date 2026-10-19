@@ -2972,7 +2972,47 @@ export class AutoTrader {
      * `deps.agent` 不存在时这个调用什么都没做，所以老机器人不受影响。
      */
     this.refreshAgentState();
-    const config = this.activeConfig;
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  ⚠️⚠️ **JEV 模式的熔断阈值必须在这里覆盖**（2026-10-19 实盘抓到）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * ## 我犯的错
+     *
+     * 我把 `circuitBreaker` 的覆盖写进了 `riskConfig`（第 4597 行那个），
+     * 而**熔断读的是 `config`（这一行）** —— 两个不同的对象：
+     *
+     * ```
+     *   config      → checkCircuitBreakers(config, ...)   熔断用这个
+     *   riskConfig  → this.risk.review(decisions, {...})  风控引擎用那个
+     * ```
+     * ⇒ 用户在界面上把熔断从 5% 改成 30%，**界面上显示 30%，实际仍按 5% 拦**。
+     *
+     * ## 实盘症状
+     *
+     * ```
+     *   10:45 部署（熔断 5% → 30%）
+     *   10:54 周期15  skip_cycle「上限 5%」   ← 还在按 5% 拦
+     *   11:09 周期16  skip_cycle「上限 5%」
+     *   ⇒ 一天里连续 4 轮白白跳过，Jev 一次都没被问
+     * ```
+     *
+     * ## 修法
+     *
+     * 在 `config` 这一层就覆盖 —— 它是本轮所有下游（熔断、风控、提示词）
+     * 共同的源头。**覆盖在源头，就不会有"某条路径忘了"的洞。**
+     */
+    const config: StrategyConfig =
+      this.deps.trader.mode === 'jev'
+        ? {
+            ...this.activeConfig,
+            circuitBreaker: {
+              ...this.activeConfig.circuitBreaker,
+              /* 0 = 关闭这条熔断（与既有约定一致）。 */
+              maxDailyLossPercent: Math.max(0, jevNumber('max_daily_loss_percent')),
+            },
+          }
+        : this.activeConfig;
 
     /* --- 1. Authoritative account state ---------------------------------- */
     const account = await this.deps.broker.getAccountState();
@@ -4698,10 +4738,14 @@ export class AutoTrader {
              *   用户设 0 时这条熔断完全不生效 —— 那是他的选择，但代码里
              *   必须如实传 0，不能偷偷兜底成某个安全值。
              */
-            circuitBreaker: {
-              ...config.circuitBreaker,
-              maxDailyLossPercent: Math.max(0, jevNumber('max_daily_loss_percent')),
-            },
+            /*
+             * ⚠️ `circuitBreaker` **不在这里覆盖** —— 熔断读的是 `config`
+             *（本轮开头那一处），不是 `riskConfig`。
+             *
+             * 2026-10-19 的教训：我原来在这里覆盖，界面上显示 30% 而实际按 5% 拦，
+             * 连续 4 轮 skip_cycle。**覆盖要放在所有下游的共同源头**，
+             * 放在某个消费者身上就必然漏掉别的消费者。
+             */
           }
         : config;
 
