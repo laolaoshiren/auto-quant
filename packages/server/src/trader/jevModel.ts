@@ -111,6 +111,80 @@ export interface JevCandidate {
   ema20?: number;
   /** 已有持仓的方向 —— 有仓时不新开（本模式只做"开仓/跳过"）。 */
   heldSide?: 'long' | 'short';
+  /**
+   * **账户状态**（2026-10-19 用户要求）。
+   *
+   * ## 为什么必须有
+   *
+   * 用户原话：
+   * > 「还有就是给JEV 判断里面现在有没有实际仓位？
+   * >  （如果开很多仓位了JEV不知道又一直要开仓的情况，
+   * >   你研究一下到底要投喂哪些数据最合理，你要考虑实际真实情况）」
+   *
+   * ## 缺了它会怎样（线上实测）
+   *
+   * ```
+   * 00:30 那轮：Jev 提议开仓 6 个，而 maxEntriesPerCycle = 2
+   * ⇒ 风控拒掉 4 个，日志里全是 rejected:open_xxx
+   * ```
+   * **Jev 不知道额度，所以它不会"挑最好的 2 个"，而是"随便提 6 个"。**
+   * 那浪费了它唯一的价值 —— 判断哪个机会最好。
+   *
+   * ## ⚠️ 为什么给"结论"而不是原始数字
+   *
+   * Jev **不擅长算术**（官方文档明确说它是分类器，不是计算器）。
+   * 给它「保证金已用 1.06U、权益 21.18U、上限 30%」让它自己算
+   * 「还能用多少」—— 实测它会算错。
+   *
+   * ⇒ 这里给的是**已经算好的结论**：`canOpenMore`、`marginRoomPercent`。
+   */
+  account?: JevAccountState;
+}
+
+/**
+ * **Jev 能看到的账户状态**（2026-10-19）。
+ *
+ * ## 设计原则：只给"会影响它该不该开仓"的事实
+ *
+ * | 给了 | 为什么 |
+ * |---|---|
+ * | `openPositions` / `maxPositions` | 满了就不该再提 |
+ * | `canOpenMore` | **算好的结论**，不让它自己减 |
+ * | `marginUsedPercent` / `marginLimitPercent` | 还有多少保证金空间 |
+ * | `entriesThisCycle` / `maxEntriesPerCycle` | 本轮额度（决定"提几个"） |
+ * | `entriesThisHour` / `maxEntriesPerHour` | 小时额度 |
+ * | `heldSymbols` | 哪些已持仓（避免同标的重复） |
+ *
+ * ⚠️ **不给的东西**（刻意的）：
+ * ```
+ *   · 浮盈浮亏明细 —— 那是持仓问询（P1）的事，不是开仓判断的依据
+ *   · 历史胜率       —— 它改变不了当前这一笔的胜算
+ *   · 账户绝对余额   —— 仓位档已经按权益算好了，给它只会让它想重新算
+ * ```
+ */
+export interface JevAccountState {
+  /** 当前权益（USDT）。 */
+  equity: number;
+  /** 当前持仓数。 */
+  openPositions: number;
+  /** 持仓数上限（`riskControl.maxPositions`）。 */
+  maxPositions: number;
+  /** **还能开几个仓**（已算好：`maxPositions - openPositions`，不小于 0）。 */
+  canOpenMore: number;
+  /** 保证金占用百分比（已算好）。 */
+  marginUsedPercent: number;
+  /** 保证金占用上限百分比（`riskControl.maxMarginUsage`）。 */
+  marginLimitPercent: number;
+  /** 本轮已开几个仓。 */
+  entriesThisCycle: number;
+  /** 本轮开仓上限（`throttle.maxEntriesPerCycle`）。 */
+  maxEntriesPerCycle: number;
+  /** 本小时已开几个仓。 */
+  entriesThisHour: number;
+  /** 本小时开仓上限（`throttle.maxEntriesPerHour`）。 */
+  maxEntriesPerHour: number;
+  /** 已持仓的标的（`symbol → side`）—— 避免对同一标的重复提议。 */
+  heldSymbols?: ReadonlyArray<{ symbol: string; side: 'long' | 'short' }>;
 }
 
 /** 本模式的可调参数。 */
@@ -473,6 +547,74 @@ export function buildState(
   ];
 
   lines.push('', ...tierLine('做多', longTiers, '【做多】'), '', ...tierLine('做空', shortTiers, '【做空】'));
+
+  /*
+   * ══════════════════════════════════════════════════════════════════════════
+   *  **账户状态**（2026-10-19 用户要求）
+   * ══════════════════════════════════════════════════════════════════════════
+   *
+   * 用户原话：
+   * > 「给JEV 判断里面现在有没有实际仓位？（如果开很多仓位了JEV不知道
+   * >  又一直要开仓的情况，你研究一下到底要投喂哪些数据最合理）」
+   *
+   * ## 放在"标的"之后、"杠杆范围"之前
+   *
+   * 顺序的理由：先看"这个标的长什么样"（事实），再看"我还有多少余地"
+   * （约束），最后是"你能选多少杠杆"（最细的约束）。
+   *
+   * ## ⚠️ 每条都给【结论】而不是原始数字
+   *
+   * Jev 不擅长算术。所以：
+   * ```
+   *   ✗ 「持仓 1、上限 4」      → 它要自己减
+   *   ✓ 「还能开 3 个」         → 直接可用
+   * ```
+   * 两者都给（原始 + 结论）—— 原始数字让它理解"为什么"，
+   * 结论让它**不用算**。
+   */
+  if (c.account !== undefined) {
+    const a = c.account;
+    lines.push('', '【账户状态】');
+    lines.push(
+      `权益 ${a.equity.toFixed(2)}U · 已用保证金 ${a.marginUsedPercent.toFixed(1)}%` +
+        `（上限 ${a.marginLimitPercent}%）`,
+    );
+    lines.push(`当前持仓 ${a.openPositions}/${a.maxPositions} 个 · **还能开 ${a.canOpenMore} 个**`);
+    lines.push(
+      `本轮已开 ${a.entriesThisCycle}/${a.maxEntriesPerCycle} 个 · ` +
+        `本小时已开 ${a.entriesThisHour}/${a.maxEntriesPerHour} 个`,
+    );
+    if (a.heldSymbols !== undefined && a.heldSymbols.length > 0) {
+      const heldText = a.heldSymbols
+        .map((h) => `${h.symbol}（${h.side === 'long' ? '多' : '空'}）`)
+        .join('、');
+      lines.push(`已持仓标的：${heldText} —— 这些不要再开同方向的仓`);
+    }
+    /*
+     * ⚠️ **额度用完时明说**。
+     *
+     * 不说的话 Jev 仍然会提议开仓（它看到机会就想做），
+     * 而风控会全部拒掉 —— 日志里一堆 `rejected`，看起来像风控在跟模型作对。
+     * 说清了它就会主动选 `skip`，那一轮的日志就是干净的"额度用完"。
+     */
+    if (a.canOpenMore <= 0) {
+      lines.push('⚠️ 持仓数已达上限 —— 本轮只能平仓或跳过，不能再开新仓。');
+    } else if (a.entriesThisCycle >= a.maxEntriesPerCycle) {
+      lines.push('⚠️ 本周期开仓额度已用完 —— 本轮只能平仓或跳过。');
+    } else if (a.entriesThisHour >= a.maxEntriesPerHour) {
+      lines.push('⚠️ 本小时开仓额度已用完 —— 本轮只能平仓或跳过。');
+    } else {
+      const room = Math.min(
+        a.canOpenMore,
+        a.maxEntriesPerCycle - a.entriesThisCycle,
+        a.maxEntriesPerHour - a.entriesThisHour,
+      );
+      lines.push(
+        `⇒ **本轮最多能开 ${room} 个新仓**（取持仓上限、本周期额度、本小时额度三者中最小的）。` +
+          '如果要开多个，请优先挑机会最好的那几个。',
+      );
+    }
+  }
 
   /*
    * 杠杆范围放**最后一行**：它是"你能选多少"的约束，

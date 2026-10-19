@@ -62,6 +62,7 @@ import {
   type PromptContext,
   type PromptRejection,
 } from '../strategy/prompt.js';
+import type { JevAccountState } from './jevModel.js';
 import { jevBool, jevEnum, jevNumber } from './control.js';
 import { last } from '../market/indicators.js';
 import { isMajorSymbol, type DecisionAction } from '@aq/shared';
@@ -3973,10 +3974,63 @@ export class AutoTrader {
      *
      * 本模式只做"开仓 / 跳过"，已有持仓的标的要跳过（不叠加）。
      * 那个判断需要**持仓列表**，而 `jevModel` 只拿得到 prompt 文本。
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     *  **把账户状态交给 Jev**（2026-10-19 用户要求）
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * 用户原话：
+     * > 「给JEV 判断里面现在有没有实际仓位？（如果开很多仓位了JEV不知道
+     * >  又一直要开仓的情况，你研究一下到底要投喂哪些数据最合理，
+     * >  你要考虑实际真实情况）」
+     *
+     * ## 线上实测的症状
+     *
+     * ```
+     *   00:30 那轮：Jev 提议开仓 6 个，而 maxEntriesPerCycle = 2
+     *   ⇒ 风控拒掉 4 个，日志里全是 rejected:open_xxx
+     *   04:xx 那轮：已持仓 4/4，Jev 仍在提议开仓
+     *   ⇒ 「已达最大同时持仓数（4/4）」被拒
+     * ```
+     * **它不知道额度，所以不会"挑最好的"，只会"随便提一堆"。**
+     * 那浪费了它唯一的价值 —— 判断哪个机会最好。
+     *
+     * ## ⚠️ 给结论而不是原始数字
+     *
+     * Jev 不擅长算术。所以 `canOpenMore` 是**算好的**，
+     * 而不是让它自己用 `maxPositions - openPositions`。
      */
+    const jevAccountState: JevAccountState | undefined =
+      this.deps.trader.mode === 'jev'
+        ? (() => {
+            const maxPositions = Math.max(1, Math.floor(jevNumber('max_positions')));
+            const maxPerCycle = Math.max(1, Math.floor(jevNumber('max_entries_per_cycle')));
+            const maxPerHour = Math.max(1, Math.floor(jevNumber('max_entries_per_hour')));
+            const equity = promptContext.account.equity;
+            const marginUsed = promptContext.account.marginUsed;
+            const openPositions = promptContext.positions.length;
+            return {
+              equity,
+              openPositions,
+              maxPositions,
+              canOpenMore: Math.max(0, maxPositions - openPositions),
+              /* 已算好的百分比 —— 不让 Jev 自己做除法。 */
+              marginUsedPercent: equity > 0 ? (marginUsed / equity) * 100 : 0,
+              marginLimitPercent: promptContext.config.riskControl.maxMarginUsage,
+              entriesThisCycle: 0,
+              maxEntriesPerCycle: maxPerCycle,
+              entriesThisHour: entriesLastHour,
+              maxEntriesPerHour: maxPerHour,
+              heldSymbols: promptContext.positions.map((p) => ({
+                symbol: p.position.symbol,
+                side: p.position.side === 'long' ? ('long' as const) : ('short' as const),
+              })),
+            };
+          })()
+        : undefined;
     const jevInput =
       this.deps.trader.mode === 'jev'
-        ? buildJevInputBlock(promptContext, this.promptBudget)
+        ? buildJevInputBlock(promptContext, this.promptBudget, jevAccountState)
         : '';
     const promptForModel = jevInput === '' ? userPrompt : `${userPrompt}\n\n${jevInput}`;
 
@@ -4592,6 +4646,8 @@ export class AutoTrader {
                 1,
                 Math.min(config.riskControl.minPositionSize, account.equity * 0.1),
               ),
+              /* 最大同时持仓数也来自 JEV 选项（2026-10-19 用户要求）。 */
+              maxPositions: Math.max(1, Math.floor(jevNumber('max_positions'))),
             },
             /*
              * ⚠️ **开仓节流也来自 JEV 选项**（2026-10-19 用户要求）。
@@ -12827,7 +12883,27 @@ export function readForeignActivity(traderId: number): {
  * 上限在这里就截断，`jevModel` 那边再截一次（双重保险，不会因为
  * 一处改动就失控）。
  */
-function buildJevInputBlock(ctx: PromptContext, _budgetTokens: number): string {
+function buildJevInputBlock(
+  ctx: PromptContext,
+  _budgetTokens: number,
+  /**
+   * **账户状态**（2026-10-19 用户要求）。
+   *
+   * 用户原话：
+   * > 「给JEV 判断里面现在有没有实际仓位？（如果开很多仓位了JEV不知道
+   * >  又一直要开仓的情况，你研究一下到底要投喂哪些数据最合理）」
+   *
+   * ## 为什么从参数传进来而不是从 `ctx` 读
+   *
+   * `PromptContext` 是**提示词层**的结构（给普通 LLM 用的散文渲染），
+   * 它没有"本轮已开几仓"这种**交易循环的状态**。
+   * 那些数只有 `AutoTrader` 自己知道（它管着节流计数）。
+   *
+   * ⇒ 加一个参数，而不是往 `PromptContext` 塞字段 ——
+   *   后者会让"提示词层"依赖"交易循环的状态"，方向是反的。
+   */
+  account?: JevAccountState,
+): string {
   const held = new Map<string, 'long' | 'short'>();
   for (const p of ctx.positions) {
     const side = p.position.side;
@@ -12876,6 +12952,8 @@ function buildJevInputBlock(ctx: PromptContext, _budgetTokens: number): string {
       ...(rsi7 !== undefined && Number.isFinite(rsi7) ? { rsi7 } : {}),
       ...(ema20 !== undefined && Number.isFinite(ema20) ? { ema20 } : {}),
       ...(held.has(c.symbol) ? { heldSide: held.get(c.symbol) } : {}),
+      /* 账户状态挂到每个候选上 —— `jevModel` 从 `c.account` 读。 */
+      ...(account !== undefined ? { account } : {}),
       
     };
   });

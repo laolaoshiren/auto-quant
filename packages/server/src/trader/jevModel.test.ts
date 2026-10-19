@@ -980,3 +980,99 @@ describe('JEV 模式：请求里必须包含全部必需问题', () => {
     );
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/*  账户状态（2026-10-19 用户要求）                                              */
+/* -------------------------------------------------------------------------- */
+
+describe('JEV 模式：账户状态', () => {
+  it('★★★ 有账户状态时 state 里必须出现「还能开几个」的结论', () => {
+    /*
+     * ## 用户的要求
+     *
+     * > 「给JEV 判断里面现在有没有实际仓位？（如果开很多仓位了JEV不知道
+     * >  又一直要开仓的情况，你研究一下到底要投喂哪些数据最合理）」
+     *
+     * ## 线上症状
+     *
+     * ```
+     * 00:30 那轮：Jev 提议开仓 6 个，而 maxEntriesPerCycle = 2
+     *           ⇒ 风控拒掉 4 个
+     * 04:xx 那轮：已持仓 4/4，Jev 仍在提议开仓
+     * ```
+     *
+     * ## ⚠️ 为什么必须给"结论"而不是原始数字
+     *
+     * Jev 不擅长算术。给它「持仓 1、上限 4」让它自己减 —— 实测会算错。
+     * 所以 `canOpenMore` 是**代码算好的**，state 里直接说"还能开 N 个"。
+     */
+    const t = tiersFor({ symbol: 'XUSDT', price: 100, atr: 2 }, OPTS, 'long');
+    const state = buildState(
+      {
+        symbol: 'XUSDT',
+        price: 100,
+        atr: 2,
+        account: {
+          equity: 21.2,
+          openPositions: 1,
+          maxPositions: 4,
+          canOpenMore: 3,
+          marginUsedPercent: 5,
+          marginLimitPercent: 30,
+          entriesThisCycle: 0,
+          maxEntriesPerCycle: 2,
+          entriesThisHour: 3,
+          maxEntriesPerHour: 6,
+          heldSymbols: [{ symbol: 'BRUSDT', side: 'short' }],
+        },
+      },
+      t,
+      t,
+    );
+    assert.ok(state.includes('账户状态'), '★ state 里必须有【账户状态】段');
+    assert.ok(state.includes('还能开 3 个'), '★ 必须给出"还能开几个"的结论');
+    assert.ok(state.includes('持仓 1/4'), '★ 必须给出持仓数（让它理解为什么）');
+    assert.ok(state.includes('BRUSDT'), '★ 已持仓标的必须列出来');
+    assert.ok(state.includes('本轮最多能开'), '★ 必须给出本轮额度的结论');
+  });
+
+  it('★★★ 持仓满时必须明说"不能再开新仓"', () => {
+    /*
+     * 不说的话 Jev 仍然会提议开仓（它看到机会就想做），而风控会全部拒掉 ——
+     * 日志里一堆 `rejected`，看起来像风控在跟模型作对。
+     * 说清了它就会主动选 `skip`，那一轮的日志就是干净的。
+     */
+    const t = tiersFor({ symbol: 'XUSDT', price: 100, atr: 2 }, OPTS, 'long');
+    const state = buildState(
+      {
+        symbol: 'XUSDT',
+        price: 100,
+        atr: 2,
+        account: {
+          equity: 21.2,
+          openPositions: 4,
+          maxPositions: 4,
+          canOpenMore: 0,
+          marginUsedPercent: 25,
+          marginLimitPercent: 30,
+          entriesThisCycle: 0,
+          maxEntriesPerCycle: 2,
+          entriesThisHour: 3,
+          maxEntriesPerHour: 6,
+        },
+      },
+      t,
+      t,
+    );
+    assert.ok(
+      state.includes('持仓数已达上限'),
+      '★ 持仓满时必须明说不能再开（否则它会一直提，被风控拒）',
+    );
+  });
+
+  it('★★ 没有账户状态时 state 里不该出现那一整段（其它模式逐字节不变）', () => {
+    const t = tiersFor({ symbol: 'XUSDT', price: 100, atr: 2 }, OPTS, 'long');
+    const state = buildState({ symbol: 'XUSDT', price: 100, atr: 2 }, t, t);
+    assert.ok(!state.includes('账户状态'), '★ 没传账户状态时不该凭空出现这一段');
+  });
+});

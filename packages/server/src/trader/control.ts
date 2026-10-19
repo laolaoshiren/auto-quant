@@ -328,6 +328,18 @@ export const JEV_OPTIONS: readonly JevOptionSpec[] = [
     fallback: '8',
   },
   {
+    key: 'max_positions',
+    label: '最大同时持仓',
+    why:
+      '同时最多持有几个仓位。到上限后新的机会会被风控拒掉。' +
+      '⚠️ 它和「每周期开仓上限」是两件事：这个限制"总共能有多少"，' +
+      '那个限制"一轮最多新开几个"。' +
+      '持仓越多越分散风险，但也越难盯住、且每个仓位的保证金被摊薄。',
+    kind: 'number',
+    range: { min: 1, max: 20, step: 1, unit: '个' },
+    fallback: '4',
+  },
+  {
     key: 'max_entries_per_cycle',
     label: '每周期开仓上限',
     why:
