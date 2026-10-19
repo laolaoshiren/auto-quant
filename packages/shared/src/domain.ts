@@ -370,6 +370,39 @@ export interface PositionView {
   notional: number;
   stopLoss: number | null;
   takeProfit: number | null;
+  /**
+   * **保护单还在挂载中**（2026-10-19 用户要求）。
+   *
+   * ## 为什么需要这个字段
+   *
+   * 用户原话：
+   * > 「我刚才看到这单开单的时候提示没有止损，后面又有了好像是系统自动补上，
+   * >  但是这显示是不是有问题？…显示要正常不要让我产生误会」
+   *
+   * ## 那个"没有止损"是什么
+   *
+   * 一条市价开仓的时间线：
+   * ```
+   *   t+0s   下单成交（此时持仓存在，但保护单还没发请求）
+   *   t+2s   两张条件单挂好
+   * ```
+   * 页面若在 t+0~t+2 之间刷新，`stopLoss` 已经有值（本地决策时就算好了），
+   * **但交易所侧还没有对应的挂单** —— 于是出现两种误导：
+   * ```
+   *   ① "无止损" 红标  → 用户以为裸奔
+   *   ② 显示止损价但交易所其实没有那张单 → 用户以为有保护
+   * ```
+   *
+   * ## 判定方式
+   *
+   * `openedAt` 距今很近（< `PROTECTION_PENDING_MS`）**且**该持仓的
+   * `stopLoss` / `takeProfit` 在 `orders` 表里还没有对应的 `NEW` 行
+   * ⇒ 这就是"正在挂"。服务端算好这个布尔值，客户端不再自己推。
+   *
+   * ⚠️ **它是"未知"而不是"没有"**。所以界面显示「挂单中」，
+   * 不能显示「无止损」—— 后者是一个**结论**，而此刻我们并不知道。
+   */
+  protectionPending?: boolean;
   openedAt: string;
   /** Free-form reason captured at entry, from the model. */
   openReasoning: string;

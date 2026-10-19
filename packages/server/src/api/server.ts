@@ -2502,6 +2502,51 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     }
   };
 
+  /**
+   * **保护单是否还在挂载中**（2026-10-19 用户要求）。
+   *
+   * ## 为什么需要它
+   *
+   * 用户原话：
+   * > 「我刚才看到这单开单的时候提示没有止损，后面又有了好像是系统自动补上，
+   * >  但是这显示是不是有问题？…显示要正常不要让我产生误会」
+   *
+   * 市场价开仓到保护单挂好之间有约 2 秒的窗口：
+   * ```
+   *   t+0s  成交（持仓已存在，stopLoss 在本地也已算好）
+   *   t+2s  两张条件单挂上
+   * ```
+   * 窗口内界面说「无止损」是**把"还不知道"说成了"没有"** —— 两件事不一样。
+   *
+   * ## 判据
+   *
+   * ```
+   *   开仓不足 60 秒  &&  该标的一条 NEW 保护单都没有  ⇒ 挂载中
+   * ```
+   * 60 秒远大于实测的 2 秒，留足余量；超过 60 秒还缺，
+   * 那就是**真的缺**（由 `ensureStopsOnOpenPositions()` 下一轮补），
+   * 这时界面该如实说"无止损"。
+   *
+   * ⚠️ 只在**本地持仓**上算（模拟盘/未运行机器人）。实盘走交易所挂单列表，
+   * 那里本来就是真相，不需要这个猜测。
+   */
+  const PROTECTION_PENDING_MS = 60_000;
+  const protectionPendingOf = (
+    traderId: number,
+    row: { symbol: string; opened_at: string },
+  ): boolean => {
+    const age = Date.now() - new Date(row.opened_at).getTime();
+    if (!(age >= 0 && age < PROTECTION_PENDING_MS)) return false;
+    try {
+      /* 有任何一张 NEW 的保护单就不算"挂载中" —— 已经在挂了。 */
+      const orderTypes = orderStore.openProtectionTypes(traderId, row.symbol);
+      return orderTypes.length === 0;
+    } catch {
+      /* 读不到订单表时**不猜**：当作不在挂载中，让界面按实际情况显示。 */
+      return false;
+    }
+  };
+
   const localPositionsFor = (
     traderId: number,
     markPriceOf?: ReadonlyMap<string, number>,
@@ -2581,6 +2626,8 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         notional: row.quantity * markPrice,
         stopLoss: row.stop_loss,
         takeProfit: row.take_profit,
+        /* 刚开仓且保护单还没挂好 —— 界面显示「挂单中」而不是「无止损」。 */
+        protectionPending: protectionPendingOf(traderId, row),
         openedAt: row.opened_at,
         openReasoning: row.open_reasoning,
       };

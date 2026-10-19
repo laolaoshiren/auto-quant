@@ -1554,6 +1554,36 @@ export const orders = {
    * 如果之后有人在交易所手工改了模式，这里记的仍是旧值，界面那列的 `title`
    * 与 `/positions` 的实时读取会兜底（见 `recordOrder` 的说明）。
    */
+  /**
+   * **某标的下还在挂着的保护单类型**（`STOP*` / `TAKE_PROFIT*`）。
+   *
+   * ## 为什么需要它
+   *
+   * 界面要回答「这个持仓的保护单到底挂上了没有」。`positions` 表的
+   * `stop_loss` / `take_profit` 只是**意向值**（决策时就算好了），
+   * 而"挂上了"这件事只有 `orders` 表知道 —— 那里才有 `status = 'NEW'` 的行。
+   *
+   * 两者在开仓后的头两秒会不一致：
+   * ```
+   *   t+0s  持仓行已写，stop_loss 有值
+   *   t+2s  保护单行才写进 orders
+   * ```
+   * 窗口内若只看 `positions`，界面会把"正在挂"说成"没有"。
+   *
+   * ⚠️ 只返回**保护单**类型（止损/止盈），不含入场单 ——
+   * 调用方问的是"有没有保护"，入场单不是保护。
+   */
+  openProtectionTypes(traderId: number, symbol: string): string[] {
+    const rows = getDb().all<{ type: string }>(
+      `SELECT type FROM orders
+        WHERE trader_id = ? AND symbol = ? AND status = 'NEW'
+          AND (type LIKE 'STOP%' OR type LIKE 'TAKE_PROFIT%' OR type = 'TRAILING_STOP_MARKET')`,
+      traderId,
+      symbol,
+    );
+    return rows.map((row) => row.type);
+  },
+
   latestMarginTypeBySymbol(traderId: number): Map<string, string> {
     const map = new Map<string, string>();
     for (const row of getDb().all<{ symbol: string; margin_type: string }>(

@@ -998,7 +998,22 @@ export function PositionsTable({
           </thead>
           <tbody>
             {shown.map((position) => {
-              const missingStop = position.stopLoss === null || position.stopLoss === undefined;
+              /*
+         * ⚠️ **"挂单中" ≠ "没有止损"**（2026-10-19 用户要求）。
+         *
+         * 用户原话：
+         * > 「我刚才看到这单开单的时候提示没有止损，后面又有了好像是系统自动补上，
+         * >  但是这显示是不是有问题？…显示要正常不要让我产生误会」
+         *
+         * 市价开仓到保护单挂好之间约有 2 秒。窗口内把"还不知道"说成"没有"，
+         * 会让操作员以为仓位在裸奔 —— 那是**一个结论，而此刻并没有依据**。
+         *
+         * 服务端算好 `protectionPending`（开仓 <60 秒且订单表里还没有保护单），
+         * 这里只负责照着显示。
+         */
+        const protectionPending = position.protectionPending === true;
+        const missingStop =
+          !protectionPending && (position.stopLoss === null || position.stopLoss === undefined);
               const stopDistance = position.stopLoss ? distancePercent(position.entryPrice, position.stopLoss) : null;
               const targetDistance = position.takeProfit ? distancePercent(position.entryPrice, position.takeProfit) : null;
 
@@ -1011,8 +1026,16 @@ export function PositionsTable({
                       <Badge tone="muted" title="该持仓在交易所使用的杠杆倍数。">
                         {position.leverage}x
                       </Badge>
+                      {protectionPending && (
+                        <Badge
+                          tone="muted"
+                          title="刚开仓，止损/止盈单正在发往交易所（实测约 2 秒）。这不是「没有保护」，而是还没挂完。"
+                        >
+                          挂单中
+                        </Badge>
+                      )}
                       {missingStop && (
-                        <Badge tone="down" title="该持仓没有交易所侧止损。">
+                        <Badge tone="down" title="该持仓已开仓超过 1 分钟，交易所侧仍没有止损单。">
                           无止损
                         </Badge>
                       )}
@@ -1071,14 +1094,21 @@ export function PositionsTable({
 
                   <td className="td num text-right">
                     <div className="text-base text-up">
-                      {position.takeProfit ? fmtPrice(position.takeProfit) : '无'}
-                    </div>
-                    {targetDistance && <div className="text-xs text-ink-faint">{targetDistance}</div>}
-                  </td>
+                  {position.takeProfit
+                    ? fmtPrice(position.takeProfit)
+                    : protectionPending
+                      ? '挂单中'
+                      : '无'}
+                </div>
+              </td>
 
                   <td className="td num text-right">
                     <div className={`text-base ${missingStop ? 'font-semibold' : ''} text-down`}>
-                      {position.stopLoss ? fmtPrice(position.stopLoss) : '无'}
+                {position.stopLoss
+                  ? fmtPrice(position.stopLoss)
+                  : protectionPending
+                    ? '挂单中'
+                    : '无'}
                     </div>
                     {stopDistance && <div className="text-xs text-ink-faint">{stopDistance}</div>}
                   </td>
