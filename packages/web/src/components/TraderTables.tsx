@@ -1663,7 +1663,25 @@ export function OrdersTable({
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
-              <th className="th">时间</th>
+              {/*
+                ⚠️ **「持仓时长」与「平仓时间」是两列**（2026-10-19 用户要求）。
+                用户原话：「持仓时间 和 时间分开做一下区分」。
+
+                原来它们挤在同一格：`15分 · 2026-10-19 20:25:45` ——
+                一个 `·` 把两个**不同量纲**的东西连在一起：
+                ```
+                  15分           ← 持续了多久（相对量）
+                  2026-10-19...  ← 什么时候结束（绝对时刻）
+                ```
+                挤在一起时既不好纵向扫读（一列里混两种格式），
+                也没法排序（"哪笔持得最久"看不出来）。
+              */}
+              <th className="th" title="这笔仓位从开仓到平仓持续了多久。">
+                持仓时长
+              </th>
+              <th className="th" title="这笔仓位被平掉的时间。">
+                平仓时间
+              </th>
               <th className="th">交易对</th>
               <th className="th">用途</th>
               <th className="th">方向</th>
@@ -2092,7 +2110,25 @@ export function TradesTable({
                 三张表说的是同一批东西，**同一列在三个标签页里的位置必须一致**，
                 否则切换标签时眼睛要重新找一遍 —— 这是可读性，不是洁癖。
               */}
-              <th className="th">时间</th>
+              {/*
+                ⚠️ **「持仓时长」与「平仓时间」是两列**（2026-10-19 用户要求）。
+                用户原话：「持仓时间 和 时间分开做一下区分」。
+
+                原来它们挤在同一格：`15分 · 2026-10-19 20:25:45` ——
+                一个 `·` 把两个**不同量纲**的东西连在一起：
+                ```
+                  15分           ← 持续了多久（相对量）
+                  2026-10-19...  ← 什么时候结束（绝对时刻）
+                ```
+                挤在一起时既不好纵向扫读（一列里混两种格式），
+                也没法排序（"哪笔持得最久"看不出来）。
+              */}
+              <th className="th" title="这笔仓位从开仓到平仓持续了多久。">
+                持仓时长
+              </th>
+              <th className="th" title="这笔仓位被平掉的时间。">
+                平仓时间
+              </th>
               <th className="th">交易对</th>
               {/* 方向与杠杆合成一列（`空 5x`）——杠杆只在方向旁边有意义，拆开白占宽度。 */}
               <th className="th">方向 / 杠杆</th>
@@ -2142,9 +2178,11 @@ export function TradesTable({
                     「历史成交，列表中的时间显示改到最左边，和当前委托、订单记录保持一样」。
                     持仓时长仍然保留在这格（`3 时 42 分 · 10-18 04:14:04`），信息没丢。
                   */}
-                  <td className="td whitespace-nowrap text-ink-mid">
+                  <td className="td whitespace-nowrap num text-ink-mid">
                     {fmtDuration(trade.holdMinutes)}
-                    <span className="text-ink-faint"> · {fmtDateTime(trade.closedAt)}</span>
+                  </td>
+                  <td className="td whitespace-nowrap text-ink-faint">
+                    {fmtDateTime(trade.closedAt)}
                   </td>
                   <td className="td font-semibold text-ink-hi">
                     <div className="flex items-center gap-1.5">
