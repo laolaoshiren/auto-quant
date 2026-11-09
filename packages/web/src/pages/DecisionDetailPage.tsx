@@ -58,10 +58,25 @@ export function DecisionDetailPage() {
  * 收进左栏的「上下文（诊断）」分组：做审计时一眼能找到，日常看的时候不碍事。
  */
 export function DecisionAuditView({ record, traderId }: { record: DecisionRecord; traderId: number }) {
-  const rejected = record.executionLog.filter((entry) => entry.status === 'rejected');
-  const failed = record.executionLog.filter((entry) => entry.status === 'failed');
-  const executed = record.executionLog.filter((entry) => entry.status === 'ok');
-  const candidates = record.candidateSymbols;
+  /*
+   * ⚠️ **历史决策记录可能缺字段 —— 必须先归一化，否则详情页白屏**（2026-11-10 走查发现）。
+   *
+   * 真实库里的老决策记录没有 `adjustments` / `candidateSymbols` 等字段
+   * （它们来自后续迭代），而类型描述的是"现在这份"的形状 —— 渲染时
+   * `undefined.length` 直接把整个 `<DecisionAuditView>` 炸掉：
+   *
+   *     TypeError: Cannot read properties of undefined (reading 'length')
+   *
+   * 演示数据永远带齐这些字段，所以这个问题**只在真实数据上暴露**。
+   * 归一化放在视图入口一处，下面的渲染就不用到处写 `?.`。
+   */
+  const executionLog = record.executionLog ?? [];
+  const decisions = record.decisions ?? [];
+  const candidates = record.candidateSymbols ?? [];
+  const cotTrace = record.cotTrace ?? '';
+  const rejected = executionLog.filter((entry) => entry.status === 'rejected');
+  const failed = executionLog.filter((entry) => entry.status === 'failed');
+  const executed = executionLog.filter((entry) => entry.status === 'ok');
   /*
    * ⚠️ **"没有决策"要按成因说不同的话**（2026-10-15 第二次改：从"两支"改成"五态"）。
    *
@@ -80,7 +95,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
    * ⇒ 文案表在 `decisionZeroStateCopy.ts`（按 `ZeroDecisionKind` 穷尽映射，
    *   将来加故障态会**编译不过**）。这里只负责把它的两句话放进版式。
    */
-  const zeroDecisionKind = classifyZeroDecision(record.rawResponse);
+  const zeroDecisionKind = classifyZeroDecision(record.rawResponse ?? '');
   const zeroDecision = zeroDecisionCopy(zeroDecisionKind);
   /*
    * 故障用警示色、判断用中性色。
@@ -104,9 +119,9 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
       <MetricGroup title="周期结果" columns={2}>
         <Metric
           label="决策数"
-          value={fmtInt(record.decisions.length)}
+          value={fmtInt(decisions.length)}
           size="lg"
-          sub={`${fmtInt(record.executionLog.length)} 条执行记录`}
+          sub={`${fmtInt(executionLog.length)} 条执行记录`}
           title="模型给出的决策条数，以及风控复核后落下的执行记录条数。"
         />
         <Metric
@@ -157,7 +172,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
 
       {/* Rejected proposals are the clearest signal that the bot looked and
           declined — surface them above the fold rather than burying them. */}
-      <RejectedBanner log={record.executionLog} />
+      <RejectedBanner log={executionLog} />
 
       {failed.length > 0 && (
         <div className="rounded-lg border border-down/60 bg-down/10 px-4 py-3">
@@ -187,7 +202,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
         <section>
           <SectionLabel
             title="解析后的决策"
-            count={record.decisions.length}
+            count={decisions.length}
             actions={
               <>
                 <span className="text-xs text-ink-faint">风控复核后</span>
@@ -196,7 +211,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
             }
           />
           <Panel bodyClassName="p-0" padded={false}>
-            {record.decisions.length === 0 ? (
+            {decisions.length === 0 ? (
               /*
                * ⚠️ 四类故障 + 一类判断，各说各的话（文案表见 `decisionZeroStateCopy.ts`）。
                *
@@ -225,7 +240,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
                 border instead of bleeding to its corner.
               */
               <div className="grid grid-cols-1 gap-px bg-base-850 pb-px pr-px">
-                {record.decisions.map((decision, index) => (
+                {decisions.map((decision, index) => (
                   <div key={`${decision.symbol}-${index}`} className="min-w-0 bg-base-900 px-4 py-3">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-base font-semibold text-ink-hi">{decision.symbol}</span>
@@ -259,11 +274,11 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
                       </p>
                     )}
 
-                    {decision.adjustments.length > 0 && (
+                    {(decision.adjustments ?? []).length > 0 && (
                       <div className="mt-2 rounded-md border border-warn/40 bg-warn/10 px-3 py-2">
                         <div className="text-xs font-semibold uppercase tracking-wide text-warn">风控引擎调整</div>
                         <ul className="mt-1 space-y-0.5">
-                          {decision.adjustments.map((note, noteIndex) => (
+                          {(decision.adjustments ?? []).map((note, noteIndex) => (
                             <li key={noteIndex} className="text-xs leading-relaxed text-warn/90">
                               • {note}
                             </li>
@@ -293,13 +308,13 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
           {/* Chain of thought ------------------------------------------------ */}
           <Panel
             title="思维链"
-            actions={<span className="num text-xs text-ink-faint">{fmtInt(record.cotTrace.length)} 字符</span>}
+            actions={<span className="num text-xs text-ink-faint">{fmtInt(cotTrace.length)} 字符</span>}
             bodyClassName="p-0"
             padded={false}
           >
-            {record.cotTrace ? (
+            {cotTrace ? (
               <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-xs leading-relaxed text-ink-mid">
-                {record.cotTrace}
+                {cotTrace}
               </pre>
             ) : (
               <p className="px-4 py-3 text-base text-ink-faint">
@@ -321,7 +336,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
             bodyClassName="p-3"
             padded={false}
           >
-            <ExecutionList log={record.executionLog} />
+            <ExecutionList log={executionLog} />
           </Panel>
         </div>
 

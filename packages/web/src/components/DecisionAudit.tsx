@@ -340,11 +340,11 @@ export function PromptBlocks({ record, onExpand }: { record: DecisionRecord; onE
    * 团队模式用如实的名字 + 一行说明；非团队模式保持原名（那边的 `rawResponse`
    * 就是模型原样输出，没有这三块骨架 —— 逐字节不变）。
    */
-  const isTeam = parseTeamTrace(record.rawResponse) !== null;
+  const isTeam = parseTeamTrace(record.rawResponse ?? '') !== null;
   return (
     <div className="space-y-2">
-      <PromptBlock title="系统提示词" body={record.systemPrompt} onExpand={onExpand} />
-      <PromptBlock title="用户提示词" body={record.userPrompt} onExpand={onExpand} />
+      <PromptBlock title="系统提示词" body={record.systemPrompt ?? ''} onExpand={onExpand} />
+      <PromptBlock title="用户提示词" body={record.userPrompt ?? ''} onExpand={onExpand} />
       <PromptBlock
         title={
           isTeam ? (
@@ -360,7 +360,7 @@ export function PromptBlocks({ record, onExpand }: { record: DecisionRecord; onE
             '原始模型响应'
           )
         }
-        body={record.rawResponse}
+        body={record.rawResponse ?? ''}
         defaultOpen={false}
         onExpand={onExpand}
       />
