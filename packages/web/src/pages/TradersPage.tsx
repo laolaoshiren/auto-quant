@@ -503,14 +503,14 @@ export function TradersPage() {
               容器撑满剩余视口高度：行少时下面是表格自己的空白（"还有位置"），
               行多时表体自己滚动，页面不会被顶长。
             */}
-            <div className="scroll-x min-h-[16rem] flex-1 overflow-y-auto">
-              <table className="w-full border-collapse">
+            <div className="min-h-[16rem] flex-1 overflow-y-auto">
+              <table className="w-full table-fixed border-collapse">
                 <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
                   <tr>
-                    <th className="th">机器人</th>
-                    <th className="th">状态</th>
+                    <th className="th w-[22%]">机器人</th>
+                    <th className="th w-[8%]">状态</th>
                     <th
-                      className="th text-right"
+                      className="th w-[14%] text-right"
                       title={
                         '归属权益 = 起始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。' +
                         '同一账户下其他机器人挣的钱不算在内。' +
@@ -521,20 +521,20 @@ export function TradersPage() {
                     >
                       归属权益
                     </th>
-                    <th className="th text-right" title="总收益率 = 归属权益相对起始权益的变化；下面一行是它的构成：净 = 毛 − 手续费 − 资金费。">
+                    <th className="th w-[13%] text-right" title="总收益率 = 归属权益相对起始权益的变化；下面一行是它的构成：净 = 毛 − 手续费 − 资金费。">
                       盈亏
                     </th>
-                    <th className="th text-right" title="胜率（winRatePercent，已是 0–100 的百分数）· 盈/亏笔数与盈利因子（∞ = 尚无亏损成交）。">
+                    <th className="th hidden w-[10%] text-right lg:table-cell" title="胜率（winRatePercent，已是 0–100 的百分数）· 盈/亏笔数与盈利因子（∞ = 尚无亏损成交）。">
                       胜率 / PF
                     </th>
-                    <th className="th text-right">持仓</th>
-                    <th className="th text-right" title="历史最大回撤（账户从高水位回落的最大幅度）。">
+                    <th className="th w-[7%] text-right">持仓</th>
+                    <th className="th hidden w-[8%] text-right xl:table-cell" title="历史最大回撤（账户从高水位回落的最大幅度）。">
                       最大回撤
                     </th>
-                    <th className="th text-right" title="已运行时长 / 最近一个决策周期的时间。">
+                    <th className="th hidden w-[10%] text-right lg:table-cell" title="已运行时长 / 最近一个决策周期的时间。">
                       运行 / 最近周期
                     </th>
-                    <th className="th text-right">操作</th>
+                    <th className="th w-[8%] text-right">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -755,7 +755,7 @@ export function TradersPage() {
                         </td>
                         {/* `winRatePercent` is already 0–100 — never × 100 again.
                             盈/亏是后端给的真实笔数，不由胜率反推。 */}
-                        <td className="td num text-right">
+                        <td className="td hidden num text-right lg:table-cell">
                           {stats ? (
                             <>
                               {`${stats.winRatePercent.toFixed(1)}%`}
@@ -772,12 +772,12 @@ export function TradersPage() {
                           )}
                         </td>
                         <td className="td num text-right">{stats ? fmtInt(stats.openPositions) : '—'}</td>
-                        <td className="td num text-right text-down">
+                        <td className="td hidden num text-right text-down xl:table-cell">
                           {stats ? fmtDrawdownPercent(stats.maxDrawdownPercent) : '—'}
                         </td>
                         {/* 运行时长 + 最近周期合成一格：它们是同一个问题的两个方面
                             （还在跑吗、跑到哪了），分两列各占 100px 不值。 */}
-                        <td className="td num text-right text-ink-lo">
+                        <td className="td hidden num text-right text-ink-lo lg:table-cell">
                           {stats ? fmtDuration(stats.uptimeHours * 60) : '—'}
                           <div className="text-xs text-ink-faint">{timeAgo(trader.lastCycleAt)}</div>
                         </td>

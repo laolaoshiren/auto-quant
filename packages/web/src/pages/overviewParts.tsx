@@ -247,32 +247,41 @@ export function TradersSnapshotTable({
   return (
     <>
       <Panel padded={false}>
-        <div className="scroll-x">
-          <table className="w-full border-collapse">
+        {/*
+          ⚠️ **不再用 `scroll-x`**（2026-11-10 用户：「不许出现横向滚动条」）。
+          7 列在 1280 宽的主栏里放不下，之前的做法是内部横滚 —— 右边界被切、
+          底下一根滚动条，而"胜率"这种辅助信息不值得换来一根滚动条。
+          现在 `table-fixed` + 按列宽百分比 + 窄屏隐藏辅助列：
+            · 平仓胜率 → `2xl`（≥1536）才显示；
+            · 最近平仓 → `xl`（≥1280）才显示；
+          其余列用 `truncate` 保证不撑宽。
+        */}
+        <div>
+          <table className="w-full table-fixed border-collapse">
             <caption className="sr-only">机器人归属权益与运行状态快照</caption>
             <thead className="border-b border-base-800 bg-base-850/60">
               <tr>
-                <th scope="col" className="th px-2 py-1.5">
+                <th scope="col" className="th w-[25%] px-2 py-1.5">
                   机器人
                 </th>
-                <th scope="col" className="th px-2 py-1.5">
+                <th scope="col" className="th w-[10%] px-2 py-1.5">
                   状态
                 </th>
-                <th scope="col" className="th px-2 py-1.5 text-right">
+                <th scope="col" className="th w-[28%] px-2 py-1.5 text-right">
                   <span title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。只是这个机器人自己的账，同一账户下其他机器人挣的钱不算在内；反过来，共用同一个账户的机器人各自都带着同一笔本金，所以这一列不能相加（相加会把钱包数 N 遍）。账户里的钱看左栏「账户权益合计」。">
                     归属权益
                   </span>
                 </th>
-                <th scope="col" className="th px-2 py-1.5 text-right">
+                <th scope="col" className="th w-[9%] px-2 py-1.5 text-right">
                   持仓
                 </th>
-                <th scope="col" className="th px-2 py-1.5 text-right">
+                <th scope="col" className="th hidden w-[12%] px-2 py-1.5 text-right 2xl:table-cell">
                   平仓胜率
                 </th>
-                <th scope="col" className="th px-2 py-1.5 text-right">
+                <th scope="col" className="th hidden w-[18%] px-2 py-1.5 text-right xl:table-cell">
                   最近平仓
                 </th>
-                <th scope="col" className="th px-2 py-1.5 text-right">
+                <th scope="col" className="th w-[9%] px-2 py-1.5 text-right">
                   操作
                 </th>
               </tr>
@@ -322,7 +331,7 @@ export function TradersSnapshotTable({
                     <td className="td px-2 py-1.5">
                       <TraderStatusBadge status={status} live={trader.isRunning} />
                       {trader.consecutiveFailures > 0 && (
-                        <div className="num mt-0.5 text-xs text-warn">{trader.consecutiveFailures} 次连续失败</div>
+                        <div className="num truncate text-xs text-warn">{trader.consecutiveFailures} 次连续失败</div>
                       )}
                     </td>
                     <td
@@ -335,26 +344,31 @@ export function TradersSnapshotTable({
                           : undefined
                       }
                     >
-                      <div className={cn('num', stats ? 'text-ink-hi' : 'text-ink-faint')}>
+                      {/*
+                        ⚠️ **`truncate` 是必须的**：`table-fixed` 下单元格内容超长会
+                        **溢出到相邻列**（不是把列撑宽），两个数字叠在一起看着像 BUG。
+                        副行 `+6.47% · 净 +$412.37` 在 1280 宽的主栏里正好卡在边界上。
+                      */}
+                      <div className={cn('num truncate', stats ? 'text-ink-hi' : 'text-ink-faint')}>
                         {stats ? fmtUsd(equity, 2) : '—'}
                       </div>
                       {stats && (
                         /* 净领先、毛在 title 里：差额就是成本，而小账户上成本才是重点。
                            总收益率与权益合成一格，因为它们是同一个故事。 */
-                        <div className={cn('num text-xs', pnlColor(stats.totalReturnPercent))}>
+                        <div className={cn('num truncate text-xs', pnlColor(stats.totalReturnPercent))}>
                           {fmtPercent(stats.totalReturnPercent)} · 净 {fmtUsdSigned(stats.realizedPnl, 2)}
                         </div>
                       )}
                     </td>
                     <td className="td num px-2 py-1.5 text-right">
-                      {stats ? fmtInt(stats.openPositions) : '—'}
+                      <div className="truncate">{stats ? fmtInt(stats.openPositions) : '—'}</div>
                       {stats && stats.unrealizedPnl !== 0 && (
                         /* 刻意中性：这一格已经有符号，两个彩色盈亏数字并排会读成
                            一个被拆成两格的数。 */
-                        <div className="text-xs text-ink-faint">浮 {fmtUsdSigned(stats.unrealizedPnl, 2)}</div>
+                        <div className="truncate text-xs text-ink-faint">浮 {fmtUsdSigned(stats.unrealizedPnl, 2)}</div>
                       )}
                     </td>
-                    <td className="td num px-2 py-1.5 text-right">
+                    <td className="td num hidden px-2 py-1.5 text-right 2xl:table-cell">
                       {/* `winRatePercent` 与 `wins`/`losses` 都是服务端的读数，
                           这里只并排显示，绝不互相推算（硬规则）。 */}
                       {stats ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
@@ -364,7 +378,7 @@ export function TradersSnapshotTable({
                         </div>
                       )}
                     </td>
-                    <td className="td px-2 py-1.5 text-right">
+                    <td className="td hidden px-2 py-1.5 text-right xl:table-cell">
                       <RecentClose trade={recentTrades.byTrader[trader.id]} pending={recentTrades.loading} />
                     </td>
                     <td className="td px-2 py-1.5 text-right">

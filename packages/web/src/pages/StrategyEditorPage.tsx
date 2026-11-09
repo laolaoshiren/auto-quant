@@ -540,7 +540,13 @@ export function StrategyEditorPage() {
       {/* 常驻工具条：用不透明背景，不用 backdrop-blur —— 理由见 Layout 顶栏的注释：
           常驻的 backdrop-filter 会让 Chrome 创建"背景根"，在部分 GPU/远程桌面环境下
           把整页内容错误地模糊掉。这里 95% 不透明已经足够遮住滚动内容。 */}
-      <div className="sticky top-0 z-20 -mx-4 -mt-4 space-y-2 border-b border-base-800 bg-base-950 px-4 pb-2 pt-2">
+      {/*
+        ⚠️ **不再用 `-mx-4` 做通栏**（2026-11-10 实测：876/768 宽度下这个负边距把
+        工具条撑出内容区 4px，`main` 出现横向溢出）。`q-pad` 在 ≥64em 时左右内边距
+        是 22px 而不是 16px，负边距与它并不严格相等 —— 与其算这个差值，不如让
+        工具条待在内边距里：视觉上只是左右少了一点点出血，但不会再算错宽度。
+      */}
+      <div className="sticky top-0 z-20 -mt-4 space-y-2 border-b border-base-800 bg-base-950 pb-2 pt-2">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <Link
             to="/strategy"

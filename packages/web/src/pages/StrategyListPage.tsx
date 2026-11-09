@@ -293,17 +293,17 @@ export function StrategyListPage() {
                 />
               ) : (
                 <>
-                  <div className="scroll-x">
-                    <table className="w-full border-collapse">
+                  <div>
+                    <table className="w-full table-fixed border-collapse">
                       <thead className="border-b border-base-800 bg-base-850/60">
                         <tr>
-                          <th className="th px-2 py-1.5">名称</th>
-                          <th className="th px-2 py-1.5">模式</th>
-                          <th className="th px-2 py-1.5">币种池</th>
-                          <th className="th px-2 py-1.5 text-right">风控</th>
-                          <th className="th px-2 py-1.5">被引用</th>
-                          <th className="th px-2 py-1.5">更新时间</th>
-                          <th className="th px-2 py-1.5 text-right">操作</th>
+                          <th className="th w-[28%] px-2 py-1.5">名称</th>
+                          <th className="th w-[12%] px-2 py-1.5">模式</th>
+                          <th className="th hidden w-[16%] px-2 py-1.5 lg:table-cell">币种池</th>
+                          <th className="th w-[14%] px-2 py-1.5 text-right">风控</th>
+                          <th className="th hidden w-[10%] px-2 py-1.5 xl:table-cell">被引用</th>
+                          <th className="th hidden w-[12%] px-2 py-1.5 lg:table-cell">更新时间</th>
+                          <th className="th w-[8%] px-2 py-1.5 text-right">操作</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -337,7 +337,7 @@ export function StrategyListPage() {
                               <td className="td px-2 py-1.5">
                                 <Badge tone="accent">{tradingModeLabel(record.config.tradingMode)}</Badge>
                               </td>
-                              <td className="td px-2 py-1.5 text-ink-lo">
+                              <td className="td hidden px-2 py-1.5 text-ink-lo lg:table-cell">
                                 {coinSourceTypeLabel(source.sourceType)}
                                 {staticCount > 0 && (
                                   <span className="num text-ink-faint"> · {staticCount} 个标的</span>
@@ -350,7 +350,7 @@ export function StrategyListPage() {
                               >
                                 {risk.maxPositions} 持仓 · {risk.defaultLeverage}×
                               </td>
-                              <td className="td px-2 py-1.5">
+                              <td className="td hidden px-2 py-1.5 xl:table-cell">
                                 {/*
                                   ⚠️ **只有"真的在用这份参数"的机器人会被数进来。**
                                   AI 托管的机器人 `strategyId === null`，压根不在这张表里
@@ -367,7 +367,7 @@ export function StrategyListPage() {
                                   <span className="text-ink-faint">未使用</span>
                                 )}
                               </td>
-                              <td className="td num px-2 py-1.5 text-xs text-ink-faint">
+                              <td className="td num hidden px-2 py-1.5 text-xs text-ink-faint lg:table-cell">
                                 {fmtDateTime(record.updatedAt)}
                               </td>
                               <td className="td px-2 py-1.5 text-right">
