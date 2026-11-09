@@ -73,6 +73,14 @@ export function AppearancePage() {
    * 真的会生效（见那里的注释：classic 固定深色）。
    */
   const activeTemplate = getTemplate(templateId);
+  /*
+   * 全部可用模板（内置 + 运行时注册的第三方）。
+   *
+   * UI 收敛之后内置只剩 `quill` 一套，但**这一页仍然要按列表渲染**：
+   * 第三方模板通过 `templates/<目录>/` 自动注册进来时必须出现在这里，
+   * 否则"能注册但看不见"的接口等于没有接口。
+   */
+  const templates = listTemplates();
   const [skin, setSkinState] = useState<Skin>(() => getSkin());
   const [density, setDensityState] = useState<Density>(() => getDensity());
 
@@ -110,9 +118,9 @@ export function AppearancePage() {
         一个"能注册但看不见"的接口等于没有接口。
       */}
       <section>
-        <SectionLabel title="模板" count={listTemplates().length} />
+        <SectionLabel title="模板" count={templates.length} />
         <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-2">
-          {listTemplates().map((option) => {
+          {templates.map((option) => {
             const active = templateId === option.id;
             const Icon = templateIcon(option.id);
             return (
@@ -156,16 +164,25 @@ export function AppearancePage() {
         <p className="mt-2 text-xs leading-relaxed text-ink-faint">
           {/*
             ⚠️ **这里不能用 Markdown 的 `**粗体**`。** JSX 不解析 Markdown，
-            星号会**原样画在屏幕上**（第一版就是这样，截图里一眼看见两处
-            `**不刷新页面**`）。要加粗就用 <strong>，或者像这里一样把该强调的
-            词单独包一层。
+            星号会**原样画在屏幕上**（2026-11-10 的 UI 走查就在这一页抓到过
+            `**是禁用的**`）。要加粗就用 <strong>。
           */}
-          <strong className="font-semibold text-ink-lo">顶栏上也有一个切换器</strong>
-          （标题栏里的布局图标）—— 那是日常换着看用的入口，这一页是"设置"意义上的
-          目录。模板记在浏览器本地（<span className="num">{TEMPLATE_KEY}</span>），切换时
-          <strong className="font-semibold text-ink-lo">不刷新页面、不重连推送</strong>
-          。想自己做一套？见仓库里的 <span className="num">packages/web/TEMPLATES.md</span> ——
-          只需要一个外壳组件加一条注册，不必碰任何业务页面。
+          {templates.length <= 1 ? (
+            <>
+              内置模板只有「静谧」这一套 —— 2026-11 的 UI 重构把原来的三套收敛成一套
+              （理由与实测数据见仓库里的 <span className="num">ui-audit</span> 报告）。
+              第三方模板把外壳放进 <span className="num">templates/&lt;目录&gt;/</span> 后会自动出现在这里，
+              <strong className="font-semibold text-ink-lo">切换不刷新页面、不重连推送</strong>。
+              顶栏上也有一个切换器，那里是日常换着看用的入口。
+            </>
+          ) : (
+            <>
+              <strong className="font-semibold text-ink-lo">顶栏上也有一个切换器</strong>
+              —— 那是日常换着看用的入口，这一页是"设置"意义上的目录。模板记在浏览器本地（
+              <span className="num">{TEMPLATE_KEY}</span>），切换时
+              <strong className="font-semibold text-ink-lo">不刷新页面、不重连推送</strong>。
+            </>
+          )}
         </p>
       </section>
 
@@ -244,9 +261,13 @@ export function AppearancePage() {
           <span className="num"> index.html </span>
           里的一段内联脚本在样式表生效前读出来 —— 所以刷新时不会先闪一下另一种底色。
           <br />
-          ⚠️ <strong className="font-semibold text-ink-lo">经典模板只有深色</strong>
-          ：它的配色就是原版配色，所以那一项在当前模板下**是禁用的**（不再是一个点了
-          没反应的开关）。切到「控制台」或「静谧」即可使用浅色。
+          {/*
+           * 不必在这里再解释「某套模板为什么只有深色」：内置模板（静谧）深/浅两套都
+           * 支持，因此下面两张卡都是可选的。第三方模板若声明 `supportedSkins: ['dark']`
+           * 只支持深色，浅色那张会被**禁用并就地说明原因**（isSkinSupported 的逻辑保留）。
+           */}
+          <strong className="font-semibold text-ink-lo">内置模板深 / 浅两套都支持</strong>
+          ：切换只写 <span className="num">data-skin</span> 与本地存储，不重新加载页面。
         </p>
       </section>
 
@@ -321,8 +342,6 @@ export function AppearancePage() {
           <span className="num">{DENSITY_KEY}</span>），不改字号：字号是全站排版基准，
           跟着密度变会让"正文一个尺寸"这个前提失效，而字号是写死像素的 ——
           结果是一半文字变了一半没变。
-          <br />
-          经典模板下这一项同样不生效：它的行高就是原版的行高。
         </p>
       </section>
     </PageShell>

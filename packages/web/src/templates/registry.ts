@@ -1,19 +1,25 @@
 /**
  * 模板注册表。
  *
- * ## 加一套新模板
+ * ## 现在只有一套内置模板
+ *
+ * 2026-11-10 的 UI 重构把原来的三套（`classic` / `console` / `quill`）收敛成
+ * **唯一的 `quill`（静谧）**：用户要求"保留一套、删掉另外两套，并把保留那套的
+ * UI/UX 彻底修好"。选择依据与量测数据见
+ * `packages/web/ui-audit/phase-a/REPORT.md`（真实无头浏览器对比：
+ * 深浅色支持、工具栏契约、导航分层、内容空间、对比度、移动端）。
+ *
+ * 注册表机制本身**保留**：它仍然支持运行时注册第三方模板（`registerTemplate`），
+ * 也仍然是"有哪些模板"的唯一起点。理由是它把"有哪些模板"和"外壳怎么渲染"
+ * 分开，第三方想插一套皮肤不必 fork 页面或改 `Layout.tsx`；而收敛之后这条路径
+ * 只会更简单 —— 新增模板不会再和内置的抢样式。
+ *
+ * ## 加一套新模板（第三方）
  *
  * 1. 建 `src/templates/<你的名字>/<YourShell>.tsx`，导出外壳组件；
  * 2. （可选）在 `src/templates/<你的名字>/theme.css` 里覆盖配色变量；
- * 3. 在下面的 `BUILT_IN` 里加一条。
- *
- * **不需要**动页面、路由、导航表或任何业务代码。
- *
- * ## 为什么要有一个注册表，而不是硬编码两个 if
- *
- * 硬编码意味着每加一套模板都要改 `Layout.tsx`，而它是并发改动最容易冲突的
- * 文件。注册表把"有哪些模板"和"外壳怎么渲染"彻底分开：加模板只碰这个文件
- * 和一个新目录。
+ * 3. 在下面的 `BUILT_IN` 里加一条 —— **或者**什么都不改，靠
+ *    `themes.ts` 的 `import.meta.glob` 自动发现（目录名即模板 id）。
  *
  * ## 这是静态数组，不是运行时的 Map
  *
@@ -21,39 +27,9 @@
  * 扩展留的口子，两条路并存。
  */
 import type { TemplateDefinition, TemplateId } from './types';
-import { ClassicShell } from './classic/ClassicShell';
-import { ConsoleShell } from './console/ConsoleShell';
 import { QuillShell } from './quill/QuillShell';
 
 export const BUILT_IN: TemplateDefinition[] = [
-  {
-    id: 'classic',
-    label: '经典',
-    hint: '顶部导航 + 单列内容区。原版外观，页面动作就地显示。',
-    rootClass: 'aq-classic',
-    Shell: ClassicShell,
-    ownsPalette: false,
-    /*
-     * ⚠️ **只有深色 —— 这是"原版外观"的定义，不是漏了浅色。**
-     *
-     * `templates/classic/` 下 `grep skin` 零命中：浅色规则只写在
-     * `console/theme.css:210` 与 `quill/theme.css:215`。
-     *
-     * 声明在这里之后，外观页会**禁用**「浅色」并说明原因 —— 在那之前它是个
-     * 点了没反应的开关：设置写进了 localStorage、`data-skin` 也写对了、
-     * 按钮还显示已选中，而**界面一个像素都不变**（外部 issue #171）。
-     */
-    supportedSkins: ['dark'],
-  },
-  {
-    id: 'console',
-    label: '控制台',
-    hint: '桌面窗口外壳：标题栏 / 菜单栏 / 工具栏 / 侧栏 / 状态栏五层，页面动作统一收进工具栏。',
-    rootClass: 'aq-console',
-    Shell: ConsoleShell,
-    ownsPalette: true,
-    supportedSkins: ['dark', 'light'],
-  },
   {
     id: 'quill',
     label: '静谧',
@@ -118,6 +94,10 @@ export const FALLBACK_TEMPLATE: TemplateDefinition = BUILT_IN[0]!;
  * localStorage 里，而下游删掉一套模板、或用户从别人的分支切回来时，
  * 那个 id 就成了孤儿。抛异常的表现是**整个应用白屏**，而用户根本不知道
  * 自己该做什么 —— 回落到默认模板只是"外观变回去了"，他能自己再选一次。
+ *
+ * ⚠️ 本次收敛正是"删掉一套模板"的现实场景：用户 localStorage 里可能存着
+ * `classic` 或 `console`。它们现在都是孤儿 id —— **必须靠这条回落路径**
+ * 正常进入 quill，而不是白屏。`registry.test.ts` 钉住了这一点。
  */
 export function getTemplate(id: TemplateId): TemplateDefinition {
   return listTemplates().find((item) => item.id === id) ?? FALLBACK_TEMPLATE;

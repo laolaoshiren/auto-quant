@@ -12,16 +12,20 @@
  * 渲染相关的东西），这样它才能在 Node 里被直接单测。图标来自 `lucide-react`，
  * 属于渲染层。
  *
+ * ## UI 收敛之后只剩内置的 `quill`
+ *
+ * 2026-11-10 把三套收敛成一套（见 `registry.ts` 顶部）。这张表仍然保留：
+ * 第三方模板通过 `registerTemplate()` / 目录自动发现进来时，可以在这里补一个
+ * 图标；没登记的走兜底。
+ *
  * 兜底图标是 `PanelsTopLeft`（一个"面板"的中性形状），不是某一个具体模板的
- * 图标：第三方模板没登记图标时，它应该看起来"还没配图"，而不是看起来像经典模板。
+ * 图标：第三方模板没登记图标时，它应该看起来"还没配图"，而不是看起来像内置模板。
  */
-import { LayoutDashboard, PanelLeft, PanelTop, PanelsTopLeft } from 'lucide-react';
+import { PanelLeft, PanelsTopLeft } from 'lucide-react';
 
-export type TemplateIconComponent = typeof PanelTop;
+export type TemplateIconComponent = typeof PanelLeft;
 
 const TEMPLATE_ICON: Record<string, TemplateIconComponent> = {
-  classic: PanelTop,
-  console: LayoutDashboard,
   /*
    * quill 的骨架是「左侧分组侧栏 + 分段控件」，`PanelLeft` 正好画的是
    * "左边一栏 + 右边内容" —— 图标表存在的意义就是让外观页的卡片一眼能

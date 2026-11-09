@@ -75,7 +75,7 @@ export { useShell } from './lib/context';
  * 模板 id。
  *
  * 用 `string` 而不是联合字面量：第三方模板通过 `registerTemplate()` 在运行时
- * 注册，编译器不可能提前知道它们叫什么。内置的两个是 `'classic'` 与 `'console'`。
+ * 注册，编译器不可能提前知道它们叫什么。内置的唯一一套是 `'quill'`（静谧）。
  */
 export type TemplateId = string;
 
@@ -95,7 +95,7 @@ export interface TemplateDefinition {
   /**
    * 需要挂到 `<html>` 上的类名。
    *
-   * 模板自己的 CSS 全部挂在这个类下面（例如 `.aq-console .panel { … }`），
+   * 模板自己的 CSS 全部挂在这个类下面（例如 `.aq-quill .panel { … }`），
    * 这样多套模板的样式可以同时存在于一个 bundle 里而互不干扰 ——
    * **切换模板不需要重新加载页面，也不需要重新构建**。
    */
@@ -106,7 +106,7 @@ export interface TemplateDefinition {
    * 是否由模板自己管理配色（覆盖 CSS 变量）。
    *
    * `false` = 用 `index.css` 里 `:root` 的默认色板（也就是原版配色）。
-   * 内置的 `classic` 是 `false`，`console` 是 `true`。
+   * 唯一的 `quill` 是 `true`（自带 theme.css）。
    */
   ownsPalette: boolean;
   /**
@@ -115,14 +115,14 @@ export interface TemplateDefinition {
    * ## 为什么必须是独立声明，不能拿 `ownsPalette` 当代理（issue #171）
    *
    * `ownsPalette` 回答的是"这套模板**是否覆盖 CSS 变量**"；而"支持几套主题"是
-   * **另一件事** —— 一套模板可以自带配色却只有深色（`classic` 就是：
-   * 它用 `:root` 的默认色板，而浅色规则只写在 `console` / `quill` 的 theme.css 里）。
+   * **另一件事** —— 一套模板可以自带配色却只有深色（第三方模板可能如此：
+   * 用 `:root` 的默认色板而只写深色规则）。
    *
    * 拿前者当后者的代理，将来加模板时两者一旦不同步，就会重现同一个缺陷：
    * **外观页把「浅色」摆出来、用户点了、按钮还显示已选中，而界面毫无变化。**
    *
    * 省略（`undefined`）= 不做限制 —— 第三方模板不必知道这个字段。
-   * 内置三套都显式声明，并由 `appearance.test.ts` 检查"声明与 CSS 规则一致"。
+   * 内置的 `quill` 显式声明两套都支持，并由 `appearance.test.ts` 检查"声明与 CSS 规则一致"。
    */
   supportedSkins?: readonly ('dark' | 'light')[];
 }

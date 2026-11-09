@@ -27,8 +27,15 @@
  *
  * 数据从 `useShell()` 拿，动作由页面自己 portal 进工具栏。页面不知道自己在
  * 什么壳里，外壳不知道"机器人"是什么 —— 两者之间只有 `templates/types.ts`
- * 那份接口。想看三套外壳的差别，把这个文件与 `../classic/ClassicShell.tsx`、
- * `../console/ConsoleShell.tsx` 并排读就够了。
+ * 那份接口。
+ *
+ * ## 它是现在**唯一**的内置外壳
+ *
+ * 2026-11-10 的 UI 重构把原来的三套（`classic` / `console` / `quill`）收敛成
+ * 这一套：选择依据是三套在真实无头浏览器里的实测对比（深浅色、工具栏契约、
+ * 导航分层、内容空间、对比度、移动端），数据见
+ * `packages/web/ui-audit/phase-a/REPORT.md`。另外两套的源码在 git 历史里，
+ * 不在工作树中。
  *
  * ## 几条不能破坏的约束
  *

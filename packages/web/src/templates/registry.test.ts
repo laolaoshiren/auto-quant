@@ -24,7 +24,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { getTemplate, listTemplates, registerTemplate, FALLBACK_TEMPLATE } from './registry';
+import { BUILT_IN, getTemplate, listTemplates, registerTemplate, FALLBACK_TEMPLATE } from './registry';
 import { MAIN_SCROLL_ID, TOOLBAR_END_ID, TOOLBAR_START_ID } from './ids';
 
 const SRC = new URL('../', import.meta.url);
@@ -78,19 +78,23 @@ const hitsSelect = (selector: string): boolean => /\.select(?![\w-])/.test(selec
 /*  注册表本身                                                                  */
 /* -------------------------------------------------------------------------- */
 
-test('★ 内置模板必须存在、id 唯一，且第一个是原版（回落目标）', () => {
+test('★ 内置模板必须存在、id 唯一，且唯一内置的是 quill（回落目标）', () => {
   const all = listTemplates();
-  assert.ok(all.length >= 2, `至少要内置两套模板（原版 + 控制台），实际 ${all.length} 套。`);
+  assert.ok(all.length >= 1, `至少要有一套内置模板，实际 ${all.length} 套。`);
 
   const ids = all.map((t) => t.id);
   assert.equal(new Set(ids).size, ids.length, `模板 id 必须唯一，实际 ${ids.join(' / ')}。`);
 
   /*
-   * 第一项是 `readInitial()` 的默认值，也是 `getTemplate()` 的兜底目标 ——
-   * 它**必须**是原版。否则一个 localStorage 里存着未知 id 的用户（或第一次
-   * 打开的新用户）会直接落进改造版，而那与"原版是默认"相矛盾。
+   * 内置模板在 2026-11-10 收敛成唯一的一套 `quill`（选择依据见
+   * `packages/web/ui-audit/phase-a/REPORT.md`）。
+   *
+   * 它同时是 `readInitial()` 的默认值、`getTemplate()` 的兜底目标 ——
+   * 一个 localStorage 里还存着已删除 id（`classic` / `console`）的用户，
+   * 或第一次打开的新用户，都必须落到它上面。
    */
-  assert.equal(FALLBACK_TEMPLATE.id, 'classic', '兜底模板必须是原版 classic。');
+  assert.equal(BUILT_IN.length, 1, `内置模板应只剩 quill 一套，实际 ${BUILT_IN.length} 套：${BUILT_IN.map((t) => t.id).join(', ')}`);
+  assert.equal(FALLBACK_TEMPLATE.id, 'quill', '兜底模板必须是 quill。');
 });
 
 test('★ 未知模板 id 必须回落到默认模板，绝不抛异常', () => {
@@ -98,10 +102,15 @@ test('★ 未知模板 id 必须回落到默认模板，绝不抛异常', () => 
    * 这条防的是**白屏**：id 存在用户的 localStorage 里，下游删掉一套模板、
    * 或用户从别人的分支切回来时它就是孤儿。抛异常 = 应用起不来，而用户
    * 根本不知道自己该做什么。回落只是"外观变回去了"，他能自己再选一次。
+   *
+   * ⚠️ 本次收敛正是"删掉一套模板"的现实场景：`classic` / `console` 这两个 id
+   * 现在都成了孤儿，必须都能安静地回到 quill。
    */
   assert.doesNotThrow(() => getTemplate('没有这一套'));
   assert.equal(getTemplate('没有这一套').id, FALLBACK_TEMPLATE.id);
   assert.equal(getTemplate('').id, FALLBACK_TEMPLATE.id);
+  assert.equal(getTemplate('classic').id, 'quill', '已删除的 classic 必须回落到 quill，不能白屏');
+  assert.equal(getTemplate('console').id, 'quill', '已删除的 console 必须回落到 quill，不能白屏');
 });
 
 test('每套模板都要有可用的 id / label / hint / rootClass / Shell', () => {
@@ -150,16 +159,16 @@ test('运行时注册可以加新模板、也可以按 id 覆盖内置，但不�
    * —— 那会让设置页上有两张长得一样、点哪个都"没反应"的选项。
    */
   registerTemplate({
-    id: 'classic',
-    label: '被覆盖的经典',
+    id: 'quill',
+    label: '被覆盖的静谧',
     hint: '测试用。',
-    rootClass: 'aq-classic',
+    rootClass: 'aq-quill',
     Shell: () => null,
     ownsPalette: false,
   });
   const ids = listTemplates().map((t) => t.id);
   assert.equal(new Set(ids).size, ids.length, '覆盖内置模板后，列表里不该出现重复 id。');
-  assert.equal(getTemplate('classic').label, '被覆盖的经典');
+  assert.equal(getTemplate('quill').label, '被覆盖的静谧');
 });
 
 /* -------------------------------------------------------------------------- */
@@ -188,7 +197,7 @@ function shellFiles(): string[] {
 
 test('★ 每套外壳的内容区都要写成 id={MAIN_SCROLL_ID}（不许手写字符串）', () => {
   const shells = shellFiles();
-  assert.ok(shells.length >= 2, `应该能找到两套外壳，实际 ${shells.length} 个：${shells.join(', ')}`);
+  assert.ok(shells.length >= 1, `应该能找到至少一套外壳，实际 ${shells.length} 个：${shells.join(', ')}`);
 
   /*
    * 断言的是**常量名**而不是写死的字符串 `'main-scroll'`。
@@ -291,17 +300,14 @@ test('★ 模板样式必须全部挂在根类名下面（不得裸写选择器�
    * 写它的人在控制台模板下看，一切正常；切回原版才发现某个颜色变了 ——
    * 那时已经没人记得是哪次改动引入的。
    *
-   * 顺带它也是"特异性保险"：`html.aq-console` 是 0,2,1，压得过 `index.css`
+   * 顺带它也是"特异性保险"：`html.aq-quill` 是 0,2,1，压得过 `index.css`
    * 里的单类名（0,1,0），所以两段 CSS 的加载顺序不再重要。
    *
    * ⚠️ **这张表要跟着内置模板一起长。** 它一度只列了 console，于是 quill
    * 的 1600 行 CSS 完全不在覆盖内 —— 而这条断言抓的正是最难自查的一类
    * 错误（漏前缀的选择器在写它的人眼里"一切正常"）。加一套模板就加一行。
    */
-  const themes = [
-    ['templates/console/theme.css', 'aq-console'],
-    ['templates/quill/theme.css', 'aq-quill'],
-  ] as const;
+  const themes = [['templates/quill/theme.css', 'aq-quill']] as const;
 
   for (const [rel, rootClass] of themes) {
     const code = stripComments(src(rel));
@@ -369,10 +375,10 @@ test('★ 下拉框的箭头不能被 `background` 简写打散', () => {
    * 变成瓷砖，在整个控件里平铺开。
    *
    * 读源码时它完全合理，只有真实浏览器里量 computed style 才看得出
-   * （实测 console：`size: auto / repeat / 0% 0%`；classic：`12px auto /
+   * （实测 quill：`11px auto / no-repeat / right 0.65rem center`）
    * no-repeat / right`）。所以钉成断言。
    */
-  const rules = cssRules(stripComments(src('templates/console/theme.css')));
+  const rules = cssRules(stripComments(src('templates/quill/theme.css')));
 
   const shorthand = rules.filter(
     (rule) =>
@@ -392,9 +398,9 @@ test('★ 下拉框的箭头不能被 `background` 简写打散', () => {
    * 改那边就会悄悄改掉控制台模板的样子（改坏的表现还是一排箭头，像另一个 bug）。
    */
   const arrow = rules.find(
-    (rule) => rule.selectors.length === 1 && rule.selectors[0] === 'html.aq-console .select',
+    (rule) => rule.selectors.length === 1 && rule.selectors[0] === 'html.aq-quill .select',
   );
-  assert.ok(arrow, '找不到 `html.aq-console .select` 这条规则 —— 自定义箭头没有归属。');
+  assert.ok(arrow, '找不到 `html.aq-quill .select` 这条规则 —— 自定义箭头没有归属。');
   for (const longhand of [
     'background-image',
     'background-repeat',
@@ -404,7 +410,7 @@ test('★ 下拉框的箭头不能被 `background` 简写打散', () => {
     assert.match(
       arrow!.body,
       new RegExp(`${longhand}\\s*:`),
-      `html.aq-console .select 缺少 ${longhand} —— 四条 background-* 必须写在同一个地方，否则箭头会变形或平铺。`,
+      `html.aq-quill .select 缺少 ${longhand} —— 四条 background-* 必须写在同一个地方，否则箭头会变形或平铺。`,
     );
   }
 });
@@ -428,7 +434,7 @@ test('★ 下拉框的文字不能被竖向 padding 挤出内容盒', () => {
    *
    * 高度既然由 `height` 说了算，竖向 padding 在这里就是来抢内容盒空间的。
    */
-  const rules = cssRules(stripComments(src('templates/console/theme.css')));
+  const rules = cssRules(stripComments(src('templates/quill/theme.css')));
 
   /* 先确认前提还在：`index.css` 确实给了竖向 padding，否则这条断言就没意义。 */
   const base = cssRules(stripComments(src('index.css')));
@@ -444,9 +450,9 @@ test('★ 下拉框的文字不能被竖向 padding 挤出内容盒', () => {
   );
 
   /*
-   * ⚠️ 判的是**命中下拉框的每一条规则**，不是单看 `html.aq-console .select` 那一条。
+   * ⚠️ 判的是**命中下拉框的每一条规则**，不是单看 `html.aq-quill .select` 那一条。
    *
-   * 竖向归零写在共享的 `html.aq-console .input, .select, .textarea` 里（高度
+   * 竖向归零写在共享的 `html.aq-quill .input, .select, .textarea` 里（高度
    * 也在那儿），而 `.select` 单列那条只管箭头。第一版断言只查后者，于是它
    * 报了一条**并不存在的 bug** —— 规则确实写了，只是写在另一条里。
    * 这种假阳性会训练人以后忽略这条用例，所以按"命中谁"来查。
@@ -468,13 +474,13 @@ test('★ 下拉框的文字不能被竖向 padding 挤出内容盒', () => {
 
   /* 横向 padding 仍然是刻意的：它是给右侧箭头留位子的，不能一起归零。 */
   const selectRule = rules.find(
-    (rule) => rule.selectors.length === 1 && rule.selectors[0] === 'html.aq-console .select',
+    (rule) => rule.selectors.length === 1 && rule.selectors[0] === 'html.aq-quill .select',
   );
-  assert.ok(selectRule, '找不到 `html.aq-console .select` 这条规则。');
+  assert.ok(selectRule, '找不到 `html.aq-quill .select` 这条规则。');
   assert.match(
     selectRule!.body,
     /padding-right\s*:/,
-    'html.aq-console .select 不能把 padding-right 也归零 —— 那是箭头的位置。',
+    'html.aq-quill .select 不能把 padding-right 也归零 —— 那是箭头的位置。',
   );
 });
 

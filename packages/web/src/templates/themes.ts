@@ -61,7 +61,7 @@ const shells = import.meta.glob('./*/[A-Za-z0-9_]*Shell.tsx', { eager: true }) a
   Record<string, unknown>
 >;
 
-/** `./console/ConsoleShell.tsx` → `console`。 */
+/** `./quill/QuillShell.tsx` → `quill`。 */
 function dirOf(globKey: string): string {
   return globKey.split('/')[1] ?? '';
 }
@@ -124,7 +124,7 @@ for (const id of dirs) {
   /*
    * 内置的两套已经静态注册过了。
    *
-   * ⚠️ **这里跳过，是为了 `import './console/theme.css'` 那条不重复**。
+   * ⚠️ **这里跳过，是为了 `import './quill/theme.css'` 那条不重复**。
    * 样式是 eager glob 自动带进来的，不需要在这里再引一次；而组件用目录名
    * 重名替换内置定义，会把内置的人写 label / hint 换成目录名。
    */

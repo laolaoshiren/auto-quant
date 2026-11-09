@@ -57,6 +57,19 @@ function read(rel: string): string {
 }
 
 /**
+ * 全部模板目录名（`templates/<id>/`，排除 `lib/`）。
+ *
+ * 扫目录而不是写死清单：内置模板收敛成一套之后，第三方模板仍可加进来，
+ * 而"每套模板都要覆盖 --aq-ink-mid"这条约束对它们同样成立。
+ */
+function allTemplateIds(): string[] {
+  const root = path.join(SRC, 'templates');
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== 'lib')
+    .map((entry) => entry.name);
+}
+
+/**
  * 剥掉 CSS 注释后再匹配变量定义。
  *
  * ⚠️ **这一步是必需的，不是保险。** 本仓库的 CSS 注释密度很高，
@@ -150,15 +163,18 @@ test('★ ink-mid 在每套模板里都有定义 —— 别名依赖它，它缺
   /*
    * 别名指向 `--aq-ink-mid`，所以那个变量必须在每套模板的主题块里存在，
    * 否则 `var(--aq-ink-mid)` 会解析成空值（文字颜色失效 → 继承）。
+   *
+   * UI 收敛之后内置只剩 `quill` 一套（2026-11-10）；第三方模板通过
+   * `templates/<目录>/theme.css` 进来时，这条同样应该覆盖它 —— 所以扫目录而不是写死清单。
    */
   const missing: string[] = [];
-  for (const tpl of ['classic', 'console', 'quill']) {
+  for (const tpl of allTemplateIds()) {
     const file = path.join(SRC, 'templates', tpl, 'theme.css');
     let css = '';
     try {
       css = readFileSync(file, 'utf8');
     } catch {
-      /* classic 可能没有 theme.css —— 它用 :root 的值，算通过。 */
+      /* 模板可以没有 theme.css（用 :root 默认值）—— 算通过。 */
       continue;
     }
     if (!css.includes('--aq-ink-mid:')) missing.push(tpl);

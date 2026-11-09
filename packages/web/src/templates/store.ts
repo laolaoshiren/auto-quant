@@ -84,8 +84,7 @@ export const useTemplateStore = create<TemplateStore>((set, get) => ({
  * 最需要控制的就是"整页底色是什么"。
  *
  * 同时把**上一套**模板的类摘掉：不摘的话两套模板的 CSS 会同时命中，
- * 表现是"颜色对了一半"—— 而且不会有任何报错。
- */
+ * 表现是"颜色对了一半"—— 而且不会有任何报错。 */
 export function applyTemplateClass(template: TemplateDefinition): void {
   const root = document.documentElement;
   for (const item of listTemplates()) {

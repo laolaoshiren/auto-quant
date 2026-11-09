@@ -187,11 +187,10 @@ test('★ CHART_INK 的每个键都要有一份 CSS 变量映射，且值等于�
    * 这是"多套模板互不影响"的底线：漏掉一个变量，那个颜色在该模板下
    * 是原版的色 —— 属于"看起来对、其实没换"，而没有人会去数变量。
    *
-   * ⚠️ 这张表要跟着内置模板一起长：它一度只列了 console，于是 quill 的
-   * 图表配色不在覆盖内（而 quill **确实**覆盖了全部 11 个 —— 但那是我
-   * 逐个核对出来的，不是测试保证的）。
+   * ⚠️ 这张表要跟着内置模板一起长。UI 收敛之后只剩 `quill` 一套；它**确实**
+   * 覆盖了全部 11 个图表配色变量（逐个核对 + 本用例守住）。
    */
-  const themedTemplates = ['console', 'quill'] as const;
+  const themedTemplates = ['quill'] as const;
   for (const template of themedTemplates) {
     const css = readFileSync(new URL(`../templates/${template}/theme.css`, import.meta.url), 'utf8');
     for (const key of keys) {

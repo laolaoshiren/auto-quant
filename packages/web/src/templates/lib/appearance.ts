@@ -4,8 +4,9 @@
  *   · **模板**决定骨架（导航在哪、有没有工具栏、窗口是不是浮着）；
  *   · **亮暗**决定配色；**密度**决定表格行高。
  *
- * 一个模板可以同时支持亮暗（`console` 模板就是这样），也可以自己定死一种
- * （`classic` 模板只有深色）。这两件事混在一起之后，"换个深色版"就会变成
+ * 一个模板可以同时支持亮暗（内置的 `quill` 就是深 / 浅两套都支持），
+ * 也可以自己定死一种（只有深色的模板需要声明 `supportedSkins: ['dark']`）。
+ * 这两件事混在一起之后，"换个深色版"就会变成
  * "换一套模板"，那是不必要的重复。
  *
  * ## ⚠️ 键名是两份代码之间的契约
@@ -41,13 +42,12 @@ export const DENSITIES: Array<{ id: Density; label: string; hint: string }> = [
 /**
  * 某个主题选项在当前模板下是否**真的会生效**。
  *
- * ## 这个函数为什么存在（外部 issue #171）
+ * ## 这个函数为什么存在（外部 issue #171，历史）
  *
- * 浅色主题是靠 CSS 属性选择器实现的，而**只有 `console` 与 `quill` 写了那套规则**：
+ * 当时内置还有一套固定深色的 `classic` 模板，浅色规则只写在另两套的 theme.css 里：
  *
  * ```
- * html.aq-console[data-skin='light'] { … }   ← console/theme.css:210
- * html.aq-quill[data-skin='light']   { … }   ← quill/theme.css:215
+ * html.aq-quill[data-skin='light']   { … }   ← quill/theme.css:224
  * ```
  *
  * `classic/` 目录下 `skin` 零命中 —— 它的定位是"原版外观"，固定深色。
@@ -62,6 +62,9 @@ export const DENSITIES: Array<{ id: Density; label: string; hint: string }> = [
  * 这是本仓库反复修过的那类"设置存下来但不生效、且不报任何错"。原来的处理是
  * 在页面底部小字里加一句「经典模板只有深色……切了不会坏，只是看不出来」——
  * 但那是**点击之后**才可能读到的说明，按钮本身仍然承诺"这会生效"。
+ *
+ * UI 收敛之后内置只剩 `quill`（深 / 浅都支持），但机制仍然保留：第三方模板
+ * 若只有深色，声明 `supportedSkins: ['dark']` 就能让浅色卡被禁用并就地说明原因。
  *
  * ## 为什么用显式声明而不是复用 `ownsPalette`
  *
