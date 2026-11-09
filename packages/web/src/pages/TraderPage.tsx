@@ -106,8 +106,14 @@ type ChartTab = 'equity' | 'candles';
  * 所以改由 `useEquityChartHeight()` 在 JS 里算出像素值。
  */
 const EQUITY_CHART_MIN = 110;
-const EQUITY_CHART_MAX = 260;
-const EQUITY_CHART_RATIO = 0.16;
+/**
+ * **实验性布局**（2026-11-10 用户要求按参考截图把详情页改成"大图表"版）：
+ * 原来上限 260px / 比例 16vh —— 曲线只占一小条，首屏一半是空白。
+ * 现在放大到 380px / 26vh，让图表成为首屏主体（右侧仍是决策流、底部表格不变）。
+ * 若用户觉得不好，`git revert` 这一个提交即可回到原比例。
+ */
+const EQUITY_CHART_MAX = 380;
+const EQUITY_CHART_RATIO = 0.26;
 
 /**
  * 图表高度 = `clamp(110, 16vh, 260)`，但**在 JS 里算**。
@@ -1309,7 +1315,7 @@ export function TraderPage() {
      * 指标卡**等高**（不加 `items-start`），这是刻意的 —— 它们是一组 KPI 方块、
      * 是一个视觉单元，高低不齐会让人觉得它们不属于同一组。
      */
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
       {/* 1 — 账户余额：我到底有多少钱 ---------------------------------- */}
       <MetricCard>
         <Metric
@@ -1919,24 +1925,12 @@ export function TraderPage() {
           </h1>
           <TraderStatusBadge status={status} live={trader.isRunning} />
           {/*
-            显示**这个机器人用的是哪个钱包**，而不是交易环境标签。
+            ⚠️ **「USDT 账户」徽章已删除**（用户 2026-11-10：「去掉没意义」）。
             
-            原来这里是「币安 USDT 本位合约（实盘）」—— 那说的是**平台**，
-            不是**账户**。同一个平台下可能配了多个钱包，而
-            「这台机器人花的是哪一笔钱」才是操作员需要一眼确认的事，
-            尤其当几个机器人共用同一个账户时（那种情况下很容易看错）。
-            
-            环境（实盘/模拟）仍然有价值，但它降级到 title 里 ——
-            它不随机器人变化，而钱包名会。
+            纯模拟盘机器人没有交易所账户，兜底显示的「USDT 账户」既不回答
+            "它花的是哪笔钱"（没有账户），也和旁边的「模拟盘」徽章重复。
+            绑定了账户的机器人在页头下方的信息行与配置摘要里都能看到账户名。
           */}
-          <Badge
-            tone="muted"
-            title={
-              `该机器人使用的交易所钱包。交易环境：${system?.environmentLabel ?? '未知'}（由服务端配置决定）。`
-            }
-          >
-            {accountLabel ?? `${settleAsset} 账户`}
-          </Badge>
           {/*
             ⚠️ **「这个机器人在不在花真钱」必须能被一眼看到，而它不在顶栏里。**
             
