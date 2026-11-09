@@ -236,7 +236,16 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
   };
 
   const running = traders.filter((trader) => trader.isRunning);
-  const stopped = traders.filter((trader) => !trader.isRunning);
+  /*
+   * ⚠️ **`starting` 不能混进 `stopped`**（2026-11-10 回归实测）。
+   *
+   * 启动是异步的（`stopped → starting → running`）。之前 `stopped` 只判
+   * `!isRunning`，于是**刚点过启动的那台**会在面板里继续显示「启动」项 ——
+   * 再回车一次 → 服务端拒绝「正在启动中」，面板只弹一条错误提示。
+   * 现在它单独成一项、禁用，文案与列表页一致。
+   */
+  const starting = traders.filter((trader) => !trader.isRunning && trader.status === 'starting');
+  const stopped = traders.filter((trader) => !trader.isRunning && trader.status !== 'starting');
   const runningCount = system?.runningTraders.length ?? running.length;
 
   return (
@@ -322,8 +331,11 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                           <Bot aria-hidden className="h-4 w-4 shrink-0 text-ink-faint" />
                           <span className="min-w-0 flex-1 truncate">{trader.name}</span>
                           <span className="flex shrink-0 items-center gap-1.5 text-xs text-ink-lo">
-                            <Dot tone={trader.isRunning ? 'up' : 'muted'} pulse={trader.isRunning} />
-                            {trader.isRunning ? '运行中' : '已停止'}
+                            <Dot
+                              tone={trader.isRunning ? 'up' : trader.status === 'starting' ? 'warn' : 'muted'}
+                              pulse={trader.isRunning || trader.status === 'starting'}
+                            />
+                            {trader.isRunning ? '运行中' : trader.status === 'starting' ? '启动中' : '已停止'}
                           </span>
                         </Command.Item>
                       ))}
@@ -332,6 +344,18 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
 
                   {(running.length > 0 || stopped.length > 0) && (
                     <Command.Group heading="机器人操作" className={GROUP_CLASS}>
+                      {starting.map((trader) => (
+                        <Command.Item
+                          key={`starting-${trader.id}`}
+                          value={`启动中 ${trader.name} starting ${trader.id}`}
+                          disabled
+                          className={ITEM_CLASS}
+                        >
+                          <LoaderCircle aria-hidden className="h-4 w-4 shrink-0 animate-spin text-ink-faint" />
+                          <span className="min-w-0 flex-1 truncate">启动中「{trader.name}」</span>
+                          <span className="shrink-0 text-xs text-ink-faint">正在预检</span>
+                        </Command.Item>
+                      ))}
                       {running.map((trader) => (
                         <Command.Item
                           key={`stop-${trader.id}`}

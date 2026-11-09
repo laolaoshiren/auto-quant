@@ -445,7 +445,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | `Layout.tsx` | 外壳与导航 |
 | `Badges.tsx` | `TraderStatusBadge` / `SideBadge` / `CheckList`（预检结果）/ `SectionHeading` |
 | `TraderTables.tsx` | 持仓 / 委托 / 成交 / 历史四个表 + `TraderTabId` |
-| `TraderModals.tsx` | 新建 / 启动机器人弹窗 |
+| `TraderModals.tsx` | 新建机器人弹窗（运行模式在此选定并固定；启动入口已改为点击即运行，无启动弹窗） |
 | `TraderConfigModal.tsx` | 修改机器人配置 |
 | `BalanceCells.tsx` | 余额单元格与账户条（多资产、单位正确） |
 | `PnlBreakdown.tsx` | 净盈亏拆解（`NET_PNL_FORMULA = '净盈亏 = 毛盈亏 − 手续费 − 资金费'`） |

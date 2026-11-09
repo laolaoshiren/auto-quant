@@ -364,7 +364,8 @@ export function OverviewPage() {
   /**
    * **启动 = 点击即启动**（用户 2026-11-10：「点启动以后直接就运行，而不是又弹一个框」）。
    *
-   * 运行模式在创建时固定，启动弹窗已无可选项；失败原因走行内 `actionError`。
+   * 运行模式在创建时固定，启动入口（列表 / 详情 / 总览 / 命令面板）都是**点击即启动**、
+   * 不再有弹窗；失败原因走行内 `actionError`。
    */
   const startNow = async (trader: TraderRow) => {
     setBusyId(trader.id);

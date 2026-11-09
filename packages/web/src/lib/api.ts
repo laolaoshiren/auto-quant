@@ -1059,7 +1059,8 @@ export const api = {
   deleteTrader: (id: number) => request<{ ok: boolean }>(`/traders/${id}`, { method: 'DELETE' }),
   /*
    * **运行模式（模拟/实盘）在创建机器人时就已固定**（2026-11-10 用户要求）——
-   * 启动接口不再接受这个选择。参数保留 `dryRun` 只为兼容旧调用点，服务端会忽略它。
+   * 启动接口**不接受**这个选择，也不再有 `dryRun` 参数：服务端读 `traders.dry_run`。
+   * 老数据（`dry_run = NULL`）由服务端在首次启动时用请求体补写一次，属于一次性迁移。
    */
   startTrader: (id: number) =>
     request<StartResult>(`/traders/${id}/start`, { method: 'POST', body: {} }),

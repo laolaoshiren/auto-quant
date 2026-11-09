@@ -1,21 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { isAiDriven, type TraderMode, type TraderStatus } from '@aq/shared';
+import { isAiDriven, type TraderMode } from '@aq/shared';
 import {
   api,
   type AiModelRow,
   type DiscoverModelsResult,
   type ExchangeAccountRow,
-  type PreflightCheck,
   type TraderRow,
 } from '../lib/api';
-import { useApp } from '../lib/store';
 import { MODE_LABEL } from '../lib/glossary';
 import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, TextInput } from './ui';
-import { CheckList } from './Badges';
 import { SectionLabel } from './shell';
 import { EquitySourceField, equityPayload, useExchangeEquity } from './EquitySourceField';
-import { fmtUsd } from '../lib/format';
 import type { Catalog } from '../lib/api';
 
 /* -------------------------------------------------------------------------- */
@@ -620,7 +616,8 @@ export function NewTraderModal({
              * **运行模式在创建时固定**（2026-11-10 用户要求）。
              *
              * 用户原话：「应该是由创建机器人的时候决定固定，而不是运行启动机器人的时候来决定」。
-             * 所以这里是"这台机器人永远用模拟还是实盘"的唯一一次选择；启动弹窗只展示、不再让选。
+             * 所以这里是"这台机器人永远用模拟还是实盘"的唯一一次选择；启动入口
+             * （列表 / 详情 / 总览 / 命令面板）**点一下就直接启动**，不再弹任何选择框。
              * 实盘必须已绑定账户（没账户的机器人在服务端会被拒，这里提前禁用）。
              *
              * 两张卡**描述都压到一行** —— 原来一张 2 行、一张 3 行，并排时高度不齐，
