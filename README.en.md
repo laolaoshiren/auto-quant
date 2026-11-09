@@ -248,6 +248,7 @@ Further reading: [Architecture and trade-offs](docs/ARCHITECTURE.md) · [Module 
 | Document | Contents |
 | --- | --- |
 | [Development guide](docs/DEVELOPMENT.md) | Environment, commands, test strategy, debugging, common pitfalls |
+| [DSH workflow guide](docs/WORKFLOW-DSH.md) | Task splitting, verification matrix and evidence trails in a multi-agent / DSH setup |
 | [Module map](docs/MODULES.md) | Per-file responsibilities + "to add a new X, change this" recipes |
 | [Architecture](docs/ARCHITECTURE.md) | Design trade-offs and key engineering decisions |
 | [API reference](docs/API.md) | Contracts for every HTTP endpoint |

@@ -28,7 +28,7 @@
 >
 > | 工作流 | 触发 | 做什么 |
 > | --- | --- | --- |
-> | [`ci.yml`](../.github/workflows/ci.yml) | PR / push main | 类型检查 · Lint · 文档链接 · 接口一致性 · 测试 · 构建 · 密钥扫描 |
+> | [`ci.yml`](../.github/workflows/ci.yml) | PR / push main | 类型检查 · Lint · 文档链接 · 接口一致性 · 测试 · 构建 · 第三方声明 · 密钥扫描 |
 > | [`pr-labeler.yml`](../.github/workflows/pr-labeler.yml) | PR | 路径标签（`labeler.yml`）+ 类型标签（Conventional Commits 前缀）|
 > | `release-drafter.yml`（该 workflow 当前**未启用**，见下方说明） | push main | 增量维护发布说明草稿，并按标签推导版本号 |
 

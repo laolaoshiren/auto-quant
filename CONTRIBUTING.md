@@ -21,6 +21,7 @@
 想理解**为什么这样设计** → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 想知道**某个功能该改哪个文件** → [`docs/MODULES.md`](docs/MODULES.md)
 如果你是**没有上下文的新 AI 会话** → [`docs/AGENTS.md`](docs/AGENTS.md)
+多 Agent / DSH 环境下怎么落地这套流程（任务拆分、验证矩阵、证据落盘）→ [`docs/WORKFLOW-DSH.md`](docs/WORKFLOW-DSH.md)
 
 最短路径：
 
@@ -42,12 +43,12 @@ npm test
 
 | 项目 | 状态 |
 |---|---|
-| CI（类型检查 / Lint / 文档链接 / 接口一致性 / 测试 / 构建 / 密钥扫描） | ✅ 每次 PR 与 push main 都跑（`.github/workflows/ci.yml`）|
+| CI（类型检查 / Lint / 文档链接 / 接口一致性 / 测试 / 构建 / 第三方声明 / 密钥扫描） | ✅ 每次 PR 与 push main 都跑（`.github/workflows/ci.yml`）|
 | PR 自动打标签（路径 + 标题前缀） | ✅ 仅在 PR 上跑（`.github/workflows/pr-labeler.yml`）|
-| 发布说明草稿（release-drafter） | ✅ 合入 main 时增量重算（`.github/workflows/release-drafter.yml`）|
-| Docker 镜像 | ✅ push main 与 `v*` 标签时构建（`.github/workflows/docker-publish.yml`）|
+| 发布说明草稿（release-drafter） | ⚠️ **配置在 `.github/release-drafter.yml`，但对应 workflow 当前未启用** —— 它现在只是分类/版本推导口径的配置，不会自动生成草稿（见 [`docs/RELEASING.md`](docs/RELEASING.md)）|
+| Docker 镜像 | ⚠️ **`Dockerfile` 在仓库里，但自动构建镜像的 workflow 当前未启用**（`docker-publish.yml` 不在仓库内）—— 镜像由部署流程/本地 `docker build` 产生（见 [`docs/RELEASING.md`](docs/RELEASING.md)）|
 | CODEOWNERS | ✅ 指向真实账号，改动会自动请求 review |
-| Dependabot（npm + GitHub Actions，每周） | ✅ 已启用 |
+| Dependabot（npm + GitHub Actions，每周） | ✅ 配置已就位（`.github/dependabot.yml`）；**不得开启 auto-merge** |
 | Issue / PR 模板 | ✅ 已配置 |
 | `main` 分支保护 | ❌ **未启用**（见下）|
 
@@ -69,10 +70,13 @@ npm test
 
 直接推送到 `main` 仍然允许。理由：
 
-- 维护者自己的迭代走 `scripts/deploy.ps1`（scp/ssh），**不经过 GitHub**，
-  而现在 `docker-publish.yml` 会在每次 push main 时构建镜像 ——
+- 维护者自己的迭代走 `scripts/deploy.ps1`（scp/ssh），**不经过 GitHub** ——
   若强制走 PR，自己的迭代会多出一轮"开 PR → 等 CI → 合并"的往返；
 - 把 `main` 长期弄成红色会训练人忽略红色，比没有保护更糟。
+
+> ⚠️ **历史前提已变**：上一版这里写的是"`docker-publish.yml` 会在每次 push main 时构建镜像"，
+> 但那个 workflow **当前不在仓库里**（未启用，见上面的仓库设置表）。所以这条理由现在只剩前半句
+> —— 分支保护仍未启用，是否启用由维护者在有外部协作者时决定。
 
 **没有分支保护时，"`main` 是绿的"只能靠看 CI 结果，没有机制帮你拦。**
 所以发版前请确认 `main` 上最近一次 CI 是绿的（见 `docs/RELEASING.md`）。

@@ -56,22 +56,23 @@ cd /opt/autoquant/deploy && ./up.sh
 
 ## A2. 镜像从哪里来
 
-推送代码到 `main` → GitHub Actions **直接**构建并推送镜像到 GHCR
-（`.github/workflows/docker-publish.yml`，触发条件是 `push: branches: [main]` 与 `v*` 标签）。
+⚠️ **当前没有自动构建镜像的 workflow。** 仓库里有 `Dockerfile` 与 `deploy/docker-compose.yml`，
+但 `docker-publish.yml`（推送 main / `v*` 标签时构建并推送 GHCR）**当前不在仓库内** ——
+镜像由维护者在发布流程里构建/推送，或在服务器上 `docker compose build` 本地构建。
+Docker 发布路径详见 [`RELEASING.md`](RELEASING.md) 的「Docker 镜像」一节。
 
-> ⚠️ **2026-09-30 起不再经过 CI。**
+> ⚠️ **2026-09-30 的自动化移除只恢复了一部分。**
 >
-> 原来这里是「先跑 CI，`workflow_run` 等它成功再构建」。那套设计对多人协作是对的
-> （镜像永远可部署），但它有一个不会报错的隐患：**镜像的产出依赖 CI 存在** ——
-> CI 一旦被拿掉，`workflow_run` 永不触发，镜像就安静地不再更新。
->
-> 用户此时的决定是「自动化功能能不用就不用，项目只有我自己在维护」，于是
-> `ci.yml` 等 6 个工作流被移除，质量把关回到本地：
-> `npm run typecheck / lint / test`（779 个用例）+ `npm run build`。
+> 那次为了避开 GitHub 风控，`ci.yml` 等 workflow 被移除，质量把关回到本地
+> （`npm run typecheck / lint / test` + `npm run build`）。
+> **2026-10-13 起 `ci.yml` 与 `pr-labeler.yml` 已恢复**（外部协作者提 PR 时需要它们，
+> 见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)）；
+> 而 `docker-publish.yml` 与 release-drafter 的 workflow **仍未恢复** ——
+> 所以不要再假设"推上去镜像就自动更新"。
 >
 > **日常部署仍然走 `scripts/deploy.ps1`（scp + ssh），根本不经过 GitHub。**
 
-镜像同时带 `sha-<短哈希>` 标签，所以任何一次部署都能追溯到确切的提交。
+镜像（无论由谁构建）都带 `sha-<短哈希>` 标签，所以任何一次部署都能追溯到确切的提交。
 
 ## A3. 网络暴露
 

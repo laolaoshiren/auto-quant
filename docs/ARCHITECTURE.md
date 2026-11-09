@@ -394,13 +394,15 @@ base URL、鉴权方式、推荐模型、是否兼容 OpenAI 方言、JSON 模�
 ## 10. 测试
 
 ```bash
-npm test                                     # 全部后端测试
-npx tsx --test src/risk/engine.test.ts       # 风控引擎（27 个用例）
-npx tsx --test src/strategy/parser.test.ts   # 响应解析（29 个用例）
-npx tsx --test src/market/indicators.test.ts # 技术指标（16 个用例）
-npx tsx --test src/llm/llm.test.ts           # LLM 各厂商怪癖（45 个用例）
+npm test                                     # 全部测试（shared / server / web + 决策流 SSR）
+npx tsx --test src/risk/engine.test.ts       # 风控引擎
+npx tsx --test src/strategy/parser.test.ts   # 响应解析
+npx tsx --test src/market/indicators.test.ts # 技术指标
+npx tsx --test src/llm/llm.test.ts           # LLM 各厂商怪癖
 npx tsx packages/server/src/scripts/verifyPipeline.ts   # 真实币安数据全链路
 ```
+
+> 用例数看命令自己打印的 `# tests` —— **不要在文档里写死**（写了必然腐烂）。
 
 指标测试里固化了经典参考值（Wilder RSI、EMA），
 风控测试覆盖了每一条限制与钳制方向 —— 这是防止"看起来对但方向反了"这类

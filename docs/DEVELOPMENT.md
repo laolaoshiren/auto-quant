@@ -172,7 +172,7 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 | `npm run sim:live` | `tsx packages/server/src/scripts/simulate.ts --live --loose --cycles 12` | 同上，但模型换成**真实 LLM**（需要 `SIM_LLM_KEY`），策略放宽（`--loose`）以便真的有可能下单 |
 | `npm run seed:demo` | `tsx packages/server/src/scripts/seedDemoData.ts` | 往**真实数据库**灌一批演示用的机器人 / 成交 / 决策数据（用于看控制台长什么样） |
 | `npm run seed:demo:clean` | 同上加 `--clean` | 清掉 `seed:demo` 灌入的数据 |
-| `npm run notices` | `node scripts/generate-notices.mjs` | 重新生成 `THIRD-PARTY-NOTICES.md`。**改过任何依赖之后必须跑**；`node scripts/generate-notices.mjs --check` 可校验产物是否过期（**CI 目前还没接入这一步**，别指望它自动变红） |
+| `npm run notices` | `node scripts/generate-notices.mjs` | 重新生成 `THIRD-PARTY-NOTICES.md`。**改过任何依赖之后必须跑**；`node scripts/generate-notices.mjs --check` 可校验产物是否过期；**CI 每次都会跑这一步**（依赖变了却没重新生成会红） |
 | `npm run check:links` | `node scripts/check-links.mjs` | 检查文档里的**站内链接**是否都解析得到（外链不查，别人家站点挂了不该让本项目变红）。**CI 每次都会跑**；本地改过文档路径/标题时先跑一次，省得推上去才发现 |
 | `npm run check:routes` | `node scripts/check-api-routes.mjs` | 前后端接口对照：前端 `api.ts` 声明的每个调用，后端是否真有那条路由。**CI 每次都会跑**。改过 `api.ts` 或 `server.ts` 的路由后先跑一次 |
 | `npm run ui:smoke` | `node scripts/ui-smoke.mjs` | 用真实浏览器把每个页面打开一遍，抓运行时报错、白屏、横向滚动条。（需要先有 `packages/web/dist` 且服务在跑；用本机 Chrome/Edge，不下载浏览器；登录靠 `UI_SMOKE_USER` / `UI_SMOKE_PASS` 或 `AQ_TOKEN`） |
@@ -267,8 +267,9 @@ ERROR [trader] 为 BTCUSDT 挂 止盈（触发价 79033.592）失败：
    （它断言真实 broker 发送前会取整）。放在模拟器里等于在测试另一条代码路径——
    模拟运行根本不会调用真实 broker。
 2. **没进 CI 的验证等于不存在。** 当时 `npm test` 全绿，因为单元测试走不到这条路径。
-   它曾是 CI 的一个步骤（`.github/workflows/ci.yml`）；**该工作流已于 2026-09-30 移除**
-   （用户决定：自动化能不用就不用，项目只有他一人维护）。所以这条验证现在要**手工跑**：
+   而这条验证**至今不在 CI 里**（CI 的步骤见 `.github/workflows/ci.yml`：类型检查 / lint /
+   链接 / 路由 / 测试 / 构建 / 第三方声明 / 密钥扫描 —— **没有 `npm run sim`**：
+   它要连真实行情，GitHub runner 既不可靠、也受地区限制）。所以这条验证要**手工跑**：
    `npm run sim` —— 它需要能连上币安，本地连不上时在服务器上跑。
    > 顺带记下当年在 GitHub runner 上的形状：币安返回
    > `Service unavailable from a restricted location`（runner 在限制区域），

@@ -649,7 +649,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "==> ✗ 部署失败（远端退出码 $LASTEXITCODE）" -ForegroundColor Red
     Write-Host "    上面最后几行是远端的报错。**服务很可能没有重启，仍在跑旧代码**：" -ForegroundColor Yellow
-    Write-Host "      ssh tx 'systemctl show autoquant -p ExecMainStartTimestamp'" -ForegroundColor Yellow
+    Write-Host "      ssh <SSH 别名> 'systemctl show autoquant -p ExecMainStartTimestamp'" -ForegroundColor Yellow
     Write-Host "    修掉远端那一步再重跑；不要只看 build-info.json —— 它在重启【之前】就写好了。" -ForegroundColor Yellow
     exit $LASTEXITCODE
 }

@@ -1,5 +1,7 @@
 # 需求④验证：harness（Claude Code）真的在跑，且产出已落库（2026-10-15）
 
+> **归档于 2026-11-09：一次性验证 / 复核报告。** 对应任务已闭环；本文仅作历史记录，**不代表当前行为**。
+
 > 需求原话：
 > > 「不重复造轮子，就像我刚才想要的那些功能，例如增加查新闻智能体，
 > >  可以直接用现成的 AI AGENT：如 claude code / codex / dsh 等等去完成……
@@ -9,7 +11,7 @@
 
 ---
 
-## 1. 选型结论（`docs/FINDING-harness-selection.md`）
+## 1. 选型结论（`docs/archive/FINDING-harness-selection.md`）
 
 ```
 只保留【已接好的 Claude Code】，并且只让它服务【猎手（调研）】这一个岗位。

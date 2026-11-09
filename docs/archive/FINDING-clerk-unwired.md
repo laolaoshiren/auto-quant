@@ -1,5 +1,7 @@
 # 发现：`clerk`（文员）是「定义了但从未被调用」的第二个 `engineer`
 
+> **归档于 2026-11-09：一次性调查 / 复盘记录。** 结论已并入代码、测试或长期文档；本文仅作历史记录，**不代表当前行为**。
+
 > 状态：**待决策，未修**。这是一条**产品决策**（要不要这个岗位、以什么形式存在），
 > 不是 BUG 修复 —— 所以没有擅自改代码。
 >
@@ -73,6 +75,41 @@ packages/shared/src/firm.ts:306                 ← 组织架构声明
 
 **这是反对接线的核心论据。**
 
+### ⚠️ 2026-11-09 更正：「答案已经存在」在当时**不成立**
+
+上面这段判断有一个事实错误（后端质量审计发现，HEAD `bf5feda`）：
+
+```text
+assessSignal()             ← 全仓只有测试引用
+tradesForSignal()          ← 全仓只有测试引用
+signalsWithEnoughSamples() ← 全仓只有测试引用
+trades.intel_keys          ← 只写不读（TradeRow / toTrade 不读它，仓储层也没有读取方法）
+```
+
+也就是说：**归因链的最后一环是断的**。`attribution.ts` 确实"直接读数据库"——但它自始至终
+**没有任何生产调用点**，所以它一次都没有读过。整条链的真实状态是：
+
+```text
+情报 → 决策（intel_keys）→ positions.intel_keys → trades.intel_keys → ✗ 没有人读
+```
+
+**「确定性代码存在」≠「确定性代码在跑」** —— 这与本文档 §1 对 `clerk` 的判断是同一种缺口，
+只不过这一回是"看起来已经承担了职责"的那一侧。
+
+2026-11-09 已补上（**只做可观测接线，不改变交易行为**）：
+
+- `store/repositories.ts` 新增 `trades.intelAttributionsSince()` —— `intel_keys` 的读取侧；
+- 新增 `trader/intel/signalHealthReport.ts` —— 把 `assessSignal()` 接到真实归因数据上；
+- `AutoTrader` 每周期（10 分钟节流）写一条 `signal-health` 观测日志（`emitOnChange`，结论不变不重复写）。
+
+仍未完成（需要单独决策）：
+
+- **反应衰减**（`detectReactionDecay()`）仍无法评估：`trades.intel_keys` 只存键、不存开仓时
+  那条情报的权重，需要新增列并改写入侧（迁移）；
+- 健康度**没有**进提示词、也没有用来降权/过滤 —— 任何"参与决策"的接线都需要单独拍板；
+- 同类缺口还有一例：`intel/factSheet.ts` 的 `recentFacts()` 同样**只有测试引用**
+  （2026-11-09 grep 实测），即"跨来源事实表"也尚未接线。
+
 ---
 
 ## 4. 但 `clerk` 覆盖的范围确实更宽
@@ -97,7 +134,8 @@ packages/shared/src/firm.ts:306                 ← 组织架构声明
 
 ### 方案 A：按 `engineer` 先例处理 —— **删除 `clerk`**
 - 与先例一致；
-- 理由：职责已由 `attribution.ts` + `signalHealth.ts` 以更可靠的方式承担。
+- 理由：职责**在 2026-11-09 接线之后**才真正由 `attribution.ts` + `signalHealth.ts` 承担
+  （接线之前这句话与事实不符，见 §3 的更正）。
 - ⚠️ 代价：用户需求 ⑤ **点名要"文员"**，删掉它需要向用户解释清楚"为什么不需要"。
 
 ### 方案 B：**用确定性代码实现**「跨来源事实表」，然后把 `clerk` 改成它的调用方

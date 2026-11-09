@@ -1,5 +1,7 @@
 # 复核报告：task-3 岗位状态诚实化（对抗式）
 
+> **归档于 2026-11-09：一次性验证 / 复核报告。** 对应任务已闭环；本文仅作历史记录，**不代表当前行为**。
+
 > 复核对象：`task-3`（`FirmRole.status` 增加 `by_code`，`data_sentinel` / `ops_watchdog`
 > 从 `planned` 改为 `by_code`，前端团队看板显示新状态）
 > 复核人：实现者本人（`roster-honesty`）· 日期：2026-10-15 · 方式：**试图推翻它**
@@ -199,7 +201,7 @@ typecheck / build / 既有单测全绿，只有屏幕会说假话。已修（`by
 | 5 | `shared/src/firmStatus.test.ts:138` planned 清单 | 7 个 | 5 个 | 期望值更新 |
 | 6 | `shared/src/firmRoles.test.ts:129-134` | 不存在（本次新增） | 分布断言 14/2/5 | 新增守卫 |
 | 7 | **`server/src/trader/routedModel.test.ts:387`** `filter(r => r.status === 'staffed')` | 这 2 个不在集合内 | 仍不在集合内 | **行为不变**（server 全量测试 1747/1747 绿） |
-| 8 | `docs/团队模式-进度看板.md:54`、`docs/FINDING-clerk-unwired.md:16` | 提到"看板显示规划中" / `clerk` 是 planned | 文档文字**已过时**（前者描述的是旧判据行号与旧行为） | ⚠️ **见 §7 第 2 条** |
+| 8 | `docs/archive/团队模式-进度看板.md:54`、`docs/archive/FINDING-clerk-unwired.md:16` | 提到"看板显示规划中" / `clerk` 是 planned | 文档文字**已过时**（前者描述的是旧判据行号与旧行为） | ⚠️ **见 §7 第 2 条** |
 
 ⇒ 有行为变化的只有 2 个前端消费点，且都是**期望的**变化；测试期望更新 3 处；
 `routedModel.test.ts` 那条判据**不受影响**（我实测跑过 server 全量）。
@@ -332,9 +334,9 @@ collapsed 含 [规划中 5（还没实现）] ? true
 
 ### 7.2 两处文档已经过时（**建议修**）
 
-- `docs/团队模式-进度看板.md:54` 原文：「团队看板上它们会显示「规划中」`roster.ts:202` 的判据
+- `docs/archive/团队模式-进度看板.md:54` 原文：「团队看板上它们会显示「规划中」`roster.ts:202` 的判据
   就是 `role.status === 'planned'`」——判据行号与**行为**都过时了（现在这 2 个显示"代码在跑"）。
-- `docs/FINDING-clerk-unwired.md:16` 把 `clerk` 的 `firm.ts:306` 描述成 `status: 'planned'` ——
+- `docs/archive/FINDING-clerk-unwired.md:16` 把 `clerk` 的 `firm.ts:306` 描述成 `status: 'planned'` ——
   行号已漂移（现在在 `firm.ts:371`），且该文档是"发现记录"，本就不该被当成现状。
 
 这两处**不属于** task-3 的交付范围（task-3 写的是"注释解释为什么"，没要求同步 docs），

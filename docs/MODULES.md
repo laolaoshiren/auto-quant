@@ -513,7 +513,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | 5 | `packages/server/src/llm/discovery.ts` | 只有当它的 `/models` 响应**不是** OpenAI 形状时才需要加一支 `extractModels()` 分支（Gemini 和 Anthropic 各有一支）。OpenAI 形状的话第 2 步的 `modelsPath`/`modelsAuth` 就够了 |
 | 6 | `packages/server/src/llm/errors.ts` | 只有当它在**非标准场景**报错时才需要（例如 MiniMax 在 HTTP 200 里报错 → `MINIMAX_CODES` + `classifyMinimaxBaseResp`）。通用的 4xx/429/5xx 已经被 `kindForStatus()` 覆盖 |
 | 7 | 前端 | 无需改动：供应商下拉来自 `/api/catalog` 的 `providers`，选中后 baseUrl 与默认值自动填 |
-| 8 | 测试 | 在 `packages/server/src/llm/llm.test.ts` 加用例。这个文件有 45 个用例，模式是分别断言 `buildBody()`（纯函数，看请求体）与 `parseResponse()`（纯函数，喂真实响应样本） |
+| 8 | 测试 | 在 `packages/server/src/llm/llm.test.ts` 加用例。模式是分别断言 `buildBody()`（纯函数，看请求体）与 `parseResponse()`（纯函数，喂真实响应样本） |
 
 #### 情况 B：方言完全不同（非 OpenAI 兼容）
 
@@ -557,7 +557,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | 2 | `packages/server/src/risk/engine.ts` | **唯一正确的执行位置**。开仓限制加在 `RiskEngine.reviewOpen()`，平仓限制加在 `reviewClose()`，跨周期的（回撤、熔断）做成导出的纯函数（仿 `shouldCloseForDrawdown()` / `checkCircuitBreakers()`）。选好插入位置：**检查顺序影响报错信息**，越早返回越省事，但"先拒绝还是先钳制"要按语义决定 |
 | 3 | 同上 | **每一次钳制或拒绝都要留下痕迹**：拒绝 → `return { ok: false, reason: '...' }`（中文、说清数字）；钳制 → `adjustments.push('...')`。`adjustments` 会进 `ExecutionLogEntry.adjustments`，控制台会列表展示，测试也能断言"钳制真的发生了"而不是去匹配一句话 |
 | 4 | `packages/server/src/strategy/prompt.ts` | 在 `buildSystemPrompt()` 的「硬性约束」段里加一行。这段是**从 `RiskControlConfig` 动态生成**的，所以模型立刻能看到新边界——**但真正的执行者是风控引擎，不是这段文字**。有条件的话仿照现有写法（例如 `config.throttle.minHoldMinutes > 0 ? '...' : ''`），避免输出无意义的"限制为 0" |
-| 5 | `packages/server/src/risk/engine.test.ts` | 加用例，覆盖**每一个方向**（例如上限把值压小、下限把值抬大，以及边界值恰好相等时的行为）。现有 27 个用例就是按这个粒度写的 |
+| 5 | `packages/server/src/risk/engine.test.ts` | 加用例，覆盖**每一个方向**（例如上限把值压小、下限把值抬大，以及边界值恰好相等时的行为）。现有用例就是按这个粒度写的 |
 | 6 | 前端（可选） | 策略编辑器里由 `packages/web/src/components/StrategyRiskFields.tsx` 的 `RiskSection` / `ProtectionSection` 渲染 |
 | 7 | 别忘了 | 如果新规则依赖新的运行时输入（例如"最近 N 分钟内的某统计"），要同时扩展 `RiskEnvironment` 接口，并在 `trader/autoTrader.ts` 构造 `verdict` 的地方（以及 `strategy/healthCheck.ts` 里那份）**两处**都补上——漏一处会编译失败（好事），两处都要用真实数据 |
 

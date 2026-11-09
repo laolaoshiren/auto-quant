@@ -1,5 +1,7 @@
 # 运行监控记录 · 机器人 #5「测试2」
 
+> **已归档（早于 2026-11-09 的批次）：一次性过程记录，仅作历史记录，不代表当前行为。**
+
 **监控目标**：控制台上的机器人详情页（地址见本地部署配置，不写进仓库），至少 5 小时。
 **体检脚本**：`tools/healthSnapshot.mjs`（只读，一条命令输出全部指标）。
 
@@ -108,7 +110,7 @@ setLogSink((level, scope, message) => {
 **熔断（-6.11% > 5%）是保护机制，不是故障** —— 它已经阻止了当天所有新开仓
 （周期 #38 的两笔 `open_short` 都被它拦下）。
 
-**动作**：记录。**根因方案已写好待批**：`docs/PROPOSAL-model-performance-context.md`。
+**动作**：记录。**根因方案已写好待批**：`docs/archive/PROPOSAL-model-performance-context.md`。
 
 ---
 

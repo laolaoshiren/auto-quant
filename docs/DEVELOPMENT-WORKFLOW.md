@@ -83,7 +83,7 @@
 | `revert` | 撤销某个提交（标题里写明撤销哪个） | 🔧 其他 → patch |
 
 - **不要新增自定义 type**：type → 标签 → 发布说明分类 → 版本增量是一条链
-  （`.github/workflows/pr-labeler.yml` → `.github/release-drafter.yml`），
+  （`.github/workflows/pr-labeler.yml` → `.github/release-drafter.yml`；⚠️ release-drafter 的 **workflow 当前未启用**，但这份分类配置仍是契约），
   要加 type 必须三处同步改，并更新本表。
 - 破坏性变更的判定（哪些算破坏性）见 [`RELEASING.md`](RELEASING.md) 第 1 节。
 

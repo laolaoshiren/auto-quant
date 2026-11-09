@@ -1,5 +1,7 @@
 # 外部 Issue 集中分类（triage）
 
+> **已归档（早于 2026-11-09 的批次）：一次性过程记录，仅作历史记录，不代表当前行为。**
+
 **处理者**：PR/Issue 处理窗口　**日期**：2026-10-13　**基线**：`c8c4db3`（第 2 轮已推进到 `725e381`）
 **范围**：open issue #112–#125（14 个，全部来自外部贡献者 `8585684` / Vanta），open PR：0 个
 
@@ -2895,7 +2897,7 @@ Docker 镜像 (v0.1.16)→ success
 `screenUniverseRows()` **有意返回全市场**。且 `sourceType: 'funnel'`
 **没有任何预设或 UI 在用** → **"已设计、未接线"**，要不要接线是**产品方向**。
 
-**② 岗位层**（`d534db5`）：复核另一维护者的 `docs/FINDING-clerk-unwired.md`，
+**② 岗位层**（`d534db5`）：复核另一维护者的 `docs/archive/FINDING-clerk-unwired.md`，
 **属实**（`clerk` 在 `roles.ts` 之外零引用），纳入守卫 + 显式豁免。
 
 ⚠️ **这个扩展的动机是他文档里那句话**：

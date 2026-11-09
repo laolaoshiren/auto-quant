@@ -10,18 +10,19 @@
 
 ## 1. 先读什么
 
-按这个顺序读，构建一个最小可用的心智模型。**不要跳过第 4 项。**
+按这个顺序读，构建一个最小可用的心智模型。**不要跳过第 5 项。**
 
 | 顺序 | 读什么 | 目的 | 大概花多久 |
 | --- | --- | --- | --- |
 | 1 | 本文件 | 规则与边界 | 3 分钟 |
 | 2 | [`README.md`](../README.md) | 这个产品是什么、控制台怎么用、有哪些已实现/暂缓的功能 | 8 分钟 |
-| 3 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | **为什么**这样设计。关键工程决策表（条件单端点、WS 路由、权重预算…）在这里 | 10 分钟 |
-| 4 | [`docs/MODULES.md`](MODULES.md) | **改哪个文件**。含八条扩展配方与类型级约束清单 | 10 分钟，之后按需回查 |
-| 5 | 下面这五个文件 | 任何改动都会碰到的东西 | 30 分钟 |
-| 6 | [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) | 怎么跑、怎么测、常见陷阱 | 按需 |
+| 3 | [`docs/WORKFLOW-DSH.md`](WORKFLOW-DSH.md) | **怎么干活**：多 Agent / DSH 环境下的任务拆分、验证矩阵、证据落盘。只看规则不落地的人会反复犯同一类错 | 10 分钟 |
+| 4 | [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | **为什么**这样设计。关键工程决策表（条件单端点、WS 路由、权重预算…）在这里 | 10 分钟 |
+| 5 | [`docs/MODULES.md`](MODULES.md) | **改哪个文件**。含八条扩展配方与类型级约束清单 | 10 分钟，之后按需回查 |
+| 6 | 下面这五个文件 | 任何改动都会碰到的东西 | 30 分钟 |
+| 7 | [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) | 怎么跑、怎么测、常见陷阱 | 按需 |
 
-### 第 5 项：必须读的五个文件
+### 第 6 项：必须读的五个文件
 
 | 文件 | 为什么它排在最前面 |
 | --- | --- |
@@ -39,6 +40,7 @@
 | 改 LLM 相关 | `packages/server/src/llm/client.ts`、`errors.ts`，以及 `docs/research/binance-ws-and-llm-apis.md` 的 LLM 部分 |
 | 改 HTTP 接口 | `docs/API.md`（逐端点的参考文档，改接口必须同步它） |
 | 改前端 | `packages/web/src/lib/api.ts`（唯一的后端客户端）、`lib/store.ts`、`App.tsx` |
+| **拆分 / 重构交易循环**（`autoTrader.ts`） | [`docs/REFACTOR-autoTrader.md`](REFACTOR-autoTrader.md)（分阶段方案与遗留约束） |
 
 ### 省时间的捷径
 
@@ -553,7 +555,9 @@ Jev 日志的时间跨度只有 40 分钟
 **这条信息是否"只对某个特定部署者成立"？** 对所有部署者都成立 ⇒ 不是站点信息。
 
 ### 7.3 **真正要改的**（只对某个人成立的东西）
-- 真实域名、公网 IP、**操作者自己的 SSH 别名**（实测有 2 处已入库：`scripts/deploy.ps1:583` 与 `docs/VERIFY-task1-zero-decision.md:7`，写法都是 `ssh <别名> …`；而同文件其它地方用的是 `my-server` 占位符）。
+- 真实域名、公网 IP、**操作者自己的 SSH 别名**。
+  ⚠️ 历史教训：曾有 **2 处**真实 SSH 别名被提交入库（`scripts/deploy.ps1` 的失败提示、以及一份一次性复核报告），
+  两份都在 **2026-11-09** 被替换成 `ssh <SSH 别名>` 占位符；`/opt/autoquant` 这类**标准安装路径**按 §7.1 未做替换。
 - 任何凭据。
 
 ### 7.4 两条操作纪律

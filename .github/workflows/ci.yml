@@ -85,6 +85,13 @@ jobs:
       - name: 构建前端
         run: npm run build
 
+      # 第三方声明必须与当前 lockfile 一致：本文件是 MIT/Apache 等许可证
+      # **再分发义务**的履行方式，一份过期的清单比没有更糟（它声称已覆盖，实际漏了）。
+      # `--check` 只比对不写盘，依赖有变化时这里会红 —— 提醒改依赖的人跑一次
+      # `npm run notices` 并把产物一起提交。
+      - name: 第三方依赖声明（THIRD-PARTY-NOTICES.md 是否过期）
+        run: node scripts/generate-notices.mjs --check
+
       # 密钥扫描：这个仓库会同步到 GitHub，而它处理的是真实交易所凭据。
       # 用最简单的模式匹配，不引入新依赖（见 docs/AGENTS.md §4.3）。
       - name: 扫描提交里是否混入凭据
@@ -129,6 +136,7 @@ jobs:
             echo "| 接口一致性 | \`npm run check:routes\`（前端调的后端是否有） |"
             echo "| 测试 | \`npm test\`（含风控与账目算术） |"
             echo "| 构建 | \`npm run build\` |"
+            echo "| 第三方声明 | \`node scripts/generate-notices.mjs --check\`（是否与 lockfile 一致） |"
             echo "| 密钥扫描 | 新增行里是否有凭据字面量 |"
           } >> "$GITHUB_STEP_SUMMARY"
 

@@ -233,6 +233,7 @@ packages/
 | 文档 | 内容 |
 | --- | --- |
 | [开发手册](docs/DEVELOPMENT.md) | 环境、命令、测试策略、调试、常见陷阱 |
+| [DSH 工作流手册](docs/WORKFLOW-DSH.md) | 多 Agent / DSH 环境下的任务拆分、验证矩阵、证据落盘 |
 | [模块地图](docs/MODULES.md) | 逐文件职责 + 「要加一个新的 X 就改这里」配方 |
 | [架构文档](docs/ARCHITECTURE.md) | 设计取舍与关键工程决策 |
 | [API 参考](docs/API.md) | 全部 HTTP 端点契约 |
@@ -244,6 +245,7 @@ packages/
 | [AI 代理指南](docs/AGENTS.md) | 面向自动化编码代理的工作约束 |
 | [合规清单](docs/LEGAL.md) | 许可证、交易所条款、监管风险的逐项说明 |
 | [调研记录](docs/research/README.md) | 交易所与模型接口的一手实测记录 |
+| [历史归档](docs/archive/) | 一次性的调查 / 验证 / 实验记录（**仅作历史参考，不代表当前行为**） |
 | [第三方声明](THIRD-PARTY-NOTICES.md) | 运行时依赖的许可证与版权方 |
 
 ---

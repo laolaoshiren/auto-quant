@@ -1,10 +1,12 @@
 # task-4 复核报告：团队决策空转修复（task-1）
 
+> **归档于 2026-11-09：一次性验证 / 复核报告。** 对应任务已闭环；本文仅作历史记录，**不代表当前行为**。
+
 - **复核人**：`desk-pipeline`（即 task-1 的实现者本人 —— 对抗式自审）
 - **复核时间**：2026-10-15
 - **被复核对象**：`packages/server/src/trader/agent/deskOutput.ts`（+ `deskOutput.test.ts`、`teamModel.test.ts` 各一处）
 - **代码基线**：工作树 `HEAD=269e386`（task-1 的改动**未提交**，仍在工作树里）
-- **线上**：`ssh tx` 只读查询 `/opt/autoquant/data/autoquant.sqlite`（全部语句只有 `SELECT`）
+- **线上**：`ssh <SSH 别名>` 只读查询 `<部署根>/data/autoquant.sqlite`（全部语句只有 `SELECT`）
 
 > **总判定：可部署**（附 1 条"数字需更正"、2 条"必须记录的限制"、1 条建议）
 
@@ -333,7 +335,7 @@ git diff --stat -- packages/server/src/trader/agent/deskOutput.ts
 
 ```
 $ git status --porcelain | Select-String '^\?\?'
-?? docs/VERIFY-task3-roster-honesty.md
+?? docs/archive/VERIFY-task3-roster-honesty.md
 ?? packages/server/src/trader/agent/summaryCloses.test.ts
 ?? packages/web/src/components/TeamBoard/boardRender.test.ts
 ?? packages/web/src/pages/DecisionDetailPage.test.ts

@@ -1,8 +1,10 @@
 # Jev 实验 · 10 小时监控台账
 
+> **归档于 2026-11-09：JEV 实验的过程 / 结论记录。** 实验已闭环（JEV 模式保留，设计见 [`../JEV-MODE-DESIGN.md`](../JEV-MODE-DESIGN.md)）；本文仅作历史记录。
+
 > 开始：2026-10-18 07:20（服务器时间 UTC）
 > 开关：`AQ_JEV_PREFILTER=on` · `AQ_JEV_TOP_N=6` · `AQ_JEV_MIN_SCORE=0` · `AQ_JEV_BASE=http://172.19.0.1:3425`
-> **判定标准见 `docs/JEV-EXPERIMENT.md` 第五节。**
+> **判定标准见 `docs/archive/JEV-EXPERIMENT.md` 第五节。**
 
 ---
 
@@ -446,7 +448,7 @@ BTCUSDT: 24h -0.14%，ATR 0.35%（占价），D=-0.14%
 
 ## 最终判定（对照事先定好的五条判据）
 
-| 判据（`docs/JEV-EXPERIMENT.md` §5） | 现状 | 结论 |
+| 判据（`docs/archive/JEV-EXPERIMENT.md` §5） | 现状 | 结论 |
 |---|---|---|
 | ① LLM 调用数下降 ≥50% | 19 → 6（↓68%） | ✅ **达成** |
 | ② 每轮耗时下降 ≥30% | 308s → 191s（↓38%） | ✅ **达成** |
