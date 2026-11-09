@@ -130,7 +130,20 @@ function main() {
       if (!filePart) continue;
 
       checked += 1;
-      const resolved = path.resolve(path.dirname(file), decodeURIComponent(filePart));
+      /*
+       * `decodeURIComponent` 遇到非法的百分号序列会抛 URIError。
+       * 一个手误写坏的链接（例如 `[x](foo%zz.md)`）不该让**整个检查崩掉** ——
+       * 那样报出来的是 `URIError` 堆栈，而不是"哪个文件里哪条链接坏了"，
+       * 而这个脚本存在的意义正是后者。
+       */
+      let decoded;
+      try {
+        decoded = decodeURIComponent(filePart);
+      } catch {
+        broken.push({ file: path.relative(REPO_ROOT, file), target });
+        continue;
+      }
+      const resolved = path.resolve(path.dirname(file), decoded);
       if (!existsSync(resolved)) {
         broken.push({ file: path.relative(REPO_ROOT, file), target });
       }
