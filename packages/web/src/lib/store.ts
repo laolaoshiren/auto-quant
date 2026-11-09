@@ -540,27 +540,21 @@ export const useEvents = create<EventState>((set, get) => ({
     }
 
     if (event.type === 'trader_status') {
-      const status = event.status;
       /*
-       * ⚠️ **重放的历史不弹通知 —— 但状态照常更新。**
+       * ⚠️ **状态变化不弹通知**（用户 2026-11-10：
+       * 「不要弹这个，无意义又傻逼……如果以后做多用户给人用了，人家用户在运行这机器人，
+       *   你这边更新了代码，用户这边看到这个东西（用户不知道你在更新），弹出这么个玩意作何感想？」）。
        *
-       * 这一类与上面三类不同，所以**不能**在 `ingest` 开头一并 `return`：
-       * `trader_status` 除了弹通知，还要更新 `byTrader[id].status`（在下面的
-       * reducer 里）—— 那是新开页面拿到"这台机器人现在是什么状态"的初值来源，
-       * 跳过它会让界面停在上一次会话的旧状态上。
+       * 状态本来就实时显示在列表徽章、详情页页头与命令面板里，弹 toast 只是噪音；
+       * 而且**服务端重启会自动恢复运行中的机器人**（`stopAll(persist:false)` +
+       * `resumePersisted`），于是每次部署都会给用户刷一串「启动中 / 运行中」——
+       * 在单用户下像故障，在多用户下更是完全无法解释。
        *
-       * 实测：每次刷新页面都会看到「机器人 #9 → 启动中」和「→ 运行中」两条提示，
-       * 而它们是**几小时前那次服务重启**留下的历史 —— 重放的 30 条里就带着这一对，
-       * 于是每刷新一次就播一遍。
+       * 状态 reducer 照常更新（下面 `byTrader[id].status` 是新开页面的初值来源，
+       * 不能跳过）；只是不再弹窗。真正的异常（error / 熔断）在列表与详情页有红色
+       * 徽章与原因文字，足够显眼，不需要打断用户。
        */
-      if (event.replay !== true) {
-        pushToast(set, {
-          kind: status === 'error' ? 'error' : 'info',
-          title: `机器人 #${event.traderId} → ${traderStatusLabel(status)}`,
-          body: event.detail ?? '',
-          traderId: event.traderId,
-        });
-      }
+      void event.status;
     }
 
     /*
