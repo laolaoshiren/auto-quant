@@ -80,7 +80,6 @@ import {
   type AgentRunOutcome,
   type AiModelConfig,
   type Decision,
-  type LlmProviderId,
   type StrategyConfig,
   type TraderMode,
   type WakeTrigger,
@@ -756,49 +755,13 @@ async function main(): Promise<void> {
       });
 
   /*
-   * 其余厂商模型：只为覆盖"多模型"这种数据形态（列表多行、标签长短不一、
-   * 带括号的全角字符、不可用的错误态）。它们**不会被选为默认模型**，
-   * 也**不会被派生给示例机器人**（见 `main()` 里 `aiModelId` 的说明）。
+   * ⚠️ **不再创建其它厂商模型**（用户 2026-11-10 要求）：
+   * 「那些以前遗留添加的模型提供商删了吧，留一个本地 magpie 就行了」。
    *
-   * ⚠️ 这里刻意**没有** DeepSeek 官方端点 —— 用户明确要求不要出现。
+   * 演示数据也遵守同一条规则 —— 否则每次重灌都会把已经删掉的 4 条厂商模型
+   * 又造回来，用户看到的就是"删了又回来"。
    */
-  const modelSpecs: Array<{
-    provider: LlmProviderId;
-    label: string;
-    model: string;
-    base: string;
-  }> = [
-    { provider: 'anthropic', label: `${TAG} Claude Opus（团队主模型）`, model: 'claude-opus-5-5', base: 'https://api.anthropic.com' },
-    { provider: 'openai', label: `${TAG} GPT-5.2 Codex（预览）`, model: 'gpt-5.2-codex', base: 'https://api.openai.com/v1' },
-    // `kimi` 是平台名（Moonshot），不是 `moonshot` —— 枚举里叫 `kimi`。
-    { provider: 'kimi', label: `${TAG} Kimi K3`, model: 'kimi-k3', base: 'https://api.moonshot.cn/v1' },
-    /*
-     * **错误态模型**：端点是一个保留的 `.invalid` 域名（RFC 2606，永远不会解析），
-     * 配合下面的 `llm_health` 失败记录，让「模型」页显示"不可用/最近失败"。
-     * 这是空数据下永远看不到的一类界面状态。
-     */
-    {
-      provider: 'custom',
-      label: `${TAG} 已离线的自建网关（不可用示例）`,
-      model: 'internal/legacy-gateway',
-      base: 'https://gateway.example.invalid/v1',
-    },
-  ];
-  const models = [magpieModel, ...modelSpecs.map((spec) => {
-    const existing = aiModels.list().find((m) => m.label === spec.label);
-    if (existing) return ensureModelKey(existing);
-    return aiModels.create({
-      provider: spec.provider,
-      label: spec.label,
-      model: spec.model,
-      baseUrl: spec.base,
-      apiKeyEnc: vault.encrypt(DEMO_MODEL_KEY_PLACEHOLDER),
-      temperature: Number(between(rng, 0.1, 0.7).toFixed(2)),
-      maxTokens: intBetween(rng, 2048, 8192),
-      timeoutSeconds: intBetween(rng, 60, 180),
-      maxRetries: intBetween(rng, 1, 4),
-    });
-  })];
+  const models = [magpieModel];
 
   /*
    * 默认模型指向 magpie —— 这是"策略性地不让人选错"的一步：新建机器人的人
@@ -809,25 +772,12 @@ async function main(): Promise<void> {
   /*
    * 模型健康读数（`llm_health:<id>`，由 `manager.recordLlmHealth()` 写、
    * `/api/ai-models` 读回来给界面显示"最近一次调用成功/失败"）。
-   *
-   * 两条刻意一正一反：magpie 是刚验证过的可用状态，离线的自建网关是失败状态。
-   * `at` 用相对时间而不是写死日期，否则一年后打开控制台会看到"2025 年的最近一次调用"。
+   * 只有 magpie 一条，记一次成功调用即可。
    */
-  const offlineModel = models.find((m) => m.baseUrl.includes('gateway.example.invalid'));
   settings.set(
     `llm_health:${magpieModel.id}`,
     JSON.stringify({ ok: true, at: spread(rng, 0.02), latencyMs: intBetween(rng, 420, 1800) }),
   );
-  if (offlineModel) {
-    settings.set(
-      `llm_health:${offlineModel.id}`,
-      JSON.stringify({
-        ok: false,
-        at: spread(rng, 0.5),
-        error: '连接失败：getaddrinfo ENOTFOUND gateway.example.invalid（示例数据，不是真实故障）',
-      }),
-    );
-  }
 
   /* --- 策略 ------------------------------------------------------------- */
 
@@ -1077,7 +1027,7 @@ async function main(): Promise<void> {
       '      · jev            → JEV 选项面板',
       '    /traders/<id>/decisions/<recordId> → 思维链、执行日志、风控调整（含被拒/失败）',
       '    /data              → 日志面板（500 行）',
-      '    /models            → 模型列表（magpie 默认 + 一个不可用模型的错误态）',
+      '    /models            → 模型列表（只有本机 magpie 一条）',
       '    /exchanges         → 四个账户（含只读与超长标签）',
       '    /strategy          → 策略列表与预设',
       '',

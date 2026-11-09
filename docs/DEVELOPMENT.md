@@ -202,8 +202,25 @@ npx tsx packages/server/src/scripts/liveSmokeTest.ts --confirm --symbol DOGEUSDT
 
 ### 3.1 演示数据模式（`seed:demo`）
 
-> 用户 2026-11-10 的方针：「**演示数据优先** —— 开发与验收尽量基于演示数据模式（模拟各种实盘数据），
-> 不要等真实跑单才能验证 UI/功能」。
+> 用户 2026-11-10 的方针：「**演示数据这个弄成你开发的时候是否启用**——
+> 默认给我看的就是**正常版本**（不需要演示数据），除非我要求要看」。
+
+所以分两个实例，**不要混用**：
+
+| 实例 | `DATA_DIR` | 用途 |
+| --- | --- | --- |
+| **正常版本**（默认给用户看的） | `data/`（真实库，或空库） | 日常查看/使用；**没有示例数据** |
+| **演示数据**（开发验收用） | `.dsh/demo-data` | 需要覆盖各种数据形态时，由开发者显式启动 |
+
+```bash
+# 正常版本（默认）：真实库 + 后端 :27137 + 前端 :5173
+npm run dev
+npm run dev:web
+
+# 演示数据（开发/验收时）：先灌数据，再指向演示库启动
+npm run seed:demo
+$env:DATA_DIR=".dsh/demo-data"; npm run dev
+```
 
 #### 一条命令灌入（默认只写演示库）
 
@@ -243,7 +260,7 @@ secret 是加密后的占位符；示例模型行也只是一个"配置"。**默
 
 | 约定 | 为什么 |
 | --- | --- |
-| **所有示例机器人绑定 magpie 模型**（`workbuddy/deepseek-v4.1-flash`） | 用户要求项目内 LLM 调用一律走本机 magpie。演示实例里用户会真的点"启动"——绑了没有真实凭据的厂商模型，一启动就报"还没有配置 API Key"（`PERMANENT_START_FAILURES` 里的**永久失败**，不会重试），看起来像系统坏了。其它厂商模型只留在 `/models` 列表里做形态演示，不被机器人引用 |
+| **所有示例机器人绑定 magpie 模型**（`workbuddy/deepseek-v4.1-flash`） | 用户要求项目内 LLM 调用一律走本机 magpie。演示实例里用户会真的点"启动"——绑了没有真实凭据的厂商模型，一启动就报"还没有配置 API Key"（`PERMANENT_START_FAILURES` 里的**永久失败**，不会重试），看起来像系统坏了。**演示数据里只保留 magpie 一条模型**（用户 2026-11-10：遗留的模型提供商都删掉，只留本地 magpie） |
 | **模型 key 写入非空占位**（`vault.encrypt('demo-placeholder-key-not-real')`） | 启动判据是**解密后明文是否为空**（`manager.buildModel()`：`!apiKey && provider !== 'custom'`）。注意 `vault.encrypt('')` 的**密文非空、明文为空**——按密文长度判断会漏掉这种模型（`useMagpieModel.ts` 建的就是它），所以 seed 会解密后再判断并补齐。本地 magpie 网关不校验 key，所以占位 key 能正常调用；其余厂商模型有非空 key 只是"看起来已配置" |
 | **机器人默认 `stopped`**（只保留一台 `error` 展示错误态） | `manager.resumePersisted()` 会自动恢复 `running`/`safe_mode` 的机器人。演示数据写 `running` 会让演示实例一重启就真的拉起十几个机器人跑周期、调模型、写库；`safe_mode` 同样在自动恢复列表里。所以两条都不写，`error` 可以写（它不在恢复列表里） |
 
