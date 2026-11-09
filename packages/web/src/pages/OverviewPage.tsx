@@ -34,7 +34,7 @@
  */
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Bot, CircleAlert, RefreshCw } from 'lucide-react';
+import { Bot, RefreshCw } from 'lucide-react';
 import type { EquitySnapshot, TraderMode, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { MODE_HINT, MODE_LABEL } from '../lib/glossary';
@@ -51,7 +51,6 @@ import { ConfirmStopTrader } from '../components/ConfirmStopTrader';
 import { EQUITY_RANGES, mergeEquityCurves, rangeSpanMs, type EquityRange } from '../components/equityCurve';
 import {
   EquitySkeleton,
-  SystemFact,
   TradersSnapshotTable,
   useRecentTrades,
 } from './overviewParts';
@@ -294,7 +293,7 @@ export function OverviewPage() {
    */
   const realizedPnl = fleet.realizedPnlFleet;
   const withStats = fleet.tradersWithStats;
-  const statsPending = fleet.traderCount > 0 && withStats < fleet.traderCount;
+  /* 统计加载态**不再在界面上写字**（见页头那段注释）：缺统计的行显示 `—` 即可。 */
   const accountCount = fleet.accounts.length;
 
   /*
@@ -490,10 +489,53 @@ export function OverviewPage() {
         <Metric
           label="平仓记录"
           value={withStats > 0 ? `${fmtInt(totalWins)} 盈 / ${fmtInt(totalLosses)} 亏` : '—'}
-          sub={withStats > 0 ? '按各机器人统计求和' : '统计读取中…'}
+          sub="按各机器人统计求和"
           title="已平仓的盈利笔数与亏损笔数之和（真实计数）。账户级胜率不在这里换算 —— 各机器人自己的胜率见下表与机器人页。"
         />
       </MetricGroup>
+
+      {/*
+        **运行环境** —— 原来是页面底部一整块面板（178px 高，而且把页脚推到了
+        视口下面；用户 2026-11-10：「多余还有导致 UI BUG」）。它只是诊断信息，
+        收进右栏底部一小段即可：环境 / 模式 / 可交易对 / 推送；内部诊断值
+        （时钟、权重）仍然只在越界时多一行，带后果。
+      */}
+      <div className="border-t border-base-750 pt-2.5">
+        <dl className="num flex flex-wrap gap-x-4 gap-y-1 text-xs">
+          <div className="flex min-w-0 items-baseline gap-1">
+            <dt className="shrink-0 text-ink-faint">环境</dt>
+            <dd className="min-w-0 truncate text-ink-mid" title={system?.environmentLabel ?? ''}>
+              {system?.environmentLabel ?? '—'}
+            </dd>
+          </div>
+          <div className="flex items-baseline gap-1">
+            <dt className="text-ink-faint">模式</dt>
+            <dd className={system?.dryRun ? 'text-accent' : 'text-warn'}>
+              {system ? (system.dryRun ? '模拟' : '实盘资金') : '—'}
+            </dd>
+          </div>
+          <div className="flex items-baseline gap-1">
+            <dt className="text-ink-faint">可交易对</dt>
+            <dd className="text-ink-mid">{fmtInt(system?.tradableSymbols)}</dd>
+          </div>
+          <div className="flex items-baseline gap-1">
+            <dt className="text-ink-faint">推送</dt>
+            <dd className={socketOpen ? 'text-up' : 'text-warn'}>{socketOpen ? '实时' : '轮询'}</dd>
+          </div>
+        </dl>
+        {clockWarn && (
+          <p className="mt-1 text-xs text-warn">
+            ⚠ 时钟偏差 {fmtClockOffset(system?.clockOffsetMs)} —— 签名请求会被拒（-1021）
+          </p>
+        )}
+        {weightWarn && (
+          <p className="mt-1 text-xs text-warn">⚠ API 权重 {weightPercent}% —— 继续升高会被封 IP（418）</p>
+        )}
+        {system?.tradingDisabled && (
+          <p className="mt-1 text-xs text-down">全局交易已禁用：启动请求会被拒绝（503），平仓与对账仍可用。</p>
+        )}
+        {!system && <p className="mt-1 text-xs text-ink-faint">正在读取系统状态…</p>}
+      </div>
     </div>
   );
 
@@ -504,39 +546,23 @@ export function OverviewPage() {
       {/* ------------------------------------------------------------------ */}
       {/*  页头：标题 + 状态 + 主要操作（LAYOUT.md §1）                        */}
       {/* ------------------------------------------------------------------ */}
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <div className="min-w-0">
-          {/* `h2` 而不是 `h1`：页面级标题由应用外壳的顶栏提供，这里不重复一层 */}
-          <h2 className="truncate text-lg font-semibold tracking-tight text-ink-hi">
-            欢迎回来{user?.username ? `，${user.username}` : ''}
-          </h2>
-          <p className="num mt-0.5 truncate text-xs text-ink-faint">
-            更新于 {timeAgo(tradersQuery.updatedAt ? new Date(tradersQuery.updatedAt).toISOString() : null)}
-            {statsPending && ` · 正在读取 ${fmtInt(traders.length - withStats)} 个机器人的统计…`}
-          </p>
-        </div>
-        {/*
-          动作走**统一接口**：控制台模板把它们收进工具栏，经典模板就地渲染
-          （下面这一屏就是原版的样子）。见 `templates/lib/PageActions.tsx`。
-
-          ⚠️ 这一层容器的类名**原样保留**，它是"经典模板下和改版前逐字一致"
-          的关键：`PageActions` 就地渲染时**不加包裹层**，直接把自己那两个
-          子项交给这个 `flex` 容器排版（`ml-auto` 把整组推到右边、`gap-1.5`
-          给按钮之间留缝）。控制台模板下这个容器是空的 —— 两个子项被 portal
-          进工具栏了，而 `flex` 容器没有子项时宽度为 0，不影响标题行。
-        */}
+      {/*
+        页头只留两样东西：更新时间和动作。
+        原来的「欢迎回来，admin」是**多余**的（2026-11-10 用户：「多余还有导致 UI BUG」）——
+        外壳头部已经写着当前页名「总览」，右下角也有操作员名；
+        标题只是把内容往下推了 40px。「管理机器人」链接也与左侧导航重复，一并删除。
+      */}
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <p className="num truncate text-xs text-ink-faint">
+          更新于 {timeAgo(tradersQuery.updatedAt ? new Date(tradersQuery.updatedAt).toISOString() : null)}
+        </p>
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
           <PageActions
             start={
-              <>
-                <Button small variant="ghost" busy={refreshing} onClick={refreshAll} title="重新读取机器人列表、统计与系统状态">
-                  <RefreshCw aria-hidden className="h-3.5 w-3.5" />
-                  刷新
-                </Button>
-                <Link to="/traders" className="btn btn-ghost btn-xs">
-                  管理机器人
-                </Link>
-              </>
+              <Button small variant="ghost" busy={refreshing} onClick={refreshAll} title="重新读取机器人列表、统计与系统状态">
+                <RefreshCw aria-hidden className="h-3.5 w-3.5" />
+                刷新
+              </Button>
             }
             end={
               <Button small variant="primary" onClick={() => setNewOpen(true)}>
@@ -547,34 +573,8 @@ export function OverviewPage() {
         </div>
       </header>
 
-      <PageShell aside={rail}>
-        {/*
-          **运行模式分布**（用户 2026-10-12 要求三种模式在 UI 上分开）。
-
-          用户的原话：
-          > 「既然现在有 3 种模式了（普通、智能、团队），那么 **UI 上面也要加上相应得显示**，
-          >  并且 3 种模式进去以后看板 UI 显示内容什么的**也应该是要分开的**」
-
-          ## 为什么总览页需要这一块
-
-          总览页此前把所有机器人**混在一起**统计（"共 N 个机器人"）——
-          而三种模式的运行方式、成本、风险完全不同：
-
-          | 模式 | 谁在决策 | 一轮要多久 |
-          |---|---|---|
-          | 普通 | 固定策略，**不用 AI** | 秒级 |
-          | 智能托管 | **一个**模型 | 1–10 分钟 |
-          | AI 团队 | **一队**模型（开会） | 数分钟 |
-
-          混在一起时，"有 3 个在跑"看不出**有多少个在烧模型额度**。
-
-          ## 为什么不做成"分模式各显示一套指标"
-
-          那会让总览页在只有一种模式时**显得残缺**（大块空白区域），
-          而用户要的是**增量**：现有模式的表现**一点都不能变**。
-          所以这里只是**加一块**分布视图，不动任何既有指标。
-        */}
-        <ModeBreakdown traders={traders} onOpen={(id) => navigate(`/traders/${id}`)} />
+      <PageShell aside={rail} fillHeight={false}>
+        <ModeBreakdown traders={traders} />
 
         {/* ---------------------------------------------------------------- */}
         {/*  1. 资金曲线 —— 有形状才展开成图表（§4）                          */}
@@ -702,76 +702,13 @@ export function OverviewPage() {
           {!listFailed && tradersQuery.error && (
             <ErrorNote className="mt-2">最近一次刷新失败，下面是上一次的数据：{tradersQuery.error}</ErrorNote>
           )}
-          {statsPending && (
-            <p className="mt-2 flex items-center gap-1.5 text-xs text-ink-faint">
-              <CircleAlert aria-hidden className="h-3.5 w-3.5" />
-              正在读取 {traders.length - withStats} 个机器人的统计…
-            </p>
-          )}
+          {/*
+           * 机器人统计的加载提示不再常驻（理由见页头那段）：轮询每几秒一次，
+           * 这行文字会让页面看起来一直在忙。缺统计的行本身显示 `—`。
+           */}
         </section>
       </PageShell>
 
-      {/* ------------------------------------------------------------------ */}
-      {/*  3. 运行环境（页脚，全页最小字号；只放状态，诊断值越界才出现）        */}
-      {/* ------------------------------------------------------------------ */}
-      <section aria-labelledby="overview-system" className="rounded-lg border border-base-800 bg-base-900/60 px-3.5 py-3">
-        <SectionLabel title="运行环境" className="mb-2" />
-        <h2 id="overview-system" className="sr-only">
-          运行环境
-        </h2>
-        <dl className="num grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3 xl:grid-cols-4">
-          <SystemFact label="环境" value={system?.environmentLabel ?? '—'} />
-          <SystemFact
-            label="模式"
-            value={system ? (system.dryRun ? '模拟' : '实盘资金') : '—'}
-            sub={system?.tradingDisabled ? '交易已禁用' : '交易已启用'}
-            tone={system ? (system.dryRun ? 'text-accent' : 'text-warn') : undefined}
-          />
-          <SystemFact label="可交易对" value={fmtInt(system?.tradableSymbols)} sub="USDT-M 永续" />
-          <SystemFact
-            label="推送"
-            value={socketOpen ? '实时' : '轮询'}
-            sub={socketOpen ? 'WebSocket 已连接' : '已退回轮询'}
-            tone={socketOpen ? 'text-up' : 'text-warn'}
-          />
-          {/*
-            时钟偏移与 API 权重是**内部诊断值**（LAYOUT.md §3）：正常运行时它们
-            永远"没事"，看一百次有九十九次拿不到信息。所以只在越界时出现，
-            并且带后果而不是原始数值。
-          */}
-          {clockWarn && (
-            <SystemFact
-              label="⚠ 时钟偏差"
-              value={fmtClockOffset(system?.clockOffsetMs)}
-              sub="签名请求会被拒（-1021）"
-              tone="text-warn"
-            />
-          )}
-          {weightWarn && (
-            <SystemFact
-              label="⚠ API 权重"
-              value={`${fmtInt(weightPercent)}%`}
-              sub="继续升高会被封 IP（418）"
-              tone="text-warn"
-            />
-          )}
-        </dl>
-
-        {system?.tradingDisabled && (
-          <div className="mt-3 rounded-md border border-down/60 bg-down/10 px-3 py-2">
-            <div className="flex items-center gap-1.5 text-base font-semibold text-down">
-              <CircleAlert aria-hidden className="h-4 w-4 shrink-0" />
-              全局交易已禁用
-            </div>
-            <p className="mt-1 text-xs leading-relaxed text-ink-mid">
-              服务端已设置 <span className="num text-ink-hi">GLOBAL_TRADING_DISABLED</span>
-              ：所有启动请求都会返回 HTTP 503，且无法下任何订单，但平仓与对账仍然可用。要恢复交易，请从服务端环境中移除该变量并重启。
-            </p>
-          </div>
-        )}
-
-        {!system && <Spinner3 label="正在读取系统状态" />}
-      </section>
 
       <NewTraderModal
         open={newOpen}
@@ -812,49 +749,29 @@ export function OverviewPage() {
 
 
 /**
- * **运行模式分布** —— 三种模式在总览页分开显示（用户 2026-10-12 要求）。
+ * **运行模式分布** —— 一行紧凑统计，不再是大卡片（2026-11-10 用户反馈）。
  *
- * ## 为什么需要它
+ * ## 为什么从"四张大卡片"改成"一行统计"
  *
- * 总览页此前把所有机器人**混在一起**统计（"共 N 个机器人"）——
- * 而三种模式的运行方式与成本完全不同：
+ * 用户的原话是「**重新设计 UI/UX，简单实用**」。改造前的四张卡片每张塞：
+ * 模式名 + 数量 + 一句解释 + 全部机器人名字 —— 占了首屏一半高度，
+ * 而信息量只有"每个模式有几台"。首屏该先回答的是「钱怎么样、谁在跑、
+ * 最近发生了什么」，不是"模式说明"。
  *
- * | 模式 | 谁在决策 | 一轮要多久 |
- * |---|---|---|
- * | 普通 | 固定策略，**不用 AI** | 秒级 |
- * | 智能托管 | **一个**模型 | 1–10 分钟 |
- * | AI 团队 | **一队**模型（开会） | 数分钟 |
+ * 现在的形态：一行四个单元格，**名称 + 数量 + 运行数**，解释只在 `title` 里。
+ * 名字列表不再铺开（机器人表就在下面，那里能点进去）。
  *
- * 混在一起时，"有 3 个在跑"看不出**有多少个在烧模型额度**。
+ * ## 仍然列出全部四种模式
  *
- * ## 为什么三种模式【都列】，即使数量为 0
- *
- * 只列有机器人的模式，会让"这个系统支持三种模式"这件事**看不出来** ——
- * 而用户的原话正是「**UI 上面也要加上相应得显示**」。
- * 数量为 0 时显示成灰的，而不是隐藏。
- *
- * ## 为什么不做成"分模式各一套指标"
- *
- * 那会让总览页在只有一种模式时**显得残缺**（大块空白），
- * 而用户要的是**增量**：现有模式的表现**一点都不能变**。
- * 所以这里只**加一块**分布视图，不动任何既有指标。
+ * `mode='jev'` 曾经漏列（2026-10-19 用户报"显示不对"）：不在任何分组里的机器人
+ * 会让总览看起来"少了一台"，而它其实在跑。所以数量为 0 的模式也占一格（灰掉）。
  */
-function ModeBreakdown({
-  traders,
-  onOpen,
-}: {
-  traders: TraderRow[];
-  onOpen: (id: number) => void;
-}): React.ReactElement {
+function ModeBreakdown({ traders }: { traders: TraderRow[] }): React.ReactElement {
   /*
-   * ⚠️ **这里必须列出每一种 TraderMode**（2026-10-19 用户报"显示不对"）。
-   *
-   * 原来只有三种，加 `'jev'` 之后：一台 `mode=jev` 的机器人（`#13 JEV测试`）
-   * **不会出现在任何分组里** —— 总览页看起来像"少了一台机器人"，
-   * 而它其实正在运行。这类"数据在、界面看不见"的缺陷比报错更危险。
+   * ⚠️ **这里必须列出每一种 TraderMode**。名字登记在 `lib/glossary.ts`，
+   * 这里不许再写字面量。
    */
   const groups: Array<{ mode: TraderMode; label: string; hint: string }> = [
-    /* 名字登记在 `lib/glossary.ts`（唯一登记处）—— 这里不许再写字面量。 */
     { mode: 'strategy', label: MODE_LABEL.strategy, hint: MODE_HINT.strategy },
     { mode: 'ai_managed', label: MODE_LABEL.ai_managed, hint: MODE_HINT.ai_managed },
     { mode: 'ai_team', label: MODE_LABEL.ai_team, hint: MODE_HINT.ai_team },
@@ -863,46 +780,45 @@ function ModeBreakdown({
 
   return (
     <section aria-labelledby="overview-modes">
-      <SectionLabel title="运行模式" />
-      {/*
-        ⚠️ 四列而不是三列（加 `jev` 之后）——
-        沿用 `sm:grid-cols-3` 会让第四项单独占一整行，看起来很怪。
-      */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <h2 id="overview-modes" className="sr-only">
+        运行模式分布
+      </h2>
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
         {groups.map((g) => {
           const mine = traders.filter((t) => t.mode === g.mode);
-          const running = mine.filter((t) => t.status === 'running');
+          const running = mine.filter((t) => t.status === 'running').length;
+          const empty = mine.length === 0;
           return (
-            <Panel key={g.mode} className="p-3">
-              <div className="flex items-baseline gap-2">
-                <span className="text-base font-medium text-ink-hi">{g.label}</span>
-                <span className="num text-sm text-ink-soft">{mine.length}</span>
-                {running.length > 0 && <span className="text-xs text-up">运行中 {running.length}</span>}
-              </div>
-              <p className="mt-0.5 text-xs text-ink-faint">{g.hint}</p>
-              {mine.length === 0 ? (
-                <p className="mt-1.5 text-xs text-ink-faint">（暂无）</p>
-              ) : (
-                <ul className="mt-1.5 space-y-0.5">
-                  {mine.map((t) => (
-                    <li key={t.id}>
-                      <button
-                        type="button"
-                        onClick={() => onOpen(t.id)}
-                        className="flex w-full items-center gap-1.5 text-left text-xs hover:text-ink-hi"
-                      >
-                        <span
-                          className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                            t.status === 'running' ? 'bg-up' : 'bg-ink-faint/50'
-                          }`}
-                        />
-                        <span className="min-w-0 flex-1 truncate text-ink-lo">{t.name}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Panel>
+            <Link
+              key={g.mode}
+              to="/traders"
+              title={`${g.hint}（点这里查看机器人列表）`}
+              className={`group flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 transition ${
+                empty
+                  ? 'border-base-800 bg-base-900/40'
+                  : 'border-base-750 bg-base-900 hover:border-base-600'
+              }`}
+            >
+              <span
+                aria-hidden
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                  running > 0 ? 'bg-up' : 'bg-ink-faint/40'
+                }`}
+              />
+              <span
+                className={`min-w-0 flex-1 truncate text-base group-hover:text-ink-hi ${
+                  empty ? 'text-ink-faint' : 'text-ink-mid'
+                }`}
+              >
+                {g.label}
+              </span>
+              <span className={`num shrink-0 text-base font-semibold ${empty ? 'text-ink-faint' : 'text-ink-hi'}`}>
+                {mine.length}
+              </span>
+              <span className="num hidden shrink-0 text-xs text-ink-faint sm:inline">
+                {running > 0 ? `运行 ${running}` : ''}
+              </span>
+            </Link>
           );
         })}
       </div>

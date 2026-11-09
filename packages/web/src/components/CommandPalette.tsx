@@ -53,13 +53,20 @@ type Pending =
   | { kind: 'stop'; trader: TraderRow };
 
 const ITEM_CLASS =
-  'flex cursor-pointer select-none items-center gap-2.5 rounded-md px-2.5 py-2 text-base text-ink-mid ' +
-  'data-[selected=true]:bg-base-850 data-[selected=true]:text-ink-hi';
+  'flex cursor-pointer select-none items-center gap-2 rounded-md px-2 py-1.5 text-base text-ink-mid ' +
+  'data-[selected=true]:bg-base-850 data-[selected=true]:text-ink-hi ' +
+  /* 选中态：底色 + **左侧 2px 主色条**（inset，不改变盒模型）。只用底色的话，
+     在深浅两套主题下都偏弱，键盘选择时不容易确认"回车会执行哪一条"。 */
+  'data-[selected=true]:[box-shadow:inset_2px_0_0_var(--aq-accent)]';
 
 const GROUP_CLASS =
-  '[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-2 ' +
+  '[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-2.5 ' +
   '[&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-semibold ' +
-  '[&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-ink-lo';
+  '[&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-[0.1em] ' +
+  '[&_[cmdk-group-heading]]:text-ink-lo';
+
+/** 底部快捷键提示用的键帽。 */
+const KBD = 'inline-flex h-4 min-w-4 items-center justify-center rounded border border-base-700 bg-base-850 px-1 text-[10px] leading-none text-ink-lo';
 
 /** 正在输入框里打字时，单键快捷键（`/`、`g`）不该抢走按键。 */
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -240,7 +247,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         <div className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-[8vh]">
           {/* 焦点归还由 Radix 负责：它记下打开前的活动元素，关闭时还回去
               （顶栏搜索按钮、或按 ⌘K 时所在的任何位置）。 */}
-          <DialogPrimitive.Content className="panel flex max-h-[80vh] w-full max-w-xl animate-slide-up flex-col overflow-hidden shadow-overlay">
+          <DialogPrimitive.Content className="panel flex max-h-[72vh] w-full max-w-xl animate-slide-up flex-col overflow-hidden shadow-overlay">
             <DialogPrimitive.Title className="sr-only">命令面板</DialogPrimitive.Title>
 
             {pending ? (
@@ -256,19 +263,29 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
               />
             ) : (
               <Command label="命令面板" loop className="flex min-h-0 flex-1 flex-col">
-                <div className="flex shrink-0 items-center gap-2 border-b border-base-800 px-3">
-                  <Search aria-hidden className="h-4 w-4 shrink-0 text-ink-faint" />
+                {/*
+                  ⚠️ **搜索框不要那圈粗焦点环**（2026-11-10 用户反馈：
+                  「输入框有很重的蓝色 focus ring，且与容器边缘重叠」）。
+                  quill 的全局 `html.aq-quill :focus-visible` 是 0,2,1，压过
+                  Tailwind 的 `outline-none`（0,1,0）；而面板一打开焦点就在这个
+                  输入框上，那圈环没有传达任何新信息，只让顶部显得脏。用内联
+                  `outline: none`（内联样式优先级最高）+ 输入行底部的一条 focus 线
+                  代替它 —— 输入区本身已经是"当前在打字"的视觉信号。
+                */}
+                <div className="flex shrink-0 items-center gap-2 border-b border-base-800 px-3 transition-colors focus-within:border-accent/60">
+                  <Search aria-hidden className="h-4 w-4 shrink-0 text-ink-lo" />
                   <Command.Input
                     autoFocus
                     value={query}
                     onValueChange={setQuery}
                     placeholder="搜索页面、机器人、操作…"
-                    className="h-12 w-full bg-transparent text-md text-ink-hi outline-none placeholder:text-ink-faint"
+                    style={{ outline: 'none' }}
+                    className="h-11 w-full bg-transparent text-md text-ink-hi placeholder:text-ink-faint"
                   />
-                  <kbd className="shrink-0 rounded border border-base-700 px-1.5 py-0.5 text-xs text-ink-faint">Esc</kbd>
+                  <kbd className={KBD}>Esc</kbd>
                 </div>
 
-                <Command.List className="min-h-0 flex-1 overflow-y-auto p-2">
+                <Command.List className="min-h-0 flex-1 overflow-y-auto p-1.5">
                   <Command.Empty className="px-3 py-8 text-center text-base text-ink-lo">
                     没有匹配的结果。
                     <span className="mt-1 block text-xs text-ink-faint">试试页面名、机器人名，或「停止」「体检」。</span>
@@ -394,9 +411,20 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                   )}
                 </Command.List>
 
-                <div className="flex shrink-0 items-center justify-between gap-2 border-t border-base-800 px-3 py-1.5 text-xs text-ink-faint">
-                  <span>↑↓ 选择 · Enter 执行</span>
-                  <span className="num">⌘K 开关 · / 打开</span>
+                <div className="flex shrink-0 items-center justify-between gap-2 border-t border-base-800 px-3 py-1.5 text-xs text-ink-lo">
+                  <span className="flex items-center gap-1.5">
+                    <kbd className={KBD}>↑</kbd>
+                    <kbd className={KBD}>↓</kbd>
+                    <span>选择</span>
+                    <kbd className={KBD}>↵</kbd>
+                    <span>执行</span>
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <kbd className={KBD}>⌘K</kbd>
+                    <span>开关</span>
+                    <kbd className={KBD}>/</kbd>
+                    <span>打开</span>
+                  </span>
                 </div>
               </Command>
             )}

@@ -495,7 +495,9 @@ export function NewTraderModal({
       open={open}
       onClose={onClose}
       title="新建机器人"
-      width="max-w-xl"
+      /* 两列表单 + 2×2 卡片需要更宽：`max-w-xl`（576）下两列只剩 260px，
+         卡片式选项会挤成两行。`max-w-2xl`（672）在 1024 宽的窗口里仍有余量。 */
+      width="max-w-2xl"
       footer={
         <>
           <Button onClick={onClose}>取消</Button>
@@ -564,7 +566,7 @@ export function NewTraderModal({
             />
           </Field>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field
               label="交易所凭证"
               hint="留空 = 纯模拟盘，不需要任何真实账户。"
@@ -595,25 +597,26 @@ export function NewTraderModal({
              * 用户原话：「应该是由创建机器人的时候决定固定，而不是运行启动机器人的时候来决定」。
              * 所以这里是"这台机器人永远用模拟还是实盘"的唯一一次选择；启动弹窗只展示、不再让选。
              * 实盘必须已绑定账户（没账户的机器人在服务端会被拒，这里提前禁用）。
+             *
+             * 两张卡**描述都压到一行** —— 原来一张 2 行、一张 3 行，并排时高度不齐，
+             * 正是用户说的"两列参差"。更长的解释放 `title`。
              */}
             <Field
-              label="运行模式"
-              hint="创建后不可修改：模拟盘不碰真实资金，实盘用真实资金下单。"
+              label="运行模式（创建后固定）"
+              hint="模拟盘不碰真实资金；实盘用真实资金下单，需要先绑定账户。"
             >
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => setDryRun(true)}
                   aria-pressed={dryRun}
-                  className={`rounded-md border px-3 py-2 text-left transition ${
+                  title="订单只在本地按实时行情撮合，不产生任何真实委托。"
+                  className={`flex h-[46px] items-center gap-2 rounded-md border px-2.5 text-left transition ${
                     dryRun ? 'border-accent/70 bg-accent/10' : 'border-base-700 bg-base-850 hover:border-base-600'
                   }`}
                 >
-                  <span className="flex items-center gap-2 text-base font-semibold text-ink-hi">
-                    模拟盘
-                    <Badge tone="accent">推荐</Badge>
-                  </span>
-                  <span className="mt-0.5 block text-xs text-ink-lo">本地按实时行情撮合，不涉及真实资金。</span>
+                  <span className="text-base font-semibold text-ink-hi">模拟盘</span>
+                  <Badge tone="accent">推荐</Badge>
                 </button>
 
                 <button
@@ -621,17 +624,17 @@ export function NewTraderModal({
                   onClick={() => setDryRun(false)}
                   aria-pressed={!dryRun}
                   disabled={exchangeAccountId === ''}
-                  className={`rounded-md border px-3 py-2 text-left transition ${
+                  title={
+                    exchangeAccountId === ''
+                      ? '需先绑定交易所账户。'
+                      : '真实资金下单，亏损不可逆。'
+                  }
+                  className={`flex h-[46px] items-center gap-2 rounded-md border px-2.5 text-left transition ${
                     !dryRun ? 'border-warn/70 bg-warn/10' : 'border-base-700 bg-base-850 hover:border-base-600'
                   } ${exchangeAccountId === '' ? 'cursor-not-allowed opacity-50' : ''}`}
                 >
-                  <span className="flex items-center gap-2 text-base font-semibold text-ink-hi">
-                    实盘
-                    <Badge tone="warn">真实资金</Badge>
-                  </span>
-                  <span className="mt-0.5 block text-xs text-ink-lo">
-                    {exchangeAccountId === '' ? '需先绑定交易所账户。' : '真实下单，亏损不可逆。'}
-                  </span>
+                  <span className="text-base font-semibold text-ink-hi">实盘</span>
+                  <Badge tone="warn">真实资金</Badge>
                 </button>
               </div>
             </Field>
@@ -809,223 +812,176 @@ export function NewTraderModal({
           </div>
           </section>
 
-          {/*
-            运行模式。
-            
-            AI 托管**不是一个策略** —— 策略是"一组固定参数"，而 AI 模式的意思是
-            "没有固定参数"。所以它是机器人自己的一个属性，在创建时选。
-          */}
           <section className="space-y-3 border-t border-base-750 pt-4">
             <SectionLabel title="运行方式" className="mb-0" />
-          <Field
-            label="运行模式"
-            hint="AI 托管下参数由 AI 自己设定并持续调整，交易提示词也是它的一部分 —— 一份固定不变的提示词称不上智能。"
-          >
-            <div className="flex flex-col gap-1.5">
-              <label className="flex cursor-pointer items-start gap-2 text-base">
-                <input
-                  type="radio"
-                  name="trader-mode"
-                  className="mt-0.5"
-                  checked={mode === 'strategy'}
-                  onChange={() => setMode('strategy')}
-                />
-                <span>
-                  <span className="font-medium">{MODE_LABEL.strategy}</span>
-                  <span className="block text-xs text-ink-faint">
-                    用下面选中的策略里的固定参数跑。行为与以前完全一致。
-                  </span>
-                </span>
-              </label>
-              <label className="flex cursor-pointer items-start gap-2 text-base">
-                <input
-                  type="radio"
-                  name="trader-mode"
-                  className="mt-0.5"
-                  checked={mode === 'ai_managed'}
-                  onChange={() => setMode('ai_managed')}
-                />
-                <span>
-                  <span className="font-medium">{MODE_LABEL.ai_managed}（全自动）</span>
-                  <span className="block text-xs text-ink-faint">
-                    参数与交易提示词全部由 AI 自主设定并实时调整：周期、标的池、杠杆、仓位、
-                    止损止盈、节流与冷却。以盈利为唯一目标，并根据真实交易结果不断反思、迭代。
-                  </span>
-                </span>
-              </label>
-              {/*
-                ⚠️ **AI 团队是「智能托管」之外的另一套东西（用户 2026-10-12 明确要求）。**
-                原话：「这次更新应该是一个全新的项目，和现在智能托管是 2 个东西……
-                等这个更新做完以后**新建机器人就应该有除了智能托管外这次更新的模式**」。
 
-                所以它作为**独立选项**出现在这里，而不是替换或改造智能托管 ——
-                已有机器人（含正在实盘跑的那台）的模式与服务端行为一个字都不变。
-              */}
-              <label className="flex cursor-pointer items-start gap-2 text-base">
-                <input
-                  type="radio"
-                  name="trader-mode"
-                  className="mt-0.5"
-                  checked={mode === 'ai_team'}
-                  onChange={() => setMode('ai_team')}
-                />
-                <span>
-                  <span className="font-medium">{MODE_LABEL.ai_team}（多智能体 · 7×24）</span>
-                  <span className="block text-xs text-ink-faint">
-                    一支分工协作的智能体团队：调度官统筹，分析师并行调研（行情、新闻、社区情绪），
-                    多空研究员对抗辩论，风控官把关，交易员执行。持续工作、事件驱动，
-                    每次决策都有完整审计轨迹。
-                  </span>
-                </span>
-              </label>
-              {/*
-                ⚠️ **JEV 模式（实验性）** —— 2026-10-19 用户要求新增。
+            {/*
+              ## 卡片式选择（2026-11-10 用户反馈：「原生 radio 圆点很土」）
 
-                原话：「帮我增加一种模式（实验性），JEV 模式，该模式所有操作都
-                采用 JEV 模型来实现，从选币到交易，一切都由 JEV 自主完成」。
+              原生 radio 在这里有两个问题：一是**视觉上只有 13px 的圆点**，
+              选中的那一项与其它三项几乎没差别；二是每一项后面跟 2–4 行说明，
+              四行下来 300px 高，把"创建"按钮推到弹窗外面。
 
-                ## 说明文案为什么这么写
-
-                用户要的是「一切由 JEV 自主」，但实测发现 Jev **不产生文字、
-                弱于算术**（只有 choice/score/noul 三种答案）。
-                ⇒ 真实的形态是「代码算好候选档位 → Jev 选 → 代码翻译成决策」。
-
-                这段话必须把这一点说清（`docs/AGENTS.md` §3.2：不确定就说不确定），
-                否则用户会以为"它能自己算仓位"。同时**必须标明实验性** ——
-                它的盈利表现完全未知。
-              */}
-              <label className="flex cursor-pointer items-start gap-2 text-base">
-                <input
-                  type="radio"
-                  name="trader-mode"
-                  className="mt-0.5"
-                  checked={mode === 'jev'}
-                  onChange={() => setMode('jev')}
-                />
-                <span>
-                  <span className="font-medium">{MODE_LABEL.jev}</span>
-                  <span className="block text-xs text-ink-faint">
-                    每一个判断都交给 Jev 决策模型：选哪些标的、做多做空、用哪一档仓位与止损止盈。
-                    Jev 只回答"选哪个"（它不产生文字、也不擅长算数），
-                    所以具体价位与档位由系统按 ATR 与风险预算**先算好**，再由它挑 ——
-                    挑完照常过风控、照常挂保护单。
-                    <strong className="mt-1 block font-medium text-warn">
-                      ⚠️ 实验性：盈利能力尚未验证，建议先用模拟盘观察。
-                    </strong>
-                  </span>
-                </span>
-              </label>
+              现在的形态：2×2 卡片，标题 + 一行短说明，选中态用**边框 + 底色 +
+              实心圆点**三重标记；完整说明放 `title`（悬停可读）。
+              卡片内保留 `<input type="radio">`（sr-only）—— 方向键切换、读屏
+              播报"已选中"这些原生语义一个都不丢。
+            */}
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {(
+                [
+                  {
+                    id: 'strategy' as const,
+                    label: MODE_LABEL.strategy,
+                    desc: '按选定策略的固定参数跑，不调用模型。',
+                    badge: null,
+                    full: '用选定的策略里的固定参数跑，行为与以前完全一致。',
+                  },
+                  {
+                    id: 'ai_managed' as const,
+                    label: `${MODE_LABEL.ai_managed}（全自动）`,
+                    desc: 'AI 自己设定并调整参数与提示词。',
+                    badge: '推荐',
+                    full: '参数与交易提示词全部由 AI 自主设定并实时调整：周期、标的池、杠杆、仓位、止损止盈、节流与冷却。以盈利为唯一目标，并根据真实交易结果不断反思、迭代。',
+                  },
+                  {
+                    id: 'ai_team' as const,
+                    label: `${MODE_LABEL.ai_team}（多智能体）`,
+                    desc: '调度 → 调研 → 辩论 → 裁决 → 风控 → 执行。',
+                    badge: null,
+                    full: '一支分工协作的智能体团队：调度官统筹，分析师并行调研（行情、新闻、社区情绪），多空研究员对抗辩论，风控官把关，交易员执行。持续工作、事件驱动，每次决策都有完整审计轨迹。',
+                  },
+                  {
+                    id: 'jev' as const,
+                    label: MODE_LABEL.jev,
+                    desc: '交给 JEV 决策引擎，盈利能力尚未验证。',
+                    badge: '实验性',
+                    full: '每一个判断都交给 Jev 决策模型：选哪些标的、做多做空、用哪一档仓位与止损止盈。Jev 只回答"选哪个"（它不产生文字、也不擅长算数），所以具体价位与档位由系统按 ATR 与风险预算先算好，再由它挑 —— 挑完照常过风控、照常挂保护单。',
+                  },
+                ] as const
+              ).map((option) => {
+                const active = mode === option.id;
+                return (
+                  <label
+                    key={option.id}
+                    title={option.full}
+                    className={`relative flex cursor-pointer items-start gap-2 rounded-lg border p-2.5 transition ${
+                      active
+                        ? 'border-accent/70 bg-accent/5'
+                        : 'border-base-700 bg-base-850 hover:border-base-600'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="trader-mode"
+                      className="sr-only"
+                      checked={active}
+                      onChange={() => setMode(option.id)}
+                    />
+                    {/* 选中标记：实心圆点 + 主色描边。比 13px 的原生圆点大一圈，
+                        也让"选中"与"未选中"在同一张卡上就能分辨。 */}
+                    <span
+                      aria-hidden
+                      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                        active ? 'border-accent' : 'border-base-600'
+                      }`}
+                    >
+                      {active && <span className="h-2 w-2 rounded-full bg-accent" />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-base font-medium text-ink-hi">{option.label}</span>
+                        {option.badge && (
+                          <Badge tone={option.badge === '推荐' ? 'accent' : 'warn'}>{option.badge}</Badge>
+                        )}
+                      </span>
+                      <span className="mt-0.5 block truncate text-xs text-ink-lo">{option.desc}</span>
+                    </span>
+                  </label>
+                );
+              })}
             </div>
-          </Field>
 
-          {/*
-            团队模式的说明 —— 告诉用户"模型从哪来"。
-            用户 2026-10-12 要求团队模式"直接采用系统的 magpie"，
-            所以这里要说清它**不**用上面那个列表。
-          */}
-          {mode === 'ai_team' && (
-            <div className="rounded-md border border-base-700 bg-base-850 px-3 py-2 text-base text-ink-soft">
-              <span className="font-medium">模型由系统 magpie 网关统一调度</span>
-              <span className="block text-xs text-ink-faint">
-                团队模式不使用「AI 模型」列表里的任何记录 —— 它的模型出口是独立的 magpie 网关
-                （在服务器 <code>​.env</code> 里配置，或自动从 magpie 发现）。
-                每个智能体按工作内容分到不同档位的模型，某个模型额度用尽会自动向下平替。
-              </span>
-            </div>
-          )}
+            {/*
+              团队 / JEV 模式的模型来源说明 —— 保留：它们**不读**「AI 模型」列表，
+              不说清会让人以为上面的模型选择器漏了。
+            */}
+            {mode === 'ai_team' && (
+              <p className="rounded-md border border-base-700 bg-base-850 px-2.5 py-2 text-xs leading-relaxed text-ink-lo">
+                <span className="font-medium text-ink-mid">模型由系统 magpie 网关统一调度</span>
+                　—　不使用「AI 模型」列表；每个智能体按工作内容分到不同档位，额度用尽会自动向下平替。
+              </p>
+            )}
+            {mode === 'jev' && (
+              <p className="rounded-md border border-base-700 bg-base-850 px-2.5 py-2 text-xs leading-relaxed text-ink-lo">
+                <span className="font-medium text-ink-mid">决策模型由 magpie 网关提供（Jev）</span>
+                　—　固定调用 <code>jev-latest</code>，不使用「AI 模型」列表里的任何记录。
+              </p>
+            )}
 
-          {/*
-            ⚠️ **JEV 模式的模型出口说明**（2026-10-19）。
-
-            与团队模式同一条纪律：它**不读「AI 模型」列表**。
-            但两者调的东西不同，必须说清 —— 用户报过一次"模型乱写导致失败"，
-            而真相是那个模型压根不会被用到。
-          */}
-          {mode === 'jev' && (
-            <div className="rounded-md border border-base-700 bg-base-850 px-3 py-2 text-base text-ink-soft">
-              <span className="font-medium">决策模型由系统 magpie 网关提供（Jev）</span>
-              <span className="block text-xs text-ink-faint">
-                JEV 模式不使用「AI 模型」列表里的任何记录 —— 它固定调用 magpie 网关的
-                <code>jev-latest</code>（在服务器 <code>.env</code> 里配置网关地址与密钥，
-                或自动从 magpie 发现）。所以上面不需要、也不会让你选模型。
-              </span>
-            </div>
-          )}
-
-          {/*
-            **AI 驱动的模式不显示策略下拉框**（判据用 `isAiDriven()`，见
-            `strategyIdFor()` 上那个 P0 的说明）。
-
-            原来这里显示的是一个 `disabled` 的下拉框，文案还说 JEV 模式下
-            「这项只提供风控边界与标的池」—— 而服务端把 `jev` 也算作
-            AI 驱动模式（`AI_DRIVEN_MODES` 含 `'jev'`），收到非 null 的
-            `strategyId` 会直接报「AI 托管模式不引用任何策略」。于是那个下拉
-            既不能用、显示的又是一件不会发生的事。
-          */}
-          {isAiDriven(mode) ? (
-            <Field
-              label="策略"
-              hint="AI 驱动的模式不引用策略 —— 参数由 AI 自己设定并持续调整（JEV 模式的参数在机器人页的「JEV 模式」标签里调）。"
-            >
-              <div className="text-base text-ink-faint">不使用策略参数</div>
-            </Field>
-          ) : (
-            <Field label="策略">
-              <Select value={strategyId} onChange={(e) => setStrategyId(Number(e.target.value))}>
-                {strategyList?.map((strategy) => (
-                  <option key={strategy.id} value={strategy.id}>
-                    {strategy.name}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          )}
+            {isAiDriven(mode) ? (
+              <p className="text-xs leading-relaxed text-ink-faint">
+                策略：AI 驱动的模式不引用策略 —— 参数由 AI 自己设定并持续调整（JEV 模式的参数在机器人页的「JEV
+                模式」标签里调）。
+              </p>
+            ) : (
+              <Field label="策略">
+                <Select value={strategyId} onChange={(e) => setStrategyId(Number(e.target.value))}>
+                  {strategyList?.map((strategy) => (
+                    <option key={strategy.id} value={strategy.id}>
+                      {strategy.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            )}
           </section>
 
           <section className="space-y-3 border-t border-base-750 pt-4">
             <SectionLabel title="节奏与本金" className="mb-0" />
-          <Field label="周期间隔（分钟）" hint="多久向模型请求一次决策。">
-            <NumberInput value={cycleIntervalMinutes} onValueChange={setCycleIntervalMinutes} step={1} />
-          </Field>
+            {/*
+              两列：周期与本金各占一半。原来是两个单列字段 —— 在 672px 宽的弹窗里
+              每行只放一个输入框，垂直空间白费，而这次的要求是「简单实用」。
 
-          {/*
-            起始权益的来源分两种（用户 2026-10-27 需求）：
+              ⚠️ 起始权益的来源分两种（用户 2026-10-27 需求）：
+                · 绑了账户 → 从该凭证读真实钱包余额（既有行为，一个字节不变）；
+                · 没绑账户 → 操作员自己填模拟盘起始余额。
+              两种情况**不能**都显示 —— 一个"读交易所"的只读控件出现在纯模拟盘
+              机器人上会让人以为余额仍然来自真实账户。
+            */}
+            <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2">
+              <Field label="周期间隔（分钟）" hint="多久向模型请求一次决策。">
+                <NumberInput value={cycleIntervalMinutes} onValueChange={setCycleIntervalMinutes} step={1} />
+              </Field>
 
-              · **绑了账户** → 从该凭证读真实钱包余额（既有行为，一个字节不变）；
-              · **没绑账户** → 操作员**自己填**模拟盘起始余额。
-                这就是用户说的「模拟盘不应该根据真实钱包的余额，
-                而应该可以自定义模拟盘的余额」。
-
-            ⚠️ 两种情况**不能**都显示 —— 一个"读交易所"的只读控件出现在
-            纯模拟盘机器人上会让人以为余额仍然来自真实账户。
-          */}
-          {exchangeAccountId === '' ? (
-            <Field
-              label="模拟盘起始余额（USDT）"
-              hint="纯模拟盘的本金，与任何真实账户无关。收益率以它为分母。"
-            >
-              <TextInput
-                value={paperBalance}
-                onChange={(e) => setPaperBalance(e.target.value)}
-                inputMode="decimal"
-                placeholder="1000"
-              />
-            </Field>
-          ) : (
-            <EquitySourceField state={equity} />
-          )}
-
-          {baselineWarning && (
-            <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base text-warn">
-              <span className="font-semibold">权益基准为 0。</span> {baselineWarning}
+              {exchangeAccountId === '' ? (
+                <Field
+                  label="模拟盘起始余额（USDT）"
+                  hint="纯模拟盘的本金，与真实账户无关；收益率以它为分母。"
+                >
+                  <TextInput
+                    value={paperBalance}
+                    onChange={(e) => setPaperBalance(e.target.value)}
+                    inputMode="decimal"
+                    placeholder="1000"
+                  />
+                </Field>
+              ) : (
+                <EquitySourceField state={equity} />
+              )}
             </div>
-          )}
+
+            {baselineWarning && (
+              <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base text-warn">
+                <span className="font-semibold">权益基准为 0。</span> {baselineWarning}
+              </div>
+            )}
           </section>
 
           {error && <ErrorNote>{error}</ErrorNote>}
 
           <p className="text-xs leading-relaxed text-ink-faint">
-            创建机器人并不会启动它。启动时会要求你确认模拟或实盘模式，并在循环开始前展示预检项。
+            创建机器人并不会启动它 —— 点「启动」时会先跑一遍预检（时钟、连通性、凭证与模型可达性），结果列在启动弹窗里，确认后才开始循环。
           </p>
         </div>
       )}

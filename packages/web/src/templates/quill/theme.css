@@ -385,11 +385,28 @@ html.aq-quill ::selection {
  *
  * ⚠️ **必须用 `var(--aq-accent)`**（见 `index.css` 里那段论证：`theme()` 产出
  * 的 `<alpha-value>` 占位符不会被替换，焦点环会静默消失）。
+ *
+ * ## 输入类不画 outline（2026-11-10 用户反馈）
+ *
+ * 用户的原话是「搜索框有很重的蓝色 focus ring，且与容器边缘重叠」。
+ * 根因就是下面这条 2px outline：它对**所有** `:focus-visible` 生效，
+ * 而输入框**自己已经有焦点样式**（`.input:focus` / `.select:focus` 的
+ * accent 边框 + 3px 柔光，见本文件"共享原语覆盖"一节）。两层叠在一起，
+ * 输入框上就出现一圈又粗又硬的蓝框；它贴着输入框边缘，看起来像与容器错位。
+ *
+ * 所以：按钮/链接/自定义控件保留 outline（键盘用户靠它定位焦点），
+ * 输入类把 outline 交给它们自己的边框 + 柔光。
+ * 这两条选择器特异性 0,2,2，高于上面的 0,2,1，顺序也靠后，两条保险。
  */
 html.aq-quill :focus-visible {
   outline: 2px solid var(--aq-accent);
   outline-offset: 2px;
   border-radius: 6px;
+}
+html.aq-quill input:focus-visible,
+html.aq-quill textarea:focus-visible,
+html.aq-quill select:focus-visible {
+  outline: none;
 }
 
 /*
