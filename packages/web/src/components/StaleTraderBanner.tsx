@@ -48,6 +48,7 @@ import { TriangleAlert } from 'lucide-react';
 
 import { api, type Health } from '../lib/api';
 import { usePolled } from '../lib/hooks';
+import { useApp } from '../lib/store';
 
 /** 一条要在横幅上显示的停摆（**已经过实盘过滤**）。 */
 export interface StaleEntry {
@@ -129,6 +130,18 @@ export function staleEntryText(entry: StaleEntry): string {
  */
 export function StaleTraderBanner(): React.ReactElement | null {
   /*
+   * ⚠️ **未登录时不要请求**（2026-11-10 验收抓到的 401）。
+   *
+   * 这个横幅挂在 `App` 的最外层，**登录页也会渲染它** —— 而它无条件轮询
+   * `/api/traders`，于是打开登录页（或会话还没恢复完）时控制台会先出现一条
+   * `401 /api/traders`。功能上无害（错误被 `usePolled` 吞掉、不进 UI），
+   * 但它让"控制台干净"这条验收标准失去意义，也会在排查真实 401 时当噪声。
+   *
+   * `enabled` 由会话状态驱动：未登录 → 不请求、清数据；登录成功 → 立刻开始。
+   */
+  const sessionStatus = useApp((s) => s.status);
+
+  /*
    * 一个 loader 同时取两份数据：判据要 `health.staleTraders`，
    * 而"是不是真钱"只在 `traders` 行上（`health` 里没有这个字段）。
    * 60 秒一次：停摆是"几十分钟到几小时"量级的事，不需要更密。
@@ -138,7 +151,7 @@ export function StaleTraderBanner(): React.ReactElement | null {
       health: await api.health(),
       traders: await api.traders(),
     }),
-    { intervalMs: 60_000 },
+    { intervalMs: 60_000, enabled: sessionStatus === 'authenticated' },
   );
 
   const entries = staleEntriesFrom(query.data?.health, query.data?.traders);

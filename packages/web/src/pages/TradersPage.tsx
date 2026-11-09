@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { ModeBadge } from '../components/TeamRoster';
 import { Link, useNavigate } from 'react-router-dom';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
-import { ArrowUpRight, MoreHorizontal, Pencil, Play, RotateCw, Square, Trash2 } from 'lucide-react';
+import { ArrowUpRight, Loader2, MoreHorizontal, Pencil, Play, RotateCw, Square, Trash2 } from 'lucide-react';
 import type { EquitySnapshot, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
@@ -469,7 +469,21 @@ export function TradersPage() {
             </Button>
           </div>
         ) : (
-          <div>
+          /*
+           * ⚠️ **这一层必须有 flex 上下文，否则表格会溢出面板、压住页面末尾的说明文字。**
+           *
+           * 实测（2026-11-10，三套模板都复现，1600×900）：说明文字 top 分别在
+           * 842 / 814 / 858，而表格 bottom 在 1165 / 963 / 1141 —— 重叠 149–323px，
+           * 表格最后 1–3 行被文字遮住，且**滚不动**（溢出没有滚动层）。
+           *
+           * 根因：`Panel` 的 body 是 `flex min-h-0 flex-1 flex-col`，但这里是它的
+           * 普通块级子元素 —— 于是下面 `.scroll-x` 的 `flex-1` 不生效，表格按内容
+           * 全高渲染并画出面板之外（面板本身被 `.page-fill` 的高度链限制住了）。
+           *
+           * `flex min-h-0 flex-1 flex-col` 把这段接回高度链：表格的滚动视口 = 面板
+           * 剩余高度，溢出由 `.scroll-x` 自己吸收（`thead` 的 sticky 也依赖这一点）。
+           */
+          <div className="flex min-h-0 flex-1 flex-col">
             <SectionLabel
               title="机器人列表"
               count={traders.length}
@@ -753,7 +767,26 @@ export function TradersPage() {
                           {/* 一行、两个常用动作 + 一个溢出菜单。以前这一格把所有动作
                               平铺开，行高被撑起来、宽度也被吃掉。 */}
                           <div className="flex items-center justify-end gap-1">
-                            {trader.isRunning ? (
+                            {/*
+                              ⚠️ **`starting` 必须单独占一个分支，不能和"没在跑"共用「启动」按钮。**
+
+                              启动接口是**异步**的：返回 200 之后服务端才依次
+                              `stopped → starting → running`（预检、挂保护单都会花时间）。
+                              之前这里只看 `trader.isRunning`，而 `starting` 期间它是 false ——
+                              于是列表在"已经开始启动"之后仍显示一个可点的「启动」，
+                              操作员会以为没点上、再点一次（服务端会拒绝，但界面上看不出为什么）。
+                            */}
+                            {status === 'starting' ? (
+                              <Button
+                                size="sm"
+                                variant="success"
+                                disabled
+                                title="启动中：服务端正在执行预检并拉起循环。状态会自动更新为「运行中」；若失败会显示在状态列。"
+                              >
+                                <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
+                                启动中
+                              </Button>
+                            ) : trader.isRunning ? (
                               <>
                                 <Button
                                   size="sm"
@@ -911,8 +944,15 @@ export function TradersPage() {
         onClose={() => setStartTarget(null)}
         initialDryRun={system?.dryRun ?? true}
         onStarted={() => {
+          /*
+           * 启动接口是异步的（stopped → starting → running），所以这里刷两次：
+           * 一次立刻（拿到 `starting`，行按钮变成"启动中"），一次 1.5 秒后
+           * （确认它已经到 `running`，或失败后回到 `stopped`）。
+           * 只刷一次的话，行按钮会停在「启动」上，看起来像没点上。
+           */
           void tradersQuery.reload();
           refreshSystem();
+          window.setTimeout(() => void tradersQuery.reload(), 1500);
         }}
       />
     </div>
