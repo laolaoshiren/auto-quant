@@ -259,8 +259,17 @@ describe('创建机器人：模拟盘起始余额的边界', () => {
         200,
         `${value} 应当被接受（实际 ${result.statusCode} ${JSON.stringify(result.body)}）`,
       );
-      const created = result.body as { paperStartingBalance: number };
+      const created = result.body as { paperStartingBalance: number; exchangeAccountId: number | null };
       assert.equal(created.paperStartingBalance, value, '★ 填多少就该存多少');
+      /*
+       * ★ **`exchangeAccountId` 必须原样是 `null`**。
+       *
+       * `traders.get()` 的行接口曾经把这一列的类型写成 `number`（迁移 19 之后它可空），
+       * 那是一个**类型在说假话**的缺陷：`number` 赋给 `number | null` 照样编译通过，
+       * 但任何以"行字段非空"为前提写的逻辑都会在纯模拟盘机器人上静默走错分支。
+       * 这条断言钉住"读到什么就返回什么"，防止将来有人补一个 `?? 0` 之类的兜底。
+       */
+      assert.equal(created.exchangeAccountId, null, '★ 不绑账户必须是 null，不是 0');
     }
   });
 

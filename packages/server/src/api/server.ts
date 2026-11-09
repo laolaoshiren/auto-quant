@@ -26,6 +26,8 @@ import {
   defaultAiTeamConfig,
   isAiDriven,
   unboundedAiManagedConfig,
+  TIMEFRAMES,
+  TimeframeSchema,
   type PositionView,
   type ServerEvent,
   type Trader,
@@ -85,7 +87,7 @@ import {
 } from './auth.js';
 import { FailureThrottle, IP_THROTTLE_OPTIONS, USERNAME_THROTTLE_OPTIONS } from './loginThrottle.js';
 import { checkOutboundUrl, parseHostAllowlist } from '../llm/urlGuard.js';
-import { paperAccountState, validateStartingBalance } from '../binance/paperWallet.js';
+import { paperAccountState, paperPositionTotals, validateStartingBalance } from '../binance/paperWallet.js';
 import type { BalanceService } from '../services/balance.js';
 
 const log = createLogger('api');
@@ -1941,7 +1943,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    *
    * ## 为什么需要它
    *
-   * `GET /api/config-catalog` 早就在读 `settings.default_ai_model_id` 并把它交给
+   * `GET /api/catalog` 早就在读 `settings.default_ai_model_id` 并把它交给
    * 前端（`catalog.defaultAiModelId`），那段注释写着它存在的理由：
    *
    *   原来是"列表第一个"，而列表按 id 排 —— 于是一个**余额不足或已失效**的模型
@@ -2400,7 +2402,15 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       if (invalid) throw new Error(invalid);
     }
 
-    const requestedAccountId = (parsed.data as { exchangeAccountId?: number }).exchangeAccountId;
+    /*
+     * ⚠️ **类型里必须包含 `null`。**
+     *
+     * `Trader.exchangeAccountId` 自 PR #185 起是 `number | null`（纯模拟盘机器人没有账户）。
+     * 这里原来写成 `{ exchangeAccountId?: number }` —— 运行时行为不受影响（`null` 一样参与比较），
+     * 但类型在说假话，而"行字段非空"正是这次审计要清掉的那类语义假设。
+     */
+    const requestedAccountId = (parsed.data as { exchangeAccountId?: number | null })
+      .exchangeAccountId;
     if (requestedAccountId !== undefined && requestedAccountId !== current.exchangeAccountId) {
       return reply.code(400).send({
         error:
@@ -2838,18 +2848,11 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         const marks = await paperMarkPrices(local);
         const starting = deps.manager.paperStartingBalanceOf(trader.id);
         const realized = tradeStore.lifetimeNetPnl(trader.id);
-        let unrealizedPnl = 0;
-        let marginUsed = 0;
-        for (const position of local) {
-          marginUsed += Number.isFinite(position.margin_used) ? position.margin_used : 0;
-          const mark = marks.get(position.symbol);
-          if (mark === undefined) continue;
-          const diff =
-            position.side === 'long'
-              ? (mark - position.entry_price) * position.quantity
-              : (position.entry_price - mark) * position.quantity;
-          if (Number.isFinite(diff)) unrealizedPnl += diff;
-        }
+        /*
+         * 折算与控制台/决策同源：`paperPositionTotals()` 是那唯一一份实现
+         * （原先这里与 manager 各写一份，其中一份方向判断写错了大小写）。
+         */
+        const { unrealizedPnl, marginUsed } = paperPositionTotals(local, marks);
         return paperAccountState({ startingBalance: starting, realizedPnl: realized, unrealizedPnl, marginUsed });
       }
       const connection = await openReadOnlyFor(trader);
@@ -3966,9 +3969,30 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   app.get('/api/market/klines', authed, async (request, reply) => {
     const query = request.query as { symbol?: string; interval?: string; limit?: string };
     if (!query.symbol) return reply.code(400).send({ error: '缺少 symbol 参数' });
-    const interval = (query.interval ?? '15m') as never;
-    const limit = Math.min(Number(query.limit ?? 200) || 200, 1000);
-    return deps.publicConnection.market.klines(query.symbol, interval, limit);
+    /*
+     * ⚠️ **`interval` 必须校验后再发给交易所。**
+     *
+     * 原来这里是 `(query.interval ?? '15m') as never` —— 一个 `as never` 把类型检查
+     * 关掉了，任意字符串都会被拼进出站请求。写错一个周期（`15min`）时，
+     * 币安回 400，而 Fastify 会把未捕获的异常变成 **500**：调用方看到的是"服务端坏了"，
+     * 而不是"这个参数只能是这 11 个值之一"。
+     */
+    const interval = TimeframeSchema.safeParse(query.interval ?? '15m');
+    if (!interval.success) {
+      return reply
+        .code(400)
+        .send({ error: `interval 必须是：${TIMEFRAMES.join(' / ')}` });
+    }
+    /*
+     * `limit` 也要钳成正数：`?limit=-1` 原样透传会得到一个语义不明的请求
+     * （SQLite 那次的教训是 `LIMIT -1` 表示"不限行"；这里虽然是 HTTP 参数，
+     * 但"把用户输入原样发给交易所"同样不该发生）。
+     */
+    const rawLimit = Number(query.limit ?? 200);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(Math.max(Math.trunc(rawLimit), 1), 1000)
+      : 200;
+    return deps.publicConnection.market.klines(query.symbol, interval.data, limit);
   });
 
   /* --- Live event stream ------------------------------------------------- */
