@@ -2877,11 +2877,14 @@ export class AutoTrader {
        * 这一轮本来就没有结论，不该出现在"失败"里。`finally` 仍会排下一轮。
        */
       /*
-       * `signal` 是 `inCycle` 回调的参数，外层 catch 看不到它；
-       * 这里用 `stopRequested`（停止/重启时被置真）与错误文案判断"是否被我们主动取消"。
+       * **判据只用错误文案，不看 `stopRequested`**。
+       *
+       * 取消失败有两种来源：进程终止/`stop()` 主动 abort 在途请求 → fetch 抛
+       * `Aborted: This operation was aborted`；两种都会在消息里出现 abort。
+       * 而 `stopRequested` 会在 `stop()` 时置真 —— 用它会把"停止之前就已经失败的
+       * 那一轮"也误判成中断（实测：单测里成功恢复链的 error 断言因此失败）。
        */
-      const aborted =
-        this.stopRequested === true || /aborted|abort/i.test((error as Error).message ?? '');
+      const aborted = /aborted|abort/i.test((error as Error).message ?? '');
       if (aborted) {
         this.emit('info', `第 #${this.cycleNumber} 轮被中断（服务重启或手动停止），本轮不计入失败。`);
         return;
