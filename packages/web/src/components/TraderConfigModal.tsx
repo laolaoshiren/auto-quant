@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { isAiDriven } from '@aq/shared';
 import { api, type AiModelRow, type ExchangeAccountRow, type TraderRow } from '../lib/api';
-import { fmtAsset } from '../lib/format';
+import { fmtNum } from '../lib/format';
 import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, TextInput } from './ui';
 import { EquitySourceField, equityPayload, useExchangeEquity } from './EquitySourceField';
 
@@ -224,10 +224,7 @@ export function TraderConfigModal({
             操作员以为该选一个，一选一存就撞 400；绑了账户的机器人也没有
             「不绑账户」选项，那行注释声称的支持从未成立。
           */}
-          <Field
-            label="交易所账户"
-            hint="创建后不可更改。要换账户请新建一个机器人（当前这个可以停掉并保留历史）。"
-          >
+          <Field label="交易所账户" hint="创建后不可更改；要换账户请新建机器人。">
             <div className="text-base text-ink-mid">
               {trader.exchangeAccountId === null ? (
                 <span className="text-ink-faint">不绑账户（纯模拟盘）</span>
@@ -246,7 +243,7 @@ export function TraderConfigModal({
             <Select value={aiModelId} onChange={(e) => setAiModelId(Number(e.target.value))}>
               {models.map((model) => (
                 <option key={model.id} value={model.id}>
-                  {model.label} · {model.model}
+                  {model.label}
                 </option>
               ))}
             </Select>
@@ -263,10 +260,7 @@ export function TraderConfigModal({
             页头（`TraderPage`）对这三种模式分别做了同样的处理，这里与它保持一致。
           */}
           {isAiDriven(trader.mode) ? (
-            <Field
-              label="策略"
-              hint="AI 驱动的模式不引用策略 —— 参数由 AI 自己设定并持续调整（JEV 模式的参数在机器人页的「JEV 模式」标签里调）。"
-            >
+            <Field label="策略" hint="AI 驱动的模式不引用策略，参数由 AI 自己调整。">
               <div className="text-base text-ink-faint">不使用策略参数</div>
             </Field>
           ) : (
@@ -301,10 +295,10 @@ export function TraderConfigModal({
           {trader.exchangeAccountId === null ? (
             <Field
               label="模拟盘起始余额（USDT）"
-              hint="纯模拟盘机器人不绑任何交易所账户；模拟钱包余额 = 本金 + 已实现净额。本金在创建时设定。"
+              hint="纯模拟盘：本金 + 已实现净额 = 当前模拟余额。本金创建时设定、此处不可改。"
             >
               <div className="num text-base text-ink-mid">
-                {paperStartingBalance === null ? '—（首次启动时使用默认本金）' : fmtAsset(paperStartingBalance, 'USDT', 2)}
+                {paperStartingBalance === null ? '—' : fmtNum(paperStartingBalance, 2)}
               </div>
             </Field>
           ) : (
@@ -315,14 +309,9 @@ export function TraderConfigModal({
             </div>
           )}
 
-          <div className="flex items-start gap-2 rounded-md border border-base-800 bg-base-850/50 px-3 py-2">
-            <Badge tone="muted" className="mt-px">
-              不可变更
-            </Badge>
-            <span className="text-xs leading-relaxed text-ink-lo">
-              运行模式（模拟 / 实盘）在创建机器人时固定，不在此处修改。最近周期 #{trader.lastCycleNumber}。
-              停止中的机器人保存后会立即生效，但不会自动重新启动。
-            </span>
+          <div className="flex items-center gap-2 text-xs text-ink-faint" title={`最近周期 #${trader.lastCycleNumber}。停止中的机器人保存后立即生效，不会自动重启。`}>
+            <Badge tone="muted">模式创建时固定</Badge>
+            <span>保存后立即生效，不会自动重启</span>
           </div>
 
           {error && <ErrorNote>{error}</ErrorNote>}

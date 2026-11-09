@@ -282,7 +282,7 @@ export function Metric({
      * 图形统一贴底，中间那段空白变成**有意的留白**而不是"少了一块内容"。
      */
     <div className="flex h-full min-w-0 flex-col" title={title}>
-      <div className="truncate text-xs font-medium uppercase tracking-wider text-ink-lo">{label}</div>
+      <div className="mb-0.5 truncate text-[11px] font-medium leading-4 text-ink-lo">{label}</div>
       <div
         className={cn(
           'num truncate leading-tight',

@@ -75,7 +75,6 @@ export function BalanceCell({
           <span className="text-warn" title={`余额读取失败：${message}`}>
             {message}
           </span>
-          {env}
         </p>
         <p className="text-xs text-ink-faint">点右侧刷新按钮重试。</p>
       </div>
@@ -97,11 +96,15 @@ export function BalanceCell({
       <div className="grid grid-cols-2 gap-x-6 gap-y-2.5 sm:grid-cols-3 xl:grid-cols-4">
         <Metric
           label={BALANCE_LABEL.equity}
-          value={fmtAsset(balance.equity, asset)}
+          /*
+           * **金额不带单位**：窄卡片里 `1,234.56 USDT` 会被截成 `1,234.56 US…`
+           * （C 组 1024/768 实测）。单位放进副行，主数字只留数字。
+           */
+          value={fmtNum(balance.equity)}
           size="lg"
           tone="strong"
-          sub="保证金余额 = 钱包 + 未实现盈亏"
-          subTitle="保证金余额 = 钱包余额 + 未实现盈亏"
+          sub={`${asset} · 保证金余额 = 钱包 + 未实现盈亏`}
+          subTitle={`${asset}：保证金余额 = 钱包余额 + 未实现盈亏`}
           title={`${BALANCE_LABEL.equity}（保证金余额 = 钱包 + 未实现盈亏）。这是「交易所账户」的权益，同一账户下的所有机器人共用这一个钱包。`}
         />
         <Metric label={BALANCE_LABEL.wallet} value={fmtNum(balance.walletBalance)} />

@@ -1204,16 +1204,7 @@ export function DecisionFeed({
         */}
       {mode !== 'ai_team' && <CycleCountdown nextCycleAt={nextCycleAt} />}
       {actions}
-      <button
-        type="button"
-        onClick={() => query.reload()}
-        title="重新拉取决策记录"
-        className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-ink-lo transition hover:text-ink-hi disabled:opacity-50"
-        disabled={query.loading}
-      >
-        <RotateCw aria-hidden className={cn('h-3.5 w-3.5', query.loading && 'animate-spin')} />
-        刷新
-      </button>
+      {/* 手动刷新按钮已删除（规范 §5：页面自动刷新/推送，不需要手动按钮）。 */}
       <Link to="/data" className="text-xs text-ink-lo transition hover:text-accent">
         全部记录
       </Link>

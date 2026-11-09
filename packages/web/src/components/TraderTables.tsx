@@ -2698,9 +2698,6 @@ export function TraderTables({
           >
             全部平仓
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => setOrdersRefreshToken((n) => n + 1)} title="立即刷新表格数据">
-            刷新
-          </Button>
           {/*
             历史区的收起 / 展开。与 `TraderPage.tsx` 权益曲线那个按钮**同一套交互语言**：
             `variant="ghost" size="sm"` + `aria-expanded` + 文案跟着状态走。

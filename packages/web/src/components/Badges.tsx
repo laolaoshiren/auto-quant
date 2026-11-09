@@ -190,7 +190,7 @@ export function SectionHeading({
    * 按钮就在标题旁边；说明文字另起一行，不挤。
    */
   return (
-    <div className="mb-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+    <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
       <h2 className="truncate text-xl font-semibold tracking-tight text-ink-hi">{title}</h2>
       {right && <div className="flex shrink-0 flex-wrap items-center gap-2">{right}</div>}
       {sub && <p className="w-full text-xs text-ink-lo">{sub}</p>}
