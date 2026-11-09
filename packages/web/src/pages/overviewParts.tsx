@@ -320,41 +320,43 @@ export function TradersSnapshotTable({
                       <Link
                         to={target}
                         onClick={(event) => event.stopPropagation()}
-                        className="group flex min-w-0 items-center gap-1.5"
+                        className="group flex min-w-0 items-center gap-2"
                       >
-                        <TraderAvatar id={trader.id} size={22} className="shrink-0 rounded" />
-                        <span className="block truncate text-base font-semibold text-ink-hi group-hover:text-accent">
-                          {trader.name}
-                        </span>
-                        <span className="num block truncate text-xs text-ink-faint">
-                          周期 {trader.lastCycleNumber} · 每 {trader.cycleIntervalMinutes}m
-                        </span>
-                        {/*
-                         * **总览快照也要一眼看出模式与模拟/实盘**（用户 2026-11-10：
-                         * 「也要显示是模拟\实盘」）。列表页已有，总览页当时漏了 ——
-                         * 而总览是用户第一眼看的页面，恰恰最需要这两个信息。
-                         */}
-                        <span className="mt-0.5 flex flex-wrap items-center gap-1">
-                          <ModeBadge mode={trader.mode} />
-                          <Badge
-                            tone="muted"
-                            className={
-                              trader.dryRun === false
-                                ? 'border-warn/40 bg-warn/15 text-warn'
-                                : trader.dryRun === true
-                                  ? 'border-accent/30 bg-accent/10 text-accent'
-                                  : 'border-base-700 bg-base-800 text-ink-faint'
-                            }
-                            title={
-                              trader.dryRun === false
-                                ? '实盘：真实资金下单'
-                                : trader.dryRun === true
-                                  ? '模拟盘：本地撮合，不涉及真实资金'
-                                  : '运行模式未指定（老数据，首次启动时固定）'
-                            }
-                          >
-                            {trader.dryRun === false ? '实盘' : trader.dryRun === true ? '模拟' : '模式未定'}
-                          </Badge>
+                        <TraderAvatar id={trader.id} size={26} className="shrink-0 rounded-md" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-base font-semibold text-ink-hi group-hover:text-accent">
+                            {trader.name}
+                          </span>
+                          <span className="num block truncate text-xs text-ink-faint">
+                            周期 {trader.lastCycleNumber} · 每 {trader.cycleIntervalMinutes}m
+                          </span>
+                          {/*
+                           * **总览快照也要一眼看出模式与模拟/实盘**（用户 2026-11-10：
+                           * 「也要显示是模拟\实盘」）。列表页已有，总览页当时漏了 ——
+                           * 而总览是用户第一眼看的页面，恰恰最需要这两个信息。
+                           */}
+                          <span className="mt-0.5 flex flex-wrap items-center gap-1">
+                            <ModeBadge mode={trader.mode} />
+                            <Badge
+                              tone="muted"
+                              className={
+                                trader.dryRun === false
+                                  ? 'border-warn/40 bg-warn/15 text-warn'
+                                  : trader.dryRun === true
+                                    ? 'border-accent/30 bg-accent/10 text-accent'
+                                    : 'border-base-700 bg-base-800 text-ink-faint'
+                              }
+                              title={
+                                trader.dryRun === false
+                                  ? '实盘：真实资金下单'
+                                  : trader.dryRun === true
+                                    ? '模拟盘：本地撮合，不涉及真实资金'
+                                    : '运行模式未指定（老数据，首次启动时固定）'
+                              }
+                            >
+                              {trader.dryRun === false ? '实盘' : trader.dryRun === true ? '模拟' : '模式未定'}
+                            </Badge>
+                          </span>
                         </span>
                       </Link>
                     </td>
@@ -430,6 +432,15 @@ export function TradersSnapshotTable({
                           点进那台机器人即可。去掉之后这一格是干净的**两态**：
                           在跑 → 停止；没在跑 → 启动。
                         */}
+                        {/*
+                          ⚠️ **`starting` 必须单独占一个分支**（2026-11-10 回归实测）。
+
+                          启动接口是异步的（`stopped → starting → running`，预检/连交易所要几秒到几十秒）。
+                          之前这里只判 `isRunning`，于是**已经点过启动之后**这一格仍显示可点的
+                          「启动」（回归实测这个窗口约 7 秒）—— 再点一次会被服务端拒绝
+                          「正在启动中」，而界面上只看到一个红条，像"点了没反应"。
+                          列表页（`TradersPage`）早就有这个分支，总览页漏了。
+                        */}
                         {trader.isRunning ? (
                           <Button
                             small
@@ -439,6 +450,10 @@ export function TradersSnapshotTable({
                             onClick={() => onStop(trader)}
                           >
                             停止
+                          </Button>
+                        ) : trader.status === 'starting' ? (
+                          <Button small variant="success" disabled title="启动中：服务端正在执行预检并拉起循环，状态会自动更新。">
+                            启动中
                           </Button>
                         ) : (
                           <Button

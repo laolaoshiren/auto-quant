@@ -25,6 +25,7 @@ import { displayAvailable, displayMarginUsed } from '../lib/accountDisplay';
 import { isLedgerSuspect } from '../lib/fleetTotals';
 import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import { TraderStatusBadge } from '../components/Badges';
+import { TraderAvatar } from '../components/TraderAvatar';
 import { PageShell, Metric } from '../components/shell';
 import { DecisionFeed } from '../components/DecisionFeed';
 import { AgentAuditPanel } from '../components/AgentAuditPanel';
@@ -1012,7 +1013,7 @@ export function TraderPage() {
   /*
    * **启动 = 点击即启动**（用户 2026-11-10：「点启动以后直接就运行，而不是又弹一个框」）。
    *
-   * 运行模式在创建机器人时已固定，启动弹窗里没有任何可选项 —— 只剩说明和预检结果。
+   * 运行模式在创建机器人时已固定，启动弹窗已删除 —— 没有可选项可看，
    * 预检失败用行内 `actionError` 展示，比"必须先点开弹窗"更直接。
    */
   const startNow = async () => {
@@ -1577,8 +1578,8 @@ export function TraderPage() {
   const runtimePaper = stats?.dryRun ?? null;
   const persistedPaper = trader?.dryRun ?? null;
   const ownPaper = runtimePaper ?? persistedPaper;
-  const paperFactText =
-    ownPaper === null ? '模拟/实盘 未知（未在运行）' : ownPaper ? '模拟盘（不动真钱）' : '实盘（真实资金）';
+  /* 页头只留最短标签（用户 2026-11-10：别画蛇添足）；详细口径在 title 里。 */
+  const paperFactText = ownPaper === null ? '模式未定' : ownPaper ? '模拟盘' : '实盘';
   const paperTone = ownPaper === null ? 'text-ink-faint' : ownPaper ? 'text-accent' : 'text-warn';
   const paperFactTitle =
     runtimePaper !== null
@@ -1587,155 +1588,77 @@ export function TraderPage() {
         ? `落库的操作员选择：${persistedPaper ? '模拟盘' : '实盘'}（它现在没在运行；重启后按这一份恢复）`
         : `从未指定过（老数据）：首次启动时会固定为模拟盘（创建时还没有"运行模式"这个记录）`;
 
+  /*
+   * **页头信息只留一行**（用户 2026-11-10：「太多字，又有重复，不简洁，不优雅，不实用
+   * 不好看，重新设计 UI/UX，精简成一行，保留有用的」）。
+   *
+   * 只保留用户会问的三个问题：
+   *   · 它是什么模式、花不花真钱？
+   *   · 它多久跑一次、上次什么时候跑的？
+   *   · 它的决策从哪来（模型 / 策略）？
+   *
+   * 删掉：周期编号、创建时间、起始权益（创建时定下、之后不变，且指标卡/账户区已有），
+   * 以及重复标签（团队模式原来在页头出现两次、"（多智能体）""（按角色分档）"这类注释）。
+   * 详细说明全部进 title，不占版面。
+   */
   const secondaryFacts = (
-    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 px-1 text-xs text-ink-lo">
-      {/*
-        ══════════════════════════════════════════════════════════════════════
-         **这台机器人是哪种模式 + 在跑模拟还是实盘**（2026-10-17 · 台账 UI-11 / 用户实测 U-2）
-        ══════════════════════════════════════════════════════════════════════
-
-        用户原话：「**智能托管模式 / 普通模式不清楚**」。而"不清楚"其实有两层：
-        ```
-          ① 它是【哪种模式】—— 三个名字散落在徽章、页头、创建弹窗里；
-          ② 它在【跑模拟还是实盘】—— 这件事此前**只在两个条件下**才显示，
-             而且从不与模式并列出现（见下面那段"越界状态才渲染"的说明）。
-        ```
-        所以这里把两件事**放在同一个视觉单元里**（一段文字、一个位置），
-        一眼读完就知道"这台是什么 + 花不花真钱"。
-
-        ⚠️ **两个事实源必须分开说**（`server.ts:2328-2331` 的硬约束）：
-        ```
-          这一格 → 这台机器人自己的口径：运行时 stats.dryRun → 落库 trader.dryRun
-          顶栏   → 进程级 env.dryRun（默认值），它**可以**与上面那个不一致
-        ```
-        取值顺序由 `isPaperView()` 统一提供（与服务端 `isPaperTrader` 同一条），
-        这里不自己拼。两个口径的**不一致**另有专门告警（见下面 `stats?.dryRun` 那一段），
-        所以这一格只负责"如实说它自己"。
-      */}
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-1 text-xs text-ink-lo">
       <span
-        className="flex flex-wrap items-baseline gap-x-1"
+        className="flex items-baseline gap-1"
         title={[
           `运行模式：${MODE_LABEL[trader.mode]} —— ${MODE_HINT[trader.mode]}`,
           `资金口径：${paperFactTitle}`,
-          `顶栏那个徽章说的是进程级默认（当前为${system?.dryRun ? '模拟盘' : system ? '实盘' : '未知'}），`,
-          '它与这一格说的不是同一个事实，两者可以不一致（启动参数是每次单独传的）。',
         ].join('\n')}
       >
-        <span className="text-ink-faint">运行模式</span>
         <span className="font-medium text-ink-hi">{MODE_LABEL[trader.mode]}</span>
         <span className="text-ink-faint">·</span>
         <span className={`font-medium ${paperTone}`}>{paperFactText}</span>
       </span>
-      <span>
-        {/*
-          ⚠️ **团队模式不显示「AI 模型」**（用户 2026-10-12 明确要求）。
-
-          原话：
-          > 「团队多智能体模式，在创建/修改的时候就**不应该采用 AI 模型列表里面的**，
-          >  而是**直接采用系统的 magpie**，（系统 AI 列表里面添加的那些
-          >  **不应该给这个模式使用**）」
-
-          团队模式的模型出口来自**独立的 magpie 网关配置**，所以这里显示
-          "AI 模型 #4" 是**误导** —— 那个值是数据库外键要求的占位，
-          团队模式从不读它。浏览器实测确实看到了「AI 模型 [DEMO] 脚本化模型」，
-          而那不是它在用的东西。
-        */}
-        {/*
-          ⚠️ **JEV 模式也不显示「AI 模型」**（2026-10-19 用户截图指出）。
-
-          用户看到的是：
-          ```
-            运行模式 JEV 模式（实验性） · 模拟盘
-            AI 模型 Command Code（聚合网关） deepseek/deepseek-v4.1-flash-fast
-            策略 #null
-          ```
-          而 **JEV 模式从不读那条记录** —— 它的决策模型固定是 magpie 的
-          `jev-latest`（见 `jevModel.ts`）。显示一个不会被使用的模型名是**误导**：
-          用户会以为改它能影响 JEV 模式的行为。
-        */}
-        {trader.mode === 'ai_team' ? (
-          <span title="团队模式的模型由独立的 magpie 网关调度，与「AI 模型」列表无关。">
-            模型调度{' '}
-            <span className="text-ink-faint">系统 magpie 网关（按角色分档）</span>
-          </span>
-        ) : trader.mode === 'jev' ? (
-          <span title="JEV 模式的决策模型固定是 magpie 网关的 Jev，与「AI 模型」列表无关。">
-            决策模型{' '}
-            <span className="text-ink-faint">Jev（magpie 网关）</span>
-          </span>
-        ) : (
-          <>
-            AI 模型{' '}
-            <Link to="/models" className="text-accent hover:underline" title="决定它看什么、怎么下单的模型。">
-              {model ? model.label : `#${trader.aiModelId}`}
-            </Link>
-            {model?.model && <span className="ml-1 text-ink-faint">{model.model}</span>}
-          </>
-        )}
+      <span
+        title={
+          trader.mode === 'ai_managed'
+            ? '决策间隔由 AI 自己决定（1–1440 分钟），改完下一轮即生效。'
+            : '该机器人每多久跑一次决策周期。'
+        }
+      >
+        每 <span className="text-ink-mid">{trader.cycleIntervalMinutes}m</span> 一轮
+        {trader.mode === 'ai_managed' && <span className="text-ink-faint">（AI 可调）</span>}
       </span>
-      <span>
-        {/*
-          AI 托管模式下**不显示策略**。
-          
-          策略是"一组固定参数"，而 AI 模式的意思是"由 AI 实时设定并调整参数"——
-          对这台机器人来说，`strategies` 表里那一行**不生效**（生效的是
-          `agent_config_json`）。
-          
-          之前这里显示「策略 #8」并链到策略编辑页，那会让人以为改那里能影响它 ——
-          **一个链到无效配置的链接，比没有链接更糟**：用户改完发现没效果，
-          却不知道该怪谁。
-        */}
-        {trader.mode === 'ai_managed' ? (
-          <span title="参数与交易提示词由 AI 自主设定并持续调整；生效的配置不在策略里。">
-            {MODE_LABEL.ai_managed}
-          </span>
-        ) : trader.mode === 'ai_team' ? (
-          /*
-           * ⚠️ **团队模式也不显示策略** —— 而且原来的代码会渲染成「策略 #null」。
-           *
-           * 因为 `ai_team` 与 `ai_managed` 一样**不引用策略**（`strategyId` 是 `null`），
-           * 而这里的分支只判了 `ai_managed`，于是团队模式落进 `else` 分支，
-           * 把 `null` 渲染成「策略 #null」并链到 `/strategy/null` ——
-           * 一个**指向不存在页面的链接**，浏览器实测确实看到了「策略 #null」。
-           */
-          <span title="AI 团队模式不引用策略；参数由团队按角色自行管理。">{`${MODE_LABEL.ai_team}（多智能体）`}</span>
-        ) : trader.mode === 'jev' ? (
-          /*
-           * ⚠️ **JEV 模式同理**（2026-10-19 用户截图指出「策略 #null」）。
-           *
-           * JEV 模式也不引用策略（`strategyId` 是 `null`），风控边界来自
-           * `defaultJevConfig()`，而**可调项在「JEV 模式」标签里**（实时生效）。
-           * 所以这里说清"参数在哪调"，而不是链一个不存在的策略。
-           */
-          <span title="JEV 模式的参数在「JEV 模式」标签里调整（实时生效）。">
-            {MODE_LABEL.jev} · 参数在 JEV 标签页
-          </span>
-        ) : (
-          <>
-            策略{' '}
-            <Link
-              to={`/strategy/${trader.strategyId}`}
-              className="text-accent hover:underline"
-              title="决定候选交易对、杠杆与风控阈值的策略。"
-            >
-              {strategy?.name ?? `#${trader.strategyId}`}
-            </Link>
-          </>
-        )}
+      <span title="最近一次决策周期的时间。">
+        最近轮 <span className="text-ink-mid">{timeAgo(trader.lastCycleAt)}</span>
       </span>
+      {trader.mode === 'ai_team' ? (
+        <span title="团队模式的模型由独立 magpie 网关按角色调度，与「AI 模型」列表无关。">magpie 网关</span>
+      ) : trader.mode === 'jev' ? (
+        <span title="JEV 决策模型固定为 magpie 网关的 Jev，与「AI 模型」列表无关。">Jev · magpie</span>
+      ) : (
+        <Link
+          to="/models"
+          className="text-accent hover:underline"
+          title="决定它看什么、怎么下单的模型。"
+        >
+          {model ? model.label : `#${trader.aiModelId}`}
+        </Link>
+      )}
+      {trader.mode === 'strategy' && strategy && (
+        <Link
+          to={`/strategy/${trader.strategyId}`}
+          className="text-accent hover:underline"
+          title="决定候选交易对、杠杆与风控阈值的策略。"
+        >
+          策略 · {strategy.name}
+        </Link>
+      )}
       {/*
-        推送断开时才出现。
-        
-        这是一个**越界**状态，而且带后果（数字最多滞后几秒）；正常运行时顶栏已经有
-        一个「推送在线」，页面再常驻重复一遍就是 §5 说的那种"看一百次有九十九次
-        拿不到信息"的值。
+        推送断开才出现（越界状态，带后果）。正常时顶栏已有「推送在线」，
+        页面再常驻重复一遍就是噪音。
       */}
       {!socketOpen && (
         <span
           className="text-warn"
           title="实时事件推送断开，页面改为每 4 秒轮询一次；持仓、委托与权益最多可能滞后几秒。"
         >
-          推送断开，按 4 秒轮询兜底
+          推送断开
         </span>
       )}
     </div>
@@ -1962,6 +1885,9 @@ export function TraderPage() {
 
           <span className="h-4 w-px bg-base-700" aria-hidden />
 
+          {/* 头像：与列表/总览同一个确定性像素头像，一眼对上"是同一台机器人"。 */}
+          <TraderAvatar id={trader.id} size={30} className="shrink-0 rounded-md" />
+
           <h1
             /*
              * `text-lg`（原来 `text-xl`）：主栏宽 674px，这一行七个元素合计
@@ -2048,10 +1974,22 @@ export function TraderPage() {
               只是控制台不再提供一个按钮。
           */}
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
+            {/*
+              ⚠️ **`starting` 也要有自己的态**（2026-11-10 回归实测）。
+
+              启动是异步的（`stopped → starting → running`）。本页原来只用 `busy`
+              遮住"请求还没返回"的那几百毫秒，之后到 `running` 之前会**重新显示可点的
+              「启动」** —— 再点会被服务端以「正在启动中」拒绝。列表页早已处理，
+              详情页漏了。
+            */}
             {trader.isRunning ? (
               <Button variant="danger" busy={busy} onClick={() => setStopConfirmOpen(true)}>
                 <Square aria-hidden className="h-3.5 w-3.5" />
                 停止
+              </Button>
+            ) : status === 'starting' ? (
+              <Button variant="success" disabled title="启动中：服务端正在执行预检并拉起循环，状态会自动更新。">
+                启动中
               </Button>
             ) : (
               <Button variant="success" busy={busy} disabled={busy} onClick={() => void startNow()}>
@@ -2067,7 +2005,6 @@ export function TraderPage() {
         </header>
 
         {/* A2. 配置摘要：次要信息折起来，但永远点得到 -------------------- */}
-        <ConfigSummary trader={trader} asset={settleAsset} />
 
         {actionError && <ErrorNote>{actionError}</ErrorNote>}
 
@@ -2525,87 +2462,6 @@ export function TraderPage() {
           void tradersQuery.reload();
         }}
       />
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/*  配置摘要                                                                   */
-/* -------------------------------------------------------------------------- */
-
-/**
- * 次要配置摘要 —— 默认收起的那一半页头。
- *
- * 改版前这里是一个平铺的 flex 行：周期、间隔、最近周期、AI、策略、环境、创建于
- * 七段文字和机器人名字**同等字重**地挤在顶部（操作者原话："八段同等权重的文字，
- * 扫一眼不知道哪个重要"）。问题的解法不是把字调小，而是分层：
- *
- * - 名称 / 状态 / 环境留在页头第一行；
- * - 保证金 / 名义 / 杠杆与模型、策略（"它是否在用钱、用的是什么"）留在指标行下面的
- *   那一行小字里，常驻可见；
- * - **周期编号、间隔、最近周期、创建于、起始权益**这些创建时就定下来、之后不再变的
- *   值收在这里，点一下展开。
- *
- * 收起态只留一个按钮 —— 它不占高度，也不会因为"没东西"而让页头看起来像坏了。
- */
-function ConfigSummary({ trader, asset }: { trader: TraderRow; asset: string }) {
-  /*
-   * **直接摊平，不再做折叠。**
-   *
-   * 原来它默认收起、点一下才展开。但收起时按钮上已经显示「周期 #N · 每 3m」——
-   * 也就是说**收起状态本身就占一行**，展开再占一行。**两行换一行信息，纯亏。**
-   *
-   * 这一块总共只有一行内容。摊平之后省掉一次点击，也省掉那一行按钮，
-   * 上下空间反而更省。
-   */
-  return (
-    <div className="num -mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
-      <span title="该机器人已完成的决策周期数（跨重启连续编号）。">
-        周期编号 <span className="text-ink-mid">#{fmtInt(trader.lastCycleNumber)}</span>
-      </span>
-      <span
-        title={
-          trader.mode === 'ai_managed'
-            ? /*
-               * ⚠️ 这一段曾经说的是反话，改回来过一次 —— 值得记下来。
-               *
-               * **先前**：AI 改不到决策周期（它是 `traders` 表上的一列、
-               * 不在 `StrategyConfig` 里；而且调度器用 `setInterval`，
-               * 启动时读一次就固定住）。那时如实标注「（固定）」。
-               *
-               * **现在**：两件事都补上了 ——
-               *   · AI 有 `set_cycle_interval` 工具，能直接改这一列
-               *   · 调度器换成**自续期的 `setTimeout` 链**，每轮重新读当前值，
-               *     所以改完**下一轮就生效**，不需要重启
-               *
-               * 于是这个标注必须跟着改。**上一版的「（固定）」现在是假话** ——
-               * 而一个说"AI 改不到"、实际它随时会改的标签，
-               * 和不标注一样有害：操作员会基于错的前提去解读周期变化。
-               */
-              '决策间隔由 AI 自己决定，它可以在每轮决策时调整（1–1440 分钟），改完下一轮即生效。'
-            : '该机器人每多久跑一次决策周期。'
-        }
-      >
-        间隔{' '}
-        <span className="text-ink-mid">
-          每 {trader.cycleIntervalMinutes} 分钟
-          {trader.mode === 'ai_managed' && <span className="text-ink-faint">（AI 可调）</span>}
-        </span>
-      </span>
-      <span>
-        最近周期 <span className="text-ink-mid">{timeAgo(trader.lastCycleAt)}</span>
-      </span>
-      {/*
-        起始权益曾挂在指标行的「归属权益」下面。指标行改成 4 张卡之后，那一行
-        放不下两个数（`Metric` 的 sub 会截断），而它本身是**创建时读到的钱包余额**、
-        之后不再变化 —— 属于配置，不属于盯盘指标，所以留在这里。
-      */}
-      <span title="创建该机器人时从交易所读取的钱包余额，是总收益率与盈亏的计算基准。">
-        起始权益 <span className="text-ink-mid">{fmtAsset(trader.initialEquity, asset, 4)}</span>
-      </span>
-      <span>
-        创建于 <span className="text-ink-mid">{fmtDateTime(trader.createdAt)}</span>
-      </span>
     </div>
   );
 }

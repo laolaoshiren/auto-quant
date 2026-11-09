@@ -328,18 +328,15 @@ export function TraderAccountStrip({
             */}
             {lastKnown ? (
               <>
-                <Badge tone="muted">上次读数</Badge>
+                <Badge
+                  tone="muted"
+                  title="机器人运行时记录下来的交易所真实余额（共享钱包），不是实时读数；完整读数见上方指标卡。"
+                >
+                  上次读数
+                </Badge>
                 <span className="text-ink-faint">{timeAgo(lastKnown.at)}</span>
-                <span className="text-ink-faint">
-                  （机器人运行时记录的交易所真实余额，完整读数见上方指标卡）
-                </span>
-                {/*
-                  ⚠️ **两个分支都要有这一句。**
-
-                  第一次加的时候只加在了"有实时读数"那个分支里，
-                  而机器人停止时页面走的是**这个**分支 —— 于是它一次都没显示过。
-                  所以把它提成上面的 `foreignNote`，两处共用同一个节点。
-                */}
+                {/* 长说明收进 title（用户 2026-11-10：「太多字，精简成一行」）。 */}
+                {/* 两个分支都要有这一句 —— 见下面 `foreignNote` 的说明。 */}
                 {foreignNote}
               </>
             ) : (

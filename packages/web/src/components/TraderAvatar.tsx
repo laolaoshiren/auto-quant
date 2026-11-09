@@ -1,49 +1,143 @@
 /**
- * **机器人头像（8-bit 像素风）**（2026-11-10 用户要求）。
+ * **机器人头像（像素 NFT 风）**（2026-11-10 用户要求）。
  *
  * 用户原话：
  * > 「每个机器人加一个随机头像（8BIT 简约各种风格就行，可以去下载一点，
- * >   就像币圈玩的NFC那种头像）」。
+ * >   就像币圈玩的NFC那种头像）」→ 之后又反馈「头像你整点好看热门得，不要这种随意垃圾得」。
  *
- * ## 为什么是本地生成而不是下载图片
+ * ## 为什么不是纯随机像素
  *
- * 1. **版权**：从网上抓的像素头像绝大多数有版权，仓库是公开的，不能塞进去；
- * 2. **确定性**：下载一批再随机分配，重装数据库后同一台机器人会换脸 —— 人对头像的
- *    识别是记忆性的，"名字 + 头像"应该稳定对应；
- * 3. **体积**：一张 8×8 的 SVG 只有几百字节，也不用额外请求。
+ * 第一版是"随机对称色块"——看起来像噪点，不像头像。现在改成：
+ * **一组手工设计的像素角色模板**（机器人/猫/狐狸/外星人/幽灵/骷髅/熊/鸟）
+ * × **热门配色**（紫/粉/青/绿/橙/黄/蓝/红/薄荷/薰衣草）
+ * × **深色渐变底**。
  *
- * 这里用 `id` 作种子做确定性的伪随机：同一台机器人永远同一个头像，不同机器人
- * 大概率不同（8×8 左右对称 + 10 色调色板）。风格就是"币圈像素 NFT"那种：
- * 深底、亮色方块、左右对称。
+ * 同一个 `id` 永远得到同一个头像（模板 + 配色都由 id 决定），不同机器人分布均匀。
+ * 全部本地生成（无版权、无网络请求），一个头像只有几百字节 SVG。
  */
 
-/** 调色板：保持低饱和到高饱和各几档，深浅色主题下都能看清。 */
-const PALETTE = [
-  '#a5b4fc',
-  '#2fd08d',
-  '#fbbf24',
-  '#f472b6',
-  '#60a5fa',
-  '#fb923c',
-  '#c084fc',
-  '#34d399',
-  '#f87171',
-  '#38bdf8',
+/** 8×8 像素模板。`.` 透明 · `#` 主色 · `o` 亮色 · `x` 暗色。 */
+const TEMPLATES: Record<string, readonly string[]> = {
+  robot: [
+    '..o..o..',
+    '..####..',
+    '.######.',
+    '.x####x.',
+    '.######.',
+    '..#..#..',
+    '..####..',
+    '..x..x..',
+  ],
+  cat: [
+    '..o..o..',
+    '..####..',
+    '.######.',
+    '.#x##x#.',
+    '.######.',
+    '..#oo#..',
+    '..####..',
+    '...##...',
+  ],
+  fox: [
+    'o......o',
+    'oo....oo',
+    '########',
+    '##x##x##',
+    '########',
+    '..#oo#..',
+    '..####..',
+    '...##...',
+  ],
+  alien: [
+    '..####..',
+    '.######.',
+    '##x##x##',
+    '#x####x#',
+    '##x##x##',
+    '.######.',
+    '..####..',
+    '...##...',
+  ],
+  ghost: [
+    '..####..',
+    '.######.',
+    '########',
+    '##x##x##',
+    '########',
+    '########',
+    '##.##.##',
+    '.#..#...',
+  ],
+  skull: [
+    '..####..',
+    '.######.',
+    '##x##x##',
+    '##x##x##',
+    '########',
+    '.#.##.#.',
+    '..#oo#..',
+    '..####..',
+  ],
+  bear: [
+    '.o....o.',
+    '..####..',
+    '.######.',
+    '.#x##x#.',
+    '.######.',
+    '..#oo#..',
+    '..####..',
+    '...##...',
+  ],
+  bird: [
+    '...##...',
+    '..####..',
+    '.#x##x#.',
+    '.######.',
+    '..oooo..',
+    '..####..',
+    '..x..x..',
+    '..o..o..',
+  ],
+  dino: [
+    '..##....',
+    '.####...',
+    '.#x##...',
+    '.####...',
+    '..####..',
+    '.##..##.',
+    '.#....#.',
+    '......#.',
+  ],
+  astronaut: [
+    '..####..',
+    '.#oooo#.',
+    '#o#xxo#.',
+    '#oooooo#',
+    '#o####o#',
+    '.#oooo#.',
+    '..####..',
+    '..#..#..',
+  ],
+};
+
+const TEMPLATE_NAMES = Object.keys(TEMPLATES);
+
+/** 热门配色：`[主色, 亮色]`。深色主题下都用高饱和度，浅色主题下也够对比。 */
+const PALETTES: ReadonlyArray<readonly [string, string]> = [
+  ['#8b5cf6', '#c4b5fd'], // 紫
+  ['#ec4899', '#f9a8d4'], // 粉
+  ['#06b6d4', '#67e8f9'], // 青
+  ['#10b981', '#6ee7b7'], // 绿
+  ['#f97316', '#fdba74'], // 橙
+  ['#fbbf24', '#fde68a'], // 黄
+  ['#3b82f6', '#93c5fd'], // 蓝
+  ['#ef4444', '#fca5a5'], // 红
+  ['#2dd4bf', '#99f6e4'], // 薄荷
+  ['#a78bfa', '#ddd6fe'], // 薰衣草
 ];
 
-/** 深色底：与 quill 的 base-900 接近，浅色主题下也不会糊成白块。 */
-const BG = '#151a21';
-
-/** 32 位确定性伪随机（mulberry32）—— 不需要依赖。 */
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+/** 8×8 像素网格尺寸（SVG viewBox）。 */
+const GRID = 8;
 
 export function TraderAvatar({
   id,
@@ -55,26 +149,21 @@ export function TraderAvatar({
   size?: number;
   className?: string;
 }) {
-  const GRID = 8;
-  const rnd = mulberry32(Math.floor(Math.abs(id)) * 2654435761 + 7);
-  const primary = PALETTE[Math.floor(rnd() * PALETTE.length)]!;
-  const accent = PALETTE[Math.floor(rnd() * PALETTE.length)]!;
-
+  const seed = Math.floor(Math.abs(id));
   /*
-   * 左右对称：只生成左半边（0..3 列），再镜像到右半边 ——
-   * 这是"像素头像"最容易被认出来的形状特征。
+   * ⚠️ **相邻 id 必须换色**（用户 2026-11-10：「不要全部整一样颜色（太近似得，
+   * 风格不同热门得各来一点方便区分啊）」）。
+   *
+   * 第一版用的是 `Math.floor(seed / 5) % 调色板长度` —— 于是 id 5/6/8 全都落到
+   * 同一个粉色，一排机器人看起来像同一个人。改成 `seed % 调色板长度`：
+   * id 连续时颜色逐个不同；模板用 `seed % 模板数`（10 种造型），
+   * 组合起来 10×10=100 种，单页十几台机器人足够区分。
    */
-  const cells: Array<{ x: number; y: number; fill: string }> = [];
-  for (let y = 0; y < GRID; y += 1) {
-    for (let x = 0; x < Math.ceil(GRID / 2); x += 1) {
-      const v = rnd();
-      /* 概率分布：约 35% 留空、约 55% 主色、约 10% 点缀色 —— 太密会糊成一块。 */
-      if (v < 0.35) continue;
-      const fill = v > 0.9 ? accent : primary;
-      cells.push({ x, y, fill });
-      if (x !== GRID - 1 - x) cells.push({ x: GRID - 1 - x, y, fill });
-    }
-  }
+  const template = TEMPLATES[TEMPLATE_NAMES[seed % TEMPLATE_NAMES.length]!]!;
+  const palette = PALETTES[seed % PALETTES.length]!;
+  const [primary, bright] = palette;
+  /* 每个头像一个唯一的渐变 id（同页多个头像不能共用一个 id）。 */
+  const gradientId = `aq-avatar-${seed}`;
 
   return (
     <svg
@@ -86,10 +175,20 @@ export function TraderAvatar({
       aria-hidden
       focusable="false"
     >
-      <rect width={GRID} height={GRID} fill={BG} />
-      {cells.map((cell, index) => (
-        <rect key={index} x={cell.x} y={cell.y} width={1} height={1} fill={cell.fill} />
-      ))}
+      <defs>
+        <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor={primary} stopOpacity="0.55" />
+          <stop offset="100%" stopColor="#0b0f14" stopOpacity="0.95" />
+        </linearGradient>
+      </defs>
+      <rect width={GRID} height={GRID} fill={`url(#${gradientId})`} />
+      {template.map((row, y) =>
+        [...row].map((cell, x) => {
+          if (cell === '.') return null;
+          const fill = cell === '#' ? primary : cell === 'o' ? bright : '#1b2330';
+          return <rect key={`${x}-${y}`} x={x} y={y} width={1} height={1} fill={fill} />;
+        }),
+      )}
     </svg>
   );
 }

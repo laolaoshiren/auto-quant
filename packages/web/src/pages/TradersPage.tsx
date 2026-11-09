@@ -640,7 +640,7 @@ export function TradersPage() {
                               否则一个长名字会把整张表撑到横向滚动。 */}
                           <Link to={`/traders/${trader.id}`} className="group block max-w-[18rem]">
                             <div className="flex items-center gap-1.5">
-                              <TraderAvatar id={trader.id} size={22} className="shrink-0 rounded" />
+                              <TraderAvatar id={trader.id} size={26} className="shrink-0 rounded-md" />
                               <span
                                 className="truncate text-base font-semibold text-ink-hi group-hover:text-accent"
                                 title={trader.name}
@@ -697,9 +697,13 @@ export function TradersPage() {
                           {summaryErrors[trader.id] ? (
                             <div
                               className="mt-0.5 text-xs text-warn"
-                              title={`读取这台机器人的统计失败：${summaryErrors[trader.id]}。这一行的权益/收益率是上一次成功读到的值。`}
+                              title={
+                                stats
+                                  ? `读取这台机器人的统计失败：${summaryErrors[trader.id]}。这一行的权益/收益率是上一次成功读到的值。`
+                                  : `读取这台机器人的统计失败：${summaryErrors[trader.id]}。这一行还没有成功读到过统计值。`
+                              }
                             >
-                              统计读不到（显示的是旧值）
+                              {stats ? '统计读不到（显示的是旧值）' : '统计读不到（暂无数据）'}
                             </div>
                           ) : null}
                         </td>
@@ -1031,9 +1035,9 @@ export function TradersPage() {
           /*
            * ⚠️ **创建 = 创建，不自动弹"启动"**（用户 2026-11-10：「创建-运行不能混在一起」）。
            *
-           * 新机器人以 `stopped` 落库。创建成功后自动打开启动弹窗，会让"创建"这个动作
-           * 看起来像"创建并运行"——用户以为点一下就直接开始交易。什么时候启动是
-           * 另一个独立决定，由操作员在列表里自己点。
+           * 新机器人以 `stopped` 落库。创建成功后自动打开启动弹窗（那个弹窗已删除）
+           * 会让"创建"这个动作看起来像"创建并运行"——用户以为点一下就直接开始交易。
+           * 什么时候启动是另一个独立决定，由操作员在列表里自己点。
            */
         }}
       />
