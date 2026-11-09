@@ -858,18 +858,29 @@ export function evaluateTraderHealth(
  *
  * ## 行为
  *
- * · 有模型 → 返回**第一条的 id**（团队模式不读它，取哪条都一样）；
+ * · 有模型 → 优先返回**已经存了 API Key 的那一条**；都没有 key 才退回第一条；
  * · 一条都没有 → 抛**说人话**的错误，而不是让外键去报。
+ *
+ * ## ⚠️ 为什么优先挑"有 key"的那条（2026-11-10 走查发现）
+ *
+ * 团队模式**不读**这个字段（模型出口是 magpie 网关），但 `startTrader` 的
+ * 通用预检会校验它指向的模型**有没有存储 API Key**。取"第一条"时，如果第一条
+ * 恰好是示例/占位模型（没有 key），团队机器人就会在启动时被拒：
+ *
+ *     AI 模型「[示例] Claude Opus」还没有存储 API Key
+ *
+ * 而这条错误指向的是"模型 key"，与团队模式毫无关系 —— 排查成本极高。
  */
 function requireAnyModelIdForTeam(): number {
-  const first = aiModels.list()[0];
-  if (!first) {
+  const all = aiModels.list();
+  if (all.length === 0) {
     throw new Error(
       'AI 团队模式需要数据库里至少存在一条「AI 模型」记录（团队模式本身不使用它，' +
         '但机器人表的这一列是必填的）。请先到「AI 模型」页添加任意一条。',
     );
   }
-  return first.id;
+  const withKey = all.find((model) => (aiModels.getWithSecret(model.id)?.api_key_enc ?? '').length > 0);
+  return (withKey ?? all[0]!).id;
 }
 
 export async function buildServer(deps: ApiDependencies): Promise<FastifyInstance> {
@@ -882,6 +893,41 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   await app.register(cors, { origin: true, credentials: true });
   await app.register(websocket);
+
+  /**
+   * **基础安全响应头**（审计 2026-11-10）。
+   *
+   * 这个控制台能下单、平仓、删凭据 —— 也就是说，一次**点击劫持**就能让操作员
+   * 在不知情的情况下点掉一个仓位。而在此之前，所有响应都没有任何安全头：
+   *
+   * ```
+   *   缺 X-Frame-Options       → 攻击者可以把控制台放进 iframe 叠一层假界面
+   *   缺 X-Content-Type-Options → 浏览器可能把 JSON 当 HTML/脚本嗅探执行
+   *   缺 Referrer-Policy        → 令牌虽在 Authorization 头里，但 URL 仍可能外泄
+   * ```
+   *
+   * 三个都是低风险、零功能影响的响应头，所以放在应用级 `onSend` 上对
+   * **所有**响应生效（含静态文件与 SPA 回落），而不是逐个路由加。
+   *
+   * `SAMEORIGIN` 而不是 `DENY`：同源 iframe（若有）不应被误伤，而跨站嵌入
+   * ——也就是点击劫持的载体——被挡住。
+   *
+   * ⚠️ **没有加 CSP**：Vite 构建产物里是否有 inline script/style 需要在真实
+   * 浏览器里逐个页面验证，而一个过紧的 CSP 会让控制台白屏。那属于"要实测才能
+   * 声称能用"的改动，先留在审计报告里，不在本轮凭空加。
+   */
+  app.addHook('onSend', async (_request, reply, payload) => {
+    if (!reply.hasHeader('x-content-type-options')) {
+      reply.header('X-Content-Type-Options', 'nosniff');
+    }
+    if (!reply.hasHeader('x-frame-options')) {
+      reply.header('X-Frame-Options', 'SAMEORIGIN');
+    }
+    if (!reply.hasHeader('referrer-policy')) {
+      reply.header('Referrer-Policy', 'no-referrer');
+    }
+    return payload;
+  });
 
   /**
    * Tolerate body-less and oddly-typed POSTs.

@@ -182,11 +182,101 @@ export async function resolveMasterKey(): Promise<Buffer> {
 }
 
 /** Resolve the JWT signing secret, persisting a generated one when unset. */
-export async function resolveJwtSecret(): Promise<string> {
-  if (env.jwtSecret) return env.jwtSecret;
-  const secretPath = path.join(env.dataDir, '.jwt.secret');
-  if (existsSync(secretPath)) return readFileSync(secretPath, 'utf8').trim();
-  await ensureDataDir();
+export async function resolveJwtSecret(dataDir: string = env.dataDir): Promise<string> {
+  /*
+   * ⚠️ **环境变量给的密钥也要校验，不能原样接受**。
+   *
+   * `str()` 只把「未设置」和「空字符串」当成缺省，所以 `JWT_SECRET="   "`
+   * 会被当成"已设置"。而用空白串做 HS256 的密钥等于**零熵** —— 任何人都能
+   * 用同一个空白串伪造一张管理员令牌。空密钥是认证被完全绕过，不是弱口令。
+   */
+  if (env.jwtSecret) {
+    const fromEnv = env.jwtSecret.trim();
+    const verdict = jwtSecretVerdict(fromEnv);
+    if (!verdict.ok) throw new Error(`JWT_SECRET 不可用：${verdict.reason}`);
+    return fromEnv;
+  }
+  return await resolveOrCreateJwtSecret(dataDir);
+}
+
+/**
+ * JWT 签名密钥的最小长度（字符）。
+ *
+ * HS256 的安全性完全由密钥熵决定。`randomBytes(48).toString('hex')` 生成的是
+ * 96 个字符，这里取 32 作为**下界**（128 bit 以上），既拦得住"随手写个
+ * `secret`"这种配置，又不会把合法的十六进制密钥误判。
+ */
+export const JWT_SECRET_MIN_LENGTH = 32;
+
+export interface JwtSecretVerdict {
+  ok: boolean;
+  /** 面向操作员的中文原因（`ok === false` 时有值）。 */
+  reason?: string;
+}
+
+/**
+ * 这把密钥能不能用来签会话令牌。
+ *
+ * ## 为什么必须有这道校验（安全，不是打磨）
+ *
+ * `resolveJwtSecret()` 原来对**文件内容不做任何检查**：
+ *
+ * ```ts
+ * if (existsSync(secretPath)) return readFileSync(secretPath, 'utf8').trim();
+ * ```
+ *
+ * 于是一个被截断成空文件的 `data/.jwt.secret`（写到一半崩溃、磁盘满、误操作）
+ * 会让 `verifyToken()` / `signToken()` 用一个**空字符串**做 HMAC 密钥 ——
+ * 这不是"弱口令"，而是**认证被完全绕过**：任何知道这个实现细节的人都能自己
+ * 签一张 `role: owner` 的令牌，30 天有效。而症状上它**完全不可见**。
+ *
+ * 对照 `resolveMasterKey()`：它一直有长度校验并在损坏时抛错。JWT 这一侧漏了。
+ *
+ * ## 为什么"短"也拒绝
+ *
+ * 32 个字符是 128 bit 以上。短于它时暴力空间小到可以离线穷举 —— 而重签令牌
+ * 只需要离线尝试，不需要打服务端（签名可自验）。所以这里 fail closed。
+ */
+export function jwtSecretVerdict(raw: string | null | undefined): JwtSecretVerdict {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  if (value === '') {
+    return {
+      ok: false,
+      reason:
+        '签名密钥为空 —— 用空密钥做 HMAC 等于任何人都能伪造管理员令牌。' +
+        '删除 data/.jwt.secret 让系统重新生成，或设置一个足够长的 JWT_SECRET。',
+    };
+  }
+  if (value.length < JWT_SECRET_MIN_LENGTH) {
+    return {
+      ok: false,
+      reason:
+        `签名密钥只有 ${value.length} 个字符，至少需要 ${JWT_SECRET_MIN_LENGTH} 个（HS256 的密钥就是签名空间）。` +
+        '生成一个：node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"',
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * 从 `data/.jwt.secret` 读密钥；不存在则生成并落盘（权限 0600）。
+ *
+ * 独立成函数是为了可测：`resolveJwtSecret()` 里对 `env.jwtSecret` 的判断
+ * 在模块加载时就固定了，测试无法改它；这一个只依赖传入的目录。
+ *
+ * ⚠️ **文件存在但内容不合法时抛错，绝不"顺手重新生成"**：那会让所有已登录会话
+ * 失效，而操作员看到的只是"登录莫名其妙失效"，根本不知道密钥文件坏了。
+ * fail closed + 明确原因才是可恢复的（删掉文件重启即可）。
+ */
+export async function resolveOrCreateJwtSecret(dataDir: string): Promise<string> {
+  const secretPath = path.join(dataDir, '.jwt.secret');
+  if (existsSync(secretPath)) {
+    const stored = readFileSync(secretPath, 'utf8').trim();
+    const verdict = jwtSecretVerdict(stored);
+    if (!verdict.ok) throw new Error(`data/.jwt.secret 不可用：${verdict.reason}`);
+    return stored;
+  }
+  await mkdir(dataDir, { recursive: true });
   const generated = randomBytes(48).toString('hex');
   await writeFile(secretPath, generated, { encoding: 'utf8', mode: 0o600 });
   return generated;

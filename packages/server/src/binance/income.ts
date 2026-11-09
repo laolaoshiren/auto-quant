@@ -21,7 +21,7 @@
  * means an independent check on the platform's arithmetic is always available.
  */
 import type { BinanceRest } from './rest.js';
-import type { BinanceIncome } from './types.js';
+import type { BinanceIncome, BinanceUserTrade } from './types.js';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('binance:income');
@@ -364,6 +364,81 @@ export function fundingSince(
 }
 
 /**
+ * USDⓈ-M 合约的**结算资产**：只有以它们计价的手续费才能进 `fee`。
+ *
+ * USDT 与 USDC 都是币安 USDⓈ-M 的保证金资产，1:1 锚定美元，数量口径可以直接
+ * 相加/比较。**BNB 不在其中**：手续费抵扣时 `commissionAsset` 是 `BNB`，
+ * `commission` 是 BNB 的**币数量**（例如 `0.000123` ≈ 0.07 USDT）——
+ * 把它当成 USDT 累加会让成本被低估三个数量级，净盈亏系统性偏乐观。
+ * §2.5 因此明确规定它「不计入 `fee`，要单独报告」。
+ */
+export const SETTLEMENT_ASSETS: readonly string[] = ['USDT', 'USDC'];
+
+/**
+ * 这笔手续费是否以结算资产计价。
+ *
+ * ⚠️ **缺 `asset` 时按结算资产处理**（返回 `true`）：宁可高估成本，也不要因为
+ * 一个缺失字段把一笔真实手续费静默丢掉 —— 漏记手续费与「账目虚高」是同一条
+ * 事故的两个方向，而后者更难被发现。
+ */
+export function isSettlementAsset(
+  asset: string | undefined,
+  settlementAssets: readonly string[] = SETTLEMENT_ASSETS,
+): boolean {
+  if (!asset) return true;
+  return settlementAssets.includes(asset);
+}
+
+/** 一组成交里手续费的**两个口径**。 */
+export interface SettlementCommission {
+  /** 结算资产计价的手续费合计（支出为正，与 `fee` 同口径）。 */
+  fee: number;
+  /** 非结算资产计价的手续费 —— **不在 `fee` 里**，调用方必须单独报告。 */
+  foreign: Array<{ asset: string; amount: number }>;
+}
+
+/**
+ * 从成交明细里拆出**结算资产计价的手续费**与非结算资产手续费。
+ *
+ * 这是 `feeForOrder` / `lastFillFor` / `entryFeeFor` 以及三条平仓路径
+ * （`executeClose` / `executeReduce` / `emergencyFlatten`）共同的唯一实现。
+ *
+ * ## 为什么必须有它（§2.5 的硬约束）
+ *
+ * 上面那些调用点原来都是同一句 `sum + Number(fill.commission)` —— **五份副本**
+ * 全部忽略了 `commissionAsset`。用户一旦开启币安的 BNB 手续费抵扣
+ * （界面默认推荐），`commission` 就变成 BNB 数量：
+ *
+ * ```text
+ *   BNB 0.000123 ≈ 0.07 USDT，而代码记成 0.000123 USDT（低估约 570 倍）
+ * ```
+ *
+ * 于是 `orders.fee`、`trades.entry_fee` / `exit_fee`、以及 `netPnl`
+ * 全部系统性偏乐观。单一实现而不是每处各写一遍，也是 §5.4 的要求
+ * （金额算术只在一个地方算）。
+ */
+export function settlementCommissionOf(
+  fills: readonly BinanceUserTrade[],
+  settlementAssets: readonly string[] = SETTLEMENT_ASSETS,
+): SettlementCommission {
+  let fee = 0;
+  const foreign = new Map<string, number>();
+  for (const fill of fills) {
+    const amount = Number(fill.commission) || 0;
+    if (amount === 0) continue;
+    if (isSettlementAsset(fill.commissionAsset, settlementAssets)) {
+      fee += amount;
+      continue;
+    }
+    foreign.set(fill.commissionAsset, (foreign.get(fill.commissionAsset) ?? 0) + amount);
+  }
+  return {
+    fee,
+    foreign: [...foreign.entries()].map(([asset, amount]) => ({ asset, amount })),
+  };
+}
+
+/**
  * 一个回合的**开仓侧与平仓侧手续费** —— 取自交易所的 income 流水。
  *
  * ## 为什么需要它（实测：重建错位会连带把手续费也算错）
@@ -402,6 +477,14 @@ export function commissionsInWindow(
   let exitFee = 0;
   for (const event of events) {
     if (event.incomeType !== 'COMMISSION' || event.symbol !== symbol) continue;
+    /*
+     * ⚠️ **只认结算资产计价的手续费**（§2.5）。
+     *
+     * 上面那段注释早就写着「非结算资产（BNB 抵扣那种）不计入这里」，
+     * 但代码从来没检查过 `asset` —— 注释与实现是两件事。用户一旦开了
+     * BNB 抵扣，这里就会把 BNB 的**币数量**当成 USDT 金额累加。
+     */
+    if (!isSettlementAsset(event.asset)) continue;
     if (!(event.time >= from && event.time <= to)) continue;
     /* income 里的 COMMISSION 是负数（支出），而本仓库的 fee 是正数。 */
     const amount = Math.abs(Number(event.income) || 0);

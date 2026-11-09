@@ -648,7 +648,7 @@ export function defaultStrategyConfig(): StrategyConfig {
  *   没给保护位时用。它们都不是"边界"，改小没有意义。
  */
 export function unboundedAiManagedConfig(): StrategyConfig {
-  return StrategyConfigSchema.parse({
+  const base = StrategyConfigSchema.parse({
     riskControl: {
       /* 持仓数与杠杆：顶格（交易所给该账户的授信是 BTC 150x / 山寨 100x）。 */
       maxPositions: 20,
@@ -666,6 +666,31 @@ export function unboundedAiManagedConfig(): StrategyConfig {
       requireTakeProfit: false,
       requireStopLoss: true,
     },
+  });
+
+  /*
+   * ⚠️ **候选池必须补上**（2026-11-10 走查发现，与 2026-10-27 修
+   * `defaultStrategyConfig()` 的那次同一类缺陷）。
+   *
+   * schema 的裸默认值是 `sourceType: 'static'` + `staticCoins: []` —— 也就是
+   * **一个候选标的都没有**。于是新建的 ai_managed 机器人启动时只会写一条：
+   *
+   *     机器人 #N 的配置里没有任何候选标的（静态列表为空、也没开动态候选池）
+   *     —— 它不会交易任何东西。
+   *
+   * 而 `startTrader` 会因此**取消启动**（状态保持 stopped）—— 表现是
+   * "点了启动、看起来成功、但机器人永远不运行"。这是本仓反复记录的那类
+   * "能启动但永远不会交易"的静默失能。
+   *
+   * 只补 `coinSource`，其余分区保持"不设边界"的语义（用户的原始要求：
+   * "完全交给模型，不要系统提前写死"）—— 候选池是**能不能交易**的前提，
+   * 不是交易偏好。
+   */
+  const conservative = STRATEGY_PRESETS.find((preset) => preset.id === 'conservative');
+  if (!conservative) return base;
+  return StrategyConfigSchema.parse({
+    ...base,
+    coinSource: { ...base.coinSource, ...conservative.patch.coinSource },
   });
 }
 

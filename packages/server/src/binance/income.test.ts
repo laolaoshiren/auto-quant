@@ -1,8 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { BinanceIncome } from './types.js';
+import type { BinanceIncome, BinanceUserTrade } from './types.js';
 import type { BinanceRest } from './rest.js';
-import { commissionsInWindow, fetchIncome, fundingInWindow, fundingSince, summarizeIncome } from './income.js';
+import {
+  commissionsInWindow,
+  fetchIncome,
+  fundingInWindow,
+  fundingSince,
+  isSettlementAsset,
+  settlementCommissionOf,
+  summarizeIncome,
+} from './income.js';
 
 /**
  * The income ledger is the only place funding fees appear — no fill mentions
@@ -295,4 +303,115 @@ test('开仓时刻之前没有流水时返回 0（不能因为读不到就把上
     income({ incomeType: 'FUNDING_FEE', income: '-0.5', symbol: 'POWERUSDT', time: 1_700_000_000_000 }),
   ];
   assert.equal(fundingSince(events, 'POWERUSDT', new Date(1_700_000_100_000).toISOString()), 0);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  非结算资产计价的手续费（BNB 抵扣）—— §2.5 的口径边界                        */
+/* -------------------------------------------------------------------------- */
+
+test('★ BNB 抵扣的手续费不能进 USDT 口径（`commissionsInWindow`）', () => {
+  /*
+   * ## 这个测试防什么
+   *
+   * 用户开了币安的「BNB 手续费抵扣」之后，`/fapi/v1/income` 的 COMMISSION
+   * 事件 `asset` 是 `BNB`、`income` 是 **BNB 的币数量**（约 1e-4 量级），
+   * 而 USDT 计价的手续费约 1e-2 量级。原来的 `commissionsInWindow` 从来没看
+   * `asset` —— 注释里却写着「非结算资产不计入这里」。于是 BNB 被当成 USDT 累加，
+   * 成本被低估三个数量级，净盈亏系统性偏乐观（AGENTS §2.5）。
+   */
+  const t0 = 1_700_000_000_000;
+  const threeHours = t0 + 3 * 3600_000;
+  const events = [
+    income({ incomeType: 'COMMISSION', income: '-0.01', symbol: 'HYPEUSDT', time: t0 + 60_000 }),
+    income({
+      incomeType: 'COMMISSION',
+      income: '-0.000123',
+      asset: 'BNB',
+      symbol: 'HYPEUSDT',
+      time: t0 + 120_000,
+    }),
+    income({ incomeType: 'COMMISSION', income: '-0.02', symbol: 'HYPEUSDT', time: threeHours }),
+    income({
+      incomeType: 'COMMISSION',
+      income: '-0.000123',
+      asset: 'BNB',
+      symbol: 'HYPEUSDT',
+      time: threeHours + 1000,
+    }),
+  ];
+
+  const { entryFee, exitFee } = commissionsInWindow(
+    events,
+    'HYPEUSDT',
+    new Date(t0).toISOString(),
+    new Date(threeHours).toISOString(),
+  );
+
+  assert.ok(Math.abs(entryFee - 0.01) < 1e-12, `BNB 那条不该进开仓侧，实得 ${entryFee}`);
+  assert.ok(Math.abs(exitFee - 0.02) < 1e-12, `BNB 那条不该进平仓侧，实得 ${exitFee}`);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  成交明细里的手续费拆分（`settlementCommissionOf`）                            */
+/* -------------------------------------------------------------------------- */
+
+function fill(over: Partial<BinanceUserTrade> & { commission: string; commissionAsset: string }): BinanceUserTrade {
+  return {
+    symbol: 'HYPEUSDT',
+    id: 1,
+    orderId: '100',
+    side: 'SELL',
+    positionSide: 'BOTH',
+    price: '10',
+    qty: '1',
+    quoteQty: '10',
+    realizedPnl: '0',
+    marginAsset: 'USDT',
+    time: 1_700_000_000_000,
+    maker: false,
+    buyer: false,
+    ...over,
+  };
+}
+
+test('★ 结算资产手续费进 `fee`，BNB 抵扣单独报告', () => {
+  /*
+   * 五处调用点（feeForOrder / lastFillFor / entryFeeFor / executeClose /
+   * executeReduce / emergencyFlatten）原来各写一遍
+   * `sum + Number(fill.commission)`，全部忽略 `commissionAsset`。
+   *
+   * 复现：同一个订单的成交里混有 USDT 与 BNB 两种佣金。
+   * 期望：USDT 计入 fee；BNB 只出现在 foreign，**不进 fee**。
+   */
+  const { fee, foreign } = settlementCommissionOf([
+    fill({ commission: '0.01015906', commissionAsset: 'USDT' }),
+    fill({ commission: '0.000123', commissionAsset: 'BNB' }),
+    /* USDC 也是 USDⓈ-M 的结算资产，数量口径可以直接相加。 */
+    fill({ commission: '0.02', commissionAsset: 'USDC' }),
+    /* 0 佣金不制造任何条目。 */
+    fill({ commission: '0', commissionAsset: 'BNB' }),
+  ]);
+
+  assert.ok(Math.abs(fee - 0.03015906) < 1e-12, `fee 只该含 USDT/USDC，实得 ${fee}`);
+  assert.deepEqual(foreign, [{ asset: 'BNB', amount: 0.000123 }]);
+});
+
+test('缺 commissionAsset 时按结算资产处理 —— 宁可高估成本，也不要静默漏记', () => {
+  const { fee, foreign } = settlementCommissionOf([
+    fill({ commission: '0.01', commissionAsset: '' }),
+  ]);
+  assert.ok(Math.abs(fee - 0.01) < 1e-12);
+  assert.deepEqual(foreign, []);
+  assert.equal(isSettlementAsset(undefined), true);
+});
+
+test('非结算资产手续费按币种归并（同一资产多条成交只报一条）', () => {
+  const { foreign } = settlementCommissionOf([
+    fill({ commission: '0.0001', commissionAsset: 'BNB' }),
+    fill({ commission: '0.0002', commissionAsset: 'BNB' }),
+  ]);
+  assert.equal(foreign.length, 1, '同一币种只该出一条');
+  assert.equal(foreign[0]?.asset, 'BNB');
+  /* 浮点加法不是精确的 —— 断言近似，不把 0.00030000000000000003 当成错的。 */
+  assert.ok(Math.abs((foreign[0]?.amount ?? 0) - 0.0003) < 1e-12);
 });
