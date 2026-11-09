@@ -38,7 +38,7 @@ import type { ExchangeConnection } from '../binance/bootstrap.js';
 import { preflight } from '../binance/bootstrap.js';
 import type { Vault } from '../crypto/vault.js';
 import { dbPath, env, webDistDir } from '../env.js';
-import { checkForUpdates, readAppVersion, readBuildInfo } from '../buildInfo.js';
+import { checkForUpdates, readAppVersion, readBuildInfo, readLocalBuildInfo } from '../buildInfo.js';
 import { eventBus } from '../events.js';
 import { createLogger, setLogSink } from '../logger.js';
 import { maskSecret, hashPassword, verifyPassword, DUMMY_PASSWORD_HASH } from '../crypto/vault.js';
@@ -1459,6 +1459,26 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * 所以反复打开这一页不会反复打 GitHub。
    */
   app.get('/api/system/update', authed, async () => checkForUpdates());
+
+  /*
+   * **当前代码版本 + 与 GitHub 的关系**（2026-11-10 用户要求）。
+   *
+   * 与 /api/system/update 的区别：那个比较的是**部署产物**（build-info.json）里的提交，
+   * 本地开发时那是上一次部署的旧版本；这里在仓库带 .git 时读**真实 HEAD**，
+   * 所以本地看到的就是"眼前这份代码"与 GitHub 的关系。
+   */
+  app.get('/api/system/version', authed, async () => {
+    const local = readLocalBuildInfo();
+    const update = await checkForUpdates(local.info);
+    return {
+      mode: local.source === 'git' ? 'dev' : 'deployed',
+      source: local.source,
+      dirty: local.dirty,
+      version: readAppVersion(),
+      local: local.info,
+      update,
+    };
+  });
 
   app.get('/api/logs', authed, async (request) => {
     /*

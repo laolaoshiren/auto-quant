@@ -25,6 +25,7 @@
  * 这是纵深防御，不是形式。
  */
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { REPO_ROOT, env } from './env.js';
@@ -72,6 +73,87 @@ export function readBuildInfo(): BuildInfo | null {
   if (buildCache !== undefined) return buildCache;
   buildCache = loadBuildInfoFrom(BUILD_INFO_FILE);
   return buildCache;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  当前代码版本：git 优先，部署产物兜底                                        */
+/* -------------------------------------------------------------------------- */
+
+/** 版本来源：本地开发（git）还是部署产物（build-info.json）。 */
+export type BuildSource = 'git' | 'build-info';
+
+export interface LocalBuildInfo {
+  info: BuildInfo | null;
+  source: BuildSource | null;
+  /** 工作区是否有未提交改动（只有 git 来源能判断）。 */
+  dirty: boolean;
+}
+
+/** 跑一条 git 命令并返回 stdout（失败返回 null，不抛）。 */
+function tryGit(args: string[]): string | null {
+  try {
+    const out = execFileSync('git', args, {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      timeout: 3_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * **当前代码版本：本地开发读 git HEAD，部署环境读 `build-info.json`。**
+ *
+ * ## 为什么需要它（2026-11-10 用户要求）
+ *
+ * 用户原话：
+ * > 「版本检测放到全局页面顶部，方便我随时知道当前我看到得版本是不是最新得（生成环境），
+ * >   我本地测试你也要想办法让我知道是你当前开发最新得还是 github 最新得，你要想一个
+ * >   两全其美办法。」
+ *
+ * 原来只有 `readBuildInfo()`（部署脚本写的文件）。本地开发时那个文件是**上一次部署的
+ * 产物**（可能几十个提交之前）—— 于是本地控制台显示的"落后 GitHub N 个提交"说的是
+ * 旧部署产物，不是**你眼前这份代码**。用户看到的版本号与真实代码不一致，这比没有版本号更糟。
+ *
+ * 两全其美：
+ *   · 仓库带 `.git`（本地开发 / 完整克隆部署）→ 读真实 `HEAD`（再标 dirty）；
+ *   · 打包产物没有 `.git`（`deploy.ps1` 的 tar）→ 退回 `build-info.json`（部署时的 HEAD）。
+ *
+ * 失败一律**不抛**：版本指示器是可选信息，不能因为它把页面弄挂。
+ */
+export function readLocalBuildInfo(): LocalBuildInfo {
+  const commit = tryGit(['rev-parse', 'HEAD']);
+  if (commit) {
+    const branch = tryGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? 'main';
+    const subject = tryGit(['log', '-1', '--format=%s']) ?? '';
+    const committedAt = tryGit(['log', '-1', '--format=%cI']) ?? '';
+    const repository = tryGit(['remote', 'get-url', 'origin']) ?? '';
+    const dirty = (tryGit(['status', '--porcelain']) ?? '').length > 0;
+    return {
+      source: 'git',
+      dirty,
+      info: {
+        commit,
+        commitShort: commit.slice(0, 7),
+        branch,
+        subject,
+        committedAt,
+        deployedAt: committedAt,
+        dirty,
+        repository,
+      },
+    };
+  }
+
+  const deployed = readBuildInfo();
+  return {
+    source: deployed === null ? null : 'build-info',
+    dirty: deployed?.dirty ?? false,
+    info: deployed,
+  };
 }
 
 /**
