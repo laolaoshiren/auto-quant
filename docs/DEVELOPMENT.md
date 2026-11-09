@@ -63,7 +63,7 @@ cp .env.example .env             # Windows: Copy-Item .env.example .env
 
 ### `.env` 里哪些是必须动的
 
-`.env.example` 的每一项都有注释。默认值就能把服务跑起来，只有两项值得注意：
+`.env.example` 的每一项都有注释。默认值就能把服务跑起来，下面几项值得注意：
 
 | 变量 | 默认 | 第一次要不要改 |
 | --- | --- | --- |
@@ -153,7 +153,8 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 
 ## 3. 命令表
 
-根 `package.json` 的脚本就是下面这 13 条，没有更多。它们全是对各 workspace 脚本的转发：
+根 `package.json` 的脚本就是下面这 21 条，没有更多。它们全是对各 workspace 脚本或 `scripts/` 下
+单文件脚本的转发：
 
 | 命令 | 实际执行 | 什么时候用 |
 | --- | --- | --- |
@@ -161,16 +162,23 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 | `npm run dev:web` | `npm run dev --workspace @aq/web` → `vite` | 日常开发前端（`http://127.0.0.1:5173`，热更新 + `/api` 代理） |
 | `npm start` | `npm run start --workspace @aq/server` → `tsx src/index.ts` | 生产启动（无 watch）。需先 `npm run build`，否则它只提供 API，没有控制台静态文件 |
 | `npm run build` | `npm run build --workspace @aq/web` → `vite build` → `packages/web/dist` | 出控制台产物。**它不编译服务端**（服务端由 `tsx` 直接跑 TS） |
-| `npm run typecheck` | `npm run typecheck --workspaces --if-present` → server + web 各自 `tsc --noEmit` | 提交前必跑。`@aq/shared` 没有自己的 typecheck 脚本，它作为被依赖的源码被两边一起检查 |
-| `npm test` | `npm run test --workspace @aq/server` → `tsx --test "src/**/*.test.ts"` | 提交前必跑。**只有服务端有测试**；`@aq/web` 目前没有测试脚本 |
+| `npm run typecheck` | `npm run typecheck --workspaces --if-present` → shared + server + web 各自 `tsc --noEmit` | 提交前必跑。三个 workspace 都有自己的 `typecheck` 脚本 |
+| `npm run lint` | `eslint packages/web/src` | 提交前必跑。**只 lint 前端源码**；服务端目前没有 lint 配置 |
+| `npm test` | `npm run test --workspace @aq/shared` → `@aq/server` → `@aq/web` → `npm run test:feed` | 提交前必跑。分别跑 shared / server / web 的 `tsx --test "src/**/*.test.ts"`，最后跑一次决策流 SSR 检查 |
+| `npm run test:feed` | `node scripts/ssr-decision-feed.mjs` → `tsx scripts/ssr-decision-feed.tsx` | 决策流的服务端渲染回归检查（见脚本头部注释） |
 | `npm run verify` | `tsx packages/server/src/scripts/verifyPipeline.ts` | 用**真实币安行情**跑「选币 → 指标 → 提示词 → 解析 → 风控」全链路。**不需要任何密钥、不下单** |
 | `npm run demo` | `tsx packages/server/src/scripts/demoCycle.ts` | 往**真实数据库**写入一轮带 `[DEMO]` 前缀的完整决策审计数据，让控制台的审计界面立刻有东西可看。加 `--clean` 清除 |
 | `npm run sim` | `tsx packages/server/src/scripts/simulate.ts` | **完整交易生命周期模拟**：确定性 K 线夹具 + 会真正触发止损止盈的模拟交易所 + 脚本化模型，80 轮，逐项校验（**当前全部通过**；`--real-market` 可换回真实行情）。写临时数据库 |
 | `npm run sim:live` | `tsx packages/server/src/scripts/simulate.ts --live --loose --cycles 12` | 同上，但模型换成**真实 LLM**（需要 `SIM_LLM_KEY`），策略放宽（`--loose`）以便真的有可能下单 |
-| `npm run notices` | `node scripts/generate-notices.mjs` | 重新生成 `THIRD-PARTY-NOTICES.md`。**改过任何依赖之后必须跑**——CI 会校验产物与当前依赖一致，不一致就红 |
+| `npm run seed:demo` | `tsx packages/server/src/scripts/seedDemoData.ts` | 往**真实数据库**灌一批演示用的机器人 / 成交 / 决策数据（用于看控制台长什么样） |
+| `npm run seed:demo:clean` | 同上加 `--clean` | 清掉 `seed:demo` 灌入的数据 |
+| `npm run notices` | `node scripts/generate-notices.mjs` | 重新生成 `THIRD-PARTY-NOTICES.md`。**改过任何依赖之后必须跑**；`node scripts/generate-notices.mjs --check` 可校验产物是否过期（**CI 目前还没接入这一步**，别指望它自动变红） |
 | `npm run check:links` | `node scripts/check-links.mjs` | 检查文档里的**站内链接**是否都解析得到（外链不查，别人家站点挂了不该让本项目变红）。**CI 每次都会跑**；本地改过文档路径/标题时先跑一次，省得推上去才发现 |
 | `npm run check:routes` | `node scripts/check-api-routes.mjs` | 前后端接口对照：前端 `api.ts` 声明的每个调用，后端是否真有那条路由。**CI 每次都会跑**。改过 `api.ts` 或 `server.ts` 的路由后先跑一次 |
-| `npm run ui:smoke` | `node scripts/ui-smoke.mjs` | 用真实浏览器把每个页面打开一遍，抓运行时报错、白屏、横向滚动条。（需要先有 `packages/web/dist` 且服务在跑；用本机 Chrome/Edge，不下载浏览器） |
+| `npm run ui:smoke` | `node scripts/ui-smoke.mjs` | 用真实浏览器把每个页面打开一遍，抓运行时报错、白屏、横向滚动条。（需要先有 `packages/web/dist` 且服务在跑；用本机 Chrome/Edge，不下载浏览器；登录靠 `UI_SMOKE_USER` / `UI_SMOKE_PASS` 或 `AQ_TOKEN`） |
+| `npm run ui:audit` | `node scripts/ui-audit.mjs` | 界面"信息可见度"审计：文字是否被 CSS 截掉、markdown 强调符是否原样露给用户。（需要 `AQ_BASE` / `AQ_CHROME` 与登录凭据） |
+| `npm run ui:check` | `node scripts/ui-check.mjs` | 逐页版面自检（横向溢出、控制台错误、空白页）。需要登录态，**不能进 CI**。详见脚本头部 |
+| `npm run ui:consistent` | `node scripts/ui-consistency.mjs` | 界面一致性检查（同一概念在不同页面是否用同一个词/同一个数字）。需要 `AQ_BASE` / `AQ_CHROME`，可用 `AQ_TRADER_ID` 指定机器人 |
 
 各脚本自己的参数（本文不重复，脚本头部注释写得很细）：
 
@@ -184,8 +192,10 @@ npx tsx packages/server/src/scripts/liveSmokeTest.ts --confirm --symbol DOGEUSDT
 
 `packages/server/package.json` 里的 `verify` 脚本与根级同名脚本等价，一般用根级的就够了。
 `packages/web/package.json` 另有 `preview`（本地预览构建产物）和 `typecheck` 两个脚本——
-根级的 `npm run typecheck` 会通过 `--workspaces --if-present` 把它们一起跑上，
-但根级的 `npm test` **只跑 `@aq/server`**，控制台目前没有自动化测试。
+根级的 `npm run typecheck` 会通过 `--workspaces --if-present` 把它们一起跑上；
+根级的 `npm test` 会依次跑 **shared / server / web 三套单测 + `test:feed`**，
+所以控制台（`packages/web`）与共享类型层（`packages/shared`）的测试也在其中。
+
 
 ### `sim:live` 用到的环境变量
 

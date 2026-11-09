@@ -101,7 +101,8 @@ https://github.com/anomalyco/models.dev/blob/dev/LICENSE
 ## 2. 本项目自己的许可证 【需专业意见】
 
 本项目采用 **[Apache License 2.0](../LICENSE)**（此前为专有软件）。
-仓库当前版本号是 `0.1.0`，尚无正式发布标签 —— 不要引用一个不存在的版本号。
+仓库当前版本号以根 `package.json` 的 `version` 为准（`0.2.0`，2026-11-09 核实），
+本地已有 `v0.1.0` ~ `v0.2.0` 的发布标签。
 
 ### 将来开源时的选项
 

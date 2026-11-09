@@ -159,12 +159,12 @@ bootstrap ──► broker ──► symbols, market, account, income, rest, typ
 | `types.ts` | 层内的提供商中立契约 + usage/finish_reason 归一化 | `ChatMessage`、`ChatRequest`、`ChatUsage`、`FinishReason`、`ChatResult`、`WireUsage`、`OutboundRequest`、`ConversationParts`、`EMPTY_USAGE`、`splitSystem()`、`toTokenCount()`、`normalizeUsage()` | 无 |
 | `errors.ts` | **错误归一化与可重试性判定**。所有厂商判断都集中在这里 | `LlmError`、`LlmErrorKind`、`isRetryable()`、`kindForStatus()`、`isRetryableKind()`、`extractMessage()`、`bodyHaystack()`、`classifyHttpError()`、`classifyMinimaxBaseResp()`、`emptyCompletionError()`、`timeoutError()`、`connectionError()`、`abortError()` | 无 |
 | `http.ts` | 各适配器共用的 HTTP 管道：URL 拼接、安全 JSON 解析、`Retry-After` 解析、单次 POST、MiniMax 的 200-内错误快速失败 | `joinUrl()`、`safeJsonParse()`、`JsonResponse`、`parseRetryAfter()`、`executeJsonRequest()`、`executeJsonRequestSafe()` | `./errors.js`、`./types.js` |
-| `openaiCompatible.ts` | **一个适配器服务所有 OpenAI 方言**（DeepSeek/OpenAI/Qwen/Grok/Kimi/MiniMax/OpenRouter/custom），并把各家的偏差显式处理掉 | `buildBody()`、`buildRequest()`、`parseResponse()`、`extractText()`、`stripThinkTags()`、`normalizeFinishReason()`、`rejectsSamplingParameters()`、`supportsResponseFormat()`、`supportsStrictSchema()`、`maxTokensField()`、`defaultBaseUrl()` | `@aq/shared`、`./http.js`、`./errors.js`、`./types.js` |
+| `openaiCompatible.ts` | **一个适配器服务所有 OpenAI 方言**（DeepSeek/OpenAI/Qwen/Grok/Kimi/MiniMax/OpenRouter/custom），并把各家的偏差显式处理掉 | `buildBody()`、`buildRequest()`、`parseResponse()`、`extractText()`、`stripThinkTags()`、`normalizeFinishReason()`、`rejectsSamplingParameters()`、`supportsResponseFormat()`、`supportsStrictSchema()`、`maxTokensField()` | `@aq/shared`、`./http.js`、`./errors.js`、`./types.js` |
 | `anthropic.ts` | 原生 Messages API：`system` 是顶层字段、`content` 是类型化块数组、`x-api-key` + `anthropic-version`、新模型拒绝 sampling 参数 | `buildBody()`、`buildRequest()`、`parseResponse()`、`extractText()`、`normalizeStopReason()`、`rejectsSamplingParameters()`、`ANTHROPIC_VERSION` | `./http.js`、`./errors.js`、`./types.js` |
 | `gemini.ts` | 原生 `generateContent`：key 走 query、角色是 `model`、`systemInstruction` 顶层、schema 必须翻译成**全大写类型**并丢掉不支持的键 | `buildBody()`、`buildRequest()`、`parseResponse()`、`toGeminiSchema()`、`extractText()`、`hasFunctionCall()`、`normalizeFinishReason()` | `./http.js`、`./errors.js`、`./types.js` |
 | `client.ts` | **统一策略层**：按 `openAiCompatible` 分派 → 各家 `buildRequest`/`parseResponse`；超时、重试、全抖动退避、结构化日志（**永不记录 API Key 本身**，只记掩码）；连接探测；构造时用 `urlGuard` 拒绝内网 `baseUrl`（这是所有模型请求的必经之路，连库里存着的旧地址也会被拦下） | `LlmClient`、`LlmClientOptions`、`ConnectionProbe`、`backoffDelayMs()` | `@aq/shared`、`./errors.js`、`./http.js`、`./urlGuard.js`、三个适配器 |
 | `discovery.ts` | 用**用户自己的 key** 向厂商拉取**当前可用**模型列表（三种响应方言归一化），失败回落内置提示并标记 `source: 'fallback'`；请求前同样过 `urlGuard` | `discoverModels()`、`DiscoverModelsResult` | `@aq/shared`、`./errors.js`、`./urlGuard.js` |
-| `urlGuard.ts` | 出站 URL 白名单（SSRF 防护）：只允许 http(s)，拒绝回环 / 链路本地（含云元数据）/ RFC1918 / CGNAT / ULA / 组播，含 IPv4-mapped 与 NAT64 形式；校验**字面主机**，不做 DNS 解析 | `checkOutboundUrl()`、`assertOutboundUrlAllowed()`、`UrlGuardVerdict` | `node:net` |
+| `urlGuard.ts` | 出站 URL 白名单（SSRF 防护）：只允许 http(s)，拒绝回环 / 链路本地（含云元数据）/ RFC1918 / CGNAT / ULA / 组播，含 IPv4-mapped 与 NAT64 形式；校验**字面主机**，不做 DNS 解析。另有 `checkResolvedAddress()` 供连接层按**解析结果**判（DNS rebinding） | `checkOutboundUrl()`、`checkResolvedAddress()`、`parseHostAllowlist()`、`UrlGuardVerdict` | `node:net` |
 
 ### `LlmClient` 的调用面
 
@@ -402,16 +402,16 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 
 实际路由（`App.tsx` 为准）：`/`（总览）、`/traders`、`/traders/:id`、`/traders/:id/decisions/:recordId`、
 `/strategy`、`/strategy/:id`、`/market`、`/models`、`/exchanges`、`/account`、`/settings`（重定向）、
-`/data`、`/faq`、`*`（NotFound）。
+`/appearance`（外观）、`/data`、`/faq`、`*`（NotFound）。
 
 ### `lib/` —— 无 React 依赖的逻辑层
 
 | 文件 | 职责 | 关键导出 |
 | --- | --- | --- |
-| `api.ts` | **唯一的后端客户端**。所有请求走 `/api`，token 存 localStorage，`ApiError`，401 触发全局登出回调；同时把后端返回形状声明成 TS 类型 | `api`（一个对象，按资源分组的方法）、`ApiError`、`getToken`/`setToken`/`clearToken`/`getStoredUser`/`setStoredUser`、`setUnauthorizedHandler`、`eventStreamUrl()`、以及 `Health`/`Catalog`/`SystemStatus`/`TraderRow`/`ExchangeBalance`/`PreflightCheck`/`StrategyCheckResult`/`MarketSymbol` 等接口 |
-| `store.ts` | **两个 zustand store**：`useApp`（会话 / 目录 / 系统状态 / 机器人列表，慢）与 `useEvents`（WebSocket 实时日志、订单、持仓、通知，快）。拆开的理由：繁忙的 socket 帧只重渲染真正读它的面板 | `useApp`、`useEvents`、`selectTraderLive()`、`cachedUser`、`SessionStatus`、`SocketStatus`、`Toast`、`TraderLive` |
-| `hooks.ts` | 轮询与 UI 辅助 | `usePolled()`、`fallbackInterval()`、`useDocumentTitle()`、`useCopy()`、`useTicker()`、`QueryState` |
-| `actions.ts` | "立即运行一轮"与"手动对账"的交互封装（含 toast 文案） | `useRunOnce()`、`useReconcile()`、`reconcileSummary()`、`ReconcileOutcome` |
+| `api.ts` | **唯一的后端客户端**。所有请求走 `/api`，token 存 localStorage，`ApiError`，401 触发全局登出回调；同时把后端返回形状声明成 TS 类型 | `api`（一个对象，按资源分组的方法）、`ApiError`、`getToken`/`setToken`/`clearToken`/`setStoredUser`、`setUnauthorizedHandler`、`eventStreamUrl()`、以及 `Health`/`Catalog`/`SystemStatus`/`TraderRow`/`ExchangeBalance`/`PreflightCheck`/`StrategyCheckResult`/`MarketSymbol` 等接口 |
+| `store.ts` | **两个 zustand store**：`useApp`（会话 / 目录 / 系统状态 / 机器人列表，慢）与 `useEvents`（WebSocket 实时日志、订单、持仓、通知，快）。拆开的理由：繁忙的 socket 帧只重渲染真正读它的面板 | `useApp`、`useEvents`、`useLiveCycle()`、`SessionStatus`、`SocketStatus`、`Toast`、`TraderLive`、`LiveCycle` |
+| `hooks.ts` | 轮询与 UI 辅助 | `usePolled()`、`useDocumentTitle()`、`useCopy()`、`useTicker()`、`humanErrorText()`、`QueryState` |
+| `actions.ts` | "立即运行一轮"等交互封装（含 toast 文案）与对账结果摘要 | `useRunOnce()`、`useAgentReview()`、`reconcileSummary()` |
 | `format.ts` | 全部格式化函数与颜色 | `fmtNum`/`fmtUsd`/`fmtAsset`/`fmtSigned`/`fmtPercent`/`fmtPrice`/`fmtQty`/`fmtInt`/`fmtCompact`/`fmtDuration`/`fmtTime`/`fmtDateTime`/`fmtLatency`/`fmtProfitFactor`/`timeAgo`/`sideLabel`/`pnlColor`/`safeJson`/`clamp`、`BALANCE_LABEL`、`DEFAULT_SETTLE_ASSET` |
 | `strategy.ts` | 策略草案的工具：套用预设、预校验、深拷贝 | `applyPreset()`、`presetById()`、`validateStrategy()`、`cloneConfig()`、`ValidationResult` |
 | `summaries.ts` | 平仓原因等标签的本地兜底 + 摘要 store | `useSummaries`、`closeReasonLabel()` |
@@ -431,6 +431,7 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 | `MarketPage.tsx` | `/market` | 合约搜索 + K 线图 |
 | `ModelsPage.tsx` / `ExchangesPage.tsx` / `AccountPage.tsx` | `/models` `/exchanges` `/account` | 都是**薄页面**：只放标题 + 引用 `components/settings/` 里的 section |
 | `DataPage.tsx` | `/data` | 实时日志（WebSocket 推送） |
+| `AppearancePage.tsx` | `/appearance` | 外观设置（主题模板 / 密度等，见 `templates/`） |
 | `FaqPage.tsx` | `/faq` | 使用说明与风险提示 |
 | `LoginPage.tsx` | `/login` | 登录（无注册入口；无账号时提示去哪看凭据） |
 | `NotFoundPage.tsx` / `SettingsPage.tsx` | `*` / `/settings` | 404 / 重定向 |
@@ -440,9 +441,9 @@ RSI 与 ATR 的第一个可计算值都在索引 `period`（比同周期 EMA 晚
 
 | 文件 | 职责 |
 | --- | --- |
-| `ui.tsx` | **设计系统原语**：`Badge`/`Button`/`Panel`/`Stat`/`Modal`/`Field`/`TextInput`/`NumberInput`/`Select`/`TextArea`/`Toggle`/`Empty`/`ErrorNote`/`Spinner`/`Spinner3`/`KV`/`CopyButton`/`Collapsible`/`Dot`、`Tone` 类型 |
+| `ui.tsx` | **设计系统原语**：`Badge`/`Button`/`Panel`/`Modal`/`Field`/`TextInput`/`NumberInput`/`Select`/`TextArea`/`Toggle`/`Empty`/`ErrorNote`/`Spinner`/`Spinner3`/`CopyButton`/`Collapsible`/`Tooltip`/`Dot`、`Tone` 类型 |
 | `Layout.tsx` | 外壳与导航 |
-| `Badges.tsx` | `TraderStatusBadge` / `SideBadge` / `CheckList`（预检结果）/ `SectionHeading` / `Tabs` |
+| `Badges.tsx` | `TraderStatusBadge` / `SideBadge` / `CheckList`（预检结果）/ `SectionHeading` |
 | `TraderTables.tsx` | 持仓 / 委托 / 成交 / 历史四个表 + `TraderTabId` |
 | `TraderModals.tsx` | 新建 / 启动机器人弹窗 |
 | `TraderConfigModal.tsx` | 修改机器人配置 |

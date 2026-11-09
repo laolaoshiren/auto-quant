@@ -66,16 +66,26 @@
 
 | 情形 | 结果 |
 | --- | --- |
-| 距离上一轮决策结束 < `max(周期 × 2, 300s)` | 健康 |
+| 距离上一轮决策结束 < 该机器人的新鲜度阈值 | 健康 |
 | 超过该阈值 | **503**，并在 `staleTraders` 里列出 |
 | 已启动但还没跑完第一轮，且启动未满阈值 | 健康（冷启动宽限） |
 | 已启动但还没跑完第一轮，且已超过阈值 | **503**，`awaitingFirstCycle: true` |
 | `stopped` / `safe_mode` / `error` / `starting` | **不影响状态码** |
 
-阈值的取法见 `packages/server/src/api/server.ts` 的 `STALE_CYCLE_MULTIPLIER` 与
-`STARTUP_GRACE_MS`；简单说：`last_cycle_at` 只在**一轮结束**时写入，所以 1 倍周期
-必然产生假警报（每轮都会短暂越线），2 倍才是"连续两轮都没跑完"；
-300 秒是下界，避免冷启动时编排器在不该重启的时候重启容器。
+**阈值是分布驱动的，因机器人而异**：
+
+```
+threshold = max(周期 × 2, 300 秒, P95(该机器人最近已完成轮次的时长) × 2)
+```
+
+理由：`last_cycle_at` 只在**一轮结束**时写入，所以 1 倍周期必然产生假警报（每轮都会短暂越线）；
+2 倍才是"连续两轮都没跑完"；300 秒是地板；而固定 30 分钟会让慢模型（实测 `#10` 的
+P95 ≈ 20.9 分钟）**每一轮都判红**，所以阈值跟着真实分布走。实现在
+`packages/server/src/api/staleThreshold.ts`（`staleThresholdMs()` / `STALE_P95_MULTIPLIER`）
+与 `packages/server/src/api/server.ts`（`STALE_CYCLE_MULTIPLIER` / `STARTUP_GRACE_MS`）。
+
+`staleTraders` 每项：`{ id, name, staleForMs, awaitingFirstCycle, thresholdMs }` ——
+`thresholdMs` 必须带出去，否则控制台只能显示"已 45 分钟没跑完"却不知道**这一台**的阈值是多少。
 
 > 暂停（`safe_mode`）与已停止的机器人**不会**让这个端点变红。
 > 把"被刻意停下"算成"不健康"会让一个正常的实例在编排器眼里永远是坏的。
@@ -93,14 +103,26 @@
 
 ```json
 {
+  "dryRun": false,
+  "tradingDisabled": false,
+  "environment": "production",
+  "environmentLabel": "币安 USDT 本位合约（实盘）",
+  "clockOffsetMs": 12,
   "weightUsed": 412,
   "weightLimit": 2400,
   "requestsInFlight": 3,
   "maxRequestsInFlight": 6,
+  "tradableSymbols": 528,
   "runningTraders": [1, 2],
-  "failedTraders": []
+  "failedTraders": [],
+  "build": null,                  // build-info.json 的内容；没有就是 null（= 不知道跑的是哪一版）
+  "version": "0.2.0"              // 产品版本，来自 package.json
 }
 ```
+
+`build` 与 `version` 是**两件事**：前者回答"线上跑的是哪个提交"（来自部署产物），
+后者回答"这是个什么版本的东西"（发版时递增）。没有 `build-info.json` 时 `build` 为 `null`，
+界面必须显示"未知"，而不是一个看起来正常的默认值。
 
 > `requestsInFlight` / `maxRequestsInFlight`：权重预算以前只能靠"上一份响应里的
 > header"约束，而每一批 `Promise.all` 都在读完那个已经过期的值之后同时放行 ——
@@ -325,8 +347,9 @@
 > ⚠️ 它是**运行时状态**，由 `manager` 在每次 `chat()` 之后写进 `settings`（键 `llm_health:<id>`），
 > **不属于配置** —— 在 `POST` / `PATCH` 里传它不会生效。
 
-推理参数（`temperature` / `maxTokens` / `timeoutSeconds` / `maxRetries`）**全部可选**，
-留空时按提供商取默认值。
+推理参数（`temperature` / `maxTokens` / `timeoutSeconds` / `maxRetries`）现在**由服务端按提供商
+直接取默认值**，不再接受客户端传入（控制台的「高级设置」面板已删除）。把模型的 `provider` 改掉时，
+这四项会被刷新成新提供商的默认值 —— 否则会留下"kimi 的超时配另一个网关"这种两边都不对的组合。
 
 `baseUrl` 会过**出站地址白名单**：只允许 `http` / `https`，并且拒绝回环
 （`127.0.0.0/8`、`::1`、`localhost`）、链路本地（`169.254.0.0/16`，云元数据服务在这里）、
@@ -411,8 +434,31 @@
 
 ### `GET /api/traders` / `POST /api/traders`
 
-创建时 **`initialEquity` 可省略**。省略（或传 0）时服务端会**从配置的交易所读取真实
-钱包余额**作为起始权益：
+**`exchangeAccountId` 可以省略或传 `null`** —— 那是**纯模拟盘机器人**（PR #185）：
+它不下真实订单、余额由本地台账折算，所以**不需要任何真实交易所账户**。
+传了 id 就必须真实存在（未知 id 返回 **400**）。
+
+```jsonc
+{
+  "name": "演练",
+  "exchangeAccountId": null,     // 省略 / null = 纯模拟盘；传 id 则绑定该账户
+  "aiModelId": 1,
+  "strategyId": 9,
+  "cycleIntervalMinutes": 15,
+  "paperStartingBalance": 1000,  // 可选：模拟盘本金。省略 = 用默认值
+  "initialEquity": 0             // 可选：收益率的基准。省略/0 = 由服务端决定来源
+}
+```
+
+**`paperStartingBalance`**（可选，只对模拟盘有意义）：
+显式传值时必须是 **10 ~ 10 亿** 之间的数字（`0` 也会被拒 —— 它静默回落到默认值会让
+操作员填的数字在界面上消失）。省略时服务端回落 `initialEquity`，再回落到首次启动时的默认本金。
+它**与 `initialEquity` 不是一回事**：后者是收益率的分母，前者是模拟钱包的本金（永不被覆盖）。
+
+创建时 **`initialEquity` 可省略**，服务端按情形决定起始权益：
+
+- **绑定了交易所账户**：省略（或传 0）时**从该账户读取真实钱包余额**作为基准；
+- **纯模拟盘（没有账户）**：不可能读真实钱包，用 `paperStartingBalance`（或 `initialEquity`）。
 
 ```json
 { "ok": true, "id": 5, "initialEquity": 9.9864505, "equitySource": "exchange" }
@@ -423,12 +469,24 @@
 | 值 | 含义 |
 |---|---|
 | `exchange` | 从交易所实时读取成功 |
-| `manual` | 操作员手动指定 |
-| `unavailable` | 读取失败，起始权益为 0 —— **此时收益率百分比没有意义** |
+| `manual` | 操作员手动指定了 `initialEquity` |
+| `paper` | **纯模拟盘**：起始权益来自 `paperStartingBalance` / `initialEquity`。此时没有真实账户可读（PR #185 新增） |
+| `unavailable` | 读取失败且没有可用兜底，起始权益为 0 —— **此时收益率百分比没有意义** |
 
 > 起始权益是收益率的基准，填错会让之后所有绩效数字都错，所以默认是**读取**而不是手填。
+>
+> `aiModelId` 在 `mode: 'ai_team'` / `'jev'` 下**被忽略**（这两种模式的模型出口不来自「AI 模型」列表），
+> 但请求体里仍然需要一个真实存在的 id 来满足外键。
 
-### `PATCH /api/traders/:id` / `DELETE /api/traders/:id`
+### `PATCH /api/traders/:id`
+
+部分更新；**运行中的机器人必须先停止**（返回 **409**）。
+`exchangeAccountId` **不能通过编辑修改**：值真的变了会返回 **400**（换账户请新建机器人）。
+`paperStartingBalance` 与创建路径受**同一套边界校验**。
+
+### `DELETE /api/traders/:id`
+
+删除机器人（会先停掉它）。它的成交 / 决策 / 智能体记录随之级联删除 —— **删之前先确认账本已对过账**。
 
 ### `POST /api/traders/:id/start`
 
@@ -543,6 +601,16 @@
 它不是任何一个机器人的业绩。曾经 `equity` 写的就是共享钱包余额，后果是一个从未成交的
 机器人显示别的机器人挣来的收益率（实盘上量到 +2.67%），而两个机器人的收益率完全相同。
 
+响应里还有三个**运行时**字段（不属于 `TraderStats`，仓储层算不出来）：
+
+| 字段 | 含义 |
+|---|---|
+| `circuitBreaker` | 熔断器状态（读不到为 `null`） |
+| `maxLeverage` | 有效杠杆上限（`null` = 读不到，界面显示"不知道"而不是 0） |
+| `dryRun` | 这台机器人此刻是不是纸面模式。**`null` = 它没在运行**，客户端据此不渲染那一行，而不是渲染成「实盘」 |
+
+机器人不存在时返回 **404**（不能返回"权益 0"—— 那会被读成"这个机器人亏光了"）。
+
 ### `GET /api/traders/:id/trades`
 
 ```jsonc
@@ -570,6 +638,15 @@
 ```
 
 **恒等式**：`pnl − fee − fundingFee === netPnl`。
+
+| 参数 | 说明 |
+|---|---|
+| `limit` | 一页多少条。默认 100，上限 200 —— **钳制不报错** |
+| `before` | 游标（按 `id`）。非数字/缺失按"第一页"处理 |
+| `beforeClosedAt` | 复合游标的另一半（该行的 `closedAt`）。**与 `before` 同时给才启用按成交时间分页**；只给 `before` 时退回旧行为（按 id 分页） |
+
+> 为什么要复合游标：`trades.id` 是插入顺序，而对账补录的行 **id 更大、成交时刻更早**。
+> 只按 id 分页会在页边界漏行（实测 18 行里 4 处乱序）。
 
 ### `GET /api/traders/:id/positions`
 
@@ -634,6 +711,11 @@
 订单记录，含 `purpose`（`entry` / `exit` / `stop_loss` / `take_profit`）、触发价、
 成交均价、手续费、交易所订单号。
 
+| 参数 | 说明 |
+|---|---|
+| `limit` | 一页多少条。默认 100，上限 200 —— **钳制不报错** |
+| `before` | 游标：只返回 `id` 比它更小的订单。非数字/缺失按"第一页"处理 |
+
 ### `GET /api/traders/:id/decisions`
 
 决策审计。每条记录包含该周期的**完整提示词**、**模型原始响应**、解析出的决策、
@@ -641,15 +723,27 @@
 
 | 参数 | 说明 |
 |---|---|
-| `limit` | 默认 50 |
+| `limit` | 默认 50，上限 200 —— 钳制不报错 |
+| `before` | 游标：只返回 `id` 比它更小的记录。非数字/缺失按"第一页"处理 |
+
+> **列表返回的记录里 `systemPrompt` / `userPrompt` 恒为空字符串**：提示词全文只在
+> `GET /api/traders/:id/decisions/:recordId` 单条取。实测 910 条记录里 `user_prompt`
+> 合计 81.6 MB（单条最大 283 KB），列表若带上全文，一次 30 条 ≈ 2.7 MB JSON，
+> 浏览器解析要几十秒。
 
 ### `GET /api/traders/:id/decisions/:recordId`
 
-单条决策的完整审计详情。
+单条决策的完整审计详情。记录不存在、或不属于该机器人时返回 **404**。
 
 ### `GET /api/traders/:id/equity`
 
-归属权益曲线快照序列。每条快照里：
+归属权益曲线快照序列。
+
+| 参数 | 说明 |
+|---|---|
+| `limit` | 默认 500，钳制在 1–5000（`?limit=-1` 会被钳成 1 —— SQLite 里 `LIMIT -1` 表示"不限行"） |
+
+每条快照里：
 
 | 字段 | 口径 |
 |---|---|
@@ -658,6 +752,136 @@
 | `openPositions` | 本机器人自己的未平仓合约数 |
 | `accountEquity` / `accountUnrealizedPnl` | 所属**账户**（共享钱包）的两个数 |
 | `availableBalance` / `marginUsed` | 账户级：自由保证金无法按机器人拆分，交易所也不提供这个口径 |
+
+---
+
+## 机器人：智能体审计与实时开关
+
+这一组是**只读的审计/观测**与**运行时开关**。除标注外都需要认证。
+
+### `GET /api/traders/:id/agent-audit`
+
+AI 托管 / 团队模式的审计数据，一次返回三张表：
+
+```jsonc
+{
+  "runs": [ /* 每次角色运行：谁跑了、用了多少 token、多久 */ ],
+  "experiments": [ /* 参数实验：改了什么 + 真实结果 */ ],
+  "memory": [ /* 教训记忆（按标的） */ ],
+  "pendingExperiments": 2,   // 还没等到结果的实验数
+  "runCount": 128            // 累计运行次数
+}
+```
+
+| 参数 | 说明 |
+|---|---|
+| `limit` | 每张表返回多少条。默认 20，钳制在 1–100 |
+
+> 合成一个响应而不是三个端点：界面上这块面板要同时显示"这一轮做了什么 + 学到了什么 +
+> 之前试过什么"，分三个请求会让面板出现三次加载闪烁。
+
+### `GET /api/traders/:id/agent/last-seen`
+
+每个岗位**最近一次被观察到干活**的时刻（团队看板的"最近活跃"数据源）。
+
+```jsonc
+{
+  "roles": [
+    { "role": "risk_officer", "lastSeenAt": "2026-11-09T12:00:00.000Z", "source": "log" }
+  ]
+}
+```
+
+| 参数 | 说明 |
+|---|---|
+| `limit` | 扫描多少条 `runtime_logs`。默认 200，钳制在 1–500（`RUNTIME_LOG_CAP`） |
+
+`source` 说明这个时刻是从哪份数据里看出来的：`log` = 服务端直写的步骤日志（`runtime_logs`），
+`cot` = 那一轮决策审计块里的产出摘要（`decision_records.cot_trace`）。
+
+### `GET /api/traders/:id/agent/:role/steps`
+
+某个岗位的**历史工作详情**（只读）。
+
+| 参数 | 说明 |
+|---|---|
+| `limit` | 默认 50，钳制在 1–200 |
+
+```jsonc
+{
+  "role": "judge",
+  "total": 37,          // 过滤后的总条数（不含正文为空的条目）
+  "steps": [
+    { "at": "...", "phase": "decision", "message": "...", "source": "log" }
+  ],
+  "lastSeenAt": "..."   // 最近一条的时刻；没有条目时为 null
+}
+```
+
+`role` 只接受 `[a-z_]+`（不是安全边界，是"这个 id 必然匹配不到真实行"的诚实判据）；
+含中文/空格的 role 返回空数组。正文为空的条目（模型只调了工具、没产出文字）会被**过滤掉**，
+以免它们占满 `limit` 名额、把真正有内容的记录挤出去。
+
+### `POST /api/traders/:id/selfcheck` — 跑一次自检
+
+跑一次**不依赖模型**的确定性自检，并把结果写进 `runtime_logs`（`scope='selfcheck'`）。
+**是 POST 不是 GET**：它会写库，GET 不该有副作用。
+
+| 参数 | 说明 |
+|---|---|
+| `windowHours` | 检查窗口（小时）。默认 6，钳制在 1–168 |
+
+```jsonc
+{
+  "windowHours": 6,
+  "deterministic": [ /* 确定性发现：不依赖模型 */ ],
+  "ai": [ /* AI 层发现（没跑 AI 层时为空数组） */ ],
+  "evidence": { /* 取数证据，供人核对 */ }
+}
+```
+
+### `GET /api/traders/:id/control` / `POST /api/traders/:id/control/:key`
+
+**实时生效**的布尔开关（JEV 初筛开关等）。开关是**进程级/全局**的（不属于某台机器人），
+路径里的 `:id` 只用来校验 id 合法。
+
+```jsonc
+// GET → { "switches": [{ "key": "jev_prefilter", "label": "...", "effect": "...", "on": true, "source": "ui" }] }
+// POST /api/traders/:id/control/jev_prefilter  { "on": false }
+// → { "switches": [ ... ] }   ← 写入后回读，界面不用再发一次 GET
+```
+
+`source` 说明当前值的来源：`ui` = 界面上设过（重启保持）、`env` = `.env` 初始值、
+`default` = 代码默认值。未知 `key` 返回 **400**；`on` 不是布尔返回 **400**。
+
+### `GET /api/traders/:id/jev-options` / `POST /api/traders/:id/jev-options/:key`
+
+JEV 模式专属的枚举 / 数字 / 布尔配置（**只影响 `mode === 'jev'` 的机器人**）。
+GET 同时返回预设：
+
+```jsonc
+{
+  "options": [
+    {
+      "key": "min_confidence", "label": "最低置信度", "why": "...",
+      "kind": "number", "range": { "min": 0, "max": 100, "step": 1, "unit": "分" },
+      "value": "55", "source": "ui"     // source: 'ui' = 界面设过；'default' = 代码默认
+    }
+  ],
+  "presets": [ { "id": "balanced", "label": "均衡（推荐）", "summary": "...", "values": { /* … */ } } ]
+}
+```
+
+写一个选项：`POST /api/traders/:id/jev-options/min_confidence`，body `{ "value": 55 }`。
+服务端**逐类型校验**（枚举必须在候选里、数字必须在 `range` 内、布尔只认 `on`/`off`），
+非法 → **400 + 中文原因**；未知 key → **400**。写入后回读整个选项表。
+
+### `POST /api/traders/:id/jev-presets/:presetId`
+
+一键套用一个内置预设（一次调用原子写入整组参数，避免"一半新一半旧"的自相矛盾配置）。
+
+→ `{ "applied": 23, "options": [ ... ] }`；预设 id 未知或含非法参数时返回 **400**
+（`unknown` 里列出是哪几项）。
 
 ---
 
@@ -672,8 +896,8 @@
 | 参数 | 说明 |
 |---|---|
 | `symbol` | 必填 |
-| `interval` | 如 `1m` / `5m` / `15m` / `1h` |
-| `limit` | 默认 400 |
+| `interval` | 如 `1m` / `5m` / `15m` / `1h`。默认 `15m` |
+| `limit` | 默认 200，上限 1000 |
 
 ---
 
