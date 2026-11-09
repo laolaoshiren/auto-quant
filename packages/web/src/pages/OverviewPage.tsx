@@ -589,12 +589,6 @@ export function OverviewPage() {
         </p>
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
           <PageActions
-            start={
-              <Button small variant="ghost" busy={refreshing} onClick={refreshAll} title="重新读取机器人列表、统计与系统状态">
-                <RefreshCw aria-hidden className="h-3.5 w-3.5" />
-                刷新
-              </Button>
-            }
             end={
               <Button small variant="primary" onClick={() => setNewOpen(true)}>
                 新建机器人

@@ -1734,3 +1734,15 @@ html.aq-quill .collapsible-panel[data-state='closed'] {
     animation: none;
   }
 }
+
+/*
+ * **没有页面动作的页面，工具栏那条 42px 空带直接隐藏**
+ * （用户 2026-11-10：「中间不要一大块空白」——详情页顶部导航与页头之间
+ * 那 66px 空白就是它：TraderPage 没有 PageActions，而 .q-toolbar 原先
+ * 「永远渲染」占着 42px + 边框）。
+ *
+ * 两个 portal 槽都为空时隐藏；有动作的页面（列表/总览/策略/行情…）照常显示。
+ */
+html.aq-quill .q-toolbar:has(> #aq-toolbar-start:empty):has(> #aq-toolbar-end:empty) {
+  display: none;
+}

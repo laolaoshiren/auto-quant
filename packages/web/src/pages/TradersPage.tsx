@@ -577,15 +577,6 @@ export function TradersPage() {
               title="机器人列表"
               count={traders.length}
               className="mb-2 px-3 pt-3"
-              actions={
-                <PageActions
-                  start={
-                    <Button size="sm" variant="ghost" busy={tradersQuery.loading} onClick={() => void tradersQuery.reload()}>
-                      刷新
-                    </Button>
-                  }
-                />
-              }
             />
             {/*
               容器撑满剩余视口高度：行少时下面是表格自己的空白（"还有位置"），

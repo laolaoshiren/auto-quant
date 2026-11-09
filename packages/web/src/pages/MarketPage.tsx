@@ -375,14 +375,6 @@ export function MarketPage() {
                 <span className="num hidden text-xs text-ink-faint sm:inline">
                   {klinesQuery.loading ? '加载中…' : '每 15s 自动刷新'}
                 </span>
-                <PageActions
-                  start={
-                    <Button size="sm" busy={klinesQuery.loading} onClick={() => klinesQuery.reload()}>
-                      <RefreshCw aria-hidden className="h-3.5 w-3.5" />
-                      刷新
-                    </Button>
-                  }
-                />
               </span>
             }
             /*
