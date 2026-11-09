@@ -802,7 +802,12 @@ export function AiModelsSection() {
           <>
             {/* 工具条：搜索 + 最近测试汇总 */}
             <div className="flex flex-wrap items-center gap-2 border-b border-base-800 px-2 py-1.5">
-              <div className="relative min-w-[12rem] flex-1">
+              {/*
+               * ⚠️ **搜索框不再占满整行**（用户 2026-11-10：「搜索框太长没有设计」）。
+               * 固定 288px：一个人名的搜索框拉伸到 1500px 只会让"输入区"看起来像
+               * 表单主字段，而它其实是个辅助筛选。
+               */}
+              <div className="relative w-72 max-w-full">
                 <Search
                   aria-hidden
                   className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint"
@@ -816,11 +821,11 @@ export function AiModelsSection() {
                 />
               </div>
               {testedRows.length > 0 ? (
-                <Badge tone={testedOk === testedRows.length ? 'up' : 'warn'}>
+                <Badge className="ml-auto" tone={testedOk === testedRows.length ? 'up' : 'warn'}>
                   最近测试 {testedOk}/{testedRows.length} 正常
                 </Badge>
               ) : (
-                <span className="text-xs text-ink-faint">还没有测试过任何一个模型</span>
+                <span className="ml-auto text-xs text-ink-faint">还没有测试过任何一个模型</span>
               )}
               {filter && (
                 <span className="num text-xs text-ink-faint">

@@ -174,6 +174,16 @@ function aggregateBalance(
 
 export function ExchangeAccountsSection() {
   const catalog = useApp((s) => s.catalog);
+  /*
+   * **交易环境由全局配置决定，不再让每个账户自己选**（用户 2026-11-10：
+   * 「测试网 / 模拟盘环境」「该密钥可以下单」两个开关「多余，历史遗留问题」）。
+   *
+   * 理由：`BINANCE_ENV` 已经是进程级事实（本地 Demo / 服务器生产），再给每个
+   * 账户一个 testnet 开关，只会出现"同一个进程里一半账户连 Demo、一半连主网"
+   * 这种没人能解释的状态。`canTrade`（只读密钥）同样没有产品用途 ——
+   * 只读账户在启动预检时就会被拒，不需要用户理解这个开关。
+   */
+  const envTestnet = useApp((s) => (s.system?.environment ?? 'demo') !== 'production');
   const query = usePolled((signal) => api.exchangeAccounts(signal), { intervalMs: 30_000 });
 
   const [creating, setCreating] = useState(false);
@@ -315,8 +325,8 @@ export function ExchangeAccountsSection() {
     label: draft.label.trim() || draft.exchange,
     apiKey: draft.apiKey.trim(),
     apiSecret: draft.apiSecret,
-    testnet: draft.testnet,
-    canTrade: draft.canTrade,
+    testnet: envTestnet,
+    canTrade: true,
   });
 
   const runDraftTest = async () => {
@@ -351,8 +361,8 @@ export function ExchangeAccountsSection() {
           label: draft.label.trim(),
           apiKey: draft.apiKey.trim() || undefined,
           ...(draft.apiSecret ? { apiSecret: draft.apiSecret } : {}),
-          testnet: draft.testnet,
-          canTrade: draft.canTrade,
+          testnet: envTestnet,
+          canTrade: true,
         });
       } else {
         if (!draft.label.trim() || !draft.apiKey.trim() || !draft.apiSecret) {
@@ -952,26 +962,21 @@ export function ExchangeAccountsSection() {
             />
           </Field>
 
-          <div className="space-y-2 rounded-md border border-base-750 bg-base-850/40 p-2">
-            <Toggle
-              checked={draft.testnet}
-              onChange={(value) => setDraft({ ...draft, testnet: value })}
-              label="测试网 / 模拟盘环境"
-              hint="为模拟盘签发的密钥无法下主网订单。"
-            />
-            <Toggle
-              checked={draft.canTrade}
-              onChange={(value) => setDraft({ ...draft, canTrade: value })}
-              label="该密钥可以下单"
-              hint="关闭则存储只读密钥。风控引擎会拒绝用它交易。"
-            />
-          </div>
-
           {/*
-           * 关闭"测试网"的那一刻才是真正会亏钱的那一刻，所以警告就放在开关下面，
-           * 而不是只靠在别处写一句说明。
+           * ⚠️ **这里原来有两个开关，已删除**（用户 2026-11-10：
+           * 「测试网 / 模拟盘环境」「该密钥可以下单」→「多余，历史遗留问题」）。
+           *
+           * · 交易环境由进程级 `BINANCE_ENV` 决定（本地 Demo / 服务器生产），
+           *   账户级 testnet 开关只会造出"同一进程里一半 Demo 一半主网"的怪状态；
+           * · 只读密钥没有产品用途 —— 启动预检本来就会拒绝它。
+           *
+           * 现在提交时按全局环境自动填 `testnet`、`canTrade` 恒为 true；
+           * 下面只保留"当前环境意味着什么"的风险提示。
            */}
-          {draft.testnet ? (
+          {/*
+           * 真实环境才是真正会亏钱的那种，所以警告直接给出后果，而不是写一句说明。
+           */}
+          {envTestnet ? (
             <div className="rounded-md border border-base-700 bg-base-850/60 px-3 py-2 text-base leading-relaxed text-ink-lo">
               这是<span className="mx-1 text-ink-hi">{TRADING_ENV_LABEL.long.testnet}</span>凭证：下单不会进入真实市场。
             </div>

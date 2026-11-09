@@ -17,7 +17,7 @@ import { api, type LogLine } from '../lib/api';
 import { useApp, useEvents, type LiveLogLine } from '../lib/store';
 import { useDocumentTitle, usePolled, useTicker } from '../lib/hooks';
 import { Badge, Button, CopyButton, ErrorNote, Panel, Spinner3, TextInput, cn } from '../components/ui';
-import { fmtClockOffsetMs, fmtInt, timeAgo, tradingEnvironmentLabel } from '../lib/format';
+import { fmtClockOffsetMs, fmtInt, timeAgo } from '../lib/format';
 import { shouldBackfill } from '../lib/logBackfill';
 
 type Level = 'all' | 'info' | 'warn' | 'error';
@@ -337,15 +337,9 @@ export function DataPage() {
 
       <div className="grid shrink-0 grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
         {/*
-                  显示**中文**，不是 `production`。
-                  `environment` 是机器码，由 `tradingEnvironmentLabel` 翻译；
-                  `environmentLabel`（交易所端点名）作为注解留在下面。
-                */}
-                <Metric
-                  label="环境"
-                  value={tradingEnvironmentLabel(system?.environment)}
-                  sub={system?.environmentLabel}
-                />
+          环境卡片已删除（用户 2026-11-10：「明显多余，历史遗留问题」）——
+          环境信息在侧栏/页头已经常驻，这里再放一张同名卡片只是重复。
+        */}
         <Metric label="时钟偏移" value={fmtClockOffsetMs(system?.clockOffsetMs)} sub="本机 − 交易所" />
         <Metric
           label="API 权重"
