@@ -103,6 +103,15 @@ export function NewTraderModal({
    * 只有模拟盘会用它 —— 实盘机器人读交易所余额，这个输入框在实盘下不显示。
    */
   const [paperBalance, setPaperBalance] = useState<string>('1000');
+  /**
+   * **运行模式：模拟盘 / 实盘 —— 创建时固定**（2026-11-10 用户要求）。
+   *
+   * 用户原话：「应该是由创建机器人的时候决定固定，而不是运行启动机器人的时候来决定」。
+   *
+   * 默认 `true`（模拟盘）：危险的那条路要操作员自己走过去。
+   * 选实盘必须已绑定交易所账户（没有账户的机器人在服务端会被拒绝）。
+   */
+  const [dryRun, setDryRun] = useState(true);
   const [aiModelId, setAiModelId] = useState<number | ''>('');
   /*
    * 两级选择的中间态 —— 见下面「AI 模型」那一栏上的说明。
@@ -186,6 +195,8 @@ export function NewTraderModal({
          * 与"实盘必须显式要求"是同一条纪律：**危险的那条路要人自己走过去**。
          */
         setExchangeAccountId('');
+        /* 运行模式也回到默认的模拟盘（创建时固定，见状态说明）。 */
+        setDryRun(true);
         /*
          * 预选服务端指定的默认模型，而不是"列表第一个"。
          *
@@ -362,6 +373,10 @@ export function NewTraderModal({
     if (modelChoice === '') return setError('请选择 AI 模型。');
     /* ⚠️ 只有固定策略模式才要求策略 —— 见上面 `missing` 里的说明。 */
     if (!isAiDriven(mode) && strategyId === '') return setError('请选择策略。');
+    /* 实盘模式必须有交易所账户 —— 服务端同样会拒（在这里先拦住，不用等一次往返）。 */
+    if (!dryRun && exchangeAccountId === '') {
+      return setError('实盘模式必须绑定交易所账户。没有账户的机器人只能以模拟盘运行。');
+    }
     /* 模拟余额填了就必须是个正数 —— 否则静默回落成默认值，用户以为生效了。 */
     const paperAmount = paperBalance.trim() === '' ? 0 : Number(paperBalance);
     /*
@@ -452,6 +467,8 @@ export function NewTraderModal({
         ...(exchangeAccountId === '' && paperAmount > 0
           ? { paperStartingBalance: paperAmount }
           : {}),
+        /* **运行模式在创建时固定**（2026-11-10）：true = 模拟盘，false = 实盘。 */
+        dryRun,
       });
 
       if (trader.equitySource === 'unavailable') {
@@ -570,6 +587,53 @@ export function NewTraderModal({
                   </option>
                 ))}
               </Select>
+            </Field>
+
+            {/*
+             * **运行模式在创建时固定**（2026-11-10 用户要求）。
+             *
+             * 用户原话：「应该是由创建机器人的时候决定固定，而不是运行启动机器人的时候来决定」。
+             * 所以这里是"这台机器人永远用模拟还是实盘"的唯一一次选择；启动弹窗只展示、不再让选。
+             * 实盘必须已绑定账户（没账户的机器人在服务端会被拒，这里提前禁用）。
+             */}
+            <Field
+              label="运行模式"
+              hint="创建后不可修改：模拟盘不碰真实资金，实盘用真实资金下单。"
+            >
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDryRun(true)}
+                  aria-pressed={dryRun}
+                  className={`rounded-md border px-3 py-2 text-left transition ${
+                    dryRun ? 'border-accent/70 bg-accent/10' : 'border-base-700 bg-base-850 hover:border-base-600'
+                  }`}
+                >
+                  <span className="flex items-center gap-2 text-base font-semibold text-ink-hi">
+                    模拟盘
+                    <Badge tone="accent">推荐</Badge>
+                  </span>
+                  <span className="mt-0.5 block text-xs text-ink-lo">本地按实时行情撮合，不涉及真实资金。</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setDryRun(false)}
+                  aria-pressed={!dryRun}
+                  disabled={exchangeAccountId === ''}
+                  className={`rounded-md border px-3 py-2 text-left transition ${
+                    !dryRun ? 'border-warn/70 bg-warn/10' : 'border-base-700 bg-base-850 hover:border-base-600'
+                  } ${exchangeAccountId === '' ? 'cursor-not-allowed opacity-50' : ''}`}
+                >
+                  <span className="flex items-center gap-2 text-base font-semibold text-ink-hi">
+                    实盘
+                    <Badge tone="warn">真实资金</Badge>
+                  </span>
+                  <span className="mt-0.5 block text-xs text-ink-lo">
+                    {exchangeAccountId === '' ? '需先绑定交易所账户。' : '真实下单，亏损不可逆。'}
+                  </span>
+                </button>
+              </div>
             </Field>
 
             {/*
@@ -978,15 +1042,12 @@ export function StartTraderModal({
   open,
   onClose,
   onStarted,
-  initialDryRun = true,
 }: {
   trader: TraderRow | null;
   open: boolean;
   onClose: () => void;
   onStarted: (status: TraderStatus) => void;
-  initialDryRun?: boolean;
 }) {
-  const [dryRun, setDryRun] = useState(initialDryRun);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checks, setChecks] = useState<PreflightCheck[] | null>(null);
@@ -994,14 +1055,23 @@ export function StartTraderModal({
 
   const environmentLabel = useApp((s) => s.system?.environmentLabel ?? 'Binance USDⓈ-M Futures');
 
+  /*
+   * ⚠️ **运行模式在创建机器人时就已固定**（2026-11-10 用户要求）。
+   *
+   * 原来这个弹窗让操作员在**启动时**选模拟/实盘 —— 那会造成两种危险：
+   *   · 一台为实盘建的机器人被顺手用模拟启动（操作员以为在交易，实际没交易）；
+   *   · 一台为模拟建的机器人被用实盘启动（从未验证过的策略突然动真钱）。
+   * 现在这里只**展示**固定的模式，不再提供选择。要换模式 → 新建机器人。
+   */
+  const fixedDryRun = trader?.dryRun ?? true;
+
   useEffect(() => {
     if (open) {
-      setDryRun(initialDryRun);
       setError(null);
       setChecks(null);
       setStarted(false);
     }
-  }, [open, initialDryRun]);
+  }, [open]);
 
   if (!trader) return null;
 
@@ -1009,7 +1079,7 @@ export function StartTraderModal({
     setBusy(true);
     setError(null);
     try {
-      const result = await api.startTrader(trader.id, dryRun);
+      const result = await api.startTrader(trader.id);
       setChecks(result.preflight ?? []);
       setStarted(true);
       onStarted('running');
@@ -1035,57 +1105,37 @@ export function StartTraderModal({
         <>
           <Button onClick={onClose}>{started ? '关闭' : '取消'}</Button>
           {!started && (
-            <Button variant={dryRun ? 'primary' : 'warn'} onClick={run} busy={busy}>
-              {dryRun ? '以模拟模式启动' : '实盘启动 — 真实资金'}
+            <Button variant={fixedDryRun ? 'primary' : 'warn'} onClick={run} busy={busy}>
+              {fixedDryRun ? '以模拟盘启动' : '实盘启动 — 真实资金'}
             </Button>
           )}
         </>
       }
     >
       <div className="space-y-3">
-        <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-2">
-          <button
-            type="button"
-            onClick={() => setDryRun(true)}
-            aria-pressed={dryRun}
-            className={`rounded-md border px-3 py-2.5 text-left transition ${
-              dryRun ? 'border-accent/70 bg-accent/10' : 'border-base-700 bg-base-850 hover:border-base-600'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <span className="text-base font-semibold text-ink-hi">模拟</span>
-              <Badge tone="accent">dryRun: true</Badge>
-              <Badge tone="muted">推荐</Badge>
-            </div>
-            <p className="mt-1 text-xs leading-relaxed text-ink-lo">
-              订单基于实时行情模拟撮合，不涉及任何交易所凭证，也不会产生真实盈亏。
-            </p>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setDryRun(false)}
-            aria-pressed={!dryRun}
-            className={`rounded-md border px-3 py-2.5 text-left transition ${
-              !dryRun ? 'border-warn/70 bg-warn/10' : 'border-base-700 bg-base-850 hover:border-base-600'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <span className="text-base font-semibold text-ink-hi">实盘</span>
-              <Badge tone="warn">dryRun: false</Badge>
-            </div>
-            <p className="mt-1 text-xs leading-relaxed text-ink-lo">
-              在 {environmentLabel} 上用真实资金下真实订单。每次开仓都会带上交易所侧止损。
-            </p>
-          </button>
-        </div>
-
-        {!dryRun && (
-          <div className="rounded-md border border-warn/60 bg-warn/10 px-3 py-2 text-base text-warn">
-            <span className="font-semibold">你即将使用真实资金交易。</span>{' '}
-            风控引擎仍会限制杠杆与仓位并要求止损，但亏损是真实且不可逆的 — 启动后该循环会持续下单，直到你停止它。
+        <div
+          className={`rounded-md border px-3 py-2.5 ${
+            fixedDryRun ? 'border-accent/40 bg-accent/5' : 'border-warn/60 bg-warn/10'
+          }`}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-base font-semibold text-ink-hi">
+              {fixedDryRun ? '模拟盘' : '实盘'}
+            </span>
+            <Badge tone={fixedDryRun ? 'accent' : 'warn'}>
+              {fixedDryRun ? '模拟撮合 · 不涉及真实资金' : '真实资金 · 真实订单'}
+            </Badge>
+            <Badge tone="muted">创建时固定</Badge>
           </div>
-        )}
+          <p className="mt-1 text-xs leading-relaxed text-ink-lo">
+            {fixedDryRun
+              ? '订单基于实时行情在本地模拟撮合，不向交易所发送任何订单，也不会产生真实盈亏。'
+              : `在 ${environmentLabel} 上用真实资金下真实订单。每次开仓都会带上交易所侧止损；亏损真实且不可逆。`}
+          </p>
+          <p className="mt-1 text-xs text-ink-faint">
+            要更换模式，请新建一台机器人 —— 运行模式在创建后不可修改。
+          </p>
+        </div>
 
         {error && <ErrorNote>{error}</ErrorNote>}
 

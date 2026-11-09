@@ -788,7 +788,6 @@ export function OverviewPage() {
         trader={startTarget}
         open={startTarget !== null}
         onClose={() => setStartTarget(null)}
-        initialDryRun={system?.dryRun ?? true}
         onStarted={() => {
           void tradersQuery.reload();
           refreshSystem();

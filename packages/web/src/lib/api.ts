@@ -848,6 +848,13 @@ export interface TraderInput {
   exchangeAccountId: number | null;
   aiModelId: number;
   /**
+   * **运行模式：模拟盘 / 实盘 —— 创建时固定**（2026-11-10 用户要求）。
+   *
+   * 	rue（省略时的默认值）= 模拟盘；alse = 实盘（服务端要求已绑定交易所账户）。
+   * 创建后不可修改，启动接口也不再接受这个选择。
+   */
+  dryRun?: boolean;
+  /**
    * 这只机器人的策略；**AI 托管时必须传 `null`**。
    *
    * ## ⚠️ 这里曾经与「已知事实」相反（2026-10-03 修）
@@ -1018,8 +1025,12 @@ export const api = {
   updateTrader: (id: number, input: Partial<TraderInput>) =>
     request<Trader>(`/traders/${id}`, { method: 'PATCH', body: input }),
   deleteTrader: (id: number) => request<{ ok: boolean }>(`/traders/${id}`, { method: 'DELETE' }),
-  startTrader: (id: number, dryRun: boolean) =>
-    request<StartResult>(`/traders/${id}/start`, { method: 'POST', body: { dryRun } }),
+  /*
+   * **运行模式（模拟/实盘）在创建机器人时就已固定**（2026-11-10 用户要求）——
+   * 启动接口不再接受这个选择。参数保留 `dryRun` 只为兼容旧调用点，服务端会忽略它。
+   */
+  startTrader: (id: number) =>
+    request<StartResult>(`/traders/${id}/start`, { method: 'POST', body: {} }),
   stopTrader: (id: number) => request<{ ok: boolean }>(`/traders/${id}/stop`, { method: 'POST', body: {} }),
   /*
    * ⚠️ 这里**曾经**有一个 `resumeTrader(id)`，它 POST `/traders/${id}/resume`

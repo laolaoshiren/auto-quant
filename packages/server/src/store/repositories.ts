@@ -671,11 +671,18 @@ export const traders = {
      * 被真实钱包余额覆盖；这个字段是"模拟账户里有多少钱"，只给模拟盘用、永不被覆盖。
      */
     paperStartingBalance?: number;
+    /**
+     * **运行模式（模拟 / 实盘）—— 创建时固定**（2026-11-10 用户要求）。
+     *
+     * `undefined` = 没指定（老行为：首次启动时按启动参数固定一次）。
+     * 新代码路径由 API 层传 `true`/`false`，**创建之后不再由启动参数决定**。
+     */
+    dryRun?: boolean | null;
   }): Trader {
     const ts = now();
     const { lastInsertRowid } = getDb().run(
-      `INSERT INTO traders (name, exchange_account_id, ai_model_id, strategy_id, cycle_interval_minutes, mode, initial_equity, paper_starting_balance, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'stopped', ?, ?)`,
+      `INSERT INTO traders (name, exchange_account_id, ai_model_id, strategy_id, cycle_interval_minutes, mode, initial_equity, paper_starting_balance, dry_run, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'stopped', ?, ?)`,
       input.name,
       input.exchangeAccountId,
       input.aiModelId,
@@ -684,6 +691,7 @@ export const traders = {
       input.mode ?? 'strategy',
       input.initialEquity,
       input.paperStartingBalance ?? 0,
+      input.dryRun === undefined || input.dryRun === null ? null : input.dryRun ? 1 : 0,
       ts,
       ts,
     );

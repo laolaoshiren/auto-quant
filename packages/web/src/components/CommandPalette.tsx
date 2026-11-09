@@ -38,7 +38,7 @@ import { Badge, Button, Dot, cn } from './ui';
 
 /** 选中一个需要确认的动作后，面板会切成这个状态。 */
 type Pending =
-  | { kind: 'start'; trader: TraderRow; dryRun: boolean }
+  | { kind: 'start'; trader: TraderRow }
   | { kind: 'run-once'; trader: TraderRow }
   /*
    * ⚠️ `stop` 也走这个 `pending` 流程（外部 issue #121）。
@@ -157,10 +157,12 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     }
   };
 
-  const startBot = async (trader: TraderRow, dryRun: boolean) => {
+  const startBot = async (trader: TraderRow) => {
     setBusy(true);
     try {
-      const result = await api.startTrader(trader.id, dryRun);
+      /* 运行模式在创建时就已固定，启动不再选择（2026-11-10）。 */
+      const fixedDryRun = trader.dryRun ?? true;
+      const result = await api.startTrader(trader.id);
       await refreshTraders();
       void refreshSystem();
       const blocking = (result.preflight ?? []).filter((check) => !check.ok && check.blocking);
@@ -174,7 +176,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         notify({
           kind: 'ok',
           title: `「${trader.name}」已启动`,
-          body: dryRun ? '模拟模式：订单只在本地撮合，不涉及真实资金。' : '实盘模式：接下来会用真实资金下单。',
+          body: fixedDryRun ? '模拟盘：订单只在本地撮合，不涉及真实资金。' : '实盘：接下来会用真实资金下单。',
         });
       }
       onOpenChange(false);
@@ -245,12 +247,9 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
               <ConfirmStep
                 pending={pending}
                 busy={busy}
-                onDryRunChange={(dryRun) =>
-                  setPending((prev) => (prev && prev.kind === 'start' ? { ...prev, dryRun } : prev))
-                }
                 onCancel={() => setPending(null)}
                 onConfirm={() => {
-                  if (pending.kind === 'start') void startBot(pending.trader, pending.dryRun);
+                  if (pending.kind === 'start') void startBot(pending.trader);
                   else if (pending.kind === 'stop') void stopBot(pending.trader);
                   else void runCycle(pending.trader);
                 }}
@@ -348,7 +347,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                           key={`start-${trader.id}`}
                           value={`启动 ${trader.name} start ${trader.id}`}
                           className={ITEM_CLASS}
-                          onSelect={() => setPending({ kind: 'start', trader, dryRun: true })}
+                          onSelect={() => setPending({ kind: 'start', trader })}
                         >
                           <Play aria-hidden className="h-4 w-4 shrink-0 text-up" />
                           <span className="min-w-0 flex-1 truncate">启动「{trader.name}」</span>
@@ -419,17 +418,16 @@ function ConfirmStep({
   busy,
   onCancel,
   onConfirm,
-  onDryRunChange,
+
 }: {
   pending: Pending;
   busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
-  onDryRunChange: (dryRun: boolean) => void;
 }) {
   const environmentLabel = useApp((s) => s.system?.environmentLabel ?? '交易所');
   const trader = pending.trader;
-  const live = pending.kind === 'start' && !pending.dryRun;
+  const live = pending.kind === 'start' && (trader.dryRun ?? true) === false;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -452,48 +450,31 @@ function ConfirmStep({
           <StopConsequence name={trader.name} />
         ) : pending.kind === 'start' ? (
           <>
-            <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={() => onDryRunChange(true)}
-                className={cn(
-                  'rounded-md border px-3 py-2 text-left transition',
-                  pending.dryRun ? 'border-accent/70 bg-accent/10' : 'border-base-700 bg-base-850 hover:border-base-600',
-                )}
-              >
-                <span className="flex items-center gap-2">
-                  <span className="text-base font-semibold text-ink-hi">模拟</span>
-                  <Badge tone="accent">dryRun</Badge>
-                  <Badge tone="muted">推荐</Badge>
-                </span>
-                <span className="mt-1 block text-xs text-ink-lo">订单在本地按实时行情撮合，不碰任何真实资金。</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => onDryRunChange(false)}
-                className={cn(
-                  'rounded-md border px-3 py-2 text-left transition',
-                  !pending.dryRun ? 'border-warn/70 bg-warn/10' : 'border-base-700 bg-base-850 hover:border-base-600',
-                )}
-              >
-                <span className="flex items-center gap-2">
-                  <span className="text-base font-semibold text-ink-hi">实盘</span>
-                  <Badge tone="warn">真实资金</Badge>
-                </span>
-                <span className="mt-1 block text-xs text-ink-lo">
-                  在 {environmentLabel} 上真实下单。风控仍会限制杠杆并要求止损，但亏损不可逆。
-                </span>
-              </button>
+            <div
+              className={cn(
+                'rounded-md border px-3 py-2.5',
+                live ? 'border-warn/60 bg-warn/10' : 'border-accent/40 bg-accent/5',
+              )}
+            >
+              <span className="flex flex-wrap items-center gap-2">
+                <span className="text-base font-semibold text-ink-hi">{live ? '实盘' : '模拟盘'}</span>
+                <Badge tone={live ? 'warn' : 'accent'}>
+                  {live ? '真实资金 · 真实订单' : '模拟撮合 · 不涉及真实资金'}
+                </Badge>
+                <Badge tone="muted">创建时固定</Badge>
+              </span>
+              <span className="mt-1 block text-xs text-ink-lo">
+                {live
+                  ? `在 ${environmentLabel} 上真实下单。风控仍会限制杠杆并要求止损，但亏损不可逆。`
+                  : '订单在本地按实时行情撮合，不会产生任何真实委托，可以随时停止。'}
+              </span>
+              <span className="mt-1 block text-xs text-ink-faint">
+                运行模式在创建机器人时已固定，这里不再提供切换；要换模式请新建机器人。
+              </span>
             </div>
-
-            {live ? (
+            {live && (
               <p className="rounded-md border border-warn/60 bg-warn/10 px-3 py-2 text-base text-warn">
                 接下来这个循环会用真实资金开仓。确认前请再核对一次交易所凭证与策略。
-              </p>
-            ) : (
-              <p className="rounded-md border border-base-750 bg-base-850/60 px-3 py-2 text-base text-ink-mid">
-                模拟模式：不会产生任何真实委托，可以随时停止。
               </p>
             )}
           </>
@@ -528,9 +509,9 @@ function ConfirmStep({
           {pending.kind === 'stop'
             ? '确认停止'
             : pending.kind === 'start'
-              ? pending.dryRun
-                ? '以模拟模式启动'
-                : '实盘启动 — 真实资金'
+              ? live
+                ? '实盘启动 — 真实资金'
+                : '以模拟盘启动'
               : '立即执行'}
         </Button>
       </footer>

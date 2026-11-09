@@ -2493,7 +2493,6 @@ export function TraderPage() {
         trader={trader}
         open={startOpen}
         onClose={() => setStartOpen(false)}
-        initialDryRun={system?.dryRun ?? true}
         onStarted={() => {
           void tradersQuery.reload();
           void fetchStats(trader.id);

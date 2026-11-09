@@ -299,6 +299,17 @@ const TraderInputSchema = z.object({
    */
   paperStartingBalance: z.number().min(0).optional(),
   /**
+   * **运行模式：模拟盘 / 实盘 —— 创建时固定**（2026-11-10 用户要求）。
+   *
+   * 用户原话：「应该是由创建机器人的时候决定固定，而不是运行启动机器人的时候来决定」。
+   *
+   * · `true`（默认）→ 模拟盘：订单只在本地撮合，余额由本地台账折算；
+   * · `false` → 实盘：真实资金下单，必须绑定真实交易所账户（否则创建会被拒）。
+   *
+   * 创建之后**不可修改**（PATCH 会拒绝）；`POST /start` 也不再接受这个选择。
+   */
+  dryRun: z.boolean().optional(),
+  /**
    * 运行模式。
    *
    * `'ai_managed'` 表示由 **AI 智能体托管**：参数由它自己设定并持续调整，
@@ -2286,6 +2297,26 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     /* 模拟本金没单独填时，用 `initialEquity` 兜底 —— 两者语义不同，但都比 0 好。 */
     const effectivePaperBalance = paperStartingBalance > 0 ? paperStartingBalance : initialEquity;
 
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     *  **运行模式（模拟 / 实盘）在创建时固定**（2026-11-10 用户要求）
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * 用户的原话：
+     * > 「实盘/模拟 的根本逻辑得改一下：应该是由创建机器人的时候决定固定，
+     * >   而不是运行启动机器人的时候来决定。」
+     *
+     * 所以：创建请求里的 `dryRun` 决定这台机器人**永远**是模拟还是实盘，
+     * 之后 `POST /traders/:id/start` **不再接受**这个选择（传了也不生效）。
+     *
+     * 默认 `true`（模拟盘）—— 与"危险的那条路要人自己走过去"同一条纪律：
+     * 实盘必须由操作员在创建时显式选。
+     */
+    const fixedDryRun = parsed.data.dryRun ?? true;
+    if (requestedAccountId === null && !fixedDryRun) {
+      throw new Error('没有绑定交易所账户的机器人只能以模拟盘运行 —— 要实盘请先绑定账户再创建。');
+    }
+
     const trader = traders.create({
       name: parsed.data.name,
       /* `null` = 纯模拟盘机器人（没有真实交易所账户）。 */
@@ -2330,6 +2361,8 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       initialEquity,
       paperStartingBalance: effectivePaperBalance,
       mode: parsed.data.mode,
+      /* **运行模式在创建时固定** —— 之后启动不再选择（见上面的说明）。 */
+      dryRun: fixedDryRun,
     });
 
     /*
@@ -2437,6 +2470,22 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     if (!current) return reply.code(404).send({ error: `找不到机器人 ${id}` });
 
     /*
+     * ⚠️ **运行模式（模拟/实盘）创建后不可修改**（2026-11-10 用户要求）。
+     *
+     * 两者互相切换都会造成严重后果：
+     *   · 实盘 → 模拟：操作员以为在真实交易，实际只在本地下单（**静默失能**）；
+     *   · 模拟 → 实盘：一个从未经过实盘验证的策略**突然动真实资金**。
+     * 所以它和"交易所账户"一样，属于"要换就新建"的字段。
+     */
+    if (parsed.data.dryRun !== undefined && parsed.data.dryRun !== (current.dryRun ?? true)) {
+      return reply.code(400).send({
+        error:
+          '运行模式（模拟盘 / 实盘）在创建时就已固定，不能通过编辑修改。' +
+          '要换模式请新建一台机器人（当前这台可以停掉保留历史）。',
+      });
+    }
+
+    /*
      * **编辑路径也要校验模拟本金**（2026-10-27）。
      *
      * 创建那条路已经校验了，但 `PATCH` 原先完全没有 —— 而编辑弹窗**确实**
@@ -2483,9 +2532,28 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         preflight: [],
       });
     }
+    /*
+     * ⚠️⚠️ **运行模式由创建时决定并固定**（2026-11-10 用户要求）
+     *
+     * 用户原话：「实盘/模拟 的根本逻辑得改一下：应该是由创建机器人的时候决定固定，
+     * 而不是运行启动机器人的时候来决定。」
+     *
+     * 所以启动接口**不再接受**这个选择：
+     *   · 已固定 → 直接用库里的值（请求体里的 `dryRun` 被忽略）；
+     *   · 老数据（`dry_run = NULL`，创建时还没有这个概念）→ 用这次请求的值固定一次
+     *     （默认模拟盘），从此不再变。这是给历史数据的一次性补写，不是"每次启动可选"。
+     */
+    const current = traders.get(id);
+    if (!current) return reply.code(404).send({ error: `找不到机器人 ${id}`, preflight: [] });
     const body = (request.body ?? {}) as { dryRun?: boolean };
-    // Paper mode is the default: a real-money start must be asked for explicitly.
-    const dryRun = body.dryRun ?? true;
+    let dryRun = current.dryRun;
+    if (dryRun === undefined) {
+      dryRun = body.dryRun ?? true;
+      traders.setDryRun(id, dryRun);
+      log.info(
+        `机器人 #${id} 的运行模式在本次启动时固定为「${dryRun ? '模拟盘' : '实盘'}」（老数据一次性补写；之后不再由启动决定）。`,
+      );
+    }
     /* ⚠️ 同步返回，不等启动跑完 —— 建连接/拉持仓/对账都要等，界面会像"点了没反应"（2026-10-10）。 */
     const result = deps.manager.startTraderAsync(id, dryRun);
     if (!result.ok) return reply.code(400).send(result);

@@ -942,7 +942,6 @@ export function TradersPage() {
         trader={startTarget}
         open={startTarget !== null}
         onClose={() => setStartTarget(null)}
-        initialDryRun={system?.dryRun ?? true}
         onStarted={() => {
           /*
            * 启动接口是异步的（stopped → starting → running），所以这里刷两次：
