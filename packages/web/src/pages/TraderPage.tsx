@@ -39,7 +39,6 @@ import {
   type EquityRange,
 } from '../components/equityCurve';
 import { CandlestickChart } from '../components/CandlestickChart';
-import { StartTraderModal } from '../components/TraderModals';
 import { ConfirmStopTrader } from '../components/ConfirmStopTrader';
 import { TraderConfigModal } from '../components/TraderConfigModal';
 import { TraderAccountStrip, type TraderAccountState } from '../components/BalanceCells';
@@ -232,7 +231,6 @@ export function TraderPage() {
   const statsMap = useSummaries((s) => s.stats);
   const fetchStats = useSummaries((s) => s.fetchOne);
 
-  const [startOpen, setStartOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   /**
    * 「停止」是否已请求确认。
@@ -1011,6 +1009,38 @@ export function TraderPage() {
   const model = modelsQuery.data?.find((row) => row.id === trader?.aiModelId) ?? null;
   const strategy = strategiesQuery.data?.find((row) => row.id === trader?.strategyId) ?? null;
 
+  /*
+   * **启动 = 点击即启动**（用户 2026-11-10：「点启动以后直接就运行，而不是又弹一个框」）。
+   *
+   * 运行模式在创建机器人时已固定，启动弹窗里没有任何可选项 —— 只剩说明和预检结果。
+   * 预检失败用行内 `actionError` 展示，比"必须先点开弹窗"更直接。
+   */
+  const startNow = async () => {
+    if (!trader) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const result = await api.startTrader(trader.id);
+      const blocking = (result.preflight ?? []).filter((check) => !check.ok && check.blocking);
+      if (!result.ok || blocking.length > 0) {
+        setActionError(
+          '未通过预检：' + (blocking.map((check) => check.name).join('、') || result.error || '启动被拒绝。'),
+        );
+      }
+      await tradersQuery.reload();
+      void fetchStats(trader.id);
+      /* 异步启动（stopped → starting → running）：1.5 秒后再对齐一次状态。 */
+      window.setTimeout(() => {
+        void tradersQuery.reload();
+        void fetchStats(trader.id);
+      }, 1500);
+    } catch (err) {
+      setActionError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const stop = async () => {
     if (!trader) return;
     setBusy(true);
@@ -1555,7 +1585,7 @@ export function TraderPage() {
       ? `运行时读数：${runtimePaper ? '模拟盘' : '实盘'}（来自正在跑的这个实例）`
       : persistedPaper !== null
         ? `落库的操作员选择：${persistedPaper ? '模拟盘' : '实盘'}（它现在没在运行；重启后按这一份恢复）`
-        : `从未指定过（它现在没在运行）：下次启动时按进程级默认，当前默认是${system?.dryRun ? '模拟盘' : system ? '实盘' : '未知'}`;
+        : `从未指定过（老数据）：首次启动时会固定为模拟盘（创建时还没有"运行模式"这个记录）`;
 
   const secondaryFacts = (
     <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 px-1 text-xs text-ink-lo">
@@ -1972,14 +2002,12 @@ export function TraderPage() {
           {/*
             ⚠️ **「这个机器人在不在花真钱」必须能被一眼看到，而它不在顶栏里。**
             
-            顶栏那个徽章读的是**进程级**的 `env.dryRun`，而
-            `POST /traders/:id/start` 的 `dryRun` 是**每次启动单独传的** ——
-            两者可以不一致。实测：用 API 启动时忘了带 `{"dryRun": false}`，
-            机器人以纸面模式跑了一整轮（开仓、挂保护单、被强制平仓，全是模拟的），
-            而顶栏写着「实盘」，页头什么也没说。
-            
-            只在**与顶栏不一致**或**会花真钱**时渲染：
-              · `dryRun === true`  —— 顶栏说实盘、它在模拟 → 最危险的那一半；
+            顶栏那个徽章读的是**进程级交易环境**（交易所端点），而每台机器人
+            自己的运行模式是**创建时固定的**（`traders.dry_run`）—— 两者语义不同。
+            创建时固定的模式是该机器人**永远**的取钱方式，启动接口不再接受覆盖。
+
+            只在**与进程环境不一致**或**会花真钱**时渲染：
+              · `dryRun === true`  —— 进程说实盘、它在模拟 → 最容易误解的那一半；
               · `dryRun === false` 且进程是模拟 → 它在花真钱 → 同样要说。
             两边一致时不加徽章，否则每台机器人头上都挂一个"实盘"变成噪音。
           */}
@@ -2027,7 +2055,7 @@ export function TraderPage() {
                 停止
               </Button>
             ) : (
-              <Button variant="success" onClick={() => setStartOpen(true)}>
+              <Button variant="success" busy={busy} onClick={() => void startNow()}>
                 <Play aria-hidden className="h-3.5 w-3.5" />
                 启动
               </Button>
@@ -2486,16 +2514,6 @@ export function TraderPage() {
         onConfirm={() => {
           setStopConfirmOpen(false);
           void stop();
-        }}
-      />
-
-      <StartTraderModal
-        trader={trader}
-        open={startOpen}
-        onClose={() => setStartOpen(false)}
-        onStarted={() => {
-          void tradersQuery.reload();
-          void fetchStats(trader.id);
         }}
       />
 

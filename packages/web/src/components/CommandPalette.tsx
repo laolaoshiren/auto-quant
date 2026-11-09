@@ -38,7 +38,6 @@ import { Badge, Button, Dot, cn } from './ui';
 
 /** 选中一个需要确认的动作后，面板会切成这个状态。 */
 type Pending =
-  | { kind: 'start'; trader: TraderRow }
   | { kind: 'run-once'; trader: TraderRow }
   /*
    * ⚠️ `stop` 也走这个 `pending` 流程（外部 issue #121）。
@@ -256,8 +255,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                 busy={busy}
                 onCancel={() => setPending(null)}
                 onConfirm={() => {
-                  if (pending.kind === 'start') void startBot(pending.trader);
-                  else if (pending.kind === 'stop') void stopBot(pending.trader);
+                  if (pending.kind === 'stop') void stopBot(pending.trader);
                   else void runCycle(pending.trader);
                 }}
               />
@@ -364,7 +362,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                           key={`start-${trader.id}`}
                           value={`启动 ${trader.name} start ${trader.id}`}
                           className={ITEM_CLASS}
-                          onSelect={() => setPending({ kind: 'start', trader })}
+                          onSelect={() => void startBot(trader)}
                         >
                           <Play aria-hidden className="h-4 w-4 shrink-0 text-up" />
                           <span className="min-w-0 flex-1 truncate">启动「{trader.name}」</span>
@@ -453,19 +451,13 @@ function ConfirmStep({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const environmentLabel = useApp((s) => s.system?.environmentLabel ?? '交易所');
   const trader = pending.trader;
-  const live = pending.kind === 'start' && (trader.dryRun ?? true) === false;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="panel-head shrink-0">
         <h2 className="min-w-0 truncate text-md font-semibold text-ink-hi">
-          {pending.kind === 'start'
-            ? `启动「${trader.name}」`
-            : pending.kind === 'stop'
-              ? `停止「${trader.name}」`
-              : `立即执行一次周期「${trader.name}」`}
+          {pending.kind === 'stop' ? `停止「${trader.name}」` : `立即执行一次周期「${trader.name}」`}
         </h2>
         <Button size="icon" variant="ghost" aria-label="关闭" onClick={onCancel}>
           <X aria-hidden className="h-4 w-4" />
@@ -476,36 +468,6 @@ function ConfirmStep({
         {pending.kind === 'stop' ? (
           /* 后果文案与另外三个入口共用同一份（见 `ConfirmStopTrader.tsx`）。 */
           <StopConsequence name={trader.name} />
-        ) : pending.kind === 'start' ? (
-          <>
-            <div
-              className={cn(
-                'rounded-md border px-3 py-2.5',
-                live ? 'border-warn/60 bg-warn/10' : 'border-accent/40 bg-accent/5',
-              )}
-            >
-              <span className="flex flex-wrap items-center gap-2">
-                <span className="text-base font-semibold text-ink-hi">{live ? '实盘' : '模拟盘'}</span>
-                <Badge tone={live ? 'warn' : 'accent'}>
-                  {live ? '真实资金 · 真实订单' : '模拟撮合 · 不涉及真实资金'}
-                </Badge>
-                <Badge tone="muted">创建时固定</Badge>
-              </span>
-              <span className="mt-1 block text-xs text-ink-lo">
-                {live
-                  ? `在 ${environmentLabel} 上真实下单。风控仍会限制杠杆并要求止损，但亏损不可逆。`
-                  : '订单在本地按实时行情撮合，不会产生任何真实委托，可以随时停止。'}
-              </span>
-              <span className="mt-1 block text-xs text-ink-faint">
-                运行模式在创建机器人时已固定，这里不再提供切换；要换模式请新建机器人。
-              </span>
-            </div>
-            {live && (
-              <p className="rounded-md border border-warn/60 bg-warn/10 px-3 py-2 text-base text-warn">
-                接下来这个循环会用真实资金开仓。确认前请再核对一次交易所凭证与策略。
-              </p>
-            )}
-          </>
         ) : (
           <p className="rounded-md border border-warn/60 bg-warn/10 px-3 py-2 text-base text-warn">
             会立刻让模型做一次决策并执行 —— 如果该机器人是实盘模式，
@@ -513,12 +475,6 @@ function ConfirmStep({
           </p>
         )}
 
-        {/* stop 分支自己已经写了完整后果（`StopConsequence`），不必再重复一句。 */}
-        {pending.kind !== 'stop' && (
-          <p className="text-xs leading-relaxed text-ink-faint">
-            停止机器人不会自动平仓：已有仓位继续由交易所侧止损 / 止盈保护。
-          </p>
-        )}
       </div>
 
       <footer className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-base-800 px-4 py-2.5">
@@ -530,17 +486,11 @@ function ConfirmStep({
           这是**停止真实在跑的循环**，不是"继续"。
         */}
         <Button
-          variant={pending.kind === 'stop' ? 'danger' : live ? 'warn' : 'primary'}
+          variant={pending.kind === 'stop' ? 'danger' : 'warn'}
           busy={busy}
           onClick={onConfirm}
         >
-          {pending.kind === 'stop'
-            ? '确认停止'
-            : pending.kind === 'start'
-              ? live
-                ? '实盘启动 — 真实资金'
-                : '以模拟盘启动'
-              : '立即执行'}
+          {pending.kind === 'stop' ? '确认停止' : '立即执行'}
         </Button>
       </footer>
     </div>

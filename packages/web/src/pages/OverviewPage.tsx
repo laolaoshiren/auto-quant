@@ -46,7 +46,7 @@ import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { Button, Empty, ErrorNote, Panel, Spinner3 } from '../components/ui';
 import { Metric, MetricGroup, PageShell, SectionLabel } from '../components/shell';
 import { PageActions } from '../templates/lib/PageActions';
-import { NewTraderModal, StartTraderModal } from '../components/TraderModals';
+import { NewTraderModal } from '../components/TraderModals';
 import { ConfirmStopTrader } from '../components/ConfirmStopTrader';
 import { EQUITY_RANGES, mergeEquityCurves, rangeSpanMs, type EquityRange } from '../components/equityCurve';
 import {
@@ -112,7 +112,6 @@ export function OverviewPage() {
   const refreshMany = useSummaries((s) => s.refreshMany);
 
   const [newOpen, setNewOpen] = useState(false);
-  const [startTarget, setStartTarget] = useState<TraderRow | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   /**
    * 已请求确认停止的机器人。
@@ -355,6 +354,37 @@ export function OverviewPage() {
       await api.stopTrader(trader.id);
       await tradersQuery.reload();
       refreshSystem();
+    } catch (err) {
+      setActionError((err as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  /**
+   * **启动 = 点击即启动**（用户 2026-11-10：「点启动以后直接就运行，而不是又弹一个框」）。
+   *
+   * 运行模式在创建时固定，启动弹窗已无可选项；失败原因走行内 `actionError`。
+   */
+  const startNow = async (trader: TraderRow) => {
+    setBusyId(trader.id);
+    setActionError(null);
+    try {
+      const result = await api.startTrader(trader.id);
+      const blocking = (result.preflight ?? []).filter((check) => !check.ok && check.blocking);
+      if (!result.ok || blocking.length > 0) {
+        setActionError(
+          `「${trader.name}」未通过预检：` +
+            (blocking.map((check) => check.name).join('、') || result.error || '启动被拒绝。'),
+        );
+      }
+      await tradersQuery.reload();
+      refreshSystem();
+      /* 异步启动（stopped → starting → running）：1.5 秒后再对齐一次。 */
+      window.setTimeout(() => {
+        void tradersQuery.reload();
+        refreshSystem();
+      }, 1500);
     } catch (err) {
       setActionError((err as Error).message);
     } finally {
@@ -694,7 +724,7 @@ export function OverviewPage() {
               busyId={busyId}
               navigate={navigate}
               onStop={setStopTarget}
-              onStart={setStartTarget}
+              onStart={(trader) => void startNow(trader)}
               extraCount={traders.length - snapshotRows.length}
             />
           )}
@@ -718,16 +748,6 @@ export function OverviewPage() {
           void tradersQuery.reload();
           refreshSystem();
           /* 创建后不自动启动（用户 2026-11-10：创建-运行不能混在一起）。 */
-        }}
-      />
-
-      <StartTraderModal
-        trader={startTarget}
-        open={startTarget !== null}
-        onClose={() => setStartTarget(null)}
-        onStarted={() => {
-          void tradersQuery.reload();
-          refreshSystem();
         }}
       />
 

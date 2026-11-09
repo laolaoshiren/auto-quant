@@ -16,7 +16,7 @@ import { SectionHeading, TraderStatusBadge } from '../components/Badges';
 import { Badge } from '../components/ui';
 import { Metric, SectionLabel } from '../components/shell';
 import { PageActions } from '../templates/lib/PageActions';
-import { NewTraderModal, StartTraderModal } from '../components/TraderModals';
+import { NewTraderModal } from '../components/TraderModals';
 import { TraderConfigModal } from '../components/TraderConfigModal';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts, type PnlCosts } from '../components/PnlBreakdown';
 import {
@@ -135,7 +135,6 @@ export function TradersPage() {
   }
 
   const [newOpen, setNewOpen] = useState(false);
-  const [startTarget, setStartTarget] = useState<TraderRow | null>(null);
   const [editTarget, setEditTarget] = useState<TraderRow | null>(null);
   const [pending, setPending] = useState<PendingAction>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -177,6 +176,39 @@ export function TradersPage() {
     } catch (err) {
       setActionError((err as Error).message);
       setPending(null);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  /**
+   * **启动 = 点击即启动**（用户 2026-11-10：
+   * 「点启动以后直接就运行，而不是又弹一个框」）。
+   *
+   * 运行模式在创建机器人时就已固定，启动弹窗里已经**没有任何需要操作员选择的东西**
+   * —— 只剩一段说明和预检结果。而预检失败同样要展示，用行内错误条
+   *（`actionError`）比"先点开一个弹窗才能看到失败原因"更好。
+   *
+   * 启动是异步的（`stopped → starting → running`）：请求返回后再等 1.5 秒刷一次，
+   * 行按钮才会从「启动中」落到「停止」。
+   */
+  const startNow = async (trader: TraderRow) => {
+    setBusyId(trader.id);
+    setActionError(null);
+    try {
+      const result = await api.startTrader(trader.id);
+      const blocking = (result.preflight ?? []).filter((check) => !check.ok && check.blocking);
+      if (!result.ok || blocking.length > 0) {
+        setActionError(
+          `「${trader.name}」未通过预检：` +
+            (blocking.map((check) => check.name).join('、') || result.error || '启动被拒绝。'),
+        );
+      }
+      await tradersQuery.reload();
+      refreshSystem();
+      window.setTimeout(() => void tradersQuery.reload(), 1500);
+    } catch (err) {
+      setActionError((err as Error).message);
     } finally {
       setBusyId(null);
     }
@@ -463,7 +495,7 @@ export function TradersPage() {
           <div className="px-3.5 py-3">
             <p className="text-base text-ink-lo">还没有机器人。</p>
             <p className="mt-0.5 text-xs leading-relaxed text-ink-faint">
-              先创建一个，再选择模拟或实盘 — 模拟是默认模式，无需交易所密钥即可放心运行。
+              先创建一个（创建时选模拟或实盘）— 模拟盘无需交易所密钥即可放心运行。
             </p>
             <Button variant="primary" className="mt-2" onClick={() => setNewOpen(true)}>
               + 新建机器人
@@ -574,7 +606,14 @@ export function TradersPage() {
                                * 这台机器人是不是在动真钱。
                                */}
                               <Badge
-                                tone={trader.dryRun === false ? 'warn' : 'muted'}
+                                tone="muted"
+                                className={
+                                  trader.dryRun === false
+                                    ? 'border-warn/40 bg-warn/15 text-warn'
+                                    : trader.dryRun === true
+                                      ? 'border-accent/30 bg-accent/10 text-accent'
+                                      : 'border-base-700 bg-base-800 text-ink-faint'
+                                }
                                 title={
                                   trader.dryRun === false
                                     ? '实盘：真实资金下单'
@@ -841,7 +880,12 @@ export function TradersPage() {
                                 </Button>
                               </>
                             ) : (
-                              <Button size="sm" variant="success" onClick={() => setStartTarget(trader)}>
+                              <Button
+                                size="sm"
+                                variant="success"
+                                busy={rowBusy}
+                                onClick={() => void startNow(trader)}
+                              >
                                 <Play aria-hidden className="h-3.5 w-3.5" />
                                 启动
                               </Button>
@@ -959,23 +1003,6 @@ export function TradersPage() {
         onSaved={() => {
           setEditTarget(null);
           void tradersQuery.reload();
-        }}
-      />
-
-      <StartTraderModal
-        trader={startTarget}
-        open={startTarget !== null}
-        onClose={() => setStartTarget(null)}
-        onStarted={() => {
-          /*
-           * 启动接口是异步的（stopped → starting → running），所以这里刷两次：
-           * 一次立刻（拿到 `starting`，行按钮变成"启动中"），一次 1.5 秒后
-           * （确认它已经到 `running`，或失败后回到 `stopped`）。
-           * 只刷一次的话，行按钮会停在「启动」上，看起来像没点上。
-           */
-          void tradersQuery.reload();
-          refreshSystem();
-          window.setTimeout(() => void tradersQuery.reload(), 1500);
         }}
       />
     </div>

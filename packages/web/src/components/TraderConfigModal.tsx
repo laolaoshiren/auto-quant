@@ -320,7 +320,7 @@ export function TraderConfigModal({
               不可变更
             </Badge>
             <span className="text-xs leading-relaxed text-ink-lo">
-              模拟与实盘在每次启动时选择，不在此处保存。最近周期 #{trader.lastCycleNumber}。
+              运行模式（模拟 / 实盘）在创建机器人时固定，不在此处修改。最近周期 #{trader.lastCycleNumber}。
               停止中的机器人保存后会立即生效，但不会自动重新启动。
             </span>
           </div>
