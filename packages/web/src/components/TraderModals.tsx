@@ -124,6 +124,13 @@ export function NewTraderModal({
   const [providerId, setProviderId] = useState<string>('');
   const [modelChoice, setModelChoice] = useState<string>('');
   /**
+   * **模型搜索词**（用户 2026-11-10：「模型选择里面要有快速搜索定位功能」）。
+   *
+   * 网关下挂着两百多个模型，而模型下拉是原生 `<select>` —— 不能输入、只能滚。
+   * 这里加一个搜索框，按"标签 / 模型 id"过滤两个分组里的选项。
+   */
+  const [modelQuery, setModelQuery] = useState<string>('');
+  /**
    * 每个厂商**从它自己的接口读回来**的模型列表，按 provider id 缓存。
    *
    * ## 为什么必须是"读取接口"，而不是内置静态列表
@@ -197,6 +204,8 @@ export function NewTraderModal({
         setExchangeAccountId('');
         /* 运行模式也回到默认的模拟盘（创建时固定，见状态说明）。 */
         setDryRun(true);
+        /* 模型搜索词也清空（否则上次的过滤会让默认模型"消失"）。 */
+        setModelQuery('');
         /*
          * 预选服务端指定的默认模型，而不是"列表第一个"。
          *
@@ -333,6 +342,22 @@ export function NewTraderModal({
     const source = fromApi ?? descriptor?.models ?? [];
     return { ids: source.filter((id) => !configured.has(id)), live: fromApi !== null };
   })();
+
+  /*
+   * **模型搜索过滤**（用户 2026-11-10：「模型选择里面要有快速搜索定位功能」）。
+   *
+   * 原生 `<select>` 不能输入，而网关下挂着两百多个模型 —— 只能滚。这里先按
+   * "标签 / 模型 id"过滤两个分组，再在过滤后的列表里选。
+   */
+  const modelQueryText = modelQuery.trim().toLowerCase();
+  const shownConfigured = modelQueryText
+    ? configuredModels.filter(
+        (m) => m.label.toLowerCase().includes(modelQueryText) || m.model.toLowerCase().includes(modelQueryText),
+      )
+    : configuredModels;
+  const shownAvailable = modelQueryText
+    ? availableModels.ids.filter((id) => id.toLowerCase().includes(modelQueryText))
+    : availableModels.ids;
 
   const missing = useMemo(() => {
     const gaps: string[] = [];
@@ -676,6 +701,7 @@ export function NewTraderModal({
                   // 换厂商就把模型清掉 —— 上一个厂商的模型在这里毫无意义。
                   setProviderId(e.target.value);
                   setModelChoice("");
+                  setModelQuery("");
                   setAiModelId("");
                 }}
               >
@@ -758,6 +784,24 @@ export function NewTraderModal({
                         : "该厂商还没有可选模型。"
               }
             >
+              {/*
+               * **搜索定位**（用户 2026-11-10 要求）：先输入关键词过滤，再在剩下
+               * 的选项里选。没有这一层，两百多个模型只能靠滚。
+               */}
+              <div className="mb-1.5 flex items-center gap-2">
+                <TextInput
+                  value={modelQuery}
+                  onChange={(event) => setModelQuery(event.target.value)}
+                  placeholder={providerId ? '搜索模型（名称 / 模型 id）…' : '先选一个厂商'}
+                  disabled={!providerId}
+                  aria-label="搜索模型"
+                />
+                {modelQuery && (
+                  <Button small onClick={() => setModelQuery('')}>
+                    清空
+                  </Button>
+                )}
+              </div>
               <Select
                 value={modelChoice}
                 disabled={!providerId}
@@ -774,18 +818,18 @@ export function NewTraderModal({
                 }}
               >
                 <option value="">请选择模型</option>
-                {configuredModels.length > 0 && (
+                {shownConfigured.length > 0 && (
                   <optgroup label="已配置">
-                    {configuredModels.map((model) => (
+                    {shownConfigured.map((model) => (
                       <option key={model.id} value={model.id}>
                         {model.label} · {model.model}
                       </option>
                     ))}
                   </optgroup>
                 )}
-                {availableModels.ids.length > 0 && (
+                {shownAvailable.length > 0 && (
                   <optgroup label={availableModels.live ? "厂商可用模型" : "厂商建议"}>
-                    {availableModels.ids.map((id) => (
+                    {shownAvailable.map((id) => (
                       <option key={id} value={"new:" + id}>
                         {id}
                       </option>
@@ -793,6 +837,9 @@ export function NewTraderModal({
                   </optgroup>
                 )}
               </Select>
+              {modelQuery && shownConfigured.length === 0 && shownAvailable.length === 0 && (
+                <p className="mt-1 text-xs text-ink-faint">没有匹配「{modelQuery}」的模型。</p>
+              )}
               {/*
                 读不到原因必须说出来。一个空下拉配上"该厂商还没有可选模型"，
                 会让用户以为这个厂商真的没模型 —— 而实际原因可能是密钥没配、
