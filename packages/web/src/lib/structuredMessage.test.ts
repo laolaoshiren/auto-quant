@@ -209,7 +209,6 @@ test('★★★ 英文动作码能映射就映射（open_short→开空 等）�
    * 断言它对用户截图里那几个码给出中文。
    * （若有人删了映射项，这条红；若有人另写一套，`humanText.tsx` 的 import 会暴露。）
    */
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   return import('../components/DecisionAudit').then(({ actionLabel }) => {
     assert.equal(actionLabel('open_short'), '开空');
     assert.equal(actionLabel('open_long'), '开多');
