@@ -54,15 +54,6 @@ const TONE_CLASS: Record<Tone, string> = {
   muted: 'border-base-700 bg-base-850 text-ink-lo',
 };
 
-const TONE_TEXT: Record<Tone, string> = {
-  neutral: 'text-ink-mid',
-  up: 'text-up',
-  down: 'text-down',
-  warn: 'text-warn',
-  accent: 'text-accent',
-  muted: 'text-ink-lo',
-};
-
 const TONE_SURFACE: Record<Tone, string> = {
   neutral: 'bg-ink-lo',
   up: 'bg-up',
@@ -432,35 +423,6 @@ export function Panel({
   );
 }
 
-/**
- * 指标卡。
- *
- * 数值一档是 `text-2xl`（卡片数值）而不是原来的 `text-lg`：设计规范要求
- * "核心指标明显比次要信息大"，而指标卡和它旁边的说明文字原来几乎一样大，
- * 等于没有重点。label 保持 `text-xs`，差距就出来了。
- */
-export function Stat({
-  label,
-  value,
-  tone,
-  sub,
-  title,
-}: {
-  label: string;
-  value: ReactNode;
-  tone?: string;
-  sub?: ReactNode;
-  title?: string;
-}) {
-  return (
-    <div title={title} className="min-w-0 rounded-md border border-base-750 bg-base-850/60 px-3 py-2.5">
-      <div className="truncate text-xs font-semibold uppercase tracking-[0.12em] text-ink-lo">{label}</div>
-      <div className={cn('num mt-1.5 text-2xl leading-tight', tone ?? 'text-ink-hi')}>{value}</div>
-      {sub && <div className="mt-0.5 truncate text-xs text-ink-faint">{sub}</div>}
-    </div>
-  );
-}
-
 export function Empty({
   message,
   hint,
@@ -580,15 +542,6 @@ export function Modal({
 /* -------------------------------------------------------------------------- */
 /*  Key / value + copyable pre block                                           */
 /* -------------------------------------------------------------------------- */
-
-export function KV({ label, value, tone }: { label: string; value: ReactNode; tone?: string }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3 border-b border-base-850 py-1 last:border-0">
-      <span className="text-xs uppercase tracking-wide text-ink-lo">{label}</span>
-      <span className={cn('num min-w-0 break-words text-right text-base', tone ?? 'text-ink-hi')}>{value}</span>
-    </div>
-  );
-}
 
 export function CopyButton({ onCopy, copied }: { onCopy: () => void; copied: boolean }) {
   return (

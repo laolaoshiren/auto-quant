@@ -141,12 +141,6 @@ function emit(): void {
   window.dispatchEvent(new Event(APPEARANCE_EVENT));
 }
 
-/** 订阅外观变化。返回取消订阅的函数。 */
-export function onAppearanceChange(listener: () => void): () => void {
-  window.addEventListener(APPEARANCE_EVENT, listener);
-  return () => window.removeEventListener(APPEARANCE_EVENT, listener);
-}
-
 /**
  * 启动时调用一次：把已保存的亮暗与密度写回 `<html>`。
  *

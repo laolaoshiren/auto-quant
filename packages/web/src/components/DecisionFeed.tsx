@@ -148,21 +148,20 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react';
-import { exchangeErrorLabel, type DecisionRecord, type Decision, type ExecutionLogEntry, type TraderMode } from '@aq/shared';
+import { type DecisionRecord, type Decision, type ExecutionLogEntry, type TraderMode } from '@aq/shared';
 import { api, type MarketSymbol } from '../lib/api';
 import { useLiveCycle, useEvents, type LiveCycle } from '../lib/store';
 import { FeedErrorBoundary } from './FeedErrorBoundary';
 import { parseTeamTrace } from '../lib/teamTrace';
-import { DebateView } from './DebateView';
 /**
  * **团队看板**（2026-10-12 重做）。
  *
  * ⚠️ **只在 `mode === 'ai_team'` 时渲染** —— 另两种模式的界面必须逐字节不变。
- * 新组件放在 `./TeamBoard/` 下，与旧的那三个（`TeamRoster` / `FirmRoster` /
- * `DebateView`）并存：旧三个仍在团队模式下用于「组织架构」等既有内容，
+ * 新组件放在 `./TeamBoard/` 下，与旧的 `TeamRoster` / `FirmRoster` 并存：
+ * 旧两个仍在团队模式下用于「组织架构」等既有内容，
  * 而 `TeamBoard` 替换的是**实时工作流区**与**决策行**这两个主视图。
  *
- * 为什么另起一套而不是继续改旧组件：旧那三个用了一整批**本项目 Tailwind
+ * 为什么另起一套而不是继续改旧组件：旧那些用了一整批**本项目 Tailwind
  * 配置里根本不存在**的类（`border-base-700` / `bg-base-850` / `bg-up`…），
  * 实测渲染出来没有边框、没有底色、状态灯没有颜色 —— 见 `TeamBoard/roster.ts`
  * 文件头的完整对照表。那是"改不动"的，只能重写。
@@ -311,7 +310,6 @@ function CycleSteps({ steps, elapsedSec }: { steps: LiveCycle['steps']; elapsedS
   const [open, setOpen] = useState(false);
   if (steps.length === 0) return null;
   const last = steps[steps.length - 1]!;
-  const lastAt = Date.parse(last.at);
   /*
    * ⚠️ **两个数必须是同一口径，否则屏幕上会出现两个对不上的时间（用户 2026-10-10 实测）。**
    *
@@ -551,58 +549,6 @@ function CycleCountdown({ nextCycleAt }: { nextCycleAt: number | null }) {
   );
 }
 
-/**
- * **最新一轮的结论**（2026-10-13 加）—— 团队模式左栏。
- *
- * ## 用户的要求
- *
- * > 「这一块UI展示区域太小了，根本显示不了这么多，直接跳转把这块占用全部页面。
- * >  **把结论那块移动到左边**」
- *
- * ## 为什么单独抽一个组件（而不是复用下面的列表）
- *
- * 下面的 `runs.map()` 渲染的是**历史全部轮次**（滚动的决策流水）——
- * 而这一栏要回答的是**"现在这一轮决定了什么"**，两者职责不同：
- * ```
- *   左栏（本组件）：最新一轮的结论 —— 常驻可见，不滚走
- *   下方滚动区   ：历史轮次        —— 要看过去时才滚
- * ```
- *
- * ⚠️ 用**同一个 `TeamCycleBlock`** 渲染，不另写一套 ——
- * 那样"结论长什么样"只有一个定义处，不会两处漂移。
- */
-function LatestConclusion({
-  record,
-  symbols,
-  mode,
-}: {
-  record: DecisionRecord | null;
-  symbols: readonly MarketSymbol[];
-  mode: TraderMode;
-}): React.ReactElement {
-  if (record === null) {
-    return (
-      <p className="px-1 py-2 text-xs text-ink-faint">
-        还没有决策记录 —— 跑一轮之后这里会显示它决定了什么。
-      </p>
-    );
-  }
-  return (
-    <div className="min-w-0">
-      {/*
-        ⚠️ 单独包错误边界：与下方列表同一个理由 ——
-        一条字段不全的记录不该让整个看板白屏。
-      */}
-      <FeedErrorBoundary>
-        {mode === 'ai_team' ? (
-          <TeamCycleBlock record={record} symbols={[...symbols]} />
-        ) : (
-          <CycleBlock record={record} symbols={[...symbols]} mode={mode} />
-        )}
-      </FeedErrorBoundary>
-    </div>
-  );
-}
 
 export function DecisionFeed({
   traderId,
@@ -2115,56 +2061,6 @@ function priceOf(symbols: MarketSymbol[], symbol: string): number | null {
  * `export` 只是为了 SSR 验证脚本能够直接渲染它（`scripts/ssr-decision-feed.tsx`）。
  * 它在页面里的唯一调用点是下面的 `DecisionFeed`。
  */
-/**
- * **一轮团队决策的审计块** —— 谁参与了、各自说了什么、用的什么模型。
- *
- * ## 为什么折叠
- *
- * 一轮团队有 7 个角色，每段产出几百字。默认展开会把决策流刷满 ——
- * 而决策流的第一落点是"这一轮做了什么决定"，不是"每个角色的论证全文"。
- *
- * 所以默认只显示**摘要 + 角色名列表**（一行能看完），点开才看全文。
- * 这与项目里 `skip` 折叠、`CycleSteps` 折叠是同一个原则：
- * **信息一条不丢，但首屏只留需要看的。**
- */
-function TeamTraceBlock({ rawResponse }: { rawResponse: string }): React.ReactElement | null {
-  const [open, setOpen] = useState(false);
-  const trace = parseTeamTrace(rawResponse);
-  if (trace === null) return null;
-
-  return (
-    <div className="mb-1.5 rounded-md border border-accent/25 bg-accent/5 px-2.5 py-1.5 text-xs">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 text-left"
-      >
-        <span className="shrink-0 font-medium text-accent">智能体团队</span>
-        {trace.summary !== null && <span className="min-w-0 flex-1 truncate text-ink-soft">{trace.summary}</span>}
-        <span className="shrink-0 text-ink-faint">{open ? '收起' : `${trace.members.length} 个角色`}</span>
-      </button>
-      {open && (
-        <ul className="mt-1.5 space-y-1.5 border-t border-accent/15 pt-1.5">
-          {trace.members.map((m) => (
-            <li key={m.role} className="flex gap-2">
-              <span className="w-32 shrink-0 truncate font-medium text-ink-soft" title={m.role}>
-                {m.role}
-              </span>
-              <span className="min-w-0 flex-1">
-                {m.modelId !== null && (
-                  <span className="mr-1.5 text-ink-faint" title="这个角色用的模型">
-                    {m.modelId}
-                  </span>
-                )}
-                <span className="text-ink-lo">{m.text}</span>
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
 export function CycleBlock({ record, symbols, mode = 'strategy' }: { record: DecisionRecord; symbols: MarketSymbol[]; mode?: TraderMode }) {
   /*
    * ⚠️ **这两个字段要在这里兜一次底，不能假设它们一定存在。**
@@ -2267,10 +2163,9 @@ export function CycleBlock({ record, symbols, mode = 'strategy' }: { record: Dec
 
          `DecisionFeed` 里那个分支是
          `mode === 'ai_team' ? <TeamCycleBlock/> : <CycleBlock/>` ——
-         所以团队模式下这三块（`TeamTraceBlock` / `DebateView` / 下面那对
-         「思考过程 · 提示词」按钮）**都不会被渲染**。
+         所以团队模式下下面那对「思考过程 · 提示词」按钮**不会被渲染**。
 
-         它们没有丢，职责被 `TeamCycleBlock` + `TeamDecisionRow` 接过去了，
+         它的职责没有丢，被 `TeamCycleBlock` + `TeamDecisionRow` 接过去了，
          而且**换了位置**：
          · `<team>` 块的各角色产出 → 团队决策行展开后的「各角色产出」
            （带中文角色名与模型名，比这里原来显示 role id 更可读）；

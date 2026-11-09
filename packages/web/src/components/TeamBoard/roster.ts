@@ -12,7 +12,7 @@
  *
  * ## ⚠️ 为什么这个文件是新建的，而不是改 `TeamRoster.tsx`
  *
- * `TeamRoster.tsx` / `FirmRoster.tsx` / `DebateView.tsx` 里用了一整批
+ * `TeamRoster.tsx` / `FirmRoster.tsx` 里用了一整批
  * **本项目 Tailwind 配置里根本不存在的类名** —— 实测（对构建产物 CSS 逐类核对）：
  *
  * | 用到的类 | `tailwind.config.js` 里的真相 |
@@ -84,23 +84,6 @@ export const SURFACE = {
   border: 'border-base-700',
   borderSoft: 'border-base-750',
   divider: 'border-base-800',
-} as const;
-
-/**
- * 状态色。
- *
- * ⚠️ 语义色只有 `up` / `down` / `warn` / `accent` 四个 —— **没有 `ok` / `danger`**。
- * 写成 `bg-up` 会得到一个没有背景色的 span（那个"状态灯"于是从来不存在）。
- */
-export const TONE = {
-  active: 'bg-accent',
-  done: 'bg-up',
-  failed: 'bg-down',
-  idle: 'border border-ink-faint',
-  planned: 'bg-ink-faint/40',
-  activeText: 'text-accent',
-  doneText: 'text-up',
-  failedText: 'text-down',
 } as const;
 
 /* -------------------------------------------------------------------------- */

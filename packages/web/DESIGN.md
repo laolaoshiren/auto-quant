@@ -172,14 +172,12 @@
 | `Button` | 变体 `primary` / `ghost` / `danger` / `success` / `warn`，尺寸 `sm` |
 | `Badge` | 状态标签，`tone` 决定颜色 |
 | `Dot` | 状态圆点，`pulse` 表示进行中 |
-| `Stat` | 指标卡：label + 大数值 + 可选变化量 |
 | `Field` | 表单字段包装：label + hint + error |
 | `TextInput` / `NumberInput` / `Select` / `TextArea` / `Toggle` | 表单控件（基于 Radix，含无障碍支持） |
 | `Modal` | 对话框（Radix Dialog：焦点陷阱、Esc、点击遮罩关闭都正确） |
 | `Collapsible` | 折叠区（Radix，带正确的高度动画与 aria） |
 | `Empty` | 空状态 |
 | `ErrorNote` | 错误提示 |
-| `KV` | 键值对行 |
 | `CopyButton` | 复制按钮，带"已复制"反馈 |
 
 ### 用 Radix，不要手写

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { isAiDriven } from '@aq/shared';
 import { api, type AiModelRow, type ExchangeAccountRow, type TraderRow } from '../lib/api';
+import { fmtAsset } from '../lib/format';
 import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, TextInput } from './ui';
 import { EquitySourceField, equityPayload, useExchangeEquity } from './EquitySourceField';
 
@@ -25,7 +27,6 @@ export function TraderConfigModal({
   const [busy, setBusy] = useState(false);
 
   const [name, setName] = useState('');
-  const [exchangeAccountId, setExchangeAccountId] = useState<number | ''>(0);
   const [aiModelId, setAiModelId] = useState(0);
   /*
    * `null` = 这个机器人不引用任何策略（AI 托管）。见 `Trader.strategyId` ——
@@ -42,11 +43,39 @@ export function TraderConfigModal({
    */
   const prefilledFor = useRef<string | null>(null);
 
+  /*
+   * ⚠️ **交易所账户在创建后不可修改**（服务端语义，2026-11 审计核对）。
+   *
+   * `PATCH /api/traders/:id` 会拿请求里的 `exchangeAccountId` 与库里的比较，
+   * 一旦**值不同**就返回 400「暂不支持通过编辑修改交易所账户」（见
+   * `packages/server/src/api/server.ts` 的 PATCH 实现）。
+   *
+   * 原来这里是一个可编辑的 `<Select>`：编辑纯模拟盘机器人时它的 `value` 是 `''`、
+   * 选项里又没有对应项，于是**下拉显示空白**；操作员随便选一个账户再保存，
+   * 必然拿到那个 400。反过来，绑了账户的机器人也**没有**「不绑账户」这一项 ——
+   * 那行注释声称支持改，实际从未成立。
+   *
+   * 所以现在：账户 id 只从记录里读（用于读起始权益），界面上只**展示**，不发回。
+   * 要换账户：新建一个机器人（当前这个可以停掉保留历史）—— 与服务端的建议一致。
+   */
+  const exchangeAccountId = trader?.exchangeAccountId ?? 0;
+  /**
+   * 纯模拟盘机器人（不绑账户）：本金是 `paper_starting_balance`，
+   * 老数据上该列为 0 时回落到 `initial_equity`（与服务端
+   * `manager.paperStartingBalanceOf()` 的回落顺序一致）。
+   */
+  const paperStartingBalance =
+    trader === null
+      ? null
+      : trader.paperStartingBalance > 0
+        ? trader.paperStartingBalance
+        : trader.initialEquity > 0
+          ? trader.initialEquity
+          : null;
   const selectedAccount = accounts?.find((row) => row.id === exchangeAccountId) ?? null;
   const equity = useExchangeEquity({
     open,
-    /* `''` = 不绑账户（纯模拟盘）；`useExchangeEquity` 只在有账户时才读交易所。 */
-    exchangeAccountId: exchangeAccountId === '' ? 0 : exchangeAccountId,
+    exchangeAccountId,
     // Editing starts from what the trader was created with; the read replaces
     // it as soon as the credential answers.
     prefill: trader?.initialEquity ?? 0,
@@ -84,8 +113,6 @@ export function TraderConfigModal({
     prefilledFor.current = fillKey;
 
     setName(trader.name);
-    /* 纯模拟盘机器人没有账户（`null`）—— 编辑态下用 `''` 表示"不绑账户"。 */
-    setExchangeAccountId(trader.exchangeAccountId ?? '');
     setAiModelId(trader.aiModelId);
     setStrategyId(trader.strategyId);
     setCycleIntervalMinutes(trader.cycleIntervalMinutes);
@@ -123,8 +150,13 @@ export function TraderConfigModal({
       const manualEquity = equityPayload(equity);
       const updated = await api.updateTrader(trader.id, {
         name: name.trim(),
-        /* `''` → `null`：允许把机器人改成"不绑账户"（纯模拟盘）。 */
-        exchangeAccountId: exchangeAccountId === '' ? null : exchangeAccountId,
+        /*
+         * ⚠️ **不发 `exchangeAccountId`。**
+         *
+         * 它是创建后不可改的字段（服务端会拒绝不同的值），而"原样发回去"也
+         * 只是让请求体多一个永远不该变化的键。不发的语义是"别动它" —— 这正是
+         * 服务端在 `undefined` 时的行为（`parsed.data` 里没这个键就不比较）。
+         */
         aiModelId,
         /*
          * AI 托管时 `strategyId` 是 `null` —— 传 `undefined` 让服务端**不动这个字段**
@@ -137,8 +169,15 @@ export function TraderConfigModal({
       });
 
       if (updated.initialEquity <= 0) {
+        /*
+         * ⚠️ 文案要分两种情形：纯模拟盘机器人**没有**交易所可读，
+         * 说"未能从交易所读取钱包余额"会把人指向一个不存在的东西
+         * （创建时如果没填模拟本金，`initial_equity` 就是 0）。
+         */
         setBaselineWarning(
-          '已保存，但未能从交易所读取钱包余额，该机器人的起始权益为 0。在凭证可用之前，收益率等业绩指标都没有意义。',
+          trader.exchangeAccountId === null
+            ? '已保存，但该机器人的起始权益为 0（创建时没有填写模拟盘本金）。在补上本金之前，收益率等业绩指标都没有意义。'
+            : '已保存，但未能从交易所读取钱包余额，该机器人的起始权益为 0。在凭证可用之前，收益率等业绩指标都没有意义。',
         );
         return;
       }
@@ -176,14 +215,31 @@ export function TraderConfigModal({
             <TextInput value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
 
-          <Field label="交易所凭证" hint="测试网凭证无法下主网订单。">
-            <Select value={exchangeAccountId} onChange={(e) => setExchangeAccountId(Number(e.target.value))}>
-              {accounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.label} · {account.testnet ? '测试网' : '主网'} · {account.canTrade ? '可交易' : '只读'}
-                </option>
-              ))}
-            </Select>
+          {/*
+            交易所账户**只展示、不编辑**。
+
+            它原来是一个可编辑的下拉；而服务端 PATCH 明确拒绝"改账户"
+            （400「暂不支持通过编辑修改交易所账户」）。于是那个控件的最坏形态是：
+            纯模拟盘机器人显示一个**空白**下拉（value 为 `null`、选项里没有对应项），
+            操作员以为该选一个，一选一存就撞 400；绑了账户的机器人也没有
+            「不绑账户」选项，那行注释声称的支持从未成立。
+          */}
+          <Field
+            label="交易所账户"
+            hint="创建后不可更改。要换账户请新建一个机器人（当前这个可以停掉并保留历史）。"
+          >
+            <div className="text-base text-ink-mid">
+              {trader.exchangeAccountId === null ? (
+                <span className="text-ink-faint">不绑账户（纯模拟盘）</span>
+              ) : selectedAccount ? (
+                <>
+                  {selectedAccount.label} · {selectedAccount.testnet ? '测试网' : '主网'} ·{' '}
+                  {selectedAccount.canTrade ? '可交易' : '只读'}
+                </>
+              ) : (
+                `账户 #${trader.exchangeAccountId}（当前账户列表里没有它）`
+              )}
+            </div>
           </Field>
 
           <Field label="AI 模型">
@@ -197,20 +253,21 @@ export function TraderConfigModal({
           </Field>
 
           {/*
-            AI 托管机器人**不显示策略选择器**。
+            **AI 驱动的模式（智能托管 / AI 团队 / JEV）都不显示策略选择器。**
 
-            理由与机器人页头那个「策略 #8」链接相同：对 AI 托管机器人来说，
-            `strategies` 表里那一行**不生效**（生效的是 `agent_config_json`）。
-            在这里给一个能改的下拉框，用户改完发现没有任何变化 ——
-            **一个能操作但无效果的控件，比一个不存在的控件更糟**：
-            它会让人怀疑是自己操作错了，而不是这个控件本来就没用。
+            判据必须用共享包的 `isAiDriven()`，不能写死 `'ai_managed'` ——
+            这与 `TraderModals.tsx` 里 `strategyIdFor()` 那个 P0 是同一个坑：
+            `AI_DRIVEN_MODES` 已经包含 `ai_team` / `jev`，而写死单个模式名时
+            后加的模式会落进 `else` 分支，显示一个**改了也不生效**的下拉框。
+
+            页头（`TraderPage`）对这三种模式分别做了同样的处理，这里与它保持一致。
           */}
-          {trader.mode === 'ai_managed' ? (
+          {isAiDriven(trader.mode) ? (
             <Field
               label="策略"
-              hint="AI 托管机器人不使用策略 —— 参数与交易提示词由 AI 自己设定并持续调整。"
+              hint="AI 驱动的模式不引用策略 —— 参数由 AI 自己设定并持续调整（JEV 模式的参数在机器人页的「JEV 模式」标签里调）。"
             >
-              <div className="text-base text-ink-faint">智能托管（不使用策略参数）</div>
+              <div className="text-base text-ink-faint">不使用策略参数</div>
             </Field>
           ) : (
             <Field label="策略">
@@ -228,10 +285,31 @@ export function TraderConfigModal({
             <NumberInput value={cycleIntervalMinutes} onValueChange={setCycleIntervalMinutes} step={1} />
           </Field>
 
-          {/* 起始权益 is read from the selected credential, not typed -------- */}
-          <EquitySourceField state={equity} editing />
+          {/*
+            起始权益的来源分两种 —— 与「新建机器人」弹窗同一个判据：
 
-          {baselineWarning && (
+              · **绑了账户**：从该凭证读真实钱包余额（`EquitySourceField`）；
+              · **不绑账户**：纯模拟盘，本金是创建时填的模拟本金。
+
+            ⚠️ 原来纯模拟盘也渲染 `EquitySourceField`：那里面有一个「立即从交易所读取」
+            按钮，而它在 `exchangeAccountId === 0` 时**永远不发请求**（effect 提前返回），
+            点下去什么也不会发生；字段名还写着「钱包余额」，暗示余额来自真实账户。
+            一个点了没反应、又在说假话的控件，属于客观缺陷 —— 不是取舍。
+            模拟本金本身不在这里改：服务端 PATCH 支持它，但控制台没有这条编辑路径
+            （见汇报里的"发现但未修"）。
+          */}
+          {trader.exchangeAccountId === null ? (
+            <Field
+              label="模拟盘起始余额（USDT）"
+              hint="纯模拟盘机器人不绑任何交易所账户；模拟钱包余额 = 本金 + 已实现净额。本金在创建时设定。"
+            >
+              <div className="num text-base text-ink-mid">
+                {paperStartingBalance === null ? '—（首次启动时使用默认本金）' : fmtAsset(paperStartingBalance, 'USDT', 2)}
+              </div>
+            </Field>
+          ) : (
+            <EquitySourceField state={equity} editing />
+          )}          {baselineWarning && (
             <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base text-warn">
               <span className="font-semibold">权益基准为 0。</span> {baselineWarning}
             </div>

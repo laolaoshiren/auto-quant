@@ -2,10 +2,8 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Brain,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronUp,
   Play,
   Settings2,
   Square,
@@ -31,7 +29,7 @@ import { PageShell, Metric } from '../components/shell';
 import { DecisionFeed } from '../components/DecisionFeed';
 import { AgentAuditPanel } from '../components/AgentAuditPanel';
 import { isOpenOrder, TraderTables, type TraderTabId } from '../components/TraderTables';
-import { MODE_HINT, MODE_LABEL, isPaperView, paperLabel } from '../lib/glossary';
+import { MODE_HINT, MODE_LABEL, isPaperView } from '../lib/glossary';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import { DashboardEquityChart, WinLossBar } from '../components/DashboardCharts';
 import { LeverageArc } from '../components/LeverageArc';
@@ -54,7 +52,6 @@ import {
   fmtNum,
   fmtPercent,
   fmtProfitFactor,
-  fmtSigned,
   fmtUsd,
   fmtUsdSigned,
   pnlColor,
@@ -633,7 +630,6 @@ export function TraderPage() {
       },
     };
   }, [snapshots]);
-  const marginUsed = positions.reduce((sum, p) => sum + p.marginUsed, 0);
   const notional = positions.reduce((sum, p) => sum + p.notional, 0);
   /*
    * ── 「空仓」时，保证金占用与可用余额该显示什么（2026-10-04 修的两个 BUG）────
@@ -663,7 +659,6 @@ export function TraderPage() {
    * ⚠️ **读不到时仍然显示 `—`，不显示 0。** 与卡片其它格同一条纪律：
    * `—` 是"我们不知道"，`0` 是"我们问过了，是零"。
    */
-  const nothingOpen = positions.length === 0 && openOrderTotal === 0;
   const effectiveLeverage = equity > 0 ? notional / equity : 0;
   /*
    * ⚠️ **浮盈优先用【实时持仓】，不能用快照 —— 否则同一屏两个数会打架。**
@@ -810,7 +805,9 @@ export function TraderPage() {
    * 而那几分钟里的盈亏本来就该算在今天 —— 用日界之前的那条才不漏。
    *
    * 机器人今天才建、日界之前没有任何快照时，回落到**最早的一条**：
-   * 那等于"从开始记录算起"，并在卡片上如实标注区间（见下面的 `todayIsPartial`）。
+   * 那等于"从开始记录算起" —— 此时它其实是"自机器人启动以来"，不是完整的"今日"。
+   * ⚠️ 卡片目前**没有**把这个差别标出来（审计记录：曾经算过 `todayIsPartial`，
+   * 但从未渲染；死变量已删）。要不要在「今日」旁加区间说明是 UI 文案取舍，留给后续决定。
    */
   const todayBaseline = useMemo(() => {
     if (snapshots.length === 0) return undefined;
@@ -852,9 +849,6 @@ export function TraderPage() {
       ? 0
       : (liveAccountEquity ?? snapshots[snapshots.length - 1]?.accountEquity ?? calibratedEquity) -
         todayBaseline.equity;
-  const todayIsPartial = todayBaseline !== undefined && !todayBaseline.full;
-  const todayBase = todayBaseline?.equity;
-  const todayPercent = todayBase ? (todayPnl / Math.abs(todayBase)) * 100 : 0;
 
   /*
    * 图表与缩略条共用同一份"可见区间"数据。
@@ -1219,7 +1213,6 @@ export function TraderPage() {
    */
   const account = accountState ?? lastKnownAccount?.account ?? null;
   const accountIsStale = accountState === null && lastKnownAccount !== null;
-  const accountNote = accountIsStale ? '（最近一次读数，机器人未运行）' : '';
   /*
    * ══════════════════════════════════════════════════════════════════════════
    *  ⚠️⚠️ **模拟盘上「账户余额」不能用真实钱包**（2026-10-15 用户实测抓到）
@@ -2024,7 +2017,7 @@ export function TraderPage() {
               常驻一个手动按钮反而在暗示"不按就不对账"，那是假的。
               注意边界：**停止中**的机器人不在周期对账的覆盖范围内，它只在服务启动
               那一次被对账（或重新启动机器人之后）。接口仍然在
-              （`POST /api/traders/:id/reconcile`、`lib/actions.ts` 的 `useReconcile`），
+              （`POST /api/traders/:id/reconcile`），
               只是控制台不再提供一个按钮。
           */}
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
@@ -2647,7 +2640,7 @@ function MetricCard({ children }: { children: ReactNode }) {
  * "为什么没有形状"。一条 36px 的缩略线把这件事一次说完 —— 走平就是走平，
  * 两个点就是两个点，不需要 220px 的坐标轴来证明（`LAYOUT.md` §3）。
  *
- * 为什么就画在这个文件里，而不是复用总览页的 `EquityStrip`
+ * 为什么就画在这个文件里，而不是复用总览页的曲线
  * （`pages/overviewParts.tsx`）：那一页的点是**多机器人合并**后的序列，形状不同、
  * 这一页要显示的口径也不同（归属权益 vs 总权益），跨页互引会让两个页面必须一起改。
  */

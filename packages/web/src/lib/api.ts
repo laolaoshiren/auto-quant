@@ -184,15 +184,6 @@ export function clearToken(): void {
   }
 }
 
-export function getStoredUser(): User | null {
-  try {
-    const raw = localStorage.getItem(USER_KEY);
-    return raw ? (JSON.parse(raw) as User) : null;
-  } catch {
-    return null;
-  }
-}
-
 export function setStoredUser(user: User): void {
   try {
     localStorage.setItem(USER_KEY, JSON.stringify(user));

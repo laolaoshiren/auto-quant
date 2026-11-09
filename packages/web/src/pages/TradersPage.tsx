@@ -7,14 +7,7 @@ import type { EquitySnapshot, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries, type TraderSummary } from '../lib/summaries';
-import {
-  attributedEquityOf,
-  committedCapitalOf,
-  fleetTotals,
-  groupTradersByAccount,
-  isLedgerSuspect,
-  realizedPnlOf,
-} from '../lib/fleetTotals';
+import { attributedEquityOf, fleetTotals, isLedgerSuspect, realizedPnlOf } from '../lib/fleetTotals';
 import { pairEquityByTrader } from '../lib/equityPairing';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useRunOnce } from '../lib/actions';

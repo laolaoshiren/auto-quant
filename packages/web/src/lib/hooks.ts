@@ -261,11 +261,6 @@ export function usePolled<T>(
   return { data, error, loading, updatedAt, stale: data !== null && error !== null, reload };
 }
 
-/** Poll interval that lengthens while the socket is delivering live data. */
-export function fallbackInterval(socketOpen: boolean, liveMs = 5000, idleMs = 3000): number {
-  return socketOpen ? liveMs : idleMs;
-}
-
 export function useDocumentTitle(title: string): void {
   useEffect(() => {
     const previous = document.title;

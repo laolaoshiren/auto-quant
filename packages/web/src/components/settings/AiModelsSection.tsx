@@ -26,12 +26,10 @@ import { usePolled } from '../../lib/hooks';
 import {
   Badge,
   Button,
-  Collapsible,
   Empty,
   ErrorNote,
   Field,
   Modal,
-  NumberInput,
   Panel,
   Select,
   Spinner,
@@ -403,7 +401,6 @@ export function AiModelsSection() {
   const providerById = useMemo(() => new Map(providers.map((provider) => [provider.id, provider])), [providers]);
 
   const descriptor = providers.find((p) => p.id === draft.provider);
-  const defaults = descriptor?.defaults ?? FALLBACK_DEFAULTS;
 
   /* --- list filtering ---------------------------------------------------- */
 

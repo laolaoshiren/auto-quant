@@ -182,8 +182,8 @@ test('★★★ `applyPreset(current, preset)` 这个"以草稿为底"的入口�
   );
   assert.match(
     codeOnly(LIB),
-    /export function resolvePreset|resolvePreset,|resolvePreset\b/,
-    '★ 前提：`resolvePreset` 仍然从这里被引用（否则这条守卫盯错了文件）',
+    /export function (presetById|validateStrategy|cloneConfig)/,
+    '★ 前提：这一份确实是 lib/strategy.ts 的**代码**（否则这条守卫盯错了文件）',
   );
 });
 

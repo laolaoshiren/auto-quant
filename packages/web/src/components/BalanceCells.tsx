@@ -47,13 +47,10 @@ export function BalanceCell({
   balance,
   error,
   testnet,
-  now,
 }: {
   balance: ExchangeBalance | null;
   error: string | null;
   testnet: boolean;
-  /** Ticking clock, so the relative read time stays honest between renders. */
-  now: number;
 }) {
   /*
    * 提到变量里是因为**两个渲染分支都要用它**：第一次只加在"有实时读数"

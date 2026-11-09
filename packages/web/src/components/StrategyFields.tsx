@@ -8,7 +8,7 @@
 import { useState, type ReactNode } from 'react';
 import type { CoinPoolRank, CoinSourceType, StrategyConfig, Timeframe } from '@aq/shared';
 import { TIMEFRAMES, coinSourceTypeLabel } from '@aq/shared';
-import { Badge, Field, NumberInput, Select, TextInput, Toggle, cn } from './ui';
+import { Badge, Field, Select, TextInput, Toggle, cn } from './ui';
 import { FieldError, NumField, PeriodListField, Section } from './StrategyFieldKit';
 
 /* -------------------------------------------------------------------------- */

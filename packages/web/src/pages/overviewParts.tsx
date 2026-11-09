@@ -7,9 +7,9 @@
  *
  * 两处与 LAYOUT.md 直接对应的决定：
  *
- * 1. **数据太薄时不画整张图**（§4）。少于 3 个快照点、或权益完全走平时，
- *    `EquityStrip` 用一条 36px 的缩略线替代 240px 的图表 —— 而且因为那条线是
- *    纯 SVG，走平时连 recharts 那个 chunk 都不会下载。
+ * 1. **图表永远展开、高度固定**（§4）。曲线本身在 `EquityCurveChart.tsx`
+ *    （懒加载，把 recharts 挡在首屏之外）；这一页不再按"数据够不够厚"决定
+ *    展开还是收成缩略线 —— 那会让版面随数据变高变矮（见 `OverviewPage` 里的说明）。
  * 2. **表格行要密**（§2）。这里把所有单元格压到 `py-1.5` + 两行以内，
  *    并砍掉不挣宽度的那一列（见 `TradersSnapshotTable` 的注释）。
  */
@@ -59,93 +59,6 @@ export function equityShape(points: EquityPoint[]): { hasShape: boolean; flat: b
   const flat = spread <= threshold;
 
   return { hasShape: values.length >= 3 && !flat, flat };
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Compact equity strip                                                       */
-/* -------------------------------------------------------------------------- */
-
-/**
- * 数据太薄时的紧凑替代品。
- *
- * 两种形态各自说真话：没有快照时给一句"还没有"，并说明多久之后会有；
- * 有快照但没有形状时给一条缩略线 —— 它**就是**那张图，只是不需要 240px。
- */
-export function EquityStrip({
-  points,
-  change,
-  changePercent,
-  rangeLabel,
-  flat,
-}: {
-  points: EquityPoint[];
-  change: number | null;
-  changePercent: number | null;
-  /** 当前选中的区间标签（`7D` / `全部`…），用来说清这条线是哪一段。 */
-  rangeLabel: string;
-  flat: boolean;
-}) {
-  if (points.length === 0) {
-    return (
-      <div className="rounded-lg border border-dashed border-base-750 bg-base-900/60 px-3 py-2.5">
-        <p className="text-base text-ink-lo">还没有权益快照，暂时没有曲线可画。</p>
-        <p className="mt-0.5 text-xs leading-relaxed text-ink-faint">
-          每个决策周期结束时会记录一次 —— 机器人跑完两个周期后，这里会自动展开成完整曲线。
-        </p>
-      </div>
-    );
-  }
-
-  const values = points.map((point) => point.equity);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const span = max - min;
-  const last = points.length - 1;
-
-  /*
-   * 缩略线用 `viewBox="0 0 100 100"` + `preserveAspectRatio="none"` 拉满整宽，
-   * 所以 `strokeWidth` 必须配 `vectorEffect="non-scaling-stroke"` —— 否则
-   * 非等比缩放会把线宽也一起压成细丝或拉成色块。
-   */
-  const path = points
-    .map((point, index) => {
-      const x = last === 0 ? 0 : (index / last) * 100;
-      // 走平时按中线画：贴在盒子边缘的一条线看起来像被裁掉了。
-      const y = span === 0 ? 50 : 100 - ((point.equity - min) / span) * 100;
-      return `${index === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`;
-    })
-    .join(' ');
-
-  const stroke = change === null || change === 0 ? 'text-ink-lo' : change > 0 ? 'text-up' : 'text-down';
-
-  return (
-    <div className="flex items-center gap-3 rounded-lg border border-base-750 bg-base-900 px-3 py-2">
-      <div className={cn('h-9 min-w-0 flex-1', stroke)}>
-        <svg
-          viewBox="0 0 100 100"
-          preserveAspectRatio="none"
-          className="h-full w-full"
-          role="img"
-          aria-label={`${rangeLabel} ${BALANCE_LABEL.equity}缩略线`}
-        >
-          <path d={path} fill="none" stroke="currentColor" strokeWidth={2} vectorEffect="non-scaling-stroke" />
-        </svg>
-      </div>
-      <div className="shrink-0 text-right">
-        <div className={cn('num text-base leading-tight', pnlColor(change))}>
-          {change === null ? '—' : fmtUsdSigned(change, 2)}
-        </div>
-        {/*
-          不说"共 N 个快照点"：快照数量是内部诊断值（LAYOUT.md §3），正常运行时
-          看它一百次也拿不到信息。这里要说的是**为什么没有展开成图表**。
-        */}
-        <div className="num text-xs text-ink-faint">
-          {flat ? `${rangeLabel} ${BALANCE_LABEL.equity}持平` : '采样点不足，暂不展开曲线'}
-          {changePercent !== null && ` · ${fmtPercent(changePercent)}`}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 /* -------------------------------------------------------------------------- */

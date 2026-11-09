@@ -53,7 +53,6 @@ import {
   tradingEnvLabel,
   tradingEnvTitle,
   timeAgo,
-  pnlColor,
 } from '../../lib/format';
 
 interface AccountDraft {
@@ -194,8 +193,15 @@ export function ExchangeAccountsSection() {
   const [overrides, setOverrides] = useState<Record<number, FreshRead>>({});
   const [refreshingId, setRefreshingId] = useState<number | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
-  /** 每秒走一次的时钟，让"12 秒前"在两次轮询之间也不说谎。 */
-  const now = useTicker(1000);
+  /*
+   * 每秒走一次的时钟 —— **它的作用就是让这一节重新渲染**。
+   *
+   * `BalanceCell` 里那句「读取于 12 秒前」用的是 `timeAgo()`（内部读 `Date.now()`），
+   * 两次轮询之间（30 秒）只有重新渲染才会刷新它。所以这里不需要、也不该把 tick
+   * 往子组件里传：`BalanceCell` 曾经有一个 `now` 属性，但它从未被读过 ——
+   * 真正起作用的就是这次重渲染。写成不接收返回值的调用，把这个意图说清楚。
+   */
+  useTicker(1000);
 
   /*
    * ⚠️ **不能写 `query.data ?? []`** —— 那个字面量每轮渲染都会新建一个数组，
@@ -784,7 +790,7 @@ export function ExchangeAccountsSection() {
                      * 主次由左栏的合计承担。
                      */}
                     <div className="px-3 py-2.5">
-                      <BalanceCell balance={balance} error={balanceError} testnet={row.testnet} now={now} />
+                      <BalanceCell balance={balance} error={balanceError} testnet={row.testnet} />
                       {balance && asset !== DEFAULT_SETTLE_ASSET && (
                         // 交易所钱包不是 USDT 时，左栏合计不会把它加进去 —— 必须说清。
                         <p className="mt-0.5 text-xs text-warn">

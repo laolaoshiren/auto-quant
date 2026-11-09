@@ -8,7 +8,6 @@
  */
 import { type ReactNode } from 'react';
 import type { DecisionAction, DecisionRecord, ExecutionLogEntry } from '@aq/shared';
-import { orderPurposeLabel } from '@aq/shared';
 import { Badge, Button, Collapsible, CopyButton, type Tone } from './ui';
 import { useCopy } from '../lib/hooks';
 import { fmtInt, fmtUsd } from '../lib/format';
@@ -123,17 +122,6 @@ export const STATUS_LABELS: Record<ExecutionLogEntry['status'], string> = {
 
 export function statusLabel(status: string): string {
   return STATUS_LABELS[status as ExecutionLogEntry['status']] ?? status;
-}
-
-/**
- * `OrderRecord.purpose` 是稳定机器码 —— 永远不要把原码打在界面上。
- *
- * 标签表本身在 `@aq/shared`（`orderPurposeLabel`）里：服务端日志、提示词和
- * 这个控制台读的是同一批码。这里保留同名导出只是为了让老调用点不用改，
- * **不再自带一份 map** —— 两份 map 迟早会分叉，而分叉的那天没人会发现。
- */
-export function purposeLabel(purpose: string): string {
-  return orderPurposeLabel(purpose);
 }
 
 /** Tailwind classes for an execution-log status. */
@@ -269,23 +257,6 @@ export function RejectedBanner({ log, className }: { log: ExecutionLogEntry[]; c
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Rejected proposal card (rail)                                              */
-/* -------------------------------------------------------------------------- */
-
-export function RejectedCard({ entry }: { entry: ExecutionLogEntry }) {
-  return (
-    <div className="min-w-0 rounded-md border border-warn/50 bg-warn/10 px-3 py-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge tone="warn">被拒绝</Badge>
-        <span className="text-base font-semibold text-ink-hi">{entry.symbol}</span>
-        <span className="text-xs text-ink-lo">{actionLabel(entry.action)}</span>
-      </div>
-      <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-warn/90">{plainText(entry.detail)}</p>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
 /*  Prompt / trace panels                                                      */
 /* -------------------------------------------------------------------------- */
 
@@ -393,39 +364,6 @@ export function PromptBlocks({ record, onExpand }: { record: DecisionRecord; onE
         defaultOpen={false}
         onExpand={onExpand}
       />
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Small segmented tabs — 思考过程 / 提示词 in the decision feed               */
-/* -------------------------------------------------------------------------- */
-
-export function MiniTabs<T extends string>({
-  tabs,
-  active,
-  onChange,
-}: {
-  tabs: Array<{ id: T; label: string }>;
-  active: T;
-  onChange: (id: T) => void;
-}) {
-  return (
-    <div className="flex items-center gap-0.5">
-      {tabs.map((tab) => (
-        <button
-          key={tab.id}
-          type="button"
-          onClick={() => onChange(tab.id)}
-          className={
-            active === tab.id
-              ? 'rounded border border-accent/60 bg-accent/15 px-2.5 py-1 text-xs font-semibold text-accent'
-              : 'rounded border border-transparent px-2.5 py-1 text-xs text-ink-lo transition hover:border-base-700 hover:text-ink-mid'
-          }
-        >
-          {tab.label}
-        </button>
-      ))}
     </div>
   );
 }

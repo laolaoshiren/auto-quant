@@ -1,6 +1,5 @@
 import { useLayoutEffect, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { cn } from '../../components/ui';
 import { TOOLBAR_END_ID, TOOLBAR_START_ID } from '../ids';
 
 /**
@@ -116,9 +115,4 @@ export function PageActions({
       {end && hosts.end && createPortal(end, hosts.end)}
     </>
   );
-}
-
-/** 工具栏里的分组竖线。仅控制台模板会用到；就地渲染时它无害。 */
-export function ActionSep() {
-  return <span aria-hidden className="tb-sep" />;
 }

@@ -837,8 +837,7 @@ html.aq-quill .num {
   letter-spacing: -0.01em;
 }
 html.aq-quill .num.text-2xl,
-html.aq-quill .num.text-3xl,
-html.aq-quill .num.text-4xl {
+html.aq-quill .num.text-3xl {
   letter-spacing: -0.022em;
 }
 

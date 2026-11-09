@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Ban, Bot, Check, Info, LoaderCircle, Minus, ShieldAlert, ShieldCheck, WifiOff, X } from 'lucide-react';
-import { api, type CheckStage, type StrategyCheckResult, type StrategyCheckSample } from '../lib/api';
+import { api, type StrategyCheckResult, type StrategyCheckSample } from '../lib/api';
 import { Badge, Button, Collapsible, Empty, ErrorNote, Field, Modal, Select, Spinner, TextInput, cn } from './ui';
 import { SectionLabel } from './shell';
 import { ExecutionList, PromptBlock, RejectedBanner, actionLabel } from './DecisionAudit';
@@ -30,7 +30,6 @@ const KNOWN_STAGES = [
 
 const MODEL_STAGE = '调用模型';
 const PARSE_STAGE = '解析模型输出';
-const RISK_STAGE = '硬风控审查';
 
 interface AiModelOption {
   id: number;
@@ -354,10 +353,6 @@ export function StrategyCheckModal({
       setStartedAt(null);
     }
   };
-
-  const stages: CheckStage[] = result?.stages ?? [];
-  const failedStage = stages.find((stage) => !stage.ok);
-  const currentStep = failedStage?.name ?? stages[stages.length - 1]?.name ?? '正在准备';
 
   return (
     <Modal

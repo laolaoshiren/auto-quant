@@ -5,7 +5,6 @@ import {
   api,
   type AiModelRow,
   type DiscoverModelsResult,
-  type EquitySource,
   type ExchangeAccountRow,
   type PreflightCheck,
   type TraderRow,
@@ -335,9 +334,18 @@ export function NewTraderModal({
      * 下拉里始终有「不绑账户（纯模拟盘）」这一项。
      */
     if (models && models.length === 0) gaps.push('AI 模型');
-    if (strategyList && strategyList.length === 0) gaps.push('策略');
+    /*
+     * ⚠️ **只有"固定策略"模式才需要策略**（2026-11 审计发现）。
+     *
+     * AI 驱动的模式（智能托管 / AI 团队 / JEV）在服务端**必须**传
+     * `strategyId: null`，参数各自落在 `agent_config_json` / `defaultJevConfig()` 里。
+     * 这里却无条件把「策略」算成缺失项 —— 于是策略表被清空（默认策略可以删，
+     * 见 `db/schema.ts` 的 M7 注释：**删到没有任何策略也不影响智能托管**）之后，
+     * 控制台**根本建不出 AI 驱动机器人**，而这是服务端明确支持的情形。
+     */
+    if (!isAiDriven(mode) && strategyList && strategyList.length === 0) gaps.push('策略');
     return gaps;
-  }, [models, strategyList]);
+  }, [models, strategyList, mode]);
 
   const submit = async () => {
     setError(null);
@@ -351,7 +359,9 @@ export function NewTraderModal({
      * ⚠️ **`exchangeAccountId` 不再参与校验**（用户 2026-10-27 需求）：
      * 留空 = 纯模拟盘机器人，是合法选择。
      */
-    if (modelChoice === '' || strategyId === '') return setError('请选择模型与策略。');
+    if (modelChoice === '') return setError('请选择 AI 模型。');
+    /* ⚠️ 只有固定策略模式才要求策略 —— 见上面 `missing` 里的说明。 */
+    if (!isAiDriven(mode) && strategyId === '') return setError('请选择策略。');
     /* 模拟余额填了就必须是个正数 —— 否则静默回落成默认值，用户以为生效了。 */
     const paperAmount = paperBalance.trim() === '' ? 0 : Number(paperBalance);
     /*
@@ -878,28 +888,34 @@ export function NewTraderModal({
             </div>
           )}
 
-          <Field
-            label="策略"
-            hint={
-              mode === 'ai_managed' || mode === 'ai_team'
-                ? 'AI 模式下这项被忽略 —— 参数来自 AI 自己（每个机器人独立一份）。'
-                : mode === 'jev'
-                  ? 'JEV 模式下这项只提供风控边界与标的池；交易判断由 Jev 做出。'
-                  : undefined
-            }
-          >
-            <Select
-              value={strategyId}
-              onChange={(e) => setStrategyId(Number(e.target.value))}
-              disabled={isAiDriven(mode)}
+          {/*
+            **AI 驱动的模式不显示策略下拉框**（判据用 `isAiDriven()`，见
+            `strategyIdFor()` 上那个 P0 的说明）。
+
+            原来这里显示的是一个 `disabled` 的下拉框，文案还说 JEV 模式下
+            「这项只提供风控边界与标的池」—— 而服务端把 `jev` 也算作
+            AI 驱动模式（`AI_DRIVEN_MODES` 含 `'jev'`），收到非 null 的
+            `strategyId` 会直接报「AI 托管模式不引用任何策略」。于是那个下拉
+            既不能用、显示的又是一件不会发生的事。
+          */}
+          {isAiDriven(mode) ? (
+            <Field
+              label="策略"
+              hint="AI 驱动的模式不引用策略 —— 参数由 AI 自己设定并持续调整（JEV 模式的参数在机器人页的「JEV 模式」标签里调）。"
             >
-              {strategyList?.map((strategy) => (
-                <option key={strategy.id} value={strategy.id}>
-                  {strategy.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
+              <div className="text-base text-ink-faint">不使用策略参数</div>
+            </Field>
+          ) : (
+            <Field label="策略">
+              <Select value={strategyId} onChange={(e) => setStrategyId(Number(e.target.value))}>
+                {strategyList?.map((strategy) => (
+                  <option key={strategy.id} value={strategy.id}>
+                    {strategy.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
           </section>
 
           <section className="space-y-3 border-t border-base-750 pt-4">
