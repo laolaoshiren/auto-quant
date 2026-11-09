@@ -98,7 +98,16 @@ const log = createLogger('api');
 
 const CredentialsSchema = z.object({
   username: z.string().min(1).max(64),
-  password: z.string().min(6).max(256),
+  /*
+   * ⚠️ 登录的密码**不设最小长度**（2026-11-10 用户要求本地用 `admin/admin`）。
+   *
+   * 原来这里是 `.min(6)` —— 它挡住的不是攻击者（攻击者会直接发 6 位以上的猜测），
+   * 而是**用户自己已经设过的短密码**：登录接口只负责"拿输入去比对哈希"，
+   * 长度校验属于"设置密码"那条路（注册/改密码另有强度要求）。
+   * 长度限制留在登录侧只会让一个合法密码返回 400「Bad Request」，
+   * 用户看到的是"登录按钮没反应/格式错误"，与真实原因无关。
+   */
+  password: z.string().min(1).max(256),
 });
 
 /**
