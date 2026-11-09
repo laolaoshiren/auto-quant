@@ -271,12 +271,12 @@ export async function runDecisionTool(
       const symbols = await deps.candidates();
       return {
         text: `候选池（${symbols.length} 个）：${symbols.join('、')}`,
-        summary: `list_candidates → ${symbols.length} 个`,
+        summary: `读取候选池 → ${symbols.length} 个`,
       };
     }
 
     if (call.tool === 'get_klines') {
-      if (!symbol) return { text: 'get_klines 需要 symbol。', summary: 'get_klines 缺少 symbol' };
+      if (!symbol) return { text: 'get_klines 需要 symbol。', summary: '读取K线 缺少标的' };
       const timeframe = typeof call.args.timeframe === 'string' ? call.args.timeframe : '15m';
       /*
        * ⚠️ **无效周期必须在这一层拒掉，并告诉它哪些可用。**
@@ -299,7 +299,7 @@ export async function runDecisionTool(
           text:
             `周期 "${timeframe}" 不存在 —— 币安只接受这些：${TIMEFRAMES.join(' / ')}。` +
             '请用其中一个重新调用 `get_klines`。',
-          summary: `get_klines 周期无效：${timeframe}`,
+          summary: `读取K线 周期无效：${timeframe}`,
         };
       }
       const raw = Number(call.args.count);
@@ -311,12 +311,12 @@ export async function runDecisionTool(
       if (candles.length === 0) {
         return {
           text: `${symbol} ${timeframe} 没有取到 K 线 —— 标的或周期可能写错了（周期要用 1m/5m/15m/1h/4h/1d 这种写法）。`,
-          summary: `get_klines ${symbol} ${timeframe} → 空`,
+          summary: `读取K线 ${symbol} ${timeframe} → 无数据`,
         };
       }
       return {
         text: renderKlines(symbol, timeframe, candles),
-        summary: `get_klines ${symbol} ${timeframe} ×${candles.length}`,
+        summary: `读取K线 ${symbol} ${timeframe} ×${candles.length}`,
       };
     }
 
@@ -357,12 +357,12 @@ export async function runDecisionTool(
           text:
             '没有符合条件的标的 —— 这个条件现在筛不出东西（可能是门槛太严，或者市场确实没有）。\n' +
             '**你可以放宽条件再要一次，或者直接用手上的数据继续判断** —— 这不影响你的权限。',
-          summary: 'screen_symbols → 0 个',
+          summary: '筛选标的 → 0 个',
         };
       }
       return {
         text: renderScreenResult(rows),
-        summary: `screen_symbols → ${rows.length} 个`,
+        summary: `筛选标的 → ${rows.length} 个`,
       };
     }
 
@@ -390,7 +390,7 @@ export async function runDecisionTool(
       if (Object.keys(rawPatch).length === 0) {
         return {
           text: 'set_params 需要给出要改的字段（例如 {"patch":{"coinSource":{"coinPoolLimit":25}}}）。',
-          summary: 'set_params 缺少 patch',
+          summary: '修改参数 缺少 patch',
         };
       }
       if (reason.trim() === '') {
@@ -398,7 +398,7 @@ export async function runDecisionTool(
           text:
             'set_params 需要一个 reason —— 一次说不清理由的改动，事后没人能复查它为什么发生。\n' +
             '**把理由补上再来一次，这一轮的时间不算浪费。**',
-          summary: 'set_params 缺少 reason',
+          summary: '修改参数 缺少理由',
         };
       }
 
@@ -412,7 +412,7 @@ export async function runDecisionTool(
             ? ` 被钳制的项（实际生效值）：${JSON.stringify(outcome.clamps)}`
             : '') +
           '\n（改动下一轮生效；硬上限由代码强制，与这里写什么无关。）',
-        summary: `set_params → ${outcome.applied ? '已生效' : '被拒'}`,
+        summary: `修改参数 → ${outcome.applied ? '已生效' : '被拒'}`,
       };
     }
 
@@ -431,7 +431,7 @@ export async function runDecisionTool(
           text:
             '`request_deep_analysis` 需要一个 `symbols` 数组，例如：\n' +
             '<tool>{"tool":"request_deep_analysis","args":{"symbols":["BTCUSDT","SOLUSDT"],"reason":"放量突破"}}</tool>',
-          summary: 'request_deep_analysis 缺少 symbols',
+          summary: '请求深挖分析 缺少标的',
         };
       }
 
@@ -456,7 +456,7 @@ export async function runDecisionTool(
       if (reason) lines.push('', `你给的理由（下一轮会一并提醒你）：${reason}`);
       return {
         text: lines.join('\n'),
-        summary: `request_deep_analysis → ${ack.accepted.length} 个`,
+        summary: `请求深挖分析 → ${ack.accepted.length} 个`,
       };
     }
 
