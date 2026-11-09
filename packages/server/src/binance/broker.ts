@@ -493,7 +493,8 @@ export class BinanceBroker {
   }
 
   /** Set margin type for a symbol. Cannot change while positions are open. */
-  async setMarginType(symbol: string, marginType: 'ISOLATED' | 'CROSSED'): Promise<boolean> {    if (this.dryRun) return true;
+  async setMarginType(symbol: string, marginType: 'ISOLATED' | 'CROSSED'): Promise<boolean> {
+    if (this.dryRun) return true;
     const normalized = normalizeSymbol(symbol);
     try {
       await this.rest.signedRequest('POST', '/fapi/v1/marginType', {

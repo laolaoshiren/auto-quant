@@ -175,6 +175,62 @@ function check(
 }
 
 /**
+ * 与**有没有 API 凭据**无关的三项检查：合约元数据、时钟同步、测试环境提示。
+ *
+ * ## 为什么单独抽出来（2026-11-09 修 PR #185 的早退）
+ *
+ * 模拟盘不需要凭据，所以 `preflight()` 在"没有凭据 + dryRun"时提前返回。
+ * 原来那个 `return checks` 把**下面这三项一起跳过了** —— 而它们对模拟盘不是可选：
+ *
+ *   · **合约元数据**：`registry.size === 0` 是 blocking 检查。跳过它，一个
+ *     元数据没加载到的模拟盘会带着空 registry 启动，之后**每一笔下单**都抛
+ *     `Unknown or non-tradable futures symbol`，而启动预检显示全绿。
+ *   · **时钟同步**：`clockOffsetMs` 已经量好了，白丢一次告知。
+ *   · **测试环境提示**：模拟盘连的正是 demo/testnet 端点，那条
+ *     「行情质量、资金费率与标记价格都与实盘不同，不要在这里校准仓位大小」
+ *     对它比对实盘**更要紧**。
+ *
+ * ⇒ 把这三项做成一个函数，两条返回路径都带上，避免"加了一条新路径就漏检查"。
+ */
+function environmentChecks(connection: ExchangeConnection): PreflightCheck[] {
+  const checks: PreflightCheck[] = [];
+
+  /* --- Symbol filters loaded ------------------------------------------- */
+  checks.push(
+    check(
+      '合约元数据',
+      connection.registry.size > 0 ? 'ok' : 'error',
+      `已加载 ${connection.registry.size} 个可交易合约。`,
+      connection.registry.size === 0,
+    ),
+  );
+
+  /* --- Clock ------------------------------------------------------------ */
+  const drift = Math.abs(connection.clockOffsetMs);
+  checks.push(
+    check(
+      '时钟同步',
+      drift < 5000 ? 'ok' : drift < 60_000 ? 'warn' : 'error',
+      `本机时钟与币安相差 ${connection.clockOffsetMs}ms。`,
+      drift >= 60_000,
+    ),
+  );
+
+  /* --- Environment warnings -------------------------------------------- */
+  if (connection.endpoints.isTestnet) {
+    checks.push(
+      check(
+        '测试环境提示',
+        'warn',
+        '当前运行在测试/模拟环境。其行情质量、资金费率与标记价格都与实盘不同，不要在这里校准仓位大小或滑点假设。',
+      ),
+    );
+  }
+
+  return checks;
+}
+
+/**
  * Verify that a trader can actually trade before it is allowed to start.
  *
  * Mirrors the "launch preflight" concept: model access, exchange permissions,
@@ -219,7 +275,12 @@ export async function preflight(
           paper.equity <= 0,
         ),
       );
-      return checks;
+      /*
+       * ⚠️ **不要在这里裸 `return checks`**（2026-11-09 修）：
+       * 「合约元数据」「时钟同步」「测试环境提示」三项对模拟盘同样成立，
+       * 而它们原来被这个早退一起跳过了 —— 详见 `environmentChecks()` 的注释。
+       */
+      return [...checks, ...environmentChecks(connection)];
     }
     checks.push(
       check('API 凭据', 'error', '该交易所账户还没有配置 API Key 与 Secret。', options.requireCredentials !== false),
@@ -328,37 +389,8 @@ export async function preflight(
     checks.push(check('持仓模式', 'warn', `无法读取持仓模式：${(error as Error).message}`));
   }
 
-  /* --- Symbol filters loaded ------------------------------------------- */
-  checks.push(
-    check(
-      '合约元数据',
-      connection.registry.size > 0 ? 'ok' : 'error',
-      `已加载 ${connection.registry.size} 个可交易合约。`,
-      connection.registry.size === 0,
-    ),
-  );
-
-  /* --- Clock ------------------------------------------------------------ */
-  const drift = Math.abs(connection.clockOffsetMs);
-  checks.push(
-    check(
-      '时钟同步',
-      drift < 5000 ? 'ok' : drift < 60_000 ? 'warn' : 'error',
-      `本机时钟与币安相差 ${connection.clockOffsetMs}ms。`,
-      drift >= 60_000,
-    ),
-  );
-
-  /* --- Environment warnings -------------------------------------------- */
-  if (connection.endpoints.isTestnet) {
-    checks.push(
-      check(
-        '测试环境提示',
-        'warn',
-        '当前运行在测试/模拟环境。其行情质量、资金费率与标记价格都与实盘不同，不要在这里校准仓位大小或滑点假设。',
-      ),
-    );
-  }
+  /* --- 与凭据无关的公共检查（模拟盘也要跑） ---------------------------- */
+  checks.push(...environmentChecks(connection));
 
   return checks;
 }

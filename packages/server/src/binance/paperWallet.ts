@@ -84,6 +84,74 @@ function finite(value: number): number {
   return Number.isFinite(value) ? value : 0;
 }
 
+/* -------------------------------------------------------------------------- */
+/*  持仓折算：浮盈 + 保证金占用                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 持仓行的**最小形状** —— 只取算浮盈与保证金占用需要的字段。
+ *
+ * `side` 是**数据库原值**：`positions.side` 存的是小写 `'long' | 'short'`
+ * （`autoTrader` 写 `isLong ? 'long' : 'short'`，`repositories.ts` 也按小写读）。
+ * 所以这里用 `string` 收仓储行，而**方向判断只认小写** —— 见下方注释。
+ */
+export interface PaperPositionRow {
+  symbol: string;
+  side: string;
+  quantity: number;
+  entry_price: number;
+  margin_used: number;
+}
+
+/**
+ * 把持仓按标记价折算成「浮盈合计 + 保证金占用合计」。
+ *
+ * ## 为什么抽成一个纯函数（2026-11-09）
+ *
+ * 这段循环原先在 `manager.paperAccountStateOf()` 与 `api/server.ts` 的
+ * `readAccountBestEffort()` 里**各写了一份**。两份本该只差"标记价从哪来"，
+ * 但其中一份把方向判断写成了大写 `'LONG'` —— 于是模拟盘多头浮盈符号恒反，
+ * 而控制台（另一份，小写）与机器人决策（manager 那份）看到的余额互相矛盾。
+ *
+ * 抽出来之后：**符号判断只有一处**，测试直接钉在这一处。
+ *
+ * ## ⚠️ 方向判断必须是小写 `'long'`
+ *
+ * 写成 `'LONG'` 不会报错、不会崩溃，只会**静默地让每个多头按空头公式算**：
+ * 多头浮盈时 equity 被低估（可能误触熔断），多头浮亏时 equity 被高估
+ * （掩盖回撤）。库里存的就是小写 —— 这是 2026-11-09 实际修掉的一个 BUG，
+ * 不是假设。
+ *
+ * ## 拿不到标记价时
+ *
+ * 浮盈按 0 计 —— 宁可少算，也不凭空造一个价格。调用方在机器人还没跑起来时
+ * 拿不到行情，那种情况下"少算浮盈"远好过"编一个数"。
+ */
+export function paperPositionTotals(
+  positions: readonly PaperPositionRow[],
+  marks: ReadonlyMap<string, number>,
+): { unrealizedPnl: number; marginUsed: number } {
+  let unrealizedPnl = 0;
+  let marginUsed = 0;
+
+  for (const position of positions) {
+    marginUsed += finite(position.margin_used);
+
+    const mark = marks.get(position.symbol);
+    if (mark === undefined) continue;
+
+    const diff =
+      position.side === 'long'
+        ? (mark - position.entry_price) * position.quantity
+        : (position.entry_price - mark) * position.quantity;
+    /* 脏行（NaN / 缺字段）不参与合计，但不能让整个读数变成 NaN。 */
+    if (Number.isFinite(diff)) unrealizedPnl += diff;
+  }
+
+  return { unrealizedPnl, marginUsed };
+}
+
+
 /**
  * 校验操作员填的起始余额。
  *

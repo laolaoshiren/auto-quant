@@ -493,7 +493,7 @@ export class BinanceRest {
 
     for (const [key, value] of Object.entries(params)) {
       if (value === undefined || value === null) continue;
-      search.append(key, typeof value === 'boolean' ? String(value) : String(value));
+      search.append(key, String(value));
     }
 
     if (signed) {

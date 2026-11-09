@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { paperAccountState, validateStartingBalance } from './paperWallet.js';
+import { paperAccountState, paperPositionTotals, validateStartingBalance } from './paperWallet.js';
 
 test('★★★ 起始余额就是钱包余额，与任何真实账户无关', () => {
   const state = paperAccountState({
@@ -130,4 +130,86 @@ test('★ 拒绝时给出的原因里带具体数字（便于操作员判断该�
 
   const tooBig = validateStartingBalance(2_000_000_000);
   assert.ok(tooBig && /10 亿|1000000000/.test(tooBig), `原因里应写明上限（实际：${tooBig}）`);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  持仓折算：方向判断                                                          */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ 多头：标记价高于入场价 ⇒ 浮盈为正（方向判断只认小写 long）', () => {
+  /*
+   * Why this test exists（2026-11-09 修掉的真实 BUG）。
+   *
+   * PR #185 的第一版在 `manager.paperAccountStateOf()` 里把方向判断写成了
+   * `position.side === 'LONG'`，而 `positions.side` 存的是**小写** `'long'`
+   * —— 那个条件恒为假，于是**每个多头都按空头公式算**：
+   *
+   *   多头浮盈 → equity 被低估（可能误触熔断）
+   *   多头浮亏 → equity 被高估（掩盖回撤）
+   *
+   * 而控制台（`api/server.ts`）用的是小写、正确 —— 于是**同一台机器人，
+   * 决策时看到的余额和界面上显示的余额互相矛盾**，正是 PR #185 自己
+   * 在注释里点名的"必须同一套数字"那件事。
+   *
+   * 现在两份实现合并成 `paperPositionTotals()`，这条用例钉住它。
+   */
+  const totals = paperPositionTotals(
+    [{ symbol: 'BTCUSDT', side: 'long', quantity: 1, entry_price: 60000, margin_used: 120 }],
+    new Map([['BTCUSDT', 61000]]),
+  );
+
+  assert.equal(totals.unrealizedPnl, 1000, '多头浮盈必须是正的');
+  assert.equal(totals.marginUsed, 120);
+});
+
+test('★★★ 空头：标记价高于入场价 ⇒ 浮亏为负', () => {
+  const totals = paperPositionTotals(
+    [{ symbol: 'ETHUSDT', side: 'short', quantity: 2, entry_price: 3000, margin_used: 300 }],
+    new Map([['ETHUSDT', 3100]]),
+  );
+
+  assert.equal(totals.unrealizedPnl, -200, '空头在价格上涨时必须是亏损');
+});
+
+test('★ 多空混合时逐笔按方向算，再合计', () => {
+  const totals = paperPositionTotals(
+    [
+      { symbol: 'BTCUSDT', side: 'long', quantity: 1, entry_price: 60000, margin_used: 100 },
+      { symbol: 'ETHUSDT', side: 'short', quantity: 2, entry_price: 3000, margin_used: 50 },
+    ],
+    new Map([
+      ['BTCUSDT', 61000],
+      ['ETHUSDT', 3100],
+    ]),
+  );
+
+  assert.equal(totals.unrealizedPnl, 1000 - 200, '+1000（多）与 −200（空）合计');
+  assert.equal(totals.marginUsed, 150);
+});
+
+test('★ 拿不到标记价的持仓：浮盈按 0 计，保证金照算（不编造一个价格）', () => {
+  const totals = paperPositionTotals(
+    [{ symbol: 'SOLUSDT', side: 'long', quantity: 5, entry_price: 100, margin_used: 80 }],
+    new Map(), // 没有任何标记价
+  );
+
+  assert.equal(totals.unrealizedPnl, 0, '没有价格就不要算出一个假浮盈');
+  assert.equal(totals.marginUsed, 80, '保证金占用是本地事实，与有没有标记价无关');
+});
+
+test('★ 脏行（NaN 数量 / NaN 保证金）不污染合计', () => {
+  const totals = paperPositionTotals(
+    [
+      { symbol: 'BTCUSDT', side: 'long', quantity: Number.NaN, entry_price: 60000, margin_used: 100 },
+      { symbol: 'ETHUSDT', side: 'long', quantity: 1, entry_price: 3000, margin_used: Number.NaN },
+    ],
+    new Map([
+      ['BTCUSDT', 61000],
+      ['ETHUSDT', 3100],
+    ]),
+  );
+
+  assert.ok(Number.isFinite(totals.unrealizedPnl), 'NaN 数量必须被跳过，不能让合计变成 NaN');
+  assert.ok(Number.isFinite(totals.marginUsed), 'NaN 保证金必须按 0 计');
+  assert.equal(totals.unrealizedPnl, 100, '只有 ETHUSDT 那笔有效浮盈（3100−3000）×1');
 });

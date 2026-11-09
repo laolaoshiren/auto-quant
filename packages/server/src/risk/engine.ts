@@ -144,8 +144,6 @@ function num(value: number | null | undefined, fallback = 0): number {
  */
 export class RiskEngine {
   /**
-  /**
-  /**
    * 审核「加仓」—— 在一个已有持仓上再买一部分。
    *
    * ## 为什么不重写一份判据，而是复用 `reviewOpen`
@@ -685,7 +683,8 @@ export class RiskEngine {
           if (price > 0) {
             marginUsed += verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1);
           }
-        } else {          rejected.push({ decision, reason: verdict.reason });
+        } else {
+          rejected.push({ decision, reason: verdict.reason });
         }
         continue;
       }
