@@ -30,7 +30,6 @@ import { PageShell, SectionLabel, PAGE_MAIN_ID } from '../components/shell';
  * 而那正是模板系统要拆掉的那条线。
  */
 import { MAIN_SCROLL_ID } from '../templates/ids';
-import { PageActions } from '../templates/lib/PageActions';
 
 /**
  * 短标题（目录与折叠头用）+ 完整问答。
@@ -328,22 +327,18 @@ export function FaqPage() {
         title="这个终端如何运作"
         sub="在投入真金白银之前，值得先弄清楚的机制要点。"
         right={
-          /* 页面级动作 → 统一接口（控制台模板收进工具栏，经典模板就地显示）。 */
-          <PageActions
-            start={
-              <Button
-                size="sm"
-                onClick={() => setOpen(allOpen ? {} : Object.fromEntries(FAQ.map((item) => [item.id, true])))}
-              >
-                {allOpen ? (
-                  <ChevronUp aria-hidden className="h-3.5 w-3.5" />
-                ) : (
-                  <ChevronDown aria-hidden className="h-3.5 w-3.5" />
-                )}
-                {allOpen ? '全部折叠' : '全部展开'}
-              </Button>
-            }
-          />
+          /* 动作紧跟标题（与其它页一致，不再 portal 到最右端/工具栏）。 */
+          <Button
+            size="sm"
+            onClick={() => setOpen(allOpen ? {} : Object.fromEntries(FAQ.map((item) => [item.id, true])))}
+          >
+            {allOpen ? (
+              <ChevronUp aria-hidden className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronDown aria-hidden className="h-3.5 w-3.5" />
+            )}
+            {allOpen ? '全部折叠' : '全部展开'}
+          </Button>
         }
       />
 

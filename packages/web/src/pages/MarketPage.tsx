@@ -16,7 +16,6 @@ import { useEvents } from '../lib/store';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, TextInput, cn } from '../components/ui';
 import { CandlestickChart } from '../components/CandlestickChart';
-import { PageActions } from '../templates/lib/PageActions';
 import { fmtCompactAmount, fmtPercent, fmtPriceUsd, pnlColor } from '../lib/format';
 
 const INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;

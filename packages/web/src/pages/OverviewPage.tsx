@@ -45,7 +45,6 @@ import { pairEquityByTrader } from '../lib/equityPairing';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { Button, Empty, ErrorNote, Panel, Spinner3 } from '../components/ui';
 import { Metric, MetricGroup, PageShell, SectionLabel } from '../components/shell';
-import { PageActions } from '../templates/lib/PageActions';
 import { NewTraderModal } from '../components/TraderModals';
 import { ConfirmStopTrader } from '../components/ConfirmStopTrader';
 import { EQUITY_RANGES, mergeEquityCurves, rangeSpanMs, type EquityRange } from '../components/equityCurve';
@@ -587,15 +586,13 @@ export function OverviewPage() {
         <p className="num truncate text-xs text-ink-faint">
           更新于 {timeAgo(tradersQuery.updatedAt ? new Date(tradersQuery.updatedAt).toISOString() : null)}
         </p>
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          <PageActions
-            end={
-              <Button small variant="primary" onClick={() => setNewOpen(true)}>
-                新建机器人
-              </Button>
-            }
-          />
-        </div>
+        {/*
+          新建按钮**紧跟更新时间**，不再推到最右端（用户 2026-11-10：
+          「别单独搞那么最右边，不好用不方便看，也会造成大量空白」）。
+        */}
+        <Button small variant="primary" onClick={() => setNewOpen(true)}>
+          新建机器人
+        </Button>
       </header>
 
       <PageShell aside={rail} fillHeight={false}>

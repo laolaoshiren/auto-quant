@@ -181,13 +181,19 @@ export function SectionHeading({
   right?: ReactNode;
   sub?: ReactNode;
 }) {
+  /*
+   * ⚠️ **动作紧跟标题，不再推到最右端**（用户 2026-11-10：
+   * 「这几个页面得新建按钮…别单独搞那么最右边，不好用不方便看，也会造成大量空白」）。
+   *
+   * 原来外层是 `justify-between`：标题在左、按钮在页面最右 —— 中间一大段空白，
+   * 视线要横跨整页才能看到"新建"。现在改成**行内依次排列**（标题 → 按钮 → 说明），
+   * 按钮就在标题旁边；说明文字另起一行，不挤。
+   */
   return (
-    <div className="mb-2.5 flex flex-wrap items-end justify-between gap-x-3 gap-y-1">
-      <div className="min-w-0">
-        <h2 className="truncate text-xl font-semibold tracking-tight text-ink-hi">{title}</h2>
-        {sub && <p className="mt-0.5 text-xs text-ink-lo">{sub}</p>}
-      </div>
+    <div className="mb-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+      <h2 className="truncate text-xl font-semibold tracking-tight text-ink-hi">{title}</h2>
       {right && <div className="flex shrink-0 flex-wrap items-center gap-2">{right}</div>}
+      {sub && <p className="w-full text-xs text-ink-lo">{sub}</p>}
     </div>
   );
 }
