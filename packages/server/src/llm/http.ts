@@ -580,15 +580,3 @@ export async function executeStreamRequest(
     retryAfterMs: parseRetryAfter(response.headers.get('retry-after')),
   };
 }
-
-/** Non-throwing variant for `testConnection`, which reports instead of throwing. */export async function executeJsonRequestSafe(
-  provider: LlmProviderId | string,
-  request: OutboundRequest,
-  options: { signal?: AbortSignal; timeoutMs?: number; failFastOnMinimaxBaseResp?: boolean } = {},
-): Promise<{ response: JsonResponse | null; error: Error | null }> {
-  try {
-    return { response: await executeJsonRequest(provider, request, options), error: null };
-  } catch (error) {
-    return { response: null, error: error instanceof Error ? error : new Error(String(error)) };
-  }
-}

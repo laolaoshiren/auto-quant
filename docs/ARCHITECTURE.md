@@ -81,17 +81,13 @@ SQLite，迁移由 `PRAGMA user_version` 管理（`src/db/schema.ts`）。
 
 ### 4.1 端点路由（`endpoints.ts`）
 
-币安把合约 WebSocket 拆成了流量类别路由：
+**当前只用一条 WebSocket 通道：用户数据流（`/private`，listenKey）。**
+行情一律走 REST 轮询（`market/service.ts`），没有接入行情 WebSocket。
 
-| 路由 | 内容 |
-| --- | --- |
-| `/public` | 高频公开数据：`depth`、`bookTicker` |
-| `/market` | 常规行情：`kline`、`markPrice`、`aggTrade`、`ticker` |
-| `/private` | 用户数据流（listenKey） |
-
-**旧的无路由路径（`wss://fstream.binance.com/ws/...`）已停用。**
-`stream → route` 映射表是显式的，因为路由错误的表现是
-**握手成功但永远收不到任何数据** —— 这类静默失败最难排查。
+> 历史（2026-11-09 清理）：未接线的行情 WebSocket 实现（`BinanceMarketStream`）
+> 与它的 `/public` `/market` 流量类别路由表已移除 —— 它们从写出来起就没有生产调用点。
+> 如果将来接入行情 WS：路由错误的表现是**握手成功但永远收不到任何数据**，
+> 这类静默失败必须靠应用层存活检测抓（见 §4.3）。
 
 ### 4.2 REST 传输（`rest.ts`）
 

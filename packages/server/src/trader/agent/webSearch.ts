@@ -55,9 +55,6 @@ export interface WebSearchConfig {
   timeoutMs?: number;
 }
 
-/** 默认端点（magpie 的标准位置）。 */
-export const DEFAULT_SEARCH_ENDPOINT = 'http://127.0.0.1:3425/mcp/magpie/web-search';
-
 /**
  * 调一次 `web_search`。
  *

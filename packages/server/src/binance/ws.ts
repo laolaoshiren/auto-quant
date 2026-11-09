@@ -1,22 +1,17 @@
 import WebSocket from 'ws';
 import { createLogger } from '../logger.js';
 import {
-  buildMarketStreamUrl,
   buildUserStreamUrl,
-  groupStreamsByRoute,
   stalenessThresholdMs,
   type BinanceEndpoints,
-  type WsRoute,
 } from './endpoints.js';
 import type { BinanceRest } from './rest.js';
 import { BinanceApiError } from './types.js';
 import type {
   BinanceWsAccountConfigUpdateEvent,
   BinanceWsAccountUpdateEvent,
-  BinanceWsKlineEvent,
   BinanceWsListenKeyExpiredEvent,
   BinanceWsMarginCallEvent,
-  BinanceWsMarkPriceEvent,
   BinanceWsOrderTradeEvent,
 } from './types.js';
 
@@ -343,77 +338,6 @@ export class ResilientStream {
 /* -------------------------------------------------------------------------- */
 /*  Market data stream                                                         */
 /* -------------------------------------------------------------------------- */
-
-export interface MarketStreamHandlers {
-  onKline?: (event: BinanceWsKlineEvent) => void;
-  onMarkPrice?: (event: BinanceWsMarkPriceEvent) => void;
-  /** Raw escape hatch for stream types without a typed handler. */
-  onMessage?: (stream: string, payload: unknown) => void;
-  onStateChange?: (route: WsRoute, state: StreamState, detail: string) => void;
-}
-
-/**
- * Market data over the routed `/public` and `/market` endpoints.
- *
- * One socket per traffic class, matching Binance's own recommendation: the
- * high-frequency order-book feed cannot be allowed to delay kline or mark-price
- * delivery, and neither may be allowed to delay user-data events.
- */
-export class BinanceMarketStream {
-  private readonly sockets = new Map<WsRoute, ResilientStream>();
-
-  constructor(
-    private readonly endpoints: BinanceEndpoints,
-    private readonly handlers: MarketStreamHandlers = {},
-  ) {}
-
-  async start(streams: string[]): Promise<void> {
-    const grouped = groupStreamsByRoute(streams);
-
-    for (const route of ['public', 'market'] as const) {
-      const list = grouped[route];
-      if (list.length === 0) continue;
-
-      const stream = new ResilientStream({
-        name: `market:${route}`,
-        url: () => buildMarketStreamUrl(this.endpoints, route, list),
-        watchedStreams: () => list,
-        onStateChange: (state, detail) => this.handlers.onStateChange?.(route, state, detail),
-        onData: (_streamName, payload) => this.dispatch(payload),
-      });
-
-      this.sockets.set(route, stream);
-      await stream.start();
-    }
-  }
-
-  private dispatch(payload: unknown): void {
-    if (typeof payload !== 'object' || payload === null) return;
-    const event = payload as { e?: string };
-
-    switch (event.e) {
-      case 'kline':
-        this.handlers.onKline?.(payload as BinanceWsKlineEvent);
-        return;
-      case 'markPriceUpdate':
-        this.handlers.onMarkPrice?.(payload as BinanceWsMarkPriceEvent);
-        return;
-      default:
-        this.handlers.onMessage?.(event.e ?? 'unknown', payload);
-    }
-  }
-
-  async stop(): Promise<void> {
-    await Promise.all([...this.sockets.values()].map((s) => s.stop()));
-    this.sockets.clear();
-  }
-
-  /** Liveness across every market socket, for the readiness banner. */
-  get isLive(): boolean {
-    const all = [...this.sockets.values()];
-    return all.length > 0 && all.some((s) => s.isLive);
-  }
-}
 
 /* -------------------------------------------------------------------------- */
 /*  User data stream                                                           */

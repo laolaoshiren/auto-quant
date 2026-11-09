@@ -53,20 +53,6 @@
  * 而"混合来源"正是出问题的那种情况。
  */
 
-/** 从材料标题里解析出的来源标记（`ai_requested` / `coinpool` / …）。 */
-export interface SourcedSlice {
-  symbol: string | null;
-  text: string;
-  /**
-   * 来源列表。**由 `splitMarketContext` 在解析标题时一次算出** ——
-   * 见 `SymbolSlice.sources` 的说明（为什么不让消费者再解析一次文本）。
-   *
-   * ⚠️ 解析不出时是**空数组**（而不是 `['unknown']`）——
-   * 让这里能区分"没有来源信息"与"来源就是 unknown"。
-   */
-  sources: string[];
-}
-
 /**
  * **这段材料是"完整型"还是"只有摘要"**（2026-10-13）。
  *

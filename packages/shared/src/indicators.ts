@@ -157,8 +157,3 @@ export interface OiRankRow {
   priceChangePercent: number;
 }
 
-/** The union of every source that nominated a candidate. */
-export interface CandidateCoin {
-  symbol: string;
-  sources: string[];
-}

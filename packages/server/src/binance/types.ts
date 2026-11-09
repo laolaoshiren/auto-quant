@@ -346,7 +346,6 @@ export type BinanceAlgoStatus =
   | 'EXPIRED'
   | 'REJECTED';
 
-
 export interface BinanceUserTrade {
   symbol: string;
   id: number;
@@ -380,42 +379,6 @@ export interface BinanceIncome {
 /* -------------------------------------------------------------------------- */
 /*  WebSocket payloads                                                         */
 /* -------------------------------------------------------------------------- */
-
-export interface BinanceWsKlineEvent {
-  e: 'kline';
-  E: number;
-  s: string;
-  k: {
-    t: number;
-    T: number;
-    s: string;
-    i: string;
-    f: number;
-    L: number;
-    o: string;
-    c: string;
-    h: string;
-    l: string;
-    v: string;
-    n: number;
-    x: boolean;
-    q: string;
-    V: string;
-    Q: string;
-    B: string;
-  };
-}
-
-export interface BinanceWsMarkPriceEvent {
-  e: 'markPriceUpdate';
-  E: number;
-  s: string;
-  p: string;
-  i: string;
-  P: string;
-  r: string;
-  T: number;
-}
 
 export interface BinanceWsOrderTradeEvent {
   e: 'ORDER_TRADE_UPDATE';

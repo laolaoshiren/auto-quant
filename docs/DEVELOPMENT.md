@@ -705,10 +705,10 @@ enforces this), so `positionSide` is `BOTH` and the direction is inferred from t
 
 ### 9.6 其它几个静默失败的坑
 
-- **WebSocket 路由错了会"连接成功但永远收不到数据"。** 合约 WS 已按流量类别拆成
-  `/public` `/market` `/private`，旧的无路由路径已停用。所以 `ws.ts` 有**应用层存活检测**
+- **WebSocket 连接"握手成功但永远收不到数据"是最难查的静默失败。** 当前只接入用户数据流
+  （`/private`，listenKey）；行情走 REST。所以 `ws.ts` 有**应用层存活检测**
   （按流记录 `lastMessageAt` + 看门狗），并且**退避计数只在收到真实数据后才重置**——
-  在手握成功时重置会让一个永远收不到数据的错误路由变成紧密重连风暴。
+  在手握成功时重置会让一个收不到数据的连接变成紧密重连风暴。
 - **`exchangeInfo.serverTime` 在测试网陈旧约 5 天。** 时间同步只能用 `/fapi/v1/time`。
 - **权重预算不能硬编码。** 实盘 2400/min，测试网 6000/min；照着测试网的值打实盘会从 429 升级成 IP 封禁。
   预算从 `exchangeInfo.rateLimits` 读。

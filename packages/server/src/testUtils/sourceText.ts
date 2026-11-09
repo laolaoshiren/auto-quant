@@ -49,17 +49,3 @@ export function codeOnly(src: string): string {
     .join('\n');
 }
 
-/**
- * **取出一个具名函数的函数体**（用于断言"它内部做了什么"）。
- *
- * ⚠️ 必须传 `codeOnly()` 的结果 —— 否则正则可能跨到注释里去
- *（本项目的第 ④ 次假失败正是这样发生的）。
- *
- * ⚠️ 它用"第一个 `\n}` 收尾"这个朴素规则，所以**只适用于
- * 没有嵌套同名缩进块的短函数**。取不到时返回 `null`，
- * 调用方应当断言 `!== null` 而不是静默继续。
- */
-export function functionBody(src: string, name: string): string | null {
-  const m = new RegExp(`function ${name}\\([\\s\\S]{0,300}?\\{([\\s\\S]*?)\\n\\}`).exec(src);
-  return m === null ? null : (m[1] ?? '');
-}

@@ -66,60 +66,9 @@ export function resolveEndpoints(environment: BinanceEnvironment): BinanceEndpoi
 }
 
 /* -------------------------------------------------------------------------- */
-/*  WebSocket traffic classes                                                  */
 /* -------------------------------------------------------------------------- */
-
-export type WsRoute = 'public' | 'market' | 'private';
-
-/**
- * Which route a stream suffix belongs to. Getting this wrong yields a silent,
- * empty socket, so the mapping is explicit rather than inferred.
- */
-const MARKET_STREAM_PATTERNS: Array<[RegExp, WsRoute]> = [
-  // High-frequency order-book traffic lives on /public.
-  [/@depth/i, 'public'],
-  [/@bookTicker/i, 'public'],
-  // Everything else that we subscribe to lives on /market.
-  [/@kline_/i, 'market'],
-  [/@markPrice/i, 'market'],
-  [/@aggTrade/i, 'market'],
-  [/@trade/i, 'market'],
-  [/@miniTicker/i, 'market'],
-  [/@ticker/i, 'market'],
-  [/@forceOrder/i, 'market'],
-  [/@contractInfo/i, 'market'],
-];
-
-export function routeForStream(stream: string): WsRoute {
-  for (const [pattern, route] of MARKET_STREAM_PATTERNS) {
-    if (pattern.test(stream)) return route;
-  }
-  // Unknown suffixes default to /market, the general-purpose route.
-  return 'market';
-}
-
-/** Group stream names by the route they must be subscribed on. */
-export function groupStreamsByRoute(streams: string[]): Record<WsRoute, string[]> {
-  const grouped: Record<WsRoute, string[]> = { public: [], market: [], private: [] };
-  for (const stream of streams) grouped[routeForStream(stream)].push(stream);
-  return grouped;
-}
-
-/**
- * Build a routed combined-stream URL:
- *
- *   wss://fstream.binance.com/market/stream?streams=btcusdt@kline_5m/ethusdt@markPrice@1s
- *
- * Subscribing through the URL rather than post-connect `SUBSCRIBE` frames is
- * deliberate: it consumes none of the 10-messages-per-second inbound budget and
- * makes reconnects deterministic, since the subscription set is re-established
- * by the connect call itself.
- */
-export function buildMarketStreamUrl(endpoints: BinanceEndpoints, route: WsRoute, streams: string[]): string {
-  if (streams.length === 0) throw new Error('Cannot build a stream URL with no streams');
-  const query = streams.map((s) => s.toLowerCase()).join('/');
-  return `${endpoints.wsHost}/${route}/stream?streams=${query}`;
-}
+/*  Private user-data stream                                                  */
+/* -------------------------------------------------------------------------- */
 
 /**
  * Build the private user-data-stream URL.

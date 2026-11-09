@@ -62,11 +62,6 @@ const BUILD_INFO_FILE = path.join(REPO_ROOT, 'build-info.json');
 
 let buildCache: BuildInfo | null | undefined;
 
-/** Where the build info is expected. Exported so the API can say it in the UI. */
-export function buildInfoPath(): string {
-  return BUILD_INFO_FILE;
-}
-
 /**
  * Read the build info written by the deploy script, or `null` when there is none.
  *

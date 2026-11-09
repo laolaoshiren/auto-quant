@@ -109,7 +109,6 @@ export type DecisionAction = z.infer<typeof DecisionActionSchema>;
 
 export const OPEN_ACTIONS: readonly DecisionAction[] = ['open_long', 'open_short'];
 export const CLOSE_ACTIONS: readonly DecisionAction[] = ['close_long', 'close_short'];
-export const ADJUST_ACTIONS: readonly DecisionAction[] = ['adjust_protection'];
 
 export function isOpenAction(a: DecisionAction): boolean {
   return a === 'open_long' || a === 'open_short';

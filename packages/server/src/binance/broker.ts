@@ -3,11 +3,10 @@ import { createLogger } from '../logger.js';
 import { fetchAccountState, type AccountState } from './account.js';
 import type { BinanceMarketData } from './market.js';
 import type { BinanceRest } from './rest.js';
-import { fetchIncome, type IncomeSummary } from './income.js';
+import { fetchIncome } from './income.js';
 import { normalizeSymbol, type SymbolRegistry } from './symbols.js';
 import {
   BinanceApiError,
-  type BinanceAccountV3,
   type BinanceAlgoOrderResponse,
   type BinanceAlgoStatus,
   type BinanceOrderResponse,
@@ -1438,10 +1437,6 @@ export function normalizeAlgo(response: BinanceAlgoOrderResponse): PlacedOrder {
     terminal: TERMINAL_ALGO_STATUSES.has(response.algoStatus),
     raw: response,
   };
-}
-
-export function isFilled(order: PlacedOrder): boolean {
-  return order.executedQty > 0;
 }
 
 function sleep(ms: number): Promise<void> {

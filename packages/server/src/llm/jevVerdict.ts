@@ -33,20 +33,6 @@
  * ```
  */
 
-/** 一次 Jev 判定的结果（从日志里解析出来的）。 */
-export interface JevDecisionRecord {
-  at: number;
-  total: number;
-  kept: number;
-  highest: number | null;
-  lowest: number | null;
-  elapsedMs: number;
-  /** 被筛除的标的与分数。 */
-  dropped: Array<{ symbol: string; score: number }>;
-  /** 被保留的标的与分数（从 `筛除` 的反面推不出来，所以由调用方单独提供）。 */
-  keptSymbols: string[];
-}
-
 /** 一个标的在某个时间窗的市场表现。 */
 export interface SymbolOutcome {
   symbol: string;
