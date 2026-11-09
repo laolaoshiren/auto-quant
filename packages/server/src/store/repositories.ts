@@ -559,7 +559,19 @@ export const strategies = {
 interface TraderRow {
   id: number;
   name: string;
-  exchange_account_id: number;
+  /**
+   * ⚠️ **`null` 是真实可能的值**，不是防御性写法。
+   *
+   * 迁移 19（`M19_PAPER_TRADING`）把这一列改成了可空 + `ON DELETE SET NULL`：
+   *   · 纯模拟盘机器人在创建时就是 `NULL`（用户 2026-10-27 需求）；
+   *   · 删除交易所凭据时，引用它的机器人被置空而不是被连带删除。
+   *
+   * 这里原来写的是 `number` —— 类型检查照样通过（`number` 可以赋给
+   * `Trader.exchangeAccountId: number | null`），但那个类型在**说假话**：
+   * 任何以"行字段非空"为前提写下的逻辑都会在模拟盘机器人上静默走错分支，
+   * 而 `tsc` 不会报警。与 PR #185 修掉的那个 `'LONG'` 是同一类错误。
+   */
+  exchange_account_id: number | null;
   ai_model_id: number;
   /** `null` = 这个机器人不依赖任何策略（AI 托管）。见 `Trader.strategyId`。 */
   strategy_id: number | null;
@@ -828,7 +840,17 @@ interface PositionRow {
   id: number;
   trader_id: number;
   symbol: string;
-  side: string;
+  /**
+   * ⚠️ **只有小写 `'long' | 'short'` 两种取值，写成联合类型而不是 `string`。**
+   *
+   * 这一列只由交易循环写入（`autoTrader` 写 `isLong ? 'long' : 'short'`），
+   * 而所有读它的地方都要按方向分支。用 `string` 收它，等于把"方向只有两种"
+   * 这个事实从类型里删掉 —— 于是 `side === 'LONG'` 这种错误不会被 `tsc` 发现，
+   * 只会在运行时静默地永远落到 else 分支（2026-11-09 实际修掉的那个 BUG）。
+   *
+   * 收窄之后，任何新的方向判断写错大小写都会**编译失败**，而不是算错浮盈。
+   */
+  side: 'long' | 'short';
   quantity: number;
   entry_price: number;
   leverage: number;
@@ -985,7 +1007,11 @@ export const positions = {
   insert(input: {
     traderId: number;
     symbol: string;
-    side: string;
+    /**
+     * 方向。**只接受小写** —— 见 `PositionRow.side` 的注释：写成 `string`
+     * 时一个大写的 `'LONG'` 能一路编译通过，然后在所有读它的地方静默走错分支。
+     */
+    side: 'long' | 'short';
     quantity: number;
     entryPrice: number;
     leverage: number;
@@ -3519,13 +3545,6 @@ export const trades = {
     return row?.total ?? 0;
   },
 
-  /**
-   * Aggregate performance.
-   *
-   * Classification is by **net** PnL: a trade that made a little on price but
-   * less than it paid in commission lost money, and counting it as a win would
-   * flatter the win rate and the profit factor.
-   */
   /**
    * Aggregate performance.
    *
