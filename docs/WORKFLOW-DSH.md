@@ -177,15 +177,33 @@ team_task_create
 
 ---
 
-## 8. 上下文恢复（会话中断/换人接手）
+## 8. 记忆骨架：上下文恢复（会话中断 / 换窗口 / 换人）
 
-**靠磁盘事实，不靠记忆。** 新会话按顺序：
+**靠磁盘事实，不靠记忆。** 三层记忆 + 一个入口：
 
-1. 读 `.dsh/ledger/items.md` —— 哪些条目没关闭、卡在哪一环、谁的活。
-2. `git status` / `git log --oneline -20` —— 工作树是否干净、最近提交。
-3. 读 `.dsh/` 最近一次验证/侦察报告。
-4. 线上回读（有权限时）：`build-info.json` + `/api/health`。
-5. 三者与台账不一致 → 写进台账，**不要用"应该是这样"补齐**。
+| 层 | 文件 | 入库 | 更新频率 |
+| --- | --- | --- | --- |
+| 长期·目标 | `docs/PROJECT-GOALS.md` | ✅ | 很少（用户拍板） |
+| 长期·决策 | `docs/decisions/ADR-*.md` | ✅ | 每次重大决策 |
+| 中期·状态 | `.dsh/state.md` | ❌ | **每轮收尾** |
+| 中期·任务 | `.dsh/ledger/OPEN.md`（完整台账 `.dsh/缺陷台账.md`） | ❌ | 每次任务变化 |
+| 中期·教训 | `.dsh/ENGINEERING-LESSONS.md` | ❌ | 遇到新教训 |
+
+**入口**：`.dsh/START-HERE.md`（新会话先读它：60 秒协议 + 指针表）。
+
+**开场（每次会话，约 60 秒）**：
+
+1. 读 `docs/PROJECT-GOALS.md` —— 目标、优先级、明确不做的事；
+2. 读 `.dsh/state.md` —— 做到哪、下一步、卡点；
+3. 读 `.dsh/ledger/OPEN.md` —— 未闭环任务；
+4. `git status` / `git log --oneline -10` —— 磁盘事实；
+5. 不一致 → 先写进 state，再动手；**不要用"应该是这样"补齐**。
+
+**收尾（每轮）**：更新 `state.md` → 推进台账 → 重要决定写 ADR → `commit`。
+**没更新 state 的迭代 = 没做完。**
+
+**每周对账**：读 GOALS + state + 最近 7 天 `git log --stat`，输出「目标偏差报告」（不自动改代码）。
+提示词模板见 `.dsh/START-HERE.md` §3。
 
 ---
 
@@ -211,12 +229,15 @@ team_task_create
 ## 10. 每轮开始的 60 秒检查清单
 
 ```text
+□ 读 docs/PROJECT-GOALS.md（目标/优先级有没有变？）
+□ 读 .dsh/state.md（上次做到哪、下一步、卡点）
 □ git status 干净？HEAD 是什么？
-□ .dsh/ledger/items.md 里有没有未闭环条目？
+□ .dsh/ledger/OPEN.md 里有没有未闭环条目？
 □ 这次迭代属于"大/多天"（可自行推送）还是"小/单点"（等安排）？
 □ 任务拆到写作用域不重叠了吗？依赖标了吗？
 □ 交易链路是否被碰到？碰到就必须 sim + 独立验证。
 □ 有站点信息要写吗？→ 只写本地文件。
+□ 收尾时更新 .dsh/state.md 了吗？（没更新 = 没做完）
 ```
 
 ---
@@ -224,6 +245,8 @@ team_task_create
 ## 11. 相关文档
 
 - [`AGENTS.md`](../AGENTS.md)（本地，不入库）：协作偏好与硬红线
+- [`docs/PROJECT-GOALS.md`](PROJECT-GOALS.md)：**项目目标与优先级（北极星）**
+- [`docs/decisions/`](decisions/README.md)：重要决策记录（ADR）
 - [`docs/AGENTS.md`](AGENTS.md)：工程不变量、验证要求、代码风格
 - [`docs/DEVELOPMENT-WORKFLOW.md`](DEVELOPMENT-WORKFLOW.md)：闭环流程与缺陷台账
 - [`docs/DEVELOPMENT.md`](DEVELOPMENT.md)：命令、测试、常见陷阱
