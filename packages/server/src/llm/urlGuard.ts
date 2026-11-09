@@ -336,15 +336,6 @@ export function checkOutboundUrl(raw: string, allowPrivateHosts: readonly string
   return { allowed: true };
 }
 
-/** 允许则返回裁剪后的地址，否则抛出中文错误（调用方直接回显给操作员）。 */
-export function assertOutboundUrlAllowed(raw: string, allowPrivateHosts: readonly string[] = []): string {
-  const verdict = checkOutboundUrl(raw, allowPrivateHosts);
-  if (!verdict.allowed) {
-    throw new Error(`baseUrl 不被允许：${verdict.reason}`);
-  }
-  return raw.trim();
-}
-
 /* -------------------------------------------------------------------------- */
 /*  连接层校验（DNS rebinding 的正解）—— 外部 issue #126                          */
 /* -------------------------------------------------------------------------- */

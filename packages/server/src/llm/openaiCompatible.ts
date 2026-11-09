@@ -1,4 +1,4 @@
-import { getProvider, type LlmProviderId } from '@aq/shared';
+import type { LlmProviderId } from '@aq/shared';
 import { joinUrl } from './http.js';
 import { LlmError, emptyCompletionError } from './errors.js';
 import {
@@ -530,9 +530,4 @@ export function parseResponse(
     isEmpty: text.trim() === '' && toolCalls === undefined,
     toolCalls,
   };
-}
-
-/** Convenience for the client: the descriptor default base URL when none is given. */
-export function defaultBaseUrl(provider: LlmProviderId): string {
-  return getProvider(provider).baseUrl;
 }
