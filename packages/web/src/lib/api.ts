@@ -517,6 +517,31 @@ export interface UpdateCheck {
   latestRelease: string | null;
 }
 
+/**
+ * **当前代码版本 + 与 GitHub 的关系**（`GET /api/system/version`，2026-11-10）。
+ *
+ * `mode`：
+ *  · `dev`      —— 服务端读到了 git HEAD（本地开发 / 完整克隆部署）；
+ *  · `deployed` —— 打包产物（无 `.git`），版本来自 build-info.json。
+ */
+export interface LocalVersionInfo {
+  mode: 'dev' | 'deployed';
+  source: 'git' | 'build-info' | null;
+  dirty: boolean;
+  version: string;
+  local: {
+    commit: string;
+    commitShort: string;
+    branch: string;
+    subject: string;
+    committedAt: string;
+    deployedAt: string;
+    dirty: boolean;
+    repository: string;
+  } | null;
+  update: UpdateCheck;
+}
+
 export interface SystemStatus {
   dryRun: boolean;
   tradingDisabled: boolean;
@@ -936,6 +961,13 @@ export const api = {
    * 整页的加载。服务端缓存 10 分钟，所以重复打开这一页不会重复打 GitHub。
    */
   updateCheck: (signal?: AbortSignal) => request<UpdateCheck>('/system/update', { signal }),
+  /**
+   * **当前代码版本 + 与 GitHub 的关系**（2026-11-10 用户要求）。
+   *
+   * 与 `updateCheck` 的区别：那个比的是**部署产物**的提交（本地开发时是旧版本），
+   * 这个在仓库带 `.git` 时读真实 HEAD —— 本地看到的就是眼前这份代码。
+   */
+  systemVersion: (signal?: AbortSignal) => request<LocalVersionInfo>('/system/version', { signal }),
   logs: (limit = 200, signal?: AbortSignal) =>
     request<{ logs: LogLine[] }>('/logs', { query: { limit }, signal }),
 

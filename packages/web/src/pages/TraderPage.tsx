@@ -1978,7 +1978,6 @@ export function TraderPage() {
           >
             {trader.name}
           </h1>
-          <Badge tone="muted">#{trader.id}</Badge>
           <TraderStatusBadge status={status} live={trader.isRunning} />
           {/*
             显示**这个机器人用的是哪个钱包**，而不是交易环境标签。
@@ -2014,17 +2013,17 @@ export function TraderPage() {
           {stats?.dryRun === true && (
             <Badge
               tone="accent"
-              title="这个机器人此刻在模拟模式下运行：订单只在本地撮合，不会发到交易所。注意顶栏那个徽章说的是平台，不是它。"
+              title="这个机器人此刻在模拟盘运行：订单只在本地撮合，不会发到交易所。"
             >
-              模拟模式 —— 不会真的下单
+              模拟盘
             </Badge>
           )}
           {stats?.dryRun === false && system?.dryRun === true && (
             <Badge
               tone="warn"
-              title="这个机器人是实盘启动的：订单会用真实资金发到交易所。顶栏那个「模拟」说的是平台默认值，不是它。"
+              title="这个机器人是实盘启动的：订单会用真实资金发到交易所。"
             >
-              实盘 —— 真实资金
+              实盘
             </Badge>
           )}
           {trader.consecutiveFailures > 0 && (
@@ -2055,9 +2054,9 @@ export function TraderPage() {
                 停止
               </Button>
             ) : (
-              <Button variant="success" busy={busy} onClick={() => void startNow()}>
+              <Button variant="success" busy={busy} disabled={busy} onClick={() => void startNow()}>
                 <Play aria-hidden className="h-3.5 w-3.5" />
-                启动
+                {busy ? '启动中…' : '启动'}
               </Button>
             )}
             <Button onClick={() => setConfigOpen(true)} disabled={trader.isRunning} title="请先停止该机器人再编辑">

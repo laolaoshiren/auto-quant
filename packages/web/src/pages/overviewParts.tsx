@@ -20,8 +20,10 @@ import { api, type TraderRow } from '../lib/api';
 import { closeReasonLabel } from '../lib/summaries';
 import type { FleetTotals } from '../lib/fleetTotals';
 import { usePolled } from '../lib/hooks';
-import { Button, Panel, cn } from '../components/ui';
+import { Button, Badge, Panel, cn } from '../components/ui';
 import { SideBadge, TraderStatusBadge } from '../components/Badges';
+import { ModeBadge } from '../components/TeamRoster';
+import { TraderAvatar } from '../components/TraderAvatar';
 import { pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import { BALANCE_LABEL, fmtInt, fmtPercent, fmtUsd, fmtUsdSigned, pnlColor, timeAgo } from '../lib/format';
 import type { EquityPoint } from '../components/equityCurve';
@@ -318,13 +320,41 @@ export function TradersSnapshotTable({
                       <Link
                         to={target}
                         onClick={(event) => event.stopPropagation()}
-                        className="group block min-w-0"
+                        className="group flex min-w-0 items-center gap-1.5"
                       >
+                        <TraderAvatar id={trader.id} size={22} className="shrink-0 rounded" />
                         <span className="block truncate text-base font-semibold text-ink-hi group-hover:text-accent">
                           {trader.name}
                         </span>
                         <span className="num block truncate text-xs text-ink-faint">
-                          #{trader.id} · 周期 {trader.lastCycleNumber} · 每 {trader.cycleIntervalMinutes}m
+                          周期 {trader.lastCycleNumber} · 每 {trader.cycleIntervalMinutes}m
+                        </span>
+                        {/*
+                         * **总览快照也要一眼看出模式与模拟/实盘**（用户 2026-11-10：
+                         * 「也要显示是模拟\实盘」）。列表页已有，总览页当时漏了 ——
+                         * 而总览是用户第一眼看的页面，恰恰最需要这两个信息。
+                         */}
+                        <span className="mt-0.5 flex flex-wrap items-center gap-1">
+                          <ModeBadge mode={trader.mode} />
+                          <Badge
+                            tone="muted"
+                            className={
+                              trader.dryRun === false
+                                ? 'border-warn/40 bg-warn/15 text-warn'
+                                : trader.dryRun === true
+                                  ? 'border-accent/30 bg-accent/10 text-accent'
+                                  : 'border-base-700 bg-base-800 text-ink-faint'
+                            }
+                            title={
+                              trader.dryRun === false
+                                ? '实盘：真实资金下单'
+                                : trader.dryRun === true
+                                  ? '模拟盘：本地撮合，不涉及真实资金'
+                                  : '运行模式未指定（老数据，首次启动时固定）'
+                            }
+                          >
+                            {trader.dryRun === false ? '实盘' : trader.dryRun === true ? '模拟' : '模式未定'}
+                          </Badge>
                         </span>
                       </Link>
                     </td>
@@ -411,8 +441,14 @@ export function TradersSnapshotTable({
                             停止
                           </Button>
                         ) : (
-                          <Button small variant="success" onClick={() => onStart(trader)}>
-                            启动
+                          <Button
+                            small
+                            variant="success"
+                            busy={busyId === trader.id}
+                            disabled={busyId === trader.id}
+                            onClick={() => onStart(trader)}
+                          >
+                            {busyId === trader.id ? '启动中…' : '启动'}
                           </Button>
                         )}
                       </div>

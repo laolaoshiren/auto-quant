@@ -78,6 +78,7 @@ import { userRoleLabel } from '@aq/shared';
 import { useApp } from '../../lib/store';
 import { fmtClockOffset } from '../../lib/format';
 import { Badge, Dot, Tooltip, cn } from '../../components/ui';
+import { VersionBadge } from '../../components/VersionBadge';
 import type { NavGroup, NavItem } from '../../components/nav';
 import { MAIN_SCROLL_ID, TOOLBAR_END_ID, TOOLBAR_START_ID } from '../ids';
 import { useShell } from '../lib/context';
@@ -293,6 +294,16 @@ export function QuillShell() {
               </Badge>
             </Tooltip>
           )}
+
+          {/*
+            **全局版本指示器**（用户 2026-11-10：「版本检测放到全局页面顶部，
+            方便我随时知道当前看到的版本是不是最新的」）。
+
+            · 本地开发（有 .git）→ `dev · <HEAD>`（dirty 带 *），与 GitHub 比领先/落后；
+            · 生产部署（无 .git）→ `<版本号> · <部署 commit>` + 落后数。
+            详细说明放在 title 里，不占版面。
+          */}
+          <VersionBadge className="hidden md:inline-flex" />
 
           {/*
             刷新。全局动作 —— 它不属于任何单独一页，而"数据是不是最新的"

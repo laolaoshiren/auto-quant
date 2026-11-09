@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { ModeBadge } from '../components/TeamRoster';
 import { Link, useNavigate } from 'react-router-dom';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
-import { ArrowUpRight, Loader2, MoreHorizontal, Pencil, Play, RotateCw, Square, Trash2 } from 'lucide-react';
+import { ArrowUpRight, Loader2, MoreHorizontal, Pencil, Play, Square, Trash2 } from 'lucide-react';
 import type { EquitySnapshot, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
@@ -10,10 +10,10 @@ import { useSummaries, type TraderSummary } from '../lib/summaries';
 import { attributedEquityOf, fleetTotals, isLedgerSuspect, realizedPnlOf } from '../lib/fleetTotals';
 import { pairEquityByTrader } from '../lib/equityPairing';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
-import { useRunOnce } from '../lib/actions';
 import { Button, ErrorNote, Modal, Panel, Spinner3, cn } from '../components/ui';
 import { SectionHeading, TraderStatusBadge } from '../components/Badges';
 import { Badge } from '../components/ui';
+import { TraderAvatar } from '../components/TraderAvatar';
 import { Metric, SectionLabel } from '../components/shell';
 import { PageActions } from '../templates/lib/PageActions';
 import { NewTraderModal } from '../components/TraderModals';
@@ -138,8 +138,19 @@ export function TradersPage() {
   const [editTarget, setEditTarget] = useState<TraderRow | null>(null);
   const [pending, setPending] = useState<PendingAction>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
+  /**
+   * **点了"启动"之后、服务端确认 running 之前的本地乐观状态**。
+   *
+   * 用户 2026-11-10：「点机器以后，按钮应该马上实时反馈状态（让用户知道是什么状态、
+   * 是否在启动中），防误触、防歧义得做好」。
+   *
+   * 启动是异步的（`POST /start` 返回 200 后服务端才 stopped → starting → running，
+   * 预检/建连接/对账常要 2–10 秒）。这期间按钮若还显示可点的「启动」，操作员会
+   * 以为没点上、再点一次（服务端会拒，但界面看起来像没反应）。
+   * 所以点击的一瞬间就把这一行标记为"启动中"，并轮询到服务端给出结论。
+   */
+  const [optimisticStarting, setOptimisticStarting] = useState<ReadonlySet<number>>(new Set());
   const [actionError, setActionError] = useState<string | null>(null);
-  const { runOnce, busyId: busyOnceId } = useRunOnce();
 
   useEffect(() => {
     if (tradersQuery.data) setTraders(tradersQuery.data);
@@ -182,23 +193,31 @@ export function TradersPage() {
   };
 
   /**
-   * **启动 = 点击即启动**（用户 2026-11-10：
-   * 「点启动以后直接就运行，而不是又弹一个框」）。
+   * **启动 = 点击即启动 + 立刻反馈"启动中"**（用户 2026-11-10）。
    *
-   * 运行模式在创建机器人时就已固定，启动弹窗里已经**没有任何需要操作员选择的东西**
-   * —— 只剩一段说明和预检结果。而预检失败同样要展示，用行内错误条
-   *（`actionError`）比"先点开一个弹窗才能看到失败原因"更好。
+   * 两件事必须同时做到：
+   *  ① 点击后**立刻**把这一行切成"启动中"（不可再点）—— 防误触、防歧义；
+   *  ② 轮询到服务端给出结论（running / error / safe_mode）才交回真实状态。
    *
-   * 启动是异步的（`stopped → starting → running`）：请求返回后再等 1.5 秒刷一次，
-   * 行按钮才会从「启动中」落到「停止」。
+   * 启动是异步的（`stopped → starting → running`），预检/建连接/对账常要 2–10 秒；
+   * 只靠一次 reload 会在中间显示回「启动」，操作员会以为没点上、再点一次。
    */
   const startNow = async (trader: TraderRow) => {
+    if (optimisticStarting.has(trader.id)) return; /* 防重复点击 */
+    setOptimisticStarting((prev) => new Set(prev).add(trader.id));
     setBusyId(trader.id);
     setActionError(null);
+    const clearOptimistic = () =>
+      setOptimisticStarting((prev) => {
+        const next = new Set(prev);
+        next.delete(trader.id);
+        return next;
+      });
     try {
       const result = await api.startTrader(trader.id);
       const blocking = (result.preflight ?? []).filter((check) => !check.ok && check.blocking);
       if (!result.ok || blocking.length > 0) {
+        clearOptimistic();
         setActionError(
           `「${trader.name}」未通过预检：` +
             (blocking.map((check) => check.name).join('、') || result.error || '启动被拒绝。'),
@@ -206,13 +225,50 @@ export function TradersPage() {
       }
       await tradersQuery.reload();
       refreshSystem();
-      window.setTimeout(() => void tradersQuery.reload(), 1500);
     } catch (err) {
+      clearOptimistic();
       setActionError((err as Error).message);
     } finally {
       setBusyId(null);
     }
   };
+
+  /*
+   * 启动中的行：每 2 秒刷一次列表，直到服务端给出 running / error / safe_mode
+   * （或这台机器人从列表里消失）。
+   */
+  useEffect(() => {
+    if (optimisticStarting.size === 0) return;
+    const timer = window.setInterval(() => void tradersQuery.reload(), 2000);
+    return () => window.clearInterval(timer);
+  }, [optimisticStarting, tradersQuery]);
+
+  /* 服务端状态已经明确时清掉乐观标记（由真实状态接管按钮）。 */
+  useEffect(() => {
+    if (optimisticStarting.size === 0) return;
+    setOptimisticStarting((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const id of prev) {
+        const row = traders.find((t) => t.id === id);
+        if (!row) {
+          next.delete(id);
+          changed = true;
+          continue;
+        }
+        if (
+          row.isRunning ||
+          row.status === 'running' ||
+          row.status === 'error' ||
+          row.status === 'safe_mode'
+        ) {
+          next.delete(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [traders, optimisticStarting]);
 
   const runningCount = traders.filter((t) => t.isRunning).length;
   /*
@@ -575,6 +631,8 @@ export function TradersPage() {
                     const live = liveByTrader[trader.id];
                     const status: TraderStatus = live?.status ?? trader.status;
                     const rowBusy = busyId === trader.id;
+                    /* 点击后立刻视为「启动中」，直到服务端给出 running / error。 */
+                    const starting = status === 'starting' || optimisticStarting.has(trader.id);
                     return (
                       <tr key={trader.id} className="row-hover">
                         <td className="td">
@@ -582,6 +640,7 @@ export function TradersPage() {
                               否则一个长名字会把整张表撑到横向滚动。 */}
                           <Link to={`/traders/${trader.id}`} className="group block max-w-[18rem]">
                             <div className="flex items-center gap-1.5">
+                              <TraderAvatar id={trader.id} size={22} className="shrink-0 rounded" />
                               <span
                                 className="truncate text-base font-semibold text-ink-hi group-hover:text-accent"
                                 title={trader.name}
@@ -626,7 +685,7 @@ export function TradersPage() {
                               </Badge>
                             </div>
                             <div className="num truncate text-xs text-ink-faint">
-                              #{trader.id} · 周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
+                              周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
                             </div>
                           </Link>
                         </td>
@@ -833,7 +892,7 @@ export function TradersPage() {
                               于是列表在"已经开始启动"之后仍显示一个可点的「启动」，
                               操作员会以为没点上、再点一次（服务端会拒绝，但界面上看不出为什么）。
                             */}
-                            {status === 'starting' ? (
+                            {starting ? (
                               <Button
                                 size="sm"
                                 variant="success"
@@ -844,41 +903,24 @@ export function TradersPage() {
                                 启动中
                               </Button>
                             ) : trader.isRunning ? (
-                              <>
-                                <Button
-                                  size="sm"
-                                  variant="primary"
-                                  busy={busyOnceId === trader.id}
-                                  /*
-                                   * ⚠️ 文案是「立即分析」，**不是「立即运行」**。
-                                   *
-                                   * 它做的是"强制执行一个决策周期"（跑一轮分析、可能下单），
-                                   * 而旧名字读起来像"启动这台机器人"。详情页早就改了
-                                   * （`TraderPage.tsx` 那段注释写着「旧名字『立即运行』把
-                                   * 这两件事混成一件」），这一页和总览页当时漏了。
-                                   *
-                                   * 总览页那个**已经删除**（那里和「停止」并排放着，看起来
-                                   * 就是一对启动/停止开关，而且总览页本来就不该放这个动作）。
-                                   * 这一页保留：每行一台机器、用来快速跑一轮，位置合理 ——
-                                   * 错的只是名字。
-                                   */
-                                  title="立即分析一次：强制执行一个决策周期，不等间隔。它不会启动机器人 —— 要开始交易请用「启动」。"
-                                  onClick={() => void runOnce(trader.id, trader.name)}
-                                >
-                                  <RotateCw aria-hidden className="h-3.5 w-3.5" />
-                                  立即分析
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="danger"
-                                  busy={rowBusy && pending?.kind !== 'delete'}
-                                  title="停止循环 — 需要确认"
-                                  onClick={() => setPending({ kind: 'stop', trader })}
-                                >
-                                  <Square aria-hidden className="h-3.5 w-3.5" />
-                                  停止
-                                </Button>
-                              </>
+                              /*
+                               * ⚠️ **列表操作列只保留一个主操作**（用户 2026-11-10：
+                               * 「立即分析不应该出现在这里，列表只需要启动按钮就行」）。
+                               *
+                               * 原来运行中的行并排放「立即分析 + 停止」，两件事的视觉权重一样，
+                               * 而且和未运行行的「启动」不在同一列宽上 —— 截图里看到的就是
+                               * 那一格按钮错位、把表格挤乱。要立刻跑一轮请进详情页（那里有）。
+                               */
+                              <Button
+                                size="sm"
+                                variant="danger"
+                                busy={rowBusy && pending?.kind !== 'delete'}
+                                title="停止循环 — 需要确认"
+                                onClick={() => setPending({ kind: 'stop', trader })}
+                              >
+                                <Square aria-hidden className="h-3.5 w-3.5" />
+                                停止
+                              </Button>
                             ) : (
                               <Button
                                 size="sm"

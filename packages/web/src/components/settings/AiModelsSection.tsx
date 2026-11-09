@@ -142,6 +142,17 @@ function healthToResult(
   health: AiModelRow['health'],
 ): (ModelTestResult & { at: number }) | undefined {
   if (!health) return undefined;
+  /*
+   * ⚠️ **"被取消"不是"连接失败"**（2026-11-10 用户截图：「Aborted: This operation was aborted」
+   * 显示成红色的「连接失败」）。
+   *
+   * 原因：测试请求带 `AbortSignal`（页面刷新/组件卸载/点别的行都会中止），
+   * 中止后后端把这次调用写进 `llm_health` 的失败记录，前端刷新后又把那条
+   * 失败当成本次测试结论 —— 于是**用户什么都没做错，却看到一条红色失败**。
+   *
+   * 取消是"没有结论"，不是结论。这里直接当成"从未测试"（不显示任何红色）。
+   */
+  if (/abort/i.test(String(health.error ?? ''))) return undefined;
   const at = Date.parse(String(health.at));
   return {
     ok: health.ok,
