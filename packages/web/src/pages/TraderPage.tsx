@@ -26,6 +26,7 @@ import { isLedgerSuspect } from '../lib/fleetTotals';
 import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import { TraderStatusBadge } from '../components/Badges';
 import { TraderAvatar } from '../components/TraderAvatar';
+import { ModeBadge } from '../components/TeamRoster';
 import { PageShell, Metric } from '../components/shell';
 import { DecisionFeed } from '../components/DecisionFeed';
 import { AgentAuditPanel } from '../components/AgentAuditPanel';
@@ -1337,9 +1338,8 @@ export function TraderPage() {
           }
           sub={
             useSimulatedBalance ? (
-              <>
-                模拟 · 起始 {fmtNum(initialEquity, 2)} · 净 {fmtUsdSigned(realized, 2)}
-              </>
+              /* 主数字就是账户余额；副行只说"模拟盘"与净额（起始权益不再重复）。 */
+              <>模拟盘 · 净 {fmtUsdSigned(realized, 2)}</>
             ) : account ? (
               <>
                 钱包 {fmtNum(account.walletBalance, 2)} · 可用 {fmtAvailable()}
@@ -1602,17 +1602,30 @@ export function TraderPage() {
    * 详细说明全部进 title，不占版面。
    */
   const secondaryFacts = (
-    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-1 text-xs text-ink-lo">
-      <span
-        className="flex items-baseline gap-1"
-        title={[
-          `运行模式：${MODE_LABEL[trader.mode]} —— ${MODE_HINT[trader.mode]}`,
-          `资金口径：${paperFactTitle}`,
-        ].join('\n')}
-      >
-        <span className="font-medium text-ink-hi">{MODE_LABEL[trader.mode]}</span>
-        <span className="text-ink-faint">·</span>
-        <span className={`font-medium ${paperTone}`}>{paperFactText}</span>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs text-ink-lo">
+      {/*
+       * ⚠️ **模式与「模拟/实盘」必须是两个独立徽章，不能用文字中点连起来。**
+       *
+       * 2026-11-10 用户截图指出：「固定策略 · 模拟盘」读起来像"固定策略是一种模拟盘"——
+       * 前者是**决策方式**（策略/AI 托管/团队/JEV），后者是**资金口径**（模拟/实盘），
+       * 两个正交的概念用 `·` 串在一起就是逻辑错误。
+       * 徽章有颜色区分（模式蓝/绿/灰/黄，资金口径蓝/黄），一眼能看出是两件事。
+       */}
+      <span className="flex items-center gap-1">
+        <ModeBadge mode={trader.mode} />
+        <Badge
+          tone="muted"
+          className={
+            trader.dryRun === false
+              ? 'border-warn/40 bg-warn/15 text-warn'
+              : trader.dryRun === true
+                ? 'border-accent/30 bg-accent/10 text-accent'
+                : 'border-base-700 bg-base-800 text-ink-faint'
+          }
+          title={paperFactTitle}
+        >
+          {paperFactText}
+        </Badge>
       </span>
       <span
         title={
@@ -2096,35 +2109,15 @@ export function TraderPage() {
         {secondaryFacts}
 
         {/*
-          C. 交易所账户（共享钱包）。
+          C. 交易所账户（共享钱包）—— **已整块删除**（用户 2026-11-10：
+          「这个也是多余重复得，账户余额（USDT）实际对应得就是交易所账户余额」）。
+          
+          上面那张「账户余额」指标卡显示的就是交易所账户余额（模拟盘时是本地模拟余额，
+          title 里写明了口径），再单独一行「交易所账户 · 账户权益（共享钱包）」是重复。
+          「刷新余额」那个手动按钮一并去掉：页面本来就按轮询刷新，余额变化会自动出现。
 
-          它仍然**不改口径、不并进归属权益**：这是一个**共用钱包** —— 同一账户下所有
-          机器人读数是同一个数 —— 而主栏上面的指标只放归属这个机器人的数字。
-
-          位置从"骨架外面横跨整页"移到了主栏内部（右栏现在是决策流）。视觉上的区分
-          没有变：它有自己的分组标题、上下边线，底色也和指标卡不同，所以扫一眼就知道
-          这是另一组、另一个归属的数字。以前它无标题地贴在归属权益下面，于是一个从未
-          成交的机器人看起来也"有余额"。
+          外账户交易的说明（`foreign`）仍保留在别处（决策流/账户面板），不丢信息。
         */}
-        <TraderAccountStrip
-          account={accountState}
-          asset={settleAsset}
-          busy={accountQuery.loading}
-          error={accountQuery.error}
-          onRefresh={accountQuery.reload}
-          /*
-            实时读数拿不到时（机器人没在跑），回落到最近一条快照里的交易所读数 ——
-            见 `lastKnownAccount` 上的说明。它让这一行与上面的「归属权益」能当面对照，
-            而**不改变任何口径**：数字来自交易所，只是时间旧一点，且会标出来。
-          */
-          lastKnown={lastKnownAccount}
-          /*
-            账户上非本机器人的交易 —— 一句**安静的事实说明**，放在它解释的
-            那个数字旁边。不占独立区块、不用警示色、不替用户下"账户可能被盗"
-            的结论（系统分不清那是他手动做的还是别人做的）。
-          */
-          foreign={foreign}
-        />
 
         {/* D. 权益 / 行情（§3 的第 3 项：最大的一块，但只在有数据可看时才占大块） */}
         <Panel
