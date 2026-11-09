@@ -134,13 +134,16 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 | `data/autoquant.sqlite` | 主数据库（含**加密后的**交易所凭据） | ❌ 已在 `.gitignore` |
 | `data/.master.key` | 32 字节 AES-256-GCM 主密钥（0600） | ❌ |
 | `data/.jwt.secret` | JWT 签名密钥 | ❌ |
+| `.dsh/demo-data/` | **演示库**（`npm run seed:demo` 默认写这里；`.dsh/` 整体不入库，部署脚本也排除它） | ❌ |
 | `packages/web/dist/` | 控制台构建产物 | ❌ |
 
 > `.gitignore` 里有句注释值得记住：**主密钥和数据库放在一起就等于明文凭据**——
 > 拿到这两样就能解密出交易所 API Secret。所以 `data/` 是整体排除的，不要用 `git add -f`。
 
 想彻底重来：停掉服务，删掉整个 `data/`，再 `npm run dev`。
-想清掉演示数据但保留真实数据：`npx tsx packages/server/src/scripts/demoCycle.ts --clean`。
+想清掉演示数据：`npm run seed:demo:clean`（只动演示库 `.dsh/demo-data`，真实 `data/` 不碰；
+它会把示例机器人/成交/决策/日志一起清掉，见 [§3.1 演示数据模式](#31-演示数据模式seeddemo)）。
+`demoCycle.ts --clean` 清的是它自己写进**真实库**的 `[DEMO]` 前缀数据，两者不要混。
 
 ### 跑起来之后应该看到什么
 
@@ -170,8 +173,8 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 | `npm run demo` | `tsx packages/server/src/scripts/demoCycle.ts` | 往**真实数据库**写入一轮带 `[DEMO]` 前缀的完整决策审计数据，让控制台的审计界面立刻有东西可看。加 `--clean` 清除 |
 | `npm run sim` | `tsx packages/server/src/scripts/simulate.ts` | **完整交易生命周期模拟**：确定性 K 线夹具 + 会真正触发止损止盈的模拟交易所 + 脚本化模型，80 轮，逐项校验（**当前全部通过**；`--real-market` 可换回真实行情）。写临时数据库 |
 | `npm run sim:live` | `tsx packages/server/src/scripts/simulate.ts --live --loose --cycles 12` | 同上，但模型换成**真实 LLM**（需要 `SIM_LLM_KEY`），策略放宽（`--loose`）以便真的有可能下单 |
-| `npm run seed:demo` | `tsx packages/server/src/scripts/seedDemoData.ts` | 往**真实数据库**灌一批演示用的机器人 / 成交 / 决策数据（用于看控制台长什么样） |
-| `npm run seed:demo:clean` | 同上加 `--clean` | 清掉 `seed:demo` 灌入的数据 |
+| `npm run seed:demo` | `tsx packages/server/src/scripts/seedDemoData.ts` | 往**演示库**（默认 `.dsh/demo-data`）灌一批**多形态**的确定性数据：4 种运行模式、模拟/实盘、持仓/条件单/被拒单、决策审计、团队角色输出、intel 归因、告警读数、UI 边界样例。默认模型固定为本机 magpie 网关 |
+| `npm run seed:demo:clean` | 同上加 `--clean` | 清掉 `seed:demo` 灌入的演示库数据（真实 `data/` 不受影响） |
 | `npm run notices` | `node scripts/generate-notices.mjs` | 重新生成 `THIRD-PARTY-NOTICES.md`。**改过任何依赖之后必须跑**；`node scripts/generate-notices.mjs --check` 可校验产物是否过期；**CI 每次都会跑这一步**（依赖变了却没重新生成会红） |
 | `npm run check:links` | `node scripts/check-links.mjs` | 检查文档里的**站内链接**是否都解析得到（外链不查，别人家站点挂了不该让本项目变红）。**CI 每次都会跑**；本地改过文档路径/标题时先跑一次，省得推上去才发现 |
 | `npm run check:routes` | `node scripts/check-api-routes.mjs` | 前后端接口对照：前端 `api.ts` 声明的每个调用，后端是否真有那条路由。**CI 每次都会跑**。改过 `api.ts` 或 `server.ts` 的路由后先跑一次 |
@@ -195,6 +198,128 @@ npx tsx packages/server/src/scripts/liveSmokeTest.ts --confirm --symbol DOGEUSDT
 根级的 `npm run typecheck` 会通过 `--workspaces --if-present` 把它们一起跑上；
 根级的 `npm test` 会依次跑 **shared / server / web 三套单测 + `test:feed`**，
 所以控制台（`packages/web`）与共享类型层（`packages/shared`）的测试也在其中。
+
+
+### 3.1 演示数据模式（`seed:demo`）
+
+> 用户 2026-11-10 的方针：「**演示数据优先** —— 开发与验收尽量基于演示数据模式（模拟各种实盘数据），
+> 不要等真实跑单才能验证 UI/功能」。
+
+#### 一条命令灌入（默认只写演示库）
+
+```bash
+# ① 灌数据（默认写 .dsh/demo-data，不会碰真实 data/）
+npm run seed:demo
+
+# ② 起服务，指向同一个演示库
+#    PowerShell：
+$env:DATA_DIR=".dsh/demo-data"; npm run dev       # 后端 http://127.0.0.1:27137（端口由 PORT 决定）
+#    bash / macOS / Linux：
+DATA_DIR=.dsh/demo-data npm run dev
+
+# ③ 前端（另开一个终端，Vite 已把 /api 代理到 27137）
+npm run dev:web                                  # http://127.0.0.1:5173
+```
+
+演示库是**独立目录**：`DATA_DIR` 决定写哪个库，而入口脚本已经把
+`npm run seed:demo` 的默认值锁在 `.dsh/demo-data`。**它不会、也不允许写真实 `data/`**——
+指向 `data/` 时会直接拒绝退出（除非显式加 `--allow-real-dir`，那是给"我确定这台机器没有真实凭据"
+的人留的，不建议用）。
+
+| 命令 | 作用 |
+| --- | --- |
+| `npm run seed:demo` | **清理后重灌**（幂等：跑两次得到同一批数字） |
+| `npm run seed:demo:clean` | 只清理示例数据（按 `[示例]` 前缀识别） |
+| `npm run seed:demo -- --scale 3` | 三倍规模（42 个机器人），压列表/滚动/搜索 |
+| `npm run seed:demo -- --keep` | 保留现有数据、什么都不做（"我只想清理"的反面） |
+| `npm run seed:demo -- --data-dir .dsh/demo-data-b` | 换一个演示库目录 |
+
+安全性：**全程不联网、不调用模型、不写任何真实密钥**。账户里的 API Key 是假串、
+secret 是加密后的占位符；示例模型行也只是一个"配置"。**默认模型固定为**
+本机 magpie 网关的 `workbuddy/deepseek-v4.1-flash`（`http://127.0.0.1:3425/v1`），
+不会出现 DeepSeek 官方端点。
+
+#### 三个硬性约定（不做这三件事，演示实例一启动就会报错）
+
+| 约定 | 为什么 |
+| --- | --- |
+| **所有示例机器人绑定 magpie 模型**（`workbuddy/deepseek-v4.1-flash`） | 用户要求项目内 LLM 调用一律走本机 magpie。演示实例里用户会真的点"启动"——绑了没有真实凭据的厂商模型，一启动就报"还没有配置 API Key"（`PERMANENT_START_FAILURES` 里的**永久失败**，不会重试），看起来像系统坏了。其它厂商模型只留在 `/models` 列表里做形态演示，不被机器人引用 |
+| **模型 key 写入非空占位**（`vault.encrypt('demo-placeholder-key-not-real')`） | 启动判据是**解密后明文是否为空**（`manager.buildModel()`：`!apiKey && provider !== 'custom'`）。注意 `vault.encrypt('')` 的**密文非空、明文为空**——按密文长度判断会漏掉这种模型（`useMagpieModel.ts` 建的就是它），所以 seed 会解密后再判断并补齐。本地 magpie 网关不校验 key，所以占位 key 能正常调用；其余厂商模型有非空 key 只是"看起来已配置" |
+| **机器人默认 `stopped`**（只保留一台 `error` 展示错误态） | `manager.resumePersisted()` 会自动恢复 `running`/`safe_mode` 的机器人。演示数据写 `running` 会让演示实例一重启就真的拉起十几个机器人跑周期、调模型、写库；`safe_mode` 同样在自动恢复列表里。所以两条都不写，`error` 可以写（它不在恢复列表里） |
+
+另外：默认模型 id 由 `useMagpieModel.ts` 决定（`settings.default_ai_model_id`）。
+两者保持一致——seed 会按 `base_url + model` **复用**那条模型并把它设为默认，
+不会产生第二条一模一样的 magpie 模型。
+
+#### 它覆盖哪些数据形态（也就是"它能帮你验什么"）
+
+| 形态 | 页面/接口 | 你能在这一档看到什么 |
+| --- | --- | --- |
+| 4 种运行模式 | `/traders`、`/traders/:id` | `strategy` / `ai_managed` / `ai_team` / `jev` 的徽章、面板与专属配置区 |
+| 模拟盘 / 实盘 / 未指定 | 列表与详情页顶部 | `dryRun` 三态文案与颜色（示例默认全部 `stopped`，实盘形态用已停止的机器人演示） |
+| 持仓 / 挂单 / 条件单 | 机器人详情「当前持仓」「当前委托」 | `STOP_MARKET` / `TAKE_PROFIT_MARKET` 保护单、限价待成交 |
+| 订单边界 | 「订单记录」 | `REJECTED`（带 `-2019` 原因与 `raw_response`）/ `CANCELED` / `EXPIRED` / `PARTIALLY_FILLED` |
+| 决策审计 | `/traders/:id/decisions/:recordId` | 思维链、完整提示词、执行日志、**风控 `adjustments`**、被拒提案、失败周期、零决策周期 |
+| 团队模式 | 机器人详情「智能体审计」+ 团队看板 | `agent_runs`（谁跑的/多久/token）、参数实验（含被钳制的 patch vs applied）、教训记忆；`scope='team'` 的步骤流驱动角色出勤 |
+| intel 归因 | `trades.intel_keys`（详情页/审计） | 一个信号键积累 ≥20 笔成交，`signalHealth` 的失效检测才有样本 |
+| 告警 / 异常态 | `/models`、机器人详情 | 模型离线（`llm_health` 失败）、账本差额（`ledger_check.gap ≠ 0`）、机器人之外的活动、`error` 状态。`reason` 文案里有超长文本 |
+| UI 边界 | 各页 | 超长机器人/账户名字、超长日志与思维链、单机器人 260 笔成交（翻页）、空状态机器人（0 行）、500 行日志 |
+
+**空状态机器人是刻意留的**：`[示例] 刚创建 · 还没跑过（空状态）` 没有任何成交/决策/权益。
+"别人有数据、它没有"才是真实会遇到的空状态；把每台都灌满就永远测不到它。
+
+#### 用它做开发/验收的推荐流程
+
+1. `npm run seed:demo` → 起后端与前端（见上）。
+2. 按上面的表逐页看一眼；改 UI 后**用真实无头浏览器**复核（`npm run ui:smoke` /
+   `npm run ui:check`，用法见 §3 命令表），不要只靠编译通过。
+3. 要验证某个接口时直接打演示实例的 API（先登录拿 token）：
+
+   ```bash
+   # PowerShell：登录取 token，然后查关键端点
+   $login = Invoke-RestMethod -Method Post http://127.0.0.1:27137/api/auth/login `
+     -ContentType 'application/json' -Body '{"username":"<管理员>","password":"<密码>"}'
+   $h = @{ Authorization = "Bearer $($login.token)" }
+   Invoke-RestMethod http://127.0.0.1:27137/api/traders -Headers $h | ConvertTo-Json -Depth 4
+   Invoke-RestMethod 'http://127.0.0.1:27137/api/traders/6/agent-audit' -Headers $h | ConvertTo-Json -Depth 4
+   Invoke-RestMethod 'http://127.0.0.1:27137/api/traders/6/agent/supervisor/steps' -Headers $h | ConvertTo-Json -Depth 4
+   ```
+
+4. 收工前 `npm run seed:demo:clean`（或者保留着给下一个人看）。
+
+#### 几条容易踩的边界
+
+- **确定性 ≠ 时间戳固定**：数值、条数、结构、彼此关系都由固定种子决定（两次运行完全一致）；
+  但时间戳是按"现在"相对生成的，所以两次运行的具体时刻会差几分钟。这是刻意的——
+  否则一年后再灌，控制台会显示"2025 年的最近一次调用"。
+- **`--clean` 会清空 `runtime_logs` 里属于示例 scope 的日志**（`trader/binance/api/risk/
+  market/store/llm/team/selfcheck`）。它与运行期日志**无法从内容上区分**，所以脚本会明确告知。
+  排查线上问题时不要在有价值的库上跑这个脚本——它也本来就不该指向真实库。
+- **重灌后要重启正在跑的演示服务**：服务进程里持有旧机器人的内存实例（旧 trader id），
+  灌库会让它们指向不存在的行。灌完重启一次即可。
+- **启动是异步的，不要在 `stopped` 上判定失败**：`POST /api/traders/:id/start` 返回
+  `{ ok: true }` 后，状态可能还要几秒（preflight 拉时长/行情/时钟同步）才变成 `running`。
+  轮询到 `running` 或 `error` 为止；若在 `stopped` 上就点停止，会把一次正在进行的启动**取消**
+  （服务端日志会写「启动过程中收到「停止」」）。
+- 与 `npm run demo` 的区别：`demo` 是**一条**真实链路（真实行情 + 真实审计字段，写真实库、带 `[DEMO]`）；
+  `seed:demo` 是**规模化、多形态、确定性**的版面/功能数据，写演示库。两者互补，不互相替代。
+
+#### 重灌 + 重启的正确步骤（在有演示实例在跑时）
+
+演示实例的进程里持有旧机器人的内存实例（`AutoTrader`），它们的 id 指向被清掉的行。
+**清库 + 重启必须成对做**，否则旧实例会每隔一个周期写一次外键错误：
+
+```text
+1) 先确认没有人在那个实例上做自动化验证（无头浏览器巡检等）
+2) npm run seed:demo                      # 约 1–2 秒：清理 + 重新灌入 .dsh/demo-data
+3) 重启演示服务（谁起的那台就由谁重启）：
+     · 若由 `tsx watch` 起，保存任意服务端文件或 Ctrl+C 后重跑即可；
+     · 外部演示实例（例如 27137）由负责人重启——**不要自己再起一个抢端口**
+4) 重启后回读一次：`GET /api/health` 应为 `ok: true`，`GET /api/traders` 行数与灌入报告一致
+```
+
+灌数据本身不需要停服务（它是一个独立进程直接写 SQLite），但**旧实例必须重启**——
+原因见上。若你只是本地一次性验证，顺序无所谓，灌完再起服务即可。
 
 
 ### `sim:live` 用到的环境变量
@@ -531,7 +656,7 @@ order row exists."*
 | ① 单元测试 | `npx tsx --test <file>` / `npm test` | 纯逻辑：解析、风控每条限制与钳制方向、指标数学、金额算术、字段映射 | 任何需要真实网络 / 真实交易所行为 / 时间推进才能暴露的东西 |
 | ② 脚本化模拟 | `npm run sim` | **接缝**：开仓后是否真的挂上保护、保护触发后是否真的记账、权益曲线是否在推进、冷却/节流是否真的生效、风控是否真的在路径上（脚本化模型会故意提 100x 杠杆和过低置信度） | 真实模型的指令跟随能力、真实交易所的接口契约 |
 | ③ 真实模型 + 模拟交易所 | `npm run sim:live`（需 `SIM_LLM_KEY`） | 真实模型能不能按格式输出、提示词是否有效、真实提案能否通过风控 | 真实交易所的交易接口；`sim:live` 跑在**模拟**交易所上，不动真钱 |
-| ④ 演示数据 | `npm run demo` | 完整审计链路（提示词、思维链、执行日志）在真实库里的呈现 | 交易正确性——它的模拟交易所**不会触发**保护单 |
+| ④ 演示数据 | `npm run demo`（一条真实链路）/ `npm run seed:demo`（规模化多形态） | `demo`：完整审计链路（提示词、思维链、执行日志）在真实库里的呈现；`seed:demo`：控制台在"真实部署规模与各种数据形态"下的版面/分页/空状态/错误态 | 交易正确性——它们的模拟/伪造数据**不验证**撮合与保护单触发；`demo` 的模拟交易所不会触发保护单 |
 | ⑤ 实盘冒烟 | `npx tsx packages/server/src/scripts/liveSmokeTest.ts --confirm` | **接线**：预检、单向模式、杠杆、市价开仓、挂止损、挂止盈、**回读交易所确认保护单真的挂着**、撤单、平仓、确认账户干净 | 长时间运行的行为、策略的盈利能力、并发场景 |
 | ⑥ 真实交易 | 控制台启动机器人（选"实盘"） | 一切 | —— |
 
