@@ -186,3 +186,38 @@ test('★★★ 停止飞行中的启动时，persist 必须是 true（这是「
     '★★★ 取消分支必须显式传 persist=true（操作员点的停止要落库，否则重启后被 resumePersisted 拉起）',
   );
 });
+
+test('★★★ 新的启动请求必须先清掉上一轮「停止」留下的取消旗标', () => {
+  /*
+   * 2026-11-10 浏览器回归实测的真实 BUG（不是推测）：
+   *
+   *   startTraderAsync() → startTrader() 的 finally 才会 `cancelledStarts.delete()`
+   *   stopTrader()      → 第一句 `cancelledStarts.add()`
+   *
+   * 于是「启动 → 停止 → **马上再启动**」时，新启动在 `attemptStart()` 的守卫处
+   * 读到的是**上一轮停止**留下的旗标 → 判定"启动过程中收到停止" → 静默取消，
+   * 状态保持 stopped。用户看到的是「点了启动，什么都没发生」；实测日志只有
+   * 「启动过程中收到「停止」—— 已放弃本次启动」。更糟的是那面旗子在下次
+   * `startTrader` 退出前一直存在 —— **停止之后的下一次启动必被取消**。
+   *
+   * 修复：`startTraderAsync()` 在开始一次新的启动时删掉它。语义是"操作员
+   * 最新的意图是启动"，而上一轮停止已经兑现（`running` 已被删）。
+   * 停止若发生在**这次启动之后**，`stopTrader` 会重新 add —— 飞行中停止的
+   * 第二道守卫不受影响（见本文件其它用例）。
+   */
+  const asyncStart = SRC.indexOf('startTraderAsync(traderId: number, dryRun: boolean): StartResult {');
+  assert.ok(asyncStart > 0, '找不到 startTraderAsync —— 方法被改名了？');
+  const callStart = SRC.indexOf('void this.startTrader(traderId, dryRun)', asyncStart);
+  assert.ok(callStart > asyncStart, '找不到 startTraderAsync 里对 startTrader 的调用 —— 结构变了？');
+  const text = SRC.slice(asyncStart, callStart);
+  const deleteIdx = text.indexOf('cancelledStarts.delete(traderId)');
+  assert.ok(
+    deleteIdx > 0,
+    '★★★ 新启动必须先清掉上一轮停止的取消旗标 —— 否则「停止 → 再启动」会被上一轮停止静默取消（界面无任何提示）',
+  );
+  const guardIdx = text.indexOf('if (!guard.ok) return');
+  assert.ok(
+    guardIdx >= 0 && deleteIdx > guardIdx,
+    '★ 清理必须发生在启动守卫之后（被守卫拒绝的请求不该去动状态）',
+  );
+});

@@ -3697,6 +3697,33 @@ export class TraderManager {
     if (!trader) return { ok: false, error: `找不到机器人 ${traderId}`, preflight: [] };
 
     /*
+     * ⚠️ **清掉上一轮「停止」留下的取消旗标**（2026-11-10 回归实测的真实 BUG）。
+     *
+     * `stopTrader()` 第一句就 `cancelledStarts.add(traderId)`，而这面旗子只在
+     * `startTrader()` 的 **finally** 里删除。于是"启动 → 停止 → **立刻再点启动**"时：
+     *
+     * ```
+     *   stopTrader()          ← cancelledStarts.add(id)
+     *   startTraderAsync()    ← 新启动
+     *   attemptStart()        ← 守卫看到【上一轮停止】留下的旗标
+     *     → 判定"启动过程中收到停止"，静默取消，状态保持 stopped
+     * ```
+     *
+     * 实测症状（浏览器回归 B2）：详情页点「启动」后**什么都没发生** ——
+     * 接口返回 `ok:true`（异步接受了），前端只看到状态仍是 stopped，
+     * 日志里只有一行「启动过程中收到「停止」—— 已放弃本次启动」。
+     * 更常见的是"每次停止之后的下一次启动必被取消"，因为旗标会一直留到
+     * 下一次 `startTrader` 退出才被删。
+     *
+     * 语义：**这里是一次新的、显式的启动请求**，操作员最新的意图就是启动；
+     * 上一轮的停止意图已经兑现（`running` 早已被 stopTrader 删掉）。
+     * 如果停止是在**这次启动开始之后**才点的，`stopTrader` 会重新 `add` 这面旗子
+     * （下面 `void this.startTrader(...)` 之前没有 await，不存在把新停止信号
+     * 抹掉的窗口），"飞行中停止"的守卫保持不变。
+     */
+    this.cancelledStarts.delete(traderId);
+
+    /*
      * ⚠️ **这里不能先 `starting.add` 再调 `startTrader`** —— `startTrader` 自己的
      * 守卫会看到"已经在启动了"而拒绝，启动永远起不来。
      * 所以只写状态（界面立刻变），占位交给 `startTrader` 自己加：
