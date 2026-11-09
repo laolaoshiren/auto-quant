@@ -137,14 +137,14 @@ test('★★★ 已由代码承担的岗位不得落进"规划中"，也不得�
   /*
    * ## 这个测试防的是什么
    *
-   * `docs/FINDING-planned-roles-audit.md` §4 ④：`data_sentinel` / `ops_watchdog`
+   * `docs/archive/FINDING-planned-roles-audit.md` §4 ④：`data_sentinel` / `ops_watchdog`
    * 的职责已经在跑（`/api/health` 的 `staleTraders`、`selfcheck.ts` 每 30 分钟），
    * 界面却写"规划中" —— **那是一种说谎**。改成 `staffed` 同样是说谎（会让操作员
    * 以为有模型在盯着，实际是确定性查询）。
    *
    * ## 为什么要有"探针"那一半
    *
-   * `docs/FINDING-clerk-unwired.md` 的 2026-10-14 补充记了一条关键教训：
+   * `docs/archive/FINDING-clerk-unwired.md` 的 2026-10-14 补充记了一条关键教训：
    * 那位维护者的**第一版守卫判据本身是错的**，把实际被调用的两个角色误报成死角色。
    * 所以"守卫要能真的抓到东西"必须**用一个确定会失败的反例校准**。
    * 这里用两个方向做校准：

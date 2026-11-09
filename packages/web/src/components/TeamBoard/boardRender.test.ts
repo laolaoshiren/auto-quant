@@ -3,7 +3,7 @@
  *
  * ## 为什么需要它（本项目已为这个形状付过代价）
  *
- * `docs/FINDING-clerk-unwired.md` 的「2026-10-14 补充」记了一条教训：
+ * `docs/archive/FINDING-clerk-unwired.md` 的「2026-10-14 补充」记了一条教训：
  * 那位维护者的**第一版守卫判据本身是错的** —— 它只认 `role: 'xxx'` 一种调用形状，
  * 于是把 `performance_analyst` / `attribution_analyst` **误报成死角色**。
  * 他要的是"守卫能真的抓到东西"，做法是加**探针校准**（拿一个人造 id 跑同一套判据，
@@ -101,7 +101,7 @@ function textOf(html: string): string {
 
 test('★★★ 已由代码承担的岗位**不能**显示成"规划中"（界面在说的必须是事实）', () => {
   /*
-   * `docs/FINDING-planned-roles-audit.md` §4 ④：
+   * `docs/archive/FINDING-planned-roles-audit.md` §4 ④：
    * > `data_sentinel` / `ops_watchdog` —— 建议把它们在 FIRM_ROLES 里标成"已由代码承担"
    * > （而不是 planned），并在界面上说明 —— 否则界面显示"规划中"而实际在跑，
    * > **那本身是一种说谎。**
