@@ -2,7 +2,7 @@
 
 本项目的 Docker 镜像包含以下第三方软件包。它们的许可证要求**在再分发时保留版权声明与许可证文本**，本文件即为该义务的履行方式。
 
-运行时依赖共 **184** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
+运行时依赖共 **185** 个，全部为宽松许可证（无 copyleft）。开发依赖不会被打进镜像，因此不在此列。
 
 > 本文件由 `node scripts/generate-notices.mjs` 自动生成，请勿手工编辑。
 > 改过依赖后必须重新生成并提交；`node scripts/generate-notices.mjs --check` 可校验它是否已过期。
@@ -13,8 +13,8 @@
 | --- | --- |
 | MIT | 150 |
 | ISC | 19 |
+| BlueOak-1.0.0 | 6 |
 | BSD-3-Clause | 6 |
-| BlueOak-1.0.0 | 5 |
 | Apache-2.0 | 2 |
 | 0BSD | 1 |
 | MIT AND ISC | 1 |
@@ -34,13 +34,14 @@
 | @fastify/forwarded | 3.0.2 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
 | @fastify/merge-json-schemas | 0.2.1 | MIT | Ivan Tymoshenko <ivan@tymoshenko.me> |
 | @fastify/proxy-addr | 5.1.1 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
-| @fastify/send | 4.1.1 | MIT | TJ Holowaychuk <tj@vision-media.ca> |
-| @fastify/static | 10.1.4 | MIT | Tommaso Allevi - @allevo |
+| @fastify/send | 4.2.1 | MIT | TJ Holowaychuk <tj@vision-media.ca> |
+| @fastify/static | 10.1.10 | MIT | Tommaso Allevi - @allevo |
 | @fastify/websocket | 11.3.1 | MIT | Matteo Collina <hello@matteocollina.com> |
 | @floating-ui/core | 1.8.0 | MIT | atomiks |
 | @floating-ui/dom | 1.8.0 | MIT | atomiks |
 | @floating-ui/react-dom | 2.1.9 | MIT | atomiks |
 | @floating-ui/utils | 0.2.12 | MIT | atomiks |
+| @isaacs/nonrecursive-glob-match | 1.1.0 | BlueOak-1.0.0 | — |
 | @lukeed/ms | 2.0.2 | MIT | Luke Edwards |
 | @pinojs/redact | 0.4.0 | MIT | Matteo Collina <hello@matteocollina.com> |
 | @radix-ui/primitive | 1.1.7 | MIT | — |
@@ -125,14 +126,14 @@
 | fast-equals | 5.4.3 | MIT | Tony Quetano |
 | fast-json-stringify | 7.0.1 | MIT | Matteo Collina <hello@matteocollina.com> |
 | fast-querystring | 1.1.2 | MIT | Yagiz Nizipli <yagiz@nizipli.com> |
-| fast-uri | 4.2.1 | BSD-3-Clause | Vincent Le Goff <vince.legoff@gmail.com> (https://github.com |
-| fast-uri | 3.1.8 | BSD-3-Clause | Vincent Le Goff <vince.legoff@gmail.com> (https://github.com |
-| fastify | 5.12.5 | MIT | Matteo Collina <hello@matteocollina.com> |
+| fast-uri | 4.2.3 | BSD-3-Clause | Vincent Le Goff <vince.legoff@gmail.com> (https://github.com |
+| fast-uri | 3.1.9 | BSD-3-Clause | Vincent Le Goff <vince.legoff@gmail.com> (https://github.com |
+| fastify | 5.12.8 | MIT | Matteo Collina <hello@matteocollina.com> |
 | fastify-plugin | 6.0.0 | MIT | Tomas Della Vedova - @delvedor (http://delved.org) |
 | fastq | 1.20.3 | ISC | Matteo Collina <hello@matteocollina.com> |
-| find-my-way | 9.9.0 | MIT | Tomas Della Vedova - @delvedor (http://delved.org) |
+| find-my-way | 9.10.0 | MIT | Tomas Della Vedova - @delvedor (http://delved.org) |
 | get-nonce | 1.0.1 | MIT | Anton Korzunov <thekashey@gmail.com> |
-| glob | 13.0.6 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (https://blog.izs.me/) |
+| glob | 14.0.4 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (https://blog.izs.me/) |
 | http-errors | 2.0.1 | MIT | Jonathan Ong <me@jongleberry.com> (http://jongleberry.com) |
 | inherits | 2.0.4 | ISC | — |
 | internmap | 2.0.3 | ISC | Mike Bostock |
@@ -147,12 +148,12 @@
 | lru-cache | 11.5.3 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> |
 | lucide-react | 1.47.0 | ISC | Eric Fennis |
 | mime | 3.0.0 | MIT | Robert Kieffer |
-| minimatch | 10.2.6 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me) |
+| minimatch | 11.0.5 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me) |
 | minipass | 7.1.3 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
 | object-assign | 4.1.1 | MIT | Sindre Sorhus |
 | on-exit-leak-free | 2.1.2 | MIT | Matteo Collina <hello@matteocollina.com> |
 | once | 1.4.0 | ISC | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
-| path-scurry | 2.0.2 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (https://blog.izs.me) |
+| path-scurry | 3.0.0 | BlueOak-1.0.0 | Isaac Z. Schlueter <i@izs.me> (https://blog.izs.me) |
 | pino | 10.3.1 | MIT | Matteo Collina <hello@matteocollina.com> |
 | pino-abstract-transport | 3.0.0 | MIT | Matteo Collina <hello@matteocollina.com> |
 | pino-std-serializers | 7.1.0 | MIT | James Sumners <james.sumners@gmail.com> |
@@ -177,11 +178,11 @@
 | recharts | 2.15.4 | MIT | recharts group |
 | recharts-scale | 0.4.5 | MIT | recharts group |
 | require-from-string | 2.0.2 | MIT | Vsevolod Strukchinsky |
-| ret | 0.5.0 | MIT | fent <fentbox@gmail.com> (https://github.com/fent) |
+| ret | 0.5.1 | MIT | fent <fentbox@gmail.com> (https://github.com/fent) |
 | reusify | 1.1.0 | MIT | Matteo Collina <hello@matteocollina.com> |
 | rfdc | 1.4.1 | MIT | David Mark Clements <david.clements@nearform.com> |
 | safe-buffer | 5.2.1 | MIT | Feross Aboukhadijeh |
-| safe-regex2 | 5.1.1 | MIT | James Halliday |
+| safe-regex2 | 5.1.2 | MIT | James Halliday |
 | safe-stable-stringify | 2.5.0 | MIT | Ruben Bridgewater |
 | scheduler | 0.23.2 | MIT | — |
 | secure-json-parse | 4.1.0 | BSD-3-Clause | Eran Hammer <eran@sideway.com> |
@@ -200,7 +201,7 @@
 | toidentifier | 1.0.1 | MIT | Douglas Christopher Wilson <doug@somethingdoug.com> |
 | tslib | 2.8.1 | 0BSD | Microsoft Corp. |
 | tsx | 4.23.15 | MIT | Hiroki Osame |
-| undici | 6.29.0 | MIT | — |
+| undici | 6.29.1 | MIT | — |
 | use-callback-ref | 1.3.3 | MIT | theKashey <thekashey@gmail.com> |
 | use-sidecar | 1.1.3 | MIT | theKashey <thekashey@gmail.com> |
 | util-deprecate | 1.0.2 | MIT | Nathan Rajlich <nathan@tootallnate.net> (http://n8.io/) |
