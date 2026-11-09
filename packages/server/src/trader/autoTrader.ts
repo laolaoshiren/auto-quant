@@ -2863,6 +2863,30 @@ export class AutoTrader {
         });
       });
     } catch (error) {
+      /*
+       * ⚠️ **被我们主动取消的一轮不算失败**（2026-11-10 用户截图：
+       * 决策流里满屏「AI 服务不可用：Aborted: This operation was aborted」，
+       * 还累计成「2 次连续失败」，看起来像模型服务挂了）。
+       *
+       * 取消来自我们自己的生命周期：服务重启 / 手动停止机器人 / 切换周期时，
+       * 会 abort 在途的模型请求（必须取消，否则僵尸请求继续烧 token 并占着上下文）。
+       * 把它记成"AI 服务不可用"会让**每一次正常重启**看起来像上游故障，
+       * 还会污染连续失败计数、甚至误触发安全模式。
+       *
+       * 处理：只记一条 info，不递增失败数、不切 error 状态、不发 cycle_end ——
+       * 这一轮本来就没有结论，不该出现在"失败"里。`finally` 仍会排下一轮。
+       */
+      /*
+       * `signal` 是 `inCycle` 回调的参数，外层 catch 看不到它；
+       * 这里用 `stopRequested`（停止/重启时被置真）与错误文案判断"是否被我们主动取消"。
+       */
+      const aborted =
+        this.stopRequested === true || /aborted|abort/i.test((error as Error).message ?? '');
+      if (aborted) {
+        this.emit('info', `第 #${this.cycleNumber} 轮被中断（服务重启或手动停止），本轮不计入失败。`);
+        return;
+      }
+
       this.consecutiveFailures += 1;
       /* ⚠️ 标记这一轮失败了：`finally` 里据此用**短间隔**重试（见 `scheduleNextCycle`）。 */
       failed = true;
@@ -3045,7 +3069,21 @@ export class AutoTrader {
       summary = await this.runCycleBody(cycleNumber, progress, state, signal);
     } catch (error) {
       thrown = error;
-      progress.error = describeCycleFailure(error, state.phase);
+      /*
+       * **被主动取消（服务重启 / 手动停止）不写成"失败"。**
+       *
+       * 2026-11-10 用户截图：决策流里两条红色「失败 · AI 服务不可用：
+       * Aborted: This operation was aborted」—— 那其实是我们在重启服务时
+       * 主动 abort 了在途请求。把它写成"AI 服务不可用"会让重启看起来像上游挂了。
+       *
+       * 这里只负责记录文案（前端据此显示灰色「已中断」）；"不计入连续失败"
+       * 由外层 catch 处理（它还会决定是否切 error / 安全模式）。
+       */
+      const aborted =
+        signal?.aborted === true || /aborted|abort/i.test((error as Error).message ?? '');
+      progress.error = aborted
+        ? '本轮被中断（服务重启或手动停止），没有结论。'
+        : describeCycleFailure(error, state.phase);
     }
 
     /* --- 11. Persist the audit record ------------------------------------ */

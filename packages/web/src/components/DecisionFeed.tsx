@@ -2212,8 +2212,20 @@ export function CycleBlock({ record, symbols, mode = 'strategy' }: { record: Dec
           `trader` 层还会在连续失败后如实报「已进入安全模式」。
         */}
         {record.error && (
-          <p className="mb-1.5 flex items-start gap-1.5 text-xs leading-relaxed text-down">
-            <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          /*
+           * 「已中断」用中性色、不带红色警示图标：它不是故障，是我们重启/停止时
+           * 主动取消了这一轮（2026-11-10 用户明确：重启留下的红色失败很吓人）。
+           */
+          <p
+            className={`mb-1.5 flex items-start gap-1.5 text-xs leading-relaxed ${
+              record.error.startsWith('本轮被中断') ? 'text-ink-faint' : 'text-down'
+            }`}
+          >
+            {record.error.startsWith('本轮被中断') ? (
+              <span aria-hidden className="mt-0.5 shrink-0">⏸</span>
+            ) : (
+              <TriangleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            )}
             <span className="min-w-0 break-words">{record.error}</span>
           </p>
         )}
@@ -2577,11 +2589,22 @@ function CycleMeta({ record }: { record: DecisionRecord }) {
           <span aria-hidden className="text-ink-faint">
             │
           </span>
-          {/* 颜色 + `⚠` 双重表达：`DESIGN.md` 要求状态不能只靠颜色传递。 */}
-          <span className="flex min-w-0 items-center gap-1 font-medium text-down">
-            <TriangleAlert aria-hidden className="h-3 w-3 shrink-0" />
-            <span className="min-w-0 truncate">失败{failureCategory(record.error)}</span>
-          </span>
+          {/*
+           * 「已中断」不是失败：那是服务重启 / 手动停止时**我们主动取消**的一轮
+           * （2026-11-10 用户截图：每次重启都会留下满屏红色「失败 · AI 服务不可用」，
+           * 看起来像上游挂了）。用中性色 + `⏸`，与真正的失败区分开。
+           */}
+          {record.error?.startsWith('本轮被中断') ? (
+            <span className="flex min-w-0 items-center gap-1 font-medium text-ink-faint">
+              <span aria-hidden>⏸</span>
+              <span className="min-w-0 truncate">已中断</span>
+            </span>
+          ) : (
+            <span className="flex min-w-0 items-center gap-1 font-medium text-down">
+              <TriangleAlert aria-hidden className="h-3 w-3 shrink-0" />
+              <span className="min-w-0 truncate">失败{failureCategory(record.error)}</span>
+            </span>
+          )}
         </>
       )}
     </div>
