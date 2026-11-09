@@ -272,10 +272,10 @@ const ModelRow = memo(function ModelRow({
           {row.baseUrl || '—'}
         </div>
       </td>
-      <td className="td px-2 py-1.5">
+      <td className="td hidden px-2 py-1.5 2xl:table-cell">
         <SecretChip hasKey={row.hasKey} masked={row.apiKeyMasked} />
       </td>
-      <td className="td max-w-[220px] px-2 py-1.5">
+      <td className="td hidden max-w-[220px] px-2 py-1.5 2xl:table-cell">
         <TestOutcome testing={testing} result={result} />
       </td>
       <td className="td px-2 py-1.5 text-right">
@@ -808,7 +808,7 @@ export function AiModelsSection() {
                   className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint"
                 />
                 <TextInput
-                  className="pl-8"
+                  className="!pl-8"
                   value={filter}
                   onChange={(event) => setFilter(event.target.value)}
                   placeholder="搜索名称、模型 id、供应商或端点…"
@@ -837,14 +837,14 @@ export function AiModelsSection() {
               />
             ) : (
               <>
-                <div className="scroll-x">
-                  <table className="w-full border-collapse">
+                <div className="overflow-x-hidden">
+                  <table className="w-full table-fixed border-collapse">
                     <thead className="border-b border-base-800 bg-base-850/60">
                       <tr>
                         <th className="th px-2 py-1.5">名称</th>
                         <th className="th px-2 py-1.5">模型 · 端点</th>
-                        <th className="th px-2 py-1.5">密钥</th>
-                        <th className="th px-2 py-1.5">最近测试</th>
+                        <th className="th hidden px-2 py-1.5 2xl:table-cell">密钥</th>
+                        <th className="th hidden px-2 py-1.5 2xl:table-cell">最近测试</th>
                         <th className="th px-2 py-1.5 text-right">操作</th>
                       </tr>
                     </thead>

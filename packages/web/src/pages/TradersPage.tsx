@@ -13,6 +13,7 @@ import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { useRunOnce } from '../lib/actions';
 import { Button, ErrorNote, Modal, Panel, Spinner3, cn } from '../components/ui';
 import { SectionHeading, TraderStatusBadge } from '../components/Badges';
+import { Badge } from '../components/ui';
 import { Metric, SectionLabel } from '../components/shell';
 import { PageActions } from '../templates/lib/PageActions';
 import { NewTraderModal, StartTraderModal } from '../components/TraderModals';
@@ -567,6 +568,23 @@ export function TradersPage() {
                                 列表作为第一落点必须能一眼分辨。
                               */}
                               <ModeBadge mode={trader.mode} />
+                              {/*
+                               * **实盘 / 模拟徽章**（用户 2026-11-10 要求：「列表上要显示 实盘\模拟」）。
+                               * 运行模式在创建时固定，而列表是第一落点 —— 必须一眼看出
+                               * 这台机器人是不是在动真钱。
+                               */}
+                              <Badge
+                                tone={trader.dryRun === false ? 'warn' : 'muted'}
+                                title={
+                                  trader.dryRun === false
+                                    ? '实盘：真实资金下单'
+                                    : trader.dryRun === true
+                                      ? '模拟盘：本地撮合，不涉及真实资金'
+                                      : '运行模式未指定（老数据，首次启动时固定）'
+                                }
+                              >
+                                {trader.dryRun === false ? '实盘' : trader.dryRun === true ? '模拟' : '模式未定'}
+                              </Badge>
                             </div>
                             <div className="num truncate text-xs text-ink-faint">
                               #{trader.id} · 周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
@@ -920,11 +938,17 @@ export function TradersPage() {
       <NewTraderModal
         open={newOpen}
         onClose={() => setNewOpen(false)}
-        onCreated={(trader) => {
+        onCreated={() => {
           setNewOpen(false);
           void tradersQuery.reload();
           refreshSystem();
-          setStartTarget(trader);
+          /*
+           * ⚠️ **创建 = 创建，不自动弹"启动"**（用户 2026-11-10：「创建-运行不能混在一起」）。
+           *
+           * 新机器人以 `stopped` 落库。创建成功后自动打开启动弹窗，会让"创建"这个动作
+           * 看起来像"创建并运行"——用户以为点一下就直接开始交易。什么时候启动是
+           * 另一个独立决定，由操作员在列表里自己点。
+           */
         }}
       />
 

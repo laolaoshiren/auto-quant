@@ -276,7 +276,7 @@ export function StrategyListPage() {
                       className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint"
                     />
                     <TextInput
-                      className="pl-8"
+                      className="!pl-8"
                       value={filter}
                       onChange={(event) => setFilter(event.target.value)}
                       placeholder="搜索名称、描述或交易模式…"

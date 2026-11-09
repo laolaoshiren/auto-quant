@@ -204,7 +204,7 @@ export function MarketPage() {
           <div className="relative mb-2">
             <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
             <TextInput
-              className="pl-8"
+              className="!pl-8"
               placeholder="搜索 BTC、ETH、SOL…"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
@@ -241,17 +241,26 @@ export function MarketPage() {
           ) : (
             <>
               {/*
-               * `scroll-x` 只包住表格本身：窄屏上让这 4 列自己横滚，
-               * 而不是把整页顶出横向滚动条（Layout 的内容区会直接裁掉）。
+               * ⚠️ **不出现横向滚动条**（2026-11-10 用户明确要求：
+               * 「不应该出现横向滚动条（完全能容纳下数据）」）。
+               *
+               * 之前这里用 `scroll-x` 让 4 列在窄屏自己横滚 —— 那是把"放不下"
+               * 当成排版的默认解法，用户看到的是右边界被切、底部一条横向滚动条。
+               *
+               * 现在：
+               *  · 表格 `table-fixed w-full`（列宽按比例分配，不再按内容撑开）；
+               *  · 窄屏（< md）**隐藏 24h 成交额列** —— 它是三列里唯一"少了也不影响
+               *    判断"的辅助信息，手机/窄窗口上优先保价格与涨跌；
+               *  · 数字列 `whitespace-nowrap`、交易对列 `truncate`，避免文字把列顶宽。
                */}
-              <div className="scroll-x min-h-0 flex-1 overflow-y-auto">
+              <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
                 {/*
                   单元格上显式写 `px-1.5`（6px）：两套模板的基础内边距不一样
                   （经典 `px-3` = 12px、控制台 `0 6px`），而这张表在 440px 的列里
                   只有 16px 余量 —— 按模板走的话经典那边会多出 48px 又溢出。
                   宽度是这里最硬的约束，所以密度写成页面级的事实，不交给模板。
                 */}
-                <table className="w-full min-w-[276px] border-collapse">
+                <table className="w-full table-fixed border-collapse">
                   <thead className="sticky top-0 z-10 bg-base-900">
                     <tr>
                       {(['symbol', 'price', 'change', 'volume'] as SortKey[]).map((key) => (
@@ -259,7 +268,11 @@ export function MarketPage() {
                           key={key}
                           scope="col"
                           aria-sort={sortKey === key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-                          className={cn('th px-1.5', key !== 'symbol' && 'text-right')}
+                          className={cn(
+                            'th px-1.5',
+                            key !== 'symbol' && 'text-right',
+                            key === 'volume' && 'hidden xl:table-cell',
+                          )}
                         >
                           <button
                             type="button"
@@ -307,15 +320,15 @@ export function MarketPage() {
                             isActive && 'bg-accent/10',
                           )}
                         >
-                          <td className="td px-1.5 font-semibold text-ink-hi">
+                          <td className="td truncate px-1.5 font-semibold text-ink-hi">
                             {row.baseAsset}
                             <span className="text-ink-faint">USDT</span>
                           </td>
-                          <td className="td px-1.5 num text-right">{fmtPriceUsd(row.price)}</td>
-                          <td className={cn('td px-1.5 num text-right', pnlColor(row.changePercent24h))}>
+                          <td className="td whitespace-nowrap px-1.5 num text-right">{fmtPriceUsd(row.price)}</td>
+                          <td className={cn('td whitespace-nowrap px-1.5 num text-right', pnlColor(row.changePercent24h))}>
                             {fmtPercent(row.changePercent24h)}
                           </td>
-                          <td className="td px-1.5 num text-right text-ink-lo">
+                          <td className="td hidden whitespace-nowrap px-1.5 num text-right text-ink-lo xl:table-cell">
                             {fmtCompactAmount(row.quoteVolume24h, 'USDT')}
                           </td>
                         </tr>

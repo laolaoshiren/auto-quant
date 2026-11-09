@@ -776,11 +776,11 @@ export function OverviewPage() {
       <NewTraderModal
         open={newOpen}
         onClose={() => setNewOpen(false)}
-        onCreated={(trader) => {
+        onCreated={() => {
           setNewOpen(false);
           void tradersQuery.reload();
           refreshSystem();
-          setStartTarget(trader);
+          /* 创建后不自动启动（用户 2026-11-10：创建-运行不能混在一起）。 */
         }}
       />
 
