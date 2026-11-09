@@ -1607,16 +1607,18 @@ export function TraderPage() {
    * 以及重复标签（团队模式原来在页头出现两次、"（多智能体）""（按角色分档）"这类注释）。
    * 详细说明全部进 title，不占版面。
    */
+  /*
+   * **信息行：按类别做颜色区分**（用户 2026-11-10：「各区域做一下颜色差异化，方便人类区分」）。
+   *
+   * 四类信息：
+   *   · 决策方式徽章（蓝/绿/灰/黄）＋ 资金口径徽章（模拟=蓝、实盘=黄）—— 徽章自带颜色；
+   *   · 节奏（每 Xm 一轮 / 最近轮）—— 中性灰：标签更淡、值稍亮；
+   *   · 模型 / 策略 —— 可点链接，accent 蓝；
+   *   · 越界告警（推送断开）—— warn 黄。
+   * 区域之间用一条淡竖线分隔，扫一眼就能分清"这一段在说什么"。
+   */
   const secondaryFacts = (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs text-ink-lo">
-      {/*
-       * ⚠️ **模式与「模拟/实盘」必须是两个独立徽章，不能用文字中点连起来。**
-       *
-       * 2026-11-10 用户截图指出：「固定策略 · 模拟盘」读起来像"固定策略是一种模拟盘"——
-       * 前者是**决策方式**（策略/AI 托管/团队/JEV），后者是**资金口径**（模拟/实盘），
-       * 两个正交的概念用 `·` 串在一起就是逻辑错误。
-       * 徽章有颜色区分（模式蓝/绿/灰/黄，资金口径蓝/黄），一眼能看出是两件事。
-       */}
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-xs text-ink-lo">
       <span className="flex items-center gap-1">
         <ModeBadge mode={trader.mode} />
         <Badge
@@ -1633,40 +1635,77 @@ export function TraderPage() {
           {paperFactText}
         </Badge>
       </span>
+
+      <span aria-hidden className="text-base-700">
+        |
+      </span>
+
       <span
+        className="flex items-center gap-1"
         title={
           trader.mode === 'ai_managed'
             ? '决策间隔由 AI 自己决定（1–1440 分钟），改完下一轮即生效。'
             : '该机器人每多久跑一次决策周期。'
         }
       >
-        每 <span className="text-ink-mid">{trader.cycleIntervalMinutes}m</span> 一轮
-        {trader.mode === 'ai_managed' && <span className="text-ink-faint">（AI 可调）</span>}
+        <span className="text-ink-faint">每</span>
+        <span className="num text-ink-mid">{trader.cycleIntervalMinutes}m</span>
+        <span className="text-ink-faint">一轮</span>
       </span>
-      <span title="最近一次决策周期的时间。">
-        最近轮 <span className="text-ink-mid">{timeAgo(trader.lastCycleAt)}</span>
+      <span aria-hidden className="text-base-700">
+        |
       </span>
+
+      <span className="flex items-center gap-1" title="最近一次决策周期的时间。">
+        <span className="text-ink-faint">最近轮</span>
+        <span className="text-ink-mid">{timeAgo(trader.lastCycleAt)}</span>
+      </span>
+      <span aria-hidden className="text-base-700">
+        |
+      </span>
+
       {trader.mode === 'ai_team' ? (
-        <span title="团队模式的模型由独立 magpie 网关按角色调度，与「AI 模型」列表无关。">magpie 网关</span>
+        <span
+          className="flex items-center gap-1"
+          title="团队模式的模型由独立 magpie 网关按角色调度，与「AI 模型」列表无关。"
+        >
+          <span className="text-ink-faint">模型</span>
+          <span className="text-accent">magpie 网关</span>
+        </span>
       ) : trader.mode === 'jev' ? (
-        <span title="JEV 决策模型固定为 magpie 网关的 Jev，与「AI 模型」列表无关。">Jev · magpie</span>
+        <span
+          className="flex items-center gap-1"
+          title="JEV 决策模型固定为 magpie 网关的 Jev，与「AI 模型」列表无关。"
+        >
+          <span className="text-ink-faint">模型</span>
+          <span className="text-accent">Jev · magpie</span>
+        </span>
       ) : (
         <Link
           to="/models"
-          className="text-accent hover:underline"
+          className="flex min-w-0 items-center gap-1"
           title="决定它看什么、怎么下单的模型。"
         >
-          {model ? model.label : `#${trader.aiModelId}`}
+          <span className="text-ink-faint">模型</span>
+          <span className="max-w-[16rem] truncate text-accent hover:underline">
+            {model ? model.label : `#${trader.aiModelId}`}
+          </span>
         </Link>
       )}
       {trader.mode === 'strategy' && strategy && (
-        <Link
-          to={`/strategy/${trader.strategyId}`}
-          className="text-accent hover:underline"
-          title="决定候选交易对、杠杆与风控阈值的策略。"
-        >
-          策略 · {strategy.name}
-        </Link>
+        <>
+          <span aria-hidden className="text-base-700">
+            |
+          </span>
+          <Link
+            to={`/strategy/${trader.strategyId}`}
+            className="flex min-w-0 items-center gap-1"
+            title="决定候选交易对、杠杆与风控阈值的策略。"
+          >
+            <span className="text-ink-faint">策略</span>
+            <span className="max-w-[14rem] truncate text-accent hover:underline">{strategy.name}</span>
+          </Link>
+        </>
       )}
       {/*
         推送断开才出现（越界状态，带后果）。正常时顶栏已有「推送在线」，
@@ -1674,10 +1713,13 @@ export function TraderPage() {
       */}
       {!socketOpen && (
         <span
-          className="text-warn"
+          className="flex items-center gap-1"
           title="实时事件推送断开，页面改为每 4 秒轮询一次；持仓、委托与权益最多可能滞后几秒。"
         >
-          推送断开
+          <span aria-hidden className="text-warn">
+            ⚠
+          </span>
+          <span className="text-warn">推送断开（轮询兜底）</span>
         </span>
       )}
     </div>
@@ -1924,6 +1966,17 @@ export function TraderPage() {
             {trader.name}
           </h1>
           <TraderStatusBadge status={status} live={trader.isRunning} />
+          {/*
+            **净已实现盈亏放在页头**（用户 2026-11-10：从页面底部移上来并精简）。
+            只显示净额；毛 / 手续费 / 资金费的拆解收进 title（日常盯盘不需要）。
+          */}
+          <span
+            className="flex items-center gap-1 text-xs"
+            title={statsCost ? pnlFormulaText(statsCost) : '还没有已平仓的成交'}
+          >
+            <span className="text-ink-faint">净盈亏</span>
+            <span className={cn('num font-semibold', pnlColor(realized))}>{fmtUsdSigned(realized, 2)}</span>
+          </span>
           {/*
             ⚠️ **「USDT 账户」徽章已删除**（用户 2026-11-10：「去掉没意义」）。
             
@@ -2406,21 +2459,13 @@ export function TraderPage() {
         />
 
         {/*
-          The net-PnL bridge, spelled out once below the tables. Every 净 figure on
-          this page is 毛 − 手续费 − 资金费, and this is the line that makes that
-          checkable against the exchange rather than a number the operator has to
-          take on faith.
+          ⚠️ **「已实现盈亏（净额）· 毛 / 手续费 / 资金费」那一行已移到页头**
+          （用户 2026-11-10：「把下面这块移动到页面上面这个位置，并且精简一下显示
+          （不要毛利）」）。
+          
+          净额在页头常驻（一眼能看到赚了多少）；毛/手续费/资金费的拆解对日常盯盘
+          没有价值，完整算式放在页头那个数的 title 里。
         */}
-        {statsCost && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-base-800 bg-base-900/60 px-3 py-2 text-xs">
-            <span className="font-semibold text-ink-lo">已实现盈亏（净额）</span>
-            <span className={cn('num text-md font-semibold', pnlColor(realized))}>{fmtUsdSigned(realized, 2)}</span>
-            <PnlBreakdown costs={statsCost} />
-            <span className="num ml-auto text-ink-faint" title={pnlFormulaText(statsCost)}>
-              {NET_PNL_FORMULA}
-            </span>
-          </div>
-        )}
       </div>
       </>
       )}
