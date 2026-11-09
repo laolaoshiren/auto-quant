@@ -12,6 +12,7 @@ import { Badge, Button, Collapsible, CopyButton, type Tone } from './ui';
 import { useCopy } from '../lib/hooks';
 import { fmtInt, fmtUsd } from '../lib/format';
 import { plainText } from '../lib/plainText';
+import { humanizeToolNames } from '../lib/toolLabels';
 import { parseTeamTrace } from '../lib/teamTrace';
 
 /* -------------------------------------------------------------------------- */
@@ -207,7 +208,7 @@ export function ExecutionRow({ entry }: { entry: ExecutionLogEntry }) {
       </div>
       {entry.detail && (
         <p className={`mt-1 whitespace-pre-wrap text-xs leading-relaxed ${EXEC_TEXT_CLASS[entry.status] ?? 'text-ink-lo'}`}>
-          {plainText(entry.detail)}
+          {plainText(humanizeToolNames(entry.detail))}
         </p>
       )}
       {entry.orderId && <p className="num mt-0.5 text-xs text-ink-faint">委托 {entry.orderId}</p>}
@@ -248,7 +249,7 @@ export function RejectedBanner({ log, className }: { log: ExecutionLogEntry[]; c
             <span className="num font-semibold">
               {actionLabel(entry.action)} {entry.symbol}
             </span>{' '}
-            — {plainText(entry.detail)}
+            — {plainText(humanizeToolNames(entry.detail))}
           </li>
         ))}
       </ul>

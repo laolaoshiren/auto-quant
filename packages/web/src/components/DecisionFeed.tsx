@@ -173,6 +173,7 @@ import { Badge, Empty, ErrorNote, Panel, Spinner3, cn } from './ui';
 import { RobotControl } from './TeamBoard/RobotControl';
 import { JevSettings } from './TeamBoard/JevSettings';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
+import { humanizeToolNames } from '../lib/toolLabels';
 import { summarizeMemberOutput } from '../lib/memberSummary';
 import { plainText } from '../lib/plainText';
 import { fmtInt, fmtLatency, fmtPriceUsd, fmtQty, fmtUsd, isNum, timeAgo } from '../lib/format';
@@ -2838,7 +2839,7 @@ function DecisionOutcome({
    * 一个断句符都找不到时整段都算第一句：短消息本来就不需要折叠。
    */
   /* ⚠️ `plainText`：理由里的 `**` 是写给模型/维护者的强调符，不该露给用户（见 `lib/plainText.ts`）。 */
-  const detail = plainText(entry.detail ?? '');
+  const detail = plainText(humanizeToolNames(entry.detail ?? ''));
   const cut = detail.search(/[。；]/);
   const lead = cut >= 0 ? detail.slice(0, cut + 1) : detail;
   const rest = cut >= 0 ? detail.slice(cut + 1).trim() : '';
@@ -3265,7 +3266,7 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
    * 就以为完事了，而屏幕上的文字墙一行都没少。
    */
   /* ⚠️ `plainText`：理由里的 `**` 是写给模型/维护者的强调符，不该露给用户（见 `lib/plainText.ts`）。 */
-  const detail = plainText(entry.detail ?? '');
+  const detail = plainText(humanizeToolNames(entry.detail ?? ''));
   const cut = detail.search(/[。；]/);
   const lead = cut >= 0 ? detail.slice(0, cut + 1) : detail;
   const rest = cut >= 0 ? detail.slice(cut + 1).trim() : '';
