@@ -588,16 +588,29 @@ export function Collapsible({
       onOpenChange={onOpenChange}
       className={cn('group rounded-md border border-base-750 bg-base-850/40', className)}
     >
-      <CollapsiblePrimitive.Trigger className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-base text-ink-mid transition hover:bg-base-800/60">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <ChevronRight
-            aria-hidden
-            className="h-3.5 w-3.5 shrink-0 text-ink-faint transition-transform group-data-[state=open]:rotate-90"
-          />
-          <span className="truncate">{title}</span>
-        </span>
+      {/*
+       * ⚠️ **`meta` 必须放在 Trigger 外面**（2026-11-10 走查发现）。
+       *
+       * `CollapsiblePrimitive.Trigger` 渲染成 `<button>`，而 meta 里常放
+       * 交互控件（`CopyButton` / 「展开」）—— 两个 button 嵌套是非法 HTML，
+       * React 会报 `validateDOMNesting: <button> cannot appear as a descendant
+       * of <button>`，而且点击内层按钮会同时触发外层的折叠/展开。
+       *
+       * 所以结构改成：一行 flex 容器（不是 button）→ 左边 Trigger（button）
+       * + 右边 meta（可以放按钮）。
+       */}
+      <div className="flex w-full items-center justify-between gap-2 px-3 py-2">
+        <CollapsiblePrimitive.Trigger className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left text-base text-ink-mid transition hover:bg-base-800/60">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <ChevronRight
+              aria-hidden
+              className="h-3.5 w-3.5 shrink-0 text-ink-faint transition-transform group-data-[state=open]:rotate-90"
+            />
+            <span className="truncate">{title}</span>
+          </span>
+        </CollapsiblePrimitive.Trigger>
         {meta && <span className="shrink-0 text-xs text-ink-faint">{meta}</span>}
-      </CollapsiblePrimitive.Trigger>
+      </div>
       <CollapsiblePrimitive.Content className="collapsible-panel">
         <div className="border-t border-base-800 p-3">{children}</div>
       </CollapsiblePrimitive.Content>
