@@ -28,7 +28,7 @@
 
 import { parseNativeToolCalls } from './nativeToolCall.js';
 import { contextFor, parseRoleOutput, renderPriorFailures, ROLES, type AgentRole } from './roles.js';
-import { dispatchTool, renderToolCatalogue, type AgentToolDeps } from './tools.js';
+import { AGENT_TOOL_SPECS, dispatchTool, renderToolCatalogue, type AgentToolDeps, type ToolApiSpec } from './tools.js';
 import type { AgentMemoryRow } from '../../store/agentStore.js';
 /*
  * **输入侧预算**（t82）—— 复用策略层那一套 token 换算与 6 万上限。
@@ -44,20 +44,39 @@ import { estimateTokens, PROMPT_TOKEN_BUDGET } from '../../strategy/prompt.js';
 /*  注入的模型                                                                 */
 /* -------------------------------------------------------------------------- */
 
+/** 模型发起的**原生工具调用**（标准 function calling 的产出）。 */
+export interface LoopToolCall {
+  id: string;
+  name: string;
+  /** 参数字符串（保留原文；解析失败要报错，不猜）。 */
+  arguments: string;
+}
+
 /**
  * 循环需要的模型能力。
  *
  * 只有 `complete()` —— 与 `AutoTrader` 用的 `DecisionModel` 同一个形状，
  * 所以真实的 LLM 客户端可以直接传进来，测试里换成桩。
+ *
+ * ## ⚠️ 原生 function calling（2026-11-10）
+ *
+ * 第三参数 `tools` 给了就带标准 `tools` 请求，模型用 `tool_calls` 字段回答；
+ * **不给则退回提示词协议 + 文本解析**（旧行为）。`toolCalls` 是产出侧的同一条通道。
+ *
+ * 为什么保留文本协议：部分网关/模型不支持 `tools` 参数，或者返回的
+ * `tool_calls` 形状不合规。两条通道共存、**原生优先**，才既标准化又不脆。
  */
 export interface LoopModel {
   complete(
     system: string,
     user: string,
+    options?: { tools?: readonly ToolApiSpec[] },
   ): Promise<{
     text: string;
     usage: { promptTokens: number | null; completionTokens: number | null };
     latencyMs: number;
+    /** 原生工具调用的产出（没有则为 undefined）。 */
+    toolCalls?: readonly LoopToolCall[];
   }>;
 }
 
@@ -497,8 +516,47 @@ function crossContractHint(text: string): string {
  * 宽容度与 §2.4 一致：允许围栏、允许前后有解释文字。
  * **但抽不出 `tool` 就是失败** —— 不猜它想干什么。
  */
-export function parseTurn(text: string): { action: TurnAction | null; error: string | null } {
+export function parseTurn(
+  text: string,
+  nativeCalls?: readonly LoopToolCall[],
+): { action: TurnAction | null; error: string | null } {
   type Shape = { thought?: unknown; tool?: unknown; args?: unknown };
+
+  /*
+   * ⭐ **原生 function calling 优先**（2026-11-10）。
+   *
+   * 给了 `tools` 的调用，模型应该用标准的 `tool_calls` 回答。这条分支必须排在
+   * 文本解析**之前**：模型的正文可能同时写了一段"我打算……"的散文，
+   * 先跑文本解析会把那段散文当成协议失败。
+   *
+   * 一次回复里多个调用**只取第一个** —— 与文本协议同一条规则（循环是
+   * "一步一个动作、看到结果再决定下一步"，让模型在看不到结果时连续决策
+   * 正是这个设计要避免的）。
+   *
+   * 参数不是合法 JSON 对象时**报错而不是猜**（§2.4 的"结构宽容、语义严格"）。
+   */
+  if (nativeCalls !== undefined && nativeCalls.length > 0) {
+    const first = nativeCalls[0]!;
+    let args: unknown;
+    try {
+      args = JSON.parse(first.arguments);
+    } catch {
+      return {
+        action: null,
+        error: `原生工具调用 ${first.name} 的参数不是合法 JSON：${first.arguments.slice(0, 200)}`,
+      };
+    }
+    if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+      return {
+        action: null,
+        error: `原生工具调用 ${first.name} 的参数必须是 JSON 对象：${first.arguments.slice(0, 200)}`,
+      };
+    }
+    return {
+      action: { thought: text.trim().slice(0, 400), tool: first.name, args },
+      error: null,
+    };
+  }
 
   /*
    * 先试约定好的 JSON —— 那是提示词里要求的形式。
@@ -767,12 +825,12 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
 
   for (let step = 1; step <= maxSteps; step += 1) {
     const started = Date.now();
-    const reply = await input.model.complete(system, transcript);
+    const reply = await input.model.complete(system, transcript, { tools: AGENT_TOOL_SPECS });
     latencyMs += reply.latencyMs || Date.now() - started;
     tokensIn += reply.usage.promptTokens ?? 0;
     tokensOut += reply.usage.completionTokens ?? 0;
 
-    const { action, error } = parseTurn(reply.text);
+    const { action, error } = parseTurn(reply.text, reply.toolCalls);
     if (!action) {
       if (badOutputRetries >= 1) {
         return {

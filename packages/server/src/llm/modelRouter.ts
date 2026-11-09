@@ -33,6 +33,7 @@ import {
   pickAvailable,
   type FailureVerdict,
 } from './modelHealth.js';
+import type { ToolCall, ToolSpec } from './types.js';
 
 /** 一次模型调用的结果。 */
 export interface RouterCallResult {
@@ -54,6 +55,8 @@ export interface RouterCallResult {
    * 而"它降级了三次才拿到答案"正是最该被看见的信息。
    */
   attempts: Array<{ modelId: string; ok: boolean; ms: number; note: string }>;
+  /** 模型发起的**原生工具调用**（标准 function calling 的产出；没有则为 undefined）。 */
+  toolCalls?: ToolCall[];
 }
 
 /** 调用一个具体模型的函数（由调用方注入，便于测试与解耦）。 */
@@ -67,6 +70,15 @@ export type CallModel = (
      * 实测：思维链模型的 `reasoning_content` 会吃掉预算导致 `content: null`。
      */
     maxTokens: number;
+    /**
+     * **原生 function calling 的工具清单**（2026-11-10 加）。
+     *
+     * 传了它，请求体就带 `tools` / `tool_choice`，模型用标准的
+     * `tool_calls` 字段回答 —— 而不是让它在正文里手写 JSON 协议。
+     * 不传（默认）时行为与改动前**逐字节一致**。
+     */
+    tools?: readonly ToolSpec[];
+    toolChoice?: 'auto' | 'none' | 'required';
   },
 ) => Promise<{
   text: string;
@@ -82,6 +94,8 @@ export type CallModel = (
    * **永远不会命中**（实测发现的问题：那条分支曾是死代码）。
    */
   finishReason?: string | null;
+  /** 模型发起的**原生工具调用**（标准 function calling 的产出）。 */
+  toolCalls?: ToolCall[];
   /** 失败时由实现抛出；路由器据此分类。 */
 }>;
 
@@ -289,6 +303,12 @@ export class ModelRouter {
        * 而是会走到 `maxFallbacks` 用尽后报错（与原来一致）。
        */
       ladder?: readonly string[];
+      /**
+       * **原生 function calling 的工具清单**（2026-11-10）—— 透传给底层模型调用。
+       * 见 `CallModel` 的 options 说明。不传 = 行为与改动前完全一致。
+       */
+      tools?: readonly ToolSpec[];
+      toolChoice?: 'auto' | 'none' | 'required';
     },
   ): Promise<RouterCallResult> {
     if (tier === 'T0_code') {
@@ -375,6 +395,8 @@ export class ModelRouter {
       try {
         const result = await this.options.call(modelId, messages, {
           ...(options.signal ? { signal: options.signal } : {}),
+          ...(options.tools !== undefined ? { tools: options.tools } : {}),
+          ...(options.toolChoice !== undefined ? { toolChoice: options.toolChoice } : {}),
           maxTokens:
             budgetBoosted === null
               ? budgetFor(profile, options.baseMaxTokens)
@@ -464,7 +486,14 @@ export class ModelRouter {
 
         attempts.push({ modelId, ok: true, ms, note: '成功' });
         this.health.recordSuccess(modelId);
-        return { modelId, text: result.text, latencyMs: result.latencyMs, usage: result.usage, attempts };
+        return {
+          modelId,
+          text: result.text,
+          latencyMs: result.latencyMs,
+          usage: result.usage,
+          attempts,
+          ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
+        };
       } catch (error) {
         const ms = Date.now() - started;
         const verdict = classifyFailure({

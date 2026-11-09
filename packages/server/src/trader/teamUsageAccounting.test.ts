@@ -377,9 +377,9 @@ test('★★★ 源码里不得再有硬编码的 usage: { null, null }＋团队
     /accumulate\(/.test(src),
     '★ 必须存在累加调用（多轮交易台要相加，不是覆盖）',
   );
-  /* agent 层那条路本来就对，不得被顺手改掉。 */
+  /* agent 层那条路本来就对，不得被顺手改掉（2026-11-10 允许透传 callOptions：那是 tools 通道）。 */
   assert.ok(
-    /singleModel\.complete\(systemPrompt,\s*userPrompt\)/.test(src),
+    /singleModel\.complete\(systemPrompt,\s*userPrompt(?:,\s*callOptions)?\)/.test(src),
     '★ agent 层分支必须原样保留（它一直如实报用量）',
   );
 });

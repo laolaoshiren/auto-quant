@@ -778,6 +778,7 @@ export function createRoutedDecisionModel(options: {
         ],
         {
           ...(callOptions?.signal ? { signal: callOptions.signal } : {}),
+          ...(callOptions?.tools !== undefined ? { tools: callOptions.tools } : {}),
           baseMaxTokens,
         },
       );
@@ -822,6 +823,7 @@ export function createRoutedDecisionModel(options: {
           cachedTokens: result.usage.cachedTokens,
           reasoningTokens: result.usage.reasoningTokens,
         },
+        ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
       };
     },
   };
@@ -1338,7 +1340,7 @@ export function createTeamDecisionModel(options: {
   };
 
   return {
-    complete: async (systemPrompt, userPrompt) => {
+    complete: async (systemPrompt, userPrompt, callOptions) => {
       const started = Date.now();
       /*
        * ══════════════════════════════════════════════════════════════════════
@@ -1431,7 +1433,7 @@ export function createTeamDecisionModel(options: {
             (callerRole === null ? '（认不出具体角色，这是 agent 层的活）' : ''),
         });
         if (singleModel !== undefined) {
-          return singleModel.complete(systemPrompt, userPrompt);
+          return singleModel.complete(systemPrompt, userPrompt, callOptions);
         }
         /*
          * 没有注入单模型 → 用路由器直接调**一个**模型
@@ -1446,7 +1448,11 @@ export function createTeamDecisionModel(options: {
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          { baseMaxTokens },
+          {
+            baseMaxTokens,
+            /* 原生 function calling：调用方给了工具清单就透传。 */
+            ...(callOptions?.tools !== undefined ? { tools: callOptions.tools } : {}),
+          },
         );
         return {
           text: res.text,
@@ -1455,6 +1461,7 @@ export function createTeamDecisionModel(options: {
             promptTokens: res.usage?.promptTokens ?? null,
             completionTokens: res.usage?.completionTokens ?? null,
           },
+          ...(res.toolCalls !== undefined ? { toolCalls: res.toolCalls } : {}),
         };
       }
 

@@ -1179,3 +1179,78 @@ test('★ 空步数：第一次调用的提示词逐字节与改动前一致', (
   assert.deepEqual(packed.truncated, []);
   assert.equal(packed.prefixOverBudget, false);
 });
+
+/* -------------------------------------------------------------------------- */
+/*  原生 function calling（2026-11-10）                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ## 为什么这两条测试存在
+ *
+ * 用户 2026-11-10 指出：「AI 调用工具好像不对，没有用标准的函数调用」。
+ * 核实结论：`llm/client.ts` 早已支持 `tools` / `tool_calls`，但 **agent 循环
+ * 一直走提示词文本协议** —— 模型被迫在正文里手写 JSON，解析失败就整轮 failed
+ *（`agent_runs` 里 31% 的失败是这类形状，每次烧 2–6 万 tokens）。
+ *
+ * 现在：循环把 `AGENT_TOOL_SPECS`（标准 JSON Schema）传给模型，**原生
+ * `tool_calls` 优先**，文本协议只作兜底。这两条用例钉住"优先用原生"与
+ * "参数坏掉时不猜"。
+ */
+test('★★★ 模型返回原生 tool_calls 时循环优先用它，且把工具清单传给模型', async () => {
+  const { deps } = makeDeps();
+  const seen: Array<{ tools?: readonly { name: string }[] }> = [];
+  let i = 0;
+  const model: LoopModel = {
+    complete: async (_system, _user, options) => {
+      seen.push({ tools: options?.tools });
+      i += 1;
+      if (i === 1) {
+        /* 原生模式下很多网关**正文为空**，只有 tool_calls —— 这正是旧实现失败的那一类。 */
+        return {
+          text: '',
+          usage: { promptTokens: 100, completionTokens: 20 },
+          latencyMs: 10,
+          toolCalls: [{ id: 'call-1', name: 'get_performance', arguments: '{"window":"7d"}' }],
+        };
+      }
+      return {
+        text: '',
+        usage: { promptTokens: 100, completionTokens: 20 },
+        latencyMs: 10,
+        toolCalls: [{ id: 'call-2', name: 'finish', arguments: '{"summary":"这轮不改"}' }],
+      };
+    },
+  };
+
+  const r = await runToolLoop({ role: 'strategist', task: 'x', facts: 'y', deps, model });
+
+  assert.equal(r.outcome, 'ok');
+  assert.equal(r.conclusion, '这轮不改');
+  assert.equal(r.steps[0]!.tool, 'get_performance', '第一步必须是原生调用里那个工具');
+  assert.ok(
+    seen[0]!.tools !== undefined && seen[0]!.tools.length > 0,
+    '★ 必须把标准工具清单传给模型 —— 否则又退回文本协议',
+  );
+});
+
+test('★★ 原生 tool_calls 的参数不是合法 JSON → 报错且不猜，宽容一次后失败', async () => {
+  const { deps } = makeDeps();
+  let i = 0;
+  const model: LoopModel = {
+    complete: async () => {
+      i += 1;
+      return {
+        text: '',
+        usage: { promptTokens: 1, completionTokens: 1 },
+        latencyMs: 1,
+        toolCalls: [{ id: `c${i}`, name: 'get_performance', arguments: '不是 JSON' }],
+      };
+    },
+  };
+
+  const r = await runToolLoop({ role: 'strategist', task: 'x', facts: 'y', deps, model, maxSteps: 5 });
+
+  assert.equal(r.outcome, 'failed');
+  assert.match(r.detail, /参数不是合法 JSON/, '必须说清是参数坏，不是"模型不听话"');
+  assert.equal(i, 2, '坏输出只宽容一次（与文本协议同一条规则）');
+});

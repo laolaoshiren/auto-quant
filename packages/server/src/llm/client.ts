@@ -226,7 +226,7 @@ export interface ChatCallOptions {
    * 老的 JSON 协议路径（模型自己写 `{"tool":"…"}`）继续工作 ——
    * 这一层**不强制**任何调用方迁移。
    */
-  tools?: ToolSpec[];
+  tools?: readonly ToolSpec[];
   /** 工具选择策略。不传 = `auto`。 */
   toolChoice?: 'auto' | 'none' | 'required';
 }
@@ -697,7 +697,11 @@ export class LlmClient {
   async complete(
     systemPrompt: string,
     userPrompt: string,
-    options?: { signal?: AbortSignal },
+    /**
+     * 与 `chat()` 相同的调用选项（2026-11-10 起透传 `tools` / `toolChoice`，
+     * 让调用方可以用标准 function calling）。
+     */
+    options?: ChatCallOptions,
   ): Promise<ChatResult> {
     return this.chat(
       [
@@ -733,7 +737,7 @@ export class LlmClient {
     messages: ChatMessage[],
     probe: boolean,
     maxTokensOverride?: number,
-    toolOverride?: { tools?: ToolSpec[]; toolChoice?: 'auto' | 'none' | 'required' },
+    toolOverride?: { tools?: readonly ToolSpec[]; toolChoice?: 'auto' | 'none' | 'required' },
   ): OutboundRequest {
     /*
      * **本次调用的输出预算**：per-call 覆盖优先，否则用实例值。

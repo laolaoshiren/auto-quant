@@ -99,7 +99,7 @@ export interface ChatRequest {
    * ⚠️ **三家 provider 都要实现**（OpenAI 兼容 / Anthropic / Gemini 的 wire 格式
    * 各不相同）—— 只做一家会在换模型时静默退化回旧的 JSON 解析路径。
    */
-  tools?: ToolSpec[];
+  tools?: readonly ToolSpec[];
   /** 强制/建议如何选工具。不传 = 由模型决定。 */
   toolChoice?: 'auto' | 'none' | 'required';
   /**

@@ -31,7 +31,7 @@ export interface OpenAiBodyOptions {
    * 那段说明 —— 这是把"模型自己写 tool 字段"（实测 53% 成功率）
    * 换成"协议保证的 tool_calls"的关键一步。
    */
-  tools?: ToolSpec[];
+  tools?: readonly ToolSpec[];
   toolChoice?: 'auto' | 'none' | 'required';
   /**
    * 思考等级，翻译成 OpenAI 的 `reasoning_effort`。

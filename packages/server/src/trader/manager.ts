@@ -3395,6 +3395,11 @@ export class TraderManager {
               cachedTokens: result.usage.cachedTokens,
               reasoningTokens: result.usage.reasoningTokens,
             },
+            /*
+             * 原生工具调用（标准 function calling）—— **必须在最后一跳透传**。
+             * 漏掉它，上游 agent 循环就只看得到 text，于是退回文本协议。
+             */
+            ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
           };
         },
         /*

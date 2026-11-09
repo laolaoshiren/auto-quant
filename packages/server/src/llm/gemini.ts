@@ -26,7 +26,7 @@ export interface GeminiBodyOptions {
   jsonMode?: boolean;
   jsonSchema?: Record<string, unknown>;
   /** 原生 function calling 的工具清单（2026-10-23，见 `types.ts` 的 `ChatRequest.tools`）。 */
-  tools?: ToolSpec[];
+  tools?: readonly ToolSpec[];
   toolChoice?: 'auto' | 'none' | 'required';
 }
 

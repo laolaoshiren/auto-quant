@@ -28,7 +28,7 @@ import type { PositionSide } from '@aq/shared';
 import type { AccountState } from '../binance/account.js';
 import type { BinanceMarketData } from '../binance/market.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
-import { BinanceApiError, type BinanceAlgoStatus } from '../binance/types.js';
+import { BinanceApiError, type BinanceAlgoStatus, type BinanceUserTrade } from '../binance/types.js';
 import { eventBus } from '../events.js';
 import { createLogger } from '../logger.js';
 import { LlmError } from '../llm/errors.js';
@@ -110,7 +110,7 @@ import {
   roundTripQueryKey,
   type ReconstructedTrade,
 } from './roundTrips.js';
-import { commissionsInWindow, fundingInWindow, fundingSince, netPnlOf, realizedInFills, realizedInWindow } from '../binance/income.js';
+import { commissionsInWindow, fundingInWindow, fundingSince, isSettlementAsset, netPnlOf, realizedInFills, realizedInWindow, settlementCommissionOf } from '../binance/income.js';
 import {
   SIGNAL_HEALTH_WINDOW_DAYS,
   signalHealthReportFor,
@@ -572,6 +572,13 @@ export interface DecisionModel {
        * 缩小，比不修更糟）。
        */
       maxTokens?: number;
+      /**
+       * **原生 function calling 的工具清单**（2026-11-10）。
+       *
+       * 传了它，实现应当把 `tools` 带给模型，并把模型返回的 `toolCalls`
+       * 原样交回。不传 = 行为与改动前完全一致（提示词协议）。
+       */
+      tools?: readonly { name: string; description: string; parameters: Record<string, unknown> }[];
     },
   ): Promise<{
     text: string;
@@ -584,6 +591,8 @@ export interface DecisionModel {
       /** 花在思考上的输出 token（已计入 completion）。 */
       reasoningTokens?: number | null;
     };
+    /** 模型发起的原生工具调用（标准 function calling 的产出）。 */
+    toolCalls?: readonly { id: string; name: string; arguments: string }[];
   }>;
 
   /**
@@ -5730,6 +5739,44 @@ export class AutoTrader {
   }
 
   /**
+   * 非结算资产计价的手续费**必须单独报告**，不能静默并进 USDT 口径（§2.5）。
+   *
+   * 触发条件是用户开了币安的 **BNB 手续费抵扣**：这时成交明细的
+   * `commissionAsset` 是 `BNB`、`commission` 是 BNB 的币数量（约 0.0001 量级），
+   * 与 USDT 金额（约 0.07 量级）差三个数量级。混进 `fee` 会让成本被严重低估。
+   *
+   * ## 为什么要发日志而不是只把它丢掉
+   *
+   * 「账本净额」与「交易所流水」之间会因此出现一段**方向固定的小差额**
+   * （平台侧少扣了那笔 BNB 费）。不告诉操作员，他会以为那是又一个漏记 bug；
+   * 而这条日志把它变成一句可解释的事实。
+   */
+  private reportForeignFees(
+    symbol: string,
+    foreign: ReadonlyArray<{ asset: string; amount: number }>,
+  ): void {
+    if (foreign.length === 0) return;
+    const parts = foreign.map((f) => `${f.amount.toFixed(8)} ${f.asset}`).join('、');
+    this.emit(
+      'warn',
+      `${symbol} 的成交手续费里有非结算资产计价的部分（${parts}），**未计入** USDT 口径的 fee —— ` +
+        '这是币安的 BNB 手续费抵扣。它会让账本净额比交易所流水略好一点点，' +
+        '对账时别把它当成漏记。',
+    );
+  }
+
+  /**
+   * 一组成交里**结算资产计价**的手续费合计。
+   *
+   * 非结算资产（BNB 抵扣）会被排除并单独报告 —— 见 `settlementCommissionOf()`。
+   */
+  private settlementFeeOf(fills: readonly BinanceUserTrade[], symbol: string): number {
+    const { fee, foreign } = settlementCommissionOf(fills);
+    this.reportForeignFees(symbol, foreign);
+    return fee;
+  }
+
+  /**
    * 某张订单的**成交手续费合计**（按结算资产计价，支出为正）。
    *
    * 币安的 `GET /fapi/v1/order` 不返回佣金，只有成交明细（`userTrades`）里有，
@@ -5743,9 +5790,12 @@ export class AutoTrader {
     try {
       const fills = await this.deps.broker.getUserTrades(symbol, 50);
       const wanted = new Set([orderId]);
-      return fills
-        .filter((fill) => orderIdIn(String(fill.orderId), wanted))
-        .reduce((sum, fill) => sum + (Number(fill.commission) || 0), 0);
+      const matched = fills.filter((fill) => orderIdIn(String(fill.orderId), wanted));
+      /*
+       * ⚠️ 不能直接累加 `commission`：BNB 抵扣时它是 BNB 数量，不是 USDT
+       * 金额（§2.5，见 `settlementCommissionOf()`）。
+       */
+      return this.settlementFeeOf(matched, symbol);
     } catch {
       return 0;
     }
@@ -7053,7 +7103,11 @@ export class AutoTrader {
       const fills = await this.deps.broker.getUserTrades(symbol, 20);
       const latest = fills[fills.length - 1];
       if (latest) {
-        return { price: Number(latest.price) || 0, fee: Number(latest.commission) || 0 };
+        return {
+          price: Number(latest.price) || 0,
+          /* 单笔成交同样要按结算资产口径：BNB 抵扣的 `commission` 不是 USDT。 */
+          fee: this.settlementFeeOf([latest], symbol),
+        };
       }
     } catch {
       /* caller falls back to the mark price */
@@ -7098,7 +7152,8 @@ export class AutoTrader {
       const fills = await this.deps.broker.getUserTrades(symbol, 20);
       const mine = fills.filter((f) => String(f.orderId) === String(orderId));
       if (mine.length === 0) return 0;
-      return Math.abs(mine.reduce((sum, f) => sum + (Number(f.commission) || 0), 0));
+      /* 同上：按结算资产口径取，BNB 抵扣不进 USDT 的 `fee`。 */
+      return Math.abs(this.settlementFeeOf(mine, symbol));
     } catch {
       /* 拿不到就按 0：宁可这一列暂时空着，也不要让开仓整个失败。 */
       return 0;
@@ -8041,6 +8096,12 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
 
       for (const trip of reconstructRoundTrips(fills)) {
         /*
+         * 重建出来的**非结算资产手续费**（BNB 抵扣）不会进 `fee` —— 但它也不能
+         * 就这样消失（`ReconstructedTrade.foreignFees` 原来没有任何消费方）。
+         * 单独报一条，让操作员知道这段差额从哪来（§2.5）。
+         */
+        this.reportForeignFees(trip.symbol, trip.foreignFees);
+        /*
          * ⚠️ **先校验方向 —— 反了的回合一个数都不许记。**
          *
          * `reconstructRoundTrips()` 用的是**净头寸法**：按持仓数量的变化判断哪一笔
@@ -8731,6 +8792,15 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      * 这是唯一能**自动**发现「机器人显示在挣钱、账户却在缩水」这类故障的地方：
      * 账本自己不会说自己错了，只有拿它和权威流水比才知道。
      */
+    /*
+     * ⚠️ **非结算资产计价的手续费也要从「交易所侧」排除**（§2.5 同一条口径）。
+     *
+     * 平台侧（`trades.fee`）已经只含 USDT/USDC；而 `income` 流水的 `COMMISSION`
+     * 事件在 BNB 抵扣时 `asset = 'BNB'`、`income` 是 BNB 数量。不过滤的话两边
+     * 口径不同，这条本来该报「真的账目错了」的告警会带着一段固定差额永久响，
+     * 进而被操作员忽略 —— 那比不校验更糟。
+     */
+    let foreignCommission = 0;
     const exchangeNet = incomeEvents.reduce((sum, e) => {
       /*
        * 只算交易口径。`TRANSFER`（入金/出金）不是盈亏 ——
@@ -8744,8 +8814,21 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       ) {
         return sum;
       }
+      if (e.incomeType === 'COMMISSION' && !isSettlementAsset(e.asset)) {
+        foreignCommission += Math.abs(Number(e.income) || 0);
+        return sum;
+      }
       return sum + (Number(e.income) || 0);
     }, 0);
+    if (foreignCommission > 0) {
+      this.emitOnChange(
+        'ledger:foreign-commission',
+        'warn',
+        `交易所流水里有以非结算资产计价的手续费（合计 ${foreignCommission.toFixed(8)}，通常是 BNB 抵扣），` +
+          '已从「交易所净额」中排除。平台侧只记 USDT 口径 —— 两边必须同口径，' +
+          '否则这条差额告警会带着一段固定偏差永久响。',
+      );
+    }
     
     /* 平台侧：所有机器人的已实现净额 + 外部活动净额。 */
     /*
@@ -10129,9 +10212,10 @@ reduceQuantity: null,
       } else {
         try {
           const fills = await this.deps.broker.getUserTrades(symbol, 10);
-          fee = fills
-            .filter((fill) => String(fill.orderId) === filled.id)
-            .reduce((sum, fill) => sum + (Number(fill.commission) || 0), 0);
+          fee = this.settlementFeeOf(
+            fills.filter((fill) => String(fill.orderId) === filled.id),
+            symbol,
+          );
         } catch {
           /* leave the fee at zero rather than fail the close */
         }
@@ -12163,9 +12247,10 @@ reduceQuantity: null,
     } else {
       try {
         const fills = await this.deps.broker.getUserTrades(decision.symbol, 10);
-        exitFee = fills
-          .filter((f) => String(f.orderId) === filledId)
-          .reduce((sum, f) => sum + (Number(f.commission) || 0), 0);
+        exitFee = this.settlementFeeOf(
+          fills.filter((f) => String(f.orderId) === filledId),
+          decision.symbol,
+        );
       } catch {
         /* 拿不到手续费就记 0，对账会补 */
       }
@@ -12981,9 +13066,10 @@ reduceQuantity: null,
       } else {
         try {
           const fills = await this.deps.broker.getUserTrades(symbol, 10);
-          fee = fills
-            .filter((fill) => String(fill.orderId) === filled.id)
-            .reduce((sum, fill) => sum + (Number(fill.commission) || 0), 0);
+          fee = this.settlementFeeOf(
+            fills.filter((fill) => String(fill.orderId) === filled.id),
+            symbol,
+          );
         } catch {
           /* leave the fee at zero rather than fail the flatten */
         }

@@ -690,3 +690,48 @@ export function renderToolCatalogue(): string {
     return `### ${t.name}\n${t.describe}\n${argText}`;
   }).join('\n\n');
 }
+
+/**
+ * **标准 JSON Schema 工具声明**（OpenAI / Anthropic 的 `tools` 参数）。
+ *
+ * ## 为什么需要第二份表示（2026-11-10）
+ *
+ * 内部 `ToolSpec` 是给**提示词**用的形状（`describe` / `args`），由
+ * `renderToolCatalogue()` 渲染成文本协议。而**原生 function calling** 要求
+ * `{ name, description, parameters: JSON Schema }`。
+ *
+ * 两份都**从同一份 `AGENT_TOOLS` 生成**，所以不会出现"提示词里说有的工具、
+ * API 里没有"这种静默分叉 —— 改了工具定义，两条通道一起变。
+ *
+ * ## 为什么是 JSON Schema 里最保守的子集
+ *
+ * 只输出 `type` / `description` / `enum` / `minimum` / `maximum` / `default`，
+ * 不写 `oneOf` 之类的复杂组合 —— 各家网关对 JSON Schema 的支持程度不一，
+ * 越复杂的 schema 越容易被某个上游拒收。
+ */
+export interface ToolApiSpec {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+/** 供原生 function calling 使用的工具声明（与 `AGENT_TOOLS` 一一对应）。 */
+export const AGENT_TOOL_SPECS: readonly ToolApiSpec[] = AGENT_TOOLS.map((tool) => {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const [name, arg] of Object.entries(tool.args)) {
+    const prop: Record<string, unknown> = { type: arg.type };
+    if (arg.describe) prop.description = arg.describe;
+    if (arg.enum) prop.enum = [...arg.enum];
+    if (arg.min !== undefined) prop.minimum = arg.min;
+    if (arg.max !== undefined) prop.maximum = arg.max;
+    if (arg.default !== undefined) prop.default = arg.default;
+    properties[name] = prop;
+    if (arg.required) required.push(name);
+  }
+  return {
+    name: tool.name,
+    description: tool.describe,
+    parameters: { type: 'object', properties, required, additionalProperties: false },
+  };
+});

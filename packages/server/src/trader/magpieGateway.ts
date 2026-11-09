@@ -199,6 +199,12 @@ export function createMagpieCallFactory(gateway: MagpieGatewayConfig): CallModel
     const client = clientFor(modelId);
     const result = await client.chat(messages, {
       ...(options.signal ? { signal: options.signal } : {}),
+      /*
+       * **原生 function calling**（2026-11-10）：调用方给了工具清单就透传，
+       * 于是模型用标准的 `tool_calls` 字段回答，而不是在正文里手写 JSON 协议。
+       */
+      ...(options.tools !== undefined ? { tools: options.tools } : {}),
+      ...(options.toolChoice !== undefined ? { toolChoice: options.toolChoice } : {}),
       maxTokens: Math.max(options.maxTokens, MIN_OUTPUT_BUDGET),
     });
     return {
@@ -221,6 +227,8 @@ export function createMagpieCallFactory(gateway: MagpieGatewayConfig): CallModel
        * 从表面完全看不出原因。
        */
       finishReason: result.finishReason ?? null,
+      /* 原生工具调用：原样交给上层（agent loop 优先使用它）。 */
+      ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
     };
   };
 }
