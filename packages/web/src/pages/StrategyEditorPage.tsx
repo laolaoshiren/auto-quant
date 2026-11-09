@@ -101,7 +101,7 @@ const RiskBanner = memo(function RiskBanner({
         onClick={onOpen}
         title="强制止损 — 点击跳到核心风控"
         className={cn(
-          'group flex min-w-0 shrink-0 basis-full flex-col rounded-md border bg-base-850/80 px-3 py-1.5 text-left transition hover:bg-base-800 sm:basis-auto sm:min-w-[16rem]',
+          'group flex min-w-0 shrink-0 basis-full flex-col rounded-md border bg-base-850/80 px-3 py-1.5 text-left transition hover:bg-base-800 lg:basis-auto lg:min-w-[16rem]',
           requireStopLoss ? 'border-base-750 hover:border-accent/60' : 'border-down/60 hover:border-down',
         )}
       >
@@ -547,7 +547,12 @@ export function StrategyEditorPage() {
         工具条待在内边距里：视觉上只是左右少了一点点出血，但不会再算错宽度。
       */}
       <div className="sticky top-0 z-20 -mt-4 space-y-2 border-b border-base-800 bg-base-950 pb-2 pt-2">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        {/*
+          ⚠️ **动作紧跟标题**（ui-spec §1）：不再用 `ml-auto` 把它们推到页面最右端。
+          主操作（保存）与最高频的辅助动作（策略体检）紧跟在标题后面；
+          低频/危险动作（预设、查看 JSON、删除）下放到第二行左侧。
+        */}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
           <Link
             to="/strategy"
             className="shrink-0 text-base text-ink-lo transition hover:text-accent"
@@ -555,7 +560,7 @@ export function StrategyEditorPage() {
           >
             ← {PAGE_LABEL.strategy}
           </Link>
-          <h1 className="min-w-0 max-w-[40vw] truncate text-lg font-semibold tracking-wide text-ink-hi">
+          <h1 className="min-w-0 max-w-[40vw] truncate text-xl font-semibold tracking-tight text-ink-hi">
             {state.name || '未命名策略'}
           </h1>
 
@@ -567,7 +572,7 @@ export function StrategyEditorPage() {
               tone="warn"
               title={`这份配置是从“${clonedFrom.label}”克隆来的，但它的参数已经被改成不等于该模板了 —— 列表页会继续显示克隆来源，这里的参数才是真实生效的那一份。`}
             >
-              已偏离预设：{clonedFrom.label}
+              已偏离预设
             </Badge>
           )}
           {errorCount > 0 && (
@@ -576,72 +581,13 @@ export function StrategyEditorPage() {
             </Badge>
           )}
 
-          <div className="ml-auto flex flex-wrap items-center gap-1.5">
-            {listQuery.data && listQuery.data.length > 0 && (
-              <Select
-                className="w-44"
-                value={isNew ? '' : String(state.id)}
-                aria-label="跳转到其他策略"
-                onChange={(event) => {
-                  const next = event.target.value;
-                  if (next === '') return;
-                  if (dirty && !window.confirm('放弃未保存的修改？离开后这些修改会丢失。')) return;
-                  navigate(`/strategy/${next}`);
-                }}
-              >
-                <option value="">— 跳转到策略 —</option>
-                {listQuery.data.map((record) => (
-                  <option key={record.id} value={record.id}>
-                    {record.name}
-                  </option>
-                ))}
-              </Select>
-            )}
-            <Select
-              className="w-36"
-              /*
-               * ⚠️ **回显的是"配置还等于哪份预设"，不是 `state.presetId`。**
-               *
-               * 两者会分叉，而且分叉时下拉框读 `presetId` 是**说假话**：
-               * 用户手改一处之后草稿已经不等于"稳健"了，而 `presetId` 还停在它上面
-               * （库里的那列更是 `PATCH` 根本不会更新，见 `api/server.ts:1662-1667`）。
-               * 于是下拉框显示"稳健"，而参数是混合体 —— 正是列表页
-               * 「稳健 | 短线 | 10×」那一族矛盾的来源。
-               *
-               * 用派生值之后：配置仍等于某份预设 → 回显它；不等于 → 回到
-               * 「— 应用预设 —」占位，且徽章会提示"已偏离预设"。
-               * 这一处也是**用户唯一的线索**："我刚才改的那一下把它变成自定义配置了。"
-               */
-              value={activePresetNow?.id ?? ''}
-              aria-label="应用预设"
-              onChange={(event) => event.target.value && applyPresetToDraft(event.target.value)}
-            >
-              <option value="">— 应用预设 —</option>
-              {STRATEGY_PRESETS.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label}
-                </option>
-              ))}
-            </Select>
-            <Button
-              variant="ghost"
-              onClick={() => setRawOpen((v) => !v)}
-              title="查看并复制 API 实际收到的 StrategyConfig"
-            >
-              {rawOpen ? '隐藏 JSON' : '查看 JSON'}
-            </Button>
-            {/* Prominent: this is the "does my strategy actually work?" button. */}
+          <span className="flex items-center gap-1.5">
             <StrategyCheckButton
               onClick={() => {
                 if (dirty && !window.confirm('体检会先保存当前修改，然后运行一次真实模型调用。继续？')) return;
                 setCheckOpen(true);
               }}
             />
-            {!isNew && (
-              <Button variant="danger" onClick={() => void remove()}>
-                删除
-              </Button>
-            )}
             <Button
               variant="primary"
               onClick={() => void save()}
@@ -651,7 +597,44 @@ export function StrategyEditorPage() {
             >
               {saving ? '正在保存…' : isNew && state.id === 0 ? '创建策略' : '保存修改'}
             </Button>
-          </div>
+          </span>
+        </div>
+
+        {/* 第二行：低频动作。预设与危险操作同一行左侧，不抢标题的视线。 */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Select
+            className="w-40"
+            /*
+             * ⚠️ **回显的是"配置还等于哪份预设"，不是 `state.presetId`。**
+             *
+             * 两者会分叉，而且分叉时下拉框读 `presetId` 是**说假话**：
+             * 用户手改一处之后草稿已经不等于"稳健"了，而 `presetId` 还停在它上面。
+             * 用派生值之后：配置仍等于某份预设 → 回显它；不等于 → 回到占位。
+             */
+            value={activePresetNow?.id ?? ''}
+            aria-label="应用预设"
+            onChange={(event) => event.target.value && applyPresetToDraft(event.target.value)}
+          >
+            <option value="">— 应用预设 —</option>
+            {STRATEGY_PRESETS.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label}
+              </option>
+            ))}
+          </Select>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setRawOpen((v) => !v)}
+            title="查看并复制 API 实际收到的 StrategyConfig"
+          >
+            {rawOpen ? '隐藏 JSON' : '查看 JSON'}
+          </Button>
+          {!isNew && (
+            <Button variant="ghost" size="sm" onClick={() => void remove()} className="text-down hover:text-down">
+              删除策略
+            </Button>
+          )}
         </div>
 
         <RiskBanner

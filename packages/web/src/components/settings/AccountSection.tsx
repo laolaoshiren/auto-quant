@@ -324,21 +324,15 @@ export function AccountSection() {
    * 这件事**，所以它跟着表单走，落在表单下面。
    */
   const notes = (
-    <Panel title="账户说明" bodyClassName="px-4 py-2.5">
-      <div className="space-y-1.5 text-xs leading-snug text-ink-mid">
-        <p>
-          本系统面向单人部署：管理员账号在服务首次启动时自动创建，<strong>不提供注册入口</strong>
-          ，也没有找回密码的流程 —— 修改只能在这里做，且必须验证当前密码。
-        </p>
-        <p>如果用户名与密码都忘了，只能到服务器上重置数据库里的凭据记录。</p>
-        {build?.dirty && (
-          <p className="text-warn">
-            ⚠ 打包时工作区有未提交改动 —— 线上跑的代码<strong>不等于</strong> {build.commitShort}{' '}
-            这个提交，它的行为无法用仓库里的任何一版解释。
-          </p>
-        )}
-      </div>
-    </Panel>
+    <p className="px-1 text-xs leading-relaxed text-ink-faint">
+      本系统面向单人部署：管理员账号在服务首次启动时自动创建，<strong className="text-ink-lo">不提供注册与找回密码</strong>
+      ；忘记凭据只能到服务器上重置数据库记录。
+      {build?.dirty && (
+        <span className="mt-1 block text-warn">
+          ⚠ 打包时工作区有未提交改动 —— 线上代码不等于 {build.commitShort}，其行为无法用仓库里任何一版解释。
+        </span>
+      )}
+    </p>
   );
 
   /*
@@ -365,10 +359,7 @@ export function AccountSection() {
   return (
     <PageShell aside={rail} fillHeight={false}>
       <section className="min-w-0">
-        <SectionLabel
-          title="修改用户名与密码"
-          actions={<span className="text-xs text-ink-faint">Enter 提交 · Esc 清空</span>}
-        />
+        <SectionLabel title="修改用户名与密码" />
         <Panel>
           <form
             className="space-y-3"

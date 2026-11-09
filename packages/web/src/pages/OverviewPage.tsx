@@ -34,16 +34,17 @@
  */
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Bot, RefreshCw } from 'lucide-react';
 import type { EquitySnapshot, TraderMode, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
-import { MODE_HINT, MODE_LABEL } from '../lib/glossary';
+import { MODE_HINT, PAGE_LABEL } from '../lib/glossary';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
 import { accountEquityContributor, attributedEquityOf, fleetTotals } from '../lib/fleetTotals';
 import { pairEquityByTrader } from '../lib/equityPairing';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
-import { Button, Empty, ErrorNote, Panel, Spinner3 } from '../components/ui';
+import { Button, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
+import { SectionHeading } from '../components/Badges';
+import { ModeBadge } from '../components/TeamRoster';
 import { Metric, MetricGroup, PageShell, SectionLabel } from '../components/shell';
 import { NewTraderModal } from '../components/TraderModals';
 import { ConfirmStopTrader } from '../components/ConfirmStopTrader';
@@ -93,7 +94,7 @@ const CLOCK_WARN_MS = 2000;
 const WEIGHT_WARN_PERCENT = 70;
 
 export function OverviewPage() {
-  useDocumentTitle('总览');
+  useDocumentTitle(PAGE_LABEL.overview);
   const navigate = useNavigate();
   const user = useApp((s) => s.user);
   const system = useApp((s) => s.system);
@@ -125,7 +126,6 @@ export function OverviewPage() {
   const [stopTarget, setStopTarget] = useState<TraderRow | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [range, setRange] = useState<EquityRange>('7D');
-  const [refreshing, setRefreshing] = useState(false);
   useEffect(() => {
     if (tradersQuery.data) setTraders(tradersQuery.data);
   }, [tradersQuery.data, setTraders]);
@@ -392,20 +392,6 @@ export function OverviewPage() {
     }
   };
 
-  /**
-   * One manual refresh that cannot mislead: it is busy-labelled and it reloads
-   * every region on the page, so an operator who has just placed a trade does
-   * not have to guess whether the numbers in front of them are current.
-   */
-  const refreshAll = () => {
-    setRefreshing(true);
-    tradersQuery.reload();
-    refreshSystem();
-    const ids = traderIds ? traderIds.split(',').map(Number) : [];
-    if (ids.length > 0) void refreshMany(ids);
-    window.setTimeout(() => setRefreshing(false), 600);
-  };
-
   const listFailed = tradersQuery.error !== null && tradersQuery.data === null;
 
   const pnlTone = (value: number): 'default' | 'up' | 'down' =>
@@ -440,7 +426,7 @@ export function OverviewPage() {
    * - `< sm`：单列堆叠。
    */
   const rail = (
-    <div className="grid grid-cols-1 gap-4 rounded-lg border border-base-750 bg-base-900 p-3.5 shadow-panel sm:grid-cols-2 xl:grid-cols-1">
+    <div className="grid grid-cols-1 gap-4 rounded-lg border border-base-750 bg-base-900 p-3 sm:grid-cols-2 xl:grid-cols-1">
       <MetricGroup title="账户" columns={2}>
         <Metric
           label={`${BALANCE_LABEL.equity}合计`}
@@ -513,7 +499,7 @@ export function OverviewPage() {
           label="浮动盈亏"
           tone={pnlTone(unrealized)}
           value={fmtUsdSigned(unrealized, 2)}
-          sub={`${fmtInt(totalOpen)} 个持仓 · 未落袋`}
+          sub="未落袋"
           title="所有机器人自己的持仓的未实现盈亏合计（不是交易所账户的总浮盈 —— 账户的总浮盈在同一账户下的每个机器人身上都是同一个数）。它随时在变，且尚未计入已实现盈亏。"
         />
         <Metric
@@ -527,21 +513,19 @@ export function OverviewPage() {
       {/*
         **运行环境** —— 原来是页面底部一整块面板（178px 高，而且把页脚推到了
         视口下面；用户 2026-11-10：「多余还有导致 UI BUG」）。它只是诊断信息，
-        收进右栏底部一小段即可：环境 / 模式 / 可交易对 / 推送；内部诊断值
+        收进右栏底部一小段即可：模式 / 可交易对 / 推送；内部诊断值
         （时钟、权重）仍然只在越界时多一行，带后果。
+
+        ⚠️ 这里**不再显示「环境」**：`environmentLabel` 自己就带「…（实盘）」
+        /「…模拟盘」后缀，与紧挨着的「模式」说的是同一件事 —— 同一行里出现
+        两次「模拟」，是用户点名要删的那类重复。
       */}
-      <div className="border-t border-base-750 pt-2.5">
+      <div className="border-t border-base-750 pt-2">
         <dl className="num flex flex-wrap gap-x-4 gap-y-1 text-xs">
-          <div className="flex min-w-0 items-baseline gap-1">
-            <dt className="shrink-0 text-ink-faint">环境</dt>
-            <dd className="min-w-0 truncate text-ink-mid" title={system?.environmentLabel ?? ''}>
-              {system?.environmentLabel ?? '—'}
-            </dd>
-          </div>
           <div className="flex items-baseline gap-1">
             <dt className="text-ink-faint">模式</dt>
             <dd className={system?.dryRun ? 'text-accent' : 'text-warn'}>
-              {system ? (system.dryRun ? '模拟' : '实盘资金') : '—'}
+              {system ? (system.dryRun ? '模拟盘' : '实盘资金') : '—'}
             </dd>
           </div>
           <div className="flex items-baseline gap-1">
@@ -574,26 +558,31 @@ export function OverviewPage() {
       <ErrorNote>{actionError}</ErrorNote>
 
       {/* ------------------------------------------------------------------ */}
-      {/*  页头：标题 + 状态 + 主要操作（LAYOUT.md §1）                        */}
+      {/*  页头：与其它页同一套骨架（ui-spec §1）                              */}
       {/* ------------------------------------------------------------------ */}
       {/*
-        页头只留两样东西：更新时间和动作。
-        原来的「欢迎回来，admin」是**多余**的（2026-11-10 用户：「多余还有导致 UI BUG」）——
-        外壳头部已经写着当前页名「总览」，右下角也有操作员名；
-        标题只是把内容往下推了 40px。「管理机器人」链接也与左侧导航重复，一并删除。
+        **`SectionHeading`：20px 标题 + 紧跟标题的动作 + 12px 说明另起一行。**
+
+        原来这里只有「更新于 刚刚」+ 一个孤立按钮 —— 它既不是标题、也不在
+        标题旁边（用户 2026-11-10：「别单独搞那么最右边…也会造成大量空白」）。
+        现在与「机器人」「策略工作室」两页逐字同构：标题 → 主操作 → 说明。
+
+        说明行写**自动刷新**而不是放一个刷新按钮：ui-spec §5 要求默认自动刷新。
       */}
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <p className="num truncate text-xs text-ink-faint">
-          更新于 {timeAgo(tradersQuery.updatedAt ? new Date(tradersQuery.updatedAt).toISOString() : null)}
-        </p>
-        {/*
-          新建按钮**紧跟更新时间**，不再推到最右端（用户 2026-11-10：
-          「别单独搞那么最右边，不好用不方便看，也会造成大量空白」）。
-        */}
-        <Button small variant="primary" onClick={() => setNewOpen(true)}>
-          新建机器人
-        </Button>
-      </header>
+      <SectionHeading
+        title={PAGE_LABEL.overview}
+        right={
+          <Button variant="primary" onClick={() => setNewOpen(true)}>
+            新建机器人
+          </Button>
+        }
+        sub={
+          <>
+            数据自动刷新（推送在线时实时）· 更新于{' '}
+            {timeAgo(tradersQuery.updatedAt ? new Date(tradersQuery.updatedAt).toISOString() : null)}
+          </>
+        }
+      />
 
       <PageShell aside={rail} fillHeight={false}>
         <ModeBreakdown traders={traders} />
@@ -663,14 +652,16 @@ export function OverviewPage() {
         {/*  2. 机器人明细                                                     */}
         {/* ---------------------------------------------------------------- */}
         <section aria-labelledby="overview-traders">
+          {/*
+            ⚠️ **这里不再有「全部机器人」按钮**（原来挂在 `SectionLabel` 的
+            `actions` 槽里，也就是被推到整页最右端）：
+              · 左侧导航第一项就是「机器人」，它的功能与这个链接完全重复；
+              · 表格下面在行数超限时本来就有「在「机器人」中查看全部 N 个」。
+            用户 2026-11-10：「别单独搞那么最右边…也会造成大量空白」。
+          */}
           <SectionLabel
             title="机器人"
             count={`${fmtInt(traders.length)} 个 · ${fmtInt(runningCount)} 运行中`}
-            actions={
-              <Link to="/traders" className="btn btn-ghost btn-xs">
-                全部机器人
-              </Link>
-            }
           />
           <h2 id="overview-traders" className="sr-only">
             机器人明细
@@ -688,23 +679,21 @@ export function OverviewPage() {
               <Spinner3 label="正在读取机器人" />
             </Panel>
           ) : traders.length === 0 ? (
-            <Panel>
-              <Empty
-                icon={<Bot aria-hidden className="h-5 w-5" />}
-                message="还没有机器人，先创建一个。"
-                hint="创建后默认以「模拟」模式运行：不需要交易所密钥、不下真实订单，可以先看几轮决策再决定是否切到实盘。"
-                action={
-                  <div className="flex flex-wrap items-center justify-center gap-2">
-                    <Button variant="primary" onClick={() => setNewOpen(true)}>
-                      新建机器人
-                    </Button>
-                    <Link to="/exchanges" className="btn btn-ghost">
-                      先去配置交易所
-                    </Link>
-                  </div>
-                }
-              />
-            </Panel>
+            /* 空状态：一行说明 + 主操作，不画大盒子（ui-spec §1）。 */
+            <div className="py-2">
+              <p className="text-base text-ink-lo">还没有机器人。</p>
+              <p className="mt-1 text-xs text-ink-faint">
+                创建后默认以「模拟」运行：不需要交易所密钥、不下真实订单，可以先看几轮决策再决定是否切到实盘。
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Button variant="primary" onClick={() => setNewOpen(true)}>
+                  新建机器人
+                </Button>
+                <Link to="/exchanges" className="btn btn-ghost">
+                  先去配置交易所
+                </Link>
+              </div>
+            </div>
           ) : (
             <TradersSnapshotTable
               traders={snapshotRows}
@@ -763,15 +752,21 @@ export function OverviewPage() {
 /**
  * **运行模式分布** —— 一行紧凑统计，不再是大卡片（2026-11-10 用户反馈）。
  *
- * ## 为什么从"四张大卡片"改成"一行统计"
+ * ## 为什么是"一行统计"而不是"四张说明卡"
  *
  * 用户的原话是「**重新设计 UI/UX，简单实用**」。改造前的四张卡片每张塞：
  * 模式名 + 数量 + 一句解释 + 全部机器人名字 —— 占了首屏一半高度，
  * 而信息量只有"每个模式有几台"。首屏该先回答的是「钱怎么样、谁在跑、
  * 最近发生了什么」，不是"模式说明"。
  *
- * 现在的形态：一行四个单元格，**名称 + 数量 + 运行数**，解释只在 `title` 里。
- * 名字列表不再铺开（机器人表就在下面，那里能点进去）。
+ * ## 这一版的改动（2026-11-10 重设计）
+ *
+ * 1. **模式名改用 `ModeBadge`** —— 与机器人列表、详情页页头**同一个组件、
+ *    同一套颜色**（团队=蓝 / 托管=绿 / 固定策略=灰 / JEV=黄）。原来这里自己
+ *    画了"圆点 + 文字"，颜色与列表页对不上，同一个模式在两个页面长得不一样。
+ * 2. **不再截断**：原来用的是 `MODE_LABEL.jev`（「JEV 模式（实验性）」），
+ *    四等分之后被截成「JEV 模式（实…」；`ModeBadge` 的短名「JEV 实验」放得下。
+ * 3. **去掉解释文字的占位**：解释进 `title`，行内只留「数量 + 运行中」。
  *
  * ## 仍然列出全部四种模式
  *
@@ -780,14 +775,14 @@ export function OverviewPage() {
  */
 function ModeBreakdown({ traders }: { traders: TraderRow[] }): React.ReactElement {
   /*
-   * ⚠️ **这里必须列出每一种 TraderMode**。名字登记在 `lib/glossary.ts`，
-   * 这里不许再写字面量。
+   * ⚠️ **这里必须列出每一种 TraderMode**。名字与颜色登记在
+   * `components/TeamRoster.tsx` 的 `MODE_BADGE`，这里不许再写字面量。
    */
-  const groups: Array<{ mode: TraderMode; label: string; hint: string }> = [
-    { mode: 'strategy', label: MODE_LABEL.strategy, hint: MODE_HINT.strategy },
-    { mode: 'ai_managed', label: MODE_LABEL.ai_managed, hint: MODE_HINT.ai_managed },
-    { mode: 'ai_team', label: MODE_LABEL.ai_team, hint: MODE_HINT.ai_team },
-    { mode: 'jev', label: MODE_LABEL.jev, hint: MODE_HINT.jev },
+  const groups: Array<{ mode: TraderMode; hint: string }> = [
+    { mode: 'strategy', hint: MODE_HINT.strategy },
+    { mode: 'ai_managed', hint: MODE_HINT.ai_managed },
+    { mode: 'ai_team', hint: MODE_HINT.ai_team },
+    { mode: 'jev', hint: MODE_HINT.jev },
   ];
 
   return (
@@ -798,37 +793,29 @@ function ModeBreakdown({ traders }: { traders: TraderRow[] }): React.ReactElemen
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
         {groups.map((g) => {
           const mine = traders.filter((t) => t.mode === g.mode);
-          const running = mine.filter((t) => t.status === 'running').length;
+          const running = mine.filter((t) => t.isRunning).length;
           const empty = mine.length === 0;
           return (
             <Link
               key={g.mode}
               to="/traders"
               title={`${g.hint}（点这里查看机器人列表）`}
-              className={`group flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 transition ${
-                empty
-                  ? 'border-base-800 bg-base-900/40'
-                  : 'border-base-750 bg-base-900 hover:border-base-600'
-              }`}
+              className={cn(
+                'flex min-w-0 items-center gap-2 rounded-lg border px-2 py-2 transition',
+                empty ? 'border-base-800 bg-base-900/40' : 'border-base-750 bg-base-900 hover:border-base-600',
+              )}
             >
+              <ModeBadge mode={g.mode} />
+              <span className={cn('num text-base font-semibold', empty ? 'text-ink-faint' : 'text-ink-hi')}>
+                {mine.length} 台
+              </span>
               <span
-                aria-hidden
-                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                  running > 0 ? 'bg-up' : 'bg-ink-faint/40'
-                }`}
-              />
-              <span
-                className={`min-w-0 flex-1 truncate text-base group-hover:text-ink-hi ${
-                  empty ? 'text-ink-faint' : 'text-ink-mid'
-                }`}
+                className={cn(
+                  'num ml-auto truncate text-xs',
+                  running > 0 ? 'text-up' : 'text-ink-faint',
+                )}
               >
-                {g.label}
-              </span>
-              <span className={`num shrink-0 text-base font-semibold ${empty ? 'text-ink-faint' : 'text-ink-hi'}`}>
-                {mine.length}
-              </span>
-              <span className="num hidden shrink-0 text-xs text-ink-faint sm:inline">
-                {running > 0 ? `运行 ${running}` : ''}
+                {running > 0 ? `${running} 运行` : '未运行'}
               </span>
             </Link>
           );

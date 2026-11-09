@@ -12,7 +12,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
-import { Check, Lock, Search, TriangleAlert, X } from 'lucide-react';
+import { Check, Lock, Search, Star, TriangleAlert, X } from 'lucide-react';
 import { authStyleLabel, jsonModeLabel } from '@aq/shared';
 import {
   api,
@@ -37,8 +37,6 @@ import {
   TextInput,
   cn,
 } from '../ui';
-import { SectionLabel } from '../shell';
-import { PageActions } from '../../templates/lib/PageActions';
 import { fmtDateTime, fmtInt, fmtLatency } from '../../lib/format';
 
 /* -------------------------------------------------------------------------- */
@@ -264,15 +262,21 @@ const ModelRow = memo(function ModelRow({
 
   return (
     <tr className="row-hover" title={params}>
+      {/* 名称独占一行；供应商/参数偏离降成第二行小字。原来三个徽章挤在同一行，
+          窄屏会溢出到"模型·端点"列（768 截图实测），名称也被压成 `magp…`。 */}
       <td className="td px-2 py-1.5">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-base font-semibold text-ink-hi">{row.label}</span>
-          <Badge tone="accent">{providerLabel}</Badge>
-          {tuned && (
-            <Badge tone="muted" title={`已偏离供应商默认值：${params}`}>
-              已调参
-            </Badge>
-          )}
+        <div className="min-w-0">
+          <div className="truncate text-base font-semibold text-ink-hi" title={row.label}>
+            {row.label}
+          </div>
+          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 truncate text-xs text-ink-faint">
+            <span className="shrink-0 text-ink-lo">{providerLabel}</span>
+            {tuned && (
+              <span className="shrink-0 text-warn" title={`已偏离供应商默认值：${params}`}>
+                · 已调参
+              </span>
+            )}
+          </div>
         </div>
       </td>
       <td className="td num max-w-[260px] px-2 py-1.5">
@@ -286,7 +290,7 @@ const ModelRow = memo(function ModelRow({
       <td className="td hidden px-2 py-1.5 2xl:table-cell">
         <SecretChip hasKey={row.hasKey} masked={row.apiKeyMasked} />
       </td>
-      <td className="td hidden max-w-[220px] px-2 py-1.5 2xl:table-cell">
+      <td className="td hidden max-w-[220px] px-2 py-1.5 xl:table-cell">
         <TestOutcome testing={testing} result={result} />
       </td>
       <td className="td px-2 py-1.5 text-right">
@@ -299,20 +303,22 @@ const ModelRow = memo(function ModelRow({
           </Button>
           {/*
             「默认」是一个**标记**而不是一个按钮：已经是默认时不该再有一个可点的
-            "设为默认"，那会让操作员怀疑自己点没点上。不是默认时才给按钮。
+            "设为默认"，那会让操作员怀疑自己点没点上。不是默认时给一个**图标按钮**
+            —— 文字版在 5 列布局里会把操作列挤宽、把名称列压成 `magp…`（真实截图）。
           */}
           {isDefault ? (
-            <span className="px-1 text-xs text-ink-faint" title="新建机器人时会预选这个模型">
+            <Badge tone="accent" title="新建机器人时会预选这个模型">
               默认
-            </span>
+            </Badge>
           ) : (
             <Button
               small
               variant="ghost"
-              onClick={() => onSetDefault(row)}
+              aria-label={`将 ${row.label} 设为默认模型`}
               title="新建机器人时预选这个模型（而不是列表里的第一个）"
+              onClick={() => onSetDefault(row)}
             >
-              设为默认
+              <Star aria-hidden className="h-3.5 w-3.5" />
             </Button>
           )}
           <Button
@@ -743,43 +749,34 @@ export function AiModelsSection() {
 
       {/* 区块标题用 LAYOUT.md §5 的小字距标签 + 延伸线，而不是面板自带的标题栏：
           它和表格在视觉上绑在一起，而且省掉一整条 40px 的头部。 */}
-      <SectionLabel
-        title="已配置模型"
-        count={fmtInt(models.length)}
-        actions={
-          /* 页面级动作 → 统一接口。禁用态跟着 providers 走，不在这里重复判断。 */
-          <PageActions
-            start={
-              <>
-                {/*
-                  ⭐ **一键测试全部**（2026-10-14）。
-                  ⚠️ 与「+ 添加模型」并列而不是塞进某个菜单：它是这一页第二常用的动作
-                  （配完一批模型后第一件事就是问"哪些是通的"）。
-                  ⚠️ 测试期间 disabled —— 重复点击会**再发一轮请求**，
-                  而那在十几个模型时是明显的浪费（也可能触发网关限流）。
-                */}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  busy={batch !== null}
-                  disabled={batch !== null || models.length === 0}
-                  onClick={() => void testAll()}
-                  title={
-                    batch !== null
-                      ? `正在测试（${batch.done}/${batch.total}）`
-                      : '对每个已配置模型各发一次最小补全请求，结果直接标在下面每一行上'
-                  }
-                >
-                  {batch !== null ? `测试中 ${batch.done}/${batch.total}` : '一键测试全部'}
-                </Button>
-                <Button variant="primary" size="sm" onClick={openCreate} disabled={providers.length === 0}>
-                  + 添加模型
-                </Button>
-              </>
-            }
-          />
-        }
-      />
+      {/*
+        区块标题 + 动作**同一行紧挨着**（ui-spec §1）。不用 `SectionLabel` 的
+        `actions`：它把动作放到延伸线之后（页面最右端），正好是规范禁止的形态。
+        主操作在前，其余 ghost。
+      */}
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="shrink-0 text-xs font-semibold uppercase tracking-[0.14em] text-ink-lo">
+          已配置模型 <span className="num ml-1 text-ink-faint">{fmtInt(models.length)}</span>
+        </h2>
+        <Button variant="primary" size="sm" onClick={openCreate} disabled={providers.length === 0}>
+          + 添加模型
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          busy={batch !== null}
+          disabled={batch !== null || models.length === 0}
+          onClick={() => void testAll()}
+          title={
+            batch !== null
+              ? `正在测试（${batch.done}/${batch.total}）`
+              : '对每个已配置模型各发一次最小补全请求，结果直接标在下面每一行上'
+          }
+        >
+          {batch !== null ? `测试中 ${batch.done}/${batch.total}` : '一键测试全部'}
+        </Button>
+        <span aria-hidden className="h-px min-w-4 flex-1 bg-base-800" />
+      </div>
 
       {/*
         批量测试的汇总 —— 只在跑完一轮之后显示。
@@ -857,10 +854,11 @@ export function AiModelsSection() {
                   <table className="w-full table-fixed border-collapse">
                     <thead className="border-b border-base-800 bg-base-850/60">
                       <tr>
-                        <th className="th px-2 py-1.5">名称</th>
-                        <th className="th px-2 py-1.5">模型 · 端点</th>
-                        <th className="th hidden px-2 py-1.5 2xl:table-cell">密钥</th>
-                        <th className="th hidden px-2 py-1.5 2xl:table-cell">最近测试</th>
+                        <th className="th w-[26%] px-2 py-1.5">名称</th>
+                        <th className="th w-[34%] px-2 py-1.5">模型 · 端点</th>
+                        <th className="th hidden w-[14%] px-2 py-1.5 2xl:table-cell">密钥</th>
+                        {/* 「最近测试」是这一页第二重要的信息 —— 从 xl 起就显示，不再等到 2xl。 */}
+                        <th className="th hidden w-[14%] px-2 py-1.5 xl:table-cell">最近测试</th>
                         <th className="th px-2 py-1.5 text-right">操作</th>
                       </tr>
                     </thead>
@@ -902,8 +900,7 @@ export function AiModelsSection() {
 
       {models.length > 0 && (
         <p className="text-xs leading-relaxed text-ink-faint">
-          「测试」会向该接口发送一次最小补全请求，并报告延迟与它回显的模型 id。它不会启动任何机器人，最多只消耗少量
-          Token。密钥列显示的是服务端掩码，任何界面都无法取出明文。
+          「测试」会发一次最小补全请求并报告延迟；密钥列只是服务端掩码，无法取出明文。
           {newestUpdate && <> 最近更新 {fmtDateTime(newestUpdate)}。</>}
         </p>
       )}

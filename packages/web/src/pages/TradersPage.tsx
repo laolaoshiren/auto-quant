@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { ModeBadge } from '../components/TeamRoster';
 import { Link, useNavigate } from 'react-router-dom';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
-import { ArrowUpRight, Loader2, MoreHorizontal, Pencil, Play, Square, Trash2 } from 'lucide-react';
+import { ArrowUpRight, Loader2, MoreHorizontal, Pencil, Play, Plus, Square, Trash2 } from 'lucide-react';
 import type { EquitySnapshot, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
@@ -12,7 +12,7 @@ import { pairEquityByTrader } from '../lib/equityPairing';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { Button, ErrorNote, Modal, Panel, Spinner3, cn } from '../components/ui';
 import { SectionHeading, TraderStatusBadge } from '../components/Badges';
-import { Badge } from '../components/ui';
+import { MoneyBadge } from './overviewParts';
 import { TraderAvatar } from '../components/TraderAvatar';
 import { Metric, SectionLabel } from '../components/shell';
 import { NewTraderModal } from '../components/TraderModals';
@@ -456,11 +456,13 @@ export function TradersPage() {
     <div className="page-fill w-full gap-3">
       <SectionHeading
         title="机器人"
-        sub="每个机器人 = 一份交易所凭证 + 一个 AI 模型 + 一套策略，按固定间隔循环决策。"
+        sub="一台机器人 = 决策模式（固定策略 / 智能托管 / AI 团队 / JEV）+ 资金口径（模拟 / 实盘），按固定间隔循环决策；启动前会自动预检。"
         right={
-          /* 动作紧跟标题（用户 2026-11-10：不要孤零零挂在页面最右端）。 */
+          /* 动作紧跟标题（用户 2026-11-10：不要孤零零挂在页面最右端）。图标与
+             「策略工作室」的「新建策略」逐字一致 —— 同一类动作同一个样子。 */
           <Button variant="primary" onClick={() => setNewOpen(true)}>
-            + 新建机器人
+            <Plus aria-hidden className="h-3.5 w-3.5" />
+            新建机器人
           </Button>
         }
       />
@@ -470,7 +472,7 @@ export function TradersPage() {
         这一页的主体是下面那张表，四张 `text-2xl` 的卡片会把表格挤下去半屏 ——
         而它们回答的问题（一共几个、跑了几个、总共多少钱）一句话就能说完。
       */}
-      <div className="flex flex-wrap items-start gap-x-8 gap-y-2 rounded-lg border border-base-750 bg-base-900/50 px-3.5 py-2.5">
+      <div className="flex flex-wrap items-start gap-x-8 gap-y-2 rounded-lg border border-base-750 bg-base-900/50 px-3 py-2">
         <Metric
           label="运行中"
           value={
@@ -495,11 +497,16 @@ export function TradersPage() {
            *
            * 判据来自 `fleetTotals` 的 `accountEquityStale`（> 60 分钟）。
            * 有任何一个账户过期，这里就标出来 —— 而不是让操作员以为它是实时的。
+           *
+           * ⚠️ 正常时这里**不再写「N 个未平仓合约」**：紧挨着的「当前持仓」卡
+           * 说的就是它（同一行里同一个数字出现两次，用户点名要删）。
            */
           sub={
-            staleAccounts.length > 0
-              ? `⚠️ ${staleAccounts.length} 个账户的读数已过期（机器人未在运行）`
-              : `${fmtInt(openPositions)} 个未平仓合约`
+            staleAccounts.length > 0 ? (
+              `⚠️ ${staleAccounts.length} 个账户读数已过期`
+            ) : (
+              `按账户去重 · ${fmtInt(fleetTotal.accounts.length)} 个账户`
+            )
           }
           title={
             staleAccounts.length > 0
@@ -526,21 +533,24 @@ export function TradersPage() {
          * 面板撑满页面剩余高度，表格体再撑满面板剩余高度（见下面 `flex-1`）。
          * `min-h-0` 是必须的：flex 子项默认 `min-height:auto`，不加它表格会被
          * 内容顶高、永远不产生内部滚动条，`flex-1` 就白写了。
+         *
+         * ⚠️ **空状态不撑满**：没有机器人时如果面板照样 `flex-1`，页面会变成
+         * 一块 400px 高的空边框 —— 用户说的"空状态不占大块"（ui-spec §1）。
          */
-        className="flex min-h-0 flex-1 flex-col"
-        bodyClassName="flex min-h-0 flex-1 flex-col p-0"
+        className={traders.length > 0 ? 'flex min-h-0 flex-1 flex-col' : undefined}
+        bodyClassName={traders.length > 0 ? 'flex min-h-0 flex-1 flex-col p-0' : 'p-0'}
       >
         {tradersQuery.loading && traders.length === 0 ? (
           <Spinner3 label="正在加载机器人" />
         ) : traders.length === 0 ? (
-          /* 空状态不占位：三行文字说完"现在做什么"，不撑满一屏。 */
-          <div className="px-3.5 py-3">
-            <p className="text-base text-ink-lo">还没有机器人。</p>
-            <p className="mt-0.5 text-xs leading-relaxed text-ink-faint">
-              先创建一个（创建时选模拟或实盘）— 模拟盘无需交易所密钥即可放心运行。
+          /* 空状态：一行说明 + 主操作，不撑满一屏、不画大盒子（ui-spec §1）。 */
+          <div className="px-3 py-3">
+            <p className="text-base text-ink-lo">
+              还没有机器人。先创建一个：模式在创建时选定，模拟盘无需交易所密钥即可放心运行。
             </p>
             <Button variant="primary" className="mt-2" onClick={() => setNewOpen(true)}>
-              + 新建机器人
+              <Plus aria-hidden className="h-3.5 w-3.5" />
+              新建机器人
             </Button>
           </div>
         ) : (
@@ -613,67 +623,50 @@ export function TradersPage() {
                     return (
                       <tr key={trader.id} className="row-hover">
                         <td className="td">
-                          {/* 整格可点：这一行的职责就是打开这个机器人。名字列有宽度上限，
-                              否则一个长名字会把整张表撑到横向滚动。 */}
-                          <Link to={`/traders/${trader.id}`} className="group block max-w-[18rem]">
-                            <div className="flex items-center gap-1.5">
-                              <TraderAvatar id={trader.id} size={26} className="shrink-0 rounded-md" />
-                              <span
-                                className="truncate text-base font-semibold text-ink-hi group-hover:text-accent"
-                                title={trader.name}
-                              >
-                                {trader.name}
-                              </span>
-                              {/*
-                                ⚠️ **模式徽章**（用户 2026-10-12 要求）。
-
-                                原话：「既然现在有 3 种模式了（普通、智能、团队），
-                                那么 **UI 上面也要加上相应的显示**」。
-
-                                在此之前列表里**看不出模式区别** —— 用户截图里三台机器人
-                                只有名字和数字不同，看不出哪台是团队模式。
-                                而三种模式的**行为差别极大**（团队模式背后是一支分工的智能体队伍），
-                                列表作为第一落点必须能一眼分辨。
-                              */}
-                              <ModeBadge mode={trader.mode} />
-                              {/*
-                               * **实盘 / 模拟徽章**（用户 2026-11-10 要求：「列表上要显示 实盘\模拟」）。
-                               * 运行模式在创建时固定，而列表是第一落点 —— 必须一眼看出
-                               * 这台机器人是不是在动真钱。
-                               */}
-                              <Badge
-                                tone="muted"
-                                className={
-                                  trader.dryRun === false
-                                    ? 'border-warn/40 bg-warn/15 text-warn'
-                                    : trader.dryRun === true
-                                      ? 'border-accent/30 bg-accent/10 text-accent'
-                                      : 'border-base-700 bg-base-800 text-ink-faint'
-                                }
-                                title={
-                                  trader.dryRun === false
-                                    ? '实盘：真实资金下单'
-                                    : trader.dryRun === true
-                                      ? '模拟盘：本地撮合，不涉及真实资金'
-                                      : '运行模式未指定（老数据，首次启动时固定）'
-                                }
-                              >
-                                {trader.dryRun === false ? '实盘' : trader.dryRun === true ? '模拟' : '模式未定'}
-                              </Badge>
-                            </div>
-                            <div className="num truncate text-xs text-ink-faint">
-                              周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
-                            </div>
+                          {/*
+                            名称一行、徽章一行（原来名称 + 模式 + 资金口径 + 周期
+                            全挤在一格里，`table-fixed` 下名称被截成「[本地UI] ...」）。
+                            名称是真正的链接：整行可点，键盘与"新标签页打开"仍可用。
+                          */}
+                          <Link
+                            to={`/traders/${trader.id}`}
+                            className="group flex min-w-0 items-center gap-2"
+                          >
+                            <TraderAvatar id={trader.id} size={24} className="shrink-0 rounded-md" />
+                            <span
+                              className="min-w-0 flex-1 truncate text-base font-semibold text-ink-hi group-hover:text-accent"
+                              title={trader.name}
+                            >
+                              {trader.name}
+                            </span>
                           </Link>
+                          <div className="mt-1 flex flex-wrap items-center gap-1">
+                            {/*
+                              **模式徽章**（用户 2026-10-12 要求）+ **实盘/模拟徽章**
+                              （用户 2026-11-10 要求「列表上要显示 实盘\模拟」）。两者颜色
+                              由共享组件给：模式按模式分色、资金口径模拟=蓝/实盘=黄。
+                            */}
+                            <ModeBadge mode={trader.mode} />
+                            <MoneyBadge dryRun={trader.dryRun} />
+                            <span className="num hidden truncate text-xs text-ink-faint lg:inline">
+                              周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
+                            </span>
+                          </div>
                         </td>
                         <td className="td">
                           <TraderStatusBadge status={status} live={trader.isRunning} />
                           {trader.consecutiveFailures > 0 && (
-                            <div className="mt-0.5 text-xs text-warn">{trader.consecutiveFailures} 次连续失败</div>
+                            /* 短句 + warn 色；完整说明在 title（状态列只有 8% 宽）。 */
+                            <div
+                              className="num truncate text-xs text-warn"
+                              title={`连续失败 ${trader.consecutiveFailures} 次；超过熔断阈值会进入安全模式。`}
+                            >
+                              失败 ×{trader.consecutiveFailures}
+                            </div>
                           )}
                           {summaryErrors[trader.id] ? (
                             <div
-                              className="mt-0.5 text-xs text-warn"
+                              className="mt-1 text-xs text-warn"
                               title={
                                 stats
                                   ? `读取这台机器人的统计失败：${summaryErrors[trader.id]}。这一行的权益/收益率是上一次成功读到的值。`
@@ -819,7 +812,7 @@ export function TradersPage() {
                           {stats ? fmtPercent(calibratedOf(trader, stats).returnPercent) : '—'}
                           {stats && (
                             <div
-                              className="text-xs text-ink-faint"
+                              className="truncate text-xs text-ink-faint"
                               title={
                                 (isLedgerSuspect(trader.ledger)
                                   ? '平台账本与交易所的成交流水对不上，所以这一行改用交易所的流水校准。'
@@ -827,8 +820,12 @@ export function TradersPage() {
                                 `浮动盈亏 ${fmtUsdSigned(stats.unrealizedPnl, 2)} 未计入本行。`
                               }
                             >
-                              净 {fmtUsdSigned(calibratedOf(trader, stats).realizedPnl, 2)} · 毛{' '}
-                              {fmtUsdSigned(stats.grossRealizedPnl, 2)}
+                              {/*
+                                ⚠️ **只留净额**：毛额与净额的差就是成本，而成本这件事
+                                在 `title` 的算式里说得更完整。同一行里三个数字（净/毛/费）
+                                挤在 13% 的列宽里，在 1024/768 下会溢出到下一列。
+                              */}
+                              净 {fmtUsdSigned(calibratedOf(trader, stats).realizedPnl, 2)}
                             </div>
                           )}
                         </td>
@@ -851,7 +848,13 @@ export function TradersPage() {
                           )}
                         </td>
                         <td className="td num text-right">{stats ? fmtInt(stats.openPositions) : '—'}</td>
-                        <td className="td hidden num text-right text-down xl:table-cell">
+                        <td
+                          className={cn(
+                            'td hidden num text-right xl:table-cell',
+                            /* 0% 回撤不是"亏了"，用红色会把一行正常的数字渲染成告警。 */
+                            stats && stats.maxDrawdownPercent > 0 ? 'text-down' : 'text-ink-faint',
+                          )}
+                        >
                           {stats ? fmtDrawdownPercent(stats.maxDrawdownPercent) : '—'}
                         </td>
                         {/* 运行时长 + 最近周期合成一格：它们是同一个问题的两个方面
@@ -1124,7 +1127,7 @@ function RowMenuItem({
       title={title}
       onClick={onClick}
       className={cn(
-        'flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-base transition disabled:cursor-not-allowed disabled:opacity-40',
+        'flex w-full items-center gap-2 px-2 py-2 text-left text-base transition disabled:cursor-not-allowed disabled:opacity-40',
         danger ? 'text-down hover:bg-down/10' : 'text-ink-mid hover:bg-base-850 hover:text-ink-hi',
       )}
     >

@@ -14,7 +14,7 @@
  */
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { TriangleAlert, ArrowRight, LineChart, ShieldCheck, Terminal, Wallet } from 'lucide-react';
+import { TriangleAlert, ArrowRight, ShieldCheck, Terminal, Wallet } from 'lucide-react';
 import { Button, ErrorNote, Field, TextInput } from '../components/ui';
 import { SectionLabel } from '../components/shell';
 import { useApp } from '../lib/store';
@@ -97,13 +97,12 @@ export function LoginPage() {
             7×24 自动运行：模型判断方向，服务端风控逐笔约束杠杆、仓位与止损，交易记录逐条落库、可回放。
           </p>
 
-          {/* 区块标题走 SectionLabel（LAYOUT.md §5）：这三条是"为什么可以信任它"，
-              没有标题时它们读起来只是三句孤立的宣传语。 */}
+          {/* 两条就够（规范 §1「信息层级」：登录页不是产品介绍页）。
+              第三条「账是可核对的」属于使用中才关心的事，删掉减少噪音。 */}
           <SectionLabel title="为什么可以信任它" className="mt-5 mb-2.5" />
           <ul className="space-y-2.5">
             <TrustRow icon={<Wallet aria-hidden className="h-4 w-4" />} title="下单用真钱" text="实盘模式下会向币安提交真实订单。模拟模式不需要密钥，随时可切。" />
             <TrustRow icon={<ShieldCheck aria-hidden className="h-4 w-4" />} title="风控不可绕过" text="杠杆、保证金、单笔风险由服务端夹紧；模型给出的越界参数会被改写并记录。" />
-            <TrustRow icon={<LineChart aria-hidden className="h-4 w-4" />} title="账是可核对的" text="净盈亏 = 毛盈亏 − 手续费 − 资金费，每笔成交都按这个等式展示。" />
           </ul>
         </div>
 
@@ -129,7 +128,7 @@ export function LoginPage() {
             本系统没有注册入口，账号在服务首次启动时自动生成。
           </p>
 
-          <form onSubmit={submit} className="mt-4 space-y-4">
+          <form onSubmit={submit} className="mt-4 space-y-3">
             {noAccountYet && (
               <div
                 role="status"
@@ -181,23 +180,21 @@ export function LoginPage() {
 
             {error && <ErrorNote>{error}</ErrorNote>}
 
-            {/* 提交按钮比输入框高一档：这是整页唯一的主操作，不该和字段一样大 */}
-            <Button type="submit" variant="primary" block busy={busy} className="py-2.5">
+            {/* 主操作与其它页面的按钮同高（规范 §2：按钮 28px）。
+                原来这里用 `py-2.5` 做到 40px —— 登录页确实要突出它，
+                但"尺寸严格统一"优先：全宽 + primary 已经是足够的强调。 */}
+            <Button type="submit" variant="primary" block busy={busy}>
               登录
               {!busy && <ArrowRight aria-hidden className="h-4 w-4" />}
             </Button>
 
-            {/* 恢复路径的第二处提示。上面那块只在「还没有账户」时出现，而
-                忘记密码的情况同样需要它 —— 那正是这条命令最有用的时候。
-                用 SectionLabel 立一个小标题：这条路径是操作员唯一的退路，
-                不该长得像一句补充说明。 */}
-            <div className="rounded-md border border-base-800 bg-base-900/60 px-3 py-2">
-              <SectionLabel title="账号恢复" className="mb-1.5" />
-              <p className="text-xs leading-relaxed text-ink-lo">
-                忘记密码？本系统不提供邮件重置。用服务端日志里的首次凭据登录后，可在「操作员账户」中修改用户名与密码：
-              </p>
-              <code className="num mt-1 block select-all break-all text-xs text-ink-faint">{FIRST_RUN_HINT}</code>
-            </div>
+            {/* 恢复路径压成一行（规范 §1：说明文字不占版面）。
+                原版是一个带区块标题的常驻卡片，与上面的「还没有账户」块重复了
+                同一条命令 —— 登录页不需要两块"怎么找回凭据"。 */}
+            <p className="text-xs leading-relaxed text-ink-faint">
+              忘记密码？本系统不提供邮件重置 —— 用首次启动日志里的凭据登录后，可在「操作员账户」修改。{' '}
+              <code className="num select-all break-all text-ink-lo">{FIRST_RUN_HINT}</code>
+            </p>
           </form>
 
           <div className="mt-5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-base-800 pt-3 text-xs text-ink-faint">

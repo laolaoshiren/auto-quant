@@ -158,7 +158,7 @@ export function MarketPage() {
           </span>
         )}
 
-        <div className="ml-auto shrink-0">
+        <div className="shrink-0">
           <IntervalPicker value={interval} onChange={setKlineInterval} />
         </div>
       </div>
@@ -364,21 +364,10 @@ export function MarketPage() {
                 )}
               </span>
             }
-            actions={
-              /*
-               * 「刷新」是页面级动作 → 统一接口；「每 15s 自动刷新」是**说明文字**，
-               * 不属于动作，所以它留在原地（`Panel` 的 actions 槽里），只有按钮被
-               * portal 进工具栏。
-               */
-              <span className="flex items-center gap-2">
-                <span className="num hidden text-xs text-ink-faint sm:inline">
-                  {klinesQuery.loading ? '加载中…' : '每 15s 自动刷新'}
-                </span>
-              </span>
-            }
             /*
-             * 图表面板吃掉右栏剩下的高度，「最新K线」保持自然高度贴在下面。
-             * `min-h-0` 见 `CandlestickChart` 的 `fill` 说明。
+             * 不再渲染 actions：原来那里只有一行「每 15s 自动刷新」说明。
+             * 规范 §5 要求"默认自动刷新、不提供手动刷新按钮"，那么"它会自动刷新"
+             * 这件事就不需要一句常驻说明 —— 省一行高度，也少一处噪音。
              */
             className="flex min-h-0 flex-1 flex-col"
             bodyClassName="flex min-h-0 flex-1 flex-col p-1"
@@ -414,11 +403,15 @@ export function MarketPage() {
               bodyClassName="p-3"
               padded={false}
             >
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 xl:grid-cols-4 3xl:grid-cols-6">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 xl:grid-cols-4">
                 {/*
                  * 每一条都带单位：同一个 `12.35M` 在"成交量（币）"和"成交额（USDT）"
                  * 里是两个量级完全不同的东西，单位必须进数值本身而不只靠标签
                  * （见 `lib/format.ts` 的命名规则与 `DESIGN.md` §5.3）。
+                 *
+                 * 2026-11-10：12 格压到 8 格（规范 §1「信息层级」）——
+                 * 「主动买入（币）/（USDT）」与「成交额」是同一笔钱的两种切法，
+                 * 开盘/收盘时间已经显示在面板标题右侧，不再重复。
                  */}
                 <Readout
                   label={`开盘（${selected.replace(/USDT$/, '')}）`}
@@ -434,16 +427,9 @@ export function MarketPage() {
                 <Readout label="成交额（USDT）" value={fmtCompactAmount(last.quoteVolume, 'USDT')} />
                 <Readout label="成交笔数" value={String(last.trades)} />
                 <Readout
-                  label={`主动买入（${selected.replace(/USDT$/, '')}）`}
-                  value={fmtCompactAmount(last.takerBuyBase, selected.replace(/USDT$/, ''))}
-                />
-                <Readout label="主动买入（USDT）" value={fmtCompactAmount(last.takerBuyQuote, 'USDT')} />
-                <Readout
                   label="主动买入占比"
                   value={last.volume > 0 ? `${((last.takerBuyBase / last.volume) * 100).toFixed(1)}%` : '—'}
                 />
-                <Readout label="开盘时间" value={new Date(last.openTime).toLocaleString('en-GB', { hour12: false })} />
-                <Readout label="收盘时间" value={new Date(last.closeTime).toLocaleString('en-GB', { hour12: false })} />
               </div>
             </Panel>
           )}

@@ -10,7 +10,7 @@
  * 1. **图表永远展开、高度固定**（§4）。曲线本身在 `EquityCurveChart.tsx`
  *    （懒加载，把 recharts 挡在首屏之外）；这一页不再按"数据够不够厚"决定
  *    展开还是收成缩略线 —— 那会让版面随数据变高变矮（见 `OverviewPage` 里的说明）。
- * 2. **表格行要密**（§2）。这里把所有单元格压到 `py-1.5` + 两行以内，
+ * 2. **表格行要密**（§2）。这里把所有单元格压到 `py-2` + 两行以内，
  *    并砍掉不挣宽度的那一列（见 `TradersSnapshotTable` 的注释）。
  */
 import { Link, type NavigateFunction } from 'react-router-dom';
@@ -27,6 +27,50 @@ import { TraderAvatar } from '../components/TraderAvatar';
 import { pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import { BALANCE_LABEL, fmtInt, fmtPercent, fmtUsd, fmtUsdSigned, pnlColor, timeAgo } from '../lib/format';
 import type { EquityPoint } from '../components/equityCurve';
+
+/* -------------------------------------------------------------------------- */
+/*  资金口径徽章                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 「模拟 / 实盘」徽章 —— 全站唯一实现。
+ *
+ * ## 为什么单独提出来
+ *
+ * 同一段「`dryRun === false` → 实盘（warn）、`true` → 模拟（accent）、`null` → 模式未定」
+ * 的三元表达式原来在总览表、机器人列表、详情页各写了一遍（三份 `Badge` +
+ * `className` 覆盖）。**同一个概念三份实现，改一处等于没改** —— 更糟的是
+ * `Badge` 的 tone 走 `chip` 的 `color-mix(currentColor)`，手写底色与边框色
+ * 会与 chip 的软底色打架，三处的观感已经不一致了。
+ *
+ * 现在只有一个组件，颜色语义固定：模拟 = accent（蓝）、实盘 = warn（黄，
+ * 花真钱必须最显眼）、未定 = muted（灰）。
+ *
+ * ⚠️ 它暂时放在 `pages/overviewParts.tsx`（A 组只能改 5 个页面文件），
+ * 稳定后应迁到 `components/Badges.tsx` 与 `ModeBadge` 并列 —— 见汇报里的
+ * 「需要 Lead 在组件层处理」。
+ */
+export function MoneyBadge({ dryRun, title }: { dryRun: boolean | null | undefined; title?: string }) {
+  if (dryRun === false) {
+    return (
+      <Badge tone="warn" title={title ?? '实盘：真实资金下单'}>
+        实盘
+      </Badge>
+    );
+  }
+  if (dryRun === true) {
+    return (
+      <Badge tone="accent" title={title ?? '模拟盘：本地撮合，不涉及真实资金'}>
+        模拟
+      </Badge>
+    );
+  }
+  return (
+    <Badge tone="muted" title={title ?? '运行模式未指定（老数据，首次启动时固定）'}>
+      模式未定
+    </Badge>
+  );
+}
 
 /* -------------------------------------------------------------------------- */
 /*  Equity shape                                                               */
@@ -61,33 +105,6 @@ export function equityShape(points: EquityPoint[]): { hasShape: boolean; flat: b
   const flat = spread <= threshold;
 
   return { hasShape: values.length >= 3 && !flat, flat };
-}
-
-/* -------------------------------------------------------------------------- */
-/*  System fact                                                                */
-/* -------------------------------------------------------------------------- */
-
-/** 页脚里的一条 `label / value / unit`。全页最小的字号 —— 它是最不重要的内容。 */
-export function SystemFact({
-  label,
-  value,
-  sub,
-  tone,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  tone?: string;
-}) {
-  return (
-    <div className="min-w-0">
-      <dt className="truncate text-xs text-ink-lo">{label}</dt>
-      <dd className={cn('num mt-0.5 truncate text-base', tone ?? 'text-ink-hi')} title={value}>
-        {value}
-      </dd>
-      {sub && <dd className="truncate text-xs text-ink-faint">{sub}</dd>}
-    </div>
-  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -147,7 +164,7 @@ export function RecentClose({ trade, pending }: { trade: TradeRecord | undefined
   }
   return (
     <div className="text-right" title={`${fmtPercent(trade.pnlPercent)} · ${closeReasonLabel(trade.closeReason, trade.netPnl)}`}>
-      <div className="flex items-center justify-end gap-1.5">
+      <div className="flex items-center justify-end gap-2">
         <span className="num text-sm text-ink-mid">{trade.symbol}</span>
         <SideBadge side={trade.side} />
         {/* 净，带符号：`fmtUsdSigned` 自己带正负号，颜色只是辅助（DESIGN.md §2） */}
@@ -192,10 +209,9 @@ export function EquitySkeleton() {
  *
  * Density is the whole point (LAYOUT.md §2), so three things changed together:
  *
- * - **`px-2 py-1.5` instead of the `.td` default `px-3 py-2`.** Eight columns at
- *   16px of side padding each is 256px of the row spent on air, and DESIGN.md §4
- *   forbids horizontal scrolling at 150% zoom. Between padding and information, a
- *   dense financial grid can afford tighter gutters.
+ * - **`px-2`（8px 横向内边距）而不是 `.td` 默认的 12px。** 八列各 16px
+ *   就是每行 256px 花在空气上，而 ui-spec §6 禁止横向滚动。在"内边距"和
+ *   "信息"之间，一张密集的金融表可以承受更紧的列间距。
  * - **总收益率 folded into 归属权益.** They are one story — the value and how far
  *   it has moved from the initial deposit — and two columns of two lines each
  *   cost more width than the second number was worth. The full
@@ -263,27 +279,27 @@ export function TradersSnapshotTable({
             <caption className="sr-only">机器人归属权益与运行状态快照</caption>
             <thead className="border-b border-base-800 bg-base-850/60">
               <tr>
-                <th scope="col" className="th w-[25%] px-2 py-1.5">
+                <th scope="col" className="th w-[24%] px-2 py-2">
                   机器人
                 </th>
-                <th scope="col" className="th w-[10%] px-2 py-1.5">
+                <th scope="col" className="th w-[9%] px-2 py-2">
                   状态
                 </th>
-                <th scope="col" className="th w-[28%] px-2 py-1.5 text-right">
+                <th scope="col" className="th w-[26%] px-2 py-2 text-right">
                   <span title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。只是这个机器人自己的账，同一账户下其他机器人挣的钱不算在内；反过来，共用同一个账户的机器人各自都带着同一笔本金，所以这一列不能相加（相加会把钱包数 N 遍）。账户里的钱看左栏「账户权益合计」。">
                     归属权益
                   </span>
                 </th>
-                <th scope="col" className="th w-[9%] px-2 py-1.5 text-right">
+                <th scope="col" className="th w-[8%] px-2 py-2 text-right">
                   持仓
                 </th>
-                <th scope="col" className="th hidden w-[12%] px-2 py-1.5 text-right 2xl:table-cell">
+                <th scope="col" className="th hidden w-[11%] px-2 py-2 text-right 2xl:table-cell">
                   平仓胜率
                 </th>
-                <th scope="col" className="th hidden w-[18%] px-2 py-1.5 text-right xl:table-cell">
+                <th scope="col" className="th hidden w-[14%] px-2 py-2 text-right xl:table-cell">
                   最近平仓
                 </th>
-                <th scope="col" className="th w-[9%] px-2 py-1.5 text-right">
+                <th scope="col" className="th w-[8%] px-2 py-2 text-right">
                   操作
                 </th>
               </tr>
@@ -315,59 +331,46 @@ export function TradersSnapshotTable({
                     title="打开该机器人的详情"
                     onClick={() => navigate(target)}
                   >
-                    <td className="td px-2 py-1.5">
+                    <td className="td px-2 py-2">
                       {/* 名称是真正的链接：整行可点，但键盘与"新标签页打开"仍然可用 */}
                       <Link
                         to={target}
                         onClick={(event) => event.stopPropagation()}
                         className="group flex min-w-0 items-center gap-2"
                       >
-                        <TraderAvatar id={trader.id} size={26} className="shrink-0 rounded-md" />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-base font-semibold text-ink-hi group-hover:text-accent">
-                            {trader.name}
-                          </span>
-                          <span className="num block truncate text-xs text-ink-faint">
-                            周期 {trader.lastCycleNumber} · 每 {trader.cycleIntervalMinutes}m
-                          </span>
-                          {/*
-                           * **总览快照也要一眼看出模式与模拟/实盘**（用户 2026-11-10：
-                           * 「也要显示是模拟\实盘」）。列表页已有，总览页当时漏了 ——
-                           * 而总览是用户第一眼看的页面，恰恰最需要这两个信息。
-                           */}
-                          <span className="mt-0.5 flex flex-wrap items-center gap-1">
-                            <ModeBadge mode={trader.mode} />
-                            <Badge
-                              tone="muted"
-                              className={
-                                trader.dryRun === false
-                                  ? 'border-warn/40 bg-warn/15 text-warn'
-                                  : trader.dryRun === true
-                                    ? 'border-accent/30 bg-accent/10 text-accent'
-                                    : 'border-base-700 bg-base-800 text-ink-faint'
-                              }
-                              title={
-                                trader.dryRun === false
-                                  ? '实盘：真实资金下单'
-                                  : trader.dryRun === true
-                                    ? '模拟盘：本地撮合，不涉及真实资金'
-                                    : '运行模式未指定（老数据，首次启动时固定）'
-                              }
-                            >
-                              {trader.dryRun === false ? '实盘' : trader.dryRun === true ? '模拟' : '模式未定'}
-                            </Badge>
-                          </span>
+                        <TraderAvatar id={trader.id} size={24} className="shrink-0 rounded-md" />
+                        <span className="min-w-0 flex-1 truncate text-base font-semibold text-ink-hi group-hover:text-accent">
+                          {trader.name}
                         </span>
                       </Link>
+                      {/*
+                        **模式 + 资金口径单独一行**（原来挤在名称行里，把名称截成
+                        「[本地UI] ...」，而这两枚徽章才是"这台机器是什么"的答案）。
+                        周期编号不进总览表：它是过程量，用户要的是状态与钱。
+                      */}
+                      <div className="mt-1 flex flex-wrap items-center gap-1">
+                        <ModeBadge mode={trader.mode} />
+                        <MoneyBadge dryRun={trader.dryRun} />
+                      </div>
                     </td>
-                    <td className="td px-2 py-1.5">
+                    <td className="td px-2 py-2">
                       <TraderStatusBadge status={status} live={trader.isRunning} />
                       {trader.consecutiveFailures > 0 && (
-                        <div className="num truncate text-xs text-warn">{trader.consecutiveFailures} 次连续失败</div>
+                        /*
+                         * ⚠️ 文案要短：状态列只有 9% 宽（768 下约 63px），
+                         * 「2 次连续失败」会被截成「2 次连续失…」。用户的告警仍然
+                         * 在：短句 + warn 色 + title 里的完整说明。
+                         */
+                        <div
+                          className="num truncate text-xs text-warn"
+                          title={`连续失败 ${trader.consecutiveFailures} 次；超过熔断阈值会进入安全模式。`}
+                        >
+                          失败 ×{trader.consecutiveFailures}
+                        </div>
                       )}
                     </td>
                     <td
-                      className="td px-2 py-1.5 text-right"
+                      className="td px-2 py-2 text-right"
                       title={
                         stats
                           ? `归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈（只是这个机器人自己的账）。${accountNote}${pnlFormulaText(
@@ -392,7 +395,7 @@ export function TradersSnapshotTable({
                         </div>
                       )}
                     </td>
-                    <td className="td num px-2 py-1.5 text-right">
+                    <td className="td num px-2 py-2 text-right">
                       <div className="truncate">{stats ? fmtInt(stats.openPositions) : '—'}</div>
                       {stats && stats.unrealizedPnl !== 0 && (
                         /* 刻意中性：这一格已经有符号，两个彩色盈亏数字并排会读成
@@ -400,7 +403,7 @@ export function TradersSnapshotTable({
                         <div className="truncate text-xs text-ink-faint">浮 {fmtUsdSigned(stats.unrealizedPnl, 2)}</div>
                       )}
                     </td>
-                    <td className="td num hidden px-2 py-1.5 text-right 2xl:table-cell">
+                    <td className="td num hidden px-2 py-2 text-right 2xl:table-cell">
                       {/* `winRatePercent` 与 `wins`/`losses` 都是服务端的读数，
                           这里只并排显示，绝不互相推算（硬规则）。 */}
                       {stats ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
@@ -410,10 +413,10 @@ export function TradersSnapshotTable({
                         </div>
                       )}
                     </td>
-                    <td className="td hidden px-2 py-1.5 text-right xl:table-cell">
+                    <td className="td hidden px-2 py-2 text-right xl:table-cell">
                       <RecentClose trade={recentTrades.byTrader[trader.id]} pending={recentTrades.loading} />
                     </td>
-                    <td className="td px-2 py-1.5 text-right">
+                    <td className="td px-2 py-2 text-right">
                       <div className="flex items-center justify-end gap-1" onClick={(event) => event.stopPropagation()}>
                         {/*
                           ⚠️ **这里原来还有一个「立即运行」按钮，已删除。**
@@ -479,7 +482,7 @@ export function TradersSnapshotTable({
       {extraCount > 0 && (
         <p className="mt-2 flex flex-wrap items-center gap-1 text-xs text-ink-faint">
           仅显示前 {traders.length} 个机器人 —
-          <Link to="/traders" className="inline-flex items-center gap-0.5 text-accent hover:underline">
+          <Link to="/traders" className="inline-flex items-center gap-1 text-accent hover:underline">
             在「机器人」中查看全部 {traders.length + extraCount} 个
             <ArrowRight aria-hidden className="h-3 w-3" />
           </Link>

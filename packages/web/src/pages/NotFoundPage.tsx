@@ -6,53 +6,44 @@
  * something?"), and the useful answer is the two ways out plus the keyboard
  * shortcut that gets there fastest.
  *
- * 排版：左对齐 + 紧凑，和其余页面一致（LAYOUT.md §2/§4）。原来是一个居中的
- * 大方块，上下各 40px 空白 —— 在一个 404 上那是纯粹的浪费，而且居中的
- * 区块标题（带延伸线）在视觉上没法成立。
+ * ## 2026-11-10 按 `.dsh/ui-spec.md` 重排
+ *
+ * 原版是一个 `Panel`（卡片）+ 区块标题 + 一段说明 + 按钮组 + 底部提示 ——
+ * 在一个"什么都没有"的页面上，那个卡片和区块标题只是**给空状态加装饰**。
+ * 现在按规范 §1 的页面骨架来：**标题 + 动作紧跟标题 + 一行说明 + 一行快捷键**，
+ * 没有卡片、没有区块标题、不留空占位。
  */
 import { Link } from 'react-router-dom';
-import { Compass, Home, Search } from 'lucide-react';
-import { Panel } from '../components/ui';
-import { SectionLabel } from '../components/shell';
+import { Home, Search } from 'lucide-react';
 import { useDocumentTitle } from '../lib/hooks';
 
 export function NotFoundPage() {
   useDocumentTitle('页面不存在');
   return (
-    <Panel className="max-w-lg" padded={false}>
-      <div className="px-4 py-4">
-        <div className="flex items-center gap-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-base-750 bg-base-850 text-ink-lo">
-            <Compass aria-hidden className="h-4 w-4" />
-          </span>
-          <div className="min-w-0">
-            <p className="num text-3xl font-semibold leading-none text-ink-strong">404</p>
-            <h2 className="mt-1 text-lg font-semibold leading-tight text-ink-hi">这个地址不存在</h2>
-          </div>
-        </div>
-
-        <p className="mt-3 text-base leading-relaxed text-ink-lo">
-          控制台里没有对应这个路径的页面。可能是链接过期了，也可能是地址被手改过 —— 数据没有丢。
-        </p>
-
-        <SectionLabel title="从这里继续" className="mt-4 mb-2" />
-        <div className="flex flex-wrap items-center gap-2">
-          <Link to="/" className="btn btn-primary">
-            <Home aria-hidden className="h-4 w-4" />
-            返回总览
-          </Link>
-          <Link to="/traders" className="btn btn-ghost">
-            打开机器人列表
-          </Link>
-        </div>
-
-        <p className="mt-3 flex w-full flex-wrap items-center gap-1.5 border-t border-base-800 pt-3 text-xs text-ink-faint">
-          <Search aria-hidden className="h-3.5 w-3.5" />
-          或按
-          <kbd className="num rounded border border-base-700 bg-base-850 px-1.5 py-0.5 text-xs text-ink-lo">⌘K</kbd>
-          搜索并跳转到任意页面
-        </p>
+    <div className="space-y-3">
+      {/* 标题 + 动作在同一行：规范 §1「动作按钮永远紧跟标题」 */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <span className="num text-2xl font-semibold leading-none text-ink-strong">404</span>
+        <h1 className="text-xl font-semibold text-ink-hi">这个地址不存在</h1>
+        <Link to="/" className="btn btn-primary btn-sm">
+          <Home aria-hidden className="h-3.5 w-3.5" />
+          返回总览
+        </Link>
+        <Link to="/traders" className="btn btn-ghost btn-sm">
+          打开机器人列表
+        </Link>
       </div>
-    </Panel>
+
+      <p className="text-base leading-relaxed text-ink-lo">
+        控制台里没有对应这个路径的页面。可能是链接过期，也可能是地址被手改过 —— 数据没有丢。
+      </p>
+
+      <p className="flex flex-wrap items-center gap-1.5 text-xs text-ink-faint">
+        <Search aria-hidden className="h-3.5 w-3.5" />
+        或按
+        <kbd className="num rounded border border-base-700 bg-base-850 px-1.5 py-0.5 text-xs text-ink-lo">⌘K</kbd>
+        搜索并跳转到任意页面
+      </p>
+    </div>
   );
 }

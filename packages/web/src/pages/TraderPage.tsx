@@ -44,6 +44,7 @@ import { CandlestickChart } from '../components/CandlestickChart';
 import { ConfirmStopTrader } from '../components/ConfirmStopTrader';
 import { TraderConfigModal } from '../components/TraderConfigModal';
 import { TraderAccountStrip, type TraderAccountState } from '../components/BalanceCells';
+import { MoneyBadge } from './overviewParts';
 import {
   DEFAULT_SETTLE_ASSET,
   fmtAsset,
@@ -1314,8 +1315,11 @@ export function TraderPage() {
     /*
      * 指标卡**等高**（不加 `items-start`），这是刻意的 —— 它们是一组 KPI 方块、
      * 是一个视觉单元，高低不齐会让人觉得它们不属于同一组。
+     *
+     * ⚠️ 5 张卡在 768（`md`）上排 **3 列**（3+2），不再是 2 列（3 行）—— 后者
+     * 会多占一整行、把图表推到首屏之外（用户要求尽量不翻页）。
      */
-    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+    <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5">
       {/* 1 — 账户余额：我到底有多少钱 ---------------------------------- */}
       <MetricCard>
         <Metric
@@ -1344,8 +1348,16 @@ export function TraderPage() {
           }
           sub={
             useSimulatedBalance ? (
-              /* 主数字就是账户余额；副行只说"模拟盘"与净额（起始权益不再重复）。 */
-              <>模拟盘 · 净 {fmtUsdSigned(realized, 2)}</>
+              /*
+               * 主数字就是账户余额；副行只补一个**起始权益**（否则读者不知道
+               * 这 1,000 是本金还是赚出来的）。
+               *
+               * ⚠️ **不写「模拟账户 ·」也不写「净 X」**：
+               *  · 「模拟」由信息行的资金口径徽章表达（同一屏不重复）；
+               *  · 「净 X」就是紧挨着的「交易盈亏」卡主数字（同一数字不出现两次）。
+               * 两处都写还会在 5 列布局里把这一行截断（实测「起始 1,...」）。
+               */
+              <>起始 {fmtNum(initialEquity, 2)}</>
             ) : account ? (
               <>
                 钱包 {fmtNum(account.walletBalance, 2)} · 可用 {fmtAvailable()}
@@ -1427,7 +1439,8 @@ export function TraderPage() {
       {/* 3 — 保证金占用 ---------------------------------------------- */}
       <MetricCard>
         <Metric
-          label={`保证金占用（${settleAsset}）`}
+          /* 单位放在 title 与副行里（5 列布局下「保证金占用（USDT）」会被截成「（USD…」）。 */
+          label="保证金占用"
           value={fmtMarginUsed()}
           size="lg"
           title={
@@ -1520,33 +1533,37 @@ export function TraderPage() {
       </MetricCard>
 
       {/* 5 — 胜率 ----------------------------------------------------- */}
+      {/*
+        ⚠️ **空的这一格不再换标签**（原来是「已平仓交易 · 尚无」）。
+        同一个卡位在"还没成交"时叫别的名字，等于让读者去猜"胜率去哪了"；
+        现在标签永远是「胜率」，没有成交时主数字是 `—`、副行说明原因 ——
+        与其余四张卡同一套语法（值 + 一句副行）。
+      */}
       <MetricCard>
-        {stats && stats.totalTrades > 0 ? (
-          <Metric
-            label="胜率"
-            value={`${stats.winRatePercent.toFixed(1)}%`}
-            size="lg"
-            title="winRatePercent 本身就是 0–100 的百分数；盈/亏笔数直接来自后端，不由胜率反推。"
-            sub={`PF ${fmtProfitFactor(stats.profitFactor)} · ${fmtInt(stats.totalTrades)} 笔已平仓`}
-            /* 图形放 `footer`：`sub` 是单行且会截断的，塞进去会把柱状条压扁并裁掉。 */
-            footer={<WinLossBar wins={wins} losses={losses} />}
-          />
-        ) : (
-          <Metric
-            label="已平仓交易"
-            value="尚无"
-            size="lg"
-            title="这个机器人还没有完成过任何一次开仓—平仓回合，所以胜率与盈亏比都没有意义。"
-            sub={stats ? '完成第一个回合后这里会显示胜率与盈亏比' : '等待统计'}
-            /*
-             * `sub` 带 `truncate`，在窄栏里这句话会被切掉尾巴 —— 而没有 `title`
-             * 时切掉的部分**永远看不到**（`ui:check` 在真实浏览器里抓到过这一条）。
-             * 用 `subTitle` 而不是 `title`：卡片的 `title` 已经在解释"为什么没有
-             * 胜率"，两个提示挤在同一个属性上会互相盖掉。
-             */
-            subTitle={stats ? '完成第一个回合后这里会显示胜率与盈亏比' : '等待统计'}
-          />
-        )}
+        <Metric
+          label="胜率"
+          value={stats && stats.totalTrades > 0 ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
+          size="lg"
+          title={
+            stats && stats.totalTrades > 0
+              ? 'winRatePercent 本身就是 0–100 的百分数；盈/亏笔数直接来自后端，不由胜率反推。'
+              : '这个机器人还没有完成过任何一次开仓—平仓回合，所以胜率与盈亏比都没有意义。'
+          }
+          sub={
+            stats && stats.totalTrades > 0
+              ? `PF ${fmtProfitFactor(stats.profitFactor)} · ${fmtInt(stats.totalTrades)} 笔已平仓`
+              : '还没有已平仓成交'
+          }
+          subTitle={
+            stats && stats.totalTrades > 0
+              ? `盈利因子 ${fmtProfitFactor(stats.profitFactor)} · ${fmtInt(stats.totalTrades)} 笔已平仓（${fmtInt(wins)} 盈 / ${fmtInt(losses)} 亏）`
+              : '完成第一个回合后这里会显示胜率与盈亏比'
+          }
+          /* 图形放 `footer`：`sub` 是单行且会截断的，塞进去会把柱状条压扁并裁掉。 */
+          footer={
+            stats && stats.totalTrades > 0 ? <WinLossBar wins={wins} losses={losses} /> : undefined
+          }
+        />
       </MetricCard>
     </div>
   );
@@ -1584,9 +1601,14 @@ export function TraderPage() {
   const runtimePaper = stats?.dryRun ?? null;
   const persistedPaper = trader?.dryRun ?? null;
   const ownPaper = runtimePaper ?? persistedPaper;
-  /* 页头只留最短标签（用户 2026-11-10：别画蛇添足）；详细口径在 title 里。 */
-  const paperFactText = ownPaper === null ? '模式未定' : ownPaper ? '模拟盘' : '实盘';
-  const paperTone = ownPaper === null ? 'text-ink-faint' : ownPaper ? 'text-accent' : 'text-warn';
+  /*
+   * ⚠️ **资金口径徽章只有这一处**（2026-11-10 重设计）：页头那枚「模拟盘」
+   * 已删除 —— 同一屏两枚同名徽章本来就是重复，而两枚的自定义 `className`
+   * 覆盖还不一样（一个 accent 描边、一个 chip 软底），颜色也对不上。
+   *
+   * 现在统一用 `MoneyBadge`（与总览表、机器人列表同一个组件、同一套 tone）。
+   * `title` 仍然说清"这个读数来自运行时还是落库值"。
+   */
   const paperFactTitle =
     runtimePaper !== null
       ? `运行时读数：${runtimePaper ? '模拟盘' : '实盘'}（来自正在跑的这个实例）`
@@ -1621,19 +1643,7 @@ export function TraderPage() {
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-xs text-ink-lo">
       <span className="flex items-center gap-1">
         <ModeBadge mode={trader.mode} />
-        <Badge
-          tone="muted"
-          className={
-            trader.dryRun === false
-              ? 'border-warn/40 bg-warn/15 text-warn'
-              : trader.dryRun === true
-                ? 'border-accent/30 bg-accent/10 text-accent'
-                : 'border-base-700 bg-base-800 text-ink-faint'
-          }
-          title={paperFactTitle}
-        >
-          {paperFactText}
-        </Badge>
+        <MoneyBadge dryRun={ownPaper} title={paperFactTitle} />
       </span>
 
       <span aria-hidden className="text-base-700">
@@ -1951,15 +1961,14 @@ export function TraderPage() {
 
           <h1
             /*
-             * `text-lg`（原来 `text-xl`）：主栏宽 674px，这一行七个元素合计
-             * 683px —— 差 9px，标题被截成「[DEMO] 决策审计...」。
-             * 20px → 18px 省下约 19px，正好让标题完整显示。
+             * `text-xl`（20px）—— 与全站页面标题同一档（ui-spec §2：页面标题
+             * 20px 600）。之前这里为了挤进一行降成 `text-lg`；现在页头少了
+             * 两枚重复徽章、动作也紧跟标题，空间够了，**不必再比别的页面小一号**。
              *
              * 这一页的标题是**数据驱动的机器人名**（可能是任意长度），
-             * 而它旁边的徽章（#id、状态、账户）都是定长的 —— 该让的是标题，
-             * 但也没必要让到"看不清自己打开的是哪个机器人"。
+             * 而它旁边的徽章（状态、净盈亏）都是定长的 —— 该让的是标题。
              */
-            className="min-w-0 flex-1 truncate text-lg font-semibold tracking-wide text-ink-hi"
+            className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight text-ink-hi"
             /* 极窄窗口下标题仍可能被截，完整名字必须能从悬停读到。 */
             title={trader.name}
           >
@@ -1985,33 +1994,13 @@ export function TraderPage() {
             绑定了账户的机器人在页头下方的信息行与配置摘要里都能看到账户名。
           */}
           {/*
-            ⚠️ **「这个机器人在不在花真钱」必须能被一眼看到，而它不在顶栏里。**
+            ⚠️ **「模拟盘 / 实盘」徽章从这里删掉了**（2026-11-10 重设计）。
             
-            顶栏那个徽章读的是**进程级交易环境**（交易所端点），而每台机器人
-            自己的运行模式是**创建时固定的**（`traders.dry_run`）—— 两者语义不同。
-            创建时固定的模式是该机器人**永远**的取钱方式，启动接口不再接受覆盖。
-
-            只在**与进程环境不一致**或**会花真钱**时渲染：
-              · `dryRun === true`  —— 进程说实盘、它在模拟 → 最容易误解的那一半；
-              · `dryRun === false` 且进程是模拟 → 它在花真钱 → 同样要说。
-            两边一致时不加徽章，否则每台机器人头上都挂一个"实盘"变成噪音。
+            它原来在页头挂一个，下面信息行又挂一个 —— 同一屏两枚同名徽章，
+            而两枚的自定义 `className` 覆盖还不一样。现在资金口径**只在信息行**
+            用 `MoneyBadge` 表达一次（带 tone：模拟=蓝 / 实盘=黄），
+            页头只留状态徽章与净盈亏两个信息。
           */}
-          {stats?.dryRun === true && (
-            <Badge
-              tone="accent"
-              title="这个机器人此刻在模拟盘运行：订单只在本地撮合，不会发到交易所。"
-            >
-              模拟盘
-            </Badge>
-          )}
-          {stats?.dryRun === false && system?.dryRun === true && (
-            <Badge
-              tone="warn"
-              title="这个机器人是实盘启动的：订单会用真实资金发到交易所。"
-            >
-              实盘
-            </Badge>
-          )}
           {trader.consecutiveFailures > 0 && (
             <Badge tone="warn" title="连续的模型或执行失败次数；超过熔断阈值会进入安全模式。">
               {trader.consecutiveFailures} 次连续失败
@@ -2033,16 +2022,21 @@ export function TraderPage() {
               （`POST /api/traders/:id/reconcile`），
               只是控制台不再提供一个按钮。
           */}
-          <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          {/*
+            动作**紧跟页头信息**，不再 `ml-auto` 推到最右端（规范 §1：动作按钮紧跟标题，
+            不孤零零挂在右边缘）。启动/停止/配置是这台机器人的全部主操作，紧挨名称和状态
+            才是它们该在的位置。
+          */}
+          <div className="flex flex-wrap items-center gap-1.5">
             {/*
-              ⚠️ **`starting` 也要有自己的态**（2026-11-10 回归实测）。
-
-              启动是异步的（`stopped → starting → running`）。本页原来只用 `busy`
-              遮住"请求还没返回"的那几百毫秒，之后到 `running` 之前会**重新显示可点的
-              「启动」** —— 再点会被服务端以「正在启动中」拒绝。列表页早已处理，
-              详情页漏了。
+              ⚠️ **按钮状态必须跟着 `status`（推送实时）走，不能跟 `trader.isRunning`（REST 滞后）。**
+              （2026-11-10 用户截图：点启动后徽章已经显示「运行中」，按钮却还是「启动」，
+              要过很久才变 —— 因为 REST 的 isRunning 最多滞后 8 秒。）
+              · running / safe_mode → 停止；
+              · starting → 启动中（禁用，等推送）；
+              · 其余 → 启动。
             */}
-            {trader.isRunning ? (
+            {status === 'running' || status === 'safe_mode' ? (
               <Button variant="danger" busy={busy} onClick={() => setStopConfirmOpen(true)}>
                 <Square aria-hidden className="h-3.5 w-3.5" />
                 停止
@@ -2057,7 +2051,7 @@ export function TraderPage() {
                 {busy ? '启动中…' : '启动'}
               </Button>
             )}
-            <Button onClick={() => setConfigOpen(true)} disabled={trader.isRunning} title="请先停止该机器人再编辑">
+            <Button onClick={() => setConfigOpen(true)} disabled={running} title="请先停止该机器人再编辑">
               <Settings2 aria-hidden className="h-3.5 w-3.5" />
               配置
             </Button>
@@ -2196,25 +2190,27 @@ export function TraderPage() {
           }
           actions={
             chartTab === 'equity' ? (
-              <span className="flex items-center gap-0.5">
+              <span className="flex flex-wrap items-center gap-1">
                 {EQUITY_RANGES.map((item) => (
-                  <button
+                  /*
+                    ⚠️ **统一用 `Button`（primary/ghost）**，不再手写一套
+                    `border-accent/60 bg-accent/15` 的按钮 —— 总览页的区间选择、
+                    这里的区间选择、下面的 K 线周期原来是三套不同的选中样式，
+                    同一类控件在三个地方长得不一样（"拼凑感"就是这么来的）。
+                  */
+                  <Button
                     key={item.id}
-                    type="button"
+                    size="sm"
+                    variant={range === item.id ? 'primary' : 'ghost'}
+                    aria-pressed={range === item.id}
                     onClick={() => {
                       setRange(item.id);
                       // 换区间就重新按数据判断收起与否，别把上一段的展开状态带过来。
                       setChartOverride(null);
                     }}
-                    aria-pressed={range === item.id}
-                    className={
-                      range === item.id
-                        ? 'rounded border border-accent/60 bg-accent/15 px-2 py-0.5 text-xs font-semibold text-accent'
-                        : 'rounded border border-transparent px-2 py-0.5 text-xs text-ink-lo transition hover:border-base-700 hover:text-ink-mid'
-                    }
                   >
                     {item.label}
-                  </button>
+                  </Button>
                 ))}
                 <Button
                   size="sm"
@@ -2264,7 +2260,7 @@ export function TraderPage() {
                 onExpand={() => setChartOverride(true)}
               />
             ) : (
-              <div className="px-3.5 pb-2.5 pt-2">
+              <div className="px-3 pb-2 pt-2">
                 <EquityWindowLine
                   equity={windowLast}
                   delta={windowDelta}
@@ -2288,7 +2284,7 @@ export function TraderPage() {
               </div>
             )
           ) : (
-            <CandlesPanel symbol={chartSymbol} />
+            <CandlesPanel symbol={chartSymbol} height={equityChartHeight} />
           )}
         </Panel>
 
@@ -2524,12 +2520,12 @@ function MetricCard({ children }: { children: ReactNode }) {
    * `h-full` 是**必须**的，不是装饰：grid 子项默认 `stretch` 只让外层 div 等高，
    * 里面的 `Metric` 想用 `mt-auto` 把 footer 推到底，就得让高度真的传下去。
    *
-   * `py-2`（原来 `py-3`）：这一页在 722 高的窗口下主栏只有三百来像素，
-   * 五张卡各 90px 里每张有 24px 是上下内边距。收到 16px 之后每张 82px，
-   * 五张省下 40px —— 正好是"要不要滚动"的那点差距。
+   * 内边距 12px（`px-3 py-3`）：ui-spec §2 规定卡片内边距 12px、圆角 8px ——
+   * 原来这里是 `px-3.5 py-2`（14/8）—— 与页面其它卡片不一致，一眼就看出
+   * 不是一套。这一页在 722 高的窗口下主栏只有三百来像素，所以不再往上加。
    */
   return (
-    <div className="h-full min-w-0 rounded-lg border border-base-750 bg-base-900 px-3.5 py-2">{children}</div>
+    <div className="h-full min-w-0 rounded-lg border border-base-750 bg-base-900 px-3 py-3">{children}</div>
   );
 }
 
@@ -2584,7 +2580,7 @@ function EquityMiniStrip({
     .join(' ');
 
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3.5 py-2">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2">
       {values.length >= 2 ? (
         <div className={cn('h-9 min-w-[8rem] flex-1', pnlColor(delta))}>
           <svg
@@ -2688,25 +2684,20 @@ function ChartTabButton({
   onClick: () => void;
   children: ReactNode;
 }) {
+  /*
+   * 与面板头里的区间按钮**同一套控件**（`Button` primary/ghost）。
+   * 原来这里自己写了一套 `border-base-700 bg-base-800` 的选中态，而右边
+   * 区间按钮是 accent 描边 —— 同一个面板头两种选中样式，一眼就能看出是拼的。
+   */
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={cn(
-        'rounded border px-2.5 py-1 text-base transition',
-        active
-          ? 'border-base-700 bg-base-800 font-semibold text-ink-hi'
-          : 'border-transparent text-ink-lo hover:text-ink-mid',
-      )}
-    >
+    <Button size="sm" variant={active ? 'primary' : 'ghost'} aria-pressed={active} onClick={onClick}>
       {children}
-    </button>
+    </Button>
   );
 }
 
 /** The trader's most recent position symbol, as a candlestick chart. */
-function CandlesPanel({ symbol }: { symbol?: string }) {
+function CandlesPanel({ symbol, height }: { symbol?: string; height: number }) {
   const [interval, setIntervalValue] = useState('15m');
   const query = usePolled((signal) => api.marketKlines(symbol ?? '', interval, 400, signal), {
     intervalMs: 15_000,
@@ -2715,7 +2706,16 @@ function CandlesPanel({ symbol }: { symbol?: string }) {
   });
 
   if (!symbol) {
-    return <Empty message="该机器人当前没有持仓。" hint="开仓后这里会显示其行情图表。" />;
+    /*
+     * ⚠️ **空状态也要占住图表的高度**：否则从「归属权益曲线」切到「行情图表」
+     * 时面板会从 234px 塌成一行字，整页高度跟着跳 —— 与"不管有没有数据版面都
+     * 要保持一致"是同一条要求。
+     */
+    return (
+      <p className="flex items-center justify-center px-3 text-base text-ink-faint" style={{ height }}>
+        该机器人当前没有持仓 —— 开仓后这里会显示其行情图表。
+      </p>
+    );
   }
 
   const candles = query.data ?? [];
@@ -2723,24 +2723,20 @@ function CandlesPanel({ symbol }: { symbol?: string }) {
 
   return (
     <div className="p-3">
-      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="text-base font-semibold text-ink-hi">{symbol}</span>
         {last && <span className="num text-base text-ink-mid">{fmtCompact(last.close)}</span>}
-        <span className="ml-auto flex items-center gap-0.5">
+        <span className="ml-auto flex flex-wrap items-center gap-1">
           {['5m', '15m', '1h', '4h'].map((value) => (
-            <button
+            <Button
               key={value}
-              type="button"
-              onClick={() => setIntervalValue(value)}
+              size="sm"
+              variant={interval === value ? 'primary' : 'ghost'}
               aria-pressed={interval === value}
-              className={
-                interval === value
-                  ? 'rounded border border-accent/60 bg-accent/15 px-2 py-0.5 text-xs text-accent'
-                  : 'rounded border border-transparent px-2 py-0.5 text-xs text-ink-lo transition hover:text-ink-mid'
-              }
+              onClick={() => setIntervalValue(value)}
             >
               {value}
-            </button>
+            </Button>
           ))}
         </span>
       </div>
@@ -2751,7 +2747,7 @@ function CandlesPanel({ symbol }: { symbol?: string }) {
       ) : candles.length === 0 ? (
         <Empty message="该交易对没有返回K线。" />
       ) : (
-        <CandlestickChart candles={candles} height={300} />
+        <CandlestickChart candles={candles} height={height} />
       )}
     </div>
   );

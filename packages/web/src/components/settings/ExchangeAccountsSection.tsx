@@ -27,7 +27,6 @@ import {
   Badge,
   Button,
   Collapsible,
-  Empty,
   ErrorNote,
   Field,
   Modal,
@@ -35,11 +34,9 @@ import {
   Select,
   Spinner3,
   TextInput,
-  Toggle,
 } from '../ui';
 import { CheckList } from '../Badges';
-import { Metric, MetricGroup, PageShell, SectionLabel } from '../shell';
-import { PageActions } from '../../templates/lib/PageActions';
+import { Metric, MetricGroup, PageShell } from '../shell';
 import { BalanceCell } from '../BalanceCells';
 import {
   BALANCE_LABEL,
@@ -48,7 +45,6 @@ import {
   fmtAmount,
   fmtAsset,
   fmtDateTime,
-  fmtInt,
   fmtTime,
   tradingEnvLabel,
   tradingEnvTitle,
@@ -501,20 +497,6 @@ export function ExchangeAccountsSection() {
         )}
       </MetricGroup>
 
-      <MetricGroup title="环境" columns={2}>
-        <Metric
-          label="实盘凭证"
-          value={fmtInt(liveAccounts.length)}
-          tone={liveAccounts.length > 0 ? 'warn' : 'default'}
-          sub={liveAccounts.length > 0 ? TRADING_ENV_LABEL.long.live : '没有实盘凭证，当前不会动用真实资金'}
-        />
-        <Metric
-          label="测试网凭证"
-          value={fmtInt(accounts.length - liveAccounts.length)}
-          sub={TRADING_ENV_LABEL.long.testnet}
-        />
-      </MetricGroup>
-
       <MetricGroup title="读取" columns={1}>
         {/*
           只留一个时间，而且用**相对时间**。
@@ -573,15 +555,11 @@ export function ExchangeAccountsSection() {
   );
 
   /*
-   * 支持的交易所目录。
-   *
-   * 它回答的是"这把密钥该往哪加"：`exchanges` 目录此前只在「添加凭证」对话框的
-   * 下拉里露过一面，于是"除了币安还有谁"只能靠点开对话框试。每一行直接带一个
-   * 「添加」，点进去**预选好这一行的交易所**（`openCreate(id)`）。
-   *
-   * 尚未接入的那些也列出来 —— 一行"尚未支持"比"列表里根本没有它"更明确。
+   * 支持的交易所目录：**只在有多个交易所时渲染**（现在目录里只有币安一家，
+   * 那面板就是一块"只有一个选项的清单"= 多余，用户 2026-11-10）。
+   * 将来接入第二家时它会自动出现 —— 不必改调用方。
    */
-  const supported = exchanges.length > 0 && (
+  const supported = exchanges.length > 1 && (
     <Panel title="支持的交易所" bodyClassName="p-0">
       <ul className="divide-y divide-base-800">
         {exchanges.map((row) => (
@@ -628,7 +606,7 @@ export function ExchangeAccountsSection() {
    */
   return (
     <>
-      <PageShell aside={rail} fillHeight={false}>
+      <PageShell aside={accounts.length > 0 ? rail : null} fillHeight={false}>
         {error && <ErrorNote>{error}</ErrorNote>}
 
         {query.error && <ErrorNote>读取凭证列表失败：{query.error}</ErrorNote>}
@@ -638,61 +616,39 @@ export function ExchangeAccountsSection() {
             <Spinner3 label="正在加载凭证" />
           </Panel>
         ) : accounts.length === 0 ? (
-          <Panel title="交易所凭证">
-            <Empty
-              message="还没有交易所凭证，因此没有余额可读。"
-              hint="模拟模式不需要任何密钥。要接实盘，先添加一把测试网密钥，确认行情、签名与风控这条链路通了再换主网。"
-              action={
-                /*
-                 * `() => openCreate()` 而不是 `onClick={openCreate}`：
-                 * `openCreate` 的入参是**交易所 id**，直接当事件处理函数传进去的话
-                 * React 会把 `MouseEvent` 递给它（类型上就报错，运行时更是把事件对象
-                 * 当成 id 查了一遍目录）。空态这里不需要预选，显式不传。
-                 */
-                <Button variant="primary" onClick={() => openCreate()} disabled={exchanges.length === 0}>
-                  <Plus aria-hidden className="h-3.5 w-3.5" />
-                  添加第一个凭证
-                </Button>
-              }
-            />
-          </Panel>
+          /* 空状态是一行说明 + 一个主操作，不再画一个占半屏的 Empty 大盒子（ui-spec §1）。 */
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-dashed border-base-750 bg-base-900/40 px-3 py-2.5">
+            <span className="text-base font-semibold text-ink-hi">还没有交易所凭证</span>
+            <span className="min-w-0 flex-1 text-xs leading-relaxed text-ink-lo">
+              模拟盘不需要密钥；要接实盘，先加一把测试网密钥，确认行情、签名与风控这条链路通了再换主网。
+            </span>
+            <Button variant="primary" size="sm" onClick={() => openCreate()} disabled={exchanges.length === 0}>
+              <Plus aria-hidden className="h-3.5 w-3.5" />
+              添加第一个凭证
+            </Button>
+          </div>
         ) : (
           <section>
-            <SectionLabel
-              title="交易所凭证"
-              count={accounts.length}
-              actions={
-                <>
-                  <span className="hidden text-xs text-ink-faint lg:inline">
-                    「刷新」绕过服务端缓存
-                  </span>
-                  {/*
-                    两个按钮走统一接口：控制台模板收进工具栏，经典模板就地显示。
-                    上面那行说明文字**不是动作**，留在原地 —— 工具栏里放一句
-                    "「刷新」绕过服务端缓存"会把 40px 的带子变成一段说明。
-                  */}
-                  <PageActions
-                    start={
-                      <Button
-                        size="sm"
-                        busy={refreshingAll}
-                        title="强制刷新所有凭证的实时余额（绕过服务端缓存）"
-                        onClick={() => void refreshAll(accounts.map((row) => row.id))}
-                      >
-                        <RotateCw aria-hidden className="h-3.5 w-3.5" />
-                        刷新全部
-                      </Button>
-                    }
-                    end={
-                      <Button variant="primary" size="sm" onClick={() => openCreate()} disabled={exchanges.length === 0}>
-                        <Plus aria-hidden className="h-3.5 w-3.5" />
-                        添加凭证
-                      </Button>
-                    }
-                  />
-                </>
-              }
-            />
+            {/* 标题 + 动作同一行紧挨着（ui-spec §1），延伸线在动作之后。 */}
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <h2 className="shrink-0 text-xs font-semibold uppercase tracking-[0.14em] text-ink-lo">
+                交易所凭证 <span className="num ml-1 text-ink-faint">{accounts.length}</span>
+              </h2>
+              <Button
+                size="sm"
+                busy={refreshingAll}
+                title="强制刷新所有凭证的实时余额（绕过服务端缓存）"
+                onClick={() => void refreshAll(accounts.map((row) => row.id))}
+              >
+                <RotateCw aria-hidden className="h-3.5 w-3.5" />
+                刷新全部
+              </Button>
+              <Button variant="primary" size="sm" onClick={() => openCreate()} disabled={exchanges.length === 0}>
+                <Plus aria-hidden className="h-3.5 w-3.5" />
+                添加凭证
+              </Button>
+              <span aria-hidden className="h-px min-w-4 flex-1 bg-base-800" />
+            </div>
 
             <ul className="space-y-2">
               {accounts.map((row) => {
@@ -877,8 +833,7 @@ export function ExchangeAccountsSection() {
 
             {accounts.length > 0 && (
               <p className="mt-2 text-xs leading-relaxed text-ink-faint">
-                合计与单个读数都来自交易所回报的<span className="text-ink-lo">账户</span>权益（共享钱包），不是某个机器人的归属权益；
-                同一交易所有多把指向同一账户的凭证时，合计会把同一份钱算两次。
+                合计来自交易所回报的账户权益（共享钱包），不是某个机器人的归属权益；多把密钥指向同一账户时，合计会把同一份钱算两次。
               </p>
             )}
           </section>

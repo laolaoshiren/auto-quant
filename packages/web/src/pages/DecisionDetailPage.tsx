@@ -115,28 +115,13 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
    */
   const rail = (
     /* 窄屏 2 列而非 3 列 —— 理由见 TraderPage 同名处：3 列会把值截断。 */
-    <div className="grid grid-cols-1 items-start gap-5 sm:grid-cols-2 xl:grid-cols-1">
-      <MetricGroup title="周期结果" columns={2}>
-        <Metric
-          label="决策数"
-          value={fmtInt(decisions.length)}
-          size="lg"
-          sub={`${fmtInt(executionLog.length)} 条执行记录`}
-          title="模型给出的决策条数，以及风控复核后落下的执行记录条数。"
-        />
-        <Metric
-          label="已执行 / 已拒绝"
-          value={
-            <>
-              <span className="text-up">{fmtInt(executed.length)}</span>
-              <span className="text-ink-faint"> / </span>
-              <span className={rejected.length > 0 ? 'text-warn' : 'text-ink-mid'}>{fmtInt(rejected.length)}</span>
-            </>
-          }
-          sub={failed.length > 0 ? `另有 ${fmtInt(failed.length)} 条在交易所失败` : '风控复核结果'}
-        />
-      </MetricGroup>
-
+    <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-1">
+      {/*
+        2026-11-10（ui-spec §4.2）：删掉原来的「周期结果」分组。
+        它的两个数字（决策数 / 已执行·已拒绝）在决策区标题与执行日志面板里
+        已经各出现一次 —— 同一件事在首屏出现三遍，是"拼凑感"而不是信息。
+        右栏只留**这里才有的**诊断读数。
+      */}
       <MetricGroup title="上下文（诊断）" columns={2}>
         <Metric label="模型延迟" value={fmtLatency(record.aiLatencyMs)} sub="单次推理耗时" />
         <Metric label="提示词 Token" value={fmtInt(record.promptTokens ?? 0)} />
@@ -164,9 +149,9 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
         <span className="h-4 w-px bg-base-700" aria-hidden />
         <h1 className="text-xl font-semibold tracking-wide text-ink-hi">周期 #{record.cycleNumber}</h1>
         <Badge tone={record.success ? 'up' : 'down'}>{record.success ? '周期成功' : '周期失败'}</Badge>
-        <span className="num text-xs text-ink-faint">{fmtDateTime(record.timestamp)}</span>
-        <span className="num ml-auto text-xs text-ink-faint">
-          记录 #{record.id} · 机器人 #{traderId}
+        {/* 元信息跟在标题后面（规范 §1：不要用 `ml-auto` 把信息推到最右端）。 */}
+        <span className="num text-xs text-ink-faint">
+          {fmtDateTime(record.timestamp)} · 记录 #{record.id} · 机器人 #{traderId}
         </span>
       </div>
 
@@ -248,9 +233,10 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
                       <Badge tone="muted" title="该决策建议的杠杆倍数。">
                         {decision.leverage}x
                       </Badge>
-                      <span className="num text-xs text-ink-lo" title="名义价值（USDT）">
-                        {fmtUsd(decision.positionSizeUsd, 2)}
-                      </span>
+                      {/*
+                        名义价值只在下面的 Readout 里出现一次（规范 §4.2：
+                        同一张卡里不重复同一个数字）。原来头部这里也有一份。
+                      */}
                       {/*
                         ⚠️ 漏填时显示"未给出"而不是 0% —— 两者含义相反，
                         见 `Decision.confidence` 的说明。

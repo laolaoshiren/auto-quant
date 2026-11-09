@@ -313,16 +313,10 @@ export function DataPage() {
      * 直接看见 `.page-fill` 这个 flex 容器，中间多一层普通 div 会把
      * `height:100%` 的链断掉（实测会退化成按内容撑高）。
      */
-    <>
       <div className="page-fill h-full gap-3">
-      <div className="flex shrink-0 flex-wrap items-end justify-between gap-3">
-        <div className="min-w-0">
+      <div className="shrink-0 space-y-1">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <h1 className="text-xl font-semibold tracking-wide text-ink-hi">数据与日志</h1>
-          <p className="mt-0.5 text-xs text-ink-faint">
-            运行时日志流、连接健康状态，以及控制台背后的原始行情计数器。
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
           <Badge tone={socketStatus === 'open' ? 'up' : 'warn'}>
             {socketStatus === 'open' ? '推送已连接' : `推送 ${socketStatus}`}
           </Badge>
@@ -333,26 +327,29 @@ export function DataPage() {
             </Button>
           )}
         </div>
+        <p className="text-xs text-ink-faint">运行时日志流、连接健康状态，以及控制台背后的原始行情计数器。</p>
       </div>
 
-      <div className="grid shrink-0 grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
-        {/*
-          环境卡片已删除（用户 2026-11-10：「明显多余，历史遗留问题」）——
-          环境信息在侧栏/页头已经常驻，这里再放一张同名卡片只是重复。
-        */}
-        <Metric label="时钟偏移" value={fmtClockOffsetMs(system?.clockOffsetMs)} sub="本机 − 交易所" />
-        <Metric
-          label="API 权重"
-          value={`${fmtInt(system?.weightUsed)} / ${fmtInt(system?.weightLimit)}`}
-          sub="每分钟"
-        />
-        <Metric label="可交易对" value={fmtInt(system?.tradableSymbols)} />
-        <Metric label="服务运行时长" value={health ? `${Math.floor(health.uptimeSeconds / 60)} 分` : '—'} />
-        <Metric
-          label="日志行数"
-          value={fmtInt(visible.length)}
-          sub={`${counts.error} 错误 · ${counts.warn} 警告`}
-        />
+      <div className="num flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-faint">
+        <span>
+          时钟偏移 <span className="text-ink-mid">{fmtClockOffsetMs(system?.clockOffsetMs)}</span>
+        </span>
+        <span>
+          API 权重 <span className="text-ink-mid">{fmtInt(system?.weightUsed)} / {fmtInt(system?.weightLimit)}</span>
+        </span>
+        <span>
+          可交易对 <span className="text-ink-mid">{fmtInt(system?.tradableSymbols)}</span>
+        </span>
+        <span>
+          已运行 <span className="text-ink-mid">{health ? `${Math.floor(health.uptimeSeconds / 60)} 分` : '—'}</span>
+        </span>
+        <span>
+          日志 <span className="text-ink-mid">{fmtInt(visible.length)}</span> 行
+          <span className="text-ink-faint"> · </span>
+          <span className="text-down">{counts.error} 错误</span>
+          <span className="text-ink-faint"> / </span>
+          <span className="text-warn">{counts.warn} 警告</span>
+        </span>
       </div>
 
       <Panel
@@ -372,76 +369,10 @@ export function DataPage() {
         className="flex min-h-0 flex-1 flex-col"
         actions={
           <div className="flex flex-wrap items-center justify-end gap-1.5">
-            {/* 级别：文字 + 颜色，两者都在 */}
-            <div role="group" aria-label="按级别过滤" className="flex items-center gap-0.5">
-              {LEVELS.map((item) => (
-                <Button
-                  key={item.id}
-                  size="sm"
-                  variant={level === item.id ? 'primary' : 'ghost'}
-                  aria-pressed={level === item.id}
-                  onClick={() => setLevel(item.id)}
-                >
-                  {item.label}
-                  {item.id !== 'all' && (
-                    <span className="num text-ink-faint">{counts[item.id as 'info' | 'warn' | 'error']}</span>
-                  )}
-                </Button>
-              ))}
-            </div>
-
-            <span aria-hidden className="mx-0.5 hidden h-4 w-px bg-base-700 sm:block" />
-
-            <div role="group" aria-label="日志来源" className="flex items-center gap-0.5">
-              <Button
-                size="sm"
-                variant={source === 'socket' ? 'primary' : 'ghost'}
-                aria-pressed={source === 'socket'}
-                onClick={() => setSource('socket')}
-              >
-                实时
-              </Button>
-              <Button
-                size="sm"
-                variant={source === 'rest' ? 'primary' : 'ghost'}
-                aria-pressed={source === 'rest'}
-                onClick={() => setSource('rest')}
-              >
-                持久化
-              </Button>
-            </div>
-
-            <span aria-hidden className="mx-0.5 hidden h-4 w-px bg-base-700 sm:block" />
-
             <Button
               size="sm"
-              variant={follow ? 'primary' : 'ghost'}
-              aria-pressed={follow}
-              title="开启后新日志会自动滚到底部"
-              onClick={() => setFollow((value) => !value)}
-            >
-              {follow ? <ArrowDownToLine aria-hidden className="h-3.5 w-3.5" /> : null}
-              跟随{follow ? '开' : '关'}
-            </Button>
-            <Button
-              size="sm"
-              variant={paused ? 'warn' : 'ghost'}
-              aria-pressed={paused}
-              title="暂停只冻结视图，不会停止接收推送"
-              onClick={() => setPaused((value) => !value)}
-            >
-              {paused ? <Play aria-hidden className="h-3.5 w-3.5" /> : <Pause aria-hidden className="h-3.5 w-3.5" />}
-              {paused ? '已暂停' : '暂停'}
-            </Button>
-            <Button
-              size="sm"
+              variant="danger"
               onClick={() => {
-                /*
-                 * ⚠️ **先立起"用户主动清空"的标志，再清缓冲区**（外部 issue #168）。
-                 *
-                 * 顺序无所谓（同一个事件循环内两件事都会发生），但**标志必须立** ——
-                 * 否则回填 effect 会立刻把同一批历史灌回，这个按钮等于没用。
-                 */
                 clearedByUser.current = true;
                 clearLogs();
               }}
@@ -455,21 +386,6 @@ export function DataPage() {
               <RefreshCw aria-hidden className="h-3.5 w-3.5" />
               重新加载
             </Button>
-            {/*
-              ⚠️ **这一整组不进工具栏，这是刻意的。**
-
-              级别筛选、日志来源、跟随/暂停、清空缓冲看着像"页面的动作"，
-              其实是**视图选项** —— 四件事共同描述"我现在在看什么"。
-              搬进 40px 的工具栏会丢掉两样东西：
-
-                · 按钮的**选中态**（`variant="primary"` 表示"当前就是这个筛选值"）
-                  在工具栏的透明底上读不出来；
-                · 它们和下面那张日志表是**一组**，分到两条横带上就断开了。
-
-              工具栏只收"重新加载"这类真正的页面级动作。这条边界见
-              `LAYOUT.md` §0：工具栏放**当前页面能做的事**，
-              筛选与视图状态属于**当前页面在看的东西**。
-            */}
           </div>
         }
         /*
@@ -480,7 +396,7 @@ export function DataPage() {
         bodyClassName="flex min-h-0 flex-1 flex-col p-2"
         padded={false}
       >
-        <div className="mb-2 flex flex-wrap items-center gap-2">
+        <div className="mb-2 flex flex-wrap items-center gap-1.5">
           <div className="relative min-w-[12rem] flex-1">
             <TextInput
               className="num"
@@ -490,21 +406,72 @@ export function DataPage() {
               aria-label="过滤日志消息"
             />
           </div>
-          {filtering && (
-            <>
-              <span className="num text-xs text-ink-faint">
-                命中 {fmtInt(matched.length)} / {fmtInt(visible.length)}
-              </span>
+
+          <div role="group" aria-label="按级别过滤" className="flex items-center gap-0.5">
+            {LEVELS.map((item) => (
               <Button
+                key={item.id}
                 size="sm"
-                onClick={() => {
-                  setSearch('');
-                  setLevel('all');
-                }}
+                variant={level === item.id ? 'primary' : 'ghost'}
+                aria-pressed={level === item.id}
+                onClick={() => setLevel(item.id)}
               >
-                清除过滤
+                {item.label}
+                {item.id !== 'all' && (
+                  <span className="num text-ink-faint">{counts[item.id as 'info' | 'warn' | 'error']}</span>
+                )}
               </Button>
-            </>
+            ))}
+          </div>
+
+          <span aria-hidden className="mx-0.5 hidden h-4 w-px bg-base-700 sm:block" />
+
+          <div role="group" aria-label="日志来源" className="flex items-center gap-0.5">
+            <Button
+              size="sm"
+              variant={source === 'socket' ? 'primary' : 'ghost'}
+              aria-pressed={source === 'socket'}
+              onClick={() => setSource('socket')}
+            >
+              实时
+            </Button>
+            <Button
+              size="sm"
+              variant={source === 'rest' ? 'primary' : 'ghost'}
+              aria-pressed={source === 'rest'}
+              onClick={() => setSource('rest')}
+            >
+              持久化
+            </Button>
+          </div>
+
+          <span aria-hidden className="mx-0.5 hidden h-4 w-px bg-base-700 sm:block" />
+
+          <Button
+            size="sm"
+            variant={follow ? 'primary' : 'ghost'}
+            aria-pressed={follow}
+            title="开启后新日志会自动滚到底部"
+            onClick={() => setFollow((value) => !value)}
+          >
+            {follow ? <ArrowDownToLine aria-hidden className="h-3.5 w-3.5" /> : null}
+            跟随
+          </Button>
+          <Button
+            size="sm"
+            variant={paused ? 'warn' : 'ghost'}
+            aria-pressed={paused}
+            title="暂停只冻结视图，不会停止接收推送"
+            onClick={() => setPaused((value) => !value)}
+          >
+            {paused ? <Play aria-hidden className="h-3.5 w-3.5" /> : <Pause aria-hidden className="h-3.5 w-3.5" />}
+            {paused ? '已暂停' : '暂停'}
+          </Button>
+
+          {filtering && (
+            <span className="num text-xs text-ink-faint">
+              命中 {fmtInt(matched.length)} / {fmtInt(visible.length)}
+            </span>
           )}
           <CopyButton onCopy={() => void copyBuffer()} copied={copied} />
         </div>
@@ -667,43 +634,12 @@ export function DataPage() {
           <FeedClock lastEventAt={lastEventAt} />
         </div>
       </Panel>
+        <p className="shrink-0 text-xs leading-relaxed text-ink-faint">
+          实时 = WebSocket 缓冲；持久化 = <code className="num">GET /api/logs</code>（最近 500 行）；推送断开后自动重连、REST
+          轮询继续。交易所返回的报错文本（如 <code className="num">-2019</code>）原样展示。
+        </p>
       </div>
 
-      {/* 折叠说明：排查时用得到，平时不该占版面 */}
-      <Panel title="本页数据来源" className="mt-3">
-        <ul className="space-y-1.5 text-base leading-relaxed text-ink-lo">
-          <li>
-            • <span className="text-ink-mid">实时</span>：渲染 WebSocket 缓冲 —— 服务端推送的每条{' '}
-            <code className="num">log</code> 事件，以及以浮层形式出现的委托、成交与状态事件。
-          </li>
-          <li>
-            • <span className="text-ink-mid">持久化</span>：轮询 <code className="num">GET /api/logs</code>，读取裁剪过的{' '}
-            <code className="num">runtime_logs</code> 表（最近 500 行）。
-          </li>
-          <li>
-            • 推送断开后会以指数退避重连（0.8s → 15s），登出时干净关闭。REST 轮询始终继续，
-            因此推送中断时本页仍会更新。
-          </li>
-          <li>
-            • 交易所返回的报错文本<span className="text-ink-mid">原样展示</span>
-            （例如 Binance 的 <code className="num">-2019</code>）—— 它通常是唯一能定位问题的线索。
-          </li>
-        </ul>
-      </Panel>
-    </>
   );
 }
 
-function Metric({ label, value, sub }: { label: string; value: string; sub?: string }) {
-  return (
-    <div className="min-w-0 rounded-md border border-base-750 bg-base-850/60 px-3 py-2.5">
-      <div className="truncate text-xs font-semibold uppercase tracking-[0.12em] text-ink-lo" title={label}>
-        {label}
-      </div>
-      <div className="num mt-1.5 break-all text-2xl leading-tight text-ink-hi" title={value}>
-        {value}
-      </div>
-      {sub && <div className="mt-0.5 truncate text-xs text-ink-faint">{sub}</div>}
-    </div>
-  );
-}
