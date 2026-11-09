@@ -154,7 +154,7 @@ test('★★★ 每个岗位的实现状态必须是被明确分类过的，不�
    * 2026-10-15 之前只有 `staffed` / `planned` 两态，而 `data_sentinel` /
    * `ops_watchdog` 的职责**一直在跑**（`/api/health` 的 `staleTraders`、
    * `selfcheck.ts` 的 `findDeterministicProblems()`）却被标成 `planned` ——
-   * 于是界面写着"规划中"，实际在跑。`docs/FINDING-planned-roles-audit.md` §4 ④
+   * 于是界面写着"规划中"，实际在跑。`docs/archive/FINDING-planned-roles-audit.md` §4 ④
    * 把这件事的定性写得很清楚：**那本身是一种说谎**。
    *
    * 反过来把真没实现的岗位标成"在跑"同样是说谎。所以"必须有一个明确分类"
@@ -174,7 +174,7 @@ test('★★★ data_sentinel / ops_watchdog 必须标 by_code —— 界面写"
   /*
    * ## 为什么这两个必须**同时**从 planned 里消失
    *
-   * 它们的职责有实测证据（`docs/FINDING-planned-roles-audit.md` §2.1/2.2）：
+   * 它们的职责有实测证据（`docs/archive/FINDING-planned-roles-audit.md` §2.1/2.2）：
    *   · `data_sentinel` → `api/server.ts` 的 `/api/health` 返回 `staleTraders`（线上实测 `[]`）；
    *   · `ops_watchdog`  → `trader/selfcheck.ts` 的 `findDeterministicProblems()`，
    *                      由 `selfcheckRunner.ts` 每 30 分钟调度。
@@ -201,7 +201,7 @@ test('★★★ data_sentinel / ops_watchdog 必须标 by_code —— 界面写"
   for (const id of ['data_sentinel', 'ops_watchdog']) {
     assert.ok(
       !planned.includes(id),
-      `★ ${id} 的职责已经在跑（见 docs/FINDING-planned-roles-audit.md §2）—— 不能再标 planned`,
+      `★ ${id} 的职责已经在跑（见 docs/archive/FINDING-planned-roles-audit.md §2）—— 不能再标 planned`,
     );
   }
 });
@@ -231,7 +231,7 @@ test('★★★ by_code 岗位必须写明【由哪段代码承担】，而且�
    * 字段名出现在注释、类型声明、或者别处的变量名里都能骗过它，
    * 而真正要保证的是"**这个端点仍然把它写进响应体**"。
    * （本仓库对这种"判据比它要防的东西宽"的形态记过教训：
-   *  `docs/FINDING-clerk-unwired.md` 2026-10-14 补充 —— 判据本身也需要校准。）
+   *  `docs/archive/FINDING-clerk-unwired.md` 2026-10-14 补充 —— 判据本身也需要校准。）
    */
   const PLACES: Record<string, { file: string; needles: Array<{ pattern: RegExp; what: string }> }> = {
     data_sentinel: {
@@ -301,7 +301,7 @@ test('★★ `by_code` 必须是"没有 LLM 出勤"的岗位（tier 为 T0_code�
    *
    * ⚠️ 这条断言**会**在"把 by_code 岗位改造成 LLM 岗位"时变红 —— 那是刻意的：
    * 那个改造正是本仓库付过两次代价的形状（`engineer` 被删、`clerk` 未接线，
-   * 见 `docs/FINDING-clerk-unwired.md`）。要做的话，得先改状态、并说明谁消费它的产出。
+   * 见 `docs/archive/FINDING-clerk-unwired.md`）。要做的话，得先改状态、并说明谁消费它的产出。
    */
   const wrongTier = FIRM_ROLES.filter((r) => r.status === 'by_code' && r.tier !== 'T0_code').map(
     (r) => `${r.label}(${r.id}): tier=${r.tier}`,

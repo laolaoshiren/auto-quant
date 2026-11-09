@@ -111,6 +111,12 @@ import {
   type ReconstructedTrade,
 } from './roundTrips.js';
 import { commissionsInWindow, fundingInWindow, fundingSince, netPnlOf, realizedInFills, realizedInWindow } from '../binance/income.js';
+import {
+  SIGNAL_HEALTH_WINDOW_DAYS,
+  signalHealthReportFor,
+  signalHealthStateKey,
+} from './intel/signalHealthReport.js';
+import { SIGNAL_LIMITS } from './intel/signalHealth.js';
 
 const log = createLogger('trader');
 
@@ -185,6 +191,16 @@ export const PARAM_CHANGE_MIN_INTERVAL_MS = 30 * 60_000;
 
 /** 一小时内最多改几次参数。 */
 export const PARAM_CHANGE_MAX_PER_HOUR = 2;
+
+/**
+ * **信号健康度复盘的最小间隔**（毫秒）。
+ *
+ * 见 `observeSignalHealth()`。10 分钟与"一轮 5–35 分钟"同量级：一个周期里最多跑
+ * 一次，而**跨周期**（模型把下一次排到 120 分钟后）时仍能保证每 10 分钟有一次观测。
+ * 这个查询是只读 SQL（窗口 + 条数上限），但没有任何理由每轮都跑 ——
+ * 信号健康度的判据本身是按"20 笔样本"积累的，10 分钟已经完全够密。
+ */
+const SIGNAL_HEALTH_INTERVAL_MS = 10 * 60_000;
 
 /**
  * 账本对账的容差 —— **绝对下限 + 权益的 0.1%，取较大者**。
@@ -1161,6 +1177,13 @@ export class AutoTrader {
    * 这样操作者既不会被重复刷屏，也不会漏掉数值的实质变化。
    */
   private stateNotices = new Map<string, string>();
+
+  /**
+   * 上一次算**信号健康度复盘**的时刻（毫秒；节流用）。
+   *
+   * 见 `observeSignalHealth()`。0 = 还没算过（启动后第一轮就算一次）。
+   */
+  private signalHealthCheckedAt = 0;
 
   /**
    * 已经设过的**保证金模式**（symbol → 模式）。
@@ -2838,7 +2861,12 @@ export class AutoTrader {
       this.emit('error', `第 #${this.cycleNumber} 轮决策失败：${message}`);
       traderStore.recordCycle(traderId, this.cycleNumber, this.consecutiveFailures);
 
-      const threshold = this.activeConfig.circuitBreaker.safeModeAfterFailures;
+      /*
+       * ⚠️ **运行期读配置一律走 `effectiveConfig()`**（2026-11-09 统一）。
+       * 这是"连续失败到阈值就进安全模式"的判据，属于运行期行为；
+       * 直接读 `activeConfig` 会让 JEV 覆盖（以及将来新增的覆盖）对这道门失效。
+       */
+      const threshold = this.effectiveConfig().circuitBreaker.safeModeAfterFailures;
       if (this.consecutiveFailures >= threshold) {
         // Repeated failures usually mean a rejected key, an exhausted balance or
         // a model outage. Stop opening new positions until something changes.
@@ -4096,7 +4124,8 @@ export class AutoTrader {
        * 它自己的规则规模 —— 模型没有刻度：只写不删，也看不到"我的规则多大了"。
        * 实测 9 天内从 1,841 涨到 9,618 字符（5.2 倍），同期开单率 48% → 8%。
        */
-      ...summariseRules(this.activeConfig.promptSections),
+      /* ⚠️ 运行期读配置走 `effectiveConfig()` —— 见 `effectiveConfig()` 的说明。 */
+      ...summariseRules(this.effectiveConfig().promptSections),
       memory,
       /*
        * ⚠️ **选币阶段裁掉了多少，必须告诉模型。**
@@ -4403,6 +4432,16 @@ export class AutoTrader {
           return { applied: false, rejected: gate, clamps: [] };
         }
 
+        /*
+         * ⚠️ **这里必须读 `activeConfig`，不能读 `effectiveConfig()`**
+         *（2026-11-09 加结构守卫时逐处判定）。
+         *
+         * `applyAgentPatch()` 的结果会被 `setAgentConfig()` **持久化**。若基于
+         * `effectiveConfig()`（JEV 模式下它含**瞬态**覆盖，例如
+         * `circuitBreaker.maxDailyLossPercent`）来打补丁，那些临时覆盖值会被
+         * 写进策略配置 —— 于是"JEV 模式今天用 30%"变成"这个机器人的策略被永久
+         * 改成 30%"，切回别的模式也不会恢复。装配期读原始配置才是对的。
+         */
         const current = this.activeConfig;
         const result = applyAgentPatch(current, patch);
         if (result.rejected === null) {
@@ -5435,7 +5474,84 @@ export class AutoTrader {
     if (cooldownBlocked > 0) parts.push(`${cooldownBlocked} 条被冷却期拦截`);
     const rejectedCount = parsed.rejected.length + verdict.rejected.length;
     if (rejectedCount > 0) parts.push(`${rejectedCount} 条被拒绝`);
+
+    /*
+     * --- 12.5 消息面信号健康度复盘（只观测，不参与决策） -------------------
+     *
+     * 排在最后一步、摘要返回之前：本轮所有交易动作都已经完成，它**只读库、只写日志**，
+     * 不 await 任何东西、内部吞掉异常 —— 所以对它唯一的正确期待是"不改变这一轮"。
+     * 为什么现在才接：`assessSignal()` 从写出来那天起只有测试引用，详见方法注释。
+     */
+    this.observeSignalHealth();
+
     return parts.join('，');
+  }
+
+  /**
+   * **消息面信号健康度复盘** —— 把 `signalHealth.assessSignal()` 接到真实数据上。
+   *
+   * ## 它接的是哪条断链（2026-11-09 审计）
+   *
+   * `intel/signalHealth.ts` 的 `assessSignal()`、`intel/attribution.ts` 的
+   * `tradesForSignal()` / `signalsWithEnoughSamples()` 从写出来那天起**只有测试引用**；
+   * `trades.intel_keys` 只写不读。于是"消息面策略失效检测"从未生效过 ——
+   * 与 `clerk` / `funnelUniverseLimit` 是同一类缺口（见
+   * `docs/archive/FINDING-clerk-unwired.md` 的更正）。
+   *
+   * 现在每个周期（节流后）读一次归因成交、算出每个信号的健康度，只写**一条**日志：
+   * 操作员在控制台的日志与周期步骤里能看到"哪个信号失效了、为什么"。
+   *
+   * ## ⚠️ 它**不改变任何交易行为**
+   *
+   * · 不降权、不拦单、不改决策，也不进提示词 —— 报告只进日志（审计流）；
+   * · 整段 try/catch：附属观测失败绝不让一轮交易失败；
+   * · `emitOnChange`：结论不变（只有胜率/样本数在动）就不重复写，避免"每轮都响的
+   *   告警"（`emitOnChange` 的注释里记录过"上百条 error 把真告警埋掉"的事故）。
+   *
+   * ## 为什么没有进提示词
+   *
+   * 那会改变模型输入（进而可能改变交易行为），超出"可观测接线"的范围 ——
+   * 方案与取舍留给 Lead 决策（见汇报），落地前不擅自改。
+   */
+  private observeSignalHealth(): void {
+    const nowMs = Date.now();
+    if (nowMs - this.signalHealthCheckedAt < SIGNAL_HEALTH_INTERVAL_MS) return;
+    this.signalHealthCheckedAt = nowMs;
+
+    try {
+      const report = signalHealthReportFor(this.deps.trader.id, {
+        windowStart: new Date(nowMs - SIGNAL_HEALTH_WINDOW_DAYS * 86_400_000).toISOString(),
+      });
+
+      if (report.summary === null) {
+        /*
+         * 样本不足 = **没有结论**，不是"健康"（§3.2）。固定 stateKey 让它只记一次；
+         * 等某个信号攒够样本（状态变化）时才会再写一条。
+         */
+        this.emitOnChange(
+          'signal-health',
+          'info',
+          `消息面信号健康度：最近 ${SIGNAL_HEALTH_WINDOW_DAYS} 天窗口内还不够样本` +
+            `（每个信号需 ≥${SIGNAL_LIMITS.MIN_SAMPLES} 笔），失效检测暂不下结论` +
+            `（窗口内情报驱动成交 ${report.attributedTrades} 笔）。`,
+          'insufficient',
+        );
+        return;
+      }
+
+      const hasFailed = report.signals.some((s) => s.verdict.health === 'failed');
+      this.emitOnChange(
+        'signal-health',
+        hasFailed ? 'warn' : 'info',
+        report.summary,
+        signalHealthStateKey(report),
+      );
+    } catch (error) {
+      /* 附属观测失败只记 warn：**不能让一轮交易因为它失败**。 */
+      log.warn(
+        `[${this.deps.trader.name}] 信号健康度复盘失败（不影响本轮交易）：${(error as Error).message}`,
+      );
+    }
   }
 
   /* ---------------------------------------------------------------------- */
@@ -5912,7 +6028,7 @@ export class AutoTrader {
    */
   private async expireStalePendingEntries(): Promise<number> {
     const traderId = this.deps.trader.id;
-    const configBaseMinutes = this.activeConfig.riskControl.pendingEntryTimeoutMinutes;
+    const configBaseMinutes = this.effectiveConfig().riskControl.pendingEntryTimeoutMinutes;
     /*
      * ⚠️ `0` = 关闭这条兜底规则（本项目同类字段的既有约定）——
      * **整条规则关闭**，而不是"只对没指定耐心的单生效"。关闭就该是关闭。
@@ -5938,7 +6054,7 @@ export class AutoTrader {
     const caps = await this.deps.marketData
       .buildSnapshots(
         rows.map((r) => r.symbol),
-        this.activeConfig.indicators,
+        this.effectiveConfig().indicators,
         /* 来源标记只影响提示词渲染，这里用不上。 */
         new Map(),
       )
@@ -5960,7 +6076,7 @@ export class AutoTrader {
        */
       const atrSeries = pickAtrSeries(
         snap?.primary?.atr,
-        this.activeConfig.indicators.atrPeriods,
+        this.effectiveConfig().indicators.atrPeriods,
       ).values;
       const atr =
         atrSeries && atrSeries.length > 0
@@ -6025,6 +6141,39 @@ export class AutoTrader {
           .getOrder(row.symbol, row.entry_order_id)
           .catch(() => null);
         if (live === null) {
+          /*
+           * ════════════════════════════════════════════════════════════════════
+           *  ⚠️ **模拟盘：读不到 = 这张模拟挂单已经不可能成交**（2026-11-09）
+           * ════════════════════════════════════════════════════════════════════
+           *
+           * 模拟挂单只活在**本进程**的模拟撮合账里（见 broker 的
+           * `SimulatedRestingOrder`）：进程重启后它们既不在交易所、也不在新的
+           * 进程里，**永远不会再被触发**。
+           *
+           * 而实盘那条判据是"读不到就等下一轮"（读不到 ≠ 不存在）—— 如果照搬到
+           * 模拟盘，一张重启前的模拟挂单会**永远占着入场名额**（每一轮都 continue）。
+           * 所以这里按模拟盘的事实作废本地记录，并写清原因。
+           */
+          if (this.isDryRun) {
+            positionStore.close(row.id);
+            expired += 1;
+            if (row.entry_order_id) {
+              const entryOrder = orderStore.findByExchangeOrderId(
+                traderId,
+                String(row.entry_order_id),
+              );
+              if (entryOrder && !TERMINAL_ORDER_STATUSES.includes(entryOrder.status)) {
+                orderStore.update(entryOrder.id, { status: 'CANCELED' });
+              }
+            }
+            this.emit(
+              'warn',
+              `${row.symbol} 的模拟限价挂单已等满 ${Math.round(waitedMinutes)} 分钟，` +
+                '而它不在本进程的模拟撮合账里（进程重启前的挂单不会保留）—— ' +
+                '已作废该本地记录并释放入场名额。',
+            );
+            continue;
+          }
           log.warn(
             `[${this.deps.trader.name}] ${row.symbol} 的挂单超时，但读不到它的状态 —— 本轮不撤，等下一轮确认。`,
           );
@@ -6240,7 +6389,7 @@ export class AutoTrader {
        * 那种情况下平掉是回到已知状态。而这里是**操作员手动开的一个仓位**：
        * 替他决定平掉，比留一个无保护的仓位更越界。所以报错，让他自己处置。
        */
-      const fallbackPercent = this.activeConfig.riskControl.fallbackStopLossPercent;
+      const fallbackPercent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
       const adoptedStop = fallbackStopPrice(live.entryPrice, live.side === 'long', fallbackPercent);
 
       const protection = await this.replaceProtection({
@@ -6433,18 +6582,18 @@ export class AutoTrader {
        * 平仓记账路径（§2.3），它负责减仓扣减、手续费归属、`positions.close()`。
        * 自己再写一遍会立刻产生"两处各记一次"的分歧。
        *
-       * 手续费：模拟盘没有真实成交记录，按**名义价值 × 往返费率**估 ——
-       * 复用 `fallbackRoundTripFeeRate`（策略里已有的那个回退费率，
-       * 默认 0.001 = 0.1%，见 `strategy.ts`）。
+       * 手续费：模拟盘没有真实成交记录，按**整趟往返费率**估（见
+       * `dryRunRoundTripFee()` —— 那是所有 dry-run 平仓路径共用的唯一一份估算，
+       * 这样"止损/止盈触发"与"模型主动平仓/紧急平仓/手工平仓"的成本口径一致）。
        *
-       * ⚠️ **不能用 0**：那会让模拟盘看起来比现实更容易赚 ——
-       * 而模拟盘的价值恰恰是"尽量像真的"。实测模拟盘的净额本来就是负的，
-       * 记 0 会把一个真实存在的成本藏起来。
+       * ⚠️ **不能用 0**：那会让模拟盘看起来比现实更容易赚，而模拟盘的价值恰恰是
+       * "尽量像真的"。实测模拟盘的净额本来就是负的，记 0 会把真实成本藏起来。
        */
-      const notional = exitPrice * local.quantity;
-      const exitFee = notional * this.activeConfig.riskControl.fallbackRoundTripFeeRate;
+      const { entryFee, exitFee } = this.dryRunRoundTripFee(exitPrice, local.quantity);
 
-      await this.bookClosedPosition(local, reason, exitPrice, exitFee);
+      await this.bookClosedPosition(local, reason, exitPrice, exitFee, undefined, {
+        entryFeeFallback: entryFee,
+      });
     }
 
     /* 整轮读完后统一记一次，供模拟盘钱包算浮盈（见 `paperMarkPrices`）。 */
@@ -6533,6 +6682,19 @@ export class AutoTrader {
    * （weight 1 + 1）；挂上之后的下一轮 `hasStop` 为真，稳态零额外调用。
    */
   private async ensureStopsOnOpenPositions(exchangePositions: ExchangePosition[]): Promise<void> {
+    /*
+     * ⚠️ **模拟盘不走这条检查**（2026-11-09）。
+     *
+     * 它读的是"交易所有没有活着的止损单"（`getOpenOrders` / `getOpenAlgoOrders`）。
+     * 模拟盘的保护单从不发到交易所，而 broker 在 dry-run 下按约定返回本地/空 ——
+     * 把那个空当成"仓位没有止损"会导致每轮重复挂一次模拟保护单（单号被反复改写），
+     * 甚至触发 §2.6 的误平仓。
+     *
+     * 模拟盘的止损真相是本地 `positions.stop_loss`，触发由
+     * `settleDryRunPositions()` 按标记价判 —— 这条交易所侧检查在模拟盘下没有对象。
+     */
+    if (this.isDryRun) return;
+
     const traderId = this.deps.trader.id;
     const liveBySymbol = new Map(exchangePositions.map((position) => [position.symbol, position]));
     /** 什么算"这个仓位有止损"。注意 `TRAILING_STOP_MARKET` 也是止损。 */
@@ -6633,7 +6795,7 @@ export class AutoTrader {
       if (recordedOk) {
         stop = local.stop_loss as number;
       } else {
-        const percent = this.activeConfig.riskControl.fallbackStopLossPercent;
+        const percent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
         stop = fallbackStopPrice(live.entryPrice, isLong, percent);
         if (!(isLong ? stop < mark : stop > mark)) {
           this.emit(
@@ -6682,7 +6844,7 @@ export class AutoTrader {
         1,
         this.deps.trader.mode === 'jev'
           ? jevNumber('breakeven_trigger_percent')
-          : this.activeConfig.riskControl.breakevenTriggerPercent,
+          : this.effectiveConfig().riskControl.breakevenTriggerPercent,
       );
       /** 本地记录的目标位（方向必须还在现价之外）。 */
       const recordedTargetOk =
@@ -6943,6 +7105,51 @@ export class AutoTrader {
     }
   }
 
+  /**
+   * **模拟盘的往返手续费估算** —— `dryRun` 下所有平仓路径共用这一份。
+   *
+   * ## 为什么模拟盘必须按全额估（2026-11-09，行为变更）
+   *
+   * 模拟盘没有真实成交回报，`getUserTrades()` 返回空 —— 于是"按成交明细取手续费"
+   * 的几条路径（`executeClose` / `emergencyFlatten` / 减仓）全都把手续费记成 **0**，
+   * 而 `closeManually` 只记了半程。**成本被系统性低估 = 模拟收益被系统性高估**：
+   * 一个在高费率山寨上高频往返的策略，在模拟盘上看起来比实盘好赚得多，
+   * 而后续开发**以本地模拟盘为主**（用户 2026-11-09 的指示）—— 那样评估出来的
+   * 策略一文不值。
+   *
+   * ⇒ 统一按策略里已有的 `fallbackRoundTripFeeRate`（默认 0.001 = 0.1%）估算
+   * **整趟往返费**，再对半拆到 entry / exit 两侧。**保守口径**：模拟盘宁愿把成本
+   * 估高一点，也不要让它看起来比实盘容易赚。
+   *
+   * ## 口径（与 `settleDryRunPositions` 完全一致）
+   *
+   * ```
+   *   total    = 出场名义价值 × 往返费率
+   *   exitFee  = total / 2
+   *   entryFee = total − exitFee     （先算整趟再对半拆 → 两侧之和恒等于 total）
+   * ```
+   *
+   * ⚠️ **只在 dry-run 下调用**：实盘的手续费必须来自交易所成交明细，不能估。
+   * 调用点一律长成 `if (this.isDryRun) { … }`，实盘那一支逐字节不变。
+   */
+  private dryRunRoundTripFee(exitPrice: number, quantity: number): { entryFee: number; exitFee: number } {
+    const total = exitPrice * quantity * this.effectiveConfig().riskControl.fallbackRoundTripFeeRate;
+    const exitFee = total / 2;
+    return { entryFee: total - exitFee, exitFee };
+  }
+
+  /**
+   * 把"模拟盘估算的开仓侧手续费"包成 `bookClosedPosition` 的可选参数。
+   *
+   * `undefined` = 不估（实盘，或该路径没有估算值）→ `bookClosedPosition` 的行为
+   * 与改动前逐字节一致。
+   */
+  private entryFeeExtra(
+    entryFee: number | undefined,
+  ): { entryFeeFallback: number } | undefined {
+    return entryFee === undefined ? undefined : { entryFeeFallback: entryFee };
+  }
+
   /** Persist a trade and mark the local position closed. */
   private async bookClosedPosition(
     local: PositionRow,
@@ -6951,6 +7158,15 @@ export class AutoTrader {
     exitFeeInput: number,
     /** Exchange fill time, when known. Funding is attributed to the real window. */
     closedAtInput?: string,
+    /**
+     * 交易所成交明细不可用时的**开仓侧手续费**（回退路径专用）。
+     *
+     * 实盘回退时它保持缺省 0 —— 真正的开仓费只能从成交明细里取，取不到就不编。
+     * 模拟盘没有成交明细，但它的往返成本是按策略费率**估**出来的，于是可以
+     * （也应该）把估算值按两侧拆开传进来 —— 见 `settleDryRunPositions()`。
+     * 有 `authoritative`（交易所重建值）时本参数被忽略：那时两侧费用以交易所为准。
+     */
+    extra?: { entryFeeFallback?: number },
   ): Promise<{ netPnl: number; grossPnl: number; exitPrice: number; quantity: number }> {
     const traderId = this.deps.trader.id;
 
@@ -7090,15 +7306,17 @@ export class AutoTrader {
      *     的成交手续费，它本来就不含已减仓的部分 —— 再乘 `(1 - share)` 会
      *     **新引入少记**（把唯一已知的那笔费用也削掉）。
      *
-     * `entryFeeRaw` 在回退路径上恒为 0（开仓费在开仓那一刻已作为持仓成本付掉），
-     * 所以它乘不乘都一样；这里仍统一写成乘以 share，是为了让"只有权威值才分摊"
-     * 这条规则在两条腿上长得一样，不必让读者去推 `?? 0` 的取值。
+     * `entryFeeRaw` 在**实盘**回退路径上恒为 0（真正的开仓费只能从成交明细取，
+     * 取不到就不编）；模拟盘没有成交明细，但往返成本是按策略费率估出来的，
+     * 于是把估算值按两侧拆开传进来（`extra.entryFeeFallback`，见
+     * `settleDryRunPositions()`）。这里仍统一写成乘以 share，是为了让
+     * "只有权威值才分摊"这条规则在两条腿上长得一样。
      */
     const partialShare =
       authoritative && partialQty > 0 && local.quantity > 0
         ? Math.min(partialQty / (partialQty + local.quantity), 1)
         : 0;
-    const entryFeeRaw = authoritative?.entryFee ?? 0;
+    const entryFeeRaw = authoritative?.entryFee ?? extra?.entryFeeFallback ?? 0;
     const exitFeeRaw = authoritative?.exitFee ?? exitFeeInput;
     const entryFee = entryFeeRaw * (1 - partialShare);
     /*
@@ -7106,6 +7324,31 @@ export class AutoTrader {
      * 那是剩余腿自己那一笔的费用，不参与分摊。
      */
     const exitFee = authoritative ? exitFeeRaw * (1 - partialShare) : exitFeeInput;
+
+    /*
+     * ⚠️ **模拟盘估算出来的开仓侧手续费要一并回填那张入场订单行**（2026-11-09）。
+     *
+     * 模拟盘的成本是按费率**估**的，而 `orders.fee` 那一列在开仓时还是 0
+     *（`entryFeeFor()` 读不到成交明细）。如果只改 `trades`，同一笔交易在
+     * 「订单」与「成交」两处的费用之和对不上 —— 那正是这个项目一直在消灭的
+     * "同一件事有两个数"。
+     *
+     * 只在 `extra.entryFeeFallback` 存在时执行（= 只有模拟盘会传），实盘一行不动；
+     * 而且**不覆盖已有的非零值**（真实成交明细优先）。失败只影响展示，绝不能让
+     * 一次已经成交的平仓失败。
+     */
+    if (extra?.entryFeeFallback !== undefined && entryFee > 0) {
+      try {
+        const entryOrder = local.entry_order_id
+          ? orderStore.findByExchangeOrderId(traderId, String(local.entry_order_id))
+          : null;
+        if (entryOrder && !(Number(entryOrder.fee) > 0)) {
+          orderStore.update(entryOrder.id, { fee: entryFee });
+        }
+      } catch {
+        /* 展示口径的补写失败不值得让平仓记账失败。 */
+      }
+    }
 
     /*
      * Funding is read here, at the moment of closing, and not only during the
@@ -7553,6 +7796,39 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     foreignNet: number;
   }> {
     const traderId = this.deps.trader.id;
+
+    /*
+     * ══════════════════════════════════════════════════════════════════════════
+     *  ⚠️⚠️ **模拟盘不跑"与交易所对账"这一趟**（2026-11-09）
+     * ══════════════════════════════════════════════════════════════════════════
+     *
+     * 这一段做的是"拿交易所的成交/流水去校平台账本"，而模拟盘的成交**从来没发到
+     * 交易所**（`BinanceBroker` 的 dry-run 分支全程本地模拟）。于是：
+     *
+     *   · `getIncome` / `getUserTrades` 在模拟盘下返回空（本层没有信息，见 broker
+     *     的 dryRun 守卫）——**空数组被当成"交易所流水是 0"**；
+     *   · 只要这台模拟盘**绑定了真实账户**（PR #185 允许），下面那段总账校验就会
+     *     拿"平台(模拟)净额 vs 交易所(别人的)流水"相减，**每一轮都报一条假的
+     *     「账目与交易所对不上」** —— 一个永久误报的校验会训练操作员忽略这条
+     *     唯一能自动发现账本错误的地方。
+     *   · 反过来说，"外部活动"也是账户级概念，属于在跑实盘的机器人；模拟盘认领它
+     *     只会把别人的盈亏算到自己头上。
+     *
+     * ⇒ 模拟盘的真相就是**本地台账**，没有可对的一侧。直接返回全零，且**一个
+     * 交易所读取都不发**（调用方据此知道"没有发生对账"，而不是"对账结果为 0"）。
+     */
+    if (this.isDryRun) {
+      return {
+        recovered: 0,
+        corrected: 0,
+        correctedAttempted: 0,
+        correctedKept: 0,
+        funding: 0,
+        foreignRounds: 0,
+        foreignNet: 0,
+      };
+    }
+
     const deep = full || this.reconcilePasses % FULL_RECONCILE_EVERY_PASSES === 0;
     this.reconcilePasses += 1;
 
@@ -9401,18 +9677,23 @@ reduceQuantity: null,
      *
      * ## 根因
      *
-     * 这一行和下面 `trailPercent` 那行都读 `this.activeConfig`，
+     * 这一行和下面 `trailPercent` 那行原来都读 `this.activeConfig`，
      * 而 JEV 的覆盖只发生在决策循环内部的 `effectiveConfig()` 上 ——
      * **机械保护这一组方法（保本/回撤/过期撤单）全都没走那条路**。
      *
      * 这类"配置读错对象"已经犯了三次（熔断、横幅、现在这个）。
      * ⇒ 统一原则：JEV 模式下所有运行期配置都从 `jevNumber()` / `jevBool()` 现读，
      *   **不再从 `activeConfig` 里拿**。
+     *
+     * ⚠️ 2026-11-09 加结构守卫后：非 JEV 分支统一读 `effectiveConfig()`，
+     * JEV 分支继续现读 JEV 选项（`effectiveConfig()` 目前只覆盖
+     * `maxDailyLossPercent`，还没有把这两个字段纳入覆盖）——
+     * 等它纳入之后，这两个三元表达式可以一起删掉。
      */
     const threshold =
       this.deps.trader.mode === 'jev'
         ? Math.max(0, jevNumber('breakeven_trigger_percent'))
-        : this.activeConfig.riskControl.breakevenTriggerPercent;
+        : this.effectiveConfig().riskControl.breakevenTriggerPercent;
 
     // 阈值为 0 表示关闭这条规则 —— 连行情都不必拉。
     if (!(threshold > 0)) return 0;
@@ -9469,7 +9750,7 @@ reduceQuantity: null,
         trailPercent:
           this.deps.trader.mode === 'jev'
             ? Math.max(0, jevNumber('trailing_stop_percent'))
-            : this.activeConfig.riskControl.trailingStopPercent,
+            : this.effectiveConfig().riskControl.trailingStopPercent,
       });
 
       if (!verdict.move || verdict.newStop === null) continue;
@@ -9701,6 +9982,7 @@ reduceQuantity: null,
             flatten.avgPrice,
             flatten.fee,
             new Date().toISOString(),
+            this.entryFeeExtra(flatten.entryFee),
           );
         } else if (still) {
           this.emit(
@@ -9832,16 +10114,27 @@ reduceQuantity: null,
 
       const exitPrice = filled.avgPrice || (await this.deps.broker.getMarkPrice(symbol));
 
-      // Best-effort commission capture. Fee accounting is a reporting concern,
-      // so a failure here must never abort a close that has already executed.
+      /*
+       * 手续费：实盘**只能**从交易所成交明细取（best-effort，取不到记 0）；
+       * 模拟盘没有成交明细，按 `dryRunRoundTripFee()` 估**整趟往返费**并拆到两侧
+       * —— 否则模型主动平仓的模拟交易会以 0 成本入账，系统性高估模拟收益
+       *（2026-11-09，行为变更；见 `dryRunRoundTripFee()` 的注释）。
+       */
       let fee = 0;
-      try {
-        const fills = await this.deps.broker.getUserTrades(symbol, 10);
-        fee = fills
-          .filter((fill) => String(fill.orderId) === filled.id)
-          .reduce((sum, fill) => sum + (Number(fill.commission) || 0), 0);
-      } catch {
-        /* leave the fee at zero rather than fail the close */
+      let paperEntryFee: number | undefined;
+      if (this.isDryRun) {
+        const estimate = this.dryRunRoundTripFee(exitPrice, filledQty);
+        fee = estimate.exitFee;
+        paperEntryFee = estimate.entryFee;
+      } else {
+        try {
+          const fills = await this.deps.broker.getUserTrades(symbol, 10);
+          fee = fills
+            .filter((fill) => String(fill.orderId) === filled.id)
+            .reduce((sum, fill) => sum + (Number(fill.commission) || 0), 0);
+        } catch {
+          /* leave the fee at zero rather than fail the close */
+        }
       }
 
       this.recordOrder({
@@ -9887,6 +10180,7 @@ reduceQuantity: null,
         exitPrice,
         fee,
         new Date().toISOString(),
+        this.entryFeeExtra(paperEntryFee),
       );
 
       /*
@@ -10771,7 +11065,7 @@ reduceQuantity: null,
              * 走到这里说明决策没给，保守回落逐仓（最不容易被单笔打穿全账户）。 */
             return configured === 'crossed' ? ('crossed' as const) : ('isolated' as const);
           })()
-        : this.activeConfig.riskControl.marginMode);
+        : this.effectiveConfig().riskControl.marginMode);
     if (this.marginSet.get(symbol) !== wantedMode) {
       const ok = await this.deps.broker.setMarginType(
         symbol,
@@ -11201,7 +11495,7 @@ reduceQuantity: null,
         }
       }
 
-      if (!stopOrderId && this.activeConfig.riskControl.requireStopLoss) {
+      if (!stopOrderId && this.effectiveConfig().riskControl.requireStopLoss) {
         this.emit(
           'error',
           `无法为 ${symbol} 挂上止损。为避免留下无保护的杠杆敞口，立即平掉该仓位。`,
@@ -11226,6 +11520,7 @@ reduceQuantity: null,
             flatten.avgPrice,
             flatten.fee,
             new Date().toISOString(),
+            this.entryFeeExtra(flatten.entryFee),
           );
         } else if (localPosition) {
           /*
@@ -11421,7 +11716,7 @@ reduceQuantity: null,
          * 影线打掉止损只是少赚一次，**止损不生效可能亏掉保证金**。
          * 见 `StrategyConfigSchema.priceProtectOnStop` 的完整说明。
          */
-        priceProtect: this.activeConfig.riskControl.priceProtectOnStop,
+        priceProtect: this.effectiveConfig().riskControl.priceProtectOnStop,
         clientOrderId,
       });
 
@@ -11697,7 +11992,7 @@ reduceQuantity: null,
      */
     let stopForProtection = decision.stopLoss ?? local.stop_loss;
     if (stopForProtection === null || !(stopForProtection > 0)) {
-      const fallbackPercent = this.activeConfig.riskControl.fallbackStopLossPercent;
+      const fallbackPercent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
       stopForProtection = fallbackStopPrice(fillPrice, local.side === 'long', fallbackPercent);
       this.emit(
         'warn',
@@ -11853,14 +12148,27 @@ reduceQuantity: null,
     const isLong = local.side === 'long';
     const grossPnl =
       (isLong ? exitPrice - local.entry_price : local.entry_price - exitPrice) * filledReduceQty;
+    /*
+     * 手续费：实盘从成交明细取（拿不到记 0，对账会补）；模拟盘没有成交明细，
+     * 按 `dryRunRoundTripFee()` 对**这一笔减掉的数量**估整趟往返费并拆到两侧
+     *（2026-11-09，行为变更）。减仓同样是在把仓位变成已实现盈亏，模拟盘的成本
+     * 不能因为"只是一部分"就免掉 —— 否则分多次减仓的模拟策略会显著高估收益。
+     */
     let exitFee = 0;
-    try {
-      const fills = await this.deps.broker.getUserTrades(decision.symbol, 10);
-      exitFee = fills
-        .filter((f) => String(f.orderId) === filledId)
-        .reduce((sum, f) => sum + (Number(f.commission) || 0), 0);
-    } catch {
-      /* 拿不到手续费就记 0，对账会补 */
+    let paperEntryFee: number | undefined;
+    if (this.isDryRun) {
+      const estimate = this.dryRunRoundTripFee(exitPrice, filledReduceQty);
+      exitFee = estimate.exitFee;
+      paperEntryFee = estimate.entryFee;
+    } else {
+      try {
+        const fills = await this.deps.broker.getUserTrades(decision.symbol, 10);
+        exitFee = fills
+          .filter((f) => String(f.orderId) === filledId)
+          .reduce((sum, f) => sum + (Number(f.commission) || 0), 0);
+      } catch {
+        /* 拿不到手续费就记 0，对账会补 */
+      }
     }
 
     /*
@@ -11899,13 +12207,18 @@ reduceQuantity: null,
      * 它没有可与交易所对齐的整段往返身份，也不该被重建逻辑覆盖。
      */
     /*
-     * ⚠️ 这是**这一笔平仓自己**的净额（毛 − 平仓费），**不含开仓费** ——
+     * ⚠️ 这是**这一笔平仓自己**的净额，**不含开仓费**（实盘口径）——
      * 开仓费在开仓那一刻就作为持仓成本付掉了，它不重复计在这一笔上。
      *
-     * 所以日志里不要把它写成光秃秃的「净 X USDT」（那会让人以为已扣开仓费，
+     * ⚠️ 模拟盘是例外（2026-11-09）：它的成本是按整趟往返费率**估**的，没有
+     * "开仓时已付"那笔现实记录 —— 若只减平仓侧，等于把开仓侧从模拟成本里抹掉，
+     * 部分减仓的模拟策略会系统性高估收益。所以模拟盘把两侧都算进这一笔，
+     * 与 `tradeStore.insert` 的 fee 口径保持一致。
+     *
+     * 所以日志里不要把它写成光秃秃的「净 X USDT」（会让人以为已扣开仓费，
      * 和账户对上时会发现差一点点）。这里明确标成"本笔平仓净额"。
      */
-    const netPnl = grossPnl - exitFee;
+    const netPnl = grossPnl - exitFee - (paperEntryFee ?? 0);
     tradeStore.insert({
       traderId,
       symbol: decision.symbol,
@@ -11915,7 +12228,7 @@ reduceQuantity: null,
       exitPrice,
       leverage: local.leverage,
       grossPnl,
-      entryFee: 0,
+      entryFee: paperEntryFee ?? 0,
       exitFee,
       fundingFee: 0,
       closeReason: 'manual_partial',
@@ -11957,7 +12270,7 @@ reduceQuantity: null,
      */
     let stopForProtection = decision.stopLoss ?? local.stop_loss;
     if (stopForProtection === null || !(stopForProtection > 0)) {
-      const fallbackPercent = this.activeConfig.riskControl.fallbackStopLossPercent;
+      const fallbackPercent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
       stopForProtection = fallbackStopPrice(exitPrice, local.side === 'long', fallbackPercent);
       this.emit(
         'warn',
@@ -11989,7 +12302,7 @@ reduceQuantity: null,
       symbol: decision.symbol,
       status: 'ok',
       detail:
-        `减仓 ${reduceQty} @ ${exitPrice}，本笔平仓净 ${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(4)} USDT（不含开仓费），` +
+        `减仓 ${reduceQty} @ ${exitPrice}，本笔平仓净 ${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(4)} USDT（${this.isDryRun ? '模拟盘：含按往返费率估算的两侧手续费' : '不含开仓费'}），` +
         `剩余 ${remaining}，保护单已按剩余数量重挂。`,
     };
   }
@@ -12140,6 +12453,7 @@ reduceQuantity: null,
         flatten.avgPrice,
         flatten.fee,
         new Date().toISOString(),
+        this.entryFeeExtra(flatten.entryFee),
       );
     } else if (still) {
       this.emit(
@@ -12317,8 +12631,20 @@ reduceQuantity: null,
      * 会让仓位失去保护，而它们都落在这个判断里。
      */
     const survivingStop = newStop ?? local.stop_loss;
-    const stillProtected =
-      survivingStop !== null
+    /*
+     * ⚠️ **模拟盘的"有没有保护"必须看本地账本，不能问交易所**（2026-11-09）。
+     *
+     * 下面 `hasLiveStop()` 查的是交易所的条件单列表 —— 模拟盘的保护单从未发出去，
+     * broker 在 dry-run 下返回空（见它的守卫）。若照旧判"空 = 没保护"，模拟盘上
+     * **每一次 adjust_protection 都会误判仓位裸奔并按 §2.6 立刻平仓**
+     *（这个形态在模拟回放里真实发生过并导致 17 次调整全部平仓）。
+     *
+     * 模拟盘的保护就是本地 `stop_loss` 价位：`settleDryRunPositions()` 每轮按它
+     * 触发，所以"调整完还有止损价位"= 仍然受保护。
+     */
+    const stillProtected = this.isDryRun
+      ? survivingStop !== null && survivingStop > 0
+      : survivingStop !== null
         ? await this.hasLiveStop(decision.symbol, survivingStop)
         : await this.hasLiveStop(decision.symbol, null);
 
@@ -12341,6 +12667,7 @@ reduceQuantity: null,
           flatten.avgPrice,
           flatten.fee,
           new Date().toISOString(),
+          this.entryFeeExtra(flatten.entryFee),
         );
       } else if (still) {
         this.emit(
@@ -12547,7 +12874,7 @@ reduceQuantity: null,
      *
      * ⚠️ 标记价读不到时**不能编一个价格** —— 那会永久污染账本。
      */
-    let flatten: { avgPrice: number; fee: number } | null;
+    let flatten: { avgPrice: number; fee: number; entryFee?: number } | null;
     if (this.isDryRun) {
       const mark = await this.deps.broker.getMarkPrice(symbol).catch(() => 0);
       if (!(mark > 0)) {
@@ -12555,9 +12882,15 @@ reduceQuantity: null,
           `${symbol} 手工平仓失败：模拟盘读不到标记价，无法结算（不会编造价格）。请稍后重试。`,
         );
       }
-      /* 模拟盘按真实费率记手续费 —— 否则回测净额会偏乐观。 */
-      const feeRate = this.effectiveConfig().riskControl.fallbackRoundTripFeeRate;
-      flatten = { avgPrice: mark, fee: local.quantity * mark * feeRate * 0.5 };
+      /*
+       * 模拟盘按真实费率记手续费 —— 否则回测净额会偏乐观。
+       *
+       * ⚠️ 这里原来只记 `fee = 名义 × 费率 × 0.5`（**半程**）：与 settle 路径
+       * 的"整趟往返费两侧分摊"口径不一致，模拟盘的手工平仓成本被算少一半。
+       * 现在统一走 `dryRunRoundTripFee()`（2026-11-09，行为变更）。
+       */
+      const estimate = this.dryRunRoundTripFee(mark, local.quantity);
+      flatten = { avgPrice: mark, fee: estimate.exitFee, entryFee: estimate.entryFee };
     } else {
       flatten = await this.emergencyFlatten(symbol, local.quantity, exitSide, traderId);
       if (!flatten) {
@@ -12574,6 +12907,7 @@ reduceQuantity: null,
         flatten.avgPrice,
         flatten.fee,
         new Date().toISOString(),
+        this.entryFeeExtra(flatten.entryFee),
       );
     }
 
@@ -12586,7 +12920,7 @@ reduceQuantity: null,
     quantity: number,
     side: 'BUY' | 'SELL',
     traderId: number,
-  ): Promise<{ avgPrice: number; fee: number } | null> {
+  ): Promise<{ avgPrice: number; fee: number; entryFee?: number } | null> {
     const clientOrderId = makeClientId('flatten', symbol);
     try {
       const placed = await this.deps.broker.placeOrder({
@@ -12630,15 +12964,29 @@ reduceQuantity: null,
        * Commission is captured here too. This exit is a pure cost — the entry
        * and the exit both paid a fee — and reporting a net PnL that omits it
        * would make the platform's books read better than the account's (§2.5).
+       *
+       * 模拟盘没有成交明细：按 `dryRunRoundTripFee()` 估整趟往返费并拆两侧
+       *（2026-11-09，行为变更）—— 紧急平仓同样是"没有保护就退出"的真实成本，
+       * 不能因为它是模拟盘就记 0（那会让"止损挂不上"看起来几乎免费）。
        */
       let fee = 0;
-      try {
-        const fills = await this.deps.broker.getUserTrades(symbol, 10);
-        fee = fills
-          .filter((fill) => String(fill.orderId) === filled.id)
-          .reduce((sum, fill) => sum + (Number(fill.commission) || 0), 0);
-      } catch {
-        /* leave the fee at zero rather than fail the flatten */
+      let entryFee: number | undefined;
+      if (this.isDryRun) {
+        const estimate = this.dryRunRoundTripFee(
+          filled.avgPrice,
+          Number(filled.executedQty) || quantity,
+        );
+        fee = estimate.exitFee;
+        entryFee = estimate.entryFee;
+      } else {
+        try {
+          const fills = await this.deps.broker.getUserTrades(symbol, 10);
+          fee = fills
+            .filter((fill) => String(fill.orderId) === filled.id)
+            .reduce((sum, fill) => sum + (Number(fill.commission) || 0), 0);
+        } catch {
+          /* leave the fee at zero rather than fail the flatten */
+        }
       }
 
       this.recordOrder({
@@ -12671,7 +13019,7 @@ reduceQuantity: null,
         );
       });
       this.emit('warn', `因保护单挂单失败，已市价平掉 ${symbol}。`);
-      return { avgPrice: filled.avgPrice, fee };
+      return { avgPrice: filled.avgPrice, fee, ...(entryFee !== undefined ? { entryFee } : {}) };
     } catch (error) {
       this.emit(
         'error',

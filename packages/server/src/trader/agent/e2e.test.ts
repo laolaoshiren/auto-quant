@@ -189,7 +189,7 @@ test('端到端 ②：审视跑完会在 agent_runs 里留下轨迹', async () =
    * `panel` 档现在会**额外**跑两个分析角色（`performance_analyst` +
    * `attribution_analyst`），各落一条轨迹 —— 所以总数变成 1 + 2 = 3。
    *
-   * 那两个角色从前是「定义了但生产零调用」（见 `docs/FINDING-unwired-roles.md`），
+   * 那两个角色从前是「定义了但生产零调用」（见 `docs/archive/FINDING-unwired-roles.md`），
    * 现在接上了 —— 而**"跑过"这件事必须留痕**，否则"接了线但看不出它在跑"
    * 与"没接线"在运维眼里完全一样（那正是它们藏了这么久没被发现的原因）。
    *

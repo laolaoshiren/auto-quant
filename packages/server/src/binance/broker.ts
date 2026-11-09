@@ -131,6 +131,47 @@ export interface BrokerOptions {
   paperAccount?: () => AccountState | Promise<AccountState>;
 }
 
+/**
+ * 模拟盘里一张**还挂着**的限价单（只在 `dryRun` 下存在）。
+ *
+ * ## 为什么需要它（2026-11-09）
+ *
+ * 在此之前 `simulateStandard` 对 LIMIT 也返回 `FILLED`、`avgPrice = markPrice` ——
+ * 于是模拟盘上"限价入场"**从不等待**，成交价也永远等于那一刻的标记价。
+ * 而风控是按 `limitPrice` 计价的（`reviewOpen` 的 `entryPrice` 口径），
+ * 两边口径不同 ⇒ **限价入场策略在模拟盘与实盘之间不可比**。
+ *
+ * ## 只实现最小撮合语义（不是真实撮合器）
+ *
+ * ```
+ *   下标时价格已经穿过 → 立即成交（成交价用【委托价】，保守口径）
+ *   没穿过             → 挂着（NEW）
+ *   之后每次被查询      → 按当时的标记价再判一次；触及 → FILLED
+ * ```
+ *
+ * ⚠️ **成交价用委托价**，不假设"限价单会以更优的价格成交"：那是可能发生的好事，
+ * 但不该被模拟器写进账本 —— 账本按保守方向估，模拟盘才不会看起来比实盘容易赚。
+ *
+ * ⚠️ **局限**（写在这里，免得以后把它当成真实撮合）：
+ *   · 没有真实下单流/盘口，撮合只在 `getOrder()` / `getOpenOrders()` **被调用时**推进；
+ *   · 不模拟部分成交、滑点、排队优先级；
+ *   · 模拟挂单只存在于**本进程**：进程重启后它们在交易所侧本来就不存在，
+ *     由 `autoTrader` 的「超时撤单」路径按"永远不会再成交"作废本地记录。
+ */
+interface SimulatedRestingOrder {
+  orderId: string;
+  clientOrderId: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  quantity: number;
+  limitPrice: number;
+  timeInForce: 'GTC' | 'IOC' | 'FOK';
+  status: 'NEW' | 'FILLED' | 'CANCELED';
+  filledQty: number;
+  avgPrice: number;
+  updatedAt: number;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Broker                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -163,6 +204,15 @@ export class BinanceBroker {
 
   /** 模拟盘账户读数来源；`null` 表示"没有提供"，仍走交易所。 */
   private readonly paperAccount: (() => AccountState | Promise<AccountState>) | null;
+
+  /**
+   * 模拟盘里还挂着的限价单（`orderId` → 状态）。**只在 `dryRun` 下使用。**
+   *
+   * 见 `SimulatedRestingOrder` 的注释：它只提供"未触及不成交"这一条最小语义。
+   */
+  private readonly simulatedRestingOrders = new Map<string, SimulatedRestingOrder>();
+  /** 模拟单号序列 —— 同一毫秒下两张单也不能撞号。 */
+  private simulatedOrderSeq = 0;
 
   constructor(
     private readonly rest: BinanceRest,
@@ -276,6 +326,18 @@ export class BinanceBroker {
 
   /** Open positions only — Binance returns a row for every symbol it knows. */
   async getPositions(symbol?: string): Promise<ExchangePosition[]> {
+    /*
+     * ⚠️ **模拟盘不查交易所持仓**（2026-11-09）。
+     *
+     * 模拟盘的成交从不真的下单，交易所上**从来没有**它的仓位 —— 直连查询的结果
+     * 不是"空"就是**别的机器人/手工**的仓位。两种都会把调用方带进歧路
+     *（历史上它把每个模拟仓位判成"已消失"并平掉，p50 只活 3.8 分钟）。
+     *
+     * 模拟盘的持仓真相是**本地 `positions` 表**，唯一入口是
+     * `AutoTrader.effectivePositions()`。这里返回空是明确的"本层没有这个信息"，
+     * 不是"账户上没有仓位" —— 调用方在模拟盘下**不得**把 `[]` 当成结论。
+     */
+    if (this.dryRun) return [];
     const rows = await this.rest.signedRequest<BinancePositionRisk[]>(
       'GET',
       '/fapi/v2/positionRisk',
@@ -775,7 +837,23 @@ export class BinanceBroker {
   /*  Order queries                                                          */
   /* ---------------------------------------------------------------------- */
 
+  /**
+   * 还挂着的普通委托。
+   *
+   * 模拟盘返回**本地模拟挂单**（`simulatedRestingOrders`）—— 那才是"这个机器人还
+   * 挂着什么"的真相；去问交易所只会读到别人的单（2026-11-09）。
+   */
   async getOpenOrders(symbol?: string): Promise<BinanceOrderResponse[]> {
+    if (this.dryRun) {
+      const wanted = symbol ? normalizeSymbol(symbol) : null;
+      const out: BinanceOrderResponse[] = [];
+      for (const order of this.simulatedRestingOrders.values()) {
+        if (wanted !== null && order.symbol !== wanted) continue;
+        const refreshed = await this.refreshSimulatedOrder(order);
+        if (refreshed.status === 'NEW') out.push(this.simulatedResponse(refreshed));
+      }
+      return out;
+    }
     return this.rest.signedRequest<BinanceOrderResponse[]>(
       'GET',
       '/fapi/v1/openOrders',
@@ -798,7 +876,19 @@ export class BinanceBroker {
    * **不让一次读失败被误当成一种结论**。
    */
   async getOrder(symbol: string, orderId: string | number): Promise<BinanceOrderResponse | null> {
-    if (this.dryRun) return null;
+    /*
+     * 模拟盘：按模拟挂单账回答「还挂着 / 成交了 / 被撤了」，并在**每次查询时**
+     * 按当前标记价推进撮合（见 `SimulatedRestingOrder` 的注释）。
+     *
+     * ⚠️ 不认识的单号返回 `null`（= "本进程不知道这张单"）——**不要**编一个 `NEW`
+     * 出来：调用方（限价入场结算）把 `null` 读成"下一轮再问"，而编出来的状态
+     * 会让一张其实已经不存在的单永远挂着。
+     */
+    if (this.dryRun) {
+      const order = this.simulatedRestingOrders.get(String(orderId));
+      if (!order || order.symbol !== normalizeSymbol(symbol)) return null;
+      return this.simulatedResponse(await this.refreshSimulatedOrder(order));
+    }
     try {
       return await this.rest.signedRequest<BinanceOrderResponse>('GET', '/fapi/v1/order', {
         symbol: normalizeSymbol(symbol),
@@ -813,8 +903,15 @@ export class BinanceBroker {
   /**
    * Open algo orders. Weight 1 with a symbol, **40 without** — so this is always
    * called per symbol.
+   *
+   * 模拟盘返回空数组：模拟盘的保护单只是**本地账本里的价位 + 单号**
+   *（`positions.stop_order_id` / `settleDryRunPositions` 按标记价判触发），
+   * 从来没有发到交易所。所以"交易所上有没有活着的条件单"这个问题在模拟盘下
+   * 没有信息 —— 调用方（如 `hasLiveStop`）必须按 `isDryRun` 换用本地口径，
+   * **不能**把这里的 `[]` 读成"仓位没有保护"（那会导致模拟盘每轮误平仓位）。
    */
   async getOpenAlgoOrders(symbol?: string): Promise<BinanceAlgoOrderResponse[]> {
+    if (this.dryRun) return [];
     const response = await this.rest.signedRequest<BinanceAlgoOrderResponse[] | { orders?: BinanceAlgoOrderResponse[] }>(
       'GET',
       '/fapi/v1/openAlgoOrders',
@@ -940,7 +1037,21 @@ export class BinanceBroker {
     orderId: string | number,
     kind: 'order' | 'algo' = 'order',
   ): Promise<boolean> {
-    if (this.dryRun) return true;
+    /*
+     * 模拟盘：撤掉**本地模拟挂单**（如果有的话）。
+     *
+     * 不认识的单号仍然返回 `true` —— 与实盘 `-2011`（Unknown order）的语义一致：
+     * "它已经不在交易所了"就是撤单想要的结果。模拟盘没有真实单可撤，所以这条
+     * 语义正好覆盖"进程重启前的模拟单"。
+     */
+    if (this.dryRun) {
+      const order = this.simulatedRestingOrders.get(String(orderId));
+      if (order && order.symbol === normalizeSymbol(symbol) && order.status === 'NEW') {
+        order.status = 'CANCELED';
+        order.updatedAt = Date.now();
+      }
+      return true;
+    }
     const normalized = normalizeSymbol(symbol);
     try {
       if (kind === 'algo') {
@@ -988,7 +1099,23 @@ export class BinanceBroker {
    * "已经不在交易所了"这个我们要的结果。
    */
   async cancelAllOrders(symbol: string): Promise<void> {
-    if (this.dryRun) return;
+    if (this.dryRun) {
+      /*
+       * 模拟盘：把该标的的本地模拟挂单标成 `CANCELED`。
+       *
+       * 这**不是**多余动作：模拟盘的限价入场靠 `settlePendingEntries()` 轮询
+       * `getOrder()` 推进，而"撤掉之后那张单不能再成交"必须被模拟账记住 ——
+       * 否则手工平仓/全部平仓撤单后，下一轮它还会按标记价"成交"出一个幽灵仓位。
+       */
+      const normalized = normalizeSymbol(symbol);
+      const now = Date.now();
+      for (const order of this.simulatedRestingOrders.values()) {
+        if (order.symbol !== normalized || order.status !== 'NEW') continue;
+        order.status = 'CANCELED';
+        order.updatedAt = now;
+      }
+      return;
+    }
     const normalized = normalizeSymbol(symbol);
 
     const results = await Promise.allSettled([
@@ -1055,7 +1182,14 @@ export class BinanceBroker {
   /*  Dry-run simulation                                                     */
   /* ---------------------------------------------------------------------- */
 
+  /**
+   * 模拟盘下单：MARKET 立即成交；**LIMIT 走最小撮合语义**。
+   *
+   * 见 `SimulatedRestingOrder` 的注释 —— 限价单不再被当成"立即成交的市价单"。
+   */
   private async simulateStandard(request: PlaceOrderRequest & { symbol: string }): Promise<PlacedOrder> {
+    if (request.type === 'LIMIT') return this.simulateLimit(request);
+
     const markPrice = (await this.getMarkPrice(request.symbol)) || request.price || 0;
     const at = Date.now();
     const qty = request.quantity ?? 0;
@@ -1088,6 +1222,116 @@ export class BinanceBroker {
       priceProtect: false,
     };
     return normalizeStandard(response);
+  }
+
+  /** 模拟盘的 LIMIT 单：价格已经穿过就成交，否则挂进本地模拟账。 */
+  private async simulateLimit(request: PlaceOrderRequest & { symbol: string }): Promise<PlacedOrder> {
+    this.pruneSimulatedOrders();
+    const at = Date.now();
+    const quantity = request.quantity ?? 0;
+    const limitPrice = request.price ?? 0;
+    const markPrice = (await this.getMarkPrice(request.symbol)) || 0;
+    const touched =
+      markPrice > 0 && (request.side === 'BUY' ? limitPrice >= markPrice : limitPrice <= markPrice);
+
+    const order: SimulatedRestingOrder = {
+      /*
+       * 单号用 `Date.now() * 100 + 序号`：仍在 Number 安全整数范围内
+       * （1.78e14 < 9e15），于是投影回响应时不必牺牲精度 —— 与实盘单号一样是
+       * 一个"能原样往返"的整数。`% 100` 保证同一毫秒内多张单不撞号。
+       */
+      orderId: String(at * 100 + ((this.simulatedOrderSeq += 1) % 100)),
+      clientOrderId: request.clientOrderId ?? `dry-limit-${at}`,
+      symbol: request.symbol,
+      side: request.side,
+      quantity,
+      limitPrice,
+      timeInForce: request.timeInForce ?? 'GTC',
+      status: touched ? 'FILLED' : 'NEW',
+      filledQty: touched ? quantity : 0,
+      /* 成交价用**委托价**：不假设限价单会以更优的价格成交（保守口径）。 */
+      avgPrice: touched ? limitPrice : 0,
+      updatedAt: at,
+    };
+    this.simulatedRestingOrders.set(order.orderId, order);
+
+    log.info(
+      `[dry-run] LIMIT ${request.side} ${request.symbol} qty=${quantity} limit=${limitPrice} ` +
+        `mark=${markPrice} → ${touched ? `FILLED @ ${limitPrice}` : 'NEW（挂单等待）'}`,
+    );
+    return normalizeStandard(this.simulatedResponse(order));
+  }
+
+  /**
+   * 按**当前标记价**推进一张模拟挂单的撮合状态，返回更新后的那一份。
+   *
+   * 只推进 `NEW` 的单；`FILLED` / `CANCELED` 是终态。标记价读不到时**保持 NEW** ——
+   * 读不到不等于没触及（宁可多等，也不要凭空成交）。
+   */
+  private async refreshSimulatedOrder(order: SimulatedRestingOrder): Promise<SimulatedRestingOrder> {
+    if (order.status !== 'NEW') return order;
+    const markPrice = await this.getMarkPrice(order.symbol).catch(() => 0);
+    if (!(markPrice > 0)) return order;
+    const touched =
+      order.side === 'BUY' ? order.limitPrice >= markPrice : order.limitPrice <= markPrice;
+    if (!touched) return order;
+    order.status = 'FILLED';
+    order.filledQty = order.quantity;
+    order.avgPrice = order.limitPrice;
+    order.updatedAt = Date.now();
+    log.info(
+      `[dry-run] LIMIT ${order.side} ${order.symbol} 触及 ${order.limitPrice}（标记价 ${markPrice}）` +
+        ` → FILLED ${order.quantity} @ ${order.limitPrice}`,
+    );
+    return order;
+  }
+
+  /** 把模拟挂单投影成与真实响应同形的 `BinanceOrderResponse`。 */
+  private simulatedResponse(order: SimulatedRestingOrder): BinanceOrderResponse {
+    return {
+      clientOrderId: order.clientOrderId,
+      cumQty: String(order.filledQty),
+      cumQuote: String(order.filledQty * order.avgPrice),
+      executedQty: String(order.filledQty),
+      orderId: Number(order.orderId),
+      avgPrice: String(order.avgPrice),
+      origQty: String(order.quantity),
+      price: String(order.limitPrice),
+      reduceOnly: false,
+      side: order.side,
+      positionSide: 'BOTH',
+      status: order.status,
+      stopPrice: '0',
+      closePosition: false,
+      symbol: order.symbol,
+      timeInForce: order.timeInForce,
+      type: 'LIMIT',
+      origType: 'LIMIT',
+      updateTime: order.updatedAt,
+      workingType: 'MARK_PRICE',
+      priceProtect: false,
+    } as BinanceOrderResponse;
+  }
+
+  /**
+   * 清掉很久以前的**终态**模拟挂单，避免 7×24 长跑时这张表无限增长。
+   *
+   * ⚠️ 只删 `FILLED` / `CANCELED` 且超过 1 小时的：还在 `NEW` 的单必须留着
+   * （它是未成交委托的唯一真相）；刚终态的单也留着，因为调用方可能紧接着要
+   * `getOrder()` 确认成交/撤销（`settlePendingEntries` / `expireStalePendingEntries`
+   * 都是"查到结果之后才关本地记录"）。
+   *
+   * 数量阈值 200 只是"平时不扫"的优化，不是正确性边界 —— 删掉的都是早已结清、
+   * 且没有任何本地 pending 行还会引用的单（那些行最多一个周期内就会关掉）。
+   */
+  private pruneSimulatedOrders(): void {
+    if (this.simulatedRestingOrders.size <= 200) return;
+    const cutoff = Date.now() - 60 * 60_000;
+    for (const [id, order] of this.simulatedRestingOrders) {
+      if (order.status !== 'NEW' && order.updatedAt < cutoff) {
+        this.simulatedRestingOrders.delete(id);
+      }
+    }
   }
 
   private async simulateAlgo(request: PlaceOrderRequest & { symbol: string }): Promise<PlacedOrder> {

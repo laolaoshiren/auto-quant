@@ -50,12 +50,12 @@
  * 标成 `staffed` 会让操作员以为"有个哨兵模型在盯着"，那是**另一种说谎**。
  *
  * 反过来标 `planned` 也是错的：职责**确实在跑**，而且有实测证据
- * （见 `docs/FINDING-planned-roles-audit.md` §2.1/2.2）——
+ * （见 `docs/archive/FINDING-planned-roles-audit.md` §2.1/2.2）——
  * 界面写"规划中"而实际在跑，同样是在骗操作员。
  *
  * ⚠️ 也**不要**为了消掉这个状态去给它们硬接 LLM：那会造出"看起来在干活、
  * 实际没人读"的空转角色。本仓库已为这个形状付过两次代价（`engineer` 被删、
- * `clerk` 至今未接线，见 `docs/FINDING-clerk-unwired.md`）。
+ * `clerk` 至今未接线，见 `docs/archive/FINDING-clerk-unwired.md`）。
  * 正解是**把承担它的代码模块写给操作员看**（`carriedBy`），而不是换一个承担者。
  *
  * ## ⚠️⚠️ **加新角色之前，先在这里查一遍**（2026-10-13 的真实教训）
@@ -378,7 +378,7 @@ export const FIRM_ROLES: readonly FirmRole[] = [
     /*
      * ⚠️ **2026-10-15 从 `planned` 改为 `by_code`** —— 它一直在跑，只是没有模型出勤。
      *
-     * 实测证据（`docs/FINDING-planned-roles-audit.md` §2.1）：`api/server.ts` 的
+     * 实测证据（`docs/archive/FINDING-planned-roles-audit.md` §2.1）：`api/server.ts` 的
      * `/api/health` 返回 `staleTraders`（线上实测 `"staleTraders":[]`），
      * 判据 = `cycleIntervalMinutes × STALE_CYCLE_MULTIPLIER(2)`；
      * Dockerfile 的 HEALTHCHECK 也以它为准。
@@ -398,7 +398,7 @@ export const FIRM_ROLES: readonly FirmRole[] = [
     /*
      * ⚠️ **2026-10-15 从 `planned` 改为 `by_code`** —— 同上，职责已在跑。
      *
-     * 实测证据（`docs/FINDING-planned-roles-audit.md` §2.2 + 2026-10-15 线上复核）：
+     * 实测证据（`docs/archive/FINDING-planned-roles-audit.md` §2.2 + 2026-10-15 线上复核）：
      * `trader/selfcheck.ts` 的 `findDeterministicProblems()`，由
      * **周期性自检**（`selfcheckRunner.runSelfCheck`，由 `manager.ts` 的
      * `startSelfCheckLoop()` 调度）调用；含"裸奔仓位（唯一会直接亏钱的一项）/
@@ -408,7 +408,7 @@ export const FIRM_ROLES: readonly FirmRole[] = [
      * ⚠️ **间隔不要写进面向操作员的文案**：它是 `SELF_CHECK_INTERVAL_MINUTES` 的
      * **默认值 30 分钟**（`manager.ts` 的三元），现场可被环境变量改掉 ——
      * 复核时实测该变量**未设置**，所以当前确实是 30 分钟，但写死会在别的部署上变成
-     * 一句**不可核对且已过时**的话（见 `docs/VERIFY-task3-roster-honesty.md` §7.1）。
+     * 一句**不可核对且已过时**的话（见 `docs/archive/VERIFY-task3-roster-honesty.md` §7.1）。
      *
      * ⚠️ 注意它与 `system_engineer` 的分工：那个是自检的 **AI 层**（T3，读证据找缺陷），
      * 这个是被它调用的**确定性判据层**（T0）。两者都不是"待实现"。

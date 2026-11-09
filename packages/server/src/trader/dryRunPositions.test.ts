@@ -115,7 +115,9 @@ test('★★★ 模拟盘的保护单必须真的会触发（不能永远停在 
     '★ 成交价必须是【触发价】而不是标记价 —— 否则"止损距离"的归因会被污染',
   );
   assert.ok(
-    /await this\.bookClosedPosition\(local, reason, exitPrice, exitFee\)/.test(body),
+    /await this\.bookClosedPosition\(local, reason, exitPrice, exitFee, undefined, \{[\s\S]{0,120}?entryFeeFallback: entryFee/.test(
+      body,
+    ),
     '★ 必须走唯一的平仓记账路径（§2.3），不能自己写 trades',
   );
 });
@@ -131,14 +133,32 @@ test('★★★ 止损优先：同一轮同时穿过止损与止盈时按保守�
 
 test('★★★ 模拟盘的结算必须记手续费（记 0 会让它比现实更容易赚）', () => {
   const at = CODE.indexOf('private async settleDryRunPositions');
-  const body = CODE.slice(at, at + 3200);
+  const body = CODE.slice(at, at + 3600);
+  /*
+   * ⚠️ 所有 dry-run 平仓路径共用 `dryRunRoundTripFee()`（2026-11-09 统一）：
+   * 先算整趟往返费，再对半拆成 entry / exit 两侧 —— 总额一个数都不变，只修正归属。
+   * 这里同时钉住"settle 走的是那个共用实现"和"它真的把开仓侧交给记账路径"。
+   */
   assert.ok(
-    /fallbackRoundTripFeeRate/.test(body),
-    '★ 必须复用策略里已有的回退费率，而不是自己编一个',
+    /const \{ entryFee, exitFee \} = this\.dryRunRoundTripFee\(exitPrice, local\.quantity\)/.test(body),
+    '★ settle 必须走共用的 dryRunRoundTripFee() —— 否则各条平仓路径的成本口径会再次分叉',
   );
   assert.ok(
-    /const exitFee = notional \* this\.activeConfig\.riskControl\.fallbackRoundTripFeeRate/.test(body),
-    '★ 手续费 = 名义价值 × 往返费率',
+    /entryFeeFallback: entryFee/.test(body),
+    '★ 拆出来的开仓侧费用必须交给 bookClosedPosition 的回退路径',
+  );
+
+  /* 共用估算本体：总额 = 名义 × 往返费率；两侧各半。 */
+  const helperAt = CODE.indexOf('private dryRunRoundTripFee(');
+  assert.ok(helperAt > 0, '★ 必须有共用的 dryRunRoundTripFee()');
+  const helper = CODE.slice(helperAt, helperAt + 900);
+  assert.ok(
+    /exitPrice \* quantity \* this\.effectiveConfig\(\)\.riskControl\.fallbackRoundTripFeeRate/.test(helper),
+    '★ 手续费总额 = 名义价值 × 往返费率（复用策略里已有的费率）',
+  );
+  assert.ok(
+    /const exitFee = total \/ 2/.test(helper) && /entryFee: total - exitFee/.test(helper),
+    '★ 往返费要对半拆到 entry/exit 两侧（总额不变，只改归属）',
   );
 });
 

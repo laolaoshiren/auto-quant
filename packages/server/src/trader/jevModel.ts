@@ -932,7 +932,7 @@ export async function askJev(
         type: 'choice',
         /*
          * ⚠️ **用肯定句**：Jev 官方明确说它对否定句的读取不可靠
-         *（见 `docs/JEV-README.md` 的实测记录）。
+         *（见 `docs/archive/JEV-README.md` 的实测记录）。
          */
         instructions:
           '根据上面给出的数字，现在应该做多、做空，还是跳过？' +

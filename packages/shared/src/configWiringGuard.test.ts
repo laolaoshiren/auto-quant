@@ -150,17 +150,38 @@ function walk(dir: string, out: string[] = []): string[] {
  * ⚠️ 排除 schema 文件是判据的核心：`strategy.ts` 里那个 `.default(…)` 是**定义**，
  * 不是**消费**。不排除的话每个字段都能"出现"，守卫就成了空转。
  */
+/**
+ * 去掉注释（块注释 + 行注释）。
+ *
+ * ⚠️ **判据是"字段在代码里有没有读取点"，注释里提到字段名不算读取。**
+ *
+ * 2026-11-09 实测踩到：一个字段只在注释里被引用（作为反例解释某类缺口），
+ * 旧实现把注释也当语料，于是它被算成"已接线"，`KNOWN_UNWIRED` 的反向守卫
+ * （"字段已接线却还在名单里"）误报 —— 而它其实仍然没人读。
+ *
+ * 粗略实现够用：处理 `/* … *\/` 与 `//`，并用 `[^:]` 保护 `https://` 这类
+ * 字符串里的双斜杠。它不追求完整的词法分析，只追求"注释不参与判据"。
+ */
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
 function usageFiles(fields: readonly string[]): Map<string, string[]> {
   const schemaFile = join(PACKAGES, 'shared', 'src', 'strategy.ts');
   const files = [join(PACKAGES, 'server', 'src'), join(PACKAGES, 'shared', 'src'), join(PACKAGES, 'web', 'src')]
     .flatMap((dir) => walk(dir))
-    .filter((f) => f !== schemaFile);
+    /*
+     * ⚠️ **排除测试文件**（2026-11-09 修）：上面那段注释一直写着"非测试源码"，
+     * 而实现把 `*.test.ts` 也扫进去了 —— 于是"测试里引用了字段名"会被误当成
+     * "生产代码有读取点"。测试只证明字段名拼得对，不证明功能被接线。
+     */
+    .filter((f) => f !== schemaFile && !/\.test\.(ts|tsx)$/.test(f));
 
   const out = new Map<string, string[]>(fields.map((f) => [f, []]));
   for (const file of files) {
-    const text = readFileSync(file, 'utf8');
+    const code = stripComments(readFileSync(file, 'utf8'));
     for (const field of fields) {
-      if (new RegExp(`\\b${field}\\b`).test(text)) out.get(field)!.push(file);
+      if (new RegExp(`\\b${field}\\b`).test(code)) out.get(field)!.push(file);
     }
   }
   return out;
@@ -264,7 +285,7 @@ test('★★★ 判据必须能真的报出死配置 —— 用一个不存在�
 /**
  * ⚠️ **同一个"定义了但没接线"的形态，在角色层也发生过。**
  *
- * `docs/FINDING-clerk-unwired.md`（另一维护者 2026-10-14 的侦察）记录：
+ * `docs/archive/FINDING-clerk-unwired.md`（另一维护者 2026-10-14 的侦察）记录：
  * `clerk`（文员）在**三个声明层**里都存在（组织架构 `firm.ts`、提示词 `roles.ts`、
  * 模型档位 `routedModel.ts`），而**生产代码 0 处调用** —— 而且
  * `roles.test.ts` 的角色清单检查**会覆盖它**（它在 `ROLES` 里），
@@ -359,7 +380,7 @@ function roleIds(): string[] {
 const KNOWN_UNWIRED_ROLES: ReadonlyMap<string, string> = new Map([
   [
     'clerk',
-    '⚠️ 产品决策，未修。`docs/FINDING-clerk-unwired.md` 记录：它在组织架构' +
+    '⚠️ 产品决策，未修。`docs/archive/FINDING-clerk-unwired.md` 记录：它在组织架构' +
       '（`firm.ts`，`status: \'planned\'`）、提示词（`roles.ts`）、模型档位' +
       '（`routedModel.ts`）三层都存在，而生产代码 0 处调用。' +
       '⚠️ `roles.test.ts` 的角色清单检查**会覆盖它**，所以"没人用"不会让测试变红 ——' +
@@ -419,7 +440,7 @@ test('★★★ 每个声明的 AI 岗位都必须在生产代码里被调用 �
     '★★★ 这些岗位在 `ROLES` 里声明了（有提示词、有模型档位），但**生产代码 0 处调用**：\n' +
       unexpected.map((id) => `      · ${id}`).join('\n') +
       '\n    ⚠️ 角色清单测试**会覆盖它们**，所以"定义了但没人用"不会让任何测试变红\n' +
-      '    （`docs/FINDING-clerk-unwired.md` 记的就是这个形态，`engineer` 有过同样一次）。\n' +
+      '    （`docs/archive/FINDING-clerk-unwired.md` 记的就是这个形态，`engineer` 有过同样一次）。\n' +
       '    ✅ 若确实是"已设计、待产品决策"，请加进 `KNOWN_UNWIRED_ROLES` 并写明理由与决策方。',
   );
 

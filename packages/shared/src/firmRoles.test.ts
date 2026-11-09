@@ -107,7 +107,7 @@ test('★★★ 岗位的实现状态分布（14 在岗 / 2 已由代码承担 /
    *
    * 本文件开头记的事故是「我搜的地方不对，而我以为搜过了」——
    * 那时能查的只有"岗位存不存在"与 `system_engineer` 一个特例。
-   * 2026-10-15 的审计（`docs/FINDING-planned-roles-audit.md`）发现**同一类错误还有第三种**：
+   * 2026-10-15 的审计（`docs/archive/FINDING-planned-roles-audit.md`）发现**同一类错误还有第三种**：
    * `data_sentinel` / `ops_watchdog` 的职责一直在跑，却标着 `planned` ——
    * 界面于是显示"规划中"，而实际在跑。**那是一种说谎**（§4 ④ 的原话）。
    *

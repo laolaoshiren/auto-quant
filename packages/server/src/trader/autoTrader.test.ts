@@ -1105,6 +1105,15 @@ const OPEN_LONG_RESPONSE = `<reasoning>Clean setup.</reasoning>
 const CLOSE_LONG_RESPONSE = `<reasoning>Target reached.</reasoning>
 <decision>[{"symbol":"BTCUSDT","action":"close_long","confidence":90,"reasoning":"Thesis complete."}]</decision>`;
 
+/*
+ * 把本地止损上移到 67000 的调整提案。
+ *
+ * 用于「模拟盘调整保护位后不能因为交易所没有条件单而误平仓」那条用例：
+ * 它需要一次成功的 `adjust_protection`，而断言的正是调整后的本地价位。
+ */
+const ADJUST_PROTECTION_RESPONSE = `<reasoning>Raise the stop.</reasoning>
+<decision>[{"symbol":"BTCUSDT","action":"adjust_protection","stop_loss":67000,"confidence":70,"reasoning":"Move the stop above the recent low."}]</decision>`;
+
 /* -------------------------------------------------------------------------- */
 /*  模型真的能看见自己的绩效（提案 §2）                                          */
 /* -------------------------------------------------------------------------- */
@@ -7665,5 +7674,370 @@ test('★ 空列表 / 全部在阈值内 → 不触发（这是常态，必须�
       threshold: 3,
     }),
     null,
+  );
+});
+/* -------------------------------------------------------------------------- */
+/*  模拟盘可信度（task-4）：限价入场 / 本地真相 / 手续费归属                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 把 FakeBroker 标成"模拟盘"。
+ *
+ * `AutoTrader.isDryRun` 直接读 `deps.broker.isDryRun`（上一轮修 `cancelAllProtection`
+ * 时确认过这一点）。这样既能复用 FakeBroker 的限价挂单/`getOrder` 机制来驱动
+ * `pending` 流程，又能让所有 `isDryRun` 分支走模拟盘语义。
+ */
+function paperBroker(broker: FakeBroker): FakeBroker {
+  (broker as unknown as { isDryRun: boolean }).isDryRun = true;
+  return broker;
+}
+
+const PAPER_LIMIT_ENTRY = `<reasoning>Wait for the retest.</reasoning>
+<decision>
+[
+  {
+    "symbol": "BTCUSDT",
+    "action": "open_long",
+    "entry_type": "limit",
+    "limit_price": 67000,
+    "leverage": 3,
+    "position_size_usd": 600,
+    "stop_loss": 65000,
+    "take_profit": 73000,
+    "confidence": 85,
+    "risk_usd": 20,
+    "reasoning": "Buy the retest."
+  }
+]
+</decision>`;
+
+test('★★★ 模拟盘的限价入场必须先变成 pending，成交后才建仓并挂保护单', async () => {
+  /*
+   * Why this test exists —— 任务 #4 的第 1 条。
+   *
+   * 原来 `BinanceBroker.simulateStandard` 对 LIMIT 也返回 `FILLED`，于是模拟盘的
+   * "限价入场"根本不存在：下单即建仓、成交价还是标记价。这条用例钉住完整链路：
+   *
+   *   下单 → pending（不建仓）→ 价格走过来 → settlePendingEntries 转正 → 挂保护单
+   *
+   * 其中"pending 期间不建仓"是限价语义的最小可观测形态；"转正时挂保护单"是 §2.6。
+   */
+  const broker = paperBroker(new FakeBroker());
+  const trader = buildTrader(broker, PAPER_LIMIT_ENTRY);
+
+  await trader.runOnce();
+
+  const pending = positionStore.pending(traderId);
+  assert.equal(pending.length, 1, '限价单应当挂成 pending，而不是直接建仓');
+  assert.equal(positionStore.open(traderId).length, 0, '没成交就不能有持仓');
+  assert.ok(
+    broker.placed.some((p) => p.type === 'LIMIT' && p.price === 67_000),
+    '必须以委托价 67,000 挂出 LIMIT 单',
+  );
+  const restingOrderId = Number(pending[0]!.entry_order_id);
+  assert.ok(Number.isFinite(restingOrderId) && restingOrderId > 0, 'pending 行必须带交易所单号');
+
+  /* 价格走到委托价 → 那张单成交。 */
+  broker.fillRestingOrder(restingOrderId);
+  broker.markPrice = 67_000;
+  await trader.runOnce();
+
+  assert.equal(positionStore.pending(traderId).length, 0, '成交后 pending 行必须转正');
+  const open = positionStore.open(traderId);
+  assert.equal(open.length, 1);
+  assert.equal(open[0]!.entry_price, 67_000, '入场价必须是委托价（不是当时的标记价）');
+  assert.ok(open[0]!.stop_order_id, '转正后必须已挂上止损（§2.6）');
+});
+
+test('★★★ 模拟盘平仓手续费按两侧对半拆，总额不变', async () => {
+  /*
+   * Why this test exists —— 任务 #4 的第 3 条。
+   *
+   * 原来整趟往返费率都记在 `exitFee`、`entryFee` 恒为 0 —— 模拟盘的「开仓手续费」
+   * 在账上永远是空的，与实盘"两侧各一笔"的口径不一致（回测/对照因此不可比）。
+   *
+   * 断言两件事，缺一不可：
+   *   ① 两侧真的各分了一半；
+   *   ② **总额与改动前完全相等**（`名义价值 × 往返费率`）—— 这是"只调归属、
+   *      不改成本"的硬约束。只断言①的话，一个"把总额翻倍"的实现也能通过。
+   */
+  const broker = paperBroker(new FakeBroker());
+  const trader = buildTrader(broker, OPEN_LONG_RESPONSE);
+  await trader.runOnce();
+
+  const opened = positionStore.open(traderId)[0]!;
+  assert.ok(opened.stop_loss, '前提：开仓必须带止损');
+
+  /* 价格跌破止损 —— settleDryRunPositions 按止损价结算。 */
+  broker.markPrice = benchmarkBelow(opened.stop_loss!);
+  await trader.runOnce();
+
+  const trades = tradeStore.list(traderId);
+  const closed = trades.find((t) => t.closeReason === 'stop_loss');
+  assert.ok(closed, `应当有一笔 stop_loss 平仓，实际：${trades.map((t) => t.closeReason).join(',')}`);
+
+  const rate = permissiveConfig().riskControl.fallbackRoundTripFeeRate;
+  const expectedTotal = closed.exitPrice * closed.quantity * rate;
+  assert.ok(Math.abs(closed.exitFee - closed.entryFee) < 1e-9, '两侧手续费必须相等（对半拆）');
+  assert.ok(
+    Math.abs(closed.fee - expectedTotal) < 1e-9,
+    `手续费总额必须仍是"名义价值 × 往返费率"：期望 ${expectedTotal}，实际 ${closed.fee}`,
+  );
+  assert.ok(
+    Math.abs(closed.netPnl - (closed.pnl - closed.fee + closed.fundingFee)) < 1e-9,
+    '净额算式不变：净 = 毛 − 费 + 资金费',
+  );
+});
+
+test('★★★ 模拟盘不做"与交易所对账"，也不去读交易所流水', async () => {
+  /*
+   * Why this test exists —— 任务 #4 的第 2 条（调用方一侧）。
+   *
+   * broker 在 dryRun 下把流水/成交查询改成返回空（那是"本层没有信息"）。
+   * 但**空数组被当成"交易所流水是 0"** 就是另一个 bug：绑定了真实账户的模拟盘
+   * 会因此每轮报一条假的「账目与交易所对不上」。
+   * 所以 `reconcileTradeHistory()` 在模拟盘下必须整段跳过、一个读取都不发。
+   */
+  const broker = paperBroker(new FakeBroker());
+  let incomeCalls = 0;
+  let fillCalls = 0;
+  broker.getIncome = async () => {
+    incomeCalls += 1;
+    return [];
+  };
+  broker.getUserTrades = async () => {
+    fillCalls += 1;
+    return [];
+  };
+  const trader = buildTrader(broker, OPEN_LONG_RESPONSE);
+
+  const result = await trader.reconcileTradeHistory();
+
+  assert.deepEqual(
+    result,
+    {
+      recovered: 0,
+      corrected: 0,
+      correctedAttempted: 0,
+      correctedKept: 0,
+      funding: 0,
+      foreignRounds: 0,
+      foreignNet: 0,
+    },
+    '模拟盘没有可对的交易所一侧 —— 结果必须是"什么都没发生"',
+  );
+  assert.equal(incomeCalls, 0, '模拟盘不能读交易所流水');
+  assert.equal(fillCalls, 0, '模拟盘不能读交易所成交历史');
+});
+
+test('★★★ 调整保护位后不许因为"交易所没有条件单"误平模拟仓位', async () => {
+  /*
+   * Why this test exists —— 任务 #4 的第 2 条里最危险的那一处调用方。
+   *
+   * `executeAdjust` 用 `hasLiveStop()`（查交易所条件单）判断"调整完还有没有保护"。
+   * 模拟盘的保护单从未发到交易所，而 broker 现在按约定返回空 —— 若照旧判
+   * "空 = 没保护"，**每一次 adjust_protection 都会按 §2.6 立刻平仓**
+   *（这个形态在模拟回放里真实发生过：17 次调整全部平仓）。
+   *
+   * 修法是模拟盘改用本地 `stop_loss` 判断。这里把桩的条件单列表钉成空，
+   * 复现"真实 broker 在 dryRun 下的返回值"，然后完整跑一轮调整。
+   */
+  const broker = paperBroker(new FakeBroker());
+  /* 真实 broker 在 dryRun 下 getOpenAlgoOrders 恒返回 [] —— 桩也必须是这个形状。 */
+  broker.getOpenAlgoOrders = async () => [];
+
+  const trader = buildTrader(broker, OPEN_LONG_RESPONSE);
+  await trader.runOnce();
+  assert.equal(positionStore.open(traderId).length, 1, '前提：先有一个模拟持仓');
+
+  const adjustTrader = buildTrader(broker, ADJUST_PROTECTION_RESPONSE);
+  await adjustTrader.runOnce();
+
+  const open = positionStore.open(traderId);
+  assert.equal(open.length, 1, '调整保护位不该把仓位平掉（模拟盘的保护是本地价位）');
+  assert.equal(open[0]!.stop_loss, 67_000, '本地止损必须被更新成调整后的价位');
+  assert.equal(
+    tradeStore.list(traderId).length,
+    0,
+    '不该产生任何平仓记录（误判"没有保护"会走 emergencyFlatten 并记账）',
+  );
+});
+
+test('★★★ 进程重启后，模拟盘的孤儿 pending 记录必须作废（不能永远占名额）', async () => {
+  /*
+   * Why this test exists —— 任务 #4 第 1 条的边界。
+   *
+   * 模拟挂单只活在**本进程**的模拟撮合账里。进程重启后它们既不在交易所、
+   * 也不在新进程里 —— 永远不会再成交。而实盘的判据是"读不到就等下一轮"
+   *（读不到 ≠ 不存在），照搬到模拟盘的结果是：那张 pending 记录**永远占着入场名额**。
+   *
+   * 所以超时撤单路径在模拟盘下必须把"读不到"读成"它已经不会成交了"。
+   */
+  const broker = paperBroker(new FakeBroker());
+  const trader = buildTrader(broker, PAPER_LIMIT_ENTRY);
+  await trader.runOnce();
+
+  const pending = positionStore.pending(traderId)[0]!;
+  const orderRow = orderStore.list(traderId)[0]!;
+  /* 模拟"进程重启"：新进程的模拟撮合账里没有这张单。 */
+  broker.restingOrders.clear();
+  /* 把它改成"已经等超时"。 */
+  getDb().run('UPDATE positions SET opened_at = ? WHERE id = ?', '2020-01-01T00:00:00.000Z', pending.id);
+
+  await buildTrader(broker, '<decision>[]</decision>').runOnce();
+
+  assert.equal(positionStore.pending(traderId).length, 0, '孤儿 pending 记录必须被作废');
+  assert.equal(
+    orderStore.list(traderId).find((o) => o.id === orderRow.id)?.status,
+    'CANCELED',
+    '那张入场单在本地必须被结清成 CANCELED（它从未成交）',
+  );
+  assert.equal(positionStore.open(traderId).length, 0, '不能凭空建仓');
+});
+
+/** 给止损价下面留一点空间，避免浮点边界把命中判成不命中。 */
+function benchmarkBelow(stop: number): number {
+  return stop * 0.999;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  模拟盘成本口径统一（task-7）：所有平仓路径都按往返费率估手续费               */
+/* -------------------------------------------------------------------------- */
+
+const REDUCE_HALF_RESPONSE = `<decision>
+[{"symbol":"BTCUSDT","action":"reduce_position","reduce_percent":50,"confidence":80,"reasoning":"Lock in half."}]
+</decision>`;
+
+type ClosedTrade = ReturnType<typeof tradeStore.list>[number];
+
+/**
+ * 断言一笔**模拟盘**平仓的成本口径：
+ *
+ * ```
+ *   entryFee + exitFee === 名义(exitPrice × quantity) × 往返费率
+ *   两侧各半
+ *   净 = 毛 − 费 + 资金费     （trades 的唯一算式，不得被绕开）
+ * ```
+ *
+ * Why this test exists —— task-7：模拟盘原先各条平仓路径的成本口径不一致
+ * （settle 全额、executeClose/紧急平仓 0、手工平仓半程）。成本为 0 会系统性
+ * **高估模拟收益**，而后续开发以本地模拟盘为主 ⇒ 策略评估不可信。
+ */
+function assertPaperRoundTripCost(closed: ClosedTrade, label: string): void {
+  const rate = permissiveConfig().riskControl.fallbackRoundTripFeeRate;
+  const total = closed.exitPrice * closed.quantity * rate;
+  assert.ok(
+    Math.abs(closed.entryFee - closed.exitFee) < 1e-9,
+    `${label}：两侧手续费必须各半（entry=${closed.entryFee} exit=${closed.exitFee}）`,
+  );
+  assert.ok(
+    Math.abs(closed.fee - total) < 1e-9,
+    `${label}：手续费总额必须 = 名义 × 往返费率（期望 ${total}，实际 ${closed.fee}）`,
+  );
+  assert.ok(
+    Math.abs(closed.netPnl - (closed.pnl - closed.fee + closed.fundingFee)) < 1e-9,
+    `${label}：净额算式必须是 净 = 毛 − 费 + 资金费`,
+  );
+}
+
+test('★★★ 模拟盘：模型主动平仓（executeClose）也按往返费率记全额成本', async () => {
+  /*
+   * 原来这条路径只从 `getUserTrades()` 取手续费，模拟盘返回空 ⇒ trades 的成本
+   * 是 0（比 settle 路径更乐观）。现在按 `dryRunRoundTripFee()` 估整趟并拆两侧。
+   *
+   * 同时断言 `orders` 与 `trades` 口径一致：入场订单行补上了开仓侧那一半，
+   * 两张订单的 fee 之和 == 这笔成交的 fee —— 否则「订单」与「成交」两处显示
+   * 两个不同的成本，又回到"同一件事有两个数"。
+   */
+  const broker = paperBroker(new FakeBroker());
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  assert.equal(positionStore.open(traderId).length, 1, '前提：先有一个模拟持仓');
+
+  await buildTrader(broker, CLOSE_LONG_RESPONSE).runOnce();
+
+  const trades = tradeStore.list(traderId);
+  const closed = trades.find((t) => t.closeReason === 'model_decision');
+  assert.ok(closed, `应当有一笔 model_decision 平仓，实际：${trades.map((t) => t.closeReason).join(',')}`);
+  assertPaperRoundTripCost(closed!, 'executeClose');
+
+  const orders = orderStore.list(traderId);
+  const entryOrder = orders.find((o) => o.purpose === 'entry');
+  const exitOrder = orders.find((o) => o.purpose === 'exit');
+  assert.ok(entryOrder && exitOrder, '入场/平仓订单都应留痕');
+  assert.ok(
+    Math.abs(entryOrder!.fee + exitOrder!.fee - closed!.fee) < 1e-9,
+    `orders 与 trades 的手续费必须同口径：订单 ${entryOrder!.fee} + ${exitOrder!.fee} vs 成交 ${closed!.fee}`,
+  );
+});
+
+test('★★★ 模拟盘：保护单挂不上时的紧急平仓（emergencyFlatten）也按全额估', async () => {
+  /*
+   * 保护单挂不上 → §2.6 立刻市价平仓。这条成本是"止损没挂上"的真实代价，
+   * 模拟盘不能把它记成 0（否则"挂不上止损"看起来几乎免费，训练出的模型会
+   * 对保护单失败毫无感觉）。
+   */
+  const broker = paperBroker(new FakeBroker());
+  broker.failAlgoPlacement = '-4130 Order would trigger immediately';
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const trades = tradeStore.list(traderId);
+  const closed = trades.find((t) => t.closeReason === 'protection_unavailable');
+  assert.ok(closed, `应当有一笔 protection_unavailable 平仓，实际：${trades.map((t) => t.closeReason).join(',')}`);
+  assertPaperRoundTripCost(closed!, 'emergencyFlatten');
+  assert.equal(positionStore.open(traderId).length, 0, '紧急平仓后不留下敞口');
+});
+
+test('★★★ 模拟盘：手工平仓（closeManually）按整趟往返费，不再只记半程', async () => {
+  const broker = paperBroker(new FakeBroker());
+  const trader = buildTrader(broker, OPEN_LONG_RESPONSE);
+  await trader.runOnce();
+  assert.equal(positionStore.open(traderId).length, 1, '前提：先有一个模拟持仓');
+
+  const result = await trader.closeManually('BTCUSDT');
+  assert.ok(result, '手工平仓应当成功');
+
+  const closed = tradeStore.list(traderId).find((t) => t.closeReason === 'manual');
+  assert.ok(closed, '应当有一笔 manual 平仓');
+  assertPaperRoundTripCost(closed!, 'closeManually');
+});
+
+test('★★ 模拟盘：部分减仓（executeReduce）同样按这一笔的名义估全额成本', async () => {
+  /*
+   * 减仓也是把仓位变成已实现盈亏 —— 成本为 0 会让"分批止盈"策略在模拟盘上
+   * 显著占便宜。这里按**减掉的那部分**名义价值估算，两侧各半。
+   */
+  const broker = paperBroker(new FakeBroker());
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  assert.equal(positionStore.open(traderId).length, 1, '前提：先有一个模拟持仓');
+
+  await buildTrader(broker, REDUCE_HALF_RESPONSE).runOnce();
+
+  const closed = tradeStore.list(traderId).find((t) => t.closeReason === 'manual_partial');
+  assert.ok(closed, '应当有一笔 manual_partial 平仓');
+  assertPaperRoundTripCost(closed!, 'executeReduce');
+});
+
+test('★★★ 实盘路径不传手续费估算值（逐字节保持"取不到就记 0"）', async () => {
+  /*
+   * Why this test exists —— task-7 的硬约束："只改 dry-run 分支，实盘逐字节不变"。
+   *
+   * 实盘的手续费**只能**来自交易所成交明细；取不到就记 0（下一轮对账会补），
+   * 绝不能拿"策略里的回退费率"去估 —— 那会让实盘账本凭空多出一笔基于假设的成本。
+   *
+   * 这里用没有 `isDryRun` 的桩（= 实盘语义）走同一条平仓路径，断言：
+   * `getUserTrades` 为空时手续费仍然是 **0**，而不是按费率估出来的数。
+   */
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+  await buildTrader(broker, CLOSE_LONG_RESPONSE).runOnce();
+
+  const closed = tradeStore.list(traderId).find((t) => t.closeReason === 'model_decision');
+  assert.ok(closed, '应当有一笔 model_decision 平仓');
+  assert.equal(closed!.entryFee, 0, '实盘取不到成交明细时开仓费记 0（不估）');
+  assert.equal(closed!.fee, 0, '实盘取不到成交明细时手续费记 0（不估）');
+  const rate = permissiveConfig().riskControl.fallbackRoundTripFeeRate;
+  assert.ok(
+    closed!.exitPrice * closed!.quantity * rate > 0.01,
+    '前提：若误用估算，这里会是一个明显大于 0 的数（否则本用例测不出回归）',
   );
 });

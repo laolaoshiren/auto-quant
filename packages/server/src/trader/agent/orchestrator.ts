@@ -500,7 +500,7 @@ export async function runStrategyReview(input: {
    * ```
    *   typecheck 过 · 测试全绿 · 界面上也不报错 —— 只是它永远不会被调用
    * ```
-   *（`docs/FINDING-unwired-roles.md` 有复核脚本与另外两个同类角色。）
+   *（`docs/archive/FINDING-unwired-roles.md` 有复核脚本与另外两个同类角色。）
    *
    * ## 为什么挂在 panel 档
    *

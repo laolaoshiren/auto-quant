@@ -2293,6 +2293,115 @@ export interface TradePerformance {
 }
 
 /**
+ * 一行「由某条情报驱动」的已平仓成交 —— 即 `trades.intel_keys` 的**读取侧**。
+ *
+ * 它存在的理由是 `trader/intel/signalHealth.ts` 需要输入：`assessSignal()` 的
+ * 参数是"这个信号的历史成交"，而那条链（情报 → 决策 → 成交）的落点是
+ * `trades.intel_keys`。在 2026-11-09 之前，这一列**只写不读**：
+ *
+ * ```
+ *   写入：开仓写 positions.intel_keys → 平仓搬到 trades.intel_keys   ✅
+ *   读取：全仓 0 处                                                  ❌
+ *   ⇒ signalHealth 永远 insufficient_data，失效检测从未生效
+ * ```
+ *
+ * 这是与 `clerk` 同一类的"写了但没接线"（见 `docs/archive/FINDING-clerk-unwired.md`）。
+ */
+export interface TradeIntelAttributionRow {
+  /** 该笔成交依据的情报键（`signalKeyOf()` 的产出；**已去重**，坏值已丢弃）。 */
+  intelKeys: string[];
+  /**
+   * 该笔的**净**收益率（小数比例：0.012 = +1.2%）。
+   *
+   * 取自 `trades.pnl_percent / 100`（那一列是 `net_pnl / margin × 100`，见
+   * `trades.insert()`）。与 `signalHealth.SignalTrade.returnPct` 的定义一致。
+   */
+  returnPct: number;
+  /** 平仓时刻（ISO）。 */
+  closedAt: string;
+}
+
+/**
+ * `trades.intelAttributionsSince()` 一次最多回多少笔。
+ *
+ * 与 `TREND_WINDOW` 同一个理由：这张表随时间无限增长，而调用方会按固定间隔
+ * 重算信号健康度。上限让它保持 O(固定行数)，而不是随历史长度线性变慢。
+ * 2000 笔足够 20+ 个信号各积累 30+ 样本（`SIGNAL_LIMITS`），也小到不拖慢周期。
+ */
+export const TRADE_INTEL_ATTRIBUTION_MAX = 2000;
+
+/**
+ * **容错解析 `trades.intel_keys` 列**（JSON 数组字符串）。
+ *
+ * ⚠️ 与 `autoTrader.parseIntelKeysOf` 是**同一条纪律**（那边解析的是
+ * `positions.intel_keys`，写入侧；这里是读取侧）：
+ * 坏值降级成 `[]`，绝不抛错 —— 一个附属统计字段不该让"读成交"失败。
+ * 降级的语义是"这笔没被任何信号驱动"，最坏结果只是少一个样本，
+ * 而不是让整份信号健康度报告消失。
+ */
+function parseIntelKeysColumn(raw: string | null | undefined): string[] {
+  if (raw === null || raw === undefined || raw.length === 0) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((k): k is string => typeof k === 'string' && k.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 一次 SQL 聚合出「成交总额」口径的**所有**数字。
+ *
+ * ## 为什么它必须只有一份（2026-11-09 合并）
+ *
+ * `aggregateTrades()`（终身口径，给控制台）与 `trades.performanceSince()`
+ * （窗口口径，给提示词）原来各自抄了一份完全相同的 9 个 `SUM` / `COUNT` 表达式。
+ * 两份副本的**判胜口径**（按净盈亏而不是毛盈亏）一旦漂移，控制台上的胜率与
+ * 模型看到的胜率就会说两件事 —— 而"模型照着一个假的胜率做决策"是看不见的。
+ *
+ * `sinceIso` 省略 = 终身口径；给了就只算 `closed_at >= sinceIso` 的窗口。
+ * 聚合仍然全部在 SQL 里完成（见 `aggregateTrades` 的 O(1) 说明）。
+ */
+interface TradeTotalsRow {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  grossProfit: number | null;
+  grossLoss: number | null;
+  best: number | null;
+  worst: number | null;
+  grossPnl: number | null;
+  totalFees: number | null;
+  totalFunding: number | null;
+  netPnl: number | null;
+  firstClosedAt: string | null;
+  notional: number | null;
+}
+
+function aggregateTradeTotals(traderId: number, sinceIso?: string): TradeTotalsRow | undefined {
+  const windowed = sinceIso !== undefined;
+  return getDb().get<TradeTotalsRow>(
+    `SELECT
+       COUNT(*)                                                   AS totalTrades,
+       COALESCE(SUM(CASE WHEN net_pnl >  0 THEN 1 ELSE 0 END), 0) AS wins,
+       COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN 1 ELSE 0 END), 0) AS losses,
+       COALESCE(SUM(CASE WHEN net_pnl >  0 THEN net_pnl ELSE 0 END), 0) AS grossProfit,
+       ABS(COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN net_pnl ELSE 0 END), 0)) AS grossLoss,
+       MAX(net_pnl) AS best,
+       MIN(net_pnl) AS worst,
+       COALESCE(SUM(pnl), 0)         AS grossPnl,
+       COALESCE(SUM(fee), 0)         AS totalFees,
+       COALESCE(SUM(funding_fee), 0) AS totalFunding,
+       COALESCE(SUM(net_pnl), 0)     AS netPnl,
+       MIN(closed_at) AS firstClosedAt,
+       COALESCE(SUM(ABS(entry_price * quantity)), 0) AS notional
+     FROM trades WHERE trader_id = ?${windowed ? ' AND closed_at >= ?' : ''}`,
+    ...(windowed ? [traderId, sinceIso] : [traderId]),
+  );
+}
+
+/**
  * One pass over `trades`: aggregate in SQL, materialise only the trend window.
  *
  * Why: `computeTraderStats` used to pull every column of every round-trip into
@@ -2307,36 +2416,7 @@ export interface TradePerformance {
  * figures and must not silently follow the window.
  */
 function aggregateTrades(traderId: number): { totals: TradeStats; curve: TradeCurvePoint[] } {
-  const totals = getDb().get<{
-    totalTrades: number;
-    wins: number;
-    losses: number;
-    grossProfit: number | null;
-    grossLoss: number | null;
-    best: number | null;
-    worst: number | null;
-    grossPnl: number | null;
-    totalFees: number | null;
-    totalFunding: number | null;
-    netPnl: number | null;
-    firstClosedAt: string | null;
-  }>(
-    `SELECT
-       COUNT(*)                                                   AS totalTrades,
-       COALESCE(SUM(CASE WHEN net_pnl >  0 THEN 1 ELSE 0 END), 0) AS wins,
-       COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN 1 ELSE 0 END), 0) AS losses,
-       COALESCE(SUM(CASE WHEN net_pnl >  0 THEN net_pnl ELSE 0 END), 0) AS grossProfit,
-       ABS(COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN net_pnl ELSE 0 END), 0)) AS grossLoss,
-       MAX(net_pnl) AS best,
-       MIN(net_pnl) AS worst,
-       COALESCE(SUM(pnl), 0)         AS grossPnl,
-       COALESCE(SUM(fee), 0)         AS totalFees,
-       COALESCE(SUM(funding_fee), 0) AS totalFunding,
-       COALESCE(SUM(net_pnl), 0)     AS netPnl,
-       MIN(closed_at) AS firstClosedAt
-     FROM trades WHERE trader_id = ?`,
-    traderId,
-  );
+  const totals = aggregateTradeTotals(traderId);
 
   const totalTrades = totals?.totalTrades ?? 0;
   const wins = totals?.wins ?? 0;
@@ -2591,23 +2671,6 @@ export const trades = {
   },
 
   /**
-   * 一个时间窗口内的成交绩效，**全部在 SQL 里聚合**。
-   *
-   * ## 为什么必须有这个函数（提案 §4 的 O(1) 性质）
-   *
-   * 提示词要告诉模型"你最近在亏钱"，而 `trades` 是**随时间无限增长**的表。
-   * 这个函数对外只回**固定几个字段**：无论窗口里有 3 笔还是 30000 笔，进提示词的
-   * 字节数完全一样。没有这条保证，"7×24 跑一年"就只是一个说法 —— 跑一年之后
-   * 提示词会随历史长度线性膨胀，直到撑爆上下文。
-   *
-   * 分类口径与 `aggregateTrades()` 严格一致：按**净**盈亏判胜负。一笔毛赚了
-   * 一点点、但不够付手续费的钱实际是亏的，算成盈利会同时抬高胜率与盈亏比 ——
-   * 那是这个产品最容易骗自己的地方。
-   *
-   * @param sinceIso 窗口起点（含）。调用方给固定长度的窗口（例如最近 24 小时），
-   *   所以窗口内的行数由**交易频率**决定，而不是由历史长度决定。
-   */
-  /**
    * **这台机器人累计的已实现净盈亏**（毛盈亏 − 手续费 − 资金费），全生命周期。
    *
    * 给模拟盘钱包用（见 `binance/paperWallet.ts`）：`walletBalance = 起始余额 + 它`。
@@ -2626,34 +2689,32 @@ export const trades = {
     return row?.netPnl ?? 0;
   },
 
+  /**
+   * 一个时间窗口内的成交绩效，**全部在 SQL 里聚合**。
+   *
+   * ## 为什么必须有这个函数（提案 §4 的 O(1) 性质）
+   *
+   * 提示词要告诉模型"你最近在亏钱"，而 `trades` 是**随时间无限增长**的表。
+   * 这个函数对外只回**固定几个字段**：无论窗口里有 3 笔还是 30000 笔，进提示词的
+   * 字节数完全一样。没有这条保证，"7×24 跑一年"就只是一个说法 —— 跑一年之后
+   * 提示词会随历史长度线性膨胀，直到撑爆上下文。
+   *
+   * 分类口径与 `aggregateTrades()` 严格一致：按**净**盈亏判胜负。一笔毛赚了
+   * 一点点、但不够付手续费的钱实际是亏的，算成盈利会同时抬高胜率与盈亏比 ——
+   * 那是这个产品最容易骗自己的地方。
+   *
+   * @param sinceIso 窗口起点（含）。调用方给固定长度的窗口（例如最近 24 小时），
+   *   所以窗口内的行数由**交易频率**决定，而不是由历史长度决定。
+   */
   performanceSince(traderId: number, sinceIso: string): TradePerformance {
-    const row = getDb().get<{
-      totalTrades: number;
-      wins: number;
-      losses: number;
-      grossProfit: number | null;
-      grossLoss: number | null;
-      grossPnl: number | null;
-      totalFees: number | null;
-      totalFunding: number | null;
-      netPnl: number | null;
-      notional: number | null;
-    }>(
-      `SELECT
-         COUNT(*)                                                   AS totalTrades,
-         COALESCE(SUM(CASE WHEN net_pnl >  0 THEN 1 ELSE 0 END), 0) AS wins,
-         COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN 1 ELSE 0 END), 0) AS losses,
-         COALESCE(SUM(CASE WHEN net_pnl >  0 THEN net_pnl ELSE 0 END), 0) AS grossProfit,
-         ABS(COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN net_pnl ELSE 0 END), 0)) AS grossLoss,
-         COALESCE(SUM(pnl), 0)          AS grossPnl,
-         COALESCE(SUM(fee), 0)          AS totalFees,
-         COALESCE(SUM(funding_fee), 0)  AS totalFunding,
-         COALESCE(SUM(net_pnl), 0)      AS netPnl,
-         COALESCE(SUM(ABS(entry_price * quantity)), 0) AS notional
-       FROM trades WHERE trader_id = ? AND closed_at >= ?`,
-      traderId,
-      sinceIso,
-    );
+    /*
+     * ⚠️ **走 `aggregateTradeTotals()`，不要再抄一份聚合 SQL。**
+     *
+     * 原来这里复制了 `aggregateTrades()` 的 9 个 `SUM` / `COUNT`，两份的判胜
+     * 口径（按**净**盈亏）一旦漂移，控制台与提示词就会给出两个胜率。
+     * 两个入口都从同一段 SQL 取数，"最近表现"与"终身表现"才不可能分叉。
+     */
+    const row = aggregateTradeTotals(traderId, sinceIso);
 
     const wins = row?.wins ?? 0;
     const losses = row?.losses ?? 0;
@@ -2689,6 +2750,69 @@ export const trades = {
        */
       roundTripFeeRate: notional > 0 ? totalFees / notional : null,
     };
+  },
+
+  /**
+   * **读取"由某条情报驱动"的已平仓成交**（`trades.intel_keys` 的读取侧）。
+   *
+   * ## 为什么需要它（2026-11-09）
+   *
+   * `intel_keys` 从 M16/M18 起就一直在**写**（开仓写 `positions`、平仓搬到
+   * `trades`），但整个仓库**没有一处读它** —— 于是
+   * `trader/intel/signalHealth.ts` 的 `assessSignal()` 拿不到输入，失效检测
+   * 永远只会返回 `insufficient_data`：代码在跑、测试通过、日志正常，
+   * 而它从未下过一次结论。
+   *
+   * ## 口径
+   *
+   * · `returnPct` = `pnl_percent / 100`（**净**收益率，小数比例）—— 与
+   *   `SignalTrade.returnPct` 一致；用净额而不是毛额，让"手续费吃掉的盈利"
+   *   如实算作没赚到。
+   * · 只取 `intel_keys <> '[]'` 的行：空数组的语义是"纯技术面成交"，
+   *   它不属于任何信号，算进任何键都会污染样本。
+   *
+   * ## 为什么带窗口与条数上限
+   *
+   * 这张表随时间无限增长，而调用方（`AutoTrader.observeSignalHealth()`）会按
+   * 固定间隔重算。窗口 + `LIMIT` 让查询保持 O(固定行数) —— 与
+   * `performanceSince()` 同一个理由：周期耗时不随历史长度增长。
+   *
+   * @param sinceIso 窗口起点（含）。
+   * @param limit 最多取**最新**多少笔（返回时已按时间升序）。
+   */
+  intelAttributionsSince(
+    traderId: number,
+    sinceIso: string,
+    limit = TRADE_INTEL_ATTRIBUTION_MAX,
+  ): TradeIntelAttributionRow[] {
+    const rows = getDb().all<{
+      intel_keys: string;
+      pnl_percent: number;
+      closed_at: string;
+    }>(
+      `SELECT intel_keys, pnl_percent, closed_at
+         FROM trades
+        WHERE trader_id = ? AND closed_at >= ? AND intel_keys <> '[]'
+        ORDER BY closed_at DESC, id DESC
+        LIMIT ?`,
+      traderId,
+      sinceIso,
+      Math.max(1, Math.trunc(limit)),
+    );
+
+    /*
+     * 反转成**时间升序**：`signalHealth` 的"连续亏损"是从最后一笔往前数、
+     * 滚动窗口是 `slice(-WINDOW)` —— 两者都假定输入旧 → 新。
+     * 这里取的是"最新 limit 条"，反转后恰好给出该窗口内的时间顺序。
+     */
+    return rows
+      .slice()
+      .reverse()
+      .map((row) => ({
+        intelKeys: parseIntelKeysColumn(row.intel_keys),
+        returnPct: (Number(row.pnl_percent) || 0) / 100,
+        closedAt: row.closed_at,
+      }));
   },
 
   /**
