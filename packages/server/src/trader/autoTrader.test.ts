@@ -3748,6 +3748,57 @@ test('stopping a trader waits for the cycle already in flight', async () => {
   assert.ok(open[0]!.stop_order_id, 'the position must be protected by the time stop() resolves');
 });
 
+test('开始与停止落在同一毫秒时，stop() 仍然必须等保护单挂完（flaky 回归）', async () => {
+  /*
+   * Why this test exists —— 2026-11-09 的全量 `npm test` 偶发红。
+   *
+   * 停止判据原来是两个**墙钟时刻**的比较：
+   *
+   *     this.cycleStartedAt < this.stopRequestedAt      // 两个 Date.now()
+   *
+   * 而 `start()` 之后立刻 `stop()` 时，这两个 `Date.now()` **完全可能落在同一毫秒**
+   * —— 于是"停止前就在跑的那一轮"被判成"停止之后才开始"，整轮决策被跳过，
+   * **保护单根本没挂**（§2.6 的底线），而 `stop()` 却已经正常返回。
+   * 外显形态：`npm test` 全量（2126 条、并行、负载高）偶发红，单独跑必绿。
+   *
+   * ⚠️ **必须固定时钟才能力住这个回归。**
+   *
+   * 不固定的话，"两者是否同毫秒"取决于机器速度，这条用例本身就会变成新的 flaky。
+   * 把 `Date.now()` 钉在同一个值上：任何"墙钟先后"形式的判据都会把这一轮当成
+   * 停止之后才开始的 —— 与全量跑里翻车的毫秒碰撞等价。
+   * 判据改成 `runCycle` 开头的**状态快照**之后，时钟固定与否都不影响结论。
+   */
+  const realNow = Date.now;
+  const frozen = realNow();
+  Date.now = () => frozen;
+  try {
+    const broker = new FakeBroker();
+    const trader = buildTrader(broker, OPEN_LONG_RESPONSE, {
+      async complete() {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return {
+          text: OPEN_LONG_RESPONSE,
+          latencyMs: 150,
+          usage: { promptTokens: 1, completionTokens: 1 },
+        };
+      },
+    });
+
+    await trader.start();
+    await trader.stop('测试：同毫秒停机');
+
+    assert.ok(
+      broker.placed.some((p) => p.type === 'STOP_MARKET'),
+      '开始与停止落在同一毫秒时，stop() 也不许在保护单挂上之前返回',
+    );
+    const open = positionStore.open(traderId);
+    assert.equal(open.length, 1);
+    assert.ok(open[0]!.stop_order_id, '仓位必须已有保护单');
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test('a reconcile pass does not run while a cycle is in flight', async () => {
   /*
    * Why this test exists (D7).

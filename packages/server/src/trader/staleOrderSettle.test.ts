@@ -222,47 +222,53 @@ test('★★★ 停止请求必须在【下单前】拦住（停止后还在开�
    * ⇒ 必须有一个**流程级**的标志，并在下单前检查。
    */
   assert.ok(
-    /private stopRequestedAt: number \| null = null/.test(AUTO),
-    '★ 必须记录停止请求的时刻（时间戳，不是布尔 —— 见下）',
+    /private stopRequested = false/.test(AUTO),
+    '★ 必须有「已请求停止」的状态位 —— 下单前要靠它拦住',
   );
   assert.ok(
-    /this\.stopRequestedAt = Date\.now\(\)/.test(AUTO),
-    '★ stop() 里必须记下时刻',
+    /this\.stopRequested = true/.test(AUTO),
+    '★ stop() 里必须置位',
   );
 
   /*
-   * ⚠️ **判据用的是「这一轮的开始时刻 vs 停止时刻」，不是布尔标志。**
+   * ⚠️ **判据必须是「本轮开始时取的状态快照」，不是两个墙钟时刻的比较。**
    *
-   * 我第一版写成布尔 + "本轮是否已执行过决策"，结果撞上了既有契约：
-   * `start()` 后立刻 `stop()` 时，那一轮已经在 `await complete()` 里
-   * 但还没到执行循环 —— 布尔判据会把它整轮跳过，于是
-   * "stopping a trader waits for the cycle already in flight" 立刻变红
-   *（那意味着已成交的仓位会裸奔，§2.6）。
+   * 2026-11-09 修掉一个 flaky：原来存 `cycleStartedAt = Date.now()`，判据写成
+   * `cycleStartedAt < stopRequestedAt`。**毫秒粒度不是因果顺序** ——
+   * `start()` 后立刻 `stop()` 时两个 `Date.now()` 可能落在同一毫秒，于是
+   * 「停止前就在跑的那一轮」被判成「停止后才开始」→ 整轮跳过 → **保护单不挂**，
+   * 而 `stop()` 已经正常返回。外显形态：全量 `npm test`（并行、负载高）时
+   * `autoTrader.test.ts` 的 "stopping a trader waits for the cycle already in
+   * flight" 偶发红，单独跑必绿（冻结 `Date.now()` 可 100% 复现）。
    *
-   * 时间戳判据能精确区分：
+   * 快照的语义与时刻比较完全一致，但没有粒度歧义：
    * ```
-   *   cycleStartedAt <  stopRequestedAt  ⇒ 停止前就在跑 ⇒ 放行（挂完保护单）
-   *   cycleStartedAt >= stopRequestedAt  ⇒ 停止后才开始 ⇒ 跳过（不开新仓）
+   *   cycleStartedAfterStopRequest === false ⇒ 停止前就在跑 ⇒ 放行（挂完保护单）
+   *   cycleStartedAfterStopRequest === true  ⇒ 停止后才开始 ⇒ 跳过（不开新仓）
    * ```
    */
   assert.ok(
-    /private cycleStartedAt = 0/.test(AUTO),
-    '★ 必须记录本轮开始时刻',
+    /private cycleStartedAfterStopRequest = false/.test(AUTO),
+    '★ 必须有「本轮开始时是否已有停止请求」的快照字段',
   );
   assert.ok(
-    /this\.cycleStartedAt = Date\.now\(\)/.test(AUTO),
-    '★ runCycle 开头必须写它',
+    /this\.cycleStartedAfterStopRequest = this\.stopRequested;/.test(AUTO),
+    '★ runCycle 开头必须取快照',
   );
+  /*
+   * 墙钟判据必须彻底消失 —— 它正是 flaky 的根因。
+   * 只查带 `this.` 的表达式：注释里引用旧写法（不带 `this.`）是允许的。
+   */
   assert.ok(
-    /cycleStartedBeforeStop/.test(AUTO),
-    '★ 必须有「停止前就在跑」的判据',
+    !/this\.cycleStartedAt/.test(AUTO) && !/this\.stopRequestedAt/.test(AUTO),
+    '★ 停止判据不许再比较墙钟时刻（`cycleStartedAt` / `stopRequestedAt` 两个字段必须删掉）',
   );
 
-  const guardAt = AUTO.indexOf('cycleStartedBeforeStop');
+  const guardAt = AUTO.indexOf('if (this.cycleStartedAfterStopRequest)');
   const loopAt = AUTO.indexOf('for (const decision of verdict.approved)');
   assert.ok(guardAt > 0, '★ 必须有停止判据');
   assert.ok(
-    AUTO.indexOf('cycleStartedBeforeStop', loopAt) > loopAt,
+    guardAt > loopAt,
     '★ 判据必须在下单循环【内部】—— 放在循环前会破坏"停止要等保护单"的契约',
   );
 });

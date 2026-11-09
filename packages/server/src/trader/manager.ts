@@ -18,7 +18,7 @@ import { createJevDecisionModel } from './jevModel.js';
 import { createLogger } from '../logger.js';
 import { env } from '../env.js';
 import { MarketDataService } from '../market/service.js';
-import { paperAccountState } from '../binance/paperWallet.js';
+import { paperAccountState, paperPositionTotals } from '../binance/paperWallet.js';
 import { LlmClient } from '../llm/client.js';
 import { discoverModels } from '../llm/discovery.js';
 import { aiModels, equity, exchanges, positions, runtimeLogs, settings, strategies, trades as tradeStore, traders } from '../store/repositories.js';
@@ -1763,8 +1763,6 @@ export class TraderManager {
   }
 
   /**
-
-  /**
    * 某个机器人此刻是不是在纸面模式下跑。
    *
    * `null` = **它没在运行**，所以这个值此刻不存在 —— 与 `circuitBreakerReading()`
@@ -1902,21 +1900,17 @@ export class TraderManager {
     const startingBalance = this.paperStartingBalanceOf(traderId);
     const realizedPnl = tradeStore.lifetimeNetPnl(traderId);
 
-    /* 浮盈与保证金：只有运行中的机器人拿得到标记价。 */
-    let unrealizedPnl = 0;
-    let marginUsed = 0;
+    /*
+     * 浮盈与保证金：只有运行中的机器人拿得到标记价。
+     *
+     * ⚠️ 折算抽到 `paperPositionTotals()`（binance/paperWallet.ts）里，
+     * 与控制台读数是**同一个函数** —— 原先这里与 api/server.ts 各写一份，
+     * 而这里把方向判断写成了大写 `'LONG'`（库里存的是小写），
+     * 于是模拟盘多头浮盈符号恒反、且与控制台读数互相矛盾（2026-11-09 修）。
+     */
     const live = this.running.get(traderId);
     const marks = live ? live.paperMarkPrices() : new Map<string, number>();
-    for (const position of positions.open(traderId)) {
-      marginUsed += Number.isFinite(position.margin_used) ? position.margin_used : 0;
-      const mark = marks.get(position.symbol);
-      if (mark === undefined) continue;
-      const quantity = position.quantity;
-      const entry = position.entry_price;
-      const diff =
-        position.side === 'LONG' ? (mark - entry) * quantity : (entry - mark) * quantity;
-      if (Number.isFinite(diff)) unrealizedPnl += diff;
-    }
+    const { unrealizedPnl, marginUsed } = paperPositionTotals(positions.open(traderId), marks);
 
     return paperAccountState({ startingBalance, realizedPnl, unrealizedPnl, marginUsed });
   }
@@ -2255,7 +2249,8 @@ export class TraderManager {
     };
   }
 
-  private async buildTeamModel(traderId: number): Promise<TeamModelBuild> {    /*
+  private async buildTeamModel(traderId: number): Promise<TeamModelBuild> {
+    /*
      * ⚠️ **团队模式【不】使用「AI 模型」列表里的任何记录**（用户 2026-10-12 明确要求）。
      *
      * 用户原话：
@@ -3961,6 +3956,28 @@ export class TraderManager {
   }> {
     const trader = traders.get(traderId);
     if (!trader) throw new Error('机器人不存在。');
+
+    /*
+     * **纯模拟盘机器人没有交易所侧可对账**（PR #185 的传播缺口，2026-11-09 补）。
+     *
+     * 它的成交、持仓与盈亏全部来自本地模拟（`BinanceBroker` 的 dryRun 分支），
+     * 交易所流水里从来没有它的单 —— 这个端点本来的职责（"从
+     * `/fapi/v1/userTrades` 补齐进程未运行时发生的平仓"）对它没有任何输入。
+     *
+     * 而原来会继续往下走，于是对着一条**永远走不通**的路径报错：
+     *
+     *   · 机器人从未启动过（`dry_run = NULL`）且环境是实盘时，
+     *     `effectiveDryRun()` 返回 false → `connectionFor(null, false)` 抛出
+     *     「没有绑定交易所账户，只能以模拟盘运行」→ 操作员点「对账」得到 400，
+     *     功能看起来是坏的；
+     *   · 机器人正在跑时，`runReconcile()` 会去查交易所成交流水 —— 同样没有可查的东西。
+     *
+     * 所以直接返回"没有可对账的东西"。这与 `autoTrader` 在总账校验里对
+     * `exchangeAccountId === null` 的处理一致（那里也直接跳过交易所侧比较）。
+     */
+    if (trader.exchangeAccountId === null) {
+      return { recovered: 0, corrected: 0, correctedAttempted: 0, correctedKept: 0, funding: 0 };
+    }
 
     /*
      * When the trader is live, reconcile **through the live instance**.

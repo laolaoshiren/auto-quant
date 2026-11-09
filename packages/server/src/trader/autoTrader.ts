@@ -1115,10 +1115,32 @@ export class AutoTrader {
    * ⚠️ **单向**：一旦置位不再清除。这台实例被丢弃，下次启动是新建的。
    * 双向开关会让"停止中又启动"的竞态重新打开。
    */
-  private stopRequestedAt: number | null = null;
+  private stopRequested = false;
 
-  /** 当前这一轮的开始时刻（`runCycle` 开头写）。停止判据用它。 */
-  private cycleStartedAt = 0;
+  /**
+   * **本轮开始时**是否已经有停止请求 —— 在 `runCycle` 开头取的状态快照。
+   *
+   * ## 为什么是快照，而不是"轮次开始时刻 vs 停止时刻"的墙钟比较
+   *
+   * 这里原来存的是 `cycleStartedAt = Date.now()`，判据写成
+   * `cycleStartedAt < stopRequestedAt`。**毫秒粒度不是因果顺序**：
+   * `start()` 之后立刻 `stop()` 时，这两个 `Date.now()` 完全可能落在
+   * **同一毫秒** —— 于是"停止前就在跑的那一轮"被判成"停止之后才开始的"，
+   * 整轮决策被跳过、**保护单根本没挂**（违反 §2.6）。
+   *
+   * 实测形态：`npm test` 全量（2126 条、并行、机器负载高）时
+   * `autoTrader.test.ts` 的 "stopping a trader waits for the cycle already in
+   * flight" 偶发红，而单独跑必绿；把 `Date.now()` 固定成同一个值可以 100% 复现。
+   *
+   * 而停止判据真正关心的是**先后关系**，不是时刻差 —— 带停止请求的
+   * "停止前 / 停止后"二分，在**轮次开始那一刻**取一个快照就是精确的：
+   *
+   *   · 此刻还没有人请求停止 ⇒ 这一轮属于"停止前就在跑" ⇒ 把保护单挂完；
+   *   · 此刻已有停止请求     ⇒ 这一轮是"停止之后才开始的" ⇒ 一个单都不下。
+   *
+   * 与时间比较的语义完全一致，只是不再有粒度歧义。见执行循环里那段判据。
+   */
+  private cycleStartedAfterStopRequest = false;
   /**
    * 有多少轮"超时了但还没真正结束"。
    *
@@ -1942,7 +1964,7 @@ export class AutoTrader {
      * ⚠️ **置位必须发生在 abort 之前**：abort 触发的错误处理可能先跑完，
      * 而在那个窗口里循环仍会认为"没被要求停止"。
      */
-    this.stopRequestedAt = Date.now();
+    this.stopRequested = true;
     if (persist) {
       this.abortCurrentCycle?.abort();
     }
@@ -1965,13 +1987,6 @@ export class AutoTrader {
   }
 
   /**
-   * Resolve once no cycle is running.
-   *
-   * `timeoutMs` bounds the wait so shutdown can never hang forever on a stuck
-   * exchange call — but it returns `false` in that case rather than pretending
-   * the cycle finished, so the caller can say so in the log.
-   */
-  /**
    * **立刻中止在途的那一轮决策**（拆掉正在等待的 LLM 请求）。
    *
    * 给操作员的"停止"用：那条路径不该干等一轮跑完（见 `stop()` 里的说明）。
@@ -1981,16 +1996,45 @@ export class AutoTrader {
     this.abortCurrentCycle?.abort();
   }
 
+  /**
+   * Resolve once no cycle is running.
+   *
+   * `timeoutMs` bounds the wait so shutdown can never hang forever on a stuck
+   * exchange call — but it returns `false` in that case rather than pretending
+   * the cycle finished, so the caller can say so in the log.
+   *
+   * ## ⚠️ 超时定时器必须被清掉（2026-11-09，测试进程被拖住 60 秒）
+   *
+   * 原来这里是 `Promise.race([pending, new Promise(resolve => setTimeout(...))])`。
+   * 竞速的一方赢了**不会取消另一方** —— 那个 `setTimeout` 仍然挂在事件循环上，
+   * 一直到 `timeoutMs` 才释放。而 `timeoutMs` 默认是 **60 秒**。
+   *
+   * 实测代价：`npx tsx --test` 只跑一条用 `stop()` 的用例，两个被测用例本身
+   * 合计 0.6 秒，**整个测试进程却要 60.19 秒才退出**（日志里的
+   * `duration_ms: 60188`）—— 因为 `stop()` 调了两次 `waitForIdle`，留下两个
+   * 60 秒的定时器在撑着事件循环。生产侧的停机路径同样会被拖住（`stopAll()` 里
+   * 每个机器人一次），只是那里通常紧接着 `process.exit()`，所以没暴露出来。
+   *
+   * 所以改成手动清理：谁先完成谁 `clearTimeout`，一次调用最多只留一个
+   * **确定会被释放**的定时器。
+   */
   async waitForIdle(timeoutMs = 60_000): Promise<boolean> {
     const pending = this.cyclePromise;
     if (!pending) return true;
-    return Promise.race([
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (idle: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(idle);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
       pending.then(
-        () => true,
-        () => true,
-      ),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
-    ]);
+        () => finish(true),
+        () => finish(true),
+      );
+    });
   }
 
   private setStatus(status: TraderStatus, error: string | null): void {
@@ -2203,7 +2247,8 @@ export class AutoTrader {
     settings.set(`param_change_log:${traderId}`, JSON.stringify([now, ...recent].slice(0, 20)));
   }
 
-  private async ensurePositionMode(): Promise<void> {    const mode = await this.deps.broker.ensureOneWayMode().catch((error) => ({
+  private async ensurePositionMode(): Promise<void> {
+    const mode = await this.deps.broker.ensureOneWayMode().catch((error) => ({
       changed: false,
       warning: `无法读取持仓模式：${(error as Error).message}`,
     }));
@@ -2862,13 +2907,13 @@ export class AutoTrader {
   private async runCycle(cycleNumber: number, signal?: AbortSignal): Promise<string> {
     const traderId = this.deps.trader.id;
     /*
-     * **本轮的开始时刻** —— 停止检查用它区分「停止前就在跑的那一轮」
-     * 与「停止之后才开始的新轮次」。见执行循环里那个判据的说明。
+     * **本轮开始时**是否已有停止请求 —— 取状态快照，不做任何时间比较。
+     * 见 `cycleStartedAfterStopRequest` 字段的注释（那里记了墙钟判据的 flaky 事故）。
      *
      * ⚠️ 用**成员变量**而不是往下传参数：`runCycleBody` 的签名已经很长，
      * 而这个值只被一个地方读（执行循环里的停止判据）。
      */
-    this.cycleStartedAt = Date.now();
+    this.cycleStartedAfterStopRequest = this.stopRequested;
 
     /*
      * 本轮**已经拿到的东西**，边走边填。
@@ -5079,22 +5124,35 @@ export class AutoTrader {
        *
        * ## 判据：**这一轮是不是在停止请求之后才开始的**
        *
+       * 判据读的是 `cycleStartedAfterStopRequest` —— 在 `runCycle` 开头取的
+       * **状态快照**，不是两个墙钟时刻的比较：
+       *
        * ```
-       *   cycleStartedAt < stopRequestedAt  ⇒ 这一轮在停止前就在跑
-       *                                       ⇒ 放行（把 ② 做完）
-       *   cycleStartedAt >= stopRequestedAt ⇒ 停止之后才开的轮次
-       *                                       ⇒ 全部跳过（满足 ①）
+       *   cycleStartedAfterStopRequest === false ⇒ 这一轮在停止前就在跑
+       *                                           ⇒ 放行（把 ② 做完）
+       *   cycleStartedAfterStopRequest === true  ⇒ 停止之后才开的轮次
+       *                                           ⇒ 全部跳过（满足 ①）
        * ```
+       *
+       * ## ⚠️ 为什么从"时刻比较"改成"状态快照"（2026-11-09，flaky 测试）
+       *
+       * 原来写的是 `cycleStartedAt < stopRequestedAt`（两个 `Date.now()`）。
+       * **毫秒粒度不是因果顺序**：`start()` 之后立刻 `stop()` 时两者可能落在
+       * **同一毫秒** ⇒ `cycleStartedAt >= stopRequestedAt` 成立 ⇒ 这一轮被整轮
+       * 跳过 ⇒ **保护单没挂**，而 `stop()` 却已经正常返回。
+       *
+       * 外显形态就是全量 `npm test`（并行、负载高）里
+       * `autoTrader.test.ts` 的 "stopping a trader waits for the cycle already
+       * in flight" 偶发红（单独跑必绿）；把 `Date.now()` 固定成同一个值
+       * 可以 100% 复现。快照没有粒度问题，而语义与时刻比较完全一致。
+       *
        * ⚠️ **不能用"是否已经执行过决策"来判断**（我第一版就是那样）：
        * 实测 `start()` 后立刻 `stop()` 时，那一轮已经在 `await complete()`
        * 里、但还没到执行循环 —— 用 `executedAny` 会把它整轮跳过，
        * 于是那条契约测试立刻变红（"stop() must not return before the
        * in-flight cycle has placed its protection"）。
-       * 而按**轮次开始时间**判断就精确了：那一轮确实在停止前就开始了。
        */
-      const cycleStartedBeforeStop =
-        this.stopRequestedAt !== null && this.cycleStartedAt < this.stopRequestedAt;
-      if (this.stopRequestedAt !== null && !cycleStartedBeforeStop) {
+      if (this.cycleStartedAfterStopRequest) {
         progress.executionLog.push({
           action: decision.action,
           symbol: decision.symbol,
@@ -5466,7 +5524,6 @@ export class AutoTrader {
   }
 
   /**
-  /**
    * 撤掉某个标的上、**指定类别**的全部存活保护单，返回撤掉的张数。
    *
    * ⚠️ **为什么撤"全部同类"而不是"DB 里记的那一张"、以及它为什么必须存在**，
@@ -5494,6 +5551,24 @@ export class AutoTrader {
     symbol: string,
     kinds: { stop: boolean; target: boolean },
   ): Promise<number> {
+    /*
+     * ⚠️ **模拟盘没有"交易所侧的保护单"可撤 —— 不要发这个查询**（2026-11-09 修）。
+     *
+     * 保护单在 dry-run 下走 `broker.placeAlgoOrder` 的本地模拟分支，**从不真的挂到
+     * 交易所**；撤回同样被 `cancelOrder` 的 dryRun 守卫吃掉（直接返回 true）。
+     * 所以这里查交易所只会得到两种坏结果：
+     *
+     *   · **没有凭据** → `signedRequest` 直接抛「签名接口 … 需要 API 凭据」，
+     *     被下面的 catch 吞掉：一次注定失败的调用，什么也没学到；
+     *   · **绑定了真实账户**（PR #185 允许模拟盘这么做）→ 读到的是**别的机器人或
+     *     手工**在同一标的上的挂单，于是 `cancelled > 1` 时对模拟盘发一条
+     *     「有多张同类保护单同时存活」的**假告警** —— 一个把正常行为报成异常的检查，
+     *     比没有检查更糟。
+     *
+     * 而 PR #185 的前提就是"模拟盘全程本地模拟"。⇒ 直接返回 0。
+     */
+    if (this.isDryRun) return 0;
+
     const wanted = (kind: string): boolean =>
       (kinds.stop && kind.includes('STOP')) || (kinds.target && kind.includes('TAKE_PROFIT'));
     let cancelled = 0;
@@ -6166,11 +6241,7 @@ export class AutoTrader {
        * 替他决定平掉，比留一个无保护的仓位更越界。所以报错，让他自己处置。
        */
       const fallbackPercent = this.activeConfig.riskControl.fallbackStopLossPercent;
-      const fallbackDistance = live.entryPrice * (fallbackPercent / 100);
-      const adoptedStop =
-        live.side === 'long'
-          ? live.entryPrice - fallbackDistance
-          : live.entryPrice + fallbackDistance;
+      const adoptedStop = fallbackStopPrice(live.entryPrice, live.side === 'long', fallbackPercent);
 
       const protection = await this.replaceProtection({
         symbol: live.symbol,
@@ -6563,9 +6634,7 @@ export class AutoTrader {
         stop = local.stop_loss as number;
       } else {
         const percent = this.activeConfig.riskControl.fallbackStopLossPercent;
-        stop = isLong
-          ? live.entryPrice * (1 - percent / 100)
-          : live.entryPrice * (1 + percent / 100);
+        stop = fallbackStopPrice(live.entryPrice, isLong, percent);
         if (!(isLong ? stop < mark : stop > mark)) {
           this.emit(
             'error',
@@ -11629,8 +11698,7 @@ reduceQuantity: null,
     let stopForProtection = decision.stopLoss ?? local.stop_loss;
     if (stopForProtection === null || !(stopForProtection > 0)) {
       const fallbackPercent = this.activeConfig.riskControl.fallbackStopLossPercent;
-      const distance = fillPrice * (fallbackPercent / 100);
-      stopForProtection = local.side === 'long' ? fillPrice - distance : fillPrice + distance;
+      stopForProtection = fallbackStopPrice(fillPrice, local.side === 'long', fallbackPercent);
       this.emit(
         'warn',
         `${decision.symbol} 加仓时本地没有止损记录（可能是收养的仓位），已按兜底比例 ${fallbackPercent}% 补挂 ${stopForProtection.toFixed(6)} —— 请按你自己的失效位调一次。`,
@@ -11890,8 +11958,7 @@ reduceQuantity: null,
     let stopForProtection = decision.stopLoss ?? local.stop_loss;
     if (stopForProtection === null || !(stopForProtection > 0)) {
       const fallbackPercent = this.activeConfig.riskControl.fallbackStopLossPercent;
-      const distance = exitPrice * (fallbackPercent / 100);
-      stopForProtection = local.side === 'long' ? exitPrice - distance : exitPrice + distance;
+      stopForProtection = fallbackStopPrice(exitPrice, local.side === 'long', fallbackPercent);
       this.emit(
         'warn',
         `${decision.symbol} 减仓时本地没有止损记录（可能是收养的仓位），已按兜底比例 ${fallbackPercent}% 补挂 ${stopForProtection.toFixed(6)} —— 请按你自己的失效位调一次。`,
@@ -12843,7 +12910,8 @@ reduceQuantity: null,
   private buildPromptPositions(
     localPositions: PositionRow[],
     snapshots: Map<string, MarketSnapshot>,
-  ): PromptPosition[] {    return localPositions.map((p) => ({
+  ): PromptPosition[] {
+    return localPositions.map((p) => ({
       position: this.toPositionView(p, snapshots),
       snapshot: snapshots.get(p.symbol) ?? null,
       holdingMinutes: (Date.now() - new Date(p.opened_at).getTime()) / 60_000,
@@ -13206,6 +13274,24 @@ reduceQuantity: null,
 /* -------------------------------------------------------------------------- */
 /*  Module helpers                                                             */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * 按**兜底比例**算一个止损价：`基准价 ± 基准价 × 比例%`。
+ *
+ * ## 为什么抽出来（2026-11-09）
+ *
+ * 同一道算式在本文件里原来有**四份副本**（收养手动仓位、补挂缺失的保护单、
+ * 加仓、减仓），每份都手写 `price × (percent / 100)` 再按方向加减。
+ * §5.4 说"金额相关的算术只在一个地方算"—— 四份副本迟早有一份被改错方向
+ * 或者少除一个 100，而那种错误既不抛也不崩，**只会让止损落在错误的一侧**。
+ *
+ * 基准价由调用方定，但必须是**那笔交易真正的入场/出场口径**（不是随手拿现价）：
+ * 收养与补挂用 `entryPrice`，加仓用成交价，减仓用减仓价 —— 本函数只管公式。
+ */
+function fallbackStopPrice(referencePrice: number, isLong: boolean, percent: number): number {
+  const distance = referencePrice * (percent / 100);
+  return isLong ? referencePrice - distance : referencePrice + distance;
+}
 
 /**
  * Client order ids are how we correlate our records with the exchange's.

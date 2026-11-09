@@ -326,3 +326,58 @@ test('★★ 四类该恢复的持久态都要被恢复 —— 逐一钉住，�
     assert.ok(attempted.has(id), `★★ 持久态 ${status} 的机器人必须被恢复`);
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/*  纯模拟盘机器人的对账：没有交易所侧可对                                        */
+/* -------------------------------------------------------------------------- */
+
+test('★★ 纯模拟盘机器人点「对账」直接返回空结果 —— 不去建交易所连接（PR #185 传播缺口）', async () => {
+  /*
+   * Why this test exists（2026-11-09）。
+   *
+   * PR #185 允许机器人不绑交易所账户（`exchange_account_id = NULL`），但
+   * `reconcileTrader()` 仍无条件走 `connectionFor(traderId, exchangeAccountId, dryRun)`。
+   * 对一台**从未启动过**的纯模拟盘机器人：库里 `dry_run = NULL`，
+   * `effectiveDryRun()` 于是回落读环境（实盘部署下为 `false`）→
+   * `connectionFor(null, false)` 抛出「没有绑定交易所账户，只能以模拟盘运行」
+   * → 操作员点「对账」得到 400，功能看起来是坏的。
+   *
+   * 而它本来就没有可对的东西：模拟盘的成交/持仓/盈亏全在本地台账里，
+   * 交易所流水里从来没有它的单。所以正确行为是**短路返回空结果**，
+   * 与 `autoTrader` 总账校验对 `exchangeAccountId === null` 的处理一致。
+   *
+   * 负向校准：把 `reconcileTrader()` 里的 null 短路删掉 → 本用例立刻红
+   * （抛「只能以模拟盘运行」，而不是返回 0）。
+   */
+  const model = aiModels.create({
+    provider: 'deepseek',
+    label: '纯模拟盘模型',
+    model: 'm',
+    baseUrl: 'https://example.invalid',
+    apiKeyEnc: '',
+    temperature: 0.2,
+    maxTokens: 4096,
+    timeoutSeconds: 60,
+    maxRetries: 1,
+  });
+  const id = traders.create({
+    name: '纯模拟盘',
+    exchangeAccountId: null,
+    aiModelId: model.id,
+    strategyId: null,
+    cycleIntervalMinutes: 15,
+    initialEquity: 1000,
+    paperStartingBalance: 1000,
+  }).id;
+  /* 从未启动过 —— 这正是复现条件（`dryRun` 为 undefined 时回落读环境）。 */
+  assert.equal(traders.get(id)?.dryRun, undefined);
+
+  const manager = new TraderManager(new Vault(Buffer.alloc(32, 7)));
+  const result = await manager.reconcileTrader(id);
+
+  assert.deepEqual(
+    result,
+    { recovered: 0, corrected: 0, correctedAttempted: 0, correctedKept: 0, funding: 0 },
+    '纯模拟盘没有交易所侧可对，必须返回空结果而不是抛错',
+  );
+});
