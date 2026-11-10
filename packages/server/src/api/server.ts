@@ -36,6 +36,7 @@ import {
 } from '@aq/shared';
 import { z } from 'zod';
 import type { ExchangeConnection } from '../binance/bootstrap.js';
+import type { GateConnection } from '../gate/connection.js';
 import { preflight } from '../binance/bootstrap.js';
 import type { Vault } from '../crypto/vault.js';
 import { dbPath, env, webDistDir } from '../env.js';
@@ -3038,7 +3039,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    *
    * 返回 `null` 表示**找不到凭据行**（`错误`那条路要如实说出来，而不是静默当空仓）。
    */
-  const openReadOnlyFor = async (trader: Trader): Promise<ExchangeConnection | null> => {
+  const openReadOnlyFor = async (trader: Trader): Promise<ExchangeConnection | GateConnection | null> => {
     if (deps.openReadOnlyConnection) return deps.openReadOnlyConnection();
     /*
      * 纯模拟盘机器人没有交易所账户（用户 2026-10-27 需求）——
@@ -3048,6 +3049,21 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     if (trader.exchangeAccountId === null) return null;
     const row = exchanges.getWithSecret(trader.exchangeAccountId);
     if (!row) return null;
+    /*
+     * ⚠️ **按交易所分派**（2026-11-11 端到端联调实测）：原来这里无条件走币安 ——
+     * Gate 机器人的"账户/持仓"视图会拿 Gate 凭据去打币安端点，回报
+     * 「币安错误 -2014：API-key format invalid」，界面上看起来像凭据坏了。
+     * 两个连接对象在只读视图用到的三个方法（getAccountState/getPositions/
+     * getOpenOrders）形状一致，所以返回类型收成 union 即可。
+     */
+    if (row.exchange === 'gate') {
+      const { connectGate, gateEnvironmentOf } = await import('../gate/connection.js');
+      return connectGate({
+        apiKey: row.api_key,
+        apiSecret: deps.vault.decrypt(row.api_secret_enc),
+        environment: gateEnvironmentOf(row.testnet === 1),
+      });
+    }
     const { connectExchange } = await import('../binance/bootstrap.js');
     return connectExchange({
       environment: row.testnet === 1 ? 'demo' : 'production',
