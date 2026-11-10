@@ -8,7 +8,8 @@ import {
   type TraderStatus,
 } from '@aq/shared';
 import { connectExchange, preflight, type ExchangeConnection, type PreflightCheck } from '../binance/bootstrap.js';
-import type { BinanceEnvironment } from '../binance/endpoints.js';
+import type { AccountState } from '../binance/account.js';
+import { connectGate, gateEnvironmentOf, type GateConnection } from '../gate/connection.js';
 import { BinanceUserDataStream } from '../binance/ws.js';
 import type { Vault } from '../crypto/vault.js';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -289,12 +290,138 @@ const DEFAULT_PAPER_BALANCE = 1000;
  * 见 `connectionFor` 里那段说明 —— 键里少了 `dryRun` 会让模拟盘启动复用到实盘连接，
  * 日志写模拟、订单真实成交（2026-10-11 审查发现的 P0）。
  */
+/**
+ * 一次交易所连接：**币安或 Gate**。
+ *
+ * 两种连接的 `broker` 形状相同（都满足 `trader/brokerPort.ts` 的 `BrokerPort`），
+ * 但行情层与合约注册表是各自的实现：
+ *
+ * ```
+ *   币安：BinanceMarketData + SymbolRegistry（同步 API）
+ *   Gate：GateMarketPort   + GateContractRegistry（异步 API，见 gate/account.ts）
+ * ```
+ *
+ * ⇒ 用 union 而不是硬塞成一种形状。需要"交易循环那一套币安形状依赖"的调用点
+ * 必须先用 `isGateConnection()` 收窄；目前它们对 Gate 一律**明确拒绝**（见
+ * `requireTradingConnection`），直到 Gate 行情层与注册表适配完成合并。
+ */
+export type AnyExchangeConnection = ExchangeConnection | GateConnection;
+
+/**
+ * 这条连接是不是 Gate 的。
+ *
+ * 用 `exchange` 字段判别（而不是 `instanceof GateBroker`）：它不依赖具体类，
+ * 且未来新增交易所时判别方式不用改。
+ */
+export function isGateConnection(
+  connection: AnyExchangeConnection,
+): connection is GateConnection {
+  return (connection as GateConnection).exchange === 'gate';
+}
+
+/**
+ * `exchange_accounts.exchange` → 连接类型。**唯一的按交易所分派处。**
+ *
+ * 返回值里带 `'unsupported'` 而不是默认到币安：见 `createExchangeConnection`
+ * 末尾那段说明 —— 回落会让 A 交易所的凭据去 B 交易所下单。
+ */
+export function accountExchangeKind(exchange: string): 'binance' | 'gate' | 'unsupported' {
+  if (exchange === 'gate') return 'gate';
+  if (exchange === 'binance') return 'binance';
+  return 'unsupported';
+}
+
+export interface CreateConnectionInput {
+  traderId: number;
+  /** `exchange_accounts.exchange` 的原始值（分派依据）。 */
+  exchange: string;
+  apiKey: string;
+  apiSecret: string;
+  /**
+   * 账户的**测试网标记** —— 连接环境只由它决定（不是全局 env，也不是 `dryRun`）。
+   */
+  testnet: boolean;
+  dryRun: boolean;
+  /** 币安模拟盘的本地账户读数；Gate 走测试网真实撮合，没有这个。 */
+  paperAccount?: () => AccountState | Promise<AccountState>;
+  wsHostOverride?: string;
+}
+
+/** 连接构造器的注入点（单测用桩；生产用 `DEFAULT_CONNECTION_FACTORIES`）。 */
+export interface ExchangeConnectionFactories {
+  binance: typeof connectExchange;
+  gate: typeof connectGate;
+}
+
+export const DEFAULT_CONNECTION_FACTORIES: ExchangeConnectionFactories = {
+  binance: connectExchange,
+  gate: connectGate,
+};
+
+/**
+ * **按交易所创建连接**（导出的纯分派入口，单测直接调用它，不必启动 Manager）。
+ *
+ * `connectionFor()` 负责缓存与"无账户的纯模拟盘"分支；"账户 → 连接"这一段
+ * 抽到这里，是为了让它能在**不碰数据库、不发网络请求**的情况下被测（注入桩工厂）。
+ */
+export async function createExchangeConnection(
+  input: CreateConnectionInput,
+  factories: ExchangeConnectionFactories = DEFAULT_CONNECTION_FACTORIES,
+): Promise<AnyExchangeConnection> {
+  const kind = accountExchangeKind(input.exchange);
+
+  if (kind === 'gate') {
+    /*
+     * ⚠️ **Gate 的「模拟盘」是官方测试网，不是币安那种本地模拟**。
+     *
+     * 见 `gate/broker.ts` 开头：Gate 用真实撮合、假钱，`GateBroker.isDryRun`
+     * 恒为 false。于是"模拟盘启动 + 正式网账户"= **拿真钱下单**。
+     * 所以这里硬性拒绝：要么给测试网账户，要么按实盘启动。宁可不启动，
+     * 也不能让操作员以为它在纸面上试。
+     */
+    if (input.dryRun && !input.testnet) {
+      throw new Error(
+        'Gate 账户不支持本地模拟盘：它的「模拟」是 Gate 官方测试网（真实撮合、假钱）。' +
+          '请给这台机器人绑定一个勾选了「测试网」的 Gate 账户，或按实盘启动。',
+      );
+    }
+    return factories.gate({
+      apiKey: input.apiKey,
+      apiSecret: input.apiSecret,
+      /* ⚠️ 环境由**账户的 testnet 字段**决定 —— 不是全局 env，也不是 dryRun。 */
+      environment: gateEnvironmentOf(input.testnet),
+    });
+  }
+
+  if (kind === 'binance') {
+    return factories.binance({
+      environment: input.testnet ? 'demo' : 'production',
+      apiKey: input.apiKey,
+      apiSecret: input.apiSecret,
+      dryRun: input.dryRun,
+      /* 模拟盘（绑定了真实账户也一样）的账户读数走本地台账 —— 见 `connectionFor` 原注释。 */
+      ...(input.dryRun && input.paperAccount ? { paperAccount: input.paperAccount } : {}),
+      quiet: true,
+      ...(input.wsHostOverride ? { wsHostOverride: input.wsHostOverride } : {}),
+    });
+  }
+
+  /*
+   * 兜底必须**显式报错**，绝不能回落到币安：那会拿 A 交易所的凭据去 B 交易所下单。
+   * 类型上 `ExchangeId` 目前只有两个值，这里是防御库内旧行 / 手工 SQL 数据。
+   */
+  throw new Error(
+    `暂不支持的交易所「${input.exchange}」—— 目前只接了 binance 与 gate。` +
+      '不会回落到币安：拿别的交易所的凭据去币安下单是危险的行为。',
+  );
+}
+
 function connectionCacheKey(traderId: number, dryRun: boolean): string {
   return `${traderId}:${dryRun ? 'paper' : 'live'}`;
 }
 
 /** 把某台机器人**两种模式**的连接都从缓存里去掉（停止 / 失败 / 清理时用）。 */
-function dropConnections(store: Map<string, ExchangeConnection>, traderId: number): void {
+function dropConnections(store: Map<string, AnyExchangeConnection>, traderId: number): void {
   store.delete(connectionCacheKey(traderId, true));
   store.delete(connectionCacheKey(traderId, false));
 }
@@ -1511,7 +1638,7 @@ export class TraderManager {
    * 都能凑成这个组合。所以启动必须**先占位、再干活**。
    */
   private readonly starting = new Set<number>();
-  private readonly connections = new Map<string, ExchangeConnection>();
+  private readonly connections = new Map<string, AnyExchangeConnection>();
   private readonly userStreams = new Map<number, BinanceUserDataStream>();
   /**
    * 成交触发的即时对账，按机器人去抖 —— 见 `scheduleFillReconcile()`。
@@ -2014,7 +2141,7 @@ export class TraderManager {
     traderId: number,
     exchangeAccountId: number | null,
     dryRun: boolean,
-  ): Promise<ExchangeConnection> {
+  ): Promise<AnyExchangeConnection> {
     /*
      * ⚠️ **缓存键必须带上 `dryRun`（2026-10-11 审查发现的 P0）。**
      *
@@ -2058,44 +2185,64 @@ export class TraderManager {
     const account = exchanges.getWithSecret(exchangeAccountId);
     if (!account) throw new Error(`找不到交易所账户 ${exchangeAccountId}`);
 
-    const apiKey = account.api_key;
-    const apiSecret = this.vault.decrypt(account.api_secret_enc);
-
-    const environment: BinanceEnvironment = account.testnet === 1 ? 'demo' : 'production';
-
-    const connection = await connectExchange({
-      environment,
-      apiKey,
-      apiSecret,
+    /*
+     * ══════════════════════════════════════════════════════════════════════
+     *  **按交易所分派连接**（2026-11-11 Gate 接线）
+     * ══════════════════════════════════════════════════════════════════════
+     *
+     * 原来这里写死 `connectExchange(...)` —— 于是给一个 Gate 账户启动机器人，
+     * 会拿 Gate 的 key 去请求币安（签名必然失败，而错误信息还是币安口径的）。
+     *
+     * 现在交给 `createExchangeConnection()`：按 `exchange_accounts.exchange`
+     * 造对应连接；**环境分别来自账户的 `testnet` 字段**（币安 demo/production、
+     * Gate testnet/live），不是全局 env，也不是 `dryRun`。
+     *
+     * ⚠️ 模拟盘即使**绑定了真实账户**，账户读数也走本地台账 —— 否则模拟盘会看到
+     * 真金白银的余额，而它下的单在交易所根本不存在，两边永远对不上。
+     * 这正是用户说的「模拟盘不应该根据真实钱包的余额」。
+     * （`paperAccount` 只有币安分支会用到；Gate 的"模拟"是测试网，见
+     * `gate/connection.ts` 与 `createExchangeConnection` 的说明。）
+     */
+    const connection = await createExchangeConnection({
+      traderId,
+      exchange: account.exchange,
+      apiKey: account.api_key,
+      apiSecret: this.vault.decrypt(account.api_secret_enc),
+      testnet: account.testnet === 1,
       dryRun,
-      /*
-       * 模拟盘即使**绑定了真实账户**，账户读数也走本地台账 —— 否则模拟盘会看到
-       * 真金白银的余额，而它下的单在交易所根本不存在，两边永远对不上。
-       * 这正是用户说的「模拟盘不应该根据真实钱包的余额」。
-       */
-      ...(dryRun ? { paperAccount: () => this.paperAccountStateOf(traderId) } : {}),
-      /*
-       * **不给每个机器人刷两条启动日志。**
-       *
-       * `connectExchange` 在非 quiet 时会打「已连接 …」和「已加载 528 个
-       * 可交易的 USDT 本位永续合约；请求权重上限 2400/分钟」。
-       * 而这里是**每个机器人各建一条连接**（缓存按 `traderId`），
-       * 于是 5 个机器人启动时把同样两句话刷 5 遍 ——
-       * 实测在「数据与日志」页上，十几行日志里只有两行是新信息。
-       *
-       * `server.ts` 里那三处调用本来就传了 `quiet: true`，这里是漏掉的第四处。
-       *
-       * ⚠️ 顺便记下**没有**做的事：连接缓存是按 `traderId` 的，
-       * 所以共用同一个交易所账户的多个机器人会各建一条连接（各做一次校时、
-       * 各拉一次 `exchangeInfo`）。**那确实是浪费，但不改** ——
-       * 它要动"下单用的 broker 对象归谁"，而收益只是启动时省几次 API 调用
-       * （不是热点），风险与收益不成比例。
-       */
-      quiet: true,
+      paperAccount: () => this.paperAccountStateOf(traderId),
       ...(process.env.BINANCE_WS_HOST ? { wsHostOverride: process.env.BINANCE_WS_HOST } : {}),
     });
 
     this.connections.set(cacheKey, connection);
+    return connection;
+  }
+
+  /**
+   * 把连接收窄成**交易循环能直接用的币安形状连接**（`ExchangeConnection`）。
+   *
+   * ## 为什么 Gate 在这里被明确拒绝（而不是硬转）
+   *
+   * `AutoTrader` 的依赖类型是币安的具体类型：`registry: SymbolRegistry`（同步）、
+   * `market: BinanceMarketData`（具体类，带 private 字段）。Gate 的对应物是
+   * `GateContractRegistry`（**异步** API：`all()` / `get()` / `quantityToSize()`）
+   * 与 `GateMarket`（`gate/market.ts`，并发实现中）。
+   *
+   * 两者形状没有对齐之前，唯一安全的做法是**明确失败**：给出"哪一步被阻止、为什么"。
+   * 绝不用币安行情服务驱动 Gate 下单 —— 那会让风控按币安的行情与合约精度去裁决
+   * Gate 的订单，而且不会报错。
+   */
+  private requireTradingConnection(
+    connection: AnyExchangeConnection,
+    purpose: string,
+  ): ExchangeConnection {
+    if (isGateConnection(connection)) {
+      throw new Error(
+        `该机器人绑定的是 Gate 账户；${purpose}需要交易循环的行情与合约注册表，` +
+          '而 Gate 行情适配层（GateMarket）尚未接线 —— 已阻止该操作，' +
+          '以免用币安行情服务驱动 Gate 下单。',
+      );
+    }
     return connection;
   }
 
@@ -3047,6 +3194,28 @@ export class TraderManager {
        */
       dropConnections(this.connections, traderId);
       const connection = await this.connectionFor(traderId, trader.exchangeAccountId, dryRun);
+      /*
+       * ⚠️ **Gate 账户：连接建得出来，但交易循环的行情/注册表适配还没合并。**
+       *
+       * 下面 `new MarketDataService(connection.market, connection.registry)` 与
+       * `new AutoTrader({ registry, market, ... })` 要的是**币安的具体类型**
+       *（同步 `SymbolRegistry` / `BinanceMarketData`）。Gate 的
+       * `GateContractRegistry` 是异步 API、`GateMarket` 由并发任务（task-15）实现中 ——
+       * 硬转过去会在运行期以"拿合约张数当币数"这类方式静默出错。
+       *
+       * ⇒ 在适配合并之前**宁可起不来**，并说清是哪一步被阻止。
+       * `permanent: true`：这不是网络抖动，重试 4 次只会把同一句话刷 4 遍。
+       */
+      if (isGateConnection(connection)) {
+        const detail =
+          '该机器人绑定的是 Gate 账户，但 Gate 行情适配层（GateMarket）尚未接线 —— ' +
+          '本次启动已阻止：绝不用币安行情服务驱动 Gate 下单。' +
+          '（Gate 行情由后续任务提供，合并后再放开 Gate 账户的启动。）';
+        checks.push({ name: '交易所适配', severity: 'error', ok: false, detail, blocking: true });
+        dropConnections(this.connections, traderId);
+        this.setTraderStatus(traderId, 'error', detail);
+        return { result: { ok: false, error: detail, preflight: checks }, permanent: true };
+      }
       const connectivity = await preflight(connection, { requireCredentials: !dryRun });
       checks.push(...connectivity);
 
@@ -4184,7 +4353,10 @@ export class TraderManager {
     const live = this.running.get(traderId);
     if (live) return live.runReconcile();
 
-    const connection = await this.connectionFor(traderId, trader.exchangeAccountId, this.effectiveDryRun(traderId, trader));
+    const connection = this.requireTradingConnection(
+      await this.connectionFor(traderId, trader.exchangeAccountId, this.effectiveDryRun(traderId, trader)),
+      '对账',
+    );
     /* `null` = 不依赖策略（AI 托管）；这里本来就已容错，只是要接受空值。 */
     const strategyRecord =
       trader.strategyId === null ? undefined : strategies.get(trader.strategyId);
@@ -4251,7 +4423,10 @@ export class TraderManager {
      * 那会让"按一个按钮"变成"等一次模型请求"，而且在模型故障时根本用不了。
      * **操作员的退出路径不能依赖任何外部服务。**
      */
-    const connection = await this.connectionFor(traderId, trader.exchangeAccountId, this.effectiveDryRun(traderId, trader));
+    const connection = this.requireTradingConnection(
+      await this.connectionFor(traderId, trader.exchangeAccountId, this.effectiveDryRun(traderId, trader)),
+      '手工平仓',
+    );
     /* `null` = 不依赖策略（AI 托管）—— 手工平仓同理，绝不能因为策略没了就用不了。 */
     const strategyRecord =
       trader.strategyId === null ? undefined : strategies.get(trader.strategyId);
@@ -4332,7 +4507,10 @@ export class TraderManager {
          * 已停止：建一个一次性实例（与 `closePosition` 同一条路径）。
          * 模型换成"永远拒绝"的桩 —— 撤单绝不该调用 LLM。
          */
-        const connection = await this.connectionFor(traderId, trader.exchangeAccountId, this.effectiveDryRun(traderId, trader));
+        const connection = this.requireTradingConnection(
+          await this.connectionFor(traderId, trader.exchangeAccountId, this.effectiveDryRun(traderId, trader)),
+          '撤销挂单',
+        );
         const strategyRecord =
           trader.strategyId === null ? undefined : strategies.get(trader.strategyId);
         const config: StrategyConfig = this.configOf(strategyRecord);
