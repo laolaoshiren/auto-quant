@@ -10,7 +10,7 @@ import type { Decision } from './decision.js';
  * Phase 1 ships Binance USDⓈ-M futures only. The union is intentionally open so
  * further venues can be added without touching call sites.
  */
-export const ExchangeIdSchema = z.enum(['binance']);
+export const ExchangeIdSchema = z.enum(['binance', 'gate']);
 export type ExchangeId = z.infer<typeof ExchangeIdSchema>;
 
 export const EXCHANGES: ReadonlyArray<{
@@ -20,6 +20,7 @@ export const EXCHANGES: ReadonlyArray<{
   available: boolean;
 }> = [
   { id: 'binance', label: '币安 USDT 本位合约', market: 'USDT 永续合约', available: true },
+  { id: 'gate', label: 'Gate.io USDT 本位合约', market: 'USDT 永续合约（Gate API v4）', available: false },
 ];
 
 /* -------------------------------------------------------------------------- */
