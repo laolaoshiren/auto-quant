@@ -24,6 +24,13 @@ export interface GateFuturesAccount {
   margin?: string;
   /** 结算币种，恒为 USDT。 */
   currency?: string;
+  /**
+   * 是否双向持仓模式（v4.15.5 起由账户响应提供）。
+   *
+   * ⚠️ Gate **没有** `GET /futures/usdt/dual_mode`（2026-11-11 实测 405）——
+   * 查询持仓模式只能读这个字段；设置才走 `POST /futures/usdt/dual_mode`。
+   */
+  in_dual_mode?: boolean;
 }
 
 /**

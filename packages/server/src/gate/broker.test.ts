@@ -237,6 +237,33 @@ test('行情：mark_price 取自 tickers', async () => {
   assert.equal(await broker.getMarkPrice('BTCUSDT'), 73959.9);
 });
 
+test('★★★ 持仓模式查询走账户响应的 in_dual_mode（Gate 没有 GET dual_mode —— 实测 405）', async () => {
+  const paths: string[] = [];
+  const rest = {
+    signed: async (_method: string, path: string) => {
+      paths.push(path);
+      if (path === '/futures/usdt/accounts') {
+        return { total: '100', unrealised_pnl: '0', available: '100', in_dual_mode: true };
+      }
+      throw new Error(`unexpected ${path}`);
+    },
+    publicGet: async () => [],
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  const broker = new GateBroker(rest, fakeContracts());
+  assert.equal(await broker.isHedgeMode(), true);
+  assert.ok(paths.every((p) => !p.includes('dual_mode')), '不得请求 GET dual_mode（那个端点不存在，405）');
+});
+
+test('持仓模式读取失败 → 按单向处理（不让机器人整轮停摆）', async () => {
+  const rest = {
+    signed: async () => {
+      throw new Error('Gate API GET /futures/usdt/accounts 失败（HTTP 500）');
+    },
+    publicGet: async () => [],
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  assert.equal(await new GateBroker(rest, fakeContracts()).isHedgeMode(), false);
+});
+
 test('isDryRun 恒为 false —— Gate 的模拟盘是测试网账户，不是本地模拟', () => {
   assert.equal(new GateBroker(fakeRest().rest, fakeContracts()).isDryRun, false);
 });

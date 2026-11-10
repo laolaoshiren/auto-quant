@@ -31,6 +31,7 @@ import { createLogger } from '../logger.js';
 import { GateAccountReader, GateContractRegistry, gateContractToSymbol, num, symbolToGateContract } from './account.js';
 import { GateRest } from './rest.js';
 import type {
+  GateFuturesAccount,
   GateFuturesAccountBook,
   GateFuturesContract,
   GateFuturesFill,
@@ -220,8 +221,23 @@ export class GateBroker {
   }
 
   async isHedgeMode(): Promise<boolean> {
-    const dual = await this.rest.signed<{ in_dual_mode: boolean }>('GET', '/futures/usdt/dual_mode');
-    return dual.in_dual_mode === true;
+    /*
+     * ⚠️ **Gate 没有 `GET /futures/usdt/dual_mode`**（2026-11-11 实测 HTTP 405）。
+     * 持仓模式由**账户响应**的 `in_dual_mode` 给出；设置才走 `POST dual_mode`。
+     * 之前用 GET 查询 → 每轮都抛错 → 风控把每一单都拒掉（用户截图：
+     * 「无法读取持仓模式…本轮没有任何下单」），Gate 机器人等于不能交易。
+     *
+     * 读不到 `in_dual_mode` 时按**单向**处理（Gate 新账户默认单向）：宁可放过，
+     * 也不要因为一个可选字段缺失而让整个机器人停摆。真正不匹配时交易所会以
+     * -4061 拒绝下单，那是一条能看懂的错误，比"每轮静默拒绝"好。
+     */
+    try {
+      const account = await this.rest.signed<GateFuturesAccount>('GET', '/futures/usdt/accounts');
+      return account.in_dual_mode === true;
+    } catch (error) {
+      log.warn(`[gate] 读取持仓模式失败，按单向处理：${(error as Error).message}`);
+      return false;
+    }
   }
 
   async ensureOneWayMode(): Promise<{ changed: boolean; warning: string | null }> {
