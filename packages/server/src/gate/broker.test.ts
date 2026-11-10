@@ -176,6 +176,18 @@ test('限价下单：gtc + 显式价格 + 客户端单号', async () => {
   assert.equal(body.text, 't-aq-x');
 });
 
+test('★★★ 客户端单号：t- 前缀 + 总长 ≤ 30（Gate 实测限长 30）', async () => {
+  const { rest, calls } = fakeRest();
+  const broker = new GateBroker(rest, fakeContracts());
+  /* 币安侧 makeClientId 生成 36 字符，直接传会被 Gate 拒。 */
+  const longId = 'entry-abc123xyz-ETHUSDT-0123456789ab';
+  await broker.placeOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 0.01, clientOrderId: longId });
+  const body = calls[0]!.body as Record<string, unknown>;
+  const text = String(body.text);
+  assert.ok(text.startsWith('t-'), '必须以 t- 开头');
+  assert.ok(text.length <= 30, `长度应 ≤30，实际 ${text.length}`);
+});
+
 test('★★★ 条件单触发方向：多止损=下穿(2)、空止损=上穿(1)、多止盈=上穿(1)、空止盈=下穿(2)', async () => {
   const cases: Array<{ side: 'BUY' | 'SELL'; type: string; expectedRule: number }> = [
     { side: 'SELL', type: 'STOP_MARKET', expectedRule: 2 },

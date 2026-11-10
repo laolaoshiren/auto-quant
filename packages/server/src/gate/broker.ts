@@ -49,7 +49,16 @@ const log = createLogger('gate:broker');
  * 前缀加上；已经是 `t-` 开头的原样保留（幂等）。
  */
 function toGateOrderText(clientOrderId: string): string {
-  return clientOrderId.startsWith('t-') ? clientOrderId : `t-${clientOrderId}`;
+  const prefixed = clientOrderId.startsWith('t-') ? clientOrderId : `t-${clientOrderId}`;
+  /*
+   * Gate 的 text **限长 30 字符**（2026-11-11 实测：`text content length longer
+   * than 30`）。`makeClientId` 给币安生成的是 36 —— 直接传必被拒。
+   *
+   * 截断是安全的：`makeClientId` 的唯一性来自**前缀后的时间戳+随机段**
+   * （`prefix-<stamp><random>-<symbol>`），它落在前 ~21 字符内，30 字符
+   * 足够保留全部唯一段，只丢掉尾部的符号可读性。
+   */
+  return prefixed.slice(0, 30);
 }
 
 /** 本系统的一侧（BUY/SELL 决定开平方向）→ Gate 的 `size` 符号。 */
