@@ -78,6 +78,9 @@ export class AgentRuntime {
    */
   private reviewing: Promise<void> | null = null;
 
+  /** 策略审视失败后的自动重试定时器（见 `triggerReview` 的 catch）。 */
+  private reviewRetryTimer: NodeJS.Timeout | null = null;
+
   constructor(private readonly deps: AgentRuntimeDeps) {}
 
   /**
@@ -153,6 +156,19 @@ export class AgentRuntime {
       .catch((error) => {
         // 纪律 1：绝不抛穿。智能体坏了不该让机器人停止交易。
         log.warn(`机器人 #${this.deps.traderId} 的策略审视失败（不影响交易）：${(error as Error).message}`);
+        /*
+         * **失败后 5 分钟自动重试一次**（2026-11-10 用户在服务器上看到
+         * 「完成策略审视：failed，0 步」—— 一次模型瞬时失败就让这轮自适应白跑，
+         * 而失去自适应的智能托管等于参数写死）。
+         * 只重试一次：避免模型持续失败时刷屏；`wake` 冷却与预算仍由 `decideWake` 管。
+         */
+        if (!this.reviewRetryTimer) {
+          this.reviewRetryTimer = setTimeout(() => {
+            this.reviewRetryTimer = null;
+            if (this.isEnabled()) this.triggerReview(reason);
+          }, 5 * 60_000);
+          this.reviewRetryTimer.unref();
+        }
       })
       .finally(() => {
         this.reviewing = null;
