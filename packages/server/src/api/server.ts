@@ -35,6 +35,7 @@ import {
   type TraderStatus,
 } from '@aq/shared';
 import { z } from 'zod';
+import type { AccountBalanceSnapshot } from '../binance/account.js';
 import type { ExchangeConnection } from '../binance/bootstrap.js';
 import type { GateConnection } from '../gate/connection.js';
 import { preflight } from '../binance/bootstrap.js';
@@ -1502,9 +1503,17 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     // Balances are read from the cache here so that a polling console stays
     // cheap; the dedicated endpoint below forces a fresh read on demand.
     const balances = await deps.balance.getAll();
+    /*
+     * Gate 账户不走 `deps.balance`（那是币安专用缓存）—— 逐条读，避免
+     * "拿 Gate key 打币安"导致的「API Key 无效」假报错（2026-11-11 实测）。
+     */
+    const gateBalances = new Map<number, Awaited<ReturnType<typeof readGateBalanceFor>>>();
+    for (const account of exchanges.list()) {
+      if (account.exchange === 'gate') gateBalances.set(account.id, await readGateBalanceFor(account.id));
+    }
 
     return exchanges.list().map((account) => {
-      const result = balances.get(account.id);
+      const result = account.exchange === 'gate' ? gateBalances.get(account.id) : balances.get(account.id);
       return {
         ...publicAccount(account),
         balance: result?.ok ? result.balance : null,
@@ -1524,7 +1533,10 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     if (!exchanges.get(id)) return reply.code(404).send({ ok: false, error: '找不到该凭据' });
 
     const refresh = String((request.query as { refresh?: string }).refresh ?? '') === '1';
-    const result = await deps.balance.get(id, { force: refresh });
+    const account = exchanges.get(id);
+    /* Gate 没有"缓存余额"这一层（每次都是实时读），所以 force 对它无意义。 */
+    const result =
+      account?.exchange === 'gate' ? await readGateBalanceFor(id) : await deps.balance.get(id, { force: refresh });
     if (!result.ok) return reply.code(200).send({ ok: false, error: result.error });
     return { ok: true, balance: result.balance, cached: result.cached };
   });
@@ -3039,6 +3051,37 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    *
    * 返回 `null` 表示**找不到凭据行**（`错误`那条路要如实说出来，而不是静默当空仓）。
    */
+  /**
+   * 按凭据读 Gate 测试网/正式网的账户余额。
+   *
+   * ⚠️ **2026-11-11 用户实测**：凭证卡片显示「API Key 无效」—— 因为
+   * `/exchange-accounts` 与 `/exchange-accounts/:id/balance` 走的是
+   * `deps.balance`（币安专用余额缓存），拿 Gate 的 key 打币安端点。
+   * Gate 账户在这里独立读，返回与币安同形的 `AccountBalanceSnapshot`。
+   */
+  const readGateBalanceFor = async (
+    accountId: number,
+  ): Promise<{ ok: true; balance: AccountBalanceSnapshot; cached: boolean } | { ok: false; error: string }> => {
+    const row = exchanges.getWithSecret(accountId);
+    if (!row) return { ok: false, error: '找不到该凭据' };
+    try {
+      const { connectGate, gateEnvironmentOf } = await import('../gate/connection.js');
+      const connection = await connectGate({
+        apiKey: row.api_key,
+        apiSecret: deps.vault.decrypt(row.api_secret_enc),
+        environment: gateEnvironmentOf(row.testnet === 1),
+      });
+      const state = await connection.broker.getAccountState();
+      return {
+        ok: true,
+        balance: { ...state, readAt: new Date().toISOString(), asset: 'USDT' },
+        cached: false,
+      };
+    } catch (error) {
+      return { ok: false, error: `Gate 余额读取失败：${(error as Error).message}` };
+    }
+  };
+
   const openReadOnlyFor = async (trader: Trader): Promise<ExchangeConnection | GateConnection | null> => {
     if (deps.openReadOnlyConnection) return deps.openReadOnlyConnection();
     /*
