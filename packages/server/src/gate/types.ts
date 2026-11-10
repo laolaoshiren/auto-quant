@@ -109,6 +109,19 @@ export interface GateFuturesOrder {
     rule?: number;
     expiration?: number;
   };
+  /**
+   * 价格保护单（`price_orders`）的"初始订单"——**契约/数量/价格都在这里面**，
+   * 顶层没有 `contract`/`size`（2026-11-11 联调实测：直接读顶层会 undefined）。
+   */
+  initial?: {
+    contract: string;
+    size: number;
+    price: string;
+    tif?: string;
+    reduce_only?: boolean;
+    close?: boolean;
+    text?: string;
+  };
   /** 是否自动平仓（止盈止损生成的单）。 */
   finish_as?: string;
 }

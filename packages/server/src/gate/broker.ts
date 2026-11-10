@@ -115,17 +115,21 @@ export function gatePriceOrderToAlgoResponse(
   contract: GateFuturesContract,
 ): BinanceAlgoOrderResponse {
   const multiplier = num(contract.quanto_multiplier) || 1;
-  const size = Math.abs(order.size);
-  const left = Math.abs(order.left);
+  /* price_orders 的契约/数量/价格在 `initial` 里（顶层没有，实测 undefined）。 */
+  const initial = order.initial;
+  const size = Math.abs(initial?.size ?? order.size);
+  const left = Math.abs(initial?.size ?? order.left);
   const filledSize = Math.max(0, size - left);
   const rule = order.trigger?.rule ?? 1;
+  const priceText = initial?.price ?? order.price;
+  const contractName = initial?.contract ?? order.contract;
   return {
     algoId: order.id,
     clientAlgoId: order.text ?? '',
     algoType: 'CONDITIONAL',
-    orderType: (num(order.price) === 0 ? 'MARKET' : 'LIMIT') as BinanceAlgoOrderResponse['orderType'],
-    symbol: gateContractToSymbol(order.contract),
-    side: order.size > 0 ? 'BUY' : 'SELL',
+    orderType: (num(priceText) === 0 ? 'MARKET' : 'LIMIT') as BinanceAlgoOrderResponse['orderType'],
+    symbol: gateContractToSymbol(contractName ?? ''),
+    side: (initial?.size ?? order.size) > 0 ? 'BUY' : 'SELL',
     positionSide: 'BOTH',
     timeInForce: 'GTC',
     quantity: String(size * multiplier),
@@ -135,9 +139,9 @@ export function gatePriceOrderToAlgoResponse(
         ? 'CANCELLED'
         : 'WORKING') as BinanceAlgoOrderResponse['algoStatus'],
     triggerPrice: order.trigger?.price ?? '0',
-    price: order.price,
-    closePosition: order.is_close === true,
-    reduceOnly: order.is_reduce_only === true,
+    price: priceText,
+    closePosition: initial?.close === true || order.is_close === true,
+    reduceOnly: initial?.reduce_only === true || order.is_reduce_only === true,
     workingType: 'MARK_PRICE',
     priceProtect: false,
     /* Gate 的触发方向：rule=1 价格上穿触发 / rule=2 下穿触发 —— 记录在 activatePrice 之外的语义里。 */
@@ -299,8 +303,16 @@ export class GateBroker {
     contract: GateFuturesContract,
     contractName: string,
   ): Promise<PlacedOrder> {
-    const size = toSize(request.quantity ?? 0, contract);
-    if (size === 0) throw new Error(`Gate 条件单数量换算为 0 张（quantity=${request.quantity}，合约=${contractName}）。`);
+    /*
+     * ⚠️ **closePosition 条件单的 size 必须是 0**（2026-11-11 测试网实测：
+     * 传持仓张数会得到 `AUTO_INVALID_PARAM_INITIAL_SIZE: close size must zero`）。
+     * Gate 的语义是"触发时按当时的仓位全平"，所以它不需要、也不允许指定张数。
+     */
+    const closeAll = request.closePosition === true;
+    const size = closeAll ? 0 : toSize(request.quantity ?? 0, contract);
+    if (!closeAll && size === 0) {
+      throw new Error(`Gate 条件单数量换算为 0 张（quantity=${request.quantity}，合约=${contractName}）。`);
+    }
     const trigger = request.triggerPrice ?? 0;
     /*
      * Gate 的触发方向：rule=1（价格 ≥ 触发价时触发）/ rule=2（≤ 时触发）。
@@ -315,12 +327,13 @@ export class GateBroker {
     const body = {
       initial: {
         contract: contractName,
-        size: signedSize(request.side, size),
+        /* close 单必须 size=0（见上面那段实测说明）；否则按数量下单。 */
+        size: closeAll ? 0 : signedSize(request.side, size),
         price: request.price !== undefined && request.price > 0 ? String(request.price) : '0',
         tif: request.price !== undefined && request.price > 0 ? 'gtc' : 'ioc',
-        reduce_only: true,
+        reduce_only: !closeAll,
         /* closePosition 语义在 Gate 叫 `close`（按触发时仓位全平）。 */
-        close: request.closePosition === true,
+        close: closeAll,
       },
       trigger: { strategy: 0, price: String(trigger), rule },
     };
@@ -369,15 +382,16 @@ export class GateBroker {
     const orders = await this.rest.signed<GateFuturesOrder[]>('GET', '/futures/usdt/price_orders', { params });
     const registry = await this.contracts.all();
     return orders
-      .filter((o) => registry.has(o.contract))
-      .map((o) => gatePriceOrderToAlgoResponse(o, registry.get(o.contract)!));
+      .map((o) => ({ o, name: o.initial?.contract ?? o.contract }))
+      .filter(({ name }) => registry.has(name))
+      .map(({ o, name }) => gatePriceOrderToAlgoResponse(o, registry.get(name)!));
   }
 
   async getAlgoOrder(algoId: string | number): Promise<BinanceAlgoOrderResponse | null | 'not-found'> {
     try {
       const order = await this.rest.signed<GateFuturesOrder>('GET', `/futures/usdt/price_orders/${algoId}`);
       const registry = await this.contracts.all();
-      const contract = registry.get(order.contract);
+      const contract = registry.get(order.initial?.contract ?? order.contract);
       if (!contract) return 'not-found';
       return gatePriceOrderToAlgoResponse(order, contract);
     } catch (error) {

@@ -79,6 +79,26 @@ test('★ 条件单映射：触发价进 triggerPrice，close 语义进 closePos
   assert.equal(raw.actualOrderId, undefined);
 });
 
+test('★★★ 价格保护单响应：契约/数量/价格在 initial 嵌套里（顶层没有）', () => {
+  const priceOrder = {
+    id: 555,
+    contract: '',
+    size: 0,
+    left: 0,
+    price: '0',
+    status: 'open',
+    create_time: '1700000000',
+    initial: { contract: 'BTC_USDT', size: 100, price: '0', tif: 'ioc', reduce_only: false, close: true },
+    trigger: { price: '72466', rule: 2 },
+  } as unknown as GateFuturesOrder;
+  const raw = gatePriceOrderToAlgoResponse(priceOrder, BTC);
+  assert.equal(raw.symbol, 'BTCUSDT');
+  assert.equal(raw.quantity, '0.01');
+  assert.equal(raw.side, 'BUY');
+  assert.equal(raw.closePosition, true);
+  assert.equal(raw.triggerPrice, '72466');
+});
+
 test('成交映射：方向、数量换算、手续费、时间（秒→毫秒）', () => {
   const trade = gateFillToUserTrade(
     { id: 5, create_time: 1700000100, contract: 'BTC_USDT', size: -50, price: '70000', fee: '0.35' },
@@ -172,12 +192,18 @@ test('★★★ 条件单触发方向：多止损=下穿(2)、空止损=上穿(1
       triggerPrice: 73650,
       closePosition: true,
     });
-    const body = calls[0]!.body as { trigger: { rule: number; price: string }; initial: { close: boolean; reduce_only: boolean } };
+    const body = calls[0]!.body as {
+      trigger: { rule: number; price: string };
+      initial: { close: boolean; reduce_only: boolean; size: number };
+    };
     assert.equal(calls[0]!.path, '/futures/usdt/price_orders');
+    /* 2026-11-11 测试网实测：close 单 size 必须是 0，否则 AUTO_INVALID_PARAM_INITIAL_SIZE。 */
+    assert.equal(body.initial.size, 0, 'closePosition 条件单必须传 size=0');
     assert.equal(body.trigger.rule, item.expectedRule, `${item.side} ${item.type} 的触发方向错了`);
     assert.equal(body.trigger.price, '73650');
     assert.equal(body.initial.close, true);
-    assert.equal(body.initial.reduce_only, true);
+    /* close 单：不传 reduce_only（close 与 reduce_only 互斥，Gate 只认 close 语义）。 */
+    assert.equal(body.initial.reduce_only, false);
   }
 });
 
