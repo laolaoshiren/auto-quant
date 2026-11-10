@@ -164,6 +164,20 @@ function modelsDevLookup(): ModelsDevLookup | null {
 const MIN_MAX_TOKENS_FOR_REASONING = 131_072;
 
 /**
+ * **构造 `LlmClient` 时真正生效的 `maxTokens`**（抬到 `MIN_MAX_TOKENS_FOR_REASONING` 下限）。
+ *
+ * ⚠️ 交给交易循环的 `outputBudgetTokens` 必须用**同一个值**，而不是原始的
+ * `ai_models.max_tokens`：空正文重试会把 `boostedOutputBudgetFor(outputBudgetTokens)`
+ * 作为单次调用的 `maxTokens` 覆盖传下去（client 里 `override ?? this.maxTokens`）。
+ * 若基准是原始值（建表默认 4096、常见 16384），重试预算会从实际的 131072
+ * **被压到 16384/65536** —— 重试反而比失败那次预算更小，几乎必然再次截断
+ * （2026-11-10 审查 #4）。
+ */
+export function clientMaxTokensFor(rowMaxTokens: number): number {
+  return Math.max(rowMaxTokens, MIN_MAX_TOKENS_FOR_REASONING);
+}
+
+/**
  * 成交推送之后，隔多久去对一次账。
  *
  * 一笔平仓会连着推若干帧（部分成交、最后成交），而一次对账要为每个相关标的
@@ -1596,6 +1610,35 @@ export class TraderManager {
     });
   }
 
+  /**
+   * 把一条**已连上**的用户数据流登记到 `userStreams` —— 前提是这台机器人此刻仍在运行。
+   *
+   * ⚠️ `stream.start()` 是网络往返（建 listenKey + 连 WebSocket）。这期间操作员点了
+   * 「停止」时，`stopTrader` 去 `userStreams` 里找不到这条流，于是不会停它；
+   * 原来这里照样 `set` 进去 —— 一个已停止机器人的 keepalive/WebSocket 一直活着、
+   * 持续写日志，下次启动还会被新流**直接覆盖**而永久泄漏（2026-11-10 审查 #7）。
+   *
+   * 所以：已取消 / 正在关机 / 已不在 `running` → 就地停掉这条流、不登记，返回 false。
+   * 若 map 里还有一条旧流（不该有，但覆盖就是泄漏），先把旧的停掉。
+   */
+  private async adoptUserStream(
+    traderId: number,
+    stream: Pick<BinanceUserDataStream, 'stop'>,
+  ): Promise<boolean> {
+    const previous = this.userStreams.get(traderId);
+    if (previous && previous !== stream) {
+      this.userStreams.delete(traderId);
+      await previous.stop().catch(() => undefined);
+    }
+    /* 判定与登记之间不能有 await —— 否则又留出一个"停止落在中间"的窗口。 */
+    if (this.stopping || this.cancelledStarts.has(traderId) || !this.running.has(traderId)) {
+      await stream.stop().catch(() => undefined);
+      return false;
+    }
+    this.userStreams.set(traderId, stream as BinanceUserDataStream);
+    return true;
+  }
+
   private async startUserStream(traderId: number, connection: ExchangeConnection): Promise<void> {
     if (!connection.rest.hasCredentials) return;
 
@@ -1669,7 +1712,7 @@ export class TraderManager {
 
     try {
       await stream.start();
-      this.userStreams.set(traderId, stream);
+      if (!(await this.adoptUserStream(traderId, stream))) return;
       emit('info', '已订阅交易所用户数据流（订单、持仓与保证金告警）。');
     } catch (error) {
       // Alerting is a nice-to-have; never let it block a trader from starting.
@@ -2705,7 +2748,7 @@ export class TraderManager {
        * ⚠️ **抬到下限**：推理与正文共享这个额度，而推理量随提示词规模增长 ——
        * 16384 的文件已实测被推理吃满、正文 0（见常量上的说明）。
        */
-      maxTokens: Math.max(row.max_tokens, MIN_MAX_TOKENS_FOR_REASONING),
+      maxTokens: clientMaxTokensFor(row.max_tokens),
       timeoutSeconds: row.timeout_seconds,
       maxRetries: row.max_retries,
       /*
@@ -2880,7 +2923,7 @@ export class TraderManager {
           !this.stopping &&
           attempt < BOOT_RETRY_BACKOFF_MS.length;
 
-        if (!canRetry) return outcome.result;
+        if (!canRetry) return this.markOperatorCancel(traderId, outcome.result);
 
         const waitMs = BOOT_RETRY_BACKOFF_MS[attempt] ?? 90_000;
         log.warn(
@@ -2893,7 +2936,9 @@ export class TraderManager {
           `启动失败，${Math.round(waitMs / 1000)} 秒后自动重试（第 ${attempt + 1}/${BOOT_RETRY_BACKOFF_MS.length} 次）：${message}`,
         );
         await this.waitForRetry(waitMs, traderId);
-        if (this.cancelledStarts.has(traderId) || this.stopping) return outcome.result;
+        if (this.cancelledStarts.has(traderId) || this.stopping) {
+          return this.markOperatorCancel(traderId, outcome.result);
+        }
       }
     } finally {
       this.starting.delete(traderId);
@@ -2909,6 +2954,23 @@ export class TraderManager {
        */
       this.cancelledStarts.delete(traderId);
     }
+  }
+
+  /**
+   * 失败结果若是**操作员的「停止」**造成的（而不是进程关闭），带上 `cancelled: true`。
+   *
+   * 必须在 `finally` 收掉 `cancelledStarts` **之前**判定 —— 之后调用方
+   * （`resumePersisted` / `startTraderAsync`）只能靠 `result.cancelled` 区分
+   * "被叫停"与"启动失败"（2026-11-10 审查 #5：退避等待中被停止，原来返回的
+   * 上一轮失败结果不带 `cancelled`，开机恢复随即把它覆写成 `error`，
+   * 下次重启又被拉起）。
+   *
+   * 进程关闭（`stopping`）**不**算操作员取消：那时写 `error` 正是"下次重启要恢复"的意图。
+   */
+  private markOperatorCancel(traderId: number, result: StartResult): StartResult {
+    if (result.ok || result.cancelled || this.stopping) return result;
+    if (!this.cancelledStarts.has(traderId)) return result;
+    return { ...result, cancelled: true };
   }
 
   /**
@@ -3359,7 +3421,17 @@ export class TraderManager {
          * 那一行存在，但类型上仍要收一次）。传 `undefined` = **不放大**（行为与改动前
          * 完全一致），所以这里读不到也不会有副作用。
          */
-        outputBudgetTokens: modelConfig?.maxTokens,
+        /*
+         * ⚠️ 基准必须是 `client` **实际生效**的预算（`clientMaxTokensFor`，已抬到下限），
+         * 不是原始 `row.max_tokens` —— 否则空正文重试会把预算**缩小**（审查 #4）。
+         * 团队模式走路由模型、不用这个 `client`，保持原值以免改变团队行为。
+         */
+        outputBudgetTokens:
+          modelConfig === undefined
+            ? undefined
+            : routedTeamModel
+              ? modelConfig.maxTokens
+              : clientMaxTokensFor(modelConfig.maxTokens),
         complete: async (systemPrompt, userPrompt, options) => {
           /*
            * ⚠️ **团队模式走路由模型；其余模式走原来那一条路（一字未改）。**
@@ -3605,6 +3677,41 @@ export class TraderManager {
       // Attached after the trader is live, so a stream failure can never prevent
       // the trading loop from starting.
       await this.startUserStream(traderId, connection);
+
+      /*
+       * 第三道：`startUserStream()` 也是网络往返（listenKey + WebSocket）。
+       * 期间收到的停止已由 `stopTrader()` 停掉交易循环并写好 `stopped`，
+       * 流本身由 `adoptUserStream()` 拒绝登记；这里只是**不能再往下走**——
+       * 否则会落 dryRun、写「机器人已启动」并返回 ok:true，与已停止的事实矛盾
+       * （2026-11-10 审查 #7）。
+       *
+       * 进程关闭（`stopping`）不走这里：清理归 `stopAll()`，流已由 `adoptUserStream()`
+       * 拒绝登记，其余行为保持不变。
+       */
+      if (this.cancelledStarts.has(traderId) && !this.stopping) {
+        if (this.running.get(traderId) === autoTrader) {
+          await autoTrader.stop('操作员在启动过程中请求停止', true);
+          this.running.delete(traderId);
+          this.startedAt.delete(traderId);
+        }
+        const leftover = this.userStreams.get(traderId);
+        if (leftover) {
+          this.userStreams.delete(traderId);
+          await leftover.stop().catch(() => undefined);
+        }
+        dropConnections(this.connections, traderId);
+        this.setTraderStatus(traderId, 'stopped', null);
+        runtimeLogs.write(
+          traderId,
+          'info',
+          'manager',
+          '启动收尾（订阅用户数据流）期间收到「停止」—— 已放弃本次启动。',
+        );
+        return {
+          result: { ok: false, error: '启动完成后被操作员取消。', preflight: checks, cancelled: true },
+          permanent: true,
+        };
+      }
 
       const mode = dryRun ? '模拟盘' : '实盘';
       /*
@@ -4450,6 +4557,22 @@ export class TraderManager {
       if (this.cancelledStarts.has(trader.id)) continue;
       if (this.stopping) break;
 
+      /*
+       * ⚠️ **循环用的是开头那份 `traders.list()` 快照**，而恢复是串行的（每台带
+       * 退避重试，可能几分钟）—— 排在后面的机器人在界面上显示「已停止」，
+       * 操作员这期间可能已经手动启动或停止了它（2026-11-10 审查 #6）。
+       *
+       *   · 已在运行 / 启动中：`startTrader` 的守卫会拒绝（ok:false），原来被当成
+       *     "恢复失败"写成 `error` + 「需要人工处理」—— 机器人明明在跑。
+       *   · 已被操作员停成 `stopped`：那是人的决定，不该再拉起。
+       *
+       * 所以轮到它时**重新看一次实时状态**再决定。这里到 `startTrader` 的占位
+       * 之间没有 await，不会再留竞争窗口。
+       */
+      if (this.running.has(trader.id) || this.starting.has(trader.id)) continue;
+      const current = traders.get(trader.id);
+      if (!current || !resumable.has(current.status)) continue;
+
       const recovering = trader.status === 'error';
       log.info(
         recovering
@@ -4485,7 +4608,7 @@ export class TraderManager {
        * `{ok:false}`，但**异常路径同样存在**（网络层、数据库层、任何未预期的 throw），
        * 而它一个异常就会让**后面所有机器人**都得不到恢复。见上面那段 2026-10-03 的说明。
        */
-      let result: { ok: boolean; error?: string };
+      let result: { ok: boolean; error?: string; cancelled?: boolean };
       try {
         /*
          * ══════════════════════════════════════════════════════════════════════
@@ -4536,6 +4659,26 @@ export class TraderManager {
         );
       }
       if (result.ok) continue;
+
+      /*
+       * ⚠️ **恢复途中被操作员点了「停止」—— 那不是失败**（2026-11-10 审查 #5）。
+       *
+       * 原来这里无条件写 `error`：界面显示故障告警而不是操作员要的「已停止」，
+       * 而 `error` 在可恢复集合里 —— **下一次部署/重启会把这台被叫停的机器人
+       * 重新拉起并用真钱下单**。与 `startTraderAsync` 的 `.then` 同一判据：
+       * 只能看 `result.cancelled`（`cancelledStarts` 已在 `startTrader` 的 finally 收掉）。
+       *
+       * 再把状态钉回 `stopped`：启动失败分支可能在 `stopTrader` 写完 `stopped`
+       * 之后又写了 `error`，不能让它留在可恢复集合里。
+       * 进程关闭（`stopping`）不走这里 —— 那时写 `error` 正是"下次重启恢复"的意图。
+       */
+      if (result.cancelled && !this.stopping) {
+        if (traders.get(trader.id)?.status !== 'stopped') {
+          this.setTraderStatus(trader.id, 'stopped', null);
+        }
+        log.info(`机器人「${trader.name}」在开机恢复过程中被操作员停止 —— 保持 stopped，不记为失败。`);
+        continue;
+      }
 
       /*
        * Give up **visibly**. The point of F2 is that this state must not be

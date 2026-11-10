@@ -1190,6 +1190,118 @@ test('加仓：持仓数已满时仍然放行 —— 它不占新的仓位名额
 });
 
 /* -------------------------------------------------------------------------- */
+/*  加仓/减仓不得绕过保护位棘轮与保证金口径（2026-11-10 修复）                  */
+/* -------------------------------------------------------------------------- */
+
+/** 关掉盈亏比门槛，让兜底止损/止盈的组合不会因恰好 1:3 的浮点误差被拒 —— 被测的不是它。 */
+function addEnv(
+  positionOverrides: Partial<PositionView> = {},
+  riskOverrides: Partial<StrategyConfig['riskControl']> = {},
+  account: RiskEnvironment['account'] = { equity: 1000, availableBalance: 900, marginUsed: 0, positionCount: 1 },
+): RiskEnvironment {
+  return environment({
+    config: configWith({
+      riskControl: { ...defaultStrategyConfig().riskControl, minRiskRewardRatio: 0, ...riskOverrides },
+    }),
+    account,
+    positions: new Map([['BTCUSDT', position({ side: 'long', ...positionOverrides })]]),
+  });
+}
+
+test('★ 加仓：模型没给止损时不得用兜底止损放松已上移的止损（#16）', () => {
+  /*
+   * 现价 68,000，持仓止损已上移到 67,500。兜底 2.5% ⇒ 66,300（更宽）。
+   * 修复前 reviewOpen 的兜底值原样带出，执行层 `decision.stopLoss ?? local` 永远取不到旧值。
+   */
+  const verdict = engine.review(
+    [addDecision({ positionSizeUsd: 50, stopLoss: null, takeProfit: null })],
+    addEnv({ stopLoss: 67_500, takeProfit: 72_000 }),
+  );
+  assert.equal(verdict.approved.length, 1, JSON.stringify(verdict.rejected));
+  assert.equal(verdict.approved[0]!.stopLoss, 67_500, '止损只能保持或收紧，不能被兜底值放松');
+  assert.equal(verdict.approved[0]!.takeProfit, 72_000, '没给止盈时沿用持仓原止盈');
+});
+
+test('★ 加仓：模型显式给出更宽的止损时，保留现有止损（棘轮）', () => {
+  const verdict = engine.review(
+    [addDecision({ positionSizeUsd: 50, stopLoss: 66_000, takeProfit: 74_000 })],
+    addEnv({ stopLoss: 67_000 }),
+  );
+  assert.equal(verdict.approved.length, 1, JSON.stringify(verdict.rejected));
+  assert.equal(verdict.approved[0]!.stopLoss, 67_000);
+  assert.equal(verdict.approved[0]!.takeProfit, 74_000, '模型给的止盈照常采用');
+  assert.ok(verdict.approved[0]!.adjustments.some((a) => /不放松止损/.test(a)));
+});
+
+test('加仓：模型给出更紧的止损照常采用；持仓没有止损时仍按兜底补', () => {
+  const tighter = engine.review(
+    [addDecision({ positionSizeUsd: 50, stopLoss: 67_200, takeProfit: 74_000 })],
+    addEnv({ stopLoss: 66_000 }),
+  );
+  assert.equal(tighter.approved.length, 1, JSON.stringify(tighter.rejected));
+  assert.equal(tighter.approved[0]!.stopLoss, 67_200);
+
+  const bare = engine.review(
+    [addDecision({ positionSizeUsd: 50, stopLoss: null, takeProfit: null })],
+    addEnv({ stopLoss: null, takeProfit: null }),
+  );
+  assert.equal(bare.approved.length, 1, JSON.stringify(bare.rejected));
+  assert.ok((bare.approved[0]!.stopLoss ?? 0) > 0 && bare.approved[0]!.stopLoss! < 68_000, '裸仓位仍要补兜底止损');
+});
+
+test('★ 加仓：保证金按持仓的真实杠杆算，不按模型写的杠杆（#18）', () => {
+  /*
+   * 持仓 5x，模型写 50x。可用余额只有 $20：
+   *   修复前按 50x ⇒ $300 只要 $6 保证金，原样放行；
+   *   修复后按 5x ⇒ 最多 $20 × 5 = $100。
+   */
+  const verdict = engine.review(
+    [addDecision({ positionSizeUsd: 300, leverage: 50 })],
+    addEnv(
+      { leverage: 5 },
+      { btcEthMaxLeverage: 50 },
+      { equity: 1000, availableBalance: 20, marginUsed: 0, positionCount: 1 },
+    ),
+  );
+  assert.equal(verdict.approved.length, 1, JSON.stringify(verdict.rejected));
+  assert.equal(verdict.approved[0]!.leverage, 5, '加仓的杠杆必须是持仓杠杆');
+  assert.ok(
+    verdict.approved[0]!.positionSizeUsd <= 100 + 1e-6,
+    `按 5x 算保证金，名义不能超过 $100，实际 ${verdict.approved[0]!.positionSizeUsd}`,
+  );
+});
+
+test('★ 减仓：附带的更宽止损被丢弃，不绕过棘轮（#15）', () => {
+  const verdict = engine.review(
+    [reduceDecision({ stopLoss: 60_000 })],
+    withPosition({ stopLoss: 64_000 }),
+  );
+  assert.equal(verdict.approved.length, 1, JSON.stringify(verdict.rejected));
+  assert.equal(verdict.approved[0]!.stopLoss, null, 'null = 执行层沿用持仓原止损');
+  assert.ok(verdict.approved[0]!.adjustments.some((a) => /未采用/.test(a)));
+});
+
+test('★ 减仓：附带的止损/止盈在现价错误一侧时被丢弃，而不是让剩余仓位被整个平掉（#15）', () => {
+  const verdict = engine.review(
+    [reduceDecision({ stopLoss: 69_000, takeProfit: 67_000 })],
+    withPosition({ stopLoss: 64_000 }),
+  );
+  assert.equal(verdict.approved.length, 1, '减仓本身只降风险，不因保护位不合格被拒');
+  assert.equal(verdict.approved[0]!.stopLoss, null);
+  assert.equal(verdict.approved[0]!.takeProfit, null);
+});
+
+test('减仓：附带的合格且更紧的止损照常采用', () => {
+  const verdict = engine.review(
+    [reduceDecision({ stopLoss: 66_000, takeProfit: 72_000 })],
+    withPosition({ stopLoss: 64_000 }),
+  );
+  assert.equal(verdict.approved.length, 1, JSON.stringify(verdict.rejected));
+  assert.equal(verdict.approved[0]!.stopLoss, 66_000);
+  assert.equal(verdict.approved[0]!.takeProfit, 72_000);
+});
+
+/* -------------------------------------------------------------------------- */
 /*  同标的重入（含 pending）                                                   */
 /* -------------------------------------------------------------------------- */
 

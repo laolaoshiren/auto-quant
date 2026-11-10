@@ -1708,6 +1708,41 @@ test('a cycle opens a position and places exchange-side protection', async () =>
   assert.ok(equityStore.list(traderId).length >= 1);
 });
 
+test('★ 交易所把杠杆降下来时，开仓名义按比例缩小、本地按实际杠杆记账（#17）', async () => {
+  /*
+   * 子账户 `-4421` 的形状：请求 3x，broker 降级重试后返回 1x。
+   * 修复前仍按风控批准的 3x 名义（≈$600）下单 —— 实际保证金是批准值的 3 倍，
+   * 本地还记成 3x。修复后名义 ≤ 批准值 × 1/3，本地杠杆 = 1。
+   */
+  const broker = new FakeBroker();
+  broker.setLeverage = async (symbol: string, leverage: number) => {
+    broker.leverageCalls.push({ symbol, leverage });
+    return { ok: true, leverage: 1, note: `${symbol} 的杠杆从 ${leverage}x 降到 1x` };
+  };
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const entry = broker.placed.find((p) => p.type === 'MARKET');
+  assert.ok(entry, '前提：降杠杆后仍然开出了仓（只是变小）');
+  const notional = Number(entry.quantity) * MARK_PRICE;
+  assert.ok(notional <= 600 / 3 + 1, `名义必须随杠杆缩小到 ≤ $200，实际 $${notional.toFixed(2)}`);
+
+  const open = positionStore.open(traderId);
+  assert.equal(open.length, 1);
+  assert.equal(open[0]!.leverage, 1, '本地必须按交易所实际杠杆记账');
+});
+
+test('★ setLeverage 返回 ok:false（实际杠杆不可知）时不开仓（#17）', async () => {
+  const broker = new FakeBroker();
+  broker.setLeverage = async (symbol: string, leverage: number) => {
+    broker.leverageCalls.push({ symbol, leverage });
+    return { ok: false, leverage, note: `${symbol} 有挂单未成交，杠杆保持不变` };
+  };
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  assert.equal(broker.placed.filter((p) => p.type === 'MARKET').length, 0, '杠杆没设上就不能下入场单');
+  assert.equal(positionStore.open(traderId).length, 0);
+});
+
 test('★ 空仓且权益没变时不重复记快照 —— 否则曲线上全是悬停看不出变化的长平线', async () => {
   /*
    * 用户的原话：「默认上面显示得是全部 …… 鼠标悬停在某个时间节点上，显示得信息

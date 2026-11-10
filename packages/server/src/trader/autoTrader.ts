@@ -1079,6 +1079,18 @@ export class AutoTrader {
    * 用户硬约束：不能改变现有实盘机器人（`#10 赚大钱` 是 `ai_managed`）。
    */
   private moveWatchTimer: NodeJS.Timeout | null = null;
+
+  /**
+   * **回撤守卫实时监控**（2026-11-10 用户服务器实测后新增，每 30 秒）。
+   *
+   * 原来回撤守卫只在每个决策周期开头跑一次（生产 15–45 分钟一次）。实测的后果：
+   * 峰值浮盈到过 +4.46% 的仓位，到下一个检查点时价格已经回落并**转为亏损** ——
+   * 于是"浮盈回吐 50% 就落袋"变成了"在 -1.96% 处平仓"，用户看到的是一连串小亏。
+   * 这个定时器把同一套机械判断提到 30 秒一次，浮盈一过激活线、回吐到阈值就平，
+   * 不再等下一个周期。周期与它对同一笔仓位并发平仓的概率极低，且 `executeClose`
+   * 走的是同一套撤单/记账路径；出错只影响一个 tick。
+   */
+  private guardWatchTimer: NodeJS.Timeout | null = null;
   /**
    * **各标的的基准价**（`symbol → 价格`）—— 上次评估时记下的。
    *
@@ -1467,6 +1479,8 @@ export class AutoTrader {
      * 只对 `ai_team` 启动（用户硬约束：不改现有实盘机器人的行为）。
      */
     void this.startMoveWatch();
+    /* 回撤守卫实时监控（每 30 秒）—— 见 `guardWatchTimer` 的说明。 */
+    this.startGuardWatch();
 
     if (elapsedMs >= cycleMs) {
       /* 从没跑过，或者停机超过一个周期 —— 立刻跑（操作员在等 / 行情已变）。 */
@@ -1734,6 +1748,47 @@ export class AutoTrader {
     this.moveBaseline.clear();
   }
 
+  /* ---------------------------------------------------------------------- */
+  /*  回撤守卫实时监控                                                        */
+  /* ---------------------------------------------------------------------- */
+
+  /** 启动实时回撤/保本守卫（每 30 秒，可用 `AQ_GUARD_WATCH_SECONDS` 调）。 */
+  private startGuardWatch(): void {
+    if (this.guardWatchTimer !== null) return;
+    const raw = Number(process.env.AQ_GUARD_WATCH_SECONDS ?? '');
+    const seconds = Number.isFinite(raw) && raw >= 5 ? Math.min(raw, 300) : 30;
+    const timer = setInterval(() => {
+      if (!this.running) return;
+      void this.runGuardTick();
+    }, seconds * 1000);
+    /* 不因为这个定时器把进程吊住 —— 它是可丢弃的。 */
+    timer.unref();
+    this.guardWatchTimer = timer;
+    this.emit('info', `回撤守卫实时监控已启动（每 ${seconds} 秒检查一次）。`);
+  }
+
+  /** 停止实时回撤/保本守卫（`stop()` 时调用）。 */
+  private stopGuardWatch(): void {
+    if (this.guardWatchTimer !== null) {
+      clearInterval(this.guardWatchTimer);
+      this.guardWatchTimer = null;
+    }
+  }
+
+  /**
+   * 一次实时守卫检查：先回撤守卫（平仓，落袋），再保本止损（移止损，让赢的单继续跑）。
+   * 顺序与周期里那两步一致（见 `runCycle` 的 "Mechanical protections"）。
+   */
+  private async runGuardTick(): Promise<void> {
+    try {
+      const closed = await this.applyDrawdownGuard();
+      if (closed > 0) this.emit('info', `回撤守卫（实时检查）平仓 ${closed} 笔`);
+      await this.applyBreakevenGuard().catch(() => undefined);
+    } catch {
+      /* 单次失败不影响下一轮；既有止损单仍然有效。 */
+    }
+  }
+
   /**
    * **这一轮该盯哪些候选标的**（2026-10-14 加）。
    *
@@ -1944,6 +1999,7 @@ export class AutoTrader {
     this.timer = null;
     /* 持仓剧变监控也要停 —— 否则它会对已停止的机器人调用 requestEarlyCycle。 */
     this.stopMoveWatch();
+    this.stopGuardWatch();
     /*
      * ⚠️ **先把在途那一轮掐断，再去等它结束（2026-10-10，用户报的卡顿）。**
      *
@@ -11144,6 +11200,56 @@ reduceQuantity: null,
     if (leverageResult.note) this.emit('warn', leverageResult.note);
 
     /*
+     * ⚠️ **交易所给的杠杆不是风控批的那个时，仓位必须跟着缩**（2026-11-10 修复）。
+     *
+     * 风控按"名义 ÷ 批准杠杆 = 保证金"定额度（`maxMarginUsage` / 可用余额）。
+     * 子账户被币安钳在 5x（`-4421`）、或档位不允许（`-4203/-4205/-4209`）时，
+     * broker 会降杠杆重试并返回**实际**杠杆 —— 以前这里只打一条 warn，
+     * 仍按批准杠杆的名义下单，于是实际保证金 = 批准值 × (批准杠杆 ÷ 实际杠杆)，
+     * 要么被交易所以保证金不足拒单（每轮重复），要么吃掉超出预算的余额；
+     * 本地记账（marginUsed / leverage / ROE）也全部按批准杠杆失真。
+     *
+     * 处置（只收紧）：
+     *   · 实际杠杆更低 → 名义与数量按 `实际 ÷ 批准` 等比缩小，保证金不超过风控核定值；
+     *     本地按实际杠杆记账；并把实际杠杆写进 `leverageCapCache`，下一轮风控直接按它钳制。
+     *   · `ok:false`（`-4168` 有挂单 / 已有持仓）→ 交易所杠杆**不可知或不是批准值**，
+     *     无法确认保证金占用，本笔放弃（不在不知道杠杆的情况下开杠杆仓）。
+     */
+    if (!leverageResult.ok) {
+      return {
+        action: decision.action,
+        symbol,
+        status: 'skipped',
+        detail:
+          `${symbol} 的杠杆未能设为风控批准的 ${decision.leverage}x` +
+          `${leverageResult.note ? `（${leverageResult.note}）` : ''} —— ` +
+          '无法确认实际杠杆与保证金占用，本笔不开。',
+      };
+    }
+    const actualLeverage = Number(leverageResult.leverage);
+    if (Number.isFinite(actualLeverage) && actualLeverage > 0 && actualLeverage < decision.leverage) {
+      const ratio = actualLeverage / decision.leverage;
+      const scaledUsd = decision.positionSizeUsd * ratio;
+      const cached = this.leverageCapCache.get(symbol);
+      if (cached === undefined || actualLeverage < cached) {
+        this.leverageCapCache.set(symbol, actualLeverage);
+      }
+      this.emit(
+        'warn',
+        `${symbol} 交易所只接受 ${actualLeverage}x（风控批准 ${decision.leverage}x）—— ` +
+          `名义已按比例从 $${decision.positionSizeUsd.toFixed(2)} 缩到 $${scaledUsd.toFixed(2)}，` +
+          '保证金占用不超过风控核定值。',
+      );
+      /*
+       * 引擎算好的 `quantity` 是按批准名义取整的 —— 作废它，让下面的回退路径按
+       * 缩小后的名义重新取整（含"差一档就进位"的兜底）。
+       */
+      const scaled: Decision = { ...decision, leverage: actualLeverage, positionSizeUsd: scaledUsd };
+      delete scaled.quantity;
+      decision = scaled;
+    }
+
+    /*
      * --- Margin mode -----------------------------------------------------
      *
      * ⚠️ **在下第一单之前设保证金模式 —— 而这一步以前完全缺失。**
@@ -12116,6 +12222,18 @@ reduceQuantity: null,
      * 准备的处置 —— 两件事不该共用一条路径。
      */
     let stopForProtection = decision.stopLoss ?? local.stop_loss;
+    /* 棘轮兜底（风控已按同一规则处理，这里防本地记录与风控视图不一致）：加仓不放松本地已有止损。 */
+    if (
+      stopForProtection !== null &&
+      stopForProtection > 0 &&
+      local.stop_loss !== null &&
+      local.stop_loss > 0 &&
+      (local.side === 'long'
+        ? local.stop_loss < fillPrice && stopForProtection < local.stop_loss
+        : local.stop_loss > fillPrice && stopForProtection > local.stop_loss)
+    ) {
+      stopForProtection = local.stop_loss;
+    }
     if (stopForProtection === null || !(stopForProtection > 0)) {
       const fallbackPercent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
       stopForProtection = fallbackStopPrice(fillPrice, local.side === 'long', fallbackPercent);
@@ -12395,6 +12513,16 @@ reduceQuantity: null,
      * 那条规则是为「保护单**真的挂不上**」准备的。缺记录时按兜底比例补一个。
      */
     let stopForProtection = decision.stopLoss ?? local.stop_loss;
+    /* 棘轮兜底（风控已按同一规则处理，这里防本地记录与风控视图不一致）：减仓不放松本地已有止损。 */
+    if (
+      stopForProtection !== null &&
+      stopForProtection > 0 &&
+      local.stop_loss !== null &&
+      local.stop_loss > 0 &&
+      (isLong ? stopForProtection < local.stop_loss : stopForProtection > local.stop_loss)
+    ) {
+      stopForProtection = local.stop_loss;
+    }
     if (stopForProtection === null || !(stopForProtection > 0)) {
       const fallbackPercent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
       stopForProtection = fallbackStopPrice(exitPrice, local.side === 'long', fallbackPercent);

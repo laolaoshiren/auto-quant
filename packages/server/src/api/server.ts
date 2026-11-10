@@ -2515,6 +2515,40 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     }
 
     /*
+     * ⚠️ **PATCH 必须复用创建时的模式/策略/模型规则**（2026-11-10 审计 #3）。
+     *
+     * 原来这里不校验：传 `mode` 回 200 但模式没变（`traders.update` 不写 mode ——
+     * 又一个"告诉你成功了"的静默失败）；智能托管能被重新绑回策略；固定策略能被
+     * 置成无策略（推迟到启动时才报错）；不存在的 id 直接抛 SQLite 外键错误。
+     *
+     * 判据仍是"值变了没有"（见上面的说明）：前端可能把当前值原样带上来。
+     */
+    if (parsed.data.mode !== undefined && parsed.data.mode !== current.mode) {
+      return reply.code(400).send({
+        error: '机器人的模式在创建时就已固定，不能通过编辑修改。要换模式请新建一台机器人。',
+      });
+    }
+    if (parsed.data.strategyId !== undefined) {
+      const requestedStrategyId = parsed.data.strategyId;
+      if (isAiDriven(current.mode)) {
+        if (requestedStrategyId !== null) {
+          throw new Error('AI 托管模式不引用任何策略 —— 请不要为它选择策略。');
+        }
+      } else {
+        if (requestedStrategyId === null) throw new Error('固定策略模式必须选择一个策略。');
+        if (!strategies.get(requestedStrategyId)) throw new Error('未知的策略');
+      }
+    }
+    /* 只校验"换成的新值"：原样带回当前值（含团队模式的占位 id）不受影响。 */
+    if (
+      parsed.data.aiModelId !== undefined &&
+      parsed.data.aiModelId !== current.aiModelId &&
+      !aiModels.get(parsed.data.aiModelId)
+    ) {
+      throw new Error('未知的 AI 模型');
+    }
+
+    /*
      * **编辑路径也要校验模拟本金**（2026-10-27）。
      *
      * 创建那条路已经校验了，但 `PATCH` 原先完全没有 —— 而编辑弹窗**确实**
@@ -2674,10 +2708,15 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     const id = idOf(request);
     try {
       const result = deps.manager.requestAgentReview(id);
-      if (!result.accepted) return reply.code(409).send({ ok: false, ...result });
+      /*
+       * 拒绝原因同时放进 `error`（审计 #21）：前端 `request()` 以 `error` 为准，
+       * 只给 `note` 时页面只能显示「请求失败：HTTP 409」，操作员看不到原因。
+       */
+      if (!result.accepted) return reply.code(409).send({ ok: false, error: result.note, ...result });
       return { ok: true, ...result };
     } catch (error) {
-      return reply.code(400).send({ ok: false, note: (error as Error).message });
+      const note = (error as Error).message;
+      return reply.code(400).send({ ok: false, error: note, note });
     }
   });
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { isAiDriven, type TraderMode } from '@aq/shared';
 import {
@@ -56,6 +56,34 @@ export function strategyIdFor(mode: TraderMode, selected: number): number | null
    * 只是换到了新模式的路径上 —— 因为两处规则各自写了一遍模式名。
    */
   return isAiDriven(mode) ? null : selected;
+}
+
+/**
+ * 创建成功但服务端回 `equitySource: 'unavailable'` 时给操作员看的说明。
+ *
+ * ⚠️ **按"有没有绑账户"区分文案**（2026-11-10 审计 #2）：原来无条件说
+ * 「未能从交易所读取钱包余额」—— 而不绑账户的纯模拟盘**根本没有交易所**，
+ * 它走到这里只是因为模拟盘起始余额留空；运行时 `manager.paperStartingBalanceOf()`
+ * 会回落到默认模拟余额。与 `TraderConfigModal` 按 `exchangeAccountId` 区分的做法一致。
+ */
+export function baselineWarningFor(paperOnly: boolean): string {
+  return paperOnly
+    ? '机器人已创建，但没有填写模拟盘起始余额，起始权益被记为 0（运行时按默认模拟余额开仓）。补上起始余额之前，该机器人的收益率等业绩指标都没有意义。'
+    : '机器人已创建，但未能从交易所读取钱包余额，起始权益被记为 0。在凭证可用之前，该机器人的收益率等业绩指标都没有意义。';
+}
+
+/**
+ * 「厂商建议」模型（`new:<modelId>`）在**本次弹窗里**已经建过的记录 id。
+ *
+ * 审计 #2：原来每次提交只要 `modelChoice` 以 `new:` 开头就先 `createAiModel` ——
+ * 于是"模型建好了、机器人那一步失败后重试"会留下一条条重复的模型记录。
+ * 建过一次就记住，同一个选择再提交时复用它。
+ */
+export function reusableModelId(
+  createdModels: Readonly<Record<string, number>>,
+  modelChoice: string,
+): number | undefined {
+  return modelChoice.startsWith('new:') ? createdModels[modelChoice] : undefined;
 }
 
 export function NewTraderModal({
@@ -163,6 +191,17 @@ export function NewTraderModal({
   const [error, setError] = useState<string | null>(null);
   /** Set when the server could not seed the baseline from the exchange. */
   const [baselineWarning, setBaselineWarning] = useState<string | null>(null);
+  /**
+   * **已经建好、但还没交给父页面的那台机器人**（审计 #2）。
+   *
+   * `equitySource === 'unavailable'` 时弹窗要留着把警告给人看 —— 但机器人
+   * 其实已经建好了。原来这时「创建机器人」按钮仍可点，再点一次就建出同名的
+   * 第二台。现在：按钮变成「完成」（交给父页面刷新列表并关弹窗），
+   * 关闭弹窗同样把它交出去，**不能再提交一次**。
+   */
+  const [createdPending, setCreatedPending] = useState<TraderRow | null>(null);
+  /** 本次弹窗里已建的「厂商建议」模型记录：`new:<modelId>` → id。见 `reusableModelId`。 */
+  const createdModelsRef = useRef<Record<string, number>>({});
 
   const selectedAccountId = exchangeAccountId === '' ? 0 : Number(exchangeAccountId);
   // The credential's own read error, so the field explains the failure even
@@ -179,6 +218,8 @@ export function NewTraderModal({
     let alive = true;
     setLoadError(null);
     setBaselineWarning(null);
+    setCreatedPending(null);
+    createdModelsRef.current = {};
     void Promise.all([api.exchangeAccounts(), api.aiModels(), api.strategies(), api.catalog()])
       .then(([accountRows, modelRows, strategyRows, catalog]) => {
         if (!alive) return;
@@ -379,7 +420,19 @@ export function NewTraderModal({
     return gaps;
   }, [models, strategyList, mode]);
 
+  /** 把"已建好但带警告"的机器人交给父页面（父页面会关弹窗并刷新列表）。 */
+  const finishPending = () => {
+    if (!createdPending) return;
+    const trader = createdPending;
+    setCreatedPending(null);
+    setBaselineWarning(null);
+    setName('');
+    onCreated(trader);
+  };
+
   const submit = async () => {
+    /* 机器人已经建好（只是带警告）—— 绝不能再建一次。 */
+    if (createdPending) return finishPending();
     setError(null);
     setBaselineWarning(null);
     if (!name.trim()) return setError('请为机器人起个名字。');
@@ -439,7 +492,10 @@ export function NewTraderModal({
        * 而用户随后可以在模型管理页补上。**不因此拦住创建机器人。**
        */
       let resolvedModelId = Number(aiModelId);
-      if (modelChoice.startsWith('new:')) {
+      const reused = reusableModelId(createdModelsRef.current, modelChoice);
+      if (reused !== undefined) {
+        resolvedModelId = reused;
+      } else if (modelChoice.startsWith('new:')) {
         const modelId = modelChoice.slice(4);
         const created = await api.createAiModel({
           provider: providerId,
@@ -449,6 +505,7 @@ export function NewTraderModal({
           apiKey: '',
         });
         resolvedModelId = created.id;
+        createdModelsRef.current = { ...createdModelsRef.current, [modelChoice]: created.id };
       }
 
       const manualEquity = equityPayload(equity);
@@ -496,9 +553,9 @@ export function NewTraderModal({
         // The trader exists, but its return baseline is 0 — every performance
         // percentage derived from it will be meaningless. Say so and let the
         // operator act, without throwing their work away.
-        setBaselineWarning(
-          '机器人已创建，但未能从交易所读取钱包余额，起始权益被记为 0。在凭证可用之前，该机器人的收益率等业绩指标都没有意义。',
-        );
+        // ⚠️ 但机器人**已经建好**：记下来，按钮改成「完成」，不能再提交一次（审计 #2）。
+        setCreatedPending({ ...trader, isRunning: false });
+        setBaselineWarning(baselineWarningFor(exchangeAccountId === ''));
         return;
       }
 
@@ -514,17 +571,26 @@ export function NewTraderModal({
   return (
     <Modal
       open={open}
-      onClose={onClose}
+      onClose={createdPending ? finishPending : onClose}
       title="新建机器人"
       /* 两列表单 + 2×2 卡片需要更宽：`max-w-xl`（576）下两列只剩 260px，
          卡片式选项会挤成两行。`max-w-2xl`（672）在 1024 宽的窗口里仍有余量。 */
       width="max-w-2xl"
       footer={
         <>
-          <Button onClick={onClose}>取消</Button>
-          <Button variant="primary" onClick={submit} busy={busy} disabled={!ready || missing.length > 0}>
-            创建机器人
-          </Button>
+          {createdPending ? (
+            /* 机器人已建好（带警告）：只剩「完成」，关闭也等同完成 —— 列表必须刷新。 */
+            <Button variant="primary" onClick={finishPending}>
+              完成
+            </Button>
+          ) : (
+            <>
+              <Button onClick={onClose}>取消</Button>
+              <Button variant="primary" onClick={submit} busy={busy} disabled={!ready || missing.length > 0}>
+                创建机器人
+              </Button>
+            </>
+          )}
         </>
       }
     >

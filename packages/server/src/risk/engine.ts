@@ -236,8 +236,24 @@ export class RiskEngine {
         : []),
     ];
 
+    /*
+     * ⚠️ **加仓的保证金必须按持仓的真实杠杆算**（2026-11-10 修复）。
+     *
+     * 执行层加仓不调 `setLeverage`（交易所上一个标的只有一个杠杆），保证金按
+     * `local.leverage` 实扣。以前这里把模型给的 `leverage`（或 `defaultLeverage`）
+     * 原样交给 `reviewOpen`，第 9 步按 `名义 ÷ 那个杠杆` 算保证金 —— 持仓 5x、
+     * 模型写 50x 时放行的名义是真实可承受量的 10 倍，`maxMarginUsage` 对加仓失效，
+     * 同批滚动的 `marginUsed` 也被低估。与 `reviewReduce` / `reviewAdjust` 同口径：
+     * 固定成 `position.leverage`（拿不到才退回模型的值）。
+     */
+    const addLeverage = position.leverage > 0 ? position.leverage : decision.leverage;
     const verdict = this.reviewOpen(
-      { ...decision, action: wantsLong ? 'open_long' : 'open_short', positionSizeUsd: capped },
+      {
+        ...decision,
+        action: wantsLong ? 'open_long' : 'open_short',
+        positionSizeUsd: capped,
+        leverage: addLeverage,
+      },
       {
         ...env,
         /* 这一仓已占着名额 —— 不扣掉的话加仓会被"最大持仓数"挡住。 */
@@ -258,6 +274,49 @@ export class RiskEngine {
     if (!verdict.ok) return verdict;
 
     /*
+     * ⚠️ **加仓不能放松已有保护**（2026-11-10 修复）。
+     *
+     * `reviewOpen` 第 4/5 步会给缺失的止损/止盈填兜底值，所以它返回的
+     * `stopLoss` 永远不是 null —— 执行层 `decision.stopLoss ?? local.stop_loss`
+     * 的"沿用旧的"分支因此不可达：一个已上移到保本/移动止损的多头止损 108，
+     * 会被一次加仓换成按现价 2.5% 兜底的 107.25；模型显式给更低的止损也照单全收。
+     * 止盈同理被兜底值覆盖。
+     *
+     * 规则（与 `reviewAdjust` 的棘轮同一口径，只收紧）：
+     *   · 止损取**更紧**的那个：多头 max(新, 旧)、空头 min(新, 旧)。
+     *     `reviewOpen` 已按新止损（更宽或相等）核过风险，取更紧只会让风险更小。
+     *     旧止损已在现价错误一侧（不该发生）时不采用它，交给新止损。
+     *   · 模型没给止盈时沿用持仓原止盈（在正确一侧才用），不被兜底值覆盖。
+     */
+    const isLongPos = position.side === 'long';
+    const protectAdjustments: string[] = [];
+    let addStop = verdict.decision.stopLoss;
+    const oldStop = position.stopLoss;
+    const oldStopValid =
+      oldStop !== null && oldStop > 0 && (isLongPos ? oldStop < price : oldStop > price);
+    if (oldStopValid && addStop !== null && addStop > 0) {
+      const looser = isLongPos ? addStop < oldStop : addStop > oldStop;
+      if (looser) {
+        protectAdjustments.push(
+          `加仓不放松止损：新止损 ${addStop} 比现有止损 ${oldStop} 更宽，已保留现有止损。`,
+        );
+        addStop = oldStop;
+      }
+    }
+    let addTarget = verdict.decision.takeProfit;
+    const modelGaveTarget = decision.takeProfit !== null && decision.takeProfit > 0;
+    const oldTarget = position.takeProfit;
+    if (
+      !modelGaveTarget &&
+      oldTarget !== null &&
+      oldTarget > 0 &&
+      (isLongPos ? oldTarget > price : oldTarget < price)
+    ) {
+      addTarget = oldTarget;
+      protectAdjustments.push(`模型没有给出新止盈，沿用持仓原止盈 ${oldTarget}。`);
+    }
+
+    /*
      * 把动作改回 `add_to_position` —— `reviewOpen` 返回的 decision 里
      * action 被换成了 `open_long` / `open_short`，而执行层靠 action 分支。
      * 忘了改回去的话，一笔加仓会被当成**新开一个仓位**去执行，
@@ -269,7 +328,9 @@ export class RiskEngine {
       decision: {
         ...verdict.decision,
         action: 'add_to_position',
-        adjustments: [...verdict.decision.adjustments, ...adjustments],
+        stopLoss: addStop,
+        takeProfit: addTarget,
+        adjustments: [...verdict.decision.adjustments, ...adjustments, ...protectAdjustments],
       },
     };
   }
@@ -345,15 +406,87 @@ export class RiskEngine {
       };
     }
 
+    /*
+     * ⚠️ **减仓顺带的止损/止盈必须过与 `reviewAdjust` 同一套校验**（2026-11-10 修复）。
+     *
+     * 解析器对所有动作都保留 `stop_loss` / `take_profit`，执行层减仓后按
+     * `decision.stopLoss ?? local.stop_loss` 重挂保护。以前这里原样透传，于是：
+     *   · 多头止损已上移到 108、模型顺手写 100 → 交易所止损被放松，棘轮被绕过；
+     *   · 写在现价错误一侧 → 交易所拒单（会立即触发）→ §2.6 把剩余仓位整个平掉。
+     *
+     * 减仓本身只降风险，所以**不因保护位不合格而拒绝减仓**：不合格的那一个丢弃
+     * （置 null = 执行层沿用持仓原保护），并记一条 adjustment 说清。
+     */
+    const protectAdjustments: string[] = [];
+    let stopLoss = decision.stopLoss;
+    if (stopLoss !== null) {
+      const problem = this.followupStopProblem(stopLoss, price, position, env);
+      if (problem) {
+        protectAdjustments.push(`减仓附带的止损 ${stopLoss} 未采用（${problem}），沿用持仓原止损。`);
+        stopLoss = null;
+      }
+    }
+    let takeProfit = decision.takeProfit;
+    if (takeProfit !== null) {
+      const isLong = position.side === 'long';
+      const wrongSide = !(takeProfit > 0) || (isLong ? !(takeProfit > price) : !(takeProfit < price));
+      if (wrongSide) {
+        protectAdjustments.push(
+          `减仓附带的止盈 ${takeProfit} 未采用（${isLong ? '多头止盈必须在现价之上' : '空头止盈必须在现价之下'}，现价 ${price}），沿用持仓原止盈。`,
+        );
+        takeProfit = null;
+      }
+    }
+
     return {
       ok: true,
       decision: {
         ...decision,
+        stopLoss,
+        takeProfit,
         /* 执行层按这个换算数量：要减掉的那部分的名义价值。 */
         positionSizeUsd: position.quantity * fraction * price,
         leverage: position.leverage,
+        adjustments: [...decision.adjustments, ...protectAdjustments],
       },
     };
+  }
+
+  /**
+   * 对"已有持仓上的新止损"做与 `reviewAdjust` 相同的三条判断：
+   * 在保护一侧、距离盖过往返成本的若干倍、只能朝有利方向移（棘轮）。
+   * 合格返回 null，不合格返回原因。
+   */
+  private followupStopProblem(
+    stop: number,
+    price: number,
+    position: { side: string; stopLoss: number | null },
+    env: RiskEnvironment,
+  ): string | null {
+    const isLong = position.side === 'long';
+    if (!(stop > 0)) return '止损价必须大于 0';
+    if (isLong && !(stop < price)) return `多头止损必须在现价 ${price} 之下`;
+    if (!isLong && !(stop > price)) return `空头止损必须在现价 ${price} 之上`;
+
+    const risk = env.config.riskControl;
+    const feeMultiple = risk.minStopLossFeeMultiple;
+    const observed = env.roundTripFeeRate;
+    const roundTripFeeRate =
+      typeof observed === 'number' && Number.isFinite(observed) && observed > 0
+        ? observed
+        : risk.fallbackRoundTripFeeRate;
+    const distancePercent = (Math.abs(price - stop) / price) * 100;
+    const minPercent = roundTripFeeRate * feeMultiple * 100;
+    if (feeMultiple > 0 && distancePercent + 1e-9 < minPercent) {
+      return `止损距离 ${distancePercent.toFixed(3)}% 低于往返成本的 ${feeMultiple} 倍（${minPercent.toFixed(3)}%）`;
+    }
+
+    const old = position.stopLoss;
+    if (old !== null && old > 0) {
+      if (isLong && stop < old) return `多头止损只能往上移（当前 ${old}）`;
+      if (!isLong && stop > old) return `空头止损只能往下移（当前 ${old}）`;
+    }
+    return null;
   }
 
   /**
@@ -1455,11 +1588,25 @@ export function shouldCloseForDrawdown(
 
   const current = position.unrealizedPnlPercent;
   if (current <= 0) {
+    /*
+     * ⚠️ **"浮盈转亏"不再一律由回撤守卫平仓**（2026-11-10 用户服务器实测）。
+     *
+     * 原行为：峰值只要过激活线（默认 1.5%，10x 杠杆下价格只需 0.15%），之后
+     * 一旦 `current < 0` 就立刻平 —— 于是震荡市里**几乎每一单都以小亏收场**，
+     * 用户看到的是"成交 4 单全亏、还都是回撤守卫平的"。
+     *
+     * 现在的分工：
+     *   · **小浮盈转亏**（peak < 激活线×2）→ 不平仓，交给**止损/保本止损**，
+     *     让交易按计划走完（要么止盈、要么触发止损），不再提前制造亏损；
+     *   · **大浮盈转亏**（peak ≥ 激活线×2）→ 仍然平仓保护利润（这是它存在的意义）。
+     * 同一条规则的"仍盈利但回吐过多"分支保持不变。
+     */
+    const protectProfit = peak >= guard.activationPercent * 2;
     return {
-      close: current < 0 && peak >= guard.activationPercent,
+      close: current < 0 && protectProfit,
       reason:
-        current < 0
-          ? `回撤守卫：该仓位最高浮盈 +${peak.toFixed(2)}%，当前已转为亏损（${current.toFixed(2)}%）。`
+        current < 0 && protectProfit
+          ? `回撤守卫：最高浮盈 +${peak.toFixed(2)}%，当前已转为亏损（${current.toFixed(2)}%），落袋保护利润。`
           : '',
     };
   }

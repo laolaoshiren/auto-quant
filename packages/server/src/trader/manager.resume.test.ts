@@ -381,3 +381,149 @@ test('★★ 纯模拟盘机器人点「对账」直接返回空结果 —— �
     '纯模拟盘没有交易所侧可对，必须返回空结果而不是抛错',
   );
 });
+
+/* -------------------------------------------------------------------------- */
+/*  开机恢复期间的操作员动作（2026-11-10 审查 #5 / #6）                           */
+/* -------------------------------------------------------------------------- */
+
+/** 读写 manager 的私有状态 —— 只在测试里用，用来摆出"恢复途中"的竞争现场。 */
+type ManagerInternals = {
+  running: Map<number, unknown>;
+  starting: Set<number>;
+  cancelledStarts: Set<number>;
+  stopping: boolean;
+  attemptStart: (...args: unknown[]) => Promise<unknown>;
+  waitForRetry: (waitMs: number, traderId: number) => Promise<void>;
+};
+
+function internals(manager: TraderManager): ManagerInternals {
+  return manager as unknown as ManagerInternals;
+}
+
+test('★★ #5 退避等待中被操作员停止：startTrader 必须带 cancelled 返回（不是普通失败）', async () => {
+  const id = seedTrader('stop-during-backoff');
+  const manager = new TraderManager(new Vault(Buffer.alloc(32, 7)));
+  const m = internals(manager);
+  m.attemptStart = async () => ({
+    result: { ok: false, error: '交易所 503', preflight: [] },
+    permanent: false,
+  });
+  /* 模拟：退避等待期间操作员点了「停止」（stopTrader 第一句就是 add）。 */
+  m.waitForRetry = async (_ms, traderId) => {
+    m.cancelledStarts.add(traderId);
+  };
+
+  const result = await manager.startTrader(id, true, { retryTransient: true });
+
+  assert.equal(result.ok, false);
+  assert.equal(
+    result.cancelled,
+    true,
+    '★★ 退避中被叫停返回的是上一轮失败结果 —— 不带 cancelled，开机恢复就会把它写成 error 并在下次重启拉起',
+  );
+});
+
+test('★ #5 进程关闭（stopping）导致的取消【不】标 cancelled —— 那时写 error 才能在下次重启恢复', async () => {
+  const id = seedTrader('shutdown-during-backoff');
+  const manager = new TraderManager(new Vault(Buffer.alloc(32, 7)));
+  const m = internals(manager);
+  m.attemptStart = async () => ({
+    result: { ok: false, error: '交易所 503', preflight: [] },
+    permanent: false,
+  });
+  m.waitForRetry = async (_ms, traderId) => {
+    m.cancelledStarts.add(traderId);
+    m.stopping = true;
+  };
+
+  const result = await manager.startTrader(id, true, { retryTransient: true });
+
+  assert.equal(result.ok, false);
+  assert.notEqual(result.cancelled, true, '关机不是操作员的决定，不能把它当成「停止」');
+});
+
+test('★★ #5 恢复途中被操作员停止：resumePersisted 不得覆写成 error（否则下次重启被拉起）', async () => {
+  const id = seedTrader('stopped-while-resuming');
+  traders.setStatus(id, 'running', null);
+
+  const manager = new TraderManager(new Vault(Buffer.alloc(32, 7)));
+  manager.startTrader = (async (traderId: number) => {
+    /*
+     * 模拟最坏的写入顺序：stopTrader 先写 stopped，启动失败分支随后又写了 error，
+     * 然后 startTrader 带 cancelled 返回。
+     */
+    traders.setStatus(traderId, 'stopped', null);
+    traders.setStatus(traderId, 'error', '交易所 503');
+    return { ok: false, error: '交易所 503', preflight: [], cancelled: true };
+  }) as unknown as TraderManager['startTrader'];
+
+  await manager.resumePersisted(false);
+
+  assert.equal(
+    traders.get(id)?.status,
+    'stopped',
+    '★★ 操作员在恢复途中点了停止 —— 必须保持 stopped；error 在可恢复集合里，等于停手作废',
+  );
+});
+
+test('★ #6 恢复轮到它时已在运行（操作员手动启动）：不再启动、不写 error', async () => {
+  const id = seedTrader('manually-started-while-queued');
+  traders.setStatus(id, 'running', null);
+
+  const manager = new TraderManager(new Vault(Buffer.alloc(32, 7)));
+  internals(manager).running.set(id, {});
+  const attempted: number[] = [];
+  manager.startTrader = (async (traderId: number) => {
+    attempted.push(traderId);
+    /* 与真实 startGuard 一致：已在运行 → 拒绝。 */
+    return { ok: false, error: '该机器人已经在运行中', preflight: [] };
+  }) as unknown as TraderManager['startTrader'];
+
+  await manager.resumePersisted(false);
+
+  assert.deepEqual(attempted, [], '已在运行的机器人不该再走一次恢复');
+  assert.equal(
+    traders.get(id)?.status,
+    'running',
+    '★ 机器人明明在跑，却被写成「启动恢复失败，需要人工处理」',
+  );
+});
+
+test('★ #6 恢复轮到它时正在启动中：同样跳过', async () => {
+  const id = seedTrader('starting-while-queued');
+  traders.setStatus(id, 'running', null);
+
+  const manager = new TraderManager(new Vault(Buffer.alloc(32, 7)));
+  internals(manager).starting.add(id);
+  const attempted: number[] = [];
+  manager.startTrader = (async (traderId: number) => {
+    attempted.push(traderId);
+    return { ok: false, error: '该机器人正在启动中', preflight: [] };
+  }) as unknown as TraderManager['startTrader'];
+
+  await manager.resumePersisted(false);
+
+  assert.deepEqual(attempted, []);
+  assert.notEqual(traders.get(id)?.status, 'error');
+});
+
+test('★ #6 排队中被操作员停成 stopped：轮到它时按实时状态跳过，不按开头的快照拉起', async () => {
+  const first = seedTrader('resume-first');
+  const second = seedTrader('resume-second-stopped-meanwhile');
+  traders.setStatus(first, 'running', null);
+  traders.setStatus(second, 'running', null);
+
+  const manager = new TraderManager(new Vault(Buffer.alloc(32, 7)));
+  const attempted: number[] = [];
+  manager.startTrader = (async (traderId: number) => {
+    attempted.push(traderId);
+    /* 恢复第一台期间，操作员把第二台停成了 stopped（快照里它仍是 running）。 */
+    if (traderId === first) traders.setStatus(second, 'stopped', null);
+    return { ok: true, preflight: [] };
+  }) as unknown as TraderManager['startTrader'];
+
+  await manager.resumePersisted(false);
+
+  assert.deepEqual(attempted, [first], '被人停掉的那台不该再被开机恢复拉起');
+  assert.equal(traders.get(second)?.status, 'stopped');
+});

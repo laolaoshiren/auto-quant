@@ -278,6 +278,24 @@ export function setUnauthorizedHandler(fn: (() => void) | null): void {
 
 type Query = Record<string, string | number | boolean | undefined | null>;
 
+/**
+ * 从失败响应体里取给人看的原因。
+ *
+ * 先认 `error`；没有时回落到 `note`（审计 #21）—— 有些接口（例如
+ * `POST /api/traders/:id/agent-review`）把拒绝原因放在 `note` 里，
+ * 原来只认 `error` 的写法会把「机器人没有在运行」之类的原因吞掉，
+ * 只剩一句「请求失败：HTTP 409」。都没有才用状态码兜底。
+ */
+export function errorMessageOf(status: number, payload: unknown): string {
+  if (payload && typeof payload === 'object') {
+    const body = payload as { error?: unknown; note?: unknown };
+    /* 与原来一致：有 `error` 字段就以它为准。 */
+    if ('error' in body) return String(body.error);
+    if (typeof body.note === 'string' && body.note.trim() !== '') return body.note;
+  }
+  return `请求失败：HTTP ${status}`;
+}
+
 function withQuery(path: string, query?: Query): string {
   if (!query) return path;
   const params = new URLSearchParams();
@@ -393,11 +411,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
      * 判据与理由都写在那个函数上。
      */
     if (shouldSignOut(response.status, payload, anonymous)) onUnauthorized?.();
-    const message =
-      (payload && typeof payload === 'object' && 'error' in payload
-        ? String((payload as { error: unknown }).error)
-        : null) ?? `请求失败：HTTP ${response.status}`;
-    throw new ApiError(response.status, message, payload);
+    throw new ApiError(response.status, errorMessageOf(response.status, payload), payload);
   }
 
   return payload as T;
