@@ -14,6 +14,7 @@ import { Button, ErrorNote, Modal, Panel, Spinner3, cn } from '../components/ui'
 import { SectionHeading, TraderStatusBadge } from '../components/Badges';
 import { MoneyBadge } from './overviewParts';
 import { TraderAvatar } from '../components/TraderAvatar';
+import { ExchangeAccountChip, accountOf } from '../components/ExchangeAccountChip';
 import { Metric, SectionLabel } from '../components/shell';
 import { NewTraderModal } from '../components/TraderModals';
 import { TraderConfigModal } from '../components/TraderConfigModal';
@@ -81,6 +82,11 @@ export function TradersPage() {
     intervalMs: socketOpen ? 8000 : 4000,
   });
   const traders = tradersQuery.data ?? [];
+  /*
+   * 用户 2026-11-11：「列表页要能清楚看到机器人使用的是什么交易所什么钱包
+   * （有测试网的也要清楚看到）」。账户信息单独拉一份（慢轮询：它几乎不变）。
+   */
+  const exchangeAccountsQuery = usePolled((signal) => api.exchangeAccounts(signal), { intervalMs: 20_000 });
 
   const statsMap = useSummaries((s) => s.stats);
   /*
@@ -648,6 +654,8 @@ export function TradersPage() {
                             */}
                             <ModeBadge mode={trader.mode} />
                             <MoneyBadge dryRun={trader.dryRun} />
+                            {/* 交易所 + 钱包 + 测试网/主网（用户 2026-11-11 需求）。 */}
+                            <ExchangeAccountChip account={accountOf(exchangeAccountsQuery.data, trader.exchangeAccountId)} />
                             <span className="num hidden truncate text-xs text-ink-faint lg:inline">
                               周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
                             </span>

@@ -26,6 +26,7 @@ import { isLedgerSuspect } from '../lib/fleetTotals';
 import { Badge, Button, Empty, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import { TraderStatusBadge } from '../components/Badges';
 import { TraderAvatar } from '../components/TraderAvatar';
+import { ExchangeAccountChip, accountOf } from '../components/ExchangeAccountChip';
 import { ModeBadge } from '../components/TeamRoster';
 import { PageShell, Metric } from '../components/shell';
 import { DecisionFeed } from '../components/DecisionFeed';
@@ -442,9 +443,11 @@ export function TraderPage() {
    * 暂时性死区（`Cannot access before initialization`），整棵 React 树会卸载。
    * 类型检查抓不到它，因为引用包在箭头函数里、看起来像是稍后才跑。
    */
-  const accountLabel = exchangeAccountsQuery.data?.find(
-    (row) => row.id === trader?.exchangeAccountId,
-  )?.label;
+  /*
+   * 用户 2026-11-11：「详情页要能清楚看到机器人使用的是什么交易所什么钱包
+   * （有测试网的也要清楚看到）」。原来只取了 label（且没渲染），现在取整行。
+   */
+  const exchangeAccount = accountOf(exchangeAccountsQuery.data, trader?.exchangeAccountId);
   const status = liveStatus ?? trader?.status ?? 'stopped';
   /*
    * 决策流用它决定要不要显示"正在请求模型"这一条。
@@ -1975,6 +1978,8 @@ export function TraderPage() {
             {trader.name}
           </h1>
           <TraderStatusBadge status={status} live={trader.isRunning} />
+          {/* 交易所 + 钱包 + 测试网/主网（用户 2026-11-11 需求）。 */}
+          <ExchangeAccountChip account={exchangeAccount} />
           {/*
             **净已实现盈亏放在页头**（用户 2026-11-10：从页面底部移上来并精简）。
             只显示净额；毛 / 手续费 / 资金费的拆解收进 title（日常盯盘不需要）。
