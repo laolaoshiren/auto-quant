@@ -8,6 +8,7 @@ import {
   gatePriceOrderToAlgoResponse,
 } from './broker.js';
 import type { GateFuturesContract, GateFuturesOrder } from './types.js';
+import type { BrokerPort } from '../trader/brokerPort.js';
 
 const BTC: GateFuturesContract = {
   name: 'BTC_USDT',
@@ -217,8 +218,13 @@ test('撤单：普通单走 orders/{id}，条件单走 price_orders/{id}；已�
     publicGet: async () => [],
   } as unknown as ConstructorParameters<typeof GateBroker>[0];
   const broker = new GateBroker(rest, fakeContracts());
-  assert.equal(await broker.cancelOrder({ kind: 'order', id: '1' } as never), true);
-  assert.equal(await broker.cancelOrder({ kind: 'algo', id: '2' } as never), true);
+  /*
+   * 参数形状必须与 `BrokerPort`（= BinanceBroker）一致：`(symbol, orderId, kind)`。
+   * 交易循环的撤单调用点手里只有单号、没有 PlacedOrder —— 旧的 `(order)` 形状
+   * 会让 `connection.broker` 无法当 BrokerPort 用（阶段 2 接入时才暴露）。
+   */
+  assert.equal(await broker.cancelOrder('BTCUSDT', '1', 'order'), true);
+  assert.equal(await broker.cancelOrder('BTCUSDT', '2', 'algo'), true);
   assert.equal(calls[0]!.path, '/futures/usdt/orders/1');
   assert.equal(calls[1]!.path, '/futures/usdt/price_orders/2');
 });
@@ -233,4 +239,74 @@ test('行情：mark_price 取自 tickers', async () => {
 
 test('isDryRun 恒为 false —— Gate 的模拟盘是测试网账户，不是本地模拟', () => {
   assert.equal(new GateBroker(fakeRest().rest, fakeContracts()).isDryRun, false);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  与 BrokerPort 的形状对齐（阶段 2 放开交易循环的前置条件）                      */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ GateBroker 必须满足 BrokerPort（否则 connection.broker 不能直接喂给 AutoTrader）', () => {
+  /*
+   * Why this test exists：`BrokerPort = Pick<BinanceBroker, 19 方法>`，交易循环按它
+   * 调用 broker。GateBroker 只要有一个方法签名对不上，`connection.broker` 就无法
+   * 赋值给 `AutoTrader` 的 `broker` —— 阶段 2 放开启动时 typecheck 直接红。
+   *
+   * 这条是**编译期**断言（`tsc` 负责判），运行时开销为零；写在这里是为了让
+   * "形状对齐"成为可被单个测试文件发现的事实，而不是等到 manager 集成才暴露。
+   * 实际暴露过的两处：`setLeverage` 返回 boolean（应为 {ok,leverage}）、
+   * `cancelOrder(order)`（应为 `(symbol, orderId, kind)`）。
+   */
+  const broker: BrokerPort = new GateBroker(fakeRest().rest, fakeContracts());
+  void broker;
+});
+
+test('★★ setLeverage 返回 { ok, leverage }，让交易循环能按实际杠杆缩小名义', async () => {
+  const calls: Array<{ path: string; params?: unknown }> = [];
+  const rest = {
+    signed: async (_method: string, path: string, options?: { params?: unknown }) => {
+      calls.push({ path, ...(options === undefined ? {} : { params: options.params }) });
+      return { leverage: '8' };
+    },
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  const broker = new GateBroker(rest, fakeContracts());
+
+  const result = await broker.setLeverage('BTCUSDT', 10);
+  assert.deepEqual(result, { ok: true, leverage: 8 }, '必须回传交易所实际给的杠杆');
+  assert.equal(calls[0]!.path, '/futures/usdt/positions/BTC_USDT/leverage');
+  assert.deepEqual(calls[0]!.params, { leverage: '10' });
+});
+
+test('★★ setLeverage 被交易所拒绝 → { ok:false, note }（本笔放弃，不拿未知杠杆开仓）', async () => {
+  const rest = {
+    signed: async () => {
+      throw new Error('Gate API 失败（HTTP 400 · INVALID_LEVERAGE）：leverage exceeds limit');
+    },
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  const broker = new GateBroker(rest, fakeContracts());
+
+  const result = await broker.setLeverage('BTCUSDT', 20);
+  assert.equal(result.ok, false);
+  assert.equal(result.leverage, 0);
+  assert.match(result.note ?? '', /INVALID_LEVERAGE/);
+});
+
+test('★★ getIncome 不传 endTime 时不能发出 NaN（接口可选性必须与币安一致）', async () => {
+  /*
+   * 交易循环多数调用点只传 `startTime`（`reconcileTradeHistory` / `fundingFor`）。
+   * 若这里把 endTime 声明成必填、运行时直接除法，`Math.floor(undefined/1000)` = NaN
+   * 会被 Gate 拒成 INVALID_PARAM —— 只在联调时暴露的接口不匹配。
+   */
+  const calls: Array<{ params?: Record<string, string> }> = [];
+  const rest = {
+    signed: async (_method: string, _path: string, options?: { params?: Record<string, string> }) => {
+      calls.push({ ...(options?.params === undefined ? {} : { params: options.params }) });
+      return [];
+    },
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  const broker = new GateBroker(rest, fakeContracts());
+
+  await broker.getIncome({ startTime: 1_700_000_000_000 });
+  assert.ok(!/NaN/.test(JSON.stringify(calls[0]!.params)), `参数里不能有 NaN：${JSON.stringify(calls[0])}`);
+  assert.equal(calls[0]!.params?.from, '1700000000');
+  assert.ok(Number(calls[0]!.params?.to) > 0);
 });

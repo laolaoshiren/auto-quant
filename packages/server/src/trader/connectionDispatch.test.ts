@@ -22,7 +22,7 @@ import type { ConnectOptions, ExchangeConnection } from '../binance/bootstrap.js
 import { BinanceBroker } from '../binance/broker.js';
 import type { BinanceMarketData } from '../binance/market.js';
 import type { BinanceRest } from '../binance/rest.js';
-import type { SymbolRegistry } from '../binance/symbols.js';
+import { SymbolRegistry } from '../binance/symbols.js';
 import { GateBroker } from '../gate/broker.js';
 import { connectGate } from '../gate/connection.js';
 import {
@@ -66,8 +66,15 @@ function recordingFactories(recorded: Recorded): ExchangeConnectionFactories {
     }) as ExchangeConnectionFactories['binance'],
     gate: ((options: Parameters<typeof connectGate>[0]) => {
       recorded.gate.push(options);
-      /* 真实的 GateBroker / GateContractRegistry —— `connectGate` 不联网（懒加载）。 */
-      return connectGate(options);
+      /*
+       * 真实的 GateBroker / GateContractRegistry —— `connectGate` 除"启动期构建
+       * 同步注册表"外不联网；而注册表在这里注入一个**空桩**，让分派测试不依赖
+       * Gate 测试网（否则单测在无网环境会红，且每次跑测试都打外部接口）。
+       */
+      return connectGate({
+        ...options,
+        createRegistry: async () => new SymbolRegistry([]),
+      });
     }) as ExchangeConnectionFactories['gate'],
   };
 }

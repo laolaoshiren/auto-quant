@@ -8,7 +8,7 @@ import {
   type Timeframe,
   type TimeframeIndicators,
 } from '@aq/shared';
-import type { BinanceMarketData } from '../binance/market.js';
+import type { MarketPort } from './port.js';
 import type { FunnelCandidate } from './funnel.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
 import { normalizeSymbol } from '../binance/symbols.js';
@@ -78,7 +78,7 @@ export class MarketDataService {
   private readonly klineCache = new Map<string, { at: number; klines: Kline[] }>();
 
   constructor(
-    private readonly market: BinanceMarketData,
+    private readonly market: MarketPort,
     private readonly registry: SymbolRegistry,
   ) {}
 

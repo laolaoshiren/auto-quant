@@ -1556,6 +1556,21 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       return reply.code(400).send({ ok: false, checks: [], error: '请填写完整的交易所、API Key 与 Secret。' });
     }
     try {
+      /*
+       * ⚠️ **按交易所分派**（2026-11-11）：原来这里无条件走币安 —— Gate 账户点
+       * 「测试连接」会拿 Gate 的 key 去打币安的端点，回报一条"认证失败"，
+       * 让人以为 Gate key 配错了。Gate 走自己的连接与预检。
+       */
+      if (parsed.data.exchange === 'gate') {
+        const { connectGate, gateStartupChecks, gateEnvironmentOf } = await import('../gate/connection.js');
+        const connection = await connectGate({
+          apiKey: parsed.data.apiKey,
+          apiSecret: parsed.data.apiSecret,
+          environment: gateEnvironmentOf(parsed.data.testnet),
+        });
+        const checks = await gateStartupChecks(connection);
+        return { ok: checks.every((c) => c.ok || !c.blocking), checks };
+      }
       const { connectExchange } = await import('../binance/bootstrap.js');
       const connection = await connectExchange({
         environment: parsed.data.testnet ? 'demo' : 'production',
@@ -1654,6 +1669,16 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     if (!row) return reply.code(404).send({ error: '找不到该凭据' });
 
     try {
+      if (row.exchange === 'gate') {
+        const { connectGate, gateStartupChecks, gateEnvironmentOf } = await import('../gate/connection.js');
+        const connection = await connectGate({
+          apiKey: row.api_key,
+          apiSecret: deps.vault.decrypt(row.api_secret_enc),
+          environment: gateEnvironmentOf(row.testnet === 1),
+        });
+        const checks = await gateStartupChecks(connection);
+        return { ok: checks.every((c) => c.ok || !c.blocking), checks };
+      }
       const { connectExchange } = await import('../binance/bootstrap.js');
       const connection = await connectExchange({
         environment: row.testnet === 1 ? 'demo' : 'production',

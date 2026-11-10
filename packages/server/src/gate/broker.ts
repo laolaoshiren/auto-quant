@@ -245,12 +245,43 @@ export class GateBroker {
     }
   }
 
-  async setLeverage(symbol: string, leverage: number): Promise<boolean> {
+  /**
+   * 设置杠杆（对齐 `BrokerPort`/`BinanceBroker.setLeverage` 的返回形状）。
+   *
+   * ## 为什么返回对象而不是 boolean
+   *
+   * 交易循环的 `executeOpen` 靠 `{ ok, leverage, note }` 决定：
+   *   · `ok:false`（交易所不允许该杠杆/有挂单）→ **本笔放弃**，不在不知道实际杠杆的
+   *     情况下开杠杆仓；
+   *   · `leverage` 低于风控批准值（子账户/档位限制）→ 按比例缩小名义价值。
+   * 只返回 `true/false` 会让"交易所实际给了多少杠杆"永远丢失 —— 那正是
+   * 2026-11-10 修过的一类 bug（按批准杠杆记账、实际保证金超预算）。
+   *
+   * Gate 的 `POST /positions/{contract}/leverage` 响应里带 `leverage`；
+   * 拒绝时（`INVALID_LEVERAGE` / 超过上限）返回 `ok:false`，让调用方安全放弃本笔。
+   */
+  async setLeverage(
+    symbol: string,
+    leverage: number,
+  ): Promise<{ ok: boolean; leverage: number; note?: string }> {
     const contract = symbolToGateContract(symbol);
-    await this.rest.signed('POST', `/futures/usdt/positions/${contract}/leverage`, {
-      params: { leverage: String(Math.trunc(leverage)) },
-    });
-    return true;
+    const wanted = Math.trunc(leverage);
+    try {
+      const response = await this.rest.signed<{ leverage?: string | number }>(
+        'POST',
+        `/futures/usdt/positions/${contract}/leverage`,
+        { params: { leverage: String(wanted) } },
+      );
+      const applied = num(response?.leverage);
+      return { ok: true, leverage: applied > 0 ? applied : wanted };
+    } catch (error) {
+      const message = (error as Error).message;
+      return {
+        ok: false,
+        leverage: 0,
+        note: `Gate 设置 ${symbol} 杠杆 ${wanted}x 失败：${message}`,
+      };
+    }
   }
 
   /**
@@ -440,13 +471,34 @@ export class GateBroker {
     return current;
   }
 
-  async cancelOrder(order: PlacedOrder): Promise<boolean> {
+  /**
+   * 撤一张单（对齐 `BrokerPort`：`(symbol, orderId, kind)`）。
+   *
+   * ## 为什么参数是单号而不是 `PlacedOrder`
+   *
+   * 交易循环的撤单调用点（`cancelAllProtection` / `executeCancelPending` /
+   * 保本移损 / 手工平仓）手里只有**单号**，没有完整的 `PlacedOrder`。币安那层
+   * 早就改成了 `(symbol, orderId, kind)`，Gate 原来保留 `(order: PlacedOrder)`
+   * 的旧形状 —— 两个实现形状不一致时 `connection.broker` 无法当 `BrokerPort` 用
+   *（接入阶段 2 才暴露出来）。`kind` 决定打哪个端点：
+   *
+   * ```
+   *   order → DELETE /futures/usdt/orders/{id}
+   *   algo  → DELETE /futures/usdt/price_orders/{id}    （条件单是独立资源）
+   * ```
+   *
+   * 已不存在 = 撤单成功（与币安 `-2011` 同一语义）。
+   */
+  async cancelOrder(
+    symbol: string,
+    orderId: string | number,
+    kind: 'order' | 'algo' = 'order',
+  ): Promise<boolean> {
     try {
-      if (order.kind === 'algo') {
-        await this.rest.signed('DELETE', `/futures/usdt/price_orders/${order.id}`);
-      } else {
-        await this.rest.signed('DELETE', `/futures/usdt/orders/${order.id}`);
-      }
+      const path =
+        kind === 'algo' ? `/futures/usdt/price_orders/${orderId}` : `/futures/usdt/orders/${orderId}`;
+      await this.rest.signed('DELETE', path);
+      log.info(`[gate] 已撤销 ${symbol} 的${kind === 'algo' ? '条件单' : '普通单'} #${orderId}`);
       return true;
     } catch (error) {
       /* 已经不在 = 撤单成功（与币安那层同一个语义）。 */
@@ -479,12 +531,19 @@ export class GateBroker {
   async getIncome(options: {
     symbol?: string;
     startTime: number;
-    endTime: number;
+    endTime?: number;
     limit?: number;
   }): Promise<BinanceIncome[]> {
+    /*
+     * ⚠️ `endTime` 必须可选：交易循环的多数调用点只传 `startTime`（例如
+     * `reconcileTradeHistory` / `fundingFor`）。声明成必填时类型层面因为方法
+     * 双变而"通过"，但运行时 `Math.floor(undefined/1000)` = NaN，会被 Gate 拒成
+     * `INVALID_PARAM` —— 一类只在联调时才暴露的接口不匹配。
+     */
+    const endTime = options.endTime ?? Date.now();
     const params: Record<string, string> = {
       from: String(Math.floor(options.startTime / 1000)),
-      to: String(Math.floor(options.endTime / 1000)),
+      to: String(Math.floor(endTime / 1000)),
       limit: String(options.limit ?? 100),
     };
     if (options.symbol) params.contract = symbolToGateContract(options.symbol);

@@ -9,7 +9,7 @@ import {
 } from '@aq/shared';
 import { connectExchange, preflight, type ExchangeConnection, type PreflightCheck } from '../binance/bootstrap.js';
 import type { AccountState } from '../binance/account.js';
-import { connectGate, gateEnvironmentOf, type GateConnection } from '../gate/connection.js';
+import { connectGate, gateEnvironmentOf, gateStartupChecks, type GateConnection } from '../gate/connection.js';
 import { BinanceUserDataStream } from '../binance/ws.js';
 import type { Vault } from '../crypto/vault.js';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -294,16 +294,11 @@ const DEFAULT_PAPER_BALANCE = 1000;
  * 一次交易所连接：**币安或 Gate**。
  *
  * 两种连接的 `broker` 形状相同（都满足 `trader/brokerPort.ts` 的 `BrokerPort`），
- * 但行情层与合约注册表是各自的实现：
- *
- * ```
- *   币安：BinanceMarketData + SymbolRegistry（同步 API）
- *   Gate：GateMarketPort   + GateContractRegistry（异步 API，见 gate/account.ts）
- * ```
- *
- * ⇒ 用 union 而不是硬塞成一种形状。需要"交易循环那一套币安形状依赖"的调用点
- * 必须先用 `isGateConnection()` 收窄；目前它们对 Gate 一律**明确拒绝**（见
- * `requireTradingConnection`），直到 Gate 行情层与注册表适配完成合并。
+ * `market` 都满足 `market/port.ts` 的 `MarketPort`，`registry` 都是**同一个**
+ * `SymbolRegistry` —— 所以交易循环、行情服务、对账/手工平仓这些路径**不需要**
+ * 按交易所分叉。只有"预检"这一步要分叉（币安读 `BinanceRest`，Gate 读
+ * `GateRest`，见 `attemptStart`），以及币安独有的用户数据流（Gate 的 WS 属于
+ * 阶段 3，见 `attemptStart` 里 `startUserStream` 的调用点）。
  */
 export type AnyExchangeConnection = ExchangeConnection | GateConnection;
 
@@ -2219,30 +2214,27 @@ export class TraderManager {
   }
 
   /**
-   * 把连接收窄成**交易循环能直接用的币安形状连接**（`ExchangeConnection`）。
+   * 把连接收窄成**交易循环能直接用的形状**。
    *
-   * ## 为什么 Gate 在这里被明确拒绝（而不是硬转）
+   * ## 为什么现在对 Gate 也放行（2026-11-11）
    *
-   * `AutoTrader` 的依赖类型是币安的具体类型：`registry: SymbolRegistry`（同步）、
-   * `market: BinanceMarketData`（具体类，带 private 字段）。Gate 的对应物是
-   * `GateContractRegistry`（**异步** API：`all()` / `get()` / `quantityToSize()`）
-   * 与 `GateMarket`（`gate/market.ts`，并发实现中）。
+   * 之前这里把 Gate 明确拒绝，因为 `AutoTrader` 的依赖是币安的具体类型
+   *（`registry: SymbolRegistry` 同步、`market: BinanceMarketData` 具体类），而
+   * Gate 的对应物是异步 `GateContractRegistry` + `GateMarket`。
    *
-   * 两者形状没有对齐之前，唯一安全的做法是**明确失败**：给出"哪一步被阻止、为什么"。
-   * 绝不用币安行情服务驱动 Gate 下单 —— 那会让风控按币安的行情与合约精度去裁决
-   * Gate 的订单，而且不会报错。
+   * 现在两层都对齐了：
+   *   · `registry`：`GateConnection.registry` 就是**同一个** `SymbolRegistry`
+   *     （由 `gate/symbols.ts` 在连接创建时把 Gate 合约映射进来）；
+   *   · `market`：两个实现都满足 `market/port.ts` 的 `MarketPort`；
+   *   · `broker`：两个实现都满足 `trader/brokerPort.ts` 的 `BrokerPort`。
+   *
+   * ⇒ 对账 / 手工平仓 / 撤销挂单这些"跨交易所通用"的路径不再需要分叉 ——
+   * 用同一条连接组装同一个 `AutoTrader` 即可。
    */
   private requireTradingConnection(
     connection: AnyExchangeConnection,
-    purpose: string,
-  ): ExchangeConnection {
-    if (isGateConnection(connection)) {
-      throw new Error(
-        `该机器人绑定的是 Gate 账户；${purpose}需要交易循环的行情与合约注册表，` +
-          '而 Gate 行情适配层（GateMarket）尚未接线 —— 已阻止该操作，' +
-          '以免用币安行情服务驱动 Gate 下单。',
-      );
-    }
+    _purpose: string,
+  ): AnyExchangeConnection {
     return connection;
   }
 
@@ -3195,39 +3187,46 @@ export class TraderManager {
       dropConnections(this.connections, traderId);
       const connection = await this.connectionFor(traderId, trader.exchangeAccountId, dryRun);
       /*
-       * ⚠️ **Gate 账户：连接建得出来，但交易循环的行情/注册表适配还没合并。**
+       * ══════════════════════════════════════════════════════════════════════
+       *  **启动预检：币安与 Gate 各用各的**（2026-11-11 Gate 放开启动）
+       * ══════════════════════════════════════════════════════════════════════
        *
-       * 下面 `new MarketDataService(connection.market, connection.registry)` 与
-       * `new AutoTrader({ registry, market, ... })` 要的是**币安的具体类型**
-       *（同步 `SymbolRegistry` / `BinanceMarketData`）。Gate 的
-       * `GateContractRegistry` 是异步 API、`GateMarket` 由并发任务（task-15）实现中 ——
-       * 硬转过去会在运行期以"拿合约张数当币数"这类方式静默出错。
+       * 两种连接的 broker/market/registry **形状已经对齐**（`BrokerPort` /
+       * `MarketPort` / 同一个 `SymbolRegistry`），所以下面组装交易循环的代码
+       * 对两者是同一份。只有预检必须分叉：币安那套 `preflight()` 读
+       * `BinanceRest` 的签名/权重/持仓模式 API，Gate 的 REST 形状不同。
        *
-       * ⇒ 在适配合并之前**宁可起不来**，并说清是哪一步被阻止。
-       * `permanent: true`：这不是网络抖动，重试 4 次只会把同一句话刷 4 遍。
+       * ⚠️ Gate 的"正式网 + dryRun"守卫**不在这里** —— 它在
+       * `createExchangeConnection()`（建连接之前）就拒绝了：Gate 的"模拟盘"
+       * 就是官方测试网，拿正式网账户跑 dryRun 会**真钱下单**。
        */
       if (isGateConnection(connection)) {
-        const detail =
-          '该机器人绑定的是 Gate 账户，但 Gate 行情适配层（GateMarket）尚未接线 —— ' +
-          '本次启动已阻止：绝不用币安行情服务驱动 Gate 下单。' +
-          '（Gate 行情由后续任务提供，合并后再放开 Gate 账户的启动。）';
-        checks.push({ name: '交易所适配', severity: 'error', ok: false, detail, blocking: true });
-        dropConnections(this.connections, traderId);
-        this.setTraderStatus(traderId, 'error', detail);
-        return { result: { ok: false, error: detail, preflight: checks }, permanent: true };
-      }
-      const connectivity = await preflight(connection, { requireCredentials: !dryRun });
-      checks.push(...connectivity);
+        const gateChecks = await gateStartupChecks(connection);
+        checks.push(...gateChecks);
+        const blockingGate = gateChecks.filter((c) => !c.ok && c.blocking);
+        if (blockingGate.length > 0) {
+          dropConnections(this.connections, traderId);
+          const message = blockingGate.map((c) => `${c.name}: ${c.detail}`).join(' ');
+          this.setTraderStatus(traderId, 'error', message);
+          return {
+            result: { ok: false, error: message, preflight: checks },
+            permanent: isPermanentStartFailure(message),
+          };
+        }
+      } else {
+        const connectivity = await preflight(connection, { requireCredentials: !dryRun });
+        checks.push(...connectivity);
 
-      const blocking = connectivity.filter((c) => !c.ok && c.blocking);
-      if (blocking.length > 0) {
-        dropConnections(this.connections, traderId);
-        const message = blocking.map((c) => `${c.name}: ${c.detail}`).join(' ');
-        this.setTraderStatus(traderId, 'error', message);
-        return {
-          result: { ok: false, error: message, preflight: checks },
-          permanent: isPermanentStartFailure(message),
-        };
+        const blocking = connectivity.filter((c) => !c.ok && c.blocking);
+        if (blocking.length > 0) {
+          dropConnections(this.connections, traderId);
+          const message = blocking.map((c) => `${c.name}: ${c.detail}`).join(' ');
+          this.setTraderStatus(traderId, 'error', message);
+          return {
+            result: { ok: false, error: message, preflight: checks },
+            permanent: isPermanentStartFailure(message),
+          };
+        }
       }
 
       /* --- Strategy（**可选**）-------------------------------------------- */
@@ -3892,9 +3891,20 @@ export class TraderManager {
         };
       }
 
-      // Attached after the trader is live, so a stream failure can never prevent
-      // the trading loop from starting.
-      await this.startUserStream(traderId, connection);
+      /*
+       * 用户数据流：**只有币安接了这一层**（Gate 的 WS 属于阶段 3）。
+       *
+       * Gate 没有这个流不影响交易循环：成交推送只是"提前知道成交"的加速器，
+       * 真正的对账由每个周期的 `reconcile*` 与 `/reconcile` 端点保证
+       *（见 `startUserStream` 上方那段"advisory only"的说明）。
+       * ⚠️ 不要为了"两边一样"给 Gate 硬塞一个 `BinanceUserDataStream` ——
+       * 那会拿 Gate 的 rest 去请求币安的 listenKey 端点，必然失败且噪声很大。
+       */
+      if (!isGateConnection(connection)) {
+        // Attached after the trader is live, so a stream failure can never prevent
+        // the trading loop from starting.
+        await this.startUserStream(traderId, connection);
+      }
 
       /*
        * 第三道：`startUserStream()` 也是网络往返（listenKey + WebSocket）。

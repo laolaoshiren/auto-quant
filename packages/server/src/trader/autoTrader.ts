@@ -27,8 +27,8 @@ import type { ExchangePosition } from '../binance/broker.js';
 import type { BrokerPort } from './brokerPort.js';
 import type { PositionSide } from '@aq/shared';
 import type { AccountState } from '../binance/account.js';
-import type { BinanceMarketData } from '../binance/market.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
+import type { MarketPort } from '../market/port.js';
 import { BinanceApiError, type BinanceAlgoStatus, type BinanceUserTrade } from '../binance/types.js';
 import { eventBus } from '../events.js';
 import { createLogger } from '../logger.js';
@@ -646,7 +646,14 @@ export interface AutoTraderDeps {
   trader: Trader;
   config: StrategyConfig;
   registry: SymbolRegistry;
-  market: BinanceMarketData;
+  /**
+   * 行情层 —— 只要满足 `MarketPort`（`binance/market.ts` 的 8 个公开方法）。
+   *
+   * ⚠️ 这里原来写的是具体类 `BinanceMarketData`：接 Gate 时 GateMarket 结构上
+   * 满足同一套方法，但**永远不满足具体类**（币安实现带 private 字段）——
+   * 收窄成 `MarketPort` 才能让两个交易所共用同一个交易循环。
+   */
+  market: MarketPort;
   marketData: MarketDataService;
   broker: BrokerPort;
   model: DecisionModel;
