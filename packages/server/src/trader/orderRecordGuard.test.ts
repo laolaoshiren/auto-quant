@@ -200,6 +200,7 @@ test('★★★ 所有下单都必须发生在 autoTrader.ts —— 别处不许
     'trader/autoTrader.ts', // 唯一的调用方（且它自己必须配对 recordOrder，由上一条守着）
     'trader/broker.ts', // 接口声明（类型层面）
     'binance/broker.ts', // 实现（真正发请求的那一层）
+    'gate/broker.ts', // Gate 实现（同样是真正发请求的那一层，与 binance/broker.ts 同性质）
     'simulate/simulatedExchange.ts', // 模拟盘的实现
     'scripts/demoCycle.ts', // 演示脚本里的**模拟 broker 实现**（不是"下单调用"）
     /*
