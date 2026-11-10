@@ -17,6 +17,7 @@ import type {
   EquitySnapshot,
   ExecutionLogEntry,
   ExchangeAccount,
+  ExchangeId,
   Kline,
   LlmProviderDescriptor,
   OrderRecord,
@@ -839,7 +840,11 @@ export interface MarketSymbol {
 }
 
 export interface ExchangeAccountInput {
-  exchange: string;
+  /*
+   * 用 `ExchangeId`（binance / gate）而不是硬编码 'binance'：证书表单支持多交易所，
+   * 新增一家时这里不需要跟着改（schema 在 `@aq/shared` 的 ExchangeIdSchema）。
+   */
+  exchange: ExchangeId;
   label: string;
   apiKey: string;
   apiSecret?: string;

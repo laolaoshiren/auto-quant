@@ -17,6 +17,7 @@ import {
 } from '../trader/control.js';
 import {
   EXCHANGES,
+  ExchangeIdSchema,
   LLM_PROVIDERS,
   STRATEGY_PRESETS,
   StrategyConfigSchema,
@@ -153,7 +154,8 @@ const BaseUrlSchema = z
   });
 
 const ExchangeAccountInputSchema = z.object({
-  exchange: z.enum(['binance']).default('binance'),
+  /* 交易所目录由共享的 `ExchangeIdSchema` 定义（binance/gate）—— 新增交易所只改 shared 一处。 */
+  exchange: ExchangeIdSchema.default('binance'),
   label: z.string().min(1).max(80),
   apiKey: z.string().min(1),
   apiSecret: z.string().min(1),

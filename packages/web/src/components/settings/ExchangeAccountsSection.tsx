@@ -20,6 +20,7 @@
  */
 import { useCallback, useMemo, useState } from 'react';
 import { Landmark, Plus, RotateCw, Trash2 } from 'lucide-react';
+import { EXCHANGES, type ExchangeId } from '@aq/shared';
 import { api, type ExchangeAccountInput, type ExchangeAccountRow, type ExchangeBalance, type ExchangeBalanceResult, type PreflightCheck } from '../../lib/api';
 import { useApp } from '../../lib/store';
 import { usePolled, useTicker } from '../../lib/hooks';
@@ -34,6 +35,7 @@ import {
   Select,
   Spinner3,
   TextInput,
+  cn,
 } from '../ui';
 import { CheckList } from '../Badges';
 import { Metric, MetricGroup, PageShell } from '../shell';
@@ -52,7 +54,11 @@ import {
 } from '../../lib/format';
 
 interface AccountDraft {
-  exchange: string;
+  /*
+   * `ExchangeId`（binance / gate）来自 `@aq/shared` —— 新增交易所时这里不用改。
+   * 后端 `PATCH` 不收 `exchange`：创建后交易所不可更改（见表单里禁用的下拉）。
+   */
+  exchange: ExchangeId;
   label: string;
   apiKey: string;
   apiSecret: string;
@@ -171,13 +177,15 @@ function aggregateBalance(
 export function ExchangeAccountsSection() {
   const catalog = useApp((s) => s.catalog);
   /*
-   * **交易环境由全局配置决定，不再让每个账户自己选**（用户 2026-11-10：
-   * 「测试网 / 模拟盘环境」「该密钥可以下单」两个开关「多余，历史遗留问题」）。
+   * **交易环境由交易所决定**（用户 2026-11-10：「测试网 / 模拟盘环境」「该密钥可以下单」
+   * 两个开关「多余，历史遗留问题」——币安的账户级开关已删除）：
    *
-   * 理由：`BINANCE_ENV` 已经是进程级事实（本地 Demo / 服务器生产），再给每个
-   * 账户一个 testnet 开关，只会出现"同一个进程里一半账户连 Demo、一半连主网"
-   * 这种没人能解释的状态。`canTrade`（只读密钥）同样没有产品用途 ——
-   * 只读账户在启动预检时就会被拒，不需要用户理解这个开关。
+   * · 币安：`BINANCE_ENV` 已经是进程级事实（本地 Demo / 服务器生产），再给每个账户
+   *   一个 testnet 开关只会出现"同一进程里一半账户连 Demo、一半连主网"的怪状态；
+   * · Gate：没有进程级环境开关，凭证自己的 `testnet` 才是事实 —— 由表单显式选
+   *   （默认测试网），正式网要用户主动切一次。
+   *
+   * `canTrade`（只读密钥）同样没有产品用途 —— 只读账户在启动预检时就会被拒。
    */
   const envTestnet = useApp((s) => (s.system?.environment ?? 'demo') !== 'production');
   const query = usePolled((signal) => api.exchangeAccounts(signal), { intervalMs: 30_000 });
@@ -215,7 +223,23 @@ export function ExchangeAccountsSection() {
    * 这个组件的 `accounts` 还被 `liveAccounts` 与几处 `useCallback` 依赖着。
    */
   const accounts = useMemo(() => query.data ?? [], [query.data]);
-  const exchanges = useMemo(() => catalog?.exchanges ?? [], [catalog]);
+  /*
+   * 交易所目录：以 `/api/catalog` 为主，但**用 `EXCHANGES` 兜底并补齐** ——
+   * 旧服务端（catalog 里还没有 gate）与前端部署不同步时，凭证表单仍应能选
+   * 目录里的每一家，否则会出现"共享包加了、界面看不见"。
+   */
+  const exchanges = useMemo(() => {
+    const rows = catalog?.exchanges ?? [];
+    return EXCHANGES.map((entry) => {
+      const row = rows.find((candidate) => candidate.id === entry.id);
+      return {
+        id: entry.id,
+        label: row?.label ?? entry.label,
+        market: row?.market ?? entry.market,
+        available: row?.available ?? entry.available,
+      };
+    });
+  }, [catalog]);
   const liveAccounts = accounts.filter((row) => !row.testnet);
 
   const overrideFor = useCallback(
@@ -278,8 +302,8 @@ export function ExchangeAccountsSection() {
    * 并把该交易所预选好 —— 否则从那一行点进来，还要在对话框的下拉里
    * 再找一次同一个交易所（那是纯粹的重复劳动）。
    */
-  const openCreate = (exchangeId?: string) => {
-    // 默认选中目录里第一个真正可用的交易所。
+  const openCreate = (exchangeId?: ExchangeId) => {
+    // 从「支持的交易所」点进来时预选该行；否则选目录里第一个可用的（币安）。
     const picked = exchangeId ? exchanges.find((row) => row.id === exchangeId) : undefined;
     const usable = picked ?? exchanges.find((row) => row.available) ?? exchanges[0];
     setDraft({ ...EMPTY_ACCOUNT, exchange: usable?.id ?? 'binance' });
@@ -321,7 +345,12 @@ export function ExchangeAccountsSection() {
     label: draft.label.trim() || draft.exchange,
     apiKey: draft.apiKey.trim(),
     apiSecret: draft.apiSecret,
-    testnet: envTestnet,
+    /*
+     * 币安：环境由进程级 `BINANCE_ENV` 决定（本地 Demo / 服务器生产），账户级开关
+     * 会造出"同一进程里一半 Demo 一半主网"的怪状态，所以沿用它。
+     * Gate：没有进程级环境开关，用账户自己的 `testnet`（表单里显式选，默认测试网）。
+     */
+    testnet: draft.exchange === 'gate' ? draft.testnet : envTestnet,
     canTrade: true,
   });
 
@@ -412,6 +441,11 @@ export function ExchangeAccountsSection() {
   };
 
   const exchangeLabel = (id: string) => exchanges.find((row) => row.id === id)?.label ?? id;
+  /**
+   * 这份草稿最终以哪个环境保存：
+   * 币安沿用进程级 `envTestnet`；Gate 用账户自己的 `testnet`（默认测试网）。
+   */
+  const draftTestnet = draft.exchange === 'gate' ? draft.testnet : envTestnet;
   const failedReads = totals.failed;
 
   /* ------------------------------------------------------------------------ */
@@ -555,9 +589,9 @@ export function ExchangeAccountsSection() {
   );
 
   /*
-   * 支持的交易所目录：**只在有多个交易所时渲染**（现在目录里只有币安一家，
-   * 那面板就是一块"只有一个选项的清单"= 多余，用户 2026-11-10）。
-   * 将来接入第二家时它会自动出现 —— 不必改调用方。
+   * 支持的交易所目录：**>1 家时才有意义**（现在有币安 + Gate）。
+   * 每一行都能直接进「添加凭证」并预选该交易所；`available: false` 的显示"联调中"
+   * 但**不禁用** —— 凭证可以先保存、先联调，等后端/机器人侧接入完成即可用。
    */
   const supported = exchanges.length > 1 && (
     <Panel title="支持的交易所" bodyClassName="p-0">
@@ -569,16 +603,15 @@ export function ExchangeAccountsSection() {
             </span>
             <span className="min-w-0 truncate text-base text-ink-hi">{row.label}</span>
             <Badge tone="muted">{row.market}</Badge>
-            {!row.available && <Badge tone="warn">尚未支持</Badge>}
+            {!row.available && <Badge tone="warn">联调中</Badge>}
             <span className="ml-auto">
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={!row.available}
                 title={
                   row.available
                     ? `添加一个「${row.label}」凭证 —— 对话框里会预选它`
-                    : `${row.label} 尚未接入，本终端还不能用它下单`
+                    : `${row.label} 正在接入联调：可以先把凭证保存进来，机器人交易前请确认后端已支持`
                 }
                 onClick={() => openCreate(row.id)}
               >
@@ -878,18 +911,43 @@ export function ExchangeAccountsSection() {
             </div>
           )}
 
-          <Field label="交易所" hint={exchanges.find((row) => row.id === draft.exchange)?.market}>
-            <Select value={draft.exchange} onChange={(event) => setDraft({ ...draft, exchange: event.target.value })}>
+          <Field
+            label="交易所"
+            hint={
+              editing
+                ? '创建后不可更改交易所。'
+                : exchanges.find((row) => row.id === draft.exchange)?.market
+            }
+          >
+            {/*
+              * 所有交易所都可选（gate 的 `available: false` 只表示"机器人交易尚未
+               * 全量开放"，凭证本身可以先保存、先联调）——所以这里**不按 available 禁用**。
+              */}
+            <Select
+              value={draft.exchange}
+              disabled={editing !== null}
+              onChange={(event) => {
+                const next = event.target.value as ExchangeId;
+                setDraft({ ...draft, exchange: next, testnet: true });
+              }}
+            >
               {exchanges.map((row) => (
-                <option key={row.id} value={row.id} disabled={!row.available}>
+                <option key={row.id} value={row.id}>
                   {row.label}
-                  {row.available ? ` · ${row.market}` : '（尚未支持）'}
+                  {row.available ? ` · ${row.market}` : '（联调中）'}
                 </option>
               ))}
             </Select>
           </Field>
 
-          <Field label="名称" hint="便于识别的名称 — 例如“币安模拟盘”“主账户”。">
+          <Field
+            label="名称"
+            hint={
+              draft.exchange === 'gate'
+                ? '便于识别的名称 — 例如“Gate 测试网”“主账户”。'
+                : '便于识别的名称 — 例如“币安模拟盘”“主账户”。'
+            }
+          >
             <TextInput value={draft.label} onChange={(event) => setDraft({ ...draft, label: event.target.value })} />
           </Field>
 
@@ -918,26 +976,66 @@ export function ExchangeAccountsSection() {
           </Field>
 
           {/*
-           * ⚠️ **这里原来有两个开关，已删除**（用户 2026-11-10：
-           * 「测试网 / 模拟盘环境」「该密钥可以下单」→「多余，历史遗留问题」）。
-           *
-           * · 交易环境由进程级 `BINANCE_ENV` 决定（本地 Demo / 服务器生产），
-           *   账户级 testnet 开关只会造出"同一进程里一半 Demo 一半主网"的怪状态；
-           * · 只读密钥没有产品用途 —— 启动预检本来就会拒绝它。
-           *
-           * 现在提交时按全局环境自动填 `testnet`、`canTrade` 恒为 true；
-           * 下面只保留"当前环境意味着什么"的风险提示。
-           */}
-          {/*
-           * 真实环境才是真正会亏钱的那种，所以警告直接给出后果，而不是写一句说明。
-           */}
-          {envTestnet ? (
+            Gate 没有进程级环境开关（`BINANCE_ENV` 只对币安生效），所以环境是
+            **账户自己的字段**：默认测试网，正式网要用户显式切一次。
+
+            这里**不用 `Field`**（它用 Radix Label.Root，会把子节点包进 `<label>`；
+            两个 `<button>` 嵌在 label 里，可访问名会混进整段提示文字，点击文字还可能
+            误触第一个按钮）。改成"标题 + 选择器 + 提示"三段式，语义干净。
+          */}
+          {draft.exchange === 'gate' && (
+            <div>
+              <span className="field-label">交易环境</span>
+              <div
+                role="group"
+                aria-label="交易环境"
+                className="inline-flex rounded-md border border-base-700 bg-base-900 p-0.5"
+              >
+                {[
+                  { testnet: true, label: '测试网' },
+                  { testnet: false, label: '正式网' },
+                ].map((option) => {
+                  const selected = draft.testnet === option.testnet;
+                  return (
+                    <button
+                      key={option.label}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => setDraft({ ...draft, testnet: option.testnet })}
+                      className={cn(
+                        'rounded px-3 py-1 text-base transition',
+                        selected
+                          ? option.testnet
+                            ? 'bg-base-800 text-ink-hi'
+                            : 'bg-warn/20 text-warn'
+                          : 'text-ink-lo hover:text-ink-hi',
+                      )}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <span className="mt-1 block text-xs text-ink-faint">
+                测试网=假钱、真实撮合（默认）；正式网=真实资金。
+              </span>
+            </div>
+          )}
+
+          {/* 真实环境才是真正会亏钱的那种，所以警告直接给出后果，而不是写一句说明。 */}
+          {draftTestnet ? (
             <div className="rounded-md border border-base-700 bg-base-850/60 px-3 py-2 text-base leading-relaxed text-ink-lo">
-              这是<span className="mx-1 text-ink-hi">{TRADING_ENV_LABEL.long.testnet}</span>凭证：下单不会进入真实市场。
+              这是
+              <span className="mx-1 text-ink-hi">
+                {draft.exchange === 'gate' ? 'Gate 测试网' : TRADING_ENV_LABEL.long.testnet}
+              </span>
+              凭证：下单不会进入真实市场，但撮合与手续费按真实规则计算。
             </div>
           ) : (
             <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base leading-relaxed text-warn">
-              <span className="font-semibold">{TRADING_ENV_LABEL.long.live}。</span>
+              <span className="font-semibold">
+                {draft.exchange === 'gate' ? 'Gate 正式网（真实资金）。' : `${TRADING_ENV_LABEL.long.live}。`}
+              </span>
               保存后，使用该凭证的机器人会向真实市场提交真实订单，盈亏从账户里真实增减。
               请确认密钥已关闭提现权限，并尽量限制为服务器 IP。
             </div>

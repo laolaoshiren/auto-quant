@@ -52,12 +52,6 @@ export function BalanceCell({
   error: string | null;
   testnet: boolean;
 }) {
-  /*
-   * 提到变量里是因为**两个渲染分支都要用它**：第一次只加在"有实时读数"
-   * 那个分支里，而机器人停止时走的是另一个分支，于是它一次都没显示过。
-   */
-  const env = <Badge tone={testnet ? 'muted' : 'warn'}>{testnet ? '测试网' : '主网'}</Badge>;
-
   if (!balance) {
     const message = error ?? '尚未读取到余额。';
     return (
@@ -86,8 +80,8 @@ export function BalanceCell({
   return (
     <div className="space-y-1.5 whitespace-normal">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        {/* 测试网/主网徽章由外层凭证卡片头展示 —— 这里不再重复（用户实测「重复」）。 */}
         <h3 className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-faint">实时余额</h3>
-        {env}
       </div>
       {/*
        * 列数跟着卡片宽度走。凭证卡窄屏时是整宽一列，宽屏可以到 1100px 以上 ——
