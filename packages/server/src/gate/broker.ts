@@ -40,6 +40,18 @@ import type {
 
 const log = createLogger('gate:broker');
 
+/**
+ * Gate 的自定义客户端单号 **必须以 `t-` 开头**。
+ *
+ * 2026-11-11 服务器实测：限价开仓全部失败，Gate 返回
+ * `HTTP 400 · INVALID_PARAM_VALUE: text not starting with \`t-\``。
+ * 本系统的 clientOrderId 形如 `aq-entry-...`，直接传必被拒。
+ * 前缀加上；已经是 `t-` 开头的原样保留（幂等）。
+ */
+function toGateOrderText(clientOrderId: string): string {
+  return clientOrderId.startsWith('t-') ? clientOrderId : `t-${clientOrderId}`;
+}
+
 /** 本系统的一侧（BUY/SELL 决定开平方向）→ Gate 的 `size` 符号。 */
 function signedSize(side: 'BUY' | 'SELL', size: number): number {
   return side === 'BUY' ? Math.abs(size) : -Math.abs(size);
@@ -325,7 +337,7 @@ export class GateBroker {
       tif: request.type === 'MARKET' ? 'ioc' : 'gtc',
     };
     if (request.reduceOnly === true) body.reduce_only = true;
-    if (request.clientOrderId) body.text = request.clientOrderId;
+    if (request.clientOrderId) body.text = toGateOrderText(request.clientOrderId);
 
     const order = await this.rest.signed<GateFuturesOrder>('POST', '/futures/usdt/orders', { body });
     log.info(`[gate] 下单 ${request.symbol} ${request.side} ${size} 张 → #${order.id}`);
@@ -384,7 +396,7 @@ export class GateBroker {
       },
       trigger: { strategy: 0, price: String(trigger), rule },
     };
-    if (request.clientOrderId) (body.initial as Record<string, unknown>).text = request.clientOrderId;
+    if (request.clientOrderId) (body.initial as Record<string, unknown>).text = toGateOrderText(request.clientOrderId);
     const order = await this.rest.signed<GateFuturesOrder>('POST', '/futures/usdt/price_orders', { body });
     log.info(`[gate] 条件单 ${request.symbol} ${request.type} 触发 ${trigger} → #${order.id}`);
     const raw = gatePriceOrderToAlgoResponse(order, contract);

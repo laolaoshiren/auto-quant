@@ -172,7 +172,8 @@ test('限价下单：gtc + 显式价格 + 客户端单号', async () => {
   assert.equal(body.price, '71000');
   assert.equal(body.tif, 'gtc');
   assert.equal(body.reduce_only, true);
-  assert.equal(body.text, 'aq-x');
+  /* Gate 要求自定义单号以 `t-` 开头（实测 400 INVALID_PARAM_VALUE）。 */
+  assert.equal(body.text, 't-aq-x');
 });
 
 test('★★★ 条件单触发方向：多止损=下穿(2)、空止损=上穿(1)、多止盈=上穿(1)、空止盈=下穿(2)', async () => {
