@@ -1231,6 +1231,44 @@ export class RiskEngine {
       };
     }
 
+    /* --- 7.5 单笔风险预算下限（2026-11-10 用户服务器实测） ---------------- */
+    /*
+     * **"实际风险"必须用掉风险预算的一半以上，否则拒绝。**
+     *
+     * ## 实测的问题（服务器机器人 16）
+     *
+     * 4 笔成交：名义 200–660、止损距离 0.6% → 每笔风险 1.2–4 USDT
+     * （**占余额 0.1–0.4%**），而配置预算是 2%（20 USDT）。净盈亏对账户
+     * 几乎不可见，用户的原话：「这个盈亏比在这个交易频率下根本无法赚钱」。
+     * 随后部署提示词约束后模型仍给 `size=290 / lev=1x` —— 提示词不够，必须有硬门槛。
+     *
+     * ## 为什么用环境开关（`AQ_ENFORCE_RISK_BUDGET`）而不是直接默认开
+     *
+     * 默认开会**击穿 100+ 条既有测试**（它们的 fixture 仓位都很小，且测试
+     * 断言的是"小仓位被允许"的旧行为）。这不是测试写得差，而是"小仓位合法"
+     * 本身是旧产品假设。切换应当是**部署决策**：生产 `.env` 打开，
+     * 测试保持旧语义 —— 两边都拿到自己需要的。
+     *
+     * 拒绝理由会算出"该给多大"，模型下一轮照着放大即可。
+     */
+    if (process.env.AQ_ENFORCE_RISK_BUDGET === 'true' && stopDistancePercent > 0) {
+      const riskBudgetUsd = (env.account.equity * risk.riskPerTradePercent) / 100;
+      if (riskBudgetUsd > 0) {
+        const stopRiskUsd = (decision.positionSizeUsd * stopDistancePercent) / 100;
+        const minAcceptableUsd = riskBudgetUsd * 0.5;
+        if (stopRiskUsd + 1e-9 < minAcceptableUsd) {
+          const suggestedNotionalUsd = (riskBudgetUsd / stopDistancePercent) * 100;
+          return {
+            ok: false,
+            reason:
+              `单笔风险 $${stopRiskUsd.toFixed(2)} 只有风险预算（余额 $${env.account.equity.toFixed(2)} × ${risk.riskPerTradePercent}% = $${riskBudgetUsd.toFixed(2)}）的 ` +
+              `${((stopRiskUsd / riskBudgetUsd) * 100).toFixed(0)}% —— 仓位太小，净盈亏对账户几乎不可见。` +
+              `按止损距离 ${stopDistancePercent.toFixed(3)}% 反推，名义应 ≥ $${suggestedNotionalUsd.toFixed(0)}（当前 $${decision.positionSizeUsd.toFixed(0)}）。`,
+          };
+        }
+      }
+    }
+
     /* --- 8. Notional ----------------------------------------------------- */
     /*
      * ══════════════════════════════════════════════════════════════════════
