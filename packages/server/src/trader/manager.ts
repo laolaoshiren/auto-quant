@@ -1806,6 +1806,42 @@ export class TraderManager {
   }
 
   /**
+   * 这台机器人是否**正在启动途中**（建连接 / 预检 / 探测模型，尚未进入 `running`）。
+   *
+   * 启动要等十几秒，这段时间里 `isRunning()` 是 false —— 只看它的守卫
+   *（编辑、删除）会把"启动中"当成"已停止"放行（2026-11-11 审查）。
+   */
+  isStarting(traderId: number): boolean {
+    return this.starting.has(traderId);
+  }
+
+  /**
+   * 交易所凭据变了（换 Key / Secret / 切测试网 / 删除）→ 丢掉**引用它的、
+   * 当前没在跑的**机器人的缓存连接（2026-11-11 审查）。
+   *
+   * `connectionFor` 命中缓存就直接返回，不比对凭据与环境。而未运行机器人的
+   * 对账 / 手工平仓 / 全部平仓都会建一条连接并留在缓存里（开机对账会给每台
+   * 绑了账户的机器人都建一条）。凭据路由原来只失效余额缓存 —— 于是换完 Key
+   * 或切到测试网之后，操作员对一台已停止的机器人点"平仓"，订单仍发往
+   * **旧账户、旧环境**。那恰好是紧急退出时走的路径。
+   *
+   * 运行中 / 启动中的不动：它们的 broker 正被交易循环持有，换掉缓存对象
+   * 并不会换掉它手里那条，只会让两边不一致（它们停止时本来就会清）。
+   *
+   * @returns 被清掉缓存的机器人数量
+   */
+  invalidateConnectionsForAccount(exchangeAccountId: number): number {
+    let dropped = 0;
+    for (const trader of traders.list()) {
+      if (trader.exchangeAccountId !== exchangeAccountId) continue;
+      if (this.running.has(trader.id) || this.starting.has(trader.id)) continue;
+      dropConnections(this.connections, trader.id);
+      dropped += 1;
+    }
+    return dropped;
+  }
+
+  /**
    * 某个机器人此刻是不是在纸面模式下跑。
    *
    * `null` = **它没在运行**，所以这个值此刻不存在 —— 与 `circuitBreakerReading()`
@@ -2997,6 +3033,19 @@ export class TraderManager {
 
     try {
       /* --- Connection + preflight --------------------------------------- */
+      /*
+       * ⚠️ **启动前先丢掉这台机器人的缓存连接**（2026-11-11 审查）。
+       *
+       * 未运行时的对账 / 手工平仓会建一条连接并留在缓存里，而在「交易所」页
+       * 换 API Key、Secret 或切测试网只失效了余额缓存、不碰这里 —— 于是换完
+       * 凭据再启动，拿到的仍是**旧凭据、旧环境**的那条连接（切到测试网后
+       * 仍在主网下单）。`stopTrader` 会清缓存，但"从未启动过"和"开机后
+       * 被对账过"的机器人走不到那里。
+       *
+       * 此刻它不在 `running` 里（`startTrader` 用 `starting` 互斥），
+       * 被丢掉的只是一次性调用留下的缓存对象；代价是启动多建一次连接。
+       */
+      dropConnections(this.connections, traderId);
       const connection = await this.connectionFor(traderId, trader.exchangeAccountId, dryRun);
       const connectivity = await preflight(connection, { requireCredentials: !dryRun });
       checks.push(...connectivity);

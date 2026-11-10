@@ -37,12 +37,19 @@ let strategyId = 0;
 /** 桩 manager 的审视结果 —— 每条用例自己设定。 */
 let reviewBehaviour: () => { accepted: boolean; note: string } = () => ({ accepted: true, note: 'ok' });
 
+/** 桩 manager 是否报告"正在启动途中" —— 每条用例自己设定。 */
+let starting = false;
+/** 桩 manager 是否报告"运行中" —— 每条用例自己设定。 */
+let running = false;
+
 function stubDependencies(): ApiDependencies {
   return {
     vault: new Vault(randomBytes(32)),
     manager: {
       runningSince: () => new Map<number, number>(),
-      isRunning: () => false,
+      isRunning: () => running,
+      isStarting: () => starting,
+      invalidateConnectionsForAccount: () => 0,
       stopTrader: async () => {},
       requestAgentReview: () => reviewBehaviour(),
     } as unknown as TraderManager,
@@ -89,6 +96,8 @@ beforeEach(async () => {
     presetId: null,
   }).id;
   reviewBehaviour = () => ({ accepted: true, note: 'ok' });
+  starting = false;
+  running = false;
   const res = await app.inject({
     method: 'POST',
     url: '/api/auth/login',
@@ -197,4 +206,53 @@ test('#21 agent-review 抛错（400）时原因放在 error 字段', async () =>
   const body = res.json() as { ok: boolean; error?: string; note?: string };
   assert.equal(body.error, '只有智能托管模式支持审视');
   assert.equal(body.note, '只有智能托管模式支持审视');
+});
+
+/* ------------------------- 2026-11-11：启动途中的守卫 ------------------------- */
+
+test('启动途中 PATCH → 409，改动不落库（isRunning 此时还是 false）', async () => {
+  const id = await createTrader('ai_managed');
+  starting = true;
+  const res = await patch(id, { name: '启动中改名' });
+  assert.equal(res.status, 409, res.body);
+  assert.match(res.body, /正在启动/, '文案要说清是"启动中"，而不是让一台显示已停止的机器人"请先停止"');
+  assert.equal(traders.get(id)?.name, 'patch-ai_managed', '被拒的改动不能写进库');
+});
+
+test('启动在等待期内被取消 → DELETE 等到后正常删除', async () => {
+  const id = await createTrader('ai_managed');
+  starting = true;
+  setTimeout(() => {
+    starting = false;
+  }, 300);
+  const res = await app.inject({ method: 'DELETE', url: `/api/traders/${id}`, headers: auth() });
+  assert.equal(res.statusCode, 200, res.payload);
+  assert.ok(!traders.get(id), '启动收尾后应当删掉');
+});
+
+test('等待期内启动反而成功进入运行 → DELETE 409，机器人行还在', async () => {
+  const id = await createTrader('ai_managed');
+  starting = true;
+  setTimeout(() => {
+    starting = false;
+    running = true;
+  }, 300);
+  const res = await app.inject({ method: 'DELETE', url: `/api/traders/${id}`, headers: auth() });
+  assert.equal(res.statusCode, 409, res.payload);
+  assert.ok(traders.get(id), '一台在跑的机器人不能被删行');
+});
+
+test('启动迟迟不收尾时 DELETE → 409，机器人行还在（不能留下幽灵机器人；本条会等满约 4 秒）', async () => {
+  const id = await createTrader('ai_managed');
+  starting = true;
+  const res = await app.inject({ method: 'DELETE', url: `/api/traders/${id}`, headers: auth() });
+  assert.equal(res.statusCode, 409, res.payload);
+  assert.ok(traders.get(id), '启动还没收尾就删行，会让在途的启动对着不存在的机器人继续跑');
+});
+
+test('未在启动 / 运行时 DELETE → 照常删除', async () => {
+  const id = await createTrader('ai_managed');
+  const res = await app.inject({ method: 'DELETE', url: `/api/traders/${id}`, headers: auth() });
+  assert.equal(res.statusCode, 200, res.payload);
+  assert.ok(!traders.get(id), '行应当已被删除');
 });

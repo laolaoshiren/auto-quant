@@ -1085,6 +1085,26 @@ function buildTrader(
   });
 }
 
+/**
+ * 与 `buildTrader` 相同，只是把机器人当作**智能托管**（`mode = 'ai_managed'`）。
+ *
+ * 决策轮的 `set_params` 只对 AI 驱动的模式开放（见下面那条"固定策略"用例），
+ * 而 `beforeEach` 建的夹具是固定策略 —— 测那条通道的用例要用这个。
+ */
+function buildAiManagedTrader(broker: FakeBroker, model: DecisionModel): AutoTrader {
+  const trader = traders.get(traderId);
+  const strategy = strategyStore.get(trader!.strategyId!);
+  return new AutoTrader({
+    trader: { ...trader!, mode: 'ai_managed' },
+    config: strategy!.config,
+    registry: fakeRegistry,
+    market: {} as never,
+    marketData: fakeMarketData,
+    broker: broker as unknown as BinanceBroker,
+    model,
+  });
+}
+
 const OPEN_LONG_RESPONSE = `<reasoning>Clean setup.</reasoning>
 <decision>
 [
@@ -4865,7 +4885,7 @@ test('★ 决策轮改参数有频率闸门 —— 防止它每轮微调把参�
   };
 
   /* 第一轮：闸门放行，改动生效。 */
-  const first = buildTrader(broker, '', model);
+  const first = buildAiManagedTrader(broker, model);
   await first.runOnce();
   const afterFirst = JSON.parse(
     String((traders.get(traderId) as { agentConfigJson?: string }).agentConfigJson ?? '{}'),
@@ -4879,7 +4899,7 @@ test('★ 决策轮改参数有频率闸门 —— 防止它每轮微调把参�
   /* 第二轮：换个值再改一次 —— 必须被闸门拦下。 */
   call = 0;
   limit = '9%';
-  const second = buildTrader(broker, '', model);
+  const second = buildAiManagedTrader(broker, model);
   await second.runOnce();
   const afterSecond = JSON.parse(
     String((traders.get(traderId) as { agentConfigJson?: string }).agentConfigJson ?? '{}'),
@@ -4897,6 +4917,53 @@ test('★ 决策轮改参数有频率闸门 —— 防止它每轮微调把参�
     String(afterSecond.promptSections?.entryStandards ?? ''),
     /止损上限 9%/,
     '★ 第二次的 patch 不能生效',
+  );
+});
+
+test('★ 固定策略机器人调 set_params 必须被拒 —— 否则一次调用就把它永久变成"半托管"', async () => {
+  /*
+   * ## 2026-11-11 审查发现
+   *
+   * 工具目录对所有模式都渲染 `set_params`，而决策轮的 `applyPatch` 原来不看模式
+   * 就 `setAgentConfig()`。`AgentRuntime.isEnabled()` 的判据之一是
+   * "`agent_config_json` 非空" —— 所以固定策略机器人的模型调一次之后：
+   *
+   *   · 每个周期都用那份 AI 配置覆盖策略参数；
+   *   · 界面仍显示固定策略，策略工坊里的修改不再生效，也不报错；
+   *   · 没有任何代码把这一列写回 NULL —— 只能手改数据库。
+   *
+   * ## 这条用例钉什么
+   *
+   * 夹具机器人是固定策略（`beforeEach` 没给 `mode`）。模型调一次 `set_params`，
+   * 断言 `agent_config_json` **仍然是空的**。
+   */
+  const broker = new FakeBroker();
+  assert.equal(traders.get(traderId)!.mode, 'strategy', '前提：夹具是固定策略机器人');
+  let call = 0;
+  /** 第二次起模型收到的全部入参 —— 用来确认拒绝原因真的回喂给了它。 */
+  const fedBack: string[] = [];
+  const model: DecisionModel = {
+    async complete(...args: unknown[]) {
+      if (call > 0) fedBack.push(JSON.stringify(args));
+      const text =
+        call === 0
+          ? '<tool>{"tool":"set_params","args":{"patch":{"promptSections":{"entryStandards":"我自己定"}},"reason":"想放宽"}}</tool>'
+          : '<decision>[]</decision>';
+      call += 1;
+      return { text, latencyMs: 1, usage: { promptTokens: 1, completionTokens: 1 } };
+    },
+  };
+  await buildTrader(broker, '', model).runOnce();
+  assert.ok(call >= 2, '前提：工具调用确实被处理了（模型被再问了一次）');
+  assert.match(
+    fedBack.join('\n'),
+    /固定策略模式/,
+    '★ 拒绝原因必须如实回喂 —— 不告诉它，它会以为改成了',
+  );
+  assert.equal(
+    (traders.get(traderId) as { agentConfigJson?: string | null }).agentConfigJson ?? null,
+    null,
+    '★ 固定策略机器人的 agent_config_json 必须保持为空 —— 它一旦非空就会被当成 AI 托管',
   );
 });
 

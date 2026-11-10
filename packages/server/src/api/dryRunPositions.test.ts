@@ -133,6 +133,8 @@ function fakeConnection(): ExchangeConnection {
 function managerStub() {
   const impl: Record<string, unknown> = {
     isRunning: () => runtime.running,
+    isStarting: () => false,
+    invalidateConnectionsForAccount: () => 0,
     dryRunOf: () => runtime.dryRun,
     runningSince: () => new Map<number, number>(),
     runningIds: () => (runtime.running ? [traderId] : []),

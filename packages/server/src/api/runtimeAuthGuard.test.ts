@@ -108,6 +108,8 @@ function managerStub(): TraderManager {
     statusOf: () => 'stopped',
     nextCycleAtOf: () => null,
     isRunning: () => false,
+    isStarting: () => false,
+    invalidateConnectionsForAccount: () => 0,
     failedTraders: () => [],
     dryRunOf: () => null,
     leverageCap: () => null,

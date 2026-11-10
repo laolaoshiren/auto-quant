@@ -527,3 +527,38 @@ test('★ #6 排队中被操作员停成 stopped：轮到它时按实时状态�
   assert.deepEqual(attempted, [first], '被人停掉的那台不该再被开机恢复拉起');
   assert.equal(traders.get(second)?.status, 'stopped');
 });
+
+/* ------------------- 2026-11-11：凭据变更后失效缓存连接 ------------------- */
+
+test('★ 凭据变更 → 只丢掉【未运行】且【引用该凭据】的机器人的缓存连接', () => {
+  /*
+   * `connectionFor` 命中缓存就直接返回，不比对凭据与环境。未运行机器人的
+   * 对账 / 手工平仓会把连接留在缓存里，而凭据路由原来只失效余额缓存 ——
+   * 换 Key 或切测试网之后对已停止的机器人点"平仓"，订单仍发往旧账户、旧环境。
+   */
+  const stopped = seedTrader('acct-stopped');
+  const other = seedTrader('acct-other');
+  const live = seedTrader('acct-running');
+  const accountId = traders.get(stopped)!.exchangeAccountId!;
+  /* 让 live 与 stopped 共用同一个凭据；other 用它自己的。 */
+  const db = initDb(path.join(workDir, 'resume.sqlite'));
+  db.run('UPDATE traders SET exchange_account_id = ? WHERE id = ?', accountId, live);
+
+  const manager = new TraderManager(new Vault(Buffer.alloc(32, 7)));
+  const internals = manager as unknown as {
+    connections: Map<string, unknown>;
+    running: Map<number, unknown>;
+  };
+  for (const id of [stopped, other, live]) {
+    internals.connections.set(`${id}:paper`, {});
+    internals.connections.set(`${id}:live`, {});
+  }
+  internals.running.set(live, {});
+
+  assert.equal(manager.invalidateConnectionsForAccount(accountId), 1);
+  assert.equal(internals.connections.has(`${stopped}:live`), false, '★ 已停止机器人的实盘连接必须被丢掉');
+  assert.equal(internals.connections.has(`${stopped}:paper`), false, '两种模式的连接都要丢');
+  assert.equal(internals.connections.has(`${other}:live`), true, '别的凭据的机器人不受影响');
+  assert.equal(internals.connections.has(`${live}:live`), true, '运行中的不动 —— 它的 broker 正被交易循环持有');
+  internals.running.clear();
+});

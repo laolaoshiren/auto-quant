@@ -44,6 +44,8 @@ function stubDependencies(): ApiDependencies {
     manager: {
       runningSince: () => new Map<number, number>(),
       isRunning: () => false,
+      isStarting: () => false,
+      invalidateConnectionsForAccount: () => 0,
       startTraderAsync: (id: number, dryRun: boolean) => {
         started.push({ id, dryRun });
         return { ok: true, preflight: [] };

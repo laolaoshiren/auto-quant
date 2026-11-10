@@ -65,7 +65,7 @@ import {
 import type { JevAccountState } from './jevModel.js';
 import { jevBool, jevEnum, jevNumber } from './control.js';
 import { last } from '../market/indicators.js';
-import { isMajorSymbol, type DecisionAction } from '@aq/shared';
+import { isAiDriven, isMajorSymbol, type DecisionAction } from '@aq/shared';
 import { agentMemory } from '../store/agentStore.js';
 import {
   attributedEquity,
@@ -4533,6 +4533,27 @@ export class AutoTrader {
          * 被拦时**如实回喂**（与 `clamps` 同一个理由）：不告诉它，
          * 它会以为改成了、并在下一轮基于一个错误前提继续推理。
          */
+        /*
+         * ⚠️ **固定策略机器人不能走这条通道**（2026-11-11 审查）。
+         *
+         * 工具目录对所有模式都渲染 `set_params`，而这里原来不看模式就
+         * `setAgentConfig()`。`AgentRuntime.isEnabled()` 的判据之一是
+         * "`agent_config_json` 非空" —— 于是固定策略机器人的模型调一次，
+         * 这一列就非空，之后每个周期都用那份配置覆盖策略参数：
+         * 界面仍显示固定策略、策略工坊里的修改不再生效，而且全仓库
+         * 没有任何地方把这一列写回 NULL（只能手改数据库）。
+         *
+         * 模式在创建时固定（PATCH 拒绝改 mode），所以读启动时那份就够了。
+         * 如实回喂原因 —— 不告诉它，它会以为改成了。
+         */
+        if (!isAiDriven(this.deps.trader.mode)) {
+          return {
+            applied: false,
+            rejected:
+              '这台机器人是固定策略模式，参数由策略工坊里的策略决定，set_params 在这里不可用 —— 请按现有参数决策。',
+            clamps: [],
+          };
+        }
         const gate = this.paramChangeGate(traderId);
         if (gate !== null) {
           return { applied: false, rejected: gate, clamps: [] };

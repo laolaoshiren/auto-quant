@@ -1586,6 +1586,8 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     // The stored key may have changed, so the cached balance and REST client are
     // no longer trustworthy.
     deps.balance.invalidate(id);
+    /* 机器人侧缓存的交易连接同理 —— 见 `invalidateConnectionsForAccount` 的说明。 */
+    deps.manager.invalidateConnectionsForAccount(id);
     return { ok: true };
   }));
 
@@ -1626,7 +1628,11 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
           '运行中的机器人被解绑后，它手上的仓位会失去管理。',
       });
     }
-    /* 已停止的机器人仍然引用着它 —— 先解绑，避免留下指向幽灵 id 的行。 */
+    /*
+     * 已停止的机器人仍然引用着它 —— 先解绑，避免留下指向幽灵 id 的行。
+     * ⚠️ 失效连接必须在解绑**之前**：解绑后就查不出哪些机器人用过这个凭据了。
+     */
+    deps.manager.invalidateConnectionsForAccount(id);
     const detached = exchanges.detachAll(id);
     exchanges.remove(id);
     deps.balance.invalidate(id);
@@ -2459,8 +2465,19 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   app.patch('/api/traders/:id', authed, guard(async (body: unknown, request, reply) => {
     const id = idOf(request);
+    /*
+     * ⚠️ "启动中"也要拦（2026-11-11 审查）：启动要十几秒，这期间 `isRunning`
+     * 还是 false，改动会写进库，而正在启动的实例用的是启动那一刻读到的旧值 ——
+     * 界面显示新配置、机器人按旧配置交易。
+     */
     if (deps.manager.isRunning(id)) {
       return reply.code(409).send({ error: '请先停止该机器人，再修改它的配置。' });
+    }
+    if (deps.manager.isStarting(id)) {
+      /* 文案单列：点了停止后界面已显示"已停止"，而启动还没收尾 —— 再说"请先停止"会让人无从下手。 */
+      return reply
+        .code(409)
+        .send({ error: '这台机器人正在启动（或正在取消启动），请稍等几秒再修改它的配置。' });
     }
     const parsed = TraderInputSchema.partial().safeParse(body);
     if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? 'Invalid trader');
@@ -2580,9 +2597,29 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     return traders.get(id);
   }));
 
-  app.delete('/api/traders/:id', authed, guard(async (_body: unknown, request) => {
+  /** 删除时最多等在途启动收尾多久。见下面路由里的说明。 */
+  const DELETE_WAIT_FOR_START_MS = 4_000;
+  app.delete('/api/traders/:id', authed, guard(async (_body: unknown, request, reply) => {
     const id = idOf(request);
     await deps.manager.stopTrader(id);
+    /*
+     * ⚠️ **等在途的启动收尾，再删行**（2026-11-11 审查）。
+     *
+     * 启动途中 `stopTrader` 取不到实例，只能立一面取消旗，由 `attemptStart`
+     * 在下一个检查点放弃。在那之前就把 `traders` 行删掉，启动流程剩下的
+     * 几步（落状态、写日志、记账）会对着一个不存在的机器人执行。
+     * 取消通常在几秒内生效；等不到就让操作员稍后重试，而不是硬删。
+     *
+     * ⚠️ 上限必须**明显短于前端的请求超时**（`web/src/lib/api.ts` 的 12 秒）：
+     * 否则界面先报"超时"，这里随后才把行删掉 —— 操作员看到失败，机器人却没了。
+     */
+    const deadline = Date.now() + DELETE_WAIT_FOR_START_MS;
+    while (deps.manager.isStarting(id) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    if (deps.manager.isStarting(id) || deps.manager.isRunning(id)) {
+      return reply.code(409).send({ error: '这台机器人还在启动收尾中，请稍等几秒再删除。' });
+    }
     traders.remove(id);
     return { ok: true };
   }));

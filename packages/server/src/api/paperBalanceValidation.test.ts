@@ -80,6 +80,8 @@ function fakeConnection(): ExchangeConnection {
 function managerStub() {
   const impl: Record<string, unknown> = {
     isRunning: () => false,
+    isStarting: () => false,
+    invalidateConnectionsForAccount: () => 0,
     dryRunOf: () => true,
     runningSince: () => new Map<number, number>(),
     runningIds: () => [],
