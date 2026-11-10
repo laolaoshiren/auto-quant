@@ -42,6 +42,8 @@ export interface GateFuturesContract {
   quanto_multiplier: string;
   /** 最小下单张数（字符串，通常是 1）。 */
   order_size_min: string;
+  /** 最大杠杆（字符串）。 */
+  leverage_max?: string;
   /** 张数步长（字符串，通常是 1）。 */
   order_size_step?: string;
   /** 价格最小变动（字符串）。 */
