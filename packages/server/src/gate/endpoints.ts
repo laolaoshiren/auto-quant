@@ -24,8 +24,8 @@ const LIVE: GateEndpoints = {
 };
 
 const TESTNET: GateEndpoints = {
-  rest: 'https://fx-api-testnet.gateio.ws/api/v4',
-  ws: 'wss://fx-ws-testnet.gateio.ws/v4/ws/usdt',
+  rest: 'https://api-testnet.gateapi.io/api/v4',
+  ws: 'wss://ws-testnet.gateapi.io/v4/ws/usdt',
 };
 
 /** 把环境名解析成端点。未知值按 live 处理（宁可连错也别静默连测试网）。 */

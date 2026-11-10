@@ -106,7 +106,36 @@ test('★★★ 私有接口：KEY / Timestamp / SIGN 三个头都在，且 SIGN
   assert.equal(headers.SIGN, expected);
 });
 
-test('测试网走独立域名（fx-api-testnet）', async () => {
+test('★★★ path 里的 ?query 必须拆开参与签名（联调实测的 INVALID_SIGNATURE）', async () => {
+  let headers: Record<string, string> = {};
+  let seen = '';
+  const rest = new GateRest({
+    apiKey: 'k',
+    apiSecret: 's',
+    fetchImpl: fakeFetch((url, init) => {
+      seen = String(url);
+      headers = init?.headers as Record<string, string>;
+      return new Response('[]', { status: 200 });
+    }),
+  });
+  /* 调用方把 query 写在 path 里 —— 必须被拆开，否则签名 URL 段会带上它 */
+  await rest.signed('GET', '/futures/usdt/orders?status=open');
+  assert.match(seen, /\?status=open/);
+  const expected = createHmac('sha512', 's')
+    .update(
+      gateSignString({
+        method: 'GET',
+        url: '/api/v4/futures/usdt/orders',
+        query: 'status=open',
+        body: '',
+        timestamp: Number(headers.Timestamp),
+      }),
+    )
+    .digest('hex');
+  assert.equal(headers.SIGN, expected);
+});
+
+test('测试网走独立域名（api-testnet.gateapi.io）', async () => {
   let seen = '';
   const rest = new GateRest({
     apiKey: 'k',
@@ -118,7 +147,7 @@ test('测试网走独立域名（fx-api-testnet）', async () => {
     }),
   });
   await rest.publicGet('/futures/usdt/contracts');
-  assert.match(seen, /^https:\/\/fx-api-testnet\.gateio\.ws\/api\/v4\//);
+  assert.match(seen, /^https:\/\/api-testnet\.gateapi\.io\/api\/v4\//);
 });
 
 test('★ 非 2xx 映射成 GateApiError（带状态与 label，消息里保留 Gate 的原始说明）', async () => {

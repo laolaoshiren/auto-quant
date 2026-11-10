@@ -23,7 +23,8 @@ import {
   type Kline,
   type Timeframe,
 } from '@aq/shared';
-import type { BinanceBroker, ExchangePosition } from '../binance/broker.js';
+import type { ExchangePosition } from '../binance/broker.js';
+import type { BrokerPort } from './brokerPort.js';
 import type { PositionSide } from '@aq/shared';
 import type { AccountState } from '../binance/account.js';
 import type { BinanceMarketData } from '../binance/market.js';
@@ -647,7 +648,7 @@ export interface AutoTraderDeps {
   registry: SymbolRegistry;
   market: BinanceMarketData;
   marketData: MarketDataService;
-  broker: BinanceBroker;
+  broker: BrokerPort;
   model: DecisionModel;
   /**
    * 一轮决策的硬超时（毫秒）。默认 {@link CYCLE_HARD_TIMEOUT_MS}（60 分钟）。
@@ -5740,7 +5741,7 @@ export class AutoTrader {
         continue;
       }
 
-      let order: Awaited<ReturnType<BinanceBroker['getOrder']>>;
+      let order: Awaited<ReturnType<BrokerPort['getOrder']>>;
       try {
         order = await this.deps.broker.getOrder(row.symbol, orderId);
       } catch (error) {
@@ -8023,7 +8024,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      * fill mentions) and it names **every symbol the account has touched**, which
      * is how a symbol the platform has no record of at all gets discovered.
      */
-    let incomeEvents: Awaited<ReturnType<BinanceBroker['getIncome']>> = [];
+    let incomeEvents: Awaited<ReturnType<BrokerPort['getIncome']>> = [];
     /*
      * ⚠️ **"读失败"与"读到空"是两件事，而它们在这里被混成了一件。**
      *

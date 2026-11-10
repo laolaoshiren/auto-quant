@@ -166,8 +166,30 @@ export class GateRest {
     path: string,
     options: { params?: Record<string, unknown>; body?: unknown; signed?: boolean },
   ): Promise<T> {
-    const normalized = path.startsWith('/') ? path : `/${path}`;
-    const query = buildQueryString(options.params);
+    /*
+     * ⚠️ **path 里的 `?query` 必须拆出来**（2026-11-11 联调实测的 401）。
+     *
+     * Gate 的签名把「URL」与「QUERY」当**两段**：
+     *   签名 URL 段 = path（不含 `?`），QUERY 段 = 参数字符串。
+     * 如果调用方把 `?status=open` 直接拼进 path，签名 URL 段会带上它、
+     * 而 QUERY 段为空 —— Gate 算出来的签名自然不匹配，返回
+     * `INVALID_SIGNATURE`（实测 `/futures/usdt/orders?status=open` 就是这样失败的）。
+     *
+     * 这里统一拆开：path 保留 `?` 之前的部分，query 与 `params` 合并后
+     * 再按同一份排序规则拼接 —— 调用方怎么写都不会签错。
+     */
+    const [rawPath, inlineQuery] = path.split('?');
+    const inlineParams: Record<string, string> = {};
+    if (inlineQuery) {
+      for (const part of inlineQuery.split('&')) {
+        if (part === '') continue;
+        const [key, ...rest] = part.split('=');
+        if (key) inlineParams[decodeURIComponent(key)] = decodeURIComponent(rest.join('='));
+      }
+    }
+    const mergedParams = { ...inlineParams, ...(options.params ?? {}) };
+    const normalized = rawPath!.startsWith('/') ? rawPath! : `/${rawPath}`;
+    const query = buildQueryString(mergedParams);
     const bodyText = options.body === undefined ? '' : JSON.stringify(options.body);
     const url = `${this.baseUrl}${normalized}${query ? `?${query}` : ''}`;
 
