@@ -41,6 +41,29 @@ import type {
 const log = createLogger('gate:broker');
 
 /**
+ * 按合约的**允许最小价格变动**（`order_price_round`）把价格取整到合法值。
+ *
+ * 2026-11-11 服务器实测：保护单大量失败
+ * `AUTO_INVALID_PARAM_TRIGGER_PRICE: trigger.price price is not an integer multiple of a price unit` ——
+ * 触发价带着浮点长尾（`69.02236585365898`、`74.4715000000005`），Gate 对价格精度执行得比
+ * 币安严格，多一位小数就整单拒绝。
+ *
+ * 取整放在 broker 内部是**防御性**的：上层（`replaceProtection`）本该用 SymbolRegistry 的
+ * `roundTriggerPrice`，但那条路径目前没有调用点 —— 交易所这一层兜底最可靠，
+ * 至少不会把浮点长尾发到交易所。
+ *
+ * 取整方向用 `round`（四舍五入到最近一档），而不是 floor/ceil：触发价只是"到价才触发"，
+ * 差半档不影响保护效果，而方向性取整在两种持仓方向下会各错一次。
+ */
+function toGatePrice(price: number, contract: GateFuturesContract): number {
+  const tick = num(contract.order_price_round);
+  if (!(tick > 0) || !(price > 0)) return price;
+  const stepped = Math.round(price / tick) * tick;
+  /* 消除浮点残差（0.1 的整数倍算出 69.30000000000001 这种）。 */
+  return Number(stepped.toFixed(8));
+}
+
+/**
  * Gate 的自定义客户端单号 **必须以 `t-` 开头**。
  *
  * 2026-11-11 服务器实测：限价开仓全部失败，Gate 返回
@@ -135,6 +158,12 @@ export function gateOrderToBinanceResponse(
 export function gatePriceOrderToAlgoResponse(
   order: GateFuturesOrder,
   contract: GateFuturesContract,
+  /*
+   * `kind` 由**创建时**的请求决定（Gate 的 price_orders 响应里**没有**止盈/止损字段）。
+   * 不给时按 'STOP' 兜底 —— 保守方向：把条件单都当保护单，宁可少挂一次，
+   * 也不要在 `hasLiveStop` 里判"没有止损"而重复挂/误平。
+   */
+  kind: 'STOP' | 'TAKE_PROFIT' = 'STOP',
 ): BinanceAlgoOrderResponse {
   const multiplier = num(contract.quanto_multiplier) || 1;
   /* price_orders 的契约/数量/价格在 `initial` 里（顶层没有，实测 undefined）。 */
@@ -149,7 +178,7 @@ export function gatePriceOrderToAlgoResponse(
     algoId: order.id,
     clientAlgoId: order.text ?? '',
     algoType: 'CONDITIONAL',
-    orderType: (num(priceText) === 0 ? 'MARKET' : 'LIMIT') as BinanceAlgoOrderResponse['orderType'],
+    orderType: (kind === 'TAKE_PROFIT' ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET') as BinanceAlgoOrderResponse['orderType'],
     symbol: gateContractToSymbol(contractName ?? ''),
     side: (initial?.size ?? order.size) > 0 ? 'BUY' : 'SELL',
     positionSide: 'BOTH',
@@ -225,6 +254,8 @@ export function gateBookToIncome(book: GateFuturesAccountBook): BinanceIncome {
 
 export class GateBroker {
   readonly isDryRun = false;
+  /** 条件单 id → 创建时是止损还是止盈（Gate 响应里不带这个信息，见映射函数的说明）。 */
+  private readonly algoKinds = new Map<string, 'STOP' | 'TAKE_PROFIT'>();
   private readonly account: GateAccountReader;
   private readonly fillTimeoutMs: number;
 
@@ -342,7 +373,7 @@ export class GateBroker {
       contract: contractName,
       size: signedSize(request.side, size),
       /* Gate：price=0 即市价单，且 tif 必须是 ioc。 */
-      price: request.type === 'MARKET' ? '0' : String(request.price ?? 0),
+      price: request.type === 'MARKET' ? '0' : String(toGatePrice(request.price ?? 0, contract)),
       tif: request.type === 'MARKET' ? 'ioc' : 'gtc',
     };
     if (request.reduceOnly === true) body.reduce_only = true;
@@ -381,7 +412,7 @@ export class GateBroker {
     if (!closeAll && size === 0) {
       throw new Error(`Gate 条件单数量换算为 0 张（quantity=${request.quantity}，合约=${contractName}）。`);
     }
-    const trigger = request.triggerPrice ?? 0;
+    const trigger = toGatePrice(request.triggerPrice ?? 0, contract);
     /*
      * Gate 的触发方向：rule=1（价格 ≥ 触发价时触发）/ rule=2（≤ 时触发）。
      * 本系统的语义：
@@ -397,7 +428,7 @@ export class GateBroker {
         contract: contractName,
         /* close 单必须 size=0（见上面那段实测说明）；否则按数量下单。 */
         size: closeAll ? 0 : signedSize(request.side, size),
-        price: request.price !== undefined && request.price > 0 ? String(request.price) : '0',
+        price: request.price !== undefined && request.price > 0 ? String(toGatePrice(request.price, contract)) : '0',
         tif: request.price !== undefined && request.price > 0 ? 'gtc' : 'ioc',
         reduce_only: !closeAll,
         /* closePosition 语义在 Gate 叫 `close`（按触发时仓位全平）。 */
@@ -407,6 +438,7 @@ export class GateBroker {
     };
     if (request.clientOrderId) (body.initial as Record<string, unknown>).text = toGateOrderText(request.clientOrderId);
     const order = await this.rest.signed<GateFuturesOrder>('POST', '/futures/usdt/price_orders', { body });
+    this.algoKinds.set(String(order.id), request.type.startsWith('TAKE_PROFIT') ? 'TAKE_PROFIT' : 'STOP');
     log.info(`[gate] 条件单 ${request.symbol} ${request.type} 触发 ${trigger} → #${order.id}`);
     const raw = gatePriceOrderToAlgoResponse(order, contract);
     return {
@@ -452,7 +484,9 @@ export class GateBroker {
     return orders
       .map((o) => ({ o, name: o.initial?.contract ?? o.contract }))
       .filter(({ name }) => registry.has(name))
-      .map(({ o, name }) => gatePriceOrderToAlgoResponse(o, registry.get(name)!));
+      .map(({ o, name }) =>
+        gatePriceOrderToAlgoResponse(o, registry.get(name)!, this.algoKinds.get(String(o.id)) ?? 'STOP'),
+      );
   }
 
   async getAlgoOrder(algoId: string | number): Promise<BinanceAlgoOrderResponse | null | 'not-found'> {
@@ -461,7 +495,7 @@ export class GateBroker {
       const registry = await this.contracts.all();
       const contract = registry.get(order.initial?.contract ?? order.contract);
       if (!contract) return 'not-found';
-      return gatePriceOrderToAlgoResponse(order, contract);
+      return gatePriceOrderToAlgoResponse(order, contract, this.algoKinds.get(String(order.id)) ?? 'STOP');
     } catch (error) {
       const message = (error as Error).message;
       if (/not.?found|404|INVALID/i.test(message)) return 'not-found';
@@ -547,12 +581,31 @@ export class GateBroker {
 
   async cancelAllOrders(symbol: string): Promise<void> {
     const contract = symbolToGateContract(symbol);
+    /* 普通挂单：Gate 支持按 contract 批量撤。 */
     await this.rest.signed('DELETE', '/futures/usdt/orders', { params: { contract } }).catch((error) => {
       log.warn(`[gate] 撤销 ${symbol} 普通挂单失败：${(error as Error).message}`);
     });
-    await this.rest.signed('DELETE', '/futures/usdt/price_orders', { params: { contract } }).catch((error) => {
-      log.warn(`[gate] 撤销 ${symbol} 条件单失败：${(error as Error).message}`);
-    });
+    /*
+     * ⚠️ **条件单必须逐个撤**（2026-11-11 线上实测）。
+     *
+     * 原来用 `DELETE /price_orders?contract=` 批量撤 —— 失败被 catch 吞掉，
+     * 于是旧的条件单一直留在交易所：日志里"条件单 SPCXUSDT ..." 每轮都新建一个，
+     * 累计 5-6 份重复止损/止盈单。
+     *
+     * 先列再逐个删，失败也不静默（每一条都记 warn）。
+     */
+    try {
+      const open = await this.rest.signed<GateFuturesOrder[]>('GET', '/futures/usdt/price_orders', {
+        params: { status: 'open', contract },
+      });
+      for (const order of open) {
+        await this.rest.signed('DELETE', `/futures/usdt/price_orders/${order.id}`).catch((error) => {
+          log.warn(`[gate] 撤销条件单 #${order.id} 失败：${(error as Error).message}`);
+        });
+      }
+    } catch (error) {
+      log.warn(`[gate] 列 ${symbol} 条件单失败：${(error as Error).message}`);
+    }
   }
 
   async getUserTrades(symbol: string, limit = 50): Promise<BinanceUserTrade[]> {

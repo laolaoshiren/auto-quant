@@ -176,6 +176,34 @@ test('限价下单：gtc + 显式价格 + 客户端单号', async () => {
   assert.equal(body.text, 't-aq-x');
 });
 
+test('★★★ 触发价必须按 order_price_round 取整（实测浮点长尾被 Gate 400 拒）', async () => {
+  const { rest, calls } = fakeRest();
+  const broker = new GateBroker(rest, fakeContracts());
+  /* 2026-11-11 线上真实坏价格：69.02236585365898（浮点长尾）。BTC 的 tick 是 0.1。 */
+  await broker.placeOrder({
+    symbol: 'BTCUSDT',
+    side: 'SELL',
+    type: 'STOP_MARKET',
+    quantity: 0.001,
+    triggerPrice: 69.02236585365898,
+    closePosition: true,
+  });
+  const body = calls[0]!.body as { trigger: { price: string } };
+  assert.equal(body.trigger.price, '69', '应取整到 tick 0.1 的整数倍');
+
+  /* 第二个真实坏价格：74.4715000000005 → 74.5 */
+  await broker.placeOrder({
+    symbol: 'BTCUSDT',
+    side: 'SELL',
+    type: 'TAKE_PROFIT_MARKET',
+    quantity: 0.001,
+    triggerPrice: 74.4715000000005,
+    closePosition: true,
+  });
+  const body2 = calls[1]!.body as { trigger: { price: string } };
+  assert.equal(body2.trigger.price, '74.5');
+});
+
 test('★★★ 客户端单号：t- 前缀 + 总长 ≤ 30（Gate 实测限长 30）', async () => {
   const { rest, calls } = fakeRest();
   const broker = new GateBroker(rest, fakeContracts());
