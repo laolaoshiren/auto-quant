@@ -99,6 +99,51 @@ export function gateSignature(input: {
   return createHmac('sha512', input.secret).update(gateSignString(input)).digest('hex');
 }
 
+/**
+ * 保留 Gate 响应里超过 `Number.MAX_SAFE_INTEGER`（16 位）的 64 位整数 ID 精度（2026-11-24 实测 P0 修复）。
+ *
+ * 实测 Gate 测试网 `/futures/usdt/orders` 返回 17 位整数（如 `29836347847423509`），
+ * `/futures/usdt/price_orders` 返回 19 位整数（如 `2120981814880239616`）。
+ * 裸 `JSON.parse` 会按 IEEE-754 float64 舍入末位（`...509` → `...508`，`...616` → `...600`），
+ * 随后 `GET`/`DELETE /price_orders/{id}` 全打向不存在的单号返回 404，而 `cancelOrder` 又把 404
+ * 当成"已撤"——导致旧条件单与限价单永远撤不掉、在 Gate 侧无限堆积。
+ *
+ * 优先用 ECMAScript `JSON.parse` reviver 的 `context.source`（Node 22 原生支持，语法感知不误伤字符串）；
+ * 若运行时无 `context.source`，降级到正则预处理（同 `binance/rest.ts` 的 `preserveBigIds`）。
+ */
+export function preserveGateBigIds(text: string): string {
+  return text.replace(/"([A-Za-z0-9_]*[Ii]d)"\s*:\s*(\d{15,})/g, '"$1":"$2"');
+}
+
+const HAS_JSON_PARSE_SOURCE = (() => {
+  let supported = false;
+  JSON.parse('1', ((_k: string, _v: unknown, ctx?: { source?: string }) => {
+    supported = typeof ctx?.source === 'string';
+    return _v;
+  }) as Parameters<typeof JSON.parse>[1]);
+  return supported;
+})();
+
+export function parseGateJson(text: string): unknown {
+  if (HAS_JSON_PARSE_SOURCE) {
+    return JSON.parse(
+      text,
+      ((_key: string, value: unknown, context?: { source?: string }) => {
+        if (
+          typeof value === 'number' &&
+          !Number.isSafeInteger(value) &&
+          typeof context?.source === 'string' &&
+          /^-?\d+$/.test(context.source)
+        ) {
+          return context.source;
+        }
+        return value;
+      }) as Parameters<typeof JSON.parse>[1],
+    ) as unknown;
+  }
+  return JSON.parse(preserveGateBigIds(text)) as unknown;
+}
+
 /** 一个极简的并发闸门：超过上限就排队。 */
 class Semaphore {
   private active = 0;
@@ -231,7 +276,7 @@ export class GateRest {
         let parsed: unknown = null;
         if (text.trim() !== '') {
           try {
-            parsed = JSON.parse(text) as unknown;
+            parsed = parseGateJson(text);
           } catch {
             /* 非 JSON 响应按原始文本处理（网关 502 时就是 HTML）。 */
           }

@@ -196,11 +196,21 @@ interface OpenLeg {
  * position has no realised PnL yet, and inventing one would be worse than
  * reporting nothing.
  */
+function compareTradeIds(a: number | string, b: number | string): number {
+  const sa = String(a);
+  const sb = String(b);
+  if (sa === sb) return 0;
+  if (/^\d+$/.test(sa) && /^\d+$/.test(sb)) {
+    return sa.length !== sb.length ? sa.length - sb.length : sa < sb ? -1 : 1;
+  }
+  return sa < sb ? -1 : 1;
+}
+
 export function reconstructRoundTrips(
   fills: readonly BinanceUserTrade[],
   settlementAsset = 'USDT',
 ): ReconstructedTrade[] {
-  const ordered = [...fills].sort((a, b) => (a.time - b.time) || (a.id - b.id));
+  const ordered = [...fills].sort((a, b) => (a.time - b.time) || compareTradeIds(a.id, b.id));
 
   const trades: ReconstructedTrade[] = [];
   let leg: OpenLeg | null = null;

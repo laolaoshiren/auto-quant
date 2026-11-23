@@ -42,6 +42,17 @@ import type {
 
 const log = createLogger('gate:broker');
 
+/** 精确比较可能超过 MAX_SAFE_INTEGER 的单号/成交号，避免减法丢精度。 */
+function compareIds(a: number | string, b: number | string): number {
+  const sa = String(a);
+  const sb = String(b);
+  if (sa === sb) return 0;
+  if (/^\d+$/.test(sa) && /^\d+$/.test(sb)) {
+    return sa.length !== sb.length ? sa.length - sb.length : sa < sb ? -1 : 1;
+  }
+  return sa < sb ? -1 : 1;
+}
+
 /**
  * 按合约的**允许最小价格变动**（`order_price_round`）把价格取整到合法值。
  *
@@ -342,7 +353,7 @@ export function gateBookToIncome(book: GateFuturesAccountBook): BinanceIncome {
     asset: 'USDT',
     time: timeMs,
     info: book.type,
-    tranId: book.id !== undefined ? Number(book.id) || timeMs : timeMs,
+    tranId: book.id !== undefined ? book.id : timeMs,
     tradeId: '',
   };
 }
@@ -759,7 +770,7 @@ export class GateBroker {
      */
     return fills
       .map((fill) => gateFillToUserTrade(fill, contract))
-      .sort((a, b) => a.time - b.time || a.id - b.id);
+      .sort((a, b) => a.time - b.time || compareIds(a.id, b.id));
   }
 
   async getIncome(options: {

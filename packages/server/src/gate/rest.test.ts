@@ -8,6 +8,8 @@ import {
   buildQueryString,
   gateSignature,
   gateSignString,
+  parseGateJson,
+  preserveGateBigIds,
 } from './rest.js';
 import { GateApiError } from './types.js';
 
@@ -192,4 +194,37 @@ test('★ 超时映射成 GateApiError（status=0），不会把 AbortError 裸�
     (error: unknown) => error instanceof GateApiError && error.status === 0 && /超时/.test(error.message),
   );
   assert.equal(GATE_TIMEOUT_MS, 15_000);
+});
+
+test('★★★ Gate 64 位订单/条件单 ID（17-19 位）必须逐位保真，不得被 JSON.parse 舍入（实测 404 根因）', async () => {
+  /* 实测 Gate 测试网真实返回的 17 位普通单 ID 与 19 位 price_orders ID（均超过 MAX_SAFE_INTEGER）。 */
+  const rawOrder = '{"id":29836347847423509,"size":10,"price":"0.313"}';
+  const rawAlgo = '{"id":2120981814880239616,"order_id":29836347847423509,"size":0,"text":"\\"id\\":99999999999999999"}';
+
+  /* 确认裸 JSON.parse 确实会丢精度（验证测试夹具本身有效）。 */
+  assert.notEqual(String((JSON.parse(rawOrder) as { id: number }).id), '29836347847423509');
+  assert.notEqual(String((JSON.parse(rawAlgo) as { id: number }).id), '2120981814880239616');
+
+  /* parseGateJson 逐位保留大整数 ID，同时小整数/文本内容原样不动。 */
+  const parsedAlgo = parseGateJson(rawAlgo) as { id: string; order_id: string; size: number; text: string };
+  assert.equal(parsedAlgo.id, '2120981814880239616');
+  assert.equal(parsedAlgo.order_id, '29836347847423509');
+  assert.equal(parsedAlgo.size, 0);
+  assert.equal(parsedAlgo.text, '"id":99999999999999999');
+
+  /* 降级正则同样保护 snake_case/camelCase 大整数 ID。 */
+  const fallback = JSON.parse(preserveGateBigIds(rawOrder)) as { id: string; size: number };
+  assert.equal(fallback.id, '29836347847423509');
+  assert.equal(fallback.size, 10);
+
+  /* 通过真实 GateRest.signed 端到端验证。 */
+  const rest = new GateRest({
+    apiKey: 'k',
+    apiSecret: 's',
+    fetchImpl: fakeFetch(() => new Response(`[${rawAlgo}]`, { status: 200 })),
+  });
+  const list = await rest.signed<Array<{ id: string | number }>>('GET', '/futures/usdt/price_orders', {
+    params: { status: 'open' },
+  });
+  assert.equal(list[0]?.id, '2120981814880239616');
 });

@@ -348,7 +348,7 @@ export type BinanceAlgoStatus =
 
 export interface BinanceUserTrade {
   symbol: string;
-  id: number;
+  id: number | string;
   /** 同 `BinanceOrderResponse.orderId`：可能是字符串（大整数保护），不要 `Number()`。 */
   orderId: number | string;
   side: BinanceOrderSide;
@@ -372,7 +372,7 @@ export interface BinanceIncome {
   asset: string;
   time: number;
   info: string;
-  tranId: number;
+  tranId: number | string;
   tradeId: string;
 }
 

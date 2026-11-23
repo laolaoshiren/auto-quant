@@ -89,7 +89,8 @@ export interface GateFuturesPosition {
 
 /** 委托（`GET /futures/usdt/orders`）。 */
 export interface GateFuturesOrder {
-  id: number;
+  /** Gate 订单/条件单 ID 可达 17–19 位，超过 MAX_SAFE_INTEGER 时以字符串保留原精度。 */
+  id: number | string;
   /** 用户自定义 id。 */
   text?: string;
   /** 合约名。 */
@@ -141,7 +142,8 @@ export interface GateFuturesOrder {
 
 /** 成交（`GET /futures/usdt/my_trades`）。 */
 export interface GateFuturesFill {
-  id: number;
+  /** 成交 ID 同样可能超过 MAX_SAFE_INTEGER，支持 string 保精度。 */
+  id: number | string;
   create_time: number;
   contract: string;
   /** 张数（有符号）。 */

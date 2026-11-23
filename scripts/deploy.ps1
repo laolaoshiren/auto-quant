@@ -336,7 +336,12 @@ chmod 600 .env 2>/dev/null || true
 #
 # ⚠️ 复制失败**不阻断部署**，但会在 ``MAGPIE_GATEWAY_KEY`` 缺席时
 # 让团队模式明确报告"未启用"（而不是静默降级）。
-MAGPIE_KEY_SRC=/var/lib/docker/volumes/magpie-config/_data/magpie/caller-keys.json
+MAGPIE_DIR=/root/.config/magpie
+if [ ! -d "`$MAGPIE_DIR" ]; then
+  MAGPIE_DIR=/var/lib/docker/volumes/magpie-config/_data/magpie
+fi
+
+MAGPIE_KEY_SRC=`$MAGPIE_DIR/caller-keys.json
 MAGPIE_KEY_DST=$RemoteDir/data/magpie-caller-keys.json
 if [ -r "`$MAGPIE_KEY_SRC" ]; then
   mkdir -p $RemoteDir/data
@@ -362,7 +367,7 @@ fi
 # 少了它，就只能靠"感觉最近好像变慢了"。
 #
 # ⚠️ 复制失败**不阻断部署**（读不到版本不是交易问题）。
-MAGPIE_VER_SRC=/var/lib/docker/volumes/magpie-config/_data/magpie/last-version
+MAGPIE_VER_SRC=`$MAGPIE_DIR/last-version
 MAGPIE_VER_DST=$RemoteDir/data/magpie-last-version
 if [ -r "`$MAGPIE_VER_SRC" ]; then
   mkdir -p $RemoteDir/data
@@ -395,7 +400,7 @@ fi
 #
 # ⚠️ 复制失败**不阻断部署** —— 那只是让免费标注退化（``free: 'unknown'``），
 # 团队模式仍能用静态档案跑，只是少了"优先用免费模型"这一层优化。
-MAGPIE_SRC=/var/lib/docker/volumes/magpie-config/_data/magpie/plugin-providers.json
+MAGPIE_SRC=`$MAGPIE_DIR/plugin-providers.json
 MAGPIE_DST=$RemoteDir/data/magpie-plugin-providers.json
 if [ -r "`$MAGPIE_SRC" ]; then
   mkdir -p $RemoteDir/data
