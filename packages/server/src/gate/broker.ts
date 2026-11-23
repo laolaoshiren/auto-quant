@@ -20,6 +20,7 @@
  */
 import type {
   BinanceAlgoOrderResponse,
+  BinanceAlgoStatus,
   BinanceIncome,
   BinanceOrderResponse,
   BinanceUserTrade,
@@ -27,6 +28,7 @@ import type {
 import type { AccountState } from '../binance/account.js';
 import type { ExchangePosition, PlaceOrderRequest, PlacedOrder, BrokerOptions } from '../binance/broker.js';
 import { CONDITIONAL_ORDER_TYPES } from '../binance/broker.js';
+import { stepDecimals } from '../binance/symbols.js';
 import { createLogger } from '../logger.js';
 import { GateAccountReader, GateContractRegistry, gateContractToSymbol, num, symbolToGateContract } from './account.js';
 import { GateRest } from './rest.js';
@@ -55,12 +57,18 @@ const log = createLogger('gate:broker');
  * 取整方向用 `round`（四舍五入到最近一档），而不是 floor/ceil：触发价只是"到价才触发"，
  * 差半档不影响保护效果，而方向性取整在两种持仓方向下会各错一次。
  */
-function toGatePrice(price: number, contract: GateFuturesContract): number {
+function formatGatePrice(price: number, contract: GateFuturesContract): string {
   const tick = num(contract.order_price_round);
-  if (!(tick > 0) || !(price > 0)) return price;
+  if (!(tick > 0) || !(price > 0)) return String(price);
+  const decimals = stepDecimals(String(contract.order_price_round));
   const stepped = Math.round(price / tick) * tick;
-  /* 消除浮点残差（0.1 的整数倍算出 69.30000000000001 这种）。 */
-  return Number(stepped.toFixed(8));
+  /*
+   * 用 `toFixed(decimals)` 而非 `String(Number(stepped.toFixed(8)))`（2026-11-23 修复）：
+   *   1. 防止极小价币种（如 1e-7）被 `toFixed(8)` 截断或 `String(...)` 转成科学计数法 `"1e-7"` 被 Gate 拒单；
+   *   2. 去掉小数末尾多余的 0（如 `"69.0"` → `"69"`、`"74.50"` → `"74.5"`），同时消除二进制浮点尾差。
+   */
+  const fixed = stepped.toFixed(decimals);
+  return decimals > 0 ? fixed.replace(/\.?0+$/, '') : fixed;
 }
 
 /**
@@ -84,6 +92,28 @@ function toGateOrderText(clientOrderId: string): string {
   return prefixed.slice(0, 30);
 }
 
+/**
+ * 为 Gate 条件单构造自带止损/止盈标记的客户端单号（`t-sl-...` / `t-tp-...`）。
+ *
+ * ⚠️ **为什么不能只靠进程内 `algoKinds` Map（2026-11-23 修复）**：
+ * Gate 的 `price_orders` 响应没有「止盈/止损」字段。仅靠内存 Map 会在重启后清空，
+ * 导致所有挂着的止盈单退化成 `'STOP_MARKET'` —— 止损缺失时 `hasLiveStop` 误放行
+ * （仓位裸奔），而移损/调止损时 `cancelAllProtection` 又把止盈单误撤。
+ * 把标记写进 `initial.text` 后，重启也能 100% 无状态准确区分。
+ */
+function toGateAlgoText(kind: 'STOP' | 'TAKE_PROFIT', clientOrderId?: string): string {
+  const tag = kind === 'TAKE_PROFIT' ? 't-tp-' : 't-sl-';
+  const raw = (clientOrderId ?? '').replace(/^t-/, '').replace(/^(?:tp|sl|stop)-/i, '');
+  const body = raw || Date.now().toString(36);
+  return `${tag}${body}`.slice(0, 30);
+}
+
+function inferAlgoKindFromText(text: string): 'STOP' | 'TAKE_PROFIT' | null {
+  if (/^t-tp-/i.test(text) || /^tp-/i.test(text)) return 'TAKE_PROFIT';
+  if (/^t-sl-/i.test(text) || /^sl-/i.test(text) || /^stop-/i.test(text)) return 'STOP';
+  return null;
+}
+
 /** 本系统的一侧（BUY/SELL 决定开平方向）→ Gate 的 `size` 符号。 */
 function signedSize(side: 'BUY' | 'SELL', size: number): number {
   return side === 'BUY' ? Math.abs(size) : -Math.abs(size);
@@ -103,18 +133,50 @@ function toSize(quantity: number, contract: GateFuturesContract): number {
 /**
  * Gate 订单状态 → 币安状态（交易循环按币安词汇判断"还能不能变"）。
  *
- * Gate：`open`（挂单中）/ `finished`（全部成交）/ `cancelled`（已撤/部分成交后撤）。
- * 币安：`NEW` / `PARTIALLY_FILLED` / `FILLED` / `CANCELED`。
+ * ⚠️ **Gate API v4 普通单只有 `open` / `finished` 两种 `status`（2026-11-23 修复）**：
+ * 被撤单、IOC 未成交、reduce_only 冲突、强平等全部返回 `status: 'finished'`，
+ * 真正的原因在 `finish_as` 里。原来只看 `status === 'finished'` 就返回 `'FILLED'`，
+ * 会把已撤销的限价单和未成交的 IOC 单错判为成交。
  */
-function orderStatus(order: GateFuturesOrder): string {
-  if (order.status === 'finished') return 'FILLED';
+function orderStatus(order: GateFuturesOrder): BinanceOrderResponse['status'] {
   if (order.status === 'cancelled') {
-    /* Gate 用 `finish_as` 区分"用户撤的"与"自动撤的"（IOC 未成交、仓位不足等）。 */
     return order.finish_as === 'auto_deleveraged' ? 'EXPIRED' : 'CANCELED';
   }
   const left = Math.abs(order.left);
   const total = Math.abs(order.size);
+  if (order.status === 'finished') {
+    const finishAs = order.finish_as;
+    if (finishAs === 'auto_deleveraged' || finishAs === 'liquidated') return 'EXPIRED';
+    if (
+      finishAs === 'cancelled' ||
+      finishAs === 'reduce_only' ||
+      finishAs === 'position_closed' ||
+      finishAs === 'reduce_out' ||
+      finishAs === 'stp'
+    ) {
+      return 'CANCELED';
+    }
+    if (finishAs === 'ioc') {
+      return total > 0 && left === 0 ? 'FILLED' : 'CANCELED';
+    }
+    if (finishAs === 'filled') return 'FILLED';
+    /* 未给 finish_as（兼容旧测试夹具）：若一笔未成交（left === total 且 total > 0）按撤单处理。 */
+    if (total > 0 && left >= total) return 'CANCELED';
+    return 'FILLED';
+  }
   return left > 0 && left < total ? 'PARTIALLY_FILLED' : 'NEW';
+}
+
+function algoStatusOf(order: GateFuturesOrder): BinanceAlgoStatus {
+  if (order.status === 'cancelled') return 'CANCELED';
+  if (order.status === 'finished') {
+    const finishAs = order.finish_as;
+    if (finishAs === 'cancelled') return 'CANCELED';
+    if (finishAs === 'expired') return 'EXPIRED';
+    if (finishAs === 'failed') return 'REJECTED';
+    return 'FINISHED';
+  }
+  return 'NEW';
 }
 
 /** Gate 订单 → `BinanceOrderResponse`（缺失字段给安全默认值，逐项注释在下面）。 */
@@ -140,7 +202,7 @@ export function gateOrderToBinanceResponse(
     side: order.size > 0 ? 'BUY' : 'SELL',
     /* Gate 的合约默认单向持仓（dual_mode=false）→ 币安侧对应 `BOTH`。 */
     positionSide: 'BOTH',
-    status: orderStatus(order) as BinanceOrderResponse['status'],
+    status: orderStatus(order),
     stopPrice: order.trigger ? order.trigger.price : '0',
     closePosition: order.is_close === true,
     symbol: gateContractToSymbol(order.contract),
@@ -159,36 +221,51 @@ export function gatePriceOrderToAlgoResponse(
   order: GateFuturesOrder,
   contract: GateFuturesContract,
   /*
-   * `kind` 由**创建时**的请求决定（Gate 的 price_orders 响应里**没有**止盈/止损字段）。
-   * 不给时按 'STOP' 兜底 —— 保守方向：把条件单都当保护单，宁可少挂一次，
-   * 也不要在 `hasLiveStop` 里判"没有止损"而重复挂/误平。
+   * `kind` 优先采用调用方已知值；未传时从 `initial.text`（`t-tp-` / `t-sl-`）无状态还原；
+   * 均缺失（例如进程重启前的外部手工条件单）时保守回落 `'STOP'`。
    */
-  kind: 'STOP' | 'TAKE_PROFIT' = 'STOP',
+  kind?: 'STOP' | 'TAKE_PROFIT',
 ): BinanceAlgoOrderResponse {
   const multiplier = num(contract.quanto_multiplier) || 1;
-  /* price_orders 的契约/数量/价格在 `initial` 里（顶层没有，实测 undefined）。 */
+  /* price_orders 的契约/数量/价格/text 在 `initial` 里（顶层没有，实测 undefined）。 */
   const initial = order.initial;
+  const clientAlgoId = initial?.text ?? order.text ?? '';
+  const resolvedKind: 'STOP' | 'TAKE_PROFIT' = kind ?? inferAlgoKindFromText(clientAlgoId) ?? 'STOP';
+  const rawSignedSize = initial?.size !== undefined && initial.size !== 0 ? initial.size : order.size;
   const size = Math.abs(initial?.size ?? order.size);
-  const left = Math.abs(initial?.size ?? order.left);
-  const filledSize = Math.max(0, size - left);
   const rule = order.trigger?.rule ?? 1;
   const priceText = initial?.price ?? order.price;
   const contractName = initial?.contract ?? order.contract;
+  const algoStatus = algoStatusOf(order);
+  /*
+   * closePosition 条件单在 Gate 必须传 `initial.size = 0`。原来写 `rawSignedSize > 0 ? 'BUY' : 'SELL'`
+   * 会把平空单（BUY）全部错标为 `'SELL'`。size=0 时按 `resolvedKind` + `trigger.rule` 唯一反推：
+   *   · STOP:        rule=2(≤触发) → SELL 平多；rule=1(≥触发) → BUY 平空
+   *   · TAKE_PROFIT: rule=1(≥触发) → SELL 平多；rule=2(≤触发) → BUY 平空
+   */
+  const side: 'BUY' | 'SELL' =
+    rawSignedSize !== 0
+      ? rawSignedSize > 0
+        ? 'BUY'
+        : 'SELL'
+      : resolvedKind === 'STOP'
+        ? rule === 2
+          ? 'SELL'
+          : 'BUY'
+        : rule === 1
+          ? 'SELL'
+          : 'BUY';
   return {
     algoId: order.id,
-    clientAlgoId: order.text ?? '',
+    clientAlgoId,
     algoType: 'CONDITIONAL',
-    orderType: (kind === 'TAKE_PROFIT' ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET') as BinanceAlgoOrderResponse['orderType'],
+    orderType: (resolvedKind === 'TAKE_PROFIT' ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET') as BinanceAlgoOrderResponse['orderType'],
     symbol: gateContractToSymbol(contractName ?? ''),
-    side: (initial?.size ?? order.size) > 0 ? 'BUY' : 'SELL',
+    side,
     positionSide: 'BOTH',
     timeInForce: 'GTC',
     quantity: String(size * multiplier),
-    algoStatus: (order.status === 'finished'
-      ? 'FINISHED'
-      : order.status === 'cancelled'
-        ? 'CANCELLED'
-        : 'WORKING') as BinanceAlgoOrderResponse['algoStatus'],
+    algoStatus,
     triggerPrice: order.trigger?.price ?? '0',
     price: priceText,
     closePosition: initial?.close === true || order.is_close === true,
@@ -197,7 +274,7 @@ export function gatePriceOrderToAlgoResponse(
     priceProtect: false,
     /* Gate 的触发方向：rule=1 价格上穿触发 / rule=2 下穿触发 —— 记录在 activatePrice 之外的语义里。 */
     activatePrice: String(rule),
-    actualOrderId: order.finish_time ? String(order.id) : undefined,
+    actualOrderId: algoStatus === 'FINISHED' && order.finish_time ? String(order.id) : undefined,
     /* Gate 不单独给这些时间戳：用创建时间兜底（秒 → 毫秒）。 */
     createTime: Number(order.create_time) * 1000,
     updateTime: Number(order.finish_time ?? order.create_time) * 1000,
@@ -219,11 +296,16 @@ export function gateFillToUserTrade(fill: GateFuturesFill, contract: GateFutures
     qty: String(Math.abs(fill.size) * multiplier),
     quoteQty: String(Math.abs(fill.size) * multiplier * price),
     /*
-     * Gate 的成交行**不含 realizedPnl**（盈亏在 account_book 里按仓位结算）。
-     * 这里给 '0' —— 交易循环拿它做"成交即记账"时，真正入账仍走 `bookClosedPosition`
-     * （按持仓/均价算），不会依赖这个字段。
+     * ⚠️ **必须留空串 `''`，绝不能写 `'0'`（2026-11-23 P0 账目修复）**。
+     *
+     * Gate 的 `my_trades` 成交明细不含 `realizedPnl`。原实现硬填 `'0'`，结果
+     * `reconstructRoundTrips()` 算出 `grossPnl = 0` → `bookClosedPosition` 与
+     * `reconcileTradeHistory` 的 `applyExchangeFigures()` 把 Gate 账本里所有平仓的
+     * 毛盈亏全数覆写清零（界面只剩负手续费、对账永久大差额）。
+     * 留空串 `''` 明确语义为"成交行未提供 realizedPnl"，由 `reconstructRoundTrips`
+     * 自动按线性合约加权入场均价精确算出毛盈亏（币安始终返回数值串，不受影响）。
      */
-    realizedPnl: '0',
+    realizedPnl: '',
     marginAsset: 'USDT',
     commission: fill.fee,
     commissionAsset: 'USDT',
@@ -235,21 +317,34 @@ export function gateFillToUserTrade(fill: GateFuturesFill, contract: GateFutures
 
 /** Gate account_book → `BinanceIncome`。 */
 export function gateBookToIncome(book: GateFuturesAccountBook): BinanceIncome {
+  /*
+   * ⚠️ **Gate API v4 `account_book` 官方枚举（2026-11-23 P0 修复）**：
+   *   · `fund` = 资金费（原代码错映成 `TRANSFER`，导致资金费全部丢失且污染转账！）
+   *   · `pnl`  = 已实现盈亏（原代码只认 `realised_pnl`，导致所有已实现盈亏未计入 `REALIZED_PNL`！）
+   *   · `dnw`  = 出入金转账（原代码未映射成 `TRANSFER`）
+   *   · `fee`  = 交易手续费
+   * 保留 `funding`/`realised_pnl` 别名兼容旧夹具。
+   */
   const typeMap: Record<string, string> = {
+    fund: 'FUNDING_FEE',
     funding: 'FUNDING_FEE',
     fee: 'COMMISSION',
+    pnl: 'REALIZED_PNL',
     realised_pnl: 'REALIZED_PNL',
-    fund: 'TRANSFER',
+    dnw: 'TRANSFER',
     auto_deleveraging: 'AUTO_EXCHANGE',
   };
+  const timeMs = Math.round(book.time * 1000);
   return {
     symbol: book.contract ? gateContractToSymbol(book.contract) : '',
     incomeType: typeMap[book.type] ?? book.type.toUpperCase(),
     income: book.change,
     asset: 'USDT',
-    time: book.time * 1000,
+    time: timeMs,
     info: book.type,
-  } as BinanceIncome;
+    tranId: book.id !== undefined ? Number(book.id) || timeMs : timeMs,
+    tradeId: '',
+  };
 }
 
 export class GateBroker {
@@ -334,20 +429,29 @@ export class GateBroker {
   ): Promise<{ ok: boolean; leverage: number; note?: string }> {
     const contract = symbolToGateContract(symbol);
     const wanted = Math.trunc(leverage);
+    /*
+     * ⚠️ **Gate 全仓模式必须传 `leverage=0` + `cross_leverage_limit=N`（2026-11-23 修复）**。
+     *
+     * Gate API v4 约定：传正整数 `leverage=10` 会把该合约强制切换为**逐仓模式**；
+     * 而本系统交易循环按单向全仓设计（`setMarginType` 假定全仓）。改用全仓上限参数后，
+     * 既不误切逐仓，也能从响应里的 `cross_leverage_limit` / `leverage` 读回实际生效倍数。
+     */
     try {
-      const response = await this.rest.signed<{ leverage?: string | number }>(
+      const response = await this.rest.signed<{ leverage?: string | number; cross_leverage_limit?: string | number }>(
         'POST',
         `/futures/usdt/positions/${contract}/leverage`,
-        { params: { leverage: String(wanted) } },
+        { params: { leverage: '0', cross_leverage_limit: String(wanted) } },
       );
-      const applied = num(response?.leverage);
-      return { ok: true, leverage: applied > 0 ? applied : wanted };
+      const cross = num(response?.cross_leverage_limit);
+      const isolated = num(response?.leverage);
+      const applied = cross > 0 ? cross : isolated > 0 ? isolated : wanted;
+      return { ok: true, leverage: applied };
     } catch (error) {
       const message = (error as Error).message;
       return {
         ok: false,
         leverage: 0,
-        note: `Gate 设置 ${symbol} 杠杆 ${wanted}x 失败：${message}`,
+        note: `Gate 设置 ${symbol} 全仓杠杆 ${wanted}x 失败：${message}`,
       };
     }
   }
@@ -373,7 +477,7 @@ export class GateBroker {
       contract: contractName,
       size: signedSize(request.side, size),
       /* Gate：price=0 即市价单，且 tif 必须是 ioc。 */
-      price: request.type === 'MARKET' ? '0' : String(toGatePrice(request.price ?? 0, contract)),
+      price: request.type === 'MARKET' ? '0' : formatGatePrice(request.price ?? 0, contract),
       tif: request.type === 'MARKET' ? 'ioc' : 'gtc',
     };
     if (request.reduceOnly === true) body.reduce_only = true;
@@ -397,6 +501,15 @@ export class GateBroker {
     };
   }
 
+  private rememberAlgoKind(id: string, kind: 'STOP' | 'TAKE_PROFIT'): void {
+    this.algoKinds.set(id, kind);
+    /* 有界淘汰，防止 7×24 长期运行缓慢泄漏。 */
+    if (this.algoKinds.size > 500) {
+      const oldest = this.algoKinds.keys().next().value;
+      if (oldest !== undefined) this.algoKinds.delete(oldest);
+    }
+  }
+
   private async placeConditional(
     request: PlaceOrderRequest,
     contract: GateFuturesContract,
@@ -412,7 +525,7 @@ export class GateBroker {
     if (!closeAll && size === 0) {
       throw new Error(`Gate 条件单数量换算为 0 张（quantity=${request.quantity}，合约=${contractName}）。`);
     }
-    const trigger = toGatePrice(request.triggerPrice ?? 0, contract);
+    const triggerText = formatGatePrice(request.triggerPrice ?? 0, contract);
     /*
      * Gate 的触发方向：rule=1（价格 ≥ 触发价时触发）/ rule=2（≤ 时触发）。
      * 本系统的语义：
@@ -421,30 +534,38 @@ export class GateBroker {
      * 判断用「平仓方向」：SELL 平多 → 止损在下（2）/止盈在上（1）；BUY 平空相反。
      */
     const isStop = request.type.startsWith('STOP');
+    const kind: 'STOP' | 'TAKE_PROFIT' = request.type.startsWith('TAKE_PROFIT') ? 'TAKE_PROFIT' : 'STOP';
     const closingLong = request.side === 'SELL';
     const rule = isStop ? (closingLong ? 2 : 1) : closingLong ? 1 : 2;
+    const algoText = toGateAlgoText(kind, request.clientOrderId);
     const body = {
       initial: {
         contract: contractName,
         /* close 单必须 size=0（见上面那段实测说明）；否则按数量下单。 */
         size: closeAll ? 0 : signedSize(request.side, size),
-        price: request.price !== undefined && request.price > 0 ? String(toGatePrice(request.price, contract)) : '0',
+        price: request.price !== undefined && request.price > 0 ? formatGatePrice(request.price, contract) : '0',
         tif: request.price !== undefined && request.price > 0 ? 'gtc' : 'ioc',
         reduce_only: !closeAll,
         /* closePosition 语义在 Gate 叫 `close`（按触发时仓位全平）。 */
         close: closeAll,
+        /* 写入带 t-sl-/t-tp- 标记的客户端单号，重启后仍可无状态还原止损/止盈身份。 */
+        text: algoText,
       },
-      trigger: { strategy: 0, price: String(trigger), rule },
+      /*
+       * Gate API v4 字段名是 `strategy_type`（0=价格触发）与 `price_type`（1=标记价，
+       * 与本项目 `workingType: 'MARK_PRICE'` 口径一致；不传默认为 0=最新价）。
+       */
+      trigger: { strategy_type: 0, price_type: 1, price: triggerText, rule },
     };
-    if (request.clientOrderId) (body.initial as Record<string, unknown>).text = toGateOrderText(request.clientOrderId);
     const order = await this.rest.signed<GateFuturesOrder>('POST', '/futures/usdt/price_orders', { body });
-    this.algoKinds.set(String(order.id), request.type.startsWith('TAKE_PROFIT') ? 'TAKE_PROFIT' : 'STOP');
-    log.info(`[gate] 条件单 ${request.symbol} ${request.type} 触发 ${trigger} → #${order.id}`);
-    const raw = gatePriceOrderToAlgoResponse(order, contract);
+    this.rememberAlgoKind(String(order.id), kind);
+    log.info(`[gate] 条件单 ${request.symbol} ${request.type} 触发 ${triggerText} → #${order.id}`);
+    /* 必须把 `kind` 传进去，否则刚挂出的止盈单 `raw.orderType` 会被错标成 STOP_MARKET。 */
+    const raw = gatePriceOrderToAlgoResponse(order, contract, kind);
     return {
       kind: 'algo',
       id: String(order.id),
-      clientId: request.clientOrderId ?? '',
+      clientId: algoText,
       symbol: request.symbol,
       side: request.side,
       type: request.type,
@@ -485,7 +606,8 @@ export class GateBroker {
       .map((o) => ({ o, name: o.initial?.contract ?? o.contract }))
       .filter(({ name }) => registry.has(name))
       .map(({ o, name }) =>
-        gatePriceOrderToAlgoResponse(o, registry.get(name)!, this.algoKinds.get(String(o.id)) ?? 'STOP'),
+        /* 不传硬编码 `'STOP'`，让 `gatePriceOrderToAlgoResponse` 在重启后优先按 `initial.text` 还原类型。 */
+        gatePriceOrderToAlgoResponse(o, registry.get(name)!, this.algoKinds.get(String(o.id))),
       );
   }
 
@@ -495,7 +617,7 @@ export class GateBroker {
       const registry = await this.contracts.all();
       const contract = registry.get(order.initial?.contract ?? order.contract);
       if (!contract) return 'not-found';
-      return gatePriceOrderToAlgoResponse(order, contract, this.algoKinds.get(String(order.id)) ?? 'STOP');
+      return gatePriceOrderToAlgoResponse(order, contract, this.algoKinds.get(String(order.id)));
     } catch (error) {
       const message = (error as Error).message;
       if (/not.?found|404|INVALID/i.test(message)) return 'not-found';
@@ -518,13 +640,19 @@ export class GateBroker {
         current.kind === 'algo'
           ? await this.getAlgoOrder(current.id)
           : await this.getOrder(current.symbol, current.id);
-      if (!raw || raw === 'not-found') break;
+      if (raw === 'not-found') break;
+      /* 瞬时读取失败（null）继续等到 deadline，不要把一次网络抖动当成终态退出。 */
+      if (!raw) continue;
       if (current.kind === 'algo') {
         const algo = raw as BinanceAlgoOrderResponse;
         current = {
           ...current,
           status: algo.algoStatus,
-          terminal: algo.algoStatus === 'FINISHED' || algo.algoStatus === 'CANCELED',
+          terminal:
+            algo.algoStatus === 'FINISHED' ||
+            algo.algoStatus === 'CANCELED' ||
+            algo.algoStatus === 'EXPIRED' ||
+            algo.algoStatus === 'REJECTED',
           raw: algo,
         };
       } else {
@@ -545,20 +673,7 @@ export class GateBroker {
   /**
    * 撤一张单（对齐 `BrokerPort`：`(symbol, orderId, kind)`）。
    *
-   * ## 为什么参数是单号而不是 `PlacedOrder`
-   *
-   * 交易循环的撤单调用点（`cancelAllProtection` / `executeCancelPending` /
-   * 保本移损 / 手工平仓）手里只有**单号**，没有完整的 `PlacedOrder`。币安那层
-   * 早就改成了 `(symbol, orderId, kind)`，Gate 原来保留 `(order: PlacedOrder)`
-   * 的旧形状 —— 两个实现形状不一致时 `connection.broker` 无法当 `BrokerPort` 用
-   *（接入阶段 2 才暴露出来）。`kind` 决定打哪个端点：
-   *
-   * ```
-   *   order → DELETE /futures/usdt/orders/{id}
-   *   algo  → DELETE /futures/usdt/price_orders/{id}    （条件单是独立资源）
-   * ```
-   *
-   * 已不存在 = 撤单成功（与币安 `-2011` 同一语义）。
+   * 契约与 `BinanceBroker.cancelOrder` 一致：已不存在返回 `true`，其它失败记 warn 返回 `false`。
    */
   async cancelOrder(
     symbol: string,
@@ -569,42 +684,63 @@ export class GateBroker {
       const path =
         kind === 'algo' ? `/futures/usdt/price_orders/${orderId}` : `/futures/usdt/orders/${orderId}`;
       await this.rest.signed('DELETE', path);
+      if (kind === 'algo') this.algoKinds.delete(String(orderId));
       log.info(`[gate] 已撤销 ${symbol} 的${kind === 'algo' ? '条件单' : '普通单'} #${orderId}`);
       return true;
     } catch (error) {
       /* 已经不在 = 撤单成功（与币安那层同一个语义）。 */
       const message = (error as Error).message;
-      if (/not.?found|404|INVALID_ORDER/i.test(message)) return true;
-      throw error;
+      if (/not.?found|404|INVALID_ORDER/i.test(message)) {
+        if (kind === 'algo') this.algoKinds.delete(String(orderId));
+        return true;
+      }
+      log.warn(`[gate] 撤销 ${symbol} 的${kind === 'algo' ? '条件单' : '普通单'} #${orderId} 失败：${message}`);
+      return false;
     }
   }
 
   async cancelAllOrders(symbol: string): Promise<void> {
     const contract = symbolToGateContract(symbol);
-    /* 普通挂单：Gate 支持按 contract 批量撤。 */
-    await this.rest.signed('DELETE', '/futures/usdt/orders', { params: { contract } }).catch((error) => {
-      log.warn(`[gate] 撤销 ${symbol} 普通挂单失败：${(error as Error).message}`);
-    });
+    const errors: string[] = [];
+    /* 普通挂单：Gate 支持按 contract 批量撤。失败不可静默，否则调用方会继续挂单造成重复单。 */
+    try {
+      await this.rest.signed('DELETE', '/futures/usdt/orders', { params: { contract } });
+    } catch (error) {
+      const msg = `普通挂单撤销失败：${(error as Error).message}`;
+      log.warn(`[gate] ${symbol} ${msg}`);
+      errors.push(msg);
+    }
     /*
-     * ⚠️ **条件单必须逐个撤**（2026-11-11 线上实测）。
-     *
-     * 原来用 `DELETE /price_orders?contract=` 批量撤 —— 失败被 catch 吞掉，
-     * 于是旧的条件单一直留在交易所：日志里"条件单 SPCXUSDT ..." 每轮都新建一个，
-     * 累计 5-6 份重复止损/止盈单。
-     *
-     * 先列再逐个删，失败也不静默（每一条都记 warn）。
+     * ⚠️ **条件单必须逐个撤**（2026-11-11 线上实测），且**失败必须抛出**（2026-11-23 对齐 BrokerPort 契约）：
+     * `executeAdjust`/`applyBreakevenGuard` 依赖 `cancelAllOrders` 抛错来中止重挂保护单；
+     * 静默吞错会让旧条件单留在交易所并叠加重复单。
      */
     try {
       const open = await this.rest.signed<GateFuturesOrder[]>('GET', '/futures/usdt/price_orders', {
         params: { status: 'open', contract },
       });
       for (const order of open) {
-        await this.rest.signed('DELETE', `/futures/usdt/price_orders/${order.id}`).catch((error) => {
-          log.warn(`[gate] 撤销条件单 #${order.id} 失败：${(error as Error).message}`);
-        });
+        try {
+          await this.rest.signed('DELETE', `/futures/usdt/price_orders/${order.id}`);
+          this.algoKinds.delete(String(order.id));
+        } catch (error) {
+          const message = (error as Error).message;
+          if (/not.?found|404|INVALID_ORDER/i.test(message)) {
+            this.algoKinds.delete(String(order.id));
+            continue;
+          }
+          const msg = `条件单 #${order.id} 撤销失败：${message}`;
+          log.warn(`[gate] ${symbol} ${msg}`);
+          errors.push(msg);
+        }
       }
     } catch (error) {
-      log.warn(`[gate] 列 ${symbol} 条件单失败：${(error as Error).message}`);
+      const msg = `列条件单失败：${(error as Error).message}`;
+      log.warn(`[gate] ${symbol} ${msg}`);
+      errors.push(msg);
+    }
+    if (errors.length > 0) {
+      throw new Error(`Gate 撤销 ${symbol} 挂单未全部完成：${errors.join('；')}`);
     }
   }
 
@@ -615,7 +751,15 @@ export class GateBroker {
     };
     const fills = await this.rest.signed<GateFuturesFill[]>('GET', '/futures/usdt/my_trades', { params });
     const contract = await this.contracts.get(symbolToGateContract(symbol));
-    return fills.map((fill) => gateFillToUserTrade(fill, contract));
+    /*
+     * ⚠️ **必须按时间升序返回（2026-11-23 P0 修复）**。
+     * Gate API v4 `my_trades` 默认倒序（最新在前），而本项目所有消费方（`lastFillFor`、
+     * `detectCloseReason`）按币安 `userTrades` 契约取 `fills[fills.length - 1]` 作为最新成交。
+     * 不排序会导致 Gate 每次都取到 20 笔之前的陈旧成交价。
+     */
+    return fills
+      .map((fill) => gateFillToUserTrade(fill, contract))
+      .sort((a, b) => a.time - b.time || a.id - b.id);
   }
 
   async getIncome(options: {
@@ -625,20 +769,38 @@ export class GateBroker {
     limit?: number;
   }): Promise<BinanceIncome[]> {
     /*
-     * ⚠️ `endTime` 必须可选：交易循环的多数调用点只传 `startTime`（例如
-     * `reconcileTradeHistory` / `fundingFor`）。声明成必填时类型层面因为方法
-     * 双变而"通过"，但运行时 `Math.floor(undefined/1000)` = NaN，会被 Gate 拒成
-     * `INVALID_PARAM` —— 一类只在联调时才暴露的接口不匹配。
+     * ⚠️ `endTime` 必须可选；并按 offset 翻页避免超过 100 条资金流水被静默截断（2026-11-23 修复）。
      */
     const endTime = options.endTime ?? Date.now();
-    const params: Record<string, string> = {
-      from: String(Math.floor(options.startTime / 1000)),
-      to: String(Math.floor(endTime / 1000)),
-      limit: String(options.limit ?? 100),
-    };
-    if (options.symbol) params.contract = symbolToGateContract(options.symbol);
-    const books = await this.rest.signed<GateFuturesAccountBook[]>('GET', '/futures/usdt/account_book', { params });
-    return books.map(gateBookToIncome);
+    const pageSize = Math.max(1, Math.min(options.limit ?? 100, 100));
+    const maxPages = 50;
+    const fromSec = String(Math.floor(options.startTime / 1000));
+    const toSec = String(Math.floor(endTime / 1000));
+    const out: BinanceIncome[] = [];
+    const seen = new Set<string>();
+
+    for (let page = 0; page < maxPages; page += 1) {
+      const params: Record<string, string> = {
+        from: fromSec,
+        to: toSec,
+        limit: String(pageSize),
+        ...(page > 0 ? { offset: String(page * pageSize) } : {}),
+      };
+      if (options.symbol) params.contract = symbolToGateContract(options.symbol);
+      const books = await this.rest.signed<GateFuturesAccountBook[]>('GET', '/futures/usdt/account_book', { params });
+      if (!Array.isArray(books) || books.length === 0) break;
+      for (const book of books) {
+        const mapped = gateBookToIncome(book);
+        const key = `${book.id ?? ''}:${mapped.time}:${mapped.incomeType}:${mapped.symbol}:${mapped.income}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(mapped);
+      }
+      /* 调用方显式指定了小 limit 或本页不满 → 已拉完。 */
+      if (books.length < pageSize || (options.limit !== undefined && out.length >= options.limit)) break;
+    }
+
+    return out;
   }
 
   async getMarkPrice(symbol: string): Promise<number> {

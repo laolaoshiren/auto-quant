@@ -762,7 +762,7 @@ class FakeBroker {
   }
 
   /** 回读单张条件单，包括已经不在挂单列表里的（币安就是靠它区分"触发了"和"被撤了"）。 */
-  async getAlgoOrder(algoId: number) {
+  async getAlgoOrder(algoId: string | number) {
     return this.algoOrders.get(String(algoId)) ?? null;
   }
 
@@ -836,6 +836,25 @@ class FakeBroker {
     });
     const single = this.positions.length === 1 ? this.positions[0]!.markPrice : null;
     if (single !== null) this.markPrice = single;
+  }
+
+  /** Test helper: 直接设置交易所持仓快照。 */
+  setPositions(next: ExchangePosition[]): void {
+    this.positions = next;
+  }
+
+  /** Test helper: 写入一张交易所侧存活条件单（如手工止损）。 */
+  seedAlgoOrder(symbol: string, order: BinanceAlgoOrderResponse): void {
+    const id = String(order.algoId);
+    this.algoOrders.set(id, order);
+    this.algoSymbol.set(id, symbol);
+  }
+
+  /** Test helper: 删除指定类型的条件单并刷新持仓浮盈比例。 */
+  removeAlgoOrdersOfType(orderType: string): void {
+    for (const [id, o] of [...this.algoOrders.entries()]) {
+      if (o.orderType === orderType) this.algoOrders.delete(id);
+    }
   }
 }
 
@@ -8142,4 +8161,426 @@ test('★★★ 实盘路径不传手续费估算值（逐字节保持"取不到
     closed!.exitPrice * closed!.quantity * rate > 0.01,
     '前提：若误用估算，这里会是一个明显大于 0 的数（否则本用例测不出回归）',
   );
+});
+
+const EMPTY_WAIT_RESPONSE = '<decision>[]</decision>';
+
+test('★★★ 19 位条件单号直传 getAlgoOrder，不再经 Number() 截断精度', async () => {
+  const LONG_ALGO_ID = '8389766285736311569';
+  const broker = new FakeBroker();
+  const seenIds: Array<string | number> = [];
+  const origGetAlgo = broker.getAlgoOrder.bind(broker);
+  broker.getAlgoOrder = async (algoId: string | number) => {
+    seenIds.push(algoId);
+    if (String(algoId) === LONG_ALGO_ID) {
+      return {
+        algoId: LONG_ALGO_ID,
+        clientAlgoId: 'c1',
+        algoType: 'CONDITIONAL',
+        orderType: 'STOP_MARKET',
+        symbol: SYMBOL,
+        side: 'SELL',
+        positionSide: 'BOTH',
+        timeInForce: 'GTC',
+        quantity: '0',
+        algoStatus: 'FINISHED',
+        triggerPrice: '66000',
+        price: '0',
+        closePosition: true,
+        createTime: Date.now(),
+        updateTime: Date.now(),
+      } as BinanceAlgoOrderResponse;
+    }
+    return origGetAlgo(algoId);
+  };
+
+  positionStore.insert({
+    traderId,
+    symbol: SYMBOL,
+    side: 'long',
+    quantity: 0.01,
+    entryPrice: MARK_PRICE,
+    leverage: 5,
+    liquidationPrice: null,
+    marginUsed: 136,
+    stopLoss: 66000,
+    takeProfit: 72000,
+    stopOrderId: LONG_ALGO_ID,
+    tpOrderId: null,
+    openReasoning: 'test 19-digit algoId',
+  });
+  broker.simulateExchangeClose();
+
+  await buildTrader(broker, EMPTY_WAIT_RESPONSE).runOnce();
+
+  assert.ok(
+    seenIds.includes(LONG_ALGO_ID),
+    `getAlgoOrder 必须收到原始 19 位字符串 ${LONG_ALGO_ID}，实得 ${JSON.stringify(seenIds)}`,
+  );
+  const closed = tradeStore.list(traderId).find((t) => t.symbol === SYMBOL);
+  assert.equal(closed?.closeReason, 'stop_loss', '应准确识别为 19 位止损单触发');
+});
+
+test('★★★ ensureStopsOnOpenPositions 已有活止损且不补固定止盈时，绝不撤改活止损也不误报无止损', async () => {
+  const broker = new FakeBroker();
+  await buildTrader(broker, OPEN_LONG_RESPONSE).runOnce();
+
+  const openPos = positionStore.open(traderId).find((p) => p.symbol === SYMBOL);
+  assert.ok(openPos, '前提：已开仓');
+  /* 清除止盈单并设止损已在保本之上 + 浮盈超保本阈值，模拟"有活止损、已保本、无固定止盈且正在奔跑的仓位"。 */
+  broker.removeAlgoOrdersOfType('TAKE_PROFIT_MARKET');
+  positionStore.setProtection(
+    traderId,
+    SYMBOL,
+    openPos.entry_price * 1.01,
+    null,
+    openPos.stop_order_id,
+    null,
+  );
+  const mark = openPos.entry_price * 1.08;
+  broker.markPrice = mark;
+  broker.setPositions([
+    {
+      symbol: SYMBOL,
+      side: 'long',
+      quantity: openPos.quantity,
+      entryPrice: openPos.entry_price,
+      markPrice: mark,
+      notional: mark * openPos.quantity,
+      unrealizedPnl: (mark - openPos.entry_price) * openPos.quantity,
+      unrealizedPnlPercent: 40,
+      leverage: openPos.leverage,
+      marginUsed: openPos.margin_used,
+      liquidationPrice: 55000,
+      marginType: 'isolated',
+    },
+  ]);
+
+  const placedBefore = broker.placed.length;
+  const cancelsBefore = broker.opLog.filter((op) => op.startsWith('cancel:')).length;
+  await buildTrader(broker, EMPTY_WAIT_RESPONSE).runOnce();
+
+  assert.equal(
+    broker.placed.length,
+    placedBefore,
+    '已有止损且浮盈超保本点时不补止盈，绝不应重复挂单或替换活止损',
+  );
+  assert.equal(
+    broker.opLog.filter((op) => op.startsWith('cancel:')).length,
+    cancelsBefore,
+    '绝不应撤销已有的活止损单',
+  );
+});
+
+test('★★★ 多机器人共用账户：不抢占他机持仓，收养纯手工仓时保留交易所已有止损', async () => {
+  const trader1 = traders.get(traderId)!;
+  const trader2 = traders.create({
+    name: 'shared-account-bot-2',
+    exchangeAccountId: trader1.exchangeAccountId,
+    aiModelId: trader1.aiModelId,
+    strategyId: trader1.strategyId,
+    cycleIntervalMinutes: 15,
+    initialEquity: 1000,
+    dryRun: false,
+  });
+
+  /* 同账户的 trader2 已经持有 ETHUSDT，且有 SOLUSDT 的 pending 限价入场单 */
+  positionStore.insert({
+    traderId: trader2.id,
+    symbol: 'ETHUSDT',
+    side: 'long',
+    quantity: 1,
+    entryPrice: 3000,
+    leverage: 5,
+    liquidationPrice: null,
+    marginUsed: 600,
+    stopLoss: 2900,
+    takeProfit: null,
+    stopOrderId: 'eth-stop-1',
+    tpOrderId: null,
+    openReasoning: 'bot 2 position',
+  });
+  positionStore.insert({
+    traderId: trader2.id,
+    symbol: 'SOLUSDT',
+    side: 'long',
+    quantity: 2,
+    entryPrice: 150,
+    leverage: 5,
+    liquidationPrice: null,
+    marginUsed: 60,
+    stopLoss: 140,
+    takeProfit: 170,
+    stopOrderId: null,
+    tpOrderId: null,
+    openReasoning: 'bot 2 pending limit entry',
+    status: 'pending',
+    entryOrderId: 'sol-limit-1',
+  });
+
+  const broker = new FakeBroker();
+  /* 交易所同时存在 trader2 的 ETHUSDT、刚成交的 SOLUSDT，以及纯手工开的 BTCUSDT（带手工止盈 75000，无止损） */
+  broker.setPositions([
+    {
+      symbol: 'ETHUSDT',
+      side: 'long',
+      quantity: 1,
+      entryPrice: 3000,
+      markPrice: 3050,
+      notional: 3050,
+      unrealizedPnl: 50,
+      unrealizedPnlPercent: 8.33,
+      leverage: 5,
+      marginUsed: 600,
+      liquidationPrice: 2400,
+      marginType: 'isolated',
+    },
+    {
+      symbol: 'SOLUSDT',
+      side: 'long',
+      quantity: 2,
+      entryPrice: 150,
+      markPrice: 151,
+      notional: 302,
+      unrealizedPnl: 2,
+      unrealizedPnlPercent: 3.33,
+      leverage: 5,
+      marginUsed: 60,
+      liquidationPrice: 120,
+      marginType: 'isolated',
+    },
+    {
+      symbol: SYMBOL,
+      side: 'long',
+      quantity: 0.01,
+      entryPrice: MARK_PRICE,
+      markPrice: MARK_PRICE,
+      notional: MARK_PRICE * 0.01,
+      unrealizedPnl: 0,
+      unrealizedPnlPercent: 0,
+      leverage: 5,
+      marginUsed: 136,
+      liquidationPrice: 55000,
+      marginType: 'isolated',
+    },
+  ]);
+  broker.seedAlgoOrder(SYMBOL, {
+    algoId: 'manual-tp-1',
+    clientAlgoId: 'manual-tp-1',
+    algoType: 'CONDITIONAL',
+    orderType: 'TAKE_PROFIT_MARKET',
+    symbol: SYMBOL,
+    side: 'SELL',
+    positionSide: 'BOTH',
+    timeInForce: 'GTC',
+    quantity: '0',
+    algoStatus: 'NEW',
+    triggerPrice: '75000',
+    price: '0',
+    closePosition: true,
+    createTime: Date.now(),
+    updateTime: Date.now(),
+  } as BinanceAlgoOrderResponse);
+
+  await buildTrader(broker, EMPTY_WAIT_RESPONSE).runOnce();
+
+  const bot1Open = positionStore.open(traderId);
+  assert.equal(
+    bot1Open.some((p) => p.symbol === 'ETHUSDT'),
+    false,
+    '不得抢占同账户其它机器人已持有的 ETHUSDT',
+  );
+  assert.equal(
+    bot1Open.some((p) => p.symbol === 'SOLUSDT'),
+    false,
+    '不得抢占同账户其它机器人 pending 刚成交的 SOLUSDT',
+  );
+  const adoptedBtc = bot1Open.find((p) => p.symbol === SYMBOL);
+  assert.ok(adoptedBtc, '纯手工开的 BTCUSDT 应被收养');
+  assert.equal(adoptedBtc!.take_profit, 75000, '收养补兜底止损时必须保留交易所已有手工止盈价位');
+  assert.equal(adoptedBtc!.tp_order_id, 'manual-tp-1', '收养补兜底止损时必须保留交易所已有手工止盈单号');
+  assert.equal(
+    broker.placed.filter((p) => p.symbol === SYMBOL && p.type === 'TAKE_PROFIT_MARKET').length,
+    0,
+    '已有手工止盈时不得撤改或重挂止盈单',
+  );
+  assert.equal(
+    broker.placed.filter((p) => p.symbol === SYMBOL && p.type === 'STOP_MARKET').length,
+    1,
+    '缺失止损时仍应补挂兜底止损',
+  );
+});
+
+test('★★★ reconcileTradeHistory 遇到 manual_partial 拆分腿时不覆写减仓行，并仅补录未记账尾仓', async () => {
+  const broker = new FakeBroker();
+  const nowMs = Date.now();
+  const openedAt = new Date(nowMs - 600_000).toISOString();
+  const partialAt = new Date(nowMs - 300_000).toISOString();
+
+  /* 本机器人开仓单号 900001（10 枚），运行期已记一笔 4 枚的 manual_partial（出场单号 900002），
+     随后停机期间交易所止损平掉剩余 6 枚（出场单号 900003）。 */
+  orderStore.insert({
+    traderId,
+    exchangeOrderId: '900001',
+    clientOrderId: 'entry-900001',
+    symbol: SYMBOL,
+    side: 'BUY',
+    type: 'MARKET',
+    purpose: 'entry',
+    quantity: 10,
+    price: null,
+    stopPrice: null,
+    status: 'FILLED',
+    avgPrice: 100,
+    filledQty: 10,
+    fee: 1,
+  });
+  const partial = tradeStore.insert({
+    traderId,
+    symbol: SYMBOL,
+    side: 'long',
+    quantity: 4,
+    entryPrice: 100,
+    exitPrice: 110,
+    leverage: 5,
+    grossPnl: 40,
+    entryFee: 0,
+    exitFee: 0.4,
+    fundingFee: 0,
+    closeReason: 'manual_partial',
+    openedAt,
+    closedAt: partialAt,
+    source: 'bot',
+    entryOrderId: null,
+    exitOrderId: '900002',
+    idempotent: false,
+  });
+
+  broker.userTrades = [
+    {
+      symbol: SYMBOL,
+      id: 101,
+      orderId: 900001,
+      side: 'BUY',
+      positionSide: 'BOTH',
+      price: '100',
+      qty: '10',
+      quoteQty: '1000',
+      realizedPnl: '0',
+      marginAsset: 'USDT',
+      commission: '1.0',
+      commissionAsset: 'USDT',
+      time: nowMs - 600_000,
+      maker: false,
+      buyer: true,
+    },
+    {
+      symbol: SYMBOL,
+      id: 102,
+      orderId: 900002,
+      side: 'SELL',
+      positionSide: 'BOTH',
+      price: '110',
+      qty: '4',
+      quoteQty: '440',
+      realizedPnl: '40',
+      marginAsset: 'USDT',
+      commission: '0.4',
+      commissionAsset: 'USDT',
+      time: nowMs - 300_000,
+      maker: false,
+      buyer: false,
+    },
+    {
+      symbol: SYMBOL,
+      id: 103,
+      orderId: 900003,
+      side: 'SELL',
+      positionSide: 'BOTH',
+      price: '105',
+      qty: '6',
+      quoteQty: '630',
+      realizedPnl: '30',
+      marginAsset: 'USDT',
+      commission: '0.6',
+      commissionAsset: 'USDT',
+      time: nowMs - 60_000,
+      maker: false,
+      buyer: false,
+    },
+  ];
+
+  const trader = buildTrader(broker, EMPTY_WAIT_RESPONSE);
+  await trader.runReconcile();
+  /* 第二次对账必须完全幂等 */
+  await trader.runReconcile();
+
+  const rows = tradeStore.list(traderId, 20);
+  assert.equal(rows.length, 2, `应恰有 1 笔 manual_partial + 1 笔尾仓补录，实得 ${rows.length} 笔`);
+  const partialRow = rows.find((r) => r.id === partial.id);
+  const remRow = rows.find((r) => r.id !== partial.id);
+  assert.ok(partialRow && remRow);
+  assert.equal(partialRow.quantity, 4, 'manual_partial 数量不得被整腿覆盖');
+  assert.equal(partialRow.pnl, 40, 'manual_partial 毛盈亏不得被整腿覆盖');
+  assert.equal(remRow.quantity, 6, '尾仓补录数量应为剩余 6 枚');
+  assert.ok(Math.abs(remRow.pnl - 30) < 1e-9, `尾仓补录毛盈亏应为 30，实得 ${remRow.pnl}`);
+  assert.ok(Math.abs(partialRow.fee + remRow.fee - 2.0) < 1e-9, '两笔合计手续费应精确等于整腿 2.0');
+});
+
+test('★★★ 按需取数多轮对话保留前序工具结果且透传 AbortSignal 给 model.chat', async () => {
+  const broker = new FakeBroker();
+  const seenCalls: Array<{ messages: Array<{ role: string; content: string }>; hasSignal: boolean }> = [];
+  let turn = 0;
+
+  const multiTurnModel: DecisionModel = {
+    complete: async () => {
+      throw new Error('should call chat when provided');
+    },
+    chat: async (messages, options) => {
+      turn += 1;
+      seenCalls.push({ messages: messages.map((m) => ({ ...m })), hasSignal: Boolean(options?.signal) });
+      if (turn === 1) {
+        return {
+          text: '<tool>{"name":"list_candidates","args":{}}</tool>',
+          latencyMs: 5,
+          usage: { promptTokens: 100, completionTokens: 20, cachedTokens: null, reasoningTokens: null },
+        };
+      }
+      if (turn === 2) {
+        return {
+          text: '<tool>{"name":"list_candidates","args":{}}</tool>',
+          latencyMs: 5,
+          usage: { promptTokens: 120, completionTokens: 20, cachedTokens: null, reasoningTokens: null },
+        };
+      }
+      return {
+        text: EMPTY_WAIT_RESPONSE,
+        latencyMs: 5,
+        usage: { promptTokens: 140, completionTokens: 20, cachedTokens: null, reasoningTokens: null },
+      };
+    },
+  };
+
+  await buildTrader(broker, '', multiTurnModel).runOnce();
+
+  assert.equal(seenCalls.length, 3, '应完成 1 次首问 + 2 次取数追问');
+  assert.ok(
+    seenCalls.every((c) => c.hasSignal),
+    '每次 model.chat 调用都必须透传 AbortSignal',
+  );
+  /* 第三次调用消息数应严格大于第二次（说明保留了第 1 轮工具结果而不是被覆盖） */
+  assert.ok(
+    seenCalls[2]!.messages.length > seenCalls[1]!.messages.length,
+    `第 3 轮消息应保留第 1 轮工具上下文：turn2=${seenCalls[1]!.messages.length}, turn3=${seenCalls[2]!.messages.length}`,
+  );
+  /* 任意相邻消息不得出现连续两个 user（会导致上游 400 或缓存失效） */
+  for (const call of seenCalls) {
+    for (let i = 1; i < call.messages.length; i += 1) {
+      assert.notEqual(
+        `${call.messages[i - 1]!.role}:${call.messages[i]!.role}`,
+        'user:user',
+        '不得构造连续两条 user 消息',
+      );
+    }
+  }
 });

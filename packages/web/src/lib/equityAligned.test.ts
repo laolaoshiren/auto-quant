@@ -116,11 +116,17 @@ test('★★★ 详情页的判据必须来自共享库（它曾是唯一的本�
    * 于是"模拟盘不校准"那条新判据只修了共享库、漏了这一页 ——
    * 而这一页正是用户报"卡片是 $0.00"的那一屏。
    *
-   * 现在它必须调共享实现，并把 `dryRun` 传进去。
+   * ⚠️ 2026-11-23 升级：从只传 `stats?.dryRun` 升级为传 `isDryRun`（由 `isPaperView()`
+   * 三级回落算出：运行时 `stats?.dryRun` → 持久化 `trader?.dryRun` → 进程级 `system?.dryRun`），
+   * 否则机器人停止后 `stats?.dryRun` 为 `null` 会把停机模拟盘误当实盘、用 `exchangeNet = 0` 清零。
    */
   assert.ok(
-    /const ledgerSuspect = isLedgerSuspect\(ledger, stats\?\.dryRun\)/.test(DETAIL),
-    '★ 详情页必须调共享库的 isLedgerSuspect 并传 dryRun（不能再有本地副本）',
+    /const isDryRun = isPaperView\(\{[\s\S]*?runtimeDryRun:\s*stats\?\.dryRun[\s\S]*?\}\)/.test(DETAIL),
+    '★ 详情页的 isDryRun 必须走 isPaperView() 三级回落（含 stats?.dryRun）',
+  );
+  assert.ok(
+    /const ledgerSuspect = isLedgerSuspect\(ledger, isDryRun\)/.test(DETAIL),
+    '★ 详情页必须调共享库的 isLedgerSuspect 并传三级回落的 isDryRun（不能再有本地副本）',
   );
   assert.ok(
     !/const ledgerSuspect = ledger !== null && Math\.abs\(ledger\.gap\) >= 0\.01/.test(DETAIL),

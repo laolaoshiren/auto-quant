@@ -140,10 +140,16 @@ export function TraderConfigModal({
 
   if (!trader) return null;
 
+  const usesModelPicker = trader.mode !== 'ai_team' && trader.mode !== 'jev';
+
   const save = async () => {
-    setBusy(true);
     setError(null);
     setBaselineWarning(null);
+    if (!isAiDriven(trader.mode) && strategyId === null) {
+      setError('固定策略模式必须选择一个策略。');
+      return;
+    }
+    setBusy(true);
     try {
       // Re-read only when the operator took the baseline over; otherwise the
       // stored value (or the server's own exchange read) stays authoritative.
@@ -157,7 +163,7 @@ export function TraderConfigModal({
          * 只是让请求体多一个永远不该变化的键。不发的语义是"别动它" —— 这正是
          * 服务端在 `undefined` 时的行为（`parsed.data` 里没这个键就不比较）。
          */
-        aiModelId,
+        ...(usesModelPicker ? { aiModelId } : {}),
         /*
          * AI 托管时 `strategyId` 是 `null` —— 传 `undefined` 让服务端**不动这个字段**
          * （它本来就是空的）。绝不能传一个数字：那等于又把机器人绑回一个策略，
@@ -239,15 +245,28 @@ export function TraderConfigModal({
             </div>
           </Field>
 
-          <Field label="AI 模型">
-            <Select value={aiModelId} onChange={(e) => setAiModelId(Number(e.target.value))}>
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.label}
-                </option>
-              ))}
-            </Select>
-          </Field>
+          {usesModelPicker ? (
+            <Field label="AI 模型">
+              <Select value={aiModelId} onChange={(e) => setAiModelId(Number(e.target.value))}>
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          ) : (
+            <Field
+              label="AI 模型"
+              hint={
+                trader.mode === 'jev'
+                  ? 'JEV 模式固定调用 magpie 网关的 jev-latest，不读「AI 模型」列表。'
+                  : 'AI 团队模式由 magpie 网关统一按角色调度，不读「AI 模型」列表。'
+              }
+            >
+              <div className="text-base text-ink-faint">由 magpie 网关配置管理</div>
+            </Field>
+          )}
 
           {/*
             **AI 驱动的模式（智能托管 / AI 团队 / JEV）都不显示策略选择器。**
@@ -265,7 +284,15 @@ export function TraderConfigModal({
             </Field>
           ) : (
             <Field label="策略">
-              <Select value={strategyId ?? ''} onChange={(e) => setStrategyId(Number(e.target.value))}>
+              <Select
+                value={strategyId ?? ''}
+                onChange={(e) => setStrategyId(e.target.value === '' ? null : Number(e.target.value))}
+              >
+                {(strategyId === null || !strategies.some((s) => s.id === strategyId)) && (
+                  <option value="" disabled>
+                    请选择策略
+                  </option>
+                )}
                 {strategies.map((strategy) => (
                   <option key={strategy.id} value={strategy.id}>
                     {strategy.name}

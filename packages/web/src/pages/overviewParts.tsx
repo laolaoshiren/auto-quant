@@ -233,6 +233,7 @@ export function TradersSnapshotTable({
   liveStatus,
   fleet,
   equityOf,
+  realizedOf,
   recentTrades,
   busyId,
   navigate,
@@ -249,14 +250,11 @@ export function TradersSnapshotTable({
    */
   fleet: FleetTotals;
   equityOf: (trader: TraderRow) => number;
+  /** 校准后的已实现净盈亏（与 `equityOf` 走同一套 `isLedgerSuspect` + `isPaperView` 判据）。 */
+  realizedOf: (trader: TraderRow) => number;
   recentTrades: { byTrader: Record<number, TradeRecord>; loading: boolean };
   busyId: number | null;
   navigate: NavigateFunction;
-  /*
-   * 这里原来还有 `runOnceBusyId` 与 `onRunOnce` —— 它们只服务于那个被删掉的
-   * 「立即运行」按钮。留一个没人用的 prop 会让下一个读这段代码的人以为
-   * "总览页能跑一轮"，而那正是被删掉的那件事。
-   */
   onStop: (trader: TraderRow) => void;
   onStart: (trader: TraderRow) => void;
   /** Rows that exist but are not rendered, so the footer link can say how many. */
@@ -307,8 +305,18 @@ export function TradersSnapshotTable({
             <tbody>
               {traders.map((trader) => {
                 const stats = statsMap[trader.id];
-                const status: TraderStatus = liveStatus[trader.id] ?? trader.status;
+                const live = liveStatus[trader.id];
+                const status: TraderStatus = live ?? trader.status;
+                const isLiveRunning =
+                  live !== null && live !== undefined
+                    ? live === 'running' || live === 'safe_mode'
+                    : trader.isRunning;
                 const equity = equityOf(trader);
+                const calibratedRealized = stats ? realizedOf(trader) : 0;
+                const calibratedReturnPercent =
+                  stats && trader.initialEquity > 0
+                    ? ((equity - trader.initialEquity) / trader.initialEquity) * 100
+                    : 0;
                 /*
                  * 这一行的账户上下文。
                  *
@@ -354,7 +362,7 @@ export function TradersSnapshotTable({
                       </div>
                     </td>
                     <td className="td px-2 py-2">
-                      <TraderStatusBadge status={status} live={trader.isRunning} />
+                      <TraderStatusBadge status={status} live={isLiveRunning} />
                       {trader.consecutiveFailures > 0 && (
                         /*
                          * ⚠️ 文案要短：状态列只有 9% 宽（768 下约 63px），
@@ -388,10 +396,9 @@ export function TradersSnapshotTable({
                         {stats ? fmtUsd(equity, 2) : '—'}
                       </div>
                       {stats && (
-                        /* 净领先、毛在 title 里：差额就是成本，而小账户上成本才是重点。
-                           总收益率与权益合成一格，因为它们是同一个故事。 */
-                        <div className={cn('num truncate text-xs', pnlColor(stats.totalReturnPercent))}>
-                          {fmtPercent(stats.totalReturnPercent)} · 净 {fmtUsdSigned(stats.realizedPnl, 2)}
+                        /* 与上方校准后的归属权益走同一套口径，避免同一格内数字自相矛盾。 */
+                        <div className={cn('num truncate text-xs', pnlColor(calibratedReturnPercent))}>
+                          {fmtPercent(calibratedReturnPercent)} · 净 {fmtUsdSigned(calibratedRealized, 2)}
                         </div>
                       )}
                     </td>
@@ -444,7 +451,7 @@ export function TradersSnapshotTable({
                           「正在启动中」，而界面上只看到一个红条，像"点了没反应"。
                           列表页（`TradersPage`）早就有这个分支，总览页漏了。
                         */}
-                        {trader.isRunning ? (
+                        {isLiveRunning ? (
                           <Button
                             small
                             variant="danger"
@@ -454,7 +461,7 @@ export function TradersSnapshotTable({
                           >
                             停止
                           </Button>
-                        ) : trader.status === 'starting' ? (
+                        ) : status === 'starting' ? (
                           <Button small variant="success" disabled title="启动中：服务端正在执行预检并拉起循环，状态会自动更新。">
                             启动中
                           </Button>

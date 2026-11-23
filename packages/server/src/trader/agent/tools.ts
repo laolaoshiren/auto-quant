@@ -331,6 +331,35 @@ export function validateArgs(
       continue;
     }
 
+    if (arg.type === 'object') {
+      /*
+       * 允许模型把对象参数以合法 JSON 对象字符串传入（例如 Gemini 对无固定
+       * properties 的对象参数退回 STRING、或 DSML 方言以字符串传 patch）：
+       * 只接受解析后确为纯对象（非 null / 非数组）的输入，其它字符串照常拒绝。
+       */
+      if (typeof given === 'string') {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(given);
+        } catch {
+          errors.push({ arg: name, why: `必须是 object，收到 string` });
+          continue;
+        }
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          errors.push({ arg: name, why: `必须是 object，收到 string` });
+          continue;
+        }
+        value[name] = parsed;
+        continue;
+      }
+      if (typeof given !== 'object' || Array.isArray(given)) {
+        errors.push({ arg: name, why: `必须是 object，收到 ${Array.isArray(given) ? 'array' : typeof given}` });
+        continue;
+      }
+      value[name] = given;
+      continue;
+    }
+
     if (typeof given !== arg.type) {
       errors.push({ arg: name, why: `必须是 ${arg.type}，收到 ${typeof given}` });
       continue;
@@ -723,8 +752,17 @@ export const AGENT_TOOL_SPECS: readonly ToolApiSpec[] = AGENT_TOOLS.map((tool) =
     const prop: Record<string, unknown> = { type: arg.type };
     if (arg.describe) prop.description = arg.describe;
     if (arg.enum) prop.enum = [...arg.enum];
-    if (arg.min !== undefined) prop.minimum = arg.min;
-    if (arg.max !== undefined) prop.maximum = arg.max;
+    /*
+     * JSON Schema 里字符串长度限制是 `minLength`/`maxLength`，数值范围才是
+     * `minimum`/`maximum`。对 string 输出 `minimum`/`maximum` 会被严格网关拒收。
+     */
+    if (arg.type === 'string') {
+      if (arg.min !== undefined) prop.minLength = arg.min;
+      if (arg.max !== undefined) prop.maxLength = arg.max;
+    } else {
+      if (arg.min !== undefined) prop.minimum = arg.min;
+      if (arg.max !== undefined) prop.maximum = arg.max;
+    }
     if (arg.default !== undefined) prop.default = arg.default;
     properties[name] = prop;
     if (arg.required) required.push(name);

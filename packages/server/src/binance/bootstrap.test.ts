@@ -100,3 +100,38 @@ test('★★ 实盘没有凭据时仍然 fail-closed，且不能谎报模拟资�
   assert.ok(credentials, '应当有「API 凭据」这一项');
   assert.equal(credentials.severity, 'error', '实盘没有凭据必须报错');
 });
+
+test('★★★ dryRun 连接跑带凭据 preflight 时，仍须实查 positionRisk 拦截双向持仓+已有持仓', async () => {
+  const conn = {
+    environment: 'production',
+    endpoints: { label: 'production', isTestnet: false },
+    rest: {
+      hasCredentials: true,
+      signedRequest: async (_method: string, path: string) => {
+        if (path === '/fapi/v2/positionRisk') return [{ symbol: 'BTCUSDT', positionAmt: '0.1' }];
+        return { canTrade: true, canWithdraw: false };
+      },
+    },
+    broker: {
+      isDryRun: true,
+      isHedgeMode: async () => true,
+      getPositions: async () => [],
+      getAccountState: async () => ({
+        equity: 1000,
+        walletBalance: 1000,
+        availableBalance: 900,
+        unrealizedPnl: 0,
+        marginUsed: 100,
+        openOrderMargin: 0,
+      }),
+    },
+    registry: { size: 500 },
+    clockOffsetMs: 5,
+  } as unknown as ExchangeConnection;
+
+  const checks = await preflight(conn, { requireCredentials: true });
+  const posMode = checks.find((c) => c.name === '持仓模式');
+  assert.ok(posMode);
+  assert.equal(posMode.severity, 'error', '双向持仓且存在真实持仓必须阻断');
+  assert.equal(posMode.blocking, true);
+});

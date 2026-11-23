@@ -99,18 +99,29 @@ export function buildBody(
    * 以 `tool_result` 内容块的形式回传。直接照抄 OpenAI 的 `role:'tool'`
    * 会被拒（`role: tool is not supported`）。
    */
-  const wireMessages: JsonObject[] = turns.map((m) => {
+  /*
+   * 连续多条 `role: 'tool'` 消息必须合并进紧跟 assistant 之后的**单条 `user` 消息**
+   * 的 `content[]` 里：Anthropic 要求所有对应的 `tool_result` 块集中在下一条 `user`
+   * turn，拆成多条连续 `user` turn 会被拒或打断 tool_use/tool_result 校验。
+   */
+  const wireMessages: JsonObject[] = [];
+  for (const m of turns) {
     if (m.role === 'tool') {
-      return {
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            tool_use_id: m.toolCallId ?? '',
-            content: m.content,
-          },
-        ],
+      const block: JsonObject = {
+        type: 'tool_result',
+        tool_use_id: m.toolCallId ?? '',
+        content: m.content,
       };
+      const prev = wireMessages[wireMessages.length - 1];
+      const prevContent = prev && prev['role'] === 'user' && Array.isArray(prev['content'])
+        ? (prev['content'] as JsonObject[])
+        : null;
+      if (prevContent !== null && prevContent[prevContent.length - 1]?.['type'] === 'tool_result') {
+        prevContent.push(block);
+      } else {
+        wireMessages.push({ role: 'user', content: [block] });
+      }
+      continue;
     }
     if (m.role === 'assistant' && m.toolCalls !== undefined && m.toolCalls.length > 0) {
       /*
@@ -120,18 +131,23 @@ export function buildBody(
       const blocks: JsonObject[] = [];
       if (m.content !== '') blocks.push({ type: 'text', text: m.content });
       for (const c of m.toolCalls) {
-        let input: unknown = {};
+        let input: JsonObject = {};
         try {
-          input = JSON.parse(c.arguments);
+          const parsed: unknown = JSON.parse(c.arguments);
+          /* Anthropic 严格要求 `tool_use.input` 是 JSON 对象（不能是数组/原始值/null）。 */
+          if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            input = parsed as JsonObject;
+          }
         } catch {
           /* 参数不是合法 JSON：留空对象，让模型在下一轮看到"工具没收到参数"而不是整轮炸掉。 */
         }
         blocks.push({ type: 'tool_use', id: c.id, name: c.name, input });
       }
-      return { role: 'assistant', content: blocks };
+      wireMessages.push({ role: 'assistant', content: blocks });
+      continue;
     }
-    return { role: m.role, content: m.content };
-  });
+    wireMessages.push({ role: m.role, content: m.content });
+  }
 
   const body: JsonObject = {
     model,

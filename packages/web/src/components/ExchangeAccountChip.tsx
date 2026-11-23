@@ -24,6 +24,12 @@ const EXCHANGE_SHORT: Record<string, string> = {
   gate: 'Gate',
 };
 
+/** 交易所短名：供芯片与下拉选项统一使用，避免多处硬编码。 */
+export function exchangeShortLabel(exchange: string | undefined): string {
+  if (!exchange) return '未知所';
+  return EXCHANGE_SHORT[exchange] ?? exchange;
+}
+
 export interface ExchangeAccountLike {
   exchange?: string;
   label?: string;
@@ -48,7 +54,7 @@ export function ExchangeAccountChip({
     );
   }
   const exchange = account.exchange ?? '';
-  const short = EXCHANGE_SHORT[exchange] ?? exchange ?? '未知所';
+  const short = exchangeShortLabel(exchange);
   const testnet = account.testnet === true;
   return (
     <span className={`flex min-w-0 items-center gap-1 ${className}`}>

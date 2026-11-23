@@ -24,7 +24,7 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 
 import { checkResolvedAddress, checkOutboundUrl } from './urlGuard.js';
-import { guardedDispatcher } from './http.js';
+import { guardedDispatcher, literalHostUrl } from './http.js';
 import { Agent, fetch as undiciFetch } from 'undici';
 
 /* -------------------------------------------------------------------------- */
@@ -175,4 +175,26 @@ test('★★ 连接层校验用的是 undici 的 Agent（真的是连接层，�
     guardedDispatcher([]) instanceof Agent,
     '★ 必须是 undici Agent —— 只有它的 `connect.lookup` 能在建立连接前拿到解析结果',
   );
+});
+
+test('★★ 连接层 connect.lookup 处理裸 IPv6 字面量时自动补方括号，不因 URL 解析报错误判', () => {
+  /*
+   * 防 bug：undici 传给 `connect.lookup` 的 IPv6 字面量不带方括号（如 `::1` 或
+   * `2606:4700:4700::1111`）。旧代码直接拼 `http://${hostname}/` 给 `new URL()`
+   * 会抛 Invalid URL，导致连合法公网 IPv6 或白名单放行的 `::1` 都被误拒。
+   */
+  assert.equal(literalHostUrl('::1'), 'http://[::1]/');
+  assert.equal(literalHostUrl('[::1]'), 'http://[::1]/');
+  assert.equal(literalHostUrl('2606:4700:4700::1111'), 'http://[2606:4700:4700::1111]/');
+  assert.equal(literalHostUrl('api.example.com'), 'http://api.example.com/');
+
+  const publicV6 = checkOutboundUrl(literalHostUrl('2606:4700:4700::1111'), []);
+  assert.equal(publicV6.allowed, true, '★ 合法公网 IPv6 补方括号后必须放行');
+
+  const blockedLoopback = checkOutboundUrl(literalHostUrl('::1'), []);
+  assert.equal(blockedLoopback.allowed, false, '未放行时 ::1 必须被拒绝');
+  assert.match(blockedLoopback.reason ?? '', /回环/, '应命中 IPv6 回环规则，而非 URL 解析失败');
+
+  const allowedLoopback = checkOutboundUrl(literalHostUrl('::1'), ['::1']);
+  assert.equal(allowedLoopback.allowed, true, '★ 白名单放行 ::1 时必须通过校验');
 });

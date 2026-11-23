@@ -1,7 +1,7 @@
 import { getProvider, type LlmProviderId, type LlmProviderDescriptor } from '@aq/shared';
 import { createLogger } from '../logger.js';
 import { maskSecret } from '../crypto/vault.js';
-import { LlmError, emptyCompletionError, isRetryable, timeoutError } from './errors.js';
+import { LlmError, abortError, emptyCompletionError, isRetryable, timeoutError } from './errors.js';
 import { executeJsonRequest, executeStreamRequest } from './http.js';
 import { nextReasoningEffort } from './effortFallback.js';
 import * as openai from './openaiCompatible.js';
@@ -231,8 +231,45 @@ export interface ChatCallOptions {
   toolChoice?: 'auto' | 'none' | 'required';
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * 支持 `AbortSignal` 的退避等待：取消时立即清理定时器并抛出 `abortError`，
+ * 避免重试退避期间无视取消信号白等数十秒并泄漏 timer。
+ */
+function sleep(ms: number, provider: string, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError(provider, signal.reason));
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(abortError(provider, signal?.reason));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function badRequestDetail(error: LlmError): string {
+  const parts = [error.message];
+  if (typeof error.body === 'string') {
+    parts.push(error.body);
+  } else if (error.body !== null && error.body !== undefined) {
+    try {
+      parts.push(JSON.stringify(error.body));
+    } catch {
+      /* ignore unserializable error body */
+    }
+  }
+  return parts.join(' ');
+}
+
+function isReasoningEffortBadRequest(error: LlmError): boolean {
+  return /\b(?:reasoning_effort|reasoning|effort)\b/i.test(badRequestDetail(error));
+}
+
+function isStreamBadRequest(error: LlmError): boolean {
+  return /\b(?:stream_options|stream|streaming|include_usage|sse)\b/i.test(badRequestDetail(error));
 }
 
 /**
@@ -515,6 +552,9 @@ export class LlmClient {
     const totalBudgetMs = Math.min(this.timeoutMs * (this.maxRetries + 1), MAX_TOTAL_CHAT_MS);
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+      if (options.signal?.aborted) {
+        throw abortError(this.provider, options.signal.reason);
+      }
       /*
        * ⚠️ **在发起下一次尝试【之前】检查预算**（而不是在失败之后）——
        * 前者省掉一次注定超时的请求与它的退避等待，后者会把总时长再撑长一整轮。
@@ -587,7 +627,8 @@ export class LlmClient {
         if (
           this.reasoningEffort !== undefined &&
           error instanceof LlmError &&
-          error.kind === 'bad_request'
+          error.kind === 'bad_request' &&
+          isReasoningEffortBadRequest(error)
         ) {
           const dropped = this.reasoningEffort;
           this.reasoningEffort = undefined;
@@ -626,15 +667,17 @@ export class LlmClient {
          * 一个已经拒绝过流式的端点，下一轮再试只会再被拒一次。
          * 这个标记活在客户端实例上，而实例是每个机器人一个、随进程存活。
          *
-         * 注意：这里的 `continue` **会消耗一次重试预算**（见上面那条注释），
-         * 所以它只在 `maxRetries >= 1` 时才有第二次机会 —— 而这正是
-         * 本项目所有 provider 的默认值（2–3）。
+         * ⚠️ 必须检查错误消息确与 `stream`/`stream_options` 相关，避免把上下文超长或
+         * schema 错误误判成"不支持流式"而永久关闭流式（退回非流式会重新触发 524）。
          */
         if (
           this.descriptor.openAiCompatible &&
+          options.probe !== true &&
+          !this.usesAnthropicProtocol() &&
           !this.streamDisabled &&
           error instanceof LlmError &&
-          error.kind === 'bad_request'
+          error.kind === 'bad_request' &&
+          isStreamBadRequest(error)
         ) {
           this.streamDisabled = true;
           log.warn(
@@ -686,7 +729,7 @@ export class LlmClient {
           ...detail,
           retryAfterMs,
         });
-        await sleep(delayMs);
+        await sleep(delayMs, this.provider, options.signal);
       }
     }
 

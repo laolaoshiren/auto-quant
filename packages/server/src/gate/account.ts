@@ -79,9 +79,19 @@ export function mapPosition(position: GateFuturesPosition, contract: GateFutures
   const quantity = Math.abs(size) * (multiplier > 0 ? multiplier : 1);
   const entryPrice = num(position.entry_price);
   const markPrice = num(position.mark_price);
-  const leverage = num(position.leverage) > 0 ? num(position.leverage) : 1;
+  /*
+   * ⚠️ **Gate 全仓模式下 `position.leverage === "0"`**（2026-11-23 修复）。
+   *
+   * Gate API v4 约定：`leverage > 0` 是逐仓杠杆；`leverage === "0"` 表示全仓，
+   * 实际杠杆上限放在 `cross_leverage_limit`。原来只读 `position.leverage` →
+   * 全仓仓位一律退化成 `1x`，导致 `marginUsed` 与收益率错算 10 倍。
+   */
+  const rawLeverage = num(position.leverage);
+  const crossLeverage = num(position.cross_leverage_limit);
+  const leverage = rawLeverage > 0 ? rawLeverage : crossLeverage > 0 ? crossLeverage : 1;
   const notional = quantity * markPrice;
   const marginUsedRaw = position.margin === undefined ? NaN : num(position.margin);
+  const marginUsed = Number.isFinite(marginUsedRaw) && marginUsedRaw > 0 ? marginUsedRaw : notional / leverage;
   const unrealizedPnl = num(position.unrealised_pnl);
   /*
    * 收益率：Gate 的 `unrealised_pnl_rate` 是**百分比字符串**（"2.5" = 2.5%）。
@@ -89,8 +99,16 @@ export function mapPosition(position: GateFuturesPosition, contract: GateFutures
    */
   const rateRaw = position.unrealised_pnl_rate;
   const unrealizedPnlPercent =
-    rateRaw === undefined || rateRaw === '' ? (marginUsedRaw > 0 ? (unrealizedPnl / marginUsedRaw) * 100 : 0) : num(rateRaw);
+    rateRaw === undefined || rateRaw === '' ? (marginUsed > 0 ? (unrealizedPnl / marginUsed) * 100 : 0) : num(rateRaw);
   const liq = position.liq_price === undefined || position.liq_price === '' ? 0 : num(position.liq_price);
+  const marginType: 'cross' | 'isolated' =
+    position.pos_margin_mode === 'isolated'
+      ? 'isolated'
+      : position.pos_margin_mode === 'cross'
+        ? 'cross'
+        : rawLeverage === 0
+          ? 'cross'
+          : 'isolated';
   return {
     symbol: gateContractToSymbol(position.contract),
     side: size > 0 ? 'long' : 'short',
@@ -101,13 +119,9 @@ export function mapPosition(position: GateFuturesPosition, contract: GateFutures
     liquidationPrice: liq > 0 ? liq : null,
     unrealizedPnl,
     unrealizedPnlPercent,
-    marginUsed: Number.isFinite(marginUsedRaw) && marginUsedRaw > 0 ? marginUsedRaw : notional / leverage,
+    marginUsed,
     notional,
-    /*
-     * Gate 的合约仓位默认全仓（cross）；逐仓要显式设置且响应里未必回传。
-     * 这里如实给 `cross` —— 不要假装知道它不是。
-     */
-    marginType: 'cross',
+    marginType,
   };
 }
 

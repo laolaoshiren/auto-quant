@@ -123,3 +123,72 @@ test('★ 调用方取消仍然不重试 —— 修复不得把取消复活成�
     globalThis.fetch = original;
   }
 });
+
+test('★★★ 非流式：读响应体中途触发 AbortSignal.timeout 必须判为可重试 timeout 而非不可重试 abort', async () => {
+  /*
+   * 防 bug：`executeJsonRequest` 读 `response.text()` 抛错时旧代码只看 `options.signal?.aborted`，
+   * 把 `AbortSignal.timeout` 触发的读体超时误判成调用方主动取消（`abortError`, retryable=false）。
+   */
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
+    const stream = new ReadableStream({
+      start(c) {
+        init?.signal?.addEventListener('abort', () => {
+          c.error(init.signal?.reason ?? new Error('timeout'));
+        });
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof globalThis.fetch;
+  const keepalive = setInterval(() => {}, 10);
+  try {
+    await assert.rejects(
+      () => executeJsonRequest('custom', req, { signal: AbortSignal.timeout(25), timeoutMs: 25 }),
+      (err: unknown) => {
+        assert.ok(err instanceof LlmError, '必须是 LlmError');
+        assert.equal(err.kind, 'timeout', '★ 读体超时必须归类为 timeout');
+        assert.equal(isRetryable(err), true, '★ 读体超时必须可重试');
+        return true;
+      },
+    );
+  } finally {
+    clearInterval(keepalive);
+    globalThis.fetch = original;
+  }
+});
+
+test('★★ 流式：非 2xx 提前抛出时必须清理 idleTimer，不泄漏悬空定时器', async () => {
+  /*
+   * 防 bug：旧代码在 `if (!response.ok)` 分支直接 throw，未走清理 `idleTimer` 的 finally，
+   * 导致每次流式非 2xx 错误都会泄漏一个长达 180s 的 timer。
+   */
+  const origSetTimeout = globalThis.setTimeout;
+  const origClearTimeout = globalThis.clearTimeout;
+  const created = new Set<unknown>();
+  const cleared = new Set<unknown>();
+  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+    const handle = origSetTimeout(...args);
+    created.add(handle);
+    return handle;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((handle?: Parameters<typeof clearTimeout>[0]) => {
+    cleared.add(handle);
+    return origClearTimeout(handle);
+  }) as typeof clearTimeout;
+
+  try {
+    await withFetch(
+      new Response('{"error":{"message":"bad"}}', { status: 400, headers: { 'content-type': 'application/json' } }),
+      async () => {
+        await assert.rejects(() => executeStreamRequest('custom', req, {}), LlmError);
+      },
+    );
+    assert.ok(created.size >= 1, '前置：确实创建了 idleTimer');
+    for (const h of created) {
+      assert.ok(cleared.has(h), '★ 非 2xx 返回后 idleTimer 必须被 clearTimeout');
+    }
+  } finally {
+    globalThis.setTimeout = origSetTimeout;
+    globalThis.clearTimeout = origClearTimeout;
+  }
+});

@@ -88,40 +88,49 @@ function TooltipPanel({
   );
 }
 
-/** Which figure the tooltip leads with: the curve's own domain, or the whole account. */
-interface TooltipOptions {
+interface EquityTooltipProps {
+  active?: boolean;
+  payload?: Array<{ payload?: EquityPoint }>;
   primaryLabel: string;
-  primaryValue: (point: EquityPoint) => string;
-  primaryTone?: (point: EquityPoint) => string;
+  primaryDigits: number;
   /** 当前外观的提示框底色（`ink.surface`），由调用方透传进来。 */
   surface: string;
-  extra?: (point: EquityPoint) => TooltipRow | null;
+  showUnrealized: boolean;
 }
 
-function buildTooltip(options: TooltipOptions) {
-  return function EquityTooltip({
-    active,
-    payload,
-  }: {
-    active?: boolean;
-    payload?: Array<{ payload?: EquityPoint }>;
-  }) {
-    if (!active) return null;
-    const point = payload?.[0]?.payload;
-    if (!point) return null;
-    const rows: TooltipRow[] = [
-      { label: options.primaryLabel, value: options.primaryValue(point), tone: options.primaryTone?.(point) },
-    ];
-    const extra = options.extra?.(point);
-    if (extra) rows.push(extra);
-    return (
-      <TooltipPanel
-        rows={rows}
-        footer={new Date(point.t).toLocaleString('en-GB', { hour12: false })}
-        surface={options.surface}
-      />
-    );
-  };
+/**
+ * 模块级稳定 Tooltip 组件：通过 props 接收配置而非在渲染体内动态工厂新建组件类型，
+ * 避免每次轮询重渲染都把 Tooltip 子树反复卸载重建。
+ */
+function EquityTooltip({
+  active,
+  payload,
+  primaryLabel,
+  primaryDigits,
+  surface,
+  showUnrealized,
+}: EquityTooltipProps) {
+  if (!active) return null;
+  const point = payload?.[0]?.payload;
+  if (!point) return null;
+  const rows: TooltipRow[] = [
+    { label: primaryLabel, value: `${equityAxisFormatter(point.equity)} USDT`, tone: 'text-ink-hi' },
+  ];
+  if (showUnrealized) {
+    const unrealized = point.unrealizedPnl ?? 0;
+    rows.push({
+      label: '浮动盈亏',
+      value: signed(unrealized, primaryDigits),
+      tone: unrealized >= 0 ? 'text-up' : 'text-down',
+    });
+  }
+  return (
+    <TooltipPanel
+      rows={rows}
+      footer={new Date(point.t).toLocaleString('en-GB', { hour12: false })}
+      surface={surface}
+    />
+  );
 }
 
 /**
@@ -231,20 +240,6 @@ export function EquityCurveChart({
    */
   const ticks = axisTicks(points, range);
 
-  const TooltipContent = buildTooltip({
-    primaryLabel,
-    primaryValue: (point) => `${equityAxisFormatter(point.equity)} USDT`,
-    primaryTone: () => 'text-ink-hi',
-    surface: ink.surface,
-    extra: showUnrealized
-      ? (point) => ({
-          label: '浮动盈亏',
-          value: signed(point.unrealizedPnl ?? 0, primaryDigits),
-          tone: (point.unrealizedPnl ?? 0) >= 0 ? 'text-up' : 'text-down',
-        })
-      : undefined,
-  });
-
   return (
     <ResponsiveContainer width="100%" height={height}>
       {/* `left: 0` and no axis title: the y labels already carry the unit's
@@ -288,7 +283,14 @@ export function EquityCurveChart({
         />
 
         <Tooltip
-          content={<TooltipContent />}
+          content={
+            <EquityTooltip
+              primaryLabel={primaryLabel}
+              primaryDigits={primaryDigits}
+              surface={ink.surface}
+              showUnrealized={showUnrealized}
+            />
+          }
           cursor={<Cursor color={ink.rule} />}
           /* One point at a time: a band highlight over a single series just
              dims the curve the user is trying to read. */

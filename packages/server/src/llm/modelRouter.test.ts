@@ -874,3 +874,68 @@ test('★★★ 403 把同一供应商的其它模型一起冷掉（不再每轮
   const result = await router.callByTier('T3_deep', [{ role: 'user', content: 'hi' }], { baseMaxTokens: 100 });
   assert.ok(typeof result.text === 'string' && result.text.length > 0, '★ 路由仍能产出结果');
 });
+
+test('★★★ 原生 tool_calls 且正文为空时不得判为空内容失败或拉黑健康模型', async () => {
+  /*
+   * 防 bug：OpenAI/Anthropic/Gemini 原生 function calling 正常回复常见
+   * `content: null` (`text: ""`) + `toolCalls: [...]`。旧实现只判断
+   * `result.text.trim().length === 0`，把正常工具调用误判为空回复、拉黑首选模型并降级。
+   */
+  const health = new ModelHealthRegistry();
+  const called: string[] = [];
+  const router = new ModelRouter({
+    health,
+    discoveredLadders: { T3_deep: ['prov/a', 'prov/b'] },
+    call: async (modelId) => {
+      called.push(modelId);
+      return {
+        text: '',
+        latencyMs: 12,
+        usage: { promptTokens: 10, completionTokens: 5 },
+        finishReason: 'tool_calls',
+        toolCalls: [{ id: 'call_1', name: 'get_performance', arguments: '{"window":"7d"}' }],
+      };
+    },
+  });
+
+  const result = await router.callByTier('T3_deep', [{ role: 'user', content: '查绩效' }], { baseMaxTokens: 512 });
+  assert.deepEqual(called, ['prov/a'], '★ 命中首候选即应直接返回，不触发降级');
+  assert.equal(result.modelId, 'prov/a');
+  assert.equal(result.toolCalls?.length, 1);
+  assert.equal(result.toolCalls?.[0]?.name, 'get_performance');
+  assert.equal(health.isAvailable('prov/a'), true, '★ 健康模型不得被记录失败');
+});
+
+test('★★ 空内容降级到下一个候选时重置 budgetBoosted 并计入 fallbackCount', async () => {
+  /*
+   * 防 bug：候选 A 触发 length 截断重试设置 `budgetBoosted` 后再次返回空内容并降级到
+   * 候选 B 时，旧代码没有重置 `budgetBoosted` 也没递增 `fallbackCount`：
+   *   1) 候选 B 首次调用就继承了 A 的放大预算，且 B 自己遇 length 截断时无法再原地重试；
+   *   2) `fallbackCount` 始终为 0，违背降级计数语义。
+   */
+  const calls: Array<{ model: string; maxTokens: number }> = [];
+  const router = new ModelRouter({
+    discoveredLadders: { T1_fast: ['prov/m1', 'prov/m2'] },
+    call: async (modelId, _msgs, opts) => {
+      calls.push({ model: modelId, maxTokens: opts.maxTokens });
+      if (modelId === 'prov/m1') {
+        return { text: '', latencyMs: 5, usage: { promptTokens: 1, completionTokens: 0 }, finishReason: 'length' };
+      }
+      /* 候选 B 首次也被截断，应当用正常预算调用、并且能触发一次它自己的放大重试 */
+      if (calls.filter((c) => c.model === 'prov/m2').length === 1) {
+        return { text: '', latencyMs: 5, usage: { promptTokens: 1, completionTokens: 0 }, finishReason: 'length' };
+      }
+      return { text: 'ok', latencyMs: 5, usage: { promptTokens: 1, completionTokens: 2 }, finishReason: 'stop' };
+    },
+  });
+
+  const result = await router.callByTier('T1_fast', [{ role: 'user', content: 'hi' }], { baseMaxTokens: 512 });
+  assert.equal(result.modelId, 'prov/m2');
+  assert.equal(result.text, 'ok');
+  const m1Calls = calls.filter((c) => c.model === 'prov/m1');
+  const m2Calls = calls.filter((c) => c.model === 'prov/m2');
+  assert.equal(m1Calls.length, 2, '★ m1 首次 + 1 次放大重试');
+  assert.equal(m2Calls.length, 2, '★ m2 必须拿到自己独立的首次 + 1 次放大重试（budgetBoosted 已重置）');
+  assert.equal(m2Calls[0]!.maxTokens, m1Calls[0]!.maxTokens, '★ m2 首次预算必须回到正常值而非继承 m1 放大值');
+  assert.ok(m2Calls[1]!.maxTokens > m2Calls[0]!.maxTokens, '★ m2 重试预算应当高于其首次预算');
+});

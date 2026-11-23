@@ -743,7 +743,7 @@ function SampleReport({ sample }: { sample: StrategyCheckSample }) {
                       <span>止损 {decision.stopLoss ?? '无'}</span>
                       <span>止盈 {decision.takeProfit ?? '无'}</span>
                       <span>
-                        置信度 {decision.confidence === null ? '未给出' : decision.confidence}
+                        置信度 {decision.confidence == null ? '未给出' : decision.confidence}
                       </span>
                     </div>
                     {reason && <p className="mt-1 text-xs leading-relaxed text-warn">{reason}</p>}
@@ -791,13 +791,24 @@ function MiniStat({ label, value, tone }: { label: string; value: string; tone?:
 }
 
 /** Small trigger button so the list page and the editor share one look. */
-export function StrategyCheckButton({ onClick, small }: { onClick: () => void; small?: boolean }) {
+export function StrategyCheckButton({
+  onClick,
+  small,
+  disabled,
+  title,
+}: {
+  onClick: () => void;
+  small?: boolean;
+  disabled?: boolean;
+  title?: string;
+}) {
   return (
     <Button
       small={small}
       variant="primary"
+      disabled={disabled}
       onClick={onClick}
-      title="用真实模型跑一遍完整决策链路，验证策略是否能正常工作（不会下单）"
+      title={title ?? '用真实模型跑一遍完整决策链路，验证策略是否能正常工作（不会下单）'}
     >
       <ShieldCheck aria-hidden className="h-3.5 w-3.5" />
       策略体检

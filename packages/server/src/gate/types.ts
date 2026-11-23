@@ -69,8 +69,10 @@ export interface GateFuturesPosition {
   entry_price: string;
   /** 标记价。 */
   mark_price: string;
-  /** 杠杆（字符串）。 */
+  /** 杠杆（字符串；Gate 全仓模式下为 `"0"`，实际杠杆上限在 `cross_leverage_limit`）。 */
   leverage: string;
+  /** 全仓模式下的杠杆上限（仅当 `leverage === "0"` 时生效）。 */
+  cross_leverage_limit?: string;
   /** 强平价。 */
   liq_price?: string;
   /** 未实现盈亏。 */
@@ -79,6 +81,8 @@ export interface GateFuturesPosition {
   margin?: string;
   /** 仓位模式：`single` 单向 / `dual_long|dual_short` 双向。 */
   mode?: string;
+  /** 保证金模式：`cross` 全仓 / `isolated` 逐仓（部分账户/版本返回）。 */
+  pos_margin_mode?: string;
   /** 未实现盈亏收益率（Gate 给的百分比字符串）。 */
   unrealised_pnl_rate?: string;
 }
@@ -98,7 +102,7 @@ export interface GateFuturesOrder {
   price: string;
   /** 成交均价。 */
   fill_price?: string;
-  /** 状态：`open` / `finished` / `cancelled`。 */
+  /** 状态：Gate v4 实际只有 `open` / `finished`（撤单也是 `finished` + `finish_as='cancelled'`）。 */
   status: string;
   /** 是否只减仓。 */
   is_reduce_only?: boolean;
@@ -112,6 +116,8 @@ export interface GateFuturesOrder {
   finish_time?: string;
   /** 触发条件（价格保护单才有）。 */
   trigger?: {
+    strategy_type?: number;
+    price_type?: number;
     price: string;
     rule?: number;
     expiration?: number;
@@ -153,12 +159,14 @@ export interface GateFuturesFill {
 
 /** 资金流水（`GET /futures/usdt/account_book`）。 */
 export interface GateFuturesAccountBook {
+  id?: number | string;
   time: number;
   /** 变动金额（字符串，有符号）。 */
   change: string;
-  /** 流水类型：`fund` / `realised_pnl` / `fee` / `funding` / `auto_deleveraging` / ... */
+  /** 流水类型（Gate v4 官方枚举）：`dnw`(出入金) / `pnl`(已实现盈亏) / `fee`(手续费) / `fund`(资金费) / `refr` / `auto_deleveraging` */
   type: string;
   contract?: string;
+  text?: string;
   /** 余额快照。 */
   balance?: string;
 }

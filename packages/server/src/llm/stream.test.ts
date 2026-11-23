@@ -105,3 +105,65 @@ test('空流返回一个"没有内容"的形状，而不是 null', () => {
   assert.equal(body['choices'][0]['message']['content'], '');
   assert.equal(body['choices'][0]['finish_reason'], null);
 });
+
+test('★★★ 后续分片里的空串 id/name/type 不得覆盖首片已拿到的工具元信息', () => {
+  /*
+   * 防 bug：部分 OpenAI 兼容网关在续传 arguments 的 chunk 中会带 `"id": ""`,
+   * `"name": ""`。旧代码无条件覆盖，把已有工具名清空，导致下游 `extractToolCalls`
+   * 按 `name === ''` 静默丢弃整次工具调用。
+   */
+  const body = mergeOpenAiStreamChunks([
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_99","type":"function","function":{"name":"set_params","arguments":"{\\"a\\":"}}]},"finish_reason":null}]}',
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"","type":"","function":{"name":"","arguments":"1}"}}]},"finish_reason":"tool_calls"}]}',
+  ]) as Record<string, any>;
+
+  const calls = body['choices'][0]['message']['tool_calls'];
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]['id'], 'call_99', '★ 空串 id 不得覆盖已有 id');
+  assert.equal(calls[0]['type'], 'function', '★ 空串 type 不得覆盖已有 type');
+  assert.equal(calls[0]['function']['name'], 'set_params', '★ 空串 name 不得覆盖已有 name');
+  assert.equal(calls[0]['function']['arguments'], '{"a":1}');
+});
+
+test('★★ 工具名分片发送时应拼接，重复发送全名时不重复拼接', () => {
+  const splitBody = mergeOpenAiStreamChunks([
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"get_","arguments":""}}]},"finish_reason":null}]}',
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"performance","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}',
+  ]) as Record<string, any>;
+  assert.equal(splitBody['choices'][0]['message']['tool_calls'][0]['function']['name'], 'get_performance');
+
+  const repeatedBody = mergeOpenAiStreamChunks([
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"finish","arguments":"{\\"s\\":"}}]},"finish_reason":null}]}',
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"finish","arguments":"\\"ok\\"}"}}]},"finish_reason":"tool_calls"}]}',
+  ]) as Record<string, any>;
+  assert.equal(repeatedBody['choices'][0]['message']['tool_calls'][0]['function']['name'], 'finish');
+});
+
+test('★★★ 缺 index 的并行工具调用按新 id 或数组下标分槽，不得全挤进槽 0 拼坏 JSON', () => {
+  /*
+   * 防 bug：部分网关流式返回 `tool_calls` 不带 `index` 字段。旧代码一律回落到 `index = 0`，
+   * 导致并行两次工具调用的 `arguments` 被拼成 `{"a":1}{"b":2}` 这种坏 JSON。
+   */
+  const acrossChunks = mergeOpenAiStreamChunks([
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","function":{"name":"get_performance","arguments":"{\\"window\\":"}}]},"finish_reason":null}]}',
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"","function":{"name":"","arguments":"\\"7d\\"}"}}]},"finish_reason":null}]}',
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","function":{"name":"get_lessons","arguments":"{\\"limit\\":5}"}}]},"finish_reason":"tool_calls"}]}',
+  ]) as Record<string, any>;
+
+  const callsA = acrossChunks['choices'][0]['message']['tool_calls'];
+  assert.equal(callsA.length, 2, '★ 新 id 必须分配独立槽位');
+  assert.equal(callsA[0]['id'], 'call_a');
+  assert.equal(callsA[0]['function']['name'], 'get_performance');
+  assert.equal(callsA[0]['function']['arguments'], '{"window":"7d"}');
+  assert.equal(callsA[1]['id'], 'call_b');
+  assert.equal(callsA[1]['function']['name'], 'get_lessons');
+  assert.equal(callsA[1]['function']['arguments'], '{"limit":5}');
+
+  const sameChunkNoId = mergeOpenAiStreamChunks([
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"name":"a","arguments":"{\\"x\\":1}"}},{"function":{"name":"b","arguments":"{\\"y\\":2}"}}]},"finish_reason":"tool_calls"}]}',
+  ]) as Record<string, any>;
+  const callsB = sameChunkNoId['choices'][0]['message']['tool_calls'];
+  assert.equal(callsB.length, 2, '★ 同 chunk 缺 index 且无 id 时应按数组下标分槽');
+  assert.equal(callsB[0]['function']['arguments'], '{"x":1}');
+  assert.equal(callsB[1]['function']['arguments'], '{"y":2}');
+});

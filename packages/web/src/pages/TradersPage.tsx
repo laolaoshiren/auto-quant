@@ -1,10 +1,11 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ModeBadge } from '../components/TeamRoster';
 import { Link, useNavigate } from 'react-router-dom';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { ArrowUpRight, Loader2, MoreHorizontal, Pencil, Play, Plus, Square, Trash2 } from 'lucide-react';
 import type { EquitySnapshot, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
+import { isPaperView } from '../lib/glossary';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries, type TraderSummary } from '../lib/summaries';
 import { attributedEquityOf, fleetTotals, isLedgerSuspect, realizedPnlOf } from '../lib/fleetTotals';
@@ -39,6 +40,9 @@ import {
  * rather than losing rows silently.
  */
 const MAX_ROWS = 100;
+
+/** 乐观「启动中」状态的最长兜底时长（30 秒），防止后端静默回落时按钮永久卡死。 */
+const OPTIMISTIC_START_TIMEOUT_MS = 30_000;
 
 /** Which destructive action a confirmation dialog is currently guarding. */
 type PendingAction = { kind: 'stop' | 'delete'; trader: TraderRow } | null;
@@ -81,7 +85,8 @@ export function TradersPage() {
   const tradersQuery = usePolled((signal) => api.traders(signal), {
     intervalMs: socketOpen ? 8000 : 4000,
   });
-  const traders = tradersQuery.data ?? [];
+  const traders = useMemo(() => tradersQuery.data ?? [], [tradersQuery.data]);
+  const reloadTraders = tradersQuery.reload;
   /*
    * 用户 2026-11-11：「列表页要能清楚看到机器人使用的是什么交易所什么钱包
    * （有测试网的也要清楚看到）」。账户信息单独拉一份（慢轮询：它几乎不变）。
@@ -154,7 +159,9 @@ export function TradersPage() {
    * 以为没点上、再点一次（服务端会拒，但界面看起来像没反应）。
    * 所以点击的一瞬间就把这一行标记为"启动中"，并轮询到服务端给出结论。
    */
-  const [optimisticStarting, setOptimisticStarting] = useState<ReadonlySet<number>>(new Set());
+  const [optimisticStarting, setOptimisticStarting] = useState<
+    ReadonlyMap<number, { startedAt: number; sawStarting: boolean }>
+  >(() => new Map());
   const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -186,7 +193,7 @@ export function TradersPage() {
     try {
       if (kind === 'stop') await api.stopTrader(trader.id);
       else await api.deleteTrader(trader.id);
-      await tradersQuery.reload();
+      tradersQuery.reload();
       refreshSystem();
       setPending(null);
     } catch (err) {
@@ -209,12 +216,17 @@ export function TradersPage() {
    */
   const startNow = async (trader: TraderRow) => {
     if (optimisticStarting.has(trader.id)) return; /* 防重复点击 */
-    setOptimisticStarting((prev) => new Set(prev).add(trader.id));
+    setOptimisticStarting((prev) => {
+      const next = new Map(prev);
+      next.set(trader.id, { startedAt: Date.now(), sawStarting: false });
+      return next;
+    });
     setBusyId(trader.id);
     setActionError(null);
     const clearOptimistic = () =>
       setOptimisticStarting((prev) => {
-        const next = new Set(prev);
+        if (!prev.has(trader.id)) return prev;
+        const next = new Map(prev);
         next.delete(trader.id);
         return next;
       });
@@ -228,7 +240,7 @@ export function TradersPage() {
             (blocking.map((check) => check.name).join('、') || result.error || '启动被拒绝。'),
         );
       }
-      await tradersQuery.reload();
+      reloadTraders();
       refreshSystem();
     } catch (err) {
       clearOptimistic();
@@ -239,33 +251,49 @@ export function TradersPage() {
   };
 
   /*
-   * 启动中的行：每 2 秒刷一次列表，直到服务端给出 running / error / safe_mode
-   * （或这台机器人从列表里消失）。
+   * 启动中的行：每 2 秒刷一次列表，直到服务端给出明确结论。
+   * 仅依赖布尔值与稳定的 `reloadTraders` 引用，避免每次重渲染重置 2 秒定时器。
+   */
+  const hasOptimisticStarting = optimisticStarting.size > 0;
+  useEffect(() => {
+    if (!hasOptimisticStarting) return;
+    const timer = window.setInterval(() => void reloadTraders(), 2000);
+    return () => window.clearInterval(timer);
+  }, [hasOptimisticStarting, reloadTraders]);
+
+  /*
+   * 服务端状态已明确（running / error / safe_mode，或经历 starting 后回落到 stopped），
+   * 或超过 30 秒超时兜底时自动清理乐观标记，防止按钮永久卡死在「启动中」。
    */
   useEffect(() => {
     if (optimisticStarting.size === 0) return;
-    const timer = window.setInterval(() => void tradersQuery.reload(), 2000);
-    return () => window.clearInterval(timer);
-  }, [optimisticStarting, tradersQuery]);
-
-  /* 服务端状态已经明确时清掉乐观标记（由真实状态接管按钮）。 */
-  useEffect(() => {
-    if (optimisticStarting.size === 0) return;
+    const now = Date.now();
     setOptimisticStarting((prev) => {
-      const next = new Set(prev);
       let changed = false;
-      for (const id of prev) {
+      const next = new Map(prev);
+      for (const [id, entry] of prev) {
         const row = traders.find((t) => t.id === id);
         if (!row) {
           next.delete(id);
           changed = true;
           continue;
         }
+        const liveStatus = liveByTrader[id]?.status;
+        const effectiveStatus: TraderStatus = liveStatus ?? row.status;
+        if (effectiveStatus === 'starting' && !entry.sawStarting) {
+          next.set(id, { ...entry, sawStarting: true });
+          changed = true;
+          continue;
+        }
+        const timedOut = now - entry.startedAt >= OPTIMISTIC_START_TIMEOUT_MS;
+        const fellBackStopped = entry.sawStarting && effectiveStatus === 'stopped';
         if (
           row.isRunning ||
-          row.status === 'running' ||
-          row.status === 'error' ||
-          row.status === 'safe_mode'
+          effectiveStatus === 'running' ||
+          effectiveStatus === 'error' ||
+          effectiveStatus === 'safe_mode' ||
+          fellBackStopped ||
+          timedOut
         ) {
           next.delete(id);
           changed = true;
@@ -273,41 +301,53 @@ export function TradersPage() {
       }
       return changed ? next : prev;
     });
-  }, [traders, optimisticStarting]);
 
-  const runningCount = traders.filter((t) => t.isRunning).length;
+    let soonestRemaining = Number.POSITIVE_INFINITY;
+    for (const entry of optimisticStarting.values()) {
+      const remaining = entry.startedAt + OPTIMISTIC_START_TIMEOUT_MS - now;
+      if (remaining < soonestRemaining) soonestRemaining = remaining;
+    }
+    if (!Number.isFinite(soonestRemaining)) return;
+    const timer = window.setTimeout(
+      () => {
+        const cutoff = Date.now() - OPTIMISTIC_START_TIMEOUT_MS;
+        setOptimisticStarting((prev) => {
+          let changed = false;
+          const next = new Map(prev);
+          for (const [id, entry] of prev) {
+            if (entry.startedAt <= cutoff) {
+              next.delete(id);
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      },
+      Math.max(50, soonestRemaining),
+    );
+    return () => window.clearTimeout(timer);
+  }, [traders, liveByTrader, optimisticStarting]);
+
+  const runningCount = traders.filter((t) => {
+    const liveStatus = liveByTrader[t.id]?.status;
+    return liveStatus ? liveStatus === 'running' || liveStatus === 'safe_mode' : t.isRunning;
+  }).length;
+
   /*
-   * ⚠️⚠️ **不能把各机器人的「归属权益」求和** —— 也**不能**"同账户取第一个"。
-   *
-   * 共用同一个交易所账户的机器人，每个人的归属权益里都含**同一笔初始资金**
-   * （归属权益 = 初始权益 + 自己的净盈亏 + 自己的浮盈）。求和 = 把同一笔钱
-   * 数很多遍 —— 实测三个机器人给出 **30.67**，而钱包里只有 **10.42**。
-   *
-   * ## 2026-10-14 修：这里原来取的是"第一个有效读数"，而不是"最新的"
-   *
-   * 原实现：
-   * ```
-   *   const shared = group
-   *     .map((trader) => statsMap[trader.id]?.accountEquity)
-   *     .find((value) => ...);       // ← find 取【第一个】，不是最新
-   * ```
-   * `group` 按 id 排序，于是**取到了 id 最小那台机器人的快照** ——
-   * 而它可能是**几周前**的。线上实测（账户 #2 挂着 #9 与 #11）：
-   * ```
-   *   #9  accountEquity = 20.8585 @2026-10-03  ← 43 天前（旧）
-   *   #11 accountEquity = 20.7519 @2026-10-13  ← 最新
-   *   → find() 取 #9 的 20.8585 → 合计 114.97
-   *   → 正确（取最新）        → 合计 114.86
-   * ```
-   * 用户看到的就是这个："盈亏计算有问题，和实际对不上"。
-   *
-   * ## 根治：改用 `fleetTotals()`，而不是在这里手算第二遍
-   *
-   * `fleetTotals.ts` 里已经有正确的 `latestAccountReading()`（**取时间最新**）——
-   * 而这里手算了一遍、且算错了。**同一个算术写在两个地方，改一处等于没改**
-   *（`docs/MAINTENANCE.md` §3.4 记的就是这一类）。
-   * 所以不再"修对这份手算"，而是**让它调用共享库**。
+   * 统一用 `isPaperView()` 三级回落判断模拟盘（运行时 → 持久化 `trader.dryRun` → 进程级 `system.dryRun`），
+   * 避免停机时 `stats.dryRun === null` 把模拟盘历史盈亏静默清零或混入实盘账户统计。
    */
+  const dryRunById: Record<number, boolean> = Object.fromEntries(
+    traders.map((t) => [
+      t.id,
+      isPaperView({
+        runtimeDryRun: statsMap[t.id]?.dryRun,
+        persistedDryRun: t.dryRun,
+        processDryRun: system?.dryRun,
+      }),
+    ]),
+  );
+
   const fleetTotal = fleetTotals({
     traders,
     stats: statsMap,
@@ -316,31 +356,13 @@ export function TradersPage() {
      * ⚠️ `dryRun` 要传进来 —— 模拟盘上 exchangeNet 恒为 0，
      * 拿它校准会把正确的账本替换成 0（见 `isLedgerSuspect`）。
      */
-    dryRun: Object.fromEntries(
-      traders.map((t) => [t.id, statsMap[t.id]?.dryRun ?? null]),
-    ),
+    dryRun: dryRunById,
   });
   const totalEquity = fleetTotal.accountEquityFleet;
+  const paperOnlyFleet = fleetTotal.accounts.length === 0 && fleetTotal.paper.traderCount > 0;
   /** 读数已过期的账户（机器人全停了 → 没有新快照）。见上面那个 Metric 的说明。 */
   const staleAccounts = fleetTotal.accounts.filter((a) => a.accountEquityStale);
-  /*
-   * WARNING: 这三个函数已移到 lib/fleetTotals.ts（2026-10-14）。
-   *
-   * 原因：用户报「你做事情只做一半？？」—— 同一个"账本 vs 交易所"的判据
-   * 原先散在四个地方（本页两处、首页一处、详情页一处），我上一轮只修了
-   * 其中两处，首页就漏了。根因是判据被复制了四份。
-   *
-   * 现在它们是共享库里的单一实现：
-   *   isLedgerSuspect    -> fleetTotals.isLedgerSuspect(ledger)
-   *   realizedPnlOf      -> fleetTotals.realizedPnlOf(trader, stats)
-   *   attributedEquityOf -> fleetTotals.attributedEquityOf(trader, stats)
-   *
-   * 共享版比原来多两道判据：
-   *   · incomeReadFailed 为真时不校准 —— 那时 exchangeNet 是残缺读数；
-   *   · **模拟盘（dryRun）一律不校准**（2026-10-15 加）—— 那时 exchangeNet 恒为 0，
-   *     拿它校准会把正确的账本替换成 0。见 `isLedgerSuspect` 的事故说明。
-   */
-  const dryRunOf = (id: number): boolean | null | undefined => statsMap[id]?.dryRun;
+  const dryRunOf = (id: number): boolean | null | undefined => dryRunById[id];
 
   const equityOf = (trader: TraderRow, stats: TraderSummary): number =>
     attributedEquityOf(trader, stats, dryRunOf(trader.id));
@@ -490,35 +512,26 @@ export function TradersPage() {
           sub="运行 / 总数"
         />
         <Metric
-          label="账户权益合计"
-          value={fmtUsd(totalEquity, 2)}
+          label={paperOnlyFleet ? '模拟权益合计' : '账户权益合计'}
+          value={fmtUsd(paperOnlyFleet ? fleetTotal.paper.equity : totalEquity, 2)}
           size="lg"
           tone="strong"
-          /*
-           * ⚠️ **读数过期时必须说出来**（2026-10-14）。
-           *
-           * 快照在每次决策周期结束时写一条。若某账户下的机器人**全都停了**，
-           * "最新快照"也可能是几周前的 —— 而那个数字**看起来和实时值一模一样**。
-           * `#9` 就是这种情况：停了 10 天、快照是 43 天前的。
-           *
-           * 判据来自 `fleetTotals` 的 `accountEquityStale`（> 60 分钟）。
-           * 有任何一个账户过期，这里就标出来 —— 而不是让操作员以为它是实时的。
-           *
-           * ⚠️ 正常时这里**不再写「N 个未平仓合约」**：紧挨着的「当前持仓」卡
-           * 说的就是它（同一行里同一个数字出现两次，用户点名要删）。
-           */
           sub={
-            staleAccounts.length > 0 ? (
+            paperOnlyFleet ? (
+              `模拟盘 · ${fmtInt(fleetTotal.paper.traderCount)} 台`
+            ) : staleAccounts.length > 0 ? (
               `⚠️ ${staleAccounts.length} 个账户读数已过期`
             ) : (
               `按账户去重 · ${fmtInt(fleetTotal.accounts.length)} 个账户`
             )
           }
           title={
-            staleAccounts.length > 0
-              ? `⚠️ 其中 ${staleAccounts.map((a) => `#${a.exchangeAccountId}`).join('、')} 的权益读数是旧的 —— ` +
-                '那些账户下的机器人都不在运行，所以没有新快照。这个数字是最后一次读到的值，不代表现在的钱包。'
-              : '按交易所账户合计的权益：同一账户下的多个机器人共用同一个钱包，只算一次；账户之间再相加。表格每一行的「归属权益」是那个机器人自己的贡献。'
+            paperOnlyFleet
+              ? '当前仅有模拟盘机器人：此处为各模拟盘本地模拟权益之和（与真实钱包无关）。'
+              : staleAccounts.length > 0
+                ? `⚠️ 其中 ${staleAccounts.map((a) => `#${a.exchangeAccountId}`).join('、')} 的权益读数是旧的 —— ` +
+                  '那些账户下的机器人都不在运行，所以没有新快照。这个数字是最后一次读到的值，不代表现在的钱包。'
+                : '按实盘交易所账户合计的权益：同一账户下的多个机器人共用同一个钱包，只算一次；模拟盘不混入。表格每一行的「归属权益」是那个机器人自己的贡献。'
           }
         />
         <Metric
@@ -623,8 +636,12 @@ export function TradersPage() {
                     const stats = statsMap[trader.id];
                     const live = liveByTrader[trader.id];
                     const status: TraderStatus = live?.status ?? trader.status;
+                    const isLiveRunning =
+                      live?.status !== null && live?.status !== undefined
+                        ? live.status === 'running' || live.status === 'safe_mode'
+                        : trader.isRunning;
                     const rowBusy = busyId === trader.id;
-                    /* 点击后立刻视为「启动中」，直到服务端给出 running / error。 */
+                    /* 点击后立刻视为「启动中」，直到服务端给出明确结论或超时。 */
                     const starting = status === 'starting' || optimisticStarting.has(trader.id);
                     return (
                       <tr key={trader.id} className="row-hover">
@@ -662,7 +679,7 @@ export function TradersPage() {
                           </div>
                         </td>
                         <td className="td">
-                          <TraderStatusBadge status={status} live={trader.isRunning} />
+                          <TraderStatusBadge status={status} live={isLiveRunning} />
                           {trader.consecutiveFailures > 0 && (
                             /* 短句 + warn 色；完整说明在 title（状态列只有 8% 宽）。 */
                             <div
@@ -763,7 +780,7 @@ export function TradersPage() {
                             ⚠️ 详细原因保留在 `title` 里（想深究的人能查到），
                             但**可见的那一行只放结论**。
                           */}
-                          {stats && isLedgerSuspect(trader.ledger) && (
+                          {stats && isLedgerSuspect(trader.ledger, dryRunOf(trader.id)) && (
                             <div
                               className="text-xs text-ink-faint"
                               title={
@@ -822,7 +839,7 @@ export function TradersPage() {
                             <div
                               className="truncate text-xs text-ink-faint"
                               title={
-                                (isLedgerSuspect(trader.ledger)
+                                (isLedgerSuspect(trader.ledger, dryRunOf(trader.id))
                                   ? '平台账本与交易所的成交流水对不上，所以这一行改用交易所的流水校准。'
                                   : `${pnlFormulaText(statsCosts(stats))}。`) +
                                 `浮动盈亏 ${fmtUsdSigned(stats.unrealizedPnl, 2)} 未计入本行。`
@@ -894,7 +911,7 @@ export function TradersPage() {
                                 <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
                                 启动中
                               </Button>
-                            ) : trader.isRunning ? (
+                            ) : isLiveRunning ? (
                               /*
                                * ⚠️ **列表操作列只保留一个主操作**（用户 2026-11-10：
                                * 「立即分析不应该出现在这里，列表只需要启动按钮就行」）。

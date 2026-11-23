@@ -669,7 +669,13 @@ export class BinanceBroker {
         const info = this.registry.require(symbol);
         const notional = rounded * refPrice;
         if (info.minNotional > 0 && notional < info.minNotional) {
-          const neededQty = this.registry.roundQuantity(symbol, info.minNotional / refPrice);
+          /* 用向上取整 `roundQuantityUp` 给出真正能达到 minNotional 的最小数量。 */
+          const rawNeeded = info.minNotional / refPrice;
+          const floorNeeded = this.registry.roundQuantity(symbol, rawNeeded);
+          const neededQty =
+            floorNeeded * refPrice >= info.minNotional
+              ? floorNeeded
+              : this.registry.roundQuantityUp(symbol, rawNeeded);
           /*
            * 说清"需要多少数量"而不只是"不够"：如果连**下限对应的数量**取整后
            * 仍然不足，那这一类标的在这个价位上根本开不出来（步长太粗），
@@ -1197,12 +1203,13 @@ export class BinanceBroker {
       `[dry-run] ${request.type} ${request.side} ${request.symbol} qty=${qty} @ ~${markPrice}`,
     );
 
+    const orderId = at * 100 + ((this.simulatedOrderSeq += 1) % 100);
     const response: BinanceOrderResponse = {
-      clientOrderId: request.clientOrderId ?? `dry-${at}`,
+      clientOrderId: request.clientOrderId ?? `dry-${orderId}`,
       cumQty: String(qty),
       cumQuote: String(qty * markPrice),
       executedQty: String(qty),
-      orderId: at,
+      orderId,
       avgPrice: String(markPrice),
       origQty: String(qty),
       price: String(request.price ?? 0),
@@ -1339,9 +1346,11 @@ export class BinanceBroker {
       `[dry-run] algo ${request.type} ${request.side} ${request.symbol} trigger=${request.triggerPrice} closePosition=${request.closePosition ?? false}`,
     );
 
+    /* 复用自增序列防同毫秒挂止损+止盈撞 algoId（与 simulateLimit 保持同一单号生成规则）。 */
+    const algoId = at * 100 + ((this.simulatedOrderSeq += 1) % 100);
     const response: BinanceAlgoOrderResponse = {
-      algoId: at,
-      clientAlgoId: request.clientOrderId ?? `dry-algo-${at}`,
+      algoId,
+      clientAlgoId: request.clientOrderId ?? `dry-algo-${algoId}`,
       algoType: 'CONDITIONAL',
       orderType: request.type as BinanceOrderType,
       symbol: request.symbol,

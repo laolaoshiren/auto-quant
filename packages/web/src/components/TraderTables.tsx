@@ -358,7 +358,10 @@ function useTablePaging<T extends { id: number; traderId: number }>(
         earliest = row;
         return;
       }
-      const older = timeOf ? timeOf(row) < timeOf(earliest) : row.id < earliest.id;
+      const older = timeOf
+        ? timeOf(row) < timeOf(earliest) ||
+          (timeOf(row) === timeOf(earliest) && row.id < earliest.id)
+        : row.id < earliest.id;
       if (older) earliest = row;
     };
     for (const row of loaded) consider(row);
@@ -847,11 +850,14 @@ function distancePercent(entry: number, level: number | null): string | null {
 
 export function PositionsTable({
   traderId,
+  refreshToken = 0,
   onCloseRequest,
   onSelectSymbol,
   collapsed = false,
 }: {
   traderId: number;
+  /** 手工平仓等写操作后递增，触发持仓表立即重拉，不等待 5 秒轮询。 */
+  refreshToken?: number;
   onCloseRequest: (symbol: string) => void;
   /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
   onSelectSymbol?: (symbol: string) => void;
@@ -877,7 +883,7 @@ export function PositionsTable({
   const live = useEvents((s) => s.byTrader[traderId]?.positions);
   const query = usePolled((signal) => api.traderPositions(traderId, signal), {
     intervalMs: 5000,
-    deps: [traderId],
+    deps: [traderId, refreshToken],
   });
 
   /*
@@ -1599,6 +1605,15 @@ export function OrdersTable({
    */
   const showSpinner = useDelayedSpinner(paging.loading && !paging.hasLoadedOnce && all.length === 0);
 
+  /* 首屏读取失败优先可见 —— 不能被下面的占位或空态吞掉（查不到 ≠ 没有）。 */
+  if (paging.error !== null && all.length === 0) {
+    return (
+      <div className="p-3">
+        <ErrorNote>订单记录读取失败（这不等于没有委托）：{paging.error}</ErrorNote>
+      </div>
+    );
+  }
+
   if (!paging.hasLoadedOnce && all.length === 0) {
     if (showSpinner) return <Spinner3 label="正在加载委托" />;
     /*
@@ -1609,10 +1624,19 @@ export function OrdersTable({
   }
 
   if (orders.length === 0) {
-    return onlyOpen ? (
-      <TableEmpty message="暂无当前委托。" hint="交易所侧的止损 / 止盈单在触发前会出现在这里。" />
-    ) : (
-      <TableEmpty message="暂无订单记录。" />
+    return (
+      <div>
+        {paging.error !== null && (
+          <div className="px-3 pt-2">
+            <ErrorNote>读取失败，下面是上一次成功读到的状态：{paging.error}</ErrorNote>
+          </div>
+        )}
+        {onlyOpen ? (
+          <TableEmpty message="暂无当前委托。" hint="交易所侧的止损 / 止盈单在触发前会出现在这里。" />
+        ) : (
+          <TableEmpty message="暂无订单记录。" />
+        )}
+      </div>
     );
   }
 
@@ -1983,6 +2007,7 @@ export function TradesTable({
    */
   const query = usePolled((signal) => api.traderTrades(traderId, { limit: PAGE_LIMIT, signal }), {
     intervalMs: 15_000,
+    enabled: !providedPaging,
     deps: [traderId, refreshToken],
   });
 
@@ -2011,11 +2036,19 @@ export function TradesTable({
   /* 同屏不重复的配色 —— 见 `useSymbolTones()`。 */
   const symbolTones = useSymbolTones(trades.map((t) => t.symbol));
 
-  /* 同 `OrdersTable`：只有"从没成功加载过"才显示转圈；再延迟一层，避免出现又消失。 */
-  const showSpinner = useDelayedSpinner(query.loading && query.updatedAt === null && trades.length === 0);
+  /* 统一读 `paging`（`providedPaging` 传入时内部 `query` 已禁用）。 */
+  const showSpinner = useDelayedSpinner(paging.loading && !paging.hasLoadedOnce && trades.length === 0);
+
+  if (paging.error !== null && trades.length === 0) {
+    return (
+      <div className="p-3">
+        <ErrorNote>历史成交读取失败（这不等于没有成交）：{paging.error}</ErrorNote>
+      </div>
+    );
+  }
 
   /* 同 `OrdersTable`：数据还在路上时不能下"暂无"的结论。 */
-  if (query.updatedAt === null && trades.length === 0) {
+  if (!paging.hasLoadedOnce && trades.length === 0) {
     if (showSpinner) return <Spinner3 label="正在加载成交记录" />;
     return <div className="py-8" aria-hidden />;
   }
@@ -2764,6 +2797,7 @@ export function TraderTables({
         {tab === 'positions' && (
           <PositionsTable
             traderId={traderId}
+            refreshToken={token}
             onCloseRequest={setCloseTarget}
             onSelectSymbol={onSelectSymbol}
             /* 收起态（用户要求的"弹性伸缩"）：只换 class，不卸载表格。 */

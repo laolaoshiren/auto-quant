@@ -88,3 +88,21 @@ export function staleness(
     label: `状态停更 ${seconds} 秒 · 最后成功 ${clockOf(loadedAt)}`,
   };
 }
+
+/**
+ * 停更时钟的下一次唤醒延迟（毫秒）。
+ *
+ * - 从未成功加载（`loadedAt === null`）→ `null`（不挂定时器，`staleness` 不依赖 `now`）；
+ * - 尚未超过 `3 × pollMs` → 距离跨过阈值的毫秒数（+20ms 余量），正常轮询成功会重置它，
+ *   全壳平时 0 次每秒重渲染；
+ * - 已跨过阈值 → `0`（立即进入 1 秒一次的停更读秒）。
+ */
+export function staleWakeDelayMs(
+  loadedAt: number | null,
+  pollMs: number,
+  now: number,
+): number | null {
+  if (loadedAt === null) return null;
+  const remaining = loadedAt + pollMs * STALE_POLL_MULTIPLIER - now;
+  return remaining < 0 ? 0 : remaining + 20;
+}

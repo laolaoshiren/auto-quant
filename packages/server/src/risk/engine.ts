@@ -175,15 +175,12 @@ export class RiskEngine {
       return { ok: false, reason: `${decision.symbol} 没有持仓，不能加仓（要新开请用 open_long/open_short）。` };
     }
 
-    /* 方向必须与已有持仓一致 —— 反向的"加仓"其实是先把仓位平掉再反向开。 */
-    const wantsLong = decision.action === 'add_to_position';
-    if ((position.side === 'long') !== wantsLong) {
-      return {
-        ok: false,
-        reason: `${decision.symbol} 当前是${position.side === 'long' ? '多头' : '空头'}，` +
-          `add_to_position 只能同向加仓；反向要先用 close_${position.side} 平掉。`,
-      };
-    }
+    /*
+     * 方向沿用已有持仓方向 —— `add_to_position` 本身不带多空后缀，语义就是同向加仓。
+     * ⚠️ 历史 bug：曾错写成 `decision.action === 'add_to_position'`（恒为 true），
+     * 导致所有空头加仓 100% 被误判为"方向不符"而拒绝。
+     */
+    const wantsLong = position.side === 'long';
 
     const snapshot = env.snapshots.get(decision.symbol);
     const price = snapshot?.price ?? position.markPrice;
@@ -191,20 +188,53 @@ export class RiskEngine {
       return { ok: false, reason: `${decision.symbol} 没有可用价格，无法计算加仓额度。` };
     }
 
-    /* 单仓名义上限减去已有敞口，剩下的才是这次能加的。 */
+    /*
+     * ⚠️ **加仓的保证金必须按持仓的真实杠杆算**（2026-11-10 修复）。
+     *
+     * 执行层加仓不调 `setLeverage`（交易所上一个标的只有一个杠杆），保证金按
+     * `local.leverage` 实扣。提前算出真实杠杆，使 `marginBasedLimit` 下的名义额度
+     * 与 `reviewOpen` §9 的保证金约束口径完全一致。
+     */
     const risk = env.config.riskControl;
+    const addLeverage = position.leverage > 0 ? position.leverage : decision.leverage;
+    const configuredMaxLev = isMajorSymbol(decision.symbol)
+      ? risk.btcEthMaxLeverage
+      : risk.altcoinMaxLeverage;
+    const exchangeMaxLev = env.exchangeMaxLeverageOf?.(decision.symbol) ?? null;
+    const maxLeverage =
+      exchangeMaxLev !== null && exchangeMaxLev > 0
+        ? Math.min(configuredMaxLev, exchangeMaxLev)
+        : configuredMaxLev;
+    const effectiveLeverage =
+      addLeverage > 0
+        ? Math.min(Math.round(addLeverage), maxLeverage)
+        : Math.min(risk.defaultLeverage, maxLeverage);
+
+    /* 单仓名义上限减去已有敞口，剩下的才是这次能加的。适配 marginBasedLimit 口径。 */
+    const useMarginLimit = risk.marginBasedLimit === true;
     const maxRatio = isMajorSymbol(decision.symbol)
       ? risk.btcEthMaxPositionValueRatio
       : risk.altcoinMaxPositionValueRatio;
-    const cap = env.account.equity * maxRatio;
-    const room = cap - position.notional;
+    let cap: number;
+    let room: number;
+    if (useMarginLimit) {
+      const maxAllowedMargin = env.account.equity * (risk.maxMarginUsage / 100);
+      const marginHeadroom = Math.max(0, maxAllowedMargin - env.account.marginUsed);
+      const spendable = Math.min(marginHeadroom, Math.max(0, env.account.availableBalance));
+      room = spendable * Math.max(effectiveLeverage, 1);
+      cap = position.notional + room;
+    } else {
+      cap = env.account.equity * maxRatio;
+      room = cap - position.notional;
+    }
 
     if (!(room > 0)) {
       return {
         ok: false,
-        reason:
-          `${decision.symbol} 的敞口 $${position.notional.toFixed(2)} 已达单仓上限 ` +
-          `$${cap.toFixed(2)}（权益的 ${maxRatio} 倍），没有加仓空间。`,
+        reason: useMarginLimit
+          ? `${decision.symbol} 可用保证金或保证金占用已达上限（当前敞口 $${position.notional.toFixed(2)}），没有加仓空间。`
+          : `${decision.symbol} 的敞口 $${position.notional.toFixed(2)} 已达单仓上限 ` +
+            `$${cap.toFixed(2)}（权益的 ${maxRatio} 倍），没有加仓空间。`,
       };
     }
 
@@ -226,7 +256,11 @@ export class RiskEngine {
     const capped = missingAmount ? fallback : Math.min(requested, room);
     const adjustments = [
       ...(requested > room
-        ? [`加仓名义已从 $${requested.toFixed(2)} 削到 $${capped.toFixed(2)}（单仓上限剩余额度）。`]
+        ? [
+            useMarginLimit
+              ? `加仓名义已从 $${requested.toFixed(2)} 削到 $${capped.toFixed(2)}（保证金上限剩余额度）。`
+              : `加仓名义已从 $${requested.toFixed(2)} 削到 $${capped.toFixed(2)}（单仓上限剩余额度）。`,
+          ]
         : []),
       ...(missingAmount
         ? [
@@ -236,17 +270,6 @@ export class RiskEngine {
         : []),
     ];
 
-    /*
-     * ⚠️ **加仓的保证金必须按持仓的真实杠杆算**（2026-11-10 修复）。
-     *
-     * 执行层加仓不调 `setLeverage`（交易所上一个标的只有一个杠杆），保证金按
-     * `local.leverage` 实扣。以前这里把模型给的 `leverage`（或 `defaultLeverage`）
-     * 原样交给 `reviewOpen`，第 9 步按 `名义 ÷ 那个杠杆` 算保证金 —— 持仓 5x、
-     * 模型写 50x 时放行的名义是真实可承受量的 10 倍，`maxMarginUsage` 对加仓失效，
-     * 同批滚动的 `marginUsed` 也被低估。与 `reviewReduce` / `reviewAdjust` 同口径：
-     * 固定成 `position.leverage`（拿不到才退回模型的值）。
-     */
-    const addLeverage = position.leverage > 0 ? position.leverage : decision.leverage;
     const verdict = this.reviewOpen(
       {
         ...decision,
@@ -261,14 +284,15 @@ export class RiskEngine {
         /* 加仓不占新的"开仓节流"额度的一部分吗？占 —— 它确实是一笔新的入场。 */
       },
       /*
-       * ⚠️ **加仓必须豁免"同标的重入"里"已有持仓"那一半。**
+       * ⚠️ **加仓必须豁免"同标的重入"里"已有持仓"那一半，以及整仓风险预算下限。**
        *
        * 加仓的语义就是"在已有持仓上再买一部分"，不豁免的话这条新判据会把
        * 每一笔加仓都拦死。`pending` 那一半**不豁免**：同标的既有持仓又有挂单
        * 本身就是缺口留下的异常状态，这时再加仓会让两笔敞口叠加，
        * 绕过上面按 `position.notional` 算的单仓名义上限。
+       * 同时 `isAdd: true` 豁免整仓单笔风险预算下限（小额分批加仓本身就小于整仓预算）。
        */
-      { allowExistingPosition: true },
+      { allowExistingPosition: true, isAdd: true },
     );
 
     if (!verdict.ok) return verdict;
@@ -542,6 +566,10 @@ export class RiskEngine {
      * 空头止损 ≤ 现价同理。
      */
     if (stop !== null) {
+      /* 先校验 > 0，防止 0 或负数绕过多头 `stop < price` 检查。 */
+      if (!(stop > 0)) {
+        return { ok: false, reason: `止损价 ${stop} 必须大于 0。` };
+      }
       if (isLong && !(stop < price)) {
         return { ok: false, reason: `多头止损 ${stop} 必须在现价 ${price} 之下。` };
       }
@@ -573,8 +601,11 @@ export class RiskEngine {
       }
     }
 
-    /* 止盈同样必须在目标一侧，否则它一挂上就成交。 */
+    /* 止盈同样必须在目标一侧，否则它一挂上就成交；先校验 > 0 防空头 0/负数穿透 `< price`。 */
     if (target !== null) {
+      if (!(target > 0)) {
+        return { ok: false, reason: `止盈价 ${target} 必须大于 0。` };
+      }
       if (isLong && !(target > price)) {
         return { ok: false, reason: `多头止盈 ${target} 必须在现价 ${price} 之上。` };
       }
@@ -651,7 +682,15 @@ export class RiskEngine {
      */
     const openedSymbolsThisBatch = new Set<string>();
 
+    /*
+     * 滚动的持仓副本：同一批里先批准了平仓 / 减仓 / 加仓 / 调保护，后续决策必须
+     * 看见更新后的 notional / quantity / stopLoss / takeProfit，防止同批多条加仓
+     * 或多条减仓复用进入本批时的静态快照而穿透单仓上限或扣穿持仓数量。
+     */
+    const rollingPositions = new Map<string, PositionView>(env.positions);
+
     const ordered = [
+      ...decisions.filter((d) => isCancelPendingAction(d.action)),
       ...decisions.filter((d) => isCloseAction(d.action)),
       /*
        * 调保护位与减仓排在开仓之前 —— 与 `ACTION_PRIORITY` 同一个理由：
@@ -669,6 +708,7 @@ export class RiskEngine {
       ...decisions.filter((d) => d.action === 'add_to_position'),
       ...decisions.filter(
         (d) =>
+          !isCancelPendingAction(d.action) &&
           !isCloseAction(d.action) &&
           !isOpenAction(d.action) &&
           !isAdjustAction(d.action) &&
@@ -694,16 +734,31 @@ export class RiskEngine {
       }
 
       if (isCloseAction(decision.action)) {
-        const verdict = this.reviewClose(decision, env);
-        if (verdict.ok) approved.push(verdict.decision);
-        else rejected.push({ decision, reason: verdict.reason });
+        const verdict = this.reviewClose(decision, { ...env, positions: rollingPositions });
+        if (verdict.ok) {
+          approved.push(verdict.decision);
+          rollingPositions.delete(decision.symbol);
+        } else {
+          rejected.push({ decision, reason: verdict.reason });
+        }
         continue;
       }
 
       if (isAdjustAction(decision.action)) {
-        const verdict = this.reviewAdjust(decision, env);
-        if (verdict.ok) approved.push(verdict.decision);
-        else rejected.push({ decision, reason: verdict.reason });
+        const verdict = this.reviewAdjust(decision, { ...env, positions: rollingPositions });
+        if (verdict.ok) {
+          approved.push(verdict.decision);
+          const existing = rollingPositions.get(decision.symbol);
+          if (existing) {
+            rollingPositions.set(decision.symbol, {
+              ...existing,
+              stopLoss: verdict.decision.stopLoss,
+              takeProfit: verdict.decision.takeProfit,
+            });
+          }
+        } else {
+          rejected.push({ decision, reason: verdict.reason });
+        }
         continue;
       }
 
@@ -712,12 +767,13 @@ export class RiskEngine {
        *
        * 加仓**占用额度**（它是新的一笔入场），所以要通过与开仓同一批上限；
        * 减仓只释放风险，不占额度。
-       * 两者都并入 `marginUsed` 的滚动视图 —— 同一批里先加仓再算别的仓位时，
-       * 那笔保证金必须已经被算进去。
+       * 两者都并入 `marginUsed` 与 `rollingPositions` 的滚动视图 —— 同一批里先加仓再算别的仓位时，
+       * 那笔保证金与新增名义必须已经被算进去。
        */
       if (decision.action === 'add_to_position') {
         const verdict = this.reviewAdd(decision, {
           ...env,
+          positions: rollingPositions,
           account: { ...env.account, positionCount, marginUsed },
           /*
            * ⚠️ **必须传当前的滚动计数，不能沿用 `env` 里那个入口值。**
@@ -741,10 +797,26 @@ export class RiskEngine {
         if (verdict.ok) {
           approved.push(verdict.decision);
           entriesThisCycle += 1;
+          const existing = rollingPositions.get(decision.symbol);
           const snapshot = env.snapshots.get(decision.symbol);
-          const price = snapshot?.price ?? 0;
+          const price = snapshot?.price ?? existing?.markPrice ?? 0;
           if (price > 0) {
             marginUsed += verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1);
+          }
+          if (existing) {
+            const addedQty =
+              typeof verdict.decision.quantity === 'number' && verdict.decision.quantity > 0
+                ? verdict.decision.quantity
+                : price > 0
+                  ? verdict.decision.positionSizeUsd / price
+                  : 0;
+            rollingPositions.set(decision.symbol, {
+              ...existing,
+              quantity: existing.quantity + addedQty,
+              notional: existing.notional + verdict.decision.positionSizeUsd,
+              stopLoss: verdict.decision.stopLoss,
+              takeProfit: verdict.decision.takeProfit,
+            });
           }
         } else {
           rejected.push({ decision, reason: verdict.reason });
@@ -753,17 +825,28 @@ export class RiskEngine {
       }
 
       if (decision.action === 'reduce_position') {
-        const verdict = this.reviewReduce(decision, env);
+        const verdict = this.reviewReduce(decision, { ...env, positions: rollingPositions });
         if (verdict.ok) {
           approved.push(verdict.decision);
-          /* 减仓释放保证金 —— 让同一批里后面的开仓看得见这部分空间。 */
+          /* 减仓释放保证金并扣减滚动持仓 —— 让同一批里后面的减仓/开仓看得见真实余量。 */
+          const existing = rollingPositions.get(decision.symbol);
           const snapshot = env.snapshots.get(decision.symbol);
-          const price = snapshot?.price ?? 0;
+          const price = snapshot?.price ?? existing?.markPrice ?? 0;
           if (price > 0) {
             marginUsed = Math.max(
               0,
               marginUsed - verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1),
             );
+          }
+          if (existing) {
+            const reducedQty = price > 0 ? verdict.decision.positionSizeUsd / price : 0;
+            rollingPositions.set(decision.symbol, {
+              ...existing,
+              quantity: Math.max(0, existing.quantity - reducedQty),
+              notional: Math.max(0, existing.notional - verdict.decision.positionSizeUsd),
+              stopLoss: verdict.decision.stopLoss ?? existing.stopLoss,
+              takeProfit: verdict.decision.takeProfit ?? existing.takeProfit,
+            });
           }
         } else {
           rejected.push({ decision, reason: verdict.reason });
@@ -774,6 +857,7 @@ export class RiskEngine {
       if (isOpenAction(decision.action)) {
         const verdict = this.reviewOpen(decision, {
           ...env,
+          positions: rollingPositions,
           account: { ...env.account, positionCount, marginUsed },
           entriesThisCycle,
           /*
@@ -842,6 +926,19 @@ export class RiskEngine {
       return { ok: false, reason: `${decision.symbol} 当前没有可平仓的持仓。` };
     }
 
+    if (decision.action === 'close_long' && position.side !== 'long') {
+      return {
+        ok: false,
+        reason: `${decision.symbol} 当前是空头持仓，不能用 close_long 平仓（请用 close_short）。`,
+      };
+    }
+    if (decision.action === 'close_short' && position.side !== 'short') {
+      return {
+        ok: false,
+        reason: `${decision.symbol} 当前是多头持仓，不能用 close_short 平仓（请用 close_long）。`,
+      };
+    }
+
     const { minHoldMinutes } = env.config.throttle;
     if (minHoldMinutes > 0) {
       const heldMinutes = (Date.now() - new Date(position.openedAt).getTime()) / 60_000;
@@ -872,6 +969,11 @@ export class RiskEngine {
        * 新开仓的调用方一律不传 —— 默认拒绝，避免漏改一处就放行一条危险路径。
        */
       allowExistingPosition?: boolean;
+      /**
+       * 标记本笔调用来自加仓（`reviewAdd`）。
+       * 加仓分批规模通常小于整仓单笔风险预算，因此豁免 §9b 整仓风险预算下限检查。
+       */
+      isAdd?: boolean;
       /**
        * **本批次里已经放行过开仓的标的**（由 `review()` 逐笔累加）。
        *
@@ -1231,44 +1333,6 @@ export class RiskEngine {
       };
     }
 
-    /* --- 7.5 单笔风险预算下限（2026-11-10 用户服务器实测） ---------------- */
-    /*
-     * **"实际风险"必须用掉风险预算的一半以上，否则拒绝。**
-     *
-     * ## 实测的问题（服务器机器人 16）
-     *
-     * 4 笔成交：名义 200–660、止损距离 0.6% → 每笔风险 1.2–4 USDT
-     * （**占余额 0.1–0.4%**），而配置预算是 2%（20 USDT）。净盈亏对账户
-     * 几乎不可见，用户的原话：「这个盈亏比在这个交易频率下根本无法赚钱」。
-     * 随后部署提示词约束后模型仍给 `size=290 / lev=1x` —— 提示词不够，必须有硬门槛。
-     *
-     * ## 为什么用环境开关（`AQ_ENFORCE_RISK_BUDGET`）而不是直接默认开
-     *
-     * 默认开会**击穿 100+ 条既有测试**（它们的 fixture 仓位都很小，且测试
-     * 断言的是"小仓位被允许"的旧行为）。这不是测试写得差，而是"小仓位合法"
-     * 本身是旧产品假设。切换应当是**部署决策**：生产 `.env` 打开，
-     * 测试保持旧语义 —— 两边都拿到自己需要的。
-     *
-     * 拒绝理由会算出"该给多大"，模型下一轮照着放大即可。
-     */
-    if (process.env.AQ_ENFORCE_RISK_BUDGET === 'true' && stopDistancePercent > 0) {
-      const riskBudgetUsd = (env.account.equity * risk.riskPerTradePercent) / 100;
-      if (riskBudgetUsd > 0) {
-        const stopRiskUsd = (decision.positionSizeUsd * stopDistancePercent) / 100;
-        const minAcceptableUsd = riskBudgetUsd * 0.5;
-        if (stopRiskUsd + 1e-9 < minAcceptableUsd) {
-          const suggestedNotionalUsd = (riskBudgetUsd / stopDistancePercent) * 100;
-          return {
-            ok: false,
-            reason:
-              `单笔风险 $${stopRiskUsd.toFixed(2)} 只有风险预算（余额 $${env.account.equity.toFixed(2)} × ${risk.riskPerTradePercent}% = $${riskBudgetUsd.toFixed(2)}）的 ` +
-              `${((stopRiskUsd / riskBudgetUsd) * 100).toFixed(0)}% —— 仓位太小，净盈亏对账户几乎不可见。` +
-              `按止损距离 ${stopDistancePercent.toFixed(3)}% 反推，名义应 ≥ $${suggestedNotionalUsd.toFixed(0)}（当前 $${decision.positionSizeUsd.toFixed(0)}）。`,
-          };
-        }
-      }
-    }
-
     /* --- 8. Notional ----------------------------------------------------- */
     /*
      * ══════════════════════════════════════════════════════════════════════
@@ -1322,7 +1386,8 @@ export class RiskEngine {
       // faithful reading of the model's intent.
       const riskUsd = num(decision.riskUsd, 0);
       if (riskUsd > 0 && riskDistance > 0) {
-        notional = (riskUsd / riskDistance) * price;
+        /* 用 entryPrice 而非市价 price：确保最终 (notional / entryPrice) * |entryPrice - stopLoss| === riskUsd。 */
+        notional = (riskUsd / riskDistance) * entryPrice;
         adjustments.push(
           `按模型给出的风险金额 $${riskUsd.toFixed(2)} 反推仓位，名义价值 $${notional.toFixed(2)}。`,
         );
@@ -1353,6 +1418,36 @@ export class RiskEngine {
         `名义价值已从 $${notional.toFixed(2)} 降至 $${reducedNotional.toFixed(2)}，以适配可用保证金（$${spendable.toFixed(2)}）。`,
       );
       notional = reducedNotional;
+    }
+
+    /* --- 9b. 单笔风险预算下限（原 §7.5，移至最终 notional 确定之后） -------- */
+    /*
+     * 移到 §9 之后的原因：
+     *   1) 模型可能省略 positionSizeUsd 而由 §8 按 riskUsd 或 10% 权益反推，在 §7.5 提前检查会误杀合法决策；
+     *   2) 若 positionSizeUsd 为 NaN 或被 §8/§9 裁小，这里基于清洗后的最终 notional 检查，防 NaN 绕过或缩水后漏检；
+     *   3) 加仓（options.isAdd）豁免整仓风险预算下限。
+     */
+    if (
+      !options.isAdd &&
+      process.env.AQ_ENFORCE_RISK_BUDGET === 'true' &&
+      stopDistancePercent > 0
+    ) {
+      const riskBudgetUsd = (env.account.equity * risk.riskPerTradePercent) / 100;
+      if (Number.isFinite(riskBudgetUsd) && riskBudgetUsd > 0) {
+        const safeNotional = Number.isFinite(notional) ? notional : 0;
+        const stopRiskUsd = (safeNotional * stopDistancePercent) / 100;
+        const minAcceptableUsd = riskBudgetUsd * 0.5;
+        if (!Number.isFinite(stopRiskUsd) || stopRiskUsd + 1e-9 < minAcceptableUsd) {
+          const suggestedNotionalUsd = (riskBudgetUsd / stopDistancePercent) * 100;
+          return {
+            ok: false,
+            reason:
+              `单笔风险 $${stopRiskUsd.toFixed(2)} 只有风险预算（余额 $${env.account.equity.toFixed(2)} × ${risk.riskPerTradePercent}% = $${riskBudgetUsd.toFixed(2)}）的 ` +
+              `${((stopRiskUsd / riskBudgetUsd) * 100).toFixed(0)}% —— 仓位太小，净盈亏对账户几乎不可见。` +
+              `按止损距离 ${stopDistancePercent.toFixed(3)}% 反推，名义应 ≥ $${suggestedNotionalUsd.toFixed(0)}（当前 $${safeNotional.toFixed(0)}）。`,
+          };
+        }
+      }
     }
 
     /* --- 10. Minimums ---------------------------------------------------- */
@@ -1640,12 +1735,14 @@ export function shouldCloseForDrawdown(
      * 同一条规则的"仍盈利但回吐过多"分支保持不变。
      */
     const protectProfit = peak >= guard.activationPercent * 2;
+    const shouldClose = current <= 0 && protectProfit;
     return {
-      close: current < 0 && protectProfit,
-      reason:
-        current < 0 && protectProfit
+      close: shouldClose,
+      reason: shouldClose
+        ? current < 0
           ? `回撤守卫：最高浮盈 +${peak.toFixed(2)}%，当前已转为亏损（${current.toFixed(2)}%），落袋保护利润。`
-          : '',
+          : `回撤守卫：最高浮盈 +${peak.toFixed(2)}%，当前已回吐全部浮盈（${current.toFixed(2)}%），落袋保护利润。`
+        : '',
     };
   }
 

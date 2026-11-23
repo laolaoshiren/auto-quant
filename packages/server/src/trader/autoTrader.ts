@@ -81,6 +81,7 @@ import {
   ownUnrealizedPnlOf,
   positions as positionStore,
   resolveOrderMarginUsed,
+  runInTransaction,
   settings,
   TERMINAL_ORDER_STATUSES,
   tradeEvents,
@@ -111,7 +112,17 @@ import {
   roundTripQueryKey,
   type ReconstructedTrade,
 } from './roundTrips.js';
-import { commissionsInWindow, fundingInWindow, fundingSince, isSettlementAsset, netPnlOf, realizedInFills, realizedInWindow, settlementCommissionOf } from '../binance/income.js';
+import {
+  commissionsInFills,
+  commissionsInWindow,
+  fundingInWindow,
+  fundingSince,
+  isSettlementAsset,
+  netPnlOf,
+  realizedInFills,
+  realizedInWindow,
+  settlementCommissionOf,
+} from '../binance/income.js';
 import {
   SIGNAL_HEALTH_WINDOW_DAYS,
   signalHealthReportFor,
@@ -1068,6 +1079,12 @@ function parseIntelKeysOf(raw: string | null | undefined): string[] {
     return [];
   }
 }
+/** 累加可空 token 用量：服务商未回报该字段（null/undefined）时保留 null，不误记为 0。 */
+function addNullableUsage(prev: number | null, next: number | null | undefined): number | null {
+  if (next === null || next === undefined || !Number.isFinite(next)) return prev;
+  return (prev ?? 0) + next;
+}
+
 export class AutoTrader {
   private timer: NodeJS.Timeout | null = null;
   /**
@@ -1099,6 +1116,8 @@ export class AutoTrader {
    * 走的是同一套撤单/记账路径；出错只影响一个 tick。
    */
   private guardWatchTimer: NodeJS.Timeout | null = null;
+  private guardInFlight = false;
+  private guardPromise: Promise<void> | null = null;
   /**
    * **各标的的基准价**（`symbol → 价格`）—— 上次评估时记下的。
    *
@@ -1786,14 +1805,27 @@ export class AutoTrader {
   /**
    * 一次实时守卫检查：先回撤守卫（平仓，落袋），再保本止损（移止损，让赢的单继续跑）。
    * 顺序与周期里那两步一致（见 `runCycle` 的 "Mechanical protections"）。
+   *
+   * 并发保护：与 `cycleInFlight` 互斥，且自身不可重入；同时暴露 `guardPromise` 给
+   * `inCycle()` 与 `waitForIdle()` 等待，防止 30s 定时器和主循环并发对同一持仓平仓/改单。
    */
   private async runGuardTick(): Promise<void> {
+    if (!this.running || this.cycleInFlight || this.guardInFlight) return;
+    this.guardInFlight = true;
+    let done: () => void = () => undefined;
+    this.guardPromise = new Promise<void>((resolve) => {
+      done = resolve;
+    });
     try {
       const closed = await this.applyDrawdownGuard();
       if (closed > 0) this.emit('info', `回撤守卫（实时检查）平仓 ${closed} 笔`);
       await this.applyBreakevenGuard().catch(() => undefined);
     } catch {
       /* 单次失败不影响下一轮；既有止损单仍然有效。 */
+    } finally {
+      this.guardInFlight = false;
+      this.guardPromise = null;
+      done();
     }
   }
 
@@ -2062,7 +2094,7 @@ export class AutoTrader {
      */
     this.stopRequested = true;
     if (persist) {
-      this.abortCurrentCycle?.abort();
+      this.abortCurrentCycle?.abort('lifecycle');
     }
     const drained = await this.waitForIdle(persist ? 60_000 : SHUTDOWN_DRAIN_TIMEOUT_MS);
     if (!drained) {
@@ -2089,7 +2121,7 @@ export class AutoTrader {
    * 幂等，没有在途轮次时是空操作。
    */
   abortInFlightCycle(): void {
-    this.abortCurrentCycle?.abort();
+    this.abortCurrentCycle?.abort('lifecycle');
   }
 
   /**
@@ -2115,8 +2147,12 @@ export class AutoTrader {
    * **确定会被释放**的定时器。
    */
   async waitForIdle(timeoutMs = 60_000): Promise<boolean> {
-    const pending = this.cyclePromise;
-    if (!pending) return true;
+    const inflight: Array<Promise<void>> = [];
+    if (this.cyclePromise) inflight.push(this.cyclePromise);
+    if (this.guardPromise) inflight.push(this.guardPromise);
+    if (inflight.length === 0) return true;
+    const pending =
+      inflight.length === 1 ? inflight[0]! : Promise.allSettled(inflight).then(() => undefined);
     return new Promise<boolean>((resolve) => {
       let settled = false;
       const finish = (idle: boolean): void => {
@@ -2442,10 +2478,14 @@ export class AutoTrader {
     const signal = this.abortCurrentCycle.signal;
     let timer: NodeJS.Timeout | null = null;
     try {
+      /* 若 30s 实时守卫此刻正在跑，等它收尾再开始本轮（cycleInFlight 已置位，不会起新守卫）。 */
+      if (this.guardPromise !== null) {
+        await this.guardPromise.catch(() => undefined);
+      }
       const timeout = new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           /* 真的取消在途请求 —— 不只是放弃等待。 */
-          this.abortCurrentCycle?.abort();
+          this.abortCurrentCycle?.abort('timeout');
           /*
            * 记一笔"僵尸"：abort 是请求取消而不是保证终止。
            * 若那一轮之后真的结束了，`work()` 的 `.finally` 会把它减回来。
@@ -2883,8 +2923,10 @@ export class AutoTrader {
      */
     this.requestedNextCheckMinutes = undefined;
 
+    let cycleSignal: AbortSignal | undefined;
     try {
       await this.inCycle(async (signal) => {
+        cycleSignal = signal;
         this.cycleNumber += 1;
         eventBus.publish({
           type: 'cycle_start',
@@ -2948,7 +2990,13 @@ export class AutoTrader {
        * 而 `stopRequested` 会在 `stop()` 时置真 —— 用它会把"停止之前就已经失败的
        * 那一轮"也误判成中断（实测：单测里成功恢复链的 error 断言因此失败）。
        */
-      const aborted = /aborted|abort/i.test((error as Error).message ?? '');
+      /*
+       * 只把“本轮自己的 AbortSignal 被生命周期（stop / abortInFlightCycle）主动中止”
+       * 视作非失败中断；不要用宽泛正则 `/aborted|abort/i` 误吞上游真实超时（ECONNABORTED /
+       * AbortError）或硬超时，否则连续故障无法计入 consecutiveFailures 与 safe_mode。
+       */
+      const aborted =
+        cycleSignal?.aborted === true && cycleSignal.reason === 'lifecycle';
       if (aborted) {
         this.emit('info', `第 #${this.cycleNumber} 轮被中断（服务重启或手动停止），本轮不计入失败。`);
         return;
@@ -4418,22 +4466,23 @@ export class AutoTrader {
      * 回落不是"降级"而是为了不改动已有的桩：`complete` 内部本来就是
      * `chat([system, user])`，两条消息也能跑，只是缓存命中差一些。
      */
+    const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: systemPrompt },
+      ...(stablePrompt.length > 0
+        ? [
+            { role: 'user' as const, content: stablePrompt },
+            /*
+             * 占位回复。它的内容不重要（模型不会把它当成指令），重要的是
+             * **它把最后一条推回 `user`** —— 否则两条 `user` 会连成一段，
+             * 而 `stable` 与 `volatile` 的语义边界就消失了。
+             */
+            { role: 'assistant' as const, content: '（已读取当前状态与历史。）' },
+          ]
+        : []),
+      { role: 'user', content: volatilePrompt },
+    ];
     let response = this.deps.model.chat
-      ? await this.deps.model.chat([
-          { role: 'system', content: systemPrompt },
-          ...(stablePrompt.length > 0
-            ? [
-                { role: 'user' as const, content: stablePrompt },
-                /*
-                 * 占位回复。它的内容不重要（模型不会把它当成指令），重要的是
-                 * **它把最后一条推回 `user`** —— 否则两条 `user` 会连成一段，
-                 * 而 `stable` 与 `volatile` 的语义边界就消失了。
-                 */
-                { role: 'assistant' as const, content: '（已读取当前状态与历史。）' },
-              ]
-            : []),
-          { role: 'user', content: volatilePrompt },
-        ])
+      ? await this.deps.model.chat(baseMessages, { signal })
       : await this.deps.model.complete(systemPrompt, promptForModel, { signal });
 
     /*
@@ -4628,6 +4677,8 @@ export class AutoTrader {
     let totalCached: number | null = response.usage.cachedTokens ?? null;
     let totalReasoning: number | null = response.usage.reasoningTokens ?? null;
     const dataRequests: string[] = [];
+    const toolConversation = [...baseMessages];
+    let completeHistory = promptForModel;
 
     for (let dataRound = 1; dataRound <= MAX_DATA_ROUNDS; dataRound += 1) {
       const calls = extractToolCalls(finalResponse.text);
@@ -4642,35 +4693,31 @@ export class AutoTrader {
         `按需取数 #${dataRound}：${summaries.join('、')}（这一轮还会再问一次模型）`,
       );
 
-      /*
-       * 与上面那次调用同样的回落：有 `chat` 就用它，没有（测试桩）就用 `complete`。
-       * 回落时把工具结果直接拼进 user 提示词 —— 两条消息也能跑，只是缓存命中差。
-       */
-      const askAgain = (extra: string) =>
-        this.deps.model.chat
-          ? this.deps.model.chat([
-              { role: 'system', content: systemPrompt },
-              ...(stablePrompt.length > 0
-                ? [{ role: 'user' as const, content: stablePrompt }]
-                : []),
-              { role: 'user', content: volatilePrompt },
-              { role: 'assistant', content: finalResponse.text },
-              { role: 'user', content: extra },
-            ])
-          : this.deps.model.complete(systemPrompt, `${userPrompt}\n\n${extra}`);
-
-      const followUp = await askAgain(
+      const extra =
         `你要的数据：\n\n${outcomes.map((o) => o.text).join('\n\n')}\n\n` +
-          '现在给出你的最终结论 —— 输出 `<reasoning>` 与 `<decision>` 两个块。' +
-          (dataRound >= MAX_DATA_ROUNDS
-            ? '**取数次数已经用完，不要再写工具调用。**'
-            : `还可以再要 ${MAX_DATA_ROUNDS - dataRound} 次数据，或者直接给结论。`),
-      );
+        '现在给出你的最终结论 —— 输出 `<reasoning>` 与 `<decision>` 两个块。' +
+        (dataRound >= MAX_DATA_ROUNDS
+          ? '**取数次数已经用完，不要再写工具调用。**'
+          : `还可以再要 ${MAX_DATA_ROUNDS - dataRound} 次数据，或者直接给结论。`);
 
-      totalPrompt = (totalPrompt ?? 0) + (followUp.usage.promptTokens ?? 0);
-      totalCompletion = (totalCompletion ?? 0) + (followUp.usage.completionTokens ?? 0);
-      totalCached = (totalCached ?? 0) + (followUp.usage.cachedTokens ?? 0);
-      totalReasoning = (totalReasoning ?? 0) + (followUp.usage.reasoningTokens ?? 0);
+      /*
+       * 累加保留每一轮的模型回复与工具返回（不丢失前一轮要到的数据），
+       * 且始终沿用带占位 assistant 的前缀（避免连续两条 user 消息并保持缓存前缀一致）。
+       */
+      toolConversation.push(
+        { role: 'assistant', content: finalResponse.text },
+        { role: 'user', content: extra },
+      );
+      completeHistory = `${completeHistory}\n\n${finalResponse.text}\n\n${extra}`;
+
+      const followUp = this.deps.model.chat
+        ? await this.deps.model.chat(toolConversation, { signal })
+        : await this.deps.model.complete(systemPrompt, completeHistory, { signal });
+
+      totalPrompt = addNullableUsage(totalPrompt, followUp.usage.promptTokens);
+      totalCompletion = addNullableUsage(totalCompletion, followUp.usage.completionTokens);
+      totalCached = addNullableUsage(totalCached, followUp.usage.cachedTokens);
+      totalReasoning = addNullableUsage(totalReasoning, followUp.usage.reasoningTokens);
 
       finalResponse = followUp;
     }
@@ -5492,7 +5539,11 @@ export class AutoTrader {
           const outcome = await this.executeReduce(decision);
           executionLog.push(outcome);
         } else {
-          const outcome = await this.executeOpen(decision, snapshotBySymbol.get(decision.symbol));
+          const outcome = await this.executeOpen(
+            decision,
+            snapshotBySymbol.get(decision.symbol),
+            account.availableBalance,
+          );
           executionLog.push(outcome);
           if (outcome.status === 'ok') entriesTaken += 1;
           /* 挂单不是开仓 —— 分开数，见 `limitSubmissions` 的说明。 */
@@ -5553,6 +5604,7 @@ export class AutoTrader {
       log: executionLog,
       progress,
       snapshots: snapshotBySymbol,
+      signal,
       /*
        * ⚠️ 账户读数要传进去（外部 issue #117）：回执里的 `adjust_protection`
        * 现在**要过风控引擎**，而引擎的判据需要账户（保证金占用等）。
@@ -5951,11 +6003,16 @@ export class AutoTrader {
      * 用**交易所报的**成交量与成交价覆盖挂单时的意向值：部分成交在限价单上
      * 很常见，而账本只能记实际发生的。
      */
-    const promoted = positionStore.promote(traderId, symbol, {
-      quantity: executedQty,
-      entryPrice: avgPrice,
-      marginUsed: (executedQty * avgPrice) / Math.max(row.leverage, 1),
-    });
+    const promoted = positionStore.promote(
+      traderId,
+      symbol,
+      {
+        quantity: executedQty,
+        entryPrice: avgPrice,
+        marginUsed: (executedQty * avgPrice) / Math.max(row.leverage, 1),
+      },
+      row.id,
+    );
     tradeEvents.record(traderId, symbol, 'entry');
 
     /*
@@ -6525,8 +6582,38 @@ export class AutoTrader {
 
     // Positions opened outside the bot (a manual trade) are adopted rather than
     // ignored: the model should manage what is actually there.
+    // 多机器人共用同一交易所账户时，先排除已被同账户其它机器人持有的标的，
+    // 绝不抢占他机仓位或撤改其保护单。
+    const accountId = this.deps.trader.exchangeAccountId;
+    const otherTraderOpenSymbols =
+      typeof accountId === 'number' && accountId > 0
+        ? positionStore.openSymbolsForOtherTradersOnAccount(accountId, traderId)
+        : new Set<string>();
+
     for (const live of exchangePositions) {
       if (localOpen.some((p) => p.symbol === live.symbol)) continue;
+      if (otherTraderOpenSymbols.has(live.symbol)) continue;
+
+      let existingStop: { price: number; orderId: string } | null = null;
+      let existingTarget: { price: number; orderId: string } | null = null;
+      if (!this.isDryRun) {
+        try {
+          const openAlgos = await this.deps.broker.getOpenAlgoOrders(live.symbol);
+          for (const o of openAlgos) {
+            const kind = String((o as { orderType?: string }).orderType ?? '');
+            const trigger = Number((o as { triggerPrice?: string | number }).triggerPrice ?? 0);
+            const id = String((o as { algoId?: string | number }).algoId ?? '');
+            if (!(trigger > 0)) continue;
+            if (!existingStop && kind.includes('STOP')) existingStop = { price: trigger, orderId: id };
+            if (!existingTarget && kind.includes('TAKE_PROFIT')) {
+              existingTarget = { price: trigger, orderId: id };
+            }
+          }
+        } catch {
+          /* 查询失败按无已有保护单处理，走下方兜底补挂 */
+        }
+      }
+
       this.emit(
         'warn',
         `发现一个未被记录的 ${live.symbol} ${live.side === 'long' ? '多头' : '空头'} 持仓，已收养它以便模型可以管理。`,
@@ -6540,31 +6627,22 @@ export class AutoTrader {
         leverage: live.leverage,
         liquidationPrice: live.liquidationPrice,
         marginUsed: live.marginUsed,
-        stopLoss: null,
-        takeProfit: null,
-        stopOrderId: null,
-        tpOrderId: null,
+        stopLoss: existingStop?.price ?? null,
+        takeProfit: existingTarget?.price ?? null,
+        stopOrderId: existingStop?.orderId ?? null,
+        tpOrderId: existingTarget?.orderId ?? null,
         openReasoning: '收养：该仓位是在机器人之外开立的。',
       });
 
-      /*
-       * ⚠️ **收养之后立刻补挂保护单 —— 不要留一个裸的杠杆敞口。**
-       *
-       * 收养的意义是"让模型可以管理它"，而一个没有交易所侧保护的杠杆仓位
-       * **是最糟糕的状态**（§2.6）：VPS 重启、网络中断、进程卡住，那个仓位
-       * 就没有任何东西在兜底。原来收养只写一行记录、把 `stop_loss` 留成 null，
-       * 保护单要等到**下一次加仓或减仓**才可能被补上 —— 而在那之前敞口是裸的，
-       * 在那之后还有"缺记录被误判成挂单失败"的另一个坑（已单独修）。
-       *
-       * 用**兜底比例**而不是问模型：收养发生在对账里，此刻没有模型上下文，
-       * 而"先有个保护、再由模型按失效位调整"明显好于"等着"。
-       *
-       * ## 挂不上时**不**擅自平仓
-       *
-       * §2.6 的"挂不上就立刻市价平仓"是针对**本机器人自己开的仓** ——
-       * 那种情况下平掉是回到已知状态。而这里是**操作员手动开的一个仓位**：
-       * 替他决定平掉，比留一个无保护的仓位更越界。所以报错，让他自己处置。
-       */
+      if (existingStop !== null) {
+        this.emit(
+          'info',
+          `收养的 ${live.symbol} 在交易所侧已有止损 ${existingStop.price}` +
+            `${existingTarget ? ` 与止盈 ${existingTarget.price}` : ''}，已直接同步至本地记录（保留原手工保护单，不覆盖）。`,
+        );
+        continue;
+      }
+
       const fallbackPercent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
       const adoptedStop = fallbackStopPrice(live.entryPrice, live.side === 'long', fallbackPercent);
 
@@ -6573,8 +6651,12 @@ export class AutoTrader {
         side: live.side,
         quantity: live.quantity,
         stop: adoptedStop,
+        /* 已有手工止盈时传 target: null 并由 preserveTarget 原样保留单号与价位，不撤改交易所原单。 */
         target: null,
         traderId,
+        ...(existingTarget
+          ? { preserveTarget: { target: existingTarget.price, tpOrderId: existingTarget.orderId } }
+          : {}),
       });
 
       if (protection.stopPlaced) {
@@ -6703,9 +6785,12 @@ export class AutoTrader {
   private async settleDryRunPositions(): Promise<void> {
     const traderId = this.deps.trader.id;
     const open = positionStore.open(traderId);
-    if (open.length === 0) return;
+    if (open.length === 0) {
+      this.markPriceSnapshot.clear();
+      return;
+    }
 
-    /* 本轮读到的标记价，顺手喂给模拟盘钱包（见 `paperMarkPrices`）。 */
+    /* 本轮读到的标记价（仅保留仍处于开仓状态的标的），顺手喂给模拟盘钱包（见 `paperMarkPrices`）。 */
     const marks: Array<{ symbol: string; markPrice: number }> = [];
 
     for (const local of open) {
@@ -6720,7 +6805,6 @@ export class AutoTrader {
         continue;
       }
       if (!(mark > 0)) continue;
-      marks.push({ symbol: local.symbol, markPrice: mark });
 
       const isLong = local.side === 'long';
       const stop = local.stop_loss;
@@ -6735,6 +6819,7 @@ export class AutoTrader {
         target !== null && target > 0 && (isLong ? mark >= target : mark <= target);
 
       if (!hitStop && !hitTarget) {
+        marks.push({ symbol: local.symbol, markPrice: mark });
         /*
          * 都没触发 → 继续持有。仍然要**更新回撤守卫用的峰值** ——
          * 那是"浮盈曾经到过多少"的记录，只有每轮更新才准。
@@ -6806,7 +6891,7 @@ export class AutoTrader {
     for (const row of rows) {
       if (Number.isFinite(row.markPrice) && row.markPrice > 0) next.set(row.symbol, row.markPrice);
     }
-    if (next.size > 0) this.markPriceSnapshot = next;
+    this.markPriceSnapshot = next;
   }
 
   /**
@@ -6967,49 +7052,40 @@ export class AutoTrader {
         local.stop_loss > 0 &&
         (isLong ? local.stop_loss < mark : local.stop_loss > mark);
 
-      let stop: number;
-      if (recordedOk) {
-        stop = local.stop_loss as number;
-      } else {
-        const percent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
-        stop = fallbackStopPrice(live.entryPrice, isLong, percent);
-        if (!(isLong ? stop < mark : stop > mark)) {
-          this.emit(
-            'error',
-            `${local.symbol} 的持仓在交易所侧没有任何止损，而按兜底比例（${percent}%）算出的止损 ` +
-              `${stop.toFixed(6)} 已落在当前标记价 ${mark} 的**错误一侧** —— 挂上去会立即触发、等于未经决策的市价平仓，` +
-              '因此不挂。请人工确认这个仓位。',
-          );
-          continue;
+      const fallbackPercent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
+      let stopForRr: number;
+      let stopToPlace: number | null = null;
+      if (!hasStop) {
+        if (recordedOk) {
+          stopToPlace = local.stop_loss as number;
+        } else {
+          const candidateStop = fallbackStopPrice(live.entryPrice, isLong, fallbackPercent);
+          if (!(isLong ? candidateStop < mark : candidateStop > mark)) {
+            this.emit(
+              'error',
+              `${local.symbol} 的持仓在交易所侧没有任何止损，而按兜底比例（${fallbackPercent}%）算出的止损 ` +
+                `${candidateStop.toFixed(6)} 已落在当前标记价 ${mark} 的**错误一侧** —— 挂上去会立即触发、等于未经决策的市价平仓，` +
+                '因此不挂。请人工确认这个仓位。',
+            );
+            continue;
+          }
+          stopToPlace = candidateStop;
         }
+        stopForRr = stopToPlace;
+      } else {
+        /* 交易所侧已有活的止损单：只用本地记录或兜底止损作盈亏比参考，绝不撤改活止损。 */
+        stopForRr =
+          local.stop_loss !== null && local.stop_loss > 0
+            ? local.stop_loss
+            : fallbackStopPrice(live.entryPrice, isLong, fallbackPercent);
       }
-      /*
-       * ══════════════════════════════════════════════════════════════════
-       *  **补止盈的两条规则**（2026-10-19 用户要求）
-       * ══════════════════════════════════════════════════════════════════
-       *
-       * 用户原话：
-       * > 「系统会不会有兜底策略（如果有兜底策略 要设置多少合理，
-       * >  不能太保守导致小亏导致手续费亏损得磨损，和错失大涨机会）」
-       *
-       * 三个约束：① 不能太保守 ② 不能磨损手续费 ③ 不错失大涨。
-       *
-       * 规则：
-       * ```
-       *   A. 本地有 take_profit 且方向正确 → 用它（Jev 算的，最优先）
-       *   B. 没有可用 take_profit →
-       *        浮盈 < 保本触发点 → 按「止损距离 × 盈亏比」补
-       *        浮盈 ≥ 保本触发点 → 不补，交给移动止损
-       * ```
-       *
-       * 为什么用「止损距离 × 盈亏比」而不是固定百分比：
-       * ```
-       *   固定 7.5% + 止损 8.2% ⇒ 盈亏比 0.91:1  ← 必亏
-       *   固定 7.5% + 止损 1.2% ⇒ 盈亏比 6.25:1
-       * ```
-       * 同一个固定值在波动不同的标的上含义相反。
-       */
-      const rr = Math.max(0.5, jevNumber('min_rr'));
+
+      const rr = Math.max(
+        0.5,
+        this.deps.trader.mode === 'jev'
+          ? jevNumber('min_rr')
+          : this.effectiveConfig().riskControl.minRiskRewardRatio,
+      );
       /* 往返成本约 0.1%（单边 0.05% × 2），乘 3 倍安全边际 = 0.3%。 */
       const minTargetPercent = 0.3;
       /* 浮盈百分比 —— 决定该不该补固定目标（用标记价，不是成本价）。 */
@@ -7028,7 +7104,7 @@ export class AutoTrader {
         local.take_profit > 0 &&
         (isLong ? local.take_profit > mark : local.take_profit < mark);
 
-      let target: number | null = recordedTargetOk ? (local.take_profit as number) : null;
+      let target: number | null = !hasTarget && recordedTargetOk ? (local.take_profit as number) : null;
 
       if (target === null && !hasTarget) {
         /*
@@ -7036,7 +7112,7 @@ export class AutoTrader {
          * 移动止损会跟着上移 —— 既保护利润又不封顶，那才是"不错失大涨"。
          */
         if (unrealizedPercent < breakevenTrigger) {
-          const stopDistancePercent = (Math.abs(stop - local.entry_price) / local.entry_price) * 100;
+          const stopDistancePercent = (Math.abs(stopForRr - local.entry_price) / local.entry_price) * 100;
           const targetDistancePercent = Math.max(stopDistancePercent * rr, minTargetPercent);
           const candidate = isLong
             ? local.entry_price * (1 + targetDistancePercent / 100)
@@ -7063,19 +7139,44 @@ export class AutoTrader {
         }
       }
 
+      /* 已有止损且本轮决定不补固定止盈 → 完全跳过，不碰活止损、不误报无止损。 */
+      if (hasStop && target === null) continue;
+
+      if (hasStop && target !== null) {
+        const protection = await this.replaceProtection({
+          symbol: local.symbol,
+          side: isLong ? 'long' : 'short',
+          quantity: local.quantity,
+          stop: null,
+          target,
+          traderId,
+          preserveStop: { stop: local.stop_loss, stopOrderId: local.stop_order_id },
+        });
+        if (!protection.targetPlaced) {
+          this.emit(
+            'warn',
+            `${local.symbol} 补挂止盈失败（${protection.failures.join('；') || '原因未知'}）—— 现有止损单未受影响。`,
+          );
+        }
+        continue;
+      }
+
       const protection = await this.replaceProtection({
         symbol: local.symbol,
         side: isLong ? 'long' : 'short',
         quantity: local.quantity,
-        stop,
-        target,
+        stop: stopToPlace,
+        target: hasTarget ? null : target,
         traderId,
+        ...(hasTarget
+          ? { preserveTarget: { target: local.take_profit, tpOrderId: local.tp_order_id } }
+          : {}),
       });
 
       if (protection.stopPlaced) {
         this.emit(
           'warn',
-          `⚠️ ${local.symbol} 的持仓在交易所侧**没有止损**，已自动重挂 ${stop}` +
+          `⚠️ ${local.symbol} 的持仓在交易所侧**没有止损**，已自动重挂 ${stopToPlace}` +
             `（${recordedOk ? '用本地记录的保护位' : '用兜底比例'}${protection.targetPlaced ? '，止盈一并恢复' : ''}）` +
             '—— 它此前为什么消失值得查（撤单失败/被替换/交易所侧过期）。',
         );
@@ -7144,8 +7245,8 @@ export class AutoTrader {
   ): Promise<CloseReason> {
     try {
       const [stopOrder, tpOrder] = await Promise.all([
-        stopOrderId ? this.deps.broker.getAlgoOrder(Number(stopOrderId)) : Promise.resolve(null),
-        tpOrderId ? this.deps.broker.getAlgoOrder(Number(tpOrderId)) : Promise.resolve(null),
+        stopOrderId ? this.deps.broker.getAlgoOrder(stopOrderId) : Promise.resolve(null),
+        tpOrderId ? this.deps.broker.getAlgoOrder(tpOrderId) : Promise.resolve(null),
       ]);
 
       const fired = (status: string | undefined): boolean =>
@@ -7554,10 +7655,12 @@ export class AutoTrader {
      * 所以判定必须在写账之前，用的身份与 `trades.insert()` 里的完全一致
      * （`trades.findDuplicate()` 是同一个实现，不存在两套判据）。
      */
+    const closeQuantity =
+      partialQty > 0 ? local.quantity : (authoritative?.quantity ?? local.quantity);
     const alreadyBooked = tradeStore.findDuplicate({
       traderId,
       symbol: local.symbol,
-      quantity: authoritative?.quantity ?? local.quantity,
+      quantity: closeQuantity,
       entryPrice: local.entry_price,
       /* 出场价——两条记账路径之间唯一同源的字段，见 `findDuplicate()` 的说明。 */
       exitPrice,
@@ -7576,64 +7679,81 @@ export class AutoTrader {
       exitOrderId: authoritative?.exitOrderId ?? null,
     });
     if (alreadyBooked !== null) {
+      let figuresToApply: {
+        grossPnl: number;
+        entryFee: number;
+        exitFee: number;
+        entryPrice: number;
+        exitPrice: number;
+        quantity: number;
+        entryOrderId: string | null;
+        exitOrderId: string | null;
+      } | null = null;
+
       if (authoritative) {
         /*
-         * 运行期拿到了成交记录的权威口径，就把它写到已有那一行上 —— 这正是
-         * §2.5 的"重复执行只修正"：`net_pnl` 仍然只在
-         * `trades.insert()` / `applyExchangeFigures()` 里算过一次。
-         *
-         * 为什么必须修正而不是"找到就什么都不做"：运行期与对账对同一回合取到的
-         * 数量口径本来就可能不同（本地持仓量 vs 交易所实际成交量）。如果只认"已存在"
-         * 而把交易所的数字丢掉，账本里留下的就是那个较粗的口径 —— 与账户对不上，
-         * 而 §2.5 要求账目必须能与交易所对得上。
+         * 若该持仓此前有部分减仓（`partialQty > 0` 或 `partialGross !== 0`），
+         * 上面已经算好了扣减已记部分后的 `grossPnl`/`entryFee`/`exitFee` 与剩余量 `local.quantity`，
+         * 必须写扣减后口径，绝不可用整腿原始 `authoritative.*` 覆盖，否则已减仓盈亏会被重复计账。
          */
-        /*
-         * ⚠️ **重建错位时，手续费也要走交易所流水 —— 只保住数量是不够的。**
-         *
-         * 重建的窗口起点落在持仓中间时，整条序列错位，它算出的 fee 是按**错位后的数量**
-         * 计的（实测 HYPEUSDT：重建 0.000970 vs 交易所 0.010204）。只保留本地数量的话，
-         * 净额照样偏大、账目 gap 依旧（0.0596）。
-         *
-         * 只在"数量明显不可信"时才多取一次流水 —— 正常情况不多花这次请求。
-         */
-        let entryFee = authoritative.entryFee;
-        let exitFee = authoritative.exitFee;
-        const localQuantity = tradeStore.quantityOf(alreadyBooked);
-        if (
-          localQuantity !== undefined &&
-          !shouldTrustReconciledQuantity(localQuantity, authoritative.quantity)
-        ) {
-          const fees = await this.commissionsFor(
-            local.symbol,
-            authoritative.openedAt,
-            authoritative.closedAt,
-          );
-          if (fees) {
-            entryFee = fees.entryFee;
-            exitFee = fees.exitFee;
-            log.warn(
-              `[${this.deps.trader.name}] ${local.symbol} 的重建成交量（${authoritative.quantity}）与本地（${localQuantity}）差得太远 —— ` +
-                `本回合手续费改用交易所流水（${(entryFee + exitFee).toFixed(6)}，重建算的是 ${(authoritative.entryFee + authoritative.exitFee).toFixed(6)}）。`,
+        if (partialQty > 0 || partialGross !== 0) {
+          figuresToApply = {
+            grossPnl,
+            entryFee,
+            exitFee,
+            entryPrice: authoritative.entryPrice,
+            exitPrice: authoritative.exitPrice,
+            quantity: local.quantity,
+            entryOrderId: authoritative.entryOrderId || null,
+            exitOrderId: authoritative.exitOrderId || null,
+          };
+        } else {
+          let effEntryFee = authoritative.entryFee;
+          let effExitFee = authoritative.exitFee;
+          const localQuantity = tradeStore.quantityOf(alreadyBooked);
+          if (
+            localQuantity !== undefined &&
+            !shouldTrustReconciledQuantity(localQuantity, authoritative.quantity)
+          ) {
+            const fees = await this.commissionsFor(
+              local.symbol,
+              authoritative.openedAt,
+              authoritative.closedAt,
             );
+            if (fees) {
+              effEntryFee = fees.entryFee;
+              effExitFee = fees.exitFee;
+              log.warn(
+                `[${this.deps.trader.name}] ${local.symbol} 的重建成交量（${authoritative.quantity}）与本地（${localQuantity}）差得太远 —— ` +
+                  `本回合手续费改用交易所流水（${(effEntryFee + effExitFee).toFixed(6)}，重建算的是 ${(authoritative.entryFee + authoritative.exitFee).toFixed(6)}）。`,
+              );
+            }
           }
+          figuresToApply = {
+            grossPnl: authoritative.grossPnl,
+            entryFee: effEntryFee,
+            exitFee: effExitFee,
+            entryPrice: authoritative.entryPrice,
+            exitPrice: authoritative.exitPrice,
+            quantity: authoritative.quantity,
+            entryOrderId: authoritative.entryOrderId || null,
+            exitOrderId: authoritative.exitOrderId || null,
+          };
         }
-
-        tradeStore.applyExchangeFigures({
-          id: alreadyBooked,
-          grossPnl: authoritative.grossPnl,
-          entryFee,
-          exitFee,
-          fundingFee,
-          entryPrice: authoritative.entryPrice,
-          exitPrice: authoritative.exitPrice,
-          quantity: authoritative.quantity,
-          leverage: local.leverage,
-          entryOrderId: authoritative.entryOrderId || null,
-          exitOrderId: authoritative.exitOrderId || null,
-        });
       }
-      positionStore.close(local.id);
-      tradeEvents.record(traderId, local.symbol, 'exit');
+
+      runInTransaction(() => {
+        if (figuresToApply) {
+          tradeStore.applyExchangeFigures({
+            id: alreadyBooked,
+            ...figuresToApply,
+            fundingFee,
+            leverage: local.leverage,
+          });
+        }
+        positionStore.close(local.id);
+        tradeEvents.record(traderId, local.symbol, 'exit');
+      });
       const existing = tradeStore.list(traderId, 200).find((t) => t.id === alreadyBooked);
       this.emit(
         'info',
@@ -7647,46 +7767,48 @@ export class AutoTrader {
       };
     }
 
-    const booked = tradeStore.insert({
-      traderId,
-      symbol: local.symbol,
-      side: isLong ? 'long' : 'short',
-      quantity: authoritative?.quantity ?? local.quantity,
-      entryPrice: local.entry_price,
-      exitPrice,
-      leverage: local.leverage,
-      grossPnl,
-      entryFee,
-      exitFee,
-      fundingFee,
-      closeReason: reason,
-      openedAt: local.opened_at,
-      closedAt,
-      source: 'bot',
-      entryOrderId: authoritative?.entryOrderId ?? null,
-      exitOrderId: authoritative?.exitOrderId ?? null,
-      /*
-       * **把开仓时记下的情报归因搬到成交上**（归因链最后一环，2026-10-12）。
-       *
-       * `local` 就是那行**仓位记录** —— 开仓时（`positions.insert`）
-       * 已把 `decision.intelKeys` 存在它的 `intel_keys` 上。
-       * 平仓时**直接搬过来**，不需要回查决策记录
-       *（那需要靠 symbol + 时间猜，正是我拒绝过的"猜测式归因"）。
-       *
-       * ⚠️ 仓位行缺这个字段（老数据、收养的仓位）时 `?? []` ——
-       * 语义是"**纯技术面成交**"，与 225 笔历史成交一致。
-       *
-       * ⚠️ 对账路径（`reconcileTradeHistory`）从交易所历史重建时**拿不到**它 ——
-       * 那时为空是**正确的**：那条路径本来就没有决策上下文。
-       */
-      intelKeys: parseIntelKeysOf(local.intel_keys),
-      // 这是一笔真实平仓：先查重，别把同一回合记两次（§2.5 的幂等）。
-      idempotent: true,
+    const booked = runInTransaction(() => {
+      const inserted = tradeStore.insert({
+        traderId,
+        symbol: local.symbol,
+        side: isLong ? 'long' : 'short',
+        quantity: closeQuantity,
+        entryPrice: local.entry_price,
+        exitPrice,
+        leverage: local.leverage,
+        grossPnl,
+        entryFee,
+        exitFee,
+        fundingFee,
+        closeReason: reason,
+        openedAt: local.opened_at,
+        closedAt,
+        source: 'bot',
+        entryOrderId: authoritative?.entryOrderId ?? null,
+        exitOrderId: authoritative?.exitOrderId ?? null,
+        /*
+         * **把开仓时记下的情报归因搬到成交上**（归因链最后一环，2026-10-12）。
+         *
+         * `local` 就是那行**仓位记录** —— 开仓时（`positions.insert`）
+         * 已把 `decision.intelKeys` 存在它的 `intel_keys` 上。
+         * 平仓时**直接搬过来**，不需要回查决策记录
+         *（那需要靠 symbol + 时间猜，正是我拒绝过的"猜测式归因"）。
+         *
+         * ⚠️ 仓位行缺这个字段（老数据、收养的仓位）时 `?? []` ——
+         * 语义是"**纯技术面成交**"，与 225 笔历史成交一致。
+         *
+         * ⚠️ 对账路径（`reconcileTradeHistory`）从交易所历史重建时**拿不到**它 ——
+         * 那时为空是**正确的**：那条路径本来就没有决策上下文。
+         */
+        intelKeys: parseIntelKeysOf(local.intel_keys),
+        // 这是一笔真实平仓：先查重，别把同一回合记两次（§2.5 的幂等）。
+        idempotent: true,
+      });
+      positionStore.close(local.id);
+      tradeEvents.record(traderId, local.symbol, 'exit');
+      return inserted;
     });
     const tradeId = booked.id;
-
-    positionStore.close(local.id);
-    tradeEvents.record(traderId, local.symbol, 'exit');
 
     const record = tradeStore.list(traderId, 200).find((t) => t.id === tradeId);
     if (record) eventBus.publish({ type: 'trade', traderId, trade: record });
@@ -8139,6 +8261,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      * The live symptom was exactly this: two traders on one credential, and a
      * boot pass that booked the same four trades onto both.
      */
+    /* 与下方 allExchangeOrderIds() 保持一致，不截断 2000 条，防止高频老机器人本机订单被误判为他机。 */
     const ownOrders = orderStore.exchangeOrderIds(traderId);
     /*
      * **全局**订单号 —— 用来把「别的机器人」和「外部活动」分开。
@@ -8210,6 +8333,10 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      *（`platformSelf` 是重算的，不是累加的）。
      */
     const claimedFillIds = new Set<string>();
+    const claimedCommissionFillIds = new Set<string>();
+    const hasCommissionTradeIds = incomeEvents.some(
+      (e) => e.incomeType === 'COMMISSION' && String(e.tradeId ?? '').length > 0,
+    );
 
     for (const symbol of symbols) {
       if (!this.deps.registry.get(symbol)) continue;
@@ -8399,7 +8526,15 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
                   realizedInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
             const fundingForTrip = fundingInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
             const feesForTrip =
-              commissionsInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
+              trip.fillIds.length > 0 && hasCommissionTradeIds
+                ? commissionsInFills(
+                    incomeEvents,
+                    trip.fillIds,
+                    trip.openedAt,
+                    trip.closedAt,
+                    claimedCommissionFillIds,
+                  )
+                : commissionsInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
             /*
              * 窗口里一条 `REALIZED_PNL` 都没有 ⇒ 这一个"回合"在交易所流水里没有任何
              * 已实现盈亏 —— 那它大概率是重建把两笔平仓拼出来的假回合（金额为 0），
@@ -8417,7 +8552,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
               fundingFee: fundingForTrip,
             });
             try {
-              tradeStore.insert({
+              const bookedReversed = tradeStore.insert({
                 traderId,
                 symbol,
                 side: trip.side,
@@ -8445,13 +8580,15 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
                 exitOrderIds: correctedExitOrderIds,
                 idempotent: true,
               });
-              reversedBookedNet += netForTrip;
-              this.emit(
-                'info',
-                `${symbol} 的一个回合开/平方向不可信（成交历史窗口起点落在持仓中间），` +
-                  `已按【交易所流水】记账：净 ${netForTrip >= 0 ? '+' : ''}${netForTrip.toFixed(4)} USDT。` +
-                  '该行的方向与数量字段请勿用于胜率统计。',
-              );
+              if (bookedReversed.created) {
+                reversedBookedNet += netForTrip;
+                this.emit(
+                  'info',
+                  `${symbol} 的一个回合开/平方向不可信（成交历史窗口起点落在持仓中间），` +
+                    `已按【交易所流水】记账：净 ${netForTrip >= 0 ? '+' : ''}${netForTrip.toFixed(4)} USDT。` +
+                    '该行的方向与数量字段请勿用于胜率统计。',
+                );
+              }
             } catch (error) {
               log.warn(
                 `[${this.deps.trader.name}] ${symbol} 的反向回合记账失败（不影响本周期交易）：` +
@@ -8468,6 +8605,98 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         const funding = fundingInWindow(incomeEvents, symbol, trip.openedAt, trip.closedAt);
         fundingTotal += funding;
         const key = roundTripKey(trip);
+
+        /*
+         * 部分减仓（`manual_partial`）拆分腿专项核算：
+         * 交易所重建出的 `trip` 是整腿合并值，绝不可用整腿去覆盖单笔 `manual_partial` 行
+         * （减仓 ≥67% 时会覆盖成整腿造成双计，减仓 <67% 时又会因边界拒改而静默丢掉尾仓）。
+         * 先查同源拆分行：有尾仓行时只用差额修正尾仓行；停机漏记尾仓时只补录剩余差额。
+         */
+        const splits = tradeStore.legSplitRows({
+          traderId,
+          symbol: trip.symbol,
+          entryOrderId: trip.entryOrderId,
+          exitOrderIds: trip.exitOrderIds,
+          openedAt: trip.openedAt,
+        });
+        const partialRows = splits.filter((r) => r.closeReason === 'manual_partial');
+        if (partialRows.length > 0) {
+          const finalRows = splits.filter((r) => r.closeReason !== 'manual_partial');
+          const partialQty = partialRows.reduce((s, r) => s + r.quantity, 0);
+          const partialGross = partialRows.reduce((s, r) => s + r.grossPnl, 0);
+          const partialEntryFee = partialRows.reduce((s, r) => s + r.entryFee, 0);
+          const partialExitFee = partialRows.reduce((s, r) => s + r.exitFee, 0);
+          const partialFunding = partialRows.reduce((s, r) => s + r.fundingFee, 0);
+          const remQty = Math.max(0, trip.quantity - partialQty);
+          const remGross = trip.grossPnl - partialGross;
+          const remEntryFee = Math.max(0, trip.entryFee - partialEntryFee);
+          const remExitFee = Math.max(0, trip.exitFee - partialExitFee);
+          const remFunding = funding - partialFunding;
+
+          if (finalRows.length === 1) {
+            const finalRow = finalRows[0]!;
+            if (remQty > Math.max(1e-8, trip.quantity * 1e-4)) {
+              correctedAttempted += 1;
+              const figureWrite = tradeStore.applyExchangeFigures({
+                id: finalRow.id,
+                grossPnl: remGross,
+                entryFee: remEntryFee,
+                exitFee: remExitFee,
+                fundingFee: remFunding,
+                entryPrice: trip.entryPrice,
+                exitPrice: trip.exitPrice,
+                quantity: remQty,
+                leverage: this.leverageFor(symbol),
+                entryOrderId: trip.entryOrderId || null,
+                exitOrderId: trip.exitOrderId || null,
+              });
+              if (figureWrite.applied) corrected += 1;
+              else keptForBoundary += 1;
+            }
+            byKey.set(key, finalRow.id);
+            continue;
+          }
+          if (finalRows.length > 1) {
+            continue;
+          }
+          if (
+            remQty > Math.max(1e-8, trip.quantity * 1e-4) &&
+            !partialRows.some((r) => r.exitOrderId && r.exitOrderId === trip.exitOrderId)
+          ) {
+            const bookedRemainder = tradeStore.insert({
+              traderId,
+              symbol: trip.symbol,
+              side: trip.side,
+              quantity: remQty,
+              entryPrice: trip.entryPrice,
+              exitPrice: trip.exitPrice,
+              leverage: this.leverageFor(symbol),
+              grossPnl: remGross,
+              entryFee: remEntryFee,
+              exitFee: remExitFee,
+              fundingFee: remFunding,
+              closeReason: 'reconciled',
+              openedAt: trip.openedAt,
+              closedAt: trip.closedAt,
+              source: 'reconciled',
+              entryOrderId: trip.entryOrderId || null,
+              exitOrderId: trip.exitOrderId || null,
+              idempotent: false,
+            });
+            byKey.set(key, bookedRemainder.id);
+            recovered += 1;
+            const remNet = netPnlOf({
+              grossPnl: remGross,
+              fee: remEntryFee + remExitFee,
+              fundingFee: remFunding,
+            });
+            this.emit(
+              'warn',
+              `对账补录了 ${trip.symbol} 减仓后的剩余平仓：${remQty} @ ${trip.entryPrice} → ${trip.exitPrice}，净 ${remNet >= 0 ? '+' : ''}${remNet.toFixed(4)} USDT。`,
+            );
+          }
+          continue;
+        }
         /*
          * Exact match first. Only when no row owns this entry order do we fall
          * back to the description-only index, and only for rows that have no
@@ -9041,24 +9270,23 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     const openHoldings = ((): { entryFees: number; funding: number } => {
       try {
         /*
-         * 传**入场订单号**而不是标的：同一标的反复开平时，按标的过滤会把
-         * 历史回合的入场费再加一遍（那些回合已经在 `platformSelf` 里了）。
-         * 详见 `openEntryCosts` 的注释。
+         * 与 `netSinceForAccount` / `exchangeNet` 同一账户级口径：汇总该交易所账户下
+         * 所有机器人当前的未平仓持仓（含同仓位后续加仓的入场手续费与持仓期资金费），
+         * 避免多机器人共用账户或加仓后在总账校验里报出假差额。
          */
-        const entryOrderIds = positionStore
-          .open(traderId)
-          .map((p) => p.entry_order_id)
-          .filter((id): id is string => typeof id === 'string' && id.length > 0);
-        /*
-         * 未平仓仓位的**资金费**（`orders` 表没有资金费列，只能从流水取）。
-         * 持仓跨过资金费结算点时平台侧会偏小 —— 代码注释原来把它记成
-         * "已知且方向固定的残差，不要再靠猜口径去补"，而它**不用猜**：
-         * 资金费就在 `income` 流水里，按标的 + 开仓之后聚合即可。
-         */
-        const funding = positionStore
-          .open(traderId)
-          .reduce((sum, p) => sum + fundingSince(incomeEvents, p.symbol, p.opened_at), 0);
-        return { entryFees: orderStore.openEntryCosts(traderId, entryOrderIds), funding };
+        const accountId = this.deps.trader.exchangeAccountId;
+        const openPositions =
+          typeof accountId === 'number' && accountId > 0
+            ? positionStore.openForAccount(accountId)
+            : positionStore.open(traderId);
+        const funding = openPositions.reduce(
+          (sum, p) => sum + fundingSince(incomeEvents, p.symbol, p.opened_at),
+          0,
+        );
+        return {
+          entryFees: orderStore.openEntryCostsForAccount(openPositions),
+          funding,
+        };
       } catch {
         /* 读不到就按 0：宁可这一轮差一点，也不要让对账整个失败。 */
         return { entryFees: 0, funding: 0 };
@@ -9491,7 +9719,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     if (!exchangeOrderId) return null;
 
     if (CONDITIONAL_ORDER_TYPES.has(row.type)) {
-      const algo = await this.deps.broker.getAlgoOrder(Number(exchangeOrderId));
+      const algo = await this.deps.broker.getAlgoOrder(exchangeOrderId);
       /*
        * ══════════════════════════════════════════════════════════════════════
        *  ⚠️ **交易所说"这张单不存在"是一个可判定的答案**（2026-10-14 修的死锁）
@@ -9709,13 +9937,21 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       const live = liveBySymbol.get(local.symbol);
       if (!live) continue;
 
-      // Use the exchange's own unrealised PnL for the decision, but the stored
-      // peak (which we ratchet ourselves) for the reference point.
+      /*
+       * 30s 实时守卫也要刷新峰值浮盈：否则周期内冲高回落时 `peak_pnl_percent` 停在上轮旧值，
+       * 30s 监控永远看不到本次尖峰，也就无法在回吐时触发平仓。
+       */
+      positionStore.updatePeak(traderId, local.symbol, live.unrealizedPnlPercent);
+      const peakPnlPercent = Math.max(local.peak_pnl_percent ?? 0, live.unrealizedPnlPercent);
+
+      // Use the exchange's own unrealised PnL for the decision, and the ratcheted
+      // peak as the reference point.
       const view: PositionView = {
         ...this.toPositionView(local, new Map()),
         markPrice: live.markPrice,
         unrealizedPnl: live.unrealizedPnl,
         unrealizedPnlPercent: live.unrealizedPnlPercent,
+        peakPnlPercent,
       };
 
       /*
@@ -10308,15 +10544,16 @@ reduceQuantity: null,
           filledQty: 0,
           raw: filled.raw,
         });
+        await this.restoreProtection(local, traderId, symbol);
         this.emit(
           'warn',
-          `${symbol} 的平仓单在 ${filled.status} 状态下没有确认成交，本次不记账；仓位仍按本地记录保留，下一轮对账会以交易所的实际持仓为准。`,
+          `${symbol} 的平仓单在 ${filled.status} 状态下没有确认成交，本次不记账并已尝试恢复原有保护单；仓位仍按本地记录保留，下一轮对账会以交易所的实际持仓为准。`,
         );
         return {
           action: decision.action,
           symbol,
           status: 'failed',
-          detail: `平仓单未确认成交（状态 ${filled.status}），未记账，等待对账。`,
+          detail: `平仓单未确认成交（状态 ${filled.status}），未记账，已尝试恢复保护单并等待对账。`,
           orderId: filled.id,
         };
       }
@@ -10365,16 +10602,39 @@ reduceQuantity: null,
         raw: filled.raw,
       });
 
-      if (filledQty < local.quantity) {
+      if (filledQty < local.quantity * (1 - 1e-6)) {
+        const remainingQty = Math.max(0, local.quantity - filledQty);
+        const isLong = local.side === 'long';
+        const refPrice = exitPrice > 0 ? exitPrice : local.entry_price;
+        /*
+         * 保留本地原持仓量留给对账核算（D4 约定：未入账部分平仓前不缩减 local.quantity），
+         * 但立即按剩余敞口补挂 `closePosition: true` 保护单，绝不在 `cancelAllOrders` 后裸奔。
+         */
+        const stopValid =
+          local.stop_loss !== null &&
+          local.stop_loss > 0 &&
+          (isLong ? local.stop_loss < refPrice : local.stop_loss > refPrice);
+        const stopForRestore = stopValid
+          ? local.stop_loss
+          : fallbackStopPrice(
+              refPrice,
+              isLong,
+              this.effectiveConfig().riskControl.fallbackStopLossPercent,
+            );
+        await this.restoreProtection(
+          { ...local, quantity: remainingQty, stop_loss: stopForRestore },
+          traderId,
+          symbol,
+        );
         this.emit(
           'warn',
-          `${symbol} 只成交了 ${filledQty}/${local.quantity}，本地记录已保留，剩余敞口由下一轮对账与后续平仓处理。`,
+          `${symbol} 只成交了 ${filledQty}/${local.quantity}，已立即为剩余敞口 ${remainingQty} 补挂保护单，本地记录保留由下一轮对账与后续平仓处理。`,
         );
         return {
           action: decision.action,
           symbol,
           status: 'failed',
-          detail: `平仓单只成交 ${filledQty}/${local.quantity}，未按全平记账，等待对账。`,
+          detail: `平仓单只成交 ${filledQty}/${local.quantity}，已为剩余敞口补挂保护单，未按全平记账，等待对账。`,
           orderId: filled.id,
         };
       }
@@ -10431,6 +10691,8 @@ reduceQuantity: null,
         filledQty: 0,
         error: (error as Error).message,
       });
+      /* 平仓前已撤掉旧保护单，下单失败必须立即尝试恢复原有保护，避免仓位裸奔。 */
+      await this.restoreProtection(local, traderId, symbol);
       throw error;
     }
   }
@@ -10754,6 +11016,10 @@ reduceQuantity: null,
      * 而走到这里意味着交易所接受了撤单请求。
      */
     positionStore.close(row.id);
+    const cancelledEntry = orderStore.findByExchangeOrderId(traderId, String(orderId));
+    if (cancelledEntry && !TERMINAL_ORDER_STATUSES.includes(cancelledEntry.status)) {
+      orderStore.update(cancelledEntry.id, { status: 'CANCELED' });
+    }
     this.emit('info', `已撤掉 ${symbol} 的限价挂单（挂在 ${row.entry_price}，未成交），释放该入场名额。`);
 
     return {
@@ -10833,6 +11099,10 @@ reduceQuantity: null,
         }
 
         positionStore.close(row.id);
+        const cancelledEntry = orderStore.findByExchangeOrderId(traderId, String(row.entry_order_id));
+        if (cancelledEntry && !TERMINAL_ORDER_STATUSES.includes(cancelledEntry.status)) {
+          orderStore.update(cancelledEntry.id, { status: 'CANCELED' });
+        }
         cancelled += 1;
       } catch (error) {
         this.emit('warn', `全部平仓时撤销 ${symbol} 的挂单出错：${(error as Error).message}`);
@@ -10904,6 +11174,8 @@ reduceQuantity: null,
      * 重拉会多一次网络请求，也可能与刚才执行时用的读数不一致。
      */
     account: { equity: number; availableBalance: number; marginUsed: number };
+    /** 周期取消信号：手动停止或硬超时时同步中止执行回执的在途模型请求。 */
+    signal?: AbortSignal;
   }): Promise<ExecutionLogEntry[]> {
     const traderId = this.deps.trader.id;
 
@@ -11000,17 +11272,28 @@ reduceQuantity: null,
        * 与主调用同一个消息形状（system + 稳定段 + 变动段 + 回执），
        * **前缀完全一致** —— 那让这一轮的输入能命中缓存，成本是未命中价的 1/50。
        */
+      const callOpts = input.signal ? { signal: input.signal } : undefined;
       const response = this.deps.model.chat
-        ? await this.deps.model.chat([
-            { role: 'system', content: input.systemPrompt },
-            ...(input.stablePrompt.length > 0
-              ? [{ role: 'user' as const, content: input.stablePrompt }]
-              : []),
-            { role: 'user', content: input.volatilePrompt },
-            { role: 'assistant', content: '（已给出决策。）' },
-            { role: 'user', content: feedback },
-          ])
-        : await this.deps.model.complete(input.systemPrompt, `${input.volatilePrompt}\n\n${feedback}`);
+        ? await this.deps.model.chat(
+            [
+              { role: 'system', content: input.systemPrompt },
+              ...(input.stablePrompt.length > 0
+                ? [
+                    { role: 'user' as const, content: input.stablePrompt },
+                    { role: 'assistant' as const, content: '（已读取当前状态与历史。）' },
+                  ]
+                : []),
+              { role: 'user', content: input.volatilePrompt },
+              { role: 'assistant', content: '（已给出决策。）' },
+              { role: 'user', content: feedback },
+            ],
+            callOpts,
+          )
+        : await this.deps.model.complete(
+            input.systemPrompt,
+            `${input.volatilePrompt}\n\n${feedback}`,
+            callOpts,
+          );
       text = response.text;
       usage = response.usage;
     } catch (error) {
@@ -11023,9 +11306,11 @@ reduceQuantity: null,
     }
 
     /* token 用量必须累计 —— 否则"这一轮花了多少"会少算一整次调用。 */
-    input.progress.promptTokens = (input.progress.promptTokens ?? 0) + (usage.promptTokens ?? 0);
-    input.progress.completionTokens =
-      (input.progress.completionTokens ?? 0) + (usage.completionTokens ?? 0);
+    input.progress.promptTokens = addNullableUsage(input.progress.promptTokens, usage.promptTokens);
+    input.progress.completionTokens = addNullableUsage(
+      input.progress.completionTokens,
+      usage.completionTokens,
+    );
 
     /*
      * ⚠️ **追问就记 —— 不管模型有没有真的调整。**
@@ -11210,6 +11495,7 @@ reduceQuantity: null,
   private async executeOpen(
     decision: Decision,
     snapshot: MarketSnapshot | undefined,
+    maxMarginUsd?: number,
   ): Promise<ExecutionLogEntry> {
     const traderId = this.deps.trader.id;
     const symbol = normalizeSymbol(decision.symbol);
@@ -11380,20 +11666,27 @@ reduceQuantity: null,
      * 所以引擎现在把 `quantity` 一起交出来，这里直接用。**回退路径保留**：
      * 字段缺失时（回放数据、别的调用方）仍按原来的算法算，并保留"差一档就进位"的兜底。
      */
+    const sizingPrice =
+      decision.entryType === 'limit' && (decision.limitPrice ?? 0) > 0
+        ? (decision.limitPrice as number)
+        : price;
     let quantity: number;
     if (decision.quantity && decision.quantity > 0) {
       quantity = decision.quantity;
     } else {
-      quantity = this.deps.registry.notionalToQuantity(symbol, decision.positionSizeUsd, price);
+      quantity = this.deps.registry.notionalToQuantity(symbol, decision.positionSizeUsd, sizingPrice);
     }
     const minNotional = this.deps.registry.minNotional(symbol);
-    if (minNotional > 0 && quantity > 0 && quantity * price < minNotional) {
+    if (minNotional > 0 && quantity > 0 && quantity * sizingPrice < minNotional) {
       const bumped = this.deps.registry.roundQuantityUp(symbol, quantity);
-      if (bumped > quantity && bumped * price >= minNotional) {
+      const bumpedMargin = (bumped * sizingPrice) / Math.max(1, decision.leverage);
+      const withinMarginBudget =
+        maxMarginUsd === undefined || !Number.isFinite(maxMarginUsd) || bumpedMargin <= maxMarginUsd;
+      if (bumped > quantity && bumped * sizingPrice >= minNotional && withinMarginBudget) {
         this.emit(
           'info',
-          `${symbol} 的数量按挂单价 ${price} 向下取整后只有 $${(quantity * price).toFixed(4)}` +
-            `（低于交易所下限 $${minNotional}）—— 已上取一档到 ${bumped}（$${(bumped * price).toFixed(4)}）。`,
+          `${symbol} 的数量按挂单价 ${sizingPrice} 向下取整后只有 $${(quantity * sizingPrice).toFixed(4)}` +
+            `（低于交易所下限 $${minNotional}）—— 已上取一档到 ${bumped}（$${(bumped * sizingPrice).toFixed(4)}）。`,
         );
         quantity = bumped;
       }
@@ -12491,44 +12784,70 @@ reduceQuantity: null,
      * 所以日志里不要把它写成光秃秃的「净 X USDT」（会让人以为已扣开仓费，
      * 和账户对上时会发现差一点点）。这里明确标成"本笔平仓净额"。
      */
-    const netPnl = grossPnl - exitFee - (paperEntryFee ?? 0);
-    tradeStore.insert({
-      traderId,
-      symbol: decision.symbol,
-      side: local.side === 'long' ? 'long' : 'short',
-      quantity: filledReduceQty,
-      entryPrice: local.entry_price,
-      exitPrice,
-      leverage: local.leverage,
-      grossPnl,
-      entryFee: paperEntryFee ?? 0,
-      exitFee,
-      fundingFee: 0,
-      closeReason: 'manual_partial',
-      openedAt: local.opened_at,
-      closedAt: new Date().toISOString(),
-      source: 'bot',
-      entryOrderId: null,
-      exitOrderId: filledId,
-      idempotent: false,
-    });
-
-    /* ④ 更新持仓：数量减、**均价不变**、已记部分累加。 */
     const remaining = local.quantity - filledReduceQty;
-    positionStore.resize(traderId, decision.symbol, {
-      quantity: remaining,
-      entryPrice: local.entry_price,
-      marginUsed: (remaining * local.entry_price) / Math.max(local.leverage, 1),
+    const minStepQty = this.deps.registry.get(decision.symbol)?.minQty ?? 0;
+    const effectivelyFlat = remaining <= 1e-12 || (minStepQty > 0 && remaining < minStepQty);
+    if (effectivelyFlat) {
       /*
-       * ⚠️ **累计的是毛盈亏，不是净。**
-       *
-       * 最终平仓时会用它去减交易所重建的**整段毛盈亏**（见 `bookClose` 的
-       * `grossRaw - partialGross`）—— 那里扣的必须是同一口径。这里若记净额，
-       * 最终的毛盈亏会凭空多出这一部分的平仓手续费（`G − (g − xf)` 而非 `G − g`），
-       * 而手续费那一侧还会再算一遍，账目因此偏高。
+       * 若实际成交量已覆盖整笔持仓（或剩余已低于交易所最小下单量），直接走
+       * `bookClosedPosition` 结清仓位并记账，绝不留下 `quantity <= 0` 的僵尸 `open` 行。
        */
-      addRealizedPartialPnl: grossPnl,
-      addBookedPartialQty: filledReduceQty,
+      const booked = await this.bookClosedPosition(
+        local,
+        'manual',
+        exitPrice,
+        exitFee,
+        new Date().toISOString(),
+        this.entryFeeExtra(paperEntryFee),
+      );
+      return {
+        action: decision.action,
+        symbol: decision.symbol,
+        status: 'ok',
+        detail:
+          `减仓 ${filledReduceQty} @ ${exitPrice} 已覆盖全部剩余持仓，按全平入账，净 ${booked.netPnl >= 0 ? '+' : ''}${booked.netPnl.toFixed(4)} USDT。`,
+      };
+    }
+
+    const netPnl = grossPnl - exitFee - (paperEntryFee ?? 0);
+    runInTransaction(() => {
+      tradeStore.insert({
+        traderId,
+        symbol: decision.symbol,
+        side: local.side === 'long' ? 'long' : 'short',
+        quantity: filledReduceQty,
+        entryPrice: local.entry_price,
+        exitPrice,
+        leverage: local.leverage,
+        grossPnl,
+        entryFee: paperEntryFee ?? 0,
+        exitFee,
+        fundingFee: 0,
+        closeReason: 'manual_partial',
+        openedAt: local.opened_at,
+        closedAt: new Date().toISOString(),
+        source: 'bot',
+        entryOrderId: null,
+        exitOrderId: filledId,
+        idempotent: false,
+      });
+
+      /* ④ 更新持仓：数量减、**均价不变**、已记部分累加（与上面成交入账在同一事务内原子落库）。 */
+      positionStore.resize(traderId, decision.symbol, {
+        quantity: remaining,
+        entryPrice: local.entry_price,
+        marginUsed: (remaining * local.entry_price) / Math.max(local.leverage, 1),
+        /*
+         * ⚠️ **累计的是毛盈亏，不是净。**
+         *
+         * 最终平仓时会用它去减交易所重建的**整段毛盈亏**（见 `bookClose` 的
+         * `grossRaw - partialGross`）—— 那里扣的必须是同一口径。这里若记净额，
+         * 最终的毛盈亏会凭空多出这一部分的平仓手续费（`G − (g − xf)` 而非 `G − g`），
+         * 而手续费那一侧还会再算一遍，账目因此偏高。
+         */
+        addRealizedPartialPnl: grossPnl,
+        addBookedPartialQty: filledReduceQty,
+      });
     });
 
     /*
@@ -12603,44 +12922,17 @@ reduceQuantity: null,
     stop: number | null;
     target: number | null;
     traderId: number;
+    /** 仅补挂止盈时保留本地既有止损价与单号，不覆盖也不撤改交易所活止损。 */
+    preserveStop?: { stop: number | null; stopOrderId: string | null };
+    /** 仅补挂止损时保留本地既有止盈价与单号，不覆盖也不撤改交易所活止盈。 */
+    preserveTarget?: { target: number | null; tpOrderId: string | null };
   }): Promise<{ stopPlaced: boolean; targetPlaced: boolean; failures: string[] }> {
     const exitSide: 'BUY' | 'SELL' = input.side === 'long' ? 'SELL' : 'BUY';
-    let stopOrderId: string | null = null;
-    let tpOrderId: string | null = null;
+    let stopOrderId: string | null = input.preserveStop?.stopOrderId ?? null;
+    let tpOrderId: string | null = input.preserveTarget?.tpOrderId ?? null;
     /** 挂单失败的原因。**必须带回去** —— 见下面的说明。 */
     const failures: string[] = [];
 
-    /*
-     * ⚠️ **先把这个标的的旧保护单撤干净，再挂新的。**
-     *
-     * ## 这个函数叫 `replaceProtection`，但原来只做了"挂"、没有"替代"
-     *
-     * 实测（2026-10-02）：HYPEUSDT 持仓上**同时有两张 STOP_MARKET 存活** ——
-     * `#788` 是上移止损时挂的、`#790` 是缺失检测时挂的，而 `positionStore`
-     * 只记得其中一张。历史上 LTCUSDT 在同一时刻挂过 4 张。
-     *
-     * 因为 `placeProtection` 传的是 `closePosition: true`，多余的止损**不会**
-     * 反手开仓（第一张平掉仓位后第二张无仓可平）—— 所以这不是致命风险，
-     * 但有三个真实代价：
-     *
-     *   1. 本地账目与交易所长期不一致（日志里"对账结清了 3 张…"就是它）；
-     *   2. 占用交易所的挂单额度；
-     *   3. **上移止损时新旧并存** —— 旧的那张（更差的价位）可能先被触发，
-     *      于是"止损上移"这件事在有重复单时是**没有生效**的。
-     *
-     * ## 为什么撤"全部"而不是"DB 里记的那一张"
-     *
-     * `positionStore` 只保存最后一次的 `stop_order_id`。上移过 N 次止损就会
-     * 留下 N-1 张**不在 DB 里、却在交易所侧仍然有效**的孤儿单。只撤 DB 里
-     * 那个 id 根本撤不干净 —— 那正是上面 `#788` 的来历。
-     *
-     * 撤单失败**不阻断**：撤不掉的通常已经成交或过期，那时挂新单是对的。
-     *
-     * ⚠️ **"撤旧的"现在由 `placeProtection` 自己做（按 purpose 撤同类）** ——
-     * 这个不变量放在最底层，调用点就不可能漏。见那里的完整说明：
-     * 用户实测到 ETHUSDT 上堆了 **3 组**重复止盈/止损，根因正是
-     * "先撤"散落在 6 个调用点里、只覆盖了一两处。
-     */
     if (input.stop !== null && input.stop > 0) {
       stopOrderId = await this.placeProtection({
         symbol: input.symbol,
@@ -12673,11 +12965,20 @@ reduceQuantity: null,
       });
     }
 
+    const storedStop =
+      input.stop !== null && input.stop > 0
+        ? (stopOrderId ? input.stop : null)
+        : (input.preserveStop?.stop ?? input.stop);
+    const storedTarget =
+      input.target !== null && input.target > 0
+        ? (tpOrderId ? input.target : null)
+        : (input.preserveTarget?.target ?? input.target);
+
     positionStore.setProtection(
       input.traderId,
       input.symbol,
-      input.stop,
-      input.target,
+      storedStop,
+      storedTarget,
       stopOrderId,
       tpOrderId,
     );
@@ -12973,13 +13274,33 @@ reduceQuantity: null,
      * "是否仍在亏损侧"，读到旧值的话它会以为还需要移，于是**每一轮都重复挂一张新止损**。
      * 保本止损那段注释里已经记过这个坑。
      */
+    /*
+     * ④ 本地记录必须与交易所一致 —— 连**单号**一起更新。
+     *
+     * 只在止盈挂单实际成功（`tpOrderId !== null`）时才写入 `newTarget`；
+     * 实盘前序 `cancelAllOrders` 已撤清旧止盈，故 `newTarget === null` 时实盘不再保留旧止盈。
+     */
+    const storedStop =
+      newStop !== null
+        ? (stopOrderId ? newStop : local.stop_loss)
+        : local.stop_loss;
+    const storedStopOrderId =
+      newStop !== null ? stopOrderId : (this.isDryRun ? local.stop_order_id : null);
+    const storedTarget =
+      newTarget !== null
+        ? (tpOrderId ? newTarget : null)
+        : (this.isDryRun ? local.take_profit : null);
+    const storedTpOrderId =
+      newTarget !== null
+        ? tpOrderId
+        : (this.isDryRun ? local.tp_order_id : null);
     positionStore.setProtection(
       traderId,
       decision.symbol,
-      newStop ?? local.stop_loss,
-      newTarget ?? local.take_profit,
-      stopOrderId ?? (newStop === null ? local.stop_order_id : null),
-      tpOrderId ?? (newTarget === null ? local.tp_order_id : null),
+      storedStop,
+      storedTarget,
+      storedStopOrderId,
+      storedTpOrderId,
     );
 
     if (failed.length > 0) {
@@ -13204,98 +13525,133 @@ reduceQuantity: null,
     side: 'BUY' | 'SELL',
     traderId: number,
   ): Promise<{ avgPrice: number; fee: number; entryFee?: number } | null> {
-    const clientOrderId = makeClientId('flatten', symbol);
     try {
-      const placed = await this.deps.broker.placeOrder({
-        symbol,
-        side,
-        type: 'MARKET',
-        quantity,
-        reduceOnly: true,
-        clientOrderId,
-      });
-      const filled = await this.deps.broker.waitForFill(placed);
+      let totalFilled = 0;
+      let weightedNotional = 0;
+      let totalFee = 0;
+      let totalEntryFee: number | undefined;
+      let lastAvgPrice = 0;
+      let lastStatus = '';
 
-      /*
-       * ⚠️ **"没成交"和"平掉了"是两句相反的话，这里必须挡住。**
-       *
-       * `waitForFill` 超时（默认 10s）后会返回**它最后一次轮询看到的东西** ——
-       * 可能是一张仍然挂着的单、也可能是 `executedQty = 0`。原来的代码不看这个
-       * 数字，照样返回 `{avgPrice, fee}`，而**5 处调用点都拿它当"已经平掉"的
-       * 凭据**去 `bookClosedPosition()`：写一行 `trades` + `positionStore.close()`。
-       *
-       * 结果是 §2.6 那个最糟状态的镜像：**交易所上仓位还在、保护单已经被撤掉、
-       * 而本地账本说已经平了** —— 机器人下一轮按"空仓"决策，敞口无人管。
-       *
-       * 对照：同文件 `executeClose` 有一整段注释写着「未确认的平仓绝不能记成
-       * 完成的回合」，并在 `filledQty <= 0` 时拒记。**同一条纪律原来只在平仓
-       * 路径实现了，而这里（保护单挂不上时的紧急退出）漏了。**
-       *
-       * 返回 `null` 让调用方**不记账**：漏记会在下一轮 `reconcilePositions` /
-       * 对账里自己修好，而凭空记一笔会永久污染账本（§2.3）。
-       */
-      if (!(Number(filled.executedQty) > 0)) {
+      let lastError: string | null = null;
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const remainingToClose = quantity - totalFilled;
+        if (remainingToClose <= quantity * 1e-6) break;
+
+        const clientOrderId = makeClientId('flatten', symbol);
+        let filled;
+        try {
+          const placed = await this.deps.broker.placeOrder({
+            symbol,
+            side,
+            type: 'MARKET',
+            quantity: remainingToClose,
+            reduceOnly: true,
+            clientOrderId,
+          });
+          filled = await this.deps.broker.waitForFill(placed);
+        } catch (attemptError) {
+          lastError = (attemptError as Error).message;
+          /* 若首笔已部分成交而二次补平抛错（例如残仓低于 minQty 或网络抖动），
+             跳出循环走下方残仓缩量 + 补挂保护单分支，绝不跳过保护直接裸奔。 */
+          if (totalFilled > 0) break;
+          throw attemptError;
+        }
+        const executedQty = Number(filled.executedQty) || 0;
+        lastStatus = filled.status;
+
+        if (!(executedQty > 0)) {
+          if (attempt === 0) {
+            this.emit(
+              'error',
+              `${symbol} 的紧急平仓没有被交易所确认成交（status=${filled.status}、executedQty=${filled.executedQty}）` +
+                '—— 仓位可能仍然是开的，这一笔不记账，留给下一轮对账处理。需要人工确认交易所侧状态。',
+            );
+            return null;
+          }
+          break;
+        }
+
+        let fee = 0;
+        let entryFee: number | undefined;
+        if (this.isDryRun) {
+          const estimate = this.dryRunRoundTripFee(filled.avgPrice, executedQty);
+          fee = estimate.exitFee;
+          entryFee = estimate.entryFee;
+        } else {
+          try {
+            const fills = await this.deps.broker.getUserTrades(symbol, 10);
+            fee = this.settlementFeeOf(
+              fills.filter((fill) => String(fill.orderId) === filled.id),
+              symbol,
+            );
+          } catch {
+            /* leave the fee at zero rather than fail the flatten */
+          }
+        }
+
+        this.recordOrder({
+          traderId,
+          exchangeOrderId: filled.id,
+          clientOrderId,
+          symbol,
+          side,
+          type: 'MARKET',
+          purpose: 'exit',
+          quantity: remainingToClose,
+          price: null,
+          triggerPrice: null,
+          status: filled.status,
+          avgPrice: filled.avgPrice,
+          filledQty: executedQty,
+          fee,
+          raw: filled.raw,
+        });
+
+        totalFilled += executedQty;
+        if (filled.avgPrice > 0) {
+          weightedNotional += executedQty * filled.avgPrice;
+          lastAvgPrice = filled.avgPrice;
+        }
+        totalFee += fee;
+        if (entryFee !== undefined) {
+          totalEntryFee = (totalEntryFee ?? 0) + entryFee;
+        }
+      }
+
+      if (totalFilled < quantity * (1 - 1e-6)) {
+        const remainingQty = Math.max(0, quantity - totalFilled);
+        const local = positionStore.getOpenBySymbol(traderId, symbol);
+        if (local && remainingQty > 0) {
+          const isLong = local.side === 'long';
+          const refPrice = lastAvgPrice > 0 ? lastAvgPrice : local.entry_price;
+          const stopValid =
+            local.stop_loss !== null &&
+            local.stop_loss > 0 &&
+            (isLong ? local.stop_loss < refPrice : local.stop_loss > refPrice);
+          const stopForRestore = stopValid
+            ? local.stop_loss
+            : fallbackStopPrice(
+                refPrice,
+                isLong,
+                this.effectiveConfig().riskControl.fallbackStopLossPercent,
+              );
+          await this.restoreProtection(
+            { ...local, quantity: remainingQty, stop_loss: stopForRestore },
+            traderId,
+            symbol,
+          );
+        }
         this.emit(
           'error',
-          `${symbol} 的紧急平仓没有被交易所确认成交（status=${filled.status}、executedQty=${filled.executedQty}）` +
-            '—— 仓位可能仍然是开的，这一笔不记账，留给下一轮对账处理。需要人工确认交易所侧状态。',
+          `${symbol} 的紧急平仓仅部分成交（${totalFilled}/${quantity}，末次状态=${lastStatus}${lastError ? `，二次补平错误=${lastError}` : ''}）` +
+            '—— 剩余敞口仍在交易所，已尝试为剩余敞口补挂保护单，本地持仓保留不按全平记账，请人工确认。',
         );
         return null;
       }
 
-      /*
-       * Commission is captured here too. This exit is a pure cost — the entry
-       * and the exit both paid a fee — and reporting a net PnL that omits it
-       * would make the platform's books read better than the account's (§2.5).
-       *
-       * 模拟盘没有成交明细：按 `dryRunRoundTripFee()` 估整趟往返费并拆两侧
-       *（2026-11-09，行为变更）—— 紧急平仓同样是"没有保护就退出"的真实成本，
-       * 不能因为它是模拟盘就记 0（那会让"止损挂不上"看起来几乎免费）。
-       */
-      let fee = 0;
-      let entryFee: number | undefined;
-      if (this.isDryRun) {
-        const estimate = this.dryRunRoundTripFee(
-          filled.avgPrice,
-          Number(filled.executedQty) || quantity,
-        );
-        fee = estimate.exitFee;
-        entryFee = estimate.entryFee;
-      } else {
-        try {
-          const fills = await this.deps.broker.getUserTrades(symbol, 10);
-          fee = this.settlementFeeOf(
-            fills.filter((fill) => String(fill.orderId) === filled.id),
-            symbol,
-          );
-        } catch {
-          /* leave the fee at zero rather than fail the flatten */
-        }
-      }
-
-      this.recordOrder({
-        traderId,
-        exchangeOrderId: filled.id,
-        clientOrderId,
-        symbol,
-        side,
-        type: 'MARKET',
-        purpose: 'exit',
-        quantity,
-        price: null,
-        triggerPrice: null,
-        status: filled.status,
-        avgPrice: filled.avgPrice,
-        filledQty: filled.executedQty,
-        fee,
-        raw: filled.raw,
-      });
-      /*
-       * 撤掉刚才那张仓位的残余挂单。**这一步失败不能翻转"已经平掉"这个结论** ——
-       * 平仓单已经成交、账也已经记好了，只是还有一张挂单没撤干净。
-       * （`cancelAllOrders` 的契约是"撤不掉就抛"，所以这里必须显式接住，
-       * 否则异常会跑到外层 `catch`，让调用方以为平仓失败而拒绝记账。）
-       */
+      const avgPrice = totalFilled > 0 && weightedNotional > 0 ? weightedNotional / totalFilled : lastAvgPrice;
       await this.deps.broker.cancelAllOrders(symbol).catch((error) => {
         this.emit(
           'warn',
@@ -13303,7 +13659,11 @@ reduceQuantity: null,
         );
       });
       this.emit('warn', `因保护单挂单失败，已市价平掉 ${symbol}。`);
-      return { avgPrice: filled.avgPrice, fee, ...(entryFee !== undefined ? { entryFee } : {}) };
+      return {
+        avgPrice,
+        fee: totalFee,
+        ...(totalEntryFee !== undefined ? { entryFee: totalEntryFee } : {}),
+      };
     } catch (error) {
       this.emit(
         'error',

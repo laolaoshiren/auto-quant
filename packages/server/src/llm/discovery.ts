@@ -64,6 +64,17 @@ interface GeminiModelsBody {
  * something to click — but the result is labelled `fallback` so the UI never
  * pretends a guess is authoritative.
  */
+/** 打码任何可能混进异常或响应里的明文 API Key（尤其是 Gemini `?key=...`）。 */
+function redactApiKey(text: string, apiKey: string): string {
+  let out = text.replace(/([?&]key=)[^&\s'"`)]+/gi, '$1***');
+  if (apiKey) {
+    out = out.split(apiKey).join('***');
+    const encoded = encodeURIComponent(apiKey);
+    if (encoded !== apiKey) out = out.split(encoded).join('***');
+  }
+  return out;
+}
+
 export async function discoverModels(options: {
   provider: LlmProviderId;
   apiKey: string;
@@ -82,7 +93,11 @@ export async function discoverModels(options: {
   if (!baseUrl) {
     return fallback('请先填写基础 URL，然后才能获取模型列表。');
   }
-  if (!options.apiKey) {
+  /*
+   * `custom` 提供商（本地 Ollama / vLLM / 免鉴权网关）允许不填 API Key 拉取模型清单，
+   * 与 `api/server.ts` 允许 custom 无 key 的口径一致。
+   */
+  if (!options.apiKey && options.provider !== 'custom') {
     return fallback('请先填写 API Key，然后才能获取模型列表。');
   }
 
@@ -100,16 +115,18 @@ export async function discoverModels(options: {
     'User-Agent': 'auto-quant/0.1',
   };
 
-  switch (descriptor.modelsAuth) {
-    case 'bearer':
-      headers.Authorization = `Bearer ${options.apiKey}`;
-      break;
-    case 'x-api-key':
-      headers['x-api-key'] = options.apiKey;
-      break;
-    case 'query-key':
-      url.searchParams.set('key', options.apiKey);
-      break;
+  if (options.apiKey) {
+    switch (descriptor.modelsAuth) {
+      case 'bearer':
+        headers.Authorization = `Bearer ${options.apiKey}`;
+        break;
+      case 'x-api-key':
+        headers['x-api-key'] = options.apiKey;
+        break;
+      case 'query-key':
+        url.searchParams.set('key', options.apiKey);
+        break;
+    }
   }
   for (const [key, value] of Object.entries(descriptor.modelsHeaders ?? {})) {
     headers[key] = value;
@@ -136,7 +153,7 @@ export async function discoverModels(options: {
       const hint =
         response.status === 401 || response.status === 403
           ? 'API Key 被拒绝 —— 请确认密钥正确，且该密钥有权限访问模型列表。'
-          : error.message;
+          : redactApiKey(error.message, options.apiKey);
       return fallback(hint);
     }
 
@@ -159,7 +176,7 @@ export async function discoverModels(options: {
       message: `已从 ${descriptor.label} 获取到 ${models.length} 个可用模型。`,
     };
   } catch (error) {
-    const message = (error as Error).message;
+    const message = redactApiKey((error as Error).message, options.apiKey);
     log.warn(`模型列表获取失败（${descriptor.id}）：${message}`);
     return fallback(`无法连接模型接口：${message}`);
   }

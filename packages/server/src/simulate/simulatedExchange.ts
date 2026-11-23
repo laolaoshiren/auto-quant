@@ -669,7 +669,7 @@ export class SimulatedExchange {
    * This is what lets the trading loop distinguish "the stop fired" from "the
    * target fired" after the position is gone.
    */
-  async getAlgoOrder(algoId: number): Promise<BinanceAlgoOrderResponse | null> {
+  async getAlgoOrder(algoId: string | number): Promise<BinanceAlgoOrderResponse | null> {
     const id = String(algoId);
 
     for (const position of this.positions.values()) {

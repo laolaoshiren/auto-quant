@@ -20,7 +20,7 @@
  * 用户原话是「我不懂 JEV 实际用法」。给他一个光秃秃的下拉框（`code` / `hybrid` / `jev`）
  * 等于让他瞎猜 —— 而猜错的代价是**真金白银的交易行为改变**。
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api, type JevOption, type JevPreset } from '../../lib/api.js';
 import { ErrorNote, Spinner3 } from '../ui.js';
@@ -86,28 +86,73 @@ function estimateDailyCost(opt: Record<string, string>): {
   };
 }
 
+const SLIDER_COMMIT_KEYS = new Set([
+  'ArrowLeft',
+  'ArrowRight',
+  'ArrowUp',
+  'ArrowDown',
+  'Home',
+  'End',
+  'PageUp',
+  'PageDown',
+]);
+
 export function JevSettings({ traderId }: { traderId: number }) {
   const [options, setOptions] = useState<JevOption[] | null>(null);
   /** 可一键套用的参数预设（与服务端同一份定义）。 */
   const [presets, setPresets] = useState<JevPreset[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [errorKind, setErrorKind] = useState<'load' | 'save' | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   /** 刚改过的项 —— 用来显示"已保存，下一轮生效"的短暂提示。 */
   const [justSaved, setJustSaved] = useState<string | null>(null);
+
+  /** 最近一次与服务端对齐的权威值：用于跳过重复提交，以及保存失败时回滚滑杆/数字框。 */
+  const committedValuesRef = useRef<Record<string, string>>({});
+  /** 单调递增的写请求序号：丢弃乱序/过期的并发响应。 */
+  const writeSeqRef = useRef(0);
+  const savedTimerRef = useRef<number | null>(null);
+
+  const syncCommitted = useCallback((rows: readonly JevOption[]) => {
+    const map: Record<string, string> = {};
+    for (const o of rows) map[o.key] = o.value;
+    committedValuesRef.current = map;
+  }, []);
+
+  const scheduleClearSaved = useCallback((target: string) => {
+    if (savedTimerRef.current !== null) window.clearTimeout(savedTimerRef.current);
+    savedTimerRef.current = window.setTimeout(() => {
+      savedTimerRef.current = null;
+      setJustSaved((k) => (k === target ? null : k));
+    }, 2500);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (savedTimerRef.current !== null) {
+        window.clearTimeout(savedTimerRef.current);
+        savedTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
       try {
         const r = await api.traderJevOptions(traderId, signal);
         setOptions(r.options);
+        syncCommitted(r.options);
         setPresets(r.presets ?? []);
         setError(null);
+        setErrorKind(null);
       } catch (err) {
         if ((err as Error).name === 'AbortError') return;
         setError((err as Error).message);
+        setErrorKind('load');
       }
     },
-    [traderId],
+    [traderId, syncCommitted],
   );
 
   useEffect(() => {
@@ -116,23 +161,42 @@ export function JevSettings({ traderId }: { traderId: number }) {
     return () => controller.abort();
   }, [load]);
 
+  const rollbackToCommitted = useCallback(() => {
+    const snapshot = committedValuesRef.current;
+    setOptions((prev) =>
+      prev === null ? null : prev.map((x) => (x.key in snapshot ? { ...x, value: snapshot[x.key]! } : x)),
+    );
+  }, []);
+
   const save = async (key: string, value: string): Promise<void> => {
+    const seq = ++writeSeqRef.current;
     setBusyKey(key);
     try {
       /*
-       * 用返回值直接刷新 —— 不乐观更新。这些选项会真的改变交易行为，
-       * 界面先假装成功、实际失败，是最糟的那种体验。
+       * 用返回值直接刷新，并通过递增序号丢弃过期并发响应；
+       * 保存失败时把本地草稿回滚到最后一次服务端权威值，避免界面假装已生效。
        */
       const r = await api.setTraderJevOption(traderId, key, value);
+      if (seq !== writeSeqRef.current) return;
       setOptions(r.options);
+      syncCommitted(r.options);
       setError(null);
+      setErrorKind(null);
       setJustSaved(key);
-      window.setTimeout(() => setJustSaved((k) => (k === key ? null : k)), 2500);
+      scheduleClearSaved(key);
     } catch (err) {
+      if (seq !== writeSeqRef.current) return;
+      rollbackToCommitted();
       setError((err as Error).message);
+      setErrorKind('save');
     } finally {
-      setBusyKey(null);
+      if (seq === writeSeqRef.current) setBusyKey(null);
     }
+  };
+
+  const commitIfChanged = (key: string, value: string): void => {
+    if (committedValuesRef.current[key] === value) return;
+    void save(key, value);
   };
 
   /**
@@ -142,20 +206,25 @@ export function JevSettings({ traderId }: { traderId: number }) {
    * 界面先假装成功、实际失败是最糟的体验（与 `save` 同一条纪律）。
    */
   const applyPreset = async (presetId: string): Promise<void> => {
-    setBusyKey(`preset:${presetId}`);
+    const seq = ++writeSeqRef.current;
+    const tag = `preset:${presetId}`;
+    setBusyKey(tag);
     try {
       const r = await api.applyTraderJevPreset(traderId, presetId);
+      if (seq !== writeSeqRef.current) return;
       setOptions(r.options);
+      syncCommitted(r.options);
       setError(null);
-      setJustSaved(`preset:${presetId}`);
-      window.setTimeout(
-        () => setJustSaved((k) => (k === `preset:${presetId}` ? null : k)),
-        2500,
-      );
+      setErrorKind(null);
+      setJustSaved(tag);
+      scheduleClearSaved(tag);
     } catch (err) {
+      if (seq !== writeSeqRef.current) return;
+      rollbackToCommitted();
       setError((err as Error).message);
+      setErrorKind('save');
     } finally {
-      setBusyKey(null);
+      if (seq === writeSeqRef.current) setBusyKey(null);
     }
   };
 
@@ -165,7 +234,11 @@ export function JevSettings({ traderId }: { traderId: number }) {
 
   return (
     <div className="px-2.5 py-2">
-      {error !== null && <ErrorNote className="mb-2">JEV 选项读取失败：{error}</ErrorNote>}
+      {error !== null && (
+        <ErrorNote className="mb-2">
+          {errorKind === 'save' ? 'JEV 选项保存失败' : 'JEV 选项读取失败'}：{error}
+        </ErrorNote>
+      )}
 
       <p className="mb-2 text-[11px] leading-4 text-ink-faint">
         这些选项只影响 <strong className="font-medium text-ink-lo">JEV 模式</strong>的机器人。
@@ -354,9 +427,20 @@ export function JevSettings({ traderId }: { traderId: number }) {
                             (prev ?? []).map((x) => (x.key === o.key ? { ...x, value: next } : x)),
                           );
                         }}
-                        /* 拖完才保存 —— 拖动过程中每一帧都写库毫无意义。 */
-                        onPointerUp={(e) => void save(o.key, (e.target as HTMLInputElement).value)}
-                        onKeyUp={(e) => void save(o.key, (e.target as HTMLInputElement).value)}
+                        /* 拖完才保存 —— 捕获指针避免拖出滑杆后丢 pointerup，同时用 onBlur 兜底。 */
+                        onPointerDown={(e) => {
+                          try {
+                            e.currentTarget.setPointerCapture(e.pointerId);
+                          } catch {
+                            /* 合成事件或不支持 pointer capture 时回落到 onBlur 兜底 */
+                          }
+                        }}
+                        onPointerUp={(e) => commitIfChanged(o.key, (e.target as HTMLInputElement).value)}
+                        onBlur={(e) => commitIfChanged(o.key, e.target.value)}
+                        onKeyUp={(e) => {
+                          if (!SLIDER_COMMIT_KEYS.has(e.key)) return;
+                          commitIfChanged(o.key, (e.target as HTMLInputElement).value);
+                        }}
                         className="h-1 w-20 cursor-pointer appearance-none rounded-full bg-base-700 accent-accent"
                       />
                       <input
@@ -377,7 +461,7 @@ export function JevSettings({ traderId }: { traderId: number }) {
                             (prev ?? []).map((x) => (x.key === o.key ? { ...x, value: next } : x)),
                           );
                         }}
-                        onBlur={(e) => void save(o.key, e.target.value)}
+                        onBlur={(e) => commitIfChanged(o.key, e.target.value)}
                         className="w-12 rounded border border-base-700 bg-base-900 px-1 py-1 text-right text-[11px] tabular-nums text-ink-hi"
                       />
                       <span className="text-[10px] text-ink-faint">{o.range?.unit ?? ''}</span>

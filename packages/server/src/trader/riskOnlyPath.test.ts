@@ -1031,6 +1031,8 @@ const CALLERS: ReadonlyArray<{
     allowed: [
       { caller: 'executeAdd', why: '加仓下单失败/未成交 → 恢复原有保护' },
       { caller: 'executeReduce', why: '减仓下单失败/未成交 → 恢复原有保护' },
+      { caller: 'executeClose', why: '§2.6：平仓失败/未成交/部分成交后立即恢复剩余敞口的保护单' },
+      { caller: 'emergencyFlatten', why: '§2.6：紧急平仓仅部分成交时立即恢复剩余敞口的保护单' },
     ],
   },
 ];
@@ -2026,8 +2028,8 @@ test('★★★ 判据必须能真的报出绕过（人造源码校准）—— 
    * 旧判据（`loopBody.includes`）与"计数"判据在这里都是 exit=0。
    */
   const B1_MOVED_RAW = AUTO_TRADER_RAW.replace(
-    '          const outcome = await this.executeOpen(decision, snapshotBySymbol.get(decision.symbol));',
-    '          // t57 校准：把这一处分派挪到循环之外',
+    /const outcome = await this\.executeOpen\([\s\S]*?\);/,
+    '// t57 校准：把这一处分派挪到循环之外',
   ).replace(
     LOOP_LINE,
     '    if (this.t57SecondPath) {\n      await this.executeOpen({ symbol: "TIAUSDT" } as never, undefined);\n    }\n' + LOOP_LINE,
@@ -2156,8 +2158,8 @@ test('★★★ 改前看不见、改后必须红：四个缺口的旧判据 vs 
 
   /* B1-b：把循环里那一处挪到循环之外 —— 旧判据会报"缺了"，但说不清它**在哪**。 */
   const B1B_MUTATED = AUTO_TRADER_RAW.replace(
-    '          const outcome = await this.executeOpen(decision, snapshotBySymbol.get(decision.symbol));',
-    '          // t57 校准：把这一处分派挪到循环之外',
+    /const outcome = await this\.executeOpen\([\s\S]*?\);/,
+    '// t57 校准：把这一处分派挪到循环之外',
   ).replace(
     LOOP_LINE,
     '    if (this.t57MovedPath) {\n      await this.executeOpen({ symbol: "TIAUSDT" } as never, undefined);\n    }\n' + LOOP_LINE,

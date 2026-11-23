@@ -15,6 +15,7 @@ import {
   equityAxisFormatter,
   filterByRange,
   HOURLY_AXIS_MAX_MS,
+  padEquityPoints,
   rangeSpanMs,
   type EquityPoint,
   type EquityRange,
@@ -256,7 +257,7 @@ export function DashboardEquityChart({
    */
   const ink = useChartInk();
   const windowed = filterByRange(snapshots, range);
-  const points: EquityPoint[] = windowed
+  const rawPoints: EquityPoint[] = windowed
     .map((snapshot) => ({
       t: new Date(snapshot.timestamp).getTime(),
       /*
@@ -282,20 +283,11 @@ export function DashboardEquityChart({
    * ⚠️ **数据不足时也要画出图表**（用户 2026-11-10：「图表默认要显示，不能因为没有
    * 数据就不显示」）。
    *
-   * 原来这里直接返回一条虚线横条 —— 图表区域整个消失，看起来像功能坏了/页面没加载。
-   * 现在补一条**水平参考线**（两个点，值取现有唯一值或基线），坐标轴与网格照常渲染，
-   * 再在图上叠一行小字说明"数据会在两个周期后出现"。
+   * `padEquityPoints` 处理 `ALL`（`rangeSpanMs === Infinity` → 兜底 24h）以及单点仅在左侧
+   * 补更早参考点，保证所有 `t` 有限且严格升序，不出现 `-Infinity`。
    */
-  const insufficient = points.length < 2;
-  if (insufficient) {
-    const flat = points[0]?.equity ?? baseline ?? 0;
-    const span = Math.max(rangeSpanMs(range), 60 * 60_000);
-    const now = Date.now();
-    points.push(
-      { t: now - span, equity: flat, unrealizedPnl: 0, openPositions: 0 },
-      { t: now, equity: flat, unrealizedPnl: 0, openPositions: 0 },
-    );
-  }
+  const insufficient = rawPoints.length < 2;
+  const points = insufficient ? padEquityPoints(rawPoints, range, baseline) : rawPoints;
 
   const values = points.map((p) => p.equity);
   const min = Math.min(...values);

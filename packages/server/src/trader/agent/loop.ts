@@ -261,8 +261,20 @@ export function packContext(
    * 但把这件事报出去 —— 上游要知道"这一轮的输入预算本来就是破的"。
    */
   if (estimateTokens(prefix) >= budgetTokens) {
+    /*
+     * 固定段本身已超预算时，历史步骤必须省略为一行摘要（并记入 dropped），
+     * 绝不能再把所有历史步骤原样拼回来雪上加霜（2026-11-23 修复）。
+     */
+    for (const s of steps) {
+      dropped.push({ step: s.step, tool: s.tool, chars: renderStep(s).length });
+    }
+    const omitSummary =
+      dropped.length === 0
+        ? ''
+        : `\n\n## ⚠️ 固定任务段已超输入预算，${dropped.length} 条历史工具结果已省略\n` +
+          dropped.map((d) => `- 第 ${d.step} 步 ${d.tool}：结果约 ${d.chars} 字符，已省略。`).join('\n');
     return {
-      transcript: prefix + steps.map(renderStep).join(''),
+      transcript: prefix + omitSummary,
       dropped,
       truncated,
       prefixOverBudget: true,
@@ -538,13 +550,19 @@ export function parseTurn(
   if (nativeCalls !== undefined && nativeCalls.length > 0) {
     const first = nativeCalls[0]!;
     let args: unknown;
-    try {
-      args = JSON.parse(first.arguments);
-    } catch {
-      return {
-        action: null,
-        error: `原生工具调用 ${first.name} 的参数不是合法 JSON：${first.arguments.slice(0, 200)}`,
-      };
+    const rawArgs = typeof first.arguments === 'string' ? first.arguments.trim() : '';
+    if (rawArgs === '') {
+      /* 部分网关对无参工具（如 get_current_params）返回空串 ""，按空对象 {} 解析。 */
+      args = {};
+    } else {
+      try {
+        args = JSON.parse(rawArgs);
+      } catch {
+        return {
+          action: null,
+          error: `原生工具调用 ${first.name} 的参数不是合法 JSON：${first.arguments.slice(0, 200)}`,
+        };
+      }
     }
     if (typeof args !== 'object' || args === null || Array.isArray(args)) {
       return {
@@ -879,6 +897,8 @@ export async function runToolLoop(input: LoopInput): Promise<LoopResult> {
       continue;
     }
 
+    /* 一旦解析并执行成功，清零"连续坏输出"计数（否则非连续两次格式错也会误报"连续两轮失败"）。 */
+    badOutputRetries = 0;
     const outcome = await dispatchTool(action.tool, action.args, input.deps);
     const record: LoopStep = {
       step,

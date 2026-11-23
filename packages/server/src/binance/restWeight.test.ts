@@ -453,3 +453,22 @@ test('★ 过期边界：elapsed 恰好 60s 算过期，差一毫秒不算', () 
   assert.equal(reanchorWindow(1900, t0, t0 + WEIGHT_WINDOW_MS - 1, 1950), 0, '差 1ms 未过期：不重锚');
   assert.equal(reanchorWindow(1900, t0, t0 + WEIGHT_WINDOW_MS, 1950), t0 + WEIGHT_WINDOW_MS, '整 60s：过期');
 });
+
+test('★ respectWeightBudget 衰减估算只作局部判断，不得反向覆写实测 usedWeight1m', async () => {
+  const rest = makeRest(2);
+  weightHeader = '900';
+  const req1 = rest.publicGet('/fapi/v1/first');
+  await settle();
+  pending.shift()?.resolve(jsonResponse({}));
+  await req1;
+  assert.equal(rest.usedWeight1m, 900);
+
+  // 稍后再发一个无头响应的请求：即便经过短时间衰减，usedWeight1m 不应被估算值反向改小
+  await new Promise((r) => setTimeout(r, 30));
+  weightHeader = null;
+  const req2 = rest.publicGet('/fapi/v1/second');
+  await settle();
+  pending.shift()?.resolve(jsonResponse({}));
+  await req2;
+  assert.equal(rest.usedWeight1m, 900, '无新权重头时不得用衰减估算覆写实测 usedWeight1m');
+});

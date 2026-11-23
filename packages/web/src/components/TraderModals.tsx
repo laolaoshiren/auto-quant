@@ -9,6 +9,7 @@ import {
   type TraderRow,
 } from '../lib/api';
 import { MODE_LABEL } from '../lib/glossary';
+import { exchangeShortLabel } from './ExchangeAccountChip';
 import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, TextInput } from './ui';
 import { SectionLabel } from './shell';
 import { EquitySourceField, equityPayload, useExchangeEquity } from './EquitySourceField';
@@ -84,6 +85,57 @@ export function reusableModelId(
   modelChoice: string,
 ): number | undefined {
   return modelChoice.startsWith('new:') ? createdModels[modelChoice] : undefined;
+}
+
+/**
+ * 选中「厂商可用模型 / 建议」（`new:<modelId>`）需要临时创建模型记录时，决定它的 `baseUrl`。
+ *
+ * `custom` 等厂商的内置 `descriptor.baseUrl` 为空串 —— 直接传空会被服务端拒绝（400）。
+ * 优先继承同厂商已有记录（尤其是带密钥的那条）的 `baseUrl`，再回落到厂商内置默认值。
+ */
+export function resolveNewModelBaseUrl(
+  providerId: string,
+  descriptorBaseUrl: string | undefined,
+  existingModels: ReadonlyArray<Pick<AiModelRow, 'provider' | 'baseUrl' | 'hasKey'>>,
+): string {
+  const sameProvider = existingModels.filter((m) => m.provider === providerId && m.baseUrl.trim() !== '');
+  const withKey = sameProvider.find((m) => m.hasKey);
+  return (withKey?.baseUrl ?? sameProvider[0]?.baseUrl ?? descriptorBaseUrl ?? '').trim();
+}
+
+/**
+ * 选中交易所凭证后，运行模式（模拟盘 / 实盘）的默认与约束规则。
+ *
+ * - 不绑账户：强制纯模拟盘（`dryRun = true`）；
+ * - Gate 正式网（`gate && !testnet`）：无本地模拟盘，强制实盘（`dryRun = false`），禁用模拟盘；
+ * - Gate 测试网（`gate && testnet`）：同样无本地模拟盘，测试网本身即假钱真实撮合，
+ *   强制 `dryRun = false` 并禁用「本地模拟」，确保运行期与停机期展示口径与后端一致。
+ */
+export function accountDryRunPolicy(account: Pick<ExchangeAccountRow, 'exchange' | 'testnet'> | null): {
+  defaultDryRun: boolean;
+  paperDisabled: boolean;
+  liveDisabled: boolean;
+  isGateMainnet: boolean;
+  isGateTestnet: boolean;
+} {
+  if (!account) {
+    return {
+      defaultDryRun: true,
+      paperDisabled: false,
+      liveDisabled: true,
+      isGateMainnet: false,
+      isGateTestnet: false,
+    };
+  }
+  const isGateMainnet = account.exchange === 'gate' && !account.testnet;
+  const isGateTestnet = account.exchange === 'gate' && account.testnet;
+  return {
+    defaultDryRun: account.exchange === 'gate' ? false : true,
+    paperDisabled: account.exchange === 'gate',
+    liveDisabled: false,
+    isGateMainnet,
+    isGateTestnet,
+  };
 }
 
 export function NewTraderModal({
@@ -207,6 +259,8 @@ export function NewTraderModal({
   // The credential's own read error, so the field explains the failure even
   // before our own `?refresh=1` probe comes back.
   const selectedAccount = accounts?.find((row) => row.id === selectedAccountId) ?? null;
+  const runPolicy = accountDryRunPolicy(selectedAccount);
+  const usesModelPicker = mode !== 'ai_team' && mode !== 'jev';
   const equity = useExchangeEquity({
     open,
     exchangeAccountId: selectedAccountId,
@@ -400,25 +454,14 @@ export function NewTraderModal({
     const gaps: string[] = [];
     /*
      * ⚠️ **交易所凭证不再是"缺少"项**（用户 2026-10-27 需求）。
+     * 模拟盘不需要账户，所以凭证是可选的。
      *
-     * 原来这里写的是 `if (accounts.length === 0) gaps.push('交易所凭证')` ——
-     * 于是没有凭证就**根本建不了机器人**，连纯模拟盘都不行。
-     * 现在模拟盘不需要账户，所以凭证是**可选的**：
-     * 下拉里始终有「不绑账户（纯模拟盘）」这一项。
+     * ⚠️ **JEV / AI 团队模式走独立网关，不强制依赖隐藏的模型选择器**。
      */
-    if (models && models.length === 0) gaps.push('AI 模型');
-    /*
-     * ⚠️ **只有"固定策略"模式才需要策略**（2026-11 审计发现）。
-     *
-     * AI 驱动的模式（智能托管 / AI 团队 / JEV）在服务端**必须**传
-     * `strategyId: null`，参数各自落在 `agent_config_json` / `defaultJevConfig()` 里。
-     * 这里却无条件把「策略」算成缺失项 —— 于是策略表被清空（默认策略可以删，
-     * 见 `db/schema.ts` 的 M7 注释：**删到没有任何策略也不影响智能托管**）之后，
-     * 控制台**根本建不出 AI 驱动机器人**，而这是服务端明确支持的情形。
-     */
+    if (usesModelPicker && models && models.length === 0) gaps.push('AI 模型');
     if (!isAiDriven(mode) && strategyList && strategyList.length === 0) gaps.push('策略');
     return gaps;
-  }, [models, strategyList, mode]);
+  }, [models, strategyList, mode, usesModelPicker]);
 
   /** 把"已建好但带警告"的机器人交给父页面（父页面会关弹窗并刷新列表）。 */
   const finishPending = () => {
@@ -439,30 +482,23 @@ export function NewTraderModal({
     /*
      * 校验按 `modelChoice` 而不是 `aiModelId` —— 选了"厂商建议"里的模型时
      * `aiModelId` 还是空的（它的记录要等到下面才建）。
+     * JEV / AI 团队模式隐藏了模型选择器（走 magpie 网关），不要求选择。
      */
-    /*
-     * ⚠️ **`exchangeAccountId` 不再参与校验**（用户 2026-10-27 需求）：
-     * 留空 = 纯模拟盘机器人，是合法选择。
-     */
-    if (modelChoice === '') return setError('请选择 AI 模型。');
+    if (usesModelPicker && modelChoice === '') return setError('请选择 AI 模型。');
     /* ⚠️ 只有固定策略模式才要求策略 —— 见上面 `missing` 里的说明。 */
     if (!isAiDriven(mode) && strategyId === '') return setError('请选择策略。');
     /* 实盘模式必须有交易所账户 —— 服务端同样会拒（在这里先拦住，不用等一次往返）。 */
     if (!dryRun && exchangeAccountId === '') {
       return setError('实盘模式必须绑定交易所账户。没有账户的机器人只能以模拟盘运行。');
     }
-    /* 模拟余额填了就必须是个正数 —— 否则静默回落成默认值，用户以为生效了。 */
-    const paperAmount = paperBalance.trim() === '' ? 0 : Number(paperBalance);
-    /*
-     * 边界与服务端 `validateStartingBalance` **必须一致**（上下限都要）。
-     *
-     * 早先这里只判了 `> 0`，于是"填 999999999999"在前端一路绿灯、到服务端才
-     * 被拒 —— 而那种错误在点下"创建"之后才出现，用户已经填完了整个表单。
-     * 前端校验的价值就是**在提交之前**说清楚。
-     *
-     * 下限 10 的理由同服务端：低于它任何仓位都会被最小下单量拒绝。
-     */
-    if (paperBalance.trim() !== '') {
+    /* Gate 正式网无本地模拟盘 —— 服务端同样会拒，前端提前拦住。 */
+    if (runPolicy.isGateMainnet && dryRun) {
+      return setError('Gate 正式网无本地模拟盘 —— 请切换为实盘，或绑定 Gate 测试网账户 / 不绑账户（纯模拟盘）。');
+    }
+    /* 模拟余额仅在未绑定交易所账户（纯模拟盘）时参与校验与提交。 */
+    const paperAmount =
+      exchangeAccountId === '' && paperBalance.trim() !== '' ? Number(paperBalance) : 0;
+    if (exchangeAccountId === '' && paperBalance.trim() !== '') {
       if (!Number.isFinite(paperAmount) || paperAmount <= 0) {
         return setError('模拟盘起始余额必须是一个大于 0 的数字。');
       }
@@ -476,36 +512,32 @@ export function NewTraderModal({
 
     setBusy(true);
     try {
-      /*
-       * 选了「厂商建议」里的模型 → **先建一条记录**，再拿它的 id 创建机器人。
-       *
-       * ## 为什么必须有这一步
-       *
-       * 机器人绑定的是 `ai_model_id`（一条记录），而不是"厂商 + 型号"这对字符串。
-       * 而"厂商建议"里那些模型**还没有记录** —— 不建就只能让用户先去模型管理页
-       * 手工添加，那正是这次要消掉的那一步。
-       *
-       * ## 空 API Key 是允许的
-       *
-       * 服务端的 `apiKey` 默认空串，而 `custom` / 网关类厂商本来就可能没有 Key。
-       * 所以这里建出来的记录**可能还没有密钥** —— 那没关系：机器人启动时才需要它，
-       * 而用户随后可以在模型管理页补上。**不因此拦住创建机器人。**
-       */
       let resolvedModelId = Number(aiModelId);
-      const reused = reusableModelId(createdModelsRef.current, modelChoice);
-      if (reused !== undefined) {
-        resolvedModelId = reused;
-      } else if (modelChoice.startsWith('new:')) {
-        const modelId = modelChoice.slice(4);
-        const created = await api.createAiModel({
-          provider: providerId,
-          label: `${descriptor?.label ?? providerId} · ${modelId}`,
-          model: modelId,
-          baseUrl: descriptor?.baseUrl ?? '',
-          apiKey: '',
-        });
-        resolvedModelId = created.id;
-        createdModelsRef.current = { ...createdModelsRef.current, [modelChoice]: created.id };
+      if (!usesModelPicker) {
+        /* 团队 / JEV 模式由网关提供模型；后端 schema 要求正整数占位 id，优先取已有模型。 */
+        resolvedModelId = Number(aiModelId) > 0 ? Number(aiModelId) : (models?.[0]?.id ?? 1);
+      } else {
+        const reused = reusableModelId(createdModelsRef.current, modelChoice);
+        if (reused !== undefined) {
+          resolvedModelId = reused;
+        } else if (modelChoice.startsWith('new:')) {
+          const modelId = modelChoice.slice(4);
+          const existingSame = configuredModels.find((m) => m.model === modelId);
+          if (existingSame) {
+            resolvedModelId = existingSame.id;
+          } else {
+            const resolvedBaseUrl = resolveNewModelBaseUrl(providerId, descriptor?.baseUrl, models ?? []);
+            const created = await api.createAiModel({
+              provider: providerId,
+              label: `${descriptor?.label ?? providerId} · ${modelId}`,
+              model: modelId,
+              baseUrl: resolvedBaseUrl,
+              apiKey: '',
+            });
+            resolvedModelId = created.id;
+            createdModelsRef.current = { ...createdModelsRef.current, [modelChoice]: created.id };
+          }
+        }
       }
 
       const manualEquity = equityPayload(equity);
@@ -660,9 +692,20 @@ export function NewTraderModal({
             >
               <Select
                 value={exchangeAccountId}
-                onChange={(e) =>
-                  setExchangeAccountId(e.target.value === '' ? '' : Number(e.target.value))
-                }
+                onChange={(e) => {
+                  if (e.target.value === '') {
+                    setExchangeAccountId('');
+                    setDryRun(true);
+                    return;
+                  }
+                  const nextId = Number(e.target.value);
+                  setExchangeAccountId(nextId);
+                  const nextAccount = accounts?.find((row) => row.id === nextId) ?? null;
+                  const policy = accountDryRunPolicy(nextAccount);
+                  if (policy.paperDisabled || policy.isGateTestnet) {
+                    setDryRun(policy.defaultDryRun);
+                  }
+                }}
               >
                 {/*
                   ⚠️ **「不绑账户」必须是第一个选项，且是默认值**（用户 2026-10-27 需求）。
@@ -672,7 +715,8 @@ export function NewTraderModal({
                 <option value="">不绑账户（纯模拟盘）</option>
                 {accounts?.map((account) => (
                   <option key={account.id} value={account.id}>
-                    {account.label} · {account.testnet ? '测试网' : '主网'}
+                    {exchangeShortLabel(account.exchange)} · {account.label} ·{' '}
+                    {account.testnet ? '测试网' : '主网'}
                   </option>
                 ))}
               </Select>
@@ -681,48 +725,71 @@ export function NewTraderModal({
             {/*
              * **运行模式在创建时固定**（2026-11-10 用户要求）。
              *
-             * 用户原话：「应该是由创建机器人的时候决定固定，而不是运行启动机器人的时候来决定」。
-             * 所以这里是"这台机器人永远用模拟还是实盘"的唯一一次选择；启动入口
-             * （列表 / 详情 / 总览 / 命令面板）**点一下就直接启动**，不再弹任何选择框。
-             * 实盘必须已绑定账户（没账户的机器人在服务端会被拒，这里提前禁用）。
-             *
-             * 两张卡**描述都压到一行** —— 原来一张 2 行、一张 3 行，并排时高度不齐，
-             * 正是用户说的"两列参差"。更长的解释放 `title`。
+             * - 不绑账户：强制模拟盘；
+             * - Gate 正式网：无本地模拟盘，强制实盘并禁用模拟盘；
+             * - Gate 测试网：假钱真实撮合，推荐直接走测试网撮合（dryRun=false），不显示真钱红字警告。
              */}
             <Field
               label="运行模式（创建后固定）"
-              hint="模拟盘不碰真实资金；实盘用真实资金下单，需要先绑定账户。"
+              hint={
+                  runPolicy.isGateMainnet
+                    ? 'Gate 正式网无本地模拟盘 —— 如需模拟测试，请改绑 Gate 测试网账户或不绑账户（纯模拟盘）。'
+                    : runPolicy.isGateTestnet
+                      ? 'Gate 测试网本身即假钱真实撮合，无本地模拟模式 —— 订单直接发往 Gate 测试网，不会消耗真实资金。'
+                      : '模拟盘不碰真实资金；实盘用真实资金下单，需要先绑定账户。'
+              }
             >
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => setDryRun(true)}
                   aria-pressed={dryRun}
-                  title="订单只在本地按实时行情撮合，不产生任何真实委托。"
+                  disabled={runPolicy.paperDisabled}
+                  title={
+                    runPolicy.isGateMainnet
+                      ? 'Gate 正式网无本地模拟盘，模拟测试请绑 Gate 测试网账户或不绑账户。'
+                      : runPolicy.isGateTestnet
+                        ? 'Gate 测试网已采用假钱真实撮合，不支持本地模拟模式。'
+                        : '订单只在本地按实时行情撮合，不产生任何真实委托。'
+                  }
                   className={`flex h-[46px] items-center gap-2 rounded-md border px-2.5 text-left transition ${
                     dryRun ? 'border-accent/70 bg-accent/10' : 'border-base-700 bg-base-850 hover:border-base-600'
-                  }`}
+                  } ${runPolicy.paperDisabled ? 'cursor-not-allowed opacity-50' : ''}`}
                 >
-                  <span className="text-base font-semibold text-ink-hi">模拟盘</span>
-                  <Badge tone="accent">推荐</Badge>
+                  <span className="text-base font-semibold text-ink-hi">
+                    {runPolicy.isGateTestnet ? '本地模拟' : '模拟盘'}
+                  </span>
+                  {!runPolicy.isGateMainnet && !runPolicy.isGateTestnet && <Badge tone="accent">推荐</Badge>}
                 </button>
 
                 <button
                   type="button"
                   onClick={() => setDryRun(false)}
                   aria-pressed={!dryRun}
-                  disabled={exchangeAccountId === ''}
+                  disabled={runPolicy.liveDisabled}
                   title={
-                    exchangeAccountId === ''
+                    runPolicy.liveDisabled
                       ? '需先绑定交易所账户。'
-                      : '真实资金下单，亏损不可逆。'
+                      : runPolicy.isGateTestnet
+                        ? 'Gate 测试网（假钱真实撮合），订单直接发往 Gate 测试网，不涉及真实资金。'
+                        : '真实资金下单，亏损不可逆。'
                   }
                   className={`flex h-[46px] items-center gap-2 rounded-md border px-2.5 text-left transition ${
-                    !dryRun ? 'border-warn/70 bg-warn/10' : 'border-base-700 bg-base-850 hover:border-base-600'
-                  } ${exchangeAccountId === '' ? 'cursor-not-allowed opacity-50' : ''}`}
+                    !dryRun
+                      ? runPolicy.isGateTestnet
+                        ? 'border-accent/70 bg-accent/10'
+                        : 'border-warn/70 bg-warn/10'
+                      : 'border-base-700 bg-base-850 hover:border-base-600'
+                  } ${runPolicy.liveDisabled ? 'cursor-not-allowed opacity-50' : ''}`}
                 >
-                  <span className="text-base font-semibold text-ink-hi">实盘</span>
-                  <Badge tone="warn">真实资金</Badge>
+                  <span className="text-base font-semibold text-ink-hi">
+                    {runPolicy.isGateTestnet ? '测试网' : '实盘'}
+                  </span>
+                  {runPolicy.isGateTestnet ? (
+                    <Badge tone="accent">假钱撮合</Badge>
+                  ) : (
+                    <Badge tone="warn">真实资金</Badge>
+                  )}
                 </button>
               </div>
             </Field>

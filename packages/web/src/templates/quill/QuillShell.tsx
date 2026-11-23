@@ -820,6 +820,14 @@ function UserMenu({ onSignOut }: { onSignOut: () => void }) {
  * 它只服务这个外壳（侧栏宽 212 还是 240 对别的模板没有意义）。放进全局
  * store 会让"模板自己的偏好"污染共享状态。
  */
+function writeSideWidth(next: number): void {
+  try {
+    window.localStorage.setItem(SIDE_KEY, String(next));
+  } catch {
+    /* 存储被禁用：这一次调整只在当前会话有效。 */
+  }
+}
+
 function useSideWidth() {
   const [width, setWidth] = useState(() => {
     try {
@@ -832,13 +840,18 @@ function useSideWidth() {
     return 212;
   });
 
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(
+    () => () => {
+      dragCleanupRef.current?.();
+    },
+    [],
+  );
+
   const persist = useCallback((next: number) => {
     setWidth(next);
-    try {
-      window.localStorage.setItem(SIDE_KEY, String(next));
-    } catch {
-      /* 存储被禁用：这一次调整只在当前会话有效。 */
-    }
+    writeSideWidth(next);
   }, []);
 
   /*
@@ -850,37 +863,57 @@ function useSideWidth() {
    *    的热区之后事件就不再来了 —— 表现是"拖到 20px 就停住"。
    * 2. **给 `<html>` 加一个类**，让**整页**的光标变成 `col-resize`：
    *    否则鼠标一离开热区光标就变回箭头，看起来像"拖拽已经结束了"。
-   * 3. **监听 pointerup 而不是 mouseup**：触屏与手写笔没有 mouse 事件。
+   * 3. **监听 pointerup 而不是 mouseup**：触屏与手写笔没有 mouse 事件；
+   *    同时挂到 `window` 并在组件卸载时由 `dragCleanupRef` 清理，避免中途卸载泄漏监听。
    */
   const startDrag = useCallback(
     (event: React.PointerEvent<HTMLElement>) => {
       event.preventDefault();
+      dragCleanupRef.current?.();
+
       const target = event.currentTarget;
+      const pointerId = event.pointerId;
       const startX = event.clientX;
       const startWidth = width;
-      target.setPointerCapture(event.pointerId);
+      let latest = startWidth;
+
+      try {
+        target.setPointerCapture(pointerId);
+      } catch {
+        /* 合成事件或不支持 pointer capture 时仍由 window 监听兜底。 */
+      }
       document.documentElement.classList.add('q-resizing');
 
       const onMove = (moveEvent: PointerEvent) => {
-        const next = Math.min(SIDE_MAX, Math.max(SIDE_MIN, startWidth + (moveEvent.clientX - startX)));
-        setWidth(next);
+        latest = Math.min(SIDE_MAX, Math.max(SIDE_MIN, startWidth + (moveEvent.clientX - startX)));
+        setWidth(latest);
       };
-      const onUp = () => {
-        target.removeEventListener('pointermove', onMove);
-        target.removeEventListener('pointerup', onUp);
-        target.removeEventListener('pointercancel', onUp);
+
+      const cleanup = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
         document.documentElement.classList.remove('q-resizing');
-        // 只在松手时写盘：拖动过程每帧写一次 localStorage 是没必要的开销。
-        setWidth((current) => {
-          persist(current);
-          return current;
-        });
+        try {
+          if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+        } catch {
+          /* ignore */
+        }
+        if (dragCleanupRef.current === cleanup) dragCleanupRef.current = null;
       };
-      target.addEventListener('pointermove', onMove);
-      target.addEventListener('pointerup', onUp);
-      target.addEventListener('pointercancel', onUp);
+
+      const onUp = () => {
+        cleanup();
+        // 只在松手时写盘：把副作用放在 updater 之外，避免 StrictMode 重复执行和嵌套 setState。
+        writeSideWidth(latest);
+      };
+
+      dragCleanupRef.current = cleanup;
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
     },
-    [width, persist],
+    [width],
   );
 
   const nudge = useCallback(

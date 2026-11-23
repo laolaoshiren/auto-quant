@@ -168,8 +168,8 @@ test('★★★ 模拟盘必须显示模拟权益，不能显示没动过的真�
    */
   const page = codeOnly(PAGE);
   assert.ok(
-    /const useSimulatedBalance = isDryRun && stats !== undefined;/.test(page),
-    '★ 必须有"模拟盘走模拟权益"的开关',
+    /const useSimulatedBalance = isDryRun && stats !== null;/.test(page),
+    '★ 必须有"模拟盘走模拟权益"的开关（stats 是 TraderSummary | null，必须判 !== null）',
   );
   assert.ok(
     /useSimulatedBalance\s*\?\s*fmtNum\(calibratedEquity, 2\)/.test(page),

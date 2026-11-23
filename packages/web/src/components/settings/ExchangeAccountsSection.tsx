@@ -21,7 +21,14 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Landmark, Plus, RotateCw, Trash2 } from 'lucide-react';
 import { EXCHANGES, type ExchangeId } from '@aq/shared';
-import { api, type ExchangeAccountInput, type ExchangeAccountRow, type ExchangeBalance, type ExchangeBalanceResult, type PreflightCheck } from '../../lib/api';
+import { api, type ExchangeAccountRow, type ExchangeBalance, type ExchangeBalanceResult, type PreflightCheck } from '../../lib/api';
+import {
+  EMPTY_ACCOUNT,
+  buildExchangeAccountCreatePayload,
+  buildExchangeAccountUpdatePayload,
+  resolveDraftTestnet,
+  type AccountDraft,
+} from './exchangeAccountDraft';
 import { useApp } from '../../lib/store';
 import { usePolled, useTicker } from '../../lib/hooks';
 import {
@@ -52,28 +59,6 @@ import {
   tradingEnvTitle,
   timeAgo,
 } from '../../lib/format';
-
-interface AccountDraft {
-  /*
-   * `ExchangeId`（binance / gate）来自 `@aq/shared` —— 新增交易所时这里不用改。
-   * 后端 `PATCH` 不收 `exchange`：创建后交易所不可更改（见表单里禁用的下拉）。
-   */
-  exchange: ExchangeId;
-  label: string;
-  apiKey: string;
-  apiSecret: string;
-  testnet: boolean;
-  canTrade: boolean;
-}
-
-const EMPTY_ACCOUNT: AccountDraft = {
-  exchange: 'binance',
-  label: '',
-  apiKey: '',
-  apiSecret: '',
-  testnet: true,
-  canTrade: true,
-};
 
 function checksPassed(checks: PreflightCheck[]): boolean {
   return checks.every((check) => check.ok || !check.blocking);
@@ -339,20 +324,14 @@ export function ExchangeAccountsSection() {
     setDraftError(null);
   };
 
+  /**
+   * 这份草稿最终以哪个环境保存：
+   * 币安沿用进程级 `envTestnet`；Gate 用账户自己的 `testnet`（默认测试网）。
+   */
+  const draftTestnet = resolveDraftTestnet(draft.exchange, draft.testnet, envTestnet);
+
   /** 创建 / 测试接口期望的确切载荷。 */
-  const buildPayload = (): ExchangeAccountInput => ({
-    exchange: draft.exchange,
-    label: draft.label.trim() || draft.exchange,
-    apiKey: draft.apiKey.trim(),
-    apiSecret: draft.apiSecret,
-    /*
-     * 币安：环境由进程级 `BINANCE_ENV` 决定（本地 Demo / 服务器生产），账户级开关
-     * 会造出"同一进程里一半 Demo 一半主网"的怪状态，所以沿用它。
-     * Gate：没有进程级环境开关，用账户自己的 `testnet`（表单里显式选，默认测试网）。
-     */
-    testnet: draft.exchange === 'gate' ? draft.testnet : envTestnet,
-    canTrade: true,
-  });
+  const buildPayload = () => buildExchangeAccountCreatePayload(draft, envTestnet);
 
   const runDraftTest = async () => {
     setDraftError(null);
@@ -381,14 +360,7 @@ export function ExchangeAccountsSection() {
     setError(null);
     try {
       if (editing) {
-        await api.updateExchangeAccount(editing.id, {
-          exchange: draft.exchange,
-          label: draft.label.trim(),
-          apiKey: draft.apiKey.trim() || undefined,
-          ...(draft.apiSecret ? { apiSecret: draft.apiSecret } : {}),
-          testnet: envTestnet,
-          canTrade: true,
-        });
+        await api.updateExchangeAccount(editing.id, buildExchangeAccountUpdatePayload(draft, envTestnet));
       } else {
         if (!draft.label.trim() || !draft.apiKey.trim() || !draft.apiSecret) {
           throw new Error('名称、API Key 与 API Secret 为必填项。');
@@ -441,11 +413,6 @@ export function ExchangeAccountsSection() {
   };
 
   const exchangeLabel = (id: string) => exchanges.find((row) => row.id === id)?.label ?? id;
-  /**
-   * 这份草稿最终以哪个环境保存：
-   * 币安沿用进程级 `envTestnet`；Gate 用账户自己的 `testnet`（默认测试网）。
-   */
-  const draftTestnet = draft.exchange === 'gate' ? draft.testnet : envTestnet;
   const failedReads = totals.failed;
 
   /* ------------------------------------------------------------------------ */

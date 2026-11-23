@@ -298,9 +298,9 @@ export function extractCoTTrace(response: string): string {
  * string literals and escapes. A naive `indexOf(']')` breaks on any `]` that
  * appears inside a symbol name or a reasoning string.
  */
-function findBalancedJson(text: string): string | null {
-  const startArray = text.indexOf('[');
-  const startObject = text.indexOf('{');
+function findBalancedJsonFrom(text: string, fromIndex = 0): { slice: string; start: number; end: number } | null {
+  const startArray = text.indexOf('[', fromIndex);
+  const startObject = text.indexOf('{', fromIndex);
 
   let start: number;
   let open: string;
@@ -340,10 +340,28 @@ function findBalancedJson(text: string): string | null {
     if (ch === open) depth += 1;
     else if (ch === close) {
       depth -= 1;
-      if (depth === 0) return text.slice(start, i + 1);
+      if (depth === 0) return { slice: text.slice(start, i + 1), start, end: i + 1 };
     }
   }
   return null;
+}
+
+/**
+ * Find the first balanced `[...]` or `{...}` region in `text` that can actually
+ * be parsed as JSON. Skipping non-JSON bracketed prose like `[提示]` avoids
+ * throwing away a valid decision array written right after it.
+ */
+function findBalancedJson(text: string): string | null {
+  let cursor = 0;
+  let firstCandidate: string | null = null;
+  while (cursor < text.length) {
+    const found = findBalancedJsonFrom(text, cursor);
+    if (!found) break;
+    if (firstCandidate === null) firstCandidate = found.slice;
+    if (safeParseJson(found.slice) !== undefined) return found.slice;
+    cursor = found.start + 1;
+  }
+  return firstCandidate;
 }
 
 /**
@@ -354,21 +372,16 @@ function findBalancedJson(text: string): string | null {
  *  4. the first balanced JSON value in the whole response
  */
 export function extractDecisions(response: string): string | null {
-  const text = repairEncoding(stripInvisible(response));
-
   /*
-   * ⚠️ **提取必须限定在 `<decision>` 之后 —— 这是实测出来的一条。**
+   * ⚠️ **入口绝不能无条件调 `repairEncoding()`（2026-11-23 P1 修复）**。
    *
-   * 案例（#1623，2026-09-28 周期 390）：响应被截断（`reasoning` 字符串写到一半
-   * 就没了，连 `</decision>` 都没有），而**响应前面还有别的 JSON 片段**
-   * （模型自己的分析草稿）。`findBalancedJson()` 从**第一个 `[`** 开始扫描，
-   * 于是从那个草稿开始、在**别处**凑巧找到了一个平衡点，返回一段
-   * **"看起来合法、其实是错的"**内容 —— `JSON.parse` 失败 → **整轮零决策**，
-   * 而模型真正要交付的内容就在下面几十行处。
-   *
-   * 模型承诺交付的东西一定写在 `<decision>` 之后，所以作用域先钉死在那里：
-   * 有完整块就用块内，**没有闭合标签（截断）就用到文末**。
+   * 中文推理字符串里的中文双引号 `“支撑位”` 本是 100% 合法 JSON；
+   * 入口提前执行 `repairEncoding()` 会把 `“`/`”` 全局替换成未转义 ASCII `"`，
+   * 导致 `findBalancedJson()` 状态机错乱且 `safeParseJson()` 全军覆没、整轮零决策。
+   * 保持原文优先走标准提取，仅在原文找不到任何可解析 JSON（例如用了全角括号）时再兜底修复标点。
    */
+  const text = stripInvisible(response);
+
   const openTag = /<decision>/i.exec(text);
   const decisionBlock = /<decision>([\s\S]*?)<\/decision>/i.exec(text);
   const body = decisionBlock?.[1] ?? (openTag ? text.slice(openTag.index + openTag[0].length) : text);
@@ -376,48 +389,24 @@ export function extractDecisions(response: string): string | null {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(body);
   const fencedText = fenced?.[1]?.trim();
   if (fencedText) {
-    /*
-     * ⚠️ **围栏里的内容不一定就是裸 JSON**（外部 issue #160）。
-     *
-     * 模型经常在围栏里先写一句说明再给 JSON：
-     *
-     * ```text
-     *   ```json
-     *   分析如下:
-     *   [{"symbol":"BTCUSDT","action":"wait"}]
-     *   ```
-     * ```
-     *
-     * 原实现把这一整段（含"分析如下:"）当作 JSON 返回，于是 `safeParseJson` 失败
-     * → **整轮零决策**，而模型真正要交付的内容就在下一行。
-     * 实测：`决策数 = 0`，日志写"模型返回的 JSON 在自动修复之后仍无法解析"。
-     *
-     * ## 这里原来有一层"死代码兜底"
-     *
-     * 原来的第 3 步是**同一个正则对同一个 `body`** 再求值一次：
-     *
-     * ```ts
-     * const anyFence = /```(?:json)?\s*([\s\S]*?)```/i.exec(body);   // ← 与第 1 步同一正则、同一输入
-     * if (anyFence?.[1]?.trim()) { … }                                // ← 永不可达
-     * ```
-     *
-     * `fenced[1] === anyFence[1]` 恒成立：第 1 步的非空判定一旦为假，
-     * 第 3 步的同一个判定也为假；一旦为真，第 1 步早已 return。
-     * 所以那层"兜底"**一层保护都没提供**，却让人以为容错有三层
-     *（issue #160 的原话：后续真要加抢救逻辑时，可能误以为这里已经处理过了）。
-     *
-     * 现在把**那层原本的意图真正实现**：围栏内容不是裸 JSON 时，
-     * **在围栏内部**再找一次平衡 JSON。作用域仍限定在围栏里 ——
-     * 不会退化成"去整份响应里乱找"（那正是本函数开头那段注释警告过的坑）。
-     */
-    if (fencedText.startsWith('[') || fencedText.startsWith('{')) return fencedText;
+    if ((fencedText.startsWith('[') || fencedText.startsWith('{')) && safeParseJson(fencedText) !== undefined) {
+      return fencedText;
+    }
     const insideFence = findBalancedJson(fencedText);
     if (insideFence) return insideFence;
+    if (fencedText.startsWith('[') || fencedText.startsWith('{')) return fencedText;
   }
   const balanced = findBalancedJson(body);
-  if (balanced) return balanced;
+  if (balanced && safeParseJson(balanced) !== undefined) return balanced;
 
-  return findBalancedJson(body) ?? salvageTruncatedDecisions(body);
+  /* 仅在原文找不到合法 JSON 时才兜底尝试全角标点修复（如 `［｛` 全角括号）。 */
+  const repairedBody = repairEncoding(body);
+  if (repairedBody !== body) {
+    const repairedBalanced = findBalancedJson(repairedBody);
+    if (repairedBalanced && safeParseJson(repairedBalanced) !== undefined) return repairedBalanced;
+  }
+
+  return balanced ?? salvageTruncatedDecisions(body);
 }
 
 /**

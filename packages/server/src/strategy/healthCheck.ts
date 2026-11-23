@@ -6,9 +6,10 @@ import {
   type RejectedDecision,
   type StrategyConfig,
 } from '@aq/shared';
-import type { ExchangeConnection } from '../binance/bootstrap.js';
+import type { SymbolRegistry } from '../binance/symbols.js';
 import type { LlmClient } from '../llm/client.js';
 import { createLogger } from '../logger.js';
+import type { MarketPort } from '../market/port.js';
 import { MarketDataService } from '../market/service.js';
 import { RiskEngine } from '../risk/engine.js';
 import { selectCandidates } from './coins.js';
@@ -83,9 +84,16 @@ export interface StrategyCheckResult {
  * Market data comes from the live public endpoint; the account is **simulated**
  * (a fixed equity) so no exchange credentials are needed at all.
  */
+export interface StrategyCheckConnection {
+  market: MarketPort;
+  registry: SymbolRegistry;
+  endpoints: { label: string };
+  clockOffsetMs: number;
+}
+
 export async function checkStrategy(options: {
   config: StrategyConfig;
-  connection: ExchangeConnection;
+  connection: StrategyCheckConnection;
   client: LlmClient;
   /** Fix the universe to one symbol — useful for a fast, focused check. */
   symbol?: string;

@@ -1125,49 +1125,35 @@ export function DecisionFeed({
    * ⇒ 用一个 `useEffect` 在模式变化时把它拉回 `'decisions'`。
    *   选 `'decisions'` 而不是"第一个可用标签"，是因为它**在所有模式里都存在**。
    */
-  useEffect(() => {
-    const allowed: ReadonlyArray<typeof pane> =
+  const visibleTabs: ReadonlyArray<'decisions' | 'workflow' | 'control' | 'jev'> = useMemo(
+    () =>
       mode === 'ai_team'
         ? ['decisions', 'workflow', 'control']
         : mode === 'jev'
-          ? ['decisions', 'control', 'jev']
-          : ['decisions'];
-    if (!allowed.includes(pane)) setPane('decisions');
-  }, [mode, pane]);
+          ? ['decisions', 'jev']
+          : ['decisions'],
+    [mode],
+  );
 
-  /**
-   * ── 标签栏的**键盘操作**（2026-10-17 · 台账 F3）────────────────────────────
-   *
-   * ## 为什么要有
-   *
-   * `role="tablist"` / `role="tab"` / `aria-selected` 只把**语义**说清楚了；
-   * 一个真正的 tab 组件还必须能用键盘操作 —— 否则对键盘与读屏用户来说，
-   * 那两个"标签"就是**两个普通按钮**，而它们宣称自己是标签。
-   * 页面上另一个标签栏（`TraderTables` 的机器人数据表）同样缺这一块，
-   * 属仓库级既有缺口；本轮只补本组件这一处（`TraderTables` 不在本次写作用域）。
-   *
-   * ## 键位照 WAI-ARIA 的 tabs 模式
-   *
-   * ```
-   *   ← / →  在同一个 tablist 里切换（两端循环）
-   *   Home   第一个（最终决策）
-   *   End    最后一个（AI 工作流）
-   * ```
-   * 选中即切换（`aria-selected` 与面板同步）—— 本标签栏面板很轻（都是本地状态，
-   * 没有网络请求），所以按"自动激活"处理，不需要 Enter/Space 二次确认。
-   *
-   * ⚠️ 焦点也要跟着走（roving tabindex 的标准做法）：两个标签里只有选中的那个
-   * `tabIndex=0`，所以 `focus()` 必须显式调用，否则焦点会留在旧的（已变 -1 的）按钮上。
-   */
+  useEffect(() => {
+    if (!visibleTabs.includes(pane)) setPane('decisions');
+  }, [visibleTabs, pane]);
+
   const onTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    if (visibleTabs.length <= 1) return;
     event.preventDefault();
-    const next: 'decisions' | 'workflow' =
-      event.key === 'ArrowLeft' || event.key === 'Home' ? 'decisions' : 'workflow';
+    const idx = Math.max(0, visibleTabs.indexOf(pane));
+    let nextIdx = idx;
+    if (event.key === 'ArrowLeft') nextIdx = (idx - 1 + visibleTabs.length) % visibleTabs.length;
+    else if (event.key === 'ArrowRight') nextIdx = (idx + 1) % visibleTabs.length;
+    else if (event.key === 'Home') nextIdx = 0;
+    else if (event.key === 'End') nextIdx = visibleTabs.length - 1;
+    const next = visibleTabs[nextIdx] ?? 'decisions';
     switchPane(next);
     /* 等 roving tabindex 落到新按钮上再聚焦（同一提交内 ref 还没换）。 */
     requestAnimationFrame(() => {
-      document.getElementById(next === 'decisions' ? 'feed-tab-decisions' : 'feed-tab-workflow')?.focus();
+      document.getElementById(`feed-tab-${next}`)?.focus();
     });
   };
 
@@ -1286,13 +1272,7 @@ export function DecisionFeed({
           </ErrorNote>
         </div>
       )}
-      {records.length === 0 && !showLive && feedError === null ? (
-        <Empty
-          message="暂无决策记录。"
-          hint="每个周期都会连同完整提示词与原始响应一起持久化 — 运行一次后这里就会填满。"
-        />
-      ) : (
-        <>
+      <>
           {/*
             ══════════════════════════════════════════════════════════════════
              **AI 工作流（固定区）** —— 团队模式专属（2026-10-12 用户要求）
@@ -1619,7 +1599,7 @@ export function DecisionFeed({
             ⚠️ **只在这个标签被选中时渲染**（`pane === 'control'`），
             与决策流同一条纪律：不在 DOM 里留一份"被压扁的"副本。
           */}
-          {isTeamLike && pane === 'control' && (
+          {mode === 'ai_team' && pane === 'control' && (
             <div
               role="tabpanel"
               id="feed-panel-control"
@@ -1823,6 +1803,14 @@ export function DecisionFeed({
           {showLive && liveCycle && mode !== 'ai_team' && (
             <LiveCycleBlock key={liveCycle.cycleNumber} live={liveCycle} />
           )}
+
+          {records.length === 0 && !showLive && feedError === null ? (
+            <Empty
+              message="暂无决策记录。"
+              hint="每个周期都会连同完整提示词与原始响应一起持久化 — 运行一次后这里就会填满。"
+            />
+          ) : (
+            <>
           {/*
             ══════════════════════════════════════════════════════════════════
              **组织架构** —— ⚠️ 团队模式下**已删除**（2026-10-12 重做）
@@ -1927,10 +1915,11 @@ export function DecisionFeed({
           {records.length > 0 && !hasMore && (
             <p className="pt-1 text-center text-xs text-ink-faint">已到最早一轮</p>
           )}
+            </>
+          )}
           </div>
           )}
-        </>
-      )}
+      </>
     </Panel>
   );
 }
@@ -2679,7 +2668,7 @@ function DecisionRow({
         **0 分和"没给"是完全不同的两件事**，界面把它们显示成同一个数字就是在说谎。
       */}
       <div className="mt-0.5 pl-5 text-xs text-accent">
-        {decision.confidence === null ? (
+        {decision.confidence == null ? (
           <span className="text-ink-faint" title="模型这一条决策里没有给出 confidence 字段。">
             置信度: 未给出
           </span>
@@ -3342,6 +3331,53 @@ function CycleDetails({
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<DetailTab>('cot');
 
+  const cotTrace = record.cotTrace ?? '';
+  const inlineSystem = record.systemPrompt ?? '';
+  const inlineUser = record.userPrompt ?? '';
+  const hasInlinePrompt = inlineSystem.trim() !== '' || inlineUser.trim() !== '';
+
+  /*
+   * 提示词懒加载提升到 `CycleDetails`：服务端列表接口为了避免单页数 MB 载荷会剥离
+   * `systemPrompt` / `userPrompt`，因此一次 `traderDecision` 请求同时填充两段提示词，
+   * 避免两个 `PromptSection` 各自发重复双请求。
+   */
+  const [loadedPrompt, setLoadedPrompt] = useState<{
+    recordId: number;
+    systemPrompt: string;
+    userPrompt: string;
+  } | null>(null);
+  const [promptLoading, setPromptLoading] = useState(false);
+  const fetchedForThis = loadedPrompt !== null && loadedPrompt.recordId === record.id;
+
+  useEffect(() => {
+    if (!open || tab !== 'prompt') return;
+    if (hasInlinePrompt || fetchedForThis || record.id <= 0) return;
+    let alive = true;
+    const controller = new AbortController();
+    setPromptLoading(true);
+    api
+      .traderDecision(record.traderId, record.id, controller.signal)
+      .then((full) => {
+        if (!alive) return;
+        setLoadedPrompt({
+          recordId: record.id,
+          systemPrompt: full.systemPrompt ?? '',
+          userPrompt: full.userPrompt ?? '',
+        });
+      })
+      .catch(() => {
+        if (!alive) return;
+        setLoadedPrompt({ recordId: record.id, systemPrompt: '', userPrompt: '' });
+      })
+      .finally(() => {
+        if (alive) setPromptLoading(false);
+      });
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [open, tab, hasInlinePrompt, fetchedForThis, record.traderId, record.id]);
+
   /**
    * 点一个按钮既切换内容也展开（§4）。
    *
@@ -3357,30 +3393,30 @@ function CycleDetails({
 
   const notes: string[] = [];
   if (counts.failed > 0) notes.push(`${counts.failed} 条执行失败`);
-  /*
-   * `skipped` 也要进这一行。
-   *
-   * 一轮里**全部**决策都被跳过时（`success: true`，熔断或冷却把每一条都拦下），
-   * 周期头那一行看起来和一次正常执行完全一样：`周期 #38 │ in 4,980 · out 210 │ 12.3s`。
-   * 这一行小字是操作者扫视整列时唯一能一眼看出"这一轮什么都没执行"的地方
-   * （§2：这类信息用一行小字表达，不要做成徽章行）。
-   */
   if (counts.skipped > 0) notes.push(`${counts.skipped} 条未执行`);
   if (counts.rejected > 0) notes.push(`${counts.rejected} 条被风控拒绝`);
 
   /*
-   * 有没有可展开的东西。
-   *
-   * 一个在模型调用**之前**就失败的周期（欠费、行情为空、账户读取失败）三条都是空的，
-   * 那两个按钮点开只会显示"（空）"和"本周期模型未返回 <reasoning> 块。" —— 两个死
-   * 按钮比没有按钮更让人困惑。整个底部行因此只在真的有内容、或者有失败/被拒条目时
-   * 才出现（后者仍然必须可见，见 §7）。
+   * 列表响应已剥离提示词原文 —— 对已持久化记录（`record.id > 0`）允许点击展开懒加载，
+   * 不再因列表里 `systemPrompt`/`userPrompt` 为空且无思考过程而把按钮整体隐藏。
    */
-  const hasDetail =
-    record.cotTrace.trim() !== '' ||
-    record.systemPrompt.trim() !== '' ||
-    record.userPrompt.trim() !== '';
+  const hasDetail = cotTrace.trim() !== '' || hasInlinePrompt || record.id > 0;
   if (!hasDetail && notes.length === 0) return null;
+
+  const systemBody = hasInlinePrompt
+    ? inlineSystem
+    : fetchedForThis
+      ? loadedPrompt.systemPrompt
+      : promptLoading
+        ? '正在加载提示词…'
+        : '';
+  const userBody = hasInlinePrompt
+    ? inlineUser
+    : fetchedForThis
+      ? loadedPrompt.userPrompt
+      : promptLoading
+        ? '正在加载提示词…'
+        : '';
 
   const tabClass = (active: boolean): string =>
     cn(
@@ -3423,11 +3459,6 @@ function CycleDetails({
           </>
         )}
 
-        {/*
-          被拒 / 未执行 / 失败在底部也要有一行小字（§2）：按钮这一行是操作者扫视时的落点，
-          而"这一轮被风控拦了 2 条"是必须看见的信息 —— 具体的**原因**在每条决策
-          自己的行上（`DecisionOutcome`），这里只报数量。
-        */}
         {notes.length > 0 && (
           <span className="flex items-center gap-1 text-xs text-warn">
             <TriangleAlert aria-hidden className="h-3.5 w-3.5 shrink-0" />
@@ -3441,13 +3472,13 @@ function CycleDetails({
         <div className="mt-2 min-w-0">
           {tab === 'cot' ? (
             <ScrollArea
-              body={record.cotTrace}
+              body={cotTrace}
               empty="本周期模型未返回 <reasoning> 块。"
             />
           ) : (
             <div className="space-y-2">
-              <PromptSection title="系统提示词" body={record.systemPrompt} traderId={record.traderId} recordId={record.id} field="system" />
-              <PromptSection title="用户提示词" body={record.userPrompt} traderId={record.traderId} recordId={record.id} field="user" />
+              <PromptSection title="系统提示词" body={systemBody} />
+              <PromptSection title="用户提示词" body={userBody} />
             </div>
           )}
         </div>
@@ -3456,50 +3487,11 @@ function CycleDetails({
   );
 }
 
-function PromptSection({
-  title,
-  body,
-  traderId,
-  recordId,
-  field,
-}: {
-  title: string;
-  body: string;
-  traderId: number;
-  recordId: number;
-  field: 'system' | 'user';
-}) {
-  /*
-   * ⚠️ **列表里没有全文了，展开时才去取单条详情。**
-   *
-   * 服务端列表为了不让一页 2.7 MB 的提示词卡死浏览器，把 `systemPrompt` /
-   * `userPrompt` 剥离成空串（见 `/api/traders/:id/decisions` 的注释）。
-   * 而这里**只在用户点开「提示词」标签时才渲染** —— 所以按需加载天然成立：
-   * 不点就一个字节都不传。
-   *
-   * `body` 有内容时直接用（兼容后端未剥离的情形，例如 `DecisionAudit`）；
-   * 为空且拿得到 id 时才发请求，失败显示空而不是把异常抛到界面上。
-   */
-  const [loaded, setLoaded] = useState<string | null>(body.trim() ? body : null);
-  useEffect(() => {
-    if (loaded !== null) return;
-    let alive = true;
-    api
-      .traderDecision(traderId, recordId)
-      .then((record) => {
-        if (alive) setLoaded(field === 'system' ? record.systemPrompt : record.userPrompt);
-      })
-      .catch(() => {
-        if (alive) setLoaded('');
-      });
-    return () => {
-      alive = false;
-    };
-  }, [loaded, traderId, recordId, field]);
+function PromptSection({ title, body }: { title: string; body: string }) {
   return (
     <section className="min-w-0">
       <h4 className="mb-1 text-xs font-semibold text-ink-lo">{title}</h4>
-      <ScrollArea body={loaded ?? '正在加载提示词…'} empty="（空）" />
+      <ScrollArea body={body} empty="（空）" />
     </section>
   );
 }
@@ -3512,10 +3504,11 @@ function PromptSection({
  * 把这一栏顶出横向滚动条。
  */
 function ScrollArea({ body, empty }: { body: string; empty: string }) {
-  if (!body.trim()) return <p className="px-1 py-2 text-xs text-ink-faint">{empty}</p>;
+  const safe = body ?? '';
+  if (!safe.trim()) return <p className="px-1 py-2 text-xs text-ink-faint">{empty}</p>;
   return (
     <pre className="max-h-80 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-base-800 bg-base-950 px-2.5 py-2 font-mono text-xs leading-relaxed text-ink-mid">
-      {body}
+      {safe}
     </pre>
   );
 }

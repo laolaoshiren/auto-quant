@@ -24,7 +24,7 @@ import type { ExchangeConnection } from '../binance/bootstrap.js';
 import { Vault, hashPassword } from '../crypto/vault.js';
 import { closeDb, initDb } from '../db/index.js';
 import type { BalanceService } from '../services/balance.js';
-import { aiModels, traders, users } from '../store/repositories.js';
+import { aiModels, exchanges, traders, users } from '../store/repositories.js';
 import type { TraderManager } from '../trader/manager.js';
 import { buildServer, type ApiDependencies } from './server.js';
 
@@ -183,4 +183,48 @@ test('★ 编辑不允许修改运行模式', async () => {
   });
   assert.equal(res.statusCode, 400);
   assert.match(res.payload, /运行模式/);
+});
+
+test('★★★ 创建时拒绝「Gate 正式网 + 模拟盘」，避免造出永远无法启动也无法编辑修复的死机器人', async () => {
+  const vault = new Vault(randomBytes(32));
+  const gateLive = exchanges.create({
+    exchange: 'gate',
+    label: 'Gate 正式网',
+    apiKey: 'gk-live',
+    apiSecretEnc: vault.encrypt('gs-live'),
+    testnet: false,
+    canTrade: true,
+  });
+  const created = await createTrader({ exchangeAccountId: gateLive.id, dryRun: true, initialEquity: 500 });
+  assert.equal(created.status, 400);
+  assert.match(created.body, /Gate 正式网/);
+
+  const gateTest = exchanges.create({
+    exchange: 'gate',
+    label: 'Gate 测试网',
+    apiKey: 'gk-test',
+    apiSecretEnc: vault.encrypt('gs-test'),
+    testnet: true,
+    canTrade: true,
+  });
+  const testDryRun = await createTrader({ exchangeAccountId: gateTest.id, dryRun: true, initialEquity: 500 });
+  assert.equal(testDryRun.status, 400, 'Gate 测试网同样不支持本地模拟盘');
+  const testDefault = await createTrader({ exchangeAccountId: gateTest.id, initialEquity: 500 });
+  assert.equal(testDefault.status, 200, 'Gate 测试网不传 dryRun 时默认落库为 false（测试网撮合）');
+  assert.equal(traders.get(testDefault.id)?.dryRun, false);
+});
+
+test('★★★ 老数据启动补写 dryRun 必须校验布尔值，传入 0 等 falsy 非布尔值不得误固化为实盘', async () => {
+  const created = await createTrader({});
+  const db = initDb(path.join(workDir, 'test.sqlite'));
+  db.exec(`UPDATE traders SET dry_run = NULL WHERE id = ${created.id}`);
+
+  const res = await app.inject({
+    method: 'POST',
+    url: `/api/traders/${created.id}/start`,
+    headers: auth(),
+    payload: { dryRun: 0 },
+  });
+  assert.equal(res.statusCode, 200, res.payload);
+  assert.equal(traders.get(created.id)?.dryRun, true, '非布尔值必须安全回落模拟盘');
 });

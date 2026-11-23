@@ -2,6 +2,7 @@ import {
   createCipheriv,
   createDecipheriv,
   randomBytes,
+  scrypt,
   scryptSync,
   timingSafeEqual,
 } from 'node:crypto';
@@ -118,6 +119,44 @@ export function verifyPassword(password: string, stored: string): boolean {
     r,
     p,
     maxmem: 128 * N * r * 2,
+  });
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+/**
+ * 异步口令校验（在 libuv 线程池中执行 scrypt，不阻塞 Node.js 事件循环）。
+ *
+ * 登录与改密路由应使用本版本：防止高频登录请求把同进程的交易循环与止损监控卡死。
+ */
+export async function verifyPasswordAsync(password: string, stored: string): Promise<boolean> {
+  if (typeof password !== 'string') return false;
+  const parts = stored.split('$');
+  if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
+  const [, nStr, rStr, pStr, saltHex, hashHex] = parts as [
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
+  const N = Number.parseInt(nStr, 10);
+  const r = Number.parseInt(rStr, 10);
+  const p = Number.parseInt(pStr, 10);
+  if (!Number.isFinite(N) || !Number.isFinite(r) || !Number.isFinite(p)) return false;
+
+  const expected = Buffer.from(hashHex, 'hex');
+  const actual = await new Promise<Buffer>((resolve, reject) => {
+    scrypt(
+      password,
+      Buffer.from(saltHex, 'hex'),
+      expected.length,
+      { N, r, p, maxmem: 128 * N * r * 2 },
+      (err, derivedKey) => {
+        if (err) reject(err);
+        else resolve(derivedKey);
+      },
+    );
   });
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }

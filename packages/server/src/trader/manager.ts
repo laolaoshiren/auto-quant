@@ -427,11 +427,18 @@ export function startGuard(input: {
   traderExists: boolean;
   running: boolean;
   starting: boolean;
+  shuttingDown?: boolean;
 }): { ok: true } | { ok: false; error: string } {
   if (input.globalTradingDisabled) {
     return {
       ok: false,
       error: 'GLOBAL_TRADING_DISABLED 已设置 —— 拒绝启动任何机器人（这是全局熔断，不是这一台的问题）。',
+    };
+  }
+  if (input.shuttingDown) {
+    return {
+      ok: false,
+      error: '服务器正在停机清理中，拒绝启动新机器人。',
     };
   }
   if (!input.traderExists) {
@@ -1641,6 +1648,26 @@ export class TraderManager {
   private readonly fillReconcileTimers = new Map<number, NodeJS.Timeout>();
   private stopping = false;
   /**
+   * 进程/全量停机锁（仅在 `stopAll()` 执行排空期间为 true）。
+   *
+   * 区别于 `this.stopping`（停机完成后仍保持 true 以中止残余退避重试）：
+   * 在 `stopAll()` 正在排空期间禁止任何并发 `startTrader()` 覆写 `this.stopping = false`
+   * 并打破全进程停机保护。
+   */
+  private shutdownInProgress = false;
+  /**
+   * 正在排空停机的机器人（`stopTrader` 已同步从 `running` 摘除让 UI 立刻看到 `stopped`，
+   * 但底层 `autoTrader.stop()` 仍在异步排空在途周期）。新启动必须等待旧排空结束后再继续，
+   * 防止双实例并存同时下单。
+   */
+  private readonly stoppingTraders = new Map<number, Promise<void>>();
+  /**
+   * 每个机器人的生命周期代次号（每次 `stopTrader` 与每次新启动自增）。
+   * `stopTrader` 异步排空完毕清理 `researchRefresher` / `userStreams` / `connections` 时，
+   * 仅当当前代次仍等于本次停机代次时才执行清理，绝不拆毁新实例已建好的连接。
+   */
+  private readonly traderGenerations = new Map<number, number>();
+  /**
    * 被明确取消启动的机器人（操作员点了停止、或进程正在关闭）。
    *
    * 开机恢复会在退避后重试启动，而"点了停止"是比"我想让它跑"更强的意图：
@@ -2360,7 +2387,7 @@ export class TraderManager {
     const strategyRecord =
       config?.strategyId == null ? undefined : strategies.get(config.strategyId);
     const risk = strategyRecord?.config.riskControl;
-    const equity = config?.initialEquity ?? 0;
+    const initialEquityFallback = config?.initialEquity ?? 0;
 
     /*
      * ⚠️ **杠杆取策略上限的一半**：本模式是实验性的，先保守起步。
@@ -2419,8 +2446,14 @@ export class TraderManager {
          */
         readMinNotional: () => 5,
         readHoldAskEvery: () => Math.max(1, Math.floor(jevNumber('hold_ask_every'))),
-        /* 权益也每轮现读 —— 余额会变，写死会让档位基于旧余额。 */
-        readEquity: () => traders.get(traderId)?.initialEquity ?? equity,
+        /* 权益每轮现读：优先读最新实时权益快照，尚无快照时再回落 initialEquity。 */
+        readEquity: () => {
+          const latest = equity.list(traderId, 1)[0]?.equity;
+          if (typeof latest === 'number' && Number.isFinite(latest) && latest > 0) {
+            return latest;
+          }
+          return traders.get(traderId)?.initialEquity ?? initialEquityFallback;
+        },
         readMarginMode: () => jevEnum('margin_mode'),
         readLeverageMode: () => jevEnum('leverage_mode'),
         readLeverageManual: () => jevNumber('leverage_manual'),
@@ -3066,6 +3099,7 @@ export class TraderManager {
       traderExists: trader !== undefined,
       running: this.running.has(traderId),
       starting: this.starting.has(traderId),
+      shuttingDown: this.shutdownInProgress,
     });
     if (!guard.ok) {
       if (env.globalTradingDisabled) {
@@ -3082,7 +3116,30 @@ export class TraderManager {
      * 也要能重来，否则一次网络抖动就会让这台机器人**再也点不起来**。
      */
     this.starting.add(traderId);
+    /*
+     * 清除上一次 `stopTrader()` 残留的取消旗标（与 `startTraderAsync` 对齐）：
+     *   · 必须在 `await pendingStop` **之前**清，这样"停 → 启"不会误吃上一次停止的旗标；
+     *   · 若在 `await pendingStop` 期间操作员**再次**点停止，新的 `cancelledStarts.add()`
+     *     仍会在 await 之后被下面的检查精准捕获。
+     */
+    this.cancelledStarts.delete(traderId);
     try {
+      /*
+       * 若该机器人正处于上一次 `stopTrader()` 的异步排空中，必须等旧实例彻底停稳后再继续，
+       * 防止两个 `AutoTrader` 并行下单或旧停机流程在后台拆毁新实例的连接。
+       */
+      const pendingStop = this.stoppingTraders.get(traderId);
+      if (pendingStop) {
+        await pendingStop.catch(() => undefined);
+      }
+      if (this.shutdownInProgress) {
+        return { ok: false, error: '服务器正在停机清理中，拒绝启动新机器人。', preflight: [] };
+      }
+      if (this.cancelledStarts.has(traderId)) {
+        this.setTraderStatus(traderId, 'stopped', null);
+        return { ok: false, error: '启动过程中被操作员取消。', preflight: [], cancelled: true };
+      }
+      this.traderGenerations.set(traderId, (this.traderGenerations.get(traderId) ?? 0) + 1);
       this.stopping = false;
       const retry = options.retryTransient === true;
 
@@ -3718,9 +3775,35 @@ export class TraderManager {
          * ⚠️ 只在 `jevModel` 存在时挂（其它三种模式这个属性不存在，
          * `typeof` 探测自然为假，行为逐字节不变）。
          */
+        ...(!routedTeamModel && !jevModel
+          ? {
+              chat: async (messages, options) => {
+                const result = await client.chat(messages, options);
+                return {
+                  text: result.text,
+                  latencyMs: result.latencyMs,
+                  usage: {
+                    promptTokens: result.usage.promptTokens,
+                    completionTokens: result.usage.completionTokens,
+                    cachedTokens: result.usage.cachedTokens,
+                    reasoningTokens: result.usage.reasoningTokens,
+                  },
+                  ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
+                };
+              },
+            }
+          : {}),
         ...(jevModel !== null && jevModel !== undefined
           ? {
               rerankByJev: (jevModel as unknown as { rerankByJev: unknown }).rerankByJev,
+              ...(typeof (jevModel as unknown as { suggestTrailingStop?: unknown })
+                .suggestTrailingStop === 'function'
+                ? {
+                    suggestTrailingStop: (
+                      jevModel as unknown as { suggestTrailingStop: unknown }
+                    ).suggestTrailingStop,
+                  }
+                : {}),
             }
           : {}),
       };
@@ -3984,6 +4067,17 @@ export class TraderManager {
       log.error(`启动机器人 ${traderId} 失败：${message}`);
       this.running.delete(traderId);
       dropConnections(this.connections, traderId);
+      if (this.cancelledStarts.has(traderId) && !this.stopping) {
+        /*
+         * 操作员在启动过程中已点击「停止」：即使建连/初始化抛错，也保持 stopped，
+         * 避免落成 error 后在下次服务重启时被 resumePersisted() 意外复活下单。
+         */
+        this.setTraderStatus(traderId, 'stopped', null);
+        return {
+          result: { ok: false, error: message, preflight: checks, cancelled: true },
+          permanent: true,
+        };
+      }
       this.setTraderStatus(traderId, 'error', message);
       return {
         result: { ok: false, error: message, preflight: checks },
@@ -4027,6 +4121,7 @@ export class TraderManager {
       traderExists: trader !== undefined,
       running: this.running.has(traderId),
       starting: this.starting.has(traderId),
+      shuttingDown: this.shutdownInProgress,
     });
     if (!guard.ok) return { ok: false, error: guard.error, preflight: [] };
     if (!trader) return { ok: false, error: `找不到机器人 ${traderId}`, preflight: [] };
@@ -4129,6 +4224,8 @@ export class TraderManager {
          * 那面旗子在 `startTrader` 的 finally 里已收掉，此时看它永远看不出来。
          */
         if (result.cancelled) {
+          /* 兜底确保 DB 状态落为 stopped，防止取消竞态下残留 starting/error 导致重启后复活下单。 */
+          this.setTraderStatus(traderId, 'stopped', null);
           log.info(`机器人 ${traderId} 的启动已被取消，状态保持 stopped（不记为 error）。`);
           return;
         }
@@ -4151,49 +4248,62 @@ export class TraderManager {
     // parked in `waitForRetry()` aborts instead of starting the trader seconds
     // after it was told to stop.
     this.cancelledStarts.add(traderId);
+    const stopGen = (this.traderGenerations.get(traderId) ?? 0) + 1;
+    this.traderGenerations.set(traderId, stopGen);
     const autoTrader = this.running.get(traderId);
+    const previousDrain = this.stoppingTraders.get(traderId);
 
     /*
-     * ⚠️ **先把"它已停止"定下来，再去做清理（2026-10-10，用户报的卡顿）。**
-     *
-     * 用户的原话：「机器人启动\停止，用户点击以后应该是瞬间完成（起码 UI 页面上
-     * 用户感觉是瞬间完成，现在运行中的机器人运行\停止会卡住很久）」。
-     *
-     * 原来 `this.running.delete()` 在 `await autoTrader.stop()` **之后** ——
-     * 而 `stop()` 要等在途那一轮结束（最多 60 秒，那一轮可能正卡在一次 LLM 调用上）。
-     * 界面读的是 `statusOf()`（= `running.get(id)?.currentStatus ?? 'stopped'`），
-     * 于是**这 60 秒里页面上还写着"运行中"**，看起来就是"点了没反应"。
-     *
-     * 顺序反过来之后：状态立刻变 `stopped`，界面立刻翻；清理照常在后面做完。
-     * 清理期的机器人在 `running` 里已经不存在，所以并发 `start` 不会撞上半停的实例。
+     * 先把 UI 可见状态定为 `stopped`（从 `running` 摘除 + 写库），保证点击停止立刻翻态；
+     * 同时把异步排空 Promise 登记进 `stoppingTraders`，并按 `stopGen` 代次保护清理：
+     *   · 新启动的 `startTrader()` 看到 `stoppingTraders` 时必须等旧停机排空完毕再启动，杜绝双实例；
+     *   · 清理 `researchRefresher`/`userStreams`/`connections` 前校验当前代次仍等于 `stopGen`，
+     *     确保绝不会拆毁后续新实例已建好的连接。
      */
     this.running.delete(traderId);
     this.startedAt.delete(traderId);
     if (autoTrader) {
       /* 掐断在途的 AI 请求 —— 这是"停止"要立即生效的那部分。 */
       autoTrader.abortInFlightCycle();
-      this.setTraderStatus(traderId, 'stopped', null);
-      await autoTrader.stop();
-    } else {
-      this.setTraderStatus(traderId, 'stopped', null);
     }
-    this.cancelFillReconcile(traderId);
-    /*
-     * ⚠️ **必须停掉后台调研循环**（2026-10-13 实测发现的资源泄漏）。
-     *
-     * 实测：`#11` 已 `stopped`，而服务器上**还有 2 个 claude 进程在跑** ——
-     * 因为 `researchRefreshers` 只在创建处出现，从未被清理。
-     * 后果：机器人停止后后台调研**每 10 分钟照常起 4 个进程**，
-     * 不报错、界面看不见，只是安静地吃 CPU/内存（单个约 250MB）。
-     */
-    stopResearchRefresher(traderId);
-    const stream = this.userStreams.get(traderId);
-    if (stream) {
-      await stream.stop().catch(() => undefined);
-      this.userStreams.delete(traderId);
+    this.setTraderStatus(traderId, 'stopped', null);
+
+    const drainPromise = (async () => {
+      if (previousDrain) {
+        await previousDrain.catch(() => undefined);
+      }
+      if (autoTrader) {
+        await autoTrader.stop();
+      }
+      this.cancelFillReconcile(traderId);
+      if (this.traderGenerations.get(traderId) === stopGen) {
+        /*
+         * ⚠️ **必须停掉后台调研循环**（2026-10-13 实测发现的资源泄漏）。
+         * 仅在当前代次未被新启动接管时才清理，避免旧停机拆毁新实例资源。
+         */
+        stopResearchRefresher(traderId);
+        const stream = this.userStreams.get(traderId);
+        if (stream) {
+          await stream.stop().catch(() => undefined);
+          if (this.traderGenerations.get(traderId) === stopGen) {
+            this.userStreams.delete(traderId);
+          }
+        }
+        if (this.traderGenerations.get(traderId) === stopGen) {
+          dropConnections(this.connections, traderId);
+        }
+      }
+      runtimeLogs.write(traderId, 'info', 'manager', '机器人已停止');
+    })();
+
+    this.stoppingTraders.set(traderId, drainPromise);
+    try {
+      await drainPromise;
+    } finally {
+      if (this.stoppingTraders.get(traderId) === drainPromise) {
+        this.stoppingTraders.delete(traderId);
+      }
     }
-    dropConnections(this.connections, traderId);
-    runtimeLogs.write(traderId, 'info', 'manager', '机器人已停止');
   }
 
   /**
@@ -4637,78 +4747,68 @@ export class TraderManager {
 
   /** Stop everything — used on shutdown, and by the global kill switch. */
   async stopAll(reason = '服务器正在关闭'): Promise<void> {
-    if (this.stopping) return;
-    /*
-     * Cancel every in-flight boot retry *before* anything else.
-     *
-     * `resumePersisted()` can be sitting in a 90-second backoff when SIGTERM
-     * arrives. Without this, the shutdown would clear the loop timers, close the
-     * database, and the backoff would then expire and try to start a trader
-     * against a closed database — a crash during shutdown that looks like a
-     * random failure on the next boot.
-     */
-    for (const trader of traders.list()) this.cancelledStarts.add(trader.id);
-    this.stopping = true;
-    /* 停掉自检循环 —— 关闭时不该再开新的查询。 */
-    if (this.selfCheckTimer) {
-      clearInterval(this.selfCheckTimer);
-      this.selfCheckTimer = null;
+    if (this.shutdownInProgress || this.stopping) return;
+    this.shutdownInProgress = true;
+    try {
+      /*
+       * Cancel every in-flight boot retry *before* anything else.
+       */
+      for (const trader of traders.list()) this.cancelledStarts.add(trader.id);
+      this.stopping = true;
+      /* 停掉自检循环 —— 关闭时不该再开新的查询。 */
+      if (this.selfCheckTimer) {
+        clearInterval(this.selfCheckTimer);
+        this.selfCheckTimer = null;
+      }
+
+      /*
+       * 停掉所有后台调研定时器与在飞猎手进程（保留库内持久化情报供重启续用，
+       * 与 `stopResearchRefresher` 用户主动停机清库区分）。
+       */
+      for (const [id, timer] of [...researchRefreshers.entries()]) {
+        clearInterval(timer);
+        researchRefreshers.delete(id);
+        clearResearchCache(id);
+      }
+      for (const [id, controller] of [...researchAborts.entries()]) {
+        controller.abort();
+        researchAborts.delete(id);
+      }
+
+      await Promise.all(
+        [...this.userStreams.entries()].map(async ([id, stream]) => {
+          try {
+            await stream.stop();
+          } catch (error) {
+            log.warn(`停止机器人 ${id} 的用户数据流失败：${(error as Error).message}`);
+          }
+        }),
+      );
+      this.userStreams.clear();
+      /*
+       * 还没到点的即时对账一并丢掉：机器人已经不再运行，`applyExchangeFill()`
+       * 的第一行就会返回。
+       */
+      for (const id of [...this.fillReconcileTimers.keys()]) this.cancelFillReconcile(id);
+
+      await Promise.all(
+        [...this.running.entries()].map(async ([id, trader]) => {
+          try {
+            await trader.stop(reason, false);
+          } catch (error) {
+            log.warn(`停止机器人 ${id} 失败：${(error as Error).message}`);
+          }
+        }),
+      );
+      /* 等待已有单台 stopTrader 排空结束，避免关闭数据库时仍有在途写入。 */
+      await Promise.all([...this.stoppingTraders.values()].map((p) => p.catch(() => undefined)));
+      this.running.clear();
+      this.startedAt.clear();
+      this.connections.clear();
+      log.info('所有机器人已停止');
+    } finally {
+      this.shutdownInProgress = false;
     }
-
-    await Promise.all(
-      [...this.userStreams.entries()].map(async ([id, stream]) => {
-        try {
-          await stream.stop();
-        } catch (error) {
-          log.warn(`停止机器人 ${id} 的用户数据流失败：${(error as Error).message}`);
-        }
-      }),
-    );
-    this.userStreams.clear();
-    /*
-     * 还没到点的即时对账一并丢掉：机器人已经不再运行，`applyExchangeFill()`
-     * 的第一行就会返回。
-     */
-    for (const id of [...this.fillReconcileTimers.keys()]) this.cancelFillReconcile(id);
-
-    /*
-     * `trader.stop()` waits for the cycle in flight before resolving, which is
-     * what makes this shutdown safe: Ctrl+C used to land between "entry filled"
-     * and "stop placed", the timer was already cleared, `process.exit(0)` ran
-     * immediately, and the account was left holding a leveraged position with no
-     * exchange-side stop — the exact state §2.6 forbids. The wait is bounded
-     * inside `stop()`, so a wedged exchange call delays shutdown but cannot hang
-     * it forever.
-     */
-    await Promise.all(
-      [...this.running.entries()].map(async ([id, trader]) => {
-        try {
-          /*
-           * `persist: false` —— 进程关闭不是"操作员点了停止"。
-           *
-           * 若这里照常写入 `stopped`，`resumePersisted()` 会把它当成人的决定而
-           * 拒绝恢复（见那里的注释），于是**每一次部署或重启都会静默停掉所有
-           * 机器人** —— 而且控制台上看起来就像是有人手动停的，没有任何异常提示。
-           * 这个 bug 真实发生过。
-           *
-           * 保留库里的 `running`，下次启动就能恢复。
-           */
-          await trader.stop(reason, false);
-        } catch (error) {
-          log.warn(`停止机器人 ${id} 失败：${(error as Error).message}`);
-        }
-      }),
-    );
-    this.running.clear();
-    this.connections.clear();
-    /*
-     * `stopping` deliberately stays true: this instance is on its way down, and
-     * any boot retry still parked in `waitForRetry()` must abort rather than
-     * resurrect a trader against a closing database. `startTrader()` resets the
-     * flag itself, so a start issued after a shutdown (the global kill switch can
-     * stop traders without ending the process) still works.
-     */
-    log.info('所有机器人已停止');
   }
 
   /**

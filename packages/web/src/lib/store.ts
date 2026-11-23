@@ -30,7 +30,7 @@ import type {
   User,
 } from '@aq/shared';
 import { orderPurposeLabel, orderStatusLabel, traderStatusLabel } from '@aq/shared';
-import { closeReasonLabel } from './summaries';
+import { closeReasonLabel, useSummaries } from './summaries';
 import { fmtSigned, sideLabel } from './format';
 
 /* -------------------------------------------------------------------------- */
@@ -43,6 +43,8 @@ interface SessionState {
   status: SessionStatus;
   user: User | null;
   health: Health | null;
+  /** 最近一次拉到 `health` 的本地时间戳（epoch ms），供数据页推算实时运行时长。 */
+  healthLoadedAt: number | null;
   catalog: Catalog | null;
   system: SystemStatus | null;
   traders: TraderRow[];
@@ -77,6 +79,7 @@ export const useApp = create<SessionState>((set, get) => ({
   status: 'loading',
   user: null,
   health: null,
+  healthLoadedAt: null,
   catalog: null,
   system: null,
   traders: [],
@@ -88,24 +91,29 @@ export const useApp = create<SessionState>((set, get) => ({
   bootstrap: async () => {
     setUnauthorizedHandler(() => {
       clearToken();
-      set({ status: 'anonymous', user: null });
       /*
-       * ⚠️ **会话失效时把推送也关掉**（台账 FRD-03）。
-       *
-       * 401 原来只清 token、不动 socket，于是 `socket.status` 停在 `'closed'`
-       * （`onclose` 里那句 `if (!getToken()) return;` 让重连**永远不发生**）——
-       * 界面显示"推送断开 · 轮询兜底"，而实际上**没有任何机制能让它恢复**：
-       * 重新登录后 `bootstrap()` 也不会再 `connect()`。
-       * 这里显式 disconnect：状态回到 `idle`（= 还没连、不是"连过又断了"），
-       * 并给出原因，登录成功后由下面的 `connect()` 重新建立。
+       * ⚠️ **会话失效时把推送与所有敏感缓存一并清空**（台账 FRD-03 + 安全清理）。
+       * 先清空事件与摘要，再 disconnect 写入原因，避免上一会话的日志/持仓/统计残留。
        */
+      useEvents.getState().reset();
       useEvents.getState().disconnect('会话已失效，请重新登录');
+      useSummaries.getState().reset();
+      set({
+        status: 'anonymous',
+        user: null,
+        traders: [],
+        catalog: null,
+        system: null,
+        lastError: null,
+        systemsLoadedAt: null,
+        systemError: null,
+      });
     });
 
     if (!getToken()) {
       try {
         const health = await api.health();
-        set({ health, status: 'anonymous' });
+        set({ health, healthLoadedAt: Date.now(), status: 'anonymous' });
       } catch {
         set({ status: 'anonymous' });
       }
@@ -114,7 +122,7 @@ export const useApp = create<SessionState>((set, get) => ({
 
     try {
       const [{ user }, health] = await Promise.all([api.me(), api.health().catch(() => null)]);
-      set({ user, health, status: 'authenticated' });
+      set({ user, health, healthLoadedAt: health ? Date.now() : null, status: 'authenticated' });
       setStoredUser(user);
       await Promise.all([get().loadCatalog(), get().refreshSystem(), get().refreshTraders()]);
       /*
@@ -132,7 +140,12 @@ export const useApp = create<SessionState>((set, get) => ({
       } catch {
         health = null;
       }
-      set({ status: 'anonymous', user: null, health });
+      set({
+        status: 'anonymous',
+        user: null,
+        health,
+        healthLoadedAt: health ? Date.now() : null,
+      });
     }
   },
 
@@ -142,13 +155,27 @@ export const useApp = create<SessionState>((set, get) => ({
     setStoredUser(result.user);
     set({ user: result.user, status: 'authenticated', lastError: null });
     await get().bootstrap();
+    if (get().status !== 'authenticated') {
+      throw new Error('登录已受理，但会话初始化未通过，请稍后重试。');
+    }
   },
 
   logout: () => {
     clearToken();
-    /* 登出必须把推送也关掉并说明原因 —— 否则界面会一直显示"正在重连"（台账 FRD-03）。 */
+    /* 登出必须清空事件/摘要/敏感状态并关闭推送（台账 FRD-03）。 */
+    useEvents.getState().reset();
     useEvents.getState().disconnect('已退出登录，推送已关闭');
-    set({ status: 'anonymous', user: null, traders: [], catalog: null, system: null });
+    useSummaries.getState().reset();
+    set({
+      status: 'anonymous',
+      user: null,
+      traders: [],
+      catalog: null,
+      system: null,
+      lastError: null,
+      systemsLoadedAt: null,
+      systemError: null,
+    });
   },
 
   loadCatalog: async () => {
@@ -242,7 +269,13 @@ export interface LiveCycle {
    * 一轮可能推几十条。界面折叠时只显示**最后一条**（"现在在做什么"），
    * 展开才看全 —— 所以留一个够看的窗口即可，不无限增长。
    */
-  steps: { at: string; level: 'info' | 'warn' | 'error'; message: string }[];
+  steps: {
+    at: string;
+    level: 'info' | 'warn' | 'error';
+    message: string;
+    role?: string | null;
+    phase?: string | null;
+  }[];
 }
 
 export interface TraderLive {
@@ -348,6 +381,8 @@ interface EventState {
   hydrateLogs: (lines: LiveLogLine[]) => void;
   dismissToast: (id: number) => void;
   clearLogs: () => void;
+  /** 登出 / 会话失效时清空全部实时日志、事件与通知，不留上一会话痕迹。 */
+  reset: () => void;
   /** Raise a toast from outside the socket — used for REST-triggered actions. */
   notify: (input: { kind: Toast['kind']; title: string; body?: string; traderId?: number | null }) => void;
 }
@@ -402,7 +437,7 @@ export const useEvents = create<EventState>((set, get) => ({
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       /*
        * 断了就必须把"正在请求模型"一起清掉。
        *
@@ -415,7 +450,12 @@ export const useEvents = create<EventState>((set, get) => ({
         status: 'closed',
         byTrader: clearAllLiveCycles(state.byTrader),
       }));
-      socket = null;
+      if (socket === ws) socket = null;
+      if (event.code === 1008) {
+        /* 服务端明确以 1008 Policy Violation 拒绝令牌：停止重连，避免死循环撞墙。 */
+        set({ blockedReason: '会话认证被拒绝，请重新登录' });
+        return;
+      }
       if (!getToken()) {
         /* 没凭据了（会话失效 / 登出）：说清原因，别显示成"等重连就好"。 */
         set({ blockedReason: '未登录，推送不可用' });
@@ -443,6 +483,9 @@ export const useEvents = create<EventState>((set, get) => ({
       reconnectTimer = null;
     }
     if (socket) {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
       socket.onclose = null;
       socket.close();
       socket = null;
@@ -695,6 +738,14 @@ export const useEvents = create<EventState>((set, get) => ({
 
   dismissToast: (id) => set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),
   clearLogs: () => set({ logs: [] }),
+  reset: () =>
+    set({
+      attempts: 0,
+      logs: [],
+      toasts: [],
+      byTrader: {},
+      lastEventAt: null,
+    }),
 
   notify: (input) =>
     pushToast(set, {

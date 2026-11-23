@@ -95,10 +95,12 @@ export function toGeminiSchema(schema: unknown): unknown {
       for (const [name, subschema] of Object.entries(properties)) {
         rewritten[name] = toGeminiSchema(subschema);
       }
-      out['properties'] = rewritten;
-      // Gemini ignores object key order otherwise, which changes the emitted
-      // JSON field order and confuses a downstream positional parser.
-      out['propertyOrdering'] = Object.keys(rewritten);
+      if (Object.keys(rewritten).length > 0) {
+        out['properties'] = rewritten;
+        // Gemini ignores object key order otherwise, which changes the emitted
+        // JSON field order and confuses a downstream positional parser.
+        out['propertyOrdering'] = Object.keys(rewritten);
+      }
       continue;
     }
 
@@ -108,6 +110,24 @@ export function toGeminiSchema(schema: unknown): unknown {
     }
 
     out[key] = value;
+  }
+
+  // Gemini rejects `type: 'OBJECT'` with missing or empty `properties`
+  // ("properties: should be non-empty for OBJECT type"). Convert freeform
+  // object schemas (such as `set_params.patch`) into a JSON-object STRING
+  // schema so Gemini accepts the declaration and can emit arbitrary patch keys.
+  if (out['type'] === 'OBJECT') {
+    const props = asObject(out['properties']);
+    if (!props || Object.keys(props).length === 0) {
+      delete out['properties'];
+      delete out['propertyOrdering'];
+      delete out['required'];
+      out['type'] = 'STRING';
+      const desc = typeof out['description'] === 'string' ? out['description'] : '';
+      if (!/json/i.test(desc)) {
+        out['description'] = desc ? `${desc} (JSON object string)` : 'JSON object string';
+      }
+    }
   }
 
   // An enum is only honoured when flagged as such.
@@ -147,39 +167,50 @@ export function buildBody(
    * 所以同名工具一轮内不能并行调两次（我们的工具集没有这种情况，
    * 但若以后加了就必须改协议）。
    */
-  const body: JsonObject = {
-    contents: turns.map((m) => {
-      if (m.role === 'tool') {
-        return {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                name: m.toolName ?? m.toolCallId ?? '',
-                response: safeParseObject(m.content),
-              },
-            },
-          ],
-        };
-      }
-      if (m.role === 'assistant' && m.toolCalls !== undefined && m.toolCalls.length > 0) {
-        const parts: JsonObject[] = [];
-        if (m.content !== '') parts.push({ text: m.content });
-        for (const c of m.toolCalls) {
-          parts.push({
-            functionCall: { name: c.name, args: safeParseObject(c.arguments) },
-          });
-        }
-        // Role `model` — the string `assistant` is not a valid Gemini role.
-        return { role: 'model', parts };
-      }
-      return {
-        // Role `model` — the string `assistant` is not a valid Gemini role.
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
+  /*
+   * 连续多条 `role: 'tool'` 消息必须合并进紧跟 model 之后的**单条 `user` 消息**
+   * 的 `parts[]` 里：Gemini 要求同一轮并行 `functionCall` 的所有 `functionResponse`
+   * 在同一条 `user` turn 中一起回传，拆成多条连续 `user` turn 会被拒。
+   */
+  const contents: JsonObject[] = [];
+  for (const m of turns) {
+    if (m.role === 'tool') {
+      const part: JsonObject = {
+        functionResponse: {
+          name: m.toolName ?? m.toolCallId ?? '',
+          response: safeParseObject(m.content),
+        },
       };
-    }),
-  };
+      const prev = contents[contents.length - 1];
+      const prevParts = prev && prev['role'] === 'user' && Array.isArray(prev['parts'])
+        ? (prev['parts'] as JsonObject[])
+        : null;
+      if (prevParts !== null && prevParts[prevParts.length - 1]?.['functionResponse'] !== undefined) {
+        prevParts.push(part);
+      } else {
+        contents.push({ role: 'user', parts: [part] });
+      }
+      continue;
+    }
+    if (m.role === 'assistant' && m.toolCalls !== undefined && m.toolCalls.length > 0) {
+      const parts: JsonObject[] = [];
+      if (m.content !== '') parts.push({ text: m.content });
+      for (const c of m.toolCalls) {
+        parts.push({
+          functionCall: { name: c.name, args: safeParseObject(c.arguments) },
+        });
+      }
+      // Role `model` — the string `assistant` is not a valid Gemini role.
+      contents.push({ role: 'model', parts });
+      continue;
+    }
+    contents.push({
+      // Role `model` — the string `assistant` is not a valid Gemini role.
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    });
+  }
+  const body: JsonObject = { contents };
 
   if (system !== undefined) {
     body['systemInstruction'] = { parts: [{ text: system }] };
@@ -214,11 +245,28 @@ export function buildBody(
   if (options.tools !== undefined && options.tools.length > 0) {
     body['tools'] = [
       {
-        functionDeclarations: options.tools.map((t) => ({
-          name: t.name,
-          description: t.description,
-          parameters: toGeminiSchema(t.parameters),
-        })),
+        functionDeclarations: options.tools.map((t) => {
+          const decl: JsonObject = {
+            name: t.name,
+            description: t.description,
+          };
+          const rawParams = asObject(t.parameters);
+          const rawProps = rawParams ? asObject(rawParams['properties']) : null;
+          const isEmptyObjectParams =
+            rawParams !== null &&
+            typeof rawParams['type'] === 'string' &&
+            rawParams['type'].toUpperCase() === 'OBJECT' &&
+            (!rawProps || Object.keys(rawProps).length === 0);
+          /*
+           * 无参工具（如 `get_current_params`）的 `parameters` 若传空 OBJECT，
+           * Gemini 会报 400 (`properties: should be non-empty for OBJECT type`)；
+           * 按 Gemini 规范直接省略 `parameters`。
+           */
+          if (!isEmptyObjectParams) {
+            decl['parameters'] = toGeminiSchema(t.parameters);
+          }
+          return decl;
+        }),
       },
     ];
     /*

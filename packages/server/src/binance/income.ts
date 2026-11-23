@@ -134,7 +134,8 @@ export async function fetchIncome(
       }
 
       for (const event of page) {
-        const key = `${event.tranId ?? ''}:${event.time ?? ''}:${event.incomeType ?? ''}:${event.income ?? ''}`;
+        /* 纳入 symbol 与 tradeId，避免同毫秒多标的等额流水或 tranId 缺失被误判重复而丢流水。 */
+        const key = `${event.tranId ?? ''}:${event.tradeId ?? ''}:${event.symbol ?? ''}:${event.time ?? ''}:${event.incomeType ?? ''}:${event.income ?? ''}`;
         if (seen.has(key)) continue;
         seen.add(key);
         events.push(event);
@@ -170,6 +171,14 @@ export function summarizeIncome(events: readonly BinanceIncome[]): IncomeSummary
   const symbols = new Set<string>();
 
   for (const event of events) {
+    /*
+     * 非结算资产计价的手续费（如 BNB 抵扣）单位不是 USDT，绝不可与 USDT 直接相加
+     *（与 `commissionsInWindow` / `settlementCommissionOf` 保持同一 §2.5 口径）。
+     */
+    if (event.incomeType === 'COMMISSION' && !isSettlementAsset(event.asset)) {
+      if (event.symbol) symbols.add(event.symbol);
+      continue;
+    }
     const amount = Number(event.income) || 0;
     byType[event.incomeType] = (byType[event.incomeType] ?? 0) + amount;
     if (event.symbol) symbols.add(event.symbol);
@@ -492,6 +501,43 @@ export function commissionsInWindow(
     else exitFee += amount;
   }
   return { entryFee, exitFee };
+}
+
+/**
+ * 按成交 id 归属结算资产手续费（供 `reconciled_reversed` 反向回合使用）。
+ *
+ * 反向回合的时间窗口往往跨度极大（实测 23~159 小时），用 `commissionsInWindow` 会把
+ * 窗口内其它回合的手续费重复计入。`BinanceIncome` 的 `COMMISSION` 事件同样带 `tradeId`，
+ * 按 `fillIds` 精确匹配并与 `claimed` 去重可彻底隔离跨回合串账。
+ */
+export function commissionsInFills(
+  events: readonly BinanceIncome[],
+  fillIds: readonly string[],
+  openedAt: string,
+  closedAt: string,
+  claimed?: Set<string>,
+): { entryFee: number; exitFee: number; matched: number } {
+  if (fillIds.length === 0) return { entryFee: 0, exitFee: 0, matched: 0 };
+  const wanted = new Set(fillIds);
+  const from = new Date(openedAt).getTime();
+  const to = new Date(closedAt).getTime();
+  const mid = Number.isFinite(from) && Number.isFinite(to) ? (from + to) / 2 : Number.NaN;
+  let entryFee = 0;
+  let exitFee = 0;
+  let matched = 0;
+  for (const event of events) {
+    if (event.incomeType !== 'COMMISSION') continue;
+    if (!isSettlementAsset(event.asset)) continue;
+    const id = String(event.tradeId ?? '');
+    if (id.length === 0 || !wanted.has(id)) continue;
+    if (claimed?.has(id)) continue;
+    claimed?.add(id);
+    const amount = Math.abs(Number(event.income) || 0);
+    matched += 1;
+    if (Number.isFinite(mid) && event.time <= mid) entryFee += amount;
+    else exitFee += amount;
+  }
+  return { entryFee, exitFee, matched };
 }
 
 /**

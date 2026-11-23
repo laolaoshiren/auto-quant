@@ -375,6 +375,7 @@ export class BinanceRest {
       // The time-sync probe is the one exception — see `skipSlot`. Holding a slot
       // across it is what turns "clock drifted" into "client deadlocked".
       const holdsSlot = options.skipSlot !== true;
+      let backoffMs = 0;
       if (holdsSlot) await this.acquireSlot();
       try {
         if (!options.skipWeightGate) await this.respectWeightBudget();
@@ -394,20 +395,14 @@ export class BinanceRest {
 
             // Throttled: honour Retry-After when given, else back off hard.
             if (error.isRateLimited && attempt < retries) {
-              const waitMs = error.retryAfterSeconds
+              backoffMs = error.retryAfterSeconds
                 ? error.retryAfterSeconds * 1000
                 : Math.min(30_000, 2 ** attempt * 1000);
-              log.warn(`${path} 被限流（错误码 ${error.code}）；等待 ${waitMs}ms 后重试`);
-              await sleep(waitMs);
-              continue;
-            }
-
-            // Filter/validation/symbol problems are deterministic — retrying wastes weight.
-            if (error.isFilterError || error.isSymbolError || error.isInsufficientMargin) {
+              log.warn(`${path} 被限流（错误码 ${error.code}）；等待 ${backoffMs}ms 后重试`);
+            } else if (error.isFilterError || error.isSymbolError || error.isInsufficientMargin) {
+              // Filter/validation/symbol problems are deterministic — retrying wastes weight.
               throw error;
-            }
-
-            if (attempt < retries && (error.httpStatus === 500 || error.httpStatus === 503)) {
+            } else if (attempt < retries && (error.httpStatus === 500 || error.httpStatus === 503)) {
               if (options.avoidAmbiguousRetry) {
                 /*
                  * A 5xx may well have been executed before the gateway failed —
@@ -418,14 +413,12 @@ export class BinanceRest {
                 );
                 throw error;
               }
-              await sleep(2 ** attempt * 500);
-              continue;
+              backoffMs = 2 ** attempt * 500;
+            } else {
+              throw error;
             }
-            throw error;
-          }
-
-          // Transport-level failure (DNS, TLS, socket reset, timeout).
-          if (attempt < retries) {
+          } else if (attempt < retries) {
+            // Transport-level failure (DNS, TLS, socket reset, timeout).
             if (options.avoidAmbiguousRetry) {
               /*
                * The request may have reached Binance and been filled; only the
@@ -436,18 +429,21 @@ export class BinanceRest {
               );
               throw error;
             }
-            const waitMs = 2 ** attempt * 500;
-            log.warn(`${path} 网络传输错误（${(error as Error).message}）；${waitMs}ms 后重试`);
-            await sleep(waitMs);
-            continue;
+            backoffMs = 2 ** attempt * 500;
+            log.warn(`${path} 网络传输错误（${(error as Error).message}）；${backoffMs}ms 后重试`);
+          } else {
+            throw error;
           }
-          throw error;
         }
       } finally {
-        // Released even on a retry path, so a retry waits its turn again rather
-        // than holding a slot across the backoff sleep.
+        /*
+         * 必须在退避 `sleep(backoffMs)` 之前释放并发槽（2026-11-23 修复）：
+         * 原实现在 try/catch 内 `await sleep(...)`，6 个并发请求同时撞 429 时会死锁
+         * 全部并发槽位长达 30 秒，连止损/紧急平仓都被行情重试卡死。
+         */
         if (holdsSlot) this.releaseSlot();
       }
+      if (backoffMs > 0) await sleep(backoffMs);
     }
 
     throw lastError instanceof Error ? lastError : new Error(`Request to ${path} failed`);
@@ -586,7 +582,13 @@ export class BinanceRest {
       return;
     }
 
-    this.usedWeight1m = charged;
+    /*
+     * ⚠️ **严禁把衰减估算值 `charged` 写回 `this.usedWeight1m`（2026-11-23 P1 修复）**。
+     *
+     * `usedWeight1m` 是 `weightWindowStart` 时刻的真实服务端读数基准；每次放行前覆盖它
+     * 却不改 `weightWindowStart`，会让并发请求反复乘衰减系数导致计数在毫秒内指数归零，
+     * 软限速彻底失效并破坏 `reanchorWindow()` 的读数回落判据。
+     */
     if (charged < this.weightLimitPerMinute * WEIGHT_SOFT_LIMIT) return;
 
     const remaining = Math.max(0, this.weightWindowStart + 60_000 - now);

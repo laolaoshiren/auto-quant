@@ -413,10 +413,7 @@ export function MarketPage() {
                  * 「主动买入（币）/（USDT）」与「成交额」是同一笔钱的两种切法，
                  * 开盘/收盘时间已经显示在面板标题右侧，不再重复。
                  */}
-                <Readout
-                  label={`开盘（${selected.replace(/USDT$/, '')}）`}
-                  value={fmtPriceUsd(last.open)}
-                />
+                <Readout label="开盘（USDT）" value={fmtPriceUsd(last.open)} />
                 <Readout label="最高（USDT）" value={fmtPriceUsd(last.high)} tone="text-up" />
                 <Readout label="最低（USDT）" value={fmtPriceUsd(last.low)} tone="text-down" />
                 <Readout label="收盘（USDT）" value={fmtPriceUsd(last.close)} />

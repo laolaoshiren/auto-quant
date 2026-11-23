@@ -308,18 +308,25 @@ export class SymbolRegistry {
     if (!(rounded > 0)) return rounded;
 
     if (marketPrice !== undefined && marketPrice > 0) {
-      // Step away from the market until the trigger is strictly on the required
-      // side. A single step is not always enough (the market price itself need
-      // not be tick-aligned), and stopping early would hand Binance a value it
-      // rejects with `-2021`.
-      const maxSteps = 1000;
-      let steps = 0;
-      while (steps < maxSteps) {
-        const onCorrectSide = mustBeBelow ? rounded < marketPrice : rounded > marketPrice;
-        if (onCorrectSide) break;
-        rounded = roundToStep(rounded + (mustBeBelow ? -step : step), step, decimals);
-        steps += 1;
-        if (!(rounded > 0)) break;
+      /*
+       * 只修正「原始触发价原本在安全侧（或恰好贴着市价 1 个 tick 内），仅因 tick 取整踩线」的情形：
+       *   · 一步退回到安全侧最近 tick（不受旧版 maxSteps=1000 限制）；
+       *   · 若原始 `value` 本来就明确位于错误一侧（超过 1 个 tick，如卖单止损 70000 > 市价 68000），
+       *     保留 `rounded` 交由 `broker.placeOrder` 的 `isValidTrigger()` 明确拒绝「会立即触发」，
+       *     绝不悄悄把错方向止损拉到市价边上下单。
+       */
+      const onCorrectSide = mustBeBelow ? rounded < marketPrice : rounded > marketPrice;
+      const inputNearOrValid = mustBeBelow ? value <= marketPrice + step : value >= marketPrice - step;
+      if (!onCorrectSide && inputNearOrValid) {
+        if (mustBeBelow) {
+          let candidate = roundPrice(marketPrice, step, decimals, 'down');
+          if (candidate >= marketPrice) candidate = roundToStep(candidate - step, step, decimals);
+          rounded = candidate > 0 ? candidate : rounded;
+        } else {
+          let candidate = roundPrice(marketPrice, step, decimals, 'up');
+          if (candidate <= marketPrice) candidate = roundToStep(candidate + step, step, decimals);
+          rounded = candidate;
+        }
       }
     }
     return Number(rounded.toFixed(Math.max(decimals, 0)));

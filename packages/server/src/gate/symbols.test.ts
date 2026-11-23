@@ -129,8 +129,25 @@ test('★★★ 单合约映射：tick/步长/最小量全部按"张数 × 面�
   assert.equal(symbolInfo!.pricePrecision, 1);
   assert.equal(symbolInfo!.quantityPrecision, 4);
   assert.equal(symbolInfo!.contractSize, 1, '本系统数量是币数；张数换算在 broker 内部');
-  /* 任务约定的口径：minNotional = 最小张数 × 面值（量纲是币数，只可能更宽松）。 */
-  assert.equal(symbolInfo!.minNotional, 0.0001);
+  /*
+   * Gate 无原生 USDT MIN_NOTIONAL：必须为 0 而非币数 minQty，
+   * 否则 DOGE/SHIB/PEPE 等 quanto_multiplier>1 合约会被风控误拒。
+   */
+  assert.equal(symbolInfo!.minNotional, 0);
+});
+
+test('★★★ 高合约乘数低价币（如 PEPE/SHIB）minNotional 仍为 0，不会被当成千万 USDT 门槛误拒', () => {
+  const info = toGateContractInfo({
+    name: 'SHIB_USDT',
+    quanto_multiplier: '10000',
+    order_price_round: '0.00000001',
+    order_size_min: 1,
+    order_size_max: 1000000,
+  } as never);
+  const symbolInfo = gateContractInfoToSymbolInfo(info);
+  assert.ok(symbolInfo);
+  assert.equal(symbolInfo!.minQty, 10000);
+  assert.equal(symbolInfo!.minNotional, 0, '币数 10000 绝不能当成 10000 USDT 最小名义门槛');
 });
 
 test('★★ 不同 quanto_multiplier → 步长/精度跟着走（ETH：1 张 = 0.01 ETH）', () => {

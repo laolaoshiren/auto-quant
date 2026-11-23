@@ -163,15 +163,6 @@ export const DECISION_TOOL_CATALOGUE = `
     下一轮就不在池子里了 —— **这个工具就是让它留下来**。
   - 注意：名单有上限，也按轮数自动过期（默认几轮后消失）。**续点一次就会续期。**
     超上限时系统会如实告诉你哪些没被收下。
-  - 只在**处于停手状态**时才有意义：那种情况下你每轮的提示词里会带上
-    「你当前处于停手状态 + 当初的理由」。
-  - \`reason\`：必填。说清**当初那条理由为什么不再成立**（例如"当时担心的持仓叠加
-    已经不存在了，账户零敞口"）。空着会被拒。
-  - ⚠️ **恢复 ≠ 必须开仓。** 它只是把"不能开新仓"这道自设的闸门撤掉；
-    撤掉之后仍然按你的入场标准逐笔挑，没有合格的就继续空仓。
-  - ⚠️ **别一直停着不动。** 停手的理由往往是**当时的**；
-    如果那条理由已经不成立而你还停着，那是**白等**（这个账户一停就是三小时）。
-    每轮都值得问自己一句："我当初停手的理由，今天还成立吗？"
 
 - \`set_params(patch, reason)\` —— **改你自己的参数，包括你自己的规则文本。**
   - \`patch\`：要改的字段（增量，只改你写进去的）。可改：\`coinSource.*\`（选币）、
@@ -203,17 +194,9 @@ export const DECISION_TOOL_CATALOGUE = `
 /**
  * 从模型回复里抽出数据请求。
  *
- * 认两种格式：
- *
- * 1. `<tool>{...}</tool>` —— 我们自己在提示词里约定的；
- * 2. 模型**训练时的原生工具调用方言**（`parseNativeToolCalls` 认的那种）。
- *
- * 第二种是**实测逼出来的**：`agent/tools.ts` 那边就遇到过模型不照我们的格式、
- * 而是用它自己训练的语法回来，结果整轮解析失败、白烧两万多 token。
- * **同一个模型，这里必须一开始就接住它。**
- *
- * 解析不出来就返回空数组 —— **不猜它想调什么**（与 §2.4 一致：多认格式，
- * 不放宽语义；认不出的工具名照样在后面被拒）。
+ * 认两种文本格式：
+ * 1. `<tool>{"tool":"...","args":{...}}</tool>` —— 提示词约定的标准格式；
+ * 2. `<tool_call>{"name":"...","arguments":{...}}</tool_call>` —— 部分开源模型自带的原生文本方言。
  */
 export function extractToolCalls(text: string): DecisionToolCall[] {
   const calls: DecisionToolCall[] = [];
@@ -226,6 +209,13 @@ export function extractToolCalls(text: string): DecisionToolCall[] {
     if (parsed) calls.push(parsed);
   }
 
+  /* 格式二：<tool_call>...</tool_call>（如 Qwen/DeepSeek 文本方言） */
+  const nativeRe = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+  while ((match = nativeRe.exec(text)) !== null) {
+    const parsed = safeJson(match[1] ?? '');
+    if (parsed) calls.push(parsed);
+  }
+
   return calls;
 }
 
@@ -234,10 +224,23 @@ function safeJson(raw: string): DecisionToolCall | null {
     const value = JSON.parse(raw) as unknown;
     if (!value || typeof value !== 'object') return null;
     const obj = value as Record<string, unknown>;
-    const tool = typeof obj.tool === 'string' ? obj.tool : null;
+    const tool =
+      typeof obj.tool === 'string'
+        ? obj.tool
+        : typeof obj.name === 'string'
+          ? obj.name
+          : null;
     if (!tool) return null;
-    const args =
-      obj.args && typeof obj.args === 'object' ? (obj.args as Record<string, unknown>) : {};
+    const rawArgs = obj.args ?? obj.arguments;
+    let args: Record<string, unknown> = {};
+    if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
+      args = rawArgs as Record<string, unknown>;
+    } else if (typeof rawArgs === 'string' && rawArgs.trim() !== '') {
+      const parsedArgs = JSON.parse(rawArgs) as unknown;
+      if (parsedArgs && typeof parsedArgs === 'object' && !Array.isArray(parsedArgs)) {
+        args = parsedArgs as Record<string, unknown>;
+      }
+    }
     return { tool, args };
   } catch {
     return null;
@@ -461,7 +464,7 @@ export async function runDecisionTool(
     }
 
     return {
-      text: `没有名为 ${call.tool} 的工具。可用的是 get_klines、list_candidates、screen_symbols 与 request_deep_analysis。`,
+      text: `没有名为 ${call.tool} 的工具。可用的是 get_klines、list_candidates、screen_symbols、request_deep_analysis 与 set_params。`,
       summary: `未知工具 ${call.tool}`,
     };
   } catch (error) {

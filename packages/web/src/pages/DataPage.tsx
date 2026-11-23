@@ -55,6 +55,41 @@ function FeedClock({ lastEventAt }: { lastEventAt: number | null }) {
   );
 }
 
+/**
+ * 服务运行时长叶子组件 —— 基于 `healthLoadedAt` 每 30 秒推算实时值，
+ * 避免 `uptimeSeconds` 冻结在首次 bootstrap 读数，且不触发下方 500 行日志重渲染。
+ */
+function UptimeReadout({
+  baseSeconds,
+  loadedAt,
+}: {
+  baseSeconds: number | null;
+  loadedAt: number | null;
+}) {
+  const now = useTicker(30_000);
+  if (baseSeconds === null) return <span className="text-ink-mid">—</span>;
+  const elapsedSec = loadedAt === null ? 0 : Math.max(0, Math.floor((now - loadedAt) / 1000));
+  const totalMinutes = Math.floor((baseSeconds + elapsedSec) / 60);
+  return <span className="text-ink-mid">{totalMinutes} 分</span>;
+}
+
+const SOCKET_STATUS_LABEL: Record<string, string> = {
+  open: '推送已连接',
+  connecting: '推送连接中',
+  closed: '推送已断开',
+  idle: '推送未连接',
+};
+
+function safeIsoTime(value: string): string {
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : value || '—';
+}
+
+function safeClockTime(value: string): string {
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toLocaleTimeString('en-GB', { hour12: false }) : '—';
+}
+
 const LEVELS: Array<{ id: Level; label: string }> = [
   { id: 'all', label: '全部' },
   { id: 'info', label: '信息' },
@@ -165,6 +200,7 @@ export function DataPage() {
   const connect = useEvents((s) => s.connect);
   const system = useApp((s) => s.system);
   const health = useApp((s) => s.health);
+  const healthLoadedAt = useApp((s) => s.healthLoadedAt);
 
   const [level, setLevel] = useState<Level>('all');
   const [search, setSearch] = useState('');
@@ -173,6 +209,17 @@ export function DataPage() {
   const [source, setSource] = useState<'socket' | 'rest'>('socket');
   const [copied, setCopied] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   const restQuery = usePolled((signal) => api.logs(300, signal), { intervalMs: socketStatus === 'open' ? 30_000 : 8000 });
 
@@ -263,7 +310,7 @@ export function DataPage() {
     const text = shown
       .map(
         (line) =>
-          `${new Date(line.timestamp).toISOString()} ${line.level.toUpperCase().padEnd(5)} ${
+          `${safeIsoTime(line.timestamp)} ${line.level.toUpperCase().padEnd(5)} ${
             line.traderId !== null ? `t${line.traderId} ` : ''
           }${line.message}`,
       )
@@ -271,7 +318,11 @@ export function DataPage() {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1400);
+      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => {
+        copyTimerRef.current = null;
+        setCopied(false);
+      }, 1400);
     } catch {
       /* 剪贴板被浏览器拒绝（非 https / 无权限）时不弹错：操作员可以手动选中复制 */
     }
@@ -318,7 +369,7 @@ export function DataPage() {
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <h1 className="text-xl font-semibold tracking-wide text-ink-hi">数据与日志</h1>
           <Badge tone={socketStatus === 'open' ? 'up' : 'warn'}>
-            {socketStatus === 'open' ? '推送已连接' : `推送 ${socketStatus}`}
+            {SOCKET_STATUS_LABEL[socketStatus] ?? '推送状态未知'}
           </Badge>
           {socketStatus !== 'open' && (
             <Button size="sm" onClick={() => connect()}>
@@ -341,7 +392,7 @@ export function DataPage() {
           可交易对 <span className="text-ink-mid">{fmtInt(system?.tradableSymbols)}</span>
         </span>
         <span>
-          已运行 <span className="text-ink-mid">{health ? `${Math.floor(health.uptimeSeconds / 60)} 分` : '—'}</span>
+          已运行 <UptimeReadout baseSeconds={health?.uptimeSeconds ?? null} loadedAt={healthLoadedAt} />
         </span>
         <span>
           日志 <span className="text-ink-mid">{fmtInt(visible.length)}</span> 行
@@ -382,7 +433,15 @@ export function DataPage() {
               <Trash2 aria-hidden className="h-3.5 w-3.5" />
               清空
             </Button>
-            <Button size="sm" onClick={() => restQuery.reload()} busy={restQuery.loading}>
+            <Button
+              size="sm"
+              onClick={() => {
+                clearedByUser.current = false;
+                hydratedOnce.current = false;
+                void restQuery.reload();
+              }}
+              busy={restQuery.loading}
+            >
               <RefreshCw aria-hidden className="h-3.5 w-3.5" />
               重新加载
             </Button>
@@ -502,7 +561,7 @@ export function DataPage() {
         >
           {source === 'rest' && restQuery.loading && shown.length === 0 ? (
             <Spinner3 label="正在加载持久化日志" />
-          ) : restQuery.error && shown.length === 0 ? (
+          ) : source === 'rest' && restQuery.error && shown.length === 0 ? (
             <div className="space-y-1.5 p-2">
               <ErrorNote>读取持久化日志失败：{restQuery.error}</ErrorNote>
               <Button size="sm" busy={restQuery.loading} onClick={() => restQuery.reload()}>
@@ -544,8 +603,8 @@ export function DataPage() {
                   LEVEL_ROW[line.level] ?? '',
                 )}
               >
-                <span className="num shrink-0 text-ink-faint" title={new Date(line.timestamp).toISOString()}>
-                  {new Date(line.timestamp).toLocaleTimeString('en-GB', { hour12: false })}
+                <span className="num shrink-0 text-ink-faint" title={safeIsoTime(line.timestamp)}>
+                  {safeClockTime(line.timestamp)}
                 </span>
                 {/*
                   级别用**图标**，文字标签退到 `title` 里。

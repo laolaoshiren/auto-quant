@@ -324,10 +324,42 @@ interface RequestOptions {
   /** Skip the Authorization header (login/register/health). */
   anonymous?: boolean;
   signal?: AbortSignal;
+  /** 本次请求的超时上限（毫秒），默认 12 秒；慢同步接口按需放宽。 */
+  timeoutMs?: number;
+}
+
+/**
+ * 把 `fetch()` 抛出的传输层异常归类为可区分的错误：
+ * - `TimeoutError`（或本请求自带超时信号触发而外部未取消）→ `ApiError(0, '请求超时…')`，
+ *   绝不误报成「无法连接后端」；
+ * - 外部 `AbortError` → 原样透传，供 `usePolled` / 卸载清理静默忽略；
+ * - 其余断网/连接失败 → `ApiError(0, '无法连接后端')`。
+ */
+export function classifyFetchError(error: unknown, timedOutBySelf: boolean): Error {
+  const err = error as Error;
+  if (err?.name === 'TimeoutError' || timedOutBySelf) {
+    return new ApiError(0, '请求超时，服务端可能仍在处理，请稍后刷新确认', null);
+  }
+  if (err?.name === 'AbortError') return err;
+  /*
+   * ⚠️ **不要把端口号、内部实现写进给用户看的文案**（2026-10-18 修）。
+   *
+   * 这句会被 `hooks.ts` 的 `humanErrorText()` 识别并翻译成
+   * 「暂时连不上服务（网络或服务正在重启）—— 页面会自动重试」。
+   * 这里保留一句**技术上准确、但不含站点细节**的描述。
+   */
+  return new ApiError(0, '无法连接后端', null);
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, query, anonymous = false, signal } = options;
+  const {
+    method = 'GET',
+    body,
+    query,
+    anonymous = false,
+    signal,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  } = options;
 
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -337,19 +369,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   /*
-   * ⚠️ **必须有超时**（2026-10-18 补）。
+   * ⚠️ **必须有超时**（2026-10-18 补；2026-11-23 支持按端点配置）。
    *
    * 原来这里直接 `fetch(...)` 不设超时 —— 一个卡住的请求会**一直挂着**，
-   * 而轮询的下一次又发出去。表现上就是"页面数据不更新，然后突然闪一条错误"：
-   * 那次挂住的请求最终超时/断开时才报错，而那时界面可能已经好了。
+   * 而轮询的下一次又发出去。表现上就是"页面数据不更新，然后突然闪一条错误"。
+   * 后来统一写死 12 秒，但策略体检 / 立即分析 / 模型测试 / 对账 / 平仓等慢同步接口
+   * 往往超过 12 秒，会被前端提前强断并误报「无法连接后端」。
    *
-   * `AbortSignal.timeout` 让失败**及时且确定**：最多等 12 秒。
-   * 配合 `hooks.ts` 的"单次失败静默"，抖动就不会再闪成红条。
-   *
-   * ⚠️ 12 秒的依据：这些接口里最慢的是 `/positions`（要问交易所），
-   * 实测 P99 在 2-3 秒；12 秒足够宽松，而不会让人等太久。
+   * 现在常规接口沿用 12 秒，慢接口各自声明合理上限，并在 catch 中区分超时与断网。
    */
-  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const mergedSignal = signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
 
   let response: Response;
@@ -361,24 +390,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       signal: mergedSignal,
     });
   } catch (error) {
-    if ((error as Error).name === 'AbortError') throw error;
-    /*
-     * ⚠️ **不要把端口号、内部实现写进给用户看的文案**（2026-10-18 修）。
-     *
-     * 原来这里写的是：
-     * ```
-     *   '无法连接后端。端口 27137 上的服务是否在运行？'
-     * ```
-     * 两个问题：
-     * ① `27137` 是**开发端口**，线上不是它 —— 这句话在线上是错的，
-     *    会让操作员去查一个不存在的东西；
-     * ② 操作员不该关心端口号，他要知道的是"现在能不能看数、要不要等"。
-     *
-     * 这句会被 `hooks.ts` 的 `humanErrorText()` 识别并翻译成
-     * 「暂时连不上服务（网络或服务正在重启）—— 页面会自动重试」。
-     * 这里保留一句**技术上准确、但不含站点细节**的描述。
-     */
-    throw new ApiError(0, '无法连接后端', null);
+    throw classifyFetchError(error, timeoutSignal.aborted && !signal?.aborted);
   }
 
   const text = await response.text();
@@ -680,7 +692,7 @@ export type ExchangeBalanceResult =
   | { ok: false; error: string };
 
 /** Where a new trader's starting equity came from. */
-export type EquitySource = 'exchange' | 'manual' | 'unavailable';
+export type EquitySource = 'exchange' | 'manual' | 'paper' | 'unavailable';
 
 /**
  * `POST /traders/:id/reconcile`.
@@ -1012,10 +1024,10 @@ export const api = {
   deleteExchangeAccount: (id: number) =>
     request<{ ok: boolean }>(`/exchange-accounts/${id}`, { method: 'DELETE' }),
   testExchangeAccount: (id: number) =>
-    request<ExchangeTestResult>(`/exchange-accounts/${id}/test`, { method: 'POST', body: {} }),
+    request<ExchangeTestResult>(`/exchange-accounts/${id}/test`, { method: 'POST', body: {}, timeoutMs: 30_000 }),
   /** Probe credentials that have not been saved yet. */
   testExchangeDraft: (input: ExchangeAccountInput) =>
-    request<ExchangeTestResult>('/exchange-accounts/test-draft', { method: 'POST', body: input }),
+    request<ExchangeTestResult>('/exchange-accounts/test-draft', { method: 'POST', body: input, timeoutMs: 30_000 }),
 
   /* --- AI models --- */
   aiModels: (signal?: AbortSignal) => request<AiModelRow[]>('/ai-models', { signal }),
@@ -1035,7 +1047,8 @@ export const api = {
       method: 'POST',
       body: {},
     }),
-  testAiModel: (id: number) => request<ModelTestResult>(`/ai-models/${id}/test`, { method: 'POST', body: {} }),
+  testAiModel: (id: number) =>
+    request<ModelTestResult>(`/ai-models/${id}/test`, { method: 'POST', body: {}, timeoutMs: 75_000 }),
   /**
    * Ask the provider which models this key can use.
    *
@@ -1044,7 +1057,7 @@ export const api = {
    * 用户手动输入了密钥时不必传 `modelId`。
    */
   discoverModels: (input: { provider: string; baseUrl: string; apiKey: string; modelId?: number }) =>
-    request<DiscoverModelsResult>('/ai-models/discover', { method: 'POST', body: input }),
+    request<DiscoverModelsResult>('/ai-models/discover', { method: 'POST', body: input, timeoutMs: 30_000 }),
   /**
    * Probe an unsaved model draft before committing it.
    *
@@ -1053,7 +1066,7 @@ export const api = {
    * 会被服务端当成"没提供密钥"而直接报 `Missing API key.`。
    */
   testAiModelDraft: (input: AiModelInput & { modelId?: number }) =>
-    request<ModelTestResult>('/ai-models/test-draft', { method: 'POST', body: input }),
+    request<ModelTestResult>('/ai-models/test-draft', { method: 'POST', body: input, timeoutMs: 75_000 }),
 
   /* --- strategies --- */
   strategies: (signal?: AbortSignal) => request<StrategyRecord[]>('/strategies', { signal }),
@@ -1066,8 +1079,8 @@ export const api = {
    * Strategy health check — runs the whole pipeline against a simulated
    * account. Slow (10–60s) and never places an order.
    */
-  checkStrategy: (id: number, input: { aiModelId: number; symbol?: string }) =>
-    request<StrategyCheckResult>(`/strategies/${id}/check`, { method: 'POST', body: input }),
+  checkStrategy: (id: number, input: { aiModelId: number; symbol?: string; exchange?: 'binance' | 'gate' }) =>
+    request<StrategyCheckResult>(`/strategies/${id}/check`, { method: 'POST', body: input, timeoutMs: 120_000 }),
 
   /* --- traders --- */
   traders: (signal?: AbortSignal) => request<TraderRow[]>('/traders', { signal }),
@@ -1098,7 +1111,11 @@ export const api = {
    */
   /** Force one decision cycle now instead of waiting for the interval. */
   runTraderOnce: (id: number) =>
-    request<{ ok: boolean; summary: string }>(`/traders/${id}/run-once`, { method: 'POST', body: {} }),
+    request<{ ok: boolean; summary: string }>(`/traders/${id}/run-once`, {
+      method: 'POST',
+      body: {},
+      timeoutMs: 180_000,
+    }),
   /**
    * 让 AI **现在**审视一次策略 —— 与 `runTraderOnce` 是两件事。
    *
@@ -1115,7 +1132,7 @@ export const api = {
     }),
   /** Rebuild the books from the exchange's fill history — never places an order. */
   reconcileTrader: (id: number) =>
-    request<ReconcileResult>(`/traders/${id}/reconcile`, { method: 'POST', body: {} }),
+    request<ReconcileResult>(`/traders/${id}/reconcile`, { method: 'POST', body: {}, timeoutMs: 90_000 }),
 
   /**
    * 手工平掉一个持仓 —— **操作员的最高权限，随时可用**。
@@ -1126,7 +1143,7 @@ export const api = {
   closePosition: (id: number, symbol: string) =>
     request<{ ok: boolean; avgPrice: number; fee: number; stillRunning: boolean }>(
       `/traders/${id}/positions/${symbol}/close`,
-      { method: 'POST', body: {} },
+      { method: 'POST', body: {}, timeoutMs: 30_000 },
     ),
 
   /**
@@ -1154,7 +1171,7 @@ export const api = {
       /** 平仓失败的标的与原因。**非空时界面必须如实报出，不能说"已全部平仓"。** */
       failed: Array<{ symbol: string; error: string }>;
       stillRunning: boolean;
-    }>(`/traders/${id}/positions/close-all`, { method: 'POST', body: {} }),
+    }>(`/traders/${id}/positions/close-all`, { method: 'POST', body: {}, timeoutMs: 60_000 }),
 
   /* --- per-trader data --- */
   /**
@@ -1167,7 +1184,11 @@ export const api = {
    */
   traderStats: (id: number, signal?: AbortSignal) =>
     request<
-      TraderStats & { circuitBreaker: CircuitBreakerReading | null; dryRun: boolean | null }
+      TraderStats & {
+        circuitBreaker: CircuitBreakerReading | null;
+        dryRun: boolean | null;
+        maxLeverage?: number | null;
+      }
     >(`/traders/${id}/stats`, {
       signal,
     }),

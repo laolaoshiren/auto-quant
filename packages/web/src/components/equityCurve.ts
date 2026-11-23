@@ -243,6 +243,36 @@ export function rangeSpanMs(range: string): number {
 }
 
 /**
+ * 数据不足 2 个点时补齐水平参考线 —— 保证点列有限且按 `t` 严格升序。
+ *
+ * `range === 'ALL'` 时 `rangeSpanMs(range)` 是 `Infinity`，直接 `now - Infinity`
+ * 会产出 `t: -Infinity` 让坐标轴彻底坏掉；只有一个点时只在左侧补一个更早参考点，
+ * 避免尾部追加乱序点。
+ */
+export function padEquityPoints(
+  points: readonly EquityPoint[],
+  range: string,
+  baseline?: number,
+  now = Date.now(),
+): EquityPoint[] {
+  if (points.length >= 2) return [...points];
+  const flat = points[0]?.equity ?? baseline ?? 0;
+  const rawSpan = rangeSpanMs(range);
+  const span = Number.isFinite(rawSpan) ? Math.max(rawSpan, 60 * 60_000) : 24 * 60 * 60_000;
+  if (points.length === 1) {
+    const only = points[0]!;
+    return [
+      { t: only.t - span, equity: flat, unrealizedPnl: 0, openPositions: 0 },
+      only,
+    ];
+  }
+  return [
+    { t: now - span, equity: flat, unrealizedPnl: 0, openPositions: 0 },
+    { t: now, equity: flat, unrealizedPnl: 0, openPositions: 0 },
+  ];
+}
+
+/**
  * 时间轴用"时钟刻度"还是"日期刻度"的分界。
  *
  * ⚠️ **刻度摆放与刻度格式化必须共用这一个数**：一处按整点摆刻度、

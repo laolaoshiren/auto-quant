@@ -33,6 +33,7 @@ import {
   fmtProfitFactor,
   fmtSigned,
   fmtUsdSigned,
+  formatCandlePrice,
   isNum,
   marginModeLabel,
   orderMarginMode,
@@ -531,4 +532,16 @@ test('★ orderMarginMode：落库值优先于当前持仓，且必须说清值�
     null,
     '两边都是没收口的写法时一律当"不知道" —— 前端不该替上游归一，更不该猜',
   );
+});
+
+test('★★★ formatCandlePrice：极低价币（< 0.001）动态给足小数位，绝不显示 0.000000', () => {
+  assert.equal(formatCandlePrice(95_000.5), '95,000.50');
+  assert.equal(formatCandlePrice(180.425), '180.425');
+  assert.equal(formatCandlePrice(0.2541), '0.254100');
+  assert.equal(formatCandlePrice(0.000842), '0.0008420');
+  assert.equal(formatCandlePrice(0.00000842), '0.000008420', 'PEPE 量级保留有效数字');
+  assert.equal(formatCandlePrice(0.00000042), '0.0000004200', '★ 绝不截成 0.000000');
+  assert.equal(formatCandlePrice(0), '0.00');
+  assert.equal(formatCandlePrice(-95_000.5), '-95,000.50', '负区按绝对值选档位');
+  assert.equal(formatCandlePrice(Number.NaN), '—');
 });

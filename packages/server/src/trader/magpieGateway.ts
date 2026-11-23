@@ -33,6 +33,7 @@
  */
 
 import { LlmClient } from '../llm/client.js';
+import { fetchGuarded } from '../llm/http.js';
 import type { CallModel } from '../llm/modelRouter.js';
 import { buildCatalog, type DiscoveredCatalog, type ModelsDevLookup } from '../llm/modelDiscovery.js';
 
@@ -110,7 +111,8 @@ export async function discoverFromGateway(
     /* `/v1/models` 的路径：baseUrl 可能带 `/v1` 也可能不带。 */
     const base = gateway.baseUrl.replace(/\/+$/, '');
     const url = base.endsWith('/v1') ? `${base}/models` : `${base}/v1/models`;
-    const res = await fetch(url, {
+    const res = await fetchGuarded(url, {
+      method: 'GET',
       headers: { authorization: `Bearer ${gateway.apiKey}` },
       signal: options.signal ?? AbortSignal.timeout(15_000),
     });
@@ -248,5 +250,5 @@ export function createMagpieCallFactory(gateway: MagpieGatewayConfig): CallModel
 export function looksLikeMagpieGateway(baseUrl: string): boolean {
   const url = baseUrl.trim().toLowerCase();
   if (url.length === 0) return false;
-  return url.includes(':3425') || url.includes('/magpie/');
+  return url.includes(':3425') || /\/magpie(?:\/|\?|#|$)/.test(url);
 }

@@ -24,6 +24,7 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts';
 import type { Kline } from '@aq/shared';
+import { formatCandlePrice } from '../lib/format';
 import { useChartInk } from './useChartInk';
 
 export function CandlestickChart({
@@ -74,7 +75,8 @@ export function CandlestickChart({
 
     const chart = createChart(container, {
       width: container.clientWidth,
-      height,
+      /* `fill` 模式下直接取容器实际高度（而不是写死默认 460），避免首帧溢出或跳动。 */
+      height: fill ? container.clientHeight : height,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
         /*
@@ -116,11 +118,7 @@ export function CandlestickChart({
       },
       handleScale: { axisPressedMouseMove: { time: true, price: false } },
       localization: {
-        priceFormatter: (price: number) =>
-          price.toLocaleString('en-US', {
-            minimumFractionDigits: price >= 1000 ? 2 : price >= 1 ? 3 : 6,
-            maximumFractionDigits: price >= 1000 ? 2 : price >= 1 ? 3 : 6,
-          }),
+        priceFormatter: formatCandlePrice,
       },
     });
 
@@ -139,14 +137,18 @@ export function CandlestickChart({
     seriesRef.current = series;
 
     const observer = new ResizeObserver(() => {
-      if (!containerRef.current) return;
+      const el = containerRef.current;
+      if (!el) return;
+      const nextWidth = el.clientWidth;
+      const nextHeight = el.clientHeight;
+      if (nextWidth <= 0 || (fill && nextHeight <= 0)) return;
       /*
        * 高度也要跟着报 —— 只报宽度时，`fill` 模式下的 canvas 会停在初始高度，
        * 容器变高了图表还是一小条（见 `fill` 的说明）。
        */
       chart.applyOptions({
-        width: containerRef.current.clientWidth,
-        ...(fill ? { height: containerRef.current.clientHeight } : {}),
+        width: nextWidth,
+        ...(fill ? { height: nextHeight } : {}),
       });
     });
     observer.observe(container);
@@ -168,7 +170,7 @@ export function CandlestickChart({
      * 换图表，只需要把新的颜色**应用**上去。
      */
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [height]);
+  }, [fill, height]);
 
   /*
    * 外观（模板 / 深浅）变化时，把新配色**应用**到已有的图表与序列上。

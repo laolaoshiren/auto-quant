@@ -411,8 +411,13 @@ export class ModelRouter {
         });
         const ms = Date.now() - started;
 
-        /* ② 空内容检查 —— 实测的"HTTP 200 但没吐字"。 */
-        if (result.text.trim().length === 0) {
+        /*
+         * ② 空内容检查 —— 实测的"HTTP 200 但没吐字"。
+         *
+         * ⚠️ 原生 function calling 常常只返回 `tool_calls` 而正文 `content` 为空/null：
+         * 那是正常的一轮工具调用，不是空内容故障；若误判为空会错误拉黑健康模型。
+         */
+        if (result.text.trim().length === 0 && !(result.toolCalls && result.toolCalls.length > 0)) {
           const verdict = classifyFailure({
             status: 200,
             message: '',
@@ -481,6 +486,13 @@ export class ModelRouter {
           }
           this.health.recordFailure(modelId, verdict.reason);
           previousModel = modelId;
+          /*
+           * 切换到下一个候选模型时必须重置 `budgetBoosted` 并递增 `fallbackCount`：
+           * 否则上一候选的放大重试预算会串到新候选上，新候选也失去自己的截断重试机会，
+           * 且 `fallbackCount` 漏记会导致降级上限失效。
+           */
+          budgetBoosted = null;
+          fallbackCount += 1;
           continue;
         }
 
@@ -506,13 +518,15 @@ export class ModelRouter {
           this.health.recordFailure(modelId, verdict.reason);
           this.options.onFallback?.({ from: previousModel, to: modelId, verdict });
           previousModel = modelId;
-          /* 换候选 = 一次降级（这是 `fallbackCount` 唯一递增的地方）。 */
+          budgetBoosted = null;
+          /* 换候选 = 一次降级。 */
           fallbackCount += 1;
           continue;
         }
         if (verdict.shouldRetry) {
           /* 可重试：不退避（退避在 LlmClient 内部已做），换下一个候选继续试。 */
           previousModel = modelId;
+          budgetBoosted = null;
           fallbackCount += 1;
           continue;
         }

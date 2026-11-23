@@ -2,6 +2,9 @@ import { createLogger } from '../logger.js';
 import { fetchBalanceSnapshot, type AccountBalanceSnapshot } from '../binance/account.js';
 import { BinanceRest, type BinanceRestOptions } from '../binance/rest.js';
 import type { BinanceEnvironment } from '../binance/endpoints.js';
+import { GateAccountReader, GateContractRegistry } from '../gate/account.js';
+import { gateEnvironmentOf } from '../gate/connection.js';
+import { GateRest } from '../gate/rest.js';
 import type { Vault } from '../crypto/vault.js';
 import { exchanges } from '../store/repositories.js';
 
@@ -37,8 +40,10 @@ export type BalanceResult =
  * credentials list, it should render as "余额读取失败" on that row alone.
  */
 export class BalanceService {
-  /** Long-lived REST client per account, so the clock offset survives. */
+  /** Long-lived REST client per Binance account, so the clock offset survives. */
   private readonly clients = new Map<number, { rest: BinanceRest; fingerprint: string }>();
+  /** Long-lived REST client per Gate account. */
+  private readonly gateClients = new Map<number, { reader: GateAccountReader; fingerprint: string }>();
   private readonly cache = new Map<number, { at: number; result: BalanceResult }>();
 
   constructor(
@@ -70,16 +75,46 @@ export class BalanceService {
     this.cache.delete(accountId);
     // The stored key may have changed, so the client must be rebuilt too.
     this.clients.delete(accountId);
+    this.gateClients.delete(accountId);
   }
 
   invalidateAll(): void {
     this.cache.clear();
     this.clients.clear();
+    this.gateClients.clear();
+  }
+
+  private gateReaderFor(accountId: number): GateAccountReader | null {
+    const row = exchanges.getWithSecret(accountId);
+    if (!row || row.exchange !== 'gate') return null;
+
+    let apiSecret: string;
+    try {
+      apiSecret = this.vault.decrypt(row.api_secret_enc);
+    } catch (error) {
+      log.warn(`无法解密 Gate 账户 ${accountId} 的凭据：${(error as Error).message}`);
+      return null;
+    }
+    if (!apiSecret) return null;
+
+    const fingerprint = `gate:${row.api_key}:${apiSecret.length}:${row.testnet}`;
+    const existing = this.gateClients.get(accountId);
+    if (existing && existing.fingerprint === fingerprint) return existing.reader;
+
+    const rest = new GateRest({
+      apiKey: row.api_key,
+      apiSecret,
+      environment: gateEnvironmentOf(row.testnet === 1),
+      timeoutMs: 12_000,
+    });
+    const reader = new GateAccountReader(rest, new GateContractRegistry(rest));
+    this.gateClients.set(accountId, { reader, fingerprint });
+    return reader;
   }
 
   private clientFor(accountId: number): BinanceRest | null {
     const row = exchanges.getWithSecret(accountId);
-    if (!row) return null;
+    if (!row || row.exchange !== 'binance') return null;
 
     let apiSecret: string;
     try {
@@ -112,6 +147,32 @@ export class BalanceService {
   private async read(accountId: number): Promise<BalanceResult> {
     const row = exchanges.getWithSecret(accountId);
     if (!row) return { ok: false, error: '找不到该交易所账户' };
+
+    /*
+     * ⚠️ **严格按 `row.exchange` 分派，绝不可把非币安凭据发往币安（2026-11-23 P0 凭据修复）**。
+     *
+     * 原实现直接为所有账户建 `BinanceRest`：`GET /api/exchange-accounts` 与 `POST /api/traders`
+     * 都会拿 Gate 的明文 API Key 与签名发给 Binance，既外泄凭据，又让新建 Gate 机器人
+     * 的初始权益恒为 0。统一在这里分派并共享缓存。
+     */
+    if (row.exchange === 'gate') {
+      const reader = this.gateReaderFor(accountId);
+      if (!reader) return { ok: false, error: '无法读取该 Gate 账户的 API 凭据' };
+      try {
+        const state = await reader.balance();
+        return {
+          ok: true,
+          balance: { ...state, readAt: new Date().toISOString(), asset: 'USDT' },
+          cached: false,
+        };
+      } catch (error) {
+        return { ok: false, error: `Gate 余额读取失败：${(error as Error).message}` };
+      }
+    }
+
+    if (row.exchange !== 'binance') {
+      return { ok: false, error: `暂不支持读取交易所「${row.exchange}」的余额` };
+    }
 
     const rest = this.clientFor(accountId);
     if (!rest) return { ok: false, error: '无法读取该账户的 API 凭据' };

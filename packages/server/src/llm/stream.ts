@@ -58,6 +58,14 @@ export function mergeOpenAiStreamChunks(lines: readonly string[]): unknown {
   let reasoning = '';
   let usage: unknown = undefined;
   const tools = new Map<number, PartialToolCall>();
+  const idToSlot = new Map<string, number>();
+  let lastUnindexedSlot = -1;
+
+  const nextFreeSlot = (): number => {
+    let slot = tools.size;
+    while (tools.has(slot)) slot += 1;
+    return slot;
+  };
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -101,16 +109,51 @@ export function mergeOpenAiStreamChunks(lines: readonly string[]): unknown {
 
     const toolCalls = delta['tool_calls'];
     if (Array.isArray(toolCalls)) {
-      for (const item of toolCalls) {
-        const call = asRecord(item);
+      for (let pos = 0; pos < toolCalls.length; pos += 1) {
+        const call = asRecord(toolCalls[pos]);
         if (call === null) continue;
-        const index = typeof call['index'] === 'number' ? call['index'] : 0;
+        const callId = typeof call['id'] === 'string' && call['id'] !== '' ? call['id'] : undefined;
+        /*
+         * 槽位归并（兼容缺 `index` 或后续 chunk 发空串的网关）：
+         *   1. 有数值 `index` → 直接按 `index` 归并；
+         *   2. 缺 `index` 但带非空 `id` → 复用该 `id` 对应槽位，新 `id` 分配新槽位，
+         *      避免并行调用全部挤进槽 `0` 拼坏 JSON；
+         *   3. 既缺 `index` 又无 `id` → 同 chunk 多项按数组下标 `pos` 区分，
+         *      单项续传挂回上一个缺 index 的槽位（或已有最大槽位 / 0）。
+         */
+        let index: number;
+        if (typeof call['index'] === 'number' && Number.isFinite(call['index'])) {
+          index = call['index'];
+        } else if (callId !== undefined) {
+          index = idToSlot.get(callId) ?? nextFreeSlot();
+          lastUnindexedSlot = index;
+        } else if (toolCalls.length > 1) {
+          index = pos;
+          lastUnindexedSlot = index;
+        } else {
+          index = lastUnindexedSlot >= 0 ? lastUnindexedSlot : tools.size > 0 ? Math.max(...tools.keys()) : 0;
+        }
+
         const existing = tools.get(index) ?? { index, arguments: '' };
-        if (typeof call['id'] === 'string') existing.id = call['id'];
-        if (typeof call['type'] === 'string') existing.type = call['type'];
+        if (callId !== undefined) {
+          existing.id = callId;
+          idToSlot.set(callId, index);
+        }
+        /*
+         * 仅接受非空 `type` / `name`：部分兼容网关在后续 arguments 分片里会带上
+         * `"id": ""` / `"name": ""`，直接覆写会把首片拿到的工具名抹空，导致下游
+         * `extractToolCalls` 按 `name === ''` 静默丢弃整次工具调用。
+         */
+        if (typeof call['type'] === 'string' && call['type'] !== '') existing.type = call['type'];
         const fn = asRecord(call['function']);
         if (fn !== null) {
-          if (typeof fn['name'] === 'string') existing.name = fn['name'];
+          if (typeof fn['name'] === 'string' && fn['name'] !== '') {
+            if (!existing.name) {
+              existing.name = fn['name'];
+            } else if (fn['name'] !== existing.name) {
+              existing.name += fn['name'];
+            }
+          }
           if (typeof fn['arguments'] === 'string') existing.arguments += fn['arguments'];
         }
         tools.set(index, existing);

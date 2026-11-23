@@ -5,9 +5,9 @@
  * toast）。两者分开是因为行为必须在 React 树里恰好发生一次，而数据可以
  * 被任意多个组件读。
  */
+import { useEffect, useMemo, useState } from 'react';
 import { useApp, useEvents } from '../../lib/store';
-import { useTicker } from '../../lib/hooks';
-import { staleness } from '../../lib/staleness';
+import { staleWakeDelayMs, staleness } from '../../lib/staleness';
 import { NAV_GROUPS, NAV_ITEMS, type NavGroup, type NavItem } from '../../components/nav';
 
 /**
@@ -56,6 +56,36 @@ export interface ShellData {
   navGroups: NavGroup[];
 }
 
+/**
+ * 仅在真正进入停更态后才每秒跳动的时钟。
+ *
+ * 之前这里无条件调用 `useTicker(1000)`，导致 `<ShellRuntime>` 即使在系统正常时
+ * 也每秒重建一次 `ShellContext` 并驱动整棵外壳树无效重渲染。
+ * 现在正常期间只挂一个在 `3 × pollMs` 阈值处触发的单次定时器（每次轮询成功都会重置，
+ * 平时永不触发）；只有真停更时才启动 1 秒 interval 让"状态停更 N 秒"持续更新。
+ */
+function useStaleClock(loadedAt: number | null, pollMs: number): number {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const delay = staleWakeDelayMs(loadedAt, pollMs, Date.now());
+    if (delay === null) return;
+
+    let intervalId: number | null = null;
+    const timeoutId = window.setTimeout(() => {
+      setNow(Date.now());
+      intervalId = window.setInterval(() => setNow(Date.now()), 1000);
+    }, delay);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      if (intervalId !== null) window.clearInterval(intervalId);
+    };
+  }, [loadedAt, pollMs]);
+
+  return now;
+}
+
 export function useShellData(): ShellData {
   const user = useApp((s) => s.user);
   const system = useApp((s) => s.system);
@@ -64,10 +94,9 @@ export function useShellData(): ShellData {
   const systemError = useApp((s) => s.systemError);
   const socketStatus = useEvents((s) => s.status);
   const socketBlockedReason = useEvents((s) => s.blockedReason);
-  /* 每秒跳一次：状态栏那句"N 秒"要活着 —— 它停住不动等于没在报停更。 */
-  const now = useTicker(1000);
 
   const pollMs = systemPollMs(socketStatus === 'open');
+  const now = useStaleClock(systemsLoadedAt, pollMs);
   const stale = staleness(systemsLoadedAt, systemError, pollMs, now);
 
   const runningCount = system?.runningTraders.length ?? traders.filter((t) => t.isRunning).length;
@@ -86,22 +115,40 @@ export function useShellData(): ShellData {
     system?.weightLimit && system.weightLimit > 0
       ? Math.round(((system?.weightUsed ?? 0) / system.weightLimit) * 100)
       : 0;
+  const weightWarn = weightPercent >= 70;
 
-  return {
-    user,
-    system,
-    traders,
-    socketStatus,
-    socketBlockedReason,
-    runningCount,
-    clockWarn,
-    weightPercent,
-    weightWarn: weightPercent >= 70,
-    statusStale: stale.stale,
-    statusStaleLabel: stale.label,
-    statusLastLoadedAt: systemsLoadedAt,
-    statusError: systemError,
-    navItems: NAV_ITEMS,
-    navGroups: NAV_GROUPS,
-  };
+  return useMemo<ShellData>(
+    () => ({
+      user,
+      system,
+      traders,
+      socketStatus,
+      socketBlockedReason,
+      runningCount,
+      clockWarn,
+      weightPercent,
+      weightWarn,
+      statusStale: stale.stale,
+      statusStaleLabel: stale.label,
+      statusLastLoadedAt: systemsLoadedAt,
+      statusError: systemError,
+      navItems: NAV_ITEMS,
+      navGroups: NAV_GROUPS,
+    }),
+    [
+      user,
+      system,
+      traders,
+      socketStatus,
+      socketBlockedReason,
+      runningCount,
+      clockWarn,
+      weightPercent,
+      weightWarn,
+      stale.stale,
+      stale.label,
+      systemsLoadedAt,
+      systemError,
+    ],
+  );
 }

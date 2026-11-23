@@ -316,3 +316,49 @@ test('没有平仓成交的腿不产生出场单号（半开仓不该被当成�
   const onlyEntry = [MANA[0]!];
   assert.deepEqual(reconstructRoundTrips(onlyEntry), [], '仓位没回到零就没有回合');
 });
+
+/* -------------------------------------------------------------------------- */
+/*  Gate.io 成交 realizedPnl === '' 场景 —— 按加权入场均价精确核算毛盈亏        */
+/* -------------------------------------------------------------------------- */
+
+test('★ Gate 成交 realizedPnl 为空串时，加仓 + 部分平仓 + 翻仓均按加权入场均价精确核算 grossPnl', () => {
+  /*
+   * 防回归：Gate.io `/futures/usdt/my_trades` 不返回单笔 realizedPnl，适配层约定填入 ''。
+   * 若直接 Number('') || 0，整腿毛盈亏恒为 0，导致账目与钱包余额严重背离。
+   */
+  const gateFills: BinanceUserTrade[] = [
+    // 多头：1 @ 100，加仓 3 @ 102（均价 101.5），部分平 2 @ 105（+7），再加 2 @ 107.5（剩余 4 均价 104.5），
+    // 最后卖 6 @ 110 → 平掉 4（+22，本腿总毛利 29）并翻空 2 @ 110
+    fill({ id: 101, orderId: 5001, time: T0, symbol: 'ETHUSDT', side: 'BUY', price: '100', qty: '1', realizedPnl: '', commission: '0.05' }),
+    fill({ id: 102, orderId: 5002, time: T0 + 1000, symbol: 'ETHUSDT', side: 'BUY', price: '102', qty: '3', realizedPnl: '', commission: '0.15' }),
+    fill({ id: 103, orderId: 5003, time: T0 + 2000, symbol: 'ETHUSDT', side: 'SELL', price: '105', qty: '2', realizedPnl: '', commission: '0.10' }),
+    fill({ id: 104, orderId: 5004, time: T0 + 3000, symbol: 'ETHUSDT', side: 'BUY', price: '107.5', qty: '2', realizedPnl: '', commission: '0.10' }),
+    fill({ id: 105, orderId: 5005, time: T0 + 4000, symbol: 'ETHUSDT', side: 'SELL', price: '110', qty: '6', realizedPnl: '', commission: '0.30' }),
+    // 空头平仓：买回 2 @ 104 → (110 - 104) * 2 = +12
+    fill({ id: 106, orderId: 5006, time: T0 + 5000, symbol: 'ETHUSDT', side: 'BUY', price: '104', qty: '2', realizedPnl: '', commission: '0.10' }),
+  ];
+
+  const trips = reconstructRoundTrips(gateFills);
+  assert.equal(trips.length, 2, '翻仓应拆成一多一空两条完整回合');
+
+  const [longLeg, shortLeg] = trips;
+  assert.ok(longLeg && shortLeg);
+  assert.equal(longLeg.side, 'long');
+  // 总买出成本 = 100 + 306 + 215 = 621；总卖出名义 = 210 + 440 = 650 → 差值严格为 +29
+  assert.ok(Math.abs(longLeg.grossPnl - 29) < 1e-9, `多头腿毛盈亏应为 29，实得 ${longLeg.grossPnl}`);
+  assert.equal(shortLeg.side, 'short');
+  assert.ok(Math.abs(shortLeg.grossPnl - 12) < 1e-9, `空头腿毛盈亏应为 12，实得 ${shortLeg.grossPnl}`);
+});
+
+test('★ 币安回报 realizedPnl === "0"（非空串）时仍严格采用交易所数值，不回退价差估算', () => {
+  /*
+   * 守住币安零变更约定：即使币安回报 '0'（与价差不同），只要非空就必须信任交易所字段。
+   */
+  const binanceFills: BinanceUserTrade[] = [
+    fill({ id: 201, orderId: 6001, time: T0, symbol: 'BTCUSDT', side: 'BUY', price: '100', qty: '1', realizedPnl: '0' }),
+    fill({ id: 202, orderId: 6002, time: T0 + 1000, symbol: 'BTCUSDT', side: 'SELL', price: '110', qty: '1', realizedPnl: '0' }),
+  ];
+  const [trip] = reconstructRoundTrips(binanceFills);
+  assert.ok(trip);
+  assert.equal(trip.grossPnl, 0, '非空字符串 "0" 表示交易所已显式回报，不得覆盖');
+});

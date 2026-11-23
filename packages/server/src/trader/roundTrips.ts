@@ -155,9 +155,20 @@ interface OpenLeg {
   signedPosition: number;
   entryQty: number;
   entryNotional: number;
+  /**
+   * 当前仍敞开着的数量与对应的剩余成本基数（用于未提供 `realizedPnl` 的交易所，
+   * 如 Gate.io：在每次平仓时按当前加权入场均价精确核算毛盈亏；
+   * 即使经历「开仓 → 部分平仓 → 加仓 → 全部平仓」也能保持总毛盈亏严格等于名义差）。
+   */
+  openQty: number;
+  openCost: number;
   exitQty: number;
   exitNotional: number;
   grossPnl: number;
+  /** 本腿任意一笔平仓成交是否提供了非空 `realizedPnl`（币安恒为真，Gate 为假）。 */
+  hasReportedRealizedPnl: boolean;
+  /** 当交易所未提供 `realizedPnl`（全为空串）时，按加权均价差累加的毛盈亏。 */
+  estimatedGrossPnl: number;
   fee: number;
   entryFee: number;
   foreignFees: Map<string, number>;
@@ -198,6 +209,7 @@ export function reconstructRoundTrips(
   const finalize = (current: OpenLeg, closedAt: number): void => {
     const entryPrice = current.entryQty > 0 ? current.entryNotional / current.entryQty : 0;
     const exitPrice = current.exitQty > 0 ? current.exitNotional / current.exitQty : 0;
+    const grossPnl = current.hasReportedRealizedPnl ? current.grossPnl : current.estimatedGrossPnl;
     trades.push({
       symbol: current.symbol,
       side: current.side,
@@ -206,7 +218,7 @@ export function reconstructRoundTrips(
       quantity: Number(current.entryQty.toFixed(12)),
       entryPrice: Number(entryPrice.toFixed(12)),
       exitPrice: Number(exitPrice.toFixed(12)),
-      grossPnl: Number(current.grossPnl.toFixed(12)),
+      grossPnl: Number(grossPnl.toFixed(12)),
       fee: Number(current.fee.toFixed(12)),
       entryFee: Number(current.entryFee.toFixed(12)),
       exitFee: Number((current.fee - current.entryFee).toFixed(12)),
@@ -242,9 +254,13 @@ export function reconstructRoundTrips(
         signedPosition: 0,
         entryQty: 0,
         entryNotional: 0,
+        openQty: 0,
+        openCost: 0,
         exitQty: 0,
         exitNotional: 0,
         grossPnl: 0,
+        hasReportedRealizedPnl: false,
+        estimatedGrossPnl: 0,
         fee: 0,
         entryFee: 0,
         foreignFees: new Map(),
@@ -261,6 +277,8 @@ export function reconstructRoundTrips(
       leg.signedPosition = position;
       leg.entryQty += qty;
       leg.entryNotional += price * qty;
+      leg.openQty += qty;
+      leg.openCost += price * qty;
       leg.fillCount += 1;
       leg.fillIds.push(String(fill.id));
       leg.openFillIds.push(String(fill.id));
@@ -277,6 +295,8 @@ export function reconstructRoundTrips(
       leg.signedPosition = position;
       leg.entryQty += qty;
       leg.entryNotional += price * qty;
+      leg.openQty += qty;
+      leg.openCost += price * qty;
       leg.fillCount += 1;
       leg.fillIds.push(String(fill.id));
       leg.openFillIds.push(String(fill.id));
@@ -290,7 +310,24 @@ export function reconstructRoundTrips(
 
     leg.exitQty += closing;
     leg.exitNotional += price * closing;
-    leg.grossPnl += Number(fill.realizedPnl) || 0;
+    /*
+     * 交易所若在成交记录里直接回报了 `realizedPnl`（币安恒为数值字符串，含 '0'），
+     * 沿用原有累加逻辑零变更；若未提供（Gate.io 约定设为空串 ''），则按当前加权入场均价
+     * 精确核算线性合约毛盈亏，覆盖加仓、部分平仓、先减后加与翻仓场景。
+     */
+    const avgEntry =
+      leg.openQty > 0
+        ? leg.openCost / leg.openQty
+        : leg.entryQty > 0
+          ? leg.entryNotional / leg.entryQty
+          : 0;
+    leg.estimatedGrossPnl += (leg.side === 'long' ? price - avgEntry : avgEntry - price) * closing;
+    leg.openCost = Math.max(0, leg.openCost - avgEntry * closing);
+    leg.openQty = Math.max(0, leg.openQty - closing);
+    if (typeof fill.realizedPnl === 'string' && fill.realizedPnl.trim() !== '') {
+      leg.hasReportedRealizedPnl = true;
+      leg.grossPnl += Number(fill.realizedPnl) || 0;
+    }
     leg.lastExitOrderId = String(fill.orderId);
     /* 每一次出场都记下单号（含部分平仓）—— 判重靠的是这组身份。 */
     leg.exitOrderIds.push(String(fill.orderId));
@@ -321,9 +358,13 @@ export function reconstructRoundTrips(
         signedPosition: next,
         entryQty: remainderQty,
         entryNotional: price * remainderQty,
+        openQty: remainderQty,
+        openCost: price * remainderQty,
         exitQty: 0,
         exitNotional: 0,
         grossPnl: 0,
+        hasReportedRealizedPnl: false,
+        estimatedGrossPnl: 0,
         fee: 0,
         entryFee: 0,
         foreignFees: new Map(),

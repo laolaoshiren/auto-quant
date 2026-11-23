@@ -42,24 +42,26 @@ import type { EquityContributor } from '../components/equityCurve';
 /* -------------------------------------------------------------------------- */
 
 /**
- * 把机器人按交易所账户分组。
+ * 把**实盘**机器人按交易所账户分组。
  *
  * 这是整个文件的地基：凡是"账户里的钱"都必须先过这一步，否则共享账户下的
  * 每个机器人都会各自贡献一份本金（19.81 那个 bug 就是这么来的）。
+ *
+ * ⚠️ **两类机器人必须排除**：
+ *   1. `exchangeAccountId === null`（纯模拟盘，不对应任何真实钱包）；
+ *   2. 模拟盘（`dryRun === true`，含运行时或持久化的 `trader.dryRun`）——
+ *      哪怕它绑定了某个真实账户，它的模拟盈亏与快照也不属于该真实钱包，
+ *      混进来会污染实盘账户的本金、净盈亏与曲线。
  */
-export function groupTradersByAccount(traders: readonly TraderRow[]): Map<number, TraderRow[]> {
+export function groupTradersByAccount(
+  traders: readonly TraderRow[],
+  dryRun?: Record<number, boolean | null | undefined>,
+): Map<number, TraderRow[]> {
   const groups = new Map<number, TraderRow[]>();
   for (const trader of traders) {
-    /*
-     * ⚠️ **没有交易所账户的机器人不参与这个分组**（用户 2026-10-27 需求）。
-     *
-     * 纯模拟盘机器人（`exchangeAccountId === null`）的钱是**本地模拟出来的**，
-     * 它不对应任何真实钱包。把它塞进"按账户汇总"里会凭空造出一个
-     * 「账户权益」—— 而那个数字会被读成"我在交易所里有这么多钱"。
-     *
-     * 它的模拟余额在机器人自己的详情页上显示（那里明确标注是模拟盘）。
-     */
     if (trader.exchangeAccountId === null) continue;
+    const isPaper = dryRun?.[trader.id] ?? trader.dryRun;
+    if (isPaper === true) continue;
     const group = groups.get(trader.exchangeAccountId);
     if (group) group.push(trader);
     else groups.set(trader.exchangeAccountId, [trader]);
@@ -149,6 +151,23 @@ export interface FleetAccount {
   attributedEquitySum: number;
 }
 
+/** 模拟盘机器人的独立合计（绝不混入实盘账户统计；纯模拟盘场景下由总览页展示，避免全 0）。 */
+export interface PaperFleetTotals {
+  traderCount: number;
+  tradersWithStats: number;
+  /** 模拟盘总权益（每台模拟盘各自独立本地账本，因此可加）。 */
+  equity: number;
+  /** 模拟盘起始本金之和。 */
+  capital: number;
+  /** 模拟盘总收益率（0–100；本金为 0 时为 0）。 */
+  returnPercent: number;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  openPositions: number;
+  wins: number;
+  losses: number;
+}
+
 export interface FleetTotals {
   accounts: FleetAccount[];
   /** traderId → 它所属账户的合计，供表格每一行直接引用，免得再分组一次。 */
@@ -175,6 +194,8 @@ export interface FleetTotals {
    * Σ 归属权益。**只能拿来说明"它不等于账户里的钱"**，页面上不得当作余额。
    */
   attributedEquitySumFleet: number;
+  /** 模拟盘独立汇总（不混入实盘账户；纯模拟盘舰队时供总览页/列表页展示）。 */
+  paper: PaperFleetTotals;
 }
 
 export interface FleetInputs {
@@ -408,7 +429,7 @@ export function fleetTotals({ traders, stats, snapshots, dryRun }: FleetInputs):
    */
   const byTrader: Record<number, FleetAccount> = {};
 
-  for (const [exchangeAccountId, group] of groupTradersByAccount(traders)) {
+  for (const [exchangeAccountId, group] of groupTradersByAccount(traders, dryRun)) {
     let realizedPnl = 0;
     let unrealizedPnl = 0;
     let openPositions = 0;
@@ -547,6 +568,42 @@ export function fleetTotals({ traders, stats, snapshots, dryRun }: FleetInputs):
     attributedEquitySumFleet += attributedEquitySum;
   }
 
+  /*
+   * 模拟盘独立汇总：每台模拟盘机器人的本地模拟钱包彼此独立，因此权益与本金均可加；
+   * 绝不与上面的实盘账户混算，但在纯模拟盘场景下可避免总览页全 0。
+   */
+  let paperTraderCount = 0;
+  let paperWithStats = 0;
+  let paperEquity = 0;
+  let paperCapital = 0;
+  let paperRealizedPnl = 0;
+  let paperUnrealizedPnl = 0;
+  let paperOpenPositions = 0;
+  let paperWins = 0;
+  let paperLosses = 0;
+
+  for (const trader of traders) {
+    if (byTrader[trader.id]) continue;
+    const isPaper = trader.exchangeAccountId === null || (dryRunOf(trader.id) ?? trader.dryRun) === true;
+    if (!isPaper) continue;
+    paperTraderCount += 1;
+    const row = stats[trader.id];
+    if (row) paperWithStats += 1;
+    const baseCap =
+      trader.initialEquity > 0
+        ? trader.initialEquity
+        : trader.paperStartingBalance > 0
+          ? trader.paperStartingBalance
+          : 0;
+    paperCapital += baseCap;
+    paperEquity += row ? attributedEquityOf(trader, row, true) : baseCap;
+    paperRealizedPnl += realizedPnlOf(trader, row, true);
+    paperUnrealizedPnl += row?.unrealizedPnl ?? 0;
+    paperOpenPositions += row?.openPositions ?? 0;
+    paperWins += row?.wins ?? 0;
+    paperLosses += row?.losses ?? 0;
+  }
+
   return {
     accounts,
     byTrader,
@@ -564,6 +621,19 @@ export function fleetTotals({ traders, stats, snapshots, dryRun }: FleetInputs):
     traderCount: traders.length,
     tradersWithStats,
     attributedEquitySumFleet,
+    paper: {
+      traderCount: paperTraderCount,
+      tradersWithStats: paperWithStats,
+      equity: paperEquity,
+      capital: paperCapital,
+      returnPercent:
+        paperCapital > 0 ? ((paperEquity - paperCapital) / paperCapital) * 100 : 0,
+      realizedPnl: paperRealizedPnl,
+      unrealizedPnl: paperUnrealizedPnl,
+      openPositions: paperOpenPositions,
+      wins: paperWins,
+      losses: paperLosses,
+    },
   };
 }
 
@@ -571,30 +641,15 @@ export function fleetTotals({ traders, stats, snapshots, dryRun }: FleetInputs):
 /*  账户口径的权益曲线                                                          */
 /* -------------------------------------------------------------------------- */
 
-/**
- * 把「每机器人一份快照」重排成「每账户一份」的贡献者，交给 `mergeEquityCurves`。
- *
- * 每个账户只贡献**一条序列**：把该账户下所有机器人的快照合并成一条时间线，
- * 每条快照的金额换成交易所给的 `accountEquity`（共享钱包权益）。同账户下的
- * 机器人读数是同一个数，所以"桶对齐后取最近一条"就是正确做法；`mergeEquityCurves`
- * 随即将**账户之间**求和 —— 不同账户是不同的钱包，跨账户相加才是对的，
- * 错的是把同一个钱包数 N 遍（本文件顶部那 19.81）。
- *
- * `baseline` 用该账户的起始资金，于是曲线在第一条快照之前是一条平线，
- * 而不是从 0 开始 —— 也不会是"三个机器人的本金之和"。
- *
- * 两个字段在账户口径下没有意义，因此明确置空而不是沿用某个机器人的值：
- * `openPositions` 是**本机器人**的持仓数（账户口径下应看交易所的净持仓，
- * 不是把各机器人的持仓相加）；浮盈换成账户的总浮盈 `accountUnrealizedPnl`。
- */
 export function accountEquityContributor(
   traders: readonly TraderRow[],
   snapshots: Record<number, EquitySnapshot[]>,
+  dryRun?: Record<number, boolean | null | undefined>,
 ): EquityContributor {
   const series: Record<number, EquitySnapshot[]> = {};
   const baseline: Record<number, number> = {};
 
-  for (const [exchangeAccountId, group] of groupTradersByAccount(traders)) {
+  for (const [exchangeAccountId, group] of groupTradersByAccount(traders, dryRun)) {
     const timeline: EquitySnapshot[] = [];
     for (const trader of group) {
       for (const snapshot of snapshots[trader.id] ?? []) {
@@ -610,6 +665,35 @@ export function accountEquityContributor(
     }
     if (timeline.length > 0) series[exchangeAccountId] = timeline;
     baseline[exchangeAccountId] = committedCapitalOf(group);
+  }
+
+  return { series, baseline };
+}
+
+/**
+ * 纯模拟盘舰队的合并权益曲线（按每台模拟盘的本地归属权益 `snapshot.equity` 相加）。
+ * 仅在没有任何实盘账户时由总览页使用，绝不与实盘账户混在一起。
+ */
+export function paperEquityContributor(
+  traders: readonly TraderRow[],
+  snapshots: Record<number, EquitySnapshot[]>,
+  dryRun?: Record<number, boolean | null | undefined>,
+): EquityContributor {
+  const series: Record<number, EquitySnapshot[]> = {};
+  const baseline: Record<number, number> = {};
+
+  for (const trader of traders) {
+    const isPaper =
+      trader.exchangeAccountId === null || (dryRun?.[trader.id] ?? trader.dryRun) === true;
+    if (!isPaper) continue;
+    const rows = (snapshots[trader.id] ?? []).filter((s) => Number.isFinite(s.equity) && s.equity > 0);
+    if (rows.length > 0) series[trader.id] = rows;
+    baseline[trader.id] =
+      trader.initialEquity > 0
+        ? trader.initialEquity
+        : trader.paperStartingBalance > 0
+          ? trader.paperStartingBalance
+          : 0;
   }
 
   return { series, baseline };

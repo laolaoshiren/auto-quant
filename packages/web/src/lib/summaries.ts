@@ -64,6 +64,8 @@ interface SummaryState {
   refreshMany: (traderIds: number[]) => Promise<void>;
   prune: (traderIds: number[]) => void;
   put: (stats: TraderSummary) => void;
+  /** 登出 / 会话失效时清空全部缓存统计，避免残留上一会话的敏感数据。 */
+  reset: () => void;
 }
 
 export const useSummaries = create<SummaryState>((set, get) => ({
@@ -110,6 +112,7 @@ export const useSummaries = create<SummaryState>((set, get) => ({
   },
 
   put: (stats) => set((state) => ({ stats: { ...state.stats, [stats.traderId]: stats } })),
+  reset: () => set({ stats: {}, pending: {}, lastRefresh: null, errors: {} }),
 }));
 
 /* -------------------------------------------------------------------------- */

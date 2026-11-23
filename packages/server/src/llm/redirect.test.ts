@@ -170,4 +170,26 @@ test('★ 3xx 但没有 Location：原样返回，不抛（交给上层按状态
   const response = await fetchGuarded('https://gateway.example.com/v1/chat', { method: 'POST' });
   assert.equal(response.status, 302);
   assert.equal(hops.length, 1, '没有 Location 就停在第一跳');
+  /* 确认没有提前 cancel body，上层依然能完整读出响应体 */
+  assert.equal(await response.text(), '{"ok":true}', '★ 无 Location 返回原响应时 body 不得被提前 cancel');
+});
+
+test('★★★ 同主机 https → http 协议降级跳转必须剥掉鉴权头（按 origin 校验而非仅按 host）', async () => {
+  /*
+   * 防 bug：旧代码只比对 `.host`，导致 `https://gateway.example.com` 302 降级到
+   * `http://gateway.example.com` 时继续携带明文 Authorization / x-api-key。
+   */
+  let n = 0;
+  route = () =>
+    ++n === 1
+      ? { status: 302, location: 'http://gateway.example.com/v1/chat' }
+      : { status: 200 };
+  const response = await fetchGuarded('https://gateway.example.com/v1/chat', {
+    method: 'POST',
+    headers: { 'x-api-key': 'SECRET-KEY-1', authorization: 'Bearer SECRET' },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(hops.length, 2);
+  assert.equal(hops[1]!.headers['x-api-key'], undefined, '★ 协议降级不得带 x-api-key');
+  assert.equal(hops[1]!.headers['authorization'], undefined, '★ 协议降级不得带 authorization');
 });

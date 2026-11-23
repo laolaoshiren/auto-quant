@@ -103,6 +103,7 @@ export function isTokenRevoked(
 }
 
 export function verifyToken(token: string, secret: string): TokenPayload | null {
+  if (typeof token !== 'string' || token.length === 0) return null;
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   const [header, body, signature] = parts as [string, string, string];
@@ -146,8 +147,13 @@ export function extractToken(
   if (typeof header === 'string' && header.startsWith('Bearer ')) return header.slice(7);
   // 浏览器的 WebSocket 构造函数无法设置请求头，因此只有这条传输通道需要兜底。
   if (options.allowQueryToken) {
-    const query = request.query as { token?: string } | undefined;
-    if (query?.token) return query.token;
+    const query = request.query as { token?: unknown } | undefined;
+    /*
+     * ⚠️ 必须校验 `typeof query.token === 'string'`（2026-11-23 修复）：
+     * 传入 `?token=a&token=b` 时 Fastify 会把 `query.token` 解析为 `string[]`，
+     * 未校验直接传给 `verifyToken` 会在 `token.split('.')` 抛未捕获 `TypeError`。
+     */
+    if (typeof query?.token === 'string' && query.token.length > 0) return query.token;
   }
   return null;
 }

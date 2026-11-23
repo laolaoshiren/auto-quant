@@ -33,6 +33,11 @@ const now = (): string => new Date().toISOString();
 /*  Users                                                                      */
 /* -------------------------------------------------------------------------- */
 
+/** 在单个 SQLite 事务内原子执行多步写账，供业务层使用而不直接依赖 `db/`（§5.4）。 */
+export function runInTransaction<T>(fn: () => T): T {
+  return getDb().transaction(fn);
+}
+
 interface UserRow {
   id: number;
   username: string;
@@ -833,10 +838,12 @@ export const traders = {
    */
   remove(id: number): void {
     const db = getDb();
-    db.run('DELETE FROM agent_memory WHERE trader_id = ?', id);
-    db.run('DELETE FROM agent_experiments WHERE trader_id = ?', id);
-    db.run('DELETE FROM agent_runs WHERE trader_id = ?', id);
-    db.run('DELETE FROM traders WHERE id = ?', id);
+    db.transaction(() => {
+      db.run('DELETE FROM agent_memory WHERE trader_id = ?', id);
+      db.run('DELETE FROM agent_experiments WHERE trader_id = ?', id);
+      db.run('DELETE FROM agent_runs WHERE trader_id = ?', id);
+      db.run('DELETE FROM traders WHERE id = ?', id);
+    });
   },
 };
 
@@ -1004,6 +1011,45 @@ export const positions = {
       .map((r) => r.symbol);
   },
 
+  /**
+   * 同一交易所账户下，**其它机器人**当前处于 `open` 或 `pending`（挂单待转正）状态的标的集合。
+   *
+   * 多机器人共用同一个交易所账户时，`reconcilePositions` 看到交易所持仓但本机本地没有：
+   * 若该标的已被同账户另一台机器人持有（或正有挂单等待转正），说明那是他机仓位，
+   * 跳过收养、绝不抢占或撤改其保护单。
+   */
+  openSymbolsForOtherTradersOnAccount(accountId: number, excludeTraderId: number): Set<string> {
+    return new Set(
+      getDb()
+        .all<{ symbol: string }>(
+          `SELECT DISTINCT p.symbol
+             FROM positions p
+             JOIN traders t ON t.id = p.trader_id
+            WHERE t.exchange_account_id = ?
+              AND p.trader_id != ?
+              AND p.status IN ('open', 'pending')`,
+          accountId,
+          excludeTraderId,
+        )
+        .map((r) => r.symbol),
+    );
+  },
+
+  /**
+   * 同一交易所账户下所有机器人当前的 `open` 持仓（总账校验与 `netSinceForAccount` 同口径）。
+   */
+  openForAccount(accountId: number): PositionRow[] {
+    return getDb().all<PositionRow>(
+      `SELECT p.*
+         FROM positions p
+         JOIN traders t ON t.id = p.trader_id
+        WHERE t.exchange_account_id = ?
+          AND p.status = 'open'
+        ORDER BY p.opened_at`,
+      accountId,
+    );
+  },
+
   getOpenBySymbol(traderId: number, symbol: string): PositionRow | undefined {
     return getDb().get<PositionRow>(
       "SELECT * FROM positions WHERE trader_id = ? AND symbol = ? AND status = 'open'",
@@ -1110,62 +1156,76 @@ export const positions = {
     traderId: number,
     symbol: string,
     fill: { quantity: number; entryPrice: number; marginUsed: number },
+    pendingId?: number,
   ): { mergedIntoExisting: boolean } {
     const db = getDb();
 
-    /*
-     * ⚠️ **该标的可能已经有一行 `open` 了 —— 那就不能再把它变成第二行。**
-     *
-     * 表上有一条**部分唯一索引**（`schema.ts`）：
-     *
-     *     CREATE UNIQUE INDEX idx_positions_open_symbol
-     *       ON positions(trader_id, symbol) WHERE status = 'open';
-     *
-     * 而"限价单成交时已经有一行 open"是**真实会发生**的：对账的**收养路径**
-     * 只检查了 `positionStore.open()`，**没有看 pending 行** —— 于是同一个标的
-     * 可以同时存在「收养来的 open 行」和「还没成交的 pending 行」。这时下面那条
-     * UPDATE 会把 pending 行改成 open → **撞唯一索引**：
-     *
-     *     UNIQUE constraint failed: positions.trader_id, positions.symbol
-     *
-     * 实测（2026-09-29 00:56 / 01:18 / 01:28，连续三轮）：这个异常被
-     * `settlePendingEntries()` 的调用方接住、记成「待成交对账失败」，而**那行
-     * pending 永远不会消失** —— 每轮重试、每轮失败，日志一直刷，而那一笔
-     * 限价入场永远转不了正（只能靠收养兜底）。
-     *
-     * 所以这里**合并**：把那行 pending 关掉（它是同一笔的残留），把交易所报的
-     * 成交数据写进**已有的 open 行** —— 账本上仍然只有一行，数量与均价用权威值。
-     */
-    const existingOpen = this.getOpenBySymbol(traderId, symbol);
-    if (existingOpen) {
-      db.run(
-        `UPDATE positions SET status = 'closed' WHERE trader_id = ? AND symbol = ? AND status = 'pending'`,
-        traderId,
-        symbol,
-      );
-      db.run(
-        `UPDATE positions SET quantity = ?, entry_price = ?, margin_used = ?, opened_at = ? WHERE id = ?`,
-        fill.quantity,
-        fill.entryPrice,
-        fill.marginUsed,
-        now(),
-        existingOpen.id,
-      );
-      return { mergedIntoExisting: true };
-    }
+    return db.transaction(() => {
+      /*
+       * ⚠️ **该标的可能已经有一行 `open` 了 —— 那就不能再把它变成第二行。**
+       *
+       * 表上有一条**部分唯一索引**（`schema.ts`）：
+       *
+       *     CREATE UNIQUE INDEX idx_positions_open_symbol
+       *       ON positions(trader_id, symbol) WHERE status = 'open';
+       *
+       * 而"限价单成交时已经有一行 open"是**真实会发生**的：对账的**收养路径**
+       * 只检查了 `positionStore.open()`，**没有看 pending 行** —— 于是同一个标的
+       * 可以同时存在「收养来的 open 行」和「还没成交的 pending 行」。
+       *
+       * 另外，即使没有 `open` 行，如果异常状态下存在多条 `pending` 行，按
+       * `WHERE trader_id = ? AND symbol = ? AND status = 'pending'` 批量改状态
+       * 也会一次把多行改成 `open` 而撞上唯一索引 —— 因此按精确 `pendingRow.id`
+       * 更新单行，并将整段包裹在事务里。
+       */
+      const existingOpen = this.getOpenBySymbol(traderId, symbol);
+      if (existingOpen) {
+        if (pendingId !== undefined) {
+          db.run(
+            `UPDATE positions SET status = 'closed' WHERE id = ? AND trader_id = ? AND status = 'pending'`,
+            pendingId,
+            traderId,
+          );
+        } else {
+          db.run(
+            `UPDATE positions SET status = 'closed' WHERE trader_id = ? AND symbol = ? AND status = 'pending'`,
+            traderId,
+            symbol,
+          );
+        }
+        db.run(
+          `UPDATE positions SET quantity = ?, entry_price = ?, margin_used = ?, opened_at = ? WHERE id = ?`,
+          fill.quantity,
+          fill.entryPrice,
+          fill.marginUsed,
+          now(),
+          existingOpen.id,
+        );
+        return { mergedIntoExisting: true };
+      }
 
-    db.run(
-      `UPDATE positions
-          SET status = 'open', quantity = ?, entry_price = ?, margin_used = ?, opened_at = ?
-        WHERE trader_id = ? AND symbol = ? AND status = 'pending'`,
-      fill.quantity,
-      fill.entryPrice,
-      fill.marginUsed,
-      now(),
-      traderId,
-      symbol,
-    );
-    return { mergedIntoExisting: false };
+      const targetPendingId =
+        pendingId ??
+        db.get<{ id: number }>(
+          `SELECT id FROM positions WHERE trader_id = ? AND symbol = ? AND status = 'pending' ORDER BY id ASC LIMIT 1`,
+          traderId,
+          symbol,
+        )?.id;
+      if (targetPendingId !== undefined) {
+        db.run(
+          `UPDATE positions
+              SET status = 'open', quantity = ?, entry_price = ?, margin_used = ?, opened_at = ?
+            WHERE id = ? AND trader_id = ? AND status = 'pending'`,
+          fill.quantity,
+          fill.entryPrice,
+          fill.marginUsed,
+          now(),
+          targetPendingId,
+          traderId,
+        );
+      }
+      return { mergedIntoExisting: false };
+    });
   },
 
   updatePeak(traderId: number, symbol: string, peakPnlPercent: number): void {
@@ -1571,13 +1631,24 @@ export const orders = {
    * every fill in the account is visible to both and only the order history says
    * which one actually traded it.
    */
-  exchangeOrderIds(traderId: number, limit = 2000): Set<string> {
+  exchangeOrderIds(traderId: number, limit?: number): Set<string> {
+    if (typeof limit === 'number' && Number.isFinite(limit)) {
+      const safeLimit = Math.max(0, Math.floor(limit));
+      return new Set(
+        getDb()
+          .all<{ exchange_order_id: string | null }>(
+            'SELECT exchange_order_id FROM orders WHERE trader_id = ? AND exchange_order_id IS NOT NULL ORDER BY id DESC LIMIT ?',
+            traderId,
+            safeLimit,
+          )
+          .map((r) => String(r.exchange_order_id)),
+      );
+    }
     return new Set(
       getDb()
         .all<{ exchange_order_id: string | null }>(
-          'SELECT exchange_order_id FROM orders WHERE trader_id = ? AND exchange_order_id IS NOT NULL ORDER BY id DESC LIMIT ?',
+          'SELECT DISTINCT exchange_order_id FROM orders WHERE trader_id = ? AND exchange_order_id IS NOT NULL',
           traderId,
-          limit,
         )
         .map((r) => String(r.exchange_order_id)),
     );
@@ -1854,6 +1925,47 @@ export const orders = {
       ...ids,
     );
     return Number(row?.total ?? 0);
+  },
+
+  /**
+   * 账户级未平仓入场手续费合计（兼容多机器人共用账户及加仓订单）。
+   *
+   * 每个当前 `open` 持仓既匹配其 `entry_order_id`（首笔开仓，包括更早挂出的限价入场单），
+   * 也匹配该标的在 `opened_at` 之后成交的同机器人 `purpose = 'entry'` 加仓订单，
+   * 避免旧实现只看单机器人或漏算加仓单手续费导致总账校验出现假差额。
+   */
+  openEntryCostsForAccount(
+    openPositions: readonly Array<{
+      trader_id: number;
+      symbol: string;
+      opened_at: string;
+      entry_order_id: string | null;
+    }>[number][],
+  ): number {
+    let total = 0;
+    const db = getDb();
+    for (const pos of openPositions) {
+      const entryId = pos.entry_order_id && pos.entry_order_id.length > 0 ? pos.entry_order_id : null;
+      const row = db.get<{ total: number | null }>(
+        `SELECT SUM(COALESCE(fee, 0)) AS total
+           FROM orders
+          WHERE trader_id = ?
+            AND symbol = ?
+            AND purpose = 'entry'
+            AND status = 'FILLED'
+            AND (
+                  (? IS NOT NULL AND exchange_order_id = ?)
+               OR created_at >= ?
+            )`,
+        pos.trader_id,
+        pos.symbol,
+        entryId,
+        entryId,
+        pos.opened_at,
+      );
+      total += Number(row?.total ?? 0);
+    }
+    return total;
   },
 
   insert(input: {
@@ -2625,15 +2737,21 @@ export const trades = {
     if (cursor !== null && beforeClosedAt) {
       /*
        * 复合游标：`closed_at` 更早的排在后面；同一毫秒的用 id 破平。
-       * 两个条件缺一不可 —— 只比 `closed_at` 会在同一毫秒上漏行，只比 id 就是
-       * 原来那个会错乱的写法。
+       * 用标量子查询取 entry_margin_type（而非 LEFT JOIN orders），
+       * 避免同 exchange_order_id 存在多条 orders 行时把 trades 结果放大重复。
        */
       return getDb()
         .all<TradeRow>(
-          `SELECT t.*, o.margin_type AS entry_margin_type
+          `SELECT t.*,
+                  (SELECT o.margin_type
+                     FROM orders o
+                    WHERE o.trader_id = t.trader_id
+                      AND o.exchange_order_id = t.entry_order_id
+                      AND t.entry_order_id IS NOT NULL
+                      AND t.entry_order_id <> ''
+                    ORDER BY o.id DESC
+                    LIMIT 1) AS entry_margin_type
              FROM trades t
-             LEFT JOIN orders o
-               ON o.trader_id = t.trader_id AND o.exchange_order_id = t.entry_order_id
             WHERE t.trader_id = ? AND (t.closed_at < ? OR (t.closed_at = ? AND t.id < ?))
             ORDER BY t.closed_at DESC, t.id DESC LIMIT ?`,
           traderId,
@@ -2649,10 +2767,16 @@ export const trades = {
     if (cursor === null) {
       return getDb()
         .all<TradeRow>(
-          `SELECT t.*, o.margin_type AS entry_margin_type
+          `SELECT t.*,
+                  (SELECT o.margin_type
+                     FROM orders o
+                    WHERE o.trader_id = t.trader_id
+                      AND o.exchange_order_id = t.entry_order_id
+                      AND t.entry_order_id IS NOT NULL
+                      AND t.entry_order_id <> ''
+                    ORDER BY o.id DESC
+                    LIMIT 1) AS entry_margin_type
              FROM trades t
-             LEFT JOIN orders o
-               ON o.trader_id = t.trader_id AND o.exchange_order_id = t.entry_order_id
             WHERE t.trader_id = ? ORDER BY t.closed_at DESC, t.id DESC LIMIT ?`,
           traderId,
           pageSize,
@@ -2662,10 +2786,16 @@ export const trades = {
 
     return getDb()
       .all<TradeRow>(
-        `SELECT t.*, o.margin_type AS entry_margin_type
+        `SELECT t.*,
+                (SELECT o.margin_type
+                   FROM orders o
+                  WHERE o.trader_id = t.trader_id
+                    AND o.exchange_order_id = t.entry_order_id
+                    AND t.entry_order_id IS NOT NULL
+                    AND t.entry_order_id <> ''
+                  ORDER BY o.id DESC
+                  LIMIT 1) AS entry_margin_type
            FROM trades t
-           LEFT JOIN orders o
-             ON o.trader_id = t.trader_id AND o.exchange_order_id = t.entry_order_id
           WHERE t.trader_id = ? AND t.id < ? ORDER BY t.id DESC LIMIT ?`,
         traderId,
         cursor,
@@ -3242,6 +3372,7 @@ export const trades = {
      */
     const sql = `SELECT id FROM trades
        WHERE trader_id = ? AND symbol = ? AND quantity > 0
+         AND close_reason <> 'manual_partial'
          AND (
               (
                 ABS(quantity - ?) <= MAX(1e-6, ABS(?) * ${DUPLICATE_QUANTITY_TOLERANCE})
@@ -3311,6 +3442,101 @@ export const trades = {
 
     const row = getDb().get<{ id: number }>(sql, ...params);
     return row?.id ?? null;
+  },
+
+  /**
+   * 查出账本上属于同一个交易所整腿 `trip` 的所有拆分记录（用于 `manual_partial` 腿的对账核算）。
+   *
+   * 匹配规则（并集）：
+   *   1) `entry_order_id = trip.entryOrderId`；
+   *   2) `exit_order_id IN (trip.exitOrderIds)`；
+   *   3) 开仓时刻落在同源窗口（5 分钟）内，且 `entry_order_id` / `exit_order_id` 未归属他单
+   *      （覆盖运行期止损尾仓 `entry_order_id` 与 `exit_order_id` 均为 null 的场景）。
+   */
+  legSplitRows(input: {
+    traderId: number;
+    symbol: string;
+    entryOrderId?: string | null;
+    exitOrderIds?: readonly string[];
+    openedAt?: string | null;
+  }): Array<{
+    id: number;
+    closeReason: string;
+    quantity: number;
+    grossPnl: number;
+    entryFee: number;
+    exitFee: number;
+    fundingFee: number;
+    entryOrderId: string | null;
+    exitOrderId: string | null;
+  }> {
+    const clauses: string[] = [];
+    const params: unknown[] = [input.traderId, input.symbol];
+
+    const entryId = input.entryOrderId && input.entryOrderId.length > 0 ? input.entryOrderId : null;
+    const exitIds = (input.exitOrderIds ?? []).filter((id) => typeof id === 'string' && id.length > 0);
+
+    if (entryId) {
+      clauses.push('entry_order_id = ?');
+      params.push(entryId);
+    }
+    if (exitIds.length > 0) {
+      clauses.push(`exit_order_id IN (${exitIds.map(() => '?').join(', ')})`);
+      params.push(...exitIds);
+    }
+    if (input.openedAt) {
+      const openParts: string[] = [
+        `ABS(julianday(opened_at) - julianday(?)) * 86400000 <= ${DUPLICATE_OPEN_TOLERANCE_MS}`,
+      ];
+      params.push(input.openedAt);
+      if (entryId) {
+        openParts.push("(entry_order_id IS NULL OR entry_order_id = '' OR entry_order_id = ?)");
+        params.push(entryId);
+      } else {
+        openParts.push("(entry_order_id IS NULL OR entry_order_id = '')");
+      }
+      if (exitIds.length > 0) {
+        openParts.push(
+          `(exit_order_id IS NULL OR exit_order_id = '' OR exit_order_id IN (${exitIds.map(() => '?').join(', ')}))`,
+        );
+        params.push(...exitIds);
+      } else {
+        openParts.push("(exit_order_id IS NULL OR exit_order_id = '')");
+      }
+      clauses.push(`(${openParts.join(' AND ')})`);
+    }
+    if (clauses.length === 0) return [];
+
+    return getDb()
+      .all<{
+        id: number;
+        close_reason: string;
+        quantity: number;
+        pnl: number;
+        entry_fee: number;
+        fee: number;
+        funding_fee: number;
+        entry_order_id: string | null;
+        exit_order_id: string | null;
+      }>(
+        `SELECT id, close_reason, quantity, pnl, entry_fee, fee, funding_fee, entry_order_id, exit_order_id
+           FROM trades
+          WHERE trader_id = ? AND symbol = ?
+            AND (${clauses.join(' OR ')})
+          ORDER BY id ASC`,
+        ...params,
+      )
+      .map((r) => ({
+        id: r.id,
+        closeReason: r.close_reason,
+        quantity: Number(r.quantity) || 0,
+        grossPnl: Number(r.pnl) || 0,
+        entryFee: Number(r.entry_fee) || 0,
+        exitFee: Number((r.fee - r.entry_fee).toFixed(12)) || 0,
+        fundingFee: Number(r.funding_fee) || 0,
+        entryOrderId: r.entry_order_id,
+        exitOrderId: r.exit_order_id,
+      }));
   },
 
   /**
@@ -3461,8 +3687,8 @@ export const trades = {
               entry_price = CASE WHEN ? THEN entry_price ELSE ? END,
               exit_price = CASE WHEN ? THEN exit_price ELSE ? END,
               quantity = ?,
-              entry_order_id = COALESCE(?, entry_order_id),
-              exit_order_id = COALESCE(?, exit_order_id)
+              entry_order_id = COALESCE(NULLIF(entry_order_id, ''), ?),
+              exit_order_id = COALESCE(NULLIF(exit_order_id, ''), ?)
         WHERE id = ?`,
       /* pnl */
       keep, input.grossPnl,
@@ -4501,20 +4727,19 @@ export const equity = {
 const TRADE_EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * 一次 count 结果的阈值，到了才顺手裁剪一次。
+ * 每写入这么多条节流事件顺手裁剪一次 7 天前的历史行。
  *
- * 这个数字同时是"多久裁一次"的开关：`countSince()` 的返回值是有界窗口内的条数，
- * 正常情况下是个位到两位数，所以稳态下这条 DELETE 一次都不会执行。只有当窗口内
- * 真的积压了 200 条以上事件时才触发一次裁剪 —— 那时删掉 7 天前的行是纯收益。
+ * 原实现挂在 `countSince()` 里并要求窗口内 `count >= 200`（1 小时内开仓 ≥200 次），
+ * 正常交易下永远不会触发，导致 `trade_events` 无限膨胀。改为在 `record()` 写入路径上
+ * 按写入计数周期性裁剪（与 `runtimeLogs` 相同模式）。
  */
-const TRADE_EVENT_TRIM_THRESHOLD = 200;
+const TRADE_EVENT_TRIM_EVERY_WRITES = 200;
+let tradeEventWritesSinceTrim = 0;
 
 /**
  * 裁掉保留窗口之外的节流事件。
  *
- * 模块级函数而不是 `tradeEvents.trim`：`countSince` 内部要调它，而对象字面量
- * 在初始化期间引用自身（`tradeEvents.trim()`）会抛 TDZ 的 ReferenceError ——
- * 一个只在阈值被突破时才现形的隐藏炸弹。
+ * 模块级函数而不是 `tradeEvents.trim`：避免对象字面量初始化期的自引用问题。
  */
 function trimTradeEvents(retentionMs = TRADE_EVENT_RETENTION_MS): void {
   getDb().run(
@@ -4532,22 +4757,25 @@ export const tradeEvents = {
       kind,
       now(),
     );
+    tradeEventWritesSinceTrim += 1;
+    if (tradeEventWritesSinceTrim >= TRADE_EVENT_TRIM_EVERY_WRITES) {
+      tradeEventWritesSinceTrim = 0;
+      trimTradeEvents();
+    }
   },
 
-  /** 裁剪到保留窗口内。**按批次调用**（入口是 `countSince()`），不是每次写入都调。 */
+  /** 裁剪到保留窗口内。写路径按写入计数周期性触发，也可按需显式调用。 */
   trim(retentionMs = TRADE_EVENT_RETENTION_MS): void {
     trimTradeEvents(retentionMs);
   },
 
   countSince(traderId: number, kind: 'entry' | 'exit', sinceIso: string): number {
-    const count = getDb().count(
+    return getDb().count(
       'SELECT COUNT(*) AS n FROM trade_events WHERE trader_id = ? AND kind = ? AND created_at >= ?',
       traderId,
       kind,
       sinceIso,
     );
-    if (count >= TRADE_EVENT_TRIM_THRESHOLD) trimTradeEvents();
-    return count;
   },
 
   /** Most recent event of a kind for a symbol — drives the re-entry cooldown. */

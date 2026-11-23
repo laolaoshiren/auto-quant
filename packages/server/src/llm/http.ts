@@ -108,6 +108,12 @@ export const GUARDED_RESPONSE_TIMEOUT_MS = 900_000;
  */
 const agentCache = new Map<string, Dispatcher>();
 
+/** 把 `connect.lookup` 拿到的主机名拼成可被 `new URL` 解析的 URL（裸 IPv6 补方括号）。 */
+export function literalHostUrl(hostname: string): string {
+  const urlHost = hostname.includes(':') && !hostname.startsWith('[') ? `[${hostname}]` : hostname;
+  return `http://${urlHost}/`;
+}
+
 /** 取一个带连接层校验的 undici `Dispatcher`。 */
 export function guardedDispatcher(
   allowPrivateHosts: readonly string[],
@@ -142,7 +148,7 @@ export function guardedDispatcher(
          *（`localhost` 也解析到 127.0.0.1，所以两者重叠；但 `.internal`
          * 可能解析到一个公网 IP，那时只有这一层能挡）。
          */
-        const literalVerdict = checkOutboundUrl(`http://${hostname}/`, allowPrivateHosts);
+        const literalVerdict = checkOutboundUrl(literalHostUrl(hostname), allowPrivateHosts);
         if (!literalVerdict.allowed) {
           const error: NodeJS.ErrnoException = new Error(
             `出站地址被拒绝：${literalVerdict.reason ?? hostname}`,
@@ -266,27 +272,27 @@ export async function fetchGuarded(url: string, init: RequestInit): Promise<Resp
 
     if (!REDIRECT_STATUSES.has(response.status)) return response;
 
+    const location = response.headers.get('location');
+    if (!location) return response;
+
     /*
-     * 从这一行往下，`response` 只是我们要跟着走的中转站 —— 它的 body 必须丢掉：
-     * 不消费它，那一跳的连接就一直挂着不释放，而这是一台 7x24 常在的服务器，
-     * 跳转次数累积起来就是 fd 泄漏。`cancel()` 失败（已经结束）时忽略即可，
-     * 它只是清理，不是业务逻辑。
-     *
-     * **放在所有提前 return / throw 之前**，是为了让"带个响应体离开这个分支"的
-     * 每条路径都经过它 —— 否则迟早会有一条忘了 cancel。
+     * 确认存在 Location 并决定离开当前响应后，再释放 body 避免 fd 泄漏；
+     * 若没有 Location 而原样返回 response，不能提前 cancel 其 body，否则上层读不到响应体。
      */
     void response.body?.cancel().catch(() => undefined);
 
-    const location = response.headers.get('location');
-    if (!location) return response;
     if (hop >= MAX_REDIRECTS) {
       throw connectionError('outbound', new Error(`重定向超过 ${MAX_REDIRECTS} 跳，已放弃`));
     }
 
     // 相对 Location 要按当前 URL 解析，否则换路径的网关会丢整段 base。
     const next = new URL(location, current).toString();
-    if (new URL(next).host !== new URL(current).host) {
-      // 跨主机：丢掉全部请求头（见上面那段为什么）。
+    /*
+     * 比对 `.origin`（协议 + 主机 + 端口）而不是 `.host`：
+     * 防止 `https://` 降级跳转到 `http://` 时把明文 `Authorization` / `x-api-key` 带出去。
+     */
+    if (new URL(next).origin !== new URL(current).origin) {
+      // 跨源（含跨主机或协议降级）：丢掉全部请求头（见上面那段为什么）。
       headers = undefined;
     }
     current = next;
@@ -364,6 +370,14 @@ export function parseRetryAfter(value: string | null, maxMs = 60_000): number | 
   return null;
 }
 
+function isTimeoutErrorLike(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { name?: unknown }).name === 'TimeoutError'
+  );
+}
+
 /**
  * Issue one HTTP call.
  *
@@ -407,7 +421,7 @@ export async function executeJsonRequest(
   } catch (error) {
     // An abort raised by our own timeout is a retryable slow generation; an
     // abort raised by the caller is a cancellation and must not be retried.
-    if (error instanceof Error && error.name === 'TimeoutError') {
+    if (isTimeoutErrorLike(error) || isTimeoutErrorLike(options.signal?.reason)) {
       throw timeoutError(String(provider), options.timeoutMs ?? 0);
     }
     if (error instanceof Error && error.name === 'AbortError') {
@@ -420,6 +434,14 @@ export async function executeJsonRequest(
     rawText = await response.text();
   } catch (error) {
     const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
+    /*
+     * 优先判超时（`TimeoutError` 或 `AbortSignal.timeout` 的 `signal.reason`）：
+     * 读响应体中途触发超时属于可重试超时，不能因 `options.signal.aborted === true`
+     * 就一刀切误判成不可重试的调用方主动取消（`abortError`）。
+     */
+    if (isTimeoutErrorLike(error) || isTimeoutErrorLike(options.signal?.reason)) {
+      throw timeoutError(String(provider), options.timeoutMs ?? 0);
+    }
     if (options.signal?.aborted) throw abortError(String(provider), error);
     if (!response.ok) {
       const classified = classifyHttpError(String(provider), response.status, null, '');
@@ -512,62 +534,68 @@ export async function executeStreamRequest(
   const signals = options.signal ? [stall.signal, options.signal] : [stall.signal];
   const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
 
-  let response: Response;
-  try {
-    response = await fetchGuarded(request.url, {
-      method: 'POST',
-      headers: { ...request.headers, accept: 'text/event-stream' },
-      body: JSON.stringify(request.body),
-      signal,
-    });
-  } catch (error) {
-    if (idleTimer) clearTimeout(idleTimer);
-    /* 我们自己因为"卡住"而中止的算**可重试的超时**（它是慢，不是坏）。 */
-    if (stall.signal.aborted) throw timeoutError(String(provider), idleMs);
-    if (error instanceof Error && error.name === 'TimeoutError') {
-      throw timeoutError(String(provider), options.timeoutMs ?? 0);
-    }
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw abortError(String(provider), error);
-    }
-    throw connectionError(String(provider), error);
-  }
-
   /*
-   * 非 2xx 时上游发的是普通 JSON 错误体（不是 SSE），所以照 `executeJsonRequest`
-   * 那条路解析与分类 —— 错误分类逻辑必须只有一份。
+   * 将 `idleTimer` 清理放到最外层 `try / finally`：
+   * 此前仅在 fetch catch 与 readOpenAiStreamLines finally 清理，
+   * 非 2xx 分支提前 throw 会泄漏 `idleTimer` 直到 180s 后触发。
    */
-  if (!response.ok) {
-    const rawText = await response.text().catch(() => '');
-    const error = classifyHttpError(String(provider), response.status, safeJsonParse(rawText), rawText);
-    error.retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
-    throw error;
-  }
-
+  let response: Response;
   let lines: string[];
   try {
-    /* 每收到一块数据就重置"卡住"计时器 —— 慢模型因此不会被总时长误杀。 */
-    lines = await readOpenAiStreamLines(response, bumpIdle);
-  } catch (error) {
+    try {
+      response = await fetchGuarded(request.url, {
+        method: 'POST',
+        headers: { ...request.headers, accept: 'text/event-stream' },
+        body: JSON.stringify(request.body),
+        signal,
+      });
+    } catch (error) {
+      /* 我们自己因为"卡住"而中止的算**可重试的超时**（它是慢，不是坏）。 */
+      if (stall.signal.aborted) throw timeoutError(String(provider), idleMs);
+      if (isTimeoutErrorLike(error) || isTimeoutErrorLike(options.signal?.reason)) {
+        throw timeoutError(String(provider), options.timeoutMs ?? 0);
+      }
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw abortError(String(provider), error);
+      }
+      throw connectionError(String(provider), error);
+    }
+
     /*
-     * ⚠️ **2xx 流式在读取过程中失败，要与非流式共用同一套分类。**
-     *
-     * 原来这里只认"卡住"（`stall.signal.aborted`），其余一律 `throw error` 裸抛 ——
-     * 于是"头部已 200、SSE 读到一半连接被重置"抛的是原生 `TypeError`，
-     * `isRetryable()` 认不出，一次可重试的抖动被判成永久失败
-     * （外部实测确认：流式 200 + body 读失败 → `isRetryable=false`）。
-     *
-     * 补法与上面 fetch 的 catch **完全同构**：卡住→可重试超时；调用方取消→不重试；
-     * 其余（连接重置）→可重试连接错误。三条路径的错误分类只有一份逻辑。
+     * 非 2xx 时上游发的是普通 JSON 错误体（不是 SSE），所以照 `executeJsonRequest`
+     * 那条路解析与分类 —— 错误分类逻辑必须只有一份。
      */
-    if (stall.signal.aborted) throw timeoutError(String(provider), idleMs);
-    if (error instanceof Error && error.name === 'TimeoutError') {
-      throw timeoutError(String(provider), options.timeoutMs ?? 0);
+    if (!response.ok) {
+      const rawText = await response.text().catch(() => '');
+      const error = classifyHttpError(String(provider), response.status, safeJsonParse(rawText), rawText);
+      error.retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
+      throw error;
     }
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw abortError(String(provider), error);
+
+    try {
+      /* 每收到一块数据就重置"卡住"计时器 —— 慢模型因此不会被总时长误杀。 */
+      lines = await readOpenAiStreamLines(response, bumpIdle);
+    } catch (error) {
+      /*
+       * ⚠️ **2xx 流式在读取过程中失败，要与非流式共用同一套分类。**
+       *
+       * 原来这里只认"卡住"（`stall.signal.aborted`），其余一律 `throw error` 裸抛 ——
+       * 于是"头部已 200、SSE 读到一半连接被重置"抛的是原生 `TypeError`，
+       * `isRetryable()` 认不出，一次可重试的抖动被判成永久失败
+       * （外部实测确认：流式 200 + body 读失败 → `isRetryable=false`）。
+       *
+       * 补法与上面 fetch 的 catch **完全同构**：卡住→可重试超时；调用方取消→不重试；
+       * 其余（连接重置）→可重试连接错误。三条路径的错误分类只有一份逻辑。
+       */
+      if (stall.signal.aborted) throw timeoutError(String(provider), idleMs);
+      if (isTimeoutErrorLike(error) || isTimeoutErrorLike(options.signal?.reason)) {
+        throw timeoutError(String(provider), options.timeoutMs ?? 0);
+      }
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw abortError(String(provider), error);
+      }
+      throw connectionError(String(provider), error);
     }
-    throw connectionError(String(provider), error);
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
   }

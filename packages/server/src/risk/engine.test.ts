@@ -1738,5 +1738,253 @@ test('★ 盈亏比"刚好达标"必须通过 —— 浮点误差不该变成拒
   assert.match(justShort.rejected[0]!.reason, /盈亏比/, '理由应当还是盈亏比');
 });
 
+/* -------------------------------------------------------------------------- */
+/*  域 C 回归测试：空头加仓 / 风险预算下限 / 排序 / 滚动持仓 / 零值 / 方向 / 0% 回撤 */
+/* -------------------------------------------------------------------------- */
+
+test('★ 空头持仓允许 add_to_position（防 wantsLong 恒为 true 导致空头 100% 无法加仓）', () => {
+  const env = environment({
+    positions: new Map([
+      [
+        'BTCUSDT',
+        position({
+          side: 'short',
+          entryPrice: 68_000,
+          markPrice: 68_000,
+          stopLoss: 70_000,
+          takeProfit: 62_000,
+          notional: 500,
+        }),
+      ],
+    ]),
+  });
+  const verdict = engine.review(
+    [addDecision({ positionSizeUsd: 100, stopLoss: 70_000, takeProfit: 62_000 })],
+    env,
+  );
+  assert.equal(verdict.approved.length, 1, `空头同向加仓应放行：${JSON.stringify(verdict.rejected)}`);
+  assert.equal(verdict.approved[0]!.action, 'add_to_position');
+});
+
+test('★ 风险预算下限检查移至最终 notional 之后：支持 riskUsd 反推、拦截 NaN、豁免加仓', () => {
+  const prev = process.env.AQ_ENFORCE_RISK_BUDGET;
+  process.env.AQ_ENFORCE_RISK_BUDGET = 'true';
+  try {
+    const config = configWith({
+      riskControl: {
+        ...defaultStrategyConfig().riskControl,
+        riskPerTradePercent: 2, // 预算 = 1000 * 2% = $20，下限 = $10
+        minRiskRewardRatio: 0,
+        minStopLossFeeMultiple: 0,
+        btcEthMaxPositionValueRatio: 50,
+      },
+    });
+    // 1) 未填 positionSizeUsd 但给了 riskUsd=20，§8 反推出 notional=680 → 风险 $20 ≥ $10，应放行
+    const viaRiskUsd = engine.review(
+      [openDecision({ positionSizeUsd: 0, riskUsd: 20, stopLoss: 66_000, takeProfit: 74_000 })],
+      environment({ config }),
+    );
+    assert.equal(viaRiskUsd.approved.length, 1, `按 riskUsd 反推满足预算应放行：${JSON.stringify(viaRiskUsd.rejected)}`);
+
+    // 2) 传入 NaN 且无 riskUsd → §8 回退 10% 权益=$100，止损距 2.94% → 风险 $2.94 < $10，必须拦截
+    const withNaN = engine.review(
+      [openDecision({ positionSizeUsd: Number.NaN, riskUsd: 0, stopLoss: 66_000, takeProfit: 74_000 })],
+      environment({ config }),
+    );
+    assert.equal(withNaN.approved.length, 0, 'NaN 经清洗后若风险低于下限必须拒绝');
+    assert.match(withNaN.rejected[0]!.reason, /单笔风险/);
+
+    // 3) 加仓（add_to_position）即使小额也豁免整仓风险预算下限
+    const smallAdd = engine.review(
+      [addDecision({ positionSizeUsd: 50, stopLoss: 66_000, takeProfit: 74_000 })],
+      environment({
+        config,
+        positions: new Map([['BTCUSDT', position({ side: 'long', notional: 500 })]]),
+      }),
+    );
+    assert.equal(smallAdd.approved.length, 1, `加仓应豁免整仓风险预算下限：${JSON.stringify(smallAdd.rejected)}`);
+  } finally {
+    if (prev === undefined) delete process.env.AQ_ENFORCE_RISK_BUDGET;
+    else process.env.AQ_ENFORCE_RISK_BUDGET = prev;
+  }
+});
+
+test('★ cancel_pending 在批处理中排在最前面（先撤挂单再平仓/调保护/开仓）', () => {
+  const verdict = engine.review(
+    [
+      openDecision({ symbol: 'ETHUSDT', stopLoss: 2_400, takeProfit: 2_800 }),
+      { ...openDecision({ symbol: 'SOLUSDT', action: 'cancel_pending' }) },
+    ],
+    environment({
+      snapshots: new Map([
+        ['ETHUSDT', snapshot('ETHUSDT', 2_500)],
+        ['SOLUSDT', snapshot('SOLUSDT', 150)],
+      ]),
+    }),
+  );
+  assert.equal(verdict.approved.length, 2);
+  assert.equal(verdict.approved[0]!.action, 'cancel_pending', 'cancel_pending 必须位于 approved[0]');
+});
+
+test('★ 同批多条 add_to_position / reduce_position / close 共享滚动持仓视图，不可穿透限额', () => {
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      btcEthMaxPositionValueRatio: 1, // 权益 1000 → 单仓上限 $1000
+      minRiskRewardRatio: 0,
+      minStopLossFeeMultiple: 0,
+    },
+    throttle: { ...defaultStrategyConfig().throttle, maxEntriesPerCycle: 5, maxEntriesPerHour: 5 },
+  });
+  // 已有持仓 $700，剩余空间 $300；同批两次加仓各 $250 → 第二次只能看到剩余 $50，总敞口 ≤ $1000
+  const env = environment({
+    config,
+    positions: new Map([['BTCUSDT', position({ side: 'long', notional: 700, quantity: 700 / 68_000 })]]),
+  });
+  const addVerdict = engine.review(
+    [addDecision({ positionSizeUsd: 250 }), addDecision({ positionSizeUsd: 250 })],
+    env,
+  );
+  const totalAdded = addVerdict.approved.reduce((s, d) => s + d.positionSizeUsd, 0);
+  assert.ok(totalAdded <= 300 + 1e-6, `同批两次加仓合计不得超过剩余空间 300，实得 ${totalAdded}`);
+
+  // 同批先 close_long 再 reduce_position → 持仓已被删，reduce 必须被拒
+  const closeThenReduce = engine.review(
+    [reduceDecision({ reducePercent: 50 }), openDecision({ action: 'close_long' })],
+    env,
+  );
+  assert.equal(closeThenReduce.approved.length, 1);
+  assert.equal(closeThenReduce.approved[0]!.action, 'close_long');
+  assert.equal(closeThenReduce.rejected.length, 1);
+  assert.match(closeThenReduce.rejected[0]!.reason, /没有持仓/);
+});
+
+test('★ reviewAdjust 拒绝多头 stop <= 0 与空头 target <= 0（防止负数/0 穿透 < price 检查）', () => {
+  const longEnv = environment({
+    positions: new Map([['BTCUSDT', position({ side: 'long', stopLoss: 64_000 })]]),
+  });
+  const longZeroStop = engine.review([adjustDecision({ stopLoss: 0 })], longEnv);
+  assert.equal(longZeroStop.approved.length, 0);
+  assert.match(longZeroStop.rejected[0]!.reason, /必须大于 0/);
+
+  const longNegStop = engine.review([adjustDecision({ stopLoss: -10 })], longEnv);
+  assert.equal(longNegStop.approved.length, 0);
+  assert.match(longNegStop.rejected[0]!.reason, /必须大于 0/);
+
+  const shortEnv = environment({
+    positions: new Map([['BTCUSDT', position({ side: 'short', stopLoss: 72_000, takeProfit: 60_000 })]]),
+  });
+  const shortZeroTp = engine.review([adjustDecision({ stopLoss: null, takeProfit: 0 })], shortEnv);
+  assert.equal(shortZeroTp.approved.length, 0);
+  assert.match(shortZeroTp.rejected[0]!.reason, /必须大于 0/);
+
+  const shortNegTp = engine.review([adjustDecision({ stopLoss: null, takeProfit: -5 })], shortEnv);
+  assert.equal(shortNegTp.approved.length, 0);
+  assert.match(shortNegTp.rejected[0]!.reason, /必须大于 0/);
+});
+
+test('★ reviewAdd 适配 marginBasedLimit === true（不再被 altcoinMaxPositionValueRatio 误杀）', () => {
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      marginBasedLimit: true,
+      altcoinMaxPositionValueRatio: 0.1, // 按旧比例只有 $100，小于已有 $200 持仓
+      altcoinMaxLeverage: 10,
+      maxMarginUsage: 80,
+      minRiskRewardRatio: 0,
+      minStopLossFeeMultiple: 0,
+    },
+  });
+  const env = environment({
+    config,
+    account: { equity: 1000, availableBalance: 980, marginUsed: 20, positionCount: 1 },
+    snapshots: new Map([['SOLUSDT', snapshot('SOLUSDT', 100)]]),
+    positions: new Map([
+      ['SOLUSDT', position({ symbol: 'SOLUSDT', side: 'long', leverage: 10, notional: 200, quantity: 2, entryPrice: 100, markPrice: 100, stopLoss: 95, takeProfit: 120 })],
+    ]),
+  });
+  const verdict = engine.review(
+    [addDecision({ symbol: 'SOLUSDT', positionSizeUsd: 100, stopLoss: 95, takeProfit: 120 })],
+    env,
+  );
+  assert.equal(verdict.approved.length, 1, `marginBasedLimit 开启时应允许按保证金余量加仓：${JSON.stringify(verdict.rejected)}`);
+});
+
+test('★ 限价单按 riskUsd 反推名义时乘以 entryPrice 而非市价，保证最终实际风险等于 riskUsd', () => {
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      btcEthMaxPositionValueRatio: 50,
+      minRiskRewardRatio: 0,
+      minStopLossFeeMultiple: 0,
+    },
+  });
+  // 市价 100，限价买 80，止损 76（距离 4），riskUsd = 20 → 应买 5 张，名义 5 * 80 = 400（若乘市价会算成 500 → 6.25 张 → 风险 $25）
+  const env = environment({
+    config,
+    snapshots: new Map([['SOLUSDT', snapshot('SOLUSDT', 100)]]),
+  });
+  const verdict = engine.review(
+    [
+      openDecision({
+        symbol: 'SOLUSDT',
+        entryType: 'limit',
+        limitPrice: 80,
+        stopLoss: 76,
+        takeProfit: 100,
+        positionSizeUsd: 0,
+        riskUsd: 20,
+        leverage: 5,
+      }),
+    ],
+    env,
+  );
+  assert.equal(verdict.approved.length, 1, JSON.stringify(verdict.rejected));
+  assert.ok(
+    Math.abs((verdict.approved[0]!.riskUsd ?? 0) - 20) < 0.05,
+    `最终风险应严格贴近 $20，实得 ${verdict.approved[0]!.riskUsd}`,
+  );
+  assert.ok(
+    Math.abs(verdict.approved[0]!.positionSizeUsd - 400) < 1,
+    `名义应按挂单价 80 反推为 400，实得 ${verdict.approved[0]!.positionSizeUsd}`,
+  );
+});
+
+test('★ reviewClose 校验平仓方向与持仓方向一致', () => {
+  const longEnv = environment({
+    positions: new Map([['BTCUSDT', position({ side: 'long' })]]),
+  });
+  const wrongCloseShort = engine.review([openDecision({ action: 'close_short' })], longEnv);
+  assert.equal(wrongCloseShort.approved.length, 0);
+  assert.match(wrongCloseShort.rejected[0]!.reason, /多头持仓.*close_short/);
+
+  const shortEnv = environment({
+    positions: new Map([['BTCUSDT', position({ side: 'short' })]]),
+  });
+  const wrongCloseLong = engine.review([openDecision({ action: 'close_long' })], shortEnv);
+  assert.equal(wrongCloseLong.approved.length, 0);
+  assert.match(wrongCloseLong.rejected[0]!.reason, /空头持仓.*close_long/);
+});
+
+test('★ shouldCloseForDrawdown 在大浮盈恰好回吐至 0% 时也要触发平仓（消除 0 点不连续）', () => {
+  const config = configWith({
+    drawdownGuard: { enabled: true, activationPercent: 1.5, givebackRatio: 0.5 },
+  });
+  // peak = 4% ≥ 2 * 1.5%，current === 0 恰好回吐 100%
+  const verdict = shouldCloseForDrawdown(
+    position({ peakPnlPercent: 4, unrealizedPnlPercent: 0 }),
+    config,
+  );
+  assert.equal(verdict.close, true, '大浮盈回吐至 0% 不应漏平');
+  assert.match(verdict.reason, /回吐全部浮盈/);
+
+  // 小浮盈（peak = 2% < 3%）回吐至 0% 仍交给止损/保本止损处理
+  const smallPeak = shouldCloseForDrawdown(
+    position({ peakPnlPercent: 2, unrealizedPnlPercent: 0 }),
+    config,
+  );
+  assert.equal(smallPeak.close, false);
+});
+
 
 

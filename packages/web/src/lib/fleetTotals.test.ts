@@ -29,7 +29,15 @@ import test from 'node:test';
 
 import type { EquitySnapshot, TraderStats } from '@aq/shared';
 
-import { attributedEquityOf, committedCapitalOf, fleetTotals, groupTradersByAccount, realizedPnlOf } from './fleetTotals';
+import {
+  accountEquityContributor,
+  attributedEquityOf,
+  committedCapitalOf,
+  fleetTotals,
+  groupTradersByAccount,
+  paperEquityContributor,
+  realizedPnlOf,
+} from './fleetTotals';
 import type { TraderRow } from './api';
 
 /* -------------------------------------------------------------------------- */
@@ -388,7 +396,7 @@ test('★★★ 实盘仍然会用 exchangeNet 校准（模拟盘分支不能误
   assert.equal(realizedPnlOf(live, s, undefined), -6.956285, '★ undefined = 没给 → 不排除校准');
 });
 
-test('★★★ fleetTotals 也要把 dryRun 传下去（否则汇总页仍显示 0）', () => {
+test('★★★ fleetTotals 也要把 dryRun 传下去（模拟盘独立进 paper 汇总，不被清零也不混入实盘账户）', () => {
   const simulated = trader({
     id: 11,
     initialEquity: 20.75,
@@ -401,15 +409,104 @@ test('★★★ fleetTotals 也要把 dryRun 传下去（否则汇总页仍显�
     stats: { 11: s },
     dryRun: { 11: true },
   });
+  assert.equal(
+    withDryRun.accounts.length,
+    0,
+    '★ 模拟盘绝不能混入实盘账户分组（哪怕绑定了 exchangeAccountId）',
+  );
+  assert.equal(withDryRun.paper.traderCount, 1, '★ 模拟盘必须进入独立的 paper 汇总');
   assert.ok(
-    Math.abs((withDryRun.accounts[0]?.realizedPnl ?? 0) - -0.052428) < 1e-9,
-    '★ 传了 dryRun 之后，汇总里的已实现盈亏必须是账本值（不是 0）',
+    Math.abs(withDryRun.paper.realizedPnl - -0.052428) < 1e-9,
+    '★ 传了 dryRun 之后，模拟盘汇总里的已实现盈亏必须是账本值（不是 0）',
+  );
+  assert.ok(
+    Math.abs(withDryRun.paper.equity - 20.70) < 1e-9,
+    '★ 传了 dryRun 之后，模拟盘汇总里的模拟权益必须是账本值',
   );
 
   const without = fleetTotals({ traders: [simulated], stats: { 11: s } });
   assert.equal(
     without.accounts[0]?.realizedPnl,
     0,
-    '★ 不传时仍是旧行为（0）—— 说明这个参数确实是判据的开关',
+    '★ 不传时仍按实盘处理（0）—— 说明这个参数确实是判据的开关',
   );
+  assert.equal(without.paper.traderCount, 0);
+});
+
+test('★★★ 混合舰队：同账户下实盘与模拟盘共存时，实盘账户与曲线绝不被模拟盘污染', () => {
+  const live = trader({
+    id: 10,
+    exchangeAccountId: 1,
+    initialEquity: 100,
+    createdAt: '2026-09-16T00:00:00.000Z',
+    dryRun: false,
+  });
+  // 故意让模拟盘创建时间更早且本金更大：若混入实盘分组会直接把实盘本金污染成 5000。
+  const paperBound = trader({
+    id: 11,
+    exchangeAccountId: 1,
+    initialEquity: 5000,
+    createdAt: '2026-09-10T00:00:00.000Z',
+    dryRun: true,
+    ledger: { platformNet: 12.5, exchangeNet: 0, gap: 12.5, checkedAt: '2026-10-14T19:17:04.565Z' },
+  });
+  const paperPure = trader({
+    id: 12,
+    exchangeAccountId: null,
+    initialEquity: 1000,
+    dryRun: true,
+  });
+
+  const statsMap = {
+    10: stats({ traderId: 10, equity: 108, realizedPnl: 8, accountEquity: 108 }),
+    11: stats({ traderId: 11, equity: 5012.5, realizedPnl: 12.5, accountEquity: 9999 }),
+    12: stats({ traderId: 12, equity: 990, realizedPnl: -10, accountEquity: 0 }),
+  };
+  const snapshots = {
+    10: [snapshot('2026-09-18T00:00:00.000Z', 108)],
+    // 故意给模拟盘一个更新的错误 accountEquity，验证不会被实盘采纳。
+    11: [
+      {
+        timestamp: '2026-09-19T00:00:00.000Z',
+        accountEquity: 9999,
+        equity: 5012.5,
+        accountUnrealizedPnl: 0,
+        unrealizedPnl: 0,
+        openPositions: 0,
+      } as EquitySnapshot,
+    ],
+    12: [
+      {
+        timestamp: '2026-09-19T00:00:00.000Z',
+        accountEquity: 0,
+        equity: 990,
+        accountUnrealizedPnl: 0,
+        unrealizedPnl: 0,
+        openPositions: 0,
+      } as EquitySnapshot,
+    ],
+  };
+  const dryRun = { 10: false, 11: true, 12: true };
+
+  const totals = fleetTotals({ traders: [live, paperBound, paperPure], stats: statsMap, snapshots, dryRun });
+  assert.equal(totals.accounts.length, 1);
+  assert.deepEqual(totals.accounts[0]?.traderIds, [10], '★ 实盘账户只包含实盘机器人');
+  assert.equal(totals.committedCapitalFleet, 100, '★ 实盘本金不能被同账户更早的模拟盘污染');
+  assert.equal(totals.accountEquityFleet, 108, '★ 实盘账户权益不能采纳同账户模拟盘的快照');
+  assert.equal(totals.realizedPnlFleet, 8, '★ 实盘已实现盈亏不能混入模拟盘盈亏');
+
+  assert.equal(totals.paper.traderCount, 2, '★ 绑定账户与纯模拟盘两台都归入 paper 独立汇总');
+  assert.equal(totals.paper.capital, 6000);
+  assert.ok(Math.abs(totals.paper.equity - 6002.5) < 1e-9);
+  assert.ok(Math.abs(totals.paper.realizedPnl - 2.5) < 1e-9, '★ 模拟盘盈亏保留账本值（12.5 - 10）');
+
+  const liveCurve = accountEquityContributor([live, paperBound, paperPure], snapshots, dryRun);
+  assert.equal(liveCurve.series[1]?.length, 1);
+  assert.equal(liveCurve.series[1]?.[0]?.equity, 108, '★ 实盘曲线排除同账户模拟盘快照');
+  assert.equal(liveCurve.baseline[1], 100);
+
+  const paperCurve = paperEquityContributor([live, paperBound, paperPure], snapshots, dryRun);
+  assert.equal(paperCurve.series[10], undefined, '★ 模拟盘曲线不包含实盘机器人');
+  assert.equal(paperCurve.series[11]?.[0]?.equity, 5012.5);
+  assert.equal(paperCurve.series[12]?.[0]?.equity, 990);
 });

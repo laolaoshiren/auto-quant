@@ -32,14 +32,20 @@
  * The presentational pieces are in `overviewParts.tsx` so this file stays
  * readable as structure rather than as markup.
  */
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { EquitySnapshot, TraderMode, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
-import { MODE_HINT, PAGE_LABEL } from '../lib/glossary';
+import { MODE_HINT, PAGE_LABEL, isPaperView } from '../lib/glossary';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
-import { accountEquityContributor, attributedEquityOf, fleetTotals } from '../lib/fleetTotals';
+import {
+  accountEquityContributor,
+  attributedEquityOf,
+  fleetTotals,
+  paperEquityContributor,
+  realizedPnlOf,
+} from '../lib/fleetTotals';
 import { pairEquityByTrader } from '../lib/equityPairing';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
 import { Button, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
@@ -197,129 +203,77 @@ export function OverviewPage() {
       ...(liveByTrader[trader.id]?.equity ?? []),
     ];
   }
-  const merged = mergeEquityCurves([accountEquityContributor(traders, equitySnapshots)]);
 
   /*
-   * 去掉开头那段"没有读数"的点。
-   *
-   * `mergeEquityCurves` 的第一个桶是 `floor(最早快照时间)`，因此**没有任何样本
-   * ≤ 它**，于是首桶的合计是 0 —— 这是它在首桶上的已知边界，旧的每机器人曲线
-   * 一样有这个 0（实测两种写法首点都是 0）。但 0 在权益里不是"账户没钱"，
-   * 而是"这一桶还没有读数"：留着它，`equityChange = 账户权益 − 窗口起点` 就会
-   * 等于**整个账户权益**（实测页面显示「区间盈亏 +$10.42 / 还没有权益快照」，
-   * 而真实变化是 +$0.03），正好违反 LAYOUT.md §7。
-   *
-   * 根因在 `components/equityCurve.ts`（不在本次改动的文件范围内），已上报；
-   * 这里只中和它的后果：丢掉开头这一段非正的点。若一条正读数都没有，就返回空
-   * 曲线 —— 那种情况下页面应该说的是"还没有权益快照"，而不是"账户是 0"。
+   * 统一用 `isPaperView()` 三级回落（运行时 → 持久化 `trader.dryRun` → 进程级 `system.dryRun`），
+   * 避免模拟盘停机后 `stats.dryRun === null` 被当成实盘，既污染账户统计又把模拟盈亏清零。
    */
-  const firstReading = merged.findIndex((point) => point.equity > 0);
-  const curve = firstReading === -1 ? [] : merged.slice(firstReading);
+  const dryRunById: Record<number, boolean> = Object.fromEntries(
+    traders.map((t) => [
+      t.id,
+      isPaperView({
+        runtimeDryRun: statsMap[t.id]?.dryRun,
+        persistedDryRun: t.dryRun,
+        processDryRun: system?.dryRun,
+      }),
+    ]),
+  );
+  const dryRunOf = (id: number): boolean | null | undefined => dryRunById[id];
 
-  const runningCount = traders.filter((t) => t.isRunning).length;
+  const runningCount = traders.filter((t) => {
+    const liveStatusNow = liveByTrader[t.id]?.status;
+    return liveStatusNow ? liveStatusNow === 'running' || liveStatusNow === 'safe_mode' : t.isRunning;
+  }).length;
 
-  /** 舰队合计（账户口径与机器人归属口径分开算，见 `lib/fleetTotals.ts`）。 */
+  /** 舰队合计（账户口径与模拟盘口径分开算，见 `lib/fleetTotals.ts`）。 */
   const fleet = fleetTotals({
     traders,
     stats: statsMap,
     snapshots: equitySnapshots,
-    /* ⚠️ 模拟盘不校准（exchangeNet 恒为 0）—— 见 `isLedgerSuspect`。 */
-    dryRun: Object.fromEntries(traders.map((t) => [t.id, statsMap[t.id]?.dryRun ?? null])),
+    /* ⚠️ 模拟盘不校准（exchangeNet 恒为 0）且不混入实盘账户分组。 */
+    dryRun: dryRunById,
   });
 
-  /**
-   * 单行的归属权益：**只是这个机器人自己的账**，不能相加。
-   *
-   * ## ⚠️ 2026-10-14：账本不可信时改用**交易所校准值**（用户报"图4 也一样"）
-   *
-   * 用户的原话：
-   * > 「列表和详情要正确对齐数字，别整无意义的垃圾数据，还有首页总览的图表-图4也是一样」
-   *
-   * ## 事实（线上 `#10`）
-   *
-   * ```
-   *   账本推算的归属权益  $104.89  ← 起始 100.05 + trades.net_pnl +4.84
-   *   交易所真实账户权益  $92.34
-   *   差 12.56
-   * ```
-   * 差额的来源是 `trades.net_pnl` 被对账重建写坏（39 笔 `source='reconciled'`
-   * 里 16 笔 `pnl=0`，本该有盈亏，合计虚高 9.13）。
-   *
-   * ## 判据与详情页 / 机器人列表页**完全一致**
-   *
-   * ```
-   *   ledger.gap ≥ 0.01 → 用交易所的成交流水（exchangeNet）校准
-   *   否则              → 用账本（它与交易所一致）
-   * ```
-   * ⚠️ 三处（首页 / 机器人列表 / 详情页）必须给出**同一个数**，
-   * 而"同一个数"的唯一保证是**同一套判据** —— 所以阈值一字不差地复制过来。
-   * 改一处必须改三处（这是本项目"同一个算术不要写两遍"那条教训的例外：
-   * 三处判据必须一致，而共享它们需要跨页面的模块 —— 那超出本次改动范围，
-   * 但**不一致的代价更大**，所以先保证一致）。
-   */
-  /*
-   * ⚠️⚠️ **改用共享实现**（2026-10-14）。
-   *
-   * 原来这里是"账本 vs 交易所"判据的**第三个副本**，而且它漏了
-   * `incomeReadFailed` 那道判据（那时 `exchangeNet` 是残缺读数）。
-   *
-   * 用户报「你做事情只做一半？？」的直接原因就是这一类复制：
-   * 我修了机器人列表页两处，首页这一处没修。
-   * 现在判据只有一份（`lib/fleetTotals.ts`），**改一处即三处生效**。
-   *
-   * ⚠️ 2026-10-15 又加了一道：**模拟盘不校准**（那时 exchangeNet 恒为 0）。
-   * 所以 `dryRun` 也要一路传下去。
-   */
-  const dryRunOf = (id: number): boolean | null | undefined => statsMap[id]?.dryRun;
+  /** 全舰队都是模拟盘（没有实盘账户）时，总览展示模拟盘合计与模拟曲线，而不是全 0。 */
+  const paperOnlyFleet = fleet.accounts.length === 0 && fleet.paper.traderCount > 0;
+
+  const merged = mergeEquityCurves([
+    paperOnlyFleet
+      ? paperEquityContributor(traders, equitySnapshots, dryRunById)
+      : accountEquityContributor(traders, equitySnapshots, dryRunById),
+  ]);
+  const firstReading = merged.findIndex((point) => point.equity > 0);
+  const curve = firstReading === -1 ? [] : merged.slice(firstReading);
 
   const equityOf = (trader: TraderRow): number =>
     attributedEquityOf(trader, statsMap[trader.id], dryRunOf(trader.id));
 
-  const accountEquity = fleet.accountEquityFleet;
-  const committedCapital = fleet.committedCapitalFleet;
-  const totalReturnPercent = fleet.accountReturnPercent;
-  const totalOpen = fleet.openPositionsFleet;
-  const unrealized = fleet.unrealizedPnlFleet;
-  /*
-   * Σ 各机器人自己的净已实现盈亏 —— 这一项本来就是可加的。
-   *
-   * ⚠️ `fleet.realizedPnlFleet` 现在**已经按交易所校准过**（在 `fleetTotals`
-   * 里逐机器人调 `realizedPnlOf`）。所以这里直接用，不要再减一次：
-   * ```
-   *   #10 校准前 +5.66（坏账本）· 校准后 -7.00（交易所）· 差 12.6
-   * ```
-   */
-  const realizedPnl = fleet.realizedPnlFleet;
-  const withStats = fleet.tradersWithStats;
-  /* 统计加载态**不再在界面上写字**（见页头那段注释）：缺统计的行显示 `—` 即可。 */
+  const realizedOf = (trader: TraderRow): number =>
+    realizedPnlOf(trader, statsMap[trader.id], dryRunOf(trader.id));
+
+  const accountEquity = paperOnlyFleet ? fleet.paper.equity : fleet.accountEquityFleet;
+  const committedCapital = paperOnlyFleet ? fleet.paper.capital : fleet.committedCapitalFleet;
+  const totalReturnPercent = paperOnlyFleet ? fleet.paper.returnPercent : fleet.accountReturnPercent;
+  const totalOpen = paperOnlyFleet ? fleet.paper.openPositions : fleet.openPositionsFleet;
+  const unrealized = paperOnlyFleet ? fleet.paper.unrealizedPnl : fleet.unrealizedPnlFleet;
+  const realizedPnl = paperOnlyFleet ? fleet.paper.realizedPnl : fleet.realizedPnlFleet;
+  const withStats = paperOnlyFleet ? fleet.paper.tradersWithStats : fleet.tradersWithStats;
   const accountCount = fleet.accounts.length;
 
-  /*
-   * Closed-trade counts are **summed, never divided**: `wins` / `losses` are real
-   * counts and `winRatePercent` is a server figure. Deriving an account-level
-   * rate from the two counts would be inventing a number the API never returned,
-   * so the rail shows the counts themselves (hard rule in the task brief).
-   */
-  const totalWins = fleet.winsFleet;
-  const totalLosses = fleet.lossesFleet;
+  const totalWins = paperOnlyFleet ? fleet.paper.wins : fleet.winsFleet;
+  const totalLosses = paperOnlyFleet ? fleet.paper.losses : fleet.lossesFleet;
 
-  /**
-   * Start of the selected window, plus whether that start is really the start of
-   * the window or merely the oldest snapshot there is.
-   *
-   * `windowStartValue` comes off the same curve that is drawn, so the change shown
-   * in the rail and the shape of the curve can never disagree. When the window
-   * holds fewer than two points it falls back to the earliest recorded value — and
-   * the label has to say so, otherwise a young account's whole history gets
-   * presented as "今日盈亏". `null` means there is nothing recorded at all, in
-   * which case the page says that instead of printing an invented 0.
-   */
-  const dayStart = Date.now() - rangeSpanMs('1D');
-  const inDay = curve.find((point) => point.t >= dayStart);
+  const RANGE_COPY: Record<EquityRange, { label: string; coveredSub: string; partialSub: string }> = {
+    '1D': { label: '近 24 小时', coveredSub: '24 小时', partialSub: '自最早快照' },
+    '7D': { label: '近 7 天', coveredSub: '7 天', partialSub: '自最早快照' },
+    '1M': { label: '近 30 天', coveredSub: '30 天', partialSub: '自最早快照' },
+    '3M': { label: '近 90 天', coveredSub: '90 天', partialSub: '自最早快照' },
+    ALL: { label: '累计变化', coveredSub: '全部区间', partialSub: '全部区间' },
+  };
+  const selectedSpan = rangeSpanMs(range);
   const windowStartValue = (() => {
-    const span = rangeSpanMs(range);
-    if (!Number.isFinite(span) || curve.length === 0) return curve[0]?.equity ?? null;
-    const cutoff = Date.now() - span;
+    if (!Number.isFinite(selectedSpan) || curve.length === 0) return curve[0]?.equity ?? null;
+    const cutoff = Date.now() - selectedSpan;
     return curve.find((point) => point.t >= cutoff)?.equity ?? curve[0]?.equity ?? null;
   })();
   const equityChange = windowStartValue === null ? null : accountEquity - windowStartValue;
@@ -327,8 +281,14 @@ export function OverviewPage() {
     windowStartValue !== null && windowStartValue !== 0 && equityChange !== null
       ? (equityChange / Math.abs(windowStartValue)) * 100
       : null;
-  /** The 24h window is genuinely covered, so the figure can be called 今日. */
-  const has24hCoverage = inDay !== undefined && inDay.t <= dayStart + 5 * 60_000;
+  /** 所选周期是否被快照完整覆盖（`ALL` 有点即覆盖；其余检查首点是否早于窗口起点 + 5m 容差）。 */
+  const hasRangeCoverage =
+    range === 'ALL'
+      ? curve.length > 0
+      : Number.isFinite(selectedSpan) &&
+        curve.length > 0 &&
+        (curve[0]?.t ?? Number.POSITIVE_INFINITY) <= Date.now() - selectedSpan + 5 * 60_000;
+  const rangeCopy = RANGE_COPY[range];
 
   /*
    * Only the traders actually rendered, and only the running ones.
@@ -351,7 +311,7 @@ export function OverviewPage() {
     setActionError(null);
     try {
       await api.stopTrader(trader.id);
-      await tradersQuery.reload();
+      tradersQuery.reload();
       refreshSystem();
     } catch (err) {
       setActionError((err as Error).message);
@@ -359,6 +319,15 @@ export function OverviewPage() {
       setBusyId(null);
     }
   };
+
+  const startTimersRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    const timers = startTimersRef.current;
+    return () => {
+      for (const id of timers) window.clearTimeout(id);
+      timers.clear();
+    };
+  }, []);
 
   /**
    * **启动 = 点击即启动**（用户 2026-11-10：「点启动以后直接就运行，而不是又弹一个框」）。
@@ -378,13 +347,15 @@ export function OverviewPage() {
             (blocking.map((check) => check.name).join('、') || result.error || '启动被拒绝。'),
         );
       }
-      await tradersQuery.reload();
+      tradersQuery.reload();
       refreshSystem();
-      /* 异步启动（stopped → starting → running）：1.5 秒后再对齐一次。 */
-      window.setTimeout(() => {
+      /* 异步启动（stopped → starting → running）：1.5 秒后再对齐一次（卸载时自动清理）。 */
+      const timerId = window.setTimeout(() => {
+        startTimersRef.current.delete(timerId);
         void tradersQuery.reload();
         refreshSystem();
       }, 1500);
+      startTimersRef.current.add(timerId);
     } catch (err) {
       setActionError((err as Error).message);
     } finally {
@@ -427,57 +398,56 @@ export function OverviewPage() {
    */
   const rail = (
     <div className="grid grid-cols-1 gap-4 rounded-lg border border-base-750 bg-base-900 p-3 sm:grid-cols-2 xl:grid-cols-1">
-      <MetricGroup title="账户" columns={2}>
+      <MetricGroup title={paperOnlyFleet ? '模拟盘' : '账户'} columns={2}>
         <Metric
-          label={`${BALANCE_LABEL.equity}合计`}
+          label={paperOnlyFleet ? '模拟权益合计' : `${BALANCE_LABEL.equity}合计`}
           size="lg"
           tone="strong"
-          value={accountCount > 0 ? fmtAsset(accountEquity, 'USDT', 2) : '—'}
-          sub={accountCount > 0 ? `按账户口径 · ${fmtInt(accountCount)} 个账户` : '还没有交易所账户'}
-          title={`所有交易所账户（共享钱包）的${BALANCE_LABEL.equity}之和 —— 每个账户只算一次。共用同一个账户的机器人读的是同一个钱包，所以它们的「归属权益」不能相加：实盘实测三个机器人 Σ归属权益 30.6690、Σ初始权益 30.2316，而账户里只有 10.4180，其中 19.81 是被数了三遍的同一笔本金。各机器人自己挣了多少见下表「归属权益」列，单个账户的钱见「交易所」页。`}
+          value={accountCount > 0 || paperOnlyFleet ? fmtAsset(accountEquity, 'USDT', 2) : '—'}
+          sub={
+            paperOnlyFleet
+              ? `模拟盘口径 · ${fmtInt(fleet.paper.traderCount)} 台机器人`
+              : accountCount > 0
+                ? `按账户口径 · ${fmtInt(accountCount)} 个账户${fleet.paper.traderCount > 0 ? `（另 ${fmtInt(fleet.paper.traderCount)} 台模拟）` : ''}`
+                : '还没有交易所账户'
+          }
+          title={
+            paperOnlyFleet
+              ? '当前仅有模拟盘机器人：此处为各模拟盘本地模拟权益之和（与真实钱包无关）。接入实盘账户后将自动切回实盘账户口径。'
+              : `所有实盘交易所账户（共享钱包）的${BALANCE_LABEL.equity}之和 —— 每个账户只算一次，模拟盘不混入。各机器人自己挣了多少见下表「归属权益」列，单个账户的钱见「交易所」页。`
+          }
         />
 
         <Metric
           label="累计净盈亏"
           tone={pnlTone(realizedPnl)}
           value={fmtUsdSigned(realizedPnl, 2)}
-          sub="各机器人自己的净额之和"
-          title="Σ(每个机器人自己的已平仓净盈亏)，净 = 毛 − 手续费 − 资金费。这一项可以相加：每个机器人只认自己挂过的订单对应的回合（归属闸门），共享账户不会让它重复计入别人的盈亏。它不含持仓浮盈。"
+          sub={paperOnlyFleet ? '各模拟盘净额之和' : '各实盘机器人净额之和'}
+          title="Σ(各机器人自己的已平仓净盈亏)，净 = 毛 − 手续费 − 资金费。它不含持仓浮盈。"
         />
 
         <Metric
-          /*
-           * ⚠️ **不叫「今日盈亏」。**
-           *
-           * 这张卡显示的是**所选窗口**内的变化，而 `range = '1D'` 是
-           * **滚动 24 小时**（`Date.now() - 24h`），不是自然日。
-           *
-           * 原来它写着「今日盈亏」，于是北京时间凌晨打开这一页时，
-           * 这个数字覆盖的是「昨天大半天 + 今天凌晨」—— 名字和内容对不上。
-           * 操作员问"今天赚了多少"，得到的是另一段时间的答案。
-           *
-           * 机器人详情页那张「今日盈亏」已经改成**北京时间自然日**；
-           * 这张是区间卡（1D / 7D / 30D / ALL 可切），所以它的 1D 就该
-           * 老老实实叫「近 24 小时」—— **一个会随窗口变化的数字，
-           * 不该顶着一个固定时间范围的名字。**
-           */
-          label={has24hCoverage ? `近 ${range}` : '区间盈亏'}
+          label={range === 'ALL' ? rangeCopy.label : hasRangeCoverage ? rangeCopy.label : '区间盈亏'}
           tone={equityChange === null ? 'default' : pnlTone(equityChange)}
           value={equityChange === null ? '—' : fmtUsdSigned(equityChange, 2)}
           sub={
             equityChangePercent === null
               ? '还没有权益快照'
-              : `${has24hCoverage ? '24 小时' : `较${range === 'ALL' ? '起始' : `近 ${range}`}`} · ${fmtPercent(equityChangePercent)}`
+              : `${hasRangeCoverage ? rangeCopy.coveredSub : rangeCopy.partialSub} · ${fmtPercent(equityChangePercent)}`
           }
-          title="账户权益（账户口径）在窗口内的变化，含已实现与浮动盈亏；入金/出金同样会推动它 —— 它说的是「账户里的钱怎么变」，策略自己赚的那部分看「累计净盈亏」。快照不足所选窗口时改显示自最早一条快照以来的变化。（这里按滚动窗口算，不是自然日 —— 自然日的「今日盈亏」在机器人详情页。）"
+          title="所选时间窗口内的权益变化，含已实现与浮动盈亏。快照不足所选窗口时显示自最早一条快照以来的变化（自然日的「今日盈亏」在机器人详情页）。"
         />
 
         <Metric
-          label="总收益率（账户口径）"
+          label={paperOnlyFleet ? '总收益率（模拟口径）' : '总收益率（账户口径）'}
           tone={committedCapital > 0 ? pnlTone(totalReturnPercent) : 'default'}
           value={committedCapital > 0 ? fmtPercent(totalReturnPercent) : '—'}
-          sub={`初始投入 ${fmtUsd(committedCapital, 2)}`}
-          title="（账户权益合计 − 账户起始资金）÷ 账户起始资金。本金按账户算：共享账户取该账户被接入时的起始资金（最早那个机器人建号时从交易所读到的钱包余额），不是各机器人 initialEquity 之和 —— 后者在同一账户下会把同一笔本金数很多遍（实测 Σ初始权益 30.2316 vs 账户里 10.4180，多算 19.81 USDT）。各机器人自己的收益率见下表。入金/出金也计入本比率。"
+          sub={`${paperOnlyFleet ? '模拟本金' : '初始投入'} ${fmtUsd(committedCapital, 2)}`}
+          title={
+            paperOnlyFleet
+              ? '（模拟权益合计 − 模拟本金之和）÷ 模拟本金之和。'
+              : '（实盘账户权益合计 − 账户起始资金）÷ 账户起始资金。本金按账户去重计算，模拟盘不混入。'
+          }
         />
       </MetricGroup>
 
@@ -592,7 +562,7 @@ export function OverviewPage() {
         {/* ---------------------------------------------------------------- */}
         <section aria-labelledby="overview-equity">
           <SectionLabel
-            title={`${BALANCE_LABEL.equity}曲线`}
+            title={paperOnlyFleet ? '模拟权益曲线' : `${BALANCE_LABEL.equity}曲线`}
             actions={
               <div role="group" aria-label="曲线时间范围" className="flex items-center gap-1">
                 {EQUITY_RANGES.map((item) => (
@@ -641,7 +611,7 @@ export function OverviewPage() {
                   range={range}
                   height={CHART_HEIGHT}
                   baseline={committedCapital > 0 ? committedCapital : undefined}
-                  primaryLabel={BALANCE_LABEL.equity}
+                  primaryLabel={paperOnlyFleet ? '模拟权益' : BALANCE_LABEL.equity}
                 />
               </Suspense>
             </Panel>
@@ -701,6 +671,7 @@ export function OverviewPage() {
               liveStatus={liveStatus}
               fleet={fleet}
               equityOf={equityOf}
+              realizedOf={realizedOf}
               recentTrades={recentTrades}
               busyId={busyId}
               navigate={navigate}

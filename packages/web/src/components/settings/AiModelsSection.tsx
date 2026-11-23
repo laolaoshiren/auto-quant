@@ -435,9 +435,28 @@ export function AiModelsSection() {
   const shown = filtered.slice(0, rowLimit);
   const remaining = filtered.length - shown.length;
 
+  /**
+   * 预计算每行的最终测试/健康结果：
+   *   1. 顶部汇总复用同一份（含持久化 `row.health`），刷新页面不会回落成「从未测试」；
+   *   2. 引用稳定，避免每次渲染创建新对象破坏 `ModelRow` 的 `memo`。
+   */
+  const resolvedResults = useMemo(() => {
+    const map: Record<number, (ModelTestResult & { at: number }) | undefined> = {};
+    for (const row of models) {
+      map[row.id] = testResult[row.id] ?? healthToResult(row.health);
+    }
+    return map;
+  }, [models, testResult]);
+
   /** 最近测试汇总：让"哪些能连上"在表头就能读出来，不用逐行看。 */
-  const testedRows = models.filter((row) => testResult[row.id]);
-  const testedOk = testedRows.filter((row) => testResult[row.id]?.ok).length;
+  const testedRows = useMemo(
+    () => models.filter((row) => resolvedResults[row.id] !== undefined),
+    [models, resolvedResults],
+  );
+  const testedOk = useMemo(
+    () => testedRows.filter((row) => resolvedResults[row.id]?.ok).length,
+    [testedRows, resolvedResults],
+  );
 
   /* --- dialogs ----------------------------------------------------------- */
 
@@ -620,6 +639,7 @@ export function AiModelsSection() {
     try {
       await api.setDefaultAiModel(row.id);
       setDefaultIdOverride(row.id);
+      void useApp.getState().loadCatalog();
     } catch (err) {
       setError((err as Error).message);
     }
@@ -869,7 +889,7 @@ export function AiModelsSection() {
                           row={row}
                           providerLabel={providerById.get(row.provider)?.label ?? row.provider}
                           defaults={providerById.get(row.provider)?.defaults}
-                          result={testResult[row.id] ?? healthToResult(row.health)}
+                          result={resolvedResults[row.id]}
                           testing={testingId === row.id}
                           removing={removingId === row.id}
                           isDefault={row.id === (defaultIdOverride ?? catalog?.defaultAiModelId ?? null)}

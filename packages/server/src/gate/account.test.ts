@@ -83,6 +83,27 @@ test('★★★ 持仓映射：张数 × quanto_multiplier = 币数，符号位�
   assert.ok(short);
   assert.equal(short.quantity, 0.02);
   assert.equal(short.side, 'short');
+  assert.equal(short.marginType, 'isolated');
+});
+
+test('★★★ Gate 全仓持仓（leverage="0"）必须读 cross_leverage_limit 且 marginType=cross', () => {
+  const crossPos = mapPosition(
+    {
+      contract: 'BTC_USDT',
+      size: '100',
+      entry_price: '70000',
+      mark_price: '70700',
+      leverage: '0',
+      cross_leverage_limit: '10',
+      unrealised_pnl: '7',
+    },
+    BTC,
+  );
+  assert.ok(crossPos);
+  assert.equal(crossPos.leverage, 10, '全仓 leverage="0" 不得退化为 1x');
+  assert.equal(crossPos.marginType, 'cross');
+  assert.ok(Math.abs(crossPos.marginUsed - 70.7) < 1e-6);
+  assert.ok(Math.abs(crossPos.unrealizedPnlPercent - (7 / 70.7) * 100) < 1e-6);
 });
 
 test('★ 平掉的仓位（size=0 / contract 空）不映射 —— 否则界面出现 0 数量持仓', () => {

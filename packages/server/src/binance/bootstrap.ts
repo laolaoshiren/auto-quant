@@ -371,14 +371,31 @@ export async function preflight(
   /* --- Position mode ---------------------------------------------------- */
   try {
     const hedge = await connection.broker.isHedgeMode();
-    const positions = await connection.broker.getPositions();
-    const cannotSwitch = hedge && positions.length > 0;
+    /*
+     * ⚠️ **dryRun 模式下 `broker.getPositions()` 会短路返回 `[]`（2026-11-23 修复）**。
+     * 测试连接或以只读 dryRun 建连跑 `preflight({ requireCredentials: true })` 时，
+     * 必须直接通过只读 `/fapi/v2/positionRisk` 核查交易所是否真有持仓，否则双向持仓+有仓位
+     * 会被误报 OK，直到实际启动实盘才失败。
+     */
+    let openPositionCount = 0;
+    if (connection.broker.isDryRun && connection.rest.hasCredentials) {
+      const rows = await connection.rest.signedRequest<Array<{ positionAmt?: string }>>(
+        'GET',
+        '/fapi/v2/positionRisk',
+      );
+      openPositionCount = Array.isArray(rows)
+        ? rows.filter((r) => Math.abs(Number(r.positionAmt) || 0) > 0).length
+        : 0;
+    } else {
+      openPositionCount = (await connection.broker.getPositions()).length;
+    }
+    const cannotSwitch = hedge && openPositionCount > 0;
     checks.push(
       check(
         '持仓模式',
         cannotSwitch ? 'error' : 'ok',
         hedge
-          ? positions.length === 0
+          ? openPositionCount === 0
             ? '账户当前是双向持仓模式，启动时将自动切换为单向持仓模式。'
             : '账户处于双向持仓模式但已有持仓，无法切换。请先清空所有持仓后重试。'
           : '账户处于单向持仓模式。',

@@ -20,7 +20,7 @@ export const EXCHANGES: ReadonlyArray<{
   available: boolean;
 }> = [
   { id: 'binance', label: '币安 USDT 本位合约', market: 'USDT 永续合约', available: true },
-  { id: 'gate', label: 'Gate.io USDT 本位合约', market: 'USDT 永续合约（Gate API v4）', available: false },
+  { id: 'gate', label: 'Gate.io USDT 本位合约', market: 'USDT 永续合约（Gate API v4）', available: true },
 ];
 
 /* -------------------------------------------------------------------------- */

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Brain,
@@ -49,11 +49,11 @@ import { MoneyBadge } from './overviewParts';
 import {
   DEFAULT_SETTLE_ASSET,
   fmtAsset,
-  fmtCompact,
   fmtDateTime,
   fmtInt,
   fmtNum,
   fmtPercent,
+  fmtPriceUsd,
   fmtProfitFactor,
   fmtUsd,
   fmtUsdSigned,
@@ -720,24 +720,19 @@ export function TraderPage() {
    */
   const ledger = trader?.ledger ?? null;
   /*
-   * ⚠️⚠️ **模拟盘不能拿交易所口径校准**（2026-10-15 用户实测抓到）
+   * ⚠️⚠️ **必须用 `isPaperView()` 的三级回落，不能只读 `stats.dryRun`**
+   *      （2026-10-21 曲线口径修过一次；2026-11-23 `ledgerSuspect` 与「今日盈亏」同步收口）
    *
-   * 用户报（`#11`，模拟盘）：
-   * ```
-   *   历史成交区：25 笔 · 净额 −$0.58 · 6 盈 / 19 亏   ✅ 有数据
-   *   胜率卡：    31.3% · 32 笔已平仓                   ✅ 有数据
-   *   交易盈亏卡：$0.00                                  ❌ 空的
-   * ```
-   * 根因：`SimulatedExchange.getIncome()` **返回空数组**（回放里不存在资金费
-   * 结算），于是 `exchangeNet = 0`、`gap = platformNet − 0` **恒等于账本自身**
-   * → `|gap| ≥ 0.01` 必然成立 → 判定"账本可疑" → 把 realized 换成 `exchangeNet = 0`。
-   *
-   * **那不是"账本坏了"，而是"模拟盘根本没有交易接口的流水"** ——
-   * 用一个不存在的口径去校准，等于把正确的账本替换成 0。
-   *
-   * 判据走共享实现（`isLedgerSuspect` 现在收 `dryRun`），与列表页/首页同一份。
+   * 机器人停止时 `stats?.dryRun` 为 `null` —— 只传 `stats?.dryRun` 会让停机后的模拟盘
+   * 被当成实盘，拿恒为 0 的 `exchangeNet` 校准，把历史盈亏静默清零。
+   * 统一走 `isPaperView()` 三级回落（运行时 → 持久化 `trader.dryRun` → 进程级 `system.dryRun`）。
    */
-  const ledgerSuspect = isLedgerSuspect(ledger, stats?.dryRun);
+  const isDryRun = isPaperView({
+    runtimeDryRun: stats?.dryRun,
+    persistedDryRun: trader?.dryRun,
+    processDryRun: system?.dryRun,
+  });
+  const ledgerSuspect = isLedgerSuspect(ledger, isDryRun);
   const realized = ledgerSuspect ? ledger!.exchangeNet : (stats?.realizedPnl ?? 0);
   /*
    * ⚠️ **卡片上那个"总盈亏"必须与下面的权益曲线同口径 —— 含浮盈。**
@@ -828,37 +823,36 @@ export function TraderPage() {
       else break;
     }
     /*
+     * 模拟盘走归属权益 `s.equity`；实盘按 `s.accountEquity > 0 ? s.accountEquity : s.equity`
+     * （避免 `0 ?? s.equity` 取到 0 把总余额整笔算成今日盈利）。
+     */
+    const pick = (s: EquitySnapshot): number =>
+      isDryRun ? s.equity : s.accountEquity > 0 ? s.accountEquity : s.equity;
+    /*
      * `before` 存在 ⇒ 基准真的落在日界之前，覆盖完整。
      * 否则用最早那条（机器人今天才启动），此时**不能**叫它"今日"。
      */
     return before
-      ? { equity: before.accountEquity ?? before.equity, full: true }
+      ? { equity: pick(before), full: true }
       : snapshots[0]
-        ? { equity: snapshots[0].accountEquity ?? snapshots[0].equity, full: false }
+        ? { equity: pick(snapshots[0]), full: false }
         : undefined;
-  }, [snapshots]);
+  }, [snapshots, isDryRun]);
 
   /*
-   * 当日盈亏用**校准后**的权益（与卡片主数字同源）。
-   *
-   * 日界基线是历史快照里的账本权益，它无法回溯校准（那时没有 gap 读数），
-   * 所以这一项仍带一点账本误差 —— 但比"当前也用账本"要小，而且
-   * **至少与上面的「交易盈亏」不会只差一个 gap**。
-   */
-  /*
-   * 当前端取**实时**账户权益（60 秒轮询），与基线的快照口径同为"账户权益"。
-   *
-   * 独立验收 2026-10-07 指出：上一版当前端取**最新快照**的 `account_equity`，
-   * 而本机器人快照间隔实测 4.9–12.1 分钟，同卡「交易盈亏」的浮盈却是 60 秒轮询的
-   * 实时值 —— 于是"今日盈亏 − 交易盈亏"只在那一个瞬间是常数、周期内随行情漂移
-   * （13.9 张 ORCA 动 1% ≈ 0.4，比 1.17 还大）。**那是换口径换出来的新问题。**
+   * 当日盈亏：模拟盘走 `calibratedEquity`（与「交易盈亏」和曲线同源）；
+   * 实盘优先实时账户权益，其次末条快照的 `accountEquity > 0`，最后回落 `calibratedEquity`。
    */
   const liveAccountEquity = num(accountQuery.data?.account?.equity);
-  const todayPnl =
-    todayBaseline === undefined
-      ? 0
-      : (liveAccountEquity ?? snapshots[snapshots.length - 1]?.accountEquity ?? calibratedEquity) -
-        todayBaseline.equity;
+  const latestSnapshotForToday = snapshots[snapshots.length - 1];
+  const todayCurrentEquity = isDryRun
+    ? calibratedEquity
+    : (liveAccountEquity ??
+      (latestSnapshotForToday && latestSnapshotForToday.accountEquity > 0
+        ? latestSnapshotForToday.accountEquity
+        : undefined) ??
+      calibratedEquity);
+  const todayPnl = todayBaseline === undefined ? 0 : todayCurrentEquity - todayBaseline.equity;
 
   /*
    * 图表与缩略条共用同一份"可见区间"数据。
@@ -959,11 +953,7 @@ export function TraderPage() {
    * 那与下面 `paper=` prop 用的是同一个函数 —— **同一屏上的同一个概念
    * 只能有一个实现**（本文件自己的纪律）。
    */
-  const isDryRun = isPaperView({
-    runtimeDryRun: stats?.dryRun,
-    persistedDryRun: trader?.dryRun,
-    processDryRun: system?.dryRun,
-  });
+  /* `isDryRun` 已在上方通过 `isPaperView()` 三级回落算好，曲线与卡片共用同一个布尔值。 */
   const curveMetric: 'account' | 'attributed' = isDryRun ? 'attributed' : 'account';
   const windowAccountFirst = windowed[0]?.accountEquity ?? 0;
   /*
@@ -1027,6 +1017,17 @@ export function TraderPage() {
    * 运行模式在创建机器人时已固定，启动弹窗已删除 —— 没有可选项可看，
    * 预检失败用行内 `actionError` 展示，比"必须先点开弹窗"更直接。
    */
+  const startFollowupTimerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (startFollowupTimerRef.current !== null) {
+        window.clearTimeout(startFollowupTimerRef.current);
+        startFollowupTimerRef.current = null;
+      }
+    },
+    [],
+  );
+
   const startNow = async () => {
     if (!trader) return;
     setBusy(true);
@@ -1039,12 +1040,17 @@ export function TraderPage() {
           '未通过预检：' + (blocking.map((check) => check.name).join('、') || result.error || '启动被拒绝。'),
         );
       }
-      await tradersQuery.reload();
+      tradersQuery.reload();
       void fetchStats(trader.id);
-      /* 异步启动（stopped → starting → running）：1.5 秒后再对齐一次状态。 */
-      window.setTimeout(() => {
+      /* 异步启动（stopped → starting → running）：1.5 秒后再对齐一次状态（卸载时自动清理）。 */
+      if (startFollowupTimerRef.current !== null) {
+        window.clearTimeout(startFollowupTimerRef.current);
+      }
+      const targetId = trader.id;
+      startFollowupTimerRef.current = window.setTimeout(() => {
+        startFollowupTimerRef.current = null;
         void tradersQuery.reload();
-        void fetchStats(trader.id);
+        void fetchStats(targetId);
       }, 1500);
     } catch (err) {
       setActionError((err as Error).message);
@@ -1059,7 +1065,7 @@ export function TraderPage() {
     setActionError(null);
     try {
       await api.stopTrader(trader.id);
-      await tradersQuery.reload();
+      tradersQuery.reload();
       void fetchStats(trader.id);
     } catch (err) {
       setActionError((err as Error).message);
@@ -1287,7 +1293,7 @@ export function TraderPage() {
    * 它就是 `初始权益 + realized + unrealized`，与列表页「归属权益」逐字相等。
    * 重算一份等于又埋一个"两处各算一遍"的坑（本项目为此吃过四次亏）。
    */
-  const useSimulatedBalance = isDryRun && stats !== undefined;
+  const useSimulatedBalance = isDryRun && stats !== null;
   /*
    * 「保证金占用」与「可用余额」这两个数字的判定 —— 见 `lib/accountDisplay.ts`
    * 里那段"空仓时该显示什么"的说明（用户 2026-10-04 报的两个 BUG 其实是同一个）。
@@ -2262,7 +2268,7 @@ export function TraderPage() {
                       ? `仅 ${fmtInt(windowed.length)} 个快照，连不成曲线`
                       : '这段区间内权益几乎没变化'
                 }
-                onExpand={() => setChartOverride(true)}
+                onExpand={() => setChartOverride(false)}
               />
             ) : (
               <div className="px-3 pb-2 pt-2">
@@ -2454,6 +2460,9 @@ export function TraderPage() {
               .traderPositions(traderId)
               .then((rows) => setLivePositions(traderId, rows))
               .catch(() => undefined);
+            void accountQuery.reload();
+            void positionsQuery.reload();
+            void fetchStats(traderId);
             // 图表盯着的那个币种可能已经被平掉了 —— 回到"跟随持仓"。
             setPickedSymbol(undefined);
           }}
@@ -2730,7 +2739,7 @@ function CandlesPanel({ symbol, height }: { symbol?: string; height: number }) {
     <div className="p-3">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="text-base font-semibold text-ink-hi">{symbol}</span>
-        {last && <span className="num text-base text-ink-mid">{fmtCompact(last.close)}</span>}
+        {last && <span className="num text-base text-ink-mid">{fmtPriceUsd(last.close)}</span>}
         <span className="ml-auto flex flex-wrap items-center gap-1">
           {['5m', '15m', '1h', '4h'].map((value) => (
             <Button

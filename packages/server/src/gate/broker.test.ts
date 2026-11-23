@@ -52,12 +52,25 @@ test('订单映射：市价单（price=0）→ MARKET + IOC；已成交 → FILL
   assert.equal(raw.avgPrice, '70100');
 });
 
-test('订单映射：部分成交 → PARTIALLY_FILLED；已撤 → CANCELED', () => {
+test('订单映射：部分成交 → PARTIALLY_FILLED；已撤（status=cancelled 或 status=finished+finish_as=cancelled/ioc）→ CANCELED', () => {
   assert.equal(gateOrderToBinanceResponse({ ...limitOrder, left: 40 }, BTC).status, 'PARTIALLY_FILLED');
   assert.equal(gateOrderToBinanceResponse({ ...limitOrder, status: 'cancelled' }, BTC).status, 'CANCELED');
+  /* Gate v4 真实撤单与 IOC 未成交均返回 status="finished" + finish_as="cancelled"/"ioc"。 */
+  assert.equal(
+    gateOrderToBinanceResponse({ ...limitOrder, status: 'finished', finish_as: 'cancelled', left: 100 }, BTC).status,
+    'CANCELED',
+  );
+  assert.equal(
+    gateOrderToBinanceResponse({ ...limitOrder, price: '0', status: 'finished', finish_as: 'ioc', left: 100 }, BTC).status,
+    'CANCELED',
+  );
+  assert.equal(
+    gateOrderToBinanceResponse({ ...limitOrder, status: 'finished', finish_as: 'liquidated', left: 100 }, BTC).status,
+    'EXPIRED',
+  );
 });
 
-test('★ 条件单映射：触发价进 triggerPrice，close 语义进 closePosition', () => {
+test('★ 条件单映射：触发价进 triggerPrice，close 语义进 closePosition，状态为合法 BinanceAlgoStatus', () => {
   const algo: GateFuturesOrder = {
     ...limitOrder,
     id: 777,
@@ -76,8 +89,55 @@ test('★ 条件单映射：触发价进 triggerPrice，close 语义进 closePos
   assert.equal(raw.triggerPrice, '73650');
   assert.equal(raw.closePosition, true);
   assert.equal(raw.quantity, '0.01');
-  assert.equal(raw.algoStatus, 'WORKING');
+  assert.equal(raw.algoStatus, 'NEW', '必须用合法 BinanceAlgoStatus NEW，不再强转非法的 WORKING');
   assert.equal(raw.actualOrderId, undefined);
+
+  /* Gate 条件单撤销后 status="finished" + finish_as="cancelled" → 单 L 的 CANCELED。 */
+  const cancelledAlgo = gatePriceOrderToAlgoResponse(
+    { ...algo, status: 'finished', finish_as: 'cancelled', finish_time: '1700000100' },
+    BTC,
+  );
+  assert.equal(cancelledAlgo.algoStatus, 'CANCELED');
+  assert.equal(cancelledAlgo.actualOrderId, undefined, '撤销的条件单不得填 actualOrderId');
+
+  const expiredAlgo = gatePriceOrderToAlgoResponse({ ...algo, status: 'finished', finish_as: 'expired' }, BTC);
+  assert.equal(expiredAlgo.algoStatus, 'EXPIRED');
+  const failedAlgo = gatePriceOrderToAlgoResponse({ ...algo, status: 'finished', finish_as: 'failed' }, BTC);
+  assert.equal(failedAlgo.algoStatus, 'REJECTED');
+});
+
+test('★★★ 条件单重启无状态恢复：按 initial.text 前缀区分止盈/止损，closePosition(size=0) 正确反推平空 BUY', () => {
+  const shortStop: GateFuturesOrder = {
+    id: 881,
+    contract: '',
+    size: 0,
+    left: 0,
+    price: '0',
+    status: 'open',
+    create_time: '1700000000',
+    initial: { contract: 'BTC_USDT', size: 0, price: '0', tif: 'ioc', reduce_only: false, close: true, text: 't-sl-abc123' },
+    trigger: { price: '75000', rule: 1 },
+  };
+  const shortTp: GateFuturesOrder = {
+    id: 882,
+    contract: '',
+    size: 0,
+    left: 0,
+    price: '0',
+    status: 'open',
+    create_time: '1700000000',
+    initial: { contract: 'BTC_USDT', size: 0, price: '0', tif: 'ioc', reduce_only: false, close: true, text: 't-tp-abc123' },
+    trigger: { price: '68000', rule: 2 },
+  };
+  const stopMapped = gatePriceOrderToAlgoResponse(shortStop, BTC);
+  assert.equal(stopMapped.orderType, 'STOP_MARKET');
+  assert.equal(stopMapped.side, 'BUY', '空头止损 rule=1 + size=0 必须反推出 BUY');
+  assert.equal(stopMapped.clientAlgoId, 't-sl-abc123');
+
+  const tpMapped = gatePriceOrderToAlgoResponse(shortTp, BTC);
+  assert.equal(tpMapped.orderType, 'TAKE_PROFIT_MARKET', '重启无内存 Map 时仍须识别为止盈单，不可当成止损');
+  assert.equal(tpMapped.side, 'BUY', '空头止盈 rule=2 + size=0 必须反推出 BUY');
+  assert.equal(tpMapped.clientAlgoId, 't-tp-abc123');
 });
 
 test('★★★ 价格保护单响应：契约/数量/价格在 initial 嵌套里（顶层没有）', () => {
@@ -100,7 +160,7 @@ test('★★★ 价格保护单响应：契约/数量/价格在 initial 嵌套�
   assert.equal(raw.triggerPrice, '72466');
 });
 
-test('成交映射：方向、数量换算、手续费、时间（秒→毫秒）', () => {
+test('成交映射：方向、数量换算、手续费、时间（秒→毫秒）且 realizedPnl 留空串交由 roundTrips 按均价核算', () => {
   const trade = gateFillToUserTrade(
     { id: 5, create_time: 1700000100, contract: 'BTC_USDT', size: -50, price: '70000', fee: '0.35' },
     BTC,
@@ -110,12 +170,17 @@ test('成交映射：方向、数量换算、手续费、时间（秒→毫秒�
   assert.equal(trade.qty, '0.005');
   assert.equal(trade.commission, '0.35');
   assert.equal(trade.commissionAsset, 'USDT');
+  assert.equal(trade.realizedPnl, '', 'Gate 成交行不含 realizedPnl，必须留空串而非 "0" 以防覆写清零账本');
   assert.equal(trade.time, 1700000100000);
 });
 
-test('流水映射：funding/fee/realised_pnl → 币安 incomeType', () => {
-  assert.equal(gateBookToIncome({ time: 1, change: '-0.12', type: 'funding', contract: 'BTC_USDT' }).incomeType, 'FUNDING_FEE');
+test('★★★ 流水映射：Gate v4 官方枚举 fund→FUNDING_FEE / pnl→REALIZED_PNL / dnw→TRANSFER / fee→COMMISSION', () => {
+  assert.equal(gateBookToIncome({ time: 1, change: '-0.12', type: 'fund', contract: 'BTC_USDT' }).incomeType, 'FUNDING_FEE');
+  assert.equal(gateBookToIncome({ time: 1, change: '3.2', type: 'pnl', contract: 'BTC_USDT' }).incomeType, 'REALIZED_PNL');
+  assert.equal(gateBookToIncome({ time: 1, change: '100', type: 'dnw' }).incomeType, 'TRANSFER');
   assert.equal(gateBookToIncome({ time: 1, change: '-0.5', type: 'fee', contract: 'BTC_USDT' }).incomeType, 'COMMISSION');
+  /* 历史别名保持兼容 */
+  assert.equal(gateBookToIncome({ time: 1, change: '-0.12', type: 'funding', contract: 'BTC_USDT' }).incomeType, 'FUNDING_FEE');
   assert.equal(gateBookToIncome({ time: 1, change: '3.2', type: 'realised_pnl', contract: 'BTC_USDT' }).incomeType, 'REALIZED_PNL');
 });
 
@@ -328,20 +393,66 @@ test('★★★ GateBroker 必须满足 BrokerPort（否则 connection.broker �
   void broker;
 });
 
-test('★★ setLeverage 返回 { ok, leverage }，让交易循环能按实际杠杆缩小名义', async () => {
+test('★★ setLeverage 采用全仓 leverage=0 + cross_leverage_limit，并返回 { ok, leverage }', async () => {
   const calls: Array<{ path: string; params?: unknown }> = [];
   const rest = {
     signed: async (_method: string, path: string, options?: { params?: unknown }) => {
       calls.push({ path, ...(options === undefined ? {} : { params: options.params }) });
-      return { leverage: '8' };
+      return { leverage: '0', cross_leverage_limit: '8' };
     },
   } as unknown as ConstructorParameters<typeof GateBroker>[0];
   const broker = new GateBroker(rest, fakeContracts());
 
   const result = await broker.setLeverage('BTCUSDT', 10);
-  assert.deepEqual(result, { ok: true, leverage: 8 }, '必须回传交易所实际给的杠杆');
+  assert.deepEqual(result, { ok: true, leverage: 8 }, '必须回传交易所实际给的全仓杠杆上限');
   assert.equal(calls[0]!.path, '/futures/usdt/positions/BTC_USDT/leverage');
-  assert.deepEqual(calls[0]!.params, { leverage: '10' });
+  assert.deepEqual(calls[0]!.params, { leverage: '0', cross_leverage_limit: '10' });
+});
+
+test('★★★ getUserTrades 必须按时间升序返回（抵消 Gate my_trades 默认倒序）', async () => {
+  const rest = {
+    signed: async () => [
+      { id: 20, create_time: 1700000200, contract: 'BTC_USDT', size: -10, price: '71000', fee: '0.1' },
+      { id: 10, create_time: 1700000100, contract: 'BTC_USDT', size: 10, price: '70000', fee: '0.1' },
+    ],
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  const broker = new GateBroker(rest, fakeContracts());
+  const fills = await broker.getUserTrades('BTCUSDT', 20);
+  assert.equal(fills[0]!.id, 10);
+  assert.equal(fills[1]!.id, 20);
+});
+
+test('★★★ placeConditional 止盈单返回 TAKE_PROFIT_MARKET 且 trigger 用 strategy_type + price_type=1', async () => {
+  const { rest, calls } = fakeRest();
+  const broker = new GateBroker(rest, fakeContracts());
+  const placed = await broker.placeOrder({
+    symbol: 'BTCUSDT',
+    side: 'SELL',
+    type: 'TAKE_PROFIT_MARKET',
+    quantity: 0.01,
+    triggerPrice: 75000,
+    closePosition: true,
+    clientOrderId: 'tp-abc',
+  });
+  const body = calls[0]!.body as {
+    initial: { text: string };
+    trigger: { strategy_type: number; price_type: number };
+  };
+  assert.equal((placed.raw as { orderType: string }).orderType, 'TAKE_PROFIT_MARKET');
+  assert.ok(body.initial.text.startsWith('t-tp-'));
+  assert.equal(body.trigger.strategy_type, 0);
+  assert.equal(body.trigger.price_type, 1);
+});
+
+test('★★★ cancelOrder 失败返回 false；cancelAllOrders 失败必须抛错（对齐 BrokerPort 契约）', async () => {
+  const rest = {
+    signed: async () => {
+      throw new Error('HTTP 500 internal error');
+    },
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  const broker = new GateBroker(rest, fakeContracts());
+  assert.equal(await broker.cancelOrder('BTCUSDT', '1', 'order'), false);
+  await assert.rejects(() => broker.cancelAllOrders('BTCUSDT'));
 });
 
 test('★★ setLeverage 被交易所拒绝 → { ok:false, note }（本笔放弃，不拿未知杠杆开仓）', async () => {

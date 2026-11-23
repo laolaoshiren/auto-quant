@@ -193,23 +193,31 @@ export class GateRest {
     const bodyText = options.body === undefined ? '' : JSON.stringify(options.body);
     const url = `${this.baseUrl}${normalized}${query ? `?${query}` : ''}`;
 
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    if (bodyText !== '') headers['Content-Type'] = 'application/json';
-    if (options.signed) {
-      const timestamp = Math.floor(Date.now() / 1000);
-      headers.KEY = this.apiKey;
-      headers.Timestamp = String(timestamp);
-      headers.SIGN = gateSignature({
-        method,
-        url: `${this.apiPrefix}${normalized}`,
-        query,
-        body: bodyText,
-        timestamp,
-        secret: this.apiSecret,
-      });
-    }
+    const baseHeaders: Record<string, string> = { Accept: 'application/json' };
+    if (bodyText !== '') baseHeaders['Content-Type'] = 'application/json';
 
+    /*
+     * ⚠️ **签名必须在拿到并发槽之后、真正发出请求前计算**（2026-11-23 修复）。
+     *
+     * 原实现在 `this.gate.run()` 外面提前取 `Timestamp` 并计算 `SIGN`：
+     * 高并发下多个慢请求排队超过 60 秒时，出队时签名已经过期被 Gate 拒成
+     * `REQUEST_EXPIRED`。挪进队列内部后，每个请求发出前才生成实时时间戳。
+     */
     return this.gate.run(async () => {
+      const headers: Record<string, string> = { ...baseHeaders };
+      if (options.signed) {
+        const timestamp = Math.floor(Date.now() / 1000);
+        headers.KEY = this.apiKey;
+        headers.Timestamp = String(timestamp);
+        headers.SIGN = gateSignature({
+          method,
+          url: `${this.apiPrefix}${normalized}`,
+          query,
+          body: bodyText,
+          timestamp,
+          secret: this.apiSecret,
+        });
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       try {

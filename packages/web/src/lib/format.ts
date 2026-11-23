@@ -315,6 +315,32 @@ export function fmtPriceUsd(value: number | null | undefined): string {
 /** 旧的、名字里没有单位的价格格式化器 —— 保留给尚未迁移的调用处。 */
 export const fmtPrice = fmtPriceUsd;
 
+/**
+ * K 线纵轴与十字光标的价格格式化器。
+ *
+ * 与通用 `fmtPriceUsd` 类似，但对极低价币（如 `< 0.001` 的 PEPE / BTTC / SHIB）
+ * 动态计算前导零并至少保留 4 位有效数字（最多 12 位小数），避免固定 6 位小数把
+ * `0.00000042` 截成 `0.000000`；同时按绝对值选档位，避免十字光标移到负区时精度突变。
+ */
+export function formatCandlePrice(price: number): string {
+  if (!Number.isFinite(price)) return '—';
+  const abs = Math.abs(price);
+  const digits =
+    abs === 0
+      ? 2
+      : abs >= 1000
+        ? 2
+        : abs >= 1
+          ? 3
+          : abs >= 0.001
+            ? 6
+            : Math.min(12, Math.max(6, Math.floor(-Math.log10(abs)) + 4));
+  return price.toLocaleString('en-US', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+
 /** 仓位数量（币本位），不带单位后缀：单位是具体交易对的基础币。 */
 export function fmtQty(value: number | null | undefined): string {
   if (!isNum(value)) return '—';

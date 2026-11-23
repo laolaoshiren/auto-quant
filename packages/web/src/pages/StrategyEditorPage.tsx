@@ -408,7 +408,7 @@ export function StrategyEditorPage() {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
-        void saveRef.current();
+        void saveRef.current().catch(() => undefined);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -450,12 +450,30 @@ export function StrategyEditorPage() {
       setError(`预设“${preset.label}”无法应用：${(err as Error).message}`);
       return;
     }
+    /*
+     * 保留用户已有的非空名称与描述 —— `resolvePreset(preset)` 里的 `next.name` 是 schema 默认的
+     * `'Default strategy'`，直接写回会把正在编辑的策略名称覆盖掉。
+     * 仅在新建空白（或仍是默认占位/其它预设名）时顺手填入预设名与简介。
+     */
+    const trimmedName = state.name.trim();
+    const isPlaceholderName =
+      trimmedName === '' ||
+      (state.id === 0 &&
+        (trimmedName === '未命名策略' || STRATEGY_PRESETS.some((p) => p.label === trimmedName)));
+    const nextName = isPlaceholderName ? preset.label : state.name;
+
+    const trimmedDesc = state.description.trim();
+    const isPlaceholderDesc =
+      trimmedDesc === '' ||
+      (state.id === 0 && STRATEGY_PRESETS.some((p) => p.summary === trimmedDesc));
+    const nextDescription = isPlaceholderDesc ? preset.summary : state.description;
+
     setState({
       ...state,
       presetId: preset.id,
-      name: next.name,
-      description: next.description,
-      config: next,
+      name: nextName,
+      description: nextDescription,
+      config: { ...next, name: nextName, description: nextDescription },
     });
     setDirty(true);
     setNotice(`已把草稿替换为预设“${preset.label}”的完整定义（未在模板里的字段回到默认值）。`);
@@ -583,14 +601,21 @@ export function StrategyEditorPage() {
 
           <span className="flex items-center gap-1.5">
             <StrategyCheckButton
+              disabled={state.id === 0}
+              title={
+                state.id === 0
+                  ? '请先保存策略'
+                  : '用真实模型跑一遍完整决策链路，验证策略是否能正常工作（不会下单）'
+              }
               onClick={() => {
+                if (state.id === 0) return;
                 if (dirty && !window.confirm('体检会先保存当前修改，然后运行一次真实模型调用。继续？')) return;
                 setCheckOpen(true);
               }}
             />
             <Button
               variant="primary"
-              onClick={() => void save()}
+              onClick={() => void save().catch(() => undefined)}
               busy={saving}
               title="保存修改（⌘S / Ctrl+S）"
               disabled={!dirty && state.id > 0}

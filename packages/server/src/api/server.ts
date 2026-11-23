@@ -35,7 +35,6 @@ import {
   type TraderStatus,
 } from '@aq/shared';
 import { z } from 'zod';
-import type { AccountBalanceSnapshot } from '../binance/account.js';
 import type { ExchangeConnection } from '../binance/bootstrap.js';
 import type { GateConnection } from '../gate/connection.js';
 import { preflight } from '../binance/bootstrap.js';
@@ -44,7 +43,7 @@ import { dbPath, env, webDistDir } from '../env.js';
 import { checkForUpdates, readAppVersion, readBuildInfo, readLocalBuildInfo } from '../buildInfo.js';
 import { eventBus } from '../events.js';
 import { createLogger, setLogSink } from '../logger.js';
-import { maskSecret, hashPassword, verifyPassword, DUMMY_PASSWORD_HASH } from '../crypto/vault.js';
+import { maskSecret, hashPassword, verifyPasswordAsync, DUMMY_PASSWORD_HASH } from '../crypto/vault.js';
 import {
   aiModels,
   computeTraderStats,
@@ -241,6 +240,8 @@ const StrategyCheckInputSchema = z.object({
   aiModelId: z.number().int().positive(),
   /** Restrict the universe to one symbol for a fast, focused check. */
   symbol: z.string().max(24).optional(),
+  /** 可选指定体检使用的交易所行情（默认 binance；传 gate 时走 Gate 公共行情与合约表）。 */
+  exchange: z.enum(['binance', 'gate']).optional(),
 });
 
 const StrategyInputSchema = z.object({
@@ -908,11 +909,37 @@ function requireAnyModelIdForTeam(): number {
 }
 
 export async function buildServer(deps: ApiDependencies): Promise<FastifyInstance> {
+  /*
+   * ⚠️ **收敛 `trustProxy` 信任边界（2026-11-23 P0 DoS 修复）**。
+   *
+   * 原先设为 `trustProxy: true`（信任任意公网来源的 XFF），为了防直连伪造 XFF 又把
+   * `socket.remoteAddress` 加进了登录节流键；结果在反向代理（nginx / 容器网桥）后面，
+   * 全部流量共享同一个 `sock:127.0.0.1`，攻击者 20 次错密码就能锁死全站管理员登录。
+   *
+   * 只信任本机与私有网段反代（`loopback` / `linklocal` / `uniquelocal`）：
+   *   · 反代后：Fastify 解析反代写入的客户端真实 IP 作为 `request.ip`，不再锁反代出口；
+   *   · 公网直连：非信任来源的 `X-Forwarded-For` 会被 Fastify 忽略，`request.ip` 就是真实对端。
+   */
+  const trustProxyRaw = process.env.AQ_TRUST_PROXY?.trim();
+  const trustProxy: boolean | string[] | ((address: string, hop: number) => boolean) = (() => {
+    if (!trustProxyRaw) return ['loopback', 'linklocal', 'uniquelocal'];
+    const lower = trustProxyRaw.toLowerCase();
+    if (lower === 'false') return false;
+    if (lower === 'true') return true;
+    if (/^\d+$/.test(trustProxyRaw)) {
+      const hops = Number(trustProxyRaw);
+      return (_address: string, hop: number) => hop <= hops;
+    }
+    const list = trustProxyRaw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return list.length > 0 ? list : ['loopback', 'linklocal', 'uniquelocal'];
+  })();
+
   const app = Fastify({
     logger: false,
-    // The console is served from the same origin in production, and Vite proxies
-    // /api during development.
-    trustProxy: true,
+    trustProxy,
   });
 
   await app.register(cors, { origin: true, credentials: true });
@@ -1157,18 +1184,14 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   const accountIpThrottle = new FailureThrottle(IP_THROTTLE_OPTIONS);
 
   /**
-   * 一次登录尝试要计入的「来源」键。
+   * 一次登录尝试要计入的「来源 IP」键。
    *
-   * 除了 `request.ip`（`trustProxy: true` 下取自 `X-Forwarded-For`，**可被伪造**），
-   * 还额外计入 TCP 层的对端地址：直连场景下攻击者能随意编造 XFF 来轮换 IP 键，
-   * 但换不掉自己的出口地址。两者相同时只记一个键，避免把正常流量算两遍。
+   * `trustProxy` 已收敛为仅信任本机/内网反代：
+   *   · 直连公网时 Fastify 自动忽略伪造的 XFF，`request.ip` 即对端真实 IP；
+   *   · 经过受信任反代时 `request.ip` 为客户端真实 IP —— 绝不再把反代共享的
+   *     `socket.remoteAddress` 混进节流键，防止未认证攻击者一键锁死管理员登录。
    */
-  const ipThrottleKeys = (request: FastifyRequest): string[] => {
-    const keys = [`ip:${request.ip}`];
-    const socketAddress = request.socket.remoteAddress;
-    if (socketAddress && socketAddress !== request.ip) keys.push(`sock:${socketAddress}`);
-    return keys;
-  };
+  const ipThrottleKeys = (request: FastifyRequest): string[] => [`ip:${request.ip}`];
 
   app.post('/api/auth/register', async (_request, reply) =>
     reply.code(410).send({
@@ -1203,16 +1226,10 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     const record = users.findByUsername(username);
     let passwordOk = false;
     if (record) {
-      passwordOk = verifyPassword(password, record.passwordHash);
+      passwordOk = await verifyPasswordAsync(password, record.passwordHash);
     } else {
-      // 用户名不存在时**也必须**跑一遍 scrypt。
-      //
-      // 这里原先是 `if (!record || !verifyPassword(...))`，`||` 短路意味着
-      // 未知用户名的 401 根本不派生密钥，比"密码错"快几十毫秒。
-      // 那条时间差就是一个可靠的**用户名枚举预言机**：
-      // 先花几毫秒问出哪些用户名存在，再对存在的那个慢慢爆破密码 ——
-      // 于是 generateUsername() 随机后缀换来的优势被完全抵消。
-      verifyPassword(password, DUMMY_PASSWORD_HASH);
+      // 用户名不存在时**也必须**跑一遍 scrypt（异步走线程池，不阻塞交易事件循环）。
+      await verifyPasswordAsync(password, DUMMY_PASSWORD_HASH);
     }
 
     if (!record || !passwordOk) {
@@ -1299,7 +1316,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     }
 
     const full = users.findByUsername(record.username);
-    if (!full || !verifyPassword(body.currentPassword, full.passwordHash)) {
+    if (!full || !(await verifyPasswordAsync(body.currentPassword, full.passwordHash))) {
       accountThrottle.recordFailure(accountKeys);
       accountIpThrottle.recordFailure(accountIpKeys);
       /*
@@ -1500,20 +1517,14 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   /* --- Exchange accounts ------------------------------------------------- */
 
   app.get('/api/exchange-accounts', authed, async () => {
-    // Balances are read from the cache here so that a polling console stays
-    // cheap; the dedicated endpoint below forces a fresh read on demand.
-    const balances = await deps.balance.getAll();
     /*
-     * Gate 账户不走 `deps.balance`（那是币安专用缓存）—— 逐条读，避免
-     * "拿 Gate key 打币安"导致的「API Key 无效」假报错（2026-11-11 实测）。
+     * `deps.balance` 内部已按 `account.exchange` 分派（币安 / Gate 各自走对应客户端并共享缓存），
+     * 绝不再出现"先拿全部账户（含 Gate Key）打币安、再单独重查 Gate"的凭据外泄。
      */
-    const gateBalances = new Map<number, Awaited<ReturnType<typeof readGateBalanceFor>>>();
-    for (const account of exchanges.list()) {
-      if (account.exchange === 'gate') gateBalances.set(account.id, await readGateBalanceFor(account.id));
-    }
+    const balances = await deps.balance.getAll();
 
     return exchanges.list().map((account) => {
-      const result = account.exchange === 'gate' ? gateBalances.get(account.id) : balances.get(account.id);
+      const result = balances.get(account.id);
       return {
         ...publicAccount(account),
         balance: result?.ok ? result.balance : null,
@@ -1533,10 +1544,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     if (!exchanges.get(id)) return reply.code(404).send({ ok: false, error: '找不到该凭据' });
 
     const refresh = String((request.query as { refresh?: string }).refresh ?? '') === '1';
-    const account = exchanges.get(id);
-    /* Gate 没有"缓存余额"这一层（每次都是实时读），所以 force 对它无意义。 */
-    const result =
-      account?.exchange === 'gate' ? await readGateBalanceFor(id) : await deps.balance.get(id, { force: refresh });
+    const result = await deps.balance.get(id, { force: refresh });
     if (!result.ok) return reply.code(200).send({ ok: false, error: result.error });
     return { ok: true, balance: result.balance, cached: result.cached };
   });
@@ -1589,7 +1597,8 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         environment: parsed.data.testnet ? 'demo' : 'production',
         apiKey: parsed.data.apiKey,
         apiSecret: parsed.data.apiSecret,
-        dryRun: true,
+        /* 仅执行只读 preflight：不能传 dryRun=true，否则 getPositions 短路为 [] 会漏检双向持仓下的真实持仓。 */
+        dryRun: false,
         // 一次性的连通性自检：结论由下面的 preflight 报告，不必广播"已连接"。
         quiet: true,
       });
@@ -1650,11 +1659,14 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 解绑是**有后果的操作**：那些机器人下次启动时会报"没有配置交易所账户"。
      * 那不是故障，但操作员需要知道是他的删除导致的 —— 否则他会以为是新 BUG。
      */
-    const inUse = exchanges.usageCount(id);
+    const startingCount = traders
+      .list()
+      .filter((t) => t.exchangeAccountId === id && deps.manager.isStarting(t.id)).length;
+    const inUse = Math.max(exchanges.usageCount(id), startingCount);
     if (inUse > 0) {
       return reply.code(409).send({
         error:
-          `该凭据正被 ${inUse} 个**正在运行**的机器人使用。请先停止它们再删除 —— ` +
+          `该凭据正被 ${inUse} 个**正在运行或启动中**的机器人使用。请先停止它们再删除 —— ` +
           '运行中的机器人被解绑后，它手上的仓位会失去管理。',
       });
     }
@@ -1697,7 +1709,8 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         environment: row.testnet === 1 ? 'demo' : 'production',
         apiKey: row.api_key,
         apiSecret: deps.vault.decrypt(row.api_secret_enc),
-        dryRun: true,
+        /* 仅执行只读 preflight，不短路 getPositions 以准确检测双向持仓。 */
+        dryRun: false,
         // 同上：自检结果由 preflight 报告。
         quiet: true,
       });
@@ -1792,12 +1805,30 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       // 统一由 discoverModels() 给出那句"请先填写 API Key"的中文提示。
     }
 
-    const { discoverModels } = await import('../llm/discovery.js');
-    return discoverModels({
-      provider: provider as never,
-      apiKey,
-      ...(parsed.data.baseUrl ? { baseUrl: parsed.data.baseUrl } : {}),
-    });
+    if (!LLM_PROVIDERS.some((p) => p.id === provider)) {
+      return reply.code(400).send({
+        ok: false,
+        models: [],
+        source: 'fallback',
+        message: `不支持的模型提供商：${provider}`,
+      });
+    }
+
+    try {
+      const { discoverModels } = await import('../llm/discovery.js');
+      return await discoverModels({
+        provider: provider as never,
+        apiKey,
+        ...(parsed.data.baseUrl ? { baseUrl: parsed.data.baseUrl } : {}),
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        ok: false,
+        models: [],
+        source: 'fallback',
+        message: (error as Error).message,
+      });
+    }
   });
 
   /**
@@ -1945,11 +1976,25 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     const parsed = AiModelInputSchema.partial().safeParse(body);
     if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? 'Invalid input');
 
+    const existing = aiModels.get(id);
+    if (!existing) throw new Error('找不到该 AI 模型');
+    const nextProvider = (parsed.data.provider ?? existing.provider) as string;
+    const descriptor = LLM_PROVIDERS.find((p) => p.id === nextProvider);
+    const nextBaseUrl =
+      parsed.data.baseUrl !== undefined
+        ? parsed.data.baseUrl || descriptor?.baseUrl || ''
+        : existing.baseUrl || descriptor?.baseUrl || '';
+    if (!nextBaseUrl) {
+      throw new Error('自定义提供商必须填写基础 URL。');
+    }
+
     const patch: Parameters<typeof aiModels.update>[1] = {};
     if (parsed.data.provider !== undefined) patch.provider = parsed.data.provider as never;
     if (parsed.data.label !== undefined) patch.label = parsed.data.label;
     if (parsed.data.model !== undefined) patch.model = parsed.data.model;
-    if (parsed.data.baseUrl !== undefined) patch.baseUrl = parsed.data.baseUrl;
+    if (parsed.data.baseUrl !== undefined || parsed.data.provider !== undefined) {
+      patch.baseUrl = nextBaseUrl;
+    }
     if (parsed.data.apiKey) patch.apiKeyEnc = deps.vault.encrypt(parsed.data.apiKey);
     /*
      * ⚠️ **改了 provider 就要把这四项刷新成它的默认值。**
@@ -2012,9 +2057,23 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         maxRetries: modelRow.max_retries,
       });
 
+      const checkConnection =
+        parsed.data.exchange === 'gate'
+          ? await (async () => {
+              const { connectGate } = await import('../gate/connection.js');
+              const gateConn = await connectGate({ apiKey: '', apiSecret: '', environment: 'live' });
+              return {
+                market: gateConn.market,
+                registry: gateConn.registry,
+                endpoints: { label: 'Gate.io 合约（公共行情）' },
+                clockOffsetMs: gateConn.clockOffsetMs,
+              };
+            })()
+          : deps.publicConnection;
+
       const result = await checkStrategy({
         config: strategy.config,
-        connection: deps.publicConnection,
+        connection: checkConnection,
         client,
         ...(parsed.data.symbol ? { symbol: parsed.data.symbol.toUpperCase() } : {}),
       });
@@ -2387,9 +2446,28 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 默认 `true`（模拟盘）—— 与"危险的那条路要人自己走过去"同一条纪律：
      * 实盘必须由操作员在创建时显式选。
      */
-    const fixedDryRun = parsed.data.dryRun ?? true;
+    const fixedDryRun =
+      parsed.data.dryRun !== undefined
+        ? parsed.data.dryRun
+        : account?.exchange === 'gate'
+          ? false
+          : true;
     if (requestedAccountId === null && !fixedDryRun) {
       throw new Error('没有绑定交易所账户的机器人只能以模拟盘运行 —— 要实盘请先绑定账户再创建。');
+    }
+    /*
+     * ⚠️ **提前拦截「Gate + 本地模拟盘」（2026-11-23 P0 修复）**。
+     * Gate 没有本地模拟撮合引擎（`GateBroker` 恒发单到所绑 Gate 环境）：
+     *   · Gate 正式网：禁止 `dryRun: true`（避免误动真钱或造出无法启动的死机器人）；
+     *   · Gate 测试网：测试网本身即假钱真实撮合，也不支持本地模拟盘，必须用 `dryRun: false`
+     *     以保持运行期、停机期与舰队汇总口径一致。
+     */
+    if (account && account.exchange === 'gate' && fixedDryRun) {
+      throw new Error(
+        account.testnet
+          ? 'Gate 测试网本身即假钱真实撮合，不支持本地模拟盘；请选择「测试网」运行模式（dryRun: false）。'
+          : 'Gate 正式网账户不支持本地模拟盘（避免误动真实资金）。如需模拟测试，请绑定 Gate 测试网账户；如需正式交易，请选择「实盘」。',
+      );
     }
 
     const trader = traders.create({
@@ -2685,10 +2763,11 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      */
     const current = traders.get(id);
     if (!current) return reply.code(404).send({ error: `找不到机器人 ${id}`, preflight: [] });
-    const body = (request.body ?? {}) as { dryRun?: boolean };
+    const body = (request.body ?? {}) as { dryRun?: unknown };
     let dryRun = current.dryRun;
     if (dryRun === undefined) {
-      dryRun = body.dryRun ?? true;
+      /* 严格只认布尔值，防止传 0 / "" 等 falsy 非布尔值把老机器人意外固化为实盘。 */
+      dryRun = typeof body.dryRun === 'boolean' ? body.dryRun : true;
       traders.setDryRun(id, dryRun);
       log.info(
         `机器人 #${id} 的运行模式在本次启动时固定为「${dryRun ? '模拟盘' : '实盘'}」（老数据一次性补写；之后不再由启动决定）。`,
@@ -2850,10 +2929,22 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * 与 `manager.resumePersisted(env.dryRun)` 同一条口径。把它读成 `false`
    * 会让一个"没在跑的模拟盘机器人"被当成实盘去读交易所，于是又回到空持仓。
    */
+  const exchangeOfTrader = (trader: Trader | null | undefined): 'binance' | 'gate' => {
+    if (!trader || trader.exchangeAccountId === null) return 'binance';
+    const acc = exchanges.get(trader.exchangeAccountId);
+    return acc?.exchange === 'gate' ? 'gate' : 'binance';
+  };
+
   const isPaperTrader = (traderId: number): boolean => {
+    const trader = traders.get(traderId);
+    /*
+     * Gate 的「模拟」= Gate 官方合约测试网（假钱、真实撮合，见 `gate/broker.ts` 文件头），
+     * 没有本地纸面撮合分支；因此 Gate 机器人（无论测试网还是正式网）的账户/持仓真相都在 Gate 侧。
+     */
+    if (exchangeOfTrader(trader) === 'gate') return false;
     const runtime = deps.manager.dryRunOf(traderId);
     if (runtime !== null) return runtime;
-    return traders.get(traderId)?.dryRun ?? env.dryRun;
+    return trader?.dryRun ?? env.dryRun;
   };
 
   /**
@@ -3052,34 +3143,27 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * 返回 `null` 表示**找不到凭据行**（`错误`那条路要如实说出来，而不是静默当空仓）。
    */
   /**
-   * 按凭据读 Gate 测试网/正式网的账户余额。
-   *
-   * ⚠️ **2026-11-11 用户实测**：凭证卡片显示「API Key 无效」—— 因为
-   * `/exchange-accounts` 与 `/exchange-accounts/:id/balance` 走的是
-   * `deps.balance`（币安专用余额缓存），拿 Gate 的 key 打币安端点。
-   * Gate 账户在这里独立读，返回与币安同形的 `AccountBalanceSnapshot`。
+   * 懒加载的 Gate 公开行情读取器（无需凭据，供 `/api/market/*` 与 Gate 模拟盘标记价复用）。
    */
-  const readGateBalanceFor = async (
-    accountId: number,
-  ): Promise<{ ok: true; balance: AccountBalanceSnapshot; cached: boolean } | { ok: false; error: string }> => {
-    const row = exchanges.getWithSecret(accountId);
-    if (!row) return { ok: false, error: '找不到该凭据' };
-    try {
-      const { connectGate, gateEnvironmentOf } = await import('../gate/connection.js');
-      const connection = await connectGate({
-        apiKey: row.api_key,
-        apiSecret: deps.vault.decrypt(row.api_secret_enc),
-        environment: gateEnvironmentOf(row.testnet === 1),
+  let publicGateMarketPromise: Promise<{
+    market: import('../gate/market.js').GateMarket;
+    contracts: import('../gate/account.js').GateContractRegistry;
+  }> | null = null;
+  const getPublicGateMarket = () => {
+    if (!publicGateMarketPromise) {
+      publicGateMarketPromise = (async () => {
+        const { GateRest } = await import('../gate/rest.js');
+        const { GateContractRegistry } = await import('../gate/account.js');
+        const { GateMarket } = await import('../gate/market.js');
+        const rest = new GateRest({ apiKey: '', apiSecret: '', environment: 'live' });
+        const contracts = new GateContractRegistry(rest);
+        return { market: new GateMarket(rest, contracts), contracts };
+      })().catch((err) => {
+        publicGateMarketPromise = null;
+        throw err;
       });
-      const state = await connection.broker.getAccountState();
-      return {
-        ok: true,
-        balance: { ...state, readAt: new Date().toISOString(), asset: 'USDT' },
-        cached: false,
-      };
-    } catch (error) {
-      return { ok: false, error: `Gate 余额读取失败：${(error as Error).message}` };
     }
+    return publicGateMarketPromise;
   };
 
   const openReadOnlyFor = async (trader: Trader): Promise<ExchangeConnection | GateConnection | null> => {
@@ -3112,7 +3196,13 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       environment: row.testnet === 1 ? 'demo' : 'production',
       apiKey: row.api_key,
       apiSecret: deps.vault.decrypt(row.api_secret_enc),
-      dryRun: true,
+      /*
+       * ⚠️ **只读视图必须传 `dryRun: false`（2026-11-23 P0 修复）**：
+       * 2026-11-09 `BinanceBroker.getPositions`/`getOpenOrders` 加上了 `if (this.dryRun) return []`
+       * 守卫后，这里继续传 `dryRun: true` 会把实盘币安机器人的实时持仓与挂单数全部短路为空数组。
+       * 本连接只在 `liveExchangeView` 中做只读查询，永不调用任何下单/撤单方法。
+       */
+      dryRun: false,
       /*
        * 这条连接是**一次性**的：控制台每次轮询都会重建它，只为拿到交易所
        * 真实持仓（而不是本地镜像）。不加这个开关时，`loaded 528 tradable...`
@@ -3150,7 +3240,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
          * 不需要该账户有凭据）。
          */
         const local = positionStore.open(trader.id);
-        const marks = await paperMarkPrices(local);
+        const marks = await paperMarkPrices(local, exchangeOfTrader(trader));
         const starting = deps.manager.paperStartingBalanceOf(trader.id);
         const realized = tradeStore.lifetimeNetPnl(trader.id);
         /*
@@ -3185,11 +3275,17 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    */
   const paperMarkPrices = async (
     local: ReadonlyArray<{ symbol: string }>,
+    exchange: 'binance' | 'gate' = 'binance',
   ): Promise<Map<string, number>> => {
     const marks = new Map<string, number>();
     if (local.length === 0) return marks;
     const want = new Set(local.map((p) => p.symbol));
-    const premiums = await deps.publicConnection.market.premiumIndex().catch(() => []);
+    const premiums =
+      exchange === 'gate'
+        ? await getPublicGateMarket()
+            .then(({ market }) => market.premiumIndex())
+            .catch(() => [])
+        : await deps.publicConnection.market.premiumIndex().catch(() => []);
     for (const premium of premiums) {
       if (!want.has(premium.symbol)) continue;
       const value = Number(premium.markPrice);
@@ -3245,7 +3341,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      */
     if (isPaperTrader(traderId)) {
       const local = positionStore.open(traderId);
-      const marks = await paperMarkPrices(local);
+      const marks = await paperMarkPrices(local, exchangeOfTrader(trader));
       const own = ownUnrealizedPnlOf(local, (symbol) => marks.get(symbol));
       if (own.missingMarkPrice.length > 0) {
         log.warn(
@@ -4250,7 +4346,39 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   /* --- Public market data ------------------------------------------------ */
 
-  app.get('/api/market/symbols', authed, async () => {
+  app.get('/api/market/symbols', authed, async (request, reply) => {
+    const rawExchange = (request.query as { exchange?: string }).exchange;
+    const exchangeParsed = rawExchange ? ExchangeIdSchema.safeParse(rawExchange) : { success: true as const, data: 'binance' as const };
+    if (!exchangeParsed.success) {
+      return reply.code(400).send({ error: `不支持的交易所：${rawExchange}` });
+    }
+    if (exchangeParsed.data === 'gate') {
+      try {
+        const { market } = await getPublicGateMarket();
+        const [infos, tickers] = await Promise.all([
+          market.contractInfos(),
+          market.ticker24h().catch(() => []),
+        ]);
+        const bySymbol = new Map(tickers.map((t) => [t.symbol, t]));
+        return infos
+          .map((info) => {
+            const ticker = bySymbol.get(info.symbol);
+            const baseAsset = info.contract.split('_')[0] ?? info.symbol;
+            return {
+              symbol: info.symbol,
+              baseAsset,
+              price: Number(ticker?.lastPrice ?? 0),
+              changePercent24h: Number(ticker?.priceChangePercent ?? 0),
+              quoteVolume24h: Number(ticker?.quoteVolume ?? 0),
+              minNotional: 0,
+            };
+          })
+          .filter((s) => s.quoteVolume24h > 0)
+          .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
+      } catch (error) {
+        return reply.code(502).send({ error: `读取 Gate 行情失败：${(error as Error).message}` });
+      }
+    }
     const registry = deps.publicConnection.registry;
     const tickers = await deps.publicConnection.market.ticker24h().catch(() => []);
     const bySymbol = new Map(tickers.map((t) => [t.symbol, t]));
@@ -4272,99 +4400,114 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   });
 
   app.get('/api/market/klines', authed, async (request, reply) => {
-    const query = request.query as { symbol?: string; interval?: string; limit?: string };
-    if (!query.symbol) return reply.code(400).send({ error: '缺少 symbol 参数' });
-    /*
-     * ⚠️ **`interval` 必须校验后再发给交易所。**
-     *
-     * 原来这里是 `(query.interval ?? '15m') as never` —— 一个 `as never` 把类型检查
-     * 关掉了，任意字符串都会被拼进出站请求。写错一个周期（`15min`）时，
-     * 币安回 400，而 Fastify 会把未捕获的异常变成 **500**：调用方看到的是"服务端坏了"，
-     * 而不是"这个参数只能是这 11 个值之一"。
-     */
+    const query = request.query as { symbol?: string; interval?: string; limit?: string; exchange?: string };
+    if (!query.symbol || typeof query.symbol !== 'string') {
+      return reply.code(400).send({ error: '缺少 symbol 参数' });
+    }
+    const symbol = query.symbol.trim().toUpperCase();
+    if (!/^[A-Z0-9_-]{3,30}$/.test(symbol)) {
+      return reply.code(400).send({ error: `无效的合约符号：${query.symbol}` });
+    }
+    const exchangeParsed = query.exchange
+      ? ExchangeIdSchema.safeParse(query.exchange)
+      : { success: true as const, data: 'binance' as const };
+    if (!exchangeParsed.success) {
+      return reply.code(400).send({ error: `不支持的交易所：${query.exchange}` });
+    }
     const interval = TimeframeSchema.safeParse(query.interval ?? '15m');
     if (!interval.success) {
       return reply
         .code(400)
         .send({ error: `interval 必须是：${TIMEFRAMES.join(' / ')}` });
     }
-    /*
-     * `limit` 也要钳成正数：`?limit=-1` 原样透传会得到一个语义不明的请求
-     * （SQLite 那次的教训是 `LIMIT -1` 表示"不限行"；这里虽然是 HTTP 参数，
-     * 但"把用户输入原样发给交易所"同样不该发生）。
-     */
     const rawLimit = Number(query.limit ?? 200);
     const limit = Number.isFinite(rawLimit)
       ? Math.min(Math.max(Math.trunc(rawLimit), 1), 1000)
       : 200;
-    return deps.publicConnection.market.klines(query.symbol, interval.data, limit);
+    try {
+      if (exchangeParsed.data === 'gate') {
+        const { market } = await getPublicGateMarket();
+        return await market.klines(symbol, interval.data, limit);
+      }
+      return await deps.publicConnection.market.klines(symbol, interval.data, limit);
+    } catch (error) {
+      const msg = (error as Error).message;
+      const isBadRequest = /invalid symbol|unknown|不支持|not found|-1121|INVALID_PARAM/i.test(msg);
+      return reply.code(isBadRequest ? 400 : 502).send({ error: msg });
+    }
   });
 
   /* --- Live event stream ------------------------------------------------- */
 
   app.get('/api/events', { websocket: true }, (socket, request) => {
-    // 这是**唯一**允许从查询参数取令牌的地方（浏览器的 WebSocket 构造函数
-    // 无法设置请求头）。HTTP 路由一律只认 Authorization 头，见 auth.ts。
-    const token = extractToken(request, { allowQueryToken: true });
-    if (!token) {
-      socket.close(1008, '需要登录');
-      return;
+    try {
+      // 这是**唯一**允许从查询参数取令牌的地方（浏览器的 WebSocket 构造函数
+      // 无法设置请求头）。HTTP 路由一律只认 Authorization 头，见 auth.ts。
+      const token = extractToken(request, { allowQueryToken: true });
+      if (!token) {
+        socket.close(1008, '需要登录');
+        return;
+      }
+      const payload = verifyToken(token, deps.jwtSecret);
+      if (!payload || tokenRevoked(payload)) {
+        socket.close(1008, 'Invalid session');
+        return;
+      }
+
+      for (const event of eventBus.history(30)) {
+        socket.send(JSON.stringify({ ...event, replay: true }));
+      }
+
+      const unsubscribe = eventBus.subscribe((event: ServerEvent) => {
+        if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(event));
+      });
+
+      /*
+       * ⚠️ **心跳同时负责三件事（2026-11-23 P0 安全/泄漏修复）**：
+       *   1. 防止 nginx 60s 空闲断连；
+       *   2. 校验 `pong` 响应：半开网络断开时立刻 `terminate()` 释放定时器与 `eventBus` 订阅；
+       *   3. 周期性复检会话有效性（到期或管理员修改密码吊销令牌）→ 立刻以 1008 关闭旧 WS，
+       *      防止改密码后泄漏会话继续实时收取持仓/成交/日志推送。
+       */
+      let isAlive = true;
+      socket.on('pong', () => {
+        isAlive = true;
+      });
+
+      const cleanup = () => {
+        clearInterval(heartbeat);
+        unsubscribe();
+      };
+
+      const heartbeat = setInterval(() => {
+        if (socket.readyState !== socket.OPEN) {
+          cleanup();
+          return;
+        }
+        if (payload.exp * 1000 < Date.now() || tokenRevoked(payload)) {
+          cleanup();
+          socket.close(1008, 'Invalid session');
+          return;
+        }
+        if (!isAlive) {
+          cleanup();
+          socket.terminate();
+          return;
+        }
+        isAlive = false;
+        socket.ping();
+      }, 30_000);
+
+      socket.on('close', cleanup);
+      socket.on('error', cleanup);
+    } catch (error) {
+      log.warn(`/api/events WebSocket 初始化失败：${(error as Error).message}`);
+      try {
+        socket.close(1008, 'Invalid session');
+      } catch {
+        /* socket already closed */
+      }
     }
-    const payload = verifyToken(token, deps.jwtSecret);
-    if (!payload || tokenRevoked(payload)) {
-      socket.close(1008, 'Invalid session');
-      return;
-    }
-
-    /*
-     * Replay recent history so a freshly-opened console is not blank.
-     *
-     * ⚠️ **必须带 `replay: true`。** 这些事件是几分钟甚至几小时前发生的，而客户端
-     * 原来把它们和实时事件一视同仁 —— 于是**每刷新一次页面，右下角就弹一轮
-     * 「已平仓 ETHUSDT」**，内容还是过时的。操作员实测到的就是"每次刷新都弹，
-     * 弹的全是旧消息"。
-     *
-     * 带标记之后：**数据照填**（持仓、权益、状态需要初值），
-     * **但不弹通知、也不重复追加日志**。见 `ServerEvent` 上 `Replayable` 的说明。
-     */
-    for (const event of eventBus.history(30)) {
-      socket.send(JSON.stringify({ ...event, replay: true }));
-    }
-
-    const unsubscribe = eventBus.subscribe((event: ServerEvent) => {
-      if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(event));
-    });
-
-    /*
-     * ⚠️ **心跳。原来没有，于是页面老是显示「推送断开」。**
-     *
-     * 这条流是**事件驱动**的：只在有事件时发数据。而机器人空闲时（等待下一个
-     * 周期、或者根本没在运行）一分钟都可能一个事件都没有 —— 而中间的
-     * 反向代理有一条空闲超时（nginx 的 `proxy_read_timeout` 默认 60 秒），
-     * **一条 60 秒没有数据的 WebSocket 会被它单方面切断**。
-     *
-     * 客户端会把这次切断当成故障：状态变 `closed`、页面顶上弹「推送断开，
-     * 按 4 秒轮询兜底」，然后指数退避重连。重连成功后过一分钟再来一次 ——
-     * **于是这条警告变成了一个周期性的东西**，而它本意是提示异常。
-     * 一个每两分钟出现一次的"异常提示"等于没有提示，而且它让操作员
-     * 误以为系统不稳定。
-     *
-     * 用协议层的 `ping`：浏览器会自动回 `pong`（不需要改客户端），
-     * 而任何中间代理看到的都是**双向的真实流量**，空闲计时器因此被重置。
-     * 30 秒是常见的空闲超时（60 秒）的一半，留了一半余量。
-     */
-    const heartbeat = setInterval(() => {
-      if (socket.readyState === socket.OPEN) socket.ping();
-    }, 30_000);
-
-    socket.on('close', () => {
-      clearInterval(heartbeat);
-      unsubscribe();
-    });
-    socket.on('error', () => {
-      clearInterval(heartbeat);
-      unsubscribe();
-    });
   });
 
   /* --- Server logs to the console ---------------------------------------- */

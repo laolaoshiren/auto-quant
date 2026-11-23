@@ -12,7 +12,7 @@
  * 下单会花真钱、以及账号从哪里来（`docker logs` 那行命令是锁死的操作员唯一的
  * 恢复路径，必须显眼且可复制）。
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { TriangleAlert, ArrowRight, ShieldCheck, Terminal, Wallet } from 'lucide-react';
 import { Button, ErrorNote, Field, TextInput } from '../components/ui';
@@ -32,8 +32,19 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
   const navigate = useNavigate();
   useDocumentTitle('登录');
+
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   // 服务端还没初始化出账号。正常情况下首次启动就会创建，出现这个状态
   // 多半是服务刚起来、或数据卷被清空了。
@@ -66,7 +77,11 @@ export function LoginPage() {
       .writeText(FIRST_RUN_HINT)
       .then(() => {
         setCopied(true);
-        window.setTimeout(() => setCopied(false), 1600);
+        if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = window.setTimeout(() => {
+          copyTimerRef.current = null;
+          setCopied(false);
+        }, 1600);
       })
       .catch(() => {
         /* 被浏览器策略拒绝：命令本身就在屏幕上，可以手选 */

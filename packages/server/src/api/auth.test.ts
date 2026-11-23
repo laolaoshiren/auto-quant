@@ -197,6 +197,12 @@ test('只有 WebSocket 升级路径显式打开查询参数令牌', () => {
   assert.equal(extractToken(request, { allowQueryToken: true }), 'events-token');
 });
 
+test('★★★ 重复查询参数 ?token=a&token=b 解析为数组时返回 null，绝不触发未捕获 TypeError', () => {
+  const request = { headers: {}, query: { token: ['a', 'b'] } } as unknown as FastifyRequest;
+  assert.equal(extractToken(request, { allowQueryToken: true }), null);
+  assert.equal(verifyToken(['a', 'b'] as unknown as string, SECRET), null);
+});
+
 /* -------------------------------------------------------------------------- */
 /*  时间侧信道                                                                 */
 /* -------------------------------------------------------------------------- */

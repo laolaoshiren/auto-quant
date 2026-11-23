@@ -17,7 +17,7 @@
  * 要在模板挂载/卸载时保持稳定 —— 切模板时如果把 WebSocket 也断开重连，
  * 用户会看到"切个皮肤，推送断了两秒"。
  */
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useApp, useEvents } from '../../lib/store';
 import { CommandPalette } from '../../components/CommandPalette';
@@ -138,22 +138,24 @@ export function ShellRuntime({
    */
   useEffect(() => setPaletteOpen(false), [location.pathname]);
 
+  const signOut = useCallback(() => {
+    logout();
+    navigate('/login');
+  }, [logout, navigate]);
+
   const value = useMemo<ShellState>(
     () => ({
       ...data,
-      signOut: () => {
-        logout();
-        navigate('/login');
-      },
+      signOut,
       paletteOpen,
       setPaletteOpen,
       templateId: template.id,
       setTemplateId: template.set,
       templates: template.list,
     }),
-    // `data` 每次渲染都是新对象，但它的字段全都来自 store 订阅 —— 这里逐项列出
-    // 反而是维护负担。用整体依赖，代价只是一次浅比较。
-    [data, logout, navigate, paletteOpen, template],
+    // `data` 已在 `useShellData` 内按字段稳定引用，`template` 按细粒度字段依赖，
+    // 避免父级重渲染或无关状态更新触发全壳无效重渲染。
+    [data, signOut, paletteOpen, template.id, template.set, template.list],
   );
 
   return (

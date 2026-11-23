@@ -103,8 +103,15 @@ export function gateContractInfoToSymbolInfo(info: GateContractInfo): SymbolInfo
     stepSize,
     minQty,
     maxQty,
-    /* 见文件头：Gate 没有最小名义价值字段，这里是"最小张数 × 面值"（量纲是币数）。 */
-    minNotional: minQty,
+    /*
+     * ⚠️ **Gate 没有 USDT 口径的 `MIN_NOTIONAL` 字段，此处必须填 0（2026-11-23 修复）**。
+     *
+     * 原实现直接填了 `minQty`（单位是**币数**，不是 USDT）：对 `BTC_USDT`（0.0001）
+     * 恰好宽松，但对 DOGE/SHIB/PEPE 等 `quanto_multiplier` 为 10 ~ 10,000,000 的
+     * 合约，风控第 10 步会把数千至上千万枚币数当成 USDT 门槛，导致这些标的 100%
+     * 被拒单。最小下单量由上面的 `minQty` 与 `GateBroker.toSize()` 硬兜底。
+     */
+    minNotional: 0,
     /* 本项目的"数量"是币数；张数换算在 broker 内部完成。 */
     contractSize: 1,
   };

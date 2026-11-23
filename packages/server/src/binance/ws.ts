@@ -94,7 +94,9 @@ export class ResilientStream {
 
   private attempt = 0;
   private stopped = true;
+  private openedAt = 0;
   private lastMessageAt = 0;
+  private connectGen = 0;
   private lastDataByStream = new Map<string, number>();
   private watchdog: NodeJS.Timeout | null = null;
   private rotationTimer: NodeJS.Timeout | null = null;
@@ -154,20 +156,30 @@ export class ResilientStream {
 
   private async connect(reason: string): Promise<void> {
     if (this.stopped) return;
+    /* 代次号防止并发 connect() 跨 await 交错时泄漏孤儿 socket 与 rotationTimer。 */
+    const gen = ++this.connectGen;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting', reason);
 
     let url: string;
     try {
       // Some streams (user data) need fresh credentials before their URL is valid.
       await this.options.beforeConnect?.();
+      if (this.stopped || gen !== this.connectGen) return;
       url = await this.options.url();
+      if (this.stopped || gen !== this.connectGen) return;
     } catch (error) {
+      if (this.stopped || gen !== this.connectGen) return;
       log.error(`[${this.options.name}] 无法构造数据流地址`, error);
       this.scheduleReconnect('url-error');
       return;
     }
 
     await this.teardown();
+    if (this.stopped || gen !== this.connectGen) return;
 
     const socket = new WebSocket(url, {
       handshakeTimeout: 15_000,
@@ -176,9 +188,12 @@ export class ResilientStream {
       followRedirects: true,
     });
     this.socket = socket;
+    this.openedAt = 0;
     this.lastMessageAt = 0;
 
     socket.on('open', () => {
+      if (this.socket !== socket) return;
+      this.openedAt = Date.now();
       log.info(`[${this.options.name}] 连接已建立（${reason}）`);
       // Deliberately NOT resetting `attempt` here. A routed-URL mistake yields an
       // open socket with no data; resetting now would spin forever.
@@ -258,10 +273,15 @@ export class ResilientStream {
 
   private scheduleReconnect(reason: string): void {
     if (this.stopped) return;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     const delay = fullJitterBackoff(this.attempt);
     this.attempt += 1;
     log.warn(`[${this.options.name}] ${delay}ms 后重连（第 ${this.attempt} 次，原因：${reason}）`);
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       void this.connect(reason);
     }, delay);
   }
@@ -273,7 +293,28 @@ export class ResilientStream {
    */
   private startWatchdog(): void {
     this.watchdog = setInterval(() => {
-      if (this.stopped || this.state !== 'live') return;
+      if (this.stopped) return;
+
+      /*
+       * ⚠️ **也要盯住「握手成功但从未收到首帧」的静默僵尸连接（2026-11-23 P1 修复）**。
+       *
+       * `socket.on('open')` 刻意不把 `state` 翻成 `'live'`（要等首帧 `message`），
+       * 原先 `if (this.state !== 'live') return;` 直接跳过了这类连接 —— 一旦 listenKey
+       * 失效或路由错误导致握手成功但一直无消息，看门狗永远不重连。
+       */
+      if (this.state !== 'live') {
+        if (this.socket?.readyState === WebSocket.OPEN && this.openedAt > 0) {
+          const openSilence = Date.now() - this.openedAt;
+          if (openSilence > this.stalenessWindowMs()) {
+            log.error(
+              `[${this.options.name}] 连接建立后 ${Math.round(openSilence / 1000)}s 未收到任何首帧数据；强制重连`,
+            );
+            this.attempt += 1;
+            void this.connect('watchdog-open-silent');
+          }
+        }
+        return;
+      }
 
       const silence = Date.now() - this.lastMessageAt;
       if (silence > this.stalenessWindowMs()) {
@@ -378,6 +419,9 @@ export class BinanceUserDataStream {
   private socket: ResilientStream | null = null;
   private listenKey: string | null = null;
   private keepaliveTimer: NodeJS.Timeout | null = null;
+  private stopped = false;
+  /** 生命周期代次号：串行化并作废并发的 start / restart / stop，防止孤儿 socket 泄漏。 */
+  private lifecycleGen = 0;
   private readonly log = log;
 
   constructor(
@@ -387,23 +431,19 @@ export class BinanceUserDataStream {
   ) {}
 
   async start(): Promise<void> {
-    // Idempotent on purpose, and not merely as a courtesy.
-    //
-    // `start()` used to overwrite `this.socket` with a brand-new
-    // `ResilientStream` unconditionally. Every caller that restarts the stream —
-    // `keepalive()` on a lapsed key, the `listenKeyExpired` event path, and any
-    // future one — therefore orphaned the previous object: its socket stayed
-    // connected (so Binance kept delivering user-data frames), its 10-second
-    // watchdog interval stayed scheduled, and both copies dispatched the same
-    // `ORDER_TRADE_UPDATE` / `MARGIN_CALL` events. Bots that reconnect often
-    // accumulate one live socket and one leaked timer per partition.
-    //
-    // Stopping first fixes both: exactly one socket and exactly one watchdog,
-    // and the old key's frames stop arriving before the new key is dialled.
+    const gen = ++this.lifecycleGen;
+    this.stopped = false;
     await this.stopSocket();
+    if (this.stopped || gen !== this.lifecycleGen) return;
 
-    this.socket = this.createSocket();
-    await this.socket.start();
+    const nextSocket = this.createSocket();
+    this.socket = nextSocket;
+    await nextSocket.start();
+    if (this.stopped || gen !== this.lifecycleGen) {
+      if (this.socket === nextSocket) this.socket = null;
+      await nextSocket.stop().catch(() => undefined);
+      return;
+    }
     this.startKeepalive();
   }
 
@@ -458,17 +498,28 @@ export class BinanceUserDataStream {
 
   /** Recreate the key and dial a fresh socket, replacing any live one. */
   private async restart(reason: string): Promise<void> {
+    if (this.stopped) return;
+    const gen = ++this.lifecycleGen;
     this.log.warn(`用户数据流重连（${reason}）`);
     await this.ensureListenKey();
+    if (this.stopped || gen !== this.lifecycleGen) return;
     await this.stopSocket();
-    this.socket = this.createSocket();
-    await this.socket.start();
+    if (this.stopped || gen !== this.lifecycleGen) return;
+    const nextSocket = this.createSocket();
+    this.socket = nextSocket;
+    await nextSocket.start();
+    if (this.stopped || gen !== this.lifecycleGen) {
+      if (this.socket === nextSocket) this.socket = null;
+      await nextSocket.stop().catch(() => undefined);
+    }
   }
 
   private startKeepalive(): void {
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
     this.keepaliveTimer = setInterval(() => {
-      void this.keepalive();
+      void this.keepalive().catch((error) => {
+        this.log.warn(`用户数据流保活异常：${(error as Error).message}`);
+      });
     }, LISTEN_KEY_KEEPALIVE_MS);
   }
 
@@ -485,23 +536,29 @@ export class BinanceUserDataStream {
 
   /** Extend the key's life by 60 minutes. `-1125` means it lapsed — recreate. */
   async keepalive(): Promise<void> {
+    if (this.stopped) return;
     try {
       const response = await this.rest.keyedRequest<{ listenKey: string }>('PUT', '/fapi/v1/listenKey');
       if (response?.listenKey) this.listenKey = response.listenKey;
     } catch (error) {
+      if (this.stopped) return;
       const expired =
         error instanceof BinanceApiError && (error.code === -1125 || error.code === -1102);
       this.log.warn(`用户数据流密钥的保活失败（${(error as Error).message}）`);
       if (expired) {
         this.log.warn('用户数据流的密钥已过期；重新申请并重连');
-        await this.restart('keepalive-lapsed');
-        await this.handlers.onListenKeyExpired?.();
+        try {
+          await this.restart('keepalive-lapsed');
+          if (!this.stopped) await this.handlers.onListenKeyExpired?.();
+        } catch (restartError) {
+          this.log.warn(`用户数据流密钥过期后重连失败：${(restartError as Error).message}`);
+        }
       }
     }
   }
 
   private async dispatch(payload: unknown): Promise<void> {
-    if (typeof payload !== 'object' || payload === null) return;
+    if (this.stopped || typeof payload !== 'object' || payload === null) return;
     const event = payload as { e?: string };
 
     switch (event.e) {
@@ -521,8 +578,12 @@ export class BinanceUserDataStream {
       case 'listenKeyExpired':
         this.log.warn('收到密钥过期事件；重新申请并重连');
         void (payload as BinanceWsListenKeyExpiredEvent);
-        await this.restart('listenKeyExpired-event');
-        await this.handlers.onListenKeyExpired?.();
+        try {
+          await this.restart('listenKeyExpired-event');
+          if (!this.stopped) await this.handlers.onListenKeyExpired?.();
+        } catch (restartError) {
+          this.log.warn(`listenKeyExpired 重连失败：${(restartError as Error).message}`);
+        }
         return;
       default:
         this.log.debug(`unhandled user-data event: ${event.e ?? 'unknown'}`);
@@ -534,6 +595,8 @@ export class BinanceUserDataStream {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
+    this.lifecycleGen += 1;
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
     this.keepaliveTimer = null;
     await this.stopSocket();

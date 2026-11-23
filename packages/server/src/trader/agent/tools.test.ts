@@ -17,7 +17,7 @@ import test from 'node:test';
 
 import { defaultStrategyConfig, STRATEGY_PRESETS, StrategyConfigSchema, type StrategyConfig } from '@aq/shared';
 
-import { AGENT_TOOLS, derivedRiskFigures, dispatchTool, renderToolCatalogue, validateArgs, type AgentToolDeps } from './tools.js';
+import { AGENT_TOOL_SPECS, AGENT_TOOLS, derivedRiskFigures, dispatchTool, renderToolCatalogue, validateArgs, type AgentToolDeps } from './tools.js';
 
 const config = (): StrategyConfig =>
   StrategyConfigSchema.parse({
@@ -480,4 +480,43 @@ test('get_current_params 必须带上决策周期 —— 否则 AI 不知道起�
     7,
     '当前参数里必须能看到决策周期',
   );
+});
+
+test('★★★ AGENT_TOOL_SPECS：string 参数生成 minLength/maxLength 而非 minimum/maximum', () => {
+  /*
+   * 防 bug：JSON Schema 中 `minimum`/`maximum` 仅适用于数值，字符串长度约束必须是
+   * `minLength`/`maxLength`。对 string 输出 `minimum`/`maximum` 会导致严格网关 400 拒收。
+   */
+  const setParams = AGENT_TOOL_SPECS.find((t) => t.name === 'set_params');
+  assert.ok(setParams);
+  const reasonProp = (setParams.parameters['properties'] as Record<string, Record<string, unknown>>)['reason']!;
+  assert.equal(reasonProp['type'], 'string');
+  assert.equal(reasonProp['minLength'], 1);
+  assert.equal(reasonProp['maxLength'], 2000);
+  assert.equal(reasonProp['minimum'], undefined, '★ string 不得包含 minimum');
+  assert.equal(reasonProp['maximum'], undefined, '★ string 不得包含 maximum');
+
+  const setCycle = AGENT_TOOL_SPECS.find((t) => t.name === 'set_cycle_interval');
+  assert.ok(setCycle);
+  const minutesProp = (setCycle.parameters['properties'] as Record<string, Record<string, unknown>>)['minutes']!;
+  assert.equal(minutesProp['type'], 'number');
+  assert.equal(minutesProp['minimum'], 1);
+  assert.equal(minutesProp['maximum'], 1440);
+  assert.equal(minutesProp['minLength'], undefined);
+});
+
+test('★★ validateArgs：object 参数支持合法 JSON 对象字符串（兼容 Gemini STRING 回退）并拒绝数组/非法串', () => {
+  const spec = AGENT_TOOLS.find((t) => t.name === 'set_params')!;
+  const okFromJsonStr = validateArgs(spec, {
+    patch: '{"coinSource":{"coinPoolLimit":6}}',
+    reason: '收窄候选池',
+  });
+  assert.equal(okFromJsonStr.ok, true);
+  if (okFromJsonStr.ok) {
+    assert.deepEqual(okFromJsonStr.value.patch, { coinSource: { coinPoolLimit: 6 } });
+  }
+
+  assert.equal(validateArgs(spec, { patch: '[1,2]', reason: 'x' }).ok, false, 'JSON 数组字符串必须被拒绝');
+  assert.equal(validateArgs(spec, { patch: [1, 2], reason: 'x' }).ok, false, '原生数组必须被拒绝');
+  assert.equal(validateArgs(spec, { patch: 'not-json', reason: 'x' }).ok, false, '非 JSON 字符串必须被拒绝');
 });

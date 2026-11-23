@@ -693,3 +693,40 @@ test('★ 元素极多时不炸栈 —— `Math.min(...seen)` 会在约 12.5 万
   assert.doesNotThrow(() => extractNextCheckMinutes(items), '不得再抛 RangeError');
   assert.equal(extractNextCheckMinutes(items), 3, '改写成循环之后，取最小的语义必须保持');
 });
+
+test('★ 合法 JSON 字符串里含中文弯引号时不该被 repairEncoding 破坏', () => {
+  const raw = `<reasoning>分析完毕</reasoning>
+<decision>
+[
+  {
+    "symbol": "BTCUSDT",
+    "action": "open_long",
+    "leverage": 5,
+    "position_size_usd": 100,
+    "stop_loss": 65000,
+    "take_profit": 75000,
+    "confidence": 82,
+    "reasoning": "突破“前高阻力”后放量回踩确认"
+  }
+]
+</decision>`;
+  const parsed = parseDecisionResponse(raw, context());
+  assert.equal(parsed.decisions.length, 1);
+  assert.equal(parsed.decisions[0]?.symbol, 'BTCUSDT');
+  assert.ok(parsed.decisions[0]?.reasoning.includes('前高阻力'));
+});
+
+test('★ 文本前出现非 JSON 方括号如 [提示] 时仍能提取后面的合法决策数组', () => {
+  const raw = `[提示] 本轮仅关注 BTC：
+[
+  {
+    "symbol": "BTCUSDT",
+    "action": "wait",
+    "confidence": 60,
+    "reasoning": "量能不足，继续观察"
+  }
+]`;
+  const parsed = parseDecisionResponse(raw, context());
+  assert.equal(parsed.decisions.length, 1);
+  assert.equal(parsed.decisions[0]?.action, 'wait');
+});

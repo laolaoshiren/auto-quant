@@ -38,7 +38,7 @@ import { api, type AgentAudit } from '../lib/api';
 import { fmtSigned, pnlColor } from '../lib/format';
 import { usePolled } from '../lib/hooks';
 import { plainText } from '../lib/plainText';
-import { Panel } from './ui';
+import { ErrorNote, Panel } from './ui';
 
 /** 把 ISO 时刻显示成 `MM-DD HH:MM`。 */
 function stamp(iso: string | null | undefined): string {
@@ -214,8 +214,17 @@ export function AgentAuditPanel({ traderId }: { traderId: number }): React.React
       </button>
       {open && (
         <div className="border-t border-base-700">
-          {query.loading && data === undefined ? (
+          {query.error !== null && data !== null && (
+            <div className="px-3 pt-2">
+              <ErrorNote>最新智能体审计读取失败：{query.error}</ErrorNote>
+            </div>
+          )}
+          {query.loading && data === null ? (
             <div className="px-3 py-3 text-base text-ink-faint">正在读取…</div>
+          ) : query.error !== null && data === null ? (
+            <div className="px-3 py-3">
+              <ErrorNote>读取智能体审计失败：{query.error}</ErrorNote>
+            </div>
           ) : total === 0 ? (
             <div className="px-3 py-3 text-base text-ink-faint">
               还没有审计记录。机器人跑过一轮、或 AI 调整过一次参数之后，这里就会有内容。

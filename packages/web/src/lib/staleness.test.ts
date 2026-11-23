@@ -13,9 +13,11 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { STALE_POLL_MULTIPLIER, staleness } from './staleness';
+import { STALE_POLL_MULTIPLIER, staleWakeDelayMs, staleness } from './staleness';
+import { codeOnlyCss as codeOnly } from '../testUtils/cssText.js';
 
 const NOW = Date.parse('2026-10-17T08:00:00+08:00'); // 本地时区 08:00:00
 
@@ -59,4 +61,19 @@ test('★ 时钟倒流（负数秒）不产生负读数', () => {
   const future = staleness(NOW + 5_000, null, 10_000, NOW);
   assert.equal(future.seconds, 0, '本地时钟回拨时显示 0 秒，不显示 -5 秒');
   assert.equal(future.stale, false);
+});
+
+test('★★★ staleWakeDelayMs：正常轮询期间不每秒唤醒，仅跨过 3× 阈值才醒来', () => {
+  assert.equal(staleWakeDelayMs(null, 10_000, NOW), null, '从未成功加载时不挂定时器');
+  assert.equal(staleWakeDelayMs(NOW - 5_000, 10_000, NOW), 25_020, '阈值内只在跨阈值那一刻醒来');
+  assert.equal(staleWakeDelayMs(NOW - 30_000, 10_000, NOW), 20, '恰好在边界上仍等待越界');
+  assert.equal(staleWakeDelayMs(NOW - 30_001, 10_000, NOW), 0, '已超阈值立即唤醒进入每秒读秒');
+
+  const shellDataSrc = codeOnly(
+    readFileSync(new URL('../templates/lib/useShellData.ts', import.meta.url), 'utf8'),
+  );
+  assert.ok(
+    !/useTicker\s*\(\s*1000\s*\)/.test(shellDataSrc),
+    '★ useShellData 不得再无条件调用 useTicker(1000) 驱动全壳每秒无效重渲染',
+  );
 });

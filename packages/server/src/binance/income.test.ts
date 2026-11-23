@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { BinanceIncome, BinanceUserTrade } from './types.js';
 import type { BinanceRest } from './rest.js';
 import {
+  commissionsInFills,
   commissionsInWindow,
   fetchIncome,
   fundingInWindow,
@@ -414,4 +415,45 @@ test('非结算资产手续费按币种归并（同一资产多条成交只报�
   assert.equal(foreign[0]?.asset, 'BNB');
   /* 浮点加法不是精确的 —— 断言近似，不把 0.00030000000000000003 当成错的。 */
   assert.ok(Math.abs((foreign[0]?.amount ?? 0) - 0.0003) < 1e-12);
+});
+
+test('★ summarizeIncome 排除 BNB 等非结算资产计价的 COMMISSION，避免与 USDT 直接相加', () => {
+  const summary = summarizeIncome([
+    income({ incomeType: 'REALIZED_PNL', income: '1.00', asset: 'USDT', time: 1000 }),
+    income({ incomeType: 'COMMISSION', income: '-0.05', asset: 'USDT', time: 1001 }),
+    income({ incomeType: 'COMMISSION', income: '-0.0002', asset: 'BNB', time: 1002 }),
+  ]);
+  assert.ok(Math.abs(summary.commission - -0.05) < 1e-12, `BNB 佣金不得混入 USDT：实得 ${summary.commission}`);
+  assert.ok(Math.abs(summary.netTradingIncome - 0.95) < 1e-12);
+});
+
+test('★ commissionsInFills 按 tradeId 精确匹配结算资产手续费并去重', () => {
+  const claimed = new Set<string>();
+  const events = [
+    income({ incomeType: 'COMMISSION', income: '-0.04', asset: 'USDT', time: 1000, tradeId: 'f1' }),
+    income({ incomeType: 'COMMISSION', income: '-0.06', asset: 'USDT', time: 2000, tradeId: 'f2' }),
+    income({ incomeType: 'COMMISSION', income: '-0.50', asset: 'USDT', time: 1500, tradeId: 'other' }),
+    income({ incomeType: 'COMMISSION', income: '-0.001', asset: 'BNB', time: 1600, tradeId: 'f1' }),
+  ];
+  const first = commissionsInFills(
+    events,
+    ['f1', 'f2'],
+    new Date(1000).toISOString(),
+    new Date(2000).toISOString(),
+    claimed,
+  );
+  assert.equal(first.matched, 2);
+  assert.ok(Math.abs(first.entryFee - 0.04) < 1e-12);
+  assert.ok(Math.abs(first.exitFee - 0.06) < 1e-12);
+
+  // 同一 fillId 被第二腿再次查询时去重，不重复计费
+  const dup = commissionsInFills(
+    events,
+    ['f2'],
+    new Date(1000).toISOString(),
+    new Date(2000).toISOString(),
+    claimed,
+  );
+  assert.equal(dup.matched, 0);
+  assert.equal(dup.entryFee + dup.exitFee, 0);
 });

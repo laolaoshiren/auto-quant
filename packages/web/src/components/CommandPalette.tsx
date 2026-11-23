@@ -82,11 +82,12 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
   const refreshTraders = useApp((s) => s.refreshTraders);
   const refreshSystem = useApp((s) => s.refreshSystem);
   const notify = useEvents((s) => s.notify);
-  const { runOnce, busyId } = useRunOnce();
+  const { runOnce, busyId: runOnceBusyId } = useRunOnce();
 
   const [query, setQuery] = useState('');
   const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
+  const [actionBusyId, setActionBusyId] = useState<number | null>(null);
 
   // 策略列表只有这里需要，所以只在面板打开时拉一次；关掉就不要再轮询。
   const strategiesQuery = usePolled((signal) => api.strategies(signal), { enabled: open });
@@ -140,6 +141,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       setQuery('');
       setPending(null);
       setBusy(false);
+      setActionBusyId(null);
     }
   }, [open]);
 
@@ -150,6 +152,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
 
   const stopBot = async (trader: TraderRow) => {
     setBusy(true);
+    setActionBusyId(trader.id);
     try {
       await api.stopTrader(trader.id);
       await refreshTraders();
@@ -160,11 +163,14 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       notify({ kind: 'error', title: `「${trader.name}」停止失败`, body: (error as Error).message });
     } finally {
       setBusy(false);
+      setActionBusyId(null);
     }
   };
 
   const startBot = async (trader: TraderRow) => {
+    if (busy || actionBusyId === trader.id) return;
     setBusy(true);
+    setActionBusyId(trader.id);
     try {
       /* 运行模式在创建时就已固定，启动不再选择（2026-11-10）。 */
       const fixedDryRun = trader.dryRun ?? true;
@@ -197,6 +203,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       });
     } finally {
       setBusy(false);
+      setActionBusyId(null);
     }
   };
 
@@ -342,7 +349,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                     </Command.Group>
                   )}
 
-                  {(running.length > 0 || stopped.length > 0) && (
+                  {(running.length > 0 || starting.length > 0 || stopped.length > 0) && (
                     <Command.Group heading="机器人操作" className={GROUP_CLASS}>
                       {starting.map((trader) => (
                         <Command.Item
@@ -360,36 +367,39 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                         <Command.Item
                           key={`stop-${trader.id}`}
                           value={`停止 ${trader.name} stop ${trader.id}`}
-                          disabled={busy}
+                          disabled={busy || actionBusyId === trader.id}
                           className={ITEM_CLASS}
                           onSelect={() => setPending({ kind: 'stop', trader })}
                         >
                           <Square aria-hidden className="h-4 w-4 shrink-0 text-down" />
                           <span className="min-w-0 flex-1 truncate">停止「{trader.name}」</span>
-                          {busyId === trader.id && <LoaderCircle aria-hidden className="h-3.5 w-3.5 animate-spin" />}
+                          {actionBusyId === trader.id && <LoaderCircle aria-hidden className="h-3.5 w-3.5 animate-spin" />}
                         </Command.Item>
                       ))}
                       {running.map((trader) => (
                         <Command.Item
                           key={`once-${trader.id}`}
                           value={`立即执行 周期 ${trader.name} run once ${trader.id}`}
+                          disabled={busy || runOnceBusyId === trader.id}
                           className={ITEM_CLASS}
                           onSelect={() => setPending({ kind: 'run-once', trader })}
                         >
                           <Play aria-hidden className="h-4 w-4 shrink-0 text-accent" />
                           <span className="min-w-0 flex-1 truncate">立即执行一次周期「{trader.name}」</span>
-                          {busyId === trader.id && <LoaderCircle aria-hidden className="h-3.5 w-3.5 animate-spin" />}
+                          {runOnceBusyId === trader.id && <LoaderCircle aria-hidden className="h-3.5 w-3.5 animate-spin" />}
                         </Command.Item>
                       ))}
                       {stopped.map((trader) => (
                         <Command.Item
                           key={`start-${trader.id}`}
                           value={`启动 ${trader.name} start ${trader.id}`}
+                          disabled={busy || actionBusyId === trader.id}
                           className={ITEM_CLASS}
                           onSelect={() => void startBot(trader)}
                         >
                           <Play aria-hidden className="h-4 w-4 shrink-0 text-up" />
                           <span className="min-w-0 flex-1 truncate">启动「{trader.name}」</span>
+                          {actionBusyId === trader.id && <LoaderCircle aria-hidden className="h-3.5 w-3.5 animate-spin" />}
                         </Command.Item>
                       ))}
                     </Command.Group>

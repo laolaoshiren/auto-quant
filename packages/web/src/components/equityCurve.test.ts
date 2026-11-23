@@ -23,6 +23,7 @@ import test from 'node:test';
 import {
   axisTicks,
   hasEquityVariation,
+  padEquityPoints,
   rangeSpanMs,
   EQUITY_BUCKET_MS,
   CHART_INK,
@@ -317,4 +318,62 @@ test('采样桶是 1 分钟 —— 它决定 1D 窗口里能有多少个点', ()
    */
   assert.equal(EQUITY_BUCKET_MS, 60_000);
   assert.equal(rangeSpanMs('1D') / EQUITY_BUCKET_MS, 1440);
+});
+
+/* -------------------------------------------------------------------------- */
+/*  数据不足补齐：range='ALL' 且快照 < 2 时绝不产生 -Infinity / NaN            */
+/* -------------------------------------------------------------------------- */
+
+test('★★★ padEquityPoints：range=ALL 且 0 个快照时不产生 -Infinity 或 NaN', () => {
+  const now = Date.parse('2026-11-23T12:00:00.000Z');
+  const padded = padEquityPoints([], 'ALL', 100, now);
+
+  assert.equal(padded.length, 2, '空序列应补成 2 个水平参考点');
+  for (const pt of padded) {
+    assert.ok(Number.isFinite(pt.t), `时间戳必须有限，不能是 -Infinity / NaN（实际 ${pt.t}）`);
+    assert.ok(Number.isFinite(pt.equity), `权益必须有限（实际 ${pt.equity}）`);
+    assert.equal(pt.equity, 100);
+  }
+  assert.ok(padded[0]!.t < padded[1]!.t, '两个参考点必须严格升序');
+  assert.equal(padded[1]!.t - padded[0]!.t, 24 * 60 * 60_000, 'ALL 兜底跨度为 24h');
+
+  const ticks = axisTicks(padded, 'ALL');
+  for (const t of ticks) {
+    assert.ok(Number.isFinite(t), `axisTicks 不得产出非有限刻度（实际 ${t}）`);
+  }
+});
+
+test('★★★ padEquityPoints：range=ALL 且仅有 1 个快照时仅在左侧补点且无非有限值', () => {
+  const only = {
+    t: Date.parse('2026-11-23T10:00:00.000Z'),
+    equity: 256.42,
+    unrealizedPnl: 1.5,
+    openPositions: 1,
+  };
+  const padded = padEquityPoints([only], 'ALL', 200);
+
+  assert.equal(padded.length, 2);
+  assert.ok(Number.isFinite(padded[0]!.t) && Number.isFinite(padded[1]!.t), '所有时间戳必须有限');
+  assert.ok(padded[0]!.t < padded[1]!.t, '补齐点必须在原快照左侧（严格升序）');
+  assert.deepEqual(padded[1], only, '原快照保持在末端不变');
+  assert.equal(padded[0]!.equity, only.equity, '单点水平线高度等于该快照权益');
+});
+
+test('★★ padEquityPoints：固定区间与 >=2 点边界行为正确，且 DashboardCharts 已接入', () => {
+  const now = Date.parse('2026-11-23T12:00:00.000Z');
+  const padded1d = padEquityPoints([], '1D', 50, now);
+  assert.equal(padded1d.length, 2);
+  assert.equal(padded1d[1]!.t - padded1d[0]!.t, 24 * 60 * 60_000);
+
+  const pair = [
+    { t: now - 60_000, equity: 10 },
+    { t: now, equity: 12 },
+  ];
+  assert.deepEqual(padEquityPoints(pair, 'ALL', 10, now), pair, '已有 >=2 点时原样返回');
+
+  const dashboardSrc = readFileSync(new URL('./DashboardCharts.tsx', import.meta.url), 'utf8');
+  assert.ok(
+    /padEquityPoints\(/.test(dashboardSrc),
+    '★ DashboardCharts 必须走 padEquityPoints 兜底，避免 ALL + <2 点时算出 now - Infinity',
+  );
 });

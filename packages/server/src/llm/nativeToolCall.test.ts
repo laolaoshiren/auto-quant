@@ -33,6 +33,7 @@ import * as anthropic from '../llm/anthropic.js';
 import * as gemini from '../llm/gemini.js';
 import * as openai from '../llm/openaiCompatible.js';
 import type { ChatMessage, ToolSpec } from '../llm/types.js';
+import { AGENT_TOOL_SPECS } from '../trader/agent/tools.js';
 
 const TOOLS: ToolSpec[] = [
   {
@@ -379,4 +380,110 @@ test('★★★ 改造后三种 adapter 的响应形状一致（上游只需一�
     assert.equal(typeof parsed.toolCalls?.[0]?.arguments, 'string', `★ ${label} 的参数都是字符串`);
     assert.equal(parsed.finishReason, 'tool_calls', `★ ${label} 的 finishReason 一致`);
   }
+});
+
+test('★★★ Anthropic & Gemini：连续多条 tool 消息必须合并为单条 user turn', () => {
+  /*
+   * 防 bug：并行工具调用回传 2 条 `{ role: 'tool' }` 消息时，若逐条映射为独立
+   * `user` turn，Anthropic 和 Gemini 都会因连续同 role 或缺少完整配对而拒绝请求。
+   */
+  const parallelMsgs: ChatMessage[] = [
+    { role: 'user', content: '查绩效和教训' },
+    {
+      role: 'assistant',
+      content: '',
+      toolCalls: [
+        { id: 'c1', name: 'get_performance', arguments: '{"window":"7d"}' },
+        { id: 'c2', name: 'get_lessons', arguments: '{"limit":5}' },
+      ],
+    },
+    { role: 'tool', content: '{"net":1}', toolCallId: 'c1', toolName: 'get_performance' },
+    { role: 'tool', content: '{"rows":[]}', toolCallId: 'c2', toolName: 'get_lessons' },
+  ];
+
+  const aBody = anthropic.buildBody('claude-sonnet-5-5', parallelMsgs, { tools: TOOLS });
+  const aMessages = aBody['messages'] as Array<{ role: string; content: unknown }>;
+  assert.equal(aMessages.length, 3, '★ Anthropic 只能有 user → assistant → 1 条合并的 user');
+  assert.equal(aMessages[2]?.role, 'user');
+  const aBlocks = aMessages[2]?.content as Array<Record<string, unknown>>;
+  assert.equal(aBlocks.length, 2, '★ 两条 tool_result 必须合并在同一个 content[] 中');
+  assert.equal(aBlocks[0]?.['tool_use_id'], 'c1');
+  assert.equal(aBlocks[1]?.['tool_use_id'], 'c2');
+
+  const gBody = gemini.buildBody(parallelMsgs, { tools: TOOLS });
+  const gContents = gBody['contents'] as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
+  assert.equal(gContents.length, 3, '★ Gemini 只能有 user → model → 1 条合并的 user');
+  assert.equal(gContents[2]?.role, 'user');
+  assert.equal(gContents[2]?.parts.length, 2, '★ 两条 functionResponse 必须合并在同一个 parts[] 中');
+  assert.equal((gContents[2]?.parts[0]?.['functionResponse'] as Record<string, unknown>)?.['name'], 'get_performance');
+  assert.equal((gContents[2]?.parts[1]?.['functionResponse'] as Record<string, unknown>)?.['name'], 'get_lessons');
+});
+
+test('★★★ Anthropic：tool_use.input 解析出非纯对象（数组/原始值/null）时回退为 {}', () => {
+  /*
+   * 防 bug：历史消息中若模型曾吐出 `[1,2]` / `"str"` / `null` 作为 arguments，
+   * `JSON.parse` 不会抛错，但 Anthropic 要求 `tool_use.input` 必须是 JSON 对象。
+   */
+  const msgs: ChatMessage[] = [
+    { role: 'user', content: 'run' },
+    {
+      role: 'assistant',
+      content: '',
+      toolCalls: [
+        { id: 'c1', name: 't1', arguments: '[1,2]' },
+        { id: 'c2', name: 't2', arguments: 'null' },
+        { id: 'c3', name: 't3', arguments: '"raw"' },
+        { id: 'c4', name: 't4', arguments: '{"ok":true}' },
+      ],
+    },
+  ];
+  const body = anthropic.buildBody('claude-sonnet-5-5', msgs, { tools: TOOLS });
+  const messages = body['messages'] as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+  const blocks = messages[1]!.content;
+  assert.deepEqual(blocks[0]?.['input'], {});
+  assert.deepEqual(blocks[1]?.['input'], {});
+  assert.deepEqual(blocks[2]?.['input'], {});
+  assert.deepEqual(blocks[3]?.['input'], { ok: true });
+});
+
+test('★★★ Gemini：AGENT_TOOL_SPECS 转换后不含非法空 OBJECT（get_current_params / set_params.patch）', () => {
+  /*
+   * 防 bug：Gemini 拒绝所有 `type: 'OBJECT'` 但缺 `properties` 或 `properties: {}` 的 schema
+   * (`properties: should be non-empty for OBJECT type`)。
+   * 覆盖全部真实智能体工具声明，确保无参工具省略 `parameters`，自由对象 `set_params.patch` 不产生空 OBJECT。
+   */
+  const body = gemini.buildBody([{ role: 'user', content: 'hi' }], { tools: AGENT_TOOL_SPECS });
+  const decls = (body['tools'] as Array<{ functionDeclarations: Array<Record<string, unknown>> }>)[0]!
+    .functionDeclarations;
+
+  const getCurrentParams = decls.find((d) => d['name'] === 'get_current_params');
+  assert.ok(getCurrentParams, '★ get_current_params 必须存在');
+  assert.equal(getCurrentParams['parameters'], undefined, '★ 无参工具按 Gemini 规范省略 parameters');
+
+  const setParams = decls.find((d) => d['name'] === 'set_params');
+  assert.ok(setParams, '★ set_params 必须存在');
+  const patchSchema = ((setParams['parameters'] as Record<string, unknown>)['properties'] as Record<string, unknown>)[
+    'patch'
+  ] as Record<string, unknown>;
+  assert.notEqual(patchSchema['type'], 'OBJECT', '★ 无固定 properties 的 patch 不得生成非法空 OBJECT');
+  assert.equal(patchSchema['type'], 'STRING');
+
+  /* 递归校验所有 declaration 的任意层级 schema 都不得出现空 OBJECT */
+  const assertNoEmptyObject = (node: unknown, path: string): void => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach((item, i) => assertNoEmptyObject(item, `${path}[${i}]`));
+      return;
+    }
+    const rec = node as Record<string, unknown>;
+    if (rec['type'] === 'OBJECT') {
+      const props = rec['properties'];
+      assert.ok(
+        props && typeof props === 'object' && !Array.isArray(props) && Object.keys(props).length > 0,
+        `★ ${path} 不得是空 OBJECT`,
+      );
+    }
+    for (const [k, v] of Object.entries(rec)) assertNoEmptyObject(v, `${path}.${k}`);
+  };
+  for (const d of decls) assertNoEmptyObject(d['parameters'], String(d['name']));
 });

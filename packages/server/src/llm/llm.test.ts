@@ -15,7 +15,8 @@ import {
   kindForStatus,
 } from './errors.js';
 import { joinUrl, parseRetryAfter } from './http.js';
-import { backoffDelayMs } from './client.js';
+import { backoffDelayMs, LlmClient } from './client.js';
+import { discoverModels } from './discovery.js';
 import { normalizeUsage, splitSystem, type ChatMessage } from './types.js';
 
 type JsonObject = Record<string, unknown>;
@@ -839,4 +840,160 @@ test('★ 缓存 token：OpenAI 与 DeepSeek 两种口径都要读出来', () =>
   );
   // 两个都没有 → null（不知道），而不是伪装成 0
   assert.equal(normalizeUsage({ prompt_tokens: 10, completion_tokens: 1 }).cachedTokens, null);
+});
+
+test('★★★ LlmClient：重试退避 sleep 收到 signal 取消时立即中断，不白等退避时间', async () => {
+  /*
+   * 防 bug：旧代码 `await sleep(delayMs)` 没接 `options.signal`，
+   * 遇到 429 `Retry-After: 30` 后即使上层取消信号触发，协程仍挂死 30 秒。
+   */
+  const origFetch = globalThis.fetch;
+  let calls = 0;
+  const controller = new AbortController();
+  globalThis.fetch = (async () => {
+    calls += 1;
+    /* 15ms 后触发取消 —— 若 sleep 未接 signal 会等满 30 秒 */
+    setTimeout(() => controller.abort(new Error('user cancelled')), 15);
+    return new Response('{"error":{"message":"rate limit"}}', {
+      status: 429,
+      headers: { 'retry-after': '30', 'content-type': 'application/json' },
+    });
+  }) as typeof globalThis.fetch;
+
+  try {
+    const client = new LlmClient({
+      provider: 'deepseek',
+      apiKey: 'test-key',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-chat',
+      maxRetries: 3,
+    });
+    const t0 = Date.now();
+    await assert.rejects(
+      () => client.chat([{ role: 'user', content: 'hi' }], { signal: controller.signal }),
+      (err: unknown) => err instanceof LlmError && !err.retryable && err.message.startsWith('Aborted:'),
+    );
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed < 2000, `★ 取消必须立即打断 30s 退避（实际 ${elapsed}ms）`);
+    assert.equal(calls, 1, '取消后不得发起第二次请求');
+
+    /* 已取消的 signal 在循环首行即应直接抛出，一次请求都不发 */
+    await assert.rejects(
+      () => client.chat([{ role: 'user', content: 'hi' }], { signal: controller.signal }),
+      (err: unknown) => err instanceof LlmError && !err.retryable && err.message.startsWith('Aborted:'),
+    );
+    assert.equal(calls, 1, '★ 预先已取消的 signal 不应发出任何请求');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('★★★ LlmClient：上下文超长/schema 400 不得误关 streamDisabled 或误删 reasoningEffort', async () => {
+  /*
+   * 防 bug：旧代码见到任何 `bad_request` 就盲目去掉 `reasoningEffort` 并永久设置
+   * `streamDisabled = true`，导致一次上下文超长 400 永久把客户端打回非流式（引发 524）。
+   */
+  const origFetch = globalThis.fetch;
+  const seenCalls: Array<{ isStream: boolean; body: Record<string, unknown> }> = [];
+  let mode: 'context_length' | 'stream_err' | 'ok' = 'context_length';
+  globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
+    const parsed = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    const isStream = headers['accept'] === 'text/event-stream';
+    seenCalls.push({ isStream, body: parsed });
+    if (mode === 'context_length') {
+      return new Response(
+        JSON.stringify({ error: { message: "This model's maximum context length is 128000 tokens" } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (mode === 'stream_err' && isStream) {
+      return new Response(
+        JSON.stringify({ error: { message: 'Unknown parameter: stream_options' } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        model: 'deepseek-chat',
+        choices: [{ finish_reason: 'stop', message: { content: 'ok' } }],
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof globalThis.fetch;
+
+  try {
+    const client = new LlmClient({
+      provider: 'deepseek',
+      apiKey: 'test-key',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-chat',
+      reasoningEffort: 'high',
+      maxRetries: 2,
+    });
+
+    /* ① 上下文超长 400：直接失败，不重试，不改 reasoningEffort / streamDisabled */
+    await assert.rejects(
+      () => client.chat([{ role: 'user', content: 'too long' }]),
+      (err: unknown) => err instanceof LlmError && err.kind === 'bad_request',
+    );
+    assert.equal(seenCalls.length, 1, '★ 无关 400 不应触发降级重试');
+    assert.equal(seenCalls[0]!.isStream, true);
+    assert.equal(seenCalls[0]!.body['reasoning_effort'], 'high');
+
+    /* ② 下一次调用仍保留流式和 reasoning_effort=high，且遇到 stream_options 400 才降级 */
+    mode = 'stream_err';
+    const res = await client.chat([{ role: 'user', content: 'normal' }]);
+    assert.equal(res.text, 'ok');
+    assert.equal(seenCalls.length, 3, '★ stream_options 400 应触发 1 次非流式降级重试');
+    assert.equal(seenCalls[1]!.isStream, true, '第二次调用起手仍是流式（未被上次无关 400 污染）');
+    assert.equal(seenCalls[1]!.body['reasoning_effort'], 'high', 'reasoning_effort 未被无关 400 误删');
+    assert.equal(seenCalls[2]!.isStream, false, '确认 stream_options 错误后降级为非流式');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('★★ discoverModels：custom 提供商允许无 apiKey 拉取清单，且 Gemini 错误不泄露明文 key=', async () => {
+  /*
+   * 防 bug：
+   *   1) `custom` 本地网关（Ollama/vLLM）常无需 apiKey，旧代码直接拦截；
+   *   2) Gemini 用 `?key=<secret>` 鉴权，网络报错若原样打印 URL 会把明文密钥打进日志和前端提示。
+   */
+  const origFetch = globalThis.fetch;
+  let capturedAuth: string | undefined;
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    const url = String(input);
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    capturedAuth = headers['Authorization'] ?? headers['authorization'];
+    if (url.includes('generativelanguage.googleapis.com')) {
+      throw new Error(`connect ECONNREFUSED ${url}`);
+    }
+    return new Response(JSON.stringify({ data: [{ id: 'llama-3.3-70b' }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as unknown as typeof globalThis.fetch;
+
+  try {
+    const customRes = await discoverModels({
+      provider: 'custom',
+      apiKey: '',
+      baseUrl: 'https://gateway.example.com/v1',
+    });
+    assert.equal(customRes.ok, true, '★ custom 无 apiKey 应允许拉取模型清单');
+    assert.equal(customRes.models[0]?.id, 'llama-3.3-70b');
+    assert.equal(capturedAuth, undefined, '无 apiKey 时不发送空的 Authorization 头');
+
+    const secret = 'AIzaSySecretTestKey123456';
+    const geminiRes = await discoverModels({
+      provider: 'gemini',
+      apiKey: secret,
+    });
+    assert.equal(geminiRes.ok, false);
+    assert.ok(!geminiRes.message.includes(secret), `★ 错误信息不得泄露 Gemini 密钥：${geminiRes.message}`);
+    assert.match(geminiRes.message, /key=\*\*\*/, '★ query-key 必须被打码成 key=***');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });

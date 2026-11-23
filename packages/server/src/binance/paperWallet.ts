@@ -138,7 +138,8 @@ export function paperPositionTotals(
     marginUsed += finite(position.margin_used);
 
     const mark = marks.get(position.symbol);
-    if (mark === undefined) continue;
+    /* 过滤 0/负数/NaN 标记价，避免无效标记价算出 -100% 假亏损。 */
+    if (typeof mark !== 'number' || !Number.isFinite(mark) || mark <= 0) continue;
 
     const diff =
       position.side === 'long'
