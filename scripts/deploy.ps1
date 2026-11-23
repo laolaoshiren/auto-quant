@@ -1,4 +1,4 @@
-# 部署到远程服务器
+﻿# 部署到远程服务器
 #
 #   pwsh -File scripts/deploy.ps1 -Server my-server
 #   pwsh -File scripts/deploy.ps1 -Server my-server -PublicUrl https://quant.example.com
@@ -98,7 +98,10 @@ $excludes = @(    '--exclude=./.env',                 # ← 关键：绝不覆�
     #
     # 服务器需要的是**运行代码**，备份留在本地就够（它本来就是"本地完整"的保险）。
     '--exclude=./.dsh', '--exclude=./.agent-teams',   # 团队协作状态：含凭 brief 生成的 team.json 与 inbox，其中有部署者环境信息
-    '--exclude=./_deploy.tar.gz'
+    '--exclude=./packages/web/ui-audit',
+    '--exclude=./packages/web/ui-smoke',
+    '--exclude=./_deploy.tar.gz',
+    '--exclude=./_deploy-*.tar.gz'
     # 注意：dist **不排除** —— 本地构建好一起传，见文件顶部说明。
 )
 
