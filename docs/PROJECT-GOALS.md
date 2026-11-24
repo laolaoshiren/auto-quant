@@ -28,13 +28,12 @@
 ④ 体验（界面、易用性、性能）—— 最后
 ```
 
-## 3. 当前阶段（2026-11 基线）
+## 3. 当前阶段（2026-11-24 基线）
 
-- 版本 **v0.2.0**，核心链路「自然语言策略 → 硬风控 → 执行 → 完整审计」已实盘验证。
-- 四种运行模式：固定策略 / AI 托管 / 多智能体团队 / JEV（实验性）。
-- **2026-11 完成了一轮"地基加固"**：模拟盘可信化（撮合/守卫/成本口径）、信号健康度接线、
-  运行期配置守卫、文档归档与工程校准、DSH 多 Agent 工作流手册。
-- **后续开发以本地模拟盘为主**；实盘验证只在服务器上用**子账号**做。
+- 版本 **v0.2.0**，核心链路「双交易所（Binance / Gate）执行 → 统一硬风控 → 对账 → 完整审计」已实盘/测试网验证。
+- **主攻方向：智能托管 2.0（`ai_managed`）** —— 按 [`AI-MANAGED-2.0-SPEC.md`](AI-MANAGED-2.0-SPEC.md) 与 [`ADR-0005`](decisions/ADR-0005-ai-managed-2-architecture.md) 推进：复用稳健底座，新建独立 `radar/`（自研 AI500 雷达 + 筹码结构 + 15m Δ）与 `managed/`（精简上下文 + 三段式决策 + 持仓论点 `thesis` + 反例衰减记忆）内核接管 `ai_managed`，追求高信噪比、大盈亏比与严格物理风控底线。
+- 其余模式定位：`strategy`（固定策略）保留作为实盘对照组；`jev` 已停用待后续清理；`ai_team` 保持暂缓等待整体重构。
+- **测试环境以服务器为主**（本地仅做单元/类型/构建/模拟校验）；实盘测试只用**子账号**，主账户绝不动。
 
 ## 4. 明确不做 / 暂缓（避免重复讨论）
 
@@ -102,6 +101,7 @@ node scripts/generate-notices.mjs --check   # 改依赖时
 | 工程不变量与禁止项 | [`AGENTS.md`](AGENTS.md) |
 | 为什么这样设计 | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | 改哪个文件 | [`MODULES.md`](MODULES.md) |
+| 智能托管 2.0 架构与里程碑总表 | [`AI-MANAGED-2.0-SPEC.md`](AI-MANAGED-2.0-SPEC.md) |
 | 历史教训（按主题） | `.dsh/ENGINEERING-LESSONS.md`（本地） |
 | 交易循环拆分计划 | [`REFACTOR-autoTrader.md`](REFACTOR-autoTrader.md) |
 | 路线图 | [`../ROADMAP.md`](../ROADMAP.md) |

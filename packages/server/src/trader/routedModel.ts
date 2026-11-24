@@ -149,32 +149,9 @@ const T1_LADDER: readonly string[] = [
   /* 免费 + 524K；小 prompt 1.15–1.37s、2.2 万字符材料 1.54–2.50s；三项测验全通过。 */
   'opencode-zen-free/space-bunny-free',
   /*
-   * 免费路由组，实测 1.41–1.43s。
-   *
-   * ⚠️ **id 从 `group/auto-space-bunny-free` 改成了 `group/auto-space-bunny`**
-   * （2026-10-18 实测 · 线上网关）。
-   *
-   * 带 `-free` 的那个**在线上已经不存在了**：
-   * ```
-   *   线上网关（172.19.0.1:3425）329 个模型里，含 space-bunny 的只有：
-   *     group/auto-space-bunny        ← 现名
-   *     opencode-go/space-bunny
-   *     workbuddy/space-bunny
-   *     opencode-zen-free/space-bunny-free
-   *   `group/auto-space-bunny-free` 查无此项。
-   * ```
-   *
-   * ## 这个改动**必须**配着 `resolveLadder()` 一起用
-   *
-   * 手工维护 id 会一直这样烂下去（这正是本文件开头那段"链上的 id 会失效，
-   * 而不会有任何测试因此变红"说的事）。现在启动时会用 `/v1/models` 过滤掉
-   * 不存在的 id 并写 warn —— 这条改动只是把**已知**的那个修对，
-   * **真正的防线是那次过滤**。
-   */
-  'group/auto-space-bunny',
-  /*
    * 原来的体力活兜底组：线上实测 1.19–1.39s（三项测验只测了契约，通过）。
    * 保留它是因为它自带网关级跨供应商故障转移 —— 那是我这三条免费模型没有的能力。
+   * （2026-11-24 已移除线上网关不再存在的 `group/auto-space-bunny`。）
    */
   'group/team-grunt',
   /* 再兜一层：分析组（线上 1.15–1.51s；契约测验通过）。 */
@@ -198,9 +175,7 @@ const T2_LADDER: readonly string[] = [
    * 线上 1.82–2.07s。⚠️ 因为只有 200K，它**不当"可能读超长材料"角色的链首**。
    */
   'opencode-zen-free/deepseek-v4.1-flash-free',
-  /* 免费组，1.41–1.43s；契约 3/3。**id 见 T1 链上那段说明**（`-free` 后缀已不存在）。 */
-  'group/auto-space-bunny',
-  /* 兜底：原来的分析组（线上 1.15–1.51s）。 */
+  /* 兜底：原来的分析组（线上 1.15–1.51s）。（2026-11-24 已移除网关不存在的 `group/auto-space-bunny`。） */
   'group/team-analyst',
   /* 再兜一层：原来的体力活组（"单组一次 5xx 就让整档不可用"的教训仍成立）。 */
   'group/team-grunt',
@@ -215,24 +190,11 @@ const T2_LADDER: readonly string[] = [
  */
 const T3_LADDER: readonly string[] = [
   /*
-   * 首席：线上实测**又准又不慢**的那一个 —— 规则算术 3/3、JSON 数组契约 3/3，
-   * 小 prompt 1.54–2.40s、2.2 万字符材料 1.89–10.30s。
-   * 在它之前我原以为首席该是 `gpt-6-astra`，**那条结论建立在错的网关上了**（见下）。
+   * 2026-11-24 清理：移除线上网关不再存在的 4 个旧 `group/auto-*` 组名
+   *（`auto-glm-5-3` / `auto-grok-4-7` / `auto-kimi-k3` / `auto-mimo-v2-6-pro`），
+   * 消除启动网关契约 WARN 告警；保留当前线上稳定可用的主力与故障转移组。
    */
-  'group/auto-glm-5-3',
-  /* 次席：契约 3/3、规则 3/3，小 2.07–4.85s、2.2 万字符 7.78–8.91s —— 比首席慢一档。 */
-  'group/auto-grok-4-7',
-  /*
-   * 第三：质量最稳（契约与规则各 3/3），但**慢** —— 小 4.49–5.59s、2.2 万字符 5.10–6.74s，
-   * 规则题上甚至出现 11.5 / 16.1 / **28.0s**。它是"前面都不可用时的质量兜底"，不该当首选。
-   */
-  'group/auto-kimi-k3',
-  /* 第四：免费兜底（保证最坏情况不烧付费额度），契约 3/3、小 2.46–2.88s、大 3.85–4.42s。 */
-  'group/auto-mimo-v2-6-pro',
-  /*
-   * ⚠️ **原来的"最强组"名字，保留在链尾** —— 它们在线上实测可用（`team-judge` 1.14–1.38s），
-   * 且自带网关级故障转移。它们排最后：只有前面四个都不行才会用到。
-   */
+  'workbuddy/deepseek-v4.1-flash',
   'group/team-judge',
   'group/team-analyst',
 ];

@@ -13,3 +13,4 @@
 | [0002](ADR-0002-local-multi-agent-workflow.md) | 本地多 Agent 工作流：分支 + 完成标记 + 单点合并 | 已采纳 | 2026-11-09 |
 | [0003](ADR-0003-native-function-calling.md) | AI 工具调用改用标准 function calling | 已采纳 | 2026-11-10 |
 | [0004](ADR-0004-ui-template-convergence.md) | UI 模板收敛为 quill，删除 classic/console | 已采纳 | 2026-11-10 |
+| [0005](ADR-0005-ai-managed-2-architecture.md) | 智能托管 2.0 采用「复用底座 + 独立新内核」借壳换脑架构 | 已采纳 | 2026-11-24 |
