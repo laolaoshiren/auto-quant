@@ -56,28 +56,27 @@
 
 **目标**：建立独立、纯函数、可回测的 `packages/server/src/radar/` 与 `packages/server/src/managed/prompt.ts`，让 DeepSeek v4.1-flash 从 15.5 万字噪音中解放出来，聚焦在 Top 3–5 真正具备短期爆发力的标的上。
 
-- [ ] **M2.1 全市场 6 维「AI500 评分雷达」（`packages/server/src/radar/ai500.ts`）**：
+- [x] **M2.1 全市场 6 维「AI500 评分雷达」（`packages/server/src/radar/ai500.ts`）**（`68df2e6`）：
   - 流动性硬过滤（成交额 + OI 门槛，剔除稳定币与垃圾低流动币）；
-  - 6 维量化评分（0–100 + `bias: long | short | neutral` + 结构化触发标签）：
+  - 6 维量化评分（0–100 + `bias: long | short | neutral` + 结构化触发/警示标签）：
     1. 多周期趋势共振（`4h` / `1h` / `15m` EMA 斜率与排列一致度）
     2. 放量真突破 & K 线实体饱满度（过滤长影线插针与缩量假突破）
     3. 合约资金流共振（OI 增仓同向确认，区分真资金进场与空心拉盘）
-    4. Taker 主动买卖盘净流 & CVD（`5m / 15m / 1h / 4h`，直接利用交易所 K 线自带主动买量字段）
+    4. Taker 主动买卖盘净流 & CVD（直接利用交易所 K 线自带主动买量字段）
     5. 资金费率挤压与拥挤度（捕捉轧空/轧多机会，规避过度拥挤追高）
-    6. 相对 BTC 超额强弱（RS Alpha）+ 启动位置性价比（奖励蓄势突破，严惩已偏离均线 >2.5×ATR 的追高单）
+    6. 相对 BTC 超额强弱（RS Alpha）+ 启动位置性价比（奖励蓄势突破，严惩偏离均线 >2.5×ATR 追单，风险标签置顶永不截断）
   - 严格按雷达综合分排序，输出 **Top 3–5 候选**，支持可配置准入红线（默认 `≥ 75` 强关注、`≥ 65` 观察）。
-- [ ] **M2.2 筹码结构 & 清算簇代理引擎（`packages/server/src/radar/volumeProfile.ts`）**：
-  - 基于近期 `15m/1h` K 线成交量按价格分桶，计算 **POC（筹码最密集价）**、**Value Area（70% 价值区）**、**上方阻力墙 & 下方支撑墙（Walls）** 及其相对现价的 `%` 偏移；
-  - 基于近期显著波段高低点与常见杠杆倍数（5x/10x/20x）估算上下方止损/清算磁吸区；
-  - 所有结果直接输出为结构化文字结论（如 `POC 1344.2 (+0.58%) · 上方阻力墙 +3.2% · 下方支撑墙 -1.8%`）。
-- [ ] **M2.3 15 分钟环比增量追踪器（`packages/server/src/radar/deltaTracker.ts`）**：
-  - 按标的缓存上一轮雷达与结构快照，输出 **15m Δ**（`AI500 Δ`、`OI Δ`、`Taker 净流 Δ`、`POC 偏移 Δ`），让 LLM 看见“动能是在加速还是退潮”。
-- [ ] **M2.4 `ai_managed` 2.0 精简结构化 Prompt（`packages/server/src/managed/prompt.ts`）**：
-  - 只展开 **Top 3–5 雷达高分标的 + 当前持仓**；
-  - K 线切为 **`4h + 15m + 1m`** 各 30 根干净 OHLCV；
-  - 实测总 User Prompt 严格控制在 **≤ 30,000 字符**；
-  - 接入 `autoTrader.ts` 的 `mode === 'ai_managed'` 路径（极薄委托），保留前端决策流与审计兼容。
-- [ ] **M2 验收与上线**：全量单测 + 新增 `radar/` 穷举单测 + 离线多币种样本打分验收 + 部署上线观察 `#19` Prompt 长度（≤ 3 万字）、延迟（≤ 15s）与选币精准度。
+- [x] **M2.2 筹码结构 & 清算簇代理引擎（`packages/server/src/radar/volumeProfile.ts`）**（`68df2e6`）：
+  - 基于近期 `15m` K 线成交额按价格 24 档分桶（实体 60% / 振幅 40% 加权），计算 **POC（筹码最密集价）**、**Value Area（70% 价值区）**、**上方阻力墙 & 下方支撑墙（Walls）** 及其相对现价的 `%` 偏移；
+  - 基于近期显著波段高低点与常见杠杆倍数（5x/10x/20x）估算去重后的上下方止损/清算磁吸区；
+  - 所有结果直接输出为结构化单行文字结论。
+- [x] **M2.3 15 分钟环比增量追踪器（`packages/server/src/radar/deltaTracker.ts`）**（`68df2e6`）：
+  - 按机器人实例 + 标的缓存上一轮雷达与结构快照，输出 **15m Δ**（`AI500 Δ`、`现价 Δ%`、`OI Δ%`、`Taker 买比 Δpp`、`POC 偏移 Δpp` 与 `accelerating/steady/fading/reversing` 动能状态），超 90 分钟自动失效防陈旧增量。
+- [x] **M2.4 `ai_managed` 2.0 精简结构化 Prompt（`packages/server/src/managed/prompt.ts` + `packages/server/src/managed/cycle.ts`）**（`68df2e6`）：
+  - 只展开 **Top 4 雷达高分标的 + 当前持仓**，附 Top 10 一行极简雷达榜；
+  - K 线切为 **`4h + 15m + 1m`** 各 30 根干净 OHLCV（含 `tb%`），5 级自动压缩保证单轮 User Prompt **硬红线 ≤ 30,000 字符**，且拆分 `stablePrompt / volatilePrompt` 保留前缀缓存；
+  - 极薄委托接入 `autoTrader.ts` 的 `mode === 'ai_managed'` 路径，其它模式零字节变动，保留前端决策流与审计兼容。
+- [x] **M2 验收与上线**（`68df2e6`）：`typecheck` 0 · `lint` 0 · `check:links` 107/236 · 全量 `npm test` 绿（`@aq/shared` 82/82、`@aq/server` 2443/2443 含 9 项 M2 雷达/筹码/Δ/端到端测试、`@aq/web` 457/457、`test:feed` PASS）· `npm run sim` 18/18 · 已部署上线并现场验证 `#19` 首轮实跑。
 
 ---
 
