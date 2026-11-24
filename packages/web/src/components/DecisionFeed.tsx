@@ -558,6 +558,7 @@ export function DecisionFeed({
   mode = 'strategy',
   focusMode = false,
   onToggleFocus,
+  onSelectSymbol,
 }: {
   traderId: number;
   running?: boolean;
@@ -584,6 +585,8 @@ export function DecisionFeed({
   focusMode?: boolean;
   /** 退出聚焦模式（聚焦时在工具栏显示「返回」）。 */
   onToggleFocus?: () => void;
+  /** 点击决策卡片上的币种时触发：切换到左侧行情图表并展示对应币种 K 线。 */
+  onSelectSymbol?: (symbol: string) => void;
 }) {
   const live = useEvents((s) => s.byTrader[traderId]?.decisions);
   const liveCycle = useLiveCycle(traderId);
@@ -1775,7 +1778,12 @@ export function DecisionFeed({
                 {mode === 'ai_team' ? (
                   <TeamCycleBlock record={run.record} symbols={symbolsQuery.data ?? []} />
                 ) : (
-                  <CycleBlock record={run.record} symbols={symbolsQuery.data ?? []} mode={mode} />
+                  <CycleBlock
+                    record={run.record}
+                    symbols={symbolsQuery.data ?? []}
+                    mode={mode}
+                    onSelectSymbol={onSelectSymbol}
+                  />
                 )}
                 {run.repeats.length > 0 && <RepeatedCycles repeats={run.repeats} />}
               </FeedErrorBoundary>
@@ -1956,7 +1964,17 @@ function priceOf(symbols: MarketSymbol[], symbol: string): number | null {
  * `export` 只是为了 SSR 验证脚本能够直接渲染它（`scripts/ssr-decision-feed.tsx`）。
  * 它在页面里的唯一调用点是下面的 `DecisionFeed`。
  */
-export function CycleBlock({ record, symbols, mode = 'strategy' }: { record: DecisionRecord; symbols: MarketSymbol[]; mode?: TraderMode }) {
+export function CycleBlock({
+  record,
+  symbols,
+  mode = 'strategy',
+  onSelectSymbol,
+}: {
+  record: DecisionRecord;
+  symbols: MarketSymbol[];
+  mode?: TraderMode;
+  onSelectSymbol?: (symbol: string) => void;
+}) {
   /*
    * ⚠️ **这两个字段要在这里兜一次底，不能假设它们一定存在。**
    *
@@ -2150,6 +2168,7 @@ export function CycleBlock({ record, symbols, mode = 'strategy' }: { record: Dec
                 outcome={plan.outcomes[index] ?? null}
                 /* `total > 1` 才给计数 —— 单条时什么都不显示，保持安静。 */
                 duplicate={{ nth, total }}
+                onSelectSymbol={onSelectSymbol}
               />
             ))}
             {/*
@@ -2186,6 +2205,7 @@ export function CycleBlock({ record, symbols, mode = 'strategy' }: { record: Dec
                       decision={decision}
                       price={priceOf(symbols, decision.symbol)}
                       outcome={plan.outcomes[index] ?? null}
+                      onSelectSymbol={onSelectSymbol}
                     />
                   ))}
                 </div>
@@ -2535,11 +2555,17 @@ function failureCategory(error: string | null): string {
  * 第四段（`outcome`）是**这一条决策的执行结果**：`null` 表示运行时一条记录都没留下。
  * 它由 `planExecution` 从 `executionLog` 里配出来，见上面的说明。
  */
+function isClickableSymbol(symbol: string | null | undefined): boolean {
+  const s = (symbol ?? '').trim().toUpperCase();
+  return /^[A-Z0-9]{2,24}$/.test(s) && s !== 'ALL' && s !== 'NONE';
+}
+
 function DecisionRow({
   decision,
   price,
   outcome,
   duplicate,
+  onSelectSymbol,
 }: {
   decision: Decision;
   price: number | null;
@@ -2550,14 +2576,32 @@ function DecisionRow({
    * 那是真实输出、不该去重，但需要让人知道"这不是界面重复"。
    */
   duplicate?: { nth: number; total: number };
+  onSelectSymbol?: (symbol: string) => void;
 }) {
   const figures = figureParts(decision, price);
+  const canSelect = Boolean(onSelectSymbol && isClickableSymbol(decision.symbol));
 
   return (
     <div className="min-w-0">
       <div className="flex min-w-0 items-center gap-2">
-        <CoinIcon symbol={decision.symbol} />
-        <span className="min-w-0 truncate text-base font-semibold text-ink-hi">{decision.symbol}</span>
+        {canSelect ? (
+          <button
+            type="button"
+            onClick={() => onSelectSymbol!(decision.symbol.trim().toUpperCase())}
+            title={`点击在左侧行情图表查看 ${decision.symbol}`}
+            className="group -mx-1 inline-flex min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left transition hover:bg-base-800/80"
+          >
+            <CoinIcon symbol={decision.symbol} />
+            <span className="min-w-0 truncate text-base font-semibold text-ink-hi underline-offset-2 transition-colors group-hover:text-accent group-hover:underline">
+              {decision.symbol}
+            </span>
+          </button>
+        ) : (
+          <>
+            <CoinIcon symbol={decision.symbol} />
+            <span className="min-w-0 truncate text-base font-semibold text-ink-hi">{decision.symbol}</span>
+          </>
+        )}
         {duplicate && duplicate.total > 1 && (
           <span
             className="shrink-0 rounded bg-base-800 px-1.5 py-0.5 text-[10px] text-ink-lo"

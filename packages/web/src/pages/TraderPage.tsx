@@ -564,6 +564,12 @@ export function TraderPage() {
    */
   const [pickedSymbol, setPickedSymbol] = useState<string | undefined>(undefined);
   const chartSymbol = pickedSymbol ?? positions[0]?.symbol;
+  const selectChartSymbol = (symbol: string) => {
+    setPickedSymbol(symbol);
+    setChartTab('candles');
+    setChartOverride(false);
+    setFeedFocusOverride(false);
+  };
   /*
    * ⚠️ **必须用 `isOpenOrder`，不能自己写判定。**
    *
@@ -1873,6 +1879,7 @@ export function TraderPage() {
               mode={trader?.mode ?? 'strategy'}
               nextCycleAt={trader?.nextCycleAt ?? null}
               onToggleFocus={() => setFeedFocusOverride(false)}
+              onSelectSymbol={selectChartSymbol}
               focusMode
               actions={
                 <>
@@ -1963,6 +1970,7 @@ export function TraderPage() {
              * 用户**无法进入全屏**（而"进不去全屏"正是他抱怨的那件事）。
              */
             onToggleFocus={() => setFeedFocusOverride(true)}
+            onSelectSymbol={selectChartSymbol}
             actions={
               <>
                 {runNowAction}
@@ -2222,10 +2230,7 @@ export function TraderPage() {
           <div className="shrink-0">
             <ManagedIntelPanel
               traderId={traderId}
-              onSelectSymbol={(symbol) => {
-                setPickedSymbol(symbol);
-                setChartTab('candles');
-              }}
+              onSelectSymbol={selectChartSymbol}
             />
           </div>
         )}
@@ -2294,7 +2299,9 @@ export function TraderPage() {
                 </Button>
               </span>
             ) : (
-              <span className="text-xs text-ink-faint">最近持仓标的</span>
+              <span className="text-xs text-ink-faint">
+                {pickedSymbol ? `已选标的 · ${pickedSymbol}` : '最近持仓标的'}
+              </span>
             )
           }
         >
@@ -2486,20 +2493,7 @@ export function TraderPage() {
             persistedDryRun: trader?.dryRun,
             processDryRun: system?.dryRun,
           })}
-          onSelectSymbol={(symbol) => {
-            /*
-             * ⚠️ **点币种要同时把图表切到「行情」** —— 只设币种是不够的。
-             *
-             * 这一格默认停在「归属权益曲线」，而用户点币种的意图**百分百是"看这个币
-             * 的行情"**。只设 `pickedSymbol` 的话，他还要再点一下「行情图表」那个
-             * tab 才看得到 —— 而那一格点开是空的权益曲线，看起来像"点了没反应"。
-             *
-             * 记不得上次选了哪个 tab 是对的（那是页面状态），但"点币种"这个动作本身
-             * 就表达了"我要看行情"，所以顺手切过去是**消除一步**，而不是替用户做决定。
-             */
-            setPickedSymbol(symbol);
-            setChartTab('candles');
-          }}
+          onSelectSymbol={selectChartSymbol}
           positionSymbols={positions.map((p) => p.symbol)}
           /*
            * ⚠️ **必须原样传 `positions`，不要 `.map()` 出一个新数组。**
