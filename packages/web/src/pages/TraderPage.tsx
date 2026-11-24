@@ -48,7 +48,6 @@ import { isOpenOrder, TraderTables, type TraderTabId } from '../components/Trade
 import { MODE_HINT, MODE_LABEL, isPaperView } from '../lib/glossary';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import { DashboardEquityChart, WinLossBar } from '../components/DashboardCharts';
-import { LeverageArc } from '../components/LeverageArc';
 import {
   EQUITY_RANGES,
   filterByRange,
@@ -1363,7 +1362,7 @@ export function TraderPage() {
       : null;
 
   const metricCards = (
-    <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-5">
+    <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5">
       {/* 1 — 账户余额 */}
       <MetricCard
         title={
@@ -1374,17 +1373,15 @@ export function TraderPage() {
               : '暂时读不到交易所账户读数。'
         }
       >
-        <div className="flex items-center justify-between gap-1.5">
-          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-ink-lo">
-            <Wallet aria-hidden className="h-3.5 w-3.5 shrink-0 text-accent" />
-            <span className="truncate">账户余额</span>
+        <div className="flex items-center justify-between gap-1">
+          <span className="flex min-w-0 items-center gap-1 text-[11px] font-medium text-ink-lo">
+            <Wallet aria-hidden className="h-3 w-3 shrink-0 text-accent" />
+            <span className="whitespace-nowrap">账户余额</span>
           </span>
-          <span className="num shrink-0 rounded bg-base-850 px-1.5 py-px text-[10px] font-medium text-ink-lo">
-            {settleAsset}
-          </span>
+          <span className="num shrink-0 text-[10px] text-ink-faint">{settleAsset}</span>
         </div>
 
-        <div className="num mt-2 truncate text-[21px] font-bold leading-tight tracking-tight text-ink-strong 2xl:text-2xl">
+        <div className="num mt-1.5 truncate text-[19px] font-bold leading-tight tracking-tight text-ink-strong 2xl:text-2xl">
           {useSimulatedBalance
             ? fmtNum(calibratedEquity, 2)
             : account
@@ -1392,30 +1389,28 @@ export function TraderPage() {
               : '—'}
         </div>
 
-        <div
-          className="num mt-auto flex items-center justify-between gap-2 border-t border-base-800/80 pt-2 text-[11px] text-ink-faint"
-          title={
-            useSimulatedBalance
-              ? `模拟权益 ${fmtNum(calibratedEquity, 2)} = 起始 ${fmtNum(initialEquity, 2)} + 已实现 ${fmtUsdSigned(realized, 2)} + 浮盈 ${fmtUsdSigned(unrealized, 2)}`
-              : account
-                ? `钱包余额 ${fmtNum(account.walletBalance, 2)} · 可用 ${fmtAvailable()}`
-                : undefined
-          }
-        >
+        <div className="num mt-auto space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
           {useSimulatedBalance ? (
             <>
-              <span className="truncate">起始 {fmtNum(initialEquity, 2)}</span>
-              <span className="shrink-0 text-ink-lo">模拟盘</span>
+              <div className="flex items-center justify-between gap-1">
+                <span>起始</span>
+                <span className="text-ink-mid">{fmtNum(initialEquity, 2)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-1">
+                <span>口径</span>
+                <span className="text-ink-lo">模拟权益</span>
+              </div>
             </>
           ) : account ? (
             <>
-              <span className="truncate">
-                钱包 <span className="text-ink-mid">{fmtNum(account.walletBalance, 2)}</span>
-              </span>
-              <span className="shrink-0">
-                可用 <span className="text-ink-mid">{fmtAvailable()}</span>
-                {accountIsStale ? <span className="text-warn"> · 快照</span> : null}
-              </span>
+              <div className="flex items-center justify-between gap-1">
+                <span>钱包</span>
+                <span className="text-ink-mid">{fmtNum(account.walletBalance, 2)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-1">
+                <span>可用{accountIsStale ? ' · 快照' : ''}</span>
+                <span className="text-ink-mid">{fmtAvailable()}</span>
+              </div>
             </>
           ) : (
             <span>读取中…</span>
@@ -1431,52 +1426,33 @@ export function TraderPage() {
             : '总盈亏 = 已平仓净盈亏 + 当前持仓浮动盈亏。'
         }
       >
-        <div className="flex items-center justify-between gap-1.5">
-          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-ink-lo">
-            <TrendingUp aria-hidden className="h-3.5 w-3.5 shrink-0 text-up" />
-            <span className="truncate">交易盈亏</span>
+        <div className="flex items-center justify-between gap-1">
+          <span className="flex min-w-0 items-center gap-1 text-[11px] font-medium text-ink-lo">
+            <TrendingUp aria-hidden className="h-3 w-3 shrink-0 text-up" />
+            <span className="whitespace-nowrap">交易盈亏</span>
           </span>
-          {stats && (
-            <span
-              className={cn(
-                'num shrink-0 rounded px-1.5 py-px text-[10px] font-semibold',
-                cardReturnPercent > 0
-                  ? 'bg-up/15 text-up'
-                  : cardReturnPercent < 0
-                    ? 'bg-down/15 text-down'
-                    : 'bg-base-850 text-ink-lo',
-              )}
-            >
-              {fmtPercent(cardReturnPercent)}
-            </span>
-          )}
         </div>
 
         <div
           className={cn(
-            'num mt-2 truncate text-[21px] font-bold leading-tight tracking-tight 2xl:text-2xl',
+            'num mt-1.5 truncate text-[19px] font-bold leading-tight tracking-tight 2xl:text-2xl',
             stats ? pnlColor(totalPnl) : 'text-ink-hi',
           )}
         >
           {stats ? fmtUsdSigned(totalPnl, 2) : '—'}
         </div>
 
-        <div
-          className="num mt-auto flex items-center justify-between gap-2 border-t border-base-800/80 pt-2 text-[11px] text-ink-faint"
-          title={
-            stats
-              ? `今日盈亏 ${fmtUsdSigned(todayPnl, 2)} · 已实现 ${fmtUsdSigned(realized, 2)} · 总收益率 ${fmtPercent(cardReturnPercent)}`
-              : undefined
-          }
-        >
+        <div className="num mt-auto space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
           {stats ? (
             <>
-              <span className="truncate">
-                今日 <span className={pnlColor(todayPnl)}>{fmtUsdSigned(todayPnl, 2)}</span>
-              </span>
-              <span className="shrink-0">
-                已实现 <span className={pnlColor(realized)}>{fmtUsdSigned(realized, 2)}</span>
-              </span>
+              <div className="flex items-center justify-between gap-1">
+                <span>今日</span>
+                <span className={pnlColor(todayPnl)}>{fmtUsdSigned(todayPnl, 2)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-1">
+                <span>收益率</span>
+                <span className={pnlColor(cardReturnPercent)}>{fmtPercent(cardReturnPercent)}</span>
+              </div>
             </>
           ) : (
             <span>等待统计</span>
@@ -1492,18 +1468,16 @@ export function TraderPage() {
             : '暂时读不到交易所账户读数。'
         }
       >
-        <div className="flex items-center justify-between gap-1.5">
-          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-ink-lo">
-            <Shield aria-hidden className="h-3.5 w-3.5 shrink-0 text-warn" />
-            <span className="truncate">保证金占用</span>
+        <div className="flex items-center justify-between gap-1">
+          <span className="flex min-w-0 items-center gap-1 text-[11px] font-medium text-ink-lo">
+            <Shield aria-hidden className="h-3 w-3 shrink-0 text-warn" />
+            <span className="whitespace-nowrap">保证金</span>
           </span>
           {marginUtilPct !== null && (
             <span
               className={cn(
-                'num shrink-0 rounded px-1.5 py-px text-[10px] font-semibold',
-                marginUtilPct >= 75
-                  ? 'bg-warn/15 text-warn'
-                  : 'bg-base-850 text-ink-lo',
+                'num shrink-0 text-[10px] font-semibold',
+                marginUtilPct >= 75 ? 'text-warn' : 'text-ink-faint',
               )}
             >
               {marginUtilPct.toFixed(1)}%
@@ -1511,46 +1485,23 @@ export function TraderPage() {
           )}
         </div>
 
-        <div className="num mt-2 truncate text-[21px] font-bold leading-tight tracking-tight text-ink-hi 2xl:text-2xl">
+        <div className="num mt-1.5 truncate text-[19px] font-bold leading-tight tracking-tight text-ink-hi 2xl:text-2xl">
           {fmtMarginUsed()}
         </div>
 
-        <div
-          className="num mt-auto flex items-center justify-between gap-2 border-t border-base-800/80 pt-2 text-[11px] text-ink-faint"
-          title={
-            account
-              ? [
-                  notional > 0 ? `名义敞口 ${fmtUsd(notional, 2)}` : null,
-                  (account.openOrderMargin ?? 0) > 0
-                    ? `挂单占用 ${fmtNum(account.openOrderMargin ?? 0, 2)}`
-                    : null,
-                  notional === 0 && !((account.openOrderMargin ?? 0) > 0) ? '当前无持仓及挂单占用' : null,
-                ]
-                  .filter(Boolean)
-                  .join(' · ')
-              : undefined
-          }
-        >
+        <div className="num mt-auto space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
           {account ? (
             <>
-              <span className="truncate">
-                {notional > 0 ? (
-                  <>
-                    名义 <span className="text-ink-mid">{fmtUsd(notional, 2)}</span>
-                  </>
-                ) : (account.openOrderMargin ?? 0) > 0 ? (
-                  <>
-                    挂单占用 <span className="text-ink-mid">{fmtNum(account.openOrderMargin ?? 0, 2)}</span>
-                  </>
-                ) : (
-                  '当前无持仓'
-                )}
-              </span>
-              {notional > 0 && (account.openOrderMargin ?? 0) > 0 ? (
-                <span className="shrink-0">挂单 {fmtNum(account.openOrderMargin ?? 0, 2)}</span>
-              ) : (
-                <span className="shrink-0 text-ink-faint">{settleAsset}</span>
-              )}
+              <div className="flex items-center justify-between gap-1">
+                <span>名义</span>
+                <span className="text-ink-mid">{notional > 0 ? fmtUsd(notional, 2) : '$0.00'}</span>
+              </div>
+              <div className="flex items-center justify-between gap-1">
+                <span>挂单</span>
+                <span className="text-ink-mid">
+                  {(account.openOrderMargin ?? 0) > 0 ? fmtNum(account.openOrderMargin ?? 0, 2) : '0.00'}
+                </span>
+              </div>
             </>
           ) : (
             <span>读取中…</span>
@@ -1558,7 +1509,7 @@ export function TraderPage() {
         </div>
       </MetricCard>
 
-      {/* 4 — 持仓 */}
+      {/* 4 — 当前持仓 */}
       <MetricCard
         title={
           liveUnavailable
@@ -1566,36 +1517,40 @@ export function TraderPage() {
             : '当前持仓数量与实时有效杠杆。仓位状态读不到时显示 —。'
         }
       >
-        <div className="flex items-center justify-between gap-1.5">
-          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-ink-lo">
-            <Layers aria-hidden className="h-3.5 w-3.5 shrink-0 text-sky-400" />
-            <span className="truncate">当前持仓</span>
+        <div className="flex items-center justify-between gap-1">
+          <span className="flex min-w-0 items-center gap-1 text-[11px] font-medium text-ink-lo">
+            <Layers aria-hidden className="h-3 w-3 shrink-0 text-sky-400" />
+            <span className="whitespace-nowrap">持仓</span>
           </span>
-          {!liveUnavailable && (
-            <LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} size={18} />
-          )}
+          {!liveUnavailable && stats?.maxLeverage ? (
+            <span className="num shrink-0 text-[10px] text-ink-faint">上限 {stats.maxLeverage}x</span>
+          ) : null}
         </div>
 
-        <div className="num mt-2 flex items-baseline gap-2">
-          <span className="text-[21px] font-bold leading-tight tracking-tight text-ink-hi 2xl:text-2xl">
+        <div className="num mt-1.5 flex items-baseline gap-1.5">
+          <span className="text-[19px] font-bold leading-tight tracking-tight text-ink-hi 2xl:text-2xl">
             {liveUnavailable ? '—' : fmtInt(openPositionCount)}
           </span>
           {!liveUnavailable && openOrderTotal > 0 && (
-            <span className="text-xs font-medium text-accent">+{fmtInt(openOrderTotal)} 挂单</span>
+            <span className="whitespace-nowrap text-[11px] font-medium text-accent">
+              +{fmtInt(openOrderTotal)} 挂单
+            </span>
           )}
         </div>
 
-        <div className="num mt-auto flex items-center justify-between gap-2 border-t border-base-800/80 pt-2 text-[11px] text-ink-faint">
+        <div className="num mt-auto space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
           {liveUnavailable ? (
-            <span className="truncate">仓位状态暂不可读</span>
+            <span className="truncate">状态暂不可读</span>
           ) : (
             <>
-              <span className="truncate">
-                浮盈 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
-              </span>
-              <span className="shrink-0 text-ink-lo">
-                有效 {effectiveLeverage.toFixed(1)}x
-              </span>
+              <div className="flex items-center justify-between gap-1">
+                <span>浮盈</span>
+                <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-1">
+                <span>杠杆</span>
+                <span className="text-ink-mid">{effectiveLeverage.toFixed(1)}x</span>
+              </div>
             </>
           )}
         </div>
@@ -1609,19 +1564,19 @@ export function TraderPage() {
             : '完成第一个开仓—平仓回合后这里会显示胜率与盈亏比。'
         }
       >
-        <div className="flex items-center justify-between gap-1.5">
-          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-ink-lo">
-            <Target aria-hidden className="h-3.5 w-3.5 shrink-0 text-violet-400" />
-            <span className="truncate">胜率</span>
+        <div className="flex items-center justify-between gap-1">
+          <span className="flex min-w-0 items-center gap-1 text-[11px] font-medium text-ink-lo">
+            <Target aria-hidden className="h-3 w-3 shrink-0 text-violet-400" />
+            <span className="whitespace-nowrap">胜率</span>
           </span>
           {stats && stats.totalTrades > 0 && (
-            <span className="num shrink-0 rounded bg-base-850 px-1.5 py-px text-[10px] font-medium text-ink-lo">
+            <span className="num shrink-0 text-[10px] text-ink-faint">
               PF {fmtProfitFactor(stats.profitFactor)}
             </span>
           )}
         </div>
 
-        <div className="num mt-2 truncate text-[21px] font-bold leading-tight tracking-tight text-ink-hi 2xl:text-2xl">
+        <div className="num mt-1.5 truncate text-[19px] font-bold leading-tight tracking-tight text-ink-hi 2xl:text-2xl">
           {stats && stats.totalTrades > 0 ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
         </div>
 
@@ -1629,9 +1584,15 @@ export function TraderPage() {
           {stats && stats.totalTrades > 0 ? (
             <WinLossBar wins={wins} losses={losses} />
           ) : (
-            <div className="flex items-center justify-between pt-0.5 text-[11px] text-ink-faint">
-              <span>暂无已平仓回合</span>
-              <span className="num">0 笔</span>
+            <div className="num space-y-0.5 text-[11px] text-ink-faint">
+              <div className="flex items-center justify-between gap-1">
+                <span>已平仓</span>
+                <span className="text-ink-mid">0 笔</span>
+              </div>
+              <div className="flex items-center justify-between gap-1">
+                <span>盈亏比</span>
+                <span>—</span>
+              </div>
             </div>
           )}
         </div>
@@ -2637,7 +2598,7 @@ function MetricCard({ children, title }: { children: ReactNode; title?: string }
   return (
     <div
       title={title}
-      className="flex h-full min-w-0 flex-col rounded-xl border border-base-700/90 bg-base-900 px-3.5 py-3 transition-colors hover:border-base-600"
+      className="flex h-full min-w-0 flex-col rounded-xl border border-base-700/90 bg-base-900 px-2.5 py-2.5 transition-colors hover:border-base-600"
     >
       {children}
     </div>

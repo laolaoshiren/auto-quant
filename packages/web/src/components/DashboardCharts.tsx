@@ -304,12 +304,16 @@ export function DashboardEquityChart({
   const referenceValue = baseline ?? first;
   const unit = asset?.trim() || 'USDT';
 
-  // 一天半以内用时钟，更长用日期 —— 阈值与 `axisTicks` 共用，见上面的常量。
-  const axisTick =
-    rangeSpanMs(range) <= HOURLY_AXIS_MAX_MS
-      ? (value: number) => fmtTime(new Date(value).toISOString())
-      : (value: number) => new Date(value).toLocaleDateString('en-CA', { month: '2-digit', day: '2-digit' });
-  const ticks = axisTicks(points, range);
+  // 一天半以内用时钟，更长用日期；选择「全部」时按实际数据跨度判断，避免同日重复显示多个 `11-25`。
+  const rawRangeSpan = rangeSpanMs(range);
+  const actualSpan =
+    points.length >= 2 ? points[points.length - 1]!.t - points[0]!.t : 0;
+  const hourlyAxis =
+    (Number.isFinite(rawRangeSpan) ? rawRangeSpan : actualSpan) <= HOURLY_AXIS_MAX_MS;
+  const axisTick = hourlyAxis
+    ? (value: number) => fmtTime(new Date(value).toISOString())
+    : (value: number) => new Date(value).toLocaleDateString('en-CA', { month: '2-digit', day: '2-digit' });
+  const ticks = axisTicks(points, hourlyAxis ? '1D' : range);
 
   return (
     <div className="relative">

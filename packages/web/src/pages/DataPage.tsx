@@ -524,13 +524,13 @@ export function DataPage() {
               </Select>
             </div>
 
-            <div className="w-44">
+            <div className="w-40">
               <Select
                 aria-label="按机器人或系统过滤"
                 value={traderFilter}
                 onChange={(event) => setTraderFilter(event.target.value)}
               >
-                <option value="all">全部对象（系统 + 机器人）</option>
+                <option value="all">全部对象</option>
                 <option value="system">仅系统级日志</option>
                 {traderOptions.map((id) => (
                   <option key={id} value={String(id)}>

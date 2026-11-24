@@ -2731,6 +2731,8 @@ export function TraderTables({
     };
   }, [tradesPaging, symbolFilter, tab]);
 
+  const [dockCollapsed, setDockCollapsed] = useState(false);
+
   const tabs: Array<{
     id: TraderTabId;
     label: string;
@@ -2756,17 +2758,15 @@ export function TraderTables({
     { id: 'history', label: '订单记录', icon: <FileText aria-hidden className="h-3.5 w-3.5" /> },
   ];
 
-  const activeCollapsed = isHeavyTab ? historyCollapsed : tab === 'positions' ? positionsCollapsed : false;
-  const toggleActiveCollapse = () => {
-    if (isHeavyTab) setHistoryCollapsed((c) => !c);
-    else if (tab === 'positions') setPositionsCollapsed((c) => !c);
+  const toggleDockCollapse = () => {
+    setDockCollapsed((prev) => !prev);
   };
 
   return (
     <Panel padded={false} bodyClassName="p-0" className="overflow-hidden">
       <div
         ref={toolbarRef}
-        className="flex flex-wrap items-center gap-2 border-b border-base-800 bg-base-900 px-3 py-2"
+        className={`flex flex-wrap items-center gap-2 bg-base-900 px-3 py-2 ${dockCollapsed ? '' : 'border-b border-base-800'}`}
       >
         {/* 现代分段胶囊页签：图标 + 文字 + 高亮计数 */}
         <div
@@ -2788,7 +2788,10 @@ export function TraderTables({
                 type="button"
                 role="tab"
                 aria-selected={active}
-                onClick={() => onChange(item.id)}
+                onClick={() => {
+                  onChange(item.id);
+                  if (dockCollapsed) setDockCollapsed(false);
+                }}
                 className={
                   active
                     ? 'inline-flex h-7 items-center gap-1.5 rounded-md bg-base-800 px-2.5 text-xs font-semibold text-ink-strong shadow-sm transition'
@@ -2810,7 +2813,7 @@ export function TraderTables({
         </div>
 
         {/* 历史表快捷按币种筛选 */}
-        {isHeavyTab && (
+        {isHeavyTab && !dockCollapsed && (
           <div className="relative w-40 sm:w-44">
             <Search
               aria-hidden
@@ -2848,31 +2851,33 @@ export function TraderTables({
               全部平仓 ({closableCount})
             </Button>
           )}
-          {(isHeavyTab || tab === 'positions') && (
-            <Button
-              size="sm"
-              variant="ghost"
-              aria-expanded={!activeCollapsed}
-              title={activeCollapsed ? '展开面板高度' : '收起面板高度，给上方图表与决策流留出更多视野'}
-              onClick={toggleActiveCollapse}
-            >
-              {activeCollapsed ? (
-                <>
-                  <ChevronUp aria-hidden className="h-3.5 w-3.5" />
-                  展开
-                </>
-              ) : (
-                <>
-                  <ChevronDown aria-hidden className="h-3.5 w-3.5" />
-                  收起
-                </>
-              )}
-            </Button>
-          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-expanded={!dockCollapsed}
+            title={dockCollapsed ? '展开底部数据面板' : '收起底部数据面板，给上方图表与决策流留出更多视野'}
+            onClick={toggleDockCollapse}
+          >
+            {dockCollapsed ? (
+              <>
+                <ChevronUp aria-hidden className="h-3.5 w-3.5" />
+                展开
+              </>
+            ) : (
+              <>
+                <ChevronDown aria-hidden className="h-3.5 w-3.5" />
+                收起
+              </>
+            )}
+          </Button>
         </div>
       </div>
 
-      <div ref={tableAreaRef}>
+      <div
+        ref={tableAreaRef}
+        className={dockCollapsed ? 'max-h-0 overflow-hidden' : undefined}
+        aria-hidden={dockCollapsed || undefined}
+      >
         {tab === 'positions' && (
           <PositionsTable
             traderId={traderId}

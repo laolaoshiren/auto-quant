@@ -225,20 +225,16 @@ export function EquityCurveChart({
     : [center - Math.max(center * 0.002, 0.5), center + Math.max(center * 0.002, 0.5)];
 
   const reference = baseline ?? (hasData ? first : center);
-  /*
-   * 阈值与刻度摆放共用 `HOURLY_AXIS_MAX_MS` —— 见 `axisTicks` 的注释：
-   * 一处按整点摆、另一处把整点格式化成日期，会得到重复标签。
-   */
-  const axisTick =
-    rangeSpanMs(range) <= HOURLY_AXIS_MAX_MS
-      ? (value: number) => fmtTime(new Date(value).toISOString())
-      : (value: number) =>
-          new Date(value).toLocaleDateString('en-CA', { month: '2-digit', day: '2-digit' });
-  /*
-   * 刻度钉在真实的整点 / 日界上 —— 与交易页那条曲线同一份实现，
-   * 否则同一个区间在两个页面上会长出两条不一样的时间轴。
-   */
-  const ticks = axisTicks(points, range);
+  const rawRangeSpan = rangeSpanMs(range);
+  const actualSpan =
+    points.length >= 2 ? points[points.length - 1]!.t - points[0]!.t : 0;
+  const hourlyAxis =
+    (Number.isFinite(rawRangeSpan) ? rawRangeSpan : actualSpan) <= HOURLY_AXIS_MAX_MS;
+  const axisTick = hourlyAxis
+    ? (value: number) => fmtTime(new Date(value).toISOString())
+    : (value: number) =>
+        new Date(value).toLocaleDateString('en-CA', { month: '2-digit', day: '2-digit' });
+  const ticks = axisTicks(points, hourlyAxis ? '1D' : range);
 
   return (
     <ResponsiveContainer width="100%" height={height}>
