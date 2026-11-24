@@ -496,7 +496,7 @@ export function DataPage() {
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder="搜索日志内容、币种、错误码或模块…"
                 aria-label="过滤日志消息"
-                className="input num h-8 w-full pl-8 pr-7 text-xs"
+                className="input num !h-8 w-full !pl-8 !pr-7 text-xs"
               />
               {search && (
                 <button

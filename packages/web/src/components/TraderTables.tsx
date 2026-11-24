@@ -28,11 +28,13 @@ import {
 import {
   ChevronDown,
   ChevronUp,
+  Clock,
   FileText,
   History,
   Layers,
   ListOrdered,
   LoaderCircle,
+  RotateCcw,
   Search,
   X,
 } from 'lucide-react';
@@ -52,7 +54,7 @@ import {
   tradeCosts,
   type PnlCosts,
 } from './PnlBreakdown';
-import { BALANCE_LABEL, fmtDateTime, fmtDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, marginModeLabel, orderMarginMode, pnlColor, symbolTone, symbolToneWithAvoidance } from '../lib/format';
+import { BALANCE_LABEL, elapsedMinutesSince, fmtDateTime, fmtDuration, fmtPendingDuration, fmtPercent, fmtPrice, fmtQty, fmtSigned, fmtUsd, fmtUsdSigned, marginModeLabel, orderMarginMode, pnlColor, symbolTone, symbolToneWithAvoidance } from '../lib/format';
 import { summarizeClose } from '../lib/closeSummary';
 import { pickPositions } from '../lib/pickPositions';
 
@@ -875,6 +877,7 @@ export function PositionsTable({
   onCloseRequest,
   onSelectSymbol,
   collapsed = false,
+  fillHeight = false,
   openOrderCount = 0,
   onOpenOrdersTab,
 }: {
@@ -885,6 +888,8 @@ export function PositionsTable({
   /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
   onSelectSymbol?: (symbol: string) => void;
   collapsed?: boolean;
+  /** 为真时撑满父容器（手动拖动底部高度时使用）。 */
+  fillHeight?: boolean;
   /** 当前待成交委托数量：空仓但有挂单时提供直达入口。 */
   openOrderCount?: number;
   onOpenOrdersTab?: () => void;
@@ -996,9 +1001,9 @@ export function PositionsTable({
     query.updatedAt === null ? null : Math.max(0, Math.round((Date.now() - query.updatedAt) / 1000));
 
   return (
-    <div>
+    <div className={fillHeight ? 'flex min-h-0 flex-1 flex-col' : undefined}>
       {query.error !== null && (
-        <ErrorNote className="mb-2">
+        <ErrorNote className="mb-2 shrink-0">
           持仓暂时读不到{ageSeconds === null ? '' : `，下面是 ${ageSeconds} 秒前的读数`}：{query.error}
         </ErrorNote>
       )}
@@ -1009,7 +1014,9 @@ export function PositionsTable({
           与订单表、成交表逐字一致 —— 原来这里写死 `max-h-[34vh]`，
           于是"收起"对持仓表**从来没生效过**（用户截图里那张表正是它）。
           收起态**只换这一个 class**：节点、`ref`、观察器都不换。 */}
-      <div className={`scroll-x ${collapsed ? COLLAPSED_MAX_H : EXPANDED_MAX_H} overflow-y-auto`}>
+      <div
+        className={`scroll-x ${fillHeight ? 'min-h-0 flex-1' : collapsed ? COLLAPSED_MAX_H : EXPANDED_MAX_H} overflow-y-auto`}
+      >
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
@@ -1566,6 +1573,7 @@ export function OrdersTable({
   paper,
   onSelectSymbol,
   collapsed = false,
+  fillHeight = false,
   liveMarginModes,
 }: {
   /*
@@ -1603,6 +1611,8 @@ export function OrdersTable({
    * 「当前委托」不传（它是行动面板，默认就该看得全）。
    */
   collapsed?: boolean;
+  /** 为真时撑满父容器（手动拖动底部高度时使用）。 */
+  fillHeight?: boolean;
   /**
    * 保证金模式的**兜底来源**：当前持仓的 `symbol → marginType`（`PositionView.marginType`）。
    *
@@ -1616,6 +1626,15 @@ export function OrdersTable({
   /* 同屏不重复的配色 —— 见 `useSymbolTones()`（探针行也在 `paging.rows` 里，
      但它已经被 `isOpenOrder` 过滤掉了，不会占色）。 */
   const symbolTones = useSymbolTones(orders.map((o) => o.symbol));
+
+  /* 当前委托表需要实时刷新「已挂时长」；无活跃挂单时不跑定时器。 */
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!onlyOpen || orders.length === 0) return;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => setNowMs(Date.now()), 10_000);
+    return () => window.clearInterval(timer);
+  }, [onlyOpen, orders.length]);
 
   /*
    * ⚠️ **"暂无"是一个结论，结论要有依据 —— 数据还在路上时不能说。**
@@ -1675,7 +1694,7 @@ export function OrdersTable({
   }
 
   return (
-    <div>
+    <div className={fillHeight ? 'flex min-h-0 flex-1 flex-col' : undefined}>
       {/*
         ⚠️ **第一页读取失败必须可见**（2026-10-17 · 台账 FRD-02 的同一族）。
 
@@ -1684,7 +1703,7 @@ export function OrdersTable({
         只做了一半。表格里剩下的行是上一次成功读到的，必须说清它有多旧。
       */}
       {paging.error !== null && (
-        <ErrorNote className="mb-2">
+        <ErrorNote className="mb-2 shrink-0">
           读取失败，下面是上一次成功读到的记录：{paging.error}
         </ErrorNote>
       )}
@@ -1701,7 +1720,7 @@ export function OrdersTable({
       */}
       <div
         ref={paging.scrollerRef}
-        className={`scroll-x ${collapsed ? COLLAPSED_MAX_H : EXPANDED_MAX_H} overflow-y-auto`}
+        className={`scroll-x ${fillHeight ? 'min-h-0 flex-1' : collapsed ? COLLAPSED_MAX_H : EXPANDED_MAX_H} overflow-y-auto`}
       >
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
@@ -1717,6 +1736,11 @@ export function OrdersTable({
               <th className="th" title="这笔委托被创建的时间。">
                 下单时间
               </th>
+              {onlyOpen && (
+                <th className="th" title="该挂单自创建至今持续等待成交的时长（实时更新）。">
+                  已挂时长
+                </th>
+              )}
               <th className="th">交易对</th>
               <th className="th">用途</th>
               <th className="th">方向</th>
@@ -1814,11 +1838,31 @@ export function OrdersTable({
                 order.filledQty >= order.quantity * (1 - 1e-9) &&
                 !/cancel|reject|expired/i.test(order.status);
 
+              const pendingMins = onlyOpen ? elapsedMinutesSince(order.createdAt, nowMs) : null;
+              const pendingText = onlyOpen ? fmtPendingDuration(order.createdAt, nowMs) : null;
+
               return (
                 // `data-row-id` 是**给滚动锚点用的 DOM 标记**（见 `useTablePaging` 里那个
                 // `useLayoutEffect`）：新订单插到顶部时要靠它量出"我正在读的那一行"被推了多远。
                 <tr key={order.id} className="row-hover" data-row-id={order.id}>
                   <td className="td num text-ink-faint">{fmtDateTime(order.createdAt)}</td>
+                  {onlyOpen && (
+                    <td
+                      className={`td num whitespace-nowrap ${
+                        pendingMins !== null && pendingMins >= 60
+                          ? 'font-semibold text-warn'
+                          : pendingMins !== null && pendingMins >= 30
+                            ? 'text-warn'
+                            : 'text-ink-mid'
+                      }`}
+                      title={`已持续挂单 ${pendingText ?? '—'}（下单时间 ${fmtDateTime(order.createdAt)}）`}
+                    >
+                      <span className="inline-flex items-center gap-1">
+                        <Clock aria-hidden className="h-3 w-3 shrink-0 opacity-70" />
+                        {pendingText}
+                      </span>
+                    </td>
+                  )}
                     <td className="td font-semibold"><SymbolCell symbol={order.symbol} onSelect={onSelectSymbol} tone={symbolTones.get(order.symbol)} /></td>
                   <td className="td">
                     <Badge tone={purposeTone(order.purpose)}>{orderPurposeLabel(order.purpose)}</Badge>
@@ -2000,6 +2044,7 @@ export function TradesTable({
   refreshToken,
   onSelectSymbol,
   collapsed = false,
+  fillHeight = false,
   paging: providedPaging,
   liveMarginModes,
 }: {
@@ -2009,6 +2054,8 @@ export function TradesTable({
   onSelectSymbol?: (symbol: string) => void;
   /** 收起态：只把滚动框的 `max-height` 改小 —— 理由见 `COLLAPSED_MAX_H`。 */
   collapsed?: boolean;
+  /** 为真时撑满父容器（手动拖动底部高度时使用）。 */
+  fillHeight?: boolean;
   /**
    * 由**容器**预取好的分页实例。不传时组件内部自己建一套（向后兼容）。
    *
@@ -2116,14 +2163,14 @@ export function TradesTable({
   );
 
   return (
-    <div>
+    <div className={fillHeight ? 'flex min-h-0 flex-1 flex-col' : undefined}>
       {/* 首屏读取失败与订单表同一条纪律：不说的话，下面的行看起来像刚更新的。 */}
       {paging.error !== null && (
-        <ErrorNote className="mb-2">
+        <ErrorNote className="mb-2 shrink-0">
           读取失败，下面是上一次成功读到的记录：{paging.error}
         </ErrorNote>
       )}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-base-800 px-3 py-2 text-xs">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-base-800 px-3 py-2 text-xs">
         <span className="text-ink-lo">
           {paging.hasMore ? `已加载 ${trades.length} 笔` : `${trades.length} 笔成交`} ·{' '}
           <span className="text-up">{wins} 盈</span> /{' '}
@@ -2143,7 +2190,7 @@ export function TradesTable({
           收起态只换这一个 class（`COLLAPSED_MAX_H`），节点与 `ref` 都不换。 */}
       <div
         ref={paging.scrollerRef}
-        className={`scroll-x ${collapsed ? COLLAPSED_MAX_H : EXPANDED_MAX_H} overflow-y-auto`}
+        className={`scroll-x ${fillHeight ? 'min-h-0 flex-1' : collapsed ? COLLAPSED_MAX_H : EXPANDED_MAX_H} overflow-y-auto`}
       >
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
@@ -2390,6 +2437,39 @@ const EXPANDED_MAX_H = 'max-h-[34vh]';
  */
 const COLLAPSED_MAX_H = 'max-h-[max(16vh,144px)]';
 
+const DOCK_HEIGHT_STORAGE_KEY = 'aq.traderDockBodyHeight';
+const DOCK_MIN_BODY_H = 72;
+const DOCK_MAX_BODY_RATIO = 0.58;
+
+function clampDockBodyHeight(raw: number): number {
+  const maxAllowed =
+    typeof window !== 'undefined'
+      ? Math.max(240, Math.round(window.innerHeight * DOCK_MAX_BODY_RATIO))
+      : 520;
+  return Math.round(Math.min(maxAllowed, Math.max(DOCK_MIN_BODY_H, raw)));
+}
+
+function loadSavedDockBodyHeight(): number | null {
+  try {
+    const raw = window.localStorage.getItem(DOCK_HEIGHT_STORAGE_KEY);
+    if (!raw) return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < DOCK_MIN_BODY_H) return null;
+    return clampDockBodyHeight(n);
+  } catch {
+    return null;
+  }
+}
+
+function persistDockBodyHeight(value: number | null): void {
+  try {
+    if (value === null) window.localStorage.removeItem(DOCK_HEIGHT_STORAGE_KEY);
+    else window.localStorage.setItem(DOCK_HEIGHT_STORAGE_KEY, String(Math.round(value)));
+  } catch {
+    /* ignore storage errors */
+  }
+}
+
 export function TraderTables({
   traderId,
   tab,
@@ -2521,6 +2601,7 @@ export function TraderTables({
    * 就不会有任何一行布局跟着变。工具栏**必须**算在里面，否则点「刷新」会被当成
    * "点了外面"，表格在操作者正要继续看它的时候缩掉。
    */
+  const resizeHandleRef = useRef<HTMLDivElement | null>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const tableAreaRef = useRef<HTMLDivElement | null>(null);
 
@@ -2547,9 +2628,16 @@ export function TraderTables({
     if (!isHeavyTab || historyCollapsed) return;
     const onPointerDown = (event: PointerEvent): void => {
       if (event.button !== 0) return;
+      if (manualBodyHeightRef.current !== null) return;
       const target = event.target;
       if (!(target instanceof Node)) return;
-      if (toolbarRef.current?.contains(target) || tableAreaRef.current?.contains(target)) return;
+      if (
+        resizeHandleRef.current?.contains(target) ||
+        toolbarRef.current?.contains(target) ||
+        tableAreaRef.current?.contains(target)
+      ) {
+        return;
+      }
       if (document.querySelector('[role="dialog"]')) return;
       setHistoryCollapsed(true);
     };
@@ -2600,12 +2688,13 @@ export function TraderTables({
     if (tab !== 'positions') return;
     const onPointerDown = (event: PointerEvent): void => {
       if (event.button !== 0) return;
+      if (manualBodyHeightRef.current !== null) return;
       const target = event.target;
       if (!(target instanceof Node)) return;
       /* 对话框开着 → 完全不管（同上一条理由）。 */
       if (document.querySelector('[role="dialog"]')) return;
-      /* 工具栏里按下 → **两件事都不做**：那些按钮自己有 onClick，见上面那段。 */
-      if (toolbarRef.current?.contains(target)) return;
+      /* 拖拽条或工具栏里按下 → **两件事都不做**：那些按钮自己有 onClick / 拖拽逻辑。 */
+      if (resizeHandleRef.current?.contains(target) || toolbarRef.current?.contains(target)) return;
       const inTable = tableAreaRef.current?.contains(target) ?? false;
       /* 点在表格**里面** → 放大；点在**外面** → 收缩。 */
       setPositionsCollapsed(!inTable);
@@ -2732,6 +2821,78 @@ export function TraderTables({
   }, [tradesPaging, symbolFilter, tab]);
 
   const [dockCollapsed, setDockCollapsed] = useState(false);
+  const [manualBodyHeight, setManualBodyHeight] = useState<number | null>(loadSavedDockBodyHeight);
+  const [resizingDock, setResizingDock] = useState(false);
+  const hasManualHeight = manualBodyHeight !== null;
+  const manualBodyHeightRef = useRef<number | null>(manualBodyHeight);
+  manualBodyHeightRef.current = manualBodyHeight;
+  const dockCollapsedRef = useRef<boolean>(dockCollapsed);
+  dockCollapsedRef.current = dockCollapsed;
+
+  /* 窗口缩放时重新钳制手动高度，防止切小屏后底部面板撑破视口。 */
+  useEffect(() => {
+    if (!hasManualHeight) return;
+    const onResize = () => setManualBodyHeight((prev) => (prev === null ? null : clampDockBodyHeight(prev)));
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [hasManualHeight]);
+
+  const startDockResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = dockCollapsedRef.current
+      ? 0
+      : (manualBodyHeightRef.current ??
+          Math.round(tableAreaRef.current?.getBoundingClientRect().height ?? 160));
+    let moved = false;
+    let latestHeight: number | null = manualBodyHeightRef.current;
+
+    setResizingDock(true);
+    const prevCursor = document.body.style.cursor;
+    const prevSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const delta = startY - moveEvent.clientY;
+      if (!moved && Math.abs(delta) < 3) return;
+      moved = true;
+      if (dockCollapsedRef.current) setDockCollapsed(false);
+      const next = clampDockBodyHeight(startHeight + delta);
+      latestHeight = next;
+      setManualBodyHeight(next);
+    };
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', cleanup);
+      window.removeEventListener('pointercancel', cleanup);
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevSelect;
+      setResizingDock(false);
+      if (moved && latestHeight !== null) persistDockBodyHeight(latestHeight);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', cleanup);
+    window.addEventListener('pointercancel', cleanup);
+  }, []);
+
+  const resetDockHeight = useCallback(() => {
+    setManualBodyHeight(null);
+    persistDockBodyHeight(null);
+  }, []);
+
+  const nudgeDockHeight = useCallback((deltaPx: number) => {
+    setDockCollapsed(false);
+    setManualBodyHeight((prev) => {
+      const base = prev ?? Math.round(tableAreaRef.current?.getBoundingClientRect().height ?? 160);
+      const next = clampDockBodyHeight(base + deltaPx);
+      persistDockBodyHeight(next);
+      return next;
+    });
+  }, []);
 
   const tabs: Array<{
     id: TraderTabId;
@@ -2764,9 +2925,45 @@ export function TraderTables({
 
   return (
     <Panel padded={false} bodyClassName="p-0" className="overflow-hidden">
+      {/* 顶部上下拖拽条：手动调整底部数据表高度，上方图表与决策区自动弹性伸缩；双击恢复自动高度 */}
+      <div
+        ref={resizeHandleRef}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="上下拖动调整底部数据表高度，双击恢复自动高度"
+        aria-valuenow={dockCollapsed ? 0 : (manualBodyHeight ?? undefined)}
+        aria-valuemin={DOCK_MIN_BODY_H}
+        tabIndex={0}
+        title="上下拖动调整底部高度 · 双击恢复自动高度"
+        onPointerDown={startDockResize}
+        onDoubleClick={resetDockHeight}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            nudgeDockHeight(32);
+          } else if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            nudgeDockHeight(-32);
+          } else if (event.key === 'Home') {
+            event.preventDefault();
+            resetDockHeight();
+          }
+        }}
+        className={`group flex h-2.5 cursor-row-resize select-none items-center justify-center transition-colors ${
+          resizingDock ? 'bg-accent/15' : 'bg-base-900 hover:bg-base-850'
+        }`}
+      >
+        <span
+          aria-hidden
+          className={`h-1 w-12 rounded-full transition-colors ${
+            resizingDock ? 'bg-accent' : 'bg-base-600/80 group-hover:bg-accent/80'
+          }`}
+        />
+      </div>
+
       <div
         ref={toolbarRef}
-        className={`flex flex-wrap items-center gap-2 bg-base-900 px-3 py-2 ${dockCollapsed ? '' : 'border-b border-base-800'}`}
+        className={`flex flex-wrap items-center gap-2 bg-base-900 px-3 pb-2 pt-0.5 ${dockCollapsed ? '' : 'border-b border-base-800'}`}
       >
         {/* 现代分段胶囊页签：图标 + 文字 + 高亮计数 */}
         <div
@@ -2817,7 +3014,7 @@ export function TraderTables({
           <div className="relative w-40 sm:w-44">
             <Search
               aria-hidden
-              className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint"
+              className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint"
             />
             <input
               type="text"
@@ -2825,7 +3022,7 @@ export function TraderTables({
               onChange={(e) => setSymbolFilter(e.target.value)}
               placeholder="筛选币种…"
               aria-label="按交易对筛选"
-              className="input num h-7 w-full pl-7 pr-6 text-xs"
+              className="input num !h-7 w-full !pl-8 !pr-7 text-xs"
             />
             {symbolFilter && (
               <button
@@ -2849,6 +3046,17 @@ export function TraderTables({
               onClick={() => setCloseTarget('__all__')}
             >
               全部平仓 ({closableCount})
+            </Button>
+          )}
+          {hasManualHeight && !dockCollapsed && (
+            <Button
+              size="sm"
+              variant="ghost"
+              title="恢复底部数据表按内容自动适配高度（也可双击顶部拖拽条）"
+              onClick={resetDockHeight}
+            >
+              <RotateCcw aria-hidden className="h-3 w-3" />
+              自动高度
             </Button>
           )}
           <Button
@@ -2875,7 +3083,14 @@ export function TraderTables({
 
       <div
         ref={tableAreaRef}
-        className={dockCollapsed ? 'max-h-0 overflow-hidden' : undefined}
+        style={!dockCollapsed && hasManualHeight ? { height: manualBodyHeight } : undefined}
+        className={
+          dockCollapsed
+            ? 'max-h-0 overflow-hidden'
+            : hasManualHeight
+              ? 'flex min-h-0 flex-col overflow-hidden'
+              : undefined
+        }
         aria-hidden={dockCollapsed || undefined}
       >
         {tab === 'positions' && (
@@ -2884,7 +3099,8 @@ export function TraderTables({
             refreshToken={token}
             onCloseRequest={setCloseTarget}
             onSelectSymbol={onSelectSymbol}
-            collapsed={positionsCollapsed}
+            collapsed={!hasManualHeight && positionsCollapsed}
+            fillHeight={hasManualHeight}
             openOrderCount={openOrders.length}
             onOpenOrdersTab={() => onChange('orders')}
           />
@@ -2896,7 +3112,8 @@ export function TraderTables({
             positionCount={positionCount}
             paper={paper}
             onSelectSymbol={onSelectSymbol}
-            collapsed={tab === 'history' ? historyCollapsed : undefined}
+            collapsed={!hasManualHeight && tab === 'history' ? historyCollapsed : undefined}
+            fillHeight={hasManualHeight}
             liveMarginModes={liveMarginModes}
           />
         )}
@@ -2905,7 +3122,8 @@ export function TraderTables({
             traderId={traderId}
             refreshToken={token}
             onSelectSymbol={onSelectSymbol}
-            collapsed={historyCollapsed}
+            collapsed={!hasManualHeight && historyCollapsed}
+            fillHeight={hasManualHeight}
             paging={filteredTradesPaging}
             liveMarginModes={liveMarginModes}
           />

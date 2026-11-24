@@ -414,7 +414,7 @@ export function Panel({
   return (
     <section className={cn('panel', className)}>
       {(title || actions) && (
-        <header className="panel-head">
+        <header className="panel-head shrink-0">
           {/* min-w-0 + truncate：标题是数据驱动的名字，长名字不能把 actions 挤出去 */}
           <h2 className="panel-title min-w-0 truncate">{title}</h2>
           {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}

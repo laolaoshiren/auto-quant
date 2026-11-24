@@ -25,10 +25,12 @@ import test from 'node:test';
 
 import {
   clamp,
+  elapsedMinutesSince,
   fmtDeltaUsd,
   fmtDrawdownPercent,
   fmtDuration,
   fmtNum,
+  fmtPendingDuration,
   fmtPercent,
   fmtProfitFactor,
   fmtSigned,
@@ -211,6 +213,23 @@ test('时长入参单位是分钟，超过 60 分进位、超过 24 时进位', 
   assert.equal(fmtDuration(24 * 60), '1天0时');
   assert.equal(fmtDuration(50 * 60), '2天2时');
   assert.equal(fmtDuration(-5), '0分', '负数被夹到 0，不显示 -5分');
+});
+
+test('fmtPendingDuration 与 elapsedMinutesSince：覆盖秒/分/时/天与非法输入', () => {
+  const now = Date.parse('2026-11-25T06:00:00Z');
+  const before = (sec: number) => new Date(now - sec * 1000).toISOString();
+
+  assert.equal(fmtPendingDuration(null, now), '—');
+  assert.equal(fmtPendingDuration('bad-date', now), '—');
+  assert.equal(elapsedMinutesSince('bad-date', now), null);
+
+  assert.equal(fmtPendingDuration(before(42), now), '42秒');
+  assert.equal(fmtPendingDuration(before(3 * 60 + 15), now), '3分15秒');
+  assert.equal(fmtPendingDuration(before(5 * 60), now), '5分');
+  assert.equal(fmtPendingDuration(before(28 * 60 + 40), now), '28分');
+  assert.equal(fmtPendingDuration(before(2 * 3600 + 18 * 60), now), '2时18分');
+  assert.equal(fmtPendingDuration(before(27 * 3600), now), '1天3时');
+  assert.equal(elapsedMinutesSince(before(45 * 60), now), 45);
 });
 
 /* -------------------------------------------------------------------------- */

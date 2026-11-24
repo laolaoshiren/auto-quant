@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Brain,
@@ -119,35 +119,42 @@ type ChartTab = 'equity' | 'candles';
  * 里面 `<svg>` 为 `null`、`path` 数量 0：一块**空白的框**，看起来像"没有数据"。
  * 所以改由 `useEquityChartHeight()` 在 JS 里算出像素值。
  */
-const EQUITY_CHART_MIN = 110;
-/**
- * **实验性布局**（2026-11-10 用户要求按参考截图把详情页改成"大图表"版）：
- * 原来上限 260px / 比例 16vh —— 曲线只占一小条，首屏一半是空白。
- * 现在放大到 380px / 26vh，让图表成为首屏主体（右侧仍是决策流、底部表格不变）。
- * 若用户觉得不好，`git revert` 这一个提交即可回到原比例。
- */
-const EQUITY_CHART_MAX = 380;
-const EQUITY_CHART_RATIO = 0.26;
+const EQUITY_CHART_MIN = 150;
+const EQUITY_CHART_FALLBACK = 240;
 
 /**
- * 图表高度 = `clamp(110, 16vh, 260)`，但**在 JS 里算**。
+ * 实时量测图表的 `flex-1` 弹性宿主高度（像素整数）。
  *
- * 监听 `resize`（而不是 `ResizeObserver` 盯某个容器）：图表高度只跟视口有关，
- * 而视口变化一定会触发 `resize`。初始值直接读 `window.innerHeight`，
- * 所以首帧就是对的，不会先画一个错的高度再跳。
+ * 为什么不直接给 Recharts 传 `height="100%"`：父链是 flex 计算出的高度，
+ * Recharts 在部分窗口下会把百分比解析成 6px 导致曲线消失。用 `ResizeObserver`
+ * 盯着 `relative flex-1 overflow-hidden` 宿主盒子，再把像素数传给 Recharts，
+ * 既能把 16:9 屏下方的空白完全顶满，又能在底部数据表被手动拖动/切标签/收起时
+ * 实时弹性伸缩。
  */
-function useEquityChartHeight(): number {
-  const compute = () =>
-    Math.round(
-      Math.min(EQUITY_CHART_MAX, Math.max(EQUITY_CHART_MIN, window.innerHeight * EQUITY_CHART_RATIO)),
-    );
-  const [height, setHeight] = useState(compute);
+function useMeasuredHeight(
+  ref: RefObject<HTMLDivElement | null>,
+  active: boolean,
+  minHeight = EQUITY_CHART_MIN,
+  fallback = EQUITY_CHART_FALLBACK,
+): number {
+  const [height, setHeight] = useState(fallback);
 
-  useEffect(() => {
-    const onResize = () => setHeight(compute());
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
+  useLayoutEffect(() => {
+    if (!active) return;
+    const el = ref.current;
+    if (!el) return;
+
+    const measure = () => {
+      const next = Math.max(minHeight, Math.floor(el.clientHeight));
+      setHeight((prev) => (prev === next ? prev : next));
+    };
+
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref, active, minHeight]);
 
   return height;
 }
@@ -263,8 +270,8 @@ export function TraderPage() {
   const [tableTab, setTableTab] = useState<TraderTabId>('positions');
   const [chartTab, setChartTab] = useState<ChartTab>('equity');
   const [range, setRange] = useState<EquityRange>('ALL');
-  /* 权益曲线高度跟随视口（见 `useEquityChartHeight` 的说明）。 */
-  const equityChartHeight = useEquityChartHeight();
+  /** 权益曲线弹性宿主 ref —— 通过 ResizeObserver 把剩余垂直空间撑满并随底部拖动实时伸缩。 */
+  const equityHostRef = useRef<HTMLDivElement | null>(null);
   /**
    * 手动覆盖"要不要收起曲线"。
    *
@@ -1015,6 +1022,10 @@ export function TraderPage() {
    * 那是人的动作，不是数据的动作。
    */
   const curveCollapsed = chartOverride ?? false;
+  const equityChartHeight = useMeasuredHeight(
+    equityHostRef,
+    chartTab === 'equity' && !curveCollapsed,
+  );
 
   const model = modelsQuery.data?.find((row) => row.id === trader?.aiModelId) ?? null;
   const strategy = strategiesQuery.data?.find((row) => row.id === trader?.strategyId) ?? null;
@@ -1938,7 +1949,7 @@ export function TraderPage() {
          * 间距，`flex` 让下面的图表面板能用 `flex-1` 吃掉剩余高度
          * （`space-y-*` 本身不影响 flex 布局）。
          */
-        mainClassName="flex flex-col space-y-2"
+        mainClassName="flex flex-col gap-2 space-y-0"
         aside={
           <DecisionFeed
             traderId={traderId}
@@ -1985,7 +1996,7 @@ export function TraderPage() {
           —— 正好是"[DEMO] 决策审计示例"被截成"[DEMO] 决策审..."的那点差距
           （标题需要 191px，收窄前只剩 174px）。8px 的间距在徽章之间仍然清楚。
         */}
-        <header className="flex flex-wrap items-center gap-x-2 gap-y-2 xl:flex-nowrap">
+        <header className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-2 xl:flex-nowrap">
           <Link
             to="/traders"
             className="inline-flex items-center gap-1 text-base text-ink-lo transition hover:text-accent"
@@ -2198,29 +2209,33 @@ export function TraderPage() {
         )}
 
         {/* B. 指标行 + 一行次要事实（§3 的第 2 项） --------------------- */}
-        {metricCards}
-        {secondaryFacts}
+        <div className="shrink-0">{metricCards}</div>
+        <div className="shrink-0">{secondaryFacts}</div>
 
         {/* 智能托管 2.0：外显风险护栏三档（无需进入设置即可直观查看与运行中一键切换） */}
         {trader.mode === 'ai_managed' && (
-          <ManagedRiskInlineSwitcher
-            value={trader.managedRiskProfile}
-            busy={riskProfileBusy}
-            disabled={status === 'starting'}
-            feedback={riskProfileFeedback}
-            onChange={(next) => void switchRiskProfile(next)}
-          />
+          <div className="shrink-0">
+            <ManagedRiskInlineSwitcher
+              value={trader.managedRiskProfile}
+              busy={riskProfileBusy}
+              disabled={status === 'starting'}
+              feedback={riskProfileFeedback}
+              onChange={(next) => void switchRiskProfile(next)}
+            />
+          </div>
         )}
 
         {/* 智能托管 2.0：AI500 雷达、持仓论点、反例笔记与归因就绪面板置顶于图表之上，首屏直达核心判断 */}
         {trader.mode === 'ai_managed' && (
-          <ManagedIntelPanel
-            traderId={traderId}
-            onSelectSymbol={(symbol) => {
-              setPickedSymbol(symbol);
-              setChartTab('candles');
-            }}
-          />
+          <div className="shrink-0">
+            <ManagedIntelPanel
+              traderId={traderId}
+              onSelectSymbol={(symbol) => {
+                setPickedSymbol(symbol);
+                setChartTab('candles');
+              }}
+            />
+          </div>
         )}
 
         {/*
@@ -2234,21 +2249,11 @@ export function TraderPage() {
           外账户交易的说明（`foreign`）仍保留在别处（决策流/账户面板），不丢信息。
         */}
 
-        {/* D. 权益 / 行情（§3 的第 3 项：最大的一块，但只在有数据可看时才占大块） */}
+        {/* D. 权益 / 行情（弹性撑满左侧剩余垂直空间，随底部数据表高度自动伸缩） */}
         <Panel
           padded={false}
-          bodyClassName="p-0"
-          /*
-           * 图表高度由 `EQUITY_CHART_HEIGHT` 的 `clamp(110px, 16vh, 260px)`
-           * 决定，**不再用 `flex-1` 吃剩余高度**。
-           *
-           * 试过 `flex-1` + `fill`（让 recharts 撑满父级）：主栏的高度是
-           * flex 算出来的，而 `height:100%` 需要父级有一个**已解析的**像素
-           * 高度 —— 实测图表在 1405x722 下只拿到 6px（`.recharts-responsive-
-           * container` 的实际高度），曲线整块消失。`clamp()` 给出的是一个
-           * 确定的像素值，recharts 能照用，四种窗口尺寸下都画得出来。
-           */
-          className="shrink-0"
+          bodyClassName={curveCollapsed && chartTab === 'equity' ? 'p-0' : 'flex min-h-0 flex-1 flex-col p-0'}
+          className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[240px] flex-1 flex-col'}
           title={
             <span className="flex items-center gap-1">
               <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
@@ -2334,33 +2339,40 @@ export function TraderPage() {
                 onExpand={() => setChartOverride(false)}
               />
             ) : (
-              <div className="px-3 pb-2 pt-2">
+              <div className="flex min-h-0 flex-1 flex-col px-3 pb-2 pt-2">
                 <EquityWindowLine
                   equity={windowLast}
                   delta={windowDelta}
                   percent={windowPercent}
                   asset={settleAsset}
                 />
-                <DashboardEquityChart
-                  snapshots={snapshots}
-                  range={range}
-                  baseline={trader.initialEquity}
-                  height={equityChartHeight}
-                  metric={curveMetric}
-                  liveEquity={
-                    running
-                      ? curveMetric === 'attributed'
-                        ? calibratedEquity
-                        : (liveAccountEquityForCurve ?? account?.equity)
-                      : undefined
-                  }
-                  liveUnrealizedPnl={running ? unrealized : undefined}
-                  liveOpenPositions={running ? openPositionCount : undefined}
-                />
+                <div
+                  ref={equityHostRef}
+                  className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[150px]"
+                >
+                  <div className="absolute inset-0">
+                    <DashboardEquityChart
+                      snapshots={snapshots}
+                      range={range}
+                      baseline={trader.initialEquity}
+                      height={equityChartHeight}
+                      metric={curveMetric}
+                      liveEquity={
+                        running
+                          ? curveMetric === 'attributed'
+                            ? calibratedEquity
+                            : (liveAccountEquityForCurve ?? account?.equity)
+                          : undefined
+                      }
+                      liveUnrealizedPnl={running ? unrealized : undefined}
+                      liveOpenPositions={running ? openPositionCount : undefined}
+                    />
+                  </div>
+                </div>
               </div>
             )
           ) : (
-            <CandlesPanel symbol={chartSymbol} height={equityChartHeight} />
+            <CandlesPanel symbol={chartSymbol} />
           )}
         </Panel>
 
@@ -2733,7 +2745,7 @@ function EquityWindowLine({
   asset: string;
 }) {
   return (
-    <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
+    <div className="mb-2 flex shrink-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
       <span
         className="text-ink-lo"
         title="相对可见区间第一个快照的变化。与上方「账户余额」同一口径（共享钱包的真实权益）。"
@@ -2773,7 +2785,7 @@ function ChartTabButton({
 }
 
 /** The trader's most recent position symbol, as a candlestick chart. */
-function CandlesPanel({ symbol, height }: { symbol?: string; height: number }) {
+function CandlesPanel({ symbol }: { symbol?: string }) {
   const [interval, setIntervalValue] = useState('15m');
   const query = usePolled((signal) => api.marketKlines(symbol ?? '', interval, 400, signal), {
     intervalMs: 15_000,
@@ -2783,12 +2795,10 @@ function CandlesPanel({ symbol, height }: { symbol?: string; height: number }) {
 
   if (!symbol) {
     /*
-     * ⚠️ **空状态也要占住图表的高度**：否则从「归属权益曲线」切到「行情图表」
-     * 时面板会从 234px 塌成一行字，整页高度跟着跳 —— 与"不管有没有数据版面都
-     * 要保持一致"是同一条要求。
+     * ⚠️ **空状态也要占住图表的弹性高度**：切到「行情图表」时同样把下方空白顶满。
      */
     return (
-      <p className="flex items-center justify-center px-3 text-base text-ink-faint" style={{ height }}>
+      <p className="flex min-h-[200px] flex-1 items-center justify-center px-3 text-base text-ink-faint">
         该机器人当前没有持仓 —— 开仓后这里会显示其行情图表。
       </p>
     );
@@ -2798,8 +2808,8 @@ function CandlesPanel({ symbol, height }: { symbol?: string; height: number }) {
   const last = candles[candles.length - 1];
 
   return (
-    <div className="p-3">
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+    <div className="flex min-h-0 flex-1 flex-col p-3">
+      <div className="mb-3 flex shrink-0 flex-wrap items-center gap-2">
         <span className="text-base font-semibold text-ink-hi">{symbol}</span>
         {last && <span className="num text-base text-ink-mid">{fmtPriceUsd(last.close)}</span>}
         <span className="ml-auto flex flex-wrap items-center gap-1">
@@ -2819,11 +2829,17 @@ function CandlesPanel({ symbol, height }: { symbol?: string; height: number }) {
       {query.error ? (
         <ErrorNote>{query.error}</ErrorNote>
       ) : query.loading && candles.length === 0 ? (
-        <Spinner3 label="正在加载K线" />
+        <div className="flex min-h-[160px] flex-1 items-center justify-center">
+          <Spinner3 label="正在加载K线" />
+        </div>
       ) : candles.length === 0 ? (
         <Empty message="该交易对没有返回K线。" />
       ) : (
-        <CandlestickChart candles={candles} height={height} />
+        <div className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[150px]">
+          <div className="absolute inset-0">
+            <CandlestickChart candles={candles} fill />
+          </div>
+        </div>
       )}
     </div>
   );

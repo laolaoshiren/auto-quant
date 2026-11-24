@@ -389,6 +389,36 @@ export function fmtDuration(minutes: number | null | undefined): string {
   return `${days}天${hours % 24}时`;
 }
 
+/** 计算自 `iso` 以来经过的分钟数（非法时间返回 `null`）。 */
+export function elapsedMinutesSince(iso: string | null | undefined, nowMs = Date.now()): number | null {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return null;
+  return Math.max(0, (nowMs - then) / 60_000);
+}
+
+/** 挂单已持续时长（精简中文，10 分钟内保留秒，避免刚挂出时只显示 `0分`）。 */
+export function fmtPendingDuration(iso: string | null | undefined, nowMs = Date.now()): string {
+  if (!iso) return '—';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '—';
+  const diffSec = Math.max(0, Math.floor((nowMs - then) / 1000));
+  if (diffSec < 60) return `${diffSec}秒`;
+  if (diffSec < 600) {
+    const mins = Math.floor(diffSec / 60);
+    const secs = diffSec % 60;
+    return secs > 0 ? `${mins}分${secs}秒` : `${mins}分`;
+  }
+  const totalMins = Math.floor(diffSec / 60);
+  if (totalMins < 60) return `${totalMins}分`;
+  const hours = Math.floor(totalMins / 60);
+  const mins = totalMins % 60;
+  if (hours < 24) return mins > 0 ? `${hours}时${mins}分` : `${hours}时`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return remHours > 0 ? `${days}天${remHours}时` : `${days}天`;
+}
+
 /** 一天内的时刻（24 小时制）。 */
 export function fmtTime(iso: string | null | undefined): string {
   if (!iso) return '—';
