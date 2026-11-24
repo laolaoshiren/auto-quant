@@ -1,6 +1,7 @@
 import {
   clampAiManagedHardLimits,
   closeReasonLabel,
+  isStableBaseAsset,
   isCloseAction,
   isAdjustAction,
   isCancelPendingAction,
@@ -4521,13 +4522,24 @@ export class AutoTrader {
      * 会让**要了数据的那几轮凭空消失** —— 而那恰好是最贵的那几轮。
      */
     let finalResponse = response;
+    /*
+     * M1.2（2026-11-24）：记录智能托管在本轮通过 `get_klines` 主动查验过的池外标的，
+     * 循环结束后通过合约与流动性校验热加入本轮可执行池，根治「自己找的币被风控以不在候选池拒杀」。
+     */
+    const klineInspectedSymbols = new Set<string>();
     const toolDeps: DecisionToolDeps = {
-      klines: (symbol, timeframe, count) =>
-        this.deps.marketData.getKlines(
+      klines: async (symbol, timeframe, count) => {
+        const rows = (await this.deps.marketData.getKlines(
           symbol,
           timeframe as Timeframe,
           count,
-        ) as Promise<Kline[]>,
+        )) as Kline[];
+        if (this.deps.trader.mode === 'ai_managed' && rows.length > 0) {
+          const norm = normalizeSymbol(symbol);
+          if (norm) klineInspectedSymbols.add(norm);
+        }
+        return rows;
+      },
       candidates: async () => snapshots.map((s) => s.symbol),
       /*
        * 第 3 层「索取」：**按模型自己的条件筛全市场**。
@@ -4877,6 +4889,47 @@ export class AutoTrader {
         );
       }
     }
+    /*
+     * M1.2（2026-11-24）：智能托管在按需取数轮主动拉取了 K 线的池外标的，
+     * 经过交易所合约存在性 + 非稳定币 + 24h 成交额流动性门槛三重校验后，
+     * 热加入本周期 `snapshots` / `snapshotBySymbol` / `candidateSymbols`，
+     * 使其既能通过解析器候选池检查，又能走完整 `RiskEngine` 硬风控审查。
+     */
+    if (this.deps.trader.mode === 'ai_managed' && klineInspectedSymbols.size > 0) {
+      const MAX_HOT_ADD = 5;
+      const outOfPool = [...klineInspectedSymbols]
+        .filter((sym) => !snapshotBySymbol.has(sym))
+        .slice(0, MAX_HOT_ADD);
+      const hotAdded: MarketSnapshot[] = [];
+      for (const sym of outOfPool) {
+        if (!this.deps.registry.get(sym)) continue;
+        if (config.coinSource.excludeStablecoins && isStableBaseAsset(sym)) continue;
+        const snap = await this.deps.marketData
+          .buildSnapshot(sym, config.indicators, ['ai_discovered'])
+          .catch(() => null);
+        if (!snap) continue;
+        const minVol = config.coinSource.minQuoteVolume24h;
+        if (minVol > 0 && snap.quoteVolume24h < minVol) {
+          this.emit(
+            'info',
+            `AI 自选标的 ${sym} 的 24h 成交额 $${(snap.quoteVolume24h / 1e6).toFixed(1)}M 低于门槛 $${(minVol / 1e6).toFixed(0)}M，未加入本轮可执行池。`,
+          );
+          continue;
+        }
+        snapshots.push(snap);
+        snapshotBySymbol.set(snap.symbol, snap);
+        hotAdded.push(snap);
+      }
+      if (hotAdded.length > 0) {
+        this.annotateTradability(hotAdded, account.equity);
+        progress.candidateSymbols = snapshots.map((s) => s.symbol);
+        this.emit(
+          'info',
+          `AI 自选标的已热加入本轮可执行池（通过合约与流动性校验）：${hotAdded.map((s) => s.symbol).join('、')}`,
+        );
+      }
+    }
+
     const openPositionMap = new Map<string, 'long' | 'short'>(
       localPositions.map((p) => [p.symbol, p.side as 'long' | 'short']),
     );

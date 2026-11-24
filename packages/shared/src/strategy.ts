@@ -736,6 +736,16 @@ export function unboundedAiManagedConfig(): StrategyConfig {
       /* 止盈是策略选择，交给模型；止损是结构要求，强制保留。 */
       requireTakeProfit: false,
       requireStopLoss: true,
+      /*
+       * M1.1（2026-11-24）：释放智能托管的大盈亏比空间（3:1 ~ 5:1 波段）。
+       * 关闭会在早期小回吐时砍死波段赢家的机械回撤守卫，改为交易所侧保本 + 宽追踪止损基线：
+       * 浮盈达 5%（如 5x 下价格走 1%）时移至保本，随后保留 1.5% 价格追踪空间让大趋势奔跑。
+       */
+      breakevenTriggerPercent: 5,
+      trailingStopPercent: 1.5,
+    },
+    drawdownGuard: {
+      enabled: false,
     },
     circuitBreaker: {
       maxDailyLossPercent: 8,

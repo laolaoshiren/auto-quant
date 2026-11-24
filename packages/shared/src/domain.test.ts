@@ -375,6 +375,11 @@ test('★ 智能托管的起始配置不设边界 —— 上限顶格、门槛�
     '★ 止损必须保留 —— 那是结构要求（不许裸奔），不是替模型做交易决定',
   );
 
+  /* M1.1：智能托管默认关闭早期机械回撤守卫，开启交易所侧保本 + 追踪止损基线以释放大盈亏比。 */
+  assert.equal(cfg.drawdownGuard.enabled, false, '智能托管默认关闭早期机械回撤守卫');
+  assert.equal(rc.breakevenTriggerPercent, 5, '智能托管默认开启 5% 浮盈保本止损');
+  assert.equal(rc.trailingStopPercent, 1.5, '智能托管默认开启 1.5% 追踪止损');
+
   /* 历史旧配置（125x / 100% / 熔断关闭）过 clampAiManagedHardLimits 后必须全部按回硬底线。 */
   const clamped = clampAiManagedHardLimits({
     ...cfg,
