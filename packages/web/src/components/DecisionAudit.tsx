@@ -8,7 +8,7 @@
  */
 import { type ReactNode } from 'react';
 import type { DecisionAction, DecisionRecord, ExecutionLogEntry } from '@aq/shared';
-import { Badge, Button, Collapsible, CopyButton, type Tone } from './ui';
+import { Badge, Button, Collapsible, CopyButton, cn, type Tone } from './ui';
 import { useCopy } from '../lib/hooks';
 import { fmtInt, fmtUsd } from '../lib/format';
 import { plainText } from '../lib/plainText';
@@ -82,10 +82,22 @@ export const ACTION_TONES: Record<DecisionAction, Tone> = {
   cancel_pending: 'neutral',
   add_to_position: 'neutral',
   reduce_position: 'neutral',
-  hold: 'muted',
+  /* `hold` 表示有在途仓位或挂单正在守护，视觉权重高于纯观望的 `wait` 与 `skip`。 */
+  hold: 'accent',
   wait: 'muted',
   /* `skip` 是"什么都没做"，用最弱的色调 —— 它在决策流里会很频繁。 */
   skip: 'muted',
+};
+
+/**
+ * 动作徽章的精细差异化配色（深浅主题均达 WCAG AA 对比度）。
+ *
+ * 将「持有（青蓝：有仓/挂单守护中）」「等待（淡紫：观察待机）」「跳过（低调灰）」
+ * 明确拉开层次，避免全员灰牌导致决策流里看不出哪些标的真正持仓。
+ */
+const ACTION_BADGE_CLASS: Partial<Record<DecisionAction, string>> = {
+  hold: "border-sky-500/40 bg-sky-500/12 text-sky-300 [[data-skin='light']_&]:border-sky-700/35 [[data-skin='light']_&]:bg-sky-500/12 [[data-skin='light']_&]:text-sky-800",
+  wait: "border-violet-400/35 bg-violet-500/10 text-violet-300 [[data-skin='light']_&]:border-violet-700/30 [[data-skin='light']_&]:bg-violet-500/10 [[data-skin='light']_&]:text-violet-800",
 };
 
 export function actionLabel(action: string): string {
@@ -155,7 +167,11 @@ export function ActionBadge({ action, className }: { action: string; className?:
     // The machine code goes in the tooltip rather than being translated away:
     // an unknown action renders as its raw code on purpose, and the operator
     // needs to be able to grep for it in the record.
-    <Badge tone={actionTone(action)} className={className} title={action}>
+    <Badge
+      tone={actionTone(action)}
+      className={cn(ACTION_BADGE_CLASS[action as DecisionAction], className)}
+      title={action}
+    >
       {actionLabel(action)}
     </Badge>
   );
