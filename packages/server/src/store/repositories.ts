@@ -1784,6 +1784,33 @@ export const orders = {
     return Number(result.changes ?? 0);
   },
 
+  /**
+   * 仅把指定标的与用途（止损 / 止盈）下仍处于 `NEW` 的本地保护委托标为 `CANCELED`。
+   *
+   * 2026-11-24 实测修复：模拟盘移动止损（`applyBreakevenGuard`）或调整保护位时，
+   * `cancelAllProtection` 在 dry-run 直接返回 0，旧 `STOP_MARKET` 本地行留在 `NEW`，
+   * 导致委托表里同一仓位同时出现多张活跃止损单。
+   */
+  cancelOpenProtectionBySymbol(
+    traderId: number,
+    symbol: string,
+    kinds: { stop?: boolean; target?: boolean },
+  ): number {
+    const purposes: string[] = [];
+    if (kinds.stop) purposes.push('stop_loss');
+    if (kinds.target) purposes.push('take_profit');
+    if (purposes.length === 0) return 0;
+    const placeholders = purposes.map(() => '?').join(', ');
+    const result = getDb().run(
+      `UPDATE orders SET status = 'CANCELED'
+        WHERE trader_id = ? AND symbol = ? AND status = 'NEW' AND purpose IN (${placeholders})`,
+      traderId,
+      symbol,
+      ...purposes,
+    );
+    return Number(result.changes ?? 0);
+  },
+
   openProtectionTypes(traderId: number, symbol: string): string[] {
     const rows = getDb().all<{ type: string }>(
       `SELECT type FROM orders
@@ -3459,6 +3486,7 @@ export const trades = {
     entryOrderId?: string | null;
     exitOrderIds?: readonly string[];
     openedAt?: string | null;
+    closedAt?: string | null;
   }): Array<{
     id: number;
     closeReason: string;
@@ -3476,6 +3504,23 @@ export const trades = {
     const entryId = input.entryOrderId && input.entryOrderId.length > 0 ? input.entryOrderId : null;
     const exitIds = (input.exitOrderIds ?? []).filter((id) => typeof id === 'string' && id.length > 0);
 
+    const idGuardParts: string[] = [];
+    const idGuardParams: unknown[] = [];
+    if (entryId) {
+      idGuardParts.push("(entry_order_id IS NULL OR entry_order_id = '' OR entry_order_id = ?)");
+      idGuardParams.push(entryId);
+    } else {
+      idGuardParts.push("(entry_order_id IS NULL OR entry_order_id = '')");
+    }
+    if (exitIds.length > 0) {
+      idGuardParts.push(
+        `(exit_order_id IS NULL OR exit_order_id = '' OR exit_order_id IN (${exitIds.map(() => '?').join(', ')}))`,
+      );
+      idGuardParams.push(...exitIds);
+    } else {
+      idGuardParts.push("(exit_order_id IS NULL OR exit_order_id = '')");
+    }
+
     if (entryId) {
       clauses.push('entry_order_id = ?');
       params.push(entryId);
@@ -3485,47 +3530,73 @@ export const trades = {
       params.push(...exitIds);
     }
     if (input.openedAt) {
-      const openParts: string[] = [
-        `ABS(julianday(opened_at) - julianday(?)) * 86400000 <= ${DUPLICATE_OPEN_TOLERANCE_MS}`,
-      ];
-      params.push(input.openedAt);
-      if (entryId) {
-        openParts.push("(entry_order_id IS NULL OR entry_order_id = '' OR entry_order_id = ?)");
-        params.push(entryId);
-      } else {
-        openParts.push("(entry_order_id IS NULL OR entry_order_id = '')");
-      }
-      if (exitIds.length > 0) {
-        openParts.push(
-          `(exit_order_id IS NULL OR exit_order_id = '' OR exit_order_id IN (${exitIds.map(() => '?').join(', ')}))`,
-        );
-        params.push(...exitIds);
-      } else {
-        openParts.push("(exit_order_id IS NULL OR exit_order_id = '')");
-      }
-      clauses.push(`(${openParts.join(' AND ')})`);
+      clauses.push(
+        `(ABS(julianday(opened_at) - julianday(?)) * 86400000 <= ${DUPLICATE_OPEN_TOLERANCE_MS} AND ${idGuardParts.join(' AND ')})`,
+      );
+      params.push(input.openedAt, ...idGuardParams);
+    }
+    if (input.closedAt) {
+      /*
+       * 2026-11-24 Gate 实测修复：限价入场单由 `settlePendingEntries` 晚于成交十几分钟才转正，
+       * 导致本地仓位与平仓行的 `opened_at` 偏离交易所重建值超出容差；若尾仓行又缺 `exit_order_id`，
+       * 只按 `opened_at` 会漏掉已记的 `drawdown_guard` 尾仓并重复补录。补充按 `closed_at` 容差匹配。
+       */
+      clauses.push(
+        `(ABS(julianday(closed_at) - julianday(?)) * 86400000 <= ${DUPLICATE_OPEN_TOLERANCE_MS} AND ${idGuardParts.join(' AND ')})`,
+      );
+      params.push(input.closedAt, ...idGuardParams);
     }
     if (clauses.length === 0) return [];
 
-    return getDb()
-      .all<{
-        id: number;
-        close_reason: string;
-        quantity: number;
-        pnl: number;
-        entry_fee: number;
-        fee: number;
-        funding_fee: number;
-        entry_order_id: string | null;
-        exit_order_id: string | null;
-      }>(
-        `SELECT id, close_reason, quantity, pnl, entry_fee, fee, funding_fee, entry_order_id, exit_order_id
+    type RawSplitRow = {
+      id: number;
+      close_reason: string;
+      quantity: number;
+      pnl: number;
+      entry_fee: number;
+      fee: number;
+      funding_fee: number;
+      entry_order_id: string | null;
+      exit_order_id: string | null;
+      opened_at: string;
+    };
+
+    const initialRows = getDb().all<RawSplitRow>(
+      `SELECT id, close_reason, quantity, pnl, entry_fee, fee, funding_fee, entry_order_id, exit_order_id, opened_at
+         FROM trades
+        WHERE trader_id = ? AND symbol = ?
+          AND (${clauses.join(' OR ')})
+        ORDER BY id ASC`,
+      ...params,
+    );
+
+    /*
+     * 若命中了部分减仓行（`manual_partial`），同仓位拆出的尾仓平仓行必然与其共享完全相同的 `opened_at`。
+     * 一并捞出同 `opened_at` 的兄弟行（受 idGuard 约束不误伤其它独立回合），彻底杜绝减仓尾仓重复补录。
+     */
+    const partialOpenedAts = [
+      ...new Set(initialRows.filter((r) => r.close_reason === 'manual_partial' && r.opened_at).map((r) => r.opened_at)),
+    ];
+    const byId = new Map<number, RawSplitRow>(initialRows.map((r) => [r.id, r]));
+    if (partialOpenedAts.length > 0) {
+      const openPlaceholders = partialOpenedAts.map(() => '?').join(', ');
+      const siblings = getDb().all<RawSplitRow>(
+        `SELECT id, close_reason, quantity, pnl, entry_fee, fee, funding_fee, entry_order_id, exit_order_id, opened_at
            FROM trades
           WHERE trader_id = ? AND symbol = ?
-            AND (${clauses.join(' OR ')})
+            AND opened_at IN (${openPlaceholders})
+            AND ${idGuardParts.join(' AND ')}
           ORDER BY id ASC`,
-        ...params,
-      )
+        input.traderId,
+        input.symbol,
+        ...partialOpenedAts,
+        ...idGuardParams,
+      );
+      for (const s of siblings) byId.set(s.id, s);
+    }
+
+    return [...byId.values()]
+      .sort((a, b) => a.id - b.id)
       .map((r) => ({
         id: r.id,
         closeReason: r.close_reason,

@@ -5881,7 +5881,11 @@ export class AutoTrader {
      *
      * 而 PR #185 的前提就是"模拟盘全程本地模拟"。⇒ 直接返回 0。
      */
-    if (this.isDryRun) return 0;
+    if (this.isDryRun) {
+      /* 模拟盘撤保护单不走交易所，但必须把本地 orders 表旧保护行标为 CANCELED，避免移动止损后残留多张 NEW 止损单。 */
+      orderStore.cancelOpenProtectionBySymbol(this.deps.trader.id, symbol, kinds);
+      return 0;
+    }
 
     const wanted = (kind: string): boolean =>
       (kinds.stop && kind.includes('STOP')) || (kinds.target && kind.includes('TAKE_PROFIT'));
@@ -7459,7 +7463,7 @@ export class AutoTrader {
      * （也应该）把估算值按两侧拆开传进来 —— 见 `settleDryRunPositions()`。
      * 有 `authoritative`（交易所重建值）时本参数被忽略：那时两侧费用以交易所为准。
      */
-    extra?: { entryFeeFallback?: number },
+    extra?: { entryFeeFallback?: number; exitOrderId?: string | null },
   ): Promise<{ netPnl: number; grossPnl: number; exitPrice: number; quantity: number }> {
     const traderId = this.deps.trader.id;
 
@@ -7668,6 +7672,8 @@ export class AutoTrader {
      */
     const closeQuantity =
       partialQty > 0 ? local.quantity : (authoritative?.quantity ?? local.quantity);
+    const resolvedEntryOrderId = authoritative?.entryOrderId || local.entry_order_id || null;
+    const resolvedExitOrderId = authoritative?.exitOrderId || extra?.exitOrderId || null;
     const alreadyBooked = tradeStore.findDuplicate({
       traderId,
       symbol: local.symbol,
@@ -7678,7 +7684,7 @@ export class AutoTrader {
       /* 开仓时刻 —— 主判据（两条路径的平仓时刻不同源，差过 11 分钟）。 */
       openedAt: local.opened_at,
       closedAt,
-      entryOrderId: authoritative?.entryOrderId ?? null,
+      entryOrderId: resolvedEntryOrderId,
       /*
        * **确定性键。** 同一笔平仓在交易所只有一个 `orderId`，所以"两条路径拿到
        * 同一个单号"就等于"这是同一个回合" —— 不依赖任何容差窗口。
@@ -7687,7 +7693,7 @@ export class AutoTrader {
        * 共用同一个 `exit_order_id`，却因为平仓时刻差 6 秒（超出 2 秒窗口）
        * 被判成两个回合，账上多记一笔 —— 而那一笔让归属权益比钱包高出 0.015。
        */
-      exitOrderId: authoritative?.exitOrderId ?? null,
+      exitOrderId: resolvedExitOrderId,
     });
     if (alreadyBooked !== null) {
       let figuresToApply: {
@@ -7795,8 +7801,8 @@ export class AutoTrader {
         openedAt: local.opened_at,
         closedAt,
         source: 'bot',
-        entryOrderId: authoritative?.entryOrderId ?? null,
-        exitOrderId: authoritative?.exitOrderId ?? null,
+        entryOrderId: resolvedEntryOrderId,
+        exitOrderId: resolvedExitOrderId,
         /*
          * **把开仓时记下的情报归因搬到成交上**（归因链最后一环，2026-10-12）。
          *
@@ -8629,6 +8635,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
           entryOrderId: trip.entryOrderId,
           exitOrderIds: trip.exitOrderIds,
           openedAt: trip.openedAt,
+          closedAt: trip.closedAt,
         });
         const partialRows = splits.filter((r) => r.closeReason === 'manual_partial');
         if (partialRows.length > 0) {
@@ -10661,7 +10668,7 @@ reduceQuantity: null,
         exitPrice,
         fee,
         new Date().toISOString(),
-        this.entryFeeExtra(paperEntryFee),
+        { ...this.entryFeeExtra(paperEntryFee), exitOrderId: filled.id },
       );
 
       /*

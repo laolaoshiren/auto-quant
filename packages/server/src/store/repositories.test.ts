@@ -413,3 +413,144 @@ test('★ openEntryCostsForAccount 按账户汇总多机器人持仓及加仓订
   const totalFee = orders.openEntryCostsForAccount(openPos);
   assert.ok(Math.abs(totalFee - 0.25) < 1e-9, `应汇总两台机器人开仓+加仓手续费 0.25，实得 ${totalFee}`);
 });
+
+test('★ trades.legSplitRows 能召回部分减仓同批尾仓（opened_at 因延迟入账偏移且尾仓单号缺失）', () => {
+  /*
+   * 复现线上实测故障：限价单延迟晋升导致本地 opened_at 比交易所开仓晚十余分钟；
+   * 先 manual_partial 减半（记录了 exit_order_id），后 drawdown_guard 平尾仓（未记 orderId）。
+   * 对账时 legSplitRows 必须把两笔都召回，绝不可因漏召尾仓而重复补录 reconciled 记录。
+   */
+  const acc = seedAccount();
+  const tid = seedTrader(acc, 't-legsplit');
+
+  const partial = trades.insert({
+    traderId: tid,
+    symbol: 'WLDUSDT',
+    side: 'short',
+    quantity: 1150,
+    entryPrice: 0.239,
+    exitPrice: 0.242,
+    leverage: 10,
+    grossPnl: -3.45,
+    entryFee: 0,
+    exitFee: 0.13915,
+    closeReason: 'manual_partial',
+    openedAt: '2026-11-24T00:11:40.314Z',
+    closedAt: '2026-11-24T02:14:12.000Z',
+    source: 'bot',
+    entryOrderId: null,
+    exitOrderId: 'E_PARTIAL',
+  });
+
+  const tail = trades.insert({
+    traderId: tid,
+    symbol: 'WLDUSDT',
+    side: 'short',
+    quantity: 1151,
+    entryPrice: 0.239,
+    exitPrice: 0.238,
+    leverage: 10,
+    grossPnl: 1.151,
+    entryFee: 0,
+    exitFee: 0.137,
+    closeReason: 'drawdown_guard',
+    openedAt: '2026-11-24T00:11:40.314Z',
+    closedAt: '2026-11-24T02:54:36.550Z',
+    source: 'bot',
+    entryOrderId: null,
+    exitOrderId: null,
+  });
+
+  // 同标的另一笔无关历史单（不同 opened_at 且不同单号），不可被误拉入
+  trades.insert({
+    traderId: tid,
+    symbol: 'WLDUSDT',
+    side: 'short',
+    quantity: 500,
+    entryPrice: 0.25,
+    exitPrice: 0.24,
+    leverage: 10,
+    grossPnl: 5,
+    entryFee: 0,
+    exitFee: 0.06,
+    closeReason: 'take_profit',
+    openedAt: '2026-11-23T18:00:00.000Z',
+    closedAt: '2026-11-23T19:00:00.000Z',
+    source: 'bot',
+    entryOrderId: 'E_OLD_ENTRY',
+    exitOrderId: 'E_OLD_EXIT',
+  });
+
+  const rows = trades.legSplitRows({
+    traderId: tid,
+    symbol: 'WLDUSDT',
+    entryOrderId: 'E_ENTRY',
+    exitOrderIds: ['E_PARTIAL', 'E_EXIT'],
+    openedAt: '2026-11-23T23:57:05.696Z',
+    closedAt: '2026-11-24T02:54:36.408Z',
+  });
+
+  assert.equal(rows.length, 2, '应召回 manual_partial + 同批尾仓共 2 条记录');
+  const ids = rows.map((r) => r.id).sort((a, b) => a - b);
+  assert.deepEqual(ids, [partial.id, tail.id].sort((a, b) => a - b));
+});
+
+test('★ orders.cancelOpenProtectionBySymbol 仅取消指定保护单的 NEW 行，不影响其他委托', () => {
+  const acc = seedAccount();
+  const tid = seedTrader(acc, 't-cancel-prot');
+
+  const sl = orders.insert({
+    traderId: tid,
+    exchangeOrderId: 'PAPER-SL-1',
+    clientOrderId: 'c-sl-1',
+    symbol: 'XRPUSDT',
+    side: 'BUY',
+    type: 'STOP_MARKET',
+    purpose: 'stop_loss',
+    quantity: 100,
+    price: null,
+    stopPrice: 1.5,
+    status: 'NEW',
+    fee: 0,
+  });
+  const tp = orders.insert({
+    traderId: tid,
+    exchangeOrderId: 'PAPER-TP-1',
+    clientOrderId: 'c-tp-1',
+    symbol: 'XRPUSDT',
+    side: 'BUY',
+    type: 'TAKE_PROFIT_MARKET',
+    purpose: 'take_profit',
+    quantity: 100,
+    price: null,
+    stopPrice: 1.2,
+    status: 'NEW',
+    fee: 0,
+  });
+  const entry = orders.insert({
+    traderId: tid,
+    exchangeOrderId: 'PAPER-ENTRY-1',
+    clientOrderId: 'c-entry-1',
+    symbol: 'XRPUSDT',
+    side: 'SELL',
+    type: 'MARKET',
+    purpose: 'entry',
+    quantity: 100,
+    price: 1.4,
+    stopPrice: null,
+    status: 'FILLED',
+    fee: 0.05,
+  });
+
+  const changed = orders.cancelOpenProtectionBySymbol(tid, 'XRPUSDT', { stop: true, target: false });
+  assert.equal(changed, 1);
+
+  const statuses = new Map(
+    getDb()
+      .all<{ id: number; status: string }>('SELECT id, status FROM orders WHERE trader_id = ?', tid)
+      .map((r) => [r.id, r.status]),
+  );
+  assert.equal(statuses.get(sl), 'CANCELED');
+  assert.equal(statuses.get(tp), 'NEW');
+  assert.equal(statuses.get(entry), 'FILLED');
+});
