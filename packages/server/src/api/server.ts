@@ -1478,7 +1478,10 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     environment: deps.publicConnection.environment,
     environmentLabel: deps.publicConnection.endpoints.label,
     clockOffsetMs: deps.publicConnection.clockOffsetMs,
-    weightUsed: deps.publicConnection.rest.usedWeight1m,
+    weightUsed:
+      typeof deps.publicConnection.rest.currentUsedWeight1m === 'function'
+        ? deps.publicConnection.rest.currentUsedWeight1m()
+        : deps.publicConnection.rest.usedWeight1m,
     weightLimit: deps.publicConnection.rest.weightLimitPerMinute,
     /**
      * 并发请求占用。

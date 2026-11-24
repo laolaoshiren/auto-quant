@@ -115,7 +115,13 @@ export function useShellData(): ShellData {
     system?.weightLimit && system.weightLimit > 0
       ? Math.round(((system?.weightUsed ?? 0) / system.weightLimit) * 100)
       : 0;
-  const weightWarn = weightPercent >= 70;
+  /*
+   * API 权重告警门槛设为 90%（原 70% 过低）：
+   * 70%–89% 属于系统内部 `BinanceRest` 软限速自动退避可消化的正常区间，不该在顶栏
+   * 挂黄色感叹号制造噪音；只有实时衰减后的同 IP 占用逼近 90%（真正有 418 封 IP 风险，
+   * 常见于同机其它程序共享 IP 配额）时才需要通知操作员。
+   */
+  const weightWarn = weightPercent >= 90;
 
   return useMemo<ShellData>(
     () => ({

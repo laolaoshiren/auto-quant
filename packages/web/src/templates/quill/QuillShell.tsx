@@ -268,7 +268,7 @@ export function QuillShell() {
           )}
 
           {shell.weightWarn && (
-            <Tooltip side="bottom" content="交易所 API 当前分钟请求权重占用率（超过 70% 提醒）。雷达扫描期间会短暂升高并在下一分钟自动回落；持续逼近 100% 可能触发交易所限流或临时封禁 IP（418）。">
+            <Tooltip side="bottom" content="当前服务器公网 IP 近 1 分钟币安 API 权重已逼近上限（≥90%）。系统内部已自动限速退避；若长期居高，请检查同服务器是否有其它程序共享币安 IP 配额，以免触发 418 临时封禁。">
               <Badge tone="warn" className="hidden shrink-0 cursor-help md:inline-flex">
                 <TriangleAlert aria-hidden className="h-3.5 w-3.5" />
                 API 权重 {shell.weightPercent}%

@@ -271,6 +271,14 @@ export class BinanceRest {
     return Boolean(this.apiKey && this.apiSecret);
   }
 
+  /**
+   * 按分钟窗口衰减后的当前真实权重占用（供 `/api/system` 展示用）。
+   * 避免闲置期间把几分钟前某次尖峰的旧 `usedWeight1m` 一直钉在界面上。
+   */
+  currentUsedWeight1m(nowMs = Date.now()): number {
+    return Math.round(decayWeight(this.usedWeight1m, this.weightWindowStart, nowMs));
+  }
+
   /* ---------------------------------------------------------------------- */
   /*  Time synchronisation                                                   */
   /* ---------------------------------------------------------------------- */
