@@ -1412,12 +1412,26 @@ export class RiskEngine {
     const marginHeadroom = Math.max(0, maxAllowedMargin - account.marginUsed);
     const spendable = Math.min(marginHeadroom, Math.max(0, account.availableBalance));
 
+    /*
+     * 可用保证金或余额已经见底时，必须在此直接拒绝，绝不可静默把 notional 归零后
+     * 落入 §9b 报出误导性的「单笔风险 $0.00 —— 仓位太小」。
+     */
+    if (spendable <= 0) {
+      const reason =
+        marginHeadroom <= 0
+          ? `保证金占用已达上限（已用 $${account.marginUsed.toFixed(2)} / 上限 $${maxAllowedMargin.toFixed(2)}，${risk.maxMarginUsage}%），无法再开新仓。`
+          : `可用余额不足（$${Math.max(0, account.availableBalance).toFixed(2)}），无法再开新仓。`;
+      return { ok: false, reason };
+    }
+
+    let marginClamped = false;
     if (requiredMargin > spendable) {
       const reducedNotional = spendable * leverage;
       adjustments.push(
         `名义价值已从 $${notional.toFixed(2)} 降至 $${reducedNotional.toFixed(2)}，以适配可用保证金（$${spendable.toFixed(2)}）。`,
       );
       notional = reducedNotional;
+      marginClamped = true;
     }
 
     /* --- 9b. 单笔风险预算下限（原 §7.5，移至最终 notional 确定之后） -------- */
@@ -1439,12 +1453,15 @@ export class RiskEngine {
         const minAcceptableUsd = riskBudgetUsd * 0.5;
         if (!Number.isFinite(stopRiskUsd) || stopRiskUsd + 1e-9 < minAcceptableUsd) {
           const suggestedNotionalUsd = (riskBudgetUsd / stopDistancePercent) * 100;
+          const reason = marginClamped
+            ? `剩余可用保证金不足（仅剩 $${spendable.toFixed(2)}，最多开名义 $${safeNotional.toFixed(0)}），` +
+              `导致单笔风险 $${stopRiskUsd.toFixed(2)} 低于风险预算下限（$${minAcceptableUsd.toFixed(2)}，建议先平仓释放保证金）。`
+            : `单笔风险 $${stopRiskUsd.toFixed(2)} 只有风险预算（余额 $${env.account.equity.toFixed(2)} × ${risk.riskPerTradePercent}% = $${riskBudgetUsd.toFixed(2)}）的 ` +
+              `${((stopRiskUsd / riskBudgetUsd) * 100).toFixed(0)}% —— 仓位太小，净盈亏对账户几乎不可见。` +
+              `按止损距离 ${stopDistancePercent.toFixed(3)}% 反推，名义应 ≥ $${suggestedNotionalUsd.toFixed(0)}（当前 $${safeNotional.toFixed(0)}）。`;
           return {
             ok: false,
-            reason:
-              `单笔风险 $${stopRiskUsd.toFixed(2)} 只有风险预算（余额 $${env.account.equity.toFixed(2)} × ${risk.riskPerTradePercent}% = $${riskBudgetUsd.toFixed(2)}）的 ` +
-              `${((stopRiskUsd / riskBudgetUsd) * 100).toFixed(0)}% —— 仓位太小，净盈亏对账户几乎不可见。` +
-              `按止损距离 ${stopDistancePercent.toFixed(3)}% 反推，名义应 ≥ $${suggestedNotionalUsd.toFixed(0)}（当前 $${safeNotional.toFixed(0)}）。`,
+            reason,
           };
         }
       }
@@ -1716,32 +1733,48 @@ export function shouldCloseForDrawdown(
    */
   if (!(guard.activationPercent > 0)) return { close: false, reason: '' };
 
+  /*
+   * 成本感知 + 杠杆解耦（2026-11-24 线上实测修复）：
+   *   高杠杆下（如 10x–18x），单纯按保证金 ROE%（如 1.5%–3%）触发意味着价格仅抖动
+   *   0.15%–0.17% 就激活回撤守卫，回吐一半时毛利还不够付双边 taker 手续费（0.10%），
+   *   把大量小盈利单强平在净亏损线上，同时把盈亏比系统性砍坏。
+   *
+   *   现在把双边手续费折算到保证金 ROE 口径：
+   *     feeRoePercent      = roundTripFeeRate × leverage × 100
+   *     effectiveActivation = max(guard.activationPercent, feeRoePercent × 4)
+   *       → 至少走出 4 倍双边手续费的真实价差盈利（约 0.40%）才启动回撤守卫；
+   *     costBreakevenRoe   = feeRoePercent × 1.2
+   *       → 当前浮盈若已回落到手续费保本线及以下，小浮盈（< 2×有效激活线）交回止损/保本，
+   *         绝不在"扣费必亏"的位置把小赢家提前砍死；仅大浮盈回吐才触发强平保护。
+   */
+  const leverage =
+    Number.isFinite(position.leverage) && position.leverage > 0 ? position.leverage : 1;
+  const roundTripFeeRate =
+    Number.isFinite(config.riskControl.fallbackRoundTripFeeRate) &&
+    config.riskControl.fallbackRoundTripFeeRate >= 0
+      ? config.riskControl.fallbackRoundTripFeeRate
+      : 0.001;
+  const feeRoePercent = roundTripFeeRate * leverage * 100;
+  const effectiveActivation = Math.max(guard.activationPercent, feeRoePercent * 4);
+  const costBreakevenRoe = feeRoePercent * 1.2;
+
   const peak = position.peakPnlPercent;
-  if (peak < guard.activationPercent) return { close: false, reason: '' };
+  if (peak < effectiveActivation) return { close: false, reason: '' };
 
   const current = position.unrealizedPnlPercent;
-  if (current <= 0) {
-    /*
-     * ⚠️ **"浮盈转亏"不再一律由回撤守卫平仓**（2026-11-10 用户服务器实测）。
-     *
-     * 原行为：峰值只要过激活线（默认 1.5%，10x 杠杆下价格只需 0.15%），之后
-     * 一旦 `current < 0` 就立刻平 —— 于是震荡市里**几乎每一单都以小亏收场**，
-     * 用户看到的是"成交 4 单全亏、还都是回撤守卫平的"。
-     *
-     * 现在的分工：
-     *   · **小浮盈转亏**（peak < 激活线×2）→ 不平仓，交给**止损/保本止损**，
-     *     让交易按计划走完（要么止盈、要么触发止损），不再提前制造亏损；
-     *   · **大浮盈转亏**（peak ≥ 激活线×2）→ 仍然平仓保护利润（这是它存在的意义）。
-     * 同一条规则的"仍盈利但回吐过多"分支保持不变。
-     */
-    const protectProfit = peak >= guard.activationPercent * 2;
-    const shouldClose = current <= 0 && protectProfit;
+  if (current <= costBreakevenRoe) {
+    const protectProfit = peak >= effectiveActivation * 2;
+    const shouldClose = protectProfit;
+    const stateDesc =
+      current < 0
+        ? `当前已转为亏损（${current.toFixed(2)}%）`
+        : current === 0
+          ? `当前已回吐全部浮盈（${current.toFixed(2)}%）`
+          : `当前仅剩 +${current.toFixed(2)}%（已跌破手续费保本线 ~${costBreakevenRoe.toFixed(2)}%）`;
     return {
       close: shouldClose,
       reason: shouldClose
-        ? current < 0
-          ? `回撤守卫：最高浮盈 +${peak.toFixed(2)}%，当前已转为亏损（${current.toFixed(2)}%），落袋保护利润。`
-          : `回撤守卫：最高浮盈 +${peak.toFixed(2)}%，当前已回吐全部浮盈（${current.toFixed(2)}%），落袋保护利润。`
+        ? `回撤守卫：最高浮盈 +${peak.toFixed(2)}%，${stateDesc}，落袋保护利润。`
         : '',
     };
   }

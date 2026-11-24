@@ -45,6 +45,10 @@ const ALLOWED_LINES: ReadonlyMap<string, string> = new Map([
   ['private activeConfig: StrategyConfig;', '字段声明。'],
   ['if (override) this.activeConfig = override;', '`refreshAgentState()`：装配期刷新。'],
   [
+    'if (this.deps.trader.mode === \'ai_managed\') return clampAiManagedHardLimits(this.activeConfig);',
+    '`effectiveConfig()` 自身实现：智能托管模式强制钳制在物理安全硬底线内。',
+  ],
+  [
     'if (this.deps.trader.mode !== \'jev\') return this.activeConfig;',
     '`effectiveConfig()` 自身实现：非 JEV 模式直接返回原始配置。',
   ],

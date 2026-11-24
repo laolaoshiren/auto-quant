@@ -38,10 +38,9 @@ test('★★ 团队配置与智能托管的配置【不是同一份】', () => {
   assert.notDeepEqual(team.coinSource, managed.coinSource, '★ 标的来源必须不同（团队模式要有池）');
 });
 
-test('★ 风控口径与智能托管一致：上限顶格、门槛归零（用户要求"不设内置风控"）', () => {
+test('★ 团队模式门槛归零（暂缓重构期间保持既有口径，不随智能托管硬底线改动）', () => {
   const team = defaultAiTeamConfig();
-  const managed = unboundedAiManagedConfig();
-  assert.equal(team.riskControl.maxPositions, managed.riskControl.maxPositions);
+  assert.equal(team.riskControl.maxPositions, 20);
   assert.equal(team.riskControl.maxMarginUsage, 100);
   assert.equal(team.riskControl.minConfidence, 0, '门槛归零 —— 该不该出手由 AI 判断');
   assert.equal(team.riskControl.minRiskRewardRatio, 0);

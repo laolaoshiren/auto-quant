@@ -34,7 +34,7 @@
  * 每一类越界各一个用例，外加"被钳制时如实记录"。
  */
 
-import { StrategyConfigSchema, type StrategyConfig } from '@aq/shared';
+import { AI_MANAGED_HARD_LIMITS, StrategyConfigSchema, type StrategyConfig } from '@aq/shared';
 
 /* -------------------------------------------------------------------------- */
 /*  结果类型                                                                   */
@@ -429,5 +429,110 @@ export function applyAgentPatch(current: StrategyConfig, patch: unknown): AgentP
     };
   }
 
-  return { config: parsed.data as StrategyConfig, clamps, rejected: null, dropped };
+  // 4. 物理安全硬底线（AI_MANAGED_HARD_LIMITS）：在 zod 校验通过之后执行，
+  //    这样极端非法值（如 9999x 杠杆）仍整份拒绝，而 schema 合法但超硬底线的值
+  //    （如 50x 杠杆、100% 保证金、关闭日亏/总回撤熔断）会被平稳钳制并如实回喂给 AI。
+  const finalConfig = structuredClone(parsed.data) as StrategyConfig;
+  const ceilingGuards: ReadonlyArray<{
+    field: string;
+    current: number;
+    max: number;
+    set: (v: number) => void;
+    forbidZero?: boolean;
+    why: string;
+  }> = [
+    {
+      field: 'riskControl.maxPositions',
+      current: finalConfig.riskControl.maxPositions,
+      max: AI_MANAGED_HARD_LIMITS.maxPositions,
+      set: (v) => {
+        finalConfig.riskControl.maxPositions = v;
+      },
+      why: `同时持仓数硬上限为 ${AI_MANAGED_HARD_LIMITS.maxPositions}，防止多币同向共振爆仓。`,
+    },
+    {
+      field: 'riskControl.btcEthMaxLeverage',
+      current: finalConfig.riskControl.btcEthMaxLeverage,
+      max: AI_MANAGED_HARD_LIMITS.btcEthMaxLeverage,
+      set: (v) => {
+        finalConfig.riskControl.btcEthMaxLeverage = v;
+      },
+      why: `BTC/ETH 杠杆硬上限为 ${AI_MANAGED_HARD_LIMITS.btcEthMaxLeverage}x，避免单根插针击穿强平线。`,
+    },
+    {
+      field: 'riskControl.altcoinMaxLeverage',
+      current: finalConfig.riskControl.altcoinMaxLeverage,
+      max: AI_MANAGED_HARD_LIMITS.altcoinMaxLeverage,
+      set: (v) => {
+        finalConfig.riskControl.altcoinMaxLeverage = v;
+      },
+      why: `山寨币杠杆硬上限为 ${AI_MANAGED_HARD_LIMITS.altcoinMaxLeverage}x，高波动标的超过该倍数极易穿透止损强平。`,
+    },
+    {
+      field: 'riskControl.btcEthMaxPositionValueRatio',
+      current: finalConfig.riskControl.btcEthMaxPositionValueRatio,
+      max: AI_MANAGED_HARD_LIMITS.btcEthMaxPositionValueRatio,
+      set: (v) => {
+        finalConfig.riskControl.btcEthMaxPositionValueRatio = v;
+      },
+      why: `BTC/ETH 单币名义敞口硬上限为权益的 ${AI_MANAGED_HARD_LIMITS.btcEthMaxPositionValueRatio} 倍。`,
+    },
+    {
+      field: 'riskControl.altcoinMaxPositionValueRatio',
+      current: finalConfig.riskControl.altcoinMaxPositionValueRatio,
+      max: AI_MANAGED_HARD_LIMITS.altcoinMaxPositionValueRatio,
+      set: (v) => {
+        finalConfig.riskControl.altcoinMaxPositionValueRatio = v;
+      },
+      why: `山寨币单币名义敞口硬上限为权益的 ${AI_MANAGED_HARD_LIMITS.altcoinMaxPositionValueRatio} 倍。`,
+    },
+    {
+      field: 'riskControl.maxMarginUsage',
+      current: finalConfig.riskControl.maxMarginUsage,
+      max: AI_MANAGED_HARD_LIMITS.maxMarginUsage,
+      set: (v) => {
+        finalConfig.riskControl.maxMarginUsage = v;
+      },
+      why: `保证金占用硬上限为 ${AI_MANAGED_HARD_LIMITS.maxMarginUsage}%，必须保留至少 ${100 - AI_MANAGED_HARD_LIMITS.maxMarginUsage}% 缓冲应对插针与资金费。`,
+    },
+    {
+      field: 'circuitBreaker.maxDailyLossPercent',
+      current: finalConfig.circuitBreaker.maxDailyLossPercent,
+      max: AI_MANAGED_HARD_LIMITS.maxDailyLossPercent,
+      forbidZero: true,
+      set: (v) => {
+        finalConfig.circuitBreaker.maxDailyLossPercent = v;
+      },
+      why: `单日亏损熔断不可关闭且硬上限为 ${AI_MANAGED_HARD_LIMITS.maxDailyLossPercent}%，这是账户最后的安全护栏。`,
+    },
+    {
+      field: 'circuitBreaker.maxTotalDrawdownPercent',
+      current: finalConfig.circuitBreaker.maxTotalDrawdownPercent,
+      max: AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent,
+      forbidZero: true,
+      set: (v) => {
+        finalConfig.circuitBreaker.maxTotalDrawdownPercent = v;
+      },
+      why: `总回撤熔断不可关闭且硬上限为 ${AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent}%，这是账户最后的安全护栏。`,
+    },
+  ];
+
+  for (const guard of ceilingGuards) {
+    const asked = readPath(known, guard.field);
+    // 只有补丁里显式改了该字段，或者当前值本身超界时才钳制
+    const breaches =
+      guard.current > guard.max || (guard.forbidZero === true && guard.current <= 0);
+    if (!breaches) continue;
+    guard.set(guard.max);
+    if (asked !== undefined) {
+      clamps.push({
+        field: guard.field,
+        asked,
+        allowed: guard.max,
+        why: guard.why,
+      });
+    }
+  }
+
+  return { config: finalConfig, clamps, rejected: null, dropped };
 }

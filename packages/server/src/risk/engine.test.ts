@@ -872,11 +872,82 @@ test('drawdown guard closes a position that peaked then turned negative', () => 
   const config = configWith({
     drawdownGuard: { enabled: true, activationPercent: 1, givebackRatio: 0.5 },
   });
+  // 5x 杠杆双边费 0.5% ROE → 有效激活线 2.0%，2× 激活线 = 4.0%，大浮盈 4.5% 转负应平仓保护
   const verdict = shouldCloseForDrawdown(
-    position({ peakPnlPercent: 3, unrealizedPnlPercent: -0.4 }),
+    position({ peakPnlPercent: 4.5, unrealizedPnlPercent: -0.4 }),
     config,
   );
   assert.equal(verdict.close, true);
+});
+
+test('★ 回撤守卫成本感知：高杠杆微幅噪音不激活，且不在扣费必亏线提前砍死小赢家', () => {
+  const config = configWith({
+    drawdownGuard: { enabled: true, activationPercent: 3, givebackRatio: 0.5 },
+  });
+  // 18x 杠杆 × 0.10% 双边费 = 1.8% ROE；4× 费用激活底线 = 7.2% ROE（0.40% 真实价差）
+  // 场景 1：仅走出 0.20% 价差（3.6% ROE），即便回吐到 1.0% ROE 也不应激活（避免净亏手续费）
+  const noise = shouldCloseForDrawdown(
+    position({ leverage: 18, peakPnlPercent: 3.6, unrealizedPnlPercent: 1.0 }),
+    config,
+  );
+  assert.equal(noise.close, false, '高杠杆下低于 4× 手续费的噪音波动不应激活回撤守卫');
+
+  // 场景 2：刚过激活线（peak = 8% < 2×7.2%），回落到 1.5% ROE（< 手续费保本线 2.16%）
+  // 不得在"扣费必亏"处把小赢家强平，交给止损/保本处理
+  const feeLossZone = shouldCloseForDrawdown(
+    position({ leverage: 18, peakPnlPercent: 8.0, unrealizedPnlPercent: 1.5 }),
+    config,
+  );
+  assert.equal(feeLossZone.close, false, '小浮盈跌破手续费保本线时不强平制造净亏');
+
+  // 场景 3：peak = 9%，回吐 60% 至 3.6% ROE（高于保本线 2.16%）→ 锁定净盈利
+  const netProfitLock = shouldCloseForDrawdown(
+    position({ leverage: 18, peakPnlPercent: 9.0, unrealizedPnlPercent: 3.6 }),
+    config,
+  );
+  assert.equal(netProfitLock.close, true, '高于手续费保本线的回吐应正常落袋净盈利');
+
+  // 场景 4：大浮盈（peak = 16% ≥ 2×7.2%）跌破保本线到 1.0% → 触发大浮盈保护
+  const bigPeakReversal = shouldCloseForDrawdown(
+    position({ leverage: 18, peakPnlPercent: 16.0, unrealizedPnlPercent: 1.0 }),
+    config,
+  );
+  assert.equal(bigPeakReversal.close, true, '大浮盈回吐至保本线下方必须触发保护');
+});
+
+test('★ 风控 §9 保证金耗尽时直接报保证金上限，不误报为 §9b 仓位太小（单笔风险 $0.00）', () => {
+  const prev = process.env.AQ_ENFORCE_RISK_BUDGET;
+  process.env.AQ_ENFORCE_RISK_BUDGET = 'true';
+  try {
+    const engine = new RiskEngine();
+    const config = configWith({
+      riskControl: {
+        ...defaultStrategyConfig().riskControl,
+        maxMarginUsage: 60,
+        riskPerTradePercent: 2,
+      },
+    });
+    const fullMarginEnv = environment({
+      config,
+      account: { equity: 1000, availableBalance: 400, marginUsed: 600, positionCount: 2 },
+    });
+    const verdict = engine.review([openDecision()], fullMarginEnv);
+    assert.equal(verdict.approved.length, 0);
+    assert.match(verdict.rejected[0]!.reason, /保证金占用已达上限/);
+    assert.doesNotMatch(verdict.rejected[0]!.reason, /仓位太小/);
+
+    // 剩余保证金极少（仅剩 $5，不足以支撑风险预算）时，报错明确指出是保证金受限
+    const tightMarginEnv = environment({
+      config,
+      account: { equity: 1000, availableBalance: 400, marginUsed: 595, positionCount: 2 },
+    });
+    const tightVerdict = engine.review([openDecision()], tightMarginEnv);
+    assert.equal(tightVerdict.approved.length, 0);
+    assert.match(tightVerdict.rejected[0]!.reason, /剩余可用保证金不足/);
+  } finally {
+    if (prev === undefined) delete process.env.AQ_ENFORCE_RISK_BUDGET;
+    else process.env.AQ_ENFORCE_RISK_BUDGET = prev;
+  }
 });
 
 /* -------------------------------------------------------------------------- */

@@ -1,4 +1,5 @@
 import {
+  clampAiManagedHardLimits,
   closeReasonLabel,
   isCloseAction,
   isAdjustAction,
@@ -2619,6 +2620,7 @@ export class AutoTrader {
    *   `activeConfig` 只在"装配期"用，运行期一律走这里。
    */
   private effectiveConfig(): StrategyConfig {
+    if (this.deps.trader.mode === 'ai_managed') return clampAiManagedHardLimits(this.activeConfig);
     if (this.deps.trader.mode !== 'jev') return this.activeConfig;
     return {
       ...this.activeConfig,

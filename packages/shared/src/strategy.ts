@@ -647,24 +647,99 @@ export function defaultStrategyConfig(): StrategyConfig {
  *   —— 前者的下限由**交易所的最小名义**决定（填小了会被拒），后者只在模型
  *   没给保护位时用。它们都不是"边界"，改小没有意义。
  */
+/**
+ * **智能托管（`ai_managed`）不可绕过的物理安全硬底线**（2026-11-24）。
+ *
+ * ## 为什么从"125x/100% 全放开"收拢到硬底线
+ *
+ * 1. 策略风格旋钮（`minConfidence`、`minRiskRewardRatio`、`requireTakeProfit`、
+ *    入场标准、选币池、指标周期、节流节奏等）仍然完全交给 AI 自主调整；
+ * 2. 下面这组属于**账户生死物理护栏**（杠杆上限、保证金上限、单币敞口、最大持仓、
+ *    日亏/总回撤熔断不可关闭）—— 实盘/模拟盘验证中，模型一旦抽风开高倍满仓或关掉
+ *    熔断，单轮即可造成不可逆爆仓；且系统并无独立于 `StrategyConfig` 的紧急刹车模块。
+ *
+ * 本常量同时是：
+ *   - `unboundedAiManagedConfig()` 初始起点的上界；
+ *   - `patch.ts`（`set_params` 补丁守卫）钳制 AI 越界改动的唯一依据；
+ *   - `AutoTrader.effectiveConfig()` 运行期兜底（覆盖历史已落库的旧 `ai_managed` 配置）。
+ */
+export const AI_MANAGED_HARD_LIMITS = {
+  maxPositions: 10,
+  btcEthMaxLeverage: 20,
+  altcoinMaxLeverage: 10,
+  btcEthMaxPositionValueRatio: 10,
+  altcoinMaxPositionValueRatio: 5,
+  maxMarginUsage: 80,
+  /** 日亏熔断必须开启且不得超过 15%（0 = 关闭被禁止）。 */
+  maxDailyLossPercent: 15,
+  /** 总回撤熔断必须开启且不得超过 35%（0 = 关闭被禁止）。 */
+  maxTotalDrawdownPercent: 35,
+} as const;
+
+/**
+ * 把任意 `StrategyConfig` 钳制到 `AI_MANAGED_HARD_LIMITS` 之内（纯函数，不改原对象）。
+ *
+ * 供运行期 `effectiveConfig()` 对历史已落库的旧 `ai_managed` 配置即时生效。
+ */
+export function clampAiManagedHardLimits(config: StrategyConfig): StrategyConfig {
+  const rc = config.riskControl;
+  const cb = config.circuitBreaker;
+  const dailyLoss =
+    cb.maxDailyLossPercent <= 0 || cb.maxDailyLossPercent > AI_MANAGED_HARD_LIMITS.maxDailyLossPercent
+      ? AI_MANAGED_HARD_LIMITS.maxDailyLossPercent
+      : cb.maxDailyLossPercent;
+  const totalDrawdown =
+    cb.maxTotalDrawdownPercent <= 0 ||
+    cb.maxTotalDrawdownPercent > AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent
+      ? AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent
+      : cb.maxTotalDrawdownPercent;
+
+  return {
+    ...config,
+    riskControl: {
+      ...rc,
+      requireStopLoss: true,
+      maxPositions: Math.min(rc.maxPositions, AI_MANAGED_HARD_LIMITS.maxPositions),
+      btcEthMaxLeverage: Math.min(rc.btcEthMaxLeverage, AI_MANAGED_HARD_LIMITS.btcEthMaxLeverage),
+      altcoinMaxLeverage: Math.min(rc.altcoinMaxLeverage, AI_MANAGED_HARD_LIMITS.altcoinMaxLeverage),
+      btcEthMaxPositionValueRatio: Math.min(
+        rc.btcEthMaxPositionValueRatio,
+        AI_MANAGED_HARD_LIMITS.btcEthMaxPositionValueRatio,
+      ),
+      altcoinMaxPositionValueRatio: Math.min(
+        rc.altcoinMaxPositionValueRatio,
+        AI_MANAGED_HARD_LIMITS.altcoinMaxPositionValueRatio,
+      ),
+      maxMarginUsage: Math.min(rc.maxMarginUsage, AI_MANAGED_HARD_LIMITS.maxMarginUsage),
+    },
+    circuitBreaker: {
+      ...cb,
+      maxDailyLossPercent: dailyLoss,
+      maxTotalDrawdownPercent: totalDrawdown,
+    },
+  };
+}
+
 export function unboundedAiManagedConfig(): StrategyConfig {
   const base = StrategyConfigSchema.parse({
     riskControl: {
-      /* 持仓数与杠杆：顶格（交易所给该账户的授信是 BTC 150x / 山寨 100x）。 */
-      maxPositions: 20,
-      btcEthMaxLeverage: 125,
-      altcoinMaxLeverage: 125,
-      /* 名义敞口上限：顶格（配合上面的杠杆，真正的总闸是 maxMarginUsage）。 */
-      btcEthMaxPositionValueRatio: 50,
-      altcoinMaxPositionValueRatio: 50,
-      /* 保证金占用：允许用满。 */
-      maxMarginUsage: 100,
-      /* 门槛归零 —— "要不要出手"由模型判断，不由数字拦。 */
+      /* 在物理安全底线（AI_MANAGED_HARD_LIMITS）内给 AI 充足的自主空间；越界由 patch.ts 钳制。 */
+      maxPositions: 6,
+      btcEthMaxLeverage: 10,
+      altcoinMaxLeverage: 5,
+      btcEthMaxPositionValueRatio: 5,
+      altcoinMaxPositionValueRatio: 3,
+      maxMarginUsage: 60,
+      /* 门槛归零 —— "要不要出手"属于策略风格，由模型判断，不由数字拦。 */
       minRiskRewardRatio: 0,
       minConfidence: 0,
-      /* 止盈是策略选择，交给模型；止损是结构要求，保留。 */
+      /* 止盈是策略选择，交给模型；止损是结构要求，强制保留。 */
       requireTakeProfit: false,
       requireStopLoss: true,
+    },
+    circuitBreaker: {
+      maxDailyLossPercent: 8,
+      maxTotalDrawdownPercent: 25,
     },
   });
 

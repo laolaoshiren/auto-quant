@@ -122,24 +122,32 @@ test('结构性不变量：requireStopLoss 被强制为真，并如实记录', (
   assert.ok(result.clamps[0]!.why.length > 10, '钳制理由必须能读懂，它会回喂给 AI');
 });
 
-test('熔断阈值可以被 AI 调 —— 它是策略工具，不再是安全网', () => {
+test('熔断阈值与杠杆在硬底线内可由 AI 自由调整，突破硬底线或尝试关闭时会被平稳钳制并记录', () => {
   const current = base();
 
-  /*
-   * 这一条**故意**断言允许调高。
-   *
-   * 最初的设计是"用户设上限、AI 只能在上限内调"，产品方最终选择完全交给 AI。
-   * 于是熔断阈值降级为策略工具（AI 可以用它主动停手防上头），
-   * 真正的安全网搬到 `StrategyConfig` 之外的账户级紧急刹车。
-   *
-   * 如果哪天有人把熔断也塞进 STRUCTURAL_INVARIANTS，这个用例会红 ——
-   * 那时要问的是"紧急刹车还在不在"，而不是把用例改掉。
-   */
-  const result = applyAgentPatch(current, { circuitBreaker: { maxDailyLossPercent: 25 } });
+  // 硬底线之内（如日亏熔断 12% ≤ 15%、山寨杠杆 8x ≤ 10x）原样接受，无钳制
+  const within = applyAgentPatch(current, {
+    circuitBreaker: { maxDailyLossPercent: 12 },
+    riskControl: { altcoinMaxLeverage: 8, maxMarginUsage: 70 },
+  });
+  assert.equal(within.rejected, null);
+  assert.equal(within.config.circuitBreaker.maxDailyLossPercent, 12);
+  assert.equal(within.config.riskControl.altcoinMaxLeverage, 8);
+  assert.equal(within.config.riskControl.maxMarginUsage, 70);
+  assert.deepEqual(within.clamps, []);
 
-  assert.equal(result.rejected, null);
-  assert.equal(result.config.circuitBreaker.maxDailyLossPercent, 25);
-  assert.deepEqual(result.clamps, []);
+  // 超硬底线（50x 杠杆、100% 保证金、日亏 25%、关闭总回撤熔断 0%）被钳制并回喂原因
+  const exceeded = applyAgentPatch(current, {
+    riskControl: { btcEthMaxLeverage: 50, altcoinMaxLeverage: 30, maxMarginUsage: 100 },
+    circuitBreaker: { maxDailyLossPercent: 25, maxTotalDrawdownPercent: 0 },
+  });
+  assert.equal(exceeded.rejected, null);
+  assert.equal(exceeded.config.riskControl.btcEthMaxLeverage, 20);
+  assert.equal(exceeded.config.riskControl.altcoinMaxLeverage, 10);
+  assert.equal(exceeded.config.riskControl.maxMarginUsage, 80);
+  assert.equal(exceeded.config.circuitBreaker.maxDailyLossPercent, 15);
+  assert.equal(exceeded.config.circuitBreaker.maxTotalDrawdownPercent, 35);
+  assert.equal(exceeded.clamps.length, 5);
 });
 
 test('越界值得整体拒绝，而不是部分生效', () => {

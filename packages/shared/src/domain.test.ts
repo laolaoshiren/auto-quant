@@ -27,7 +27,12 @@ import {
   exchangeErrorLabel,
   marginPercentToPricePercent,
 } from './domain.js';
-import { defaultStrategyConfig, unboundedAiManagedConfig } from './strategy.js';
+import {
+  AI_MANAGED_HARD_LIMITS,
+  clampAiManagedHardLimits,
+  defaultStrategyConfig,
+  unboundedAiManagedConfig,
+} from './strategy.js';
 
 test('实测撞到的 -4130 被翻译成可行动的一句话', () => {
   /*
@@ -329,34 +334,73 @@ test('★ 智能托管的起始配置不设边界 —— 上限顶格、门槛�
    * 所以这条用例钉的是：`unboundedAiManagedConfig()` 必须**处处顶格**，
    * 而不是又一组"看起来更合理"的保守值。
    */
-  const rc = unboundedAiManagedConfig().riskControl;
+  /*
+   * 2026-11-24 收口：智能托管保留策略风格自由（门槛归零、不强制止盈），
+   * 但账户物理安全边界（杠杆、保证金占比、持仓数、单币敞口、日亏/总回撤熔断）
+   * 必须落在 AI_MANAGED_HARD_LIMITS 硬底线以内，杜绝 125x/100% 裸奔。
+   */
+  const cfg = unboundedAiManagedConfig();
+  const rc = cfg.riskControl;
+  const cb = cfg.circuitBreaker;
 
-  /* 上限类：必须是 schema 允许的最大值 —— 少一格就是"系统又替它做了决定"。 */
-  assert.equal(rc.maxPositions, 20, '持仓数上限要顶格（schema max 20）');
-  assert.equal(rc.btcEthMaxLeverage, 125, 'BTC/ETH 杠杆上限要顶格（schema max 125）');
-  assert.equal(rc.altcoinMaxLeverage, 125, '山寨杠杆上限要顶格');
-  assert.equal(rc.btcEthMaxPositionValueRatio, 50, '名义敞口上限要顶格');
-  assert.equal(rc.altcoinMaxPositionValueRatio, 50, '山寨名义敞口上限要顶格');
-  assert.equal(rc.maxMarginUsage, 100, '保证金占用允许用满');
+  assert.ok(rc.maxPositions > 0 && rc.maxPositions <= AI_MANAGED_HARD_LIMITS.maxPositions);
+  assert.ok(rc.btcEthMaxLeverage > 0 && rc.btcEthMaxLeverage <= AI_MANAGED_HARD_LIMITS.btcEthMaxLeverage);
+  assert.ok(rc.altcoinMaxLeverage > 0 && rc.altcoinMaxLeverage <= AI_MANAGED_HARD_LIMITS.altcoinMaxLeverage);
+  assert.ok(
+    rc.btcEthMaxPositionValueRatio > 0 &&
+      rc.btcEthMaxPositionValueRatio <= AI_MANAGED_HARD_LIMITS.btcEthMaxPositionValueRatio,
+  );
+  assert.ok(
+    rc.altcoinMaxPositionValueRatio > 0 &&
+      rc.altcoinMaxPositionValueRatio <= AI_MANAGED_HARD_LIMITS.altcoinMaxPositionValueRatio,
+  );
+  assert.ok(rc.maxMarginUsage > 0 && rc.maxMarginUsage <= AI_MANAGED_HARD_LIMITS.maxMarginUsage);
+  assert.ok(cb.maxDailyLossPercent > 0 && cb.maxDailyLossPercent <= AI_MANAGED_HARD_LIMITS.maxDailyLossPercent);
+  assert.ok(
+    cb.maxTotalDrawdownPercent > 0 &&
+      cb.maxTotalDrawdownPercent <= AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent,
+  );
 
-  /* 门槛类：归零 —— "要不要出手"由模型判断，不由数字拦。 */
+  /* 门槛类：归零 —— "要不要出手"属于策略风格，由模型判断，不由数字拦。 */
   assert.equal(rc.minRiskRewardRatio, 0, '盈亏比门槛要归零');
   assert.equal(rc.minConfidence, 0, '置信度门槛要归零');
 
   /* 止盈是策略选择，交给模型。 */
   assert.equal(rc.requireTakeProfit, false, '不该强制止盈');
 
-  /*
-   * ⚠️ **唯一保留的一条：`requireStopLoss`。**
-   *
-   * 一个没有保护的杠杆仓位可以在几秒内亏光全部保证金 —— 那**不是一种策略选择**
-   * （`patch.ts` 的 `STRUCTURAL_INVARIANTS` 同样把它列为唯一的结构不变量，
-   * 且模型改不动）。它限制的是"裸奔"，不是"怎么交易"。
-   */
+  /* 止损是结构要求，强制保留。 */
   assert.equal(
     rc.requireStopLoss,
     true,
     '★ 止损必须保留 —— 那是结构要求（不许裸奔），不是替模型做交易决定',
+  );
+
+  /* 历史旧配置（125x / 100% / 熔断关闭）过 clampAiManagedHardLimits 后必须全部按回硬底线。 */
+  const clamped = clampAiManagedHardLimits({
+    ...cfg,
+    riskControl: {
+      ...rc,
+      requireStopLoss: false,
+      maxPositions: 20,
+      btcEthMaxLeverage: 125,
+      altcoinMaxLeverage: 125,
+      maxMarginUsage: 100,
+    },
+    circuitBreaker: {
+      ...cb,
+      maxDailyLossPercent: 0,
+      maxTotalDrawdownPercent: 0,
+    },
+  });
+  assert.equal(clamped.riskControl.requireStopLoss, true);
+  assert.equal(clamped.riskControl.maxPositions, AI_MANAGED_HARD_LIMITS.maxPositions);
+  assert.equal(clamped.riskControl.btcEthMaxLeverage, AI_MANAGED_HARD_LIMITS.btcEthMaxLeverage);
+  assert.equal(clamped.riskControl.altcoinMaxLeverage, AI_MANAGED_HARD_LIMITS.altcoinMaxLeverage);
+  assert.equal(clamped.riskControl.maxMarginUsage, AI_MANAGED_HARD_LIMITS.maxMarginUsage);
+  assert.equal(clamped.circuitBreaker.maxDailyLossPercent, AI_MANAGED_HARD_LIMITS.maxDailyLossPercent);
+  assert.equal(
+    clamped.circuitBreaker.maxTotalDrawdownPercent,
+    AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent,
   );
 });
 
