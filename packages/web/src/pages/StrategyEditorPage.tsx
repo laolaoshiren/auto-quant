@@ -649,14 +649,17 @@ export function StrategyEditorPage() {
           </Select>
           <Button
             variant="ghost"
-            size="sm"
             onClick={() => setRawOpen((v) => !v)}
             title="查看并复制 API 实际收到的 StrategyConfig"
           >
             {rawOpen ? '隐藏 JSON' : '查看 JSON'}
           </Button>
           {!isNew && (
-            <Button variant="ghost" size="sm" onClick={() => void remove()} className="text-down hover:text-down">
+            <Button
+              variant="ghost"
+              onClick={() => void remove()}
+              className="text-down hover:text-down"
+            >
               删除策略
             </Button>
           )}

@@ -127,10 +127,10 @@ const LEVEL_ROW: Record<string, string> = {
 /** 来源标签的配色，按**类别**分 —— 同类的东西在整页里长得一样。 */
 const SCOPE_TONE: Record<string, string> = {
   exchange: 'bg-accent/15 text-accent',
-  ai: 'bg-[#a78bfa]/15 text-[#a78bfa]',
-  data: 'bg-[#22d3ee]/15 text-[#22d3ee]',
+  ai: "bg-violet-500/15 text-violet-300 [[data-skin='light']_&]:text-violet-700",
+  data: "bg-cyan-500/15 text-cyan-300 [[data-skin='light']_&]:text-cyan-700",
   runtime: 'bg-base-800 text-ink-mid',
-  other: 'bg-base-850 text-ink-faint',
+  other: 'bg-base-850 text-ink-lo',
 };
 
 /**
@@ -456,7 +456,7 @@ export function DataPage() {
         padded={false}
       >
         <div className="mb-2 flex flex-wrap items-center gap-1.5">
-          <div className="relative min-w-[12rem] flex-1">
+          <div className="relative w-full max-w-[280px] sm:w-64">
             <TextInput
               className="num"
               placeholder="按原文过滤消息…"

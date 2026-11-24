@@ -200,7 +200,7 @@ export function MarketPage() {
           }
           padded={false}
         >
-          <div className="relative mb-2">
+          <div className="relative mb-2 max-w-[280px]">
             <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
             <TextInput
               className="!pl-8"

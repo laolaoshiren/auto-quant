@@ -286,7 +286,7 @@ export function Metric({
       <div
         className={cn(
           'num truncate leading-tight',
-          size === 'lg' ? 'text-2xl' : 'text-lg',
+          size === 'lg' ? 'text-[19px] font-semibold tracking-tight 2xl:text-2xl' : 'text-lg',
           toneClass,
         )}
       >

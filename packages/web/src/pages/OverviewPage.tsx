@@ -746,14 +746,15 @@ export function OverviewPage() {
  */
 function ModeBreakdown({ traders }: { traders: TraderRow[] }): React.ReactElement {
   /*
-   * ⚠️ **这里必须列出每一种 TraderMode**。名字与颜色登记在
-   * `components/TeamRoster.tsx` 的 `MODE_BADGE`，这里不许再写字面量。
+   * 仅展示当前活跃的三种模式（固定策略 / 智能托管 / AI 团队）；
+   * 已停用退役的 `jev` 仅在库里存在历史记录时才以归档项显示，避免空置占位并挤压宽度。
    */
+  const hasJev = traders.some((t) => t.mode === 'jev');
   const groups: Array<{ mode: TraderMode; hint: string }> = [
     { mode: 'strategy', hint: MODE_HINT.strategy },
     { mode: 'ai_managed', hint: MODE_HINT.ai_managed },
     { mode: 'ai_team', hint: MODE_HINT.ai_team },
-    { mode: 'jev', hint: MODE_HINT.jev },
+    ...(hasJev ? [{ mode: 'jev' as const, hint: MODE_HINT.jev }] : []),
   ];
 
   return (
@@ -761,7 +762,7 @@ function ModeBreakdown({ traders }: { traders: TraderRow[] }): React.ReactElemen
       <h2 id="overview-modes" className="sr-only">
         运行模式分布
       </h2>
-      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+      <div className={cn('grid grid-cols-1 gap-2 sm:grid-cols-3', hasJev && 'lg:grid-cols-4')}>
         {groups.map((g) => {
           const mine = traders.filter((t) => t.mode === g.mode);
           const running = mine.filter((t) => t.isRunning).length;
@@ -772,22 +773,27 @@ function ModeBreakdown({ traders }: { traders: TraderRow[] }): React.ReactElemen
               to="/traders"
               title={`${g.hint}（点这里查看机器人列表）`}
               className={cn(
-                'flex min-w-0 items-center gap-2 rounded-lg border px-2 py-2 transition',
+                'flex min-w-0 flex-col gap-1.5 rounded-lg border px-3 py-2.5 transition',
                 empty ? 'border-base-800 bg-base-900/40' : 'border-base-750 bg-base-900 hover:border-base-600',
               )}
             >
-              <ModeBadge mode={g.mode} />
-              <span className={cn('num text-base font-semibold', empty ? 'text-ink-faint' : 'text-ink-hi')}>
-                {mine.length} 台
-              </span>
-              <span
-                className={cn(
-                  'num ml-auto truncate text-xs',
-                  running > 0 ? 'text-up' : 'text-ink-faint',
-                )}
-              >
-                {running > 0 ? `${running} 运行` : '未运行'}
-              </span>
+              <div className="flex items-center justify-between gap-2">
+                <ModeBadge mode={g.mode} />
+                <span
+                  className={cn(
+                    'num shrink-0 whitespace-nowrap text-xs',
+                    running > 0 ? 'text-up' : 'text-ink-faint',
+                  )}
+                >
+                  {running > 0 ? `${running} 运行` : '未运行'}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-1">
+                <span className={cn('num text-lg font-semibold leading-none', empty ? 'text-ink-faint' : 'text-ink-hi')}>
+                  {mine.length}
+                </span>
+                <span className="text-xs text-ink-faint">台</span>
+              </div>
             </Link>
           );
         })}

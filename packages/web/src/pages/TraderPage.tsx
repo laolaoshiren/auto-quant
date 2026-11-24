@@ -2169,6 +2169,17 @@ export function TraderPage() {
         {metricCards}
         {secondaryFacts}
 
+        {/* 智能托管 2.0：AI500 雷达、持仓论点、反例笔记与归因就绪面板置顶于图表之上，首屏直达核心判断 */}
+        {trader.mode === 'ai_managed' && (
+          <ManagedIntelPanel
+            traderId={traderId}
+            onSelectSymbol={(symbol) => {
+              setPickedSymbol(symbol);
+              setChartTab('candles');
+            }}
+          />
+        )}
+
         {/*
           C. 交易所账户（共享钱包）—— **已整块删除**（用户 2026-11-10：
           「这个也是多余重复得，账户余额（USDT）实际对应得就是交易所账户余额」）。
@@ -2334,15 +2345,6 @@ export function TraderPage() {
           所以现在**只对 `ai_team` 显示** —— 与本次大更新的边界一致。
         */}
         {trader.mode === 'ai_team' && <AgentAuditPanel traderId={traderId} />}
-        {trader.mode === 'ai_managed' && (
-          <ManagedIntelPanel
-            traderId={traderId}
-            onSelectSymbol={(symbol) => {
-              setPickedSymbol(symbol);
-              setChartTab('candles');
-            }}
-          />
-        )}
 
       </PageShell>
       </div>

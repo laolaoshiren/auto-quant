@@ -277,27 +277,27 @@ export function TradersSnapshotTable({
             <caption className="sr-only">机器人归属权益与运行状态快照</caption>
             <thead className="border-b border-base-800 bg-base-850/60">
               <tr>
-                <th scope="col" className="th w-[24%] px-2 py-2">
+                <th scope="col" className="th w-[27%] px-2 py-2">
                   机器人
                 </th>
-                <th scope="col" className="th w-[9%] px-2 py-2">
+                <th scope="col" className="th w-[11%] px-2 py-2">
                   状态
                 </th>
-                <th scope="col" className="th w-[26%] px-2 py-2 text-right">
+                <th scope="col" className="th w-[23%] px-2 py-2 text-right">
                   <span title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。只是这个机器人自己的账，同一账户下其他机器人挣的钱不算在内；反过来，共用同一个账户的机器人各自都带着同一笔本金，所以这一列不能相加（相加会把钱包数 N 遍）。账户里的钱看左栏「账户权益合计」。">
                     归属权益
                   </span>
                 </th>
-                <th scope="col" className="th w-[8%] px-2 py-2 text-right">
+                <th scope="col" className="th w-[12%] px-2 py-2 text-right">
                   持仓
                 </th>
-                <th scope="col" className="th hidden w-[11%] px-2 py-2 text-right 2xl:table-cell">
+                <th scope="col" className="th hidden w-[10%] px-2 py-2 text-right 2xl:table-cell">
                   平仓胜率
                 </th>
                 <th scope="col" className="th hidden w-[14%] px-2 py-2 text-right xl:table-cell">
                   最近平仓
                 </th>
-                <th scope="col" className="th w-[8%] px-2 py-2 text-right">
+                <th scope="col" className="th w-[11%] px-2 py-2 text-right">
                   操作
                 </th>
               </tr>

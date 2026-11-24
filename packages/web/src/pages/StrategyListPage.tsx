@@ -330,13 +330,13 @@ export function StrategyListPage() {
                     <table className="w-full table-fixed border-collapse">
                       <thead className="border-b border-base-800 bg-base-850/60">
                         <tr>
-                          <th className="th w-[25%] px-2 py-2">名称</th>
-                          <th className="th w-[11%] px-2 py-2">模式</th>
-                          <th className="th hidden w-[15%] px-2 py-2 lg:table-cell">币种池</th>
-                          <th className="th w-[14%] px-2 py-2 text-right">风控</th>
-                          <th className="th hidden w-[12%] px-2 py-2 xl:table-cell">被引用</th>
-                          <th className="th hidden w-[12%] px-2 py-2 lg:table-cell">更新时间</th>
-                          <th className="th w-[11%] px-2 py-2 text-right">操作</th>
+                          <th className="th w-[23%] px-2 py-2">名称</th>
+                          <th className="th w-[10%] px-2 py-2">模式</th>
+                          <th className="th hidden w-[14%] px-2 py-2 lg:table-cell">币种池</th>
+                          <th className="th w-[12%] px-2 py-2 text-right">风控</th>
+                          <th className="th hidden w-[10%] px-2 py-2 xl:table-cell">被引用</th>
+                          <th className="th hidden w-[16%] whitespace-nowrap px-2 py-2 pr-3 lg:table-cell">更新时间</th>
+                          <th className="th w-[15%] whitespace-nowrap px-2 py-2 text-right">操作</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -409,7 +409,7 @@ export function StrategyListPage() {
                                   <span className="text-ink-faint">未使用</span>
                                 )}
                               </td>
-                              <td className="td num hidden px-2 py-2 text-xs text-ink-faint lg:table-cell">
+                              <td className="td num hidden whitespace-nowrap px-2 py-2 pr-3 text-xs text-ink-faint lg:table-cell">
                                 {fmtDateTime(record.updatedAt)}
                               </td>
                               <td className="td px-2 py-2 text-right">

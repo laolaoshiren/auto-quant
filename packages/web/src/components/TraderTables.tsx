@@ -988,18 +988,18 @@ export function PositionsTable({
         <table className="w-full border-collapse">
           <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
             <tr>
-              <th className="th">合约 / 方向</th>
-              <th className="th">保证金模式</th>
-              <th className="th text-right">数量</th>
-              <th className="th text-right">名义</th>
-              <th className="th text-right">保证金</th>
-              <th className="th text-right">开仓价</th>
-              <th className="th text-right">标记价</th>
-              <th className="th text-right">止盈</th>
-              <th className="th text-right">止损</th>
-              <th className="th text-right">强平价</th>
-              <th className="th text-right">未实现盈亏</th>
-              <th className="th text-right">操作</th>
+              <th className="th whitespace-nowrap px-1.5">合约 / 方向</th>
+              <th className="th whitespace-nowrap px-1.5">模式</th>
+              <th className="th whitespace-nowrap px-1.5 text-right">数量</th>
+              <th className="th whitespace-nowrap px-1.5 text-right">名义</th>
+              <th className="th whitespace-nowrap px-1.5 text-right">保证金</th>
+              <th className="th whitespace-nowrap px-1.5 text-right">开仓价</th>
+              <th className="th whitespace-nowrap px-1.5 text-right">标记价</th>
+              <th className="th whitespace-nowrap px-1.5 text-right">止盈</th>
+              <th className="th whitespace-nowrap px-1.5 text-right">止损</th>
+              <th className="th whitespace-nowrap px-1.5 text-right">强平价</th>
+              <th className="th whitespace-nowrap px-1.5 text-right">浮盈</th>
+              <th className="th sticky right-0 z-10 whitespace-nowrap bg-base-850 px-1.5 text-right">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -1025,8 +1025,8 @@ export function PositionsTable({
 
               return (
                 <tr key={position.id} className="row-hover align-top">
-                  <td className="td">
-                    <div className="flex items-center gap-2">
+                  <td className="td px-1.5">
+                    <div className="flex items-center gap-1.5">
                   <SymbolCell symbol={position.symbol} onSelect={onSelectSymbol} tone={symbolTones.get(position.symbol)} />
                       <SideBadge side={position.side} />
                       <Badge tone="muted" title="该持仓在交易所使用的杠杆倍数。">
@@ -1062,7 +1062,7 @@ export function PositionsTable({
                     保证金是真金），挤在一格里时谁都无法一眼扫读、也没法纵向对比
                     不同持仓的同项。拆成独立列后，每一列都能**沿着列往下比**。
                   */}
-                  <td className="td">
+                  <td className="td px-1.5">
                     {/*
                       保证金模式（全仓 / 逐仓）—— 与订单记录那一列同源同措辞。
                       
@@ -1083,22 +1083,22 @@ export function PositionsTable({
                     </Badge>
                   </td>
 
-                  <td className="td num text-right">{fmtQty(position.quantity)}</td>
+                  <td className="td num whitespace-nowrap px-1.5 text-right">{fmtQty(position.quantity)}</td>
 
-                  <td className="td num text-right">{fmtUsd(position.notional, 2)}</td>
+                  <td className="td num whitespace-nowrap px-1.5 text-right">{fmtUsd(position.notional, 2)}</td>
 
                   <td
-                    className="td num text-right"
+                    className="td num whitespace-nowrap px-1.5 text-right"
                     title="该仓位占用的保证金（本金）= 名义价值 ÷ 杠杆。"
                   >
                     {fmtUsd(position.marginUsed, 2)}
                   </td>
 
-                  <td className="td num text-right">{fmtPrice(position.entryPrice)}</td>
+                  <td className="td num whitespace-nowrap px-1.5 text-right">{fmtPrice(position.entryPrice)}</td>
 
-                  <td className="td num text-right">{fmtPrice(position.markPrice)}</td>
+                  <td className="td num whitespace-nowrap px-1.5 text-right">{fmtPrice(position.markPrice)}</td>
 
-                  <td className="td num text-right">
+                  <td className="td num whitespace-nowrap px-1.5 text-right">
                     <div className="text-base text-up">
                   {position.takeProfit
                     ? fmtPrice(position.takeProfit)
@@ -1111,7 +1111,7 @@ export function PositionsTable({
                 )}
               </td>
 
-                  <td className="td num text-right">
+                  <td className="td num whitespace-nowrap px-1.5 text-right">
                     <div className={`text-base ${missingStop ? 'font-semibold' : ''} text-down`}>
                 {position.stopLoss
                   ? fmtPrice(position.stopLoss)
@@ -1122,21 +1122,21 @@ export function PositionsTable({
                     {stopDistance && <div className="text-xs text-ink-faint">{stopDistance}</div>}
                   </td>
 
-                  <td className={`td num text-right ${position.liquidationPrice ? 'text-warn' : 'text-ink-faint'}`}>
+                  <td className={`td num whitespace-nowrap px-1.5 text-right ${position.liquidationPrice ? 'text-warn' : 'text-ink-faint'}`}>
                     {position.liquidationPrice ? fmtPrice(position.liquidationPrice) : '—'}
                   </td>
 
-                  <td className={`td num text-right ${pnlColor(position.unrealizedPnl)}`}>
+                  <td className={`td num whitespace-nowrap px-1.5 text-right ${pnlColor(position.unrealizedPnl)}`}>
                     {fmtUsdSigned(position.unrealizedPnl, 2)}
                     <div className="text-xs">{fmtPercent(position.unrealizedPnlPercent)}</div>
                   </td>
 
-                  <td className="td text-right">
+                  <td className="td sticky right-0 whitespace-nowrap bg-base-900 px-1.5 text-right">
                     <Button
                       size="sm"
                       variant="danger"
                       onClick={() => onCloseRequest(position.symbol)}
-                      title="查看手工平仓的说明"
+                      title="手工平仓该持仓"
                     >
                       平仓
                     </Button>
@@ -1213,22 +1213,31 @@ function SymbolCell({
   tone?: string;
 }) {
   const tone = toneOverride ?? symbolTone(symbol);
+  const content = (
+    <span className="inline-flex items-center gap-1.5 font-semibold text-ink-hi">
+      <span
+        aria-hidden
+        className="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
+        style={{ backgroundColor: tone }}
+      />
+      <span>{symbol}</span>
+    </span>
+  );
   /*
    * 没有回调时退化成纯文本：表格被用在不需要跳转的地方时（比如策略体检报告），
    * 一个点不动的按钮比一段文字更糟。
    */
   if (!onSelect) {
-    return <span style={{ color: tone }}>{symbol}</span>;
+    return content;
   }
   return (
     <button
       type="button"
       onClick={() => onSelect(symbol)}
       title={`在行情图表里查看 ${symbol}`}
-      className="-mx-1 rounded px-1 transition hover:bg-base-800"
-      style={{ color: tone }}
+      className="-mx-1 inline-flex items-center rounded px-1 transition hover:bg-base-800"
     >
-      {symbol}
+      {content}
     </button>
   );
 }

@@ -140,8 +140,8 @@ html.aq-quill {
    */
   --aq-up: #2fd08d;
   --aq-up-rgb: 47 208 141;
-  --aq-down: #f2607a;
-  --aq-down-rgb: 242 96 122;
+  --aq-down: #f76c84;
+  --aq-down-rgb: 247 108 132;
   --aq-warn: #f0b357;
   --aq-warn-rgb: 240 179 87;
 
@@ -1183,6 +1183,13 @@ html.aq-quill .q-seg-wrap {
   flex: none;
   padding: 0 12px 8px 16px;
   min-width: 0;
+}
+
+/* 宽屏（≥56em）左侧导航常驻，隐藏顶部重复分组导航条，释放约 48px 垂直视野给图表与表格。 */
+@media (min-width: 56em) {
+  html.aq-quill .q-seg-wrap {
+    display: none;
+  }
 }
 
 html.aq-quill .q-seg {

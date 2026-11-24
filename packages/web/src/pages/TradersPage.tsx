@@ -601,10 +601,10 @@ export function TradersPage() {
               <table className="w-full table-fixed border-collapse">
                 <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
                   <tr>
-                    <th className="th w-[22%]">机器人</th>
+                    <th className="th w-[21%]">机器人</th>
                     <th className="th w-[8%]">状态</th>
                     <th
-                      className="th w-[14%] text-right"
+                      className="th w-[12%] text-right"
                       title={
                         '归属权益 = 起始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。' +
                         '同一账户下其他机器人挣的钱不算在内。' +
@@ -615,20 +615,20 @@ export function TradersPage() {
                     >
                       归属权益
                     </th>
-                    <th className="th w-[13%] text-right" title="总收益率 = 归属权益相对起始权益的变化；下面一行是它的构成：净 = 毛 − 手续费 − 资金费。">
+                    <th className="th w-[12%] text-right" title="总收益率 = 归属权益相对起始权益的变化；下面一行是它的构成：净 = 毛 − 手续费 − 资金费。">
                       盈亏
                     </th>
-                    <th className="th hidden w-[10%] text-right lg:table-cell" title="胜率（winRatePercent，已是 0–100 的百分数）· 盈/亏笔数与盈利因子（∞ = 尚无亏损成交）。">
+                    <th className="th hidden w-[12%] text-right lg:table-cell" title="胜率（winRatePercent，已是 0–100 的百分数）· 盈/亏笔数与盈利因子（∞ = 尚无亏损成交）。">
                       胜率 / PF
                     </th>
-                    <th className="th w-[7%] text-right">持仓</th>
+                    <th className="th w-[5%] text-right">持仓</th>
                     <th className="th hidden w-[8%] text-right xl:table-cell" title="历史最大回撤（账户从高水位回落的最大幅度）。">
                       最大回撤
                     </th>
-                    <th className="th hidden w-[10%] text-right lg:table-cell" title="已运行时长 / 最近一个决策周期的时间。">
+                    <th className="th hidden w-[10%] pr-3 text-right lg:table-cell" title="已运行时长 / 最近一个决策周期的时间。">
                       运行 / 最近周期
                     </th>
-                    <th className="th w-[8%] text-right">操作</th>
+                    <th className="th w-[12%] text-right">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -884,14 +884,14 @@ export function TradersPage() {
                         </td>
                         {/* 运行时长 + 最近周期合成一格：它们是同一个问题的两个方面
                             （还在跑吗、跑到哪了），分两列各占 100px 不值。 */}
-                        <td className="td hidden num text-right text-ink-lo lg:table-cell">
+                        <td className="td hidden num whitespace-nowrap pr-3 text-right text-ink-lo lg:table-cell">
                           {stats ? fmtDuration(stats.uptimeHours * 60) : '—'}
                           <div className="text-xs text-ink-faint">{timeAgo(trader.lastCycleAt)}</div>
                         </td>
-                        <td className="td">
+                        <td className="td whitespace-nowrap">
                           {/* 一行、两个常用动作 + 一个溢出菜单。以前这一格把所有动作
                               平铺开，行高被撑起来、宽度也被吃掉。 */}
-                          <div className="flex items-center justify-end gap-1">
+                          <div className="flex items-center justify-end gap-1.5">
                             {/*
                               ⚠️ **`starting` 必须单独占一个分支，不能和"没在跑"共用「启动」按钮。**
 

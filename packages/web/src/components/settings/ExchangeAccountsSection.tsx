@@ -701,46 +701,43 @@ export function ExchangeAccountsSection() {
                       把这 20px 从间距里省出来，名称就能完整显示而不是被截成
                       「[DEMO] 模...」。
                     */}
-                    <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2 border-b border-base-800 bg-base-850/60 px-3 py-2 md:flex-nowrap">
-                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-base-700 bg-base-800 text-ink-lo">
-                        <Landmark aria-hidden className="h-3 w-3" />
-                      </span>
-                      <span className="min-w-0 truncate text-base font-semibold text-ink-hi" title={row.label}>
-                        {row.label}
-                      </span>
-                      {/*
-                        徽章组 `shrink-0`：它们不该为了给按钮腾地方而被压扁。
-                        放不下时该压缩的是名称（见上），徽章是身份的一部分。
-                      */}
-                      <span className="flex shrink-0 items-center gap-1.5">
+                    <div className="flex flex-col gap-1.5 border-b border-base-800 bg-base-850/60 px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-base-700 bg-base-800 text-ink-lo">
+                          <Landmark aria-hidden className="h-3 w-3" />
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-base font-semibold text-ink-hi" title={row.label}>
+                          {row.label}
+                        </span>
+                        <span className="ml-auto flex shrink-0 items-center gap-1">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            busy={testingId === row.id}
+                            onClick={() => void test(row)}
+                            title="用已保存的密钥向交易所发起一次只读探测"
+                          >
+                            测试连接
+                          </Button>
+                          <Button size="sm" onClick={() => openEdit(row)}>
+                            编辑
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            onClick={() => setRemoving(row)}
+                            aria-label={`删除凭证 ${row.label}`}
+                          >
+                            <Trash2 aria-hidden className="h-3.5 w-3.5" />
+                            删除
+                          </Button>
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5 pl-7">
                         <Badge tone="accent">{exchangeLabel(row.exchange)}</Badge>
                         <EnvBadge testnet={row.testnet} />
                         {row.canTrade ? <Badge tone="up">可下单</Badge> : <Badge tone="warn">只读</Badge>}
-                      </span>
-
-                      <span className="ml-auto flex shrink-0 items-center gap-1">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          busy={testingId === row.id}
-                          onClick={() => void test(row)}
-                          title="用已保存的密钥向交易所发起一次只读探测"
-                        >
-                          测试连接
-                        </Button>
-                        <Button size="sm" onClick={() => openEdit(row)}>
-                          编辑
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="danger"
-                          onClick={() => setRemoving(row)}
-                          aria-label={`删除凭证 ${row.label}`}
-                        >
-                          <Trash2 aria-hidden className="h-3.5 w-3.5" />
-                          删除
-                        </Button>
-                      </span>
+                      </div>
                     </div>
 
                     {/*

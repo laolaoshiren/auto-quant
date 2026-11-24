@@ -69,6 +69,8 @@ export function TemplateSwitcher({
   useEffect(() => setOpen(false), [pathname]);
 
   const templates = shell.templates;
+  // 只有唯一内置模板（quill）且无第三方模板注册时，不占用顶栏位置；注册多套时自动显现。
+  if (templates.length <= 1) return null;
   const current = templates.find((option) => option.id === id) ?? templates[0];
   const CurrentIcon = templateIcon(id);
   const compact = size === 'sm';
