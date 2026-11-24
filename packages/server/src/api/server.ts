@@ -2314,39 +2314,48 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   app.get('/api/traders', authed, async () => {
     const running = new Set(deps.manager.runningIds());
-    return traders.list().map((trader) => ({
-      ...trader,
-      managedRiskProfile: managedRiskProfileOf(trader),
-      // The live loop is the source of truth for status, not the stored value.
-      status: running.has(trader.id) ? deps.manager.statusOf(trader.id) : ('stopped' as const),
-      isRunning: running.has(trader.id),
-      /*
-       * ⚠️ **账本与交易所的差额必须发到界面上。**
-       *
-       * 用户 2026-10-07 报的：「起始权益 100.05，现在 100.84，为什么显示 +$1.29？」
-       *
-       * 首页那个"交易盈亏"来自 `trades.net_pnl` 求和（账本），而这个机器人**一直在漏记
-       * 平仓手续费**（33 张已成交的平仓单 `fee=0`），账本只好拿开仓费顶上
-       * —— 11 笔呈现精确的 `fee = 2 × entry_fee`。差额就是这个字段。
-       *
-       * 系统的账目校验（`ledger_check:<id>`）**每轮都算出这个 gap 并写进 settings**，
-       * 却**从来没有一条路径把它送到界面上**。于是操作员看到一个错数、且没有任何提示。
-       *
-       * 带出去，让界面能说"账本与交易所差了多少"，而不是继续假装账本是准的。
-       */
-      ledger: ledgerCheckOf(trader.id),
-      /*
-       * **下一轮决策的预定时刻**（epoch 毫秒）—— 界面据此显示倒计时。
-       *
-       * 用户 2026-10-07：「能在这里加入一个倒计时吗？让我明显知道下一轮决策剩余周期」。
-       *
-       * 由 `AutoTrader.nextCycleAt` 提供：它记的是**定时器真正被排到的那一刻**，
-       * 已经把"模型自己要求的间隔"（`requestedMinutes`）与"失败短重试"算进去了。
-       * **界面不要自己拿"上一轮时间 + 配置周期"推算** —— 那会忽略这两件事，
-       * 显示一个骗人的倒计时（模型说 5 分钟、界面显示 60 分钟）。
-       */
-      nextCycleAt: deps.manager.nextCycleAtOf(trader.id),
-    }));
+    const runningSince = deps.manager.runningSince();
+    return traders.list().map((trader) => {
+      const isRunning = running.has(trader.id);
+      const persistedStart = isRunning ? settings.get(`trader_started_at:${trader.id}`)?.trim() : '';
+      const memStartMs = isRunning ? runningSince.get(trader.id) : undefined;
+      return {
+        ...trader,
+        managedRiskProfile: managedRiskProfileOf(trader),
+        // The live loop is the source of truth for status, not the stored value.
+        status: isRunning ? deps.manager.statusOf(trader.id) : ('stopped' as const),
+        isRunning,
+        startedAt: isRunning
+          ? (persistedStart || (memStartMs !== undefined ? new Date(memStartMs).toISOString() : null))
+          : null,
+        /*
+         * ⚠️ **账本与交易所的差额必须发到界面上。**
+         *
+         * 用户 2026-10-07 报的：「起始权益 100.05，现在 100.84，为什么显示 +$1.29？」
+         *
+         * 首页那个"交易盈亏"来自 `trades.net_pnl` 求和（账本），而这个机器人**一直在漏记
+         * 平仓手续费**（33 张已成交的平仓单 `fee=0`），账本只好拿开仓费顶上
+         * —— 11 笔呈现精确的 `fee = 2 × entry_fee`。差额就是这个字段。
+         *
+         * 系统的账目校验（`ledger_check:<id>`）**每轮都算出这个 gap 并写进 settings**，
+         * 却**从来没有一条路径把它送到界面上**。于是操作员看到一个错数、且没有任何提示。
+         *
+         * 带出去，让界面能说"账本与交易所差了多少"，而不是继续假装账本是准的。
+         */
+        ledger: ledgerCheckOf(trader.id),
+        /*
+         * **下一轮决策的预定时刻**（epoch 毫秒）—— 界面据此显示倒计时。
+         *
+         * 用户 2026-10-07：「能在这里加入一个倒计时吗？让我明显知道下一轮决策剩余周期」。
+         *
+         * 由 `AutoTrader.nextCycleAt` 提供：它记的是**定时器真正被排到的那一刻**，
+         * 已经把"模型自己要求的间隔"（`requestedMinutes`）与"失败短重试"算进去了。
+         * **界面不要自己拿"上一轮时间 + 配置周期"推算** —— 那会忽略这两件事，
+         * 显示一个骗人的倒计时（模型说 5 分钟、界面显示 60 分钟）。
+         */
+        nextCycleAt: deps.manager.nextCycleAtOf(trader.id),
+      };
+    });
   });
 
   app.post('/api/traders', authed, guard(async (body: unknown) => {

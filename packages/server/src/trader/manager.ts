@@ -53,6 +53,9 @@ import { setAvailableModelIds } from './routedModel.js';
 
 const log = createLogger('manager');
 
+/** 持久化机器人本次连续运行的起始时刻（ISO），仅在操作员主动启停时更新，跨服务重启保留。 */
+const TRADER_STARTED_AT_PREFIX = 'trader_started_at:';
+
 /**
  * ══════════════════════════════════════════════════════════════════════════════
  *  **models.dev 模型档案 store（进程级单例）**（2026-10-14 接上）
@@ -3184,7 +3187,7 @@ export class TraderManager {
   async startTrader(
     traderId: number,
     dryRun: boolean,
-    options: { retryTransient?: boolean } = {},
+    options: { retryTransient?: boolean; resuming?: boolean } = {},
   ): Promise<StartResult> {
     /*
      * ⚠️ **全局熔断必须在"生命周期的最底层"判定，而不是只装在 HTTP 路由上。**
@@ -3262,7 +3265,21 @@ export class TraderManager {
 
       for (let attempt = 0; ; attempt += 1) {
         const outcome = await this.attemptStart(traderId, trader, dryRun);
-        if (outcome.result.ok) return outcome.result;
+        if (outcome.result.ok) {
+          try {
+            const key = `${TRADER_STARTED_AT_PREFIX}${traderId}`;
+            const existing = settings.get(key)?.trim();
+            if (!options.resuming) {
+              settings.set(key, new Date().toISOString());
+            } else if (!existing) {
+              const firstSnap = equity.list(traderId, 5000)[0]?.timestamp;
+              settings.set(key, firstSnap ?? new Date().toISOString());
+            }
+          } catch {
+            /* 运行起始时间写库失败不影响交易循环 */
+          }
+          return outcome.result;
+        }
 
         const message = outcome.result.error ?? '未知错误';
         const canRetry =
@@ -4437,6 +4454,11 @@ export class TraderManager {
      */
     this.running.delete(traderId);
     this.startedAt.delete(traderId);
+    try {
+      settings.set(`${TRADER_STARTED_AT_PREFIX}${traderId}`, '');
+    } catch {
+      /* 清理运行起始时间失败不影响停机 */
+    }
     if (autoTrader) {
       /* 掐断在途的 AI 请求 —— 这是"停止"要立即生效的那部分。 */
       autoTrader.abortInFlightCycle();
@@ -5183,7 +5205,7 @@ export class TraderManager {
               `—— 与本次进程的 ${dryRun} 不同。`,
           );
         }
-        result = await this.startTrader(trader.id, effectiveDryRun, { retryTransient: true });
+        result = await this.startTrader(trader.id, effectiveDryRun, { retryTransient: true, resuming: true });
       } catch (error) {
         result = { ok: false, error: (error as Error).message };
         log.error(

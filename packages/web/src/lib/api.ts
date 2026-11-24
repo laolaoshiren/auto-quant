@@ -646,6 +646,8 @@ export interface TraderRow extends Trader {
    * **界面不要自己推算**，那会显示一个骗人的倒计时。
    */
   nextCycleAt?: number | null;
+  /** 本次连续运行的起始时刻（ISO，跨服务重启保留；停机时为 null）。 */
+  startedAt?: string | null;
 }
 
 /**

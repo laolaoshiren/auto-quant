@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleStop,
+  Clock,
   Layers,
   Play,
   Settings2,
@@ -64,6 +65,7 @@ import {
   fmtDateTime,
   fmtInt,
   fmtNum,
+  fmtPendingDuration,
   fmtPercent,
   fmtPriceUsd,
   fmtProfitFactor,
@@ -473,6 +475,13 @@ export function TraderPage() {
     liveStatus === 'running' ||
     liveStatus === 'starting' ||
     liveStatus === 'safe_mode';
+  const [runtimeNowMs, setRuntimeNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    setRuntimeNowMs(Date.now());
+    const timer = window.setInterval(() => setRuntimeNowMs(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, [running]);
   const stats = statsMap[traderId] ?? null;
   /*
    * 熔断器的当前读数。机器人在**停止**时服务端给 `null`（没有内存里的配置可用来
@@ -609,6 +618,7 @@ export function TraderPage() {
   }, [equityQuery.data, live?.equity]);
 
   const equity = stats?.equity ?? snapshots[snapshots.length - 1]?.equity ?? trader?.initialEquity ?? 0;
+  const runtimeStartIso = running ? (trader?.startedAt ?? snapshots[0]?.timestamp ?? null) : null;
 
   /*
    * 最近一条快照里的**交易所账户读数**。
@@ -2026,6 +2036,15 @@ export function TraderPage() {
             {trader.name}
           </h1>
           <TraderStatusBadge status={status} live={trader.isRunning} />
+          {running && runtimeStartIso && (
+            <span
+              className="num inline-flex shrink-0 items-center gap-1 rounded-md border border-base-750 bg-base-850/90 px-2 py-0.5 text-xs text-ink-mid"
+              title={`本次连续运行时长（自 ${fmtDateTime(runtimeStartIso)} 起，跨服务重启保留）`}
+            >
+              <Clock aria-hidden className="h-3 w-3 shrink-0 text-up/80" />
+              <span>已运行 {fmtPendingDuration(runtimeStartIso, runtimeNowMs)}</span>
+            </span>
+          )}
           {/* 交易所 + 钱包 + 测试网/主网（用户 2026-11-11 需求）。 */}
           <ExchangeAccountChip account={exchangeAccount} />
           {/*
