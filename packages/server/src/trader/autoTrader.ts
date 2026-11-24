@@ -5658,6 +5658,8 @@ export class AutoTrader {
      * 与"模型提议，运行时裁决"同一条思路：模型没错，是当前环境不允许。
      */
     const modeBlocked = this.positionModeBlocked;
+    /** 同轮撤旧挂单若失败（例如刚成交或网络错误），拦住紧随其后的同标的新开仓以防双倍敞口。 */
+    const failedCancelPending = new Set<string>();
 
 
     for (const decision of verdict.approved) {
@@ -5875,6 +5877,7 @@ export class AutoTrader {
           const outcome = await this.executeCancelPending(decision);
           executionLog.push(outcome);
           if (outcome.status === 'ok') cancelsTaken += 1;
+          else failedCancelPending.add(decision.symbol);
         } else if (isCloseAction(decision.action)) {
           const outcome = await this.executeClose(decision, 'model_decision');
           executionLog.push(outcome);
@@ -5890,6 +5893,15 @@ export class AutoTrader {
           const outcome = await this.executeReduce(decision);
           executionLog.push(outcome);
         } else {
+          if (failedCancelPending.has(decision.symbol)) {
+            executionLog.push({
+              action: decision.action,
+              symbol: decision.symbol,
+              status: 'skipped',
+              detail: `同轮撤掉 ${decision.symbol} 旧挂单未成功，为防双倍敞口已跳过本次重新开仓。`,
+            });
+            continue;
+          }
           const outcome = await this.executeOpen(
             decision,
             snapshotBySymbol.get(decision.symbol),
@@ -5901,6 +5913,9 @@ export class AutoTrader {
           if (outcome.status === 'submitted') limitSubmissions += 1;
         }
       } catch (error) {
+        if (isCancelPendingAction(decision.action)) {
+          failedCancelPending.add(decision.symbol);
+        }
         const detail = (error as Error).message;
         this.emit('error', `${decision.action} ${decision.symbol} 执行失败：${detail}`);
         executionLog.push({

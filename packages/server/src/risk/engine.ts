@@ -688,6 +688,12 @@ export class RiskEngine {
      * 或多条减仓复用进入本批时的静态快照而穿透单仓上限或扣穿持仓数量。
      */
     const rollingPositions = new Map<string, PositionView>(env.positions);
+    /*
+     * 滚动的未成交限价挂单集合：同一轮里模型先发 `cancel_pending` 再发新的 `open_*`
+     * （撤旧挂单改新价 / 改市价进场）是合法且高频的战术调整。`ordered` 已保证 `cancel_pending`
+     * 排在最前审核与执行；这里同步从 `rollingPending` 移除并释放名额，避免新开仓被误杀为「同标的重入」。
+     */
+    const rollingPending = new Set<string>(env.pendingSymbols ?? []);
 
     const ordered = [
       ...decisions.filter((d) => isCancelPendingAction(d.action)),
@@ -730,6 +736,9 @@ export class RiskEngine {
        */
       if (isCancelPendingAction(decision.action)) {
         approved.push({ ...decision, adjustments: decision.adjustments });
+        if (rollingPending.delete(decision.symbol)) {
+          positionCount = Math.max(0, positionCount - 1);
+        }
         continue;
       }
 
@@ -858,6 +867,7 @@ export class RiskEngine {
         const verdict = this.reviewOpen(decision, {
           ...env,
           positions: rollingPositions,
+          pendingSymbols: rollingPending,
           account: { ...env.account, positionCount, marginUsed },
           entriesThisCycle,
           /*

@@ -236,8 +236,23 @@ export const MANAGED_AGENT_TOOLS: readonly ToolSpec[] = [
                   'skip',
                 ],
               },
-              entry_type: { type: 'string', enum: ['market', 'limit'] },
-              limit_price: { type: 'number' },
+              entry_type: {
+                type: 'string',
+                enum: ['market', 'limit'],
+                description:
+                  '入场类型：结构刚确认且距 15m EMA20 ≤ 1.5×ATR 可直接 market 市价切入；偏离过大或贴阻力墙用 limit 回踩限价。',
+              },
+              limit_price: { type: 'number', description: '限价入场价（entry_type=limit 时必填）。' },
+              wait_minutes: {
+                type: 'number',
+                description: '限价单耐心等待上限（分钟，15-90，到期未成交系统自动撤单释放名额）。',
+              },
+              margin_mode: {
+                type: 'string',
+                enum: ['isolated', 'cross'],
+                description:
+                  '保证金模式：默认 isolated（逐仓隔离风险）；仅低波动主流趋势单且有严格硬止损时可选 cross（全仓）。',
+              },
               leverage: { type: 'number' },
               position_size_usd: { type: 'number' },
               stop_loss: { type: 'number' },
@@ -367,6 +382,8 @@ export function normalizeFinalizePayload(
     const copyKeys = [
       'entry_type',
       'limit_price',
+      'wait_minutes',
+      'margin_mode',
       'leverage',
       'position_size_usd',
       'stop_loss',

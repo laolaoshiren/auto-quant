@@ -1468,6 +1468,38 @@ test('★ 同标的重入②：只有 pending 挂单（没有持仓）时，再�
   assert.match(verdict.rejected[0]!.reason, /cancel_pending/);
 });
 
+test('★★★ 同标的重入②b：同轮先 cancel_pending 再 open 同一标的（挂单改价/改市价）必须放行并释放名额', () => {
+  /*
+   * 实盘回归（#21 Cycle #4）：模型看到旧限价挂单久未成交，同轮先发 cancel_pending
+   * 再发 open_long/open_short 改价进场。ordered 已保证撤单排在最前执行，rollingPending
+   * 必须同步删掉该标的并释放 positionCount 名额，避免旧单撤了、新单又被误杀导致踏空。
+   */
+  const verdict = engine.review(
+    [
+      openDecision({
+        action: 'open_long',
+        entryType: 'limit',
+        limitPrice: 67_500,
+        stopLoss: 66_500,
+        takeProfit: 71_000,
+      }),
+      openDecision({ action: 'cancel_pending' }),
+    ],
+    environment({
+      config: configWith({
+        riskControl: { ...defaultStrategyConfig().riskControl, maxPositions: 1 },
+      }),
+      account: { equity: 1000, availableBalance: 900, marginUsed: 100, positionCount: 1 },
+      positions: new Map(),
+      pendingSymbols: new Set(['BTCUSDT']),
+    }),
+  );
+  assert.equal(verdict.rejected.length, 0, `同轮撤旧开新不应被拒：${JSON.stringify(verdict.rejected)}`);
+  assert.equal(verdict.approved.length, 2, '撤单与新开仓必须同时放行');
+  assert.equal(verdict.approved[0]!.action, 'cancel_pending', '撤单必须排在开仓之前执行');
+  assert.equal(verdict.approved[1]!.action, 'open_long');
+});
+
 test('★ 同标的重入③：不同标的照原样放行 —— 这条判据不能误伤正常的分散开仓', () => {
   const config = configWith({
     riskControl: {
