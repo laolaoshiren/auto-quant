@@ -44,11 +44,11 @@
 
 **目标**：消除现系统阻塞 `ai_managed` 盈利与可靠性的 4 个基础硬伤，让模拟盘数据可信、让大赢家不再被提前砍死。
 
-- [ ] **M1.1 释放 `ai_managed` 大盈亏比空间**：`unboundedAiManagedConfig()` 默认关闭早期机械 `drawdownGuard`（`enabled: false`），并开启合理的交易所侧保本/移动止损安全基线；兼容已有测试并补充回归单测。
-- [ ] **M1.2 打通 AI 自选币与风控白名单**：允许 `ai_managed` 在当轮通过 `screen_symbols` + 拉取 K 线校验过的合法合约标的热加入本轮可执行名单（仍严格校验流动性、交易所可交易性与风控），彻底根治「自己选的币被风控以不在候选池拒杀」。
-- [ ] **M1.3 限价单防穿透止损闭环**：挂限价入场单前校验限价与止损价的安全缓冲；限价成交瞬间若价格仅轻度逼近保护位而非深穿，按安全缓冲重算合规止损（深穿仍立即平仓防裸仓），消除无谓的 `protection_unavailable` 秒亏。
-- [ ] **M1.4 模拟盘真实摩擦模型**：为模拟盘（`dryRun`）增加可配置的**市价单滑点**（默认 `0.03%`，通过 env/配置可设 `0` 以保证确定性 `npm run sim` 18/18 零波动）与 **8 小时资金费估算**，使模拟盘净收益真实反映实盘摩擦。
-- [ ] **M1 验收与上线**：`typecheck` 0 · `lint` 0 · 全量 `npm test` 绿 · `npm run sim` 18/18 · 部署至服务器验证 `#18` / `#19` 稳定运行。
+- [x] **M1.1 释放 `ai_managed` 大盈亏比空间**（`d40ca37`）：`unboundedAiManagedConfig()` 默认关闭早期机械 `drawdownGuard`（`enabled: false`），并开启交易所侧保本（`breakevenTriggerPercent: 5`）与移动止损（`trailingStopPercent: 1.5`）基线；兼容已有测试并补充回归单测。
+- [x] **M1.2 打通 AI 自选币与风控白名单**（`d40ca37`）：允许 `ai_managed` 在当轮通过 `get_klines` 查验过的合法合约标的热加入本轮可执行池（上限 5 个，仍严格校验交易所可交易性、排除稳定币、`minQuoteVolume24h` 流动性底线与风控，且严格隔离固定策略模式），彻底根治「自己选的币被风控以不在候选池拒杀」。
+- [x] **M1.3 限价单防穿透止损闭环**（`10a5175`）：风控 §6/§6b 拦截现价已穿止损与无安全缓冲的立即可成交限价单；`submitLimitEntry()` 下单前执行 `isValidTrigger` 校验并落库拒绝原因；30 秒实时守卫 `runGuardTick()` 主动巡检结清已成交限价单（将裸仓窗口从 10–20 分钟压缩至 ≤ 30 秒）；`promotePendingEntry()` 转正前复检止损有效性，已穿越则立即平仓防裸仓。
+- [x] **M1.4 模拟盘真实摩擦模型**（`10a5175`）：为模拟盘（`dryRun`）增加可配置市价单不利滑点（默认 `0.03%`，`AQ_PAPER_SLIPPAGE_RATE=0` 可关闭，限价单仍按委托价精确成交）与 8 小时 UTC 结算点资金费估算（读取缓存标的资金费率，默认 `0.01%` 兜底，`AQ_PAPER_FUNDING_ENABLED=false` 可关闭），使模拟盘净收益真实反映实盘摩擦。
+- [x] **M1 验收与上线**（`d40ca37` + `10a5175`）：`typecheck` 0 · `lint` 0 · `check:links` 107/236 · 全量 `npm test` 绿（`@aq/shared` 82/82、`@aq/server` 2434/2434、`@aq/web` 457/457、`test:feed` PASS）· `npm run sim` 18/18 · 已同步部署验证上线。
 
 ---
 
