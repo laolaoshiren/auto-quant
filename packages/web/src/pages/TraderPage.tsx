@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Brain,
@@ -119,29 +119,24 @@ type ChartTab = 'equity' | 'candles';
  * 里面 `<svg>` 为 `null`、`path` 数量 0：一块**空白的框**，看起来像"没有数据"。
  * 所以改由 `useEquityChartHeight()` 在 JS 里算出像素值。
  */
-const EQUITY_CHART_MIN = 112;
+const EQUITY_CHART_MIN = 88;
 const EQUITY_CHART_FALLBACK = 220;
 
 /**
  * 实时量测图表的 `flex-1` 弹性宿主高度（像素整数）。
  *
- * 为什么不直接给 Recharts 传 `height="100%"`：父链是 flex 计算出的高度，
- * Recharts 在部分窗口下会把百分比解析成 6px 导致曲线消失。用 `ResizeObserver`
- * 盯着 `relative flex-1 overflow-hidden` 宿主盒子，再把像素数传给 Recharts，
- * 既能把 16:9 屏下方的空白完全顶满，又能在底部数据表被手动拖动/切标签/收起时
- * 实时弹性伸缩。
+ * 必须接收 callback ref 捕获到的 DOM 节点（而不是 `RefObject`）：`TraderPage` 首屏
+ * 在 `tradersQuery.loading` 时会提前返回加载态，若用 `RefObject`，首次 effect 拿到的
+ * 是 `null` 且后续节点挂载时依赖不变，导致 `ResizeObserver` 永远挂不上。
  */
 function useMeasuredHeight(
-  ref: RefObject<HTMLDivElement | null>,
-  active: boolean,
+  el: HTMLDivElement | null,
   minHeight = EQUITY_CHART_MIN,
   fallback = EQUITY_CHART_FALLBACK,
 ): number {
   const [height, setHeight] = useState(fallback);
 
   useLayoutEffect(() => {
-    if (!active) return;
-    const el = ref.current;
     if (!el) return;
 
     const measure = () => {
@@ -154,7 +149,7 @@ function useMeasuredHeight(
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [ref, active, minHeight]);
+  }, [el, minHeight]);
 
   return height;
 }
@@ -270,8 +265,8 @@ export function TraderPage() {
   const [tableTab, setTableTab] = useState<TraderTabId>('positions');
   const [chartTab, setChartTab] = useState<ChartTab>('equity');
   const [range, setRange] = useState<EquityRange>('ALL');
-  /** 权益曲线弹性宿主 ref —— 通过 ResizeObserver 把剩余垂直空间撑满并随底部拖动实时伸缩。 */
-  const equityHostRef = useRef<HTMLDivElement | null>(null);
+  /** 权益曲线弹性宿主 DOM 节点（callback ref，跨 loading 首帧/切标签/收起展开必定重绑 ResizeObserver）。 */
+  const [equityHostEl, setEquityHostEl] = useState<HTMLDivElement | null>(null);
   /**
    * 手动覆盖"要不要收起曲线"。
    *
@@ -1022,10 +1017,7 @@ export function TraderPage() {
    * 那是人的动作，不是数据的动作。
    */
   const curveCollapsed = chartOverride ?? false;
-  const equityChartHeight = useMeasuredHeight(
-    equityHostRef,
-    chartTab === 'equity' && !curveCollapsed,
-  );
+  const equityChartHeight = useMeasuredHeight(equityHostEl);
 
   const model = modelsQuery.data?.find((row) => row.id === trader?.aiModelId) ?? null;
   const strategy = strategiesQuery.data?.find((row) => row.id === trader?.strategyId) ?? null;
@@ -2253,7 +2245,7 @@ export function TraderPage() {
         <Panel
           padded={false}
           bodyClassName={curveCollapsed && chartTab === 'equity' ? 'p-0' : 'flex min-h-0 flex-1 flex-col p-0'}
-          className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[176px] flex-1 flex-col'}
+          className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[168px] flex-1 flex-col'}
           title={
             <span className="flex items-center gap-1">
               <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
@@ -2347,8 +2339,8 @@ export function TraderPage() {
                   asset={settleAsset}
                 />
                 <div
-                  ref={equityHostRef}
-                  className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[112px]"
+                  ref={setEquityHostEl}
+                  className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[88px]"
                 >
                   <div className="absolute inset-0">
                     <DashboardEquityChart
