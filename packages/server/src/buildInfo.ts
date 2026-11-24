@@ -164,9 +164,11 @@ export function readLocalBuildInfo(): LocalBuildInfo {
  * suite leave the working tree dirty.
  */
 export function loadBuildInfoFrom(file: string): BuildInfo | null {
-  let parsed: Partial<BuildInfo>;
+  let parsed: Partial<BuildInfo> & { builtAt?: string };
   try {
-    parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<BuildInfo>;
+    // 兼容 Windows PowerShell 5.1 等工具可能写出的 UTF-8 BOM，避免静默解析失败退回「未知」。
+    const raw = readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+    parsed = JSON.parse(raw) as Partial<BuildInfo> & { builtAt?: string };
   } catch {
     // 没有文件是**正常状态**（部署脚本早于这个功能、或用了别的部署方式），
     // 不是错误 —— 所以这里不记日志，由调用方把"未知"显示出来。
@@ -186,7 +188,7 @@ export function loadBuildInfoFrom(file: string): BuildInfo | null {
     branch: parsed.branch,
     subject: parsed.subject ?? '',
     committedAt: parsed.committedAt ?? '',
-    deployedAt: parsed.deployedAt ?? '',
+    deployedAt: parsed.deployedAt ?? parsed.builtAt ?? '',
     dirty: parsed.dirty === true,
     repository: parsed.repository ?? '',
   };

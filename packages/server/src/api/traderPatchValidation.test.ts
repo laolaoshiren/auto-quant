@@ -404,3 +404,12 @@ test('★★★ 运行中固定策略模式允许在线改名/改周期，但切
   const nonManagedProfile = await patch(id, { managedRiskProfile: 'aggressive' });
   assert.equal(nonManagedProfile.status, 400, nonManagedProfile.body);
 });
+
+test('★★★ GET /api/auth/me 必须返回账户 createdAt，刷新后操作员账户页不显示「—」', async () => {
+  const res = await app.inject({ method: 'GET', url: '/api/auth/me', headers: auth() });
+  assert.equal(res.statusCode, 200, res.payload);
+  const body = res.json() as { user: { id: number; username: string; role: string; createdAt?: string } };
+  assert.equal(body.user.username, OWNER);
+  assert.equal(body.user.role, 'owner');
+  assert.ok(typeof body.user.createdAt === 'string' && body.user.createdAt.length > 0, '必须返回 createdAt');
+});

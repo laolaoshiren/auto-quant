@@ -119,6 +119,33 @@ test('没有 build-info.json 时返回 null —— "不知道"不能变成一个
   }
 });
 
+test('带 UTF-8 BOM 或仅含 builtAt 的 build-info.json 也能正常解析（不退回「未知」）', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'aq-build-bom-'));
+  try {
+    const file = path.join(dir, 'build-info.json');
+    const bomJson =
+      '\uFEFF' +
+      JSON.stringify({
+        commit: 'b'.repeat(40),
+        commitShort: 'bbbbbbb',
+        branch: 'main',
+        subject: 'feat: test',
+        committedAt: '2026-11-24T20:00:00Z',
+        builtAt: '2026-11-24T20:02:00Z',
+        dirty: false,
+        repository: 'https://github.com/example/quant',
+      });
+    writeFileSync(file, bomJson, 'utf8');
+    const loaded = loadBuildInfoFrom(file);
+    assert.ok(loaded);
+    assert.equal(loaded.commitShort, 'bbbbbbb');
+    assert.equal(loaded.deployedAt, '2026-11-24T20:02:00Z');
+    assert.equal(loaded.repository, 'https://github.com/example/quant');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('字段不全的文件也当作没有 —— 否则界面会显示 "undefined @ undefined"', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'aq-build-'));
   try {

@@ -1308,9 +1308,19 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   const authed = { preHandler: requireAuth(deps.jwtSecret, tokenRevoked) };
 
-  app.get('/api/auth/me', authed, async (request: AuthedRequest) => ({
-    user: request.user,
-  }));
+  app.get('/api/auth/me', authed, async (request: AuthedRequest) => {
+    const record = request.user ? users.findById(request.user.sub) : undefined;
+    if (!record) return { user: request.user };
+    return {
+      user: {
+        id: record.id,
+        sub: record.id,
+        username: record.username,
+        role: record.role,
+        createdAt: record.createdAt,
+      },
+    };
+  });
 
   /*
    * 修改账户凭据：用户名与密码。
