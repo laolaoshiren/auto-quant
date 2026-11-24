@@ -250,8 +250,8 @@ export function QuillShell() {
             需要看的那几条（`LAYOUT.md` §5）。
           */}
           {shell.system?.tradingDisabled && (
-            <Tooltip content="开仓会被 GLOBAL_TRADING_DISABLED 拦截；平仓与对账仍然可用。">
-              <Badge tone="down" className="hidden shrink-0 animate-pulse-soft sm:inline-flex">
+            <Tooltip side="bottom" content="开仓会被 GLOBAL_TRADING_DISABLED 拦截；平仓与对账仍然可用。">
+              <Badge tone="down" className="hidden shrink-0 cursor-help animate-pulse-soft sm:inline-flex">
                 <Dot tone="down" />
                 交易已禁用
               </Badge>
@@ -259,19 +259,19 @@ export function QuillShell() {
           )}
 
           {shell.clockWarn && (
-            <Tooltip content="本地时钟与交易所时钟相差超过 2 秒。签名请求会因时间戳超窗被拒绝（-1021），下单与撤单都会失败。请校准服务器时间（NTP）。">
-              <Badge tone="warn" className="hidden shrink-0 md:inline-flex">
+            <Tooltip side="bottom" content="本地时钟与交易所时钟相差超过 2 秒。签名请求会因时间戳超窗被拒绝（-1021），下单与撤单都会失败。请校准服务器时间（NTP）。">
+              <Badge tone="warn" className="hidden shrink-0 cursor-help md:inline-flex">
                 <TriangleAlert aria-hidden className="h-3.5 w-3.5" />
-                {fmtClockOffset(shell.system?.clockOffsetMs)}
+                时钟偏差 {fmtClockOffset(shell.system?.clockOffsetMs)}
               </Badge>
             </Tooltip>
           )}
 
           {shell.weightWarn && (
-            <Tooltip content="当前分钟已消耗的请求权重接近上限。继续升高会被交易所临时封禁 IP（418），届时所有行情与交易请求都会失败。">
-              <Badge tone="warn" className="hidden shrink-0 md:inline-flex">
+            <Tooltip side="bottom" content="交易所 API 当前分钟请求权重占用率（超过 70% 提醒）。雷达扫描期间会短暂升高并在下一分钟自动回落；持续逼近 100% 可能触发交易所限流或临时封禁 IP（418）。">
+              <Badge tone="warn" className="hidden shrink-0 cursor-help md:inline-flex">
                 <TriangleAlert aria-hidden className="h-3.5 w-3.5" />
-                {shell.weightPercent}%
+                API 权重 {shell.weightPercent}%
               </Badge>
             </Tooltip>
           )}
@@ -286,9 +286,10 @@ export function QuillShell() {
           */}
           {shell.statusStaleLabel !== null && (
             <Tooltip
+              side="bottom"
               content={`最近一次读取系统状态失败${shell.statusError ? `：${shell.statusError}` : ''}。页面显示的是上一次成功读到的读数。`}
             >
-              <Badge tone="warn" className="hidden shrink-0 md:inline-flex">
+              <Badge tone="warn" className="hidden shrink-0 cursor-help md:inline-flex">
                 <TriangleAlert aria-hidden className="h-3.5 w-3.5" />
                 {shell.statusStaleLabel}
               </Badge>

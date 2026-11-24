@@ -13,6 +13,7 @@ import {
   forwardRef,
   useState,
   type ButtonHTMLAttributes,
+  type HTMLAttributes,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -83,15 +84,15 @@ const TONE_SURFACE: Record<Tone, string> = {
  */
 export const Badge = forwardRef<
   HTMLSpanElement,
-  {
+  HTMLAttributes<HTMLSpanElement> & {
     tone?: Tone;
     children: ReactNode;
     className?: string;
     title?: string;
   }
->(function Badge({ tone = 'neutral', children, className, title }, ref) {
+>(function Badge({ tone = 'neutral', children, className, title, ...rest }, ref) {
   return (
-    <span ref={ref} title={title} className={cn('chip', TONE_CLASS[tone], className)}>
+    <span ref={ref} title={title} {...rest} className={cn('chip', TONE_CLASS[tone], className)}>
       {children}
     </span>
   );
@@ -110,17 +111,18 @@ export const Badge = forwardRef<
  */
 export const Dot = forwardRef<
   HTMLSpanElement,
-  {
+  HTMLAttributes<HTMLSpanElement> & {
     tone?: Tone;
     pulse?: boolean;
     title?: string;
     className?: string;
   }
->(function Dot({ tone = 'neutral', pulse = false, title, className }, ref) {
+>(function Dot({ tone = 'neutral', pulse = false, title, className, ...rest }, ref) {
   return (
     <span
       ref={ref}
       title={title}
+      {...rest}
       className={cn(
         'inline-block h-1.5 w-1.5 shrink-0 rounded-full',
         TONE_SURFACE[tone],
@@ -644,7 +646,7 @@ export function Tooltip({
 }) {
   if (!content) return <>{children}</>;
   return (
-    <TooltipPrimitive.Provider delayDuration={300}>
+    <TooltipPrimitive.Provider delayDuration={150}>
       <TooltipPrimitive.Root>
         <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
         <TooltipPrimitive.Portal>
