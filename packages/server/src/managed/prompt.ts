@@ -33,6 +33,9 @@ import type {
   PromptPendingEntry,
   PromptPosition,
 } from '../strategy/prompt.js';
+import { formatManagedNotesSection, type ManagedNote } from './notes.js';
+import { computePositionTactics, formatPositionTacticsLines } from './tactics.js';
+import type { PositionThesis } from './thesis.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Constants & Public Types                                                   */
@@ -83,6 +86,12 @@ export interface ManagedPromptContext {
   roundTripCostPercent?: number | null;
   idleCycles?: number;
   memory?: PromptMemory;
+  /** M3.1：当前活跃持仓论点映射（symbol → PositionThesis）。 */
+  thesesBySymbol?: ReadonlyMap<string, PositionThesis>;
+  /** M3.3：活跃反例衰减观察笔记列表。 */
+  managedNotes?: readonly ManagedNote[];
+  /** M3.4：是否开启原生 function-calling 三段式决策协议提示。 */
+  enableAgenticProtocol?: boolean;
 }
 
 export interface ManagedPromptBundle {
@@ -185,9 +194,9 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
     '   - 偏离 15m EMA20 超过 2.5×ATR 或带有「追单风险」「长影线插针」「OI背离」警示 → 严禁市价追单，宁可挂回踩限价或直接放弃。',
     '3. **多空双向顺势**：遵循 4h 大趋势与 15m 结构共振，利用 1m 精确找入场与止损位；止损放在真实结构失效位之外（避开整数位与清算扫荡区），严禁贴着现价放必被噪音扫掉的窄止损。',
     '4. **大盈亏比波段管理（目标 3:1 ~ 5:1）**：',
-    '   - 盈利单不因为小幅回撤而惊慌砍仓，让交易所侧保本/移动止损与结构位保护利润；',
-    '   - 盈利扩大且遇上方强阻力墙/清算磁吸区或 15m Δ 显示动能退潮时，用 `reduce_position` 分批锁利、并用 `adjust_protection` 把止损移至成本价以上锁盈侧；',
-    '   - 逻辑被市场否定（跌破关键结构/OI 持续撤退）时果断 `close_long` / `close_short`，不死扛。',
+    '   - 试仓 → 盈利 ≥ 1R 且突破确认、战术面板提示可无风险加仓时，优先考虑金字塔加仓 50% 并同步把止损移至合并均价保本位（避开整数位）；',
+    '   - 盈利 ≥ 2R 或遇强阻力墙/清算磁吸/动能衰减时，用 `reduce_position` 分批减仓锁利，并沿 15m 结构高低点外侧（非整数位）上移止损；',
+    '   - 严禁亏损摊平加仓；每个持仓须明确时间止损（`time_stop_hours`）与最大不利偏移硬线（`max_adverse_excursion_pct`），由 30 秒守卫机器硬执行；逻辑被市场否定即果断平仓。',
     '',
     '## 二、不可绕过的物理安全硬底线',
     `- 最大同时持仓：${rc.maxPositions} 笔 · 保证金占用上限：${rc.maxMarginUsage}%`,
@@ -195,17 +204,22 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
     `- 每笔开仓**必须**同时给出合法 stop_loss（且距入场至少覆盖 3× 往返手续费）；建议同时给出 take_profit（期望盈亏比 ≥ ${Math.max(1.8, rc.minRiskRewardRatio).toFixed(1)}:1）`,
     `- 账户熔断：单日亏损 ≥ ${cb.maxDailyLossPercent}% 或总回撤 ≥ ${cb.maxTotalDrawdownPercent}% 自动禁止新开仓`,
     '',
-    '## 三、输出协议（严格遵守，系统自动解析）',
-    '1. 先在 `<reasoning>...</reasoning>` 内用简洁中文给出：大盘判断 → 持仓处置评估 → 候选标的逐一筛选（为什么做或为什么观望）。',
-    '2. 再在 `<decision>...</decision>` 内输出合法 JSON（`{"decisions":[...]}` 或数组）：',
-    '   - 开仓：`{"symbol":"SOLUSDT","action":"open_long|open_short","entry_type":"market|limit","limit_price":可选,"leverage":3,"position_size_usd":200,"stop_loss":142.5,"take_profit":172.0,"confidence":82,"reasoning":"简明逻辑与失效位"}`',
-    '   - 平仓：`{"symbol":"...","action":"close_long|close_short","confidence":85,"reasoning":"..."}`',
-    '   - 减仓：`{"symbol":"...","action":"reduce_position","reduce_percent":50,"confidence":80,"reasoning":"..."}`',
-    '   - 加仓：`{"symbol":"...","action":"add_position","position_size_usd":150,"stop_loss":可选,"take_profit":可选,"confidence":82,"reasoning":"..."}`',
-    '   - 调止损止盈：`{"symbol":"...","action":"adjust_protection","stop_loss":151.2,"take_profit":178.0,"confidence":80,"reasoning":"..."}`',
-    '   - 撤限价挂单：`{"symbol":"...","action":"cancel_pending","confidence":80,"reasoning":"..."}`',
-    '   - 持仓观望 / 全市场观望：`{"symbol":"...","action":"hold","confidence":75,"reasoning":"..."}` 或 `{"decisions":[]}`',
-    '3. 如确实需要查看雷达外标的的 K 线或调整自身运行参数，可在给出 `<decision>` 前输出 `<tool>{"tool":"get_klines|screen_symbols|set_params|write_memory","args":{...}}</tool>`（仅在必要时使用，常规轮次直接一步输出 `<reasoning>` + `<decision>`）。',
+    '## 三、三段式决策协议（严格遵守）',
+    ...(ctx.enableAgenticProtocol
+      ? [
+          '1. **阶段 1（`plan`）**：先调用 `plan` 工具声明大盘格局、逐个持仓复盘与重点候选结论；',
+          '2. **阶段 2（`update_notes` / `update_thesis` · 按需并行）**：',
+          '   - 有新的明确价位/量能观察机会，或旧笔记被市场证伪时，调用 `update_notes`（必须带数字可验证条件，被证伪记反例）；',
+          '   - 需要修订已有持仓的加仓/减仓条件、时间止损或 MAE 硬线时，调用 `update_thesis`；',
+          '3. **阶段 3（`finalize` · 必选终结）**：最后必须调用 `finalize` 提交完整决策数组——**永不空决策**：每个持仓必须给出 `hold` 或战术动作，每个重点候选必须给出 `wait`/`skip` 或开仓动作；新开仓建议一并填写 `time_stop_hours` / `max_adverse_excursion_pct` / `add_trigger` / `reduce_target` / `invalidation`。',
+        ]
+      : [
+          '1. 先在 `<reasoning>...</reasoning>` 内用简洁中文给出：大盘判断 → 持仓处置评估 → 候选标的逐一筛选（为什么做或为什么观望）。',
+          '2. 再在 `<decision>...</decision>` 内输出合法 JSON（`{"decisions":[...]}` 或数组）：',
+          '   - 开仓：`{"symbol":"SOLUSDT","action":"open_long|open_short","entry_type":"market|limit","limit_price":可选,"leverage":3,"position_size_usd":200,"stop_loss":142.5,"take_profit":172.0,"confidence":82,"reasoning":"简明逻辑与失效位"}`',
+          '   - 平仓/减仓/加仓/调保护位/撤挂单/观望：`close_long|close_short|reduce_position|add_position|adjust_protection|cancel_pending|hold|wait`',
+          '3. 如确实需要查看雷达外标的的 K 线或调整自身运行参数，可在给出 `<decision>` 前输出 `<tool>{"tool":"get_klines|screen_symbols|set_params|write_memory","args":{...}}</tool>`。',
+        ]),
   ];
 
   // 若模型曾经通过 set_params 写过精简自定义纪律，限量附在 system 尾部（最多 1500 字，防规则膨胀失控）
@@ -225,10 +239,9 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
 function renderStableSection(ctx: ManagedPromptContext): string {
   const sections: string[] = [];
   const mem = ctx.memory;
-  if (!mem) return '';
 
   // 1) 最近已平仓复盘（最多 6 笔）
-  if (mem.recentCloses.length > 0) {
+  if (mem && mem.recentCloses.length > 0) {
     const recent = mem.recentCloses.slice(0, 6);
     const rows = recent.map((t) => {
       const sideCn = t.side === 'long' ? '多' : '空';
@@ -240,7 +253,7 @@ function renderStableSection(ctx: ManagedPromptContext): string {
   }
 
   // 2) 最近风控拒绝（最多 4 条，避免重复犯错）
-  if (mem.recentRejections.length > 0) {
+  if (mem && mem.recentRejections.length > 0) {
     const rows = mem.recentRejections
       .slice(0, 4)
       .map((r) => `- ${r.symbol} ($${r.positionSizeUsd.toFixed(0)})：${r.reason.slice(0, 100)}`);
@@ -248,7 +261,7 @@ function renderStableSection(ctx: ManagedPromptContext): string {
   }
 
   // 3) 跨轮复盘教训（严格限流，最多 4 条 × 120 字）
-  if (mem.lessons.length > 0) {
+  if (mem && mem.lessons.length > 0) {
     const notes = mem.lessons
       .slice(0, 4)
       .map((l) => {
@@ -258,11 +271,26 @@ function renderStableSection(ctx: ManagedPromptContext): string {
     sections.push(`# 历史复盘教训\n${notes.join('\n')}`);
   }
 
+  // 4) M3.3 反例衰减跨轮观察笔记
+  if (ctx.managedNotes && ctx.managedNotes.length > 0) {
+    const notesBlock = formatManagedNotesSection(ctx.managedNotes);
+    if (notesBlock) sections.push(notesBlock);
+  }
+
   return sections.join('\n\n');
 }
 
 function renderPositionsSection(ctx: ManagedPromptContext): string {
-  const lines: string[] = ['# 当前持仓与挂单'];
+  const lines: string[] = ['# 当前持仓战术面板与挂单'];
+  const dossierBySymbol = new Map(ctx.dossiers.map((d) => [d.symbol, d]));
+  const feeRate =
+    ctx.roundTripCostPercent !== undefined &&
+    ctx.roundTripCostPercent !== null &&
+    Number.isFinite(ctx.roundTripCostPercent) &&
+    ctx.roundTripCostPercent > 0
+      ? ctx.roundTripCostPercent / 100
+      : 0.001;
+
   if (ctx.positions.length === 0) {
     lines.push('- 当前无持仓（空仓等待高质量信号）。');
   } else {
@@ -276,21 +304,21 @@ function renderPositionsSection(ctx: ManagedPromptContext): string {
               p.entryPrice) *
             100
           : 0;
-      // 预计算当前 R 倍数（若有止损）
-      let rText = '';
-      if (p.stopLoss && p.stopLoss > 0 && p.entryPrice > 0) {
-        const risk = Math.abs(p.entryPrice - p.stopLoss);
-        if (risk > 0) {
-          const move = p.side === 'long' ? p.markPrice - p.entryPrice : p.entryPrice - p.markPrice;
-          const rVal = move / risk;
-          rText = ` · R=${rVal >= 0 ? '+' : ''}${rVal.toFixed(2)}R`;
-        }
-      }
       const holdMin = Math.round(item.holdingMinutes);
       const holdStr = holdMin >= 60 ? `${(holdMin / 60).toFixed(1)}h` : `${holdMin}m`;
+      const thesis = ctx.thesesBySymbol?.get(p.symbol) ?? null;
+      const dossier = dossierBySymbol.get(p.symbol) ?? null;
+      const tactics = computePositionTactics({
+        position: p,
+        thesis,
+        radar: dossier?.radar ?? null,
+        roundTripFeeRate: feeRate,
+        nowMs: ctx.now.getTime(),
+      });
       lines.push(
-        `- **${p.symbol} ${sideCn} ${p.leverage}x** | 名义 ${fmtUsd(p.notional)} · 均价 ${formatCompactPrice(p.entryPrice)} → 现价 ${formatCompactPrice(p.markPrice)} (${fmtSignedPct(pricePnlPct, 2)}) · 浮盈 ${pnlSign}${p.unrealizedPnl.toFixed(2)}U (${fmtSignedPct(p.unrealizedPnlPercent, 1)} ROE)${rText} · 持仓 ${holdStr} · SL=${p.stopLoss ? formatCompactPrice(p.stopLoss) : '未设'} · TP=${p.takeProfit ? formatCompactPrice(p.takeProfit) : '未设'}`,
+        `- **${p.symbol} ${sideCn} ${p.leverage}x** | 名义 ${fmtUsd(p.notional)} · 均价 ${formatCompactPrice(p.entryPrice)} → 现价 ${formatCompactPrice(p.markPrice)} (${fmtSignedPct(pricePnlPct, 2)}) · 浮盈 ${pnlSign}${p.unrealizedPnl.toFixed(2)}U (${fmtSignedPct(p.unrealizedPnlPercent, 1)} ROE) · 持仓 ${holdStr} · SL=${p.stopLoss ? formatCompactPrice(p.stopLoss) : '未设'} · TP=${p.takeProfit ? formatCompactPrice(p.takeProfit) : '未设'}`,
       );
+      lines.push(...formatPositionTacticsLines(tactics, thesis));
     }
   }
 

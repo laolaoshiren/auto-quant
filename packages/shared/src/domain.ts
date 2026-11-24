@@ -724,6 +724,8 @@ export const CLOSE_REASONS = [
    * 穷尽用例遍历本名单，确保将来新增的码不会再漏标签。
    */
   'reconciled_reversed',
+  'thesis_time_stop', // M3.1: position thesis time-stop triggered without minimum R progress
+  'thesis_mae_stop', // M3.1: position thesis max adverse excursion (MAE) breached
 ] as const;
 export type CloseReason = (typeof CLOSE_REASONS)[number];
 
@@ -765,6 +767,8 @@ export const CLOSE_REASON_LABELS: Record<CloseReason, string> = {
   reconciled_reversed: '补录·方向不可信（金额取自交易所流水）',
   manual: '手工平仓',
   manual_partial: '减仓（部分平仓）',
+  thesis_time_stop: '论点时间止损',
+  thesis_mae_stop: '论点最大偏移止损',
 };
 
 /**

@@ -6,6 +6,9 @@ import fastifyStatic from '@fastify/static';
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import { DEFAULT_MAGPIE_URL } from '../trader/teamGateway.js';
+import { managedNotesStore } from '../managed/notes.js';
+import { managedRadarStore } from '../managed/radarStore.js';
+import { managedThesisStore } from '../managed/thesis.js';
 import {
   jevOptionSpec,
   listJevOptions,
@@ -3744,6 +3747,20 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     const trader = traders.get(idOf(request));
     if (!trader) return reply.code(404).send({ error: '找不到该机器人' });
     return readForeignActivityFor(trader.id);
+  });
+
+  /**
+   * M3.4：智能托管 2.0 雷达评分、活跃持仓论点 `thesis` 与反例衰减笔记只读视图。
+   * 仅从本地 SQLite 读取，不触发任何交易所或模型请求。
+   */
+  app.get('/api/traders/:id/managed-intel', authed, (request, reply) => {
+    const trader = traders.get(idOf(request));
+    if (!trader) return reply.code(404).send({ error: '找不到该机器人' });
+    return {
+      radar: managedRadarStore.get(trader.id),
+      theses: managedThesisStore.listActive(trader.id),
+      notes: managedNotesStore.listActive(trader.id),
+    };
   });
 
   /**

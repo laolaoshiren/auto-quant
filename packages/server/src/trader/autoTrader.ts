@@ -136,8 +136,14 @@ import {
 } from './intel/signalHealthReport.js';
 import { SIGNAL_LIMITS } from './intel/signalHealth.js';
 import { RadarDeltaTracker } from '../radar/deltaTracker.js';
+import { formatVolumeProfileLine } from '../radar/volumeProfile.js';
 import { runManagedRadarCycle, type ManagedCycleResult } from '../managed/cycle.js';
+import { runManagedAgenticLoop, type PendingThesisPlan } from '../managed/engine.js';
+import { managedNotesStore } from '../managed/notes.js';
 import { buildManagedPrompts } from '../managed/prompt.js';
+import { managedRadarStore } from '../managed/radarStore.js';
+import { evaluateThesisHardCheck, managedThesisStore } from '../managed/thesis.js';
+import type { ChatMessage, ToolCall, ToolSpec } from '../llm/types.js';
 
 const log = createLogger('trader');
 
@@ -647,9 +653,14 @@ export interface DecisionModel {
    * 可选：测试用的桩可以只实现 `complete`，调用方会回落到它。
    */
   chat?(
-    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-    /** 与 `complete` 同一套可选项（空内容重试要能加大预算）。 */
-    options?: { signal?: AbortSignal; maxTokens?: number },
+    messages: ChatMessage[],
+    /** 与 `complete` 同一套可选项（空内容重试放大预算 + M3.4 原生 function calling 工具表）。 */
+    options?: {
+      signal?: AbortSignal;
+      maxTokens?: number;
+      tools?: readonly ToolSpec[];
+      toolChoice?: 'auto' | 'none' | 'required';
+    },
   ): Promise<{
     text: string;
     latencyMs: number;
@@ -659,6 +670,7 @@ export interface DecisionModel {
       cachedTokens?: number | null;
       reasoningTokens?: number | null;
     };
+    toolCalls?: ToolCall[];
   }>;
 }
 
@@ -1106,6 +1118,13 @@ export class AutoTrader {
   private timer: NodeJS.Timeout | null = null;
   /** M2.3：智能托管 2.0 雷达 15m 环比增量追踪器（每个机器人实例独立维护）。 */
   private readonly radarDeltaTracker = new RadarDeltaTracker();
+  /** M3.1：最近一轮雷达标的入场基准指标缓存，用于新开仓落库论点时记录入场评分/OI/Taker。 */
+  private lastManagedRadarBySymbol = new Map<
+    string,
+    { score: number; oiUsd: number | null; takerBuyRatio1h: number }
+  >();
+  /** M3.4：三段式 `finalize` 附带的新开仓初始论点暂存，成交后即时绑定 `managed_theses`。 */
+  private pendingThesisPlans = new Map<string, PendingThesisPlan>();
   /**
    * **持仓剧变监控的定时器**（2026-10-13 加）。
    *
@@ -1848,6 +1867,10 @@ export class AutoTrader {
       }
       const closed = await this.applyDrawdownGuard();
       if (closed > 0) this.emit('info', `回撤守卫（实时检查）平仓 ${closed} 笔`);
+      if (this.deps.trader.mode === 'ai_managed') {
+        const thesisClosed = await this.applyThesisHardGuard();
+        if (thesisClosed > 0) this.emit('info', `持仓论点硬检查（实时守卫）平仓 ${thesisClosed} 笔`);
+      }
       await this.applyBreakevenGuard().catch(() => undefined);
     } catch {
       /* 单次失败不影响下一轮；既有止损单仍然有效。 */
@@ -3759,6 +3782,66 @@ export class AutoTrader {
         );
       }
       this.emit('info', managedRadar.radarSummaryLine);
+
+      // M3：同步雷达快照、反例笔记过期清理与活跃持仓默认论点绑定
+      try {
+        const dossierBySym = new Map(managedRadar.dossiers.map((d) => [d.symbol, d]));
+        this.lastManagedRadarBySymbol = new Map(
+          managedRadar.radarLeaderboard.map((c) => [
+            c.symbol,
+            {
+              score: c.score,
+              oiUsd: c.metrics.openInterestUsd,
+              takerBuyRatio1h: c.metrics.takerBuyRatio1h,
+            },
+          ]),
+        );
+        managedRadarStore.save({
+          traderId,
+          btcBenchmark: managedRadar.btcBenchmarkLine,
+          summary: managedRadar.radarSummaryLine,
+          items: managedRadar.radarLeaderboard.map((c) => {
+            const d = dossierBySym.get(c.symbol);
+            return {
+              symbol: c.symbol,
+              score: c.score,
+              tier: c.tier,
+              bias: c.bias,
+              price: c.metrics.price,
+              change4hPct: c.metrics.change4hPct,
+              dimensions: c.dimensions,
+              tags: c.tags,
+              vpSummary: d?.volumeProfile ? formatVolumeProfileLine(d.volumeProfile) : null,
+              deltaState: d?.delta.state ?? null,
+              scoreDelta: d?.delta.scoreDelta ?? null,
+            };
+          }),
+        });
+        const activePool = new Set<string>([
+          ...held,
+          ...managedRadar.radarLeaderboard.map((c) => c.symbol),
+        ]);
+        managedNotesStore.syncPoolAndPrune(traderId, activePool);
+        managedThesisStore.closeMissingPositions(traderId, new Set(held));
+        for (const pos of localPositions) {
+          if (!managedThesisStore.getActive(traderId, pos.symbol)) {
+            const r = this.lastManagedRadarBySymbol.get(pos.symbol);
+            managedThesisStore.upsertActive({
+              traderId,
+              symbol: pos.symbol,
+              side: pos.side === 'short' ? 'short' : 'long',
+              entryPrice: pos.entry_price,
+              initialStopLoss: pos.stop_loss ?? pos.entry_price,
+              entryBasis: pos.open_reasoning || '既有持仓自动补建论点',
+              entryRadarScore: r?.score ?? null,
+              entryOiUsd: r?.oiUsd ?? null,
+              entryTakerBuyRatio: r?.takerBuyRatio1h ?? null,
+            });
+          }
+        }
+      } catch {
+        /* 持久化观测辅助失败不阻断交易主循环 */
+      }
     }
 
     /*
@@ -4395,6 +4478,10 @@ export class AutoTrader {
     let userPrompt: string;
 
     if (this.deps.trader.mode === 'ai_managed' && managedRadar) {
+      const thesesBySymbol = new Map(
+        managedThesisStore.listActive(traderId).map((t) => [t.symbol, t]),
+      );
+      const managedNotes = managedNotesStore.listActive(traderId);
       const managedBundle = buildManagedPrompts({
         traderName: promptContext.traderName,
         cycleNumber: promptContext.cycleNumber,
@@ -4410,6 +4497,9 @@ export class AutoTrader {
         roundTripCostPercent: promptContext.roundTripCostPercent,
         idleCycles: promptContext.idleCycles,
         memory: promptContext.memory,
+        thesesBySymbol,
+        managedNotes,
+        enableAgenticProtocol: typeof this.deps.model.chat === 'function',
       });
       systemPrompt = managedBundle.systemPrompt;
       stablePrompt = managedBundle.stablePrompt;
@@ -4577,9 +4667,61 @@ export class AutoTrader {
         : []),
       { role: 'user', content: volatilePrompt },
     ];
-    let response = this.deps.model.chat
-      ? await this.deps.model.chat(baseMessages, { signal })
-      : await this.deps.model.complete(systemPrompt, promptForModel, { signal });
+    const klineInspectedSymbols = new Set<string>();
+    this.pendingThesisPlans.clear();
+
+    const useManagedAgenticEngine =
+      this.deps.trader.mode === 'ai_managed' &&
+      managedRadar !== null &&
+      typeof this.deps.model.chat === 'function';
+
+    let managedStageTrace: string[] = [];
+    let response: {
+      text: string;
+      latencyMs: number;
+      usage: {
+        promptTokens: number | null;
+        completionTokens: number | null;
+        cachedTokens?: number | null;
+        reasoningTokens?: number | null;
+      };
+    };
+
+    if (useManagedAgenticEngine && this.deps.model.chat && managedRadar) {
+      const heldSetForEngine = new Set(held);
+      const engineResult = await runManagedAgenticLoop({
+        traderId,
+        model: { chat: this.deps.model.chat.bind(this.deps.model) },
+        baseMessages,
+        openPositions: promptPositions.map((p) => p.position),
+        candidateSymbols: managedRadar.dossiers
+          .filter((d) => !heldSetForEngine.has(d.symbol))
+          .map((d) => d.symbol),
+        getKlines: async (symbol, timeframe, count) => {
+          const rows = (await this.deps.marketData.getKlines(symbol, timeframe, count)) as Kline[];
+          if (rows.length > 0) {
+            const norm = normalizeSymbol(symbol);
+            if (norm) klineInspectedSymbols.add(norm);
+          }
+          return rows;
+        },
+        onStageEvent: (_stage, detail) => {
+          this.emit('info', `[三段决策] ${detail}`);
+        },
+        signal,
+      });
+      this.pendingThesisPlans = engineResult.pendingThesisPlans;
+      managedStageTrace = engineResult.stageTrace;
+      response = {
+        text: engineResult.text,
+        latencyMs: engineResult.latencyMs,
+        usage: engineResult.usage,
+      };
+    } else {
+      response = this.deps.model.chat
+        ? await this.deps.model.chat(baseMessages, { signal })
+        : await this.deps.model.complete(systemPrompt, promptForModel, { signal });
+    }
 
     /*
      * ── 按需取数：模型可以在给结论之前主动要数据 ─────────────────────────
@@ -4604,11 +4746,6 @@ export class AutoTrader {
      * 会让**要了数据的那几轮凭空消失** —— 而那恰好是最贵的那几轮。
      */
     let finalResponse = response;
-    /*
-     * M1.2（2026-11-24）：记录智能托管在本轮通过 `get_klines` 主动查验过的池外标的，
-     * 循环结束后通过合约与流动性校验热加入本轮可执行池，根治「自己找的币被风控以不在候选池拒杀」。
-     */
-    const klineInspectedSymbols = new Set<string>();
     const toolDeps: DecisionToolDeps = {
       klines: async (symbol, timeframe, count) => {
         const rows = (await this.deps.marketData.getKlines(
@@ -5084,6 +5221,14 @@ export class AutoTrader {
         symbol: '-',
         status: 'data',
         detail: `模型主动取数：${request}`,
+      });
+    }
+    if (managedStageTrace.length > 0) {
+      executionLog.push({
+        action: 'wait',
+        symbol: '-',
+        status: 'data',
+        detail: `三段式决策轨迹：${managedStageTrace.join(' → ')}`,
       });
     }
 
@@ -6166,6 +6311,13 @@ export class AutoTrader {
       row.id,
     );
     tradeEvents.record(traderId, symbol, 'entry');
+    this.bindThesisOnOpen({
+      symbol,
+      side: isLong ? 'long' : 'short',
+      entryPrice: avgPrice,
+      stopLoss: row.stop_loss,
+      reasoning: row.open_reasoning,
+    });
 
     /*
      * ⚠️ **那张入场单也要在同一刻结清。**
@@ -7931,6 +8083,9 @@ export class AutoTrader {
         positionStore.close(local.id);
         tradeEvents.record(traderId, local.symbol, 'exit');
       });
+      if (this.deps.trader.mode === 'ai_managed') {
+        managedThesisStore.markClosed(traderId, local.symbol);
+      }
       const existing = tradeStore.list(traderId, 200).find((t) => t.id === alreadyBooked);
       this.emit(
         'info',
@@ -7985,6 +8140,9 @@ export class AutoTrader {
       tradeEvents.record(traderId, local.symbol, 'exit');
       return inserted;
     });
+    if (this.deps.trader.mode === 'ai_managed') {
+      managedThesisStore.markClosed(traderId, local.symbol);
+    }
     const tradeId = booked.id;
 
     const record = tradeStore.list(traderId, 200).find((t) => t.id === tradeId);
@@ -10212,6 +10370,115 @@ reduceQuantity: null,
 
     return closed;
   }
+
+  /**
+   * M3.1 持仓论点 30 秒确定性机器硬检查（`time_stop_at` + `max_adverse_excursion_pct`）。
+   * 仅在 `ai_managed` 模式启用，逐仓读取实时标记价、刷新峰值 R / 最大不利偏移，触线即自动平仓。
+   */
+  private async applyThesisHardGuard(): Promise<number> {
+    if (this.deps.trader.mode !== 'ai_managed') return 0;
+    const traderId = this.deps.trader.id;
+    const openLocals = positionStore.open(traderId);
+    if (openLocals.length === 0) return 0;
+
+    const exchangePositions = await this.effectivePositions();
+    const liveBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
+    let closed = 0;
+
+    for (const local of openLocals) {
+      const thesis = managedThesisStore.getActive(traderId, local.symbol);
+      if (!thesis) continue;
+
+      const live = liveBySymbol.get(local.symbol);
+      const markPrice =
+        live && live.markPrice > 0
+          ? live.markPrice
+          : await this.deps.broker.getMarkPrice(local.symbol).catch(() => 0);
+      if (!(markPrice > 0)) continue;
+
+      const verdict = evaluateThesisHardCheck(thesis, { markPrice });
+      if (
+        verdict.nextPeakR > thesis.peakR ||
+        verdict.nextWorstAdversePct > thesis.worstAdversePct
+      ) {
+        managedThesisStore.recordExcursion(
+          thesis.id,
+          verdict.nextPeakR,
+          verdict.nextWorstAdversePct,
+        );
+      }
+
+      if (!verdict.shouldClose || !verdict.closeReason) continue;
+
+      this.emit('warn', verdict.detail);
+      try {
+        await this.executeClose(
+          {
+            symbol: local.symbol,
+            action: local.side === 'long' ? 'close_long' : 'close_short',
+            leverage: local.leverage,
+            positionSizeUsd: 0,
+            stopLoss: null,
+            takeProfit: null,
+            confidence: 100,
+            riskUsd: 0,
+            reasoning: verdict.detail,
+            reducePercent: null,
+            reduceQuantity: null,
+            setupScore: null,
+            setupScoreBasis: '',
+            adjustments: [],
+          },
+          verdict.closeReason,
+        );
+        closed += 1;
+      } catch (error) {
+        this.emit(
+          'error',
+          `持仓论点硬检查平仓 ${local.symbol} 失败：${(error as Error).message}`,
+        );
+      }
+    }
+
+    return closed;
+  }
+
+  /** M3.1：新开仓成交后立即为 `ai_managed` 仓位落库绑定结构化论点。 */
+  private bindThesisOnOpen(params: {
+    symbol: string;
+    side: 'long' | 'short';
+    entryPrice: number;
+    stopLoss: number | null;
+    reasoning: string;
+  }): void {
+    if (this.deps.trader.mode !== 'ai_managed') return;
+    try {
+      const sym = normalizeSymbol(params.symbol);
+      const plan = this.pendingThesisPlans.get(sym);
+      this.pendingThesisPlans.delete(sym);
+      const radarSnap = this.lastManagedRadarBySymbol.get(sym);
+      managedThesisStore.upsertActive({
+        traderId: this.deps.trader.id,
+        symbol: sym,
+        side: params.side,
+        entryPrice: params.entryPrice,
+        initialStopLoss: params.stopLoss ?? params.entryPrice,
+        entryBasis: plan?.entryBasis || params.reasoning,
+        addTrigger: plan?.addTrigger,
+        reduceTarget: plan?.reduceTarget,
+        invalidation: plan?.invalidation,
+        timeStopHours: plan?.timeStopHours,
+        minProgressR: plan?.minProgressR,
+        maxAdverseExcursionPct: plan?.maxAdverseExcursionPct,
+        entryRadarScore: radarSnap?.score ?? null,
+        entryOiUsd: radarSnap?.oiUsd ?? null,
+        entryTakerBuyRatio: radarSnap?.takerBuyRatio1h ?? null,
+      });
+    } catch {
+      /* 论点落库异常不阻断主成交链路 */
+    }
+  }
+
   /* ---------------------------------------------------------------------- */
   /*  Breakeven guard                                                        */
   /* ---------------------------------------------------------------------- */
@@ -12198,6 +12465,13 @@ reduceQuantity: null,
         entryOrderId: filled.id,
       };
       positionStore.insert(openPosition);
+      this.bindThesisOnOpen({
+        symbol: openPosition.symbol,
+        side: openPosition.side,
+        entryPrice: openPosition.entryPrice,
+        stopLoss: decision.stopLoss ?? openPosition.stopLoss,
+        reasoning: openPosition.openReasoning,
+      });
 
       /* --- Exchange-side protection ------------------------------------- */
       // Order matters: the stop goes on first and is verified. If protection

@@ -984,6 +984,70 @@ ALTER TABLE traders_new RENAME TO traders;
 CREATE INDEX idx_traders_status ON traders(status);
 `;
 
+/*
+ * ══════════════════════════════════════════════════════════════════════════
+ *  M20：智能托管 2.0 持久化状态（M3.1 持仓论点 thesis + M3.3 反例衰减笔记 + 雷达快照）
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * 三张表全部按 `trader_id` 级联清理，零改动既有 `positions` / `trades` / `orders` 账本结构：
+ *   1. `managed_theses`      — 每笔持仓的结构化论点（开仓依据、加减仓条件、时间止损、MAE 硬线）
+ *   2. `managed_notes`       — 按标的唯一替换的反例衰减笔记（强制可验证条件 + 7 天/离池 24h 过期）
+ *   3. `managed_radar_latest`— 每台机器人最新一轮 AI500 雷达榜快照，供前端详情页简洁展示
+ */
+const M20_MANAGED_V2_STATE = /* sql */ `
+CREATE TABLE IF NOT EXISTS managed_theses (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+  trader_id                  INTEGER NOT NULL REFERENCES traders(id) ON DELETE CASCADE,
+  symbol                     TEXT    NOT NULL,
+  side                       TEXT    NOT NULL,
+  entry_price                REAL    NOT NULL,
+  initial_stop_loss          REAL    NOT NULL,
+  entry_basis                TEXT    NOT NULL DEFAULT '',
+  add_trigger                TEXT    NOT NULL DEFAULT '',
+  reduce_target              TEXT    NOT NULL DEFAULT '',
+  invalidation               TEXT    NOT NULL DEFAULT '',
+  time_stop_at               TEXT,
+  min_progress_r             REAL    NOT NULL DEFAULT 0.3,
+  max_adverse_excursion_pct  REAL,
+  peak_r                     REAL    NOT NULL DEFAULT 0,
+  worst_adverse_pct          REAL    NOT NULL DEFAULT 0,
+  entry_radar_score          REAL,
+  entry_oi_usd               REAL,
+  entry_taker_buy_ratio      REAL,
+  status                     TEXT    NOT NULL DEFAULT 'active',
+  created_at                 TEXT    NOT NULL,
+  updated_at                 TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_managed_theses_active
+  ON managed_theses(trader_id, status, symbol);
+
+CREATE TABLE IF NOT EXISTS managed_notes (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  trader_id           INTEGER NOT NULL REFERENCES traders(id) ON DELETE CASCADE,
+  symbol              TEXT    NOT NULL,
+  note                TEXT    NOT NULL,
+  trigger_condition   TEXT    NOT NULL,
+  bias                TEXT    NOT NULL DEFAULT 'neutral',
+  confidence          INTEGER NOT NULL DEFAULT 70,
+  counterexamples     INTEGER NOT NULL DEFAULT 0,
+  last_seen_in_pool_at TEXT   NOT NULL,
+  expires_at          TEXT    NOT NULL,
+  created_at          TEXT    NOT NULL,
+  updated_at          TEXT    NOT NULL,
+  UNIQUE(trader_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_managed_notes_trader
+  ON managed_notes(trader_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS managed_radar_latest (
+  trader_id     INTEGER PRIMARY KEY REFERENCES traders(id) ON DELETE CASCADE,
+  updated_at    TEXT    NOT NULL,
+  btc_benchmark TEXT,
+  summary       TEXT    NOT NULL DEFAULT '',
+  items_json    TEXT    NOT NULL DEFAULT '[]'
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -1016,4 +1080,5 @@ export const MIGRATIONS: readonly Migration[] = [
     /* 重建被引用的表 —— 必须在事务外关外键，否则 DROP 会级联删掉子表数据。 */
     detachForeignKeys: true,
   },
+  { version: 20, name: 'managed-v2-state', sql: M20_MANAGED_V2_STATE },
 ];

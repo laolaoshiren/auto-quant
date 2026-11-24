@@ -31,6 +31,7 @@ import { ModeBadge } from '../components/TeamRoster';
 import { PageShell, Metric } from '../components/shell';
 import { DecisionFeed } from '../components/DecisionFeed';
 import { AgentAuditPanel } from '../components/AgentAuditPanel';
+import { ManagedIntelPanel } from '../components/ManagedIntelPanel';
 import { isOpenOrder, TraderTables, type TraderTabId } from '../components/TraderTables';
 import { MODE_HINT, MODE_LABEL, isPaperView } from '../lib/glossary';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
@@ -1899,7 +1900,7 @@ export function TraderPage() {
         撞在一起、留下"底部一大截空白"（见表格区上的事故记录）。
         现在主栏 `flex-1` 吸收空间、表格区按内容高。
       */}
-      <div className="min-h-0 flex-1">
+      <div className="min-h-0 flex-1 overflow-y-auto xl:overflow-hidden">
       <PageShell
         /*
          * 主栏区块间距收到 10px（默认 16px）：这一页在主栏里有五个区块，
@@ -2333,6 +2334,15 @@ export function TraderPage() {
           所以现在**只对 `ai_team` 显示** —— 与本次大更新的边界一致。
         */}
         {trader.mode === 'ai_team' && <AgentAuditPanel traderId={traderId} />}
+        {trader.mode === 'ai_managed' && (
+          <ManagedIntelPanel
+            traderId={traderId}
+            onSelectSymbol={(symbol) => {
+              setPickedSymbol(symbol);
+              setChartTab('candles');
+            }}
+          />
+        )}
 
       </PageShell>
       </div>

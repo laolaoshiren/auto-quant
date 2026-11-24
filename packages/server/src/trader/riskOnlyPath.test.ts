@@ -953,6 +953,7 @@ const CALLERS: ReadonlyArray<{
     allowed: [
       { caller: 'runCycleBody', why: 'approved：分派 `close_long` / `close_short`' },
       { caller: 'applyDrawdownGuard', why: '减敞口：机械回撤守卫平仓（§2.9，不问模型）' },
+      { caller: 'applyThesisHardGuard', why: '减敞口：M3.1 持仓论点时间止损与 MAE 确定性机器硬平仓（§2.1 只减敞口，不问模型）' },
       { caller: 'closeManually', why: '减敞口：操作员手工平仓（API `/positions/:symbol/close`）' },
     ],
   },

@@ -1440,12 +1440,79 @@ export const api = {
     request<DecisionRecord>(`/traders/${id}/decisions/${recordId}`, { signal }),
   traderEquity: (id: number, limit = 500, signal?: AbortSignal) =>
     request<EquitySnapshot[]>(`/traders/${id}/equity`, { query: { limit }, signal }),
+  traderManagedIntel: (id: number, signal?: AbortSignal) =>
+    request<ManagedIntelView>(`/traders/${id}/managed-intel`, { signal }),
 
   /* --- market --- */
   marketSymbols: (signal?: AbortSignal) => request<MarketSymbol[]>('/market/symbols', { signal }),
   marketKlines: (symbol: string, interval: string, limit = 300, signal?: AbortSignal) =>
     request<Kline[]>('/market/klines', { query: { symbol, interval, limit }, signal }),
 };
+
+/** M3.4：智能托管 2.0 雷达评分、持仓论点与反例衰减笔记视图。 */
+export interface ManagedRadarItemView {
+  symbol: string;
+  score: number;
+  tier: 'strong' | 'watch' | 'skip';
+  bias: 'long' | 'short' | 'neutral';
+  price: number;
+  change4hPct: number;
+  dimensions: {
+    trend: number;
+    breakout: number;
+    oiFlow: number;
+    takerFlow: number;
+    funding: number;
+    alphaPosition: number;
+  };
+  tags: string[];
+  vpSummary: string | null;
+  deltaState: string | null;
+  scoreDelta: number | null;
+}
+
+export interface ManagedThesisView {
+  id: number;
+  symbol: string;
+  side: 'long' | 'short';
+  entryPrice: number;
+  initialStopLoss: number;
+  entryBasis: string;
+  addTrigger: string;
+  reduceTarget: string;
+  invalidation: string;
+  timeStopAt: string | null;
+  minProgressR: number;
+  maxAdverseExcursionPct: number | null;
+  peakR: number;
+  worstAdversePct: number;
+  entryRadarScore: number | null;
+  updatedAt: string;
+}
+
+export interface ManagedNoteView {
+  id: number;
+  symbol: string;
+  note: string;
+  triggerCondition: string;
+  bias: 'long' | 'short' | 'neutral';
+  confidence: number;
+  counterexamples: number;
+  effectiveWeight: number;
+  expiresAt: string;
+}
+
+export interface ManagedIntelView {
+  radar: {
+    traderId: number;
+    updatedAt: string;
+    btcBenchmark: string | null;
+    summary: string;
+    items: ManagedRadarItemView[];
+  } | null;
+  theses: ManagedThesisView[];
+  notes: ManagedNoteView[];
+}
 
 /** Absolute WebSocket URL for the live event stream. */
 export function eventStreamUrl(): string {
