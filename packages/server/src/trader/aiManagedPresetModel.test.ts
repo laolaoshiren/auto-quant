@@ -213,3 +213,24 @@ test('★★★ 智能托管启动统一走 magpie 网关的 workbuddy/deepseek-
     rmSync(workDir, { recursive: true, force: true });
   }
 });
+
+test('★★★ 后台自检 AI 层默认关闭（不自动调用旧团队路由 workbuddy-ai / opencode-zen-free）', () => {
+  const savedUrl = process.env.MAGPIE_GATEWAY_URL;
+  const savedKey = process.env.MAGPIE_GATEWAY_KEY;
+  const savedFlag = process.env.SELF_CHECK_AI_ENABLED;
+  try {
+    process.env.MAGPIE_GATEWAY_URL = 'http://127.0.0.1:3425/v1';
+    process.env.MAGPIE_GATEWAY_KEY = 'sk-magpie-test-key';
+    delete process.env.SELF_CHECK_AI_ENABLED;
+    const manager = new TraderManager(new Vault(Buffer.alloc(32, 1)));
+    const ask = (manager as unknown as { buildSelfCheckAsk: () => unknown }).buildSelfCheckAsk();
+    assert.equal(ask, undefined, '默认必须关闭自检 AI 层，避免后台刷旧候选链 429');
+  } finally {
+    if (savedUrl === undefined) delete process.env.MAGPIE_GATEWAY_URL;
+    else process.env.MAGPIE_GATEWAY_URL = savedUrl;
+    if (savedKey === undefined) delete process.env.MAGPIE_GATEWAY_KEY;
+    else process.env.MAGPIE_GATEWAY_KEY = savedKey;
+    if (savedFlag === undefined) delete process.env.SELF_CHECK_AI_ENABLED;
+    else process.env.SELF_CHECK_AI_ENABLED = savedFlag;
+  }
+});

@@ -5264,6 +5264,14 @@ export class TraderManager {
    * **网关挂掉的时候恰恰最需要自检**，那时更不该因为"AI 层不可用"而什么都不做。
    */
   private buildSelfCheckAsk(): ((prompt: string) => Promise<string>) | undefined {
+    /*
+     * 2026-11-24 用户指示关闭自检的 AI 层（只保留确定性规则自检）：
+     * 自检 AI 层走旧团队候选链（workbuddy-ai / opencode-zen-free），每 30 分钟
+     * 在全局日志刷出一串 429 报错，且与当前智能托管预设模型路线不一致。
+     * 仅在显式设置 `SELF_CHECK_AI_ENABLED=true` 时才启用。
+     */
+    if (process.env.SELF_CHECK_AI_ENABLED !== 'true') return undefined;
+
     let gateway;
     try {
       gateway = resolveTeamGateway(process.env);
