@@ -510,3 +510,41 @@ test('★★★ 混合舰队：同账户下实盘与模拟盘共存时，实盘�
   assert.equal(paperCurve.series[11]?.[0]?.equity, 5012.5);
   assert.equal(paperCurve.series[12]?.[0]?.equity, 990);
 });
+
+test('★ 运行中的实盘账户空仓心跳去重期间不得误报为「读数已过期」', () => {
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+  const runningTrader = trader({
+    id: 21,
+    exchangeAccountId: 3,
+    initialEquity: 50,
+    status: 'running',
+    isRunning: true,
+    dryRun: false,
+  });
+  const stoppedTrader = trader({
+    id: 22,
+    exchangeAccountId: 4,
+    initialEquity: 50,
+    status: 'stopped',
+    isRunning: false,
+    dryRun: false,
+  });
+
+  const totals = fleetTotals({
+    traders: [runningTrader, stoppedTrader],
+    stats: {
+      21: stats({ traderId: 21, accountEquity: 50.13, equity: 50.13 }),
+      22: stats({ traderId: 22, accountEquity: 50.13, equity: 50.13 }),
+    },
+    snapshots: {
+      21: [snapshot(twoHoursAgo, 50.13)],
+      22: [snapshot(twoHoursAgo, 50.13)],
+    },
+    dryRun: { 21: false, 22: false },
+  });
+
+  const accRunning = totals.accounts.find((a) => a.exchangeAccountId === 3);
+  const accStopped = totals.accounts.find((a) => a.exchangeAccountId === 4);
+  assert.equal(accRunning?.accountEquityStale, false, '有机器人在跑时不该误报读数过期');
+  assert.equal(accStopped?.accountEquityStale, true, '全部已停止且快照超 1 小时才标记旧读数');
+});

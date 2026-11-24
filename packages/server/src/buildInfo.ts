@@ -478,6 +478,22 @@ export async function checkForUpdates(info: BuildInfo | null = readBuildInfo()):
         return remember(base('up-to-date', `与 GitHub 上的 ${info.branch} 一致。`, seen));
       }
     } catch {
+      /*
+       * compare 返回 404 通常意味着线上已部署本地新提交、尚未推送到 GitHub。
+       * 当本地提交时间明确晚于 GitHub 分支最新提交时间时，直接标为 `ahead`（领先未推送），
+       * 而不是含糊的 `unknown`（「无法比对 / 未知」）；若时间戳无法判定则保留 `unknown`。
+       */
+      const localMs = Date.parse(info.committedAt);
+      const remoteMs = Date.parse(latestCommittedAt);
+      if (Number.isFinite(localMs) && Number.isFinite(remoteMs) && localMs > remoteMs) {
+        return remember(
+          base(
+            'ahead',
+            `领先 GitHub 上的 ${info.branch} —— 线上已部署更新的本地提交 ${info.commitShort}（尚未推送；GitHub 最新为 ${latestCommitShort ?? '未知'}）。`,
+            seen,
+          ),
+        );
+      }
       return remember(
         base(
           'unknown',

@@ -279,15 +279,12 @@ const FULL_RECONCILE_EVERY_PASSES = 24;
 const SNAPSHOT_SAME_TOLERANCE = 1e-9;
 
 /**
- * 持仓与权益都没变时，最多隔多久记一条**心跳**快照。
+ * 持仓与权益都没变时，最多隔多久记一条**心跳**快照（30 分钟）。
  *
- * 没有心跳，长时间空仓会在权益曲线上留下断档 —— 那看起来像"机器人没在跑"，
- * 而它其实一直在跑。2 小时对一台 45 分钟一轮的机器人是"每 2–3 轮一条"，
- * 既保住了"我还在"的证据，又不会把曲线铺成一堆重复的点。
- *
- * 完整理由见 `recordEquity()`。
+ * 必须严格短于前端 `ACCOUNT_READING_STALE_MS`（60 分钟），确保运行中机器人空仓期间
+ * 不会因为心跳去重而在列表中被误报「账户读数已过期」，也能在启动后半小时内形成真实曲线。
  */
-const SNAPSHOT_HEARTBEAT_MS = 2 * 60 * 60 * 1000;
+const SNAPSHOT_HEARTBEAT_MS = 30 * 60 * 1000;
 
 /**
  * 结清一张本地委托之前，它至少要有多"老"。
@@ -14868,7 +14865,8 @@ reduceQuantity: null,
     const same =
       prev.openPositions === next.openPositions &&
       Math.abs(prev.unrealizedPnl - next.unrealizedPnl) < SNAPSHOT_SAME_TOLERANCE &&
-      Math.abs(prev.equity - next.equity) < SNAPSHOT_SAME_TOLERANCE;
+      Math.abs(prev.equity - next.equity) < SNAPSHOT_SAME_TOLERANCE &&
+      Math.abs(prev.accountEquity - next.accountEquity) < SNAPSHOT_SAME_TOLERANCE;
     if (!same) return false;
 
     const ageMs = Date.parse(next.timestamp) - Date.parse(prev.timestamp);

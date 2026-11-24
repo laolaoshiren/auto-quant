@@ -3,7 +3,7 @@ import { ModeBadge } from '../components/TeamRoster';
 import { ManagedRiskBadge } from '../components/ManagedRiskProfileControl';
 import { Link, useNavigate } from 'react-router-dom';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
-import { ArrowUpRight, Loader2, MoreHorizontal, Pencil, Play, Plus, Square, Trash2 } from 'lucide-react';
+import { ArrowUpRight, CircleStop, Loader2, MoreHorizontal, Pencil, Play, Plus, Trash2 } from 'lucide-react';
 import type { EquitySnapshot, TraderStatus } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { isPaperView } from '../lib/glossary';
@@ -521,7 +521,7 @@ export function TradersPage() {
             paperOnlyFleet ? (
               `模拟盘 · ${fmtInt(fleetTotal.paper.traderCount)} 台`
             ) : staleAccounts.length > 0 ? (
-              `⚠️ ${staleAccounts.length} 个账户读数已过期`
+              `已停机 · 末次快照（${staleAccounts.length} 个账户）`
             ) : (
               `按账户去重 · ${fmtInt(fleetTotal.accounts.length)} 个账户`
             )
@@ -530,8 +530,7 @@ export function TradersPage() {
             paperOnlyFleet
               ? '当前仅有模拟盘机器人：此处为各模拟盘本地模拟权益之和（与真实钱包无关）。'
               : staleAccounts.length > 0
-                ? `⚠️ 其中 ${staleAccounts.map((a) => `#${a.exchangeAccountId}`).join('、')} 的权益读数是旧的 —— ` +
-                  '那些账户下的机器人都不在运行，所以没有新快照。这个数字是最后一次读到的值，不代表现在的钱包。'
+                ? `账户 ${staleAccounts.map((a) => `#${a.exchangeAccountId}`).join('、')} 下所有机器人当前均已停止，此处展示停机前的最近一次权益快照。`
                 : '按实盘交易所账户合计的权益：同一账户下的多个机器人共用同一个钱包，只算一次；模拟盘不混入。表格每一行的「归属权益」是那个机器人自己的贡献。'
           }
         />
@@ -602,34 +601,30 @@ export function TradersPage() {
               <table className="w-full table-fixed border-collapse">
                 <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
                   <tr>
-                    <th className="th w-[21%]">机器人</th>
+                    <th className="th w-[22%]">机器人</th>
+                    <th className="th hidden w-[14%] md:table-cell">交易所 / 周期</th>
                     <th className="th w-[8%]">状态</th>
                     <th
-                      className="th w-[12%] text-right"
+                      className="th w-[11%] text-right"
                       title={
                         '归属权益 = 起始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。' +
                         '同一账户下其他机器人挣的钱不算在内。' +
-                        '⚠️ 当平台账本与交易所对不上时（`ledger.gap`），这一列改用交易所的' +
-                        '成交流水校准 —— 否则账本里记错的笔数会让它虚高，而那个数字' +
-                        '与详情页的「账户余额」对不上。'
+                        '当平台账本与交易所存在差异时，按交易所实际成交流水校准。'
                       }
                     >
                       归属权益
                     </th>
-                    <th className="th w-[12%] text-right" title="总收益率 = 归属权益相对起始权益的变化；下面一行是它的构成：净 = 毛 − 手续费 − 资金费。">
+                    <th className="th w-[11%] text-right" title="总收益率 = 归属权益相对起始权益的变化；下面一行是净已实现盈亏。">
                       盈亏
                     </th>
-                    <th className="th hidden w-[12%] text-right lg:table-cell" title="胜率（winRatePercent，已是 0–100 的百分数）· 盈/亏笔数与盈利因子（∞ = 尚无亏损成交）。">
+                    <th className="th hidden w-[11%] text-right lg:table-cell" title="胜率 · 盈/亏笔数与盈利因子（∞ = 尚无亏损成交）。">
                       胜率 / PF
                     </th>
                     <th className="th w-[5%] text-right">持仓</th>
-                    <th className="th hidden w-[8%] text-right xl:table-cell" title="历史最大回撤（账户从高水位回落的最大幅度）。">
-                      最大回撤
+                    <th className="th hidden w-[8%] pr-3 text-right xl:table-cell" title="已运行时长 / 最近一个决策周期的时间。">
+                      运行 / 最近
                     </th>
-                    <th className="th hidden w-[10%] pr-3 text-right lg:table-cell" title="已运行时长 / 最近一个决策周期的时间。">
-                      运行 / 最近周期
-                    </th>
-                    <th className="th w-[12%] text-right">操作</th>
+                    <th className="th w-[10%] text-right">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -642,44 +637,41 @@ export function TradersPage() {
                         ? live.status === 'running' || live.status === 'safe_mode'
                         : trader.isRunning;
                     const rowBusy = busyId === trader.id;
-                    /* 点击后立刻视为「启动中」，直到服务端给出明确结论或超时。 */
                     const starting = status === 'starting' || optimisticStarting.has(trader.id);
+                    const account = accountOf(exchangeAccountsQuery.data, trader.exchangeAccountId);
                     return (
                       <tr key={trader.id} className="row-hover">
                         <td className="td">
-                          {/*
-                            名称一行、徽章一行（原来名称 + 模式 + 资金口径 + 周期
-                            全挤在一格里，`table-fixed` 下名称被截成「[本地UI] ...」）。
-                            名称是真正的链接：整行可点，键盘与"新标签页打开"仍可用。
-                          */}
-                          <Link
-                            to={`/traders/${trader.id}`}
-                            className="group flex min-w-0 items-center gap-2"
-                          >
-                            <TraderAvatar id={trader.id} size={24} className="shrink-0 rounded-md" />
-                            <span
-                              className="min-w-0 flex-1 truncate text-base font-semibold text-ink-hi group-hover:text-accent"
-                              title={trader.name}
-                            >
-                              {trader.name}
-                            </span>
-                          </Link>
-                          <div className="mt-1 flex flex-wrap items-center gap-1">
-                            {/*
-                              **模式徽章**（用户 2026-10-12 要求）+ **实盘/模拟徽章**
-                              （用户 2026-11-10 要求「列表上要显示 实盘\模拟」）。两者颜色
-                              由共享组件给：模式按模式分色、资金口径模拟=蓝/实盘=黄。
-                            */}
-                            <ModeBadge mode={trader.mode} />
-                            {trader.mode === 'ai_managed' && (
-                              <ManagedRiskBadge profile={trader.managedRiskProfile} />
-                            )}
-                            <MoneyBadge dryRun={trader.dryRun} />
-                            {/* 交易所 + 钱包 + 测试网/主网（用户 2026-11-11 需求）。 */}
-                            <ExchangeAccountChip account={accountOf(exchangeAccountsQuery.data, trader.exchangeAccountId)} />
-                            <span className="num hidden truncate text-xs text-ink-faint lg:inline">
+                          <div className="flex min-w-0 items-center gap-2.5">
+                            <Link to={`/traders/${trader.id}`} className="shrink-0">
+                              <TraderAvatar id={trader.id} size={28} className="rounded-lg" />
+                            </Link>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex min-w-0 items-center gap-1.5">
+                                <Link
+                                  to={`/traders/${trader.id}`}
+                                  className="min-w-0 truncate text-sm font-semibold text-ink-hi transition hover:text-accent"
+                                  title={trader.name}
+                                >
+                                  {trader.name}
+                                </Link>
+                                <MoneyBadge dryRun={trader.dryRun} />
+                              </div>
+                              <div className="mt-1 flex flex-wrap items-center gap-1">
+                                <ModeBadge mode={trader.mode} />
+                                {trader.mode === 'ai_managed' && (
+                                  <ManagedRiskBadge profile={trader.managedRiskProfile} />
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="td hidden md:table-cell">
+                          <div className="min-w-0">
+                            <ExchangeAccountChip account={account} />
+                            <div className="num mt-1 truncate text-xs text-ink-faint">
                               周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
-                            </span>
+                            </div>
                           </div>
                         </td>
                         <td className="td">
@@ -877,18 +869,11 @@ export function TradersPage() {
                           )}
                         </td>
                         <td className="td num text-right">{stats ? fmtInt(stats.openPositions) : '—'}</td>
+                        {/* 运行时长 + 最近周期合成一格，悬停可查最大回撤。 */}
                         <td
-                          className={cn(
-                            'td hidden num text-right xl:table-cell',
-                            /* 0% 回撤不是"亏了"，用红色会把一行正常的数字渲染成告警。 */
-                            stats && stats.maxDrawdownPercent > 0 ? 'text-down' : 'text-ink-faint',
-                          )}
+                          className="td hidden num whitespace-nowrap pr-3 text-right text-ink-lo xl:table-cell"
+                          title={stats ? `最大回撤 ${fmtDrawdownPercent(stats.maxDrawdownPercent)}` : undefined}
                         >
-                          {stats ? fmtDrawdownPercent(stats.maxDrawdownPercent) : '—'}
-                        </td>
-                        {/* 运行时长 + 最近周期合成一格：它们是同一个问题的两个方面
-                            （还在跑吗、跑到哪了），分两列各占 100px 不值。 */}
-                        <td className="td hidden num whitespace-nowrap pr-3 text-right text-ink-lo lg:table-cell">
                           {stats ? fmtDuration(stats.uptimeHours * 60) : '—'}
                           <div className="text-xs text-ink-faint">{timeAgo(trader.lastCycleAt)}</div>
                         </td>
@@ -931,7 +916,7 @@ export function TradersPage() {
                                 title="停止循环 — 需要确认"
                                 onClick={() => setPending({ kind: 'stop', trader })}
                               >
-                                <Square aria-hidden className="h-3.5 w-3.5" />
+                                <CircleStop aria-hidden className="h-3.5 w-3.5" />
                                 停止
                               </Button>
                             ) : (

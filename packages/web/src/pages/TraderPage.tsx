@@ -4,9 +4,14 @@ import {
   Brain,
   ChevronLeft,
   ChevronRight,
+  CircleStop,
+  Layers,
   Play,
   Settings2,
-  Square,
+  Shield,
+  Target,
+  TrendingUp,
+  Wallet,
   Zap,
 } from 'lucide-react';
 import {
@@ -34,7 +39,7 @@ import { TraderStatusBadge } from '../components/Badges';
 import { TraderAvatar } from '../components/TraderAvatar';
 import { ExchangeAccountChip, accountOf } from '../components/ExchangeAccountChip';
 import { ModeBadge } from '../components/TeamRoster';
-import { PageShell, Metric } from '../components/shell';
+import { PageShell } from '../components/shell';
 import { DecisionFeed } from '../components/DecisionFeed';
 import { AgentAuditPanel } from '../components/AgentAuditPanel';
 import { ManagedIntelPanel } from '../components/ManagedIntelPanel';
@@ -150,13 +155,6 @@ function useEquityChartHeight(): number {
 
 function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
-/** `Metric` 的色调用有限联合，这里把"盈亏正负"翻译过去（0 走默认色）。 */
-function toneOf(value: number): 'up' | 'down' | 'default' {
-  if (value > 0) return 'up';
-  if (value < 0) return 'down';
-  return 'default';
 }
 
 /**
@@ -1359,259 +1357,284 @@ export function TraderPage() {
     `它不等于本机器人的「归属权益」。` +
     (accountIsStale ? '机器人当前未运行，这是最近一条快照里的读数。' : '');
 
+  const marginUtilPct =
+    account && account.equity > 0 && displayMarginUsed(displayInput) !== null
+      ? ((displayMarginUsed(displayInput)! / account.equity) * 100)
+      : null;
+
   const metricCards = (
-    /*
-     * 指标卡**等高**（不加 `items-start`），这是刻意的 —— 它们是一组 KPI 方块、
-     * 是一个视觉单元，高低不齐会让人觉得它们不属于同一组。
-     *
-     * ⚠️ 5 张卡在 768（`md`）上排 **3 列**（3+2），不再是 2 列（3 行）—— 后者
-     * 会多占一整行、把图表推到首屏之外（用户要求尽量不翻页）。
-     */
-    <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5">
-      {/* 1 — 账户余额：我到底有多少钱 ---------------------------------- */}
-      <MetricCard>
-        <Metric
-          label={`账户余额（${settleAsset}）`}
-          /*
-           * ⚠️ 模拟盘显示**它自己的模拟权益**（`calibratedEquity`），不是真实钱包 ——
-           * 否则会出现"赚了 0.09、余额一分没动"的矛盾。见 `useSimulatedBalance`。
-           */
-          value={
-            useSimulatedBalance
-              ? fmtNum(calibratedEquity, 2)
-              : account
-                ? fmtNum(account.equity, 2)
-                : '—'
-          }
-          size="lg"
-          tone="strong"
+    <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-5">
+      {/* 1 — 账户余额 */}
+      <MetricCard
+        title={
+          useSimulatedBalance
+            ? '模拟盘：本机器人的模拟权益（起始权益 + 已实现净额 + 浮盈），与列表页「归属权益」一致。'
+            : account
+              ? `账户权益 = 钱包余额 + 未实现盈亏。${accountTitle}`
+              : '暂时读不到交易所账户读数。'
+        }
+      >
+        <div className="flex items-center justify-between gap-1.5">
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-ink-lo">
+            <Wallet aria-hidden className="h-3.5 w-3.5 shrink-0 text-accent" />
+            <span className="truncate">账户余额</span>
+          </span>
+          <span className="num shrink-0 rounded bg-base-850 px-1.5 py-px text-[10px] font-medium text-ink-lo">
+            {settleAsset}
+          </span>
+        </div>
+
+        <div className="num mt-2 truncate text-[21px] font-bold leading-tight tracking-tight text-ink-strong 2xl:text-2xl">
+          {useSimulatedBalance
+            ? fmtNum(calibratedEquity, 2)
+            : account
+              ? fmtNum(account.equity, 2)
+              : '—'}
+        </div>
+
+        <div
+          className="num mt-auto flex items-center justify-between gap-2 border-t border-base-800/80 pt-2 text-[11px] text-ink-faint"
           title={
-            useSimulatedBalance
-              ? '模拟盘：这里的余额是本机器人的模拟权益（起始权益 + 已实现净额 + 浮盈），' +
-                '与列表页的「归属权益」同一个数。' +
-                '模拟成交不会动真实钱包，所以不能拿交易所余额当这里的答案。'
-              : account
-                ? `账户权益 = 钱包余额 + 未实现盈亏。这是交易所钱包里的钱（共享）。${accountTitle}`
-                : '暂时读不到交易所账户读数。'
-          }
-          sub={
-            useSimulatedBalance ? (
-              /*
-               * 主数字就是账户余额；副行只补一个**起始权益**（否则读者不知道
-               * 这 1,000 是本金还是赚出来的）。
-               *
-               * ⚠️ **不写「模拟账户 ·」也不写「净 X」**：
-               *  · 「模拟」由信息行的资金口径徽章表达（同一屏不重复）；
-               *  · 「净 X」就是紧挨着的「交易盈亏」卡主数字（同一数字不出现两次）。
-               * 两处都写还会在 5 列布局里把这一行截断（实测「起始 1,...」）。
-               */
-              <>起始 {fmtNum(initialEquity, 2)}</>
-            ) : account ? (
-              <>
-                钱包 {fmtNum(account.walletBalance, 2)} · 可用 {fmtAvailable()}
-                {accountIsStale ? <span className="text-warn"> · 快照</span> : null}
-              </>
-            ) : (
-              '读取中…'
-            )
-          }
-          /* ⚠️ `sub` 带 `truncate`，会静默切掉尾巴 —— 完整内容必须能从 title 读到。 */
-          subTitle={
             useSimulatedBalance
               ? `模拟权益 ${fmtNum(calibratedEquity, 2)} = 起始 ${fmtNum(initialEquity, 2)} + 已实现 ${fmtUsdSigned(realized, 2)} + 浮盈 ${fmtUsdSigned(unrealized, 2)}`
               : account
                 ? `钱包余额 ${fmtNum(account.walletBalance, 2)} · 可用 ${fmtAvailable()}`
                 : undefined
           }
-        />
+        >
+          {useSimulatedBalance ? (
+            <>
+              <span className="truncate">起始 {fmtNum(initialEquity, 2)}</span>
+              <span className="shrink-0 text-ink-lo">模拟盘</span>
+            </>
+          ) : account ? (
+            <>
+              <span className="truncate">
+                钱包 <span className="text-ink-mid">{fmtNum(account.walletBalance, 2)}</span>
+              </span>
+              <span className="shrink-0">
+                可用 <span className="text-ink-mid">{fmtAvailable()}</span>
+                {accountIsStale ? <span className="text-warn"> · 快照</span> : null}
+              </span>
+            </>
+          ) : (
+            <span>读取中…</span>
+          )}
+        </div>
       </MetricCard>
 
-      {/* 2 — 交易盈亏：总盈亏（含浮盈）+ 今日盈亏（用户要求放一起）------- */}
-      <MetricCard>
-        <Metric
-          label="交易盈亏"
-          value={stats ? fmtUsdSigned(totalPnl, 2) : '—'}
-          size="lg"
-          tone={toneOf(stats ? totalPnl : 0)}
+      {/* 2 — 交易盈亏 */}
+      <MetricCard
+        title={
+          ledgerSuspect
+            ? `已平仓净额（交易所校准 ${fmtUsdSigned(ledger!.exchangeNet, 2)}）+ 本机器人当前浮盈。`
+            : '总盈亏 = 已平仓净盈亏 + 当前持仓浮动盈亏。'
+        }
+      >
+        <div className="flex items-center justify-between gap-1.5">
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-ink-lo">
+            <TrendingUp aria-hidden className="h-3.5 w-3.5 shrink-0 text-up" />
+            <span className="truncate">交易盈亏</span>
+          </span>
+          {stats && (
+            <span
+              className={cn(
+                'num shrink-0 rounded px-1.5 py-px text-[10px] font-semibold',
+                cardReturnPercent > 0
+                  ? 'bg-up/15 text-up'
+                  : cardReturnPercent < 0
+                    ? 'bg-down/15 text-down'
+                    : 'bg-base-850 text-ink-lo',
+              )}
+            >
+              {fmtPercent(cardReturnPercent)}
+            </span>
+          )}
+        </div>
+
+        <div
+          className={cn(
+            'num mt-2 truncate text-[21px] font-bold leading-tight tracking-tight 2xl:text-2xl',
+            stats ? pnlColor(totalPnl) : 'text-ink-hi',
+          )}
+        >
+          {stats ? fmtUsdSigned(totalPnl, 2) : '—'}
+        </div>
+
+        <div
+          className="num mt-auto flex items-center justify-between gap-2 border-t border-base-800/80 pt-2 text-[11px] text-ink-faint"
           title={
-            ledgerSuspect
-              ? /*
-                 * ⚠️ **卡片与曲线现在不同口径了 —— 必须说出来，不能继续假装一致。**
-                 *
-                 * 独立验收 2026-10-07 抓到：原文案写"与下面曲线的「本段变化」同一个口径"，
-                 * 而卡片走交易所校准值（`exchangeNet`）、曲线仍走快照的**账本**权益
-                 * （含 `platformNet`）—— 两者实测差 0.175728，正是那个 gap。
-                 *
-                 * 曲线是**历史序列**，它的每个点都带着当时的账本口径，无法回溯校准；
-                 * 而卡片要回答"我现在赚了多少"，必须用交易所的真实值。
-                 * 与其让两句话互相矛盾，不如把差异讲清楚。
-                 */
-                `已平仓净额（交易所校准 ${fmtUsdSigned(ledger!.exchangeNet, 2)}）+ 本机器人当前浮盈。` +
-                `本地账本记的是 ${fmtUsdSigned(ledger!.platformNet, 2)}，与交易所差 ${fmtUsdSigned(ledger!.gap, 2)}` +
-                '（账本按"腿"记、交易所按"整回合"结算，共享账户下无法完全对齐）。' +
-                '下面的权益曲线画的是本地账本口径，所以它的「本段变化」会比这张卡片多出这个差额 ——' +
-                '以卡片为准。'
-              : '总盈亏 = 已平仓的净盈亏 + 当前持仓的浮动盈亏，与下面曲线的「本段变化」同一个口径。' +
-                '它等于「归属权益 − 起始权益」（归属口径：只算这个机器人自己的账）。' +
-                '只看已平仓那一部分，见「盈亏拆解」。'
-          }
-          sub={
-            stats ? (
-              <>
-                今日 <span className={pnlColor(todayPnl)}>{fmtUsdSigned(todayPnl, 2)}</span>
-                {' · '}
-                <span className={pnlColor(cardReturnPercent)}>{fmtPercent(cardReturnPercent)}</span>
-              </>
-            ) : (
-              '等待统计'
-            )
-          }
-          /*
-           * ⚠️ **这一行被 `ui:check` 在真实浏览器里抓到过**：
-           *
-           *     ⚠️ 被截断且没有 title（内容读不到）:
-           *        "今日 +$0.13 · 总收益率 +6.26%"
-           *
-           * `sub` 带 `truncate`，五列布局下卡片只有约 290px —— 那一行被切掉尾巴，
-           * 而**切掉的部分谁也看不到**（`ui-check.mjs` 顶部把这种情况判为"信息丢失"，
-           * 而不是"版面正常"）。所以文案缩到「总收益」，并把完整句子放进 `subTitle`。
-           */
-          subTitle={
             stats
-              ? `今日盈亏 ${fmtUsdSigned(todayPnl, 2)} · 总收益率 ${fmtPercent(cardReturnPercent)}`
+              ? `今日盈亏 ${fmtUsdSigned(todayPnl, 2)} · 已实现 ${fmtUsdSigned(realized, 2)} · 总收益率 ${fmtPercent(cardReturnPercent)}`
               : undefined
           }
-        />
+        >
+          {stats ? (
+            <>
+              <span className="truncate">
+                今日 <span className={pnlColor(todayPnl)}>{fmtUsdSigned(todayPnl, 2)}</span>
+              </span>
+              <span className="shrink-0">
+                已实现 <span className={pnlColor(realized)}>{fmtUsdSigned(realized, 2)}</span>
+              </span>
+            </>
+          ) : (
+            <span>等待统计</span>
+          )}
+        </div>
       </MetricCard>
 
-      {/* 3 — 保证金占用 ---------------------------------------------- */}
-      <MetricCard>
-        <Metric
-          /* 单位放在 title 与副行里（5 列布局下「保证金占用（USDT）」会被截成「（USD…」）。 */
-          label="保证金占用"
-          value={fmtMarginUsed()}
-          size="lg"
+      {/* 3 — 保证金占用 */}
+      <MetricCard
+        title={
+          account
+            ? `交易所账户里被持仓与挂单占用的保证金。${accountTitle}`
+            : '暂时读不到交易所账户读数。'
+        }
+      >
+        <div className="flex items-center justify-between gap-1.5">
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-ink-lo">
+            <Shield aria-hidden className="h-3.5 w-3.5 shrink-0 text-warn" />
+            <span className="truncate">保证金占用</span>
+          </span>
+          {marginUtilPct !== null && (
+            <span
+              className={cn(
+                'num shrink-0 rounded px-1.5 py-px text-[10px] font-semibold',
+                marginUtilPct >= 75
+                  ? 'bg-warn/15 text-warn'
+                  : 'bg-base-850 text-ink-lo',
+              )}
+            >
+              {marginUtilPct.toFixed(1)}%
+            </span>
+          )}
+        </div>
+
+        <div className="num mt-2 truncate text-[21px] font-bold leading-tight tracking-tight text-ink-hi 2xl:text-2xl">
+          {fmtMarginUsed()}
+        </div>
+
+        <div
+          className="num mt-auto flex items-center justify-between gap-2 border-t border-base-800/80 pt-2 text-[11px] text-ink-faint"
           title={
-            account
-              ? `交易所账户里被持仓与挂单占用的保证金。${accountTitle}`
-              : '暂时读不到交易所账户读数。'
-          }
-          sub={
-            account ? (
-              <>
-                {/*
-                 * ⚠️ **这个主数字含挂单占用 —— 挂单不是持仓，但它一样占着保证金。**
-                 *
-                 * 实测（2026-09-29）：两笔限价挂单在手（XRPUSDT $5.20 + SOLUSDT $5.04），
-                 * 卡片显示「保证金占用 10.24 / 当前无持仓」—— 两个数字看着互相矛盾，
-                 * 而真相是那 10.24 **全部来自挂单**。原来的副行只说"当前无持仓"，
-                 * 恰好把唯一能解释它的那半句（挂单占用）漏掉了。
-                 *
-                 * 口径在后端就写明了：`binance/account.ts` 的
-                 * `marginUsed = totalPositionInitialMargin + openOrderMargin`。
-                 * 而上面那张"5 张卡"的设计表里，这一格的副行本来就写着「其中挂单占用」。
-                 */}
-                {notional > 0 ? <>名义 {fmtUsd(notional, 2)}</> : null}
-                {(account.openOrderMargin ?? 0) > 0 ? (
-                  <>
-                    {notional > 0 ? ' · ' : ''}
-                    挂单占用 {fmtNum(account.openOrderMargin ?? 0, 2)}
-                  </>
-                ) : null}
-                {notional === 0 && !((account.openOrderMargin ?? 0) > 0) ? '当前无持仓' : null}
-                {account.unrealizedPnl !== 0 && (
-                  <>
-                    {' · '}未实现 <span className={pnlColor(account.unrealizedPnl)}>{fmtUsdSigned(account.unrealizedPnl, 2)}</span>
-                  </>
-                )}
-              </>
-            ) : (
-              '读取中…'
-            )
-          }
-          subTitle={
             account
               ? [
                   notional > 0 ? `名义敞口 ${fmtUsd(notional, 2)}` : null,
                   (account.openOrderMargin ?? 0) > 0
                     ? `挂单占用 ${fmtNum(account.openOrderMargin ?? 0, 2)}`
                     : null,
-                  notional === 0 && !((account.openOrderMargin ?? 0) > 0) ? '当前无持仓' : null,
-                  account.unrealizedPnl !== 0
-                    ? `账户未实现盈亏 ${fmtUsdSigned(account.unrealizedPnl, 2)}`
-                    : null,
+                  notional === 0 && !((account.openOrderMargin ?? 0) > 0) ? '当前无持仓及挂单占用' : null,
                 ]
                   .filter(Boolean)
                   .join(' · ')
               : undefined
           }
-        />
+        >
+          {account ? (
+            <>
+              <span className="truncate">
+                {notional > 0 ? (
+                  <>
+                    名义 <span className="text-ink-mid">{fmtUsd(notional, 2)}</span>
+                  </>
+                ) : (account.openOrderMargin ?? 0) > 0 ? (
+                  <>
+                    挂单占用 <span className="text-ink-mid">{fmtNum(account.openOrderMargin ?? 0, 2)}</span>
+                  </>
+                ) : (
+                  '当前无持仓'
+                )}
+              </span>
+              {notional > 0 && (account.openOrderMargin ?? 0) > 0 ? (
+                <span className="shrink-0">挂单 {fmtNum(account.openOrderMargin ?? 0, 2)}</span>
+              ) : (
+                <span className="shrink-0 text-ink-faint">{settleAsset}</span>
+              )}
+            </>
+          ) : (
+            <span>读取中…</span>
+          )}
+        </div>
       </MetricCard>
 
-      {/* 4 — 持仓 ----------------------------------------------------- */}
-      <MetricCard>
-        <Metric
-          label="持仓"
-          /*
-           * ⚠️ **读不到时显示 `—`，不显示 `0`。** `0` 会被读成"我已经空仓了"，
-           * 而真相可能是"我们没能问到交易所"。
-           */
-          value={liveUnavailable ? '—' : fmtInt(openPositionCount)}
-          size="lg"
-          title={
-            liveUnavailable
-              ? liveUnavailableWhy
-              : '当前持仓数量。仓位状态读不到时显示 —，而不是 0。'
-          }
-          sub={
-            liveUnavailable ? (
-              '仓位状态暂不可读'
-            ) : (
-              <>
-                浮动 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
-              </>
-            )
-          }
-          footer={
-            liveUnavailable ? undefined : (
-              <LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} size={20} />
-            )
-          }
-        />
+      {/* 4 — 持仓 */}
+      <MetricCard
+        title={
+          liveUnavailable
+            ? liveUnavailableWhy
+            : '当前持仓数量与实时有效杠杆。仓位状态读不到时显示 —。'
+        }
+      >
+        <div className="flex items-center justify-between gap-1.5">
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-ink-lo">
+            <Layers aria-hidden className="h-3.5 w-3.5 shrink-0 text-sky-400" />
+            <span className="truncate">当前持仓</span>
+          </span>
+          {!liveUnavailable && (
+            <LeverageArc leverage={effectiveLeverage} max={stats?.maxLeverage ?? 0} size={18} />
+          )}
+        </div>
+
+        <div className="num mt-2 flex items-baseline gap-2">
+          <span className="text-[21px] font-bold leading-tight tracking-tight text-ink-hi 2xl:text-2xl">
+            {liveUnavailable ? '—' : fmtInt(openPositionCount)}
+          </span>
+          {!liveUnavailable && openOrderTotal > 0 && (
+            <span className="text-xs font-medium text-accent">+{fmtInt(openOrderTotal)} 挂单</span>
+          )}
+        </div>
+
+        <div className="num mt-auto flex items-center justify-between gap-2 border-t border-base-800/80 pt-2 text-[11px] text-ink-faint">
+          {liveUnavailable ? (
+            <span className="truncate">仓位状态暂不可读</span>
+          ) : (
+            <>
+              <span className="truncate">
+                浮盈 <span className={pnlColor(unrealized)}>{fmtUsdSigned(unrealized, 2)}</span>
+              </span>
+              <span className="shrink-0 text-ink-lo">
+                有效 {effectiveLeverage.toFixed(1)}x
+              </span>
+            </>
+          )}
+        </div>
       </MetricCard>
 
-      {/* 5 — 胜率 ----------------------------------------------------- */}
-      {/*
-        ⚠️ **空的这一格不再换标签**（原来是「已平仓交易 · 尚无」）。
-        同一个卡位在"还没成交"时叫别的名字，等于让读者去猜"胜率去哪了"；
-        现在标签永远是「胜率」，没有成交时主数字是 `—`、副行说明原因 ——
-        与其余四张卡同一套语法（值 + 一句副行）。
-      */}
-      <MetricCard>
-        <Metric
-          label="胜率"
-          value={stats && stats.totalTrades > 0 ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
-          size="lg"
-          title={
-            stats && stats.totalTrades > 0
-              ? 'winRatePercent 本身就是 0–100 的百分数；盈/亏笔数直接来自后端，不由胜率反推。'
-              : '这个机器人还没有完成过任何一次开仓—平仓回合，所以胜率与盈亏比都没有意义。'
-          }
-          sub={
-            stats && stats.totalTrades > 0
-              ? `PF ${fmtProfitFactor(stats.profitFactor)} · ${fmtInt(stats.totalTrades)} 笔已平仓`
-              : '还没有已平仓成交'
-          }
-          subTitle={
-            stats && stats.totalTrades > 0
-              ? `盈利因子 ${fmtProfitFactor(stats.profitFactor)} · ${fmtInt(stats.totalTrades)} 笔已平仓（${fmtInt(wins)} 盈 / ${fmtInt(losses)} 亏）`
-              : '完成第一个回合后这里会显示胜率与盈亏比'
-          }
-          /* 图形放 `footer`：`sub` 是单行且会截断的，塞进去会把柱状条压扁并裁掉。 */
-          footer={
-            stats && stats.totalTrades > 0 ? <WinLossBar wins={wins} losses={losses} /> : undefined
-          }
-        />
+      {/* 5 — 胜率 */}
+      <MetricCard
+        title={
+          stats && stats.totalTrades > 0
+            ? `盈利因子 ${fmtProfitFactor(stats.profitFactor)} · ${fmtInt(stats.totalTrades)} 笔已平仓（${fmtInt(wins)} 盈 / ${fmtInt(losses)} 亏）`
+            : '完成第一个开仓—平仓回合后这里会显示胜率与盈亏比。'
+        }
+      >
+        <div className="flex items-center justify-between gap-1.5">
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-ink-lo">
+            <Target aria-hidden className="h-3.5 w-3.5 shrink-0 text-violet-400" />
+            <span className="truncate">胜率</span>
+          </span>
+          {stats && stats.totalTrades > 0 && (
+            <span className="num shrink-0 rounded bg-base-850 px-1.5 py-px text-[10px] font-medium text-ink-lo">
+              PF {fmtProfitFactor(stats.profitFactor)}
+            </span>
+          )}
+        </div>
+
+        <div className="num mt-2 truncate text-[21px] font-bold leading-tight tracking-tight text-ink-hi 2xl:text-2xl">
+          {stats && stats.totalTrades > 0 ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
+        </div>
+
+        <div className="mt-auto border-t border-base-800/80 pt-1.5">
+          {stats && stats.totalTrades > 0 ? (
+            <WinLossBar wins={wins} losses={losses} />
+          ) : (
+            <div className="flex items-center justify-between pt-0.5 text-[11px] text-ink-faint">
+              <span>暂无已平仓回合</span>
+              <span className="num">0 笔</span>
+            </div>
+          )}
+        </div>
       </MetricCard>
     </div>
   );
@@ -2096,7 +2119,7 @@ export function TraderPage() {
             */}
             {status === 'running' || status === 'safe_mode' ? (
               <Button variant="danger" busy={busy} onClick={() => setStopConfirmOpen(true)}>
-                <Square aria-hidden className="h-3.5 w-3.5" />
+                <CircleStop aria-hidden className="h-3.5 w-3.5" />
                 停止
               </Button>
             ) : status === 'starting' ? (
@@ -2362,14 +2385,16 @@ export function TraderPage() {
                   range={range}
                   baseline={trader.initialEquity}
                   height={equityChartHeight}
-                  /*
-                   * ⚠️ **口径按模式选**（2026-10-15）——
-                   * 实盘画账户口径（与「账户余额」指标卡对上）；
-                   * 模拟盘画归属口径（它的成交不改变真实钱包，
-                   * 账户口径恒为一个值 → 必然平线，用户实测报过）。
-                   * 见 `curveMetric` 那段说明。
-                   */
                   metric={curveMetric}
+                  liveEquity={
+                    running
+                      ? curveMetric === 'attributed'
+                        ? calibratedEquity
+                        : (liveAccountEquityForCurve ?? account?.equity)
+                      : undefined
+                  }
+                  liveUnrealizedPnl={running ? unrealized : undefined}
+                  liveOpenPositions={running ? openPositionCount : undefined}
                 />
               </div>
             )
@@ -2480,7 +2505,7 @@ export function TraderPage() {
         它现在会吸收表格省下的空间）。两者真正的差别是**死空白归谁** ——
         而用户的判定是"底部不该有空白"，所以取 `flex-none`。
       */}
-      <div className="min-h-0 max-h-[30vh] flex-none space-y-4 overflow-y-auto">
+      <div className="min-h-0 flex-none">
         <TraderTables
           traderId={traderId}
           tab={tableTab}
@@ -2608,17 +2633,14 @@ export function TraderPage() {
  * 而**错的那条正好在真正的组件旁边** —— 下一个读代码的人会照着它去加 `items-start`，
  * 于是把一组本该成块的 KPI 拆成高低不齐的四块。所以这里改成陈述事实。
  */
-function MetricCard({ children }: { children: ReactNode }) {
-  /*
-   * `h-full` 是**必须**的，不是装饰：grid 子项默认 `stretch` 只让外层 div 等高，
-   * 里面的 `Metric` 想用 `mt-auto` 把 footer 推到底，就得让高度真的传下去。
-   *
-   * 内边距 12px（`px-3 py-3`）：ui-spec §2 规定卡片内边距 12px、圆角 8px ——
-   * 原来这里是 `px-3.5 py-2`（14/8）—— 与页面其它卡片不一致，一眼就看出
-   * 不是一套。这一页在 722 高的窗口下主栏只有三百来像素，所以不再往上加。
-   */
+function MetricCard({ children, title }: { children: ReactNode; title?: string }) {
   return (
-    <div className="h-full min-w-0 rounded-lg border border-base-750 bg-base-900 px-3 py-3">{children}</div>
+    <div
+      title={title}
+      className="flex h-full min-w-0 flex-col rounded-xl border border-base-700/90 bg-base-900 px-3.5 py-3 transition-colors hover:border-base-600"
+    >
+      {children}
+    </div>
   );
 }
 

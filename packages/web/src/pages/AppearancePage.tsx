@@ -1,18 +1,8 @@
 /**
- * 外观：模板 · 主题 · 界面密度。
- *
- * 三项**正交**的设置：模板决定骨架（导航/工具栏），主题是深/浅，密度只改表格行高。
- * 切换全部即时生效、不刷新页面（只写 `<html>` 上的根类名与 localStorage）。
- *
- * 2026-11-10 UI 重设计：
- * - 三块共用一个 `OptionCard` 排版（图标 + 标题 + 一行说明 + 选中勾）；
- * - 内置模板只有一套时**整块不渲染**（「多余」）；只有第三方模板注册进来才出现；
- * - 删掉三处页脚技术说明（`aq.skin` / 本地存储 / 内联脚本这类实现细节），
- *   页面上只留用户需要判断的那一句；实现细节进代码注释；
- * - 密度预览保留：它是唯一能当场验证"改了什么"的东西。
+ * 外观：主题与界面密度并排呈现在同一行，下方紧跟实时表格预览。
  */
 import { useState, type ReactNode } from 'react';
-import { Check, Moon, Sun } from 'lucide-react';
+import { AlignJustify, Check, Moon, Rows2, Rows3, Sun } from 'lucide-react';
 import { useDocumentTitle } from '../lib/hooks';
 import { SectionHeading } from '../components/Badges';
 import { PageShell, SectionLabel } from '../components/shell';
@@ -33,7 +23,13 @@ import {
   type Skin,
 } from '../templates/lib/appearance';
 
-/** 三个区块共用的选项卡片：尺寸只用 token（rounded-md / px-3 / py-2.5）。 */
+const DENSITY_ICON: Record<Density, ReactNode> = {
+  compact: <AlignJustify aria-hidden className="h-4 w-4" />,
+  normal: <Rows3 aria-hidden className="h-4 w-4" />,
+  cozy: <Rows2 aria-hidden className="h-4 w-4" />,
+};
+
+/** 选项卡片：统一圆角、高度与选中态，适配并排紧凑布局。 */
 function OptionCard({
   active,
   disabled = false,
@@ -59,14 +55,14 @@ function OptionCard({
       disabled={disabled}
       onClick={onClick}
       aria-pressed={active}
-      title={title}
+      title={title ?? hint}
       className={cn(
-        'flex min-w-0 items-center gap-3 rounded-md border px-3 py-2.5 text-left transition',
+        'flex h-full min-w-0 items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition',
         disabled
           ? 'cursor-not-allowed border-base-800 bg-base-900/40 opacity-50'
           : active
-            ? 'border-accent bg-accent-soft'
-            : 'border-base-700 bg-base-900 hover:border-base-600',
+            ? 'border-accent bg-accent/10'
+            : 'border-base-700 bg-base-900 hover:border-base-600 hover:bg-base-850/60',
       )}
     >
       {icon && (
@@ -81,7 +77,7 @@ function OptionCard({
       )}
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-base font-semibold text-ink-hi">{label}</span>
+          <span className="truncate text-sm font-semibold text-ink-hi">{label}</span>
           {active && <Check aria-hidden className="h-3.5 w-3.5 shrink-0 text-accent" />}
           {extra}
         </span>
@@ -97,11 +93,6 @@ export function AppearancePage() {
   const templateId = useTemplateStore((s) => s.id);
   const setTemplateId = useTemplateStore((s) => s.setId);
   const activeTemplate = getTemplate(templateId);
-  /*
-   * 全部可用模板（内置 + 运行时注册的第三方）。内置收敛后只剩 quill 一套 ——
-   * 那时**不渲染模板区块**；第三方模板通过 `templates/<目录>/` 自动注册进来，
-   * 出现第二套时这一块才出现（否则就是一个只有一个选项的选择器 = 多余）。
-   */
   const templates = listTemplates();
   const [skin, setSkinState] = useState<Skin>(() => getSkin());
   const [density, setDensityState] = useState<Density>(() => getDensity());
@@ -118,12 +109,12 @@ export function AppearancePage() {
 
   return (
     <PageShell>
-      <SectionHeading title="外观" sub="只影响这台设备的显示，不影响任何交易行为。" />
+      <SectionHeading title="外观" sub="仅作用于当前设备的界面显示，不影响任何交易逻辑。" />
 
       {templates.length > 1 && (
         <section>
           <SectionLabel title="模板" count={templates.length} />
-          <div className="grid grid-cols-1 items-start gap-2 sm:grid-cols-2">
+          <div className="grid grid-cols-1 items-stretch gap-2.5 sm:grid-cols-2">
             {templates.map((option) => {
               const Icon = templateIcon(option.id);
               return (
@@ -148,51 +139,55 @@ export function AppearancePage() {
         </section>
       )}
 
-      <section>
-        <SectionLabel title="主题" />
-        <div className="grid grid-cols-2 items-start gap-2 sm:max-w-md">
-          {SKINS.map((option) => {
-            const supported = isSkinSupported(activeTemplate.supportedSkins, option.id);
-            return (
+      {/* 主题与界面密度合并为同一行，左右分栏对齐 */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+        <section className="lg:col-span-5">
+          <SectionLabel title="主题" className="mb-2.5" />
+          <div className="grid grid-cols-2 gap-2.5">
+            {SKINS.map((option) => {
+              const supported = isSkinSupported(activeTemplate.supportedSkins, option.id);
+              return (
+                <OptionCard
+                  key={option.id}
+                  active={skin === option.id}
+                  disabled={!supported}
+                  onClick={() => pickSkin(option.id)}
+                  title={supported ? option.hint : `「${activeTemplate.label}」模板固定深色，不支持浅色主题`}
+                  icon={
+                    option.id === 'dark' ? (
+                      <Moon aria-hidden className="h-4 w-4" />
+                    ) : (
+                      <Sun aria-hidden className="h-4 w-4" />
+                    )
+                  }
+                  label={option.label}
+                  hint={supported ? option.hint : '该模板固定深色'}
+                />
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="lg:col-span-7">
+          <SectionLabel title="界面密度" className="mb-2.5" />
+          <div className="grid grid-cols-3 gap-2.5">
+            {DENSITIES.map((option) => (
               <OptionCard
                 key={option.id}
-                active={skin === option.id}
-                disabled={!supported}
-                onClick={() => pickSkin(option.id)}
-                title={supported ? undefined : `「${activeTemplate.label}」模板固定深色，不支持浅色主题`}
-                icon={
-                  option.id === 'dark' ? (
-                    <Moon aria-hidden className="h-4 w-4" />
-                  ) : (
-                    <Sun aria-hidden className="h-4 w-4" />
-                  )
-                }
+                active={density === option.id}
+                onClick={() => pickDensity(option.id)}
+                icon={DENSITY_ICON[option.id]}
                 label={option.label}
-                hint={supported ? option.hint : '该模板固定深色'}
+                hint={option.hint}
               />
-            );
-          })}
-        </div>
-      </section>
+            ))}
+          </div>
+        </section>
+      </div>
 
+      {/* 预览用真实的 `.th/.td` 与 `--aq-row-h` */}
       <section>
-        <SectionLabel title="界面密度" />
-        <div className="grid grid-cols-3 items-start gap-2 sm:max-w-xl">
-          {DENSITIES.map((option) => (
-            <OptionCard
-              key={option.id}
-              active={density === option.id}
-              onClick={() => pickDensity(option.id)}
-              label={option.label}
-              hint={option.hint}
-            />
-          ))}
-        </div>
-      </section>
-
-      {/* 预览必须用真实的 `.th/.td` 与 `--aq-row-h`：示意图永远差几个像素，而差的就是要判断的东西。 */}
-      <section>
-        <SectionLabel title="预览" actions={<span className="text-xs text-ink-faint">行高随密度变化，字号不变</span>} />
+        <SectionLabel title="表格密度实时预览" actions={<span className="text-xs text-ink-faint">行高随密度变化，字号保持不变</span>} />
         <Panel padded={false}>
           <table className="data-grid w-full border-collapse">
             <thead>

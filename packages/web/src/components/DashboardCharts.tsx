@@ -9,7 +9,7 @@
  */
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { EquitySnapshot } from '@aq/shared';
-import { fmtInt, fmtNum, fmtTime } from '../lib/format';
+import { fmtDateTime, fmtInt, fmtNum, fmtTime } from '../lib/format';
 import {
   axisTicks,
   equityAxisFormatter,
@@ -107,7 +107,7 @@ function EquityTooltip({
       style={{ backgroundColor: ink.surface }}
     >
       <div className="num mb-1 text-xs text-ink-faint">
-        {new Date(point.t).toLocaleString('en-GB', { hour12: false })}
+        {fmtDateTime(new Date(point.t).toISOString())}
       </div>
 
       <div className="flex items-baseline justify-between gap-3">
@@ -222,33 +222,21 @@ export function DashboardEquityChart({
    * "本机器人归属"），因为它回答的是另一个问题。
    */
   metric = 'account',
+  liveEquity,
+  liveUnrealizedPnl,
+  liveOpenPositions,
 }: {
   snapshots: EquitySnapshot[];
   range: EquityRange;
-  /**
-   * 图表高度。
-   *
-   * 收 `string | number` 而不是只有 `number`：机器人详情页要传
-   * `clamp(120px, 22vh, 260px)` —— 那一页的主栏在 722 高的窗口下只剩
-   * 三百来像素，写死的高度会把页面顶出滚动条（见 `TraderPage` 里
-   * `EQUITY_CHART_HEIGHT` 的说明）。recharts 的 `ResponsiveContainer`
-   * 本来就接受字符串，这里只是别把它挡在类型外面。
-   */
   height?: string | number;
   baseline?: number;
   /** Settlement unit for the readout. Defaults to USDT, the only one in practice. */
   asset?: string;
-  /**
-   * 画哪个口径。
-   *
-   * ```
-   *   'account'    —— 共享钱包的真实权益（默认；与「账户余额」指标卡一致）
-   *   'attributed' —— 本机器人归属（只算自己的已平仓净额）
-   * ```
-   * ⚠️ 默认是 `'account'`：**曲线必须能和指标卡对上**，
-   * 否则用户看到两个数就会问"为什么对不上"。
-   */
   metric?: 'account' | 'attributed';
+  /** 实时账户/模拟权益：当运行中仅存少量快照时补一个“当前时刻”实时点，避免长时间停留在“暂无足够快照”。 */
+  liveEquity?: number;
+  liveUnrealizedPnl?: number;
+  liveOpenPositions?: number;
 }) {
   /*
    * ⚠️ hook 必须在"点数不足"那个提前 return **之前**调用 ——
@@ -260,14 +248,6 @@ export function DashboardEquityChart({
   const rawPoints: EquityPoint[] = windowed
     .map((snapshot) => ({
       t: new Date(snapshot.timestamp).getTime(),
-      /*
-       * ⚠️ 按 `metric` 取口径 —— 见 props 里那段说明。
-       *
-       * ⚠️ **`accountEquity` 为 0 时回落到 `equity`**：迁移前的旧行
-       * `account_equity` 是回填的，而完全没有值时它是 `0`
-       *（见 `db/schema.ts` 的 M4 取舍说明）。直接用 0 会把曲线砸到地板，
-       * 而那条曲线**看起来完全正常** —— 只是数字全错。
-       */
       equity:
         metric === 'account'
           ? snapshot.accountEquity > 0
@@ -280,14 +260,29 @@ export function DashboardEquityChart({
     .filter((point) => Number.isFinite(point.t));
 
   /*
-   * ⚠️ **数据不足时也要画出图表**（用户 2026-11-10：「图表默认要显示，不能因为没有
-   * 数据就不显示」）。
-   *
-   * `padEquityPoints` 处理 `ALL`（`rangeSpanMs === Infinity` → 兜底 24h）以及单点仅在左侧
-   * 补更早参考点，保证所有 `t` 有限且严格升序，不出现 `-Infinity`。
+   * 若机器人正在运行且拿到了实时读数，当最新快照已过去 > 60s 时补一个当前时刻点：
+   * 既让曲线自然延伸到「现在」，也避免空仓心跳去重期间误显示「暂无足够快照」。
    */
-  const insufficient = rawPoints.length < 2;
-  const points = insufficient ? padEquityPoints(rawPoints, range, baseline) : rawPoints;
+  const nowMs = Date.now();
+  const lastRaw = rawPoints[rawPoints.length - 1];
+  const withLivePoints: EquityPoint[] =
+    liveEquity !== undefined &&
+    Number.isFinite(liveEquity) &&
+    lastRaw &&
+    nowMs - lastRaw.t > 60_000
+      ? [
+          ...rawPoints,
+          {
+            t: nowMs,
+            equity: liveEquity,
+            unrealizedPnl: liveUnrealizedPnl ?? lastRaw.unrealizedPnl ?? 0,
+            openPositions: liveOpenPositions ?? lastRaw.openPositions ?? 0,
+          },
+        ]
+      : rawPoints;
+
+  const insufficient = withLivePoints.length < 2;
+  const points = insufficient ? padEquityPoints(withLivePoints, range, baseline) : withLivePoints;
 
   const values = points.map((p) => p.equity);
   const min = Math.min(...values);

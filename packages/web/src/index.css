@@ -405,8 +405,11 @@
   }
 
   .select {
-    @apply cursor-pointer appearance-none bg-[length:12px] bg-[right_0.75rem_center] bg-no-repeat pr-9;
+    @apply cursor-pointer appearance-none truncate bg-[length:12px] bg-[right_0.75rem_center] bg-no-repeat pr-9;
     background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%2376839a' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+  }
+  .select::picker-icon {
+    display: none;
   }
 
   /*

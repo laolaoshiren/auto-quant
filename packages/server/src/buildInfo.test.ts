@@ -264,7 +264,7 @@ test('GitHub 落后于线上（本地有提交没推）→ ahead', async () => {
   );
 });
 
-test('线上那个提交在远端找不到（改完没推就部署）→ unknown，不猜方向', async () => {
+test('线上那个提交在远端找不到（改完没推就部署）→ 缺时间时 unknown；提交时间明确新于远端时判定 ahead', async () => {
   resetBuildInfoCache();
   await withFetch(
     (url) => {
@@ -275,6 +275,24 @@ test('线上那个提交在远端找不到（改完没推就部署）→ unknown
       const result = await checkForUpdates(info());
       assert.equal(result.state, 'unknown');
       assert.match(result.message, /推送|找不到/);
+    },
+  );
+
+  resetBuildInfoCache();
+  await withFetch(
+    (url) => {
+      if (url.includes('/compare/')) return { status: 404, body: {} };
+      return {
+        body: {
+          sha: 'c'.repeat(40),
+          commit: { message: 'old release', committer: { date: '2026-09-19T00:00:00Z' } },
+        },
+      };
+    },
+    async () => {
+      const result = await checkForUpdates(info({ committedAt: '2026-09-20T00:00:00Z' }));
+      assert.equal(result.state, 'ahead');
+      assert.match(result.message, /尚未推送|领先/);
     },
   );
 });

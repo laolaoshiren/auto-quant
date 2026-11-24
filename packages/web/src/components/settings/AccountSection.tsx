@@ -1,97 +1,57 @@
 /**
- * 操作员账户。
+ * 操作员账户 —— 安全设置与服务端状态总览。
  *
- * 这一页是**安全设置**，不是资料页：系统没有注册入口，账号在服务首次启动时
- * 自动创建，之后只能在这里改。版面按 `LAYOUT.md` §1 分成两半：
- *
- *   左指标栏（只读状态）：当前身份 / 角色 / 账户创建时间 / 服务端版本 / 数据库 / 运行环境。
- *     这些数字回答的是"我现在改的是哪个账号、跑在什么环境里" —— 它们是**状态**，
- *     改密码时不需要动它们，所以不该和表单抢同一列。
- *   主内容区：凭据变更表单（用户名 / 当前密码 / 新密码）。
- *
- * **供应商目录已删除**：那是一张"这个版本支持哪些模型厂商"的静态清单，与
- * "改我的账号凭据"没有任何关系，而它占了整页最下方一大块。要看供应商清单去
- * 「AI 模型」页 —— 那里每一行都是**你实际配置过的**模型，比一张通用目录有用。
- * （见 `git log` 里 `fix(ui): 账号页删掉与它无关的供应商目录`。）
- *
- * `PATCH /api/auth/account` 要求**当前密码**，这是有意为之：能碰到这台浏览器的人
- * 不应该因此就能永久接管账户。这一道校验在前端不做任何"放宽" ——
- * 契约保持原样：`currentPassword` 必填，`username` 与 `newPassword`（≥8）可选，
- * 服务端重新签发令牌后本地必须换掉那一份（否则后续请求带的还是旧身份）。
+ * 2026-11-25 UI/UX 重构：
+ * - 顶部紧凑身份横幅（头像、用户名、角色、创建时间、运行环境一目了然）；
+ * - 下方 12 列均衡两栏：左 7 列「凭据安全」表单（当前密码验证 + 变更项分区）、
+ *   右 5 列「服务端与版本」状态卡（清晰徽章 + 提交说明 + GitHub 同步态），一屏舒适呈现。
  */
-import { useState } from 'react';
-import { Save } from 'lucide-react';
+import { useState, type ReactNode } from 'react';
+import {
+  CheckCircle2,
+  Clock,
+  Database,
+  GitBranch,
+  KeyRound,
+  Lock,
+  Save,
+  Server,
+  ShieldCheck,
+  UserCheck,
+} from 'lucide-react';
 import { userRoleLabel } from '@aq/shared';
 import { api, setToken } from '../../lib/api';
 import { useApp } from '../../lib/store';
 import { usePolled } from '../../lib/hooks';
-import { Button, ErrorNote, Field, Panel, TextInput } from '../ui';
-import { PageShell, SectionLabel } from '../shell';
+import { Badge, Button, Dot, ErrorNote, Field, Panel, TextInput, Tooltip, cn } from '../ui';
 import { fmtDateTime, tradingEnvironmentLabel } from '../../lib/format';
 
-/**
- * 只读的「键 — 值」一行。
- *
- * ## 为什么这一页不用 `Metric` 卡
- *
- * 这一页原来在伴随栏里塞了两组 `MetricGroup`（身份 3 项 + 运行环境 1 项 +
- * 版本与部署 3 项 + 运行时 2 项），每项都是一张 60px 高的卡：9 项 ≈ 540px。
- * 而这一页**总共只有 4 个输入框**，却要滚动 262px 才能看到底 ——
- * 用户的原话是「这个页面重新设计好，别出现滚动翻页，本身就没几个显示的东西」。
- *
- * `Metric` 那套排版是给**盯盘用的读数**设计的（大号数字、副行、贴底对齐），
- * 而这里的值全是"我是谁 / 跑在什么版本上"这类**静态事实**，一眼扫过去就够，
- * 不需要 2xl 的字号也不需要等高的卡片。换成一行 20px 的键值对之后，
- * 同样的 9 项只占 180px 左右，整页因此能收进一屏。
- *
- * 值一律 `break-all` 且带 `title`：版本号、提交哈希这类长串在窄栏里会被
- * 截断，而截掉的部分必须能从悬停读到（见 `Metric.subTitle` 那段说明）。
- */
-function FactRow({
+function StatusRow({
+  icon,
   label,
   value,
   sub,
-  tone,
 }: {
+  icon: ReactNode;
   label: string;
-  value: string;
+  value: ReactNode;
   sub?: string;
-  tone?: 'warn' | 'up';
 }) {
-  const toneClass = tone === 'warn' ? 'text-warn' : tone === 'up' ? 'text-up' : 'text-ink-hi';
   return (
-    /*
-     * `py-0.5` 而不是 `py-1`：一行 25px，正好对上设计规范里"紧凑密度"的
-     * 表格行高（`--aq-row-h` 24px）。这一页有 9 行，每行省 4px 就是 36px ——
-     * 那 36px 正好是"一屏放得下"与"要多滚一下"的分界（实测 1405x722 下
-     * 差 10px）。行高再小就该看不清了，所以这里不再往下压。
-     */
-    <div className="flex items-baseline gap-2 border-b border-base-800 py-0.5 last:border-b-0">
-      <span className="shrink-0 text-xs text-ink-faint">{label}</span>
-      <span className="min-w-0 flex-1" />
-      <span className={`num min-w-0 break-all text-right text-base ${toneClass}`} title={sub ?? value}>
-        {value}
+    <div className="flex items-start justify-between gap-3 border-b border-base-800/80 py-2.5 last:border-b-0">
+      <span className="flex shrink-0 items-center gap-2 text-xs text-ink-lo">
+        <span className="text-ink-faint">{icon}</span>
+        {label}
       </span>
+      <div className="min-w-0 text-right">
+        <div className="text-sm font-medium text-ink-hi">{value}</div>
+        {sub && (
+          <div className="mt-0.5 truncate text-xs text-ink-faint" title={sub}>
+            {sub}
+          </div>
+        )}
+      </div>
     </div>
-  );
-}
-
-/**
- * 一组 `FactRow`，带小标题。
- *
- * 标题用 `MetricGroup` 同一套排版（`text-xs` + 大写字距 + `ink-faint`），
- * 让"身份 / 运行环境 / 版本与部署 / 运行时"四组在视觉上仍然分得开 ——
- * 换成键值行省掉的是**卡片的体积**，不是分组本身。
- *
- * 组之间一条 `border-t`：两行数值挨着时，没有它读者会以为
- * 「账户创建时间」下面那行还是身份信息。
- */
-function FactGroup({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="border-t border-base-800 pt-1.5 first:border-t-0 first:pt-0">
-      <h3 className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-faint">{title}</h3>
-      {children}
-    </section>
   );
 }
 
@@ -109,58 +69,32 @@ export function AccountSection() {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
-  /*
-   * 部署版本，以及"线上是不是最新的"。
-   *
-   * 版本比对**单独加载**，因为服务端要为它出网（打 GitHub，8 秒超时）——
-   * 塞进 `/api/system` 会让整页的加载被一个有则更好、没有也无妨的诊断拖住。
-   * 不带 interval：打开这一页查一次就够，服务端自己缓存 10 分钟。
-   */
   const build = system?.build ?? null;
   const update = usePolled((signal) => api.updateCheck(signal), { intervalMs: 0 });
-
-  /*
-   * ⚠️ **产品版本的权威来源是 GitHub 上的最新 release，不是 `package.json`**
-   *（2026-10-15 用户报的 BUG）。
-   *
-   * 原来这一格读 `system.version` / `health.version`，两者都来自 `package.json`
-   * 的 `version` —— 而那个字段**从 `0.1.0` 起就没再更新过**（发版走的是
-   * release-drafter 从提交推导 tag）。实测界面上写 `0.1.0`，
-   * 而 GitHub 上最新发布已经是 **`v0.1.32`** —— 差了 32 个版本。
-   *
-   * 取不到（没发过 release / 网络不通）时回落到本地那个值，并且**说明它是本地的** ——
-   * 不假装它是远端版本。
-   */
   const latestRelease = update.data?.latestRelease ?? null;
+  const productVersion = latestRelease ?? (system?.version ? `v${system.version.replace(/^v/i, '')}` : health?.version ?? '—');
 
-  const updateLabel = update.error
-    ? '检查失败'
-    : update.loading
-      ? '检查中…'
-      : update.data?.state === 'up-to-date'
-        ? '一致'
-        : update.data?.state === 'behind'
-          ? `落后${update.data.behindBy === null ? '' : ` ${update.data.behindBy} 个提交`}`
-          : update.data?.state === 'ahead'
-            ? '领先（未推送）'
-            : update.data?.state === 'diverged'
-              ? '已分叉'
-              : '未知';
-  const updateTone: 'default' | 'up' | 'warn' = update.error
-    ? 'warn'
-    : update.data?.state === 'up-to-date'
-      ? 'up'
-      : update.data?.state === 'behind' ||
-          update.data?.state === 'ahead' ||
-          update.data?.state === 'diverged'
-        ? 'warn'
-        : 'default';
+  const syncBadge = (() => {
+    if (update.error) return { tone: 'warn' as const, label: '检查失败', tip: update.error };
+    if (update.loading) return { tone: 'muted' as const, label: '检查中…', tip: '正在与 GitHub 比对当前提交' };
+    const state = update.data?.state;
+    const tip = update.data?.message ?? undefined;
+    if (state === 'up-to-date') return { tone: 'up' as const, label: '已同步', tip };
+    if (state === 'ahead') return { tone: 'accent' as const, label: '领先（未推送）', tip };
+    if (state === 'behind') {
+      const n = update.data?.behindBy;
+      return { tone: 'warn' as const, label: n !== null && n !== undefined ? `落后 ${n} 个提交` : '落后 GitHub', tip };
+    }
+    if (state === 'diverged') return { tone: 'down' as const, label: '已分叉', tip };
+    return { tone: 'muted' as const, label: '暂无法比对', tip };
+  })();
 
   const reset = () => {
     setNewUsername('');
     setCurrentPassword('');
     setNewPassword('');
     setConfirm('');
+    setError(null);
   };
 
   const submit = async () => {
@@ -171,8 +105,6 @@ export function AccountSection() {
     const wantsUsername = username.length > 0 && username !== user?.username;
     const wantsPassword = newPassword.length > 0;
 
-    // 前端先拦一道，避免为明显的输入问题跑一趟网络；
-    // 真正的校验在服务端，这里只是省一次往返。
     if (!wantsUsername && !wantsPassword) {
       return setError('没有需要修改的内容 —— 请填写新用户名或新密码。');
     }
@@ -193,9 +125,6 @@ export function AccountSection() {
         ...(wantsUsername ? { username } : {}),
         ...(wantsPassword ? { newPassword } : {}),
       });
-
-      // 用户名变了，服务端会重新签发令牌 —— 必须换掉本地那份，
-      // 否则后续请求带的还是旧身份。
       setToken(result.token);
       await bootstrap();
 
@@ -203,7 +132,6 @@ export function AccountSection() {
       if (wantsUsername) parts.push('用户名');
       if (wantsPassword) parts.push('密码');
       setDone(`${parts.join('与')}已更新。`);
-
       reset();
     } catch (err) {
       setError((err as Error).message);
@@ -212,238 +140,229 @@ export function AccountSection() {
     }
   };
 
-  /* ------------------------------------------------------------------------ */
-  /*  伴随栏：只读状态与部署信息                                              */
-  /* ------------------------------------------------------------------------ */
-  /*
-   * ## 为什么状态回到伴随栏，而不是"横排占整宽"
-   *
-   * 这块指标**曾经**就在伴随栏里被截断过：`MetricGroup` 的列数是按**视口**
-   * 断点算的（不看容器宽度），伴随栏只占视口的 40%，`columns={4}` 却照样排
-   * 四列 —— 每列约 150px，而 `Metric` 的数值带 `truncate`：`main @ 222ae15`、
-   * `2026-09-20 03:33`、`autoquant.sqlite` 全被静默切掉。
-   *
-   * 当时的修法是"横排占整宽"。宽度是够了，但页面变成了**两张互不相干的表**：
-   * 上面一条占满整宽的大字指标带，下面左边一个表单、右边一段说明，中间大片空白。
-   *
-   * 现在回到伴随栏，但换一条思路解决截断：**列数跟着栏宽显式降下来**。
-   * 这一栏里所有指标都用 `columns={1}`（一行一个），于是长值天然放得下 ——
-   * 不再依赖"整宽"这件事，也就不需要占满整宽。
-   *
-   * ⚠️ **不要给这里的任何一组改回 3/4 列**：那是把同一次静默截断再犯一次。
-   *
-   * ## ⚠️ 2026-10-13：这里从 `Metric` 卡换成了 `FactRow`
-   *
-   * 用户的原话：「这个页面重新设计好，别出现滚动翻页，本身就没几个显示的东西」。
-   *
-   * 实测（1405x722）：页面总高 **776px**、视口只有 **542px**，溢出 **262px**。
-   * 高度全花在两处，而它们都不是用户来这一页要做的事：
-   *
-   *   · 右栏两张卡 9 项 `Metric`：356 + 350 = **706px**；
-   *   · 左栏表单 4 个输入框：410px。
-   *
-   * `Metric` 那套排版是给**盯盘读数**用的（2xl 数字、副行贴底、等高卡片），
-   * 而这里 9 项全是"我是谁 / 跑在什么版本上"的静态事实 —— 一眼扫过就够。
-   * 换成 20px 一行的 `FactRow` 之后，同样 9 项只占 180px 上下，
-   * 页面从 776px 收到 542px 以内，**一屏放得下**。
-   *
-   * 分组没有丢：`FactGroup` 仍然给每组一个小标题和上下分隔线，
-   * 读者依然知道"身份 / 运行环境 / 版本与部署 / 运行时"是四组不同的东西。
-   */
-  const rail = (
-    <div className="space-y-3">
-      <Panel title="当前账户" bodyClassName="px-4 py-2">
-        <FactGroup title="身份">
-          <FactRow label="用户名" value={user?.username ?? '—'} />
-          <FactRow label="角色" value={user?.role ? userRoleLabel(user.role) : '—'} sub={user?.role ?? undefined} />
-          <FactRow label="账户创建时间" value={fmtDateTime(user?.createdAt)} />
-        </FactGroup>
+  const envLabel =
+    system?.environmentLabel ??
+    (system?.environment ? tradingEnvironmentLabel(system.environment) : undefined);
 
-        <FactGroup title="运行环境">
-          {/*
-            ⚠️ **兜底那一支也要翻译**（2026-10-17，t52 的 B2）。
-
-            这一格的 `sub` 有两个来源：`environmentLabel`（交易所端点名，中文）
-            与 `environment`（机器码）。老服务端不给前者时，第二个来源就直接
-            渲染成 `production` / `demo` —— 一个兜底路径上的露码，
-            而它恰好出现在一次**跨版本升级**之后（最容易让人困惑的时刻）。
-
-            改成过 `tradingEnvironmentLabel`：与「数据与日志」页、登录页同一套词。
-          */}
-          <FactRow
-            label="模式"
-            value={system?.dryRun ? '模拟' : '实盘'}
-            sub={
-              system?.environmentLabel ??
-              (system?.environment ? tradingEnvironmentLabel(system.environment) : undefined)
-            }
-            tone={system?.dryRun ? undefined : 'warn'}
-          />
-        </FactGroup>
-      </Panel>
-
-      <Panel title="服务端" bodyClassName="px-4 py-2">
-        <FactGroup title="版本与部署">
-          <FactRow
-            label="服务端版本"
-            value={build ? `${build.branch} @ ${build.commitShort}` : '未知'}
-            sub={build?.subject || (build ? undefined : '本次部署没有写出版本信息')}
-            tone={build?.dirty ? 'warn' : undefined}
-          />
-          <FactRow label="部署时间" value={build?.deployedAt ? fmtDateTime(build.deployedAt) : '—'} />
-          <FactRow
-            label="与 GitHub"
-            value={updateLabel}
-            sub={update.error ?? update.data?.message}
-            tone={updateTone === 'up' ? 'up' : updateTone === 'warn' ? 'warn' : undefined}
-          />
-        </FactGroup>
-
-        <FactGroup title="运行时">
-          <FactRow
-            label="产品版本"
-            value={latestRelease ?? system?.version ?? health?.version ?? '—'}
-            sub={
-              latestRelease !== null
-                ? 'GitHub 上最新发布的版本'
-                : '本地 package.json 的版本 —— GitHub 上的发布没取到'
-            }
-          />
-          <FactRow label="数据库" value={health?.db ?? '—'} />
-        </FactGroup>
-      </Panel>
-    </div>
-  );
-
-  /*
-   * 账户说明 = 表单的注脚。
-   *
-   * 它原来在右栏里、和「服务端」那些指标叠在一起，而左栏的表单比它高一截 ——
-   * 两栏底部对不齐，右下角空出半屏。这一段只说三件事（没有注册入口、忘记密码
-   * 只能去服务器、打包不干净时线上代码无法解释），而**读它的人正在做"改密码"
-   * 这件事**，所以它跟着表单走，落在表单下面。
-   */
-  const notes = (
-    <p className="px-1 text-xs leading-relaxed text-ink-faint">
-      本系统面向单人部署：管理员账号在服务首次启动时自动创建，<strong className="text-ink-lo">不提供注册与找回密码</strong>
-      ；忘记凭据只能到服务器上重置数据库记录。
-      {build?.dirty && (
-        <span className="mt-1 block text-warn">
-          ⚠ 打包时工作区有未提交改动 —— 线上代码不等于 {build.commitShort}，其行为无法用仓库里任何一版解释。
-        </span>
-      )}
-    </p>
-  );
-
-  /*
-   * 版面：伴随栏放**只读的**（我是谁、跑在什么版本上），主区放**唯一的动作**
-   * （改凭据）—— 与「交易所」页同一套结构，两屏之间不用重新学怎么读。
-   *
-   * `fillHeight={false}`：这一页内容少，撑满视口只会在最下面空出半屏纯黑。
-   * 表单也不再自己限宽（原来 `max-w-xl` + 外层再套列宽，结果左边空出四百多
-   * 像素）：它现在只占主内容列，输入框横跨这一列正是该有的宽度。
-   *
-   * ## 四个输入框改成 2x2 栅格（2026-10-13）
-   *
-   * 原来是单列 `space-y-3`：4 个字段各占一整行（标签 17 + 输入 38 + 说明 16
-   * + 间距 12 ≈ 83px），合计 **410px** —— 这一栏里最贵的一块，而它只装了
-   * 四个输入框。用户要的是"别出现滚动翻页，本身就没几个显示的东西"。
-   *
-   * 换成 `sm:grid-cols-2` 之后同样的字段只占两行（约 242px），省下 168px。
-   * 语义上也更顺：**新用户名 / 当前密码** 是第一行（"改成什么" + "凭什么"），
-   * **新密码 / 确认新密码** 是第二行（一对必须一致的字段并排，比对更直观）。
-   *
-   * 窄屏（`< sm`）仍然退回单列 —— 320px 宽的屏幕上两个密码框并排会各剩
-   * 不到 140px，输入的圆点根本看不清。
-   */
   return (
-    <PageShell aside={rail} fillHeight={false}>
-      <section className="min-w-0">
-        <SectionLabel title="修改用户名与密码" />
-        <Panel>
+    <div className="space-y-4">
+      {/* 顶部身份概览带 */}
+      <div className="flex flex-wrap items-center gap-4 rounded-xl border border-base-700 bg-base-900 px-5 py-4">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-accent/30 bg-accent/12 text-lg font-bold text-accent">
+          {(user?.username ?? '?').slice(0, 1).toUpperCase()}
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="truncate text-lg font-semibold text-ink-strong">{user?.username ?? '—'}</span>
+            <Badge tone="accent">{user?.role ? userRoleLabel(user.role) : '未知角色'}</Badge>
+            <Badge tone={system?.dryRun ? 'accent' : 'warn'} title={envLabel}>
+              <Dot tone={system?.dryRun ? 'accent' : 'warn'} />
+              {system?.dryRun ? '模拟环境' : '实盘环境'}
+            </Badge>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
+            <span className="inline-flex items-center gap-1">
+              <UserCheck aria-hidden className="h-3.5 w-3.5 text-ink-faint" />
+              创建于 <span className="num text-ink-mid">{fmtDateTime(user?.createdAt)}</span>
+            </span>
+            {envLabel && (
+              <span className="truncate text-ink-faint" title={envLabel}>
+                {envLabel}
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Badge tone="neutral" className="px-2.5 py-1 text-xs">
+            <ShieldCheck aria-hidden className="h-3.5 w-3.5 text-up" />
+            单人私有部署
+          </Badge>
+        </div>
+      </div>
+
+      {/* 主体两栏：左安全凭据修改 · 右服务端运行时 */}
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-12">
+        <Panel
+          className="lg:col-span-7"
+          title={
+            <span className="inline-flex items-center gap-2">
+              <KeyRound aria-hidden className="h-4 w-4 text-accent" />
+              登录凭据管理
+            </span>
+          }
+          bodyClassName="p-5"
+        >
           <form
-            className="space-y-3"
+            className="space-y-4"
             onSubmit={(event) => {
               event.preventDefault();
               void submit();
             }}
             onKeyDown={(event) => {
-              // Esc 清空表单：和对话框里的取消保持一致，别让半填的密码留在屏幕上
               if (event.key === 'Escape') reset();
             }}
           >
-            <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
-              <Field label="新用户名" hint="留空则不修改。">
-                <TextInput
-                  value={newUsername}
-                  onChange={(event) => setNewUsername(event.target.value)}
-                  autoComplete="username"
-                  placeholder={user?.username ? `留空则保持 ${user.username}` : '留空则不修改'}
-                />
-              </Field>
-
-              <Field
-                label="当前密码"
-                hint="修改任何一项都必须验证当前密码 —— 服务端会拒绝没有它的请求。"
-              >
+            {/* 第一步：身份验证 */}
+            <div className="rounded-lg border border-base-750 bg-base-850/40 p-3.5">
+              <div className="mb-2.5 flex items-center gap-1.5 text-xs font-semibold text-ink-mid">
+                <Lock aria-hidden className="h-3.5 w-3.5 text-accent" />
+                安全验证（必填）
+              </div>
+              <Field label="当前密码" hint="提交任意修改前必须验证当前密码，修改后会自动签发新会话令牌。">
                 <TextInput
                   type="password"
                   value={currentPassword}
                   onChange={(event) => setCurrentPassword(event.target.value)}
                   autoComplete="current-password"
-                  placeholder="修改任何一项都需要验证"
+                  placeholder="请输入当前登录密码"
+                />
+              </Field>
+            </div>
+
+            {/* 第二步：变更内容 */}
+            <div className="space-y-3">
+              <Field label="新用户名（可选）" hint="留空保持当前用户名不变。">
+                <TextInput
+                  value={newUsername}
+                  onChange={(event) => setNewUsername(event.target.value)}
+                  autoComplete="username"
+                  placeholder={user?.username ? `当前：${user.username}` : '留空则不修改'}
                 />
               </Field>
 
-              <Field label="新密码" hint="留空则不修改，至少 8 个字符。">
-                <TextInput
-                  type="password"
-                  value={newPassword}
-                  onChange={(event) => setNewPassword(event.target.value)}
-                  autoComplete="new-password"
-                  placeholder="留空则不修改"
-                />
-              </Field>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label="新密码（可选）" hint="至少 8 位字符，留空不修改。">
+                  <TextInput
+                    type="password"
+                    value={newPassword}
+                    onChange={(event) => setNewPassword(event.target.value)}
+                    autoComplete="new-password"
+                    placeholder="输入新密码"
+                  />
+                </Field>
 
-              <Field label="确认新密码" hint="与新密码完全一致。">
-                <TextInput
-                  type="password"
-                  value={confirm}
-                  onChange={(event) => setConfirm(event.target.value)}
-                  autoComplete="new-password"
-                  placeholder="与新密码一致"
-                />
-              </Field>
+                <Field
+                  label="确认新密码"
+                  hint={
+                    confirm && newPassword && confirm !== newPassword
+                      ? undefined
+                      : '再次输入新密码以确认。'
+                  }
+                  error={confirm && newPassword && confirm !== newPassword ? '两次输入的新密码不一致' : null}
+                >
+                  <TextInput
+                    type="password"
+                    value={confirm}
+                    onChange={(event) => setConfirm(event.target.value)}
+                    autoComplete="new-password"
+                    placeholder="再次输入新密码"
+                  />
+                </Field>
+              </div>
             </div>
 
             {error && <ErrorNote>{error}</ErrorNote>}
             {done && (
               <div
                 role="status"
-                className="flex items-start gap-2 rounded-md border border-up/40 bg-up/10 px-3 py-2 text-base text-up"
+                className="flex items-center gap-2 rounded-lg border border-up/40 bg-up/10 px-3.5 py-2.5 text-sm text-up"
               >
-                <span aria-hidden>✓</span>
+                <CheckCircle2 aria-hidden className="h-4 w-4 shrink-0" />
                 <span className="min-w-0">
                   {done}
-                  {done.includes('用户名') && ' 服务端已重新签发令牌，当前会话继续有效。'}
+                  {done.includes('用户名') && ' 已自动续签当前登录会话。'}
                 </span>
               </div>
             )}
 
-            <div className="flex flex-wrap items-center gap-2">
-              <Button type="submit" variant="primary" busy={busy}>
-                <Save aria-hidden className="h-3.5 w-3.5" />
-                保存修改
-              </Button>
-              <Button type="button" onClick={reset} disabled={busy}>
-                清空
-              </Button>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-base-800 pt-3.5">
+              <p className="text-xs text-ink-faint">
+                不提供注册与自助找回；忘记密码请在服务器执行重置脚本。
+              </p>
+              <div className="flex items-center gap-2">
+                <Button type="button" onClick={reset} disabled={busy}>
+                  重置
+                </Button>
+                <Button type="submit" variant="primary" busy={busy}>
+                  <Save aria-hidden className="h-3.5 w-3.5" />
+                  保存修改
+                </Button>
+              </div>
             </div>
           </form>
         </Panel>
-      </section>
 
-      {notes}
-    </PageShell>
+        <Panel
+          className="lg:col-span-5"
+          title={
+            <span className="inline-flex items-center gap-2">
+              <Server aria-hidden className="h-4 w-4 text-ink-lo" />
+              服务端与版本信息
+            </span>
+          }
+          bodyClassName="px-5 py-2.5"
+        >
+          <StatusRow
+            icon={<ShieldCheck aria-hidden className="h-3.5 w-3.5" />}
+            label="产品版本"
+            value={
+              <Badge tone="accent" className="num">
+                {productVersion}
+              </Badge>
+            }
+            sub={latestRelease ? '来自 GitHub 最新发行版' : '来自本地 package.json'}
+          />
+
+          <StatusRow
+            icon={<GitBranch aria-hidden className="h-3.5 w-3.5" />}
+            label="服务端提交"
+            value={
+              <span className={cn('num', build?.dirty ? 'text-warn' : 'text-ink-hi')}>
+                {build ? `${build.branch} @ ${build.commitShort}${build.dirty ? '*' : ''}` : '未知'}
+              </span>
+            }
+            sub={build?.subject || (build ? undefined : '本次部署未包含版本元数据')}
+          />
+
+          <StatusRow
+            icon={<CheckCircle2 aria-hidden className="h-3.5 w-3.5" />}
+            label="GitHub 同步"
+            value={
+              <Tooltip side="left" content={syncBadge.tip}>
+                <Badge tone={syncBadge.tone} className="cursor-help">
+                  <Dot tone={syncBadge.tone} />
+                  {syncBadge.label}
+                </Badge>
+              </Tooltip>
+            }
+            sub={
+              update.data?.latestCommitShort
+                ? `远端最新 ${update.data.latestCommitShort}`
+                : update.data?.message
+            }
+          />
+
+          <StatusRow
+            icon={<Clock aria-hidden className="h-3.5 w-3.5" />}
+            label="部署时间"
+            value={<span className="num">{build?.deployedAt ? fmtDateTime(build.deployedAt) : '—'}</span>}
+          />
+
+          <StatusRow
+            icon={<Database aria-hidden className="h-3.5 w-3.5" />}
+            label="本地数据库"
+            value={<span className="num text-ink-mid">{health?.db ?? '—'}</span>}
+          />
+
+          {build?.dirty && (
+            <div className="my-2 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
+              打包时工作区存在未提交改动，线上代码可能与 {build.commitShort} 不完全一致。
+            </div>
+          )}
+        </Panel>
+      </div>
+    </div>
   );
 }

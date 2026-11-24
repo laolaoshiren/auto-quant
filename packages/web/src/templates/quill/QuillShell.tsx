@@ -100,7 +100,7 @@ const DESKTOP_NAV_QUERY = '(min-width: 56em)';
 /** 侧栏宽度记在 localStorage（用户拖过就记住）。 */
 const SIDE_KEY = 'aq.quill.side';
 
-const SIDE_MIN = 184;
+const SIDE_MIN = 196;
 const SIDE_MAX = 320;
 
 export function QuillShell() {

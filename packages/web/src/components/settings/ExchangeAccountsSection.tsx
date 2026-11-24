@@ -192,6 +192,7 @@ export function ExchangeAccountsSection() {
   const [overrides, setOverrides] = useState<Record<number, FreshRead>>({});
   const [refreshingId, setRefreshingId] = useState<number | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
+  const [envFilter, setEnvFilter] = useState<'all' | 'live' | 'testnet'>('all');
   /*
    * 每秒走一次的时钟 —— **它的作用就是让这一节重新渲染**。
    *
@@ -225,7 +226,8 @@ export function ExchangeAccountsSection() {
       };
     });
   }, [catalog]);
-  const liveAccounts = accounts.filter((row) => !row.testnet);
+  const liveAccounts = useMemo(() => accounts.filter((row) => !row.testnet), [accounts]);
+  const testnetAccounts = useMemo(() => accounts.filter((row) => row.testnet), [accounts]);
 
   const overrideFor = useCallback(
     (id: number) => {
@@ -237,7 +239,22 @@ export function ExchangeAccountsSection() {
     [overrides, query.updatedAt],
   );
 
-  const totals = useMemo(() => aggregateBalance(accounts, overrideFor), [accounts, overrideFor]);
+  /*
+   * 实盘（主网）与测试网（虚拟资金）必须分开汇总，绝不能把测试网假钱和真实资金相加。
+   */
+  const liveTotals = useMemo(() => aggregateBalance(liveAccounts, overrideFor), [liveAccounts, overrideFor]);
+  const testnetTotals = useMemo(
+    () => aggregateBalance(testnetAccounts, overrideFor),
+    [testnetAccounts, overrideFor],
+  );
+  const latestReadAt = useMemo(() => {
+    const a = liveTotals.readAt ? Date.parse(liveTotals.readAt) : 0;
+    const b = testnetTotals.readAt ? Date.parse(testnetTotals.readAt) : 0;
+    if (!a && !b) return null;
+    return a >= b ? liveTotals.readAt : testnetTotals.readAt;
+  }, [liveTotals.readAt, testnetTotals.readAt]);
+  const failedReads = liveTotals.failed + testnetTotals.failed;
+  const skippedAssets = liveTotals.skippedAsset + testnetTotals.skippedAsset;
 
   const refreshOne = useCallback(async (id: number) => {
     setRefreshingId(id);
@@ -413,7 +430,6 @@ export function ExchangeAccountsSection() {
   };
 
   const exchangeLabel = (id: string) => exchanges.find((row) => row.id === id)?.label ?? id;
-  const failedReads = totals.failed;
 
   /* ------------------------------------------------------------------------ */
   /*  左指标栏：先回答"钱在不在"，再回答"这是真钱吗"                          */
@@ -447,109 +463,107 @@ export function ExchangeAccountsSection() {
         "紧贴上一块的续接块"的设计（`first:border-t-0` 就是照这个用的）。
       */}
       <Panel title="账户概览" bodyClassName="p-4">
-      {/*
-        ⚠️ **`columns={1}`，不是 2。**
-
-        这一栏是 `PageShell` 的伴随栏（视口宽度的 2/5）。`MetricGroup` 的列数是
-        按**视口断点**算的，不看容器宽度 —— `columns={2}` 在 1600px 的视口下
-        照样排两列，于是每列只剩约 200px：权益合计那种 `1,000.00 USDT` 会被
-        `truncate` 切掉，而"切掉"在界面上看不出来。
-
-        竖排一行一个指标也不浪费：这一栏是给人**确认**的，不是给人扫的。
-      */}
-      <MetricGroup title="账户余额" columns={1}>
         {query.loading && accounts.length === 0 ? (
           <p className="text-xs text-ink-lo">正在读取交易所余额…</p>
         ) : accounts.length === 0 ? (
           <p className="text-xs leading-relaxed text-ink-lo">
             还没有凭证，因此没有余额可读。模拟模式不需要密钥。
           </p>
-        ) : totals.counted === 0 ? (
-          /*
-           * 读不到就是读不到 —— 一张写着破折号的卡，理由在卡片下面的注脚里
-           * （见 `</Panel>` 之后那几段）。原来那句理由和这张卡**并排**挤在
-           * 两列网格里，于是一句二十来字的话被压成两行，紧挨着一个破折号。
-           */
-          <Metric label={BALANCE_LABEL.equity} value="—" size="lg" />
         ) : (
           <>
-            {/* 这一屏的主数字：操作员的第一个问题就这一个答案 */}
-            <Metric
-              label={`${BALANCE_LABEL.equity}合计（${totals.asset}）`}
-              value={fmtAsset(totals.total, totals.asset)}
-              sub={`${totals.counted} 个凭证合计 · ${BALANCE_LABEL.settleAsset} ${totals.asset}`}
-              size="lg"
-              tone="strong"
-              title="所有凭证由交易所回报的账户权益之和，不是本终端的归属权益"
-            />
-            <Metric
-              label={BALANCE_LABEL.wallet}
-              value={fmtAmount(totals.wallet)}
-              sub={`${BALANCE_LABEL.available} ${fmtAmount(totals.available)}`}
-            />
-            {totals.unrealized !== 0 && (
-              <Metric
-                label={`${BALANCE_LABEL.unrealized}（${totals.asset}）`}
-                value={fmtAsset(totals.unrealized, totals.asset)}
-                tone={totals.unrealized > 0 ? 'up' : 'down'}
-              />
+            {/* 1. 实盘主网资产（独立核算，绝不混入测试网虚拟资金） */}
+            <MetricGroup title="实盘资产（主网）" columns={1}>
+              {liveAccounts.length === 0 ? (
+                <p className="text-xs text-ink-faint">暂未添加主网实盘凭证。</p>
+              ) : liveTotals.counted === 0 ? (
+                <Metric label={`实盘${BALANCE_LABEL.equity}`} value="—" size="lg" />
+              ) : (
+                <>
+                  <Metric
+                    label={`实盘${BALANCE_LABEL.equity}合计（${liveTotals.asset}）`}
+                    value={fmtAsset(liveTotals.total, liveTotals.asset)}
+                    sub={`${liveTotals.counted} 个主网凭证 · 可用 ${fmtAmount(liveTotals.available)}`}
+                    size="lg"
+                    tone="strong"
+                    title="仅统计主网实盘账户由交易所回报的真实权益之和，不包含任何测试网资金"
+                  />
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
+                    <span>
+                      钱包 <span className="num text-ink-mid">{fmtAmount(liveTotals.wallet)}</span>
+                    </span>
+                    <span>
+                      可用 <span className="num text-ink-mid">{fmtAmount(liveTotals.available)}</span>
+                    </span>
+                    {liveTotals.unrealized !== 0 && (
+                      <span>
+                        未实现{' '}
+                        <span className={cn('num font-medium', liveTotals.unrealized > 0 ? 'text-up' : 'text-down')}>
+                          {fmtAsset(liveTotals.unrealized, liveTotals.asset)}
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                </>
+              )}
+            </MetricGroup>
+
+            {/* 2. 测试网资产（单独隔离展示） */}
+            {testnetAccounts.length > 0 && (
+              <MetricGroup title="测试网资产（虚拟资金）" columns={1} className="mt-4">
+                {testnetTotals.counted === 0 ? (
+                  <Metric label={`测试网${BALANCE_LABEL.equity}`} value="—" />
+                ) : (
+                  <>
+                    <Metric
+                      label={`测试网${BALANCE_LABEL.equity}合计（${testnetTotals.asset}）`}
+                      value={fmtAsset(testnetTotals.total, testnetTotals.asset)}
+                      sub={`${testnetTotals.counted} 个测试网凭证 · 仅用于联调，不计入实盘`}
+                      title="仅统计测试网虚拟资金余额，与主网真实资金完全隔离"
+                    />
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-faint">
+                      <span>
+                        钱包 <span className="num text-ink-lo">{fmtAmount(testnetTotals.wallet)}</span>
+                      </span>
+                      <span>
+                        可用 <span className="num text-ink-lo">{fmtAmount(testnetTotals.available)}</span>
+                      </span>
+                    </div>
+                  </>
+                )}
+              </MetricGroup>
             )}
           </>
         )}
-      </MetricGroup>
 
-      <MetricGroup title="读取" columns={1}>
-        {/*
-          只留一个时间，而且用**相对时间**。
-          
-          原来这里还有一条 `本机时刻`，每秒跳动，旁边写着"每 30 秒自动轮询一次"。
-          两条说的是同一件事（数据新不新），但一个是绝对时间、一个是跳动的时钟，
-          操作者得自己相减才知道"数据有多旧"。
-          
-          这正是先前从顶栏删掉 `时钟 +22 ms` 的同一类问题：**常驻的诊断值，
-          正常运行时永远没事**。相对时间直接回答了那个唯一有价值的问题。
-        */}
-        <Metric
-          label="最近一次成功读取"
-          value={totals.readAt ? timeAgo(totals.readAt) : '尚未读取'}
-          sub={
-            totals.readAt
-              ? `${fmtTime(totals.readAt)} · 每 30 秒自动轮询`
-              : '点「刷新全部」立即读取'
-          }
-          title={
-            totals.readAt
-              ? `交易所返回的读取时刻 ${fmtTime(totals.readAt)}`
-              : undefined
-          }
-        />
-      </MetricGroup>
+        <MetricGroup title="读取" columns={1} className="mt-4">
+          <Metric
+            label="最近一次成功读取"
+            value={latestReadAt ? timeAgo(latestReadAt) : '尚未读取'}
+            sub={
+              latestReadAt
+                ? `${fmtTime(latestReadAt)} · 每 30 秒自动轮询`
+                : '点「刷新全部」立即读取'
+            }
+            title={latestReadAt ? `交易所返回的读取时刻 ${fmtTime(latestReadAt)}` : undefined}
+          />
+        </MetricGroup>
       </Panel>
 
-      {/*
-        指标卡放不下的**注脚**。
-
-        它们原来在 `MetricGroup` 里面，于是被网格排成了"指标卡旁边的一格" ——
-        一句中文被压成两行，紧挨着一张只有一个破折号的卡。注脚是**整栏**的话，
-        它读起来才像注脚。
-
-        三种情况互斥或叠加，所以分开判：读不到 / 部分失败 / 币种被跳过。
-      */}
-      {accounts.length > 0 && totals.counted === 0 && (
+      {accounts.length > 0 && liveTotals.counted + testnetTotals.counted === 0 && (
         <p className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs leading-relaxed text-warn">
           {failedReads > 0
             ? `${failedReads} 个凭证读取失败，合计未知 —— 读不到不等于余额是 0。`
             : '尚未读取到余额。点主区的「刷新全部」向交易所重新查询。'}
         </p>
       )}
-      {totals.counted > 0 && failedReads > 0 && (
+      {liveTotals.counted + testnetTotals.counted > 0 && failedReads > 0 && (
         <p className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs leading-relaxed text-warn">
           {failedReads} 个凭证读取失败，未计入合计。
         </p>
       )}
-      {totals.skippedAsset > 0 && (
+      {skippedAssets > 0 && (
         <p className="rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs leading-relaxed text-warn">
-          {totals.skippedAsset} 个凭证以其他币种计价，未计入合计（混币相加没有意义）。
+          {skippedAssets} 个凭证以其他币种计价，未计入合计（混币相加没有意义）。
         </p>
       )}
     </div>
@@ -648,10 +662,43 @@ export function ExchangeAccountsSection() {
                 添加凭证
               </Button>
               <span aria-hidden className="h-px min-w-4 flex-1 bg-base-800" />
+              {liveAccounts.length > 0 && testnetAccounts.length > 0 && (
+                <div
+                  role="group"
+                  aria-label="按网络筛选凭证"
+                  className="inline-flex items-center rounded-lg border border-base-750 bg-base-950 p-0.5 text-xs"
+                >
+                  {(
+                    [
+                      ['all', `全部 ${accounts.length}`],
+                      ['live', `实盘主网 ${liveAccounts.length}`],
+                      ['testnet', `测试网 ${testnetAccounts.length}`],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      aria-pressed={envFilter === id}
+                      onClick={() => setEnvFilter(id)}
+                      className={cn(
+                        'h-6 rounded-md px-2 font-medium transition',
+                        envFilter === id ? 'bg-base-800 text-ink-strong' : 'text-ink-lo hover:text-ink-hi',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             <ul className="space-y-2">
-              {accounts.map((row) => {
+              {(envFilter === 'live'
+                ? liveAccounts
+                : envFilter === 'testnet'
+                  ? testnetAccounts
+                  : [...liveAccounts, ...testnetAccounts]
+              ).map((row) => {
                 const outcome = tests[row.id];
                 const passed = outcome ? checksPassed(outcome.checks) : false;
                 // 同一行里的两个余额视图必须同源，否则手动刷新后上下会互相矛盾。

@@ -25,7 +25,17 @@ import {
   useState,
   type MutableRefObject,
 } from 'react';
-import { LoaderCircle } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  History,
+  Layers,
+  ListOrdered,
+  LoaderCircle,
+  Search,
+  X,
+} from 'lucide-react';
 import { exchangeErrorLabel, type MarginMode, type OrderRecord, type PositionView, type TradeRecord } from '@aq/shared';
 import { orderPurposeLabel, orderStatusLabel, orderTypeLabel } from '@aq/shared';
 import { api } from '../lib/api';
@@ -625,11 +635,22 @@ function CapNote({ shown, total }: { shown: number; total: number }) {
  * 留出半屏空白 —— 那正是这次改造要修的东西。空表要说的只有"现在没有"，
  * 以及一句"什么情况下会有"。
  */
-function TableEmpty({ message, hint }: { message: string; hint?: string }) {
+function TableEmpty({
+  message,
+  hint,
+  action,
+}: {
+  message: string;
+  hint?: string;
+  action?: React.ReactNode;
+}) {
   return (
-    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-3.5 py-2.5">
-      <span className="text-base text-ink-lo">{message}</span>
-      {hint && <span className="text-xs text-ink-faint">{hint}</span>}
+    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-4">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="text-sm font-medium text-ink-mid">{message}</span>
+        {hint && <span className="text-xs text-ink-faint">{hint}</span>}
+      </div>
+      {action && <div className="shrink-0">{action}</div>}
     </div>
   );
 }
@@ -854,6 +875,8 @@ export function PositionsTable({
   onCloseRequest,
   onSelectSymbol,
   collapsed = false,
+  openOrderCount = 0,
+  onOpenOrdersTab,
 }: {
   traderId: number;
   /** 手工平仓等写操作后递增，触发持仓表立即重拉，不等待 5 秒轮询。 */
@@ -861,24 +884,10 @@ export function PositionsTable({
   onCloseRequest: (symbol: string) => void;
   /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
   onSelectSymbol?: (symbol: string) => void;
-  /**
-   * **收起态**（2026-10-17 · 用户要求"弹性伸缩"）。
-   *
-   * ## 为什么这个 prop 直到今天才有（诚实记录）
-   *
-   * 两档高度常量（`EXPANDED_MAX_H` = `34vh` / `COLLAPSED_MAX_H` = `max(16vh,144px)`）
-   * 早就存在，也早被订单表/成交表用着（它们接的是 `historyCollapsed`）；
-   * **唯独持仓表这一格写死了 `max-h-[34vh]`** —— 而持仓表恰恰是用户盯着看的那张
-   * （截图里 6 条持仓把区域顶满，把上面的行情与决策流挤出去）。
-   *
-   * 所以缺的不是"新机制"，是**这一格没接上那两个常量**。现在接上：
-   * `collapsed` 只影响**一个 class**，节点、`ref`、滚动容器全都不变。
-   *
-   * ⚠️ 与订单/成交表同一条纪律：**收起只换 class，绝不卸载表格** ——
-   * 那张表的滚动框同时是分页观察器的 `root`（见 `COLLAPSED_MAX_H` 的注释）。
-   * 持仓表不分页，但保持同一个写法，避免"同一概念两种实现"。
-   */
   collapsed?: boolean;
+  /** 当前待成交委托数量：空仓但有挂单时提供直达入口。 */
+  openOrderCount?: number;
+  onOpenOrdersTab?: () => void;
 }) {
   const live = useEvents((s) => s.byTrader[traderId]?.positions);
   const query = usePolled((signal) => api.traderPositions(traderId, signal), {
@@ -953,7 +962,23 @@ export function PositionsTable({
         <ErrorNote>持仓暂时读不到（不代表没有持仓）：{query.error}</ErrorNote>
       );
     }
-    return <TableEmpty message="暂无持仓。" hint="模型选择空仓 — 没有符合条件的标时不会下任何订单。" />;
+    return (
+      <TableEmpty
+        message="暂无持仓"
+        hint={
+          openOrderCount > 0
+            ? `当前有 ${openOrderCount} 笔待成交委托正在挂单等待入场。`
+            : '当前保持空仓，等待满足策略条件时自动开仓。'
+        }
+        action={
+          openOrderCount > 0 && onOpenOrdersTab ? (
+            <Button size="sm" variant="ghost" onClick={onOpenOrdersTab}>
+              查看 {openOrderCount} 笔当前委托 →
+            </Button>
+          ) : undefined
+        }
+      />
+    );
   }
 
   const shown = positions.slice(0, MAX_ROWS);
@@ -2430,6 +2455,7 @@ export function TraderTables({
 }) {
   const [closeTarget, setCloseTarget] = useState<string | null>(null);
   const [ordersRefreshToken, setOrdersRefreshToken] = useState(0);
+  const [symbolFilter, setSymbolFilter] = useState('');
 
   /**
    * `positions` → `symbol → marginType`，供两张订单表给「保证金模式」兜底。
@@ -2687,166 +2713,184 @@ export function TraderTables({
   });
   const closableCount = pickPositions(positionsQuery.data, livePositions).length;
 
-  const tabs: Array<{ id: TraderTabId; label: string; count?: number }> = [
-    { id: 'positions', label: '当前持仓', count: closableCount },
-    // 与表格同一个数组，见上面 `ordersPaging` 的说明。
-    { id: 'orders', label: '当前委托', count: openOrders.length },
-    { id: 'trades', label: '历史成交' },
-    { id: 'history', label: '订单记录' },
+  const filteredOrdersPaging = useMemo(() => {
+    const q = symbolFilter.trim().toUpperCase();
+    if (!q || tab !== 'history') return ordersPaging;
+    return {
+      ...ordersPaging,
+      rows: ordersPaging.rows.filter((r) => r.symbol.toUpperCase().includes(q)),
+    };
+  }, [ordersPaging, symbolFilter, tab]);
+
+  const filteredTradesPaging = useMemo(() => {
+    const q = symbolFilter.trim().toUpperCase();
+    if (!q || tab !== 'trades') return tradesPaging;
+    return {
+      ...tradesPaging,
+      rows: tradesPaging.rows.filter((r) => r.symbol.toUpperCase().includes(q)),
+    };
+  }, [tradesPaging, symbolFilter, tab]);
+
+  const tabs: Array<{
+    id: TraderTabId;
+    label: string;
+    icon: React.ReactNode;
+    count?: number;
+    highlightTone?: 'up' | 'accent';
+  }> = [
+    {
+      id: 'positions',
+      label: '当前持仓',
+      icon: <Layers aria-hidden className="h-3.5 w-3.5" />,
+      count: closableCount,
+      highlightTone: 'up',
+    },
+    {
+      id: 'orders',
+      label: '当前委托',
+      icon: <ListOrdered aria-hidden className="h-3.5 w-3.5" />,
+      count: openOrders.length,
+      highlightTone: 'accent',
+    },
+    { id: 'trades', label: '历史成交', icon: <History aria-hidden className="h-3.5 w-3.5" /> },
+    { id: 'history', label: '订单记录', icon: <FileText aria-hidden className="h-3.5 w-3.5" /> },
   ];
 
+  const activeCollapsed = isHeavyTab ? historyCollapsed : tab === 'positions' ? positionsCollapsed : false;
+  const toggleActiveCollapse = () => {
+    if (isHeavyTab) setHistoryCollapsed((c) => !c);
+    else if (tab === 'positions') setPositionsCollapsed((c) => !c);
+  };
+
   return (
-    <Panel padded={false} bodyClassName="p-0">
+    <Panel padded={false} bodyClassName="p-0" className="overflow-hidden">
       <div
         ref={toolbarRef}
-        className="flex flex-wrap items-center gap-2 border-b border-base-800 px-3 py-2"
+        className="flex flex-wrap items-center gap-2 border-b border-base-800 bg-base-900 px-3 py-2"
       >
-        {/* Real tab semantics, so the arrow keys and the tab order work. */}
-        <div role="tablist" aria-label="机器人数据表" className="flex items-center gap-0.5">
-          {tabs.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === item.id}
-              onClick={() => onChange(item.id)}
-              className={
-                tab === item.id
-                  ? '-mb-px border-b-2 border-accent px-3 py-1.5 text-base font-semibold text-ink-hi'
-                  : '-mb-px border-b-2 border-transparent px-3 py-1.5 text-base text-ink-lo transition hover:text-ink-mid'
-              }
-            >
-              {item.label}
-              {item.count !== undefined && <span className="num ml-1.5 text-xs text-ink-faint">{item.count}</span>}
-            </button>
-          ))}
+        {/* 现代分段胶囊页签：图标 + 文字 + 高亮计数 */}
+        <div
+          role="tablist"
+          aria-label="机器人数据表"
+          className="inline-flex flex-wrap items-center gap-1 rounded-lg border border-base-750 bg-base-950 p-0.5"
+        >
+          {tabs.map((item) => {
+            const active = tab === item.id;
+            const hasCount = item.count !== undefined && item.count > 0;
+            const countClass = hasCount
+              ? item.highlightTone === 'up'
+                ? 'bg-up/20 text-up'
+                : 'bg-accent/20 text-accent'
+              : 'bg-base-800 text-ink-faint';
+            return (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => onChange(item.id)}
+                className={
+                  active
+                    ? 'inline-flex h-7 items-center gap-1.5 rounded-md bg-base-800 px-2.5 text-xs font-semibold text-ink-strong shadow-sm transition'
+                    : 'inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-ink-lo transition hover:bg-base-850/70 hover:text-ink-hi'
+                }
+              >
+                <span className={active ? 'text-accent' : 'text-ink-faint'}>{item.icon}</span>
+                <span>{item.label}</span>
+                {item.count !== undefined && (
+                  <span
+                    className={`num inline-flex min-w-[18px] items-center justify-center rounded-full px-1.5 py-px text-[11px] font-semibold leading-tight ${countClass}`}
+                  >
+                    {item.count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
-        <div className="ml-auto flex items-center gap-1.5">
-          <Button
-            size="sm"
-            variant="danger"
-            disabled={closableCount === 0}
-            title={closableCount === 0 ? '当前没有持仓' : '查看手工平仓的说明'}
-            onClick={() => setCloseTarget('__all__')}
-          >
-            全部平仓
-          </Button>
-          {/*
-            历史区的收起 / 展开。与 `TraderPage.tsx` 权益曲线那个按钮**同一套交互语言**：
-            `variant="ghost" size="sm"` + `aria-expanded` + 文案跟着状态走。
+        {/* 历史表快捷按币种筛选 */}
+        {isHeavyTab && (
+          <div className="relative w-40 sm:w-44">
+            <Search
+              aria-hidden
+              className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint"
+            />
+            <input
+              type="text"
+              value={symbolFilter}
+              onChange={(e) => setSymbolFilter(e.target.value)}
+              placeholder="筛选币种…"
+              aria-label="按交易对筛选"
+              className="input num h-7 w-full pl-7 pr-6 text-xs"
+            />
+            {symbolFilter && (
+              <button
+                type="button"
+                onClick={() => setSymbolFilter('')}
+                aria-label="清空币种筛选"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-ink-faint hover:text-ink-hi"
+              >
+                <X aria-hidden className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        )}
 
-            放在工具栏而不是各表内部：两张历史表是**同一个开关**，而"同一屏上的同一个概念
-            只能有一个实现"是这个文件自己的纪律（四张表各写一遍币种单元格吃过一次亏）。
-            收起后的手上动作也只有一步 —— 不用点回「当前持仓」。
-          */}
-          {isHeavyTab && (
+        <div className="ml-auto flex items-center gap-1.5">
+          {closableCount > 0 && (
             <Button
               size="sm"
-              variant="ghost"
-              aria-expanded={!historyCollapsed}
-              title={
-                historyCollapsed
-                  ? '把历史表展开到完整高度（更早的记录仍然在表格里往下滚）'
-                  : '把历史表收成几行，给上面的行情 / 决策流让出高度'
-              }
-              onClick={() => setHistoryCollapsed((collapsed) => !collapsed)}
+              variant="danger"
+              title="市价平掉当前所有持仓并撤销关联保护单（需二次确认）"
+              onClick={() => setCloseTarget('__all__')}
             >
-              {historyCollapsed ? '展开全部' : '收起'}
+              全部平仓 ({closableCount})
             </Button>
           )}
-          {/*
-            **持仓表的显式开关**（2026-10-17 · 用户要求的"弹性伸缩"）。
-
-            用户描述的是**点区域外收缩、点区域内放大**，那套已经实现在上面的
-            `pointerdown` 监听里。但**只用点击是不够的**：
-            ```
-              · 键盘用户没法"点区域外"（焦点移动不产生 pointerdown）；
-              · 屏幕阅读器读不到"这块可以伸缩"；
-              · 触屏上"点外面"很容易被当成误触。
-            ```
-            所以补一个**显式按钮**：它与点击**同一个 state**，两条路等价。
-            这一条也是 `AGENTS.md` 里"不能只靠鼠标手势表达一个状态"的落实
-            （颜色不能单独表达状态 → 手势同样不能）。
-          */}
-          {tab === 'positions' && (
+          {(isHeavyTab || tab === 'positions') && (
             <Button
               size="sm"
               variant="ghost"
-              aria-expanded={!positionsCollapsed}
-              title={
-                positionsCollapsed
-                  ? '展开持仓表（也会在点击表格区域时自动展开）'
-                  : '把持仓表收成几行，给上面的行情 / 决策流让出高度（点击表格区域外也会自动收起）'
-              }
-              onClick={() => setPositionsCollapsed((collapsed) => !collapsed)}
+              aria-expanded={!activeCollapsed}
+              title={activeCollapsed ? '展开面板高度' : '收起面板高度，给上方图表与决策流留出更多视野'}
+              onClick={toggleActiveCollapse}
             >
-              {positionsCollapsed ? '展开' : '收起'}
+              {activeCollapsed ? (
+                <>
+                  <ChevronUp aria-hidden className="h-3.5 w-3.5" />
+                  展开
+                </>
+              ) : (
+                <>
+                  <ChevronDown aria-hidden className="h-3.5 w-3.5" />
+                  收起
+                </>
+              )}
             </Button>
           )}
         </div>
       </div>
 
-      {/* 空表格不占位：`min-h` 曾经给这一区留了 220px，于是"暂无持仓"下面跟着
-          一片空白。高度交给内容，有行时才需要滚动。
-
-          这个 `ref` 只用于"点击区域之外"的判断（见上面那个 `useEffect`），不参与布局。 */}
       <div ref={tableAreaRef}>
-        {/*
-          ⚠️ **`onSelectSymbol` 必须传** —— 漏过一次。
-
-          `PositionsTable` 一直支持点击币种跳转行情图（它内部用的就是下面三张表同一个
-          `SymbolCell`），但这一行**没有把它传进去**：委托表、成交表、订单记录都传了，
-          持仓表漏了。于是四张表里唯独最上面那张点了没反应 —— 而它恰恰是操作员最想
-          看行情的那一张（手上正拿着这个仓位）。
-
-          `onSelectSymbol` 是可选的，所以漏传**不会报错**，只会静默失去功能。
-          这正是四个调用点里最容易漏掉第三个的原因。
-        */}
         {tab === 'positions' && (
           <PositionsTable
             traderId={traderId}
             refreshToken={token}
             onCloseRequest={setCloseTarget}
             onSelectSymbol={onSelectSymbol}
-            /* 收起态（用户要求的"弹性伸缩"）：只换 class，不卸载表格。 */
             collapsed={positionsCollapsed}
+            openOrderCount={openOrders.length}
+            onOpenOrdersTab={() => onChange('orders')}
           />
         )}
-        {/*
-          两个标签共用同一个分页实例：它们读的是同一个端点，只是过滤条件不同；
-          分开两套只会让翻出来的历史与"当前委托"的数字再次分家。
-
-          ⚠️ **这里原来写成了两个并列的 `{tab === 'orders' && …}{tab === 'history' && …}`，
-          那会让两个标签之间有 25 行一闪而过的残留。**
-
-          实测（1600px 视口，点「当前委托」后每 30ms 采一次 DOM）：
-
-              0ms   行=25   ← 还是「订单记录」的内容
-              30ms  行= 2   ← 才换成「当前委托」
-
-          成因：两个 `&&` 分支虽然渲染的是同一个组件类型，但它们**在 JSX 里是两个不同的
-          位置** —— `tab` 一变，React 把旧的那个**卸载**、新的那个**挂载**，卸载发生在先，
-          而浏览器的下一帧仍可能画出旧 DOM。用户的描述是「点进去会快速闪烁出现一堆订单，
-          闪完以后又恢复正常」。
-
-          合并成一个条件之后，React 在同一个位置看到**同一个组件类型**，于是**复用同一个实例**
-          （只更新 props），中间不存在"旧表格还在、新表格还没上"的那一帧。
-
-          两处的差异只有 `onlyOpen` 与 `collapsed` —— 把它们写成 `tab` 的表达式即可，
-          不需要两个 JSX 分支。
-        */}
         {(tab === 'orders' || tab === 'history') && (
           <OrdersTable
-            paging={ordersPaging}
+            paging={filteredOrdersPaging}
             onlyOpen={tab === 'orders'}
             positionCount={positionCount}
             paper={paper}
             onSelectSymbol={onSelectSymbol}
-            /*
-             * 只有「历史」那侧才有收起态：「当前委托」是行动面板（对着它撤单、
-             * 确认保护单），行数受挂单数约束，默认就该看得全 —— 见 `isHeavyTab`。
-             */
             collapsed={tab === 'history' ? historyCollapsed : undefined}
             liveMarginModes={liveMarginModes}
           />
@@ -2857,9 +2901,7 @@ export function TraderTables({
             refreshToken={token}
             onSelectSymbol={onSelectSymbol}
             collapsed={historyCollapsed}
-            /* 容器预取好的那份 —— 切过来时数据已在手上，不会经历"空白 → 转圈"。 */
-            paging={tradesPaging}
-            /* 「保证金模式」的兜底来源，与订单表共用同一份映射。 */
+            paging={filteredTradesPaging}
             liveMarginModes={liveMarginModes}
           />
         )}

@@ -19,7 +19,7 @@
  * numbers and strings, no charting dependency.
  */
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { fmtTime } from '../lib/format';
+import { fmtDateTime, fmtTime } from '../lib/format';
 import { axisTicks, equityAxisFormatter, HOURLY_AXIS_MAX_MS, rangeSpanMs, type EquityPoint } from './equityCurve';
 import { useChartInk } from './useChartInk';
 
@@ -127,7 +127,7 @@ function EquityTooltip({
   return (
     <TooltipPanel
       rows={rows}
-      footer={new Date(point.t).toLocaleString('en-GB', { hour12: false })}
+      footer={fmtDateTime(new Date(point.t).toISOString())}
       surface={surface}
     />
   );

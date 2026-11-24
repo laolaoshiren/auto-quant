@@ -18,7 +18,6 @@ import {
 import { MODE_LABEL } from '../lib/glossary';
 import { exchangeShortLabel } from './ExchangeAccountChip';
 import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, TextInput } from './ui';
-import { SectionLabel } from './shell';
 import { EquitySourceField, equityPayload, useExchangeEquity } from './EquitySourceField';
 import { ManagedRiskProfileCards } from './ManagedRiskProfileControl';
 import type { Catalog } from '../lib/api';
@@ -657,400 +656,40 @@ export function NewTraderModal({
       )}
 
       {ready && missing.length === 0 && (
-        /*
-         * ⚠️ **分组是这个弹窗最重要的可读性修复。**
-         *
-         * 之前八个字段一路 `space-y-3` 平铺：名称、凭证、厂商、模型、运行模式、
-         * 策略、周期、起始权益 —— 全靠 12px 的间距区分。用户的原话是
-         * 「该有的分割线得有」：他滚到「运行模式」时已经看不出前面那四行
-         * 属于"选哪个账户和模型"、后面两行属于"怎么跑"。
-         *
-         * 三组的边界是**用户要做的三个决定**，不是字段类型：
-         *
-         *   1. 叫什么、用哪个钱包与模型 —— 身份；
-         *   2. 怎么跑（按策略参数 / AI 托管）—— 唯一会改变机器人行为的选择；
-         *   3. 跑多快、从多少本金起算 —— 参数。
-         *
-         * 用 `SectionLabel`（页面里同一个区块标题组件）：标题 + 延伸线，
-         * 两套模板下都成立，不是这里临时画的样式。
-         *
-         * ⚠️ 光有标题还不够。用户第二次看的时候说的是「该有的分割线得有」：
-         * 三组之间只有 16px 空白，滚到中间时上一组的最后一个字段和下一组的
-         * 标题在视觉上仍然是一个段落 —— 延伸线只画在标题右侧，管不到组的
-         * 边界。所以第 2、3 组各加一条 `border-t`，让组的起止一眼可辨。
-         *
-         * 颜色必须是 `base-750` 而不是 `base-800`：弹窗底色就是 `base-900`，
-         * 控制台主题下 800 (#1e242c) 和 900 (#1d232b) 只差 1 个色阶，
-         * 实测那条线在屏幕上根本看不见（采样出来就是底色）。750 (#2a323b)
-         * 在主题里的语义正是「弱分隔线」，两套模板下都够看。
-         */
         <div className="space-y-4">
-          <section className="space-y-3">
-            <SectionLabel title="身份与账户" className="mb-0" />
-          <Field label="名称" hint="在控制台与审计记录中显示。">
-            <TextInput
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="BTC 动量 · 模拟"
-              autoFocus
-            />
-          </Field>
+          {/* Step 1: 运行方式 —— 决定后续需要填写什么配置 */}
+          <section className="space-y-2.5">
+            <div className="flex items-center gap-2">
+              <span className="num flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">
+                1
+              </span>
+              <h3 className="text-xs font-semibold tracking-wider text-ink-mid">运行方式</h3>
+              <span aria-hidden className="h-px flex-1 bg-base-800" />
+            </div>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Field
-              label="交易所凭证"
-              hint="留空 = 纯模拟盘，不需要任何真实账户。"
-            >
-              <Select
-                value={exchangeAccountId}
-                onChange={(e) => {
-                  if (e.target.value === '') {
-                    setExchangeAccountId('');
-                    setDryRun(true);
-                    return;
-                  }
-                  const nextId = Number(e.target.value);
-                  setExchangeAccountId(nextId);
-                  const nextAccount = accounts?.find((row) => row.id === nextId) ?? null;
-                  const policy = accountDryRunPolicy(nextAccount);
-                  if (policy.paperDisabled || policy.isGateTestnet) {
-                    setDryRun(policy.defaultDryRun);
-                  }
-                }}
-              >
-                {/*
-                  ⚠️ **「不绑账户」必须是第一个选项，且是默认值**（用户 2026-10-27 需求）。
-                  它表示纯模拟盘机器人：不下真实订单、余额由本地台账折算。
-                  没有这一项时，没有凭证的用户根本进不了创建流程。
-                */}
-                <option value="">不绑账户（纯模拟盘）</option>
-                {accounts?.map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {exchangeShortLabel(account.exchange)} · {account.label} ·{' '}
-                    {account.testnet ? '测试网' : '主网'}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-
-            {/*
-             * **运行模式在创建时固定**（2026-11-10 用户要求）。
-             *
-             * - 不绑账户：强制模拟盘；
-             * - Gate 正式网：无本地模拟盘，强制实盘并禁用模拟盘；
-             * - Gate 测试网：假钱真实撮合，推荐直接走测试网撮合（dryRun=false），不显示真钱红字警告。
-             */}
-            <Field
-              label="运行模式（创建后固定）"
-              hint={
-                  runPolicy.isGateMainnet
-                    ? 'Gate 正式网无本地模拟盘 —— 如需模拟测试，请改绑 Gate 测试网账户或不绑账户（纯模拟盘）。'
-                    : runPolicy.isGateTestnet
-                      ? 'Gate 测试网本身即假钱真实撮合，无本地模拟模式 —— 订单直接发往 Gate 测试网，不会消耗真实资金。'
-                      : '模拟盘不碰真实资金；实盘用真实资金下单，需要先绑定账户。'
-              }
-            >
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setDryRun(true)}
-                  aria-pressed={dryRun}
-                  disabled={runPolicy.paperDisabled}
-                  title={
-                    runPolicy.isGateMainnet
-                      ? 'Gate 正式网无本地模拟盘，模拟测试请绑 Gate 测试网账户或不绑账户。'
-                      : runPolicy.isGateTestnet
-                        ? 'Gate 测试网已采用假钱真实撮合，不支持本地模拟模式。'
-                        : '订单只在本地按实时行情撮合，不产生任何真实委托。'
-                  }
-                  className={`flex h-[46px] items-center gap-2 rounded-md border px-2.5 text-left transition ${
-                    dryRun ? 'border-accent/70 bg-accent/10' : 'border-base-700 bg-base-850 hover:border-base-600'
-                  } ${runPolicy.paperDisabled ? 'cursor-not-allowed opacity-50' : ''}`}
-                >
-                  <span className="text-base font-semibold text-ink-hi">
-                    {runPolicy.isGateTestnet ? '本地模拟' : '模拟盘'}
-                  </span>
-                  {!runPolicy.isGateMainnet && !runPolicy.isGateTestnet && <Badge tone="accent">推荐</Badge>}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setDryRun(false)}
-                  aria-pressed={!dryRun}
-                  disabled={runPolicy.liveDisabled}
-                  title={
-                    runPolicy.liveDisabled
-                      ? '需先绑定交易所账户。'
-                      : runPolicy.isGateTestnet
-                        ? 'Gate 测试网（假钱真实撮合），订单直接发往 Gate 测试网，不涉及真实资金。'
-                        : '真实资金下单，亏损不可逆。'
-                  }
-                  className={`flex h-[46px] items-center gap-2 rounded-md border px-2.5 text-left transition ${
-                    !dryRun
-                      ? runPolicy.isGateTestnet
-                        ? 'border-accent/70 bg-accent/10'
-                        : 'border-warn/70 bg-warn/10'
-                      : 'border-base-700 bg-base-850 hover:border-base-600'
-                  } ${runPolicy.liveDisabled ? 'cursor-not-allowed opacity-50' : ''}`}
-                >
-                  <span className="text-base font-semibold text-ink-hi">
-                    {runPolicy.isGateTestnet ? '测试网' : '实盘'}
-                  </span>
-                  {runPolicy.isGateTestnet ? (
-                    <Badge tone="accent">假钱撮合</Badge>
-                  ) : (
-                    <Badge tone="warn">真实资金</Badge>
-                  )}
-                </button>
-              </div>
-            </Field>
-
-            {/*
-              两级：**先厂商、再模型**。
-
-              原来只有一个下拉，列的是 ai_models 里已配置的记录 ——
-              于是「我想用 Command Code 的某个模型」必须先去模型管理页建一条
-              记录、再回来选。而用户此刻的意图是「建一个机器人」。
-
-              两级之后，第二个下拉给出两种情况：
-                · 该厂商**已配置的**模型（用户自定义的）
-                · 该厂商**接口读回来的**模型（选中后在提交时自动建记录）
-
-              第二种**必须来自接口**而不是内置静态列表：聚合网关的内置列表是空的，
-              照静态列表做出来的下拉在那些厂商上会一个模型都不显示。
-            */}
-            {/*
-              ⚠️ **JEV 模式同样不显示模型选择**（2026-10-19 用户实测踩到）。
-
-              用户报：「第一次我是直接创建，模型乱写的（应该是不可用的），
-              运行的时候说失败」—— 而他当时选的模型**根本不会被 JEV 模式使用**：
-              ```
-                JEV 模式 → 只用 magpie 网关调 /v1/systemone（固定 jev-latest）
-                         → 完全不读「AI 模型」列表里的任何记录
-              ```
-              所以显示那个选择框是**误导**：它让用户以为必须挑一个模型，
-              挑错了又会在启动时"看起来失败"（实际那次失败是别的原因，
-              但用户无从分辨 —— 这正是"界面说了假话"的典型）。
-
-              ⇒ 与团队模式同一条纪律：**不渲染**，而不是渲染了再禁用。
-            */}
-            {usesModelPicker && (
-            <Field label="模型厂商">
-              <Select
-                value={providerId}
-                onChange={(e) => {
-                  // 换厂商就把模型清掉 —— 上一个厂商的模型在这里毫无意义。
-                  setProviderId(e.target.value);
-                  setModelChoice("");
-                  setModelQuery("");
-                  setAiModelId("");
-                }}
-              >
-                <option value="">请选择厂商</option>
-                {providers.map((provider) => (
-                  <option key={provider.id} value={provider.id}>
-                    {/*
-                     * ⚠️ **带上该厂商已有的模型数**（2026-10-19）。
-                     *
-                     * 用户的 magpie 与 CPA 模型都记在 `custom`（「自定义 OpenAI 兼容端点」）
-                     * 下面 —— 光看这个名字他认不出"这就是我配的 magpie"。
-                     * 显示数量至少让他能对上："哦，这个下面有 4 个，那是我的"。
-                     */}
-                    {provider.label}
-                    {(() => {
-                      const n = (models ?? []).filter((m) => m.provider === provider.id).length;
-                      return n > 0 ? `（已配 ${n} 个）` : '';
-                    })()}
-                  </option>
-                ))}
-              </Select>
-              {/*
-                ⚠️ **一个模型都没配时要说清"去哪里加"**，而不是让用户对着空下拉发呆。
-                这是本仓库一贯的纪律：空状态必须解释原因（不是"没有数据"就完了）。
-              */}
-              {providers.length === 0 && (
-                <p className="mt-1 text-xs text-warn">
-                  还没有任何 AI 模型 —— 请先到「AI 模型」页面添加一个，再回来新建机器人。
-                </p>
-              )}
-            </Field>
-            )}
-
-            {/*
-              ⚠️ **团队模式不显示模型选择**（用户 2026-10-12 明确要求）。
-
-              用户原话：
-              > 「团队多智能体模式，在创建/修改的时候就**不应该采用 AI 模型列表里面的**，
-              >  而是**直接采用系统的 magpie**，（系统 AI 列表里面添加的那些
-              >  **不应该给这个模式使用**），因为这个模式很多东西会和其他的冲突」
-
-              理由（实测确认过）：团队模式的模型出口来自**独立的 magpie 网关配置**
-              （见 `teamGateway.ts`），而「AI 模型」列表是给普通机器人用的。
-              两者共用会造成"改一条记录去调 A 机器人，连带改掉所有团队机器人" ——
-              用户实测发现了这个现象。
-
-              所以这里**不渲染**选择器，而不是渲染了再禁用 ——
-              禁用会让用户以为"这里有个选项只是现在不能改"，
-              而真相是**这个字段与团队模式无关**。
-            */}
-            {/*
-              ⚠️ **JEV 模式同样不显示模型选择**（2026-10-19 用户实测踩到）。
-
-              用户报：「第一次我是直接创建，模型乱写的（应该是不可用的），
-              运行的时候说失败」—— 而他当时选的模型**根本不会被 JEV 模式使用**：
-              ```
-                JEV 模式 → 只用 magpie 网关调 /v1/systemone（固定 jev-latest）
-                         → 完全不读「AI 模型」列表里的任何记录
-              ```
-              所以显示那个选择框是**误导**：它让用户以为必须挑一个模型，
-              挑错了又会在启动时"看起来失败"（实际那次失败是别的原因，
-              但用户无从分辨 —— 这正是"界面说了假话"的典型）。
-
-              ⇒ 与团队模式同一条纪律：**不渲染**，而不是渲染了再禁用。
-            */}
-            {usesModelPicker && (
-            <Field
-              label="模型"
-              hint={
-                !providerId
-                  ? "先选一个模型厂商。"
-                  : discovering
-                    ? "正在读取该厂商当前可用的模型…"
-                    : availableModels.live
-                      ? configuredModels.length > 0
-                        ? "已配置的在前，该厂商当前可用的在后（选后者会自动建一条记录）。"
-                        : "来自该厂商接口的实时列表（选中后会自动建一条记录）。"
-                      : configuredModels.length > 0
-                        ? "已配置的。未能从该厂商接口读取模型列表。"
-                        : "该厂商还没有可选模型。"
-              }
-            >
-              {/*
-               * **搜索定位**（用户 2026-11-10 要求）：先输入关键词过滤，再在剩下
-               * 的选项里选。没有这一层，两百多个模型只能靠滚。
-               */}
-              <div className="mb-1.5 flex items-center gap-2">
-                <TextInput
-                  value={modelQuery}
-                  onChange={(event) => setModelQuery(event.target.value)}
-                  placeholder={providerId ? '搜索模型（名称 / 模型 id）…' : '先选一个厂商'}
-                  disabled={!providerId}
-                  aria-label="搜索模型"
-                />
-                {modelQuery && (
-                  <Button small onClick={() => setModelQuery('')}>
-                    清空
-                  </Button>
-                )}
-              </div>
-              <Select
-                value={modelChoice}
-                disabled={!providerId}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  setModelChoice(value);
-                  /*
-                   * 已配置的：编码就是它的数字 id，直接填 aiModelId。
-                   * 读回来的：编码是 new:<模型id>，**提交时才建记录** ——
-                   * 不在 onChange 里建，否则用户每试一个型号都会留下一条
-                   * 用不上的记录。
-                   */
-                  setAiModelId(value.startsWith("new:") ? "" : Number(value));
-                }}
-              >
-                <option value="">请选择模型</option>
-                {shownConfigured.length > 0 && (
-                  <optgroup label="已配置">
-                    {shownConfigured.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.label} · {model.model}
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-                {shownAvailable.length > 0 && (
-                  <optgroup label={availableModels.live ? "厂商可用模型" : "厂商建议"}>
-                    {shownAvailable.map((id) => (
-                      <option key={id} value={"new:" + id}>
-                        {id}
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-              </Select>
-              {modelQuery && shownConfigured.length === 0 && shownAvailable.length === 0 && (
-                <p className="mt-1 text-xs text-ink-faint">没有匹配「{modelQuery}」的模型。</p>
-              )}
-              {/*
-                读不到原因必须说出来。一个空下拉配上"该厂商还没有可选模型"，
-                会让用户以为这个厂商真的没模型 —— 而实际原因可能是密钥没配、
-                或者密钥被拒。两种情况要做的事完全不同。
-              */}
-              {providerId && !discovering && providerDiscovery && !providerDiscovery.ok && (
-                <p className="mt-1 text-xs text-warn">{providerDiscovery.message}</p>
-              )}
-              {providerId && !discovering && !providerDiscovery && !canDiscover && (
-                <p className="mt-1 text-xs text-ink-faint">
-                  该厂商还没有带密钥的记录，无法读取它的模型列表 —— 到「AI 模型」页添加一条并填上 API
-                  Key，回来就会自动列出。
-                </p>
-              )}
-            </Field>
-            )}
-            {mode === 'ai_managed' && (
-              <div className="sm:col-span-2">
-                <Field
-                  label="AI 模型"
-                  hint="智能托管模式统一走系统 magpie 网关预设模型，无需从「AI 模型」列表选择。"
-                >
-                  <div className="flex items-center gap-2 rounded-md border border-base-700 bg-base-850 px-3 py-2 text-sm text-ink-mid">
-                    <span className="font-mono text-accent">{AI_MANAGED_PRESET_MODEL}</span>
-                    <Badge tone="accent">系统预设 · magpie</Badge>
-                  </div>
-                </Field>
-              </div>
-            )}
-          </div>
-          </section>
-
-          <section className="space-y-3 border-t border-base-750 pt-4">
-            <SectionLabel title="运行方式" className="mb-0" />
-
-            {/*
-              ## 卡片式选择（2026-11-10 用户反馈：「原生 radio 圆点很土」）
-
-              原生 radio 在这里有两个问题：一是**视觉上只有 13px 的圆点**，
-              选中的那一项与其它三项几乎没差别；二是每一项后面跟 2–4 行说明，
-              四行下来 300px 高，把"创建"按钮推到弹窗外面。
-
-              现在的形态：2×2 卡片，标题 + 一行短说明，选中态用**边框 + 底色 +
-              实心圆点**三重标记；完整说明放 `title`（悬停可读）。
-              卡片内保留 `<input type="radio">`（sr-only）—— 方向键切换、读屏
-              播报"已选中"这些原生语义一个都不丢。
-            */}
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
               {(
                 [
                   {
-                    id: 'strategy' as const,
-                    label: MODE_LABEL.strategy,
-                    desc: '按选定策略的固定参数跑，不调用模型。',
-                    badge: null,
-                    full: '用选定的策略里的固定参数跑，行为与以前完全一致。',
+                    id: 'ai_managed' as const,
+                    label: MODE_LABEL.ai_managed,
+                    desc: 'AI 自主选币与调参',
+                    badge: '推荐',
+                    full: '参数与交易提示词全部由 AI 自主设定并实时调整：周期、标的池、杠杆、仓位、止损止盈。',
                   },
                   {
-                    id: 'ai_managed' as const,
-                    label: `${MODE_LABEL.ai_managed}（全自动）`,
-                    desc: 'AI 自己设定并调整参数与提示词。',
-                    badge: '推荐',
-                    full: '参数与交易提示词全部由 AI 自主设定并实时调整：周期、标的池、杠杆、仓位、止损止盈、节流与冷却。以盈利为唯一目标，并根据真实交易结果不断反思、迭代。',
+                    id: 'strategy' as const,
+                    label: MODE_LABEL.strategy,
+                    desc: '按固定策略参数运行',
+                    badge: null,
+                    full: '按选定策略的固定参数与风控规则运行。',
                   },
                   {
                     id: 'ai_team' as const,
-                    label: `${MODE_LABEL.ai_team}（多智能体）`,
-                    desc: '调度 → 调研 → 辩论 → 裁决 → 风控 → 执行。',
+                    label: MODE_LABEL.ai_team,
+                    desc: '多智能体协作（暂缓）',
                     badge: null,
-                    full: '一支分工协作的智能体团队：调度官统筹，分析师并行调研（行情、新闻、社区情绪），多空研究员对抗辩论，风控官把关，交易员执行。持续工作、事件驱动，每次决策都有完整审计轨迹。',
+                    full: '多智能体协作模式（当前开发中暂缓）。',
                   },
                 ] as const
               ).map((option) => {
@@ -1059,10 +698,10 @@ export function NewTraderModal({
                   <label
                     key={option.id}
                     title={option.full}
-                    className={`relative flex cursor-pointer items-start gap-2 rounded-lg border p-2.5 transition ${
+                    className={`relative flex cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2.5 transition ${
                       active
-                        ? 'border-accent/70 bg-accent/5'
-                        : 'border-base-700 bg-base-850 hover:border-base-600'
+                        ? 'border-accent bg-accent/10 shadow-sm'
+                        : 'border-base-700 bg-base-850/60 hover:border-base-600'
                     }`}
                   >
                     <input
@@ -1072,92 +711,281 @@ export function NewTraderModal({
                       checked={active}
                       onChange={() => setMode(option.id)}
                     />
-                    {/* 选中标记：实心圆点 + 主色描边。比 13px 的原生圆点大一圈，
-                        也让"选中"与"未选中"在同一张卡上就能分辨。 */}
-                    <span
-                      aria-hidden
-                      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
-                        active ? 'border-accent' : 'border-base-600'
-                      }`}
-                    >
-                      {active && <span className="h-2 w-2 rounded-full bg-accent" />}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-base font-medium text-ink-hi">{option.label}</span>
-                        {option.badge && (
-                          <Badge tone={option.badge === '推荐' ? 'accent' : 'warn'}>{option.badge}</Badge>
-                        )}
+                    <span className="flex items-center justify-between gap-1.5">
+                      <span className="flex items-center gap-1.5">
+                        <span
+                          aria-hidden
+                          className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border ${
+                            active ? 'border-accent' : 'border-base-600'
+                          }`}
+                        >
+                          {active && <span className="h-2 w-2 rounded-full bg-accent" />}
+                        </span>
+                        <span className="text-sm font-semibold text-ink-hi">{option.label}</span>
                       </span>
-                      <span className="mt-0.5 block truncate text-xs text-ink-lo">{option.desc}</span>
+                      {option.badge && <Badge tone="accent">{option.badge}</Badge>}
                     </span>
+                    <span className="truncate pl-5 text-xs text-ink-lo">{option.desc}</span>
                   </label>
                 );
               })}
             </div>
 
-            {/*
-              团队 / JEV 模式的模型来源说明 —— 保留：它们**不读**「AI 模型」列表，
-              不说清会让人以为上面的模型选择器漏了。
-            */}
-            {mode === 'ai_team' && (
-              <p className="rounded-md border border-base-700 bg-base-850 px-2.5 py-2 text-xs leading-relaxed text-ink-lo">
-                <span className="font-medium text-ink-mid">模型由系统 magpie 网关统一调度</span>
-                　—　不使用「AI 模型」列表；每个智能体按工作内容分到不同档位，额度用尽会自动向下平替。
-              </p>
-            )}
-
             {mode === 'ai_managed' && (
-              <Field
-                label="风险护栏档位（每单杠杆由 AI 在护栏内自主决定）"
-                hint="创建后与运行中均可直接在机器人页一键切换，下一轮决策立即生效；实际杠杆会同步受交易所账号上限约束。"
-              >
+              <div className="space-y-2.5 rounded-lg border border-base-750 bg-base-850/40 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-medium text-ink-mid">风险护栏档位（运行中可随时在线切换）</span>
+                  <span className="inline-flex items-center gap-1.5 text-ink-lo">
+                    预设模型
+                    <span className="num rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[11px] text-accent">
+                      {AI_MANAGED_PRESET_MODEL}
+                    </span>
+                  </span>
+                </div>
                 <ManagedRiskProfileCards
                   value={managedRiskProfile}
                   onChange={setManagedRiskProfile}
                 />
-              </Field>
+              </div>
             )}
 
-            {isAiDriven(mode) ? (
-              <p className="text-xs leading-relaxed text-ink-faint">
-                策略：智能托管 2.0 与 AI 团队模式不引用固定策略，由 AI500 雷达与统一硬风控自动护航。
+            {mode === 'ai_team' && (
+              <p className="rounded-lg border border-base-750 bg-base-850/40 px-3 py-2 text-xs leading-relaxed text-ink-lo">
+                <span className="font-medium text-ink-mid">模型由系统 magpie 网关统一调度</span>
+                {' · '}不使用「AI 模型」列表。
               </p>
-            ) : (
-              <Field label="策略">
-                <Select value={strategyId} onChange={(e) => setStrategyId(Number(e.target.value))}>
-                  {strategyList?.map((strategy) => (
-                    <option key={strategy.id} value={strategy.id}>
-                      {strategy.name}
+            )}
+
+            {!isAiDriven(mode) && (
+              <div className="space-y-3 rounded-lg border border-base-750 bg-base-850/40 p-3">
+                <Field label="交易策略">
+                  <Select value={strategyId} onChange={(e) => setStrategyId(Number(e.target.value))}>
+                    {strategyList?.map((strategy) => (
+                      <option key={strategy.id} value={strategy.id}>
+                        {strategy.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+
+                {usesModelPicker && (
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <Field label="模型厂商">
+                      <Select
+                        value={providerId}
+                        onChange={(e) => {
+                          setProviderId(e.target.value);
+                          setModelChoice('');
+                          setModelQuery('');
+                          setAiModelId('');
+                        }}
+                      >
+                        <option value="">请选择厂商</option>
+                        {providers.map((provider) => (
+                          <option key={provider.id} value={provider.id}>
+                            {provider.label}
+                            {(() => {
+                              const n = (models ?? []).filter((m) => m.provider === provider.id).length;
+                              return n > 0 ? `（已配 ${n} 个）` : '';
+                            })()}
+                          </option>
+                        ))}
+                      </Select>
+                      {providers.length === 0 && (
+                        <p className="mt-1 text-xs text-warn">
+                          还没有 AI 模型，请先到「AI 模型」页面添加。
+                        </p>
+                      )}
+                    </Field>
+
+                    <Field
+                      label="模型"
+                      hint={
+                        !providerId
+                          ? '先选模型厂商'
+                          : discovering
+                            ? '正在读取可用模型…'
+                            : availableModels.live
+                              ? '已配置在前，厂商可用在后（选后者自动建记录）'
+                              : undefined
+                      }
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <TextInput
+                            value={modelQuery}
+                            onChange={(event) => setModelQuery(event.target.value)}
+                            placeholder={providerId ? '快速筛选模型…' : '先选厂商'}
+                            disabled={!providerId}
+                            aria-label="搜索模型"
+                          />
+                          {modelQuery && (
+                            <Button size="sm" onClick={() => setModelQuery('')}>
+                              清空
+                            </Button>
+                          )}
+                        </div>
+                        <Select
+                          value={modelChoice}
+                          disabled={!providerId}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setModelChoice(value);
+                            setAiModelId(value.startsWith('new:') ? '' : Number(value));
+                          }}
+                        >
+                          <option value="">请选择模型</option>
+                          {shownConfigured.length > 0 && (
+                            <optgroup label="已配置">
+                              {shownConfigured.map((model) => (
+                                <option key={model.id} value={model.id}>
+                                  {model.label} · {model.model}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
+                          {shownAvailable.length > 0 && (
+                            <optgroup label={availableModels.live ? '厂商可用模型' : '厂商建议'}>
+                              {shownAvailable.map((id) => (
+                                <option key={id} value={'new:' + id}>
+                                  {id}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
+                        </Select>
+                      </div>
+                      {modelQuery && shownConfigured.length === 0 && shownAvailable.length === 0 && (
+                        <p className="mt-1 text-xs text-ink-faint">没有匹配「{modelQuery}」的模型。</p>
+                      )}
+                      {providerId && !discovering && providerDiscovery && !providerDiscovery.ok && (
+                        <p className="mt-1 text-xs text-warn">{providerDiscovery.message}</p>
+                      )}
+                      {providerId && !discovering && !providerDiscovery && !canDiscover && (
+                        <p className="mt-1 text-xs text-ink-faint">
+                          该厂商尚未配置密钥，无法拉取实时模型列表。
+                        </p>
+                      )}
+                    </Field>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
+          {/* Step 2: 账户与资金模式 */}
+          <section className="space-y-2.5 border-t border-base-800 pt-3.5">
+            <div className="flex items-center gap-2">
+              <span className="num flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">
+                2
+              </span>
+              <h3 className="text-xs font-semibold tracking-wider text-ink-mid">账户与资金模式</h3>
+              <span aria-hidden className="h-px flex-1 bg-base-800" />
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label="交易所凭证" hint="不绑账户则自动运行纯本地模拟盘。">
+                <Select
+                  value={exchangeAccountId}
+                  onChange={(e) => {
+                    if (e.target.value === '') {
+                      setExchangeAccountId('');
+                      setDryRun(true);
+                      return;
+                    }
+                    const nextId = Number(e.target.value);
+                    setExchangeAccountId(nextId);
+                    const nextAccount = accounts?.find((row) => row.id === nextId) ?? null;
+                    const policy = accountDryRunPolicy(nextAccount);
+                    if (policy.paperDisabled || policy.isGateTestnet) {
+                      setDryRun(policy.defaultDryRun);
+                    }
+                  }}
+                >
+                  <option value="">不绑账户（纯模拟盘）</option>
+                  {accounts?.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {exchangeShortLabel(account.exchange)} · {account.label} ·{' '}
+                      {account.testnet ? '测试网' : '主网'}
                     </option>
                   ))}
                 </Select>
               </Field>
-            )}
+
+              <Field
+                label="资金模式（创建后固定）"
+                hint={
+                  runPolicy.isGateMainnet
+                    ? 'Gate 正式网无本地模拟盘，仅支持实盘。'
+                    : runPolicy.isGateTestnet
+                      ? 'Gate 测试网使用虚拟资金真实撮合。'
+                      : '实盘需先选择交易所凭证。'
+                }
+              >
+                <div className="grid h-[34px] grid-cols-2 gap-1 rounded-lg border border-base-700 bg-base-950 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setDryRun(true)}
+                    aria-pressed={dryRun}
+                    disabled={runPolicy.paperDisabled}
+                    className={`flex items-center justify-center gap-1.5 rounded-md text-xs font-semibold transition ${
+                      dryRun
+                        ? 'bg-accent/20 text-accent shadow-sm'
+                        : 'text-ink-lo hover:text-ink-hi'
+                    } ${runPolicy.paperDisabled ? 'cursor-not-allowed opacity-40' : ''}`}
+                  >
+                    <span>{runPolicy.isGateTestnet ? '本地模拟' : '模拟盘'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDryRun(false)}
+                    aria-pressed={!dryRun}
+                    disabled={runPolicy.liveDisabled}
+                    className={`flex items-center justify-center gap-1.5 rounded-md text-xs font-semibold transition ${
+                      !dryRun
+                        ? runPolicy.isGateTestnet
+                          ? 'bg-accent/20 text-accent shadow-sm'
+                          : 'bg-warn/20 text-warn shadow-sm'
+                        : 'text-ink-lo hover:text-ink-hi'
+                    } ${runPolicy.liveDisabled ? 'cursor-not-allowed opacity-40' : ''}`}
+                  >
+                    <span>{runPolicy.isGateTestnet ? '测试网' : '实盘'}</span>
+                    {!runPolicy.isGateTestnet && !dryRun && (
+                      <span className="h-1.5 w-1.5 rounded-full bg-warn" aria-hidden />
+                    )}
+                  </button>
+                </div>
+              </Field>
+            </div>
           </section>
 
-          <section className="space-y-3 border-t border-base-750 pt-4">
-            <SectionLabel title="节奏与本金" className="mb-0" />
-            {/*
-              两列：周期与本金各占一半。原来是两个单列字段 —— 在 672px 宽的弹窗里
-              每行只放一个输入框，垂直空间白费，而这次的要求是「简单实用」。
+          {/* Step 3: 名称与节奏 */}
+          <section className="space-y-2.5 border-t border-base-800 pt-3.5">
+            <div className="flex items-center gap-2">
+              <span className="num flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">
+                3
+              </span>
+              <h3 className="text-xs font-semibold tracking-wider text-ink-mid">名称、节奏与本金</h3>
+              <span aria-hidden className="h-px flex-1 bg-base-800" />
+            </div>
 
-              ⚠️ 起始权益的来源分两种（用户 2026-10-27 需求）：
-                · 绑了账户 → 从该凭证读真实钱包余额（既有行为，一个字节不变）；
-                · 没绑账户 → 操作员自己填模拟盘起始余额。
-              两种情况**不能**都显示 —— 一个"读交易所"的只读控件出现在纯模拟盘
-              机器人上会让人以为余额仍然来自真实账户。
-            */}
+            <Field label="机器人名称">
+              <TextInput
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="例如：印钞机 / BTC 动量 · 模拟"
+                autoFocus
+              />
+            </Field>
+
             <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2">
-              <Field label="周期间隔（分钟）" hint="多久向模型请求一次决策。">
+              <Field label="决策周期（分钟）" hint="每轮向模型请求决策的间隔。">
                 <NumberInput value={cycleIntervalMinutes} onValueChange={setCycleIntervalMinutes} step={1} />
               </Field>
 
               {exchangeAccountId === '' ? (
-                <Field
-                  label="模拟盘起始余额（USDT）"
-                  hint="纯模拟盘的本金，与真实账户无关；收益率以它为分母。"
-                >
+                <Field label="模拟盘起始余额（USDT）" hint="纯模拟盘本金，收益率以此为基准。">
                   <TextInput
                     value={paperBalance}
                     onChange={(e) => setPaperBalance(e.target.value)}
@@ -1171,7 +999,7 @@ export function NewTraderModal({
             </div>
 
             {baselineWarning && (
-              <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-base text-warn">
+              <div className="rounded-md border border-warn/50 bg-warn/10 px-3 py-2 text-sm text-warn">
                 <span className="font-semibold">权益基准为 0。</span> {baselineWarning}
               </div>
             )}
@@ -1179,8 +1007,8 @@ export function NewTraderModal({
 
           {error && <ErrorNote>{error}</ErrorNote>}
 
-          <p className="text-xs leading-relaxed text-ink-faint">
-            创建机器人并不会启动它。点「启动」即开始运行 —— 预检（时钟、连通性、凭证与模型可达性）会在启动前自动执行，失败时直接在列表/详情页给出原因。
+          <p className="text-xs text-ink-faint">
+            创建后默认处于停止状态；点击「启动」时会自动执行时钟、连通性与模型预检。
           </p>
         </div>
       )}

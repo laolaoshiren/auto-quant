@@ -533,12 +533,17 @@ export function fleetTotals({ traders, stats, snapshots, dryRun }: FleetInputs):
     }
 
     /*
-     * ⚠️ **过期判定只在"读数来自快照"时才成立** ——
+     * ⚠️ **过期判定只在"读数来自快照"且账户下所有机器人都已停止时成立** ——
      * stats / derived 两条来源没有可比时刻（`accountEquityAtMs === null`），
-     * 把它们标成"过期"是假告警。
+     * 而只要该账户下仍有机器人在运行，空仓期间的心跳去重不应被误报成「读数已过期」。
      */
+    const hasRunningTrader = group.some(
+      (trader) => trader.isRunning || trader.status === 'running' || trader.status === 'safe_mode',
+    );
     const accountEquityStale =
-      accountEquityAtMs !== null && Date.now() - accountEquityAtMs > ACCOUNT_READING_STALE_MS;
+      !hasRunningTrader &&
+      accountEquityAtMs !== null &&
+      Date.now() - accountEquityAtMs > ACCOUNT_READING_STALE_MS;
 
     const account: FleetAccount = {
       exchangeAccountId,
