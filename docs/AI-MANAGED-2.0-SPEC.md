@@ -84,18 +84,18 @@
 
 **目标**：让 `ai_managed` 的持仓管理（加仓、减半锁利、上移止损、时间止损、果断离场）达到“游刃有余”的专业交易员水准。
 
-- [ ] **M3.1 持仓论点 `thesis` 与机器硬检查（`packages/server/src/managed/thesis.ts` + SQLite 迁移）**：
-  - 每笔持仓落库绑定结构化论点：开仓依据、加仓触发条件、减仓/止盈目标、**`time_stop_at` 时间止损**（防死扛 10 小时大亏）、**`max_adverse_excursion` 最大不利偏移（MAE）**；
-  - 30 秒监控层对 `time_stop` 与 `MAE` 执行**确定性机器硬检查**，触线自动平仓并记明确原因。
-- [ ] **M3.2 持仓战术仪表盘（`packages/server/src/managed/tactics.ts`）**：
-  - 每轮为每个持仓自动算好并喂给 LLM：当前 **`R` 倍数**（浮盈/初始风险）、距止损/止盈的 ATR 距离、**若金字塔加仓 50% 后的合并均价与零风险保本止损位**、以及持仓期间量能/OI/AI500 评分的衰减变化；
-  - 明确引导“试仓 → 盈利 ≥ 1R 突破确认后无风险金字塔加仓 → 2R+/动能衰减分批减仓锁利 + 结构上移止损（非整数位）”。
-- [ ] **M3.3 反例衰减笔记（`packages/server/src/managed/notes.ts`）**：
-  - 升级跨轮记忆，支持按标的替换语义、**`counterexamples` 反例计数**（屡错自动降权）、自动过期（7 天或标的离池 24h 后退休），强制记录**可验证的价位/量能触发条件**。
-- [ ] **M3.4 三段式 Agentic 决策循环（`packages/server/src/managed/engine.ts`）**：
-  - 落地标准 function-calling 三段式流程：`plan`（声明本轮观察与候选）→ `update_notes` / `update_thesis`（维护记忆与持仓论点）→ `finalize`（永不空决策，必须对每个持仓给 `HOLD`/战术动作、每个候选给 `WATCH`/开仓）；
-  - 补齐前端详情页对雷达 AI500 评分与持仓论点 `thesis` 的简洁展示（真实无头浏览器巡检通过）。
-- [ ] **M3 验收与上线**：全量单测 + 端到端模拟回放 + 无头浏览器 UI 巡检 + 部署至服务器长跑观察。
+- [x] **M3.1 持仓论点 `thesis` 与机器硬检查（`packages/server/src/managed/thesis.ts` + SQLite 迁移 `v20`）**（`d29c18b`）：
+  - 新增 SQLite 迁移 `v20`（`managed_theses` / `managed_notes` / `managed_radar_latest`）及退出原因 `thesis_time_stop` / `thesis_mae_stop`；每笔持仓开仓即绑定结构化论点（开仓依据、加仓/减仓/失效触发、`time_stop_at` 时间止损、`max_adverse_excursion_pct` MAE、入场快照与峰值 `R`）；
+  - 30 秒监控层 `runGuardTick()` 接入 `applyThesisHardGuard()` 对 `time_stop` 与 `MAE` 执行**确定性机器硬检查**，触线自动平仓并记明确原因（已登记 `riskOnlyPath.test.ts` 降暴露白名单）。
+- [x] **M3.2 持仓战术仪表盘（`packages/server/src/managed/tactics.ts`）**（`d29c18b`）：
+  - 每轮为每个持仓预计算并注入 Prompt：当前 **`R` 倍数**与峰值 `R`、距止损/止盈的 ATR 距离、**+50% 金字塔加仓模拟（合并均价 + 含手续费零风险保本止损位）**、以及入场至今的 AI500/OI/Taker 动能衰减提示；
+  - 明确给出战术阶段指引（`trial` 试仓 → `pyramid_ready` ≥1R 无风险金字塔加仓 → `scale_out_lock` 2R+/动能衰减分批减仓锁利与非整数位结构上移止损 → `defense` 防守）。
+- [x] **M3.3 反例衰减笔记（`packages/server/src/managed/notes.ts`）**（`d29c18b`）：
+  - 升级跨轮记忆：按 `(trader_id, symbol)` 唯一键替换语义、强制校验**可验证价位/指标触发条件**（`hasVerifiableTrigger`）、**`counterexamples` 反例计数**自动降权（`1/(1+n)`，累计 `≥ 3` 自动退休）、7 天过期与离池 24h 自动退休。
+- [x] **M3.4 三段式 Agentic 决策循环 + 前端雷达/论点面板（`packages/server/src/managed/engine.ts` + `ManagedIntelPanel.tsx`）**（`d29c18b`）：
+  - 落地原生 function-calling 三段式流程：`plan` → `update_notes` / `update_thesis` / `get_klines` → `finalize`（永不空决策，自动补齐漏报持仓 `hold` 与漏报候选 `wait`，并兼容纯文本 `<decision>` 回落）；
+  - 后端新增鉴权只读接口 `GET /api/traders/:id/managed-intel`，前端仅在 `ai_managed` 详情页渲染 `<ManagedIntelPanel>`（彩色 AI500 雷达徽章联动切图、持仓论点 `thesis` 与时间止损/MAE 卡片、可折叠反例衰减笔记），真实无头浏览器 8/8 视口×主题巡检零重叠/零横向溢出/零报错。
+- [x] **M3 验收与上线**（`d29c18b`）：`typecheck` 0 · `lint` 0 · `check:links` 107/236 · 全量 `npm test` 绿（`@aq/shared` 82/82、`@aq/server` 2448/2448 含 5 项 M3 端到端单测、`@aq/web` 457/457、`test:feed` PASS）· `npm run sim` 18/18 · 无头浏览器 UI 巡检 8/8 PASS · 已部署上线并现场验证 `v20` 迁移与运行态。
 
 ---
 
