@@ -135,6 +135,9 @@ import {
   signalHealthStateKey,
 } from './intel/signalHealthReport.js';
 import { SIGNAL_LIMITS } from './intel/signalHealth.js';
+import { RadarDeltaTracker } from '../radar/deltaTracker.js';
+import { runManagedRadarCycle, type ManagedCycleResult } from '../managed/cycle.js';
+import { buildManagedPrompts } from '../managed/prompt.js';
 
 const log = createLogger('trader');
 
@@ -1101,6 +1104,8 @@ function addNullableUsage(prev: number | null, next: number | null | undefined):
 
 export class AutoTrader {
   private timer: NodeJS.Timeout | null = null;
+  /** M2.3：智能托管 2.0 雷达 15m 环比增量追踪器（每个机器人实例独立维护）。 */
+  private readonly radarDeltaTracker = new RadarDeltaTracker();
   /**
    * **持仓剧变监控的定时器**（2026-10-13 加）。
    *
@@ -3715,11 +3720,46 @@ export class AutoTrader {
       },
     });
 
-    let snapshots = await this.deps.marketData.buildSnapshots(
-      selection.symbols,
-      config.indicators,
-      selection.sourcesBySymbol,
-    );
+    const useManagedRadar = this.deps.trader.mode === 'ai_managed';
+    const canScanManagedUniverse =
+      useManagedRadar &&
+      config.coinSource.sourceType !== 'static' &&
+      typeof (this.deps.marketData as { getUniverseOverview?: unknown }).getUniverseOverview ===
+        'function';
+
+    let snapshots: MarketSnapshot[] = canScanManagedUniverse
+      ? []
+      : await this.deps.marketData.buildSnapshots(
+          selection.symbols,
+          config.indicators,
+          selection.sourcesBySymbol,
+        );
+
+    let managedRadar: ManagedCycleResult | null = null;
+    if (useManagedRadar) {
+      managedRadar = await runManagedRadarCycle({
+        config,
+        market: this.deps.market,
+        marketData: this.deps.marketData,
+        registry: this.deps.registry,
+        deltaTracker: this.radarDeltaTracker,
+        heldSymbols: held,
+        watchedSymbols: watched,
+        existingSnapshots: snapshots,
+        leverageCaps: this.leverageCapCache,
+      });
+      if (managedRadar.snapshots.length > 0) {
+        snapshots = managedRadar.snapshots;
+      } else if (canScanManagedUniverse && selection.symbols.length > 0) {
+        // 极端网络抖动兜底：雷达扫描未产快照时退回既有选币快照
+        snapshots = await this.deps.marketData.buildSnapshots(
+          selection.symbols,
+          config.indicators,
+          selection.sourcesBySymbol,
+        );
+      }
+      this.emit('info', managedRadar.radarSummaryLine);
+    }
 
     /*
      * ══════════════════════════════════════════════════════════════════════════
@@ -4349,25 +4389,56 @@ export class AutoTrader {
       })),
     };
 
-    const systemPrompt = buildSystemPrompt(promptContext);
-    /*
-     * ⚠️ **拆成「稳定段 / 占位 / 变动段」三条消息 —— 缓存命中率就靠这一步。**
-     *
-     * 原来这里是一句 `buildUserPrompt(ctx, budget)` 拼出**一整条** user 消息，
-     * 而它的第一行是 `时间：<ISO>` —— 每轮都不同，于是从第一个字符起前缀就分叉，
-     * 整条消息（4.7 万 token）全部按全价计费。实测 `cached_tokens 2304 / prompt_tokens 49394`
-     * —— **只有 system 那一段命中了 5%**。
-     *
-     * 拆开之后前缀变成：`system` + `稳定段`，两者都只在**成交之后**才变，
-     * 于是连续多轮之间逐字节相同、进缓存。中间那条 assistant 占位是必要的：
-     * 它让最后一条仍是 `user`，模型看到的仍是"一轮新的输入"，而不是两段连贯的
-     * 用户指令叠在一起。
-     */
-    const { stable: stablePrompt, volatile: volatilePrompt } = buildUserPromptParts(
-      promptContext,
-      this.promptBudget,
-    );
-    const userPrompt = stablePrompt.length > 0 ? `${stablePrompt}\n\n${volatilePrompt}` : volatilePrompt;
+    let systemPrompt: string;
+    let stablePrompt: string;
+    let volatilePrompt: string;
+    let userPrompt: string;
+
+    if (this.deps.trader.mode === 'ai_managed' && managedRadar) {
+      const managedBundle = buildManagedPrompts({
+        traderName: promptContext.traderName,
+        cycleNumber: promptContext.cycleNumber,
+        now: promptContext.now,
+        config: promptContext.config,
+        account: promptContext.account,
+        positions: promptContext.positions,
+        pendingEntries: promptContext.pendingEntries,
+        dossiers: managedRadar.dossiers,
+        radarLeaderboard: managedRadar.radarLeaderboard,
+        btcBenchmarkLine: managedRadar.btcBenchmarkLine,
+        cycleIntervalMinutes: promptContext.cycleIntervalMinutes ?? this.deps.trader.cycleIntervalMinutes,
+        roundTripCostPercent: promptContext.roundTripCostPercent,
+        idleCycles: promptContext.idleCycles,
+        memory: promptContext.memory,
+      });
+      systemPrompt = managedBundle.systemPrompt;
+      stablePrompt = managedBundle.stablePrompt;
+      volatilePrompt = managedBundle.volatilePrompt;
+      userPrompt = managedBundle.userPrompt;
+      this.emit(
+        'info',
+        `[智能托管2.0] 精简 Prompt 就绪：${managedBundle.stats.userChars} 字符（展开 ${managedBundle.stats.expandedSymbols} 标的，K 线 4h:${managedBundle.stats.barsPerTf['4h']}/15m:${managedBundle.stats.barsPerTf['15m']}/1m:${managedBundle.stats.barsPerTf['1m']}）`,
+      );
+    } else {
+      systemPrompt = buildSystemPrompt(promptContext);
+      /*
+       * ⚠️ **拆成「稳定段 / 占位 / 变动段」三条消息 —— 缓存命中率就靠这一步。**
+       *
+       * 原来这里是一句 `buildUserPrompt(ctx, budget)` 拼出**一整条** user 消息，
+       * 而它的第一行是 `时间：<ISO>` —— 每轮都不同，于是从第一个字符起前缀就分叉，
+       * 整条消息（4.7 万 token）全部按全价计费。实测 `cached_tokens 2304 / prompt_tokens 49394`
+       * —— **只有 system 那一段命中了 5%**。
+       *
+       * 拆开之后前缀变成：`system` + `稳定段`，两者都只在**成交之后**才变，
+       * 于是连续多轮之间逐字节相同、进缓存。中间那条 assistant 占位是必要的：
+       * 它让最后一条仍是 `user`，模型看到的仍是"一轮新的输入"，而不是两段连贯的
+       * 用户指令叠在一起。
+       */
+      const parts = buildUserPromptParts(promptContext, this.promptBudget);
+      stablePrompt = parts.stable;
+      volatilePrompt = parts.volatile;
+      userPrompt = stablePrompt.length > 0 ? `${stablePrompt}\n\n${volatilePrompt}` : volatilePrompt;
+    }
 
     /*
      * ══════════════════════════════════════════════════════════════════════════

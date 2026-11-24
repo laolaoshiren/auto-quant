@@ -24,6 +24,7 @@ import {
   type ScreenCriteria,
 } from './screening.js';
 import { scoreSymbol } from '../strategy/scoring.js';
+import type { RadarUniverseRow } from '../radar/ai500.js';
 
 const log = createLogger('market:service');
 
@@ -452,6 +453,34 @@ export class MarketDataService {
    * Returns symbols ordered by the requested ranking, filtered by turnover and
    * open interest so the model never wastes attention on illiquid contracts.
    */
+  /**
+   * 返回全市场可交易永续合约的缓存基础视图（含标记价/成交额/24h 涨跌/高低点/资金费率）。
+   * 复用 `getUniverse(false)` 缓存，零额外交易所请求，专供 AI500 选币雷达初筛使用。
+   */
+  async getUniverseOverview(): Promise<RadarUniverseRow[]> {
+    const universe = await this.getUniverse(false);
+    const rows: RadarUniverseRow[] = [];
+    for (const [symbol, ticker] of universe.tickers) {
+      if (!this.registry.get(symbol)) continue;
+      const premium = universe.premiums.get(symbol);
+      const markPrice = premium ? Number(premium.markPrice) : Number.NaN;
+      const lastPrice = Number(ticker.lastPrice);
+      const price = Number.isFinite(markPrice) && markPrice > 0 ? markPrice : lastPrice;
+      if (!Number.isFinite(price) || price <= 0) continue;
+      const fundingRaw = premium ? Number(premium.lastFundingRate) : Number.NaN;
+      rows.push({
+        symbol,
+        price,
+        quoteVolume24h: Number(ticker.quoteVolume ?? 0),
+        changePercent24h: Number(ticker.priceChangePercent ?? 0),
+        high24h: Number(ticker.highPrice ?? price),
+        low24h: Number(ticker.lowPrice ?? price),
+        fundingRate: Number.isFinite(fundingRaw) ? fundingRaw : null,
+      });
+    }
+    return rows;
+  }
+
   /**
    * **全量候选行**（不排序、不截断）—— 给**分层漏斗**用。
    *
