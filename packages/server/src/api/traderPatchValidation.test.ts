@@ -256,3 +256,50 @@ test('未在启动 / 运行时 DELETE → 照常删除', async () => {
   assert.equal(res.statusCode, 200, res.payload);
   assert.ok(!traders.get(id), '行应当已被删除');
 });
+
+/* ---------------- 2026-11-24：智能托管统一预设模型 ---------------- */
+
+test('★★★ 智能托管创建时可不传 aiModelId（即使 ai_models 为空也能自动补占位）', async () => {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/traders',
+    headers: auth(),
+    payload: {
+      name: '智能托管-免选模型',
+      exchangeAccountId: null,
+      strategyId: null,
+      cycleIntervalMinutes: 15,
+      mode: 'ai_managed',
+      paperStartingBalance: 1000,
+    },
+  });
+  assert.equal(res.statusCode, 200, res.payload);
+  const created = res.json() as { id: number; mode: string; aiModelId: number };
+  assert.equal(created.mode, 'ai_managed');
+  assert.ok(created.aiModelId > 0, '外键占位 id 必须有效');
+});
+
+test('★★★ 智能托管 PATCH 尝试切换 aiModelId → 明确 400 拒绝，原样带回或省略照常成功', async () => {
+  const id = await createTrader('ai_managed');
+  const current = traders.get(id)!;
+  const otherModel = aiModels.create({
+    provider: 'deepseek',
+    label: '其他模型',
+    model: 'deepseek-chat',
+    baseUrl: 'https://api.deepseek.com/v1',
+    apiKeyEnc: '',
+    temperature: 0.2,
+    maxTokens: 4096,
+    timeoutSeconds: 60,
+    maxRetries: 1,
+  });
+
+  const denied = await patch(id, { aiModelId: otherModel.id });
+  assert.equal(denied.status, 400, denied.body);
+  assert.match(denied.body, /workbuddy\/deepseek-v4\.1-flash/);
+  assert.equal(traders.get(id)?.aiModelId, current.aiModelId, '被拒的改模型不得落库');
+
+  const sameOk = await patch(id, { aiModelId: current.aiModelId, name: '智能托管改名' });
+  assert.equal(sameOk.status, 200, sameOk.body);
+  assert.equal(traders.get(id)?.name, '智能托管改名');
+});

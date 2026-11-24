@@ -902,7 +902,8 @@ export interface TraderInput {
    * 表达不出"我没有账户"这件事。
    */
   exchangeAccountId: number | null;
-  aiModelId: number;
+  /** 固定策略模式必填；智能托管 / AI 团队 / JEV 统一走系统 magpie 网关，可省略。 */
+  aiModelId?: number;
   /**
    * **运行模式：模拟盘 / 实盘 —— 创建时固定**（2026-11-10 用户要求）。
    *

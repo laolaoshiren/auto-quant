@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { isAiDriven } from '@aq/shared';
+import { AI_MANAGED_PRESET_MODEL, isAiDriven, usesModelPicker as modeUsesModelPicker } from '@aq/shared';
 import { api, type AiModelRow, type ExchangeAccountRow, type TraderRow } from '../lib/api';
 import { fmtNum } from '../lib/format';
 import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, TextInput } from './ui';
@@ -140,7 +140,7 @@ export function TraderConfigModal({
 
   if (!trader) return null;
 
-  const usesModelPicker = trader.mode !== 'ai_team' && trader.mode !== 'jev';
+  const usesModelPicker = modeUsesModelPicker(trader.mode);
 
   const save = async () => {
     setError(null);
@@ -259,12 +259,18 @@ export function TraderConfigModal({
             <Field
               label="AI 模型"
               hint={
-                trader.mode === 'jev'
-                  ? 'JEV 模式固定调用 magpie 网关的 jev-latest，不读「AI 模型」列表。'
-                  : 'AI 团队模式由 magpie 网关统一按角色调度，不读「AI 模型」列表。'
+                trader.mode === 'ai_managed'
+                  ? `智能托管模式统一走系统 magpie 网关预设模型（${AI_MANAGED_PRESET_MODEL}），不读「AI 模型」列表。`
+                  : trader.mode === 'jev'
+                    ? 'JEV 模式固定调用 magpie 网关的 jev-latest，不读「AI 模型」列表。'
+                    : 'AI 团队模式由 magpie 网关统一按角色调度，不读「AI 模型」列表。'
               }
             >
-              <div className="text-base text-ink-faint">由 magpie 网关配置管理</div>
+              <div className="text-base text-ink-faint">
+                {trader.mode === 'ai_managed'
+                  ? `${AI_MANAGED_PRESET_MODEL}（magpie 网关）`
+                  : '由 magpie 网关配置管理'}
+              </div>
             </Field>
           )}
 

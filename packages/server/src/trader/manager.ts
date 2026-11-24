@@ -1,4 +1,5 @@
 import {
+  AI_MANAGED_PRESET_MODEL,
   StrategyConfigSchema,
   defaultStrategyConfig,
   isAiDriven,
@@ -2906,6 +2907,115 @@ export class TraderManager {
     return { model, reason: null };
   }
 
+  /**
+   * 装配智能托管模式（`ai_managed`）的统一预设模型客户端（2026-11-24）。
+   *
+   * 固定走系统 magpie 网关（`resolveTeamGateway`）与预设模型 `workbuddy/deepseek-v4.1-flash`，
+   * 完全不读取 `ai_models` 列表里的配置，避免修改列表中任意模型影响智能托管机器人。
+   * 找不到网关配置时返回明确 `reason`（由启动流程报 error 预检，绝不静默回落到其它模型）。
+   */
+  private async buildAiManagedModel(
+    traderId: number,
+    healthModelId: number,
+  ): Promise<{
+    client: LlmClient | null;
+    maxTokens: number;
+    inputTokenLimit: number;
+    reason: string | null;
+  }> {
+    const defaultMaxTokens = clientMaxTokensFor(65_536);
+    const defaultInputLimit = 1_000_000;
+    const gateway = resolveTeamGateway(process.env);
+    if (!gateway) {
+      return {
+        client: null,
+        maxTokens: defaultMaxTokens,
+        inputTokenLimit: defaultInputLimit,
+        reason:
+          '找不到系统 magpie 网关配置（请检查 MAGPIE_GATEWAY_URL / MAGPIE_GATEWAY_KEY_FILE 或本机 magpie 配置），' +
+          `无法调用预设模型 ${AI_MANAGED_PRESET_MODEL}。`,
+      };
+    }
+
+    let inputTokenLimit = defaultInputLimit;
+    try {
+      const result = await discoverModels({
+        provider: 'custom',
+        baseUrl: gateway.baseUrl,
+        apiKey: gateway.apiKey,
+      });
+      if (result.ok) {
+        const match = result.models.find((m) => m.id === AI_MANAGED_PRESET_MODEL);
+        if (match?.contextLength && match.contextLength > 0) {
+          inputTokenLimit = match.contextLength;
+        }
+      }
+    } catch {
+      /* 拉不到目录不阻断启动，回落预设 1M 上下文窗口。 */
+    }
+
+    const client = new LlmClient({
+      provider: 'custom',
+      apiKey: gateway.apiKey,
+      baseUrl: gateway.baseUrl,
+      model: AI_MANAGED_PRESET_MODEL,
+      temperature: 0.2,
+      maxTokens: defaultMaxTokens,
+      timeoutSeconds: 600,
+      maxRetries: 2,
+      reasoningEffort: 'high',
+    });
+
+    const probe = await client.testConnection();
+    if (!probe.ok) {
+      log.warn(
+        `机器人 #${traderId} 智能托管预设模型「${AI_MANAGED_PRESET_MODEL}」（magpie：${gateway.source}）探测失败，但启动继续：${probe.message}`,
+      );
+      recordLlmHealth(healthModelId, {
+        ok: false,
+        at: new Date().toISOString(),
+        latencyMs: probe.latencyMs,
+        error: probe.message.slice(0, 300),
+      });
+    } else {
+      log.info(
+        `机器人 #${traderId} 智能托管预设模型「${AI_MANAGED_PRESET_MODEL}」（magpie：${gateway.source}）响应正常，耗时 ${probe.latencyMs}ms`,
+      );
+      recordLlmHealth(healthModelId, {
+        ok: true,
+        at: new Date().toISOString(),
+        latencyMs: probe.latencyMs,
+      });
+    }
+
+    const tracked = Object.create(client) as LlmClient;
+    tracked.chat = async (...args: Parameters<LlmClient['chat']>) => {
+      try {
+        const result = await client.chat(...args);
+        recordLlmHealth(healthModelId, {
+          ok: true,
+          at: new Date().toISOString(),
+          latencyMs: result.latencyMs,
+        });
+        return result;
+      } catch (error) {
+        recordLlmHealth(healthModelId, {
+          ok: false,
+          at: new Date().toISOString(),
+          error: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+        });
+        throw error;
+      }
+    };
+
+    return {
+      client: tracked,
+      maxTokens: defaultMaxTokens,
+      inputTokenLimit,
+      reason: null,
+    };
+  }
+
   private async buildModel(aiModelId: number): Promise<{ client: LlmClient; config: ReturnType<typeof aiModels.get> }> {
     const row = aiModels.getWithSecret(aiModelId);
     if (!row) throw new Error(`找不到 AI 模型 ${aiModelId}`);
@@ -3337,14 +3447,56 @@ export class TraderManager {
        * 别名 `modelConfig` 是必需的：上面几行的 `config` 是**策略配置**
        *（`StrategyConfig`），两者同名会直接编译不过。
        */
-      const { client, config: modelConfig } = await this.buildModel(trader.aiModelId);
-      checks.push({
-        name: '语言模型',
-        severity: 'ok',
-        ok: true,
-        detail: '模型已成功响应探测请求。',
-        blocking: false,
-      });
+      let client: LlmClient;
+      let modelConfig: ReturnType<typeof aiModels.get>;
+      let modelMaxTokens: number | undefined;
+      let modelInputTokenLimit: number | undefined;
+
+      if (trader.mode === 'ai_managed') {
+        const managedBuild = await this.buildAiManagedModel(trader.id, trader.aiModelId);
+        modelMaxTokens = managedBuild.maxTokens;
+        modelInputTokenLimit = managedBuild.inputTokenLimit;
+        if (managedBuild.client) {
+          client = managedBuild.client;
+          checks.push({
+            name: '语言模型',
+            severity: 'ok',
+            ok: true,
+            detail: `智能托管模式已绑定预设模型 ${AI_MANAGED_PRESET_MODEL}（系统 magpie 网关）。`,
+            blocking: false,
+          });
+        } else {
+          const detail = `智能托管模式未启用：${managedBuild.reason ?? '缺少 magpie 网关配置'} 不会静默回落到其它模型。`;
+          checks.push({
+            name: '语言模型',
+            severity: 'error',
+            ok: false,
+            detail,
+            blocking: false,
+          });
+          runtimeLogs.write(trader.id, 'error', 'manager', detail);
+          log.warn(`机器人 #${trader.id} ${detail}`);
+          const missingError = (): never => {
+            throw new Error(detail);
+          };
+          client = {
+            complete: async () => missingError(),
+            chat: async () => missingError(),
+            testConnection: async () => ({ ok: false, message: detail, latencyMs: 0 }),
+          } as unknown as LlmClient;
+        }
+      } else {
+        const built = await this.buildModel(trader.aiModelId);
+        client = built.client;
+        modelConfig = built.config;
+        checks.push({
+          name: '语言模型',
+          severity: 'ok',
+          ok: true,
+          detail: '模型已成功响应探测请求。',
+          blocking: false,
+        });
+      }
 
       /*
        * ── AI 团队模式的**模型出口**（2026-10-12 新增，与智能托管完全隔离）──
@@ -3701,11 +3853,13 @@ export class TraderManager {
          * 团队模式走路由模型、不用这个 `client`，保持原值以免改变团队行为。
          */
         outputBudgetTokens:
-          modelConfig === undefined
-            ? undefined
-            : routedTeamModel
-              ? modelConfig.maxTokens
-              : clientMaxTokensFor(modelConfig.maxTokens),
+          modelMaxTokens !== undefined
+            ? modelMaxTokens
+            : modelConfig === undefined
+              ? undefined
+              : routedTeamModel
+                ? modelConfig.maxTokens
+                : clientMaxTokensFor(modelConfig.maxTokens),
         complete: async (systemPrompt, userPrompt, options) => {
           /*
            * ⚠️ **团队模式走路由模型；其余模式走原来那一条路（一字未改）。**
@@ -3879,6 +4033,7 @@ export class TraderManager {
         marketData,
         broker: connection.broker,
         model,
+        ...(modelInputTokenLimit !== undefined ? { modelInputTokenLimit } : {}),
         agent: {
           configOverride: () => agentRuntime.configOverride(),
           /*

@@ -669,6 +669,14 @@ export interface AutoTraderDeps {
   broker: BrokerPort;
   model: DecisionModel;
   /**
+   * 运行期模型实际可用的输入上下文上限（token）。
+   *
+   * 省略或 ≤ 0 时回落到 `aiModels.get(trader.aiModelId)?.inputTokenLimit`；
+   * 走系统预设模型（如智能托管固定 `workbuddy/deepseek-v4.1-flash`）时由 manager
+   * 显式传入该预设模型的真实上下文窗口，不读占位 `aiModelId`。
+   */
+  modelInputTokenLimit?: number;
+  /**
    * 一轮决策的硬超时（毫秒）。默认 {@link CYCLE_HARD_TIMEOUT_MS}（60 分钟）。
    *
    * ⚠️ **存在的唯一理由是让超时路径可测。** 20 分钟的常量没法在用例里等 ——
@@ -1337,7 +1345,10 @@ export class AutoTrader {
      *
      * 在这里算一次而不是每轮算：`aiModelId` 是机器人的属性，运行期不会变。
      */
-    const modelLimit = aiModels.get(deps.trader.aiModelId)?.inputTokenLimit ?? 0;
+    const modelLimit =
+      deps.modelInputTokenLimit !== undefined && deps.modelInputTokenLimit > 0
+        ? deps.modelInputTokenLimit
+        : (aiModels.get(deps.trader.aiModelId)?.inputTokenLimit ?? 0);
     this.promptBudget = promptTokenBudget(modelLimit);
 
     /*

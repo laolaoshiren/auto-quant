@@ -44,7 +44,7 @@ export const MODE_LABEL: Record<TraderMode, string> = {
 /** 一句话说明每种模式的**代价**（用户靠它决定"这台要不要一直开着"）。 */
 export const MODE_HINT: Record<TraderMode, string> = {
   strategy: '按策略参数跑，不调用模型 —— 秒级一轮，不花模型额度',
-  ai_managed: '一个模型负责决策 —— 每轮一次调用，1–10 分钟',
+  ai_managed: '智能托管统一走预设模型 workbuddy/deepseek-v4.1-flash（系统 magpie 网关）—— AI 自主调参决策',
   ai_team: '一支智能体团队开会决策 —— 每轮多次调用，数分钟',
   /*
    * ⚠️ **必须说清它是实验性的**（用户明确要求这个模式是"实验性"）。

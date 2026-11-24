@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { isAiDriven, type TraderMode } from '@aq/shared';
+import { AI_MANAGED_PRESET_MODEL, isAiDriven, usesModelPicker as modeUsesModelPicker, type TraderMode } from '@aq/shared';
 import {
   api,
   type AiModelRow,
@@ -260,7 +260,7 @@ export function NewTraderModal({
   // before our own `?refresh=1` probe comes back.
   const selectedAccount = accounts?.find((row) => row.id === selectedAccountId) ?? null;
   const runPolicy = accountDryRunPolicy(selectedAccount);
-  const usesModelPicker = mode !== 'ai_team' && mode !== 'jev';
+  const usesModelPicker = modeUsesModelPicker(mode);
   const equity = useExchangeEquity({
     open,
     exchangeAccountId: selectedAccountId,
@@ -512,11 +512,9 @@ export function NewTraderModal({
 
     setBusy(true);
     try {
-      let resolvedModelId = Number(aiModelId);
-      if (!usesModelPicker) {
-        /* 团队 / JEV 模式由网关提供模型；后端 schema 要求正整数占位 id，优先取已有模型。 */
-        resolvedModelId = Number(aiModelId) > 0 ? Number(aiModelId) : (models?.[0]?.id ?? 1);
-      } else {
+      let resolvedModelId: number | undefined;
+      if (usesModelPicker) {
+        resolvedModelId = Number(aiModelId);
         const reused = reusableModelId(createdModelsRef.current, modelChoice);
         if (reused !== undefined) {
           resolvedModelId = reused;
@@ -549,7 +547,7 @@ export function NewTraderModal({
          * （省略与 null 在创建语义上等价，但显式写出来，读代码的人不用猜）。
          */
         exchangeAccountId: exchangeAccountId === '' ? null : Number(exchangeAccountId),
-        aiModelId: resolvedModelId,
+        ...(resolvedModelId !== undefined ? { aiModelId: resolvedModelId } : {}),
         /*
          * ⚠️ **AI 托管必须传 `null`，不能传下拉框里选中的那个 id。**
          *
@@ -823,7 +821,7 @@ export function NewTraderModal({
 
               ⇒ 与团队模式同一条纪律：**不渲染**，而不是渲染了再禁用。
             */}
-            {mode !== 'ai_team' && mode !== 'jev' && (
+            {usesModelPicker && (
             <Field label="模型厂商">
               <Select
                 value={providerId}
@@ -897,7 +895,7 @@ export function NewTraderModal({
 
               ⇒ 与团队模式同一条纪律：**不渲染**，而不是渲染了再禁用。
             */}
-            {mode !== 'ai_team' && mode !== 'jev' && (
+            {usesModelPicker && (
             <Field
               label="模型"
               hint={
@@ -985,6 +983,19 @@ export function NewTraderModal({
                 </p>
               )}
             </Field>
+            )}
+            {mode === 'ai_managed' && (
+              <div className="sm:col-span-2">
+                <Field
+                  label="AI 模型"
+                  hint="智能托管模式统一走系统 magpie 网关预设模型，无需从「AI 模型」列表选择。"
+                >
+                  <div className="flex items-center gap-2 rounded-md border border-base-700 bg-base-850 px-3 py-2 text-sm text-ink-mid">
+                    <span className="font-mono text-accent">{AI_MANAGED_PRESET_MODEL}</span>
+                    <Badge tone="accent">系统预设 · magpie</Badge>
+                  </div>
+                </Field>
+              </div>
             )}
           </div>
           </section>

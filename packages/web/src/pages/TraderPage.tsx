@@ -9,7 +9,7 @@ import {
   Square,
   Zap,
 } from 'lucide-react';
-import { beijingDayStartMs, type EquitySnapshot } from '@aq/shared';
+import { AI_MANAGED_PRESET_MODEL, beijingDayStartMs, type EquitySnapshot } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
@@ -1690,6 +1690,14 @@ export function TraderPage() {
         >
           <span className="text-ink-faint">模型</span>
           <span className="text-accent">magpie 网关</span>
+        </span>
+      ) : trader.mode === 'ai_managed' ? (
+        <span
+          className="flex items-center gap-1"
+          title={`智能托管模式统一走系统 magpie 网关预设模型 ${AI_MANAGED_PRESET_MODEL}，与「AI 模型」列表无关。`}
+        >
+          <span className="text-ink-faint">模型</span>
+          <span className="text-accent">{AI_MANAGED_PRESET_MODEL}</span>
         </span>
       ) : trader.mode === 'jev' ? (
         <span

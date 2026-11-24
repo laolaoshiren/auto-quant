@@ -35,6 +35,8 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 /** 团队模式的网关配置。 */
 export interface TeamGatewayConfig {
@@ -65,7 +67,8 @@ const MAGPIE_KEY_PATHS = [
   '/opt/autoquant/data/magpie-caller-keys.json',
   /* Docker 卷（原文件；权限通常是 0600，服务多半读不到）。 */
   '/var/lib/docker/volumes/magpie-config/_data/magpie/caller-keys.json',
-  /* 原生安装（magpie 默认配置目录）。 */
+  /* 原生安装（magpie 默认配置目录，含 Windows / macOS / Linux 当前用户）。 */
+  join(homedir(), '.config', 'magpie', 'caller-keys.json'),
   '/root/.config/magpie/caller-keys.json',
   '/home/magpie/.config/magpie/caller-keys.json',
 ];

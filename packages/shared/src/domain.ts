@@ -198,6 +198,26 @@ export function isAiDriven(mode: TraderMode): boolean {
   return AI_DRIVEN_MODES.includes(mode);
 }
 
+/**
+ * 智能托管模式（`ai_managed`）统一走的预设模型（经系统 magpie 网关）。
+ *
+ * 2026-11-24 用户要求：智能模式下模型统一走预设模型 `workbuddy/deepseek-v4.1-flash`，
+ * 不再从「AI 模型」列表里挑选，避免修改或删改列表里的某条记录误伤智能托管机器人。
+ */
+export const AI_MANAGED_PRESET_MODEL = 'workbuddy/deepseek-v4.1-flash';
+
+/**
+ * 这个模式在创建/编辑机器人时，是否需要从「AI 模型」列表里挑选模型。
+ *
+ * - `strategy`（固定策略）：需要从「AI 模型」列表挑选；
+ * - `ai_managed`（智能托管）：统一走系统 magpie 网关预设模型 {@link AI_MANAGED_PRESET_MODEL}；
+ * - `ai_team`（AI 团队）：统一走系统 magpie 网关按角色路由；
+ * - `jev`（JEV 模式）：统一走系统 magpie 网关固定 `jev-latest`。
+ */
+export function usesModelPicker(mode: TraderMode): boolean {
+  return mode === 'strategy';
+}
+
 export type TraderStatus = 'running' | 'stopped' | 'starting' | 'error' | 'safe_mode';
 
 export interface Trader {

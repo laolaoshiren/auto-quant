@@ -5,6 +5,7 @@ import fastifyStatic from '@fastify/static';
 /* `setHeaders` 拿到的是**原始** `ServerResponse`，不是 Fastify 的 reply。 */
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
+import { DEFAULT_MAGPIE_URL } from '../trader/teamGateway.js';
 import {
   jevOptionSpec,
   listJevOptions,
@@ -16,6 +17,7 @@ import {
   applyJevPreset,
 } from '../trader/control.js';
 import {
+  AI_MANAGED_PRESET_MODEL,
   EXCHANGES,
   ExchangeIdSchema,
   LLM_PROVIDERS,
@@ -26,6 +28,7 @@ import {
   defaultJevConfig,
   defaultAiTeamConfig,
   isAiDriven,
+  usesModelPicker,
   unboundedAiManagedConfig,
   TIMEFRAMES,
   TimeframeSchema,
@@ -277,7 +280,10 @@ const TraderInputSchema = z.object({
    * 明确拒绝没有账户的机器人 —— 见 `manager.connectionFor`。
    */
   exchangeAccountId: z.number().int().positive().nullable().optional(),
-  aiModelId: z.number().int().positive(),
+  /**
+   * 固定策略模式必填；智能托管 / AI 团队 / JEV 统一走系统 magpie 网关，可省略。
+   */
+  aiModelId: z.number().int().positive().optional(),
   /**
    * 引用的策略 —— **AI 托管模式不需要它，传 `null`（或省略）**。
    *
@@ -896,14 +902,28 @@ export function evaluateTraderHealth(
  *
  * 而这条错误指向的是"模型 key"，与团队模式毫无关系 —— 排查成本极高。
  */
-function requireAnyModelIdForTeam(): number {
+function requireAnyModelIdForGateway(): number {
   const all = aiModels.list();
   if (all.length === 0) {
-    throw new Error(
-      'AI 团队模式需要数据库里至少存在一条「AI 模型」记录（团队模式本身不使用它，' +
-        '但机器人表的这一列是必填的）。请先到「AI 模型」页添加任意一条。',
-    );
+    /*
+     * 全新库还没有任何 AI 模型记录时，为走系统 magpie 网关的模式自动写入一条占位记录，
+     * 满足 traders.ai_model_id 的外键约束，不再阻断直接新建智能托管 / JEV / 团队机器人。
+     */
+    const seeded = aiModels.create({
+      provider: 'custom',
+      label: 'magpie（系统预设）',
+      model: AI_MANAGED_PRESET_MODEL,
+      baseUrl: DEFAULT_MAGPIE_URL,
+      apiKeyEnc: '',
+      temperature: 0.2,
+      maxTokens: 65536,
+      timeoutSeconds: 600,
+      maxRetries: 2,
+    });
+    return seeded.id;
   }
+  const presetMatch = all.find((model) => model.model === AI_MANAGED_PRESET_MODEL);
+  if (presetMatch) return presetMatch.id;
   const withKey = all.find((model) => (aiModels.getWithSecret(model.id)?.api_key_enc ?? '').length > 0);
   return (withKey ?? all[0]!).id;
 }
@@ -2315,8 +2335,11 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 所以：**列保留、写入一个占位值、团队模式不读它**。
      * 这比"为了语义干净去做一次有风险的迁移"更符合本项目"不碰实盘"的纪律。
      */
-    const isTeamMode = parsed.data.mode === 'ai_team';
-    if (!isTeamMode && !aiModels.get(parsed.data.aiModelId)) throw new Error('未知的 AI 模型');
+    const needsModelPicker = usesModelPicker(parsed.data.mode);
+    if (needsModelPicker) {
+      if (parsed.data.aiModelId === undefined) throw new Error('固定策略模式必须选择一个 AI 模型');
+      if (!aiModels.get(parsed.data.aiModelId)) throw new Error('未知的 AI 模型');
+    }
 
     /*
      * ── 策略：**两种模式的要求正好相反** ────────────────────────────────
@@ -2505,10 +2528,16 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        * 所以这里都只需要"一个真实存在的外键值"，取哪条都行。
        * 不这么处理的话，用户会被要求给一台根本不读模型的机器人挑一个模型。
        */
-      aiModelId:
-        parsed.data.mode === 'ai_team' || parsed.data.mode === 'jev'
-          ? requireAnyModelIdForTeam()
-          : parsed.data.aiModelId,
+      /*
+       * ⚠️ **智能托管 / 团队 / JEV 统一走系统 magpie 网关，不读 `ai_models` 列表**（2026-11-24）。
+       *   · `ai_managed` → 固定预设模型 `workbuddy/deepseek-v4.1-flash`（magpie 网关）
+       *   · `ai_team`    → 角色路由在运行时决定模型名（magpie 网关）
+       *   · `jev`        → 固定调 `jev-latest`（magpie 网关）
+       * 数据库列 `traders.ai_model_id` 仍保留外键，这里写入一个真实存在的占位 id。
+       */
+      aiModelId: needsModelPicker
+        ? parsed.data.aiModelId!
+        : requireAnyModelIdForGateway(),
       strategyId: requestedStrategyId,
       cycleIntervalMinutes: parsed.data.cycleIntervalMinutes,
       initialEquity,
@@ -2674,13 +2703,18 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         if (!strategies.get(requestedStrategyId)) throw new Error('未知的策略');
       }
     }
-    /* 只校验"换成的新值"：原样带回当前值（含团队模式的占位 id）不受影响。 */
-    if (
-      parsed.data.aiModelId !== undefined &&
-      parsed.data.aiModelId !== current.aiModelId &&
-      !aiModels.get(parsed.data.aiModelId)
-    ) {
-      throw new Error('未知的 AI 模型');
+    /* 只校验"换成的新值"：原样带回当前值（含网关模式的占位 id）不受影响。 */
+    if (parsed.data.aiModelId !== undefined && parsed.data.aiModelId !== current.aiModelId) {
+      if (!usesModelPicker(current.mode)) {
+        const modeHint =
+          current.mode === 'ai_managed'
+            ? `智能托管模式统一使用预设模型 ${AI_MANAGED_PRESET_MODEL}（系统 magpie 网关），不支持单独修改 AI 模型。`
+            : '当前模式统一由系统 magpie 网关调度模型，不支持单独修改 AI 模型。';
+        throw new Error(modeHint);
+      }
+      if (!aiModels.get(parsed.data.aiModelId)) {
+        throw new Error('未知的 AI 模型');
+      }
     }
 
     /*
