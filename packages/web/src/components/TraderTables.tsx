@@ -2414,7 +2414,7 @@ export type TraderTabId = 'positions' | 'orders' | 'trades' | 'history';
  * 所以"收起"在结构上**不可能**多取一页；反过来"展开"才会让哨兵更近一步 ——
  * 那也只是把盒子填满（本来就有的行为）。
  */
-const EXPANDED_MAX_H = 'max-h-[34vh]';
+const EXPANDED_MAX_H = 'max-h-[min(22vh,210px)]';
 
 /**
  * 收起态：表头 + **至少 2 行**。

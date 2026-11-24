@@ -119,8 +119,8 @@ type ChartTab = 'equity' | 'candles';
  * 里面 `<svg>` 为 `null`、`path` 数量 0：一块**空白的框**，看起来像"没有数据"。
  * 所以改由 `useEquityChartHeight()` 在 JS 里算出像素值。
  */
-const EQUITY_CHART_MIN = 150;
-const EQUITY_CHART_FALLBACK = 240;
+const EQUITY_CHART_MIN = 112;
+const EQUITY_CHART_FALLBACK = 220;
 
 /**
  * 实时量测图表的 `flex-1` 弹性宿主高度（像素整数）。
@@ -2253,7 +2253,7 @@ export function TraderPage() {
         <Panel
           padded={false}
           bodyClassName={curveCollapsed && chartTab === 'equity' ? 'p-0' : 'flex min-h-0 flex-1 flex-col p-0'}
-          className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[240px] flex-1 flex-col'}
+          className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[176px] flex-1 flex-col'}
           title={
             <span className="flex items-center gap-1">
               <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
@@ -2348,7 +2348,7 @@ export function TraderPage() {
                 />
                 <div
                   ref={equityHostRef}
-                  className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[150px]"
+                  className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[112px]"
                 >
                   <div className="absolute inset-0">
                     <DashboardEquityChart
@@ -2835,7 +2835,7 @@ function CandlesPanel({ symbol }: { symbol?: string }) {
       ) : candles.length === 0 ? (
         <Empty message="该交易对没有返回K线。" />
       ) : (
-        <div className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[150px]">
+        <div className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[112px]">
           <div className="absolute inset-0">
             <CandlestickChart candles={candles} fill />
           </div>
