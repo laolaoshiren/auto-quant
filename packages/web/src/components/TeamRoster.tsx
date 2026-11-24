@@ -296,7 +296,7 @@ export const MODE_BADGE: Record<TraderRow['mode'], { text: string; className: st
    * 用 warn 色让它在列表里显眼 —— 它的盈利表现完全未知，
    * 不该和另外三种看起来一样。
    */
-  jev: { text: 'JEV 实验', className: 'bg-warn/15 text-warn' },
+  jev: { text: 'JEV 已停用', className: 'bg-base-800 text-ink-faint' },
 };
 
 export function ModeBadge({ mode }: { mode: TraderRow['mode'] }): React.ReactElement {

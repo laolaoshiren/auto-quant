@@ -85,6 +85,18 @@ export interface Ai500DimensionScores {
   alphaPosition: number;
 }
 
+/** M4.3 六维因子权重配置（默认总和 = 100）。 */
+export type Ai500Weights = Ai500DimensionScores;
+
+export const DEFAULT_AI500_WEIGHTS: Readonly<Ai500Weights> = {
+  trend: 20,
+  breakout: 20,
+  oiFlow: 15,
+  takerFlow: 15,
+  funding: 15,
+  alphaPosition: 15,
+} as const;
+
 export interface Ai500Metrics {
   price: number;
   quoteVolume24h: number;
@@ -366,10 +378,37 @@ export function selectPrescreenSymbols(
  */
 export function scoreAi500Symbol(
   input: Ai500ScoreInput,
-  thresholds: { strongThreshold?: number; watchThreshold?: number } = {},
+  thresholds: {
+    strongThreshold?: number;
+    watchThreshold?: number;
+    weights?: Partial<Ai500Weights>;
+  } = {},
 ): Ai500Candidate {
   const strongThreshold = thresholds.strongThreshold ?? AI500_DEFAULTS.strongThreshold;
   const watchThreshold = thresholds.watchThreshold ?? AI500_DEFAULTS.watchThreshold;
+  const weights: Ai500Weights = {
+    trend: thresholds.weights?.trend ?? DEFAULT_AI500_WEIGHTS.trend,
+    breakout: thresholds.weights?.breakout ?? DEFAULT_AI500_WEIGHTS.breakout,
+    oiFlow: thresholds.weights?.oiFlow ?? DEFAULT_AI500_WEIGHTS.oiFlow,
+    takerFlow: thresholds.weights?.takerFlow ?? DEFAULT_AI500_WEIGHTS.takerFlow,
+    funding: thresholds.weights?.funding ?? DEFAULT_AI500_WEIGHTS.funding,
+    alphaPosition: thresholds.weights?.alphaPosition ?? DEFAULT_AI500_WEIGHTS.alphaPosition,
+  };
+  const weightSum =
+    weights.trend +
+    weights.breakout +
+    weights.oiFlow +
+    weights.takerFlow +
+    weights.funding +
+    weights.alphaPosition;
+  const useCustomWeights =
+    weightSum > 0 &&
+    (weights.trend !== DEFAULT_AI500_WEIGHTS.trend ||
+      weights.breakout !== DEFAULT_AI500_WEIGHTS.breakout ||
+      weights.oiFlow !== DEFAULT_AI500_WEIGHTS.oiFlow ||
+      weights.takerFlow !== DEFAULT_AI500_WEIGHTS.takerFlow ||
+      weights.funding !== DEFAULT_AI500_WEIGHTS.funding ||
+      weights.alphaPosition !== DEFAULT_AI500_WEIGHTS.alphaPosition);
 
   const k15 = input.klines15m;
   const k4h = input.klines4h;
@@ -651,14 +690,22 @@ export function scoreAi500Symbol(
   const overextendedPenalty = movedAlongDir && distEma20Atr > 3.2 ? 8 : 0;
   alphaPositionScore = clamp(round1(alphaPositionScore), 0, 15);
 
-  const rawTotal =
-    trendScore +
-    breakoutScore +
-    oiFlowScore +
-    takerFlowScore +
-    fundingScore +
-    alphaPositionScore -
-    overextendedPenalty;
+  const rawTotal = useCustomWeights
+    ? ((trendScore / DEFAULT_AI500_WEIGHTS.trend) * weights.trend +
+        (breakoutScore / DEFAULT_AI500_WEIGHTS.breakout) * weights.breakout +
+        (oiFlowScore / DEFAULT_AI500_WEIGHTS.oiFlow) * weights.oiFlow +
+        (takerFlowScore / DEFAULT_AI500_WEIGHTS.takerFlow) * weights.takerFlow +
+        (fundingScore / DEFAULT_AI500_WEIGHTS.funding) * weights.funding +
+        (alphaPositionScore / DEFAULT_AI500_WEIGHTS.alphaPosition) * weights.alphaPosition) *
+        (100 / weightSum) -
+      overextendedPenalty
+    : trendScore +
+      breakoutScore +
+      oiFlowScore +
+      takerFlowScore +
+      fundingScore +
+      alphaPositionScore -
+      overextendedPenalty;
 
   const score = Math.round(clamp(rawTotal, 0, 100));
   const tier: RadarTier =

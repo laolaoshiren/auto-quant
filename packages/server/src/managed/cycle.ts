@@ -21,6 +21,7 @@ import {
   scoreAi500Symbol,
   selectPrescreenSymbols,
   type Ai500Candidate,
+  type Ai500Weights,
   type RadarUniverseRow,
 } from '../radar/ai500.js';
 import type { RadarDeltaTracker } from '../radar/deltaTracker.js';
@@ -50,6 +51,12 @@ export interface ManagedCycleInput {
   existingSnapshots: readonly MarketSnapshot[];
   /** 标的单笔最小名义额与杠杆上限映射（可选，用于提示词）。 */
   leverageCaps?: ReadonlyMap<string, number>;
+  /** M4.3：来自成交归因引擎的校准权重与准入红线（缺省沿用基准）。 */
+  calibration?: {
+    weights?: Partial<Ai500Weights>;
+    strongThreshold?: number;
+    watchThreshold?: number;
+  };
   nowMs?: number;
 }
 
@@ -283,24 +290,35 @@ export async function runManagedRadarCycle(input: ManagedCycleInput): Promise<Ma
       continue;
     }
     scored.push(
-      scoreAi500Symbol({
-        symbol: sym,
-        price: item.row.price,
-        quoteVolume24h: item.row.quoteVolume24h,
-        changePercent24h: item.row.changePercent24h,
-        fundingRate: item.row.fundingRate,
-        klines15m: item.klines15m,
-        klines4h: item.klines4h,
-        openInterestUsd: item.openInterestUsd,
-        oiChange1hPct: item.oiChange1hPct,
-        oiChange4hPct: item.oiChange4hPct,
-        btcReturn1hPct,
-        btcReturn4hPct,
-      }),
+      scoreAi500Symbol(
+        {
+          symbol: sym,
+          price: item.row.price,
+          quoteVolume24h: item.row.quoteVolume24h,
+          changePercent24h: item.row.changePercent24h,
+          fundingRate: item.row.fundingRate,
+          klines15m: item.klines15m,
+          klines4h: item.klines4h,
+          openInterestUsd: item.openInterestUsd,
+          oiChange1hPct: item.oiChange1hPct,
+          oiChange4hPct: item.oiChange4hPct,
+          btcReturn1hPct,
+          btcReturn4hPct,
+        },
+        {
+          strongThreshold: input.calibration?.strongThreshold,
+          watchThreshold: input.calibration?.watchThreshold,
+          weights: input.calibration?.weights,
+        },
+      ),
     );
   }
 
-  const rankResult = rankAi500Candidates(scored, { topN: TOP_RADAR_PICKS });
+  const rankResult = rankAi500Candidates(scored, {
+    topN: TOP_RADAR_PICKS,
+    strongThreshold: input.calibration?.strongThreshold,
+    watchThreshold: input.calibration?.watchThreshold,
+  });
   const scoreBySym = new Map(rankResult.ranked.map((c) => [c.symbol, c]));
 
   // 最终展开集合：全部当前持仓 + Top 4 雷达高分标的（去重）

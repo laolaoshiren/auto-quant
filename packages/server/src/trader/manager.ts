@@ -3219,6 +3219,13 @@ export class TraderManager {
     }
 
     if (!trader) return { ok: false, error: `找不到机器人 ${traderId}`, preflight: [] };
+    if (trader.mode === 'jev') {
+      return {
+        ok: false,
+        error: 'JEV 模式已停用退役，不再支持启动；历史成交与决策仍保留只读查阅，请改用智能托管 2.0。',
+        preflight: [],
+      };
+    }
 
     /*
      * 占位必须在**第一个 await 之前**，否则并发 start 会双双通过上面那道检查
@@ -3997,9 +4004,15 @@ export class TraderManager {
          *（所以它不该被当成一个可选策略）。`ai_team` 同样是 AI 管参数 →
          * 用 `isAiDriven` 而不是写死单模式名。
          */
+        /*
+         * M4.1/M4.4：智能托管 2.0（`ai_managed`）已由独立 `radar/` + `managed/`（三段式决策 +
+         * 持仓论点 `thesis` + 反例衰减笔记 + M4.3 因子归因校准）接管，彻底停用旧 1.0 `AgentRuntime`
+         * 后台改参（避免它写旧版 `promptSections` 或重新打开 `drawdownGuard` 砍死波段赢家）。
+         * 仅保留给暂缓中的 `ai_team` 模式使用。
+         */
         isAiStrategy: () => {
           const mode = traders.get(traderId)?.mode;
-          return mode !== undefined && isAiDriven(mode);
+          return mode === 'ai_team';
         },
         model,
         equityNow: () => equity.latest(traderId)?.equity ?? null,
@@ -4280,6 +4293,13 @@ export class TraderManager {
     });
     if (!guard.ok) return { ok: false, error: guard.error, preflight: [] };
     if (!trader) return { ok: false, error: `找不到机器人 ${traderId}`, preflight: [] };
+    if (trader.mode === 'jev') {
+      return {
+        ok: false,
+        error: 'JEV 模式已停用退役，不再支持启动；历史成交与决策仍保留只读查阅，请改用智能托管 2.0。',
+        preflight: [],
+      };
+    }
 
     /*
      * ⚠️ **清掉上一轮「停止」留下的取消旗标**（2026-11-10 回归实测的真实 BUG）。

@@ -107,11 +107,13 @@ export function collectEvidenceFromDb(traderId: number, windowHours = DEFAULT_WI
     /* 用空数组 */
   }
 
-  /* ── 智能体运行与实验 ── */
+  /* ── 智能体运行与实验（ai_managed 2.0 已停用旧 1.0 参数实验，不再误报未结算）── */
   let pendingExperiments = 0;
   let totalRuns = 0;
   try {
-    pendingExperiments = agentExperiments.pending(traderId).length;
+    if (trader?.mode !== 'ai_managed') {
+      pendingExperiments = agentExperiments.pending(traderId).length;
+    }
     totalRuns = agentRuns.countSince(traderId, '1970-01-01T00:00:00Z');
   } catch {
     /* 用 0 */

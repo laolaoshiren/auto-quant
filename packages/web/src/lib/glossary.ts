@@ -38,23 +38,15 @@ export const MODE_LABEL: Record<TraderMode, string> = {
   strategy: '固定策略',
   ai_managed: '智能托管',
   ai_team: 'AI 团队',
-  jev: 'JEV 模式（实验性）',
+  jev: 'JEV 模式（已停用）',
 };
 
 /** 一句话说明每种模式的**代价**（用户靠它决定"这台要不要一直开着"）。 */
 export const MODE_HINT: Record<TraderMode, string> = {
   strategy: '按策略参数跑，不调用模型 —— 秒级一轮，不花模型额度',
-  ai_managed: '智能托管统一走预设模型 workbuddy/deepseek-v4.1-flash（系统 magpie 网关）—— AI 自主调参决策',
+  ai_managed: '智能托管 2.0 统一走预设模型 workbuddy/deepseek-v4.1-flash（系统 magpie 网关）—— AI500 雷达 + 三段式决策 + 持仓论点硬检查',
   ai_team: '一支智能体团队开会决策 —— 每轮多次调用，数分钟',
-  /*
-   * ⚠️ **必须说清它是实验性的**（用户明确要求这个模式是"实验性"）。
-   *
-   * 同时说清它的真实形态：Jev 只做**判断**（选方向、选档位），
-   * 数值档位由代码算好喂给它 —— 因为实测发现 Jev 不产生文字、且弱于算术
-   *（见 `docs/JEV-MODE-DESIGN.md`）。写在用户看得见的地方，
-   * 是为了不让人误以为"它能自己算仓位"。
-   */
-  jev: '全部判断交给 Jev 模型（实验性）—— 每个标的一次调用、秒级；数值档位由代码算好供它选',
+  jev: '已停用退役的历史实验模式，仅保留既有记录只读查阅，不支持新建或启动',
 };
 
 /** 页面名登记（导航、标题、返回链接、FAQ 全部取这里）。 */

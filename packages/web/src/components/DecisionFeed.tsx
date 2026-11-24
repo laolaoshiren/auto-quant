@@ -171,7 +171,6 @@ import { TeamCycleBlock } from './TeamBoard/TeamCycleBlock';
 import { usePolled } from '../lib/hooks';
 import { Badge, Empty, ErrorNote, Panel, Spinner3, cn } from './ui';
 import { RobotControl } from './TeamBoard/RobotControl';
-import { JevSettings } from './TeamBoard/JevSettings';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
 import { humanizeToolNames } from '../lib/toolLabels';
 import { summarizeMemberOutput } from '../lib/memberSummary';
@@ -661,17 +660,8 @@ export function DecisionFeed({
    * ⚠️ **只有团队模式有标签栏**：另两种模式本来就没有工作流区，
    * 它们的决策流一直是独占全部高度 —— 给它们加一个只有一项的标签栏是纯噪音。
    */
-  const [pane, setPane] = useState<'decisions' | 'workflow' | 'control' | 'jev'>('decisions');
-  /**
-   * **哪些模式需要这套标签栏**（2026-10-19）。
-   *
-   * `ai_team` 有「AI 工作流 + 机器人控制」；`jev` 有「机器人控制 + JEV 模式」。
-   * 两者都需要标签栏，但**不需要彼此的面板** —— 所以下面每个面板各自判模式。
-   *
-   * ⚠️ 另两种模式（`strategy` / `ai_managed`）**不渲染标签栏** ——
-   * 它们的界面必须逐字节不变（那上面挂着实盘）。
-   */
-  const isTeamLike = mode === 'ai_team' || mode === 'jev';
+  const [pane, setPane] = useState<'decisions' | 'workflow' | 'control'>('decisions');
+  const isTeamLike = mode === 'ai_team';
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -1103,35 +1093,15 @@ export function DecisionFeed({
    * 而 `scrollTop` 已经由这里设好了 —— 不清就会**补偿两遍**、滚过头。
    */
   /** 两个标签的统一切换入口：**离开决策页时先记住位置**。 */
-  const switchPane = (next: 'decisions' | 'workflow' | 'control' | 'jev') => {
+  const switchPane = (next: 'decisions' | 'workflow' | 'control') => {
     if (pane === 'decisions' && next !== 'decisions') {
       restoreScrollRef.current = scrollerRef.current?.scrollTop ?? null;
     }
     setPane(next);
   };
 
-  /**
-   * ⚠️ **`pane` 停在一个当前模式没有的标签上时必须回落**（2026-10-19）。
-   *
-   * ## 什么情况下会发生
-   *
-   * 用户在一台**团队模式**的机器人上切到「AI 工作流」，然后去看另一台
-   * **JEV 模式**的机器人 —— 如果 `pane` 被复用（同一个组件实例），
-   * 它会停在 `'workflow'`，而 JEV 模式下**那个面板不渲染**
-   * ⇒ 整块区域**一片空白**，用户不知道发生了什么。
-   *
-   * 反过来也一样（JEV 的「JEV 模式」标签在团队模式里不存在）。
-   *
-   * ⇒ 用一个 `useEffect` 在模式变化时把它拉回 `'decisions'`。
-   *   选 `'decisions'` 而不是"第一个可用标签"，是因为它**在所有模式里都存在**。
-   */
-  const visibleTabs: ReadonlyArray<'decisions' | 'workflow' | 'control' | 'jev'> = useMemo(
-    () =>
-      mode === 'ai_team'
-        ? ['decisions', 'workflow', 'control']
-        : mode === 'jev'
-          ? ['decisions', 'jev']
-          : ['decisions'],
+  const visibleTabs: ReadonlyArray<'decisions' | 'workflow' | 'control'> = useMemo(
+    () => (mode === 'ai_team' ? ['decisions', 'workflow', 'control'] : ['decisions']),
     [mode],
   );
 
@@ -1465,38 +1435,6 @@ export function DecisionFeed({
                 机器人控制
               </button>
               )}
-              {/*
-                ── 「JEV 模式」标签（2026-10-19 用户要求）────────────────────
-
-                用户原话：
-                > 「我感觉 P3 可以做…但是**要有开关**（像团队模式一样，
-                >  这边增加 P3 选项和其他你觉得必要的选项，**不要全部写死**）」
-
-                ## 为什么它只对 JEV 模式出现
-
-                这些选项（选币方式、开仓方式、置信门槛…）只影响 `mode === 'jev'`
-                的机器人。给另外三种模式显示它们等于**让人以为能改**，
-                而实际上一个字节都不会被读到。
-              */}
-              {mode === 'jev' && (
-                <button
-                  id="feed-tab-jev"
-                  type="button"
-                  role="tab"
-                  aria-selected={pane === 'jev'}
-                  aria-controls="feed-panel-jev"
-                  tabIndex={pane === 'jev' ? 0 : -1}
-                  onClick={() => switchPane('jev')}
-                  className={cn(
-                    '-mb-px border-b-2 px-2.5 py-1 text-base transition',
-                    pane === 'jev'
-                      ? 'border-accent font-semibold text-ink-hi'
-                      : 'border-transparent text-ink-lo hover:text-ink-mid',
-                  )}
-                >
-                  JEV 模式
-                </button>
-              )}
             </div>
           )}
 
@@ -1607,30 +1545,6 @@ export function DecisionFeed({
               className="min-h-0 flex-1 overflow-y-auto"
             >
               <RobotControl traderId={traderId} />
-            </div>
-          )}
-
-          {/*
-            **JEV 模式专属选项**（2026-10-19 用户要求）。
-
-            原话：
-            > 「我感觉 P3 可以做…但是**要有开关**（像团队模式一样，这边增加 P3 选项
-            >  和其他你觉得必要的选项，**不要全部写死**）」
-
-            这些项从服务端的 `JEV_OPTIONS` 拉，前端不硬编码任何一项 ——
-            以后加一个新选项只改 `control.ts` 一处。
-
-            ⚠️ **只在 `mode === 'jev'` 时出现**：这些选项只影响 JEV 模式的机器人，
-            给另外三种显示它们等于让人以为能改，而实际一个字节都不会被读到。
-          */}
-          {mode === 'jev' && pane === 'jev' && (
-            <div
-              role="tabpanel"
-              id="feed-panel-jev"
-              aria-labelledby="feed-tab-jev"
-              className="min-h-0 flex-1 overflow-y-auto"
-            >
-              <JevSettings traderId={traderId} />
             </div>
           )}
 

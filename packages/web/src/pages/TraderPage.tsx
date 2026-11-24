@@ -1703,10 +1703,10 @@ export function TraderPage() {
       ) : trader.mode === 'jev' ? (
         <span
           className="flex items-center gap-1"
-          title="JEV 决策模型固定为 magpie 网关的 Jev，与「AI 模型」列表无关。"
+          title="JEV 模式已停用退役，仅保留历史记录只读查阅。"
         >
-          <span className="text-ink-faint">模型</span>
-          <span className="text-accent">Jev · magpie</span>
+          <span className="text-ink-faint">模式</span>
+          <span className="text-ink-faint">JEV 已停用（只读归档）</span>
         </span>
       ) : (
         <Link

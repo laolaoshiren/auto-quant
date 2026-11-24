@@ -120,7 +120,12 @@ export const managedNotesStore = {
     const norm = normalizeSymbol(input.symbol);
     if (!norm) return { ok: false, reason: '标的名称无效。' };
     const cleanNote = input.note.replace(/\s+/g, ' ').trim().slice(0, 240);
-    const cleanTrigger = input.triggerCondition.replace(/\s+/g, ' ').trim().slice(0, 160);
+    let rawTrigger = input.triggerCondition.replace(/\s+/g, ' ').trim();
+    // 剥离模型偶发误抄的提示词展示前缀 `触发[...]`，避免渲染成 `触发[触发[...]]`
+    while (/^触发\[.*\]$/.test(rawTrigger)) {
+      rawTrigger = rawTrigger.slice(3, -1).trim();
+    }
+    const cleanTrigger = rawTrigger.slice(0, 160);
     if (cleanNote.length < 4) return { ok: false, reason: '笔记正文过短，请写清关键结构判断。' };
     if (!hasVerifiableTrigger(cleanTrigger)) {
       return {

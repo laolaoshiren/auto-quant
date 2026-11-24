@@ -1502,6 +1502,76 @@ export interface ManagedNoteView {
   expiresAt: string;
 }
 
+export interface ManagedAttributionDimView {
+  key: 'trend' | 'breakout' | 'oiFlow' | 'takerFlow' | 'funding' | 'alphaPosition';
+  label: string;
+  baselineWeight: number;
+  recommendedWeight: number;
+  deltaWeight: number;
+  correlationR: number;
+  winMeanPct: number;
+  lossMeanPct: number;
+  edgePct: number;
+  highBucketWinRate: number;
+  lowBucketWinRate: number;
+  highBucketAvgR: number;
+  lowBucketAvgR: number;
+}
+
+export interface ManagedAttributionView {
+  sampleSize: number;
+  minSamplesRequired: number;
+  applied: boolean;
+  reason: string;
+  weights: {
+    trend: number;
+    breakout: number;
+    oiFlow: number;
+    takerFlow: number;
+    funding: number;
+    alphaPosition: number;
+  };
+  strongThreshold: number;
+  watchThreshold: number;
+  dimensions: ManagedAttributionDimView[];
+  summaryLine: string;
+  updatedAt: string;
+}
+
+export interface ManagedReadinessCheckView {
+  id: string;
+  label: string;
+  status: 'pass' | 'warn' | 'fail';
+  detail: string;
+}
+
+export interface ManagedReadinessView {
+  overall: 'pass' | 'warn' | 'fail';
+  summary: string;
+  metrics: {
+    windowHours: number;
+    totalCycles: number;
+    successfulCycles: number;
+    cycleSuccessRatePct: number;
+    maxPromptChars: number;
+    avgCacheHitPct: number;
+    watchOrHoldRatioPct: number;
+    closedTrades: number;
+    wins: number;
+    winRatePct: number;
+    profitFactor: number | null;
+    rewardRiskRatio: number | null;
+    totalNetPnl: number;
+    totalFees: number;
+    totalFunding: number;
+    thesisTriggerCount: number;
+    unprotectedOpenCount: number;
+    drawdownGuardEnabled: boolean;
+  };
+  checks: ManagedReadinessCheckView[];
+  updatedAt: string;
+}
+
 export interface ManagedIntelView {
   radar: {
     traderId: number;
@@ -1512,6 +1582,8 @@ export interface ManagedIntelView {
   } | null;
   theses: ManagedThesisView[];
   notes: ManagedNoteView[];
+  attribution?: ManagedAttributionView | null;
+  readiness?: ManagedReadinessView | null;
 }
 
 /** Absolute WebSocket URL for the live event stream. */

@@ -1048,6 +1048,34 @@ CREATE TABLE IF NOT EXISTS managed_radar_latest (
 );
 `;
 
+/**
+ * Migration 21: 智能托管 2.0 成交归因与 AI500 因子权重校准（M4.3）。
+ *
+ * - 为 `managed_theses` 补充入场 6 维 AI500 分数快照（`entry_dimensions_json`）、
+ *   准入档位（`entry_tier`）与平仓成交归因结果（`closed_trade_id` / `realized_net_pnl` /
+ *   `realized_r` / `close_reason`），构成「入场因子 → 实盘净盈亏」的确定性归因闭环；
+ * - 新增 `managed_radar_calibration` 表，按机器人持久化校准后的六维权重、准入红线与统计报告。
+ */
+const M21_MANAGED_V2_ATTRIBUTION = `
+ALTER TABLE managed_theses ADD COLUMN entry_dimensions_json TEXT;
+ALTER TABLE managed_theses ADD COLUMN entry_tier            TEXT;
+ALTER TABLE managed_theses ADD COLUMN closed_trade_id       INTEGER;
+ALTER TABLE managed_theses ADD COLUMN realized_net_pnl      REAL;
+ALTER TABLE managed_theses ADD COLUMN realized_r            REAL;
+ALTER TABLE managed_theses ADD COLUMN close_reason          TEXT;
+
+CREATE TABLE IF NOT EXISTS managed_radar_calibration (
+  trader_id        INTEGER PRIMARY KEY REFERENCES traders(id) ON DELETE CASCADE,
+  weights_json     TEXT    NOT NULL,
+  strong_threshold INTEGER NOT NULL DEFAULT 75,
+  watch_threshold  INTEGER NOT NULL DEFAULT 65,
+  sample_size      INTEGER NOT NULL DEFAULT 0,
+  applied          INTEGER NOT NULL DEFAULT 0,
+  report_json      TEXT    NOT NULL DEFAULT '{}',
+  updated_at       TEXT    NOT NULL
+);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -1081,4 +1109,5 @@ export const MIGRATIONS: readonly Migration[] = [
     detachForeignKeys: true,
   },
   { version: 20, name: 'managed-v2-state', sql: M20_MANAGED_V2_STATE },
+  { version: 21, name: 'managed-v2-attribution', sql: M21_MANAGED_V2_ATTRIBUTION },
 ];

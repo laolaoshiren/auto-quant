@@ -8,7 +8,9 @@ import { basename } from 'node:path';
 import { DEFAULT_MAGPIE_URL } from '../trader/teamGateway.js';
 import { managedNotesStore } from '../managed/notes.js';
 import { managedRadarStore } from '../managed/radarStore.js';
+import { evaluateTraderManagedReadiness } from '../managed/readiness.js';
 import { managedThesisStore } from '../managed/thesis.js';
+import { managedAttributionStore } from '../radar/attribution.js';
 import {
   jevOptionSpec,
   listJevOptions,
@@ -28,7 +30,6 @@ import {
   StrategyConfigSchema,
   defaultStrategyConfig,
   providerDefaults,
-  defaultJevConfig,
   defaultAiTeamConfig,
   isAiDriven,
   usesModelPicker,
@@ -2378,6 +2379,9 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * ⇒ 判据必须是 `AI_DRIVEN_MODES` 那份唯一清单（`isAiDriven()`），
      *   加新模式时只改 `domain.ts` 一处。
      */
+    if (parsed.data.mode === 'jev') {
+      throw new Error('JEV 模式已停用退役，不再支持新建；请改用「智能托管（ai_managed 2.0）」模式。');
+    }
     const isAiDrivenMode = isAiDriven(parsed.data.mode);
     const requestedStrategyId = parsed.data.strategyId ?? null;
     if (isAiDrivenMode) {
@@ -2602,12 +2606,6 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       traders.setAgentConfig(trader.id, JSON.stringify(unboundedAiManagedConfig()));
     } else if (parsed.data.mode === 'ai_team') {
       traders.setAgentConfig(trader.id, JSON.stringify(defaultAiTeamConfig()));
-    } else if (parsed.data.mode === 'jev') {
-      /*
-       * ⚠️ 与团队模式同一类坑：**不播种就会空转**（策略配置全空 ⇒ 没有候选标的
-       * ⇒ Jev 永远收到空数组 ⇒ 一台"运行中"的机器人永远不开仓）。
-       */
-      traders.setAgentConfig(trader.id, JSON.stringify(defaultJevConfig()));
     }
 
     return { ...trader, equitySource };
@@ -3760,6 +3758,8 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       radar: managedRadarStore.get(trader.id),
       theses: managedThesisStore.listActive(trader.id),
       notes: managedNotesStore.listActive(trader.id),
+      attribution: managedAttributionStore.get(trader.id),
+      readiness: evaluateTraderManagedReadiness(trader.id),
     };
   });
 

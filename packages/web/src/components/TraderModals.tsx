@@ -1039,13 +1039,6 @@ export function NewTraderModal({
                     badge: null,
                     full: '一支分工协作的智能体团队：调度官统筹，分析师并行调研（行情、新闻、社区情绪），多空研究员对抗辩论，风控官把关，交易员执行。持续工作、事件驱动，每次决策都有完整审计轨迹。',
                   },
-                  {
-                    id: 'jev' as const,
-                    label: MODE_LABEL.jev,
-                    desc: '交给 JEV 决策引擎，盈利能力尚未验证。',
-                    badge: '实验性',
-                    full: '每一个判断都交给 Jev 决策模型：选哪些标的、做多做空、用哪一档仓位与止损止盈。Jev 只回答"选哪个"（它不产生文字、也不擅长算数），所以具体价位与档位由系统按 ATR 与风险预算先算好，再由它挑 —— 挑完照常过风控、照常挂保护单。',
-                  },
                 ] as const
               ).map((option) => {
                 const active = mode === option.id;
@@ -1100,17 +1093,10 @@ export function NewTraderModal({
                 　—　不使用「AI 模型」列表；每个智能体按工作内容分到不同档位，额度用尽会自动向下平替。
               </p>
             )}
-            {mode === 'jev' && (
-              <p className="rounded-md border border-base-700 bg-base-850 px-2.5 py-2 text-xs leading-relaxed text-ink-lo">
-                <span className="font-medium text-ink-mid">决策模型由 magpie 网关提供（Jev）</span>
-                　—　固定调用 <code>jev-latest</code>，不使用「AI 模型」列表里的任何记录。
-              </p>
-            )}
 
             {isAiDriven(mode) ? (
               <p className="text-xs leading-relaxed text-ink-faint">
-                策略：AI 驱动的模式不引用策略 —— 参数由 AI 自己设定并持续调整（JEV 模式的参数在机器人页的「JEV
-                模式」标签里调）。
+                策略：智能托管 2.0 与 AI 团队模式不引用固定策略，由 AI500 雷达与统一硬风控自动护航。
               </p>
             ) : (
               <Field label="策略">

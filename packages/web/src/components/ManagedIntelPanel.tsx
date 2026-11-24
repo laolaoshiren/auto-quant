@@ -38,6 +38,7 @@ function radarBadgeTone(item: ManagedRadarItemView): 'up' | 'down' | 'warn' | 'm
 
 export function ManagedIntelPanel({ traderId, onSelectSymbol }: ManagedIntelPanelProps) {
   const [notesOpen, setNotesOpen] = useState(false);
+  const [intelOpen, setIntelOpen] = useState(false);
 
   const fetcher = useCallback(
     (signal: AbortSignal) => api.traderManagedIntel(traderId, signal),
@@ -52,8 +53,10 @@ export function ManagedIntelPanel({ traderId, onSelectSymbol }: ManagedIntelPane
   const radar = data?.radar ?? null;
   const theses = data?.theses ?? [];
   const notes = data?.notes ?? [];
+  const attribution = data?.attribution ?? null;
+  const readiness = data?.readiness ?? null;
 
-  if (!radar && theses.length === 0 && notes.length === 0) {
+  if (!radar && theses.length === 0 && notes.length === 0 && !attribution && !readiness) {
     return null;
   }
 
@@ -67,6 +70,29 @@ export function ManagedIntelPanel({ traderId, onSelectSymbol }: ManagedIntelPane
             <span className="hidden truncate sm:inline" title={radar.btcBenchmark}>
               {radar.btcBenchmark}
             </span>
+          )}
+          {(attribution || readiness) && (
+            <button
+              type="button"
+              onClick={() => setIntelOpen((v) => !v)}
+              className="rounded px-1.5 py-0.5 text-xs text-ink-lo transition hover:bg-base-800 hover:text-ink-hi"
+              title={readiness?.summary ?? attribution?.summaryLine}
+            >
+              归因/就绪
+              {readiness && (
+                <span
+                  className={cn(
+                    'ml-1 inline-block h-1.5 w-1.5 rounded-full align-middle',
+                    readiness.overall === 'pass'
+                      ? 'bg-up'
+                      : readiness.overall === 'warn'
+                        ? 'bg-warn'
+                        : 'bg-down',
+                  )}
+                />
+              )}{' '}
+              {intelOpen ? '▴' : '▾'}
+            </button>
           )}
           {notes.length > 0 && (
             <button
@@ -224,6 +250,79 @@ export function ManagedIntelPanel({ traderId, onSelectSymbol }: ManagedIntelPane
                 </span>
               </div>
             ))}
+          </div>
+        )}
+        {/* 4) 可折叠的 M4.3 因子归因校准与 M4.1/M4.2 实盘就绪门禁 */}
+        {intelOpen && (attribution || readiness) && (
+          <div className="flex flex-col gap-2 border-t border-base-800/80 pt-2">
+            {attribution && (
+              <div className="flex flex-col gap-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium text-ink-hi">AI500 因子归因</span>
+                  <Badge tone={attribution.applied ? 'up' : 'muted'}>
+                    {attribution.applied
+                      ? `已校准 (${attribution.sampleSize}笔)`
+                      : `基准权重 (${attribution.sampleSize}/${attribution.minSamplesRequired}笔)`}
+                  </Badge>
+                  <Badge tone="accent">
+                    红线 ≥{attribution.strongThreshold} / ≥{attribution.watchThreshold}
+                  </Badge>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {attribution.dimensions.map((d) => (
+                    <Badge
+                      key={d.key}
+                      tone={
+                        d.deltaWeight > 0
+                          ? 'up'
+                          : d.deltaWeight < 0
+                            ? 'down'
+                            : d.correlationR >= 0.2
+                              ? 'accent'
+                              : 'muted'
+                      }
+                      title={`${d.label}：权重 ${d.recommendedWeight}（基准 ${d.baselineWeight}）· 相关系数 r=${d.correlationR.toFixed(2)} · 赢单均分 ${d.winMeanPct}% vs 亏单 ${d.lossMeanPct}%`}
+                    >
+                      {d.label} {d.recommendedWeight}
+                      {d.deltaWeight !== 0 ? `(${d.deltaWeight > 0 ? '+' : ''}${d.deltaWeight})` : ''}
+                      {attribution.sampleSize >= 3 ? ` · r=${d.correlationR.toFixed(2)}` : ''}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {readiness && (
+              <div className="flex flex-col gap-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium text-ink-hi">
+                    近 {readiness.metrics.windowHours}h 运行门禁
+                  </span>
+                  <Badge
+                    tone={
+                      readiness.overall === 'pass'
+                        ? 'up'
+                        : readiness.overall === 'warn'
+                          ? 'warn'
+                          : 'down'
+                    }
+                  >
+                    {readiness.summary}
+                  </Badge>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {readiness.checks.map((c) => (
+                    <Badge
+                      key={c.id}
+                      tone={c.status === 'pass' ? 'up' : c.status === 'warn' ? 'warn' : 'down'}
+                      title={c.detail}
+                    >
+                      {c.status === 'pass' ? '✓' : c.status === 'warn' ? '!' : '✕'} {c.label}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

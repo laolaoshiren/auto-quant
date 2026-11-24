@@ -135,6 +135,8 @@ import {
   signalHealthStateKey,
 } from './intel/signalHealthReport.js';
 import { SIGNAL_LIMITS } from './intel/signalHealth.js';
+import type { Ai500DimensionScores, RadarTier } from '../radar/ai500.js';
+import { managedAttributionStore } from '../radar/attribution.js';
 import { RadarDeltaTracker } from '../radar/deltaTracker.js';
 import { formatVolumeProfileLine } from '../radar/volumeProfile.js';
 import { runManagedRadarCycle, type ManagedCycleResult } from '../managed/cycle.js';
@@ -1118,10 +1120,16 @@ export class AutoTrader {
   private timer: NodeJS.Timeout | null = null;
   /** M2.3：智能托管 2.0 雷达 15m 环比增量追踪器（每个机器人实例独立维护）。 */
   private readonly radarDeltaTracker = new RadarDeltaTracker();
-  /** M3.1：最近一轮雷达标的入场基准指标缓存，用于新开仓落库论点时记录入场评分/OI/Taker。 */
+  /** M3.1/M4.3：最近一轮雷达标的入场基准指标与六维因子缓存，供开仓论点落库与成交归因使用。 */
   private lastManagedRadarBySymbol = new Map<
     string,
-    { score: number; oiUsd: number | null; takerBuyRatio1h: number }
+    {
+      score: number;
+      tier: RadarTier;
+      dimensions: Ai500DimensionScores;
+      oiUsd: number | null;
+      takerBuyRatio1h: number;
+    }
   >();
   /** M3.4：三段式 `finalize` 附带的新开仓初始论点暂存，成交后即时绑定 `managed_theses`。 */
   private pendingThesisPlans = new Map<string, PendingThesisPlan>();
@@ -3760,6 +3768,21 @@ export class AutoTrader {
 
     let managedRadar: ManagedCycleResult | null = null;
     if (useManagedRadar) {
+      let calibration:
+        | { weights?: Partial<Ai500DimensionScores>; strongThreshold?: number; watchThreshold?: number }
+        | undefined;
+      try {
+        const activeCal = managedAttributionStore.getActiveOptions(traderId);
+        if (activeCal.applied) {
+          calibration = {
+            weights: activeCal.weights,
+            strongThreshold: activeCal.strongThreshold,
+            watchThreshold: activeCal.watchThreshold,
+          };
+        }
+      } catch {
+        /* 校准读取异常不阻断雷达主循环 */
+      }
       managedRadar = await runManagedRadarCycle({
         config,
         market: this.deps.market,
@@ -3770,6 +3793,7 @@ export class AutoTrader {
         watchedSymbols: watched,
         existingSnapshots: snapshots,
         leverageCaps: this.leverageCapCache,
+        calibration,
       });
       if (managedRadar.snapshots.length > 0) {
         snapshots = managedRadar.snapshots;
@@ -3791,6 +3815,8 @@ export class AutoTrader {
             c.symbol,
             {
               score: c.score,
+              tier: c.tier,
+              dimensions: c.dimensions,
               oiUsd: c.metrics.openInterestUsd,
               takerBuyRatio1h: c.metrics.takerBuyRatio1h,
             },
@@ -3836,6 +3862,8 @@ export class AutoTrader {
               entryRadarScore: r?.score ?? null,
               entryOiUsd: r?.oiUsd ?? null,
               entryTakerBuyRatio: r?.takerBuyRatio1h ?? null,
+              entryDimensions: r?.dimensions ?? null,
+              entryTier: r?.tier ?? null,
             });
           }
         }
@@ -8083,10 +8111,20 @@ export class AutoTrader {
         positionStore.close(local.id);
         tradeEvents.record(traderId, local.symbol, 'exit');
       });
-      if (this.deps.trader.mode === 'ai_managed') {
-        managedThesisStore.markClosed(traderId, local.symbol);
-      }
       const existing = tradeStore.list(traderId, 200).find((t) => t.id === alreadyBooked);
+      if (this.deps.trader.mode === 'ai_managed') {
+        try {
+          managedThesisStore.markClosedWithOutcome(traderId, local.symbol, {
+            tradeId: alreadyBooked,
+            netPnl: existing?.netPnl ?? netPnlOf({ grossPnl, fee: entryFee + exitFee, fundingFee }),
+            exitPrice: existing?.exitPrice ?? exitPrice,
+            closeReason: existing?.closeReason ?? reason,
+          });
+          managedAttributionStore.recompute(traderId);
+        } catch {
+          /* 归因更新失败不阻断平仓主流程 */
+        }
+      }
       this.emit(
         'info',
         `${local.symbol} 的平仓此前已入账（第 #${alreadyBooked} 笔），本次不再重复记录；净 ${(existing?.netPnl ?? 0).toFixed(4)} USDT。`,
@@ -8140,12 +8178,22 @@ export class AutoTrader {
       tradeEvents.record(traderId, local.symbol, 'exit');
       return inserted;
     });
-    if (this.deps.trader.mode === 'ai_managed') {
-      managedThesisStore.markClosed(traderId, local.symbol);
-    }
     const tradeId = booked.id;
 
     const record = tradeStore.list(traderId, 200).find((t) => t.id === tradeId);
+    if (this.deps.trader.mode === 'ai_managed') {
+      try {
+        managedThesisStore.markClosedWithOutcome(traderId, local.symbol, {
+          tradeId,
+          netPnl: record?.netPnl ?? netPnlOf({ grossPnl, fee: entryFee + exitFee, fundingFee }),
+          exitPrice: record?.exitPrice ?? exitPrice,
+          closeReason: record?.closeReason ?? reason,
+        });
+        managedAttributionStore.recompute(traderId);
+      } catch {
+        /* 归因更新失败不阻断平仓主流程 */
+      }
+    }
     if (record) eventBus.publish({ type: 'trade', traderId, trade: record });
 
     /*
@@ -10473,6 +10521,8 @@ reduceQuantity: null,
         entryRadarScore: radarSnap?.score ?? null,
         entryOiUsd: radarSnap?.oiUsd ?? null,
         entryTakerBuyRatio: radarSnap?.takerBuyRatio1h ?? null,
+        entryDimensions: radarSnap?.dimensions ?? null,
+        entryTier: radarSnap?.tier ?? null,
       });
     } catch {
       /* 论点落库异常不阻断主成交链路 */
@@ -11703,7 +11753,14 @@ reduceQuantity: null,
        * 实测触发这条的场景：`#120` 有一条 `rejected open_long BNBUSDT`，
        * 而它在原来的筛选下**完全不会进回执** —— 那一轮等于白提。
        */
-      if (entry.status === 'rejected') return true;
+      if (
+        entry.status === 'rejected' &&
+        entry.action !== 'wait' &&
+        entry.action !== 'hold' &&
+        entry.action !== 'skip'
+      ) {
+        return true;
+      }
       /*
        * 而"下去再来"的那种跳过**不进**：节流与冷却到下一轮自然会解除，
        * 模型知道了也做不了什么 —— 塞进回执只是花 token 换噪声。

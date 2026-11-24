@@ -322,6 +322,10 @@ export function normalizeFinalizePayload(
   const pendingThesisPlans = new Map<string, PendingThesisPlan>();
   const normalizedDecisions: Array<Record<string, unknown>> = [];
   const coveredSymbols = new Set<string>();
+  const allowedObservationSymbols = new Set<string>([
+    ...openPositions.map((p) => normalizeSymbol(p.symbol)),
+    ...candidateSymbols.map((s) => normalizeSymbol(s)),
+  ]);
 
   for (const item of rawList) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
@@ -329,6 +333,15 @@ export function normalizeFinalizePayload(
     const sym = normalizeSymbol(String(obj['symbol'] ?? ''));
     const action = String(obj['action'] ?? '').trim();
     if (!sym || !action) continue;
+
+    // 对未展开的雷达榜外围标的，纯观察性 wait/skip 不送入解析器以免产生误报 rejected:wait/skip
+    if (
+      (action === 'wait' || action === 'skip') &&
+      allowedObservationSymbols.size > 0 &&
+      !allowedObservationSymbols.has(sym)
+    ) {
+      continue;
+    }
 
     coveredSymbols.add(sym);
 

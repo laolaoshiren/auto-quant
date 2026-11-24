@@ -14,6 +14,7 @@
 import { isMajorSymbol, normalizeSymbol, type CloseReason } from '@aq/shared';
 
 import { getDb } from '../db/index.js';
+import type { Ai500DimensionScores, RadarTier } from '../radar/ai500.js';
 
 /* -------------------------------------------------------------------------- */
 /*  Public Types                                                               */
@@ -40,10 +41,12 @@ export interface PositionThesis {
   peakR: number;
   /** 持仓期间观测到的最大不利偏移（%，正数表示逆向幅度）。 */
   worstAdversePct: number;
-  /** 入场快照指标：供 M3.2 战术面板衡量持仓期间动能/资金流衰减。 */
+  /** 入场快照指标：供 M3.2 战术面板衡量持仓期间动能/资金流衰减与 M4.3 成交归因。 */
   entryRadarScore: number | null;
   entryOiUsd: number | null;
   entryTakerBuyRatio: number | null;
+  entryDimensions?: Ai500DimensionScores | null;
+  entryTier?: RadarTier | null;
   status: 'active' | 'closed';
   createdAt: string;
   updatedAt: string;
@@ -67,6 +70,8 @@ export interface UpsertThesisInput {
   entryRadarScore?: number | null;
   entryOiUsd?: number | null;
   entryTakerBuyRatio?: number | null;
+  entryDimensions?: Ai500DimensionScores | null;
+  entryTier?: RadarTier | null;
   nowMs?: number;
 }
 
@@ -241,12 +246,45 @@ interface ThesisRow {
   entry_radar_score: number | null;
   entry_oi_usd: number | null;
   entry_taker_buy_ratio: number | null;
+  entry_dimensions_json?: string | null;
+  entry_tier?: string | null;
   status: string;
   created_at: string;
   updated_at: string;
 }
 
+function parseEntryDimensions(raw: string | null | undefined): Ai500DimensionScores | null {
+  if (!raw) return null;
+  try {
+    const obj = JSON.parse(raw) as Partial<Ai500DimensionScores>;
+    if (
+      typeof obj.trend === 'number' &&
+      typeof obj.breakout === 'number' &&
+      typeof obj.oiFlow === 'number' &&
+      typeof obj.takerFlow === 'number' &&
+      typeof obj.funding === 'number' &&
+      typeof obj.alphaPosition === 'number'
+    ) {
+      return {
+        trend: obj.trend,
+        breakout: obj.breakout,
+        oiFlow: obj.oiFlow,
+        takerFlow: obj.takerFlow,
+        funding: obj.funding,
+        alphaPosition: obj.alphaPosition,
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 function toThesis(row: ThesisRow): PositionThesis {
+  const tier =
+    row.entry_tier === 'strong' || row.entry_tier === 'watch' || row.entry_tier === 'skip'
+      ? row.entry_tier
+      : null;
   return {
     id: row.id,
     traderId: row.trader_id,
@@ -266,6 +304,8 @@ function toThesis(row: ThesisRow): PositionThesis {
     entryRadarScore: row.entry_radar_score,
     entryOiUsd: row.entry_oi_usd,
     entryTakerBuyRatio: row.entry_taker_buy_ratio,
+    entryDimensions: parseEntryDimensions(row.entry_dimensions_json),
+    entryTier: tier,
     status: row.status === 'closed' ? 'closed' : 'active',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -378,8 +418,9 @@ export const managedThesisStore = {
         time_stop_at, min_progress_r, max_adverse_excursion_pct,
         peak_r, worst_adverse_pct,
         entry_radar_score, entry_oi_usd, entry_taker_buy_ratio,
+        entry_dimensions_json, entry_tier,
         status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 'active', ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, 'active', ?, ?)`,
       input.traderId,
       norm,
       input.side,
@@ -395,6 +436,8 @@ export const managedThesisStore = {
       input.entryRadarScore ?? null,
       input.entryOiUsd ?? null,
       input.entryTakerBuyRatio ?? null,
+      input.entryDimensions ? JSON.stringify(input.entryDimensions) : null,
+      input.entryTier ?? null,
       nowIso,
       nowIso,
     );
@@ -422,6 +465,49 @@ export const managedThesisStore = {
       new Date(nowMs).toISOString(),
       traderId,
       norm,
+    );
+  },
+
+  /** M4.3：平仓后关闭活跃论点并回填真实成交归因（净盈亏、实际 R 倍数、平仓原因）。 */
+  markClosedWithOutcome(
+    traderId: number,
+    symbol: string,
+    outcome: {
+      tradeId: number | null;
+      netPnl: number;
+      exitPrice: number;
+      closeReason: string | null;
+      nowMs?: number;
+    },
+  ): void {
+    const norm = normalizeSymbol(symbol);
+    const active = this.getActive(traderId, norm);
+    if (!active) return;
+    const initialRisk = Math.abs(active.entryPrice - active.initialStopLoss);
+    const favorableMove =
+      active.side === 'long'
+        ? outcome.exitPrice - active.entryPrice
+        : active.entryPrice - outcome.exitPrice;
+    const realizedR =
+      initialRisk > 0 && Number.isFinite(outcome.exitPrice) && outcome.exitPrice > 0
+        ? round2(favorableMove / initialRisk)
+        : 0;
+    const db = getDb();
+    db.run(
+      `UPDATE managed_theses
+       SET status = 'closed',
+           closed_trade_id = ?,
+           realized_net_pnl = ?,
+           realized_r = ?,
+           close_reason = ?,
+           updated_at = ?
+       WHERE id = ?`,
+      outcome.tradeId,
+      round2(outcome.netPnl),
+      realizedR,
+      outcome.closeReason,
+      new Date(outcome.nowMs ?? Date.now()).toISOString(),
+      active.id,
     );
   },
 

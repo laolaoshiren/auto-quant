@@ -135,8 +135,8 @@ test('★ 所有模式的用户可见名称必须唯一且齐全', () => {
    * 界面上不写清，用户会以为它和另外三种一样是验证过的。
    */
   assert.ok(
-    MODE_LABEL.jev.includes('实验性'),
-    '★ JEV 模式的名字必须标明它是实验性的',
+    MODE_LABEL.jev.includes('已停用'),
+    '★ JEV 模式已退役，名称必须标明「已停用」',
   );
   /* 每种模式都要有一句"代价"说明 —— 用户靠它决定要不要一直开着。 */
   for (const mode of ['strategy', 'ai_managed', 'ai_team', 'jev'] as const) {

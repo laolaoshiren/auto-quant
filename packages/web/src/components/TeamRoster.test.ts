@@ -148,7 +148,7 @@ test('★★★ 每一种 TraderMode 都必须有自己的徽章（不许落到�
    * 而它的盈利表现完全未知（`docs/JEV-MODE-DESIGN.md` §八）。
    */
   assert.ok(
-    /实验/.test(MODE_BADGE.jev.text),
-    '★ JEV 模式的徽章必须标明它是实验性的',
+    /停用/.test(MODE_BADGE.jev.text),
+    '★ JEV 模式已退役，徽章必须标明已停用',
   );
 });
