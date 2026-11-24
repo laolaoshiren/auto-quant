@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BinanceBroker, normalizeAlgo, normalizeStandard, parseAdmittedLeverage } from './broker.js';
+import {
+  applyPaperSlippage,
+  BinanceBroker,
+  normalizeAlgo,
+  normalizeStandard,
+  paperSlippageRate,
+  parseAdmittedLeverage,
+} from './broker.js';
 import { roundDownToStep, roundPrice, stepDecimals, SymbolRegistry } from './symbols.js';
 import type { BinanceRest } from './rest.js';
 import type { BinanceMarketData } from './market.js';
@@ -331,7 +338,11 @@ test('dry run fills a market order without ever calling a signed endpoint', asyn
   assert.equal(placed.kind, 'order');
   assert.equal(placed.status, 'FILLED');
   assert.equal(placed.executedQty, 0.01);
-  assert.equal(placed.avgPrice, 68_000, 'the simulated fill prices at the live mark price');
+  assert.equal(
+    placed.avgPrice,
+    applyPaperSlippage(68_000, 'BUY', paperSlippageRate()),
+    'the simulated market fill prices at the live mark price plus unfavorable slippage',
+  );
   assert.equal(placed.terminal, true);
 
   const signed = calls.filter((c) => c.path.startsWith('/fapi/v1/order'));

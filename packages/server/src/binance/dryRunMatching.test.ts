@@ -34,7 +34,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { BinanceBroker } from './broker.js';
+import {
+  applyPaperSlippage,
+  BinanceBroker,
+  DEFAULT_PAPER_SLIPPAGE_RATE,
+  paperSlippageRate,
+} from './broker.js';
 import type { BinanceRest } from './rest.js';
 import type { BinanceMarketData } from './market.js';
 import { SymbolRegistry } from './symbols.js';
@@ -322,4 +327,44 @@ test('★★ dryRun 下撤单/撤全部挂单也不碰交易所', async () => {
   assert.equal(await broker.cancelOrder('BTCUSDT', '123', 'order'), true);
   await broker.cancelAllOrders('BTCUSDT');
   assert.deepEqual(calls, []);
+});
+
+test('★ M1.4 模拟盘市价单施加可配置不利方向滑点（默认 0.03%，设 0 可关闭），限价单不受滑点影响', async () => {
+  assert.equal(paperSlippageRate({}), DEFAULT_PAPER_SLIPPAGE_RATE);
+  assert.equal(paperSlippageRate({ AQ_PAPER_SLIPPAGE_RATE: '0' }), 0);
+  assert.equal(paperSlippageRate({ AQ_PAPER_SLIPPAGE_RATE: '0.001' }), 0.001);
+  assert.ok(applyPaperSlippage(100, 'BUY', 0.001) > 100);
+  assert.ok(applyPaperSlippage(100, 'SELL', 0.001) < 100);
+
+  const prev = process.env.AQ_PAPER_SLIPPAGE_RATE;
+  try {
+    process.env.AQ_PAPER_SLIPPAGE_RATE = '0.0005'; // 0.05%
+    const { broker } = dryRunSetup(100_000);
+    const buy = await broker.placeOrder({
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      type: 'MARKET',
+      quantity: 0.01,
+    });
+    const sell = await broker.placeOrder({
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      type: 'MARKET',
+      quantity: 0.01,
+    });
+    assert.ok(Math.abs(buy.avgPrice - 100_050) < 1e-6, `买单应含 +0.05% 滑点，实际 ${buy.avgPrice}`);
+    assert.ok(Math.abs(sell.avgPrice - 99_950) < 1e-6, `卖单应含 -0.05% 滑点，实际 ${sell.avgPrice}`);
+
+    process.env.AQ_PAPER_SLIPPAGE_RATE = '0';
+    const zeroSlip = await broker.placeOrder({
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      type: 'MARKET',
+      quantity: 0.01,
+    });
+    assert.equal(zeroSlip.avgPrice, 100_000, '设 0 时应关闭模拟滑点');
+  } finally {
+    if (prev === undefined) delete process.env.AQ_PAPER_SLIPPAGE_RATE;
+    else process.env.AQ_PAPER_SLIPPAGE_RATE = prev;
+  }
 });

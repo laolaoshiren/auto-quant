@@ -197,6 +197,31 @@ interface SimulatedRestingOrder {
  *  5. **Never blind-retry an order.** An ambiguous outcome is reconciled by
  *     client id rather than resent.
  */
+/**
+ * M1.4（2026-11-24）：模拟盘市价单默认滑点（0.03% = 3 bps）。
+ * 可通过环境变量 `AQ_PAPER_SLIPPAGE_RATE` 调整（例如设 `0` 关闭，用于确定性回放）。
+ */
+export const DEFAULT_PAPER_SLIPPAGE_RATE = 0.0003;
+
+export function paperSlippageRate(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.AQ_PAPER_SLIPPAGE_RATE;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_PAPER_SLIPPAGE_RATE;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_PAPER_SLIPPAGE_RATE;
+  return Math.min(0.02, parsed);
+}
+
+/** 模拟盘市价单按不利方向施加滑点：买单略贵、卖单略便宜。 */
+export function applyPaperSlippage(
+  markPrice: number,
+  side: 'BUY' | 'SELL',
+  rate: number,
+): number {
+  if (!Number.isFinite(markPrice) || markPrice <= 0) return markPrice;
+  if (!Number.isFinite(rate) || rate <= 0) return markPrice;
+  return side === 'BUY' ? markPrice * (1 + rate) : markPrice * (1 - rate);
+}
+
 export class BinanceBroker {
   private readonly dryRun: boolean;
   private readonly fillTimeoutMs: number;
@@ -1196,21 +1221,24 @@ export class BinanceBroker {
     if (request.type === 'LIMIT') return this.simulateLimit(request);
 
     const markPrice = (await this.getMarkPrice(request.symbol)) || request.price || 0;
+    const slippage = paperSlippageRate();
+    const fillPrice = applyPaperSlippage(markPrice, request.side, slippage);
     const at = Date.now();
     const qty = request.quantity ?? 0;
 
     log.info(
-      `[dry-run] ${request.type} ${request.side} ${request.symbol} qty=${qty} @ ~${markPrice}`,
+      `[dry-run] ${request.type} ${request.side} ${request.symbol} qty=${qty} @ ~${fillPrice}` +
+        (slippage > 0 ? ` (mark=${markPrice}, slip=${(slippage * 100).toFixed(3)}%)` : ''),
     );
 
     const orderId = at * 100 + ((this.simulatedOrderSeq += 1) % 100);
     const response: BinanceOrderResponse = {
       clientOrderId: request.clientOrderId ?? `dry-${orderId}`,
       cumQty: String(qty),
-      cumQuote: String(qty * markPrice),
+      cumQuote: String(qty * fillPrice),
       executedQty: String(qty),
       orderId,
-      avgPrice: String(markPrice),
+      avgPrice: String(fillPrice),
       origQty: String(qty),
       price: String(request.price ?? 0),
       reduceOnly: request.reduceOnly ?? false,

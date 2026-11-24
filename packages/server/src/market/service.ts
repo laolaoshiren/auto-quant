@@ -147,6 +147,21 @@ export class MarketDataService {
   }
 
   /**
+   * 查询单个标的当前资金费率（复用 `getUniverse()` 缓存，供模拟盘跨 8h 结算估算资金费）。
+   * 读不到返回 `null`，绝不编造。
+   */
+  async getFundingRate(symbol: string): Promise<number | null> {
+    try {
+      const universe = await this.getUniverse();
+      const premium = universe.premiums.get(normalizeSymbol(symbol));
+      const rate = premium ? Number(premium.lastFundingRate) : Number.NaN;
+      return Number.isFinite(rate) ? rate : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Closed klines with a short cache.
    *
    * The live candle is always excluded: feeding a partial candle into EMA/RSI

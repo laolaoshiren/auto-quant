@@ -168,3 +168,43 @@ export function validateStartingBalance(value: number): string | null {
   if (value > 1_000_000_000) return '起始余额过大（上限 10 亿）。';
   return null;
 }
+
+/* -------------------------------------------------------------------------- */
+/*  M1.4：模拟盘 8 小时资金费估算（与交易所口径一致：支出为负、收入为正）            */
+/* -------------------------------------------------------------------------- */
+
+const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * 统计 `(openedAtMs, closedAtMs]` 区间内跨越了多少个永续合约 8 小时整点结算点
+ *（UTC 00:00 / 08:00 / 16:00）。
+ */
+export function countFundingSettlements(openedAtMs: number, closedAtMs: number): number {
+  if (!Number.isFinite(openedAtMs) || !Number.isFinite(closedAtMs)) return 0;
+  if (closedAtMs <= openedAtMs) return 0;
+  return Math.max(0, Math.floor(closedAtMs / EIGHT_HOURS_MS) - Math.floor(openedAtMs / EIGHT_HOURS_MS));
+}
+
+/**
+ * 估算模拟盘单笔持仓生命周期内的资金费（交易所口径：支出为负、收入为正，与 `netPnlOf` 一致）。
+ *
+ * - 资金费率 > 0 时：多头付空头（多头为负、空头为正）；
+ * - 资金费率 < 0 时：空头付多头（多头为正、空头为负）；
+ * - 未跨过任何 8 小时整点结算点时为 0。
+ */
+export function estimatePaperFundingFee(input: {
+  side: 'long' | 'short';
+  notional: number;
+  fundingRate: number;
+  openedAt: string;
+  closedAt: string;
+}): number {
+  if (!Number.isFinite(input.notional) || input.notional <= 0) return 0;
+  if (!Number.isFinite(input.fundingRate) || input.fundingRate === 0) return 0;
+  const openedMs = Date.parse(input.openedAt);
+  const closedMs = Date.parse(input.closedAt);
+  const settlements = countFundingSettlements(openedMs, closedMs);
+  if (settlements <= 0) return 0;
+  const sign = input.side === 'long' ? -1 : 1;
+  return sign * input.notional * input.fundingRate * settlements;
+}

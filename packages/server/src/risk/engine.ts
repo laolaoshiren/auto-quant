@@ -1232,6 +1232,27 @@ export class RiskEngine {
       };
     }
 
+    /*
+     * M1.3（2026-11-24）：限价入场防穿透止损校验。
+     * 若当前市价本身已经穿越计划止损位，说明挂单论点在挂出前就已失效，
+     * 必须直接拒单，绝不可允许挂出"成交即无保护强平"的限价单。
+     */
+    const isLimitEntry = decision.entryType === 'limit' && (decision.limitPrice ?? 0) > 0;
+    if (isLimitEntry && price > 0) {
+      if (isLong && price <= stopLoss) {
+        return {
+          ok: false,
+          reason: `限价多单止损已失效：当前市价 ${price} 已低于或触及计划止损价 ${stopLoss}，挂单存在成交即无保护强平风险。`,
+        };
+      }
+      if (!isLong && price >= stopLoss) {
+        return {
+          ok: false,
+          reason: `限价空单止损已失效：当前市价 ${price} 已高于或触及计划止损价 ${stopLoss}，挂单存在成交即无保护强平风险。`,
+        };
+      }
+    }
+
     /* --- 6b. 止损距离必须覆盖往返手续费（提案 §5） ------------------------ */
     /*
      * 一笔止损比往返手续费还近的交易，**即使方向做对了也是亏的**：价格必须先走完
@@ -1285,6 +1306,23 @@ export class RiskEngine {
           `按${feeSource}，往返成本约 ${(roundTripFeeRate * 100).toFixed(4)}%，止损幅度至少要有 ${minStopDistancePercent.toFixed(4)}%。` +
           '止损比交易成本还近的交易，方向做对了也是亏的。',
       };
+    }
+    /*
+     * M1.3：若限价单本身已穿市价（会立即成交），按当前市价算的止损缓冲也必须满足
+     * 最低手续费倍数门槛，防止挂单立即成交后距离止损过近被滑点打穿。
+     */
+    const limitImmediatelyMarketable =
+      isLimitEntry && price > 0 && (isLong ? entryPrice >= price : entryPrice <= price);
+    if (limitImmediatelyMarketable && feeMultiple > 0) {
+      const marketStopPercent = (Math.abs(price - stopLoss) / price) * 100;
+      if (marketStopPercent + 1e-9 < minStopDistancePercent) {
+        return {
+          ok: false,
+          reason:
+            `立即成交型限价单止损缓冲不足：按当前市价 ${price} 到止损 ${stopLoss} 仅 ${marketStopPercent.toFixed(3)}%，` +
+            `低于最低安全缓冲 ${minStopDistancePercent.toFixed(4)}%。`,
+        };
+      }
     }
     if (feeMultiple > 0) {
       adjustments.push(

@@ -950,6 +950,49 @@ test('★ 风控 §9 保证金耗尽时直接报保证金上限，不误报为 �
   }
 });
 
+test('★ M1.3 限价入场防穿透止损：当前市价已穿越止损位或立即成交缓冲不足时直接拒单', () => {
+  const engine = new RiskEngine();
+  // 空头限价单：挂单价 0.096，止损 0.0987，但当前市价已涨到 0.0988（穿越止损）
+  const envCrossed = environment({
+    snapshots: new Map([['LISTAUSDT', snapshot('LISTAUSDT', 0.0988)]]),
+  });
+  const crossedVerdict = engine.review(
+    [
+      openDecision({
+        symbol: 'LISTAUSDT',
+        action: 'open_short',
+        entryType: 'limit',
+        limitPrice: 0.096,
+        stopLoss: 0.0987,
+        takeProfit: 0.087,
+      }),
+    ],
+    envCrossed,
+  );
+  assert.equal(crossedVerdict.approved.length, 0);
+  assert.match(crossedVerdict.rejected[0]!.reason, /限价空单止损已失效/);
+
+  // 立即成交型限价多单：挂单价 68200 >= 市价 68000，止损 67950 距挂单价 >0.3%，但距市价仅 0.07% < 0.30%
+  const envThinBuffer = environment({
+    snapshots: new Map([['BTCUSDT', snapshot('BTCUSDT', 68_000)]]),
+  });
+  const thinVerdict = engine.review(
+    [
+      openDecision({
+        symbol: 'BTCUSDT',
+        action: 'open_long',
+        entryType: 'limit',
+        limitPrice: 68_250,
+        stopLoss: 67_950,
+        takeProfit: 70_000,
+      }),
+    ],
+    envThinBuffer,
+  );
+  assert.equal(thinVerdict.approved.length, 0);
+  assert.match(thinVerdict.rejected[0]!.reason, /立即成交型限价单止损缓冲不足/);
+});
+
 /* -------------------------------------------------------------------------- */
 /*  Circuit breakers                                                           */
 /* -------------------------------------------------------------------------- */

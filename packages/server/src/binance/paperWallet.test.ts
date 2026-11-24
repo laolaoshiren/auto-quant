@@ -12,7 +12,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { paperAccountState, paperPositionTotals, validateStartingBalance } from './paperWallet.js';
+import {
+  countFundingSettlements,
+  estimatePaperFundingFee,
+  paperAccountState,
+  paperPositionTotals,
+  validateStartingBalance,
+} from './paperWallet.js';
 
 test('★★★ 起始余额就是钱包余额，与任何真实账户无关', () => {
   const state = paperAccountState({
@@ -212,4 +218,61 @@ test('★ 脏行（NaN 数量 / NaN 保证金）不污染合计', () => {
   assert.ok(Number.isFinite(totals.unrealizedPnl), 'NaN 数量必须被跳过，不能让合计变成 NaN');
   assert.ok(Number.isFinite(totals.marginUsed), 'NaN 保证金必须按 0 计');
   assert.equal(totals.unrealizedPnl, 100, '只有 ETHUSDT 那笔有效浮盈（3100−3000）×1');
+});
+
+/* -------------------------------------------------------------------------- */
+/*  M1.4：模拟盘 8 小时资金费估算                                                */
+/* -------------------------------------------------------------------------- */
+
+test('★ M1.4 countFundingSettlements 精确统计跨过的 UTC 8 小时整点结算数', () => {
+  // 同 8h 窗口内：0 结算
+  assert.equal(
+    countFundingSettlements(Date.parse('2026-11-24T01:00:00Z'), Date.parse('2026-11-24T07:59:59Z')),
+    0,
+  );
+  // 跨过 08:00 UTC：1 结算
+  assert.equal(
+    countFundingSettlements(Date.parse('2026-11-24T07:50:00Z'), Date.parse('2026-11-24T08:05:00Z')),
+    1,
+  );
+  // 恰好在 08:00:00 开仓、08:10 平仓：不算跨过 08:00
+  assert.equal(
+    countFundingSettlements(Date.parse('2026-11-24T08:00:00Z'), Date.parse('2026-11-24T08:10:00Z')),
+    0,
+  );
+  // 跨过 08:00 与 16:00 两个结算点：2 结算
+  assert.equal(
+    countFundingSettlements(Date.parse('2026-11-24T01:00:00Z'), Date.parse('2026-11-24T17:00:00Z')),
+    2,
+  );
+});
+
+test('★ M1.4 estimatePaperFundingFee 符号与交易所口径一致（支出为负、收入为正）', () => {
+  // 正费率 +0.01%：多头付、空头收（名义 1000 U，跨 2 次结算 = ±0.20 U）
+  const longPaid = estimatePaperFundingFee({
+    side: 'long',
+    notional: 1000,
+    fundingRate: 0.0001,
+    openedAt: '2026-11-24T01:00:00Z',
+    closedAt: '2026-11-24T17:00:00Z',
+  });
+  const shortReceived = estimatePaperFundingFee({
+    side: 'short',
+    notional: 1000,
+    fundingRate: 0.0001,
+    openedAt: '2026-11-24T01:00:00Z',
+    closedAt: '2026-11-24T17:00:00Z',
+  });
+  assert.ok(Math.abs(longPaid - -0.2) < 1e-9, `正费率多头应支出 -0.20，实得 ${longPaid}`);
+  assert.ok(Math.abs(shortReceived - 0.2) < 1e-9, `正费率空头应收入 +0.20，实得 ${shortReceived}`);
+
+  // 负费率 -0.02%：多头收、空头付（跨 1 次结算 = ±0.20 U）
+  const longReceived = estimatePaperFundingFee({
+    side: 'long',
+    notional: 1000,
+    fundingRate: -0.0002,
+    openedAt: '2026-11-24T07:30:00Z',
+    closedAt: '2026-11-24T08:30:00Z',
+  });
+  assert.ok(Math.abs(longReceived - 0.2) < 1e-9, `负费率多头应收入 +0.20，实得 ${longReceived}`);
 });

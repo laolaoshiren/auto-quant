@@ -126,6 +126,10 @@ import {
   settlementCommissionOf,
 } from '../binance/income.js';
 import {
+  countFundingSettlements,
+  estimatePaperFundingFee,
+} from '../binance/paperWallet.js';
+import {
   SIGNAL_HEALTH_WINDOW_DAYS,
   signalHealthReportFor,
   signalHealthStateKey,
@@ -1830,6 +1834,13 @@ export class AutoTrader {
       done = resolve;
     });
     try {
+      /*
+       * M1.3（2026-11-24）：30s 实时守卫同步结清待成交限价单，
+       * 把限价单成交到挂保护单的裸仓窗口从 10–20 分钟压缩至 ≤30 秒。
+       */
+      if (positionStore.pending(this.deps.trader.id).length > 0) {
+        await this.settlePendingEntries().catch(() => undefined);
+      }
       const closed = await this.applyDrawdownGuard();
       if (closed > 0) this.emit('info', `回撤守卫（实时检查）平仓 ${closed} 笔`);
       await this.applyBreakevenGuard().catch(() => undefined);
@@ -6244,22 +6255,42 @@ export class AutoTrader {
      * **同一个文件里已经为这个形态写过很多次注释了：一个写了一半的记账，
      * 会在别处被读成"什么都没有"。**
      */
-    const stopOrderId = await this.placeProtection({
-      symbol,
-      side: exitSide,
-      type: 'STOP_MARKET',
-      triggerPrice: row.stop_loss ?? 0,
-      purpose: 'stop_loss',
-      traderId,
-      quantity: executedQty,
-    }).catch(() => null);
+    /*
+     * M1.3（2026-11-24）：限价单成交转正前先核对最新标记价是否已穿越计划止损位，
+     * 已穿越时直接平仓防裸仓，不再徒劳向交易所发出必吃 -2021 的条件单。
+     */
+    let stopOrderId: string | null = null;
+    let stopAlreadyCrossed = false;
+    if (row.stop_loss !== null && row.stop_loss > 0) {
+      const markNow = await this.deps.broker.getMarkPrice(symbol).catch(() => 0);
+      if (
+        markNow > 0 &&
+        !this.deps.registry.isValidTrigger(row.stop_loss, 'STOP_MARKET', exitSide, markNow)
+      ) {
+        stopAlreadyCrossed = true;
+        this.emit(
+          'error',
+          `限价单成交时 ${symbol} 最新标记价 ${markNow} 已穿越计划止损位 ${row.stop_loss}（挂上去会立即触发），立即平仓止损防裸仓。`,
+        );
+      } else {
+        stopOrderId = await this.placeProtection({
+          symbol,
+          side: exitSide,
+          type: 'STOP_MARKET',
+          triggerPrice: row.stop_loss,
+          purpose: 'stop_loss',
+          traderId,
+          quantity: executedQty,
+        }).catch(() => null);
+      }
+    }
 
     /*
      * 止盈也要挂 —— `row.take_profit` 一直存在，而这一段原来**只用止损**，
      * 于是限价入场的止盈计划从来没有生效过（模型给了、存了、然后没用）。
      */
     const tpOrderId =
-      row.take_profit !== null && row.take_profit > 0
+      !stopAlreadyCrossed && row.take_profit !== null && row.take_profit > 0
         ? await this.placeProtection({
             symbol,
             side: exitSide,
@@ -7714,7 +7745,10 @@ export class AutoTrader {
      * a net PnL that was better than the account's, which is exactly the
      * divergence §2.5 forbids.
      */
-    const fundingFee = await this.fundingFor(local.symbol, local.opened_at, closedAt);
+    const fundingFee = await this.fundingFor(local.symbol, local.opened_at, closedAt, {
+      side: local.side === 'long' ? 'long' : 'short',
+      notional: local.quantity * local.entry_price,
+    });
 
     /*
      * 上锁前先问一次：这一回合是不是已经记过账了？
@@ -7985,7 +8019,30 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
    * reconcile pass re-reads the ledger later and overwrites the row with the
    * real figure if this read failed.
    */
-  private async fundingFor(symbol: string, openedAt: string, closedAt: string): Promise<number> {
+  private async fundingFor(
+    symbol: string,
+    openedAt: string,
+    closedAt: string,
+    paperCtx?: { side: 'long' | 'short'; notional: number },
+  ): Promise<number> {
+    if (this.isDryRun) {
+      /*
+       * M1.4（2026-11-24）：模拟盘跨过 8 小时整点结算时，按标的真实资金费率估算资金费
+       *（可用 `AQ_PAPER_FUNDING_ENABLED=false` 关闭；同 8h 窗口内结算数为 0 直接返回 0）。
+       */
+      if (process.env.AQ_PAPER_FUNDING_ENABLED === 'false' || !paperCtx) return 0;
+      const settlements = countFundingSettlements(Date.parse(openedAt), Date.parse(closedAt));
+      if (settlements <= 0) return 0;
+      const rate =
+        (await this.deps.marketData.getFundingRate?.(symbol).catch(() => null)) ?? 0.0001;
+      return estimatePaperFundingFee({
+        side: paperCtx.side,
+        notional: paperCtx.notional,
+        fundingRate: rate,
+        openedAt,
+        closedAt,
+      });
+    }
     try {
       /*
        * The ledger is read from `openedAt`, not from the trader's creation time:
@@ -10806,6 +10863,42 @@ reduceQuantity: null,
   ): Promise<ExecutionLogEntry> {
     const { traderId, symbol, side, quantity, price, clientOrderId } = ctx;
     const limitPrice = decision.limitPrice ?? 0;
+
+    /*
+     * M1.3（2026-11-24）：挂限价入场单前同样核验当前标记价是否已穿越计划止损位，
+     * 防止行情在决策→执行窗口内跳穿止损后依然发出限价单，造成"成交即无保护强平"。
+     */
+    if (decision.stopLoss && decision.stopLoss > 0 && price > 0) {
+      const exitSide: 'BUY' | 'SELL' = side === 'BUY' ? 'SELL' : 'BUY';
+      if (!this.deps.registry.isValidTrigger(decision.stopLoss, 'STOP_MARKET', exitSide, price)) {
+        const detail =
+          `挂限价单前止损已失效：计划止损 ${decision.stopLoss} 已位于当前标记价 ${price} 的错误一侧，` +
+          '入场论点已被市场否定，本次不挂单。';
+        this.emit('warn', `${symbol} ${detail}`);
+        this.recordOrder({
+          traderId,
+          exchangeOrderId: null,
+          clientOrderId,
+          symbol,
+          side,
+          type: 'LIMIT',
+          purpose: 'entry',
+          quantity,
+          price: limitPrice,
+          triggerPrice: null,
+          status: 'REJECTED',
+          avgPrice: null,
+          filledQty: 0,
+          error: detail,
+        });
+        return {
+          action: decision.action,
+          symbol,
+          status: 'failed',
+          detail,
+        };
+      }
+    }
 
     /*
      * 本地先做一次方向检查：买单的限价**高于**市价会立刻成交（那就不是"挂单等"），
