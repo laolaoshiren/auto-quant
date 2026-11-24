@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { CoinSourceType, StrategyConfig, TradingMode } from './strategy.js';
+import type { CoinSourceType, ManagedRiskProfileId, StrategyConfig, TradingMode } from './strategy.js';
 import type { Decision } from './decision.js';
 
 /* -------------------------------------------------------------------------- */
@@ -298,6 +298,11 @@ export interface Trader {
    * 为 null 时按 `strategies.config` 跑，行为与以前完全一致。
    */
   agentConfigJson: string | null;
+  /**
+   * 智能托管 2.0 风险护栏档位（仅 `mode === 'ai_managed'` 有效；其它模式为 `null`）。
+   * 由服务端按 `agentConfigJson` 解析/推断并随机器人列表返回，供页面直接展示与在线切换。
+   */
+  managedRiskProfile?: ManagedRiskProfileId | null;
   /**
    * 运行模式。
    *

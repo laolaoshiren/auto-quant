@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ModeBadge } from '../components/TeamRoster';
+import { ManagedRiskBadge } from '../components/ManagedRiskProfileControl';
 import { Link, useNavigate } from 'react-router-dom';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { ArrowUpRight, Loader2, MoreHorizontal, Pencil, Play, Plus, Square, Trash2 } from 'lucide-react';
@@ -670,6 +671,9 @@ export function TradersPage() {
                               由共享组件给：模式按模式分色、资金口径模拟=蓝/实盘=黄。
                             */}
                             <ModeBadge mode={trader.mode} />
+                            {trader.mode === 'ai_managed' && (
+                              <ManagedRiskBadge profile={trader.managedRiskProfile} />
+                            )}
                             <MoneyBadge dryRun={trader.dryRun} />
                             {/* 交易所 + 钱包 + 测试网/主网（用户 2026-11-11 需求）。 */}
                             <ExchangeAccountChip account={accountOf(exchangeAccountsQuery.data, trader.exchangeAccountId)} />
@@ -1112,8 +1116,14 @@ function TraderRowMenu({
           <RowMenuItem
             icon={<Pencil aria-hidden className="h-3.5 w-3.5" />}
             label="编辑配置"
-            disabled={trader.isRunning}
-            title={trader.isRunning ? '请先停止该机器人再修改配置。' : '编辑名称、凭证、模型、策略与周期间隔'}
+            disabled={trader.status === 'starting'}
+            title={
+              trader.status === 'starting'
+                ? '启动中，请稍候再修改配置。'
+                : trader.isRunning
+                  ? '运行中可直接在线修改风险档位、名称、周期等配置（下一轮生效）'
+                  : '编辑名称、风险档位、模型、策略与周期间隔'
+            }
             onClick={run(onEdit)}
           />
           <RowMenuItem

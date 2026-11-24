@@ -29,8 +29,11 @@ import {
 } from './domain.js';
 import {
   AI_MANAGED_HARD_LIMITS,
+  MANAGED_RISK_PROFILES,
+  applyManagedRiskProfile,
   clampAiManagedHardLimits,
   defaultStrategyConfig,
+  inferManagedRiskProfile,
   unboundedAiManagedConfig,
 } from './strategy.js';
 
@@ -407,6 +410,32 @@ test('★ 智能托管的起始配置不设边界 —— 上限顶格、门槛�
     clamped.circuitBreaker.maxTotalDrawdownPercent,
     AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent,
   );
+});
+
+test('智能托管三档风险护栏（稳健 / 平衡 / 进取）应用与历史配置推断正确', () => {
+  const def = unboundedAiManagedConfig();
+  assert.equal(def.managedRiskProfile, 'balanced');
+  assert.equal(def.riskControl.btcEthMaxLeverage, 20);
+  assert.equal(def.riskControl.altcoinMaxLeverage, 10);
+
+  for (const id of ['conservative', 'balanced', 'aggressive'] as const) {
+    const spec = MANAGED_RISK_PROFILES[id];
+    const applied = applyManagedRiskProfile(def, id);
+    assert.equal(applied.managedRiskProfile, id);
+    assert.equal(applied.riskControl.btcEthMaxLeverage, spec.btcEthMaxLeverage);
+    assert.equal(applied.riskControl.altcoinMaxLeverage, spec.altcoinMaxLeverage);
+    assert.equal(applied.riskControl.maxMarginUsage, spec.maxMarginUsage);
+    assert.equal(applied.circuitBreaker.maxDailyLossPercent, spec.maxDailyLossPercent);
+    assert.equal(inferManagedRiskProfile(applied), id);
+  }
+
+  // 兼容历史未落库 managedRiskProfile 字段的老配置
+  const legacyConservative = {
+    ...def,
+    managedRiskProfile: undefined,
+    riskControl: { ...def.riskControl, btcEthMaxLeverage: 10, altcoinMaxLeverage: 5 },
+  };
+  assert.equal(inferManagedRiskProfile(legacyConservative), 'conservative');
 });
 
 test('出厂默认值本身不变 —— 传统策略模式仍然有它自己的保守起点', () => {

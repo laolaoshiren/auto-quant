@@ -41,6 +41,8 @@ let reviewBehaviour: () => { accepted: boolean; note: string } = () => ({ accept
 let starting = false;
 /** 桩 manager 是否报告"运行中" —— 每条用例自己设定。 */
 let running = false;
+/** 记录热更新回调的入参，断言运行中改配置真正推送到了内存实例。 */
+let liveUpdates: Array<{ traderId: number; patch: Record<string, unknown> }> = [];
 
 function stubDependencies(): ApiDependencies {
   return {
@@ -52,6 +54,10 @@ function stubDependencies(): ApiDependencies {
       invalidateConnectionsForAccount: () => 0,
       stopTrader: async () => {},
       requestAgentReview: () => reviewBehaviour(),
+      applyLiveUpdate: (traderId: number, patch: Record<string, unknown>) => {
+        liveUpdates.push({ traderId, patch });
+        return running;
+      },
     } as unknown as TraderManager,
     jwtSecret: JWT_SECRET,
     publicConnection: { environment: 'demo' } as unknown as ExchangeConnection,
@@ -98,6 +104,7 @@ beforeEach(async () => {
   reviewBehaviour = () => ({ accepted: true, note: 'ok' });
   starting = false;
   running = false;
+  liveUpdates = [];
   const res = await app.inject({
     method: 'POST',
     url: '/api/auth/login',
@@ -302,4 +309,98 @@ test('★★★ 智能托管 PATCH 尝试切换 aiModelId → 明确 400 拒绝�
   const sameOk = await patch(id, { aiModelId: current.aiModelId, name: '智能托管改名' });
   assert.equal(sameOk.status, 200, sameOk.body);
   assert.equal(traders.get(id)?.name, '智能托管改名');
+});
+
+/* ----------- 2026-11-25：智能托管三档风险护栏 + 运行中热更新 ----------- */
+
+test('★★★ 智能托管默认使用平衡档（20x/10x），支持创建时指定进取档（30x/15x）', async () => {
+  const defaultId = await createTrader('ai_managed');
+  const defaultCfg = JSON.parse(traders.get(defaultId)!.agentConfigJson!) as {
+    managedRiskProfile: string;
+    riskControl: { btcEthMaxLeverage: number; altcoinMaxLeverage: number; maxMarginUsage: number };
+  };
+  assert.equal(defaultCfg.managedRiskProfile, 'balanced');
+  assert.equal(defaultCfg.riskControl.btcEthMaxLeverage, 20);
+  assert.equal(defaultCfg.riskControl.altcoinMaxLeverage, 10);
+  assert.equal(defaultCfg.riskControl.maxMarginUsage, 80);
+
+  const aggRes = await app.inject({
+    method: 'POST',
+    url: '/api/traders',
+    headers: auth(),
+    payload: {
+      name: '进取小资金',
+      exchangeAccountId: null,
+      strategyId: null,
+      cycleIntervalMinutes: 15,
+      mode: 'ai_managed',
+      managedRiskProfile: 'aggressive',
+      paperStartingBalance: 50,
+    },
+  });
+  assert.equal(aggRes.statusCode, 200, aggRes.payload);
+  const aggBody = aggRes.json() as { id: number; managedRiskProfile: string };
+  assert.equal(aggBody.managedRiskProfile, 'aggressive');
+  const aggCfg = JSON.parse(traders.get(aggBody.id)!.agentConfigJson!) as {
+    riskControl: { btcEthMaxLeverage: number; altcoinMaxLeverage: number; maxMarginUsage: number };
+  };
+  assert.equal(aggCfg.riskControl.btcEthMaxLeverage, 30);
+  assert.equal(aggCfg.riskControl.altcoinMaxLeverage, 15);
+  assert.equal(aggCfg.riskControl.maxMarginUsage, 85);
+});
+
+test('★★★ 运行中支持直接热更新智能托管风险档位、名称与周期，且立即推送至运行实例', async () => {
+  const id = await createTrader('ai_managed');
+  running = true;
+
+  const res = await patch(id, {
+    name: '印钞机-在线改名',
+    cycleIntervalMinutes: 10,
+    managedRiskProfile: 'aggressive',
+  });
+  assert.equal(res.status, 200, res.body);
+  const body = JSON.parse(res.body) as { name: string; cycleIntervalMinutes: number; managedRiskProfile: string };
+  assert.equal(body.name, '印钞机-在线改名');
+  assert.equal(body.cycleIntervalMinutes, 10);
+  assert.equal(body.managedRiskProfile, 'aggressive');
+
+  const cfg = JSON.parse(traders.get(id)!.agentConfigJson!) as {
+    managedRiskProfile: string;
+    riskControl: { btcEthMaxLeverage: number; altcoinMaxLeverage: number };
+  };
+  assert.equal(cfg.managedRiskProfile, 'aggressive');
+  assert.equal(cfg.riskControl.btcEthMaxLeverage, 30);
+  assert.equal(cfg.riskControl.altcoinMaxLeverage, 15);
+
+  assert.equal(liveUpdates.length, 1, '运行中热更新必须通知 TraderManager.applyLiveUpdate');
+  assert.equal(liveUpdates[0]!.traderId, id);
+  assert.ok(liveUpdates[0]!.patch.config, '必须携带新 StrategyConfig 替换运行实例 activeConfig');
+});
+
+test('★★★ 运行中固定策略模式允许在线改名/改周期，但切换 AI 模型仍需先停止（409）', async () => {
+  const id = await createTrader('strategy');
+  const otherModel = aiModels.create({
+    provider: 'deepseek',
+    label: '新模型',
+    model: 'deepseek-chat',
+    baseUrl: 'https://api.deepseek.com/v1',
+    apiKeyEnc: '',
+    temperature: 0.2,
+    maxTokens: 4096,
+    timeoutSeconds: 60,
+    maxRetries: 1,
+  });
+  running = true;
+
+  const ok = await patch(id, { name: '策略在线改名', cycleIntervalMinutes: 20 });
+  assert.equal(ok.status, 200, ok.body);
+  assert.equal(traders.get(id)?.name, '策略在线改名');
+
+  const denied = await patch(id, { aiModelId: otherModel.id });
+  assert.equal(denied.status, 409, denied.body);
+  assert.match(denied.body, /切换 AI 模型需要先停止/);
+  assert.equal(traders.get(id)?.aiModelId, modelId);
+
+  const nonManagedProfile = await patch(id, { managedRiskProfile: 'aggressive' });
+  assert.equal(nonManagedProfile.status, 400, nonManagedProfile.body);
 });

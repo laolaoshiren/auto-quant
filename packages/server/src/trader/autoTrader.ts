@@ -2680,6 +2680,36 @@ export class AutoTrader {
   }
 
   /**
+   * 运行中安全热更新配置（名称 / 周期 / 起始权益 / 策略配置或智能托管风险护栏）。
+   *
+   * 仅替换内存里的元数据与 `activeConfig` 不可变引用，不中断当前在途决策、不改动交易所侧
+   * 已有持仓与挂单；新配置将在下一轮决策周期立即生效，并写一条运行日志留痕。
+   */
+  applyLiveConfigUpdate(patch: {
+    name?: string;
+    cycleIntervalMinutes?: number;
+    initialEquity?: number;
+    strategyId?: number | null;
+    config?: StrategyConfig;
+    note?: string;
+  }): void {
+    if (patch.name !== undefined) this.deps.trader.name = patch.name;
+    if (patch.cycleIntervalMinutes !== undefined) {
+      this.deps.trader.cycleIntervalMinutes = patch.cycleIntervalMinutes;
+    }
+    if (patch.initialEquity !== undefined) this.deps.trader.initialEquity = patch.initialEquity;
+    if (patch.strategyId !== undefined) this.deps.trader.strategyId = patch.strategyId;
+    if (patch.config !== undefined) {
+      const next =
+        this.deps.trader.mode === 'ai_managed' ? clampAiManagedHardLimits(patch.config) : patch.config;
+      this.activeConfig = next;
+    }
+    if (patch.note) {
+      this.emit('info', patch.note);
+    }
+  }
+
+  /**
    * 让操作员**现在**就要一次策略审视。
    *
    * ## 为什么需要它

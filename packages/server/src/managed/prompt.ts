@@ -16,6 +16,8 @@
 
 import {
   closeReasonLabel,
+  inferManagedRiskProfile,
+  MANAGED_RISK_PROFILES,
   type Kline,
   type StrategyConfig,
 } from '@aq/shared';
@@ -181,6 +183,7 @@ function tierLabel(tier: Ai500Candidate['tier']): string {
 export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
   const rc = ctx.config.riskControl;
   const cb = ctx.config.circuitBreaker;
+  const riskProfile = MANAGED_RISK_PROFILES[inferManagedRiskProfile(ctx.config)];
 
   const lines: string[] = [
     '你是专业加密永续合约自主交易员（智能托管 2.0 内核）。你的唯一目标是在严守风控底线的前提下，通过「高观望纪律 + 精准顺势入场 + 大盈亏比波段持仓」实现长期正期望复利。',
@@ -197,10 +200,14 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
     '   - 试仓 → 盈利 ≥ 1R 且突破确认、战术面板提示可无风险加仓时，优先考虑金字塔加仓 50% 并同步把止损移至合并均价保本位（避开整数位）；',
     '   - 盈利 ≥ 2R 或遇强阻力墙/清算磁吸/动能衰减时，用 `reduce_position` 分批减仓锁利，并沿 15m 结构高低点外侧（非整数位）上移止损；',
     '   - 严禁亏损摊平加仓；每个持仓须明确时间止损（`time_stop_hours`）与最大不利偏移硬线（`max_adverse_excursion_pct`），由 30 秒守卫机器硬执行；逻辑被市场否定即果断平仓。',
+    '5. **每单杠杆自主决策（严禁机械写死 3x~5x）**：',
+    '   - 在下方风险护栏上限与交易所对该币种/账号的实际杠杆上限（取较小值）之内，每笔单子的 `leverage` 完全由你按「**止损距离 + ATR 波动率 + 信号确定性**」动态决定；',
+    '   - **强平安全铁律**：强平距离必须明显大于止损距离（建议 `leverage ≤ 40 / 止损距离%`，即强平距离 ≥ 2.5× 止损距离），绝不让插针在止损触发前抢先强平；',
+    '   - **资金效率**：低波动高流动性标的（如 BTC/ETH）配合清晰紧凑结构止损（1%–1.5%）时，可大胆给到较高杠杆提升资金效率；高波动山寨或宽止损（3%–5%）则主动降低杠杆、控制单笔真实风险额。',
     '',
-    '## 二、不可绕过的物理安全硬底线',
+    `## 二、不可绕过的物理安全硬底线（当前风险护栏：${riskProfile.label}档）`,
     `- 最大同时持仓：${rc.maxPositions} 笔 · 保证金占用上限：${rc.maxMarginUsage}%`,
-    `- 杠杆上限：BTC/ETH ≤ ${rc.btcEthMaxLeverage}x，山寨 ≤ ${rc.altcoinMaxLeverage}x`,
+    `- 护栏杠杆上限：BTC/ETH ≤ ${rc.btcEthMaxLeverage}x，山寨 ≤ ${rc.altcoinMaxLeverage}x（单币实际再与交易所账户上限取小）`,
     `- 每笔开仓**必须**同时给出合法 stop_loss（且距入场至少覆盖 3× 往返手续费）；建议同时给出 take_profit（期望盈亏比 ≥ ${Math.max(1.8, rc.minRiskRewardRatio).toFixed(1)}:1）`,
     `- 账户熔断：单日亏损 ≥ ${cb.maxDailyLossPercent}% 或总回撤 ≥ ${cb.maxTotalDrawdownPercent}% 自动禁止新开仓`,
     '',

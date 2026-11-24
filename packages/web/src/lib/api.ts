@@ -956,6 +956,8 @@ export interface TraderInput {
    * `'strategy'` 时 `strategyId` 必须是一个真实存在的策略 id。
    */
   mode?: TraderMode;
+  /** 智能托管 2.0 风险护栏档位（仅 `mode === 'ai_managed'` 生效，支持运行中热切换）。 */
+  managedRiskProfile?: import('@aq/shared').ManagedRiskProfileId;
 }
 
 /* -------------------------------------------------------------------------- */

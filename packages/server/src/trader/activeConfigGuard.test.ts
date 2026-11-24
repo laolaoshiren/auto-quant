@@ -59,6 +59,7 @@ const ALLOWED_LINES: ReadonlyMap<string, string> = new Map([
     '`applyAgentPatch()`：补丁结果会落库，必须基于原始配置（否则瞬态覆盖被持久化）。',
   ],
   ['this.activeConfig = result.config;', '`applyAgentPatch()`：写回刚持久化的配置。'],
+  ['this.activeConfig = next;', '`applyLiveConfigUpdate()`：操作员在线热更新写回已持久化的配置。'],
 ]);
 
 /** 去掉一行里的 `//` 与 `/* … *\/` 注释（跳过字符串字面量）。 */

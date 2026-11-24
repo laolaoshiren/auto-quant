@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AI_MANAGED_PRESET_MODEL, isAiDriven, usesModelPicker as modeUsesModelPicker, type TraderMode } from '@aq/shared';
+import {
+  AI_MANAGED_PRESET_MODEL,
+  DEFAULT_MANAGED_RISK_PROFILE,
+  isAiDriven,
+  usesModelPicker as modeUsesModelPicker,
+  type ManagedRiskProfileId,
+  type TraderMode,
+} from '@aq/shared';
 import {
   api,
   type AiModelRow,
@@ -13,6 +20,7 @@ import { exchangeShortLabel } from './ExchangeAccountChip';
 import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, TextInput } from './ui';
 import { SectionLabel } from './shell';
 import { EquitySourceField, equityPayload, useExchangeEquity } from './EquitySourceField';
+import { ManagedRiskProfileCards } from './ManagedRiskProfileControl';
 import type { Catalog } from '../lib/api';
 
 /* -------------------------------------------------------------------------- */
@@ -238,6 +246,10 @@ export function NewTraderModal({
   const [strategyId, setStrategyId] = useState<number | ''>('');
   /** 运行模式。默认按策略，与既有行为一致。 */
   const [mode, setMode] = useState<TraderMode>('strategy');
+  /** 智能托管 2.0 风险护栏档位（默认平衡档：主流 20x / 山寨 10x）。 */
+  const [managedRiskProfile, setManagedRiskProfile] = useState<ManagedRiskProfileId>(
+    DEFAULT_MANAGED_RISK_PROFILE,
+  );
   const [cycleIntervalMinutes, setCycleIntervalMinutes] = useState(15);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -563,6 +575,7 @@ export function NewTraderModal({
          */
         strategyId: strategyIdFor(mode, Number(strategyId)),
         mode,
+        ...(mode === 'ai_managed' ? { managedRiskProfile } : {}),
         cycleIntervalMinutes,
         // Omitted unless the operator took over: the server then reads the real
         // wallet balance itself. `undefined` drops the key from the JSON body.
@@ -1092,6 +1105,18 @@ export function NewTraderModal({
                 <span className="font-medium text-ink-mid">模型由系统 magpie 网关统一调度</span>
                 　—　不使用「AI 模型」列表；每个智能体按工作内容分到不同档位，额度用尽会自动向下平替。
               </p>
+            )}
+
+            {mode === 'ai_managed' && (
+              <Field
+                label="风险护栏档位（每单杠杆由 AI 在护栏内自主决定）"
+                hint="创建后与运行中均可直接在机器人页一键切换，下一轮决策立即生效；实际杠杆会同步受交易所账号上限约束。"
+              >
+                <ManagedRiskProfileCards
+                  value={managedRiskProfile}
+                  onChange={setManagedRiskProfile}
+                />
+              </Field>
             )}
 
             {isAiDriven(mode) ? (

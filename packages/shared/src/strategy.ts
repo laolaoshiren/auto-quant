@@ -513,6 +513,81 @@ export const CircuitBreakerConfigSchema = z.object({
 export const TradingModeSchema = z.enum(['aggressive', 'conservative', 'scalping']);
 export type TradingMode = z.infer<typeof TradingModeSchema>;
 
+/**
+ * 智能托管 2.0 账户风险护栏档位。
+ *
+ * - `conservative`（稳健）：低杠杆、低保证金占用、紧熔断，适合大资金稳健复利；
+ * - `balanced`（平衡 · 默认）：主流 20x / 山寨 10x、80% 保证金上限，兼顾资金效率与安全；
+ * - `aggressive`（进取）：主流 30x / 山寨 15x、85% 保证金上限，适合小资金高波动博弈。
+ *
+ * 护栏定义“上限天花板”，每笔单子具体用几倍杠杆仍由模型按止损距离与波动率自主决策。
+ */
+export const MANAGED_RISK_PROFILE_IDS = ['conservative', 'balanced', 'aggressive'] as const;
+export const ManagedRiskProfileSchema = z.enum(MANAGED_RISK_PROFILE_IDS);
+export type ManagedRiskProfileId = z.infer<typeof ManagedRiskProfileSchema>;
+
+export interface ManagedRiskProfileSpec {
+  id: ManagedRiskProfileId;
+  label: string;
+  shortLabel: string;
+  tagline: string;
+  maxPositions: number;
+  btcEthMaxLeverage: number;
+  altcoinMaxLeverage: number;
+  btcEthMaxPositionValueRatio: number;
+  altcoinMaxPositionValueRatio: number;
+  maxMarginUsage: number;
+  maxDailyLossPercent: number;
+  maxTotalDrawdownPercent: number;
+}
+
+export const DEFAULT_MANAGED_RISK_PROFILE: ManagedRiskProfileId = 'balanced';
+
+export const MANAGED_RISK_PROFILES: Record<ManagedRiskProfileId, ManagedRiskProfileSpec> = {
+  conservative: {
+    id: 'conservative',
+    label: '稳健',
+    shortLabel: '稳健',
+    tagline: '低杠杆 · 紧熔断，适合大资金稳健复利',
+    maxPositions: 6,
+    btcEthMaxLeverage: 10,
+    altcoinMaxLeverage: 5,
+    btcEthMaxPositionValueRatio: 5,
+    altcoinMaxPositionValueRatio: 3,
+    maxMarginUsage: 60,
+    maxDailyLossPercent: 8,
+    maxTotalDrawdownPercent: 25,
+  },
+  balanced: {
+    id: 'balanced',
+    label: '平衡',
+    shortLabel: '平衡',
+    tagline: '主流 20x / 山寨 10x，推荐默认档',
+    maxPositions: 8,
+    btcEthMaxLeverage: 20,
+    altcoinMaxLeverage: 10,
+    btcEthMaxPositionValueRatio: 10,
+    altcoinMaxPositionValueRatio: 5,
+    maxMarginUsage: 80,
+    maxDailyLossPercent: 12,
+    maxTotalDrawdownPercent: 30,
+  },
+  aggressive: {
+    id: 'aggressive',
+    label: '进取',
+    shortLabel: '进取',
+    tagline: '主流 30x / 山寨 15x，适合小资金博弈',
+    maxPositions: 10,
+    btcEthMaxLeverage: 30,
+    altcoinMaxLeverage: 15,
+    btcEthMaxPositionValueRatio: 15,
+    altcoinMaxPositionValueRatio: 8,
+    maxMarginUsage: 85,
+    maxDailyLossPercent: 20,
+    maxTotalDrawdownPercent: 40,
+  },
+};
+
 export const PromptSectionsSchema = z.object({
   roleDefinition: z.string().default(''),
   tradingFrequency: z.string().default(''),
@@ -535,6 +610,8 @@ export const StrategyConfigSchema = z.object({
   description: z.string().max(500).default(''),
 
   tradingMode: TradingModeSchema.default('conservative'),
+  /** 智能托管 2.0 风险护栏档位（可选，缺省按风险控制参数自动推断，不破坏存量 JSON）。 */
+  managedRiskProfile: ManagedRiskProfileSchema.optional(),
 
   coinSource: CoinSourceConfigSchema.default({}),
   indicators: IndicatorConfigSchema.default({}),
@@ -665,16 +742,62 @@ export function defaultStrategyConfig(): StrategyConfig {
  */
 export const AI_MANAGED_HARD_LIMITS = {
   maxPositions: 10,
-  btcEthMaxLeverage: 20,
-  altcoinMaxLeverage: 10,
-  btcEthMaxPositionValueRatio: 10,
-  altcoinMaxPositionValueRatio: 5,
-  maxMarginUsage: 80,
-  /** 日亏熔断必须开启且不得超过 15%（0 = 关闭被禁止）。 */
-  maxDailyLossPercent: 15,
-  /** 总回撤熔断必须开启且不得超过 35%（0 = 关闭被禁止）。 */
-  maxTotalDrawdownPercent: 35,
+  btcEthMaxLeverage: 30,
+  altcoinMaxLeverage: 15,
+  btcEthMaxPositionValueRatio: 15,
+  altcoinMaxPositionValueRatio: 8,
+  maxMarginUsage: 85,
+  /** 日亏熔断必须开启且不得超过 20%（0 = 关闭被禁止）。 */
+  maxDailyLossPercent: 20,
+  /** 总回撤熔断必须开启且不得超过 40%（0 = 关闭被禁止）。 */
+  maxTotalDrawdownPercent: 40,
 } as const;
+
+/**
+ * 从智能托管配置中推断当前生效的风险护栏档位（优先读取显式字段，兼容历史未落库该字段的老配置）。
+ */
+export function inferManagedRiskProfile(
+  config: StrategyConfig | null | undefined,
+): ManagedRiskProfileId {
+  if (!config) return DEFAULT_MANAGED_RISK_PROFILE;
+  if (config.managedRiskProfile && MANAGED_RISK_PROFILES[config.managedRiskProfile]) {
+    return config.managedRiskProfile;
+  }
+  const rc = config.riskControl;
+  if (rc.btcEthMaxLeverage >= 25 || rc.altcoinMaxLeverage >= 12) return 'aggressive';
+  if (rc.btcEthMaxLeverage >= 15 || rc.altcoinMaxLeverage >= 8) return 'balanced';
+  return 'conservative';
+}
+
+/**
+ * 将指定风险护栏档位应用到一份 `StrategyConfig`（纯函数，保留选币池、指标、自定义备忘等非护栏配置）。
+ */
+export function applyManagedRiskProfile(
+  config: StrategyConfig,
+  profile: ManagedRiskProfileId,
+): StrategyConfig {
+  const spec = MANAGED_RISK_PROFILES[profile];
+  return clampAiManagedHardLimits({
+    ...config,
+    tradingMode: profile === 'aggressive' ? 'aggressive' : 'conservative',
+    managedRiskProfile: profile,
+    riskControl: {
+      ...config.riskControl,
+      maxPositions: spec.maxPositions,
+      btcEthMaxLeverage: spec.btcEthMaxLeverage,
+      altcoinMaxLeverage: spec.altcoinMaxLeverage,
+      btcEthMaxPositionValueRatio: spec.btcEthMaxPositionValueRatio,
+      altcoinMaxPositionValueRatio: spec.altcoinMaxPositionValueRatio,
+      maxMarginUsage: spec.maxMarginUsage,
+      requireStopLoss: true,
+    },
+    circuitBreaker: {
+      ...config.circuitBreaker,
+      maxDailyLossPercent: spec.maxDailyLossPercent,
+      maxTotalDrawdownPercent: spec.maxTotalDrawdownPercent,
+    },
+  });
+}
 
 /**
  * 把任意 `StrategyConfig` 钳制到 `AI_MANAGED_HARD_LIMITS` 之内（纯函数，不改原对象）。
@@ -720,16 +843,21 @@ export function clampAiManagedHardLimits(config: StrategyConfig): StrategyConfig
   };
 }
 
-export function unboundedAiManagedConfig(): StrategyConfig {
+export function unboundedAiManagedConfig(
+  profile: ManagedRiskProfileId = DEFAULT_MANAGED_RISK_PROFILE,
+): StrategyConfig {
+  const spec = MANAGED_RISK_PROFILES[profile];
   const base = StrategyConfigSchema.parse({
+    tradingMode: profile === 'aggressive' ? 'aggressive' : 'conservative',
+    managedRiskProfile: profile,
     riskControl: {
-      /* 在物理安全底线（AI_MANAGED_HARD_LIMITS）内给 AI 充足的自主空间；越界由 patch.ts 钳制。 */
-      maxPositions: 6,
-      btcEthMaxLeverage: 10,
-      altcoinMaxLeverage: 5,
-      btcEthMaxPositionValueRatio: 5,
-      altcoinMaxPositionValueRatio: 3,
-      maxMarginUsage: 60,
+      /* 在物理安全底线（AI_MANAGED_HARD_LIMITS）内按所选风险护栏档位给 AI 自主决策空间。 */
+      maxPositions: spec.maxPositions,
+      btcEthMaxLeverage: spec.btcEthMaxLeverage,
+      altcoinMaxLeverage: spec.altcoinMaxLeverage,
+      btcEthMaxPositionValueRatio: spec.btcEthMaxPositionValueRatio,
+      altcoinMaxPositionValueRatio: spec.altcoinMaxPositionValueRatio,
+      maxMarginUsage: spec.maxMarginUsage,
       /* 门槛归零 —— "要不要出手"属于策略风格，由模型判断，不由数字拦。 */
       minRiskRewardRatio: 0,
       minConfidence: 0,
@@ -748,8 +876,8 @@ export function unboundedAiManagedConfig(): StrategyConfig {
       enabled: false,
     },
     circuitBreaker: {
-      maxDailyLossPercent: 8,
-      maxTotalDrawdownPercent: 25,
+      maxDailyLossPercent: spec.maxDailyLossPercent,
+      maxTotalDrawdownPercent: spec.maxTotalDrawdownPercent,
     },
   });
 

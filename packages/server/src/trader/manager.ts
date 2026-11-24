@@ -4530,6 +4530,27 @@ export class TraderManager {
   }
 
   /**
+   * 将在线修改的安全配置同步到正在运行的 `AutoTrader` 实例（若未运行则无操作）。
+   * 下一轮决策立即读到新配置，不影响当前已有持仓与挂单。
+   */
+  applyLiveUpdate(
+    traderId: number,
+    patch: {
+      name?: string;
+      cycleIntervalMinutes?: number;
+      initialEquity?: number;
+      strategyId?: number | null;
+      config?: StrategyConfig;
+      note?: string;
+    },
+  ): boolean {
+    const running = this.running.get(traderId);
+    if (!running) return false;
+    running.applyLiveConfigUpdate(patch);
+    return true;
+  }
+
+  /**
    * 这台机器人**生效**的杠杆上限 —— 控制台用它当有效杠杆表盘的刻度。
    *
    * ## 为什么必须走「生效配置」

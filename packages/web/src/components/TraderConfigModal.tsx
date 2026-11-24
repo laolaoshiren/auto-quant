@@ -1,13 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
-import { AI_MANAGED_PRESET_MODEL, isAiDriven, usesModelPicker as modeUsesModelPicker } from '@aq/shared';
+import {
+  AI_MANAGED_PRESET_MODEL,
+  DEFAULT_MANAGED_RISK_PROFILE,
+  isAiDriven,
+  usesModelPicker as modeUsesModelPicker,
+  type ManagedRiskProfileId,
+} from '@aq/shared';
 import { api, type AiModelRow, type ExchangeAccountRow, type TraderRow } from '../lib/api';
 import { fmtNum } from '../lib/format';
 import { Badge, Button, ErrorNote, Field, Modal, NumberInput, Select, Spinner3, TextInput } from './ui';
 import { EquitySourceField, equityPayload, useExchangeEquity } from './EquitySourceField';
+import { ManagedRiskProfileCards } from './ManagedRiskProfileControl';
 
 /**
- * Edit a stopped trader. The API refuses configuration changes while the loop is
- * running, so the caller disables the entry point instead of failing here.
+ * Edit a trader (supports hot-updating safe fields such as name, cycle interval,
+ * strategy, and `ai_managed` risk guardrails while running; switching AI model
+ * on fixed-strategy bots still requires stopping first).
  */
 export function TraderConfigModal({
   trader,
@@ -34,6 +42,9 @@ export function TraderConfigModal({
    * 编辑一台 AI 托管机器人时 `trader.strategyId` 就是 `null`。
    */
   const [strategyId, setStrategyId] = useState<number | null>(null);
+  const [managedRiskProfile, setManagedRiskProfile] = useState<ManagedRiskProfileId>(
+    DEFAULT_MANAGED_RISK_PROFILE,
+  );
   const [cycleIntervalMinutes, setCycleIntervalMinutes] = useState(15);
   /** Set when the save left the trader with a 0 baseline. */
   const [baselineWarning, setBaselineWarning] = useState<string | null>(null);
@@ -115,6 +126,7 @@ export function TraderConfigModal({
     setName(trader.name);
     setAiModelId(trader.aiModelId);
     setStrategyId(trader.strategyId);
+    setManagedRiskProfile(trader.managedRiskProfile ?? DEFAULT_MANAGED_RISK_PROFILE);
     setCycleIntervalMinutes(trader.cycleIntervalMinutes);
     setError(null);
     setBaselineWarning(null);
@@ -163,13 +175,14 @@ export function TraderConfigModal({
          * 只是让请求体多一个永远不该变化的键。不发的语义是"别动它" —— 这正是
          * 服务端在 `undefined` 时的行为（`parsed.data` 里没这个键就不比较）。
          */
-        ...(usesModelPicker ? { aiModelId } : {}),
+        ...(usesModelPicker && !trader.isRunning ? { aiModelId } : {}),
         /*
          * AI 托管时 `strategyId` 是 `null` —— 传 `undefined` 让服务端**不动这个字段**
          * （它本来就是空的）。绝不能传一个数字：那等于又把机器人绑回一个策略，
          * 而用户要的正是"完全独立"。
          */
         strategyId: strategyId ?? undefined,
+        ...(trader.mode === 'ai_managed' ? { managedRiskProfile } : {}),
         cycleIntervalMinutes,
         ...(manualEquity !== undefined ? { initialEquity: manualEquity } : {}),
       });
@@ -217,6 +230,12 @@ export function TraderConfigModal({
         <Spinner3 label="正在加载可选项" />
       ) : (
         <div className="space-y-3">
+          {trader.isRunning && (
+            <div className="rounded-md border border-accent/35 bg-accent/10 px-3 py-2 text-xs leading-relaxed text-ink-mid">
+              当前机器人正在运行：修改后的配置将<strong className="font-semibold text-ink-hi">在线热更新</strong>，在下一轮决策周期立即生效，不会中断运行或影响当前持仓与挂单。
+            </div>
+          )}
+
           <Field label="名称">
             <TextInput value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
@@ -246,8 +265,15 @@ export function TraderConfigModal({
           </Field>
 
           {usesModelPicker ? (
-            <Field label="AI 模型">
-              <Select value={aiModelId} onChange={(e) => setAiModelId(Number(e.target.value))}>
+            <Field
+              label="AI 模型"
+              hint={trader.isRunning ? '切换 AI 模型需要先停止该机器人；其它配置可直接在线保存。' : undefined}
+            >
+              <Select
+                value={aiModelId}
+                disabled={trader.isRunning}
+                onChange={(e) => setAiModelId(Number(e.target.value))}
+              >
                 {models.map((model) => (
                   <option key={model.id} value={model.id}>
                     {model.label}
@@ -284,7 +310,17 @@ export function TraderConfigModal({
 
             页头（`TraderPage`）对这三种模式分别做了同样的处理，这里与它保持一致。
           */}
-          {isAiDriven(trader.mode) ? (
+          {trader.mode === 'ai_managed' ? (
+            <Field
+              label="风险护栏档位（每单杠杆由 AI 在护栏内自主决定）"
+              hint="保存后下一轮决策立即生效；实际杠杆会同步与交易所账号上限取小。"
+            >
+              <ManagedRiskProfileCards
+                value={managedRiskProfile}
+                onChange={setManagedRiskProfile}
+              />
+            </Field>
+          ) : isAiDriven(trader.mode) ? (
             <Field label="策略" hint="AI 驱动的模式不引用策略，参数由 AI 自己调整。">
               <div className="text-base text-ink-faint">不使用策略参数</div>
             </Field>

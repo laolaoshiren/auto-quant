@@ -9,7 +9,13 @@ import {
   Square,
   Zap,
 } from 'lucide-react';
-import { AI_MANAGED_PRESET_MODEL, beijingDayStartMs, type EquitySnapshot } from '@aq/shared';
+import {
+  AI_MANAGED_PRESET_MODEL,
+  MANAGED_RISK_PROFILES,
+  beijingDayStartMs,
+  type EquitySnapshot,
+  type ManagedRiskProfileId,
+} from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
@@ -32,6 +38,7 @@ import { PageShell, Metric } from '../components/shell';
 import { DecisionFeed } from '../components/DecisionFeed';
 import { AgentAuditPanel } from '../components/AgentAuditPanel';
 import { ManagedIntelPanel } from '../components/ManagedIntelPanel';
+import { ManagedRiskInlineSwitcher } from '../components/ManagedRiskProfileControl';
 import { isOpenOrder, TraderTables, type TraderTabId } from '../components/TraderTables';
 import { MODE_HINT, MODE_LABEL, isPaperView } from '../lib/glossary';
 import { NET_PNL_FORMULA, PnlBreakdown, pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
@@ -252,6 +259,9 @@ export function TraderPage() {
    */
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [riskProfileBusy, setRiskProfileBusy] = useState(false);
+  const [riskProfileFeedback, setRiskProfileFeedback] = useState<string | null>(null);
+  const riskFeedbackTimerRef = useRef<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [tableTab, setTableTab] = useState<TraderTabId>('positions');
   const [chartTab, setChartTab] = useState<ChartTab>('equity');
@@ -1025,9 +1035,37 @@ export function TraderPage() {
         window.clearTimeout(startFollowupTimerRef.current);
         startFollowupTimerRef.current = null;
       }
+      if (riskFeedbackTimerRef.current !== null) {
+        window.clearTimeout(riskFeedbackTimerRef.current);
+        riskFeedbackTimerRef.current = null;
+      }
     },
     [],
   );
+
+  const switchRiskProfile = async (nextProfile: ManagedRiskProfileId) => {
+    if (!trader || riskProfileBusy) return;
+    setRiskProfileBusy(true);
+    setActionError(null);
+    setRiskProfileFeedback(null);
+    try {
+      await api.updateTrader(trader.id, { managedRiskProfile: nextProfile });
+      tradersQuery.reload();
+      const label = MANAGED_RISK_PROFILES[nextProfile].label;
+      setRiskProfileFeedback(running ? `已切至「${label}」· 下一轮立即生效` : `已切至「${label}」`);
+      if (riskFeedbackTimerRef.current !== null) {
+        window.clearTimeout(riskFeedbackTimerRef.current);
+      }
+      riskFeedbackTimerRef.current = window.setTimeout(() => {
+        riskFeedbackTimerRef.current = null;
+        setRiskProfileFeedback(null);
+      }, 4500);
+    } catch (err) {
+      setActionError((err as Error).message);
+    } finally {
+      setRiskProfileBusy(false);
+    }
+  };
 
   const startNow = async () => {
     if (!trader) return;
@@ -2071,7 +2109,17 @@ export function TraderPage() {
                 {busy ? '启动中…' : '启动'}
               </Button>
             )}
-            <Button onClick={() => setConfigOpen(true)} disabled={running} title="请先停止该机器人再编辑">
+            <Button
+              onClick={() => setConfigOpen(true)}
+              disabled={status === 'starting'}
+              title={
+                status === 'starting'
+                  ? '启动中，请稍候再编辑配置'
+                  : running
+                    ? '运行中可直接在线修改名称、风险档位、周期等配置（下一轮生效）'
+                    : '编辑机器人配置'
+              }
+            >
               <Settings2 aria-hidden className="h-3.5 w-3.5" />
               配置
             </Button>
@@ -2168,6 +2216,17 @@ export function TraderPage() {
         {/* B. 指标行 + 一行次要事实（§3 的第 2 项） --------------------- */}
         {metricCards}
         {secondaryFacts}
+
+        {/* 智能托管 2.0：外显风险护栏三档（无需进入设置即可直观查看与运行中一键切换） */}
+        {trader.mode === 'ai_managed' && (
+          <ManagedRiskInlineSwitcher
+            value={trader.managedRiskProfile}
+            busy={riskProfileBusy}
+            disabled={status === 'starting'}
+            feedback={riskProfileFeedback}
+            onChange={(next) => void switchRiskProfile(next)}
+          />
+        )}
 
         {/* 智能托管 2.0：AI500 雷达、持仓论点、反例笔记与归因就绪面板置顶于图表之上，首屏直达核心判断 */}
         {trader.mode === 'ai_managed' && (

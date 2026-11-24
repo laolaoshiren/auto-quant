@@ -23,6 +23,7 @@ import { usePolled } from '../lib/hooks';
 import { Button, Badge, Panel, cn } from '../components/ui';
 import { SideBadge, TraderStatusBadge } from '../components/Badges';
 import { ModeBadge } from '../components/TeamRoster';
+import { ManagedRiskBadge } from '../components/ManagedRiskProfileControl';
 import { TraderAvatar } from '../components/TraderAvatar';
 import { pnlFormulaText, statsCosts } from '../components/PnlBreakdown';
 import { BALANCE_LABEL, fmtInt, fmtPercent, fmtUsd, fmtUsdSigned, pnlColor, timeAgo } from '../lib/format';
@@ -358,6 +359,9 @@ export function TradersSnapshotTable({
                       */}
                       <div className="mt-1 flex flex-wrap items-center gap-1">
                         <ModeBadge mode={trader.mode} />
+                        {trader.mode === 'ai_managed' && (
+                          <ManagedRiskBadge profile={trader.managedRiskProfile} />
+                        )}
                         <MoneyBadge dryRun={trader.dryRun} />
                       </div>
                     </td>

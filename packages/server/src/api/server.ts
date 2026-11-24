@@ -23,12 +23,17 @@ import {
 } from '../trader/control.js';
 import {
   AI_MANAGED_PRESET_MODEL,
+  DEFAULT_MANAGED_RISK_PROFILE,
   EXCHANGES,
   ExchangeIdSchema,
   LLM_PROVIDERS,
+  MANAGED_RISK_PROFILES,
+  ManagedRiskProfileSchema,
   STRATEGY_PRESETS,
   StrategyConfigSchema,
+  applyManagedRiskProfile,
   defaultStrategyConfig,
+  inferManagedRiskProfile,
   providerDefaults,
   defaultAiTeamConfig,
   isAiDriven,
@@ -36,8 +41,10 @@ import {
   unboundedAiManagedConfig,
   TIMEFRAMES,
   TimeframeSchema,
+  type ManagedRiskProfileId,
   type PositionView,
   type ServerEvent,
+  type StrategyConfig,
   type Trader,
   type TraderStatus,
 } from '@aq/shared';
@@ -348,6 +355,11 @@ const TraderInputSchema = z.object({
    * 默认 `'strategy'`，所以既有调用点（前端与脚本）行为完全不变。
    */
   mode: z.enum(['strategy', 'ai_managed', 'ai_team', 'jev']).default('strategy'),
+  /**
+   * 智能托管 2.0 风险护栏档位（`conservative` / `balanced` / `aggressive`）。
+   * 仅对 `mode === 'ai_managed'` 生效，默认 `'balanced'`；支持运行中热切换。
+   */
+  managedRiskProfile: ManagedRiskProfileSchema.optional(),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -2272,10 +2284,26 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     }
   }
 
+  function parseAgentConfig(raw: string | null | undefined): StrategyConfig | null {
+    if (typeof raw !== 'string' || raw.length === 0) return null;
+    try {
+      const parsed = StrategyConfigSchema.safeParse(JSON.parse(raw));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function managedRiskProfileOf(trader: Pick<Trader, 'mode' | 'agentConfigJson'>): ManagedRiskProfileId | null {
+    if (trader.mode !== 'ai_managed') return null;
+    return inferManagedRiskProfile(parseAgentConfig(trader.agentConfigJson));
+  }
+
   app.get('/api/traders', authed, async () => {
     const running = new Set(deps.manager.runningIds());
     return traders.list().map((trader) => ({
       ...trader,
+      managedRiskProfile: managedRiskProfileOf(trader),
       // The live loop is the source of truth for status, not the stored value.
       status: running.has(trader.id) ? deps.manager.statusOf(trader.id) : ('stopped' as const),
       isRunning: running.has(trader.id),
@@ -2602,75 +2630,36 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      *   · `ai_team`    → `defaultAiTeamConfig()`（含**动态标的池**）
      *   · `jev`        → `defaultJevConfig()`（动态标的池 + 实验性的收紧风控）
      */
+    let initialManagedProfile: ManagedRiskProfileId | null = null;
     if (parsed.data.mode === 'ai_managed') {
-      traders.setAgentConfig(trader.id, JSON.stringify(unboundedAiManagedConfig()));
+      initialManagedProfile = parsed.data.managedRiskProfile ?? DEFAULT_MANAGED_RISK_PROFILE;
+      traders.setAgentConfig(trader.id, JSON.stringify(unboundedAiManagedConfig(initialManagedProfile)));
     } else if (parsed.data.mode === 'ai_team') {
       traders.setAgentConfig(trader.id, JSON.stringify(defaultAiTeamConfig()));
     }
 
-    return { ...trader, equitySource };
+    const fresh = traders.get(trader.id) ?? trader;
+    return { ...fresh, managedRiskProfile: managedRiskProfileOf(fresh) ?? initialManagedProfile, equitySource };
   }));
 
   app.patch('/api/traders/:id', authed, guard(async (body: unknown, request, reply) => {
     const id = idOf(request);
     /*
-     * ⚠️ "启动中"也要拦（2026-11-11 审查）：启动要十几秒，这期间 `isRunning`
-     * 还是 false，改动会写进库，而正在启动的实例用的是启动那一刻读到的旧值 ——
-     * 界面显示新配置、机器人按旧配置交易。
+     * ⚠️ "启动中"仍必须拦（2026-11-11 审查）：启动要十几秒，这期间 `isRunning`
+     * 还是 false，改动会写进库，而正在启动的实例用的是启动那一刻读到的旧值。
      */
-    if (deps.manager.isRunning(id)) {
-      return reply.code(409).send({ error: '请先停止该机器人，再修改它的配置。' });
-    }
     if (deps.manager.isStarting(id)) {
       /* 文案单列：点了停止后界面已显示"已停止"，而启动还没收尾 —— 再说"请先停止"会让人无从下手。 */
       return reply
         .code(409)
         .send({ error: '这台机器人正在启动（或正在取消启动），请稍等几秒再修改它的配置。' });
     }
+    const isCurrentlyRunning = deps.manager.isRunning(id);
     const parsed = TraderInputSchema.partial().safeParse(body);
     if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? 'Invalid trader');
-    /*
-     * ⚠️ **改了仓储不支持的字段时必须明说，不能静默成功（2026-10-11 审查发现）。**
-     *
-     * `TraderInputSchema` 含 `exchangeAccountId`（创建时必需），而 `traders.update()`
-     * 的入参里**没有这个字段** —— 于是编辑弹窗改了交易所账户、接口回 200、
-     * `return traders.get(id)` 看起来一切正常，**而账户根本没变**。
-     *
-     * 这是最坏的一类失败：**它告诉你成功了。**
-     *
-     * ## ⚠️ 判据必须是"值变了没有"，不是"键在不在"（2026-10-11 当天返工）
-     *
-     * 第一版写的是 `key in parsed.data` —— **它把用户改任何东西都挡住了**，
-     * 用户报的原话是「我修改机器人模型报错了」。我为了防"静默失败"，
-     * 造出了一个"什么都改不了"。
-     *
-     * ### 真正的原因（已实测证实，不是推测）
-     *
-     * 我起初以为是 zod 的 `.partial()` 会保留声明过的键 —— **实测否定了它**：
-     *
-     *     z.object({ a: z.number().optional(), b: z.string() }).partial()
-     *       .safeParse({ b: 'x' }).data   →  { b: 'x' }
-     *       'a' in data                   →  false
-     *
-     * 所以 `key in parsed.data` 对**未传**的键本来就是 false。
-     * 真正的原因是**前端把 `exchangeAccountId` 一起提交了** ——
-     * 配置弹窗会带上当前选中的交易所账户，哪怕用户改的是别的东西。
-     *
-     * 结论不变、但理由不同：**要判断的是"这一次有没有改它"，只能拿值和库里的比。**
-     * 一个请求体里出现某个字段，既不代表用户改了它、也不代表没改 ——
-     * **只有和当前值比较才能回答那个问题。**
-     */
     const current = traders.get(id);
     if (!current) return reply.code(404).send({ error: `找不到机器人 ${id}` });
 
-    /*
-     * ⚠️ **运行模式（模拟/实盘）创建后不可修改**（2026-11-10 用户要求）。
-     *
-     * 两者互相切换都会造成严重后果：
-     *   · 实盘 → 模拟：操作员以为在真实交易，实际只在本地下单（**静默失能**）；
-     *   · 模拟 → 实盘：一个从未经过实盘验证的策略**突然动真实资金**。
-     * 所以它和"交易所账户"一样，属于"要换就新建"的字段。
-     */
     if (parsed.data.dryRun !== undefined && parsed.data.dryRun !== (current.dryRun ?? true)) {
       return reply.code(400).send({
         error:
@@ -2679,15 +2668,6 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       });
     }
 
-    /*
-     * ⚠️ **PATCH 必须复用创建时的模式/策略/模型规则**（2026-11-10 审计 #3）。
-     *
-     * 原来这里不校验：传 `mode` 回 200 但模式没变（`traders.update` 不写 mode ——
-     * 又一个"告诉你成功了"的静默失败）；智能托管能被重新绑回策略；固定策略能被
-     * 置成无策略（推迟到启动时才报错）；不存在的 id 直接抛 SQLite 外键错误。
-     *
-     * 判据仍是"值变了没有"（见上面的说明）：前端可能把当前值原样带上来。
-     */
     if (parsed.data.mode !== undefined && parsed.data.mode !== current.mode) {
       return reply.code(400).send({
         error: '机器人的模式在创建时就已固定，不能通过编辑修改。要换模式请新建一台机器人。',
@@ -2704,8 +2684,14 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         if (!strategies.get(requestedStrategyId)) throw new Error('未知的策略');
       }
     }
+    if (parsed.data.managedRiskProfile !== undefined && current.mode !== 'ai_managed') {
+      return reply.code(400).send({
+        error: '只有智能托管（ai_managed）模式支持风险护栏档位。',
+      });
+    }
     /* 只校验"换成的新值"：原样带回当前值（含网关模式的占位 id）不受影响。 */
-    if (parsed.data.aiModelId !== undefined && parsed.data.aiModelId !== current.aiModelId) {
+    const modelChanged = parsed.data.aiModelId !== undefined && parsed.data.aiModelId !== current.aiModelId;
+    if (modelChanged) {
       if (!usesModelPicker(current.mode)) {
         const modeHint =
           current.mode === 'ai_managed'
@@ -2713,30 +2699,21 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
             : '当前模式统一由系统 magpie 网关调度模型，不支持单独修改 AI 模型。';
         throw new Error(modeHint);
       }
-      if (!aiModels.get(parsed.data.aiModelId)) {
+      if (isCurrentlyRunning) {
+        return reply.code(409).send({
+          error: '切换 AI 模型需要先停止该机器人；名称、周期、策略与风险档位等配置可直接在线修改。',
+        });
+      }
+      if (!aiModels.get(parsed.data.aiModelId!)) {
         throw new Error('未知的 AI 模型');
       }
     }
 
-    /*
-     * **编辑路径也要校验模拟本金**（2026-10-27）。
-     *
-     * 创建那条路已经校验了，但 `PATCH` 原先完全没有 —— 而编辑弹窗**确实**
-     * 能改这个字段。于是同一个约束在两条路上不一致：界面改不了的值，
-     * 直接调 API 能改。那种"漏了一处"的开关等于没接（本仓的既有教训）。
-     */
     if (parsed.data.paperStartingBalance !== undefined) {
       const invalid = validateStartingBalance(parsed.data.paperStartingBalance);
       if (invalid) throw new Error(invalid);
     }
 
-    /*
-     * ⚠️ **类型里必须包含 `null`。**
-     *
-     * `Trader.exchangeAccountId` 自 PR #185 起是 `number | null`（纯模拟盘机器人没有账户）。
-     * 这里原来写成 `{ exchangeAccountId?: number }` —— 运行时行为不受影响（`null` 一样参与比较），
-     * 但类型在说假话，而"行字段非空"正是这次审计要清掉的那类语义假设。
-     */
     const requestedAccountId = (parsed.data as { exchangeAccountId?: number | null })
       .exchangeAccountId;
     if (requestedAccountId !== undefined && requestedAccountId !== current.exchangeAccountId) {
@@ -2746,8 +2723,59 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
           '（当前这个可以停掉保留历史）。',
       });
     }
-    traders.update(id, parsed.data);
-    return traders.get(id);
+
+    const { managedRiskProfile, ...dbPatch } = parsed.data;
+    traders.update(id, dbPatch);
+
+    let nextLiveConfig: StrategyConfig | undefined;
+    const notes: string[] = [];
+
+    if (managedRiskProfile !== undefined && current.mode === 'ai_managed') {
+      const baseCfg = parseAgentConfig(current.agentConfigJson) ?? unboundedAiManagedConfig(managedRiskProfile);
+      const updatedCfg = applyManagedRiskProfile(baseCfg, managedRiskProfile);
+      traders.setAgentConfig(id, JSON.stringify(updatedCfg));
+      nextLiveConfig = updatedCfg;
+      const spec = MANAGED_RISK_PROFILES[managedRiskProfile];
+      notes.push(
+        `风险护栏已切换为「${spec.label}」（BTC/ETH ≤ ${spec.btcEthMaxLeverage}x · 山寨 ≤ ${spec.altcoinMaxLeverage}x · 保证金 ≤ ${spec.maxMarginUsage}% · 日亏熔断 ${spec.maxDailyLossPercent}%）`,
+      );
+    } else if (
+      current.mode === 'strategy' &&
+      parsed.data.strategyId !== undefined &&
+      parsed.data.strategyId !== null &&
+      parsed.data.strategyId !== current.strategyId
+    ) {
+      const nextStrategy = strategies.get(parsed.data.strategyId);
+      if (nextStrategy) {
+        nextLiveConfig = nextStrategy.config;
+        notes.push(`策略已切换为「${nextStrategy.name}」`);
+      }
+    }
+
+    if (
+      parsed.data.cycleIntervalMinutes !== undefined &&
+      parsed.data.cycleIntervalMinutes !== current.cycleIntervalMinutes
+    ) {
+      notes.push(`决策周期调整为 ${parsed.data.cycleIntervalMinutes} 分钟`);
+    }
+
+    if (isCurrentlyRunning) {
+      deps.manager.applyLiveUpdate?.(id, {
+        name: parsed.data.name,
+        cycleIntervalMinutes: parsed.data.cycleIntervalMinutes,
+        initialEquity: parsed.data.initialEquity,
+        strategyId: parsed.data.strategyId,
+        config: nextLiveConfig,
+        note:
+          notes.length > 0
+            ? `操作员在线热更新配置：${notes.join('；')} —— 下一轮决策立即生效，不影响当前持仓与挂单。`
+            : undefined,
+      });
+    }
+
+    const updated = traders.get(id);
+    if (!updated) return reply.code(404).send({ error: `找不到机器人 ${id}` });
+    return { ...updated, managedRiskProfile: managedRiskProfileOf(updated) };
   }));
 
   /** 删除时最多等在途启动收尾多久。见下面路由里的说明。 */
