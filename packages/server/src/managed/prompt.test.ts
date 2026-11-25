@@ -212,6 +212,32 @@ test('★ M2.4 常规 4 候选 + 1 持仓与极端 10 持仓压测均严格满�
   assert.ok(heavy.stats.compactionLevel >= 1, '极端场景应自动触发压缩档位');
 });
 
+test('★ ai_managed 2.0 屏蔽旧 1.0 遗留 entryStandards 注入，并内置强突破 50% 底仓与 4h/日线级 TP 锚定纪律', () => {
+  const cfg = unboundedAiManagedConfig();
+  cfg.promptSections.entryStandards = '不许把入场平移到现价；绝不许提交半额单；违第③条';
+  const bundle = buildManagedPrompts({
+    traderName: 'breakout-check',
+    cycleNumber: 78,
+    now: new Date('2026-11-26T00:00:00Z'),
+    config: cfg,
+    account: { equity: 51, availableBalance: 51, unrealizedPnl: 0, marginUsed: 0, positionCount: 0 },
+    positions: [],
+    pendingEntries: [],
+    dossiers: [makeDossier('MMTUSDT', 0.305, false)],
+    radarLeaderboard: [],
+    btcBenchmarkLine: null,
+    cycleIntervalMinutes: 15,
+    enableAgenticProtocol: true,
+  });
+
+  assert.doesNotMatch(bundle.systemPrompt, /不许把入场平移到现价/);
+  assert.doesNotMatch(bundle.systemPrompt, /绝不许提交半额单/);
+  assert.doesNotMatch(bundle.systemPrompt, /策略补充备忘/);
+  assert.match(bundle.systemPrompt, /50% 计划仓位/);
+  assert.match(bundle.systemPrompt, /严禁撤掉远价限价单后在原远价位原地重挂/);
+  assert.match(bundle.systemPrompt, /4h\/日线级前高前低/);
+});
+
 /* -------------------------------------------------------------------------- */
 /*  End-to-End AutoTrader Integration (ai_managed 2.0)                         */
 /* -------------------------------------------------------------------------- */

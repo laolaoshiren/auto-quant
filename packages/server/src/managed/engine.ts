@@ -245,7 +245,7 @@ export const MANAGED_AGENT_TOOLS: readonly ToolSpec[] = [
                 type: 'string',
                 enum: ['market', 'limit'],
                 description:
-                  '入场类型：结构刚确认且距 15m EMA20 ≤ 1.5×ATR 可直接 market 市价切入；偏离过大或贴阻力墙用 limit 回踩限价。',
+                  '入场类型：放量突破刚确认且距 15m EMA20 ≤ 1.8×ATR 可直接 market 市价切入（强关注突破可用 50% 计划仓位先市价上底仓）；偏离过大（>2.0×ATR）或顶阻力墙用 limit 回踩限价，严禁撤单后在原远价位原地重挂。',
               },
               limit_price: { type: 'number', description: '限价入场价（entry_type=limit 时必填）。' },
               wait_minutes: {

@@ -61,7 +61,19 @@ export interface ResilientStreamOptions {
    * **用户数据流必须显式传** —— 它是事件驱动的，账户空闲时长时间没有消息是正常的，
    * 用市场数据流的判据会不停地把健康连接掐掉（见 `createSocket()` 的说明）。
    */
-  stalenessWindowMs?: number;  /** Called once per successfully received data message. */
+  stalenessWindowMs?: number;
+  /**
+   * 该流是否为“空闲静默属正常”的事件驱动流（例如 Binance User Data Stream）。
+   *
+   * - `false`（默认，行情流）：超过 `stalenessWindowMs` 无业务帧直接记 `ERROR` 并按故障退避重连；
+   * - `true`（用户数据流）：空仓/无挂单时长时间无业务帧是正常的。只要近期仍持续收到服务端 WS `ping`
+   *   心跳，说明传输层健康；超过 `stalenessWindowMs` 仍执行例行保活重连与状态对账（防止 listenKey
+   *   静默失效），但记为 `INFO` 且不累加故障退避计数，避免空仓期间污染自检告警。
+   */
+  idleSilenceExpected?: boolean;
+  /** 可选覆盖看门狗巡检周期（仅测试加速使用，默认 10,000ms）。 */
+  watchdogIntervalMs?: number;
+  /** Called once per successfully received data message. */
   onData?: (stream: string, payload: unknown) => void;
   /** Called when the connection becomes live, and again when it is lost. */
   onStateChange?: (state: StreamState, detail: string) => void;
@@ -96,6 +108,7 @@ export class ResilientStream {
   private stopped = true;
   private openedAt = 0;
   private lastMessageAt = 0;
+  private lastPingAt = 0;
   private connectGen = 0;
   private lastDataByStream = new Map<string, number>();
   private watchdog: NodeJS.Timeout | null = null;
@@ -107,6 +120,8 @@ export class ResilientStream {
   /** Proactive reconnect at 23h, safely inside Binance's 24-hour cap. */
   private static readonly ROTATE_AFTER_MS = 23 * 60 * 60 * 1000;
   private static readonly WATCHDOG_INTERVAL_MS = 10_000;
+  /** Binance Futures 约每 3 分钟发送一次 WS ping；10 分钟内收到过即视为传输层存活。 */
+  private static readonly IDLE_HEARTBEAT_MAX_AGE_MS = 10 * 60 * 1000;
 
   get currentState(): StreamState {
     return this.state;
@@ -190,6 +205,7 @@ export class ResilientStream {
     this.socket = socket;
     this.openedAt = 0;
     this.lastMessageAt = 0;
+    this.lastPingAt = 0;
 
     socket.on('open', () => {
       if (this.socket !== socket) return;
@@ -225,8 +241,16 @@ export class ResilientStream {
     });
 
     socket.on('ping', () => {
-      // `ws` already replies with a pong; this is only for observability.
+      if (this.socket !== socket) return;
+      this.lastPingAt = Date.now();
+      // `ws` already replies with a pong; recording the timestamp proves transport liveness
+      // for event-driven streams (like Binance user-data) when the account is flat/idle.
       log.debug(`[${this.options.name}] server ping`);
+    });
+
+    socket.on('pong', () => {
+      if (this.socket !== socket) return;
+      this.lastPingAt = Date.now();
     });
 
     /*
@@ -292,8 +316,14 @@ export class ResilientStream {
    * liveness cannot see this; only the absence of data can.
    */
   private startWatchdog(): void {
+    const intervalMs = Math.max(20, this.options.watchdogIntervalMs ?? ResilientStream.WATCHDOG_INTERVAL_MS);
     this.watchdog = setInterval(() => {
       if (this.stopped) return;
+
+      const hasRecentHeartbeat =
+        this.options.idleSilenceExpected === true &&
+        this.lastPingAt > 0 &&
+        Date.now() - this.lastPingAt < ResilientStream.IDLE_HEARTBEAT_MAX_AGE_MS;
 
       /*
        * ⚠️ **也要盯住「握手成功但从未收到首帧」的静默僵尸连接（2026-11-23 P1 修复）**。
@@ -301,16 +331,28 @@ export class ResilientStream {
        * `socket.on('open')` 刻意不把 `state` 翻成 `'live'`（要等首帧 `message`），
        * 原先 `if (this.state !== 'live') return;` 直接跳过了这类连接 —— 一旦 listenKey
        * 失效或路由错误导致握手成功但一直无消息，看门狗永远不重连。
+       *
+       * 但对事件驱动的 `user-data` 流（`idleSilenceExpected: true`），空仓且无挂单时
+       * 几小时没有业务帧完全正常：若近期仍正常收到服务端 WS `ping` 心跳，则按 `INFO`
+       * 执行例行保活刷新重连（兼做 `onOpen` 状态对账与 listenKey 续期），不记 `ERROR`、
+       * 不污染健康自检；只有连心跳也丢失时才按真正僵尸连接记 `ERROR`。
        */
       if (this.state !== 'live') {
         if (this.socket?.readyState === WebSocket.OPEN && this.openedAt > 0) {
           const openSilence = Date.now() - this.openedAt;
           if (openSilence > this.stalenessWindowMs()) {
-            log.error(
-              `[${this.options.name}] 连接建立后 ${Math.round(openSilence / 1000)}s 未收到任何首帧数据；强制重连`,
-            );
-            this.attempt += 1;
-            void this.connect('watchdog-open-silent');
+            if (hasRecentHeartbeat) {
+              log.info(
+                `[${this.options.name}] 账户空闲 ${Math.round(openSilence / 1000)}s 无首帧事件（WS 心跳正常）；执行例行保活重连与状态对账`,
+              );
+              void this.connect('idle-refresh');
+            } else {
+              log.error(
+                `[${this.options.name}] 连接建立后 ${Math.round(openSilence / 1000)}s 未收到任何首帧数据；强制重连`,
+              );
+              this.attempt += 1;
+              void this.connect('watchdog-open-silent');
+            }
           }
         }
         return;
@@ -318,11 +360,18 @@ export class ResilientStream {
 
       const silence = Date.now() - this.lastMessageAt;
       if (silence > this.stalenessWindowMs()) {
-        log.error(
-          `[${this.options.name}] no data for ${Math.round(silence / 1000)}s — socket is alive but silent; forcing reconnect`,
-        );
-        this.attempt += 1; // do not treat this as a healthy connection
-        void this.connect('watchdog-stale');
+        if (hasRecentHeartbeat) {
+          log.info(
+            `[${this.options.name}] 账户空闲 ${Math.round(silence / 1000)}s 无新事件（WS 心跳正常）；执行例行保活重连与状态对账`,
+          );
+          void this.connect('idle-refresh');
+        } else {
+          log.error(
+            `[${this.options.name}] no data for ${Math.round(silence / 1000)}s — socket is alive but silent; forcing reconnect`,
+          );
+          this.attempt += 1; // do not treat this as a healthy connection
+          void this.connect('watchdog-stale');
+        }
         return;
       }
 
@@ -339,7 +388,7 @@ export class ResilientStream {
           this.lastDataByStream.set(stream, Date.now());
         }
       }
-    }, ResilientStream.WATCHDOG_INTERVAL_MS);
+    }, intervalMs);
   }
 
   /** Close the current socket and wait for it to actually terminate. */
@@ -464,6 +513,7 @@ export class BinanceUserDataStream {
        * 真正断掉的 TCP 由 `ws` 库的 ping/pong 负责发现，不需要这个看门狗。
        */
       stalenessWindowMs: 55 * 60 * 1000,
+      idleSilenceExpected: true,
       // Recreate or refresh the key before every dial. A dial can follow a lapse,
       // and a stale key yields an open-but-silent socket.
       beforeConnect: async () => {
