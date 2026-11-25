@@ -9,7 +9,6 @@ import {
   isResizeAction,
   isOpenAction,
   normalizeSymbol,
-  orderPurposeLabel,
   exchangeErrorCode,
   type CloseReason,
   type CircuitBreakerReading,
@@ -31,16 +30,14 @@ import type { PositionSide } from '@aq/shared';
 import type { AccountState } from '../binance/account.js';
 import type { SymbolRegistry } from '../binance/symbols.js';
 import type { MarketPort } from '../market/port.js';
-import { BinanceApiError, type BinanceAlgoStatus, type BinanceUserTrade } from '../binance/types.js';
+import { BinanceApiError, type BinanceUserTrade } from '../binance/types.js';
 import { eventBus } from '../events.js';
 import { createLogger } from '../logger.js';
 import { LlmError } from '../llm/errors.js';
 import type { MarketDataService } from '../market/service.js';
-import { shouldMoveStopToBreakeven } from '../risk/breakeven.js';
 import {
   checkCircuitBreakers,
   RiskEngine,
-  shouldCloseForDrawdown,
   type CircuitBreakerVerdict,
 } from '../risk/engine.js';
 import { selectCandidates } from '../strategy/coins.js';
@@ -119,10 +116,31 @@ import {
   toPositionView as buildPositionView,
   type PromptLessonLike,
 } from './promptBuilders.js';
+import {
+  applyBreakevenGuardForTrader,
+  applyDrawdownGuardForTrader,
+  applyThesisHardGuardForTrader,
+  runMechanicalGuardTick,
+} from './mechanicalGuards.js';
+import {
+  ORDER_SETTLE_GRACE_MS,
+  resolveFinalOrderStatus,
+  settleStaleOrdersForTrader,
+} from './staleOrders.js';
+import {
+  bookVanishedPositionForTrader,
+  detectCloseReasonForPosition,
+  ensureStopsOnOpenPositionsForTrader,
+  fallbackStopPrice,
+  lastFillForSymbol,
+  reasonFromPrice as inferReasonFromPrice,
+  reconcilePositionsForTrader,
+} from './positionReconcile.js';
 
 export {
   describeBreaker,
   describeCycleFailure,
+  ORDER_SETTLE_GRACE_MS,
   PROMPT_LESSON_LIMIT,
   selectPromptLessons,
   type CycleFailurePhase,
@@ -186,7 +204,7 @@ import { runManagedAgenticLoop, type PendingThesisPlan } from '../managed/engine
 import { managedNotesStore } from '../managed/notes.js';
 import { buildManagedPrompts } from '../managed/prompt.js';
 import { managedRadarStore } from '../managed/radarStore.js';
-import { evaluateThesisHardCheck, managedThesisStore } from '../managed/thesis.js';
+import { managedThesisStore } from '../managed/thesis.js';
 import type { ChatMessage, ToolCall, ToolSpec } from '../llm/types.js';
 
 const log = createLogger('trader');
@@ -310,25 +328,6 @@ export function ledgerGapTolerance(equity: number): number {
  * 修复路径，间隔越长，账面与账户不一致持续的时间就越长。
  */
 const FULL_RECONCILE_EVERY_PASSES = 24;
-
-/**
- * 结清一张本地委托之前，它至少要有多"老"。
- *
- * ## 为什么需要这个宽限
- *
- * "这张单还在不在"的权威答案是交易所的挂单列表，但那是一次**读**：一张单从我们记下它
- * （`created_at`）到它出现在 `/fapi/v1/openOrders` / `/fapi/v1/openAlgoOrders` 里，
- * 中间可能有极短的时延（请求在途、两次读之间的竞态）。没有这个下界，一次刚好排在
- * 下单之后的读就会把**刚挂上去的保护单**判成"已经不在交易所"，在账面上把保护单抹掉 ——
- * 而 §2.6 存在的意义就是不让一个没有保护的杠杆仓位变得看不见。
- *
- * ## 为什么是 2 分钟
- *
- * 下界要远大于任何一次交易所读写的耗时（亚秒到几秒，相差两个数量级），
- * 又要小到让真正已经撤销的行不会长期挂在界面上：默认周期 15 分钟，最短 1 分钟，
- * 所以一行脏数据最多多显示一两轮就会被结清。
- */
-export const ORDER_SETTLE_GRACE_MS = 2 * 60_000;
 
 /**
  * 一个决策周期里，模型最多能**主动索要几次数据**。
@@ -489,42 +488,6 @@ const TERMINAL_GONE_STATUSES: ReadonlySet<string> = new Set([
   'EXPIRED_IN_MATCH',
   'REJECTED',
 ]);
-
-
-/**
- * 走 Algo 端点的条件单类型。
- *
- * 就是 `/fapi/v1/order` 会以 `-4120` 拒掉的那几种（见 `binance/types.ts`），
- * 它们的最终状态只能用 `/fapi/v1/algoOrder` 回读。
- */
-const CONDITIONAL_ORDER_TYPES = new Set([
-  'STOP',
-  'STOP_MARKET',
-  'TAKE_PROFIT',
-  'TAKE_PROFIT_MARKET',
-  'TRAILING_STOP_MARKET',
-]);
-
-/**
- * 条件单的 `algoStatus` → `orders.status` 里的订单状态。
- *
- * 必须翻译：`orders.status` 那一列存的是**订单**状态（`FILLED` / `CANCELED` / …），
- * 而 Algo 端点报的是它自己的状态词表（`FINISHED` / `TRIGGERED` / …），两者只有 `NEW`
- * 一个词重合。把 `FINISHED` 原样写进那一列的话：控制台既没有它的中文标签，终态集合里
- * 也没有它 —— 一张已经触发成交的止损会继续以"已挂单"的样子留在「当前委托」里，
- * 也就是这次要修的显示缺陷换个状态码重演一遍。
- *
- * `TRIGGERED` 同样记为成交：走到这里的前提是本地已经没有任何该标的的持仓，
- * 而 `closePosition=true` 条件单的唯一作用就是平掉整个仓位 —— 它触发了、仓位也没了，
- * 这一张就是成交了。
- */
-const ALGO_FINAL_ORDER_STATUS: Partial<Record<BinanceAlgoStatus, string>> = {
-  FINISHED: 'FILLED',
-  TRIGGERED: 'FILLED',
-  CANCELED: 'CANCELED',
-  EXPIRED: 'EXPIRED',
-  REJECTED: 'REJECTED',
-};
 
 /* -------------------------------------------------------------------------- */
 /*  Injected model interface                                                   */
@@ -1984,20 +1947,15 @@ export class AutoTrader {
       done = resolve;
     });
     try {
-      /*
-       * M1.3（2026-11-24）：30s 实时守卫同步结清待成交限价单，
-       * 把限价单成交到挂保护单的裸仓窗口从 10–20 分钟压缩至 ≤30 秒。
-       */
-      if (positionStore.pending(this.deps.trader.id).length > 0) {
-        await this.settlePendingEntries().catch(() => undefined);
-      }
-      const closed = await this.applyDrawdownGuard();
-      if (closed > 0) this.emit('info', `回撤守卫（实时检查）平仓 ${closed} 笔`);
-      if (this.deps.trader.mode === 'ai_managed') {
-        const thesisClosed = await this.applyThesisHardGuard();
-        if (thesisClosed > 0) this.emit('info', `持仓论点硬检查（实时守卫）平仓 ${thesisClosed} 笔`);
-      }
-      await this.applyBreakevenGuard().catch(() => undefined);
+      await runMechanicalGuardTick({
+        traderId: this.deps.trader.id,
+        mode: this.deps.trader.mode,
+        settlePendingEntries: () => this.settlePendingEntries(),
+        applyDrawdownGuard: () => this.applyDrawdownGuard(),
+        applyThesisHardGuard: () => this.applyThesisHardGuard(),
+        applyBreakevenGuard: () => this.applyBreakevenGuard(),
+        emit: (level, message) => this.emit(level, message),
+      });
     } catch {
       /* 单次失败不影响下一轮；既有止损单仍然有效。 */
     } finally {
@@ -6687,183 +6645,27 @@ export class AutoTrader {
     return expired;
   }
 
+  /** 持仓对账与外部仓位收养（模拟盘早退，实盘委托 `positionReconcile.ts`，行为逐字节一致）。 */
   private async reconcilePositions(exchangePositions: ExchangePosition[]): Promise<void> {
-    const traderId = this.deps.trader.id;
-    /*
-     * ══════════════════════════════════════════════════════════════════════════
-     *  ⚠️⚠️ **模拟盘不能用交易所的持仓列表当真相**（2026-10-15 线上实测抓到）
-     * ══════════════════════════════════════════════════════════════════════════
-     *
-     * ## 症状：团队模式的仓位**活不过一个周期**
-     *
-     * 实测 `#11`（`dry_run=1`，团队模式）37 笔平仓的持有时间：
-     * ```
-     *   最短 0.0 分 · p50 3.8 分 · p90 6.2 分 · 最长 7.3 分
-     *   持有 > 15 分钟（超过一个周期）的：【0 笔】
-     *
-     *   对照 #10（实盘）：p50 109 分 · 94% 超过 15 分钟 · 最长 9556 分
-     * ```
-     * 也就是说：**它开仓，然后在同一个周期里被自己对账平掉，再开仓，如此空转。**
-     *
-     * ## 机制（三个事实凑成的）
-     *
-     * ```
-     *   ① 模拟盘的成交是本地模拟的（`simulateStandard`）—— 从不真的下单
-     *   ② 而 `getPositions()` 【没有 dryRun 守卫】→ 真去查交易所
-     *      → 那个账户上从来没有它的仓位 → 返回空
-     *   ③ 这里于是看到"本地有、交易所没有" → `bookVanishedPosition()`
-     *      → 拿 `lastFillFor()`（可能是【同账户其他机器人】的成交价）当出场价
-     *      → `detectCloseReason()` 猜一个原因
-     *      → `positionStore.close()` 把仓位抹掉
-     * ```
-     *
-     * ## 实测的次生伤害（同一份数据）
-     *
-     * ```
-     *   · 保护单从未成交：stop_loss / take_profit 的 FILLED = 0（31 张 CANCELED）
-     *   · 31/32 笔的出场价【离所有保护单都 >0.5%】（最远 5.74%）
-     *     ⇒ close_reason 是"离谁近猜谁"，而那个"最近的"不是触发它的单
-     *   · 标 take_profit 却亏钱 5 笔（止盈单在有利方向，逻辑上不可能）
-     *   · 标 stop_loss 却赚钱 10 笔（这个在移动止损下是合法的，不算错）
-     * ```
-     * ⇒ 那些 `stop_loss` / `take_profit` 标签在模拟盘上**是噪声**，
-     *   而它们会经 `agent_memory` 变成模型的"教训"。
-     *
-     * ## 修法：模拟盘走自己的结算
-     *
-     * **模拟盘里，交易所不是真相来源** —— 本地持仓 + 标记价才是。
-     * 所以这里不再比对交易所列表，改为**对着标记价结算保护单**：
-     * ```
-     *   标记价碰到止损 → 以【止损价】平仓，原因 stop_loss
-     *   标记价碰到止盈 → 以【止盈价】平仓，原因 take_profit
-     *   都没碰到       → 继续持有（并更新回撤守卫用的峰值）
-     * ```
-     * 这让模拟盘**真的在模拟**：出场价是触发价（而不是别处的价），
-     * 原因是从触发事实推出来的（而不是猜的）。
-     *
-     * ⚠️ **实盘一行都不动** —— 那里交易所就是唯一真相来源，
-     * 而 `#10 赚大钱` 正在用真实资金跑（用户硬约束）。
-     */
     if (this.isDryRun) {
       await this.settleDryRunPositions();
       return;
     }
 
-    const exchangeBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
-    const localOpen = positionStore.open(traderId);
-
-    for (const local of localOpen) {
-      const live = exchangeBySymbol.get(local.symbol);
-      if (live) {
-        // Still open: ratchet the peak profit used by the drawdown guard.
-        positionStore.updatePeak(traderId, local.symbol, live.unrealizedPnlPercent);
-        continue;
-      }
-
-      await this.bookVanishedPosition(local);
-    }
-
-    // Positions opened outside the bot (a manual trade) are adopted rather than
-    // ignored: the model should manage what is actually there.
-    // 多机器人共用同一交易所账户时，先排除已被同账户其它机器人持有的标的，
-    // 绝不抢占他机仓位或撤改其保护单。
-    const accountId = this.deps.trader.exchangeAccountId;
-    const otherTraderOpenSymbols =
-      typeof accountId === 'number' && accountId > 0
-        ? positionStore.openSymbolsForOtherTradersOnAccount(accountId, traderId)
-        : new Set<string>();
-
-    for (const live of exchangePositions) {
-      if (localOpen.some((p) => p.symbol === live.symbol)) continue;
-      if (otherTraderOpenSymbols.has(live.symbol)) continue;
-
-      let existingStop: { price: number; orderId: string } | null = null;
-      let existingTarget: { price: number; orderId: string } | null = null;
-      if (!this.isDryRun) {
-        try {
-          const openAlgos = await this.deps.broker.getOpenAlgoOrders(live.symbol);
-          for (const o of openAlgos) {
-            const kind = String((o as { orderType?: string }).orderType ?? '');
-            const trigger = Number((o as { triggerPrice?: string | number }).triggerPrice ?? 0);
-            const id = String((o as { algoId?: string | number }).algoId ?? '');
-            if (!(trigger > 0)) continue;
-            if (!existingStop && kind.includes('STOP')) existingStop = { price: trigger, orderId: id };
-            if (!existingTarget && kind.includes('TAKE_PROFIT')) {
-              existingTarget = { price: trigger, orderId: id };
-            }
-          }
-        } catch {
-          /* 查询失败按无已有保护单处理，走下方兜底补挂 */
-        }
-      }
-
-      this.emit(
-        'warn',
-        `发现一个未被记录的 ${live.symbol} ${live.side === 'long' ? '多头' : '空头'} 持仓，已收养它以便模型可以管理。`,
-      );
-      positionStore.insert({
-        traderId,
-        symbol: live.symbol,
-        side: live.side,
-        quantity: live.quantity,
-        entryPrice: live.entryPrice,
-        leverage: live.leverage,
-        liquidationPrice: live.liquidationPrice,
-        marginUsed: live.marginUsed,
-        stopLoss: existingStop?.price ?? null,
-        takeProfit: existingTarget?.price ?? null,
-        stopOrderId: existingStop?.orderId ?? null,
-        tpOrderId: existingTarget?.orderId ?? null,
-        openReasoning: '收养：该仓位是在机器人之外开立的。',
-      });
-
-      if (existingStop !== null) {
-        this.emit(
-          'info',
-          `收养的 ${live.symbol} 在交易所侧已有止损 ${existingStop.price}` +
-            `${existingTarget ? ` 与止盈 ${existingTarget.price}` : ''}，已直接同步至本地记录（保留原手工保护单，不覆盖）。`,
-        );
-        continue;
-      }
-
-      const fallbackPercent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
-      const adoptedStop = fallbackStopPrice(live.entryPrice, live.side === 'long', fallbackPercent);
-
-      const protection = await this.replaceProtection({
-        symbol: live.symbol,
-        side: live.side,
-        quantity: live.quantity,
-        stop: adoptedStop,
-        /* 已有手工止盈时传 target: null 并由 preserveTarget 原样保留单号与价位，不撤改交易所原单。 */
-        target: null,
-        traderId,
-        ...(existingTarget
-          ? { preserveTarget: { target: existingTarget.price, tpOrderId: existingTarget.orderId } }
-          : {}),
-      });
-
-      if (protection.stopPlaced) {
-        this.emit(
-          'info',
-          `已为收养的 ${live.symbol} 挂上兜底止损 ${adoptedStop.toFixed(6)}（按 ${fallbackPercent}%）—— 这是系统挑的价位，建议让模型按真实失效位调整一次。`,
-        );
-      } else {
-        this.emit(
-          'error',
-          `收养的 ${live.symbol} 仓位**没能挂上止损**（${protection.failures.join('；') || '原因未知'}）—— ` +
-            '它现在没有交易所侧保护。这是你手动开的仓，系统不会替你平掉，请手动处理。',
-        );
-      }
-    }
-
-    /*
-     * 最后再统一检查一遍"持仓还在、但交易所侧没有止损"。
-     *
-     * 放在收养之后：收养路径刚刚挂过保护单，这一遍不会重复挂。
-     * 它同时覆盖了另外两种情况 —— 保护单**事后**被撤掉/过期，
-     * 以及下面这种实测事故（见方法的注释）。
-     */
-    await this.ensureStopsOnOpenPositions(exchangePositions);
+    await reconcilePositionsForTrader({
+      traderId: this.deps.trader.id,
+      exchangeAccountId: this.deps.trader.exchangeAccountId,
+      isDryRun: this.isDryRun,
+      exchangePositions,
+      getFallbackStopLossPercent: () => this.effectiveConfig().riskControl.fallbackStopLossPercent,
+      getOpenAlgoOrders: (symbol) => this.deps.broker.getOpenAlgoOrders(symbol),
+      replacePositionProtection: (params) => this.replaceProtection(params),
+      bookVanishedPosition: async (local) => {
+        await this.bookVanishedPosition(local);
+      },
+      ensureStopsOnOpenPositions: (positions) => this.ensureStopsOnOpenPositions(positions),
+      emit: (level, message) => this.emit(level, message),
+    });
   }
 
   /**
@@ -6944,328 +6746,40 @@ export class AutoTrader {
     return dryRunUnrealizedPercent(local, mark);
   }
 
-  /**
-   * ⚠️ **持仓还在、交易所侧却没有任何止损 —— 这件事必须有周期性检查。**
-   *
-   * ## 这条检查为什么存在（2026-09-26 实测事故）
-   *
-   * SOLUSDT 持仓 0.16 张、浮盈 +5%，交易所侧**一张保护单都不在**：逐张查
-   * `algoStatus` 全部是 `CANCELED`、`actualOrderId` 为空（= 从未触发，是被撤掉的），
-   * 而它就这样裸着跑了 **1 小时 25 分钟**，系统一句告警都没有。
-   *
-   * 系统原来的保护只覆盖"**挂的那一刻**失败"（`executeOpen` / `executeAdjust` /
-   * 收养路径里的 §2.6 分支）。而"挂上去之后因为任何原因消失"没有任何人管 ——
-   * 而 §2.6 存在的意义恰恰是**不让一个没有保护的杠杆仓位变得看不见**。
-   * 这次不是"变得看不见"，而是**它本来就没有任何东西在看**。
-   *
-   * ## 行为：自动重挂一次（方案 A），**不**自动平仓
-   *
-   * 发现缺失就按**本地记录的保护位**重挂（`restoreProtection`，它会一并回写单号），
-   * 失败只告警、绝不市价平仓 —— 把一笔可能正在盈利的仓位在浮盈时强平，
-   * 正是 ADAUSDT 那次净 −0.0166 的形态（用户的原话是"这不是白玩吗"）。
-   *
-   * ## 三条不肯定的地方都不动手
-   *
-   *   · **挂单列表读失败** → 跳过。读不到 ≠ 没有；据它重挂会挂出第二张止损。
-   *   · **止盈方向不对** → 只挂止损（止盈缺了不影响安全）。
-   *   · **止损落在标记价的错误一侧** → 告警而不挂：`STOP_MARKET` 挂上去会
-   *     **立即触发**，那等于一次没有经过任何决策的市价平仓。
-   *
-   * ## 幂等与代价
-   *
-   * 每轮对账跑一次；有止损就什么都不做。每个持仓标的每轮多读两次挂单
-   * （weight 1 + 1）；挂上之后的下一轮 `hasStop` 为真，稳态零额外调用。
-   */
+  /** 缺失保护单周期巡检与补挂（委托 `positionReconcile.ts`，行为逐字节一致）。 */
   private async ensureStopsOnOpenPositions(exchangePositions: ExchangePosition[]): Promise<void> {
-    /*
-     * ⚠️ **模拟盘不走这条检查**（2026-11-09）。
-     *
-     * 它读的是"交易所有没有活着的止损单"（`getOpenOrders` / `getOpenAlgoOrders`）。
-     * 模拟盘的保护单从不发到交易所，而 broker 在 dry-run 下按约定返回本地/空 ——
-     * 把那个空当成"仓位没有止损"会导致每轮重复挂一次模拟保护单（单号被反复改写），
-     * 甚至触发 §2.6 的误平仓。
-     *
-     * 模拟盘的止损真相是本地 `positions.stop_loss`，触发由
-     * `settleDryRunPositions()` 按标记价判 —— 这条交易所侧检查在模拟盘下没有对象。
-     */
-    if (this.isDryRun) return;
-
-    const traderId = this.deps.trader.id;
-    const liveBySymbol = new Map(exchangePositions.map((position) => [position.symbol, position]));
-    /** 什么算"这个仓位有止损"。注意 `TRAILING_STOP_MARKET` 也是止损。 */
-    const STOP_TYPES = new Set(['STOP', 'STOP_MARKET', 'TRAILING_STOP_MARKET']);
-    /**
-     * 什么算"这个仓位有止盈"。
-     *
-     * ## 为什么必须单独判（2026-10-19 实盘抓到）
-     *
-     * 这个方法原来只有一行判据：
-     * ```ts
-     * if (orderTypes.some((type) => STOP_TYPES.has(type))) continue;
-     * ```
-     * **只要有任何止损就整段跳过** —— 于是"有止损但没止盈"的仓位
-     * （CTUSDT 实测就是这样）永远不会被补上目标位。
-     *
-     * 用户问得很准：「系统会不会有兜底策略？」——
-     * 答案是**原来只有止损兜底，止盈完全没有**。
-     */
-    const TARGET_TYPES = new Set(['TAKE_PROFIT', 'TAKE_PROFIT_MARKET']);
-
-    for (const local of positionStore.open(traderId)) {
-      const live = liveBySymbol.get(local.symbol);
-      // 仓位已经不在交易所 —— 那是 `reconcilePositions()` 上面那一遍的事。
-      if (!live) continue;
-
-      let orderTypes: string[];
-      try {
-        const [regular, algo] = await Promise.all([
-          this.deps.broker.getOpenOrders(local.symbol),
-          this.deps.broker.getOpenAlgoOrders(local.symbol),
-        ]);
-        orderTypes = [...regular, ...algo].map((order) => {
-          /*
-           * ⚠️ **字段名有两个，必须都看。**
-           *
-           * 普通委托（`BinanceOrderResponse`）用 `type`；而 Algo 条件单
-           * （`BinanceAlgoOrderResponse`）用 **`orderType`**。
-           *
-           * 只看 `type` 会让**每一张 Algo 止损都被读成空字符串** → 每轮都判定
-           * "这个仓位没有止损" → 每个对账点重复挂一次止损（并被交易所 `-4130` 拒），
-           * 同时把本地 `stop_order_id` 越写越乱。
-           *
-           * 这个坑是在测试里抓到的：`algoAfter` 从 4 → 6 → 8 一路涨，
-           * 而代码还认为自己只是在"补挂一张缺失的止损"。
-           */
-          const type =
-            (order as { orderType?: unknown }).orderType ?? (order as { type?: unknown }).type;
-          return String(type ?? '');
-        });
-      } catch (error) {
-        log.warn(
-          `[${this.deps.trader.name}] ${local.symbol} 的挂单列表读取失败，本轮不检查保护单：${(error as Error).message}`,
-        );
-        continue;
-      }
-
-      const hasStop = orderTypes.some((type) => STOP_TYPES.has(type));
-      const hasTarget = orderTypes.some((type) => TARGET_TYPES.has(type));
-
-      const isLong = local.side === 'long';
-      const mark = live.markPrice > 0 ? live.markPrice : live.entryPrice;
-
-      /*
-       * ══════════════════════════════════════════════════════════════════════
-       *  **止损与止盈分开判**（2026-10-19 用户要求，修"只有止损没止盈"）
-       * ══════════════════════════════════════════════════════════════════════
-       *
-       * ## 原来为什么不对
-       *
-       * ```
-       *   if (有任何止损) continue;   ⇒ 有止损没止盈的仓位永远不补目标
-       * ```
-       * 实盘 CTUSDT 就是这样：有止损、无止盈、浮盈跑到 +28% 仍无目标位。
-       *
-       * ## 现在的四种情况
-       *
-       * ```
-       *   ① 有止损 + 有止盈  → continue（健康，什么都不做）
-       *   ② 有止损 + 无止盈  → 只补止盈（用下面的 deriveTarget 规则）
-       *   ③ 无止损 + 有止盈  → 补止损（原有逻辑），止盈保留
-       *   ④ 都没有           → 两者都补（原有逻辑 + 新规则）
-       * ```
-       *
-       * ⚠️ **补止盈不总是对的** —— 见 `deriveTarget()` 的说明：
-       * 已经浮盈超过保本点的仓位**不该**补一个固定目标（那会把
-       * 本来能跑的单锁死在半路）。判断在那个函数里。
-       */
-      if (hasStop && hasTarget) continue;
-
-      /* 本地记录的保护位优先（那是模型/系统当初认定的失效位）。 */
-      const recordedOk =
-        local.stop_loss !== null &&
-        local.stop_loss > 0 &&
-        (isLong ? local.stop_loss < mark : local.stop_loss > mark);
-
-      const fallbackPercent = this.effectiveConfig().riskControl.fallbackStopLossPercent;
-      let stopForRr: number;
-      let stopToPlace: number | null = null;
-      if (!hasStop) {
-        if (recordedOk) {
-          stopToPlace = local.stop_loss as number;
-        } else {
-          const candidateStop = fallbackStopPrice(live.entryPrice, isLong, fallbackPercent);
-          if (!(isLong ? candidateStop < mark : candidateStop > mark)) {
-            this.emit(
-              'error',
-              `${local.symbol} 的持仓在交易所侧没有任何止损，而按兜底比例（${fallbackPercent}%）算出的止损 ` +
-                `${candidateStop.toFixed(6)} 已落在当前标记价 ${mark} 的**错误一侧** —— 挂上去会立即触发、等于未经决策的市价平仓，` +
-                '因此不挂。请人工确认这个仓位。',
-            );
-            continue;
-          }
-          stopToPlace = candidateStop;
-        }
-        stopForRr = stopToPlace;
-      } else {
-        /* 交易所侧已有活的止损单：只用本地记录或兜底止损作盈亏比参考，绝不撤改活止损。 */
-        stopForRr =
-          local.stop_loss !== null && local.stop_loss > 0
-            ? local.stop_loss
-            : fallbackStopPrice(live.entryPrice, isLong, fallbackPercent);
-      }
-
-      const rr = Math.max(
-        0.5,
-        this.effectiveConfig().riskControl.minRiskRewardRatio,
-      );
-      /* 往返成本约 0.1%（单边 0.05% × 2），乘 3 倍安全边际 = 0.3%。 */
-      const minTargetPercent = 0.3;
-      /* 浮盈 ROE 百分比（含杠杆），与保本阈值 `breakevenTrigger` 同口径。 */
-      const priceMovePercent = isLong
-        ? ((mark - local.entry_price) / local.entry_price) * 100
-        : ((local.entry_price - mark) / local.entry_price) * 100;
-      const unrealizedPercent = priceMovePercent * Math.max(1, local.leverage);
-      const breakevenTrigger = Math.max(
-        1,
-        this.effectiveConfig().riskControl.breakevenTriggerPercent,
-      );
-      /** 本地记录的目标位（方向必须还在现价之外）。 */
-      const recordedTargetOk =
-        local.take_profit !== null &&
-        local.take_profit > 0 &&
-        (isLong ? local.take_profit > mark : local.take_profit < mark);
-
-      let target: number | null = !hasTarget && recordedTargetOk ? (local.take_profit as number) : null;
-
-      /* 仅当策略要求必须设止盈（requireTakeProfit=true）时才自动兜底补目标；无止盈趋势单交给移动止损跟随。 */
-      if (target === null && !hasTarget && this.effectiveConfig().riskControl.requireTakeProfit) {
-        /*
-         * 浮盈已超保本点就不补：那种仓位正在奔跑，补固定目标等于设天花板。
-         * 移动止损会跟着上移 —— 既保护利润又不封顶，那才是"不错失大涨"。
-         */
-        if (unrealizedPercent < breakevenTrigger) {
-          const stopDistancePercent = (Math.abs(stopForRr - local.entry_price) / local.entry_price) * 100;
-          const targetDistancePercent = Math.max(stopDistancePercent * rr, minTargetPercent);
-          const candidate = isLong
-            ? local.entry_price * (1 + targetDistancePercent / 100)
-            : local.entry_price * (1 - targetDistancePercent / 100);
-          if (isLong ? candidate > mark : candidate < mark) {
-            target = candidate;
-            this.emit(
-              'info',
-              `${local.symbol} 缺止盈，已按「止损 ${stopDistancePercent.toFixed(2)}% × 盈亏比 ${rr.toFixed(1)}」` +
-                `补目标 ${candidate.toFixed(6)}（距离 ${targetDistancePercent.toFixed(2)}%，已确保覆盖往返成本）`,
-            );
-          } else {
-            this.emit(
-              'info',
-              `${local.symbol} 缺止盈，但算出的目标落在现价错误一侧 —— 不补，交给移动止损。`,
-            );
-          }
-        } else {
-          this.emit(
-            'info',
-            `${local.symbol} 缺止盈，但浮盈 ${unrealizedPercent.toFixed(2)}% 已超保本点 ${breakevenTrigger}% —— ` +
-              '不补固定目标（避免设天花板），交给移动止损跟随。',
-          );
-        }
-      }
-
-      /* 已有止损且本轮决定不补固定止盈 → 完全跳过，不碰活止损、不误报无止损。 */
-      if (hasStop && target === null) continue;
-
-      if (hasStop && target !== null) {
-        const protection = await this.replaceProtection({
-          symbol: local.symbol,
-          side: isLong ? 'long' : 'short',
-          quantity: local.quantity,
-          stop: null,
-          target,
-          traderId,
-          preserveStop: { stop: local.stop_loss, stopOrderId: local.stop_order_id },
-        });
-        if (!protection.targetPlaced) {
-          this.emit(
-            'warn',
-            `${local.symbol} 补挂止盈失败（${protection.failures.join('；') || '原因未知'}）—— 现有止损单未受影响。`,
-          );
-        }
-        continue;
-      }
-
-      const protection = await this.replaceProtection({
-        symbol: local.symbol,
-        side: isLong ? 'long' : 'short',
-        quantity: local.quantity,
-        stop: stopToPlace,
-        target: hasTarget ? null : target,
-        traderId,
-        ...(hasTarget
-          ? { preserveTarget: { target: local.take_profit, tpOrderId: local.tp_order_id } }
-          : {}),
-      });
-
-      if (protection.stopPlaced) {
-        this.emit(
-          'warn',
-          `⚠️ ${local.symbol} 的持仓在交易所侧**没有止损**，已自动重挂 ${stopToPlace}` +
-            `（${recordedOk ? '用本地记录的保护位' : '用兜底比例'}${protection.targetPlaced ? '，止盈一并恢复' : ''}）` +
-            '—— 它此前为什么消失值得查（撤单失败/被替换/交易所侧过期）。',
-        );
-      } else {
-        this.emit(
-          'error',
-          `${local.symbol} 的持仓没有任何交易所侧止损，且**重挂失败**` +
-            `（${protection.failures.join('；') || '原因未知'}）—— 该仓位目前无保护，下一轮会再试。`,
-        );
-      }
-    }
+    await ensureStopsOnOpenPositionsForTrader({
+      traderId: this.deps.trader.id,
+      traderName: this.deps.trader.name,
+      isDryRun: this.isDryRun,
+      exchangePositions,
+      getFallbackStopLossPercent: () => this.effectiveConfig().riskControl.fallbackStopLossPercent,
+      getMinRiskRewardRatio: () => this.effectiveConfig().riskControl.minRiskRewardRatio,
+      getBreakevenTriggerPercent: () => this.effectiveConfig().riskControl.breakevenTriggerPercent,
+      getRequireTakeProfit: () => this.effectiveConfig().riskControl.requireTakeProfit,
+      getOpenOrders: (symbol) => this.deps.broker.getOpenOrders(symbol),
+      getOpenAlgoOrders: (symbol) => this.deps.broker.getOpenAlgoOrders(symbol),
+      replacePositionProtection: (params) => this.replaceProtection(params),
+      emit: (level, message) => this.emit(level, message),
+      logWarn: (message) => log.warn(message),
+    });
   }
 
-  /**
-   * Book a local position the exchange no longer holds, and close the row.
-   *
-   * There are two ways to learn a position vanished — a cycle comparing the
-   * exchange's position list, and the ledger pass at the head of every cycle —
-   * and both must produce the **same** record. This is that single path, so
-   * neither one can close a row without booking the round-trip it represents.
-   *
-   * The exit is recovered from the exchange's fill record rather than assumed:
-   * the reason detection needs it too, because when the exchange cannot tell us
-   * which order fired, the exit price relative to the two levels is what
-   * disambiguates a stop from a target.
-   */
+  /** 已消失持仓的归因与记账（委托 `positionReconcile.ts`，行为逐字节一致）。 */
   private async bookVanishedPosition(local: PositionRow): Promise<void> {
-    const fill = await this.lastFillFor(local.symbol);
-    const exitPrice =
-      fill.price > 0 ? fill.price : await this.deps.broker.getMarkPrice(local.symbol).catch(() => 0);
-
-    const reason = await this.detectCloseReason(
-      local.symbol,
-      local.stop_order_id,
-      local.tp_order_id,
-      exitPrice,
-      local.entry_price,
-      local.stop_loss,
-      local.take_profit,
-    );
-    await this.bookClosedPosition(local, reason, exitPrice, fill.fee);
+    await bookVanishedPositionForTrader({
+      local,
+      lastFillFor: (symbol) => this.lastFillFor(symbol),
+      getMarkPrice: (symbol) => this.deps.broker.getMarkPrice(symbol),
+      detectCloseReason: (symbol, stopOrderId, tpOrderId, exitPrice, entryPrice, stopLoss, takeProfit) =>
+        this.detectCloseReason(symbol, stopOrderId, tpOrderId, exitPrice, entryPrice, stopLoss, takeProfit),
+      bookClosedPosition: async (row, reason, exitPrice, fee) => {
+        await this.bookClosedPosition(row, reason, exitPrice, fee);
+      },
+    });
   }
 
-  /**
-   * Determine why a position vanished.
-   *
-   * The subtlety that this used to get wrong: when a `closePosition` stop or
-   * target fires, Binance also removes the *surviving* one, so neither id is in
-   * `openAlgoOrders` any more. Checking "is the stop gone?" therefore always
-   * answered yes and every take-profit was booked as a stop loss.
-   *
-   * The authoritative signal is each algo order's own final status — the one
-   * that fired is `FINISHED`/`TRIGGERED`, the other is `CANCELED`. When that
-   * query is unavailable (dry run, network), fall back to comparing the exit
-   * price against the levels we recorded, which is unambiguous in practice
-   * because they sit on opposite sides of the entry.
-   */
+  /** 判定消失持仓的平仓原因（委托 `positionReconcile.ts`，行为逐字节一致）。 */
   private async detectCloseReason(
     symbol: string,
     stopOrderId: string | null,
@@ -7275,103 +6789,33 @@ export class AutoTrader {
     stopLoss: number | null,
     takeProfit: number | null,
   ): Promise<CloseReason> {
-    try {
-      const [stopOrder, tpOrder] = await Promise.all([
-        stopOrderId ? this.deps.broker.getAlgoOrder(stopOrderId) : Promise.resolve(null),
-        tpOrderId ? this.deps.broker.getAlgoOrder(tpOrderId) : Promise.resolve(null),
-      ]);
-
-      const fired = (status: string | undefined): boolean =>
-        status === 'FINISHED' || status === 'TRIGGERED';
-      const dead = (status: string | undefined): boolean =>
-        status === 'CANCELED' || status === 'EXPIRED' || status === 'REJECTED';
-
-      /*
-       * ⚠️ **`'not-found'` 不能当成任何一种终态**（2026-10-14）。
-       *
-       * `getAlgoOrder` 现在会返回 `'not-found'`（交易所明确说这张单不存在）。
-       * 在这里它意味着"那张单已经结束了，但**分不清是触发还是撤销**" ——
-       * 而 `fired` / `dead` 都会把它读成 `false`（因为它不是 `undefined` 里的任何一个
-       * 状态字符串），于是**自然落空**、继续走下面"用价位推断"的判据。
-       *
-       * 那正是这里想要的行为：**不拿一个分不清的答案去猜平仓原因**。
-       * 所以不需要额外的分支 —— 但必须**显式写下来**，否则下一个人会以为
-       * `'not-found'` 被漏处理了，然后给它加一个错误的映射。
-       */
-      /*
-       * ⚠️ **先把状态抽出来再判**（`getAlgoOrder` 现在可能返回 `'not-found'`）。
-       * 直接读 `stopOrder?.algoStatus` 会在类型层面失败 —— 那是好事：
-       * 它逼着我们把"读失败 / 不存在 / 有状态"三种情况分开处理。
-       */
-      const statusOf = (o: typeof stopOrder): string | undefined =>
-        o === null || o === 'not-found' ? undefined : o.algoStatus;
-
-      if (fired(statusOf(stopOrder))) return 'stop_loss';
-      if (fired(statusOf(tpOrder))) return 'take_profit';
-
-      // Both cancelled: the position was closed some other way, so the levels
-      // themselves are the tiebreaker.
-      if (dead(statusOf(stopOrder)) && dead(statusOf(tpOrder))) {
-        const byPrice = this.reasonFromPrice(exitPrice, stopLoss, takeProfit);
-        if (byPrice) return byPrice;
-      }
-
-      // Liquidation and ADL fills carry a recognisable client order id.
-      const fills = await this.deps.broker.getUserTrades(symbol, 20);
-      const latest = fills[fills.length - 1];
-      if (latest) {
-        const clientId = String((latest as { clientOrderId?: string }).clientOrderId ?? '');
-        if (/autoclose|adl/i.test(clientId)) return 'liquidated';
-      }
-
-      const byPrice = this.reasonFromPrice(exitPrice, stopLoss, takeProfit);
-      if (byPrice) return byPrice;
-
-      return 'external';
-    } catch {
-      return 'external';
-    }
+    return detectCloseReasonForPosition({
+      symbol,
+      stopOrderId,
+      tpOrderId,
+      exitPrice,
+      entryPrice,
+      stopLoss,
+      takeProfit,
+      getAlgoOrder: (algoId) => this.deps.broker.getAlgoOrder(algoId),
+      getUserTrades: (sym, limit) => this.deps.broker.getUserTrades(sym, limit),
+    });
   }
 
-  /**
-   * Infer the trigger from where the position actually exited.
-   *
-   * Only used when the exchange will not tell us: each level is on the opposite
-   * side of the entry, so whichever one the exit price is sitting on is the one
-   * that fired.
-   */
   private reasonFromPrice(
     exitPrice: number,
     stopLoss: number | null,
     takeProfit: number | null,
   ): CloseReason | null {
-    if (!(exitPrice > 0)) return null;
-    const toStop = stopLoss !== null ? Math.abs(exitPrice - stopLoss) : Number.POSITIVE_INFINITY;
-    const toTarget =
-      takeProfit !== null ? Math.abs(exitPrice - takeProfit) : Number.POSITIVE_INFINITY;
-    if (toStop === Number.POSITIVE_INFINITY && toTarget === Number.POSITIVE_INFINITY) return null;
-    return toStop <= toTarget ? 'stop_loss' : 'take_profit';
+    return inferReasonFromPrice(exitPrice, stopLoss, takeProfit);
   }
 
-  /**
-   * The most recent fill for a symbol, used to recover the true exit price and
-   * commission. A guessed exit price would corrupt the trade history permanently.
-   */
   private async lastFillFor(symbol: string): Promise<{ price: number; fee: number }> {
-    try {
-      const fills = await this.deps.broker.getUserTrades(symbol, 20);
-      const latest = fills[fills.length - 1];
-      if (latest) {
-        return {
-          price: Number(latest.price) || 0,
-          /* 单笔成交同样要按结算资产口径：BNB 抵扣的 `commission` 不是 USDT。 */
-          fee: this.settlementFeeOf([latest], symbol),
-        };
-      }
-    } catch {
-      /* caller falls back to the mark price */
-    }
-    return { price: 0, fee: 0 };
+    return lastFillForSymbol({
+      symbol,
+      getUserTrades: (sym, limit) => this.deps.broker.getUserTrades(sym, limit),
+      settlementFeeOf: (fills, sym) => this.settlementFeeOf(fills, sym),
+    });
   }
 
   /**
@@ -9603,328 +9047,30 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
   /*  Stale order records                                                    */
   /* ---------------------------------------------------------------------- */
 
-  /**
-   * 把交易所已经不挂着的本地委托行结清（§2.2 只要求不删行，从不要求状态停在 `NEW`）。
-   *
-   * ## 这个缺陷是什么
-   *
-   * `orders.status` 是**下单那一刻**交易所给的返回值，此后没有任何代码更新过它
-   * （`orders.update()` 在本次修复之前没有任何调用点）。于是有三条路径会让它停在非终态：
-   *
-   *  1. **条件单触发成交** —— 平仓发生在交易所，本地行还是 `NEW`；
-   *  2. **平仓前 `cancelAllOrders()` 撤单**（§2.7）—— 撤掉了，但没写回本地行；
-   *  3. **交易所自己撤单** —— `closePosition=true` 的止损触发后，止盈那张"兄弟单"
-   *     会被交易所一并撤掉，它不会通知任何人。
-   *
-   * 实盘上量到的后果：本地 24 行 `NEW` 全部属于已经平掉的仓位，而交易所的
-   * `/fapi/v1/openOrders` 是 **0** —— 控制台的「当前委托」因此列出十几行并不存在的委托，
-   * 其中每一行按 §2.7 看起来都像是会朝反方向开出新仓的存活单。**它其实全是假警报**，
-   * 但一个不能相信的界面与真的出事一样糟：操作员无法分辨这一次到底是哪一种。
-   *
-   * ## 它只改账
-   *
-   * 这里既不补撤单、也不重挂保护单，唯一的依据是**交易所自己**说这张单还在不在
-   * （挂单列表 + 条件单的最终状态）。撤单与下单的时机、位置一个都没有变 ——
-   * 若某条路径真的漏撤了，那是另一件更严重的事，要单独报出来，而不是靠更新一行状态
-   * 把它掩盖掉。
-   *
-   * @param onlySymbol 只结清这一个标的（平仓之后立刻调用，好让控制台马上正确）；
-   *   不传时扫这个机器人全部待结清的行。对账轮次走的就是不传的那条。
-   * @returns 实际改写的行数。
-   */
+  /** 结清陈旧挂单记录（委托 `staleOrders.ts`，行为逐字节一致）。 */
   private async settleStaleOrders(onlySymbol?: string): Promise<number> {
-    const traderId = this.deps.trader.id;
-
-    /*
-     * 只把"够老"的行当候选：`createdBefore` 就是宽限窗口的下界，
-     * 窗口取多长、为什么需要，见 `ORDER_SETTLE_GRACE_MS`。
-     */
-    const cutoff = new Date(Date.now() - ORDER_SETTLE_GRACE_MS).toISOString();
-    const candidates = orderStore
-      .unsettled(traderId, cutoff)
-      .filter((row) => onlySymbol === undefined || row.symbol === onlySymbol);
-    if (candidates.length === 0) return 0;
-
-    /*
-     * ⚠️ **只保护"当前正在生效的那张保护单"，不再按标的整体跳过。**
-     *
-     * 原来这里的判据是"这个标的还持仓 → 它的保护单一行都不碰"。理由是：
-     * 还持仓时保护单不在交易所，可能不是"显示脏了"而是"保护单真的没了"——
-     * 那是一件更严重、也完全不同的故障（§2.6），不该混进这次记账修复里。
-     *
-     * **这个理由对"当前生效的那张保护单"成立，对被替换掉的旧保护单不成立。**
-     * 而追踪止损每上移一次就换一张：实测同一个 SOLUSDT 仓位在界面上挂着
-     * **4 条止损**（118.10 / 119.607 / 119.627 / 120.942），而交易所侧一张都没有 ——
-     * 旧的那三张早被撤掉，只是**永远没人结清**。用户据此问"这是不是 BUG"，
-     * 而它确实是。
-     *
-     * 现在的判据来自本地持仓行：`positions.stop_order_id` / `tp_order_id` 指向的
-     * 才是"现在生效的那一张"。它缺失 → 由 `ensureStopsOnOpenPositions()` 去重挂
-     * 并告警（那才是 §2.6 要的处置）；其余历史保护单行照常走交易所核对 → 结清。
-     */
-    const activeProtectionIds = new Set<string>();
-    for (const position of positionStore.open(traderId)) {
-      if (position.stop_order_id) activeProtectionIds.add(String(position.stop_order_id));
-      if (position.tp_order_id) activeProtectionIds.add(String(position.tp_order_id));
-    }
-
-    /*
-     * ══════════════════════════════════════════════════════════════════════════
-     *  ⚠️⚠️ **模拟盘：本地账就是唯一真相**（2026-10-14 线上实测抓到的死锁）
-     * ══════════════════════════════════════════════════════════════════════════
-     *
-     * ## 事故：模拟盘 `#11` 的 44 条委托永远停在「已挂单」
-     *
-     * 用户截图：下面「当前委托 17」列着一堆"已挂单（待对账）"，
-     * 而上面「保证金占用 / 持仓」都是 0 —— **两边对不上**。
-     *
-     * ## 死锁的形状（三个事实凑成的）
-     *
-     * ```
-     *   ① 模拟盘（dry_run=1）的委托【从未真的发到交易所】
-     *   ② 但 getOpenOrders / getOpenAlgoOrders 【没有 dryRun 守卫】→ 真去查交易所
-     *      → 交易所返回 0 条（当然没有）
-     *   ③ 而 getAlgoOrder 【有】dryRun 守卫：`if (this.dryRun) return null`
-     *      → finalStatusOf 拿到 null → "这一轮不下结论" → 静默跳过
-     *   ⇒ settleStaleOrders 永远返回 0，那些行永远停在 NEW
-     * ```
-     * ⚠️ **两个方法对 dryRun 的处理不一致**正是这个死锁的成因 ——
-     * 一个去查交易所，另一个拒绝查。而**在模拟盘里，交易所本来就不该是真相来源**。
-     *
-     * ## 修法：模拟盘直接结清（依据是本地持仓行，不是交易所）
-     *
-     * ```
-     *   模拟盘：本地 positions 表说这个标的还有没有仓位 —— 那就是全部真相
-     *           没有持仓了 → 它的保护单行就该是终态
-     *   实盘  ：照旧问交易所（那是唯一的真相来源）
-     * ```
-     *
-     * ⚠️ **判据仍然用 `activeProtectionIds`**（上面刚算出来的）——
-     * 也就是"当前生效的保护单不碰"。所以即使模拟盘里还持有仓位，
-     * 它那张**正在生效**的保护单也不会被误写成终态。
-     *
-     * ⚠️ 写 `CANCELED` 而不是 `FILLED`：模拟盘里那张单**从未成交**
-     *（它根本没到交易所），说"已撤销"是准确的说法。写 `FILLED` 会编造一次成交。
-     */
-    if (this.isDryRun) {
-      let settled = 0;
-      const summary: string[] = [];
-      for (const row of candidates) {
-        /* 当前生效的保护单不碰（与实盘那条路径同一个判据）。 */
-        if (activeProtectionIds.has(String(row.exchangeOrderId ?? ''))) continue;
-        orderStore.update(row.id, { status: 'CANCELED' });
-        settled += 1;
-        summary.push(`${row.symbol} ${orderPurposeLabel(row.purpose)}`);
-      }
-      if (settled > 0) {
-        this.emit(
-          'info',
-          `模拟盘结清了 ${settled} 张本地委托（${summary.slice(0, 8).join('、')}` +
-            `${summary.length > 8 ? ' 等' : ''}）：模拟盘的单从未发到交易所，` +
-            '仓位平掉后它们的本地行应当收尾 —— 否则界面会一直显示"已挂单"。',
-        );
-      }
-      return settled;
-    }
-
-    const symbols = [
-      ...new Set(
-        candidates
-          .filter((row) => !activeProtectionIds.has(String(row.exchangeOrderId ?? '')))
-          .map((row) => row.symbol),
-      ),
-    ];
-    if (symbols.length === 0) return 0;
-
-    /*
-     * 权威答案在交易所。
-     *
-     * 两个端点都要读：条件单在 Algo 端点（`/fapi/v1/algoOpenOrders`），普通单在
-     * `/fapi/v1/openOrders`，两边互不覆盖（`broker.cancelAllOrders()` 的注释写过同一件事）。
-     * 少读一个，都会把一张**真的还挂着**的保护单当成已经不在 —— 那就是在自己造 §2.6 的事故。
-     *
-     * 按标的读（带 symbol 是 weight 1，不带是 40），而且只为"有待结清行的标的"读：
-     * 结清之后这些标的下一次就没有候选行了，稳态下这一整段不产生任何请求。
-     */
-    const liveBySymbol = new Map<string, Set<string>>();
-    for (const symbol of symbols) {
-      try {
-        const [regular, algo] = await Promise.all([
-          this.deps.broker.getOpenOrders(symbol),
-          this.deps.broker.getOpenAlgoOrders(symbol),
-        ]);
-        const live = new Set<string>();
-        for (const order of regular) live.add(String(order.orderId));
-        for (const order of algo) live.add(String(order.algoId));
-        liveBySymbol.set(symbol, live);
-      } catch (error) {
-        /*
-         * 读不到就**什么都不做**：这一轮无法断定它已经不在交易所，而"以为它不在"
-         * 会把一张还在挂着的保护单写成终态。下一轮会重新读。
-         */
-        log.warn(
-          `[${this.deps.trader.name}] ${symbol} 的挂单列表读取失败，本轮不结清该标的的委托记录：${(error as Error).message}`,
-        );
-      }
-    }
-
-    let settled = 0;
-    const summary: string[] = [];
-    for (const row of candidates) {
-      /*
-       * 只跳过**当前正在生效**的那张保护单：它不在交易所挂单列表里说明保护真的丢了，
-       * 那由 `ensureStopsOnOpenPositions()` 负责重挂并告警（§2.6），
-       * **不能在这里被静默写成终态** —— 那会把"仓位裸着"伪装成"历史脏行"。
-       */
-      if (activeProtectionIds.has(String(row.exchangeOrderId ?? ''))) continue;
-
-      const live = liveBySymbol.get(row.symbol);
-      // 三种情况都不是"可以结清"：这个标的一轮没读到、这行没有交易所单号、
-      // 或者它**正躺在挂单列表里**（那它当然还活着）。
-      if (!live || !row.exchangeOrderId || live.has(row.exchangeOrderId)) continue;
-
-      const outcome = await this.finalStatusOf(row);
-      if (!outcome) continue;
-
-      orderStore.update(row.id, outcome);
-      settled += 1;
-      summary.push(`${row.symbol} ${orderPurposeLabel(row.purpose)}`);
-    }
-
-    if (settled > 0) {
-      this.emit(
-        'info',
-        `对账结清了 ${settled} 张交易所已不再挂着的委托（${summary.slice(0, 8).join('、')}` +
-          `${summary.length > 8 ? ' 等' : ''}）：这些行此前停在挂单状态，实际早已成交或撤销；交易所侧没有任何改动。`,
-      );
-    }
-    return settled;
+    return settleStaleOrdersForTrader({
+      traderId: this.deps.trader.id,
+      traderName: this.deps.trader.name,
+      isDryRun: this.isDryRun,
+      onlySymbol,
+      getOpenOrders: (symbol) => this.deps.broker.getOpenOrders(symbol),
+      getOpenAlgoOrders: (symbol) => this.deps.broker.getOpenAlgoOrders(symbol),
+      finalStatusOf: (row) => this.finalStatusOf(row),
+      emit: (level, message) => this.emit(level, message),
+      logWarn: (message) => log.warn(message),
+    });
   }
 
-  /**
-   * 一张已经**不在交易所挂单列表里**的委托，最终是怎么结束的。
-   *
-   * 判据只有两种，都来自交易所，没有一处靠推断凑数：
-   *
-   *  1. **条件单** —— `/fapi/v1/algoOrder` 能查到它自己的 `algoStatus`：
-   *     `FINISHED`/`TRIGGERED` 是触发成交，`CANCELED` 是被撤，`EXPIRED` 是过期。
-   *     这是唯一能把"止损真的触发了"和"平仓时被我们撤掉了"分开的东西，
-   *     `detectCloseReason()` 依赖的也正是同一个查询。
-   *     查不到（网络故障、dry run）时返回 `null` = **什么都不写** —— 此时把一张可能已经
-   *     成交的止损写成"已撤销"，会和 `trades.close_reason` 里的 `stop_loss` 直接矛盾，
-   *     比多留一轮脏行糟得多。
-   *  2. **普通委托**（开仓 / 平仓的市价单）—— 交易所没有按单号回读的封装，就用手上
-   *     真实拿到过的数字判：下单时确认的成交量若已覆盖整张单，就是 `FILLED`；
-   *     否则它是带着剩余数量离场的，在币安自己的语义里那就是 `CANCELED`
-   *     （部分成交 + 撤销剩余）。
-   *
-   * @returns 要写进那一行的字段；`null` 表示"这一轮不下结论"。
-   */
+  /** 查询已不在挂单列表的委托终态（委托 `staleOrders.ts`，行为逐字节一致）。 */
   private async finalStatusOf(
     row: OrderRecord,
   ): Promise<{ status: string; filledQty?: number; avgPrice?: number; rawResponse?: unknown } | null> {
-    const exchangeOrderId = row.exchangeOrderId;
-    if (!exchangeOrderId) return null;
-
-    if (CONDITIONAL_ORDER_TYPES.has(row.type)) {
-      const algo = await this.deps.broker.getAlgoOrder(exchangeOrderId);
-      /*
-       * ══════════════════════════════════════════════════════════════════════
-       *  ⚠️ **交易所说"这张单不存在"是一个可判定的答案**（2026-10-14 修的死锁）
-       * ══════════════════════════════════════════════════════════════════════
-       *
-       * ## 死锁：查不到 → 不下结论 → 永远查不到
-       *
-       * 原来这里只有 `if (!algo) return null`，而 `null` 的含义是
-       * "这一轮不下结论"。那个取舍本身对（读不到时不该改账），但它有个死锁：
-       * ```
-       *   交易所真的查不到这张单（-2013 Order does not exist）
-       *   → getAlgoOrder 永远返回 null → 这里永远 return null
-       *   → 那些行【永远】停在 NEW
-       * ```
-       * 线上实测（`#11`）：**42 条**本地 `NEW` 条件单，逐个查都回
-       * `{"code":-2013,"msg":"Order does not exist."}` —— 而界面一直显示"已挂单"。
-       *
-       * ## 修法：把"不存在"翻译成一个明确的终态
-       *
-       * 交易所说它不存在，意思是**它已经结束了**（成交过、或被撤掉后过了保留期）。
-       * 而我们**无法**再分辨是哪一种 —— 所以写 `CANCELED`（币安语义里"带着剩余
-       * 数量离场"就是它），并且**不写成交数字**（`filledQty` / `avgPrice` 留空）。
-       *
-       * ⚠️ **安全边界不变**：
-       * ```
-       *   'not-found'（交易所明确说不存在）→ 写 CANCELED
-       *   null（网络 / 鉴权 / 限流）      → 仍然 return null，什么都不写
-       * ```
-       * 这两件事被混成一件正是这个 bug 的成因。
-       *
-       * ⚠️ 为什么敢写 `CANCELED` 而不是别的：这一行的仓位**早已平掉**
-       *（`settleStaleOrders` 只在"交易所挂单列表里没有它"时才走到这里），
-       * 所以它不可能还是"活着的保护单"。而写终态让界面不再骗人 ——
-       * 那正是 §2.2 的目的（"不删行，但状态不能停在 NEW"）。
-       */
-      if (algo === 'not-found') {
-        return { status: 'CANCELED' };
-      }
-      if (!algo) return null;
-      const status = ALGO_FINAL_ORDER_STATUS[algo.algoStatus];
-      // `NEW` 会走到这里：它说"还挂着"，而挂单列表刚说"不在" —— 两次读之间的竞态，
-      // 真相是哪一个都可能是。留给下一轮，不拿这个矛盾去改账。
-      if (!status) return null;
-
-      const filledQty = Number(algo.actualQty ?? 0) || 0;
-      const avgPrice = Number(algo.actualPrice ?? 0) || 0;
-      return {
-        status,
-        // 只有交易所确实报了成交数字才写：`0` 会把已有的数字抹掉。
-        ...(filledQty > 0 ? { filledQty } : {}),
-        ...(avgPrice > 0 ? { avgPrice } : {}),
-        // 交易所对这张单的最后一次答复（§2.2：raw_response 留的是交易所的话）。
-        rawResponse: algo,
-      };
-    }
-
-    /*
-     * ⚠️ **限价单必须问交易所，不能靠"下单时拿到过的数字"判。**
-     *
-     * 下面那条 `fullyExecuted` 的判据只有一个输入：`row.filledQty`。而一张限价单
-     * **挂出去的时候成交量就是 0** —— 它是之后某个时刻才成交的，本地那一行如果没被
-     * 别的路径回写，`filledQty` 会一直是 0，于是这里把一张**已经成交**的单判成
-     * `CANCELED`。实测：持仓 `12.7 @ 1.5600` 明明在，它的入场单却会被判成"已撤销"。
-     *
-     * 交易所对普通单有单号回读（`GET /fapi/v1/order`），所以这里去问它 ——
-     * 与 `settlePendingEntries()` 问的是同一个接口、同一个答案。
-     */
-    if (row.type === 'LIMIT') {
-      const limit = await this.deps.broker.getOrder(row.symbol, exchangeOrderId).catch(() => null);
-      // 读不到 = 不知道，这一轮不下结论。
-      if (!limit) return null;
-
-      const executed = Number(limit.executedQty) || 0;
-      const avgPrice = Number(limit.avgPrice) || 0;
-      if (executed <= 0) {
-        // 成交量为 0 且已不在挂单列表里 —— 被撤或过期，交易所自己说了是哪一个。
-        return {
-          status: limit.status === 'EXPIRED' ? 'EXPIRED' : 'CANCELED',
-          rawResponse: limit,
-        };
-      }
-      return {
-        status: executed >= row.quantity * (1 - 1e-9) ? 'FILLED' : 'CANCELED',
-        filledQty: executed,
-        ...(avgPrice > 0 ? { avgPrice } : {}),
-        rawResponse: limit,
-      };
-    }
-
-    /*
-     * 相对容差而不是"浮点相等"：`quantity` 与 `filledQty` 分别是**请求数量**与交易所
-     * 回报的**成交数量**，两者都过了字符串 → 数字这一趟，一个先取整、一个由交易所
-     * 自己格式化，逐位相等不是它们之间的契约（同一取舍见 `repositories.ts` 里
-     * 判定"同一个回合"用的 `DUPLICATE_QUANTITY_TOLERANCE`）。
-     */
-    const fullyExecuted = row.quantity > 0 && row.filledQty >= row.quantity * (1 - 1e-9);
-    return fullyExecuted ? { status: 'FILLED' } : { status: 'CANCELED' };
+    return resolveFinalOrderStatus({
+      row,
+      getAlgoOrder: (exchangeOrderId) => this.deps.broker.getAlgoOrder(exchangeOrderId),
+      getOrder: (symbol, exchangeOrderId) => this.deps.broker.getOrder(symbol, exchangeOrderId),
+    });
   }
 
   /**
@@ -10025,171 +9171,28 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
   /*  Drawdown guard                                                         */
   /* ---------------------------------------------------------------------- */
 
-  /**
-   * Close positions that have given back too much of their peak profit.
-   *
-   * Runs before the model is consulted and does not ask permission: protecting
-   * realised profit is exactly the judgement models reliably get wrong.
-   */
+  /** 回撤守卫（委托 `mechanicalGuards.ts`，行为逐字节一致）。 */
   private async applyDrawdownGuard(): Promise<number> {
-    const traderId = this.deps.trader.id;
-    /*
-     * ⚠️ 走 `effectivePositions()` —— 直接读 `broker.getPositions()` 在模拟盘上
-     * **恒返回空**，于是回撤守卫会**从不触发**（静默失效）。见那个方法的说明。
-     */
-    const exchangePositions = await this.effectivePositions();
-    const liveBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
-    let closed = 0;
-
-    for (const local of positionStore.open(traderId)) {
-      const live = liveBySymbol.get(local.symbol);
-      if (!live) continue;
-
-      /*
-       * 30s 实时守卫也要刷新峰值浮盈：否则周期内冲高回落时 `peak_pnl_percent` 停在上轮旧值，
-       * 30s 监控永远看不到本次尖峰，也就无法在回吐时触发平仓。
-       */
-      positionStore.updatePeak(traderId, local.symbol, live.unrealizedPnlPercent);
-      const peakPnlPercent = Math.max(local.peak_pnl_percent ?? 0, live.unrealizedPnlPercent);
-
-      // Use the exchange's own unrealised PnL for the decision, and the ratcheted
-      // peak as the reference point.
-      const view: PositionView = {
-        ...this.toPositionView(local, new Map()),
-        markPrice: live.markPrice,
-        unrealizedPnl: live.unrealizedPnl,
-        unrealizedPnlPercent: live.unrealizedPnlPercent,
-        peakPnlPercent,
-      };
-
-      /*
-     * ⚠️⚠️ **必须传 `effectiveConfig()`，不是 `activeConfig`**（2026-10-20）。
-     *
-     * ## 为什么
-     *
-     * `effectiveConfig()` 是 JEV 覆盖之后的配置（回撤守卫的激活点与回吐比例
-     * 都在里面）。`activeConfig` 是装配期的原始配置 —— 用它意味着
-     * **用户在界面上把激活点从 0.4% 改成 3%，而这里仍然按 0.4% 判**。
-     *
-     * ## 这是同一类错误的第四次
-     *
-     * ```
-     *   ① 熔断阈值  → 覆盖写在 riskConfig，熔断读 config
-     *   ② 熔断横幅  → circuitBreakerReading 读 activeConfig
-     *   ③ 保本阈值  → applyBreakevenGuard 读 activeConfig
-     *   ④ 回撤守卫  → 就是这一处
-     * ```
-     * 根因是同一个：**"JEV 覆盖后的配置"没有一个所有人都用的入口**。
-     * `effectiveConfig()` 现在就是那个入口 —— 之后新增的机械保护方法
-     * 一律走它，不要再直接读 `activeConfig`。
-     */
-    const verdict = shouldCloseForDrawdown(view, this.effectiveConfig());
-      if (!verdict.close) continue;
-
-      this.emit('info', verdict.reason);
-      try {
-        await this.executeClose(
-          {
-            symbol: local.symbol,
-            action: local.side === 'long' ? 'close_long' : 'close_short',
-            leverage: local.leverage,
-            positionSizeUsd: 0,
-            stopLoss: null,
-            takeProfit: null,
-            confidence: 100,
-            riskUsd: 0,
-            reasoning: verdict.reason,
-reducePercent: null,
-reduceQuantity: null,
-            /* 回撤守卫是机械动作，没有"标的评分"可言 —— 如实留空。 */
-            setupScore: null,
-            setupScoreBasis: '',
-            adjustments: [],
-          },
-          'drawdown_guard',
-        );
-        closed += 1;
-      } catch (error) {
-        this.emit(
-          'error',
-          `回撤守卫平仓 ${local.symbol} 失败：${(error as Error).message}`,
-        );
-      }
-    }
-
-    return closed;
+    return applyDrawdownGuardForTrader({
+      traderId: this.deps.trader.id,
+      getEffectivePositions: () => this.effectivePositions(),
+      toPositionView: (local) => this.toPositionView(local, new Map()),
+      getEffectiveConfig: () => this.effectiveConfig(),
+      closePosition: (decision, reason) => this.executeClose(decision, reason),
+      emit: (level, message) => this.emit(level, message),
+    });
   }
 
-  /**
-   * M3.1 持仓论点 30 秒确定性机器硬检查（`time_stop_at` + `max_adverse_excursion_pct`）。
-   * 仅在 `ai_managed` 模式启用，逐仓读取实时标记价、刷新峰值 R / 最大不利偏移，触线即自动平仓。
-   */
+  /** M3.1 持仓论点 30 秒确定性机器硬检查（委托 `mechanicalGuards.ts`，行为逐字节一致）。 */
   private async applyThesisHardGuard(): Promise<number> {
-    if (this.deps.trader.mode !== 'ai_managed') return 0;
-    const traderId = this.deps.trader.id;
-    const openLocals = positionStore.open(traderId);
-    if (openLocals.length === 0) return 0;
-
-    const exchangePositions = await this.effectivePositions();
-    const liveBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
-    let closed = 0;
-
-    for (const local of openLocals) {
-      const thesis = managedThesisStore.getActive(traderId, local.symbol);
-      if (!thesis) continue;
-
-      const live = liveBySymbol.get(local.symbol);
-      const markPrice =
-        live && live.markPrice > 0
-          ? live.markPrice
-          : await this.deps.broker.getMarkPrice(local.symbol).catch(() => 0);
-      if (!(markPrice > 0)) continue;
-
-      const verdict = evaluateThesisHardCheck(thesis, { markPrice });
-      if (
-        verdict.nextPeakR > thesis.peakR ||
-        verdict.nextWorstAdversePct > thesis.worstAdversePct
-      ) {
-        managedThesisStore.recordExcursion(
-          thesis.id,
-          verdict.nextPeakR,
-          verdict.nextWorstAdversePct,
-        );
-      }
-
-      if (!verdict.shouldClose || !verdict.closeReason) continue;
-
-      this.emit('warn', verdict.detail);
-      try {
-        await this.executeClose(
-          {
-            symbol: local.symbol,
-            action: local.side === 'long' ? 'close_long' : 'close_short',
-            leverage: local.leverage,
-            positionSizeUsd: 0,
-            stopLoss: null,
-            takeProfit: null,
-            confidence: 100,
-            riskUsd: 0,
-            reasoning: verdict.detail,
-            reducePercent: null,
-            reduceQuantity: null,
-            setupScore: null,
-            setupScoreBasis: '',
-            adjustments: [],
-          },
-          verdict.closeReason,
-        );
-        closed += 1;
-      } catch (error) {
-        this.emit(
-          'error',
-          `持仓论点硬检查平仓 ${local.symbol} 失败：${(error as Error).message}`,
-        );
-      }
-    }
-
-    return closed;
+    return applyThesisHardGuardForTrader({
+      traderId: this.deps.trader.id,
+      mode: this.deps.trader.mode,
+      getEffectivePositions: () => this.effectivePositions(),
+      getMarkPrice: (symbol) => this.deps.broker.getMarkPrice(symbol),
+      closePosition: (decision, reason) => this.executeClose(decision, reason),
+      emit: (level, message) => this.emit(level, message),
+    });
   }
 
   /** M3.1：新开仓成交后立即为 `ai_managed` 仓位落库绑定结构化论点。 */
@@ -10234,314 +9237,37 @@ reduceQuantity: null,
   /*  Breakeven guard                                                        */
   /* ---------------------------------------------------------------------- */
 
-  /**
-   * 浮盈够多时把止损移到开仓价。
-   *
-   * ## 与回撤守卫的分工
-   *
-   * `applyDrawdownGuard()` 是**平仓**：浮盈回吐太多就落袋 —— 它给利润设了上限。
-   * 这里**不平仓**，只把止损移到成本价，**让赢的单继续跑**。
-   *
-   * 两者互补。而这一条治的是实测到的那个病：
-   * **平均持仓 4.6 分钟、手续费占毛盈亏 38%，一笔已经赚到钱的单又变回亏损单。**
-   *
-   * ## ⚠️ 顺序：**先撤旧、再挂新**（这一段原来是反的，见下）
-   *
-   * 实测得出的结论，而不是推理出来的：
-   *
-   * | 顺序 | 结果 |
-   * | --- | --- |
-   * | **先撤旧、再挂新** | 中间有一个短暂的无保护窗口 —— 但这是**唯一可行**的顺序 |
-   * | 先挂新、再撤旧 | **必吃 `-4130`**（币安不允许同一仓位存在两张条件单） |
-   *
-   * 原来这里写的是"先挂新、再撤旧"，理由是"挂新失败时旧止损还在"。那个推理
-   * **漏了交易所的约束**：两张不能并存。实测后果是订单记录里连刷四条 `-4130`、
-   * **保本止损从未生效过**（`20:00:25 / 20:12:25 / 20:15:25 / 20:16:25`）。
-   *
-   * 所以挂新失败时**必须按 §2.6 处理** —— 立刻市价平仓并记账，
-   * 而不是留一个没有止损的杠杆敞口等下一轮。
-   *
-   * ## 为什么不用 `cancelAllOrders`
-   *
-   * 它同时撤**普通单和条件单**，会把**止盈单一起撤掉** —— 而本函数只重挂止损，
-   * 那个止盈就永久没了。**精选要撤的那一张**，而不是推倒重来。
-   * 用 `cancelOrder(symbol, id, 'algo')` —— `kind` 必须传 `'algo'`，理由见调用处的注释。
-   */
-  /**
-   * **判断新止损是否【比旧止损更紧】**（P2 的最后一道闸 · 2026-10-19）。
-   *
-   * ## 为什么需要它（不能信任上游）
-   *
-   * 上游有两个来源：机械规则与 Jev。**两者都可能算出更宽松的值** ——
-   * 机械规则理论上不会（`breakeven.ts` 有保证），但 Jev 的答案完全不可控
-   *（它是个概率模型，可能选错档、也可能在某个边界上给出奇怪的值）。
-   *
-   * ⇒ 在真正下单之前**再判一次**：
-   * ```
-   *   多头：新止损 > 旧止损（更靠近上方当前价）⇒ 更紧
-   *   空头：新止损 < 旧止损（更靠近下方当前价）⇒ 更紧
-   * ```
-   * 旧止损为 `null`（仓位没有止损？）时**一律拒绝移动** ——
-   * 那种情况应该走"补挂保护单"那条路径，不是这里。
-   */
-  private isStopTighter(
-    side: 'long' | 'short',
-    oldStop: number | null,
-    newStop: number,
-    _markPrice: number,
-  ): boolean {
-    if (oldStop === null || !Number.isFinite(oldStop)) return false;
-    if (!Number.isFinite(newStop) || newStop <= 0) return false;
-    return side === 'long' ? newStop > oldStop : newStop < oldStop;
-  }
-
+  /** 保本 / 移动止损守卫（委托 `mechanicalGuards.ts`，行为逐字节一致）。 */
   private async applyBreakevenGuard(): Promise<number> {
-    const traderId = this.deps.trader.id;
     const threshold = this.effectiveConfig().riskControl.breakevenTriggerPercent;
 
-    // 阈值为 0 表示关闭这条规则 —— 连行情都不必拉。
-    if (!(threshold > 0)) return 0;
-
-    /* ⚠️ 同 `applyDrawdownGuard`：模拟盘上直接读会恒空 → 保本止损从不触发。 */
-    const exchangePositions = await this.effectivePositions();
-    const liveBySymbol = new Map(exchangePositions.map((p) => [p.symbol, p]));
-    let moved = 0;
-
-    for (const local of positionStore.open(traderId)) {
-      const live = liveBySymbol.get(local.symbol);
-      if (!live) continue;
-
-      /*
-       * 用 `toPositionView` 而不是直接读 `local.side`。
-       *
-       * `positionStore.open()` 返回的是**原始数据库行**（`side` 是 `string`），
-       * 而视图把它收窄成 `PositionSide`。既有代码（`applyDrawdownGuard`）
-       * 走的也是这条路 —— 直接读会拿到一个宽类型，硬转则会把
-       * "数据库里出现了意料之外的 side 值"这件事静默吞掉。
-       */
-      const view: PositionView = {
-        ...this.toPositionView(local, new Map()),
-        markPrice: live.markPrice,
-        unrealizedPnl: live.unrealizedPnl,
-        unrealizedPnlPercent: live.unrealizedPnlPercent,
-      };
-
-      const verdict = shouldMoveStopToBreakeven({
-        side: view.side,
-        entryPrice: view.entryPrice,
-        currentStop: view.stopLoss,
-        markPrice: view.markPrice,
-        unrealizedPnlPercent: view.unrealizedPnlPercent,
-        triggerPercent: threshold,
-        /*
-         * 追踪距离。`0` = 退回旧的纯保本行为（止损停在开仓价）。
-         *
-         * ⚠️ 它必须与 `breakevenTriggerPercent` 一起读 —— 只配后者不配前者，
-         * 就是那条被实测证明会回吐 27% 浮盈的旧行为。
-         */
-        trailPercent: this.effectiveConfig().riskControl.trailingStopPercent,
-      });
-
-      if (!verdict.move || verdict.newStop === null) continue;
-
-      const effectiveStop = verdict.newStop;
-
-      /*
-       * ⚠️ **最后一道闸：只接受"比旧止损更靠近当前价"的值**（约束 ③）。
-       *
-       * 这一步不信任任何上游（包括 Jev）—— 放宽止损等于增加风险，
-       * 而那段逻辑绝不能靠"上游会算对"来保证。
-       */
-      if (!this.isStopTighter(view.side, view.stopLoss ?? null, effectiveStop, view.markPrice)) {
-        this.emitOnChange(
-          `stop-not-tighter:${local.id}`,
-          'warn',
-          `${local.symbol} 算出的新止损 ${effectiveStop} 并不比原止损更紧，本轮不移动（防止放宽风险）。`,
-        );
-        continue;
-      }
-
-      /*
-       * ⚠️ **先撤旧止损，再挂新的 —— 顺序与我最初的实现相反。**
-       *
-       * ## 我最初写反了，而实盘证明它完全不工作
-       *
-       * 原本是"先挂新、再撤旧"，理由是"新挂失败时旧止损还在，仓位不会失去保护"。
-       * **那个推理漏了一个前提：交易所允不允许两张条件单并存。**
-       *
-       * 实测（订单记录里连刷四条）：
-       *
-       *     20:00:25  ZECUSDT 止损 已拒绝  Binance -4130
-       *     20:12:25  ZECUSDT 止损 已拒绝  Binance -4130
-       *     20:15:25  ZECUSDT 止损 已拒绝  Binance -4130
-       *     20:16:25  ZECUSDT 止损 已拒绝  Binance -4130
-       *
-       * `-4130` = 该仓位已有止损/止盈单，不能再挂一张。**所以新止损每一次都被拒绝，
-       * 保本止损从未生效过，而它每一轮都重试、把订单记录刷满拒绝。**
-       *
-       * ## 现在的顺序，以及它带来的代价
-       *
-       * 撤旧 → 挂新。中间有一个**短暂的无保护窗口**，这无法避免：
-       * 交易所不允许两张并存，"先撤"是唯一路径。
-       *
-       * 所以挂新失败时**必须按 §2.6 处理** —— 立刻市价平仓并记账，
-       * 而不是留一个没有止损的杠杆敞口等下一轮。
-       */
-      /*
-       * ⚠️ **单号保持字符串**（不去 `Number()`）——19 位单号超过 JS 安全整数，
-       * 转换后末几位就变了，撤单会打到一个不存在的单号上（详见 `preserveBigIds()`）。
-       */
-      const oldStopId = local.stop_order_id ? String(local.stop_order_id) : null;
-      /*
-       * ⚠️ **撤"该标的全部止损"，而不是"DB 里记的那一张"（2026-10-02 实测）。**
-       *
-       * 下面那段撤单逻辑原来只打 `oldStopId`。而 `positionStore` 只保存**最后一次**
-       * 的 `stop_order_id` —— 上移过 N 次止损就留下 N-1 张**不在 DB 里、却在交易所侧
-       * 仍然有效**的孤儿单。只撤 DB 里那张，撤完再挂一张，孤儿单就此累积。
-       *
-       * 实测形态（HYPEUSDT）：持仓上同时有两张 STOP_MARKET（`#788` 上移时挂的、
-       * `#790` 缺失检测挂的），历史上 LTCUSDT 同挂过 4 张。**旧的那张价位更差、
-       * 会先被触发** —— 于是"止损上移"这件事在有孤儿单时根本没有生效。
-       *
-       * 所以这里改用 `cancelAllProtection(symbol, { stop: true, target: false })`：
-       * **只撤止损、不碰止盈**（止盈本函数不重挂，撤掉就永久没了 —— 见下面那段注释）。
-       */
-      const oldStopCount = await this.cancelAllProtection(local.symbol, {
-        stop: true,
-        target: false,
-      });
-      if (oldStopCount === 0 && oldStopId && oldStopId.length > 0) {
-        /*
-         * 交易所侧查不到任何止损（可能是查询失败、也可能它真的已经不在）——
-         * 回退到"按 DB 里的单号撤一次"，与改动前的行为一致。
-         */
-        const cancelled = await this.deps.broker
-          .cancelOrder(local.symbol, oldStopId, 'algo')
-          .catch(() => false);
-        if (!cancelled) {
-          this.emitOnChange(
-            `breakeven-cancel-fail:${local.id}`,
-            'warn',
-            `${local.symbol} 的旧止损 #${oldStopId} 未能撤掉，本轮不移动止损（原有的仍然有效）。`,
-          );
-          continue;
-        }
-        orderStore.cancelOpenProtectionBySymbol(traderId, local.symbol, {
-          stop: true,
-          target: false,
-        });
-      }
-
-      const newStopId = await this.placeProtection({
-        symbol: local.symbol,
-        side: local.side === 'long' ? 'SELL' : 'BUY',
-        type: 'STOP_MARKET',
-        triggerPrice: effectiveStop,
-        purpose: 'stop_loss',
-        traderId,
-        quantity: local.quantity,
-      }).catch(() => null);
-
-      if (!newStopId) {
-        /*
-         * 撤旧成功、挂新失败（常见于往返间微回撤导致新保本价吃 -2021）：
-         * 若旧止损价仍在当前标记价的安全侧，先尝试恢复旧止损，避免把健康仓位直接市价强平。
-         */
-        const prevStop = local.stop_loss;
-        const prevStopSafe =
-          prevStop !== null &&
-          prevStop > 0 &&
-          live.markPrice > 0 &&
-          (local.side === 'long' ? prevStop < live.markPrice : prevStop > live.markPrice);
-        if (prevStopSafe && prevStop !== null) {
-          const restoredId = await this.placeProtection({
-            symbol: local.symbol,
-            side: local.side === 'long' ? 'SELL' : 'BUY',
-            type: 'STOP_MARKET',
-            triggerPrice: prevStop,
-            purpose: 'stop_loss',
-            traderId,
-            quantity: local.quantity,
-          }).catch(() => null);
-          if (restoredId) {
-            positionStore.setProtection(
-              traderId,
-              local.symbol,
-              prevStop,
-              local.take_profit,
-              restoredId,
-              local.tp_order_id,
-            );
-            this.emit(
-              'warn',
-              `${local.symbol} 移动止损至 ${effectiveStop} 未挂上，已立即恢复原止损 ${prevStop}（仓位保持受保护，不强平）。`,
-            );
-            continue;
-          }
-        }
-
-        /*
-         * 撤旧成功、挂新且恢复旧止损均失败 —— **此刻仓位没有止损**。按 §2.6：
-         * 一个没有保护的杠杆仓位是最糟糕的状态，宁可立刻退出。
-         */
-        this.emit(
-          'error',
-          `为 ${local.symbol} 移动止损时，旧止损已撤但新止损（开仓价 ${effectiveStop}）没挂上。` +
-            '为避免留下无保护的敞口，立即平掉该仓位。',
-        );
-        const exitSide: 'BUY' | 'SELL' = local.side === 'long' ? 'SELL' : 'BUY';
-        const flatten = await this.emergencyFlatten(
-          local.symbol,
-          local.quantity,
-          exitSide,
-          traderId,
-        ).catch(() => null);
-        const still = positionStore.getOpenBySymbol(traderId, local.symbol);
-        /*
-         * ⚠️ **只有交易所确认成交了才记账**（`flatten === null` 表示"没确认"）。
-         * 未确认就 `bookClosedPosition` = 账本说已平、交易所上仓位还在。
-         * 漏记会在下一轮对账里补上，凭空记一笔不会自己消失（§2.3）。
-         */
-        if (still && flatten) {
-          await this.bookClosedPosition(
-            still,
-            'protection_unavailable',
-            flatten.avgPrice,
-            flatten.fee,
-            new Date().toISOString(),
-            this.entryFeeExtra(flatten.entryFee),
-          );
-        } else if (still) {
-          this.emit(
-            'warn',
-            `${local.symbol} 的紧急平仓未获确认，本轮不记账（本地持仓保留），交给下一轮对账处理。`,
-          );
-        }
-        moved += 1;
-        continue;
-      }
-
-      /*
-       * 本地记录必须与交易所一致：把 `stop_loss` 也更新成刚挂上去的保本价。
-       *
-       * 只更新单号是不够的 —— 下一轮的 `shouldMoveStopToBreakeven()` 会拿
-       * `local.stop_loss` 判断"是否仍在亏损侧"，读到旧值的话它会以为还需要移，
-       * 于是**每一轮都重复挂一张新止损**，把交易所堆满同向的条件单。
-       */
-      positionStore.setProtection(
-        traderId,
-        local.symbol,
-        effectiveStop,
-        local.take_profit,
-        String(newStopId),
-        local.tp_order_id,
-      );
-      this.clearStateNotice(`breakeven-fail:${local.id}`);
-      this.emit('info', verdict.reason);
-      moved += 1;
-    }
-
-    return moved;
+    return applyBreakevenGuardForTrader({
+      traderId: this.deps.trader.id,
+      threshold,
+      getTrailPercent: () => this.effectiveConfig().riskControl.trailingStopPercent,
+      getEffectivePositions: () => this.effectivePositions(),
+      toPositionView: (local) => this.toPositionView(local, new Map()),
+      cancelAllStopProtection: (symbol) =>
+        this.cancelAllProtection(symbol, { stop: true, target: false }),
+      cancelAlgoOrder: (symbol, orderId) => this.deps.broker.cancelOrder(symbol, orderId, 'algo'),
+      placeStopOrder: (params) =>
+        this.placeProtection({
+          symbol: params.symbol,
+          side: params.side,
+          type: 'STOP_MARKET',
+          triggerPrice: params.triggerPrice,
+          purpose: 'stop_loss',
+          traderId: params.traderId,
+          quantity: params.quantity,
+        }),
+      flattenPosition: (symbol, quantity, exitSide, traderId) =>
+        this.emergencyFlatten(symbol, quantity, exitSide, traderId),
+      bookClosedPosition: (still, reason, avgPrice, fee, closedAt, entryFee) =>
+        this.bookClosedPosition(still, reason, avgPrice, fee, closedAt, this.entryFeeExtra(entryFee)),
+      emit: (level, message) => this.emit(level, message),
+      emitOnChange: (key, level, message) => this.emitOnChange(key, level, message),
+      clearStateNotice: (key) => this.clearStateNotice(key),
+    });
   }
 
 
@@ -14093,24 +12819,6 @@ reduceQuantity: null,
 /* -------------------------------------------------------------------------- */
 /*  Module helpers                                                             */
 /* -------------------------------------------------------------------------- */
-
-/**
- * 按**兜底比例**算一个止损价：`基准价 ± 基准价 × 比例%`。
- *
- * ## 为什么抽出来（2026-11-09）
- *
- * 同一道算式在本文件里原来有**四份副本**（收养手动仓位、补挂缺失的保护单、
- * 加仓、减仓），每份都手写 `price × (percent / 100)` 再按方向加减。
- * §5.4 说"金额相关的算术只在一个地方算"—— 四份副本迟早有一份被改错方向
- * 或者少除一个 100，而那种错误既不抛也不崩，**只会让止损落在错误的一侧**。
- *
- * 基准价由调用方定，但必须是**那笔交易真正的入场/出场口径**（不是随手拿现价）：
- * 收养与补挂用 `entryPrice`，加仓用成交价，减仓用减仓价 —— 本函数只管公式。
- */
-function fallbackStopPrice(referencePrice: number, isLong: boolean, percent: number): number {
-  const distance = referencePrice * (percent / 100);
-  return isLong ? referencePrice - distance : referencePrice + distance;
-}
 
 /**
  * Client order ids are how we correlate our records with the exchange's.

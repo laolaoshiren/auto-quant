@@ -58,6 +58,8 @@ const AUTO = readFileSync(new URL('./autoTrader.ts', import.meta.url), 'utf8');
 const CODE = codeOnly(AUTO);
 const PAPER = readFileSync(new URL('./paperPositions.ts', import.meta.url), 'utf8');
 const PAPER_CODE = codeOnly(PAPER);
+const GUARDS = readFileSync(new URL('./mechanicalGuards.ts', import.meta.url), 'utf8');
+const GUARDS_CODE = codeOnly(GUARDS);
 
 test('★★★ 必须有 effectivePositions()，且模拟盘走本地持仓', () => {
   assert.ok(
@@ -188,14 +190,31 @@ test('★★★ 回撤守卫与保本守卫也必须走 effectivePositions（否
   /*
    * ⚠️ 这两个是**静默失效**的典型：直接读 `broker.getPositions()` 在模拟盘上
    * 恒返回空 → 两个守卫**从不触发**，而界面上看不出任何异常。
+   * 阶段 2 抽出到 `mechanicalGuards.ts` 后，同时校验 `autoTrader.ts` 委托注入与新模块调用。
    */
-  for (const fn of ['applyDrawdownGuard', 'applyBreakevenGuard']) {
-    const at = CODE.indexOf(`private async ${fn}`);
-    assert.ok(at > 0, `★ 应当能找到 ${fn}`);
-    const body = CODE.slice(at, at + 900);
+  const pairs: ReadonlyArray<{ method: string; extracted: string }> = [
+    { method: 'applyDrawdownGuard', extracted: 'applyDrawdownGuardForTrader' },
+    { method: 'applyBreakevenGuard', extracted: 'applyBreakevenGuardForTrader' },
+  ];
+  for (const { method, extracted } of pairs) {
+    const at = CODE.indexOf(`private async ${method}`);
+    assert.ok(at > 0, `★ 应当能找到 ${method}`);
+    const body = CODE.slice(at, at + 1800);
     assert.ok(
-      /await this\.effectivePositions\(\)/.test(body),
-      `★ ${fn} 必须走 effectivePositions —— 否则模拟盘上它从不触发（静默失效）`,
+      new RegExp(`${extracted}\\(`).test(body),
+      `★ ${method} 必须委托给 mechanicalGuards.ts 的 ${extracted}`,
+    );
+    assert.ok(
+      /getEffectivePositions:\s*\(\)\s*=>\s*this\.effectivePositions\(\)/.test(body),
+      `★ ${method} 必须把 this.effectivePositions() 注入机械守卫 —— 否则模拟盘上它从不触发（静默失效）`,
+    );
+
+    const guardAt = GUARDS_CODE.indexOf(`export async function ${extracted}`);
+    assert.ok(guardAt > 0, `★ mechanicalGuards.ts 应当导出 ${extracted}`);
+    const guardBody = GUARDS_CODE.slice(guardAt, guardAt + 2800);
+    assert.ok(
+      /await input\.getEffectivePositions\(\)/.test(guardBody),
+      `★ ${extracted} 内部必须 await input.getEffectivePositions()，不得直读 broker.getPositions`,
     );
   }
 });
@@ -205,9 +224,16 @@ test('★★ 读不到标记价时跳过结算，不猜', () => {
    * §2.3：读不到 ≠ 没触发。据一个猜出来的价平仓会**永久污染账本**。
    */
   const at = CODE.indexOf('private async settleDryRunPositions');
-  const body = CODE.slice(at, at + 3200);
+  assert.ok(at > 0, '★ 应当能找到 settleDryRunPositions');
   assert.ok(
-    /continue;/.test(body),
+    /settleDryRunPositionsForTrader\(/.test(CODE.slice(at, at + 1000)),
+    '★ settleDryRunPositions 必须委托给 paperPositions.ts 的 settleDryRunPositionsForTrader',
+  );
+  const paperAt = PAPER_CODE.indexOf('export async function settleDryRunPositionsForTrader');
+  assert.ok(paperAt > 0, '★ paperPositions.ts 应当导出 settleDryRunPositionsForTrader');
+  const body = PAPER_CODE.slice(paperAt, paperAt + 3200);
+  assert.ok(
+    /catch \(error\)[\s\S]{0,400}?continue;/.test(body),
     '★ 标记价读不到时必须跳过这个标的（而不是用 0 或入场价硬算）',
   );
 });

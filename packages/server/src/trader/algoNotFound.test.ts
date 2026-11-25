@@ -39,6 +39,8 @@ import { codeOnly } from '../testUtils/sourceText.js';
 
 const BROKER = readFileSync(new URL('../binance/broker.ts', import.meta.url), 'utf8');
 const AUTO = readFileSync(new URL('./autoTrader.ts', import.meta.url), 'utf8');
+const STALE = readFileSync(new URL('./staleOrders.ts', import.meta.url), 'utf8');
+const RECONCILE = readFileSync(new URL('./positionReconcile.ts', import.meta.url), 'utf8');
 
 test('★★★ getAlgoOrder 必须把"交易所说不存在"翻译成 not-found', () => {
   assert.ok(
@@ -60,12 +62,18 @@ test('★★★ getAlgoOrder 必须把"交易所说不存在"翻译成 not-found
 
 test('★★★ finalStatusOf 必须把 not-found 写成终态（否则死锁）', () => {
   /*
-   * ⚠️ **必须剥掉注释再判** —— 我在那个分支的说明里**引用了** `if (!algo) return null`
-   * 这句话，于是"第一个出现位置"落在注释里，判据自相矛盾。
-   *（本项目反复踩过这一类：`>本轮未参与<` 查 JSX 文本、`requestEarlyCycle('有成交')`
-   *  查源码 —— 都是"注释/文本里的字被当成了代码"。）
+   * ⚠️ **必须剥掉注释再判** —— 同时校验 autoTrader.ts 委托与 staleOrders.ts 实现。
    */
-  const code = codeOnly(AUTO).slice(codeOnly(AUTO).indexOf('private async finalStatusOf'));
+  const autoCode = codeOnly(AUTO);
+  const autoFnAt = autoCode.indexOf('private async finalStatusOf');
+  assert.ok(autoFnAt > 0, '★ autoTrader.ts 应当保留 finalStatusOf 委托入口');
+  assert.ok(
+    /resolveFinalOrderStatus\(/.test(autoCode.slice(autoFnAt, autoFnAt + 600)),
+    '★ finalStatusOf 必须委托给 staleOrders.ts 的 resolveFinalOrderStatus',
+  );
+
+  const staleCode = codeOnly(STALE);
+  const code = staleCode.slice(staleCode.indexOf('export async function resolveFinalOrderStatus'));
   const notFoundAt = code.indexOf("algo === 'not-found'");
   const nullAt = code.indexOf('if (!algo) return null');
   assert.ok(notFoundAt > 0, "★ 必须有 'not-found' 的分支 —— 否则那些行永远结清不了");
@@ -77,7 +85,7 @@ test('★★★ finalStatusOf 必须把 not-found 写成终态（否则死锁）
 });
 
 test('★★★ 安全边界不变：只有"交易所说不存在"才写终态', () => {
-  const fn = AUTO.slice(AUTO.indexOf('private async finalStatusOf'));
+  const fn = STALE.slice(STALE.indexOf('export async function resolveFinalOrderStatus'));
   /*
    * ⚠️ 那一条必须是 `status: 'CANCELED'` 且**不带成交数字** ——
    * 我们分不清它是成交还是撤销，写成交数字就是编造。
@@ -91,12 +99,19 @@ test('★★ detectCloseReason 不能把 not-found 猜成止损或止盈', () =>
    * ⚠️ `'not-found'` 意味着"那张单结束了，但分不清是触发还是撤销"——
    * 拿它去猜平仓原因就是编造。它应该落空、继续走"用价位推断"的判据。
    */
+  const autoCode = codeOnly(AUTO);
+  const autoFnAt = autoCode.indexOf('private async detectCloseReason');
+  assert.ok(autoFnAt > 0, '★ autoTrader.ts 应当保留 detectCloseReason 委托入口');
   assert.ok(
-    /const statusOf = \(o: typeof stopOrder\)/.test(AUTO),
-    '★ detectCloseReason 必须先把状态抽出来（类型层面逼着处理 not-found）',
+    /detectCloseReasonForPosition\(/.test(autoCode.slice(autoFnAt, autoFnAt + 800)),
+    '★ detectCloseReason 必须委托给 positionReconcile.ts 的 detectCloseReasonForPosition',
   );
   assert.ok(
-    /o === null \|\| o === 'not-found' \? undefined : o\.algoStatus/.test(AUTO),
+    /const statusOf = \(o: typeof stopOrder\)/.test(RECONCILE),
+    '★ detectCloseReasonForPosition 必须先把状态抽出来（类型层面逼着处理 not-found）',
+  );
+  assert.ok(
+    /o === null \|\| o === 'not-found' \? undefined : o\.algoStatus/.test(RECONCILE),
     "★ 'not-found' 必须映射成 undefined（落空），而不是映射成某个终态",
   );
 });

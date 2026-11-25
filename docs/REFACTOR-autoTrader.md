@@ -1,7 +1,8 @@
-# `autoTrader.ts` 拆分方案（分阶段，未执行）
+# `autoTrader.ts` 拆分方案（分阶段执行中）
 
-> 状态：**阶段 1 已完成（2026-11-26）**。阶段 1 的 4 个低风险纯搬模块
-> （`promptBuilders.ts` / `equityRecord.ts` / `paperPositions.ts` / `cycleFailures.ts`）已抽出并保留 `AutoTrader` 门面与全量再导出，行为零变化；阶段 2/3 待后续迭代推进。
+> 状态：**阶段 1 已完成（2026-11-26）** · **阶段 2 第一批已完成（2026-11-26）**。
+> - 阶段 1 的 4 个低风险纯搬模块（`promptBuilders.ts` / `equityRecord.ts` / `paperPositions.ts` / `cycleFailures.ts`）已抽出并保留 `AutoTrader` 门面与全量再导出，行为零变化；
+> - 阶段 2 的 3 个核心守卫/结清/对账模块（`mechanicalGuards.ts` / `staleOrders.ts` / `positionReconcile.ts`）已抽出并保留 `AutoTrader` 门面、全部公开导出与结构守卫不变量，行为零变化；`closeBooking.ts` / `tradeHistoryReconcile.ts`（受账本写账点与手续费守卫强绑定）及阶段 3 待后续独立迭代推进。
 >
 > 目标：让交易主链路在"多人多维度开发"下可读、可审查、少冲突，**且不改变任何行为语义**。
 
@@ -47,13 +48,13 @@
 
 ### 阶段 2：中风险（预计 −3,500 行）
 
-| 模块 | 搬什么 | 约行数 | 风险 |
-| --- | --- | --- | --- |
-| `trader/positionReconcile.ts` | 持仓对账 | ~500 | 中（会写 `trades`） |
-| `trader/closeBooking.ts` | 平仓记账核心 | ~900 | 中（金额算术，已有 `closeBooking*` 测试可作边界） |
-| `trader/tradeHistoryReconcile.ts` | 成交历史重建（`/fapi/v1/userTrades`） | ~1,270 | 中（归属闸门不可放宽） |
-| `trader/staleOrders.ts` | 陈旧挂单结清 | ~300 | 中 |
-| `trader/mechanicalGuards.ts` | 回撤/保本/收紧等机械保护 | ~530 | 中（依赖注入） |
+| 模块 | 搬什么 | 约行数 | 风险 | 状态 |
+| --- | --- | --- | --- | --- |
+| `trader/positionReconcile.ts` | 持仓对账、缺失保护单巡检恢复、消失持仓归因（`reconcilePositions` / `ensureStopsOnOpenPositions` / `bookVanishedPosition` / `detectCloseReason` / `reasonFromPrice` / `lastFillFor` / `fallbackStopPrice`） | ~560 | 中（会写持仓与触发记账委托） | ✅ 已完成（2026-11-26） |
+| `trader/staleOrders.ts` | 陈旧挂单结清与终态判定（`settleStaleOrders` / `finalStatusOf` / `ORDER_SETTLE_GRACE_MS`） | ~340 | 中 | ✅ 已完成（2026-11-26） |
+| `trader/mechanicalGuards.ts` | 实时守卫、回撤守卫、论点硬检查、保本/移动止损（`runGuardTick` / `applyDrawdownGuard` / `applyThesisHardGuard` / `applyBreakevenGuard` / `tightenStop` / `isStopTighter`） | ~650 | 中（依赖注入） | ✅ 已完成（2026-11-26） |
+| `trader/closeBooking.ts` | 平仓记账核心 | ~900 | 中（金额算术，受 `closeBookingGuard` / `closeBookingLedger` 强绑定） | ⏳ 待后续独立迭代 |
+| `trader/tradeHistoryReconcile.ts` | 成交历史重建（`/fapi/v1/userTrades`） | ~1,270 | 中（归属闸门与写账点守卫强绑定） | ⏳ 待后续独立迭代 |
 
 **验收**：每搬一个模块前先确认它的测试存在且钉住原行为；对账/记账的测试必须全绿；
 `sim` 18/18。**不允许**在搬的同时改行为。

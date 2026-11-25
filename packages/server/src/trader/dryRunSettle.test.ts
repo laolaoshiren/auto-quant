@@ -36,14 +36,25 @@ import test from 'node:test';
 import { codeOnly } from '../testUtils/sourceText.js';
 
 const AUTO = readFileSync(new URL('./autoTrader.ts', import.meta.url), 'utf8');
+const STALE = readFileSync(new URL('./staleOrders.ts', import.meta.url), 'utf8');
 
 test('★★★ settleStaleOrders 必须有模拟盘分支（否则永远结清不了）', () => {
-  const code = codeOnly(AUTO);
-  const fnAt = code.indexOf('private async settleStaleOrders');
+  const autoCode = codeOnly(AUTO);
+  const fnAt = autoCode.indexOf('private async settleStaleOrders');
   assert.ok(fnAt > 0, '★ 应当能找到 settleStaleOrders');
-  const body = code.slice(fnAt, fnAt + 4000);
+  const delegateBody = autoCode.slice(fnAt, fnAt + 800);
   assert.ok(
-    /if \(this\.isDryRun\) \{/.test(body),
+    /settleStaleOrdersForTrader\(/.test(delegateBody) &&
+      /isDryRun:\s*this\.isDryRun/.test(delegateBody),
+    '★ settleStaleOrders 必须委托给 staleOrders.ts 并传入 isDryRun',
+  );
+
+  const staleCode = codeOnly(STALE);
+  const implAt = staleCode.indexOf('export async function settleStaleOrdersForTrader');
+  assert.ok(implAt > 0, '★ staleOrders.ts 应当导出 settleStaleOrdersForTrader');
+  const body = staleCode.slice(implAt, implAt + 4000);
+  assert.ok(
+    /if \(input\.isDryRun\) \{/.test(body),
     '★ 必须有模拟盘分支 —— 交易所不是模拟盘的真相来源',
   );
   assert.ok(
@@ -53,10 +64,10 @@ test('★★★ settleStaleOrders 必须有模拟盘分支（否则永远结清�
 });
 
 test('★★★ 模拟盘分支必须排在"读交易所"之前（否则走不到）', () => {
-  const code = codeOnly(AUTO);
-  const fnAt = code.indexOf('private async settleStaleOrders');
-  const body = code.slice(fnAt, fnAt + 4000);
-  const dryAt = body.indexOf('if (this.isDryRun) {');
+  const staleCode = codeOnly(STALE);
+  const implAt = staleCode.indexOf('export async function settleStaleOrdersForTrader');
+  const body = staleCode.slice(implAt, implAt + 4000);
+  const dryAt = body.indexOf('if (input.isDryRun) {');
   const liveAt = body.indexOf('getOpenOrders(');
   assert.ok(dryAt > 0 && liveAt > 0, '★ 两处都该在函数里');
   assert.ok(
@@ -66,10 +77,10 @@ test('★★★ 模拟盘分支必须排在"读交易所"之前（否则走不�
 });
 
 test('★★★ 模拟盘分支必须尊重 activeProtectionIds（当前生效的保护单不碰）', () => {
-  const code = codeOnly(AUTO);
-  const fnAt = code.indexOf('private async settleStaleOrders');
-  const body = code.slice(fnAt, fnAt + 4000);
-  const dryBlock = body.slice(body.indexOf('if (this.isDryRun) {'), body.indexOf('const symbols = ['));
+  const staleCode = codeOnly(STALE);
+  const implAt = staleCode.indexOf('export async function settleStaleOrdersForTrader');
+  const body = staleCode.slice(implAt, implAt + 4000);
+  const dryBlock = body.slice(body.indexOf('if (input.isDryRun) {'), body.indexOf('const symbols = ['));
   assert.ok(
     /activeProtectionIds\.has\(/.test(dryBlock),
     '★ 模拟盘分支也必须跳过当前生效的保护单 —— 否则会把活着的保护单写成终态',
@@ -77,13 +88,25 @@ test('★★★ 模拟盘分支必须尊重 activeProtectionIds（当前生效�
 });
 
 test('★★★ 实盘路径不能被动到（它本来是对的）', () => {
-  const code = codeOnly(AUTO);
+  const autoCode = codeOnly(AUTO);
+  const fnAt = autoCode.indexOf('private async settleStaleOrders');
+  const delegateBody = autoCode.slice(fnAt, fnAt + 800);
   assert.ok(
-    /getOpenAlgoOrders\(/.test(code) || /this\.deps\.broker\.getOpenAlgoOrders/.test(code),
+    /this\.deps\.broker\.getOpenAlgoOrders/.test(delegateBody),
+    '★ 实盘委托必须把 broker.getOpenAlgoOrders 注入 staleOrders.ts',
+  );
+  assert.ok(
+    /finalStatusOf:\s*\(row\)\s*=>\s*this\.finalStatusOf\(row\)/.test(delegateBody),
+    '★ 实盘委托必须注入 finalStatusOf',
+  );
+
+  const staleCode = codeOnly(STALE);
+  assert.ok(
+    /input\.getOpenAlgoOrders\(/.test(staleCode),
     '★ 实盘仍必须问交易所要挂单列表',
   );
   assert.ok(
-    /finalStatusOf\(/.test(code),
+    /input\.finalStatusOf\(/.test(staleCode),
     '★ 实盘仍必须用 finalStatusOf 定终态',
   );
 });
