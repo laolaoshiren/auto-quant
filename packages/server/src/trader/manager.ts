@@ -1645,6 +1645,14 @@ export class TraderManager {
    */
   private readonly starting = new Set<number>();
   private readonly connections = new Map<string, AnyExchangeConnection>();
+  /**
+   * 跨机器人共享的公开行情服务（按 `exchange:environment` 分桶）。
+   *
+   * 全市场 `ticker/24hr`（40 权重）、`premiumIndex`（10 权重）与 K 线都是公开事实，
+   * 与账户无关；同交易所同环境下多个机器人共用一份带 TTL + 在途去重的
+   * `MarketDataService`，避免 N 台机器人各自重复烧全市场权重。
+   */
+  private readonly sharedMarketData = new Map<string, MarketDataService>();
   private readonly userStreams = new Map<number, BinanceUserDataStream>();
   /**
    * 成交触发的即时对账，按机器人去抖 —— 见 `scheduleFillReconcile()`。
@@ -1956,6 +1964,29 @@ export class TraderManager {
 
   isRunning(traderId: number): boolean {
     return this.running.has(traderId);
+  }
+
+  /**
+   * 返回运行中实盘机器人的已建立连接，供只读控制台视图复用（避免每次 HTTP 轮询
+   * 重新调用 `connectExchange` 拉取 `/time` 与 600KB `exchangeInfo`）。
+   * 模拟盘或未运行的机器人返回 `null`。
+   */
+  activeLiveConnectionOf(traderId: number): AnyExchangeConnection | null {
+    if (!this.running.has(traderId)) return null;
+    if (this.dryRunOf(traderId) !== false) return null;
+    return this.connections.get(connectionCacheKey(traderId, false)) ?? null;
+  }
+
+  /** 按 `(exchange, environment)` 复用一份共享公开行情服务。 */
+  private marketDataFor(connection: AnyExchangeConnection): MarketDataService {
+    const key = isGateConnection(connection)
+      ? `gate:${connection.environment}`
+      : `binance:${connection.environment}`;
+    const existing = this.sharedMarketData.get(key);
+    if (existing) return existing;
+    const created = new MarketDataService(connection.market, connection.registry);
+    this.sharedMarketData.set(key, created);
+    return created;
   }
 
   /**
@@ -3624,7 +3655,7 @@ export class TraderManager {
       }
 
       /* --- Assemble ----------------------------------------------------- */
-      const marketData = new MarketDataService(connection.market, connection.registry);
+      const marketData = this.marketDataFor(connection);
 
       // A trader created before its exchange credential existed (or created with
       // a hand-typed baseline) would otherwise show a meaningless return
@@ -4710,7 +4741,7 @@ export class TraderManager {
       config,
       registry: connection.registry,
       market: connection.market,
-      marketData: new MarketDataService(connection.market, connection.registry),
+      marketData: this.marketDataFor(connection),
       broker: connection.broker,
       model: {
         complete: () => Promise.reject(new Error('对账不调用模型')),
@@ -4775,7 +4806,7 @@ export class TraderManager {
       config,
       registry: connection.registry,
       market: connection.market,
-      marketData: new MarketDataService(connection.market, connection.registry),
+      marketData: this.marketDataFor(connection),
       broker: connection.broker,
       model: {
         complete: () => Promise.reject(new Error('手工平仓不调用模型')),
@@ -4857,7 +4888,7 @@ export class TraderManager {
           config,
           registry: connection.registry,
           market: connection.market,
-          marketData: new MarketDataService(connection.market, connection.registry),
+          marketData: this.marketDataFor(connection),
           broker: connection.broker,
           model: { complete: () => Promise.reject(new Error('撤单不调用模型')) },
         });
@@ -5023,6 +5054,7 @@ export class TraderManager {
       this.running.clear();
       this.startedAt.clear();
       this.connections.clear();
+      this.sharedMarketData.clear();
       log.info('所有机器人已停止');
     } finally {
       this.shutdownInProgress = false;

@@ -76,37 +76,53 @@ const SCREEN_MAX_LIMIT = 30;
  */
 export class MarketDataService {
   private universe: UniverseSnapshot | null = null;
+  private universeInFlight: Promise<UniverseSnapshot> | null = null;
   private readonly klineCache = new Map<string, { at: number; klines: Kline[] }>();
+  private readonly klineInFlight = new Map<string, Promise<Kline[]>>();
 
   constructor(
     private readonly market: MarketPort,
     private readonly registry: SymbolRegistry,
   ) {}
 
-  /** Universe-wide tickers and funding/mark prices, cached for a few seconds. */
+  /** Universe-wide tickers and funding/mark prices, cached for a few seconds with in-flight deduplication. */
   private async getUniverse(force = false): Promise<UniverseSnapshot> {
     if (!force && this.universe && Date.now() - this.universe.fetchedAt < UNIVERSE_TTL_MS) {
       return this.universe;
     }
+    if (!force && this.universeInFlight) {
+      return this.universeInFlight;
+    }
 
-    const [tickers, premiums] = await Promise.all([
-      this.market.ticker24h().catch((error) => {
-        log.warn(`拉取全市场行情快照失败：${(error as Error).message}`);
-        return [] as BinanceTicker24h[];
-      }),
-      this.market.premiumIndex().catch((error) => {
-        log.warn(`拉取全市场标记价与资金费率失败：${(error as Error).message}`);
-        return [] as BinancePremiumIndex[];
-      }),
-    ]);
+    const pending = (async (): Promise<UniverseSnapshot> => {
+      const [tickers, premiums] = await Promise.all([
+        this.market.ticker24h().catch((error) => {
+          log.warn(`拉取全市场行情快照失败：${(error as Error).message}`);
+          return [] as BinanceTicker24h[];
+        }),
+        this.market.premiumIndex().catch((error) => {
+          log.warn(`拉取全市场标记价与资金费率失败：${(error as Error).message}`);
+          return [] as BinancePremiumIndex[];
+        }),
+      ]);
 
-    const snapshot: UniverseSnapshot = {
-      fetchedAt: Date.now(),
-      tickers: new Map(tickers.map((t) => [t.symbol, t])),
-      premiums: new Map(premiums.map((p) => [p.symbol, p])),
-    };
-    this.universe = snapshot;
-    return snapshot;
+      const snapshot: UniverseSnapshot = {
+        fetchedAt: Date.now(),
+        tickers: new Map(tickers.map((t) => [t.symbol, t])),
+        premiums: new Map(premiums.map((p) => [p.symbol, p])),
+      };
+      this.universe = snapshot;
+      return snapshot;
+    })();
+
+    this.universeInFlight = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.universeInFlight === pending) {
+        this.universeInFlight = null;
+      }
+    }
   }
 
   /**
@@ -176,13 +192,34 @@ export class MarketDataService {
    */
   async getKlines(symbol: string, timeframe: Timeframe, count: number): Promise<Kline[]> {
     const key = `${symbol}:${timeframe}:${count}`;
+    const now = Date.now();
     const cached = this.klineCache.get(key);
     // A candle closes at most once per timeframe; 15s is safely within that.
-    if (cached && Date.now() - cached.at < 15_000) return cached.klines;
+    if (cached && now - cached.at < 15_000) return cached.klines;
 
-    const klines = await this.market.fetchClosedKlines(symbol, timeframe, count);
-    this.klineCache.set(key, { at: Date.now(), klines });
-    return klines;
+    const existing = this.klineInFlight.get(key);
+    if (existing) return existing;
+
+    const pending = this.market.fetchClosedKlines(symbol, timeframe, count).then((klines) => {
+      const storedAt = Date.now();
+      this.klineCache.set(key, { at: storedAt, klines });
+      /* 多机器人共享缓存时防止长期运行无限膨胀：超过阈值时清掉 60 秒前的旧条目。 */
+      if (this.klineCache.size > 1500) {
+        for (const [k, entry] of this.klineCache) {
+          if (storedAt - entry.at > 60_000) this.klineCache.delete(k);
+        }
+      }
+      return klines;
+    });
+
+    this.klineInFlight.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.klineInFlight.get(key) === pending) {
+        this.klineInFlight.delete(key);
+      }
+    }
   }
 
   /** Drop caches so the next cycle reads fresh data. */

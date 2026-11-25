@@ -392,6 +392,14 @@ export interface ApiDependencies {
    * 它存在的唯一理由是"让不可达的分支可达"。
    */
   openReadOnlyConnection?: () => Promise<ExchangeConnection>;
+  /**
+   * 控制台实时交易所视图（`/positions` 与 `/account`）的内存缓存时长（毫秒）。
+   *
+   * 生产默认 5000ms（避免多标签页与前端轮询高频撞击币安 2400 权重/分钟限额）；
+   * 注入了 `openReadOnlyConnection` 的测试场景默认 0（不缓存，保证各用例彼此隔离），
+   * 需测试缓存本身时可显式传入正数。
+   */
+  liveViewCacheTtlMs?: number;
 }
 
 /**
@@ -2800,10 +2808,37 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     return { ...updated, managedRiskProfile: managedRiskProfileOf(updated) };
   }));
 
+  const liveViewCacheTtlMs =
+    deps.liveViewCacheTtlMs ?? (deps.openReadOnlyConnection ? 0 : 5_000);
+  type LiveAccountViewResult = {
+    live: boolean;
+    account: ExchangeAccountState | null;
+    positions: PositionView[];
+    positionsSource: PositionsSource;
+    ownUnrealizedPnl?: number;
+    openOrderCount?: number;
+    error: string | undefined;
+  };
+  type LivePositionsViewResult = {
+    live: boolean;
+    positions: PositionView[];
+    positionsSource: PositionsSource;
+    error: string | undefined;
+  };
+  const liveAccountCache = new Map<number, { at: number; value: LiveAccountViewResult }>();
+  const liveAccountInFlight = new Map<number, Promise<LiveAccountViewResult>>();
+  const livePositionsCache = new Map<number, { at: number; value: LivePositionsViewResult }>();
+  const livePositionsInFlight = new Map<number, Promise<LivePositionsViewResult>>();
+  const invalidateLiveView = (traderId: number): void => {
+    liveAccountCache.delete(traderId);
+    livePositionsCache.delete(traderId);
+  };
+
   /** 删除时最多等在途启动收尾多久。见下面路由里的说明。 */
   const DELETE_WAIT_FOR_START_MS = 4_000;
   app.delete('/api/traders/:id', authed, guard(async (_body: unknown, request, reply) => {
     const id = idOf(request);
+    invalidateLiveView(id);
     await deps.manager.stopTrader(id);
     /*
      * ⚠️ **等在途的启动收尾，再删行**（2026-11-11 审查）。
@@ -2859,14 +2894,17 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       );
     }
     /* ⚠️ 同步返回，不等启动跑完 —— 建连接/拉持仓/对账都要等，界面会像"点了没反应"（2026-10-10）。 */
+    invalidateLiveView(id);
     const result = deps.manager.startTraderAsync(id, dryRun);
     if (!result.ok) return reply.code(400).send(result);
     return result;
   });
 
   app.post('/api/traders/:id/stop', authed, async (request) => {
+    const id = idOf(request);
+    invalidateLiveView(id);
     /* ⚠️ 不 await：stopTrader 已先把状态翻成 stopped 并掐断在途 AI 请求（2026-10-10）。 */
-    void deps.manager.stopTrader(idOf(request));
+    void deps.manager.stopTrader(id);
     return { ok: true };
   });
 
@@ -2899,6 +2937,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     const id = idOf(request);
     try {
       const result = await deps.manager.closeAllPositions(id);
+      invalidateLiveView(id);
       return { ok: true, ...result };
     } catch (error) {
       return reply.code(400).send({ ok: false, error: (error as Error).message });
@@ -2910,6 +2949,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     const symbol = String((request.params as { symbol: string }).symbol).toUpperCase();
     try {
       const result = await deps.manager.closePosition(id, symbol);
+      invalidateLiveView(id);
       return { ok: true, ...result };
     } catch (error) {
       return reply.code(400).send({ ok: false, error: (error as Error).message });
@@ -2972,6 +3012,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     const id = idOf(request);
     try {
       const result = await deps.manager.reconcileTrader(id);
+      invalidateLiveView(id);
       return { ok: true, ...result };
     } catch (error) {
       return reply.code(400).send({ ok: false, error: (error as Error).message });
@@ -3254,6 +3295,12 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   const openReadOnlyFor = async (trader: Trader): Promise<ExchangeConnection | GateConnection | null> => {
     if (deps.openReadOnlyConnection) return deps.openReadOnlyConnection();
     /*
+     * 优先复用运行中实盘机器人已经建立好的连接：避免每次前端轮询都重建连接、
+     * 重复请求 `/fapi/v1/time` 与 600KB `exchangeInfo`。只读查询不会改变连接状态。
+     */
+    const active = deps.manager.activeLiveConnectionOf?.(trader.id);
+    if (active) return active;
+    /*
      * 纯模拟盘机器人没有交易所账户（用户 2026-10-27 需求）——
      * 没有凭据行就是"读不到账户事实"，返回 null，由调用方按"读不到"处理
      * （模拟盘的持仓本来就来自本地台账，不依赖这条连接）。
@@ -3380,16 +3427,147 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   };
 
   /**
+   * 将交易所实时持仓与本地台账元数据（止盈止损、峰值浮盈、入场理由）叠加为 `PositionView[]`。
+   * `/positions` 与 `/account` 两条路由共用同一套映射逻辑，保证口径完全一致。
+   */
+  const mapExchangePositions = (
+    traderId: number,
+    livePositions: Awaited<ReturnType<ExchangeConnection['broker']['getPositions']>>,
+  ): PositionView[] => {
+    const local = positionStore.open(traderId);
+    const bySymbol = new Map(local.map((p) => [p.symbol, p]));
+    return livePositions.map((live) => {
+      const record = bySymbol.get(live.symbol);
+      return {
+        id: record?.id ?? 0,
+        traderId,
+        symbol: live.symbol,
+        side: live.side,
+        quantity: live.quantity,
+        entryPrice: live.entryPrice,
+        markPrice: live.markPrice,
+        leverage: live.leverage,
+        liquidationPrice: live.liquidationPrice,
+        unrealizedPnl: live.unrealizedPnl,
+        unrealizedPnlPercent: live.unrealizedPnlPercent,
+        peakPnlPercent: record?.peak_pnl_percent ?? 0,
+        marginUsed: live.marginUsed,
+        marginType: normalizeMarginMode(live.marginType) ?? undefined,
+        notional: live.notional,
+        stopLoss: record?.stop_loss ?? null,
+        takeProfit: record?.take_profit ?? null,
+        openedAt: record?.opened_at ?? new Date().toISOString(),
+        openReasoning: record?.open_reasoning ?? '',
+      };
+    });
+  };
+
+  /**
+   * 轻量版实时持仓读取（供 `GET /api/traders/:id/positions` 专用）。
+   *
+   * 相比 `liveExchangeView`：
+   *   1. 实盘分支**只调用 `getPositions()`（5 权重）**，不再附带 40 权重的全量
+   *      `getOpenOrders()` 与 5 权重的 `getAccountState()` —— 每次轮询直降 90% 权重；
+   *   2. 带 `liveViewCacheTtlMs` 短缓存 + 并发合并（in-flight 去重），多标签页/多组件
+   *      同时轮询只向交易所发 1 次请求；失败结果永不缓存。
+   */
+  const livePositionsView = async (traderId: number): Promise<LivePositionsViewResult> => {
+    const trader = traders.get(traderId);
+    if (!trader || !deps.manager.isRunning(traderId)) {
+      return {
+        live: false,
+        positions: [] as PositionView[],
+        positionsSource: 'none' as PositionsSource,
+        error: undefined,
+      };
+    }
+    if (isPaperTrader(traderId)) {
+      const local = positionStore.open(traderId);
+      const marks = await paperMarkPrices(local, exchangeOfTrader(trader));
+      return {
+        live: true,
+        positions: localPositionsFor(traderId, marks),
+        positionsSource: 'local_mirror' as PositionsSource,
+        error: undefined,
+      };
+    }
+    const now = Date.now();
+    if (liveViewCacheTtlMs > 0) {
+      const cachedPos = livePositionsCache.get(traderId);
+      if (cachedPos && now - cachedPos.at < liveViewCacheTtlMs) {
+        return cachedPos.value;
+      }
+      const cachedAcc = liveAccountCache.get(traderId);
+      if (cachedAcc && now - cachedAcc.at < liveViewCacheTtlMs && cachedAcc.value.live) {
+        return {
+          live: true,
+          positions: cachedAcc.value.positions,
+          positionsSource: cachedAcc.value.positionsSource,
+          error: undefined,
+        };
+      }
+      const inFlight = livePositionsInFlight.get(traderId);
+      if (inFlight) return inFlight;
+    }
+
+    const run = async (): Promise<LivePositionsViewResult> => {
+      try {
+        const connection = await openReadOnlyFor(trader);
+        if (!connection) {
+          return {
+            live: false,
+            positions: [] as PositionView[],
+            positionsSource: 'none' as PositionsSource,
+            error: '找不到该凭据',
+          };
+        }
+        const livePositions = await connection.broker.getPositions();
+        const exchangePositions = mapExchangePositions(traderId, livePositions);
+        const paper = isPaperTrader(traderId);
+        const result: LivePositionsViewResult = {
+          live: true,
+          positions: paper ? localPositionsFor(traderId) : exchangePositions,
+          positionsSource: (paper ? 'local_mirror' : 'exchange') as PositionsSource,
+          error: undefined,
+        };
+        if (liveViewCacheTtlMs > 0) {
+          livePositionsCache.set(traderId, { at: Date.now(), value: result });
+        }
+        return result;
+      } catch (error) {
+        log.warn(`机器人 #${traderId} 的交易所持仓读数失败，本轮不回退到本地镜像：${(error as Error).message}`);
+        return {
+          live: false,
+          positions: [] as PositionView[],
+          positionsSource: 'none' as PositionsSource,
+          error: (error as Error).message,
+        };
+      }
+    };
+
+    if (liveViewCacheTtlMs <= 0) return run();
+    const pending = run();
+    livePositionsInFlight.set(traderId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (livePositionsInFlight.get(traderId) === pending) {
+        livePositionsInFlight.delete(traderId);
+      }
+    }
+  };
+
+  /**
    * Read the exchange directly for a trader's live account and positions.
    *
-   * Uses a throwaway read-only connection so the console always shows what the
-   * exchange actually holds, rather than our local mirror — the whole point of
-   * having a reconciliation loop is that the mirror can be wrong.
+   * Uses the running live connection when available (otherwise a read-only connection),
+   * with short TTL caching + in-flight deduplication so multiple browser tabs never
+   * hammer Binance's 2400 weight/min budget.
    *
    * ⚠️ **一个例外：模拟盘（`dry_run`）机器人。** 交易所对它**不是**真相来源 ——
    * 它的仓位在交易所根本不存在，用它只会得到"空持仓"。见 `PositionsSource` 的说明。
    */
-  const liveExchangeView = async (traderId: number) => {
+  const liveExchangeView = async (traderId: number): Promise<LiveAccountViewResult> => {
     const trader = traders.get(traderId);
     if (!trader || !deps.manager.isRunning(traderId)) {
       return {
@@ -3400,30 +3578,6 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         error: undefined as string | undefined,
       };
     }
-    /*
-     * ══════════════════════════════════════════════════════════════════════════
-     * ⚠️⚠️ **模拟盘（`dry_run`）在这里就短路 —— 在解密凭据、建连接之前**
-     * ══════════════════════════════════════════════════════════════════════════
-     *
-     * ## 为什么必须短路（而不是连接成功之后再换持仓来源）
-     *
-     * 如果先连交易所、再按 `paper` 决定用哪份持仓，那么**交易所一抖动就会走
-     * `catch`**，于是模拟盘拿到 `live: false` → `/positions` 回 **503**。
-     * 那正是本仓最忌讳的形态：用户看到的是"读不到持仓"，而他手里的模拟仓
-     * **根本不需要交易所** —— 一次无关的网络故障让它闪烁，比不修还糟。
-     *
-     * ## 短路之后各字段从哪来
-     *
-     * · `positions`  —— **本地台账** + 公共行情的标记价（模拟盘的真相就是它）
-     * · `openOrderCount` —— 本地 `pending` 行数（模拟盘的委托从不出现在交易所）
-     * · `ownUnrealizedPnl` —— 同一个 `ownUnrealizedPnlOf`（与实盘同一个算式）
-     * · `account`   —— **仍然尽力问交易所**（账户余额是账户级事实）；
-     *                  读不到就 `null`，**不影响上面三个数字**
-     *
-     * ## 实盘一个字段都没动
-     *
-     * 下面 `try` 里那条路对 `paper === false` 的机器人是**逐字节原样**。
-     */
     if (isPaperTrader(traderId)) {
       const local = positionStore.open(traderId);
       const marks = await paperMarkPrices(local, exchangeOfTrader(trader));
@@ -3443,220 +3597,109 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         error: undefined as string | undefined,
       };
     }
-    try {
-      /*
-       * 建一条**只读**交易所连接。`deps.openReadOnlyConnection` 是**测试用**的
-       * 注入口 —— 见 `ApiDependencies` 上那个字段的说明（不传时行为与改动前相同）。
-       */
-      const connection = await openReadOnlyFor(trader);
-      if (!connection)
+
+    if (liveViewCacheTtlMs > 0) {
+      const cached = liveAccountCache.get(traderId);
+      if (cached && Date.now() - cached.at < liveViewCacheTtlMs) {
+        return cached.value;
+      }
+      const inFlight = liveAccountInFlight.get(traderId);
+      if (inFlight) return inFlight;
+    }
+
+    const run = async (): Promise<LiveAccountViewResult> => {
+      try {
+        /*
+         * 建一条**只读**交易所连接（或复用运行中连接）。`deps.openReadOnlyConnection` 是**测试用**的
+         * 注入口 —— 见 `ApiDependencies` 上那个字段的说明（不传时行为与改动前相同）。
+         */
+        const connection = await openReadOnlyFor(trader);
+        if (!connection)
+          return {
+            live: false,
+            account: null,
+            positions: [] as PositionView[],
+            positionsSource: 'none' as PositionsSource,
+            error: '找不到该凭据',
+          };
+        const [account, livePositions, liveOrders] = await Promise.all([
+          connection.broker.getAccountState(),
+          connection.broker.getPositions(),
+          /*
+           * ⚠️ **挂单数必须由这里给，不能让界面用 WebSocket 镜像去数。**
+           * 判断"有没有东西占着保证金"这件事，**必须问交易所，不能问镜像**。
+           */
+          connection.broker.getOpenOrders(),
+        ]);
+        const local = positionStore.open(traderId);
+        const exchangePositions = mapExchangePositions(traderId, livePositions);
+        const markPriceOf = new Map(livePositions.map((live) => [live.symbol, live.markPrice]));
+        const missingMark = local.map((p) => p.symbol).filter((symbol) => !markPriceOf.has(symbol));
+        if (missingMark.length > 0) {
+          const want = new Set(missingMark);
+          const premiums = await connection.market.premiumIndex().catch(() => []);
+          for (const premium of premiums) {
+            if (!want.has(premium.symbol)) continue;
+            const value = Number(premium.markPrice);
+            if (Number.isFinite(value) && value > 0) markPriceOf.set(premium.symbol, value);
+          }
+        }
+        const own = ownUnrealizedPnlOf(local, (symbol) => markPriceOf.get(symbol));
+        if (own.missingMarkPrice.length > 0) {
+          log.warn(
+            `[trader ${traderId}] 这些标的有本地持仓但拿不到标记价，其浮盈未计入首页数字：${own.missingMarkPrice.join('、')}`,
+          );
+        }
+        const ownUnrealizedPnl = own.unrealizedPnl;
+        const paper = isPaperTrader(traderId);
+        const positions: PositionView[] = paper
+          ? localPositionsFor(traderId, markPriceOf)
+          : exchangePositions;
+        const openOrderCount = paper ? positionStore.pending(traderId).length : liveOrders.length;
+        const result: LiveAccountViewResult = {
+          live: true,
+          account,
+          positions,
+          positionsSource: (paper ? 'local_mirror' : 'exchange') as PositionsSource,
+          ownUnrealizedPnl,
+          openOrderCount,
+          error: undefined as string | undefined,
+        };
+        if (liveViewCacheTtlMs > 0) {
+          const ts = Date.now();
+          liveAccountCache.set(traderId, { at: ts, value: result });
+          livePositionsCache.set(traderId, {
+            at: ts,
+            value: {
+              live: true,
+              positions: result.positions,
+              positionsSource: result.positionsSource,
+              error: undefined,
+            },
+          });
+        }
+        return result;
+      } catch (error) {
+        log.warn(`机器人 #${traderId} 的交易所读数失败，本轮不回退到本地镜像：${(error as Error).message}`);
         return {
           live: false,
           account: null,
           positions: [] as PositionView[],
           positionsSource: 'none' as PositionsSource,
-          error: '找不到该凭据',
+          error: (error as Error).message,
         };
-      const [account, livePositions, liveOrders] = await Promise.all([
-        connection.broker.getAccountState(),
-        connection.broker.getPositions(),
-        /*
-         * ⚠️ **挂单数必须由这里给，不能让界面用 WebSocket 镜像去数。**
-         *
-         * 用户 2026-10-08 报：「有 3 个挂单，为什么上面不显示保证金占用？」
-         * 卡片写 0.00、而下方「挂单占用」写 26.74。
-         *
-         * 根因：卡片判断"是否空仓"用的是 `live?.orders`（**WebSocket 镜像**），
-         * 那个镜像在推送断开/重连时是**空的**，于是它以为"没有任何挂单"，
-         * 走了"空仓 ⇒ 占用为 0"那条推算；而下方「当前委托」的角标是表格
-         * **自己调接口**数出来的 3。**同一屏两个数来自两个时效，于是自相矛盾。**
-         *
-         * 与持仓同一个道理（`positions` 也是从交易所实时读的）：
-         * 判断"有没有东西占着保证金"这件事，**必须问交易所，不能问镜像**。
-         */
-        connection.broker.getOpenOrders(),
-      ]);
-      // Layer the local records (stop/target ids, peak PnL, entry reasoning) on
-      // top of the exchange's truth.
-      const local = positionStore.open(traderId);
-      const bySymbol = new Map(local.map((p) => [p.symbol, p]));
-      /*
-       * 显式标成 `PositionView[]`：这条路由的契约就是它（`docs/API.md`），
-       * 而内联对象字面量在 `app.get()` 里没有任何类型约束 —— 字段名写错（`marginTyp`）
-       * 只会静默多一个没人读的键，前端拿到的一直是 `undefined`（界面 `—`）。
-       * 加上这一层，`tsc` 就能替这条"改了但没接线"的路径把关。
-       */
-      const exchangePositions: PositionView[] = livePositions.map((live) => {
-        const record = bySymbol.get(live.symbol);
-        return {
-          id: record?.id ?? 0,
-          traderId,
-          symbol: live.symbol,
-          side: live.side,
-          quantity: live.quantity,
-          entryPrice: live.entryPrice,
-          markPrice: live.markPrice,
-          leverage: live.leverage,
-          liquidationPrice: live.liquidationPrice,
-          unrealizedPnl: live.unrealizedPnl,
-          unrealizedPnlPercent: live.unrealizedPnlPercent,
-          peakPnlPercent: record?.peak_pnl_percent ?? 0,
-          marginUsed: live.marginUsed,
-          /*
-           * 保证金模式（全仓 / 逐仓）—— 订单记录那列的**当前配置兜底来源**。
-           *
-           * 它读自交易所的 `positionRisk`（`broker.getPositions()`），是**实时**的账户配置，
-           * 而**不是这张单下单时的历史快照**（那是 `OrderRecord.marginType`）。
-           * 界面对这两个口径分得很清：落库值优先，缺失时才用这一份，并明说它是当前值。
-           *
-           * 再收一次口：`ExchangePosition.marginType` 的类型来自 `binance/types.ts` 的声明，
-           * 运行期拿到的是交易所原样的字符串 —— 认不出的写法宁可当"不知道"（前端显示 `—`），
-           * 也绝不猜成 `'cross'`。
-           */
-          marginType: normalizeMarginMode(live.marginType) ?? undefined,
-          notional: live.notional,
-          stopLoss: record?.stop_loss ?? null,
-          takeProfit: record?.take_profit ?? null,
-          openedAt: record?.opened_at ?? new Date().toISOString(),
-          openReasoning: record?.open_reasoning ?? '',
-        };
-      });
-      /*
-       * ⚠️ **本机器人的浮盈必须按它自己的入场价算，不能拿交易所的合并持仓。**
-       *
-       * 独立验收（2026-10-07）连着指出两次，第二次是对的：
-       *
-       *  · 第一版直接对 `livePositions` 求和 —— 那是**整个账户**的持仓。
-       *  · 第二版按 symbol 过滤后求和 —— 好一些，但同一账户里**两台机器人做同一个币**时，
-       *    交易所的 `positionRisk` 只给一条**合并净头寸**，浮盈照旧被合并、两者互相污染。
-       *
-       * 正确答案在仓库里已经有了：`ownUnrealizedPnlOf()` —— 它用**本机器人自己**的
-       * `entry_price × quantity × 标记价` 算，与交易所怎么合并无关，而且会回报
-       * "哪些标的缺标记价"（缺了就跳过，不拿 0 冒充）。快照写入路径（`autoTrader`）
-       * 一直在用它 —— 所以这里再自己写一遍的话，同屏会出现两个"本机器人浮盈"
-       * 且数值不同。**同一个算式只留一份。**
-       *
-       * `positions` 列表保持原样：它是账户级视图，持仓卡与账户条都依赖它。
-       */
-      const markPriceOf = new Map(livePositions.map((live) => [live.symbol, live.markPrice]));
-      /*
-       * ⚠️ **交易所没有的标的要回落到【行情】标记价**（2026-10-15 修）
-       *
-       * `dry_run`（模拟盘）机器人的本地持仓**在交易所不存在** → 这里恒缺标记价 →
-       * 那个仓的浮盈被按 0 计入首页数字，而界面上看不出异样（数字看着正常）。
-       * 线上实测（`#11`）：每 5 秒一条
-       * ```
-       *   这些标的有本地持仓但拿不到标记价，其浮盈未计入首页数字：SOLUSDT
-       * ```
-       * 而那个 SOLUSDT 空头是**模拟仓** —— 交易所侧本来就没有它。
-       *
-       * 标记价是**行情事实**（对所有机器人相同），借它不引入归属错误 ——
-       * 与"借用交易所 `markPrice`"是同一条理由（见上面 `ownUnrealizedPnlOf` 那段）。
-       *
-       * ⚠️ 只对交易所**没有**的标的去查行情：有的话仍用交易所那个数 ——
-       * 它是这个账户的实际结算依据。
-       */
-      const missingMark = local.map((p) => p.symbol).filter((symbol) => !markPriceOf.has(symbol));
-      if (missingMark.length > 0) {
-        const want = new Set(missingMark);
-        const premiums = await connection.market.premiumIndex().catch(() => []);
-        for (const premium of premiums) {
-          if (!want.has(premium.symbol)) continue;
-          const value = Number(premium.markPrice);
-          if (Number.isFinite(value) && value > 0) markPriceOf.set(premium.symbol, value);
-        }
       }
-      const own = ownUnrealizedPnlOf(local, (symbol) => markPriceOf.get(symbol));
-      /*
-       * ⚠️ **缺标记价的标的必须说出来，不能静默按 0 计。**
-       *
-       * `ownUnrealizedPnlOf` 的返回值里专门有 `missingMarkPrice`，而它的注释
-       * （`repositories.ts:3604`）写明"必须有人能说出来"—— 快照那条路径
-       * （`autoTrader.ts:9619`）就解构并 `emit('warn')` 了。
-       * 独立验收 2026-10-07 抓到：这条新路由把那一半丢掉了 —— 同一个函数两处调用，
-       * 一处上报、一处静默。
-       *
-       * 触发条件：本地有 `open` 行、而交易所该 symbol 已无 `positionRisk`
-       * （外部平仓 / 本地未同步）→ 那个仓的浮盈会被当成 0，界面看不出异样。
-       */
-      if (own.missingMarkPrice.length > 0) {
-        log.warn(
-          `[trader ${traderId}] 这些标的有本地持仓但拿不到标记价，其浮盈未计入首页数字：${own.missingMarkPrice.join('、')}`,
-        );
+    };
+
+    if (liveViewCacheTtlMs <= 0) return run();
+    const pending = run();
+    liveAccountInFlight.set(traderId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (liveAccountInFlight.get(traderId) === pending) {
+        liveAccountInFlight.delete(traderId);
       }
-      const ownUnrealizedPnl = own.unrealizedPnl;
-      /*
-       * ── 持仓到底该问谁 ────────────────────────────────────────────────────
-       *
-       * ⚠️ **模拟盘（`dry_run`）机器人的持仓只存在于本地台账。**
-       *
-       * 上面那段注释（`dry_run` 机器人恒缺标记价）已经写明了这个事实的一半：
-       * 交易所侧**本来就没有**它的仓。当时只把"浮盈"那一路改成用本地台账算，
-       * 而 `positions` 被刻意留成账户级视图 —— 于是出现用户实测两次的那个矛盾：
-       * 卡片「持仓 0 / 保证金占用 0.00」，同一张卡里却有「浮动 +$0.32」。
-       *
-       * **浮盈不可能是 0 持仓** —— 两个数字来自不同的来源，而界面上看不出来。
-       * 所以这里按来源分流，并把来源随响应交给前端（`positionsSource`）：
-       * 前端再没有"猜"的余地。
-       *
-       * ⚠️ **实盘（非纸面）分支逐字节不变**：`paper === false` 时用的还是上面那份
-       * `exchangePositions`，一个字段都没动。
-       *
-       * ⚠️ 标记价用的是**同一个** `markPriceOf`（上面刚补过行情回落），
-       * 所以持仓数、保证金占用、浮动盈亏三个数字**同口径** —— 这正是
-       * 「同屏三个数字互相矛盾」那个老问题的解法。
-       */
-      const paper = isPaperTrader(traderId);
-      const positions: PositionView[] = paper
-        ? localPositionsFor(traderId, markPriceOf)
-        : exchangePositions;
-      /*
-       * ⚠️ **挂单数也要跟着来源走**（同一族的次生矛盾）。
-       *
-       * `openOrderCount` 的用途是让卡片回答"有没有东西占着保证金"，而模拟盘的
-       * 委托**从不出现在交易所**（`broker.ts` 的 `simulateStandard` 路径）——
-       * 问交易所只会恒得 0。本地那张 `status='pending'` 的行才是它的挂单。
-       *
-       * 实盘分支仍然问交易所：那个镜像在推送断开时可能是空的，而"有没有挂单"
-       * 必须问交易所（见上面 `getOpenOrders` 那段实测）。
-       */
-      const openOrderCount = paper ? positionStore.pending(traderId).length : liveOrders.length;
-      /*
-       * `openOrderCount` 是**挂单数** —— 卡片用它判断"有没有东西占着保证金"。
-       * 只给数量、不传订单明细：界面要的只是"空不空"（明细由「当前委托」那张表自己查）。
-       *
-       * ⚠️ 它的**来源跟着 `positionsSource` 一起变**（模拟盘问本地、实盘问交易所）——
-       * 见上面 `openOrderCount` 那段的理由。混用会让"0 持仓却有挂单占用"再次出现。
-       */
-      return {
-        live: true,
-        account,
-        positions,
-        positionsSource: (paper ? 'local_mirror' : 'exchange') as PositionsSource,
-        ownUnrealizedPnl,
-        openOrderCount,
-        error: undefined as string | undefined,
-      };
-    } catch (error) {
-      /*
-       * ⚠️ **这条日志是必须的，不是可选的。**
-       *
-       * 这个 `catch` 原来**什么都不打**：交易所读失败时静默返回 `live: false`，
-       * 而调用方会把它当成"机器人没在跑"、回退到本地镜像 —— 于是界面上出现
-       * 一个已经不存在的持仓、几秒后又消失（用户报的那个现象）。
-       *
-       * 那种故障**没有留下任何痕迹**，只能靠盯着界面看。一条 warn 让"到底是不是
-       * 交易所读数在失败"变成一个可以查的问题。频率有上限：控制台的持仓轮询
-       * 是 30 秒一次，所以最坏也只是每 30 秒一行。
-       */
-      log.warn(`机器人 #${traderId} 的交易所读数失败，本轮不回退到本地镜像：${(error as Error).message}`);
-      return {
-        live: false,
-        account: null,
-        positions: [] as PositionView[],
-        positionsSource: 'none' as PositionsSource,
-        error: (error as Error).message,
-      };
     }
   };
 
@@ -3722,7 +3765,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   app.get('/api/traders/:id/positions', authed, async (request, reply) => {
     const id = idOf(request);
-    const live = await liveExchangeView(id);
+    const live = await livePositionsView(id);
 
     /*
      * ── 读得到交易所就用交易所的；**读不到时不要拿本地镜像冒充** ──────────

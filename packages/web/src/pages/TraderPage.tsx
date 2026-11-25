@@ -25,7 +25,7 @@ import {
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
 import { useSummaries } from '../lib/summaries';
-import { useDocumentTitle, usePolled } from '../lib/hooks';
+import { useDocumentTitle, usePolled, useTabVisible } from '../lib/hooks';
 import { useRunOnce, useAgentReview } from '../lib/actions';
 import { pickPositions } from '../lib/pickPositions';
 import { displayAvailable, displayMarginUsed } from '../lib/accountDisplay';
@@ -349,14 +349,7 @@ export function TraderPage() {
   // The exchange's own view of the account. `fetchAccountState` reads live from
   // the exchange, so this is polled only while the tab is visible and rarely —
   // the running loop fetches the same figures every cycle anyway.
-  const [tabVisible, setTabVisible] = useState(
-    () => typeof document === 'undefined' || document.visibilityState === 'visible',
-  );
-  useEffect(() => {
-    const onVisibility = () => setTabVisible(document.visibilityState === 'visible');
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, []);
+  const tabVisible = useTabVisible();
 
   const accountQuery = usePolled((signal) => api.traderAccount(traderId, signal), {
     intervalMs: 60_000,
@@ -367,41 +360,9 @@ export function TraderPage() {
   const accountState = toAccountState(accountQuery.data?.account ?? null);
 
   /*
-   * ⚠️ **持仓必须自己轮询 —— 否则未实现盈亏会停在 45 分钟前。**
-   *
-   * ## 实测的问题（操作员截图报的）
-   *
-   * 持仓行显示 `+$0.01`，而页面底部显示 `+0.09` —— 两个数本该是同一个。
-   * 查下去发现：底部那行来自 `accountQuery`（**60 秒**轮询、实时读交易所），
-   * 而持仓行**唯一的更新来源是 WebSocket 的 `positions` 事件**，那个事件由
-   * `autoTrader` 在**周期末尾**发一次 —— **而周期是 45 分钟**。
-   *
-   * 所以不是算错，是「**一个每 60 秒动、一个每 45 分钟动**」。而 `api.positions`
-   * 其实早就写好了（`/traders/:id/positions` 直接读交易所、不读本地镜像），
-   * **只是从来没有一个组件调用过它**。
-   *
-   * ## 为什么把结果写进 `useEvents`，而不是给表格加一个 prop
-   *
-   * `TraderTables` 内部读的是 `useEvents(s => s.byTrader[id])` —— 它**没有**
-   * `positions` prop。而 `setLivePositions`（平仓后立刻覆盖用的那条路）写的正是
-   * 同一处，所以复用它就不必动表格的接口。
-   *
-   * ## 与 WebSocket 推送的关系
-   *
-   * 两个来源写的是同一个 store，**后到的覆盖先到的**。推送只在周期末尾来一次，
-   * 所以绝大多数时候轮询是更新的那个；而周期刚结束时推送到达，它也是交易所的
-   * 真值 —— 两者不会互相引入错误值，只是**新鲜度不同**。
+   * 实时持仓的唯一轮询已合并至 `TraderTables`（10 秒一次、可见页签才轮询，
+   * 并直接回写 `useEvents.setLivePositions`），避免页面内多路定时器重复请求 `/positions`。
    */
-  const positionsQuery = usePolled((signal) => api.traderPositions(traderId, signal), {
-    intervalMs: 30_000,
-    enabled: Number.isFinite(traderId) && tabVisible,
-    deps: [traderId, tabVisible],
-  });
-
-  useEffect(() => {
-    const rows = positionsQuery.data;
-    if (rows && Number.isFinite(traderId)) setLivePositions(traderId, rows);
-  }, [positionsQuery.data, traderId, setLivePositions]);
 
   /*
    * 账户上的外部交易活动 —— 见 `api.foreignActivity` 上的说明。
@@ -2543,7 +2504,6 @@ export function TraderPage() {
               .then((rows) => setLivePositions(traderId, rows))
               .catch(() => undefined);
             void accountQuery.reload();
-            void positionsQuery.reload();
             void fetchStats(traderId);
             // 图表盯着的那个币种可能已经被平掉了 —— 回到"跟随持仓"。
             setPickedSymbol(undefined);

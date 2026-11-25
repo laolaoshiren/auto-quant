@@ -43,7 +43,7 @@ import { orderPurposeLabel, orderStatusLabel, orderTypeLabel } from '@aq/shared'
 import { api } from '../lib/api';
 import { needsReconcileFlag, reconcileNoteTitle } from '../lib/orderFlags';
 import { useEvents } from '../lib/store';
-import { usePolled } from '../lib/hooks';
+import { usePolled, useTabVisible, type QueryState } from '../lib/hooks';
 import { Badge, Button, ErrorNote, Modal, Panel, Spinner3 } from './ui';
 import { SideBadge } from './Badges';
 import { closeReasonLabel } from '../lib/summaries';
@@ -874,6 +874,7 @@ function distancePercent(entry: number, level: number | null): string | null {
 export function PositionsTable({
   traderId,
   refreshToken = 0,
+  query: externalQuery,
   onCloseRequest,
   onSelectSymbol,
   collapsed = false,
@@ -882,8 +883,10 @@ export function PositionsTable({
   onOpenOrdersTab,
 }: {
   traderId: number;
-  /** 手工平仓等写操作后递增，触发持仓表立即重拉，不等待 5 秒轮询。 */
+  /** 手工平仓等写操作后递增，触发持仓表立即重拉，不等待轮询。 */
   refreshToken?: number;
+  /** 由外层容器共享的 `/positions` 查询结果；传入后不再另起重复轮询定时器。 */
+  query?: QueryState<PositionView[]>;
   onCloseRequest: (symbol: string) => void;
   /** 点击币种名时把它送到上面的行情图表（可选；不传就是纯文本）。 */
   onSelectSymbol?: (symbol: string) => void;
@@ -895,10 +898,12 @@ export function PositionsTable({
   onOpenOrdersTab?: () => void;
 }) {
   const live = useEvents((s) => s.byTrader[traderId]?.positions);
-  const query = usePolled((signal) => api.traderPositions(traderId, signal), {
-    intervalMs: 5000,
+  const internalQuery = usePolled((signal) => api.traderPositions(traderId, signal), {
+    intervalMs: 10_000,
+    enabled: !externalQuery,
     deps: [traderId, refreshToken],
   });
+  const query = externalQuery ?? internalQuery;
 
   /*
    * ⚠️ **实时查询优先，WebSocket 镜像只作兜底** —— 这个顺序在 2026-10-04 之前是反的。
@@ -2714,10 +2719,11 @@ export function TraderTables({
    * 代价是这一轮询问在切到别的标签时也会发生（以前只有订单表挂载时才拉）。
    * 25 行的一页、15 秒一次，换来的是标签上的数字与表格永远一致。
    */
+  const tabVisible = useTabVisible();
   const liveOrders = useEvents((s) => s.byTrader[traderId]?.orders);
   const ordersQuery = usePolled(
     (signal) => api.traderOrders(traderId, { limit: PAGE_LIMIT, signal }),
-    { intervalMs: 15_000, deps: [traderId, token] },
+    { intervalMs: 15_000, enabled: Number.isFinite(traderId) && tabVisible, deps: [traderId, token, tabVisible] },
   );
   const ordersPaging = useTablePaging<OrderRecord>(
     traderId,
@@ -2752,7 +2758,7 @@ export function TraderTables({
   const liveTrades = useEvents((s) => s.byTrader[traderId]?.trades);
   const tradesQuery = usePolled(
     (signal) => api.traderTrades(traderId, { limit: PAGE_LIMIT, signal }),
-    { intervalMs: 15_000, deps: [traderId, token] },
+    { intervalMs: 15_000, enabled: Number.isFinite(traderId) && tabVisible, deps: [traderId, token, tabVisible] },
   );
   const tradesPaging = useTablePaging<TradeRecord>(
     traderId,
@@ -2795,11 +2801,23 @@ export function TraderTables({
    * 代价是切到别的标签时也会拉一次（与订单表那段注释同一个取舍：
    * 15 秒一次的小请求，换来"数字与表格永远一致"）。
    */
+  /*
+   * 全页**唯一一份** `/positions` 实时轮询（10 秒一次，后台标签页自动暂停）：
+   * 同时喂给「当前持仓」表格、「全部平仓」按钮角标、以及 `useEvents.setLivePositions`
+   * （供顶栏与卡片浮盈同步）。此前页面内有 3 路独立定时器（5s / 15s / 30s），
+   * 合并后既保证同屏数字严格一致，又大幅降低币安 API 权重消耗。
+   */
   const livePositions = useEvents((s) => s.byTrader[traderId]?.positions);
+  const setLivePositions = useEvents((s) => s.setPositions);
   const positionsQuery = usePolled((signal) => api.traderPositions(traderId, signal), {
-    intervalMs: 15_000,
-    deps: [traderId, token],
+    intervalMs: 10_000,
+    enabled: Number.isFinite(traderId) && tabVisible,
+    deps: [traderId, token, tabVisible],
   });
+  useEffect(() => {
+    const rows = positionsQuery.data;
+    if (rows && Number.isFinite(traderId)) setLivePositions(traderId, rows);
+  }, [positionsQuery.data, traderId, setLivePositions]);
   const closableCount = pickPositions(positionsQuery.data, livePositions).length;
 
   const filteredOrdersPaging = useMemo(() => {
@@ -3097,6 +3115,7 @@ export function TraderTables({
           <PositionsTable
             traderId={traderId}
             refreshToken={token}
+            query={positionsQuery}
             onCloseRequest={setCloseTarget}
             onSelectSymbol={onSelectSymbol}
             collapsed={!hasManualHeight && positionsCollapsed}

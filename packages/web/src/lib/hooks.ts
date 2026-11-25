@@ -321,3 +321,16 @@ export function useTicker(intervalMs = 1000): number {
   }, [intervalMs]);
   return tick;
 }
+
+/** 当前浏览器标签页是否处于可见状态 —— 用于后台标签页暂停轮询，节省接口权重。 */
+export function useTabVisible(): boolean {
+  const [visible, setVisible] = useState(
+    () => typeof document === 'undefined' || document.visibilityState === 'visible',
+  );
+  useEffect(() => {
+    const onVisibility = () => setVisible(document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+  return visible;
+}
