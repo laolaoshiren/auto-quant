@@ -13167,6 +13167,10 @@ reduceQuantity: null,
      */
     try {
       await this.deps.broker.cancelAllOrders(decision.symbol);
+      orderStore.cancelOpenProtectionBySymbol(this.deps.trader.id, decision.symbol, {
+        stop: true,
+        target: true,
+      });
     } catch (error) {
       return {
         action: decision.action,
@@ -13425,6 +13429,10 @@ reduceQuantity: null,
      */
     try {
       await this.deps.broker.cancelAllOrders(decision.symbol);
+      orderStore.cancelOpenProtectionBySymbol(this.deps.trader.id, decision.symbol, {
+        stop: true,
+        target: true,
+      });
     } catch (error) {
       return {
         action: decision.action,

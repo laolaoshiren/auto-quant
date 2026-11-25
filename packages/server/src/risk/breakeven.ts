@@ -64,6 +64,15 @@ export interface BreakevenInput {
    * `0` 表示不追踪 —— 即**退回原来的纯保本行为**（移到开仓价），保持向后兼容。
    */
   trailPercent: number;
+  /**
+   * 追踪止损的最小改善步长（百分比，默认 `0.15` = 0.15%）。
+   *
+   * 仅在当前止损已处于保本或盈利侧（`!stillAtRisk`）后的增量追踪阶段生效：
+   * 防止 30 秒监控因为 0.01% 的微小价格抖动就频繁撤换实盘 STOP_MARKET 保护单，
+   * 既避免产生无意义的保护空窗，也避免消耗交易所下单限额。
+   * 从亏损侧首次移至保本时不受此限制。设为 `0` 可关闭防抖。
+   */
+  minStepPercent?: number;
 }
 
 export interface BreakevenVerdict {
@@ -185,6 +194,29 @@ export function shouldMoveStopToBreakeven(input: BreakevenInput): BreakevenVerdi
         `但候选止损 ${candidate.toFixed(6)} 不比现有止损 ${input.currentStop} 更有利 —— ` +
         '止损只往有利方向移（价格回落时不回退）。',
     };
+  }
+
+  /*
+   * 追踪阶段防抖：止损已在保本或盈利侧时，忽略小于最小步长的微幅改善，
+   * 避免每 30 秒因 0.008% 的噪声跳动就撤换实盘保护单。
+   */
+  if (!stillAtRisk && trail > 0) {
+    const minStep =
+      input.minStepPercent !== undefined && Number.isFinite(input.minStepPercent) && input.minStepPercent >= 0
+        ? input.minStepPercent
+        : 0.15;
+    if (minStep > 0 && input.currentStop > 0) {
+      const stepPct = (Math.abs(candidate - input.currentStop) / input.currentStop) * 100;
+      if (stepPct < minStep) {
+        return {
+          move: false,
+          newStop: null,
+          reason:
+            `候选止损 ${candidate.toFixed(6)} 相对现有止损 ${input.currentStop} 仅改善 ${stepPct.toFixed(3)}%，` +
+            `小于最小防抖步长 ${minStep}%，暂不撤换保护单。`,
+        };
+      }
+    }
   }
 
   /* 合法侧守卫：新止损必须严格位于当前标记价的止损侧，防止微回撤触发交易所 -2021 立即成交。 */

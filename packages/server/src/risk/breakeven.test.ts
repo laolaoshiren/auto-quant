@@ -269,3 +269,35 @@ test('trailPercent = 0：退回旧的纯保本行为（向后兼容）', () => {
   assert.equal(v.move, true);
   assert.equal(v.newStop, 100, '0 表示不追踪 —— 止损停在开仓价');
 });
+
+test('追踪防抖：已在盈利侧时微幅改善（<0.15%）不撤换保护单，达步长才移', () => {
+  /* 空头已在盈利侧 58.746，新候选 58.742 仅改善 0.007% → 跳过，避免每 30s 撤换 */
+  const jitter = shouldMoveStopToBreakeven(
+    base({
+      side: 'short',
+      entryPrice: 58.9,
+      currentStop: 58.746,
+      markPrice: 57.874, // 57.874 * 1.015 = 58.74211 (改善 0.0066%)
+      unrealizedPnlPercent: 17.5,
+      triggerPercent: 5,
+      trailPercent: 1.5,
+    }),
+  );
+  assert.equal(jitter.move, false);
+  assert.match(jitter.reason, /防抖步长/);
+
+  /* 价格继续走远使候选改善 >= 0.15% → 正常推进 */
+  const realStep = shouldMoveStopToBreakeven(
+    base({
+      side: 'short',
+      entryPrice: 58.9,
+      currentStop: 58.746,
+      markPrice: 57.7, // 57.7 * 1.015 = 58.5655 (改善 0.31% >= 0.15%)
+      unrealizedPnlPercent: 20.4,
+      triggerPercent: 5,
+      trailPercent: 1.5,
+    }),
+  );
+  assert.equal(realStep.move, true);
+  assert.ok(realStep.newStop! < 58.6);
+});
