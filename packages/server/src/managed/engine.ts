@@ -446,7 +446,14 @@ export function normalizeFinalizePayload(
  * `plan` → `update_notes` / `update_thesis` / `get_klines` → `finalize`。
  */
 export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<ManagedEngineResult> {
-  const maxRounds = Math.max(2, Math.min(6, input.maxRounds ?? 4));
+  /*
+   * 默认 5 轮（原 4 轮实盘 Cycle #51 撞坑：模型连查 3 轮 get_klines 后在第 4 轮调了 plan+update_notes，
+   * 没收到“这是最后一轮”的硬约束，直接撞上限退回 fallback_hold_wait 静默丢掉了整轮刚算好的 XRPUSDT 挂单）。
+   * 第 1~(maxRounds-1) 轮保持完整工具列表以维持前缀缓存高命中；仅当进入最后一轮仍未 finalize 时，
+   * 收窄工具集为仅保留 finalize + toolChoice:'required'，确保整轮推理绝不被白白丢弃。
+   */
+  const maxRounds = Math.max(2, Math.min(8, input.maxRounds ?? 5));
+  const finalizeOnlyTools = MANAGED_AGENT_TOOLS.filter((tool) => tool.name === 'finalize');
   const nowMs = input.nowMs ?? Date.now();
   const messages: ChatMessage[] = [...input.baseMessages];
   const openPosBySymbol = new Map(input.openPositions.map((p) => [normalizeSymbol(p.symbol), p]));
@@ -463,9 +470,16 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
 
   for (let round = 1; round <= maxRounds; round += 1) {
     const isFinalTurn = round === maxRounds;
+    if (isFinalTurn && round > 1 && messages[messages.length - 1]?.role !== 'user') {
+      messages.push({
+        role: 'user',
+        content:
+          '已进入本轮最终拍板回合，请立即调用 `finalize` 工具提交本轮全部持仓与候选的最终决策，不要再调用其它工具。',
+      });
+    }
     const res = await input.model.chat(messages, {
       signal: input.signal,
-      tools: MANAGED_AGENT_TOOLS,
+      tools: isFinalTurn ? finalizeOnlyTools : MANAGED_AGENT_TOOLS,
       toolChoice: isFinalTurn ? 'required' : 'auto',
     });
 

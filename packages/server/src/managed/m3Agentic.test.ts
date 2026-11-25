@@ -736,3 +736,90 @@ test('★ M3.4 直接单元验证 runManagedAgenticLoop：支持 update_thesis �
   assert.match(res.text, /"symbol":"ETHUSDT","action":"hold"/);
   assert.match(res.text, /"symbol":"SOLUSDT","action":"wait"/);
 });
+
+test('★ 实盘回归（Cycle #51）：进入最终回合时仅暴露 finalize 工具并提示拍板，防止模型在末轮调 plan/notes 导致静默丢单', async () => {
+  const trader = createPaperTrader('m3-engine-final-turn-lock');
+  const seenToolCounts: number[] = [];
+  const seenToolNamesPerTurn: string[][] = [];
+
+  let turn = 0;
+  const res = await runManagedAgenticLoop({
+    traderId: trader.id,
+    maxRounds: 3,
+    baseMessages: [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'user' },
+    ],
+    openPositions: [],
+    candidateSymbols: ['XRPUSDT'],
+    model: {
+      async chat(_msgs, opts) {
+        turn += 1;
+        seenToolCounts.push(opts?.tools?.length ?? 0);
+        seenToolNamesPerTurn.push((opts?.tools ?? []).map((t) => t.name));
+        if (turn === 1) {
+          return {
+            text: '',
+            toolCalls: [{ id: 'c1', name: 'plan', arguments: JSON.stringify({ market_regime: '偏空' }) }],
+            latencyMs: 5,
+            usage: { promptTokens: 100, completionTokens: 20 },
+          };
+        }
+        if (turn === 2) {
+          return {
+            text: '',
+            toolCalls: [
+              {
+                id: 'c2',
+                name: 'update_notes',
+                arguments: JSON.stringify({
+                  op: 'upsert',
+                  symbol: 'XRPUSDT',
+                  note: '等反抽挂空',
+                  trigger_condition: '反抽 0.9165 限价空',
+                  bias: 'short',
+                  confidence: 70,
+                }),
+              },
+            ],
+            latencyMs: 5,
+            usage: { promptTokens: 120, completionTokens: 30 },
+          };
+        }
+        return {
+          text: '',
+          toolCalls: [
+            {
+              id: 'c3',
+              name: 'finalize',
+              arguments: JSON.stringify({
+                summary: '挂 XRP 空单',
+                decisions: [
+                  {
+                    symbol: 'XRPUSDT',
+                    action: 'open_short',
+                    entry_type: 'limit',
+                    limit_price: 0.9165,
+                    leverage: 10,
+                    position_size_usd: 80,
+                    stop_loss: 0.9228,
+                    take_profit: 0.903,
+                    confidence: 72,
+                    reasoning: '结构反抽空',
+                  },
+                ],
+              }),
+            },
+          ],
+          latencyMs: 5,
+          usage: { promptTokens: 150, completionTokens: 40 },
+        };
+      },
+    },
+  });
+
+  assert.equal(res.usedFinalizeTool, true);
+  assert.deepEqual(seenToolCounts, [5, 5, 1], '前两轮保持完整 5 工具维持缓存，末轮仅暴露 finalize');
+  assert.deepEqual(seenToolNamesPerTurn[2], ['finalize']);
+  assert.match(res.text, /"symbol":"XRPUSDT","action":"open_short"/);
+});
