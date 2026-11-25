@@ -1,99 +1,44 @@
-# DSH 工作流手册：在 auto-quant 上做可持续、可审查、可回滚的迭代
+# AI 协作工作流手册：在 auto-quant 上做可持续、可审查、可回滚的迭代
 
-> **本文是"怎么干活"的操作手册**，默认 harness 为 **DSH（DeepSeek Harness）**。
-> 规则从哪来：`AGENTS.md`（本地协作与 GitHub 纪律，**不入库**）、`docs/AGENTS.md`
-> （工程不变量与验证阶梯）、`docs/DEVELOPMENT-WORKFLOW.md`（闭环流程与台账）。
-> 本文只负责**把这些规则落到 DSH 的具体操作上**，不重复它们的内容。
+> **本文是"怎么干活"的操作手册**（2026-11-26 升级适配 **Antigravity + `/swarm` + 内置浏览器 + 自动增量部署**）。
+> 规则来源：`AGENTS.md`（本地协作与 GitHub 纪律，**不入库**）、`docs/AGENTS.md`（工程不变量与验证阶梯）、`docs/DEVELOPMENT-WORKFLOW.md`（闭环流程与台账）。
 >
-> 适用对象：接手本仓库的 AI 代理（单个或多 Agent 团队）与人类开发者。
+> 适用对象：接手本仓库的 AI 代理（单代理或 `/swarm` 多代理团队）与人类开发者。
 
 ---
 
 ## 0. 一句话版本
 
-**每个迭代 = 一次"发现 → 拆任务 → 并行实现 → 独立验证 → 独立审查 → 闭环 → 提交 →（推送/部署）"的闭环，
-所有证据落盘到 `.dsh/`，所有长期规则落进 `docs/`，所有代码改动带测试，站点信息永不入库。**
+**每个迭代 = 「发现/定标 → 并行实现或单点直修 → 全量门禁验收 → 独立审查（复杂改动） → 更新精简 `state.md` → 提交 → 增量部署并回读线上 → 自动单次推送备份」，站点信息永不入库。**
 
 ---
 
-## 1. 四份文档的分工（先搞清谁管什么，避免规则打架）
+## 1. 四份文档的分工（避免规则打架）
 
 | 文件 | 内容 | 是否入库 | 谁改 |
 | --- | --- | --- | --- |
-| `AGENTS.md`（根） | 用户协作偏好：GitHub 纪律、推送规则、实盘测试规范、UI 暂缓、站点信息 | ❌ 本地 | 用户 |
-| `docs/AGENTS.md` | 工程不变量（§2）、验证要求（§3）、禁止项（§4）、代码风格（§5）、验证阶梯（§6） | ✅ | 代理/人 |
-| `docs/DEVELOPMENT-WORKFLOW.md` | 闭环流程图、缺陷台账、角色与准入/退出条件 | ✅ | 代理/人 |
-| **本文** | DSH 工具落地、任务拆分、验证矩阵、节奏 | ✅ | 代理/人 |
+| `AGENTS.md`（根） | 用户协作偏好：GitHub 纪律、推送规则、实盘规范、站点信息 | ❌ 本地 | 用户 / AI 提炼 |
+| `docs/AGENTS.md` | 工程不变量（§2）、验证要求（§3）、禁止项（§4）、代码风格（§5）、验证阶梯（§6） | ✅ | 代理 / 人 |
+| `docs/PROJECT-GOALS.md` | 长期目标、优先级、明确不做/暂缓项 | ✅ | 用户拍板，AI 同步 |
+| **本文** | 协作工具落地、并行切分、验证矩阵、部署与推送节奏 | ✅ | 代理 / 人 |
 
-冲突时按"更具体、更直接"的顺序：`AGENTS.md` → `docs/AGENTS.md` → 本文 → 其余文档。
-
----
-
-## 2. 迭代的 9 个阶段
-
-| # | 阶段 | 做什么 | DSH 工具 | 产出 | 退出条件 |
-| --- | --- | --- | --- | --- | --- |
-| 1 | **发现** | 读症状、代码、日志，形成可指认的现象 | `read` / `grep` / `job_output`（读日志） | 现象 + 证据（文件:行 / 命令+退出码） | 能回答"怎么复现/怎么证明" |
-| 2 | **登记** | 写进台账，定 P0–P3、验收标准、写作用域 | `write`（`.dsh/ledger/items.md`） | 台账条目 | 状态 `DEFINED` |
-| 3 | **拆任务** | 按写作用域切分，标注依赖 | `team_task_create`（带 `write_scopes` / `blocked_by`） | 任务板条目 | 每条任务可独立完成、范围不重叠 |
-| 4 | **分派** | 复杂并行交 Agent Team；单点自己干 | `spawn_teammate` / `send_message` | 运行中的成员 | 每个成员都有明确任务与红线 |
-| 5 | **实现** | 改代码 + 加测试（修 bug 必须带"没修就会红"的测试） | `read`/`edit`/`write`；单文件测试用 `npx tsx --test <file>` | 代码 + 测试 | 本地最低门槛（§5 矩阵） |
-| 6 | **独立验证** | **≠ 实现者**在指定档位跑验收，记录命令/退出码/输出 | `job_output`（后台跑全量）| 验证证据 | 状态 `VERIFIED` |
-| 7 | **独立审查** | **≠ 实现者**逐行读关键 diff + 过红线清单 | `read`/`git diff` | 审查 findings | 状态 `REVIEWED` |
-| 8 | **闭环核验** | 回到原点确认现象消失 + 无回归 + 验收标准逐条对照 | 同上 | 闭环证据 | 状态 `CLOSED` |
-| 9 | **收尾** | 提交 →（必要时）推送/部署 → 回读线上 | `git`；`pwsh -File scripts/deploy.ps1` | `build-info.json` 回读值 | 线上版本与 HEAD 一致 |
-
-> 人手不足时：**允许一个人兼任多角色，但必须在汇报里明说"我自验了、没有独立验证"**，
-> 不能把自验写成"已验证"（`docs/AGENTS.md` §3.2）。
+冲突时按「更具体、更近期」顺序：`AGENTS.md` → `docs/PROJECT-GOALS.md` → `docs/AGENTS.md` → 本文。
 
 ---
 
-## 3. DSH 工具能力速查
+## 2. 协作形态选择（什么时候单干，什么时候 `/swarm`）
 
-### 3.1 什么时候用 Agent Team
+| 场景 | 推荐形态 | 关键规则 |
+|---|---|---|
+| 单点 Bug 修复、单模块小改动（1–3 文件） | 单代理直接完成 | 改完跑对应门禁，不额外开子代理空耗 |
+| UI 改动与线上页面巡检 | 内置 `browser` 子代理 | 直连目标页交互与深/浅主题核验（已废止旧 `playwright-core` 脚本） |
+| 跨多模块大清理 / 大重构（用户触发 `/swarm`） | **`/swarm` 隔离工作树并行** | 每位作者用 `workspace:"share"`、写作用域零重叠 + 配 1 名只读 `verifier` 审查 + 1 名 `integrator` 主线合入回归 |
+| 跨多目录只读深度排查 | `research` 只读子代理 | 不改文件，只回传带行号证据的报告 |
 
-| 场景 | 选择 |
-| --- | --- |
-| 单文件、单点修复（≤1 小时） | 自己干，**不要** spawn |
-| 2–4 个独立方向（前端/后端/文档/脚本） | `spawn_teammate`，每个方向一个成员 |
-| 大量同质、可枚举的检查（几十个文件逐一审计） | `workflow` 工具（脚本化 fan-out），或 `subagent` 批跑 |
-| 需要长时间后台跑（全量测试、构建、部署） | `run_in_background` + `job_output`（**不要忙轮询**） |
-
-### 3.2 任务板（Team Task Board）的正确用法
-
-```
-team_task_create
-  subject:      一句话说清交付物
-  description:  必读文档 + 范围 + 具体项 + 验收标准 + 红线
-  write_scopes: 允许改动的路径（advisory，但必须写，冲突靠它避免）
-  blocked_by:   必须完成后才能开始的任务 id
-```
-
-- **写作用域不重叠**是并行安全的前提。两个成员要改同一文件 → 必须串行（`blocked_by`）或合并成一个任务。
-- 成员开工第一步：`team_task_get` → `team_task_update(action=claim, expected_revision=当前 revision)`。
-- 完成后 `action=complete`；汇报里带"改了什么（文件:行）/ 发现但未修（证据）/ 验证结果"。
-- Lead 不代替成员 complete；Lead 只负责**最终集成与全量验证**。
-
-### 3.3 给 teammate 的任务描述模板（复制用）
-
-```text
-工作目录：<路径>（共享工作树，HEAD=<sha>）
-第一步：team_task_get 读 <task-id> → claim → 执行。
-必读：docs/AGENTS.md（硬约束）、<领域文档>
-写范围：<路径列表>（不要改 <排除路径>）
-要做的：
-1. <具体项 + 证据/文件:行>
-2. ...
-验收：<命令 + 期望>
-红线：不 push/deploy、不碰 .env 与 data、策略性改动先汇报
-交付：complete task + 中文汇报（改了什么/未修问题/验证结果）
-```
-
-### 3.4 后台任务
-
-- 用 `run_in_background: true` 跑 `npm test` / `npm run sim` / `npm run build`；用 `job_output(wait:true)` 收。
-- **不要**在后台任务运行期间重复启动同样的任务（CPU 争抢会让原本的 flaky 更像随机故障）。
-- 长任务期间做独立的事（读 diff、写文档），不要 sleep 忙等。
+### `/swarm` 并行铁律
+1. **写作用域按文件切分，设计阶段消灭冲突**：严禁两名作者同时改同一个大文件核心段；
+2. **先合入、再清理**：所有 `workspace:"share"` 作者必须在隔离分支 `git commit`，经 `verifier` 独立复测通过并由 `integrator` 合并进 `main` 跑完集成回归后，才能 `kill` 回收工作树；
+3. **验证与实现分离**：`verifier` 只审查和跑测试、不直接改业务代码，发现缺陷 `@作者名` 打回修完复验。
 
 ---
 
@@ -134,7 +79,10 @@ team_task_create
 | 提示词/模型 | `npm run sim:live`（需 `SIM_LLM_KEY`，花 LLM 钱） | 真实模型输出 |
 | 实盘接线 | 服务器 + 子账号 `liveSmokeTest --confirm` | **动真实资金，AI 不自行运行** |
 
-**PowerShell 陷阱**：命令接管道后 `$LASTEXITCODE` 是管道的、不是 npm 的。必须重定向到文件再读退出码。
+**Windows PowerShell 5.1 必避三坑**：
+1. 不支持 `&&` / `||`，链式命令必须写 `; if ($LASTEXITCODE -eq 0) { ... }`；
+2. 调 npm/npx 用 `npm.cmd` / `npx.cmd`（绕开 `.ps1` 执行策略）；
+3. 管道后的 `$LASTEXITCODE` 是管道右侧的，必须重定向到文件再读退出码；复杂远端 shell 统一 base64 编码后通过 `ssh <alias> "echo <b64> | base64 -d | bash"` 执行。
 
 ---
 
@@ -142,25 +90,21 @@ team_task_create
 
 ### 6.1 提交
 
-- **一行中文标题**，Conventional Commits 前缀（`fix/trader`、`feat(llm)`、`docs`…）。
-- 不写正文、不写过程、不写教训（那些进代码注释或 `.dsh/`）。
-- 一个逻辑改动一个 commit；同一迭代多条 commit 是正常的。
+- **一行清晰标题**，Conventional Commits 前缀（`fix(trader): ...`、`feat(managed): ...`、`refactor(cleanup): ...`）。
+- 不写站点信息、不写冗余过程日志（那些进 `.dsh/`）。
 
-### 6.2 推送（按用户 2026-11-09 的规则）
+### 6.2 推送（2026-11-26 更新）
 
-| 迭代规模 | 动作 |
+| 改动类型 | 动作 |
 | --- | --- |
-| 大的 / 多天的 / 跨多个模块 | 验证全绿后**自己推送一次** |
-| 小的 / 单点的 / 当天收尾 | 本地 commit，等用户安排 |
+| **正常完整的功能改动 / Bug 修复** | 本地验证全绿 + `git commit`（及按需部署验证）后**自动单次 `git push origin main`** |
+| **特别小的、预期还要多次协商微调的短期改动** | 先本地 `commit` 暂存，定稿后再合推一次 |
 
-- **不要反复问"要不要推送"**；按上表判断。
-- 一次迭代最多一个 PR；`gh` 单次调用、绝不放循环。
-- 禁止：`gh pr checks` 轮询、批量 API、自动合并、`git ls-remote` 探测。
+- **严守防风控红线**：低频单次 push、禁用 `gh` 轮询/批处理/自动合并、不做 `git ls-remote` 探测。
 
-### 6.3 部署
+### 6.3 部署（自动增量极速模式）
 
-1. 本地全绿 → 2. `git commit` → 3. `pwsh -File scripts/deploy.ps1` → 4. 回读线上
-`build-info.json` 的 `commitShort` 与 `/api/health`，确认等于本地 HEAD。
+1. 本地门禁全绿 → 2. `git commit`（工作树干净）→ 3. `pwsh -File scripts/deploy.ps1`（自动对比远端 `build-info.json` 走 `git diff` 增量包，纯后端改动自动跳过 `vite build` 与 `dist` 传输，智能 1s 健康轮询，结束自动清理本地 `build-info.json`；需强制全量加 `-Full`）→ 4. 回读线上 `build-info.json` 的 `commitShort` 与 `/api/health`，确认等于本地 HEAD。
 
 ---
 
@@ -185,8 +129,8 @@ team_task_create
 | --- | --- | --- | --- |
 | 长期·目标 | `docs/PROJECT-GOALS.md` | ✅ | 很少（用户拍板） |
 | 长期·决策 | `docs/decisions/ADR-*.md` | ✅ | 每次重大决策 |
-| 中期·状态 | `.dsh/state.md` | ❌ | **每轮收尾** |
-| 中期·任务 | `.dsh/ledger/OPEN.md`（完整台账 `.dsh/缺陷台账.md`） | ❌ | 每次任务变化 |
+| 中期·状态 | `.dsh/state.md`（严控 ≤ 100 行，超长先归档） | ❌ | **每轮收尾** |
+| 中期·任务 | `.dsh/ledger/OPEN.md`（完整历史见 `.dsh/archive/legacy-2026-11/缺陷台账.md`） | ❌ | 每次任务变化 |
 | 中期·教训 | `.dsh/ENGINEERING-LESSONS.md` | ❌ | 遇到新教训 |
 
 **入口**：`.dsh/START-HERE.md`（新会话先读它：60 秒协议 + 指针表）。
@@ -233,11 +177,11 @@ team_task_create
 □ 读 .dsh/state.md（上次做到哪、下一步、卡点）
 □ git status 干净？HEAD 是什么？
 □ .dsh/ledger/OPEN.md 里有没有未闭环条目？
-□ 这次迭代属于"大/多天"（可自行推送）还是"小/单点"（等安排）？
-□ 任务拆到写作用域不重叠了吗？依赖标了吗？
-□ 交易链路是否被碰到？碰到就必须 sim + 独立验证。
-□ 有站点信息要写吗？→ 只写本地文件。
-□ 收尾时更新 .dsh/state.md 了吗？（没更新 = 没做完）
+□ 本次属于正常完整改动（验证后自动单次 push）还是短期微调暂存？
+□ 并行改动是否切分到写作用域不重叠？
+□ 交易链路是否被碰到？碰到就必须 sim（18/18）+ 独立验证。
+□ 有站点信息要写吗？→ 只写本地不入库文件。
+□ 收尾时更新 .dsh/state.md（保持 ≤ 100 行）了吗？（没更新 = 没做完）
 ```
 
 ---
