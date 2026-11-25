@@ -37,7 +37,9 @@ param(
     [string]$PublicUrl,
     [switch]$SkipBuild,
     # 允许在工作树不干净时部署（见下面「检查工作树是否干净」那段的原因）。
-    [switch]$AllowDirty
+    [switch]$AllowDirty,
+    # 强制全量打包上传（默认在远端版本可追溯且工作树干净时自动走增量极速部署）。
+    [switch]$Full
 )
 
 $ErrorActionPreference = 'Stop'
@@ -134,59 +136,10 @@ $excludes = @(    '--exclude=./.env',                 # ← 关键：绝不覆�
 # 而"构建成功"照样放行、包照样传上去、**服务在线上进入崩溃循环**
 # （`systemctl` 显示 `activating (auto-restart)`，进程 exit-code 1）。
 # 类型检查是唯一能在本地拦住那类错误的闸。
-if (-not $SkipBuild) {
-    $tcLog = Join-Path $env:TEMP 'aq-typecheck.log'
-    Write-Host "==> 类型检查（全仓）" -ForegroundColor Cyan
-    & npm run typecheck *> $tcLog
-    if ($LASTEXITCODE -ne 0) {
-        Get-Content $tcLog | Select-String -Pattern 'error TS' | Select-Object -First 12 | ForEach-Object { Write-Host "    $($_.Line.Trim())" -ForegroundColor Red }
-        throw "类型检查失败，已中止部署（服务端的错误 build 抓不到，只有这一步能拦）"
-    }
-
-    $buildLog = Join-Path $env:TEMP 'aq-build.log'
-    Write-Host "==> 本地构建前端" -ForegroundColor Cyan
-    # -----------------------------------------------------------------------
-    # 把 HEAD 与构建时刻注入前端（Vite 只暴露 VITE_* 前缀的变量）
-    # -----------------------------------------------------------------------
-    # 为什么需要：控制台上原来只显示 package.json 的 version（`0.1.32`），
-    # 那个值**在两次部署之间不变** —— 用户因此无法判断「我看到的是不是最新一版」，
-    # 只能来问队长，而队长还要 SSH 回读 build-info.json。本批已多次因此产生
-    # 「你改的没生效？」/「其实还没部署」的来回。
-    #
-    # 现在页面会显示 `9b88931 · 10-17 10:05`，部署完刷新即可核对。
-    # ⚠️ 必须在 `npm run build` **之前**设置：Vite 在构建期把值内联进产物。
-    $env:VITE_BUILD_COMMIT = (& git -C $repoRoot rev-parse --short HEAD).Trim()
-    $env:VITE_BUILD_TIME = (Get-Date).ToString('MM-dd HH:mm')
-    & npm run build *> $buildLog
-    if ($LASTEXITCODE -ne 0) {
-        Get-Content $buildLog | Select-String -Pattern 'error|✗' | Select-Object -First 12 | ForEach-Object { Write-Host "    $($_.Line.Trim())" -ForegroundColor Red }
-        throw "本地构建失败，已中止部署（不会把陈旧产物传上去）"
-    }
-    Get-Content $buildLog | Select-String -Pattern 'built in' | Select-Object -First 2 | ForEach-Object { Write-Host "    $($_.Line.Trim())" }
-
-    $distIndex = Join-Path $repoRoot 'packages/web/dist/index.html'
-    if (-not (Test-Path $distIndex)) { throw "构建完成但找不到 packages/web/dist/index.html —— 产物不完整，已中止" }
-} else {
-    Write-Host "==> 跳过本地构建（-SkipBuild），将使用现有的 packages/web/dist" -ForegroundColor Yellow
-    if (-not (Test-Path (Join-Path $repoRoot 'packages/web/dist/index.html'))) {
-        throw "packages/web/dist 不存在，无法跳过构建。去掉 -SkipBuild 或先手动构建一次。"
-    }
-}
-
+# ---------------------------------------------------------------------------
+# 1) 工作树干净检查（提前到构建与探测之前，避免脏树白跑构建）
+# ---------------------------------------------------------------------------
 Write-Host "==> 检查工作树是否干净" -ForegroundColor Cyan
-# ---------------------------------------------------------------------------
-# 为什么部署前必须干净（2026-10-17 加，起因是一次真实事故）
-# ---------------------------------------------------------------------------
-# `deploy.ps1` 打包的是**整个工作树**（`tar -C $repoRoot .`），不是 HEAD。
-# 所以工作树脏的时候，线上跑的东西 ≠ `build-info.json` 里的 `commitShort`
-# —— 而 `commitShort` 正是「线上到底是哪一版」的**唯一**答案（服务器没有 .git）。
-#
-# 2026-10-17 15:53 就撞上了：部署时 `t111` 正在工作树里写两个测试文件，
-# 结果线上 `dirty=true`。事后 `t93` 的独立核验不得不**逐个比 8 个文件的 sha256**
-# 才能证明"线上确实等于 303967a"—— 把最硬的判据降级成了人工比对。
-#
-# 默认中止（而不是只告警）：一旦放行过一次，下一次就会变成"反正也能过"。
-# 确实要在脏树上部署时用 `-AllowDirty`，并且那一次的 `dirty` 会如实记进 build-info。
 if (-not $AllowDirty) {
     $dirtyPaths = @(& git -C $repoRoot status --porcelain)
     if ($dirtyPaths.Count -gt 0) {
@@ -202,22 +155,119 @@ if (-not $AllowDirty) {
     Write-Host "    ✓ 工作树干净"
 }
 
-Write-Host "==> 生成构建信息（build-info.json）" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
-# 为什么这个文件必须存在
+# 2) 自动探测是否可走「增量极速部署」（仅传变更文件 + 后端纯改动免跑 vite build）
 # ---------------------------------------------------------------------------
-# 服务器上**没有 `.git`**（部署是打包上传，`.git` 在下面的排除列表里），所以运行
-# 目录里根本没有仓库 —— 它无法回答"我在跑哪个提交"。控制台「操作员账户」页那个
-# 「服务端版本」格子因此长期显示一个硬编码的 `'0.1.0'`：一个永远不变的数字，
-# 看起来像状态，其实什么都没说。
-#
-# 这个文件就是那条信息从构建机传到运行环境的**唯一通道**：HEAD、提交时间、以及
-# 仓库地址（从 `origin` 读，所以本脚本自己仍然不含任何站点专属信息），一并写下来，
-# 服务端读它并与远端比对"是否落后"。
-#
-# `dirty` 必须如实记录：工作区有未提交改动时，服务器跑的东西**不等于**这个提交，
-# 而"版本一致"会让一个改到一半的部署看起来是干净的。
+# 为什么做增量：全量打包（含 packages/web/dist 与历史文档）约 4.9 MB，跨网带宽抖动时
+# 一次 scp 动辄 2–8 分钟；而 90% 的日常迭代只改几个后端 .ts 文件（总计 5–30 KB）。
+# 只要远端 build-info.json 存在、dirty=false、且其 commit 在本地 git 历史中，
+# 我们就能 100% 精确算出 git diff，只打包变更文件，并在无前端/shared 改动时自动跳过 vite build。
 $gitSha = (& git -C $repoRoot rev-parse HEAD).Trim()
+$deployMode = 'full'
+$incrementalFiles = New-Object System.Collections.Generic.List[string]
+$deletedFiles = New-Object System.Collections.Generic.List[string]
+$needsWebBuild = $true
+$replaceWebDist = $true
+
+function Test-DeployExcludedPath([string]$relPath) {
+    $norm = $relPath.Replace('\', '/').TrimStart('./')
+    if ($norm -eq '.env' -or $norm -eq '.env.local' -or $norm -like '.env.*' -or $norm -like '*/.env' -or $norm -like '*/.env.*') { return $true }
+    if ($norm -eq 'deploy.local.ps1' -or $norm -like 'deploy.local.*' -or $norm -eq 'AGENTS.md') { return $true }
+    if ($norm -like 'node_modules/*' -or $norm -like 'packages/*/node_modules/*') { return $true }
+    if ($norm -like 'data/*' -or $norm -like 'docs/research/vendor/*' -or $norm -like '.git/*' -or $norm -like '.dsh/*' -or $norm -like '.agent-teams/*') { return $true }
+    if ($norm -like 'packages/web/ui-audit/*' -or $norm -like 'packages/web/ui-smoke/*') { return $true }
+    return $false
+}
+
+if (-not $Full -and -not $AllowDirty) {
+    Write-Host "==> 探测远端基线（自动判断是否走增量极速部署）" -ForegroundColor Cyan
+    $remoteInfoRaw = (& ssh -o BatchMode=yes -o ConnectTimeout=10 $Server "cat $RemoteDir/build-info.json 2>/dev/null || true" 2>$null) -join "`n"
+    if ($LASTEXITCODE -eq 0 -and $remoteInfoRaw.Trim().StartsWith('{')) {
+        try {
+            $remoteInfo = $remoteInfoRaw | ConvertFrom-Json
+            $remoteCommit = [string]$remoteInfo.commit
+            $remoteDirty = [bool]$remoteInfo.dirty
+            if (-not $remoteDirty -and $remoteCommit -match '^[0-9a-f]{40}$') {
+                & git -C $repoRoot cat-file -e "$remoteCommit^{commit}" 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $diffLines = @(& git -C $repoRoot diff --name-status --no-renames "$remoteCommit..$gitSha")
+                    if ($LASTEXITCODE -eq 0 -and $diffLines.Count -le 120) {
+                        $webTouched = $false
+                        foreach ($line in $diffLines) {
+                            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                            $parts = $line -split "`t", 2
+                            if ($parts.Count -lt 2) { continue }
+                            $status = $parts[0].Trim()
+                            $path = $parts[1].Trim().Replace('\', '/')
+                            if (Test-DeployExcludedPath $path) { continue }
+                            if ($path -like 'packages/web/*' -or $path -like 'packages/shared/*' -or $path -eq 'package.json' -or $path -eq 'package-lock.json') {
+                                $webTouched = $true
+                            }
+                            if ($status -eq 'D') {
+                                $deletedFiles.Add($path)
+                            } else {
+                                if (Test-Path (Join-Path $repoRoot $path)) {
+                                    $incrementalFiles.Add($path)
+                                }
+                            }
+                        }
+                        $deployMode = 'incremental'
+                        $needsWebBuild = $webTouched
+                        $replaceWebDist = $webTouched
+                        $remoteShort = $remoteCommit.Substring(0, 7)
+                        Write-Host "    ✓ 命中增量部署：$remoteShort → $($gitSha.Substring(0, 7))（变更 $($incrementalFiles.Count) 个，删除 $($deletedFiles.Count) 个，前端$(if ($webTouched) { '有改动→重建 dist' } else { '无改动→跳过 vite build 与 dist 传输' })）" -ForegroundColor Green
+                    }
+                }
+            }
+        } catch {
+            Write-Host "    提示：远端 build-info 解析失败，自动回退全量部署" -ForegroundColor DarkGray
+        }
+    }
+    if ($deployMode -eq 'full') {
+        Write-Host "    → 回退全量部署（远端无干净基线或变更超过 120 文件）" -ForegroundColor DarkGray
+    }
+} elseif ($Full) {
+    Write-Host "==> 已指定 -Full，执行全量部署" -ForegroundColor Yellow
+}
+
+# ---------------------------------------------------------------------------
+# 3) 本地类型检查与按需前端构建
+# ---------------------------------------------------------------------------
+if (-not $SkipBuild) {
+    $tcLog = Join-Path $env:TEMP 'aq-typecheck.log'
+    Write-Host "==> 类型检查（全仓）" -ForegroundColor Cyan
+    & npm run typecheck *> $tcLog
+    if ($LASTEXITCODE -ne 0) {
+        Get-Content $tcLog | Select-String -Pattern 'error TS' | Select-Object -First 12 | ForEach-Object { Write-Host "    $($_.Line.Trim())" -ForegroundColor Red }
+        throw "类型检查失败，已中止部署（服务端的错误 build 抓不到，只有这一步能拦）"
+    }
+
+    if ($needsWebBuild) {
+        $buildLog = Join-Path $env:TEMP 'aq-build.log'
+        Write-Host "==> 本地构建前端" -ForegroundColor Cyan
+        $env:VITE_BUILD_COMMIT = (& git -C $repoRoot rev-parse --short HEAD).Trim()
+        $env:VITE_BUILD_TIME = (Get-Date).ToString('MM-dd HH:mm')
+        & npm run build *> $buildLog
+        if ($LASTEXITCODE -ne 0) {
+            Get-Content $buildLog | Select-String -Pattern 'error|✗' | Select-Object -First 12 | ForEach-Object { Write-Host "    $($_.Line.Trim())" -ForegroundColor Red }
+            throw "本地构建失败，已中止部署（不会把陈旧产物传上去）"
+        }
+        Get-Content $buildLog | Select-String -Pattern 'built in' | Select-Object -First 2 | ForEach-Object { Write-Host "    $($_.Line.Trim())" }
+
+        $distIndex = Join-Path $repoRoot 'packages/web/dist/index.html'
+        if (-not (Test-Path $distIndex)) { throw "构建完成但找不到 packages/web/dist/index.html —— 产物不完整，已中止" }
+    } else {
+        Write-Host "==> 前端与 shared 无改动，自动跳过 vite build" -ForegroundColor DarkGray
+    }
+} else {
+    Write-Host "==> 跳过本地构建（-SkipBuild）" -ForegroundColor Yellow
+    if ($replaceWebDist -and -not (Test-Path (Join-Path $repoRoot 'packages/web/dist/index.html'))) {
+        throw "packages/web/dist 不存在，无法跳过构建。去掉 -SkipBuild 或先手动构建一次。"
+    }
+}
+
+Write-Host "==> 生成构建信息（build-info.json）" -ForegroundColor Cyan
+$buildInfoPath = Join-Path $repoRoot 'build-info.json'
 $buildInfo = [ordered]@{
     commit      = $gitSha
     commitShort = $gitSha.Substring(0, 7)
@@ -229,48 +279,32 @@ $buildInfo = [ordered]@{
     repository  = ((& git -C $repoRoot remote get-url origin) -replace '\.git$', '').Trim()
 }
 [System.IO.File]::WriteAllText(
-    (Join-Path $repoRoot 'build-info.json'),
+    $buildInfoPath,
     ($buildInfo | ConvertTo-Json),
     (New-Object System.Text.UTF8Encoding($false))
 )
 Write-Host "    $($buildInfo.branch) @ $($buildInfo.commitShort)$(if ($buildInfo.dirty) { '（工作区有未提交改动）' })"
 
-Write-Host "==> 打包（排除 .env / data / node_modules；含前端产物）" -ForegroundColor Cyan
-<#
-  ⚠️ **归档文件名必须唯一（含 PID），不能是固定的 `_deploy.tar.gz`**（2026-10-15 修）
-
-  ## 事故：两次部署并行时，一个删掉归档、另一个正在传它
-
-  原来的写法：
-  ```
-    $archive = Join-Path $repoRoot '_deploy.tar.gz'   # 固定名
-    …scp…
-    Remove-Item $archive -Force                       # 跑完就删
-  ```
-  而 `deploy.ps1` 一次要跑几分钟。**两次并行**（我连续重试时就发生了）会撞车：
-  ```
-    A: 打包 → _deploy.tar.gz 就位
-    B: 打包 → 覆盖同一个文件
-    A: scp → 成功
-    A: Remove-Item → 文件没了
-    B: scp → scp: stat local "_deploy.tar.gz": No such file or directory  ❌
-  ```
-  症状是 **scp 失败（退出码 1）而网络完全正常** —— 我为此把它误判成"scp 抖动"
-  并重试了好几轮，**而真相是并发竞争**。
-
-  ## 为什么用 PID 而不是时间戳
-
-  `$PID` 是**本进程**的 id，同一进程内重复执行会复用同一个名字（那是安全的，
-  因为同一进程不会并行跑两次自己）；不同进程必然不同 —— 正好是需要区分的粒度。
-
-  ## 附带：临时文件应当清理干净
-
-  `try/finally` 保证**即使 scp 抛错也删掉归档** —— 否则失败一次就在仓库根
-  留一个 8MB 的文件，而下一次 `git status` 会看到它。
-#>
+Write-Host "==> 打包（$(if ($deployMode -eq 'incremental') { '增量极速包' } else { '全量包，排除 .env / data / node_modules' })）" -ForegroundColor Cyan
 $archive = Join-Path $env:TEMP "aq-deploy.$PID.tar.gz"
+$tarListFile = Join-Path $env:TEMP "aq-deploy.$PID.files.txt"
 try {
-  & tar -czf $archive @excludes -C $repoRoot . 2>&1 | Out-Null
+  if ($deployMode -eq 'incremental') {
+    $packList = New-Object System.Collections.Generic.List[string]
+    $packList.Add('build-info.json')
+    foreach ($f in $incrementalFiles) { $packList.Add($f) }
+    if ($replaceWebDist -and (Test-Path (Join-Path $repoRoot 'packages/web/dist'))) {
+      $packList.Add('packages/web/dist')
+    }
+    [System.IO.File]::WriteAllText(
+      $tarListFile,
+      (($packList | Select-Object -Unique) -join "`n") + "`n",
+      (New-Object System.Text.UTF8Encoding($false))
+    )
+    & tar -czf $archive -C $repoRoot -T $tarListFile 2>&1 | Out-Null
+  } else {
+    & tar -czf $archive @excludes -C $repoRoot . 2>&1 | Out-Null
+  }
   if ($LASTEXITCODE -ne 0) {
     throw "tar 打包失败（退出码 $LASTEXITCODE）"
   }
@@ -278,11 +312,6 @@ try {
   Write-Host "    $sizeKb KB"
 
   Write-Host "==> 传输到 ${Server}:/tmp/aq.tar.gz" -ForegroundColor Cyan
-  <#
-    ⚠️ **scp 的失败原因必须打出来** —— 原来这行是 `2>&1 | Out-Null`，
-    于是 `throw "scp 失败"` 只说"失败了"，不说为什么。
-    实测代价：我把"文件不存在"误判成"网络抖动"，白重试了好几轮。
-  #>
   $scpOut = & scp -o BatchMode=yes $archive "${Server}:/tmp/aq.tar.gz" 2>&1
   if ($LASTEXITCODE -ne 0) {
     $scpOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
@@ -290,6 +319,16 @@ try {
   }
 } finally {
   if (Test-Path $archive) { Remove-Item $archive -Force }
+  if (Test-Path $tarListFile) { Remove-Item $tarListFile -Force }
+  if (Test-Path $buildInfoPath) { Remove-Item $buildInfoPath -Force }
+}
+
+$replaceDistFlag = if ($replaceWebDist) { 'yes' } else { 'no' }
+$safeDeleted = @($deletedFiles | Where-Object { $_ -and -not $_.StartsWith('/') -and -not $_.Contains('..') -and -not (Test-DeployExcludedPath $_) })
+$deletedB64 = if ($safeDeleted.Count -gt 0) {
+    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($safeDeleted -join "`n") + "`n"))
+} else {
+    ''
 }
 
 $remote = @"
@@ -301,21 +340,21 @@ cd $RemoteDir
 # 解压前先看一眼 .env 是否还在，避免把它弄丢
 HAD_ENV=`$( [ -f .env ] && echo yes || echo no )
 
-# 前端产物目录先删干净再解包。
-#
-# ``vite build`` 给每个 chunk 起带内容哈希的名字，所以每次构建的文件名都不同。
-# 而 ``tar -x`` 只覆盖、不删除 —— 结果是**每次部署都在服务器上留下一批陈旧 chunk**：
-# 实测一次累积到 69 个文件，而本地构建只有 35 个。它们不会被 index.html 引用，
-# 但会一直占着磁盘，也让"服务器上到底是哪一版"变得难以判断。
-#
-# ``dist`` 完全由构建产出，删掉再解包是安全的；源码与 data 都不在这个目录里。
 # 解压前先校验归档完整性，避免损坏包把现有 dist 删掉
 tar -tzf /tmp/aq.tar.gz >/dev/null
 
-rm -rf packages/web/dist
+if [ "$replaceDistFlag" = "yes" ]; then
+  rm -rf packages/web/dist
+fi
 
 tar -xzf /tmp/aq.tar.gz -C $RemoteDir
 rm -f /tmp/aq.tar.gz
+
+if [ -n "$deletedB64" ]; then
+  echo "$deletedB64" | base64 -d | while IFS= read -r f; do
+    [ -n "`$f" ] && rm -f -- "`$f"
+  done
+fi
 
 if [ "`$HAD_ENV" = "no" ]; then
   echo "  ⚠️  服务器上原本没有 .env —— 请确认环境配置！"
@@ -588,27 +627,28 @@ if [ -f "`$NETUNIT" ]; then
 fi
 
 systemctl restart autoquant
-sleep 15
-echo -n "    服务状态: "; systemctl is-active autoquant
-echo -n "    日志文件: "; ls -la /opt/autoquant/data/server.log 2>/dev/null | awk '{print `$5" 字节  最后写入 "`$6" "`$7" "`$8}'
 
 # 服务绑定在 Docker 网桥网关（供反向代理容器访问），公网无法直接路由到它。
-# 所以健康检查走绑定地址，而不是 127.0.0.1。
 BIND=`$(grep -E '^HOST=' .env | cut -d= -f2)
 BIND=`${BIND:-172.17.0.1}
-
-# 端口必须读 .env，不能写死。
-#
-# 曾经写死过 27137（当时的默认值），而线上 .env 里是 PORT=3200 ——
-# 于是部署日志里"健康检查"永远是空的，看起来像服务没起来，
-# 实际上只是查错了端口。默认值会变，部署脚本不该假设它。
 PORT=`$(grep -E '^PORT=' .env | cut -d= -f2)
 PORT=`${PORT:-27137}
 
+# 智能健康轮询（最快 2 秒放行，最多等 25 秒），替代固定 sleep 15
+HEALTH=""
+for _i in `$(seq 1 25); do
+    HEALTH=`$(curl -sf --max-time 3 http://`$BIND:`$PORT/api/health 2>/dev/null || true)
+    if [ -n "`$HEALTH" ]; then
+        break
+    fi
+    sleep 1
+done
+
+echo -n "    服务状态: "; systemctl is-active autoquant
+echo -n "    日志文件: "; ls -la /opt/autoquant/data/server.log 2>/dev/null | awk '{print `$5" 字节  最后写入 "`$6" "`$7" "`$8}'
 echo -n "    监听地址: `$BIND:`$PORT"
 echo ""
-echo -n "    健康检查: "; curl -s --max-time 8 http://`$BIND:`$PORT/api/health
-echo ""
+echo "    健康检查: `$HEALTH"
 "@
 
 if ($PublicUrl) {
