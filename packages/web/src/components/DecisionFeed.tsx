@@ -3110,16 +3110,20 @@ export function figureParts(decision: Decision, price: number | null): Figure[] 
    * 而 `NaN` 会让 `fmtPriceUsd` 输出 `NaN`，也是坏数据。
    * `typeof === 'number'` 配合 `Number.isFinite` 是最严的"这是个能显示的数字"。
    */
+  const limitEntry = decision.entryType === 'limit' && num(decision.limitPrice) ? decision.limitPrice : null;
+  const entryRef = limitEntry ?? price;
   const parts: Figure[] = [{ key: 'size', label: '', value: fmtUsd(num(decision.positionSizeUsd) ? decision.positionSizeUsd : null, 2) }];
-  if (price !== null) parts.push({ key: 'entry', label: '开仓', value: fmtPriceUsd(price) });
+  if (entryRef !== null) {
+    parts.push({ key: 'entry', label: limitEntry !== null ? '限价' : '开仓', value: fmtPriceUsd(entryRef) });
+  }
   if (num(decision.stopLoss)) parts.push({ key: 'stop', label: '止损', value: fmtPriceUsd(decision.stopLoss) });
   if (num(decision.takeProfit))
     parts.push({ key: 'target', label: '止盈', value: fmtPriceUsd(decision.takeProfit) });
-  if (price !== null && num(decision.stopLoss) && num(decision.takeProfit)) {
+  if (entryRef !== null && num(decision.stopLoss) && num(decision.takeProfit)) {
     // `Math.abs` 两侧：做空时价格在止损之上、止盈之下，直接相减会得到一个**负数**
     // 的风险回报比 —— 那是一个不存在的比例，看起来像算错了。
-    const risk = Math.abs(price - decision.stopLoss);
-    const reward = Math.abs(decision.takeProfit - price);
+    const risk = Math.abs(entryRef - decision.stopLoss);
+    const reward = Math.abs(decision.takeProfit - entryRef);
     if (risk > 0) parts.push({ key: 'reward', label: '', value: `1:${(reward / risk).toFixed(2)}` });
   }
   /*

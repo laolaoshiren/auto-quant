@@ -5529,8 +5529,19 @@ export class AutoTrader {
       positions: new Map(
         localPositions.map((p) => [p.symbol, this.toPositionView(p, snapshotBySymbol)]),
       ),
-      /* 挂单不是持仓 —— `positions` 里没有它们，风控判"同标的重入"要这个集合。 */
+      /* 挂单不是持仓 —— `positions` 里没有它们，风控判"同标的重入"与撤单释放保证金要这两份数据。 */
       pendingSymbols: new Set(pendingRows.map((p) => p.symbol)),
+      pendingMarginBySymbol: new Map(
+        pendingRows.map((p) => {
+          const margin =
+            Number.isFinite(p.margin_used) && p.margin_used > 0
+              ? p.margin_used
+              : p.leverage > 0
+                ? (p.entry_price * p.quantity) / p.leverage
+                : 0;
+          return [p.symbol, Math.max(0, margin)] as const;
+        }),
+      ),
       snapshots: snapshotBySymbol,
       minNotionalOf: (symbol) => this.deps.registry.minNotional(symbol),
       quantityFor: (symbol, notionalUsd, price) =>

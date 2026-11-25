@@ -2132,5 +2132,198 @@ test('★ shouldCloseForDrawdown 在大浮盈恰好回吐至 0% 时也要触发�
   assert.equal(smallPeak.close, false);
 });
 
+test('★★★ 同轮先 cancel_pending 撤旧挂单再新开 2 仓：必须释放被撤挂单锁定的保证金与可用余额（2026-11-25 实盘误拒回归）', () => {
+  const prevBudget = process.env.AQ_ENFORCE_RISK_BUDGET;
+  process.env.AQ_ENFORCE_RISK_BUDGET = 'true';
+  try {
+    // 精确复现线上 #21 周期 22：权益 49.4，85% 上限 = 41.99；撤单前已占用 31.38（4 张旧挂单占 28.19 + AIOT 持仓 3.19），
+    // 撤单前仅剩 10.61 裕量；本轮先撤 4 张旧挂单（释放 28.19），再开 UNI（需 8.00）+ DOGE（需 7.60）。
+    // 旧代码因 cancel_pending 未释放保证金，导致 UNI 之后仅剩 $2.84，把 DOGE 误拒。
+    const config = configWith({
+      riskControl: {
+        ...defaultStrategyConfig().riskControl,
+        maxPositions: 10,
+        altcoinMaxLeverage: 15,
+        altcoinMaxPositionValueRatio: 8,
+        maxMarginUsage: 85,
+        minPositionSize: 12,
+        minRiskRewardRatio: 0,
+        minConfidence: 0,
+        riskPerTradePercent: 2,
+      },
+      throttle: { ...defaultStrategyConfig().throttle, maxEntriesPerCycle: 2, maxEntriesPerHour: 6 },
+    });
+    const env = environment({
+      config,
+      account: {
+        equity: 49.4,
+        availableBalance: 18.02,
+        marginUsed: 31.38,
+        positionCount: 5,
+      },
+      positions: new Map([
+        ['AIOTUSDT', position({ symbol: 'AIOTUSDT', side: 'long', marginUsed: 3.19, notional: 31.9, leverage: 10 })],
+      ]),
+      pendingSymbols: new Set(['UNIUSDT', 'DOGEUSDT', 'NEARUSDT', 'EVAAUSDT']),
+      pendingMarginBySymbol: new Map([
+        ['UNIUSDT', 10.41],
+        ['DOGEUSDT', 7.23],
+        ['NEARUSDT', 8.4],
+        ['EVAAUSDT', 2.15],
+      ]),
+      snapshots: new Map([
+        ['UNIUSDT', snapshot('UNIUSDT', 4.609)],
+        ['DOGEUSDT', snapshot('DOGEUSDT', 0.05464)],
+      ]),
+    });
+
+    const verdict = engine.review(
+      [
+        openDecision({ action: 'cancel_pending', symbol: 'UNIUSDT' }),
+        openDecision({ action: 'cancel_pending', symbol: 'DOGEUSDT' }),
+        openDecision({ action: 'cancel_pending', symbol: 'NEARUSDT' }),
+        openDecision({ action: 'cancel_pending', symbol: 'EVAAUSDT' }),
+        openDecision({
+          action: 'open_short',
+          symbol: 'UNIUSDT',
+          entryType: 'limit',
+          limitPrice: 4.66,
+          stopLoss: 4.708,
+          takeProfit: 4.56,
+          positionSizeUsd: 96,
+          leverage: 12,
+        }),
+        openDecision({
+          action: 'open_short',
+          symbol: 'DOGEUSDT',
+          entryType: 'limit',
+          limitPrice: 0.0552,
+          stopLoss: 0.05568,
+          takeProfit: 0.0541,
+          positionSizeUsd: 114,
+          leverage: 15,
+        }),
+      ],
+      env,
+    );
+
+    assert.equal(verdict.rejected.length, 0, `撤旧挂单后保证金充足，两笔新开仓不应被误拒：${JSON.stringify(verdict.rejected)}`);
+    const opens = verdict.approved.filter((d) => d.action === 'open_short');
+    assert.equal(opens.length, 2, 'UNI 与 DOGE 两笔开空必须全部放行');
+    const doge = opens.find((d) => d.symbol === 'DOGEUSDT');
+    assert.ok(doge && doge.positionSizeUsd >= 110, `DOGE 名义不应被误压，实得 ${doge?.positionSizeUsd}`);
+  } finally {
+    if (prevBudget === undefined) delete process.env.AQ_ENFORCE_RISK_BUDGET;
+    else process.env.AQ_ENFORCE_RISK_BUDGET = prevBudget;
+  }
+});
+
+test('★★ 同轮先平仓再开新仓：close 必须释放持仓名额、保证金与可用余额', () => {
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      maxPositions: 1,
+      maxMarginUsage: 80,
+      btcEthMaxLeverage: 10,
+      btcEthMaxPositionValueRatio: 8,
+      minRiskRewardRatio: 0,
+      minConfidence: 0,
+    },
+  });
+  const env = environment({
+    config,
+    account: {
+      equity: 100,
+      availableBalance: 20,
+      marginUsed: 80,
+      positionCount: 1,
+    },
+    positions: new Map([
+      ['BTCUSDT', position({ symbol: 'BTCUSDT', side: 'long', marginUsed: 80, notional: 400, leverage: 5 })],
+    ]),
+    snapshots: new Map([
+      ['BTCUSDT', snapshot('BTCUSDT', 68_000)],
+      ['ETHUSDT', snapshot('ETHUSDT', 2_500)],
+    ]),
+  });
+
+  const verdict = engine.review(
+    [
+      openDecision({ action: 'close_long', symbol: 'BTCUSDT' }),
+      openDecision({
+        action: 'open_short',
+        symbol: 'ETHUSDT',
+        stopLoss: 2_600,
+        takeProfit: 2_200,
+        positionSizeUsd: 300,
+        leverage: 10,
+      }),
+    ],
+    env,
+  );
+  assert.equal(verdict.rejected.length, 0, `平仓释放名额与保证金后新仓应放行：${JSON.stringify(verdict.rejected)}`);
+  assert.equal(verdict.approved.length, 2);
+});
+
+test('★★ 同轮连续两笔开仓：第一笔必须扣减 availableBalance，防止第二笔穿透真实余额', () => {
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      maxPositions: 5,
+      maxMarginUsage: 90,
+      btcEthMaxLeverage: 10,
+      btcEthMaxPositionValueRatio: 10,
+      minPositionSize: 50,
+      minRiskRewardRatio: 0,
+      minConfidence: 0,
+    },
+    throttle: { ...defaultStrategyConfig().throttle, maxEntriesPerCycle: 2, maxEntriesPerHour: 5 },
+  });
+  const env = environment({
+    config,
+    account: {
+      equity: 200,
+      // 可用余额只有 $35（低于 90% 保证金上限 $180）：第一笔用掉 $30 后只剩 $5
+      availableBalance: 35,
+      marginUsed: 0,
+      positionCount: 0,
+    },
+    snapshots: new Map([
+      ['BTCUSDT', snapshot('BTCUSDT', 68_000)],
+      ['ETHUSDT', snapshot('ETHUSDT', 2_500)],
+    ]),
+  });
+
+  const verdict = engine.review(
+    [
+      openDecision({
+        action: 'open_long',
+        symbol: 'BTCUSDT',
+        stopLoss: 66_000,
+        takeProfit: 72_000,
+        positionSizeUsd: 300, // 需保证金 $30
+        leverage: 10,
+      }),
+      openDecision({
+        action: 'open_long',
+        symbol: 'ETHUSDT',
+        stopLoss: 2_400,
+        takeProfit: 2_800,
+        positionSizeUsd: 300, // 需保证金 $30，但可用余额只剩 $5 → 最多 $50 名义
+        leverage: 10,
+      }),
+    ],
+    env,
+  );
+  const btc = verdict.approved.find((d) => d.symbol === 'BTCUSDT');
+  const eth = verdict.approved.find((d) => d.symbol === 'ETHUSDT');
+  assert.ok(btc && eth, `两笔均应在余额约束下处理：${JSON.stringify(verdict.rejected)}`);
+  const remainingAvail = 35 - btc.positionSizeUsd / btc.leverage;
+  assert.ok(
+    eth.positionSizeUsd <= remainingAvail * 10 + 1e-6,
+    `第二笔不得穿透剩余 $${remainingAvail.toFixed(2)} 可用余额（名义应 ≤ $${(remainingAvail * 10).toFixed(2)}），实得 ${eth.positionSizeUsd}`,
+  );
+});
+
 
 

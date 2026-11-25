@@ -51,6 +51,15 @@ export interface RiskEnvironment {
    * 可以逐个接；但每一条真实会下单的路径都应当传（主路径见 `autoTrader.ts`）。
    */
   pendingSymbols?: ReadonlySet<string>;
+  /**
+   * 各待成交限价挂单当前锁定的保证金（按 symbol 索引，单位 USDT）。
+   *
+   * 币安 `account.marginUsed` 已包含 `totalOpenOrderInitialMargin`，`availableBalance`
+   * 也已扣除挂单初始保证金。同轮里模型先发 `cancel_pending` 再发新的 `open_*` 时，
+   * 必须把被撤挂单锁定的保证金归还给滚动预算（`marginUsed` 扣减、`availableBalance` 增加），
+   * 否则后续新开仓仍按"旧挂单还锁着钱"算，触发「剩余可用保证金不足」误拒。
+   */
+  pendingMarginBySymbol?: ReadonlyMap<string, number>;
   /** Current market snapshot keyed by symbol, used for fallback stop distances. */
   snapshots: ReadonlyMap<string, MarketSnapshot>;
   /** Exchange-imposed minimum notional for a symbol. */
@@ -669,9 +678,11 @@ export class RiskEngine {
     const rejected: RiskRejection[] = [];
 
     // A running view of the budget so that several opens in one batch cannot
-    // collectively exceed the account's limits.
+    // collectively exceed the account's limits — and conversely, cancels/closes
+    // earlier in the same batch release their locked margin for subsequent opens.
     let positionCount = env.account.positionCount;
     let marginUsed = env.account.marginUsed;
+    let availableBalance = env.account.availableBalance;
     let entriesThisCycle = env.entriesThisCycle;
     /*
      * 本批**已经放行**的开仓标的。
@@ -689,11 +700,13 @@ export class RiskEngine {
      */
     const rollingPositions = new Map<string, PositionView>(env.positions);
     /*
-     * 滚动的未成交限价挂单集合：同一轮里模型先发 `cancel_pending` 再发新的 `open_*`
+     * 滚动的未成交限价挂单集合与保证金表：同一轮里模型先发 `cancel_pending` 再发新的 `open_*`
      * （撤旧挂单改新价 / 改市价进场）是合法且高频的战术调整。`ordered` 已保证 `cancel_pending`
-     * 排在最前审核与执行；这里同步从 `rollingPending` 移除并释放名额，避免新开仓被误杀为「同标的重入」。
+     * 排在最前审核与执行；这里同步从 `rollingPending` 移除并释放名额与锁定保证金，
+     * 避免新开仓被误杀为「同标的重入」或「剩余可用保证金不足」。
      */
     const rollingPending = new Set<string>(env.pendingSymbols ?? []);
+    const rollingPendingMargin = new Map<string, number>(env.pendingMarginBySymbol ?? []);
 
     const ordered = [
       ...decisions.filter((d) => isCancelPendingAction(d.action)),
@@ -738,15 +751,33 @@ export class RiskEngine {
         approved.push({ ...decision, adjustments: decision.adjustments });
         if (rollingPending.delete(decision.symbol)) {
           positionCount = Math.max(0, positionCount - 1);
+          const releasedMargin = rollingPendingMargin.get(decision.symbol) ?? 0;
+          rollingPendingMargin.delete(decision.symbol);
+          if (Number.isFinite(releasedMargin) && releasedMargin > 0) {
+            marginUsed = Math.max(0, marginUsed - releasedMargin);
+            availableBalance += releasedMargin;
+          }
         }
         continue;
       }
 
       if (isCloseAction(decision.action)) {
+        const existing = rollingPositions.get(decision.symbol);
         const verdict = this.reviewClose(decision, { ...env, positions: rollingPositions });
         if (verdict.ok) {
           approved.push(verdict.decision);
           rollingPositions.delete(decision.symbol);
+          positionCount = Math.max(0, positionCount - 1);
+          const releasedMargin =
+            existing && Number.isFinite(existing.marginUsed) && existing.marginUsed > 0
+              ? existing.marginUsed
+              : existing && existing.leverage > 0
+                ? existing.notional / existing.leverage
+                : 0;
+          if (Number.isFinite(releasedMargin) && releasedMargin > 0) {
+            marginUsed = Math.max(0, marginUsed - releasedMargin);
+            availableBalance += releasedMargin;
+          }
         } else {
           rejected.push({ decision, reason: verdict.reason });
         }
@@ -783,23 +814,7 @@ export class RiskEngine {
         const verdict = this.reviewAdd(decision, {
           ...env,
           positions: rollingPositions,
-          account: { ...env.account, positionCount, marginUsed },
-          /*
-           * ⚠️ **必须传当前的滚动计数，不能沿用 `env` 里那个入口值。**
-           *
-           * `env.entriesThisCycle` 是**进入 `review()` 时**的值，调用点给的是 0
-           * （`autoTrader.ts` 里 `entriesThisCycle: 0`）。而加仓最终会走
-           * `reviewOpen`，节流判据读的正是这两个数 —— 于是 `maxEntriesPerCycle`
-           * 与 `maxEntriesPerHour` **对加仓完全无效**：模型可以在一个周期里
-           * 连续加仓，节流一次都数不到。
-           *
-           * 而提示词明确告诉模型「加仓与新开仓共用同一批上限（杠杆、单仓名义上限、
-           * 保证金占用、节流）」—— 它因此以为节流在替它兜底。**它没有。**
-           *
-           * 两个数都要带上本周期已经用掉的量：`entriesThisCycle` 是局部变量，
-           * 它会在下面 `+= 1` 累加；`entriesLastHour` 是入口值，加上本周期已用的
-           * 部分才是真实的滚动小时数。
-           */
+          account: { ...env.account, positionCount, marginUsed, availableBalance },
           entriesThisCycle,
           entriesLastHour: env.entriesLastHour + entriesThisCycle,
         });
@@ -809,8 +824,11 @@ export class RiskEngine {
           const existing = rollingPositions.get(decision.symbol);
           const snapshot = env.snapshots.get(decision.symbol);
           const price = snapshot?.price ?? existing?.markPrice ?? 0;
-          if (price > 0) {
-            marginUsed += verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1);
+          const addedMargin =
+            price > 0 ? verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1) : 0;
+          if (addedMargin > 0) {
+            marginUsed += addedMargin;
+            availableBalance = Math.max(0, availableBalance - addedMargin);
           }
           if (existing) {
             const addedQty =
@@ -823,6 +841,7 @@ export class RiskEngine {
               ...existing,
               quantity: existing.quantity + addedQty,
               notional: existing.notional + verdict.decision.positionSizeUsd,
+              marginUsed: existing.marginUsed + addedMargin,
               stopLoss: verdict.decision.stopLoss,
               takeProfit: verdict.decision.takeProfit,
             });
@@ -841,11 +860,11 @@ export class RiskEngine {
           const existing = rollingPositions.get(decision.symbol);
           const snapshot = env.snapshots.get(decision.symbol);
           const price = snapshot?.price ?? existing?.markPrice ?? 0;
-          if (price > 0) {
-            marginUsed = Math.max(
-              0,
-              marginUsed - verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1),
-            );
+          const releasedMargin =
+            price > 0 ? verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1) : 0;
+          if (releasedMargin > 0) {
+            marginUsed = Math.max(0, marginUsed - releasedMargin);
+            availableBalance += releasedMargin;
           }
           if (existing) {
             const reducedQty = price > 0 ? verdict.decision.positionSizeUsd / price : 0;
@@ -853,6 +872,7 @@ export class RiskEngine {
               ...existing,
               quantity: Math.max(0, existing.quantity - reducedQty),
               notional: Math.max(0, existing.notional - verdict.decision.positionSizeUsd),
+              marginUsed: Math.max(0, existing.marginUsed - releasedMargin),
               stopLoss: verdict.decision.stopLoss ?? existing.stopLoss,
               takeProfit: verdict.decision.takeProfit ?? existing.takeProfit,
             });
@@ -868,32 +888,8 @@ export class RiskEngine {
           ...env,
           positions: rollingPositions,
           pendingSymbols: rollingPending,
-          account: { ...env.account, positionCount, marginUsed },
+          account: { ...env.account, positionCount, marginUsed, availableBalance },
           entriesThisCycle,
-          /*
-           * ⚠️ **小时计数必须带上本批已经开出去的那些**（外部 issue #118）。
-           *
-           * 这一行原来是**漏的** —— 而 `add_to_position` 分支（上面那处）有它。
-           * 于是 `reviewOpen` 的
-           *
-           * ```ts
-           * if (env.entriesLastHour >= config.throttle.maxEntriesPerHour) { … 拒绝 … }
-           * ```
-           *
-           * 在**同一批**里每一笔都读到同一个入口值（调用点给的是数据库里已记的条数），
-           * **本批已经开出去的一笔都没算进去**。
-           *
-           * 实测（issue #118）：`maxEntriesPerHour: 2` 时同一批 6 笔开仓
-           * **全部放行、零拒绝记录**。而调用点给 `entriesThisCycle: 0`，
-           * 所以那道"每轮"节流也数不到 —— **两道节流同时失效**。
-           *
-           * 提示词明确告诉模型「加仓与新开仓共用同一批上限（…、节流）」，
-           * 它因此以为节流在替它兜底。**它没有。**
-           *
-           * `entriesLastHour` 是入口值，加上本周期已用的部分才是真实的滚动小时数 ——
-           * 与 `add_to_position` 那处同一个算式（`entriesThisCycle` 是局部变量，
-           * 它在下面 `+= 1` 累加）。
-           */
           entriesLastHour: env.entriesLastHour + entriesThisCycle,
         }, {
           reservedSymbols: openedSymbolsThisBatch,
@@ -908,7 +904,9 @@ export class RiskEngine {
           const snapshot = env.snapshots.get(decision.symbol);
           const price = snapshot?.price ?? 0;
           if (price > 0) {
-            marginUsed += verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1);
+            const chargedMargin = verdict.decision.positionSizeUsd / Math.max(verdict.decision.leverage, 1);
+            marginUsed += chargedMargin;
+            availableBalance = Math.max(0, availableBalance - chargedMargin);
           }
         } else {
           rejected.push({ decision, reason: verdict.reason });

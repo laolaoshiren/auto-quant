@@ -165,3 +165,24 @@ test('观望 / 等待 / 持有不带任何数字', () => {
     );
   }
 });
+
+test('★ 限价开仓必须以 limitPrice 作为入场参考价与盈亏比基准，不得用现价误算', () => {
+  const parts = figureParts(
+    makeDecision({
+      symbol: 'DOGEUSDT',
+      action: 'open_short',
+      entryType: 'limit',
+      limitPrice: 0.0552,
+      stopLoss: 0.05568,
+      takeProfit: 0.0541,
+      positionSizeUsd: 114,
+      leverage: 15,
+    }),
+    0.05464,
+  );
+  const entry = parts.find((p) => p.key === 'entry');
+  const reward = parts.find((p) => p.key === 'reward');
+  assert.equal(entry?.label, '限价');
+  assert.match(entry?.value ?? '', /0\.0552/);
+  assert.equal(reward?.value, '1:2.29');
+});
