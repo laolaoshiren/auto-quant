@@ -429,7 +429,16 @@ export class RiskEngine {
      * 与其让操作员事后发现，不如当场拒绝并说清。
      */
     const remaining = position.quantity * (1 - fraction);
+    const cutQty = position.quantity * fraction;
     const minQty = env.quantityFor(decision.symbol, env.minNotionalOf(decision.symbol), price);
+    if (minQty > 0 && cutQty < minQty) {
+      return {
+        ok: false,
+        reason:
+          `本次减仓 ${(fraction * 100).toFixed(0)}%（数量 ${cutQty}）低于该标的最小下单量 ${minQty} —— ` +
+          '避免碎片化微幅切仓；请调大减仓比例、直接全部平仓（close_long / close_short）或继续持有守 TP/移动止损。',
+      };
+    }
     if (minQty > 0 && remaining < minQty) {
       return {
         ok: false,

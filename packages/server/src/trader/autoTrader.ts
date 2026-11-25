@@ -1458,6 +1458,13 @@ export class AutoTrader {
     if (!agent) return;
     const override = agent.configOverride();
     if (override) this.activeConfig = override;
+    /*
+     * 实盘优化（2026-11-25 5.5h 观察）：智能托管 2.0 已有独立三段式决策、持仓论点、反例衰减笔记与
+     * M4.2 雷达归因校准，且风控上限已按三档风险护栏锁定；v1 策略自审（7-11 步并发调用）在每笔减仓后
+     * 重复唤醒会抢占网关带宽导致主决策延迟飙升至 3-5 分钟并浪费 ~40 万 token/次。
+     * 因此 `ai_managed` 下不再自动周期唤醒 v1 策略审视（手动点击「让 AI 审视」仍可按需触发）。
+     */
+    if (this.deps.trader.mode === 'ai_managed') return;
     // 不 await：审视可能跑几十秒，不能把 3 分钟的周期撑长。
     agent.triggerReview();
   }
@@ -4537,6 +4544,19 @@ export class AutoTrader {
         managedThesisStore.listActive(traderId).map((t) => [t.symbol, t]),
       );
       const managedNotes = managedNotesStore.listActive(traderId);
+      const recentTradesForCount = tradeStore.list(traderId, 40);
+      const partialCloseCountBySymbol = new Map<string, number>();
+      for (const item of promptContext.positions) {
+        const sym = item.position.symbol;
+        const openedAt = item.position.openedAt;
+        const count = recentTradesForCount.filter(
+          (t) =>
+            t.symbol === sym &&
+            t.closeReason === 'manual_partial' &&
+            t.openedAt === openedAt,
+        ).length;
+        if (count > 0) partialCloseCountBySymbol.set(sym, count);
+      }
       const managedBundle = buildManagedPrompts({
         traderName: promptContext.traderName,
         cycleNumber: promptContext.cycleNumber,
@@ -4553,6 +4573,7 @@ export class AutoTrader {
         idleCycles: promptContext.idleCycles,
         memory: promptContext.memory,
         thesesBySymbol,
+        partialCloseCountBySymbol,
         managedNotes,
         enableAgenticProtocol: typeof this.deps.model.chat === 'function',
       });
@@ -4754,6 +4775,7 @@ export class AutoTrader {
         candidateSymbols: managedRadar.dossiers
           .filter((d) => !heldSetForEngine.has(d.symbol))
           .map((d) => d.symbol),
+        expandedSymbols: managedRadar.dossiers.map((d) => d.symbol),
         getKlines: async (symbol, timeframe, count) => {
           const rows = (await this.deps.marketData.getKlines(symbol, timeframe, count)) as Kline[];
           if (rows.length > 0) {
@@ -8360,43 +8382,46 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      */
     if (booked.created && this.deps.agent) {
       const agent = this.deps.agent;
-      // 两个调用都不阻塞平仓路径：复盘要调模型，可能几秒到几十秒。
-      agent.reviewTrade({
-        tradeId,
-        symbol: local.symbol,
-        closeReason: reason,
-        netPnl: net,
-        grossPnl,
-        fee: entryFee + exitFee,
-        /*
-         * 这几项是复盘员**真正需要**的事实，此前没被传出去 ——
-         * 于是它的结论只能停在「数据不足」（实测 #1 号记忆就是如此）。
-         *
-         * `peakPnlPercent` 最关键：没有它，复盘员分不清
-         * 「正常波动的保护性离场」与「止盈过晚导致利润回吐」，
-         * 而这两者的改法完全相反。
-         */
-        peakPnlPercent: local.peak_pnl_percent,
-        leverage: local.leverage,
-        holdMinutes: Math.max(0, (Date.now() - new Date(local.opened_at).getTime()) / 60_000),
-        entryPrice: local.entry_price,
-        exitPrice,
-        openedAt: local.opened_at,
-        /*
-         * **开仓时计划的保护位** —— 复盘员要靠它区分"止损设错/挂错"与
-         * "方向就错"，而以前它拿不到，只能在同标的历史记忆里找一个数，
-         * 于是 `#104` 把上一笔（`#275`）的 0.544 当成了本笔的止损。
-         * 详见 `ReviewTradeFacts.stopLoss` 的说明。
-         *
-         * ⚠️ 取**开仓时**的值，而不是当前的：`local` 是平仓那一刻的持仓行，
-         * 而移动止损会改写 `stop_loss`（`#280` 就是被改写过的例子）——
-         * 但复盘要回答的是"这一笔的保护位是怎么被触发的"，用平仓时的值才是对的
-         * （它就是**实际挂在交易所上的那个价**）。开仓原值另有用途，
-         * 由 `entry.adjustments` 那条"风控当时记下的调整"覆盖。
-         */
-        stopLoss: local.stop_loss,
-        takeProfit: local.take_profit,
-      });
+      // 部分分批减仓（manual_partial）不属于完整一笔交易闭环，跳过单笔复盘以避免噪音与多余模型调用。
+      if (reason !== 'manual_partial') {
+        // 两个调用都不阻塞平仓路径：复盘要调模型，可能几秒到几十秒。
+        agent.reviewTrade({
+          tradeId,
+          symbol: local.symbol,
+          closeReason: reason,
+          netPnl: net,
+          grossPnl,
+          fee: entryFee + exitFee,
+          /*
+           * 这几项是复盘员**真正需要**的事实，此前没被传出去 ——
+           * 于是它的结论只能停在「数据不足」（实测 #1 号记忆就是如此）。
+           *
+           * `peakPnlPercent` 最关键：没有它，复盘员分不清
+           * 「正常波动的保护性离场」与「止盈过晚导致利润回吐」，
+           * 而这两者的改法完全相反。
+           */
+          peakPnlPercent: local.peak_pnl_percent,
+          leverage: local.leverage,
+          holdMinutes: Math.max(0, (Date.now() - new Date(local.opened_at).getTime()) / 60_000),
+          entryPrice: local.entry_price,
+          exitPrice,
+          openedAt: local.opened_at,
+          /*
+           * **开仓时计划的保护位** —— 复盘员要靠它区分"止损设错/挂错"与
+           * "方向就错"，而以前它拿不到，只能在同标的历史记忆里找一个数，
+           * 于是 `#104` 把上一笔（`#275`）的 0.544 当成了本笔的止损。
+           * 详见 `ReviewTradeFacts.stopLoss` 的说明。
+           *
+           * ⚠️ 取**开仓时**的值，而不是当前的：`local` 是平仓那一刻的持仓行，
+           * 而移动止损会改写 `stop_loss`（`#280` 就是被改写过的例子）——
+           * 但复盘要回答的是"这一笔的保护位是怎么被触发的"，用平仓时的值才是对的
+           * （它就是**实际挂在交易所上的那个价**）。开仓原值另有用途，
+           * 由 `entry.adjustments` 那条"风控当时记下的调整"覆盖。
+           */
+          stopLoss: local.stop_loss,
+          takeProfit: local.take_profit,
+        });
+      }
       agent.settleOnly();
     }
 

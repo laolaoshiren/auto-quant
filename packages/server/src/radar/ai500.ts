@@ -335,7 +335,7 @@ export function selectPrescreenSymbols(
   // 2) 按「活跃度 × 非极端追高」综合初筛权重：多维榜单轮询取头
   const byVolume = [...rows].sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
   const byGainers = [...rows]
-    .filter((r) => r.changePercent24h > 0 && r.changePercent24h <= 55)
+    .filter((r) => r.changePercent24h > 0 && r.changePercent24h <= 45)
     .sort((a, b) => b.changePercent24h - a.changePercent24h);
   const byLosers = [...rows]
     .filter((r) => r.changePercent24h < 0 && r.changePercent24h >= -45)
@@ -686,8 +686,36 @@ export function scoreAi500Symbol(
   }
 
   let alphaPositionScore = rsPts + posPts;
+  /*
+   * 实盘校准（2026-11-25 路线④）：
+   *   1) 早期放量起爆加权（+3）：在 ATR 尚未拉爆（0.45%–3.2%）且刚离均线（0.25–1.6×ATR）放量实体起爆时
+   *      抢先浮出榜单，对标 VergeX 在主升/主跌初期发现强势币的能力；
+   *   2) 末期高波动警示（-4）：ATR15m > 4.5% 且 24h 已暴涨/暴跌 >35%（如 BIGTIME +59.6% / ATR 5.8%）
+   *      降权让位给早期起爆标的，避免挤占展开名额与小资金物理不可开仓白耗算力。
+   */
+  const earlyIgnition =
+    dir !== 0 &&
+    movedAlongDir &&
+    volRatio15m >= 1.8 &&
+    bodyRatio15m >= 0.5 &&
+    distEma20Atr >= 0.25 &&
+    distEma20Atr <= 1.6 &&
+    atr15mPct >= 0.45 &&
+    atr15mPct <= 3.2;
+  if (earlyIgnition) {
+    breakoutScore = clamp(round1(breakoutScore + 3), 0, 20);
+    // 置顶于正向标签前列，避免被 orderedTags.slice(0, 6) 截断
+    tags.unshift('早期放量起爆');
+  }
+  const lateBlowoffPenalty =
+    atr15mPct > 4.5 && Math.abs(input.changePercent24h) > 35 ? 4 : 0;
+  if (lateBlowoffPenalty > 0) {
+    tags.push(`高波动警示(ATR ${atr15mPct.toFixed(1)}%)`);
+  }
+
   // 极端追高（>3.2×ATR）进一步扣除总分，防止高分误导模型追在尖顶
   const overextendedPenalty = movedAlongDir && distEma20Atr > 3.2 ? 8 : 0;
+  const totalPenalty = overextendedPenalty + lateBlowoffPenalty;
   alphaPositionScore = clamp(round1(alphaPositionScore), 0, 15);
 
   const rawTotal = useCustomWeights
@@ -698,14 +726,14 @@ export function scoreAi500Symbol(
         (fundingScore / DEFAULT_AI500_WEIGHTS.funding) * weights.funding +
         (alphaPositionScore / DEFAULT_AI500_WEIGHTS.alphaPosition) * weights.alphaPosition) *
         (100 / weightSum) -
-      overextendedPenalty
+      totalPenalty
     : trendScore +
       breakoutScore +
       oiFlowScore +
       takerFlowScore +
       fundingScore +
       alphaPositionScore -
-      overextendedPenalty;
+      totalPenalty;
 
   const score = Math.round(clamp(rawTotal, 0, 100));
   const tier: RadarTier =

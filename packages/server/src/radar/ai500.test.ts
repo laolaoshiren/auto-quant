@@ -249,3 +249,88 @@ test('★ M2.1 初筛轮询覆盖成交额/涨跌/振幅/费率且永不丢 alwa
   assert.equal(picked.length, 12);
   assert.ok(picked.includes('COIN39USDT'));
 });
+
+test('★ 路线④：AI500 识别早期放量起爆加分，同时对末期高波动妖币（ATR>4.5% 且 24h>35%）打警示降权', () => {
+  // 1) 早期起爆标的：温和震荡蓄势（ATR ≈ 0.9%）后刚离 EMA20（~1.0×ATR）放量实体起爆
+  const early15 = makeTrendKlines({
+    count: 80,
+    startPrice: 10,
+    stepPct: 0.0004,
+    intervalMs: 15 * 60_000,
+    baseQuoteVol: 1_500_000,
+    takerBuyRatio: 0.61,
+    lastVolMultiplier: 2.4,
+    lastBodyRatio: 0.78,
+    lastJumpPct: 0.007,
+  });
+  for (let i = 0; i < early15.length - 1; i += 1) {
+    const k = early15[i]!;
+    k.high = Math.max(k.high, k.close * 1.0045);
+    k.low = Math.min(k.low, k.close * 0.9955);
+  }
+  const early4h = makeTrendKlines({
+    count: 45,
+    startPrice: 8.5,
+    stepPct: 0.005,
+    intervalMs: 4 * 3600_000,
+    baseQuoteVol: 25_000_000,
+    takerBuyRatio: 0.59,
+  });
+  const earlyScore = scoreAi500Symbol({
+    symbol: 'EARLYUSDT',
+    price: early15[early15.length - 1]!.close,
+    quoteVolume24h: 180_000_000,
+    changePercent24h: 11.5,
+    fundingRate: -0.0001,
+    klines15m: early15,
+    klines4h: early4h,
+    openInterestUsd: 60_000_000,
+    oiChange1hPct: 3.1,
+    oiChange4hPct: 6.5,
+    btcReturn1hPct: 0.1,
+    btcReturn4hPct: 0.2,
+  });
+
+  // 2) 末期高波动妖币：ATR15m > 5% 且 24h 已涨 +58%
+  const blowoff15 = makeTrendKlines({
+    count: 80,
+    startPrice: 1.0,
+    stepPct: 0.006,
+    intervalMs: 15 * 60_000,
+    baseQuoteVol: 2_000_000,
+    takerBuyRatio: 0.58,
+    lastVolMultiplier: 1.4,
+    lastBodyRatio: 0.12, // 极端巨震：totalRange = body/0.12 -> 拉高 ATR > 5%
+    lastJumpPct: 0.01,
+  });
+  // 让最近 30 根整体振幅放大（±3.5%），使 Wilder 平滑后的 ATR15m ≈ 6% (>4.5%)
+  for (let i = blowoff15.length - 30; i < blowoff15.length; i += 1) {
+    const k = blowoff15[i]!;
+    k.high = k.close * 1.036;
+    k.low = k.close * 0.964;
+  }
+  const blowoffScore = scoreAi500Symbol({
+    symbol: 'BLOWOFFUSDT',
+    price: blowoff15[blowoff15.length - 1]!.close,
+    quoteVolume24h: 220_000_000,
+    changePercent24h: 58.0,
+    fundingRate: -0.0002,
+    klines15m: blowoff15,
+    klines4h: early4h,
+    openInterestUsd: 50_000_000,
+    oiChange1hPct: 1.0,
+    oiChange4hPct: 2.0,
+    btcReturn1hPct: 0.1,
+    btcReturn4hPct: 0.2,
+  });
+
+  assert.ok(earlyScore.tags.includes('早期放量起爆'), `早期起爆应带标签，实际 ${earlyScore.tags.join(',')}`);
+  assert.ok(
+    blowoffScore.tags.some((t) => t.startsWith('高波动警示')),
+    `ATR>4.5% 且 24h>35% 应打高波动警示，实际 ${blowoffScore.tags.join(',')}`,
+  );
+  assert.ok(
+    earlyScore.score > blowoffScore.score,
+    `早期放量起爆(${earlyScore.score})应排在末期高波动妖币(${blowoffScore.score})之前`,
+  );
+});

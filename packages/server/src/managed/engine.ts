@@ -67,6 +67,10 @@ export interface ManagedEngineInput {
   openPositions: readonly PositionView[];
   /** 本轮深度展开的候选标的（不含持仓，用于 finalize 完整性兜底）。 */
   candidateSymbols: readonly string[];
+  /** 本轮 Prompt 中已展开完整 4h/15m/1m K 线的标的集合（含持仓+候选），用于拦截重复 get_klines 拖慢周期。 */
+  expandedSymbols?: readonly string[];
+  /** 单周期允许调用 get_klines 的最大次数（默认 4 次，防止 12 连查拖慢周期到 5-7 分钟）。 */
+  maxKlineCalls?: number;
   /** 可选按需拉取 K 线回调（复用 MarketDataService.getKlines 并触发 M1.2 热加入）。 */
   getKlines?: (symbol: string, timeframe: Timeframe, count: number) => Promise<Kline[]>;
   /** 可选事件回调：向运行日志输出三段式推进痕迹。 */
@@ -187,7 +191,8 @@ export const MANAGED_AGENT_TOOLS: readonly ToolSpec[] = [
   },
   {
     name: 'get_klines',
-    description: '【可选】按需拉取雷达外某个标的的指定周期 K 线进行查验（查验通过流动性后可在本轮交易）。',
+    description:
+      '【可选·限流】仅在确需查验“上方档案未展开”的雷达外标的时拉取 K 线（每轮最多 4 次）。上方已展开标的自带最新 30 根 4h/15m/1m K 线，严禁重复拉取以免拖慢周期错过行情。',
     parameters: {
       type: 'object',
       properties: {
@@ -201,7 +206,7 @@ export const MANAGED_AGENT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'finalize',
     description:
-      '【第 3 步·必选终结】提交本轮最终交易决策。严禁空决策：必须对每个当前持仓给出 hold 或战术动作（close/reduce/add/adjust_protection），对每个重点候选给出 wait/skip 或开仓动作（open_long/open_short）。调用此工具后本轮决策立即结束。',
+      '【第 3 步·必选终结】提交本轮最终交易决策。严禁空决策：必须对每个当前持仓给出 hold 或战术动作（close/reduce/add/adjust_protection），对每个重点候选给出 wait/skip 或开仓动作（open_long/open_short）。执行 add_to_position 顺势滚仓时，请同步传入 position_size_usd、合并保本 stop_loss 以及顺延拓展后的新 take_profit。调用此工具后本轮决策立即结束。',
     parameters: {
       type: 'object',
       properties: {
@@ -453,7 +458,13 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
    * 收窄工具集为仅保留 finalize + toolChoice:'required'，确保整轮推理绝不被白白丢弃。
    */
   const maxRounds = Math.max(2, Math.min(8, input.maxRounds ?? 5));
+  const maxKlineCalls = Math.max(1, Math.min(12, input.maxKlineCalls ?? 4));
   const finalizeOnlyTools = MANAGED_AGENT_TOOLS.filter((tool) => tool.name === 'finalize');
+  const expandedSet = new Set(
+    (input.expandedSymbols ?? []).map((s) => normalizeSymbol(s)).filter(Boolean),
+  );
+  const fetchedKlines = new Set<string>();
+  let klineCallsUsed = 0;
   const nowMs = input.nowMs ?? Date.now();
   const messages: ChatMessage[] = [...input.baseMessages];
   const openPosBySymbol = new Map(input.openPositions.map((p) => [normalizeSymbol(p.symbol), p]));
@@ -662,10 +673,22 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
         const sym = normalizeSymbol(String(args['symbol'] ?? ''));
         const tf = String(args['timeframe'] ?? '15m') as Timeframe;
         const count = Math.max(10, Math.min(60, Math.round(asFiniteNumber(args['count']) ?? 30)));
+        const klineKey = `${sym}:${tf}`;
         let content = `${sym}: K 线接口不可用`;
-        if (sym && input.getKlines) {
+        if (sym && expandedSet.has(sym) && (tf === '4h' || tf === '15m' || tf === '1m')) {
+          content = `${sym} 的 ${tf} K 线（最新 30 根）已在上方标的档案中完整提供，无需重复拉取，请直接基于已有数据决策。`;
+          stageTrace.push(`klines_dup:${sym}:${tf}`);
+        } else if (sym && fetchedKlines.has(klineKey)) {
+          content = `本轮已拉取过 ${sym} ${tf} K 线，请直接参考前文工具返回。`;
+          stageTrace.push(`klines_dup:${sym}:${tf}`);
+        } else if (klineCallsUsed >= maxKlineCalls) {
+          content = `本轮额外 K 线查验已达上限（${maxKlineCalls} 次），为保证实盘决策时效请停止泛查，立即基于已有数据进入 plan / finalize 拍板。`;
+          stageTrace.push(`klines_cap:${sym}:${tf}`);
+        } else if (sym && input.getKlines) {
           try {
             const klines = await input.getKlines(sym, tf, count);
+            klineCallsUsed += 1;
+            fetchedKlines.add(klineKey);
             content = formatKlinesBrief(sym, tf, klines);
             stageTrace.push(`klines:${sym}:${tf}`);
           } catch (err) {

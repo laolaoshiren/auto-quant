@@ -823,3 +823,182 @@ test('★ 实盘回归（Cycle #51）：进入最终回合时仅暴露 finalize 
   assert.deepEqual(seenToolNamesPerTurn[2], ['finalize']);
   assert.match(res.text, /"symbol":"XRPUSDT","action":"open_short"/);
 });
+
+test('★ 路线①②：尾仓（已减仓≥2次或剩余名义过小）进入 runner_hold 禁止继续切碎；顺势加仓给出动态顺延 TP', () => {
+  const k15Bear = makeSeries(60, 0.145, -0.0012, 15 * 60_000, 2_000_000, 0.38);
+  const k4hBear = makeSeries(40, 0.165, -0.004, 4 * 3600_000, 20_000_000, 0.4);
+  const strongRadar = scoreAi500Symbol({
+    symbol: 'ADAUSDT',
+    price: 0.1376,
+    quoteVolume24h: 250_000_000,
+    changePercent24h: -6.2,
+    fundingRate: 0.0002,
+    klines15m: k15Bear,
+    klines4h: k4hBear,
+    openInterestUsd: 120_000_000,
+    oiChange1hPct: 2.5,
+    oiChange4hPct: 5.0,
+    btcReturn4hPct: -0.5,
+  });
+  const basePos = {
+    id: 10,
+    traderId: 1,
+    symbol: 'ADAUSDT',
+    side: 'short' as const,
+    quantity: 666,
+    entryPrice: 0.1402,
+    markPrice: 0.1376, // +1.73R (initial risk 0.0015)
+    leverage: 10,
+    liquidationPrice: null,
+    unrealizedPnl: 1.73,
+    unrealizedPnlPercent: 18.5,
+    peakPnlPercent: 20,
+    marginUsed: 9.3,
+    notional: 93,
+    stopLoss: 0.1402,
+    takeProfit: 0.1352,
+    openedAt: '2026-11-25T12:00:00.000Z',
+    openReasoning: 'ada short',
+  };
+  const thesis = {
+    id: 1,
+    traderId: 1,
+    symbol: 'ADAUSDT',
+    side: 'short' as const,
+    entryPrice: 0.1402,
+    initialStopLoss: 0.1417,
+    entryBasis: '空头共振',
+    addTrigger: '',
+    reduceTarget: '',
+    invalidation: '',
+    timeStopAt: null,
+    minProgressR: 0.3,
+    maxAdverseExcursionPct: 1.2,
+    peakR: 1.73,
+    worstAdversePct: 0.2,
+    entryRadarScore: 76,
+    entryOiUsd: 100_000_000,
+    entryTakerBuyRatio: 0.42,
+    status: 'active' as const,
+    createdAt: '2026-11-25T12:00:00.000Z',
+    updatedAt: '2026-11-25T12:00:00.000Z',
+  };
+
+  // 1) 未减过仓且强趋势 +1.73R → 可顺势加仓并给出顺延 TP（低于旧 TP 或外推目标）
+  const pyramid = computePositionTactics({
+    position: basePos,
+    thesis,
+    radar: strongRadar,
+    atr15m: 0.0008,
+    minNotionalUsd: 12,
+    partialCloseCount: 0,
+  });
+  assert.equal(pyramid.stage, 'pyramid_ready');
+  assert.equal(pyramid.pyramid50.canZeroRiskPyramid, true);
+  assert.ok(pyramid.pyramid50.suggestedExtendedTp < basePos.markPrice);
+  assert.match(pyramid.guidance, /顺延拓展/);
+
+  // 2) 已减仓 2 次 → 强制进入 runner_hold，严禁继续碎片化减仓
+  const tailByCount = computePositionTactics({
+    position: { ...basePos, quantity: 200, notional: 28 },
+    thesis,
+    radar: strongRadar,
+    atr15m: 0.0008,
+    minNotionalUsd: 12,
+    partialCloseCount: 2,
+  });
+  assert.equal(tailByCount.isTailRunner, true);
+  assert.equal(tailByCount.stage, 'runner_hold');
+  assert.match(tailByCount.guidance, /严禁继续碎片化/);
+
+  // 3) 剩余名义 < 2.2 × minNotional（如 $11 < $26.4）→ 即使只减过 1 次也进入 runner_hold
+  const tailBySize = computePositionTactics({
+    position: { ...basePos, quantity: 80, notional: 11 },
+    thesis,
+    radar: strongRadar,
+    atr15m: 0.0008,
+    minNotionalUsd: 12,
+    partialCloseCount: 1,
+  });
+  assert.equal(tailBySize.isTailRunner, true);
+  assert.equal(tailBySize.stage, 'runner_hold');
+});
+
+test('★ 路线③：runManagedAgenticLoop 拦截已展开标的的重复 get_klines，并将雷达外 K 线查验限流至 maxKlineCalls', async () => {
+  const trader = createPaperTrader('m3-engine-klines-cap');
+  let fetchedCount = 0;
+  let turn = 0;
+  const toolReplies: string[] = [];
+
+  const res = await runManagedAgenticLoop({
+    traderId: trader.id,
+    maxRounds: 4,
+    maxKlineCalls: 2,
+    expandedSymbols: ['SOLUSDT'],
+    baseMessages: [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'user' },
+    ],
+    openPositions: [],
+    candidateSymbols: ['SOLUSDT'],
+    getKlines: async () => {
+      fetchedCount += 1;
+      return [
+        {
+          openTime: 1,
+          closeTime: 2,
+          open: 10,
+          high: 11,
+          low: 9.5,
+          close: 10.5,
+          volume: 1000,
+          quoteVolume: 10500,
+          trades: 10,
+          takerBuyBase: 600,
+          takerBuyQuote: 6300,
+        },
+      ];
+    },
+    model: {
+      async chat(msgs) {
+        turn += 1;
+        for (const m of msgs) {
+          if (m.role === 'tool' && typeof m.content === 'string') toolReplies.push(m.content);
+        }
+        if (turn === 1) {
+          return {
+            text: '',
+            toolCalls: [
+              // 1) 已展开标的的 15m → 应被直接拦截不调 getKlines
+              { id: 'k1', name: 'get_klines', arguments: JSON.stringify({ symbol: 'SOLUSDT', timeframe: '15m' }) },
+              // 2-3) 两个雷达外标的 → 允许执行（耗尽 maxKlineCalls=2）
+              { id: 'k2', name: 'get_klines', arguments: JSON.stringify({ symbol: 'DOGEUSDT', timeframe: '15m' }) },
+              { id: 'k3', name: 'get_klines', arguments: JSON.stringify({ symbol: 'XRPUSDT', timeframe: '15m' }) },
+              // 4) 第 3 次雷达外查验 → 应被限流拦截
+              { id: 'k4', name: 'get_klines', arguments: JSON.stringify({ symbol: 'LINKUSDT', timeframe: '15m' }) },
+            ],
+            latencyMs: 5,
+            usage: { promptTokens: 100, completionTokens: 20 },
+          };
+        }
+        return {
+          text: '',
+          toolCalls: [
+            {
+              id: 'f1',
+              name: 'finalize',
+              arguments: JSON.stringify({ summary: '完成', decisions: [] }),
+            },
+          ],
+          latencyMs: 5,
+          usage: { promptTokens: 120, completionTokens: 20 },
+        };
+      },
+    },
+  });
+
+  assert.equal(res.usedFinalizeTool, true);
+  assert.equal(fetchedCount, 2, '已展开标的免拉取 + 超出 maxKlineCalls=2 的请求必须被拦截');
+  assert.ok(toolReplies.some((t) => t.includes('已在上方标的档案中完整提供')));
+  assert.ok(toolReplies.some((t) => t.includes('已达上限（2 次）')));
+});

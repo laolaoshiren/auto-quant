@@ -19,7 +19,12 @@ import type { PositionThesis } from './thesis.js';
 /*  Public Types                                                               */
 /* -------------------------------------------------------------------------- */
 
-export type PositionTacticStage = 'trial' | 'pyramid_ready' | 'scale_out_lock' | 'defense';
+export type PositionTacticStage =
+  | 'trial'
+  | 'pyramid_ready'
+  | 'scale_out_lock'
+  | 'runner_hold'
+  | 'defense';
 
 export interface PyramidSimulation {
   /** 若按当前持仓量加仓 50%（总仓位变为 1.5x）后的合并均价。 */
@@ -28,7 +33,9 @@ export interface PyramidSimulation {
   zeroRiskBreakevenStop: number;
   /** 新保本止损距现价的 ATR 倍数（正数 = 处于安全锁盈侧）。 */
   breakevenBufferAtr: number | null;
-  /** 是否满足「盈利 ≥ 1R + 新保本止损留足 ≥ 0.8×ATR 呼吸空间 + 动能未退潮」的无风险金字塔加仓条件。 */
+  /** 若执行顺势金字塔加仓，建议顺延拓展的新止盈目标价（打破旧静态 TP 对剩余 RR 的束缚）。 */
+  suggestedExtendedTp: number;
+  /** 是否满足「盈利 ≥ 1R + 新保本止损留足 ≥ 0.7×ATR 呼吸空间 + 动能未退潮 + 非尾仓」的无风险金字塔加仓条件。 */
   canZeroRiskPyramid: boolean;
 }
 
@@ -56,6 +63,10 @@ export interface PositionTactics {
   timeStopRemainingMinutes: number | null;
   pyramid50: PyramidSimulation;
   decay: EntryFlowDecay;
+  /** 本笔持仓已执行过的分批减仓次数（用于防碎片化连续对半切）。 */
+  partialCloseCount: number;
+  /** 是否已进入尾仓/底仓阶段（已减仓 ≥ 2 次，或剩余名义 < 2.2×最小名义），此阶段严禁再切碎。 */
+  isTailRunner: boolean;
   stage: PositionTacticStage;
   /** 一句话结构化战术指引（非强制，供 LLM 结合图表做最终拍板）。 */
   guidance: string;
@@ -69,6 +80,10 @@ export interface TacticsInput {
   atr15m?: number | null;
   /** 双边手续费率（小数，默认 0.001 = 0.10%）。 */
   roundTripFeeRate?: number;
+  /** 该标的最小下单名义额（用于判定是否已缩至不可继续拆分的尾仓，默认 12）。 */
+  minNotionalUsd?: number;
+  /** 本笔持仓已发生过的部分减仓次数（默认 0）。 */
+  partialCloseCount?: number;
   nowMs?: number;
 }
 
@@ -135,6 +150,13 @@ export function computePositionTactics(input: TacticsInput): PositionTactics {
     pos.side === 'long' ? mergedEntryPrice * (1 + feeBuffer) : mergedEntryPrice * (1 - feeBuffer);
   const breakevenGap = (mark - zeroRiskBreakevenStop) * dir; // >0 说明现价已在保本止损有利一侧
   const breakevenBufferAtr = atrVal && atrVal > 0 ? round2(breakevenGap / atrVal) : null;
+  // 顺势金字塔加仓时的动态顺延止盈目标：在现价基础上再外推 max(1.8×初始风险, 3.2×ATR15m)，且优于原 TP
+  const tpExtension = Math.max(initialRisk * 1.8, (atrVal ?? mark * 0.012) * 3.2);
+  const rawExtendedTp = mark + dir * tpExtension;
+  const suggestedExtendedTp =
+    tp > 0 && (pos.side === 'long' ? tp > rawExtendedTp : tp < rawExtendedTp)
+      ? tp
+      : Math.max(1e-8, rawExtendedTp);
 
   // 持仓期间动能/资金流衰减评估
   const radarScoreDelta =
@@ -167,38 +189,67 @@ export function computePositionTactics(input: TacticsInput): PositionTactics {
     radar !== null &&
     radar.bias !== 'neutral' &&
     ((pos.side === 'long' && radar.bias === 'short') || (pos.side === 'short' && radar.bias === 'long'));
+  /*
+   * 实盘校准（2026-11-25 5.5h 观察）：趋势中途正常整理常出现 Taker -10pp~-12pp 抖动（如 ADA/HYPE 随后再冲 +1.5R），
+   * 收紧衰减门槛至 radarScoreDelta <= -15 或 favorableTakerDeltaPp <= -14 或方向翻转/OI 显著流失，
+   * 避免趋势中途误报衰减导致过早切光主波段仓位。
+   */
   const isFading =
     biasFlipped ||
-    (radarScoreDelta !== null && radarScoreDelta <= -12) ||
-    (favorableTakerDeltaPp !== null && favorableTakerDeltaPp <= -10) ||
-    (oiChangePct !== null && oiChangePct <= -4);
+    (radarScoreDelta !== null && radarScoreDelta <= -15) ||
+    (favorableTakerDeltaPp !== null && favorableTakerDeltaPp <= -14) ||
+    (oiChangePct !== null && oiChangePct <= -5);
+
+  const partialCloseCount = Math.max(0, Math.floor(input.partialCloseCount ?? 0));
+  const remainingNotional = pos.notional > 0 ? pos.notional : pos.quantity * mark;
+  const effectiveMinNotional = Math.max(input.minNotionalUsd ?? 12, 5);
+  const isTailRunner =
+    partialCloseCount >= 2 ||
+    (remainingNotional > 0 && remainingNotional < effectiveMinNotional * 2.2);
 
   const canZeroRiskPyramid =
     currentR >= 1.0 &&
     breakevenGap > 0 &&
-    (breakevenBufferAtr === null ? breakevenGap / mark >= 0.008 : breakevenBufferAtr >= 0.8) &&
+    (breakevenBufferAtr === null ? breakevenGap / mark >= 0.007 : breakevenBufferAtr >= 0.7) &&
     !isFading &&
-    (radar === null || radar.score >= 68);
+    !isTailRunner &&
+    (radar === null || radar.score >= 65);
 
-  // 战术阶段判定与明确引导
+  // 战术阶段判定与明确引导（防碎片连切 + 放行顺势金字塔滚仓 + 保护大赢家波段）
   let stage: PositionTacticStage = 'trial';
   let guidance: string;
 
-  if (currentR >= 2.0 || (currentR >= 1.0 && isFading)) {
-    stage = 'scale_out_lock';
-    guidance = isFading
-      ? `已达 ${currentR.toFixed(2)}R 但动能衰减，优先考虑 reduce_position(40%-50%) 分批锁利，并把止损沿结构位（避开整数关口）移至锁盈侧。`
-      : `已达 ${currentR.toFixed(2)}R 大波段盈利区，可分批减仓锁利并留底仓博弈更远目标，止损沿 15m 结构高低点外侧上移（避开整数位）。`;
-  } else if (canZeroRiskPyramid) {
-    stage = 'pyramid_ready';
-    guidance =
-      `盈利 ${currentR.toFixed(2)}R 且动能强劲：若突破确认，可金字塔加仓 50%（合并均价 ${formatCompactPrice(mergedEntryPrice)}），并同步将止损移至零风险保本位 ${formatCompactPrice(zeroRiskBreakevenStop)}（避开整数位）。`;
-  } else if (currentR < 0) {
+  if (currentR < 0) {
     stage = 'defense';
     guidance =
       adversePct > 0 && thesis?.maxAdverseExcursionPct
         ? `当前浮亏 ${currentR.toFixed(2)}R（MAE ${adversePct.toFixed(2)}%/${thesis.maxAdverseExcursionPct.toFixed(2)}%）：严禁逆势摊平加仓，核对结构失效位与时间止损，破位即果断离场。`
         : `当前浮亏 ${currentR.toFixed(2)}R：严禁亏损加仓摊平，守住原定结构止损，逻辑否定即果断平仓。`;
+  } else if (isTailRunner && currentR >= 0.3) {
+    stage = 'runner_hold';
+    guidance =
+      `已分批锁利 ${partialCloseCount} 次或余仓名义仅 $${remainingNotional.toFixed(1)}（尾仓区）：严禁继续碎片化 reduce_position！` +
+      '仅在出现「15m 放量反向吞没 + Taker 反转/结构失效」时一次性全平（close），否则交由结构移动止损与 TP 完整博弈大波段。';
+  } else if (canZeroRiskPyramid && currentR < 2.2 && partialCloseCount === 0) {
+    stage = 'pyramid_ready';
+    guidance =
+      `盈利 ${currentR.toFixed(2)}R 且趋势强劲：若放量突破确认，优先用 add_to_position 加仓 35%-50%（合并均价 ${formatCompactPrice(mergedEntryPrice)}），` +
+      `同步将 stop_loss 移至零风险保本位 ${formatCompactPrice(zeroRiskBreakevenStop)} 并将 take_profit 顺延拓展至 ${formatCompactPrice(suggestedExtendedTp)}（勿被旧 TP 剩余 RR 束缚）。`;
+  } else if (currentR >= 2.0 || (currentR >= 1.0 && isFading)) {
+    stage = 'scale_out_lock';
+    if (partialCloseCount === 0) {
+      guidance = isFading
+        ? `已达 ${currentR.toFixed(2)}R 且出现动能衰减，建议执行第 1 批（30%-35%）reduce_position 锁利，保留 65%-70% 主力仓位并将止损沿 15m 结构位移至锁盈侧。`
+        : `已达 ${currentR.toFixed(2)}R 大波段盈利区：建议执行第 1 批（30%-35%）reduce_position 锁利，保留 65%-70% 主力仓位顺延博弈更远目标，止损沿 15m 结构位上移（避开整数位）。`;
+    } else {
+      guidance =
+        `已达 ${currentR.toFixed(2)}R（已锁利 1 批）：仅在确有「15m 放量反向吞没/结构破位」时执行最后 1 批减仓或全平，切忌频繁对半切碎大赢家；否则沿结构移损持有看 TP。`;
+    }
+  } else if (canZeroRiskPyramid) {
+    stage = 'pyramid_ready';
+    guidance =
+      `盈利 ${currentR.toFixed(2)}R 且趋势强劲：若放量突破确认，可用 add_to_position 加仓 35%-50%（合并均价 ${formatCompactPrice(mergedEntryPrice)}），` +
+      `同步将 stop_loss 移至零风险保本位 ${formatCompactPrice(zeroRiskBreakevenStop)} 并顺延 take_profit 至 ${formatCompactPrice(suggestedExtendedTp)}。`;
   } else {
     stage = 'trial';
     guidance = `试仓推进中（${currentR.toFixed(2)}R）：耐心让结构展开，未破失效位不惊慌砍单，待 ≥1R 突破确认再评估无风险加仓或移损保本。`;
@@ -218,6 +269,7 @@ export function computePositionTactics(input: TacticsInput): PositionTactics {
       mergedEntryPrice,
       zeroRiskBreakevenStop,
       breakevenBufferAtr,
+      suggestedExtendedTp,
       canZeroRiskPyramid,
     },
     decay: {
@@ -226,6 +278,8 @@ export function computePositionTactics(input: TacticsInput): PositionTactics {
       favorableTakerDeltaPp,
       isFading,
     },
+    partialCloseCount,
+    isTailRunner,
     stage,
     guidance,
   };
@@ -242,6 +296,7 @@ export function formatPositionTacticsLines(
     trial: '试仓观察',
     pyramid_ready: '★可无风险加仓',
     scale_out_lock: '★锁利/移损区',
+    runner_hold: '★底仓奔跑(禁切碎)',
     defense: '防守监控',
   };
 
@@ -264,7 +319,7 @@ export function formatPositionTacticsLines(
   }
 
   const lines: string[] = [
-    `  · 战术面板[${stageCn[tactics.stage]}]：R=${tactics.currentR >= 0 ? '+' : ''}${tactics.currentR.toFixed(2)}R (峰值 ${tactics.peakR.toFixed(2)}R)${atrParts.length > 0 ? ` · ${atrParts.join(' / ')}` : ''} · +50%加仓模拟(均价 ${formatCompactPrice(tactics.pyramid50.mergedEntryPrice)} → 保本SL ${formatCompactPrice(tactics.pyramid50.zeroRiskBreakevenStop)}${tactics.pyramid50.breakevenBufferAtr !== null ? `, 缓冲 ${tactics.pyramid50.breakevenBufferAtr}×ATR` : ''})${decayParts.length > 0 ? ` · 入场至今变化(${decayParts.join(', ')}${tactics.decay.isFading ? ' ⚠️衰减' : ''})` : ''}`,
+    `  · 战术面板[${stageCn[tactics.stage]}]：R=${tactics.currentR >= 0 ? '+' : ''}${tactics.currentR.toFixed(2)}R (峰值 ${tactics.peakR.toFixed(2)}R${tactics.partialCloseCount > 0 ? `, 已减仓${tactics.partialCloseCount}次` : ''})${atrParts.length > 0 ? ` · ${atrParts.join(' / ')}` : ''} · +50%加仓模拟(均价 ${formatCompactPrice(tactics.pyramid50.mergedEntryPrice)} → 保本SL ${formatCompactPrice(tactics.pyramid50.zeroRiskBreakevenStop)}${tactics.pyramid50.breakevenBufferAtr !== null ? `, 缓冲 ${tactics.pyramid50.breakevenBufferAtr}×ATR` : ''}${tactics.pyramid50.canZeroRiskPyramid ? `, 可顺延TP→${formatCompactPrice(tactics.pyramid50.suggestedExtendedTp)}` : ''})${decayParts.length > 0 ? ` · 入场至今变化(${decayParts.join(', ')}${tactics.decay.isFading ? ' ⚠️衰减' : ''})` : ''}`,
   ];
 
   if (thesis) {

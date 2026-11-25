@@ -90,6 +90,8 @@ export interface ManagedPromptContext {
   memory?: PromptMemory;
   /** M3.1：当前活跃持仓论点映射（symbol → PositionThesis）。 */
   thesesBySymbol?: ReadonlyMap<string, PositionThesis>;
+  /** 本笔持仓已发生过的部分减仓次数映射（symbol → count，用于防碎片连切）。 */
+  partialCloseCountBySymbol?: ReadonlyMap<string, number>;
   /** M3.3：活跃反例衰减观察笔记列表。 */
   managedNotes?: readonly ManagedNote[];
   /** M3.4：是否开启原生 function-calling 三段式决策协议提示。 */
@@ -196,10 +198,12 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
     '   - 评分 < 65 → 原则不新开仓（持仓管理除外）；',
     '   - **市价 vs 限价清晰分界**：刚放量突破/破位确认且距 15m EMA20 ≤ 1.5×ATR（无追单风险）时，**可直接用 `market` 市价切入**（或贴现价 0.2%–0.5% 限价），不因盲目挂远价而踏空主升/主跌浪；只有偏离 15m EMA20 > 2.0×ATR、顶着强阻力墙或带有「追单风险」「长影线插针」警示时，才用 `limit` 回踩限价并填写合理的 `wait_minutes`（通常 20–45 分钟）；',
     '   - **挂单改价 / 撤单**：已有未成交限价挂单若行情已走远或结构价位迁移，**可在同一轮 `finalize` 中直接同时提交 `cancel_pending` + 新的 `open_long/open_short`**（系统会先撤旧单再挂新单或市价进场，不要白白再干等一整轮）。',
-    '3. **多空双向顺势**：遵循 4h 大趋势与 15m 结构共振，利用 1m 精确找入场与止损位；止损放在真实结构失效位之外（避开整数位与清算扫荡区），严禁贴着现价放必被噪音扫掉的窄止损。',
-    '4. **大盈亏比波段管理（目标 3:1 ~ 5:1）**：',
-    '   - 试仓 → 盈利 ≥ 1R 且突破确认、战术面板提示可无风险加仓时，优先考虑金字塔加仓 50% 并同步把止损移至合并均价保本位（避开整数位）；',
-    '   - 盈利 ≥ 2R 或遇强阻力墙/清算磁吸/动能衰减时，用 `reduce_position` 分批减仓锁利，并沿 15m 结构高低点外侧（非整数位）上移止损；',
+    '   - **小资金物理可交易预检**：标的档案若标有 `[当前资金物理不可开]`（1.5×ATR 止损下连最小名义的风险都 > 2.5%），直接 `skip` 勿浪费算力；若标有 `[小仓容错可开]`（≥78 分强突破且贴最小名义风险 ≤ 2.5%），可按最小名义轻仓把握早期主升/主跌浪；',
+    '3. **多空双向顺势 & 反抽止损缓冲**：遵循 4h 大趋势与 15m 结构共振，利用 1m 精确找入场与止损位；止损放在真实结构失效位之外（避开整数位与清算扫荡区）。**限价反抽入场（limit）易遇惯性插针，止损必须留足 `1.8–2.0×ATR15m` 缓冲**（放在反抽高/低点簇外侧，避免贴着 `1.5×ATR` 下限被 15 分钟噪音扫出）。',
+    '4. **大盈亏比波段管理（吃满主浪、严禁碎片连切）**：',
+    '   - **可执行顺势金字塔滚仓**：盈利 ≥ 1R、动能强劲且战术面板示 `★可无风险加仓` 时，若放量突破确认，主动用 `add_to_position` 加仓 `35%–50%`，同步把 `stop_loss` 移至零风险合并保本位，**并将 `take_profit` 顺延拓展至面板建议目标或下一结构墙**（严禁被旧 TP 算出的“剩余 RR < 1”束缚而不敢滚仓）；',
+    '   - **最多 2 批止盈 + 保护大赢家**：单笔持仓原则上**最多分 2 批减仓**——首减在 `+1.5R~2.0R` 仅减 `30%–35%` 锁底仓，保留 `65%–70%` 主力仓位博弈 `+2.5R~4R` 大波段；面板提示 `★底仓奔跑(禁切碎)` 时**严禁继续 `reduce_position`**，余仓交给移动止损与 TP 走完；',
+    '   - **真衰竭离场 vs 正常洗盘**：不要因为“浮盈看着不少”或单指标小幅波动就反复切仓；真正的离场/二次减仓信号是 **「15m 放量反向吞没（量比 > 1.5x）+ 顺向 Taker 显著反转 + 破 15m 结构位/EMA20」**；',
     '   - 严禁亏损摊平加仓；每个持仓须明确时间止损（`time_stop_hours`）与最大不利偏移硬线（`max_adverse_excursion_pct`），由 30 秒守卫机器硬执行；逻辑被市场否定即果断平仓。',
     '5. **每单杠杆与保证金模式自主决策（严禁机械写死 3x~5x）**：',
     '   - 在下方风险护栏上限与交易所对该币种/账号的实际杠杆上限（取较小值）之内，每笔单子的 `leverage` 完全由你按「**止损距离 + ATR 波动率 + 信号确定性**」动态决定；',
@@ -322,6 +326,8 @@ function renderPositionsSection(ctx: ManagedPromptContext): string {
         thesis,
         radar: dossier?.radar ?? null,
         roundTripFeeRate: feeRate,
+        minNotionalUsd: dossier?.minNotionalUsd,
+        partialCloseCount: ctx.partialCloseCountBySymbol?.get(p.symbol) ?? 0,
         nowMs: ctx.now.getTime(),
       });
       lines.push(
@@ -347,12 +353,36 @@ function renderPositionsSection(ctx: ManagedPromptContext): string {
 function renderDossierBlock(
   d: ManagedSymbolDossier,
   bars: { '4h': number; '15m': number; '1m': number },
+  sizingCtx?: { equity: number; riskPerTradePercent: number; minPositionSize: number },
 ): string {
   const r = d.radar;
   const m = r.metrics;
   const dim = r.dimensions;
   const heldTag = d.isHeld ? ' [持仓中]' : '';
   const tagText = r.tags.length > 0 ? r.tags.join(' | ') : '常规波动';
+
+  /*
+   * 实盘路线④：小资金高波动强币物理可交易预检（直接算清，省掉模型反复心算与白耗算力）
+   * - minLegalStopPct = max(1.5 × ATR15m, 0.35%)
+   * - 若按正常单笔风险预算算出的名义 < 最小名义门槛：
+   *   · 若按最小名义开仓的真实风险 ≤ 2.5% 且评分 ≥ 78（主档强突破）→ 标注「小仓容错可开」；
+   *   · 否则风险 > 2.5% → 标注「当前资金物理不可开，建议直接 skip」。
+   */
+  let tradabilityNote = '';
+  if (!d.isHeld && sizingCtx && sizingCtx.equity > 0 && m.atr15mPct > 0) {
+    const minNotional = Math.max(d.minNotionalUsd ?? 5, sizingCtx.minPositionSize);
+    const minLegalStopPct = Math.max(1.5 * m.atr15mPct, 0.35);
+    const riskBudgetUsd = (sizingCtx.equity * sizingCtx.riskPerTradePercent) / 100;
+    const maxNotionalAtBudget = riskBudgetUsd / (minLegalStopPct / 100);
+    if (maxNotionalAtBudget < minNotional) {
+      const minRiskPct = ((minNotional * (minLegalStopPct / 100)) / sizingCtx.equity) * 100;
+      if (minRiskPct <= 2.5 && r.score >= 78) {
+        tradabilityNote = ` · [小仓容错可开: 最小额 ${fmtUsd(minNotional)} 风险约 ${minRiskPct.toFixed(2)}% ≤ 2.5%]`;
+      } else if (minRiskPct > 2.5) {
+        tradabilityNote = ` · [当前资金物理不可开: 1.5×ATR止损最小风险 ${minRiskPct.toFixed(1)}% > 2.5%，建议直接 skip]`;
+      }
+    }
+  }
 
   const header = [
     `## ${d.symbol}${heldTag} — AI500 **${r.score}/100** (${tierLabel(r.tier)} · ${biasLabel(r.bias)})`,
@@ -361,7 +391,7 @@ function renderDossierBlock(
     `- 资金流与费率：Taker买比 1h=${Math.round(m.takerBuyRatio1h * 100)}% / 4h=${Math.round(m.takerBuyRatio4h * 100)}% (CVD:${m.cvdTrend}) · OI ${m.openInterestUsd ? fmtUsd(m.openInterestUsd) : 'N/A'} (1h ${fmtSignedPct(m.oiChange1hPct, 1)} / 4h ${fmtSignedPct(m.oiChange4hPct, 1)}) · 资金费 ${m.fundingRatePct !== null ? `${m.fundingRatePct >= 0 ? '+' : ''}${m.fundingRatePct.toFixed(4)}%` : 'N/A'}`,
     `- 筹码与清算：${d.volumeProfile ? formatVolumeProfileLine(d.volumeProfile) : '样本不足'}`,
     `- 动能变化：${formatRadarDeltaLine(d.delta)}`,
-    `- 信号标签：${tagText}${d.minNotionalUsd || d.maxLeverage ? ` · 合约约束(最小额 ${fmtUsd(d.minNotionalUsd ?? 5)}, 最大杠杆 ${d.maxLeverage ?? 10}x)` : ''}`,
+    `- 信号标签：${tagText}${d.minNotionalUsd || d.maxLeverage ? ` · 合约约束(最小额 ${fmtUsd(d.minNotionalUsd ?? 5)}, 最大杠杆 ${d.maxLeverage ?? 10}x)` : ''}${tradabilityNote}`,
   ];
 
   const klineBlocks: string[] = [];
@@ -414,10 +444,15 @@ function renderVolatileSection(
   parts.push('', renderPositionsSection(ctx));
 
   if (dossiers.length > 0) {
+    const sizingCtx = {
+      equity: acc.equity,
+      riskPerTradePercent: ctx.config.riskControl.riskPerTradePercent,
+      minPositionSize: ctx.config.riskControl.marginBasedLimit ? 0 : ctx.config.riskControl.minPositionSize,
+    };
     parts.push(
       '',
       `# 深度展开标的（共 ${dossiers.length} 个：持仓 + AI500 Top 精选）`,
-      ...dossiers.map((d) => renderDossierBlock(d, bars)),
+      ...dossiers.map((d) => renderDossierBlock(d, bars, sizingCtx)),
     );
   } else {
     parts.push('', '# 深度展开标的', '本轮无达标候选标的，请保持观望。');
