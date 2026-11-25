@@ -104,7 +104,8 @@ $excludes = @(    '--exclude=./.env',                 # ← 关键：绝不覆�
     '--exclude=./packages/web/ui-audit',
     '--exclude=./packages/web/ui-smoke',
     '--exclude=./_deploy.tar.gz',
-    '--exclude=./_deploy-*.tar.gz'
+    '--exclude=./_deploy-*.tar.gz',
+    '--exclude=./_deploy.*.tar.gz'
     # 注意：dist **不排除** —— 本地构建好一起传，见文件顶部说明。
 )
 
@@ -267,9 +268,12 @@ Write-Host "==> 打包（排除 .env / data / node_modules；含前端产物）"
   `try/finally` 保证**即使 scp 抛错也删掉归档** —— 否则失败一次就在仓库根
   留一个 8MB 的文件，而下一次 `git status` 会看到它。
 #>
-$archive = Join-Path $repoRoot "_deploy.$PID.tar.gz"
+$archive = Join-Path $env:TEMP "aq-deploy.$PID.tar.gz"
 try {
   & tar -czf $archive @excludes -C $repoRoot . 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "tar 打包失败（退出码 $LASTEXITCODE）"
+  }
   $sizeKb = [math]::Round((Get-Item $archive).Length / 1KB, 1)
   Write-Host "    $sizeKb KB"
 
@@ -305,6 +309,9 @@ HAD_ENV=`$( [ -f .env ] && echo yes || echo no )
 # 但会一直占着磁盘，也让"服务器上到底是哪一版"变得难以判断。
 #
 # ``dist`` 完全由构建产出，删掉再解包是安全的；源码与 data 都不在这个目录里。
+# 解压前先校验归档完整性，避免损坏包把现有 dist 删掉
+tar -tzf /tmp/aq.tar.gz >/dev/null
+
 rm -rf packages/web/dist
 
 tar -xzf /tmp/aq.tar.gz -C $RemoteDir
