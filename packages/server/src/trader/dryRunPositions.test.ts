@@ -56,6 +56,8 @@ import { codeOnly } from '../testUtils/sourceText.js';
 
 const AUTO = readFileSync(new URL('./autoTrader.ts', import.meta.url), 'utf8');
 const CODE = codeOnly(AUTO);
+const PAPER = readFileSync(new URL('./paperPositions.ts', import.meta.url), 'utf8');
+const PAPER_CODE = codeOnly(PAPER);
 
 test('★★★ 必须有 effectivePositions()，且模拟盘走本地持仓', () => {
   assert.ok(
@@ -63,18 +65,24 @@ test('★★★ 必须有 effectivePositions()，且模拟盘走本地持仓', (
     '★ 必须有 effectivePositions() —— 它是"按模式选持仓真相来源"的唯一入口',
   );
   const at = CODE.indexOf('private async effectivePositions');
-  const body = CODE.slice(at, at + 1600);
+  const body = CODE.slice(at, at + 800);
   assert.ok(
     /if \(!this\.isDryRun\) return this\.deps\.broker\.getPositions\(symbol\);/.test(body),
     '★ 实盘必须直接转发（交易所是唯一真相来源）',
   );
   assert.ok(
-    /positionStore\s*\r?\n?\s*\.open\(this\.deps\.trader\.id\)/.test(body) ||
-      /positionStore\.open\(this\.deps\.trader\.id\)/.test(body),
+    /buildDryRunExchangePositions\(/.test(body),
+    '★ 模拟盘必须委托给 paperPositions.ts 的 buildDryRunExchangePositions',
+  );
+  const paperAt = PAPER_CODE.indexOf('export async function buildDryRunExchangePositions');
+  const paperBody = PAPER_CODE.slice(paperAt, paperAt + 1600);
+  assert.ok(
+    /positionStore\s*\r?\n?\s*\.open\(input\.traderId\)/.test(paperBody) ||
+      /positionStore\.open\(input\.traderId\)/.test(paperBody),
     '★ 模拟盘必须用本地持仓合成（那些仓位本来就是本地模拟的）',
   );
   assert.ok(
-    /getMarkPrice\(local\.symbol\)/.test(body),
+    /getMarkPrice\(local\.symbol\)/.test(paperBody),
     '★ 必须取真实标记价 —— 行情不是模拟的，浮盈要按它算',
   );
 });
@@ -99,7 +107,20 @@ test('★★★ 模拟盘的保护单必须真的会触发（不能永远停在 
     '★ 必须有模拟盘结算 —— 否则保护单永不触发，close_reason 只能靠猜',
   );
   const at = CODE.indexOf('private async settleDryRunPositions');
-  const body = CODE.slice(at, at + 3200);
+  const delegateBody = CODE.slice(at, at + 1000);
+  assert.ok(
+    /settleDryRunPositionsForTrader\(/.test(delegateBody),
+    '★ settleDryRunPositions 必须委托给 paperPositions.ts 的 settleDryRunPositionsForTrader',
+  );
+  assert.ok(
+    /this\.bookClosedPosition\(local, reason, exitPrice, exitFee, undefined, \{ entryFeeFallback \}\)/.test(
+      delegateBody,
+    ),
+    '★ 必须走唯一的平仓记账路径（§2.3），不能自己写 trades',
+  );
+
+  const settleAt = PAPER_CODE.indexOf('export async function settleDryRunPositionsForTrader');
+  const body = PAPER_CODE.slice(settleAt, settleAt + 3200);
   assert.ok(
     /const hitStop = stop !== null && stop > 0 && \(isLong \? mark <= stop : mark >= stop\)/.test(body),
     '★ 做多的止损判据是"标记价 ≤ 止损"（做空反过来）',
@@ -115,16 +136,14 @@ test('★★★ 模拟盘的保护单必须真的会触发（不能永远停在 
     '★ 成交价必须是【触发价】而不是标记价 —— 否则"止损距离"的归因会被污染',
   );
   assert.ok(
-    /await this\.bookClosedPosition\(local, reason, exitPrice, exitFee, undefined, \{[\s\S]{0,120}?entryFeeFallback: entryFee/.test(
-      body,
-    ),
-    '★ 必须走唯一的平仓记账路径（§2.3），不能自己写 trades',
+    /await input\.bookClosedPosition\(local, reason, exitPrice, exitFee, entryFee\)/.test(body),
+    '★ 必须通过回调进入唯一的平仓记账路径',
   );
 });
 
 test('★★★ 止损优先：同一轮同时穿过止损与止盈时按保守方向处理', () => {
-  const at = CODE.indexOf('private async settleDryRunPositions');
-  const body = CODE.slice(at, at + 3200);
+  const settleAt = PAPER_CODE.indexOf('export async function settleDryRunPositionsForTrader');
+  const body = PAPER_CODE.slice(settleAt, settleAt + 3200);
   assert.ok(
     /const reason: CloseReason = hitStop \? 'stop_loss' : 'take_profit'/.test(body),
     '★ 两个都碰到时按止损处理（少赚好过多亏）',
@@ -133,19 +152,22 @@ test('★★★ 止损优先：同一轮同时穿过止损与止盈时按保守�
 
 test('★★★ 模拟盘的结算必须记手续费（记 0 会让它比现实更容易赚）', () => {
   const at = CODE.indexOf('private async settleDryRunPositions');
-  const body = CODE.slice(at, at + 3600);
-  /*
-   * ⚠️ 所有 dry-run 平仓路径共用 `dryRunRoundTripFee()`（2026-11-09 统一）：
-   * 先算整趟往返费，再对半拆成 entry / exit 两侧 —— 总额一个数都不变，只修正归属。
-   * 这里同时钉住"settle 走的是那个共用实现"和"它真的把开仓侧交给记账路径"。
-   */
+  const delegateBody = CODE.slice(at, at + 1000);
   assert.ok(
-    /const \{ entryFee, exitFee \} = this\.dryRunRoundTripFee\(exitPrice, local\.quantity\)/.test(body),
+    /dryRunRoundTripFee:\s*\(exitPrice, quantity\) => this\.dryRunRoundTripFee\(exitPrice, quantity\)/.test(
+      delegateBody,
+    ),
     '★ settle 必须走共用的 dryRunRoundTripFee() —— 否则各条平仓路径的成本口径会再次分叉',
   );
   assert.ok(
-    /entryFeeFallback: entryFee/.test(body),
+    /entryFeeFallback/.test(delegateBody),
     '★ 拆出来的开仓侧费用必须交给 bookClosedPosition 的回退路径',
+  );
+  const settleAt = PAPER_CODE.indexOf('export async function settleDryRunPositionsForTrader');
+  const body = PAPER_CODE.slice(settleAt, settleAt + 3200);
+  assert.ok(
+    /const \{ entryFee, exitFee \} = input\.dryRunRoundTripFee\(exitPrice, local\.quantity\)/.test(body),
+    '★ paperPositions 内部必须调用注入的 dryRunRoundTripFee()',
   );
 
   /* 共用估算本体：总额 = 名义 × 往返费率；两侧各半。 */

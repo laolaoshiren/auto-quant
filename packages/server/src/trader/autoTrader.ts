@@ -100,6 +100,37 @@ import {
   nextCycleDelayMs,
 } from './cycleSchedule.js';
 import {
+  describeBreaker,
+  describeCycleFailure,
+  type CycleFailurePhase,
+} from './cycleFailures.js';
+import {
+  buildTraderEquitySnapshot,
+  recordTraderEquity,
+} from './equityRecord.js';
+import {
+  buildDryRunExchangePositions,
+  dryRunUnrealizedPercent,
+  settleDryRunPositionsForTrader,
+} from './paperPositions.js';
+import {
+  buildPromptMemory as buildTraderPromptMemory,
+  buildPromptPositions as buildTraderPromptPositions,
+  PROMPT_LESSON_LIMIT,
+  selectPromptLessons,
+  toPositionView as buildPositionView,
+  type PromptLessonLike,
+} from './promptBuilders.js';
+
+export {
+  describeBreaker,
+  describeCycleFailure,
+  PROMPT_LESSON_LIMIT,
+  selectPromptLessons,
+  type CycleFailurePhase,
+  type PromptLessonLike,
+};
+import {
   BAR_MINUTES,
   pendingTimeoutMinutes,
   timeframeBarMinutes,
@@ -283,23 +314,6 @@ export function ledgerGapTolerance(equity: number): number {
 const FULL_RECONCILE_EVERY_PASSES = 24;
 
 /**
- * 两条权益快照差在这以内就算"同一个数"（浮点末位不算变化）。
- *
- * 用绝对容差而不是相等：`equity` 是"初始 + Σ已实现 + 浮盈"算出来的，
- * 浮盈那一路经过价格换算，同一个持仓在同一个价位上重算可能差在 1e-12 量级 ——
- * 那不该被当成"账户动了"。
- */
-const SNAPSHOT_SAME_TOLERANCE = 1e-9;
-
-/**
- * 持仓与权益都没变时，最多隔多久记一条**心跳**快照（30 分钟）。
- *
- * 必须严格短于前端 `ACCOUNT_READING_STALE_MS`（60 分钟），确保运行中机器人空仓期间
- * 不会因为心跳去重而在列表中被误报「账户读数已过期」，也能在启动后半小时内形成真实曲线。
- */
-const SNAPSHOT_HEARTBEAT_MS = 30 * 60 * 1000;
-
-/**
  * 结清一张本地委托之前，它至少要有多"老"。
  *
  * ## 为什么需要这个宽限
@@ -328,15 +342,6 @@ export const ORDER_SETTLE_GRACE_MS = 2 * 60_000;
  * 提示词里也把它写明，免得模型以为可以一直要。
  */
 export const MAX_DATA_ROUNDS = 3;
-
-/**
- * 提示词里给模型看多少条**自己复盘出来的教训**。
- *
- * ⚠️ 这个数从"按候选池遍历到 8 条"改成了"按时间取最近 8 条"（见
- * `buildPromptLessons` 的说明）：**条数没变，变的是"取哪 8 条"。**
- * 旧口径下只有候选池排名前 4 的标的有机会，最新的教训常常一条都进不来。
- */
-export const PROMPT_LESSON_LIMIT = 8;
 
 /**
  * **正文一个字都没有**时的重试要求（实盘缺陷，2026-10-17）。
@@ -468,48 +473,6 @@ export function emptyContentRetryPlan(input: {
         : `模型这一轮正文为空（输出预算被思考吃光）—— 重试时把输出预算从 ` +
           `${input.outputBudgetTokens} 加到 ${maxTokens}，并要求它跳过思维链直接给决策块。`,
   };
-}
-
-/** 提示词里"你自己复盘出来的教训"的一条。 */
-export interface PromptLessonLike {
-  symbol: string;
-  closeReason: string;
-  netPnl: number;
-  lesson: string;
-}
-
-/**
- * 从 `agent_memory` 的**按时间倒序**快照里挑要进提示词的教训。
- *
- * ⚠️ 抽成纯函数是为了**可测**：这段逻辑出过一个很隐蔽的 BUG（见下），
- * 而它藏在 `AutoTrader` 的私有方法里、又依赖数据库外键，很难写一条干净的用例。
- *
- * ## 那个 BUG（2026-10-02 实测）
- *
- * 旧实现是"遍历候选池顺序 → 每标的取 2 条 → 满 8 条停"：
- *
- *     for (const symbol of symbols) { ... }     // 候选池按 24h 成交额降序
- *
- * 三者叠加的后果：**只有候选池排名前 4 左右的标的**的教训能进提示词。
- * HYPEUSDT 常排第 14 位，于是它的教训永远进不了 —— 而区块标题写"最新在前"。
- *
- * 实测：`#90`（15:22 写下 HYPE 的回吐教训，"不解决留利"那句）在 `#1851`
- * （16:02 的决策轮）提示词里**完全找不到**。
- *
- * 所以现在的口径是：**按时间取最近 N 条**（输入即已按 id DESC 排好）。
- * 这样"最新学到的"一定到达现场；代价只是老标的的旧教训可能被挤出 ——
- * 而旧教训针对的是当时的行情，本来就更不相关。
- */
-export function selectPromptLessons(
-  recent: readonly PromptLessonLike[],
-  limit: number = PROMPT_LESSON_LIMIT,
-): PromptLessonLike[] {
-  return recent.slice(0, Math.max(0, limit)).map((m) => ({
-    symbol: m.symbol,
-    closeReason: m.closeReason,
-    netPnl: m.netPnl,
-    lesson: m.lesson,
-  }));
 }
 
 /**
@@ -7356,163 +7319,32 @@ export class AutoTrader {
    */
   private async effectivePositions(symbol?: string): Promise<ExchangePosition[]> {
     if (!this.isDryRun) return this.deps.broker.getPositions(symbol);
-
-    const open = positionStore
-      .open(this.deps.trader.id)
-      .filter((p) => symbol === undefined || p.symbol === normalizeSymbol(symbol));
-    if (open.length === 0) return [];
-
-    const out: ExchangePosition[] = [];
-    for (const local of open) {
-      let mark = 0;
-      try {
-        mark = await this.deps.broker.getMarkPrice(local.symbol);
-      } catch {
-        /* 读不到标记价：下面用入场价兜底（浮盈按 0），并让调用方看到这个仓位仍然存在。 */
-      }
-      const price = mark > 0 ? mark : local.entry_price;
-      const isLong = local.side === 'long';
-      const pnl = (isLong ? price - local.entry_price : local.entry_price - price) * local.quantity;
-      const margin =
-        local.margin_used > 0
-          ? local.margin_used
-          : (local.entry_price * local.quantity) / Math.max(1, local.leverage);
-
-      out.push({
-        symbol: local.symbol,
-        side: local.side as PositionSide,
-        quantity: local.quantity,
-        entryPrice: local.entry_price,
-        markPrice: price,
-        leverage: local.leverage,
-        liquidationPrice: local.liquidation_price ?? null,
-        unrealizedPnl: pnl,
-        unrealizedPnlPercent: margin > 0 ? (pnl / margin) * 100 : 0,
-        marginUsed: margin,
-        notional: price * local.quantity,
-        marginType: 'cross',
-      });
-    }
-    return out;
+    return buildDryRunExchangePositions({
+      traderId: this.deps.trader.id,
+      broker: this.deps.broker,
+      symbol,
+    });
   }
 
-  /**
-   * **模拟盘的持仓结算** —— 对着标记价判保护单有没有触发。
-   *
-   * 见 `reconcilePositions` 顶部那段事故说明：模拟盘**不能**拿交易所的持仓列表
-   * 当真相（那里从来没有它的仓位），否则每个仓位都会在同一轮被"发现已消失"
-   * 然后平掉 —— 实测持有时间 p50 只有 3.8 分钟。
-   *
-   * ## 判据
-   *
-   * ```
-   *   做多：标记价 ≤ 止损 → 触发止损（以【止损价】成交）
-   *         标记价 ≥ 止盈 → 触发止盈（以【止盈价】成交）
-   *   做空：反过来
-   * ```
-   *
-   * ⚠️ **成交价用触发价，不用标记价**：真实交易所的条件单触发后是以触发价
-   * （`STOP_MARKET` 是市价、但触发那一刻的价就是触发价附近）成交的。
-   * 用标记价会让"止损距离"看起来比实际更小，污染后续的归因。
-   *
-   * ⚠️ **两个都碰到时按"先碰到哪个"**：一次对账只看一个快照，无法知道先后。
-   * 那种情况在 1 个周期（15 分钟）内同时穿过止损与止盈，说明波动极大；
-   * 按**止损优先**处理（保守方向 —— 少赚好过多亏）。
-   *
-   * ⚠️ 标记价读不到时**跳过这个标的**，不猜。读不到 ≠ 没触发，
-   * 而据一个猜出来的价平仓会永久污染账本（§2.3）。
-   */
+  /** 模拟盘持仓结算（委托 `paperPositions.ts`，行为逐字节一致）。 */
   private async settleDryRunPositions(): Promise<void> {
-    const traderId = this.deps.trader.id;
-    const open = positionStore.open(traderId);
-    if (open.length === 0) {
+    const marks = await settleDryRunPositionsForTrader({
+      traderId: this.deps.trader.id,
+      broker: this.deps.broker,
+      dryRunRoundTripFee: (exitPrice, quantity) => this.dryRunRoundTripFee(exitPrice, quantity),
+      bookClosedPosition: (local, reason, exitPrice, exitFee, entryFeeFallback) =>
+        this.bookClosedPosition(local, reason, exitPrice, exitFee, undefined, { entryFeeFallback }),
+      onInfo: (msg) => this.emit('info', msg),
+      onWarn: (msg) => this.emit('warn', msg),
+    });
+    if (marks.length === 0) {
       this.markPriceSnapshot.clear();
       return;
     }
-
-    /* 本轮读到的标记价（仅保留仍处于开仓状态的标的），顺手喂给模拟盘钱包（见 `paperMarkPrices`）。 */
-    const marks: Array<{ symbol: string; markPrice: number }> = [];
-
-    for (const local of open) {
-      let mark = 0;
-      try {
-        mark = await this.deps.broker.getMarkPrice(local.symbol);
-      } catch (error) {
-        this.emit(
-          'warn',
-          `模拟盘读不到 ${local.symbol} 的标记价（${(error as Error).message}），本轮不结算它。`,
-        );
-        continue;
-      }
-      if (!(mark > 0)) continue;
-
-      const isLong = local.side === 'long';
-      const stop = local.stop_loss;
-      const target = local.take_profit;
-
-      /*
-       * 触发判据。`<=` / `>=` 而不是 `<` / `>`：真实交易所的条件单在**等于**
-       * 触发价时就会触发，用严格不等会让恰好触到的那一笔永远不平。
-       */
-      const hitStop = stop !== null && stop > 0 && (isLong ? mark <= stop : mark >= stop);
-      const hitTarget =
-        target !== null && target > 0 && (isLong ? mark >= target : mark <= target);
-
-      if (!hitStop && !hitTarget) {
-        marks.push({ symbol: local.symbol, markPrice: mark });
-        /*
-         * 都没触发 → 继续持有。仍然要**更新回撤守卫用的峰值** ——
-         * 那是"浮盈曾经到过多少"的记录，只有每轮更新才准。
-         */
-        positionStore.updatePeak(traderId, local.symbol, this.dryRunUnrealizedPercent(local, mark));
-        continue;
-      }
-
-      /* 止损优先（保守方向）。见方法注释里"两个都碰到"那段。 */
-      const reason: CloseReason = hitStop ? 'stop_loss' : 'take_profit';
-      const exitPrice = hitStop ? (stop as number) : (target as number);
-
-      this.emit(
-        'info',
-        `[模拟盘] ${local.symbol} ${isLong ? '多头' : '空头'} 的` +
-          `${hitStop ? '止损' : '止盈'} ${exitPrice} 已被标记价 ${mark} 触发，按触发价结算。`,
-      );
-
-      /*
-       * ⚠️ 走 `bookClosedPosition()` 而不是自己写 `trades` —— 那是**唯一**的
-       * 平仓记账路径（§2.3），它负责减仓扣减、手续费归属、`positions.close()`。
-       * 自己再写一遍会立刻产生"两处各记一次"的分歧。
-       *
-       * 手续费：模拟盘没有真实成交记录，按**整趟往返费率**估（见
-       * `dryRunRoundTripFee()` —— 那是所有 dry-run 平仓路径共用的唯一一份估算，
-       * 这样"止损/止盈触发"与"模型主动平仓/紧急平仓/手工平仓"的成本口径一致）。
-       *
-       * ⚠️ **不能用 0**：那会让模拟盘看起来比现实更容易赚，而模拟盘的价值恰恰是
-       * "尽量像真的"。实测模拟盘的净额本来就是负的，记 0 会把真实成本藏起来。
-       */
-      const { entryFee, exitFee } = this.dryRunRoundTripFee(exitPrice, local.quantity);
-
-      await this.bookClosedPosition(local, reason, exitPrice, exitFee, undefined, {
-        entryFeeFallback: entryFee,
-      });
-    }
-
-    /* 整轮读完后统一记一次，供模拟盘钱包算浮盈（见 `paperMarkPrices`）。 */
     this.rememberMarkPrices(marks);
   }
 
-  /**
-   * **最近一次读到的标记价快照**（symbol → markPrice）。
-   *
-   * 用途只有一个：让 `TraderManager` 能在**同步**上下文里给模拟盘钱包算浮盈
-   *（`paperAccountStateOf` 是 `getAccountState()` 的实现，而那个签名是同步友好的）。
-   *
-   * 为什么不在这里现拉一次行情：`getAccountState()` 每个周期都会被调用，
-   * 而行情本来就已经在周期里拉过了 —— 再拉一次等于把一个纯读数变成一次网络请求，
-   * 且会在"行情接口抖动"时让账户读数跟着失败。缓存住的这一份足够算浮盈。
-   *
-   * 没读过时是空 Map：调用方按"浮盈 0"处理，**不编造价格**。
-   */
+  /** 最近一次读到的标记价快照（symbol → markPrice），供模拟盘钱包同步折算浮盈。 */
   private markPriceSnapshot = new Map<string, number>();
 
   /** 最近一次的标记价快照（只读，供模拟盘钱包折算浮盈）。 */
@@ -7520,12 +7352,6 @@ export class AutoTrader {
     return this.markPriceSnapshot;
   }
 
-  /**
-   * 记下本轮读到的标记价，供 `paperMarkPrices()` 使用。
-   *
-   * 只保留**当前有持仓的**标的：全市场 500 多个 symbol 的 Map 会一直占着内存，
-   * 而模拟盘钱包只关心自己拿着的那几个。
-   */
   private rememberMarkPrices(rows: ReadonlyArray<{ symbol: string; markPrice: number }>): void {
     const next = new Map<string, number>();
     for (const row of rows) {
@@ -7534,20 +7360,8 @@ export class AutoTrader {
     this.markPriceSnapshot = next;
   }
 
-  /**
-   * 模拟盘某个持仓在给定标记价下的**浮盈百分比**（保证金口径）。
-   *
-   * 与真实交易所的 `unrealizedPnlPercent` 同一口径：盈亏 ÷ 保证金。
-   * 保证金用 `entry × qty ÷ leverage` —— 与 `marginOf()` 一致。
-   */
   private dryRunUnrealizedPercent(local: PositionRow, mark: number): number {
-    const isLong = local.side === 'long';
-    const pnl = (isLong ? mark - local.entry_price : local.entry_price - mark) * local.quantity;
-    const margin =
-      local.margin_used > 0
-        ? local.margin_used
-        : (local.entry_price * local.quantity) / Math.max(1, local.leverage);
-    return margin > 0 ? (pnl / margin) * 100 : 0;
+    return dryRunUnrealizedPercent(local, mark);
   }
 
   /**
@@ -14682,252 +14496,20 @@ reduceQuantity: null,
     traderId: number,
     config: StrategyConfig,
     entriesThisHour: number,
-    /** 这一轮的候选标的 —— 用来取"我在这些标的上以前是怎么亏的"。 */
-    symbols: readonly string[],
+    _symbols?: readonly string[],
   ): PromptMemory {
-    const since = new Date(Date.now() - PROMPT_PERFORMANCE_WINDOW_HOURS * 3_600_000).toISOString();
-    const performance = tradeStore.performanceSince(traderId, since);
-    const lastExitAt = tradeEvents.lastExit(traderId);
-    const lastExitMs = lastExitAt ? Date.parse(lastExitAt) : Number.NaN;
-
-    return {
-      performance: {
-        windowHours: PROMPT_PERFORMANCE_WINDOW_HOURS,
-        totalTrades: performance.totalTrades,
-        wins: performance.wins,
-        losses: performance.losses,
-        grossPnl: performance.grossPnl,
-        totalFees: performance.totalFees,
-        totalFunding: performance.totalFunding,
-        netPnl: performance.netPnl,
-        avgWin: performance.avgWin,
-        avgLoss: performance.avgLoss,
-        /*
-         * 没有亏损单时这个比值算不出来 —— 用 null 表示"算不出来"，而不是 0 或无穷：
-         * 0 会被渲染成"实际盈亏比 0.00"，读起来像是"每一笔都亏"，与事实相反。
-         */
-        realizedPayoffRatio:
-          performance.avgLoss > 0 ? performance.avgWin / performance.avgLoss : null,
-        roundTripFeeRate: performance.roundTripFeeRate,
-        /*
-         * ⚠️ **连续空转了多少轮。**
-         *
-         * 上面那些字段在"没有成交"时全是 0，而模型需要区分"刚开始跑"与
-         * "已经连着二十几轮把候选全部否掉"。后者是系统性问题，处置方式
-         * （改门槛 / 改标的池 / 承认账户规模不该交易）与"再等等"完全不同。
-         */
-        idleCycles: this.countIdleCycles(traderId),
-        /*
-         * ⚠️ **按平仓原因摊开 —— "钱是在哪一类里漏掉的"。**
-         *
-         * 用户 2026-10-02：「AI 是瞎子、傻子，**看不清订单**」。
-         * 聚合后的绩效看不出答案；摊开之后（实测 63 笔）是：
-         * 赚钱那类平均走 3.6%，而它主动平仓那类平均只走 0.4%（往返成本 0.07–0.1%）。
-         *
-         * 上限 200 笔是**固定常数**，所以这一步是 O(1)（§4）。
-         */
-        byCloseReason: closeReasonBreakdown(tradeStore.recent(traderId, 200)),
-      },
-      recentCloses: tradeStore.recentWithReason(traderId, PROMPT_RECENT_CLOSE_COUNT),
-      throttle: {
-        entriesThisHour,
-        maxEntriesPerHour: config.throttle.maxEntriesPerHour,
-        // 时间戳读不出来时按"从未平过仓"处理（null）：宁可少说一句，也不要报一个假的剩余时间。
-        minutesSinceLastExit: Number.isFinite(lastExitMs)
-          ? Math.max(0, (Date.now() - lastExitMs) / 60_000)
-          : null,
-        reentryCooldownMinutes: config.throttle.reentryCooldownMinutes,
-      },
-      /*
-       * 最近被风控拒绝的提议。
-       *
-       * **这一块是实测逼出来的**：模型提「名义 $6.00」→ 取整后 $5.00 → 拒绝，
-       * 而下一轮它只看到绩效与节流、**完全不知道被拒过**，于是原样再提一次。
-       * 操作员看到的是「为什么同一个错误反复出现」——
-       * **不是模型不智能，是这一侧没把它自己的失败告诉它。**
-       *
-       * 取自 `decision_records` 的执行记录（`status === 'rejected'`），
-       * 固定取最近 3 条（与最近平仓同样的 O(1) 纪律，见 §4）。
-       */
-      recentRejections: this.buildPromptRejections(traderId),
-      lessons: this.buildPromptLessons(traderId),
-    };
-  }
-
-  /**
-   * AI 自己复盘出来的教训，按候选标的取。
-   *
-   * ## 为什么这一条是"越跑越厉害"的关键
-   *
-   * `agent_memory` 是复盘员每笔平仓之后写下的结论（"止损过紧""费用吃掉利润"
-   * 之类）。它写进了库，**但在这次改动之前没有任何决策路径读它** ——
-   * 交易决策提示词里从来没有出现过教训，于是 AI 每一轮都在从零开始：
-   * 它看不见自己上一笔为什么亏，也看不见复盘员对那笔怎么说。
-   *
-   * 一条教训要影响交易，原来只能**绕道**：复盘员的结论 → 策略师（如果它恰好
-   * 调用了 `get_lessons`）→ 变成一次参数改动 → 才间接影响下一笔。
-   * 中间任何一跳断掉，教训就沉在库里了。
-   *
-   * ## 取多少
-   *
-   * 每个标的最近 2 条，总数封顶 8 条 —— 与 `recentCloses` / `recentRejections`
-   * 同样的 **O(1) 纪律**（§4）：区块大小不随交易历史增长。超过就丢后面的，
-   * 因为**最近的教训最可能还与当前行情相关**。
-   *
-   * 按候选顺序取（候选已按评分排过），于是最值得看的标的的教训优先保留。
-   */
-  private buildPromptLessons(traderId: number): PromptLesson[] {
-    /*
-     * ⚠️ **【2026-10-02 修复】原来按"候选池顺序"遍历，把最新教训挤掉了。**
-     *
-     * 旧实现：
-     *
-     *     for (const symbol of symbols) {                     // 候选池顺序（按成交额降序）
-     *       for (const m of agentMemory.forSymbol(traderId, symbol, 2)) {  // 每标的 2 条
-     *         out.push(...);
-     *         if (out.length >= 8) return out;                // 满 8 条就停
-     *       }
-     *     }
-     *
-     * 三个条件叠在一起，后果是：**只有候选池排名前 4 左右的标的**的教训能进提示词。
-     * 而候选池按 24h 成交额降序 —— HYPEUSDT 常排第 14 位左右，于是它的教训
-     * **永远进不了**。而区块标题写的是"最新在前"，名不副实。
-     *
-     * 实测证据（两轮相隔 40 分钟）：
-     *
-     *     #90（agent_memory）15:22 写下 HYPE 的回吐教训，里面有
-     *         "同类单应在浮盈约 0.5% 价格时部分止盈" 与
-     *         "保本/移动止损只解决不亏，不解决留利"
-     *     #1851（决策轮）16:02 的提示词里【完全找不到它】，
-     *         教训列表第一条是更早的 SUIUSDT 教训
-     *
-     * 也就是说：**复盘员认真总结出一条能改变行为的结论，而它没有到达决策现场。**
-     * 而那句话（"不解决留利"）恰好是当时账户最需要的一条。
-     *
-     * 现在按**时间**取最近 N 条 —— 与标题一致，让每一次复盘都真的被看见。
-     * 代价是"候选池里某个老标的的旧教训"可能被挤出去；但旧教训针对的是当时的行情，
-     * 而"最新的教训"正是它刚学到的。
-     */
-    return selectPromptLessons(agentMemory.recent(traderId, PROMPT_LESSON_LIMIT));
-  }
-
-  /**
-   * 最近被拒的提议，给提示词用。
-   *
-   * 只取 `rejected`（被风控挡下），**不含 `failed`**（执行出错）——
-   * 后者是系统问题，让模型去"调整提议"是误导。
-   */
-  private buildPromptRejections(traderId: number): PromptRejection[] {
-    try {
-      const recent = decisionStore.list(traderId, 20);
-      const out: PromptRejection[] = [];
-      for (const rec of recent) {
-        for (const entry of rec.executionLog) {
-          if (entry.status !== 'rejected') continue;
-          // 从记录里找回当时提议的名义价值：执行记录只带理由，
-          // 而"我提了多少"是模型调整时最需要的对照。
-          const decision = rec.decisions.find((d) => d.symbol === entry.symbol);
-          out.push({
-            symbol: entry.symbol,
-            positionSizeUsd: decision?.positionSizeUsd ?? 0,
-            reason: entry.detail,
-          });
-          if (out.length >= 3) return out;
-        }
-      }
-      return out;
-    } catch {
-      /*
-       * 读不到就当作"没有被拒记录" —— 少一块记忆好过整个周期失败。
-       * **但这是有损的**：模型会因此重复它上一次的错误，所以只吞读取异常，
-       * 不吞逻辑异常。
-       */
-      return [];
-    }
-  }
-
-  /**
-   * 连续多少轮没有做出**任何**决策。
-   *
-   * 从最近的决策记录往前数，遇到第一条有决策的就停。它回答的是
-   * "我是不是已经空转很久了" —— 而那个问题在绩效区块里原来没有答案：
-   * `totalTrades === 0` 只会说"最近 N 小时没有已平仓的交易"，
-   * 那既可能是刚跑两轮，也可能是连着二十几轮把候选全部否掉。
-   *
-   * ⚠️ 扫的是固定 50 条（O(1) 的窗口，与其它记忆块同一纪律）：这个数字只需要
-   * 分辨"几轮"与"几十轮"，不需要跨月精确 —— 而扫全表会让每轮都读一遍历史。
-   *
-   * 读不到时返回 0（而不是抛）：一块统计缺失不该让整个周期失败。
-   * **但那是偏乐观的默认** —— 读失败时它会显示成"没有空转"，所以只吞读取异常。
-   */
-  private countIdleCycles(traderId: number): number {
-    try {
-      const recent = decisionStore.list(traderId, 50);
-      let idle = 0;
-      for (const rec of recent) {
-        if (rec.decisions.length > 0) break;
-        idle += 1;
-      }
-      return idle;
-    } catch {
-      return 0;
-    }
+    return buildTraderPromptMemory(traderId, config, entriesThisHour);
   }
 
   private buildPromptPositions(
     localPositions: PositionRow[],
     snapshots: Map<string, MarketSnapshot>,
   ): PromptPosition[] {
-    return localPositions.map((p) => ({
-      position: this.toPositionView(p, snapshots),
-      snapshot: snapshots.get(p.symbol) ?? null,
-      holdingMinutes: (Date.now() - new Date(p.opened_at).getTime()) / 60_000,
-    }));
+    return buildTraderPromptPositions(localPositions, snapshots);
   }
 
   private toPositionView(row: PositionRow, snapshots: Map<string, MarketSnapshot>): PositionView {
-    const snapshot = snapshots.get(row.symbol);
-    /*
-     * ⚠️ **这个回落是"账面上的假事实"，不要让它发生。**
-     *
-     * 取不到快照时拿开仓价当市价，算出来的未实现盈亏恒等于 0 —— 一笔正在亏的
-     * 持仓会以"浮盈 +0.00"的样子进到提示词里，而模型据此会认为没什么可管的。
-     *
-     * 这条路径应当是**不可达**的：候选评分门槛已经把持仓标的排除在外
-     * （见上面 gate 那段），而持仓标的本身是由 `mustInclude: held` 强制进候选池的。
-     * 剩下唯一的可能是"这个标的的行情确实取不到"—— 那种情况下
-     * `ownUnrealizedPnlOf()`（归属权益那条路径）会另外报一条"读不到标记价"的告警，
-     * 提示词里的这一处仍然不代表真相。
-     *
-     * 保留回落是为了不改 `PositionView.markPrice: number` 的类型契约（改动会波及
-     * 前端与持仓页）；但**如果这条路径真的开始出现，该做的是让持仓标的必然带快照，
-     * 而不是在这里补一个更好看的默认值。**
-     */
-    const markPrice = snapshot?.price ?? row.entry_price;
-    const isLong = row.side === 'long';
-    const unrealizedPnl =
-      (isLong ? markPrice - row.entry_price : row.entry_price - markPrice) * row.quantity;
-
-    return {
-      id: row.id,
-      traderId: row.trader_id,
-      symbol: row.symbol,
-      side: isLong ? 'long' : 'short',
-      quantity: row.quantity,
-      entryPrice: row.entry_price,
-      markPrice,
-      leverage: row.leverage,
-      liquidationPrice: row.liquidation_price,
-      unrealizedPnl,
-      unrealizedPnlPercent: row.margin_used > 0 ? (unrealizedPnl / row.margin_used) * 100 : 0,
-      peakPnlPercent: row.peak_pnl_percent,
-      marginUsed: row.margin_used,
-      notional: row.quantity * markPrice,
-      stopLoss: row.stop_loss,
-      takeProfit: row.take_profit,
-      openedAt: row.opened_at,
-      openReasoning: row.open_reasoning,
-    };
+    return buildPositionView(row, snapshots);
   }
 
   private recordOrder(input: {
@@ -15093,149 +14675,32 @@ reduceQuantity: null,
     });
   }
 
-  /**
-   * 组装这个机器人本次的权益快照。
-   *
-   * 为什么不能直接写 `account.equity`：同一个交易所账户下可以跑多个机器人 ——
-   * 它们共用一份凭据、共用一个钱包，`account.equity` 对它们全都是**同一个数**。
-   * 实盘上量到的后果：一个 **0 笔平仓、净盈亏 0.000000** 的机器人显示 +2.67%
-   * 收益率，而另一个机器人显示完全相同的 +2.67%（两个机器人读的是同一个钱包）。
-   *
-   * 归属权益只由这个机器人自己的东西构成（见 `attributedEquity()`）：
-   *
-   *   initialEquity + Σ(本机器人 net_pnl) + 本机器人持仓浮盈
-   *
-   * 浮盈用**自己的** `positions` 行（开仓价、数量、方向）按标记价算；标记价取自
-   * 交易所持仓里的 `markPrice`（行情事实，对所有机器人相同，借用它不引入归属
-   * 错误），**不是** `account.unrealizedPnl` —— 那个数同样是整个账户的，会把它
-   * 人的浮盈算进来。读不到标记价时按 0 计并明确报警，不静默。
-   *
-   * 账户权益没有丢：`accountEquity` / `accountUnrealizedPnl` 两列记的就是它，
-   * 风控的回撤高水位与「账户权益」展示读那两列（见 `realizedHighWaterMark`）。
-   */
-  private async buildEquitySnapshot(account: AccountState, exchangePositions: ExchangePosition[]): Promise<EquitySnapshot> {
-    const traderId = this.deps.trader.id;
-    const openPositions = positionStore.open(traderId);
-    const markPrices = new Map(exchangePositions.map((p) => [p.symbol, p.markPrice]));
-
-    /*
-     * ══════════════════════════════════════════════════════════════════════
-     *  ⚠️ **交易所没有的标的要回落到【行情】标记价**（2026-10-15 修）
-     * ══════════════════════════════════════════════════════════════════════
-     *
-     * ## 事故：模拟盘的浮盈恒被按 0 计入
-     *
-     * 上面那个 map 来自交易所的 `positionRisk` —— 而 `dry_run`（模拟盘）机器人的
-     * 本地持仓**在交易所根本不存在**，于是它**恒缺标记价**。线上实测（`#11`）：
-     * ```
-     *   每 5 秒一条 WARN
-     *   「这些标的有本地持仓但拿不到标记价，其浮盈未计入首页数字：SOLUSDT」
-     *   而那个 SOLUSDT 空头是模拟仓 —— 交易所侧本来就没有它。
-     * ```
-     * 后果：模拟盘的浮盈**永远少算那一块**，而界面上的数字看起来完全正常。
-     *
-     * ## 为什么回落是安全的
-     *
-     * 标记价是**行情事实**（对所有机器人相同），借它不引入归属错误 ——
-     * 与"借用交易所 `markPrice`"是同一条理由（见上面那段注释）。
-     *
-     * ⚠️ 只对**交易所没有的**标的去查行情：有的话优先用交易所那个数，
-     * 它是这个账户的实际结算依据。
-     */
-    const fromMarket = await this.deps.marketData.markPricesOf(
-      openPositions.map((p) => p.symbol).filter((symbol) => !markPrices.has(symbol)),
-    );
-
-    const { unrealizedPnl, missingMarkPrice } = ownUnrealizedPnlOf(openPositions, (symbol) =>
-      markPrices.get(symbol) ?? fromMarket.get(symbol),
-    );
-    if (missingMarkPrice.length > 0) {
-      this.emit(
-        'warn',
-        `读不到 ${missingMarkPrice.join('、')} 的标记价，这些持仓的浮动盈亏暂按 0 计入归属权益。`,
-      );
-    }
-
-    return {
-      traderId,
-      timestamp: new Date().toISOString(),
-      // 归属权益：本机器人自己的账，不是共享钱包。
-      equity: attributedEquity(
-        traderStore.get(traderId)?.initialEquity ?? 0,
-        tradeStore.stats(traderId).netPnl,
-        unrealizedPnl,
-      ),
-      availableBalance: account.availableBalance,
-      unrealizedPnl,
-      marginUsed: account.marginUsed,
-      openPositions: openPositions.length,
-      accountEquity: account.equity,
-      accountUnrealizedPnl: account.unrealizedPnl,
-    };
+  /** 组装归属权益快照（委托 `equityRecord.ts`，行为逐字节一致）。 */
+  private buildEquitySnapshot(
+    account: AccountState,
+    exchangePositions: ExchangePosition[],
+  ): Promise<EquitySnapshot> {
+    return buildTraderEquitySnapshot({
+      traderId: this.deps.trader.id,
+      account,
+      exchangePositions,
+      marketData: this.deps.marketData,
+      onWarn: (msg) => this.emit('warn', msg),
+    });
   }
 
-  /**
-   * 记录一条权益快照 —— **但完全重复的不记**。
-   *
-   * ## 为什么（用户的原话）
-   *
-   * 「默认上面显示得是全部 …… 鼠标悬停在某个时间节点上，显示得信息也是全局来的
-   * 数据（现在显示的数据我感觉是基于今天的，导致了**除了今天以外的鼠标悬停都看
-   * 不到数据**）」
-   *
-   * 查下来的结论是**数据没错**：那一刻的快照确实是那个值（悬停在 24/09 07:08
-   * 显示 21.97，而那条快照的 `equity` 就是 21.96687；如果它读的是"今天的值"，
-   * 应该显示 22.23）。**但体验确实是坏的**，而根因在这里：
-   *
-   * 空仓期间权益一动不动，而系统仍然每 45 分钟记一条**逐字节相同**的快照。
-   * 实测线上 635 条里最长的一段是**连续 64 条都是 21.9669**：
-   *
-   *     09-21T02:35 → 连续 31 条都是 20.8021
-   *     09-21T22:14 → 连续 19 条都是 22.0523
-   *     09-23T11:09 → 连续 64 条都是 21.9669
-   *     09-24T18:39 → 连续 27 条都是 22.0601
-   *
-   * 于是曲线上是大片长平线，**悬停在任何一点看到的都是同一个数** ——
-   * 用户的感受完全正确，只是原因不在提示框、而在这里。
-   *
-   * ## 规则
-   *
-   *   · **有变化 → 一定记**（持仓数、浮动盈亏、权益任一不同）；
-   *   · **没变化 → 每 `SNAPSHOT_HEARTBEAT_MS` 记一条心跳**，其余跳过。
-   *
-   * 心跳是必要的：没有它，长时间空仓会在曲线上留下**断档**，那看起来像
-   * "机器人没在跑"。而重复的中间态**没有信息量** —— 去掉它不丢任何东西。
-   *
-   * ## 比哪几项
-   *
-   * `openPositions` / `unrealizedPnl` / `equity` 三项。前两项是"这个机器人在干什么"，
-   * 最后一项是"结果" —— 只比 `equity` 会让"开了仓但价格还没动"被误判成重复。
-   *
-   * ⚠️ **不比较 `availableBalance` / `accountEquity`**：那是**共享钱包**的读数，
-   * 同一个账户下别的机器人交易也会让它变。用它当判据会让这个机器人在自己什么都没做
-   * 的时候记下一堆"变化"，而那条曲线上讲的是**它自己的账**。
-   */
-  private async recordEquity(account: AccountState, exchangePositions: ExchangePosition[]): Promise<void> {
-    const snapshot = await this.buildEquitySnapshot(account, exchangePositions);
-    if (this.isRedundantSnapshot(snapshot)) return;
-    equityStore.insert(snapshot);
-    eventBus.publish({ type: 'equity', traderId: this.deps.trader.id, snapshot });
-  }
-
-  /** 与上一条快照相比，这一条有没有新信息（判据见 `recordEquity`）。 */
-  private isRedundantSnapshot(next: EquitySnapshot): boolean {
-    const [prev] = equityStore.list(next.traderId, 1);
-    if (!prev) return false;
-
-    const same =
-      prev.openPositions === next.openPositions &&
-      Math.abs(prev.unrealizedPnl - next.unrealizedPnl) < SNAPSHOT_SAME_TOLERANCE &&
-      Math.abs(prev.equity - next.equity) < SNAPSHOT_SAME_TOLERANCE &&
-      Math.abs(prev.accountEquity - next.accountEquity) < SNAPSHOT_SAME_TOLERANCE;
-    if (!same) return false;
-
-    const ageMs = Date.parse(next.timestamp) - Date.parse(prev.timestamp);
-    return Number.isFinite(ageMs) && ageMs < SNAPSHOT_HEARTBEAT_MS;
+  /** 构建、去重、落库并广播机器人权益快照（委托 `equityRecord.ts`）。 */
+  private recordEquity(
+    account: AccountState,
+    exchangePositions: ExchangePosition[],
+  ): Promise<void> {
+    return recordTraderEquity({
+      traderId: this.deps.trader.id,
+      account,
+      exchangePositions,
+      marketData: this.deps.marketData,
+      onWarn: (msg) => this.emit('warn', msg),
+    });
   }
 }
 
@@ -15290,205 +14755,6 @@ export function makeClientId(prefix: string, symbol: string): string {
   // 只保留币安允许的字符；全被去掉时给一个占位符，避免出现空片段。
   const safeSymbol = symbol.replace(/[^A-Za-z0-9]/g, '').slice(0, 14) || 'X';
   return `${prefix}-${stamp}${random}-${safeSymbol}`.slice(0, 36);
-}
-
-/* -------------------------------------------------------------------------- */
-/*  周期失败的分类与表述                                                        */
-/* -------------------------------------------------------------------------- */
-
-/**
- * 失败发生在周期的哪一段。
- *
- * 只在**错误类型本身说明不了问题**时才用得上（`describeCycleFailure` 的最后一级）：
- * 行情层抛的是普通 `Error`，而下单路径抛的也可能是普通 `Error` —— 同一个异常类型在
- * 两个阶段意味着两件完全不同的事，只有阶段标记分得开。
- */
-export type CycleFailurePhase =
-  | 'bookkeeping'
-  | 'market'
-  | 'model'
-  | 'parse'
-  | 'risk'
-  | 'execute';
-
-/** 一条记录里放得下的错误原文长度。见 `clipDetail` 的说明。 */
-const FAILURE_DETAIL_LIMIT = 300;
-
-/**
- * 折叠并截断服务商 / 交易所返回的原文。
- *
- * 它们可能是一整页 HTML 错误页或者带着换行的 JSON。原样写进
- * `decision_records.error` 会：让一条记录在决策流里占满整屏、把元数据行挤出视野。
- * 300 字符够放下"insufficient balance: please top up"这类关键句。
- */
-function clipDetail(text: string): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  if (flat === '') return '未提供错误详情';
-  return flat.length > FAILURE_DETAIL_LIMIT ? `${flat.slice(0, FAILURE_DETAIL_LIMIT)}…` : flat;
-}
-
-function detailOf(error: unknown): string {
-  if (error instanceof Error) return clipDetail(error.message);
-  return clipDetail(String(error));
-}
-
-/**
- * `llm/errors.ts` 的 `emptyCompletionError()` 没有专属的 `kind`（HTTP 200、但没有任何
- * 可用的助手文本），只能认它那句固定的英文文案 —— 那是"AI 响应无法解析"这一类的
- * 唯一信号。判错的后果只是把"空补全"说成"服务不可用"，两者的处置建议相同，所以这个
- * 妥协是可接受的；不要为了它去改 `errors.ts` 的类型（那会牵动重试策略）。
- */
-function looksLikeEmptyCompletion(error: LlmError): boolean {
-  return error.status === null && /no assistant text/i.test(error.message);
-}
-
-/**
- * 一次失败的周期，该对操作员说什么。
- *
- * ## 为什么返回中文散文，而不是堆栈
- *
- * 决策流是操作员唯一会去看的地方（参考产品就是这么做的），而堆栈在那里等于什么都
- * 没说：既看不出"是谁没给钱"，也看不出"要不要做点什么"。所以每一类都给一句**能照着
- * 做**的话，并把服务商 / 交易所的原文附在中间 —— 那句话往往已经写明了原因
- * （额度耗尽、模型不存在、保证金不足）。
- *
- * ## 失败类别写在**第一个全角冒号之前**
- *
- * 决策流的元数据行只放类别（`失败 · AI 服务额度不足`），完整说明留在盒子里，见
- * `packages/web/src/components/DecisionFeed.tsx` 的 `failureCategory()`。没有为此
- * 新增列：`decision_records.error` 本来就在，而这条文本的唯一读者是人。
- *
- * ## 判类只做这一次，且**不看 HTTP 状态码**
- *
- * `LlmError.kind` 是 `llm/errors.ts` 已经判好的结论，这里直接用它。那里记着一次实测
- * 事故：一个网关在 **HTTP 400** 里返回 `模型不可用：deepseek-flash`，而"400 不可重试"
- * 的通用规则让一次本可成功的请求被放弃；修复方式正是在 `kindForStatus()` 里显式列出
- * 这类可用性短语。这里若按状态码再判一次，等于把那个 bug 复制到展示层。
- */
-export function describeCycleFailure(error: unknown, phase: CycleFailurePhase): string {
-  if (error instanceof LlmError) {
-    const detail = detailOf(error);
-    switch (error.kind) {
-      case 'quota_exhausted':
-        return `AI 服务额度不足：${detail}。服务商已经把这条密钥判定为没有余额或没有额度，机器人在充值前每一轮决策都会失败 —— 请先在服务商后台充值或提高额度；充值后无需重启机器人，下一轮会自动恢复。`;
-      case 'auth':
-        return `AI 服务拒绝：${detail}。通常是 API Key 无效、已过期或被停用，请在控制台「设置 → AI 模型」里更新密钥。`;
-      case 'permission':
-        return `AI 服务拒绝：${detail}。这把密钥没有调用该模型的权限，请确认密钥权限或改用其他模型。`;
-      case 'not_found':
-        return `AI 服务拒绝：${detail}。配置的模型名在服务商侧不存在或已下线，请在控制台改用可用的模型。`;
-      case 'bad_request':
-        return `AI 服务拒绝：请求参数错误（${detail}）。请求被 AI 服务判定为参数异常，本轮没有产生任何决策；请检查模型名、温度与最大输出 Token 的配置，若反复出现请联系模型服务商。`;
-      case 'content_filter':
-        return `AI 服务拒绝：${detail}。模型侧的内容审核拦下了本次请求，一般下一轮就会恢复；若持续出现，请检查提示词与行情数据里是否有异常内容。`;
-      case 'rate_limit':
-      case 'overloaded':
-      case 'server':
-      case 'timeout': {
-        /*
-         * ⚠️ **必须说清"具体是哪一种不可用"。**
-         *
-         * 用户 2026-10-01 的原话：「还有图示的报错（系统不能自己处理重试？
-         * **因为报错的时候我用 API 测试上游是可用的**）」。
-         *
-         * 他看到的是一句把四类原因混在一起的话，于是**无从判断该等还是该查**。
-         * 而这四类指向完全不同的处置：
-         *
-         *   · **超时**（`request exceeded 240000ms`）—— 是**我们**的请求跑太久，
-         *     该动的是提示词大小与超时配置，不是去服务商后台查；用户在那里单独测 API
-         *     会发现"上游是好的"，因为那是**另一个请求路径**（请求体小得多）。
-         *   · **限流**（429）—— 该退避，而不是立刻重试（那会加剧限流）。
-         *   · **5xx** —— 确实是上游，等一等就恢复。
-         *
-         * 格式约束：第一个全角冒号之前必须仍是类别 —— `DecisionFeed.failureCategory()`
-         * 靠它渲染元数据行。
-         */
-        const which =
-          error.kind === 'rate_limit'
-            ? '被限流'
-            : error.kind === 'overloaded'
-              ? '服务商过载'
-              : error.kind === 'server'
-                ? '服务商 5xx'
-                : '请求超时';
-        const http = typeof error.status === 'number' ? `HTTP ${error.status}` : '无 HTTP 状态';
-        const advice =
-          error.kind === 'timeout'
-            ? '**注意：这一类的责任在我们这边** —— 请求没有在配置的时限内拿到响应，' +
-              '通常意味着单次请求太大或模型推理太久，而不是上游挂了。' +
-              '机器人在下一轮会重试；若反复出现，可考虑调小候选池或提高该模型的超时配置。'
-            : '这是服务商侧的临时故障，机器人下一轮会自动重试，通常不需要人工处理。';
-        return `AI 服务不可用：${which}（${http}）—— ${detail}。${advice}`;
-      }
-      case 'unknown':
-        return looksLikeEmptyCompletion(error)
-          ? `AI 响应无法解析：${detail}。模型返回了 HTTP 成功但没有任何可用文本（推理过程耗尽输出预算、或内容被审核掉都可能这样），本轮没有决策；机器人会在下一轮重新提问。`
-          : `AI 服务不可用：${detail}。这次请求没有拿到模型的响应（网络不可达、被取消或响应异常），机器人下一轮会自动重试。`;
-    }
-  }
-
-  if (error instanceof BinanceApiError) {
-    const detail = detailOf(error);
-    if (error.isInsufficientMargin) {
-      return `交易所拒绝：保证金不足（${detail}）。这笔订单没有成交；请降低仓位比例或少开几个仓位，风控会按最新可用余额重算额度。`;
-    }
-    if (error.isRateLimited) {
-      return `交易所限流：${detail}。请求过快或已被临时限制，机器人下一轮会自动重试。`;
-    }
-    if (error.isTimestampError) {
-      return `交易所拒绝：请求时间戳超出接收窗口（${detail}）。服务器时钟需要与交易所同步，否则每一笔下单都会被拒。`;
-    }
-    if (error.isFilterError) {
-      return `交易所拒绝：订单参数不符合该标的的交易规则（${detail}）。这通常是数量 / 价格的取整或最小名义价值问题，订单没有成交。`;
-    }
-    return `交易所拒绝：${detail}。这笔订单没有得到交易所确认；原始响应与错误码已记入订单表，可据此判断是否需要人工干预。`;
-  }
-
-  const detail = detailOf(error);
-
-  // 模型返回的内容本身不是合法 JSON（被截断、或混进了额外说明）。它在"解析"阶段
-  // 抛出，但类型是 SyntaxError，比阶段标记更精确。
-  if (error instanceof SyntaxError) {
-    return `AI 响应无法解析：${detail}。模型返回的内容不是合法 JSON（可能被截断或混入了说明文字），本轮没有决策；机器人会在下一轮重新提问。`;
-  }
-
-  switch (phase) {
-    case 'market':
-      return `行情数据不可用：${detail}。本轮取不到可用行情，因此没有向模型提问、也没有下单；通常是交易所行情接口暂时失败，机器人会在下一轮重试。`;
-    case 'model':
-      return `AI 服务不可用：${detail}。调用模型时出错，且这个错误不属于已知的服务商故障类型；机器人会在下一轮重试。若持续出现，请检查网络与模型配置。`;
-    case 'parse':
-      return `AI 响应无法解析：${detail}。模型返回的内容无法解析成决策，本轮没有决策。`;
-    case 'risk':
-      return `决策处理失败：${detail}。本轮在风控裁决环节抛出异常，没有下任何单；这属于程序内部故障，请结合运行日志排查（该周期的提示词与模型返回已保存在这条记录里）。`;
-    case 'execute':
-      return `交易所下单失败：${detail}。这笔订单没有得到交易所确认，可能并未成交；请核对交易所的持仓与挂单，机器人下一轮会重新对账。`;
-    case 'bookkeeping':
-      return `未知错误：${detail}。本轮在账务 / 对账环节失败，且错误不属于已知的模型、行情或交易所类别；该周期已经拿到的提示词与执行记录已尽量保存，请结合运行日志排查。`;
-  }
-}
-
-/**
- * 把熔断裁决变成一句**给人看的话**：为什么被拦、以及怎么解除。
- *
- * 提取出来是因为它有**两个调用点**：跳过周期时的 `executionLog`，以及控制台的
- * `/stats` 响应。**两处必须说同一件事** —— 否则操作员会在面板上看到一种说法、
- * 在决策流里看到另一种，然后去追一个不存在的差异。
- *
- * ⚠️ **两种熔断的解除方式完全不同，不能都用"等零点"概括。**
- * `total_drawdown` 比较的是历史最高水位与当前权益，**没有"按日"这个概念**；
- * 空仓时权益不会自己变化，所以它**不会自行恢复**。这里原来对所有 `blocked`
- * 都写「熔断按单日结算，跨过零点后自动恢复」—— 一个被总回撤熔断的机器人因此
- * 连续 15 个周期都在给操作员一条**会让他安心地不去处理**的错误信息。
- */
-export function describeBreaker(verdict: CircuitBreakerVerdict, config: StrategyConfig): string {
-  if (!verdict.blocked) return '';
-  return verdict.kind === 'total_drawdown'
-    ? `${verdict.reason}注意：总回撤熔断不按日重置 —— 它要等权益回到最高水位以下 ` +
-        `${config.circuitBreaker.maxTotalDrawdownPercent}% 以内才会解除，` +
-        '而空仓时权益不会自己变化，所以它不会自行恢复。' +
-        '要不要继续交易需要操作员决定（例如入金，或调整这一上限）。'
-    : `${verdict.reason}单日亏损熔断按日结算，跨过零点后自动恢复。`;
 }
 
 /**

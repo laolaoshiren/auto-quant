@@ -178,10 +178,6 @@ npm run dev:web      # 前端：vite dev server，带 /api 与 WebSocket 代理
 | `npm run notices` | `node scripts/generate-notices.mjs` | 重新生成 `THIRD-PARTY-NOTICES.md`。**改过任何依赖之后必须跑**；`node scripts/generate-notices.mjs --check` 可校验产物是否过期；**CI 每次都会跑这一步**（依赖变了却没重新生成会红） |
 | `npm run check:links` | `node scripts/check-links.mjs` | 检查文档里的**站内链接**是否都解析得到（外链不查，别人家站点挂了不该让本项目变红）。**CI 每次都会跑**；本地改过文档路径/标题时先跑一次，省得推上去才发现 |
 | `npm run check:routes` | `node scripts/check-api-routes.mjs` | 前后端接口对照：前端 `api.ts` 声明的每个调用，后端是否真有那条路由。**CI 每次都会跑**。改过 `api.ts` 或 `server.ts` 的路由后先跑一次 |
-| `npm run ui:smoke` | `node scripts/ui-smoke.mjs` | 用真实浏览器把每个页面打开一遍，抓运行时报错、白屏、横向滚动条。（需要先有 `packages/web/dist` 且服务在跑；用本机 Chrome/Edge，不下载浏览器；登录靠 `UI_SMOKE_USER` / `UI_SMOKE_PASS` 或 `AQ_TOKEN`） |
-| `npm run ui:audit` | `node scripts/ui-audit.mjs` | 界面"信息可见度"审计：文字是否被 CSS 截掉、markdown 强调符是否原样露给用户。（需要 `AQ_BASE` / `AQ_CHROME` 与登录凭据） |
-| `npm run ui:check` | `node scripts/ui-check.mjs` | 逐页版面自检（横向溢出、控制台错误、空白页）。需要登录态，**不能进 CI**。详见脚本头部 |
-| `npm run ui:consistent` | `node scripts/ui-consistency.mjs` | 界面一致性检查（同一概念在不同页面是否用同一个词/同一个数字）。需要 `AQ_BASE` / `AQ_CHROME`，可用 `AQ_TRADER_ID` 指定机器人 |
 
 各脚本自己的参数（本文不重复，脚本头部注释写得很细）：
 
