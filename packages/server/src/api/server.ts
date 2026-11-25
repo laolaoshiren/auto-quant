@@ -135,7 +135,7 @@ const CredentialsSchema = z.object({
  * 客户端错误看起来像服务端故障，还会把内部栈信息回显出去。
  */
 const UpdateAccountSchema = z.object({
-  currentPassword: z.string({ description: '当前密码' }).min(1, '请填写当前密码。').max(256),
+  currentPassword: z.string().describe('当前密码').min(1, '请填写当前密码。').max(256),
   username: z.string().max(64).optional(),
   newPassword: z.string().max(256).optional(),
 });
@@ -148,25 +148,23 @@ const UpdateAccountSchema = z.object({
  * 真正的兜底在 `LlmClient` 构造函数里 —— 那里覆盖所有出站路径，
  * 包括本次改动之前就已经存进库里的旧地址。
  */
-const BaseUrlSchema = z
-  .string()
-  .default('')
-  .superRefine((value, ctx) => {
-    if (!value) return;
-    /*
-     * ⚠️ **这里必须也传操作员的内网白名单（2026-10-11）。**
-     *
-     * 这是**保存模型时的校验**，也就是用户看到「baseUrl 不被允许：私有地址 172.16.0.0/12」
-     * 的那一处。只改 `client.ts`/`discovery.ts` 的话，保存这一步照样拒绝 ——
-     * 于是"允许内网端点"这个开关**在用户真正会碰到的那道门上不起作用**。
-     *
-     * 教训：一个开关接了几处、漏了一处，等于没接 —— 因为用户只会撞上漏的那一处。
-     */
-    const verdict = checkOutboundUrl(value, parseHostAllowlist(env.allowPrivateLlmHosts));
-    if (!verdict.allowed) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `baseUrl 不被允许：${verdict.reason}` });
-    }
-  });
+const BaseUrlValueSchema = z.string().superRefine((value, ctx) => {
+  if (!value) return;
+  /*
+   * ⚠️ **这里必须也传操作员的内网白名单（2026-10-11）。**
+   *
+   * 这是**保存模型时的校验**，也就是用户看到「baseUrl 不被允许：私有地址 172.16.0.0/12」
+   * 的那一处。只改 `client.ts`/`discovery.ts` 的话，保存这一步照样拒绝 ——
+   * 于是"允许内网端点"这个开关**在用户真正会碰到的那道门上不起作用**。
+   *
+   * 教训：一个开关接了几处、漏了一处，等于没接 —— 因为用户只会撞上漏的那一处。
+   */
+  const verdict = checkOutboundUrl(value, parseHostAllowlist(env.allowPrivateLlmHosts));
+  if (!verdict.allowed) {
+    ctx.addIssue({ code: 'custom', message: `baseUrl 不被允许：${verdict.reason}` });
+  }
+});
+const BaseUrlSchema = BaseUrlValueSchema.default('');
 
 const ExchangeAccountInputSchema = z.object({
   /* 交易所目录由共享的 `ExchangeIdSchema` 定义（binance/gate）—— 新增交易所只改 shared 一处。 */
@@ -361,6 +359,31 @@ const TraderInputSchema = z.object({
    */
   managedRiskProfile: ManagedRiskProfileSchema.optional(),
 });
+
+/*
+ * Zod v4 中 `schema.partial()` 仍会对省略字段执行 `.default()`。
+ * PATCH 请求需要「省略 = 不改」，因此剥离默认值后再 `.partial()`，避免静默覆盖既有字段。
+ */
+const ExchangeAccountPatchSchema = ExchangeAccountInputSchema.extend({
+  exchange: ExchangeAccountInputSchema.shape.exchange.unwrap(),
+  testnet: ExchangeAccountInputSchema.shape.testnet.unwrap(),
+  canTrade: ExchangeAccountInputSchema.shape.canTrade.unwrap(),
+}).partial();
+
+const AiModelPatchSchema = AiModelInputSchema.extend({
+  baseUrl: BaseUrlValueSchema,
+  apiKey: AiModelInputSchema.shape.apiKey.unwrap(),
+}).partial();
+
+const StrategyPatchSchema = StrategyInputSchema.extend({
+  description: StrategyInputSchema.shape.description.unwrap(),
+  presetId: StrategyInputSchema.shape.presetId.unwrap(),
+}).partial();
+
+const TraderPatchSchema = TraderInputSchema.extend({
+  cycleIntervalMinutes: TraderInputSchema.shape.cycleIntervalMinutes.unwrap(),
+  mode: TraderInputSchema.shape.mode.unwrap(),
+}).partial();
 
 /* -------------------------------------------------------------------------- */
 /*  Server                                                                     */
@@ -1697,7 +1720,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   app.patch('/api/exchange-accounts/:id', authed, guard(async (body: unknown, request) => {
     const id = idOf(request);
-    const parsed = ExchangeAccountInputSchema.partial().safeParse(body);
+    const parsed = ExchangeAccountPatchSchema.safeParse(body);
     if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? 'Invalid input');
 
     const patch: Parameters<typeof exchanges.update>[1] = {};
@@ -2063,7 +2086,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   app.patch('/api/ai-models/:id', authed, guard(async (body: unknown, request) => {
     const id = idOf(request);
-    const parsed = AiModelInputSchema.partial().safeParse(body);
+    const parsed = AiModelPatchSchema.safeParse(body);
     if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? 'Invalid input');
 
     const existing = aiModels.get(id);
@@ -2289,7 +2312,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   app.patch('/api/strategies/:id', authed, guard(async (body: unknown, request, reply) => {
     const id = idOf(request);
-    const parsed = StrategyInputSchema.partial().safeParse(body);
+    const parsed = StrategyPatchSchema.safeParse(body);
     if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? 'Invalid strategy');
 
     const patch: Parameters<typeof strategies.update>[1] = {};
@@ -2743,7 +2766,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         .send({ error: '这台机器人正在启动（或正在取消启动），请稍等几秒再修改它的配置。' });
     }
     const isCurrentlyRunning = deps.manager.isRunning(id);
-    const parsed = TraderInputSchema.partial().safeParse(body);
+    const parsed = TraderPatchSchema.safeParse(body);
     if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? 'Invalid trader');
     const current = traders.get(id);
     if (!current) return reply.code(404).send({ error: `找不到机器人 ${id}` });

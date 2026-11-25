@@ -54,23 +54,40 @@ const SOURCE = readFileSync(new URL('./strategy.ts', import.meta.url), 'utf8');
 /* -------------------------------------------------------------------------- */
 
 interface ZodLike {
-  _def?: { typeName?: string; shape?: () => Record<string, unknown>; schema?: unknown; innerType?: unknown };
+  shape?: Record<string, unknown>;
+  unwrap?: () => unknown;
+  def?: { type?: string; shape?: Record<string, unknown>; innerType?: unknown; schema?: unknown };
+  _def?: {
+    typeName?: string;
+    shape?: (() => Record<string, unknown>) | Record<string, unknown>;
+    schema?: unknown;
+    innerType?: unknown;
+  };
 }
 
 /**
  * 剥掉 zod 的包装拿到内层对象。
  *
- * ⚠️ 必须做：`coinSource` 是 `ZodDefault(ZodObject)` —— 直接读 `.shape` 得到
+ * ⚠️ 必须做：`coinSource` 是 `ZodPrefault(ZodObject)` —— 直接读 `.shape` 得到
  * `undefined`，于是审计**静默地什么都查不到**（我第一版踩过：所有分区都"不是
  * zod 对象"，看起来像没问题，实际一个字段都没验）。
  */
 function zodShape(schema: unknown): Record<string, unknown> | null {
   let current = schema as ZodLike | undefined;
   for (let depth = 0; depth < 8 && current; depth += 1) {
-    const def = current._def;
-    if (!def) return null;
-    if (def.typeName === 'ZodObject' && typeof def.shape === 'function') return def.shape();
-    const next = def.schema ?? def.innerType;
+    if (current.shape && typeof current.shape === 'object' && !Array.isArray(current.shape)) {
+      return current.shape;
+    }
+    const def = current.def ?? current._def;
+    if (def && 'shape' in def && def.shape) {
+      if (typeof def.shape === 'function') return def.shape();
+      if (typeof def.shape === 'object') return def.shape;
+    }
+    if (typeof current.unwrap === 'function') {
+      current = current.unwrap() as ZodLike;
+      continue;
+    }
+    const next = def?.schema ?? def?.innerType;
     if (!next) return null;
     current = next as ZodLike;
   }

@@ -208,7 +208,7 @@
 | victory-vendor | 36.9.2 | MIT AND ISC | Formidable |
 | wrappy | 1.0.2 | ISC | Isaac Z. Schlueter <i@izs.me> (http://blog.izs.me/) |
 | ws | 8.21.3 | MIT | Einar Otto Stangvik <einaros@gmail.com> (http://2x.io) |
-| zod | 3.25.76 | MIT | Colin McDonnell <zod@colinhacks.com> |
+| zod | 4.6.7 | MIT | Colin McDonnell <zod@colinhacks.com> |
 | zustand | 5.0.15 | MIT | Paul Henschel |
 
 ---

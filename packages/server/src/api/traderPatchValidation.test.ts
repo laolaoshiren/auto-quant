@@ -21,7 +21,7 @@ import type { ExchangeConnection } from '../binance/bootstrap.js';
 import { Vault, hashPassword } from '../crypto/vault.js';
 import { closeDb, initDb } from '../db/index.js';
 import type { BalanceService } from '../services/balance.js';
-import { aiModels, strategies, traders, users } from '../store/repositories.js';
+import { aiModels, exchanges, strategies, traders, users } from '../store/repositories.js';
 import type { TraderManager } from '../trader/manager.js';
 import { buildServer, type ApiDependencies } from './server.js';
 
@@ -61,7 +61,7 @@ function stubDependencies(): ApiDependencies {
     } as unknown as TraderManager,
     jwtSecret: JWT_SECRET,
     publicConnection: { environment: 'demo' } as unknown as ExchangeConnection,
-    balance: {} as unknown as BalanceService,
+    balance: { invalidate: () => {} } as unknown as BalanceService,
   };
 }
 
@@ -412,4 +412,78 @@ test('★★★ GET /api/auth/me 必须返回账户 createdAt，刷新后操作�
   assert.equal(body.user.username, OWNER);
   assert.equal(body.user.role, 'owner');
   assert.ok(typeof body.user.createdAt === 'string' && body.user.createdAt.length > 0, '必须返回 createdAt');
+});
+
+test('★★★ Zod v4 PATCH 不得把省略字段回写成默认值（trader / strategy / exchange-account）', async () => {
+  /* 1. Trader PATCH：只改 name 不得把 cycleIntervalMinutes 回写为 15，也不得把 mode 填成 strategy */
+  const id = await createTrader('ai_managed');
+  const set30 = await patch(id, { cycleIntervalMinutes: 30 });
+  assert.equal(set30.status, 200, set30.body);
+  assert.equal(traders.get(id)?.cycleIntervalMinutes, 30);
+
+  const renameOnly = await patch(id, { name: '仅改名不覆写周期' });
+  assert.equal(renameOnly.status, 200, renameOnly.body);
+  assert.equal(traders.get(id)?.name, '仅改名不覆写周期');
+  assert.equal(traders.get(id)?.cycleIntervalMinutes, 30, '省略 cycleIntervalMinutes 时不得回写默认值 15');
+  assert.equal(traders.get(id)?.mode, 'ai_managed');
+
+  /* 2. Strategy PATCH：只改 name 不得把 description 清空成默认空串 */
+  const strat = strategies.create({
+    name: '原策略名',
+    description: '保留这份说明',
+    config: defaultStrategyConfig(),
+    presetId: null,
+  });
+  const patchStrat = await app.inject({
+    method: 'PATCH',
+    url: `/api/strategies/${strat.id}`,
+    headers: auth(),
+    payload: { name: '新策略名' },
+  });
+  assert.equal(patchStrat.statusCode, 200, patchStrat.payload);
+  assert.equal(strategies.get(strat.id)?.description, '保留这份说明', '省略 description 不得清空原说明');
+
+  /* 3. ExchangeAccount PATCH：只改 label 不得把实盘账户（testnet=false）改回 testnet=true */
+  const liveAcc = exchanges.create({
+    exchange: 'binance',
+    label: '实盘账户',
+    apiKey: 'k-live',
+    apiSecretEnc: 'v1:00:00:00',
+    testnet: false,
+    canTrade: false,
+  });
+  const patchAcc = await app.inject({
+    method: 'PATCH',
+    url: `/api/exchange-accounts/${liveAcc.id}`,
+    headers: auth(),
+    payload: { label: '实盘账户-重命名' },
+  });
+  assert.equal(patchAcc.statusCode, 200, patchAcc.payload);
+  assert.equal(exchanges.get(liveAcc.id)?.testnet, false, '省略 testnet 不得把实盘账户改回测试网');
+  assert.equal(exchanges.get(liveAcc.id)?.canTrade, false, '省略 canTrade 不得把只读账户改回可交易');
+
+  /* 4. AiModel PATCH：只改 label 不得把自定义 baseUrl 清空或覆盖 */
+  const customModel = aiModels.create({
+    provider: 'custom',
+    label: '自定义模型',
+    model: 'my-model',
+    baseUrl: 'https://api.example.com/v1',
+    apiKeyEnc: 'v1:00:00:00',
+    temperature: 0.2,
+    maxTokens: 4096,
+    timeoutSeconds: 60,
+    maxRetries: 1,
+  });
+  const patchModel = await app.inject({
+    method: 'PATCH',
+    url: `/api/ai-models/${customModel.id}`,
+    headers: auth(),
+    payload: { label: '自定义模型-重命名' },
+  });
+  assert.equal(patchModel.statusCode, 200, patchModel.payload);
+  assert.equal(
+    aiModels.get(customModel.id)?.baseUrl,
+    'https://api.example.com/v1',
+    '省略 baseUrl 不得清空或覆写已有自定义端点',
+  );
 });

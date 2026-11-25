@@ -151,7 +151,7 @@ export const KlineConfigSchema = z.object({
 });
 
 export const IndicatorConfigSchema = z.object({
-  kline: KlineConfigSchema.default({}),
+  kline: KlineConfigSchema.prefault({}),
 
   enableEma: z.boolean().default(true),
   emaPeriods: z.array(z.number().int().min(2).max(400)).default([20, 50]),
@@ -613,14 +613,14 @@ export const StrategyConfigSchema = z.object({
   /** 智能托管 2.0 风险护栏档位（可选，缺省按风险控制参数自动推断，不破坏存量 JSON）。 */
   managedRiskProfile: ManagedRiskProfileSchema.optional(),
 
-  coinSource: CoinSourceConfigSchema.default({}),
-  indicators: IndicatorConfigSchema.default({}),
-  riskControl: RiskControlConfigSchema.default({}),
-  drawdownGuard: DrawdownGuardSchema.default({}),
-  throttle: ThrottleConfigSchema.default({}),
-  circuitBreaker: CircuitBreakerConfigSchema.default({}),
+  coinSource: CoinSourceConfigSchema.prefault({}),
+  indicators: IndicatorConfigSchema.prefault({}),
+  riskControl: RiskControlConfigSchema.prefault({}),
+  drawdownGuard: DrawdownGuardSchema.prefault({}),
+  throttle: ThrottleConfigSchema.prefault({}),
+  circuitBreaker: CircuitBreakerConfigSchema.prefault({}),
 
-  promptSections: PromptSectionsSchema.default({}),
+  promptSections: PromptSectionsSchema.prefault({}),
   /** Appended verbatim to the system prompt. */
   customPrompt: z.string().max(20_000).default(''),
 });
@@ -646,7 +646,7 @@ export type StrategyConfigInput = z.input<typeof StrategyConfigSchema>;
  * 与 `presetOfConfig()` 的说明（把名字纳入比较会让每一条经界面保存的策略都显示"已偏离预设"）。
  */
 export const STRATEGY_CONFIG_KEYS = Object.keys(
-  StrategyConfigSchema._def.shape(),
+  StrategyConfigSchema.shape,
 ) as ReadonlyArray<keyof StrategyConfig>;
 
 /* -------------------------------------------------------------------------- */

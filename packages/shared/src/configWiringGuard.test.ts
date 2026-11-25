@@ -52,16 +52,33 @@ import { StrategyConfigSchema } from './strategy.js';
 /* -------------------------------------------------------------------------- */
 
 interface ZodLike {
-  _def?: { typeName?: string; shape?: () => Record<string, unknown>; schema?: unknown; innerType?: unknown };
+  shape?: Record<string, unknown>;
+  unwrap?: () => unknown;
+  def?: { type?: string; shape?: Record<string, unknown>; innerType?: unknown; schema?: unknown };
+  _def?: {
+    typeName?: string;
+    shape?: (() => Record<string, unknown>) | Record<string, unknown>;
+    schema?: unknown;
+    innerType?: unknown;
+  };
 }
 
 function zodShape(schema: unknown): Record<string, unknown> | null {
   let current = schema as ZodLike | undefined;
   for (let depth = 0; depth < 8 && current; depth += 1) {
-    const def = current._def;
-    if (!def) return null;
-    if (def.typeName === 'ZodObject' && typeof def.shape === 'function') return def.shape();
-    const next = def.schema ?? def.innerType;
+    if (current.shape && typeof current.shape === 'object' && !Array.isArray(current.shape)) {
+      return current.shape;
+    }
+    const def = current.def ?? current._def;
+    if (def && 'shape' in def && def.shape) {
+      if (typeof def.shape === 'function') return def.shape();
+      if (typeof def.shape === 'object') return def.shape;
+    }
+    if (typeof current.unwrap === 'function') {
+      current = current.unwrap() as ZodLike;
+      continue;
+    }
+    const next = def?.schema ?? def?.innerType;
     if (!next) return null;
     current = next as ZodLike;
   }

@@ -454,3 +454,94 @@ test('★ M19 重建 traders：账本一条不少、删账户只置空、老行�
     }
   }
 });
+
+test('★ M22 追加高频查询复合索引：幂等可重复执行且消除热点查询临时排序', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'aq-mig-indexes-'));
+  const file = path.join(dir, 'hot-indexes.sqlite');
+  let db: Db | null = null;
+  try {
+    const raw = new DatabaseSync(file);
+    raw.exec('PRAGMA foreign_keys = ON');
+    pushTo(raw, 21);
+    raw.close();
+
+    db = new Db(file);
+    db.migrate();
+
+    const latestVersion = MIGRATIONS[MIGRATIONS.length - 1]!.version;
+    assert.equal(
+      db.get<{ user_version: number }>('PRAGMA user_version')!.user_version,
+      latestVersion,
+      '迁移应推进到最新版本（含 M22）',
+    );
+
+    const expectedIndexes = [
+      'idx_orders_trader_id',
+      'idx_orders_trader_exchange_order',
+      'idx_orders_trader_status_symbol',
+      'idx_positions_trader_symbol_id',
+      'idx_positions_trader_status_opened',
+      'idx_trades_trader_closed_id',
+      'idx_trades_trader_symbol_closed',
+      'idx_decisions_trader_id',
+      'idx_decisions_trader_timestamp',
+      'idx_equity_trader_ts_id',
+      'idx_runtime_logs_trader_created',
+    ];
+
+    const existing = new Set(
+      db
+        .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'")
+        .map((row) => row.name),
+    );
+    for (const idx of expectedIndexes) {
+      assert.ok(existing.has(idx), `缺少 M22 复合索引 ${idx}`);
+    }
+
+    /* 幂等性校验：重复执行 M22 SQL 与重复调用 db.migrate() 均不报错。 */
+    const m22 = MIGRATIONS.find((m) => m.version === 22);
+    assert.ok(m22, 'MIGRATIONS 必须包含 v22');
+    assert.doesNotThrow(() => db!.exec(m22.sql), '重复执行 M22 SQL 必须幂等');
+    assert.doesNotThrow(() => db!.migrate(), '重复调用 db.migrate() 必须幂等');
+    assert.equal(
+      db.get<{ user_version: number }>('PRAGMA user_version')!.user_version,
+      latestVersion,
+    );
+
+    /* 实测高频查询计划不再出现 USE TEMP B-TREE FOR ORDER BY。 */
+    const hotQueries: Array<[string, string]> = [
+      ['orders.list', 'SELECT * FROM orders WHERE trader_id = 1 AND id < 100 ORDER BY id DESC LIMIT 50'],
+      [
+        'orders.findByExchangeOrderId',
+        "SELECT * FROM orders WHERE trader_id = 1 AND exchange_order_id = '123' ORDER BY id DESC LIMIT 1",
+      ],
+      ['positions.lastBySymbol', "SELECT * FROM positions WHERE trader_id = 1 AND symbol = 'BTCUSDT' ORDER BY id DESC LIMIT 1"],
+      ['positions.open', "SELECT * FROM positions WHERE trader_id = 1 AND status = 'open' ORDER BY opened_at"],
+      ['trades.list', 'SELECT * FROM trades WHERE trader_id = 1 ORDER BY closed_at DESC, id DESC LIMIT 50'],
+      ['decisions.list', 'SELECT * FROM decision_records WHERE trader_id = 1 AND id < 100 ORDER BY id DESC LIMIT 50'],
+      ['equity.list', 'SELECT * FROM equity_snapshots WHERE trader_id = 1 ORDER BY timestamp DESC, id DESC LIMIT 500'],
+    ];
+
+    for (const [label, sql] of hotQueries) {
+      const plan = db
+        .all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`)
+        .map((r) => r.detail)
+        .join(' | ');
+      assert.ok(
+        !plan.includes('TEMP B-TREE'),
+        `${label} 不应再触发临时 B-Tree 排序，实际计划：${plan}`,
+      );
+    }
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* ignore */
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      console.warn(`[migration.test] 临时目录未能删除（不影响结论）：${(error as Error).message}`);
+    }
+  }
+});

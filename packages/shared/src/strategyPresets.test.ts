@@ -556,18 +556,37 @@ test('★★★ 三套模板的 patch 不得出现 schema 里没有的键（否�
    * 证明判据本身不是空转（见 `bogus` 那段）。
    */
   const shapeOf = (schema: unknown): Record<string, unknown> | null => {
-    /* ⚠️ `coinSource` 等分区是 `ZodDefault(ZodObject)` —— 直接读 `.shape` 得到
+    /* ⚠️ `coinSource` 等分区是 `ZodPrefault(ZodObject)` —— 直接读 `.shape` 得到
      * `undefined`，而那会让判据**静默地什么都查不到 / 或把所有键都判成不存在**
      * （`configSchemaGuard.test.ts` 的 `zodShape()` 记过同一次踩坑）。
-     * 所以这里显式剥掉一层 `schema` / `innerType` 包装。 */
+     * 所以这里显式剥掉外层包装拿到内层 `ZodObject.shape`。 */
     let current = schema as
-      | { _def?: { typeName?: string; shape?: () => Record<string, unknown>; schema?: unknown; innerType?: unknown } }
+      | {
+          shape?: Record<string, unknown>;
+          unwrap?: () => unknown;
+          def?: { type?: string; shape?: Record<string, unknown>; innerType?: unknown; schema?: unknown };
+          _def?: {
+            typeName?: string;
+            shape?: (() => Record<string, unknown>) | Record<string, unknown>;
+            schema?: unknown;
+            innerType?: unknown;
+          };
+        }
       | undefined;
     for (let depth = 0; depth < 8 && current; depth += 1) {
-      const def = current._def;
-      if (!def) return null;
-      if (def.typeName === 'ZodObject' && typeof def.shape === 'function') return def.shape();
-      const next = def.schema ?? def.innerType;
+      if (current.shape && typeof current.shape === 'object' && !Array.isArray(current.shape)) {
+        return current.shape;
+      }
+      const def = current.def ?? current._def;
+      if (def && 'shape' in def && def.shape) {
+        if (typeof def.shape === 'function') return def.shape();
+        if (typeof def.shape === 'object') return def.shape;
+      }
+      if (typeof current.unwrap === 'function') {
+        current = current.unwrap() as typeof current;
+        continue;
+      }
+      const next = def?.schema ?? def?.innerType;
       if (!next) return null;
       current = next as typeof current;
     }

@@ -1076,6 +1076,50 @@ CREATE TABLE IF NOT EXISTS managed_radar_calibration (
 );
 `;
 
+/**
+ * Migration 22: 高频查询复合索引优化。
+ *
+ * 针对实盘/控制台高频分页、对账关联与风控统计查询（经 `EXPLAIN QUERY PLAN` 实测确认存在
+ * `USE TEMP B-TREE FOR ORDER BY` 或全机器人范围扫描），追加覆盖式复合索引：
+ *   - `orders`           : `(trader_id, id DESC)`、`(trader_id, exchange_order_id, id DESC)`、`(trader_id, status, symbol)`
+ *   - `positions`        : `(trader_id, symbol, id DESC)`、`(trader_id, status, opened_at)`
+ *   - `trades`           : `(trader_id, closed_at DESC, id DESC)`、`(trader_id, symbol, closed_at DESC)`
+ *   - `decision_records` : `(trader_id, id DESC)`、`(trader_id, timestamp DESC, id DESC)`
+ *   - `equity_snapshots` : `(trader_id, timestamp DESC, id DESC)`
+ *   - `runtime_logs`     : `(trader_id, created_at DESC, id DESC)`
+ *
+ * 全部使用 `CREATE INDEX IF NOT EXISTS`，严格追加且幂等，不修改任何历史迁移与表结构。
+ */
+const M22_HOT_QUERY_INDEXES = /* sql */ `
+CREATE INDEX IF NOT EXISTS idx_orders_trader_id
+  ON orders(trader_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_trader_exchange_order
+  ON orders(trader_id, exchange_order_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_trader_status_symbol
+  ON orders(trader_id, status, symbol);
+
+CREATE INDEX IF NOT EXISTS idx_positions_trader_symbol_id
+  ON positions(trader_id, symbol, id DESC);
+CREATE INDEX IF NOT EXISTS idx_positions_trader_status_opened
+  ON positions(trader_id, status, opened_at);
+
+CREATE INDEX IF NOT EXISTS idx_trades_trader_closed_id
+  ON trades(trader_id, closed_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_trades_trader_symbol_closed
+  ON trades(trader_id, symbol, closed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_decisions_trader_id
+  ON decision_records(trader_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_decisions_trader_timestamp
+  ON decision_records(trader_id, timestamp DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_equity_trader_ts_id
+  ON equity_snapshots(trader_id, timestamp DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_logs_trader_created
+  ON runtime_logs(trader_id, created_at DESC, id DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -1110,4 +1154,5 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   { version: 20, name: 'managed-v2-state', sql: M20_MANAGED_V2_STATE },
   { version: 21, name: 'managed-v2-attribution', sql: M21_MANAGED_V2_ATTRIBUTION },
+  { version: 22, name: 'hot-query-indexes', sql: M22_HOT_QUERY_INDEXES },
 ];
