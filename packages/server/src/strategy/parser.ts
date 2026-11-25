@@ -939,7 +939,19 @@ export function parseDecisionResponse(raw: string, ctx: ParseContext): ParsedDec
      */
     const isPendingCancel =
       isCancelPendingAction(action) && Boolean(ctx.pendingSymbols?.has(coerced.symbol));
-    if (!isListed && !(ctx.allowUnlistedCloses && isHeldPositionAction) && !isPendingCancel) {
+    /*
+     * 已有持仓或挂单的标的即使本轮掉出候选池，模型明确输出 `hold` / `wait`
+     * （继续持有或继续等待挂单成交）也应放行，避免每轮在界面上误报「不在本周期候选池中」。
+     */
+    const isPassiveOnOwned =
+      (action === 'hold' || action === 'wait') &&
+      (Boolean(heldSide) || Boolean(ctx.pendingSymbols?.has(coerced.symbol)));
+    if (
+      !isListed &&
+      !(ctx.allowUnlistedCloses && isHeldPositionAction) &&
+      !isPendingCancel &&
+      !isPassiveOnOwned
+    ) {
       rejected.push({
         symbol: coerced.symbol,
         action,

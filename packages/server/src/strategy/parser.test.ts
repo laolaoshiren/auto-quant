@@ -314,6 +314,20 @@ test('rejects a symbol outside the candidate universe', () => {
   assert.match(parsed.rejected[0]!.reason, /不在本周期的候选池中/);
 });
 
+test('allows hold/wait on an unlisted symbol that is currently held or has a pending limit order', () => {
+  const raw =
+    '<decision>[{"symbol":"DOGEUSDT","action":"hold","reasoning":"继续等限价单成交"},{"symbol":"SOLUSDT","action":"wait","reasoning":"继续持仓观察"}]</decision>';
+  const parsed = parseDecisionResponse(
+    raw,
+    context({
+      openPositions: new Map([['SOLUSDT', 'long']]),
+      pendingSymbols: new Set(['DOGEUSDT']),
+    }),
+  );
+  assert.equal(parsed.rejected.length, 0, JSON.stringify(parsed.rejected));
+  assert.equal(parsed.decisions.length, 2);
+});
+
 test('rejects opening a second position on a symbol already held', () => {
   const raw = '<decision>[{"symbol":"BTCUSDT","action":"open_long"}]</decision>';
   const parsed = parseDecisionResponse(
