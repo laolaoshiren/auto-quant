@@ -120,6 +120,17 @@ export function preserveBigIds(text: string): string {
   return text.replace(/"([A-Za-z]*[Ii]d)":(\d{15,})/g, '"$1":"$2"');
 }
 
+/**
+ * 高优先级交易/风控请求：跳过 75% 行情软限速（仍严格遵守 429/418 退避），
+ * 避免行情 K 线/OI 轮询把权重打到 75% 后阻塞止损、撤单与紧急平仓。
+ */
+export function isTradingPriorityRequest(method: HttpMethod, path: string): boolean {
+  if (method !== 'POST' && method !== 'DELETE') return false;
+  return /^\/fapi\/v\d+\/(?:order|algoOrder|allOpenOrders|algoOpenOrders|leverage|marginType|positionSide\/dual)(?:$|\?)/i.test(
+    path,
+  );
+}
+
 /** Binance resets `X-MBX-USED-WEIGHT-1M` on its own one-minute boundary. */
 export const WEIGHT_WINDOW_MS = 60_000;
 
@@ -373,20 +384,24 @@ export class BinanceRest {
     options: RequestOptions,
   ): Promise<T> {
     const retries = options.retries ?? 0;
+    const bypassWeightSoftLimit =
+      options.skipWeightGate === true || isTradingPriorityRequest(method, path);
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
-      // Take a concurrency slot *before* the weight gate. Reserving first means
-      // the gate is consulted at admission time rather than by every member of a
-      // fan-out simultaneously, which is what makes the soft limit real.
+      // Wait for weight budget OUTSIDE the concurrency slot so slow market-data
+      // pacing never starves trading orders or other unblocked requests.
       //
       // The time-sync probe is the one exception — see `skipSlot`. Holding a slot
       // across it is what turns "clock drifted" into "client deadlocked".
       const holdsSlot = options.skipSlot !== true;
       let backoffMs = 0;
-      if (holdsSlot) await this.acquireSlot();
+      if (holdsSlot) {
+        await this.acquireSlotWithWeightGate(bypassWeightSoftLimit);
+      } else if (!bypassWeightSoftLimit) {
+        await this.respectWeightBudget();
+      }
       try {
-        if (!options.skipWeightGate) await this.respectWeightBudget();
         try {
           return await this.attempt<T>(method, path, params, options.signed === true);
         } catch (error) {
@@ -455,6 +470,23 @@ export class BinanceRest {
     }
 
     throw lastError instanceof Error ? lastError : new Error(`Request to ${path} failed`);
+  }
+
+  /**
+   * 拿并发槽位，同时在槽位**外部**完成权重软限速等待：
+   * 若入队拿到槽后发现权重已被其它响应推高到 75%+，立刻释放槽位再 sleep，
+   * 绝不持槽休眠 10 秒而把止损/平仓等高优先级请求堵死在队列外。
+   */
+  private async acquireSlotWithWeightGate(bypassWeightSoftLimit: boolean): Promise<void> {
+    for (;;) {
+      if (!bypassWeightSoftLimit) {
+        await this.respectWeightBudget();
+      }
+      await this.acquireSlot();
+      if (bypassWeightSoftLimit) return;
+      if (this.weightPauseMs() <= 0) return;
+      this.releaseSlot();
+    }
   }
 
   /**
@@ -578,16 +610,18 @@ export class BinanceRest {
     return decayWeight(this.usedWeight1m, this.weightWindowStart, now);
   }
 
-  /** Proactively slow down before Binance starts rejecting us. */
-  private async respectWeightBudget(): Promise<void> {
-    const now = Date.now();
+  /**
+   * 计算权重软限速需要暂停的毫秒数（纯判断，不休眠）。
+   * 抽出来供 `acquireSlotWithWeightGate` 在拿槽后快速决定是否释放槽位退让。
+   */
+  private weightPauseMs(now = Date.now()): number {
     const charged = this.decayedWeight(now);
     if (charged <= 0) {
       if (this.usedWeight1m > 0) {
         // The window rolled over, so the previous reading is no longer charged.
         this.usedWeight1m = 0;
       }
-      return;
+      return 0;
     }
 
     /*
@@ -597,14 +631,23 @@ export class BinanceRest {
      * 却不改 `weightWindowStart`，会让并发请求反复乘衰减系数导致计数在毫秒内指数归零，
      * 软限速彻底失效并破坏 `reanchorWindow()` 的读数回落判据。
      */
-    if (charged < this.weightLimitPerMinute * WEIGHT_SOFT_LIMIT) return;
+    if (charged < this.weightLimitPerMinute * WEIGHT_SOFT_LIMIT) return 0;
 
-    const remaining = Math.max(0, this.weightWindowStart + 60_000 - now);
-    const waitMs = Math.min(remaining, 10_000);
+    const remaining = Math.max(0, this.weightWindowStart + WEIGHT_WINDOW_MS - now);
+    return Math.min(remaining, 10_000);
+  }
+
+  /** Proactively slow down before Binance starts rejecting us (always called OUTSIDE the slot). */
+  private async respectWeightBudget(): Promise<void> {
+    const now = Date.now();
+    const waitMs = this.weightPauseMs(now);
+    if (waitMs <= 0) return;
+
+    const charged = this.decayedWeight(now);
     log.warn(
       `weight budget ~${Math.round(charged)}/${this.weightLimitPerMinute} consumed; pausing ${waitMs}ms`,
     );
-    if (waitMs > 0) await sleep(waitMs);
+    await sleep(waitMs);
   }
 
   private toApiError(text: string, response: Response, path: string): BinanceApiError {

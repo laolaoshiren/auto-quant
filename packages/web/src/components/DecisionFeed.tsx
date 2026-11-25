@@ -556,6 +556,7 @@ export function DecisionFeed({
   actions,
   nextCycleAt = null,
   mode = 'strategy',
+  exchange,
   focusMode = false,
   onToggleFocus,
   onSelectSymbol,
@@ -574,6 +575,8 @@ export function DecisionFeed({
    * 不传 `mode` 就与改动前逐字节一致。
    */
   mode?: TraderMode;
+  /** 机器人绑定账户所属交易所（透传给行情接口，确保 Gate 机器人读取 Gate 现价）。 */
+  exchange?: import('@aq/shared').ExchangeId;
   /**
    * **是否处于"决策流占满整页"的聚焦模式**（2026-10-13 用户要求）。
    *
@@ -607,7 +610,10 @@ export function DecisionFeed({
 
   // 行情列表提供**当前价**，用来把"止损 74434.8"变成"离现价多远"，
   // 也是开仓那一行里 `开仓 <价>` 与风险回报比的来源。
-  const symbolsQuery = usePolled((signal) => api.marketSymbols(signal), { intervalMs: 20_000 });
+  const symbolsQuery = usePolled((signal) => api.marketSymbols(signal, exchange), {
+    intervalMs: 20_000,
+    deps: [exchange],
+  });
 
   /* ------------------------------------------------------------------------ */
   /*  分页：第一页来自轮询，更早的页由滚到列表底部触发                          */

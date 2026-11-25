@@ -1,6 +1,7 @@
 import {
   AI_MANAGED_PRESET_MODEL,
   StrategyConfigSchema,
+  clampAiManagedHardLimits,
   defaultStrategyConfig,
   isAiDriven,
   type CircuitBreakerReading,
@@ -2089,6 +2090,7 @@ export class TraderManager {
    * 从而不去覆盖后来者的状态（见 `startTraderAsync`）。
    */
   private readonly startGeneration = new Map<number, number>();
+  private readonly startWatchdogs = new Map<number, NodeJS.Timeout>();
 
   runningIds(): number[] {
     return [...this.running.keys()];
@@ -3727,7 +3729,11 @@ export class TraderManager {
         if (isAiDriven(trader.mode) && typeof raw === 'string' && raw.length > 0) {
           try {
             const parsedAi = StrategyConfigSchema.safeParse(JSON.parse(raw));
-            if (parsedAi.success) return parsedAi.data;
+            if (parsedAi.success) {
+              return trader.mode === 'ai_managed'
+                ? clampAiManagedHardLimits(parsedAi.data)
+                : parsedAi.data;
+            }
           } catch {
             // 坏 JSON 与 schema 不通过走同一条回落路径。
           }
@@ -4201,8 +4207,10 @@ export class TraderManager {
        */
       if (!isGateConnection(connection)) {
         // Attached after the trader is live, so a stream failure can never prevent
-        // the trading loop from starting.
-        await this.startUserStream(traderId, connection);
+        // the trading loop from starting. Paper traders never attach to live account WS.
+        if (!dryRun) {
+          await this.startUserStream(traderId, connection);
+        }
       }
 
       /*
@@ -4403,49 +4411,38 @@ export class TraderManager {
      * 并释放占位。**"永远停在启动中"不是一种可接受的状态** ——
      * 操作员既看不到结论，也失去了重试的能力。
      */
+    const prevWatchdog = this.startWatchdogs.get(traderId);
+    if (prevWatchdog) clearTimeout(prevWatchdog);
     const startWatchdog = setTimeout(() => {
-      /* 已经有更新的一次启动接管了 → 这个陈旧看门狗什么都不做。 */
+      if (this.startWatchdogs.get(traderId) === startWatchdog) {
+        this.startWatchdogs.delete(traderId);
+      }
+      /* 已经有更新的一次启动接管或操作员已点停止 → 这个陈旧看门狗什么都不做。 */
       if (this.startGeneration.get(traderId) !== generation) return;
+      if (this.cancelledStarts.has(traderId) || this.stopping) return;
       if (this.running.has(traderId)) return;
-      /*
-       * ⚠️ **看门狗【不释放】 `starting` 占位（2026-10-11 审查发现）。**
-       *
-       * 上一版这里删了占位，理由是"否则用户再也点不动"。**那个理由换来了一个更糟的后果**：
-       * 慢启动（>90 秒）时占位被提前释放，用户再点一次就能并发出**第二个交易实例**，
-       * 而第一个还活着 —— 它既停不掉，也会和新的那个一起下单。
-       *
-       * 正确的分工：**占位由 `startTrader` 的 `finally` 释放**（谁持有谁释放），
-       * 看门狗只负责"把状态说清楚" —— 让操作员看到"启动还在进行中、已超过 N 秒"，
-       * 而不是让按钮变成一个可以踩出第二个实例的陷阱。
-       *
-       * 按钮在此期间点不动是**正确行为**：那一轮启动确实还在飞。
-       */
       const message =
         `启动仍在进行中，已超过 ${Math.round(START_WATCHDOG_MS / 1000)} 秒未完成` +
         '（可能是 AI 模型不可用导致的长重试）。请等待它结束；若持续不结束请看服务器日志。';
       log.error(`机器人 ${traderId} ${message}`);
       this.setTraderStatus(traderId, 'error', message);
     }, START_WATCHDOG_MS);
+    this.startWatchdogs.set(traderId, startWatchdog);
     /* 别让这个定时器拖住进程退出。 */
     startWatchdog.unref?.();
 
+    const clearWatchdog = () => {
+      clearTimeout(startWatchdog);
+      if (this.startWatchdogs.get(traderId) === startWatchdog) {
+        this.startWatchdogs.delete(traderId);
+      }
+    };
+
     void this.startTrader(traderId, dryRun)
       .then((result) => {
-        clearTimeout(startWatchdog);
+        clearWatchdog();
         if (this.startGeneration.get(traderId) !== generation) return;
         if (result.ok) return;
-        /*
-         * ⚠️ **取消不是失败，不要再写 `error`。**
-         *
-         * 两个取消分支已经各自把状态写成 `stopped`（那是操作员的决定）。
-         * 这里再写一次 `error`，就把"被叫停"记成"待恢复的故障" ——
-         * 而 `resumePersisted()` 恢复 `{running, safe_mode, error}`，
-         * **刻意不恢复 `stopped`**。于是下一次部署/重启，
-         * 这台刚被叫停的机器人会被重新拉起并下单。
-         *
-         * 判据只能是 `result.cancelled`，不能是 `cancelledStarts.has(id)`：
-         * 那面旗子在 `startTrader` 的 finally 里已收掉，此时看它永远看不出来。
-         */
         if (result.cancelled) {
           /* 兜底确保 DB 状态落为 stopped，防止取消竞态下残留 starting/error 导致重启后复活下单。 */
           this.setTraderStatus(traderId, 'stopped', null);
@@ -4457,7 +4454,7 @@ export class TraderManager {
         this.setTraderStatus(traderId, 'error', result.error ?? '启动失败');
       })
       .catch((error: unknown) => {
-        clearTimeout(startWatchdog);
+        clearWatchdog();
         if (this.startGeneration.get(traderId) !== generation) return;
         const message = (error as Error).message;
         log.error(`机器人 ${traderId} 启动时抛错：${message}`);
@@ -4471,6 +4468,13 @@ export class TraderManager {
     // parked in `waitForRetry()` aborts instead of starting the trader seconds
     // after it was told to stop.
     this.cancelledStarts.add(traderId);
+    /* 立即递增启动代次并清掉未到点的 90s 启动看门狗，防止停机后状态被篡改为 error 并在重启后复活。 */
+    this.startGeneration.set(traderId, (this.startGeneration.get(traderId) ?? 0) + 1);
+    const pendingWatchdog = this.startWatchdogs.get(traderId);
+    if (pendingWatchdog) {
+      clearTimeout(pendingWatchdog);
+      this.startWatchdogs.delete(traderId);
+    }
     const stopGen = (this.traderGenerations.get(traderId) ?? 0) + 1;
     this.traderGenerations.set(traderId, stopGen);
     const autoTrader = this.running.get(traderId);
@@ -4642,7 +4646,10 @@ export class TraderManager {
     if (isAiDriven(trader.mode) && typeof raw === 'string' && raw.length > 0) {
       try {
         const parsed = StrategyConfigSchema.safeParse(JSON.parse(raw));
-        if (parsed.success) config = parsed.data;
+        if (parsed.success) {
+          config =
+            trader.mode === 'ai_managed' ? clampAiManagedHardLimits(parsed.data) : parsed.data;
+        }
       } catch {
         // 坏 JSON 与 schema 不通过都回落到策略配置 —— 与可达性检查保持一致。
       }

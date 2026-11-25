@@ -3,7 +3,7 @@ import { lazy, Suspense, useEffect, type ReactNode } from 'react';
 import { Layout } from './components/Layout';
 import { FeedErrorBoundary } from './components/FeedErrorBoundary';
 import { StaleTraderBanner } from './components/StaleTraderBanner';
-import { Spinner, Spinner3 } from './components/ui';
+import { Button, Spinner, Spinner3 } from './components/ui';
 import { useApp } from './lib/store';
 import { boundaryKeyFor } from './lib/routeBoundary';
 
@@ -42,6 +42,7 @@ const NotFoundPage = lazy(() => import('./pages/NotFoundPage').then((m) => ({ de
 
 export function App() {
   const status = useApp((s) => s.status);
+  const lastError = useApp((s) => s.lastError);
   const bootstrap = useApp((s) => s.bootstrap);
 
   useEffect(() => {
@@ -50,10 +51,20 @@ export function App() {
 
   if (status === 'loading') {
     return (
-      <div className="flex h-screen items-center justify-center bg-base-950">
-        <div className="flex flex-col items-center gap-2">
-          <Spinner3 label="正在恢复会话" />
+      <div className="flex h-screen items-center justify-center bg-base-950 px-6">
+        <div className="flex max-w-sm flex-col items-center gap-2 text-center">
+          <Spinner3 label={lastError ? '正在重新连接服务' : '正在恢复会话'} />
           <p className="text-xs text-ink-faint">AutoQuant · LLM 合约终端</p>
+          {lastError && (
+            <div role="status" className="mt-2 flex flex-col items-center gap-2">
+              <p className="text-xs leading-relaxed text-warn">
+                服务可能正在重启或暂时不可达（{lastError}），已保留登录状态并正在自动重试…
+              </p>
+              <Button size="sm" variant="ghost" onClick={() => void bootstrap()}>
+                立即重试
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     );

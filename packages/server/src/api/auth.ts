@@ -116,6 +116,7 @@ export function verifyToken(token: string, secret: string): TokenPayload | null 
   try {
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as TokenPayload;
     if (typeof payload.exp !== 'number' || payload.exp * 1000 < Date.now()) return null;
+    if (typeof payload.sub !== 'number' || !Number.isInteger(payload.sub) || payload.sub <= 0) return null;
     return payload;
   } catch {
     return null;

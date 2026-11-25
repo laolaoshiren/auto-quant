@@ -436,6 +436,14 @@ export class MarketDataService {
     const klines = primary.klines;
     if (klines.length === 0) return null;
 
+    /*
+     * 某些交易所（如 Gate.io 期货 K 线）不提供主动买入量，所有 K 线的 `takerBuyBase` 恒为 0。
+     * 若继续按 `sell = volume - takerBuyBase` 核算，会把全部成交量误报成 100% 主动卖出
+     * （buyRatio=0%、netflow=-totalVolume），严重误导模型决策；此时按无数据返回 null。
+     */
+    const hasTakerBuyData = klines.some((k) => k.takerBuyBase > 0);
+    if (!hasTakerBuyData) return null;
+
     const windowFor = (hours: number): Kline[] => {
       const perHour = klinesPerHour(primary.timeframe);
       const count = Math.max(1, Math.round(perHour * hours));
@@ -446,8 +454,9 @@ export class MarketDataService {
       let buy = 0;
       let sell = 0;
       for (const k of slice) {
-        buy += k.takerBuyBase;
-        sell += k.volume - k.takerBuyBase;
+        const buyVol = Math.max(0, Math.min(k.takerBuyBase, k.volume));
+        buy += buyVol;
+        sell += Math.max(0, k.volume - buyVol);
       }
       const total = buy + sell;
       return { net: buy - sell, buyRatio: total > 0 ? buy / total : 0.5 };
@@ -775,22 +784,35 @@ export class MarketDataService {
     const period = options.windowHours <= 1 ? '5m' : options.windowHours <= 4 ? '1h' : '4h';
     const pointsNeeded = options.windowHours <= 1 ? 13 : options.windowHours <= 4 ? 5 : 7;
 
+    const universe = await this.getUniverse(false);
     const measured = await Promise.all(
       liquid.map(async (symbol) => {
         const hist = await this.market.openInterestHist(symbol, period, pointsNeeded + 2);
         if (hist.length < 2) return { symbol, growth: 0, openInterestUsd: 0 };
         const first = Number(hist[0]?.sumOpenInterest ?? 0);
-        const last = Number(hist[hist.length - 1]?.sumOpenInterest ?? 0);
+        const lastPoint = hist[hist.length - 1];
+        const last = Number(lastPoint?.sumOpenInterest ?? 0);
+        const rawUsd = Number(lastPoint?.sumOpenInterestValue ?? Number.NaN);
+        const markPrice = Number(universe.premiums.get(symbol)?.markPrice ?? Number.NaN);
+        const lastPrice = Number(universe.tickers.get(symbol)?.lastPrice ?? Number.NaN);
+        const price =
+          Number.isFinite(markPrice) && markPrice > 0
+            ? markPrice
+            : Number.isFinite(lastPrice) && lastPrice > 0
+              ? lastPrice
+              : 0;
+        const openInterestUsd =
+          Number.isFinite(rawUsd) && rawUsd > 0 ? rawUsd : price > 0 ? last * price : 0;
         return {
           symbol,
           /* 分母不可用时归 0，而不是把 Infinity 传给排序（见 `growthPercent`）。 */
           growth: growthPercent(first, last),
           /*
-           * ⚠️ **把持仓量带出来** —— 它正是 `minOpenInterestUsd` 要筛的东西
-           *（外部 issue #182）。原来这里只算 growth 就丢掉，于是那道护栏
-           * 即使想生效也无从下手。
+           * ⚠️ **必须用美元口径持仓量（`sumOpenInterestValue` 或 `sumOpenInterest × price`）**，
+           * 绝不能拿币数 `sumOpenInterest` 与美元门槛 `minOpenInterestUsd` 直接比较 ——
+           * 否则 BTC/ETH（币数远小于 500 万）会被误杀，低价山寨币反而轻易过关。
            */
-          openInterestUsd: last,
+          openInterestUsd,
         };
       }),
     );

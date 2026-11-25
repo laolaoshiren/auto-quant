@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeOpenAiStreamChunks } from './stream.js';
+import { MAX_STREAM_BYTES, mergeOpenAiStreamChunks, readOpenAiStreamLines } from './stream.js';
 
 /* -------------------------------------------------------------------------- */
 /*  流式分片 → 非流式形状                                                       */
@@ -166,4 +166,29 @@ test('★★★ 缺 index 的并行工具调用按新 id 或数组下标分槽�
   assert.equal(callsB.length, 2, '★ 同 chunk 缺 index 且无 id 时应按数组下标分槽');
   assert.equal(callsB[0]['function']['arguments'], '{"x":1}');
   assert.equal(callsB[1]['function']['arguments'], '{"y":2}');
+});
+
+test('★★ readOpenAiStreamLines：强制 16MiB 字节上限并中止超限/无换行流', async () => {
+  assert.equal(MAX_STREAM_BYTES, 16 * 1024 * 1024);
+
+  /* 正常流（在上限内）照常按行切分 */
+  const okResp = new Response('data: {"a":1}\r\ndata: [DONE]');
+  const okLines = await readOpenAiStreamLines(okResp, undefined, 1024);
+  assert.deepEqual(okLines, ['data: {"a":1}', 'data: [DONE]']);
+
+  /* 超限流（哪怕没有任何换行符）立即中止并取消 reader，防 OOM */
+  let cancelled = false;
+  const bigStream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(new Uint8Array(64).fill(65));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  await assert.rejects(
+    () => readOpenAiStreamLines(new Response(bigStream), undefined, 128),
+    /超过上限/,
+  );
+  assert.equal(cancelled, true, '超限时必须立即 cancel reader 释放底层流');
 });

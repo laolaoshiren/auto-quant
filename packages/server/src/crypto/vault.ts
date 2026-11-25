@@ -188,6 +188,7 @@ export const DUMMY_PASSWORD_HASH = [
 /** `sk-abcdef…1234` — enough for a human to recognise which key is stored. */
 export function maskSecret(secret: string): string {
   if (!secret) return '';
+  if (secret.length <= 8) return '****';
   if (secret.length <= 10) return `${secret.slice(0, 2)}…${secret.slice(-2)}`;
   return `${secret.slice(0, 6)}…${secret.slice(-4)}`;
 }

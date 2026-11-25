@@ -34,7 +34,11 @@
  * 每一类越界各一个用例，外加"被钳制时如实记录"。
  */
 
-import { AI_MANAGED_HARD_LIMITS, StrategyConfigSchema, type StrategyConfig } from '@aq/shared';
+import {
+  StrategyConfigSchema,
+  managedProfileLimitsFor,
+  type StrategyConfig,
+} from '@aq/shared';
 
 /* -------------------------------------------------------------------------- */
 /*  结果类型                                                                   */
@@ -429,10 +433,28 @@ export function applyAgentPatch(current: StrategyConfig, patch: unknown): AgentP
     };
   }
 
-  // 4. 物理安全硬底线（AI_MANAGED_HARD_LIMITS）：在 zod 校验通过之后执行，
-  //    这样极端非法值（如 9999x 杠杆）仍整份拒绝，而 schema 合法但超硬底线的值
-  //    （如 50x 杠杆、100% 保证金、关闭日亏/总回撤熔断）会被平稳钳制并如实回喂给 AI。
+  // 4. 物理安全硬底线（按当前 managedRiskProfile 逐档钳制）：在 zod 校验通过之后执行，
+  //    这样极端非法值（如 9999x 杠杆）仍整份拒绝，而 schema 合法但超当前档位硬底线的值
+  //    会被平稳钳制并如实回喂给 AI；同时锁死 managedRiskProfile 与 marginBasedLimit=false。
   const finalConfig = structuredClone(parsed.data) as StrategyConfig;
+  if (current.managedRiskProfile !== undefined) {
+    finalConfig.managedRiskProfile = current.managedRiskProfile;
+  } else {
+    delete finalConfig.managedRiskProfile;
+  }
+  const limits = managedProfileLimitsFor(current.managedRiskProfile);
+  if (finalConfig.riskControl.marginBasedLimit === true) {
+    const askedMarginBased = readPath(known, 'riskControl.marginBasedLimit');
+    finalConfig.riskControl.marginBasedLimit = false;
+    if (askedMarginBased !== undefined) {
+      clamps.push({
+        field: 'riskControl.marginBasedLimit',
+        asked: askedMarginBased,
+        allowed: false,
+        why: '托管模式下禁止开启 marginBasedLimit 以绕过单币名义倍数硬上限。',
+      });
+    }
+  }
   const ceilingGuards: ReadonlyArray<{
     field: string;
     current: number;
@@ -444,76 +466,76 @@ export function applyAgentPatch(current: StrategyConfig, patch: unknown): AgentP
     {
       field: 'riskControl.maxPositions',
       current: finalConfig.riskControl.maxPositions,
-      max: AI_MANAGED_HARD_LIMITS.maxPositions,
+      max: limits.maxPositions,
       set: (v) => {
         finalConfig.riskControl.maxPositions = v;
       },
-      why: `同时持仓数硬上限为 ${AI_MANAGED_HARD_LIMITS.maxPositions}，防止多币同向共振爆仓。`,
+      why: `同时持仓数硬上限为 ${limits.maxPositions}，防止多币同向共振爆仓。`,
     },
     {
       field: 'riskControl.btcEthMaxLeverage',
       current: finalConfig.riskControl.btcEthMaxLeverage,
-      max: AI_MANAGED_HARD_LIMITS.btcEthMaxLeverage,
+      max: limits.btcEthMaxLeverage,
       set: (v) => {
         finalConfig.riskControl.btcEthMaxLeverage = v;
       },
-      why: `BTC/ETH 杠杆硬上限为 ${AI_MANAGED_HARD_LIMITS.btcEthMaxLeverage}x，避免单根插针击穿强平线。`,
+      why: `BTC/ETH 杠杆硬上限为 ${limits.btcEthMaxLeverage}x，避免单根插针击穿强平线。`,
     },
     {
       field: 'riskControl.altcoinMaxLeverage',
       current: finalConfig.riskControl.altcoinMaxLeverage,
-      max: AI_MANAGED_HARD_LIMITS.altcoinMaxLeverage,
+      max: limits.altcoinMaxLeverage,
       set: (v) => {
         finalConfig.riskControl.altcoinMaxLeverage = v;
       },
-      why: `山寨币杠杆硬上限为 ${AI_MANAGED_HARD_LIMITS.altcoinMaxLeverage}x，高波动标的超过该倍数极易穿透止损强平。`,
+      why: `山寨币杠杆硬上限为 ${limits.altcoinMaxLeverage}x，高波动标的超过该倍数极易穿透止损强平。`,
     },
     {
       field: 'riskControl.btcEthMaxPositionValueRatio',
       current: finalConfig.riskControl.btcEthMaxPositionValueRatio,
-      max: AI_MANAGED_HARD_LIMITS.btcEthMaxPositionValueRatio,
+      max: limits.btcEthMaxPositionValueRatio,
       set: (v) => {
         finalConfig.riskControl.btcEthMaxPositionValueRatio = v;
       },
-      why: `BTC/ETH 单币名义敞口硬上限为权益的 ${AI_MANAGED_HARD_LIMITS.btcEthMaxPositionValueRatio} 倍。`,
+      why: `BTC/ETH 单币名义敞口硬上限为权益的 ${limits.btcEthMaxPositionValueRatio} 倍。`,
     },
     {
       field: 'riskControl.altcoinMaxPositionValueRatio',
       current: finalConfig.riskControl.altcoinMaxPositionValueRatio,
-      max: AI_MANAGED_HARD_LIMITS.altcoinMaxPositionValueRatio,
+      max: limits.altcoinMaxPositionValueRatio,
       set: (v) => {
         finalConfig.riskControl.altcoinMaxPositionValueRatio = v;
       },
-      why: `山寨币单币名义敞口硬上限为权益的 ${AI_MANAGED_HARD_LIMITS.altcoinMaxPositionValueRatio} 倍。`,
+      why: `山寨币单币名义敞口硬上限为权益的 ${limits.altcoinMaxPositionValueRatio} 倍。`,
     },
     {
       field: 'riskControl.maxMarginUsage',
       current: finalConfig.riskControl.maxMarginUsage,
-      max: AI_MANAGED_HARD_LIMITS.maxMarginUsage,
+      max: limits.maxMarginUsage,
       set: (v) => {
         finalConfig.riskControl.maxMarginUsage = v;
       },
-      why: `保证金占用硬上限为 ${AI_MANAGED_HARD_LIMITS.maxMarginUsage}%，必须保留至少 ${100 - AI_MANAGED_HARD_LIMITS.maxMarginUsage}% 缓冲应对插针与资金费。`,
+      why: `保证金占用硬上限为 ${limits.maxMarginUsage}%，必须保留至少 ${100 - limits.maxMarginUsage}% 缓冲应对插针与资金费。`,
     },
     {
       field: 'circuitBreaker.maxDailyLossPercent',
       current: finalConfig.circuitBreaker.maxDailyLossPercent,
-      max: AI_MANAGED_HARD_LIMITS.maxDailyLossPercent,
+      max: limits.maxDailyLossPercent,
       forbidZero: true,
       set: (v) => {
         finalConfig.circuitBreaker.maxDailyLossPercent = v;
       },
-      why: `单日亏损熔断不可关闭且硬上限为 ${AI_MANAGED_HARD_LIMITS.maxDailyLossPercent}%，这是账户最后的安全护栏。`,
+      why: `单日亏损熔断不可关闭且硬上限为 ${limits.maxDailyLossPercent}%，这是账户最后的安全护栏。`,
     },
     {
       field: 'circuitBreaker.maxTotalDrawdownPercent',
       current: finalConfig.circuitBreaker.maxTotalDrawdownPercent,
-      max: AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent,
+      max: limits.maxTotalDrawdownPercent,
       forbidZero: true,
       set: (v) => {
         finalConfig.circuitBreaker.maxTotalDrawdownPercent = v;
       },
-      why: `总回撤熔断不可关闭且硬上限为 ${AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent}%，这是账户最后的安全护栏。`,
+      why: `总回撤熔断不可关闭且硬上限为 ${limits.maxTotalDrawdownPercent}%，这是账户最后的安全护栏。`,
     },
   ];
 

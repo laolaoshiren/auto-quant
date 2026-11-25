@@ -53,6 +53,32 @@ function compareIds(a: number | string, b: number | string): number {
   return sa < sb ? -1 : 1;
 }
 
+const GATE_ORDER_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * 校验并编码 Gate 订单号/条件单号路径段，防止非法字符或路径穿越拼进 URL。
+ */
+function encodeGateOrderId(orderId: string | number): string {
+  const raw = String(orderId);
+  if (!GATE_ORDER_ID_RE.test(raw)) {
+    throw new Error(`Gate 订单号格式非法：${JSON.stringify(orderId)}`);
+  }
+  return encodeURIComponent(raw);
+}
+
+/**
+ * 仅当 Gate 明确报告"订单不存在"（HTTP 404 / ORDER_NOT_FOUND / AUTO_ORDER_NOT_FOUND / INVALID_ORDER）
+ * 时才视为订单已消失，避免把 INVALID_SIGNATURE / INVALID_TIMESTAMP 等鉴权或参数错误误判成撤单。
+ */
+function isGateOrderNotFound(error: unknown): boolean {
+  const err = error as { status?: number; label?: string; message?: string } | null;
+  if (err?.status === 404) return true;
+  const label = typeof err?.label === 'string' ? err.label : '';
+  if (/^(?:AUTO_)?ORDER_NOT_FOUND$|^INVALID_ORDER$/i.test(label)) return true;
+  const message = typeof err?.message === 'string' ? err.message : '';
+  return /\bHTTP\s+404\b|(?:AUTO_)?ORDER_NOT_FOUND|order\s+not\s+found|not[_\s-]found|\bINVALID_ORDER\b/i.test(message);
+}
+
 /**
  * 按合约的**允许最小价格变动**（`order_price_round`）把价格取整到合法值。
  *
@@ -61,25 +87,41 @@ function compareIds(a: number | string, b: number | string): number {
  * 触发价带着浮点长尾（`69.02236585365898`、`74.4715000000005`），Gate 对价格精度执行得比
  * 币安严格，多一位小数就整单拒绝。
  *
- * 取整放在 broker 内部是**防御性**的：上层（`replaceProtection`）本该用 SymbolRegistry 的
- * `roundTriggerPrice`，但那条路径目前没有调用点 —— 交易所这一层兜底最可靠，
- * 至少不会把浮点长尾发到交易所。
- *
- * 取整方向用 `round`（四舍五入到最近一档），而不是 floor/ceil：触发价只是"到价才触发"，
- * 差半档不影响保护效果，而方向性取整在两种持仓方向下会各错一次。
+ * 支持方向性取整（`down` / `up` / `nearest`）：条件单按安全侧取整，避免因四舍五入跨过标记价
+ * 造成立即触发。
  */
-function formatGatePrice(price: number, contract: GateFuturesContract): string {
+function roundGatePrice(
+  price: number,
+  contract: GateFuturesContract,
+  direction: 'nearest' | 'down' | 'up' = 'nearest',
+): { value: number; text: string } {
   const tick = num(contract.order_price_round);
-  if (!(tick > 0) || !(price > 0)) return String(price);
+  if (!(tick > 0) || !(price > 0)) return { value: price, text: String(price) };
   const decimals = stepDecimals(String(contract.order_price_round));
-  const stepped = Math.round(price / tick) * tick;
+  const ratio = price / tick;
+  const factor =
+    direction === 'down'
+      ? Math.floor(ratio + 1e-9)
+      : direction === 'up'
+        ? Math.ceil(ratio - 1e-9)
+        : Math.round(ratio);
+  const stepped = factor * tick;
   /*
    * 用 `toFixed(decimals)` 而非 `String(Number(stepped.toFixed(8)))`（2026-11-23 修复）：
    *   1. 防止极小价币种（如 1e-7）被 `toFixed(8)` 截断或 `String(...)` 转成科学计数法 `"1e-7"` 被 Gate 拒单；
    *   2. 去掉小数末尾多余的 0（如 `"69.0"` → `"69"`、`"74.50"` → `"74.5"`），同时消除二进制浮点尾差。
    */
   const fixed = stepped.toFixed(decimals);
-  return decimals > 0 ? fixed.replace(/\.?0+$/, '') : fixed;
+  const text = decimals > 0 ? fixed.replace(/\.?0+$/, '') : fixed;
+  return { value: Number(fixed), text };
+}
+
+function formatGatePrice(
+  price: number,
+  contract: GateFuturesContract,
+  direction: 'nearest' | 'down' | 'up' = 'nearest',
+): string {
+  return roundGatePrice(price, contract, direction).text;
 }
 
 /**
@@ -130,13 +172,13 @@ function signedSize(side: 'BUY' | 'SELL', size: number): number {
   return side === 'BUY' ? Math.abs(size) : -Math.abs(size);
 }
 
-/** 币数 → Gate 张数（向下取整；转换不出可交易张数时返回 0）。 */
+/** 币数 → Gate 张数（向下取整，含 1e-9 浮点容差避免 0.0003/0.0001=2.9999999999999996 少平 1 张；转换不出可交易张数时返回 0）。 */
 function toSize(quantity: number, contract: GateFuturesContract): number {
   const multiplier = num(contract.quanto_multiplier);
   if (!(multiplier > 0) || !(quantity > 0)) return 0;
   const stepRaw = num(contract.order_size_step ?? '1');
   const step = stepRaw > 0 ? stepRaw : 1;
-  const stepped = Math.floor(quantity / multiplier / step) * step;
+  const stepped = Math.floor(quantity / multiplier / step + 1e-9) * step;
   const min = num(contract.order_size_min ?? '1');
   return stepped >= (min > 0 ? min : 1) ? stepped : 0;
 }
@@ -320,7 +362,7 @@ export function gateFillToUserTrade(fill: GateFuturesFill, contract: GateFutures
     marginAsset: 'USDT',
     commission: fill.fee,
     commissionAsset: 'USDT',
-    time: fill.create_time * 1000,
+    time: Math.round(fill.create_time * 1000),
     maker: fill.role !== 'taker',
     buyer: fill.size > 0,
   };
@@ -478,24 +520,38 @@ export class GateBroker {
   async placeOrder(request: PlaceOrderRequest): Promise<PlacedOrder> {
     const contractName = symbolToGateContract(request.symbol);
     const contract = await this.contracts.get(contractName);
-    const conditional = request.triggerPrice !== undefined && CONDITIONAL_ORDER_TYPES.has(request.type);
-    if (conditional) return this.placeConditional(request, contract, contractName);
+    if (CONDITIONAL_ORDER_TYPES.has(request.type)) {
+      return this.placeConditional(request, contract, contractName);
+    }
 
-    const size = toSize(request.quantity ?? 0, contract);
-    if (size === 0) throw new Error(`Gate 下单数量换算为 0 张（quantity=${request.quantity}，合约=${contractName}）。`);
+    /*
+     * 全平市价单（`closePosition: true` + `MARKET`）：使用 Gate 原生 `size: 0, close: true`，
+     * 避免数量换算误差或浮点截断残留 1 张裸仓（Gate 约定 close 与 reduce_only 互斥且 size 须为 0）。
+     */
+    const closeAllMarket = request.type === 'MARKET' && request.closePosition === true;
+    const size = closeAllMarket ? 0 : toSize(request.quantity ?? 0, contract);
+    if (!closeAllMarket && size === 0) {
+      throw new Error(`Gate 下单数量换算为 0 张（quantity=${request.quantity}，合约=${contractName}）。`);
+    }
 
     const body: Record<string, unknown> = {
       contract: contractName,
-      size: signedSize(request.side, size),
+      size: closeAllMarket ? 0 : signedSize(request.side, size),
       /* Gate：price=0 即市价单，且 tif 必须是 ioc。 */
       price: request.type === 'MARKET' ? '0' : formatGatePrice(request.price ?? 0, contract),
       tif: request.type === 'MARKET' ? 'ioc' : 'gtc',
     };
-    if (request.reduceOnly === true) body.reduce_only = true;
+    if (closeAllMarket) {
+      body.close = true;
+    } else if (request.reduceOnly === true) {
+      body.reduce_only = true;
+    }
     if (request.clientOrderId) body.text = toGateOrderText(request.clientOrderId);
 
     const order = await this.rest.signed<GateFuturesOrder>('POST', '/futures/usdt/orders', { body });
-    log.info(`[gate] 下单 ${request.symbol} ${request.side} ${size} 张 → #${order.id}`);
+    log.info(
+      `[gate] 下单 ${request.symbol} ${request.side} ${closeAllMarket ? '全平' : `${size} 张`} → #${order.id}`,
+    );
     const raw = gateOrderToBinanceResponse(order, contract);
     return {
       kind: 'order',
@@ -526,6 +582,10 @@ export class GateBroker {
     contract: GateFuturesContract,
     contractName: string,
   ): Promise<PlacedOrder> {
+    const rawTrigger = request.triggerPrice;
+    if (rawTrigger === undefined || !Number.isFinite(rawTrigger) || rawTrigger <= 0) {
+      throw new Error(`Gate 条件单 ${request.type} 缺少合法触发价（triggerPrice=${String(rawTrigger)}）。`);
+    }
     /*
      * ⚠️ **closePosition 条件单的 size 必须是 0**（2026-11-11 测试网实测：
      * 传持仓张数会得到 `AUTO_INVALID_PARAM_INITIAL_SIZE: close size must zero`）。
@@ -536,7 +596,6 @@ export class GateBroker {
     if (!closeAll && size === 0) {
       throw new Error(`Gate 条件单数量换算为 0 张（quantity=${request.quantity}，合约=${contractName}）。`);
     }
-    const triggerText = formatGatePrice(request.triggerPrice ?? 0, contract);
     /*
      * Gate 的触发方向：rule=1（价格 ≥ 触发价时触发）/ rule=2（≤ 时触发）。
      * 本系统的语义：
@@ -548,6 +607,25 @@ export class GateBroker {
     const kind: 'STOP' | 'TAKE_PROFIT' = request.type.startsWith('TAKE_PROFIT') ? 'TAKE_PROFIT' : 'STOP';
     const closingLong = request.side === 'SELL';
     const rule = isStop ? (closingLong ? 2 : 1) : closingLong ? 1 : 2;
+    /*
+     * 安全侧取整：rule=2 要求触发价严格低于标记价（向下取整远离市价），
+     * rule=1 要求触发价严格高于标记价（向上取整远离市价），防止四舍五入踩线导致立即触发。
+     */
+    const mustBeBelow = rule === 2;
+    const trigger = roundGatePrice(rawTrigger, contract, mustBeBelow ? 'down' : 'up');
+    if (!(trigger.value > 0)) {
+      throw new Error(`Gate 条件单 ${request.type} 触发价按步长取整后为 0（triggerPrice=${rawTrigger}）。`);
+    }
+    const markPrice = await this.getMarkPrice(request.symbol).catch(() => 0);
+    if (markPrice > 0) {
+      const validTrigger = mustBeBelow ? trigger.value < markPrice : trigger.value > markPrice;
+      if (!validTrigger) {
+        throw new Error(
+          `Gate ${request.symbol} 的 ${request.type} 触发价 ${trigger.text} 会立即触发（当前标记价 ${markPrice}），已拒绝下单。`,
+        );
+      }
+    }
+    const triggerText = trigger.text;
     const algoText = toGateAlgoText(kind, request.clientOrderId);
     const body = {
       initial: {
@@ -599,9 +677,10 @@ export class GateBroker {
   }
 
   async getOrder(symbol: string, orderId: string | number): Promise<BinanceOrderResponse | null> {
+    const safeOrderId = encodeGateOrderId(orderId);
     try {
       const contract = await this.contracts.get(symbolToGateContract(symbol));
-      const order = await this.rest.signed<GateFuturesOrder>('GET', `/futures/usdt/orders/${orderId}`);
+      const order = await this.rest.signed<GateFuturesOrder>('GET', `/futures/usdt/orders/${safeOrderId}`);
       return gateOrderToBinanceResponse(order, contract);
     } catch {
       return null;
@@ -623,15 +702,15 @@ export class GateBroker {
   }
 
   async getAlgoOrder(algoId: string | number): Promise<BinanceAlgoOrderResponse | null | 'not-found'> {
+    const safeAlgoId = encodeGateOrderId(algoId);
     try {
-      const order = await this.rest.signed<GateFuturesOrder>('GET', `/futures/usdt/price_orders/${algoId}`);
+      const order = await this.rest.signed<GateFuturesOrder>('GET', `/futures/usdt/price_orders/${safeAlgoId}`);
       const registry = await this.contracts.all();
       const contract = registry.get(order.initial?.contract ?? order.contract);
       if (!contract) return 'not-found';
       return gatePriceOrderToAlgoResponse(order, contract, this.algoKinds.get(String(order.id)));
     } catch (error) {
-      const message = (error as Error).message;
-      if (/not.?found|404|INVALID/i.test(message)) return 'not-found';
+      if (isGateOrderNotFound(error)) return 'not-found';
       return null;
     }
   }
@@ -691,9 +770,10 @@ export class GateBroker {
     orderId: string | number,
     kind: 'order' | 'algo' = 'order',
   ): Promise<boolean> {
+    const safeOrderId = encodeGateOrderId(orderId);
     try {
       const path =
-        kind === 'algo' ? `/futures/usdt/price_orders/${orderId}` : `/futures/usdt/orders/${orderId}`;
+        kind === 'algo' ? `/futures/usdt/price_orders/${safeOrderId}` : `/futures/usdt/orders/${safeOrderId}`;
       await this.rest.signed('DELETE', path);
       if (kind === 'algo') this.algoKinds.delete(String(orderId));
       log.info(`[gate] 已撤销 ${symbol} 的${kind === 'algo' ? '条件单' : '普通单'} #${orderId}`);
@@ -701,7 +781,7 @@ export class GateBroker {
     } catch (error) {
       /* 已经不在 = 撤单成功（与币安那层同一个语义）。 */
       const message = (error as Error).message;
-      if (/not.?found|404|INVALID_ORDER/i.test(message)) {
+      if (isGateOrderNotFound(error)) {
         if (kind === 'algo') this.algoKinds.delete(String(orderId));
         return true;
       }
@@ -732,11 +812,12 @@ export class GateBroker {
       });
       for (const order of open) {
         try {
-          await this.rest.signed('DELETE', `/futures/usdt/price_orders/${order.id}`);
+          const safeId = encodeGateOrderId(order.id);
+          await this.rest.signed('DELETE', `/futures/usdt/price_orders/${safeId}`);
           this.algoKinds.delete(String(order.id));
         } catch (error) {
           const message = (error as Error).message;
-          if (/not.?found|404|INVALID_ORDER/i.test(message)) {
+          if (isGateOrderNotFound(error)) {
             this.algoKinds.delete(String(order.id));
             continue;
           }
@@ -781,12 +862,20 @@ export class GateBroker {
   }): Promise<BinanceIncome[]> {
     /*
      * ⚠️ `endTime` 必须可选；并按 offset 翻页避免超过 100 条资金流水被静默截断（2026-11-23 修复）。
+     *
+     * 时间戳精度（秒 vs 毫秒）：
+     *   · Gate `account_book` 的 `from`/`to` 是整秒，但流水记录 `time` 带毫秒小数；
+     *   · `from` 向下取整、`to` 向上取整（`Math.ceil`），确保末尾亚秒区间不会被截断丢漏，
+     *     同时在客户端按精确毫秒 `[startTime, endTime]` 过滤边界外的多余条目。
      */
     const endTime = options.endTime ?? Date.now();
+    if (endTime < options.startTime) return [];
     const pageSize = Math.max(1, Math.min(options.limit ?? 100, 100));
     const maxPages = 50;
-    const fromSec = String(Math.floor(options.startTime / 1000));
-    const toSec = String(Math.floor(endTime / 1000));
+    const fromFloor = Math.floor(options.startTime / 1000);
+    const toCeil = Math.max(fromFloor, Math.ceil(endTime / 1000));
+    const fromSec = String(fromFloor);
+    const toSec = String(toCeil);
     const out: BinanceIncome[] = [];
     const seen = new Set<string>();
 
@@ -802,6 +891,8 @@ export class GateBroker {
       if (!Array.isArray(books) || books.length === 0) break;
       for (const book of books) {
         const mapped = gateBookToIncome(book);
+        if (mapped.time < options.startTime) continue;
+        if (options.endTime !== undefined && mapped.time > options.endTime) continue;
         const key = `${book.id ?? ''}:${mapped.time}:${mapped.incomeType}:${mapped.symbol}:${mapped.income}`;
         if (seen.has(key)) continue;
         seen.add(key);

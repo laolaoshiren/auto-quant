@@ -46,6 +46,8 @@ function main(): void {
       users.updateUsername(owner.id, username);
     }
     users.updatePassword(owner.id, hashPassword(password));
+    // 立刻作废此前签发的所有 JWT，避免泄漏的旧会话在重置密码后继续有效
+    users.markCredentialsChanged(owner.id);
     log.warn(`已重置管理员账号：${owner.username} → ${username}`);
   } else {
     users.create(username, hashPassword(password), OWNER_ROLE);

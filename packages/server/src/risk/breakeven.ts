@@ -93,7 +93,8 @@ export function shouldMoveStopToBreakeven(input: BreakevenInput): BreakevenVerdi
   if (
     !Number.isFinite(input.entryPrice) ||
     !Number.isFinite(input.markPrice) ||
-    input.entryPrice <= 0
+    input.entryPrice <= 0 ||
+    input.markPrice <= 0
   ) {
     return { move: false, newStop: null, reason: '价格数据不完整，本轮不调整止损。' };
   }
@@ -183,6 +184,19 @@ export function shouldMoveStopToBreakeven(input: BreakevenInput): BreakevenVerdi
         `浮盈 ${input.unrealizedPnlPercent.toFixed(2)}% 已达保本阈值 ${input.triggerPercent}%，` +
         `但候选止损 ${candidate.toFixed(6)} 不比现有止损 ${input.currentStop} 更有利 —— ` +
         '止损只往有利方向移（价格回落时不回退）。',
+    };
+  }
+
+  /* 合法侧守卫：新止损必须严格位于当前标记价的止损侧，防止微回撤触发交易所 -2021 立即成交。 */
+  const onSafeSide =
+    input.side === 'long' ? candidate < input.markPrice : candidate > input.markPrice;
+  if (!onSafeSide) {
+    return {
+      move: false,
+      newStop: null,
+      reason:
+        `候选止损 ${candidate.toFixed(6)} 已贴近或越过当前标记价 ${input.markPrice}，` +
+        '本轮暂不移动止损以避免触发交易所立即成交拒单。',
     };
   }
 

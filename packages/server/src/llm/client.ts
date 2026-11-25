@@ -781,6 +781,7 @@ export class LlmClient {
     probe: boolean,
     maxTokensOverride?: number,
     toolOverride?: { tools?: readonly ToolSpec[]; toolChoice?: 'auto' | 'none' | 'required' },
+    stream = false,
   ): OutboundRequest {
     /*
      * **本次调用的输出预算**：per-call 覆盖优先，否则用实例值。
@@ -797,6 +798,7 @@ export class LlmClient {
       : {
           ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
           ...(effectiveMaxTokens !== undefined ? { maxTokens: effectiveMaxTokens } : {}),
+          ...(stream ? { stream: true } : {}),
           jsonMode: this.jsonMode,
           ...(this.jsonSchema !== undefined ? { jsonSchema: this.jsonSchema } : {}),
           /*
@@ -889,12 +891,12 @@ export class LlmClient {
     options: ChatCallOptions = {},
   ): Promise<ChatResult> {
     const probe = options.probe === true;
-    const request = this.buildRequest(messages, probe, options.maxTokens, {
-      ...(options.tools !== undefined ? { tools: options.tools } : {}),
-      ...(options.toolChoice !== undefined ? { toolChoice: options.toolChoice } : {}),
-    });
     /*
      * ⚠️ **OpenAI 兼容的 provider 默认走流式**（探测请求除外）。
+     *
+     * 必须在 `buildRequest()` 之前先算出 `useStream` 并传进 bodyOptions，
+     * 否则发出的请求头是 `accept: text/event-stream` 而请求体却是 `"stream": false`
+     * 且缺失 `stream_options: { include_usage: true }`。
      *
      * 非流式要等整个响应生成完才返回响应头，而链路上的网关等 100 秒就发
      * `HTTP 524`；我们的请求实测 60–205 秒 —— **整轮决策作废**
@@ -921,6 +923,16 @@ export class LlmClient {
       !probe &&
       !this.streamDisabled &&
       !this.usesAnthropicProtocol();
+    const request = this.buildRequest(
+      messages,
+      probe,
+      options.maxTokens,
+      {
+        ...(options.tools !== undefined ? { tools: options.tools } : {}),
+        ...(options.toolChoice !== undefined ? { toolChoice: options.toolChoice } : {}),
+      },
+      useStream,
+    );
     /*
      * ⚠️ **两个取消源要合并：本客户端自己的超时 + 调用方传来的 signal。**
      *

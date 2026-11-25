@@ -139,6 +139,12 @@ test('签名被篡改的令牌被拒绝', () => {
   assert.equal(verifyToken(mint(), 'another-secret'), null);
 });
 
+test('非正整数 sub 的令牌被拒绝', () => {
+  assert.equal(verifyToken(mint({ sub: 0 }), SECRET), null);
+  assert.equal(verifyToken(mint({ sub: -1 }), SECRET), null);
+  assert.equal(verifyToken(mint({ sub: 1.5 }), SECRET), null);
+});
+
 /* -------------------------------------------------------------------------- */
 /*  撤销                                                                       */
 /* -------------------------------------------------------------------------- */

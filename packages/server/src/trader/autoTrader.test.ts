@@ -4750,15 +4750,21 @@ test('★ 被替换掉的旧保护单行会被结清（不再永远显示「已�
     String(oldStop.exchangeOrderId),
     '前提：单号已经换成新的（旧的那张成了历史行）',
   );
-  assert.equal(orderRow(oldStop.id).status, 'NEW', '前提：旧行仍停在挂单状态');
+  assert.equal(
+    orderRow(oldStop.id).status,
+    'CANCELED',
+    '★ 移动止损替换成功时，被替换掉的旧保护单行应立即标为 CANCELED（不等 30 分钟对账）',
+  );
 
+  /* 再模拟一行异常残留的旧 NEW 保护单（例如上次进程崩在撤单和落库之间），验证对账兜底也能结清。 */
+  getDb().run(`UPDATE orders SET status = 'NEW' WHERE id = ?`, oldStop.id);
   ageOrders();
   await buildTrader(broker, '<decision>[]</decision>').runOnce();
 
   assert.equal(
     orderRow(oldStop.id).status,
     'CANCELED',
-    '★ 被替换掉的旧保护单必须被结清 —— 否则界面上会堆出一排幽灵「已挂单」',
+    '★ 异常残留的旧保护单也必须被对账兜底结清 —— 否则界面上会堆出一排幽灵「已挂单」',
   );
 });
 
@@ -7159,8 +7165,9 @@ test('★ 调整保护位时撤旧单失败：必须放弃调整，不许把有�
   assert.ok(opened, '前提：开出了一个仓位');
   assert.ok(opened.stop_loss, '前提：开仓时挂上了止损 —— 否则"有保护"这个前提不成立');
 
-  /* 撤旧单这一步失败：旧保护单**仍在**交易所上。 */
+  /* 撤旧单这一步失败：旧保护单**仍在**交易所上（executeAdjust 现已按侧调 cancelAllProtection → cancelOrder）。 */
   broker.failCancelAll = true;
+  broker.failCancel = true;
   const placedBefore = broker.placed.length;
 
   const newStop = (broker.markPrice * 0.995).toFixed(2);

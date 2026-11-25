@@ -11,6 +11,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, RefreshCw, Search } from 'lucide-react';
+import type { ExchangeId } from '@aq/shared';
 import { api, type MarketSymbol } from '../lib/api';
 import { useEvents } from '../lib/store';
 import { useDocumentTitle, usePolled } from '../lib/hooks';
@@ -19,6 +20,10 @@ import { CandlestickChart } from '../components/CandlestickChart';
 import { fmtCompactAmount, fmtPercent, fmtPriceUsd, pnlColor } from '../lib/format';
 
 const INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
+const MARKET_EXCHANGES: ReadonlyArray<{ id: ExchangeId; label: string }> = [
+  { id: 'binance', label: '币安' },
+  { id: 'gate', label: 'Gate' },
+];
 
 /**
  * 引用**稳定**的空数组。
@@ -63,9 +68,11 @@ const SORT_LABEL: Record<SortKey, string> = {
 export function MarketPage() {
   useDocumentTitle('行情');
   const socketOpen = useEvents((s) => s.status) === 'open';
+  const [exchange, setExchange] = useState<ExchangeId>('binance');
 
-  const symbolsQuery = usePolled((signal) => api.marketSymbols(signal), {
+  const symbolsQuery = usePolled((signal) => api.marketSymbols(signal, exchange), {
     intervalMs: socketOpen ? 20_000 : 10_000,
+    deps: [exchange],
   });
 
   const symbols = symbolsQuery.data ?? NO_SYMBOLS;
@@ -83,8 +90,8 @@ export function MarketPage() {
   }, [symbols, selected]);
 
   const klinesQuery = usePolled(
-    (signal) => api.marketKlines(selected, interval, 400, signal),
-    { intervalMs: 15_000, enabled: selected.length > 0, deps: [selected, interval] },
+    (signal) => api.marketKlines(selected, interval, 400, signal, exchange),
+    { intervalMs: 15_000, enabled: selected.length > 0, deps: [selected, interval, exchange] },
   );
 
   const matched = useMemo(() => {
@@ -139,6 +146,19 @@ export function MarketPage() {
       {/* ------------------------------------------------------------------ */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <h1 className="text-xl font-semibold tracking-wide text-ink-hi">行情</h1>
+        <div role="group" aria-label="行情交易所" className="flex items-center gap-0.5">
+          {MARKET_EXCHANGES.map((item) => (
+            <Button
+              key={item.id}
+              size="sm"
+              variant={exchange === item.id ? 'primary' : 'ghost'}
+              aria-pressed={exchange === item.id}
+              onClick={() => setExchange(item.id)}
+            >
+              {item.label}
+            </Button>
+          ))}
+        </div>
         <Badge tone="muted">{symbols.length} 个 USDT-M 永续</Badge>
 
         {active && (

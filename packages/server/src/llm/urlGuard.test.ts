@@ -172,6 +172,27 @@ test('非 http(s) 协议被拒绝', () => {
   rejected('not a url');
 });
 
+test('★ P2 安全加固：拒绝 IPv4 基准测试段 198.18.0.0/15、IPv6 6to4（2002::/16）与 Teredo（2001:0000::/32）', () => {
+  /* IPv4 198.18.0.0/15 (RFC 2544) */
+  assert.match(rejected('http://198.18.0.1/v1'), /198\.18\.0\.0\/15/);
+  rejected('http://198.19.255.254/v1');
+  rejected('http://[::ffff:198.18.0.1]/v1');
+  /* 边界外公网 IPv4 不能误伤 */
+  allowed('http://198.17.255.255/v1');
+  allowed('http://198.20.0.0/v1');
+
+  /* IPv6 6to4 2002::/16 */
+  assert.match(rejected('http://[2002:7f00:1::1]/v1'), /2002::\/16/);
+  rejected('http://[2002:a9fe:a9fe::1]/v1');
+  allowed('http://[2003::1]/v1');
+
+  /* IPv6 Teredo 2001:0000::/32 */
+  assert.match(rejected('http://[2001::1]/v1'), /2001:0000::\/32/);
+  rejected('http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/v1');
+  /* 正常 2001:xxxx:: 公网 IPv6（如 Google DNS 2001:4860:4860::8888）不能误伤 */
+  allowed('http://[2001:4860:4860::8888]/v1');
+});
+
 test('正常的公网端点全部放行', () => {
   // 自定义端点是有意保留的功能：自建网关、代理、兼容层。白名单必须不能把它们挡掉
   allowed('https://api.deepseek.com/v1');

@@ -185,6 +185,9 @@ export function mergeOpenAiStreamChunks(lines: readonly string[]): unknown {
   return out;
 }
 
+/** SSE 响应流硬字节上限（16 MiB），防止恶意/异常上游无限吐流或无换行缓冲打爆内存。 */
+export const MAX_STREAM_BYTES = 16 * 1024 * 1024;
+
 /**
  * 从一个 SSE `Response` 读出全部 `data:` 行。
  *
@@ -201,6 +204,7 @@ export async function readOpenAiStreamLines(
    * 是 2026-10-10 用户实测到的问题。**判据该是"有没有在动"，不是"一共花了多久"。**
    */
   onActivity?: () => void,
+  maxBytes = MAX_STREAM_BYTES,
 ): Promise<string[]> {
   const body = response.body;
   if (body === null) return [];
@@ -208,24 +212,35 @@ export async function readOpenAiStreamLines(
   const decoder = new TextDecoder();
   const lines: string[] = [];
   let buffer = '';
+  let totalBytes = 0;
 
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    /* 收到数据 = 上游还在动 —— 让调用方的"卡住"计时器重新开始。 */
-    onActivity?.();
-    buffer += decoder.decode(value, { stream: true });
-    /*
-     * 按行切：SSE 用 `\n`，但网关偶尔发 `\r\n`。留最后一段（可能是半行）
-     * 在缓冲里等下一次读取 —— 直接切会把一个 JSON 分片劈成两半。
-     */
-    let newline = buffer.indexOf('\n');
-    while (newline >= 0) {
-      lines.push(buffer.slice(0, newline).replace(/\r$/, ''));
-      buffer = buffer.slice(newline + 1);
-      newline = buffer.indexOf('\n');
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`SSE 响应流超过上限（${maxBytes} 字节），已中止读取`);
+      }
+      /* 收到数据 = 上游还在动 —— 让调用方的"卡住"计时器重新开始。 */
+      onActivity?.();
+      buffer += decoder.decode(value, { stream: true });
+      /*
+       * 按行切：SSE 用 `\n`，但网关偶尔发 `\r\n`。留最后一段（可能是半行）
+       * 在缓冲里等下一次读取 —— 直接切会把一个 JSON 分片劈成两半。
+       */
+      let newline = buffer.indexOf('\n');
+      while (newline >= 0) {
+        lines.push(buffer.slice(0, newline).replace(/\r$/, ''));
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf('\n');
+      }
     }
+    buffer += decoder.decode();
+    if (buffer.trim() !== '') lines.push(buffer.replace(/\r$/, ''));
+    return lines;
+  } finally {
+    reader.releaseLock();
   }
-  if (buffer.trim() !== '') lines.push(buffer);
-  return lines;
 }

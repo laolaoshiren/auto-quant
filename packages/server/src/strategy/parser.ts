@@ -382,9 +382,21 @@ export function extractDecisions(response: string): string | null {
    */
   const text = stripInvisible(response);
 
-  const openTag = /<decision>/i.exec(text);
-  const decisionBlock = /<decision>([\s\S]*?)<\/decision>/i.exec(text);
-  const body = decisionBlock?.[1] ?? (openTag ? text.slice(openTag.index + openTag[0].length) : text);
+  /*
+   * 先剥离 `<reasoning>...</reasoning>` 再提取 `<decision>`：防止模型在推理文本里
+   * 提及字面量 `<decision>` 和指标数组（如 `EMA [9, 20, 50]`）时劫持后方真实决策块。
+   */
+  const outsideReasoning = text.replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '');
+  const decisionMatches = [...outsideReasoning.matchAll(/<decision>([\s\S]*?)<\/decision>/gi)];
+  const lastDecisionBlock = decisionMatches[decisionMatches.length - 1];
+  const openTagOutside = /<decision>/i.exec(outsideReasoning);
+  const openTagFallback = /<decision>/i.exec(text);
+  const decisionBlockFallback = /<decision>([\s\S]*?)<\/decision>/i.exec(text);
+  const body =
+    lastDecisionBlock?.[1] ??
+    (openTagOutside ? outsideReasoning.slice(openTagOutside.index + openTagOutside[0].length) : null) ??
+    decisionBlockFallback?.[1] ??
+    (openTagFallback ? text.slice(openTagFallback.index + openTagFallback[0].length) : text);
 
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(body);
   const fencedText = fenced?.[1]?.trim();

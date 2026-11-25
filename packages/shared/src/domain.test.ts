@@ -400,14 +400,44 @@ test('★ 智能托管的起始配置不设边界 —— 上限顶格、门槛�
       maxTotalDrawdownPercent: 0,
     },
   });
+  /* 默认 balanced 档：必须按 balanced 档上限钳制，不可突破至 aggressive 的 30x/15x。 */
+  const bal = MANAGED_RISK_PROFILES.balanced;
   assert.equal(clamped.riskControl.requireStopLoss, true);
-  assert.equal(clamped.riskControl.maxPositions, AI_MANAGED_HARD_LIMITS.maxPositions);
-  assert.equal(clamped.riskControl.btcEthMaxLeverage, AI_MANAGED_HARD_LIMITS.btcEthMaxLeverage);
-  assert.equal(clamped.riskControl.altcoinMaxLeverage, AI_MANAGED_HARD_LIMITS.altcoinMaxLeverage);
-  assert.equal(clamped.riskControl.maxMarginUsage, AI_MANAGED_HARD_LIMITS.maxMarginUsage);
-  assert.equal(clamped.circuitBreaker.maxDailyLossPercent, AI_MANAGED_HARD_LIMITS.maxDailyLossPercent);
+  assert.equal(clamped.riskControl.marginBasedLimit, false);
+  assert.equal(clamped.riskControl.maxPositions, bal.maxPositions);
+  assert.equal(clamped.riskControl.btcEthMaxLeverage, bal.btcEthMaxLeverage);
+  assert.equal(clamped.riskControl.altcoinMaxLeverage, bal.altcoinMaxLeverage);
+  assert.equal(clamped.riskControl.maxMarginUsage, bal.maxMarginUsage);
+  assert.equal(clamped.circuitBreaker.maxDailyLossPercent, bal.maxDailyLossPercent);
+  assert.equal(clamped.circuitBreaker.maxTotalDrawdownPercent, bal.maxTotalDrawdownPercent);
+
+  /* 进取档 aggressive：按全局硬底线 AI_MANAGED_HARD_LIMITS 钳制。 */
+  const clampedAgg = clampAiManagedHardLimits({
+    ...unboundedAiManagedConfig('aggressive'),
+    riskControl: {
+      ...rc,
+      requireStopLoss: false,
+      marginBasedLimit: true,
+      maxPositions: 20,
+      btcEthMaxLeverage: 125,
+      altcoinMaxLeverage: 125,
+      maxMarginUsage: 100,
+    },
+    circuitBreaker: {
+      ...cb,
+      maxDailyLossPercent: 0,
+      maxTotalDrawdownPercent: 0,
+    },
+  });
+  assert.equal(clampedAgg.riskControl.requireStopLoss, true);
+  assert.equal(clampedAgg.riskControl.marginBasedLimit, false);
+  assert.equal(clampedAgg.riskControl.maxPositions, AI_MANAGED_HARD_LIMITS.maxPositions);
+  assert.equal(clampedAgg.riskControl.btcEthMaxLeverage, AI_MANAGED_HARD_LIMITS.btcEthMaxLeverage);
+  assert.equal(clampedAgg.riskControl.altcoinMaxLeverage, AI_MANAGED_HARD_LIMITS.altcoinMaxLeverage);
+  assert.equal(clampedAgg.riskControl.maxMarginUsage, AI_MANAGED_HARD_LIMITS.maxMarginUsage);
+  assert.equal(clampedAgg.circuitBreaker.maxDailyLossPercent, AI_MANAGED_HARD_LIMITS.maxDailyLossPercent);
   assert.equal(
-    clamped.circuitBreaker.maxTotalDrawdownPercent,
+    clampedAgg.circuitBreaker.maxTotalDrawdownPercent,
     AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent,
   );
 });

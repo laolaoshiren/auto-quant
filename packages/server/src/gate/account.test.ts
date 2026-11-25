@@ -139,6 +139,9 @@ test('数量换算：币数 → 张数（向下取整到 step，过小返回 0�
   assert.equal(await registry.quantityToSize('BTC_USDT', 0.01), 100);
   /* 0.00999 BTC = 99.9 张 → 向下取整 99 张 */
   assert.equal(await registry.quantityToSize('BTC_USDT', 0.00999), 99);
+  /* 浮点容差：0.0003 / 0.0001 = 2.9999999999999996 必须换算成 3 张而不是 2 张 */
+  assert.equal(await registry.quantityToSize('BTC_USDT', 0.0003), 3);
+  assert.equal(await registry.quantityToSize('BTC_USDT', 0.0007), 7);
   /* 比最小张数还小 → 0（调用方据此拒绝下单，而不是偷偷开一张） */
   assert.equal(await registry.quantityToSize('BTC_USDT', 0.00001), 0);
 });

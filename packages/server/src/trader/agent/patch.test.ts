@@ -136,7 +136,7 @@ test('熔断阈值与杠杆在硬底线内可由 AI 自由调整，突破硬底�
   assert.equal(within.config.riskControl.maxMarginUsage, 70);
   assert.deepEqual(within.clamps, []);
 
-  // 超硬底线（50x 杠杆、100% 保证金、日亏 25%、关闭总回撤熔断 0%）被钳制并回喂原因
+  // 超硬底线（50x 杠杆、100% 保证金、日亏 25%、关闭总回撤熔断 0%）被钳制到所属档位（默认 balanced）上限并回喂原因
   const exceeded = applyAgentPatch(current, {
     riskControl: { btcEthMaxLeverage: 50, altcoinMaxLeverage: 30, maxMarginUsage: 100 },
     circuitBreaker: { maxDailyLossPercent: 25, maxTotalDrawdownPercent: 0 },
@@ -145,9 +145,24 @@ test('熔断阈值与杠杆在硬底线内可由 AI 自由调整，突破硬底�
   assert.equal(exceeded.config.riskControl.btcEthMaxLeverage, 20);
   assert.equal(exceeded.config.riskControl.altcoinMaxLeverage, 10);
   assert.equal(exceeded.config.riskControl.maxMarginUsage, 80);
-  assert.equal(exceeded.config.circuitBreaker.maxDailyLossPercent, 15);
-  assert.equal(exceeded.config.circuitBreaker.maxTotalDrawdownPercent, 35);
+  assert.equal(exceeded.config.circuitBreaker.maxDailyLossPercent, 12);
+  assert.equal(exceeded.config.circuitBreaker.maxTotalDrawdownPercent, 30);
   assert.equal(exceeded.clamps.length, 5);
+});
+
+test('★ 稳健档（conservative）补丁不得突破 10/5x 档位上限，且禁止开启 marginBasedLimit', () => {
+  const conservative = StrategyConfigSchema.parse({
+    ...base(),
+    managedRiskProfile: 'conservative',
+  }) as StrategyConfig;
+  const result = applyAgentPatch(conservative, {
+    riskControl: { btcEthMaxLeverage: 25, altcoinMaxLeverage: 15, marginBasedLimit: true },
+  });
+  assert.equal(result.rejected, null);
+  assert.equal(result.config.riskControl.btcEthMaxLeverage, 10);
+  assert.equal(result.config.riskControl.altcoinMaxLeverage, 5);
+  assert.equal(result.config.riskControl.marginBasedLimit, false);
+  assert.equal(result.config.managedRiskProfile, 'conservative');
 });
 
 test('越界值得整体拒绝，而不是部分生效', () => {

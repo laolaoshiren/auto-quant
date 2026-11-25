@@ -76,6 +76,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '
 import path from 'node:path';
 
 import { createLogger } from '../logger.js';
+import { fetchGuarded } from './http.js';
 import {
   MODELS_DEV_ALIASES,
   MODELS_DEV_UNRESOLVABLE,
@@ -85,7 +86,7 @@ import {
 /** 日志 scope —— 与 `llm:discovery` 同一命名法（`llm:<模块>`）。 */
 const log = createLogger('llm:modelsdev');
 
-/** 数据源地址（编译期常量 —— 这是本模块**不需要**走 `fetchGuarded` 的理由：没有任何用户输入能进到这里）。 */
+/** 数据源地址（默认通过 `fetchGuarded` 发起受保护的出站请求，防重定向与 DNS rebinding）。 */
 export const MODELS_DEV_URL = 'https://models.dev/api.json';
 
 /**
@@ -786,18 +787,21 @@ export interface FetchModelsDevOptions {
  * @throws 网络失败 / 非 2xx / JSON 解析失败时抛出（调用方负责保留旧快照）。
  */
 export async function fetchModelsDev(options: FetchModelsDevOptions = {}): Promise<ModelsDevFetchResult> {
-  const doFetch = options.fetchImpl ?? fetch;
   const now = options.now ?? Date.now;
   const headers: Record<string, string> = { accept: 'application/json' };
   if (typeof options.etag === 'string' && options.etag.length > 0) {
     headers['if-none-match'] = options.etag;
   }
 
-  const response = await doFetch(options.url ?? MODELS_DEV_URL, {
+  const targetUrl = options.url ?? MODELS_DEV_URL;
+  const init: RequestInit = {
     method: 'GET',
     headers,
     signal: options.signal ?? AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-  });
+  };
+  const response = options.fetchImpl
+    ? await options.fetchImpl(targetUrl, init)
+    : await fetchGuarded(targetUrl, init);
 
   /* 304：本地那份还是最新的。**没有 payload** —— 这是刻意的（见上面那段）。 */
   if (response.status === 304) return { notModified: true };

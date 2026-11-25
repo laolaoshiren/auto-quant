@@ -226,7 +226,7 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
           '1. 先在 `<reasoning>...</reasoning>` 内用简洁中文给出：大盘判断 → 持仓处置评估 → 候选标的逐一筛选（为什么做或为什么观望）。',
           '2. 再在 `<decision>...</decision>` 内输出合法 JSON（`{"decisions":[...]}` 或数组）：',
           '   - 开仓：`{"symbol":"SOLUSDT","action":"open_long|open_short","entry_type":"market|limit","limit_price":可选,"leverage":3,"position_size_usd":200,"stop_loss":142.5,"take_profit":172.0,"confidence":82,"reasoning":"简明逻辑与失效位"}`',
-          '   - 平仓/减仓/加仓/调保护位/撤挂单/观望：`close_long|close_short|reduce_position|add_position|adjust_protection|cancel_pending|hold|wait`',
+          '   - 平仓/减仓/加仓/调保护位/撤挂单/观望：`close_long|close_short|reduce_position|add_to_position|adjust_protection|cancel_pending|hold|wait`',
           '3. 如确实需要查看雷达外标的的 K 线或调整自身运行参数，可在给出 `<decision>` 前输出 `<tool>{"tool":"get_klines|screen_symbols|set_params|write_memory","args":{...}}</tool>`。',
         ]),
   ];

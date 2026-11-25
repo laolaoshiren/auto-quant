@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   BinanceRest,
   decayWeight,
+  isTradingPriorityRequest,
   MAX_IN_FLIGHT_REQUESTS,
   preserveBigIds,
   reanchorWindow,
@@ -471,4 +472,69 @@ test('★ respectWeightBudget 衰减估算只作局部判断，不得反向覆�
   pending.shift()?.resolve(jsonResponse({}));
   await req2;
   assert.equal(rest.usedWeight1m, 900, '无新权重头时不得用衰减估算覆写实测 usedWeight1m');
+});
+
+test('★★★ 安全 P1 #4：权重软限速休眠期间不占并发槽，高优先级交易请求绕过 75% 软限速（仍遵守 429 退避）', async () => {
+  assert.equal(isTradingPriorityRequest('POST', '/fapi/v1/order'), true);
+  assert.equal(isTradingPriorityRequest('POST', '/fapi/v1/algoOrder'), true);
+  assert.equal(isTradingPriorityRequest('DELETE', '/fapi/v1/order'), true);
+  assert.equal(isTradingPriorityRequest('DELETE', '/fapi/v1/algoOrder'), true);
+  assert.equal(isTradingPriorityRequest('DELETE', '/fapi/v1/allOpenOrders'), true);
+  assert.equal(isTradingPriorityRequest('POST', '/fapi/v1/leverage'), true);
+  assert.equal(isTradingPriorityRequest('POST', '/fapi/v1/marginType'), true);
+  assert.equal(isTradingPriorityRequest('GET', '/fapi/v1/klines'), false);
+  assert.equal(isTradingPriorityRequest('GET', '/fapi/v1/order'), false);
+  assert.equal(isTradingPriorityRequest('POST', '/fapi/v1/listenKey'), false);
+
+  /*
+   * 把权重推过 75%（2400 * 0.75 = 1800），同时将窗口剩余时间设为 ~150ms、
+   * 读数设为足够大以确保衰减后仍超 75%，既能验证软限速暂停，又不让测试拖慢 10 秒。
+   */
+  const rest = makeSignedRest(1, 1);
+  rest.usedWeight1m = 1_000_000;
+  (rest as unknown as { weightWindowStart: number }).weightWindowStart = Date.now() - (WEIGHT_WINDOW_MS - 150);
+
+  /*
+   * 发起一个低优先级行情请求：它会进入 75% 权重软限速休眠，但**不能占着并发槽位**。
+   * 紧接着发起一个高优先级下单请求：它既绕过 75% 软限速，又能立刻拿到空闲槽位发出。
+   */
+  weightHeader = null;
+  const marketReq = rest.publicGet('/fapi/v1/klines');
+  await settle();
+  assert.equal(rest.inFlightCount, 0, '权重软限速休眠期间不得持有并发槽位');
+  assert.equal(pending.length, 0, '低优先级行情请求应在 75% 软限速处等待，尚未发出');
+
+  const tradeReq = rest.signedRequest('POST', '/fapi/v1/order', { symbol: 'BTCUSDT' });
+  await settle();
+  assert.equal(pending.length, 1, '高优先级下单请求必须绕过 75% 软限速并立即发出');
+  assert.ok(urls[urls.length - 1]!.includes('/fapi/v1/order'));
+
+  /* 验证高优先级请求遇到真实 429 时仍严格遵守 Retry-After 退避（退避期间不立刻重发） */
+  const headers429 = new Headers({ 'retry-after': '1' });
+  pending
+    .shift()
+    ?.resolve(
+      new Response(JSON.stringify({ code: -1003, msg: 'Too many requests' }), {
+        status: 429,
+        headers: headers429,
+      }),
+    );
+  await settle();
+  assert.equal(pending.length, 0, '高优先级请求收到 429 后必须遵守退避，不得绕过退避立即重试');
+
+  /* 等待窗口自然滚过 150ms 后放行 marketReq，再等待 1s 退避完成放行 tradeReq 重试 */
+  await new Promise((r) => setTimeout(r, 250));
+  assert.equal(pending.length, 1, '窗口滚过后低优先级行情请求恢复发出');
+  assert.ok(urls[urls.length - 1]!.includes('/fapi/v1/klines'));
+  pending.shift()?.resolve(jsonResponse({ klines: true }));
+  await marketReq;
+
+  await new Promise((r) => setTimeout(r, 900));
+  await settle();
+  assert.equal(pending.length, 1, '429 退避结束后高优先级请求按期重试');
+  assert.ok(urls[urls.length - 1]!.includes('/fapi/v1/order'));
+  pending.shift()?.resolve(jsonResponse({ orderId: '999' }));
+  const tradeRes = await tradeReq;
+  assert.deepEqual(tradeRes, { orderId: '999' });
+  assert.equal(rest.inFlightCount, 0, '全部请求结束后并发槽位必须归零');
 });

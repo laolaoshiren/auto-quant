@@ -51,9 +51,21 @@ test('做空：浮盈够时把止损从上方压到开仓价', () => {
    * 这是最容易写反的一条。做空的止损在**上方**，
    * 所以"移到开仓价"是往下压，不是往上抬。
    */
-  const v = shouldMoveStopToBreakeven(base({ side: 'short', currentStop: 102 }));
+  const v = shouldMoveStopToBreakeven(base({ side: 'short', currentStop: 102, markPrice: 96 }));
   assert.equal(v.move, true);
   assert.equal(v.newStop, 100, '做空的保本止损同样在开仓价');
+});
+
+test('★ 标记价非正或候选止损落到现价错误侧时拒绝移动（防止触发 -2021 立即强平）', () => {
+  assert.equal(shouldMoveStopToBreakeven(base({ markPrice: 0 })).move, false);
+  assert.equal(shouldMoveStopToBreakeven(base({ markPrice: -10 })).move, false);
+  /* 多头开仓 100 但标记价微回撤至 99.9：移到保本 100 会立刻触发止损，必须拒绝。 */
+  assert.equal(shouldMoveStopToBreakeven(base({ side: 'long', markPrice: 99.9 })).move, false);
+  /* 空头开仓 100 但标记价微反弹至 100.1：移到保本 100 会立刻触发止损，必须拒绝。 */
+  assert.equal(
+    shouldMoveStopToBreakeven(base({ side: 'short', currentStop: 102, markPrice: 100.1 })).move,
+    false,
+  );
 });
 
 /* -------------------------------------------------------------------------- */

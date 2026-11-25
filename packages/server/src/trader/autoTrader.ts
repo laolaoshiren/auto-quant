@@ -4742,7 +4742,9 @@ export class AutoTrader {
       };
     };
 
+    let usedManagedAgenticLoop = false;
     if (useManagedAgenticEngine && this.deps.model.chat && managedRadar) {
+      usedManagedAgenticLoop = true;
       const heldSetForEngine = new Set(held);
       const engineResult = await runManagedAgenticLoop({
         traderId,
@@ -4979,7 +4981,12 @@ export class AutoTrader {
     const toolConversation = [...baseMessages];
     let completeHistory = promptForModel;
 
-    for (let dataRound = 1; dataRound <= MAX_DATA_ROUNDS; dataRound += 1) {
+    /*
+     * 智能托管 2.0 已通过结构化三段式 function-calling 循环（runManagedAgenticLoop）完成决策时，
+     * 关闭旧版正文 XML `<tool>...</tool>` 提取通道，杜绝外部文本间接注入 `set_params`。
+     */
+    const allowLegacyXmlTools = !usedManagedAgenticLoop;
+    for (let dataRound = 1; allowLegacyXmlTools && dataRound <= MAX_DATA_ROUNDS; dataRound += 1) {
       const calls = extractToolCalls(finalResponse.text);
       if (calls.length === 0) break;
 
@@ -6227,6 +6234,7 @@ export class AutoTrader {
   private async cancelAllProtection(
     symbol: string,
     kinds: { stop: boolean; target: boolean },
+    throwOnError = false,
   ): Promise<number> {
     /*
      * ⚠️ **模拟盘没有"交易所侧的保护单"可撤 —— 不要发这个查询**（2026-11-09 修）。
@@ -6265,8 +6273,14 @@ export class AutoTrader {
         if (!wanted(kind)) continue;
         const id = String((order as { algoId?: string | number }).algoId ?? '');
         if (id === '') continue;
-        if (await this.deps.broker.cancelOrder(symbol, id, 'algo').catch(() => false)) {
+        const ok = await this.deps.broker.cancelOrder(symbol, id, 'algo').catch((err) => {
+          if (throwOnError) throw err;
+          return false;
+        });
+        if (ok) {
           cancelled += 1;
+        } else if (throwOnError) {
+          throw new Error(`撤销旧保护单 #${id} 失败`);
         }
       }
 
@@ -6276,12 +6290,23 @@ export class AutoTrader {
         if (!wanted(kind)) continue;
         const id = String((order as { orderId?: string | number }).orderId ?? '');
         if (id === '') continue;
-        if (await this.deps.broker.cancelOrder(symbol, id, 'order').catch(() => false)) {
+        const ok = await this.deps.broker.cancelOrder(symbol, id, 'order').catch((err) => {
+          if (throwOnError) throw err;
+          return false;
+        });
+        if (ok) {
           cancelled += 1;
+        } else if (throwOnError) {
+          throw new Error(`撤销旧保护单 #${id} 失败`);
         }
       }
-    } catch {
+    } catch (error) {
+      if (throwOnError) throw error;
       /* 查不到就当作"没有旧单"—— 挂新单仍然是当前该做的事。 */
+    }
+    if (cancelled > 0) {
+      /* 实盘撤掉旧保护单后立即同步本地 orders 表状态，避免旧 STOP/TP 行停在 NEW 等 30 分钟对账才清理。 */
+      orderStore.cancelOpenProtectionBySymbol(this.deps.trader.id, symbol, kinds);
     }
     if (cancelled > 1) {
       this.emitOnChange(
@@ -7515,10 +7540,11 @@ export class AutoTrader {
       );
       /* 往返成本约 0.1%（单边 0.05% × 2），乘 3 倍安全边际 = 0.3%。 */
       const minTargetPercent = 0.3;
-      /* 浮盈百分比 —— 决定该不该补固定目标（用标记价，不是成本价）。 */
-      const unrealizedPercent = isLong
+      /* 浮盈 ROE 百分比（含杠杆），与保本阈值 `breakevenTrigger` 同口径。 */
+      const priceMovePercent = isLong
         ? ((mark - local.entry_price) / local.entry_price) * 100
         : ((local.entry_price - mark) / local.entry_price) * 100;
+      const unrealizedPercent = priceMovePercent * Math.max(1, local.leverage);
       const breakevenTrigger = Math.max(
         1,
         this.deps.trader.mode === 'jev'
@@ -7533,7 +7559,8 @@ export class AutoTrader {
 
       let target: number | null = !hasTarget && recordedTargetOk ? (local.take_profit as number) : null;
 
-      if (target === null && !hasTarget) {
+      /* 仅当策略要求必须设止盈（requireTakeProfit=true）时才自动兜底补目标；无止盈趋势单交给移动止损跟随。 */
+      if (target === null && !hasTarget && this.effectiveConfig().riskControl.requireTakeProfit) {
         /*
          * 浮盈已超保本点就不补：那种仓位正在奔跑，补固定目标等于设天花板。
          * 移动止损会跟着上移 —— 既保护利润又不封顶，那才是"不错失大涨"。
@@ -8186,12 +8213,21 @@ export class AutoTrader {
         positionStore.close(local.id);
         tradeEvents.record(traderId, local.symbol, 'exit');
       });
-      const existing = tradeStore.list(traderId, 200).find((t) => t.id === alreadyBooked);
+      const recentTrades = tradeStore.list(traderId, 200);
+      const existing = recentTrades.find((t) => t.id === alreadyBooked);
       if (this.deps.trader.mode === 'ai_managed') {
         try {
+          /* 归因按整笔仓位回合合计净盈亏（含此前的分批止盈/减仓），防止尾仓微亏反向惩罚高胜率因子。 */
+          const roundTrades = recentTrades.filter(
+            (t) => t.symbol === local.symbol && t.openedAt === local.opened_at,
+          );
+          const roundNetPnl =
+            roundTrades.length > 0
+              ? roundTrades.reduce((sum, t) => sum + t.netPnl, 0)
+              : (existing?.netPnl ?? netPnlOf({ grossPnl, fee: entryFee + exitFee, fundingFee }));
           managedThesisStore.markClosedWithOutcome(traderId, local.symbol, {
             tradeId: alreadyBooked,
-            netPnl: existing?.netPnl ?? netPnlOf({ grossPnl, fee: entryFee + exitFee, fundingFee }),
+            netPnl: roundNetPnl,
             exitPrice: existing?.exitPrice ?? exitPrice,
             closeReason: existing?.closeReason ?? reason,
           });
@@ -8255,12 +8291,21 @@ export class AutoTrader {
     });
     const tradeId = booked.id;
 
-    const record = tradeStore.list(traderId, 200).find((t) => t.id === tradeId);
+    const recentTrades = tradeStore.list(traderId, 200);
+    const record = recentTrades.find((t) => t.id === tradeId);
     if (this.deps.trader.mode === 'ai_managed') {
       try {
+        /* 归因按整笔仓位回合合计净盈亏（含此前的分批止盈/减仓），防止尾仓微亏反向惩罚高胜率因子。 */
+        const roundTrades = recentTrades.filter(
+          (t) => t.symbol === local.symbol && t.openedAt === local.opened_at,
+        );
+        const roundNetPnl =
+          roundTrades.length > 0
+            ? roundTrades.reduce((sum, t) => sum + t.netPnl, 0)
+            : (record?.netPnl ?? netPnlOf({ grossPnl, fee: entryFee + exitFee, fundingFee }));
         managedThesisStore.markClosedWithOutcome(traderId, local.symbol, {
           tradeId,
-          netPnl: record?.netPnl ?? netPnlOf({ grossPnl, fee: entryFee + exitFee, fundingFee }),
+          netPnl: roundNetPnl,
           exitPrice: record?.exitPrice ?? exitPrice,
           closeReason: record?.closeReason ?? reason,
         });
@@ -10967,10 +11012,6 @@ reduceQuantity: null,
           .cancelOrder(local.symbol, oldStopId, 'algo')
           .catch(() => false);
         if (!cancelled) {
-          /*
-           * 撤不掉就**不要挂新的**：那必然吃 `-4130`，只会多一条无用的拒绝记录，
-           * 而旧止损仍然有效 —— 当前状态是安全的，下一轮再试。
-           */
           this.emitOnChange(
             `breakeven-cancel-fail:${local.id}`,
             'warn',
@@ -10978,6 +11019,10 @@ reduceQuantity: null,
           );
           continue;
         }
+        orderStore.cancelOpenProtectionBySymbol(traderId, local.symbol, {
+          stop: true,
+          target: false,
+        });
       }
 
       const newStopId = await this.placeProtection({
@@ -10992,7 +11037,44 @@ reduceQuantity: null,
 
       if (!newStopId) {
         /*
-         * 撤旧成功、挂新失败 —— **此刻仓位没有止损**。按 §2.6：
+         * 撤旧成功、挂新失败（常见于往返间微回撤导致新保本价吃 -2021）：
+         * 若旧止损价仍在当前标记价的安全侧，先尝试恢复旧止损，避免把健康仓位直接市价强平。
+         */
+        const prevStop = local.stop_loss;
+        const prevStopSafe =
+          prevStop !== null &&
+          prevStop > 0 &&
+          live.markPrice > 0 &&
+          (local.side === 'long' ? prevStop < live.markPrice : prevStop > live.markPrice);
+        if (prevStopSafe && prevStop !== null) {
+          const restoredId = await this.placeProtection({
+            symbol: local.symbol,
+            side: local.side === 'long' ? 'SELL' : 'BUY',
+            type: 'STOP_MARKET',
+            triggerPrice: prevStop,
+            purpose: 'stop_loss',
+            traderId,
+            quantity: local.quantity,
+          }).catch(() => null);
+          if (restoredId) {
+            positionStore.setProtection(
+              traderId,
+              local.symbol,
+              prevStop,
+              local.take_profit,
+              restoredId,
+              local.tp_order_id,
+            );
+            this.emit(
+              'warn',
+              `${local.symbol} 移动止损至 ${effectiveStop} 未挂上，已立即恢复原止损 ${prevStop}（仓位保持受保护，不强平）。`,
+            );
+            continue;
+          }
+        }
+
+        /*
+         * 撤旧成功、挂新且恢复旧止损均失败 —— **此刻仓位没有止损**。按 §2.6：
          * 一个没有保护的杠杆仓位是最糟糕的状态，宁可立刻退出。
          */
         this.emit(
@@ -11860,25 +11942,24 @@ reduceQuantity: null,
     const traderId = this.deps.trader.id;
 
     /*
-     * 挑出"模型需要立刻知道结果"的那些 —— 见下面 `filter` 里的逐条说明。
+     * 挑出"模型需要立刻知道结果"的那些：
+     *   1. 真实成交（`open_*` / `add_to_position` 且 `status === 'ok'`）→ 按真实成交价校准止损止盈；
+     *   2. 执行失败（`status === 'failed'`）或非观望类风控拒绝（`status === 'rejected'`）→ 及时告知模型原因。
+     *
+     * ⚠️ 纯限价挂单提交（`status === 'submitted'`）与纯撤挂单（`cancel_pending` + `ok`）
+     *    不触发追问：限价单尚未成交无需校准保护位，立刻再问一次模型既浪费调用又容易诱导模型
+     *    在十几秒后把刚挂的新单自己撤掉（2026-11-25 实盘周期 #36/#37 两次实测）。
      */
     const happened = input.log.filter((entry) => {
-      /* 真的改变了什么状态的三种。 */
-      if (entry.status === 'ok' || entry.status === 'submitted' || entry.status === 'failed') {
+      if (entry.status === 'failed') return true;
+      if (
+        entry.status === 'ok' &&
+        (entry.action === 'open_long' ||
+          entry.action === 'open_short' ||
+          entry.action === 'add_to_position')
+      ) {
         return true;
       }
-      /*
-       * ⚠️ **风控拒绝也要进回执 —— 这一点我原来想错了。**
-       *
-       * 第一版只挑了上面三种，理由是"`rejected` 没有产生新状态"。**而那个理由
-       * 是错的**：模型提了一个被拒的开仓，它**要等到下一轮（45 分钟后）才可能
-       * 知道** —— 甚至永远不知道（如果它下一轮换了别的想法）。而"我这个提案
-       * 为什么没通过"恰恰是回执该回答的问题：它是模型**能立刻修正**的东西
-       * （"名义太小"→ 提大一点；"盈亏比不够"→ 换价位）。
-       *
-       * 实测触发这条的场景：`#120` 有一条 `rejected open_long BNBUSDT`，
-       * 而它在原来的筛选下**完全不会进回执** —— 那一轮等于白提。
-       */
       if (
         entry.status === 'rejected' &&
         entry.action !== 'wait' &&
@@ -11887,10 +11968,6 @@ reduceQuantity: null,
       ) {
         return true;
       }
-      /*
-       * 而"下去再来"的那种跳过**不进**：节流与冷却到下一轮自然会解除，
-       * 模型知道了也做不了什么 —— 塞进回执只是花 token 换噪声。
-       */
       return false;
     });
     if (happened.length === 0) return [];
@@ -13840,7 +13917,12 @@ reduceQuantity: null,
      * 平仓去换。失败会如实回给模型（它能看到 detail），下一轮再试即可。
      */
     try {
-      await this.deps.broker.cancelAllOrders(decision.symbol);
+      /* 按需只撤本次要改的那一侧保护单，避免只调止盈时误撤活止损制造裸奔窗口或误撤同币种限价开仓单。 */
+      await this.cancelAllProtection(
+        decision.symbol,
+        { stop: newStop !== null, target: newTarget !== null },
+        true,
+      );
     } catch (error) {
       const why = (error as Error).message;
       this.emit(
@@ -13979,15 +14061,15 @@ reduceQuantity: null,
         ? (stopOrderId ? newStop : local.stop_loss)
         : local.stop_loss;
     const storedStopOrderId =
-      newStop !== null ? stopOrderId : (this.isDryRun ? local.stop_order_id : null);
+      newStop !== null ? stopOrderId : local.stop_order_id;
     const storedTarget =
       newTarget !== null
         ? (tpOrderId ? newTarget : null)
-        : (this.isDryRun ? local.take_profit : null);
+        : local.take_profit;
     const storedTpOrderId =
       newTarget !== null
         ? tpOrderId
-        : (this.isDryRun ? local.tp_order_id : null);
+        : local.tp_order_id;
     positionStore.setProtection(
       traderId,
       decision.symbol,

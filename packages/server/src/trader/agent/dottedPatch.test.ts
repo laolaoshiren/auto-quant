@@ -86,9 +86,9 @@ test('★★★ 未知字段仍然被丢弃（展开不放宽安全性）', () =
 
 test('★ 坏输入（空段）被跳过，而不是整条拒绝', () => {
   const current = defaultStrategyConfig();
-  const r = applyAgentPatch(current, { 'riskControl..minPositionSize': 5, 'riskControl.maxPositions': 9 });
+  const r = applyAgentPatch(current, { 'riskControl..minPositionSize': 5, 'riskControl.maxPositions': 7 });
   assert.equal(r.rejected, null, '★ 不该整条拒绝');
-  assert.equal(r.config.riskControl.maxPositions, 9, '★ 好的那个键仍要生效');
+  assert.equal(r.config.riskControl.maxPositions, 7, '★ 好的那个键仍要生效');
 });
 
 /*

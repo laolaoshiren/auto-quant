@@ -2325,5 +2325,32 @@ test('★★ 同轮连续两笔开仓：第一笔必须扣减 availableBalance�
   );
 });
 
+test('★ requireTakeProfit=false 且模型未给止盈时保留 takeProfit=null（不强注 7.5% 固定止盈）', () => {
+  const config = configWith({
+    riskControl: {
+      ...defaultStrategyConfig().riskControl,
+      requireTakeProfit: false,
+      fallbackTakeProfitPercent: 7.5,
+      minRiskRewardRatio: 2,
+    },
+  });
+  const verdict = engine.review(
+    [
+      openDecision({
+        symbol: 'BTCUSDT',
+        action: 'open_long',
+        stopLoss: 65_000,
+        takeProfit: null,
+        positionSizeUsd: 300,
+        leverage: 5,
+      }),
+    ],
+    environment({ config }),
+  );
+  assert.equal(verdict.rejected.length, 0, JSON.stringify(verdict.rejected));
+  assert.equal(verdict.approved.length, 1);
+  assert.equal(verdict.approved[0]!.takeProfit, null, '关闭 requireTakeProfit 时不应强注兜底固定止盈');
+});
+
 
 

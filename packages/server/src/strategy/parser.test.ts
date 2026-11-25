@@ -328,6 +328,19 @@ test('allows hold/wait on an unlisted symbol that is currently held or has a pen
   assert.equal(parsed.decisions.length, 2);
 });
 
+test('★ <reasoning> 中提及字面量 <decision> 和数组（如 EMA [9, 20, 50]）时不得劫持后方真实决策块', () => {
+  const raw =
+    '<reasoning>本轮检查 <decision> 输出格式并观察 EMA [9, 20, 50] 多头排列，准备平仓。</reasoning>\n' +
+    '<decision>[{"symbol":"BTCUSDT","action":"close_long","reasoning":"止盈离场"}]</decision>';
+  const parsed = parseDecisionResponse(
+    raw,
+    context({ openPositions: new Map([['BTCUSDT', 'long']]) }),
+  );
+  assert.equal(parsed.rejected.length, 0, JSON.stringify(parsed.rejected));
+  assert.equal(parsed.decisions.length, 1);
+  assert.equal(parsed.decisions[0]!.action, 'close_long');
+});
+
 test('rejects opening a second position on a symbol already held', () => {
   const raw = '<decision>[{"symbol":"BTCUSDT","action":"open_long"}]</decision>';
   const parsed = parseDecisionResponse(

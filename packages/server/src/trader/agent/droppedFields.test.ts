@@ -66,10 +66,10 @@ test('★★★ 嵌套里的未知字段也要报出来', () => {
 test('★★ 已知字段生效时，dropped 只列被丢的那些（混合情形）', () => {
   const current = defaultStrategyConfig();
   const r = applyAgentPatch(current, {
-    riskControl: { maxPositions: 9, 不存在的字段: 999 },
+    riskControl: { maxPositions: 7, 不存在的字段: 999 },
   });
 
-  assert.equal(r.config.riskControl.maxPositions, 9, '★ 好的字段要生效');
+  assert.equal(r.config.riskControl.maxPositions, 7, '★ 好的字段要生效');
   assert.deepEqual(r.dropped, ['riskControl.不存在的字段'], '★ 只列被丢的那个');
 });
 

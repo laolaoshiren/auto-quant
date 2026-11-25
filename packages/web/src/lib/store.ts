@@ -7,9 +7,11 @@
  */
 import { create } from 'zustand';
 import {
+  ApiError,
   api,
   clearToken,
   eventStreamUrl,
+  getSessionEpoch,
   getToken,
   setStoredUser,
   setToken,
@@ -32,12 +34,34 @@ import type {
 import { orderPurposeLabel, orderStatusLabel, traderStatusLabel } from '@aq/shared';
 import { closeReasonLabel, useSummaries } from './summaries';
 import { fmtSigned, sideLabel } from './format';
+import { upsertLiveOrder } from './orderMerge';
 
 /* -------------------------------------------------------------------------- */
 /*  Session / REST store                                                       */
 /* -------------------------------------------------------------------------- */
 
 export type SessionStatus = 'loading' | 'anonymous' | 'authenticated';
+
+/**
+ * 判断 `bootstrap()` 期间 `api.me()` 抛出的错误是否属于明确的认证失败（401 / 403）。
+ *
+ * 审计 P1 #19：只有服务端明确拒绝令牌（401 / 403）才应清空 token 并跳去登录页；
+ * 部署重启时的 502 / 503 / 504、断网或超时（status === 0）属于临时故障，
+ * 必须保留令牌并自动重试，绝不能因为一次 3 秒重启就把操作员踢出登录。
+ */
+export function isBootstrapAuthError(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403);
+}
+
+const BOOTSTRAP_RETRY_MS = 2_500;
+let bootstrapRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function cancelBootstrapRetry(): void {
+  if (bootstrapRetryTimer !== null) {
+    globalThis.clearTimeout(bootstrapRetryTimer);
+    bootstrapRetryTimer = null;
+  }
+}
 
 interface SessionState {
   status: SessionStatus;
@@ -89,7 +113,10 @@ export const useApp = create<SessionState>((set, get) => ({
 
   /** Verify a stored token and load the shell prerequisites in one pass. */
   bootstrap: async () => {
+    cancelBootstrapRetry();
+
     setUnauthorizedHandler(() => {
+      cancelBootstrapRetry();
       clearToken();
       /*
        * ⚠️ **会话失效时把推送与所有敏感缓存一并清空**（台账 FRD-03 + 安全清理）。
@@ -113,18 +140,27 @@ export const useApp = create<SessionState>((set, get) => ({
     if (!getToken()) {
       try {
         const health = await api.health();
-        set({ health, healthLoadedAt: Date.now(), status: 'anonymous' });
+        set({ health, healthLoadedAt: Date.now(), status: 'anonymous', lastError: null });
       } catch {
         set({ status: 'anonymous' });
       }
       return;
     }
 
+    const bootEpoch = getSessionEpoch();
     try {
       const [{ user }, health] = await Promise.all([api.me(), api.health().catch(() => null)]);
-      set({ user, health, healthLoadedAt: health ? Date.now() : null, status: 'authenticated' });
+      if (getSessionEpoch() !== bootEpoch) return;
+      set({
+        user,
+        health,
+        healthLoadedAt: health ? Date.now() : null,
+        status: 'authenticated',
+        lastError: null,
+      });
       setStoredUser(user);
       await Promise.all([get().loadCatalog(), get().refreshSystem(), get().refreshTraders()]);
+      if (getSessionEpoch() !== bootEpoch) return;
       /*
        * 认证成功 = "现在可以连推送了"。**这里必须主动连**：那个连接的生命周期
        * 归外壳的 `useEffect`（`[connect, disconnect]` 引用稳定 → 只跑一次），
@@ -132,20 +168,63 @@ export const useApp = create<SessionState>((set, get) => ({
        * 那种情况下 `connect()` 会早返回，之后就再也没人叫它了（台账 FRD-03）。
        */
       useEvents.getState().connect();
-    } catch {
-      clearToken();
-      let health: Health | null = null;
-      try {
-        health = await api.health();
-      } catch {
-        health = null;
+    } catch (error) {
+      /*
+       * 审计 P1 #19：区分「明确认证失败（401 / 403）」与「部署重启 / 断网 / 超时等临时故障」。
+       *
+       * - 401 / 403：令牌确已失效或被拒 → 清空 token、拉一次 health、回到登录页；
+       * - 502 / 503 / 504 / 网络断开 / 超时（status === 0）：服务端很可能正在做 3 秒滚动重启，
+       *   **绝不清除 token、绝不把操作员踢回登录页**，而是保留令牌、展示临时提示并自动重试。
+       */
+      if (isBootstrapAuthError(error)) {
+        if (get().status === 'authenticated' && getSessionEpoch() !== bootEpoch) return;
+        clearToken();
+        useEvents.getState().reset();
+        useEvents.getState().disconnect('会话已失效，请重新登录');
+        useSummaries.getState().reset();
+        let health: Health | null = null;
+        try {
+          health = await api.health();
+        } catch {
+          health = null;
+        }
+        set({
+          status: 'anonymous',
+          user: null,
+          health,
+          healthLoadedAt: health ? Date.now() : null,
+          traders: [],
+          catalog: null,
+          system: null,
+          lastError: null,
+          systemsLoadedAt: null,
+          systemError: null,
+        });
+        return;
       }
-      set({
-        status: 'anonymous',
-        user: null,
-        health,
-        healthLoadedAt: health ? Date.now() : null,
-      });
+
+      /* 若期间会话已被主动登出或切换（如用户点了退出），放弃本次迟到的临时错误。 */
+      if (getSessionEpoch() !== bootEpoch) return;
+
+      const message =
+        error instanceof Error && error.message.trim() !== ''
+          ? error.message
+          : '服务暂时不可达，正在自动重试…';
+
+      if (get().status === 'authenticated') {
+        set({ lastError: message, systemError: message });
+        return;
+      }
+
+      set({ status: 'loading', lastError: message });
+      if (getToken()) {
+        bootstrapRetryTimer = globalThis.setTimeout(() => {
+          bootstrapRetryTimer = null;
+          if (getToken() && get().status === 'loading') {
+            void get().bootstrap();
+          }
+        }, BOOTSTRAP_RETRY_MS);
+      }
     }
   },
 
@@ -161,6 +240,7 @@ export const useApp = create<SessionState>((set, get) => ({
   },
 
   logout: () => {
+    cancelBootstrapRetry();
     clearToken();
     /* 登出必须清空事件/摘要/敏感状态并关闭推送（台账 FRD-03）。 */
     useEvents.getState().reset();
@@ -704,7 +784,11 @@ export const useEvents = create<EventState>((set, get) => ({
           next.equity = [...current.equity, event.snapshot].slice(-MAX_PER_TRADER * 4);
           break;
         case 'order':
-          next.orders = [event.order, ...current.orders].slice(0, MAX_PER_TRADER);
+          /*
+           * 审计 P1 #21：按 `id` / `exchangeOrderId` 去重且单调不倒退（终态不被陈旧 `NEW` 覆盖），
+           * 避免同一笔订单在 `live.orders` 中残留旧的 `NEW` 副本导致挂单计数与表格失真。
+           */
+          next.orders = upsertLiveOrder(current.orders, event.order, MAX_PER_TRADER);
           break;
         case 'trade':
           next.trades = [event.trade, ...current.trades].slice(0, MAX_PER_TRADER);

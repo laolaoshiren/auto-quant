@@ -770,6 +770,14 @@ export class SimulatedExchange {
     return rows;
   }
 
+  /** 按单号撤掉模拟器中挂着的保护条件单（供 `cancelAllProtection` / `executeAdjust` 按侧撤单）。 */
+  async cancelOrder(symbol: string, orderId: string | number): Promise<boolean> {
+    const position = this.positions.get(symbol);
+    if (!position) return true;
+    position.protection.delete(String(orderId));
+    return true;
+  }
+
   /**
    * 回放里不存在资金费结算，所以**必须返回空数组**，而不是省略这个方法。
    *

@@ -1027,6 +1027,7 @@ export const positions = {
              JOIN traders t ON t.id = p.trader_id
             WHERE t.exchange_account_id = ?
               AND p.trader_id != ?
+              AND COALESCE(t.dry_run, 0) = 0
               AND p.status IN ('open', 'pending')`,
           accountId,
           excludeTraderId,
@@ -1036,7 +1037,8 @@ export const positions = {
   },
 
   /**
-   * 同一交易所账户下所有机器人当前的 `open` 持仓（总账校验与 `netSinceForAccount` 同口径）。
+   * 同一交易所账户下所有实盘机器人当前的 `open` 持仓（排除 `dry_run = 1` 模拟盘，
+   * 与 `netSinceForAccount` 同口径，防止纸面持仓污染实盘总账校验）。
    */
   openForAccount(accountId: number): PositionRow[] {
     return getDb().all<PositionRow>(
@@ -1044,6 +1046,7 @@ export const positions = {
          FROM positions p
          JOIN traders t ON t.id = p.trader_id
         WHERE t.exchange_account_id = ?
+          AND COALESCE(t.dry_run, 0) = 0
           AND p.status = 'open'
         ORDER BY p.opened_at`,
       accountId,
@@ -3944,7 +3947,9 @@ export const trades = {
       `SELECT SUM(t.net_pnl) AS total
          FROM trades t
          JOIN traders tr ON tr.id = t.trader_id
-        WHERE tr.exchange_account_id = ? AND t.closed_at >= ?`,
+        WHERE tr.exchange_account_id = ?
+          AND COALESCE(tr.dry_run, 0) = 0
+          AND t.closed_at >= ?`,
       exchangeAccountId,
       sinceIso,
     );

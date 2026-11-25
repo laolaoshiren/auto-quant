@@ -236,6 +236,7 @@ export async function probeGatewayContract(input: ProbeInput): Promise<ContractR
     const res = await doFetch(`${base}/v1/models`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey}` },
+      redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
@@ -308,6 +309,7 @@ export async function probeGatewayContract(input: ProbeInput): Promise<ContractR
     const res = await doFetch(`${base}/v1/magpie/quotas`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey}` },
+      redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
@@ -373,6 +375,7 @@ export async function probeGatewayContract(input: ProbeInput): Promise<ContractR
             },
           },
         }),
+        redirect: 'manual',
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (!res.ok) {

@@ -147,9 +147,9 @@ export function StaleTraderBanner(): React.ReactElement | null {
    * 60 秒一次：停摆是"几十分钟到几小时"量级的事，不需要更密。
    */
   const query = usePolled(
-    async () => ({
-      health: await api.health(),
-      traders: await api.traders(),
+    async (signal) => ({
+      health: await api.health(signal),
+      traders: await api.traders(signal),
     }),
     { intervalMs: 60_000, enabled: sessionStatus === 'authenticated' },
   );

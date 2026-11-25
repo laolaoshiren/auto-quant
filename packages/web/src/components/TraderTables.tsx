@@ -42,6 +42,7 @@ import { exchangeErrorLabel, type MarginMode, type OrderRecord, type PositionVie
 import { orderPurposeLabel, orderStatusLabel, orderTypeLabel } from '@aq/shared';
 import { api } from '../lib/api';
 import { needsReconcileFlag, reconcileNoteTitle } from '../lib/orderFlags';
+import { isOpenOrder, mergeOrderRows, pickNewerOrder } from '../lib/orderMerge';
 import { useEvents } from '../lib/store';
 import { usePolled, useTabVisible, type QueryState } from '../lib/hooks';
 import { Badge, Button, ErrorNote, Modal, Panel, Spinner3 } from './ui';
@@ -195,10 +196,37 @@ interface TablePaging<T> {
  * 去重不是可选的：轮询的第一页与翻出来的页在边界上必然重叠一行（探针行那一行
  * 会作为下一页的第一条被取回来），WebSocket 推送又可能同一行再来一份。
  */
-function mergeById<T extends { id: number }>(prev: T[], rows: T[]): T[] {
-  const seen = new Set(prev.map((row) => row.id));
-  const fresh = rows.filter((row) => !seen.has(row.id));
-  return fresh.length > 0 ? [...prev, ...fresh] : prev;
+function mergeById<T extends { id: number }>(
+  prev: T[],
+  rows: T[],
+  reconcile?: (existing: T, incoming: T) => T,
+): T[] {
+  if (!reconcile) {
+    const seen = new Set(prev.map((row) => row.id));
+    const fresh = rows.filter((row) => !seen.has(row.id));
+    return fresh.length > 0 ? [...prev, ...fresh] : prev;
+  }
+
+  let changed = false;
+  const indexById = new Map<number, number>();
+  prev.forEach((row, idx) => indexById.set(row.id, idx));
+  const next = [...prev];
+
+  for (const row of rows) {
+    const idx = indexById.get(row.id);
+    if (idx === undefined) {
+      indexById.set(row.id, next.length);
+      next.push(row);
+      changed = true;
+    } else {
+      const winner = reconcile(next[idx]!, row);
+      if (winner !== next[idx]) {
+        next[idx] = winner;
+        changed = true;
+      }
+    }
+  }
+  return changed ? next : prev;
 }
 
 /**
@@ -267,7 +295,23 @@ function useTablePaging<T extends { id: number; traderId: number }>(
    * 都会让哨兵要么没人看，要么被误判成可见、一次把整段历史拉进来**。
    */
   remountKey?: unknown,
+  /**
+   * 可选的单调合并策略（审计 P1 #21）：订单表同时按 `id` / `exchangeOrderId` 去重，
+   * 且保证陈旧 REST 轮询绝不把已终态（`FILLED` / `CANCELED` / `EXPIRED` / `REJECTED`）
+   * 订单倒退回 `NEW`。
+   */
+  mergeOptions?: {
+    reconcile?: (existing: T, incoming: T) => T;
+    mergeAll?: (
+      loaded: readonly T[],
+      live: readonly T[] | undefined,
+      polledPage: readonly T[] | undefined,
+      traderId: number,
+    ) => T[];
+  },
 ): TablePaging<T> {
+  const reconcile = mergeOptions?.reconcile;
+  const mergeAll = mergeOptions?.mergeAll;
   /**
    * 服务端给过的、**已经显示出来的**行（按 id 去重；轮询的第一页与翻出来的每一页都并进来）。
    *
@@ -315,25 +359,28 @@ function useTablePaging<T extends { id: number; traderId: number }>(
     if (!page) return;
     const rows = page.slice(0, PAGE_SIZE);
     if (rows.length === 0) return;
-    setLoaded((prev) => mergeById(prev, rows));
-  }, [polled.data, traderId]);
+    setLoaded((prev) => mergeById(prev, rows, reconcile));
+  }, [polled.data, traderId, reconcile]);
 
   /**
    * 轮询的第一页 + 更早的页 + 推送进来的实时行 → 一个列表，**按 id 倒序**。
    *
-   * 去重靠 `Map` 的键（就是 id）：同一行同时出现在两页边界上、或者既在 REST
-   * 结果里又在 WebSocket 推送里，都只会渲染一次。订单与成交写入后不再修改
-   * （`status` 变化会由下一次轮询覆盖同一 id 的那一份），所以旧行永远不需要重拉。
+   * 去重靠 `Map` 的键（就是 id）；订单表进一步走 `mergeAll`（按 `id` + `exchangeOrderId`
+   * 去重且终态单调不倒退），确保陈旧 REST 轮询不会把已成交/已撤单的记录覆盖回 `NEW`。
    *
    * 轮询刚拿到的第一页也**直接**并进来，不等上面那个 effect 落地：否则"数据到了"和
    * "列表挂上去了"会差一次重渲染，而挂在列表末尾的哨兵观察器只在这几个依赖变化时
    * 重新挂载 —— 它会永远挂不上，滚到底毫无反应（决策流那侧实测到过这个情形）。
    */
   const rows = useMemo(() => {
+    const polledPage = (polled.data ?? []).slice(0, PAGE_SIZE);
+    if (mergeAll) {
+      return mergeAll(loaded, live, polledPage, traderId);
+    }
     const merged = new Map<number, T>();
     for (const row of loaded) merged.set(row.id, row);
     for (const row of live ?? []) if (row.traderId === traderId) merged.set(row.id, row);
-    for (const row of (polled.data ?? []).slice(0, PAGE_SIZE)) merged.set(row.id, row);
+    for (const row of polledPage) merged.set(row.id, row);
     const all = [...merged.values()];
     /*
      * ⚠️ **成交表按时间排，订单表按 id 排。**
@@ -349,7 +396,7 @@ function useTablePaging<T extends { id: number; traderId: number }>(
           return ta === tb ? b.id - a.id : tb.localeCompare(ta);
         })
       : all.sort((a, b) => b.id - a.id);
-  }, [loaded, polled.data, live, traderId, timeOf]);
+  }, [loaded, polled.data, live, traderId, timeOf, mergeAll]);
 
   /**
    * 下一页的游标 = **手里最小的 id**，也就是"比我现在有的都更早"。
@@ -441,7 +488,7 @@ function useTablePaging<T extends { id: number; traderId: number }>(
       if (controller.signal.aborted || traderIdRef.current !== requestedFor) return;
 
       // 显示前 25 条，最后那条探针留给下一次翻页（它会成为新一页的第一条）。
-      setLoaded((prev) => mergeById(prev, page.slice(0, PAGE_SIZE)));
+      setLoaded((prev) => mergeById(prev, page.slice(0, PAGE_SIZE), reconcile));
       setDeeperFull(page.length > PAGE_SIZE);
       // 不满一页 = 已经到最早一笔。那条"多要一条"的探针就是为这一句存在的。
       setMoreState(page.length > PAGE_SIZE ? 'idle' : 'done');
@@ -451,7 +498,7 @@ function useTablePaging<T extends { id: number; traderId: number }>(
       setMoreError((error as Error).message);
       setMoreState('error');
     }
-  }, [cursor, moreState, traderId, timeOf]);
+  }, [cursor, moreState, traderId, timeOf, reconcile]);
 
   /** 观察器回调里用的永远是**最新一次渲染**的 `loadMore`（否则会拿着旧游标再请求一次）。 */
   const loadMoreRef = useRef(loadMore);
@@ -1211,16 +1258,12 @@ export function PositionsTable({
  * 服务端 `store/repositories.ts` 的 `TERMINAL_ORDER_STATUSES` 是同一份判据的另一份
  * 实现（前端不能 import 服务端），两处要一起改。
  */
-const TERMINAL_STATUSES = new Set([
-  'FILLED',
-  'FINISHED',
-  'CANCELED',
-  'CANCELLED',
-  'REJECTED',
-  'EXPIRED',
-  'EXPIRED_IN_MATCH',
-  'EXPIRED_IN_FUTURES',
-]);
+const ORDER_MERGE_OPTIONS = {
+  reconcile: pickNewerOrder,
+  mergeAll: mergeOrderRows,
+};
+
+export { isOpenOrder };
 
 /**
  * 表格里的**币种单元格**：有色、（可选的）可点击。
@@ -1277,10 +1320,6 @@ function SymbolCell({
       {content}
     </button>
   );
-}
-
-export function isOpenOrder(order: OrderRecord): boolean {
-  return !TERMINAL_STATUSES.has(order.status.toUpperCase());
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2737,6 +2776,7 @@ export function TraderTables({
      */
     undefined,
     tab,
+    ORDER_MERGE_OPTIONS,
   );
   const openOrders = ordersPaging.rows.filter(isOpenOrder);
 

@@ -160,7 +160,7 @@ export class GateContractRegistry {
     const stepRaw = num(info.order_size_step ?? '1');
     const step = stepRaw > 0 ? stepRaw : 1;
     const raw = quantity / multiplier;
-    const stepped = Math.floor(raw / step) * step;
+    const stepped = Math.floor(raw / step + 1e-9) * step;
     const minSize = num(info.order_size_min ?? '1') > 0 ? num(info.order_size_min ?? '1') : 1;
     return stepped >= minSize ? stepped : 0;
   }

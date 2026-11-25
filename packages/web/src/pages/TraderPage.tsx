@@ -20,6 +20,7 @@ import {
   MANAGED_RISK_PROFILES,
   beijingDayStartMs,
   type EquitySnapshot,
+  type ExchangeId,
   type ManagedRiskProfileId,
 } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
@@ -1848,6 +1849,7 @@ export function TraderPage() {
               traderId={traderId}
               running={running}
               mode={trader?.mode ?? 'strategy'}
+              exchange={exchangeAccount?.exchange}
               nextCycleAt={trader?.nextCycleAt ?? null}
               onToggleFocus={() => setFeedFocusOverride(false)}
               onSelectSymbol={selectChartSymbol}
@@ -1932,6 +1934,7 @@ export function TraderPage() {
              * 传下去是为了让团队模式显示**编制表**而不是线性步骤列表。
              */
             mode={trader?.mode ?? 'strategy'}
+            exchange={exchangeAccount?.exchange}
             /* 下一轮决策的预定时刻 —— 由服务端给出，界面只显示倒计时（见 CycleCountdown）。 */
             nextCycleAt={trader?.nextCycleAt ?? null}
             /*
@@ -2351,7 +2354,15 @@ export function TraderPage() {
               </div>
             )
           ) : (
-            <CandlesPanel symbol={chartSymbol} />
+            <CandlesPanel
+              symbol={chartSymbol}
+              exchange={exchangeAccount?.exchange}
+              exchangeReady={
+                trader?.exchangeAccountId == null ||
+                exchangeAccountsQuery.data !== null ||
+                exchangeAccountsQuery.error !== null
+              }
+            />
           )}
         </Panel>
 
@@ -2750,13 +2761,24 @@ function ChartTabButton({
 }
 
 /** The trader's most recent position symbol, as a candlestick chart. */
-function CandlesPanel({ symbol }: { symbol?: string }) {
+function CandlesPanel({
+  symbol,
+  exchange,
+  exchangeReady = true,
+}: {
+  symbol?: string;
+  exchange?: ExchangeId;
+  exchangeReady?: boolean;
+}) {
   const [interval, setIntervalValue] = useState('15m');
-  const query = usePolled((signal) => api.marketKlines(symbol ?? '', interval, 400, signal), {
-    intervalMs: 15_000,
-    enabled: Boolean(symbol),
-    deps: [symbol, interval],
-  });
+  const query = usePolled(
+    (signal) => api.marketKlines(symbol ?? '', interval, 400, signal, exchange),
+    {
+      intervalMs: 15_000,
+      enabled: Boolean(symbol) && exchangeReady,
+      deps: [symbol, interval, exchange],
+    },
+  );
 
   if (!symbol) {
     /*

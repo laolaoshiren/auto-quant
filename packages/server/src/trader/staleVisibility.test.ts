@@ -298,7 +298,7 @@ test('★★★ 横幅只把确证 `dry_run=0` 的升级为显眼状态（与服
     '★★★ dryRun 取不到时要回落到进程级 health.dryRun（与服务端 `?? envDryRun` 同口径）',
   );
   /* 横幅必须真的在轮询 health —— 否则"推到人眼前"只是口号。 */
-  assert.match(src, /api\.health\(\)/, '★ 必须读 /api/health');
+  assert.match(src, /api\.health\(/, '★ 必须读 /api/health');
   assert.match(src, /intervalMs: 60_000/, '★ 必须轮询（否则只在登录那一刻取一次，等于没有）');
   /* ⚠️ 不许引入外部通知依赖（超本批范围且需用户决定）。 */
   assert.ok(

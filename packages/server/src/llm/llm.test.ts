@@ -939,6 +939,12 @@ test('★★★ LlmClient：上下文超长/schema 400 不得误关 streamDisabl
     );
     assert.equal(seenCalls.length, 1, '★ 无关 400 不应触发降级重试');
     assert.equal(seenCalls[0]!.isStream, true);
+    assert.equal(seenCalls[0]!.body['stream'], true, '★★★ 流式请求体必须真正携带 stream: true');
+    assert.deepEqual(
+      seenCalls[0]!.body['stream_options'],
+      { include_usage: true },
+      '★★★ OpenAI 兼容流式请求体必须携带 stream_options: { include_usage: true }',
+    );
     assert.equal(seenCalls[0]!.body['reasoning_effort'], 'high');
 
     /* ② 下一次调用仍保留流式和 reasoning_effort=high，且遇到 stream_options 400 才降级 */
@@ -947,8 +953,26 @@ test('★★★ LlmClient：上下文超长/schema 400 不得误关 streamDisabl
     assert.equal(res.text, 'ok');
     assert.equal(seenCalls.length, 3, '★ stream_options 400 应触发 1 次非流式降级重试');
     assert.equal(seenCalls[1]!.isStream, true, '第二次调用起手仍是流式（未被上次无关 400 污染）');
+    assert.equal(seenCalls[1]!.body['stream'], true);
     assert.equal(seenCalls[1]!.body['reasoning_effort'], 'high', 'reasoning_effort 未被无关 400 误删');
     assert.equal(seenCalls[2]!.isStream, false, '确认 stream_options 错误后降级为非流式');
+    assert.equal(seenCalls[2]!.body['stream'], false, '降级为非流式后请求体 stream 必须为 false');
+    assert.equal('stream_options' in seenCalls[2]!.body, false, '非流式请求体不得带 stream_options');
+
+    /* ③ probe 探测请求始终走非流式（stream: false 且不带 stream_options） */
+    const probeClient = new LlmClient({
+      provider: 'deepseek',
+      apiKey: 'test-key',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-chat',
+      maxRetries: 0,
+    });
+    mode = 'ok';
+    const probeRes = await probeClient.chat([{ role: 'user', content: 'pong' }], { probe: true });
+    assert.equal(probeRes.text, 'ok');
+    assert.equal(seenCalls[3]!.isStream, false);
+    assert.equal(seenCalls[3]!.body['stream'], false);
+    assert.equal('stream_options' in seenCalls[3]!.body, false);
   } finally {
     globalThis.fetch = origFetch;
   }

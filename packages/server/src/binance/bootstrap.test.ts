@@ -135,3 +135,40 @@ test('★★★ dryRun 连接跑带凭据 preflight 时，仍须实查 positionR
   assert.equal(posMode.severity, 'error', '双向持仓且存在真实持仓必须阻断');
   assert.equal(posMode.blocking, true);
 });
+
+test('★★★ P1 #13：绑定真实账户的模拟盘启动（requireCredentials: false）不得被只读 Key 或双向持仓误阻断', async () => {
+  let signedCalled = false;
+  const conn = {
+    environment: 'production',
+    endpoints: { label: 'production', isTestnet: false },
+    rest: {
+      hasCredentials: true,
+      signedRequest: async () => {
+        signedCalled = true;
+        return { canTrade: false, canWithdraw: false };
+      },
+    },
+    broker: {
+      isDryRun: true,
+      isHedgeMode: async () => true,
+      getPositions: async () => [{ symbol: 'BTCUSDT', quantity: 0.1 }],
+      getAccountState: async () => ({
+        equity: 1000,
+        walletBalance: 1000,
+        availableBalance: 1000,
+        unrealizedPnl: 0,
+        marginUsed: 0,
+        openOrderMargin: 0,
+      }),
+    },
+    registry: { size: 500 },
+    clockOffsetMs: 5,
+  } as unknown as ExchangeConnection;
+
+  const checks = await preflight(conn, { requireCredentials: false });
+  const blocking = checks.filter((c) => !c.ok && c.blocking);
+  assert.deepEqual(blocking, [], `模拟盘启动不应被只读 Key/双向持仓阻断，实际阻断项：${JSON.stringify(blocking)}`);
+  assert.equal(signedCalled, false, '模拟盘启动不应依赖真实账户的 signedRequest 权限检查');
+  assert.ok(checks.some((c) => c.name === '模拟资金' && c.ok));
+  assert.ok(checks.some((c) => c.name === '合约元数据' && c.ok));
+});

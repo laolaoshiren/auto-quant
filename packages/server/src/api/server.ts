@@ -987,7 +987,11 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   });
 
   await app.register(cors, { origin: true, credentials: true });
-  await app.register(websocket);
+  await app.register(websocket, {
+    options: {
+      maxPayload: 64 * 1024,
+    },
+  });
 
   /**
    * **基础安全响应头**（审计 2026-11-10）。
@@ -1055,7 +1059,11 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
 
   app.setErrorHandler((error: Error & { statusCode?: number }, _request, reply) => {
     const status = error.statusCode && error.statusCode >= 400 ? error.statusCode : 500;
-    if (status >= 500) log.error(`unhandled API error: ${error.message}`, error);
+    if (status >= 500) {
+      log.error(`unhandled API error: ${error.message}`, error);
+      void reply.code(status).send({ error: '服务器内部错误，请稍后重试' });
+      return;
+    }
     void reply.code(status).send({ error: error.message });
   });
 
@@ -1070,6 +1078,10 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         return await handler(request.body as T, request, reply);
       } catch (error) {
         const status = (error as { statusCode?: number }).statusCode ?? 400;
+        if (status >= 500) {
+          log.error(`unhandled API error: ${(error as Error).message}`, error);
+          return reply.code(status).send({ error: '服务器内部错误，请稍后重试' });
+        }
         return reply.code(status).send({ error: (error as Error).message });
       }
     };
@@ -1307,12 +1319,25 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
   /**
    * 令牌签名有效 ≠ 仍然有效。
    *
-   * 账户改过凭据之后，此前签发的所有令牌都必须立刻作废 —— 否则"改密码"
-   * 在最需要它的时候（令牌泄漏、设备丢失）救不了任何东西。
-   * 判定逻辑本身是 `auth.ts` 里的纯函数，这里只负责把数据库里的当前值喂给它。
+   * 1) 必须核实账户仍存在于库中（避免已删除账户的旧令牌因为 `credentialsChangedAt === null` 绕过撤销）；
+   *    注意：首次安装尚未改过密码的账户其 `credentials_changed_at` 为 `NULL`，绝不可单凭 `null` 判撤销。
+   * 2) 账户改过凭据之后，此前签发的所有令牌都必须立刻作废 —— 否则"改密码"
+   *    在最需要它的时候（令牌泄漏、设备丢失）救不了任何东西。
    */
-  const tokenRevoked = (payload: TokenPayload): boolean =>
-    isTokenRevoked(payload, users.credentialsChangedAt(payload.sub));
+  const tokenRevoked = (payload: TokenPayload): boolean => {
+    if (!users.findById(payload.sub)) return true;
+    return isTokenRevoked(payload, users.credentialsChangedAt(payload.sub));
+  };
+
+  /** 已认证的活跃 WebSocket 连接（按 userId 分组），凭据变更时立刻踢断旧连接。 */
+  const activeWsClients = new Map<number, Set<() => void>>();
+  const disconnectUserSockets = (userId: number): void => {
+    const closers = activeWsClients.get(userId);
+    if (!closers) return;
+    for (const close of [...closers]) {
+      close();
+    }
+  };
 
   const authed = { preHandler: requireAuth(deps.jwtSecret, tokenRevoked) };
 
@@ -1431,6 +1456,10 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       nextUsername !== undefined || nextPassword !== undefined
         ? users.markCredentialsChanged(record.id)
         : (users.credentialsChangedAt(record.id) ?? 0);
+
+    if (nextUsername !== undefined || nextPassword !== undefined) {
+      disconnectUserSockets(record.id);
+    }
 
     const updated = users.findById(record.id)!;
     // 用户名可能变了，重新签发令牌，否则前端拿的还是旧身份
@@ -1716,10 +1745,14 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 解绑是**有后果的操作**：那些机器人下次启动时会报"没有配置交易所账户"。
      * 那不是故障，但操作员需要知道是他的删除导致的 —— 否则他会以为是新 BUG。
      */
-    const startingCount = traders
+    const activeInMemoryCount = traders
       .list()
-      .filter((t) => t.exchangeAccountId === id && deps.manager.isStarting(t.id)).length;
-    const inUse = Math.max(exchanges.usageCount(id), startingCount);
+      .filter(
+        (t) =>
+          t.exchangeAccountId === id &&
+          (deps.manager.isRunning?.(t.id) || deps.manager.isStarting?.(t.id)),
+      ).length;
+    const inUse = Math.max(exchanges.usageCount(id), activeInMemoryCount);
     if (inUse > 0) {
       return reply.code(409).send({
         error:
@@ -2267,6 +2300,22 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     strategies.update(id, patch);
     const updated = strategies.get(id);
     if (!updated) return reply.code(404).send({ error: '找不到该策略' });
+
+    if (parsed.data.config !== undefined) {
+      for (const trader of traders.list()) {
+        if (
+          trader.mode === 'strategy' &&
+          trader.strategyId === id &&
+          deps.manager.isRunning?.(trader.id)
+        ) {
+          deps.manager.applyLiveUpdate?.(trader.id, {
+            config: updated.config,
+            note: `策略「${updated.name}」参数已在线热更新 —— 下一轮决策立即生效，不影响当前持仓与挂单。`,
+          });
+        }
+      }
+    }
+
     return updated;
   }));
 
@@ -2289,7 +2338,13 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
    * 但**从来没有送到界面上** —— 操作员因此只能看到一个可能错的值。
    * 这里只做读取，不改变任何东西。
    */
-  function ledgerCheckOf(traderId: number): { platformNet: number; exchangeNet: number; gap: number; checkedAt: string } | null {
+  function ledgerCheckOf(traderId: number): {
+    platformNet: number;
+    exchangeNet: number;
+    gap: number;
+    checkedAt: string;
+    incomeReadFailed?: boolean;
+  } | null {
     const raw = settings.get(`ledger_check:${traderId}`);
     if (!raw) return null;
     try {
@@ -2299,6 +2354,9 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         exchangeNet: Number(parsed.exchangeNet ?? 0),
         gap: Number(parsed.gap ?? 0),
         checkedAt: String(parsed.checkedAt ?? ''),
+        ...(typeof parsed.incomeReadFailed === 'boolean'
+          ? { incomeReadFailed: parsed.incomeReadFailed }
+          : {}),
       };
     } catch {
       return null;
@@ -4598,12 +4656,19 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         return;
       }
 
+      const WS_MAX_BUFFERED_BYTES = 1024 * 1024;
+      const safeSend = (data: string): void => {
+        if (socket.readyState !== socket.OPEN) return;
+        if (socket.bufferedAmount > WS_MAX_BUFFERED_BYTES) return;
+        socket.send(data);
+      };
+
       for (const event of eventBus.history(30)) {
-        socket.send(JSON.stringify({ ...event, replay: true }));
+        safeSend(JSON.stringify({ ...event, replay: true }));
       }
 
       const unsubscribe = eventBus.subscribe((event: ServerEvent) => {
-        if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(event));
+        safeSend(JSON.stringify(event));
       });
 
       /*
@@ -4618,10 +4683,34 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         isAlive = true;
       });
 
+      let cleaned = false;
       const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
         clearInterval(heartbeat);
         unsubscribe();
+        const set = activeWsClients.get(payload.sub);
+        if (set) {
+          set.delete(revokeClose);
+          if (set.size === 0) activeWsClients.delete(payload.sub);
+        }
       };
+
+      const revokeClose = () => {
+        cleanup();
+        try {
+          socket.close(1008, 'Invalid session');
+        } catch {
+          /* socket already closed */
+        }
+      };
+
+      let userSockets = activeWsClients.get(payload.sub);
+      if (!userSockets) {
+        userSockets = new Set();
+        activeWsClients.set(payload.sub, userSockets);
+      }
+      userSockets.add(revokeClose);
 
       const heartbeat = setInterval(() => {
         if (socket.readyState !== socket.OPEN) {
@@ -4629,8 +4718,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
           return;
         }
         if (payload.exp * 1000 < Date.now() || tokenRevoked(payload)) {
-          cleanup();
-          socket.close(1008, 'Invalid session');
+          revokeClose();
           return;
         }
         if (!isAlive) {

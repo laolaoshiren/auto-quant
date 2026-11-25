@@ -554,3 +554,68 @@ test('★ orders.cancelOpenProtectionBySymbol 仅取消指定保护单的 NEW �
   assert.equal(statuses.get(tp), 'NEW');
   assert.equal(statuses.get(entry), 'FILLED');
 });
+
+test('★ 账户级持仓与净额查询排除 dry_run = 1 模拟盘，绝不污染实盘外仓收养与总账校验', () => {
+  const acc = seedAccount('mixed-acc');
+  const live1 = seedTrader(acc, 'live-1');
+  const live2 = seedTrader(acc, 'live-2');
+  const paper = seedTrader(acc, 'paper-1');
+
+  // live1: 显式实盘 (0)；live2: 历史未指定 (NULL，保留兼容)；paper: 模拟盘 (1)
+  traders.setDryRun(live1, false);
+  traders.setDryRun(paper, true);
+
+  const basePos = {
+    side: 'long' as const,
+    quantity: 1,
+    entryPrice: 100,
+    leverage: 5,
+    liquidationPrice: null,
+    marginUsed: 20,
+    stopLoss: 95,
+    takeProfit: 115,
+    stopOrderId: null,
+    tpOrderId: null,
+    openReasoning: 'test',
+  };
+  positions.insert({ ...basePos, traderId: live1, symbol: 'BTCUSDT' });
+  positions.insert({ ...basePos, traderId: live2, symbol: 'ETHUSDT' });
+  positions.insert({ ...basePos, traderId: paper, symbol: 'DOGEUSDT' });
+
+  // live1 视角：应看到同账户实盘/历史 live2 的 ETHUSDT，但绝不能被模拟盘的 DOGEUSDT 拦住收养
+  const others = positions.openSymbolsForOtherTradersOnAccount(acc, live1);
+  assert.deepEqual([...others], ['ETHUSDT']);
+
+  // openForAccount 仅含实盘持仓（BTCUSDT + ETHUSDT），不含 paper 的 DOGEUSDT
+  const openPos = positions.openForAccount(acc);
+  assert.deepEqual(
+    openPos.map((p) => p.symbol).sort(),
+    ['BTCUSDT', 'ETHUSDT'],
+  );
+
+  // netSinceForAccount 仅汇总实盘平仓净额（10 + 5 = 15），忽略模拟盘 +999
+  for (const [tid, pnl] of [
+    [live1, 10],
+    [live2, 5],
+    [paper, 999],
+  ] as Array<[number, number]>) {
+    trades.insert({
+      traderId: tid,
+      symbol: 'BTCUSDT',
+      side: 'long',
+      quantity: 1,
+      entryPrice: 100,
+      exitPrice: 110,
+      leverage: 5,
+      grossPnl: pnl,
+      entryFee: 0,
+      exitFee: 0,
+      fundingFee: 0,
+      closeReason: 'take_profit',
+      openedAt: '2026-11-20T00:00:00.000Z',
+      closedAt: '2026-11-20T01:00:00.000Z',
+      source: 'bot',
+    });
+  }
+  assert.equal(trades.netSinceForAccount(acc, '2026-11-01T00:00:00.000Z'), 15);
+});

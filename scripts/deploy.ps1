@@ -83,7 +83,10 @@ if ($LASTEXITCODE -ne 0) {
 
 $excludes = @(    '--exclude=./.env',                 # ← 关键：绝不覆盖服务器的环境配置
     '--exclude=./.env.local',
+    '--exclude=.env.*',
     '--exclude=./deploy.local.ps1',
+    '--exclude=deploy.local.*',
+    '--exclude=AGENTS.md',
     '--exclude=./node_modules',
     '--exclude=./packages/*/node_modules',
     '--exclude=./data',                 # 数据库、主密钥、JWT 密钥、日志

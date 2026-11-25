@@ -269,3 +269,30 @@ test('★★ Jev 端点正常（有 answers.<key>.type）→ 无 mismatch', asyn
     `★ 正常形状不该报（实际：${JSON.stringify(r.mismatches)}）`,
   );
 });
+
+test('★★ 安全加固：所有探针显式设置 redirect: "manual" 且不走 fetchGuarded（允许 127.0.0.1 本地网关）', async () => {
+  const seen: Array<{ url: string; redirect?: RequestInit['redirect'] }> = [];
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const s = String(url);
+    seen.push({ url: s, ...(init?.redirect !== undefined ? { redirect: init.redirect } : {}) });
+    if (s.endsWith('/v1/models')) return { ok: true, status: 200, json: async () => goodModels(['a/b']) } as never;
+    if (s.endsWith('/v1/magpie/quotas')) return { ok: true, status: 200, json: async () => ({ data: [] }) } as never;
+    if (s.endsWith('/v1/systemone')) {
+      return { ok: true, status: 200, json: async () => ({ answers: { ok: { type: 'noul' } } }) } as never;
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as never;
+  }) as unknown as typeof fetch;
+
+  const r = await probeGatewayContract({
+    baseUrl: 'http://127.0.0.1:3425/v1',
+    apiKey: KEY,
+    ladderIds: ['a/b'],
+    jevEnabled: true,
+    fetchImpl,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(seen.length, 3);
+  for (const call of seen) {
+    assert.equal(call.redirect, 'manual', `${call.url} 必须设置 redirect: "manual" 防止鉴权头被重定向泄露`);
+  }
+});

@@ -243,45 +243,46 @@ export async function preflight(
 ): Promise<PreflightCheck[]> {
   const checks: PreflightCheck[] = [];
 
+  /* --- Paper mode (dryRun) without requiring live credentials ---------- */
+  /*
+   * **模拟盘启动不需要交易所实盘权限/单向持仓校验**：
+   *   1. 无凭据的模拟盘（`!hasCredentials`）：必然走模拟盘预检；
+   *   2. 绑定了真实账户但以模拟盘启动（`requireCredentials !== true`，如 `manager.ts` 传
+   *      `requireCredentials: !dryRun`）：模拟盘余额与成交全部在本地模拟，不会对真实账户下单，
+   *      只读 Key（`canTrade: false`）或真实账户上的双向持仓/已有持仓不应阻断模拟盘启动；
+   *   3. 账号页「测试连接」（`requireCredentials: true` + `hasCredentials: true`）：继续走下方
+   *      完整的实盘权限与 `/fapi/v2/positionRisk` 校验，避免测试连接漏报风险。
+   */
+  if (connection.broker.isDryRun && (!connection.rest.hasCredentials || options.requireCredentials !== true)) {
+    checks.push(
+      check(
+        'API 凭据',
+        'ok',
+        '模拟盘：不需要交易所交易凭据，账户余额与成交全部在本地模拟。',
+      ),
+    );
+    /* 模拟盘的"账户访问 / 交易余额"由本地钱包回答，不能按真实账户判。 */
+    const paper = await connection.broker.getAccountState();
+    checks.push(
+      check(
+        '模拟资金',
+        paper.equity > 0 ? 'ok' : 'error',
+        paper.equity > 0
+          ? `模拟权益 ${paper.equity.toFixed(2)} USDT，可用 ${paper.availableBalance.toFixed(2)} USDT。`
+          : '模拟余额为 0，无法开仓。请在创建机器人时填写起始余额。',
+        paper.equity <= 0,
+      ),
+    );
+    /*
+     * ⚠️ **不要在这里裸 `return checks`**（2026-11-09 修）：
+     * 「合约元数据」「时钟同步」「测试环境提示」三项对模拟盘同样成立，
+     * 而它们原来被这个早退一起跳过了 —— 详见 `environmentChecks()` 的注释。
+     */
+    return [...checks, ...environmentChecks(connection)];
+  }
+
   /* --- Credentials present --------------------------------------------- */
   if (!connection.rest.hasCredentials) {
-    /*
-     * **模拟盘不需要凭据**（用户 2026-10-27 需求）。
-     *
-     * 它的账户读数来自本地台账（`paperAccount`），下单全程本地模拟 ——
-     * 一条只做公开行情的连接就够用。所以这里给 `ok`，让模拟盘能真正启动。
-     *
-     * ⚠️ **判据是 `dryRun`**，不是"有没有传 requireCredentials"：实盘（dryRun=false）
-     * 即使调用方忘了传 requireCredentials，也**必须**因为没有凭据而失败。
-     * 一个漏传的参数不该让"没有密钥的实盘机器人"启动成功。
-     */
-    if (connection.broker.isDryRun) {
-      checks.push(
-        check(
-          'API 凭据',
-          'ok',
-          '模拟盘：不需要交易所凭据，账户余额与成交全部在本地模拟。',
-        ),
-      );
-      /* 模拟盘的"账户访问 / 交易余额"由本地钱包回答，不能按真实账户判。 */
-      const paper = await connection.broker.getAccountState();
-      checks.push(
-        check(
-          '模拟资金',
-          paper.equity > 0 ? 'ok' : 'error',
-          paper.equity > 0
-            ? `模拟权益 ${paper.equity.toFixed(2)} USDT，可用 ${paper.availableBalance.toFixed(2)} USDT。`
-            : '模拟余额为 0，无法开仓。请在创建机器人时填写起始余额。',
-          paper.equity <= 0,
-        ),
-      );
-      /*
-       * ⚠️ **不要在这里裸 `return checks`**（2026-11-09 修）：
-       * 「合约元数据」「时钟同步」「测试环境提示」三项对模拟盘同样成立，
-       * 而它们原来被这个早退一起跳过了 —— 详见 `environmentChecks()` 的注释。
-       */
-      return [...checks, ...environmentChecks(connection)];
-    }
     checks.push(
       check('API 凭据', 'error', '该交易所账户还没有配置 API Key 与 Secret。', options.requireCredentials !== false),
     );

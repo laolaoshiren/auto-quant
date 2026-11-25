@@ -228,7 +228,7 @@ export const MANAGED_AGENT_TOOLS: readonly ToolSpec[] = [
                   'close_long',
                   'close_short',
                   'reduce_position',
-                  'add_position',
+                  'add_to_position',
                   'adjust_protection',
                   'cancel_pending',
                   'hold',
@@ -346,7 +346,8 @@ export function normalizeFinalizePayload(
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const obj = item as Record<string, unknown>;
     const sym = normalizeSymbol(String(obj['symbol'] ?? ''));
-    const action = String(obj['action'] ?? '').trim();
+    const rawAction = String(obj['action'] ?? '').trim();
+    const action = rawAction === 'add_position' ? 'add_to_position' : rawAction;
     if (!sym || !action) continue;
 
     // 对未展开的雷达榜外围标的，纯观察性 wait/skip 不送入解析器以免产生误报 rejected:wait/skip
@@ -389,6 +390,8 @@ export function normalizeFinalizePayload(
       'stop_loss',
       'take_profit',
       'reduce_percent',
+      'reduce_quantity',
+      'setup_score',
       'confidence',
     ] as const;
     for (const k of copyKeys) {
@@ -429,7 +432,8 @@ export function normalizeFinalizePayload(
     ...(nextCheck !== undefined && nextCheck > 0 ? { next_check_in_minutes: nextCheck } : {}),
   };
 
-  const text = `<reasoning>${summary}</reasoning>\n<decision>${JSON.stringify(payload)}</decision>`;
+  const safeSummary = summary.replace(/<\/?(?:decision|reasoning|tool)\b[^>]*>/gi, '');
+  const text = `<reasoning>${safeSummary}</reasoning>\n<decision>${JSON.stringify(payload)}</decision>`;
   return { text, pendingThesisPlans, decisionCount: normalizedDecisions.length };
 }
 

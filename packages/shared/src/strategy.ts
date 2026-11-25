@@ -800,21 +800,28 @@ export function applyManagedRiskProfile(
 }
 
 /**
- * 把任意 `StrategyConfig` 钳制到 `AI_MANAGED_HARD_LIMITS` 之内（纯函数，不改原对象）。
+ * 取指定托管风险档位对应的物理硬上限（未指定时默认 `balanced`，保证旧数据与未显式选激进档的机器人不越界）。
+ */
+export function managedProfileLimitsFor(profile?: ManagedRiskProfileId) {
+  return MANAGED_RISK_PROFILES[profile ?? DEFAULT_MANAGED_RISK_PROFILE];
+}
+
+/**
+ * 把任意 `StrategyConfig` 钳制到其所属 `managedRiskProfile` 档位（以及全局物理底线）之内（纯函数，不改原对象）。
  *
  * 供运行期 `effectiveConfig()` 对历史已落库的旧 `ai_managed` 配置即时生效。
  */
 export function clampAiManagedHardLimits(config: StrategyConfig): StrategyConfig {
   const rc = config.riskControl;
   const cb = config.circuitBreaker;
+  const limits = managedProfileLimitsFor(config.managedRiskProfile);
   const dailyLoss =
-    cb.maxDailyLossPercent <= 0 || cb.maxDailyLossPercent > AI_MANAGED_HARD_LIMITS.maxDailyLossPercent
-      ? AI_MANAGED_HARD_LIMITS.maxDailyLossPercent
+    cb.maxDailyLossPercent <= 0 || cb.maxDailyLossPercent > limits.maxDailyLossPercent
+      ? limits.maxDailyLossPercent
       : cb.maxDailyLossPercent;
   const totalDrawdown =
-    cb.maxTotalDrawdownPercent <= 0 ||
-    cb.maxTotalDrawdownPercent > AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent
-      ? AI_MANAGED_HARD_LIMITS.maxTotalDrawdownPercent
+    cb.maxTotalDrawdownPercent <= 0 || cb.maxTotalDrawdownPercent > limits.maxTotalDrawdownPercent
+      ? limits.maxTotalDrawdownPercent
       : cb.maxTotalDrawdownPercent;
 
   return {
@@ -822,18 +829,20 @@ export function clampAiManagedHardLimits(config: StrategyConfig): StrategyConfig
     riskControl: {
       ...rc,
       requireStopLoss: true,
-      maxPositions: Math.min(rc.maxPositions, AI_MANAGED_HARD_LIMITS.maxPositions),
-      btcEthMaxLeverage: Math.min(rc.btcEthMaxLeverage, AI_MANAGED_HARD_LIMITS.btcEthMaxLeverage),
-      altcoinMaxLeverage: Math.min(rc.altcoinMaxLeverage, AI_MANAGED_HARD_LIMITS.altcoinMaxLeverage),
+      /* 托管模式禁止绕过单币名义倍数上限。 */
+      marginBasedLimit: false,
+      maxPositions: Math.min(rc.maxPositions, limits.maxPositions),
+      btcEthMaxLeverage: Math.min(rc.btcEthMaxLeverage, limits.btcEthMaxLeverage),
+      altcoinMaxLeverage: Math.min(rc.altcoinMaxLeverage, limits.altcoinMaxLeverage),
       btcEthMaxPositionValueRatio: Math.min(
         rc.btcEthMaxPositionValueRatio,
-        AI_MANAGED_HARD_LIMITS.btcEthMaxPositionValueRatio,
+        limits.btcEthMaxPositionValueRatio,
       ),
       altcoinMaxPositionValueRatio: Math.min(
         rc.altcoinMaxPositionValueRatio,
-        AI_MANAGED_HARD_LIMITS.altcoinMaxPositionValueRatio,
+        limits.altcoinMaxPositionValueRatio,
       ),
-      maxMarginUsage: Math.min(rc.maxMarginUsage, AI_MANAGED_HARD_LIMITS.maxMarginUsage),
+      maxMarginUsage: Math.min(rc.maxMarginUsage, limits.maxMarginUsage),
     },
     circuitBreaker: {
       ...cb,

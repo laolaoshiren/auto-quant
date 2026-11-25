@@ -489,3 +489,145 @@ test('★★ getIncome 不传 endTime 时不能发出 NaN（接口可选性必�
   assert.equal(calls[0]!.params?.from, '1700000000');
   assert.ok(Number(calls[0]!.params?.to) > 0);
 });
+
+test('★★★ P0 #1：toSize 浮点容差避免 0.0003/0.0001 少平 1 张，全平市价单使用原生 size=0 + close=true', async () => {
+  const { rest, calls } = fakeRest();
+  const broker = new GateBroker(rest, fakeContracts());
+
+  await broker.placeOrder({ symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 0.0003, reduceOnly: true });
+  const body1 = calls[0]!.body as Record<string, unknown>;
+  assert.equal(body1.size, -3, '0.0003 / 0.0001 = 2.9999999999999996 必须为 -3 张而非 -2 张');
+  assert.equal(body1.reduce_only, true);
+
+  await broker.placeOrder({ symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', quantity: 0.0007, reduceOnly: true });
+  const body2 = calls[1]!.body as Record<string, unknown>;
+  assert.equal(body2.size, -7, '0.0007 / 0.0001 = 6.999999999999999 必须为 -7 张而非 -6 张');
+
+  await broker.placeOrder({ symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', closePosition: true, reduceOnly: true });
+  const body3 = calls[2]!.body as Record<string, unknown>;
+  assert.equal(body3.size, 0, 'closePosition 市价全平单必须传 size=0');
+  assert.equal(body3.close, true, 'closePosition 市价全平单必须传 close=true');
+  assert.equal('reduce_only' in body3, false, 'Gate close=true 不得同时传 reduce_only');
+});
+
+test('★★★ P0 #2 & 安全 P1 #3：orderId 路径校验防穿越 + 条件单缺触发价/立即触发必须显式拒绝', async () => {
+  const { rest, calls } = fakeRest();
+  const broker = new GateBroker(rest, fakeContracts());
+
+  for (const badId of ['', '../accounts', '123/456', '123?foo=bar', '123 456']) {
+    await assert.rejects(() => broker.getOrder('BTCUSDT', badId), /订单号格式非法/);
+    await assert.rejects(() => broker.getAlgoOrder(badId), /订单号格式非法/);
+    await assert.rejects(() => broker.cancelOrder('BTCUSDT', badId, 'order'), /订单号格式非法/);
+    await assert.rejects(() => broker.cancelOrder('BTCUSDT', badId, 'algo'), /订单号格式非法/);
+  }
+  assert.equal(calls.length, 0, '非法 orderId 必须在发任何请求前被拒绝');
+
+  /* 条件单缺失或非法 triggerPrice：绝不能回落到普通 /orders 下市价单 */
+  for (const badTrigger of [undefined, 0, -10, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(
+      () =>
+        broker.placeOrder({
+          symbol: 'BTCUSDT',
+          side: 'SELL',
+          type: 'STOP_MARKET',
+          quantity: 0.01,
+          closePosition: true,
+          ...(badTrigger === undefined ? {} : { triggerPrice: badTrigger }),
+        }),
+      /缺少合法触发价/,
+    );
+  }
+  assert.equal(calls.length, 0, '条件单缺少合法触发价时绝不得发单');
+
+  /* 带真实标记价 70000：验证安全侧取整与立即触发拦截 */
+  const markedCalls: Array<{ path: string; body?: unknown }> = [];
+  const markedRest = {
+    signed: async (_method: string, path: string, options: { body?: unknown } = {}) => {
+      markedCalls.push({ path, body: options.body });
+      return { ...limitOrder, id: 3003, trigger: { price: '69999.9', rule: 2 }, is_close: true, size: 0 };
+    },
+    publicGet: async () => [{ contract: 'BTC_USDT', mark_price: '70000' }],
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  const markedBroker = new GateBroker(markedRest, fakeContracts());
+
+  /* 多头止损（rule=2，须 < markPrice）：69999.96 按安全侧向下取整为 69999.9，避免四舍五入成 70000 立即触发 */
+  await markedBroker.placeOrder({
+    symbol: 'BTCUSDT',
+    side: 'SELL',
+    type: 'STOP_MARKET',
+    triggerPrice: 69999.96,
+    closePosition: true,
+  });
+  assert.equal((markedCalls[0]!.body as { trigger: { price: string } }).trigger.price, '69999.9');
+
+  /* 空头止损（rule=1，须 > markPrice）：70000.04 按安全侧向上取整为 70000.1 */
+  await markedBroker.placeOrder({
+    symbol: 'BTCUSDT',
+    side: 'BUY',
+    type: 'STOP_MARKET',
+    triggerPrice: 70000.04,
+    closePosition: true,
+  });
+  assert.equal((markedCalls[1]!.body as { trigger: { price: string } }).trigger.price, '70000.1');
+
+  /* 立即触发保护：多头止损 >= markPrice、空头止损 <= markPrice、多头止盈 <= markPrice、空头止盈 >= markPrice 均拒绝 */
+  await assert.rejects(
+    () => markedBroker.placeOrder({ symbol: 'BTCUSDT', side: 'SELL', type: 'STOP_MARKET', triggerPrice: 70000, closePosition: true }),
+    /会立即触发/,
+  );
+  await assert.rejects(
+    () => markedBroker.placeOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'STOP_MARKET', triggerPrice: 69900, closePosition: true }),
+    /会立即触发/,
+  );
+  await assert.rejects(
+    () => markedBroker.placeOrder({ symbol: 'BTCUSDT', side: 'SELL', type: 'TAKE_PROFIT_MARKET', triggerPrice: 69900, closePosition: true }),
+    /会立即触发/,
+  );
+  await assert.rejects(
+    () => markedBroker.placeOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'TAKE_PROFIT_MARKET', triggerPrice: 70100, closePosition: true }),
+    /会立即触发/,
+  );
+});
+
+test('★★★ P1 #16：getAlgoOrder 不把 INVALID_SIGNATURE/TIMESTAMP 误判为 not-found，getIncome 保留亚秒精度', async () => {
+  const sigErrRest = {
+    signed: async () => {
+      throw new Error('Gate API GET /futures/usdt/price_orders/123 失败（HTTP 401 · INVALID_SIGNATURE）：Signature mismatch');
+    },
+    publicGet: async () => [],
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  const sigBroker = new GateBroker(sigErrRest, fakeContracts());
+  assert.equal(await sigBroker.getAlgoOrder('123'), null, 'INVALID_SIGNATURE 必须返回 null 而非 not-found');
+
+  const notFoundRest = {
+    signed: async () => {
+      throw new Error('Gate API GET /futures/usdt/price_orders/123 失败（HTTP 404 · AUTO_ORDER_NOT_FOUND）：order not found');
+    },
+    publicGet: async () => [],
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  const nfBroker = new GateBroker(notFoundRest, fakeContracts());
+  assert.equal(await nfBroker.getAlgoOrder('123'), 'not-found', '明确的 ORDER_NOT_FOUND / HTTP 404 才返回 not-found');
+
+  /* getIncome 亚秒区间：startTime=1700000000500, endTime=1700000000900 */
+  const incomeParams: Array<Record<string, string>> = [];
+  const incomeRest = {
+    signed: async (_m: string, _p: string, options?: { params?: Record<string, string> }) => {
+      if (options?.params) incomeParams.push(options.params);
+      return [
+        { id: 1, time: 1700000000.2, change: '-0.1', type: 'fee', contract: 'BTC_USDT' },
+        { id: 2, time: 1700000000.7, change: '5.5', type: 'pnl', contract: 'BTC_USDT' },
+        { id: 3, time: 1700000000.95, change: '-0.2', type: 'fund', contract: 'BTC_USDT' },
+      ];
+    },
+    publicGet: async () => [],
+  } as unknown as ConstructorParameters<typeof GateBroker>[0];
+  const incomeBroker = new GateBroker(incomeRest, fakeContracts());
+  const rows = await incomeBroker.getIncome({
+    startTime: 1_700_000_000_500,
+    endTime: 1_700_000_000_900,
+  });
+  assert.equal(incomeParams[0]?.from, '1700000000');
+  assert.equal(incomeParams[0]?.to, '1700000001', 'endTime 带毫秒尾数时必须向上取整秒，不截断末秒流水');
+  assert.equal(rows.length, 1, '客户端按精确毫秒窗口过滤，只保留 [500ms, 900ms] 内记录');
+  assert.equal(rows[0]!.income, '5.5');
+});

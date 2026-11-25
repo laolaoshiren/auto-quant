@@ -135,7 +135,13 @@ export function evaluateThesisHardCheck(
   const adversePct = round2((adverseMove / thesis.entryPrice) * 100);
 
   const initialRisk = Math.abs(thesis.entryPrice - thesis.initialStopLoss);
-  const currentR = initialRisk > 0 ? round2(favorableMove / initialRisk) : 0;
+  /*
+   * 保本移损后补建论点时 `initialStopLoss === entryPrice`（initialRisk === 0）。
+   * 若直接记 currentR = 0，时间止损会把已大幅浮盈的赢家误判为"无进展"强平；
+   * 此时改用入场价 1% 作为名义 1R 基准衡量进展，并杜绝 NaN。
+   */
+  const effectiveRisk = initialRisk > 0 ? initialRisk : thesis.entryPrice * 0.01;
+  const currentR = effectiveRisk > 0 ? round2(favorableMove / effectiveRisk) : 0;
 
   const nextPeakR = Math.max(thesis.peakR, currentR);
   const nextWorstAdversePct = Math.max(thesis.worstAdversePct, adversePct);

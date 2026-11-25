@@ -55,6 +55,7 @@ const IPV4_BLOCKED_REASONS = {
   linkLocal: '链路本地地址 169.254.0.0/16（云元数据服务 169.254.169.254 就在这里）',
   cgnat: '运营商级 NAT 地址 100.64.0.0/10（部分云元数据服务在此，如 100.100.100.200）',
   ietfProtocolAssignments: 'IETF 协议分配段 192.0.0.0/24（Oracle Cloud 元数据服务 192.0.0.192 在这里）',
+  benchmark: '基准测试网段 198.18.0.0/15（RFC 2544，非公网地址）',
   reserved: '组播或保留地址 224.0.0.0/4 及以上',
 } as const;
 
@@ -91,6 +92,7 @@ function blockedIpv4Reason(bytes: readonly number[]): string | null {
    * 整段都挡：`192.0.0.x` 之外这个段没有别的合法用途，逐个列端点反而会漏。
    */
   if (a === 192 && b === 0) return IPV4_BLOCKED_REASONS.ietfProtocolAssignments;
+  if (a === 198 && (b === 18 || b === 19)) return IPV4_BLOCKED_REASONS.benchmark;
   if (a === 169 && b === 254) return IPV4_BLOCKED_REASONS.linkLocal;
   if (a === 100 && b >= 64 && b <= 127) return IPV4_BLOCKED_REASONS.cgnat;
   if (a >= 224) return IPV4_BLOCKED_REASONS.reserved;
@@ -187,6 +189,10 @@ function blockedIpv6Reason(bytes: readonly number[]): string | null {
     const embeddedIpv4Reason = (seg: readonly number[]): string | null =>
       seg.every((x) => x === 0) ? null : blockedIpv4Reason(seg);
     return embeddedIpv4Reason(bytes.slice(12)) ?? embeddedIpv4Reason(bytes.slice(6, 10));
+  }
+  if (bytes[0] === 0x20 && bytes[1] === 0x02) return '6to4 隧道地址 2002::/16';
+  if (bytes[0] === 0x20 && bytes[1] === 0x01 && bytes[2] === 0x00 && bytes[3] === 0x00) {
+    return 'Teredo 隧道地址 2001:0000::/32';
   }
   if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return '链路本地地址 fe80::/10';
   if ((bytes[0]! & 0xfe) === 0xfc) return '唯一本地地址 fc00::/7';

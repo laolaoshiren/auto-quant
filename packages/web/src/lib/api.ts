@@ -160,6 +160,29 @@ export interface AgentAudit {
 const TOKEN_KEY = 'aq.token';
 const USER_KEY = 'aq.user';
 
+/**
+ * 单调递增的会话纪元号（安全 P1 #6）。
+ *
+ * 每次显式切换会话（`setToken` 登录/换密、`clearToken` 登出/踢出）都自增 1。
+ * 任何在旧会话期间发出的在途 HTTP 请求，若在登出或切换新会话之后才返回：
+ * - 响应头里的 `x-refreshed-token` 不会把旧令牌写回新会话（或复活已登出状态）；
+ * - 响应状态码 401 也不会误伤已经登录的新会话。
+ */
+let sessionEpoch = 0;
+
+export function getSessionEpoch(): number {
+  return sessionEpoch;
+}
+
+/** 仅写入本地存储，不推进会话纪元（专供同会话滑动续期 `x-refreshed-token` 使用）。 */
+function writeToken(token: string): void {
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* private mode — the session then simply does not survive a reload */
+  }
+}
+
 export function getToken(): string | null {
   try {
     return localStorage.getItem(TOKEN_KEY);
@@ -169,14 +192,12 @@ export function getToken(): string | null {
 }
 
 export function setToken(token: string): void {
-  try {
-    localStorage.setItem(TOKEN_KEY, token);
-  } catch {
-    /* private mode — the session then simply does not survive a reload */
-  }
+  sessionEpoch += 1;
+  writeToken(token);
 }
 
 export function clearToken(): void {
+  sessionEpoch += 1;
   try {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
@@ -361,6 +382,12 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     timeoutMs = REQUEST_TIMEOUT_MS,
   } = options;
 
+  /*
+   * 发请求前冻结当前会话纪元号：若请求在途期间发生了登出、换账号或换密，
+   * 迟到的响应既不得通过 `x-refreshed-token` 写回旧令牌，也不得借 401 踢出新会话。
+   */
+  const reqEpoch = sessionEpoch;
+
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (!anonymous) {
@@ -413,17 +440,25 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
    * 放在 `response.ok` 判断**之前**：续期与这次请求成功与否无关，
    * 一个 500 的响应也可能带着新令牌（它同样是"经过校验的请求"）。
    * 漏掉它，一次后端抖动就会顺带把会话寿命白扔一半。
+   *
+   * ⚠️ 安全 P1 #6：仅当会话纪元号未变且当前仍持有有效会话令牌时才写回，
+   * 防止"登出后在途请求把旧令牌重新写回 localStorage"或污染新登录会话。
    */
   const refreshed = response.headers.get('x-refreshed-token');
-  if (refreshed && !anonymous) setToken(refreshed);
+  if (refreshed && !anonymous && reqEpoch === sessionEpoch && getToken() !== null) {
+    writeToken(refreshed);
+  }
 
   if (!response.ok) {
     /*
      * ⚠️ **不能只看状态码**（外部 issue #148）：`shouldSignOut()` 会排除
      * "当前密码填错"这种**本次请求**的 401 —— 否则在设置页输错一次密码就被登出。
-     * 判据与理由都写在那个函数上。
+     * 同时校验 `reqEpoch === sessionEpoch`（安全 P1 #6）：上一会话的迟到 401
+     * 绝不能把已经重新登录或刚换密的新会话踢掉。
      */
-    if (shouldSignOut(response.status, payload, anonymous)) onUnauthorized?.();
+    if (reqEpoch === sessionEpoch && shouldSignOut(response.status, payload, anonymous)) {
+      onUnauthorized?.();
+    }
     throw new ApiError(response.status, errorMessageOf(response.status, payload), payload);
   }
 
@@ -479,6 +514,27 @@ export interface Health {
      */
     cycleInProgress?: boolean;
   }>;
+  /** 停摆等降级态下服务端附带的中文说明（503 响应体自带）。 */
+  reason?: string;
+}
+
+/**
+ * 判别响应体是否是 `/api/health` 合法的结构化健康快照（审计 P1 #17）。
+ *
+ * 服务端在检测到运行中机器人停摆时会返回 **HTTP 503 + 完整 Health JSON**（给编排器探针看）。
+ * 只有载荷符合 Health 核心形状时才按正常读数消费；反向代理/网关吐出的 503 HTML 或错误体
+ * 仍照常抛出 `ApiError(503)`。
+ */
+export function isHealthPayload(payload: unknown): payload is Health {
+  if (!payload || typeof payload !== 'object') return false;
+  const obj = payload as Record<string, unknown>;
+  return (
+    typeof obj.ok === 'boolean' &&
+    typeof obj.version === 'string' &&
+    typeof obj.uptimeSeconds === 'number' &&
+    typeof obj.hasOwner === 'boolean' &&
+    (obj.staleTraders === undefined || Array.isArray(obj.staleTraders))
+  );
 }
 
 export interface AuthResult {
@@ -968,7 +1024,22 @@ export interface TraderInput {
 
 export const api = {
   /* --- auth --- */
-  health: () => request<Health>('/health', { anonymous: true }),
+  health: async (signal?: AbortSignal): Promise<Health> => {
+    try {
+      return await request<Health>('/health', { anonymous: true, signal });
+    } catch (error) {
+      /*
+       * 审计 P1 #17：`/api/health` 在检测到运行中的机器人停摆时会返回 HTTP 503 + 完整 Health JSON
+       *（含 `ok: false` 与 `staleTraders` 明细）。若仍按普通非 2xx 抛错，`StaleTraderBanner`
+       * 永远拿不到 `staleTraders`、也就永远不会渲染。
+       * 仅当响应体通过 `isHealthPayload()` 校验时放行；反向代理/网关吐出的 503 仍照常抛错。
+       */
+      if (error instanceof ApiError && error.status === 503 && isHealthPayload(error.payload)) {
+        return error.payload;
+      }
+      throw error;
+    }
+  },
 
   login: (username: string, password: string) =>
     request<AuthResult>('/auth/login', { method: 'POST', body: { username, password }, anonymous: true }),
@@ -1448,9 +1519,19 @@ export const api = {
     request<ManagedIntelView>(`/traders/${id}/managed-intel`, { signal }),
 
   /* --- market --- */
-  marketSymbols: (signal?: AbortSignal) => request<MarketSymbol[]>('/market/symbols', { signal }),
-  marketKlines: (symbol: string, interval: string, limit = 300, signal?: AbortSignal) =>
-    request<Kline[]>('/market/klines', { query: { symbol, interval, limit }, signal }),
+  marketSymbols: (signal?: AbortSignal, exchange?: ExchangeId) =>
+    request<MarketSymbol[]>('/market/symbols', { query: { exchange }, signal }),
+  marketKlines: (
+    symbol: string,
+    interval: string,
+    limit = 300,
+    signal?: AbortSignal,
+    exchange?: ExchangeId,
+  ) =>
+    request<Kline[]>('/market/klines', {
+      query: { symbol, interval, limit, exchange },
+      signal,
+    }),
 };
 
 /** M3.4：智能托管 2.0 雷达评分、持仓论点与反例衰减笔记视图。 */

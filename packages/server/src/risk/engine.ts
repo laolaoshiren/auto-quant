@@ -1195,16 +1195,21 @@ export class RiskEngine {
     }
 
     /* --- 5. Take profit -------------------------------------------------- */
-    let takeProfit = decision.takeProfit;
+    let takeProfit: number | null = decision.takeProfit;
     if (takeProfit === null || !(takeProfit > 0)) {
-      if (risk.requireTakeProfit && risk.fallbackTakeProfitPercent <= 0) {
-        return { ok: false, reason: '未提供止盈，且兜底止盈已被禁用。' };
+      if (risk.requireTakeProfit) {
+        if (risk.fallbackTakeProfitPercent <= 0) {
+          return { ok: false, reason: '未提供止盈，且兜底止盈已被禁用。' };
+        }
+        const distance = entryPrice * (risk.fallbackTakeProfitPercent / 100);
+        takeProfit = isLong ? entryPrice + distance : entryPrice - distance;
+        adjustments.push(
+          `模型未给出止盈，已按配置的 ${risk.fallbackTakeProfitPercent}% 兜底比例设为 ${takeProfit.toFixed(6)}。`,
+        );
+      } else {
+        /* 策略显式关闭强制止盈（requireTakeProfit=false）时，允许无固定止盈的趋势追踪单。 */
+        takeProfit = null;
       }
-      const distance = entryPrice * (risk.fallbackTakeProfitPercent / 100);
-      takeProfit = isLong ? entryPrice + distance : entryPrice - distance;
-      adjustments.push(
-        `模型未给出止盈，已按配置的 ${risk.fallbackTakeProfitPercent}% 兜底比例设为 ${takeProfit.toFixed(6)}。`,
-      );
     }
 
     /* --- 6. Protection must sit on the correct side ---------------------- */
@@ -1227,17 +1232,19 @@ export class RiskEngine {
         reason: `空头止损无效：止损价 ${stopLoss} 未高于入场价 ${entryPrice}。`,
       };
     }
-    if (isLong && !(takeProfit > entryPrice)) {
-      return {
-        ok: false,
-        reason: `多头止盈无效：止盈价 ${takeProfit} 未高于入场价 ${entryPrice}。`,
-      };
-    }
-    if (!isLong && !(takeProfit < entryPrice)) {
-      return {
-        ok: false,
-        reason: `空头止盈无效：止盈价 ${takeProfit} 未低于入场价 ${entryPrice}。`,
-      };
+    if (takeProfit !== null) {
+      if (isLong && !(takeProfit > entryPrice)) {
+        return {
+          ok: false,
+          reason: `多头止盈无效：止盈价 ${takeProfit} 未高于入场价 ${entryPrice}。`,
+        };
+      }
+      if (!isLong && !(takeProfit < entryPrice)) {
+        return {
+          ok: false,
+          reason: `空头止盈无效：止盈价 ${takeProfit} 未低于入场价 ${entryPrice}。`,
+        };
+      }
     }
 
     /*
@@ -1345,38 +1352,15 @@ export class RiskEngine {
      * 混用（一个按市价、一个按挂单价）会算出一个**毫无意义**的比值，
      * 而它可能恰好落在门槛两侧的任意一边。
      */
-    const rewardDistance = Math.abs(takeProfit - entryPrice);
-    const rewardRisk = riskDistance > 0 ? rewardDistance / riskDistance : 0;
-    /*
-     * ⚠️ **容差 1e-9 —— 与上面两处手续费门槛同一个写法，而这条原来漏了。**
-     *
-     * 实测（`#87`，2026-09-21）：
-     *
-     *     止损 111   止盈 115.8   市价 112.2
-     *     下行 = 112.2 − 111   = 1.2
-     *     上行 = 115.8 − 112.2 = 3.6
-     *     盈亏比 = 3.6 / 1.2 = 2.999999999999988
-     *
-     * 而拒绝理由是这么写的：
-     *
-     *     > 盈亏比 1:3.00 低于要求的 1:3。
-     *
-     * **显示出来是相等的两个数，而判定是"低于"** —— 因为 `toFixed(2)` 把
-     * 2.999999999999988 显示成了 `3.00`，而比较是 `2.999999999999988 < 3`。
-     *
-     * 于是**一个数学上刚好达标的单被拒了**。而那件事正是提示词要求它做的：
-     * 「止盈 ≥ 止损幅度的 3 倍」—— **"刚好 3 倍"是按规则算出来的结果，
-     * 而不该因为浮点误差变成拒绝的理由。**
-     *
-     * 这个文件里另外两条同类判据（`reviewAdjust` 与这里的手续费门槛）**都用了
-     * 同一个 1e-9 容差** —— 只有盈亏比这条漏了。**同一个文件里有的地方用容差、
-     * 有的没用，本身就是需要统一检查的信号。**
-     */
-    if (rewardRisk + 1e-9 < risk.minRiskRewardRatio) {
-      return {
-        ok: false,
-        reason: `盈亏比 1:${rewardRisk.toFixed(2)} 低于要求的 1:${risk.minRiskRewardRatio}。`,
-      };
+    if (takeProfit !== null) {
+      const rewardDistance = Math.abs(takeProfit - entryPrice);
+      const rewardRisk = riskDistance > 0 ? rewardDistance / riskDistance : 0;
+      if (rewardRisk + 1e-9 < risk.minRiskRewardRatio) {
+        return {
+          ok: false,
+          reason: `盈亏比 1:${rewardRisk.toFixed(2)} 低于要求的 1:${risk.minRiskRewardRatio}。`,
+        };
+      }
     }
 
     /* --- 8. Notional ----------------------------------------------------- */
@@ -1690,7 +1674,7 @@ export class RiskEngine {
      * 一侧**时才起作用 —— 那正是这个函数唯一该做的事。
      */
     const roundedStop = clampStopLoss(stopLoss, entryPrice, isLong);
-    const roundedTarget = clampTakeProfit(takeProfit, entryPrice, isLong);
+    const roundedTarget = takeProfit !== null ? clampTakeProfit(takeProfit, entryPrice, isLong) : null;
 
     // 风险金额同样按 entryPrice 计量：它才是这笔交易的入场价（第 7 步的口径）。
     const finalRiskUsd = Math.abs(entryPrice - roundedStop) * quantity;
