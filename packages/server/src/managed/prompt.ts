@@ -385,10 +385,15 @@ function renderDossierBlock(
     }
   }
 
+  const rsLabel =
+    m.rsAlpha1hPct !== undefined && m.rsAlpha1hPct !== null
+      ? `RS(vs BTC 1h/4h) ${fmtSignedPct(m.rsAlpha1hPct, 1)} / ${fmtSignedPct(m.rsAlpha4hPct, 1)}`
+      : `RS(vs BTC 4h) ${fmtSignedPct(m.rsAlpha4hPct, 1)}`;
+
   const header = [
     `## ${d.symbol}${heldTag} — AI500 **${r.score}/100** (${tierLabel(r.tier)} · ${biasLabel(r.bias)})`,
     `- 维度拆解：趋势 ${dim.trend}/20 · 突破量能 ${dim.breakout}/20 · OI流 ${dim.oiFlow}/15 · Taker ${dim.takerFlow}/15 · 费率 ${dim.funding}/15 · Alpha/位置 ${dim.alphaPosition}/15`,
-    `- 预计算指标：现价 ${formatCompactPrice(m.price)} · 1h ${fmtSignedPct(m.change1hPct, 1)} / 4h ${fmtSignedPct(m.change4hPct, 1)} / 24h ${fmtSignedPct(m.change24hPct, 1)} · RS(vs BTC 4h) ${fmtSignedPct(m.rsAlpha4hPct, 1)} · 24h额 ${fmtUsd(m.quoteVolume24h)} · 15m量比 ${m.volRatio15m}x · 实体比 ${Math.round(m.bodyRatio15m * 100)}% · ATR15m ${m.atr15mPct}% · 距EMA20 ${m.distEma20Atr}×ATR`,
+    `- 预计算指标：现价 ${formatCompactPrice(m.price)} · 1h ${fmtSignedPct(m.change1hPct, 1)} / 4h ${fmtSignedPct(m.change4hPct, 1)} / 24h ${fmtSignedPct(m.change24hPct, 1)} · ${rsLabel} · 24h额 ${fmtUsd(m.quoteVolume24h)} · 15m量比 ${m.volRatio15m}x · 实体比 ${Math.round(m.bodyRatio15m * 100)}% · ATR15m ${m.atr15mPct}% · 距EMA20 ${m.distEma20Atr}×ATR`,
     `- 资金流与费率：Taker买比 1h=${Math.round(m.takerBuyRatio1h * 100)}% / 4h=${Math.round(m.takerBuyRatio4h * 100)}% (CVD:${m.cvdTrend}) · OI ${m.openInterestUsd ? fmtUsd(m.openInterestUsd) : 'N/A'} (1h ${fmtSignedPct(m.oiChange1hPct, 1)} / 4h ${fmtSignedPct(m.oiChange4hPct, 1)}) · 资金费 ${m.fundingRatePct !== null ? `${m.fundingRatePct >= 0 ? '+' : ''}${m.fundingRatePct.toFixed(4)}%` : 'N/A'}`,
     `- 筹码与清算：${d.volumeProfile ? formatVolumeProfileLine(d.volumeProfile) : '样本不足'}`,
     `- 动能变化：${formatRadarDeltaLine(d.delta)}`,

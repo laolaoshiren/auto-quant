@@ -192,4 +192,37 @@ test('★ evaluateAnomalyCandidates：优先级 持仓剧变 > BTC剧变 > 新�
     nowMs: now,
   });
   assert.ok(trigPriority && trigPriority.kind === 'position_shock' && trigPriority.symbol === 'SOLUSDT');
+
+  // 4) 新 AI500 2.0 标签（蓄势放量突破 / 突破回踩确认）触发起爆唤醒，而带高波动/反砸警示的标的被拦截
+  const trigSqueeze = evaluateAnomalyCandidates({
+    candidates: [
+      makeCandidate({
+        symbol: 'SQUEEZEUSDT',
+        score: 79,
+        tags: ['蓄势放量突破', '1h强势领涨(+3.5%)'],
+      }),
+    ],
+    shockBySymbol: new Map(),
+    heldSymbols: new Set(),
+    pendingSymbols: new Set(),
+    cooldownUntilBySymbol: new Map(),
+    nowMs: now,
+  });
+  assert.ok(trigSqueeze && trigSqueeze.kind === 'breakout_ignition' && trigSqueeze.symbol === 'SQUEEZEUSDT');
+
+  const trigWarnBlocked = evaluateAnomalyCandidates({
+    candidates: [
+      makeCandidate({
+        symbol: 'MANTRAUSDT',
+        score: 85,
+        tags: ['高波动警示(ATR 5.5%)', '早期放量起爆'],
+      }),
+    ],
+    shockBySymbol: new Map(),
+    heldSymbols: new Set(),
+    pendingSymbols: new Set(),
+    cooldownUntilBySymbol: new Map(),
+    nowMs: now,
+  });
+  assert.equal(trigWarnBlocked, null, '带高波动/反砸警示的标的绝不触发异动唤醒');
 });

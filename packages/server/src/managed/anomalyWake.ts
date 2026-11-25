@@ -41,6 +41,8 @@ export const ANOMALY_WAKE_DELAY_MS = 5_000;
 export const ANOMALY_BREAKOUT_MIN_SCORE = 78;
 export const ANOMALY_STRONG_BREAKOUT_MIN_SCORE = 82;
 export const ANOMALY_STRONG_BREAKOUT_MIN_VOL_RATIO = 1.8;
+const ANOMALY_EARLY_IGNITION_TAGS = ['早期放量起爆', '蓄势放量突破', '突破回踩确认'] as const;
+const ANOMALY_DISQUALIFYING_WARNING_RE = /高波动警示|日内透支警示|放量反砸警惕|追单风险/;
 
 export const ANOMALY_SHOCK_ATR_MULTIPLE = 2.0;
 export const ANOMALY_BTC_MIN_SHOCK_PCT = 1.2;
@@ -213,13 +215,16 @@ export function evaluateAnomalyCandidates(input: {
     }
   }
 
-  // 3) 全市场新突发起爆机会（仅从未持仓、未挂单、非冷却标的里挑选最高分）
+  // 3) 全市场新突发起爆机会（仅从未持仓、未挂单、非冷却、无高危透支警示标的里挑选最高分）
   let best: Ai500Candidate | null = null;
   for (const c of input.candidates) {
     if (input.heldSymbols.has(c.symbol) || input.pendingSymbols.has(c.symbol)) continue;
     if (isCooling(c.symbol)) continue;
     if (c.bias === 'neutral') continue;
-    const isEarlyIgnition = c.score >= ANOMALY_BREAKOUT_MIN_SCORE && c.tags.includes('早期放量起爆');
+    if (c.tags.some((t) => ANOMALY_DISQUALIFYING_WARNING_RE.test(t))) continue;
+    const isEarlyIgnition =
+      c.score >= ANOMALY_BREAKOUT_MIN_SCORE &&
+      ANOMALY_EARLY_IGNITION_TAGS.some((tag) => c.tags.includes(tag));
     const isUltraStrongBreakout =
       c.score >= ANOMALY_STRONG_BREAKOUT_MIN_SCORE &&
       c.metrics.volRatio15m >= ANOMALY_STRONG_BREAKOUT_MIN_VOL_RATIO;
