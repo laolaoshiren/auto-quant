@@ -2208,16 +2208,6 @@ export function TraderPage() {
           </div>
         )}
 
-        {/* 智能托管 2.0：AI500 雷达、持仓论点、反例笔记与归因就绪面板置顶于图表之上，首屏直达核心判断 */}
-        {trader.mode === 'ai_managed' && (
-          <div className="shrink-0">
-            <ManagedIntelPanel
-              traderId={traderId}
-              onSelectSymbol={selectChartSymbol}
-            />
-          </div>
-        )}
-
         {/*
           C. 交易所账户（共享钱包）—— **已整块删除**（用户 2026-11-10：
           「这个也是多余重复得，账户余额（USDT）实际对应得就是交易所账户余额」）。
@@ -2365,6 +2355,16 @@ export function TraderPage() {
             />
           )}
         </Panel>
+
+        {/* 智能托管 2.0：AI500 雷达、持仓论点、反例笔记与归因就绪面板置于图表下方 */}
+        {trader.mode === 'ai_managed' && (
+          <div className="shrink-0">
+            <ManagedIntelPanel
+              traderId={traderId}
+              onSelectSymbol={selectChartSymbol}
+            />
+          </div>
+        )}
 
         {/*
           **智能体审计**（用户 2026-10-12 要求的「汇报工作的」那一环）。
