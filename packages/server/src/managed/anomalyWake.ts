@@ -24,6 +24,7 @@ import {
   type Ai500Candidate,
   type Ai500Weights,
 } from '../radar/ai500.js';
+import { getSharedMarketPulse } from '../radar/marketPulse.js';
 
 const log = createLogger('managed:anomaly');
 
@@ -304,9 +305,15 @@ export async function scanManagedAnomaly(
     excludeStablecoins: input.config.coinSource.excludeStablecoins ?? true,
     alwaysInclude: alwaysSet,
   });
+  const pulseSymbols = getSharedMarketPulse().getHotSymbols({
+    limit: 4,
+    minQuoteVolume24h: minVol,
+    nowMs,
+  });
   const prescreened = selectPrescreenSymbols(liquid, {
     limit: ANOMALY_PRESCREEN_LIMIT,
     alwaysInclude: alwaysSet,
+    pulseSymbols,
   });
   const rowBySym = new Map(liquid.map((r) => [r.symbol, r]));
 

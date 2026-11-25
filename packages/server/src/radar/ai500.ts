@@ -319,6 +319,8 @@ export function selectPrescreenSymbols(
   options: {
     limit?: number;
     alwaysInclude?: ReadonlySet<string>;
+    /** 来自全市场零 REST WS 脉冲雷达的突发点火提名（按脉冲强度降序，仅接受已过流动性过滤且非透支的标的）。 */
+    pulseSymbols?: readonly string[];
   } = {},
 ): string[] {
   const limit = Math.max(1, options.limit ?? AI500_DEFAULTS.prescreenLimit);
@@ -346,7 +348,18 @@ export function selectPrescreenSymbols(
     return clamp((r.price - r.low24h) / span, 0, 1);
   };
 
-  // 2) 多维轮询取头：把「早期突破前沿」放第一位，确保刚起势的中盘龙头进初筛前排
+  // 2) 多维轮询取头：WS 突发脉冲提名（若在线）+ 早期突破前沿排在最前，确保刚点火的暗马第一时间进深扫
+  const rowBySymbol = new Map(rows.map((r) => [r.symbol, r]));
+  const byPulse: RadarUniverseRow[] = [];
+  if (options.pulseSymbols && options.pulseSymbols.length > 0) {
+    for (const sym of options.pulseSymbols) {
+      const row = rowBySymbol.get(sym);
+      if (row && !isBlowoffRow(row)) {
+        byPulse.push(row);
+      }
+    }
+  }
+
   const byEarlyBreakout = [...rows]
     .filter((r) => {
       if (isBlowoffRow(r)) return false;
@@ -381,7 +394,7 @@ export function selectPrescreenSymbols(
     .filter((r) => !isBlowoffRow(r) && r.fundingRate !== null && Number.isFinite(r.fundingRate))
     .sort((a, b) => Math.abs(b.fundingRate ?? 0) - Math.abs(a.fundingRate ?? 0));
 
-  const queues = [byEarlyBreakout, byVolume, byGainers, byLosers, byAmplitude, byFunding];
+  const queues = [byPulse, byEarlyBreakout, byVolume, byGainers, byLosers, byAmplitude, byFunding];
   let cursor = 0;
   while (picked.size < limit) {
     let addedInPass = false;

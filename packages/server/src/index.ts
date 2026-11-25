@@ -7,6 +7,7 @@ import { createLogger } from './logger.js';
 import { setUnrecognizedErrorSink } from './llm/errors.js';
 import { buildServer, bootstrapOwnerAccount } from './api/server.js';
 import { BalanceService } from './services/balance.js';
+import { startSharedMarketPulse, stopSharedMarketPulse } from './radar/marketPulse.js';
 import { TraderManager } from './trader/manager.js';
 import { ROLE_GROUP_LADDERS } from './trader/routedModel.js';
 import { resolveTeamGateway } from './trader/teamGateway.js';
@@ -83,6 +84,10 @@ async function main(): Promise<void> {
     environment,
     dryRun: true,
     ...(process.env.BINANCE_WS_HOST ? { wsHostOverride: process.env.BINANCE_WS_HOST } : {}),
+  });
+  // 全市场零 REST 权重 WS 实时脉冲雷达（非阻塞启动，失败不影响交易主链路）
+  void startSharedMarketPulse(publicConnection.endpoints).catch((error) => {
+    log.warn(`全市场 WS 脉冲雷达启动跳过（自动使用常规初筛）：${(error as Error).message}`);
   });
 
   /* --- Services --------------------------------------------------------- */
@@ -210,6 +215,7 @@ async function main(): Promise<void> {
        * exchange call delays shutdown rather than hanging it permanently.
        */
       await manager.stopAll(signal);
+      await stopSharedMarketPulse();
       await app.close();
     } finally {
       closeDb();

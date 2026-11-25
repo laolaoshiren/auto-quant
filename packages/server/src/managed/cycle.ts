@@ -25,6 +25,7 @@ import {
   type RadarUniverseRow,
 } from '../radar/ai500.js';
 import type { RadarDeltaTracker } from '../radar/deltaTracker.js';
+import { getSharedMarketPulse } from '../radar/marketPulse.js';
 import { computeVolumeProfile, formatCompactPrice } from '../radar/volumeProfile.js';
 import { MANAGED_KLINE_BARS, type ManagedSymbolDossier } from './prompt.js';
 
@@ -214,10 +215,19 @@ export async function runManagedRadarCycle(input: ManagedCycleInput): Promise<Ma
       excludeStablecoins: input.config.coinSource.excludeStablecoins ?? true,
       alwaysInclude: alwaysSet,
     });
+    const pulseSymbols = getSharedMarketPulse().getHotSymbols({
+      limit: 8,
+      minQuoteVolume24h: minVol,
+      nowMs,
+    });
     const prescreened = selectPrescreenSymbols(liquid, {
       limit: AI500_DEFAULTS.prescreenLimit,
       alwaysInclude: alwaysSet,
+      pulseSymbols,
     });
+    if (pulseSymbols.length > 0) {
+      log.debug(`AI500 WS 脉冲提名 ${pulseSymbols.length} 标的：${pulseSymbols.join(', ')}`);
+    }
     const rowBySym = new Map(liquid.map((r) => [r.symbol, r]));
 
     await mapConcurrent(prescreened, CONCURRENCY, async (sym) => {

@@ -87,6 +87,21 @@ export function buildUserStreamUrl(
   return `${endpoints.wsHost}/private/ws?${params.toString()}`;
 }
 
+/**
+ * Build a public/market combined WebSocket stream URL (e.g. `!miniTicker@arr`).
+ *
+ * Production uses Binance's `/market/stream?streams=...` routed path;
+ * demo/testnet environments still serve combined streams at `/stream?streams=...`.
+ */
+export function buildMarketStreamUrl(
+  endpoints: BinanceEndpoints,
+  streams: readonly string[],
+): string {
+  const joined = streams.join('/');
+  const prefix = endpoints.isTestnet ? '' : '/market';
+  return `${endpoints.wsHost}${prefix}/stream?streams=${joined}`;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Application-level liveness thresholds                                      */
 /* -------------------------------------------------------------------------- */
