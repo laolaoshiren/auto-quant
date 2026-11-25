@@ -6838,6 +6838,28 @@ export class AutoTrader {
             );
             continue;
           }
+          /*
+           * ⚠️ **撤单返回 true 仍须二次核对成交量**（2026-11-25 实盘 LISTAUSDT 竞态修复）：
+           * 币安对"已成交"和"已撤销"的单撤单都返回 `-2011 Unknown order`，`cancelOrder`
+           * 把 `-2011` 视为 `true`。若挂单在 `getOrder` 与 `cancelOrder` 之间成交，直接关掉
+           * 本地 pending 行会丢掉模型预设止损/止盈并导致仓位被误收养。
+           */
+          const postCancel = await this.deps.broker
+            .getOrder(row.symbol, row.entry_order_id)
+            .catch(() => null);
+          const postExecuted = Number(postCancel?.executedQty ?? 0) || 0;
+          if (postExecuted > 0) {
+            await this.promotePendingEntry(
+              row,
+              postExecuted,
+              Number(postCancel?.avgPrice) || row.entry_price,
+            );
+            this.emit(
+              'info',
+              `${row.symbol} 的限价挂单在超时撤单瞬间已成交（${postExecuted}），已按原计划转为持仓并挂保护单。`,
+            );
+            continue;
+          }
         }
       } catch (error) {
         /*
@@ -11583,18 +11605,19 @@ reduceQuantity: null,
     if (cancelFailure !== null) {
       /*
        * 撤不掉 —— **先查清楚那张单现在是什么状态**，而不是想当然。
-       * 查不到（null）也不动：交给下一轮的对账，它每轮都会问一次。
+       * 已成交则立刻按原计划转正并挂保护单；查不到（null）则不动，留给下一轮对账。
        */
       const order = await this.deps.broker.getOrder(symbol, orderId).catch(() => null);
       const executed = Number(order?.executedQty ?? 0) || 0;
       if (executed > 0) {
+        await this.promotePendingEntry(row, executed, Number(order?.avgPrice) || row.entry_price);
         return {
           action: decision.action,
           symbol,
-          status: 'failed',
+          status: 'skipped',
           detail:
-            `撤单时发现 ${symbol} 那张单**已经成交了**（${executed}）—— 撤不了，` +
-            '它是一笔真实持仓，已留给对账去转正并挂保护单。',
+            `撤单时发现 ${symbol} 那张单已经成交（${executed}）—— 撤不了，` +
+            '已按原计划转为持仓并挂上模型预设保护单。',
         };
       }
       return {
@@ -11606,10 +11629,40 @@ reduceQuantity: null,
     }
 
     /*
-     * 撤成功（或交易所说它本来就不存在）→ 关掉本地记录。
+     * ⚠️⚠️ **即使 `cancelOrder()` 返回 `true`，也必须查一次真实订单状态！**
+     * （2026-11-25 实盘 #21 LISTAUSDT 事故根因修复）
      *
-     * 这里可以放心关：上面那个 `catch` 已经处理了"其实已经成交"的情况，
-     * 而走到这里意味着交易所接受了撤单请求。
+     * 币安对"刚刚成交"与"已撤销"的订单调撤单都会回 `-2011 Unknown order sent`，
+     * 而 `broker.cancelOrder()` 把 `-2011` 当成幂等成功返回 `true`。
+     * 当挂单在模型思考的 45–60 秒内已成交、随后本轮执行 `cancel_pending` 时：
+     *   · 旧代码不查 `getOrder()` 直接 `positionStore.close(row.id)` + 改订单为 `CANCELED`；
+     *   · 模型的原定止损/止盈（如 0.1073 / 0.1245）随 pending 行一起被毁；
+     *   · 几秒后 `reconcilePositions()` 发现交易所真实持仓、当成外部仓位收养并挂上
+     *     系统 2.5% 兜底止损（0.1087）与 1.25% 兜底止盈，导致被插针提前扫损。
+     *
+     * 现在：撤单后核对 `getOrder()` —— 若 `executedQty > 0`（已成交或部分成交），
+     * 绝不关闭 pending 行、绝不改订单为 `CANCELED`，而是**立刻转正并按原计划挂保护单**。
+     */
+    const postCancelOrder = await this.deps.broker.getOrder(symbol, orderId).catch(() => null);
+    const postExecuted = Number(postCancelOrder?.executedQty ?? 0) || 0;
+    if (postExecuted > 0) {
+      await this.promotePendingEntry(
+        row,
+        postExecuted,
+        Number(postCancelOrder?.avgPrice) || row.entry_price,
+      );
+      return {
+        action: decision.action,
+        symbol,
+        status: 'skipped',
+        detail:
+          `撤单前 ${symbol} 的限价挂单已成交（${postExecuted} @ ${Number(postCancelOrder?.avgPrice) || row.entry_price}），` +
+          '已按原计划转为持仓并挂上模型预设止损/止盈。',
+      };
+    }
+
+    /*
+     * 确认未成交且已撤掉 → 关掉本地 pending 记录并把订单行标为 CANCELED。
      */
     positionStore.close(row.id);
     const cancelledEntry = orderStore.findByExchangeOrderId(traderId, String(orderId));
@@ -11678,19 +11731,39 @@ reduceQuantity: null,
         if (cancelFailure !== null) {
           /*
            * 撤不掉 —— 查清楚它现在是"没了"还是"成了"。
-           * **已成交的不关本地记录**：那会丢掉一个真实仓位。
+           * **已成交的不关本地记录**：立刻按原计划转正并挂保护单。
            */
           const order = await this.deps.broker.getOrder(symbol, row.entry_order_id).catch(() => null);
           const executed = Number(order?.executedQty ?? 0) || 0;
           if (executed > 0) {
+            await this.promotePendingEntry(row, executed, Number(order?.avgPrice) || row.entry_price);
             this.emit(
               'warn',
-              `全部平仓时发现 ${symbol} 的挂单**已经成交**（${executed}）—— ` +
-                '它现在是真实持仓，已留给对账转正并挂保护单（本次不平它）。',
+              `全部平仓时发现 ${symbol} 的挂单已经成交（${executed}）—— ` +
+                '已按原计划转为持仓并挂上保护单（本次不平它）。',
             );
             continue;
           }
           this.emit('warn', `全部平仓时撤销 ${symbol} 的挂单失败（${cancelFailure}）—— 它仍然挂在交易所。`);
+          continue;
+        }
+
+        /* 同样防范 -2011 吞掉"已成交"：撤单返回 true 后核对一次真实成交量。 */
+        const postCancelOrder = await this.deps.broker
+          .getOrder(symbol, row.entry_order_id)
+          .catch(() => null);
+        const postExecuted = Number(postCancelOrder?.executedQty ?? 0) || 0;
+        if (postExecuted > 0) {
+          await this.promotePendingEntry(
+            row,
+            postExecuted,
+            Number(postCancelOrder?.avgPrice) || row.entry_price,
+          );
+          this.emit(
+            'warn',
+            `全部平仓时发现 ${symbol} 的挂单在撤单前已成交（${postExecuted}）—— ` +
+              '已按原计划转为持仓并挂上保护单（本次不平它）。',
+          );
           continue;
         }
 

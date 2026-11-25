@@ -6808,6 +6808,56 @@ test('撤单失败时保留本地记录 —— 下一轮继续尝试，而不是
   assert.match(summary, /开仓 0/, `撤单失败不是开仓，实际：${summary}`);
 });
 
+test('★★★ 撤单返回 true（-2011）但订单其实在思考期间已成交 → 必须按原计划转正挂保护单，绝不误撤误收养', async () => {
+  /*
+   * 回归 2026-11-25 实盘 #21 LISTAUSDT 竞态事故：
+   *   1. 21:43 挂限价多单（含模型计划 SL/TP）；
+   *   2. 21:58 周期开始时仍是 pending，模型思考的 60 秒内限价单成交；
+   *   3. 21:59 模型输出 cancel_pending；币安对已成交单撤单返回 -2011，broker.cancelOrder 返回 true；
+   *   4. 旧代码直接关闭本地 pending 行并改订单为 CANCELED → 丢掉模型 SL/TP → 被当外部仓位收养挂 2.5% 兜底止损提前扫损。
+   */
+  const broker = new FakeBroker();
+  const limitPrice = broker.markPrice * 0.995;
+  await buildTrader(broker, limitEntryResponse(limitPrice, broker.markPrice)).runOnce();
+
+  const pendingRow = positionStore.pending(traderId)[0];
+  assert.ok(pendingRow, '前提：挂上了一张限价入场单');
+  assert.ok(pendingRow.entry_order_id, '前提：待成交行有交易所单号');
+  const plannedSl = pendingRow.stop_loss;
+  const plannedTp = pendingRow.take_profit;
+
+  /* 模拟「模型思考期间成交 → cancelOrder 吃 -2011 返回 true」的精确竞态。 */
+  const origCancel = broker.cancelOrder.bind(broker);
+  broker.cancelOrder = async (symbol, orderId, kind = 'order') => {
+    if (kind === 'order' && broker.restingOrders.has(Number(orderId))) {
+      broker.fillRestingOrder(Number(orderId));
+      return true; // 币安 -2011 Unknown order 被 cancelOrder 当成幂等 true
+    }
+    return origCancel(symbol, orderId, kind);
+  };
+
+  const cancelResponse = `<decision>
+\`\`\`json
+[{"symbol": "${SYMBOL}", "action": "cancel_pending", "reasoning": "价格变动，撤销旧限价单。"}]
+\`\`\`
+</decision>`;
+  await buildTrader(broker, cancelResponse).runOnce();
+
+  assert.equal(positionStore.pending(traderId).length, 0, '已成交的挂单不应继续停留在 pending');
+  const openRows = positionStore.open(traderId);
+  assert.equal(openRows.length, 1, '★★★ 已成交的限价单必须被直接转正为 open 持仓，而不是被关掉');
+  assert.equal(openRows[0]!.stop_loss, plannedSl, '★★★ 必须保留模型原定止损价（绝不退化成系统兜底止损）');
+  assert.equal(openRows[0]!.take_profit, plannedTp, '★★★ 必须保留模型原定止盈价');
+
+  const entryOrder = orderStore.findByExchangeOrderId(traderId, String(pendingRow.entry_order_id));
+  assert.equal(entryOrder?.status, 'FILLED', '★★★ 入场订单状态必须标为 FILLED，绝不能覆盖成 CANCELED');
+
+  assert.ok(
+    broker.placed.some((p) => p.type === 'STOP_MARKET' && p.symbol === SYMBOL),
+    '转正同时必须立即挂上止损保护单',
+  );
+});
+
 /* -------------------------------------------------------------------------- */
 /*  挂单超时自动撤                                                               */
 /* -------------------------------------------------------------------------- */
