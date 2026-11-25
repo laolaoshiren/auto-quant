@@ -240,6 +240,7 @@ export function TraderPage() {
   const traderId = Number(params.id);
   const navigate = useNavigate();
   const system = useApp((s) => s.system);
+  const catalog = useApp((s) => s.catalog);
   const socketOpen = useEvents((s) => s.status) === 'open';
   /*
    * 平仓后用 REST 的结果覆盖 store 里的持仓 —— 见 `onPositionsChanged` 上的说明。
@@ -998,6 +999,11 @@ export function TraderPage() {
   const equityChartHeight = useMeasuredHeight(equityHostEl);
 
   const model = modelsQuery.data?.find((row) => row.id === trader?.aiModelId) ?? null;
+  const modelProviderLabel = model
+    ? model.provider === 'custom'
+      ? '自定义端点'
+      : (catalog?.providers.find((p) => p.id === model.provider)?.label ?? model.provider)
+    : null;
   const strategy = strategiesQuery.data?.find((row) => row.id === trader?.strategyId) ?? null;
 
   /*
@@ -1697,11 +1703,14 @@ export function TraderPage() {
         </span>
       ) : trader.mode === 'ai_managed' ? (
         <span
-          className="flex items-center gap-1"
+          className="flex min-w-0 items-center gap-1"
           title={`智能托管模式统一走系统 magpie 网关预设模型 ${AI_MANAGED_PRESET_MODEL}，与「AI 模型」列表无关。`}
         >
           <span className="text-ink-faint">模型</span>
-          <span className="text-accent">{AI_MANAGED_PRESET_MODEL}</span>
+          <span className="shrink-0 rounded border border-base-750 bg-base-850/90 px-1.5 py-px text-[11px] leading-tight text-ink-mid">
+            magpie 网关
+          </span>
+          <span className="truncate text-accent">{AI_MANAGED_PRESET_MODEL}</span>
         </span>
       ) : trader.mode === 'jev' ? (
         <span
@@ -1715,9 +1724,18 @@ export function TraderPage() {
         <Link
           to="/models"
           className="flex min-w-0 items-center gap-1"
-          title="决定它看什么、怎么下单的模型。"
+          title={
+            model
+              ? `提供商：${modelProviderLabel} · 模型：${model.model}（决定它看什么、怎么下单的模型）`
+              : '决定它看什么、怎么下单的模型。'
+          }
         >
           <span className="text-ink-faint">模型</span>
+          {modelProviderLabel && (
+            <span className="shrink-0 rounded border border-base-750 bg-base-850/90 px-1.5 py-px text-[11px] leading-tight text-ink-mid">
+              {modelProviderLabel}
+            </span>
+          )}
           <span className="max-w-[16rem] truncate text-accent hover:underline">
             {model ? model.label : `#${trader.aiModelId}`}
           </span>
