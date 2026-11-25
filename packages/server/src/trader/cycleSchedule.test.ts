@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   clampNextCheckMinutes,
   FAILED_CYCLE_RETRY_MS,
+  MANAGED_MAX_NEXT_CHECK_MINUTES,
+  MANAGED_MIN_NEXT_CHECK_MINUTES,
   MAX_NEXT_CHECK_MINUTES,
   MIN_NEXT_CHECK_MINUTES,
   nextCycleDelayMs,
@@ -160,4 +162,35 @@ test('失败重试也不比正常周期更晚 —— 短周期机器人不该被
    */
   assert.equal(nextCycleDelayMs({ failed: true, cycleIntervalMinutes: 2 }), 2 * 60_000);
   assert.equal(nextCycleDelayMs({ failed: true, cycleIntervalMinutes: 30 }), FAILED_CYCLE_RETRY_MS);
+});
+
+test('★ ai_managed 2.0 动态间隔严格钳在 3–15 分钟（只许加速，不许睡过 15m）', () => {
+  assert.equal(
+    nextCycleDelayMs({ failed: false, cycleIntervalMinutes: 15, requestedMinutes: 1, mode: 'ai_managed' }),
+    MANAGED_MIN_NEXT_CHECK_MINUTES * 60_000,
+  );
+  assert.equal(
+    nextCycleDelayMs({ failed: false, cycleIntervalMinutes: 15, requestedMinutes: 5, mode: 'ai_managed' }),
+    5 * 60_000,
+  );
+  assert.equal(
+    nextCycleDelayMs({ failed: false, cycleIntervalMinutes: 15, requestedMinutes: 20, mode: 'ai_managed' }),
+    MANAGED_MAX_NEXT_CHECK_MINUTES * 60_000,
+  );
+  assert.equal(
+    nextCycleDelayMs({ failed: false, cycleIntervalMinutes: 15, requestedMinutes: 30, mode: 'ai_managed' }),
+    MANAGED_MAX_NEXT_CHECK_MINUTES * 60_000,
+  );
+  assert.equal(
+    nextCycleDelayMs({ failed: false, cycleIntervalMinutes: 15, mode: 'ai_managed' }),
+    15 * 60_000,
+  );
+  assert.equal(
+    nextCycleDelayMs({ failed: true, cycleIntervalMinutes: 15, requestedMinutes: 15, mode: 'ai_managed' }),
+    FAILED_CYCLE_RETRY_MS,
+  );
+  assert.equal(
+    nextCycleDelayMs({ failed: true, cycleIntervalMinutes: 15, requestedMinutes: 3, mode: 'ai_managed' }),
+    3 * 60_000,
+  );
 });

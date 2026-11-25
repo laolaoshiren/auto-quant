@@ -216,7 +216,8 @@ export const MANAGED_AGENT_TOOLS: readonly ToolSpec[] = [
         },
         next_check_in_minutes: {
           type: 'number',
-          description: '可选：建议几分钟后进行下一轮评估。',
+          description:
+            '可选：动态指定下次看盘间隔（范围 3-15 分钟；常规默认 15 分钟，仅在临近突破口/有待成交挂单/持仓贴近关键位时可提速至 3-10 分钟，超过 15 分钟会被系统自动钳回 15 分钟）。',
         },
         decisions: {
           type: 'array',

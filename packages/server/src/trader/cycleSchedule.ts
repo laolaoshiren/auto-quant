@@ -52,14 +52,46 @@ export const MIN_NEXT_CHECK_MINUTES = 1;
 export const MAX_NEXT_CHECK_MINUTES = 120;
 
 /**
+ * 智能托管 2.0 动态看盘间隔范围（3–15 分钟）。
+ *
+ * 原则：默认 15m 对齐 15m K 线收盘；模型仅在临近突破口/有挂单/持仓贴近关键位时可主动提速到
+ * 3–10m，但不允许拉长超过 15m（防震荡期一觉睡过 30m 错过突发起爆行情）。
+ */
+export const MANAGED_MIN_NEXT_CHECK_MINUTES = 3;
+export const MANAGED_MAX_NEXT_CHECK_MINUTES = 15;
+
+export interface NextCheckBounds {
+  minMinutes?: number;
+  maxMinutes?: number;
+}
+
+/**
  * 把模型给的"下一次看盘"钳进允许范围。
  *
  * 返回 `undefined` 表示"它没提这个要求"，调用方应当退回配置的周期 ——
  * 这与"它说了 1 分钟"是**不同的意图**，不能混为一谈。
  */
-export function clampNextCheckMinutes(raw: unknown): number | undefined {
+export function clampNextCheckMinutes(raw: unknown, bounds?: NextCheckBounds): number | undefined {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
-  return Math.min(MAX_NEXT_CHECK_MINUTES, Math.max(MIN_NEXT_CHECK_MINUTES, raw));
+  const min = bounds?.minMinutes ?? MIN_NEXT_CHECK_MINUTES;
+  const max = bounds?.maxMinutes ?? MAX_NEXT_CHECK_MINUTES;
+  return Math.min(max, Math.max(min, raw));
+}
+
+/**
+ * 返回指定模式下模型动态 `next_check_in_minutes` 的钳制边界。
+ */
+export function nextCheckBoundsForMode(mode?: string): NextCheckBounds {
+  if (mode === 'ai_managed') {
+    return {
+      minMinutes: MANAGED_MIN_NEXT_CHECK_MINUTES,
+      maxMinutes: MANAGED_MAX_NEXT_CHECK_MINUTES,
+    };
+  }
+  return {
+    minMinutes: MIN_NEXT_CHECK_MINUTES,
+    maxMinutes: MAX_NEXT_CHECK_MINUTES,
+  };
 }
 
 /**
@@ -68,9 +100,10 @@ export function clampNextCheckMinutes(raw: unknown): number | undefined {
  * @param failed  本轮决策是否失败（模型调用/交易所/行情任一步抛错）
  * @param cycleIntervalMinutes 数据库里当前的周期长度（AI 可以自己改）
  * @param requestedMinutes 模型这一轮自己要求的间隔（`next_check_in_minutes`）
+ * @param mode 机器人模式（`ai_managed` 模式下动态间隔上限封顶 15 分钟、下限 3 分钟）
  *
  * 规则：
- *   · **模型说了就听它的**（钳进 1–120），因为"何时再看"是它的判断；
+ *   · **模型说了就听它的**（常规模式钳进 1–120，`ai_managed` 钳进 3–15）；
  *   · 没说就按配置的周期；
  *   · **失败轮次取"5 分钟"与目标的较小者** —— 让它永远不把"提前"变成"推后"。
  */
@@ -78,6 +111,7 @@ export function nextCycleDelayMs(input: {
   failed: boolean;
   cycleIntervalMinutes: number;
   requestedMinutes?: number;
+  mode?: string;
 }): number {
   /*
    * 下限 1 分钟，且**必须先挡住 `NaN`**：
@@ -89,7 +123,7 @@ export function nextCycleDelayMs(input: {
    */
   const configured = input.cycleIntervalMinutes;
   const configuredMinutes = Number.isFinite(configured) && configured > 1 ? configured : 1;
-  const requested = clampNextCheckMinutes(input.requestedMinutes);
+  const requested = clampNextCheckMinutes(input.requestedMinutes, nextCheckBoundsForMode(input.mode));
   const targetMinutes = requested ?? configuredMinutes;
   const normalMs = targetMinutes * 60_000;
   if (!input.failed) return normalMs;

@@ -224,7 +224,7 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
           '2. **阶段 2（`update_notes` / `update_thesis` · 按需并行）**：',
           '   - 有新的明确价位/量能观察机会，或旧笔记被市场证伪时，调用 `update_notes`（必须带数字可验证条件，被证伪记反例）；',
           '   - 需要修订已有持仓的加仓/减仓条件、时间止损或 MAE 硬线时，调用 `update_thesis`；',
-          '3. **阶段 3（`finalize` · 必选终结）**：最后必须调用 `finalize` 提交完整决策数组——**永不空决策**：每个持仓必须给出 `hold` 或战术动作，每个重点候选必须给出 `wait`/`skip` 或开仓动作；新开仓建议一并填写 `time_stop_hours` / `max_adverse_excursion_pct` / `add_trigger` / `reduce_target` / `invalidation`。',
+          '3. **阶段 3（`finalize` · 必选终结）**：最后必须调用 `finalize` 提交完整决策数组——**永不空决策**：每个持仓必须给出 `hold` 或战术动作，每个重点候选必须给出 `wait`/`skip` 或开仓动作；新开仓建议一并填写 `time_stop_hours` / `max_adverse_excursion_pct` / `add_trigger` / `reduce_target` / `invalidation`。如需提前盯盘（临近突破口/有待成交挂单/持仓贴近关键位），可填 `next_check_in_minutes`（3–10 分钟；常规默认 15 分钟，系统上限封顶 15 分钟）。',
         ]
       : [
           '1. 先在 `<reasoning>...</reasoning>` 内用简洁中文给出：大盘判断 → 持仓处置评估 → 候选标的逐一筛选（为什么做或为什么观望）。',

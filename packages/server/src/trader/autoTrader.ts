@@ -94,7 +94,11 @@ import { rankPlatformHistory } from '../strategy/platformHistory.js';
 import { applyAgentPatch } from './agent/patch.js';
 import { rankConsensus } from '../strategy/consensus.js';
 import { pickAtrSeries } from '../strategy/atrPeriod.js';
-import { clampNextCheckMinutes, nextCycleDelayMs } from './cycleSchedule.js';
+import {
+  clampNextCheckMinutes,
+  nextCheckBoundsForMode,
+  nextCycleDelayMs,
+} from './cycleSchedule.js';
 import {
   BAR_MINUTES,
   pendingTimeoutMinutes,
@@ -139,6 +143,15 @@ import type { Ai500DimensionScores, RadarTier } from '../radar/ai500.js';
 import { managedAttributionStore } from '../radar/attribution.js';
 import { RadarDeltaTracker } from '../radar/deltaTracker.js';
 import { formatVolumeProfileLine } from '../radar/volumeProfile.js';
+import {
+  ANOMALY_BREAKOUT_MIN_SCORE,
+  ANOMALY_SYMBOL_COOLDOWN_MS,
+  ANOMALY_WAKE_DELAY_MS,
+  ANOMALY_WATCH_DEFAULT_SECONDS,
+  scanManagedAnomaly,
+  shouldRunAnomalyScan,
+  type ManagedAnomalyTrigger,
+} from '../managed/anomalyWake.js';
 import { runManagedRadarCycle, type ManagedCycleResult } from '../managed/cycle.js';
 import { runManagedAgenticLoop, type PendingThesisPlan } from '../managed/engine.js';
 import { managedNotesStore } from '../managed/notes.js';
@@ -1161,6 +1174,12 @@ export class AutoTrader {
   private guardWatchTimer: NodeJS.Timeout | null = null;
   private guardInFlight = false;
   private guardPromise: Promise<void> | null = null;
+  /** 智能托管 2.0 轻量异动雷达监控（每 3 分钟纯数学扫描，零 LLM 成本，重大异动提前唤醒）。 */
+  private anomalyWatchTimer: NodeJS.Timeout | null = null;
+  private anomalyScanInFlight = false;
+  private lastCycleFinishedAtMs = 0;
+  private lastAnomalyWakeAtMs = 0;
+  private anomalyCooldownBySymbol = new Map<string, number>();
   /**
    * **各标的的基准价**（`symbol → 价格`）—— 上次评估时记下的。
    *
@@ -1551,6 +1570,9 @@ export class AutoTrader {
     const lastCycleAtMs = this.deps.trader.lastCycleAt
       ? new Date(this.deps.trader.lastCycleAt).getTime()
       : null;
+    if (lastCycleAtMs !== null && Number.isFinite(lastCycleAtMs)) {
+      this.lastCycleFinishedAtMs = lastCycleAtMs;
+    }
     const cycleMs = Math.max(1, this.deps.trader.cycleIntervalMinutes) * 60_000;
     const elapsedMs = lastCycleAtMs === null ? Number.POSITIVE_INFINITY : Date.now() - lastCycleAtMs;
 
@@ -1561,6 +1583,8 @@ export class AutoTrader {
     void this.startMoveWatch();
     /* 回撤守卫实时监控（每 30 秒）—— 见 `guardWatchTimer` 的说明。 */
     this.startGuardWatch();
+    /* 智能托管 2.0 轻量异动雷达监控（每 3 分钟）—— 重大行情提前唤醒。 */
+    this.startAnomalyWatch();
 
     if (elapsedMs >= cycleMs) {
       /* 从没跑过，或者停机超过一个周期 —— 立刻跑（操作员在等 / 行情已变）。 */
@@ -1637,10 +1661,14 @@ export class AutoTrader {
      * 把周期变成 NaN 或 0 而疯狂空转。
      */
     let minutes = this.deps.trader.cycleIntervalMinutes;
+    let mode: string = this.deps.trader.mode;
     try {
       const fresh = traderStore.get(this.deps.trader.id);
-      if (fresh && Number.isFinite(fresh.cycleIntervalMinutes)) {
-        minutes = fresh.cycleIntervalMinutes;
+      if (fresh) {
+        if (Number.isFinite(fresh.cycleIntervalMinutes)) {
+          minutes = fresh.cycleIntervalMinutes;
+        }
+        mode = fresh.mode;
       }
     } catch {
       /* 用启动时那份 */
@@ -1677,6 +1705,7 @@ export class AutoTrader {
     const delayMs = nextCycleDelayMs({
       failed: retrySoon,
       cycleIntervalMinutes: minutes,
+      mode,
       ...(requestedMinutes === undefined ? {} : { requestedMinutes }),
     });
     /* 记下真实触发时刻供界面倒计时（见 `nextCycleAt` 的说明）。 */
@@ -1853,6 +1882,130 @@ export class AutoTrader {
       clearInterval(this.guardWatchTimer);
       this.guardWatchTimer = null;
     }
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /*  智能托管 2.0 轻量异动雷达提前唤醒（每 3 分钟，零 LLM 成本）                */
+  /* ---------------------------------------------------------------------- */
+
+  private startAnomalyWatch(): void {
+    if (this.anomalyWatchTimer !== null) return;
+    let mode: string = this.deps.trader.mode;
+    try {
+      const fresh = traderStore.get(this.deps.trader.id);
+      if (fresh) mode = fresh.mode;
+    } catch {
+      /* 读失败用启动快照 */
+    }
+    if (mode !== 'ai_managed') return;
+
+    const raw = Number(process.env.AQ_ANOMALY_WATCH_SECONDS ?? '');
+    const seconds =
+      Number.isFinite(raw) && raw >= 15 ? Math.min(raw, 900) : ANOMALY_WATCH_DEFAULT_SECONDS;
+    const timer = setInterval(() => {
+      void this.runAnomalyScanTick();
+    }, seconds * 1000);
+    timer.unref();
+    this.anomalyWatchTimer = timer;
+    this.emit('info', `异动雷达监控已启动（每 ${seconds} 秒纯数学轻量扫描，重大行情提前唤醒）。`);
+  }
+
+  private stopAnomalyWatch(): void {
+    if (this.anomalyWatchTimer !== null) {
+      clearInterval(this.anomalyWatchTimer);
+      this.anomalyWatchTimer = null;
+    }
+    this.anomalyCooldownBySymbol.clear();
+  }
+
+  private async runAnomalyScanTick(): Promise<void> {
+    let mode: string = this.deps.trader.mode;
+    try {
+      const fresh = traderStore.get(this.deps.trader.id);
+      if (fresh) mode = fresh.mode;
+    } catch {
+      /* ignore */
+    }
+
+    const nowMs = Date.now();
+    const gate = shouldRunAnomalyScan({
+      mode,
+      running: this.running,
+      cycleInFlight: this.cycleInFlight,
+      scanInFlight: this.anomalyScanInFlight,
+      nowMs,
+      lastCycleFinishedAtMs: this.lastCycleFinishedAtMs,
+      lastAnomalyWakeAtMs: this.lastAnomalyWakeAtMs,
+      nextCycleAtMs: this.nextCycleAt,
+    });
+    if (!gate.run) return;
+
+    this.anomalyScanInFlight = true;
+    try {
+      const traderId = this.deps.trader.id;
+      const openPos = positionStore.open(traderId);
+      const pendingOrders = positionStore.pending(traderId);
+      const heldSymbols = openPos.map((p) => p.symbol);
+      const pendingSymbols = pendingOrders.map((o) => o.symbol);
+
+      let calibration:
+        | { weights?: Partial<import('../radar/ai500.js').Ai500Weights>; strongThreshold?: number; watchThreshold?: number }
+        | undefined;
+      try {
+        const activeCal = managedAttributionStore.getActiveOptions(traderId);
+        if (activeCal.applied) {
+          calibration = {
+            weights: activeCal.weights,
+            strongThreshold: activeCal.strongThreshold,
+            watchThreshold: activeCal.watchThreshold,
+          };
+        }
+      } catch {
+        /* 校准读取异常不阻断异动扫描 */
+      }
+
+      const trigger = await scanManagedAnomaly({
+        config: this.effectiveConfig(),
+        marketData: this.deps.marketData,
+        heldSymbols,
+        pendingSymbols,
+        cooldownUntilBySymbol: this.anomalyCooldownBySymbol,
+        calibration,
+        nowMs: Date.now(),
+      });
+      if (!trigger) return;
+      if (!this.running || this.cycleInFlight) return;
+      this.scheduleAnomalyWake(trigger);
+    } catch (error) {
+      log.debug(`[${this.deps.trader.name}] 轻量异动雷达扫描跳过：${(error as Error).message}`);
+    } finally {
+      this.anomalyScanInFlight = false;
+    }
+  }
+
+  private scheduleAnomalyWake(trigger: ManagedAnomalyTrigger): void {
+    const now = Date.now();
+    for (const [sym, until] of this.anomalyCooldownBySymbol) {
+      if (until <= now) this.anomalyCooldownBySymbol.delete(sym);
+    }
+    this.lastAnomalyWakeAtMs = now;
+    this.anomalyCooldownBySymbol.set(trigger.symbol, now + ANOMALY_SYMBOL_COOLDOWN_MS);
+
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    const delaySec = Math.round(ANOMALY_WAKE_DELAY_MS / 1000);
+    this.emit(
+      'info',
+      `[异动雷达唤醒] ${trigger.reason} —— 不等原定周期，${delaySec} 秒后提前唤醒决策。`,
+    );
+    this.nextCycleAt = now + ANOMALY_WAKE_DELAY_MS;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.nextCycleAt = null;
+      void this.tick();
+    }, ANOMALY_WAKE_DELAY_MS);
   }
 
   /**
@@ -2104,6 +2257,7 @@ export class AutoTrader {
     /* 持仓剧变监控也要停 —— 否则它会对已停止的机器人调用 requestEarlyCycle。 */
     this.stopMoveWatch();
     this.stopGuardWatch();
+    this.stopAnomalyWatch();
     /*
      * ⚠️ **先把在途那一轮掐断，再去等它结束（2026-10-10，用户报的卡顿）。**
      *
@@ -3142,6 +3296,7 @@ export class AutoTrader {
        */
       const requested = this.requestedNextCheckMinutes;
       this.requestedNextCheckMinutes = undefined;
+      this.lastCycleFinishedAtMs = Date.now();
       if (this.running) {
         this.scheduleNextCycle(failed, requested);
       }
@@ -3856,6 +4011,13 @@ export class AutoTrader {
             },
           ]),
         );
+        // 本轮常规扫描已评估过的高分强关注标的记入 15m 冷却，避免 3m 异动雷达针对刚看过的老标的重复唤醒
+        const radarNow = Date.now();
+        for (const c of managedRadar.radarLeaderboard) {
+          if (c.score >= ANOMALY_BREAKOUT_MIN_SCORE) {
+            this.anomalyCooldownBySymbol.set(c.symbol, radarNow + ANOMALY_SYMBOL_COOLDOWN_MS);
+          }
+        }
         managedRadarStore.save({
           traderId,
           btcBenchmark: managedRadar.btcBenchmarkLine,
@@ -5338,7 +5500,11 @@ export class AutoTrader {
      * 同一轮里"按需取数"那条通知走的就是这条路。
      */
     if (parsed.nextCheckInMinutes !== undefined) {
-      const clamped = clampNextCheckMinutes(parsed.nextCheckInMinutes);
+      const currentMode = traderStore.get(traderId)?.mode ?? this.deps.trader.mode;
+      const clamped = clampNextCheckMinutes(
+        parsed.nextCheckInMinutes,
+        nextCheckBoundsForMode(currentMode),
+      );
       this.emit(
         'info',
         `它自己定了下一轮的观察时间：${parsed.nextCheckInMinutes} 分钟后` +
