@@ -201,75 +201,6 @@ test('★★ 读到就用它；多个候选路径按顺序取第一个有效的'
   assert.equal(readGatewayVersion(read, ['/missing', '/c']), 'v0.1.9999', '★ 跳过读不到的路径');
 });
 
-/*
- * ★★★ Jev 端点探针（2026-10-18）
- *
- * ## 为什么这条探针最重要
- *
- * `/v1/systemone` 是**非标准端点**（TypeSafe 自己的 Decisions API）。
- * magpie 一天多版，任何"顺手重构路由"都可能把它改掉 —— 而那时：
- * ```
- *   Jev 初筛失效 → 降级到"不筛" → 每轮重新分析全部 20 个标的
- *   ⇒ 耗时从 110s 回到 300s+，而且【不会报错】
- * ```
- * 这正是本仓库反复记录的那类失败：**静默变差，不是报错**。
- */
-test('★★★ Jev 关闭时【不探】/v1/systemone（省钱纪律）', async () => {
-  const { fetchImpl, calls } = stubFetch({
-    '/v1/models': () => ({ ok: true, status: 200, json: async () => goodModels(['a/b']) }),
-    '/v1/magpie/quotas': () => ({ ok: true, status: 200, json: async () => ({ data: [] }) }),
-  });
-  await probeGatewayContract({ baseUrl: BASE, apiKey: KEY, ladderIds: [], fetchImpl });
-  assert.ok(
-    !calls.some((c) => c.includes('/v1/systemone')),
-    '★ 没开 Jev 时那个端点与我们无关，不该多打一次请求',
-  );
-});
-
-test('★★★ Jev 开启且端点返回畸形 → 一条 warn（不报 error，因为有降级）', async () => {
-  const { fetchImpl, calls } = stubFetch({
-    '/v1/models': () => ({ ok: true, status: 200, json: async () => goodModels(['a/b']) }),
-    '/v1/magpie/quotas': () => ({ ok: true, status: 200, json: async () => ({ data: [] }) }),
-    '/v1/systemone': () => ({ ok: true, status: 200, json: async () => ({ wrong: 'shape' }) }),
-  });
-  const r = await probeGatewayContract({
-    baseUrl: BASE,
-    apiKey: KEY,
-    ladderIds: [],
-    jevEnabled: true,
-    fetchImpl,
-  });
-  assert.ok(calls.some((c) => c.includes('/v1/systemone')), '★ 开了就该探');
-  const m = r.mismatches.find((x) => x.probe === 'systemone.shape');
-  assert.ok(m, '★ 形状不对必须被发现');
-  assert.equal(m!.severity, 'warn', '★ 是 warn 不是 error —— Jev 坏了会降级，不影响交易');
-  assert.ok(m!.hint.includes('不筛') || m!.hint.includes('降级'), '要说清后果：降级为不筛');
-});
-
-test('★★ Jev 端点正常（有 answers.<key>.type）→ 无 mismatch', async () => {
-  const { fetchImpl } = stubFetch({
-    '/v1/models': () => ({ ok: true, status: 200, json: async () => goodModels(['a/b']) }),
-    '/v1/magpie/quotas': () => ({ ok: true, status: 200, json: async () => ({ data: [] }) }),
-    '/v1/systemone': () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ answers: { ok: { type: 'noul', noul: 0.5 } } }),
-    }),
-  });
-  const r = await probeGatewayContract({
-    baseUrl: BASE,
-    apiKey: KEY,
-    ladderIds: [],
-    jevEnabled: true,
-    fetchImpl,
-  });
-  assert.equal(
-    r.mismatches.filter((m) => m.probe === 'systemone.shape').length,
-    0,
-    `★ 正常形状不该报（实际：${JSON.stringify(r.mismatches)}）`,
-  );
-});
-
 test('★★ 安全加固：所有探针显式设置 redirect: "manual" 且不走 fetchGuarded（允许 127.0.0.1 本地网关）', async () => {
   const seen: Array<{ url: string; redirect?: RequestInit['redirect'] }> = [];
   const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -277,9 +208,6 @@ test('★★ 安全加固：所有探针显式设置 redirect: "manual" 且不�
     seen.push({ url: s, ...(init?.redirect !== undefined ? { redirect: init.redirect } : {}) });
     if (s.endsWith('/v1/models')) return { ok: true, status: 200, json: async () => goodModels(['a/b']) } as never;
     if (s.endsWith('/v1/magpie/quotas')) return { ok: true, status: 200, json: async () => ({ data: [] }) } as never;
-    if (s.endsWith('/v1/systemone')) {
-      return { ok: true, status: 200, json: async () => ({ answers: { ok: { type: 'noul' } } }) } as never;
-    }
     return { ok: false, status: 404, json: async () => ({}) } as never;
   }) as unknown as typeof fetch;
 
@@ -287,11 +215,10 @@ test('★★ 安全加固：所有探针显式设置 redirect: "manual" 且不�
     baseUrl: 'http://127.0.0.1:3425/v1',
     apiKey: KEY,
     ladderIds: ['a/b'],
-    jevEnabled: true,
     fetchImpl,
   });
   assert.equal(r.ok, true);
-  assert.equal(seen.length, 3);
+  assert.equal(seen.length, 2);
   for (const call of seen) {
     assert.equal(call.redirect, 'manual', `${call.url} 必须设置 redirect: "manual" 防止鉴权头被重定向泄露`);
   }

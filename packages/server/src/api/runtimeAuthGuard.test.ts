@@ -242,50 +242,6 @@ function sensitiveEndpoints(): SensitiveEndpoint[] {
     },
     {
       method: 'POST',
-      route: '/api/traders/:id/jev-options/:key',
-      url: `/api/traders/${traderId}/jev-options/min_confidence`,
-      payload: { value: '0' },
-      /*
-       * ⚠️ **不走 `manager`**（所以没有 `expectsManagerCall`）——
-       * 它写 `settings` 表，改的是 JEV 模式下一轮的判断门槛。
-       *
-       * 为什么敏感：把 `min_confidence` 设成 0 会让**所有** Jev 判断都被执行
-       *（包括 50:50 的平局）；把 `risk_percent` 设成 5 会让单笔风险放大 5 倍。
-       * 能把这种东西拨来拨去的端点，未认证时必须 401 且零副作用。
-       */
-      why: '改 JEV 模式的风险参数（置信门槛、单笔风险比例等）—— 会立刻改变交易行为',
-    },
-    {
-      method: 'POST',
-      route: '/api/traders/:id/jev-presets/:presetId',
-      url: `/api/traders/${traderId}/jev-presets/balanced`,
-      /*
-       * ⚠️ **不走 `manager`**（所以没有 `expectsManagerCall`）—— 它一次写 20+ 条
-       * `settings`，把整组 JEV 参数换成预设值。
-       *
-       * 为什么敏感：`balanced` 预设会把 `risk_percent` / `max_positions` /
-       * `max_margin_usage` 一起改掉 —— 那是**一次调用就改变整个风险特征**。
-       * 未认证时必须 401 且零副作用。
-       */
-      why: '一键套用 JEV 参数预设 —— 一次改写 20+ 个风险参数，会立刻改变交易行为',
-    },
-    {
-      method: 'POST',
-      route: '/api/traders/:id/control/:key',
-      url: `/api/traders/${traderId}/control/jev_prefilter`,
-      payload: { on: false },
-      /*
-       * ⚠️ **不走 `manager`**（所以没有 `expectsManagerCall`）——
-       * 它直接写 `settings` 表，改的是"下一轮决策怎么跑"。
-       *
-       * 但它**确实是敏感的**：关掉 Jev 会让整个团队不再调用那个模型，
-       * 进而改变每轮的标的范围与耗时。能把这种开关拨来拨去的端点，
-       * 未认证时必须 401 且零副作用。
-       */
-      why: '改运行期开关（例如关掉 Jev 初筛）—— 会立刻改变整个团队下一轮的调用行为',
-    },
-    {
-      method: 'POST',
       route: '/api/traders/:id/reconcile',
       url: `/api/traders/${traderId}/reconcile`,
       expectsManagerCall: 'reconcileTrader',

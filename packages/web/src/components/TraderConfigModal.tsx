@@ -287,9 +287,7 @@ export function TraderConfigModal({
               hint={
                 trader.mode === 'ai_managed'
                   ? `智能托管模式统一走系统 magpie 网关预设模型（${AI_MANAGED_PRESET_MODEL}），不读「AI 模型」列表。`
-                  : trader.mode === 'jev'
-                    ? 'JEV 模式固定调用 magpie 网关的 jev-latest，不读「AI 模型」列表。'
-                    : 'AI 团队模式由 magpie 网关统一按角色调度，不读「AI 模型」列表。'
+                  : 'AI 团队模式由 magpie 网关统一按角色调度，不读「AI 模型」列表。'
               }
             >
               <div className="text-base text-ink-faint">
@@ -301,14 +299,14 @@ export function TraderConfigModal({
           )}
 
           {/*
-            **AI 驱动的模式（智能托管 / AI 团队 / JEV）都不显示策略选择器。**
+            **AI 驱动的模式（智能托管 / AI 团队）都不显示策略选择器。**
 
             判据必须用共享包的 `isAiDriven()`，不能写死 `'ai_managed'` ——
             这与 `TraderModals.tsx` 里 `strategyIdFor()` 那个 P0 是同一个坑：
-            `AI_DRIVEN_MODES` 已经包含 `ai_team` / `jev`，而写死单个模式名时
+            `AI_DRIVEN_MODES` 已经包含 `ai_team`，而写死单个模式名时
             后加的模式会落进 `else` 分支，显示一个**改了也不生效**的下拉框。
 
-            页头（`TraderPage`）对这三种模式分别做了同样的处理，这里与它保持一致。
+            页头（`TraderPage`）对这几种模式分别做了同样的处理，这里与它保持一致。
           */}
           {trader.mode === 'ai_managed' ? (
             <Field

@@ -467,7 +467,7 @@ export function NewTraderModal({
      * ⚠️ **交易所凭证不再是"缺少"项**（用户 2026-10-27 需求）。
      * 模拟盘不需要账户，所以凭证是可选的。
      *
-     * ⚠️ **JEV / AI 团队模式走独立网关，不强制依赖隐藏的模型选择器**。
+     * ⚠️ **AI 团队 / 智能托管模式走独立网关，不强制依赖隐藏的模型选择器**。
      */
     if (usesModelPicker && models && models.length === 0) gaps.push('AI 模型');
     if (!isAiDriven(mode) && strategyList && strategyList.length === 0) gaps.push('策略');
@@ -493,7 +493,7 @@ export function NewTraderModal({
     /*
      * 校验按 `modelChoice` 而不是 `aiModelId` —— 选了"厂商建议"里的模型时
      * `aiModelId` 还是空的（它的记录要等到下面才建）。
-     * JEV / AI 团队模式隐藏了模型选择器（走 magpie 网关），不要求选择。
+     * AI 团队 / 智能托管模式隐藏了模型选择器（走 magpie 网关），不要求选择。
      */
     if (usesModelPicker && modelChoice === '') return setError('请选择 AI 模型。');
     /* ⚠️ 只有固定策略模式才要求策略 —— 见上面 `missing` 里的说明。 */

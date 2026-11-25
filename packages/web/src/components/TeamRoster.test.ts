@@ -124,7 +124,7 @@ test('★★★ 每一种 TraderMode 都必须有自己的徽章（不许落到�
    * ⇒ 现在用 `Record<TraderMode, …>`，少写一个键就编译不过；
    *   这个用例再从**运行时**钉一遍，防止有人改回 if 链。
    */
-  const modes = ['strategy', 'ai_managed', 'ai_team', 'jev'] as const;
+  const modes = ['strategy', 'ai_managed', 'ai_team'] as const;
   for (const mode of modes) {
     const badge = MODE_BADGE[mode];
     assert.ok(badge !== undefined, `★ ${mode} 没有徽章定义`);
@@ -141,14 +141,5 @@ test('★★★ 每一种 TraderMode 都必须有自己的徽章（不许落到�
     new Set(texts).size,
     texts.length,
     `★ 徽章文案重复了：${texts.join(' / ')}`,
-  );
-
-  /*
-   * ⚠️ JEV 模式的徽章**必须标明实验性** —— 用户明确要求这个模式是实验性的，
-   * 而它的盈利表现完全未知（`docs/JEV-MODE-DESIGN.md` §八）。
-   */
-  assert.ok(
-    /停用/.test(MODE_BADGE.jev.text),
-    '★ JEV 模式已退役，徽章必须标明已停用',
   );
 });

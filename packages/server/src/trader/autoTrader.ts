@@ -65,8 +65,6 @@ import {
   type PromptContext,
   type PromptRejection,
 } from '../strategy/prompt.js';
-import type { JevAccountState } from './jevModel.js';
-import { jevBool, jevEnum, jevNumber } from './control.js';
 import { last } from '../market/indicators.js';
 import { isAiDriven, isMajorSymbol, type DecisionAction } from '@aq/shared';
 import { agentMemory } from '../store/agentStore.js';
@@ -2790,14 +2788,7 @@ export class AutoTrader {
    */
   private effectiveConfig(): StrategyConfig {
     if (this.deps.trader.mode === 'ai_managed') return clampAiManagedHardLimits(this.activeConfig);
-    if (this.deps.trader.mode !== 'jev') return this.activeConfig;
-    return {
-      ...this.activeConfig,
-      circuitBreaker: {
-        ...this.activeConfig.circuitBreaker,
-        maxDailyLossPercent: Math.max(0, jevNumber('max_daily_loss_percent')),
-      },
-    };
+    return this.activeConfig;
   }
 
   /**
@@ -4032,151 +4023,6 @@ export class AutoTrader {
     }
 
     /*
-     * ══════════════════════════════════════════════════════════════════════════
-     *  **P3：让 Jev 参与选币**（2026-10-19 用户要求）
-     * ══════════════════════════════════════════════════════════════════════════
-     *
-     * 用户原话：
-     * > 「加一个让 JEV 自己选」
-     * > 「我感觉 P3 可以做，这模型成本忽略不计了」
-     *
-     * ## 三种模式（用户可在「JEV 模式」标签里切换）
-     *
-     * ```
-     *   code   → 完全不调 Jev（默认，零额外成本）
-     *   hybrid → 代码先筛（成交额+OI）→ Jev 打分 → 机会差时收缩候选
-     *   jev    → 同上（候选池已由策略决定）
-     * ```
-     *
-     * ## ⚠️ 为什么做的是「整体机会闸门」而不是"逐个挑选"
-     *
-     * 实测发现：`score` 是对**整段 state** 打分，不是对 state 里每一项分别打分。
-     * 要让每个标的有独立分数必须**每个问一次**（N 次调用，成本线性上升）。
-     *
-     * ⇒ 本实现做「整体机会质量闸门」：
-     * ```
-     *   Jev 说"今天整体没机会" ⇒ 收缩候选（省掉后续 N 次逐币问询）
-     *   Jev 说"有机会"        ⇒ 保留原顺序
-     * ```
-     * 真正的"逐个挑选"仍然发生在后面的 `decideForCandidate`（每标的问 5 个问题）。
-     * 这比"假装能给每个标的打分"诚实，而且省 token。
-     *
-     * ## 失败时
-     *
-     * Jev 调用失败 ⇒ **保留原始候选**（不收缩、不中断）。
-     * 选币失败不该让整轮没有候选 —— 那会让机器人静默停摆。
-     */
-    if (this.deps.trader.mode === 'jev') {
-      const selectMode = jevEnum('coin_select');
-
-      /*
-       * ══════════════════════════════════════════════════════════════════════════
-       *  **追高过滤：24h 涨幅过大的标的直接跳过**（2026-10-20 实盘抓到）
-       * ══════════════════════════════════════════════════════════════════════════
-       *
-       * ## 事故
-       *
-       * ```
-       *   候选池：BRUSDT +42.09%、JCTUSDT +106.07%（RSI 80.76）
-       *   Jev：QUSDT 做多 97%、BRUSDT 做多 97%、PHAUSDT 做多 98%
-       *   ⇒ 它"很确定"这些会继续涨，而那是追高的形状
-       * ```
-       * 同期账户在跌（BTC -0.94%、ETH -1.40%），但候选池里全是暴涨币。
-       *
-       * ## 根因不在 Jev，在选币
-       *
-       * 选币按「成交额 + 持仓量」排序，暴涨币的成交额爆炸式增长 ⇒
-       * 它们总排最前，把正常标的挤出去。于是 Jev 看到的"整个市场"
-       * 其实是一张涨幅榜 —— **它的判断没错，错的是喂给它的候选**。
-       *
-       * ## 为什么必须在这一步过滤（而不是靠 Jev 自己拒绝）
-       *
-       * 实测它给这些币的置信度是 **97-98%** —— 它非常确信。
-       * 一个"很确信要追高"的分类器，你没法靠提示词让它自己刹车；
-       * 而一个在候选池里就不存在的标的，它没有机会去追。
-       *
-       * ⚠️ **放在 `rerankByJev` 之前**：先砍掉暴涨币，再让 Jev 从
-       * 剩下的正常标的里挑。反过来做（先让 Jev 挑、再过滤）会让它
-       * 把额度花在注定被丢弃的标的上。
-       */
-      const maxPumpPercent = Math.max(0, jevNumber('max_pump_percent'));
-      if (maxPumpPercent > 0) {
-        const before = snapshots.length;
-        const pumped = snapshots.filter(
-          (snap) => Math.abs(snap.priceChangePercent24h) > maxPumpPercent,
-        );
-        if (pumped.length > 0) {
-          snapshots = snapshots.filter(
-            (snap) => Math.abs(snap.priceChangePercent24h) <= maxPumpPercent,
-          );
-          this.emit(
-            'info',
-            `[Jev模式] 追高过滤：${pumped.length} 个标的 24h 涨幅超过 ${maxPumpPercent}%（` +
-              pumped
-                .slice(0, 4)
-                .map((s) => `${s.symbol} ${s.priceChangePercent24h.toFixed(1)}%`)
-                .join('、') +
-              `${pumped.length > 4 ? ' 等' : ''}）—— 跳过它们，${before} → ${snapshots.length} 个候选`,
-          );
-        }
-        /*
-         * ⚠️ **全被过滤掉时不补回**：那是"今天全市场都在暴涨"的信号，
-         * 正确反应是**这一轮不做**（等下一轮），而不是硬选几个出来做。
-         * 下面 `snapshots.length === 0` 的既有分支会让本轮直接跳过。
-         */
-      }
-
-      if (selectMode !== 'code') {
-        const jevRerank = this.deps.model as {
-          rerankByJev?: (
-            candidates: ReadonlyArray<{
-              symbol: string;
-              price: number;
-              change24hPercent: number;
-              atr: number;
-              rsi7?: number;
-            }>,
-            keepTop: number,
-          ) => Promise<{ symbols: string[]; failed: boolean }>;
-        };
-        if (typeof jevRerank.rerankByJev === 'function') {
-          const keepTop = Math.max(1, Math.floor(jevNumber('max_candidates')));
-          const result = await jevRerank.rerankByJev(
-            snapshots.map((snap) => {
-              const atrKey = Object.keys(snap.primary.atr)[0];
-              const rsiKey = Object.keys(snap.primary.rsi)[0];
-              return {
-                symbol: snap.symbol,
-                price: snap.price,
-                change24hPercent: snap.priceChangePercent24h,
-                atr: atrKey !== undefined ? (last(snap.primary.atr[atrKey] ?? []) ?? 0) : 0,
-                rsi7:
-                  rsiKey !== undefined
-                    ? (last(snap.primary.rsi[rsiKey] ?? []) ?? undefined)
-                    : undefined,
-              };
-            }),
-            keepTop,
-          );
-          if (result.symbols.length > 0 && result.symbols.length < snapshots.length) {
-            const kept = new Set(result.symbols);
-            const before = snapshots.length;
-            snapshots = snapshots.filter((snap) => kept.has(snap.symbol));
-            this.emit(
-              'info',
-              `[Jev模式] 选币（${selectMode}）：${before} 个候选 → ${snapshots.length} 个`,
-            );
-          } else if (!result.failed) {
-            this.emit(
-              'info',
-              `[Jev模式] 选币（${selectMode}）：Jev 认为整体有机会，保留全部 ${snapshots.length} 个候选`,
-            );
-          }
-        }
-      }
-    }
-
-    /*
      * --- 预取交易所的杠杆上限 --------------------------------------------
      *
      * 风控引擎的 `exchangeMaxLeverageOf` 是**同步**的（引擎不 await），所以档位
@@ -4731,91 +4577,7 @@ export class AutoTrader {
       userPrompt = stablePrompt.length > 0 ? `${stablePrompt}\n\n${volatilePrompt}` : volatilePrompt;
     }
 
-    /*
-     * ══════════════════════════════════════════════════════════════════════════
-     *  **JEV 模式专用：附加结构化输入块**（2026-10-19）
-     * ══════════════════════════════════════════════════════════════════════════
-     *
-     * ## 为什么要有这个块
-     *
-     * Jev **不读散文** —— 它的输入是一段紧凑摘要，输出是三种类型化答案
-     *（`choice` / `score` / `noul`，见 `docs/JEV-MODE-DESIGN.md`）。
-     * 而 `renderUserPrompt()` 产出的是**给 LLM 读的中文散文**，
-     * 从里面用正则抠"价格是多少"是脆弱的（配置一变就静默抠错）。
-     *
-     * ⇒ 在**仅 Jev 模式**下追加一个结构化 JSON 块，由 `jevModel.ts` 解析。
-     *
-     * ## ⚠️ 三条硬约束
-     *
-     * ```
-     * ① 只在 mode === 'jev' 时追加 —— 其余三种模式的 prompt 逐字节不变
-     * ② 追加在【末尾】—— 不破坏前缀缓存（那段 4.7 万 token 的稳定段）
-     * ③ 块内只放"算档位需要的最小字段"—— 不是行情全集
-     * ```
-     *
-     * ## 为什么 `heldSide` 要在这里算
-     *
-     * 本模式只做"开仓 / 跳过"，已有持仓的标的要跳过（不叠加）。
-     * 那个判断需要**持仓列表**，而 `jevModel` 只拿得到 prompt 文本。
-    /*
-     * ══════════════════════════════════════════════════════════════════
-     *  **把账户状态交给 Jev**（2026-10-19 用户要求）
-     * ══════════════════════════════════════════════════════════════════
-     *
-     * 用户原话：
-     * > 「给JEV 判断里面现在有没有实际仓位？（如果开很多仓位了JEV不知道
-     * >  又一直要开仓的情况，你研究一下到底要投喂哪些数据最合理，
-     * >  你要考虑实际真实情况）」
-     *
-     * ## 线上实测的症状
-     *
-     * ```
-     *   00:30 那轮：Jev 提议开仓 6 个，而 maxEntriesPerCycle = 2
-     *   ⇒ 风控拒掉 4 个，日志里全是 rejected:open_xxx
-     *   04:xx 那轮：已持仓 4/4，Jev 仍在提议开仓
-     *   ⇒ 「已达最大同时持仓数（4/4）」被拒
-     * ```
-     * **它不知道额度，所以不会"挑最好的"，只会"随便提一堆"。**
-     * 那浪费了它唯一的价值 —— 判断哪个机会最好。
-     *
-     * ## ⚠️ 给结论而不是原始数字
-     *
-     * Jev 不擅长算术。所以 `canOpenMore` 是**算好的**，
-     * 而不是让它自己用 `maxPositions - openPositions`。
-     */
-    const jevAccountState: JevAccountState | undefined =
-      this.deps.trader.mode === 'jev'
-        ? (() => {
-            const maxPositions = Math.max(1, Math.floor(jevNumber('max_positions')));
-            const maxPerCycle = Math.max(1, Math.floor(jevNumber('max_entries_per_cycle')));
-            const maxPerHour = Math.max(1, Math.floor(jevNumber('max_entries_per_hour')));
-            const equity = promptContext.account.equity;
-            const marginUsed = promptContext.account.marginUsed;
-            const openPositions = promptContext.positions.length;
-            return {
-              equity,
-              openPositions,
-              maxPositions,
-              canOpenMore: Math.max(0, maxPositions - openPositions),
-              /* 已算好的百分比 —— 不让 Jev 自己做除法。 */
-              marginUsedPercent: equity > 0 ? (marginUsed / equity) * 100 : 0,
-              marginLimitPercent: promptContext.config.riskControl.maxMarginUsage,
-              entriesThisCycle: 0,
-              maxEntriesPerCycle: maxPerCycle,
-              entriesThisHour: entriesLastHour,
-              maxEntriesPerHour: maxPerHour,
-              heldSymbols: promptContext.positions.map((p) => ({
-                symbol: p.position.symbol,
-                side: p.position.side === 'long' ? ('long' as const) : ('short' as const),
-              })),
-            };
-          })()
-        : undefined;
-    const jevInput =
-      this.deps.trader.mode === 'jev'
-        ? buildJevInputBlock(promptContext, this.promptBudget, jevAccountState)
-        : '';
-    const promptForModel = jevInput === '' ? userPrompt : `${userPrompt}\n\n${jevInput}`;
+    const promptForModel = userPrompt;
 
     /*
      * 提示词在**发请求之前**就填进进度对象：这是"部分成功也留痕"的关键一步 ——
@@ -5493,190 +5255,8 @@ export class AutoTrader {
      */
     const pendingRows = positionStore.pending(traderId);
 
-    /*
-     * ══════════════════════════════════════════════════════════════════════════
-     *  ⚠️⚠️ **JEV 模式的「出手门槛」必须注入风控配置**（2026-10-19 线上抓到）
-     * ══════════════════════════════════════════════════════════════════════════
-     *
-     * ## 症状
-     *
-     * 用户在「JEV 模式」标签里把「出手门槛」设成「有机会就做」（= 20），
-     * 但决策仍然被风控拒掉：
-     * ```
-     *   AGTUSDT 置信 46 → rejected
-     *   AVAUSDT 置信 22 → rejected
-     *   GTCUSDT 置信 20 → rejected
-     * ```
-     *
-     * ## 根因
-     *
-     * 风控读的是 `config.riskControl.minConfidence`（来自 `defaultJevConfig()`，
-     * 值是 **40**）—— 而那个值**只有策略配置能改，界面上改不了**。
-     *
-     * `jevModel.ts` 里的 `readMinConfidence()` 只在**决策阶段**提前放弃，
-     * 但它管不到风控那道门 ⇒ 于是出现"我设了 20，但 20 还是被拒"。
-     *
-     * ## 修法
-     *
-     * 在把 config 交给风控之前，**用 JEV 选项覆盖 `minConfidence`**。
-     *
-     * ⚠️ **只在 `mode === 'jev'` 时覆盖** —— 其它三种模式的配置必须逐字节不变
-     *（`#10` 那台实盘在上面跑）。
-     *
-     * ⚠️ 这不是"绕过风控" —— 风控仍然是唯一执行路径，只是**它的输入来自
-     *   用户刚设的那个值**，而不是一个他看不到的策略默认值。
-     */
-    const riskConfig =
-      this.deps.trader.mode === 'jev'
-        ? {
-            ...config,
-            riskControl: {
-              ...config.riskControl,
-              minConfidence: jevNumber('min_confidence'),
-              /*
-               * 盈亏比门槛同样来自 JEV 选项 —— 否则用户把「止盈止损比」
-               * 设成 1.5 而风控仍要求 1.5 以上（恰好相等时浮点误差会误拒）。
-               * 减 0.01 给浮点留余量。
-               */
-              minRiskRewardRatio: Math.max(
-                0,
-                jevNumber('min_rr') - 0.01,
-              ),
-              /*
-               * ══════════════════════════════════════════════════════════════════
-               *  ⚠️⚠️ **最小名义价值必须跟着账户规模走**（2026-10-19 线上抓到）
-               * ══════════════════════════════════════════════════════════════════
-               *
-               * ## 症状
-               *
-               * 决策名义 **3.74 U**，而 `defaultJevConfig()` 的
-               * `minPositionSize` 是 **12 U** ⇒ 3.74 < 12 ⇒ **全被拒**。
-               * 日志里只写 `rejected`，看不到原因。
-               *
-               * ## 为什么会矛盾
-               *
-               * ```
-               *   账户 21.2 U × 单笔上限 30% = 6.36 U   ← 我加的保护
-               *   策略要求单笔 ≥ 12 U                  ← 策略默认值
-               * ```
-               * 两者**不可能同时满足** ⇒ 这台机器人永远开不了仓。
-               *
-               * 而 12 U 那个默认值是为"几百 U 的账户"定的 ——
-               * 对小账户它是硬阻塞。
-               *
-               * ## 修法
-               *
-               * 最小名义取 `min(策略值, 权益 × 10%)`。
-               * 权益 21.2 时 = 2.12 U ⇒ 3.74 U 能过。
-               * 权益 500 时 = 50 U（策略值 12 更小，取 12）⇒ 行为不变。
-               *
-               * ⚠️ **下限 1 U** —— 交易所对多数标的最小名义是 5 U，
-               * 但那是 `minNotionalOf(symbol)` 的事（`registry` 里有真实值），
-               * 这里只是"策略层不要再加一道更严的"。
-               */
-              minPositionSize: Math.max(
-                1,
-                Math.min(config.riskControl.minPositionSize, account.equity * 0.1),
-              ),
-              /* 最大同时持仓数也来自 JEV 选项（2026-10-19 用户要求）。 */
-              maxPositions: Math.max(1, Math.floor(jevNumber('max_positions'))),
-              /* 保证金占用上限也来自 JEV 选项（2026-10-19，解决"想开却开不了"）。 */
-              maxMarginUsage: Math.min(100, Math.max(1, jevNumber('max_margin_usage'))),
-              /*
-               * ⚠️ **移动止损的两个参数也来自 JEV 选项**（2026-10-19 实盘数据驱动）。
-               *
-               * ## 为什么必须可调
-               *
-               * 实盘 17 笔**全部是止损离场，止盈 0 次触发**：
-               * ```
-               *   平均盈 +0.21U，平均亏 -0.82U  ⇒ 盈亏比 1:3.85（应该 2:1）
-               * ```
-               * 根因是 `breakevenTriggerPercent: 3` + `trailingStopPercent: 1`：
-               * 浮盈刚过 3% 就把止损移到保本，价格回落 1% 就离场 ——
-               * 赚 0.9% 就跑，而止盈设在 +5%~11% 永远到不了。
-               *
-               * ⇒ 默认改成 8% / 3%，并允许操作员按行情调。
-               */
-              breakevenTriggerPercent: Math.max(0, jevNumber('breakeven_trigger_percent')),
-              trailingStopPercent: Math.max(0, jevNumber('trailing_stop_percent')),
-              
-            },
-            /*
-             * ⚠️ **开仓节流也来自 JEV 选项**（2026-10-19 用户要求）。
-             *
-             * 用户截图指出「开仓节流：本周期已开 2 仓（上限 2）」——
-             * 那个 2 来自 `defaultJevConfig().throttle.maxEntriesPerCycle`，
-             * **界面上改不了**。
-             *
-             * ⚠️ `throttle` 是 `riskControl` 的**兄弟字段**（不是子字段），
-             * 所以要在这一层展开，而不是塞进 `riskControl` 里。
-             */
-            throttle: {
-              ...config.throttle,
-              maxEntriesPerCycle: Math.max(1, Math.floor(jevNumber('max_entries_per_cycle'))),
-              maxEntriesPerHour: Math.max(1, Math.floor(jevNumber('max_entries_per_hour'))),
-            },
-            /*
-             * ⚠️⚠️ **回撤守卫必须可调**（2026-10-20 实盘数据驱动）。
-             *
-             * ## 为什么这个改动关键
-             *
-             * 12 笔平仓里 **4 笔是回撤守卫平的**：
-             * ```
-             *   13:05  最高浮盈 +1.94% → 当前 -3.97%  ⇒ 平仓，亏 0.39
-             *   12:35  最高浮盈 +2.86% → 当前 +0.62%  ⇒ 回吐 78%，平仓，亏 0.12
-             * ```
-             * 出厂值 `activationPercent: 0.4%` 意味着**几乎每个仓位立刻激活**，
-             * 之后任何回吐都触发平仓 ⇒ 止盈目标（止损距离×2）永远到不了。
-             *
-             * ## 三档配合（改完之后有层次）
-             *
-             * ```
-             *   浮盈 3% → 回撤守卫激活（允许回吐 50%）
-             *   浮盈 5% → 移动止损移到保本
-             *   浮盈 = 止盈距离 → 止盈触发
-             * ```
-             * 而不是全部挤在 1% 以内互相打架。
-             *
-             * ⚠️ **`drawdownGuard` 是 `StrategyConfig` 的顶层字段，不是
-             * `riskControl` 的子字段** —— 我第一次写进了 `riskControl`，
-             * tsc 直接拒了（`Property 'drawdownGuard' does not exist`）。
-             * 那个报错是有价值的：它挡住了"改了但没生效"的静默失败。
-             */
-            drawdownGuard: {
-              ...config.drawdownGuard,
-              enabled: true,
-              activationPercent: Math.max(0, jevNumber('drawdown_activation_percent')),
-              givebackRatio: Math.min(1, Math.max(0.05, jevNumber('drawdown_giveback_ratio'))),
-            },
-            /*
-             * ⚠️ **单日亏损熔断阈值也来自 JEV 选项**（2026-10-19 用户要求）。
-             *
-             * 用户原话：「熔断改成可配置的，设立一个30%先」
-             *
-             * ## 原来为什么不行
-             *
-             * 那个 5% 写死在 `defaultJevConfig().circuitBreaker.maxDailyLossPercent`，
-             * **界面上改不了**。实盘一天亏到 11% 就触发熔断停摆 ——
-             * 而用户要的是「激进能好测试他能力」，5% 让他一天只能看十几个样本。
-             *
-             * ⚠️ **0 = 关闭**（与 `maxDailyLossPercent` 的既有约定一致）。
-             *   用户设 0 时这条熔断完全不生效 —— 那是他的选择，但代码里
-             *   必须如实传 0，不能偷偷兜底成某个安全值。
-             */
-            /*
-             * ⚠️ `circuitBreaker` **不在这里覆盖** —— 熔断读的是 `config`
-             *（本轮开头那一处），不是 `riskConfig`。
-             *
-             * 2026-10-19 的教训：我原来在这里覆盖，界面上显示 30% 而实际按 5% 拦，
-             * 连续 4 轮 skip_cycle。**覆盖要放在所有下游的共同源头**，
-             * 放在某个消费者身上就必然漏掉别的消费者。
-             */
-          }
-        : config;
-
     const verdict = this.risk.review(gatedDecisions, {
-      config: riskConfig,
+      config,
       account: {
         equity: account.equity,
         availableBalance: account.availableBalance,
@@ -6668,9 +6248,9 @@ export class AutoTrader {
        * ⚠️ **`replaceProtection` 失败不抛** —— 那时仓位仍有收养挂的兜底止损，
        *   属于"有保护但不理想"，比"为了改止盈而把仓位平掉"好。
        */
-      const jevStop = row.stop_loss;
-      const jevTarget = row.take_profit;
-      if (jevStop !== null && jevTarget !== null) {
+      const pendingStop = row.stop_loss;
+      const pendingTarget = row.take_profit;
+      if (pendingStop !== null && pendingTarget !== null) {
         /*
          * ⚠️ **只写账本，不在这里直接挂单。**
          *
@@ -6678,20 +6258,20 @@ export class AutoTrader {
          * 而 `replaceProtection` 的允许调用者有明确白名单
          *（`riskOnlyPath.test.ts` 里逐行校验）。本方法不在其中。
          *
-         * ⇒ 把 Jev 的价位写进持仓行，**交给 `ensureStopsOnOpenPositions()`**：
+         * ⇒ 把挂单预设价位写进持仓行，**交给 `ensureStopsOnOpenPositions()`**：
          * ```
          *   它每轮对账都读交易所的挂单列表，缺止盈才补；
          *   而它读的正是这一行的 stop_loss / take_profit
-         *   ⇒ 写对账本 = 下一轮会自动把保护单纠正成 Jev 的价位
+         *   ⇒ 写对账本 = 下一轮会自动把保护单纠正成预设价位
          * ```
          * 代价是**最多晚一轮（15 分钟）**才纠正 —— 那可以接受：
          * 仓位此刻仍有收养时挂的兜底止损，不是裸奔。
          */
-        positionStore.setProtection(traderId, symbol, jevStop, jevTarget);
+        positionStore.setProtection(traderId, symbol, pendingStop, pendingTarget);
         this.emit(
           'info',
-          `${symbol} 的限价单成交时先被对账收养了 —— 已把 Jev 的价位写进账本` +
-            `（止损 ${jevStop.toFixed(6)}、止盈 ${jevTarget.toFixed(6)}），` +
+          `${symbol} 的限价单成交时先被对账收养了 —— 已把限价单预设的保护价位写进账本` +
+            `（止损 ${pendingStop.toFixed(6)}、止盈 ${pendingTarget.toFixed(6)}），` +
             '下一轮对账会据此替换兜底保护单。',
         );
         return;
@@ -7536,9 +7116,7 @@ export class AutoTrader {
 
       const rr = Math.max(
         0.5,
-        this.deps.trader.mode === 'jev'
-          ? jevNumber('min_rr')
-          : this.effectiveConfig().riskControl.minRiskRewardRatio,
+        this.effectiveConfig().riskControl.minRiskRewardRatio,
       );
       /* 往返成本约 0.1%（单边 0.05% × 2），乘 3 倍安全边际 = 0.3%。 */
       const minTargetPercent = 0.3;
@@ -7549,9 +7127,7 @@ export class AutoTrader {
       const unrealizedPercent = priceMovePercent * Math.max(1, local.leverage);
       const breakevenTrigger = Math.max(
         1,
-        this.deps.trader.mode === 'jev'
-          ? jevNumber('breakeven_trigger_percent')
-          : this.effectiveConfig().riskControl.breakevenTriggerPercent,
+        this.effectiveConfig().riskControl.breakevenTriggerPercent,
       );
       /** 本地记录的目标位（方向必须还在现价之外）。 */
       const recordedTargetOk =
@@ -10692,39 +10268,6 @@ reduceQuantity: null,
    * 用 `cancelOrder(symbol, id, 'algo')` —— `kind` 必须传 `'algo'`，理由见调用处的注释。
    */
   /**
-   * **把一个止损价往当前价方向收紧**（P2 · 2026-10-19）。
-   *
-   * ## 用途
-   *
-   * 给 Jev 提供"更紧的候选档"。它不自己算数（Jev 弱于算术），
-   * 而是从算好的三档里选 —— 与开仓档位同一个设计。
-   *
-   * ## 口径
-   *
-   * ```
-   *   多头：新止损 = 当前价 - (当前价 - 原止损) × factor   ← 更靠近当前价
-   *   空头：新止损 = 当前价 + (原止损 - 当前价) × factor
-   * ```
-   * `factor < 1` ⇒ 止损离当前价更近 ⇒ **更紧**（风险更小）。
-   *
-   * ⚠️ **`factor` 必须 < 1**。`≥ 1` 会算出一个更远（更宽松）的止损，
-   * 而放宽止损等于增加风险 —— 那不是本函数该做的事。
-   */
-  private tightenStop(
-    side: 'long' | 'short',
-    markPrice: number,
-    stop: number,
-    factor: number,
-  ): number {
-    /* 防御：`factor >= 1` 会让止损变宽，直接钳到 0.99（仍比原来紧一点点）。 */
-    const f = factor >= 1 ? 0.99 : Math.max(0.01, factor);
-    if (side === 'long') {
-      return markPrice - (markPrice - stop) * f;
-    }
-    return markPrice + (stop - markPrice) * f;
-  }
-
-  /**
    * **判断新止损是否【比旧止损更紧】**（P2 的最后一道闸 · 2026-10-19）。
    *
    * ## 为什么需要它（不能信任上游）
@@ -10754,48 +10297,10 @@ reduceQuantity: null,
 
   private async applyBreakevenGuard(): Promise<number> {
     const traderId = this.deps.trader.id;
-    /*
-     * ⚠️⚠️ **JEV 模式的保本阈值必须走 JEV 选项**（2026-10-20 实盘抓到）。
-     *
-     * ## 症状
-     *
-     * 用户在界面上把 `breakeven_trigger_percent` 设成 5、`trailing_stop_percent` 设成 3，
-     * 而日志里还在说「已达保本阈值 **3%**，按价格回撤 **1%** 追踪」——
-     * 那是 `defaultJevConfig()` 的出厂值，不是用户设的那一组。
-     *
-     * ## 根因
-     *
-     * 这一行和下面 `trailPercent` 那行原来都读 `this.activeConfig`，
-     * 而 JEV 的覆盖只发生在决策循环内部的 `effectiveConfig()` 上 ——
-     * **机械保护这一组方法（保本/回撤/过期撤单）全都没走那条路**。
-     *
-     * 这类"配置读错对象"已经犯了三次（熔断、横幅、现在这个）。
-     * ⇒ 统一原则：JEV 模式下所有运行期配置都从 `jevNumber()` / `jevBool()` 现读，
-     *   **不再从 `activeConfig` 里拿**。
-     *
-     * ⚠️ 2026-11-09 加结构守卫后：非 JEV 分支统一读 `effectiveConfig()`，
-     * JEV 分支继续现读 JEV 选项（`effectiveConfig()` 目前只覆盖
-     * `maxDailyLossPercent`，还没有把这两个字段纳入覆盖）——
-     * 等它纳入之后，这两个三元表达式可以一起删掉。
-     */
-    const threshold =
-      this.deps.trader.mode === 'jev'
-        ? Math.max(0, jevNumber('breakeven_trigger_percent'))
-        : this.effectiveConfig().riskControl.breakevenTriggerPercent;
+    const threshold = this.effectiveConfig().riskControl.breakevenTriggerPercent;
 
     // 阈值为 0 表示关闭这条规则 —— 连行情都不必拉。
     if (!(threshold > 0)) return 0;
-
-    /*
-     * ⚠️ **JEV 模式的「允许移动止损」关掉时整段跳过**（2026-10-19 补）。
-     *
-     * 用户关这个开关的意思是「**不要让止损自己动**」——
-     * 而不是"不要问 Jev，但仍然按机械规则动"。
-     *
-     * ⇒ 在入口就返回，连行情都不拉（省一次交易所请求）。
-     *   ⚠️ 其它模式**逐字节不变**（`mode !== 'jev'` 时这个条件恒假）。
-     */
-    if (this.deps.trader.mode === 'jev' && !jevBool('allow_trailing')) return 0;
 
     /* ⚠️ 同 `applyDrawdownGuard`：模拟盘上直接读会恒空 → 保本止损从不触发。 */
     const exchangePositions = await this.effectivePositions();
@@ -10834,115 +10339,12 @@ reduceQuantity: null,
          * ⚠️ 它必须与 `breakevenTriggerPercent` 一起读 —— 只配后者不配前者，
          * 就是那条被实测证明会回吐 27% 浮盈的旧行为。
          */
-        /* 与上面 `threshold` 同一个理由 —— JEV 模式下从 JEV 选项现读。 */
-        trailPercent:
-          this.deps.trader.mode === 'jev'
-            ? Math.max(0, jevNumber('trailing_stop_percent'))
-            : this.effectiveConfig().riskControl.trailingStopPercent,
+        trailPercent: this.effectiveConfig().riskControl.trailingStopPercent,
       });
 
       if (!verdict.move || verdict.newStop === null) continue;
 
-      /*
-       * ══════════════════════════════════════════════════════════════════════
-       *  **JEV 模式：让 Jev 决定"要不要收紧、收到哪一档"**（P2 · 2026-10-19）
-       * ══════════════════════════════════════════════════════════════════════
-       *
-       * ## 为什么在机械规则之上再加一层
-       *
-       * 机械规则（浮盈到阈值就收紧、跟到回退 trailPercent）是**无条件执行**的。
-       * 用户希望这个判断也由 Jev 做（「一切由 JEV 自主」），代价是每个持仓
-       * 每轮多一次调用（约 300ms + token）。
-       *
-       * ## ⚠️ 三层硬约束（缺一条都不能上线）
-       *
-       * ```
-       * ① 只有 mode === 'jev' 才问 —— 其余三种模式的执行路径逐字节不变
-       * ② Jev 只能【收紧】，不能放宽 —— 放宽止损 = 增加风险，必须由人决定
-       * ③ 新止损必须在【盈利方向】上 —— 绝不接受把止损移回不利一侧
-       * ```
-       *
-       * ②③ 在这里**由代码强制**，不是靠 Jev 的自觉：
-       * `shouldMoveStopToBreakeven()` 已经保证"只往有利方向移"，
-       * 而下面再比一次（新止损必须比旧止损更靠近当前价）。
-       *
-       * ## 失败时怎么办
-       *
-       * Jev 调不通 → **退回机械规则**（`verdict` 照常执行）。
-       * 理由：机械规则本身就是安全的，不该因为一个"锦上添花"的判断失败
-       * 而放弃收紧止损的机会。
-       */
-      let effectiveStop = verdict.newStop;
-      /*
-       * ⚠️ **Jev 的移动止损判断走 `deps.model`** —— 它就是
-       * `createJevDecisionModel()` 造出来的那个 `DecisionModel`
-       *（见 `manager.ts` 的 `buildJevModeModel`）。
-       *
-       * **不给 `AutoTrader` 加新字段**：那会让"决策模型"有两个来源，
-       * 而"哪个才是权威"这种问题一旦出现就会在某个分支里写错。
-       * 用可选方法探测（`typeof === 'function'`）保证：
-       * ```
-       *   其它模式的 model 没有这个方法 ⇒ 整段跳过 ⇒ 行为逐字节不变
-       * ```
-       */
-      const jevTrailing = this.deps.model as {
-        suggestTrailingStop?: (input: {
-          symbol: string;
-          side: 'long' | 'short';
-          entryPrice: number;
-          markPrice: number;
-          currentStop: number | null;
-          unrealizedPnlPercent: number;
-          candidates: { A: number; B: number; C: number };
-        }) => Promise<number | 'keep' | null>;
-      };
-      /*
-       * ⚠️ **「允许移动止损」关掉时，Jev 不参与判断**（2026-10-19 补）。
-       *
-       * 只关掉"问 Jev"是不够的 —— 用户关这个开关的意思是
-       * **「不要让止损自己动」**，所以整段（含机械规则）都不该执行。
-       *
-       * 那个判断在函数入口（见 `applyBreakevenGuard` 开头）——
-       * 这里再判一次是防御：将来若有人改了入口，这里仍然不会误动。
-       */
-      const jevTrailingAllowed =
-        this.deps.trader.mode !== 'jev' || jevBool('allow_trailing');
-      if (
-        this.deps.trader.mode === 'jev' &&
-        jevTrailingAllowed &&
-        typeof jevTrailing.suggestTrailingStop === 'function'
-      ) {
-        try {
-          const asked = await jevTrailing.suggestTrailingStop({
-            symbol: view.symbol,
-            side: view.side,
-            entryPrice: view.entryPrice,
-            markPrice: view.markPrice,
-            currentStop: view.stopLoss,
-            unrealizedPnlPercent: view.unrealizedPnlPercent,
-            /* 三档候选：机械值 / 更紧 / 最紧。都由既有算式算出，Jev 只选。 */
-            candidates: {
-              A: verdict.newStop,
-              B: this.tightenStop(view.side, view.markPrice, verdict.newStop, 0.5),
-              C: this.tightenStop(view.side, view.markPrice, verdict.newStop, 0.25),
-            },
-          });
-          if (asked === 'keep') {
-            this.emitOnChange(
-              `jev-keep-stop:${local.id}`,
-              'info',
-              `${local.symbol} Jev 判断保持原止损不动（机械规则本可收紧到 ${verdict.newStop}）。`,
-            );
-            continue;
-          }
-          if (asked !== null) effectiveStop = asked;
-        } catch (err) {
-          /* 失败退回机械规则 —— 见上面"失败时怎么办"。 */
-          log.warn(
-            `[JEV 模式] ${local.symbol} 的移动止损判断失败，退回机械规则：${(err as Error).message}`,
-          );
-        }
-      }
+      const effectiveStop = verdict.newStop;
 
       /*
        * ⚠️ **最后一道闸：只接受"比旧止损更靠近当前价"的值**（约束 ③）。
@@ -12363,24 +11765,8 @@ reduceQuantity: null,
      * ⇒ **模型不写 / 写错 = 行为与改动前逐字一致**。这条保证很重要：
      * 团队模式在持续盈利，任何一次发版都不该悄悄改变它的风险特征。
      */
-    /*
-     * ⚠️ **JEV 模式的保证金模式要读 JEV 选项**（2026-10-20，与保本阈值同一批）。
-     *
-     * `margin_mode` 的可选值是 `isolated` / `crossed` / `jev`（让 Jev 判断）。
-     * 决策里带了 `marginMode` 时以决策为准（`resolveMarginMode()` 已经把
-     * "让 Jev 判断"解析成了具体值）；决策没带时才回落 —— 而 JEV 模式
-     * **不能**回落到 `activeConfig` 那个写死的值，那会绕过用户在界面上选的东西。
-     */
     const wantedMode =
-      decision.marginMode ??
-      (this.deps.trader.mode === 'jev'
-        ? (() => {
-            const configured = jevEnum('margin_mode');
-            /* `jev` 表示"由 Jev 判断"—— 那条路径由 `resolveMarginMode()` 走决策侧，
-             * 走到这里说明决策没给，保守回落逐仓（最不容易被单笔打穿全账户）。 */
-            return configured === 'crossed' ? ('crossed' as const) : ('isolated' as const);
-          })()
-        : this.effectiveConfig().riskControl.marginMode);
+      decision.marginMode ?? this.effectiveConfig().riskControl.marginMode;
     if (this.marginSet.get(symbol) !== wantedMode) {
       const ok = await this.deps.broker.setMarginType(
         symbol,
@@ -14876,115 +14262,4 @@ export function readForeignActivity(traderId: number): {
     /* 同上：留空，不要假装是 0。 */
   }
   return out;
-}
-
-/**
- * **JEV 模式的 `<JEV_INPUT>` 块**（2026-10-19）。
- *
- * ## 这个块是什么
- *
- * 一段结构化 JSON，附在 prompt **末尾**，只被 `jevModel.ts` 读取。
- * 它承载"算候选档位需要的最小字段" —— 不是行情全集。
- *
- * ## ⚠️ 为什么不用解析散文
- *
- * `renderUserPrompt()` 的段落随策略配置变化（有些有、有些没有）。
- * 用正则从中文散文里抠"价格是多少"会在某个配置下**静默抠错** ——
- * 而错的档位会真的下单。
- *
- * ## ⚠️ 三条约束（改这里之前先读）
- *
- * ```
- * ① 只在 mode === 'jev' 时调用 —— 其余模式的 prompt 逐字节不变
- * ② 追加在末尾 —— 不破坏前缀缓存（那段 4.7 万 token 的稳定段命中率靠它）
- * ③ 字段只放最小集 —— 每多一个字段就多一份"它变了但没人更新"的风险
- * ```
- *
- * ## `heldSide` 为什么在这里算
- *
- * 本模式只做"开仓 / 跳过"，已有持仓的标的要跳过（不叠加仓位）。
- * 那个判断需要**持仓列表**，而 `jevModel` 只拿得到 prompt 文本。
- *
- * ## `maxCandidates` 为什么在这里也生效
- *
- * 候选太多会：① 每标的 400ms ⇒ 线性变慢；② token 成本线性上升。
- * 上限在这里就截断，`jevModel` 那边再截一次（双重保险，不会因为
- * 一处改动就失控）。
- */
-function buildJevInputBlock(
-  ctx: PromptContext,
-  _budgetTokens: number,
-  /**
-   * **账户状态**（2026-10-19 用户要求）。
-   *
-   * 用户原话：
-   * > 「给JEV 判断里面现在有没有实际仓位？（如果开很多仓位了JEV不知道
-   * >  又一直要开仓的情况，你研究一下到底要投喂哪些数据最合理）」
-   *
-   * ## 为什么从参数传进来而不是从 `ctx` 读
-   *
-   * `PromptContext` 是**提示词层**的结构（给普通 LLM 用的散文渲染），
-   * 它没有"本轮已开几仓"这种**交易循环的状态**。
-   * 那些数只有 `AutoTrader` 自己知道（它管着节流计数）。
-   *
-   * ⇒ 加一个参数，而不是往 `PromptContext` 塞字段 ——
-   *   后者会让"提示词层"依赖"交易循环的状态"，方向是反的。
-   */
-  account?: JevAccountState,
-): string {
-  const held = new Map<string, 'long' | 'short'>();
-  for (const p of ctx.positions) {
-    const side = p.position.side;
-    if (side === 'long' || side === 'short') held.set(p.position.symbol, side);
-  }
-
-  /*
-   * ⚠️ 上限 8：与 `defaultJevConfig()` 的 `coinPoolLimit(8) + oiTopLimit(4)`
-   * 量级一致。再多的标的对"这一轮做不做"的判断帮助很小，而成本是线性的。
-   */
-  const MAX = 8;
-
-  const items = ctx.candidates.slice(0, MAX).map((c) => {
-    const primary = c.primary;
-    /* 指标序列取末值 —— 与 `verifyPipeline.ts` 同一取法（键名由数据决定）。 */
-    const atrKey = Object.keys(primary.atr)[0];
-    const rsiKey = Object.keys(primary.rsi)[0];
-    const emaKey = Object.keys(primary.ema)[0];
-    const atr = atrKey !== undefined ? (last(primary.atr[atrKey] ?? []) ?? 0) : 0;
-    const rsi7 = rsiKey !== undefined ? (last(primary.rsi[rsiKey] ?? []) ?? undefined) : undefined;
-    const ema20 = emaKey !== undefined ? (last(primary.ema[emaKey] ?? []) ?? undefined) : undefined;
-
-    /*
-     * 近 3 根位移百分比（策略里的 D）：
-     * `(收盘[-1] - 收盘[-4]) / 收盘[-4] × 100` —— 与团队模式 `windowHint`
-     * 用的那个 D 是同一个口径（那里实测过它的语义：0.8%~3.5% 是可执行窗口）。
-     */
-    const closes = primary.closes;
-    let displacementPercent: number | undefined;
-    if (closes.length >= 4) {
-      const a = closes[closes.length - 4];
-      const b = closes[closes.length - 1];
-      if (typeof a === 'number' && typeof b === 'number' && a > 0) {
-        displacementPercent = ((b - a) / a) * 100;
-      }
-    }
-
-    return {
-      symbol: c.symbol,
-      price: c.price,
-      atr,
-      ...(displacementPercent !== undefined ? { displacementPercent } : {}),
-      ...(Number.isFinite(c.priceChangePercent24h)
-        ? { change24hPercent: c.priceChangePercent24h }
-        : {}),
-      ...(rsi7 !== undefined && Number.isFinite(rsi7) ? { rsi7 } : {}),
-      ...(ema20 !== undefined && Number.isFinite(ema20) ? { ema20 } : {}),
-      ...(held.has(c.symbol) ? { heldSide: held.get(c.symbol) } : {}),
-      /* 账户状态挂到每个候选上 —— `jevModel` 从 `c.account` 读。 */
-      ...(account !== undefined ? { account } : {}),
-      
-    };
-  });
-
-  return `<JEV_INPUT>${JSON.stringify(items)}</JEV_INPUT>`;
 }

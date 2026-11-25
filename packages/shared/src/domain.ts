@@ -165,33 +165,30 @@ export interface DiscoveredModel {
  * | `strategy` | 固定策略：参数由人对策略配置决定 | — |
  * | `ai_managed` | **智能托管**：单智能体 + 定时轮询，AI 自己调参 | 实盘机器人 #10 `赚大钱` |
  * | `ai_team` | **多智能体团队**：7×24 事件驱动、分工协作、辩论裁决 | `[团队测试] 多智能体` #11 |
- * | `jev` | **JEV 模式（实验性）**：由 Jev 决策模型做**每一个判断** | 待建 |
  *
  * ⚠️ **隔离纪律**：每个新加入的模式必须走**独立代码路径**。
  * 前几个模式的语义一个字都不能改 —— 它们上面挂着用户的真金白银。
- *
- * ## 关于 `jev`（2026-10-19 新增，实验性）
- *
- * 用户的要求是「所有操作都采用 JEV 模型来实现，从选币到交易，一切都由 JEV 自主完成」。
- *
- * ⚠️ **实测发现字面实现不可能**：Jev 的答案只有 `choice` / `score` / `noul`
- * 三种类型化形状，**不产生任何文字、且弱于算术**；而 `Decision` 需要
- * `positionSizeUsd` / `stopLoss` / `takeProfit`（精确数字）与 `reasoning`（必需的文字）。
- *
- * ⇒ 本模式的实际形态是：**代码算好候选档位 → Jev 从档位里选 → 代码把答案翻译成 Decision**。
- *   每一个**判断**都由 Jev 做出，代码只负责算数（Jev 的弱项）与翻译。
- *   完整设计见 `docs/JEV-MODE-DESIGN.md`。
  */
-export type TraderMode = 'strategy' | 'ai_managed' | 'ai_team' | 'jev';
+export const TRADER_MODES = ['strategy', 'ai_managed', 'ai_team'] as const;
+export type TraderMode = (typeof TRADER_MODES)[number];
+
+/**
+ * 将数据库/外部输入中的历史或未知模式码安全归一化为受支持的 {@link TraderMode}。
+ *
+ * 历史 SQLite 数据库中可能仍存有已退役的 `mode = 'jev'` 记录；
+ * 读库反序列化时统一降级为 `'strategy'`，确保服务启动与列表读取绝不抛出异常。
+ */
+export function normalizeTraderMode(raw: string | null | undefined): TraderMode {
+  if (raw === 'ai_managed' || raw === 'ai_team' || raw === 'strategy') {
+    return raw;
+  }
+  return 'strategy';
+}
 
 /**
  * 需要 AI 自己决策（而不是按固定策略执行）的模式 —— 加新模式时**必须**在这里登记。
- *
- * ⚠️ `jev` **也是 AI 驱动的**：它的每一个判断都来自 Jev 模型。
- * 漏登记会让 `isAiDriven()` 返回 false，进而走到"固定策略"那条路径上
- *（那是完全不同的语义，而且会静默地用一个不存在的策略）。
  */
-export const AI_DRIVEN_MODES: readonly TraderMode[] = ['ai_managed', 'ai_team', 'jev'];
+export const AI_DRIVEN_MODES: readonly TraderMode[] = ['ai_managed', 'ai_team'];
 
 /** 这个模式是不是由 AI 驱动。 */
 export function isAiDriven(mode: TraderMode): boolean {
@@ -211,8 +208,7 @@ export const AI_MANAGED_PRESET_MODEL = 'workbuddy/deepseek-v4.1-flash';
  *
  * - `strategy`（固定策略）：需要从「AI 模型」列表挑选；
  * - `ai_managed`（智能托管）：统一走系统 magpie 网关预设模型 {@link AI_MANAGED_PRESET_MODEL}；
- * - `ai_team`（AI 团队）：统一走系统 magpie 网关按角色路由；
- * - `jev`（JEV 模式）：统一走系统 magpie 网关固定 `jev-latest`。
+ * - `ai_team`（AI 团队）：统一走系统 magpie 网关按角色路由。
  */
 export function usesModelPicker(mode: TraderMode): boolean {
   return mode === 'strategy';

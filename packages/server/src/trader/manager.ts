@@ -16,8 +16,6 @@ import { BinanceUserDataStream } from '../binance/ws.js';
 import type { Vault } from '../crypto/vault.js';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { cpus } from 'node:os';
-import { jevBool, jevEnum, jevNumber } from './control.js';
-import { createJevDecisionModel } from './jevModel.js';
 import { createLogger } from '../logger.js';
 import { env } from '../env.js';
 import { MarketDataService } from '../market/service.js';
@@ -2378,165 +2376,6 @@ export class TraderManager {
    * 「模型用尽那你启动以后页面上提示就行了」）：
    * 出口不通用 `error` 状态说清，而不是让机器人起不来。
    */
-  /**
-   * **装配 JEV 模式（实验性）的决策模型**（2026-10-19）。
-   *
-   * ## 它与 `buildTeamModel` 的关系
-   *
-   * 两者都需要**一个 magpie 网关出口**（baseUrl + key），但用途完全不同：
-   * ```
-   *   团队模式 → 用网关调很多 LLM，做辩论与裁决
-   *   JEV 模式 → 用网关调 Jev（/v1/systemone），做类型化判断
-   * ```
-   * ⚠️ 所以**复用 `resolveTeamGateway()` 找出口**（同一套 `.env`/自动发现逻辑），
-   * 但**不复用 `buildTeamModel`** —— 那会把模型档位、角色路由一起拖进来，
-   * 而那些东西对 Jev 毫无意义（它只有 `jev-latest` 一个入口）。
-   *
-   * ## 失败时返回 `reason`，不抛
-   *
-   * 与 `buildTeamModel` 同一条纪律：装配失败**不阻断启动**，
-   * 由调用方 push 一条 `severity: 'error'` 的 preflight check + 写日志。
-   * 见 `buildTeamModel` 上方那段关于"静默退回单模型"的 P0 记录。
-   */
-  private buildJevModeModel(traderId: number): {
-    model: DecisionModel | null;
-    reason: string | null;
-  } {
-    const gateway = resolveTeamGateway(process.env);
-    if (gateway === null) {
-      return {
-        model: null,
-        reason:
-          '找不到 magpie 网关配置。请在服务器 `.env` 里设置 `MAGPIE_GATEWAY_URL` 与 `MAGPIE_GATEWAY_KEY`' +
-          '（或确保 magpie 的 caller-keys.json 可被本服务读取）。',
-      };
-    }
-
-    /*
-     * 策略配置里与风险有关的量 —— 它们是**代码算档位的输入**，
-     * 不是 Jev 的判断对象（见 `jevModel.ts` 文件头：杠杆不给 Jev 选）。
-     *
-     * ⚠️ `strategies.get()` 要的是 **strategyId**，不是 traderId
-     *（本文件 2736 行同一条写法）。`strategyId` 可空 —— AI 驱动模式的
-     * 机器人可以不挂策略，那时用 `defaultJevConfig()` 的口径兜底。
-     */
-    const config = traders.get(traderId);
-    const strategyRecord =
-      config?.strategyId == null ? undefined : strategies.get(config.strategyId);
-    const risk = strategyRecord?.config.riskControl;
-    const initialEquityFallback = config?.initialEquity ?? 0;
-
-    /*
-     * ⚠️ **杠杆取策略上限的一半**：本模式是实验性的，先保守起步。
-     * 直接取上限会让第一笔就用满，而 Jev 的表现**完全未知**
-     *（`docs/JEV-MODE-DESIGN.md` §八 明确写了"盈利表现未验证"）。
-     */
-    const leverageCap = risk?.altcoinMaxLeverage ?? 10;
-    const leverage = Math.max(1, Math.floor(leverageCap / 2));
-
-    return {
-      model: createJevDecisionModel({
-        baseUrl: gateway.baseUrl,
-        apiKey: gateway.apiKey,
-        /*
-         * 模型名固定 `jev-latest`：网关侧那个别名指向当前可用的 Jev 版本
-         *（实测返回 `jev-1.13.0`）。**不要在客户端钉版本号** ——
-         * 那会让网关升级后我们还在请求旧版本，与 `AGENTS.md` 的网关边界相反。
-         */
-        model: 'jev-latest',
-        timeoutMs: 20_000,
-        /*
-         * ⚠️⚠️ **这些参数传的是「读取函数」，不是值**（2026-10-19 用户要求）。
-         *
-         * ## 原来为什么不对
-         *
-         * 用户原话：
-         * > 「需重启，你别搞这种啊，完全可以程序自己解决的吧？
-         * >  用户不要关注这些和增加繁琐步骤」
-         *
-         * 原来的写法是 `riskPercent: 0.01` —— 在**装配时读一次**，
-         * 之后界面上改了它**永远不会生效**，只能重启机器人。
-         * 那是我的实现偷懒，不是必然。
-         *
-         * ⇒ 现在传函数，`jevModel` 在**每次决策时**调用它现读。
-         *   于是界面上改完，**下一轮就用新值**，用户不需要知道"重启"这回事。
-         */
-        readRiskPercent: () => Math.max(0.001, jevNumber('risk_percent') / 100),
-        readMaxCandidates: () => Math.max(1, Math.floor(jevNumber('max_candidates'))),
-        readCoinSelect: () => jevEnum('coin_select'),
-        readEntryType: () => jevEnum('entry_type'),
-        readAllowShort: () => jevBool('allow_short'),
-        readAllowResize: () => jevBool('allow_resize'),
-        readAllowTrailing: () => jevBool('allow_trailing'),
-        readMinConfidence: () => jevNumber('min_confidence'),
-        readMinRiskRewardRatio: () => jevNumber('min_rr'),
-        /*
-         * ⚠️ 最小名义给一个**保守的固定值 5 U**。
-         *
-         * `buildJevModeModel()` 拿不到"当前在算哪个标的"，所以无法按标的读。
-         * 而真正的逐标的判断由 `registry.minNotional(symbol)` 在**下单层**做
-         *（`autoTrader` 的 `minNotionalOf`）—— 那里才是权威。
-         *
-         * 这里的作用只是"别让档位算出一个连 5 U 都不到的仓位"：
-         * 线上实测 `AGTUSDT/QUSDT/GTCUSDT` 的 `MIN_NOTIONAL` 都是 5 U，
-         * 而决策名义只有 3.74 U ⇒ 全被交易所拒。
-         */
-        readMinNotional: () => 5,
-        readHoldAskEvery: () => Math.max(1, Math.floor(jevNumber('hold_ask_every'))),
-        /* 权益每轮现读：优先读最新实时权益快照，尚无快照时再回落 initialEquity。 */
-        readEquity: () => {
-          const latest = equity.list(traderId, 1)[0]?.equity;
-          if (typeof latest === 'number' && Number.isFinite(latest) && latest > 0) {
-            return latest;
-          }
-          return traders.get(traderId)?.initialEquity ?? initialEquityFallback;
-        },
-        readMarginMode: () => jevEnum('margin_mode'),
-        readLeverageMode: () => jevEnum('leverage_mode'),
-        readLeverageManual: () => jevNumber('leverage_manual'),
-        /*
-         * ⚠️ **杠杆上限 = min(策略上限, 币种级上限)**（2026-10-19）。
-         *
-         * 用户原话：「滑动范围是不能大于账户本身限制」。
-         *
-         * 但 `buildJevModeModel()` 拿不到"当前在算哪个标的"，所以这里用
-         * **策略上限**作为保守值 —— 真正的逐标的判断在 `autoTrader` 里
-         * 通过 `leverageCapCache`（`getMaxLeverage` 的缓存）做。
-         *
-         * 实际下界由 `resolveLeverage()` 的 `Math.min(cap, …)` 兜住，
-         * 而账户级限制由 `broker.setLeverage()` 的 `-4421` 降级处理。
-         */
-        /*
-         * ⚠️ **杠杆上限按标的区分**（2026-10-19 修正）。
-         *
-         * 原来这里返回的是 `leverage`（= `floor(altcoinMaxLeverage / 2)` = 5），
-         * 那是"默认值"，不是"上限" —— 于是滑杆设 20x 也会被夹到 5x，
-         * 而用户看不出为什么。
-         *
-         * ## 正确口径
-         * ```
-         *   BTC/ETH → btcEthMaxLeverage（20x）
-         *   其它    → altcoinMaxLeverage（10x）
-         * ```
-         * ⚠️ 这里**拿不到具体标的**（`buildJevModeModel` 没有 symbol 参数），
-         * 所以给的是**两类中较宽的那个**（20x）——
-         * 逐标的收紧由 `resolveLeverage()` 在 `jevModel` 里按
-         * `c.symbol` 判断（见 `isMajorSymbol`）。
-         *
-         * 账户级限制（子账户 5x）仍然只能靠 `broker.setLeverage()` 降级。
-         */
-        readLeverageCap: () => Math.max(1, risk?.btcEthMaxLeverage ?? 20),
-        /*
-         * ⚠️ `riskControl.marginMode` 的类型只有 `'isolated'`（策略层没开放全仓），
-         * 所以这里**不需要分支** —— 写 `=== 'cross' ? 'cross' : 'isolated'`
-         * 会被 tsc 判成"这个比较不可能成立"，那正是类型在提醒我它不存在。
-         */
-        marginMode: risk?.marginMode ?? 'isolated',
-      }),
-      reason: null,
-    };
-  }
-
   private async buildTeamModel(traderId: number): Promise<TeamModelBuild> {
     /*
      * ⚠️ **团队模式【不】使用「AI 模型」列表里的任何记录**（用户 2026-10-12 明确要求）。
@@ -3255,13 +3094,6 @@ export class TraderManager {
     }
 
     if (!trader) return { ok: false, error: `找不到机器人 ${traderId}`, preflight: [] };
-    if (trader.mode === 'jev') {
-      return {
-        ok: false,
-        error: 'JEV 模式已停用退役，不再支持启动；历史成交与决策仍保留只读查阅，请改用智能托管 2.0。',
-        preflight: [],
-      };
-    }
 
     /*
      * 占位必须在**第一个 await 之前**，否则并发 start 会双双通过上面那道检查
@@ -3582,23 +3414,6 @@ export class TraderManager {
       const routedTeamModel = teamBuild.model;
 
       /*
-       * ══════════════════════════════════════════════════════════════════════
-       *  **JEV 模式（实验性）** —— 2026-10-19
-       * ══════════════════════════════════════════════════════════════════════
-       *
-       * 与团队模式同一套「显式报告失败」纪律：Jev 端点不可用 / key 读不到时
-       * **不能静默退回单模型**（那会让一台标着「JEV 模式」的机器人实际在用
-       * 别的模型跑，而界面看不出异常 —— 正是团队模式踩过的那个坑）。
-       *
-       * ⚠️ **`jevBuild.model === null` 时也必须让机器人能起来**
-       *（与「模型不可达不阻止启动」同一条：说清楚，但别卡住启动）。
-       * 那种情况下本轮会产出空决策，而 preflight 里有一条 error 让人看得见。
-       */
-      const jevBuild =
-        trader.mode === 'jev' ? this.buildJevModeModel(trader.id) : { model: null, reason: null };
-      const jevModel = jevBuild.model;
-
-      /*
        * ⚠️ **团队模式没能启用时必须【显式报告】，不能静默走回单模型。**
        *
        * ## 复核发现的 P0（2026-10-12）
@@ -3627,26 +3442,6 @@ export class TraderManager {
         const detail = `AI 团队模式未启用：${teamBuild.reason} 当前这台机器人会按**单模型**运行（不是团队）。`;
         checks.push({
           name: 'AI 团队模式',
-          severity: 'error',
-          ok: false,
-          detail,
-          blocking: false,
-        });
-        runtimeLogs.write(trader.id, 'error', 'manager', detail);
-        log.warn(`机器人 #${trader.id} ${detail}`);
-      }
-
-      /*
-       * ⚠️ **JEV 模式失败也必须显式报告**（同团队模式那条纪律）。
-       *
-       * 后果比团队模式更直接：Jev 是这台机器人**唯一**的决策来源，
-       * 没有它 ⇒ 本轮零决策 ⇒ 一台"运行中"的机器人**永远不会开仓**。
-       * 如果不说清，用户会以为是"没有机会"，而真相是"决策模型没接上"。
-       */
-      if (trader.mode === 'jev' && jevBuild.reason !== null) {
-        const detail = `JEV 模式未启用：${jevBuild.reason} 这台机器人本轮不会产生任何决策。`;
-        checks.push({
-          name: 'JEV 模式',
           severity: 'error',
           ok: false,
           detail,
@@ -3932,15 +3727,6 @@ export class TraderManager {
           if (routedTeamModel) {
             return routedTeamModel.complete(systemPrompt, userPrompt, options);
           }
-          /*
-           * **JEV 模式**：决策完全由 Jev 做出（见 `jevModel.ts` 的文件头）。
-           * ⚠️ 放在 `routedTeamModel` 之后、`client.complete()` 之前 ——
-           * 前两者互斥（`mode` 只有一个值），所以顺序不影响正确性；
-           * 但**必须在 `client` 之前**，否则 Jev 模式会静默走回普通 LLM。
-           */
-          if (jevModel) {
-            return jevModel.complete(systemPrompt, userPrompt, options);
-          }
           const result = await client.complete(systemPrompt, userPrompt, options);
           return {
             text: result.text,
@@ -3963,34 +3749,7 @@ export class TraderManager {
             ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
           };
         },
-        /*
-         * ══════════════════════════════════════════════════════════════════
-         *  ⚠️⚠️ **P3 选币必须透传到这个包装对象上**（2026-10-19 实测抓到）
-         * ══════════════════════════════════════════════════════════════════
-         *
-         * ## 症状
-         *
-         * 用户在「JEV 模式」标签里把「选币方式」设成「让 Jev 从全市场自己选」，
-         * 但日志里**从来没有** `[Jev模式] 选币（jev）：…` 那一条 ——
-         * 说明 `autoTrader` 里那段 P3 代码**整段被跳过**。
-         *
-         * ## 根因
-         *
-         * `AutoTrader` 拿到的 `deps.model` 是**这个包装对象**，不是
-         * `createJevDecisionModel()` 返回的那个。而包装对象原来**只有
-         * `complete`** —— 于是 `autoTrader` 里的
-         * `typeof jevRerank.rerankByJev === 'function'` 探测永远为假。
-         *
-         * 那是我上一版的设计疏漏：我以为 `deps.model` 就是 `jevModel`，
-         * 但它被包了一层。
-         *
-         * ## 修法
-         *
-         * 把 `jevModel.rerankByJev` 透传到包装对象上。
-         * ⚠️ 只在 `jevModel` 存在时挂（其它三种模式这个属性不存在，
-         * `typeof` 探测自然为假，行为逐字节不变）。
-         */
-        ...(!routedTeamModel && !jevModel
+        ...(!routedTeamModel
           ? {
               chat: async (messages, options) => {
                 const result = await client.chat(messages, options);
@@ -4006,19 +3765,6 @@ export class TraderManager {
                   ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
                 };
               },
-            }
-          : {}),
-        ...(jevModel !== null && jevModel !== undefined
-          ? {
-              rerankByJev: (jevModel as unknown as { rerankByJev: unknown }).rerankByJev,
-              ...(typeof (jevModel as unknown as { suggestTrailingStop?: unknown })
-                .suggestTrailingStop === 'function'
-                ? {
-                    suggestTrailingStop: (
-                      jevModel as unknown as { suggestTrailingStop: unknown }
-                    ).suggestTrailingStop,
-                  }
-                : {}),
             }
           : {}),
       };
@@ -4349,13 +4095,6 @@ export class TraderManager {
     });
     if (!guard.ok) return { ok: false, error: guard.error, preflight: [] };
     if (!trader) return { ok: false, error: `找不到机器人 ${traderId}`, preflight: [] };
-    if (trader.mode === 'jev') {
-      return {
-        ok: false,
-        error: 'JEV 模式已停用退役，不再支持启动；历史成交与决策仍保留只读查阅，请改用智能托管 2.0。',
-        preflight: [],
-      };
-    }
 
     /*
      * ⚠️ **清掉上一轮「停止」留下的取消旗标**（2026-11-10 回归实测的真实 BUG）。

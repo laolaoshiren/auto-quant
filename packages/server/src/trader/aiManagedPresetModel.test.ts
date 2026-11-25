@@ -22,7 +22,6 @@ test('★ 共享契约：智能托管预设模型为 workbuddy/deepseek-v4.1-fla
   assert.equal(usesModelPicker('strategy'), true);
   assert.equal(usesModelPicker('ai_managed'), false);
   assert.equal(usesModelPicker('ai_team'), false);
-  assert.equal(usesModelPicker('jev'), false);
 });
 
 function fakePaperConnection(): ExchangeConnection {

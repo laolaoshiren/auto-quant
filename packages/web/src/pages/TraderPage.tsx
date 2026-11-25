@@ -1712,14 +1712,6 @@ export function TraderPage() {
           </span>
           <span className="truncate text-accent">{AI_MANAGED_PRESET_MODEL}</span>
         </span>
-      ) : trader.mode === 'jev' ? (
-        <span
-          className="flex items-center gap-1"
-          title="JEV 模式已停用退役，仅保留历史记录只读查阅。"
-        >
-          <span className="text-ink-faint">模式</span>
-          <span className="text-ink-faint">JEV 已停用（只读归档）</span>
-        </span>
       ) : (
         <Link
           to="/models"

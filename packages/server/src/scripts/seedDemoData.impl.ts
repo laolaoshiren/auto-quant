@@ -28,7 +28,7 @@
  *
  * | 形态 | 怎么覆盖 |
  * | --- | --- |
- * | 四种运行模式 | `strategy` / `ai_managed` / `ai_team` / `jev` 各有机器人 |
+ * | 三种运行模式 | `strategy` / `ai_managed` / `ai_team` 各有机器人 |
  * | 模拟盘 / 实盘 / 无账户 | `dryRun` 三态（`true` / `false` / 未指定）+ `exchangeAccountId` 为空 |
  * | 持仓 / 挂单 / 保护单 | 未平仓持仓 + 限价待成交 + `STOP_MARKET` / `TAKE_PROFIT_MARKET` 条件单 |
  * | 成交与账目 | 多空、杠杆 2–20x、盈亏/手续费/资金费、`intel_keys` 归因、`reconciled` 补录 |
@@ -71,7 +71,6 @@
  */
 import {
   defaultAiTeamConfig,
-  defaultJevConfig,
   defaultStrategyConfig,
   isAiDriven,
   STRATEGY_PRESETS,
@@ -431,18 +430,6 @@ const TRADER_SPECS: TraderSpec[] = [
     aiProfile: 'team',
     intelProfile: 'mixed',
     lastError: '连续 3 次调用模型失败：HTTP 429 rate limit exceeded（示例数据）',
-  },
-  {
-    name: 'JEV · 实验模式',
-    mode: 'jev',
-    accountIndex: 2,
-    dryRun: true,
-    status: 'stopped',
-    initialEquity: 1500,
-    cycleIntervalMinutes: 15,
-    tradeCount: 38,
-    aiProfile: 'none',
-    intelProfile: 'mixed',
   },
   {
     /*
@@ -1024,7 +1011,6 @@ async function main(): Promise<void> {
       '    /traders/<id>      → 持仓、订单、成交四张表 + 决策流',
       '      · ai_team 机器人 → 智能体审计 + 团队看板（角色出勤/各角色历史）',
       '      · ai_managed     → 智能体审计（参数实验 / 教训记忆）',
-      '      · jev            → JEV 选项面板',
       '    /traders/<id>/decisions/<recordId> → 思维链、执行日志、风控调整（含被拒/失败）',
       '    /data              → 日志面板（500 行）',
       '    /models            → 模型列表（只有本机 magpie 一条）',
@@ -1789,18 +1775,6 @@ function insertDecisionAtTime(input: DecisionRecordInput, rng: () => number): nu
  * **静默回落到策略配置**）—— 所以这里从 shared 的工厂函数出发，只改**有界**字段。
  */
 function aiConfigFor(mode: TraderMode, rng: () => number): StrategyConfig {
-  if (mode === 'jev') {
-    const config = defaultJevConfig();
-    return {
-      ...config,
-      riskControl: {
-        ...config.riskControl,
-        /* 实验参数：AI 自己动过一点（在 schema 范围内）。 */
-        maxPositions: intBetween(rng, 2, 4),
-        minConfidence: intBetween(rng, 35, 55),
-      },
-    };
-  }
   const base = mode === 'ai_team' ? defaultAiTeamConfig() : unboundedAiManagedConfig();
   return {
     ...base,

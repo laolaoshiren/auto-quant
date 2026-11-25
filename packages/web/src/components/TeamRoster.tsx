@@ -283,20 +283,11 @@ export function TeamRoster({
 export const MODE_BADGE: Record<TraderRow['mode'], { text: string; className: string }> = {
   /*
    * **每种模式一个颜色**（用户 2026-11-10：「标签加颜色」）。
-   *
-   * 原来只有 ai_team（蓝）与 jev（黄）有颜色，`ai_managed` / `strategy` 都是
-   * `bg-base-800` 深灰 —— 列表里看过去一片灰，扫一眼分不出模式。
-   * 现在四种模式各有辨识度：团队=蓝、托管=绿、固定策略=青灰、JEV=黄。
+   * 三种模式各有辨识度：团队=蓝、托管=绿、固定策略=青灰。
    */
   ai_team: { text: '团队', className: 'bg-accent/15 text-accent' },
   ai_managed: { text: '智能托管', className: 'bg-up/15 text-up' },
   strategy: { text: '固定策略', className: 'bg-base-700/80 text-ink-soft' },
-  /*
-   * ⚠️ **必须标明实验性**（用户明确要求这个模式是实验性）。
-   * 用 warn 色让它在列表里显眼 —— 它的盈利表现完全未知，
-   * 不该和另外三种看起来一样。
-   */
-  jev: { text: 'JEV 已停用', className: 'bg-base-800 text-ink-lo' },
 };
 
 export function ModeBadge({ mode }: { mode: TraderRow['mode'] }): React.ReactElement {

@@ -19,7 +19,7 @@ import type {
   TraderStatus,
   User,
 } from '@aq/shared';
-import { StrategyConfigSchema, beijingDayStartIso } from '@aq/shared';
+import { StrategyConfigSchema, beijingDayStartIso, normalizeTraderMode } from '@aq/shared';
 /* 净盈亏的唯一算式 —— 见 `netPnlOf` 的注释（资金费的符号）。 */
 import { netPnlOf } from '../binance/income.js';
 import { getDb } from '../db/index.js';
@@ -618,7 +618,7 @@ function toTrader(row: TraderRow): Trader {
     lastError: row.last_error,
     consecutiveFailures: row.consecutive_failures,
     agentConfigJson: row.agent_config_json,
-    mode: row.mode as TraderMode,
+    mode: normalizeTraderMode(row.mode),
     /*
      * ⚠️ `undefined` 与 `false` 必须分得开（见 `Trader.dryRun` 的说明）：
      * 这一列是 NULL 时**不能**转成 `false`，否则"从未指定过"会被当成

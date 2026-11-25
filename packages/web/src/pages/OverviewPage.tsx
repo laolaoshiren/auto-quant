@@ -745,16 +745,11 @@ export function OverviewPage() {
  * 会让总览看起来"少了一台"，而它其实在跑。所以数量为 0 的模式也占一格（灰掉）。
  */
 function ModeBreakdown({ traders }: { traders: TraderRow[] }): React.ReactElement {
-  /*
-   * 仅展示当前活跃的三种模式（固定策略 / 智能托管 / AI 团队）；
-   * 已停用退役的 `jev` 仅在库里存在历史记录时才以归档项显示，避免空置占位并挤压宽度。
-   */
-  const hasJev = traders.some((t) => t.mode === 'jev');
+  /* 展示当前活跃的三种模式（固定策略 / 智能托管 / AI 团队）。 */
   const groups: Array<{ mode: TraderMode; hint: string }> = [
     { mode: 'strategy', hint: MODE_HINT.strategy },
     { mode: 'ai_managed', hint: MODE_HINT.ai_managed },
     { mode: 'ai_team', hint: MODE_HINT.ai_team },
-    ...(hasJev ? [{ mode: 'jev' as const, hint: MODE_HINT.jev }] : []),
   ];
 
   return (
@@ -762,7 +757,7 @@ function ModeBreakdown({ traders }: { traders: TraderRow[] }): React.ReactElemen
       <h2 id="overview-modes" className="sr-only">
         运行模式分布
       </h2>
-      <div className={cn('grid grid-cols-1 gap-2 sm:grid-cols-3', hasJev && 'lg:grid-cols-4')}>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         {groups.map((g) => {
           const mine = traders.filter((t) => t.mode === g.mode);
           const running = mine.filter((t) => t.isRunning).length;

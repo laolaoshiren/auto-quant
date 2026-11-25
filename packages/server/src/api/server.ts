@@ -12,16 +12,6 @@ import { evaluateTraderManagedReadiness } from '../managed/readiness.js';
 import { managedThesisStore } from '../managed/thesis.js';
 import { managedAttributionStore } from '../radar/attribution.js';
 import {
-  jevOptionSpec,
-  listJevOptions,
-  listSwitches,
-  setJevOption,
-  setSwitch,
-  switchSpec,
-  JEV_PRESETS,
-  applyJevPreset,
-} from '../trader/control.js';
-import {
   AI_MANAGED_PRESET_MODEL,
   DEFAULT_MANAGED_RISK_PROFILE,
   EXCHANGES,
@@ -290,7 +280,7 @@ const TraderInputSchema = z.object({
    */
   exchangeAccountId: z.number().int().positive().nullable().optional(),
   /**
-   * 固定策略模式必填；智能托管 / AI 团队 / JEV 统一走系统 magpie 网关，可省略。
+   * 固定策略模式必填；智能托管 / AI 团队统一走系统 magpie 网关，可省略。
    */
   aiModelId: z.number().int().positive().optional(),
   /**
@@ -352,7 +342,7 @@ const TraderInputSchema = z.object({
    *
    * 默认 `'strategy'`，所以既有调用点（前端与脚本）行为完全不变。
    */
-  mode: z.enum(['strategy', 'ai_managed', 'ai_team', 'jev']).default('strategy'),
+  mode: z.enum(['strategy', 'ai_managed', 'ai_team']).default('strategy'),
   /**
    * 智能托管 2.0 风险护栏档位（`conservative` / `balanced` / `aggressive`）。
    * 仅对 `mode === 'ai_managed'` 生效，默认 `'balanced'`；支持运行中热切换。
@@ -2507,20 +2497,6 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 这正是共享包把 `AI_DRIVEN_MODES` 导出来的理由：**让"哪些模式由 AI 驱动"
      * 只有一个定义处**，而不是散在各层的字符串比较里。
      */
-    /*
-     * ⚠️ **用共享包的 `isAiDriven()`，不要再写死枚举**（2026-10-19）。
-     *
-     * 上面那段注释自己就写着「让"哪些模式由 AI 驱动"只有一个定义处」，
-     * 而这里原本仍然是 `mode === 'ai_managed' || mode === 'ai_team'` ——
-     * 加 `'jev'` 时它**正好会掉进 `else`**，于是新建 JEV 模式的机器人会报
-     * 「固定策略模式必须选择一个策略」，而 JEV 模式压根不需要策略。
-     *
-     * ⇒ 判据必须是 `AI_DRIVEN_MODES` 那份唯一清单（`isAiDriven()`），
-     *   加新模式时只改 `domain.ts` 一处。
-     */
-    if (parsed.data.mode === 'jev') {
-      throw new Error('JEV 模式已停用退役，不再支持新建；请改用「智能托管（ai_managed 2.0）」模式。');
-    }
     const isAiDrivenMode = isAiDriven(parsed.data.mode);
     const requestedStrategyId = parsed.data.strategyId ?? null;
     if (isAiDrivenMode) {
@@ -2664,21 +2640,9 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
        * 一条模型都没有时（全新库）→ 抛一个说人话的错误，而不是外键报错。
        */
       /*
-       * ⚠️ **`jev` 与 `ai_team` 一样：不读 `aiModelId`**（2026-10-19）。
-       *
-       * 两者的决策模型都不来自「AI 模型」列表：
-       * ```
-       *   ai_team → 角色路由在运行时决定模型名（走 magpie 网关）
-       *   jev     → 固定调 `jev-latest`（走 magpie 网关）
-       * ```
-       * 所以这里都只需要"一个真实存在的外键值"，取哪条都行。
-       * 不这么处理的话，用户会被要求给一台根本不读模型的机器人挑一个模型。
-       */
-      /*
-       * ⚠️ **智能托管 / 团队 / JEV 统一走系统 magpie 网关，不读 `ai_models` 列表**（2026-11-24）。
+       * ⚠️ **智能托管 / 团队统一走系统 magpie 网关，不读 `ai_models` 列表**（2026-11-24）。
        *   · `ai_managed` → 固定预设模型 `workbuddy/deepseek-v4.1-flash`（magpie 网关）
        *   · `ai_team`    → 角色路由在运行时决定模型名（magpie 网关）
-       *   · `jev`        → 固定调 `jev-latest`（magpie 网关）
        * 数据库列 `traders.ai_model_id` 仍保留外键，这里写入一个真实存在的占位 id。
        */
       aiModelId: needsModelPicker
@@ -2739,7 +2703,6 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 所以现在**每种 AI 驱动模式各自播种自己那份**：
      *   · `ai_managed` → `unboundedAiManagedConfig()`（单智能体口径）
      *   · `ai_team`    → `defaultAiTeamConfig()`（含**动态标的池**）
-     *   · `jev`        → `defaultJevConfig()`（动态标的池 + 实验性的收紧风控）
      */
     let initialManagedProfile: ManagedRiskProfileId | null = null;
     if (parsed.data.mode === 'ai_managed') {
@@ -4134,171 +4097,6 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       : RUNTIME_LOG_PAGE_DEFAULT;
 
     return { roles: collectLastSeen(traderId, logLimit) };
-  });
-
-  /*
-   * ══════════════════════════════════════════════════════════════════════════
-   *  **机器人控制**（2026-10-18）
-   * ══════════════════════════════════════════════════════════════════════════
-   *
-   * 用户要一个标签，专门放**实时生效**（不需要重启机器人）的配置：
-   * > 「是实时生效的那种（不受机器人运行影响），运行中机器人改了这里配置也会更
-   * >   马上生效的，以后我计划放很多功能进去，目前只需要做一个功能：JEV 模型开关」
-   *
-   * ## 为什么是独立一组端点，而不是塞进 `/api/settings`
-   *
-   * `settings` 表是**通用 key-value**（`agent_last_wake`、`foreign_activity:8` 都在里面），
-   * 那组端点没有"这是哪个机器人的开关"的概念。而这里的开关：
-   * ```
-   *   ① 有明确的语义（每个都在 `RUNTIME_SWITCHES` 里定义了 label + effect）
-   *   ② 要能回答"现在这个值是界面设的、还是 .env 带来的"
-   * ```
-   * 后者对操作员很重要 —— 见 `SwitchState.source` 的注释。
-   *
-   * ## 加新功能时不用改这里
-   *
-   * 往 `trader/control.ts` 的 `RUNTIME_SWITCHES` 加一行，这两个端点自动支持。
-   */
-  app.get('/api/traders/:id/control', authed, (request) => {
-    /* `idOf` 仍要调：它校验 id 是正整数（否则 400），与其它端点同一套纪律。 */
-    idOf(request);
-    return { switches: listSwitches() };
-  });
-
-  /*
-   * ══════════════════════════════════════════════════════════════════════════
-   *  **JEV 模式的可调选项**（2026-10-19）
-   * ══════════════════════════════════════════════════════════════════════════
-   *
-   * 用户要求：「要有开关（像团队模式一样，这边增加 P3 选项和其他你觉得必要的
-   * 选项，**不要全部写死**）」。
-   *
-   * 与 `/control` 那组的分工：
-   * ```
-   *   /control        → 布尔开关（Jev 初筛开/关）
-   *   /jev-options    → JEV 模式专属的枚举/数字/布尔配置
-   * ```
-   * 分成两组是因为**它们的作用域不同**：初筛开关影响整个团队模式，
-   * 而这里的选项只影响 `mode === 'jev'` 的机器人。
-   */
-  app.get('/api/traders/:id/jev-options', authed, (request) => {
-    idOf(request);
-    return {
-      options: listJevOptions(),
-      /*
-       * 预设也随这个响应一起发。
-       *
-       * ⚠️ **不单开一个 `/jev-presets` 端点**：预设是"把这批选项设成某一组值"，
-       * 它与选项本身是同一份数据的两面。分成两个端点会让前端需要两次往返，
-       * 而且两边的加载顺序可能错位（先渲染出按钮、点下去时预设还没到）。
-       */
-      presets: JEV_PRESETS,
-    };
-  });
-
-  /**
-   * **应用一个 JEV 参数预设**（一键套用）。
-   *
-   * 用户原话（2026-10-20）：
-   * > 「增加一个预设模式，把你觉得最能挣钱得参数 设置一个内置预设，
-   * >  以后可以一键快速设置」
-   *
-   * ## 为什么是一个 POST 而不是 16 次 `/jev-options/:key`
-   *
-   * 16 个参数是**一组自洽的配置**。逐条 PATCH 的话中途失败会留下
-   * "一半新一半旧"的状态，而那个状态可能自相矛盾
-   *（例如 `max_positions` 已改成 8 而 `max_margin_usage` 还是 80%）。
-   * 一次调用、服务端原子写入，要么全成要么全不动。
-   */
-  app.post('/api/traders/:id/jev-presets/:presetId', authed, async (request, reply) => {
-    idOf(request);
-    const presetId = String((request.params as { presetId: string }).presetId);
-    const result = applyJevPreset(presetId);
-    if (result.unknown.length > 0) {
-      return reply.code(400).send({
-        error: `预设「${presetId}」有非法参数：${result.unknown.join('、')}`,
-      });
-    }
-    return { applied: result.applied, options: listJevOptions() };
-  });
-
-  app.post('/api/traders/:id/jev-options/:key', authed, async (request, reply) => {
-    idOf(request);
-    const key = String((request.params as { key: string }).key);
-    const body = (request.body ?? {}) as { value?: unknown };
-
-    const spec = jevOptionSpec(key);
-    if (spec === null) {
-      return reply.code(400).send({ error: `没有这个选项：${key}` });
-    }
-    if (typeof body.value !== 'string' && typeof body.value !== 'number') {
-      return reply.code(400).send({ error: '需要 { value: "…" }' });
-    }
-    const raw = String(body.value);
-
-    /*
-     * ⚠️ **逐类型校验，并且说清哪里不对**。
-     *
-     * 静默接受一个非法值（例如把置信度设成 500）会让"界面显示 500、实际行为
-     * 是 100"这种事发生 —— 而那是最难查的一类不一致。
-     */
-    if (spec.kind === 'enum') {
-      const allowed = spec.options?.map((o) => o.value) ?? [];
-      if (!allowed.includes(raw)) {
-        return reply
-          .code(400)
-          .send({ error: `「${spec.label}」只能是：${allowed.join(' / ')}` });
-      }
-    } else if (spec.kind === 'number') {
-      const n = Number(raw);
-      if (!Number.isFinite(n)) {
-        return reply.code(400).send({ error: `「${spec.label}」必须是数字` });
-      }
-      if (spec.range !== undefined && (n < spec.range.min || n > spec.range.max)) {
-        return reply
-          .code(400)
-          .send({
-            error: `「${spec.label}」必须在 ${spec.range.min} ~ ${spec.range.max} ${spec.range.unit} 之间`,
-          });
-      }
-    } else {
-      if (raw !== 'on' && raw !== 'off') {
-        return reply.code(400).send({ error: `「${spec.label}」只能是 on / off` });
-      }
-    }
-
-    setJevOption(key, raw);
-    /* 回读一次 —— 与 `/control` 同一条纪律：界面显示的必须是此刻的值。 */
-    return { options: listJevOptions() };
-  });
-
-  app.post('/api/traders/:id/control/:key', authed, async (request, reply) => {
-    /*
-     * ⚠️ **`idOf` 的校验结果不参与"改哪个开关"** —— 开关是全局的（
-     * 与机器人无关：Jev 一旦关掉，任何机器人都不会再调用它）。
-     * 但 id 仍要合法，否则说明前端传错了。
-     */
-    idOf(request);
-    const key = String((request.params as { key: string }).key);
-    const body = (request.body ?? {}) as { on?: unknown };
-
-    if (typeof body.on !== 'boolean') {
-      return reply.code(400).send({ error: '需要 { on: true|false }' });
-    }
-    /*
-     * 未知 key → **400 并说清是哪个**。
-     * 不要静默接受：那会让前端以为开关生效了（而实际什么都没改）。
-     */
-    if (switchSpec(key) === null) {
-      return reply.code(400).send({ error: `没有这个开关：${key}` });
-    }
-
-    setSwitch(key, body.on);
-    /*
-     * 回读一次当前状态 —— 前端直接用返回值刷新，不必再发一次 GET
-     * （两次请求之间可能被别人改掉，回读保证"界面显示的一定是此刻的值"）。
-     */
-    return { switches: listSwitches() };
   });
 
   app.get('/api/traders/:id/agent/:role/steps', authed, (request) => {

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { defaultStrategyConfig } from '@aq/shared';
-import { closeDb, initDb } from '../db/index.js';
+import { closeDb, getDb, initDb } from '../db/index.js';
 import { aiModels, equity, exchanges, strategies, traders } from '../store/repositories.js';
 import { Vault } from '../crypto/vault.js';
 import { TraderManager, startGuard } from './manager.js';
@@ -193,12 +193,12 @@ test('★ startTraderAsync 遇到 result.cancelled 时兜底确保 DB 为 stoppe
   assert.equal(traders.get(id)?.status, 'stopped', '取消分支必须确保 DB 最终为 stopped');
 });
 
-test('★ JEV 模式 readEquity 优先读取实时最新权益快照，无快照再回落 initialEquity', () => {
+test('★ readEquity 优先读取实时最新权益快照，无快照再回落 initialEquity', () => {
   /*
    * 防回归（Bug #10 P1）：
    * 原 readEquity 直接读 initialEquity，余额翻倍或腰斩后仓位计算仍按初始本金算。
    */
-  const id = seedTrader('jev-equity', 500);
+  const id = seedTrader('equity-snapshot', 500);
   // 尚无快照 → 回落 initialEquity = 500
   assert.equal(equity.list(id, 1)[0]?.equity, undefined);
   assert.equal(traders.get(id)?.initialEquity, 500);
@@ -216,4 +216,20 @@ test('★ JEV 模式 readEquity 优先读取实时最新权益快照，无快照
     openPositions: 1,
   });
   assert.equal(equity.list(id, 1)[0]?.equity, 1234.56);
+});
+
+test('★★★ 历史 SQLite 数据库中残留的 mode="jev" 行读库时安全降级为 strategy，不抛异常', () => {
+  const id = seedTrader('legacy-jev-row', 1000);
+  // 直接写底库模拟老版本留下的 mode = 'jev'（含 strategy_id = NULL 的历史形态）
+  getDb().run("UPDATE traders SET mode = 'jev', strategy_id = NULL WHERE id = ?", id);
+
+  const loaded = traders.get(id);
+  assert.ok(loaded, '历史 jev 行应可正常读取');
+  assert.equal(loaded!.mode, 'strategy', '历史 mode=jev 必须安全归一化降级为 strategy');
+  assert.equal(loaded!.strategyId, null);
+
+  const all = traders.list();
+  const inList = all.find((t) => t.id === id);
+  assert.ok(inList, '列表查询不应因历史 jev 行抛错或丢失该记录');
+  assert.equal(inList!.mode, 'strategy');
 });

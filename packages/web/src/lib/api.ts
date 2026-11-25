@@ -50,54 +50,6 @@ import type {
  * 老服务端（或某张表为空）不该让整个面板崩掉 —— 与决策看板那个
  * "一条坏数据白屏"的教训一致。
  */
-/**
- * 一个**运行期开关**的完整状态（`/traders/:id/control`）。
- *
- * `source` 是重点：它回答"这个值是谁定的"。
- */
-/**
- * 一个 **JEV 模式选项**（`/traders/:id/jev-options`）。
- *
- * 与 `ControlSwitch` 的区别：那个是**布尔开关**（整个团队共享），
- * 这个有枚举/数字类型，且只影响 `mode === 'jev'` 的机器人。
- */
-/**
- * **JEV 参数预设**（2026-10-20 用户要求）。
- *
- * 一组自洽的参数，一键套用。为什么需要它：JEV 的 16 个参数是**互相耦合**的
- * （risk_percent 调大会更快用完 max_margin_usage，min_rr 调大会降低胜率），
- * 逐个调很容易调出一组自相矛盾的配置。
- */
-export interface JevPreset {
-  id: string;
-  label: string;
-  summary: string;
-}
-
-export interface JevOption {
-  key: string;
-  label: string;
-  /** 一句话说明「它是什么、改了会怎样」—— 用户不懂 JEV，靠它做决定。 */
-  why: string;
-  kind: 'boolean' | 'enum' | 'number';
-  options?: Array<{ value: string; label: string }>;
-  range?: { min: number; max: number; step: number; unit: string };
-  value: string;
-  source: 'ui' | 'default';
-  /** 改它要不要重启机器人才生效（界面上要如实标注）。 */
-  requiresRestart: boolean;
-}
-
-export interface ControlSwitch {
-  key: string;
-  /** 给人看的标题（服务端 `RUNTIME_SWITCHES` 里定义，前端不重复一份）。 */
-  label: string;
-  /** **关掉之后会发生什么** —— 用户关心的是后果，不是实现。 */
-  effect: string;
-  on: boolean;
-  source: 'ui' | 'env' | 'default';
-}
-
 export interface AgentAudit {
   /** 每次角色运行（字段与 `AgentRunRow` 一一对应）。 */
   runs?: Array<{
@@ -960,7 +912,7 @@ export interface TraderInput {
    * 表达不出"我没有账户"这件事。
    */
   exchangeAccountId: number | null;
-  /** 固定策略模式必填；智能托管 / AI 团队 / JEV 统一走系统 magpie 网关，可省略。 */
+  /** 固定策略模式必填；智能托管 / AI 团队统一走系统 magpie 网关，可省略。 */
   aiModelId?: number;
   /**
    * **运行模式：模拟盘 / 实盘 —— 创建时固定**（2026-11-10 用户要求）。
@@ -1307,62 +1259,6 @@ export const api = {
    * `total` 是**未截断的总数** —— 界面据此如实说"还有 N 条更早的"，
    * 而不是把 `limit` 截断后的条数当成全部（那是微型的谎）。
    */
-  /**
-   * **机器人控制：实时生效的开关**（2026-10-18）。
-   *
-   * ## 与 `.env` 的区别（这是这个标签存在的全部理由）
-   *
-   * ```
-   *   .env       → 改完要重启进程，而重启会打断正在跑的决策周期
-   *   这个端点   → 点一下立刻生效（下一次读取就拿到新值）
-   * ```
-   *
-   * `source` 字段告诉操作员这个值**是从哪来的**：
-   * ```
-   *   'ui'      → 界面上设的（重启也保持）
-   *   'env'     → .env 里的初始值（界面上从没点过）
-   *   'default' → 代码默认值
-   * ```
-   * 少了它，操作员无法判断"我改了会不会影响别人 / 重启后会不会变回去"。
-   */
-  traderControl: (id: number, signal?: AbortSignal) =>
-    request<{ switches: ControlSwitch[] }>(`/traders/${id}/control`, { signal }),
-
-  /**
-   * 切换一个开关。返回**回读后的完整状态** —— 前端直接用它刷新，
-   * 不必再发一次 GET（两次之间可能被别人改掉）。
-   */
-  setTraderControl: (id: number, key: string, on: boolean) =>
-    request<{ switches: ControlSwitch[] }>(`/traders/${id}/control/${key}`, {
-      method: 'POST',
-      body: { on },
-    }),
-
-  /**
-   * 读 JEV 模式的全部可调选项（含可一键套用的预设）。
-   *
-   * 预设与选项**同一个响应**返回 —— 它们是一份数据的两面，
-   * 分成两次往返会让"按钮已渲染但预设还没到"的错位发生。
-   */
-  traderJevOptions: (id: number, signal?: AbortSignal) =>
-    request<{ options: JevOption[]; presets: JevPreset[] }>(`/traders/${id}/jev-options`, {
-      signal,
-    }),
-
-  /** 一键套用一个 JEV 参数预设（一次写入整组，服务端原子应用）。 */
-  applyTraderJevPreset: (id: number, presetId: string) =>
-    request<{ applied: number; options: JevOption[] }>(
-      `/traders/${id}/jev-presets/${presetId}`,
-      { method: 'POST' },
-    ),
-
-  /** 改一个 JEV 选项。返回回读后的全表。 */
-  setTraderJevOption: (id: number, key: string, value: string) =>
-    request<{ options: JevOption[] }>(`/traders/${id}/jev-options/${key}`, {
-      method: 'POST',
-      body: { value },
-    }),
-
   traderAgentSteps: (id: number, role: string, limit = 50, signal?: AbortSignal) =>
     request<{
       role: string;

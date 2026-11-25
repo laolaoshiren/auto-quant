@@ -49,11 +49,9 @@ const ALLOWED_LINES: ReadonlyMap<string, string> = new Map([
     '`effectiveConfig()` 自身实现：智能托管模式强制钳制在物理安全硬底线内。',
   ],
   [
-    'if (this.deps.trader.mode !== \'jev\') return this.activeConfig;',
-    '`effectiveConfig()` 自身实现：非 JEV 模式直接返回原始配置。',
+    'return this.activeConfig;',
+    '`effectiveConfig()` 自身实现：非智能托管模式直接返回原始配置。',
   ],
-  ['...this.activeConfig,', '`effectiveConfig()` 自身实现：展开原始配置。'],
-  ['...this.activeConfig.circuitBreaker,', '`effectiveConfig()` 自身实现：展开熔断分区。'],
   [
     'const current = this.activeConfig;',
     '`applyAgentPatch()`：补丁结果会落库，必须基于原始配置（否则瞬态覆盖被持久化）。',
@@ -134,7 +132,7 @@ test('★★★ 运行期不得直读 `this.activeConfig` —— 一律走 `effe
    * 而通过 —— 那正是这个仓库反复强调的"看不出异常的空转"。
    */
   assert.ok(
-    allowed.length >= 7,
+    allowed.length >= 6,
     `★ 只扫到 ${allowed.length} 处白名单读取 —— 源码语料可能没读到，这条守卫会空转`,
   );
 
@@ -143,8 +141,8 @@ test('★★★ 运行期不得直读 `this.activeConfig` —— 一律走 `effe
     [],
     '★★★ 这些代码在**运行期**直读 `this.activeConfig`，而不是 `effectiveConfig()`：\n' +
       runtime.map((line) => `      · ${line}`).join('\n') +
-      '\n    JEV 模式下 `activeConfig` 不是本轮生效的那份 —— 这些地方会读到旧值，' +
-      '而症状是"界面/日志说 A、实际执行用 B"，不会报错。\n' +
+      '\n    运行期直读会绕过 `effectiveConfig()` 的统一入口（如智能托管物理硬底线钳制），' +
+      '症状是"界面/日志说 A、实际执行用 B"，不会报错。\n' +
       '    ✅ 运行期读取请改用 `this.effectiveConfig()`；\n' +
       '    ✅ 若确实是装配/写路径（必须读原始配置），把它加进 `ALLOWED_LINES` 并写明理由。',
   );

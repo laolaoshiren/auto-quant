@@ -38,7 +38,6 @@ export const MODE_LABEL: Record<TraderMode, string> = {
   strategy: '固定策略',
   ai_managed: '智能托管',
   ai_team: 'AI 团队',
-  jev: 'JEV 模式（已停用）',
 };
 
 /** 一句话说明每种模式的**代价**（用户靠它决定"这台要不要一直开着"）。 */
@@ -46,7 +45,6 @@ export const MODE_HINT: Record<TraderMode, string> = {
   strategy: '按策略参数跑，不调用模型 —— 秒级一轮，不花模型额度',
   ai_managed: '智能托管 2.0 统一走预设模型 workbuddy/deepseek-v4.1-flash（系统 magpie 网关）—— AI500 雷达 + 三段式决策 + 持仓论点硬检查',
   ai_team: '一支智能体团队开会决策 —— 每轮多次调用，数分钟',
-  jev: '已停用退役的历史实验模式，仅保留既有记录只读查阅，不支持新建或启动',
 };
 
 /** 页面名登记（导航、标题、返回链接、FAQ 全部取这里）。 */

@@ -26,6 +26,7 @@ import {
   exchangeErrorCode,
   exchangeErrorLabel,
   marginPercentToPricePercent,
+  normalizeTraderMode,
 } from './domain.js';
 import {
   AI_MANAGED_HARD_LIMITS,
@@ -481,4 +482,15 @@ test('出厂默认值本身不变 —— 传统策略模式仍然有它自己的
   assert.equal(rc.btcEthMaxLeverage, 5, '传统策略的默认杠杆仍是 5x');
   assert.equal(rc.marginMode, 'isolated', '传统策略的默认保证金模式仍是逐仓');
   assert.equal(rc.minConfidence, 75, '传统策略的默认置信度门槛仍是 75');
+});
+
+test('★★★ normalizeTraderMode 安全兼容历史已退役的 jev 与未知模式码', () => {
+  assert.equal(normalizeTraderMode('strategy'), 'strategy');
+  assert.equal(normalizeTraderMode('ai_managed'), 'ai_managed');
+  assert.equal(normalizeTraderMode('ai_team'), 'ai_team');
+  assert.equal(normalizeTraderMode('jev'), 'strategy');
+  assert.equal(normalizeTraderMode(''), 'strategy');
+  assert.equal(normalizeTraderMode(null), 'strategy');
+  assert.equal(normalizeTraderMode(undefined), 'strategy');
+  assert.equal(normalizeTraderMode('unknown_future_mode'), 'strategy');
 });
