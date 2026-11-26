@@ -2419,7 +2419,7 @@ export function TraderPage() {
           bodyClassName={curveCollapsed && chartTab === 'equity' ? 'p-0' : 'flex min-h-0 flex-1 flex-col p-0'}
           className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[156px] flex-1 flex-col'}
           title={
-            <span className="inline-flex max-w-full flex-wrap items-center gap-0.5 rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
+            <span className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
               <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
                 {/* ⚠️ 标签必须与**实际画的口径**一致（2026-10-15 改成按模式选）。
                     实盘 → 账户权益（共享钱包真实权益，与「账户余额」指标卡同一个数）；
