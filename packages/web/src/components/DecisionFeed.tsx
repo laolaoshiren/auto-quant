@@ -172,6 +172,7 @@ import { usePolled } from '../lib/hooks';
 import { Badge, Empty, ErrorNote, Panel, Spinner3, cn } from './ui';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
 import { CoinIcon } from './CoinIcon';
+import { PowerlineTrajectory, parsePowerlineTrajectory } from './PowerlineTrajectory';
 import { DecisionArchiveModal } from './DecisionArchiveModal';
 import { humanizeToolNames } from '../lib/toolLabels';
 import { summarizeMemberOutput } from '../lib/memberSummary';
@@ -3090,70 +3091,6 @@ export function figureParts(decision: Decision, price: number | null): Figure[] 
 }
 
 /**
- * 将「三段式决策轨迹：plan → note:NEARUSDT → finalize(4)」解析成可读中文步骤胶囊，
- * 避免原始英文工具名直出造成阅读噪音。
- */
-interface TrajectoryStep {
-  label: string;
-  tone: string;
-}
-
-function parseTrajectorySteps(raw: string): TrajectoryStep[] | null {
-  const m = /三段式决策轨迹[：:]\s*(.+)$/.exec(raw.trim());
-  if (!m?.[1]) return null;
-  const tokens = m[1]
-    .split(/\s*→\s*/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (tokens.length === 0) return null;
-
-  return tokens.map((tok) => {
-    if (tok === 'plan') {
-      return {
-        label: '制定计划',
-        tone: "border-sky-500/30 bg-sky-500/12 text-sky-300 [[data-skin='light']_&]:border-sky-600/25 [[data-skin='light']_&]:bg-sky-500/10 [[data-skin='light']_&]:text-sky-700",
-      };
-    }
-    const noteMatch = /^note:(.+)$/i.exec(tok);
-    if (noteMatch?.[1]) {
-      return {
-        label: `记笔记 ${noteMatch[1].replace(/USDT$/i, '')}`,
-        tone: "border-violet-500/30 bg-violet-500/12 text-violet-300 [[data-skin='light']_&]:border-violet-600/25 [[data-skin='light']_&]:bg-violet-500/10 [[data-skin='light']_&]:text-violet-700",
-      };
-    }
-    const delMatch = /^note_del:(.+)$/i.exec(tok);
-    if (delMatch?.[1]) {
-      return {
-        label: `清笔记 ${delMatch[1].replace(/USDT$/i, '')}`,
-        tone: 'border-base-700 bg-base-800/90 text-ink-lo',
-      };
-    }
-    const thesisMatch = /^thesis:(.+)$/i.exec(tok);
-    if (thesisMatch?.[1]) {
-      return {
-        label: `更新论点 ${thesisMatch[1].replace(/USDT$/i, '')}`,
-        tone: 'border-warn/35 bg-warn/12 text-warn',
-      };
-    }
-    const klineMatch = /^kline[s]?:(.+)$/i.exec(tok);
-    if (klineMatch?.[1]) {
-      return {
-        label: `查K线 ${klineMatch[1]}`,
-        tone: 'border-accent/35 bg-accent/12 text-accent',
-      };
-    }
-    const finMatch = /^finalize(?:\((\d+)\))?$/i.exec(tok);
-    if (finMatch) {
-      return {
-        label: finMatch[1] ? `提交决策 (${finMatch[1]})` : '提交决策',
-        tone: 'border-up/35 bg-up/12 text-up',
-      };
-    }
-    return { label: tok, tone: 'border-base-700 bg-base-800 text-ink-mid' };
-  });
-}
-
-/**
  * 一条**没有配上决策**的执行记录，一行小字。
  *
  * 正常路径上这个组件不会被调用（见 `CycleBlock` 里 `plan.leftover` 的说明）：
@@ -3200,31 +3137,11 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
    */
   /* ⚠️ `plainText`：理由里的 `**` 是写给模型/维护者的强调符，不该露给用户（见 `lib/plainText.ts`）。 */
   const detail = plainText(humanizeToolNames(entry.detail ?? ''));
-  const trajectory = entry.status === 'data' ? parseTrajectorySteps(detail) : null;
+  const trajectory = entry.status === 'data' ? parsePowerlineTrajectory(detail) : null;
   if (trajectory) {
     return (
       <li className="min-w-0">
-        <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-base-750/90 bg-base-950/75 px-2.5 py-1.5 font-mono text-[11px] shadow-inner [[data-skin='light']_&]:bg-base-900/90">
-          <span className="mr-0.5 inline-flex shrink-0 items-center gap-1 rounded bg-base-850/90 px-1.5 py-0.5 font-sans text-[10.5px] font-medium text-ink-lo ring-1 ring-base-700/70">
-            <span aria-hidden className="font-mono text-[10px] text-accent">
-              ❯
-            </span>
-            决策步骤
-          </span>
-          {trajectory.map((step, idx) => (
-            <span key={`${step.label}-${idx}`} className="inline-flex items-center gap-1">
-              {idx > 0 && <ChevronRight aria-hidden className="h-3 w-3 shrink-0 text-ink-faint/60" />}
-              <span
-                className={cn(
-                  'inline-flex items-center rounded-md border px-2 py-0.5 font-sans font-medium leading-none',
-                  step.tone,
-                )}
-              >
-                {step.label}
-              </span>
-            </span>
-          ))}
-        </div>
+        <PowerlineTrajectory segments={trajectory} />
       </li>
     );
   }

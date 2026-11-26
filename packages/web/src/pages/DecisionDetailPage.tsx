@@ -7,7 +7,7 @@
  */
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, Copy, Check, TriangleAlert } from 'lucide-react';
+import { ChevronLeft, Copy, Check, TriangleAlert } from 'lucide-react';
 import type { Decision, DecisionRecord, ExecutionLogEntry } from '@aq/shared';
 import { api } from '../lib/api';
 import { useCopy, useDocumentTitle, usePolled } from '../lib/hooks';
@@ -21,6 +21,7 @@ import {
   isOpenAction,
 } from '../components/DecisionAudit';
 import { CoinIcon } from '../components/CoinIcon';
+import { PowerlineTrajectory, parsePowerlineTrajectory } from '../components/PowerlineTrajectory';
 import { fmtDateTime, fmtInt, fmtLatency, fmtPrice, fmtUsd } from '../lib/format';
 import { plainText } from '../lib/plainText';
 import { humanizeToolNames } from '../lib/toolLabels';
@@ -66,44 +67,6 @@ function actionBorderClass(action: Decision['action']): string {
     default:
       return 'border-l-accent/75';
   }
-}
-
-function parseDetailTrajectory(raw: string): Array<{ label: string; tone: string }> | null {
-  const m = /三段式决策轨迹[：:]\s*(.+)$/.exec(raw.trim());
-  if (!m?.[1]) return null;
-  const tokens = m[1]
-    .split(/\s*→\s*/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (tokens.length === 0) return null;
-  return tokens.map((tok) => {
-    if (tok === 'plan') {
-      return {
-        label: '制定计划',
-        tone: "border-sky-500/30 bg-sky-500/12 text-sky-300 [[data-skin='light']_&]:text-sky-700",
-      };
-    }
-    const noteMatch = /^note:(.+)$/i.exec(tok);
-    if (noteMatch?.[1]) {
-      return {
-        label: `记笔记 ${noteMatch[1].replace(/USDT$/i, '')}`,
-        tone: "border-violet-500/30 bg-violet-500/12 text-violet-300 [[data-skin='light']_&]:text-violet-700",
-      };
-    }
-    const delMatch = /^note_del:(.+)$/i.exec(tok);
-    if (delMatch?.[1]) {
-      return { label: `清笔记 ${delMatch[1].replace(/USDT$/i, '')}`, tone: 'border-base-700 bg-base-800 text-ink-lo' };
-    }
-    const thesisMatch = /^thesis:(.+)$/i.exec(tok);
-    if (thesisMatch?.[1]) {
-      return { label: `更新论点 ${thesisMatch[1].replace(/USDT$/i, '')}`, tone: 'border-warn/35 bg-warn/12 text-warn' };
-    }
-    const finMatch = /^finalize(?:\((\d+)\))?$/i.exec(tok);
-    if (finMatch) {
-      return { label: finMatch[1] ? `提交决策 (${finMatch[1]})` : '提交决策', tone: 'border-up/35 bg-up/12 text-up' };
-    }
-    return { label: tok, tone: 'border-base-700 bg-base-800 text-ink-mid' };
-  });
 }
 
 const HIGHLIGHT_RE =
@@ -215,24 +178,11 @@ function CompactExecutionLog({ log }: { log: ExecutionLogEntry[] }) {
     <ul className="space-y-2">
       {log.map((entry, idx) => {
         const cleaned = plainText(humanizeToolNames(entry.detail ?? ''));
-        const trajectory = entry.status === 'data' ? parseDetailTrajectory(cleaned) : null;
+        const trajectory = entry.status === 'data' ? parsePowerlineTrajectory(cleaned) : null;
         if (trajectory) {
           return (
             <li key={idx}>
-              <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-base-750 bg-base-950/75 px-2.5 py-1.5 text-[11px] [[data-skin='light']_&]:bg-base-900">
-                <span className="inline-flex items-center gap-1 rounded bg-base-850 px-1.5 py-0.5 text-[10.5px] font-medium text-ink-lo">
-                  <span className="font-mono text-[10px] text-accent">❯</span>
-                  决策步骤
-                </span>
-                {trajectory.map((step, sIdx) => (
-                  <span key={`${step.label}-${sIdx}`} className="inline-flex items-center gap-1">
-                    {sIdx > 0 && <ChevronRight className="h-3 w-3 text-ink-faint/60" />}
-                    <span className={cn('rounded-md border px-2 py-0.5 font-medium leading-none', step.tone)}>
-                      {step.label}
-                    </span>
-                  </span>
-                ))}
-              </div>
+              <PowerlineTrajectory segments={trajectory} />
             </li>
           );
         }
