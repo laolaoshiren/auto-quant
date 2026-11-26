@@ -497,51 +497,57 @@ export function TradersPage() {
       />
 
       {/*
-        舰队合计：**一行紧凑指标，不是四张大卡片**（DESIGN.md §4"不要把所有东西做成一样大"）。
-        这一页的主体是下面那张表，四张 `text-2xl` 的卡片会把表格挤下去半屏 ——
-        而它们回答的问题（一共几个、跑了几个、总共多少钱）一句话就能说完。
+        舰队合计：响应式四格紧凑指标栏（窄屏 1~2 列自适应，宽屏 4 列铺开，避免窄屏折行挤压或截断）。
       */}
-      <div className="flex flex-wrap items-start gap-x-8 gap-y-2 rounded-lg border border-base-750 bg-base-900/50 px-3 py-2">
-        <Metric
-          label="运行中"
-          value={
-            <>
-              {runningCount}
-              <span className="text-sm text-ink-faint"> / {traders.length}</span>
-            </>
-          }
-          sub="运行 / 总数"
-        />
-        <Metric
-          label={paperOnlyFleet ? '模拟权益合计' : '账户权益合计'}
-          value={fmtUsd(paperOnlyFleet ? fleetTotal.paper.equity : totalEquity, 2)}
-          size="lg"
-          tone="strong"
-          sub={
-            paperOnlyFleet ? (
-              `模拟盘 · ${fmtInt(fleetTotal.paper.traderCount)} 台`
-            ) : staleAccounts.length > 0 ? (
-              `已停机 · 末次快照（${staleAccounts.length} 个账户）`
-            ) : (
-              `按账户去重 · ${fmtInt(fleetTotal.accounts.length)} 个账户`
-            )
-          }
-          title={
-            paperOnlyFleet
-              ? '当前仅有模拟盘机器人：此处为各模拟盘本地模拟权益之和（与真实钱包无关）。'
-              : staleAccounts.length > 0
-                ? `账户 ${staleAccounts.map((a) => `#${a.exchangeAccountId}`).join('、')} 下所有机器人当前均已停止，此处展示停机前的最近一次权益快照。`
-                : '按实盘交易所账户合计的权益：同一账户下的多个机器人共用同一个钱包，只算一次；模拟盘不混入。表格每一行的「归属权益」是那个机器人自己的贡献。'
-          }
-        />
-        <Metric
-          label="已实现盈亏"
-          value={fmtUsdSigned(totalRealized, 2)}
-          tone={totalRealized > 0 ? 'up' : totalRealized < 0 ? 'down' : 'default'}
-          sub={fleet.known ? <PnlBreakdown costs={fleet.costs} /> : '所有机器人合计'}
-          title={`${NET_PNL_FORMULA}。此处为所有机器人已平仓成交的净盈亏合计。`}
-        />
-        <Metric label="当前持仓" value={fmtInt(openPositions)} sub="所有机器人的未平仓合约数" />
+      <div className="grid grid-cols-1 gap-x-6 gap-y-2.5 rounded-lg border border-base-750 bg-base-900/50 px-3.5 py-2.5 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="min-w-0">
+          <Metric
+            label="运行中"
+            value={
+              <>
+                {runningCount}
+                <span className="text-sm text-ink-faint"> / {traders.length}</span>
+              </>
+            }
+            sub="运行 / 总数"
+          />
+        </div>
+        <div className="min-w-0">
+          <Metric
+            label={paperOnlyFleet ? '模拟权益合计' : '账户权益合计'}
+            value={fmtUsd(paperOnlyFleet ? fleetTotal.paper.equity : totalEquity, 2)}
+            size="lg"
+            tone="strong"
+            sub={
+              paperOnlyFleet ? (
+                `模拟盘 · ${fmtInt(fleetTotal.paper.traderCount)} 台`
+              ) : staleAccounts.length > 0 ? (
+                `已停机 · 末次快照（${staleAccounts.length} 个账户）`
+              ) : (
+                `按账户去重 · ${fmtInt(fleetTotal.accounts.length)} 个账户`
+              )
+            }
+            title={
+              paperOnlyFleet
+                ? '当前仅有模拟盘机器人：此处为各模拟盘本地模拟权益之和（与真实钱包无关）。'
+                : staleAccounts.length > 0
+                  ? `账户 ${staleAccounts.map((a) => `#${a.exchangeAccountId}`).join('、')} 下所有机器人当前均已停止，此处展示停机前的最近一次权益快照。`
+                  : '按实盘交易所账户合计的权益：同一账户下的多个机器人共用同一个钱包，只算一次；模拟盘不混入。表格每一行的「归属权益」是那个机器人自己的贡献。'
+            }
+          />
+        </div>
+        <div className="min-w-0">
+          <Metric
+            label="已实现盈亏"
+            value={fmtUsdSigned(totalRealized, 2)}
+            tone={totalRealized > 0 ? 'up' : totalRealized < 0 ? 'down' : 'default'}
+            sub={fleet.known ? <PnlBreakdown costs={fleet.costs} /> : '所有机器人合计'}
+            title={`${NET_PNL_FORMULA}。此处为所有机器人已平仓成交的净盈亏合计。`}
+          />
+        </div>
+        <div className="min-w-0">
+          <Metric label="当前持仓" value={fmtInt(openPositions)} sub="所有机器人的未平仓合约数" />
+        </div>
       </div>
 
       {actionError && <ErrorNote>{actionError}</ErrorNote>}
@@ -593,19 +599,164 @@ export function TradersPage() {
               count={traders.length}
               className="mb-2 px-3 pt-3"
             />
+
             {/*
-              容器撑满剩余视口高度：行少时下面是表格自己的空白（"还有位置"），
-              行多时表体自己滚动，页面不会被顶长。
+              窄屏卡片视图（< lg / < 1024px）：
+              彻底替代旧版 table-fixed 窄屏强行压列/藏列导致的重叠与显示不全，
+              完整呈现所有拆分字段，零横向裁切、零空洞留白。
             */}
-            <div className="min-h-[16rem] flex-1 overflow-y-auto">
-              <table className="w-full table-fixed border-collapse">
+            <div className="divide-y divide-base-800/80 lg:hidden">
+              {shown.map((trader) => {
+                const stats = statsMap[trader.id];
+                const live = liveByTrader[trader.id];
+                const status: TraderStatus = live?.status ?? trader.status;
+                const isLiveRunning =
+                  live?.status !== null && live?.status !== undefined
+                    ? live.status === 'running' || live.status === 'safe_mode'
+                    : trader.isRunning;
+                const rowBusy = busyId === trader.id;
+                const starting = status === 'starting' || optimisticStarting.has(trader.id);
+                const account = accountOf(exchangeAccountsQuery.data, trader.exchangeAccountId);
+                const calibrated = stats ? calibratedOf(trader, stats) : null;
+                const pnlTip = stats
+                  ? (isLedgerSuspect(trader.ledger, dryRunOf(trader.id))
+                      ? '平台账本与交易所的成交流水对不上，所以这一行改用交易所的流水校准。'
+                      : `${pnlFormulaText(statsCosts(stats))}。`) +
+                    `\n· 浮动盈亏（未计入本行）：${fmtUsdSigned(stats.unrealizedPnl, 2)}`
+                  : undefined;
+
+                return (
+                  <div key={trader.id} className="space-y-2.5 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <Link to={`/traders/${trader.id}`} className="shrink-0">
+                          <TraderAvatar id={trader.id} size={30} className="rounded-lg" />
+                        </Link>
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Link
+                              to={`/traders/${trader.id}`}
+                              className="truncate text-sm font-semibold text-ink-hi transition hover:text-accent"
+                            >
+                              {trader.name}
+                            </Link>
+                            <MoneyBadge dryRun={trader.dryRun} />
+                            <TraderStatusBadge status={status} live={isLiveRunning} />
+                          </div>
+                        </div>
+                      </div>
+                      <TraderRowActions
+                        trader={trader}
+                        starting={starting}
+                        isLiveRunning={isLiveRunning}
+                        rowBusy={rowBusy}
+                        stopPending={pending?.kind === 'delete'}
+                        onStart={() => void startNow(trader)}
+                        onStop={() => setPending({ kind: 'stop', trader })}
+                        onOpen={() => navigate(`/traders/${trader.id}`)}
+                        onEdit={() => setEditTarget(trader)}
+                        onDelete={() => setPending({ kind: 'delete', trader })}
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-xs">
+                      <ModeBadge mode={trader.mode} />
+                      {trader.mode === 'ai_managed' && (
+                        <ManagedRiskBadge profile={trader.managedRiskProfile} />
+                      )}
+                      <ExchangeAccountChip account={account} />
+                      <span className="num text-ink-faint">
+                        周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
+                      </span>
+                    </div>
+
+                    {(trader.consecutiveFailures > 0 || summaryErrors[trader.id]) && (
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-warn">
+                        {trader.consecutiveFailures > 0 && (
+                          <span className="num">连续失败 ×{trader.consecutiveFailures}</span>
+                        )}
+                        {summaryErrors[trader.id] && (
+                          <span>{stats ? '统计读不到（显示旧值）' : '统计读不到（暂无数据）'}</span>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-2 rounded-lg border border-base-800/80 bg-base-950/40 p-2.5 sm:grid-cols-3">
+                      <div className="min-w-0">
+                        <div className="text-[11px] text-ink-faint">归属权益</div>
+                        <div className={cn('num mt-0.5 text-sm font-semibold', stats ? 'text-ink-hi' : 'text-ink-faint')}>
+                          {stats ? fmtUsd(equityOf(trader, stats), 2) : '—'}
+                        </div>
+                        {stats && isLedgerSuspect(trader.ledger, dryRunOf(trader.id)) && (
+                          <div className="text-[11px] text-ink-faint">按交易所实际成交计</div>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[11px] text-ink-faint">收益率</div>
+                        <div className={cn('num mt-0.5 text-sm font-semibold', calibrated ? pnlColor(calibrated.returnPercent) : 'text-ink-faint')}>
+                          {calibrated ? fmtPercent(calibrated.returnPercent) : '—'}
+                        </div>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[11px] text-ink-faint">净盈亏</div>
+                        <div
+                          className={cn(
+                            'num mt-0.5 text-sm font-semibold',
+                            calibrated ? pnlColor(calibrated.realizedPnl) : 'text-ink-faint',
+                            pnlTip && 'cursor-help',
+                          )}
+                          data-aq-tip={pnlTip}
+                        >
+                          {calibrated ? fmtUsdSigned(calibrated.realizedPnl, 2) : '—'}
+                        </div>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[11px] text-ink-faint">胜率</div>
+                        <div className="num mt-0.5 text-sm font-medium text-ink-hi">
+                          {stats ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
+                        </div>
+                        {stats && (
+                          <div className="num text-[11px] text-ink-faint">
+                            {fmtInt(stats.wins)} 盈 · {fmtInt(stats.losses)} 亏
+                          </div>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[11px] text-ink-faint">盈利因子 PF</div>
+                        <div className="num mt-0.5 text-sm font-medium text-ink-hi">
+                          {stats ? fmtProfitFactor(stats.profitFactor) : '—'}
+                        </div>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[11px] text-ink-faint">持仓 / 运行</div>
+                        <div className="num mt-0.5 text-sm font-medium text-ink-hi">
+                          {stats ? `${fmtInt(stats.openPositions)} 持仓` : '—'}
+                        </div>
+                        <div className="num text-[11px] text-ink-faint">
+                          {stats ? `${fmtDuration(stats.uptimeHours * 60)} · ${timeAgo(trader.lastCycleAt)}` : timeAgo(trader.lastCycleAt)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/*
+              宽屏表格视图（>= lg / >= 1024px）：
+              拆清核心列（机器人 / 模式 / 交易所 / 状态 / 归属权益 / 收益率 / 净盈亏 / 胜率 / 盈利因子 / 持仓 / 周期与运行 / 操作），
+              弃用易互相挤压重叠的 table-fixed 百分比宽度，改用自然列宽 + overflow-x-auto 平滑横向兜底。
+            */}
+            <div className="hidden min-h-0 flex-1 overflow-auto lg:block xl:min-h-[12rem]">
+              <table className="w-full min-w-[1120px] border-collapse">
                 <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
                   <tr>
-                    <th className="th w-[22%]">机器人</th>
-                    <th className="th hidden w-[14%] md:table-cell">交易所 / 周期</th>
-                    <th className="th w-[8%]">状态</th>
+                    <th className="th">机器人</th>
+                    <th className="th">模式 / 档位</th>
+                    <th className="th">交易所账户</th>
+                    <th className="th">状态</th>
                     <th
-                      className="th w-[11%] text-right"
+                      className="th text-right"
                       title={
                         '归属权益 = 起始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。' +
                         '同一账户下其他机器人挣的钱不算在内。' +
@@ -614,17 +765,23 @@ export function TradersPage() {
                     >
                       归属权益
                     </th>
-                    <th className="th w-[11%] text-right" title="总收益率 = 归属权益相对起始权益的变化；下面一行是净已实现盈亏。">
-                      盈亏
+                    <th className="th text-right" title="总收益率 = 校准后净已实现盈亏 ÷ 起始权益">
+                      收益率
                     </th>
-                    <th className="th hidden w-[11%] text-right lg:table-cell" title="胜率 · 盈/亏笔数与盈利因子（∞ = 尚无亏损成交）。">
-                      胜率 / PF
+                    <th className="th text-right" title={`${NET_PNL_FORMULA}（不含浮动盈亏）`}>
+                      净盈亏
                     </th>
-                    <th className="th w-[5%] text-right">持仓</th>
-                    <th className="th hidden w-[8%] pr-3 text-right xl:table-cell" title="已运行时长 / 最近一个决策周期的时间。">
-                      运行 / 最近
+                    <th className="th text-right" title="已平仓胜率与盈/亏笔数">
+                      胜率
                     </th>
-                    <th className="th w-[10%] text-right">操作</th>
+                    <th className="th text-right" title="盈利因子 Profit Factor（∞ 表示尚无亏损成交）">
+                      盈利因子
+                    </th>
+                    <th className="th text-right">持仓</th>
+                    <th className="th text-right" title="决策周期数、间隔、运行时长与最近一次决策时间">
+                      周期 / 运行
+                    </th>
+                    <th className="th text-right">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -639,47 +796,47 @@ export function TradersPage() {
                     const rowBusy = busyId === trader.id;
                     const starting = status === 'starting' || optimisticStarting.has(trader.id);
                     const account = accountOf(exchangeAccountsQuery.data, trader.exchangeAccountId);
+                    const pnlTip = stats
+                      ? (isLedgerSuspect(trader.ledger, dryRunOf(trader.id))
+                          ? '平台账本与交易所的成交流水对不上，所以这一行改用交易所的流水校准。'
+                          : `${pnlFormulaText(statsCosts(stats))}。`) +
+                        `\n· 浮动盈亏（未计入本行）：${fmtUsdSigned(stats.unrealizedPnl, 2)}`
+                      : undefined;
                     return (
                       <tr key={trader.id} className="row-hover">
                         <td className="td">
-                          <div className="flex min-w-0 items-center gap-2.5">
+                          <div className="flex items-center gap-2.5">
                             <Link to={`/traders/${trader.id}`} className="shrink-0">
                               <TraderAvatar id={trader.id} size={28} className="rounded-lg" />
                             </Link>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex min-w-0 items-center gap-1.5">
-                                <Link
-                                  to={`/traders/${trader.id}`}
-                                  className="min-w-0 truncate text-sm font-semibold text-ink-hi transition hover:text-accent"
-                                  title={trader.name}
-                                >
-                                  {trader.name}
-                                </Link>
-                                <MoneyBadge dryRun={trader.dryRun} />
-                              </div>
-                              <div className="mt-1 flex flex-wrap items-center gap-1">
-                                <ModeBadge mode={trader.mode} />
-                                {trader.mode === 'ai_managed' && (
-                                  <ManagedRiskBadge profile={trader.managedRiskProfile} />
-                                )}
-                              </div>
+                            <div className="flex min-w-0 items-center gap-1.5">
+                              <Link
+                                to={`/traders/${trader.id}`}
+                                className="max-w-[140px] truncate text-sm font-semibold text-ink-hi transition hover:text-accent"
+                                title={trader.name}
+                              >
+                                {trader.name}
+                              </Link>
+                              <MoneyBadge dryRun={trader.dryRun} />
                             </div>
                           </div>
                         </td>
-                        <td className="td hidden md:table-cell">
-                          <div className="min-w-0">
-                            <ExchangeAccountChip account={account} />
-                            <div className="num mt-1 truncate text-xs text-ink-faint">
-                              周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
-                            </div>
+                        <td className="td">
+                          <div className="flex flex-col items-start gap-1">
+                            <ModeBadge mode={trader.mode} />
+                            {trader.mode === 'ai_managed' && (
+                              <ManagedRiskBadge profile={trader.managedRiskProfile} />
+                            )}
                           </div>
+                        </td>
+                        <td className="td">
+                          <ExchangeAccountChip account={account} />
                         </td>
                         <td className="td">
                           <TraderStatusBadge status={status} live={isLiveRunning} />
                           {trader.consecutiveFailures > 0 && (
-                            /* 短句 + warn 色；完整说明在 title（状态列只有 8% 宽）。 */
                             <div
-                              className="num truncate text-xs text-warn"
+                              className="num mt-0.5 text-xs text-warn"
                               title={`连续失败 ${trader.consecutiveFailures} 次；超过熔断阈值会进入安全模式。`}
                             >
                               失败 ×{trader.consecutiveFailures}
@@ -687,98 +844,22 @@ export function TradersPage() {
                           )}
                           {summaryErrors[trader.id] ? (
                             <div
-                              className="mt-1 text-xs text-warn"
+                              className="mt-0.5 text-xs text-warn"
                               title={
                                 stats
                                   ? `读取这台机器人的统计失败：${summaryErrors[trader.id]}。这一行的权益/收益率是上一次成功读到的值。`
                                   : `读取这台机器人的统计失败：${summaryErrors[trader.id]}。这一行还没有成功读到过统计值。`
                               }
                             >
-                              {stats ? '统计读不到（显示的是旧值）' : '统计读不到（暂无数据）'}
+                              {stats ? '统计旧值' : '统计失败'}
                             </div>
                           ) : null}
                         </td>
-                        <td className={`td num text-right ${stats ? 'text-ink-hi' : 'text-ink-faint'}`}>
-                          {/*
-                            ══════════════════════════════════════════════════════════
-                            ⚠️⚠️ **这一格原来并列两个互相矛盾的数**（2026-10-14 用户报）
-                            ══════════════════════════════════════════════════════════
-
-                            ## 用户的原话
-
-                            > 「和里面数据不一致为什么还没修复？图3上面那个数字到底是啥意思？
-                            >   别画蛇添足，列表和详情要正确对齐数字，别整无意义的垃圾数据」
-
-                            ## 原来显示什么（图3）
-
-                            ```
-                              $104.89        ← 归属权益（本地账本推算）
-                              账户 $92.34    ← 交易所真实权益
-                            ```
-                            两个数差 12.56，而**没有任何解释**。用户看到两个数并列，
-                            第一反应是"到底哪个是我的钱"。
-
-                            ## 为什么上面那个是错的
-
-                            ```
-                              归属权益 = 起始权益 + trades.net_pnl + 浮盈
-                              而 trades.net_pnl 【被对账重建写坏了】：
-                                39 笔 source='reconciled' 的记录里 16 笔 pnl=0
-                                （本该有盈亏），合计虚高 9.13
-                              → 归属权益 104.89 而账户真实 92.34
-                            ```
-                            ⚠️ 这正是本项目反复说的那条原则：
-                            **「把数字改对，比在说明里解释它为什么错要好」** ——
-                            我上一轮只是在指标卡加了一行「账目与交易所差 +12.55」的说明，
-                            **那是错的**：说明不能替代正确的数字。
-
-                            ## 修法：用交易所校准值（与详情页同一个口径）
-
-                            详情页早就这么做了（`TraderPage` 的 `realized = ledger.exchangeNet`）：
-                            ```
-                              ledger.gap 超容差 → 用交易所的成交流水（exchangeNet）为准
-                              否则           → 用账本（它与交易所一致，没必要绕）
-                            ```
-                            这里复刻同一个判据，于是**列表页与详情页给出同一个数**。
-
-                            ## 为什么不再并列显示「账户」
-
-                            那个小字原本是为了区分"归属"与"账户钱包"两个概念。
-                            但在**账本不可信**时，那个区分传达的不是信息而是困惑 ——
-                            用户要的是"这个机器人有多少钱"，而那应该是**一个**数。
-                            共享钱包的事实仍由上面「账户权益合计」那张卡表达
-                            （它按账户去重，那才是它该在的地方）。
-                          */}
+                        <td className={`td num text-right font-medium ${stats ? 'text-ink-hi' : 'text-ink-faint'}`}>
                           {stats ? fmtUsd(equityOf(trader, stats), 2) : '—'}
-                          {/*
-                            ══════════════════════════════════════════════════════════
-                            ⚠️ **这里不能写行话**（2026-10-14 用户报）
-                            ══════════════════════════════════════════════════════════
-
-                            ## 用户的原话
-
-                            > 「『账本有差 · 已按交易所校准』什么鬼意思？这是做给人看的？」
-
-                            **他说得对**：`账本` / `交易所校准` 是我们内部的词，
-                            而这一行面对的是操作员 —— 他关心的不是"我怎么算的"，
-                            而是**"这个数准不准"**。
-
-                            ## 措辞的选择
-
-                            ```
-                            ✗ 账本有差 · 已按交易所校准    ← 内部词，且像一句警告
-                            ✓ 按交易所实际成交计            ← 说明"这个数从哪来"
-                            ```
-                            ⚠️ 用 `text-ink-faint` 而不是之前的 `text-warn`：
-                            这是**口径说明**，不是"出问题了" ——
-                            用警示色会让操作员以为账目坏了（而它恰恰是**更准**的那个数）。
-
-                            ⚠️ 详细原因保留在 `title` 里（想深究的人能查到），
-                            但**可见的那一行只放结论**。
-                          */}
                           {stats && isLedgerSuspect(trader.ledger, dryRunOf(trader.id)) && (
                             <div
-                              className="text-xs text-ink-faint"
+                              className="text-xs font-normal text-ink-faint"
                               title={
                                 '这个数按交易所的实际成交算，不是按平台自己的记录 —— ' +
                                 `平台记录与交易所差 ${fmtUsdSigned(trader.ledger!.gap, 4)}（平台有几笔记错了）。` +
@@ -789,154 +870,70 @@ export function TradersPage() {
                             </div>
                           )}
                         </td>
-                        {/*
-                          毛 / 净 / PF 三行合成一块（原来分散在「总收益率」和「成交笔数」两列里）：
-                          它们是同一个口径下的三个数，分开摆既占宽度又要来回扫。
-                          净 first：它才是余额真正发生的变化；毛是它的输入，退一档显示。
-                        */}
-                        <td className={`td num text-right ${stats ? pnlColor(calibratedOf(trader, stats).returnPercent) : ''}`}>
-                          {/*
-                            ══════════════════════════════════════════════════════════
-                            ⚠️⚠️ **这一列也必须用交易所校准值**（2026-10-14 用户报）
-                            ══════════════════════════════════════════════════════════
-
-                            ## 用户的原话
-
-                            > 「盈亏计算也不对啊！！！你做事情只做一半？？」
-
-                            ## 事实（线上 `#10`）
-
-                            ```
-                              列表页显示  +5.65%（账本：净 +5.66）
-                              交易所真实   -6.99%（净 -7.00）
-                              → 差 12.6 个百分点：【显示盈利，实际亏损】
-                            ```
-                            而"归属权益"那一格我上一轮已经校准过了 ——
-                            **同一行里两个数用两套口径**，那就是"只做一半"。
-
-                            ## 根因：`stats.totalReturnPercent` 是服务端按**坏账本**算的
-
-                            ```
-                              repositories.ts:4209
-                                totalReturnPercent = (equityNow − initial) / initial × 100
-                              而 equityNow 用了 trades.net_pnl（对账重建写坏的那份）
-                            ```
-
-                            ## 修法：整行的收益率 / 净额 / 颜色都从**同一个校准值**派生
-
-                            ```
-                              校准后的净额 = ledger.exchangeNet（账本可信时用账本）
-                              校准后的收益率 = 校准净额 / 起始权益 × 100
-                            ```
-                            ⚠️ **必须整行一致**：只改收益率而留下面的净额，就是同一个错的另一面。
-                          */}
+                        <td
+                          className={`td num text-right font-medium ${stats ? pnlColor(calibratedOf(trader, stats).returnPercent) : 'text-ink-faint'}`}
+                        >
                           {stats ? fmtPercent(calibratedOf(trader, stats).returnPercent) : '—'}
-                          {stats && (
-                            <div
-                              className="truncate text-xs text-ink-faint"
-                              title={
-                                (isLedgerSuspect(trader.ledger, dryRunOf(trader.id))
-                                  ? '平台账本与交易所的成交流水对不上，所以这一行改用交易所的流水校准。'
-                                  : `${pnlFormulaText(statsCosts(stats))}。`) +
-                                `浮动盈亏 ${fmtUsdSigned(stats.unrealizedPnl, 2)} 未计入本行。`
-                              }
-                            >
-                              {/*
-                                ⚠️ **只留净额**：毛额与净额的差就是成本，而成本这件事
-                                在 `title` 的算式里说得更完整。同一行里三个数字（净/毛/费）
-                                挤在 13% 的列宽里，在 1024/768 下会溢出到下一列。
-                              */}
-                              净 {fmtUsdSigned(calibratedOf(trader, stats).realizedPnl, 2)}
-                            </div>
+                        </td>
+                        <td
+                          className={`td num text-right font-medium ${stats ? pnlColor(calibratedOf(trader, stats).realizedPnl) : 'text-ink-faint'}`}
+                        >
+                          {stats ? (
+                            <span className={pnlTip ? 'cursor-help' : undefined} data-aq-tip={pnlTip}>
+                              {fmtUsdSigned(calibratedOf(trader, stats).realizedPnl, 2)}
+                            </span>
+                          ) : (
+                            '—'
                           )}
                         </td>
-                        {/* `winRatePercent` is already 0–100 — never × 100 again.
-                            盈/亏是后端给的真实笔数，不由胜率反推。 */}
-                        <td className="td hidden num text-right lg:table-cell">
+                        <td className="td num text-right">
                           {stats ? (
                             <>
-                              {`${stats.winRatePercent.toFixed(1)}%`}
-                              <div
-                                className="text-xs text-ink-faint"
-                                title={`${fmtInt(stats.totalTrades)} 笔已平仓；盈利因子 ∞ 表示尚无亏损成交。`}
-                              >
-                                {fmtInt(stats.wins)} 盈 · {fmtInt(stats.losses)} 亏 · PF{' '}
-                                {fmtProfitFactor(stats.profitFactor)}
+                              <span className="font-medium text-ink-hi">{`${stats.winRatePercent.toFixed(1)}%`}</span>
+                              <div className="text-xs text-ink-faint">
+                                {fmtInt(stats.wins)} 盈 · {fmtInt(stats.losses)} 亏
                               </div>
                             </>
                           ) : (
                             '—'
                           )}
                         </td>
-                        <td className="td num text-right">{stats ? fmtInt(stats.openPositions) : '—'}</td>
-                        {/* 运行时长 + 最近周期合成一格，悬停可查最大回撤。 */}
+                        <td className="td num text-right font-medium text-ink-hi">
+                          {stats ? fmtProfitFactor(stats.profitFactor) : '—'}
+                        </td>
+                        <td className="td num text-right">
+                          <span
+                            className={
+                              stats && stats.openPositions > 0 ? 'font-semibold text-accent' : 'text-ink-mid'
+                            }
+                          >
+                            {stats ? fmtInt(stats.openPositions) : '—'}
+                          </span>
+                        </td>
                         <td
-                          className="td hidden num whitespace-nowrap pr-3 text-right text-ink-lo xl:table-cell"
+                          className="td num text-right text-ink-lo"
                           title={stats ? `最大回撤 ${fmtDrawdownPercent(stats.maxDrawdownPercent)}` : undefined}
                         >
-                          {stats ? fmtDuration(stats.uptimeHours * 60) : '—'}
-                          <div className="text-xs text-ink-faint">{timeAgo(trader.lastCycleAt)}</div>
-                        </td>
-                        <td className="td whitespace-nowrap">
-                          {/* 一行、两个常用动作 + 一个溢出菜单。以前这一格把所有动作
-                              平铺开，行高被撑起来、宽度也被吃掉。 */}
-                          <div className="flex items-center justify-end gap-1.5">
-                            {/*
-                              ⚠️ **`starting` 必须单独占一个分支，不能和"没在跑"共用「启动」按钮。**
-
-                              启动接口是**异步**的：返回 200 之后服务端才依次
-                              `stopped → starting → running`（预检、挂保护单都会花时间）。
-                              之前这里只看 `trader.isRunning`，而 `starting` 期间它是 false ——
-                              于是列表在"已经开始启动"之后仍显示一个可点的「启动」，
-                              操作员会以为没点上、再点一次（服务端会拒绝，但界面上看不出为什么）。
-                            */}
-                            {starting ? (
-                              <Button
-                                size="sm"
-                                variant="success"
-                                disabled
-                                title="启动中：服务端正在执行预检并拉起循环。状态会自动更新为「运行中」；若失败会显示在状态列。"
-                              >
-                                <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
-                                启动中
-                              </Button>
-                            ) : isLiveRunning ? (
-                              /*
-                               * ⚠️ **列表操作列只保留一个主操作**（用户 2026-11-10：
-                               * 「立即分析不应该出现在这里，列表只需要启动按钮就行」）。
-                               *
-                               * 原来运行中的行并排放「立即分析 + 停止」，两件事的视觉权重一样，
-                               * 而且和未运行行的「启动」不在同一列宽上 —— 截图里看到的就是
-                               * 那一格按钮错位、把表格挤乱。要立刻跑一轮请进详情页（那里有）。
-                               */
-                              <Button
-                                size="sm"
-                                variant="danger"
-                                busy={rowBusy && pending?.kind !== 'delete'}
-                                title="停止循环 — 需要确认"
-                                onClick={() => setPending({ kind: 'stop', trader })}
-                              >
-                                <CircleStop aria-hidden className="h-3.5 w-3.5" />
-                                停止
-                              </Button>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="success"
-                                busy={rowBusy}
-                                onClick={() => void startNow(trader)}
-                              >
-                                <Play aria-hidden className="h-3.5 w-3.5" />
-                                启动
-                              </Button>
-                            )}
-                            <TraderRowMenu
-                              trader={trader}
-                              onOpen={() => navigate(`/traders/${trader.id}`)}
-                              onEdit={() => setEditTarget(trader)}
-                              onDelete={() => setPending({ kind: 'delete', trader })}
-                            />
+                          <div className="text-xs text-ink-mid">
+                            周期 {fmtInt(trader.lastCycleNumber)} · 每 {trader.cycleIntervalMinutes}m
                           </div>
+                          <div className="mt-0.5 text-xs text-ink-faint">
+                            {stats ? `${fmtDuration(stats.uptimeHours * 60)} · ${timeAgo(trader.lastCycleAt)}` : timeAgo(trader.lastCycleAt)}
+                          </div>
+                        </td>
+                        <td className="td">
+                          <TraderRowActions
+                            trader={trader}
+                            starting={starting}
+                            isLiveRunning={isLiveRunning}
+                            rowBusy={rowBusy}
+                            stopPending={pending?.kind === 'delete'}
+                            onStart={() => void startNow(trader)}
+                            onStop={() => setPending({ kind: 'stop', trader })}
+                            onOpen={() => navigate(`/traders/${trader.id}`)}
+                            onEdit={() => setEditTarget(trader)}
+                            onDelete={() => setPending({ kind: 'delete', trader })}
+                          />
                         </td>
                       </tr>
                     );
@@ -1045,6 +1042,67 @@ export function TradersPage() {
           void tradersQuery.reload();
         }}
       />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  行的主操作 + 溢出菜单                                                      */
+/* -------------------------------------------------------------------------- */
+
+function TraderRowActions({
+  trader,
+  starting,
+  isLiveRunning,
+  rowBusy,
+  stopPending,
+  onStart,
+  onStop,
+  onOpen,
+  onEdit,
+  onDelete,
+}: {
+  trader: TraderRow;
+  starting: boolean;
+  isLiveRunning: boolean;
+  rowBusy: boolean;
+  stopPending: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onOpen: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center justify-end gap-1.5">
+      {starting ? (
+        <Button
+          size="sm"
+          variant="success"
+          disabled
+          title="启动中：服务端正在执行预检并拉起循环。状态会自动更新为「运行中」；若失败会显示在状态列。"
+        >
+          <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
+          启动中
+        </Button>
+      ) : isLiveRunning ? (
+        <Button
+          size="sm"
+          variant="danger"
+          busy={rowBusy && !stopPending}
+          title="停止循环 — 需要确认"
+          onClick={onStop}
+        >
+          <CircleStop aria-hidden className="h-3.5 w-3.5" />
+          停止
+        </Button>
+      ) : (
+        <Button size="sm" variant="success" busy={rowBusy} onClick={onStart}>
+          <Play aria-hidden className="h-3.5 w-3.5" />
+          启动
+        </Button>
+      )}
+      <TraderRowMenu trader={trader} onOpen={onOpen} onEdit={onEdit} onDelete={onDelete} />
     </div>
   );
 }
