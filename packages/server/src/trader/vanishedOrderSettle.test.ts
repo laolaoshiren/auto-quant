@@ -8,7 +8,7 @@ import {
   positions as positionStore,
   traders as traderStore,
 } from '../store/repositories.js';
-import { settleStaleOrdersForTrader } from './staleOrders.js';
+import { settleConfirmedProtectionOrders, settleStaleOrdersForTrader } from './staleOrders.js';
 
 initDb(':memory:');
 
@@ -104,4 +104,80 @@ test('★ 线上回归（#21 PIEVERSEUSDT）：仓位止损平仓后即使距挂
   assert.equal(slAfter?.status, 'FILLED');
   assert.equal(tpAfter?.status, 'CANCELED');
   assert.equal(tpAfter?.cancelSource, 'system_reconcile');
+});
+
+test('★ 线上回归（#21 SSVUSDT #4033）：移动止损刚改价 <2 分钟即触发平仓，交易所明确返回 FINISHED 时立即结清而不误伤 not-found', async () => {
+  const model = aiModels.create({
+    label: 'trailing-sl-test-model',
+    provider: 'openai',
+    model: 'gpt-test',
+    apiKeyEnc: '',
+    baseUrl: 'https://example.invalid/v1',
+    temperature: 0.2,
+    maxTokens: 4096,
+    timeoutSeconds: 60,
+    maxRetries: 0,
+  });
+  const trader = traderStore.create({
+    name: 'trailing-sl-settle-test',
+    mode: 'ai_managed',
+    dryRun: false,
+    exchangeAccountId: null,
+    aiModelId: model.id,
+    strategyId: null,
+    cycleIntervalMinutes: 15,
+    initialEquity: 100,
+    paperStartingBalance: 100,
+  });
+
+  const slId = orderStore.insert({
+    traderId: trader.id,
+    exchangeOrderId: 'algo-sl-4033',
+    clientOrderId: 'cli-sl-4033',
+    symbol: 'SSVUSDT',
+    side: 'SELL',
+    type: 'STOP_MARKET',
+    purpose: 'stop_loss',
+    quantity: 13.64,
+    price: null,
+    stopPrice: 2.5932,
+    status: 'NEW',
+  });
+  const unconfirmedTpId = orderStore.insert({
+    traderId: trader.id,
+    exchangeOrderId: 'algo-tp-notfound',
+    clientOrderId: 'cli-tp-notfound',
+    symbol: 'SSVUSDT',
+    side: 'SELL',
+    type: 'TAKE_PROFIT_MARKET',
+    purpose: 'take_profit',
+    quantity: 13.64,
+    price: null,
+    stopPrice: 2.73,
+    status: 'NEW',
+  });
+
+  const settled = await settleConfirmedProtectionOrders({
+    traderId: trader.id,
+    protectionOrderIds: ['algo-sl-4033', 'algo-tp-notfound'],
+    getAlgoOrder: async (id) =>
+      id === 'algo-sl-4033'
+        ? ({
+            algoId: 4033,
+            symbol: 'SSVUSDT',
+            algoStatus: 'FINISHED',
+            actualQty: '13.64',
+            actualPrice: '2.591',
+          } as never)
+        : 'not-found',
+  });
+
+  assert.equal(settled, 1, '仅结清交易所明确确认 FINISHED 的止损单');
+  const rows = orderStore.list(trader.id);
+  const slRow = rows.find((r) => r.id === slId);
+  const tpRow = rows.find((r) => r.id === unconfirmedTpId);
+  assert.equal(slRow?.status, 'FILLED');
+  assert.equal(slRow?.filledQty, 13.64);
+  assert.equal(slRow?.avgPrice, 2.591);
+  assert.equal(tpRow?.status, 'NEW', 'not-found 仍交由 2 分钟宽限窗口处理，避免读竞态误判');
 });

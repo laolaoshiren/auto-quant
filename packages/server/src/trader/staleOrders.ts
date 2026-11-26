@@ -194,6 +194,78 @@ export async function settleStaleOrdersForTrader(input: {
   return settled;
 }
 
+const TERMINAL_ORDER_STATUSES = new Set([
+  'FILLED',
+  'CANCELED',
+  'CANCELLED',
+  'EXPIRED',
+  'EXPIRED_IN_MATCH',
+  'EXPIRED_IN_FUTURES',
+  'REJECTED',
+  'FAILED',
+]);
+
+/**
+ * 允许绕过 2 分钟宽限窗口直接落库的交易所权威终态：
+ * - `FINISHED` / `TRIGGERED`（已真实触发成交）与 `EXPIRED`（仓位归零被交易所自动失效）
+ *   均为交易所明确执行的确定性终态，不存在读竞态；
+ * - `CANCELED` 仅在我们自己显式撤单成功时立即写库，否则仍尊重 2 分钟宽限窗口。
+ */
+const IMMEDIATE_ALGO_FINAL_STATUS: Partial<Record<BinanceAlgoStatus, string>> = {
+  FINISHED: 'FILLED',
+  TRIGGERED: 'FILLED',
+  EXPIRED: 'EXPIRED',
+};
+
+/**
+ * 持仓已确认在交易所消失时，针对已知保护单单号（`stop_order_id` / `tp_order_id`）
+ * 直接向交易所回读权威终态并落库：
+ *
+ * - 场景（2026-11-26 `#21 SSVUSDT #4033` 线上实测）：移动止损刚把止损单改价 113 秒后立刻触发平仓，
+ *   仓位已记账关闭，但因未满 2 分钟 `ORDER_SETTLE_GRACE_MS`，`settleStaleOrders` 跳过了这张刚触发的止损单，
+ *   导致界面与 K 线图在下一轮周期前一直显示「持仓 0 · 止损单已挂单」。
+ * - 安全边界：仅采信 `FINISHED` / `TRIGGERED` / `EXPIRED` 确定性终态；
+ *   `CANCELED` / `not-found` / `null` 仍交由 2 分钟宽限窗口兜底，不误判刚下的单。
+ */
+export async function settleConfirmedProtectionOrders(input: {
+  traderId: number;
+  protectionOrderIds: readonly string[];
+  getAlgoOrder: (exchangeOrderId: string) => Promise<BinanceAlgoOrderResponse | null | 'not-found'>;
+}): Promise<number> {
+  const uniqueIds = [
+    ...new Set(
+      input.protectionOrderIds
+        .map((id) => String(id ?? '').trim())
+        .filter((id) => id.length > 0),
+    ),
+  ];
+  if (uniqueIds.length === 0) return 0;
+
+  let settled = 0;
+  for (const exchangeOrderId of uniqueIds) {
+    const row = orderStore.findByExchangeOrderId(input.traderId, exchangeOrderId);
+    if (!row) continue;
+    if (TERMINAL_ORDER_STATUSES.has(String(row.status ?? '').toUpperCase())) continue;
+
+    const algo = await input.getAlgoOrder(exchangeOrderId).catch(() => null);
+    if (!algo || algo === 'not-found') continue;
+
+    const status = IMMEDIATE_ALGO_FINAL_STATUS[algo.algoStatus];
+    if (!status) continue;
+
+    const filledQty = Number(algo.actualQty ?? 0) || 0;
+    const avgPrice = Number(algo.actualPrice ?? 0) || 0;
+    orderStore.update(row.id, {
+      status,
+      ...(filledQty > 0 ? { filledQty } : {}),
+      ...(avgPrice > 0 ? { avgPrice } : {}),
+      rawResponse: algo,
+    });
+    settled += 1;
+  }
+  return settled;
+}
+
 /**
  * 一张已经**不在交易所挂单列表里**的委托，最终是怎么结束的。
  *

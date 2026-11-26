@@ -127,6 +127,7 @@ import {
 import {
   ORDER_SETTLE_GRACE_MS,
   resolveFinalOrderStatus,
+  settleConfirmedProtectionOrders,
   settleStaleOrdersForTrader,
 } from './staleOrders.js';
 import {
@@ -6839,12 +6840,39 @@ export class AutoTrader {
         );
         for (const algoId of protectionIds) {
           if (!liveAlgoIds.has(algoId)) continue;
-          await this.deps.broker.cancelOrder(local.symbol, algoId, 'algo').catch((err) => {
-            log.warn(
-              `[${this.deps.trader.name}] 仓位已消失但撤残留保护单 ${local.symbol}#${algoId} 失败：${(err as Error).message}`,
-            );
-          });
+          const canceled = await this.deps.broker
+            .cancelOrder(local.symbol, algoId, 'algo')
+            .then(() => true)
+            .catch((err) => {
+              log.warn(
+                `[${this.deps.trader.name}] 仓位已消失但撤残留保护单 ${local.symbol}#${algoId} 失败：${(err as Error).message}`,
+              );
+              return false;
+            });
+          if (canceled) {
+            const localRow = orderStore.findByExchangeOrderId(this.deps.trader.id, algoId);
+            if (localRow) {
+              orderStore.update(localRow.id, {
+                status: 'CANCELED',
+                cancelSource: 'system_reconcile',
+              });
+            }
+          }
         }
+        /*
+         * 立即把交易所已明确返回终态（FINISHED/TRIGGERED/EXPIRED/CANCELED）的保护单落库，
+         * 避免移动止损刚改价 <2 分钟就触发止损时被 `ORDER_SETTLE_GRACE_MS` 跳过、
+         * 导致界面长时间显示「持仓 0 · 止损单仍为已挂单」（2026-11-26 #21 SSVUSDT #4033 实测）。
+         */
+        await settleConfirmedProtectionOrders({
+          traderId: this.deps.trader.id,
+          protectionOrderIds: protectionIds,
+          getAlgoOrder: (id) => this.deps.broker.getAlgoOrder(id),
+        }).catch((error) => {
+          log.warn(
+            `[${this.deps.trader.name}] 消失持仓 ${local.symbol} 回读保护单终态失败：${(error as Error).message}`,
+          );
+        });
       }
     }
     await this.settleStaleOrders(local.symbol).catch((error) => {
