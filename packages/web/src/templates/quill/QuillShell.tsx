@@ -64,6 +64,8 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import {
+  Bell,
+  BellOff,
   ChevronsUpDown,
   LogOut,
   Menu,
@@ -75,7 +77,7 @@ import {
   X,
 } from 'lucide-react';
 import { userRoleLabel } from '@aq/shared';
-import { useApp } from '../../lib/store';
+import { useApp, useEvents } from '../../lib/store';
 import { fmtClockOffset } from '../../lib/format';
 import { Badge, Dot, Tooltip, cn } from '../../components/ui';
 import { VersionBadge } from '../../components/VersionBadge';
@@ -323,6 +325,8 @@ export function QuillShell() {
             <Search aria-hidden className="h-3.5 w-3.5 shrink-0" />
             <span className="num hidden text-xs min-[64em]:inline">⌘K</span>
           </button>
+
+          <LiveToastToggle />
 
           <SkinToggle />
 
@@ -696,6 +700,37 @@ const RefreshButton = forwardRef<HTMLButtonElement>(function RefreshButton(_prop
  *
  * `forwardRef` 的理由同 `RefreshButton`（它也在 `<Tooltip>` 里）。
  */
+const LiveToastToggle = forwardRef<HTMLButtonElement>(function LiveToastToggle(_props, ref) {
+  const enabled = useEvents((s) => s.liveToastsEnabled);
+  const setEnabled = useEvents((s) => s.setLiveToastsEnabled);
+
+  return (
+    <Tooltip
+      side="bottom"
+      content={
+        enabled
+          ? '实时委托/成交弹窗：已开启（点击静音关闭）'
+          : '实时委托/成交弹窗：已关闭（点击重新开启）'
+      }
+    >
+      <button
+        ref={ref}
+        type="button"
+        onClick={() => setEnabled(!enabled)}
+        aria-label={enabled ? '关闭实时交易弹窗通知' : '开启实时交易弹窗通知'}
+        aria-pressed={enabled}
+        className={cn('q-icon-btn', !enabled && 'opacity-55')}
+      >
+        {enabled ? (
+          <Bell aria-hidden className="h-4 w-4" />
+        ) : (
+          <BellOff aria-hidden className="h-4 w-4" />
+        )}
+      </button>
+    </Tooltip>
+  );
+});
+
 const SkinToggle = forwardRef<HTMLButtonElement>(function SkinToggle(_props, ref) {
   const [skin, setLocalSkin] = useState<Skin>(() => getSkin());
 

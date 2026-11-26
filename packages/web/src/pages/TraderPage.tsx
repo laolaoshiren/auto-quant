@@ -1203,12 +1203,17 @@ export function TraderPage() {
    * 而 `orchestrator.ts` 的注释却写着"操作员点立即分析" —— 操作员在等一个
    * 永远不会发生的审视。
    */
+  /*
+   * 旧 1.0 `AgentRuntime` 后台自审仅对暂缓中的 `ai_team` 模式生效；
+   * 智能托管 2.0（`ai_managed`）已由独立 `radar/` + `managed/` 接管且后端直接跳过旧自审，
+   * 故不再在 `ai_managed` 面板头渲染无实际效果的「AI 审视」空炮按钮。
+   */
   const reviewAction =
-    running && trader.mode === 'ai_managed' ? (
+    running && trader.mode === 'ai_team' ? (
       <Button
         size="sm"
         busy={reviewBusyId === trader.id}
-        title="让 AI 现在审视一次策略：读绩效、复盘与历史实验，决定要不要改参数。它不会下单，但会改参数（受结构守卫约束）。"
+        title="让 AI 团队审视一次策略参数（仅多智能体模式有效）。"
         onClick={() => void requestReview(trader.id, trader.name)}
       >
         <Brain aria-hidden className="h-3.5 w-3.5" />

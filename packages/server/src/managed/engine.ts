@@ -264,7 +264,10 @@ export const MANAGED_AGENT_TOOLS: readonly ToolSpec[] = [
               stop_loss: { type: 'number' },
               take_profit: { type: 'number' },
               reduce_percent: { type: 'number' },
-              confidence: { type: 'number' },
+              confidence: {
+                type: 'number',
+                description: '0-100 对本条判断的信心度（每条决策必填，含 wait/skip/hold）。',
+              },
               reasoning: { type: 'string' },
               // 开仓时可内联初始论点字段（成交即刻落库绑定）
               add_trigger: { type: 'string' },
@@ -274,7 +277,7 @@ export const MANAGED_AGENT_TOOLS: readonly ToolSpec[] = [
               min_progress_r: { type: 'number' },
               max_adverse_excursion_pct: { type: 'number' },
             },
-            required: ['symbol', 'action', 'reasoning'],
+            required: ['symbol', 'action', 'confidence', 'reasoning'],
           },
         },
       },

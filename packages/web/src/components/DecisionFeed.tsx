@@ -132,13 +132,12 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type ReactNode,
 } from 'react';
-import { Link } from 'react-router-dom';
 import {
   Ban,
   Check,
+  ChevronDown,
   ChevronRight,
   LoaderCircle,
   Lock,
@@ -172,6 +171,8 @@ import { TeamCycleBlock } from './TeamBoard/TeamCycleBlock';
 import { usePolled } from '../lib/hooks';
 import { Badge, Empty, ErrorNote, Panel, Spinner3, cn } from './ui';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
+import { CoinIcon } from './CoinIcon';
+import { DecisionArchiveModal } from './DecisionArchiveModal';
 import { humanizeToolNames } from '../lib/toolLabels';
 import { summarizeMemberOutput } from '../lib/memberSummary';
 import { plainText } from '../lib/plainText';
@@ -214,31 +215,6 @@ function mergeFresh(prev: DecisionRecord[], rows: DecisionRecord[]): DecisionRec
   const seen = new Set(prev.map((record) => record.id));
   const fresh = rows.filter((record) => !seen.has(record.id));
   return fresh.length > 0 ? [...prev, ...fresh] : prev;
-}
-
-/**
- * 币种图标的底色。
- *
- * 参考产品给每个币一个彩色圆点，而**这里不引入图标库**（`package.json` 里没有
- * 币种图标依赖，为几个圆点加一个依赖不划算）。用币种符号哈希出一个色相：
- * 同一个币**永远**是同一个颜色，刷新、跨周期、跨机器人都不变 ——
- * 颜色是给眼睛当锚点用的，随机变一次就废了。
- *
- * 固定 `42% 40%` 的饱和度与明度，只让**色相**变：深色界面上一排圆点如果明度
- * 也各不相同，最亮的那几个会抢走数字的注意力（`DESIGN.md` §1：装饰不能挤压数据）。
- */
-function coinColor(symbol: string): string {
-  let hash = 0;
-  for (let index = 0; index < symbol.length; index += 1) {
-    hash = (hash * 31 + symbol.charCodeAt(index)) % 100_000;
-  }
-  // 乘 47 再取模：让相邻的符号（`BTCUSDT` / `BTUSDT`）落到**相隔很远**的色相上，
-  // 而不是相邻的、肉眼分不出来的两档。
-  return `hsl(${(hash * 47) % 360} 42% 40%)`;
-}
-
-function coinInitial(symbol: string): string {
-  return symbol.slice(0, 1).toUpperCase() || '?';
 }
 
 /**
@@ -1156,6 +1132,8 @@ export function DecisionFeed({
    * `⚡立即分析   ↻`（`DECISION-FEED.md` §1）。抽成变量是为了加载态那张面板也用同一份 ——
    * 否则数据一到，这个按钮会先从页面上消失再出现，读起来像功能坏了。
    */
+  const [archiveOpen, setArchiveOpen] = useState(false);
+
   const headerTitle = (
     <span className="inline-flex min-w-0 items-center gap-1.5">
       <span className="shrink-0">最近决策</span>
@@ -1167,13 +1145,14 @@ export function DecisionFeed({
     <span className="flex items-center gap-1">
       {actions}
       {actions && <span aria-hidden className="mx-0.5 h-3.5 w-px bg-base-700/80" />}
-      <Link
-        to="/data"
+      <button
+        type="button"
+        onClick={() => setArchiveOpen(true)}
         className="inline-flex h-[26px] items-center rounded-[7px] px-1.5 text-xs text-ink-lo transition hover:bg-base-800/80 hover:text-ink-hi"
-        title="查看完整历史决策与执行审计记录"
+        title="打开本机器人全量决策档案（支持按交易动作/币种检索、展开理由与翻阅历史）"
       >
         全部记录
-      </Link>
+      </button>
       {onToggleFocus !== undefined && (
         <button
           type="button"
@@ -1783,6 +1762,11 @@ export function DecisionFeed({
           </div>
           )}
       </>
+      <DecisionArchiveModal
+        traderId={traderId}
+        open={archiveOpen}
+        onClose={() => setArchiveOpen(false)}
+      />
     </Panel>
   );
 }
@@ -2634,7 +2618,7 @@ function DecisionRow({
               className="inline-flex items-baseline gap-1 rounded-md bg-base-900/70 px-1.5 py-0.5"
             >
               {part.label && <span className="text-[11px] text-ink-faint">{part.label}</span>}
-              <span className="num break-all font-medium text-ink-hi" title={FIGURE_TITLE[part.key]}>
+              <span className="num break-all text-[13px] font-semibold text-ink-hi" title={FIGURE_TITLE[part.key]}>
                 {part.value}
               </span>
             </span>
@@ -3000,7 +2984,7 @@ export function figureParts(decision: Decision, price: number | null): Figure[] 
       /* 加仓金额比"仓位"更贴切：它说的是"再投多少"。 */
       { key: 'size', label: '加仓', value: fmtUsd(decision.positionSizeUsd, 2) },
     ];
-    if (decision.leverage > 0) parts.push({ key: 'leverage', label: '', value: `${decision.leverage}x` });
+    if (decision.leverage > 0) parts.push({ key: 'leverage', label: '杠杆', value: `${decision.leverage}x` });
     if (num(decision.stopLoss)) parts.push({ key: 'stop', label: '止损', value: fmtPriceUsd(decision.stopLoss) });
     if (num(decision.takeProfit))
       parts.push({ key: 'target', label: '止盈', value: fmtPriceUsd(decision.takeProfit) });
@@ -3080,7 +3064,13 @@ export function figureParts(decision: Decision, price: number | null): Figure[] 
    */
   const limitEntry = decision.entryType === 'limit' && num(decision.limitPrice) ? decision.limitPrice : null;
   const entryRef = limitEntry ?? price;
-  const parts: Figure[] = [{ key: 'size', label: '', value: fmtUsd(num(decision.positionSizeUsd) ? decision.positionSizeUsd : null, 2) }];
+  const parts: Figure[] = [
+    {
+      key: 'size',
+      label: '仓位',
+      value: fmtUsd(num(decision.positionSizeUsd) ? decision.positionSizeUsd : null, 2),
+    },
+  ];
   if (entryRef !== null) {
     parts.push({ key: 'entry', label: limitEntry !== null ? '限价' : '开仓', value: fmtPriceUsd(entryRef) });
   }
@@ -3088,48 +3078,79 @@ export function figureParts(decision: Decision, price: number | null): Figure[] 
   if (num(decision.takeProfit))
     parts.push({ key: 'target', label: '止盈', value: fmtPriceUsd(decision.takeProfit) });
   if (entryRef !== null && num(decision.stopLoss) && num(decision.takeProfit)) {
-    // `Math.abs` 两侧：做空时价格在止损之上、止盈之下，直接相减会得到一个**负数**
-    // 的风险回报比 —— 那是一个不存在的比例，看起来像算错了。
     const risk = Math.abs(entryRef - decision.stopLoss);
     const reward = Math.abs(decision.takeProfit - entryRef);
-    if (risk > 0) parts.push({ key: 'reward', label: '', value: `1:${(reward / risk).toFixed(2)}` });
+    if (risk > 0) parts.push({ key: 'reward', label: '盈亏比', value: `1:${(reward / risk).toFixed(2)}` });
   }
-  /*
-   * ⚠️ **杠杆也要判一次，不能无条件拼。**
-   *
-   * 这一行的上面几行全都写着 `!== null` 的判断，只有它没有 —— 而模型**确实
-   * 会漏字段**：实测某次打开 `/traders/:id` 时这一格渲染成了字面量
-   * `undefinedx`（`${undefined}x` 的字符串拼接结果），就挂在"止盈 —"后面。
-   * 那看起来像界面出了故障，而实际是"模型这一条没给杠杆"。
-   *
-   * 判据用 `isNum` 而不是 `!== null`：实时推送的记录里缺字段时值是
-   * `undefined`，而 `undefined !== null` 为真 —— 上面那几行的判断在这个
-   * 来源下同样会漏（它们的 `fmtPriceUsd` 兜住了，所以没露出来）。
-   */
   if (isNum(decision.leverage) && decision.leverage > 0) {
-    parts.push({ key: 'leverage', label: '', value: `${decision.leverage}x` });
+    parts.push({ key: 'leverage', label: '杠杆', value: `${decision.leverage}x` });
   }
 
   return parts;
 }
 
 /**
- * 币种图标：一个彩色圆点，里面是符号首字母。
- *
- * 不引图标库（见 `coinColor`）。`aria-hidden` + 文本缩进对齐：这一列纯粹是视觉锚点，
- * 屏幕阅读器读出来是噪音 —— 旁边的符号本身才是内容。
+ * 将「三段式决策轨迹：plan → note:NEARUSDT → finalize(4)」解析成可读中文步骤胶囊，
+ * 避免原始英文工具名直出造成阅读噪音。
  */
-function CoinIcon({ symbol }: { symbol: string }) {
-  const style: CSSProperties = { backgroundColor: coinColor(symbol) };
-  return (
-    <span
-      aria-hidden
-      style={style}
-      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold leading-none text-white/90"
-    >
-      {coinInitial(symbol)}
-    </span>
-  );
+interface TrajectoryStep {
+  label: string;
+  tone: string;
+}
+
+function parseTrajectorySteps(raw: string): TrajectoryStep[] | null {
+  const m = /三段式决策轨迹[：:]\s*(.+)$/.exec(raw.trim());
+  if (!m?.[1]) return null;
+  const tokens = m[1]
+    .split(/\s*→\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (tokens.length === 0) return null;
+
+  return tokens.map((tok) => {
+    if (tok === 'plan') {
+      return {
+        label: '制定计划',
+        tone: "bg-sky-500/12 text-sky-300 [[data-skin='light']_&]:bg-sky-500/10 [[data-skin='light']_&]:text-sky-700",
+      };
+    }
+    const noteMatch = /^note:(.+)$/i.exec(tok);
+    if (noteMatch?.[1]) {
+      return {
+        label: `记笔记 ${noteMatch[1].replace(/USDT$/i, '')}`,
+        tone: "bg-violet-500/12 text-violet-300 [[data-skin='light']_&]:bg-violet-500/10 [[data-skin='light']_&]:text-violet-700",
+      };
+    }
+    const delMatch = /^note_del:(.+)$/i.exec(tok);
+    if (delMatch?.[1]) {
+      return {
+        label: `清笔记 ${delMatch[1].replace(/USDT$/i, '')}`,
+        tone: 'bg-base-800 text-ink-lo',
+      };
+    }
+    const thesisMatch = /^thesis:(.+)$/i.exec(tok);
+    if (thesisMatch?.[1]) {
+      return {
+        label: `更新论点 ${thesisMatch[1].replace(/USDT$/i, '')}`,
+        tone: 'bg-warn/12 text-warn',
+      };
+    }
+    const klineMatch = /^kline[s]?:(.+)$/i.exec(tok);
+    if (klineMatch?.[1]) {
+      return {
+        label: `查K线 ${klineMatch[1]}`,
+        tone: 'bg-accent/12 text-accent',
+      };
+    }
+    const finMatch = /^finalize(?:\((\d+)\))?$/i.exec(tok);
+    if (finMatch) {
+      return {
+        label: finMatch[1] ? `提交决策 (${finMatch[1]})` : '提交决策',
+        tone: 'bg-up/12 text-up',
+      };
+    }
+    return { label: tok, tone: 'bg-base-800 text-ink-mid' };
+  });
 }
 
 /**
@@ -3179,6 +3200,30 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
    */
   /* ⚠️ `plainText`：理由里的 `**` 是写给模型/维护者的强调符，不该露给用户（见 `lib/plainText.ts`）。 */
   const detail = plainText(humanizeToolNames(entry.detail ?? ''));
+  const trajectory = entry.status === 'data' ? parseTrajectorySteps(detail) : null;
+  if (trajectory) {
+    return (
+      <li className="min-w-0">
+        <div className="flex flex-wrap items-center gap-1 text-[11px]">
+          <span className="mr-0.5 shrink-0 text-ink-faint">决策步骤</span>
+          {trajectory.map((step, idx) => (
+            <span key={`${step.label}-${idx}`} className="inline-flex items-center gap-1">
+              {idx > 0 && <ChevronRight aria-hidden className="h-3 w-3 shrink-0 text-ink-faint/60" />}
+              <span
+                className={cn(
+                  'inline-flex items-center rounded px-1.5 py-0.5 font-medium leading-none',
+                  step.tone,
+                )}
+              >
+                {step.label}
+              </span>
+            </span>
+          ))}
+        </div>
+      </li>
+    );
+  }
+
   const cut = detail.search(/[。；]/);
   const lead = cut >= 0 ? detail.slice(0, cut + 1) : detail;
   const rest = cut >= 0 ? detail.slice(cut + 1).trim() : '';
@@ -3416,11 +3461,12 @@ function CycleDetails({
             <ScrollArea
               body={cotTrace}
               empty="本周期模型未返回 <reasoning> 块。"
+              onCollapse={() => setOpen(false)}
             />
           ) : (
             <div className="space-y-2">
-              <PromptSection title="系统提示词" body={systemBody} />
-              <PromptSection title="用户提示词" body={userBody} />
+              <PromptSection title="系统提示词" body={systemBody} defaultOpen={false} />
+              <PromptSection title="用户提示词" body={userBody} defaultOpen={true} />
             </div>
           )}
         </div>
@@ -3429,28 +3475,84 @@ function CycleDetails({
   );
 }
 
-function PromptSection({ title, body }: { title: string; body: string }) {
+function PromptSection({
+  title,
+  body,
+  defaultOpen = false,
+}: {
+  title: string;
+  body: string;
+  defaultOpen?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(defaultOpen);
+  const charCount = (body ?? '').trim().length;
+  const sizeHint =
+    charCount >= 1000 ? `${(charCount / 1000).toFixed(1)}K 字` : charCount > 0 ? `${charCount} 字` : '空';
+
   return (
-    <section className="min-w-0">
-      <h4 className="mb-1 text-xs font-semibold text-ink-lo">{title}</h4>
-      <ScrollArea body={body} empty="（空）" />
+    <section className="min-w-0 overflow-hidden rounded-lg border border-base-750 bg-base-900/50">
+      <div className="flex items-center justify-between gap-2 px-2.5 py-1.5">
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-xs font-semibold text-ink-mid transition hover:text-ink-hi"
+        >
+          {expanded ? (
+            <ChevronDown aria-hidden className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
+          ) : (
+            <ChevronRight aria-hidden className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
+          )}
+          <span className="truncate">{title}</span>
+          <span className="num shrink-0 text-[11px] font-normal text-ink-faint">({sizeHint})</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="shrink-0 rounded-md border border-base-700 bg-base-850 px-2 py-0.5 text-[11px] text-ink-lo transition hover:border-base-600 hover:text-ink-hi"
+        >
+          {expanded ? '收起' : '展开'}
+        </button>
+      </div>
+      {expanded && (
+        <div className="border-t border-base-750/80 p-2">
+          <ScrollArea body={body} empty="（空）" onCollapse={() => setExpanded(false)} />
+        </div>
+      )}
     </section>
   );
 }
 
 /**
- * 可滚动的等宽文本块。
- *
- * `max-h` 而不是固定 `height`：短内容不该留一大片空白。
- * `break-words` + `whitespace-pre-wrap`：提示词里有超长 JSON 行，不折行就会
- * 把这一栏顶出横向滚动条。
+ * 可滚动的等宽文本块（附底部快捷收起按钮，避免鼠标滚轮陷进长篇文本难以下滚页面）。
  */
-function ScrollArea({ body, empty }: { body: string; empty: string }) {
+function ScrollArea({
+  body,
+  empty,
+  onCollapse,
+}: {
+  body: string;
+  empty: string;
+  onCollapse?: () => void;
+}) {
   const safe = body ?? '';
   if (!safe.trim()) return <p className="px-1 py-2 text-xs text-ink-faint">{empty}</p>;
   return (
-    <pre className="max-h-80 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-base-800 bg-base-950 px-2.5 py-2 font-mono text-xs leading-relaxed text-ink-mid">
-      {safe}
-    </pre>
+    <div className="min-w-0">
+      <pre className="max-h-60 min-w-0 overflow-auto overscroll-auto whitespace-pre-wrap break-words rounded-md border border-base-800 bg-base-950 px-2.5 py-2 font-mono text-xs leading-relaxed text-ink-mid">
+        {safe}
+      </pre>
+      {onCollapse && (
+        <div className="mt-1 flex justify-end">
+          <button
+            type="button"
+            onClick={onCollapse}
+            className="rounded px-1.5 py-0.5 text-[11px] text-ink-faint transition hover:bg-base-800 hover:text-ink-hi"
+          >
+            收起此段
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

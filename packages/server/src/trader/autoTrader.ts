@@ -2834,6 +2834,16 @@ export class AutoTrader {
       if (this.status === 'safe_mode' || this.status === 'error') {
         this.setStatus('running', null);
       }
+      /*
+       * 手动「立即分析」跑完后同步重置下一次定时周期，避免距定时轮次只剩几十秒时
+       * 连续撞出两轮决策白耗 Token（不影响手动单次调用已停止的测试实例）。
+       */
+      const requested = this.requestedNextCheckMinutes;
+      this.requestedNextCheckMinutes = undefined;
+      this.lastCycleFinishedAtMs = Date.now();
+      if (this.running) {
+        this.scheduleNextCycle(false, requested);
+      }
       return summary;
     });
   }

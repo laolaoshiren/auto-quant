@@ -816,10 +816,11 @@ html.aq-quill .td {
 :where(html.aq-quill) .td {
   color: var(--aq-ink-mid);
 }
-/* 数字列的最小宽度 —— 等宽数字也需要一个下限，否则 `90天9时` 这类比预期长的
-   值会被挤成两行，下面的副行跟着错位。 */
+/* 数字列的最小宽度与可读字号放大：保持 32px 行高与内边距不变，只提升数字清晰度。 */
 html.aq-quill .td.num {
   min-width: 4.5rem;
+  font-size: 13.5px;
+  line-height: 1.4;
 }
 
 /* 斑马纹取 `--aq-well`（"凹"的语义），悬停取 `--aq-pill`（抬升），

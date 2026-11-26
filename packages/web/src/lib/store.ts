@@ -433,6 +433,8 @@ interface EventState {
   attempts: number;
   logs: LiveLogLine[];
   toasts: Toast[];
+  /** 是否开启全站实时委托/成交浮动弹窗（持久化到 localStorage，可在右上角一键开关）。 */
+  liveToastsEnabled: boolean;
   byTrader: Record<number, TraderLive>;
   lastEventAt: number | null;
   /**
@@ -460,6 +462,7 @@ interface EventState {
   setPositions: (traderId: number, positions: PositionView[]) => void;
   hydrateLogs: (lines: LiveLogLine[]) => void;
   dismissToast: (id: number) => void;
+  setLiveToastsEnabled: (enabled: boolean) => void;
   clearLogs: () => void;
   /** 登出 / 会话失效时清空全部实时日志、事件与通知，不留上一会话痕迹。 */
   reset: () => void;
@@ -472,11 +475,23 @@ let reconnectTimer: number | null = null;
 let toastSeq = 1;
 let logSeq = 1;
 
+const LIVE_TOASTS_KEY = 'aq.live_toasts';
+
+function readLiveToastsPref(): boolean {
+  try {
+    if (typeof window === 'undefined') return true;
+    return window.localStorage.getItem(LIVE_TOASTS_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
 export const useEvents = create<EventState>((set, get) => ({
   status: 'idle',
   attempts: 0,
   logs: [],
   toasts: [],
+  liveToastsEnabled: readLiveToastsPref(),
   byTrader: {},
   lastEventAt: null,
   blockedReason: null,
@@ -628,38 +643,33 @@ export const useEvents = create<EventState>((set, get) => ({
 
     if (event.type === 'order') {
       const order = event.order;
-      pushToast(set, {
-        kind: 'order',
-        // 标签而不是机器码：`purpose` / `status` 是持久化在 orders 表里的英文值，
-        // 存储值不动，但界面上必须是中文（`stop_loss` → 止损，`FILLED` → 已成交）。
-        title: `${orderPurposeLabel(order.purpose)} · ${sideLabel(order.side)} ${order.symbol}`,
-        body: `${orderStatusLabel(order.status)}${order.error ? ` — ${order.error}` : ''} · 数量 ${order.quantity}`,
-        traderId: event.traderId,
-      });
+      if (get().liveToastsEnabled) {
+        pushToast(set, {
+          kind: 'order',
+          // 标签而不是机器码：`purpose` / `status` 是持久化在 orders 表里的英文值，
+          // 存储值不动，但界面上必须是中文（`stop_loss` → 止损，`FILLED` → 已成交）。
+          title: `${orderPurposeLabel(order.purpose)} · ${sideLabel(order.side)} ${order.symbol}`,
+          body: `${orderStatusLabel(order.status)}${order.error ? ` — ${order.error}` : ''} · 数量 ${order.quantity}`,
+          traderId: event.traderId,
+        });
+      }
     }
 
     if (event.type === 'trade') {
       const trade = event.trade;
-      /*
-       * 净盈亏, not the gross.
-       *
-       * The live toast is the first place a close is reported, and it used to
-       * quote the gross — so a round-trip whose commission ate the whole move
-       * ("+0.0011") was announced as a win. `netPnl` is what the balance did.
-       * The fallback keeps a pre-upgrade server payload from throwing inside
-       * the socket handler.
-       */
       const net = typeof trade.netPnl === 'number' ? trade.netPnl : trade.pnl;
       const percent = typeof trade.pnlPercent === 'number' ? ` (${trade.pnlPercent >= 0 ? '+' : ''}${trade.pnlPercent.toFixed(2)}%)` : '';
-      pushToast(set, {
-        kind: 'trade',
-        title: `已平仓 ${trade.symbol} ${sideLabel(trade.side)}`,
-        body: `净 ${net >= 0 ? '+' : '-'}$${Math.abs(net).toFixed(2)}${percent} · 手续费 ${fmtSigned(
-          -trade.fee,
-          4,
-        )} · ${closeReasonLabel(trade.closeReason, net)}`,
-        traderId: event.traderId,
-      });
+      if (get().liveToastsEnabled) {
+        pushToast(set, {
+          kind: 'trade',
+          title: `已平仓 ${trade.symbol} ${sideLabel(trade.side)}`,
+          body: `净 ${net >= 0 ? '+' : '-'}$${Math.abs(net).toFixed(2)}${percent} · 手续费 ${fmtSigned(
+            -trade.fee,
+            4,
+          )} · ${closeReasonLabel(trade.closeReason, net)}`,
+          traderId: event.traderId,
+        });
+      }
     }
 
     if (event.type === 'trader_status') {
@@ -821,6 +831,21 @@ export const useEvents = create<EventState>((set, get) => ({
   },
 
   dismissToast: (id) => set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),
+  setLiveToastsEnabled: (enabled) => {
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(LIVE_TOASTS_KEY, enabled ? 'on' : 'off');
+      }
+    } catch {
+      /* ignore storage errors */
+    }
+    set((state) => ({
+      liveToastsEnabled: enabled,
+      toasts: enabled
+        ? state.toasts
+        : state.toasts.filter((t) => t.kind !== 'order' && t.kind !== 'trade'),
+    }));
+  },
   clearLogs: () => set({ logs: [] }),
   reset: () =>
     set({
@@ -845,10 +870,10 @@ function pushToast(
   input: Omit<Toast, 'id' | 'at'>,
 ): void {
   const toast: Toast = { ...input, id: toastSeq++, at: Date.now() };
-  set((state) => ({ toasts: [...state.toasts, toast].slice(-6) }));
+  set((state) => ({ toasts: [...state.toasts, toast].slice(-3) }));
   window.setTimeout(() => {
     useEvents.getState().dismissToast(toast.id);
-  }, 7000);
+  }, 4500);
 }
 
 /* -------------------------------------------------------------------------- */
