@@ -417,7 +417,7 @@ export function DecisionArchiveModal({
                       )}
                       {rec.aiTtftMs != null && rec.aiTtftMs > 0 && (
                         <span
-                          className="num text-up/90"
+                          className="num text-cyan-300 [[data-skin='light']_&]:text-cyan-700"
                           title="LLM 平均首字延迟（TTFT，多轮取均值）"
                         >
                           首字 {fmtLatency(rec.aiTtftMs)}

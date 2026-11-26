@@ -2567,11 +2567,11 @@ function CycleMeta({
       : null;
 
   const latencyTone =
-    record.aiLatencyMs > 60_000
-      ? 'text-down bg-down/10'
-      : record.aiLatencyMs > 30_000
-        ? 'text-warn bg-warn/10'
-        : "text-sky-300 bg-sky-500/10 [[data-skin='light']_&]:text-sky-700 [[data-skin='light']_&]:bg-sky-500/10";
+    record.aiLatencyMs > 75_000
+      ? 'text-down bg-down/12'
+      : record.aiLatencyMs > 45_000
+        ? "text-orange-300 bg-orange-500/14 [[data-skin='light']_&]:text-orange-700 [[data-skin='light']_&]:bg-orange-500/12"
+        : 'text-ink-hi bg-base-800/85';
 
   return (
     <div className="mb-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 px-0.5 text-[11.5px] leading-none text-ink-lo">
@@ -2649,11 +2649,9 @@ function CycleMeta({
         <span
           className={cn(
             'num inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium',
-            record.aiTtftMs > 5_000
-              ? 'bg-warn/12 text-warn'
-              : record.aiTtftMs > 2_000
-                ? "bg-sky-500/10 text-sky-300 [[data-skin='light']_&]:text-sky-700"
-                : 'bg-up/10 text-up',
+            record.aiTtftMs > 15_000
+              ? 'bg-down/12 text-down'
+              : "bg-cyan-500/10 text-cyan-300 [[data-skin='light']_&]:bg-cyan-500/10 [[data-skin='light']_&]:text-cyan-700",
           )}
           title={`LLM 首字延迟（TTFT）：${fmtLatency(record.aiTtftMs)}（若本周期内部有多轮调用，则取各轮首字延迟平均值）`}
         >
