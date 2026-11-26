@@ -2,6 +2,7 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { lazy, Suspense, useEffect, type ReactNode } from 'react';
 import { Layout } from './components/Layout';
 import { FeedErrorBoundary } from './components/FeedErrorBoundary';
+import { GlobalTooltipLayer } from './components/GlobalTooltip';
 import { StaleTraderBanner } from './components/StaleTraderBanner';
 import { Button, Spinner, Spinner3 } from './components/ui';
 import { useApp } from './lib/store';
@@ -79,6 +80,7 @@ export function App() {
         放在 `<Routes>` **外面**：所有路由（含登录页）都会渲染它。
       */}
       <StaleTraderBanner />
+      <GlobalTooltipLayer />
       <Routes>
       <Route
         path="/login"
