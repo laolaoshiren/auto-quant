@@ -1068,7 +1068,7 @@ export function OverviewPage() {
                         item.tier === 'strong'
                           ? 'border-up/40 bg-up/12 text-up'
                           : item.tier === 'watch'
-                            ? 'border-amber-400/40 bg-amber-400/12 text-amber-300'
+                            ? 'border-warn/40 bg-warn/12 text-warn'
                             : 'border-base-700 bg-base-850 text-ink-lo';
                       return (
                         <Link

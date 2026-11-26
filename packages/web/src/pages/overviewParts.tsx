@@ -163,15 +163,21 @@ export function RecentClose({ trade, pending }: { trade: TradeRecord | undefined
   if (!trade) {
     return <span className="text-xs text-ink-faint">{pending ? '读取中…' : '暂无平仓'}</span>;
   }
+  const shortSymbol = trade.symbol.replace(/USDT$/, '');
   return (
-    <div className="text-right" title={`${fmtPercent(trade.pnlPercent)} · ${closeReasonLabel(trade.closeReason, trade.netPnl)}`}>
-      <div className="flex items-center justify-end gap-2">
-        <span className="num text-sm text-ink-mid">{trade.symbol}</span>
+    <div
+      className="min-w-0 overflow-hidden text-right"
+      title={`${trade.symbol} · ${fmtPercent(trade.pnlPercent)} · ${closeReasonLabel(trade.closeReason, trade.netPnl)}`}
+    >
+      <div className="flex items-center justify-end gap-1.5 overflow-hidden">
+        <span className="num truncate text-xs font-semibold text-ink-hi">{shortSymbol}</span>
         <SideBadge side={trade.side} />
         {/* 净，带符号：`fmtUsdSigned` 自己带正负号，颜色只是辅助（DESIGN.md §2） */}
-        <span className={cn('num text-xs', pnlColor(trade.netPnl))}>净 {fmtUsdSigned(trade.netPnl, 2)}</span>
+        <span className={cn('num shrink-0 text-xs font-medium', pnlColor(trade.netPnl))}>
+          {fmtUsdSigned(trade.netPnl, 2)}
+        </span>
       </div>
-      <div className="num truncate text-xs text-ink-faint">
+      <div className="num truncate text-[11px] text-ink-faint">
         {closeReasonLabel(trade.closeReason, trade.netPnl)} · {timeAgo(trade.closedAt)}
       </div>
     </div>
@@ -278,27 +284,27 @@ export function TradersSnapshotTable({
             <caption className="sr-only">机器人归属权益与运行状态快照</caption>
             <thead className="border-b border-base-800 bg-base-850/60">
               <tr>
-                <th scope="col" className="th w-[27%] px-2 py-2">
+                <th scope="col" className="th w-[26%] px-2 py-2">
                   机器人
                 </th>
-                <th scope="col" className="th w-[11%] px-2 py-2">
+                <th scope="col" className="th w-[10%] px-2 py-2">
                   状态
                 </th>
-                <th scope="col" className="th w-[23%] px-2 py-2 text-right">
+                <th scope="col" className="th w-[18%] px-2 py-2 text-right">
                   <span title="归属权益 = 初始权益 + 本机器人净已实现盈亏 + 本机器人持仓浮盈。只是这个机器人自己的账，同一账户下其他机器人挣的钱不算在内；反过来，共用同一个账户的机器人各自都带着同一笔本金，所以这一列不能相加（相加会把钱包数 N 遍）。账户里的钱看左栏「账户权益合计」。">
                     归属权益
                   </span>
                 </th>
-                <th scope="col" className="th w-[12%] px-2 py-2 text-right">
+                <th scope="col" className="th w-[8%] px-2 py-2 text-right">
                   持仓
                 </th>
-                <th scope="col" className="th hidden w-[10%] px-2 py-2 text-right 2xl:table-cell">
+                <th scope="col" className="th hidden w-[11%] px-2 py-2 text-right 2xl:table-cell">
                   平仓胜率
                 </th>
-                <th scope="col" className="th hidden w-[14%] px-2 py-2 text-right xl:table-cell">
+                <th scope="col" className="th hidden w-[19%] px-2 py-2 text-right xl:table-cell">
                   最近平仓
                 </th>
-                <th scope="col" className="th w-[11%] px-2 py-2 text-right">
+                <th scope="col" className="th w-[8%] px-2 py-2 text-right">
                   操作
                 </th>
               </tr>
