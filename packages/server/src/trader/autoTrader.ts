@@ -1289,6 +1289,8 @@ export class AutoTrader {
    * （`0 % N === 0`），正好覆盖「停机期间发生的平仓」。
    */
   private reconcilePasses = 0;
+  /** 当慢周期（>60s）阻塞了 WS 成交即时对账时置位，周期收尾时补跑一次委托结清。 */
+  private pendingFillReconcile = false;
   /**
    * Resolves when the cycle that currently holds `cycleInFlight` has finished.
    *
@@ -3001,7 +3003,11 @@ export class AutoTrader {
    * 也不是坏事。
    */
   async applyExchangeFill(): Promise<void> {
-    if (!(await this.waitForIdle())) return;
+    if (!(await this.waitForIdle())) {
+      this.pendingFillReconcile = true;
+      return;
+    }
+    this.pendingFillReconcile = false;
 
     const exchangePositions = await this.effectivePositions().catch((error) => {
       log.warn(
@@ -5745,6 +5751,12 @@ export class AutoTrader {
     state.phase = 'bookkeeping';
     const finalPositions = await this.effectivePositions().catch(() => livePositions);
     await this.reconcilePositions(finalPositions);
+    if (this.pendingFillReconcile) {
+      this.pendingFillReconcile = false;
+      await this.settleStaleOrders().catch((error) => {
+        log.warn(`[${this.deps.trader.name}] 周期收尾补结清陈旧委托失败：${(error as Error).message}`);
+      });
+    }
 
     const finalAccount = await this.deps.broker.getAccountState().catch(() => account);
     await this.recordEquity(finalAccount, finalPositions);
@@ -6804,7 +6816,7 @@ export class AutoTrader {
     });
   }
 
-  /** 已消失持仓的归因与记账（委托 `positionReconcile.ts`，行为逐字节一致）。 */
+  /** 已消失持仓的归因与记账（委托 `positionReconcile.ts`，并立即结清该标的残留保护单）。 */
   private async bookVanishedPosition(local: PositionRow): Promise<void> {
     await bookVanishedPositionForTrader({
       local,
@@ -6815,6 +6827,30 @@ export class AutoTrader {
       bookClosedPosition: async (row, reason, exitPrice, fee) => {
         await this.bookClosedPosition(row, reason, exitPrice, fee);
       },
+    });
+    if (!this.isDryRun) {
+      const protectionIds = [local.stop_order_id, local.tp_order_id].filter(
+        (id): id is string => typeof id === 'string' && id.trim().length > 0,
+      );
+      if (protectionIds.length > 0) {
+        const openAlgos = await this.deps.broker.getOpenAlgoOrders(local.symbol).catch(() => []);
+        const liveAlgoIds = new Set(
+          openAlgos.map((o) => String((o as { algoId?: string | number }).algoId ?? '')),
+        );
+        for (const algoId of protectionIds) {
+          if (!liveAlgoIds.has(algoId)) continue;
+          await this.deps.broker.cancelOrder(local.symbol, algoId, 'algo').catch((err) => {
+            log.warn(
+              `[${this.deps.trader.name}] 仓位已消失但撤残留保护单 ${local.symbol}#${algoId} 失败：${(err as Error).message}`,
+            );
+          });
+        }
+      }
+    }
+    await this.settleStaleOrders(local.symbol).catch((error) => {
+      log.warn(
+        `[${this.deps.trader.name}] 消失持仓 ${local.symbol} 结清保护单记录失败：${(error as Error).message}`,
+      );
     });
   }
 
@@ -9087,12 +9123,16 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
   /* ---------------------------------------------------------------------- */
 
   /** 结清陈旧挂单记录（委托 `staleOrders.ts`，行为逐字节一致）。 */
-  private async settleStaleOrders(onlySymbol?: string): Promise<number> {
+  private async settleStaleOrders(
+    onlySymbol?: string,
+    options?: { ignoreGraceWindow?: boolean },
+  ): Promise<number> {
     return settleStaleOrdersForTrader({
       traderId: this.deps.trader.id,
       traderName: this.deps.trader.name,
       isDryRun: this.isDryRun,
       onlySymbol,
+      ignoreGraceWindow: options?.ignoreGraceWindow,
       getOpenOrders: (symbol) => this.deps.broker.getOpenOrders(symbol),
       getOpenAlgoOrders: (symbol) => this.deps.broker.getOpenAlgoOrders(symbol),
       finalStatusOf: (row) => this.finalStatusOf(row),

@@ -61,6 +61,11 @@ export async function settleStaleOrdersForTrader(input: {
   traderName: string;
   isDryRun: boolean;
   onlySymbol?: string;
+  /**
+   * 仅当某标的持仓已被确认平仓/消失时置 true：跳过 2 分钟宽限窗口，
+   * 立刻向交易所回读该标的刚挂不久的止损/止盈单终态，防止出现「持仓 0、当前委托 2」悬空。
+   */
+  ignoreGraceWindow?: boolean;
   getOpenOrders: (symbol: string) => Promise<Array<{ orderId: string | number }>>;
   getOpenAlgoOrders: (symbol: string) => Promise<Array<{ algoId: string | number }>>;
   finalStatusOf: (row: OrderRecord) => Promise<SettledOrderOutcome | null>;
@@ -72,8 +77,11 @@ export async function settleStaleOrdersForTrader(input: {
   /*
    * 只把"够老"的行当候选：`createdBefore` 就是宽限窗口的下界，
    * 窗口取多长、为什么需要，见 `ORDER_SETTLE_GRACE_MS`。
+   * 例外：调用方已确认该标的持仓刚刚平掉（`ignoreGraceWindow=true`）时立即结清。
    */
-  const cutoff = new Date(Date.now() - ORDER_SETTLE_GRACE_MS).toISOString();
+  const cutoff = input.ignoreGraceWindow
+    ? new Date(Date.now() + 60_000).toISOString()
+    : new Date(Date.now() - ORDER_SETTLE_GRACE_MS).toISOString();
   const candidates = orderStore
     .unsettled(traderId, cutoff)
     .filter((row) => input.onlySymbol === undefined || row.symbol === input.onlySymbol);
