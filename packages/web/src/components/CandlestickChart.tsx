@@ -20,12 +20,14 @@ import {
   createChart,
   type CandlestickData,
   type IChartApi,
+  type IPriceLine,
   type ISeriesApi,
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { fmtBeijingTime, type Kline } from '@aq/shared';
 import { formatCandlePrice } from '../lib/format';
+import type { ChartPriceLine } from './chartPriceLines';
 import { useChartInk } from './useChartInk';
 
 function timeToMs(time: Time): number | null {
@@ -65,11 +67,17 @@ function formatBeijingTickMark(time: Time, tickMarkType: TickMarkType): string {
 
 export function CandlestickChart({
   candles,
+  priceLines,
   height = 460,
   loading = false,
   fill = false,
 }: {
   candles: Kline[];
+  /**
+   * 仅针对当前有持仓或挂单的交易对绘制水平参考线（开仓均价 / 挂单开仓 / 止损 / 止盈）。
+   * 未传入或为空数组时不绘制任何额外线条。
+   */
+  priceLines?: ReadonlyArray<ChartPriceLine>;
   /**
    * 固定高度（像素）。`fill` 为真时**忽略**它 —— 高度改由容器决定。
    */
@@ -99,6 +107,7 @@ export function CandlestickChart({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const priceLineHandlesRef = useRef<IPriceLine[]>([]);
   /*
    * 当前外观下的配色。**换模板或切深浅时它会变**，而下面两个 effect 都依赖
    * 它 —— 所以图表会跟着重画，不会停在上一套主题的绿上（见 `useChartInk`）。
@@ -194,6 +203,7 @@ export function CandlestickChart({
 
     return () => {
       observer.disconnect();
+      priceLineHandlesRef.current = [];
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
@@ -263,6 +273,50 @@ export function CandlestickChart({
     const deduped = data.filter((bar, index) => index === 0 || bar.time !== data[index - 1]?.time);
     series.setData(deduped);
   }, [candles]);
+
+  /*
+   * 持仓 / 委托水平价格线（开仓均价、挂单开仓、止损、止盈）。
+   * 独立于图表重建与 K 线 setData，切换价位或切换深浅主题时仅原地替换 PriceLine，
+   * 绝不重置用户当前的缩放与平移视口。
+   */
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    for (const handle of priceLineHandlesRef.current) {
+      try {
+        series.removePriceLine(handle);
+      } catch {
+        /* ignore if series already detached */
+      }
+    }
+    priceLineHandlesRef.current = [];
+
+    if (!priceLines || priceLines.length === 0) return;
+
+    for (const item of priceLines) {
+      const color =
+        item.kind === 'take_profit'
+          ? ink.up
+          : item.kind === 'stop_loss'
+            ? ink.down
+            : item.kind === 'pending_entry'
+              ? ink.warn
+              : ink.accent;
+      const lineStyle = item.kind === 'entry' ? LineStyle.Solid : LineStyle.Dashed;
+      const lineWidth = item.kind === 'entry' ? 2 : 1;
+
+      const handle = series.createPriceLine({
+        price: item.price,
+        color,
+        lineWidth,
+        lineStyle,
+        axisLabelVisible: true,
+        title: item.title,
+      });
+      priceLineHandlesRef.current.push(handle);
+    }
+  }, [priceLines, ink, fill, height]);
 
   return (
     /*

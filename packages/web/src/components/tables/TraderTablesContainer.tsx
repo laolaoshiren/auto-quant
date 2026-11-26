@@ -76,6 +76,7 @@ export function TraderTables({
   onSelectSymbol,
   positionSymbols,
   onPositionsChanged,
+  onOpenOrdersChange,
   positions,
 }: {
   traderId: number;
@@ -92,6 +93,8 @@ export function TraderTables({
   positionSymbols: string[];
   /** 平仓成功后通知页面立刻重取持仓 —— 否则界面还留着刚平掉的那一行。 */
   onPositionsChanged?: () => void;
+  /** 将 REST+WS 合并后的当前活跃委托同步给父页（供 K 线图绘制挂单/止损/止盈线，避免重复轮询）。 */
+  onOpenOrdersChange?: (orders: OrderRecord[]) => void;
   /** 当前持仓数组 —— 供两张订单表与成交表作为保证金模式兜底映射。 */
   positions?: ReadonlyArray<{ symbol: string; marginType?: MarginMode | null; leverage?: number | null }>;
 }) {
@@ -174,6 +177,14 @@ export function TraderTables({
     ORDER_MERGE_OPTIONS,
   );
   const openOrders = ordersPaging.rows.filter(isOpenOrder);
+  const openOrdersSig = openOrders
+    .map((o) => `${o.id}:${o.symbol}:${o.status}:${o.purpose}:${o.price ?? ''}:${o.stopPrice ?? ''}`)
+    .join('|');
+  const openOrdersRef = useRef(openOrders);
+  openOrdersRef.current = openOrders;
+  useEffect(() => {
+    onOpenOrdersChange?.(openOrdersRef.current);
+  }, [onOpenOrdersChange, openOrdersSig]);
 
   const liveTrades = useEvents((s) => s.byTrader[traderId]?.trades);
   const tradesQuery = usePolled(

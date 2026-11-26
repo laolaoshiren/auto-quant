@@ -31,6 +31,7 @@ import {
   type EquitySnapshot,
   type ExchangeId,
   type ManagedRiskProfileId,
+  type OrderRecord,
 } from '@aq/shared';
 import { api, type TraderRow } from '../lib/api';
 import { useApp, useEvents } from '../lib/store';
@@ -65,6 +66,7 @@ import {
   type EquityRange,
 } from '../components/equityCurve';
 import { CandlestickChart } from '../components/CandlestickChart';
+import { buildSymbolChartPriceLines, type ChartPriceLine } from '../components/chartPriceLines';
 import { ConfirmStopTrader } from '../components/ConfirmStopTrader';
 import { TraderConfigModal } from '../components/TraderConfigModal';
 import { TraderAccountStrip, type TraderAccountState } from '../components/BalanceCells';
@@ -78,6 +80,7 @@ import {
   fmtPendingDuration,
   fmtPercent,
   fmtPriceUsd,
+  formatCandlePrice,
   fmtProfitFactor,
   fmtUsd,
   fmtUsdSigned,
@@ -628,28 +631,11 @@ export function TraderPage() {
    * 所以这里改成实时优先 —— 它回答的正是"**现在**交易所那边有什么"。
    */
   const positions = pickPositions(accountView?.positions, live?.positions);
+  const [syncedOpenOrders, setSyncedOpenOrders] = useState<OrderRecord[] | null>(null);
+  useEffect(() => {
+    setSyncedOpenOrders(null);
+  }, [traderId]);
 
-  /*
-   * 行情图表当前显示的币种。
-   *
-   * 默认取第一个持仓（"我在盯什么"），而下方表格里的币种名可以点击把它换掉 ——
-   * 用户看到某个陌生币种时，最自然的动作就是"让我看看它长什么样"。
-   *
-   * `undefined` 表示还没选过：那时跟随第一个持仓。**一旦用户点过就不再自动跟随** ——
-   * 否则行情会因为持仓变动跳走，那比不跳更烦人。
-   *
-   * ⚠️ **只依赖 `positions`，而它在上面** —— 这个位置上不能引用任何在它之后声明的
-   * 变量。我用 `.find(回调)` 引用过后面声明的 `trader`，撞上暂时性死区、整页白屏；
-   * 类型检查抓不到那种错，因为引用包在回调里、看起来像是稍后才跑。
-   */
-  const [pickedSymbol, setPickedSymbol] = useState<string | undefined>(undefined);
-  const chartSymbol = pickedSymbol ?? positions[0]?.symbol;
-  const selectChartSymbol = (symbol: string) => {
-    setPickedSymbol(symbol);
-    setChartTab('candles');
-    setChartOverride(false);
-    setFeedFocusOverride(false);
-  };
   /*
    * ⚠️ **必须用 `isOpenOrder`，不能自己写判定。**
    *
@@ -666,7 +652,36 @@ export function TraderPage() {
    * **同一屏上的同一个概念只能有一个判定。** 两个"都对"的实现放在一起，
    * 结果就是两个都不可信。
    */
-  const openOrders = (live?.orders ?? []).filter(isOpenOrder);
+  const openOrders = useMemo(
+    () => (syncedOpenOrders ?? (live?.orders ?? []).filter(isOpenOrder)),
+    [syncedOpenOrders, live?.orders],
+  );
+
+  /*
+   * 行情图表当前显示的币种。
+   *
+   * 默认取第一个持仓（或活跃挂单），而下方表格里的币种名可以点击把它换掉 ——
+   * 用户看到某个陌生币种时，最自然的动作就是"让我看看它长什么样"。
+   *
+   * `undefined` 表示还没选过：那时跟随第一个持仓/挂单。**一旦用户点过就不再自动跟随** ——
+   * 否则行情会因为持仓变动跳走，那比不跳更烦人。
+   *
+   * ⚠️ **只依赖 `positions` 与 `openOrders`，而它们在上面** —— 这个位置上不能引用任何在它之后声明的
+   * 变量。我用 `.find(回调)` 引用过后面声明的 `trader`，撞上暂时性死区、整页白屏；
+   * 类型检查抓不到那种错，因为引用包在回调里、看起来像是稍后才跑。
+   */
+  const [pickedSymbol, setPickedSymbol] = useState<string | undefined>(undefined);
+  const chartSymbol = pickedSymbol ?? positions[0]?.symbol ?? openOrders[0]?.symbol;
+  const chartPriceLines = useMemo(
+    () => buildSymbolChartPriceLines({ symbol: chartSymbol, positions, openOrders }),
+    [chartSymbol, positions, openOrders],
+  );
+  const selectChartSymbol = (symbol: string) => {
+    setPickedSymbol(symbol);
+    setChartTab('candles');
+    setChartOverride(false);
+    setFeedFocusOverride(false);
+  };
   /*
    * ⚠️ **判断"有没有东西占着保证金"必须用交易所给的数，不能用镜像。**
    *
@@ -2512,6 +2527,7 @@ export function TraderPage() {
                 exchangeAccountsQuery.data !== null ||
                 exchangeAccountsQuery.error !== null
               }
+              priceLines={chartPriceLines}
             />
           )}
         </Panel>
@@ -2695,6 +2711,7 @@ export function TraderPage() {
           })}
           onSelectSymbol={selectChartSymbol}
           positionSymbols={positions.map((p) => p.symbol)}
+          onOpenOrdersChange={setSyncedOpenOrders}
           /*
            * ⚠️ **必须原样传 `positions`，不要 `.map()` 出一个新数组。**
            *
@@ -3039,10 +3056,12 @@ function CandlesPanel({
   symbol,
   exchange,
   exchangeReady = true,
+  priceLines = [],
 }: {
   symbol?: string;
   exchange?: ExchangeId;
   exchangeReady?: boolean;
+  priceLines?: ReadonlyArray<ChartPriceLine>;
 }) {
   const [interval, setIntervalValue] = useState('15m');
   const query = usePolled(
@@ -3060,7 +3079,7 @@ function CandlesPanel({
      */
     return (
       <p className="flex min-h-[200px] flex-1 items-center justify-center px-3 text-base text-ink-faint">
-        该机器人当前没有持仓 —— 开仓后这里会显示其行情图表。
+        该机器人当前没有持仓或挂单 —— 开仓、挂单或点选币种后这里会显示其行情图表。
       </p>
     );
   }
@@ -3099,6 +3118,41 @@ function CandlesPanel({
             {fmtPercent(barChangePct)}
           </span>
         )}
+        {priceLines.length > 0 && (
+          <span className="inline-flex flex-wrap items-center gap-1">
+            {priceLines.map((line) => (
+              <span
+                key={line.id}
+                className={cn(
+                  'num inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-medium leading-none',
+                  line.kind === 'take_profit'
+                    ? 'border-up/30 bg-up/10 text-up'
+                    : line.kind === 'stop_loss'
+                      ? 'border-down/30 bg-down/10 text-down'
+                      : line.kind === 'pending_entry'
+                        ? 'border-warn/35 bg-warn/12 text-warn'
+                        : 'border-accent/35 bg-accent/12 text-accent',
+                )}
+              >
+                <span
+                  aria-hidden
+                  className={cn(
+                    'h-1.5 w-1.5 rounded-full',
+                    line.kind === 'take_profit'
+                      ? 'bg-up'
+                      : line.kind === 'stop_loss'
+                        ? 'bg-down'
+                        : line.kind === 'pending_entry'
+                          ? 'bg-warn'
+                          : 'bg-accent',
+                  )}
+                />
+                <span>{line.title}</span>
+                <span>{formatCandlePrice(line.price)}</span>
+              </span>
+            ))}
+          </span>
+        )}
         <span className="ml-auto inline-flex flex-wrap items-center gap-0.5 rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
           {['5m', '15m', '1h', '4h'].map((value) => (
             <Button
@@ -3124,7 +3178,7 @@ function CandlesPanel({
       ) : (
         <div className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[112px]">
           <div className="absolute inset-0">
-            <CandlestickChart candles={candles} fill />
+            <CandlestickChart candles={candles} priceLines={priceLines} fill />
           </div>
         </div>
       )}
