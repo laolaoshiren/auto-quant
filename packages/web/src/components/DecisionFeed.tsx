@@ -172,7 +172,11 @@ import { usePolled } from '../lib/hooks';
 import { Badge, Empty, ErrorNote, Panel, Spinner3, cn } from './ui';
 import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
 import { CoinIcon } from './CoinIcon';
-import { PowerlineTrajectory, parsePowerlineTrajectory } from './PowerlineTrajectory';
+import {
+  ManagedStageActionBar,
+  isManagedTrajectoryEntry,
+  resolveManagedStageChips,
+} from './PowerlineTrajectory';
 import { DecisionArchiveModal } from './DecisionArchiveModal';
 import { humanizeToolNames } from '../lib/toolLabels';
 import { summarizeMemberOutput } from '../lib/memberSummary';
@@ -2172,13 +2176,19 @@ export function CycleBlock({
           </div>
         )}
 
-        {plan.leftover.length > 0 && (
-          <ul className="mt-2.5 space-y-1 border-t border-base-750/80 pt-2">
-            {plan.leftover.map((entry, index) => (
-              <LogLine key={`leftover-${index}`} entry={entry} />
-            ))}
-          </ul>
-        )}
+        {(() => {
+          const visibleLeftover = plan.leftover.filter(
+            (entry) => !isManagedTrajectoryEntry(entry) || resolveManagedStageChips(entry).length > 0,
+          );
+          if (visibleLeftover.length === 0) return null;
+          return (
+            <ul className="mt-2.5 space-y-1.5 border-t border-base-750/80 pt-2">
+              {visibleLeftover.map((entry, index) => (
+                <LogLine key={`leftover-${index}`} entry={entry} onSelectSymbol={onSelectSymbol} />
+              ))}
+            </ul>
+          );
+        })()}
       </div>
 
       {/*
@@ -3235,7 +3245,13 @@ export function figureParts(decision: Decision, price: number | null): Figure[] 
  * 四种状态全在这里有名字：`skipped` 以前会和 `failed` 一起被当成"执行失败"，
  * 那是两种完全不同的事件。
  */
-function LogLine({ entry }: { entry: ExecutionLogEntry }) {
+function LogLine({
+  entry,
+  onSelectSymbol,
+}: {
+  entry: ExecutionLogEntry;
+  onSelectSymbol?: (symbol: string) => void;
+}) {
   const { label, tone } = logLineStyle(entry.status);
   const [expanded, setExpanded] = useState(false);
 
@@ -3271,11 +3287,12 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
    */
   /* ⚠️ `plainText`：理由里的 `**` 是写给模型/维护者的强调符，不该露给用户（见 `lib/plainText.ts`）。 */
   const detail = plainText(humanizeToolNames(entry.detail ?? ''));
-  const trajectory = entry.status === 'data' ? parsePowerlineTrajectory(detail) : null;
-  if (trajectory) {
+  if (isManagedTrajectoryEntry(entry)) {
+    const chips = resolveManagedStageChips(entry);
+    if (chips.length === 0) return null;
     return (
       <li className="min-w-0">
-        <PowerlineTrajectory segments={trajectory} />
+        <ManagedStageActionBar chips={chips} onSelectSymbol={onSelectSymbol} />
       </li>
     );
   }

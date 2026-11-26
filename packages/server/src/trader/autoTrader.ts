@@ -15,6 +15,7 @@ import {
   type Decision,
   type EquitySnapshot,
   type ExecutionLogEntry,
+  type ManagedStageStep,
   type MarketSnapshot,
   type OrderCancelSource,
   type OrderRecord,
@@ -4613,6 +4614,7 @@ export class AutoTrader {
       typeof this.deps.model.chat === 'function';
 
     let managedStageTrace: string[] = [];
+    let managedStageSteps: ManagedStageStep[] = [];
     const ttftSamples: number[] = [];
     const pushTtft = (ms: number | null | undefined): void => {
       if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) ttftSamples.push(ms);
@@ -4663,6 +4665,7 @@ export class AutoTrader {
       });
       this.pendingThesisPlans = engineResult.pendingThesisPlans;
       managedStageTrace = engineResult.stageTrace;
+      managedStageSteps = engineResult.stageSteps;
       for (const sample of engineResult.ttftSamples) pushTtft(sample);
       response = {
         text: engineResult.text,
@@ -5191,6 +5194,7 @@ export class AutoTrader {
         symbol: '-',
         status: 'data',
         detail: `三段式决策轨迹：${managedStageTrace.join(' → ')}`,
+        ...(managedStageSteps.length > 0 ? { stageSteps: managedStageSteps } : {}),
       });
     }
 

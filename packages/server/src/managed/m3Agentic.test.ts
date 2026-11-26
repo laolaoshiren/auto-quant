@@ -1046,3 +1046,79 @@ test('★ runManagedAgenticLoop 多轮调用累加总耗时并对各轮首字延
   assert.equal(res.ttftMs, 1200, '多轮首字延迟必须取平均值（(900 + 1500) / 2 = 1200）');
   assert.deepEqual(res.ttftSamples, [900, 1500]);
 });
+
+test('★ runManagedAgenticLoop 记录结构化 stageSteps（大盘定调、笔记触发条件、提前复查）', async () => {
+  const trader = createPaperTrader('m3-stage-steps');
+  let round = 0;
+  const res = await runManagedAgenticLoop({
+    traderId: trader.id,
+    baseMessages: [{ role: 'user', content: 'test' }],
+    openPositions: [],
+    candidateSymbols: ['ZECUSDT'],
+    model: {
+      chat: async () => {
+        round += 1;
+        if (round === 1) {
+          return {
+            text: '',
+            toolCalls: [
+              {
+                id: 'p1',
+                name: 'plan',
+                arguments: JSON.stringify({
+                  market_regime: 'BTC 窄幅震荡，山寨诱多偏多，维持高观望纪律',
+                  focus_candidates: [{ symbol: 'ZECUSDT', view: '假跌破后观察反包确认' }],
+                }),
+              },
+              {
+                id: 'n1',
+                name: 'update_notes',
+                arguments: JSON.stringify({
+                  op: 'upsert',
+                  symbol: 'ZECUSDT',
+                  note: '06:00 放量砸破后被买盘收复，空头失效',
+                  trigger_condition: '15m 放量跌破 755 且量比 >= 1.8x 再评估做空',
+                  bias: 'short',
+                  confidence: 62,
+                }),
+              },
+            ],
+            latencyMs: 5000,
+            ttftMs: 800,
+            usage: { promptTokens: 500, completionTokens: 120, cachedTokens: 200, reasoningTokens: 40 },
+          };
+        }
+        return {
+          text: '',
+          toolCalls: [
+            {
+              id: 'f1',
+              name: 'finalize',
+              arguments: JSON.stringify({
+                summary: '大盘横盘，继续观望等待确认。',
+                next_check_in_minutes: 6,
+                decisions: [{ symbol: 'ZECUSDT', action: 'wait', confidence: 62, reasoning: '观望' }],
+              }),
+            },
+          ],
+          latencyMs: 6000,
+          ttftMs: 900,
+          usage: { promptTokens: 600, completionTokens: 140, cachedTokens: 400, reasoningTokens: 50 },
+        };
+      },
+    },
+  });
+
+  assert.equal(res.stageSteps.length, 3);
+  assert.equal(res.stageSteps[0]?.kind, 'plan');
+  assert.ok(res.stageSteps[0]?.summary?.includes('BTC 窄幅震荡'));
+  assert.ok(res.stageSteps[0]?.meta?.some((m) => m.label === '聚焦 ZEC'));
+
+  assert.equal(res.stageSteps[1]?.kind, 'note');
+  assert.equal(res.stageSteps[1]?.symbol, 'ZECUSDT');
+  assert.ok(res.stageSteps[1]?.meta?.some((m) => m.label === '方向' && m.value === '偏空'));
+  assert.ok(res.stageSteps[1]?.meta?.some((m) => m.label === '触发条件' && m.value.includes('755')));
+
+  assert.equal(res.stageSteps[2]?.kind, 'finalize');
+  assert.ok(res.stageSteps[2]?.meta?.some((m) => m.label === '下次复查' && m.value === '提前 6 分钟'));
+});

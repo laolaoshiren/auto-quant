@@ -1721,7 +1721,11 @@ test('a cycle opens a position and places exchange-side protection', async () =>
   assert.equal(records[0]!.success, true);
   assert.ok(records[0]!.systemPrompt.length > 500);
   assert.ok(records[0]!.userPrompt.length > 200);
-  assert.equal(records[0]!.aiLatencyMs, 42);
+  assert.equal(
+    records[0]!.aiLatencyMs,
+    84,
+    '主决策 42ms + 开仓执行回执追问 42ms 必须累加为整轮耗时 84ms',
+  );
   /*
    * ⚠️ **`>= 100` 而不是 `=== 100`。**
    *

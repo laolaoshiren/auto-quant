@@ -1455,6 +1455,37 @@ export interface DecisionRecord {
   reasoningTokens?: number | null;
 }
 
+export type ManagedStageStepKind =
+  | 'plan'
+  | 'note'
+  | 'note_ce'
+  | 'note_del'
+  | 'thesis'
+  | 'klines'
+  | 'klines_dup'
+  | 'klines_cap'
+  | 'finalize'
+  | 'fallback';
+
+/**
+ * 智能托管 2.0 三段式工具循环的单步结构化审计记录。
+ * 随 `ExecutionLogEntry.stageSteps` 一起落入 `execution_log_json`，
+ * 前端据此渲染可点击展开的语义胶囊（大盘定调 / 观察笔记正文与触发条件 / 论点修订 / 提前复查等）。
+ */
+export interface ManagedStageStep {
+  kind: ManagedStageStepKind;
+  /** 第几轮 LLM 工具调用产生（从 1 开始）。 */
+  round?: number;
+  /** 关联合约标的（如 ZECUSDT）。 */
+  symbol?: string;
+  /** 胶囊短标题（如 "大盘定调"、"笔记 ZEC"、"论点 SOL"）。 */
+  title: string;
+  /** 完整摘要/正文（大盘格局、笔记内容、反例原因、论点失效条件等）。 */
+  summary?: string;
+  /** 结构化键值对（如触发条件、方向、信心度、时间止损、MAE、提前复查间隔等）。 */
+  meta?: Array<{ label: string; value: string }>;
+}
+
 export interface ExecutionLogEntry {
   action: string;
   symbol: string;
@@ -1498,6 +1529,8 @@ export interface ExecutionLogEntry {
    * pattern-matching a sentence.
    */
   adjustments?: string[];
+  /** 智能托管 2.0 三段式工具调用的结构化步骤明细（可选，兼容历史纯文本轨迹）。 */
+  stageSteps?: ManagedStageStep[];
 }
 
 /**

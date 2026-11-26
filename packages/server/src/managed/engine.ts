@@ -15,7 +15,13 @@
  *   - 最多 4 轮工具回合，逐轮累加 token/延迟统计；收尾自动补全遗漏持仓的 `hold` 与候选的 `wait`。
  */
 
-import { normalizeSymbol, type Kline, type PositionView, type Timeframe } from '@aq/shared';
+import {
+  normalizeSymbol,
+  type Kline,
+  type ManagedStageStep,
+  type PositionView,
+  type Timeframe,
+} from '@aq/shared';
 
 import type { ChatMessage, ToolCall, ToolSpec } from '../llm/types.js';
 import type { RadarBias } from '../radar/ai500.js';
@@ -99,8 +105,10 @@ export interface ManagedEngineResult {
   };
   /** 模型在 `finalize` 中为新开仓标的附带的初始论点，待成交后由 AutoTrader 落库。 */
   pendingThesisPlans: Map<string, PendingThesisPlan>;
-  /** 审计轨迹（例如 `plan`, `update_notes(SOLUSDT)`, `update_thesis(ETHUSDT)`, `finalize(4)`）。 */
+  /** 审计轨迹（例如 `plan`, `note:SOLUSDT`, `thesis:ETHUSDT`, `finalize(4)`）。 */
   stageTrace: string[];
+  /** 结构化步骤明细（大盘定调、笔记正文与触发条件、论点更新、提前复查等）。 */
+  stageSteps: ManagedStageStep[];
   /** 是否走通了原生 `finalize` 结构化协议。 */
   usedFinalizeTool: boolean;
 }
@@ -514,6 +522,10 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
   let totalReasoning: number | null = null;
 
   const stageTrace: string[] = [];
+  const stageSteps: ManagedStageStep[] = [];
+  const shortSym = (sym: string): string => sym.replace(/USDT$/i, '');
+  const biasText = (bias: RadarBias): string =>
+    bias === 'long' ? '偏多' : bias === 'short' ? '偏空' : '中性';
   let planSummary = '';
   let lastText = '';
 
@@ -560,6 +572,7 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
           },
           pendingThesisPlans: new Map(),
           stageTrace: [...stageTrace, 'direct_decision'],
+          stageSteps,
           usedFinalizeTool: false,
         };
       }
@@ -592,6 +605,32 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
         const regime = asText(args['market_regime']) ?? '已评估当前格局';
         planSummary = regime;
         stageTrace.push('plan');
+        const planMeta: Array<{ label: string; value: string }> = [];
+        if (Array.isArray(args['position_reviews'])) {
+          for (const item of args['position_reviews'].slice(0, 6)) {
+            if (!item || typeof item !== 'object') continue;
+            const rec = item as Record<string, unknown>;
+            const sym = normalizeSymbol(String(rec['symbol'] ?? ''));
+            const st = asText(rec['status']);
+            if (sym && st) planMeta.push({ label: `持仓 ${shortSym(sym)}`, value: st.slice(0, 140) });
+          }
+        }
+        if (Array.isArray(args['focus_candidates'])) {
+          for (const item of args['focus_candidates'].slice(0, 6)) {
+            if (!item || typeof item !== 'object') continue;
+            const rec = item as Record<string, unknown>;
+            const sym = normalizeSymbol(String(rec['symbol'] ?? ''));
+            const view = asText(rec['view']);
+            if (sym && view) planMeta.push({ label: `聚焦 ${shortSym(sym)}`, value: view.slice(0, 140) });
+          }
+        }
+        stageSteps.push({
+          kind: 'plan',
+          round,
+          title: '大盘定调',
+          summary: regime.slice(0, 260),
+          ...(planMeta.length > 0 ? { meta: planMeta } : {}),
+        });
         input.onStageEvent?.('plan', `阶段1[plan]：${regime.slice(0, 120)}`);
         messages.push({
           role: 'tool',
@@ -614,15 +653,34 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
         } else if (op === 'delete') {
           const deleted = managedNotesStore.deleteNote(input.traderId, sym);
           stageTrace.push(`note_del:${sym}`);
+          stageSteps.push({
+            kind: 'note_del',
+            round,
+            symbol: sym,
+            title: `清笔记 ${shortSym(sym)}`,
+            summary: deleted ? '已清理失效观察笔记' : '无对应观察笔记可清理',
+          });
           toolOut = { ok: true, deleted };
         } else if (op === 'counterexample') {
+          const ceReason = asText(args['reason']);
           const r = managedNotesStore.recordCounterexample(
             input.traderId,
             sym,
-            asText(args['reason']),
+            ceReason,
             nowMs,
           );
           stageTrace.push(`note_ce:${sym}(#${r.counterexamples})`);
+          stageSteps.push({
+            kind: 'note_ce',
+            round,
+            symbol: sym,
+            title: `反例 ${shortSym(sym)} #${r.counterexamples}`,
+            summary: (ceReason ?? '市场走势证伪原有观察假设').slice(0, 260),
+            meta: [
+              { label: '反例计数', value: `第 ${r.counterexamples} 次` },
+              { label: '笔记状态', value: r.retired ? '已自动淘汰' : '继续衰减观察' },
+            ],
+          });
           input.onStageEvent?.(
             'update_notes',
             `阶段2[笔记反例] ${sym} 反例计数=${r.counterexamples}${r.retired ? '（已自动退休淘汰）' : ''}`,
@@ -631,17 +689,35 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
         } else {
           const biasRaw = String(args['bias'] ?? 'neutral');
           const bias: RadarBias = biasRaw === 'long' || biasRaw === 'short' ? biasRaw : 'neutral';
+          const conf = asFiniteNumber(args['confidence']);
           const saved = managedNotesStore.upsertNote({
             traderId: input.traderId,
             symbol: sym,
             note: String(args['note'] ?? ''),
             triggerCondition: String(args['trigger_condition'] ?? ''),
             bias,
-            confidence: asFiniteNumber(args['confidence']),
+            confidence: conf,
             nowMs,
           });
           if (saved.ok) {
             stageTrace.push(`note:${sym}`);
+            const noteMeta: Array<{ label: string; value: string }> = [
+              { label: '方向', value: biasText(bias) },
+            ];
+            if (conf !== undefined) {
+              noteMeta.push({ label: '信心', value: `${Math.round(conf)}%` });
+            }
+            if (saved.note.triggerCondition) {
+              noteMeta.push({ label: '触发条件', value: saved.note.triggerCondition.slice(0, 220) });
+            }
+            stageSteps.push({
+              kind: 'note',
+              round,
+              symbol: sym,
+              title: `笔记 ${shortSym(sym)}`,
+              summary: saved.note.note.slice(0, 300),
+              meta: noteMeta,
+            });
             input.onStageEvent?.(
               'update_notes',
               `阶段2[更新笔记] ${sym} 触发[${saved.note.triggerCondition}]`,
@@ -675,22 +751,45 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
             error: `当前未持有 ${sym || '(空)'} 仓位；开新仓时请直接在 finalize 的开仓项里附带 time_stop_hours / max_adverse_excursion_pct / add_trigger 字段。`,
           };
         } else {
+          const entryBasis = asText(args['entry_basis']);
+          const addTrigger = asText(args['add_trigger']);
+          const reduceTarget = asText(args['reduce_target']);
+          const invalidation = asText(args['invalidation']);
+          const timeStopHours = asFiniteNumber(args['time_stop_hours']);
+          const minProgressR = asFiniteNumber(args['min_progress_r']);
+          const maePct = asFiniteNumber(args['max_adverse_excursion_pct']);
           const updated = managedThesisStore.upsertActive({
             traderId: input.traderId,
             symbol: sym,
             side: pos.side,
             entryPrice: pos.entryPrice,
             initialStopLoss: pos.stopLoss ?? pos.entryPrice,
-            entryBasis: asText(args['entry_basis']),
-            addTrigger: asText(args['add_trigger']),
-            reduceTarget: asText(args['reduce_target']),
-            invalidation: asText(args['invalidation']),
-            timeStopHours: asFiniteNumber(args['time_stop_hours']),
-            minProgressR: asFiniteNumber(args['min_progress_r']),
-            maxAdverseExcursionPct: asFiniteNumber(args['max_adverse_excursion_pct']),
+            entryBasis,
+            addTrigger,
+            reduceTarget,
+            invalidation,
+            timeStopHours,
+            minProgressR,
+            maxAdverseExcursionPct: maePct,
             nowMs,
           });
           stageTrace.push(`thesis:${sym}`);
+          const thesisMeta: Array<{ label: string; value: string }> = [];
+          if (addTrigger) thesisMeta.push({ label: '加仓条件', value: addTrigger.slice(0, 160) });
+          if (reduceTarget) thesisMeta.push({ label: '减仓目标', value: reduceTarget.slice(0, 160) });
+          if (invalidation) thesisMeta.push({ label: '失效条件', value: invalidation.slice(0, 160) });
+          if (timeStopHours !== undefined) thesisMeta.push({ label: '时间止损', value: `${timeStopHours}h` });
+          if (updated.maxAdverseExcursionPct != null) {
+            thesisMeta.push({ label: 'MAE 硬线', value: `${updated.maxAdverseExcursionPct}%` });
+          }
+          stageSteps.push({
+            kind: 'thesis',
+            round,
+            symbol: sym,
+            title: `论点 ${shortSym(sym)}`,
+            summary: (entryBasis ?? invalidation ?? '已更新持仓结构化论点').slice(0, 260),
+            ...(thesisMeta.length > 0 ? { meta: thesisMeta } : {}),
+          });
           input.onStageEvent?.(
             'update_thesis',
             `阶段2[更新论点] ${sym} 时间止损=${updated.timeStopAt ?? '无'} MAE=${updated.maxAdverseExcursionPct ?? '无'}%`,
@@ -721,12 +820,33 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
         if (sym && expandedSet.has(sym) && (tf === '4h' || tf === '15m' || tf === '1m')) {
           content = `${sym} 的 ${tf} K 线（最新 30 根）已在上方标的档案中完整提供，无需重复拉取，请直接基于已有数据决策。`;
           stageTrace.push(`klines_dup:${sym}:${tf}`);
+          stageSteps.push({
+            kind: 'klines_dup',
+            round,
+            symbol: sym,
+            title: `重复查K ${shortSym(sym)} ${tf}`,
+            summary: '已在档案中提供，系统拦截重复拉取',
+          });
         } else if (sym && fetchedKlines.has(klineKey)) {
           content = `本轮已拉取过 ${sym} ${tf} K 线，请直接参考前文工具返回。`;
           stageTrace.push(`klines_dup:${sym}:${tf}`);
+          stageSteps.push({
+            kind: 'klines_dup',
+            round,
+            symbol: sym,
+            title: `重复查K ${shortSym(sym)} ${tf}`,
+            summary: '本轮已拉取过该周期，跳过重复请求',
+          });
         } else if (klineCallsUsed >= maxKlineCalls) {
           content = `本轮额外 K 线查验已达上限（${maxKlineCalls} 次），为保证实盘决策时效请停止泛查，立即基于已有数据进入 plan / finalize 拍板。`;
           stageTrace.push(`klines_cap:${sym}:${tf}`);
+          stageSteps.push({
+            kind: 'klines_cap',
+            round,
+            symbol: sym,
+            title: `查K限流 ${shortSym(sym)} ${tf}`,
+            summary: `本轮补查已达上限（${maxKlineCalls} 次）`,
+          });
         } else if (sym && input.getKlines) {
           try {
             const klines = await input.getKlines(sym, tf, count);
@@ -734,6 +854,13 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
             fetchedKlines.add(klineKey);
             content = formatKlinesBrief(sym, tf, klines);
             stageTrace.push(`klines:${sym}:${tf}`);
+            stageSteps.push({
+              kind: 'klines',
+              round,
+              symbol: sym,
+              title: `K线 ${shortSym(sym)} ${tf}`,
+              summary: `主动补查雷达外 ${sym} ${tf} 周期最近 ${klines.length} 根 K 线`,
+            });
           } catch (err) {
             content = `${sym} ${tf} 拉取失败：${(err as Error).message}`;
           }
@@ -754,7 +881,29 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
           input.candidateSymbols,
           input.pendingSymbols,
         );
+        const nextCheckRaw = asFiniteNumber(args['next_check_in_minutes']);
+        const nextCheckClamped =
+          nextCheckRaw !== undefined && nextCheckRaw > 0
+            ? Math.max(3, Math.min(15, Math.round(nextCheckRaw)))
+            : undefined;
         stageTrace.push(`finalize(${finalized.decisionCount})`);
+        const finMeta: Array<{ label: string; value: string }> = [
+          { label: '工具轮次', value: `${round} 轮` },
+          { label: '提交决策', value: `${finalized.decisionCount} 项` },
+        ];
+        if (nextCheckClamped !== undefined) {
+          finMeta.push({
+            label: '下次复查',
+            value: nextCheckClamped < 15 ? `提前 ${nextCheckClamped} 分钟` : '常规 15 分钟',
+          });
+        }
+        stageSteps.push({
+          kind: 'finalize',
+          round,
+          title: `提交(${finalized.decisionCount})`,
+          summary: asText(args['summary'])?.slice(0, 260),
+          meta: finMeta,
+        });
         input.onStageEvent?.(
           'finalize',
           `阶段3[finalize] 已提交 ${finalized.decisionCount} 条结构化决策（轨迹：${stageTrace.join(' → ')}）`,
@@ -791,6 +940,7 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
         },
         pendingThesisPlans: finalized.pendingThesisPlans,
         stageTrace,
+        stageSteps,
         usedFinalizeTool: true,
       };
     }
@@ -807,6 +957,12 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
     input.pendingSymbols,
   );
   stageTrace.push('fallback_hold_wait');
+  stageSteps.push({
+    kind: 'fallback',
+    round: maxRounds,
+    title: '轮次上限兜底',
+    summary: `经过 ${maxRounds} 轮工具调用未提交 finalize，已按高观望纪律兜底保持既有持仓与观望`,
+  });
   return {
     text: fallback.text,
     latencyMs: totalLatencyMs,
@@ -820,6 +976,7 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
     },
     pendingThesisPlans: fallback.pendingThesisPlans,
     stageTrace,
+    stageSteps,
     usedFinalizeTool: false,
   };
 }

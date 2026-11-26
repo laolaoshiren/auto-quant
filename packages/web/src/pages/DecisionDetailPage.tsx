@@ -21,7 +21,11 @@ import {
   isOpenAction,
 } from '../components/DecisionAudit';
 import { CoinIcon } from '../components/CoinIcon';
-import { PowerlineTrajectory, parsePowerlineTrajectory } from '../components/PowerlineTrajectory';
+import {
+  ManagedStageActionBar,
+  isManagedTrajectoryEntry,
+  resolveManagedStageChips,
+} from '../components/PowerlineTrajectory';
 import { fmtDateTime, fmtInt, fmtLatency, fmtPrice, fmtUsd } from '../lib/format';
 import { plainText } from '../lib/plainText';
 import { humanizeToolNames } from '../lib/toolLabels';
@@ -171,18 +175,24 @@ function RawMaterialTabs({ record }: { record: DecisionRecord }) {
 }
 
 function CompactExecutionLog({ log }: { log: ExecutionLogEntry[] }) {
-  if (log.length === 0) {
+  const visibleLog = log.filter(
+    (entry) =>
+      !isManagedTrajectoryEntry(entry) ||
+      resolveManagedStageChips(entry, { includeFinalizeSummary: true }).length > 0,
+  );
+  if (visibleLog.length === 0) {
     return <p className="text-xs text-ink-faint">本轮无执行记录。</p>;
   }
   return (
     <ul className="space-y-2">
-      {log.map((entry, idx) => {
+      {visibleLog.map((entry, idx) => {
         const cleaned = plainText(humanizeToolNames(entry.detail ?? ''));
-        const trajectory = entry.status === 'data' ? parsePowerlineTrajectory(cleaned) : null;
-        if (trajectory) {
+        if (isManagedTrajectoryEntry(entry)) {
+          const chips = resolveManagedStageChips(entry, { includeFinalizeSummary: true });
+          if (chips.length === 0) return null;
           return (
             <li key={idx}>
-              <PowerlineTrajectory segments={trajectory} />
+              <ManagedStageActionBar chips={chips} />
             </li>
           );
         }
