@@ -2937,7 +2937,7 @@ function outcomeBadge(status: ExecutionLogEntry['status']): {
   }
 }
 
-type FigureKey = 'size' | 'entry' | 'stop' | 'target' | 'reward' | 'leverage' | 'reduce';
+type FigureKey = 'size' | 'margin' | 'entry' | 'stop' | 'target' | 'reward' | 'leverage' | 'reduce';
 
 /** 关键数字里的一个片段：`{ label: '止损', value: '0.174000' }`。 */
 interface Figure {
@@ -2956,6 +2956,7 @@ interface Figure {
  */
 const FIGURE_TITLE: Record<FigureKey, string> = {
   size: '名义价值（USDT）',
+  margin: '预计保证金占用 = 仓位名义价值 ÷ 杠杆倍数（USDT）',
   entry: '当前价格，即开仓参考价',
   stop: '止损价',
   target: '止盈价',
@@ -3039,6 +3040,9 @@ export function figureParts(decision: Decision, price: number | null): Figure[] 
       /* 加仓金额比"仓位"更贴切：它说的是"再投多少"。 */
       { key: 'size', label: '加仓', value: fmtUsd(decision.positionSizeUsd, 2) },
     ];
+    if (num(decision.positionSizeUsd) && decision.positionSizeUsd > 0 && num(decision.leverage) && decision.leverage > 0) {
+      parts.push({ key: 'margin', label: '保证金', value: fmtUsd(decision.positionSizeUsd / decision.leverage, 2) });
+    }
     if (decision.leverage > 0) parts.push({ key: 'leverage', label: '杠杆', value: `${decision.leverage}x` });
     if (num(decision.stopLoss)) parts.push({ key: 'stop', label: '止损', value: fmtPriceUsd(decision.stopLoss) });
     if (num(decision.takeProfit))
@@ -3126,6 +3130,13 @@ export function figureParts(decision: Decision, price: number | null): Figure[] 
       value: fmtUsd(num(decision.positionSizeUsd) ? decision.positionSizeUsd : null, 2),
     },
   ];
+  if (num(decision.positionSizeUsd) && decision.positionSizeUsd > 0 && num(decision.leverage) && decision.leverage > 0) {
+    parts.push({
+      key: 'margin',
+      label: '保证金',
+      value: fmtUsd(decision.positionSizeUsd / decision.leverage, 2),
+    });
+  }
   if (entryRef !== null) {
     parts.push({ key: 'entry', label: limitEntry !== null ? '限价' : '开仓', value: fmtPriceUsd(entryRef) });
   }

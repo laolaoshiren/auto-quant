@@ -418,7 +418,7 @@ export function OverviewPage() {
       const top = rec.decisions.find((d) => d.action !== 'wait' && d.action !== 'skip') ?? rec.decisions[0];
       const act = top
         ? isPendingOrderWaitDecision(top.action, top.reasoning)
-          ? { label: '挂单等待', color: 'text-amber-300' }
+          ? { label: '待成交', color: 'text-amber-300' }
           : (ACTION_TAG[top.action] ?? { label: top.action, color: 'text-slate-300' })
         : { label: '观望', color: 'text-slate-400' };
       entries.push({

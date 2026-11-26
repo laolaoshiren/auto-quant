@@ -175,7 +175,7 @@ export function isPendingOrderWaitDecision(action: string, reasoning?: string | 
   return PENDING_ORDER_WAIT_RE.test(reasoning);
 }
 
-/** Compact left badge used by the feed: 开多 / 平空 / 持有 / 挂单等待 … */
+/** Compact left badge used by the feed: 开多 / 平空 / 持有 / 待成交 … */
 export function ActionBadge({
   action,
   reasoning,
@@ -194,9 +194,9 @@ export function ActionBadge({
           "border-amber-400/40 bg-amber-500/12 text-amber-300 [[data-skin='light']_&]:border-amber-700/35 [[data-skin='light']_&]:bg-amber-500/12 [[data-skin='light']_&]:text-amber-800",
           className,
         )}
-        title={`${action}（待成交委托挂单继续等待）`}
+        title={`${action}（限价委托待成交）`}
       >
-        挂单等待
+        待成交
       </Badge>
     );
   }

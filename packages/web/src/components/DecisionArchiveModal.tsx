@@ -420,6 +420,9 @@ export function DecisionArchiveModal({
                             {isOpenAction(d.action) && (
                               <span className="num text-[11px] text-ink-lo">
                                 仓位 {fmtUsd(d.positionSizeUsd, 2)}
+                                {isNum(d.positionSizeUsd) && d.positionSizeUsd > 0 && isNum(d.leverage) && d.leverage > 0
+                                  ? ` · 保证金 ${fmtUsd(d.positionSizeUsd / d.leverage, 2)}`
+                                  : ''}
                                 {isNum(d.stopLoss) ? ` · 止损 ${fmtPriceUsd(d.stopLoss)}` : ''}
                                 {isNum(d.takeProfit) ? ` · 止盈 ${fmtPriceUsd(d.takeProfit)}` : ''}
                                 {d.leverage > 0 ? ` · 杠杆 ${d.leverage}x` : ''}

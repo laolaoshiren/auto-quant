@@ -186,3 +186,48 @@ test('★ 限价开仓必须以 limitPrice 作为入场参考价与盈亏比基�
   assert.match(entry?.value ?? '', /0\.0552/);
   assert.equal(reward?.value, '1:2.29');
 });
+
+test('★ 开仓与加仓决策同时具备仓位与杠杆时显示保证金占用（仓位 ÷ 杠杆）', () => {
+  const openParts = figureParts(
+    makeDecision({
+      symbol: 'LINKUSDT',
+      action: 'open_long',
+      entryType: 'limit',
+      limitPrice: 9.135,
+      stopLoss: 9.03,
+      takeProfit: 9.45,
+      positionSizeUsd: 85,
+      leverage: 10,
+    }),
+    9.19,
+  );
+  const margin = openParts.find((p) => p.key === 'margin');
+  assert.deepEqual(margin, { key: 'margin', label: '保证金', value: '$8.50' });
+  assert.equal(openParts[0]?.key, 'size');
+  assert.equal(openParts[1]?.key, 'margin', '保证金应紧跟仓位后面展示');
+
+  const addParts = figureParts(
+    makeDecision({
+      symbol: 'BTCUSDT',
+      action: 'add_to_position',
+      positionSizeUsd: 100,
+      leverage: 5,
+    }),
+    60000,
+  );
+  assert.deepEqual(
+    addParts.find((p) => p.key === 'margin'),
+    { key: 'margin', label: '保证金', value: '$20.00' },
+  );
+
+  const missingLev = figureParts(
+    makeDecision({
+      symbol: 'ETHUSDT',
+      action: 'open_long',
+      positionSizeUsd: 50,
+      leverage: 0,
+    }),
+    2000,
+  );
+  assert.equal(missingLev.find((p) => p.key === 'margin'), undefined, '缺少有效杠杆时不得显示 NaN/Infinity 保证金');
+});

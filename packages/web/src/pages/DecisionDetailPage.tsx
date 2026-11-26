@@ -379,6 +379,20 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
                               <strong className="num text-ink-hi">{fmtUsd(decision.positionSizeUsd, 2)}</strong>
                             </span>
                           )}
+                          {typeof decision.positionSizeUsd === 'number' &&
+                            decision.positionSizeUsd > 0 &&
+                            typeof decision.leverage === 'number' &&
+                            decision.leverage > 0 && (
+                              <span
+                                className="rounded bg-base-900/80 px-2 py-0.5"
+                                title="预计保证金占用 = 仓位名义价值 ÷ 杠杆倍数（USDT）"
+                              >
+                                <span className="text-ink-faint">保证金 </span>
+                                <strong className="num text-ink-hi">
+                                  {fmtUsd(decision.positionSizeUsd / decision.leverage, 2)}
+                                </strong>
+                              </span>
+                            )}
                           {decision.stopLoss != null && (
                             <span className="rounded bg-base-900/80 px-2 py-0.5">
                               <span className="text-ink-faint">止损 </span>

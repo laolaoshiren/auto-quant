@@ -434,7 +434,7 @@ export function normalizeFinalizePayload(
     }
   }
 
-  // 永不空决策兜底：确保每个待成交限价挂单也有明确表态（缺省补 `wait`，UI 自动渲染为「挂单等待」）
+  // 永不空决策兜底：确保每个待成交限价挂单也有明确表态（缺省补 `wait`，UI 自动渲染为「待成交」）
   for (const sym of pendingSymbolSet) {
     if (!coveredSymbols.has(sym)) {
       coveredSymbols.add(sym);
