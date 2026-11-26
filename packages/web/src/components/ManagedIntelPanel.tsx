@@ -14,6 +14,8 @@ import { Badge, cn, Panel } from './ui';
 interface ManagedIntelPanelProps {
   traderId: number;
   onSelectSymbol?: (symbol: string) => void;
+  /** 为真时撑满外部容器并在内容区内部滚动（手动上下拖动图表分割条时启用）。 */
+  fillHeight?: boolean;
 }
 
 function shortSym(symbol: string): string {
@@ -36,7 +38,7 @@ function radarBadgeTone(item: ManagedRadarItemView): 'up' | 'down' | 'warn' | 'm
   return 'muted';
 }
 
-export function ManagedIntelPanel({ traderId, onSelectSymbol }: ManagedIntelPanelProps) {
+export function ManagedIntelPanel({ traderId, onSelectSymbol, fillHeight = false }: ManagedIntelPanelProps) {
   const [notesOpen, setNotesOpen] = useState(false);
   const [intelOpen, setIntelOpen] = useState(false);
 
@@ -62,7 +64,8 @@ export function ManagedIntelPanel({ traderId, onSelectSymbol }: ManagedIntelPane
 
   return (
     <Panel
-      className="shrink-0"
+      className={fillHeight ? 'flex h-full min-h-0 flex-col' : 'shrink-0'}
+      bodyClassName={fillHeight ? 'min-h-0 flex-1 overflow-y-auto' : undefined}
       title="AI500 雷达与持仓论点"
       actions={
         <div className="flex flex-wrap items-center gap-2 text-xs text-ink-faint">

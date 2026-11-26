@@ -534,7 +534,7 @@ export function WinLossBar({ wins, losses }: { wins: number; losses: number }) {
 
   return (
     <div
-      className="mt-1"
+      className="flex h-full flex-col justify-between gap-1 pt-0.5"
       title={total > 0 ? `${fmtInt(wins)} 笔盈利 / ${fmtInt(losses)} 笔亏损` : '还没有平仓记录'}
     >
       {/*
@@ -546,14 +546,14 @@ export function WinLossBar({ wins, losses }: { wins: number; losses: number }) {
        * unfilled part is all losses.
        */}
       <div
-        className="flex h-1 w-full overflow-hidden rounded-full"
+        className="flex h-1.5 w-full overflow-hidden rounded-full"
         style={{ backgroundColor: ink.track }}
         role="img"
         aria-label={`${fmtInt(wins)} 笔盈利，${fmtInt(losses)} 笔亏损`}
       >
         <div className="h-full" style={{ width: `${winPercent}%`, backgroundColor: ink.up }} />
       </div>
-      <div className="mt-0.5 flex items-center justify-between text-xs">
+      <div className="flex items-center justify-between text-[11px] leading-4">
         <span className="num text-up">{fmtInt(wins)} 盈</span>
         <span className="num text-down">{fmtInt(losses)} 亏</span>
       </div>

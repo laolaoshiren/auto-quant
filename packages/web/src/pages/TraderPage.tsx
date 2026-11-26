@@ -1,4 +1,13 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Brain,
@@ -212,6 +221,29 @@ function toAccountState(raw: Record<string, unknown> | null): TraderAccountState
  * 下次打开还能看见当前这条 —— 收起是"这一会儿不想看"，不是"永远别看"。
  */
 const ERROR_DISMISS_KEY = 'aq.traderErrorDismissed';
+const INTEL_SPLIT_HEIGHT_KEY = 'aq.traderIntelHeight.v1';
+const INTEL_MIN_H = 72;
+const CHART_PANEL_MIN_H = 156;
+
+function loadSavedIntelHeight(): number | null {
+  try {
+    const raw = localStorage.getItem(INTEL_SPLIT_HEIGHT_KEY);
+    if (!raw) return null;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= INTEL_MIN_H ? Math.round(parsed) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveIntelHeight(value: number | null): void {
+  try {
+    if (value === null) localStorage.removeItem(INTEL_SPLIT_HEIGHT_KEY);
+    else localStorage.setItem(INTEL_SPLIT_HEIGHT_KEY, String(Math.round(value)));
+  } catch {
+    /* 隐私模式或配额受限时静默忽略，仅保持当前会话态。 */
+  }
+}
 
 function dismissedFingerprint(): string {
   try {
@@ -236,6 +268,82 @@ export function TraderPage() {
    * （指纹不同）就会重新显示出来。
    */
   const [dismissedError, setDismissedError] = useState(dismissedFingerprint);
+  const [intelHeight, setIntelHeight] = useState<number | null>(loadSavedIntelHeight);
+  const [resizingIntel, setResizingIntel] = useState(false);
+  const splitHostRef = useRef<HTMLDivElement | null>(null);
+  const intelWrapRef = useRef<HTMLDivElement | null>(null);
+  const intelHeightRef = useRef<number | null>(intelHeight);
+  intelHeightRef.current = intelHeight;
+
+  const clampIntelHeight = useCallback((next: number): number => {
+    const hostH = splitHostRef.current?.getBoundingClientRect().height ?? 0;
+    const maxH = hostH > CHART_PANEL_MIN_H + INTEL_MIN_H + 12 ? Math.floor(hostH - CHART_PANEL_MIN_H - 12) : 420;
+    return Math.max(INTEL_MIN_H, Math.min(maxH, Math.round(next)));
+  }, []);
+
+  useEffect(() => {
+    if (intelHeight === null) return;
+    const onResize = () => setIntelHeight((prev) => (prev === null ? null : clampIntelHeight(prev)));
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [intelHeight, clampIntelHeight]);
+
+  const startIntelResize = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const startY = event.clientY;
+      const startH =
+        intelHeightRef.current ??
+        Math.round(intelWrapRef.current?.getBoundingClientRect().height ?? 112);
+      let latest: number | null = intelHeightRef.current;
+
+      setResizingIntel(true);
+      const prevCursor = document.body.style.cursor;
+      const prevSelect = document.body.style.userSelect;
+      document.body.style.cursor = 'row-resize';
+      document.body.style.userSelect = 'none';
+
+      const onMove = (moveEvent: PointerEvent) => {
+        const delta = startY - moveEvent.clientY;
+        const clamped = clampIntelHeight(startH + delta);
+        latest = clamped;
+        setIntelHeight(clamped);
+      };
+
+      const finish = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', finish);
+        window.removeEventListener('pointercancel', finish);
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevSelect;
+        setResizingIntel(false);
+        if (latest !== null) saveIntelHeight(latest);
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', finish);
+      window.addEventListener('pointercancel', finish);
+    },
+    [clampIntelHeight],
+  );
+
+  const resetIntelHeight = useCallback(() => {
+    setIntelHeight(null);
+    saveIntelHeight(null);
+  }, []);
+
+  const nudgeIntelHeight = useCallback(
+    (delta: number) => {
+      const base =
+        intelHeightRef.current ??
+        Math.round(intelWrapRef.current?.getBoundingClientRect().height ?? 112);
+      const next = clampIntelHeight(base + delta);
+      setIntelHeight(next);
+      saveIntelHeight(next);
+    },
+    [clampIntelHeight],
+  );
   const params = useParams();
   const traderId = Number(params.id);
   const navigate = useNavigate();
@@ -1381,7 +1489,7 @@ export function TraderPage() {
               : '—'}
         </div>
 
-        <div className="num mt-auto space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
+        <div className="num mt-2 space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
           {useSimulatedBalance ? (
             <>
               <div className="flex items-center justify-between gap-1">
@@ -1434,7 +1542,7 @@ export function TraderPage() {
           {stats ? fmtUsdSigned(totalPnl, 2) : '—'}
         </div>
 
-        <div className="num mt-auto space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
+        <div className="num mt-2 space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
           {stats ? (
             <>
               <div className="flex items-center justify-between gap-1">
@@ -1481,7 +1589,7 @@ export function TraderPage() {
           {fmtMarginUsed()}
         </div>
 
-        <div className="num mt-auto space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
+        <div className="num mt-2 space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
           {account ? (
             <>
               <div className="flex items-center justify-between gap-1">
@@ -1530,7 +1638,7 @@ export function TraderPage() {
           )}
         </div>
 
-        <div className="num mt-auto space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
+        <div className="num mt-2 space-y-0.5 border-t border-base-800/80 pt-1.5 text-[11px] text-ink-faint">
           {liveUnavailable ? (
             <span className="truncate">状态暂不可读</span>
           ) : (
@@ -1572,7 +1680,7 @@ export function TraderPage() {
           {stats && stats.totalTrades > 0 ? `${stats.winRatePercent.toFixed(1)}%` : '—'}
         </div>
 
-        <div className="mt-auto border-t border-base-800/80 pt-1.5">
+        <div className="mt-2 flex flex-1 flex-col border-t border-base-800/80 pt-1.5">
           {stats && stats.totalTrades > 0 ? (
             <WinLossBar wins={wins} losses={losses} />
           ) : (
@@ -2234,11 +2342,12 @@ export function TraderPage() {
           外账户交易的说明（`foreign`）仍保留在别处（决策流/账户面板），不丢信息。
         */}
 
-        {/* D. 权益 / 行情（弹性撑满左侧剩余垂直空间，随底部数据表高度自动伸缩） */}
+        {/* D + AI500 上下弹性分栏：中间拖拽条可自由上下调整图表与下方雷达面板高度 */}
+        <div ref={splitHostRef} className="flex min-h-0 flex-1 flex-col">
         <Panel
           padded={false}
           bodyClassName={curveCollapsed && chartTab === 'equity' ? 'p-0' : 'flex min-h-0 flex-1 flex-col p-0'}
-          className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[168px] flex-1 flex-col'}
+          className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[156px] flex-1 flex-col'}
           title={
             <span className="inline-flex items-center gap-0.5 rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
               <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
@@ -2407,15 +2516,64 @@ export function TraderPage() {
           )}
         </Panel>
 
-        {/* 智能托管 2.0：AI500 雷达、持仓论点、反例笔记与归因就绪面板置于图表下方 */}
+        {/* 智能托管 2.0：图表与 AI500 雷达面板之间的上下可拖拽分割条（双击恢复自动高度） */}
         {trader.mode === 'ai_managed' && (
-          <div className="shrink-0">
-            <ManagedIntelPanel
-              traderId={traderId}
-              onSelectSymbol={selectChartSymbol}
-            />
-          </div>
+          <>
+            {!(curveCollapsed && chartTab === 'equity') ? (
+              <div
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="上下拖动调整图表与下方雷达面板高度，双击恢复自动高度"
+                aria-valuenow={intelHeight ?? undefined}
+                aria-valuemin={INTEL_MIN_H}
+                tabIndex={0}
+                title="上下拖动调整图表与下方雷达面板高度 · 双击恢复自动"
+                onPointerDown={startIntelResize}
+                onDoubleClick={resetIntelHeight}
+                onKeyDown={(event) => {
+                  if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    nudgeIntelHeight(28);
+                  } else if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    nudgeIntelHeight(-28);
+                  } else if (event.key === 'Home') {
+                    event.preventDefault();
+                    resetIntelHeight();
+                  }
+                }}
+                className={`group flex h-2.5 shrink-0 cursor-row-resize select-none items-center justify-center rounded transition-colors ${
+                  resizingIntel ? 'bg-accent/15' : 'hover:bg-base-850/80'
+                }`}
+              >
+                <span
+                  aria-hidden
+                  className={`h-1 w-12 rounded-full transition-colors ${
+                    resizingIntel ? 'bg-accent' : 'bg-base-700/80 group-hover:bg-accent/80'
+                  }`}
+                />
+              </div>
+            ) : (
+              <div className="h-2 shrink-0" aria-hidden />
+            )}
+            <div
+              ref={intelWrapRef}
+              className={intelHeight !== null && !(curveCollapsed && chartTab === 'equity') ? 'min-h-0 shrink-0' : 'shrink-0'}
+              style={
+                intelHeight !== null && !(curveCollapsed && chartTab === 'equity')
+                  ? { height: intelHeight }
+                  : undefined
+              }
+            >
+              <ManagedIntelPanel
+                traderId={traderId}
+                onSelectSymbol={selectChartSymbol}
+                fillHeight={intelHeight !== null && !(curveCollapsed && chartTab === 'equity')}
+              />
+            </div>
+          </>
         )}
+        </div>
 
         {/*
           **智能体审计**（用户 2026-10-12 要求的「汇报工作的」那一环）。
