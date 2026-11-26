@@ -132,16 +132,26 @@ export function OverviewPage() {
   const [stageMode, setStageMode] = useState<'radar' | 'pipeline'>('radar');
   const [wireOffset, setWireOffset] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const observatoryRef = useRef<HTMLDivElement | null>(null);
+  const nativeFsRef = useRef(false);
 
   useEffect(() => {
     const onFsChange = () => {
-      const fsEl = document.fullscreenElement;
-      setIsFullscreen(fsEl !== null && fsEl === observatoryRef.current);
+      const inNativeFs = Boolean(document.fullscreenElement);
+      if (inNativeFs) {
+        nativeFsRef.current = true;
+        setIsFullscreen(true);
+      } else if (nativeFsRef.current) {
+        // 用户通过 Esc 或系统手势退出了浏览器原生全屏 → 同步退出大屏沉浸态
+        nativeFsRef.current = false;
+        setIsFullscreen(false);
+      }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isFullscreen && !document.fullscreenElement) {
+      if (e.key === 'Escape' && isFullscreen) {
         setIsFullscreen(false);
+        if (document.fullscreenElement) {
+          void document.exitFullscreen().catch(() => {});
+        }
       }
     };
     document.addEventListener('fullscreenchange', onFsChange);
@@ -152,24 +162,21 @@ export function OverviewPage() {
     };
   }, [isFullscreen]);
 
-  const toggleFullscreen = useCallback(async () => {
-    const el = observatoryRef.current;
-    if (!el) return;
-    try {
+  const toggleFullscreen = useCallback(() => {
+    if (isFullscreen) {
+      nativeFsRef.current = false;
+      setIsFullscreen(false);
       if (document.fullscreenElement) {
-        await document.exitFullscreen();
-        setIsFullscreen(false);
-      } else if (isFullscreen) {
-        setIsFullscreen(false);
-      } else if (typeof el.requestFullscreen === 'function') {
-        await el.requestFullscreen();
-        setIsFullscreen(true);
-      } else {
-        setIsFullscreen(true);
+        void document.exitFullscreen().catch(() => {});
       }
-    } catch {
-      // 若浏览器环境限制原生 Fullscreen API，则平滑回退到整页遮罩沉浸模式
-      setIsFullscreen((v) => !v);
+      return;
+    }
+    // 1) 立刻切入 fixed inset-0 z-[9999] 纯净大屏态（隐藏侧边栏、应用顶栏与非大屏操作按钮）
+    setIsFullscreen(true);
+    // 2) 同步请求浏览器原生全屏（隐藏地址栏、标签页与系统任务栏）；即使被 Webview 拦截也保持纯净大屏态
+    const rootEl = document.documentElement;
+    if (typeof rootEl.requestFullscreen === 'function') {
+      void rootEl.requestFullscreen().catch(() => {});
     }
   }, [isFullscreen]);
 
@@ -478,11 +485,10 @@ export function OverviewPage() {
 
   return (
     <div
-      ref={observatoryRef}
       className={cn(
         'aq-observatory-bg flex flex-col gap-2.5 text-slate-100',
         isFullscreen
-          ? 'fixed inset-0 z-50 h-screen w-screen overflow-hidden rounded-none p-3.5'
+          ? 'fixed inset-0 z-[9999] h-screen w-screen overflow-hidden rounded-none p-3.5'
           : 'page-fill -m-2 rounded-xl p-3 sm:-m-3 sm:p-3.5',
       )}
     >
@@ -593,7 +599,7 @@ export function OverviewPage() {
 
             <button
               type="button"
-              onClick={() => void toggleFullscreen()}
+              onClick={toggleFullscreen}
               title={isFullscreen ? '退出全屏大屏模式（Esc）' : '进入纯净全屏大屏模式（隐藏系统边栏与浏览器界面）'}
               aria-label={isFullscreen ? '退出全屏' : '全屏显示大屏'}
               className={cn(
