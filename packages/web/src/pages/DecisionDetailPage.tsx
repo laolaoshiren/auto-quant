@@ -248,7 +248,18 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
         </div>
 
         <div className="num flex flex-wrap items-center gap-1.5 text-xs">
-          <span className="rounded-md bg-sky-500/12 px-2 py-0.5 font-medium text-sky-300 [[data-skin='light']_&]:text-sky-700">
+          {record.aiTtftMs != null && record.aiTtftMs > 0 && (
+            <span
+              className="rounded-md bg-up/12 px-2 py-0.5 font-medium text-up"
+              title="LLM 平均首字延迟（TTFT；多轮调用取各轮首字延迟均值）"
+            >
+              首字 {fmtLatency(record.aiTtftMs)}
+            </span>
+          )}
+          <span
+            className="rounded-md bg-sky-500/12 px-2 py-0.5 font-medium text-sky-300 [[data-skin='light']_&]:text-sky-700"
+            title="本周期全部 LLM 调用累计总耗时（含多轮工具交互与执行回执追问）"
+          >
             耗时 {fmtLatency(record.aiLatencyMs)}
           </span>
           <span className="rounded-md bg-base-850 px-2 py-0.5 text-ink-mid">

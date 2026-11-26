@@ -1002,3 +1002,47 @@ test('★ 路线③：runManagedAgenticLoop 拦截已展开标的的重复 get_k
   assert.ok(toolReplies.some((t) => t.includes('已在上方标的档案中完整提供')));
   assert.ok(toolReplies.some((t) => t.includes('已达上限（2 次）')));
 });
+
+test('★ runManagedAgenticLoop 多轮调用累加总耗时并对各轮首字延迟 TTFT 取平均值', async () => {
+  let round = 0;
+  const res = await runManagedAgenticLoop({
+    traderId: 21,
+    baseMessages: [{ role: 'user', content: 'test' }],
+    openPositions: [],
+    candidateSymbols: ['BTCUSDT'],
+    model: {
+      chat: async () => {
+        round += 1;
+        if (round === 1) {
+          return {
+            text: '',
+            toolCalls: [{ id: 'p1', name: 'plan', arguments: JSON.stringify({ summary: '先规划' }) }],
+            latencyMs: 12000,
+            ttftMs: 900,
+            usage: { promptTokens: 1000, completionTokens: 200, cachedTokens: 500, reasoningTokens: 100 },
+          };
+        }
+        return {
+          text: '',
+          toolCalls: [
+            {
+              id: 'f1',
+              name: 'finalize',
+              arguments: JSON.stringify({
+                summary: '完成',
+                decisions: [{ symbol: 'BTCUSDT', action: 'wait', confidence: 65, reasoning: '观望' }],
+              }),
+            },
+          ],
+          latencyMs: 18500,
+          ttftMs: 1500,
+          usage: { promptTokens: 1200, completionTokens: 300, cachedTokens: 900, reasoningTokens: 150 },
+        };
+      },
+    },
+  });
+
+  assert.equal(res.latencyMs, 30500, '多轮总耗时必须完整累加（12000 + 18500）');
+  assert.equal(res.ttftMs, 1200, '多轮首字延迟必须取平均值（(900 + 1500) / 2 = 1200）');
+  assert.deepEqual(res.ttftSamples, [900, 1500]);
+});

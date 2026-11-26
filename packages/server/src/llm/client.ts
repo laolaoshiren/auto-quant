@@ -1025,6 +1025,9 @@ export class LlmClient {
       usage: parsed.usage ?? EMPTY_USAGE,
       model: parsed.model ?? this.model,
       latencyMs,
+      ...(typeof response.ttftMs === 'number' && Number.isFinite(response.ttftMs)
+        ? { ttftMs: response.ttftMs }
+        : {}),
       raw: response.body,
       /* 原生 function calling 的产出（没有就不写这个字段 —— 见 `ChatResult.toolCalls`）。 */
       ...(parsed.toolCalls !== undefined ? { toolCalls: parsed.toolCalls } : {}),

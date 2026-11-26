@@ -189,6 +189,51 @@ export function mergeOpenAiStreamChunks(lines: readonly string[]): unknown {
 export const MAX_STREAM_BYTES = 16 * 1024 * 1024;
 
 /**
+ * 判断单条 OpenAI 兼容 SSE 行是否携带**真实的模型输出内容**（用于测量精准 TTFT 首字延迟）。
+ *
+ * 刻意排除 `: ping` 注释行、空行、`[DONE]`、仅含 `usage` 的尾包，以及首包仅含
+ * `{"role":"assistant","content":""}` 的空握手分片 —— 只有真正开始吐字、吐推理、
+ * 或吐出工具调用分片时才记为首字到达。
+ */
+export function hasOpenAiStreamOutputDelta(rawLine: string): boolean {
+  const line = rawLine.trim();
+  if (line === '' || line.startsWith(':')) return false;
+  const payload = line.startsWith('data:') ? line.slice(5).trim() : line;
+  if (payload === '' || payload === '[DONE]') return false;
+  let chunk: Record<string, unknown> | null;
+  try {
+    chunk = asRecord(JSON.parse(payload));
+  } catch {
+    return false;
+  }
+  if (chunk === null) return false;
+  const choices = chunk['choices'];
+  if (!Array.isArray(choices) || choices.length === 0) return false;
+  const choice = asRecord(choices[0]);
+  if (choice === null) return false;
+  const delta = asRecord(choice['delta']) ?? asRecord(choice['message']);
+  if (delta === null) return false;
+  if (typeof delta['content'] === 'string' && delta['content'].length > 0) return true;
+  if (typeof delta['reasoning_content'] === 'string' && delta['reasoning_content'].length > 0) {
+    return true;
+  }
+  const toolCalls = delta['tool_calls'];
+  if (Array.isArray(toolCalls)) {
+    for (const item of toolCalls) {
+      const call = asRecord(item);
+      if (call === null) continue;
+      if (typeof call['id'] === 'string' && call['id'].length > 0) return true;
+      const fn = asRecord(call['function']);
+      if (fn !== null) {
+        if (typeof fn['name'] === 'string' && fn['name'].length > 0) return true;
+        if (typeof fn['arguments'] === 'string' && fn['arguments'].length > 0) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * 从一个 SSE `Response` 读出全部 `data:` 行。
  *
  * ⚠️ **这里才是流式的价值所在**：`fetch` 一拿到响应头就返回，
@@ -205,6 +250,8 @@ export async function readOpenAiStreamLines(
    */
   onActivity?: () => void,
   maxBytes = MAX_STREAM_BYTES,
+  /** 收到第一条携带真实模型输出（content / reasoning_content / tool_calls）的 SSE 分片时触发一次，用于精准记录 TTFT。 */
+  onFirstOutput?: () => void,
 ): Promise<string[]> {
   const body = response.body;
   if (body === null) return [];
@@ -213,6 +260,15 @@ export async function readOpenAiStreamLines(
   const lines: string[] = [];
   let buffer = '';
   let totalBytes = 0;
+  let firstOutputNotified = false;
+
+  const inspectLineForFirstOutput = (line: string): void => {
+    if (firstOutputNotified || !onFirstOutput) return;
+    if (hasOpenAiStreamOutputDelta(line)) {
+      firstOutputNotified = true;
+      onFirstOutput();
+    }
+  };
 
   try {
     for (;;) {
@@ -232,13 +288,19 @@ export async function readOpenAiStreamLines(
        */
       let newline = buffer.indexOf('\n');
       while (newline >= 0) {
-        lines.push(buffer.slice(0, newline).replace(/\r$/, ''));
+        const line = buffer.slice(0, newline).replace(/\r$/, '');
+        lines.push(line);
+        inspectLineForFirstOutput(line);
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf('\n');
       }
     }
     buffer += decoder.decode();
-    if (buffer.trim() !== '') lines.push(buffer.replace(/\r$/, ''));
+    if (buffer.trim() !== '') {
+      const tail = buffer.replace(/\r$/, '');
+      lines.push(tail);
+      inspectLineForFirstOutput(tail);
+    }
     return lines;
   } finally {
     reader.releaseLock();

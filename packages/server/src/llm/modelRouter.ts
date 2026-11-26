@@ -42,6 +42,8 @@ export interface RouterCallResult {
   /** 文本内容。 */
   text: string;
   latencyMs: number;
+  /** 本次成功响应的流式首字延迟（TTFT，毫秒）；非流式或未测到时省略。 */
+  ttftMs?: number | null;
   usage: {
     promptTokens: number | null;
     completionTokens: number | null;
@@ -83,6 +85,7 @@ export type CallModel = (
 ) => Promise<{
   text: string;
   latencyMs: number;
+  ttftMs?: number | null;
   usage: RouterCallResult['usage'];
   /**
    * 结束原因。**必须透传** —— 它是区分两种"空内容"的唯一依据：
@@ -498,10 +501,18 @@ export class ModelRouter {
 
         attempts.push({ modelId, ok: true, ms, note: '成功' });
         this.health.recordSuccess(modelId);
+        /*
+         * 跨候选重试/降级时累加之前失败尝试的真实等待耗时；单次即成功时严格等于 `result.latencyMs`。
+         * 首字延迟（ttftMs）仅取成功响应本身的流式首字到达耗时，不混入前面失败候选的等待。
+         */
+        const failedMs = attempts.slice(0, -1).reduce((sum, item) => sum + item.ms, 0);
         return {
           modelId,
           text: result.text,
-          latencyMs: result.latencyMs,
+          latencyMs: result.latencyMs + failedMs,
+          ...(typeof result.ttftMs === 'number' && Number.isFinite(result.ttftMs)
+            ? { ttftMs: result.ttftMs }
+            : {}),
           usage: result.usage,
           attempts,
           ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),

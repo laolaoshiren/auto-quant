@@ -49,6 +49,7 @@ export interface ManagedChatModel {
   ): Promise<{
     text: string;
     latencyMs: number;
+    ttftMs?: number | null;
     usage: {
       promptTokens: number | null;
       completionTokens: number | null;
@@ -86,6 +87,10 @@ export interface ManagedEngineResult {
   /** 归一化后的 `<reasoning>...</reasoning>\n<decision>...</decision>` 文本，无缝交由既有解析器与风控执行。 */
   text: string;
   latencyMs: number;
+  /** 多轮调用的 LLM 平均首字延迟（毫秒）；未测到时为 `null`。 */
+  ttftMs: number | null;
+  /** 各轮实测首字延迟明细（毫秒），供外层合并执行回执追问重新求全局均值。 */
+  ttftSamples: number[];
   usage: {
     promptTokens: number | null;
     completionTokens: number | null;
@@ -498,6 +503,11 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
   const openPosBySymbol = new Map(input.openPositions.map((p) => [normalizeSymbol(p.symbol), p]));
 
   let totalLatencyMs = 0;
+  const ttftSamples: number[] = [];
+  const avgTtft = (): number | null =>
+    ttftSamples.length > 0
+      ? Math.round(ttftSamples.reduce((sum, v) => sum + v, 0) / ttftSamples.length)
+      : null;
   let totalPrompt: number | null = null;
   let totalCompletion: number | null = null;
   let totalCached: number | null = null;
@@ -523,6 +533,9 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
     });
 
     totalLatencyMs += res.latencyMs;
+    if (typeof res.ttftMs === 'number' && Number.isFinite(res.ttftMs) && res.ttftMs > 0) {
+      ttftSamples.push(res.ttftMs);
+    }
     totalPrompt = addNullable(totalPrompt, res.usage.promptTokens);
     totalCompletion = addNullable(totalCompletion, res.usage.completionTokens);
     totalCached = addNullable(totalCached, res.usage.cachedTokens);
@@ -537,6 +550,8 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
         return {
           text: res.text,
           latencyMs: totalLatencyMs,
+          ttftMs: avgTtft(),
+          ttftSamples,
           usage: {
             promptTokens: totalPrompt,
             completionTokens: totalCompletion,
@@ -766,6 +781,8 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
       return {
         text: finalized.text,
         latencyMs: totalLatencyMs,
+        ttftMs: avgTtft(),
+        ttftSamples,
         usage: {
           promptTokens: totalPrompt,
           completionTokens: totalCompletion,
@@ -793,6 +810,8 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
   return {
     text: fallback.text,
     latencyMs: totalLatencyMs,
+    ttftMs: avgTtft(),
+    ttftSamples,
     usage: {
       promptTokens: totalPrompt,
       completionTokens: totalCompletion,

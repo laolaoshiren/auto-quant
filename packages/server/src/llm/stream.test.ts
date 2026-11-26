@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_STREAM_BYTES, mergeOpenAiStreamChunks, readOpenAiStreamLines } from './stream.js';
+import {
+  MAX_STREAM_BYTES,
+  hasOpenAiStreamOutputDelta,
+  mergeOpenAiStreamChunks,
+  readOpenAiStreamLines,
+} from './stream.js';
 
 /* -------------------------------------------------------------------------- */
 /*  流式分片 → 非流式形状                                                       */
@@ -191,4 +196,57 @@ test('★★ readOpenAiStreamLines：强制 16MiB 字节上限并中止超限/�
     /超过上限/,
   );
   assert.equal(cancelled, true, '超限时必须立即 cancel reader 释放底层流');
+});
+
+test('★ 首字延迟检测（TTFT）：跳过 ping 与空握手包，在首个真实输出分片时精确触发一次', async () => {
+  assert.equal(hasOpenAiStreamOutputDelta(': ping'), false);
+  assert.equal(hasOpenAiStreamOutputDelta('data: [DONE]'), false);
+  assert.equal(
+    hasOpenAiStreamOutputDelta(
+      'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}',
+    ),
+    false,
+    '仅含 role + 空 content 的首包握手不算首字到达',
+  );
+  assert.equal(
+    hasOpenAiStreamOutputDelta(
+      'data: {"choices":[{"index":0,"delta":{"reasoning_content":"先"},"finish_reason":null}]}',
+    ),
+    true,
+    '思考推理首个分片即算首字到达',
+  );
+  assert.equal(
+    hasOpenAiStreamOutputDelta(
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"plan","arguments":""}}]},"finish_reason":null}]}',
+    ),
+    true,
+    '原生工具调用首个分片即算首字到达',
+  );
+
+  let firstHits = 0;
+  let lineCountAtFirstHit = -1;
+  const encoder = new TextEncoder();
+  const chunks = [
+    ': keep-alive\n\n',
+    'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}\n',
+    'data: {"choices":[{"index":0,"delta":{"reasoning_content":"想"}}]}\n',
+    'data: {"choices":[{"index":0,"delta":{"content":"做多"}}]}\n',
+    'data: [DONE]\n',
+  ];
+  let idx = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (idx < chunks.length) {
+        controller.enqueue(encoder.encode(chunks[idx++]!));
+      } else {
+        controller.close();
+      }
+    },
+  });
+  await readOpenAiStreamLines(new Response(stream), undefined, MAX_STREAM_BYTES, () => {
+    firstHits += 1;
+    lineCountAtFirstHit = idx;
+  });
+  assert.equal(firstHits, 1, 'onFirstOutput 必须且只能触发一次');
+  assert.equal(lineCountAtFirstHit, 3, '必须在第 3 块（首个真实 reasoning_content）到达时触发，而非前两块');
 });

@@ -333,6 +333,8 @@ export interface JsonResponse {
   body: unknown;
   rawText: string;
   retryAfterMs: number | null;
+  /** 流式请求从发起到收到首个真实模型输出分片的耗时（毫秒）；非流式为 `null` / `undefined`。 */
+  ttftMs?: number | null;
 }
 
 /**
@@ -541,6 +543,8 @@ export async function executeStreamRequest(
    */
   let response: Response;
   let lines: string[];
+  const requestStartedAt = Date.now();
+  let ttftMs: number | null = null;
   try {
     try {
       response = await fetchGuarded(request.url, {
@@ -573,8 +577,12 @@ export async function executeStreamRequest(
     }
 
     try {
-      /* 每收到一块数据就重置"卡住"计时器 —— 慢模型因此不会被总时长误杀。 */
-      lines = await readOpenAiStreamLines(response, bumpIdle);
+      /* 每收到一块数据就重置"卡住"计时器，并在首个真实输出分片到达时锁定 TTFT。 */
+      lines = await readOpenAiStreamLines(response, bumpIdle, undefined, () => {
+        if (ttftMs === null) {
+          ttftMs = Math.max(1, Date.now() - requestStartedAt);
+        }
+      });
     } catch (error) {
       /*
        * ⚠️ **2xx 流式在读取过程中失败，要与非流式共用同一套分类。**
@@ -606,5 +614,6 @@ export async function executeStreamRequest(
     body: merged,
     rawText: '',
     retryAfterMs: parseRetryAfter(response.headers.get('retry-after')),
+    ttftMs,
   };
 }

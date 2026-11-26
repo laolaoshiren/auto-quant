@@ -1124,6 +1124,10 @@ const M23_ORDER_CANCEL_SOURCE = /* sql */ `
 ALTER TABLE orders ADD COLUMN cancel_source TEXT;
 `;
 
+const M24_DECISION_TTFT = /* sql */ `
+ALTER TABLE decision_records ADD COLUMN ai_ttft_ms INTEGER;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -1160,4 +1164,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 21, name: 'managed-v2-attribution', sql: M21_MANAGED_V2_ATTRIBUTION },
   { version: 22, name: 'hot-query-indexes', sql: M22_HOT_QUERY_INDEXES },
   { version: 23, name: 'order-cancel-source', sql: M23_ORDER_CANCEL_SOURCE },
+  { version: 24, name: 'decision-ttft', sql: M24_DECISION_TTFT },
 ];

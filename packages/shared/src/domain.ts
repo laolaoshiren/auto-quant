@@ -1435,8 +1435,13 @@ export interface DecisionRecord {
   candidateSymbols: string[];
   success: boolean;
   error: string | null;
-  /** Wall-clock cost of the model call, milliseconds. */
+  /** Wall-clock cost of all model calls in this cycle, milliseconds. */
   aiLatencyMs: number;
+  /**
+   * LLM 首字延迟（TTFT，毫秒；多轮调用时为各轮实测首字延迟的算术平均值）。
+   * `null` / `undefined` = 历史旧记录或非流式调用未测到，前端不伪造。
+   */
+  aiTtftMs?: number | null;
   promptTokens: number | null;
   completionTokens: number | null;
   /**

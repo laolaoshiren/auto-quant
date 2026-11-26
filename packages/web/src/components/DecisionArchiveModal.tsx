@@ -386,6 +386,14 @@ export function DecisionArchiveModal({
                           缓存 {cachePct}%
                         </span>
                       )}
+                      {rec.aiTtftMs != null && rec.aiTtftMs > 0 && (
+                        <span
+                          className="num text-up/90"
+                          title="LLM 平均首字延迟（TTFT，多轮取均值）"
+                        >
+                          首字 {fmtLatency(rec.aiTtftMs)}
+                        </span>
+                      )}
                       {rec.aiLatencyMs > 0 && (
                         <span className="num text-ink-lo">{fmtLatency(rec.aiLatencyMs)}</span>
                       )}

@@ -2431,13 +2431,29 @@ function CycleMeta({ record }: { record: DecisionRecord }) {
         </span>
       )}
 
+      {record.aiTtftMs != null && record.aiTtftMs > 0 && (
+        <span
+          className={cn(
+            'num inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium',
+            record.aiTtftMs > 5_000
+              ? 'bg-warn/12 text-warn'
+              : record.aiTtftMs > 2_000
+                ? "bg-sky-500/10 text-sky-300 [[data-skin='light']_&]:text-sky-700"
+                : 'bg-up/10 text-up',
+          )}
+          title={`LLM 首字延迟（TTFT）：${fmtLatency(record.aiTtftMs)}（若本周期内部有多轮调用，则取各轮首字延迟平均值）`}
+        >
+          首字 {fmtLatency(record.aiTtftMs)}
+        </span>
+      )}
+
       {(record.aiLatencyMs > 0 || record.success) && (
         <span
           className={cn(
             'num inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium',
             latencyTone,
           )}
-          title="本轮向模型发起请求到收到完整响应的时间。"
+          title={`本周期全部 LLM 调用累计耗时：${fmtLatency(record.aiLatencyMs)}（含多轮工具交互与执行回执追问）`}
         >
           {fmtLatency(record.aiLatencyMs)}
         </span>

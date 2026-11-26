@@ -144,6 +144,8 @@ export interface ChatResult {
   usage: ChatUsage;
   model: string;
   latencyMs: number;
+  /** 单次流式调用的首字延迟（TTFT，毫秒）；非流式或未测到时为 `null` / `undefined`。 */
+  ttftMs?: number | null;
   /** Raw provider payload, kept for the audit trail. */
   raw: unknown;
   /**

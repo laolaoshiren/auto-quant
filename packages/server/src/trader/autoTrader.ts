@@ -547,6 +547,7 @@ export interface DecisionModel {
   ): Promise<{
     text: string;
     latencyMs: number;
+    ttftMs?: number | null;
     usage: {
       promptTokens: number | null;
       completionTokens: number | null;
@@ -601,6 +602,7 @@ export interface DecisionModel {
   ): Promise<{
     text: string;
     latencyMs: number;
+    ttftMs?: number | null;
     usage: {
       promptTokens: number | null;
       completionTokens: number | null;
@@ -775,6 +777,8 @@ interface CycleProgress {
   /** 非空即代表本轮失败；内容就是给操作员看的那句话。 */
   error: string | null;
   aiLatencyMs: number;
+  /** LLM 首字延迟（毫秒，多轮调用取各轮均值）；非流式或未测到为 `null`。 */
+  aiTtftMs: number | null;
   promptTokens: number | null;
   completionTokens: number | null;
   /*
@@ -3282,6 +3286,7 @@ export class AutoTrader {
       candidateSymbols: [],
       error: null,
       aiLatencyMs: 0,
+      aiTtftMs: null,
       promptTokens: null,
       completionTokens: null,
       cachedTokens: null,
@@ -4608,9 +4613,18 @@ export class AutoTrader {
       typeof this.deps.model.chat === 'function';
 
     let managedStageTrace: string[] = [];
+    const ttftSamples: number[] = [];
+    const pushTtft = (ms: number | null | undefined): void => {
+      if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) ttftSamples.push(ms);
+    };
+    const averageTtft = (): number | null =>
+      ttftSamples.length > 0
+        ? Math.round(ttftSamples.reduce((sum, v) => sum + v, 0) / ttftSamples.length)
+        : null;
     let response: {
       text: string;
       latencyMs: number;
+      ttftMs?: number | null;
       usage: {
         promptTokens: number | null;
         completionTokens: number | null;
@@ -4649,15 +4663,18 @@ export class AutoTrader {
       });
       this.pendingThesisPlans = engineResult.pendingThesisPlans;
       managedStageTrace = engineResult.stageTrace;
+      for (const sample of engineResult.ttftSamples) pushTtft(sample);
       response = {
         text: engineResult.text,
         latencyMs: engineResult.latencyMs,
+        ttftMs: engineResult.ttftMs,
         usage: engineResult.usage,
       };
     } else {
       response = this.deps.model.chat
         ? await this.deps.model.chat(baseMessages, { signal })
         : await this.deps.model.complete(systemPrompt, promptForModel, { signal });
+      pushTtft(response.ttftMs);
     }
 
     /*
@@ -4853,6 +4870,7 @@ export class AutoTrader {
      * 对象，改它会让"这一轮的真实用量"和"最后一次调用的用量"这两个不同的东西
      * 混成一个，而账目恰恰要能分开看。
      */
+    let totalLlmLatencyMs = response.latencyMs > 0 ? response.latencyMs : 0;
     let totalPrompt = response.usage.promptTokens;
     let totalCompletion = response.usage.completionTokens;
     let totalCached: number | null = response.usage.cachedTokens ?? null;
@@ -4900,6 +4918,8 @@ export class AutoTrader {
         ? await this.deps.model.chat(toolConversation, { signal })
         : await this.deps.model.complete(systemPrompt, completeHistory, { signal });
 
+      if (followUp.latencyMs > 0) totalLlmLatencyMs += followUp.latencyMs;
+      pushTtft(followUp.ttftMs);
       totalPrompt = addNullableUsage(totalPrompt, followUp.usage.promptTokens);
       totalCompletion = addNullableUsage(totalCompletion, followUp.usage.completionTokens);
       totalCached = addNullableUsage(totalCached, followUp.usage.cachedTokens);
@@ -4913,11 +4933,11 @@ export class AutoTrader {
     progress.cachedTokens = totalCached;
     progress.reasoningTokens = totalReasoning;
     /*
-     * 延迟：**取过数就用端到端**（那才是这一轮真实的等待时间，模型被问了不止一次），
-     * 没取数就沿用客户端报的读数。
+     * 延迟：统一按「本轮所有 LLM 调用累计纯耗时」累加（含智能托管 2.0 多轮 function calling、
+     * 按需取数多轮及下方执行回执追问），不混入中间交易所 K 线/行情拉取耗时；仅在桩模型返回 0 时回落端到端。
      */
-    progress.aiLatencyMs =
-      dataRequests.length > 0 ? Date.now() - startedAt : response.latencyMs || Date.now() - startedAt;
+    progress.aiLatencyMs = totalLlmLatencyMs > 0 ? totalLlmLatencyMs : Date.now() - startedAt;
+    progress.aiTtftMs = averageTtft();
     progress.dataRequests = dataRequests;
 
     /*
@@ -5686,6 +5706,7 @@ export class AutoTrader {
       volatilePrompt,
       log: executionLog,
       progress,
+      ttftSamples,
       snapshots: snapshotBySymbol,
       signal,
       /*
@@ -10066,6 +10087,8 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     log: ExecutionLogEntry[];
     /** 本周期用过的行情快照，用来给回执里的价位提供上下文。 */
     progress: CycleProgress;
+    /** 本轮前序 LLM 调用的首字延迟样本，回执追问并入后重新计算全局均值。 */
+    ttftSamples?: number[];
     /**
      * 本轮的行情快照（按 symbol）。
      *
@@ -10177,7 +10200,14 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       .join('\n');
 
     let text: string;
-    let usage: { promptTokens: number | null; completionTokens: number | null };
+    let usage: {
+      promptTokens: number | null;
+      completionTokens: number | null;
+      cachedTokens?: number | null;
+      reasoningTokens?: number | null;
+    };
+    let followUpLatencyMs = 0;
+    let followUpTtftMs: number | null | undefined;
     try {
       /*
        * 与主调用同一个消息形状（system + 稳定段 + 变动段 + 回执），
@@ -10207,6 +10237,8 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
           );
       text = response.text;
       usage = response.usage;
+      followUpLatencyMs = response.latencyMs;
+      followUpTtftMs = response.ttftMs;
     } catch (error) {
       /*
        * 追问失败**不影响已经完成的事** —— 单已经下了、仓位已经建了、记账已经做了。
@@ -10216,11 +10248,27 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       return [];
     }
 
-    /* token 用量必须累计 —— 否则"这一轮花了多少"会少算一整次调用。 */
+    /* token、耗时与首字延迟样本必须完整累计 —— 否则触发回执追问时统计会漏掉一整次模型调用。 */
+    if (followUpLatencyMs > 0) {
+      input.progress.aiLatencyMs += followUpLatencyMs;
+    }
+    if (typeof followUpTtftMs === 'number' && Number.isFinite(followUpTtftMs) && followUpTtftMs > 0) {
+      const samples = input.ttftSamples ?? (input.progress.aiTtftMs ? [input.progress.aiTtftMs] : []);
+      samples.push(followUpTtftMs);
+      input.progress.aiTtftMs = Math.round(samples.reduce((sum, v) => sum + v, 0) / samples.length);
+    }
     input.progress.promptTokens = addNullableUsage(input.progress.promptTokens, usage.promptTokens);
     input.progress.completionTokens = addNullableUsage(
       input.progress.completionTokens,
       usage.completionTokens,
+    );
+    input.progress.cachedTokens = addNullableUsage(
+      input.progress.cachedTokens,
+      usage.cachedTokens ?? null,
+    );
+    input.progress.reasoningTokens = addNullableUsage(
+      input.progress.reasoningTokens,
+      usage.reasoningTokens ?? null,
     );
 
     /*

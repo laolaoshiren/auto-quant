@@ -4155,6 +4155,8 @@ interface DecisionRow {
   success: number;
   error: string | null;
   ai_latency_ms: number;
+  /* 迁移 M24 加的；迁移之前的行或非流式调用为 NULL。 */
+  ai_ttft_ms?: number | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
   /* 迁移 M9 加的；迁移之前的行是 NULL（= 当时没记，不是没命中）。 */
@@ -4178,6 +4180,7 @@ function toDecisionRecord(row: DecisionRow): DecisionRecord {
     success: row.success === 1,
     error: row.error,
     aiLatencyMs: row.ai_latency_ms,
+    aiTtftMs: row.ai_ttft_ms ?? null,
     promptTokens: row.prompt_tokens,
     completionTokens: row.completion_tokens,
     /*
@@ -4410,6 +4413,8 @@ export const decisions = {
     success: boolean;
     error: string | null;
     aiLatencyMs: number;
+    /** LLM 首字延迟（毫秒，多轮取均值）；`null` 表示非流式或未测到。 */
+    aiTtftMs?: number | null;
     promptTokens: number | null;
     completionTokens: number | null;
     /** 命中缓存的输入 token，`null` 表示服务商没报。 */
@@ -4418,8 +4423,8 @@ export const decisions = {
     reasoningTokens?: number | null;
   }): number {
     const { lastInsertRowid } = getDb().run(
-      `INSERT INTO decision_records (trader_id, cycle_number, timestamp, system_prompt, user_prompt, cot_trace, decisions_json, raw_response, execution_log_json, candidate_symbols_json, success, error, ai_latency_ms, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO decision_records (trader_id, cycle_number, timestamp, system_prompt, user_prompt, cot_trace, decisions_json, raw_response, execution_log_json, candidate_symbols_json, success, error, ai_latency_ms, ai_ttft_ms, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       input.traderId,
       input.cycleNumber,
       now(),
@@ -4433,6 +4438,7 @@ export const decisions = {
       input.success,
       input.error,
       input.aiLatencyMs,
+      input.aiTtftMs ?? null,
       input.promptTokens,
       input.completionTokens,
       input.cachedTokens ?? null,
@@ -4512,7 +4518,7 @@ export const decisions = {
               SET timestamp = ?, system_prompt = '', user_prompt = '', cot_trace = '',
                   decisions_json = '[]', raw_response = '', execution_log_json = '[]',
                   candidate_symbols_json = '[]', success = 1, error = NULL,
-                  ai_latency_ms = 0, prompt_tokens = NULL, completion_tokens = NULL,
+                  ai_latency_ms = 0, ai_ttft_ms = NULL, prompt_tokens = NULL, completion_tokens = NULL,
                   cached_tokens = NULL, reasoning_tokens = NULL
             WHERE id = ?`,
           now(),
@@ -4567,6 +4573,7 @@ export const decisions = {
     success: boolean;
     error: string | null;
     aiLatencyMs: number;
+    aiTtftMs?: number | null;
     promptTokens: number | null;
     completionTokens: number | null;
     cachedTokens?: number | null;
@@ -4576,7 +4583,7 @@ export const decisions = {
       `UPDATE decision_records
           SET system_prompt = ?, user_prompt = ?, cot_trace = ?, decisions_json = ?,
               raw_response = ?, execution_log_json = ?, candidate_symbols_json = ?,
-              success = ?, error = ?, ai_latency_ms = ?,
+              success = ?, error = ?, ai_latency_ms = ?, ai_ttft_ms = ?,
               prompt_tokens = ?, completion_tokens = ?, cached_tokens = ?, reasoning_tokens = ?
         WHERE id = ?`,
       input.systemPrompt,
@@ -4589,6 +4596,7 @@ export const decisions = {
       input.success ? 1 : 0,
       input.error,
       input.aiLatencyMs,
+      input.aiTtftMs ?? null,
       input.promptTokens,
       input.completionTokens,
       input.cachedTokens ?? null,

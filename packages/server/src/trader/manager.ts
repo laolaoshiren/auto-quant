@@ -3731,6 +3731,9 @@ export class TraderManager {
           return {
             text: result.text,
             latencyMs: result.latencyMs,
+            ...(typeof result.ttftMs === 'number' && Number.isFinite(result.ttftMs)
+              ? { ttftMs: result.ttftMs }
+              : {}),
             usage: {
               promptTokens: result.usage.promptTokens,
               completionTokens: result.usage.completionTokens,
@@ -3756,6 +3759,9 @@ export class TraderManager {
                 return {
                   text: result.text,
                   latencyMs: result.latencyMs,
+                  ...(typeof result.ttftMs === 'number' && Number.isFinite(result.ttftMs)
+                    ? { ttftMs: result.ttftMs }
+                    : {}),
                   usage: {
                     promptTokens: result.usage.promptTokens,
                     completionTokens: result.usage.completionTokens,
