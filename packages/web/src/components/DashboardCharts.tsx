@@ -355,22 +355,9 @@ export function DashboardEquityChart({
   }
 
   return (
-    <div
-      className={`aq-chart-stage relative h-full ${rising ? 'aq-chart-stage-up' : 'aq-chart-stage-down'}`}
-    >
-      {/* 顶部柔和指示细线 */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 z-10 h-px"
-        style={{
-          background: `linear-gradient(90deg, transparent 10%, ${stroke}33 50%, transparent 90%)`,
-        }}
-      />
-      {/* 极克制的缓慢光幕微扫 */}
-      <div aria-hidden className="aq-chart-scan-beam z-0" />
-
+    <div className="relative h-full">
       {/* 切换时间范围（1D/7D/1M/3M/全部）时平滑从左到右展开，后台轮询不触发闪烁 */}
-      <div key={range} className="aq-chart-reveal relative z-[1] h-full w-full">
+      <div key={range} className="aq-chart-reveal h-full w-full">
         <ResponsiveContainer width="100%" height={height}>
           {/* No left margin and no axis title: the tick labels already carry the
               magnitude, and a title would cost the curve real width. */}

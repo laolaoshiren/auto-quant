@@ -2964,12 +2964,7 @@ function CandlesPanel({
       ) : candles.length === 0 ? (
         <Empty message="该交易对没有返回K线。" />
       ) : (
-        <div
-          className={cn(
-            'aq-chart-stage relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[112px]',
-            barRising ? 'aq-chart-stage-up' : 'aq-chart-stage-down',
-          )}
-        >
+        <div className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[112px]">
           <div className="absolute inset-0">
             <CandlestickChart candles={candles} fill />
           </div>
