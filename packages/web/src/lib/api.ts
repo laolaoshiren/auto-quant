@@ -30,6 +30,7 @@ import type {
   Trader,
   TraderMode,
   TraderStats,
+  TraderTokenBillingSummary,
   User,
   WakeTrigger,
 } from '@aq/shared';
@@ -1409,6 +1410,8 @@ export const api = {
     }),
   traderDecision: (id: number, recordId: number, signal?: AbortSignal) =>
     request<DecisionRecord>(`/traders/${id}/decisions/${recordId}`, { signal }),
+  traderTokenBilling: (id: number, signal?: AbortSignal) =>
+    request<TraderTokenBillingSummary>(`/traders/${id}/token-billing`, { signal }),
   traderEquity: (id: number, limit = 500, signal?: AbortSignal) =>
     request<EquitySnapshot[]>(`/traders/${id}/equity`, { query: { limit }, signal }),
   traderManagedIntel: (id: number, signal?: AbortSignal) =>

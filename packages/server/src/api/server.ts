@@ -22,6 +22,8 @@ import {
   STRATEGY_PRESETS,
   StrategyConfigSchema,
   applyManagedRiskProfile,
+  beijingDayStartIso,
+  calculateTokenCost,
   defaultStrategyConfig,
   inferManagedRiskProfile,
   providerDefaults,
@@ -37,6 +39,7 @@ import {
   type StrategyConfig,
   type Trader,
   type TraderStatus,
+  type TraderTokenBillingSummary,
 } from '@aq/shared';
 import { z } from 'zod';
 import type { ExchangeConnection } from '../binance/bootstrap.js';
@@ -78,7 +81,7 @@ import { recentCycleStats, staleThresholdMs } from './staleThreshold.js';
  */
 import { agentExperiments as agentStoreExperiments, agentMemory as agentStoreMemory, agentRuns as agentStoreRuns } from '../store/agentStore.js';
 import type { TraderManager } from '../trader/manager.js';
-import { readLlmHealth, recordLlmHealth } from '../trader/manager.js';
+import { readLlmHealth, recordLlmHealth, resolveModelTokenPricing } from '../trader/manager.js';
 import { runSelfCheck } from '../trader/selfcheckRunner.js';
 import {
   requireAuth,
@@ -4349,6 +4352,40 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
       return reply.code(404).send({ error: '找不到该决策记录' });
     }
     return record;
+  });
+
+  app.get('/api/traders/:id/token-billing', authed, async (request, reply) => {
+    const traderId = idOf(request);
+    const trader = traders.get(traderId);
+    if (!trader) {
+      return reply.code(404).send({ error: '找不到该机器人' });
+    }
+    const modelRow = trader.aiModelId !== null ? aiModels.get(trader.aiModelId) : undefined;
+    const modelName = modelRow?.model ?? '';
+    const pricing = resolveModelTokenPricing(modelName);
+    const all = decisionStore.tokenUsageStats(traderId);
+    const today = decisionStore.tokenUsageStats(traderId, beijingDayStartIso());
+    const allCost = pricing ? calculateTokenCost(all, pricing) : null;
+    const todayCost = pricing ? calculateTokenCost(today, pricing) : null;
+    const summary: TraderTokenBillingSummary = {
+      traderId,
+      model: modelName,
+      pricing,
+      totalCycles: all.totalCycles,
+      meteredCycles: all.meteredCycles,
+      promptTokens: all.promptTokens,
+      cachedTokens: all.cachedTokens,
+      completionTokens: all.completionTokens,
+      reasoningTokens: all.reasoningTokens,
+      totalCostUsd: allCost ? allCost.totalCostUsd : null,
+      savedByCacheUsd: allCost ? allCost.savedByCacheUsd : null,
+      todayCycles: today.totalCycles,
+      todayPromptTokens: today.promptTokens,
+      todayCachedTokens: today.cachedTokens,
+      todayCompletionTokens: today.completionTokens,
+      todayCostUsd: todayCost ? todayCost.totalCostUsd : null,
+    };
+    return summary;
   });
 
   app.get('/api/traders/:id/equity', authed, async (request) => {

@@ -4,9 +4,11 @@ import {
   clampAiManagedHardLimits,
   defaultStrategyConfig,
   isAiDriven,
+  resolveFallbackTokenPricing,
   type CircuitBreakerReading,
   type StrategyConfig,
   type StrategyRecord,
+  type TokenPricingPerMillion,
   type TraderStatus,
 } from '@aq/shared';
 import { connectExchange, preflight, type ExchangeConnection, type PreflightCheck } from '../binance/bootstrap.js';
@@ -119,6 +121,38 @@ function modelsDevLookup(): ModelsDevLookup | null {
     modelsDevStoreSingleton = store;
   }
   return modelsDevStoreSingleton.lookup();
+}
+
+/**
+ * 解析模型的 Token 估算单价（USD / 1M tokens）：
+ * 1. 免费模型名（`*-free`）直接按 `$0` 计；
+ * 2. 优先使用运行期已装载的 `models.dev` 目录实时单价；
+ * 3. 未命中时退回共享的内置参考价表；仍不认识则返回 `null`（不编造）。
+ */
+export function resolveModelTokenPricing(modelName: string | null | undefined): TokenPricingPerMillion | null {
+  const raw = (modelName ?? '').trim();
+  if (!raw) return null;
+  if (/(?:^|[-/])free(?:$|[-/])/i.test(raw)) {
+    return {
+      input: 0,
+      cacheRead: 0,
+      output: 0,
+      source: '免费通道',
+      free: true,
+    };
+  }
+  const lookup = modelsDevLookup();
+  const match = lookup?.(raw);
+  const cost = match?.entry.cost;
+  if (cost && (cost.input > 0 || cost.output > 0)) {
+    return {
+      input: cost.input,
+      cacheRead: cost.cacheRead > 0 ? cost.cacheRead : cost.input,
+      output: cost.output,
+      source: `models.dev (${match.entry.canonicalId ?? match.entry.id ?? raw})`,
+    };
+  }
+  return resolveFallbackTokenPricing(raw);
 }
 
 /**

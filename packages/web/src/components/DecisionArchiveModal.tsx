@@ -19,7 +19,14 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react';
-import type { Decision, DecisionRecord } from '@aq/shared';
+import {
+  calculateTokenCost,
+  fmtTokenCostUsd,
+  formatCycleCostTooltip,
+  type Decision,
+  type DecisionRecord,
+  type TokenPricingPerMillion,
+} from '@aq/shared';
 import { api } from '../lib/api';
 import { fmtInt, fmtLatency, fmtPriceUsd, fmtUsd, isNum } from '../lib/format';
 import { plainText } from '../lib/plainText';
@@ -68,10 +75,12 @@ function formatClock(iso: string): string {
 export function DecisionArchiveModal({
   traderId,
   open,
+  pricing = null,
   onClose,
 }: {
   traderId: number;
   open: boolean;
+  pricing?: TokenPricingPerMillion | null;
   onClose: () => void;
 }) {
   const [records, setRecords] = useState<DecisionRecord[]>([]);
@@ -330,6 +339,18 @@ export function DecisionArchiveModal({
                 rec.cachedTokens != null && rec.promptTokens != null && rec.promptTokens > 0
                   ? Math.round((rec.cachedTokens / rec.promptTokens) * 100)
                   : null;
+              const cycleCost =
+                pricing && (rec.promptTokens != null || rec.completionTokens != null)
+                  ? calculateTokenCost(
+                      {
+                        promptTokens: rec.promptTokens,
+                        completionTokens: rec.completionTokens,
+                        cachedTokens: rec.cachedTokens,
+                        reasoningTokens: rec.reasoningTokens,
+                      },
+                      pricing,
+                    )
+                  : null;
               const highlightDecisions = decisions.filter((d) => d.action !== 'skip');
               const shownSummary = highlightDecisions.length > 0 ? highlightDecisions : decisions.slice(0, 3);
 
@@ -381,6 +402,14 @@ export function DecisionArchiveModal({
                     </button>
 
                     <div className="flex shrink-0 items-center gap-2 text-[11px]">
+                      {cycleCost && pricing && (
+                        <span
+                          className="num rounded bg-amber-500/10 px-1.5 py-0.5 font-medium text-amber-300 [[data-skin='light']_&]:text-amber-800"
+                          title={formatCycleCostTooltip(cycleCost, pricing)}
+                        >
+                          {pricing.free ? '免费' : fmtTokenCostUsd(cycleCost.totalCostUsd, { approx: true })}
+                        </span>
+                      )}
                       {cachePct !== null && (
                         <span className={cn('num', cachePct >= 50 ? 'text-up' : 'text-warn')}>
                           缓存 {cachePct}%

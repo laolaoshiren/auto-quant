@@ -4400,6 +4400,63 @@ export const decisions = {
     return row ? toDecisionRecord(row) : undefined;
   },
 
+  /**
+   * 汇总某个机器人（全量或自 `sinceIso` 起）的决策周期 Token 用量。
+   * 逐行先用 `MIN(cached_tokens, prompt_tokens)` 钳制缓存命中量，保证累计费用与单轮之和严格一致。
+   */
+  tokenUsageStats(
+    traderId: number,
+    sinceIso?: string,
+  ): {
+    totalCycles: number;
+    meteredCycles: number;
+    promptTokens: number;
+    cachedTokens: number;
+    completionTokens: number;
+    reasoningTokens: number;
+  } {
+    const sql = sinceIso
+      ? `SELECT
+           COUNT(*) AS total_cycles,
+           COALESCE(SUM(CASE WHEN prompt_tokens IS NOT NULL OR completion_tokens IS NOT NULL THEN 1 ELSE 0 END), 0) AS metered_cycles,
+           COALESCE(SUM(COALESCE(prompt_tokens, 0)), 0) AS prompt_tokens,
+           COALESCE(SUM(CASE
+             WHEN cached_tokens IS NOT NULL AND prompt_tokens IS NOT NULL THEN MIN(MAX(cached_tokens, 0), MAX(prompt_tokens, 0))
+             WHEN cached_tokens IS NOT NULL THEN MAX(cached_tokens, 0)
+             ELSE 0
+           END), 0) AS cached_tokens,
+           COALESCE(SUM(COALESCE(completion_tokens, 0)), 0) AS completion_tokens,
+           COALESCE(SUM(COALESCE(reasoning_tokens, 0)), 0) AS reasoning_tokens
+         FROM decision_records
+         WHERE trader_id = ? AND timestamp >= ?`
+      : `SELECT
+           COUNT(*) AS total_cycles,
+           COALESCE(SUM(CASE WHEN prompt_tokens IS NOT NULL OR completion_tokens IS NOT NULL THEN 1 ELSE 0 END), 0) AS metered_cycles,
+           COALESCE(SUM(COALESCE(prompt_tokens, 0)), 0) AS prompt_tokens,
+           COALESCE(SUM(CASE
+             WHEN cached_tokens IS NOT NULL AND prompt_tokens IS NOT NULL THEN MIN(MAX(cached_tokens, 0), MAX(prompt_tokens, 0))
+             WHEN cached_tokens IS NOT NULL THEN MAX(cached_tokens, 0)
+             ELSE 0
+           END), 0) AS cached_tokens,
+           COALESCE(SUM(COALESCE(completion_tokens, 0)), 0) AS completion_tokens,
+           COALESCE(SUM(COALESCE(reasoning_tokens, 0)), 0) AS reasoning_tokens
+         FROM decision_records
+         WHERE trader_id = ?`;
+    const row = (
+      sinceIso
+        ? getDb().get<Record<string, number>>(sql, traderId, sinceIso)
+        : getDb().get<Record<string, number>>(sql, traderId)
+    ) ?? {};
+    return {
+      totalCycles: Number(row['total_cycles'] ?? 0),
+      meteredCycles: Number(row['metered_cycles'] ?? 0),
+      promptTokens: Number(row['prompt_tokens'] ?? 0),
+      cachedTokens: Number(row['cached_tokens'] ?? 0),
+      completionTokens: Number(row['completion_tokens'] ?? 0),
+      reasoningTokens: Number(row['reasoning_tokens'] ?? 0),
+    };
+  },
+
   log(input: {
     traderId: number;
     cycleNumber: number;

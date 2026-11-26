@@ -8,7 +8,15 @@
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ChevronLeft, Copy, Check, TriangleAlert } from 'lucide-react';
-import type { Decision, DecisionRecord, ExecutionLogEntry } from '@aq/shared';
+import {
+  calculateTokenCost,
+  fmtTokenCostUsd,
+  formatCycleCostTooltip,
+  type Decision,
+  type DecisionRecord,
+  type ExecutionLogEntry,
+  type TokenPricingPerMillion,
+} from '@aq/shared';
 import { api } from '../lib/api';
 import { useCopy, useDocumentTitle, usePolled } from '../lib/hooks';
 import { Badge, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
@@ -43,6 +51,10 @@ export function DecisionDetailPage() {
     enabled: Number.isFinite(traderId) && Number.isFinite(recordId),
     deps: [traderId, recordId],
   });
+  const billingQuery = usePolled((signal) => api.traderTokenBilling(traderId, signal), {
+    enabled: Number.isFinite(traderId),
+    deps: [traderId],
+  });
 
   useDocumentTitle(`决策 #${params.recordId}`);
 
@@ -50,7 +62,13 @@ export function DecisionDetailPage() {
   if (query.error) return <ErrorNote>{query.error}</ErrorNote>;
   if (!query.data) return <ErrorNote>未找到决策记录。</ErrorNote>;
 
-  return <DecisionAuditView record={query.data} traderId={traderId} />;
+  return (
+    <DecisionAuditView
+      record={query.data}
+      traderId={traderId}
+      pricing={billingQuery.data?.pricing ?? null}
+    />
+  );
 }
 
 function actionBorderClass(action: Decision['action']): string {
@@ -219,7 +237,15 @@ function CompactExecutionLog({ log }: { log: ExecutionLogEntry[] }) {
 }
 
 /** 单条周期的 16:9 宽屏完整审计视图。 */
-export function DecisionAuditView({ record, traderId }: { record: DecisionRecord; traderId: number }) {
+export function DecisionAuditView({
+  record,
+  traderId,
+  pricing = null,
+}: {
+  record: DecisionRecord;
+  traderId: number;
+  pricing?: TokenPricingPerMillion | null;
+}) {
   const executionLog = record.executionLog ?? [];
   const decisions = record.decisions ?? [];
   const candidates = record.candidateSymbols ?? [];
@@ -235,6 +261,18 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
   const cachePct =
     record.cachedTokens != null && record.promptTokens != null && record.promptTokens > 0
       ? Math.round((record.cachedTokens / record.promptTokens) * 100)
+      : null;
+  const cycleCost =
+    pricing && (record.promptTokens != null || record.completionTokens != null)
+      ? calculateTokenCost(
+          {
+            promptTokens: record.promptTokens,
+            completionTokens: record.completionTokens,
+            cachedTokens: record.cachedTokens,
+            reasoningTokens: record.reasoningTokens,
+          },
+          pricing,
+        )
       : null;
 
   return (
@@ -278,6 +316,14 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
           {cachePct !== null && (
             <span className={cn('rounded-md px-2 py-0.5 font-medium', cachePct >= 50 ? 'bg-up/12 text-up' : 'bg-warn/12 text-warn')}>
               缓存 {cachePct}%
+            </span>
+          )}
+          {cycleCost && pricing && (
+            <span
+              className="rounded-md border border-amber-400/25 bg-amber-500/12 px-2 py-0.5 font-medium text-amber-300 [[data-skin='light']_&]:border-amber-700/25 [[data-skin='light']_&]:text-amber-800"
+              title={formatCycleCostTooltip(cycleCost, pricing)}
+            >
+              计费 {pricing.free ? '免费' : fmtTokenCostUsd(cycleCost.totalCostUsd, { approx: true })}
             </span>
           )}
           <span className="rounded-md bg-base-850 px-2 py-0.5 text-ink-lo">

@@ -139,6 +139,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Coins,
   LoaderCircle,
   Lock,
   Maximize2,
@@ -148,7 +149,18 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react';
-import { type DecisionRecord, type Decision, type ExecutionLogEntry, type TraderMode } from '@aq/shared';
+import {
+  calculateTokenCost,
+  fmtCompactTokens,
+  fmtTokenCostUsd,
+  formatCycleCostTooltip,
+  type DecisionRecord,
+  type Decision,
+  type ExecutionLogEntry,
+  type TokenPricingPerMillion,
+  type TraderMode,
+  type TraderTokenBillingSummary,
+} from '@aq/shared';
 import { api, type MarketSymbol } from '../lib/api';
 import { useLiveCycle, useEvents, type LiveCycle } from '../lib/store';
 import { FeedErrorBoundary } from './FeedErrorBoundary';
@@ -622,6 +634,16 @@ export function DecisionFeed({
     intervalMs: 20_000,
     deps: [exchange],
   });
+
+  // 全部周期累计 Token 计费统计与实时单价（随新周期落地自动刷新）
+  const latestLiveDecisionId = live?.[0]?.id ?? 0;
+  const billingQuery = usePolled((signal) => api.traderTokenBilling(traderId, signal), {
+    intervalMs: 20_000,
+    deps: [traderId, latestLiveDecisionId],
+  });
+  const billing = billingQuery.data ?? null;
+  const tokenPricing = billing?.pricing ?? null;
+  const [billingOpen, setBillingOpen] = useState(false);
 
   /* ------------------------------------------------------------------------ */
   /*  分页：第一页来自轮询，更早的页由滚到列表底部触发                          */
@@ -1194,9 +1216,16 @@ export function DecisionFeed({
   const [archiveOpen, setArchiveOpen] = useState(false);
 
   const headerTitle = (
-    <span className="inline-flex min-w-0 items-center gap-1.5">
+    <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5">
       <span className="shrink-0">最近决策</span>
       {mode !== 'ai_team' && <CycleCountdown nextCycleAt={nextCycleAt} />}
+      {billing && billing.meteredCycles > 0 && (
+        <TokenBillingHeaderBadge
+          billing={billing}
+          open={billingOpen}
+          onToggle={() => setBillingOpen((v) => !v)}
+        />
+      )}
     </span>
   );
 
@@ -1293,6 +1322,9 @@ export function DecisionFeed({
             </button>
           </ErrorNote>
         </div>
+      )}
+      {billingOpen && billing && (
+        <TokenBillingSummaryStrip billing={billing} onClose={() => setBillingOpen(false)} />
       )}
       <>
           {/*
@@ -1761,6 +1793,7 @@ export function DecisionFeed({
                     record={run.record}
                     symbols={symbolsQuery.data ?? []}
                     mode={mode}
+                    pricing={tokenPricing}
                     onSelectSymbol={onSelectSymbol}
                   />
                 )}
@@ -1824,6 +1857,7 @@ export function DecisionFeed({
       <DecisionArchiveModal
         traderId={traderId}
         open={archiveOpen}
+        pricing={tokenPricing}
         onClose={() => setArchiveOpen(false)}
       />
     </Panel>
@@ -1952,11 +1986,13 @@ export function CycleBlock({
   record,
   symbols,
   mode = 'strategy',
+  pricing = null,
   onSelectSymbol,
 }: {
   record: DecisionRecord;
   symbols: MarketSymbol[];
   mode?: TraderMode;
+  pricing?: TokenPricingPerMillion | null;
   onSelectSymbol?: (symbol: string) => void;
 }) {
   /*
@@ -2051,7 +2087,7 @@ export function CycleBlock({
      * 不要用它写 CSS。
      */
     <article className="min-w-0" data-record-id={record.id}>
-      <CycleMeta record={record} />
+      <CycleMeta record={record} pricing={pricing} />
 
       {/*
         ══════════════════════════════════════════════════════════════════════
@@ -2332,7 +2368,140 @@ function planExecution(log: ExecutionLogEntry[], decisions: Decision[]): Executi
  *
  * 完整时间戳放在 `title` 里：相对时间适合扫读，但对账时需要精确时刻。
  */
-function CycleMeta({ record }: { record: DecisionRecord }) {
+function TokenBillingHeaderBadge({
+  billing,
+  open,
+  onToggle,
+}: {
+  billing: TraderTokenBillingSummary;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const totalTok = billing.promptTokens + billing.completionTokens;
+  const label = billing.pricing?.free
+    ? 'Token 免费'
+    : billing.totalCostUsd !== null
+      ? `累计 ${fmtTokenCostUsd(billing.totalCostUsd, { approx: true })}`
+      : `累计 ${fmtCompactTokens(totalTok)}`;
+
+  const tooltipLines = [
+    `点击${open ? '收起' : '展开'}全部周期 Token 计费明细（共 ${billing.totalCycles} 轮，其中 ${billing.meteredCycles} 轮有回传）`,
+    `· 累计 Token：入 ${fmtCompactTokens(billing.promptTokens)}（缓存 ${fmtCompactTokens(billing.cachedTokens)}）/ 出 ${fmtCompactTokens(billing.completionTokens)}`,
+    billing.totalCostUsd !== null
+      ? `· 累计估算：${fmtTokenCostUsd(billing.totalCostUsd)} · 今日(北京 ${billing.todayCycles} 轮)：${fmtTokenCostUsd(billing.todayCostUsd)}`
+      : '· 当前模型暂无公开单价，仅统计 Token 总量',
+  ];
+
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      title={tooltipLines.join('\n')}
+      className={cn(
+        'num inline-flex h-[22px] shrink-0 cursor-pointer items-center gap-1 rounded-full border px-2 text-[11px] font-medium leading-none transition',
+        open
+          ? "border-amber-400/60 bg-amber-500/20 text-amber-200 ring-1 ring-amber-400/30 [[data-skin='light']_&]:border-amber-700/50 [[data-skin='light']_&]:bg-amber-500/18 [[data-skin='light']_&]:text-amber-900"
+          : "border-amber-400/30 bg-amber-500/10 text-amber-300/95 hover:border-amber-400/55 hover:bg-amber-500/16 [[data-skin='light']_&]:border-amber-700/25 [[data-skin='light']_&]:bg-amber-500/10 [[data-skin='light']_&]:text-amber-800",
+      )}
+    >
+      <Coins aria-hidden className="h-3 w-3 shrink-0 opacity-85" />
+      <span>{label}</span>
+      <ChevronDown
+        aria-hidden
+        className={cn('h-2.5 w-2.5 shrink-0 opacity-70 transition-transform', open && 'rotate-180')}
+      />
+    </button>
+  );
+}
+
+function TokenBillingSummaryStrip({
+  billing,
+  onClose,
+}: {
+  billing: TraderTokenBillingSummary;
+  onClose: () => void;
+}) {
+  const cacheRate =
+    billing.promptTokens > 0 ? Math.round((billing.cachedTokens / billing.promptTokens) * 100) : null;
+  const pricing = billing.pricing;
+
+  return (
+    <div className="shrink-0 border-b border-base-800 bg-base-900/75 px-3 py-2 text-[11.5px] leading-relaxed">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="num flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span>
+            <span className="text-ink-faint">累计({billing.totalCycles}轮) </span>
+            <span className="font-semibold text-amber-300 [[data-skin='light']_&]:text-amber-800">
+              {pricing?.free
+                ? '$0.00 (免费)'
+                : billing.totalCostUsd !== null
+                  ? fmtTokenCostUsd(billing.totalCostUsd, { approx: true })
+                  : '单价未知'}
+            </span>
+          </span>
+          <span>
+            <span className="text-ink-faint">今日({billing.todayCycles}轮) </span>
+            <span className="font-medium text-ink-hi">
+              {pricing?.free
+                ? '$0.00'
+                : billing.todayCostUsd !== null
+                  ? fmtTokenCostUsd(billing.todayCostUsd, { approx: true })
+                  : '—'}
+            </span>
+          </span>
+          {billing.savedByCacheUsd != null && billing.savedByCacheUsd > 0 && (
+            <span className="text-up">
+              缓存已省 {fmtTokenCostUsd(billing.savedByCacheUsd, { approx: true })}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="收起 Token 计费统计"
+          className="inline-flex h-5 w-5 cursor-pointer items-center justify-center rounded text-ink-faint transition hover:bg-base-800 hover:text-ink-hi"
+        >
+          <X className="h-3 w-3" aria-hidden />
+        </button>
+      </div>
+      <div className="num mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-ink-lo">
+        <span>
+          入 <span className="text-ink-mid">{fmtCompactTokens(billing.promptTokens)}</span>
+          {cacheRate !== null && (
+            <span className="text-up">（缓存 {cacheRate}%）</span>
+          )}
+        </span>
+        <span>
+          出{' '}
+          <span className="text-sky-300 [[data-skin='light']_&]:text-sky-700">
+            {fmtCompactTokens(billing.completionTokens)}
+          </span>
+          {billing.reasoningTokens > 0 && (
+            <span className="text-violet-300 [[data-skin='light']_&]:text-violet-700">
+              （思考 {fmtCompactTokens(billing.reasoningTokens)}）
+            </span>
+          )}
+        </span>
+        {pricing ? (
+          <span className="text-ink-faint">
+            · 单价/1M：入 ${pricing.input} / 缓存 ${pricing.cacheRead} / 出 ${pricing.output}（{pricing.source}）
+          </span>
+        ) : (
+          <span className="text-ink-faint">· 暂无 {billing.model || '当前模型'} 公开单价</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CycleMeta({
+  record,
+  pricing = null,
+}: {
+  record: DecisionRecord;
+  pricing?: TokenPricingPerMillion | null;
+}) {
   /*
    * token 数与耗时**各自独立**显示。
    *
@@ -2369,6 +2538,19 @@ function CycleMeta({ record }: { record: DecisionRecord }) {
   const thinkPct =
     record.reasoningTokens != null && record.completionTokens != null && record.completionTokens > 0
       ? Math.round((record.reasoningTokens / record.completionTokens) * 100)
+      : null;
+
+  const cycleCost =
+    hasTokens && pricing
+      ? calculateTokenCost(
+          {
+            promptTokens: record.promptTokens,
+            completionTokens: record.completionTokens,
+            cachedTokens: record.cachedTokens,
+            reasoningTokens: record.reasoningTokens,
+          },
+          pricing,
+        )
       : null;
 
   const latencyTone =
@@ -2438,6 +2620,15 @@ function CycleMeta({ record }: { record: DecisionRecord }) {
           }
         >
           思考 {thinkPct}%
+        </span>
+      )}
+
+      {cycleCost && pricing && (
+        <span
+          className="num inline-flex items-center rounded-md border border-amber-400/25 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-300 [[data-skin='light']_&]:border-amber-700/25 [[data-skin='light']_&]:bg-amber-500/10 [[data-skin='light']_&]:text-amber-800"
+          title={formatCycleCostTooltip(cycleCost, pricing)}
+        >
+          {pricing.free ? '免费' : fmtTokenCostUsd(cycleCost.totalCostUsd, { approx: true })}
         </span>
       )}
 
