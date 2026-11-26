@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { figureParts } from './DecisionFeed.js';
+import { isPendingOrderWaitDecision } from './DecisionAudit.js';
 import type { Decision } from '@aq/shared';
 
 /* -------------------------------------------------------------------------- */
@@ -230,4 +231,33 @@ test('★ 开仓与加仓决策同时具备仓位与杠杆时显示保证金占�
     2000,
   );
   assert.equal(missingLev.find((p) => p.key === 'margin'), undefined, '缺少有效杠杆时不得显示 NaN/Infinity 保证金');
+});
+
+test('★ 未成交限价委托识别：带括号 SL/TP 说明的挂单等待必须识别为「待成交」，空仓观望与真实持仓不得误判', () => {
+  // 真实线上 #99 LINKUSDT 样本：括号内 SL/TP 导致「限价多」与「保留继续等回踩」相隔 37 字
+  assert.equal(
+    isPendingOrderWaitDecision(
+      'hold',
+      '限价多 @9.135（SL 9.030 / TP 9.450，限价口径 RR≈3）保留继续等回踩：现价 9.241 绝不追价；离挂单价仅 1.16%（未达 2.5% 撤单重挂阈值），因此原价保留不撤不重挂。',
+    ),
+    true,
+  );
+  // 兜底补全文案
+  assert.equal(
+    isPendingOrderWaitDecision('wait', '待成交限价挂单尚未触发失效条件，继续保留挂单等待成交。'),
+    true,
+  );
+  // 空仓观望里提到「等缩量回踩后的限价多」不得误判为已挂单待成交
+  assert.equal(
+    isPendingOrderWaitDecision(
+      'wait',
+      '65 分观察档，等放量收盘站上 3.889 后回踩 3.82-3.85 切入，或缩量回踩 3.664-3.710 不破 3.649 的限价多（SL 3.560）。',
+    ),
+    false,
+  );
+  // 已有真实成交持仓（带浮盈/开仓均价）必须保持「持有」
+  assert.equal(
+    isPendingOrderWaitDecision('hold', '开仓均价 9.135，当前浮盈 +1.8%，继续持有看目标位，暂不撤离。'),
+    false,
+  );
 });
