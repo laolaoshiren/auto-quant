@@ -54,20 +54,32 @@ import type { EquityPoint } from '../components/equityCurve';
 export function MoneyBadge({ dryRun, title }: { dryRun: boolean | null | undefined; title?: string }) {
   if (dryRun === false) {
     return (
-      <Badge tone="warn" title={title ?? '实盘：真实资金下单'}>
+      <Badge
+        tone="warn"
+        className="[[data-skin='light']_&]:border-amber-700/45 [[data-skin='light']_&]:bg-amber-500/18 [[data-skin='light']_&]:text-amber-900"
+        title={title ?? '实盘：真实资金下单'}
+      >
         实盘
       </Badge>
     );
   }
   if (dryRun === true) {
     return (
-      <Badge tone="accent" title={title ?? '模拟盘：本地撮合，不涉及真实资金'}>
+      <Badge
+        tone="accent"
+        className="[[data-skin='light']_&]:border-indigo-600/40 [[data-skin='light']_&]:bg-indigo-500/14 [[data-skin='light']_&]:text-indigo-800"
+        title={title ?? '模拟盘：本地撮合，不涉及真实资金'}
+      >
         模拟
       </Badge>
     );
   }
   return (
-    <Badge tone="muted" title={title ?? '运行模式未指定（老数据，首次启动时固定）'}>
+    <Badge
+      tone="muted"
+      className="[[data-skin='light']_&]:border-slate-400/55 [[data-skin='light']_&]:bg-slate-200/75 [[data-skin='light']_&]:text-slate-700"
+      title={title ?? '运行模式未指定（老数据，首次启动时固定）'}
+    >
       模式未定
     </Badge>
   );
@@ -279,8 +291,8 @@ export function TradersSnapshotTable({
             · 最近平仓 → `xl`（≥1280）才显示；
           其余列用 `truncate` 保证不撑宽。
         */}
-        <div>
-          <table className="w-full table-fixed border-collapse">
+        <div className="scroll-x">
+          <table className="w-full min-w-[540px] table-fixed border-collapse md:min-w-0">
             <caption className="sr-only">机器人归属权益与运行状态快照</caption>
             <thead className="border-b border-base-800 bg-base-850/60">
               <tr>

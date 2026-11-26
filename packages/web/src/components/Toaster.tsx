@@ -38,7 +38,7 @@ export function Toaster() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="pointer-events-none fixed right-4 top-14 z-50 flex w-72 flex-col gap-1.5">
+    <div className="pointer-events-none fixed right-2 top-12 z-50 flex w-[min(18rem,calc(100vw-1rem))] flex-col gap-1.5 sm:right-4 sm:top-14">
       {toasts.map((toast) => (
         <div
           key={toast.id}

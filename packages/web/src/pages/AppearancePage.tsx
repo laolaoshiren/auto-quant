@@ -81,7 +81,7 @@ function OptionCard({
           {active && <Check aria-hidden className="h-3.5 w-3.5 shrink-0 text-accent" />}
           {extra}
         </span>
-        <span className="mt-0.5 block truncate text-xs text-ink-lo">{hint}</span>
+        <span className="mt-0.5 line-clamp-2 block text-xs leading-snug text-ink-lo">{hint}</span>
       </span>
     </button>
   );
@@ -170,7 +170,7 @@ export function AppearancePage() {
 
         <section className="lg:col-span-7">
           <SectionLabel title="界面密度" className="mb-2.5" />
-          <div className="grid grid-cols-3 gap-2.5">
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
             {DENSITIES.map((option) => (
               <OptionCard
                 key={option.id}
@@ -189,32 +189,34 @@ export function AppearancePage() {
       <section>
         <SectionLabel title="表格密度实时预览" actions={<span className="text-xs text-ink-faint">行高随密度变化，字号保持不变</span>} />
         <Panel padded={false}>
-          <table className="data-grid w-full border-collapse">
-            <thead>
-              <tr>
-                <th className="th">交易对</th>
-                <th className="th text-right">价格</th>
-                <th className="th text-right">24h</th>
-                <th className="th text-right">成交额</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(
-                [
-                  ['BTCUSDT', '82,713.40', '-0.60%', '103.30B'],
-                  ['ETHUSDT', '2,530.86', '+0.76%', '104.84B'],
-                  ['DOGEUSDT', '0.08510', '-1.56%', '107.33B'],
-                ] as const
-              ).map(([symbol, price, change, volume]) => (
-                <tr key={symbol}>
-                  <td className="td num">{symbol}</td>
-                  <td className="td num text-right">{price}</td>
-                  <td className={cn('td num text-right', change.startsWith('-') ? 'text-down' : 'text-up')}>{change}</td>
-                  <td className="td num text-right text-ink-lo">{volume}</td>
+          <div className="scroll-x">
+            <table className="data-grid w-full border-collapse">
+              <thead>
+                <tr>
+                  <th className="th">交易对</th>
+                  <th className="th text-right">价格</th>
+                  <th className="th text-right">24h</th>
+                  <th className="th text-right">成交额</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {(
+                  [
+                    ['BTCUSDT', '82,713.40', '-0.60%', '103.30B'],
+                    ['ETHUSDT', '2,530.86', '+0.76%', '104.84B'],
+                    ['DOGEUSDT', '0.08510', '-1.56%', '107.33B'],
+                  ] as const
+                ).map(([symbol, price, change, volume]) => (
+                  <tr key={symbol}>
+                    <td className="td num">{symbol}</td>
+                    <td className="td num text-right">{price}</td>
+                    <td className={cn('td num text-right', change.startsWith('-') ? 'text-down' : 'text-up')}>{change}</td>
+                    <td className="td num text-right text-ink-lo">{volume}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Panel>
       </section>
     </PageShell>

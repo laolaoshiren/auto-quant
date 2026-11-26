@@ -557,7 +557,7 @@ function CycleCountdown({ nextCycleAt }: { nextCycleAt: number | null }) {
   const s = leftSec % 60;
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-base-700/80 bg-base-850/90 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-ink-lo"
+      className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-base-700/80 bg-base-850/90 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-ink-lo"
       title="下一轮决策的预定时刻（由服务端给出，已包含模型要求的间隔与失败后的短重试）"
     >
       <span aria-hidden className="h-1.5 w-1.5 shrink-0 animate-pulse-soft rounded-full bg-up/85" />
@@ -1216,8 +1216,8 @@ export function DecisionFeed({
   const [archiveOpen, setArchiveOpen] = useState(false);
 
   const headerTitle = (
-    <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5">
-      <span className="shrink-0">最近决策</span>
+    <span className="inline-flex max-w-full min-w-0 flex-wrap items-center gap-1.5">
+      <span className="shrink-0 whitespace-nowrap">最近决策</span>
       {mode !== 'ai_team' && <CycleCountdown nextCycleAt={nextCycleAt} />}
       {billing && billing.meteredCycles > 0 && (
         <TokenBillingHeaderBadge
@@ -1230,13 +1230,13 @@ export function DecisionFeed({
   );
 
   const headerActions = (
-    <span className="flex items-center gap-1">
+    <span className="flex max-w-full flex-wrap items-center gap-1">
       {actions}
-      {actions && <span aria-hidden className="mx-0.5 h-3.5 w-px bg-base-700/80" />}
+      {actions && <span aria-hidden className="mx-0.5 h-3.5 w-px shrink-0 bg-base-700/80" />}
       <button
         type="button"
         onClick={() => setArchiveOpen(true)}
-        className="inline-flex h-[26px] items-center rounded-[7px] px-1.5 text-xs text-ink-lo transition hover:bg-base-800/80 hover:text-ink-hi"
+        className="inline-flex h-[26px] shrink-0 items-center whitespace-nowrap rounded-[7px] px-1.5 text-xs text-ink-lo transition hover:bg-base-800/80 hover:text-ink-hi [[data-skin='light']_&]:text-ink-mid [[data-skin='light']_&]:hover:text-ink-strong"
         title="打开本机器人全量决策档案（支持按交易动作/币种检索、展开理由与翻阅历史）"
       >
         全部记录
@@ -1248,10 +1248,10 @@ export function DecisionFeed({
           aria-label={focusMode ? '退出全屏' : '全屏查看决策流'}
           title={focusMode ? '返回常规视图（图表与账户卡）' : '让决策流占满整页，获得更宽阔的阅读视野'}
           className={cn(
-            'inline-flex h-[26px] items-center justify-center gap-1 rounded-[7px] text-xs transition',
+            'inline-flex h-[26px] shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-[7px] text-xs transition',
             focusMode
               ? 'bg-accent/12 px-2 font-medium text-accent hover:bg-accent/20'
-              : 'w-[26px] text-ink-lo hover:bg-base-800/80 hover:text-ink-hi',
+              : "w-[26px] text-ink-lo hover:bg-base-800/80 hover:text-ink-hi [[data-skin='light']_&]:text-ink-mid",
           )}
         >
           {focusMode ? (
@@ -1719,7 +1719,7 @@ export function DecisionFeed({
                * `h-full` 那条 flex 高度链，否则 `calc(100dvh-16rem)` 会盖掉正确的高度，
                * 面板在矮视口上会比它该有的更矮。
                */
-              'max-h-[calc(100dvh-16rem)] flex-1 xl:max-h-none',
+              'max-h-[max(260px,calc(100dvh-16rem))] flex-1 xl:max-h-none',
             )}
           >
           {/*
@@ -2412,10 +2412,10 @@ function TokenBillingHeaderBadge({
       aria-expanded={open}
       data-aq-tip={tooltipLines.join('\n')}
       className={cn(
-        'num inline-flex h-[22px] shrink-0 cursor-pointer items-center gap-1 rounded-full border px-2 text-[11px] font-medium leading-none transition',
+        'num inline-flex h-[22px] shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium leading-none transition',
         open
-          ? "border-amber-400/60 bg-amber-500/20 text-amber-200 ring-1 ring-amber-400/30 [[data-skin='light']_&]:border-amber-700/50 [[data-skin='light']_&]:bg-amber-500/18 [[data-skin='light']_&]:text-amber-900"
-          : "border-amber-400/30 bg-amber-500/10 text-amber-300/95 hover:border-amber-400/55 hover:bg-amber-500/16 [[data-skin='light']_&]:border-amber-700/25 [[data-skin='light']_&]:bg-amber-500/10 [[data-skin='light']_&]:text-amber-800",
+          ? "border-amber-400/60 bg-amber-500/20 text-amber-200 ring-1 ring-amber-400/30 [[data-skin='light']_&]:border-amber-700/55 [[data-skin='light']_&]:bg-amber-500/20 [[data-skin='light']_&]:text-amber-950"
+          : "border-amber-400/30 bg-amber-500/10 text-amber-300/95 hover:border-amber-400/55 hover:bg-amber-500/16 [[data-skin='light']_&]:border-amber-700/40 [[data-skin='light']_&]:bg-amber-500/15 [[data-skin='light']_&]:text-amber-900",
       )}
     >
       <Coins aria-hidden className="h-3 w-3 shrink-0 opacity-85" />
@@ -2638,7 +2638,7 @@ function CycleMeta({
 
       {cycleCost && pricing && (
         <span
-          className="num inline-flex cursor-help items-center rounded-md border border-amber-400/25 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-300 [[data-skin='light']_&]:border-amber-700/25 [[data-skin='light']_&]:bg-amber-500/10 [[data-skin='light']_&]:text-amber-800"
+          className="num inline-flex cursor-help items-center rounded-md border border-amber-400/25 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-300 [[data-skin='light']_&]:border-amber-700/40 [[data-skin='light']_&]:bg-amber-500/15 [[data-skin='light']_&]:text-amber-900"
           data-aq-tip={formatCycleCostTooltip(cycleCost, pricing)}
         >
           {pricing.free ? '免费' : fmtTokenCostUsd(cycleCost.totalCostUsd, { approx: true })}
@@ -3573,6 +3573,16 @@ type DetailTab = 'cot' | 'prompt';
  * 这两个按钮**只管推理内容**，上面的决策永远可见 —— 折叠了决策，面板就会在
  * 没人点的时候什么都不显示，而"它到底决定了什么"才是操作者一直要看的东西。
  */
+/**
+ * 兼容被 JSON 二次转义的字面量换行（`\r\n` / `\n` / `\t`），还原为真实换行，
+ * 避免长思考过程里出现成串 `\n\n` 不换行。
+ */
+function unescapeReasoningText(text: string): string {
+  if (!text) return '';
+  if (!text.includes('\\n') && !text.includes('\\r') && !text.includes('\\t')) return text;
+  return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '  ');
+}
+
 function CycleDetails({
   record,
   counts,
@@ -3583,7 +3593,7 @@ function CycleDetails({
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<DetailTab>('cot');
 
-  const cotTrace = record.cotTrace ?? '';
+  const cotTrace = unescapeReasoningText(record.cotTrace ?? '');
   const inlineSystem = record.systemPrompt ?? '';
   const inlineUser = record.userPrompt ?? '';
   const hasInlinePrompt = inlineSystem.trim() !== '' || inlineUser.trim() !== '';
@@ -3675,7 +3685,7 @@ function CycleDetails({
       'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11.5px] transition',
       active
         ? 'border-up/40 bg-up/10 font-semibold text-up'
-        : 'border-transparent text-ink-lo hover:border-base-700 hover:bg-base-850 hover:text-ink-hi',
+        : "border-transparent text-ink-lo hover:border-base-700 hover:bg-base-850 hover:text-ink-hi [[data-skin='light']_&]:text-ink-mid [[data-skin='light']_&]:hover:text-ink-strong",
     );
 
   return (
@@ -3694,7 +3704,7 @@ function CycleDetails({
                 aria-hidden
                 className={cn(
                   'h-3 w-3 shrink-0',
-                  open && tab === 'cot' ? 'text-up' : "text-violet-300/80 [[data-skin='light']_&]:text-violet-600/80",
+                  open && tab === 'cot' ? 'text-up' : "text-violet-300/80 [[data-skin='light']_&]:text-violet-700",
                 )}
               />
               思考过程
@@ -3712,7 +3722,7 @@ function CycleDetails({
                 aria-hidden
                 className={cn(
                   'h-3 w-3 shrink-0',
-                  open && tab === 'prompt' ? 'text-up' : "text-sky-300/80 [[data-skin='light']_&]:text-sky-600/80",
+                  open && tab === 'prompt' ? 'text-up' : "text-sky-300/80 [[data-skin='light']_&]:text-sky-700",
                 )}
               />
               提示词

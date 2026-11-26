@@ -12,7 +12,6 @@ import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useDocumentTitle } from '../lib/hooks';
 import { PAGE_LABEL } from '../lib/glossary';
 import { Button, cn } from '../components/ui';
-import { SectionHeading } from '../components/Badges';
 import { SectionLabel } from '../components/shell';
 
 /**
@@ -117,10 +116,9 @@ export function FaqPage() {
 
   return (
     <div className="min-w-0 pb-10">
-      <SectionHeading
-        title="帮助 / 常见问题"
-        sub="在投入真金白银之前，值得先弄清楚的机制要点。"
-        right={
+      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <h1 className="truncate text-xl font-semibold tracking-tight text-ink-hi">帮助 / 常见问题</h1>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           <Button
             size="sm"
             onClick={() => setOpen(allOpen ? {} : Object.fromEntries(FAQ.map((item) => [item.id, true])))}
@@ -128,8 +126,9 @@ export function FaqPage() {
             {allOpen ? <ChevronUp aria-hidden className="h-3.5 w-3.5" /> : <ChevronDown aria-hidden className="h-3.5 w-3.5" />}
             {allOpen ? '全部折叠' : '全部展开'}
           </Button>
-        }
-      />
+        </div>
+        <p className="w-full text-xs text-ink-lo">在投入真金白银之前，值得先弄清楚的机制要点。</p>
+      </div>
 
       {/* 风险提示：一行 warn 条。详细后果进 title（用户要的是"知道危险"，不是读一堵墙）。 */}
       <div

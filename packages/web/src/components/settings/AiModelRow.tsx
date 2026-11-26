@@ -87,20 +87,7 @@ const TestOutcome = memo(function TestOutcome({
   );
 });
 
-/** 一行已配置 AI 模型（memo：测试单行连接只重渲染那一行）。 */
-export const ModelRow = memo(function ModelRow({
-  row,
-  providerLabel,
-  defaults,
-  result,
-  testing,
-  removing,
-  isDefault,
-  onTest,
-  onEdit,
-  onSetDefault,
-  onRemove,
-}: {
+export interface ModelRowProps {
   row: AiModelRow;
   /** 供应商的中文名（来自目录）。缺目录时退回机器码。 */
   providerLabel: string;
@@ -115,7 +102,22 @@ export const ModelRow = memo(function ModelRow({
   onEdit: (row: AiModelRow) => void;
   onSetDefault: (row: AiModelRow) => void;
   onRemove: (row: AiModelRow) => void;
-}) {
+}
+
+/** 一行已配置 AI 模型（memo：测试单行连接只重渲染那一行）。 */
+export const ModelRow = memo(function ModelRow({
+  row,
+  providerLabel,
+  defaults,
+  result,
+  testing,
+  removing,
+  isDefault,
+  onTest,
+  onEdit,
+  onSetDefault,
+  onRemove,
+}: ModelRowProps) {
   const params = `温度 ${row.temperature} · ${fmtInt(row.maxTokens)} tok · ${row.timeoutSeconds}s · 重试 ${row.maxRetries}`;
   const tuned =
     defaults !== undefined &&
@@ -126,7 +128,7 @@ export const ModelRow = memo(function ModelRow({
 
   return (
     <tr className="row-hover" title={params}>
-      <td className="td px-2 py-1.5">
+      <td className="td max-w-[240px] px-2 py-1.5">
         <div className="min-w-0">
           <div className="truncate text-base font-semibold text-ink-hi" title={row.label}>
             {row.label}
@@ -155,7 +157,7 @@ export const ModelRow = memo(function ModelRow({
       <td className="td hidden max-w-[220px] px-2 py-1.5 xl:table-cell">
         <TestOutcome testing={testing} result={result} />
       </td>
-      <td className="td px-2 py-1.5 text-right">
+      <td className="td whitespace-nowrap px-2 py-1.5 text-right">
         <div className="flex items-center justify-end gap-1">
           <Button small variant="ghost" busy={testing} onClick={() => onTest(row)} title="发送一次最小补全请求">
             测试
@@ -169,7 +171,7 @@ export const ModelRow = memo(function ModelRow({
             </Badge>
           ) : (
             <Button
-              small
+              size="icon"
               variant="ghost"
               aria-label={`将 ${row.label} 设为默认模型`}
               title="新建机器人时预选这个模型（而不是列表里的第一个）"
@@ -179,7 +181,7 @@ export const ModelRow = memo(function ModelRow({
             </Button>
           )}
           <Button
-            small
+            size="icon"
             variant="danger"
             busy={removing}
             aria-label={`删除模型 ${row.label}`}
@@ -191,5 +193,102 @@ export const ModelRow = memo(function ModelRow({
         </div>
       </td>
     </tr>
+  );
+});
+
+/** 移动端结构化卡片视图（< md），名称/状态、模型与端点、操作按钮清晰分层，绝不重叠。 */
+export const ModelCard = memo(function ModelCard({
+  row,
+  providerLabel,
+  defaults,
+  result,
+  testing,
+  removing,
+  isDefault,
+  onTest,
+  onEdit,
+  onSetDefault,
+  onRemove,
+}: ModelRowProps) {
+  const params = `温度 ${row.temperature} · ${fmtInt(row.maxTokens)} tok · ${row.timeoutSeconds}s · 重试 ${row.maxRetries}`;
+  const tuned =
+    defaults !== undefined &&
+    (row.temperature !== defaults.temperature ||
+      row.maxTokens !== defaults.maxTokens ||
+      row.timeoutSeconds !== defaults.timeoutSeconds ||
+      row.maxRetries !== defaults.maxRetries);
+
+  return (
+    <div className="space-y-2 px-3 py-2.5" title={params}>
+      {/* 顶部：名称 + 状态标签 */}
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="break-words text-base font-semibold text-ink-hi">{row.label}</span>
+            {isDefault && (
+              <Badge tone="accent" title="新建机器人时会预选这个模型">
+                默认
+              </Badge>
+            )}
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink-faint">
+            <span className="text-ink-lo">{providerLabel}</span>
+            {tuned && <span className="text-warn">· 已调参</span>}
+            <SecretChip hasKey={row.hasKey} masked={row.apiKeyMasked} />
+          </div>
+        </div>
+      </div>
+
+      {/* 中间：模型 ID 与端点地址独立分行且 break-all */}
+      <div className="space-y-1 rounded-md border border-base-800/80 bg-base-950/60 px-2.5 py-2 text-xs">
+        <div className="flex items-start gap-2">
+          <span className="shrink-0 text-ink-faint">模型</span>
+          <span className="num min-w-0 break-all text-ink-mid">{row.model}</span>
+        </div>
+        <div className="flex items-start gap-2">
+          <span className="shrink-0 text-ink-faint">端点</span>
+          <span className="num min-w-0 break-all text-ink-faint">{row.baseUrl || '—'}</span>
+        </div>
+      </div>
+
+      {/* 最近测试状态 */}
+      <div>
+        <TestOutcome testing={testing} result={result} />
+      </div>
+
+      {/* 底部：整行操作按钮 */}
+      <div className="flex flex-wrap items-center gap-1.5 border-t border-base-800/70 pt-2">
+        <Button small variant="ghost" busy={testing} onClick={() => onTest(row)} title="发送一次最小补全请求">
+          测试
+        </Button>
+        <Button small onClick={() => onEdit(row)}>
+          编辑
+        </Button>
+        {!isDefault && (
+          <Button
+            small
+            variant="ghost"
+            aria-label={`将 ${row.label} 设为默认模型`}
+            title="新建机器人时预选这个模型"
+            onClick={() => onSetDefault(row)}
+          >
+            <Star aria-hidden className="h-3.5 w-3.5" />
+            默认
+          </Button>
+        )}
+        <Button
+          small
+          variant="danger"
+          className="ml-auto"
+          busy={removing}
+          aria-label={`删除模型 ${row.label}`}
+          title="删除模型"
+          onClick={() => onRemove(row)}
+        >
+          <X aria-hidden className="h-3.5 w-3.5" />
+          删除
+        </Button>
+      </div>
+    </div>
   );
 });

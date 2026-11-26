@@ -748,7 +748,7 @@ export function TradersPage() {
               弃用易互相挤压重叠的 table-fixed 百分比宽度，改用自然列宽 + overflow-x-auto 平滑横向兜底。
             */}
             <div className="hidden min-h-0 flex-1 overflow-auto lg:block xl:min-h-[12rem]">
-              <table className="w-full min-w-[1120px] border-collapse">
+              <table className="w-full min-w-[1040px] border-collapse [&_td.td]:!px-2.5 [&_th.th]:!px-2.5">
                 <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
                   <tr>
                     <th className="th">机器人</th>
@@ -781,7 +781,9 @@ export function TradersPage() {
                     <th className="th text-right" title="决策周期数、间隔、运行时长与最近一次决策时间">
                       周期 / 运行
                     </th>
-                    <th className="th text-right">操作</th>
+                    <th className="th sticky right-0 z-[1] border-l border-base-800/70 bg-base-850 text-right">
+                      操作
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -921,7 +923,7 @@ export function TradersPage() {
                             {stats ? `${fmtDuration(stats.uptimeHours * 60)} · ${timeAgo(trader.lastCycleAt)}` : timeAgo(trader.lastCycleAt)}
                           </div>
                         </td>
-                        <td className="td">
+                        <td className="td sticky right-0 z-[1] border-l border-base-800/70 bg-base-900">
                           <TraderRowActions
                             trader={trader}
                             starting={starting}

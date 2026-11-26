@@ -247,10 +247,10 @@ html.aq-quill[data-skin='light'] {
   --aq-ink-rgb: 28 28 33;
   --aq-ink-mid: #4b4b53;
   --aq-ink-mid-rgb: 75 75 83;
-  --aq-ink-lo: #5c5c65;
-  --aq-ink-lo-rgb: 92 92 101;
-  --aq-ink-faint: #67676f;
-  --aq-ink-faint-rgb: 103 103 111;
+  --aq-ink-lo: #4f4f59;
+  --aq-ink-lo-rgb: 79 79 89;
+  --aq-ink-faint: #5a5a64;
+  --aq-ink-faint-rgb: 90 90 100;
   /* `--aq-ink-soft` 见深色块那段说明：别名只在 `index.css` 的 `:root` 定义一次。 */
 
   /* 语义色：浅色下是**饱和深色**（给文字用）。色相同样锁在币安那一套上，
@@ -546,7 +546,7 @@ html.aq-quill .select selectedcontent {
   white-space: nowrap;
 }
 html.aq-quill[data-skin='light'] .select {
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%235c5c65' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath fill='%234f4f59' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
 }
 
 /*
@@ -1146,7 +1146,7 @@ html.aq-quill .q-head {
 /* 当前页面名。**不设大字号** —— 页面自己的内容区会渲染 `<h1>`/`<h2>`，
    头部这一行只是"面包屑"，重复一遍大标题会让每页出现两个同样重的标题。 */
 html.aq-quill .q-crumb {
-  min-width: 0;
+  min-width: 3.5rem;
   font-size: 13.5px;
   font-weight: 500;
   color: var(--aq-ink);
@@ -1495,11 +1495,11 @@ html.aq-quill .q-pad {
 /* --- 窄屏：侧栏收成抽屉 --- */
 
 /*
- * ⚠️ 断点 56em 与 JS 里的 `matchMedia('(min-width: 56em)')` 必须**同一个数**
- * （见 QuillShell 顶部的 `DESKTOP_NAV_QUERY`）。两处不一致会在中间那段宽度里
- * 出现"侧栏已经收起来、而汉堡按钮还藏着"的空档 —— 那一段的用户点不到任何导航。
+ * ⚠️ 断点与 JS 里的 `matchMedia('(min-width: 56em)')` 严格互斥（55.998em < 56em）：
+ * 若两边都写成闭区间 56em（896px），精确 896px 视口下会同时命中 `max-width: 56em`
+ * 与 `min-width: 56em`，导致侧栏、汉堡按钮和分段导航同时消失。
  */
-@media (max-width: 56em) {
+@media (max-width: 55.998em) {
   html.aq-quill .q-root {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1535,6 +1535,22 @@ html.aq-quill .q-pad {
   html.aq-quill .q-drawer,
   html.aq-quill .q-drawer-overlay {
     display: none;
+  }
+}
+
+/* 手机横屏等矮视口：压薄顶栏与工具栏、隐藏冗余分段条（可用左上角汉堡抽屉切页），把高度还给内容区。 */
+@media (max-height: 500px) {
+  html.aq-quill .q-head {
+    height: 38px;
+  }
+  html.aq-quill .q-seg-wrap {
+    display: none;
+  }
+  html.aq-quill .q-toolbar {
+    height: 34px;
+  }
+  html.aq-quill .q-pad {
+    padding: 8px 12px 12px;
   }
 }
 

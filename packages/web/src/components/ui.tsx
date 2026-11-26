@@ -415,9 +415,9 @@ export function Panel({
     <section className={cn('panel', className)}>
       {(title || actions) && (
         <header className="panel-head shrink-0">
-          {/* min-w-0 + truncate：标题是数据驱动的名字，长名字不能把 actions 挤出去 */}
-          <h2 className="panel-title min-w-0 truncate">{title}</h2>
-          {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
+          {/* min-w-0 + flex-1：配合 .panel-head 的 flex-wrap，避免强制 truncate 截断复合胶囊标题 */}
+          <h2 className="panel-title min-w-0 flex-1">{title}</h2>
+          {actions && <div className="flex shrink-0 flex-wrap items-center gap-1.5">{actions}</div>}
         </header>
       )}
       <div className={cn('min-w-0', padded && 'p-4', bodyClassName)}>{children}</div>
@@ -493,6 +493,7 @@ export function Modal({
   footer,
   width = 'max-w-lg',
   description,
+  bodyClassName,
 }: {
   open: boolean;
   onClose: () => void;
@@ -501,12 +502,13 @@ export function Modal({
   footer?: ReactNode;
   width?: string;
   description?: ReactNode;
+  bodyClassName?: string;
 }) {
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 animate-fade-in bg-overlay backdrop-blur-sm" />
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4">
           <DialogPrimitive.Content
             className={cn(
               'panel flex max-h-full w-full animate-slide-up flex-col overflow-hidden shadow-overlay',
@@ -514,7 +516,7 @@ export function Modal({
             )}
           >
             <header className="panel-head shrink-0">
-              <DialogPrimitive.Title className="min-w-0 truncate text-md font-semibold text-ink-hi">
+              <DialogPrimitive.Title className="min-w-0 flex-1 truncate text-md font-semibold text-ink-hi">
                 {title}
               </DialogPrimitive.Title>
               <DialogPrimitive.Close asChild>
@@ -524,13 +526,13 @@ export function Modal({
               </DialogPrimitive.Close>
             </header>
             {description && (
-              <DialogPrimitive.Description className="px-4 pt-3 text-base text-ink-lo">
+              <DialogPrimitive.Description className="shrink-0 px-3 pt-2 text-base text-ink-lo sm:px-4 sm:pt-3">
                 {description}
               </DialogPrimitive.Description>
             )}
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">{children}</div>
+            <div className={cn('min-h-0 flex-1 overflow-y-auto p-3 sm:p-4', bodyClassName)}>{children}</div>
             {footer && (
-              <footer className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-base-800 px-4 py-2.5">
+              <footer className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-base-800 px-3 py-2 sm:px-4 sm:py-2.5">
                 {footer}
               </footer>
             )}

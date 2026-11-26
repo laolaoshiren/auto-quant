@@ -326,17 +326,18 @@ export function StrategyListPage() {
                 </div>
               ) : (
                 <>
-                  <div>
-                    <table className="w-full table-fixed border-collapse">
+                  {/* 桌面端自然列宽表格 + 横向滚动兜底，彻底消除窄屏叠字与裁切 */}
+                  <div className="scroll-x hidden md:block">
+                    <table className="w-full min-w-[680px] border-collapse">
                       <thead className="border-b border-base-800 bg-base-850/60">
                         <tr>
-                          <th className="th w-[23%] px-2 py-2">名称</th>
-                          <th className="th w-[10%] px-2 py-2">模式</th>
-                          <th className="th hidden w-[14%] px-2 py-2 lg:table-cell">币种池</th>
-                          <th className="th w-[12%] px-2 py-2 text-right">风控</th>
-                          <th className="th hidden w-[10%] px-2 py-2 xl:table-cell">被引用</th>
-                          <th className="th hidden w-[16%] whitespace-nowrap px-2 py-2 pr-3 lg:table-cell">更新时间</th>
-                          <th className="th w-[15%] whitespace-nowrap px-2 py-2 text-right">操作</th>
+                          <th className="th px-2 py-2">名称</th>
+                          <th className="th px-2 py-2">模式</th>
+                          <th className="th hidden px-2 py-2 lg:table-cell">币种池</th>
+                          <th className="th px-2 py-2 text-right">风控</th>
+                          <th className="th hidden px-2 py-2 xl:table-cell">被引用</th>
+                          <th className="th hidden whitespace-nowrap px-2 py-2 pr-3 lg:table-cell">更新时间</th>
+                          <th className="th whitespace-nowrap px-2 py-2 text-right">操作</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -352,7 +353,7 @@ export function StrategyListPage() {
                               onClick={() => navigate(`/strategy/${record.id}`)}
                               title="打开编辑器"
                             >
-                              <td className="td px-2 py-2">
+                              <td className="td max-w-[280px] px-2 py-2">
                                 {/* 名称是真正的链接：整行可点，但键盘与"新标签页打开"仍然可用 */}
                                 <Link
                                   to={`/strategy/${record.id}`}
@@ -362,18 +363,18 @@ export function StrategyListPage() {
                                   {record.name}
                                 </Link>
                                 {record.description && (
-                                  <div className="max-w-[320px] truncate text-xs text-ink-faint" title={record.description}>
+                                  <div className="max-w-[280px] truncate text-xs text-ink-faint" title={record.description}>
                                     {record.description}
                                   </div>
                                 )}
                               </td>
-                              <td className="td px-2 py-2">
+                              <td className="td whitespace-nowrap px-2 py-2">
                                 {/* 模式按语义分色（稳健=绿 / 短线=蓝 / 进取=琥珀）—— 原来三档全是同一种蓝 */}
                                 <Badge tone={tradingModeTone(record.config.tradingMode)}>
                                   {tradingModeLabel(record.config.tradingMode)}
                                 </Badge>
                               </td>
-                              <td className="td hidden px-2 py-2 text-ink-lo lg:table-cell">
+                              <td className="td hidden whitespace-nowrap px-2 py-2 text-ink-lo lg:table-cell">
                                 {coinSourceTypeLabel(source.sourceType)}
                                 {staticCount > 0 && (
                                   <span className="num text-ink-faint"> · {staticCount} 个标的</span>
@@ -381,23 +382,12 @@ export function StrategyListPage() {
                               </td>
                               {/* 两格并一格：持仓上限与杠杆是同一个决定的两半 */}
                               <td
-                                className="td num px-2 py-2 text-right"
+                                className="td num whitespace-nowrap px-2 py-2 text-right"
                                 title={`最大同时持仓 ${risk.maxPositions} 个 · 默认杠杆 ${risk.defaultLeverage}× · 最小置信度 ${risk.minConfidence}`}
                               >
                                 {risk.maxPositions} 持仓 · {risk.defaultLeverage}×
                               </td>
-                              <td className="td hidden px-2 py-2 xl:table-cell">
-                                {/*
-                                  ⚠️ **只有"真的在用这份参数"的机器人会被数进来。**
-                                  AI 托管的机器人 `strategyId === null`，压根不在这张表里
-                                  （见 `usageByStrategy`）—— 所以这里回到了最简形式，
-                                  不再有"AI 托管基线 ×N"那一档。那一档是"AI 托管仍然
-                                  需要一个策略占位"时期的说法，而那条依赖已经拆掉了。
-
-                                  ⚠️ 文案要短：这一列只有 12% 宽，原来那句
-                                  「1 个机器人 · 1 运行中」会把 1024/1440 下的
-                                  「更新时间」挤掉（实测文字叠在一起）。
-                                */}
+                              <td className="td hidden whitespace-nowrap px-2 py-2 xl:table-cell">
                                 {usage && usage.total > 0 ? (
                                   <Badge
                                     tone={usage.running > 0 ? 'up' : 'muted'}
@@ -412,22 +402,11 @@ export function StrategyListPage() {
                               <td className="td num hidden whitespace-nowrap px-2 py-2 pr-3 text-xs text-ink-faint lg:table-cell">
                                 {fmtDateTime(record.updatedAt)}
                               </td>
-                              <td className="td px-2 py-2 text-right">
+                              <td className="td whitespace-nowrap px-2 py-2 text-right">
                                 <div
                                   className="flex items-center justify-end gap-1"
                                   onClick={(event) => event.stopPropagation()}
                                 >
-                                  {/*
-                                    §4「操作列只放主操作（行内）」：行内只留**体检**
-                                    （它是唯一一个不进编辑器就能做的动作），
-                                    低频的克隆 / 删除收进溢出菜单 —— 原来三个按钮
-                                    并排，在 1024/768 下会盖住「风控」列（实测重叠）。
-
-                                    ⚠️ **体检用 ghost，不用 `StrategyCheckButton` 的
-                                    primary 实心**：那一版每行一颗饱和主色按钮 →
-                                    整页 4 颗"主操作"，与 ui-spec §1「每页最多 1 个
-                                    主操作」冲突。行为完全一样（同一个 Modal）。
-                                  */}
                                   <span className="hidden xl:inline-flex">
                                     <Button
                                       small
@@ -451,6 +430,68 @@ export function StrategyListPage() {
                         })}
                       </tbody>
                     </table>
+                  </div>
+
+                  {/* 移动端清晰卡片视图（< md），零重叠零裁切 */}
+                  <div className="divide-y divide-base-850/70 md:hidden">
+                    {shown.map((record) => {
+                      const usage = usageByStrategy.get(record.id);
+                      const risk = record.config.riskControl;
+                      const source = record.config.coinSource;
+                      const staticCount = source.staticCoins.length;
+                      return (
+                        <div
+                          key={record.id}
+                          className="cursor-pointer px-3 py-2.5 transition-colors hover:bg-base-850/50"
+                          onClick={() => navigate(`/strategy/${record.id}`)}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <Link
+                                  to={`/strategy/${record.id}`}
+                                  onClick={(event) => event.stopPropagation()}
+                                  className="break-words text-base font-semibold text-ink-hi hover:text-accent"
+                                >
+                                  {record.name}
+                                </Link>
+                                <Badge tone={tradingModeTone(record.config.tradingMode)}>
+                                  {tradingModeLabel(record.config.tradingMode)}
+                                </Badge>
+                              </div>
+                              {record.description && (
+                                <p className="mt-0.5 line-clamp-2 text-xs text-ink-faint">{record.description}</p>
+                              )}
+                            </div>
+                            <div className="shrink-0" onClick={(event) => event.stopPropagation()}>
+                              <StrategyRowMenu
+                                busy={busy?.kind === 'row' && busy.id === record.id}
+                                onCheck={() => setCheckTarget({ id: record.id, name: record.name })}
+                                onDuplicate={() => void duplicate(record)}
+                                onDelete={() => setDeleteTarget(record)}
+                              />
+                            </div>
+                          </div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-lo">
+                            <span className="num font-medium text-ink-mid">
+                              {risk.maxPositions} 持仓 · {risk.defaultLeverage}×
+                            </span>
+                            <span>
+                              {coinSourceTypeLabel(source.sourceType)}
+                              {staticCount > 0 && <span className="num text-ink-faint"> · {staticCount} 个标的</span>}
+                            </span>
+                            {usage && usage.total > 0 ? (
+                              <Badge tone={usage.running > 0 ? 'up' : 'muted'}>
+                                {usage.total} 个{usage.running > 0 ? ` · ${usage.running} 运行` : ''}
+                              </Badge>
+                            ) : (
+                              <span className="text-ink-faint">未使用</span>
+                            )}
+                            <span className="num ml-auto text-ink-faint">{fmtDateTime(record.updatedAt)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
 
                   {remaining > 0 && (

@@ -12,7 +12,6 @@ import { Link } from 'react-router-dom';
 import { useApp } from '../lib/store';
 import { useDocumentTitle } from '../lib/hooks';
 import { Badge } from '../components/ui';
-import { SectionHeading } from '../components/Badges';
 import { PageShell } from '../components/shell';
 import { AiModelsSection } from '../components/settings/AiModelsSection';
 
@@ -22,9 +21,14 @@ export function ModelsPage() {
 
   return (
     <PageShell>
-      <SectionHeading
-        title="AI 模型"
-        sub={
+      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <h1 className="truncate text-xl font-semibold tracking-tight text-ink-hi">AI 模型</h1>
+        {system && (
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <Badge tone={system.dryRun ? 'accent' : 'warn'}>{system.dryRun ? '模拟环境' : '可实盘'}</Badge>
+          </div>
+        )}
+        <p className="w-full text-xs text-ink-lo">
           <span>
             添加模型 → 点「测试」确认密钥/端点/模型 id 都对得上 → 在机器人里选用。密钥只以掩码显示。
             {system ? ` 当前环境：${system.environmentLabel}。` : ''}
@@ -32,9 +36,8 @@ export function ModelsPage() {
               常见问题
             </Link>
           </span>
-        }
-        right={system ? <Badge tone={system.dryRun ? 'accent' : 'warn'}>{system.dryRun ? '模拟环境' : '可实盘'}</Badge> : undefined}
-      />
+        </p>
+      </div>
 
       {system?.tradingDisabled && (
         <div className="mb-2 rounded-md border border-down/50 bg-down/10 px-3 py-2 text-base text-down" role="alert">

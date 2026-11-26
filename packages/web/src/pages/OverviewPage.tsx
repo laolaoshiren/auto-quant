@@ -56,6 +56,7 @@ import {
   NeuralPipelineCanvas,
   PolarAlphaRadarCanvas,
   QuantumRidgeCanvas,
+  useIsLightSkin,
 } from '../components/overview/ObservatoryCanvases';
 import {
   fmtClockOffset,
@@ -76,19 +77,19 @@ const NO_DECISIONS: DecisionRecord[] = [];
 const NO_TRADERS: TraderRow[] = [];
 
 const ACTION_TAG: Record<string, { label: string; color: string }> = {
-  open_long: { label: '开多', color: 'text-emerald-400' },
-  open_short: { label: '开空', color: 'text-rose-400' },
-  add_long: { label: '加多', color: 'text-emerald-400' },
-  add_short: { label: '加空', color: 'text-rose-400' },
-  close_long: { label: '平多', color: 'text-amber-300' },
-  close_short: { label: '平空', color: 'text-amber-300' },
-  reduce_long: { label: '减多', color: 'text-amber-300' },
-  reduce_short: { label: '减空', color: 'text-amber-300' },
-  update_sl_tp: { label: '调保护', color: 'text-sky-400' },
-  cancel_pending: { label: '撤挂单', color: 'text-amber-300' },
-  hold: { label: '持仓', color: 'text-sky-400' },
-  wait: { label: '观望', color: 'text-slate-400' },
-  skip: { label: '跳过', color: 'text-slate-500' },
+  open_long: { label: '开多', color: "text-emerald-400 [[data-skin='light']_&]:text-emerald-700" },
+  open_short: { label: '开空', color: "text-rose-400 [[data-skin='light']_&]:text-rose-700" },
+  add_long: { label: '加多', color: "text-emerald-400 [[data-skin='light']_&]:text-emerald-700" },
+  add_short: { label: '加空', color: "text-rose-400 [[data-skin='light']_&]:text-rose-700" },
+  close_long: { label: '平多', color: "text-amber-300 [[data-skin='light']_&]:text-amber-700" },
+  close_short: { label: '平空', color: "text-amber-300 [[data-skin='light']_&]:text-amber-700" },
+  reduce_long: { label: '减多', color: "text-amber-300 [[data-skin='light']_&]:text-amber-700" },
+  reduce_short: { label: '减空', color: "text-amber-300 [[data-skin='light']_&]:text-amber-700" },
+  update_sl_tp: { label: '调保护', color: "text-sky-400 [[data-skin='light']_&]:text-sky-700" },
+  cancel_pending: { label: '撤挂单', color: "text-amber-300 [[data-skin='light']_&]:text-amber-700" },
+  hold: { label: '持仓', color: "text-sky-400 [[data-skin='light']_&]:text-sky-700" },
+  wait: { label: '观望', color: "text-slate-400 [[data-skin='light']_&]:text-slate-600" },
+  skip: { label: '跳过', color: "text-slate-500 [[data-skin='light']_&]:text-slate-500" },
 };
 
 function useHighFreqClock(): string {
@@ -128,6 +129,7 @@ export function OverviewPage() {
   const socketOpen = useEvents((s) => s.status) === 'open';
   const liveByTrader = useEvents((s) => s.byTrader);
   const highFreqClock = useHighFreqClock();
+  const isLightSkin = useIsLightSkin();
 
   const [newOpen, setNewOpen] = useState(false);
   const [stageMode, setStageMode] = useState<'radar' | 'pipeline'>('radar');
@@ -406,10 +408,16 @@ export function OverviewPage() {
           ? new Date(intelQuery.data.radar.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })
           : nowTime,
         tag: '雷达',
-        tagCls: 'bg-amber-400/15 text-amber-300 border-amber-400/35',
+        tagCls:
+          "bg-amber-400/15 text-amber-300 border-amber-400/35 [[data-skin='light']_&]:bg-amber-500/12 [[data-skin='light']_&]:text-amber-800 [[data-skin='light']_&]:border-amber-600/35",
         body: `${r.symbol.replace(/USDT$/, '')} · ${r.bias === 'long' ? '偏多' : r.bias === 'short' ? '偏空' : '中性'} · ${fmtPriceUsd(r.price)}`,
         metric: `${Math.round(r.score)}分`,
-        metricCls: r.score >= 75 ? 'text-emerald-400' : r.score >= 65 ? 'text-amber-300' : 'text-slate-300',
+        metricCls:
+          r.score >= 75
+            ? "text-emerald-400 [[data-skin='light']_&]:text-emerald-700"
+            : r.score >= 65
+              ? "text-amber-300 [[data-skin='light']_&]:text-amber-700"
+              : "text-slate-300 [[data-skin='light']_&]:text-slate-700",
         to: primaryManagedTrader ? `/traders/${primaryManagedTrader.id}` : '/market',
       });
     }
@@ -418,14 +426,15 @@ export function OverviewPage() {
       const top = rec.decisions.find((d) => d.action !== 'wait' && d.action !== 'skip') ?? rec.decisions[0];
       const act = top
         ? isPendingOrderWaitDecision(top.action, top.reasoning)
-          ? { label: '待成交', color: 'text-amber-300' }
-          : (ACTION_TAG[top.action] ?? { label: top.action, color: 'text-slate-300' })
-        : { label: '观望', color: 'text-slate-400' };
+          ? { label: '待成交', color: "text-amber-300 [[data-skin='light']_&]:text-amber-700" }
+          : (ACTION_TAG[top.action] ?? { label: top.action, color: "text-slate-300 [[data-skin='light']_&]:text-slate-700" })
+        : { label: '观望', color: "text-slate-400 [[data-skin='light']_&]:text-slate-600" };
       entries.push({
         key: `cycle-${rec.id}`,
         time: new Date(rec.timestamp).toLocaleTimeString('zh-CN', { hour12: false }),
         tag: '决策',
-        tagCls: 'bg-violet-500/20 text-violet-300 border-violet-400/35',
+        tagCls:
+          "bg-violet-500/20 text-violet-300 border-violet-400/35 [[data-skin='light']_&]:bg-indigo-500/12 [[data-skin='light']_&]:text-indigo-700 [[data-skin='light']_&]:border-indigo-500/35",
         body: `#${rec.cycleNumber} ${top?.symbol ? top.symbol.replace(/USDT$/, '') : '全市场'} · ${act.label}`,
         metric:
           typeof top?.confidence === 'number' && top.confidence > 0
@@ -443,11 +452,13 @@ export function OverviewPage() {
         time: nowTime,
         tag: '异动',
         tagCls: up
-          ? 'bg-emerald-500/15 text-emerald-300 border-emerald-400/30'
-          : 'bg-rose-500/15 text-rose-300 border-rose-400/30',
+          ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/30 [[data-skin='light']_&]:bg-emerald-500/12 [[data-skin='light']_&]:text-emerald-700 [[data-skin='light']_&]:border-emerald-600/35"
+          : "bg-rose-500/15 text-rose-300 border-rose-400/30 [[data-skin='light']_&]:bg-rose-500/12 [[data-skin='light']_&]:text-rose-700 [[data-skin='light']_&]:border-rose-600/35",
         body: `${s.baseAsset} ${fmtPriceUsd(s.price)}`,
         metric: fmtPercent(s.changePercent24h),
-        metricCls: up ? 'text-emerald-400' : 'text-rose-400',
+        metricCls: up
+          ? "text-emerald-400 [[data-skin='light']_&]:text-emerald-700"
+          : "text-rose-400 [[data-skin='light']_&]:text-rose-700",
         to: '/market',
       });
     }
@@ -489,9 +500,9 @@ export function OverviewPage() {
   return (
     <div
       className={cn(
-        'aq-observatory-bg flex flex-col gap-2.5 text-slate-100',
+        "aq-observatory-bg flex flex-col gap-2.5 text-slate-100 [[data-skin='light']_&]:text-slate-900",
         isFullscreen
-          ? 'fixed inset-0 z-[9999] h-screen w-screen overflow-hidden rounded-none p-3.5'
+          ? 'fixed inset-0 z-[9999] h-[100dvh] w-screen overflow-y-auto xl:overflow-hidden rounded-none p-2.5 sm:p-3.5'
           : 'page-fill -m-2 rounded-xl p-3 sm:-m-3 sm:p-3.5',
       )}
     >
@@ -503,35 +514,37 @@ export function OverviewPage() {
       {/* ================================================================== */}
       {/*  1. 顶栏全中文指挥带                                                 */}
       {/* ================================================================== */}
-      <header className="aq-war-hero aq-obs-card shrink-0 rounded-xl border border-white/10 px-3.5 py-2">
+      <header className="aq-war-hero aq-obs-card shrink-0 rounded-xl border border-white/10 px-3.5 py-2 [[data-skin='light']_&]:border-slate-300/75">
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-0 h-[1.5px] overflow-hidden bg-gradient-to-r from-transparent via-violet-500/50 to-transparent"
+          className="pointer-events-none absolute inset-x-0 top-0 h-[1.5px] overflow-hidden bg-gradient-to-r from-transparent via-violet-500/50 to-transparent [[data-skin='light']_&]:via-indigo-500/35"
         >
-          <div className="aq-shimmer-line h-full w-1/3 bg-gradient-to-r from-transparent via-emerald-400 to-transparent" />
+          <div className="aq-shimmer-line h-full w-1/3 bg-gradient-to-r from-transparent via-emerald-400 to-transparent [[data-skin='light']_&]:via-emerald-500/70" />
         </div>
 
         <div className="relative flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2.5">
             <div className="flex items-center gap-2">
-              <span className="relative flex h-7 w-7 items-center justify-center rounded-lg border border-violet-400/40 bg-violet-500/15 text-violet-300">
+              <span className="relative flex h-7 w-7 items-center justify-center rounded-lg border border-violet-400/40 bg-violet-500/15 text-violet-300 [[data-skin='light']_&]:border-indigo-500/35 [[data-skin='light']_&]:bg-indigo-500/10 [[data-skin='light']_&]:text-indigo-700">
                 <Cpu className="h-4 w-4" aria-hidden />
                 {runningCount > 0 && (
                   <span className="absolute -right-0.5 -top-0.5 flex h-2 w-2">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-80" />
-                    <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-80 [[data-skin='light']_&]:bg-emerald-500" />
+                    <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400 [[data-skin='light']_&]:bg-emerald-600" />
                   </span>
                 )}
               </span>
-              <span className="text-sm font-bold tracking-wide text-white">量化全景观测台</span>
+              <span className="text-sm font-bold tracking-wide text-white [[data-skin='light']_&]:text-slate-900">
+                量化全景观测台
+              </span>
             </div>
 
             <span
               className={cn(
                 'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold',
                 system?.dryRun
-                  ? 'border-violet-400/40 bg-violet-500/15 text-violet-300'
-                  : 'border-amber-400/45 bg-amber-400/15 text-amber-300',
+                  ? "border-violet-400/40 bg-violet-500/15 text-violet-300 [[data-skin='light']_&]:border-indigo-500/35 [[data-skin='light']_&]:bg-indigo-500/10 [[data-skin='light']_&]:text-indigo-700"
+                  : "border-amber-400/45 bg-amber-400/15 text-amber-300 [[data-skin='light']_&]:border-amber-600/40 [[data-skin='light']_&]:bg-amber-500/14 [[data-skin='light']_&]:text-amber-800",
               )}
             >
               <Zap className="h-3 w-3" aria-hidden />
@@ -547,12 +560,21 @@ export function OverviewPage() {
                 <Link
                   key={trader.id}
                   to={`/traders/${trader.id}`}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1 text-xs transition hover:border-emerald-400/50 hover:bg-white/[0.08]"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1 text-xs transition hover:border-emerald-400/50 hover:bg-white/[0.08] [[data-skin='light']_&]:border-slate-300/80 [[data-skin='light']_&]:bg-white/80 [[data-skin='light']_&]:hover:border-emerald-600/50 [[data-skin='light']_&]:hover:bg-white"
                 >
-                  <span className={cn('h-1.5 w-1.5 rounded-full', isRun ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500')} />
-                  <span className="font-semibold text-white">{trader.name}</span>
-                  <span className="num font-mono text-[11px] text-emerald-300">{fmtUsd(eq, 2)}</span>
-                  <ArrowUpRight className="h-3 w-3 text-slate-400" aria-hidden />
+                  <span
+                    className={cn(
+                      'h-1.5 w-1.5 rounded-full',
+                      isRun
+                        ? "bg-emerald-400 animate-pulse [[data-skin='light']_&]:bg-emerald-600"
+                        : "bg-slate-500 [[data-skin='light']_&]:bg-slate-400",
+                    )}
+                  />
+                  <span className="font-semibold text-white [[data-skin='light']_&]:text-slate-900">{trader.name}</span>
+                  <span className="num font-mono text-[11px] text-emerald-300 [[data-skin='light']_&]:text-emerald-700">
+                    {fmtUsd(eq, 2)}
+                  </span>
+                  <ArrowUpRight className="h-3 w-3 text-slate-400 [[data-skin='light']_&]:text-slate-500" aria-hidden />
                 </Link>
               );
             })}
@@ -563,10 +585,10 @@ export function OverviewPage() {
               <Link
                 key={m!.symbol}
                 to="/market"
-                className="inline-flex items-center gap-1.5 text-slate-300 transition hover:text-white"
+                className="inline-flex items-center gap-1.5 text-slate-300 transition hover:text-white [[data-skin='light']_&]:text-slate-600 [[data-skin='light']_&]:hover:text-slate-900"
               >
                 <CoinIcon symbol={m!.symbol} className="h-3.5 w-3.5" />
-                <span className="font-semibold text-white">{m!.baseAsset}</span>
+                <span className="font-semibold text-white [[data-skin='light']_&]:text-slate-900">{m!.baseAsset}</span>
                 <span className="num">{fmtPriceUsd(m!.price)}</span>
                 <span className={cn('num font-semibold', pnlColor(m!.changePercent24h))}>
                   {fmtPercent(m!.changePercent24h)}
@@ -576,20 +598,37 @@ export function OverviewPage() {
           </div>
 
           <div className="flex items-center gap-2">
-            <div className="hidden items-center gap-1.5 rounded-lg border border-white/10 bg-black/40 px-2.5 py-1 font-mono text-[11px] sm:flex">
-              <Radio className={cn('h-3 w-3', socketOpen ? 'text-emerald-400 animate-pulse' : 'text-amber-400')} aria-hidden />
-              <span className={cn('font-sans text-[11px]', socketOpen ? 'text-emerald-300' : 'text-amber-300')}>
+            <div className="hidden items-center gap-1.5 rounded-lg border border-white/10 bg-black/40 px-2.5 py-1 font-mono text-[11px] sm:flex [[data-skin='light']_&]:border-slate-300/80 [[data-skin='light']_&]:bg-slate-100/90">
+              <Radio
+                className={cn(
+                  'h-3 w-3',
+                  socketOpen
+                    ? "text-emerald-400 animate-pulse [[data-skin='light']_&]:text-emerald-600"
+                    : "text-amber-400 [[data-skin='light']_&]:text-amber-600",
+                )}
+                aria-hidden
+              />
+              <span
+                className={cn(
+                  'font-sans text-[11px]',
+                  socketOpen
+                    ? "text-emerald-300 [[data-skin='light']_&]:text-emerald-700"
+                    : "text-amber-300 [[data-skin='light']_&]:text-amber-700",
+                )}
+              >
                 {socketOpen ? '实时推送' : '轮询同步'}
               </span>
-              <span className="text-slate-600">|</span>
-              <span className="num font-bold tracking-wider text-white">{highFreqClock}</span>
+              <span className="text-slate-600 [[data-skin='light']_&]:text-slate-300">|</span>
+              <span className="num font-bold tracking-wider text-white [[data-skin='light']_&]:text-slate-900">
+                {highFreqClock}
+              </span>
             </div>
 
             {!isFullscreen && (
               <>
                 <Link
                   to="/traders"
-                  className="inline-flex h-7 items-center gap-1 rounded-md border border-white/15 bg-white/[0.05] px-2.5 text-xs font-medium text-slate-200 transition hover:border-violet-400/50 hover:text-white"
+                  className="inline-flex h-7 items-center gap-1 rounded-md border border-white/15 bg-white/[0.05] px-2.5 text-xs font-medium text-slate-200 transition hover:border-violet-400/50 hover:text-white [[data-skin='light']_&]:border-slate-300/85 [[data-skin='light']_&]:bg-white/85 [[data-skin='light']_&]:text-slate-700 [[data-skin='light']_&]:hover:border-indigo-500/50 [[data-skin='light']_&]:hover:text-slate-950"
                 >
                   机器人 ({traders.length})
                 </Link>
@@ -608,8 +647,8 @@ export function OverviewPage() {
               className={cn(
                 'inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition',
                 isFullscreen
-                  ? 'border-emerald-400/45 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25'
-                  : 'border-white/15 bg-white/[0.05] text-slate-200 hover:border-emerald-400/50 hover:text-white',
+                  ? "border-emerald-400/45 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25 [[data-skin='light']_&]:border-emerald-600/45 [[data-skin='light']_&]:bg-emerald-500/12 [[data-skin='light']_&]:text-emerald-800 [[data-skin='light']_&]:hover:bg-emerald-500/20"
+                  : "border-white/15 bg-white/[0.05] text-slate-200 hover:border-emerald-400/50 hover:text-white [[data-skin='light']_&]:border-slate-300/85 [[data-skin='light']_&]:bg-white/85 [[data-skin='light']_&]:text-slate-700 [[data-skin='light']_&]:hover:border-emerald-600/50 [[data-skin='light']_&]:hover:text-slate-950",
               )}
             >
               {isFullscreen ? (
@@ -628,19 +667,19 @@ export function OverviewPage() {
         </div>
 
         {(clockWarn || weightWarn || system?.tradingDisabled) && (
-          <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-white/10 pt-1.5 text-[11px]">
+          <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-white/10 pt-1.5 text-[11px] [[data-skin='light']_&]:border-slate-300/75">
             {clockWarn && (
-              <span className="inline-flex items-center gap-1 text-amber-300">
+              <span className="inline-flex items-center gap-1 text-amber-300 [[data-skin='light']_&]:text-amber-700">
                 <ShieldAlert className="h-3 w-3" /> 时钟偏差 {fmtClockOffset(system?.clockOffsetMs)}
               </span>
             )}
             {weightWarn && (
-              <span className="inline-flex items-center gap-1 text-amber-300">
+              <span className="inline-flex items-center gap-1 text-amber-300 [[data-skin='light']_&]:text-amber-700">
                 <ShieldAlert className="h-3 w-3" /> API 权重 {weightPercent}%
               </span>
             )}
             {system?.tradingDisabled && (
-              <span className="inline-flex items-center gap-1 text-rose-400">
+              <span className="inline-flex items-center gap-1 text-rose-400 [[data-skin='light']_&]:text-rose-700">
                 <ShieldAlert className="h-3 w-3" /> 全局交易已禁用
               </span>
             )}
@@ -653,11 +692,11 @@ export function OverviewPage() {
       {/* ================================================================== */}
       {marketStats.tickerItems.length > 0 && (
         <div
-          className="aq-marquee-wrap aq-obs-card relative flex h-8 shrink-0 items-center overflow-hidden rounded-lg border border-white/10"
+          className="aq-marquee-wrap aq-obs-card relative flex h-8 shrink-0 items-center overflow-hidden rounded-lg border border-white/10 [[data-skin='light']_&]:border-slate-300/75"
           aria-label="实时永续合约行情条"
         >
-          <div className="z-10 flex h-full shrink-0 items-center gap-1.5 border-r border-white/10 bg-[#0d1222] px-2.5 text-[11px] font-semibold text-emerald-300">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
+          <div className="z-10 flex h-full shrink-0 items-center gap-1.5 border-r border-white/10 bg-[#0d1222] px-2.5 text-[11px] font-semibold text-emerald-300 [[data-skin='light']_&]:border-slate-300/75 [[data-skin='light']_&]:bg-slate-100/95 [[data-skin='light']_&]:text-emerald-700">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping [[data-skin='light']_&]:bg-emerald-600" />
             实时行情
           </div>
           <div className="relative flex-1 overflow-hidden">
@@ -668,20 +707,33 @@ export function OverviewPage() {
                   <Link
                     key={`${sym.symbol}-${idx}`}
                     to="/market"
-                    className="inline-flex shrink-0 items-center gap-1.5 rounded border border-white/[0.08] bg-white/[0.03] px-2 py-0.5 font-mono text-[11px] transition hover:border-violet-400/50 hover:bg-white/[0.08]"
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded border border-white/[0.08] bg-white/[0.03] px-2 py-0.5 font-mono text-[11px] transition hover:border-violet-400/50 hover:bg-white/[0.08] [[data-skin='light']_&]:border-slate-300/70 [[data-skin='light']_&]:bg-white/80 [[data-skin='light']_&]:hover:border-indigo-500/50 [[data-skin='light']_&]:hover:bg-white"
                   >
                     <CoinIcon symbol={sym.symbol} className="h-3.5 w-3.5" />
-                    <span className="font-bold text-white">{sym.baseAsset}</span>
-                    <span className="num text-slate-300">{fmtPriceUsd(sym.price)}</span>
-                    <span className={cn('num font-bold', up ? 'text-emerald-400' : 'text-rose-400')}>
+                    <span className="font-bold text-white [[data-skin='light']_&]:text-slate-900">{sym.baseAsset}</span>
+                    <span className="num text-slate-300 [[data-skin='light']_&]:text-slate-600">{fmtPriceUsd(sym.price)}</span>
+                    <span
+                      className={cn(
+                        'num font-bold',
+                        up
+                          ? "text-emerald-400 [[data-skin='light']_&]:text-emerald-700"
+                          : "text-rose-400 [[data-skin='light']_&]:text-rose-700",
+                      )}
+                    >
                       {fmtPercent(sym.changePercent24h)}
                     </span>
                   </Link>
                 );
               })}
             </div>
-            <div aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-[#090d19] to-transparent" />
-            <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-[#090d19] to-transparent" />
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-[#090d19] to-transparent [[data-skin='light']_&]:from-[#f4f6fb]"
+            />
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-[#090d19] to-transparent [[data-skin='light']_&]:from-[#f4f6fb]"
+            />
           </div>
         </div>
       )}
@@ -693,16 +745,16 @@ export function OverviewPage() {
         {/* ======================== 左 3 栏：24H 表盘 + 实时终端 ======================== */}
         <div className="flex min-h-0 min-w-0 flex-col gap-2.5 xl:col-span-3">
           {/* L1: 24小时量子表盘 */}
-          <section className="aq-obs-card flex min-h-[300px] flex-[1.15] flex-col overflow-hidden rounded-xl border border-white/10">
-            <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-3 py-2">
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-100">
-                <Sparkles className="h-3.5 w-3.5 text-emerald-400" aria-hidden />
+          <section className="aq-obs-card flex min-h-0 flex-col overflow-hidden rounded-xl border border-white/10 xl:min-h-[300px] xl:flex-[1.15] [[data-skin='light']_&]:border-slate-300/75">
+            <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-3 py-1.5 xl:py-2 [[data-skin='light']_&]:border-slate-200/90">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-100 [[data-skin='light']_&]:text-slate-900">
+                <Sparkles className="h-3.5 w-3.5 text-emerald-400 [[data-skin='light']_&]:text-emerald-600" aria-hidden />
                 24小时量子表盘
               </div>
-              <span className="font-mono text-[10px] text-slate-400">96 档时段</span>
+              <span className="font-mono text-[10px] text-slate-400 [[data-skin='light']_&]:text-slate-500">96 档时段</span>
             </div>
 
-            <div className="min-h-[210px] flex-1 p-1">
+            <div className="relative h-[205px] p-1 sm:h-[225px] xl:h-auto xl:min-h-[210px] xl:flex-1">
               <HeatclockCanvas
                 accountEquity={accountEquity}
                 realizedPnl={realizedPnl}
@@ -717,20 +769,22 @@ export function OverviewPage() {
               />
             </div>
 
-            <div className="grid shrink-0 grid-cols-3 divide-x divide-white/[0.08] border-t border-white/[0.08] bg-white/[0.02] text-center font-mono">
-              <div className="px-1.5 py-2">
-                <div className="font-sans text-[10px] text-slate-400">初始投入</div>
-                <div className="num mt-0.5 text-xs font-bold text-slate-100">{fmtUsd(committedCapital, 2)}</div>
+            <div className="grid shrink-0 grid-cols-3 divide-x divide-white/[0.08] border-t border-white/[0.08] bg-white/[0.02] text-center font-mono [[data-skin='light']_&]:divide-slate-200/90 [[data-skin='light']_&]:border-slate-200/90 [[data-skin='light']_&]:bg-slate-50/75">
+              <div className="px-1.5 py-1.5 xl:py-2">
+                <div className="font-sans text-[10px] text-slate-400 [[data-skin='light']_&]:text-slate-500">初始投入</div>
+                <div className="num mt-0.5 text-xs font-bold text-slate-100 [[data-skin='light']_&]:text-slate-900">
+                  {fmtUsd(committedCapital, 2)}
+                </div>
               </div>
-              <div className="px-1.5 py-2">
-                <div className="font-sans text-[10px] text-slate-400">持仓浮盈</div>
+              <div className="px-1.5 py-1.5 xl:py-2">
+                <div className="font-sans text-[10px] text-slate-400 [[data-skin='light']_&]:text-slate-500">持仓浮盈</div>
                 <div className={cn('num mt-0.5 text-xs font-bold', pnlColor(unrealized))}>
                   {fmtUsdSigned(unrealized, 2)}
                 </div>
               </div>
-              <div className="px-1.5 py-2">
-                <div className="font-sans text-[10px] text-slate-400">在跑舰队</div>
-                <div className="num mt-0.5 text-xs font-bold text-emerald-400">
+              <div className="px-1.5 py-1.5 xl:py-2">
+                <div className="font-sans text-[10px] text-slate-400 [[data-skin='light']_&]:text-slate-500">在跑舰队</div>
+                <div className="num mt-0.5 text-xs font-bold text-emerald-400 [[data-skin='light']_&]:text-emerald-700">
                   {runningCount}/{traders.length} · 仓{totalOpen}
                 </div>
               </div>
@@ -738,20 +792,20 @@ export function OverviewPage() {
           </section>
 
           {/* L2: 实时战况终端流 */}
-          <section className="aq-obs-card flex min-h-[220px] flex-1 flex-col overflow-hidden rounded-xl border border-white/10">
-            <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-3 py-2">
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
+          <section className="aq-obs-card flex min-h-[220px] flex-1 flex-col overflow-hidden rounded-xl border border-white/10 [[data-skin='light']_&]:border-slate-300/75">
+            <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-3 py-2 [[data-skin='light']_&]:border-slate-200/90">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300 [[data-skin='light']_&]:text-emerald-700">
                 <Terminal className="h-3.5 w-3.5" aria-hidden />
                 实时战况终端流
               </div>
-              <span className="inline-flex items-center gap-1 font-mono text-[10px] text-slate-400">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="inline-flex items-center gap-1 font-mono text-[10px] text-slate-400 [[data-skin='light']_&]:text-slate-500">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse [[data-skin='light']_&]:bg-emerald-600" />
                 {wirePool.length} 条实时
               </span>
             </div>
 
             <div className="relative min-h-0 flex-1 overflow-hidden">
-              <div className="h-full divide-y divide-white/[0.05] overflow-hidden px-2.5 py-1 font-mono text-[11px]">
+              <div className="h-full divide-y divide-white/[0.05] overflow-hidden px-2.5 py-1 font-mono text-[11px] [[data-skin='light']_&]:divide-slate-200/80">
                 {visibleWire.length === 0 ? (
                   <div className="py-10 text-center font-sans text-xs text-slate-500">正在接入实时量化数据流…</div>
                 ) : (
@@ -760,8 +814,8 @@ export function OverviewPage() {
                       key={`${item.key}-${idx}`}
                       to={item.to ?? '/market'}
                       className={cn(
-                        'flex items-center justify-between gap-2 py-1.5 transition hover:bg-white/[0.05]',
-                        idx === 0 && 'bg-emerald-500/[0.06]',
+                        "flex items-center justify-between gap-2 py-1.5 transition hover:bg-white/[0.05] [[data-skin='light']_&]:hover:bg-slate-100/80",
+                        idx === 0 && "bg-emerald-500/[0.06] [[data-skin='light']_&]:bg-emerald-500/[0.08]",
                       )}
                     >
                       <div className="flex min-w-0 items-center gap-1.5">
@@ -769,7 +823,9 @@ export function OverviewPage() {
                         <span className={cn('shrink-0 rounded border px-1 py-px font-sans text-[10px] font-semibold', item.tagCls)}>
                           {item.tag}
                         </span>
-                        <span className="truncate font-sans text-slate-200">{item.body}</span>
+                        <span className="truncate font-sans text-slate-200 [[data-skin='light']_&]:text-slate-800">
+                          {item.body}
+                        </span>
                       </div>
                       <span className={cn('num shrink-0 font-bold', item.metricCls)}>{item.metric}</span>
                     </Link>
@@ -778,7 +834,7 @@ export function OverviewPage() {
               </div>
               <div
                 aria-hidden
-                className="pointer-events-none absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-[#080b14] to-transparent"
+                className="pointer-events-none absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-[#080b14] to-transparent [[data-skin='light']_&]:from-[#f8fafc]"
               />
             </div>
           </section>
@@ -787,29 +843,29 @@ export function OverviewPage() {
         {/* ======================== 中 6 栏：360° 极坐标态势雷达 + 收益分布频谱 ======================== */}
         <div className="flex min-h-0 min-w-0 flex-col gap-2.5 xl:col-span-6">
           {/* C1: 主舞台（360° 极坐标全市场态势雷达 / 信号神经流 一键切换） */}
-          <section className="aq-obs-card relative flex min-h-[340px] flex-[1.65] flex-col overflow-hidden rounded-xl border border-violet-500/35">
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] bg-white/[0.02] px-3.5 py-2">
+          <section className="aq-obs-card relative flex min-h-0 flex-col overflow-hidden rounded-xl border border-violet-500/35 xl:min-h-[340px] xl:flex-[1.65] [[data-skin='light']_&]:border-indigo-300/85">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] bg-white/[0.02] px-3.5 py-2 [[data-skin='light']_&]:border-slate-200/90 [[data-skin='light']_&]:bg-slate-50/70">
               <div className="flex items-center gap-2">
-                <Radar className="h-4 w-4 text-emerald-400" aria-hidden />
-                <span className="text-xs font-bold tracking-wide text-white">
+                <Radar className="h-4 w-4 text-emerald-400 [[data-skin='light']_&]:text-emerald-600" aria-hidden />
+                <span className="text-xs font-bold tracking-wide text-white [[data-skin='light']_&]:text-slate-900">
                   {stageMode === 'radar'
                     ? `全市场 ${fmtInt(marketSymbols.length || system?.tradableSymbols)} 永续极坐标态势雷达`
                     : '实时量化信号神经网络流（行情 → 评分 → 决策 → 执行）'}
                 </span>
-                <span className="hidden rounded border border-emerald-400/35 bg-emerald-400/12 px-1.5 py-px text-[10px] font-semibold text-emerald-300 sm:inline">
+                <span className="hidden rounded border border-emerald-400/35 bg-emerald-400/12 px-1.5 py-px text-[10px] font-semibold text-emerald-300 sm:inline [[data-skin='light']_&]:border-emerald-600/35 [[data-skin='light']_&]:bg-emerald-500/12 [[data-skin='light']_&]:text-emerald-700">
                   实时扫描
                 </span>
               </div>
 
-              <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-black/40 p-0.5 text-[11px]">
+              <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-black/40 p-0.5 text-[11px] [[data-skin='light']_&]:border-slate-300/80 [[data-skin='light']_&]:bg-slate-100/90">
                 <button
                   type="button"
                   onClick={() => setStageMode('radar')}
                   className={cn(
                     'inline-flex items-center gap-1 rounded px-2 py-0.5 font-semibold transition',
                     stageMode === 'radar'
-                      ? 'bg-violet-500 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-white',
+                      ? "bg-violet-500 text-white shadow-sm [[data-skin='light']_&]:bg-indigo-600 [[data-skin='light']_&]:text-white"
+                      : "text-slate-400 hover:text-white [[data-skin='light']_&]:text-slate-600 [[data-skin='light']_&]:hover:text-slate-900",
                   )}
                 >
                   <Radar className="h-3 w-3" />
@@ -821,8 +877,8 @@ export function OverviewPage() {
                   className={cn(
                     'inline-flex items-center gap-1 rounded px-2 py-0.5 font-semibold transition',
                     stageMode === 'pipeline'
-                      ? 'bg-violet-500 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-white',
+                      ? "bg-violet-500 text-white shadow-sm [[data-skin='light']_&]:bg-indigo-600 [[data-skin='light']_&]:text-white"
+                      : "text-slate-400 hover:text-white [[data-skin='light']_&]:text-slate-600 [[data-skin='light']_&]:hover:text-slate-900",
                   )}
                 >
                   <GitBranch className="h-3 w-3" />
@@ -831,7 +887,7 @@ export function OverviewPage() {
               </div>
             </div>
 
-            <div className="relative min-h-[280px] flex-1">
+            <div className="relative h-[300px] sm:h-[330px] xl:h-auto xl:min-h-[280px] xl:flex-1">
               {stageMode === 'radar' ? (
                 <PolarAlphaRadarCanvas symbols={marketSymbols} radarItems={radarItems} />
               ) : (
@@ -845,58 +901,66 @@ export function OverviewPage() {
                 />
               )}
 
-              <div className="pointer-events-none absolute bottom-2 left-3 flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-[#080b13]/85 px-2.5 py-1 text-[10.5px] text-slate-300 backdrop-blur-sm">
+              <div className="pointer-events-none absolute bottom-2 left-3 flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-[#080b13]/85 px-2.5 py-1 text-[10.5px] text-slate-300 backdrop-blur-sm [[data-skin='light']_&]:border-slate-300/80 [[data-skin='light']_&]:bg-white/90 [[data-skin='light']_&]:text-slate-700 [[data-skin='light']_&]:shadow-sm">
                 <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-amber-300 shadow-[0_0_6px_#fbbf24]" />
+                  <span className="h-2 w-2 rounded-full bg-amber-300 shadow-[0_0_6px_#fbbf24] [[data-skin='light']_&]:bg-amber-500 [[data-skin='light']_&]:shadow-none" />
                   AI500 雷达焦点 ({radarItems.length})
                 </span>
                 <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 [[data-skin='light']_&]:bg-emerald-600" />
                   上涨 ({marketStats.upCount})
                 </span>
                 <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-rose-400" />
+                  <span className="h-2 w-2 rounded-full bg-rose-400 [[data-skin='light']_&]:bg-rose-600" />
                   下跌 ({marketStats.downCount})
                 </span>
               </div>
 
-              <div className="pointer-events-none absolute bottom-2 right-3 hidden items-center gap-2 rounded-lg border border-white/10 bg-[#080b13]/85 px-2.5 py-1 text-[10.5px] backdrop-blur-sm sm:flex">
-                <span className="text-slate-400">多头广度</span>
-                <div className="flex h-1.5 w-16 overflow-hidden rounded-full bg-rose-500/40">
+              <div className="pointer-events-none absolute bottom-2 right-3 hidden items-center gap-2 rounded-lg border border-white/10 bg-[#080b13]/85 px-2.5 py-1 text-[10.5px] backdrop-blur-sm sm:flex [[data-skin='light']_&]:border-slate-300/80 [[data-skin='light']_&]:bg-white/90 [[data-skin='light']_&]:shadow-sm">
+                <span className="text-slate-400 [[data-skin='light']_&]:text-slate-600">多头广度</span>
+                <div className="flex h-1.5 w-16 overflow-hidden rounded-full bg-rose-500/40 [[data-skin='light']_&]:bg-rose-200">
                   <div
-                    className="h-full bg-gradient-to-r from-emerald-400 to-cyan-300 transition-all duration-500"
+                    className="h-full bg-gradient-to-r from-emerald-400 to-cyan-300 transition-all duration-500 [[data-skin='light']_&]:from-emerald-600 [[data-skin='light']_&]:to-teal-500"
                     style={{ width: `${marketStats.bullPct}%` }}
                   />
                 </div>
-                <span className="num font-mono font-bold text-emerald-300">{marketStats.bullPct}%</span>
+                <span className="num font-mono font-bold text-emerald-300 [[data-skin='light']_&]:text-emerald-700">
+                  {marketStats.bullPct}%
+                </span>
               </div>
             </div>
           </section>
 
           {/* C2: 全市场 522 币种收益分布频谱 */}
-          <section className="aq-obs-card flex min-h-[185px] flex-1 flex-col overflow-hidden rounded-xl border border-white/10">
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-3.5 py-2">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-100">
-                <Activity className="h-3.5 w-3.5 text-violet-400" aria-hidden />
+          <section className="aq-obs-card flex min-h-0 flex-col overflow-hidden rounded-xl border border-white/10 xl:min-h-[185px] xl:flex-1 [[data-skin='light']_&]:border-slate-300/75">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-3.5 py-2 [[data-skin='light']_&]:border-slate-200/90">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-100 [[data-skin='light']_&]:text-slate-900">
+                <Activity className="h-3.5 w-3.5 text-violet-400 [[data-skin='light']_&]:text-indigo-600" aria-hidden />
                 全市场 522 币种收益分布频谱
               </div>
               <div className="flex flex-wrap items-center gap-2.5 font-mono text-[10.5px]">
-                <span className="font-sans text-slate-400">
-                  24h 总额 <strong className="num font-mono text-white">{fmtCompactAmount(marketStats.totalVol, 'USDT')}</strong>
+                <span className="font-sans text-slate-400 [[data-skin='light']_&]:text-slate-600">
+                  24h 总额{' '}
+                  <strong className="num font-mono text-white [[data-skin='light']_&]:text-slate-900">
+                    {fmtCompactAmount(marketStats.totalVol, 'USDT')}
+                  </strong>
                 </span>
-                <span className="font-sans text-slate-400">
-                  中位数 <strong className={cn('num font-mono', pnlColor(marketStats.medianPct))}>{fmtPercent(marketStats.medianPct)}</strong>
+                <span className="font-sans text-slate-400 [[data-skin='light']_&]:text-slate-600">
+                  中位数{' '}
+                  <strong className={cn('num font-mono', pnlColor(marketStats.medianPct))}>
+                    {fmtPercent(marketStats.medianPct)}
+                  </strong>
                 </span>
-                <span className="rounded bg-emerald-500/15 px-1.5 py-px font-semibold text-emerald-300">
+                <span className="rounded bg-emerald-500/15 px-1.5 py-px font-semibold text-emerald-300 [[data-skin='light']_&]:bg-emerald-500/14 [[data-skin='light']_&]:text-emerald-800">
                   暴涨(&gt;10%) {marketStats.surgeCount}币
                 </span>
-                <span className="rounded bg-rose-500/15 px-1.5 py-px font-semibold text-rose-300">
+                <span className="rounded bg-rose-500/15 px-1.5 py-px font-semibold text-rose-300 [[data-skin='light']_&]:bg-rose-500/14 [[data-skin='light']_&]:text-rose-800">
                   暴跌(&lt;-10%) {marketStats.crashCount}币
                 </span>
               </div>
             </div>
 
-            <div className="min-h-[135px] flex-1">
+            <div className="relative h-[150px] sm:h-[165px] xl:h-auto xl:min-h-[135px] xl:flex-1">
               <QuantumRidgeCanvas symbols={marketSymbols} />
             </div>
           </section>
@@ -905,43 +969,77 @@ export function OverviewPage() {
         {/* ======================== 右 3 栏：量化引擎态势 + 4×4 动能热力矩阵 ======================== */}
         <aside className="flex min-h-0 min-w-0 flex-col gap-2.5 xl:col-span-3">
           {/* R1: 量化引擎运行态势 */}
-          <section className="aq-obs-card shrink-0 overflow-hidden rounded-xl border border-white/10">
-            <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-2">
-              <span className="text-xs font-semibold text-slate-100">量化引擎运行态势</span>
+          <section className="aq-obs-card shrink-0 overflow-hidden rounded-xl border border-white/10 [[data-skin='light']_&]:border-slate-300/75">
+            <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-2 [[data-skin='light']_&]:border-slate-200/90">
+              <span className="text-xs font-semibold text-slate-100 [[data-skin='light']_&]:text-slate-900">
+                量化引擎运行态势
+              </span>
               <div className="flex h-3.5 items-end gap-[2px]" aria-hidden>
-                <span className={cn('w-[2.5px] rounded-full', runningCount > 0 ? 'aq-eq-bar-1 h-3.5 bg-emerald-400' : 'h-1 bg-slate-700')} />
-                <span className={cn('w-[2.5px] rounded-full', runningCount > 0 ? 'aq-eq-bar-2 h-3.5 bg-cyan-400' : 'h-1.5 bg-slate-700')} />
-                <span className={cn('w-[2.5px] rounded-full', runningCount > 0 ? 'aq-eq-bar-3 h-3.5 bg-violet-400' : 'h-1 bg-slate-700')} />
-                <span className={cn('w-[2.5px] rounded-full', runningCount > 0 ? 'aq-eq-bar-4 h-3.5 bg-emerald-400' : 'h-2 bg-slate-700')} />
+                <span
+                  className={cn(
+                    'w-[2.5px] rounded-full',
+                    runningCount > 0
+                      ? "aq-eq-bar-1 h-3.5 bg-emerald-400 [[data-skin='light']_&]:bg-emerald-600"
+                      : "h-1 bg-slate-700 [[data-skin='light']_&]:bg-slate-300",
+                  )}
+                />
+                <span
+                  className={cn(
+                    'w-[2.5px] rounded-full',
+                    runningCount > 0
+                      ? "aq-eq-bar-2 h-3.5 bg-cyan-400 [[data-skin='light']_&]:bg-sky-600"
+                      : "h-1.5 bg-slate-700 [[data-skin='light']_&]:bg-slate-300",
+                  )}
+                />
+                <span
+                  className={cn(
+                    'w-[2.5px] rounded-full',
+                    runningCount > 0
+                      ? "aq-eq-bar-3 h-3.5 bg-violet-400 [[data-skin='light']_&]:bg-indigo-600"
+                      : "h-1 bg-slate-700 [[data-skin='light']_&]:bg-slate-300",
+                  )}
+                />
+                <span
+                  className={cn(
+                    'w-[2.5px] rounded-full',
+                    runningCount > 0
+                      ? "aq-eq-bar-4 h-3.5 bg-emerald-400 [[data-skin='light']_&]:bg-emerald-600"
+                      : "h-2 bg-slate-700 [[data-skin='light']_&]:bg-slate-300",
+                  )}
+                />
               </div>
             </div>
 
-            <div className="divide-y divide-white/[0.06] px-3 py-1 text-[11px]">
+            <div className="divide-y divide-white/[0.06] px-3 py-1 text-[11px] [[data-skin='light']_&]:divide-slate-200/85">
               <div className="flex items-center justify-between gap-2 py-2">
                 <div className="min-w-0">
-                  <div className="text-xs font-semibold text-white">全市场脉搏雷达</div>
-                  <div className="truncate text-[10.5px] text-slate-400">
+                  <div className="text-xs font-semibold text-white [[data-skin='light']_&]:text-slate-900">
+                    全市场脉搏雷达
+                  </div>
+                  <div className="truncate text-[10.5px] text-slate-400 [[data-skin='light']_&]:text-slate-600">
                     {fmtInt(marketSymbols.length || system?.tradableSymbols)} 永续合约 · 零限频监听
                   </div>
                 </div>
-                <span className="shrink-0 rounded border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
+                <span className="shrink-0 rounded border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300 [[data-skin='light']_&]:border-emerald-600/35 [[data-skin='light']_&]:bg-emerald-500/12 [[data-skin='light']_&]:text-emerald-800">
                   扫描中
                 </span>
               </div>
 
               <Link
                 to={primaryManagedTrader ? `/traders/${primaryManagedTrader.id}` : '/market'}
-                className="flex items-center justify-between gap-2 py-2 transition hover:bg-white/[0.04]"
+                className="flex items-center justify-between gap-2 py-2 transition hover:bg-white/[0.04] [[data-skin='light']_&]:hover:bg-slate-100/70"
               >
                 <div className="min-w-0">
-                  <div className="text-xs font-semibold text-white">AI500 六维评分</div>
-                  <div className="truncate text-[10.5px] text-amber-300">
+                  <div className="text-xs font-semibold text-white [[data-skin='light']_&]:text-slate-900">
+                    AI500 六维评分
+                  </div>
+                  <div className="truncate text-[10.5px] text-amber-300 [[data-skin='light']_&]:text-amber-700">
                     {radarItems[0]
                       ? `榜首 ${radarItems[0].symbol.replace(/USDT$/, '')} ${Math.round(radarItems[0].score)}分 · 共 ${radarItems.length} 焦点`
                       : '等待下一轮全市场扫描'}
                   </div>
                 </div>
-                <span className="shrink-0 rounded border border-amber-400/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
+                <span className="shrink-0 rounded border border-amber-400/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 [[data-skin='light']_&]:border-amber-600/35 [[data-skin='light']_&]:bg-amber-500/12 [[data-skin='light']_&]:text-amber-800">
                   聚焦中
                 </span>
               </Link>
@@ -952,29 +1050,31 @@ export function OverviewPage() {
                     ? `/traders/${latestDecision.traderId}/decisions/${latestDecision.id}`
                     : '/traders'
                 }
-                className="flex items-center justify-between gap-2 py-2 transition hover:bg-white/[0.04]"
+                className="flex items-center justify-between gap-2 py-2 transition hover:bg-white/[0.04] [[data-skin='light']_&]:hover:bg-slate-100/70"
               >
                 <div className="min-w-0">
-                  <div className="text-xs font-semibold text-white">LLM 三段式大脑</div>
-                  <div className="truncate text-[10.5px] text-violet-300">
+                  <div className="text-xs font-semibold text-white [[data-skin='light']_&]:text-slate-900">
+                    LLM 三段式大脑
+                  </div>
+                  <div className="truncate text-[10.5px] text-violet-300 [[data-skin='light']_&]:text-indigo-700">
                     {latestDecision
                       ? `周期 #${latestDecision.cycleNumber}${latestCachePct !== null ? ` · 缓存 ${latestCachePct}%` : ''} · ${timeAgo(latestDecision.timestamp)}`
                       : '暂无决策周期'}
                   </div>
                 </div>
-                <span className="shrink-0 rounded border border-violet-400/40 bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
+                <span className="shrink-0 rounded border border-violet-400/40 bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300 [[data-skin='light']_&]:border-indigo-600/35 [[data-skin='light']_&]:bg-indigo-500/12 [[data-skin='light']_&]:text-indigo-800">
                   在线中
                 </span>
               </Link>
 
               <div className="flex items-center justify-between gap-2 py-2">
                 <div className="min-w-0">
-                  <div className="text-xs font-semibold text-white">硬风控闸门</div>
-                  <div className="truncate text-[10.5px] text-slate-400">
+                  <div className="text-xs font-semibold text-white [[data-skin='light']_&]:text-slate-900">硬风控闸门</div>
+                  <div className="truncate text-[10.5px] text-slate-400 [[data-skin='light']_&]:text-slate-600">
                     {totalOpen} 活跃持仓 · 浮盈 {fmtUsdSigned(unrealized, 2)}
                   </div>
                 </div>
-                <span className="shrink-0 rounded border border-sky-400/40 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300">
+                <span className="shrink-0 rounded border border-sky-400/40 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300 [[data-skin='light']_&]:border-sky-600/35 [[data-skin='light']_&]:bg-sky-500/12 [[data-skin='light']_&]:text-sky-800">
                   已布防
                 </span>
               </div>
@@ -982,13 +1082,16 @@ export function OverviewPage() {
           </section>
 
           {/* R2: 4×4 全市场动能热力矩阵 */}
-          <section className="aq-obs-card flex min-h-[260px] flex-1 flex-col overflow-hidden rounded-xl border border-white/10">
-            <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-3 py-2">
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-100">
-                <Flame className="h-3.5 w-3.5 text-amber-400" aria-hidden />
+          <section className="aq-obs-card flex min-h-[260px] flex-1 flex-col overflow-hidden rounded-xl border border-white/10 [[data-skin='light']_&]:border-slate-300/75">
+            <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-3 py-2 [[data-skin='light']_&]:border-slate-200/90">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-100 [[data-skin='light']_&]:text-slate-900">
+                <Flame className="h-3.5 w-3.5 text-amber-400 [[data-skin='light']_&]:text-amber-600" aria-hidden />
                 全市场动能热力矩阵
               </div>
-              <Link to="/market" className="text-[11px] text-violet-300 hover:underline">
+              <Link
+                to="/market"
+                className="text-[11px] text-violet-300 hover:underline [[data-skin='light']_&]:text-indigo-700"
+              >
                 全市场 →
               </Link>
             </div>
@@ -1003,27 +1106,49 @@ export function OverviewPage() {
                   const pct = sym.changePercent24h;
                   const up = pct >= 0;
                   const intensity = Math.min(1, Math.abs(pct) / 22);
-                  const bg = up
-                    ? `rgba(14, 203, 129, ${(0.14 + intensity * 0.42).toFixed(2)})`
-                    : `rgba(246, 70, 93, ${(0.14 + intensity * 0.42).toFixed(2)})`;
-                  const border = up
-                    ? `rgba(52, 211, 153, ${(0.25 + intensity * 0.5).toFixed(2)})`
-                    : `rgba(251, 113, 133, ${(0.25 + intensity * 0.5).toFixed(2)})`;
+                  const bg = isLightSkin
+                    ? up
+                      ? `rgba(16, 185, 129, ${(0.11 + intensity * 0.24).toFixed(2)})`
+                      : `rgba(244, 63, 94, ${(0.11 + intensity * 0.24).toFixed(2)})`
+                    : up
+                      ? `rgba(14, 203, 129, ${(0.14 + intensity * 0.42).toFixed(2)})`
+                      : `rgba(246, 70, 93, ${(0.14 + intensity * 0.42).toFixed(2)})`;
+                  const border = isLightSkin
+                    ? up
+                      ? `rgba(5, 150, 105, ${(0.28 + intensity * 0.36).toFixed(2)})`
+                      : `rgba(225, 29, 72, ${(0.28 + intensity * 0.36).toFixed(2)})`
+                    : up
+                      ? `rgba(52, 211, 153, ${(0.25 + intensity * 0.5).toFixed(2)})`
+                      : `rgba(251, 113, 133, ${(0.25 + intensity * 0.5).toFixed(2)})`;
                   return (
                     <Link
                       key={sym.symbol}
                       to="/market"
                       title={`${sym.symbol} · ${fmtPriceUsd(sym.price)} · 24h ${fmtPercent(pct)} · 成交额 ${fmtCompactAmount(sym.quoteVolume24h, 'USDT')}`}
                       style={{ backgroundColor: bg, borderColor: border }}
-                      className="flex flex-col items-center justify-center rounded-lg border px-1 py-1.5 text-center font-mono transition hover:scale-[1.04] hover:brightness-125"
+                      className={cn(
+                        'flex flex-col items-center justify-center rounded-lg border px-1 py-1.5 text-center font-mono transition hover:scale-[1.04]',
+                        isLightSkin ? 'hover:brightness-95' : 'hover:brightness-125',
+                      )}
                     >
-                      <span className="max-w-full truncate text-[10px] font-bold tracking-tight text-white">
+                      <span
+                        className={cn(
+                          'max-w-full truncate text-[10px] font-bold tracking-tight',
+                          isLightSkin ? (up ? 'text-emerald-950' : 'text-rose-950') : 'text-white',
+                        )}
+                      >
                         {sym.baseAsset.slice(0, 6)}
                       </span>
                       <span
                         className={cn(
                           'num mt-0.5 text-[11px] font-extrabold leading-none',
-                          up ? 'text-emerald-100' : 'text-rose-100',
+                          isLightSkin
+                            ? up
+                              ? 'text-emerald-800'
+                              : 'text-rose-800'
+                            : up
+                              ? 'text-emerald-100'
+                              : 'text-rose-100',
                         )}
                       >
                         {pct >= 0 ? '+' : ''}
@@ -1036,14 +1161,14 @@ export function OverviewPage() {
             </div>
 
             {radarItems.length > 0 && (
-              <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5 border-t border-white/[0.08] bg-white/[0.02] px-3 py-2 text-[10.5px]">
-                <span className="font-semibold text-slate-400">雷达高分榜</span>
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5 border-t border-white/[0.08] bg-white/[0.02] px-3 py-2 text-[10.5px] [[data-skin='light']_&]:border-slate-200/90 [[data-skin='light']_&]:bg-slate-50/75">
+                <span className="font-semibold text-slate-400 [[data-skin='light']_&]:text-slate-600">雷达高分榜</span>
                 <div className="flex flex-wrap items-center gap-1.5 font-mono">
                   {radarItems.slice(0, 3).map((r) => (
                     <Link
                       key={r.symbol}
                       to={primaryManagedTrader ? `/traders/${primaryManagedTrader.id}` : '/market'}
-                      className="rounded border border-amber-400/35 bg-amber-400/12 px-1.5 py-0.5 font-bold text-amber-200 transition hover:bg-amber-400/25"
+                      className="rounded border border-amber-400/35 bg-amber-400/12 px-1.5 py-0.5 font-bold text-amber-200 transition hover:bg-amber-400/25 [[data-skin='light']_&]:border-amber-600/35 [[data-skin='light']_&]:bg-amber-500/14 [[data-skin='light']_&]:text-amber-800 [[data-skin='light']_&]:hover:bg-amber-500/22"
                     >
                       {r.symbol.replace(/USDT$/, '')} {Math.round(r.score)}
                     </Link>

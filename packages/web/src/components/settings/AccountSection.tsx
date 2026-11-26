@@ -147,34 +147,36 @@ export function AccountSection() {
   return (
     <div className="space-y-4">
       {/* 顶部身份概览带 */}
-      <div className="flex flex-wrap items-center gap-4 rounded-xl border border-base-700 bg-base-900 px-5 py-4">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-accent/30 bg-accent/12 text-lg font-bold text-accent">
-          {(user?.username ?? '?').slice(0, 1).toUpperCase()}
-        </div>
-
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="truncate text-lg font-semibold text-ink-strong">{user?.username ?? '—'}</span>
-            <Badge tone="accent">{user?.role ? userRoleLabel(user.role) : '未知角色'}</Badge>
-            <Badge tone={system?.dryRun ? 'accent' : 'warn'} title={envLabel}>
-              <Dot tone={system?.dryRun ? 'accent' : 'warn'} />
-              {system?.dryRun ? '模拟环境' : '实盘环境'}
-            </Badge>
+      <div className="flex flex-col items-start gap-3 rounded-xl border border-base-700 bg-base-900 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-5 sm:py-4">
+        <div className="flex min-w-0 w-full items-start gap-3 sm:w-auto sm:flex-1 sm:items-center sm:gap-4">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-accent/30 bg-accent/12 text-lg font-bold text-accent">
+            {(user?.username ?? '?').slice(0, 1).toUpperCase()}
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
-            <span className="inline-flex items-center gap-1">
-              <UserCheck aria-hidden className="h-3.5 w-3.5 text-ink-faint" />
-              创建于 <span className="num text-ink-mid">{fmtDateTime(user?.createdAt)}</span>
-            </span>
-            {envLabel && (
-              <span className="truncate text-ink-faint" title={envLabel}>
-                {envLabel}
+
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="truncate text-lg font-semibold text-ink-strong">{user?.username ?? '—'}</span>
+              <Badge tone="accent">{user?.role ? userRoleLabel(user.role) : '未知角色'}</Badge>
+              <Badge tone={system?.dryRun ? 'accent' : 'warn'} title={envLabel}>
+                <Dot tone={system?.dryRun ? 'accent' : 'warn'} />
+                {system?.dryRun ? '模拟环境' : '实盘环境'}
+              </Badge>
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-lo">
+              <span className="inline-flex items-center gap-1 whitespace-nowrap">
+                <UserCheck aria-hidden className="h-3.5 w-3.5 text-ink-faint" />
+                创建于 <span className="num text-ink-mid">{fmtDateTime(user?.createdAt)}</span>
               </span>
-            )}
+              {envLabel && (
+                <span className="break-words text-ink-faint sm:truncate" title={envLabel}>
+                  {envLabel}
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <Badge tone="neutral" className="px-2.5 py-1 text-xs">
             <ShieldCheck aria-hidden className="h-3.5 w-3.5 text-up" />
             单人私有部署

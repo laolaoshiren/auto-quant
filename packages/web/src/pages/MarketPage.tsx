@@ -201,17 +201,17 @@ export function MarketPage() {
         `min-h-0` 让这一行能**被压到比内容矮**：它是 `page-fill` 的 flex 子项，
         默认 `min-height:auto` 时会被两栏的内容顶高，整页照样溢出。
       */}
-      <div className="grid min-h-0 grid-cols-1 gap-3 md:grid-cols-[minmax(0,300px)_minmax(0,1fr)] xl:grid-cols-[minmax(0,440px)_minmax(0,1fr)]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,440px)_minmax(0,1fr)]">
         {/* ---------------------------------------------------------------- */}
         {/*  交易对清单                                                       */}
         {/* ---------------------------------------------------------------- */}
         <Panel
           title="交易对"
           /*
-           * 左栏撑满这一行的高度，表格体内部滚动 —— 交易对最多 528 个，
-           * 让它把整页顶长就等于"看图表必须先滚过几百行币种"。
+           * 左栏在宽屏撑满这一行的高度，表格体内部滚动；在 < xl 视口下放到图表下方并限定上限高度，
+           * 防止上百行把页面或右侧 K 线容器无限拉长。
            */
-          className="flex min-h-0 flex-col"
+          className="flex max-h-[42dvh] min-h-[220px] flex-col xl:max-h-none xl:min-h-0"
           bodyClassName="flex min-h-0 flex-1 flex-col p-2"
           actions={
             <span className="num text-xs text-ink-faint">
@@ -272,14 +272,8 @@ export function MarketPage() {
                *    判断"的辅助信息，手机/窄窗口上优先保价格与涨跌；
                *  · 数字列 `whitespace-nowrap`、交易对列 `truncate`，避免文字把列顶宽。
                */}
-              <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-                {/*
-                  单元格上显式写 `px-1.5`（6px）：两套模板的基础内边距不一样
-                  （经典 `px-3` = 12px、控制台 `0 6px`），而这张表在 440px 的列里
-                  只有 16px 余量 —— 按模板走的话经典那边会多出 48px 又溢出。
-                  宽度是这里最硬的约束，所以密度写成页面级的事实，不交给模板。
-                */}
-                <table className="w-full table-fixed border-collapse">
+              <div className="scroll-x min-h-0 flex-1 overflow-y-auto">
+                <table className="w-full border-collapse">
                   <thead className="sticky top-0 z-10 bg-base-900">
                     <tr>
                       {(['symbol', 'price', 'change', 'volume'] as SortKey[]).map((key) => (
@@ -288,7 +282,7 @@ export function MarketPage() {
                           scope="col"
                           aria-sort={sortKey === key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
                           className={cn(
-                            'th px-1.5',
+                            'th whitespace-nowrap px-1.5',
                             key !== 'symbol' && 'text-right',
                             key === 'volume' && 'hidden xl:table-cell',
                           )}
@@ -339,15 +333,15 @@ export function MarketPage() {
                             isActive && 'bg-accent/10',
                           )}
                         >
-                          <td className="td truncate px-1.5 font-semibold text-ink-hi">
+                          <td className="td max-w-[140px] truncate px-1.5 text-xs font-semibold text-ink-hi sm:text-sm">
                             {row.baseAsset}
                             <span className="text-ink-faint">USDT</span>
                           </td>
-                          <td className="td whitespace-nowrap px-1.5 num text-right">{fmtPriceUsd(row.price)}</td>
-                          <td className={cn('td whitespace-nowrap px-1.5 num text-right', pnlColor(row.changePercent24h))}>
+                          <td className="td num whitespace-nowrap px-1.5 text-right text-xs">{fmtPriceUsd(row.price)}</td>
+                          <td className={cn('td num whitespace-nowrap px-1.5 text-right text-xs', pnlColor(row.changePercent24h))}>
                             {fmtPercent(row.changePercent24h)}
                           </td>
-                          <td className="td hidden whitespace-nowrap px-1.5 num text-right text-ink-lo xl:table-cell">
+                          <td className="td num hidden whitespace-nowrap px-1.5 text-right text-xs text-ink-lo xl:table-cell">
                             {fmtCompactAmount(row.quoteVolume24h, 'USDT')}
                           </td>
                         </tr>
@@ -370,7 +364,7 @@ export function MarketPage() {
         {/* ---------------------------------------------------------------- */}
         {/*  图表 + 最新K线                                                   */}
         {/* ---------------------------------------------------------------- */}
-        <div className="flex min-h-0 min-w-0 flex-col gap-2">
+        <div className="order-first flex min-h-0 min-w-0 flex-col gap-2 xl:order-last">
           <Panel
             title={
               <span className="flex flex-wrap items-center gap-2">
@@ -389,7 +383,7 @@ export function MarketPage() {
              * 规范 §5 要求"默认自动刷新、不提供手动刷新按钮"，那么"它会自动刷新"
              * 这件事就不需要一句常驻说明 —— 省一行高度，也少一处噪音。
              */
-            className="flex min-h-0 flex-1 flex-col"
+            className="flex h-[300px] min-h-0 flex-col sm:h-[340px] xl:h-auto xl:flex-1"
             bodyClassName="flex min-h-0 flex-1 flex-col p-1"
             padded={false}
           >

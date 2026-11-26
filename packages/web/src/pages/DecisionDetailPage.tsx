@@ -125,6 +125,15 @@ function HighlightedProse({ text }: { text: string }) {
   );
 }
 
+/**
+ * 兼容被 JSON 二次转义的字面量换行（`\r\n` / `\n` / `\t`），还原为真实换行。
+ */
+function unescapeReasoningText(text: string): string {
+  if (!text) return '';
+  if (!text.includes('\\n') && !text.includes('\\r') && !text.includes('\\t')) return text;
+  return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '  ');
+}
+
 type RawTab = 'user' | 'system' | 'raw';
 
 function RawMaterialTabs({ record }: { record: DecisionRecord }) {
@@ -145,14 +154,14 @@ function RawMaterialTabs({ record }: { record: DecisionRecord }) {
       padded={false}
       bodyClassName="p-0"
       title={
-        <div className="flex flex-wrap items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1.5">
           {(['user', 'system', 'raw'] as const).map((id) => (
             <button
               key={id}
               type="button"
               onClick={() => setTab(id)}
               className={cn(
-                'rounded-md px-2 py-0.5 text-xs font-medium transition',
+                'shrink-0 whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium transition',
                 tab === id
                   ? 'bg-accent/15 text-accent'
                   : 'text-ink-lo hover:bg-base-800 hover:text-ink-hi',
@@ -164,15 +173,15 @@ function RawMaterialTabs({ record }: { record: DecisionRecord }) {
         </div>
       }
       actions={
-        <div className="flex items-center gap-2">
-          <span className="num text-[11px] text-ink-faint">
+        <div className="flex flex-wrap items-center gap-2 whitespace-nowrap">
+          <span className="num shrink-0 text-[11px] text-ink-faint">
             {fmtInt(active.text.length)} 字 · {fmtInt(lines)} 行
           </span>
           {active.text && (
             <button
               type="button"
               onClick={() => void copy(active.text)}
-              className="inline-flex h-6 items-center gap-1 rounded-md border border-base-700 bg-base-850 px-2 text-[11px] text-ink-mid transition hover:border-base-600 hover:text-ink-hi"
+              className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-base-700 bg-base-850 px-2 text-[11px] text-ink-mid transition hover:border-base-600 hover:text-ink-hi"
             >
               {copied ? <Check className="h-3 w-3 text-up" /> : <Copy className="h-3 w-3" />}
               {copied ? '已复制' : '复制'}
@@ -249,7 +258,7 @@ export function DecisionAuditView({
   const executionLog = record.executionLog ?? [];
   const decisions = record.decisions ?? [];
   const candidates = record.candidateSymbols ?? [];
-  const cotTrace = record.cotTrace ?? '';
+  const cotTrace = unescapeReasoningText(record.cotTrace ?? '');
   const rejected = executionLog.filter((entry) => entry.status === 'rejected');
   const failed = executionLog.filter((entry) => entry.status === 'failed');
   const executed = executionLog.filter((entry) => entry.status === 'ok');
@@ -446,7 +455,7 @@ export function DecisionAuditView({
                       {showParams && (
                         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
                           {typeof decision.positionSizeUsd === 'number' && decision.positionSizeUsd > 0 && (
-                            <span className="rounded border border-slate-500/30 bg-slate-500/10 px-2 py-0.5">
+                            <span className="rounded border border-slate-500/30 bg-slate-500/10 px-2 py-0.5 [[data-skin='light']_&]:border-slate-400/45 [[data-skin='light']_&]:bg-slate-200/60">
                               <span className="text-ink-lo">仓位 </span>
                               <strong className="num text-ink-hi">{fmtUsd(decision.positionSizeUsd, 2)}</strong>
                             </span>

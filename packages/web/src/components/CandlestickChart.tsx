@@ -184,9 +184,11 @@ export function CandlestickChart({
     chartRef.current = chart;
     seriesRef.current = series;
 
-    const observer = new ResizeObserver(() => {
+    let rafId: number | null = null;
+    const syncSize = () => {
+      rafId = null;
       const el = containerRef.current;
-      if (!el) return;
+      if (!el || chartRef.current !== chart) return;
       const nextWidth = el.clientWidth;
       const nextHeight = el.clientHeight;
       if (nextWidth <= 0 || (fill && nextHeight <= 0)) return;
@@ -198,10 +200,23 @@ export function CandlestickChart({
         width: nextWidth,
         ...(fill ? { height: nextHeight } : {}),
       });
-    });
+    };
+
+    const scheduleResize = () => {
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+      rafId = window.requestAnimationFrame(syncSize);
+    };
+
+    const observer = new ResizeObserver(scheduleResize);
     observer.observe(container);
+    // 初始化挂载后补一次 rAF 尺寸同步，确保首帧撑满父容器 100% 宽度
+    scheduleResize();
 
     return () => {
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+        rafId = null;
+      }
       observer.disconnect();
       priceLineHandlesRef.current = [];
       chart.remove();

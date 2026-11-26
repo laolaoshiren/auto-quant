@@ -241,7 +241,7 @@ export function QuillShell() {
             当前页面名。**不是大标题** —— 页面自己的内容区会渲染 `<h1>`/`<h2>`
             （`SectionHeading` 是 text-xl），这里只是"我在哪"的一句话。
           */}
-          <span className="q-crumb">{pageLabel}</span>
+          <span className="q-crumb min-w-[3.5rem]">{pageLabel}</span>
 
           <div className="q-spring" />
 
@@ -253,9 +253,14 @@ export function QuillShell() {
           */}
           {shell.system?.tradingDisabled && (
             <Tooltip side="bottom" content="开仓会被 GLOBAL_TRADING_DISABLED 拦截；平仓与对账仍然可用。">
-              <Badge tone="down" className="hidden shrink-0 cursor-help animate-pulse-soft sm:inline-flex">
+              <Badge
+                tone="down"
+                aria-label="全局交易已禁用"
+                className="inline-flex shrink-0 cursor-help animate-pulse-soft"
+              >
                 <Dot tone="down" />
-                交易已禁用
+                <span className="sm:hidden">禁开仓</span>
+                <span className="hidden sm:inline">交易已禁用</span>
               </Badge>
             </Tooltip>
           )}

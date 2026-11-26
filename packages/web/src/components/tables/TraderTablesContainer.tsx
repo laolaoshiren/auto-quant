@@ -420,7 +420,7 @@ export function TraderTables({
         </div>
 
         {isHeavyTab && !dockCollapsed && (
-          <div className="relative w-40 sm:w-44">
+          <div className="relative w-full sm:w-44">
             <Search
               aria-hidden
               className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint"

@@ -259,10 +259,10 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 animate-fade-in bg-overlay backdrop-blur-sm" />
-        <div className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-[8vh]">
+        <div className="fixed inset-0 z-50 flex items-start justify-center p-2 pt-[4dvh] sm:p-4 sm:pt-[8dvh]">
           {/* 焦点归还由 Radix 负责：它记下打开前的活动元素，关闭时还回去
               （顶栏搜索按钮、或按 ⌘K 时所在的任何位置）。 */}
-          <DialogPrimitive.Content className="panel flex max-h-[72vh] w-full max-w-xl animate-slide-up flex-col overflow-hidden shadow-overlay">
+          <DialogPrimitive.Content className="panel flex max-h-[88dvh] w-full max-w-xl animate-slide-up flex-col overflow-hidden shadow-overlay sm:max-h-[76dvh]">
             <DialogPrimitive.Title className="sr-only">命令面板</DialogPrimitive.Title>
 
             {pending ? (
@@ -443,7 +443,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                   )}
                 </Command.List>
 
-                <div className="flex shrink-0 items-center justify-between gap-2 border-t border-base-800 px-3 py-1.5 text-xs text-ink-lo">
+                <div className="hidden shrink-0 items-center justify-between gap-2 border-t border-base-800 px-3 py-1.5 text-xs text-ink-lo sm:flex">
                   <span className="flex items-center gap-1.5">
                     <kbd className={KBD}>↑</kbd>
                     <kbd className={KBD}>↓</kbd>

@@ -7,6 +7,7 @@
  * `EquityCurveChart.tsx`, which is a separate module on purpose — see the header
  * of that file for why the recharts import must not be shared.
  */
+import { useId } from 'react';
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { EquitySnapshot } from '@aq/shared';
 import { fmtDateTime, fmtInt, fmtNum, fmtTime } from '../lib/format';
@@ -105,10 +106,10 @@ function EquityTooltip({
 
   return (
     <div
-      className="aq-chart-tooltip-hud pointer-events-none relative min-w-[13.5rem] overflow-hidden rounded-lg border border-base-600/90 px-3 py-2 shadow-overlay backdrop-blur-md"
+      className="aq-chart-tooltip-hud pointer-events-none relative min-w-[13.5rem] overflow-hidden rounded-lg border border-base-600/80 px-3 py-2 backdrop-blur-md"
       style={{
-        backgroundColor: `${ink.surface}e8`,
-        boxShadow: `0 12px 28px -10px rgba(0,0,0,0.65), 0 0 0 1px ${accentStroke}24`,
+        backgroundColor: `var(--aq-pop-bg, ${ink.surface})`,
+        boxShadow: 'var(--aq-shadow-pop, 0 8px 24px rgba(0, 0, 0, 0.35))',
       }}
     >
       {/* 顶部微发光指示细线 */}
@@ -272,6 +273,10 @@ export function DashboardEquityChart({
    * 渲染的 hook 数量不同，直接抛"Rendered fewer hooks than expected"。
    */
   const ink = useChartInk();
+  const chartUid = useId().replace(/:/g, '');
+  const themeStamp = `${ink.surface.replace('#', '')}-${ink.up.replace('#', '')}`;
+  const fillGradientId = `dashboardEquityFill-${chartUid}-${themeStamp}`;
+  const cometGradientId = `dashboardEquityComet-${chartUid}-${themeStamp}`;
   const windowed = filterByRange(snapshots, range);
   const rawPoints: EquityPoint[] = windowed
     .map((snapshot) => ({
@@ -356,23 +361,23 @@ export function DashboardEquityChart({
 
   return (
     <div className="relative h-full">
-      {/* 切换时间范围（1D/7D/1M/3M/全部）时平滑从左到右展开，后台轮询不触发闪烁 */}
+      {/* 切换时间范围（1D/7D/1M/3M/全部）时平滑从左到右展开，后台轮询与切深浅色不卸载 ResponsiveContainer，避免丢帧空白 */}
       <div key={range} className="aq-chart-reveal h-full w-full">
-        <ResponsiveContainer width="100%" height={height}>
+        <ResponsiveContainer width="100%" height={height} minWidth={0}>
           {/* No left margin and no axis title: the tick labels already carry the
               magnitude, and a title would cost the curve real width. */}
           <AreaChart data={points} margin={{ top: 14, right: 14, left: 0, bottom: 2 }}>
-            <defs>
+            <defs key={themeStamp}>
               {/* 克制通透的三段面积渐变（低饱和、久看不累） */}
-              <linearGradient id="dashboardEquityFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={stroke} stopOpacity={0.16} />
-                <stop offset="55%" stopColor={stroke} stopOpacity={0.045} />
+              <linearGradient id={fillGradientId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={stroke} stopOpacity={0.18} />
+                <stop offset="55%" stopColor={stroke} stopOpacity={0.05} />
                 <stop offset="100%" stopColor={stroke} stopOpacity={0} />
               </linearGradient>
-              {/* 沿曲线缓步流淌的微光（克制柔和，不刺眼） */}
-              <linearGradient id="dashboardEquityComet" x1="-30%" y1="0%" x2="0%" y2="0%">
+              {/* 沿曲线缓步流淌的微光（克制柔和，深浅主题自适应） */}
+              <linearGradient id={cometGradientId} x1="-30%" y1="0%" x2="0%" y2="0%">
                 <stop offset="0%" stopColor={stroke} stopOpacity={0} />
-                <stop offset="50%" stopColor="#ffffff" stopOpacity={0.38} />
+                <stop offset="50%" stopColor={ink.inkHi} stopOpacity={0.34} />
                 <stop offset="78%" stopColor={stroke} stopOpacity={0.48} />
                 <stop offset="100%" stopColor={stroke} stopOpacity={0} />
                 <animate attributeName="x1" from="-30%" to="115%" dur="6.8s" repeatCount="indefinite" />
@@ -435,7 +440,7 @@ export function DashboardEquityChart({
               stroke={stroke}
               strokeOpacity={0.92}
               strokeWidth={1.85}
-              fill="url(#dashboardEquityFill)"
+              fill={`url(#${fillGradientId})`}
               isAnimationActive={false}
               dot={(dotProps) => {
                 const { cx, cy, index } = dotProps as { cx?: number; cy?: number; index?: number };
@@ -491,7 +496,7 @@ export function DashboardEquityChart({
             <Area
               type="monotone"
               dataKey="equity"
-              stroke="url(#dashboardEquityComet)"
+              stroke={`url(#${cometGradientId})`}
               strokeWidth={2}
               fill="none"
               dot={false}

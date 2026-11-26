@@ -217,11 +217,27 @@ export function DecisionArchiveModal({
   }, [dateScopedRecords]);
 
   return (
-    <Modal open={open} onClose={onClose} title="决策档案与审计筛选" width="max-w-4xl">
-      <div className="flex max-h-[76vh] flex-col gap-2.5">
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="决策档案与审计筛选"
+      width="max-w-4xl"
+      bodyClassName="flex min-h-0 flex-1 flex-col overflow-hidden p-3 sm:p-4"
+      footer={
+        <div className="flex w-full flex-wrap items-center justify-between gap-2">
+          <span className="hidden text-xs text-ink-faint sm:inline">
+            向下滚动触底自动加载更早记录，点单轮「详情」可进入 16:9 完整审计视图。
+          </span>
+          <Button size="sm" variant="primary" className="ml-auto" onClick={onClose}>
+            关闭
+          </Button>
+        </div>
+      }
+    >
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
         {/* 顶部统计 + 日期快选 + 搜索栏 */}
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-base-750 bg-base-850/70 px-3 py-2 text-xs">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-ink-lo">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5 rounded-lg border border-base-750 bg-base-850/70 px-2.5 py-1.5 text-xs sm:gap-2 sm:px-3 sm:py-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 text-ink-lo sm:gap-x-3">
             <span>
               已加载 <strong className="num text-ink-hi">{stats.total}</strong> 轮
             </span>
@@ -243,12 +259,12 @@ export function DecisionArchiveModal({
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5 sm:gap-2">
             {/* 日期快选（默认当前 / 1天 / 3天 / 7天） */}
             <div
               role="group"
               aria-label="按日期范围筛选"
-              className="inline-flex items-center gap-0.5 rounded-lg border border-base-700 bg-base-950/70 p-0.5"
+              className="inline-flex max-w-full flex-wrap items-center gap-0.5 rounded-lg border border-base-700 bg-base-950/70 p-0.5"
             >
               <Calendar aria-hidden className="mx-1 h-3 w-3 shrink-0 text-ink-faint" />
               {DATE_RANGES.map((d) => (
@@ -258,7 +274,7 @@ export function DecisionArchiveModal({
                   aria-pressed={dateRange === d.id}
                   onClick={() => setDateRange(d.id)}
                   className={cn(
-                    'rounded-md px-2 py-0.5 text-[11px] font-medium transition',
+                    'shrink-0 whitespace-nowrap rounded-md px-2 py-0.5 text-[11px] font-medium transition',
                     dateRange === d.id
                       ? 'bg-accent/18 text-accent'
                       : 'text-ink-lo hover:text-ink-hi',
@@ -270,7 +286,7 @@ export function DecisionArchiveModal({
             </div>
 
             {/* 独立弹性搜索框：图标与输入框分列，永不与全局 .input padding 冲突重叠 */}
-            <div className="flex h-7 w-full items-center gap-1.5 rounded-lg border border-base-700 bg-base-900/90 px-2.5 transition focus-within:border-accent sm:w-52">
+            <div className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-base-700 bg-base-900/90 px-2.5 transition focus-within:border-accent sm:w-52 sm:flex-none">
               <Search aria-hidden className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
               <input
                 type="text"
@@ -294,7 +310,7 @@ export function DecisionArchiveModal({
         </div>
 
         {/* 动作分类分段 */}
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex shrink-0 flex-wrap items-center gap-1 sm:gap-1.5">
           {FILTER_TABS.map((t) => {
             const active = filter === t.id;
             return (
@@ -303,7 +319,7 @@ export function DecisionArchiveModal({
                 type="button"
                 onClick={() => setFilter(t.id)}
                 className={cn(
-                  'rounded-md border px-2.5 py-1 text-xs font-medium transition',
+                  'shrink-0 whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium transition sm:px-2.5 sm:py-1',
                   active
                     ? 'border-accent/45 bg-accent/15 text-accent'
                     : 'border-base-750 bg-base-850/60 text-ink-lo hover:border-base-600 hover:text-ink-hi',
@@ -313,13 +329,13 @@ export function DecisionArchiveModal({
               </button>
             );
           })}
-          <span className="ml-auto text-xs text-ink-faint">
+          <span className="ml-auto shrink-0 whitespace-nowrap text-xs text-ink-faint">
             匹配 <span className="num font-medium text-ink-mid">{filtered.length}</span> 条
           </span>
         </div>
 
         {/* 内容列表（触底自动加载） */}
-        <div ref={listRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+        <div ref={listRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden pr-1">
           {loading ? (
             <Spinner3 label="正在加载历史决策档案" />
           ) : error ? (
@@ -357,34 +373,34 @@ export function DecisionArchiveModal({
               return (
                 <div
                   key={rec.id}
-                  className="rounded-lg border border-base-750 bg-base-850/80 transition hover:border-base-600"
+                  className="min-w-0 overflow-hidden rounded-lg border border-base-750 bg-base-850/80 transition hover:border-base-600"
                 >
-                  <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 px-2.5 py-2 sm:px-3">
                     <button
                       type="button"
                       onClick={() => setExpandedId(expanded ? null : rec.id)}
-                      className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-left"
+                      className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 text-left sm:gap-2"
                     >
                       {expanded ? (
                         <ChevronDown className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
                       ) : (
                         <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-faint" />
                       )}
-                      <span className="num rounded bg-accent/12 px-1.5 py-0.5 text-xs font-semibold text-accent">
+                      <span className="num shrink-0 rounded bg-accent/12 px-1.5 py-0.5 text-xs font-semibold text-accent">
                         #{rec.cycleNumber}
                       </span>
-                      <span className="num text-xs text-ink-lo">{formatClock(rec.timestamp)}</span>
+                      <span className="num shrink-0 text-xs text-ink-lo">{formatClock(rec.timestamp)}</span>
                       {!rec.success && (
-                        <span className="inline-flex items-center gap-1 rounded bg-down/12 px-1.5 py-0.5 text-[11px] font-medium text-down">
+                        <span className="inline-flex shrink-0 items-center gap-1 rounded bg-down/12 px-1.5 py-0.5 text-[11px] font-medium text-down">
                           <TriangleAlert className="h-3 w-3" />
                           异常
                         </span>
                       )}
-                      <div className="flex flex-wrap items-center gap-1.5">
+                      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                         {shownSummary.map((d, idx) => (
                           <span
                             key={`${d.symbol}-${idx}`}
-                            className="inline-flex items-center gap-1 rounded-md bg-base-900/80 px-1.5 py-0.5"
+                            className="inline-flex shrink-0 items-center gap-1 rounded-md bg-base-900/80 px-1.5 py-0.5"
                           >
                             <CoinIcon symbol={d.symbol} className="h-3.5 w-3.5 text-[8px]" />
                             <span className="font-mono text-xs font-semibold text-ink-hi">
@@ -401,35 +417,35 @@ export function DecisionArchiveModal({
                       </div>
                     </button>
 
-                    <div className="flex shrink-0 items-center gap-2 text-[11px]">
+                    <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
                       {cycleCost && pricing && (
                         <span
-                          className="num cursor-help rounded bg-amber-500/10 px-1.5 py-0.5 font-medium text-amber-300 [[data-skin='light']_&]:text-amber-800"
+                          className="num shrink-0 cursor-help rounded bg-amber-500/10 px-1.5 py-0.5 font-medium text-amber-300 [[data-skin='light']_&]:bg-amber-500/15 [[data-skin='light']_&]:text-amber-900"
                           data-aq-tip={formatCycleCostTooltip(cycleCost, pricing)}
                         >
                           {pricing.free ? '免费' : fmtTokenCostUsd(cycleCost.totalCostUsd, { approx: true })}
                         </span>
                       )}
                       {cachePct !== null && (
-                        <span className={cn('num', cachePct >= 50 ? 'text-up' : 'text-warn')}>
+                        <span className={cn('num shrink-0', cachePct >= 50 ? 'text-up' : 'text-warn')}>
                           缓存 {cachePct}%
                         </span>
                       )}
                       {rec.aiTtftMs != null && rec.aiTtftMs > 0 && (
                         <span
-                          className="num text-cyan-300 [[data-skin='light']_&]:text-cyan-700"
+                          className="num shrink-0 text-cyan-300 [[data-skin='light']_&]:text-cyan-700"
                           title="LLM 平均首字延迟（TTFT，多轮取均值）"
                         >
                           首字 {fmtLatency(rec.aiTtftMs)}
                         </span>
                       )}
                       {rec.aiLatencyMs > 0 && (
-                        <span className="num text-ink-lo">{fmtLatency(rec.aiLatencyMs)}</span>
+                        <span className="num shrink-0 text-ink-lo">{fmtLatency(rec.aiLatencyMs)}</span>
                       )}
                       <Link
                         to={`/traders/${traderId}/decisions/${rec.id}`}
                         onClick={onClose}
-                        className="inline-flex items-center gap-1 rounded-md border border-base-700 bg-base-900/70 px-2 py-0.5 text-xs text-ink-mid transition hover:border-accent/50 hover:text-accent"
+                        className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-base-700 bg-base-900/70 px-2 py-0.5 text-xs text-ink-mid transition hover:border-accent/50 hover:text-accent"
                         title="打开本轮完整决策审计详情页"
                       >
                         详情
@@ -439,23 +455,23 @@ export function DecisionArchiveModal({
                   </div>
 
                   {expanded && (
-                    <div className="space-y-2 border-t border-base-750/80 px-3 py-2.5 text-xs">
+                    <div className="min-w-0 space-y-2 border-t border-base-750/80 px-3 py-2.5 text-xs">
                       {rec.error && (
-                        <p className="rounded bg-down/10 px-2 py-1 text-down">{rec.error}</p>
+                        <p className="break-words rounded bg-down/10 px-2 py-1 text-down">{rec.error}</p>
                       )}
                       {decisions.map((d, idx) => (
                         <div
                           key={`${d.symbol}-${idx}`}
-                          className="rounded-md bg-base-900/60 px-2.5 py-2"
+                          className="min-w-0 rounded-md bg-base-900/60 px-2.5 py-2"
                         >
-                          <div className="flex flex-wrap items-center gap-2">
+                          <div className="flex min-w-0 flex-wrap items-center gap-2">
                             <CoinIcon symbol={d.symbol} className="h-4 w-4 text-[9px]" />
                             <span className="font-mono font-semibold text-ink-hi">{d.symbol}</span>
                             {d.confidence != null && (
                               <span className="num text-[11px] text-accent">置信度 {d.confidence}%</span>
                             )}
                             {isOpenAction(d.action) && (
-                              <span className="num text-[11px] text-ink-lo">
+                              <span className="num break-words text-[11px] text-ink-lo">
                                 仓位 {fmtUsd(d.positionSizeUsd, 2)}
                                 {isNum(d.positionSizeUsd) && d.positionSizeUsd > 0 && isNum(d.leverage) && d.leverage > 0
                                   ? ` · 保证金 ${fmtUsd(d.positionSizeUsd / d.leverage, 2)}`
@@ -465,10 +481,10 @@ export function DecisionArchiveModal({
                                 {d.leverage > 0 ? ` · 杠杆 ${d.leverage}x` : ''}
                               </span>
                             )}
-                            <ActionBadge action={d.action} reasoning={d.reasoning} className="ml-auto" />
+                            <ActionBadge action={d.action} reasoning={d.reasoning} className="ml-auto shrink-0" />
                           </div>
                           {d.reasoning && (
-                            <p className="mt-1 leading-relaxed text-ink-mid">{plainText(d.reasoning)}</p>
+                            <p className="mt-1 break-words leading-relaxed text-ink-mid">{plainText(d.reasoning)}</p>
                           )}
                         </div>
                       ))}
@@ -495,16 +511,6 @@ export function DecisionArchiveModal({
           {!loading && !hasMore && records.length > 0 && (
             <p className="py-1 text-center text-[11px] text-ink-faint">已加载全部历史周期</p>
           )}
-        </div>
-
-        {/* 底部极简栏 */}
-        <div className="flex items-center justify-between border-t border-base-750 pt-2">
-          <span className="text-xs text-ink-faint">
-            向下滚动触底自动加载更早记录，点单轮「详情」可进入 16:9 完整审计视图。
-          </span>
-          <Button size="sm" variant="primary" onClick={onClose}>
-            关闭
-          </Button>
         </div>
       </div>
     </Modal>

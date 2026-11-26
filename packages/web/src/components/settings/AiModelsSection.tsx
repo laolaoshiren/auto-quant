@@ -25,7 +25,7 @@ import {
   TextInput,
 } from '../ui';
 import { fmtDateTime, fmtInt } from '../../lib/format';
-import { healthToResult, ModelRow, type ModelTestSnapshot } from './AiModelRow';
+import { healthToResult, ModelCard, ModelRow, type ModelTestSnapshot } from './AiModelRow';
 import { AiModelModal, emptyDraft, type ModelDraft } from './AiModelModal';
 
 /** 表格首屏渲染多少行；点「显示更多」再追加，避免一次挂几百个 DOM 节点。 */
@@ -425,14 +425,15 @@ export function AiModelsSection() {
               />
             ) : (
               <>
-                <div className="overflow-x-hidden">
-                  <table className="w-full table-fixed border-collapse">
+                {/* 桌面端自然列宽表格 + 横向滚动，彻底消除按钮裁切与文字重叠 */}
+                <div className="scroll-x hidden md:block">
+                  <table className="w-full min-w-[720px] border-collapse">
                     <thead className="border-b border-base-800 bg-base-850/60">
                       <tr>
-                        <th className="th w-[26%] px-2 py-1.5">名称</th>
-                        <th className="th w-[34%] px-2 py-1.5">模型 · 端点</th>
-                        <th className="th hidden w-[14%] px-2 py-1.5 2xl:table-cell">密钥</th>
-                        <th className="th hidden w-[14%] px-2 py-1.5 xl:table-cell">最近测试</th>
+                        <th className="th px-2 py-1.5">名称</th>
+                        <th className="th px-2 py-1.5">模型 · 端点</th>
+                        <th className="th hidden px-2 py-1.5 2xl:table-cell">密钥</th>
+                        <th className="th hidden px-2 py-1.5 xl:table-cell">最近测试</th>
                         <th className="th px-2 py-1.5 text-right">操作</th>
                       </tr>
                     </thead>
@@ -455,6 +456,26 @@ export function AiModelsSection() {
                       ))}
                     </tbody>
                   </table>
+                </div>
+
+                {/* 移动端结构化卡片视图（< md），文字与按钮绝不重叠 */}
+                <div className="divide-y divide-base-850/70 md:hidden">
+                  {shown.map((row) => (
+                    <ModelCard
+                      key={row.id}
+                      row={row}
+                      providerLabel={providerById.get(row.provider)?.label ?? row.provider}
+                      defaults={providerById.get(row.provider)?.defaults}
+                      result={resolvedResults[row.id]}
+                      testing={testingId === row.id}
+                      removing={removingId === row.id}
+                      isDefault={row.id === (defaultIdOverride ?? catalog?.defaultAiModelId ?? null)}
+                      onTest={onTest}
+                      onEdit={openEdit}
+                      onSetDefault={setDefault}
+                      onRemove={onRemove}
+                    />
+                  ))}
                 </div>
                 {remaining > 0 && (
                   <div className="flex items-center justify-between gap-2 border-t border-base-800 px-2 py-1.5">

@@ -57,7 +57,7 @@ export function ExchangeAccountChip({
   const short = exchangeShortLabel(exchange);
   const testnet = account.testnet === true;
   return (
-    <span className={`flex min-w-0 items-center gap-1 ${className}`}>
+    <span className={`flex min-w-0 shrink-0 items-center gap-1 whitespace-nowrap ${className}`}>
       <Badge tone={exchange === 'gate' ? 'accent' : 'neutral'} title={`交易所：${short}`}>
         {short}
       </Badge>

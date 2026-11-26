@@ -273,23 +273,62 @@ export function TraderPage() {
   const [dismissedError, setDismissedError] = useState(dismissedFingerprint);
   const [intelHeight, setIntelHeight] = useState<number | null>(loadSavedIntelHeight);
   const [resizingIntel, setResizingIntel] = useState(false);
+  const [splitHostEl, setSplitHostEl] = useState<HTMLDivElement | null>(null);
+  const [splitHostH, setSplitHostH] = useState(0);
+  const [viewport, setViewport] = useState(() => ({
+    width: typeof window !== 'undefined' ? window.innerWidth : 1440,
+    height: typeof window !== 'undefined' ? window.innerHeight : 900,
+  }));
   const splitHostRef = useRef<HTMLDivElement | null>(null);
   const intelWrapRef = useRef<HTMLDivElement | null>(null);
-  const intelHeightRef = useRef<number | null>(intelHeight);
-  intelHeightRef.current = intelHeight;
-
-  const clampIntelHeight = useCallback((next: number): number => {
-    const hostH = splitHostRef.current?.getBoundingClientRect().height ?? 0;
-    const maxH = hostH > CHART_PANEL_MIN_H + INTEL_MIN_H + 12 ? Math.floor(hostH - CHART_PANEL_MIN_H - 12) : 420;
-    return Math.max(INTEL_MIN_H, Math.min(maxH, Math.round(next)));
+  const setSplitHostNode = useCallback((node: HTMLDivElement | null) => {
+    splitHostRef.current = node;
+    setSplitHostEl(node);
   }, []);
+  const isCompactSplit = viewport.width < 1280 || viewport.height <= 820;
 
   useEffect(() => {
-    if (intelHeight === null) return;
-    const onResize = () => setIntelHeight((prev) => (prev === null ? null : clampIntelHeight(prev)));
+    const onResize = () => {
+      setViewport({ width: window.innerWidth, height: window.innerHeight });
+    };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, [intelHeight, clampIntelHeight]);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!splitHostEl) return;
+    const measure = () => {
+      const next = Math.floor(splitHostEl.getBoundingClientRect().height);
+      setSplitHostH((prev) => (prev === next ? prev : next));
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(splitHostEl);
+    return () => observer.disconnect();
+  }, [splitHostEl]);
+
+  const effectiveIntelHeight = useMemo(() => {
+    if (isCompactSplit || intelHeight === null) return null;
+    if (splitHostH > 0) {
+      const maxH = Math.floor(splitHostH - CHART_PANEL_MIN_H - 12);
+      if (maxH < INTEL_MIN_H) return null;
+      return Math.max(INTEL_MIN_H, Math.min(maxH, intelHeight));
+    }
+    return intelHeight;
+  }, [isCompactSplit, intelHeight, splitHostH]);
+
+  const intelHeightRef = useRef<number | null>(effectiveIntelHeight);
+  intelHeightRef.current = effectiveIntelHeight;
+
+  const clampIntelHeight = useCallback(
+    (next: number): number => {
+      const hostH = splitHostRef.current?.getBoundingClientRect().height ?? splitHostH;
+      const maxH = hostH > CHART_PANEL_MIN_H + INTEL_MIN_H + 12 ? Math.floor(hostH - CHART_PANEL_MIN_H - 12) : 420;
+      return Math.max(INTEL_MIN_H, Math.min(maxH, Math.round(next)));
+    },
+    [splitHostH],
+  );
 
   const startIntelResize = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1477,7 +1516,7 @@ export function TraderPage() {
       : null;
 
   const metricCards = (
-    <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5">
+    <div className="grid grid-cols-2 gap-2 md:grid-cols-3 2xl:grid-cols-5">
       {/* 1 — 账户余额 */}
       <MetricCard
         title={
@@ -1634,7 +1673,7 @@ export function TraderPage() {
       >
         <div className="flex items-center justify-between gap-1">
           <span className="flex min-w-0 items-center gap-1 text-[11px] font-medium text-ink-lo">
-            <Layers aria-hidden className="h-3 w-3 shrink-0 text-sky-400" />
+            <Layers aria-hidden className="h-3 w-3 shrink-0 text-sky-400 [[data-skin='light']_&]:text-sky-600" />
             <span className="whitespace-nowrap">持仓</span>
           </span>
           {!liveUnavailable && stats?.maxLeverage ? (
@@ -1673,6 +1712,7 @@ export function TraderPage() {
 
       {/* 5 — 胜率 */}
       <MetricCard
+        className="col-span-2 md:col-span-1"
         title={
           stats && stats.totalTrades > 0
             ? `盈利因子 ${fmtProfitFactor(stats.profitFactor)} · ${fmtInt(stats.totalTrades)} 笔已平仓（${fmtInt(wins)} 盈 / ${fmtInt(losses)} 亏）`
@@ -1681,7 +1721,7 @@ export function TraderPage() {
       >
         <div className="flex items-center justify-between gap-1">
           <span className="flex min-w-0 items-center gap-1 text-[11px] font-medium text-ink-lo">
-            <Target aria-hidden className="h-3 w-3 shrink-0 text-violet-400" />
+            <Target aria-hidden className="h-3 w-3 shrink-0 text-violet-400 [[data-skin='light']_&]:text-violet-600" />
             <span className="whitespace-nowrap">胜率</span>
           </span>
           {stats && stats.totalTrades > 0 && (
@@ -2108,16 +2148,16 @@ export function TraderPage() {
           —— 正好是"[DEMO] 决策审计示例"被截成"[DEMO] 决策审..."的那点差距
           （标题需要 191px，收窄前只剩 174px）。8px 的间距在徽章之间仍然清楚。
         */}
-        <header className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-2 xl:flex-nowrap">
+        <header className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 2xl:flex-nowrap">
           <Link
             to="/traders"
-            className="inline-flex items-center gap-1 text-base text-ink-lo transition hover:text-accent"
+            className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-base text-ink-lo transition hover:text-accent"
           >
-            <ChevronLeft aria-hidden className="h-4 w-4" />
+            <ChevronLeft aria-hidden className="h-4 w-4 shrink-0" />
             机器人
           </Link>
 
-          <span className="h-4 w-px bg-base-700" aria-hidden />
+          <span className="h-4 w-px shrink-0 bg-base-700" aria-hidden />
 
           {/* 头像：与列表/总览同一个确定性像素头像，一眼对上"是同一台机器人"。 */}
           <TraderAvatar id={trader.id} size={30} className="shrink-0 rounded-md" />
@@ -2129,18 +2169,21 @@ export function TraderPage() {
              * 两枚重复徽章、动作也紧跟标题，空间够了，**不必再比别的页面小一号**。
              *
              * 这一页的标题是**数据驱动的机器人名**（可能是任意长度），
-             * 而它旁边的徽章（状态、净盈亏）都是定长的 —— 该让的是标题。
+             * 而它旁边的徽章（状态、净盈亏）都是定长的 —— 该让的是标题，
+             * 但保底 `min-w-[5rem]` 绝不压成 `0px` 或单字省略。
              */
-            className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight text-ink-hi"
+            className="min-w-[5rem] flex-1 truncate text-xl font-semibold tracking-tight text-ink-hi"
             /* 极窄窗口下标题仍可能被截，完整名字必须能从悬停读到。 */
             title={trader.name}
           >
             {trader.name}
           </h1>
-          <TraderStatusBadge status={status} live={trader.isRunning} />
+          <span className="inline-flex shrink-0 whitespace-nowrap">
+            <TraderStatusBadge status={status} live={trader.isRunning} />
+          </span>
           {running && runtimeStartIso && (
             <span
-              className="num inline-flex shrink-0 items-center gap-1 rounded-md border border-base-750 bg-base-850/90 px-2 py-0.5 text-xs text-ink-mid"
+              className="num inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-base-750 bg-base-850/90 px-2 py-0.5 text-xs text-ink-mid"
               title={`本次连续运行时长（自 ${fmtDateTime(runtimeStartIso)} 起，跨服务重启保留）`}
             >
               <Clock aria-hidden className="h-3 w-3 shrink-0 text-up/80" />
@@ -2148,13 +2191,18 @@ export function TraderPage() {
             </span>
           )}
           {/* 交易所 + 钱包 + 测试网/主网（用户 2026-11-11 需求）。 */}
-          <ExchangeAccountChip account={exchangeAccount} />
+          <span className="inline-flex shrink-0 items-center whitespace-nowrap">
+            <ExchangeAccountChip
+              account={exchangeAccount}
+              className="shrink-0 whitespace-nowrap [&>*]:shrink-0 [&>*]:whitespace-nowrap"
+            />
+          </span>
           {/*
             **净已实现盈亏放在页头**（用户 2026-11-10：从页面底部移上来并精简）。
             只显示净额；毛 / 手续费 / 资金费的拆解收进 title（日常盯盘不需要）。
           */}
           <span
-            className={cn('flex items-center gap-1 text-xs', statsCost && 'cursor-help')}
+            className={cn('flex shrink-0 items-center gap-1 whitespace-nowrap text-xs', statsCost && 'cursor-help')}
             data-aq-tip={statsCost ? pnlFormulaText(statsCost) : undefined}
           >
             <span className="text-ink-faint">净盈亏</span>
@@ -2176,7 +2224,11 @@ export function TraderPage() {
             页头只留状态徽章与净盈亏两个信息。
           */}
           {trader.consecutiveFailures > 0 && (
-            <Badge tone="warn" title="连续的模型或执行失败次数；超过熔断阈值会进入安全模式。">
+            <Badge
+              tone="warn"
+              className="shrink-0 whitespace-nowrap"
+              title="连续的模型或执行失败次数；超过熔断阈值会进入安全模式。"
+            >
               {trader.consecutiveFailures} 次连续失败
             </Badge>
           )}
@@ -2201,7 +2253,7 @@ export function TraderPage() {
             不孤零零挂在右边缘）。启动/停止/配置是这台机器人的全部主操作，紧挨名称和状态
             才是它们该在的位置。
           */}
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5 whitespace-nowrap">
             {/*
               ⚠️ **按钮状态必须跟着 `status`（推送实时）走，不能跟 `trader.isRunning`（REST 滞后）。**
               （2026-11-10 用户截图：点启动后徽章已经显示「运行中」，按钮却还是「启动」，
@@ -2358,13 +2410,16 @@ export function TraderPage() {
         */}
 
         {/* D + AI500 上下弹性分栏：中间拖拽条可自由上下调整图表与下方雷达面板高度 */}
-        <div ref={splitHostRef} className="flex min-h-0 flex-1 flex-col">
+        <div
+          ref={setSplitHostNode}
+          className={cn('flex flex-1 flex-col', isCompactSplit ? 'shrink-0' : 'min-h-0')}
+        >
         <Panel
           padded={false}
           bodyClassName={curveCollapsed && chartTab === 'equity' ? 'p-0' : 'flex min-h-0 flex-1 flex-col p-0'}
           className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[156px] flex-1 flex-col'}
           title={
-            <span className="inline-flex items-center gap-0.5 rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
+            <span className="inline-flex max-w-full flex-wrap items-center gap-0.5 rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
               <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
                 {/* ⚠️ 标签必须与**实际画的口径**一致（2026-10-15 改成按模式选）。
                     实盘 → 账户权益（共享钱包真实权益，与「账户余额」指标卡同一个数）；
@@ -2378,8 +2433,8 @@ export function TraderPage() {
           }
           actions={
             chartTab === 'equity' ? (
-              <span className="flex flex-wrap items-center gap-1.5">
-                <span className="inline-flex items-center gap-0.5 rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
+              <span className="flex max-w-full flex-wrap items-center gap-1.5">
+                <span className="inline-flex max-w-full flex-wrap items-center gap-0.5 rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
                   {EQUITY_RANGES.map((item) => (
                     /*
                       ⚠️ **统一用 `Button`（primary/ghost）**，不再手写一套
@@ -2413,9 +2468,14 @@ export function TraderPage() {
                 </Button>
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1.5 rounded-md border border-base-750/70 bg-base-900/60 px-2 py-0.5 text-xs text-ink-lo">
-                <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-                {pickedSymbol ? `已选标的 · ${pickedSymbol}` : '最近持仓标的'}
+              <span
+                className="inline-flex max-w-[10rem] items-center gap-1.5 truncate rounded-md border border-base-750/70 bg-base-900/60 px-2 py-0.5 text-xs text-ink-lo"
+                title={pickedSymbol ? `已选标的 · ${pickedSymbol}` : '最近持仓标的'}
+              >
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                <span className="min-w-0 truncate">
+                  {pickedSymbol ? `已选标的 · ${pickedSymbol}` : '最近持仓标的'}
+                </span>
               </span>
             )
           }
@@ -2535,12 +2595,12 @@ export function TraderPage() {
         {/* 智能托管 2.0：图表与 AI500 雷达面板之间的上下可拖拽分割条（双击恢复自动高度） */}
         {trader.mode === 'ai_managed' && (
           <>
-            {!(curveCollapsed && chartTab === 'equity') ? (
+            {!isCompactSplit && !(curveCollapsed && chartTab === 'equity') ? (
               <div
                 role="separator"
                 aria-orientation="horizontal"
                 aria-label="上下拖动调整图表与下方雷达面板高度，双击恢复自动高度"
-                aria-valuenow={intelHeight ?? undefined}
+                aria-valuenow={effectiveIntelHeight ?? undefined}
                 aria-valuemin={INTEL_MIN_H}
                 tabIndex={0}
                 title="上下拖动调整图表与下方雷达面板高度 · 双击恢复自动"
@@ -2574,17 +2634,21 @@ export function TraderPage() {
             )}
             <div
               ref={intelWrapRef}
-              className={intelHeight !== null && !(curveCollapsed && chartTab === 'equity') ? 'min-h-0 shrink-0' : 'shrink-0'}
+              className={
+                effectiveIntelHeight !== null && !(curveCollapsed && chartTab === 'equity')
+                  ? 'min-h-0 shrink-0'
+                  : 'shrink-0'
+              }
               style={
-                intelHeight !== null && !(curveCollapsed && chartTab === 'equity')
-                  ? { height: intelHeight }
+                effectiveIntelHeight !== null && !(curveCollapsed && chartTab === 'equity')
+                  ? { height: effectiveIntelHeight }
                   : undefined
               }
             >
               <ManagedIntelPanel
                 traderId={traderId}
                 onSelectSymbol={selectChartSymbol}
-                fillHeight={intelHeight !== null && !(curveCollapsed && chartTab === 'equity')}
+                fillHeight={effectiveIntelHeight !== null && !(curveCollapsed && chartTab === 'equity')}
               />
             </div>
           </>
@@ -2808,11 +2872,22 @@ export function TraderPage() {
  * 而**错的那条正好在真正的组件旁边** —— 下一个读代码的人会照着它去加 `items-start`，
  * 于是把一组本该成块的 KPI 拆成高低不齐的四块。所以这里改成陈述事实。
  */
-function MetricCard({ children, title }: { children: ReactNode; title?: string }) {
+function MetricCard({
+  children,
+  title,
+  className,
+}: {
+  children: ReactNode;
+  title?: string;
+  className?: string;
+}) {
   return (
     <div
       title={title}
-      className="flex h-full min-w-0 flex-col rounded-xl border border-base-700/90 bg-base-900 px-2.5 py-2.5 transition-colors hover:border-base-600"
+      className={cn(
+        'flex h-full min-w-0 flex-col rounded-xl border border-base-700/90 bg-base-900 px-2.5 py-2.5 transition-colors hover:border-base-600',
+        className,
+      )}
     >
       {children}
     </div>

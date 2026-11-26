@@ -119,7 +119,7 @@ const RiskBanner = memo(function RiskBanner({
         </span>
       </button>
 
-      <div className="grid min-w-0 flex-1 grid-cols-3 gap-1.5">
+      <div className="grid min-w-0 flex-1 grid-cols-2 gap-1.5 sm:grid-cols-3">
         <RiskReadout label="杠杆上限（倍）" value={`≤ ${leverage}`} note={`山寨 ≤ ${altcoinLeverage}`} onOpen={onOpen} />
         <RiskReadout
           label="最大仓位（倍权益）"
@@ -152,9 +152,9 @@ function RiskReadout({
       title={`${label} — 点击跳到核心风控`}
       className="group flex min-w-0 flex-col rounded-md border border-base-750 bg-base-850/60 px-2 py-1 text-left transition hover:border-accent/60 hover:bg-base-800"
     >
-      <span className="truncate text-xs text-ink-faint">{label}</span>
+      <span className="text-xs leading-snug text-ink-faint">{label}</span>
       <span className="num truncate text-base leading-tight text-ink-hi">{value}</span>
-      <span className="truncate text-xs text-ink-faint">{note}</span>
+      <span className="text-xs leading-snug text-ink-faint">{note}</span>
     </button>
   );
 }
@@ -564,7 +564,7 @@ export function StrategyEditorPage() {
         是 22px 而不是 16px，负边距与它并不严格相等 —— 与其算这个差值，不如让
         工具条待在内边距里：视觉上只是左右少了一点点出血，但不会再算错宽度。
       */}
-      <div className="sticky top-0 z-20 -mt-4 space-y-2 border-b border-base-800 bg-base-950 pb-2 pt-2">
+      <div className="z-20 -mt-4 space-y-2 border-b border-base-800 bg-base-950 pb-2 pt-2 lg:sticky lg:top-0 [@media(max-height:520px)]:static">
         {/*
           ⚠️ **动作紧跟标题**（ui-spec §1）：不再用 `ml-auto` 把它们推到页面最右端。
           主操作（保存）与最高频的辅助动作（策略体检）紧跟在标题后面；
@@ -578,7 +578,7 @@ export function StrategyEditorPage() {
           >
             ← {PAGE_LABEL.strategy}
           </Link>
-          <h1 className="min-w-0 max-w-[40vw] truncate text-xl font-semibold tracking-tight text-ink-hi">
+          <h1 className="min-w-0 max-w-full truncate text-xl font-semibold tracking-tight text-ink-hi sm:max-w-[40vw]">
             {state.name || '未命名策略'}
           </h1>
 
@@ -665,16 +665,6 @@ export function StrategyEditorPage() {
           )}
         </div>
 
-        <RiskBanner
-          leverage={risk.btcEthMaxLeverage}
-          altcoinLeverage={risk.altcoinMaxLeverage}
-          positionRatio={risk.btcEthMaxPositionValueRatio}
-          altcoinPositionRatio={risk.altcoinMaxPositionValueRatio}
-          requireStopLoss={risk.requireStopLoss}
-          riskReward={risk.minRiskRewardRatio}
-          onOpen={() => selectTab('risk')}
-        />
-
         <TabsPrimitive.List
           aria-label="策略配置分区"
           className="flex flex-wrap items-center gap-x-1 gap-y-0.5 border-b border-base-800"
@@ -708,6 +698,17 @@ export function StrategyEditorPage() {
           <div className="rounded-md border border-up/40 bg-up/10 px-2.5 py-1.5 text-base text-up">{notice}</div>
         )}
       </div>
+
+      {/* 核心风控读数置于吸顶栏外，确保窄屏与矮屏横屏下编辑区不被吸顶区占满 */}
+      <RiskBanner
+        leverage={risk.btcEthMaxLeverage}
+        altcoinLeverage={risk.altcoinMaxLeverage}
+        positionRatio={risk.btcEthMaxPositionValueRatio}
+        altcoinPositionRatio={risk.altcoinMaxPositionValueRatio}
+        requireStopLoss={risk.requireStopLoss}
+        riskReward={risk.minRiskRewardRatio}
+        onOpen={() => selectTab('risk')}
+      />
 
       {/* ---------------------------------------------------------------- */}
       {/*  分区内容                                                         */}

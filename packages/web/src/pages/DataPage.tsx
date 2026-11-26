@@ -317,9 +317,9 @@ export function DataPage() {
   const hasLines = shown.length > 0;
 
   return (
-    <div className="page-fill h-full gap-3">
+    <div className="page-fill gap-2 lg:h-full lg:gap-3 [@media(max-height:520px)]:h-auto [@media(max-height:520px)]:gap-1.5">
       {/* 页头 + 运行遥测概览条 */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 lg:gap-3 [@media(max-height:520px)]:gap-1.5">
         <div className="flex flex-wrap items-center gap-2.5">
           <h1 className="text-xl font-semibold tracking-tight text-ink-hi">数据与日志</h1>
           <Badge tone={socketStatus === 'open' ? 'up' : 'warn'}>
@@ -334,20 +334,20 @@ export function DataPage() {
           )}
         </div>
 
-        <div className="num flex flex-wrap items-center gap-2 text-xs text-ink-lo">
-          <span className="rounded-md border border-base-750 bg-base-900 px-2.5 py-1">
+        <div className="num flex flex-wrap items-center gap-1.5 text-xs text-ink-lo sm:gap-2">
+          <span className="rounded-md border border-base-750 bg-base-900 px-2 py-0.5 sm:px-2.5 sm:py-1">
             时钟偏移 <span className="font-medium text-ink-hi">{fmtClockOffsetMs(system?.clockOffsetMs)}</span>
           </span>
-          <span className="rounded-md border border-base-750 bg-base-900 px-2.5 py-1">
+          <span className="rounded-md border border-base-750 bg-base-900 px-2 py-0.5 sm:px-2.5 sm:py-1">
             API 权重{' '}
             <span className="font-medium text-ink-hi">
               {fmtInt(system?.weightUsed)} / {fmtInt(system?.weightLimit)}
             </span>
           </span>
-          <span className="rounded-md border border-base-750 bg-base-900 px-2.5 py-1">
+          <span className="rounded-md border border-base-750 bg-base-900 px-2 py-0.5 sm:px-2.5 sm:py-1">
             可交易对 <span className="font-medium text-ink-hi">{fmtInt(system?.tradableSymbols)}</span>
           </span>
-          <span className="rounded-md border border-base-750 bg-base-900 px-2.5 py-1">
+          <span className="rounded-md border border-base-750 bg-base-900 px-2 py-0.5 sm:px-2.5 sm:py-1">
             已运行 <UptimeReadout baseSeconds={health?.uptimeSeconds ?? null} loadedAt={healthLoadedAt} />
           </span>
         </div>
@@ -360,13 +360,13 @@ export function DataPage() {
         bodyClassName="flex min-h-0 flex-1 flex-col p-0"
       >
         {/* 顶部工具与多维筛选栏 */}
-        <div className="flex shrink-0 flex-col gap-2 border-b border-base-800 bg-base-900 px-3 py-2.5">
+        <div className="flex shrink-0 flex-col gap-2 border-b border-base-800 bg-base-900 px-3 py-2 [@media(max-height:520px)]:gap-1.5 [@media(max-height:520px)]:py-1.5">
           {/* 第一行：级别分段 + 来源切换 + 操作组 */}
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
             <div
               role="group"
               aria-label="按级别过滤"
-              className="inline-flex items-center rounded-lg border border-base-750 bg-base-950 p-0.5"
+              className="inline-flex max-w-full items-center overflow-x-auto rounded-lg border border-base-750 bg-base-950 p-0.5"
             >
               {LEVELS.map((item) => {
                 const active = level === item.id;
@@ -387,7 +387,7 @@ export function DataPage() {
                     aria-pressed={active}
                     onClick={() => setLevel(item.id)}
                     className={cn(
-                      'inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition',
+                      'inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition',
                       active
                         ? 'bg-base-800 text-ink-strong shadow-sm'
                         : 'text-ink-lo hover:text-ink-hi',
@@ -571,7 +571,9 @@ export function DataPage() {
           ref={scrollRef}
           className={cn(
             'overflow-y-auto overflow-x-hidden bg-base-950 font-mono text-[12.5px] leading-relaxed',
-            hasLines ? 'min-h-0 flex-1' : 'min-h-0',
+            hasLines
+              ? 'min-h-[240px] max-h-[60dvh] flex-1 lg:min-h-0 lg:max-h-none [@media(max-height:520px)]:min-h-[240px] [@media(max-height:520px)]:max-h-[75dvh]'
+              : 'min-h-0',
           )}
         >
           {source === 'rest' && restQuery.loading && shown.length === 0 ? (
@@ -614,64 +616,82 @@ export function DataPage() {
                   <div
                     key={rowKey}
                     className={cn(
-                      'group grid grid-cols-1 items-start gap-x-2 gap-y-1 px-3 py-1.5 transition-colors hover:bg-base-850/70 md:grid-cols-[72px_54px_76px_132px_minmax(0,1fr)_28px]',
+                      'group flex flex-col gap-1 px-3 py-1.5 transition-colors hover:bg-base-850/70 md:grid md:grid-cols-[72px_54px_76px_132px_minmax(0,1fr)_28px] md:items-start md:gap-x-2 md:gap-y-1',
                       lvl.rowCls,
                     )}
                   >
-                    {/* 时间 */}
-                    <span
-                      className="num text-xs text-ink-faint"
-                      title={safeIsoTime(line.timestamp)}
-                    >
-                      {safeClockTime(line.timestamp)}
-                    </span>
-
-                    {/* 级别 */}
-                    <span className="flex md:justify-center">
+                    {/* < md 合并为紧凑第一行；>= md 靠 md:contents 还原为固定 4 列 */}
+                    <div className="flex flex-wrap items-center gap-1.5 md:contents">
+                      {/* 时间 */}
                       <span
-                        className={cn(
-                          'inline-flex h-5 w-11 items-center justify-center rounded border text-[11px] font-medium leading-none',
-                          lvl.cls,
-                        )}
+                        className="num text-xs text-ink-faint"
+                        title={safeIsoTime(line.timestamp)}
                       >
-                        {lvl.label}
+                        {safeClockTime(line.timestamp)}
                       </span>
-                    </span>
 
-                    {/* 对象（机器人 / 系统） */}
-                    <span className="min-w-0 truncate text-xs">
-                      {line.traderId !== null ? (
+                      {/* 级别 */}
+                      <span className="flex md:justify-center">
                         <span
-                          className="num inline-flex max-w-full items-center truncate rounded border border-accent/25 bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent"
-                          title={traderName ? `机器人 #${line.traderId} · ${traderName}` : `机器人 #${line.traderId}`}
+                          className={cn(
+                            'inline-flex h-5 w-11 items-center justify-center rounded border text-[11px] font-medium leading-none',
+                            lvl.cls,
+                          )}
                         >
-                          #{line.traderId}
-                          {traderName ? ` ${traderName}` : ''}
+                          {lvl.label}
                         </span>
-                      ) : (
-                        <span className="text-ink-faint">系统</span>
-                      )}
-                    </span>
-
-                    {/* 模块 */}
-                    <span className="min-w-0">
-                      <span
-                        className={cn(
-                          'inline-flex max-w-full items-center truncate rounded border px-1.5 py-0.5 font-sans text-[11px] font-medium leading-tight',
-                          SCOPE_TONE[kind] ?? SCOPE_TONE.other,
-                        )}
-                        title={line.scope ? `模块：${scopeName}（${line.scope}）` : '主程序'}
-                      >
-                        {scopeName}
                       </span>
-                    </span>
+
+                      {/* 对象（机器人 / 系统） */}
+                      <span className="min-w-0 truncate text-xs">
+                        {line.traderId !== null ? (
+                          <span
+                            className="num inline-flex max-w-full items-center truncate rounded border border-accent/25 bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent"
+                            title={traderName ? `机器人 #${line.traderId} · ${traderName}` : `机器人 #${line.traderId}`}
+                          >
+                            #{line.traderId}
+                            {traderName ? ` ${traderName}` : ''}
+                          </span>
+                        ) : (
+                          <span className="text-ink-faint">系统</span>
+                        )}
+                      </span>
+
+                      {/* 模块 */}
+                      <span className="min-w-0">
+                        <span
+                          className={cn(
+                            'inline-flex max-w-full items-center truncate rounded border px-1.5 py-0.5 font-sans text-[11px] font-medium leading-tight',
+                            SCOPE_TONE[kind] ?? SCOPE_TONE.other,
+                          )}
+                          title={line.scope ? `模块：${scopeName}（${line.scope}）` : '主程序'}
+                        >
+                          {scopeName}
+                        </span>
+                      </span>
+
+                      {/* 移动端快捷复制 */}
+                      <button
+                        type="button"
+                        onClick={() => void copySingleLine(rowKey, line)}
+                        title="复制此行日志"
+                        aria-label="复制此行日志"
+                        className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded text-ink-faint transition hover:bg-base-800 hover:text-ink-hi md:hidden"
+                      >
+                        {isCopied ? (
+                          <Check aria-hidden className="h-3.5 w-3.5 text-up" />
+                        ) : (
+                          <Copy aria-hidden className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
 
                     {/* 正文 */}
                     <span className="min-w-0 break-words text-ink-mid">
                       {highlightNumbers(line.message)}
                     </span>
 
-                    {/* 单行快捷复制 */}
+                    {/* 桌面端单行快捷复制 */}
                     <button
                       type="button"
                       onClick={() => void copySingleLine(rowKey, line)}

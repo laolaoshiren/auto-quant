@@ -297,7 +297,7 @@ export function ExchangeAccountsSection() {
           <div className="rounded-xl border border-base-750 bg-base-900 px-3.5 py-3">
             <div className="flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-mid">
-                <TestTube2 className="h-3.5 w-3.5 text-sky-400" />
+                <TestTube2 className="h-3.5 w-3.5 text-sky-400 [[data-skin='light']_&]:text-sky-600" />
                 测试网资产（虚拟联调）
               </span>
               <span className="num rounded bg-base-800 px-1.5 py-0.5 text-[11px] text-ink-lo">
@@ -424,7 +424,7 @@ export function ExchangeAccountsSection() {
               )}
             </div>
             <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-faint">
-              <Badge tone="muted">注：多把密钥指向同一账户时，合计会按凭证分别累加</Badge>
+              <Badge tone="muted" className="whitespace-normal">注：多把密钥指向同一账户时，合计会按凭证分别累加</Badge>
             </div>
           </div>
 

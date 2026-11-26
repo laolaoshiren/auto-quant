@@ -12,14 +12,14 @@ import type { MoreState } from './useTablePaging';
  * 展开态与收起态的滚动框高度。
  * 收起只改这一个 class：同一个 DOM 节点、同一个 `ref`、同一个 `root`，
  * React 只更新 `class`，不重挂（避免分页观察器失效）。
+ * 使用 `clamp` 确保手机横屏等矮视口下展开态（≥180px）恒高于收起态（120–160px），不会倒挂。
  */
-export const EXPANDED_MAX_H = 'max-h-[min(22vh,210px)]';
+export const EXPANDED_MAX_H = 'max-h-[clamp(180px,30dvh,260px)]';
 
 /**
- * 收起态：表头 + 至少 2 行。
- * `max()` 让它在小视口上保底 144px；大视口上仍然是 16vh。
+ * 收起态：表头 + 至少 2 行，恒小于展开态高度。
  */
-export const COLLAPSED_MAX_H = 'max-h-[max(16vh,144px)]';
+export const COLLAPSED_MAX_H = 'max-h-[clamp(120px,18dvh,160px)]';
 
 /* -------------------------------------------------------------------------- */
 /*  Shared column tooltips                                                     */
