@@ -9,7 +9,7 @@
  *    左右外围锚位标牌零重叠），支持一键切换「实时信号神经流」；
  * 5. 100% 真实数据驱动，严守 `lib/fleetTotals.ts` 口径，零虚构数据，切后台自动停帧零性能负担。
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Activity,
@@ -17,6 +17,8 @@ import {
   Cpu,
   Flame,
   GitBranch,
+  Maximize2,
+  Minimize2,
   Plus,
   Radar,
   Radio,
@@ -129,6 +131,47 @@ export function OverviewPage() {
   const [newOpen, setNewOpen] = useState(false);
   const [stageMode, setStageMode] = useState<'radar' | 'pipeline'>('radar');
   const [wireOffset, setWireOffset] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const observatoryRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      const fsEl = document.fullscreenElement;
+      setIsFullscreen(fsEl !== null && fsEl === observatoryRef.current);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isFullscreen && !document.fullscreenElement) {
+        setIsFullscreen(false);
+      }
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isFullscreen]);
+
+  const toggleFullscreen = useCallback(async () => {
+    const el = observatoryRef.current;
+    if (!el) return;
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        setIsFullscreen(false);
+      } else if (isFullscreen) {
+        setIsFullscreen(false);
+      } else if (typeof el.requestFullscreen === 'function') {
+        await el.requestFullscreen();
+        setIsFullscreen(true);
+      } else {
+        setIsFullscreen(true);
+      }
+    } catch {
+      // 若浏览器环境限制原生 Fullscreen API，则平滑回退到整页遮罩沉浸模式
+      setIsFullscreen((v) => !v);
+    }
+  }, [isFullscreen]);
 
   const tradersQuery = usePolled((signal) => api.traders(signal), {
     intervalMs: socketOpen ? 10_000 : 5_000,
@@ -348,7 +391,7 @@ export function OverviewPage() {
     const entries: WireEntry[] = [];
     const nowTime = new Date().toLocaleTimeString('zh-CN', { hour12: false });
 
-    for (const r of radarItems.slice(0, 6)) {
+    for (const r of radarItems.slice(0, 10)) {
       entries.push({
         key: `radar-${r.symbol}`,
         time: intelQuery.data?.radar?.updatedAt
@@ -363,7 +406,7 @@ export function OverviewPage() {
       });
     }
 
-    for (const rec of allDecisions.slice(0, 6)) {
+    for (const rec of allDecisions.slice(0, 12)) {
       const top = rec.decisions.find((d) => d.action !== 'wait' && d.action !== 'skip') ?? rec.decisions[0];
       const act = top
         ? (ACTION_TAG[top.action] ?? { label: top.action, color: 'text-slate-300' })
@@ -383,7 +426,7 @@ export function OverviewPage() {
       });
     }
 
-    for (const s of marketStats.heatTiles.slice(0, 10)) {
+    for (const s of marketStats.tickerItems.slice(0, 20)) {
       const up = s.changePercent24h >= 0;
       entries.push({
         key: `move-${s.symbol}`,
@@ -400,7 +443,7 @@ export function OverviewPage() {
     }
 
     return entries;
-  }, [radarItems, intelQuery.data, primaryManagedTrader, allDecisions, marketStats.heatTiles]);
+  }, [radarItems, intelQuery.data, primaryManagedTrader, allDecisions, marketStats.tickerItems]);
 
   useEffect(() => {
     if (wirePool.length <= 7) return;
@@ -412,7 +455,8 @@ export function OverviewPage() {
 
   const visibleWire = useMemo(() => {
     if (wirePool.length === 0) return [];
-    const count = Math.min(9, wirePool.length);
+    // 渲染足量条目确保在 1080p / 2K / 全屏大屏下完全铺满容器，底部零空白
+    const count = Math.min(26, wirePool.length);
     const out: WireEntry[] = [];
     for (let i = 0; i < count; i++) {
       out.push(wirePool[(wireOffset + i) % wirePool.length]!);
@@ -433,7 +477,15 @@ export function OverviewPage() {
       : null;
 
   return (
-    <div className="page-fill aq-observatory-bg -m-2 gap-2.5 rounded-xl p-3 text-slate-100 sm:-m-3 sm:p-3.5">
+    <div
+      ref={observatoryRef}
+      className={cn(
+        'aq-observatory-bg flex flex-col gap-2.5 text-slate-100',
+        isFullscreen
+          ? 'fixed inset-0 z-50 h-screen w-screen overflow-hidden rounded-none p-3.5'
+          : 'page-fill -m-2 rounded-xl p-3 sm:-m-3 sm:p-3.5',
+      )}
+    >
       <h1 className="sr-only">量化全景观测台总览</h1>
       <h2 className="sr-only">全市场实时监控与 AI500 神经信号观测总览</h2>
 
@@ -524,16 +576,45 @@ export function OverviewPage() {
               <span className="num font-bold tracking-wider text-white">{highFreqClock}</span>
             </div>
 
-            <Link
-              to="/traders"
-              className="inline-flex h-7 items-center gap-1 rounded-md border border-white/15 bg-white/[0.05] px-2.5 text-xs font-medium text-slate-200 transition hover:border-violet-400/50 hover:text-white"
+            {!isFullscreen && (
+              <>
+                <Link
+                  to="/traders"
+                  className="inline-flex h-7 items-center gap-1 rounded-md border border-white/15 bg-white/[0.05] px-2.5 text-xs font-medium text-slate-200 transition hover:border-violet-400/50 hover:text-white"
+                >
+                  机器人 ({traders.length})
+                </Link>
+                <Button variant="primary" className="h-7 px-2.5 text-xs" onClick={() => setNewOpen(true)}>
+                  <Plus className="h-3.5 w-3.5" aria-hidden />
+                  新建
+                </Button>
+              </>
+            )}
+
+            <button
+              type="button"
+              onClick={() => void toggleFullscreen()}
+              title={isFullscreen ? '退出全屏大屏模式（Esc）' : '进入纯净全屏大屏模式（隐藏系统边栏与浏览器界面）'}
+              aria-label={isFullscreen ? '退出全屏' : '全屏显示大屏'}
+              className={cn(
+                'inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition',
+                isFullscreen
+                  ? 'border-emerald-400/45 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25'
+                  : 'border-white/15 bg-white/[0.05] text-slate-200 hover:border-emerald-400/50 hover:text-white',
+              )}
             >
-              机器人 ({traders.length})
-            </Link>
-            <Button variant="primary" className="h-7 px-2.5 text-xs" onClick={() => setNewOpen(true)}>
-              <Plus className="h-3.5 w-3.5" aria-hidden />
-              新建
-            </Button>
+              {isFullscreen ? (
+                <>
+                  <Minimize2 className="h-3.5 w-3.5" aria-hidden />
+                  退出全屏
+                </>
+              ) : (
+                <>
+                  <Maximize2 className="h-3.5 w-3.5" aria-hidden />
+                  全屏
+                </>
+              )}
+            </button>
           </div>
         </div>
 
@@ -660,30 +741,36 @@ export function OverviewPage() {
               </span>
             </div>
 
-            <div className="min-h-0 flex-1 divide-y divide-white/[0.05] overflow-hidden px-2.5 py-1 font-mono text-[11px]">
-              {visibleWire.length === 0 ? (
-                <div className="py-10 text-center font-sans text-xs text-slate-500">正在接入实时量化数据流…</div>
-              ) : (
-                visibleWire.map((item, idx) => (
-                  <Link
-                    key={`${item.key}-${idx}`}
-                    to={item.to ?? '/market'}
-                    className={cn(
-                      'flex items-center justify-between gap-2 py-1.5 transition hover:bg-white/[0.05]',
-                      idx === 0 && 'bg-emerald-500/[0.06]',
-                    )}
-                  >
-                    <div className="flex min-w-0 items-center gap-1.5">
-                      <span className="shrink-0 text-[10px] text-slate-500">{item.time}</span>
-                      <span className={cn('shrink-0 rounded border px-1 py-px font-sans text-[10px] font-semibold', item.tagCls)}>
-                        {item.tag}
-                      </span>
-                      <span className="truncate font-sans text-slate-200">{item.body}</span>
-                    </div>
-                    <span className={cn('num shrink-0 font-bold', item.metricCls)}>{item.metric}</span>
-                  </Link>
-                ))
-              )}
+            <div className="relative min-h-0 flex-1 overflow-hidden">
+              <div className="h-full divide-y divide-white/[0.05] overflow-hidden px-2.5 py-1 font-mono text-[11px]">
+                {visibleWire.length === 0 ? (
+                  <div className="py-10 text-center font-sans text-xs text-slate-500">正在接入实时量化数据流…</div>
+                ) : (
+                  visibleWire.map((item, idx) => (
+                    <Link
+                      key={`${item.key}-${idx}`}
+                      to={item.to ?? '/market'}
+                      className={cn(
+                        'flex items-center justify-between gap-2 py-1.5 transition hover:bg-white/[0.05]',
+                        idx === 0 && 'bg-emerald-500/[0.06]',
+                      )}
+                    >
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span className="shrink-0 text-[10px] text-slate-500">{item.time}</span>
+                        <span className={cn('shrink-0 rounded border px-1 py-px font-sans text-[10px] font-semibold', item.tagCls)}>
+                          {item.tag}
+                        </span>
+                        <span className="truncate font-sans text-slate-200">{item.body}</span>
+                      </div>
+                      <span className={cn('num shrink-0 font-bold', item.metricCls)}>{item.metric}</span>
+                    </Link>
+                  ))
+                )}
+              </div>
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-[#080b14] to-transparent"
+              />
             </div>
           </section>
         </div>
