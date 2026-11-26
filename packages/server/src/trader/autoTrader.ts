@@ -4622,11 +4622,13 @@ export class AutoTrader {
     if (useManagedAgenticEngine && this.deps.model.chat && managedRadar) {
       usedManagedAgenticLoop = true;
       const heldSetForEngine = new Set(held);
+      const pendingSymbolsForEngine = positionStore.pending(traderId).map((row) => row.symbol);
       const engineResult = await runManagedAgenticLoop({
         traderId,
         model: { chat: this.deps.model.chat.bind(this.deps.model) },
         baseMessages,
         openPositions: promptPositions.map((p) => p.position),
+        pendingSymbols: pendingSymbolsForEngine,
         candidateSymbols: managedRadar.dossiers
           .filter((d) => !heldSetForEngine.has(d.symbol))
           .map((d) => d.symbol),

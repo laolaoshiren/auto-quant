@@ -65,6 +65,8 @@ export interface ManagedEngineInput {
   baseMessages: readonly ChatMessage[];
   /** 当前持仓（用于 update_thesis 校验与 finalize 完整性兜底）。 */
   openPositions: readonly PositionView[];
+  /** 当前待成交限价挂单标的（豁免观察池过滤并在 finalize 中保留/补齐 wait，防止掉出雷达 Top 4 后挂单评估被静默丢弃）。 */
+  pendingSymbols?: readonly string[];
   /** 本轮深度展开的候选标的（不含持仓，用于 finalize 完整性兜底）。 */
   candidateSymbols: readonly string[];
   /** 本轮 Prompt 中已展开完整 4h/15m/1m K 线的标的集合（含持仓+候选），用于拦截重复 get_klines 拖慢周期。 */
@@ -334,6 +336,7 @@ export function normalizeFinalizePayload(
   args: Record<string, unknown>,
   openPositions: readonly PositionView[],
   candidateSymbols: readonly string[],
+  pendingSymbols: readonly string[] = [],
 ): {
   text: string;
   pendingThesisPlans: Map<string, PendingThesisPlan>;
@@ -347,8 +350,10 @@ export function normalizeFinalizePayload(
   const normalizedDecisions: Array<Record<string, unknown>> = [];
   const coveredSymbols = new Set<string>();
   const openSymbolSet = new Set(openPositions.map((p) => normalizeSymbol(p.symbol)));
+  const pendingSymbolSet = new Set(pendingSymbols.map((s) => normalizeSymbol(s)).filter(Boolean));
   const allowedObservationSymbols = new Set<string>([
     ...openSymbolSet,
+    ...pendingSymbolSet,
     ...candidateSymbols.map((s) => normalizeSymbol(s)),
   ]);
 
@@ -425,6 +430,19 @@ export function normalizeFinalizePayload(
         action: 'hold',
         confidence: 70,
         reasoning: '本轮评估论点未失效，继续按既有止损与论点硬线持有观察。',
+      });
+    }
+  }
+
+  // 永不空决策兜底：确保每个待成交限价挂单也有明确表态（缺省补 `wait`，UI 自动渲染为「挂单等待」）
+  for (const sym of pendingSymbolSet) {
+    if (!coveredSymbols.has(sym)) {
+      coveredSymbols.add(sym);
+      normalizedDecisions.push({
+        symbol: sym,
+        action: 'wait',
+        confidence: 70,
+        reasoning: '待成交限价挂单尚未触发失效条件，继续保留挂单等待成交。',
       });
     }
   }
@@ -715,7 +733,12 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
       }
 
       if (call.name === 'finalize') {
-        finalized = normalizeFinalizePayload(args, input.openPositions, input.candidateSymbols);
+        finalized = normalizeFinalizePayload(
+          args,
+          input.openPositions,
+          input.candidateSymbols,
+          input.pendingSymbols,
+        );
         stageTrace.push(`finalize(${finalized.decisionCount})`);
         input.onStageEvent?.(
           'finalize',
@@ -764,6 +787,7 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
     },
     input.openPositions,
     input.candidateSymbols,
+    input.pendingSymbols,
   );
   stageTrace.push('fallback_hold_wait');
   return {
