@@ -177,6 +177,11 @@ import { DecisionArchiveModal } from './DecisionArchiveModal';
 import { humanizeToolNames } from '../lib/toolLabels';
 import { summarizeMemberOutput } from '../lib/memberSummary';
 import { plainText } from '../lib/plainText';
+import {
+  isActiveInFlightPending,
+  isPendingDecisionRecord,
+  preferCompletedDecision,
+} from '../lib/decisionPending';
 import { fmtInt, fmtLatency, fmtPriceUsd, fmtQty, fmtUsd, isNum, timeAgo } from '../lib/format';
 
 /**
@@ -213,9 +218,27 @@ const FEED_PAGE_LIMIT = FEED_PAGE_SIZE + 1;
  * 会作为下一页的第一条被取回来），WebSocket 推送又可能同一轮再来一份。
  */
 function mergeFresh(prev: DecisionRecord[], rows: DecisionRecord[]): DecisionRecord[] {
-  const seen = new Set(prev.map((record) => record.id));
-  const fresh = rows.filter((record) => !seen.has(record.id));
-  return fresh.length > 0 ? [...prev, ...fresh] : prev;
+  const indexById = new Map<number, number>();
+  prev.forEach((record, idx) => indexById.set(record.id, idx));
+
+  let next: DecisionRecord[] | null = null;
+  for (const row of rows) {
+    const existingIdx = indexById.get(row.id);
+    if (existingIdx === undefined) {
+      if (next === null) next = [...prev];
+      indexById.set(row.id, next.length);
+      next.push(row);
+      continue;
+    }
+    // 服务端 begin() 先插 pending 占位行，finish() 用同一 id 原地补完终态：
+    // 若旧缓存里存的是 pending 而新拉回的是终态，必须原地升级，不能永久停留在空白占位行。
+    const current = (next ?? prev)[existingIdx]!;
+    if (isPendingDecisionRecord(current) && !isPendingDecisionRecord(row)) {
+      if (next === null) next = [...prev];
+      next[existingIdx] = row;
+    }
+  }
+  return next ?? prev;
 }
 
 /**
@@ -722,15 +745,43 @@ export function DecisionFeed({
    * "列表挂上去了"会差一次重渲染，而挂在列表末尾的哨兵观察器只在这几个依赖变化时
    * 重新挂载 —— 它会永远挂不上，滚到底毫无反应（浏览器里实测到过这个情形）。
    */
-  const records = useMemo(() => {
+  const { records, pendingLiveCycle } = useMemo(() => {
     const merged = new Map<number, DecisionRecord>();
-    for (const record of loaded) merged.set(record.id, record);
-    for (const record of live ?? []) merged.set(record.id, record);
-    for (const record of (query.data ?? []).slice(0, FEED_PAGE_SIZE)) merged.set(record.id, record);
-    // 最新的一轮在最上面。第二关键字用 `id`：周期号理论上不会重复，
-    // 一旦重复（比如某一轮重试后写了两行），没有它列表顺序会随插入顺序抖动。
-    return [...merged.values()].sort((a, b) => b.cycleNumber - a.cycleNumber || b.id - a.id);
-  }, [loaded, query.data, live]);
+    const upsert = (record: DecisionRecord) => {
+      const prev = merged.get(record.id);
+      merged.set(record.id, prev ? preferCompletedDecision(prev, record) : record);
+    };
+    for (const record of loaded) upsert(record);
+    for (const record of (query.data ?? []).slice(0, FEED_PAGE_SIZE)) upsert(record);
+    // 实时 WebSocket 推送的终态记录最后写入，配合 preferCompletedDecision 绝不被旧轮询 pending 覆盖。
+    for (const record of live ?? []) upsert(record);
+
+    const sorted = [...merged.values()].sort((a, b) => b.cycleNumber - a.cycleNumber || b.id - a.id);
+    let activePending: DecisionRecord | null = null;
+    const finished: DecisionRecord[] = [];
+    for (const rec of sorted) {
+      if (
+        activePending === null &&
+        isActiveInFlightPending(rec, { isRunning, liveCycleNumber: liveCycle?.cycleNumber })
+      ) {
+        activePending = rec;
+        continue;
+      }
+      finished.push(rec);
+    }
+
+    const fallbackLive: LiveCycle | undefined = activePending
+      ? {
+          cycleNumber: activePending.cycleNumber,
+          startedAt: Number.isFinite(Date.parse(activePending.timestamp))
+            ? Date.parse(activePending.timestamp)
+            : Date.now(),
+          steps: [],
+        }
+      : undefined;
+
+    return { records: finished, pendingLiveCycle: fallbackLive };
+  }, [loaded, query.data, live, isRunning, liveCycle?.cycleNumber]);
 
   /*
    * 连续相同的轮次压成一段再渲染。
@@ -784,8 +835,11 @@ export function DecisionFeed({
    *    在途标记清掉，所以这里多数时候只是防御：万一标记和记录同时在（比如那一帧
    *    的处理顺序不如预期），宁可少显示一个占位条，也**绝不能**让同一轮出现两个条目。
    */
+  const effectiveLiveCycle = liveCycle ?? pendingLiveCycle;
   const showLive =
-    isRunning && liveCycle !== undefined && !records.some((record) => record.cycleNumber === liveCycle.cycleNumber);
+    isRunning &&
+    effectiveLiveCycle !== undefined &&
+    !records.some((record) => record.cycleNumber === effectiveLiveCycle.cycleNumber);
 
   /** 列表（滚动容器与哨兵）有没有挂上去 —— 观察器要在它出现的那一次重新挂。 */
   const listMounted = records.length > 0 || showLive;
@@ -1638,8 +1692,8 @@ export function DecisionFeed({
             按岗位摊开了，再插一条线性步骤列表就是同一个事实说两遍
             （用户对重复信息的容忍度很低，见 `LiveCycleBlock` 里那段注释）。
           */}
-          {showLive && liveCycle && mode !== 'ai_team' && (
-            <LiveCycleBlock key={liveCycle.cycleNumber} live={liveCycle} />
+          {showLive && effectiveLiveCycle && mode !== 'ai_team' && (
+            <LiveCycleBlock key={effectiveLiveCycle.cycleNumber} live={effectiveLiveCycle} />
           )}
 
           {records.length === 0 && !showLive && feedError === null ? (

@@ -47,6 +47,7 @@ import { Button, ErrorNote, cn } from '../components/ui';
 import { CoinIcon } from '../components/CoinIcon';
 import { NewTraderModal } from '../components/TraderModals';
 import { mergeEquityCurves } from '../components/equityCurve';
+import { isPendingDecisionRecord } from '../lib/decisionPending';
 import {
   HeatclockCanvas,
   NeuralPipelineCanvas,
@@ -259,6 +260,7 @@ export function OverviewPage() {
     const seen = new Set<number>();
     const out: DecisionRecord[] = [];
     for (const item of [...live, ...rest]) {
+      if (isPendingDecisionRecord(item)) continue;
       if (seen.has(item.id)) continue;
       seen.add(item.id);
       out.push(item);

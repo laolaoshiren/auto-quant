@@ -23,6 +23,7 @@ import type { Decision, DecisionRecord } from '@aq/shared';
 import { api } from '../lib/api';
 import { fmtInt, fmtLatency, fmtPriceUsd, fmtUsd, isNum } from '../lib/format';
 import { plainText } from '../lib/plainText';
+import { isPendingDecisionRecord } from '../lib/decisionPending';
 import { ActionBadge, isOpenAction } from './DecisionAudit';
 import { CoinIcon } from './CoinIcon';
 import { Button, Modal, Spinner3, cn } from './ui';
@@ -92,7 +93,7 @@ export function DecisionArchiveModal({
     setError(null);
     try {
       const page = await api.traderDecisions(traderId, { limit: PAGE_SIZE });
-      setRecords(page);
+      setRecords(page.filter((row) => !isPendingDecisionRecord(row)));
       setHasMore(page.length >= PAGE_SIZE);
     } catch (err) {
       setError((err as Error).message || '读取历史决策失败');
