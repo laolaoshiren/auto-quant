@@ -50,6 +50,7 @@ export type ParsedTooltip =
       kind: 'rich';
       headerLabel: string;
       headerValue?: string;
+      headerNote?: string;
       rows: TooltipRow[];
     };
 
@@ -105,6 +106,22 @@ export function parseTooltipContent(raw: string): ParsedTooltip {
 
   const rest = lines.slice(1);
   const headerSplit = splitKeyValue(first);
+  let headerLabel = first;
+  let headerValue: string | undefined;
+  let headerNote: string | undefined;
+
+  if (headerSplit) {
+    const parenMatch = /^([^（(]+?)\s*[（(]([^）)]+)[）)]$/.exec(headerSplit.value);
+    if (parenMatch && parenMatch[1] && parenMatch[2] && parenMatch[1].trim().length <= 24) {
+      headerLabel = headerSplit.label;
+      headerValue = parenMatch[1].trim();
+      headerNote = parenMatch[2].trim();
+    } else if (headerSplit.value.length <= 24) {
+      headerLabel = headerSplit.label;
+      headerValue = headerSplit.value;
+    }
+  }
+
   const rows: TooltipRow[] = rest.map((line) => {
     const bulletMatch = /^[·•\-–]\s*/.exec(line);
     const isBullet = Boolean(bulletMatch);
@@ -118,8 +135,9 @@ export function parseTooltipContent(raw: string): ParsedTooltip {
 
   return {
     kind: 'rich',
-    headerLabel: headerSplit ? headerSplit.label : first,
-    headerValue: headerSplit?.value,
+    headerLabel,
+    headerValue,
+    headerNote,
     rows,
   };
 }
@@ -488,22 +506,29 @@ export function GlobalTooltipLayer() {
       }}
       className={`pointer-events-none select-none aq-tooltip-surface ${animClass} ${
         parsed.kind === 'single'
-          ? 'max-w-[320px] rounded-lg px-2.5 py-1.5 text-[12px] font-medium leading-snug text-ink-hi'
-          : 'min-w-[220px] max-w-[360px] rounded-xl px-3 py-2.5 text-[12px] leading-relaxed text-ink-hi'
+          ? 'max-w-[min(340px,calc(100vw-24px))] rounded-lg px-2.5 py-1.5 text-[12px] font-medium leading-snug text-ink-hi'
+          : 'min-w-[230px] max-w-[min(430px,calc(100vw-24px))] rounded-xl px-3.5 py-2.5 text-[12px] leading-relaxed text-ink-hi'
       }`}
     >
       {parsed.kind === 'single' ? (
         <div className="break-words">{parsed.text}</div>
       ) : (
         <div>
-          <div className="mb-1.5 flex items-baseline justify-between gap-3 border-b border-base-700/75 pb-1.5">
-            <span className="font-semibold tracking-[0.01em] text-ink-strong break-words">
-              {parsed.headerLabel}
-            </span>
-            {parsed.headerValue && (
-              <span className="shrink-0 font-mono text-[12px] font-semibold tabular-nums text-accent">
-                {parsed.headerValue}
+          <div className="mb-2 border-b border-base-700/75 pb-1.5">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="font-semibold tracking-[0.01em] text-ink-strong break-words">
+                {parsed.headerLabel}
               </span>
+              {parsed.headerValue && (
+                <span className="shrink-0 font-mono text-[12px] font-semibold tabular-nums text-accent">
+                  {parsed.headerValue}
+                </span>
+              )}
+            </div>
+            {parsed.headerNote && (
+              <div className="mt-0.5 text-[11px] leading-snug text-ink-faint">
+                {parsed.headerNote}
+              </div>
             )}
           </div>
           <div className="space-y-1">

@@ -14,9 +14,9 @@ describe('parseTooltipContent', () => {
     });
   });
 
-  it('parses structured multi-line token billing tooltip with header value and kv rows', () => {
+  it('parses structured multi-line token billing tooltip with header value, note, and kv rows', () => {
     const raw = [
-      '本轮 Token 估算费用：$0.0111',
+      '本轮 Token 估算费用：$0.0111（不计入实盘交易盈亏）',
       '· 未缓存输入：16,844 × $0.3/1M = $0.0051',
       '· 缓存命中：24,064 × $0.03/1M = $0.0007',
       '· 输出（含思考）：4,200 × $1.25/1M = $0.0053',
@@ -29,6 +29,7 @@ describe('parseTooltipContent', () => {
 
     assert.equal(parsed.headerLabel, '本轮 Token 估算费用');
     assert.equal(parsed.headerValue, '$0.0111');
+    assert.equal(parsed.headerNote, '不计入实盘交易盈亏');
     assert.deepEqual(parsed.rows, [
       { kind: 'kv', label: '未缓存输入', value: '16,844 × $0.3/1M = $0.0051', isBullet: true },
       { kind: 'kv', label: '缓存命中', value: '24,064 × $0.03/1M = $0.0007', isBullet: true },
@@ -45,6 +46,7 @@ describe('parseTooltipContent', () => {
       kind: 'rich',
       headerLabel: '输入 40,908 tokens 中 24,064 命中前缀缓存（59%）',
       headerValue: undefined,
+      headerNote: undefined,
       rows: [
         {
           kind: 'note',
