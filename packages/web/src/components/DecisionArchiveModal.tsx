@@ -369,7 +369,7 @@ export function DecisionArchiveModal({
                             <span className="font-mono text-xs font-semibold text-ink-hi">
                               {d.symbol.replace(/USDT$/i, '')}
                             </span>
-                            <ActionBadge action={d.action} className="px-1 py-0 text-[10px]" />
+                            <ActionBadge action={d.action} reasoning={d.reasoning} className="px-1 py-0 text-[10px]" />
                           </span>
                         ))}
                         {decisions.length > shownSummary.length && (
@@ -425,7 +425,7 @@ export function DecisionArchiveModal({
                                 {d.leverage > 0 ? ` · 杠杆 ${d.leverage}x` : ''}
                               </span>
                             )}
-                            <ActionBadge action={d.action} className="ml-auto" />
+                            <ActionBadge action={d.action} reasoning={d.reasoning} className="ml-auto" />
                           </div>
                           {d.reasoning && (
                             <p className="mt-1 leading-relaxed text-ink-mid">{plainText(d.reasoning)}</p>

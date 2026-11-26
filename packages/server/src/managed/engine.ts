@@ -206,7 +206,7 @@ export const MANAGED_AGENT_TOOLS: readonly ToolSpec[] = [
   {
     name: 'finalize',
     description:
-      '【第 3 步·必选终结】提交本轮最终交易决策。严禁空决策：必须对每个当前持仓给出 hold 或战术动作（close/reduce/add/adjust_protection），对每个重点候选给出 wait/skip 或开仓动作（open_long/open_short）。执行 add_to_position 顺势滚仓时，请同步传入 position_size_usd、合并保本 stop_loss 以及顺延拓展后的新 take_profit。调用此工具后本轮决策立即结束。',
+      '【第 3 步·必选终结】提交本轮最终交易决策。严禁空决策：必须对每个已成交的真实持仓给出 hold 或战术动作（close/reduce/add/adjust_protection）；对未成交的待成交限价挂单，继续保留等待成交必须用 wait（切勿用 hold），需撤单时用 cancel_pending；对每个重点候选给出 wait/skip 或开仓动作（open_long/open_short）。执行 add_to_position 顺势滚仓时，请同步传入 position_size_usd、合并保本 stop_loss 以及顺延拓展后的新 take_profit。调用此工具后本轮决策立即结束。',
     parameters: {
       type: 'object',
       properties: {
@@ -346,8 +346,9 @@ export function normalizeFinalizePayload(
   const pendingThesisPlans = new Map<string, PendingThesisPlan>();
   const normalizedDecisions: Array<Record<string, unknown>> = [];
   const coveredSymbols = new Set<string>();
+  const openSymbolSet = new Set(openPositions.map((p) => normalizeSymbol(p.symbol)));
   const allowedObservationSymbols = new Set<string>([
-    ...openPositions.map((p) => normalizeSymbol(p.symbol)),
+    ...openSymbolSet,
     ...candidateSymbols.map((s) => normalizeSymbol(s)),
   ]);
 
@@ -356,8 +357,13 @@ export function normalizeFinalizePayload(
     const obj = item as Record<string, unknown>;
     const sym = normalizeSymbol(String(obj['symbol'] ?? ''));
     const rawAction = String(obj['action'] ?? '').trim();
-    const action = rawAction === 'add_position' ? 'add_to_position' : rawAction;
+    let action = rawAction === 'add_position' ? 'add_to_position' : rawAction;
     if (!sym || !action) continue;
+
+    // 语义防呆：`hold` 仅允许用于已成交的真实持仓；待成交限价挂单或观察标的误标 `hold` 一律纠偏为 `wait`
+    if (action === 'hold' && !openSymbolSet.has(sym)) {
+      action = 'wait';
+    }
 
     // 对未展开的雷达榜外围标的，纯观察性 wait/skip 不送入解析器以免产生误报 rejected:wait/skip
     if (

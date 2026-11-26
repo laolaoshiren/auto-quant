@@ -346,7 +346,7 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
                         <CoinIcon symbol={decision.symbol} />
                         <span className="font-mono text-sm font-bold text-ink-hi">{decision.symbol}</span>
                         <span title={`存储值 action = ${decision.action}`}>
-                          <ActionBadge action={decision.action} />
+                          <ActionBadge action={decision.action} reasoning={decision.reasoning} />
                         </span>
                         {/* 修复 0x BUG：仅当 leverage > 0 时渲染杠杆徽章 */}
                         {hasLeverage && (

@@ -2660,7 +2660,7 @@ function DecisionRow({
           </span>
         )}
 
-        <ActionBadge action={decision.action} className="ml-auto shrink-0" />
+        <ActionBadge action={decision.action} reasoning={decision.reasoning} className="ml-auto shrink-0" />
       </div>
 
       {decision.reasoning && <FormattedReasoning text={decision.reasoning} />}

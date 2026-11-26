@@ -161,8 +161,45 @@ export const EXEC_TEXT_CLASS: Record<ExecutionLogEntry['status'], string> = {
 /*  Action badge                                                               */
 /* -------------------------------------------------------------------------- */
 
-/** Compact left badge used by the feed: 开多 / 平空 / 持有 … */
-export function ActionBadge({ action, className }: { action: string; className?: string }) {
+const PENDING_ORDER_WAIT_RE =
+  /(?:(?:保留|维持|继续等待?|继续持有|留着|暂不撤).{0,12}(?:挂单|限价[多空单]?|委托)|(?:挂单|限价[多空]|待成交|委托).{0,16}(?:继续等|保留|未成交|等待成交|暂不撤|挂着))/;
+const FILLED_POSITION_RE = /(?:浮盈|浮亏|未实现盈亏|持仓均价|开仓均价|ROE|持仓\s*\d+[mh]|已成交持仓)/;
+
+/**
+ * 识别「未成交限价委托继续等待」语义（既兼容历史记录里模型误吐的 `hold`，也区分于空仓观望的 `wait`）。
+ */
+export function isPendingOrderWaitDecision(action: string, reasoning?: string | null): boolean {
+  if (action !== 'hold' && action !== 'wait') return false;
+  if (!reasoning) return false;
+  if (FILLED_POSITION_RE.test(reasoning)) return false;
+  return PENDING_ORDER_WAIT_RE.test(reasoning);
+}
+
+/** Compact left badge used by the feed: 开多 / 平空 / 持有 / 挂单等待 … */
+export function ActionBadge({
+  action,
+  reasoning,
+  className,
+}: {
+  action: string;
+  reasoning?: string | null;
+  className?: string;
+}) {
+  const pendingWait = isPendingOrderWaitDecision(action, reasoning);
+  if (pendingWait) {
+    return (
+      <Badge
+        tone="warn"
+        className={cn(
+          "border-amber-400/40 bg-amber-500/12 text-amber-300 [[data-skin='light']_&]:border-amber-700/35 [[data-skin='light']_&]:bg-amber-500/12 [[data-skin='light']_&]:text-amber-800",
+          className,
+        )}
+        title={`${action}（待成交委托挂单继续等待）`}
+      >
+        挂单等待
+      </Badge>
+    );
+  }
   return (
     // The machine code goes in the tooltip rather than being translated away:
     // an unknown action renders as its raw code on purpose, and the operator
