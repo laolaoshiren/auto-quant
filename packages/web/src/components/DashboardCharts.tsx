@@ -358,15 +358,15 @@ export function DashboardEquityChart({
     <div
       className={`aq-chart-stage relative h-full ${rising ? 'aq-chart-stage-up' : 'aq-chart-stage-down'}`}
     >
-      {/* 顶部柔和极光微线 */}
+      {/* 顶部柔和指示细线 */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-x-0 top-0 z-10 h-px"
         style={{
-          background: `linear-gradient(90deg, transparent 5%, ${stroke}88 50%, transparent 95%)`,
+          background: `linear-gradient(90deg, transparent 10%, ${stroke}33 50%, transparent 90%)`,
         }}
       />
-      {/* 极低存在感的水平光幕巡检扫光 */}
+      {/* 极克制的缓慢光幕微扫 */}
       <div aria-hidden className="aq-chart-scan-beam z-0" />
 
       {/* 切换时间范围（1D/7D/1M/3M/全部）时平滑从左到右展开，后台轮询不触发闪烁 */}
@@ -376,33 +376,25 @@ export function DashboardEquityChart({
               magnitude, and a title would cost the curve real width. */}
           <AreaChart data={points} margin={{ top: 14, right: 14, left: 0, bottom: 2 }}>
             <defs>
-              {/* 曲线外发光滤镜 */}
-              <filter id="dashboardEquityGlow" x="-10%" y="-30%" width="120%" height="160%">
-                <feGaussianBlur stdDeviation="3.2" result="blur" />
-                <feMerge>
-                  <feMergeNode in="blur" />
-                  <feMergeNode in="SourceGraphic" />
-                </feMerge>
-              </filter>
-              {/* 三段通透面积渐变 */}
+              {/* 克制通透的三段面积渐变（低饱和、久看不累） */}
               <linearGradient id="dashboardEquityFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={stroke} stopOpacity={0.36} />
-                <stop offset="52%" stopColor={stroke} stopOpacity={0.12} />
-                <stop offset="100%" stopColor={stroke} stopOpacity={0.01} />
-              </linearGradient>
-              {/* 沿曲线匀速流淌的高光能量束（纯 SVG SMIL，不触发 React 重渲染） */}
-              <linearGradient id="dashboardEquityComet" x1="-35%" y1="0%" x2="0%" y2="0%">
-                <stop offset="0%" stopColor={stroke} stopOpacity={0} />
-                <stop offset="50%" stopColor="#ffffff" stopOpacity={0.9} />
-                <stop offset="75%" stopColor={stroke} stopOpacity={0.95} />
+                <stop offset="0%" stopColor={stroke} stopOpacity={0.16} />
+                <stop offset="55%" stopColor={stroke} stopOpacity={0.045} />
                 <stop offset="100%" stopColor={stroke} stopOpacity={0} />
-                <animate attributeName="x1" from="-35%" to="115%" dur="4.8s" repeatCount="indefinite" />
-                <animate attributeName="x2" from="0%" to="150%" dur="4.8s" repeatCount="indefinite" />
+              </linearGradient>
+              {/* 沿曲线缓步流淌的微光（克制柔和，不刺眼） */}
+              <linearGradient id="dashboardEquityComet" x1="-30%" y1="0%" x2="0%" y2="0%">
+                <stop offset="0%" stopColor={stroke} stopOpacity={0} />
+                <stop offset="50%" stopColor="#ffffff" stopOpacity={0.38} />
+                <stop offset="78%" stopColor={stroke} stopOpacity={0.48} />
+                <stop offset="100%" stopColor={stroke} stopOpacity={0} />
+                <animate attributeName="x1" from="-30%" to="115%" dur="6.8s" repeatCount="indefinite" />
+                <animate attributeName="x2" from="0%" to="145%" dur="6.8s" repeatCount="indefinite" />
               </linearGradient>
             </defs>
             {/* Horizontal only: vertical lines land on the time labels and turn a
                 dense window into a barcode. */}
-            <CartesianGrid stroke={ink.grid} strokeOpacity={0.7} strokeDasharray="3 4" vertical={false} />
+            <CartesianGrid stroke={ink.grid} strokeOpacity={0.55} strokeDasharray="3 4" vertical={false} />
             <XAxis
               dataKey="t"
               type="number"
@@ -445,18 +437,18 @@ export function DashboardEquityChart({
               y={referenceValue}
               stroke={ink.rule}
               strokeDasharray="4 4"
-              strokeOpacity={0.85}
+              strokeOpacity={0.7}
               label={{ value: '初始', fill: ink.axis, fontSize: 10, position: 'insideTopRight' }}
               ifOverflow="extendDomain"
             />
-            {/* 主面积 + 发光权益曲线 + 实时末端雷达脉搏点 / 真实峰值菱形标 */}
+            {/* 主面积 + 利落主曲线 + 柔和实时末端呼吸点 / 真实峰值轻标记 */}
             <Area
               type="monotone"
               dataKey="equity"
               stroke={stroke}
-              strokeWidth={2.2}
+              strokeOpacity={0.92}
+              strokeWidth={1.85}
               fill="url(#dashboardEquityFill)"
-              style={{ filter: 'url(#dashboardEquityGlow)' }}
               isAnimationActive={false}
               dot={(dotProps) => {
                 const { cx, cy, index } = dotProps as { cx?: number; cy?: number; index?: number };
@@ -469,39 +461,29 @@ export function DashboardEquityChart({
                       <circle
                         cx={cx}
                         cy={cy}
-                        r={4.5}
-                        fill="none"
-                        stroke={stroke}
-                        strokeWidth={1.6}
-                        className="aq-chart-sonar-ring"
-                      />
-                      <circle
-                        cx={cx}
-                        cy={cy}
-                        r={4.5}
+                        r={4}
                         fill="none"
                         stroke={stroke}
                         strokeWidth={1.2}
-                        className="aq-chart-sonar-ring-delay"
+                        strokeOpacity={0.65}
+                        className="aq-chart-sonar-ring"
                       />
-                      <circle cx={cx} cy={cy} r={6.5} fill={stroke} fillOpacity={0.22} />
-                      <circle cx={cx} cy={cy} r={3.4} fill={stroke} stroke={ink.surface} strokeWidth={1.5} />
-                      <circle cx={cx} cy={cy} r={1.3} fill="#ffffff" fillOpacity={0.95} />
+                      <circle cx={cx} cy={cy} r={5} fill={stroke} fillOpacity={0.14} />
+                      <circle cx={cx} cy={cy} r={2.8} fill={stroke} stroke={ink.surface} strokeWidth={1.4} />
                     </g>
                   );
                 }
                 if (index === peakIndex) {
                   return (
                     <g key="peak-marker">
-                      <circle cx={cx} cy={cy} r={4.5} fill={ink.up} fillOpacity={0.2} />
-                      <circle cx={cx} cy={cy} r={2.3} fill={ink.up} stroke={ink.surface} strokeWidth={1.2} />
+                      <circle cx={cx} cy={cy} r={2.2} fill={ink.up} fillOpacity={0.85} stroke={ink.surface} strokeWidth={1} />
                       <text
                         x={cx}
-                        y={Math.max(11, cy - 8)}
+                        y={Math.max(11, cy - 7)}
                         textAnchor="middle"
-                        fill={ink.up}
+                        fill={ink.inkMid}
                         fontSize={10}
-                        fontWeight={600}
+                        fontWeight={500}
                         className="num"
                       >
                         峰 {fmtNum(max, 2)}
@@ -512,19 +494,18 @@ export function DashboardEquityChart({
                 return <g key={`d-${index}`} />;
               }}
               activeDot={{
-                r: 5,
+                r: 4,
                 fill: stroke,
-                stroke: '#ffffff',
+                stroke: ink.surface,
                 strokeWidth: 2,
-                style: { filter: `drop-shadow(0 0 6px ${stroke})` },
               }}
             />
-            {/* 叠加流光能量束层：不拦截悬停事件，只负责沿真实曲线匀速流淌微光 */}
+            {/* 柔和流光层：不拦截悬停事件，只沿真实曲线缓步流动 */}
             <Area
               type="monotone"
               dataKey="equity"
               stroke="url(#dashboardEquityComet)"
-              strokeWidth={2.6}
+              strokeWidth={2}
               fill="none"
               dot={false}
               activeDot={false}

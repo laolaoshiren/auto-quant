@@ -2782,9 +2782,9 @@ function EquityWindowLine({
   const positive = delta > 5e-9;
   const negative = delta < -5e-9;
   const pctBadgeCls = positive
-    ? 'border-up/35 bg-up/12 text-up'
+    ? 'border-up/25 bg-up/8 text-up/90'
     : negative
-      ? 'border-down/35 bg-down/12 text-down'
+      ? 'border-down/25 bg-down/8 text-down/90'
       : 'border-base-700 bg-base-850 text-ink-mid';
 
   return (
@@ -2795,17 +2795,10 @@ function EquityWindowLine({
       >
         本段变化
       </span>
-      <span
-        className={cn(
-          'num text-base font-semibold tracking-tight',
-          pnlColor(delta),
-          positive && 'drop-shadow-[0_0_8px_rgb(var(--aq-up-rgb)/0.35)]',
-          negative && 'drop-shadow-[0_0_8px_rgb(var(--aq-down-rgb)/0.35)]',
-        )}
-      >
+      <span className={cn('num text-base font-semibold tracking-tight', pnlColor(delta))}>
         {fmtUsdSigned(delta, 2)} {asset}
       </span>
-      <span className={cn('num rounded-md border px-1.5 py-0.5 text-[11px] font-semibold leading-none', pctBadgeCls)}>
+      <span className={cn('num rounded-md border px-1.5 py-0.5 text-[11px] font-medium leading-none', pctBadgeCls)}>
         {fmtPercent(percent)}
       </span>
 
@@ -2813,41 +2806,41 @@ function EquityWindowLine({
         <span className="ml-auto flex flex-wrap items-center gap-1.5 text-[11px]">
           {high !== undefined && (
             <span
-              className="inline-flex items-baseline gap-1 rounded border border-up/25 bg-up/8 px-1.5 py-0.5"
+              className="inline-flex items-baseline gap-1 rounded border border-base-750/80 bg-base-900/55 px-1.5 py-0.5"
               title="当前所选区间内的最高权益"
             >
-              <span className="text-up/75">峰值</span>
-              <strong className="num font-semibold text-up">{fmtNum(high, 2)}</strong>
+              <span className="text-ink-faint">峰值</span>
+              <strong className="num font-medium text-up/90">{fmtNum(high, 2)}</strong>
             </span>
           )}
           {low !== undefined && (
             <span
-              className="inline-flex items-baseline gap-1 rounded border border-down/25 bg-down/8 px-1.5 py-0.5"
+              className="inline-flex items-baseline gap-1 rounded border border-base-750/80 bg-base-900/55 px-1.5 py-0.5"
               title="当前所选区间内的最低权益"
             >
-              <span className="text-down/75">最低</span>
-              <strong className="num font-semibold text-down">{fmtNum(low, 2)}</strong>
+              <span className="text-ink-faint">最低</span>
+              <strong className="num font-medium text-down/90">{fmtNum(low, 2)}</strong>
             </span>
           )}
           {maxDrawdownPct !== undefined && maxDrawdownPct > 0.005 && (
             <span
-              className="inline-flex items-baseline gap-1 rounded border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 [[data-skin='light']_&]:border-amber-700/30"
+              className="inline-flex items-baseline gap-1 rounded border border-base-750/80 bg-base-900/55 px-1.5 py-0.5"
               title="当前区间从阶段高点到后续低点的最大回撤幅度"
             >
-              <span className="text-amber-300/80 [[data-skin='light']_&]:text-amber-800/80">回撤</span>
-              <strong className="num font-semibold text-amber-300 [[data-skin='light']_&]:text-amber-800">
+              <span className="text-ink-faint">回撤</span>
+              <strong className="num font-medium text-ink-mid">
                 -{fmtNum(maxDrawdownPct, 2)}%
               </strong>
             </span>
           )}
           {running && (
             <span
-              className="inline-flex items-center gap-1 rounded-full border border-up/35 bg-up/10 px-2 py-0.5 text-[10px] font-medium text-up"
+              className="inline-flex items-center gap-1 rounded-full border border-base-750/80 bg-base-900/55 px-2 py-0.5 text-[10px] font-medium text-ink-lo"
               title="机器人运行中，曲线实时同步最新账户权益"
             >
               <span className="relative flex h-1.5 w-1.5">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-up opacity-75" />
-                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-up" />
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-up/60 opacity-75" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-up/90" />
               </span>
               实时
             </span>
