@@ -347,25 +347,26 @@ html.aq-quill body {
 /*
  * 滚动条。
  *
- * ⚠️ 三条都要重写（`scrollbar-color`、thumb、thumb:hover）——
- * `index.css` 里那三条用的是 `--aq-base-600` 与 `--aq-ink-lo`，而这两个
- * 变量在浅色下会翻成浅灰，滚动条就消失了。
+ * ⚠️ 浅色与深色都走变量；标准 `scrollbar-color` 仅给不支持 `::-webkit-scrollbar`
+ * 的引擎（Firefox）使用，避免 Chromium 121+ 回退成带 ▲▼ 箭头的原生滚动条。
  */
-html.aq-quill * {
-  scrollbar-color: var(--aq-ink-faint) transparent;
+@supports not selector(::-webkit-scrollbar) {
+  html.aq-quill * {
+    scrollbar-color: var(--aq-ink-faint) transparent;
+  }
 }
 html.aq-quill ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 7px;
+  height: 7px;
 }
 html.aq-quill ::-webkit-scrollbar-track {
   background: transparent;
 }
 html.aq-quill ::-webkit-scrollbar-thumb {
-  background: var(--aq-ink-faint);
-  border: 3px solid transparent;
+  background: color-mix(in srgb, var(--aq-ink-faint) 65%, transparent);
+  border: 2px solid transparent;
   background-clip: content-box;
-  border-radius: 8px;
+  border-radius: 9999px;
 }
 html.aq-quill ::-webkit-scrollbar-thumb:hover {
   background: var(--aq-ink-lo);
@@ -878,8 +879,10 @@ html.aq-quill .num.text-3xl {
 
 /* 需要横滚的**表格自己套 `.scroll-x`**，外层容器 `overflow: hidden` ——
    这样横滚条只出现在表格下方，而不是整页底部。 */
-html.aq-quill .scroll-x {
-  scrollbar-width: thin;
+@supports not selector(::-webkit-scrollbar) {
+  html.aq-quill .scroll-x {
+    scrollbar-width: thin;
+  }
 }
 
 /* -------------------------------------------------------------------------- */

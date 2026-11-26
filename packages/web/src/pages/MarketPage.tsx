@@ -9,8 +9,8 @@
  * - 数字一律 `.num` + 右对齐，否则数值一变列就左右抖；
  * - 交易对清单**渲染上限 120 行**，多出来的靠搜索找，不能让上千行把页面拖死。
  */
-import { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, RefreshCw, Search } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, RefreshCw, Search } from 'lucide-react';
 import type { ExchangeId } from '@aq/shared';
 import { api, type MarketSymbol } from '../lib/api';
 import { useEvents } from '../lib/store';
@@ -39,8 +39,12 @@ const MARKET_EXCHANGES: ReadonlyArray<{ id: ExchangeId; label: string }> = [
 const NO_SYMBOLS: MarketSymbol[] = [];
 type Interval = (typeof INTERVALS)[number];
 
-/** 一次能扫完的行数上限；再多的靠搜索定位，不靠滚动。 */
-const MAX_ROWS = 120;
+/** 桌面端单行高度预算（含 1px 边框与高 DPI 余量），用于按视口高度自动计算每页条数。 */
+const DESKTOP_ROW_HEIGHT_PX = 33;
+/** 极窄/极矮窗口下保底展示行数；再矮则由容器自动兜底滚动。 */
+const MIN_DESKTOP_PAGE_SIZE = 6;
+/** 中小屏（< xl，堆叠在图表下方）固定每页条数，避免面板内再套一层竖向滚动条。 */
+const STACKED_PAGE_SIZE = 10;
 
 type SortKey = 'symbol' | 'price' | 'change' | 'volume';
 type SortDir = 'asc' | 'desc';
@@ -81,6 +85,10 @@ export function MarketPage() {
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('volume');
   const [sortDir, setSortDir] = useState<SortDir>(DEFAULT_DIR.volume);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(16);
+  const tableBoxRef = useRef<HTMLDivElement | null>(null);
+  const theadRef = useRef<HTMLTableSectionElement | null>(null);
 
   // Fall back to the deepest market when the preferred default is not listed.
   useEffect(() => {
@@ -89,18 +97,13 @@ export function MarketPage() {
     setSelected(symbols[0]?.symbol ?? 'BTCUSDT');
   }, [symbols, selected]);
 
-  const klinesQuery = usePolled(
-    (signal) => api.marketKlines(selected, interval, 400, signal, exchange),
-    { intervalMs: 15_000, enabled: selected.length > 0, deps: [selected, interval, exchange] },
-  );
-
   const matched = useMemo(() => {
     const term = search.trim().toUpperCase();
     if (!term) return symbols;
     return symbols.filter((row) => row.symbol.includes(term) || row.baseAsset.includes(term));
   }, [symbols, search]);
 
-  const filtered = useMemo(() => {
+  const sortedAll = useMemo(() => {
     const sorted = [...matched];
     const factor = sortDir === 'asc' ? 1 : -1;
     sorted.sort((a, b) => {
@@ -115,8 +118,63 @@ export function MarketPage() {
           return (a.quoteVolume24h - b.quoteVolume24h) * factor;
       }
     });
-    return sorted.slice(0, MAX_ROWS);
+    return sorted;
   }, [matched, sortKey, sortDir]);
+
+  const hasTable = sortedAll.length > 0;
+
+  // 随容器高度自动计算每页可完整容纳的行数，正常窗口不出现竖向滚动条；
+  // 仅当视口极端矮小（放不下保底行数）时由容器自然兜底滚动。
+  useEffect(() => {
+    const box = tableBoxRef.current;
+    if (!box) return;
+    let rafId = 0;
+
+    const recalc = () => {
+      const isDesktopSplit = window.matchMedia('(min-width: 1280px)').matches;
+      if (!isDesktopSplit) {
+        setPageSize((prev) => (prev === STACKED_PAGE_SIZE ? prev : STACKED_PAGE_SIZE));
+        return;
+      }
+      const boxHeight = box.clientHeight;
+      if (boxHeight <= 0) return;
+      const theadHeight = theadRef.current?.getBoundingClientRect().height ?? 34;
+      const fitRows = Math.floor((boxHeight - theadHeight - 6) / DESKTOP_ROW_HEIGHT_PX);
+      const next = Math.max(MIN_DESKTOP_PAGE_SIZE, fitRows);
+      setPageSize((prev) => (prev === next ? prev : next));
+    };
+
+    const schedule = () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(recalc);
+    };
+
+    recalc();
+    const ro = new ResizeObserver(schedule);
+    ro.observe(box);
+    window.addEventListener('resize', schedule);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      ro.disconnect();
+      window.removeEventListener('resize', schedule);
+    };
+  }, [hasTable]);
+
+  const klinesQuery = usePolled(
+    (signal) => api.marketKlines(selected, interval, 400, signal, exchange),
+    { intervalMs: 15_000, enabled: selected.length > 0, deps: [selected, interval, exchange] },
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, sortKey, sortDir, exchange]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedAll.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const filtered = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return sortedAll.slice(start, start + pageSize);
+  }, [sortedAll, safePage, pageSize]);
 
   /** 点同一列切换方向，换一列则用该列的默认方向。 */
   const toggleSort = (key: SortKey) => {
@@ -133,7 +191,6 @@ export function MarketPage() {
   const last = candles[candles.length - 1];
   const first = candles[0];
   const windowChange = last && first && first.open !== 0 ? ((last.close - first.open) / first.open) * 100 : null;
-  const hiddenRows = matched.length - filtered.length;
 
   return (
     /*
@@ -201,21 +258,21 @@ export function MarketPage() {
         `min-h-0` 让这一行能**被压到比内容矮**：它是 `page-fill` 的 flex 子项，
         默认 `min-height:auto` 时会被两栏的内容顶高，整页照样溢出。
       */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,440px)_minmax(0,1fr)]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,460px)_minmax(0,1fr)]">
         {/* ---------------------------------------------------------------- */}
         {/*  交易对清单                                                       */}
         {/* ---------------------------------------------------------------- */}
         <Panel
           title="交易对"
           /*
-           * 左栏在宽屏撑满这一行的高度，表格体内部滚动；在 < xl 视口下放到图表下方并限定上限高度，
-           * 防止上百行把页面或右侧 K 线容器无限拉长。
+           * 桌面端（xl）随可视高度自动分页，正常窗口内零竖向/横向滚动条；
+           * 中小屏（< xl）堆叠在图表下方，每页 10 条自然展示，避免嵌套滚动条。
            */
-          className="flex max-h-[42dvh] min-h-[220px] flex-col xl:max-h-none xl:min-h-0"
+          className="flex flex-col xl:min-h-0"
           bodyClassName="flex min-h-0 flex-1 flex-col p-2"
           actions={
             <span className="num text-xs text-ink-faint">
-              {filtered.length} / {matched.length}
+              {search.trim() ? `${sortedAll.length} / ${symbols.length}` : `${symbols.length} 个`}
             </span>
           }
           padded={false}
@@ -260,21 +317,14 @@ export function MarketPage() {
           ) : (
             <>
               {/*
-               * ⚠️ **不出现横向滚动条**（2026-11-10 用户明确要求：
-               * 「不应该出现横向滚动条（完全能容纳下数据）」）。
-               *
-               * 之前这里用 `scroll-x` 让 4 列在窄屏自己横滚 —— 那是把"放不下"
-               * 当成排版的默认解法，用户看到的是右边界被切、底部一条横向滚动条。
-               *
-               * 现在：
-               *  · 表格 `table-fixed w-full`（列宽按比例分配，不再按内容撑开）；
-               *  · 窄屏（< md）**隐藏 24h 成交额列** —— 它是三列里唯一"少了也不影响
-               *    判断"的辅助信息，手机/窄窗口上优先保价格与涨跌；
-               *  · 数字列 `whitespace-nowrap`、交易对列 `truncate`，避免文字把列顶宽。
+               * 正常窗口不出现横向与竖向滚动条：
+               *  · `table-fixed w-full min-w-[260px]` 按列宽比例完整容纳四列，仅在极端窄屏（<260px）兜底横滚；
+               *  · 桌面端（xl）按容器实测高度自动分页（ResizeObserver），仅在极端矮屏（放不下保底 6 行）兜底竖滚；
+               *  · 中小屏（< xl）隐藏 24h 成交额列并每页展示 10 行，避免面板内嵌套滚动条。
                */}
-              <div className="scroll-x min-h-0 flex-1 overflow-y-auto">
-                <table className="w-full border-collapse">
-                  <thead className="sticky top-0 z-10 bg-base-900">
+              <div ref={tableBoxRef} className="min-h-0 flex-1 overflow-auto">
+                <table className="w-full min-w-[260px] table-fixed border-collapse">
+                  <thead ref={theadRef} className="sticky top-0 z-10 bg-base-900">
                     <tr>
                       {(['symbol', 'price', 'change', 'volume'] as SortKey[]).map((key) => (
                         <th
@@ -283,8 +333,10 @@ export function MarketPage() {
                           aria-sort={sortKey === key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
                           className={cn(
                             'th whitespace-nowrap px-1.5',
-                            key !== 'symbol' && 'text-right',
-                            key === 'volume' && 'hidden xl:table-cell',
+                            key === 'symbol' && 'w-[42%] xl:w-[30%]',
+                            key === 'price' && 'w-[33%] text-right xl:w-[23%]',
+                            key === 'change' && 'w-[25%] text-right xl:w-[19%]',
+                            key === 'volume' && 'hidden text-right xl:table-cell xl:w-[28%]',
                           )}
                         >
                           <button
@@ -300,12 +352,12 @@ export function MarketPage() {
                             {SORT_LABEL[key]}
                             {sortKey === key ? (
                               sortDir === 'asc' ? (
-                                <ArrowUp aria-hidden className="h-3 w-3" />
+                                <ArrowUp aria-hidden className="h-3 w-3 shrink-0" />
                               ) : (
-                                <ArrowDown aria-hidden className="h-3 w-3" />
+                                <ArrowDown aria-hidden className="h-3 w-3 shrink-0" />
                               )
                             ) : (
-                              <span aria-hidden className="w-3" />
+                              <span aria-hidden className="w-3 shrink-0" />
                             )}
                           </button>
                         </th>
@@ -329,19 +381,19 @@ export function MarketPage() {
                             }
                           }}
                           className={cn(
-                            'cursor-pointer border-b border-base-850 transition-colors hover:bg-base-850/70',
+                            'h-8 cursor-pointer border-b border-base-850 transition-colors hover:bg-base-850/70',
                             isActive && 'bg-accent/10',
                           )}
                         >
-                          <td className="td max-w-[140px] truncate px-1.5 text-xs font-semibold text-ink-hi sm:text-sm">
+                          <td className="td !py-0 truncate px-1.5 text-xs font-semibold text-ink-hi sm:text-sm">
                             {row.baseAsset}
                             <span className="text-ink-faint">USDT</span>
                           </td>
-                          <td className="td num whitespace-nowrap px-1.5 text-right text-xs">{fmtPriceUsd(row.price)}</td>
-                          <td className={cn('td num whitespace-nowrap px-1.5 text-right text-xs', pnlColor(row.changePercent24h))}>
+                          <td className="td num !py-0 whitespace-nowrap px-1.5 text-right text-xs">{fmtPriceUsd(row.price)}</td>
+                          <td className={cn('td num !py-0 whitespace-nowrap px-1.5 text-right text-xs', pnlColor(row.changePercent24h))}>
                             {fmtPercent(row.changePercent24h)}
                           </td>
-                          <td className="td num hidden whitespace-nowrap px-1.5 text-right text-xs text-ink-lo xl:table-cell">
+                          <td className="td num !py-0 hidden whitespace-nowrap px-1.5 text-right text-xs text-ink-lo xl:table-cell">
                             {fmtCompactAmount(row.quoteVolume24h, 'USDT')}
                           </td>
                         </tr>
@@ -351,10 +403,36 @@ export function MarketPage() {
                 </table>
               </div>
 
-              {hiddenRows > 0 && (
-                <p className="num px-1 pt-2 text-xs text-ink-faint">
-                  另有 {hiddenRows} 个交易对未渲染（每页最多 {MAX_ROWS} 个）—— 用上方搜索框按代码定位。
-                </p>
+              {totalPages > 1 && (
+                <div className="mt-1.5 flex shrink-0 items-center justify-between gap-2 border-t border-base-850 px-1 pt-1.5 text-xs text-ink-faint">
+                  <span className="num">
+                    第 {safePage} / {totalPages} 页 · 每页 {pageSize} 个
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="!h-6 !px-1.5 text-xs"
+                      disabled={safePage <= 1}
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      aria-label="上一页"
+                    >
+                      <ChevronLeft aria-hidden className="h-3.5 w-3.5" />
+                      上一页
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="!h-6 !px-1.5 text-xs"
+                      disabled={safePage >= totalPages}
+                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                      aria-label="下一页"
+                    >
+                      下一页
+                      <ChevronRight aria-hidden className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
               )}
               {symbolsQuery.error && <ErrorNote className="mt-2">列表刷新失败：{symbolsQuery.error}</ErrorNote>}
             </>

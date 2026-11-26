@@ -168,34 +168,29 @@
   /*
    * 滚动条：窄、无按钮、hover 才明显。
    *
-   * 交易界面里表格与日志区经常需要滚动，默认的粗滚动条会挤占本就不多的
-   * 横向空间，而且在深色底上非常扎眼。
+   * ⚠️ Chromium 121+ 在同时存在标准 `scrollbar-width / scrollbar-color` 与
+   * `::-webkit-scrollbar` 时会优先走标准属性并回退到带 ▲▼ 箭头的 Windows 原生样式。
+   * 因此仅在不支持 `::-webkit-scrollbar` 的引擎（Firefox）里启用标准属性。
    */
-  * {
-    scrollbar-width: thin;
-    /*
-     * 滚动条颜色走变量。
-     *
-     * ⚠️ 这里原来写死 `#2c3546`。令牌改成变量之后，写死的那一份**不会**
-     * 跟着模板变 —— 表现是"换了模板，但滚动条还是旧的深蓝灰"，在一整套
-     * 中性色里格外明显，而且没有报错。同一个理由适用于本文件里其它
-     * 写死的颜色：能走变量的都走变量。
-     */
-    scrollbar-color: var(--aq-base-600) transparent;
+  @supports not selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: var(--aq-base-600) transparent;
+    }
   }
 
   ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
+    width: 7px;
+    height: 7px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
     background: var(--aq-base-600);
-    border: 3px solid transparent;
+    border: 2px solid transparent;
     background-clip: content-box;
-    border-radius: 8px;
+    border-radius: 9999px;
   }
   ::-webkit-scrollbar-thumb:hover {
     background: var(--aq-ink-lo);
