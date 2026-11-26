@@ -571,8 +571,64 @@ export interface OrderRecord {
    * 并且把它标成"当前账户配置"而不是这张单的历史 —— 见 `orderMarginMode()`。
    */
   marginType?: MarginMode;
+  /**
+   * 订单被撤销时的操作来源（`orders.cancel_source`，迁移 `M23_ORDER_CANCEL_SOURCE`）。
+   * 明确区分「模型主动撤单 / 模型调仓」「系统超时 / 系统守卫 / 系统对账」「手动操作」；
+   * 迁移前的历史行读出为 `undefined`，前端不编造来源。
+   */
+  cancelSource?: OrderCancelSource;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 订单撤销操作方（模型 vs 系统 vs 手动）。 */
+export type OrderCancelSource =
+  | 'model_cancel'
+  | 'model_adjust'
+  | 'system_timeout'
+  | 'system_guard'
+  | 'system_reconcile'
+  | 'manual';
+
+export const ORDER_CANCEL_SOURCE_META: Record<
+  OrderCancelSource,
+  { label: string; actor: 'model' | 'system' | 'manual'; detail: string }
+> = {
+  model_cancel: {
+    label: '模型撤单',
+    actor: 'model',
+    detail: 'AI 模型主动决策（cancel_pending）撤销该待成交限价挂单',
+  },
+  model_adjust: {
+    label: '模型调仓',
+    actor: 'model',
+    detail: 'AI 模型调整保护位或加减仓时撤销旧保护单并重挂',
+  },
+  system_timeout: {
+    label: '系统超时',
+    actor: 'system',
+    detail: '限价挂单达到等待时限未成交，由系统自动撤单释放名额',
+  },
+  system_guard: {
+    label: '系统守卫',
+    actor: 'system',
+    detail: '由系统保本/移动止损守卫撤销旧止损并重挂新保护位',
+  },
+  system_reconcile: {
+    label: '系统对账',
+    actor: 'system',
+    detail: '交易所侧已撤销或仓位已平，由系统对账同步结清为已撤销',
+  },
+  manual: {
+    label: '手动操作',
+    actor: 'manual',
+    detail: '由操作员在控制台手动平仓或撤单触发撤销',
+  },
+};
+
+export function orderCancelSourceMeta(source: string | null | undefined) {
+  if (!source) return null;
+  return ORDER_CANCEL_SOURCE_META[source as OrderCancelSource] ?? null;
 }
 
 export interface TradeRecord {

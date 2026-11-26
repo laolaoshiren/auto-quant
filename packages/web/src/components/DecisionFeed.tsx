@@ -2667,17 +2667,24 @@ function DecisionRow({
 
       {figures.length > 0 && (
         <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs leading-relaxed text-ink-lo">
-          {figures.map((part, index) => (
-            <span
-              key={`${part.label}-${part.value}-${index}`}
-              className="inline-flex items-baseline gap-1 rounded-md bg-base-900/70 px-1.5 py-0.5"
-            >
-              {part.label && <span className="text-[11px] text-ink-faint">{part.label}</span>}
-              <span className="num break-all text-[13px] font-semibold text-ink-hi" title={FIGURE_TITLE[part.key]}>
-                {part.value}
+          {figures.map((part, index) => {
+            const style = FIGURE_PILL_STYLE[part.key];
+            return (
+              <span
+                key={`${part.label}-${part.value}-${index}`}
+                className={cn(
+                  'inline-flex items-baseline gap-1 rounded-md border px-1.5 py-0.5',
+                  style.box,
+                )}
+                title={FIGURE_TITLE[part.key]}
+              >
+                {part.label && <span className={cn('text-[11px]', style.label)}>{part.label}</span>}
+                <span className={cn('num break-all text-[13px] font-semibold', style.value)}>
+                  {part.value}
+                </span>
               </span>
-            </span>
-          ))}
+            );
+          })}
         </p>
       )}
 
@@ -2964,6 +2971,52 @@ const FIGURE_TITLE: Record<FigureKey, string> = {
   leverage: '杠杆倍数',
   /* ⚠️ `reducePercent` 是百分数（服务端的 `reducePercent / 100` 才是比例）。 */
   reduce: '减仓幅度：百分比按持仓数量计，数值形式则是要卖出的数量',
+};
+
+/**
+ * 决策参数胶囊语义配色（深/浅双主题高对比，便于一眼区分仓位、保证金、入场、止损、止盈、盈亏比、杠杆）。
+ */
+const FIGURE_PILL_STYLE: Record<FigureKey, { box: string; label: string; value: string }> = {
+  size: {
+    box: "border-slate-500/30 bg-slate-500/10 [[data-skin='light']_&]:border-slate-400/45 [[data-skin='light']_&]:bg-slate-200/60",
+    label: 'text-ink-lo',
+    value: 'text-ink-hi',
+  },
+  margin: {
+    box: "border-amber-400/35 bg-amber-500/12 [[data-skin='light']_&]:border-amber-700/30 [[data-skin='light']_&]:bg-amber-500/12",
+    label: "text-amber-300/80 [[data-skin='light']_&]:text-amber-800/80",
+    value: "text-amber-300 [[data-skin='light']_&]:text-amber-800",
+  },
+  entry: {
+    box: "border-sky-400/35 bg-sky-500/12 [[data-skin='light']_&]:border-sky-700/30 [[data-skin='light']_&]:bg-sky-500/12",
+    label: "text-sky-300/80 [[data-skin='light']_&]:text-sky-800/80",
+    value: "text-sky-300 [[data-skin='light']_&]:text-sky-800",
+  },
+  stop: {
+    box: 'border-down/35 bg-down/12',
+    label: 'text-down/80',
+    value: 'text-down',
+  },
+  target: {
+    box: 'border-up/35 bg-up/12',
+    label: 'text-up/80',
+    value: 'text-up',
+  },
+  reward: {
+    box: "border-violet-400/35 bg-violet-500/12 [[data-skin='light']_&]:border-violet-700/30 [[data-skin='light']_&]:bg-violet-500/12",
+    label: "text-violet-300/80 [[data-skin='light']_&]:text-violet-800/80",
+    value: "text-violet-300 [[data-skin='light']_&]:text-violet-800",
+  },
+  leverage: {
+    box: "border-orange-400/35 bg-orange-500/12 [[data-skin='light']_&]:border-orange-700/30 [[data-skin='light']_&]:bg-orange-500/12",
+    label: "text-orange-300/80 [[data-skin='light']_&]:text-orange-800/80",
+    value: "text-orange-300 [[data-skin='light']_&]:text-orange-800",
+  },
+  reduce: {
+    box: 'border-warn/35 bg-warn/12',
+    label: 'text-warn/80',
+    value: 'text-warn',
+  },
 };
 
 /**

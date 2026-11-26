@@ -331,10 +331,15 @@ export async function applyBreakevenGuardForTrader(input: {
         );
         continue;
       }
-      orderStore.cancelOpenProtectionBySymbol(traderId, local.symbol, {
-        stop: true,
-        target: false,
-      });
+      orderStore.cancelOpenProtectionBySymbol(
+        traderId,
+        local.symbol,
+        {
+          stop: true,
+          target: false,
+        },
+        'system_guard',
+      );
     }
 
     const newStopId = await input

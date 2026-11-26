@@ -101,7 +101,7 @@ export async function settleStaleOrdersForTrader(input: {
     for (const row of candidates) {
       /* 当前生效的保护单不碰（与实盘那条路径同一个判据）。 */
       if (activeProtectionIds.has(String(row.exchangeOrderId ?? ''))) continue;
-      orderStore.update(row.id, { status: 'CANCELED' });
+      orderStore.update(row.id, { status: 'CANCELED', cancelSource: 'system_reconcile' });
       settled += 1;
       summary.push(`${row.symbol} ${orderPurposeLabel(row.purpose)}`);
     }
@@ -166,7 +166,12 @@ export async function settleStaleOrdersForTrader(input: {
     const outcome = await input.finalStatusOf(row);
     if (!outcome) continue;
 
-    orderStore.update(row.id, outcome);
+    orderStore.update(
+      row.id,
+      outcome.status === 'CANCELED'
+        ? { ...outcome, cancelSource: 'system_reconcile' }
+        : outcome,
+    );
     settled += 1;
     summary.push(`${row.symbol} ${orderPurposeLabel(row.purpose)}`);
   }

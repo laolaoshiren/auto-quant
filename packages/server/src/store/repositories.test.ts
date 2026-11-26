@@ -619,3 +619,40 @@ test('★ 账户级持仓与净额查询排除 dry_run = 1 模拟盘，绝不污
   }
   assert.equal(trades.netSinceForAccount(acc, '2026-11-01T00:00:00.000Z'), 15);
 });
+
+test('★ orders 撤销来源（M23）准确记录模型/系统/手动，并透传到 OrderRecord', () => {
+  const acc = seedAccount('cancel-src-acc');
+  const tid = seedTrader(acc, 'cancel-src-bot');
+
+  const mk = (exchangeOrderId: string, purpose: 'entry' | 'stop_loss' | 'take_profit') =>
+    orders.insert({
+      traderId: tid,
+      exchangeOrderId,
+      clientOrderId: `cid-${exchangeOrderId}`,
+      symbol: 'LINKUSDT',
+      side: 'BUY',
+      type: purpose === 'entry' ? 'LIMIT' : 'STOP_MARKET',
+      purpose,
+      quantity: 10,
+      price: purpose === 'entry' ? 9.1 : null,
+      stopPrice: purpose === 'entry' ? null : 9.0,
+      status: 'NEW',
+    });
+
+  const modelId = mk('ex-model', 'entry');
+  const timeoutId = mk('ex-timeout', 'entry');
+  const guardSlId = mk('ex-guard-sl', 'stop_loss');
+  const manualTpId = mk('ex-manual-tp', 'take_profit');
+
+  orders.update(modelId, { status: 'CANCELED', cancelSource: 'model_cancel' });
+  orders.update(timeoutId, { status: 'CANCELED', cancelSource: 'system_timeout' });
+  orders.cancelOpenProtectionBySymbol(tid, 'LINKUSDT', { stop: true, target: false }, 'system_guard');
+  orders.cancelOpenBySymbol(tid, 'LINKUSDT');
+
+  const byEx = new Map(orders.list(tid, 20).map((o) => [o.exchangeOrderId, o]));
+  assert.equal(byEx.get('ex-model')?.cancelSource, 'model_cancel');
+  assert.equal(byEx.get('ex-timeout')?.cancelSource, 'system_timeout');
+  assert.equal(byEx.get('ex-guard-sl')?.cancelSource, 'system_guard');
+  assert.equal(byEx.get('ex-manual-tp')?.cancelSource, 'manual');
+  assert.equal(guardSlId > 0 && manualTpId > 0, true);
+});

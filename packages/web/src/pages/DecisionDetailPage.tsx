@@ -374,8 +374,8 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
                       {showParams && (
                         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
                           {typeof decision.positionSizeUsd === 'number' && decision.positionSizeUsd > 0 && (
-                            <span className="rounded bg-base-900/80 px-2 py-0.5">
-                              <span className="text-ink-faint">仓位 </span>
+                            <span className="rounded border border-slate-500/30 bg-slate-500/10 px-2 py-0.5">
+                              <span className="text-ink-lo">仓位 </span>
                               <strong className="num text-ink-hi">{fmtUsd(decision.positionSizeUsd, 2)}</strong>
                             </span>
                           )}
@@ -384,31 +384,37 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
                             typeof decision.leverage === 'number' &&
                             decision.leverage > 0 && (
                               <span
-                                className="rounded bg-base-900/80 px-2 py-0.5"
+                                className="rounded border border-amber-400/35 bg-amber-500/12 px-2 py-0.5 [[data-skin='light']_&]:border-amber-700/30"
                                 title="预计保证金占用 = 仓位名义价值 ÷ 杠杆倍数（USDT）"
                               >
-                                <span className="text-ink-faint">保证金 </span>
-                                <strong className="num text-ink-hi">
+                                <span className="text-amber-300/80 [[data-skin='light']_&]:text-amber-800/80">
+                                  保证金{' '}
+                                </span>
+                                <strong className="num text-amber-300 [[data-skin='light']_&]:text-amber-800">
                                   {fmtUsd(decision.positionSizeUsd / decision.leverage, 2)}
                                 </strong>
                               </span>
                             )}
                           {decision.stopLoss != null && (
-                            <span className="rounded bg-base-900/80 px-2 py-0.5">
-                              <span className="text-ink-faint">止损 </span>
+                            <span className="rounded border border-down/35 bg-down/12 px-2 py-0.5">
+                              <span className="text-down/80">止损 </span>
                               <strong className="num text-down">{fmtPrice(decision.stopLoss)}</strong>
                             </span>
                           )}
                           {decision.takeProfit != null && (
-                            <span className="rounded bg-base-900/80 px-2 py-0.5">
-                              <span className="text-ink-faint">止盈 </span>
+                            <span className="rounded border border-up/35 bg-up/12 px-2 py-0.5">
+                              <span className="text-up/80">止盈 </span>
                               <strong className="num text-up">{fmtPrice(decision.takeProfit)}</strong>
                             </span>
                           )}
                           {typeof decision.riskUsd === 'number' && decision.riskUsd > 0 && (
-                            <span className="rounded bg-base-900/80 px-2 py-0.5">
-                              <span className="text-ink-faint">风险 </span>
-                              <strong className="num text-warn">{fmtUsd(decision.riskUsd, 2)}</strong>
+                            <span className="rounded border border-orange-400/35 bg-orange-500/12 px-2 py-0.5 [[data-skin='light']_&]:border-orange-700/30">
+                              <span className="text-orange-300/80 [[data-skin='light']_&]:text-orange-800/80">
+                                风险{' '}
+                              </span>
+                              <strong className="num text-orange-300 [[data-skin='light']_&]:text-orange-800">
+                                {fmtUsd(decision.riskUsd, 2)}
+                              </strong>
                             </span>
                           )}
                         </div>

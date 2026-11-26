@@ -16,6 +16,7 @@ import {
   type EquitySnapshot,
   type ExecutionLogEntry,
   type MarketSnapshot,
+  type OrderCancelSource,
   type OrderRecord,
   type PositionView,
   type StrategyConfig,
@@ -5936,6 +5937,7 @@ export class AutoTrader {
     symbol: string,
     kinds: { stop: boolean; target: boolean },
     throwOnError = false,
+    cancelSource: OrderCancelSource = 'system_guard',
   ): Promise<number> {
     /*
      * ⚠️ **模拟盘没有"交易所侧的保护单"可撤 —— 不要发这个查询**（2026-11-09 修）。
@@ -5955,7 +5957,7 @@ export class AutoTrader {
      */
     if (this.isDryRun) {
       /* 模拟盘撤保护单不走交易所，但必须把本地 orders 表旧保护行标为 CANCELED，避免移动止损后残留多张 NEW 止损单。 */
-      orderStore.cancelOpenProtectionBySymbol(this.deps.trader.id, symbol, kinds);
+      orderStore.cancelOpenProtectionBySymbol(this.deps.trader.id, symbol, kinds, cancelSource);
       return 0;
     }
 
@@ -6007,7 +6009,7 @@ export class AutoTrader {
     }
     if (cancelled > 0) {
       /* 实盘撤掉旧保护单后立即同步本地 orders 表状态，避免旧 STOP/TP 行停在 NEW 等 30 分钟对账才清理。 */
-      orderStore.cancelOpenProtectionBySymbol(this.deps.trader.id, symbol, kinds);
+      orderStore.cancelOpenProtectionBySymbol(this.deps.trader.id, symbol, kinds, cancelSource);
     }
     if (cancelled > 1) {
       this.emitOnChange(
@@ -6527,7 +6529,7 @@ export class AutoTrader {
                 String(row.entry_order_id),
               );
               if (entryOrder && !TERMINAL_ORDER_STATUSES.includes(entryOrder.status)) {
-                orderStore.update(entryOrder.id, { status: 'CANCELED' });
+                orderStore.update(entryOrder.id, { status: 'CANCELED', cancelSource: 'system_timeout' });
               }
             }
             this.emit(
@@ -6630,7 +6632,7 @@ export class AutoTrader {
       if (row.entry_order_id) {
         const entryOrder = orderStore.findByExchangeOrderId(traderId, String(row.entry_order_id));
         if (entryOrder && !TERMINAL_ORDER_STATUSES.includes(entryOrder.status)) {
-          orderStore.update(entryOrder.id, { status: 'CANCELED' });
+          orderStore.update(entryOrder.id, { status: 'CANCELED', cancelSource: 'system_timeout' });
         }
       }
 
@@ -9260,7 +9262,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       getEffectivePositions: () => this.effectivePositions(),
       toPositionView: (local) => this.toPositionView(local, new Map()),
       cancelAllStopProtection: (symbol) =>
-        this.cancelAllProtection(symbol, { stop: true, target: false }),
+        this.cancelAllProtection(symbol, { stop: true, target: false }, false, 'system_guard'),
       cancelAlgoOrder: (symbol, orderId) => this.deps.broker.cancelOrder(symbol, orderId, 'algo'),
       placeStopOrder: (params) =>
         this.placeProtection({
@@ -9905,7 +9907,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     positionStore.close(row.id);
     const cancelledEntry = orderStore.findByExchangeOrderId(traderId, String(orderId));
     if (cancelledEntry && !TERMINAL_ORDER_STATUSES.includes(cancelledEntry.status)) {
-      orderStore.update(cancelledEntry.id, { status: 'CANCELED' });
+      orderStore.update(cancelledEntry.id, { status: 'CANCELED', cancelSource: 'model_cancel' });
     }
     this.emit('info', `已撤掉 ${symbol} 的限价挂单（挂在 ${row.entry_price}，未成交），释放该入场名额。`);
 
@@ -10008,7 +10010,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         positionStore.close(row.id);
         const cancelledEntry = orderStore.findByExchangeOrderId(traderId, String(row.entry_order_id));
         if (cancelledEntry && !TERMINAL_ORDER_STATUSES.includes(cancelledEntry.status)) {
-          orderStore.update(cancelledEntry.id, { status: 'CANCELED' });
+          orderStore.update(cancelledEntry.id, { status: 'CANCELED', cancelSource: 'manual' });
         }
         cancelled += 1;
       } catch (error) {
@@ -11296,10 +11298,15 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      */
     try {
       await this.deps.broker.cancelAllOrders(decision.symbol);
-      orderStore.cancelOpenProtectionBySymbol(this.deps.trader.id, decision.symbol, {
-        stop: true,
-        target: true,
-      });
+      orderStore.cancelOpenProtectionBySymbol(
+        this.deps.trader.id,
+        decision.symbol,
+        {
+          stop: true,
+          target: true,
+        },
+        'model_adjust',
+      );
     } catch (error) {
       return {
         action: decision.action,
@@ -11558,10 +11565,15 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      */
     try {
       await this.deps.broker.cancelAllOrders(decision.symbol);
-      orderStore.cancelOpenProtectionBySymbol(this.deps.trader.id, decision.symbol, {
-        stop: true,
-        target: true,
-      });
+      orderStore.cancelOpenProtectionBySymbol(
+        this.deps.trader.id,
+        decision.symbol,
+        {
+          stop: true,
+          target: true,
+        },
+        'model_adjust',
+      );
     } catch (error) {
       return {
         action: decision.action,
@@ -12059,6 +12071,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         decision.symbol,
         { stop: newStop !== null, target: newTarget !== null },
         true,
+        'model_adjust',
       );
     } catch (error) {
       const why = (error as Error).message;

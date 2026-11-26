@@ -58,7 +58,9 @@ test('★★★ settleStaleOrders 必须有模拟盘分支（否则永远结清�
     '★ 必须有模拟盘分支 —— 交易所不是模拟盘的真相来源',
   );
   assert.ok(
-    /orderStore\.update\(row\.id, \{ status: 'CANCELED' \}\)/.test(body),
+    /orderStore\.update\(row\.id,\s*\{\s*status:\s*'CANCELED'(?:,\s*cancelSource:\s*'system_reconcile')?\s*\}\)/.test(
+      body,
+    ),
     "★ 模拟盘要写 CANCELED（那张单从未成交，写 FILLED 会编造成交）",
   );
 });

@@ -8,6 +8,7 @@ import type {
   ExecutionLogEntry,
   LlmProviderId,
   MarginMode,
+  OrderCancelSource,
   OrderRecord,
   PositionView,
   StrategyConfig,
@@ -1400,8 +1401,24 @@ interface OrderRow {
   margin_used: number | null;
   /** 下单时该标的的保证金模式。**可空**：`NULL` = 没有这个事实，见 `M14_ORDER_MARGIN_TYPE`。 */
   margin_type: string | null;
+  /** 撤销操作来源（模型 / 系统 / 手动）。**可空**：迁移前历史行无此字段，见 `M23_ORDER_CANCEL_SOURCE`。 */
+  cancel_source?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+const VALID_CANCEL_SOURCES: ReadonlySet<OrderCancelSource> = new Set([
+  'model_cancel',
+  'model_adjust',
+  'system_timeout',
+  'system_guard',
+  'system_reconcile',
+  'manual',
+]);
+
+function normalizeCancelSource(value: string | null | undefined): OrderCancelSource | null {
+  if (!value) return null;
+  return VALID_CANCEL_SOURCES.has(value as OrderCancelSource) ? (value as OrderCancelSource) : null;
 }
 
 function toOrder(row: OrderRow, leverages?: ReadonlyMap<string, number>): OrderRecord {
@@ -1449,6 +1466,7 @@ function toOrder(row: OrderRow, leverages?: ReadonlyMap<string, number>): OrderR
      * 历史行（`NULL`）、以及任何绕过 `orders.insert()` 的写入都从这里经过。
      */
     marginType: normalizeMarginMode(row.margin_type) ?? undefined,
+    cancelSource: normalizeCancelSource(row.cancel_source) ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1779,8 +1797,9 @@ export const orders = {
    */
   cancelOpenBySymbol(traderId: number, symbol: string): number {
     const result = getDb().run(
-      `UPDATE orders SET status = 'CANCELED'
+      `UPDATE orders SET status = 'CANCELED', cancel_source = COALESCE(cancel_source, 'manual'), updated_at = ?
         WHERE trader_id = ? AND symbol = ? AND status = 'NEW'`,
+      now(),
       traderId,
       symbol,
     );
@@ -1798,15 +1817,19 @@ export const orders = {
     traderId: number,
     symbol: string,
     kinds: { stop?: boolean; target?: boolean },
+    cancelSource?: OrderCancelSource,
   ): number {
     const purposes: string[] = [];
     if (kinds.stop) purposes.push('stop_loss');
     if (kinds.target) purposes.push('take_profit');
     if (purposes.length === 0) return 0;
     const placeholders = purposes.map(() => '?').join(', ');
+    const src = normalizeCancelSource(cancelSource);
     const result = getDb().run(
-      `UPDATE orders SET status = 'CANCELED'
+      `UPDATE orders SET status = 'CANCELED', cancel_source = COALESCE(?, cancel_source), updated_at = ?
         WHERE trader_id = ? AND symbol = ? AND status = 'NEW' AND purpose IN (${placeholders})`,
+      src,
+      now(),
       traderId,
       symbol,
       ...purposes,
@@ -2130,18 +2153,21 @@ export const orders = {
        * 于是 `raw_response` 从头到尾都是交易所说过的话（§2.2），而不是只剩一个状态码。
        */
       rawResponse: unknown;
+      /** 订单被撤销时的操作来源（模型 / 系统 / 手动），见 `M23_ORDER_CANCEL_SOURCE`。 */
+      cancelSource: OrderCancelSource | null;
     }>,
   ): void {
     const row = getDb().get<OrderRow>('SELECT * FROM orders WHERE id = ?', id);
     if (!row) return;
     getDb().run(
-      'UPDATE orders SET status = ?, avg_price = ?, filled_qty = ?, fee = ?, error = ?, raw_response = ?, updated_at = ? WHERE id = ?',
+      'UPDATE orders SET status = ?, avg_price = ?, filled_qty = ?, fee = ?, error = ?, raw_response = ?, cancel_source = ?, updated_at = ? WHERE id = ?',
       input.status ?? row.status,
       input.avgPrice === undefined ? row.avg_price : input.avgPrice,
       input.filledQty ?? row.filled_qty,
       input.fee ?? row.fee,
       input.error === undefined ? row.error : input.error,
       input.rawResponse === undefined ? row.raw_response : JSON.stringify(input.rawResponse),
+      input.cancelSource === undefined ? (row.cancel_source ?? null) : normalizeCancelSource(input.cancelSource),
       now(),
       id,
     );

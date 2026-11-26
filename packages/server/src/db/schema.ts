@@ -1120,6 +1120,10 @@ CREATE INDEX IF NOT EXISTS idx_runtime_logs_trader_created
   ON runtime_logs(trader_id, created_at DESC, id DESC);
 `;
 
+const M23_ORDER_CANCEL_SOURCE = /* sql */ `
+ALTER TABLE orders ADD COLUMN cancel_source TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'initial', sql: M1_INITIAL },
   { version: 2, name: 'trade-accounting', sql: M2_TRADE_ACCOUNTING },
@@ -1155,4 +1159,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 20, name: 'managed-v2-state', sql: M20_MANAGED_V2_STATE },
   { version: 21, name: 'managed-v2-attribution', sql: M21_MANAGED_V2_ATTRIBUTION },
   { version: 22, name: 'hot-query-indexes', sql: M22_HOT_QUERY_INDEXES },
+  { version: 23, name: 'order-cancel-source', sql: M23_ORDER_CANCEL_SOURCE },
 ];

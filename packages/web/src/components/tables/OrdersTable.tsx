@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Clock } from 'lucide-react';
 import {
   exchangeErrorLabel,
+  orderCancelSourceMeta,
   orderPurposeLabel,
   orderStatusLabel,
   orderTypeLabel,
@@ -293,26 +294,56 @@ export function OrdersTable({
                   <td className="td num text-right">{fmtQty(order.filledQty)}</td>
                   <td className="td num text-right">{order.avgPrice ? fmtPrice(order.avgPrice) : '—'}</td>
                   <td className="td">
-                    <span
-                      title={
-                        pendingReconcile
-                          ? reconcileNoteTitle(order.status)
-                          : fullyFilled
-                            ? `成交数量 ${fmtQty(order.filledQty)} 已等于下单数量 ${fmtQty(order.quantity)}，所以这一单实质已成交 —— 尽管交易所那一刻返回的状态是 ${order.status}。`
-                            : order.status
-                      }
-                      className={
-                        pendingReconcile
-                          ? 'text-warn'
-                          : isOpenOrder(order)
-                            ? 'text-up'
-                            : /cancel|reject|expired/i.test(order.status)
-                              ? 'text-warn'
-                              : 'text-ink-mid'
-                      }
-                    >
-                      {fullyFilled ? '已成交' : orderStatusLabel(order.status)}
-                    </span>
+                    {(() => {
+                      const isCanceled = !fullyFilled && /cancel/i.test(order.status);
+                      const cancelMeta = isCanceled ? orderCancelSourceMeta(order.cancelSource) : null;
+                      const actorPillClass =
+                        cancelMeta?.actor === 'model'
+                          ? "border-violet-400/40 bg-violet-500/12 text-violet-300 [[data-skin='light']_&]:border-violet-700/35 [[data-skin='light']_&]:bg-violet-500/12 [[data-skin='light']_&]:text-violet-800"
+                          : cancelMeta?.actor === 'system'
+                            ? "border-sky-400/40 bg-sky-500/12 text-sky-300 [[data-skin='light']_&]:border-sky-700/35 [[data-skin='light']_&]:bg-sky-500/12 [[data-skin='light']_&]:text-sky-800"
+                            : cancelMeta?.actor === 'manual'
+                              ? "border-amber-400/40 bg-amber-500/12 text-amber-300 [[data-skin='light']_&]:border-amber-700/35 [[data-skin='light']_&]:bg-amber-500/12 [[data-skin='light']_&]:text-amber-800"
+                              : 'border-base-700 bg-base-850/90 text-ink-faint';
+                      return (
+                        <span className="inline-flex flex-wrap items-center gap-1.5 whitespace-nowrap">
+                          <span
+                            title={
+                              pendingReconcile
+                                ? reconcileNoteTitle(order.status)
+                                : fullyFilled
+                                  ? `成交数量 ${fmtQty(order.filledQty)} 已等于下单数量 ${fmtQty(order.quantity)}，所以这一单实质已成交 —— 尽管交易所那一刻返回的状态是 ${order.status}。`
+                                  : cancelMeta
+                                    ? `${order.status} · ${cancelMeta.detail}`
+                                    : order.status
+                            }
+                            className={
+                              pendingReconcile
+                                ? 'text-warn'
+                                : isOpenOrder(order)
+                                  ? 'text-up'
+                                  : /cancel|reject|expired/i.test(order.status)
+                                    ? 'text-warn'
+                                    : 'text-ink-mid'
+                            }
+                          >
+                            {fullyFilled ? '已成交' : orderStatusLabel(order.status)}
+                          </span>
+                          {isCanceled && (
+                            <span
+                              className={`inline-flex items-center rounded border px-1.5 py-0 text-[10px] font-medium leading-4 ${actorPillClass}`}
+                              title={
+                                cancelMeta
+                                  ? cancelMeta.detail
+                                  : '历史撤单记录（升级前生成，未采集操作来源；此后新撤单将明确标注模型 / 系统 / 手动）'
+                              }
+                            >
+                              {cancelMeta ? cancelMeta.label : '历史未记'}
+                            </span>
+                          )}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td className="td max-w-[240px] truncate text-down" title={order.error ?? undefined}>
                     {order.error ? exchangeErrorLabel(order.error) : ''}
