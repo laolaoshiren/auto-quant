@@ -16,6 +16,7 @@
  */
 
 import {
+  fmtBeijingTime,
   normalizeSymbol,
   type Kline,
   type ManagedStageStep,
@@ -336,9 +337,9 @@ function formatKlinesBrief(symbol: string, timeframe: string, klines: readonly K
   const tail = klines.slice(-20);
   const rows = tail.map((k) => {
     const tb = k.quoteVolume > 0 ? Math.round((k.takerBuyQuote / k.quoteVolume) * 100) : 50;
-    return `${new Date(k.openTime).toISOString().slice(11, 16)},${k.open},${k.high},${k.low},${k.close},${Math.round(k.quoteVolume)},${tb}%`;
+    return `${fmtBeijingTime(k.openTime, 'hm')},${k.open},${k.high},${k.low},${k.close},${Math.round(k.quoteVolume)},${tb}%`;
   });
-  return `${symbol} ${timeframe} (最近${tail.length}根 t,O,H,L,C,qV,tb%):\n${rows.join('\n')}`;
+  return `${symbol} ${timeframe} (UTC+8 最近${tail.length}根 t,O,H,L,C,qV,tb%):\n${rows.join('\n')}`;
 }
 
 /**
@@ -792,7 +793,7 @@ export async function runManagedAgenticLoop(input: ManagedEngineInput): Promise<
           });
           input.onStageEvent?.(
             'update_thesis',
-            `阶段2[更新论点] ${sym} 时间止损=${updated.timeStopAt ?? '无'} MAE=${updated.maxAdverseExcursionPct ?? '无'}%`,
+            `阶段2[更新论点] ${sym} 时间止损=${updated.timeStopAt ? fmtBeijingTime(updated.timeStopAt, 'minute') : '无'} MAE=${updated.maxAdverseExcursionPct ?? '无'}%`,
           );
           toolOut = {
             ok: true,

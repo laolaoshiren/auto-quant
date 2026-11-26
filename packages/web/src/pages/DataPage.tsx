@@ -20,7 +20,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { logScopeKind, logScopeLabel } from '@aq/shared';
+import { fmtBeijingTime, logScopeKind, logScopeLabel } from '@aq/shared';
 import { api, type LogLine } from '../lib/api';
 import { useApp, useEvents, type LiveLogLine } from '../lib/store';
 import { useDocumentTitle, usePolled, useTicker } from '../lib/hooks';
@@ -65,8 +65,7 @@ const SOCKET_STATUS_LABEL: Record<string, string> = {
 };
 
 function safeIsoTime(value: string): string {
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : value || '—';
+  return fmtBeijingTime(value, 'full');
 }
 
 function safeClockTime(value: string): string {

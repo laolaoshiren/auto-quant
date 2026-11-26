@@ -1806,3 +1806,56 @@ export function beijingDayStartIso(nowMs: number = Date.now()): string {
 export function beijingDayStartMs(nowMs: number = Date.now()): number {
   return Date.parse(beijingDayStartIso(nowMs));
 }
+
+/**
+ * 将毫秒时间戳 / ISO 字符串 / Date 格式化为**北京时间（UTC+8）**，不依赖运行机器时区。
+ *
+ * - `format = 'full'`（默认）：`2026-11-26 17:45:30`
+ * - `format = 'minute'`：`2026-11-26 17:45`
+ * - `format = 'mdhm'`：`11-26 17:45`
+ * - `format = 'hm'`：`17:45`
+ * - `format = 'hms'`：`17:45:30`
+ * - `format = 'md'`：`11-26`
+ * - `format = 'ym'`：`2026-11`
+ * - `format = 'y'`：`2026`
+ */
+export function fmtBeijingTime(
+  value: number | string | Date | null | undefined,
+  format: 'full' | 'minute' | 'mdhm' | 'hm' | 'hms' | 'md' | 'ym' | 'y' = 'full',
+): string {
+  if (value === null || value === undefined || value === '') return '—';
+  const ms =
+    typeof value === 'number'
+      ? value
+      : value instanceof Date
+        ? value.getTime()
+        : Date.parse(value);
+  if (!Number.isFinite(ms)) return typeof value === 'string' ? value : '—';
+  const d = new Date(ms + BEIJING_OFFSET_MS);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  const y = d.getUTCFullYear();
+  const mo = pad(d.getUTCMonth() + 1);
+  const da = pad(d.getUTCDate());
+  const hh = pad(d.getUTCHours());
+  const mi = pad(d.getUTCMinutes());
+  const ss = pad(d.getUTCSeconds());
+  switch (format) {
+    case 'y':
+      return String(y);
+    case 'ym':
+      return `${y}-${mo}`;
+    case 'md':
+      return `${mo}-${da}`;
+    case 'hm':
+      return `${hh}:${mi}`;
+    case 'hms':
+      return `${hh}:${mi}:${ss}`;
+    case 'mdhm':
+      return `${mo}-${da} ${hh}:${mi}`;
+    case 'minute':
+      return `${y}-${mo}-${da} ${hh}:${mi}`;
+    case 'full':
+    default:
+      return `${y}-${mo}-${da} ${hh}:${mi}:${ss}`;
+  }
+}

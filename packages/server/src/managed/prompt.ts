@@ -16,6 +16,7 @@
 
 import {
   closeReasonLabel,
+  fmtBeijingTime,
   inferManagedRiskProfile,
   MANAGED_RISK_PROFILES,
   type Kline,
@@ -130,11 +131,7 @@ function fmtSignedPct(v: number | null | undefined, digits = 2): string {
 }
 
 function fmtShortTime(ms: number, includeDate: boolean): string {
-  const d = new Date(ms);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  const hhmm = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-  if (!includeDate) return hhmm;
-  return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${hhmm}`;
+  return fmtBeijingTime(ms, includeDate ? 'mdhm' : 'hm');
 }
 
 function fmtVolShort(quoteVol: number): string {
@@ -155,7 +152,7 @@ function renderKlineTable(
   if (klines.length === 0 || maxBars <= 0) return `[${tf}] 无数据`;
   const slice = klines.slice(-maxBars);
   const includeDate = tf === '4h';
-  const lines: string[] = [`[${tf} ×${slice.length}] t(UTC),O,H,L,C,V,tb%`];
+  const lines: string[] = [`[${tf} ×${slice.length}] t(UTC+8),O,H,L,C,V,tb%`];
   for (const k of slice) {
     const tbPct =
       k.quoteVolume > 0 && Number.isFinite(k.takerBuyQuote)
@@ -431,7 +428,7 @@ function renderVolatileSection(
     ctx.idleCycles !== undefined && ctx.idleCycles >= 3 ? ` · 已连续观望 ${ctx.idleCycles} 轮` : '';
 
   const parts: string[] = [
-    `# 轮次与账户快照（第 #${ctx.cycleNumber} 轮 · ${ctx.now.toISOString().slice(0, 16).replace('T', ' ')} UTC · 周期 ${ctx.cycleIntervalMinutes}m）`,
+    `# 轮次与账户快照（第 #${ctx.cycleNumber} 轮 · ${fmtBeijingTime(ctx.now, 'minute')} UTC+8 · 周期 ${ctx.cycleIntervalMinutes}m）`,
     `- 权益 ${fmtUsd(acc.equity)} · 可用 ${fmtUsd(acc.availableBalance)} · 已用保证金 ${fmtUsd(acc.marginUsed)} (${marginPct.toFixed(1)}%) · 浮盈 ${acc.unrealizedPnl >= 0 ? '+' : ''}${acc.unrealizedPnl.toFixed(2)}U · 持仓/挂单 ${acc.positionCount}/${ctx.config.riskControl.maxPositions}${costText}${idleText}`,
   ];
 

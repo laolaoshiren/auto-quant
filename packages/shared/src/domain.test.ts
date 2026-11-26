@@ -23,6 +23,7 @@ import {
   CLOSE_REASON_LABELS,
   CLOSE_REASONS,
   closeReasonLabel,
+  fmtBeijingTime,
   exchangeErrorCode,
   exchangeErrorLabel,
   marginPercentToPricePercent,
@@ -167,6 +168,22 @@ test('日界与服务器时区无关', () => {
     beijingDayStartIso(at).endsWith('Z'),
     '返回值是 UTC ISO —— 库里存的是 UTC，比较也必须用 UTC',
   );
+});
+
+test('★ fmtBeijingTime 跨日/跨时区统一输出中国时间 UTC+8', () => {
+  // UTC 2026-11-26 09:35:44 == 北京时间 2026-11-26 17:35:44
+  const utcIso = '2026-11-26T09:35:44.000Z';
+  assert.equal(fmtBeijingTime(utcIso, 'full'), '2026-11-26 17:35:44');
+  assert.equal(fmtBeijingTime(utcIso, 'minute'), '2026-11-26 17:35');
+  assert.equal(fmtBeijingTime(utcIso, 'mdhm'), '11-26 17:35');
+  assert.equal(fmtBeijingTime(utcIso, 'hm'), '17:35');
+  assert.equal(fmtBeijingTime(utcIso, 'hms'), '17:35:44');
+
+  // 跨自然日边界：UTC 2026-11-26 18:15:00 == 北京时间次日 2026-11-27 02:15:00
+  const crossDay = '2026-11-26T18:15:00.000Z';
+  assert.equal(fmtBeijingTime(crossDay, 'minute'), '2026-11-27 02:15');
+  assert.equal(fmtBeijingTime(crossDay, 'md'), '11-27');
+  assert.equal(fmtBeijingTime(null), '—');
 });
 
 /* -------------------------------------------------------------------------- */

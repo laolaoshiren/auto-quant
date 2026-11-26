@@ -11,7 +11,7 @@
  *        彻底杜绝“死扛 10 小时小亏变大亏”，同时绝不误杀已走出利润的大赢家。
  */
 
-import { isMajorSymbol, normalizeSymbol, type CloseReason } from '@aq/shared';
+import { fmtBeijingTime, isMajorSymbol, normalizeSymbol, type CloseReason } from '@aq/shared';
 
 import { getDb } from '../db/index.js';
 import type { Ai500DimensionScores, RadarTier } from '../radar/ai500.js';
@@ -176,7 +176,7 @@ export function evaluateThesisHardCheck(
           shouldClose: true,
           closeReason: 'thesis_time_stop',
           detail:
-            `${thesis.symbol} 触及论点时间止损（截止 ${thesis.timeStopAt}）：当前进展 ${currentR.toFixed(2)}R < 最低要求 ${minR.toFixed(2)}R` +
+            `${thesis.symbol} 触及论点时间止损（截止 ${fmtBeijingTime(thesis.timeStopAt)} UTC+8）：当前进展 ${currentR.toFixed(2)}R < 最低要求 ${minR.toFixed(2)}R` +
             `（历史峰值 ${nextPeakR.toFixed(2)}R），行情未按预期展开，机器自动离场释放保证金。`,
           currentR,
           adversePct,

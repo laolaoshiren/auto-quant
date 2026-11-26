@@ -16,6 +16,7 @@ import {
   ColorType,
   CrosshairMode,
   LineStyle,
+  TickMarkType,
   createChart,
   type CandlestickData,
   type IChartApi,
@@ -23,9 +24,44 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
-import type { Kline } from '@aq/shared';
+import { fmtBeijingTime, type Kline } from '@aq/shared';
 import { formatCandlePrice } from '../lib/format';
 import { useChartInk } from './useChartInk';
+
+function timeToMs(time: Time): number | null {
+  if (typeof time === 'number' && Number.isFinite(time)) return time * 1000;
+  if (typeof time === 'string') {
+    const ms = Date.parse(time);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (time && typeof time === 'object' && 'year' in time) {
+    return Date.UTC(time.year, time.month - 1, time.day);
+  }
+  return null;
+}
+
+function formatBeijingCrosshairTime(time: Time): string {
+  const ms = timeToMs(time);
+  return ms === null ? '' : fmtBeijingTime(ms, 'minute');
+}
+
+function formatBeijingTickMark(time: Time, tickMarkType: TickMarkType): string {
+  const ms = timeToMs(time);
+  if (ms === null) return '';
+  switch (tickMarkType) {
+    case TickMarkType.Year:
+      return fmtBeijingTime(ms, 'y');
+    case TickMarkType.Month:
+      return fmtBeijingTime(ms, 'ym');
+    case TickMarkType.DayOfMonth:
+      return fmtBeijingTime(ms, 'md');
+    case TickMarkType.TimeWithSeconds:
+      return fmtBeijingTime(ms, 'hms');
+    case TickMarkType.Time:
+    default:
+      return fmtBeijingTime(ms, 'hm');
+  }
+}
 
 export function CandlestickChart({
   candles,
@@ -110,6 +146,8 @@ export function CandlestickChart({
         // A minimum bar spacing keeps a 3-bar window from stretching each candle
         // into a slab that looks like a different timeframe.
         minBarSpacing: 2,
+        // 统一以北京时间（UTC+8）渲染 K 线横轴刻度，避免 lightweight-charts 默认显示 UTC 慢 8 小时。
+        tickMarkFormatter: formatBeijingTickMark,
       },
       crosshair: {
         mode: CrosshairMode.Normal,
@@ -119,6 +157,7 @@ export function CandlestickChart({
       handleScale: { axisPressedMouseMove: { time: true, price: false } },
       localization: {
         priceFormatter: formatCandlePrice,
+        timeFormatter: formatBeijingCrosshairTime,
       },
     });
 

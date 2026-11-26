@@ -38,7 +38,7 @@
  * 同时改坏复盘。共用的只有 `parseNativeToolCalls` —— 那个解析器本身不关心角色。
  */
 
-import { TIMEFRAMES, type Kline } from '@aq/shared';
+import { fmtBeijingTime, TIMEFRAMES, type Kline } from '@aq/shared';
 
 import { createLogger } from '../logger.js';
 import type { ScreenableSymbol, ScreenCriteria } from '../market/screening.js';
@@ -505,12 +505,11 @@ export async function runDecisionTool(
  */
 function renderKlines(symbol: string, timeframe: string, candles: Kline[]): string {
   const lines = candles.map((c) => {
-    const t = new Date(c.openTime);
-    const stamp = `${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')} ${String(t.getUTCHours()).padStart(2, '0')}:${String(t.getUTCMinutes()).padStart(2, '0')}`;
+    const stamp = fmtBeijingTime(c.openTime, 'mdhm');
     return `${stamp} ${trim(c.open)} ${trim(c.high)} ${trim(c.low)} ${trim(c.close)} ${trim(c.volume)}`;
   });
   return [
-    `${symbol} ${timeframe} 最近 ${candles.length} 根 K 线（UTC 时间 + 空格分隔的 O H L C V 五列，与交易所同序）：`,
+    `${symbol} ${timeframe} 最近 ${candles.length} 根 K 线（北京时间 UTC+8 + 空格分隔的 O H L C V 五列，与交易所同序）：`,
     ...lines,
   ].join('\n');
 }

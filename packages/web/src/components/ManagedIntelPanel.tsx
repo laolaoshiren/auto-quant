@@ -6,6 +6,7 @@
  */
 
 import { useCallback, useState } from 'react';
+import { fmtBeijingTime } from '@aq/shared';
 
 import { api, type ManagedIntelView, type ManagedRadarItemView } from '../lib/api';
 import { usePolled } from '../lib/hooks';
@@ -181,7 +182,7 @@ export function ManagedIntelPanel({ traderId, onSelectSymbol, fillHeight = false
                       tone={
                         t.timeStopAt && Date.parse(t.timeStopAt) <= Date.now() ? 'warn' : 'accent'
                       }
-                      title={t.timeStopAt ? `时间止损截止：${t.timeStopAt}（要求进展 ≥ ${t.minProgressR}R）` : undefined}
+                      title={t.timeStopAt ? `时间止损截止：${fmtBeijingTime(t.timeStopAt)}（UTC+8，要求进展 ≥ ${t.minProgressR}R）` : undefined}
                     >
                       时间止损 {formatRemaining(t.timeStopAt)}
                     </Badge>
