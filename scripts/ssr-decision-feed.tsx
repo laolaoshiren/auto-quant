@@ -201,7 +201,7 @@ const SAME_SYMBOL = record({
 /** 决策一条执行记录都没有，外加一条配不上任何决策的孤立日志。 */
 const NO_MATCH = record({
   cycleNumber: 41,
-  decisions: [decision({ symbol: 'XRPUSDT', action: 'wait', positionSizeUsd: 0 })],
+  decisions: [decision({ symbol: 'XRPUSDT', action: 'open_long', positionSizeUsd: 25 })],
   executionLog: [
     entry({
       action: 'close_short',

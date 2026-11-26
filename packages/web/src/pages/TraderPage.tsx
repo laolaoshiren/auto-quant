@@ -1212,7 +1212,7 @@ export function TraderPage() {
         onClick={() => void requestReview(trader.id, trader.name)}
       >
         <Brain aria-hidden className="h-3.5 w-3.5" />
-        让 AI 审视
+        AI 审视
       </Button>
     ) : null;
 

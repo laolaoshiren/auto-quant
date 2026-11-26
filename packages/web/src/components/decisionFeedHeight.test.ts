@@ -97,8 +97,9 @@ test('★★★ 旧的纯 `max-h-[10%]` / `max-h-[max(10%` 形态不得回来（
  * 不能参与配对）。
  */
 function feedClassWindow(code: string): string | null {
-  const at = code.indexOf('space-y-2.5 overflow-y-auto');
-  if (at < 0) return null;
+  const match = /space-y-\d+(?:\.\d+)?\s+overflow-y-auto/.exec(code);
+  if (!match || match.index === undefined) return null;
+  const at = match.index;
   const open = code.lastIndexOf('cn(', at);
   if (open < 0) return null;
 

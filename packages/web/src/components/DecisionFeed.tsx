@@ -139,10 +139,12 @@ import { Link } from 'react-router-dom';
 import {
   Ban,
   Check,
-  FileText,
+  ChevronRight,
+  History,
   LoaderCircle,
   Lock,
   Maximize2,
+  Minimize2,
   RotateCw,
   Sparkles,
   TriangleAlert,
@@ -540,10 +542,14 @@ function CycleCountdown({ nextCycleAt }: { nextCycleAt: number | null }) {
   const s = leftSec % 60;
   return (
     <span
-      className="inline-flex items-center gap-1 rounded border border-base-800 px-1.5 py-0.5 text-xs tabular-nums text-ink-lo"
+      className="inline-flex items-center gap-1.5 rounded-full border border-base-700/80 bg-base-850/90 px-2 py-0.5 text-[11px] font-medium tabular-nums text-ink-lo"
       title="下一轮决策的预定时刻（由服务端给出，已包含模型要求的间隔与失败后的短重试）"
     >
-      下一轮 {m}:{String(s).padStart(2, '0')}
+      <span aria-hidden className="h-1.5 w-1.5 shrink-0 animate-pulse-soft rounded-full bg-up/85" />
+      <span>下一轮</span>
+      <span className="font-semibold text-ink-hi">
+        {m}:{String(s).padStart(2, '0')}
+      </span>
     </span>
   );
 }
@@ -1151,44 +1157,43 @@ export function DecisionFeed({
    * `⚡立即分析   ↻`（`DECISION-FEED.md` §1）。抽成变量是为了加载态那张面板也用同一份 ——
    * 否则数据一到，这个按钮会先从页面上消失再出现，读起来像功能坏了。
    */
+  const headerTitle = (
+    <span className="inline-flex min-w-0 items-center gap-2">
+      <span className="truncate">最近决策</span>
+      {mode !== 'ai_team' && <CycleCountdown nextCycleAt={nextCycleAt} />}
+    </span>
+  );
+
   const headerActions = (
     <span className="flex items-center gap-1.5">
-      {/*
-        ⚠️ **团队模式不显示"下一轮倒计时"**（用户 2026-10-12 的反馈）。
-
-        用户的原话：
-        > 「**为什么还有下一轮次倒计时，本模式应该是 7X24 不间断工作**，
-        >  不是之前那两种定时分析判断的了，是多 AI 全自动自动工作
-        >  那么这个**倒计时也不应该存在**」
-
-        **他是对的**，而且这不只是显示问题：
-        · 团队模式的运行方式是"有人有活就干"（成交后立即唤醒、AI 自己决定下次什么时候看），
-          而倒计时传达的是"**到点了才会干活**"—— 与它的实际行为矛盾；
-        · 另两种模式（普通 / 智能托管）确实是周期性的，倒计时对它们**仍然是准确信息**。
-        */}
-      {mode !== 'ai_team' && <CycleCountdown nextCycleAt={nextCycleAt} />}
       {actions}
-      {/* 手动刷新按钮已删除（规范 §5：页面自动刷新/推送，不需要手动按钮）。 */}
-      <Link to="/data" className="text-xs text-ink-lo transition hover:text-accent">
-        全部记录
+      {actions && <span aria-hidden className="mx-0.5 h-3.5 w-px bg-base-700/80" />}
+      <Link
+        to="/data"
+        className="inline-flex h-[26px] items-center gap-1 rounded-[7px] px-2 text-xs text-ink-lo transition hover:bg-base-800/80 hover:text-ink-hi"
+        title="查看完整历史决策与执行审计记录"
+      >
+        <History aria-hidden className="h-3.5 w-3.5 shrink-0 opacity-80" />
+        <span>全部记录</span>
       </Link>
-      {/*
-        ── **全屏切换**（2026-10-13 用户要求）──────────────────────────────
-        用户原话：
-        > 「这一块UI展示区域太小了，根本显示不了这么多，**直接跳转把这块占用全部页面**」
-
-        ⚠️ 只在**调用方提供了 `onToggleFocus`** 时显示 ——
-        于是其他页面（概览、常见问题）的用法完全不变。
-      */}
       {onToggleFocus !== undefined && (
         <button
           type="button"
           onClick={onToggleFocus}
-          title={focusMode ? '返回常规视图（图表与账户卡）' : '让决策流占满整页 —— 团队看板在 40% 宽度下装不下'}
-          className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs text-ink-lo transition hover:text-ink-hi"
+          title={focusMode ? '返回常规视图（图表与账户卡）' : '让决策流占满整页，获得更宽阔的阅读视野'}
+          className={cn(
+            'inline-flex h-[26px] items-center gap-1 rounded-[7px] px-2 text-xs transition',
+            focusMode
+              ? 'bg-accent/12 font-medium text-accent hover:bg-accent/20'
+              : 'text-ink-lo hover:bg-base-800/80 hover:text-ink-hi',
+          )}
         >
-          <Maximize2 aria-hidden className="h-3.5 w-3.5" />
-          {focusMode ? '退出全屏' : '全屏'}
+          {focusMode ? (
+            <Minimize2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <Maximize2 aria-hidden className="h-3.5 w-3.5 shrink-0 opacity-80" />
+          )}
+          <span>{focusMode ? '退出全屏' : '全屏'}</span>
         </button>
       )}
     </span>
@@ -1202,7 +1207,7 @@ export function DecisionFeed({
     return (
       // 加载态也占满整栏：否则数据一到位，这一栏会突然从一小条跳成整屏高。
       <Panel
-        title="最近决策"
+        title={headerTitle}
         padded={false}
         className="flex h-full min-h-0 flex-col"
         bodyClassName="flex min-h-0 flex-1 flex-col p-0"
@@ -1230,7 +1235,7 @@ export function DecisionFeed({
          "剩下的高度"并自己滚动（见组件顶部注释）。 */
       className="flex h-full min-h-0 flex-col"
       bodyClassName="flex min-h-0 flex-1 flex-col p-0"
-      title="最近决策"
+      title={headerTitle}
       actions={headerActions}
     >
       {feedError !== null && (
@@ -1557,7 +1562,7 @@ export function DecisionFeed({
               scrollTopRef.current = event.currentTarget.scrollTop;
             }}
             className={cn(
-              'min-h-0 space-y-2.5 overflow-y-auto p-2.5',
+              'min-h-0 space-y-4 overflow-y-auto p-3',
               /*
                * ══════════════════════════════════════════════════════════════════
                *  ⚠️⚠️ **`max-h-[10%]` 只能对团队模式生效**（2026-10-13 实测回归）
@@ -2036,37 +2041,13 @@ export function CycleBlock({
         `base-850` 比面板抬升一层，盒子就浮出来了；配合边框，
         一眼能看出"这一轮到这里结束"。
       */}
-      <div className="min-w-0 rounded-lg border border-base-700 bg-base-850 px-3 py-2.5">
-        {/*
-          周期级失败：整段中文说明原样显示。**不加 `周期错误：` 前缀** —— 元数据行
-          已经写着 `失败 · <类别>`，再套一层前缀就会变成一句两个冒号的怪话，而这里
-          要的是让操作员直接读到"出了什么事、该做什么"。
-
-          ## ⚠️ 这里是"模型失败"唯一的信号位（2026-10-03 定的）
-
-          顶栏以前还有一个「⚠️ 调用失败」徽章，理由是 2026-09-29 的事故：
-          网关连着 12 次回「余额不足」，而页面上没有任何迹象，机器人看着"在运行"、
-          实际已经做不出决策。
-
-          **但那个徽章是重复且更差的信息**（用户的原话：「画蛇添足……看得一头雾水」）：
-         它不显示失败时间、不区分"交易决策失败"与"复盘失败"、而且**失败之后即使
-          连续成功也不会消失** —— 一次偶发的连接中断会让它红上几十分钟。
-
-          而这条红字已经给出了这里需要的一切：**完整原因文字**、
-          **元数据行里的「失败 · 类别」**（见 `failureCategory`）、
-          以及**失败发生在哪一轮**（时间戳就在卡片上）。
-
-          判断"模型是否长期不可用"也看这里：决策会连续失败，
-          `trader` 层还会在连续失败后如实报「已进入安全模式」。
-        */}
+      <div className="min-w-0 rounded-xl border border-base-700/90 bg-base-850/95 px-3.5 py-3 transition-colors hover:border-base-600/80">
         {record.error && (
-          /*
-           * 「已中断」用中性色、不带红色警示图标：它不是故障，是我们重启/停止时
-           * 主动取消了这一轮（2026-11-10 用户明确：重启留下的红色失败很吓人）。
-           */
           <p
-            className={`mb-1.5 flex items-start gap-1.5 text-xs leading-relaxed ${
-              record.error.startsWith('本轮被中断') ? 'text-ink-faint' : 'text-down'
+            className={`mb-2 flex items-start gap-1.5 rounded-lg px-2.5 py-2 text-xs leading-relaxed ${
+              record.error.startsWith('本轮被中断')
+                ? 'bg-base-900/60 text-ink-faint'
+                : 'border border-down/25 bg-down/10 text-down'
             }`}
           >
             {record.error.startsWith('本轮被中断') ? (
@@ -2078,90 +2059,78 @@ export function CycleBlock({
           </p>
         )}
 
-        {/*
-          `record.error === null` 这个条件是必要的：模型调用失败时决策当然是空的，
-          但"本周期模型没有给出任何决策"会把一次**失败**说成模型的一次选择（观望），
-          而上面那行红字已经说明了真正的原因。
-
-          执行日志也必须为空：一轮可能模型没给出任何决策，却仍然执行了动作
-          （回撤守卫平仓、失败重试），此时说"没有给出任何决策"是把一次**执行**
-          说成了模型的沉默。
-        */}
         {record.error === null && decisions.length === 0 && executionLog.length === 0 && (
-            <p className="text-xs text-ink-faint">本周期模型没有给出任何决策。</p>
-          )}
+          <p className="text-xs text-ink-faint">本周期模型没有给出任何决策。</p>
+        )}
 
         {decisions.length > 0 && (
-          // 决策之间只用**间距**分隔（§3），不加分隔线：一条细线在深色底上会
-          // 变成第二层边框，而这个盒子里只该有一层。
-          <div className="space-y-2.5">
+          <div className="divide-y divide-base-750/80">
             {visibleRows.map(({ decision, index, nth, total }) => (
-              <DecisionRow
-                key={`${decision.symbol}-${index}`}
-                decision={decision}
-                price={priceOf(symbols, decision.symbol)}
-                outcome={plan.outcomes[index] ?? null}
-                /* `total > 1` 才给计数 —— 单条时什么都不显示，保持安静。 */
-                duplicate={{ nth, total }}
-                onSelectSymbol={onSelectSymbol}
-              />
+              <div key={`${decision.symbol}-${index}`} className="py-2.5 first:pt-0 last:pb-0">
+                <DecisionRow
+                  decision={decision}
+                  price={priceOf(symbols, decision.symbol)}
+                  outcome={plan.outcomes[index] ?? null}
+                  duplicate={{ nth, total }}
+                  onSelectSymbol={onSelectSymbol}
+                />
+              </div>
             ))}
-            {/*
-              跳过的那批 —— 用原生 `<details>`，**不需要任何状态**。
-              折叠而不是删掉：那十几条里有 `setup_score`，而"我把哪些标的打了几分"
-              正是操作员核对模型判断时的原始材料（也是模型自己复盘校准门槛的原料）。
-            */}
             {skippedRows.length > 0 && (
-              <details className="rounded-md border border-base-800 px-2.5 py-1.5">
-                {/*
-                  ⚠️ **符号直接列在摘要行里 —— 不要让人展开才知道"它看了哪些币"。**
-                  用户的反馈（2026-09-30）：
-                  「我打开网页，就能方便快捷看到模型在做什么，而不是什么都不做，
-                    或者要我去点开看大段的思考过程、提示词」。
-                  折叠本身没错（十几条 skip 会把决策流刷满），但**"看了哪些标的"是
-                  一眼就该看到的东西** —— 那是这一页存在的意义。
-                */}
-                <summary className="cursor-pointer select-none text-xs text-ink-faint">
-                  另有 {skippedRows.length} 个标的看过未做
-                  {topSkippedScore !== null ? `（最高 ${topSkippedScore} 分）` : ''}：
-                  <span className="text-ink-mid">
-                    {skippedRows
-                      .slice(0, 8)
-                      .map(({ decision }) => decision.symbol)
-                      .join('、')}
-                    {skippedRows.length > 8 ? ` 等 ${skippedRows.length} 个` : ''}
-                  </span>
-                  {' '}—— 展开可见各自的评分与理由
-                </summary>
-                <div className="mt-2.5 space-y-2.5">
-                  {skippedRows.map(({ decision, index }) => (
-                    <DecisionRow
-                      key={`skip-${decision.symbol}-${index}`}
-                      decision={decision}
-                      price={priceOf(symbols, decision.symbol)}
-                      outcome={plan.outcomes[index] ?? null}
-                      onSelectSymbol={onSelectSymbol}
+              <div className="pt-2.5 first:pt-0">
+                <details className="group rounded-lg border border-base-750/90 bg-base-900/55 px-2.5 py-2 transition-colors hover:border-base-600/70">
+                  <summary className="flex cursor-pointer list-none select-none flex-wrap items-center gap-1.5 text-xs text-ink-lo [&::-webkit-details-marker]:hidden">
+                    <ChevronRight
+                      aria-hidden
+                      className="h-3.5 w-3.5 shrink-0 text-ink-faint transition-transform duration-150 group-open:rotate-90"
                     />
-                  ))}
-                </div>
-              </details>
+                    <span className="shrink-0 font-medium text-ink-mid">
+                      跳过 {skippedRows.length} 个标的
+                    </span>
+                    {topSkippedScore !== null && (
+                      <span className="num shrink-0 rounded bg-base-800 px-1.5 py-0.5 text-[11px] text-ink-lo">
+                        最高 {topSkippedScore} 分
+                      </span>
+                    )}
+                    <span className="flex flex-wrap items-center gap-1">
+                      {skippedRows.slice(0, 8).map(({ decision }, i) => (
+                        <span
+                          key={`${decision.symbol}-${i}`}
+                          className="rounded bg-base-800/90 px-1.5 py-0.5 font-mono text-[11px] font-medium text-ink-mid"
+                        >
+                          {decision.symbol}
+                        </span>
+                      ))}
+                      {skippedRows.length > 8 && (
+                        <span className="text-[11px] text-ink-faint">
+                          +{skippedRows.length - 8}
+                        </span>
+                      )}
+                    </span>
+                    <span className="ml-auto hidden text-[11px] text-ink-faint sm:inline">
+                      展开理由
+                    </span>
+                  </summary>
+                  <div className="mt-2.5 divide-y divide-base-750/70 border-t border-base-750/70 pt-2.5">
+                    {skippedRows.map(({ decision, index }) => (
+                      <div key={`skip-${decision.symbol}-${index}`} className="py-2 first:pt-0 last:pb-0">
+                        <DecisionRow
+                          decision={decision}
+                          price={priceOf(symbols, decision.symbol)}
+                          outcome={plan.outcomes[index] ?? null}
+                          onSelectSymbol={onSelectSymbol}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              </div>
             )}
           </div>
         )}
 
-        {/*
-          没有配上任何决策的执行条目。
-
-          正常情况下这里是空的：服务端的每一条执行日志都是**从决策列表里长出来的**
-          （拒绝来自风控对同一批决策的裁决，跳过与执行来自被批准的那几条），
-          所以 `action` + `symbol` 一定能配到一条决策上。
-
-          但"配不上"这件事不能因此就丢掉：老记录、字段被截断的记录、或者别的写入方
-          都有可能留下孤立条目 —— 那正是最需要被看见的一类（静默丢弃 = 又一次
-          让界面说"什么都没发生"）。
-        */}
         {plan.leftover.length > 0 && (
-          <ul className="mt-2 space-y-1 border-t border-base-800 pt-2">
+          <ul className="mt-2.5 space-y-1 border-t border-base-750/80 pt-2">
             {plan.leftover.map((entry, index) => (
               <LogLine key={`leftover-${index}`} entry={entry} />
             ))}
@@ -2349,113 +2318,100 @@ function CycleMeta({ record }: { record: DecisionRecord }) {
       ? Math.round((record.reasoningTokens / record.completionTokens) * 100)
       : null;
 
-  const tokens = hasTokens
-    ? `in ${fmtInt(record.promptTokens ?? 0)} · out ${fmtInt(record.completionTokens ?? 0)}`
-    : // 不写 `in 0 · out 0`：那会让人以为模型一个 token 都没花。
-      '用量未回传';
+  const latencyTone =
+    record.aiLatencyMs > 60_000
+      ? 'text-down bg-down/10'
+      : record.aiLatencyMs > 30_000
+        ? 'text-warn bg-warn/10'
+        : "text-sky-300 bg-sky-500/10 [[data-skin='light']_&]:text-sky-700 [[data-skin='light']_&]:bg-sky-500/10";
 
   return (
-    <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 px-0.5 text-xs text-ink-lo">
-      <span>{timeAgo(record.timestamp)}</span>
-      <span aria-hidden className="text-ink-faint">
-        │
+    <div className="mb-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 px-0.5 text-[11.5px] leading-none text-ink-lo">
+      <span
+        className="num inline-flex items-center rounded-md bg-accent/12 px-1.5 py-0.5 font-semibold text-accent"
+        title={`第 ${record.cycleNumber} 轮决策周期`}
+      >
+        #{record.cycleNumber}
       </span>
-      <span className="num">周期 #{record.cycleNumber}</span>
-      <span aria-hidden className="text-ink-faint">
-        │
+
+      <span className="font-medium text-ink-mid" title={new Date(record.timestamp).toLocaleString()}>
+        {timeAgo(record.timestamp)}
       </span>
-      <span className="num">{tokens}</span>
 
-      {/*
-        缓存命中率。
+      <span aria-hidden className="text-ink-faint/60">
+        ·
+      </span>
 
-        缓存命中价是未命中价的 1/50，所以"输入花了多少钱"几乎完全由
-        这个百分比决定。实测这个项目是 99.6%。
+      {hasTokens ? (
+        <span
+          className="num inline-flex items-center gap-1 rounded-md bg-base-850/90 px-1.5 py-0.5 text-[11px]"
+          title={`输入 ${fmtInt(record.promptTokens ?? 0)} tokens · 输出 ${fmtInt(record.completionTokens ?? 0)} tokens`}
+        >
+          <span className="text-ink-faint">in</span>
+          <span className="font-medium text-ink-mid">{fmtInt(record.promptTokens ?? 0)}</span>
+          <span className="text-ink-faint/60">/</span>
+          <span className="text-ink-faint">out</span>
+          <span className="font-medium text-sky-300 [[data-skin='light']_&]:text-sky-700">
+            {fmtInt(record.completionTokens ?? 0)}
+          </span>
+        </span>
+      ) : (
+        <span className="text-[11px] text-ink-faint">用量未回传</span>
+      )}
 
-        **只在服务商报了 `cachedTokens` 时才显示** —— `null` 是"不知道"
-        （供应商没上报），显示成 0% 会让人去查一个不存在的问题。
-        高命中不额外加颜色：它是正常状态，**一个天天都是绿色的徽章
-        很快就不会再被人看见**；只有明显偏低时才值得提示。
-      */}
       {cachePct !== null && (
-        <>
-          <span aria-hidden className="text-ink-faint">
-            │
-          </span>
-          <span
-            className={cn('num', cachePct < 50 ? 'text-warn' : 'text-ink-faint')}
-            title={
-              `输入里有 ${fmtInt(record.cachedTokens ?? 0)} 个 token 命中了上下文缓存` +
-              `（占 ${cachePct}%）。\n` +
-              '缓存命中的输入价比未命中便宜约 50 倍，所以这个数字直接决定输入成本。'
-            }
-          >
-            缓存 {cachePct}%
-          </span>
-        </>
+        <span
+          className={cn(
+            'num inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium',
+            cachePct >= 50 ? 'bg-up/10 text-up' : 'bg-warn/12 text-warn',
+          )}
+          title={
+            `输入里有 ${fmtInt(record.cachedTokens ?? 0)} 个 token 命中了上下文缓存` +
+            `（占 ${cachePct}%）。\n` +
+            '缓存命中的输入价比未命中便宜约 50 倍，所以这个数字直接决定输入成本。'
+          }
+        >
+          缓存 {cachePct}%
+        </span>
       )}
 
-      {/*
-        思考占输出的比例。
-
-        输出价是缓存命中输入价的 200 倍，所以"输出里有多少是在想"
-        是这一轮成本的主要变量 —— 实测它常常占一多半。
-      */}
       {thinkPct !== null && (
-        <>
-          <span aria-hidden className="text-ink-faint">
-            │
-          </span>
-          <span
-            className="num text-ink-faint"
-            title={
-              `输出里有 ${fmtInt(record.reasoningTokens ?? 0)} 个 token 花在思考上` +
-              `（占 ${thinkPct}%）。输出价比缓存命中的输入价贵约 200 倍，` +
-              '所以这是本轮成本的主要部分。'
-            }
-          >
-            思考 {thinkPct}%
-          </span>
-        </>
+        <span
+          className="num inline-flex items-center rounded-md bg-violet-500/12 px-1.5 py-0.5 text-[11px] font-medium text-violet-300 [[data-skin='light']_&]:bg-violet-500/10 [[data-skin='light']_&]:text-violet-700"
+          title={
+            `输出里有 ${fmtInt(record.reasoningTokens ?? 0)} 个 token 花在思考上` +
+            `（占 ${thinkPct}%）。输出价比缓存命中的输入价贵约 200 倍，` +
+            '所以这是本轮成本的主要部分。'
+          }
+        >
+          思考 {thinkPct}%
+        </span>
       )}
 
-      {/*
-        耗时。失败的周期常常在拿到响应之前就抛了（延迟为 0），
-        此时写 `0 ms` 会被读成"模型 0 毫秒就答完了"，所以留 `—`。
-      */}
       {(record.aiLatencyMs > 0 || record.success) && (
-        <>
-          <span aria-hidden className="text-ink-faint">
-            │
-          </span>
-          <span className="num" title="本轮向模型发起请求到收到完整响应的时间。">
-            {fmtLatency(record.aiLatencyMs)}
-          </span>
-        </>
+        <span
+          className={cn(
+            'num inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium',
+            latencyTone,
+          )}
+          title="本轮向模型发起请求到收到完整响应的时间。"
+        >
+          {fmtLatency(record.aiLatencyMs)}
+        </span>
       )}
 
       {!record.success && (
-        <>
-          <span aria-hidden className="text-ink-faint">
-            │
+        record.error?.startsWith('本轮被中断') ? (
+          <span className="inline-flex min-w-0 items-center gap-1 rounded-md bg-base-800 px-1.5 py-0.5 text-[11px] font-medium text-ink-faint">
+            <span aria-hidden>⏸</span>
+            <span className="min-w-0 truncate">已中断</span>
           </span>
-          {/*
-           * 「已中断」不是失败：那是服务重启 / 手动停止时**我们主动取消**的一轮
-           * （2026-11-10 用户截图：每次重启都会留下满屏红色「失败 · AI 服务不可用」，
-           * 看起来像上游挂了）。用中性色 + `⏸`，与真正的失败区分开。
-           */}
-          {record.error?.startsWith('本轮被中断') ? (
-            <span className="flex min-w-0 items-center gap-1 font-medium text-ink-faint">
-              <span aria-hidden>⏸</span>
-              <span className="min-w-0 truncate">已中断</span>
-            </span>
-          ) : (
-            <span className="flex min-w-0 items-center gap-1 font-medium text-down">
-              <TriangleAlert aria-hidden className="h-3 w-3 shrink-0" />
-              <span className="min-w-0 truncate">失败{failureCategory(record.error)}</span>
-            </span>
-          )}
-        </>
+        ) : (
+          <span className="inline-flex min-w-0 items-center gap-1 rounded-md bg-down/12 px-1.5 py-0.5 text-[11px] font-medium text-down">
+            <TriangleAlert aria-hidden className="h-3 w-3 shrink-0" />
+            <span className="min-w-0 truncate">失败{failureCategory(record.error)}</span>
+          </span>
+        )
       )}
     </div>
   );
@@ -2495,6 +2451,101 @@ function isClickableSymbol(symbol: string | null | undefined): boolean {
   return /^[A-Z0-9]{2,24}$/.test(s) && s !== 'ALL' && s !== 'NONE';
 }
 
+/** 动作对应的左侧色条，用于一秒区分开仓 / 平仓 / 持有 / 等待 / 跳过。 */
+function actionRailClass(action: Decision['action']): string {
+  switch (action) {
+    case 'open_long':
+      return 'border-l-up/85';
+    case 'open_short':
+      return 'border-l-down/85';
+    case 'close_long':
+    case 'close_short':
+      return 'border-l-warn/85';
+    case 'hold':
+      return 'border-l-sky-400/75';
+    case 'wait':
+      return 'border-l-violet-400/55';
+    case 'skip':
+      return 'border-l-base-600/60';
+    default:
+      return 'border-l-accent/70';
+  }
+}
+
+/** 置信度微胶囊配色（深浅主题均可读）。 */
+function confidenceChipClass(confidence: number): string {
+  if (confidence >= 70) {
+    return 'bg-up/12 text-up';
+  }
+  if (confidence >= 50) {
+    return "bg-sky-500/12 text-sky-300 [[data-skin='light']_&]:bg-sky-500/10 [[data-skin='light']_&]:text-sky-700";
+  }
+  return 'bg-warn/12 text-warn';
+}
+
+/**
+ * 轻量量化文本语义高亮：不改写模型原话，只把涨跌百分比（+X% / -X%）、AI500 评分、
+ * ATR / 净RR / 量比等关键量化锚点柔和提亮，消除大段纯灰文字墙的阅读疲劳。
+ */
+const REASONING_HIGHLIGHT_RE =
+  /([+-]\d+(?:\.\d+)?%|\b\d{2,3}\s*分|(?:\d+(?:\.\d+)?×ATR)|(?:ATR15m\s*\d+(?:\.\d+)?%)|(?:净?RR\s*[≈<>≤≥]=?\s*\d+(?:\.\d+)?(?::\d+(?:\.\d+)?)?)|(?:量比\s*(?:仅|约)?\s*\d+(?:\.\d+)?x))/g;
+
+function FormattedReasoning({ text }: { text: string }) {
+  const cleaned = plainText(text);
+  const parts = cleaned.split(REASONING_HIGHLIGHT_RE);
+  return (
+    <p className="mt-1.5 min-w-0 break-words text-[12.5px] leading-[1.68] tracking-[0.005em] text-ink-mid">
+      {parts.map((part, idx) => {
+        if (!part) return null;
+        if (/^\+\d+(?:\.\d+)?%$/.test(part)) {
+          return (
+            <span key={idx} className="num font-medium text-up">
+              {part}
+            </span>
+          );
+        }
+        if (/^-\d+(?:\.\d+)?%$/.test(part)) {
+          return (
+            <span key={idx} className="num font-medium text-down">
+              {part}
+            </span>
+          );
+        }
+        if (/^\d{2,3}\s*分$/.test(part)) {
+          const score = Number.parseInt(part, 10);
+          const tone =
+            score >= 75
+              ? 'bg-up/12 text-up'
+              : score >= 65
+                ? 'bg-warn/12 text-warn'
+                : 'bg-base-800 text-ink-hi';
+          return (
+            <span
+              key={idx}
+              className={cn('num mx-0.5 inline-block rounded px-1 py-px text-[11.5px] font-semibold leading-tight', tone)}
+            >
+              {part}
+            </span>
+          );
+        }
+        if (
+          /×ATR$/.test(part) ||
+          /^ATR15m/.test(part) ||
+          /^净?RR/.test(part) ||
+          /^量比/.test(part)
+        ) {
+          return (
+            <span key={idx} className="num font-medium text-ink-hi/95">
+              {part}
+            </span>
+          );
+        }
+        return <span key={idx}>{part}</span>;
+      })}
+    </p>
+  );
+}
+
 function DecisionRow({
   decision,
   price,
@@ -2505,11 +2556,6 @@ function DecisionRow({
   decision: Decision;
   price: number | null;
   outcome: ExecutionLogEntry | null;
-  /**
-   * 同一标的在这一轮的第几条（`total > 1` 时才渲染标注）。
-   * 见调用处 `visibleRows` 的说明：模型可以一轮给同一标的**多条**决策，
-   * 那是真实输出、不该去重，但需要让人知道"这不是界面重复"。
-   */
   duplicate?: { nth: number; total: number };
   onSelectSymbol?: (symbol: string) => void;
 }) {
@@ -2517,26 +2563,48 @@ function DecisionRow({
   const canSelect = Boolean(onSelectSymbol && isClickableSymbol(decision.symbol));
 
   return (
-    <div className="min-w-0">
-      <div className="flex min-w-0 items-center gap-2">
+    <div className={cn('min-w-0 border-l-2 pl-2.5', actionRailClass(decision.action))}>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         {canSelect ? (
           <button
             type="button"
             onClick={() => onSelectSymbol!(decision.symbol.trim().toUpperCase())}
             title={`点击在左侧行情图表查看 ${decision.symbol}`}
-            className="group -mx-1 inline-flex min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left transition hover:bg-base-800/80"
+            className="group -mx-1 inline-flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 text-left transition hover:bg-base-800/80"
           >
             <CoinIcon symbol={decision.symbol} />
-            <span className="min-w-0 truncate text-base font-semibold text-ink-hi underline-offset-2 transition-colors group-hover:text-accent group-hover:underline">
+            <span className="min-w-0 truncate font-mono text-[14px] font-bold tracking-tight text-ink-hi underline-offset-2 transition-colors group-hover:text-accent group-hover:underline">
               {decision.symbol}
             </span>
           </button>
         ) : (
-          <>
+          <span className="inline-flex min-w-0 items-center gap-2">
             <CoinIcon symbol={decision.symbol} />
-            <span className="min-w-0 truncate text-base font-semibold text-ink-hi">{decision.symbol}</span>
-          </>
+            <span className="min-w-0 truncate font-mono text-[14px] font-bold tracking-tight text-ink-hi">
+              {decision.symbol}
+            </span>
+          </span>
         )}
+
+        {decision.confidence == null ? (
+          <span
+            className="shrink-0 text-[11px] text-ink-faint/80"
+            title="模型这一条决策里没有给出 confidence 字段。"
+          >
+            置信度 未给出
+          </span>
+        ) : (
+          <span
+            className={cn(
+              'num shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium leading-none',
+              confidenceChipClass(decision.confidence),
+            )}
+            title={`模型对本条决策的置信度评估：${decision.confidence}%`}
+          >
+            置信度 {decision.confidence}%
+          </span>
+        )}
+
         {duplicate && duplicate.total > 1 && (
           <span
             className="shrink-0 rounded bg-base-800 px-1.5 py-0.5 text-[10px] text-ink-lo"
@@ -2548,65 +2616,21 @@ function DecisionRow({
             第 {duplicate.nth}/{duplicate.total} 条
           </span>
         )}
+
         <ActionBadge action={decision.action} className="ml-auto shrink-0" />
       </div>
 
-      {/*
-        置信度：缩进对齐到符号下方，强调色小字。
+      {decision.reasoning && <FormattedReasoning text={decision.reasoning} />}
 
-        ⚠️ **模型没给这个字段时显示"未给出"，不显示 0%。**
-        实测模型有一整轮输出的每条决策都漏了 `confidence`（提示词当时只给了开仓的
-        范例），而这里原来无条件渲染 `${decision.confidence}%` —— 于是屏幕上每个
-        标的都写着「置信度: 0%」，看起来像"模型对每个判断都毫无把握"。
-        **0 分和"没给"是完全不同的两件事**，界面把它们显示成同一个数字就是在说谎。
-      */}
-      <div className="mt-0.5 pl-5 text-xs text-accent">
-        {decision.confidence == null ? (
-          <span className="text-ink-faint" title="模型这一条决策里没有给出 confidence 字段。">
-            置信度: 未给出
-          </span>
-        ) : (
-          <>
-            置信度: <span className="num">{decision.confidence}%</span>
-          </>
-        )}
-      </div>
-
-      {decision.reasoning && (
-        <div className="mt-0.5 flex min-w-0 items-start gap-1.5 pl-5">
-          {/* `shrink-0` + `mt-[3px]`：图标不能被文字挤扁，也要和第一行文字的视觉中线对齐。 */}
-          <FileText aria-hidden className="mt-[3px] h-3.5 w-3.5 shrink-0 text-ink-lo" />
-          <p className="min-w-0 break-words text-xs leading-relaxed text-ink-mid">{plainText(decision.reasoning)}</p>
-        </div>
-      )}
-
-      {/*
-        实际开仓的关键数字：**一行小字**，不是表格。
-        见 `figureParts` 的说明 —— 这是三轮溢出 bug 的修复方式。
-      */}
       {figures.length > 0 && (
-        <p className="mt-1 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 pl-5 text-xs leading-relaxed text-ink-lo">
+        <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs leading-relaxed text-ink-lo">
           {figures.map((part, index) => (
-            <span key={`${part.label}-${part.value}-${index}`} className="flex items-baseline gap-1">
-              {index > 0 && (
-                <span aria-hidden className="text-ink-faint">
-                  ·
-                </span>
-              )}
-              {part.label && <span className="text-ink-faint">{part.label}</span>}
-              {/*
-                折行由**外层** `flex-wrap` 负责（在片段之间断），这是正常路径 ——
-                不要给这个数字加 `whitespace-nowrap`：`0.171900` 一旦被折成两行，
-                看起来就是两个数。
-
-                但也不能指望"片段足够窄"：所以保留 `break-all` 作为**最后一道防线**。
-                决策流在 `xl` 以下是整页宽（≥600px），在 `xl` 以上是右栏的 40%
-                （≥500px），而这一行最长的片段（`止损 0.174000`）约 90px，
-                正常永远用不到它；万一真的窄到放不下，`break-all` 保证数字在
-                **自己的盒子内**折行，而不是撑破容器跑出去
-                （`DECISION-FEED.md` 里那三轮溢出 bug 就是这么来的）。
-              */}
-              <span className="num break-all" title={FIGURE_TITLE[part.key]}>
+            <span
+              key={`${part.label}-${part.value}-${index}`}
+              className="inline-flex items-baseline gap-1 rounded-md bg-base-900/70 px-1.5 py-0.5"
+            >
+              {part.label && <span className="text-[11px] text-ink-faint">{part.label}</span>}
+              <span className="num break-all font-medium text-ink-hi" title={FIGURE_TITLE[part.key]}>
                 {part.value}
               </span>
             </span>
@@ -2688,8 +2712,13 @@ function DecisionOutcome({
   const notes = (entry?.adjustments?.length ? entry.adjustments : decision.adjustments) ?? [];
 
   if (!entry) {
+    // 观望 / 跳过本身就不会进入下单执行阶段，无需在每张卡片底部刷屏重复一句废话；
+    // 只有真正的可执行动作（开仓/平仓/加减仓/调保护/撤单/持仓）缺少执行记录时才显式提醒。
+    if (decision.action === 'wait' || decision.action === 'skip') {
+      return null;
+    }
     return (
-      <div className="mt-1 pl-5 text-xs leading-relaxed text-ink-faint">
+      <div className="mt-1.5 text-xs leading-relaxed text-ink-faint">
         运行时没有留下这条决策的执行记录 —— 它没有进入执行阶段。
       </div>
     );
@@ -2724,7 +2753,7 @@ function DecisionOutcome({
   const hasMore = rest.length > 0;
 
   return (
-    <div className="mt-1 min-w-0 pl-5">
+    <div className="mt-1.5 min-w-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
         <Badge tone={tone} className="inline-flex shrink-0 items-center gap-1">
           <Icon aria-hidden className="h-3 w-3 shrink-0" />
@@ -3123,7 +3152,9 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
    * 所以这类条目直接给说明。见 `AGENTS.md` §5.2：机器码可以是英文，
    * **但面向操作员的文本必须走中文标签**，不能把机器码原样显示出来。
    */
-  const isCycleNotice = entry.action === 'skip_cycle';
+  const isCycleNotice =
+    entry.action === 'skip_cycle' ||
+    (entry.status === 'data' && (!entry.symbol || entry.symbol === '-'));
 
   /*
    * ⚠️ **折叠规则与 `DecisionOutcome` 相同：第一句始终可见，其余收起。**
@@ -3317,13 +3348,15 @@ function CycleDetails({
 
   const tabClass = (active: boolean): string =>
     cn(
-      'inline-flex items-center gap-1 rounded px-1 py-0.5 text-xs transition',
-      active ? 'font-semibold text-up' : 'text-ink-lo hover:text-ink-hi',
+      'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11.5px] transition',
+      active
+        ? 'border-up/40 bg-up/10 font-semibold text-up'
+        : 'border-transparent text-ink-lo hover:border-base-700 hover:bg-base-850 hover:text-ink-hi',
     );
 
   return (
     <div className="min-w-0">
-      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 px-0.5">
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 px-0.5">
         {hasDetail && (
           <>
             <button
@@ -3333,14 +3366,16 @@ function CycleDetails({
               title={open && tab === 'cot' ? '收起思考过程' : '展开思考过程'}
               className={tabClass(open && tab === 'cot')}
             >
-              <Sparkles aria-hidden className="h-3.5 w-3.5 shrink-0" />
+              <Sparkles
+                aria-hidden
+                className={cn(
+                  'h-3 w-3 shrink-0',
+                  open && tab === 'cot' ? 'text-up' : "text-violet-300/80 [[data-skin='light']_&]:text-violet-600/80",
+                )}
+              />
               思考过程
-              {open && tab === 'cot' && <Check aria-hidden className="h-3.5 w-3.5 shrink-0" />}
+              {open && tab === 'cot' && <Check aria-hidden className="h-3 w-3 shrink-0" />}
             </button>
-
-            <span aria-hidden className="text-ink-faint">
-              │
-            </span>
 
             <button
               type="button"
@@ -3349,16 +3384,22 @@ function CycleDetails({
               title={open && tab === 'prompt' ? '收起提示词' : '展开提示词'}
               className={tabClass(open && tab === 'prompt')}
             >
-              <Lock aria-hidden className="h-3.5 w-3.5 shrink-0" />
+              <Lock
+                aria-hidden
+                className={cn(
+                  'h-3 w-3 shrink-0',
+                  open && tab === 'prompt' ? 'text-up' : "text-sky-300/80 [[data-skin='light']_&]:text-sky-600/80",
+                )}
+              />
               提示词
-              {open && tab === 'prompt' && <Check aria-hidden className="h-3.5 w-3.5 shrink-0" />}
+              {open && tab === 'prompt' && <Check aria-hidden className="h-3 w-3 shrink-0" />}
             </button>
           </>
         )}
 
         {notes.length > 0 && (
-          <span className="flex items-center gap-1 text-xs text-warn">
-            <TriangleAlert aria-hidden className="h-3.5 w-3.5 shrink-0" />
+          <span className="ml-auto flex items-center gap-1 rounded-md bg-warn/10 px-1.5 py-0.5 text-[11px] font-medium text-warn">
+            <TriangleAlert aria-hidden className="h-3 w-3 shrink-0" />
             {notes.join(' · ')}
           </span>
         )}
