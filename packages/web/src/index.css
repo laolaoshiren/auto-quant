@@ -532,3 +532,133 @@
     transform: translateX(0);
   }
 }
+
+/* ==========================================================================
+ *  总览作战大屏（Overview War-Room）动态特效 —— 全部走主题 CSS 变量，深/浅色自适应
+ * ========================================================================== */
+
+@keyframes aq-marquee {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+@keyframes aq-radar-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes aq-shimmer-x {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+@keyframes aq-eq-bar {
+  0%,
+  100% {
+    transform: scaleY(0.28);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes aq-aurora-breathe {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@layer utilities {
+  .aq-war-hero {
+    position: relative;
+    overflow: hidden;
+    background-image:
+      radial-gradient(620px circle at 12% -20%, rgb(var(--aq-accent-rgb) / 0.16), transparent 62%),
+      radial-gradient(480px circle at 92% 0%, rgb(var(--aq-up-rgb) / 0.12), transparent 58%),
+      linear-gradient(to right, rgb(var(--aq-ink-faint-rgb) / 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(var(--aq-ink-faint-rgb) / 0.05) 1px, transparent 1px);
+    background-size: 100% 100%, 100% 100%, 24px 24px, 24px 24px;
+  }
+
+  .aq-war-grid {
+    background-image:
+      linear-gradient(to right, rgb(var(--aq-ink-faint-rgb) / 0.045) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(var(--aq-ink-faint-rgb) / 0.045) 1px, transparent 1px);
+    background-size: 20px 20px;
+  }
+
+  .aq-war-card {
+    position: relative;
+    overflow: hidden;
+    transition: border-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+  }
+
+  .aq-war-card:hover {
+    border-color: rgb(var(--aq-accent-rgb) / 0.42);
+    transform: translateY(-1px);
+    box-shadow: 0 10px 28px -16px rgb(var(--aq-accent-rgb) / 0.35);
+  }
+
+  .aq-shimmer-line {
+    animation: aq-shimmer-x 5.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
+  .aq-marquee-track {
+    display: flex;
+    width: max-content;
+    animation: aq-marquee 52s linear infinite;
+    will-change: transform;
+  }
+
+  .aq-marquee-wrap:hover .aq-marquee-track {
+    animation-play-state: paused;
+  }
+
+  .aq-radar-sweep {
+    background: conic-gradient(
+      from 0deg,
+      rgb(var(--aq-up-rgb) / 0) 0deg,
+      rgb(var(--aq-up-rgb) / 0) 250deg,
+      rgb(var(--aq-up-rgb) / 0.36) 348deg,
+      rgb(var(--aq-up-rgb) / 0.78) 360deg
+    );
+    animation: aq-radar-spin 4.2s linear infinite;
+  }
+
+  .aq-aurora-glow {
+    animation: aq-aurora-breathe 5s ease-in-out infinite;
+  }
+
+  .aq-eq-bar-1 {
+    transform-origin: bottom;
+    animation: aq-eq-bar 1.15s ease-in-out infinite;
+  }
+  .aq-eq-bar-2 {
+    transform-origin: bottom;
+    animation: aq-eq-bar 0.88s ease-in-out 0.18s infinite;
+  }
+  .aq-eq-bar-3 {
+    transform-origin: bottom;
+    animation: aq-eq-bar 1.32s ease-in-out 0.35s infinite;
+  }
+  .aq-eq-bar-4 {
+    transform-origin: bottom;
+    animation: aq-eq-bar 0.96s ease-in-out 0.52s infinite;
+  }
+}

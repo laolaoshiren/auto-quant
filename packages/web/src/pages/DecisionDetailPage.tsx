@@ -1,31 +1,32 @@
+/**
+ * 单轮决策完整审计详情页（16:9 宽屏双栏工作台版式）。
+ *
+ * - 顶栏一字排开周期元信息与诊断胶囊（延迟 / Token / 缓存 / 候选数），消除底部冗余诊断区；
+ * - 主体 12 列双栏：左 7 列 2×2 卡片网格展示全部决策（自动隐藏非开仓动作的无意义 0x / $0.00 / 无止损），
+ *   右 5 列聚合思维链、中文步骤执行日志与「用户提示词 / 系统提示词 / 原始响应」三合一选项卡。
+ */
+import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ChevronLeft } from 'lucide-react';
-import type { DecisionRecord } from '@aq/shared';
+import { ChevronLeft, ChevronRight, Copy, Check, TriangleAlert } from 'lucide-react';
+import type { Decision, DecisionRecord, ExecutionLogEntry } from '@aq/shared';
 import { api } from '../lib/api';
-import { useDocumentTitle, usePolled } from '../lib/hooks';
-import { Badge, ErrorNote, Panel, Spinner3 } from '../components/ui';
-import { PageShell, Metric, MetricGroup, SectionLabel } from '../components/shell';
+import { useCopy, useDocumentTitle, usePolled } from '../lib/hooks';
+import { Badge, ErrorNote, Panel, Spinner3, cn } from '../components/ui';
 import {
   ActionBadge,
-  ExecutionList,
-  PromptBlocks,
   RejectedBanner,
+  STATUS_LABELS,
+  STATUS_TONE,
   actionLabel,
+  isOpenAction,
 } from '../components/DecisionAudit';
+import { CoinIcon } from '../components/CoinIcon';
 import { fmtDateTime, fmtInt, fmtLatency, fmtPrice, fmtUsd } from '../lib/format';
 import { plainText } from '../lib/plainText';
-/*
- * ⚠️「没有决策」是【判断】还是【故障】—— 那个判据的完整理由见该模块。
- * 一句话：一个把故障说成判断的界面，比一个报错的界面更危险。
- */
+import { humanizeToolNames } from '../lib/toolLabels';
 import { classifyZeroDecision } from './decisionZeroState';
 import { zeroDecisionCopy } from './decisionZeroStateCopy';
-/**
- * Candidate symbols are rendered as chips. The count comes from the strategy's
- * own symbol filter, which can be a few hundred on a permissive config — past
- * 48 chips the panel is a wall of text and stops being scannable, so the rest
- * collapse behind a count.
- */
+
 const MAX_CANDIDATE_CHIPS = 48;
 
 export function DecisionDetailPage() {
@@ -47,29 +48,218 @@ export function DecisionDetailPage() {
   return <DecisionAuditView record={query.data} traderId={traderId} />;
 }
 
-/**
- * 单条周期的完整审计视图。
- *
- * 版式按 `LAYOUT.md` §1 重排：**决策是主内容，诊断值进左栏**。
- *
- * 改版前这里有六张 `text-2xl` 的指标卡（延迟 / 决策数 / 提示词 token / 补全
- * token / 候选数 / 执行数）横在决策上面 —— 它们全是**诊断值**（§3），却占据了
- * 首屏最显眼的位置，把"这一轮到底决定了什么"挤到了下面。现在 token 与延迟
- * 收进左栏的「上下文（诊断）」分组：做审计时一眼能找到，日常看的时候不碍事。
- */
+function actionBorderClass(action: Decision['action']): string {
+  switch (action) {
+    case 'open_long':
+      return 'border-l-up/85';
+    case 'open_short':
+      return 'border-l-down/85';
+    case 'close_long':
+    case 'close_short':
+      return 'border-l-warn/85';
+    case 'hold':
+      return 'border-l-sky-400/75';
+    case 'wait':
+      return 'border-l-violet-400/55';
+    case 'skip':
+      return 'border-l-base-600/60';
+    default:
+      return 'border-l-accent/75';
+  }
+}
+
+function parseDetailTrajectory(raw: string): Array<{ label: string; tone: string }> | null {
+  const m = /三段式决策轨迹[：:]\s*(.+)$/.exec(raw.trim());
+  if (!m?.[1]) return null;
+  const tokens = m[1]
+    .split(/\s*→\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (tokens.length === 0) return null;
+  return tokens.map((tok) => {
+    if (tok === 'plan') {
+      return {
+        label: '制定计划',
+        tone: "border-sky-500/30 bg-sky-500/12 text-sky-300 [[data-skin='light']_&]:text-sky-700",
+      };
+    }
+    const noteMatch = /^note:(.+)$/i.exec(tok);
+    if (noteMatch?.[1]) {
+      return {
+        label: `记笔记 ${noteMatch[1].replace(/USDT$/i, '')}`,
+        tone: "border-violet-500/30 bg-violet-500/12 text-violet-300 [[data-skin='light']_&]:text-violet-700",
+      };
+    }
+    const delMatch = /^note_del:(.+)$/i.exec(tok);
+    if (delMatch?.[1]) {
+      return { label: `清笔记 ${delMatch[1].replace(/USDT$/i, '')}`, tone: 'border-base-700 bg-base-800 text-ink-lo' };
+    }
+    const thesisMatch = /^thesis:(.+)$/i.exec(tok);
+    if (thesisMatch?.[1]) {
+      return { label: `更新论点 ${thesisMatch[1].replace(/USDT$/i, '')}`, tone: 'border-warn/35 bg-warn/12 text-warn' };
+    }
+    const finMatch = /^finalize(?:\((\d+)\))?$/i.exec(tok);
+    if (finMatch) {
+      return { label: finMatch[1] ? `提交决策 (${finMatch[1]})` : '提交决策', tone: 'border-up/35 bg-up/12 text-up' };
+    }
+    return { label: tok, tone: 'border-base-700 bg-base-800 text-ink-mid' };
+  });
+}
+
+const HIGHLIGHT_RE =
+  /([+-]\d+(?:\.\d+)?%|\b\d{2,3}\s*分(?!钟)|(?:\d+(?:\.\d+)?×ATR)|(?:ATR15m\s*\d+(?:\.\d+)?%)|(?:净?RR\s*[≈<>≤≥]=?\s*\d+(?:\.\d+)?(?::\d+(?:\.\d+)?)?))/g;
+
+function HighlightedProse({ text }: { text: string }) {
+  const parts = plainText(text).split(HIGHLIGHT_RE);
+  return (
+    <p className="mt-2 whitespace-pre-wrap break-words text-[12.5px] leading-[1.66] text-ink-mid">
+      {parts.map((p, i) => {
+        if (!p) return null;
+        if (/^\+\d+(?:\.\d+)?%$/.test(p)) return <span key={i} className="num font-medium text-up">{p}</span>;
+        if (/^-\d+(?:\.\d+)?%$/.test(p)) return <span key={i} className="num font-medium text-down">{p}</span>;
+        if (/^\d{2,3}\s*分$/.test(p)) {
+          const score = Number.parseInt(p, 10);
+          return (
+            <span
+              key={i}
+              className={cn(
+                'num mx-0.5 inline-block rounded px-1 py-px text-[11px] font-semibold',
+                score >= 75 ? 'bg-up/12 text-up' : score >= 65 ? 'bg-warn/12 text-warn' : 'bg-base-800 text-ink-hi',
+              )}
+            >
+              {p}
+            </span>
+          );
+        }
+        if (/×ATR$|^ATR15m|^净?RR/.test(p)) {
+          return <span key={i} className="num font-medium text-ink-hi">{p}</span>;
+        }
+        return <span key={i}>{p}</span>;
+      })}
+    </p>
+  );
+}
+
+type RawTab = 'user' | 'system' | 'raw';
+
+function RawMaterialTabs({ record }: { record: DecisionRecord }) {
+  const [tab, setTab] = useState<RawTab>('user');
+  const { copy, copied } = useCopy();
+
+  const contentMap: Record<RawTab, { label: string; text: string }> = {
+    user: { label: '用户提示词', text: record.userPrompt ?? '' },
+    system: { label: '系统提示词', text: record.systemPrompt ?? '' },
+    raw: { label: '原始模型响应', text: record.rawResponse ?? '' },
+  };
+
+  const active = contentMap[tab];
+  const lines = active.text ? active.text.split('\n').length : 0;
+
+  return (
+    <Panel
+      padded={false}
+      bodyClassName="p-0"
+      title={
+        <div className="flex flex-wrap items-center gap-1">
+          {(['user', 'system', 'raw'] as const).map((id) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setTab(id)}
+              className={cn(
+                'rounded-md px-2 py-0.5 text-xs font-medium transition',
+                tab === id
+                  ? 'bg-accent/15 text-accent'
+                  : 'text-ink-lo hover:bg-base-800 hover:text-ink-hi',
+              )}
+            >
+              {contentMap[id].label}
+            </button>
+          ))}
+        </div>
+      }
+      actions={
+        <div className="flex items-center gap-2">
+          <span className="num text-[11px] text-ink-faint">
+            {fmtInt(active.text.length)} 字 · {fmtInt(lines)} 行
+          </span>
+          {active.text && (
+            <button
+              type="button"
+              onClick={() => void copy(active.text)}
+              className="inline-flex h-6 items-center gap-1 rounded-md border border-base-700 bg-base-850 px-2 text-[11px] text-ink-mid transition hover:border-base-600 hover:text-ink-hi"
+            >
+              {copied ? <Check className="h-3 w-3 text-up" /> : <Copy className="h-3 w-3" />}
+              {copied ? '已复制' : '复制'}
+            </button>
+          )}
+        </div>
+      }
+    >
+      {active.text.trim() ? (
+        <pre className="max-h-[300px] overflow-auto whitespace-pre-wrap break-words bg-base-950/70 px-3 py-2.5 font-mono text-xs leading-relaxed text-ink-mid">
+          {active.text}
+        </pre>
+      ) : (
+        <p className="px-3 py-4 text-xs text-ink-faint">该项暂无持久化内容。</p>
+      )}
+    </Panel>
+  );
+}
+
+function CompactExecutionLog({ log }: { log: ExecutionLogEntry[] }) {
+  if (log.length === 0) {
+    return <p className="text-xs text-ink-faint">本轮无执行记录。</p>;
+  }
+  return (
+    <ul className="space-y-2">
+      {log.map((entry, idx) => {
+        const cleaned = plainText(humanizeToolNames(entry.detail ?? ''));
+        const trajectory = entry.status === 'data' ? parseDetailTrajectory(cleaned) : null;
+        if (trajectory) {
+          return (
+            <li key={idx}>
+              <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-base-750 bg-base-950/75 px-2.5 py-1.5 text-[11px] [[data-skin='light']_&]:bg-base-900">
+                <span className="inline-flex items-center gap-1 rounded bg-base-850 px-1.5 py-0.5 text-[10.5px] font-medium text-ink-lo">
+                  <span className="font-mono text-[10px] text-accent">❯</span>
+                  决策步骤
+                </span>
+                {trajectory.map((step, sIdx) => (
+                  <span key={`${step.label}-${sIdx}`} className="inline-flex items-center gap-1">
+                    {sIdx > 0 && <ChevronRight className="h-3 w-3 text-ink-faint/60" />}
+                    <span className={cn('rounded-md border px-2 py-0.5 font-medium leading-none', step.tone)}>
+                      {step.label}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </li>
+          );
+        }
+        return (
+          <li
+            key={idx}
+            className="flex flex-wrap items-start gap-2 rounded-lg border border-base-750/80 bg-base-850/60 px-2.5 py-2 text-xs"
+          >
+            <Badge tone={STATUS_TONE[entry.status] ?? 'muted'} className="shrink-0">
+              {STATUS_LABELS[entry.status] ?? entry.status}
+            </Badge>
+            {entry.symbol && entry.symbol !== '-' && (
+              <span className="inline-flex items-center gap-1 font-mono font-semibold text-ink-hi">
+                <CoinIcon symbol={entry.symbol} className="h-4 w-4 text-[9px]" />
+                {actionLabel(entry.action)} {entry.symbol}
+              </span>
+            )}
+            {cleaned && <span className="min-w-0 flex-1 break-words text-ink-mid">{cleaned}</span>}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** 单条周期的 16:9 宽屏完整审计视图。 */
 export function DecisionAuditView({ record, traderId }: { record: DecisionRecord; traderId: number }) {
-  /*
-   * ⚠️ **历史决策记录可能缺字段 —— 必须先归一化，否则详情页白屏**（2026-11-10 走查发现）。
-   *
-   * 真实库里的老决策记录没有 `adjustments` / `candidateSymbols` 等字段
-   * （它们来自后续迭代），而类型描述的是"现在这份"的形状 —— 渲染时
-   * `undefined.length` 直接把整个 `<DecisionAuditView>` 炸掉：
-   *
-   *     TypeError: Cannot read properties of undefined (reading 'length')
-   *
-   * 演示数据永远带齐这些字段，所以这个问题**只在真实数据上暴露**。
-   * 归一化放在视图入口一处，下面的渲染就不用到处写 `?.`。
-   */
   const executionLog = record.executionLog ?? [];
   const decisions = record.decisions ?? [];
   const candidates = record.candidateSymbols ?? [];
@@ -77,96 +267,65 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
   const rejected = executionLog.filter((entry) => entry.status === 'rejected');
   const failed = executionLog.filter((entry) => entry.status === 'failed');
   const executed = executionLog.filter((entry) => entry.status === 'ok');
-  /*
-   * ⚠️ **"没有决策"要按成因说不同的话**（2026-10-15 第二次改：从"两支"改成"五态"）。
-   *
-   * ## 为什么原来那两支不够
-   *
-   * 原来说法只有：
-   * ```
-   *   故障 → "输出解析失败（模型回复可能被截断）…去查 max_tokens"
-   *   其余 → "没有可执行的决策 — 本周期模型选择观望或持仓。"
-   * ```
-   * 而分类器（`decisionZeroState.ts`）能分出**四种性质不同的故障**，
-   * 其中"裁决官这一轮没有产出（网关/冷却）"**根本不是预算问题**。
-   * 一律说"可能被截断"的后果是：**操作员去查一个不存在的 max_tokens 问题**，
-   * 而真因没人看 —— 与"把故障说成观望"是同一个病的两种方向。
-   *
-   * ⇒ 文案表在 `decisionZeroStateCopy.ts`（按 `ZeroDecisionKind` 穷尽映射，
-   *   将来加故障态会**编译不过**）。这里只负责把它的两句话放进版式。
-   */
+
   const zeroDecisionKind = classifyZeroDecision(record.rawResponse ?? '');
   const zeroDecision = zeroDecisionCopy(zeroDecisionKind);
-  /*
-   * 故障用警示色、判断用中性色。
-   *
-   * ⚠️ 这里用 `zeroDecisionKind !== 'no-block-judgment'` 而**不是**再判一次字符串 ——
-   * 判据只有 `classifyZeroDecision` 一份，这一行只是把它的结果映射到颜色
-   *（再加一条正则就会变成第二个漂移点）。
-   */
   const isFailure = zeroDecisionKind !== 'no-block-judgment';
 
-  /*
-   * 左栏：这一轮的诊断读数。
-   *
-   * `LAYOUT.md` §3 说诊断值默认不该出现在状态区，但**专门的审计页可以显示，
-   * 前提是放在专门的区块里**。这就是那个区块：它回答的是"这一轮跑了多久、
-   * 花了多少 token、给了模型多少候选"，而不是"现在该不该慌"。
-   */
-  const rail = (
-    /* 窄屏 2 列而非 3 列 —— 理由见 TraderPage 同名处：3 列会把值截断。 */
-    <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-1">
-      {/*
-        2026-11-10（ui-spec §4.2）：删掉原来的「周期结果」分组。
-        它的两个数字（决策数 / 已执行·已拒绝）在决策区标题与执行日志面板里
-        已经各出现一次 —— 同一件事在首屏出现三遍，是"拼凑感"而不是信息。
-        右栏只留**这里才有的**诊断读数。
-      */}
-      <MetricGroup title="上下文（诊断）" columns={2}>
-        <Metric label="模型延迟" value={fmtLatency(record.aiLatencyMs)} sub="单次推理耗时" />
-        <Metric label="提示词 Token" value={fmtInt(record.promptTokens ?? 0)} />
-        <Metric label="补全 Token" value={fmtInt(record.completionTokens ?? 0)} />
-        <Metric
-          label="候选交易对"
-          value={fmtInt(candidates.length)}
-          sub="本周期提供给模型的交易对"
-        />
-      </MetricGroup>
-    </div>
-  );
+  const cachePct =
+    record.cachedTokens != null && record.promptTokens != null && record.promptTokens > 0
+      ? Math.round((record.cachedTokens / record.promptTokens) * 100)
+      : null;
 
   return (
-    <div className="mx-auto w-full max-w-[110rem] space-y-3">
-      {/* Header ------------------------------------------------------------ */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <Link
-          to={`/traders/${traderId}`}
-          className="inline-flex items-center gap-1 text-base text-ink-lo transition hover:text-accent"
-        >
-          <ChevronLeft aria-hidden className="h-4 w-4" />
-          机器人面板
-        </Link>
-        <span className="h-4 w-px bg-base-700" aria-hidden />
-        <h1 className="text-xl font-semibold tracking-wide text-ink-hi">周期 #{record.cycleNumber}</h1>
-        <Badge tone={record.success ? 'up' : 'down'}>{record.success ? '周期成功' : '周期失败'}</Badge>
-        {/* 元信息跟在标题后面（规范 §1：不要用 `ml-auto` 把信息推到最右端）。 */}
-        <span className="num text-xs text-ink-faint">
-          {fmtDateTime(record.timestamp)} · 记录 #{record.id} · 机器人 #{traderId}
-        </span>
+    <div className="w-full space-y-3">
+      {/* 16:9 紧凑全宽顶栏（集成原底部所有诊断指标，一屏尽览） */}
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-base-750 bg-base-900 px-3.5 py-2.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            to={`/traders/${traderId}`}
+            className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium text-ink-lo transition hover:bg-base-850 hover:text-accent"
+          >
+            <ChevronLeft aria-hidden className="h-3.5 w-3.5" />
+            机器人面板
+          </Link>
+          <span className="h-4 w-px bg-base-750" aria-hidden />
+          <h1 className="num text-base font-bold text-ink-hi">周期 #{record.cycleNumber}</h1>
+          <Badge tone={record.success ? 'up' : 'down'}>{record.success ? '周期成功' : '周期失败'}</Badge>
+          <span className="num text-xs text-ink-faint">
+            {fmtDateTime(record.timestamp)} · 记录 #{record.id} · 机器人 #{traderId}
+          </span>
+        </div>
+
+        <div className="num flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="rounded-md bg-sky-500/12 px-2 py-0.5 font-medium text-sky-300 [[data-skin='light']_&]:text-sky-700">
+            耗时 {fmtLatency(record.aiLatencyMs)}
+          </span>
+          <span className="rounded-md bg-base-850 px-2 py-0.5 text-ink-mid">
+            输入 {fmtInt(record.promptTokens ?? 0)} / 输出 {fmtInt(record.completionTokens ?? 0)}
+          </span>
+          {cachePct !== null && (
+            <span className={cn('rounded-md px-2 py-0.5 font-medium', cachePct >= 50 ? 'bg-up/12 text-up' : 'bg-warn/12 text-warn')}>
+              缓存 {cachePct}%
+            </span>
+          )}
+          <span className="rounded-md bg-base-850 px-2 py-0.5 text-ink-lo">
+            候选 {fmtInt(candidates.length)}
+          </span>
+        </div>
       </div>
 
-      {/* Rejected proposals are the clearest signal that the bot looked and
-          declined — surface them above the fold rather than burying them. */}
       <RejectedBanner log={executionLog} />
 
       {failed.length > 0 && (
-        <div className="rounded-lg border border-down/60 bg-down/10 px-4 py-3">
-          <div className="text-base font-bold uppercase tracking-wide text-down">
+        <div className="rounded-xl border border-down/50 bg-down/10 px-3.5 py-2.5">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-down">
+            <TriangleAlert className="h-3.5 w-3.5" />
             {failed.length} 个操作在交易所失败
           </div>
-          <ul className="mt-1.5 space-y-1">
+          <ul className="mt-1 space-y-1">
             {failed.map((entry, index) => (
-              <li key={index} className="text-xs leading-relaxed text-down/90">
+              <li key={index} className="text-xs text-down/90">
                 <span className="num font-semibold" title={entry.action}>
                   {actionLabel(entry.action)} {entry.symbol}
                 </span>{' '}
@@ -177,121 +336,179 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
         </div>
       )}
 
-      <PageShell aside={rail}>
-        {/* Decisions ------------------------------------------------------- */}
-        {/*
-          The parsed decisions get the full width, first. They are what the page
-          exists to answer; the chain of thought, the execution log and the
-          prompts sit below.
-        */}
-        <section>
-          <SectionLabel
-            title="解析后的决策"
-            count={decisions.length}
-            actions={
-              <>
-                <span className="text-xs text-ink-faint">风控复核后</span>
-                {executed.length > 0 && <Badge tone="up">{executed.length} 已执行</Badge>}
-              </>
+      {/* 16:9 双栏宽屏工作台：左 7 列解析决策 + 候选池 | 右 5 列思维链 + 执行日志 + 原始材料 */}
+      <div className="grid grid-cols-1 items-start gap-3.5 xl:grid-cols-12">
+        {/* 左栏（7/12）：决策卡片 2 列网格 */}
+        <div className="space-y-3.5 xl:col-span-7">
+          <Panel
+            padded={false}
+            bodyClassName="p-3"
+            title={
+              <span className="inline-flex items-center gap-2">
+                <span>解析后的决策</span>
+                <span className="num rounded bg-base-800 px-1.5 py-0.5 text-[11px] font-normal text-ink-lo">
+                  {decisions.length}
+                </span>
+              </span>
             }
-          />
-          <Panel bodyClassName="p-0" padded={false}>
+            actions={
+              <span className="flex items-center gap-1.5">
+                <span className="text-[11px] text-ink-faint">风控复核后</span>
+                {executed.length > 0 && <Badge tone="up">{executed.length} 已执行</Badge>}
+                {rejected.length > 0 && <Badge tone="warn">{rejected.length} 被拒</Badge>}
+              </span>
+            }
+          >
             {decisions.length === 0 ? (
-              /*
-               * ⚠️ 四类故障 + 一类判断，各说各的话（文案表见 `decisionZeroStateCopy.ts`）。
-               *
-               * ## 为什么统一用 `text-warn` 而不是给"截断"配更重的颜色
-               *
-               * 这里是**审计页**：读者已经点进来了，四类都是"需要有人看一眼"的状态。
-               * 用一个统一的警示色 + **各不相同的事实陈述**（这才是关键）比
-               * 再造一个"严重度"维度更有用 —— 后者会诱使人按颜色分诊，而漏读那句话。
-               */
-              <div className="px-4 py-3">
-                {/*
-                  ⚠️ 故障用 `text-warn`、判断用 `text-ink-faint` —— 颜色只表达
-                  "要不要看一眼"，**区分靠的是那句话本身**（色盲用户同样能读）。
-                  只按颜色分诊会诱使人漏读那句话。
-                */}
-                <p className={`text-base ${isFailure ? 'text-warn' : 'text-ink-faint'}`}>
+              <div className="px-1 py-2">
+                <p className={`text-sm font-medium ${isFailure ? 'text-warn' : 'text-ink-faint'}`}>
                   {zeroDecision.headline}
                 </p>
-                <p className="mt-1 text-sm text-ink-faint">{plainText(zeroDecision.detail)}</p>
+                <p className="mt-1 text-xs leading-relaxed text-ink-faint">{plainText(zeroDecision.detail)}</p>
               </div>
             ) : (
-              /*
-                1px gaps over a border-coloured background, rather than per-item
-                borders. The 2px horizontal padding cancels the 1px the gaps leave
-                at the right edge and the bottom, so the rules stop at the panel
-                border instead of bleeding to its corner.
-              */
-              <div className="grid grid-cols-1 gap-px bg-base-850 pb-px pr-px">
-                {decisions.map((decision, index) => (
-                  <div key={`${decision.symbol}-${index}`} className="min-w-0 bg-base-900 px-4 py-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-base font-semibold text-ink-hi">{decision.symbol}</span>
-                      <ActionBadge action={decision.action} />
-                      <Badge tone="muted" title="该决策建议的杠杆倍数。">
-                        {decision.leverage}x
-                      </Badge>
-                      {/*
-                        名义价值只在下面的 Readout 里出现一次（规范 §4.2：
-                        同一张卡里不重复同一个数字）。原来头部这里也有一份。
-                      */}
-                      {/*
-                        ⚠️ 漏填时显示"未给出"而不是 0% —— 两者含义相反，
-                        见 `Decision.confidence` 的说明。
-                      */}
-                      <span className="num ml-auto text-xs text-ink-lo" title="模型对该决策的自评置信度。">
-                        {decision.confidence === null ? '置信度 未给出' : `置信度 ${decision.confidence}%`}
-                      </span>
-                    </div>
+              <div
+                className={cn(
+                  'grid grid-cols-1 gap-2.5',
+                  decisions.length >= 2 && 'md:grid-cols-2',
+                )}
+              >
+                {decisions.map((decision, index) => {
+                  const hasLeverage = typeof decision.leverage === 'number' && decision.leverage > 0;
+                  const showParams =
+                    isOpenAction(decision.action) ||
+                    decision.action === 'add_to_position' ||
+                    decision.action === 'reduce_position' ||
+                    decision.action === 'adjust_protection' ||
+                    decision.stopLoss != null ||
+                    decision.takeProfit != null ||
+                    (typeof decision.positionSizeUsd === 'number' && decision.positionSizeUsd > 0);
 
-                    {/* Units stay in the labels — "风险预算" alone does not say in what. */}
-                    <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1.5 md:grid-cols-4">
-                      <Readout label="止损" value={decision.stopLoss ? fmtPrice(decision.stopLoss) : '无'} tone="text-down" />
-                      <Readout label="止盈" value={decision.takeProfit ? fmtPrice(decision.takeProfit) : '无'} tone="text-up" />
-                      <Readout label="风险预算（USDT）" value={fmtUsd(decision.riskUsd, 2)} />
-                      <Readout label="名义价值（USDT）" value={fmtUsd(decision.positionSizeUsd, 2)} />
-                    </div>
-
-                    {decision.reasoning && (
-                      <p className="mt-2 whitespace-pre-wrap text-base leading-relaxed text-ink-mid">
-                        {decision.reasoning}
-                      </p>
-                    )}
-
-                    {(decision.adjustments ?? []).length > 0 && (
-                      <div className="mt-2 rounded-md border border-warn/40 bg-warn/10 px-3 py-2">
-                        <div className="text-xs font-semibold uppercase tracking-wide text-warn">风控引擎调整</div>
-                        <ul className="mt-1 space-y-0.5">
-                          {(decision.adjustments ?? []).map((note, noteIndex) => (
-                            <li key={noteIndex} className="text-xs leading-relaxed text-warn/90">
-                              • {note}
-                            </li>
-                          ))}
-                        </ul>
+                  return (
+                    <div
+                      key={`${decision.symbol}-${index}`}
+                      className={cn(
+                        'min-w-0 rounded-lg border border-base-750 border-l-2 bg-base-850/75 p-3 transition hover:border-base-600',
+                        actionBorderClass(decision.action),
+                      )}
+                    >
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <CoinIcon symbol={decision.symbol} />
+                        <span className="font-mono text-sm font-bold text-ink-hi">{decision.symbol}</span>
+                        <span title={`存储值 action = ${decision.action}`}>
+                          <ActionBadge action={decision.action} />
+                        </span>
+                        {/* 修复 0x BUG：仅当 leverage > 0 时渲染杠杆徽章 */}
+                        {hasLeverage && (
+                          <Badge tone="accent" title="该决策建议的杠杆倍数">
+                            {decision.leverage}x
+                          </Badge>
+                        )}
+                        <span
+                          className={cn(
+                            'num ml-auto rounded px-1.5 py-0.5 text-[11px] font-medium',
+                            decision.confidence == null
+                              ? 'text-ink-faint'
+                              : decision.confidence >= 70
+                                ? 'bg-up/12 text-up'
+                                : decision.confidence >= 50
+                                  ? "bg-sky-500/12 text-sky-300 [[data-skin='light']_&]:text-sky-700"
+                                  : 'bg-warn/12 text-warn',
+                          )}
+                        >
+                          {decision.confidence === null ? '置信度 未给出' : `置信度 ${decision.confidence}%`}
+                        </span>
                       </div>
-                    )}
 
-                    {/*
-                      The machine code, spelled out: the stored `action` is what the
-                      audit trail and the risk engine both use, and rendering only
-                      the Chinese label hides the value an operator greps for.
-                      所以这一行明确写成"存储值"，和上面的中文徽章各司其职。
-                    */}
-                    <div className="num mt-2 text-xs text-ink-faint">
-                      存储值 action = {decision.action}
+                      {/* 仅在实际存在仓位/保护位参数时显示参数胶囊，告别满屏 0x / 无 / $0.00 空白浪费 */}
+                      {showParams && (
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+                          {typeof decision.positionSizeUsd === 'number' && decision.positionSizeUsd > 0 && (
+                            <span className="rounded bg-base-900/80 px-2 py-0.5">
+                              <span className="text-ink-faint">仓位 </span>
+                              <strong className="num text-ink-hi">{fmtUsd(decision.positionSizeUsd, 2)}</strong>
+                            </span>
+                          )}
+                          {decision.stopLoss != null && (
+                            <span className="rounded bg-base-900/80 px-2 py-0.5">
+                              <span className="text-ink-faint">止损 </span>
+                              <strong className="num text-down">{fmtPrice(decision.stopLoss)}</strong>
+                            </span>
+                          )}
+                          {decision.takeProfit != null && (
+                            <span className="rounded bg-base-900/80 px-2 py-0.5">
+                              <span className="text-ink-faint">止盈 </span>
+                              <strong className="num text-up">{fmtPrice(decision.takeProfit)}</strong>
+                            </span>
+                          )}
+                          {typeof decision.riskUsd === 'number' && decision.riskUsd > 0 && (
+                            <span className="rounded bg-base-900/80 px-2 py-0.5">
+                              <span className="text-ink-faint">风险 </span>
+                              <strong className="num text-warn">{fmtUsd(decision.riskUsd, 2)}</strong>
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {decision.reasoning && <HighlightedProse text={decision.reasoning} />}
+
+                      {(decision.adjustments ?? []).length > 0 && (
+                        <div className="mt-2 rounded-md border border-warn/40 bg-warn/10 px-2.5 py-1.5">
+                          <div className="text-[11px] font-semibold text-warn">风控引擎调整</div>
+                          <ul className="mt-0.5 space-y-0.5">
+                            {(decision.adjustments ?? []).map((note, noteIndex) => (
+                              <li key={noteIndex} className="text-xs leading-relaxed text-warn/90">
+                                • {note}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </Panel>
-        </section>
 
-        {/* Reasoning + execution log ---------------------------------------- */}
-        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-          {/* Chain of thought ------------------------------------------------ */}
+          {/* 候选交易对紧凑条 */}
+          <Panel
+            padded={false}
+            bodyClassName="p-3"
+            title={
+              <span className="inline-flex items-center gap-2">
+                <span>候选交易对</span>
+                <span className="num rounded bg-base-800 px-1.5 py-0.5 text-[11px] font-normal text-ink-lo">
+                  {candidates.length}
+                </span>
+              </span>
+            }
+          >
+            {candidates.length === 0 ? (
+              <p className="text-xs text-ink-faint">本周期没有筛选出候选交易对。</p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {candidates.slice(0, MAX_CANDIDATE_CHIPS).map((symbol) => (
+                  <span
+                    key={symbol}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-base-750 bg-base-850/80 px-2 py-1 font-mono text-xs font-medium text-ink-mid"
+                  >
+                    <CoinIcon symbol={symbol} className="h-4 w-4 text-[9px]" />
+                    {symbol}
+                  </span>
+                ))}
+                {candidates.length > MAX_CANDIDATE_CHIPS && (
+                  <span className="inline-flex items-center rounded-md border border-base-750 bg-base-900 px-2 py-1 text-xs text-ink-faint">
+                    +{candidates.length - MAX_CANDIDATE_CHIPS} 个
+                  </span>
+                )}
+              </div>
+            )}
+          </Panel>
+        </div>
+
+        {/* 右栏（5/12）：思维链 + 执行日志 + 三合一原始材料 */}
+        <div className="space-y-3.5 xl:col-span-5">
           <Panel
             title="思维链"
             actions={<span className="num text-xs text-ink-faint">{fmtInt(cotTrace.length)} 字符</span>}
@@ -299,17 +516,16 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
             padded={false}
           >
             {cotTrace ? (
-              <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-xs leading-relaxed text-ink-mid">
+              <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap break-words px-3.5 py-2.5 font-mono text-xs leading-relaxed text-ink-mid">
                 {cotTrace}
               </pre>
             ) : (
-              <p className="px-4 py-3 text-base text-ink-faint">
+              <p className="px-3.5 py-3 text-xs text-ink-faint">
                 本周期模型未返回 {'<reasoning>'} 块。
               </p>
             )}
           </Panel>
 
-          {/* Execution log --------------------------------------------------- */}
           <Panel
             title="执行日志"
             actions={
@@ -322,52 +538,12 @@ export function DecisionAuditView({ record, traderId }: { record: DecisionRecord
             bodyClassName="p-3"
             padded={false}
           >
-            <ExecutionList log={executionLog} />
+            <CompactExecutionLog log={executionLog} />
           </Panel>
+
+          <RawMaterialTabs record={record} />
         </div>
-
-        {/* Candidates -------------------------------------------------------- */}
-        <section>
-          <SectionLabel
-            title="候选交易对"
-            count={candidates.length}
-            actions={
-              candidates.length > MAX_CANDIDATE_CHIPS ? (
-                <span className="num text-xs text-ink-faint">显示前 {MAX_CANDIDATE_CHIPS} 个</span>
-              ) : undefined
-            }
-          />
-          <Panel padded={false} bodyClassName="p-3">
-            {candidates.length === 0 ? (
-              <p className="text-base text-ink-faint">本周期没有筛选出候选交易对。</p>
-            ) : (
-              <div className="flex flex-wrap gap-1">
-                {candidates.slice(0, MAX_CANDIDATE_CHIPS).map((symbol) => (
-                  <span key={symbol} className="chip border-base-700 bg-base-850 text-ink-mid">
-                    {symbol}
-                  </span>
-                ))}
-                {candidates.length > MAX_CANDIDATE_CHIPS && (
-                  <span className="chip border-base-700 bg-base-900 text-ink-faint">
-                    +{candidates.length - MAX_CANDIDATE_CHIPS} 个
-                  </span>
-                )}
-              </div>
-            )}
-          </Panel>
-        </section>
-
-        <PromptBlocks record={record} />
-      </PageShell>
-    </div>
-  );
-}
-
-function Readout({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3 border-b border-base-850 py-1 last:border-0">
-      <span className="text-xs uppercase tracking-wide text-ink-lo">{label}</span>
-      <span className={`num whitespace-nowrap text-base ${tone ?? 'text-ink-hi'}`}>{value}</span>
+      </div>
     </div>
   );
 }

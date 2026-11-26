@@ -3111,45 +3111,45 @@ function parseTrajectorySteps(raw: string): TrajectoryStep[] | null {
     if (tok === 'plan') {
       return {
         label: '制定计划',
-        tone: "bg-sky-500/12 text-sky-300 [[data-skin='light']_&]:bg-sky-500/10 [[data-skin='light']_&]:text-sky-700",
+        tone: "border-sky-500/30 bg-sky-500/12 text-sky-300 [[data-skin='light']_&]:border-sky-600/25 [[data-skin='light']_&]:bg-sky-500/10 [[data-skin='light']_&]:text-sky-700",
       };
     }
     const noteMatch = /^note:(.+)$/i.exec(tok);
     if (noteMatch?.[1]) {
       return {
         label: `记笔记 ${noteMatch[1].replace(/USDT$/i, '')}`,
-        tone: "bg-violet-500/12 text-violet-300 [[data-skin='light']_&]:bg-violet-500/10 [[data-skin='light']_&]:text-violet-700",
+        tone: "border-violet-500/30 bg-violet-500/12 text-violet-300 [[data-skin='light']_&]:border-violet-600/25 [[data-skin='light']_&]:bg-violet-500/10 [[data-skin='light']_&]:text-violet-700",
       };
     }
     const delMatch = /^note_del:(.+)$/i.exec(tok);
     if (delMatch?.[1]) {
       return {
         label: `清笔记 ${delMatch[1].replace(/USDT$/i, '')}`,
-        tone: 'bg-base-800 text-ink-lo',
+        tone: 'border-base-700 bg-base-800/90 text-ink-lo',
       };
     }
     const thesisMatch = /^thesis:(.+)$/i.exec(tok);
     if (thesisMatch?.[1]) {
       return {
         label: `更新论点 ${thesisMatch[1].replace(/USDT$/i, '')}`,
-        tone: 'bg-warn/12 text-warn',
+        tone: 'border-warn/35 bg-warn/12 text-warn',
       };
     }
     const klineMatch = /^kline[s]?:(.+)$/i.exec(tok);
     if (klineMatch?.[1]) {
       return {
         label: `查K线 ${klineMatch[1]}`,
-        tone: 'bg-accent/12 text-accent',
+        tone: 'border-accent/35 bg-accent/12 text-accent',
       };
     }
     const finMatch = /^finalize(?:\((\d+)\))?$/i.exec(tok);
     if (finMatch) {
       return {
         label: finMatch[1] ? `提交决策 (${finMatch[1]})` : '提交决策',
-        tone: 'bg-up/12 text-up',
+        tone: 'border-up/35 bg-up/12 text-up',
       };
     }
-    return { label: tok, tone: 'bg-base-800 text-ink-mid' };
+    return { label: tok, tone: 'border-base-700 bg-base-800 text-ink-mid' };
   });
 }
 
@@ -3204,14 +3204,19 @@ function LogLine({ entry }: { entry: ExecutionLogEntry }) {
   if (trajectory) {
     return (
       <li className="min-w-0">
-        <div className="flex flex-wrap items-center gap-1 text-[11px]">
-          <span className="mr-0.5 shrink-0 text-ink-faint">决策步骤</span>
+        <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-base-750/90 bg-base-950/75 px-2.5 py-1.5 font-mono text-[11px] shadow-inner [[data-skin='light']_&]:bg-base-900/90">
+          <span className="mr-0.5 inline-flex shrink-0 items-center gap-1 rounded bg-base-850/90 px-1.5 py-0.5 font-sans text-[10.5px] font-medium text-ink-lo ring-1 ring-base-700/70">
+            <span aria-hidden className="font-mono text-[10px] text-accent">
+              ❯
+            </span>
+            决策步骤
+          </span>
           {trajectory.map((step, idx) => (
             <span key={`${step.label}-${idx}`} className="inline-flex items-center gap-1">
               {idx > 0 && <ChevronRight aria-hidden className="h-3 w-3 shrink-0 text-ink-faint/60" />}
               <span
                 className={cn(
-                  'inline-flex items-center rounded px-1.5 py-0.5 font-medium leading-none',
+                  'inline-flex items-center rounded-md border px-2 py-0.5 font-sans font-medium leading-none',
                   step.tone,
                 )}
               >

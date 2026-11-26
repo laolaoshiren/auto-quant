@@ -1,10 +1,10 @@
-import { Landmark, RotateCw, Trash2 } from 'lucide-react';
+import { Landmark, Pencil, RotateCw, Trash2, Wifi } from 'lucide-react';
 import type { ExchangeAccountRow, PreflightCheck } from '../../lib/api';
-import { Badge, Button, Collapsible, ErrorNote } from '../ui';
+import { Badge, Button, Collapsible, ErrorNote, cn } from '../ui';
 import { CheckList } from '../Badges';
-import { BalanceCell } from '../BalanceCells';
 import {
   DEFAULT_SETTLE_ASSET,
+  fmtAmount,
   fmtDateTime,
   fmtTime,
   timeAgo,
@@ -25,19 +25,10 @@ function countBy(checks: PreflightCheck[], severity: 'ok' | 'warn' | 'error'): n
   return checks.filter((check) => severityOf(check) === severity).length;
 }
 
-/** 一次连接测试的结果 + 它发生的时刻。 */
 export interface TestOutcome {
   at: number;
   checks: PreflightCheck[];
   error: string | null;
-}
-
-function EnvBadge({ testnet, className }: { testnet: boolean; className?: string }) {
-  return (
-    <Badge tone={testnet ? 'muted' : 'warn'} className={className} title={tradingEnvTitle(testnet)}>
-      {tradingEnvLabel(testnet, 'short')}
-    </Badge>
-  );
 }
 
 export function ExchangeAccountCard({
@@ -78,83 +69,114 @@ export function ExchangeAccountCard({
   );
 
   return (
-    <li className="overflow-hidden rounded-lg border border-base-750 bg-base-900 shadow-panel">
-      <div className="flex flex-col gap-1.5 border-b border-base-800 bg-base-850/60 px-3 py-2">
-        <div className="flex items-center gap-2">
-          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-base-700 bg-base-800 text-ink-lo">
-            <Landmark aria-hidden className="h-3 w-3" />
-          </span>
-          <span className="min-w-0 flex-1 truncate text-base font-semibold text-ink-hi" title={row.label}>
-            {row.label}
-          </span>
-          <span className="ml-auto flex shrink-0 items-center gap-1">
-            <Button
-              size="sm"
-              variant="ghost"
-              busy={testing}
-              onClick={onTest}
-              title="用已保存的密钥向交易所发起一次只读探测"
-            >
-              测试连接
-            </Button>
-            <Button size="sm" onClick={onEdit}>
-              编辑
-            </Button>
-            <Button
-              size="sm"
-              variant="danger"
-              onClick={onRemove}
-              aria-label={`删除凭证 ${row.label}`}
-            >
-              <Trash2 aria-hidden className="h-3.5 w-3.5" />
-              删除
-            </Button>
-          </span>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5 pl-7">
-          <Badge tone="accent">{exchangeLabel}</Badge>
-          <EnvBadge testnet={row.testnet} />
-          {row.canTrade ? <Badge tone="up">可下单</Badge> : <Badge tone="warn">只读</Badge>}
-        </div>
-      </div>
+    <li className="overflow-hidden rounded-xl border border-base-750 bg-base-900 transition hover:border-base-600">
+      {/* 紧凑单行顶栏：图标 + 名称 + 标签 + 快捷动作 */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-base-800 bg-base-850/60 px-3 py-2">
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-base-700 bg-base-800 text-ink-lo">
+          <Landmark aria-hidden className="h-3.5 w-3.5" />
+        </span>
+        <span className="min-w-0 truncate text-sm font-bold text-ink-hi" title={row.label}>
+          {row.label}
+        </span>
+        <Badge tone="accent">{exchangeLabel.replace(/ USDT 本位合约/, '')}</Badge>
+        <Badge tone={row.testnet ? 'muted' : 'warn'} title={tradingEnvTitle(row.testnet)}>
+          {tradingEnvLabel(row.testnet, 'short')}
+        </Badge>
+        {row.canTrade ? <Badge tone="up">可下单</Badge> : <Badge tone="warn">只读</Badge>}
 
-      <div className="px-3 py-2.5">
-        <BalanceCell balance={balance} error={balanceError} testnet={row.testnet} />
-        {balance && asset !== DEFAULT_SETTLE_ASSET && (
-          <p className="mt-0.5 text-xs text-warn">
-            该钱包以 {asset} 计价，不会计入左栏的 {DEFAULT_SETTLE_ASSET} 合计。
-          </p>
-        )}
-      </div>
-
-      <div className="num flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-base-800 bg-base-850/40 px-3 py-2 text-xs text-ink-lo">
-        <span className="min-w-0">
-          API Key <span className="text-ink-mid">{row.apiKeyMasked || '—'}</span>
-        </span>
-        <span>
-          添加于 <span className="text-ink-faint">{fmtDateTime(row.createdAt)}</span>
-        </span>
-        <span>
-          最后更新 <span className="text-ink-faint">{fmtDateTime(row.updatedAt)}</span>
-        </span>
-        <span className="min-w-0 text-ink-faint">
-          {balance
-            ? `读取于 ${timeAgo(balance.readAt)}（${fmtTime(balance.readAt)}）`
-            : balanceError
-              ? '读取未成功'
-              : '未读取'}
-        </span>
-        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+        <span className="ml-auto flex shrink-0 items-center gap-1">
           <Button
-            size="sm"
+            size="icon"
             variant="ghost"
             busy={refreshing}
             onClick={onRefresh}
-            title="向交易所强制重新读取该凭证的余额（绕过服务端缓存）"
+            aria-label={`刷新 ${row.label} 余额`}
+            title="强制向交易所刷新该凭证余额"
           >
             <RotateCw aria-hidden className="h-3.5 w-3.5" />
-            刷新
           </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            busy={testing}
+            onClick={onTest}
+            title="用已保存密钥向交易所发起只读连通探测"
+          >
+            <Wifi aria-hidden className="h-3 w-3" />
+            测试
+          </Button>
+          <Button size="icon" variant="ghost" onClick={onEdit} aria-label={`编辑 ${row.label}`} title="编辑凭证">
+            <Pencil aria-hidden className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            size="icon"
+            variant="danger"
+            onClick={onRemove}
+            aria-label={`删除凭证 ${row.label}`}
+            title="删除该凭证"
+          >
+            <Trash2 aria-hidden className="h-3.5 w-3.5" />
+          </Button>
+        </span>
+      </div>
+
+      {/* 横向 4 格紧凑资产栏（告别旧版纵向大段留白） */}
+      <div className="px-3 py-2.5">
+        {balance ? (
+          <div className="grid grid-cols-2 gap-2 rounded-lg bg-base-950/55 px-3 py-2 sm:grid-cols-4">
+            <div className="min-w-0">
+              <div className="text-[11px] text-ink-faint">账户权益 ({asset})</div>
+              <div className="num mt-0.5 truncate text-base font-bold text-ink-strong">
+                {fmtAmount(balance.equity)}
+              </div>
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] text-ink-faint">钱包余额</div>
+              <div className="num mt-0.5 truncate text-sm font-semibold text-ink-hi">
+                {fmtAmount(balance.walletBalance)}
+              </div>
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] text-ink-faint">可用余额</div>
+              <div className="num mt-0.5 truncate text-sm font-semibold text-ink-mid">
+                {fmtAmount(balance.availableBalance)}
+              </div>
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] text-ink-faint">未实现盈亏</div>
+              <div
+                className={cn(
+                  'num mt-0.5 truncate text-sm font-semibold',
+                  balance.unrealizedPnl > 0
+                    ? 'text-up'
+                    : balance.unrealizedPnl < 0
+                      ? 'text-down'
+                      : 'text-ink-lo',
+                )}
+              >
+                {balance.unrealizedPnl > 0 ? '+' : ''}
+                {fmtAmount(balance.unrealizedPnl)}
+              </div>
+            </div>
+          </div>
+        ) : balanceError ? (
+          <div className="rounded-lg border border-warn/35 bg-warn/10 px-2.5 py-2 text-xs text-warn">
+            余额读取失败：{balanceError}
+          </div>
+        ) : (
+          <div className="rounded-lg bg-base-950/40 px-3 py-2 text-xs text-ink-faint">
+            尚未读取到余额，点击右上角刷新按钮立即查询。
+          </div>
+        )}
+      </div>
+
+      {/* 极简底部元信息 */}
+      <div className="num flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-base-800/80 bg-base-850/35 px-3 py-1.5 text-[11px] text-ink-faint">
+        <span>
+          Key <span className="text-ink-mid">{row.apiKeyMasked || '—'}</span>
+        </span>
+        <span title={`添加于 ${fmtDateTime(row.createdAt)} · 更新于 ${fmtDateTime(row.updatedAt)}`}>
+          {balance ? `同步于 ${timeAgo(balance.readAt)}（${fmtTime(balance.readAt)}）` : '未同步'}
         </span>
       </div>
 
@@ -169,8 +191,8 @@ export function ExchangeAccountCard({
                 <span>连接测试</span>
                 <Badge tone={passed ? 'up' : 'down'}>{passed ? '通过' : '未通过'}</Badge>
                 <span className="num text-xs text-ink-lo">
-                  {countBy(outcome.checks, 'ok')} 项通过 · {countBy(outcome.checks, 'error')} 项失败 ·{' '}
-                  {countBy(outcome.checks, 'warn')} 项待确认
+                  {countBy(outcome.checks, 'ok')} 通过 · {countBy(outcome.checks, 'error')} 失败 ·{' '}
+                  {countBy(outcome.checks, 'warn')} 待确认
                 </span>
               </span>
             }

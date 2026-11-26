@@ -1,11 +1,11 @@
 /**
- * 交易所凭证管理。
- *
- * 按操作员的提问顺序排布：左指标栏回答“钱在不在 / 这是真钱吗”，
- * 主内容区回答“密钥能用吗 / 怎么管理”。任何情况下都不渲染明文 Secret。
+ * 交易所凭证管理（紧凑 16:9 宽屏版）：
+ * - 顶部 3 格横向资产总览条（实盘主网 | 测试网模拟 | 同步与快捷添加），一屏总览不占高；
+ * - 中部筛选栏 + 2 列紧凑凭证卡片网格，全部 3–4 个账户无需滚动一眼看全；
+ * - 任何情况下都不渲染明文 Secret。
  */
 import { useCallback, useMemo, useState } from 'react';
-import { Plus, RotateCw } from 'lucide-react';
+import { Plus, RotateCw, ShieldAlert, TestTube2, Wallet } from 'lucide-react';
 import { EXCHANGES, type ExchangeId } from '@aq/shared';
 import { api, type ExchangeAccountRow, type PreflightCheck } from '../../lib/api';
 import {
@@ -17,12 +17,10 @@ import {
 } from './exchangeAccountDraft';
 import { useApp } from '../../lib/store';
 import { usePolled, useTicker } from '../../lib/hooks';
-import { Button, ErrorNote, Panel, Spinner3, cn } from '../ui';
-import { PageShell } from '../shell';
+import { Badge, Button, ErrorNote, Panel, Spinner3, cn } from '../ui';
+import { fmtAmount, fmtAsset, fmtTime, timeAgo } from '../../lib/format';
 import {
   aggregateBalance,
-  ExchangeBalanceRail,
-  SupportedExchangesPanel,
   type ExchangeOption,
   type FreshRead,
 } from './ExchangeBalanceRail';
@@ -55,7 +53,6 @@ export function ExchangeAccountsSection() {
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [envFilter, setEnvFilter] = useState<'all' | 'live' | 'testnet'>('all');
 
-  // 每秒驱动重渲染以刷新「读取于 N 秒前」文案。
   useTicker(1000);
 
   const accounts = useMemo(() => query.data ?? [], [query.data]);
@@ -83,7 +80,6 @@ export function ExchangeAccountsSection() {
     [overrides, query.updatedAt],
   );
 
-  // 实盘（主网）与测试网（虚拟资金）严格分开汇总。
   const liveTotals = useMemo(() => aggregateBalance(liveAccounts, overrideFor), [liveAccounts, overrideFor]);
   const testnetTotals = useMemo(
     () => aggregateBalance(testnetAccounts, overrideFor),
@@ -96,7 +92,6 @@ export function ExchangeAccountsSection() {
     return a >= b ? liveTotals.readAt : testnetTotals.readAt;
   }, [liveTotals.readAt, testnetTotals.readAt]);
   const failedReads = liveTotals.failed + testnetTotals.failed;
-  const skippedAssets = liveTotals.skippedAsset + testnetTotals.skippedAsset;
 
   const refreshOne = useCallback(async (id: number) => {
     setRefreshingId(id);
@@ -259,62 +254,146 @@ export function ExchangeAccountsSection() {
         ? testnetAccounts
         : [...liveAccounts, ...testnetAccounts];
 
-  const rail = (
-    <ExchangeBalanceRail
-      loading={query.loading}
-      accounts={accounts}
-      liveAccounts={liveAccounts}
-      testnetAccounts={testnetAccounts}
-      liveTotals={liveTotals}
-      testnetTotals={testnetTotals}
-      latestReadAt={latestReadAt}
-      failedReads={failedReads}
-      skippedAssets={skippedAssets}
-    />
-  );
-
   return (
-    <>
-      <PageShell aside={accounts.length > 0 ? rail : null} fillHeight={false}>
-        {error && <ErrorNote>{error}</ErrorNote>}
+    <div className="space-y-3">
+      {error && <ErrorNote>{error}</ErrorNote>}
+      {query.error && <ErrorNote>读取凭证列表失败：{query.error}</ErrorNote>}
 
-        {query.error && <ErrorNote>读取凭证列表失败：{query.error}</ErrorNote>}
-
-        {query.loading && accounts.length === 0 ? (
-          <Panel title="交易所凭证">
-            <Spinner3 label="正在加载凭证" />
-          </Panel>
-        ) : accounts.length === 0 ? (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-dashed border-base-750 bg-base-900/40 px-3 py-2.5">
-            <span className="text-base font-semibold text-ink-hi">还没有交易所凭证</span>
-            <span className="min-w-0 flex-1 text-xs leading-relaxed text-ink-lo">
-              模拟盘不需要密钥；要接实盘，先加一把测试网密钥，确认行情、签名与风控这条链路通了再换主网。
-            </span>
-            <Button variant="primary" size="sm" onClick={() => openCreate()} disabled={exchanges.length === 0}>
-              <Plus aria-hidden className="h-3.5 w-3.5" />
-              添加第一个凭证
-            </Button>
+      {/* 顶部三联紧凑资产总览条（逻辑先总后分，16:9 横向铺满无空洞） */}
+      {accounts.length > 0 && (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {/* 1. 实盘主网汇总 */}
+          <div className="rounded-xl border border-warn/35 bg-base-900 px-3.5 py-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-warn">
+                <ShieldAlert className="h-3.5 w-3.5" />
+                实盘资产（主网真实资金）
+              </span>
+              <span className="num rounded bg-warn/12 px-1.5 py-0.5 text-[11px] font-medium text-warn">
+                {liveAccounts.length} 凭证
+              </span>
+            </div>
+            <div className="mt-1.5 flex items-baseline gap-2">
+              <span className="num text-2xl font-bold text-ink-strong">
+                {liveTotals.counted > 0 ? fmtAmount(liveTotals.total) : '—'}
+              </span>
+              <span className="text-xs font-medium text-ink-lo">{liveTotals.asset}</span>
+            </div>
+            <div className="num mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-ink-lo">
+              <span>钱包 <strong className="text-ink-mid">{fmtAmount(liveTotals.wallet)}</strong></span>
+              <span>可用 <strong className="text-ink-mid">{fmtAmount(liveTotals.available)}</strong></span>
+              {liveTotals.unrealized !== 0 && (
+                <span>
+                  浮盈{' '}
+                  <strong className={liveTotals.unrealized > 0 ? 'text-up' : 'text-down'}>
+                    {fmtAsset(liveTotals.unrealized, liveTotals.asset)}
+                  </strong>
+                </span>
+              )}
+            </div>
           </div>
-        ) : (
-          <section>
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <h2 className="shrink-0 text-xs font-semibold uppercase tracking-[0.14em] text-ink-lo">
-                交易所凭证 <span className="num ml-1 text-ink-faint">{accounts.length}</span>
-              </h2>
+
+          {/* 2. 测试网虚拟资金汇总 */}
+          <div className="rounded-xl border border-base-750 bg-base-900 px-3.5 py-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-mid">
+                <TestTube2 className="h-3.5 w-3.5 text-sky-400" />
+                测试网资产（虚拟联调）
+              </span>
+              <span className="num rounded bg-base-800 px-1.5 py-0.5 text-[11px] text-ink-lo">
+                {testnetAccounts.length} 凭证
+              </span>
+            </div>
+            <div className="mt-1.5 flex items-baseline gap-2">
+              <span className="num text-2xl font-bold text-ink-hi">
+                {testnetTotals.counted > 0 ? fmtAmount(testnetTotals.total) : '—'}
+              </span>
+              <span className="text-xs font-medium text-ink-lo">{testnetTotals.asset}</span>
+            </div>
+            <div className="num mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-ink-faint">
+              <span>钱包 <strong className="text-ink-lo">{fmtAmount(testnetTotals.wallet)}</strong></span>
+              <span>可用 <strong className="text-ink-lo">{fmtAmount(testnetTotals.available)}</strong></span>
+              <span>不计入实盘</span>
+            </div>
+          </div>
+
+          {/* 3. 状态与快捷操作 */}
+          <div className="flex flex-col justify-between rounded-xl border border-base-750 bg-base-900 px-3.5 py-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-ink-mid">
+                <Wallet className="h-3.5 w-3.5 text-accent" />
+                同步状态与快捷接入
+              </span>
+              <span className="num text-[11px] text-ink-faint">
+                {latestReadAt ? `${fmtTime(latestReadAt)} · 30s 轮询` : '等待首次读取'}
+              </span>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => openCreate()}
+                disabled={exchanges.length === 0}
+              >
+                <Plus aria-hidden className="h-3.5 w-3.5" />
+                添加凭证
+              </Button>
               <Button
                 size="sm"
                 busy={refreshingAll}
-                title="强制刷新所有凭证的实时余额（绕过服务端缓存）"
+                title="强制刷新所有凭证的实时余额"
                 onClick={() => void refreshAll(accounts.map((row) => row.id))}
               >
                 <RotateCw aria-hidden className="h-3.5 w-3.5" />
                 刷新全部
               </Button>
-              <Button variant="primary" size="sm" onClick={() => openCreate()} disabled={exchanges.length === 0}>
-                <Plus aria-hidden className="h-3.5 w-3.5" />
-                添加凭证
-              </Button>
-              <span aria-hidden className="h-px min-w-4 flex-1 bg-base-800" />
+              {exchanges.map((ex) => (
+                <button
+                  key={ex.id}
+                  type="button"
+                  onClick={() => openCreate(ex.id)}
+                  className="inline-flex h-[26px] items-center gap-1 rounded-[7px] border border-base-750 bg-base-850 px-2 text-[11px] text-ink-lo transition hover:border-base-600 hover:text-ink-hi"
+                  title={`快捷添加 ${ex.label} 凭证`}
+                >
+                  <Plus className="h-3 w-3" />
+                  {ex.id === 'binance' ? '币安' : 'Gate.io'}
+                </button>
+              ))}
+            </div>
+            <div className="mt-1.5 text-[11px] text-ink-faint">
+              {failedReads > 0 ? (
+                <span className="text-warn">⚠ {failedReads} 个凭证余额读取失败，未计入合计</span>
+              ) : (
+                <span>读取于 {latestReadAt ? timeAgo(latestReadAt) : '—'} · 共享钱包按凭证回报独立展示</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 凭证列表主体 */}
+      {query.loading && accounts.length === 0 ? (
+        <Panel title="交易所凭证">
+          <Spinner3 label="正在加载凭证" />
+        </Panel>
+      ) : accounts.length === 0 ? (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-dashed border-base-750 bg-base-900/60 px-4 py-4">
+          <span className="text-sm font-semibold text-ink-hi">还没有交易所凭证</span>
+          <span className="min-w-0 flex-1 text-xs leading-relaxed text-ink-lo">
+            模拟盘不需要密钥；要接实盘，建议先加一把测试网密钥验证链路，再接入主网子账号。
+          </span>
+          <Button variant="primary" size="sm" onClick={() => openCreate()} disabled={exchanges.length === 0}>
+            <Plus aria-hidden className="h-3.5 w-3.5" />
+            添加第一个凭证
+          </Button>
+        </div>
+      ) : (
+        <section className="space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-ink-lo">
+                已绑定凭证 <span className="num ml-1 text-ink-hi">{visibleAccounts.length}</span>
+              </h2>
               {liveAccounts.length > 0 && testnetAccounts.length > 0 && (
                 <div
                   role="group"
@@ -344,37 +423,32 @@ export function ExchangeAccountsSection() {
                 </div>
               )}
             </div>
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-faint">
+              <Badge tone="muted">注：多把密钥指向同一账户时，合计会按凭证分别累加</Badge>
+            </div>
+          </div>
 
-            <ul className="space-y-2">
-              {visibleAccounts.map((row) => (
-                <ExchangeAccountCard
-                  key={row.id}
-                  row={row}
-                  exchangeLabel={exchangeLabel(row.exchange)}
-                  fresh={overrideFor(row.id)}
-                  outcome={tests[row.id]}
-                  testOpen={openTests[row.id]}
-                  testing={testingId === row.id}
-                  refreshing={refreshingId === row.id}
-                  onTest={() => void test(row)}
-                  onEdit={() => openEdit(row)}
-                  onRemove={() => setRemoving(row)}
-                  onRefresh={() => void refreshOne(row.id)}
-                  onToggleTest={(next) => setOpenTests((current) => ({ ...current, [row.id]: next }))}
-                />
-              ))}
-            </ul>
-
-            {accounts.length > 0 && (
-              <p className="mt-2 text-xs leading-relaxed text-ink-faint">
-                合计来自交易所回报的账户权益（共享钱包），不是某个机器人的归属权益；多把密钥指向同一账户时，合计会把同一份钱算两次。
-              </p>
-            )}
-          </section>
-        )}
-
-        <SupportedExchangesPanel exchanges={exchanges} onAdd={openCreate} />
-      </PageShell>
+          <ul className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+            {visibleAccounts.map((row) => (
+              <ExchangeAccountCard
+                key={row.id}
+                row={row}
+                exchangeLabel={exchangeLabel(row.exchange)}
+                fresh={overrideFor(row.id)}
+                outcome={tests[row.id]}
+                testOpen={openTests[row.id]}
+                testing={testingId === row.id}
+                refreshing={refreshingId === row.id}
+                onTest={() => void test(row)}
+                onEdit={() => openEdit(row)}
+                onRemove={() => setRemoving(row)}
+                onRefresh={() => void refreshOne(row.id)}
+                onToggleTest={(next) => setOpenTests((current) => ({ ...current, [row.id]: next }))}
+              />
+            ))}
+          </ul>
+        </section>
+      )}
 
       <ExchangeAccountFormModal
         open={creating || editing !== null}
@@ -400,6 +474,6 @@ export function ExchangeAccountsSection() {
         onClose={() => setRemoving(null)}
         onConfirm={() => void remove()}
       />
-    </>
+    </div>
   );
 }
