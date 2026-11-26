@@ -120,7 +120,7 @@ export function PowerlineTrajectory({
   return (
     <div
       className={cn(
-        'inline-flex max-w-full flex-wrap items-center gap-y-1.5 rounded-xl bg-[#0d0f17]/90 px-2 py-1.5 shadow-inner ring-1 ring-white/5',
+        'inline-flex max-w-full flex-wrap items-center gap-y-1.5 rounded-xl bg-[#0d0f17]/90 py-1.5 pl-3 pr-2.5 shadow-inner ring-1 ring-white/5',
         "[[data-skin='light']_&]:bg-[#1e2230]/95 [[data-skin='light']_&]:ring-black/10",
         className,
       )}

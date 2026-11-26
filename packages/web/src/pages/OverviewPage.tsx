@@ -750,6 +750,7 @@ export function OverviewPage() {
               ) : (
                 <NeuralPipelineCanvas
                   symbols={marketStats.tickerItems}
+                  totalSymbols={marketSymbols.length || system?.tradableSymbols || 0}
                   radarItems={radarItems}
                   runningCount={runningCount}
                   latestCycle={latestDecision?.cycleNumber ?? null}

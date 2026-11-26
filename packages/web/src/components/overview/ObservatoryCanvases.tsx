@@ -605,10 +605,16 @@ export function MarketGalaxyCanvas({
         let bx = Math.min(w - tw - 8, Math.max(8, node.sx + 9));
         let by = Math.min(h - th - 8, Math.max(10, node.sy - 9));
 
-        // 轻量避让
-        for (const b of placedBoxes) {
-          if (bx < b.x + b.w + 4 && bx + tw + 4 > b.x && by < b.y + b.h + 4 && by + th + 4 > b.y) {
-            by = Math.min(h - th - 8, b.y + b.h + 5);
+        // 迭代避让，防止高密度区全息标签擦碰
+        for (let pass = 0; pass < 3; pass++) {
+          for (const b of placedBoxes) {
+            if (bx < b.x + b.w + 6 && bx + tw + 6 > b.x && by < b.y + b.h + 5 && by + th + 5 > b.y) {
+              const tryDown = b.y + b.h + 6;
+              const tryUp = b.y - th - 6;
+              if (tryDown + th < h - 34) by = tryDown;
+              else if (tryUp > 10) by = tryUp;
+              else bx = Math.min(w - tw - 8, b.x + b.w + 8);
+            }
           }
         }
         placedBoxes.push({ x: bx, y: by, w: tw, h: th });
@@ -661,20 +667,22 @@ export function MarketGalaxyCanvas({
 
 export function NeuralPipelineCanvas({
   symbols,
+  totalSymbols,
   radarItems,
   runningCount,
   latestCycle,
   openPositions,
 }: {
   symbols: MarketSymbol[];
+  totalSymbols: number;
   radarItems: ManagedRadarItemView[];
   runningCount: number;
   latestCycle: number | null;
   openPositions: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const dataRef = useRef({ symbols, radarItems, runningCount, latestCycle, openPositions });
-  dataRef.current = { symbols, radarItems, runningCount, latestCycle, openPositions };
+  const dataRef = useRef({ symbols, totalSymbols, radarItems, runningCount, latestCycle, openPositions });
+  dataRef.current = { symbols, totalSymbols, radarItems, runningCount, latestCycle, openPositions };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -835,7 +843,7 @@ export function NeuralPipelineCanvas({
       ctx.fillText('AI CORE', centerX, midY - 4);
       ctx.fillStyle = '#0ecb81';
       ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.fillText(`${d.symbols.length} MKTS`, centerX, midY + 11);
+      ctx.fillText(`${d.totalSymbols || d.symbols.length} MKTS`, centerX, midY + 11);
 
       if (!reduced && !document.hidden) {
         raf = requestAnimationFrame(draw);
