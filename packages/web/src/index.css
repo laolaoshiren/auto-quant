@@ -589,11 +589,47 @@
     position: relative;
     overflow: hidden;
     background-image:
-      radial-gradient(620px circle at 12% -20%, rgb(var(--aq-accent-rgb) / 0.16), transparent 62%),
-      radial-gradient(480px circle at 92% 0%, rgb(var(--aq-up-rgb) / 0.12), transparent 58%),
+      radial-gradient(620px circle at 12% -20%, rgb(var(--aq-accent-rgb) / 0.18), transparent 62%),
+      radial-gradient(480px circle at 92% 0%, rgb(var(--aq-up-rgb) / 0.14), transparent 58%),
       linear-gradient(to right, rgb(var(--aq-ink-faint-rgb) / 0.05) 1px, transparent 1px),
       linear-gradient(to bottom, rgb(var(--aq-ink-faint-rgb) / 0.05) 1px, transparent 1px);
     background-size: 100% 100%, 100% 100%, 24px 24px, 24px 24px;
+  }
+
+  /* 全景观测台沉浸式背景：多层星云光晕 + 精密坐标网，深/浅主题均具深邃层次感 */
+  .aq-observatory-bg {
+    background-color: #060912;
+    background-image:
+      radial-gradient(900px ellipse at 50% -10%, rgba(112, 96, 245, 0.22), transparent 62%),
+      radial-gradient(700px ellipse at 10% 85%, rgba(14, 203, 129, 0.14), transparent 58%),
+      radial-gradient(680px ellipse at 92% 72%, rgba(56, 189, 248, 0.14), transparent 58%),
+      linear-gradient(to right, rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+      linear-gradient(to right, rgba(112, 96, 245, 0.07) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(112, 96, 245, 0.07) 1px, transparent 1px);
+    background-size:
+      100% 100%,
+      100% 100%,
+      100% 100%,
+      28px 28px,
+      28px 28px,
+      140px 140px,
+      140px 140px;
+  }
+
+  .aq-obs-card {
+    background: linear-gradient(160deg, rgba(13, 18, 32, 0.84) 0%, rgba(8, 11, 20, 0.90) 100%);
+    backdrop-filter: blur(10px);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 10px 30px -18px rgba(0, 0, 0, 0.85);
+  }
+
+  .aq-no-scrollbar {
+    scrollbar-width: none;
+  }
+  .aq-no-scrollbar::-webkit-scrollbar {
+    display: none;
   }
 
   .aq-war-grid {

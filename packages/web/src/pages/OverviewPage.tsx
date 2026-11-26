@@ -1,16 +1,13 @@
 /**
- * 系统总览 —— 16:9 量化全景观测台（AUTOQUANT // QUANT OBSERVATORY）。
+ * 系统总览 —— 满屏 16:9 量化全景观测台（全中文界面 + 沉浸式深空网格背景 + 60fps 实时动态引擎）。
  *
- * 定位（2026-11-26 用户明确）：
- * 「要足够震撼、提供情绪价值、画面变化频繁，在不影响系统运行的前提下，不虚构数据；
- * 不要和机器人详情页重复。」
- *
- * 架构与原则：
- * 1. **零重复**：彻底移除与 `/traders` 重复的机器人大表和常规折线图，聚焦「全市场 522 永续星云 +
- *    24H 量子热力表盘 + 实时神经网络管线 + 流动性脊线频谱 + 4×4 能量热力块 + `$ tail -f` 实盘终端」；
- * 2. **100% 真实数据**：全部数值、标的名、价格、涨跌幅、成交额、权益、盈亏、胜率、AI500 评分、决策周期
- *    均来自现有只读接口与实时事件流，严守 `lib/fleetTotals.ts` 口径，绝不虚构任何一条数据；
- * 3. **零性能负担**：所有 60fps Canvas 在页面切出时自动暂停、遵循 `prefers-reduced-motion`，且零新增后端轮询压力。
+ * 2026-11-26 精修：
+ * 1. 使用 `.page-fill` 全屏撑满高度（自适应 1600×900 / 1920×1080 / 2K 宽屏，零底部空白）；
+ * 2. 全面中文化（指挥顶栏、表盘、终端流、雷达象限、引擎子系统、热力矩阵无残余英文术语）；
+ * 3. 加入深空星云 + 双层精密网格沉浸式背景（`.aq-observatory-bg`）与毛玻璃透光模块（`.aq-obs-card`）；
+ * 4. 中央主舞台升级为清晰直观的「全市场 522 永续 360° 极坐标态势雷达」（4 象限语义明确 + 余辉扫描束 +
+ *    左右外围锚位标牌零重叠），支持一键切换「实时信号神经流」；
+ * 5. 100% 真实数据驱动，严守 `lib/fleetTotals.ts` 口径，零虚构数据，切后台自动停帧零性能负担。
  */
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -20,8 +17,8 @@ import {
   Cpu,
   Flame,
   GitBranch,
-  Globe,
   Plus,
+  Radar,
   Radio,
   ShieldAlert,
   Sparkles,
@@ -52,8 +49,8 @@ import { NewTraderModal } from '../components/TraderModals';
 import { mergeEquityCurves } from '../components/equityCurve';
 import {
   HeatclockCanvas,
-  MarketGalaxyCanvas,
   NeuralPipelineCanvas,
+  PolarAlphaRadarCanvas,
   QuantumRidgeCanvas,
 } from '../components/overview/ObservatoryCanvases';
 import {
@@ -75,19 +72,19 @@ const NO_DECISIONS: DecisionRecord[] = [];
 const NO_TRADERS: TraderRow[] = [];
 
 const ACTION_TAG: Record<string, { label: string; color: string }> = {
-  open_long: { label: 'OPEN LONG', color: 'text-emerald-400' },
-  open_short: { label: 'OPEN SHORT', color: 'text-rose-400' },
-  add_long: { label: 'ADD LONG', color: 'text-emerald-400' },
-  add_short: { label: 'ADD SHORT', color: 'text-rose-400' },
-  close_long: { label: 'CLOSE LONG', color: 'text-amber-300' },
-  close_short: { label: 'CLOSE SHORT', color: 'text-amber-300' },
-  reduce_long: { label: 'REDUCE', color: 'text-amber-300' },
-  reduce_short: { label: 'REDUCE', color: 'text-amber-300' },
-  update_sl_tp: { label: 'SL/TP MOD', color: 'text-sky-400' },
-  cancel_pending: { label: 'CANCEL ORD', color: 'text-amber-300' },
-  hold: { label: 'HOLD', color: 'text-sky-400' },
-  wait: { label: 'WATCH', color: 'text-slate-400' },
-  skip: { label: 'SKIP', color: 'text-slate-500' },
+  open_long: { label: '开多', color: 'text-emerald-400' },
+  open_short: { label: '开空', color: 'text-rose-400' },
+  add_long: { label: '加多', color: 'text-emerald-400' },
+  add_short: { label: '加空', color: 'text-rose-400' },
+  close_long: { label: '平多', color: 'text-amber-300' },
+  close_short: { label: '平空', color: 'text-amber-300' },
+  reduce_long: { label: '减多', color: 'text-amber-300' },
+  reduce_short: { label: '减空', color: 'text-amber-300' },
+  update_sl_tp: { label: '调保护', color: 'text-sky-400' },
+  cancel_pending: { label: '撤挂单', color: 'text-amber-300' },
+  hold: { label: '持仓', color: 'text-sky-400' },
+  wait: { label: '观望', color: 'text-slate-400' },
+  skip: { label: '跳过', color: 'text-slate-500' },
 };
 
 function useHighFreqClock(): string {
@@ -111,7 +108,7 @@ function useHighFreqClock(): string {
 interface WireEntry {
   key: string;
   time: string;
-  tag: 'RADAR' | 'SCAN' | 'MOVE' | 'CYCLE';
+  tag: '雷达' | '决策' | '异动';
   tagCls: string;
   body: string;
   metric: string;
@@ -129,7 +126,7 @@ export function OverviewPage() {
   const highFreqClock = useHighFreqClock();
 
   const [newOpen, setNewOpen] = useState(false);
-  const [stageMode, setStageMode] = useState<'galaxy' | 'pipeline'>('galaxy');
+  const [stageMode, setStageMode] = useState<'radar' | 'pipeline'>('radar');
   const [wireOffset, setWireOffset] = useState(0);
 
   const tradersQuery = usePolled((signal) => api.traders(signal), {
@@ -165,7 +162,6 @@ export function OverviewPage() {
     { intervalMs: 60_000, enabled: traders.length > 0, deps: [traderIds] },
   );
 
-  // 全市场 522 永续合约实时快照（服务端内存缓存，不打交易所额外权重）
   const marketQuery = usePolled((signal) => api.marketSymbols(signal, 'binance'), {
     intervalMs: 12_000,
   });
@@ -201,7 +197,7 @@ export function OverviewPage() {
     },
   );
 
-  /* --- 严格走 fleetTotals 单一口径（不重复计算共享钱包） -------------------- */
+  /* --- 严守 fleetTotals 单一账户口径 ---------------------------------------- */
   const equitySnapshots: Record<number, EquitySnapshot[]> = {};
   for (const trader of traders) {
     equitySnapshots[trader.id] = [
@@ -257,7 +253,6 @@ export function OverviewPage() {
   const totalClosed = totalWins + totalLosses;
   const fleetWinRate = totalClosed > 0 ? (totalWins / totalClosed) * 100 : null;
 
-  /* --- 合并真实决策脉冲（WS 优先，REST 补底） ------------------------------- */
   const allDecisions = useMemo(() => {
     const rest = recentDecisionsQuery.data ?? NO_DECISIONS;
     const live = primaryActiveTrader ? (liveByTrader[primaryActiveTrader.id]?.decisions ?? []) : [];
@@ -272,7 +267,6 @@ export function OverviewPage() {
     return out;
   }, [recentDecisionsQuery.data, primaryActiveTrader, liveByTrader]);
 
-  /* --- 全市场真实派生指标（全部 522 标的实时统计） --------------------------- */
   const marketStats = useMemo(() => {
     if (marketSymbols.length === 0) {
       return {
@@ -320,7 +314,6 @@ export function OverviewPage() {
     const byAbs = [...(liquid.length >= 16 ? liquid : marketSymbols)].sort(
       (a, b) => Math.abs(b.changePercent24h) - Math.abs(a.changePercent24h),
     );
-    // 16 格能量矩阵：8 个最具爆发力的真实异动龙头 + 8 个最高成交额主流币去重拼装
     const tileSeen = new Set<string>();
     const heatTiles: MarketSymbol[] = [];
     for (const s of [...byAbs.slice(0, 9), ...byVol.slice(0, 12)]) {
@@ -349,19 +342,17 @@ export function OverviewPage() {
   const radarItems = useMemo(() => intelQuery.data?.radar?.items ?? [], [intelQuery.data]);
   const latestDecision = allDecisions[0] ?? null;
 
-  /* --- 实时滚动终端流（100% 真实事件 + 真实雷达 + 真实大波动标的轮播） ------- */
   const wirePool = useMemo<WireEntry[]>(() => {
     const entries: WireEntry[] = [];
     const nowTime = new Date().toLocaleTimeString('zh-CN', { hour12: false });
 
-    // 1. 真实 AI500 雷达扫描焦点
     for (const r of radarItems.slice(0, 6)) {
       entries.push({
         key: `radar-${r.symbol}`,
         time: intelQuery.data?.radar?.updatedAt
           ? new Date(intelQuery.data.radar.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })
           : nowTime,
-        tag: 'RADAR',
+        tag: '雷达',
         tagCls: 'bg-amber-400/15 text-amber-300 border-amber-400/35',
         body: `${r.symbol.replace(/USDT$/, '')} · ${r.bias === 'long' ? '偏多' : r.bias === 'short' ? '偏空' : '中性'} · ${fmtPriceUsd(r.price)}`,
         metric: `${Math.round(r.score)}分`,
@@ -370,31 +361,36 @@ export function OverviewPage() {
       });
     }
 
-    // 2. 真实决策周期记录
     for (const rec of allDecisions.slice(0, 6)) {
       const top = rec.decisions.find((d) => d.action !== 'wait' && d.action !== 'skip') ?? rec.decisions[0];
-      const act = top ? (ACTION_TAG[top.action] ?? { label: top.action.toUpperCase(), color: 'text-slate-300' }) : { label: 'WATCH', color: 'text-slate-400' };
+      const act = top
+        ? (ACTION_TAG[top.action] ?? { label: top.action, color: 'text-slate-300' })
+        : { label: '观望', color: 'text-slate-400' };
       entries.push({
         key: `cycle-${rec.id}`,
         time: new Date(rec.timestamp).toLocaleTimeString('zh-CN', { hour12: false }),
-        tag: 'CYCLE',
+        tag: '决策',
         tagCls: 'bg-violet-500/20 text-violet-300 border-violet-400/35',
-        body: `#${rec.cycleNumber} ${top?.symbol ? top.symbol.replace(/USDT$/, '') : '全市场'} ${act.label}`,
-        metric: typeof top?.confidence === 'number' && top.confidence > 0 ? `${Math.round(top.confidence)}%` : timeAgo(rec.timestamp),
+        body: `#${rec.cycleNumber} ${top?.symbol ? top.symbol.replace(/USDT$/, '') : '全市场'} · ${act.label}`,
+        metric:
+          typeof top?.confidence === 'number' && top.confidence > 0
+            ? `${Math.round(top.confidence)}%`
+            : timeAgo(rec.timestamp),
         metricCls: act.color,
         to: `/traders/${rec.traderId}/decisions/${rec.id}`,
       });
     }
 
-    // 3. 真实全市场大波动合约
     for (const s of marketStats.heatTiles.slice(0, 10)) {
       const up = s.changePercent24h >= 0;
       entries.push({
         key: `move-${s.symbol}`,
         time: nowTime,
-        tag: 'MOVE',
-        tagCls: up ? 'bg-emerald-500/15 text-emerald-300 border-emerald-400/30' : 'bg-rose-500/15 text-rose-300 border-rose-400/30',
-        body: `${s.baseAsset} ${fmtPriceUsd(s.price)} · 额 ${fmtCompactAmount(s.quoteVolume24h, 'USDT')}`,
+        tag: '异动',
+        tagCls: up
+          ? 'bg-emerald-500/15 text-emerald-300 border-emerald-400/30'
+          : 'bg-rose-500/15 text-rose-300 border-rose-400/30',
+        body: `${s.baseAsset} ${fmtPriceUsd(s.price)}`,
         metric: fmtPercent(s.changePercent24h),
         metricCls: up ? 'text-emerald-400' : 'text-rose-400',
         to: '/market',
@@ -404,7 +400,6 @@ export function OverviewPage() {
     return entries;
   }, [radarItems, intelQuery.data, primaryManagedTrader, allDecisions, marketStats.heatTiles]);
 
-  // 每 2.2 秒平滑推进一条真实记录，营造高频实盘终端滚屏感
   useEffect(() => {
     if (wirePool.length <= 7) return;
     const id = window.setInterval(() => {
@@ -415,7 +410,7 @@ export function OverviewPage() {
 
   const visibleWire = useMemo(() => {
     if (wirePool.length === 0) return [];
-    const count = Math.min(8, wirePool.length);
+    const count = Math.min(9, wirePool.length);
     const out: WireEntry[] = [];
     for (let i = 0; i < count; i++) {
       out.push(wirePool[(wireOffset + i) % wirePool.length]!);
@@ -436,16 +431,16 @@ export function OverviewPage() {
       : null;
 
   return (
-    <div className="space-y-2.5">
+    <div className="page-fill aq-observatory-bg -m-2 gap-2.5 rounded-xl p-3 text-slate-100 sm:-m-3 sm:p-3.5">
       <h1 className="sr-only">量化全景观测台总览</h1>
       <h2 className="sr-only">全市场实时监控与 AI500 神经信号观测总览</h2>
 
       {tradersQuery.error && tradersQuery.data === null && <ErrorNote>{tradersQuery.error}</ErrorNote>}
 
       {/* ================================================================== */}
-      {/*  1. 顶栏全息指挥带（暗色黑曜石机舱风，深/浅主题均锐利震撼）           */}
+      {/*  1. 顶栏全中文指挥带                                                 */}
       {/* ================================================================== */}
-      <header className="aq-war-hero relative overflow-hidden rounded-xl border border-base-750/90 bg-[#0b0e17] px-3.5 py-2.5 text-slate-100 shadow-panel">
+      <header className="aq-war-hero aq-obs-card shrink-0 rounded-xl border border-white/10 px-3.5 py-2">
         <div
           aria-hidden
           className="pointer-events-none absolute inset-x-0 top-0 h-[1.5px] overflow-hidden bg-gradient-to-r from-transparent via-violet-500/50 to-transparent"
@@ -454,7 +449,6 @@ export function OverviewPage() {
         </div>
 
         <div className="relative flex flex-wrap items-center justify-between gap-2.5">
-          {/* 左：主标识 + 实盘模式 + 运行舰队快捷胶囊 */}
           <div className="flex flex-wrap items-center gap-2.5">
             <div className="flex items-center gap-2">
               <span className="relative flex h-7 w-7 items-center justify-center rounded-lg border border-violet-400/40 bg-violet-500/15 text-violet-300">
@@ -466,24 +460,21 @@ export function OverviewPage() {
                   </span>
                 )}
               </span>
-              <span className="font-mono text-sm font-bold tracking-wider text-white">
-                QUANT OBSERVATORY
-              </span>
+              <span className="text-sm font-bold tracking-wide text-white">量化全景观测台</span>
             </div>
 
             <span
               className={cn(
-                'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider',
+                'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold',
                 system?.dryRun
                   ? 'border-violet-400/40 bg-violet-500/15 text-violet-300'
                   : 'border-amber-400/45 bg-amber-400/15 text-amber-300',
               )}
             >
               <Zap className="h-3 w-3" aria-hidden />
-              {system ? (system.dryRun ? 'PAPER' : 'LIVE MAINNET') : 'SYNC'}
+              {system ? (system.dryRun ? '模拟沙盘' : '实盘主网') : '同步中'}
             </span>
 
-            {/* 运行中的机器人单行微胶囊（保留 attributedEquityOf 单一事实口径，绝不重复整张表） */}
             {traders.slice(0, 2).map((trader) => {
               const eq = equityOf(trader);
               const isRun = liveByTrader[trader.id]?.status
@@ -504,7 +495,6 @@ export function OverviewPage() {
             })}
           </div>
 
-          {/* 中：BTC/ETH/SOL 基准 + 全市场多空广度 */}
           <div className="hidden items-center gap-3 font-mono text-[11px] 2xl:flex">
             {[marketStats.btc, marketStats.eth, marketStats.sol].filter(Boolean).map((m) => (
               <Link
@@ -522,12 +512,11 @@ export function OverviewPage() {
             ))}
           </div>
 
-          {/* 右：毫秒时钟 + WS 状态 + 快捷操作 */}
           <div className="flex items-center gap-2">
             <div className="hidden items-center gap-1.5 rounded-lg border border-white/10 bg-black/40 px-2.5 py-1 font-mono text-[11px] sm:flex">
               <Radio className={cn('h-3 w-3', socketOpen ? 'text-emerald-400 animate-pulse' : 'text-amber-400')} aria-hidden />
-              <span className={socketOpen ? 'text-emerald-300' : 'text-amber-300'}>
-                {socketOpen ? 'WS LIVE' : 'POLL'}
+              <span className={cn('font-sans text-[11px]', socketOpen ? 'text-emerald-300' : 'text-amber-300')}>
+                {socketOpen ? '实时推送' : '轮询同步'}
               </span>
               <span className="text-slate-600">|</span>
               <span className="num font-bold tracking-wider text-white">{highFreqClock}</span>
@@ -568,16 +557,16 @@ export function OverviewPage() {
       </header>
 
       {/* ================================================================== */}
-      {/*  2. 实时永续合约全速霓虹跑马灯                                       */}
+      {/*  2. 实时永续合约跑马灯                                               */}
       {/* ================================================================== */}
       {marketStats.tickerItems.length > 0 && (
         <div
-          className="aq-marquee-wrap relative flex h-8 items-center overflow-hidden rounded-lg border border-base-750/90 bg-[#0b0e17] text-slate-100"
-          aria-label="实时永续合约跑马灯"
+          className="aq-marquee-wrap aq-obs-card relative flex h-8 shrink-0 items-center overflow-hidden rounded-lg border border-white/10"
+          aria-label="实时永续合约行情条"
         >
-          <div className="z-10 flex h-full shrink-0 items-center gap-1.5 border-r border-white/10 bg-[#0e121f] px-2.5 font-mono text-[10px] font-bold uppercase tracking-wider text-emerald-300">
+          <div className="z-10 flex h-full shrink-0 items-center gap-1.5 border-r border-white/10 bg-[#0d1222] px-2.5 text-[11px] font-semibold text-emerald-300">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
-            LIVE TAPE
+            实时行情
           </div>
           <div className="relative flex-1 overflow-hidden">
             <div className="aq-marquee-track items-center gap-2 px-2">
@@ -587,7 +576,7 @@ export function OverviewPage() {
                   <Link
                     key={`${sym.symbol}-${idx}`}
                     to="/market"
-                    className="inline-flex shrink-0 items-center gap-1.5 rounded border border-white/[0.07] bg-white/[0.03] px-2 py-0.5 font-mono text-[11px] transition hover:border-violet-400/50 hover:bg-white/[0.08]"
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded border border-white/[0.08] bg-white/[0.03] px-2 py-0.5 font-mono text-[11px] transition hover:border-violet-400/50 hover:bg-white/[0.08]"
                   >
                     <CoinIcon symbol={sym.symbol} className="h-3.5 w-3.5" />
                     <span className="font-bold text-white">{sym.baseAsset}</span>
@@ -599,29 +588,29 @@ export function OverviewPage() {
                 );
               })}
             </div>
-            <div aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-[#0b0e17] to-transparent" />
-            <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-[#0b0e17] to-transparent" />
+            <div aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-[#090d19] to-transparent" />
+            <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-[#090d19] to-transparent" />
           </div>
         </div>
       )}
 
       {/* ================================================================== */}
-      {/*  3. 16:9 三栏全景观测台主机舱（3 / 6 / 3 黄金比例）                  */}
+      {/*  3. 满屏自适应 16:9 三栏主观测舱（flex-1 min-h-0 自动铺满剩余视口高） */}
       {/* ================================================================== */}
-      <div className="grid grid-cols-1 gap-3 xl:grid-cols-12">
-        {/* ======================== 左 3 栏：24H 量子热力表盘 + 实盘滚动终端 ======================== */}
-        <div className="flex min-w-0 flex-col gap-3 xl:col-span-3">
-          {/* L1: HEATCLOCK 24H 精密表盘 */}
-          <section className="relative flex flex-col overflow-hidden rounded-xl border border-base-750/90 bg-[#090c14] text-slate-100 shadow-panel">
-            <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-2">
-              <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold tracking-wider text-slate-200">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2.5 xl:grid-cols-12">
+        {/* ======================== 左 3 栏：24H 表盘 + 实时终端 ======================== */}
+        <div className="flex min-h-0 min-w-0 flex-col gap-2.5 xl:col-span-3">
+          {/* L1: 24小时量子表盘 */}
+          <section className="aq-obs-card flex min-h-[300px] flex-[1.15] flex-col overflow-hidden rounded-xl border border-white/10">
+            <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-3 py-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-100">
                 <Sparkles className="h-3.5 w-3.5 text-emerald-400" aria-hidden />
-                HEATCLOCK · 24H
+                24小时量子表盘
               </div>
-              <span className="font-mono text-[10px] text-slate-400">96×15M</span>
+              <span className="font-mono text-[10px] text-slate-400">96 档时段</span>
             </div>
 
-            <div className="h-[268px] w-full p-1">
+            <div className="min-h-[210px] flex-1 p-1">
               <HeatclockCanvas
                 accountEquity={accountEquity}
                 realizedPnl={realizedPnl}
@@ -636,19 +625,19 @@ export function OverviewPage() {
               />
             </div>
 
-            <div className="grid grid-cols-3 divide-x divide-white/[0.07] border-t border-white/[0.08] bg-white/[0.02] text-center font-mono">
+            <div className="grid shrink-0 grid-cols-3 divide-x divide-white/[0.08] border-t border-white/[0.08] bg-white/[0.02] text-center font-mono">
               <div className="px-1.5 py-2">
-                <div className="text-[9px] uppercase text-slate-400">初始投入</div>
+                <div className="font-sans text-[10px] text-slate-400">初始投入</div>
                 <div className="num mt-0.5 text-xs font-bold text-slate-100">{fmtUsd(committedCapital, 2)}</div>
               </div>
               <div className="px-1.5 py-2">
-                <div className="text-[9px] uppercase text-slate-400">持仓浮盈</div>
+                <div className="font-sans text-[10px] text-slate-400">持仓浮盈</div>
                 <div className={cn('num mt-0.5 text-xs font-bold', pnlColor(unrealized))}>
                   {fmtUsdSigned(unrealized, 2)}
                 </div>
               </div>
               <div className="px-1.5 py-2">
-                <div className="text-[9px] uppercase text-slate-400">在跑舰队</div>
+                <div className="font-sans text-[10px] text-slate-400">在跑舰队</div>
                 <div className="num mt-0.5 text-xs font-bold text-emerald-400">
                   {runningCount}/{traders.length} · 仓{totalOpen}
                 </div>
@@ -656,38 +645,38 @@ export function OverviewPage() {
             </div>
           </section>
 
-          {/* L2: $ tail -f quant.wire 实时滚动终端流 */}
-          <section className="flex min-h-[252px] flex-1 flex-col overflow-hidden rounded-xl border border-base-750/90 bg-[#090c14] text-slate-100 shadow-panel">
-            <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-2">
-              <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold text-emerald-300">
+          {/* L2: 实时战况终端流 */}
+          <section className="aq-obs-card flex min-h-[220px] flex-1 flex-col overflow-hidden rounded-xl border border-white/10">
+            <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-3 py-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
                 <Terminal className="h-3.5 w-3.5" aria-hidden />
-                $ tail -f quant.wire
+                实时战况终端流
               </div>
               <span className="inline-flex items-center gap-1 font-mono text-[10px] text-slate-400">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                {wirePool.length} LIVE
+                {wirePool.length} 条实时
               </span>
             </div>
 
-            <div className="flex-1 divide-y divide-white/[0.04] overflow-hidden px-2.5 py-1 font-mono text-[11px]">
+            <div className="min-h-0 flex-1 divide-y divide-white/[0.05] overflow-hidden px-2.5 py-1 font-mono text-[11px]">
               {visibleWire.length === 0 ? (
-                <div className="py-10 text-center text-slate-500">正在接入实时量化数据流…</div>
+                <div className="py-10 text-center font-sans text-xs text-slate-500">正在接入实时量化数据流…</div>
               ) : (
                 visibleWire.map((item, idx) => (
                   <Link
                     key={`${item.key}-${idx}`}
                     to={item.to ?? '/market'}
                     className={cn(
-                      'flex items-center justify-between gap-2 py-1.5 transition hover:bg-white/[0.04]',
-                      idx === 0 && 'bg-emerald-500/[0.05]',
+                      'flex items-center justify-between gap-2 py-1.5 transition hover:bg-white/[0.05]',
+                      idx === 0 && 'bg-emerald-500/[0.06]',
                     )}
                   >
                     <div className="flex min-w-0 items-center gap-1.5">
                       <span className="shrink-0 text-[10px] text-slate-500">{item.time}</span>
-                      <span className={cn('shrink-0 rounded border px-1 py-px text-[9px] font-bold', item.tagCls)}>
+                      <span className={cn('shrink-0 rounded border px-1 py-px font-sans text-[10px] font-semibold', item.tagCls)}>
                         {item.tag}
                       </span>
-                      <span className="truncate text-slate-200">{item.body}</span>
+                      <span className="truncate font-sans text-slate-200">{item.body}</span>
                     </div>
                     <span className={cn('num shrink-0 font-bold', item.metricCls)}>{item.metric}</span>
                   </Link>
@@ -697,42 +686,42 @@ export function OverviewPage() {
           </section>
         </div>
 
-        {/* ======================== 中 6 栏：3D 全市场 522 星云主屏 + 流动性脊线频谱 ======================== */}
-        <div className="flex min-w-0 flex-col gap-3 xl:col-span-6">
-          {/* C1: 主视觉舞台（3D 522 永续合约全息星云 / 实时信号神经网络流 一键切换） */}
-          <section className="relative flex flex-col overflow-hidden rounded-xl border border-violet-500/30 bg-[#080b13] text-slate-100 shadow-panel">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] bg-white/[0.02] px-3.5 py-2">
+        {/* ======================== 中 6 栏：360° 极坐标态势雷达 + 收益分布频谱 ======================== */}
+        <div className="flex min-h-0 min-w-0 flex-col gap-2.5 xl:col-span-6">
+          {/* C1: 主舞台（360° 极坐标全市场态势雷达 / 信号神经流 一键切换） */}
+          <section className="aq-obs-card relative flex min-h-[340px] flex-[1.65] flex-col overflow-hidden rounded-xl border border-violet-500/35">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] bg-white/[0.02] px-3.5 py-2">
               <div className="flex items-center gap-2">
-                <Globe className="h-4 w-4 text-violet-400" aria-hidden />
-                <span className="font-mono text-xs font-bold tracking-wider text-white">
-                  {stageMode === 'galaxy'
-                    ? `MARKET SPACE · ${fmtInt(marketSymbols.length || system?.tradableSymbols)} PERP GALAXY`
-                    : 'LIVE NEURAL PIPELINE · SIGNAL TO EXECUTION'}
+                <Radar className="h-4 w-4 text-emerald-400" aria-hidden />
+                <span className="text-xs font-bold tracking-wide text-white">
+                  {stageMode === 'radar'
+                    ? `全市场 ${fmtInt(marketSymbols.length || system?.tradableSymbols)} 永续极坐标态势雷达`
+                    : '实时量化信号神经网络流（行情 → 评分 → 决策 → 执行）'}
                 </span>
-                <span className="hidden rounded border border-emerald-400/35 bg-emerald-400/12 px-1.5 py-px font-mono text-[10px] font-bold text-emerald-300 sm:inline">
-                  60FPS LIVE
+                <span className="hidden rounded border border-emerald-400/35 bg-emerald-400/12 px-1.5 py-px text-[10px] font-semibold text-emerald-300 sm:inline">
+                  实时扫描
                 </span>
               </div>
 
-              <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-black/40 p-0.5 font-mono text-[10px]">
+              <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-black/40 p-0.5 text-[11px]">
                 <button
                   type="button"
-                  onClick={() => setStageMode('galaxy')}
+                  onClick={() => setStageMode('radar')}
                   className={cn(
-                    'inline-flex items-center gap-1 rounded px-2 py-1 font-semibold transition',
-                    stageMode === 'galaxy'
+                    'inline-flex items-center gap-1 rounded px-2 py-0.5 font-semibold transition',
+                    stageMode === 'radar'
                       ? 'bg-violet-500 text-white shadow-sm'
                       : 'text-slate-400 hover:text-white',
                   )}
                 >
-                  <Globe className="h-3 w-3" />
-                  3D 星云雷达
+                  <Radar className="h-3 w-3" />
+                  极坐标雷达
                 </button>
                 <button
                   type="button"
                   onClick={() => setStageMode('pipeline')}
                   className={cn(
-                    'inline-flex items-center gap-1 rounded px-2 py-1 font-semibold transition',
+                    'inline-flex items-center gap-1 rounded px-2 py-0.5 font-semibold transition',
                     stageMode === 'pipeline'
                       ? 'bg-violet-500 text-white shadow-sm'
                       : 'text-slate-400 hover:text-white',
@@ -744,9 +733,9 @@ export function OverviewPage() {
               </div>
             </div>
 
-            <div className="relative h-[368px] w-full">
-              {stageMode === 'galaxy' ? (
-                <MarketGalaxyCanvas symbols={marketSymbols} radarItems={radarItems} />
+            <div className="relative min-h-[280px] flex-1">
+              {stageMode === 'radar' ? (
+                <PolarAlphaRadarCanvas symbols={marketSymbols} radarItems={radarItems} />
               ) : (
                 <NeuralPipelineCanvas
                   symbols={marketStats.tickerItems}
@@ -758,8 +747,7 @@ export function OverviewPage() {
                 />
               )}
 
-              {/* 左下角全息坐标图例 */}
-              <div className="pointer-events-none absolute bottom-2.5 left-3 flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-[#080b13]/80 px-2.5 py-1 font-mono text-[10px] text-slate-300 backdrop-blur-sm">
+              <div className="pointer-events-none absolute bottom-2 left-3 flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-[#080b13]/85 px-2.5 py-1 text-[10.5px] text-slate-300 backdrop-blur-sm">
                 <span className="inline-flex items-center gap-1">
                   <span className="h-2 w-2 rounded-full bg-amber-300 shadow-[0_0_6px_#fbbf24]" />
                   AI500 雷达焦点 ({radarItems.length})
@@ -774,57 +762,54 @@ export function OverviewPage() {
                 </span>
               </div>
 
-              {/* 右下角全市场多空广度全息胶囊 */}
-              <div className="pointer-events-none absolute bottom-2.5 right-3 hidden items-center gap-2 rounded-lg border border-white/10 bg-[#080b13]/80 px-2.5 py-1 font-mono text-[10px] backdrop-blur-sm sm:flex">
-                <span className="text-slate-400">BREADTH</span>
+              <div className="pointer-events-none absolute bottom-2 right-3 hidden items-center gap-2 rounded-lg border border-white/10 bg-[#080b13]/85 px-2.5 py-1 text-[10.5px] backdrop-blur-sm sm:flex">
+                <span className="text-slate-400">多头广度</span>
                 <div className="flex h-1.5 w-16 overflow-hidden rounded-full bg-rose-500/40">
                   <div
                     className="h-full bg-gradient-to-r from-emerald-400 to-cyan-300 transition-all duration-500"
                     style={{ width: `${marketStats.bullPct}%` }}
                   />
                 </div>
-                <span className="num font-bold text-emerald-300">{marketStats.bullPct}%</span>
+                <span className="num font-mono font-bold text-emerald-300">{marketStats.bullPct}%</span>
               </div>
             </div>
           </section>
 
-          {/* C2: QUANTUM RIDGE — 522 币种分层流动性 24h 收益密度霓虹脊线频谱 */}
-          <section className="relative flex flex-col overflow-hidden rounded-xl border border-base-750/90 bg-[#090c14] text-slate-100 shadow-panel">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-3.5 py-2">
-              <div className="flex items-center gap-2 font-mono text-[11px] font-bold tracking-wider text-slate-200">
+          {/* C2: 全市场 522 币种收益分布频谱 */}
+          <section className="aq-obs-card flex min-h-[185px] flex-1 flex-col overflow-hidden rounded-xl border border-white/10">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] px-3.5 py-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-100">
                 <Activity className="h-3.5 w-3.5 text-violet-400" aria-hidden />
-                TAIL PROBABILITY RIDGE · 522 PERP SPECTRUM
+                全市场 522 币种收益分布频谱
               </div>
-              <div className="flex flex-wrap items-center gap-2.5 font-mono text-[10px]">
-                <span className="text-slate-400">
-                  24h总额 <strong className="num text-white">{fmtCompactAmount(marketStats.totalVol, 'USDT')}</strong>
+              <div className="flex flex-wrap items-center gap-2.5 font-mono text-[10.5px]">
+                <span className="font-sans text-slate-400">
+                  24h 总额 <strong className="num font-mono text-white">{fmtCompactAmount(marketStats.totalVol, 'USDT')}</strong>
                 </span>
-                <span className="text-slate-400">
-                  中位数 <strong className={cn('num', pnlColor(marketStats.medianPct))}>{fmtPercent(marketStats.medianPct)}</strong>
+                <span className="font-sans text-slate-400">
+                  中位数 <strong className={cn('num font-mono', pnlColor(marketStats.medianPct))}>{fmtPercent(marketStats.medianPct)}</strong>
                 </span>
-                <span className="rounded bg-emerald-500/15 px-1.5 py-px font-bold text-emerald-300">
-                  &gt;+10% · {marketStats.surgeCount}币
+                <span className="rounded bg-emerald-500/15 px-1.5 py-px font-semibold text-emerald-300">
+                  暴涨(&gt;10%) {marketStats.surgeCount}币
                 </span>
-                <span className="rounded bg-rose-500/15 px-1.5 py-px font-bold text-rose-300">
-                  &lt;-10% · {marketStats.crashCount}币
+                <span className="rounded bg-rose-500/15 px-1.5 py-px font-semibold text-rose-300">
+                  暴跌(&lt;-10%) {marketStats.crashCount}币
                 </span>
               </div>
             </div>
 
-            <div className="h-[178px] w-full">
+            <div className="min-h-[135px] flex-1">
               <QuantumRidgeCanvas symbols={marketSymbols} />
             </div>
           </section>
         </div>
 
-        {/* ======================== 右 3 栏：AI500 引擎管线状态 + 4×4 实时能量矩阵 ======================== */}
-        <aside className="flex min-w-0 flex-col gap-3 xl:col-span-3">
-          {/* R1: 实盘量化引擎子系统实时状态阵列 */}
-          <section className="overflow-hidden rounded-xl border border-base-750/90 bg-[#090c14] text-slate-100 shadow-panel">
+        {/* ======================== 右 3 栏：量化引擎态势 + 4×4 动能热力矩阵 ======================== */}
+        <aside className="flex min-h-0 min-w-0 flex-col gap-2.5 xl:col-span-3">
+          {/* R1: 量化引擎运行态势 */}
+          <section className="aq-obs-card shrink-0 overflow-hidden rounded-xl border border-white/10">
             <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-2">
-              <span className="font-mono text-[11px] font-bold tracking-wider text-slate-200">
-                ENGINE SUBSYSTEMS
-              </span>
+              <span className="text-xs font-semibold text-slate-100">量化引擎运行态势</span>
               <div className="flex h-3.5 items-end gap-[2px]" aria-hidden>
                 <span className={cn('w-[2.5px] rounded-full', runningCount > 0 ? 'aq-eq-bar-1 h-3.5 bg-emerald-400' : 'h-1 bg-slate-700')} />
                 <span className={cn('w-[2.5px] rounded-full', runningCount > 0 ? 'aq-eq-bar-2 h-3.5 bg-cyan-400' : 'h-1.5 bg-slate-700')} />
@@ -833,91 +818,87 @@ export function OverviewPage() {
               </div>
             </div>
 
-            <div className="divide-y divide-white/[0.06] px-3 py-1 font-mono text-[11px]">
-              {/* 子系统 1：WS 全市场脉搏 */}
+            <div className="divide-y divide-white/[0.06] px-3 py-1 text-[11px]">
               <div className="flex items-center justify-between gap-2 py-2">
                 <div className="min-w-0">
-                  <div className="font-sans text-xs font-semibold text-white">WS 脉搏雷达</div>
-                  <div className="truncate text-[10px] text-slate-400">
-                    {fmtInt(marketSymbols.length || system?.tradableSymbols)} 永续 · 零 REST 监听
+                  <div className="text-xs font-semibold text-white">全市场脉搏雷达</div>
+                  <div className="truncate text-[10.5px] text-slate-400">
+                    {fmtInt(marketSymbols.length || system?.tradableSymbols)} 永续合约 · 零限频监听
                   </div>
                 </div>
-                <span className="shrink-0 rounded border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">
-                  SCAN
+                <span className="shrink-0 rounded border border-emerald-400/40 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
+                  扫描中
                 </span>
               </div>
 
-              {/* 子系统 2：AI500 六维引擎 */}
               <Link
                 to={primaryManagedTrader ? `/traders/${primaryManagedTrader.id}` : '/market'}
-                className="flex items-center justify-between gap-2 py-2 transition hover:bg-white/[0.03]"
+                className="flex items-center justify-between gap-2 py-2 transition hover:bg-white/[0.04]"
               >
                 <div className="min-w-0">
-                  <div className="font-sans text-xs font-semibold text-white">AI500 六维评分</div>
-                  <div className="truncate text-[10px] text-amber-300">
+                  <div className="text-xs font-semibold text-white">AI500 六维评分</div>
+                  <div className="truncate text-[10.5px] text-amber-300">
                     {radarItems[0]
                       ? `榜首 ${radarItems[0].symbol.replace(/USDT$/, '')} ${Math.round(radarItems[0].score)}分 · 共 ${radarItems.length} 焦点`
                       : '等待下一轮全市场扫描'}
                   </div>
                 </div>
-                <span className="shrink-0 rounded border border-amber-400/40 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold text-amber-300">
-                  ACTIVE
+                <span className="shrink-0 rounded border border-amber-400/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
+                  聚焦中
                 </span>
               </Link>
 
-              {/* 子系统 3：LLM 三段式大脑 */}
               <Link
                 to={
                   latestDecision
                     ? `/traders/${latestDecision.traderId}/decisions/${latestDecision.id}`
                     : '/traders'
                 }
-                className="flex items-center justify-between gap-2 py-2 transition hover:bg-white/[0.03]"
+                className="flex items-center justify-between gap-2 py-2 transition hover:bg-white/[0.04]"
               >
                 <div className="min-w-0">
-                  <div className="font-sans text-xs font-semibold text-white">LLM 三段式大脑</div>
-                  <div className="truncate text-[10px] text-violet-300">
+                  <div className="text-xs font-semibold text-white">LLM 三段式大脑</div>
+                  <div className="truncate text-[10.5px] text-violet-300">
                     {latestDecision
                       ? `周期 #${latestDecision.cycleNumber}${latestCachePct !== null ? ` · 缓存 ${latestCachePct}%` : ''} · ${timeAgo(latestDecision.timestamp)}`
                       : '暂无决策周期'}
                   </div>
                 </div>
-                <span className="shrink-0 rounded border border-violet-400/40 bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-bold text-violet-300">
-                  THINK
+                <span className="shrink-0 rounded border border-violet-400/40 bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
+                  在线中
                 </span>
               </Link>
 
-              {/* 子系统 4：硬风控与保护位 */}
               <div className="flex items-center justify-between gap-2 py-2">
                 <div className="min-w-0">
-                  <div className="font-sans text-xs font-semibold text-white">硬风控闸门</div>
-                  <div className="truncate text-[10px] text-slate-400">
+                  <div className="text-xs font-semibold text-white">硬风控闸门</div>
+                  <div className="truncate text-[10.5px] text-slate-400">
                     {totalOpen} 活跃持仓 · 浮盈 {fmtUsdSigned(unrealized, 2)}
                   </div>
                 </div>
-                <span className="shrink-0 rounded border border-sky-400/40 bg-sky-500/15 px-1.5 py-0.5 text-[9px] font-bold text-sky-300">
-                  ARMED
+                <span className="shrink-0 rounded border border-sky-400/40 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300">
+                  已布防
                 </span>
               </div>
             </div>
           </section>
 
-          {/* R2: 4×4 实时能量热力矩阵（Resolution / Momentum Grid） */}
-          <section className="flex flex-1 flex-col overflow-hidden rounded-xl border border-base-750/90 bg-[#090c14] text-slate-100 shadow-panel">
-            <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-2">
-              <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold tracking-wider text-slate-200">
+          {/* R2: 4×4 全市场动能热力矩阵 */}
+          <section className="aq-obs-card flex min-h-[260px] flex-1 flex-col overflow-hidden rounded-xl border border-white/10">
+            <div className="flex shrink-0 items-center justify-between border-b border-white/[0.08] px-3 py-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-100">
                 <Flame className="h-3.5 w-3.5 text-amber-400" aria-hidden />
-                MOMENTUM HEAT GRID
+                全市场动能热力矩阵
               </div>
-              <Link to="/market" className="font-mono text-[10px] text-violet-300 hover:underline">
+              <Link to="/market" className="text-[11px] text-violet-300 hover:underline">
                 全市场 →
               </Link>
             </div>
 
-            <div className="grid flex-1 grid-cols-4 gap-1.5 p-2.5">
+            <div className="grid min-h-0 flex-1 grid-cols-4 gap-1.5 p-2.5">
               {marketStats.heatTiles.length === 0 ? (
-                <div className="col-span-4 flex items-center justify-center py-12 font-mono text-xs text-slate-500">
-                  LOADING LIVE MATRIX…
+                <div className="col-span-4 flex items-center justify-center text-xs text-slate-500">
+                  正在接入全市场热力矩阵…
                 </div>
               ) : (
                 marketStats.heatTiles.map((sym) => {
@@ -936,7 +917,7 @@ export function OverviewPage() {
                       to="/market"
                       title={`${sym.symbol} · ${fmtPriceUsd(sym.price)} · 24h ${fmtPercent(pct)} · 成交额 ${fmtCompactAmount(sym.quoteVolume24h, 'USDT')}`}
                       style={{ backgroundColor: bg, borderColor: border }}
-                      className="group flex flex-col items-center justify-center rounded-lg border px-1 py-2 text-center font-mono transition hover:scale-[1.04] hover:brightness-125"
+                      className="flex flex-col items-center justify-center rounded-lg border px-1 py-1.5 text-center font-mono transition hover:scale-[1.04] hover:brightness-125"
                     >
                       <span className="max-w-full truncate text-[10px] font-bold tracking-tight text-white">
                         {sym.baseAsset.slice(0, 6)}
@@ -956,11 +937,10 @@ export function OverviewPage() {
               )}
             </div>
 
-            {/* 底部实时 AI500 雷达快览条 */}
             {radarItems.length > 0 && (
-              <div className="flex flex-wrap items-center justify-between gap-1.5 border-t border-white/[0.08] bg-white/[0.02] px-3 py-2 font-mono text-[10px]">
-                <span className="text-slate-400">AI500 TOP</span>
-                <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-1.5 border-t border-white/[0.08] bg-white/[0.02] px-3 py-2 text-[10.5px]">
+                <span className="font-semibold text-slate-400">雷达高分榜</span>
+                <div className="flex flex-wrap items-center gap-1.5 font-mono">
                   {radarItems.slice(0, 3).map((r) => (
                     <Link
                       key={r.symbol}

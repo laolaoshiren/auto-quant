@@ -1,16 +1,12 @@
 /**
- * 总览页 60fps 实时量化观测台 Canvas 视觉引擎集合（100% 真实数据驱动，零虚构数值）。
+ * 总览页 60fps 全中文量化观测台 Canvas 视觉引擎集合（100% 真实数据驱动，零虚构数值）。
  *
- * 包含四套高性能 2D Canvas 实时渲染器：
- * 1. `HeatclockCanvas`       —— 24 小时量子热力精密表盘（映射真实周期、真实权益曲线与实时走时）；
- * 2. `MarketGalaxyCanvas`    —— 3D 旋转全市场 522 永续合约星云与 AI500 神经射线场；
- * 3. `NeuralPipelineCanvas`  —— 实盘量化信号神经管线流（行情 → AI500 → LLM 三段式 → 硬风控 → 执行器）；
- * 4. `QuantumRidgeCanvas`    —— 522 币种分层流动性 24h 收益分布霓虹脊线频谱（Tail Probability Ridge）。
- *
- * 性能与安全守则：
- * - 自动监听 `document.visibilitychange`，切出标签页立刻停帧零 CPU 占用；
- * - 自动尊重 `prefers-reduced-motion`（降至静态精绘一帧）；
- * - DPR 封顶 2，ResizeObserver 自适应容器宽度，卸载彻底清理 RAF 与监听器。
+ * 四套高性能 2D Canvas 实时渲染器：
+ * 1. `HeatclockCanvas`       —— 24 小时量子精密表盘（映射真实周期、真实权益曲线与实时走时）；
+ * 2. `PolarAlphaRadarCanvas` —— 全市场 522 永续 360° 极坐标态势雷达（4 象限清晰语义 + 旋转余辉扫描束 +
+ *                               外围固定锚位全息标注与折线引线，彻底杜绝杂乱堆叠与文字遮挡）；
+ * 3. `NeuralPipelineCanvas`  —— 实盘量化信号神经网络流图（实时行情 → AI 核心中枢 → 四大引擎子系统）；
+ * 4. `QuantumRidgeCanvas`    —— 522 币种分层流动性 24h 收益密度霓虹脊线频谱。
  */
 import { useEffect, useRef } from 'react';
 import type { DecisionRecord } from '@aq/shared';
@@ -43,8 +39,17 @@ function setupHiDpiCanvas(canvas: HTMLCanvasElement): {
   return { ctx, w, h };
 }
 
+function hashOf(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 4294967295;
+}
+
 /* ==========================================================================
- *  1. HEATCLOCK — 24 小时量子精密热力表盘
+ *  1. 24 小时量子精密表盘（全中文中心全息读数）
  * ========================================================================== */
 
 export function HeatclockCanvas({
@@ -102,7 +107,6 @@ export function HeatclockCanvas({
     let raf = 0;
     const reduced = prefersReducedMotion();
 
-    // 预构建 96 个 15 分钟刻度槽（对应 24h）
     const draw = (ts: number) => {
       const setup = setupHiDpiCanvas(canvas);
       if (!setup) {
@@ -113,19 +117,17 @@ export function HeatclockCanvas({
       const d = dataRef.current;
       const cx = w / 2;
       const cy = h / 2;
-      const maxR = Math.min(w, h) * 0.46;
+      const maxR = Math.min(w, h) * 0.45;
 
       ctx.clearRect(0, 0, w, h);
 
-      // 背景深邃微径向光晕
-      const bgGrad = ctx.createRadialGradient(cx, cy, maxR * 0.1, cx, cy, maxR * 1.15);
-      bgGrad.addColorStop(0, 'rgba(14, 203, 129, 0.08)');
-      bgGrad.addColorStop(0.55, 'rgba(112, 96, 245, 0.04)');
+      const bgGrad = ctx.createRadialGradient(cx, cy, maxR * 0.08, cx, cy, maxR * 1.15);
+      bgGrad.addColorStop(0, 'rgba(14, 203, 129, 0.10)');
+      bgGrad.addColorStop(0.55, 'rgba(112, 96, 245, 0.05)');
       bgGrad.addColorStop(1, 'rgba(6, 8, 13, 0)');
       ctx.fillStyle = bgGrad;
       ctx.fillRect(0, 0, w, h);
 
-      // 统计 24h 内 96 个 15m 槽的真实活跃度（来自真实曲线快照 + 决策记录）
       const buckets = new Float32Array(96);
       const bucketSign = new Int8Array(96);
       for (const p of d.curve) {
@@ -138,23 +140,22 @@ export function HeatclockCanvas({
         if (Number.isNaN(dt.getTime())) continue;
         const slot = (dt.getHours() * 4 + Math.floor(dt.getMinutes() / 15)) % 96;
         buckets[slot] = Math.min(1, buckets[slot]! + 0.55);
-        const hasAction = rec.decisions.some(
-          (x) => x.action !== 'wait' && x.action !== 'skip',
-        );
-        if (hasAction) bucketSign[slot] = 1;
+        if (rec.decisions.some((x) => x.action !== 'wait' && x.action !== 'skip')) {
+          bucketSign[slot] = 1;
+        }
       }
 
       const now = new Date();
       const nowSec = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds() + now.getMilliseconds() / 1000;
       const nowAngle = (nowSec / 86400) * Math.PI * 2 - Math.PI / 2;
 
-      // 1. 旋转扫描扇面尾迹（紧随当前实时时钟指针）
-      const sweepSpan = 0.65;
-      const steps = 26;
+      // 旋转激光尾迹
+      const sweepSpan = 0.68;
+      const steps = 24;
       for (let i = 0; i < steps; i++) {
         const a0 = nowAngle - (sweepSpan * (i + 1)) / steps;
         const a1 = nowAngle - (sweepSpan * i) / steps;
-        const alpha = (1 - i / steps) * 0.16;
+        const alpha = (1 - i / steps) * 0.17;
         ctx.beginPath();
         ctx.moveTo(cx, cy);
         ctx.arc(cx, cy, maxR * 0.99, a0, a1);
@@ -163,22 +164,20 @@ export function HeatclockCanvas({
         ctx.fill();
       }
 
-      // 2. 同心精密仪表环
-      const rings = [0.98, 0.84, 0.68, 0.50];
-      rings.forEach((ratio, idx) => {
+      // 同心精密仪表环
+      [0.98, 0.84, 0.68, 0.50].forEach((ratio, idx) => {
         ctx.beginPath();
         ctx.arc(cx, cy, maxR * ratio, 0, Math.PI * 2);
-        ctx.strokeStyle = idx === 0 ? 'rgba(148, 163, 184, 0.16)' : 'rgba(148, 163, 184, 0.09)';
+        ctx.strokeStyle = idx === 0 ? 'rgba(148, 163, 184, 0.18)' : 'rgba(148, 163, 184, 0.10)';
         ctx.lineWidth = idx === 3 ? 1.2 : 0.8;
         ctx.stroke();
       });
 
-      // 3. 96 槽位全天候热力块（映射真实市场波动 + 真实周期活动）
+      // 96 档时段热力环
       const symCount = d.symbols.length;
       for (let s = 0; s < 96; s++) {
         const angle = (s / 96) * Math.PI * 2 - Math.PI / 2;
         const inner = maxR * 0.69;
-        // 若该时段有真实周期活动高亮，否则映射对应全市场合约的真实 24h 振幅做微光星点
         const sym = symCount > 0 ? d.symbols[s % symCount] : null;
         const symAmp = sym ? Math.min(1, Math.abs(sym.changePercent24h) / 14) : 0.12;
         const symUp = sym ? sym.changePercent24h >= 0 : true;
@@ -192,24 +191,24 @@ export function HeatclockCanvas({
           ctx.arc(cx, cy, (r0 + r1) / 2, angle - 0.02, angle + 0.02);
           ctx.lineWidth = maxR * 0.018;
           if (bucketSign[s] === 1) {
-            ctx.strokeStyle = `rgba(14, 203, 129, ${0.42 + k * 0.12})`;
+            ctx.strokeStyle = `rgba(14, 203, 129, ${0.44 + k * 0.12})`;
           } else if (buckets[s]! > 0.2) {
-            ctx.strokeStyle = `rgba(245, 194, 231, ${0.28 + k * 0.11})`;
+            ctx.strokeStyle = `rgba(192, 132, 252, ${0.32 + k * 0.11})`;
           } else {
             ctx.strokeStyle = symUp
-              ? `rgba(14, 203, 129, ${0.14 + k * 0.07})`
-              : `rgba(246, 70, 93, ${0.14 + k * 0.07})`;
+              ? `rgba(14, 203, 129, ${0.15 + k * 0.07})`
+              : `rgba(246, 70, 93, ${0.15 + k * 0.07})`;
           }
           ctx.stroke();
         }
       }
 
-      // 4. 外环实时市场粒子星环（前 64 个真实币种的实时涨跌星尘）
-      const pulsePhase = ts * 0.0005;
+      // 外圈星尘粒子
+      const pulsePhase = ts * 0.00045;
       const starCount = Math.min(64, d.symbols.length);
       for (let i = 0; i < starCount; i++) {
         const s = d.symbols[i]!;
-        const a = (i / Math.max(1, starCount)) * Math.PI * 2 - Math.PI / 2 + pulsePhase * 0.12;
+        const a = (i / Math.max(1, starCount)) * Math.PI * 2 - Math.PI / 2 + pulsePhase * 0.1;
         const mag = Math.min(1, Math.abs(s.changePercent24h) / 25);
         const r = maxR * (0.86 + mag * 0.11);
         const px = cx + Math.cos(a) * r;
@@ -224,19 +223,17 @@ export function HeatclockCanvas({
         ctx.fill();
       }
 
-      // 5. 24 小时刻度数字（每 3 小时标一个：00 / 03 / 06 ... 21）
+      // 24 小时刻度
       ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.55)';
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.6)';
       for (let hr = 0; hr < 24; hr += 3) {
         const a = (hr / 24) * Math.PI * 2 - Math.PI / 2;
-        const lx = cx + Math.cos(a) * (maxR * 0.59);
-        const ly = cy + Math.sin(a) * (maxR * 0.59);
-        ctx.fillText(String(hr).padStart(2, '0'), lx, ly);
+        ctx.fillText(`${String(hr).padStart(2, '0')}时`, cx + Math.cos(a) * (maxR * 0.585), cy + Math.sin(a) * (maxR * 0.585));
       }
 
-      // 6. 中心微型真实权益弧线（沿着内环画一圈真实走势）
+      // 中心真实权益微弧线
       if (d.curve.length >= 2) {
         let minEq = Infinity;
         let maxEq = -Infinity;
@@ -256,12 +253,12 @@ export function HeatclockCanvas({
           if (idx === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         });
-        ctx.strokeStyle = d.realizedPnl >= 0 ? 'rgba(14, 203, 129, 0.85)' : 'rgba(246, 70, 93, 0.85)';
+        ctx.strokeStyle = d.realizedPnl >= 0 ? 'rgba(14, 203, 129, 0.88)' : 'rgba(246, 70, 93, 0.88)';
         ctx.lineWidth = 1.6;
         ctx.stroke();
       }
 
-      // 7. 激光时钟指针（精准指向当前时刻）
+      // 实时激光走时指针
       const tipX = cx + Math.cos(nowAngle) * (maxR * 0.99);
       const tipY = cy + Math.sin(nowAngle) * (maxR * 0.99);
       const baseX = cx + Math.cos(nowAngle) * (maxR * 0.50);
@@ -269,7 +266,7 @@ export function HeatclockCanvas({
       ctx.beginPath();
       ctx.moveTo(baseX, baseY);
       ctx.lineTo(tipX, tipY);
-      ctx.strokeStyle = 'rgba(226, 232, 240, 0.88)';
+      ctx.strokeStyle = 'rgba(226, 232, 240, 0.9)';
       ctx.lineWidth = 1.4;
       ctx.stroke();
 
@@ -281,29 +278,29 @@ export function HeatclockCanvas({
       ctx.fill();
       ctx.shadowBlur = 0;
 
-      // 8. 中心全息核心读数（全部真实数据）
+      // 中心全中文全息读数
       ctx.textAlign = 'center';
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.78)';
-      ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.fillText(d.paperOnly ? 'PAPER EQUITY' : 'LIVE ACCOUNT EQUITY', cx, cy - 26);
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.82)';
+      ctx.font = '600 10px system-ui, -apple-system, sans-serif';
+      ctx.fillText(d.paperOnly ? '模拟账户权益' : '实盘账户权益', cx, cy - 26);
 
       ctx.fillStyle = '#f8fafc';
-      ctx.font = '700 20px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.fillText(fmtAsset(d.accountEquity, 'USDT', 2).replace(' USDT', ''), cx, cy - 6);
+      ctx.font = '700 21px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.fillText(fmtAsset(d.accountEquity, 'USDT', 2).replace(' USDT', ''), cx, cy - 5);
 
       ctx.fillStyle = d.realizedPnl >= 0 ? '#0ecb81' : '#f6465d';
       ctx.font = '700 12px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.fillText(`${fmtUsdSigned(d.realizedPnl, 2)} (${fmtPercent(d.returnPct)})`, cx, cy + 14);
+      ctx.fillText(`${fmtUsdSigned(d.realizedPnl, 2)} (${fmtPercent(d.returnPct)})`, cx, cy + 15);
 
-      const clockStr = now.toLocaleTimeString('zh-CN', { hour12: false });
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.7)';
-      ctx.font = '500 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-      const wrText = d.winRatePct !== null ? `WR ${d.winRatePct.toFixed(0)}% · ${d.wins}W/${d.losses}L` : clockStr;
-      ctx.fillText(wrText, cx, cy + 31);
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.78)';
+      ctx.font = '600 10px system-ui, -apple-system, sans-serif';
+      const wrText =
+        d.winRatePct !== null
+          ? `胜率 ${d.winRatePct.toFixed(0)}% · ${d.wins}盈/${d.losses}亏`
+          : now.toLocaleTimeString('zh-CN', { hour12: false });
+      ctx.fillText(wrText, cx, cy + 32);
 
-      if (!reduced && !document.hidden) {
-        raf = requestAnimationFrame(draw);
-      }
+      if (!reduced && !document.hidden) raf = requestAnimationFrame(draw);
     };
 
     const onVis = () => {
@@ -324,20 +321,20 @@ export function HeatclockCanvas({
 }
 
 /* ==========================================================================
- *  2. 3D MARKET GALAXY — 522 永续合约全市场 3D 旋转星云 + AI500 神经射线
+ *  2. 全市场 522 永续 360° 极坐标态势雷达（清晰 4 象限 + 余辉扫描 + 零重叠外围引线标牌）
  * ========================================================================== */
 
-interface ProjectedNode {
+interface RadarPoint {
   sym: MarketSymbol;
-  sx: number;
-  sy: number;
-  depth: number;
+  x: number;
+  y: number;
+  angle: number;
   radius: number;
+  dotR: number;
   radar: ManagedRadarItemView | null;
-  isTopMover: boolean;
 }
 
-export function MarketGalaxyCanvas({
+export function PolarAlphaRadarCanvas({
   symbols,
   radarItems,
 }: {
@@ -354,16 +351,6 @@ export function MarketGalaxyCanvas({
     let raf = 0;
     const reduced = prefersReducedMotion();
 
-    // 确定性哈希用于给每个交易对分配稳定 Z 方位，避免数据刷新时粒子乱跳
-    const hashOf = (s: string): number => {
-      let h = 2166136261;
-      for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i);
-        h = Math.imul(h, 16777619);
-      }
-      return (h >>> 0) / 4294967295;
-    };
-
     const draw = (ts: number) => {
       const setup = setupHiDpiCanvas(canvas);
       if (!setup) {
@@ -375,273 +362,328 @@ export function MarketGalaxyCanvas({
 
       ctx.clearRect(0, 0, w, h);
 
-      // 深空微光背景
       const cx = w * 0.5;
-      const cy = h * 0.52;
-      const nebula = ctx.createRadialGradient(cx, cy, 12, cx, cy, Math.max(w, h) * 0.58);
-      nebula.addColorStop(0, 'rgba(112, 96, 245, 0.16)');
-      nebula.addColorStop(0.42, 'rgba(14, 203, 129, 0.07)');
-      nebula.addColorStop(1, 'rgba(7, 9, 14, 0)');
-      ctx.fillStyle = nebula;
+      const cy = h * 0.5;
+      // 为左右外围全息标牌留出充裕呼吸区，让圆盘和标牌永远井然有序
+      const maxR = Math.min(h * 0.41, w * 0.28);
+
+      // 柔和深空光晕
+      const bgGlow = ctx.createRadialGradient(cx, cy, maxR * 0.08, cx, cy, maxR * 1.45);
+      bgGlow.addColorStop(0, 'rgba(112, 96, 245, 0.14)');
+      bgGlow.addColorStop(0.55, 'rgba(14, 203, 129, 0.06)');
+      bgGlow.addColorStop(1, 'rgba(6, 9, 18, 0)');
+      ctx.fillStyle = bgGlow;
       ctx.fillRect(0, 0, w, h);
 
-      // 3D 透视投影参数（缓慢自转）
-      const yaw = reduced ? 0.55 : ts * 0.00022;
-      const pitch = 0.44;
-      const cosY = Math.cos(yaw);
-      const sinY = Math.sin(yaw);
-      const cosP = Math.cos(pitch);
-      const sinP = Math.sin(pitch);
-      const fov = Math.min(w, h) * 1.15;
-      const camZ = 3.25;
-
-      const project = (x: number, y: number, z: number): { sx: number; sy: number; depth: number; scale: number } => {
-        const rx = x * cosY - z * sinY;
-        const rz = x * sinY + z * cosY;
-        const ry = y * cosP - rz * sinP;
-        const rz2 = y * sinP + rz * cosP;
-        const depth = camZ + rz2;
-        const scale = fov / Math.max(0.5, depth);
-        return {
-          sx: cx + rx * scale,
-          sy: cy - ry * scale,
-          depth,
-          scale,
-        };
-      };
-
-      // 1. 绘制 3D 底部透视全息坐标网格
-      ctx.lineWidth = 0.7;
-      const gridRange = 1.45;
-      const gridY = -0.62;
-      const gridLines = 8;
-      for (let i = -gridLines; i <= gridLines; i++) {
-        const t = (i / gridLines) * gridRange;
-        const a1 = project(t, gridY, -gridRange);
-        const a2 = project(t, gridY, gridRange);
+      // 1. 4 个同心轨道环（对应真实 24h 涨跌振幅：3% / 10% / 20% / 40%+）
+      const ringDefs = [
+        { frac: 0.28, label: '3%' },
+        { frac: 0.52, label: '10%' },
+        { frac: 0.76, label: '20%' },
+        { frac: 1.0, label: '40%+' },
+      ];
+      for (const ring of ringDefs) {
+        const rr = maxR * ring.frac;
         ctx.beginPath();
-        ctx.moveTo(a1.sx, a1.sy);
-        ctx.lineTo(a2.sx, a2.sy);
-        ctx.strokeStyle = i === 0 ? 'rgba(112, 96, 245, 0.28)' : 'rgba(148, 163, 184, 0.08)';
+        ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+        ctx.strokeStyle = ring.frac === 1 ? 'rgba(56, 189, 248, 0.24)' : 'rgba(148, 163, 184, 0.11)';
+        ctx.lineWidth = ring.frac === 1 ? 1.2 : 0.8;
         ctx.stroke();
 
-        const b1 = project(-gridRange, gridY, t);
-        const b2 = project(gridRange, gridY, t);
-        ctx.beginPath();
-        ctx.moveTo(b1.sx, b1.sy);
-        ctx.lineTo(b2.sx, b2.sy);
-        ctx.strokeStyle = i === 0 ? 'rgba(14, 203, 129, 0.24)' : 'rgba(148, 163, 184, 0.08)';
-        ctx.stroke();
+        // 轨道刻度标在正上方
+        ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.45)';
+        ctx.fillText(ring.label, cx, cy - rr + 10);
       }
 
-      // 底部脉冲雷达同心波纹
-      const waveR = ((ts * 0.00035) % 1) * gridRange;
+      // 2. 十字象限坐标轴 + 45° 辅助虚线
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.14)';
+      ctx.lineWidth = 0.8;
       ctx.beginPath();
-      for (let k = 0; k <= 48; k++) {
-        const ang = (k / 48) * Math.PI * 2;
-        const p = project(Math.cos(ang) * waveR, gridY, Math.sin(ang) * waveR);
-        if (k === 0) ctx.moveTo(p.sx, p.sy);
-        else ctx.lineTo(p.sx, p.sy);
-      }
-      ctx.strokeStyle = `rgba(14, 203, 129, ${(0.32 * (1 - waveR / gridRange)).toFixed(3)})`;
-      ctx.lineWidth = 1.2;
+      ctx.moveTo(cx - maxR * 1.06, cy);
+      ctx.lineTo(cx + maxR * 1.06, cy);
+      ctx.moveTo(cx, cy - maxR * 1.06);
+      ctx.lineTo(cx, cy + maxR * 1.06);
       ctx.stroke();
 
-      // 2. 构建雷达 Map 与领涨前排集合
+      ctx.setLineDash([3, 4]);
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.07)';
+      const diag = maxR * 0.72;
+      ctx.beginPath();
+      ctx.moveTo(cx - diag, cy - diag);
+      ctx.lineTo(cx + diag, cy + diag);
+      ctx.moveTo(cx + diag, cy - diag);
+      ctx.lineTo(cx - diag, cy + diag);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 4 象限清晰中文说明标签（紧贴圆盘四角外缘，绝不遮挡星点）
+      ctx.font = '600 10px system-ui, -apple-system, sans-serif';
+      ctx.fillStyle = 'rgba(110, 231, 183, 0.55)';
+      ctx.textAlign = 'left';
+      ctx.fillText('↗ 放量领涨区', cx + maxR * 0.72, cy - maxR * 0.92);
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.50)';
+      ctx.fillText('↘ 中小盘潜伏上涨', cx + maxR * 0.72, cy + maxR * 0.96);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'rgba(251, 113, 133, 0.55)';
+      ctx.fillText('放量回调区 ↖', cx - maxR * 0.72, cy - maxR * 0.92);
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.45)';
+      ctx.fillText('弱势休整区 ↙', cx - maxR * 0.72, cy + maxR * 0.96);
+
+      // 3. 实时旋转翡翠雷达扫描束（每 5.5 秒完整扫过全市场 522 合约，附余辉高亮）
+      const sweepAngle = reduced ? -Math.PI * 0.25 : ((ts * 0.00115) % (Math.PI * 2)) - Math.PI;
+      const trailSpan = 0.72;
+      const trailSteps = 24;
+      for (let i = 0; i < trailSteps; i++) {
+        const a0 = sweepAngle - (trailSpan * (i + 1)) / trailSteps;
+        const a1 = sweepAngle - (trailSpan * i) / trailSteps;
+        const alpha = (1 - i / trailSteps) * 0.16;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, maxR, a0, a1);
+        ctx.closePath();
+        ctx.fillStyle = `rgba(14, 203, 129, ${alpha.toFixed(3)})`;
+        ctx.fill();
+      }
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(sweepAngle) * maxR, cy + Math.sin(sweepAngle) * maxR);
+      ctx.strokeStyle = 'rgba(52, 211, 153, 0.82)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // 4. 将全部 522 个真实永续合约映射到清晰的 4 象限极坐标
+      //    右半圆 = 24h 上涨，左半圆 = 24h 下跌；上半圆 = 高成交额（≥20M USDT），下半圆 = 中小盘
+      //    径向距离 = 真实 24h |涨跌幅|（对数平滑映射，避免中心挤成一团！）
       const radarMap = new Map<string, ManagedRadarItemView>();
       for (const r of radars) radarMap.set(r.symbol, r);
 
-      const topMovers = new Set<string>();
-      const sortedByAbs = [...syms]
-        .filter((s) => s.quoteVolume24h >= 5_000_000)
-        .sort((a, b) => Math.abs(b.changePercent24h) - Math.abs(a.changePercent24h));
-      for (const m of sortedByAbs.slice(0, 4)) topMovers.add(m.symbol);
-      topMovers.add('BTCUSDT');
-
-      // 3. 投影全部 522 个真实永续合约到 3D 空间
-      const corePt = project(0, 0.05, 0);
-      const projected: ProjectedNode[] = [];
+      const points: RadarPoint[] = [];
       for (let i = 0; i < syms.length; i++) {
         const sym = syms[i]!;
+        const pct = sym.changePercent24h;
+        const up = pct >= 0;
+        const highVol = sym.quoteVolume24h >= 20_000_000;
         const h1 = hashOf(sym.symbol);
-        const h2 = hashOf(`${sym.symbol}:z`);
-        // X/Z 按圆盘散开，极强动量向外圈跃迁；Y 按对数成交额悬浮高度
-        const volLog = Math.log10(Math.max(10_000, sym.quoteVolume24h)); // ~4..10
-        const yNorm = Math.max(-0.55, Math.min(0.88, ((volLog - 5.2) / 4.8) * 1.15 - 0.38));
-        const pctClamped = Math.max(-35, Math.min(35, sym.changePercent24h));
-        const radial = 0.24 + (Math.abs(pctClamped) / 35) * 1.02 + h1 * 0.22;
-        const theta = h2 * Math.PI * 2 + (pctClamped >= 0 ? 0 : Math.PI * 0.25);
-        const bob = reduced ? 0 : Math.sin(ts * 0.0018 + i * 0.9) * 0.025;
-        const p = project(Math.cos(theta) * radial, yNorm + bob, Math.sin(theta) * radial);
+        // 每个象限占 78°（留出坐标轴安全缝隙，干净整齐）
+        const localFrac = 0.07 + h1 * 0.86;
+        let angle: number;
+        if (up && highVol) angle = -Math.PI * 0.5 + localFrac * (Math.PI * 0.5); // 右上 [-90°, 0°]
+        else if (up && !highVol) angle = localFrac * (Math.PI * 0.5); // 右下 [0°, 90°]
+        else if (!up && highVol) angle = -Math.PI + localFrac * (Math.PI * 0.5); // 左上 [-180°, -90°]
+        else angle = Math.PI * 0.5 + localFrac * (Math.PI * 0.5); // 左下 [90°, 180°]
+
+        // 径向位置按真实振幅均匀分布到 [0.16, 0.96]
+        const absPct = Math.abs(pct);
+        const normR = Math.min(0.96, 0.16 + (Math.log1p(absPct) / Math.log1p(55)) * 0.80);
+        const radius = normR * maxR;
+        const x = cx + Math.cos(angle) * radius;
+        const y = cy + Math.sin(angle) * radius;
+        const volLog = Math.log10(Math.max(100_000, sym.quoteVolume24h));
         const radar = radarMap.get(sym.symbol) ?? null;
-        const isTopMover = topMovers.has(sym.symbol);
-        const baseRadius = radar ? 5.2 : isTopMover ? 4.1 : 1.5 + Math.max(0, (volLog - 5.5) * 0.55);
-        projected.push({
-          sym,
-          sx: p.sx,
-          sy: p.sy,
-          depth: p.depth,
-          radius: Math.max(1.2, baseRadius * (p.scale / (fov / camZ))),
-          radar,
-          isTopMover,
-        });
+        const dotR = radar ? 4.4 : Math.max(1.6, Math.min(3.6, (volLog - 4.8) * 0.65));
+
+        points.push({ sym, x, y, angle, radius, dotR, radar });
       }
 
-      // 深度排序（远→近）
-      projected.sort((a, b) => b.depth - a.depth);
+      // 5. 绘制 522 个真实合约光点（雷达束刚扫过时触发余辉闪烁！）
+      for (const p of points) {
+        let diff = sweepAngle - p.angle;
+        while (diff < 0) diff += Math.PI * 2;
+        while (diff >= Math.PI * 2) diff -= Math.PI * 2;
+        const ping = diff < 0.85 ? 1 - diff / 0.85 : 0;
+        const up = p.sym.changePercent24h >= 0;
 
-      // 4. 绘制中心 AI500 QUANT CORE 到重点目标的弯曲发光神经射线 + 流动光子
-      const featured = projected.filter((n) => n.radar !== null || n.isTopMover).slice(0, 8);
-      featured.forEach((node, idx) => {
-        const midX = (corePt.sx + node.sx) / 2;
-        const midY = Math.min(corePt.sy, node.sy) - 26 - (idx % 3) * 14;
-        const isRadar = node.radar !== null;
-        const isUp = node.sym.changePercent24h >= 0;
-        const beamColor = isRadar
-          ? 'rgba(245, 158, 11, 0.55)'
-          : isUp
-            ? 'rgba(14, 203, 129, 0.36)'
-            : 'rgba(246, 70, 93, 0.36)';
-
-        ctx.beginPath();
-        ctx.moveTo(corePt.sx, corePt.sy);
-        ctx.quadraticCurveTo(midX, midY, node.sx, node.sy);
-        ctx.strokeStyle = beamColor;
-        ctx.lineWidth = isRadar ? 1.5 : 1.0;
-        ctx.stroke();
-
-        // 沿贝塞尔曲线奔跑的高能光点
-        const t = ((ts * 0.00055 + idx * 0.21) % 1);
-        const inv = 1 - t;
-        const bx = inv * inv * corePt.sx + 2 * inv * t * midX + t * t * node.sx;
-        const by = inv * inv * corePt.sy + 2 * inv * t * midY + t * t * node.sy;
-        ctx.beginPath();
-        ctx.arc(bx, by, isRadar ? 2.6 : 2.0, 0, Math.PI * 2);
-        ctx.fillStyle = isRadar ? '#fbbf24' : isUp ? '#34d399' : '#fb7185';
-        ctx.shadowColor = isRadar ? '#fbbf24' : isUp ? '#0ecb81' : '#f6465d';
-        ctx.shadowBlur = 10;
-        ctx.fill();
-        ctx.shadowBlur = 0;
-      });
-
-      // 5. 绘制 522 个真实合约光球
-      for (const node of projected) {
-        const up = node.sym.changePercent24h >= 0;
-        const isHot = node.radar !== null || node.isTopMover;
-        const depthFade = Math.max(0.28, Math.min(1, 1.35 - (node.depth - 1.5) * 0.22));
-
-        if (isHot) {
-          // 发光外晕
-          const halo = ctx.createRadialGradient(node.sx, node.sy, 0.5, node.sx, node.sy, node.radius * 3.4);
-          if (node.radar) {
+        if (p.radar || ping > 0.35) {
+          const haloR = p.dotR * (p.radar ? 3.2 : 2.3);
+          const halo = ctx.createRadialGradient(p.x, p.y, 0.5, p.x, p.y, haloR);
+          if (p.radar) {
             halo.addColorStop(0, 'rgba(251, 191, 36, 0.72)');
-            halo.addColorStop(0.5, 'rgba(251, 191, 36, 0.18)');
             halo.addColorStop(1, 'rgba(251, 191, 36, 0)');
           } else if (up) {
-            halo.addColorStop(0, 'rgba(14, 203, 129, 0.65)');
-            halo.addColorStop(0.5, 'rgba(14, 203, 129, 0.14)');
+            halo.addColorStop(0, `rgba(14, 203, 129, ${(0.55 * ping).toFixed(2)})`);
             halo.addColorStop(1, 'rgba(14, 203, 129, 0)');
           } else {
-            halo.addColorStop(0, 'rgba(246, 70, 93, 0.65)');
-            halo.addColorStop(0.5, 'rgba(246, 70, 93, 0.14)');
+            halo.addColorStop(0, `rgba(246, 70, 93, ${(0.55 * ping).toFixed(2)})`);
             halo.addColorStop(1, 'rgba(246, 70, 93, 0)');
           }
           ctx.beginPath();
-          ctx.arc(node.sx, node.sy, node.radius * 3.4, 0, Math.PI * 2);
+          ctx.arc(p.x, p.y, haloR, 0, Math.PI * 2);
           ctx.fillStyle = halo;
           ctx.fill();
         }
 
         ctx.beginPath();
-        ctx.arc(node.sx, node.sy, node.radius, 0, Math.PI * 2);
-        ctx.fillStyle = node.radar
+        ctx.arc(p.x, p.y, p.dotR + ping * 0.8, 0, Math.PI * 2);
+        ctx.fillStyle = p.radar
           ? '#fde68a'
           : up
-            ? `rgba(14, 203, 129, ${(0.78 * depthFade).toFixed(2)})`
-            : `rgba(246, 70, 93, ${(0.78 * depthFade).toFixed(2)})`;
+            ? `rgba(14, 203, 129, ${(0.52 + ping * 0.48).toFixed(2)})`
+            : `rgba(246, 70, 93, ${(0.52 + ping * 0.48).toFixed(2)})`;
         ctx.fill();
       }
 
-      // 6. 中心 AI500 QUANT CORE 能量球
-      const corePulse = 1 + 0.14 * Math.sin(ts * 0.004);
-      const coreGlow = ctx.createRadialGradient(corePt.sx, corePt.sy, 2, corePt.sx, corePt.sy, 26 * corePulse);
-      coreGlow.addColorStop(0, 'rgba(167, 139, 250, 0.95)');
-      coreGlow.addColorStop(0.35, 'rgba(112, 96, 245, 0.45)');
-      coreGlow.addColorStop(1, 'rgba(112, 96, 245, 0)');
+      // 6. 挑选最多 6 个焦点标的（优先 AI500 高分 + BTC + 领涨龙头），按左右侧自动分配至固定外围标牌槽（彻底 0 重叠！）
+      const featured: RadarPoint[] = [];
+      const picked = new Set<string>();
+      const pushFeat = (pt: RadarPoint | undefined) => {
+        if (!pt || picked.has(pt.sym.symbol) || featured.length >= 6) return;
+        picked.add(pt.sym.symbol);
+        featured.push(pt);
+      };
+      // 先取前 4 个 AI500 雷达高分
+      const radarPoints = points
+        .filter((p) => p.radar !== null)
+        .sort((a, b) => (b.radar?.score ?? 0) - (a.radar?.score ?? 0));
+      for (const rp of radarPoints.slice(0, 4)) pushFeat(rp);
+      // 再补 BTC 与 24h 领涨龙头
+      pushFeat(points.find((p) => p.sym.symbol === 'BTCUSDT'));
+      const sortedMovers = [...points]
+        .filter((p) => p.sym.quoteVolume24h >= 15_000_000)
+        .sort((a, b) => Math.abs(b.sym.changePercent24h) - Math.abs(a.sym.changePercent24h));
+      for (const mp of sortedMovers) pushFeat(mp);
+
+      // 分成左翼 3 槽、右翼 3 槽（只在大屏宽够时画外围标牌，绝不挤压圆盘）
+      if (w >= 520 && featured.length > 0) {
+        const leftList: RadarPoint[] = [];
+        const rightList: RadarPoint[] = [];
+        for (const fp of featured) {
+          if (fp.x < cx && leftList.length < 3) leftList.push(fp);
+          else if (rightList.length < 3) rightList.push(fp);
+          else leftList.push(fp);
+        }
+        leftList.sort((a, b) => a.y - b.y);
+        rightList.sort((a, b) => a.y - b.y);
+
+        const drawCalloutWing = (list: RadarPoint[], side: 'left' | 'right') => {
+          const cardW = Math.min(144, Math.max(118, Math.floor((w - maxR * 2) * 0.42)));
+          const cardH = 38;
+          const slotStep = Math.min(68, (h - 90) / Math.max(1, list.length));
+          const startY = cy - ((list.length - 1) * slotStep) / 2;
+
+          list.forEach((pt, idx) => {
+            const boxX = side === 'left' ? 12 : w - cardW - 12;
+            const boxY = startY + idx * slotStep - cardH / 2;
+            const anchorX = side === 'left' ? boxX + cardW : boxX;
+            const anchorY = boxY + cardH / 2;
+            const kneeX = side === 'left' ? anchorX + 18 : anchorX - 18;
+
+            const isRadar = pt.radar !== null;
+            const up = pt.sym.changePercent24h >= 0;
+            const accentColor = isRadar ? '#fbbf24' : up ? '#34d399' : '#fb7185';
+            const strokeAlpha = isRadar ? 'rgba(251, 191, 36, 0.55)' : up ? 'rgba(14, 203, 129, 0.45)' : 'rgba(246, 70, 93, 0.45)';
+
+            // 中心 → 目标脉冲射线 + 目标 → 外围标牌折线引线
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(pt.x, pt.y);
+            ctx.strokeStyle = isRadar ? 'rgba(251, 191, 36, 0.25)' : 'rgba(56, 189, 248, 0.16)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(pt.x, pt.y);
+            ctx.lineTo(kneeX, anchorY);
+            ctx.lineTo(anchorX, anchorY);
+            ctx.strokeStyle = strokeAlpha;
+            ctx.lineWidth = 1.1;
+            ctx.stroke();
+
+            // 沿折线流动的微光粒子
+            const phase = ((ts * 0.0007 + idx * 0.31) % 1);
+            const lx = pt.x + (kneeX - pt.x) * phase;
+            const ly = pt.y + (anchorY - pt.y) * phase;
+            ctx.beginPath();
+            ctx.arc(lx, ly, 2, 0, Math.PI * 2);
+            ctx.fillStyle = accentColor;
+            ctx.fill();
+
+            // 目标准星圆环
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, 7.5, 0, Math.PI * 2);
+            ctx.strokeStyle = strokeAlpha;
+            ctx.lineWidth = 1.1;
+            ctx.stroke();
+
+            // 标牌卡片
+            ctx.fillStyle = 'rgba(10, 14, 26, 0.88)';
+            ctx.strokeStyle = strokeAlpha;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(boxX, boxY, cardW, cardH, 7);
+            ctx.fill();
+            ctx.stroke();
+
+            // 左侧色条
+            ctx.fillStyle = accentColor;
+            ctx.beginPath();
+            ctx.roundRect(boxX, boxY + 6, 2.5, cardH - 12, 2);
+            ctx.fill();
+
+            // 第一行：币种名 + 雷达评分/基准标记
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#f8fafc';
+            ctx.font = '700 11px ui-monospace, SFMono-Regular, Menlo, monospace';
+            ctx.fillText(pt.sym.baseAsset.slice(0, 8), boxX + 9, boxY + 13);
+
+            ctx.textAlign = 'right';
+            ctx.fillStyle = accentColor;
+            ctx.font = '700 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+            ctx.fillText(
+              pt.radar ? `${Math.round(pt.radar.score)}分` : fmtPercent(pt.sym.changePercent24h),
+              boxX + cardW - 8,
+              boxY + 13,
+            );
+
+            // 第二行：价格 + 24h 涨跌
+            ctx.textAlign = 'left';
+            ctx.fillStyle = 'rgba(148, 163, 184, 0.82)';
+            ctx.font = '500 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+            ctx.fillText(fmtPriceUsd(pt.sym.price), boxX + 9, boxY + 27);
+
+            if (pt.radar) {
+              ctx.textAlign = 'right';
+              ctx.fillStyle = up ? '#6ee7b7' : '#fda4af';
+              ctx.fillText(fmtPercent(pt.sym.changePercent24h), boxX + cardW - 8, boxY + 27);
+            }
+          });
+        };
+
+        drawCalloutWing(leftList, 'left');
+        drawCalloutWing(rightList, 'right');
+      }
+
+      // 7. 中心 AI500 雷达中枢核心
+      const pulse = 1 + 0.1 * Math.sin(ts * 0.004);
+      const coreGlow = ctx.createRadialGradient(cx, cy, 4, cx, cy, 28 * pulse);
+      coreGlow.addColorStop(0, 'rgba(139, 92, 246, 0.65)');
+      coreGlow.addColorStop(0.5, 'rgba(14, 203, 129, 0.22)');
+      coreGlow.addColorStop(1, 'rgba(139, 92, 246, 0)');
       ctx.beginPath();
-      ctx.arc(corePt.sx, corePt.sy, 26 * corePulse, 0, Math.PI * 2);
+      ctx.arc(cx, cy, 28 * pulse, 0, Math.PI * 2);
       ctx.fillStyle = coreGlow;
       ctx.fill();
 
       ctx.beginPath();
-      ctx.arc(corePt.sx, corePt.sy, 7.5, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffffff';
+      ctx.arc(cx, cy, 17, 0, Math.PI * 2);
+      ctx.fillStyle = '#0b1020';
+      ctx.strokeStyle = 'rgba(139, 92, 246, 0.85)';
+      ctx.lineWidth = 1.6;
       ctx.fill();
-      ctx.beginPath();
-      ctx.arc(corePt.sx, corePt.sy, 13 * corePulse, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(167, 139, 250, 0.7)';
-      ctx.lineWidth = 1.2;
       ctx.stroke();
 
-      ctx.font = '700 9px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.textAlign = 'center';
-      ctx.fillStyle = 'rgba(226, 232, 240, 0.92)';
-      ctx.fillText('AI500 CORE', corePt.sx, corePt.sy + 23);
-
-      // 7. 为前 6 个重点节点（AI500 雷达 + BTC + 暴涨龙头）绘制防碰撞全息浮标标签
-      const placedBoxes: Array<{ x: number; y: number; w: number; h: number }> = [];
-      ctx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.fillText('AI500', cx, cy - 3);
+      ctx.fillStyle = '#34d399';
+      ctx.font = '600 8px system-ui, -apple-system, sans-serif';
+      ctx.fillText('雷达中枢', cx, cy + 7);
 
-      for (const node of featured.slice(0, 6)) {
-        const label = node.radar
-          ? `${node.sym.baseAsset} ${Math.round(node.radar.score)}分 ${fmtPercent(node.sym.changePercent24h)}`
-          : node.sym.symbol === 'BTCUSDT'
-            ? `BTC ${fmtPriceUsd(node.sym.price)} ${fmtPercent(node.sym.changePercent24h)}`
-            : `${node.sym.baseAsset} ${fmtPercent(node.sym.changePercent24h)}`;
-        const tw = ctx.measureText(label).width + 12;
-        const th = 18;
-        let bx = Math.min(w - tw - 8, Math.max(8, node.sx + 9));
-        let by = Math.min(h - th - 8, Math.max(10, node.sy - 9));
-
-        // 迭代避让，防止高密度区全息标签擦碰
-        for (let pass = 0; pass < 3; pass++) {
-          for (const b of placedBoxes) {
-            if (bx < b.x + b.w + 6 && bx + tw + 6 > b.x && by < b.y + b.h + 5 && by + th + 5 > b.y) {
-              const tryDown = b.y + b.h + 6;
-              const tryUp = b.y - th - 6;
-              if (tryDown + th < h - 34) by = tryDown;
-              else if (tryUp > 10) by = tryUp;
-              else bx = Math.min(w - tw - 8, b.x + b.w + 8);
-            }
-          }
-        }
-        placedBoxes.push({ x: bx, y: by, w: tw, h: th });
-
-        ctx.fillStyle = 'rgba(10, 13, 22, 0.84)';
-        ctx.strokeStyle = node.radar
-          ? 'rgba(251, 191, 36, 0.65)'
-          : node.sym.changePercent24h >= 0
-            ? 'rgba(14, 203, 129, 0.55)'
-            : 'rgba(246, 70, 93, 0.55)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.roundRect(bx, by, tw, th, 4);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = node.radar
-          ? '#fde68a'
-          : node.sym.changePercent24h >= 0
-            ? '#6ee7b7'
-            : '#fda4af';
-        ctx.fillText(label, bx + 6, by + th / 2 + 0.5);
-      }
-
-      if (!reduced && !document.hidden) {
-        raf = requestAnimationFrame(draw);
-      }
+      if (!reduced && !document.hidden) raf = requestAnimationFrame(draw);
     };
 
     const onVis = () => {
@@ -658,11 +700,11 @@ export function MarketGalaxyCanvas({
     };
   }, []);
 
-  return <canvas ref={canvasRef} className="block h-full w-full" aria-label="3D 全市场522合约星云雷达" />;
+  return <canvas ref={canvasRef} className="block h-full w-full" aria-label="全市场522永续360度极坐标态势雷达" />;
 }
 
 /* ==========================================================================
- *  3. NEURAL PIPELINE — Grok-Bot 风格实时信号神经网络流图
+ *  3. 实时信号神经网络流（全中文节点）
  * ========================================================================== */
 
 export function NeuralPipelineCanvas({
@@ -701,42 +743,39 @@ export function NeuralPipelineCanvas({
 
       ctx.clearRect(0, 0, w, h);
 
-      // 左侧 4 个真实行情输入源
       const inputs = d.symbols.slice(0, 4);
-      const leftX = Math.max(82, w * 0.14);
+      const leftX = Math.max(84, w * 0.14);
       const centerX = w * 0.5;
-      const rightX = Math.min(w - 92, w * 0.84);
+      const rightX = Math.min(w - 94, w * 0.84);
       const midY = h * 0.5;
 
       const rightNodes = [
-        { title: 'AI500 六维引擎', sub: `${d.radarItems.length} 焦点标的`, color: '#38bdf8' },
-        { title: 'LLM 三段式大脑', sub: d.latestCycle ? `周期 #${d.latestCycle}` : '待命', color: '#a78bfa' },
+        { title: 'AI500 六维引擎', sub: `${d.radarItems.length} 个焦点标的`, color: '#38bdf8' },
+        { title: 'LLM 三段式大脑', sub: d.latestCycle ? `周期 #${d.latestCycle}` : '待命中', color: '#a78bfa' },
         { title: '硬风控闸门', sub: `持仓 ${d.openPositions} · 强校验`, color: '#fbbf24' },
-        { title: '交易所执行器', sub: d.runningCount > 0 ? '实盘在线' : '待机', color: '#0ecb81' },
+        { title: '交易所执行器', sub: d.runningCount > 0 ? '实盘在线' : '待机中', color: '#0ecb81' },
       ];
 
       const rowY = (idx: number, total: number) => h * 0.18 + (idx / Math.max(1, total - 1)) * (h * 0.64);
 
-      // 连线：左 → 中心核
       inputs.forEach((sym, i) => {
         const y = rowY(i, 4);
         const up = sym.changePercent24h >= 0;
         const c1x = leftX + (centerX - leftX) * 0.5;
         ctx.beginPath();
-        ctx.moveTo(leftX + 58, y);
-        ctx.bezierCurveTo(c1x, y, c1x, midY, centerX - 34, midY);
-        ctx.strokeStyle = up ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)';
+        ctx.moveTo(leftX + 60, y);
+        ctx.bezierCurveTo(c1x, y, c1x, midY, centerX - 38, midY);
+        ctx.strokeStyle = up ? 'rgba(14, 203, 129, 0.38)' : 'rgba(246, 70, 93, 0.38)';
         ctx.lineWidth = 1.5;
         ctx.stroke();
 
-        // 流动能量脉冲粒子
-        const t = ((ts * 0.00065 + i * 0.25) % 1);
+        const t = (ts * 0.00065 + i * 0.25) % 1;
         const inv = 1 - t;
         const px =
-          inv * inv * inv * (leftX + 58) +
+          inv * inv * inv * (leftX + 60) +
           3 * inv * inv * t * c1x +
           3 * inv * t * t * c1x +
-          t * t * t * (centerX - 34);
+          t * t * t * (centerX - 38);
         const py =
           inv * inv * inv * y +
           3 * inv * inv * t * y +
@@ -750,44 +789,42 @@ export function NeuralPipelineCanvas({
         ctx.fill();
         ctx.shadowBlur = 0;
 
-        // 左侧输入卡片
-        ctx.fillStyle = 'rgba(15, 20, 32, 0.9)';
-        ctx.strokeStyle = up ? 'rgba(14, 203, 129, 0.4)' : 'rgba(246, 70, 93, 0.4)';
+        ctx.fillStyle = 'rgba(13, 18, 32, 0.92)';
+        ctx.strokeStyle = up ? 'rgba(14, 203, 129, 0.42)' : 'rgba(246, 70, 93, 0.42)';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.roundRect(leftX - 58, y - 20, 116, 40, 8);
+        ctx.roundRect(leftX - 60, y - 20, 120, 40, 8);
         ctx.fill();
         ctx.stroke();
 
         ctx.textAlign = 'left';
         ctx.fillStyle = '#f8fafc';
         ctx.font = '700 11px ui-monospace, SFMono-Regular, Menlo, monospace';
-        ctx.fillText(sym.baseAsset, leftX - 48, y - 5);
+        ctx.fillText(sym.baseAsset, leftX - 50, y - 5);
         ctx.fillStyle = up ? '#34d399' : '#fb7185';
         ctx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-        ctx.fillText(`${fmtPriceUsd(sym.price)}`, leftX - 48, y + 10);
+        ctx.fillText(fmtPriceUsd(sym.price), leftX - 50, y + 10);
         ctx.textAlign = 'right';
-        ctx.fillText(fmtPercent(sym.changePercent24h), leftX + 50, y - 5);
+        ctx.fillText(fmtPercent(sym.changePercent24h), leftX + 52, y - 5);
       });
 
-      // 连线：中心核 → 右侧 4 个真实引擎子系统
       rightNodes.forEach((rn, i) => {
         const y = rowY(i, 4);
         const c2x = centerX + (rightX - centerX) * 0.5;
         ctx.beginPath();
-        ctx.moveTo(centerX + 34, midY);
-        ctx.bezierCurveTo(c2x, midY, c2x, y, rightX - 68, y);
+        ctx.moveTo(centerX + 38, midY);
+        ctx.bezierCurveTo(c2x, midY, c2x, y, rightX - 70, y);
         ctx.strokeStyle = `${rn.color}55`;
         ctx.lineWidth = 1.6;
         ctx.stroke();
 
-        const t = ((ts * 0.00058 + i * 0.23 + 0.12) % 1);
+        const t = (ts * 0.00058 + i * 0.23 + 0.12) % 1;
         const inv = 1 - t;
         const px =
-          inv * inv * inv * (centerX + 34) +
+          inv * inv * inv * (centerX + 38) +
           3 * inv * inv * t * c2x +
           3 * inv * t * t * c2x +
-          t * t * t * (rightX - 68);
+          t * t * t * (rightX - 70);
         const py =
           inv * inv * inv * midY +
           3 * inv * inv * t * midY +
@@ -801,36 +838,35 @@ export function NeuralPipelineCanvas({
         ctx.fill();
         ctx.shadowBlur = 0;
 
-        ctx.fillStyle = 'rgba(15, 20, 32, 0.92)';
+        ctx.fillStyle = 'rgba(13, 18, 32, 0.92)';
         ctx.strokeStyle = `${rn.color}66`;
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.roundRect(rightX - 68, y - 20, 136, 40, 8);
+        ctx.roundRect(rightX - 70, y - 20, 140, 40, 8);
         ctx.fill();
         ctx.stroke();
 
         ctx.textAlign = 'left';
         ctx.fillStyle = '#f8fafc';
         ctx.font = '700 11px system-ui, -apple-system, sans-serif';
-        ctx.fillText(rn.title, rightX - 58, y - 4);
+        ctx.fillText(rn.title, rightX - 60, y - 4);
         ctx.fillStyle = rn.color;
-        ctx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-        ctx.fillText(rn.sub, rightX - 58, y + 11);
+        ctx.font = '600 10px system-ui, -apple-system, sans-serif';
+        ctx.fillText(rn.sub, rightX - 60, y + 11);
       });
 
-      // 中央 AUTOQUANT 神经枢纽
       const pulse = 1 + 0.12 * Math.sin(ts * 0.0045);
-      const glow = ctx.createRadialGradient(centerX, midY, 6, centerX, midY, 54 * pulse);
+      const glow = ctx.createRadialGradient(centerX, midY, 6, centerX, midY, 58 * pulse);
       glow.addColorStop(0, 'rgba(112, 96, 245, 0.65)');
       glow.addColorStop(0.55, 'rgba(14, 203, 129, 0.18)');
       glow.addColorStop(1, 'rgba(112, 96, 245, 0)');
       ctx.beginPath();
-      ctx.arc(centerX, midY, 54 * pulse, 0, Math.PI * 2);
+      ctx.arc(centerX, midY, 58 * pulse, 0, Math.PI * 2);
       ctx.fillStyle = glow;
       ctx.fill();
 
       ctx.beginPath();
-      ctx.arc(centerX, midY, 34, 0, Math.PI * 2);
+      ctx.arc(centerX, midY, 38, 0, Math.PI * 2);
       ctx.fillStyle = '#0f1322';
       ctx.strokeStyle = '#8b5cf6';
       ctx.lineWidth = 2;
@@ -839,15 +875,13 @@ export function NeuralPipelineCanvas({
 
       ctx.textAlign = 'center';
       ctx.fillStyle = '#ffffff';
-      ctx.font = '700 11px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.fillText('AI CORE', centerX, midY - 4);
-      ctx.fillStyle = '#0ecb81';
-      ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.fillText(`${d.totalSymbols || d.symbols.length} MKTS`, centerX, midY + 11);
+      ctx.font = '700 11px system-ui, -apple-system, sans-serif';
+      ctx.fillText('AI 核心中枢', centerX, midY - 4);
+      ctx.fillStyle = '#34d399';
+      ctx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.fillText(`${d.totalSymbols || d.symbols.length} 永续`, centerX, midY + 11);
 
-      if (!reduced && !document.hidden) {
-        raf = requestAnimationFrame(draw);
-      }
+      if (!reduced && !document.hidden) raf = requestAnimationFrame(draw);
     };
 
     const onVis = () => {
@@ -868,7 +902,7 @@ export function NeuralPipelineCanvas({
 }
 
 /* ==========================================================================
- *  4. QUANTUM RIDGE — 522 币种分层流动性 24h 收益密度霓虹脊线频谱
+ *  4. 全市场 522 币种分层流动性 24h 收益分布霓虹脊线频谱
  * ========================================================================== */
 
 export function QuantumRidgeCanvas({ symbols }: { symbols: MarketSymbol[] }) {
@@ -892,7 +926,6 @@ export function QuantumRidgeCanvas({ symbols }: { symbols: MarketSymbol[] }) {
       const syms = symRef.current;
       ctx.clearRect(0, 0, w, h);
 
-      // 按真实 24h 成交额把 522 币种切分为 7 层（蓝筹 → 中盘 → 小盘），计算每层在 [-16%, +16%] 的真实收益密度脊线
       const layers = 7;
       const bins = 40;
       const sorted = [...syms].sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
@@ -900,10 +933,9 @@ export function QuantumRidgeCanvas({ symbols }: { symbols: MarketSymbol[] }) {
 
       const padX = 18;
       const plotW = w - padX * 2;
-      const topY = 26;
+      const topY = 24;
       const botY = h - 22;
 
-      // 0% 中轴参考虚线
       const zeroX = padX + plotW * 0.5;
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
@@ -920,7 +952,6 @@ export function QuantumRidgeCanvas({ symbols }: { symbols: MarketSymbol[] }) {
         for (const s of slice) {
           const clamped = Math.max(-16, Math.min(16, s.changePercent24h));
           const b = Math.min(bins - 1, Math.max(0, Math.floor(((clamped + 16) / 32) * bins)));
-          // 轻微高斯核平滑，保留真实多峰形状
           for (let k = -2; k <= 2; k++) {
             const idx = b + k;
             if (idx >= 0 && idx < bins) {
@@ -950,7 +981,6 @@ export function QuantumRidgeCanvas({ symbols }: { symbols: MarketSymbol[] }) {
         ctx.lineTo(padX + plotW, baseY);
         ctx.closePath();
 
-        // 填充深邃紫色/青色霓虹渐变
         const fillGrad = ctx.createLinearGradient(padX, baseY - amp, padX + plotW, baseY);
         fillGrad.addColorStop(0, 'rgba(246, 70, 93, 0.26)');
         fillGrad.addColorStop(0.45, 'rgba(139, 92, 246, 0.34)');
@@ -959,7 +989,6 @@ export function QuantumRidgeCanvas({ symbols }: { symbols: MarketSymbol[] }) {
         ctx.fillStyle = fillGrad;
         ctx.fill();
 
-        // 发光霓虹脊线描边
         const strokeGrad = ctx.createLinearGradient(padX, baseY, padX + plotW, baseY);
         strokeGrad.addColorStop(0, 'rgba(246, 70, 93, 0.72)');
         strokeGrad.addColorStop(0.45, 'rgba(167, 139, 250, 0.92)');
@@ -970,19 +999,16 @@ export function QuantumRidgeCanvas({ symbols }: { symbols: MarketSymbol[] }) {
         ctx.stroke();
       }
 
-      // 横轴真实刻度标签
-      ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.65)';
+      ctx.font = '600 10px system-ui, -apple-system, sans-serif';
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.72)';
       ctx.textAlign = 'left';
-      ctx.fillText('-16% 左尾', padX, h - 6);
+      ctx.fillText('-16% 左尾普跌', padX, h - 6);
       ctx.textAlign = 'center';
-      ctx.fillText('0% 平衡轴', zeroX, h - 6);
+      ctx.fillText('0% 多空平衡轴', zeroX, h - 6);
       ctx.textAlign = 'right';
-      ctx.fillText('+16% 暴涨右尾', padX + plotW, h - 6);
+      ctx.fillText('+16% 右尾暴涨', padX + plotW, h - 6);
 
-      if (!reduced && !document.hidden) {
-        raf = requestAnimationFrame(draw);
-      }
+      if (!reduced && !document.hidden) raf = requestAnimationFrame(draw);
     };
 
     const onVis = () => {
@@ -999,5 +1025,5 @@ export function QuantumRidgeCanvas({ symbols }: { symbols: MarketSymbol[] }) {
     };
   }, []);
 
-  return <canvas ref={canvasRef} className="block h-full w-full" aria-label="全市场522币种收益密度霓虹脊线图" />;
+  return <canvas ref={canvasRef} className="block h-full w-full" aria-label="全市场522币种收益密度霓虹脊线频谱" />;
 }
