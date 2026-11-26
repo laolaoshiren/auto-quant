@@ -140,7 +140,6 @@ import {
   Ban,
   Check,
   ChevronRight,
-  History,
   LoaderCircle,
   Lock,
   Maximize2,
@@ -542,7 +541,7 @@ function CycleCountdown({ nextCycleAt }: { nextCycleAt: number | null }) {
   const s = leftSec % 60;
   return (
     <span
-      className="inline-flex items-center gap-1.5 rounded-full border border-base-700/80 bg-base-850/90 px-2 py-0.5 text-[11px] font-medium tabular-nums text-ink-lo"
+      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-base-700/80 bg-base-850/90 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-ink-lo"
       title="下一轮决策的预定时刻（由服务端给出，已包含模型要求的间隔与失败后的短重试）"
     >
       <span aria-hidden className="h-1.5 w-1.5 shrink-0 animate-pulse-soft rounded-full bg-up/85" />
@@ -1158,42 +1157,44 @@ export function DecisionFeed({
    * 否则数据一到，这个按钮会先从页面上消失再出现，读起来像功能坏了。
    */
   const headerTitle = (
-    <span className="inline-flex min-w-0 items-center gap-2">
-      <span className="truncate">最近决策</span>
+    <span className="inline-flex min-w-0 items-center gap-1.5">
+      <span className="shrink-0">最近决策</span>
       {mode !== 'ai_team' && <CycleCountdown nextCycleAt={nextCycleAt} />}
     </span>
   );
 
   const headerActions = (
-    <span className="flex items-center gap-1.5">
+    <span className="flex items-center gap-1">
       {actions}
       {actions && <span aria-hidden className="mx-0.5 h-3.5 w-px bg-base-700/80" />}
       <Link
         to="/data"
-        className="inline-flex h-[26px] items-center gap-1 rounded-[7px] px-2 text-xs text-ink-lo transition hover:bg-base-800/80 hover:text-ink-hi"
+        className="inline-flex h-[26px] items-center rounded-[7px] px-1.5 text-xs text-ink-lo transition hover:bg-base-800/80 hover:text-ink-hi"
         title="查看完整历史决策与执行审计记录"
       >
-        <History aria-hidden className="h-3.5 w-3.5 shrink-0 opacity-80" />
-        <span>全部记录</span>
+        全部记录
       </Link>
       {onToggleFocus !== undefined && (
         <button
           type="button"
           onClick={onToggleFocus}
+          aria-label={focusMode ? '退出全屏' : '全屏查看决策流'}
           title={focusMode ? '返回常规视图（图表与账户卡）' : '让决策流占满整页，获得更宽阔的阅读视野'}
           className={cn(
-            'inline-flex h-[26px] items-center gap-1 rounded-[7px] px-2 text-xs transition',
+            'inline-flex h-[26px] items-center justify-center gap-1 rounded-[7px] text-xs transition',
             focusMode
-              ? 'bg-accent/12 font-medium text-accent hover:bg-accent/20'
-              : 'text-ink-lo hover:bg-base-800/80 hover:text-ink-hi',
+              ? 'bg-accent/12 px-2 font-medium text-accent hover:bg-accent/20'
+              : 'w-[26px] text-ink-lo hover:bg-base-800/80 hover:text-ink-hi',
           )}
         >
           {focusMode ? (
-            <Minimize2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+            <>
+              <Minimize2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+              <span>退出全屏</span>
+            </>
           ) : (
-            <Maximize2 aria-hidden className="h-3.5 w-3.5 shrink-0 opacity-80" />
+            <Maximize2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
           )}
-          <span>{focusMode ? '退出全屏' : '全屏'}</span>
         </button>
       )}
     </span>
@@ -2107,8 +2108,11 @@ export function CycleBlock({
                         </span>
                       )}
                     </span>
-                    <span className="ml-auto hidden text-[11px] text-ink-faint sm:inline">
+                    <span className="ml-auto hidden text-[11px] text-ink-faint group-open:hidden sm:inline">
                       展开理由
+                    </span>
+                    <span className="ml-auto hidden text-[11px] text-ink-faint sm:group-open:inline">
+                      收起理由
                     </span>
                   </summary>
                   <div className="mt-2.5 divide-y divide-base-750/70 border-t border-base-750/70 pt-2.5">
@@ -2488,7 +2492,7 @@ function confidenceChipClass(confidence: number): string {
  * ATR / 净RR / 量比等关键量化锚点柔和提亮，消除大段纯灰文字墙的阅读疲劳。
  */
 const REASONING_HIGHLIGHT_RE =
-  /([+-]\d+(?:\.\d+)?%|\b\d{2,3}\s*分|(?:\d+(?:\.\d+)?×ATR)|(?:ATR15m\s*\d+(?:\.\d+)?%)|(?:净?RR\s*[≈<>≤≥]=?\s*\d+(?:\.\d+)?(?::\d+(?:\.\d+)?)?)|(?:量比\s*(?:仅|约)?\s*\d+(?:\.\d+)?x))/g;
+  /([+-]\d+(?:\.\d+)?%|\b\d{2,3}\s*分(?!钟)|(?:\d+(?:\.\d+)?×ATR)|(?:ATR15m\s*\d+(?:\.\d+)?%)|(?:净?RR\s*[≈<>≤≥]=?\s*\d+(?:\.\d+)?(?::\d+(?:\.\d+)?)?)|(?:量比\s*(?:仅|约)?\s*\d+(?:\.\d+)?x))/g;
 
 function FormattedReasoning({ text }: { text: string }) {
   const cleaned = plainText(text);
