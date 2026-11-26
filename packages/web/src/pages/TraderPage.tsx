@@ -2139,8 +2139,8 @@ export function TraderPage() {
             只显示净额；毛 / 手续费 / 资金费的拆解收进 title（日常盯盘不需要）。
           */}
           <span
-            className="flex items-center gap-1 text-xs"
-            title={statsCost ? pnlFormulaText(statsCost) : '还没有已平仓的成交'}
+            className={cn('flex items-center gap-1 text-xs', statsCost && 'cursor-help')}
+            data-aq-tip={statsCost ? pnlFormulaText(statsCost) : undefined}
           >
             <span className="text-ink-faint">净盈亏</span>
             <span className={cn('num font-semibold', pnlColor(realized))}>{fmtUsdSigned(realized, 2)}</span>

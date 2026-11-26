@@ -320,8 +320,8 @@ export function DecisionAuditView({
           )}
           {cycleCost && pricing && (
             <span
-              className="rounded-md border border-amber-400/25 bg-amber-500/12 px-2 py-0.5 font-medium text-amber-300 [[data-skin='light']_&]:border-amber-700/25 [[data-skin='light']_&]:text-amber-800"
-              title={formatCycleCostTooltip(cycleCost, pricing)}
+              className="cursor-help rounded-md border border-amber-400/25 bg-amber-500/12 px-2 py-0.5 font-medium text-amber-300 [[data-skin='light']_&]:border-amber-700/25 [[data-skin='light']_&]:text-amber-800"
+              data-aq-tip={formatCycleCostTooltip(cycleCost, pricing)}
             >
               计费 {pricing.free ? '免费' : fmtTokenCostUsd(cycleCost.totalCostUsd, { approx: true })}
             </span>

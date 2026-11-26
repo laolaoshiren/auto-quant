@@ -2,15 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { createPortal } from 'react-dom';
 
 /* ============================================================================
- *  全局悬停提示层（GlobalTooltipLayer）
+ *  全局按需悬停提示层（GlobalTooltipLayer）
  *
- *  自动接管全站所有原生 `[title]` 属性：
- *  - 零侵入：现有 380+ 处 `title="..."` 自动升级为磨砂玻璃卡片，无需逐个组件改造；
- *  - 不双弹：悬停/聚焦时暂存 `title` 到 `data-aq-title` 并移除原生属性，离开/卸载时恢复，
- *    保持可访问性与单测兼容，且绝不触碰 SVG `<title>` 元素；
- *  - 结构化排版：单行提示渲染为精致胶囊；多行 `\n` / `· ` 提示自动识别标题、分隔线与
- *    左右对齐的键值明细（如 Token 计费公式、缓存说明、盈亏拆分）；
- *  - 视口自适应：默认目标上方居中 + 指示小三角，触顶自动翻转到底部，左右贴边自动夹紧。
+ *  设计原则 —— 极度克制，只服务真正有信息增量的显式提示：
+ *  - 严格按需（Opt-in）：仅响应显式声明了 `data-aq-tip="..."` 的元素，绝不劫持全站
+ *    数百处普通原生 `title`，避免鼠标在看板上滑动时满屏乱弹、遮挡视线；
+ *  - 结构化排版：单行提示渲染为精致胶囊；多行 `\n` / `· ` 提示自动识别标题、副标题、
+ *    分隔线与左右对齐的键值明细（如 Token 计费公式、缓存说明、盈亏公式拆分）；
+ *  - 视口自适应：默认目标上方居中 + 无缝小三角，触顶自动翻转到底部，左右贴边夹紧。
  * ============================================================================ */
 
 export interface TooltipRect {
@@ -54,14 +53,12 @@ export type ParsedTooltip =
       rows: TooltipRow[];
     };
 
-const COLD_OPEN_DELAY_MS = 220;
-const WARM_SWITCH_DELAY_MS = 40;
-const WARM_WINDOW_MS = 360;
+const OPEN_DELAY_MS = 240;
 const HIDE_GRACE_MS = 60;
 const EDGE_MARGIN_PX = 12;
 const TARGET_GAP_PX = 9;
 const ARROW_INSET_PX = 14;
-const STASH_ATTR = 'data-aq-title';
+const TIP_ATTR = 'data-aq-tip';
 
 /**
  * 安全拆分 `标签：值` 或 `Label: Value` 行。
@@ -88,7 +85,7 @@ function splitKeyValue(line: string): { label: string; value: string } | null {
 }
 
 /**
- * 将原始 `title` 字符串解析为单行胶囊或结构化多行卡片数据。
+ * 将原始提示字符串解析为单行胶囊或结构化多行卡片数据。
  */
 export function parseTooltipContent(raw: string): ParsedTooltip {
   const lines = raw
@@ -111,7 +108,7 @@ export function parseTooltipContent(raw: string): ParsedTooltip {
   let headerNote: string | undefined;
 
   if (headerSplit) {
-    const parenMatch = /^([^（(]+?)\s*[（(]([^）)]+)[）)]$/.exec(headerSplit.value);
+    const parenMatch = /^([^（(]+?)\s*[（(](.+)[）)]$/.exec(headerSplit.value);
     if (parenMatch && parenMatch[1] && parenMatch[2] && parenMatch[1].trim().length <= 24) {
       headerLabel = headerSplit.label;
       headerValue = parenMatch[1].trim();
@@ -192,42 +189,15 @@ export function computeTooltipPosition(
   };
 }
 
-function isEligibleElement(el: Element): boolean {
-  if (el.tagName.toLowerCase() === 'title') return false;
-  if (el.hasAttribute('data-native-tooltip')) return false;
-  const raw = el.getAttribute('title') ?? el.getAttribute(STASH_ATTR);
-  return Boolean(raw && raw.trim().length > 0);
-}
-
 function findTooltipHost(node: EventTarget | null): Element | null {
   if (!node || !(node instanceof Node)) return null;
   let cur: Element | null = node instanceof Element ? node : node.parentElement;
   while (cur) {
-    if (isEligibleElement(cur)) return cur;
+    const raw = cur.getAttribute(TIP_ATTR);
+    if (raw && raw.trim().length > 0) return cur;
     cur = cur.parentElement;
   }
   return null;
-}
-
-function stashTitle(el: Element): string {
-  const live = el.getAttribute('title');
-  if (live !== null) {
-    el.setAttribute(STASH_ATTR, live);
-    el.removeAttribute('title');
-    return live;
-  }
-  return el.getAttribute(STASH_ATTR) ?? '';
-}
-
-function restoreTitle(el: Element | null): void {
-  if (!el) return;
-  const saved = el.getAttribute(STASH_ATTR);
-  if (saved !== null) {
-    if (!el.hasAttribute('title')) {
-      el.setAttribute('title', saved);
-    }
-    el.removeAttribute(STASH_ATTR);
-  }
 }
 
 interface ActiveTooltipState {
@@ -245,7 +215,6 @@ export function GlobalTooltipLayer() {
   const activeHostRef = useRef<Element | null>(null);
   const openTimerRef = useRef<number | null>(null);
   const hideTimerRef = useRef<number | null>(null);
-  const lastVisibleAtRef = useRef<number>(0);
   const observerRef = useRef<MutationObserver | null>(null);
   const instanceCounterRef = useRef<number>(0);
 
@@ -267,90 +236,55 @@ export function GlobalTooltipLayer() {
     }
   }, []);
 
-  const hideNow = useCallback(
-    (recordWarmTimestamp = true) => {
-      clearTimers();
-      detachObserver();
-      if (activeHostRef.current) {
-        restoreTitle(activeHostRef.current);
-        activeHostRef.current = null;
-      }
-      setState((prev) => {
-        if (prev?.visible && recordWarmTimestamp) {
-          lastVisibleAtRef.current = Date.now();
-        }
-        return null;
-      });
-      setPos(null);
-    },
-    [clearTimers, detachObserver],
-  );
+  const hideNow = useCallback(() => {
+    clearTimers();
+    detachObserver();
+    activeHostRef.current = null;
+    setState(null);
+    setPos(null);
+  }, [clearTimers, detachObserver]);
 
   const activateHost = useCallback(
-    (host: Element, immediate = false) => {
+    (host: Element) => {
       clearTimers();
+      detachObserver();
 
-      if (activeHostRef.current && activeHostRef.current !== host) {
-        detachObserver();
-        restoreTitle(activeHostRef.current);
-      }
-
-      const rawText = stashTitle(host).trim();
+      const rawText = (host.getAttribute(TIP_ATTR) ?? '').trim();
       if (!rawText) {
-        restoreTitle(host);
-        activeHostRef.current = null;
-        setState(null);
-        setPos(null);
+        hideNow();
         return;
       }
 
       const isSameHost = activeHostRef.current === host;
       activeHostRef.current = host;
 
-      // 监听 React 在悬停期间动态更新 `title` 属性（如倒计时、状态徽章），实时同步到提示层
-      detachObserver();
+      // 若悬停期间 React 动态更新 `data-aq-tip`，实时同步内容
       const observer = new MutationObserver(() => {
-        const updated = host.getAttribute('title');
-        if (updated !== null) {
-          host.setAttribute(STASH_ATTR, updated);
-          host.removeAttribute('title');
-          const trimmed = updated.trim();
-          if (!trimmed) {
-            hideNow(false);
-          } else {
-            setState((prev) => (prev && prev.host === host ? { ...prev, text: trimmed } : prev));
-          }
+        const updated = (host.getAttribute(TIP_ATTR) ?? '').trim();
+        if (!updated) {
+          hideNow();
+        } else {
+          setState((prev) => (prev && prev.host === host ? { ...prev, text: updated } : prev));
         }
       });
-      observer.observe(host, { attributes: true, attributeFilter: ['title'] });
+      observer.observe(host, { attributes: true, attributeFilter: [TIP_ATTR] });
       observerRef.current = observer;
 
-      const warm =
-        immediate ||
-        isSameHost ||
-        Date.now() - lastVisibleAtRef.current < WARM_WINDOW_MS;
-
       setState((prev) => {
-        const alreadyVisible = Boolean(prev?.visible);
-        if (alreadyVisible && isSameHost) {
-          return prev ? { ...prev, text: rawText } : null;
+        if (prev?.visible && isSameHost) {
+          return { ...prev, text: rawText };
         }
-        const delay = immediate ? 0 : alreadyVisible || warm ? WARM_SWITCH_DELAY_MS : COLD_OPEN_DELAY_MS;
         const nextId = ++instanceCounterRef.current;
-
-        if (delay === 0) {
-          lastVisibleAtRef.current = Date.now();
-          return { host, text: rawText, visible: true, instanceId: nextId };
-        }
 
         openTimerRef.current = window.setTimeout(() => {
           openTimerRef.current = null;
           if (activeHostRef.current !== host || !host.isConnected) return;
-          lastVisibleAtRef.current = Date.now();
           setState((cur) =>
-            cur && cur.host === host ? { ...cur, visible: true } : { host, text: rawText, visible: true, instanceId: nextId },
+            cur && cur.host === host
+              ? { ...cur, visible: true }
+              : { host, text: rawText, visible: true, instanceId: nextId },
           );
-        }, delay);
+        }, OPEN_DELAY_MS);
 
         return { host, text: rawText, visible: false, instanceId: nextId };
       });
@@ -368,7 +302,7 @@ export function GlobalTooltipLayer() {
         hideTimerRef.current = null;
       }
       if (activeHostRef.current === host) return;
-      activateHost(host, false);
+      activateHost(host);
     };
 
     const onPointerOut = (e: PointerEvent) => {
@@ -380,52 +314,38 @@ export function GlobalTooltipLayer() {
 
       const nextHost = findTooltipHost(related);
       if (nextHost && nextHost !== currentHost) {
-        activateHost(nextHost, false);
+        activateHost(nextHost);
         return;
       }
 
       clearTimers();
       hideTimerRef.current = window.setTimeout(() => {
-        hideNow(true);
+        hideNow();
       }, HIDE_GRACE_MS);
     };
 
     const onFocusIn = (e: FocusEvent) => {
       const host = findTooltipHost(e.target);
       if (!host) return;
-      // 仅在键盘导航触发 `:focus-visible` 时弹出，避免鼠标点击按钮后残留提示
       try {
         if (!host.matches(':focus-visible')) return;
       } catch {
         return;
       }
-      activateHost(host, false);
+      activateHost(host);
     };
 
-    const onFocusOut = () => {
-      hideNow(true);
-    };
-
-    const onPointerDown = () => {
-      hideNow(false);
-    };
-
+    const onFocusOut = () => hideNow();
+    const onPointerDown = () => hideNow();
     const onScroll = () => {
-      if (activeHostRef.current) hideNow(false);
+      if (activeHostRef.current) hideNow();
     };
-
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && activeHostRef.current) {
-        hideNow(false);
-      }
+      if (e.key === 'Escape' && activeHostRef.current) hideNow();
     };
-
-    const onWindowBlur = () => {
-      hideNow(false);
-    };
-
+    const onWindowBlur = () => hideNow();
     const onVisibilityChange = () => {
-      if (document.hidden) hideNow(false);
+      if (document.hidden) hideNow();
     };
 
     document.addEventListener('pointerover', onPointerOver, true);
@@ -452,7 +372,6 @@ export function GlobalTooltipLayer() {
       document.removeEventListener('visibilitychange', onVisibilityChange);
       clearTimers();
       detachObserver();
-      restoreTitle(activeHostRef.current);
       activeHostRef.current = null;
     };
   }, [activateHost, clearTimers, detachObserver, hideNow]);
@@ -460,13 +379,13 @@ export function GlobalTooltipLayer() {
   useLayoutEffect(() => {
     if (!state?.visible || !tipRef.current) return;
     if (!state.host.isConnected) {
-      hideNow(false);
+      hideNow();
       return;
     }
 
     const anchorRect = state.host.getBoundingClientRect();
     if (anchorRect.width === 0 && anchorRect.height === 0) {
-      hideNow(false);
+      hideNow();
       return;
     }
 

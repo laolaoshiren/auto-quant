@@ -2384,12 +2384,25 @@ function TokenBillingHeaderBadge({
       ? `累计 ${fmtTokenCostUsd(billing.totalCostUsd, { approx: true })}`
       : `累计 ${fmtCompactTokens(totalTok)}`;
 
+  const cycleNote =
+    billing.meteredCycles === billing.totalCycles
+      ? `共 ${billing.totalCycles} 轮 · 点击${open ? '收起' : '展开'}明细条`
+      : `共 ${billing.totalCycles} 轮 / ${billing.meteredCycles} 轮已计费 · 点击${open ? '收起' : '展开'}明细条`;
+
   const tooltipLines = [
-    `点击${open ? '收起' : '展开'}全部周期 Token 计费明细（共 ${billing.totalCycles} 轮，其中 ${billing.meteredCycles} 轮有回传）`,
-    `· 累计 Token：入 ${fmtCompactTokens(billing.promptTokens)}（缓存 ${fmtCompactTokens(billing.cachedTokens)}）/ 出 ${fmtCompactTokens(billing.completionTokens)}`,
+    billing.pricing?.free
+      ? `累计 Token 估算费用：免费（${cycleNote}）`
+      : billing.totalCostUsd !== null
+        ? `累计 Token 估算费用：${fmtTokenCostUsd(billing.totalCostUsd)}（${cycleNote}）`
+        : `累计 Token 用量：${fmtCompactTokens(totalTok)}（${cycleNote}）`,
     billing.totalCostUsd !== null
-      ? `· 累计估算：${fmtTokenCostUsd(billing.totalCostUsd)} · 今日(北京 ${billing.todayCycles} 轮)：${fmtTokenCostUsd(billing.todayCostUsd)}`
-      : '· 当前模型暂无公开单价，仅统计 Token 总量',
+      ? `· 今日估算：${fmtTokenCostUsd(billing.todayCostUsd)}（北京 ${billing.todayCycles} 轮）`
+      : '· 单价状态：当前模型暂无公开单价',
+    `· 累计输入：${fmtCompactTokens(billing.promptTokens)}（缓存 ${fmtCompactTokens(billing.cachedTokens)}）`,
+    `· 累计输出：${fmtCompactTokens(billing.completionTokens)}${billing.reasoningTokens > 0 ? `（思考 ${fmtCompactTokens(billing.reasoningTokens)}）` : ''}`,
+    ...(billing.savedByCacheUsd != null && billing.savedByCacheUsd > 0
+      ? [`· 缓存已省：${fmtTokenCostUsd(billing.savedByCacheUsd, { approx: true })}`]
+      : []),
   ];
 
   return (
@@ -2397,7 +2410,7 @@ function TokenBillingHeaderBadge({
       type="button"
       onClick={onToggle}
       aria-expanded={open}
-      title={tooltipLines.join('\n')}
+      data-aq-tip={tooltipLines.join('\n')}
       className={cn(
         'num inline-flex h-[22px] shrink-0 cursor-pointer items-center gap-1 rounded-full border px-2 text-[11px] font-medium leading-none transition',
         open
@@ -2597,10 +2610,10 @@ function CycleMeta({
       {cachePct !== null && (
         <span
           className={cn(
-            'num inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium',
+            'num inline-flex cursor-help items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium',
             cachePct >= 50 ? 'bg-up/10 text-up' : 'bg-warn/12 text-warn',
           )}
-          title={
+          data-aq-tip={
             `输入里有 ${fmtInt(record.cachedTokens ?? 0)} 个 token 命中了上下文缓存` +
             `（占 ${cachePct}%）。\n` +
             '缓存命中的输入价比未命中便宜约 50 倍，所以这个数字直接决定输入成本。'
@@ -2612,11 +2625,11 @@ function CycleMeta({
 
       {thinkPct !== null && (
         <span
-          className="num inline-flex items-center rounded-md bg-violet-500/12 px-1.5 py-0.5 text-[11px] font-medium text-violet-300 [[data-skin='light']_&]:bg-violet-500/10 [[data-skin='light']_&]:text-violet-700"
-          title={
+          className="num inline-flex cursor-help items-center rounded-md bg-violet-500/12 px-1.5 py-0.5 text-[11px] font-medium text-violet-300 [[data-skin='light']_&]:bg-violet-500/10 [[data-skin='light']_&]:text-violet-700"
+          data-aq-tip={
             `输出里有 ${fmtInt(record.reasoningTokens ?? 0)} 个 token 花在思考上` +
-            `（占 ${thinkPct}%）。输出价比缓存命中的输入价贵约 200 倍，` +
-            '所以这是本轮成本的主要部分。'
+            `（占 ${thinkPct}%）。\n` +
+            '输出价比缓存命中的输入价贵约 200 倍，所以这是本轮成本的主要部分。'
           }
         >
           思考 {thinkPct}%
@@ -2625,8 +2638,8 @@ function CycleMeta({
 
       {cycleCost && pricing && (
         <span
-          className="num inline-flex items-center rounded-md border border-amber-400/25 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-300 [[data-skin='light']_&]:border-amber-700/25 [[data-skin='light']_&]:bg-amber-500/10 [[data-skin='light']_&]:text-amber-800"
-          title={formatCycleCostTooltip(cycleCost, pricing)}
+          className="num inline-flex cursor-help items-center rounded-md border border-amber-400/25 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-300 [[data-skin='light']_&]:border-amber-700/25 [[data-skin='light']_&]:bg-amber-500/10 [[data-skin='light']_&]:text-amber-800"
+          data-aq-tip={formatCycleCostTooltip(cycleCost, pricing)}
         >
           {pricing.free ? '免费' : fmtTokenCostUsd(cycleCost.totalCostUsd, { approx: true })}
         </span>

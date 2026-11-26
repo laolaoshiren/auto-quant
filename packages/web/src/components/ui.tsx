@@ -646,16 +646,17 @@ export function Tooltip({
 }) {
   if (!content) return <>{children}</>;
   return (
-    <TooltipPrimitive.Provider delayDuration={150}>
+    <TooltipPrimitive.Provider delayDuration={240}>
       <TooltipPrimitive.Root>
         <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
         <TooltipPrimitive.Portal>
           <TooltipPrimitive.Content
             side={side}
             align={align}
-            sideOffset={6}
+            sideOffset={8}
+            collisionPadding={12}
             className={cn(
-              'z-[60] max-w-xs animate-fade-in rounded-md border border-base-700 bg-base-850 px-2 py-1 text-xs text-ink-hi shadow-raised',
+              'z-[60] max-w-xs select-none aq-tooltip-surface aq-tooltip-in-top rounded-xl px-3 py-2 text-[12px] leading-relaxed text-ink-hi',
               className,
             )}
           >

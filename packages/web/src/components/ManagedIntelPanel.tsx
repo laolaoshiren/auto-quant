@@ -182,14 +182,16 @@ export function ManagedIntelPanel({ traderId, onSelectSymbol, fillHeight = false
                       tone={
                         t.timeStopAt && Date.parse(t.timeStopAt) <= Date.now() ? 'warn' : 'accent'
                       }
-                      title={t.timeStopAt ? `时间止损截止：${fmtBeijingTime(t.timeStopAt)}（UTC+8，要求进展 ≥ ${t.minProgressR}R）` : undefined}
+                      className={t.timeStopAt ? 'cursor-help' : undefined}
+                      data-aq-tip={t.timeStopAt ? `时间止损截止：${fmtBeijingTime(t.timeStopAt)}（UTC+8，要求进展 ≥ ${t.minProgressR}R）` : undefined}
                     >
                       时间止损 {formatRemaining(t.timeStopAt)}
                     </Badge>
                     {t.maxAdverseExcursionPct !== null && (
                       <Badge
                         tone={maeRatio !== null && maeRatio >= 75 ? 'down' : 'muted'}
-                        title={`历史最大不利偏移 ${t.worstAdversePct.toFixed(2)}% / 硬线 ${t.maxAdverseExcursionPct.toFixed(2)}%`}
+                        className="cursor-help"
+                        data-aq-tip={`历史最大不利偏移 ${t.worstAdversePct.toFixed(2)}% / 硬线 ${t.maxAdverseExcursionPct.toFixed(2)}%`}
                       >
                         MAE {t.worstAdversePct.toFixed(1)}%/{t.maxAdverseExcursionPct.toFixed(1)}%
                       </Badge>

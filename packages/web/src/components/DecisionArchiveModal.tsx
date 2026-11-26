@@ -404,8 +404,8 @@ export function DecisionArchiveModal({
                     <div className="flex shrink-0 items-center gap-2 text-[11px]">
                       {cycleCost && pricing && (
                         <span
-                          className="num rounded bg-amber-500/10 px-1.5 py-0.5 font-medium text-amber-300 [[data-skin='light']_&]:text-amber-800"
-                          title={formatCycleCostTooltip(cycleCost, pricing)}
+                          className="num cursor-help rounded bg-amber-500/10 px-1.5 py-0.5 font-medium text-amber-300 [[data-skin='light']_&]:text-amber-800"
+                          data-aq-tip={formatCycleCostTooltip(cycleCost, pricing)}
                         >
                           {pricing.free ? '免费' : fmtTokenCostUsd(cycleCost.totalCostUsd, { approx: true })}
                         </span>

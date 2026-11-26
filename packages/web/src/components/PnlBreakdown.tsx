@@ -181,10 +181,10 @@ export function PnlBreakdown({
 }) {
   return (
     <span
-      className={`num inline-flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-ink-lo${
+      className={`num inline-flex cursor-help flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-ink-lo${
         className ? ` ${className}` : ''
       }`}
-      title={pnlFormulaText(costs, digits)}
+      data-aq-tip={pnlFormulaText(costs, digits)}
       /* The visible line already spells out every term, but the identity itself
          is only in the tooltip — so it is exposed here for a screen reader. */
       aria-label={pnlFormulaText(costs, digits)}
