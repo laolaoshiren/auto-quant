@@ -93,21 +93,38 @@ function EquityTooltip({
   asset = 'USDT',
   metric = 'account',
   ink,
-}: EquityTooltipProps & { ink: ReturnType<typeof useChartInk> }) {
+  rising,
+}: EquityTooltipProps & { ink: ReturnType<typeof useChartInk>; rising: boolean }) {
   if (!active) return null;
   const point = payload?.[0]?.payload;
   if (!point) return null;
 
   const floating = point.unrealizedPnl ?? 0;
   const sinceBaseline = baseline === undefined ? undefined : point.equity - baseline;
+  const accentStroke = rising ? ink.up : ink.down;
 
   return (
     <div
-      className="pointer-events-none min-w-[13rem] rounded-md border border-base-600 px-2.5 py-1.5 shadow-overlay"
-      style={{ backgroundColor: ink.surface }}
+      className="aq-chart-tooltip-hud pointer-events-none relative min-w-[13.5rem] overflow-hidden rounded-lg border border-base-600/90 px-3 py-2 shadow-overlay backdrop-blur-md"
+      style={{
+        backgroundColor: `${ink.surface}e8`,
+        boxShadow: `0 12px 28px -10px rgba(0,0,0,0.65), 0 0 0 1px ${accentStroke}24`,
+      }}
     >
-      <div className="num mb-1 text-xs text-ink-faint">
-        {fmtDateTime(new Date(point.t).toISOString())}
+      {/* 顶部微发光指示细线 */}
+      <div
+        aria-hidden
+        className="absolute inset-x-0 top-0 h-[2px]"
+        style={{
+          background: `linear-gradient(90deg, transparent 0%, ${accentStroke} 50%, transparent 100%)`,
+        }}
+      />
+      <div className="num mb-1.5 flex items-center justify-between text-[11px] text-ink-faint">
+        <span>{fmtDateTime(new Date(point.t).toISOString())}</span>
+        <span
+          className="inline-block h-1.5 w-1.5 rounded-full"
+          style={{ backgroundColor: accentStroke, boxShadow: `0 0 8px ${accentStroke}` }}
+        />
       </div>
 
       <div className="flex items-baseline justify-between gap-3">
@@ -129,23 +146,23 @@ function EquityTooltip({
         <span className="text-xs text-ink-lo">
           {metric === 'account' ? '账户权益' : '归属权益'}
         </span>
-        <span className="num text-sm text-ink-hi">
-          {fmtNum(point.equity, 2)} {asset}
+        <span className="num text-sm font-semibold text-ink-hi">
+          {fmtNum(point.equity, 2)} <span className="text-[11px] font-normal text-ink-lo">{asset}</span>
         </span>
       </div>
 
       {/* 相对**初始权益**：这个账户从开头到现在赚了多少（图上那条虚线）。 */}
       {sinceBaseline !== undefined && (
-        <div className="mt-0.5 flex items-baseline justify-between gap-3 border-t border-base-750 pt-0.5">
+        <div className="mt-1 flex items-baseline justify-between gap-3 border-t border-base-750/80 pt-1">
           <span className="text-xs text-ink-lo">相对初始</span>
-          <span className={`num text-sm ${deltaTone(sinceBaseline)}`}>
+          <span className={`num text-xs font-semibold ${deltaTone(sinceBaseline)}`}>
             {deltaText(sinceBaseline, baseline)}
           </span>
         </div>
       )}
 
       {point.unrealizedPnl !== undefined && (
-        <div className="flex items-baseline justify-between gap-3">
+        <div className="mt-0.5 flex items-baseline justify-between gap-3">
           <span className="text-xs text-ink-lo">其中浮动盈亏</span>
           {/* Sign always present: colour alone is not a signal every operator can read. */}
           <span className={`num text-xs ${deltaTone(floating)}`}>
@@ -154,7 +171,7 @@ function EquityTooltip({
         </div>
       )}
 
-      <div className="flex items-baseline justify-between gap-3">
+      <div className="mt-0.5 flex items-baseline justify-between gap-3">
         <span className="text-xs text-ink-lo">持仓</span>
         <span className="num text-xs text-ink-mid">{fmtInt(point.openPositions ?? 0)}</span>
       </div>
@@ -163,21 +180,32 @@ function EquityTooltip({
 }
 
 /**
- * The hover cursor.
- *
- * Recharts' default is a wide translucent grey band; over a dark chart that
- * reads as a smudge across the curve rather than as a pointer at one snapshot.
+ * The hover cursor: glowing vertical laser crosshair.
  */
 function EquityCursor({
   points,
-  ink,
+  stroke,
 }: {
   points?: Array<{ x?: number; y?: number }>;
-  ink: ReturnType<typeof useChartInk>;
+  stroke: string;
 }) {
   const x = points?.[0]?.x;
   if (typeof x !== 'number') return null;
-  return <line x1={x} x2={x} y1={0} y2="100%" stroke={ink.rule} strokeWidth={1} />;
+  return (
+    <g>
+      <line x1={x} x2={x} y1={0} y2="100%" stroke={stroke} strokeWidth={5} strokeOpacity={0.12} />
+      <line
+        x1={x}
+        x2={x}
+        y1={0}
+        y2="100%"
+        stroke={stroke}
+        strokeWidth={1.2}
+        strokeOpacity={0.75}
+        strokeDasharray="3 3"
+      />
+    </g>
+  );
 }
 
 /*
@@ -314,88 +342,205 @@ export function DashboardEquityChart({
     ? (value: number) => fmtTime(new Date(value).toISOString())
     : (value: number) => new Date(value).toLocaleDateString('en-CA', { month: '2-digit', day: '2-digit' });
   const ticks = axisTicks(points, hourlyAxis ? '1D' : range);
+  const lastIndex = points.length - 1;
+  // 真实峰值标注点：仅当区间内确有波动且峰值不是首尾端点时，在最高点上方打一个轻盈的菱形峰标。
+  let peakIndex = -1;
+  if (!insufficient && max - min > 0.02) {
+    for (let i = 1; i < lastIndex; i += 1) {
+      if (points[i]!.equity === max) {
+        peakIndex = i;
+        break;
+      }
+    }
+  }
 
   return (
-    <div className="relative">
-      <ResponsiveContainer width="100%" height={height}>
-      {/* No left margin and no axis title: the tick labels already carry the
-          magnitude, and a title would cost the curve real width. */}
-      <AreaChart data={points} margin={{ top: 8, right: 10, left: 0, bottom: 0 }}>
-        <defs>
-          <linearGradient id="dashboardEquityFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={stroke} stopOpacity={0.3} />
-            <stop offset="100%" stopColor={stroke} stopOpacity={0.02} />
-          </linearGradient>
-        </defs>
-        {/* Horizontal only: vertical lines land on the time labels and turn a
-            dense window into a barcode. */}
-        <CartesianGrid stroke={ink.grid} strokeDasharray="3 3" vertical={false} />
-        <XAxis
-          dataKey="t"
-          type="number"
-          domain={['dataMin', 'dataMax']}
-          /*
-           * 刻度由 `axisTicks` 钉在真实的整点/日界上，而不是让 Recharts 按数值
-           * 均匀摊 —— 理由见那个函数的注释（"查看历史时显示不正确"）。
-           * 它可能返回空数组（跨度不足一个整点），那时交回默认行为。
-           */
-          {...(ticks.length > 0 ? { ticks } : {})}
-          tickFormatter={axisTick}
-          tick={{ fill: ink.axis, fontSize: 11 }}
-          tickLine={false}
-          axisLine={{ stroke: ink.grid }}
-          minTickGap={44}
-          tickMargin={6}
-        />
-        <YAxis
-          domain={domain}
-          tickFormatter={equityAxisFormatter}
-          tick={{ fill: ink.axis, fontSize: 11 }}
-          tickLine={false}
-          axisLine={false}
-          width={62}
-          tickMargin={4}
-          tickCount={5}
-        />
-        <Tooltip
-          /*
-           * ⚠️ `baseline` 必须传进去，否则提示框只能给出一个孤零零的绝对权益，
-           * 回答不了"我在这一刻是赚还是亏"。它就是图上那条「初始」虚线。
-           */
-          content={<EquityTooltip baseline={baseline} asset={unit} metric={metric} ink={ink} />}
-          cursor={<EquityCursor ink={ink} />}
-          shared={false}
-          isAnimationActive={false}
-          wrapperStyle={{ outline: 'none' }}
-        />
-        <ReferenceLine
-          y={referenceValue}
-          stroke={ink.rule}
-          strokeDasharray="4 4"
-          label={{ value: '初始', fill: ink.axis, fontSize: 10, position: 'insideTopRight' }}
-          ifOverflow="extendDomain"
-        />
-        <Area
-          type="monotone"
-          dataKey="equity"
-          stroke={stroke}
-          strokeWidth={1.8}
-          fill="url(#dashboardEquityFill)"
-          dot={false}
-          /* Off on purpose: the page polls, and a curve that re-draws itself from
-             scratch every few seconds flickers in peripheral vision — which is
-             exactly where a trading terminal lives. */
-          isAnimationActive={false}
-          activeDot={{ r: 3, fill: stroke, stroke: ink.surface, strokeWidth: 2 }}
-        />
-      </AreaChart>
-      </ResponsiveContainer>
+    <div
+      className={`aq-chart-stage relative h-full ${rising ? 'aq-chart-stage-up' : 'aq-chart-stage-down'}`}
+    >
+      {/* 顶部柔和极光微线 */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 z-10 h-px"
+        style={{
+          background: `linear-gradient(90deg, transparent 5%, ${stroke}88 50%, transparent 95%)`,
+        }}
+      />
+      {/* 极低存在感的水平光幕巡检扫光 */}
+      <div aria-hidden className="aq-chart-scan-beam z-0" />
+
+      {/* 切换时间范围（1D/7D/1M/3M/全部）时平滑从左到右展开，后台轮询不触发闪烁 */}
+      <div key={range} className="aq-chart-reveal relative z-[1] h-full w-full">
+        <ResponsiveContainer width="100%" height={height}>
+          {/* No left margin and no axis title: the tick labels already carry the
+              magnitude, and a title would cost the curve real width. */}
+          <AreaChart data={points} margin={{ top: 14, right: 14, left: 0, bottom: 2 }}>
+            <defs>
+              {/* 曲线外发光滤镜 */}
+              <filter id="dashboardEquityGlow" x="-10%" y="-30%" width="120%" height="160%">
+                <feGaussianBlur stdDeviation="3.2" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+              {/* 三段通透面积渐变 */}
+              <linearGradient id="dashboardEquityFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={stroke} stopOpacity={0.36} />
+                <stop offset="52%" stopColor={stroke} stopOpacity={0.12} />
+                <stop offset="100%" stopColor={stroke} stopOpacity={0.01} />
+              </linearGradient>
+              {/* 沿曲线匀速流淌的高光能量束（纯 SVG SMIL，不触发 React 重渲染） */}
+              <linearGradient id="dashboardEquityComet" x1="-35%" y1="0%" x2="0%" y2="0%">
+                <stop offset="0%" stopColor={stroke} stopOpacity={0} />
+                <stop offset="50%" stopColor="#ffffff" stopOpacity={0.9} />
+                <stop offset="75%" stopColor={stroke} stopOpacity={0.95} />
+                <stop offset="100%" stopColor={stroke} stopOpacity={0} />
+                <animate attributeName="x1" from="-35%" to="115%" dur="4.8s" repeatCount="indefinite" />
+                <animate attributeName="x2" from="0%" to="150%" dur="4.8s" repeatCount="indefinite" />
+              </linearGradient>
+            </defs>
+            {/* Horizontal only: vertical lines land on the time labels and turn a
+                dense window into a barcode. */}
+            <CartesianGrid stroke={ink.grid} strokeOpacity={0.7} strokeDasharray="3 4" vertical={false} />
+            <XAxis
+              dataKey="t"
+              type="number"
+              domain={['dataMin', 'dataMax']}
+              /*
+               * 刻度由 `axisTicks` 钉在真实的整点/日界上，而不是让 Recharts 按数值
+               * 均匀摊 —— 理由见那个函数的注释（"查看历史时显示不正确"）。
+               * 它可能返回空数组（跨度不足一个整点），那时交回默认行为。
+               */
+              {...(ticks.length > 0 ? { ticks } : {})}
+              tickFormatter={axisTick}
+              tick={{ fill: ink.axis, fontSize: 11 }}
+              tickLine={false}
+              axisLine={{ stroke: ink.grid }}
+              minTickGap={44}
+              tickMargin={6}
+            />
+            <YAxis
+              domain={domain}
+              tickFormatter={equityAxisFormatter}
+              tick={{ fill: ink.axis, fontSize: 11 }}
+              tickLine={false}
+              axisLine={false}
+              width={62}
+              tickMargin={4}
+              tickCount={5}
+            />
+            <Tooltip
+              /*
+               * ⚠️ `baseline` 必须传进去，否则提示框只能给出一个孤零零的绝对权益，
+               * 回答不了"我在这一刻是赚还是亏"。它就是图上那条「初始」虚线。
+               */
+              content={<EquityTooltip baseline={baseline} asset={unit} metric={metric} ink={ink} rising={rising} />}
+              cursor={<EquityCursor stroke={stroke} />}
+              shared={false}
+              isAnimationActive={false}
+              wrapperStyle={{ outline: 'none', zIndex: 20 }}
+            />
+            <ReferenceLine
+              y={referenceValue}
+              stroke={ink.rule}
+              strokeDasharray="4 4"
+              strokeOpacity={0.85}
+              label={{ value: '初始', fill: ink.axis, fontSize: 10, position: 'insideTopRight' }}
+              ifOverflow="extendDomain"
+            />
+            {/* 主面积 + 发光权益曲线 + 实时末端雷达脉搏点 / 真实峰值菱形标 */}
+            <Area
+              type="monotone"
+              dataKey="equity"
+              stroke={stroke}
+              strokeWidth={2.2}
+              fill="url(#dashboardEquityFill)"
+              style={{ filter: 'url(#dashboardEquityGlow)' }}
+              isAnimationActive={false}
+              dot={(dotProps) => {
+                const { cx, cy, index } = dotProps as { cx?: number; cy?: number; index?: number };
+                if (typeof cx !== 'number' || typeof cy !== 'number' || typeof index !== 'number') {
+                  return <g key={`empty-${index ?? 'x'}`} />;
+                }
+                if (index === lastIndex) {
+                  return (
+                    <g key="live-tip">
+                      <circle
+                        cx={cx}
+                        cy={cy}
+                        r={4.5}
+                        fill="none"
+                        stroke={stroke}
+                        strokeWidth={1.6}
+                        className="aq-chart-sonar-ring"
+                      />
+                      <circle
+                        cx={cx}
+                        cy={cy}
+                        r={4.5}
+                        fill="none"
+                        stroke={stroke}
+                        strokeWidth={1.2}
+                        className="aq-chart-sonar-ring-delay"
+                      />
+                      <circle cx={cx} cy={cy} r={6.5} fill={stroke} fillOpacity={0.22} />
+                      <circle cx={cx} cy={cy} r={3.4} fill={stroke} stroke={ink.surface} strokeWidth={1.5} />
+                      <circle cx={cx} cy={cy} r={1.3} fill="#ffffff" fillOpacity={0.95} />
+                    </g>
+                  );
+                }
+                if (index === peakIndex) {
+                  return (
+                    <g key="peak-marker">
+                      <circle cx={cx} cy={cy} r={4.5} fill={ink.up} fillOpacity={0.2} />
+                      <circle cx={cx} cy={cy} r={2.3} fill={ink.up} stroke={ink.surface} strokeWidth={1.2} />
+                      <text
+                        x={cx}
+                        y={Math.max(11, cy - 8)}
+                        textAnchor="middle"
+                        fill={ink.up}
+                        fontSize={10}
+                        fontWeight={600}
+                        className="num"
+                      >
+                        峰 {fmtNum(max, 2)}
+                      </text>
+                    </g>
+                  );
+                }
+                return <g key={`d-${index}`} />;
+              }}
+              activeDot={{
+                r: 5,
+                fill: stroke,
+                stroke: '#ffffff',
+                strokeWidth: 2,
+                style: { filter: `drop-shadow(0 0 6px ${stroke})` },
+              }}
+            />
+            {/* 叠加流光能量束层：不拦截悬停事件，只负责沿真实曲线匀速流淌微光 */}
+            <Area
+              type="monotone"
+              dataKey="equity"
+              stroke="url(#dashboardEquityComet)"
+              strokeWidth={2.6}
+              fill="none"
+              dot={false}
+              activeDot={false}
+              isAnimationActive={false}
+              tooltipType="none"
+              style={{ pointerEvents: 'none' }}
+            />
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
       {/*
         数据不足时图表照样画出（一条水平参考线 + 坐标轴），这行小字只是说明
         "为什么现在是平的"，不占布局高度。
       */}
       {insufficient && (
-        <p className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-ink-faint">
+        <p className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-xs text-ink-faint">
           暂无足够快照，两个周期后会出现曲线
         </p>
       )}

@@ -2240,7 +2240,7 @@ export function TraderPage() {
           bodyClassName={curveCollapsed && chartTab === 'equity' ? 'p-0' : 'flex min-h-0 flex-1 flex-col p-0'}
           className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[168px] flex-1 flex-col'}
           title={
-            <span className="flex items-center gap-1">
+            <span className="inline-flex items-center gap-0.5 rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
               <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
                 {/* ⚠️ 标签必须与**实际画的口径**一致（2026-10-15 改成按模式选）。
                     实盘 → 账户权益（共享钱包真实权益，与「账户余额」指标卡同一个数）；
@@ -2254,28 +2254,30 @@ export function TraderPage() {
           }
           actions={
             chartTab === 'equity' ? (
-              <span className="flex flex-wrap items-center gap-1">
-                {EQUITY_RANGES.map((item) => (
-                  /*
-                    ⚠️ **统一用 `Button`（primary/ghost）**，不再手写一套
-                    `border-accent/60 bg-accent/15` 的按钮 —— 总览页的区间选择、
-                    这里的区间选择、下面的 K 线周期原来是三套不同的选中样式，
-                    同一类控件在三个地方长得不一样（"拼凑感"就是这么来的）。
-                  */
-                  <Button
-                    key={item.id}
-                    size="sm"
-                    variant={range === item.id ? 'primary' : 'ghost'}
-                    aria-pressed={range === item.id}
-                    onClick={() => {
-                      setRange(item.id);
-                      // 换区间就重新按数据判断收起与否，别把上一段的展开状态带过来。
-                      setChartOverride(null);
-                    }}
-                  >
-                    {item.label}
-                  </Button>
-                ))}
+              <span className="flex flex-wrap items-center gap-1.5">
+                <span className="inline-flex items-center gap-0.5 rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
+                  {EQUITY_RANGES.map((item) => (
+                    /*
+                      ⚠️ **统一用 `Button`（primary/ghost）**，不再手写一套
+                      `border-accent/60 bg-accent/15` 的按钮 —— 总览页的区间选择、
+                      这里的区间选择、下面的 K 线周期原来是三套不同的选中样式，
+                      同一类控件在三个地方长得不一样（"拼凑感"就是这么来的）。
+                    */
+                    <Button
+                      key={item.id}
+                      size="sm"
+                      variant={range === item.id ? 'primary' : 'ghost'}
+                      aria-pressed={range === item.id}
+                      onClick={() => {
+                        setRange(item.id);
+                        // 换区间就重新按数据判断收起与否，别把上一段的展开状态带过来。
+                        setChartOverride(null);
+                      }}
+                    >
+                      {item.label}
+                    </Button>
+                  ))}
+                </span>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -2287,7 +2289,8 @@ export function TraderPage() {
                 </Button>
               </span>
             ) : (
-              <span className="text-xs text-ink-faint">
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-base-750/70 bg-base-900/60 px-2 py-0.5 text-xs text-ink-lo">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent" />
                 {pickedSymbol ? `已选标的 · ${pickedSymbol}` : '最近持仓标的'}
               </span>
             )
@@ -2326,13 +2329,46 @@ export function TraderPage() {
                 onExpand={() => setChartOverride(false)}
               />
             ) : (
-              <div className="flex min-h-0 flex-1 flex-col px-3 pb-2 pt-2">
-                <EquityWindowLine
-                  equity={windowLast}
-                  delta={windowDelta}
-                  percent={windowPercent}
-                  asset={settleAsset}
-                />
+              <div className="flex min-h-0 flex-1 flex-col px-3 pb-2.5 pt-2">
+                {(() => {
+                  const series = windowed.map((snapshot) =>
+                    curveMetric === 'attributed'
+                      ? snapshot.equity
+                      : snapshot.accountEquity > 0
+                        ? snapshot.accountEquity
+                        : snapshot.equity,
+                  );
+                  if (Number.isFinite(windowLast) && windowLast > 0) series.push(windowLast);
+                  let high: number | undefined;
+                  let low: number | undefined;
+                  let maxDrawdownPct: number | undefined;
+                  if (series.length >= 2) {
+                    high = Math.max(...series);
+                    low = Math.min(...series);
+                    let peak = series[0]!;
+                    let maxDd = 0;
+                    for (const v of series) {
+                      if (v > peak) peak = v;
+                      if (peak > 0) {
+                        const dd = ((peak - v) / peak) * 100;
+                        if (dd > maxDd) maxDd = dd;
+                      }
+                    }
+                    maxDrawdownPct = maxDd;
+                  }
+                  return (
+                    <EquityWindowLine
+                      equity={windowLast}
+                      delta={windowDelta}
+                      percent={windowPercent}
+                      asset={settleAsset}
+                      high={high}
+                      low={low}
+                      maxDrawdownPct={maxDrawdownPct}
+                      running={running}
+                    />
+                  );
+                })()}
                 <div
                   ref={setEquityHostEl}
                   className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[88px]"
@@ -2729,24 +2765,96 @@ function EquityWindowLine({
   delta,
   percent,
   asset,
+  high,
+  low,
+  maxDrawdownPct,
+  running,
 }: {
   equity: number;
   delta: number;
   percent: number;
   asset: string;
+  high?: number;
+  low?: number;
+  maxDrawdownPct?: number;
+  running?: boolean;
 }) {
+  const positive = delta > 5e-9;
+  const negative = delta < -5e-9;
+  const pctBadgeCls = positive
+    ? 'border-up/35 bg-up/12 text-up'
+    : negative
+      ? 'border-down/35 bg-down/12 text-down'
+      : 'border-base-700 bg-base-850 text-ink-mid';
+
   return (
-    <div className="mb-2 flex shrink-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
+    <div className="mb-2 flex shrink-0 flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
       <span
         className="text-ink-lo"
         title="相对可见区间第一个快照的变化。与上方「账户余额」同一口径（共享钱包的真实权益）。"
       >
         本段变化
       </span>
-      <span className={cn('num text-base font-semibold', pnlColor(delta))}>
+      <span
+        className={cn(
+          'num text-base font-semibold tracking-tight',
+          pnlColor(delta),
+          positive && 'drop-shadow-[0_0_8px_rgb(var(--aq-up-rgb)/0.35)]',
+          negative && 'drop-shadow-[0_0_8px_rgb(var(--aq-down-rgb)/0.35)]',
+        )}
+      >
         {fmtUsdSigned(delta, 2)} {asset}
       </span>
-      <span className={cn('num', pnlColor(delta))}>({fmtPercent(percent)})</span>
+      <span className={cn('num rounded-md border px-1.5 py-0.5 text-[11px] font-semibold leading-none', pctBadgeCls)}>
+        {fmtPercent(percent)}
+      </span>
+
+      {(high !== undefined || low !== undefined || maxDrawdownPct !== undefined) && (
+        <span className="ml-auto flex flex-wrap items-center gap-1.5 text-[11px]">
+          {high !== undefined && (
+            <span
+              className="inline-flex items-baseline gap-1 rounded border border-up/25 bg-up/8 px-1.5 py-0.5"
+              title="当前所选区间内的最高权益"
+            >
+              <span className="text-up/75">峰值</span>
+              <strong className="num font-semibold text-up">{fmtNum(high, 2)}</strong>
+            </span>
+          )}
+          {low !== undefined && (
+            <span
+              className="inline-flex items-baseline gap-1 rounded border border-down/25 bg-down/8 px-1.5 py-0.5"
+              title="当前所选区间内的最低权益"
+            >
+              <span className="text-down/75">最低</span>
+              <strong className="num font-semibold text-down">{fmtNum(low, 2)}</strong>
+            </span>
+          )}
+          {maxDrawdownPct !== undefined && maxDrawdownPct > 0.005 && (
+            <span
+              className="inline-flex items-baseline gap-1 rounded border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 [[data-skin='light']_&]:border-amber-700/30"
+              title="当前区间从阶段高点到后续低点的最大回撤幅度"
+            >
+              <span className="text-amber-300/80 [[data-skin='light']_&]:text-amber-800/80">回撤</span>
+              <strong className="num font-semibold text-amber-300 [[data-skin='light']_&]:text-amber-800">
+                -{fmtNum(maxDrawdownPct, 2)}%
+              </strong>
+            </span>
+          )}
+          {running && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full border border-up/35 bg-up/10 px-2 py-0.5 text-[10px] font-medium text-up"
+              title="机器人运行中，曲线实时同步最新账户权益"
+            >
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-up opacity-75" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-up" />
+              </span>
+              实时
+            </span>
+          )}
+        </span>
+      )}
+
       {/* `equity` 只用来兜底没有快照时的比较基准，与图表内部口径一致；
           它是给屏幕阅读器的，不占视觉位置。 */}
       <span className="sr-only">当前账户权益 {fmtNum(equity, 2)}</span>
@@ -2807,14 +2915,40 @@ function CandlesPanel({
   }
 
   const candles = query.data ?? [];
+  const first = candles[0];
   const last = candles[candles.length - 1];
+  const barChangePct =
+    first && last && first.open > 0 ? ((last.close - first.open) / first.open) * 100 : null;
+  const barRising = (barChangePct ?? 0) >= 0;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col p-3">
-      <div className="mb-3 flex shrink-0 flex-wrap items-center gap-2">
-        <span className="text-base font-semibold text-ink-hi">{symbol}</span>
-        {last && <span className="num text-base text-ink-mid">{fmtPriceUsd(last.close)}</span>}
-        <span className="ml-auto flex flex-wrap items-center gap-1">
+      <div className="mb-2.5 flex shrink-0 flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1.5 text-base font-semibold text-ink-hi">
+          <span className="relative flex h-2 w-2">
+            <span
+              className={cn(
+                'absolute inline-flex h-full w-full animate-ping rounded-full opacity-75',
+                barRising ? 'bg-up' : 'bg-down',
+              )}
+            />
+            <span className={cn('relative inline-flex h-2 w-2 rounded-full', barRising ? 'bg-up' : 'bg-down')} />
+          </span>
+          {symbol}
+        </span>
+        {last && <span className="num text-base font-semibold text-ink-hi">{fmtPriceUsd(last.close)}</span>}
+        {barChangePct !== null && (
+          <span
+            className={cn(
+              'num rounded-md border px-1.5 py-0.5 text-[11px] font-semibold leading-none',
+              barRising ? 'border-up/35 bg-up/12 text-up' : 'border-down/35 bg-down/12 text-down',
+            )}
+            title="当前窗口内首尾 K 线涨跌幅"
+          >
+            {fmtPercent(barChangePct)}
+          </span>
+        )}
+        <span className="ml-auto inline-flex flex-wrap items-center gap-0.5 rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
           {['5m', '15m', '1h', '4h'].map((value) => (
             <Button
               key={value}
@@ -2837,7 +2971,12 @@ function CandlesPanel({
       ) : candles.length === 0 ? (
         <Empty message="该交易对没有返回K线。" />
       ) : (
-        <div className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[112px]">
+        <div
+          className={cn(
+            'aq-chart-stage relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[112px]',
+            barRising ? 'aq-chart-stage-up' : 'aq-chart-stage-down',
+          )}
+        >
           <div className="absolute inset-0">
             <CandlestickChart candles={candles} fill />
           </div>
