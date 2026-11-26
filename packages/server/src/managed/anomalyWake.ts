@@ -14,6 +14,7 @@ import type { Kline, StrategyConfig } from '@aq/shared';
 
 import { createLogger } from '../logger.js';
 import { atr, last } from '../market/indicators.js';
+import type { MarketPort } from '../market/port.js';
 import type { MarketDataService } from '../market/service.js';
 import {
   AI500_DEFAULTS,
@@ -88,6 +89,8 @@ export interface ManagedAnomalyScanGateInput {
 export interface ManagedAnomalyScanInput {
   config: StrategyConfig;
   marketData: MarketDataService;
+  /** 可选：用于对进入候补 Top 6 的高分标的补拉 1 次真实 OI 变化，消除缺 OI 双向畸变（漏真起爆 + 误唤醒空心背离盘）。 */
+  market?: MarketPort;
   heldSymbols: readonly string[];
   pendingSymbols: readonly string[];
   cooldownUntilBySymbol: ReadonlyMap<string, number>;
@@ -353,6 +356,12 @@ export async function scanManagedAnomaly(
       : computeReturnPct(btcEntry.klines4h, 1)
     : null;
 
+  const scoreOpts = {
+    strongThreshold: input.calibration?.strongThreshold,
+    watchThreshold: input.calibration?.watchThreshold,
+    weights: input.calibration?.weights,
+  };
+
   const candidates: Ai500Candidate[] = [];
   for (const [sym, item] of fetched) {
     candidates.push(
@@ -371,13 +380,74 @@ export async function scanManagedAnomaly(
           btcReturn1hPct,
           btcReturn4hPct,
         },
-        {
-          strongThreshold: input.calibration?.strongThreshold,
-          watchThreshold: input.calibration?.watchThreshold,
-          weights: input.calibration?.weights,
-        },
+        scoreOpts,
       ),
     );
+  }
+
+  /*
+   * BUG-9 修复：对初筛分数可能触发异动唤醒的 Top 6 候补标的补拉 1 次真实 OI 历史，
+   * 用真实 oiChange1hPct / oiChange4hPct 重算分数，同时消除：
+   *  1) 真增仓起爆被中性 7.5/15 少算 4.5~7.5 分导致漏唤醒；
+   *  2) OI 背离空心波动被中性 7.5/15 虚高 +3~5 分导致误唤醒。
+   */
+  if (typeof input.market?.openInterestHist === 'function') {
+    const strongThr = input.calibration?.strongThreshold ?? AI500_DEFAULTS.strongThreshold;
+    const provisionalFloor = Math.max(66, strongThr - 10);
+    const topNeedsOi = [...candidates]
+      .filter((c) => c.symbol !== 'BTCUSDT' && c.score >= provisionalFloor)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+
+    if (topNeedsOi.length > 0) {
+      const oiBySym = new Map<string, { ch1h: number | null; ch4h: number | null }>();
+      await mapConcurrent(topNeedsOi, ANOMALY_CONCURRENCY, async (c) => {
+        try {
+          const hist = await input.market!.openInterestHist(c.symbol, '1h', 6).catch(() => []);
+          const vals = hist
+            .map((h) => Number(h.sumOpenInterest))
+            .filter((v) => Number.isFinite(v) && v > 0);
+          let ch1h: number | null = null;
+          let ch4h: number | null = null;
+          if (vals.length >= 2) {
+            const latest = vals[vals.length - 1]!;
+            const prev1 = vals[vals.length - 2]!;
+            ch1h = ((latest - prev1) / prev1) * 100;
+            if (vals.length >= 5) {
+              const prev4 = vals[vals.length - 5]!;
+              ch4h = ((latest - prev4) / prev4) * 100;
+            }
+          }
+          oiBySym.set(c.symbol, { ch1h, ch4h });
+        } catch {
+          /* OI 拉取失败回退原初筛分 */
+        }
+      });
+
+      for (let i = 0; i < candidates.length; i++) {
+        const cur = candidates[i]!;
+        const oi = oiBySym.get(cur.symbol);
+        const item = fetched.get(cur.symbol);
+        if (!oi || !item || (oi.ch1h === null && oi.ch4h === null)) continue;
+        candidates[i] = scoreAi500Symbol(
+          {
+            symbol: cur.symbol,
+            price: item.row.price,
+            quoteVolume24h: item.row.quoteVolume24h,
+            changePercent24h: item.row.changePercent24h,
+            fundingRate: item.row.fundingRate,
+            klines15m: item.klines15m,
+            klines4h: item.klines4h,
+            openInterestUsd: item.row.openInterestUsd ?? null,
+            oiChange1hPct: oi.ch1h,
+            oiChange4hPct: oi.ch4h,
+            btcReturn1hPct,
+            btcReturn4hPct,
+          },
+          scoreOpts,
+        );
+      }
+    }
   }
 
   return evaluateAnomalyCandidates({

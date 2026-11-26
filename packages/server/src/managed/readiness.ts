@@ -341,8 +341,10 @@ export function evaluateTraderManagedReadiness(
     };
   });
 
-  const tradeRows = db.all<TradeWindowRow>(
-    `SELECT net_pnl, pnl, fee, entry_fee, funding_fee, close_reason
+  const tradeRows = db.all<
+    TradeWindowRow & { symbol?: string | null; opened_at?: string | null }
+  >(
+    `SELECT symbol, opened_at, net_pnl, pnl, fee, entry_fee, funding_fee, close_reason
      FROM trades
      WHERE trader_id = ? AND closed_at >= ?
      ORDER BY id DESC
@@ -351,12 +353,43 @@ export function evaluateTraderManagedReadiness(
     sinceIso,
   );
 
-  const trades = tradeRows.map((t) => ({
-    netPnl: t.net_pnl ?? t.pnl ?? 0,
-    fee: (t.fee ?? 0) + (t.entry_fee ?? 0),
-    fundingFee: t.funding_fee ?? 0,
-    closeReason: t.close_reason,
-  }));
+  /*
+   * BUG-4 修复：
+   *   1. `trades.fee` 落库时已等于 `entryFee + exitFee`（见 repositories.ts），绝不再累加 `entry_fee`；
+   *   2. 按独立持仓回合（`symbol::opened_at`）聚合分批减仓拆分行，避免把 19 笔独立回合拆成 31 行虚抬胜率、压低盈亏比。
+   */
+  const grouped = new Map<
+    string,
+    { netPnl: number; fee: number; fundingFee: number; closeReason: string | null }
+  >();
+  tradeRows.forEach((t, idx) => {
+    const key =
+      t.symbol && t.opened_at ? `${t.symbol}::${t.opened_at}` : `row::${idx}`;
+    const netPnl = t.net_pnl ?? t.pnl ?? 0;
+    const fee = t.fee ?? 0;
+    const fundingFee = t.funding_fee ?? 0;
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, {
+        netPnl,
+        fee,
+        fundingFee,
+        closeReason: t.close_reason,
+      });
+    } else {
+      existing.netPnl += netPnl;
+      existing.fee += fee;
+      existing.fundingFee += fundingFee;
+      if (
+        (!existing.closeReason || existing.closeReason === 'manual_partial') &&
+        t.close_reason &&
+        t.close_reason !== 'manual_partial'
+      ) {
+        existing.closeReason = t.close_reason;
+      }
+    }
+  });
+  const trades = [...grouped.values()];
 
   const openPositions = db.all<OpenPosRow>(
     `SELECT stop_loss, stop_order_id FROM positions WHERE trader_id = ? AND status = 'open'`,

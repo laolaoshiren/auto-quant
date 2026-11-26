@@ -10,6 +10,7 @@ import {
   isOpenAction,
   normalizeSymbol,
   exchangeErrorCode,
+  StrategyConfigSchema,
   type CloseReason,
   type CircuitBreakerReading,
   type Decision,
@@ -1072,6 +1073,10 @@ export class AutoTrader {
       takerBuyRatio1h: number;
     }
   >();
+  /** 智能托管 2.0：按标的缓存最新 15m ATR%（供 30s 守卫计算 max(2.0×ATR15m, 2.5%) 自适应追踪距）。 */
+  private lastAtr15mBySymbol = new Map<string, number>();
+  /** AQ-2020：手动平仓中的标的集合，用于与决策周期互斥防并发竞态。 */
+  private manualCloseInFlight = new Set<string>();
   /** M3.4：三段式 `finalize` 附带的新开仓初始论点暂存，成交后即时绑定 `managed_theses`。 */
   private pendingThesisPlans = new Map<string, PendingThesisPlan>();
   /**
@@ -1405,18 +1410,34 @@ export class AutoTrader {
    *
    * `deps.agent` 不存在时这里**什么都不做** —— 老机器人的行为不受任何影响。
    */
+  /**
+   * BUG-1/BUG-2 修复：`ai_managed` 直接独立读取数据库 `agent_config_json` 并钳制三档硬上限，
+   * 不再经由旧 1.0 `AgentRuntime.configOverride()`（避免被旧 1.0 隔离开关误伤或启动竞态回退）。
+   */
+  private syncManagedConfigFromDb(): void {
+    if (this.deps.trader.mode !== 'ai_managed') return;
+    try {
+      const raw = traderStore.get(this.deps.trader.id)?.agentConfigJson;
+      if (typeof raw === 'string' && raw.length > 0) {
+        const parsed = StrategyConfigSchema.safeParse(JSON.parse(raw));
+        if (parsed.success) {
+          this.activeConfig = clampAiManagedHardLimits(parsed.data);
+        }
+      }
+    } catch {
+      /* 损坏 JSON 时保持当前 activeConfig，不阻断启动/周期 */
+    }
+  }
+
   private refreshAgentState(): void {
+    if (this.deps.trader.mode === 'ai_managed') {
+      this.syncManagedConfigFromDb();
+      return;
+    }
     const agent = this.deps.agent;
     if (!agent) return;
     const override = agent.configOverride();
     if (override) this.activeConfig = override;
-    /*
-     * 实盘优化（2026-11-25 5.5h 观察）：智能托管 2.0 已有独立三段式决策、持仓论点、反例衰减笔记与
-     * M4.2 雷达归因校准，且风控上限已按三档风险护栏锁定；v1 策略自审（7-11 步并发调用）在每笔减仓后
-     * 重复唤醒会抢占网关带宽导致主决策延迟飙升至 3-5 分钟并浪费 ~40 万 token/次。
-     * 因此 `ai_managed` 下不再自动周期唤醒 v1 策略审视（手动点击「让 AI 审视」仍可按需触发）。
-     */
-    if (this.deps.trader.mode === 'ai_managed') return;
     // 不 await：审视可能跑几十秒，不能把 3 分钟的周期撑长。
     agent.triggerReview();
   }
@@ -1451,6 +1472,10 @@ export class AutoTrader {
     if (this.running) return;
     this.running = true;
     this.setStatus('starting', null);
+
+    // BUG-1 修复：在启动 30s 保护守卫之前立即同步一次持久化配置，彻底消除重启窗口期回退默认配置的风险。
+    this.syncManagedConfigFromDb();
+    this.loadPersistedAnomalyCooldowns();
 
     const mode = await this.deps.broker.ensureOneWayMode().catch((error) => ({
       changed: false,
@@ -1843,12 +1868,46 @@ export class AutoTrader {
     this.emit('info', `异动雷达监控已启动（每 ${seconds} 秒纯数学轻量扫描，重大行情提前唤醒）。`);
   }
 
+  private anomalyCooldownKey(): string {
+    return `managed:anomaly_cooldown:${this.deps.trader.id}`;
+  }
+
+  /** BUG-9 修复：从 settings 恢复未过期的标的异动冷却表，避免部署重启后短时间内重复唤醒同一标的。 */
+  private loadPersistedAnomalyCooldowns(): void {
+    try {
+      const raw = settings.get(this.anomalyCooldownKey());
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, number>;
+      const now = Date.now();
+      for (const [sym, until] of Object.entries(parsed)) {
+        if (typeof until === 'number' && Number.isFinite(until) && until > now) {
+          this.anomalyCooldownBySymbol.set(sym, until);
+        }
+      }
+    } catch {
+      /* 冷却表损坏时忽略 */
+    }
+  }
+
+  private persistAnomalyCooldowns(): void {
+    try {
+      const now = Date.now();
+      const active: Record<string, number> = {};
+      for (const [sym, until] of this.anomalyCooldownBySymbol) {
+        if (until > now) active[sym] = until;
+      }
+      settings.set(this.anomalyCooldownKey(), JSON.stringify(active));
+    } catch {
+      /* 持久化失败不阻断交易 */
+    }
+  }
+
   private stopAnomalyWatch(): void {
     if (this.anomalyWatchTimer !== null) {
       clearInterval(this.anomalyWatchTimer);
       this.anomalyWatchTimer = null;
     }
-    this.anomalyCooldownBySymbol.clear();
+    this.persistAnomalyCooldowns();
   }
 
   private async runAnomalyScanTick(): Promise<void> {
@@ -1900,6 +1959,7 @@ export class AutoTrader {
       const trigger = await scanManagedAnomaly({
         config: this.effectiveConfig(),
         marketData: this.deps.marketData,
+        market: this.deps.market,
         heldSymbols,
         pendingSymbols,
         cooldownUntilBySymbol: this.anomalyCooldownBySymbol,
@@ -1923,6 +1983,7 @@ export class AutoTrader {
     }
     this.lastAnomalyWakeAtMs = now;
     this.anomalyCooldownBySymbol.set(trigger.symbol, now + ANOMALY_SYMBOL_COOLDOWN_MS);
+    this.persistAnomalyCooldowns();
 
     if (this.timer) {
       clearTimeout(this.timer);
@@ -2813,6 +2874,12 @@ export class AutoTrader {
    * "请求已经发出、去哪里看结果"，**不能说"它正在审视"** —— 那是编造。
    */
   requestAgentReview(): { accepted: boolean; note: string } {
+    if (this.deps.trader.mode === 'ai_managed') {
+      return {
+        accepted: false,
+        note: '智能托管 2.0 已由 AI500 雷达、持仓论点、反例衰减笔记与归因校准闭环接管，不再触发旧 1.0 策略师改参。',
+      };
+    }
     const agent = this.deps.agent;
     if (!agent) {
       return { accepted: false, note: '这个机器人不是 AI 托管模式 —— 它没有可审视的策略。' };
@@ -3766,36 +3833,39 @@ export class AutoTrader {
     // 失败说明里的类别全靠这个阶段标记。
     state.phase = 'market';
     const held = localPositions.map((p) => p.symbol);
+    const pendingEntriesPre = positionStore.pending(traderId);
+    const pendingSymbolsPre = pendingEntriesPre.map((p) => p.symbol);
+
+    const useManagedRadar = this.deps.trader.mode === 'ai_managed';
+    const canScanManagedUniverse =
+      useManagedRadar &&
+      config.coinSource.sourceType !== 'static' &&
+      typeof (this.deps.marketData as { getUniverseOverview?: unknown }).getUniverseOverview ===
+        'function';
+
+    const watchedBefore = readWatchlist(traderId);
+    const watched = watchlistSymbols(watchedBefore);
+    if (watchedBefore.length > 0) writeWatchlist(traderId, decayWatchlist(watchedBefore));
 
     /*
-     * --- 6.0 取全市场视图（**必须在选币之前**）----------------------------
-     *
-     * ⚠️ **顺序是有原因的**：第 2 层「深潜」只能放 15-20 个标的，而 8 个榜合起来
-     * 有几十个名字。所以"该给谁完整行情"需要一个依据 —— **多个榜同时指向的那个**
-     * （既在涨幅榜又在波动率榜 = 涨得多**且**在剧烈波动），比只在成交额榜里
-     * 出现（大盘币人人都能上）更值得看。
-     *
-     * 要算这个共识就得**先有榜**，而榜要并进候选池就得在 `selectCandidates` **之前**取。
-     * 两者都走 `getUniverse()` 的**缓存**，所以提前取**不产生额外请求**。
+     * 工程优化：`ai_managed` 走全市场 AI500 雷达独立扫描时，不再冗余执行旧版
+     * `fullMarketOverview + topRankings + selectCandidates`（其结果在 2.0 Prompt 中完全弃用）。
      */
-    const marketOverview = await this.deps.marketData.fullMarketOverview().catch((error) => {
-      log.warn(`全市场概览拉取失败（本轮不渲染这一段）：${(error as Error).message}`);
-      return [];
-    });
-    const rankings = await this.deps.marketData
-      .topRankings({ minQuoteVolume24h: config.coinSource.minQuoteVolume24h })
-      .catch((error) => {
-        log.warn(`市场聚焦榜拉取失败（本轮不渲染这一段）：${(error as Error).message}`);
-        return undefined;
-      });
+    const marketOverview = canScanManagedUniverse
+      ? []
+      : await this.deps.marketData.fullMarketOverview().catch((error) => {
+          log.warn(`全市场概览拉取失败（本轮不渲染这一段）：${(error as Error).message}`);
+          return [];
+        });
+    const rankings = canScanManagedUniverse
+      ? undefined
+      : await this.deps.marketData
+          .topRankings({ minQuoteVolume24h: config.coinSource.minQuoteVolume24h })
+          .catch((error) => {
+            log.warn(`市场聚焦榜拉取失败（本轮不渲染这一段）：${(error as Error).message}`);
+            return undefined;
+          });
 
-    /*
-     * ⚠️ **共识标的** —— 出现在**两个以上**榜里的那些。
-     *
-     * 它只是**排序依据**，不是"推荐"：单榜标的仍然在候选池里（只是排在后面），
-     * 因为"哪些不值得看"该由模型决定（用户原则：**模型是大脑，系统只是手脚**）。
-     * 这里只把**共振度 ≥2 的几个**强制请进深潜层 —— 它们最可能在预算裁剪里被挤掉。
-     */
     const consensusSymbols = rankings
       ? rankConsensus({
           boards: [
@@ -3811,77 +3881,23 @@ export class AutoTrader {
           .map((r) => r.symbol)
       : [];
 
-    /*
-     * ⚠️ **模型上一轮点名的标的也进候选池**（第 3 层「索取」的下半段）。
-     *
-     * 候选池**每轮重选** —— 模型这一轮从「全景」或 `screen_symbols` 里发现的东西，
-     * 若不点名，下一轮就不在了。这个清单就是让**它的发现留下来**
-     * （用户的原则：模型是大脑，系统只是手脚）。
-     *
-     * 它和 `held`（持仓）、`consensusSymbols`（共识）走同一条路：都通过 `mustInclude`
-     * 强制进池，并在 `selectCandidates` 的裁剪里被 `mustKeep` 保护 ——
-     * 否则"点名了却被预算裁掉"与没点名完全一样，而模型无从知道。
-     */
-    const watchedBefore = readWatchlist(traderId);
-    const watched = watchlistSymbols(watchedBefore);
-    /*
-     * 用完就把这份清单往前推一轮：到期的（remaining 到 0）自动消失。
-     * **递减而不是清空**是有意的 —— 它连续几轮盯同一个标的是常态，
-     * 每轮都要求它重新点名是多余的（而且它不一定记得）。
-     */
-    if (watchedBefore.length > 0) writeWatchlist(traderId, decayWatchlist(watchedBefore));
-
-    const selection = await selectCandidates(config, this.deps.marketData, {
-      /*
-       * ⚠️ **只有持仓是"必保"的** —— 模型必须能管理自己手上的东西，
-       * 裁掉它就只能盲目持有。
-       */
-      mustInclude: held,
-      /*
-       * ⚠️ 共识标的与模型点名的是**优先**，不是必保 —— 见 `coins.ts` 里 `preferred`
-       * 的说明。第一版把它们塞进了 `mustInclude`，于是 `mustKeep` 替它们占位、
-       * 裁剪再也裁不到，候选池**无声膨胀**：实测 20 → 25 个、
-       * 提示词 229,567 → 288,523 字符、决策耗时 145 → 397 秒（6.6 分钟）。
-       *
-       * **优先 ≠ 必保**：它们排在最前、最可能进池，但预算不够时让位。
-       */
-      preferred: [...consensusSymbols, ...watched],
-      /* 候选池的大小直接由它决定 —— 见构造函数里 `promptBudget` 的说明。 */
-      budgetTokens: this.promptBudget,
-      /*
-       * ── **漏斗每层的淘汰写进日志**（2026-10-12 接线）──────────────────────
-       *
-       * 用户的要求：
-       * > 「交易所有 500 个可以交易的币……**层层筛选**」
-       *
-       * 而"层层筛选"要真的有用，操作员必须能回答一个问题：
-       * **「我的币为什么没被看到？」**
-       *
-       * 若不写日志，漏斗就是一个**黑盒** —— 用户看到候选池里只有 8 个标的，
-       * 却不知道那 8 个是怎么从 500 个里选出来的、更不知道自己关心的那个
-       * 死在哪一层。那正是"感觉不是给人看的"。
-       *
-       * 只在 `funnel` 模式下会触发（另两种模式走 `coinpool`，不传这个回调）。
-       */
-      onFunnelReport: (stages, survivors) => {
-        const detail = stages
-          .map((s) => `${s.name}: ${s.input}→${s.output}（淘汰 ${s.dropped}）`)
-          .join(' · ');
-        /*
-         * ⚠️ 用 `this.emit()` 而不是 `runtimeLogs.write()` —— 见 `emit()` 的说明：
-         * **只走 logger 这一条路径**，否则一条日志会变成两条库记录加两个前端事件
-         *（界面上同一句话出现两遍），而且归属还对不上。
-         */
-        this.emit('info', `[漏斗] ${detail} · 最终 ${survivors} 个候选`);
-      },
-    });
-
-    const useManagedRadar = this.deps.trader.mode === 'ai_managed';
-    const canScanManagedUniverse =
-      useManagedRadar &&
-      config.coinSource.sourceType !== 'static' &&
-      typeof (this.deps.marketData as { getUniverseOverview?: unknown }).getUniverseOverview ===
-        'function';
+    const selection = canScanManagedUniverse
+      ? {
+          symbols: [...new Set([...held, ...pendingSymbolsPre])],
+          sourcesBySymbol: new Map<string, string[]>(),
+          trimmedFrom: null as number | null,
+        }
+      : await selectCandidates(config, this.deps.marketData, {
+          mustInclude: held,
+          preferred: [...consensusSymbols, ...watched],
+          budgetTokens: this.promptBudget,
+          onFunnelReport: (stages, survivors) => {
+            const detail = stages
+              .map((s) => `${s.name}: ${s.input}→${s.output}（淘汰 ${s.dropped}）`)
+              .join(' · ');
+            this.emit('info', `[漏斗] ${detail} · 最终 ${survivors} 个候选`);
+          },
+        });
 
     let snapshots: MarketSnapshot[] = canScanManagedUniverse
       ? []
@@ -3892,14 +3908,14 @@ export class AutoTrader {
         );
 
     let managedRadar: ManagedCycleResult | null = null;
+    let managedCalibration:
+      | { weights?: Partial<Ai500DimensionScores>; strongThreshold?: number; watchThreshold?: number }
+      | undefined;
     if (useManagedRadar) {
-      let calibration:
-        | { weights?: Partial<Ai500DimensionScores>; strongThreshold?: number; watchThreshold?: number }
-        | undefined;
       try {
         const activeCal = managedAttributionStore.getActiveOptions(traderId);
         if (activeCal.applied) {
-          calibration = {
+          managedCalibration = {
             weights: activeCal.weights,
             strongThreshold: activeCal.strongThreshold,
             watchThreshold: activeCal.watchThreshold,
@@ -3915,10 +3931,11 @@ export class AutoTrader {
         registry: this.deps.registry,
         deltaTracker: this.radarDeltaTracker,
         heldSymbols: held,
+        pendingSymbols: pendingSymbolsPre,
         watchedSymbols: watched,
         existingSnapshots: snapshots,
         leverageCaps: this.leverageCapCache,
-        calibration,
+        calibration: managedCalibration,
       });
       if (managedRadar.snapshots.length > 0) {
         snapshots = managedRadar.snapshots;
@@ -3935,25 +3952,51 @@ export class AutoTrader {
       // M3：同步雷达快照、反例笔记过期清理与活跃持仓默认论点绑定
       try {
         const dossierBySym = new Map(managedRadar.dossiers.map((d) => [d.symbol, d]));
-        this.lastManagedRadarBySymbol = new Map(
-          managedRadar.radarLeaderboard.map((c) => [
-            c.symbol,
-            {
-              score: c.score,
-              tier: c.tier,
-              dimensions: c.dimensions,
-              oiUsd: c.metrics.openInterestUsd,
-              takerBuyRatio1h: c.metrics.takerBuyRatio1h,
-            },
-          ]),
-        );
+        const radarMap = new Map<
+          string,
+          {
+            score: number;
+            tier: RadarTier;
+            dimensions: Ai500DimensionScores;
+            oiUsd: number | null;
+            takerBuyRatio1h: number;
+          }
+        >();
+        for (const d of managedRadar.dossiers) {
+          radarMap.set(d.symbol, {
+            score: d.radar.score,
+            tier: d.radar.tier,
+            dimensions: d.radar.dimensions,
+            oiUsd: d.radar.metrics.openInterestUsd,
+            takerBuyRatio1h: d.radar.metrics.takerBuyRatio1h,
+          });
+          if (Number.isFinite(d.radar.metrics.atr15mPct) && d.radar.metrics.atr15mPct > 0) {
+            this.lastAtr15mBySymbol.set(d.symbol, d.radar.metrics.atr15mPct);
+          }
+        }
+        for (const c of managedRadar.radarLeaderboard) {
+          radarMap.set(c.symbol, {
+            score: c.score,
+            tier: c.tier,
+            dimensions: c.dimensions,
+            oiUsd: c.metrics.openInterestUsd,
+            takerBuyRatio1h: c.metrics.takerBuyRatio1h,
+          });
+          if (Number.isFinite(c.metrics.atr15mPct) && c.metrics.atr15mPct > 0) {
+            this.lastAtr15mBySymbol.set(c.symbol, c.metrics.atr15mPct);
+          }
+        }
+        this.lastManagedRadarBySymbol = radarMap;
         // 本轮常规扫描已评估过的高分强关注标的记入 15m 冷却，避免 3m 异动雷达针对刚看过的老标的重复唤醒
         const radarNow = Date.now();
+        let cooldownUpdated = false;
         for (const c of managedRadar.radarLeaderboard) {
           if (c.score >= ANOMALY_BREAKOUT_MIN_SCORE) {
             this.anomalyCooldownBySymbol.set(c.symbol, radarNow + ANOMALY_SYMBOL_COOLDOWN_MS);
+            cooldownUpdated = true;
           }
         }
+        if (cooldownUpdated) this.persistAnomalyCooldowns();
         managedRadarStore.save({
           traderId,
           btcBenchmark: managedRadar.btcBenchmarkLine,
@@ -4529,6 +4572,7 @@ export class AutoTrader {
         partialCloseCountBySymbol,
         managedNotes,
         enableAgenticProtocol: typeof this.deps.model.chat === 'function',
+        calibration: managedCalibration,
       });
       systemPrompt = managedBundle.systemPrompt;
       stablePrompt = managedBundle.stablePrompt;
@@ -5296,6 +5340,7 @@ export class AutoTrader {
        * 用的是同一个取值规则，两边不会各说各话。
        */
       roundTripFeeRate: memory.performance.roundTripFeeRate,
+      minRiskBudgetRatio: this.deps.trader.mode === 'ai_managed' ? 0.35 : 0.5,
       /*
        * ⚠️ **交易所实际允许的杠杆上限** —— 与配置里那个取小。
        *
@@ -5938,6 +5983,7 @@ export class AutoTrader {
         await this.promotePendingEntry(row, executed, Number(order.avgPrice) || row.entry_price);
       } else if (isGone) {
         positionStore.close(row.id);
+        managedThesisStore.cancelPending(this.deps.trader.id, row.symbol);
         this.emit(
           'info',
           `${row.symbol} 的限价单已${order.status === 'EXPIRED' ? '过期' : '撤销'}（未成交），该入场作废。`,
@@ -6651,6 +6697,7 @@ export class AutoTrader {
       }
 
       positionStore.close(row.id);
+      managedThesisStore.cancelPending(traderId, row.symbol);
       expired += 1;
 
       /*
@@ -7428,12 +7475,35 @@ export class AutoTrader {
           roundTrades.length > 0
             ? roundTrades.reduce((sum, t) => sum + t.netPnl, 0)
             : (record?.netPnl ?? netPnlOf({ grossPnl, fee: entryFee + exitFee, fundingFee }));
+        /*
+         * BUG-3B 修复：分批平仓回合同时按整笔回合净盈亏 ÷ 初始总风险额计算加权 realizedR，
+         * 确保 `managed_theses.realized_r` 与 `realized_net_pnl` 始终同口径闭合。
+         */
+        let roundRealizedR: number | null = null;
+        if (roundTrades.length > 1) {
+          const activeThesis = managedThesisStore.getActive(traderId, local.symbol);
+          const totalRoundQty = roundTrades.reduce((sum, t) => sum + t.quantity, 0);
+          if (activeThesis && totalRoundQty > 0) {
+            const initialRiskPerUnit = Math.abs(
+              activeThesis.entryPrice - activeThesis.initialStopLoss,
+            );
+            const totalInitialRiskUsd = initialRiskPerUnit * totalRoundQty;
+            if (totalInitialRiskUsd > 0) {
+              roundRealizedR = roundNetPnl / totalInitialRiskUsd;
+            }
+          }
+        }
         managedThesisStore.markClosedWithOutcome(traderId, local.symbol, {
           tradeId,
           netPnl: roundNetPnl,
           exitPrice: record?.exitPrice ?? exitPrice,
           closeReason: record?.closeReason ?? reason,
+          realizedR: roundRealizedR,
         });
+        /* BUG-9A 修复：亏损平仓自动给同标的活跃观察笔记记 1 次反例，打通反例衰减闭环。 */
+        if (roundNetPnl < 0) {
+          managedNotesStore.recordCounterexample(traderId, local.symbol);
+        }
         managedAttributionStore.recompute(traderId);
       } catch {
         /* 归因更新失败不阻断平仓主流程 */
@@ -8292,6 +8362,22 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
             const finalRow = finalRows[0]!;
             if (remQty > Math.max(1e-8, trip.quantity * 1e-4)) {
               correctedAttempted += 1;
+              /*
+               * BUG-3A 修复：分批平仓回合的尾仓行只覆盖剩余数量 `remQty` 与剩余毛利 `remGross`，
+               * 不能把整腿（含历史部分平仓）的加权均价 `trip.exitPrice` 覆写进尾仓行导致 exit_price 与 pnl 矛盾；
+               * 按剩余腿毛利反推真实尾仓均价。
+               */
+              const isShortTrip = trip.side === 'short';
+              const derivedRemExit =
+                trip.entryPrice > 0
+                  ? isShortTrip
+                    ? trip.entryPrice - remGross / remQty
+                    : trip.entryPrice + remGross / remQty
+                  : trip.exitPrice;
+              const remExitPrice =
+                Number.isFinite(derivedRemExit) && derivedRemExit > 0
+                  ? derivedRemExit
+                  : trip.exitPrice;
               const figureWrite = tradeStore.applyExchangeFigures({
                 id: finalRow.id,
                 grossPnl: remGross,
@@ -8299,7 +8385,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
                 exitFee: remExitFee,
                 fundingFee: remFunding,
                 entryPrice: trip.entryPrice,
-                exitPrice: trip.exitPrice,
+                exitPrice: remExitPrice,
                 quantity: remQty,
                 leverage: this.leverageFor(symbol),
                 entryOrderId: trip.entryOrderId || null,
@@ -9302,8 +9388,8 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     });
   }
 
-  /** M3.1：新开仓成交后立即为 `ai_managed` 仓位落库绑定结构化论点。 */
-  private bindThesisOnOpen(params: {
+  /** BUG-5 修复：限价挂单提交时持久化 `status='pending'` 论点与雷达 6 维快照，跨周期/重启不丢。 */
+  private savePendingThesis(params: {
     symbol: string;
     side: 'long' | 'short';
     entryPrice: number;
@@ -9314,9 +9400,8 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
     try {
       const sym = normalizeSymbol(params.symbol);
       const plan = this.pendingThesisPlans.get(sym);
-      this.pendingThesisPlans.delete(sym);
       const radarSnap = this.lastManagedRadarBySymbol.get(sym);
-      managedThesisStore.upsertActive({
+      managedThesisStore.savePending({
         traderId: this.deps.trader.id,
         symbol: sym,
         side: params.side,
@@ -9336,6 +9421,48 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         entryTier: radarSnap?.tier ?? null,
       });
     } catch {
+      /* 持久化草稿异常不阻断挂单链路 */
+    }
+  }
+
+  /** M3.1：新开仓成交后立即为 `ai_managed` 仓位落库绑定结构化论点（优先内存本轮计划，回退库内 pending 持久化草稿）。 */
+  private bindThesisOnOpen(params: {
+    symbol: string;
+    side: 'long' | 'short';
+    entryPrice: number;
+    stopLoss: number | null;
+    reasoning: string;
+  }): void {
+    if (this.deps.trader.mode !== 'ai_managed') return;
+    try {
+      const sym = normalizeSymbol(params.symbol);
+      const plan = this.pendingThesisPlans.get(sym);
+      this.pendingThesisPlans.delete(sym);
+      const persistedPending = managedThesisStore.consumePending(this.deps.trader.id, sym);
+      const radarSnap = this.lastManagedRadarBySymbol.get(sym);
+      managedThesisStore.upsertActive({
+        traderId: this.deps.trader.id,
+        symbol: sym,
+        side: params.side,
+        entryPrice: params.entryPrice,
+        initialStopLoss: params.stopLoss ?? persistedPending?.initialStopLoss ?? params.entryPrice,
+        entryBasis: plan?.entryBasis || persistedPending?.entryBasis || params.reasoning,
+        addTrigger: plan?.addTrigger ?? (persistedPending?.addTrigger || undefined),
+        reduceTarget: plan?.reduceTarget ?? (persistedPending?.reduceTarget || undefined),
+        invalidation: plan?.invalidation ?? (persistedPending?.invalidation || undefined),
+        timeStopHours: plan?.timeStopHours,
+        timeStopAt:
+          plan?.timeStopHours === undefined ? (persistedPending?.timeStopAt ?? undefined) : undefined,
+        minProgressR: plan?.minProgressR ?? persistedPending?.minProgressR,
+        maxAdverseExcursionPct:
+          plan?.maxAdverseExcursionPct ?? persistedPending?.maxAdverseExcursionPct,
+        entryRadarScore: radarSnap?.score ?? persistedPending?.entryRadarScore ?? null,
+        entryOiUsd: radarSnap?.oiUsd ?? persistedPending?.entryOiUsd ?? null,
+        entryTakerBuyRatio: radarSnap?.takerBuyRatio1h ?? persistedPending?.entryTakerBuyRatio ?? null,
+        entryDimensions: radarSnap?.dimensions ?? persistedPending?.entryDimensions ?? null,
+        entryTier: radarSnap?.tier ?? persistedPending?.entryTier ?? null,
+      });
+    } catch {
       /* 论点落库异常不阻断主成交链路 */
     }
   }
@@ -9344,14 +9471,16 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
   /*  Breakeven guard                                                        */
   /* ---------------------------------------------------------------------- */
 
-  /** 保本 / 移动止损守卫（委托 `mechanicalGuards.ts`，行为逐字节一致）。 */
+  /** 保本 / 移动止损守卫（委托 `mechanicalGuards.ts`；`ai_managed` 走 R 倍数 + ATR 自适应口径）。 */
   private async applyBreakevenGuard(): Promise<number> {
     const threshold = this.effectiveConfig().riskControl.breakevenTriggerPercent;
 
     return applyBreakevenGuardForTrader({
       traderId: this.deps.trader.id,
+      mode: this.deps.trader.mode,
       threshold,
       getTrailPercent: () => this.effectiveConfig().riskControl.trailingStopPercent,
+      getAtr15mPct: (sym) => this.lastAtr15mBySymbol.get(normalizeSymbol(sym)) ?? null,
       getEffectivePositions: () => this.effectivePositions(),
       toPositionView: (local) => this.toPositionView(local, new Map()),
       cancelAllStopProtection: (symbol) =>
@@ -9801,6 +9930,15 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         waitMinutes: decision.waitMinutes ?? null,
       });
 
+      /* BUG-5 修复：限价挂单同时把初始论点与雷达 6 维评分持久化落库，跨周期成交或进程重启不丢失。 */
+      this.savePendingThesis({
+        symbol,
+        side: decision.action === 'open_long' ? 'long' : 'short',
+        entryPrice: limitPrice,
+        stopLoss: decision.stopLoss ?? null,
+        reasoning: decision.reasoning,
+      });
+
       /*
        * ⚠️ **挂单也可能立刻成交**（价格刚好穿过去）—— 但那**不是**"当成开仓再来一次"。
        *
@@ -9998,6 +10136,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
      * 确认未成交且已撤掉 → 关掉本地 pending 记录并把订单行标为 CANCELED。
      */
     positionStore.close(row.id);
+    managedThesisStore.cancelPending(traderId, symbol);
     const cancelledEntry = orderStore.findByExchangeOrderId(traderId, String(orderId));
     if (cancelledEntry && !TERMINAL_ORDER_STATUSES.includes(cancelledEntry.status)) {
       orderStore.update(cancelledEntry.id, { status: 'CANCELED', cancelSource: 'model_cancel' });
@@ -10101,6 +10240,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         }
 
         positionStore.close(row.id);
+        managedThesisStore.cancelPending(traderId, symbol);
         const cancelledEntry = orderStore.findByExchangeOrderId(traderId, String(row.entry_order_id));
         if (cancelledEntry && !TERMINAL_ORDER_STATUSES.includes(cancelledEntry.status)) {
           orderStore.update(cancelledEntry.id, { status: 'CANCELED', cancelSource: 'manual' });
@@ -11536,6 +11676,10 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       entryPrice: newEntry,
       marginUsed: (newQty * newEntry) / Math.max(local.leverage, 1),
     });
+    if (this.deps.trader.mode === 'ai_managed') {
+      /* BUG-8A 修复：加仓后同步更新活跃持仓论点的加权入场均价，确保 R 倍数与 MAE 计算对齐最新均价。 */
+      managedThesisStore.updateEntryPrice(traderId, decision.symbol, newEntry);
+    }
 
     /*
      * ⚠️ **加仓也要写"入场事件"。**
@@ -11849,7 +11993,23 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       };
     }
 
-    const netPnl = grossPnl - exitFee - (paperEntryFee ?? 0);
+    /*
+     * AQ-2009 修复：实盘部分减仓按减仓数量占比分摊开仓手续费（`entryFee`），
+     * 对账阶段 `remEntryFee = trip.entryFee - partialEntryFee` 会自动扣减，不重复计费，
+     * 同时让每一笔 `manual_partial` 成交的 `netPnl` 准确反映真实往返成本。
+     */
+    let allocatedEntryFee = paperEntryFee ?? 0;
+    if (!this.isDryRun && local.entry_order_id) {
+      const entryOrder = orderStore.findByExchangeOrderId(traderId, String(local.entry_order_id));
+      const partialBooked = positionStore.partialBooked(traderId, decision.symbol);
+      const totalInitialQty = local.quantity + (partialBooked.qty ?? 0);
+      if (entryOrder && entryOrder.fee > 0 && totalInitialQty > 0) {
+        const ratio = Math.min(1, filledReduceQty / totalInitialQty);
+        allocatedEntryFee = entryOrder.fee * ratio;
+      }
+    }
+
+    const netPnl = grossPnl - exitFee - allocatedEntryFee;
     runInTransaction(() => {
       tradeStore.insert({
         traderId,
@@ -11860,7 +12020,7 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         exitPrice,
         leverage: local.leverage,
         grossPnl,
-        entryFee: paperEntryFee ?? 0,
+        entryFee: allocatedEntryFee,
         exitFee,
         fundingFee: 0,
         closeReason: 'manual_partial',
@@ -12450,119 +12610,137 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
    * @returns 成交均价与手续费；没有本地持仓时返回 null
    */
   async closeManually(symbol: string): Promise<{ avgPrice: number; fee: number } | null> {
-    const traderId = this.deps.trader.id;
-    const local = positionStore.getOpenBySymbol(traderId, symbol);
-    if (!local) return null;
-
-    // ① 先撤单 —— 这一条不能颠倒，见上面的说明。
-    let cancelFailed = false;
-    await this.deps.broker.cancelAllOrders(symbol).catch((error) => {
-      /*
-       * 撤单失败**不阻断平仓**：一个撤不掉的保护单是麻烦，
-       * 而一个平不掉的亏损仓位是危险。**两害相权，先平。**
-       */
-      cancelFailed = true;
-      this.emit(
-        'warn',
-        `${symbol} 手工平仓前撤单失败（${(error as Error).message}），仍然继续平仓。`,
-      );
-    });
-
+    const norm = normalizeSymbol(symbol);
     /*
-     * ══════════════════════════════════════════════════════════════════════════
-     *  ①' **本地也要清账**（2026-10-21 用户报告的 BUG）
-     * ══════════════════════════════════════════════════════════════════════════
-     *
-     * ## 用户原话
-     *
-     * > 「JEV实盘我停了，然后手动点了全部平仓，仓位好像平了，
-     * >  但是当前委托里面为什么还有」
-     *
-     * ## 实测
-     *
-     * 那 6 张单在交易所侧**全是 `CANCELED`**（它们是 `closePosition` 条件单，
-     * 仓位一平交易所就自动撤销），而本地 `orders` 表仍然停在 `NEW`
-     * ⇒ 界面「当前委托」显示幽灵单。
-     *
-     * ## 根因
-     *
-     * 上面那一步撤了**交易所侧**，但没有任何一步回写本地 `orders` 表。
-     * 正常轮次里的对账（`settleStaleOrders`）会清理这类残留 ——
-     * **可它只在机器人运行时跑**，而这次是「先停机器人、再手工平仓」，
-     * 对账没有机会执行。
-     *
-     * ⇒ 平仓路径必须**立即**清账，不能指望下一轮对账。
-     *
-     * ⚠️ **只在撤单成功时清**：撤单失败意味着挂单可能还在交易所侧，
-     * 那时清掉本地记录会让操作员以为"没有挂单了" —— 比留着更危险。
+     * AQ-2020 修复：与在途决策周期及同标的并发手工平仓互斥。
+     * 先等待当前正在执行的周期（含开仓挂保护）收尾，再加同标的平仓锁，
+     * 避免手工撤单平仓与决策周期并发挂保护单互相踩踏。
      */
-    if (!cancelFailed) {
-      const cleared = orderStore.cancelOpenBySymbol(traderId, symbol);
-      if (cleared > 0) {
+    if (this.manualCloseInFlight.has(norm)) {
+      throw new Error(`${norm} 正在执行手工平仓，请勿重复操作。`);
+    }
+    this.manualCloseInFlight.add(norm);
+    try {
+      if (this.cyclePromise) {
+        await this.cyclePromise.catch(() => undefined);
+      }
+
+      const traderId = this.deps.trader.id;
+      const local = positionStore.getOpenBySymbol(traderId, symbol);
+      if (!local) return null;
+
+      // ① 先撤单 —— 这一条不能颠倒，见上面的说明。
+      let cancelFailed = false;
+      await this.deps.broker.cancelAllOrders(symbol).catch((error) => {
+        /*
+         * 撤单失败**不阻断平仓**：一个撤不掉的保护单是麻烦，
+         * 而一个平不掉的亏损仓位是危险。**两害相权，先平。**
+         */
+        cancelFailed = true;
         this.emit(
-          'info',
-          `${symbol} 手工平仓：已一并结清 ${cleared} 张本地挂单记录（交易所侧已撤销）。`,
+          'warn',
+          `${symbol} 手工平仓前撤单失败（${(error as Error).message}），仍然继续平仓。`,
         );
-      }
-    }
+      });
 
-    // ② 市价平仓。
-    const exitSide: 'BUY' | 'SELL' = local.side === 'long' ? 'SELL' : 'BUY';
-
-    /*
-     * ⚠️⚠️ **模拟盘的平仓走本地，不能碰交易所**（2026-10-21 用户报告）。
-     *
-     * 用户原话：「[团队测试] 多智能体，我把它停止了，然后点全部平仓失败了」。
-     * 界面报「0 个已平，2 个平仓失败。失败的标的仍未平掉，敞口还在，请立即处理」，
-     * 而日志里的真因是 `币安错误 -2022：ReduceOnly Order is rejected`。
-     *
-     * 根因：那两个持仓是**模拟盘的本地记录**，交易所上根本没有对应仓位。
-     * 而 `closeManually()` 无差别地调 `emergencyFlatten()` → 币安说"没有可减的仓位"。
-     *
-     * 那句「敞口还在，请立即处理」更是雪上加霜：**它在吓唬操作员说有真实风险，
-     * 而实际上一分钱都没有**（那是模拟盘）。
-     *
-     * ⚠️ 标记价读不到时**不能编一个价格** —— 那会永久污染账本。
-     */
-    let flatten: { avgPrice: number; fee: number; entryFee?: number } | null;
-    if (this.isDryRun) {
-      const mark = await this.deps.broker.getMarkPrice(symbol).catch(() => 0);
-      if (!(mark > 0)) {
-        throw new Error(
-          `${symbol} 手工平仓失败：模拟盘读不到标记价，无法结算（不会编造价格）。请稍后重试。`,
-        );
-      }
       /*
-       * 模拟盘按真实费率记手续费 —— 否则回测净额会偏乐观。
+       * ══════════════════════════════════════════════════════════════════════════
+       *  ①' **本地也要清账**（2026-10-21 用户报告的 BUG）
+       * ══════════════════════════════════════════════════════════════════════════
        *
-       * ⚠️ 这里原来只记 `fee = 名义 × 费率 × 0.5`（**半程**）：与 settle 路径
-       * 的"整趟往返费两侧分摊"口径不一致，模拟盘的手工平仓成本被算少一半。
-       * 现在统一走 `dryRunRoundTripFee()`（2026-11-09，行为变更）。
+       * ## 用户原话
+       *
+       * > 「JEV实盘我停了，然后手动点了全部平仓，仓位好像平了，
+       * >  但是当前委托里面为什么还有」
+       *
+       * ## 实测
+       *
+       * 那 6 张单在交易所侧**全是 `CANCELED`**（它们是 `closePosition` 条件单，
+       * 仓位一平交易所就自动撤销），而本地 `orders` 表仍然停在 `NEW`
+       * ⇒ 界面「当前委托」显示幽灵单。
+       *
+       * ## 根因
+       *
+       * 上面那一步撤了**交易所侧**，但没有任何一步回写本地 `orders` 表。
+       * 正常轮次里的对账（`settleStaleOrders`）会清理这类残留 ——
+       * **可它只在机器人运行时跑**，而这次是「先停机器人、再手工平仓」，
+       * 对账没有机会执行。
+       *
+       * ⇒ 平仓路径必须**立即**清账，不能指望下一轮对账。
+       *
+       * ⚠️ **只在撤单成功时清**：撤单失败意味着挂单可能还在交易所侧，
+       * 那时清掉本地记录会让操作员以为"没有挂单了" —— 比留着更危险。
        */
-      const estimate = this.dryRunRoundTripFee(mark, local.quantity);
-      flatten = { avgPrice: mark, fee: estimate.exitFee, entryFee: estimate.entryFee };
-    } else {
-      flatten = await this.emergencyFlatten(symbol, local.quantity, exitSide, traderId);
-      if (!flatten) {
-        throw new Error(`${symbol} 手工平仓失败：交易所没有接受平仓单。`);
+      if (!cancelFailed) {
+        const cleared = orderStore.cancelOpenBySymbol(traderId, symbol);
+        if (cleared > 0) {
+          this.emit(
+            'info',
+            `${symbol} 手工平仓：已一并结清 ${cleared} 张本地挂单记录（交易所侧已撤销）。`,
+          );
+        }
       }
-    }
 
-    // ③ 记账 —— 唯一算净额的地方。
-    const still = positionStore.getOpenBySymbol(traderId, symbol);
-    if (still) {
-      await this.bookClosedPosition(
-        still,
-        'manual',
-        flatten.avgPrice,
-        flatten.fee,
-        new Date().toISOString(),
-        this.entryFeeExtra(flatten.entryFee),
-      );
-    }
+      // ② 市价平仓。
+      const exitSide: 'BUY' | 'SELL' = local.side === 'long' ? 'SELL' : 'BUY';
 
-    this.emit('info', `操作员手工平仓 ${symbol} @ ${flatten.avgPrice}。`);
-    return flatten;
+      /*
+       * ⚠️⚠️ **模拟盘的平仓走本地，不能碰交易所**（2026-10-21 用户报告）。
+       *
+       * 用户原话：「[团队测试] 多智能体，我把它停止了，然后点全部平仓失败了」。
+       * 界面报「0 个已平，2 个平仓失败。失败的标的仍未平掉，敞口还在，请立即处理」，
+       * 而日志里的真因是 `币安错误 -2022：ReduceOnly Order is rejected`。
+       *
+       * 根因：那两个持仓是**模拟盘的本地记录**，交易所上根本没有对应仓位。
+       * 而 `closeManually()` 无差别地调 `emergencyFlatten()` → 币安说"没有可减的仓位"。
+       *
+       * 那句「敞口还在，请立即处理」更是雪上加霜：**它在吓唬操作员说有真实风险，
+       * 而实际上一分钱都没有**（那是模拟盘）。
+       *
+       * ⚠️ 标记价读不到时**不能编一个价格** —— 那会永久污染账本。
+       */
+      let flatten: { avgPrice: number; fee: number; entryFee?: number } | null;
+      if (this.isDryRun) {
+        const mark = await this.deps.broker.getMarkPrice(symbol).catch(() => 0);
+        if (!(mark > 0)) {
+          throw new Error(
+            `${symbol} 手工平仓失败：模拟盘读不到标记价，无法结算（不会编造价格）。请稍后重试。`,
+          );
+        }
+        /*
+         * 模拟盘按真实费率记手续费 —— 否则回测净额会偏乐观。
+         *
+         * ⚠️ 这里原来只记 `fee = 名义 × 费率 × 0.5`（**半程**）：与 settle 路径
+         * 的"整趟往返费两侧分摊"口径不一致，模拟盘的手工平仓成本被算少一半。
+         * 现在统一走 `dryRunRoundTripFee()`（2026-11-09，行为变更）。
+         */
+        const estimate = this.dryRunRoundTripFee(mark, local.quantity);
+        flatten = { avgPrice: mark, fee: estimate.exitFee, entryFee: estimate.entryFee };
+      } else {
+        flatten = await this.emergencyFlatten(symbol, local.quantity, exitSide, traderId);
+        if (!flatten) {
+          throw new Error(`${symbol} 手工平仓失败：交易所没有接受平仓单。`);
+        }
+      }
+
+      // ③ 记账 —— 唯一算净额的地方。
+      const still = positionStore.getOpenBySymbol(traderId, symbol);
+      if (still) {
+        await this.bookClosedPosition(
+          still,
+          'manual',
+          flatten.avgPrice,
+          flatten.fee,
+          new Date().toISOString(),
+          this.entryFeeExtra(flatten.entryFee),
+        );
+      }
+
+      this.emit('info', `操作员手工平仓 ${symbol} @ ${flatten.avgPrice}。`);
+      return flatten;
+    } finally {
+      this.manualCloseInFlight.delete(norm);
+    }
   }
 
   private async emergencyFlatten(

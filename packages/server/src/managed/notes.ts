@@ -139,6 +139,7 @@ export const managedNotesStore = {
     const expiresIso = new Date(nowMs + NOTE_DEFAULT_TTL_MS).toISOString();
     const bias: RadarBias = input.bias ?? 'neutral';
     const confidence = Math.max(0, Math.min(100, Math.round(input.confidence ?? 70)));
+    const hasExplicitCounterexamples = input.counterexamples !== undefined;
     const counterexamples = Math.max(0, Math.round(input.counterexamples ?? 0));
 
     const db = getDb();
@@ -152,7 +153,7 @@ export const managedNotesStore = {
         trigger_condition = excluded.trigger_condition,
         bias = excluded.bias,
         confidence = excluded.confidence,
-        counterexamples = excluded.counterexamples,
+        counterexamples = CASE WHEN ? = 1 THEN excluded.counterexamples ELSE managed_notes.counterexamples END,
         last_seen_in_pool_at = excluded.last_seen_in_pool_at,
         expires_at = excluded.expires_at,
         updated_at = excluded.updated_at`,
@@ -167,6 +168,7 @@ export const managedNotesStore = {
       expiresIso,
       nowIso,
       nowIso,
+      hasExplicitCounterexamples ? 1 : 0,
     );
 
     const saved = db.get<NoteRow>(

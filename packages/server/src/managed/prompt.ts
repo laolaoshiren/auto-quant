@@ -23,7 +23,12 @@ import {
   type StrategyConfig,
 } from '@aq/shared';
 
-import type { Ai500Candidate } from '../radar/ai500.js';
+import {
+  AI500_DEFAULTS,
+  DEFAULT_AI500_WEIGHTS,
+  type Ai500Candidate,
+  type Ai500Weights,
+} from '../radar/ai500.js';
 import { formatRadarDeltaLine, type RadarDelta } from '../radar/deltaTracker.js';
 import {
   formatCompactPrice,
@@ -97,6 +102,12 @@ export interface ManagedPromptContext {
   managedNotes?: readonly ManagedNote[];
   /** M3.4：是否开启原生 function-calling 三段式决策协议提示。 */
   enableAgenticProtocol?: boolean;
+  /** BUG-8 修复：透传当前生效的归因校准权重与强/观察阈值，避免 Prompt 与雷达分级自相矛盾。 */
+  calibration?: {
+    strongThreshold?: number;
+    watchThreshold?: number;
+    weights?: Partial<Ai500Weights>;
+  };
 }
 
 export interface ManagedPromptBundle {
@@ -171,8 +182,16 @@ function biasLabel(bias: Ai500Candidate['bias']): string {
   return bias === 'long' ? '多头顺势' : bias === 'short' ? '空头顺势' : '中性震荡';
 }
 
-function tierLabel(tier: Ai500Candidate['tier']): string {
-  return tier === 'strong' ? '★强关注(≥75)' : tier === 'watch' ? '○观察(65-74)' : '·偏弱(<65)';
+function tierLabel(
+  tier: Ai500Candidate['tier'],
+  strongThr: number = AI500_DEFAULTS.strongThreshold,
+  watchThr: number = AI500_DEFAULTS.watchThreshold,
+): string {
+  return tier === 'strong'
+    ? `★强关注(≥${strongThr})`
+    : tier === 'watch'
+      ? `○观察(${watchThr}-${strongThr - 1})`
+      : `·偏弱(<${watchThr})`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -183,6 +202,10 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
   const rc = ctx.config.riskControl;
   const cb = ctx.config.circuitBreaker;
   const riskProfile = MANAGED_RISK_PROFILES[inferManagedRiskProfile(ctx.config)];
+  const strongThr = ctx.calibration?.strongThreshold ?? AI500_DEFAULTS.strongThreshold;
+  const watchThr = ctx.calibration?.watchThreshold ?? AI500_DEFAULTS.watchThreshold;
+  const trailFloorPct = Math.max(2.5, rc.trailingStopPercent > 0 ? rc.trailingStopPercent : 2.5);
+  const breakevenEnabled = rc.breakevenTriggerPercent > 0;
 
   const lines: string[] = [
     '你是专业加密永续合约自主交易员（智能托管 2.0 内核）。你的唯一目标是在严守风控底线的前提下，通过「高观望纪律 + 精准顺势入场 + 大盈亏比波段持仓」实现长期正期望复利。',
@@ -190,13 +213,13 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
     '## 一、核心交易纪律（硬原则）',
     '1. **高观望纪律（宁缺毋滥）**：没有明确优势时，本轮输出空决策或 `wait` 是最优秀的决策；绝不因为空仓而强行找单开仓。',
     '2. **AI500 多因子准入与入场方式（市价 vs 限价）**：',
-    '   - 评分 ≥ 75（强关注）且结构位置合理、量能/Taker/OI 确认、有清晰失效位 → 优先评估入场；',
-    '   - 评分 65–74（观察）→ 仅当筹码位置极佳（回踩 POC/支撑阻力墙）且盈亏比 ≥ 3:1 时轻仓试仓，否则观望；',
-    '   - 评分 < 65 → 原则不新开仓（持仓管理除外）；',
-    '   - **市价 vs 限价清晰分界**：刚放量突破/破位确认且距 15m EMA20 ≤ 1.8×ATR（无追单风险）时，**可直接用 `market` 市价切入**（或贴现价 0.2%–0.5% 限价）；对评分 ≥ 75（强关注）或带 `早期放量起爆` 标签的突破机会，若担心满仓追高又怕踏空主浪，**允许先用 50% 计划仓位（不低于最小名义）`market` 市价上底仓，留 50% 等回踩或 +1R 确认后滚仓加码**，绝不因死挂 -3%~-5% 远价限价而全程踏空；只有偏离 15m EMA20 > 2.0×ATR、顶着强阻力墙或带有「追单风险」「长影线插针」警示时，才用 `limit` 回踩限价并填写合理的 `wait_minutes`（通常 20–45 分钟）；',
+    `   - 评分 ≥ ${strongThr}（强关注）且结构位置合理、量能/Taker/OI 确认、有清晰失效位 → 优先评估入场；`,
+    `   - 评分 ${watchThr}–${strongThr - 1}（观察）→ 仅当筹码位置极佳（回踩 POC/支撑阻力墙）且盈亏比 ≥ 3:1 时轻仓试仓，否则观望；`,
+    `   - 评分 < ${watchThr} → 原则不新开仓（持仓管理除外）；`,
+    `   - **市价 vs 限价清晰分界**：刚放量突破/破位确认且距 15m EMA20 ≤ 1.8×ATR（无追单风险）时，**可直接用 \`market\` 市价切入**（或贴现价 0.2%–0.5% 限价）；对评分 ≥ ${strongThr}（强关注）或带 \`早期放量起爆\` 标签的突破机会，若担心满仓追高又怕踏空主浪，**允许先用 50% 计划仓位（不低于最小名义）\`market\` 市价上底仓，留 50% 等回踩或 +1R 确认后滚仓加码**，绝不因死挂 -3%~-5% 远价限价而全程踏空；只有偏离 15m EMA20 > 2.0×ATR、顶着强阻力墙或带有「追单风险」「长影线插针」警示时，才用 \`limit\` 回踩限价并填写合理的 \`wait_minutes\`（通常 20–45 分钟）；`,
     '   - **挂单改价 / 撤单（严禁原地重挂远单）**：已有未成交限价挂单若行情已向顺势方向拉离 > 2.5% 且结构仍强，**可在同一轮 `finalize` 中直接同时提交 `cancel_pending` + `market`/近价底仓切入**，或直接撤单观望；**严禁撤掉远价限价单后在原远价位原地重挂**；',
     '   - **小资金物理可交易预检**：标的档案若标有 `[当前资金物理不可开]`（1.5×ATR 止损下连最小名义的风险都 > 2.5%），直接 `skip` 勿浪费算力；若标有 `[小仓容错可开]`（≥78 分强突破且贴最小名义风险 ≤ 2.5%），可按最小名义轻仓把握早期主升/主跌浪；',
-    '3. **多空双向顺势、突破 TP 锚定 & 反抽止损缓冲**：遵循 4h 大趋势与 15m 结构共振，利用 1m 精确找入场与止损位；止损放在真实结构失效位之外（避开整数位与清算扫荡区）。**突破趋势 TP 锚定**：当标的处于多周期强共振突破口（评分 ≥ 75 或带 `早期放量起爆` / `三周期共振` 标签）时，**严禁拿“正在突破的最近 15m 前高/前低”当止盈天花板来算 RR**（那会把所有真突破全杀掉），止盈目标应锚定 **4h/日线级前高前低、上方/下方清算磁吸区或 2.0R–3.0R 趋势延伸位**。**限价反抽入场（limit）易遇惯性插针，止损必须留足 `1.8–2.0×ATR15m` 缓冲**（放在反抽高/低点簇外侧，避免贴着 `1.5×ATR` 下限被 15 分钟噪音扫出）。',
+    `3. **多空双向顺势、突破 TP 锚定 & 反抽止损缓冲**：遵循 4h 大趋势与 15m 结构共振，利用 1m 精确找入场与止损位；止损放在真实结构失效位之外（避开整数位与清算扫荡区）。**突破趋势 TP 锚定**：当标的处于多周期强共振突破口（评分 ≥ ${strongThr} 或带 \`早期放量起爆\` / \`三周期共振\` 标签）时，**严禁拿“正在突破的最近 15m 前高/前低”当止盈天花板来算 RR**（那会把所有真突破全杀掉），止盈目标应锚定 **4h/日线级前高前低、上方/下方清算磁吸区或 2.0R–3.0R 趋势延伸位**。**限价反抽入场（limit）易遇惯性插针，止损必须留足 \`1.8–2.0×ATR15m\` 缓冲**（放在反抽高/低点簇外侧，避免贴着 \`1.5×ATR\` 下限被 15 分钟噪音扫出）。`,
     '4. **大盈亏比波段管理（吃满主浪、严禁碎片连切）**：',
     '   - **可执行顺势金字塔滚仓**：盈利 ≥ 1R、动能强劲且战术面板示 `★可无风险加仓` 时，若放量突破确认，主动用 `add_to_position` 加仓 `35%–50%`，同步把 `stop_loss` 移至零风险合并保本位，**并将 `take_profit` 顺延拓展至面板建议目标或下一结构墙**（严禁被旧 TP 算出的“剩余 RR < 1”束缚而不敢滚仓）；',
     '   - **最多 2 批止盈 + 保护大赢家**：单笔持仓原则上**最多分 2 批减仓**——首减在 `+1.5R~2.0R` 仅减 `30%–35%` 锁底仓，保留 `65%–70%` 主力仓位博弈 `+2.5R~4R` 大波段；面板提示 `★底仓奔跑(禁切碎)` 时**严禁继续 `reduce_position`**，余仓交给移动止损与 TP 走完；',
@@ -212,6 +235,9 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
     `- 最大同时持仓：${rc.maxPositions} 笔 · 保证金占用上限：${rc.maxMarginUsage}%`,
     `- 护栏杠杆上限：BTC/ETH ≤ ${rc.btcEthMaxLeverage}x，山寨 ≤ ${rc.altcoinMaxLeverage}x（单币实际再与交易所账户上限取小）`,
     `- 每笔开仓**必须**同时给出合法 stop_loss（且距入场至少覆盖 3× 往返手续费）；建议同时给出 take_profit（期望盈亏比 ≥ ${Math.max(1.8, rc.minRiskRewardRatio).toFixed(1)}:1）`,
+    breakevenEnabled
+      ? `- **30 秒保本与自适应追踪守卫（单向棘轮、永不放宽）**：浮盈达 **+1.0R 且价格走幅 ≥ 1.5%** 后自动把止损移至含 1.2× 费率缓冲（+0.12%）的保本位；浮盈达 **+1.5R** 后自动启动 **max(2.0×ATR15m, ${trailFloorPct.toFixed(1)}%)** 宽幅追踪。调保护位（\`adjust_protection\`）只允许更紧、禁止向亏损侧回退。`
+      : '- **30 秒机械保本守卫**：当前关闭，止损移动完全由你通过 `adjust_protection` 主动管理（仅允许更紧、禁止放宽）。',
     `- 账户熔断：单日亏损 ≥ ${cb.maxDailyLossPercent}% 或总回撤 ≥ ${cb.maxTotalDrawdownPercent}% 自动禁止新开仓`,
     '',
     '## 三、三段式决策协议（严格遵守）',
@@ -221,7 +247,7 @@ export function buildManagedSystemPrompt(ctx: ManagedPromptContext): string {
           '2. **阶段 2（`update_notes` / `update_thesis` · 按需并行）**：',
           '   - 有新的明确价位/量能观察机会，或旧笔记被市场证伪时，调用 `update_notes`（必须带数字可验证条件，被证伪记反例）；',
           '   - 需要修订已有持仓的加仓/减仓条件、时间止损或 MAE 硬线时，调用 `update_thesis`；',
-          '3. **阶段 3（`finalize` · 必选终结）**：最后必须调用 `finalize` 提交完整决策数组——**永不空决策**：每个持仓必须给出 `hold` 或战术动作，每个重点候选必须给出 `wait`/`skip` 或开仓动作；新开仓建议一并填写 `time_stop_hours` / `max_adverse_excursion_pct` / `add_trigger` / `reduce_target` / `invalidation`。如需提前盯盘（临近突破口/有待成交挂单/持仓贴近关键位），可填 `next_check_in_minutes`（3–10 分钟；常规默认 15 分钟，系统上限封顶 15 分钟）。',
+          '3. **阶段 3（`finalize` · 必选终结）**：最后必须调用 `finalize` 提交完整决策数组——**永不空决策**：每个持仓必须给出 `hold` 或战术动作，每个重点候选必须给出 `wait`/`skip` 或开仓动作；新开仓建议一并填写 `time_stop_hours` / `max_adverse_excursion_pct` / `add_trigger` / `reduce_target` / `invalidation`。关于 `next_check_in_minutes`：仅当持仓贴近关键位或强标的临近突破口时可设 `5–10` 分钟；**仅存在普通未成交限价挂单时请保持默认 15 分钟节拍**（30 秒守卫会在成交瞬间自动挂保护单，3 分钟异动雷达负责监控突发起爆），避免无意义高频空转。',
         ]
       : [
           '1. 先在 `<reasoning>...</reasoning>` 内用简洁中文给出：大盘判断 → 持仓处置评估 → 候选标的逐一筛选（为什么做或为什么观望）。',
@@ -352,12 +378,16 @@ function renderDossierBlock(
   d: ManagedSymbolDossier,
   bars: { '4h': number; '15m': number; '1m': number },
   sizingCtx?: { equity: number; riskPerTradePercent: number; minPositionSize: number },
+  calibration?: ManagedPromptContext['calibration'],
 ): string {
   const r = d.radar;
   const m = r.metrics;
   const dim = r.dimensions;
   const heldTag = d.isHeld ? ' [持仓中]' : '';
   const tagText = r.tags.length > 0 ? r.tags.join(' | ') : '常规波动';
+  const strongThr = calibration?.strongThreshold ?? AI500_DEFAULTS.strongThreshold;
+  const watchThr = calibration?.watchThreshold ?? AI500_DEFAULTS.watchThreshold;
+  const w: Ai500Weights = { ...DEFAULT_AI500_WEIGHTS, ...(calibration?.weights ?? {}) };
 
   /*
    * 实盘路线④：小资金高波动强币物理可交易预检（直接算清，省掉模型反复心算与白耗算力）
@@ -388,8 +418,8 @@ function renderDossierBlock(
       : `RS(vs BTC 4h) ${fmtSignedPct(m.rsAlpha4hPct, 1)}`;
 
   const header = [
-    `## ${d.symbol}${heldTag} — AI500 **${r.score}/100** (${tierLabel(r.tier)} · ${biasLabel(r.bias)})`,
-    `- 维度拆解：趋势 ${dim.trend}/20 · 突破量能 ${dim.breakout}/20 · OI流 ${dim.oiFlow}/15 · Taker ${dim.takerFlow}/15 · 费率 ${dim.funding}/15 · Alpha/位置 ${dim.alphaPosition}/15`,
+    `## ${d.symbol}${heldTag} — AI500 **${r.score}/100** (${tierLabel(r.tier, strongThr, watchThr)} · ${biasLabel(r.bias)})`,
+    `- 维度拆解：趋势 ${dim.trend}/${w.trend} · 突破量能 ${dim.breakout}/${w.breakout} · OI流 ${dim.oiFlow}/${w.oiFlow} · Taker ${dim.takerFlow}/${w.takerFlow} · 费率 ${dim.funding}/${w.funding} · Alpha/位置 ${dim.alphaPosition}/${w.alphaPosition}`,
     `- 预计算指标：现价 ${formatCompactPrice(m.price)} · 1h ${fmtSignedPct(m.change1hPct, 1)} / 4h ${fmtSignedPct(m.change4hPct, 1)} / 24h ${fmtSignedPct(m.change24hPct, 1)} · ${rsLabel} · 24h额 ${fmtUsd(m.quoteVolume24h)} · 15m量比 ${m.volRatio15m}x · 实体比 ${Math.round(m.bodyRatio15m * 100)}% · ATR15m ${m.atr15mPct}% · 距EMA20 ${m.distEma20Atr}×ATR`,
     `- 资金流与费率：Taker买比 1h=${Math.round(m.takerBuyRatio1h * 100)}% / 4h=${Math.round(m.takerBuyRatio4h * 100)}% (CVD:${m.cvdTrend}) · OI ${m.openInterestUsd ? fmtUsd(m.openInterestUsd) : 'N/A'} (1h ${fmtSignedPct(m.oiChange1hPct, 1)} / 4h ${fmtSignedPct(m.oiChange4hPct, 1)}) · 资金费 ${m.fundingRatePct !== null ? `${m.fundingRatePct >= 0 ? '+' : ''}${m.fundingRatePct.toFixed(4)}%` : 'N/A'}`,
     `- 筹码与清算：${d.volumeProfile ? formatVolumeProfileLine(d.volumeProfile) : '样本不足'}`,
@@ -455,7 +485,7 @@ function renderVolatileSection(
     parts.push(
       '',
       `# 深度展开标的（共 ${dossiers.length} 个：持仓 + AI500 Top 精选）`,
-      ...dossiers.map((d) => renderDossierBlock(d, bars, sizingCtx)),
+      ...dossiers.map((d) => renderDossierBlock(d, bars, sizingCtx, ctx.calibration)),
     );
   } else {
     parts.push('', '# 深度展开标的', '本轮无达标候选标的，请保持观望。');

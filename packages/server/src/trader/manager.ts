@@ -3854,6 +3854,9 @@ export class TraderManager {
           const mode = traders.get(traderId)?.mode;
           return mode === 'ai_team';
         },
+        /* BUG-2 修复：彻底阻断旧 1.0 策略师改参/实验结算，但显式保留高质量平仓复盘教训（写入 agent_memory 供 2.0 消费）。 */
+        disableLegacyStrategist: () => traders.get(traderId)?.mode === 'ai_managed',
+        allowTradeReview: () => traders.get(traderId)?.mode === 'ai_managed',
         model,
         equityNow: () => equity.latest(traderId)?.equity ?? null,
         /*
@@ -3878,9 +3881,14 @@ export class TraderManager {
         },
       });
 
+      /*
+       * BUG-1 修复：传入已解析并钳制过 `agent_config_json` 的 `effectiveConfig`（而非默认 `config`），
+       * 杜绝服务重启后在首轮决策运行前的窗口期内，30s 保护守卫误用 `defaultStrategyConfig()`
+       * 复活已关闭的 `drawdownGuard` 强平波段底仓。
+       */
       const autoTrader = new AutoTrader({
         trader,
-        config,
+        config: effectiveConfig,
         registry: connection.registry,
         market: connection.market,
         marketData,

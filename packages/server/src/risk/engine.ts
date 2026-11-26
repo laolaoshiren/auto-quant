@@ -120,6 +120,11 @@ export interface RiskEnvironment {
    * 这是刻意的：读不到档位不该让交易停下来。
    */
   exchangeMaxLeverageOf?(symbol: string): number | null;
+  /**
+   * §9b 单笔风险预算下限比例（默认 `0.5` = 50%）。
+   * 智能托管 2.0 允许 50% 计划底仓市价试仓（经步长取整可能落到 48%–49.9%），传入 `0.35` 避免误拒。
+   */
+  minRiskBudgetRatio?: number;
 }
 
 export interface RiskRejection {
@@ -1489,7 +1494,14 @@ export class RiskEngine {
       if (Number.isFinite(riskBudgetUsd) && riskBudgetUsd > 0) {
         const safeNotional = Number.isFinite(notional) ? notional : 0;
         const stopRiskUsd = (safeNotional * stopDistancePercent) / 100;
-        const minAcceptableUsd = riskBudgetUsd * 0.5;
+        const minBudgetRatio =
+          env.minRiskBudgetRatio !== undefined &&
+          Number.isFinite(env.minRiskBudgetRatio) &&
+          env.minRiskBudgetRatio > 0 &&
+          env.minRiskBudgetRatio <= 1
+            ? env.minRiskBudgetRatio
+            : 0.5;
+        const minAcceptableUsd = riskBudgetUsd * minBudgetRatio;
         if (!Number.isFinite(stopRiskUsd) || stopRiskUsd + 1e-9 < minAcceptableUsd) {
           const suggestedNotionalUsd = (riskBudgetUsd / stopDistancePercent) * 100;
           const reason = marginClamped

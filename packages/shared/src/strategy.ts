@@ -874,12 +874,13 @@ export function unboundedAiManagedConfig(
       requireTakeProfit: false,
       requireStopLoss: true,
       /*
-       * M1.1（2026-11-24）：释放智能托管的大盈亏比空间（3:1 ~ 5:1 波段）。
-       * 关闭会在早期小回吐时砍死波段赢家的机械回撤守卫，改为交易所侧保本 + 宽追踪止损基线：
-       * 浮盈达 5%（如 5x 下价格走 1%）时移至保本，随后保留 1.5% 价格追踪空间让大趋势奔跑。
+       * 智能托管 2.0（R 倍数 + ATR 自适应保护基线）：
+       * 关闭会在早期小回吐时砍死波段赢家的机械回撤守卫，改为：
+       * - 浮盈达 +1.0R 且价格走幅 ≥1.5% 后移至含 1.2× 费率缓冲保本位（breakevenTriggerPercent>0 为总开关）；
+       * - 达 +1.5R 后启动 max(2.0×ATR15m, 2.5%) 宽幅追踪，避免被山寨 15m 正常噪声洗飞主升浪。
        */
       breakevenTriggerPercent: 5,
-      trailingStopPercent: 1.5,
+      trailingStopPercent: 2.5,
     },
     drawdownGuard: {
       enabled: false,

@@ -73,6 +73,22 @@ export interface BreakevenInput {
    * 从亏损侧首次移至保本时不受此限制。设为 `0` 可关闭防抖。
    */
   minStepPercent?: number;
+  /**
+   * 智能托管 2.0（R 倍数 + ATR 自适应）扩展参数（可选；未传时保持原有 ROE% 口径 100% 向后兼容）：
+   * - `breakevenTriggerR`：触发保本所需的最小 R 倍数（如 `1.0` = 达到 1.0R 后才保本）；
+   * - `minBreakevenPriceMovePct`：触发保本所需的最小价格顺向幅度（如 `1.5` = 至少走出 1.5%）；
+   * - `breakevenFeeBufferPct`：保本位向盈利侧偏移的手续费缓冲（如 `0.12` ≈ 1.2× 往返吃单费）；
+   * - `trailTriggerR`：启动追踪止损所需的最小 R 倍数（如 `1.5` = 1.5R 之前仅锁保本、不紧跟追踪）；
+   * - `initialStopLoss`：开仓初始止损价（用于计算 1R 风险距离 `|entryPrice - initialStopLoss|`）；
+   * - `atr15mPct`：当前 15m ATR%（如 `3.0` = 3%），配合 `trailAtrMultiplier` 计算自适应追踪距。
+   */
+  breakevenTriggerR?: number;
+  minBreakevenPriceMovePct?: number;
+  breakevenFeeBufferPct?: number;
+  trailTriggerR?: number;
+  initialStopLoss?: number | null;
+  atr15mPct?: number | null;
+  trailAtrMultiplier?: number;
 }
 
 export interface BreakevenVerdict {
@@ -117,7 +133,52 @@ export function shouldMoveStopToBreakeven(input: BreakevenInput): BreakevenVerdi
     return { move: false, newStop: null, reason: '该仓位没有止损，应由保护单路径处理，不由保本逻辑代劳。' };
   }
 
-  if (!(input.unrealizedPnlPercent >= input.triggerPercent)) {
+  const useRAdaptive =
+    input.breakevenTriggerR !== undefined &&
+    Number.isFinite(input.breakevenTriggerR) &&
+    input.breakevenTriggerR > 0;
+
+  const priceMovePct =
+    input.side === 'long'
+      ? ((input.markPrice - input.entryPrice) / input.entryPrice) * 100
+      : ((input.entryPrice - input.markPrice) / input.entryPrice) * 100;
+
+  const initialStopRef =
+    input.initialStopLoss !== undefined &&
+    input.initialStopLoss !== null &&
+    Number.isFinite(input.initialStopLoss) &&
+    input.initialStopLoss > 0
+      ? input.initialStopLoss
+      : input.currentStop;
+  const initialRiskDist =
+    initialStopRef !== null && Math.abs(input.entryPrice - initialStopRef) > 0
+      ? Math.abs(input.entryPrice - initialStopRef)
+      : 0;
+  const favorableDist =
+    input.side === 'long'
+      ? input.markPrice - input.entryPrice
+      : input.entryPrice - input.markPrice;
+  const currentR = initialRiskDist > 0 ? favorableDist / initialRiskDist : null;
+
+  if (useRAdaptive) {
+    const reqR = input.breakevenTriggerR!;
+    const reqMovePct =
+      input.minBreakevenPriceMovePct !== undefined &&
+      Number.isFinite(input.minBreakevenPriceMovePct) &&
+      input.minBreakevenPriceMovePct > 0
+        ? input.minBreakevenPriceMovePct
+        : 1.5;
+    const hitR = currentR !== null ? currentR >= reqR : true;
+    const hitMove = priceMovePct >= reqMovePct;
+    if (!hitR || !hitMove) {
+      const rTxt = currentR !== null ? `${currentR.toFixed(2)}R / 需 ≥${reqR}R` : '无初始R基准';
+      return {
+        move: false,
+        newStop: null,
+        reason: `当前进展 ${rTxt}、价格走幅 ${priceMovePct.toFixed(2)}%（需 ≥${reqMovePct}%），未达保本条件。`,
+      };
+    }
+  } else if (!(input.unrealizedPnlPercent >= input.triggerPercent)) {
     return {
       move: false,
       newStop: null,
@@ -126,42 +187,74 @@ export function shouldMoveStopToBreakeven(input: BreakevenInput): BreakevenVerdi
   }
 
   /*
-   * 单向棘轮：只有在"当前止损仍在亏损侧"时才移。
-   *
-   * 做多：止损在开仓价**之下**才算亏损侧；做空反之。
-   * 已经等于或好于开仓价时不动 —— 那既避免多余的交易所调用，
-   * 也避免把操作员手动设的更紧的止损**往回退**（那是最坏的一种"自作聪明"）。
+   * 保本目标位：
+   * - 传统模式：`entryPrice`（零偏移）；
+   * - R 自适应模式：向盈利侧偏移 `breakevenFeeBufferPct`（默认 `0.12%` ≈ 1.2× 往返吃单费），
+   *   避免保本被扫时因为双边手续费反变净亏。
    */
+  const feeBufferPct =
+    useRAdaptive &&
+    input.breakevenFeeBufferPct !== undefined &&
+    Number.isFinite(input.breakevenFeeBufferPct) &&
+    input.breakevenFeeBufferPct >= 0
+      ? input.breakevenFeeBufferPct
+      : 0;
+  const breakeven =
+    feeBufferPct > 0
+      ? input.side === 'long'
+        ? input.entryPrice * (1 + feeBufferPct / 100)
+        : input.entryPrice * (1 - feeBufferPct / 100)
+      : input.entryPrice;
+
   const stillAtRisk =
-    input.side === 'long' ? input.currentStop < input.entryPrice : input.currentStop > input.entryPrice;
+    input.side === 'long' ? input.currentStop < breakeven : input.currentStop > breakeven;
 
   /*
-   * 追踪距离的合法性：必须是正数且小于 100%。
-   *
-   * `>= 100` 会让候选止损落到价格另一侧（做多时退到 0 以下），
-   * 那是比"不追踪"危险得多的一种错 —— 所以这里回退到纯保本，而不是照单全收。
-   * `trailPercent = 0`（或 NaN）是**有意保留的旧行为**：只保本、不追踪。
+   * 追踪距离：
+   * - 传统模式：沿用 `input.trailPercent`；
+   * - R 自适应模式：仅当 `currentR >= trailTriggerR`（默认 1.5R；无初始 R 时走幅 ≥2.5%）时启动，
+   *   追踪距离取 `max(trailPercent, atr15mPct * trailAtrMultiplier)`，防止 1.5% 固定追踪在 3% ATR 山寨中被噪音洗出。
    */
-  const trail = Number.isFinite(input.trailPercent) && input.trailPercent > 0 && input.trailPercent < 100
-    ? input.trailPercent
-    : 0;
+  const baseTrail =
+    Number.isFinite(input.trailPercent) && input.trailPercent > 0 && input.trailPercent < 100
+      ? input.trailPercent
+      : 0;
+  let trail = baseTrail;
+  if (useRAdaptive) {
+    const reqTrailR =
+      input.trailTriggerR !== undefined && Number.isFinite(input.trailTriggerR) && input.trailTriggerR > 0
+        ? input.trailTriggerR
+        : 1.5;
+    const trailUnlocked = currentR !== null ? currentR >= reqTrailR : priceMovePct >= 2.5;
+    if (!trailUnlocked) {
+      trail = 0;
+    } else {
+      const atrMult =
+        input.trailAtrMultiplier !== undefined &&
+        Number.isFinite(input.trailAtrMultiplier) &&
+        input.trailAtrMultiplier > 0
+          ? input.trailAtrMultiplier
+          : 2.0;
+      const atrTrail =
+        input.atr15mPct !== undefined &&
+        input.atr15mPct !== null &&
+        Number.isFinite(input.atr15mPct) &&
+        input.atr15mPct > 0
+          ? input.atr15mPct * atrMult
+          : 0;
+      const adaptiveTrail = Math.max(baseTrail, atrTrail);
+      trail = adaptiveTrail > 0 && adaptiveTrail < 50 ? adaptiveTrail : baseTrail;
+    }
+  }
 
   if (!stillAtRisk && trail === 0) {
     return {
       move: false,
       newStop: null,
-      reason: `止损 ${input.currentStop} 已在开仓价 ${input.entryPrice} 或更好的一侧，无需调整（止损只往有利方向移）。`,
+      reason: `止损 ${input.currentStop} 已在保本位 ${breakeven.toFixed(6)} 或更好的一侧，无需调整（止损只往有利方向移）。`,
     };
   }
 
-  /*
-   * 候选止损：
-   *   · `breakeven` —— 开仓价，**永远是下限**（这条规则至少保证"不再亏"）；
-   *   · `trailed`   —— 价格往回退 `trail%` 的位置（只在开启追踪且距离合法时存在）。
-   *
-   * 两者取**更有利**的那个：做多取大的，做空取小的。
-   */
-  const breakeven = input.entryPrice;
   const trailed =
     trail > 0
       ? input.side === 'long'
@@ -190,7 +283,7 @@ export function shouldMoveStopToBreakeven(input: BreakevenInput): BreakevenVerdi
       move: false,
       newStop: null,
       reason:
-        `浮盈 ${input.unrealizedPnlPercent.toFixed(2)}% 已达保本阈值 ${input.triggerPercent}%，` +
+        `浮盈 ${input.unrealizedPnlPercent.toFixed(2)}% 已达保本条件，` +
         `但候选止损 ${candidate.toFixed(6)} 不比现有止损 ${input.currentStop} 更有利 —— ` +
         '止损只往有利方向移（价格回落时不回退）。',
     };
@@ -235,11 +328,16 @@ export function shouldMoveStopToBreakeven(input: BreakevenInput): BreakevenVerdi
   return {
     move: true,
     newStop: candidate,
-    reason:
-      `浮盈 ${input.unrealizedPnlPercent.toFixed(2)}% 已达保本阈值 ${input.triggerPercent}%，` +
-      (trail > 0
-        ? `按价格回撤 ${trail}% 追踪，把止损从 ${input.currentStop} 移到 ${candidate.toFixed(6)}`
-        : `把止损从 ${input.currentStop} 移到开仓价 ${breakeven}`) +
-      '（只往有利方向移，不再退回）。',
+    reason: useRAdaptive
+      ? `进展 ${currentR !== null ? `${currentR.toFixed(2)}R` : `${priceMovePct.toFixed(2)}%`}（价格 ${priceMovePct >= 0 ? '+' : ''}${priceMovePct.toFixed(2)}%），` +
+        (trail > 0
+          ? `启动自适应宽追踪（回撤距 ${trail.toFixed(2)}%），把止损从 ${input.currentStop} 移到 ${candidate.toFixed(6)}`
+          : `移至含费率缓冲保本位 ${breakeven.toFixed(6)}（原止损 ${input.currentStop}）`) +
+        '（只往有利方向移，不再退回）。'
+      : `浮盈 ${input.unrealizedPnlPercent.toFixed(2)}% 已达保本阈值 ${input.triggerPercent}%，` +
+        (trail > 0
+          ? `按价格回撤 ${trail}% 追踪，把止损从 ${input.currentStop} 移到 ${candidate.toFixed(6)}`
+          : `把止损从 ${input.currentStop} 移到开仓价 ${breakeven}`) +
+        '（只往有利方向移，不再退回）。',
   };
 }

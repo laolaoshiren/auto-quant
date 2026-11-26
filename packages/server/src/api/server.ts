@@ -382,6 +382,17 @@ const TraderPatchSchema = TraderInputSchema.extend({
 /*  Server                                                                     */
 /* -------------------------------------------------------------------------- */
 
+let unhandledRejectionCount = 0;
+
+/** AQ-2023：记录未捕获的 Promise rejection 次数，供 `/api/health` 暴露运维可观测性。 */
+export function recordUnhandledRejection(): void {
+  unhandledRejectionCount += 1;
+}
+
+export function getUnhandledRejectionCount(): number {
+  return unhandledRejectionCount;
+}
+
 export interface ApiDependencies {
   vault: Vault;
   manager: TraderManager;
@@ -1205,6 +1216,7 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
         thresholdMs: entry.thresholdMs,
       })),
       runningTraders: health.traders.filter((entry) => entry.status === 'running').length,
+      unhandledRejections: unhandledRejectionCount,
     };
     if (!health.ok) {
       return reply.code(503).send({

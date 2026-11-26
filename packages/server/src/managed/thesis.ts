@@ -450,6 +450,121 @@ export const managedThesisStore = {
     return this.getActive(input.traderId, norm)!;
   },
 
+  /**
+   * BUG-5 修复：限价挂单提交时持久化 `status='pending'` 论点与雷达快照，
+   * 避免跨周期成交或进程重启后丢失 `add_trigger / reduce_target / invalidation / entryDimensions`。
+   */
+  savePending(input: UpsertThesisInput): void {
+    const db = getDb();
+    const norm = normalizeSymbol(input.symbol);
+    const nowMs = input.nowMs ?? Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+
+    let resolvedTimeStopAt: string | null = null;
+    if (input.timeStopAt !== undefined) {
+      resolvedTimeStopAt = input.timeStopAt;
+    } else if (
+      input.timeStopHours !== undefined &&
+      input.timeStopHours !== null &&
+      Number.isFinite(input.timeStopHours) &&
+      input.timeStopHours > 0
+    ) {
+      const clampedH = Math.max(0.5, Math.min(72, input.timeStopHours));
+      resolvedTimeStopAt = new Date(nowMs + clampedH * 3_600_000).toISOString();
+    }
+
+    const clampedMae =
+      input.maxAdverseExcursionPct !== undefined &&
+      input.maxAdverseExcursionPct !== null &&
+      Number.isFinite(input.maxAdverseExcursionPct) &&
+      input.maxAdverseExcursionPct > 0
+        ? round2(Math.max(0.4, Math.min(15, input.maxAdverseExcursionPct)))
+        : null;
+
+    const clampedMinR =
+      input.minProgressR !== undefined && Number.isFinite(input.minProgressR)
+        ? round2(Math.max(-0.5, Math.min(3.0, input.minProgressR)))
+        : 0.3;
+
+    // 同一标的只保留最新一条 pending 论点草稿
+    db.run(
+      `DELETE FROM managed_theses WHERE trader_id = ? AND symbol = ? AND status = 'pending'`,
+      input.traderId,
+      norm,
+    );
+    db.run(
+      `INSERT INTO managed_theses (
+        trader_id, symbol, side, entry_price, initial_stop_loss,
+        entry_basis, add_trigger, reduce_target, invalidation,
+        time_stop_at, min_progress_r, max_adverse_excursion_pct,
+        peak_r, worst_adverse_pct,
+        entry_radar_score, entry_oi_usd, entry_taker_buy_ratio,
+        entry_dimensions_json, entry_tier,
+        status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      input.traderId,
+      norm,
+      input.side,
+      input.entryPrice,
+      input.initialStopLoss,
+      clipText(input.entryBasis),
+      clipText(input.addTrigger),
+      clipText(input.reduceTarget),
+      clipText(input.invalidation),
+      resolvedTimeStopAt,
+      clampedMinR,
+      clampedMae,
+      input.entryRadarScore ?? null,
+      input.entryOiUsd ?? null,
+      input.entryTakerBuyRatio ?? null,
+      input.entryDimensions ? JSON.stringify(input.entryDimensions) : null,
+      input.entryTier ?? null,
+      nowIso,
+      nowIso,
+    );
+  },
+
+  /** 读取并消费限价挂单预存的 `status='pending'` 论点（成交转正时调用）。 */
+  consumePending(traderId: number, symbol: string): PositionThesis | null {
+    const db = getDb();
+    const norm = normalizeSymbol(symbol);
+    const row = db.get<ThesisRow>(
+      `SELECT * FROM managed_theses WHERE trader_id = ? AND symbol = ? AND status = 'pending' ORDER BY id DESC LIMIT 1`,
+      traderId,
+      norm,
+    );
+    if (!row) return null;
+    db.run(
+      `DELETE FROM managed_theses WHERE trader_id = ? AND symbol = ? AND status = 'pending'`,
+      traderId,
+      norm,
+    );
+    return toThesis(row);
+  },
+
+  /** 挂单撤销/过期后清理对应的 `status='pending'` 论点草稿。 */
+  cancelPending(traderId: number, symbol: string): void {
+    const db = getDb();
+    db.run(
+      `DELETE FROM managed_theses WHERE trader_id = ? AND symbol = ? AND status = 'pending'`,
+      traderId,
+      normalizeSymbol(symbol),
+    );
+  },
+
+  /** BUG-8 修复：加仓后同步更新活跃论点的加权入场均价（保持与 positions.entry_price 一致）。 */
+  updateEntryPrice(traderId: number, symbol: string, newEntryPrice: number, nowMs = Date.now()): void {
+    if (!Number.isFinite(newEntryPrice) || newEntryPrice <= 0) return;
+    const db = getDb();
+    db.run(
+      `UPDATE managed_theses SET entry_price = ?, updated_at = ? WHERE trader_id = ? AND symbol = ? AND status = 'active'`,
+      newEntryPrice,
+      new Date(nowMs).toISOString(),
+      traderId,
+      normalizeSymbol(symbol),
+    );
+  },
+
   /** 更新持仓期间观测到的最高 R 与最大不利偏移水位。 */
   recordExcursion(id: number, peakR: number, worstAdversePct: number, nowMs = Date.now()): void {
     const db = getDb();
@@ -483,6 +598,8 @@ export const managedThesisStore = {
       netPnl: number;
       exitPrice: number;
       closeReason: string | null;
+      /** 分批平仓时传入按全回合净/毛盈亏折算的加权 R，避免仅按尾仓单价算导致与 realized_net_pnl 口径分裂。 */
+      realizedR?: number | null;
       nowMs?: number;
     },
   ): void {
@@ -494,10 +611,16 @@ export const managedThesisStore = {
       active.side === 'long'
         ? outcome.exitPrice - active.entryPrice
         : active.entryPrice - outcome.exitPrice;
-    const realizedR =
+    const computedR =
       initialRisk > 0 && Number.isFinite(outcome.exitPrice) && outcome.exitPrice > 0
         ? round2(favorableMove / initialRisk)
         : 0;
+    const realizedR =
+      outcome.realizedR !== undefined &&
+      outcome.realizedR !== null &&
+      Number.isFinite(outcome.realizedR)
+        ? round2(outcome.realizedR)
+        : computedR;
     const db = getDb();
     db.run(
       `UPDATE managed_theses

@@ -48,6 +48,15 @@ export interface AgentRuntimeDeps {
    * ⚠️ **这是启动死锁的解药。** 见 `isEnabled()` 的注释。
    */
   isAiStrategy: () => boolean;
+  /**
+   * 智能托管 2.0（`ai_managed`）显式停用旧 1.0 策略师改参/实验结算。
+   * 即使 `agent_config_json` 非空（用于保存三档风险护栏配置），`isEnabled()` 也必须返回 `false`。
+   */
+  disableLegacyStrategist?: () => boolean;
+  /**
+   * 允许平仓后独立执行复盘归因（写 `agent_memory` 教训），即便旧 1.0 策略师已停用。
+   */
+  allowTradeReview?: () => boolean;
   /** 与交易循环同一个模型客户端（`DecisionModel` 的形状正好满足 `LoopModel`）。 */
   model: LoopModel;
   /** 当前权益，用来在唤醒时打基线（判回撤用）。 */
@@ -107,7 +116,15 @@ export class AgentRuntime {
    * 第二条打破死锁：选了那个预设就等于"要求 AI 托管"，哪怕它还没改过任何参数。
    * 之后 AI 第一次调参写入 `agent_config_json`，第一条也开始为真 —— 两条互为补充。
    */
+  /**
+   * 只有当策略是「AI 托管」预设、或者之前已经落过盘（`agent_config_json` 非空）时，
+   * 才会为真。调用方借此决定要不要读覆盖配置、要不要发起审视。
+   *
+   * ⚠️ BUG-2 修复：智能托管 2.0（`ai_managed`）在 `deps.disableLegacyStrategist?.()` 为真时，
+   * 即使 `agent_config_json` 非空（用于保存三档护栏配置），也彻底屏蔽旧 1.0 策略师改参/实验结算。
+   */
   isEnabled(): boolean {
+    if (this.deps.disableLegacyStrategist?.()) return false;
     const raw = traders.get(this.deps.traderId)?.agentConfigJson;
     if (typeof raw === 'string' && raw.length > 0) return true;
     return this.deps.isAiStrategy();
@@ -204,7 +221,7 @@ export class AgentRuntime {
    * **不 await**：复盘是附加动作，不该拖慢平仓路径。
    */
   reviewTrade(input: ReviewTradeFacts): void {
-    if (!this.isEnabled()) return;
+    if (!this.isEnabled() && !this.deps.allowTradeReview?.()) return;
     void (async () => {
       try {
         const recent = agentMemory.forSymbol(this.deps.traderId, input.symbol, 5);

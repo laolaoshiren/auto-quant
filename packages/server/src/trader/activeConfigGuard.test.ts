@@ -58,6 +58,10 @@ const ALLOWED_LINES: ReadonlyMap<string, string> = new Map([
   ],
   ['this.activeConfig = result.config;', '`applyAgentPatch()`：写回刚持久化的配置。'],
   ['this.activeConfig = next;', '`applyLiveConfigUpdate()`：操作员在线热更新写回已持久化的配置。'],
+  [
+    'this.activeConfig = clampAiManagedHardLimits(parsed.data);',
+    '`syncManagedConfigFromDb()`：装配期/周期前独立同步 `ai_managed` 数据库配置并钳制硬底线。',
+  ],
 ]);
 
 /** 去掉一行里的 `//` 与 `/* … *\/` 注释（跳过字符串字面量）。 */

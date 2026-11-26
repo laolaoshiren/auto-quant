@@ -173,6 +173,7 @@ function normalizeIntegerWeights(
   raw: Record<Ai500FactorKey, number>,
   minW = 8,
   maxW = 30,
+  baseline?: Ai500Weights,
 ): Ai500Weights {
   const clamped: Record<Ai500FactorKey, number> = {
     trend: clamp(raw.trend, minW, maxW),
@@ -201,12 +202,19 @@ function normalizeIntegerWeights(
   };
 
   let diff = 100 - AI500_FACTOR_KEYS.reduce((s, k) => s + rounded[k], 0);
-  // 按余数方向微调，确保精确总和 = 100 且不越界
-  const order = [...AI500_FACTOR_KEYS].sort((a, b) =>
-    diff > 0
+  // BUG-8 修复：补余优先分配给与 diff 同向调整的因子（避免把 +1 补余加回被负向调减的弱因子，造成小样本死区）
+  const order = [...AI500_FACTOR_KEYS].sort((a, b) => {
+    if (baseline) {
+      const aDelta = scaled[a] - baseline[a];
+      const bDelta = scaled[b] - baseline[b];
+      const aAligned = diff > 0 ? aDelta >= 0 : aDelta <= 0;
+      const bAligned = diff > 0 ? bDelta >= 0 : bDelta <= 0;
+      if (aAligned !== bAligned) return aAligned ? -1 : 1;
+    }
+    return diff > 0
       ? (scaled[b] - rounded[b]) - (scaled[a] - rounded[a])
-      : (scaled[a] - rounded[a]) - (scaled[b] - rounded[b]),
-  );
+      : (scaled[a] - rounded[a]) - (scaled[b] - rounded[b]);
+  });
   let guard = 0;
   while (diff !== 0 && guard < 32) {
     let moved = false;
@@ -312,7 +320,9 @@ export function computeAi500Attribution(
     });
   }
 
-  const finalWeights = applied ? normalizeIntegerWeights(rawTargets, 8, 30) : { ...baselineWeights };
+  const finalWeights = applied
+    ? normalizeIntegerWeights(rawTargets, 8, 30, baselineWeights)
+    : { ...baselineWeights };
   for (const row of dimRows) {
     row.recommendedWeight = finalWeights[row.key];
     row.deltaWeight = finalWeights[row.key] - row.baselineWeight;

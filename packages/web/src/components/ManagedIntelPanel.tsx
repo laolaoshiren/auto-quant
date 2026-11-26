@@ -120,11 +120,17 @@ export function ManagedIntelPanel({ traderId, onSelectSymbol, fillHeight = false
                 item.scoreDelta !== null && item.scoreDelta !== 0
                   ? `${item.scoreDelta > 0 ? '+' : ''}${item.scoreDelta}`
                   : '';
+              const activeWeights =
+                attribution?.applied && attribution.weights
+                  ? attribution.weights
+                  : { trend: 20, breakout: 20, oiFlow: 15, takerFlow: 15, funding: 15, alphaPosition: 15 };
               const tip = [
-                `${item.symbol} AI500 ${item.score}/100 (${dirCn})`,
-                `维度：趋势${item.dimensions.trend}/20 · 突破${item.dimensions.breakout}/20 · OI${item.dimensions.oiFlow}/15 · Taker${item.dimensions.takerFlow}/15 · 费率${item.dimensions.funding}/15 · Alpha${item.dimensions.alphaPosition}/15`,
-                item.vpSummary ? `筹码：${item.vpSummary}` : '',
-                item.tags.length > 0 ? `标签：${item.tags.join(' | ')}` : '',
+                `${item.symbol} AI500：${item.score}/100（${dirCn}）`,
+                `· 趋势 / 突破：${item.dimensions.trend}/${activeWeights.trend} · ${item.dimensions.breakout}/${activeWeights.breakout}`,
+                `· OI / Taker：${item.dimensions.oiFlow}/${activeWeights.oiFlow} · ${item.dimensions.takerFlow}/${activeWeights.takerFlow}`,
+                `· 费率 / Alpha：${item.dimensions.funding}/${activeWeights.funding} · ${item.dimensions.alphaPosition}/${activeWeights.alphaPosition}`,
+                item.vpSummary ? `· 筹码：${item.vpSummary}` : '',
+                item.tags.length > 0 ? `· 标签：${item.tags.join(' | ')}` : '',
               ]
                 .filter(Boolean)
                 .join('\n');
@@ -133,7 +139,7 @@ export function ManagedIntelPanel({ traderId, onSelectSymbol, fillHeight = false
                 <button
                   key={item.symbol}
                   type="button"
-                  title={tip}
+                  data-aq-tip={tip}
                   onClick={() => onSelectSymbol?.(item.symbol)}
                   className="inline-flex max-w-full items-center gap-1 rounded border border-base-700/70 bg-base-900/60 px-2 py-1 text-left transition hover:border-accent/60 hover:bg-base-800/80"
                 >

@@ -5,7 +5,7 @@ import { closeDb, initDb } from './db/index.js';
 import { dbPath, ensureDataDir, env, resolveJwtSecret, resolveMasterKey } from './env.js';
 import { createLogger } from './logger.js';
 import { setUnrecognizedErrorSink } from './llm/errors.js';
-import { buildServer, bootstrapOwnerAccount } from './api/server.js';
+import { buildServer, bootstrapOwnerAccount, recordUnhandledRejection } from './api/server.js';
 import { BalanceService } from './services/balance.js';
 import { startSharedMarketPulse, stopSharedMarketPulse } from './radar/marketPulse.js';
 import { TraderManager } from './trader/manager.js';
@@ -226,6 +226,7 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('unhandledRejection', (reason) => {
+    recordUnhandledRejection();
     log.error(`未处理的 Promise 拒绝：${String(reason)}`);
   });
   process.on('uncaughtException', (error) => {

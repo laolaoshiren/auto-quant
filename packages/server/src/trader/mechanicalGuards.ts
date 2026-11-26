@@ -229,8 +229,11 @@ export function isStopTighter(
  */
 export async function applyBreakevenGuardForTrader(input: {
   traderId: number;
+  mode?: Trader['mode'];
   threshold: number;
   getTrailPercent: () => number;
+  /** 智能托管 2.0：按标的返回最新 15m ATR%（用于 max(2.0×ATR15m, 2.5%) 自适应追踪）。 */
+  getAtr15mPct?: (symbol: string) => number | null;
   getEffectivePositions: () => Promise<ExchangePosition[]>;
   toPositionView: (local: PositionRow) => PositionView;
   cancelAllStopProtection: (symbol: string) => Promise<number>;
@@ -282,6 +285,9 @@ export async function applyBreakevenGuardForTrader(input: {
       unrealizedPnlPercent: live.unrealizedPnlPercent,
     };
 
+    const isManagedV2 = input.mode === 'ai_managed';
+    const activeThesis = isManagedV2 ? managedThesisStore.getActive(traderId, local.symbol) : null;
+    const configuredTrail = input.getTrailPercent();
     const verdict = shouldMoveStopToBreakeven({
       side: view.side,
       entryPrice: view.entryPrice,
@@ -289,7 +295,18 @@ export async function applyBreakevenGuardForTrader(input: {
       markPrice: view.markPrice,
       unrealizedPnlPercent: view.unrealizedPnlPercent,
       triggerPercent: threshold,
-      trailPercent: input.getTrailPercent(),
+      trailPercent: isManagedV2 ? Math.max(2.5, configuredTrail) : configuredTrail,
+      ...(isManagedV2
+        ? {
+            breakevenTriggerR: 1.0,
+            minBreakevenPriceMovePct: 1.5,
+            breakevenFeeBufferPct: 0.12,
+            trailTriggerR: 1.5,
+            initialStopLoss: activeThesis?.initialStopLoss ?? local.stop_loss,
+            atr15mPct: input.getAtr15mPct?.(local.symbol) ?? null,
+            trailAtrMultiplier: 2.0,
+          }
+        : {}),
     });
 
     if (!verdict.move || verdict.newStop === null) continue;

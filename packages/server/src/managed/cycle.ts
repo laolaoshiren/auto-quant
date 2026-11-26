@@ -46,6 +46,8 @@ export interface ManagedCycleInput {
   deltaTracker: RadarDeltaTracker;
   /** 本轮当前持仓标的（必须无条件展开）。 */
   heldSymbols: readonly string[];
+  /** BUG-6 修复：本轮在途限价挂单标的（即使跌出 Top 4 也必须展开完整三周期 K 线，避免模型盲评）。 */
+  pendingSymbols?: readonly string[];
   /** 观察名单标的（优先进入初筛）。 */
   watchedSymbols: readonly string[];
   /** 上游已有快照（用于 static 模式或测试替身无缝降级）。 */
@@ -113,7 +115,13 @@ async function mapConcurrent<T, R>(
 export async function runManagedRadarCycle(input: ManagedCycleInput): Promise<ManagedCycleResult> {
   const nowMs = input.nowMs ?? Date.now();
   const heldSet = new Set(input.heldSymbols);
-  const alwaysSet = new Set<string>([...input.heldSymbols, ...input.watchedSymbols, 'BTCUSDT']);
+  const pendingList = input.pendingSymbols ?? [];
+  const alwaysSet = new Set<string>([
+    ...input.heldSymbols,
+    ...pendingList,
+    ...input.watchedSymbols,
+    'BTCUSDT',
+  ]);
 
   const snapshotBySymbol = new Map<string, MarketSnapshot>(
     input.existingSnapshots.map((s) => [s.symbol, s]),
@@ -331,10 +339,16 @@ export async function runManagedRadarCycle(input: ManagedCycleInput): Promise<Ma
   });
   const scoreBySym = new Map(rankResult.ranked.map((c) => [c.symbol, c]));
 
-  // 最终展开集合：全部当前持仓 + Top 4 雷达高分标的（去重）
+  // 最终展开集合：全部当前持仓 + 在途限价挂单 + Top 4 雷达高分标的（去重）
   const expandOrder: string[] = [];
   const seen = new Set<string>();
   for (const sym of input.heldSymbols) {
+    if (scoreBySym.has(sym) && !seen.has(sym)) {
+      seen.add(sym);
+      expandOrder.push(sym);
+    }
+  }
+  for (const sym of pendingList) {
     if (scoreBySym.has(sym) && !seen.has(sym)) {
       seen.add(sym);
       expandOrder.push(sym);
@@ -412,11 +426,13 @@ export async function runManagedRadarCycle(input: ManagedCycleInput): Promise<Ma
     }
   }
 
+  const strongThr = input.calibration?.strongThreshold ?? AI500_DEFAULTS.strongThreshold;
+  const watchThr = input.calibration?.watchThreshold ?? AI500_DEFAULTS.watchThreshold;
   const topSummary = rankResult.topCandidates
     .map((c) => `${c.symbol} ${c.score}分(${c.bias === 'long' ? '多' : c.bias === 'short' ? '空' : '中'})`)
     .join(' · ');
   const radarSummaryLine =
-    `[AI500雷达] 扫描 ${rawInputs.size} 标的 → 强关注(≥75) ${rankResult.strongCount} · 观察(≥65) ${rankResult.watchCount}` +
+    `[AI500雷达] 扫描 ${rawInputs.size} 标的 → 强关注(≥${strongThr}) ${rankResult.strongCount} · 观察(≥${watchThr}) ${rankResult.watchCount}` +
     (topSummary ? ` · Top: ${topSummary}` : '');
 
   return {
