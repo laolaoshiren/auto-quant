@@ -415,9 +415,9 @@ export function Panel({
     <section className={cn('panel', className)}>
       {(title || actions) && (
         <header className="panel-head shrink-0">
-          {/* min-w-0 + flex-1：配合 .panel-head 的 flex-wrap，避免强制 truncate 截断复合胶囊标题 */}
-          <h2 className="panel-title min-w-0 flex-1">{title}</h2>
-          {actions && <div className="flex shrink-0 flex-wrap items-center gap-1.5">{actions}</div>}
+          {/* min-w-0 + flex-auto（flex-basis: auto）：宽屏单行两端对齐，窄屏按内容自然宽度触发 panel-head 换行，避免 flex-1(0%) 把左侧 Tab 挤成竖排或与右侧按钮重叠 */}
+          <h2 className="panel-title min-w-0 max-w-full flex-auto">{title}</h2>
+          {actions && <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1.5">{actions}</div>}
         </header>
       )}
       <div className={cn('min-w-0', padded && 'p-4', bodyClassName)}>{children}</div>
