@@ -183,7 +183,7 @@ export function ManagedIntelPanel({ traderId, onSelectSymbol, fillHeight = false
                         t.timeStopAt && Date.parse(t.timeStopAt) <= Date.now() ? 'warn' : 'accent'
                       }
                       className={t.timeStopAt ? 'cursor-help' : undefined}
-                      data-aq-tip={t.timeStopAt ? `时间止损截止：${fmtBeijingTime(t.timeStopAt)}（UTC+8，要求进展 ≥ ${t.minProgressR}R）` : undefined}
+                      data-aq-tip={t.timeStopAt ? `时间止损截止：${fmtBeijingTime(t.timeStopAt)}（要求进展 ≥ ${t.minProgressR}R）` : undefined}
                     >
                       时间止损 {formatRemaining(t.timeStopAt)}
                     </Badge>

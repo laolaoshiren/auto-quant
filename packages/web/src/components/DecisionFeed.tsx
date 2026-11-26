@@ -2396,7 +2396,7 @@ function TokenBillingHeaderBadge({
         ? `累计 Token 估算费用：${fmtTokenCostUsd(billing.totalCostUsd)}（${cycleNote}）`
         : `累计 Token 用量：${fmtCompactTokens(totalTok)}（${cycleNote}）`,
     billing.totalCostUsd !== null
-      ? `· 今日估算：${fmtTokenCostUsd(billing.todayCostUsd)}（北京 ${billing.todayCycles} 轮）`
+      ? `· 今日估算：${fmtTokenCostUsd(billing.todayCostUsd)}（${billing.todayCycles} 轮）`
       : '· 单价状态：当前模型暂无公开单价',
     `· 累计输入：${fmtCompactTokens(billing.promptTokens)}（缓存 ${fmtCompactTokens(billing.cachedTokens)}）`,
     `· 累计输出：${fmtCompactTokens(billing.completionTokens)}${billing.reasoningTokens > 0 ? `（思考 ${fmtCompactTokens(billing.reasoningTokens)}）` : ''}`,
