@@ -326,14 +326,14 @@ test('★ 调整保护位必须完整展示从多少到多少、增减量与百�
   const stop = parts.find((p) => p.key === 'stop');
   assert.equal(stop?.label, '止损');
   assert.equal(stop?.value, '60,970.00 → 61,300.00');
-  assert.equal(stop?.sub, '(+330.00 / +0.54%)');
+  assert.equal(stop?.sub, '(+0.54%)');
 
   const tp = parts.find((p) => p.key === 'target');
   assert.equal(tp?.label, '止盈');
   assert.equal(tp?.value, '62,400.00');
-  assert.equal(tp?.sub, '(未变 · +1.74%)');
+  assert.equal(tp?.sub, '(未变)');
 
-  // 下调止盈测试（负增减量与负百分比）
+  // 下调止盈测试（负百分比标识）
   const lowerTp = figureParts(
     makeDecision({
       symbol: 'BTCUSDT',
@@ -344,5 +344,5 @@ test('★ 调整保护位必须完整展示从多少到多少、增减量与百�
     ctx,
   ).find((p) => p.key === 'target');
   assert.equal(lowerTp?.value, '62,400.00 → 62,000.00');
-  assert.equal(lowerTp?.sub, '(-400.00 / -0.64%)');
+  assert.equal(lowerTp?.sub, '(-0.64%)');
 });

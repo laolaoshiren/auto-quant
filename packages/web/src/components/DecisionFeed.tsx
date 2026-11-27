@@ -135,7 +135,6 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  Ban,
   Check,
   ChevronDown,
   ChevronRight,
@@ -2851,6 +2850,12 @@ function DecisionRow({
 }) {
   const figures = figureParts(decision, price, figureContext);
   const canSelect = Boolean(onSelectSymbol && isClickableSymbol(decision.symbol));
+  /* 调整保护位成功且无额外风控推翻时，把「✓ 已执行」直接并入参数胶囊同一行，省去重复的整行说明。 */
+  const inlineAdjustOk =
+    figures.length > 0 &&
+    decision.action === 'adjust_protection' &&
+    outcome?.status === 'ok' &&
+    ((outcome.adjustments?.length ? outcome.adjustments : decision.adjustments) ?? []).length === 0;
 
   return (
     <div className={cn('min-w-0 border-l-2 pl-2.5', actionRailClass(decision.action))}>
@@ -2937,11 +2942,20 @@ function DecisionRow({
               </span>
             );
           })}
+          {inlineAdjustOk && outcome && (
+            <Badge
+              tone="up"
+              className="shrink-0"
+              data-aq-tip={plainText(humanizeToolNames(outcome.detail ?? '已调整保护位'))}
+            >
+              ✓ {STATUS_LABELS.ok}
+            </Badge>
+          )}
         </p>
       )}
 
       {/* 这一条决策在运行时到底发生了什么（含风控干预与命中熔断的原因）。 */}
-      <DecisionOutcome decision={decision} entry={outcome} />
+      {!inlineAdjustOk && <DecisionOutcome decision={decision} entry={outcome} hasFigures={figures.length > 0} />}
     </div>
   );
 }
@@ -2972,51 +2986,52 @@ function DecisionRow({
  * （在解析、风控之前就被丢掉了，或者记录不完整）。留白会让操作者以为"大概是
  * 在排队执行" —— 而这恰恰是这次要修的那类误读。
  */
+/** 判断一条风控备注是常规通过/步长取整提示，还是必须醒目展示的风控推翻/硬限制。 */
+function splitAdjustmentNotes(notes: ReadonlyArray<string>): {
+  overrides: string[];
+  routine: string[];
+  riskSummary: string | null;
+} {
+  const overrides: string[] = [];
+  const routine: string[] = [];
+  let riskSummary: string | null = null;
+  for (const raw of notes) {
+    const text = raw.trim();
+    if (!text) continue;
+    const riskMatch = text.match(/^本笔交易风险\s*(\$[\d,.]+)\s*[（(]占权益\s*([\d.]+%)[）)]/);
+    if (riskMatch) {
+      riskSummary = `风险 ${riskMatch[1]} (${riskMatch[2]})`;
+      routine.push(text);
+      continue;
+    }
+    if (
+      /^止损距离\s+[\d.]+%\s*[≥>=]/.test(text) ||
+      /^名义价值已调整为.*匹配交易所最小下单单位/.test(text)
+    ) {
+      routine.push(text);
+      continue;
+    }
+    overrides.push(text);
+  }
+  return { overrides, routine, riskSummary };
+}
+
 function DecisionOutcome({
   decision,
   entry,
+  hasFigures = false,
 }: {
   decision: Decision;
   entry: ExecutionLogEntry | null;
+  hasFigures?: boolean;
 }) {
-  /*
-   * 风控对这条决策做过的每一次干预。
-   *
-   * 优先用**执行记录上**的那一份：`ok` 条目才带 `adjustments`
-   * （见 `autoTrader.executeOpen`），它记的是策略真正采用的那组参数。
-   * 记录上没有时退回决策自己带的那一份，这样任何一条现在能看见的干预
-   * 都不会因为这次改动而消失。
-   */
   const [expanded, setExpanded] = useState(false);
-  /*
-   * ⚠️ **回落到的那一份也要兜底**（两处独立修复合并后的版本）。
-   *
-   * 这一行的意图是"执行记录上那份优先，没有就用决策自己带的那份"。但两份
-   * **都可能没有**：WebSocket 实时推送的决策与执行条目尚未落库，字段是缺的。
-   *
-   * ## 为什么这是真 BUG（不是"测试数据的问题"）
-   *
-   * 原来写的是 `entry?.adjustments?.length ? entry.adjustments : decision.adjustments`：
-   * 前半段对 `entry` 用了可选链，**但兜底那一侧直接读 `decision.adjustments`** ——
-   * 而 `decision` 缺这个字段时它就是 `undefined`。
-   *
-   * 下一个表达式（`notes.length`）于是抛
-   * `Cannot read properties of undefined (reading 'length')`。
-   *
-   * 而决策记录**跨版本累积**，`adjustments` 是后来才加上的字段 ——
-   * 本地库里实测就有 `[{"symbol":"BTCUSDT","action":"open_long"}]` 这种旧记录。
-   * 崩溃发生在**渲染路径**：`FeedErrorBoundary` 会把**整块决策看板**
-   * 换成一张错误卡（实测现象：团队看板完全不显示）。**一条旧记录足以让整个看板打不开。**
-   *
-   * ⚠️ `?.length ?` 这个写法本身是对的（它要区分"空数组"与"有内容"），
-   * 缺的是最后那一层 `?? []`。
-   */
   const notes = (entry?.adjustments?.length ? entry.adjustments : decision.adjustments) ?? [];
 
   if (!entry) {
-    // 观望 / 跳过本身就不会进入下单执行阶段，无需在每张卡片底部刷屏重复一句废话；
-    // 只有真正的可执行动作（开仓/平仓/加减仓/调保护/撤单/持仓）缺少执行记录时才显式提醒。
-    if (decision.action === 'wait' || decision.action === 'skip') {
+    // 观望 / 跳过 / 维持持有本身不会下单执行，无需在卡片底部刷屏重复提示；
+    // 只有真正的可执行动作（开仓/平仓/加减仓/调保护/撤单）缺少执行记录时才显式提醒。
+    if (decision.action === 'wait' || decision.action === 'skip' || decision.action === 'hold') {
       return null;
     }
     return (
@@ -3026,109 +3041,84 @@ function DecisionOutcome({
     );
   }
 
-  const { key, label, tone } = outcomeBadge(entry.status);
-  /*
-   * 图标与文字一起区分四种状态（`DESIGN.md` §2：不能只靠颜色）。
-   * `rejected` 与 `failed` 刻意用**不同**的图标：两者都是"没成交"，但一个是
-   * 风控的裁决、一个是事故，混用同一个三角感叹号等于把这两件事又合并回去。
-   */
-  const Icon =
-    key === 'ok' ? Check : key === 'rejected' ? TriangleAlert : key === 'failed' ? X : Ban;
-
-  /*
-   * 「第一句」与「其余」。
-   *
-   * 断句用中文句号与分号 —— 服务端写的这些句子本身就以此断句
-   * （`单日亏损熔断：今日已实现亏损 $0.59，占权益 6.03%（上限 5%）。`）。
-   * 一个断句符都找不到时整段都算第一句：短消息本来就不需要折叠。
-   */
-  /* ⚠️ `plainText`：理由里的 `**` 是写给模型/维护者的强调符，不该露给用户（见 `lib/plainText.ts`）。 */
+  const { label, tone } = outcomeBadge(entry.status);
   const detail = plainText(humanizeToolNames(entry.detail ?? ''));
   const cut = detail.search(/[。；]/);
   const lead = cut >= 0 ? detail.slice(0, cut + 1) : detail;
   const rest = cut >= 0 ? detail.slice(cut + 1).trim() : '';
+
+  const { overrides, routine, riskSummary } = splitAdjustmentNotes(notes);
+
   /*
-   * 折叠开关**只看 `rest`**。
-   *
-   * `notes`（风控干预）不参与折叠 —— 原因见下面那段说明。
+   * 限价挂单（`submitted`）上方胶囊已经写明了「限价 X」，徽章也写明了「已挂单（等成交）」，
+   * 再另起一行写「已挂限价单 @ X（现价 Y），等待成交；」完全重复；这里只提炼出有用的「现价 Y」
+   * 与状态徽章合并在同一行，完整文案收进「详情」按需展开。
    */
-  const hasMore = rest.length > 0;
+  const isRedundantSubmittedLead =
+    hasFigures && entry.status === 'submitted' && /^已挂限价单\s*@/.test(lead);
+  const submittedMarketPrice = isRedundantSubmittedLead
+    ? (lead.match(/[（(]现价\s*([\d,.]+)[）)]/)?.[1] ?? null)
+    : null;
+  const isRedundantAdjustLead =
+    hasFigures &&
+    decision.action === 'adjust_protection' &&
+    entry.status === 'ok' &&
+    /^已调整保护位[：:]/.test(lead);
+
+  const inlineLead = isRedundantSubmittedLead || isRedundantAdjustLead ? '' : lead;
+  const hiddenDetail = isRedundantSubmittedLead || isRedundantAdjustLead ? detail : rest;
+  const hasMore = hiddenDetail.length > 0 || routine.length > 0;
 
   return (
     <div className="mt-1.5 min-w-0">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-        <Badge tone={tone} className="inline-flex shrink-0 items-center gap-1">
-          <Icon aria-hidden className="h-3 w-3 shrink-0" />
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+        <Badge
+          tone={tone}
+          className="inline-flex shrink-0 items-center"
+          data-aq-tip={!inlineLead && detail ? detail : undefined}
+        >
           {label}
         </Badge>
         {entry.notionalUsd !== undefined && (
-          <span className="num text-xs text-ink-lo" title="名义价值（USDT）">
+          <span className="num text-ink-lo" data-aq-tip="实际成交名义价值（USDT）">
             {fmtUsd(entry.notionalUsd, 2)}
           </span>
         )}
+        {submittedMarketPrice && (
+          <span className="num text-ink-lo" data-aq-tip="挂单当时的最新市场参考价">
+            现价 {submittedMarketPrice}
+          </span>
+        )}
+        {riskSummary && (
+          <span className="num text-ink-lo" data-aq-tip="按止损距离折算的本笔最大预估亏损及占账户权益比">
+            {riskSummary}
+          </span>
+        )}
         {entry.orderId && (
-          <span className="num text-xs text-ink-faint" title={`交易所委托号 ${entry.orderId}`}>
+          <span className="num text-ink-faint" data-aq-tip={`交易所委托号 ${entry.orderId}`}>
             委托 {entry.orderId}
           </span>
         )}
-        {/*
-          折叠开关只在**真的有后续内容**时出现 —— 每条决策都挂一个点开是空的
-          "详情"比没有更让人困惑（同一个教训见 `CycleDetails` 里那两个死按钮）。
-        */}
+        {inlineLead && (
+          <span className="min-w-0 break-words leading-relaxed text-ink-mid">{inlineLead}</span>
+        )}
         {hasMore && (
           <button
             type="button"
             onClick={() => setExpanded((v) => !v)}
             aria-expanded={expanded}
-            className="shrink-0 rounded px-1 text-xs text-ink-lo transition hover:text-ink-hi"
-            title={expanded ? '收起剩余说明' : '展开剩余说明'}
+            className="shrink-0 rounded px-1 text-[11px] text-ink-faint transition hover:text-ink-hi"
+            data-aq-tip={expanded ? '收起风控与执行明细' : '展开风控校验与完整执行说明'}
           >
-            {expanded ? '收起' : '详情'}
+            {expanded ? '收起' : '明细'}
           </button>
         )}
       </div>
 
-      {/*
-        原因 / 错误：**原样显示服务端写的那句话**（`entry.detail`）—— 但只显示**第一句**。
-        改写它会把数字弄丢（数字才是重点），所以一个字都不动，只是把后半段折起来。
-
-        ## 为什么要折
-
-        实测熔断那条 `detail` 是一整段四行：
-
-          总回撤熔断：权益较最高水位 $9.54 回撤了 21.00%（上限 20%）。注意：总回撤
-          熔断不按日重置 —— 它要等权益回到最高水位以下 20% 以内才会解除，而空仓时
-          权益不会自己变化，所以它不会自行恢复。要不要继续交易需要操作员决定
-          （例如入金，或调整这一上限）。
-
-        它**每一轮都出现**，而连续 32 轮的内容一字不差（`groupCycles` 折叠了重复的
-        轮次，但单条内部这四行仍然照渲）。参考产品一条决策只占一行多一点 ——
-        差别不在骨架（币种图标 + 符号 + 动作徽章 + 置信度 + 理由，我们与它一致），
-        而在**我们额外挂了两段**：执行结果与风控注意事项。
-
-        这两段**不能删**（`AGENTS.md` §2.7：界面不能对"发生了什么"说谎），
-        但可以**默认收起**。分界线是「第一句」：它是"为什么"的答案
-        （熔断、被拒、失败的**具体**原因），必须始终可见；其后的补充与建议按需展开。
-      */}
-      {lead && <p className="mt-0.5 break-words text-xs leading-relaxed text-ink-mid">{lead}</p>}
-
-      {/*
-        ⚠️ **风控干预始终可见，不跟着"详情"一起折。**
-
-        折叠是为了少几行字，但这两类文字的性质不同：
-
-        · `detail` 的**后半段**是补充说明与建议（"要不要继续交易需要操作员决定…"）——
-          它可以在你需要时再展开；
-        · `adjustments` 是**风控推翻模型的地方**（"杠杆已从 20x 压到上限 5x。"）。
-          `AGENTS.md` §2.1 要求每一次运行时推翻都留下痕迹，那是这个产品可被信任的
-          前提 —— **一眼扫过时它必须在场**。
-
-        第一版把两类一起折了，`test:feed` 里那条「风控干预仍然显示」立刻失败。
-        那是对的：**当一条检查说"屏幕上少了一句话"，先怀疑自己减少了什么。**
-      */}
-      {notes.length > 0 && (
-        <ul className="mt-0.5 space-y-0.5">
-          {notes.map((note, index) => (
+      {/* 真正的风控推翻/截断（如杠杆或仓位被风控压低）必须始终醒目可见。 */}
+      {overrides.length > 0 && (
+        <ul className="mt-1 space-y-0.5">
+          {overrides.map((note, index) => (
             <li key={index} className="break-words text-xs leading-relaxed text-warn/90">
               • {note}
             </li>
@@ -3136,8 +3126,19 @@ function DecisionOutcome({
         </ul>
       )}
 
-      {expanded && rest && (
-        <p className="mt-0.5 break-words text-xs leading-relaxed text-ink-mid">{rest}</p>
+      {expanded && hasMore && (
+        <div className="mt-1 space-y-0.5 rounded-md border border-base-800/90 bg-base-900/55 px-2 py-1.5 text-[11.5px] leading-relaxed text-ink-lo">
+          {hiddenDetail && <p className="break-words text-ink-mid">{hiddenDetail}</p>}
+          {routine.length > 0 && (
+            <ul className="space-y-0.5">
+              {routine.map((note, index) => (
+                <li key={index} className="break-words">
+                  • {note}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </div>
   );

@@ -218,7 +218,7 @@ function buildProtectionAdjustmentFigure(params: {
         key,
         label: name,
         value: fmtPriceUsd(nextPrice),
-        sub: entryPct ? `(未变 · ${entryPct})` : '(未变)',
+        sub: '(未变)',
         tooltip: tipLines.join('\n'),
       };
     }
@@ -237,7 +237,7 @@ function buildProtectionAdjustmentFigure(params: {
       key,
       label: name,
       value: `${fmtPriceUsd(prevPrice)} → ${fmtPriceUsd(nextPrice)}`,
-      sub: `(${deltaStr} / ${pctStr})`,
+      sub: `(${pctStr})`,
       tooltip: tipLines.join('\n'),
     };
   }
