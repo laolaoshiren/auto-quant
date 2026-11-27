@@ -65,6 +65,10 @@ function formatBeijingTickMark(time: Time, tickMarkType: TickMarkType): string {
   }
 }
 
+const DEFAULT_RIGHT_OFFSET = 8;
+/** 有持仓/挂单价格线时加大右侧留白（约 18 根 K 线宽度），避免最新 K 线与右侧「开多 / 止盈 / 止损」标签重叠。 */
+const PRICE_LINE_RIGHT_OFFSET = 18;
+
 export function CandlestickChart({
   candles,
   priceLines,
@@ -108,6 +112,10 @@ export function CandlestickChart({
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const priceLineHandlesRef = useRef<IPriceLine[]>([]);
+  const hasPriceLines = Boolean(priceLines && priceLines.length > 0);
+  const rightOffsetRef = useRef<number>(
+    hasPriceLines ? PRICE_LINE_RIGHT_OFFSET : DEFAULT_RIGHT_OFFSET,
+  );
   /*
    * 当前外观下的配色。**换模板或切深浅时它会变**，而下面两个 effect 都依赖
    * 它 —— 所以图表会跟着重画，不会停在上一套主题的绿上（见 `useChartInk`）。
@@ -151,7 +159,7 @@ export function CandlestickChart({
         borderColor: ink.grid,
         timeVisible: true,
         secondsVisible: false,
-        rightOffset: 4,
+        rightOffset: rightOffsetRef.current,
         // A minimum bar spacing keeps a 3-bar window from stretching each candle
         // into a slab that looks like a different timeframe.
         minBarSpacing: 2,
@@ -288,6 +296,26 @@ export function CandlestickChart({
     const deduped = data.filter((bar, index) => index === 0 || bar.time !== data[index - 1]?.time);
     series.setData(deduped);
   }, [candles]);
+
+  /*
+   * 有/无持仓价格线状态变化时动态同步右侧留白：
+   * 若用户正停留在实时末端（未手动往历史左拖），同步平移到新留白位置避免标签盖住最新 K 线；
+   * 若用户已主动左拖看历史，则绝不打断其当前视口。
+   */
+  useEffect(() => {
+    const chart = chartRef.current;
+    const targetOffset = hasPriceLines ? PRICE_LINE_RIGHT_OFFSET : DEFAULT_RIGHT_OFFSET;
+    const prevOffset = rightOffsetRef.current;
+    rightOffsetRef.current = targetOffset;
+    if (!chart || prevOffset === targetOffset) return;
+
+    const ts = chart.timeScale();
+    const atLiveEdge = Math.abs(ts.scrollPosition() - prevOffset) <= 1.5;
+    chart.applyOptions({ timeScale: { rightOffset: targetOffset } });
+    if (atLiveEdge) {
+      ts.scrollToPosition(targetOffset, false);
+    }
+  }, [hasPriceLines, fill, height]);
 
   /*
    * 持仓 / 委托水平价格线（开仓均价、挂单开仓、止损、止盈）。
