@@ -33,6 +33,7 @@ import {
   unboundedAiManagedConfig,
   TIMEFRAMES,
   TimeframeSchema,
+  type ExecutionLogEntry,
   type ManagedRiskProfileId,
   type PositionView,
   type ServerEvent,
@@ -4354,7 +4355,10 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
      * 提示词只在用户点开「提示词」标签时才需要，那时由
      * `GET /traders/:id/decisions/:recordId` 单条取（详情接口本来就有）。
      */
-    return records.map((record) => ({ ...record, systemPrompt: '', userPrompt: '' }));
+    return records.map((record) => {
+      const hydratedLog = hydrateAdjustmentContextFromPrompt(record.userPrompt, record.executionLog);
+      return { ...record, executionLog: hydratedLog, systemPrompt: '', userPrompt: '' };
+    });
   });
 
   app.get('/api/traders/:id/decisions/:recordId', authed, async (request, reply) => {
@@ -4891,4 +4895,82 @@ function readForeignActivityFor(traderId: number): {
   } catch {
     return { ...empty, ...gap };
   }
+}
+
+/**
+ * `/api/traders/:id/decisions` 列表接口为节省带宽会裁掉 `userPrompt` 全文。
+ * 对升级前的历史 `adjust_protection` / `add_to_position` / `reduce_position` 记录，
+ * 裁剪前先从 `userPrompt` 的「当前持仓」行提取调整前 `previousStopLoss`/`previousTakeProfit`/`entryPrice`
+ * 回填到对应执行日志项，使决策流与单轮审计详情页展现完全一致且不增加响应体积。
+ */
+const HYDRATE_ACTIONS = new Set(['adjust_protection', 'add_to_position', 'reduce_position']);
+
+function hydrateAdjustmentContextFromPrompt(
+  userPrompt: string | null | undefined,
+  log: ExecutionLogEntry[],
+): ExecutionLogEntry[] {
+  if (!userPrompt || log.length === 0) return log;
+  let needsHydrate = false;
+  for (const entry of log) {
+    if (
+      entry.status !== 'data' &&
+      HYDRATE_ACTIONS.has(entry.action) &&
+      entry.previousStopLoss === undefined &&
+      entry.previousTakeProfit === undefined &&
+      entry.entryPrice === undefined
+    ) {
+      needsHydrate = true;
+      break;
+    }
+  }
+  if (!needsHydrate) return log;
+
+  const lines = userPrompt.split('\n');
+  const parseLine = (symbol: string): { entryPrice?: number | null; previousStopLoss?: number | null; previousTakeProfit?: number | null } | null => {
+    const norm = symbol.trim().toUpperCase();
+    if (!norm) return null;
+    const escaped = norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const symRe = new RegExp(`(?:^|[\\s*|\\[])\\*{0,2}${escaped}\\b`, 'i');
+    for (const line of lines) {
+      if (!symRe.test(line)) continue;
+      const hasPosMarkers =
+        /(?:均价|开仓价?|entry)\s*[=:]?\s*\d/i.test(line) ||
+        /(?:SL|止损)\s*[=:]\s*(?:\d|无|none)/i.test(line) ||
+        /(?:TP|止盈)\s*[=:]\s*(?:\d|无|none)/i.test(line);
+      if (!hasPosMarkers) continue;
+
+      const parseVal = (m: RegExpMatchArray | null): number | null | undefined => {
+        if (!m) return undefined;
+        const token = m[1]!.replace(/,/g, '').trim();
+        if (token === '无' || token.toLowerCase() === 'none') return null;
+        const n = Number(token);
+        return Number.isFinite(n) && n > 0 ? n : undefined;
+      };
+      const entryPrice = parseVal(line.match(/(?:均价|开仓价?|entry)\s*[=:]?\s*\$?([\d,]+(?:\.\d+)?)/i));
+      const previousStopLoss = parseVal(line.match(/(?:\bSL|止损)\s*[=:]\s*\$?([\d,]+(?:\.\d+)?|无|none)/i));
+      const previousTakeProfit = parseVal(line.match(/(?:\bTP|止盈)\s*[=:]\s*\$?([\d,]+(?:\.\d+)?|无|none)/i));
+      if (entryPrice !== undefined || previousStopLoss !== undefined || previousTakeProfit !== undefined) {
+        return {
+          ...(entryPrice !== undefined ? { entryPrice } : {}),
+          ...(previousStopLoss !== undefined ? { previousStopLoss } : {}),
+          ...(previousTakeProfit !== undefined ? { previousTakeProfit } : {}),
+        };
+      }
+    }
+    return null;
+  };
+
+  return log.map((entry) => {
+    if (
+      entry.status === 'data' ||
+      !HYDRATE_ACTIONS.has(entry.action) ||
+      entry.previousStopLoss !== undefined ||
+      entry.previousTakeProfit !== undefined ||
+      entry.entryPrice !== undefined
+    ) {
+      return entry;
+    }
+    const ctx = parseLine(entry.symbol);
+    return ctx ? { ...entry, ...ctx } : entry;
+  });
 }

@@ -352,7 +352,8 @@ export function figureParts(
   }
 
   if (decision.action === 'adjust_protection') {
-    const entryRef = isFiniteNum(context?.entryPrice) ? context.entryPrice : price;
+    /* 调整保护位只使用真实开仓均价 `context.entryPrice`，绝不拿实时跳动的行情价冒充开仓价。 */
+    const entryRef = isFiniteNum(context?.entryPrice) ? context.entryPrice : null;
     const adjusted: Figure[] = [];
     if (num(decision.stopLoss)) {
       adjusted.push(
