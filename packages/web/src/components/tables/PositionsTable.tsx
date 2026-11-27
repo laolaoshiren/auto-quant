@@ -120,20 +120,20 @@ export function PositionsTable({
         className={`scroll-x ${fillHeight ? 'min-h-0 flex-1' : collapsed ? COLLAPSED_MAX_H : EXPANDED_MAX_H} overflow-y-auto`}
       >
         <table className="w-full border-collapse">
-          <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-850">
+          <thead className="sticky top-0 z-10 border-b border-base-800 bg-base-900">
             <tr>
-              <th className="th whitespace-nowrap px-1.5">合约 / 方向</th>
-              <th className="th whitespace-nowrap px-1.5">模式</th>
-              <th className="th whitespace-nowrap px-1.5 text-right">数量</th>
-              <th className="th whitespace-nowrap px-1.5 text-right">名义</th>
-              <th className="th whitespace-nowrap px-1.5 text-right">保证金</th>
-              <th className="th whitespace-nowrap px-1.5 text-right">开仓价</th>
-              <th className="th whitespace-nowrap px-1.5 text-right">标记价</th>
-              <th className="th whitespace-nowrap px-1.5 text-right">止盈</th>
-              <th className="th whitespace-nowrap px-1.5 text-right">止损</th>
-              <th className="th whitespace-nowrap px-1.5 text-right">强平价</th>
-              <th className="th whitespace-nowrap px-1.5 text-right">浮盈</th>
-              <th className="th sticky right-0 z-10 whitespace-nowrap bg-base-850 px-1.5 text-right">操作</th>
+              <th className="th">合约 / 方向</th>
+              <th className="th">模式</th>
+              <th className="th text-right">数量</th>
+              <th className="th text-right">名义</th>
+              <th className="th text-right">保证金</th>
+              <th className="th text-right">开仓价</th>
+              <th className="th text-right">标记价</th>
+              <th className="th text-right">止盈</th>
+              <th className="th text-right">止损</th>
+              <th className="th text-right">强平价</th>
+              <th className="th text-right">浮盈</th>
+              <th className="th col-action-sticky">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -145,8 +145,8 @@ export function PositionsTable({
               const targetDistance = position.takeProfit ? distancePercent(position.entryPrice, position.takeProfit) : null;
 
               return (
-                <tr key={position.id} className="row-hover align-top">
-                  <td className="td px-1.5">
+                <tr key={position.id} className="row-hover">
+                  <td className="td">
                     <div className="flex items-center gap-1.5">
                       <SymbolCell symbol={position.symbol} onSelect={onSelectSymbol} tone={symbolTones.get(position.symbol)} />
                       <SideBadge side={position.side} />
@@ -172,7 +172,7 @@ export function PositionsTable({
                     </div>
                   </td>
 
-                  <td className="td px-1.5">
+                  <td className="td">
                     <Badge
                       tone="muted"
                       title={
@@ -185,22 +185,22 @@ export function PositionsTable({
                     </Badge>
                   </td>
 
-                  <td className="td num whitespace-nowrap px-1.5 text-right">{fmtQty(position.quantity)}</td>
+                  <td className="td num text-right">{fmtQty(position.quantity)}</td>
 
-                  <td className="td num whitespace-nowrap px-1.5 text-right">{fmtUsd(position.notional, 2)}</td>
+                  <td className="td num text-right">{fmtUsd(position.notional, 2)}</td>
 
                   <td
-                    className="td num whitespace-nowrap px-1.5 text-right"
+                    className="td num text-right"
                     title="该仓位占用的保证金（本金）= 名义价值 ÷ 杠杆。"
                   >
                     {fmtUsd(position.marginUsed, 2)}
                   </td>
 
-                  <td className="td num whitespace-nowrap px-1.5 text-right">{fmtPrice(position.entryPrice)}</td>
+                  <td className="td num text-right">{fmtPrice(position.entryPrice)}</td>
 
-                  <td className="td num whitespace-nowrap px-1.5 text-right">{fmtPrice(position.markPrice)}</td>
+                  <td className="td num text-right">{fmtPrice(position.markPrice)}</td>
 
-                  <td className="td num whitespace-nowrap px-1.5 text-right">
+                  <td className="td num text-right">
                     <div className="text-base text-up">
                       {position.takeProfit
                         ? fmtPrice(position.takeProfit)
@@ -213,7 +213,7 @@ export function PositionsTable({
                     )}
                   </td>
 
-                  <td className="td num whitespace-nowrap px-1.5 text-right">
+                  <td className="td num text-right">
                     <div className={`text-base ${missingStop ? 'font-semibold' : ''} text-down`}>
                       {position.stopLoss
                         ? fmtPrice(position.stopLoss)
@@ -224,24 +224,27 @@ export function PositionsTable({
                     {stopDistance && <div className="text-xs text-ink-faint">{stopDistance}</div>}
                   </td>
 
-                  <td className={`td num whitespace-nowrap px-1.5 text-right ${position.liquidationPrice ? 'text-warn' : 'text-ink-faint'}`}>
+                  <td className={`td num text-right ${position.liquidationPrice ? 'text-warn' : 'text-ink-faint'}`}>
                     {position.liquidationPrice ? fmtPrice(position.liquidationPrice) : '—'}
                   </td>
 
-                  <td className={`td num whitespace-nowrap px-1.5 text-right ${pnlColor(position.unrealizedPnl)}`}>
+                  <td className={`td num text-right ${pnlColor(position.unrealizedPnl)}`}>
                     {fmtUsdSigned(position.unrealizedPnl, 2)}
                     <div className="text-xs">{fmtPercent(position.unrealizedPnlPercent)}</div>
                   </td>
 
-                  <td className="td sticky right-0 whitespace-nowrap bg-base-900 px-1.5 text-right">
-                    <Button
-                      size="sm"
-                      variant="danger"
-                      onClick={() => onCloseRequest(position.symbol)}
-                      title="手工平仓该持仓"
-                    >
-                      平仓
-                    </Button>
+                  <td className="td col-action-sticky">
+                    <div className="flex items-center justify-end">
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        className="btn-row-danger"
+                        onClick={() => onCloseRequest(position.symbol)}
+                        data-aq-tip="手工平仓该持仓"
+                      >
+                        平仓
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               );

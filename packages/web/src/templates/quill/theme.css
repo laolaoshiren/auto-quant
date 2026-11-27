@@ -850,6 +850,80 @@ html.aq-quill .row-hover:hover {
   background-color: var(--aq-pill);
 }
 
+/*
+ * 表格右侧操作列：与整行保持 100% 视觉一体。
+ * - 默认底色与面板卡片一致（无竖向分割墙、无表头色块补丁）
+ * - 行悬停 / 斑马纹 / 选中态无缝贯穿到最右侧操作列
+ * - 窄屏横向滚动时依然贴右吸顶并自然遮住下方滚动文字
+ */
+html.aq-quill .col-action-sticky {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  text-align: right;
+  background-color: var(--aq-base-900);
+  transition: background-color 0.12s var(--aq-quill-ease);
+}
+html.aq-quill thead .col-action-sticky {
+  z-index: 20;
+  background-color: var(--aq-base-900);
+}
+html.aq-quill .data-grid tbody tr:nth-child(even) > .col-action-sticky {
+  background-color: var(--aq-well);
+}
+html.aq-quill .row-hover:hover > .col-action-sticky,
+html.aq-quill .data-grid tbody tr:hover > .col-action-sticky {
+  background-color: var(--aq-pill);
+}
+html.aq-quill .data-grid tbody tr.selected > .col-action-sticky {
+  background-color: var(--aq-sel);
+}
+
+/*
+ * 表格行内柔和操作按钮（平仓 / 停止 / 启动）：
+ * 静默态与左侧状态徽章共用同套柔底 + 细描边视觉语言，避免厚重纯色块割裂表格节奏；
+ * 悬停时转为实心高对比状态，保留危险/主操作的清晰反馈（深浅双主题均过 WCAG AA ≥4.5）。
+ */
+html.aq-quill .btn-danger.btn-row-danger,
+html.aq-quill[data-skin='light'] .btn-danger.btn-row-danger {
+  background-color: color-mix(in srgb, var(--aq-down) 12%, transparent);
+  border-color: color-mix(in srgb, var(--aq-down) 32%, transparent);
+  color: var(--aq-down);
+  box-shadow: none;
+}
+html.aq-quill .btn-danger.btn-row-danger:hover {
+  background-color: #b3384a;
+  border-color: transparent;
+  color: #ffffff;
+  filter: none;
+}
+html.aq-quill[data-skin='light'] .btn-danger.btn-row-danger:hover {
+  background-color: #c73535;
+  border-color: transparent;
+  color: #ffffff;
+  filter: none;
+}
+
+html.aq-quill .btn-success.btn-row-success,
+html.aq-quill[data-skin='light'] .btn-success.btn-row-success {
+  background-color: color-mix(in srgb, var(--aq-up) 12%, transparent);
+  border-color: color-mix(in srgb, var(--aq-up) 32%, transparent);
+  color: var(--aq-up);
+  box-shadow: none;
+}
+html.aq-quill .btn-success.btn-row-success:hover {
+  background-color: #098658;
+  border-color: transparent;
+  color: #ffffff;
+  filter: none;
+}
+html.aq-quill[data-skin='light'] .btn-success.btn-row-success:hover {
+  background-color: #0a7d4f;
+  border-color: transparent;
+  color: #ffffff;
+  filter: none;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  页面骨架                                                                   */
 /* -------------------------------------------------------------------------- */

@@ -785,7 +785,7 @@ export function TradersPage() {
                   <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                     <Link
                       to={`/traders/${trader.id}`}
-                      className="inline-flex h-8 items-center gap-1 rounded-md border border-base-700 bg-base-850/80 px-2.5 text-xs font-medium text-ink-mid transition hover:border-base-600 hover:bg-base-800 hover:text-ink-hi"
+                      className="btn btn-ghost btn-xs"
                     >
                       进入面板
                       <ArrowUpRight aria-hidden className="h-3.5 w-3.5" />
@@ -972,10 +972,10 @@ export function TradersPage() {
         </div>
       ) : (
         /* 精简列表视图（8 列紧凑归组，供多机横向对比） */
-        <div className="overflow-hidden rounded-xl border border-base-750 bg-base-900/95">
+        <div className="overflow-hidden rounded-xl border border-base-750 bg-base-900">
           <div className="scroll-x">
             <table className="w-full min-w-[920px] border-collapse">
-              <thead className="border-b border-base-800 bg-base-850/90">
+              <thead className="border-b border-base-800 bg-base-900">
                 <tr>
                   <th className="th">机器人</th>
                   <th className="th">策略与账户</th>
@@ -984,9 +984,7 @@ export function TradersPage() {
                   <th className="th text-right">收益 / 净盈亏</th>
                   <th className="th text-right">胜率 / PF</th>
                   <th className="th text-right">持仓 / 周期</th>
-                  <th className="th sticky right-0 z-[1] border-l border-base-800/70 bg-base-850 text-right">
-                    操作
-                  </th>
+                  <th className="th col-action-sticky">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -1117,7 +1115,7 @@ export function TradersPage() {
                           {stats ? `${fmtDuration(stats.uptimeHours * 60)} · ${timeAgo(trader.lastCycleAt)}` : timeAgo(trader.lastCycleAt)}
                         </div>
                       </td>
-                      <td className="td sticky right-0 z-[1] border-l border-base-800/70 bg-base-900">
+                      <td className="td col-action-sticky">
                         <TraderRowActions
                           trader={trader}
                           starting={starting}
@@ -1274,8 +1272,9 @@ function TraderRowActions({
         <Button
           size="sm"
           variant="success"
+          className="btn-row-success"
           disabled
-          title="启动中：服务端正在执行预检并拉起循环。状态会自动更新为「运行中」；若失败会显示在状态列。"
+          data-aq-tip="启动中：服务端正在执行预检并拉起循环。状态会自动更新为「运行中」；若失败会显示在状态列。"
         >
           <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
           启动中
@@ -1284,15 +1283,16 @@ function TraderRowActions({
         <Button
           size="sm"
           variant="danger"
+          className="btn-row-danger"
           busy={rowBusy && !stopPending}
-          title="停止循环 — 需要确认"
+          data-aq-tip="停止循环（需二次确认）"
           onClick={onStop}
         >
           <CircleStop aria-hidden className="h-3.5 w-3.5" />
           停止
         </Button>
       ) : (
-        <Button size="sm" variant="success" busy={rowBusy} onClick={onStart}>
+        <Button size="sm" variant="success" className="btn-row-success" busy={rowBusy} onClick={onStart}>
           <Play aria-hidden className="h-3.5 w-3.5" />
           启动
         </Button>
