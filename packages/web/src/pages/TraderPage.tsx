@@ -226,7 +226,9 @@ function toAccountState(raw: Record<string, unknown> | null): TraderAccountState
 const ERROR_DISMISS_KEY = 'aq.traderErrorDismissed';
 const INTEL_SPLIT_HEIGHT_KEY = 'aq.traderIntelHeight.v1';
 const INTEL_MIN_H = 72;
-const CHART_PANEL_MIN_H = 156;
+/** 图表卡片真实最小可用高度（标题栏 ~44 + 统计行 ~28 + 内边距 18 + 曲线最小高 88 + 边框/余量 10 = 188px），防止被压扁后 SVG 溢出遮挡拖动条 */
+const CHART_PANEL_MIN_H = 188;
+const SPLIT_HANDLE_H = 14;
 
 function loadSavedIntelHeight(): number | null {
   try {
@@ -311,7 +313,7 @@ export function TraderPage() {
   const effectiveIntelHeight = useMemo(() => {
     if (isCompactSplit || intelHeight === null) return null;
     if (splitHostH > 0) {
-      const maxH = Math.floor(splitHostH - CHART_PANEL_MIN_H - 12);
+      const maxH = Math.floor(splitHostH - CHART_PANEL_MIN_H - SPLIT_HANDLE_H);
       if (maxH < INTEL_MIN_H) return null;
       return Math.max(INTEL_MIN_H, Math.min(maxH, intelHeight));
     }
@@ -324,7 +326,10 @@ export function TraderPage() {
   const clampIntelHeight = useCallback(
     (next: number): number => {
       const hostH = splitHostRef.current?.getBoundingClientRect().height ?? splitHostH;
-      const maxH = hostH > CHART_PANEL_MIN_H + INTEL_MIN_H + 12 ? Math.floor(hostH - CHART_PANEL_MIN_H - 12) : 420;
+      const maxH =
+        hostH > CHART_PANEL_MIN_H + INTEL_MIN_H + SPLIT_HANDLE_H
+          ? Math.floor(hostH - CHART_PANEL_MIN_H - SPLIT_HANDLE_H)
+          : INTEL_MIN_H;
       return Math.max(INTEL_MIN_H, Math.min(maxH, Math.round(next)));
     },
     [splitHostH],
@@ -334,11 +339,18 @@ export function TraderPage() {
     (event: ReactPointerEvent<HTMLDivElement>) => {
       if (event.button !== 0) return;
       event.preventDefault();
+      const handleEl = event.currentTarget;
+      const pointerId = event.pointerId;
+      try {
+        handleEl.setPointerCapture?.(pointerId);
+      } catch {
+        /* 某些虚拟指针环境不支持 capture，退回 window 监听 */
+      }
       const startY = event.clientY;
-      const startH =
-        intelHeightRef.current ??
-        Math.round(intelWrapRef.current?.getBoundingClientRect().height ?? 112);
-      let latest: number | null = intelHeightRef.current;
+      /* 始终以当前屏幕真实渲染高度为起点，避免从上限往下拖时出现死区或跳变 */
+      const measuredH = Math.round(intelWrapRef.current?.getBoundingClientRect().height ?? 0);
+      const startH = measuredH > 0 ? measuredH : (intelHeightRef.current ?? 112);
+      let latest: number | null = null;
 
       setResizingIntel(true);
       const prevCursor = document.body.style.cursor;
@@ -357,6 +369,13 @@ export function TraderPage() {
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', finish);
         window.removeEventListener('pointercancel', finish);
+        try {
+          if (handleEl.hasPointerCapture?.(pointerId)) {
+            handleEl.releasePointerCapture(pointerId);
+          }
+        } catch {
+          /* ignore */
+        }
         document.body.style.cursor = prevCursor;
         document.body.style.userSelect = prevSelect;
         setResizingIntel(false);
@@ -2416,8 +2435,16 @@ export function TraderPage() {
         >
         <Panel
           padded={false}
-          bodyClassName={curveCollapsed && chartTab === 'equity' ? 'p-0' : 'flex min-h-0 flex-1 flex-col p-0'}
-          className={curveCollapsed && chartTab === 'equity' ? 'shrink-0' : 'flex min-h-[156px] flex-1 flex-col'}
+          bodyClassName={
+            curveCollapsed && chartTab === 'equity'
+              ? 'p-0'
+              : 'flex min-h-0 flex-1 flex-col overflow-hidden p-0'
+          }
+          className={
+            curveCollapsed && chartTab === 'equity'
+              ? 'shrink-0 overflow-hidden'
+              : 'flex min-h-[188px] flex-1 flex-col overflow-hidden'
+          }
           title={
             <span className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-lg border border-base-750/80 bg-base-900/75 p-0.5">
               <ChartTabButton active={chartTab === 'equity'} onClick={() => setChartTab('equity')}>
@@ -2513,7 +2540,7 @@ export function TraderPage() {
                 onExpand={() => setChartOverride(false)}
               />
             ) : (
-              <div className="flex min-h-0 flex-1 flex-col px-3 pb-2.5 pt-2">
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 pb-2.5 pt-2">
                 {(() => {
                   const series = windowed.map((snapshot) =>
                     curveMetric === 'attributed'
@@ -2555,7 +2582,10 @@ export function TraderPage() {
                 })()}
                 <div
                   ref={setEquityHostEl}
-                  className="relative min-h-[200px] w-full flex-1 overflow-hidden xl:min-h-[88px]"
+                  className={cn(
+                    'relative w-full flex-1 overflow-hidden',
+                    isCompactSplit ? 'min-h-[180px]' : 'min-h-[88px]',
+                  )}
                 >
                   <div className="absolute inset-0">
                     <DashboardEquityChart
@@ -2603,7 +2633,7 @@ export function TraderPage() {
                 aria-valuenow={effectiveIntelHeight ?? undefined}
                 aria-valuemin={INTEL_MIN_H}
                 tabIndex={0}
-                title="上下拖动调整图表与下方雷达面板高度 · 双击恢复自动"
+                data-aq-tip="上下拖动调整图表与下方雷达面板高度 · 双击恢复自动"
                 onPointerDown={startIntelResize}
                 onDoubleClick={resetIntelHeight}
                 onKeyDown={(event) => {
@@ -2618,14 +2648,14 @@ export function TraderPage() {
                     resetIntelHeight();
                   }
                 }}
-                className={`group flex h-2.5 shrink-0 cursor-row-resize select-none items-center justify-center rounded transition-colors ${
+                className={`group relative z-20 flex h-3.5 shrink-0 cursor-row-resize touch-none select-none items-center justify-center rounded transition-colors ${
                   resizingIntel ? 'bg-accent/15' : 'hover:bg-base-850/80'
                 }`}
               >
                 <span
                   aria-hidden
                   className={`h-1 w-12 rounded-full transition-colors ${
-                    resizingIntel ? 'bg-accent' : 'bg-base-700/80 group-hover:bg-accent/80'
+                    resizingIntel ? 'bg-accent' : 'bg-base-700/90 group-hover:bg-accent/80'
                   }`}
                 />
               </div>
@@ -2636,7 +2666,7 @@ export function TraderPage() {
               ref={intelWrapRef}
               className={
                 effectiveIntelHeight !== null && !(curveCollapsed && chartTab === 'equity')
-                  ? 'min-h-0 shrink-0'
+                  ? 'min-h-0 shrink-0 overflow-hidden'
                   : 'shrink-0'
               }
               style={

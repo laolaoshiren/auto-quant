@@ -35,7 +35,7 @@ export type TraderTabId = 'positions' | 'orders' | 'trades' | 'history';
 
 const DOCK_HEIGHT_STORAGE_KEY = 'aq.traderDockBodyHeight';
 const DOCK_MIN_BODY_H = 72;
-const DOCK_MAX_BODY_RATIO = 0.58;
+const DOCK_MAX_BODY_RATIO = 0.5;
 
 function clampDockBodyHeight(raw: number): number {
   const maxAllowed =
@@ -251,13 +251,22 @@ export function TraderTables({
   const startDockResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     event.preventDefault();
+    const handleEl = event.currentTarget;
+    const pointerId = event.pointerId;
+    try {
+      handleEl.setPointerCapture?.(pointerId);
+    } catch {
+      /* ignore */
+    }
     const startY = event.clientY;
+    const measuredHeight = Math.round(tableAreaRef.current?.getBoundingClientRect().height ?? 0);
     const startHeight = dockCollapsedRef.current
       ? 0
-      : (manualBodyHeightRef.current ??
-          Math.round(tableAreaRef.current?.getBoundingClientRect().height ?? 160));
+      : measuredHeight > 0
+        ? measuredHeight
+        : (manualBodyHeightRef.current ?? 160);
     let moved = false;
-    let latestHeight: number | null = manualBodyHeightRef.current;
+    let latestHeight: number | null = null;
 
     setResizingDock(true);
     const prevCursor = document.body.style.cursor;
@@ -279,6 +288,13 @@ export function TraderTables({
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', cleanup);
       window.removeEventListener('pointercancel', cleanup);
+      try {
+        if (handleEl.hasPointerCapture?.(pointerId)) {
+          handleEl.releasePointerCapture(pointerId);
+        }
+      } catch {
+        /* ignore */
+      }
       document.body.style.cursor = prevCursor;
       document.body.style.userSelect = prevSelect;
       setResizingDock(false);
@@ -345,7 +361,7 @@ export function TraderTables({
         aria-valuenow={dockCollapsed ? 0 : (manualBodyHeight ?? undefined)}
         aria-valuemin={DOCK_MIN_BODY_H}
         tabIndex={0}
-        title="上下拖动调整底部高度 · 双击恢复自动高度"
+        data-aq-tip="上下拖动调整底部高度 · 双击恢复自动高度"
         onPointerDown={startDockResize}
         onDoubleClick={resetDockHeight}
         onKeyDown={(event) => {
@@ -360,7 +376,7 @@ export function TraderTables({
             resetDockHeight();
           }
         }}
-        className={`group flex h-2.5 cursor-row-resize select-none items-center justify-center transition-colors ${
+        className={`group relative z-20 flex h-3.5 cursor-row-resize touch-none select-none items-center justify-center transition-colors ${
           resizingDock ? 'bg-accent/15' : 'bg-base-900 hover:bg-base-850'
         }`}
       >
