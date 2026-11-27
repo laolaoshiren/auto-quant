@@ -26,15 +26,20 @@ import {
   STATUS_LABELS,
   STATUS_TONE,
   actionLabel,
-  isOpenAction,
 } from '../components/DecisionAudit';
 import { CoinIcon } from '../components/CoinIcon';
+import {
+  FIGURE_PILL_STYLE,
+  FIGURE_TITLE,
+  figureParts,
+  resolveFigureContext,
+} from '../lib/decisionFigures';
 import {
   ManagedStageActionBar,
   isManagedTrajectoryEntry,
   resolveManagedStageChips,
 } from '../components/PowerlineTrajectory';
-import { fmtDateTime, fmtInt, fmtLatency, fmtPrice, fmtUsd } from '../lib/format';
+import { fmtDateTime, fmtInt, fmtLatency, fmtUsd } from '../lib/format';
 import { plainText } from '../lib/plainText';
 import { humanizeToolNames } from '../lib/toolLabels';
 import { classifyZeroDecision } from './decisionZeroState';
@@ -406,14 +411,17 @@ export function DecisionAuditView({
               >
                 {decisions.map((decision, index) => {
                   const hasLeverage = typeof decision.leverage === 'number' && decision.leverage > 0;
-                  const showParams =
-                    isOpenAction(decision.action) ||
-                    decision.action === 'add_to_position' ||
-                    decision.action === 'reduce_position' ||
-                    decision.action === 'adjust_protection' ||
-                    decision.stopLoss != null ||
-                    decision.takeProfit != null ||
-                    (typeof decision.positionSizeUsd === 'number' && decision.positionSizeUsd > 0);
+                  const matchedOutcome =
+                    executionLog.find(
+                      (entry) =>
+                        entry.status !== 'data' &&
+                        entry.symbol === decision.symbol &&
+                        entry.action === decision.action,
+                    ) ?? null;
+                  const figureCtx = resolveFigureContext(record.userPrompt, decision.symbol, matchedOutcome);
+                  const figures = figureParts(decision, null, figureCtx);
+                  const showRiskUsd = typeof decision.riskUsd === 'number' && decision.riskUsd > 0;
+                  const showParams = figures.length > 0 || showRiskUsd;
 
                   return (
                     <div
@@ -454,42 +462,32 @@ export function DecisionAuditView({
                       {/* 仅在实际存在仓位/保护位参数时显示参数胶囊，告别满屏 0x / 无 / $0.00 空白浪费 */}
                       {showParams && (
                         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
-                          {typeof decision.positionSizeUsd === 'number' && decision.positionSizeUsd > 0 && (
-                            <span className="rounded border border-slate-500/30 bg-slate-500/10 px-2 py-0.5 [[data-skin='light']_&]:border-slate-400/45 [[data-skin='light']_&]:bg-slate-200/60">
-                              <span className="text-ink-lo">仓位 </span>
-                              <strong className="num text-ink-hi">{fmtUsd(decision.positionSizeUsd, 2)}</strong>
-                            </span>
-                          )}
-                          {typeof decision.positionSizeUsd === 'number' &&
-                            decision.positionSizeUsd > 0 &&
-                            typeof decision.leverage === 'number' &&
-                            decision.leverage > 0 && (
+                          {figures.map((part, pIdx) => {
+                            const style = FIGURE_PILL_STYLE[part.key];
+                            return (
                               <span
-                                className="rounded border border-amber-400/35 bg-amber-500/12 px-2 py-0.5 [[data-skin='light']_&]:border-amber-700/30"
-                                title="预计保证金占用 = 仓位名义价值 ÷ 杠杆倍数（USDT）"
+                                key={`${part.key}-${part.value}-${pIdx}`}
+                                className={cn(
+                                  'inline-flex items-baseline gap-1 rounded border px-2 py-0.5',
+                                  style.box,
+                                )}
+                                data-aq-tip={part.tooltip ?? FIGURE_TITLE[part.key]}
                               >
-                                <span className="text-amber-300/80 [[data-skin='light']_&]:text-amber-800/80">
-                                  保证金{' '}
-                                </span>
-                                <strong className="num text-amber-300 [[data-skin='light']_&]:text-amber-800">
-                                  {fmtUsd(decision.positionSizeUsd / decision.leverage, 2)}
-                                </strong>
+                                {part.label && <span className={style.label}>{part.label}</span>}
+                                <strong className={cn('num', style.value)}>{part.value}</strong>
+                                {part.sub && (
+                                  <span className={cn('num text-[11px] font-medium', style.label)}>
+                                    {part.sub}
+                                  </span>
+                                )}
                               </span>
-                            )}
-                          {decision.stopLoss != null && (
-                            <span className="rounded border border-down/35 bg-down/12 px-2 py-0.5">
-                              <span className="text-down/80">止损 </span>
-                              <strong className="num text-down">{fmtPrice(decision.stopLoss)}</strong>
-                            </span>
-                          )}
-                          {decision.takeProfit != null && (
-                            <span className="rounded border border-up/35 bg-up/12 px-2 py-0.5">
-                              <span className="text-up/80">止盈 </span>
-                              <strong className="num text-up">{fmtPrice(decision.takeProfit)}</strong>
-                            </span>
-                          )}
-                          {typeof decision.riskUsd === 'number' && decision.riskUsd > 0 && (
-                            <span className="rounded border border-orange-400/35 bg-orange-500/12 px-2 py-0.5 [[data-skin='light']_&]:border-orange-700/30">
+                            );
+                          })}
+                          {showRiskUsd && (
+                            <span
+                              className="rounded border border-orange-400/35 bg-orange-500/12 px-2 py-0.5 [[data-skin='light']_&]:border-orange-700/30"
+                              data-aq-tip="预计单笔最大亏损额（USDT）"
+                            >
                               <span className="text-orange-300/80 [[data-skin='light']_&]:text-orange-800/80">
                                 风险{' '}
                               </span>

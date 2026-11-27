@@ -12283,6 +12283,9 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
 
     const newStop = decision.stopLoss;
     const newTarget = decision.takeProfit;
+    const prevStop = local.stop_loss;
+    const prevTarget = local.take_profit;
+    const entryPrice = local.entry_price;
 
     if (newStop === null && newTarget === null) {
       return {
@@ -12391,7 +12394,20 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         failed.push(`止损：${(error as Error).message}`);
         return null;
       });
-      if (stopOrderId) placed.push(`止损 ${newStop}`);
+      if (stopOrderId) {
+        if (prevStop !== null && Number.isFinite(prevStop) && prevStop > 0) {
+          const delta = newStop - prevStop;
+          const pct = (delta / prevStop) * 100;
+          if (Math.abs(delta) <= 1e-12) {
+            placed.push(`止损 ${newStop}（维持不变）`);
+          } else {
+            const sign = delta > 0 ? '+' : '';
+            placed.push(`止损 ${prevStop} → ${newStop}（${sign}${Number(delta.toPrecision(4))} / ${sign}${pct.toFixed(2)}%）`);
+          }
+        } else {
+          placed.push(`止损 ${newStop}`);
+        }
+      }
     }
 
     if (newTarget !== null) {
@@ -12408,7 +12424,20 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         failed.push(`止盈：${(error as Error).message}`);
         return null;
       });
-      if (tpOrderId) placed.push(`止盈 ${newTarget}`);
+      if (tpOrderId) {
+        if (prevTarget !== null && Number.isFinite(prevTarget) && prevTarget > 0) {
+          const delta = newTarget - prevTarget;
+          const pct = (delta / prevTarget) * 100;
+          if (Math.abs(delta) <= 1e-12) {
+            placed.push(`止盈 ${newTarget}（维持不变）`);
+          } else {
+            const sign = delta > 0 ? '+' : '';
+            placed.push(`止盈 ${prevTarget} → ${newTarget}（${sign}${Number(delta.toPrecision(4))} / ${sign}${pct.toFixed(2)}%）`);
+          }
+        } else {
+          placed.push(`止盈 ${newTarget}`);
+        }
+      }
     }
 
     /*
@@ -12515,6 +12544,9 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
         symbol: decision.symbol,
         status: 'failed',
         detail: `${failed.join('、')} 没挂上（已挂：${placed.join('、')}）。`,
+        previousStopLoss: prevStop,
+        previousTakeProfit: prevTarget,
+        entryPrice,
       };
     }
 
@@ -12523,6 +12555,9 @@ etPnlOf —— 见它的注释（资金费的符号）。 */
       symbol: decision.symbol,
       status: 'ok',
       detail: `已调整保护位：${placed.join('、')}。`,
+      previousStopLoss: prevStop,
+      previousTakeProfit: prevTarget,
+      entryPrice,
     };
   }
 

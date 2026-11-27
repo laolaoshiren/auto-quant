@@ -1531,6 +1531,12 @@ export interface ExecutionLogEntry {
   adjustments?: string[];
   /** 智能托管 2.0 三段式工具调用的结构化步骤明细（可选，兼容历史纯文本轨迹）。 */
   stageSteps?: ManagedStageStep[];
+  /** 调整保护位前的原止损价（供前端展示「从多少到多少 · 增减 · 百分比」）。 */
+  previousStopLoss?: number | null;
+  /** 调整保护位前的原止盈价（供前端展示「从多少到多少 · 增减 · 百分比」）。 */
+  previousTakeProfit?: number | null;
+  /** 本条动作对应仓位的开仓均价（用于计算止损/止盈距开仓价百分比）。 */
+  entryPrice?: number | null;
 }
 
 /**

@@ -182,8 +182,15 @@ import { TeamBoard } from './TeamBoard/TeamBoard';
 import { TeamCycleBlock } from './TeamBoard/TeamCycleBlock';
 import { usePolled } from '../lib/hooks';
 import { Badge, Empty, ErrorNote, Panel, Spinner3, cn } from './ui';
-import { ActionBadge, STATUS_LABELS, actionLabel, isOpenAction } from './DecisionAudit';
+import { ActionBadge, STATUS_LABELS, actionLabel } from './DecisionAudit';
 import { CoinIcon } from './CoinIcon';
+import {
+  FIGURE_PILL_STYLE,
+  FIGURE_TITLE,
+  figureParts,
+  resolveFigureContext,
+  type FigureContext,
+} from '../lib/decisionFigures';
 import {
   ManagedStageActionBar,
   isManagedTrajectoryEntry,
@@ -198,7 +205,9 @@ import {
   isPendingDecisionRecord,
   preferCompletedDecision,
 } from '../lib/decisionPending';
-import { fmtInt, fmtLatency, fmtPriceUsd, fmtQty, fmtUsd, isNum, timeAgo } from '../lib/format';
+import { fmtInt, fmtLatency, fmtUsd, timeAgo } from '../lib/format';
+
+export { figureParts };
 
 /**
  * 一页多少轮。
@@ -2145,17 +2154,21 @@ export function CycleBlock({
 
         {decisions.length > 0 && (
           <div className="divide-y divide-base-750/80">
-            {visibleRows.map(({ decision, index, nth, total }) => (
-              <div key={`${decision.symbol}-${index}`} className="py-2.5 first:pt-0 last:pb-0">
-                <DecisionRow
-                  decision={decision}
-                  price={priceOf(symbols, decision.symbol)}
-                  outcome={plan.outcomes[index] ?? null}
-                  duplicate={{ nth, total }}
-                  onSelectSymbol={onSelectSymbol}
-                />
-              </div>
-            ))}
+            {visibleRows.map(({ decision, index, nth, total }) => {
+              const rowOutcome = plan.outcomes[index] ?? null;
+              return (
+                <div key={`${decision.symbol}-${index}`} className="py-2.5 first:pt-0 last:pb-0">
+                  <DecisionRow
+                    decision={decision}
+                    price={priceOf(symbols, decision.symbol)}
+                    outcome={rowOutcome}
+                    figureContext={resolveFigureContext(record.userPrompt, decision.symbol, rowOutcome)}
+                    duplicate={{ nth, total }}
+                    onSelectSymbol={onSelectSymbol}
+                  />
+                </div>
+              );
+            })}
             {skippedRows.length > 0 && (
               <div className="pt-2.5 first:pt-0">
                 <details className="group rounded-lg border border-base-750/90 bg-base-900/55 px-2.5 py-2 transition-colors hover:border-base-600/70">
@@ -2195,16 +2208,20 @@ export function CycleBlock({
                     </span>
                   </summary>
                   <div className="mt-2.5 divide-y divide-base-750/70 border-t border-base-750/70 pt-2.5">
-                    {skippedRows.map(({ decision, index }) => (
-                      <div key={`skip-${decision.symbol}-${index}`} className="py-2 first:pt-0 last:pb-0">
-                        <DecisionRow
-                          decision={decision}
-                          price={priceOf(symbols, decision.symbol)}
-                          outcome={plan.outcomes[index] ?? null}
-                          onSelectSymbol={onSelectSymbol}
-                        />
-                      </div>
-                    ))}
+                    {skippedRows.map(({ decision, index }) => {
+                      const rowOutcome = plan.outcomes[index] ?? null;
+                      return (
+                        <div key={`skip-${decision.symbol}-${index}`} className="py-2 first:pt-0 last:pb-0">
+                          <DecisionRow
+                            decision={decision}
+                            price={priceOf(symbols, decision.symbol)}
+                            outcome={rowOutcome}
+                            figureContext={resolveFigureContext(record.userPrompt, decision.symbol, rowOutcome)}
+                            onSelectSymbol={onSelectSymbol}
+                          />
+                        </div>
+                      );
+                    })}
                   </div>
                 </details>
               </div>
@@ -2821,16 +2838,18 @@ function DecisionRow({
   decision,
   price,
   outcome,
+  figureContext,
   duplicate,
   onSelectSymbol,
 }: {
   decision: Decision;
   price: number | null;
   outcome: ExecutionLogEntry | null;
+  figureContext?: FigureContext | null;
   duplicate?: { nth: number; total: number };
   onSelectSymbol?: (symbol: string) => void;
 }) {
-  const figures = figureParts(decision, price);
+  const figures = figureParts(decision, price, figureContext);
   const canSelect = Boolean(onSelectSymbol && isClickableSymbol(decision.symbol));
 
   return (
@@ -2904,12 +2923,17 @@ function DecisionRow({
                   'inline-flex items-baseline gap-1 rounded-md border px-1.5 py-0.5',
                   style.box,
                 )}
-                title={FIGURE_TITLE[part.key]}
+                data-aq-tip={part.tooltip ?? FIGURE_TITLE[part.key]}
               >
                 {part.label && <span className={cn('text-[11px]', style.label)}>{part.label}</span>}
                 <span className={cn('num break-all text-[13px] font-semibold', style.value)}>
                   {part.value}
                 </span>
+                {part.sub && (
+                  <span className={cn('num text-[11px] font-medium', style.label)}>
+                    {part.sub}
+                  </span>
+                )}
               </span>
             );
           })}
@@ -3172,269 +3196,7 @@ function outcomeBadge(status: ExecutionLogEntry['status']): {
   }
 }
 
-type FigureKey = 'size' | 'margin' | 'entry' | 'stop' | 'target' | 'reward' | 'leverage' | 'reduce';
-
-/** 关键数字里的一个片段：`{ label: '止损', value: '0.174000' }`。 */
-interface Figure {
-  key: FigureKey;
-  /** 短标签；数量、风险回报比、杠杆没有标签，靠悬停说明解释。 */
-  label: string;
-  value: string;
-}
-
-/**
- * 开仓关键数字里每一项的悬停说明。
- *
- * 这一行的标签很短（`$30.00 · 开仓 0.171900 · … · 1:8.62 · 5x`），
- * 悬停时给出**带单位的全称** —— `DESIGN.md` §7：单位要写出来，
- * 不能让人猜 `1:8.62` 和 `5x` 各是什么。
- */
-const FIGURE_TITLE: Record<FigureKey, string> = {
-  size: '名义价值（USDT）',
-  margin: '预计保证金占用 = 仓位名义价值 ÷ 杠杆倍数（USDT）',
-  entry: '当前价格，即开仓参考价',
-  stop: '止损价',
-  target: '止盈价',
-  reward: '风险回报比 = 到止盈的距离 ÷ 到止损的距离',
-  leverage: '杠杆倍数',
-  /* ⚠️ `reducePercent` 是百分数（服务端的 `reducePercent / 100` 才是比例）。 */
-  reduce: '减仓幅度：百分比按持仓数量计，数值形式则是要卖出的数量',
-};
-
-/**
- * 决策参数胶囊语义配色（深/浅双主题高对比，便于一眼区分仓位、保证金、入场、止损、止盈、盈亏比、杠杆）。
- */
-const FIGURE_PILL_STYLE: Record<FigureKey, { box: string; label: string; value: string }> = {
-  size: {
-    box: "border-slate-500/30 bg-slate-500/10 [[data-skin='light']_&]:border-slate-400/45 [[data-skin='light']_&]:bg-slate-200/60",
-    label: 'text-ink-lo',
-    value: 'text-ink-hi',
-  },
-  margin: {
-    box: "border-amber-400/35 bg-amber-500/12 [[data-skin='light']_&]:border-amber-700/30 [[data-skin='light']_&]:bg-amber-500/12",
-    label: "text-amber-300/80 [[data-skin='light']_&]:text-amber-800/80",
-    value: "text-amber-300 [[data-skin='light']_&]:text-amber-800",
-  },
-  entry: {
-    box: "border-sky-400/35 bg-sky-500/12 [[data-skin='light']_&]:border-sky-700/30 [[data-skin='light']_&]:bg-sky-500/12",
-    label: "text-sky-300/80 [[data-skin='light']_&]:text-sky-800/80",
-    value: "text-sky-300 [[data-skin='light']_&]:text-sky-800",
-  },
-  stop: {
-    box: 'border-down/35 bg-down/12',
-    label: 'text-down/80',
-    value: 'text-down',
-  },
-  target: {
-    box: 'border-up/35 bg-up/12',
-    label: 'text-up/80',
-    value: 'text-up',
-  },
-  reward: {
-    box: "border-violet-400/35 bg-violet-500/12 [[data-skin='light']_&]:border-violet-700/30 [[data-skin='light']_&]:bg-violet-500/12",
-    label: "text-violet-300/80 [[data-skin='light']_&]:text-violet-800/80",
-    value: "text-violet-300 [[data-skin='light']_&]:text-violet-800",
-  },
-  leverage: {
-    box: "border-orange-400/35 bg-orange-500/12 [[data-skin='light']_&]:border-orange-700/30 [[data-skin='light']_&]:bg-orange-500/12",
-    label: "text-orange-300/80 [[data-skin='light']_&]:text-orange-800/80",
-    value: "text-orange-300 [[data-skin='light']_&]:text-orange-800",
-  },
-  reduce: {
-    box: 'border-warn/35 bg-warn/12',
-    label: 'text-warn/80',
-    value: 'text-warn',
-  },
-};
-
-/**
- * 开仓的关键数字，拆成**若干可以整体折行的片段**。
- *
- * ## 为什么不是表格（这是这个文件里最重要的一条注释）
- *
- * 这里原来是 6 个格子的 grid（数量 / 开仓价 / 止损 / 止盈 / 风险回报 / 杠杆），
- * 还用了容器查询按卡片宽度切 2/3 列。它连续三轮出溢出 bug：grid 的列有最小内容
- * 宽度，而决策流在右栏里只有约 40% 宽、卡片还得再分两三列，于是一个
- * `0.176800` 加一个 `+26.67%` 就撑破格子，文字挤进相邻列（截图里那个飘出去的
- * `率.47%` 就是这么来的）。
- *
- * 现在返回**结构化片段**而不是一整条字符串：调用处把每一项的标签与数字分开渲染，
- * 由外层的 `flex-wrap` 在片段之间折行（正常路径），数字上再加 `break-all` 兜底。
- * 两条加起来的结果是：**横向不可能撑破容器**，这正是三轮 bug 的根因所在。
- *
- * 顺序照 `DECISION-FEED.md` §6 的示例：
- * `$30.00 · 开仓 0.171900 · 止损 0.174000 · 止盈 0.190000 · 1:8.62 · 5x`。
- * 最后一个 `5x` 是杠杆，`1:8.62` 是风险回报比 —— 两者都在悬停说明里写清楚。
- *
- * 只在实际开仓（`open_*`）时出现。观望 / 等待没有仓位可谈；平仓的数字属于成交
- * 记录，硬凑在理由下面只会让这一行变长而不增加信息。
- *
- * ## ⚠️ 例外：`adjust_protection` —— 它的**全部内容**就是两个新价位
- *
- * 2026-10-03 用户的反馈（附了另一个产品的截图）：
- * 「调整止损/止盈一目了然，再看看我们系统感觉杂乱无章」。
- *
- * 核实：`adjust_protection` 走不进这里（`isOpenAction` 只认 `open_*`），于是界面上
- * **只剩一个"持有"徽章加一段文字**，而模型给出的新止损/止盈价 —— **那个动作的全部
- * 意义所在** —— 被丢掉了。用户只能去读理由里的散文才知道它把止损挪到了哪。
- *
- * 所以这里给它开一个分支：**只显示它真正改的那两个价**。不带仓位与杠杆，因为
- * 那个动作根本不改变持仓数量（见 `decision.ts` 里 `adjust_protection` 的说明）。
- */
-export function figureParts(decision: Decision, price: number | null): Figure[] {
-  /*
-   * ## 另外两类"调整"也必须显示数字（2026-10-03）
-   *
-   * 用户的追问：「最近决策上面会不会显示**仓位调整**？（如果有）
-   * 就和我截图给你的别人平台的 UI 一样」。
-   *
-   * 核实：`add_to_position` / `reduce_position` 和 `adjust_protection` 一样，
-   * 都被 `isOpenAction` 挡在外面 —— **界面上一个字都不显示**。
-   *
-   * 而这三个动作**恰恰是"它正在动我的仓位"的那一类**：开仓是建立敞口，
-   * 这三个是**改变已有敞口**。操作员最需要看清的正是它们改成了什么 ——
-   * 一个"持有"徽章加一段散文说不清"它加了多少 / 减了多少 / 止损挪到哪"。
-   *
-   * ⚠️ 实测（2026-10-03）这两个动作**一次都没被用过**（今日 165 条决策里
-   * `add_to_position` = 0、`reduce_position` = 0）。所以这段渲染目前没有线上样本，
-   * 但**"没用过"不等于"不该显示"** —— 它一被用上，操作员就得看懂它。
-   */
-  /*
-   * ⚠️ **判据必须是"真的是个数字"，不能是 `!== null`**（2026-10-12 实测抓到的真 BUG）。
-   *
-   * 现象：界面上一条开仓决策显示成 `止盈 -- · 止损 -- · undefinedx` ——
-   * 那个 `undefinedx` 是 `` `${decision.leverage}x` `` 里的 `${undefined}`。
-   *
-   * 原因：这些字段判的是 `!== null`，而**字段缺失时它是 `undefined`**，
-   * 而 `undefined !== null` **为真** —— 代码"以为有值"。
-   *
-   * 为什么字段会缺：决策记录**跨版本累积**，这些字段都是后来才加上的
-   *（实测库里有一条只有 `symbol`+`action` 两个字段的旧记录）。
-   *
-   * 判据选 `typeof === 'number'` + `Number.isFinite`（而不是 `!= null`）：
-   * 后者挡得住 `null`/`undefined`，但**挡不住 `NaN`** —— 而 `NaN` 会让
-   * `fmtPriceUsd` 输出 `NaN`，同样是坏数据。
-   */
-  const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
-  if (decision.action === 'add_to_position') {
-    const parts: Figure[] = [
-      /* 加仓金额比"仓位"更贴切：它说的是"再投多少"。 */
-      { key: 'size', label: '加仓', value: fmtUsd(decision.positionSizeUsd, 2) },
-    ];
-    if (num(decision.positionSizeUsd) && decision.positionSizeUsd > 0 && num(decision.leverage) && decision.leverage > 0) {
-      parts.push({ key: 'margin', label: '保证金', value: fmtUsd(decision.positionSizeUsd / decision.leverage, 2) });
-    }
-    if (decision.leverage > 0) parts.push({ key: 'leverage', label: '杠杆', value: `${decision.leverage}x` });
-    if (num(decision.stopLoss)) parts.push({ key: 'stop', label: '止损', value: fmtPriceUsd(decision.stopLoss) });
-    if (num(decision.takeProfit))
-      parts.push({ key: 'target', label: '止盈', value: fmtPriceUsd(decision.takeProfit) });
-    return parts;
-  }
-
-  if (decision.action === 'reduce_position') {
-    /*
-     * `reducePercent` 与 `reduceQuantity` 是**归一化后的二选一**（见 `decision.ts`）：
-     * 模型给任意一个，风控换算成两边的具体数值，另一个留空。
-     * 所以按"哪个有值显示哪个"来渲染 —— 两个都空就只显示保护位。
-     */
-    const parts: Figure[] = [];
-    if (num(decision.reducePercent)) {
-      /*
-       * ⚠️ `reducePercent` 是**百分数**，不是比例。
-       *
-       * 判据在服务端：`risk/engine.ts` 里 `fraction = reducePercent / 100` ——
-       * 所以模型给 `50` 表示"卖掉一半"。这里**不要再除 100**：
-       * 那会把 50% 显示成 0.50%，让操作员以为它只象征性地减了一点点。
-       */
-      parts.push({ key: 'reduce', label: '减仓', value: `${decision.reducePercent.toFixed(1)}%` });
-    } else if (num(decision.reduceQuantity)) {
-      parts.push({ key: 'reduce', label: '减仓', value: fmtQty(decision.reduceQuantity) });
-    }
-    if (num(decision.stopLoss)) parts.push({ key: 'stop', label: '止损', value: fmtPriceUsd(decision.stopLoss) });
-    if (num(decision.takeProfit))
-      parts.push({ key: 'target', label: '止盈', value: fmtPriceUsd(decision.takeProfit) });
-    return parts;
-  }
-
-  if (decision.action === 'adjust_protection') {
-    const adjusted: Figure[] = [];
-    if (num(decision.stopLoss)) {
-      adjusted.push({ key: 'stop', label: '止损 →', value: fmtPriceUsd(decision.stopLoss) });
-    }
-    if (num(decision.takeProfit)) {
-      adjusted.push({ key: 'target', label: '止盈 →', value: fmtPriceUsd(decision.takeProfit) });
-    }
-    /*
-     * 一个价位都没有（模型只写了理由）时返回空数组 —— 那说明这次"调整"没有可显示的
-     * 内容，硬渲染一个空行比不渲染更糟。执行结果那一段会说明它到底做成了什么。
-     */
-    return adjusted;
-  }
-
-  if (!isOpenAction(decision.action)) return [];
-
-  /*
-   * ⚠️ **判据必须是"真的是个数字"，不能是 `!== null`**（2026-10-12 实测抓到的真 BUG）。
-   *
-   * ## 现象
-   *
-   * 界面上一条开仓决策显示成：
-   * ```
-   *   止盈 --  ·  止损 --  ·  undefinedx
-   * ```
-   * **`undefinedx`** —— 那是 `` `${decision.leverage}x` `` 里的 `${undefined}`。
-   *
-   * ## 原因
-   *
-   * 这些字段原本判的是 `!== null`，但**字段缺失时它是 `undefined`**，
-   * 而 `undefined !== null` **为真** —— 于是代码"以为有值"，把 `undefined`
-   * 送进了模板串 / `fmtPriceUsd`。
-   *
-   * ## 为什么字段会缺
-   *
-   * 决策记录**跨版本累积**：`leverage` / `stopLoss` / `takeProfit` 都是
-   * 后来才加上的字段（实测库里有一条 `[{"symbol":"BTCUSDT","action":"open_long"}]`
-   * 只有两个字段的旧记录）。
-   *
-   * ## 判据选 `typeof === 'number'`（而不是 `!= null`）
-   *
-   * `!= null`（松等于）能同时挡 `null` 和 `undefined`，但**挡不住 `NaN`** ——
-   * 而 `NaN` 会让 `fmtPriceUsd` 输出 `NaN`，也是坏数据。
-   * `typeof === 'number'` 配合 `Number.isFinite` 是最严的"这是个能显示的数字"。
-   */
-  const limitEntry = decision.entryType === 'limit' && num(decision.limitPrice) ? decision.limitPrice : null;
-  const entryRef = limitEntry ?? price;
-  const parts: Figure[] = [
-    {
-      key: 'size',
-      label: '仓位',
-      value: fmtUsd(num(decision.positionSizeUsd) ? decision.positionSizeUsd : null, 2),
-    },
-  ];
-  if (num(decision.positionSizeUsd) && decision.positionSizeUsd > 0 && num(decision.leverage) && decision.leverage > 0) {
-    parts.push({
-      key: 'margin',
-      label: '保证金',
-      value: fmtUsd(decision.positionSizeUsd / decision.leverage, 2),
-    });
-  }
-  if (entryRef !== null) {
-    parts.push({ key: 'entry', label: limitEntry !== null ? '限价' : '开仓', value: fmtPriceUsd(entryRef) });
-  }
-  if (num(decision.stopLoss)) parts.push({ key: 'stop', label: '止损', value: fmtPriceUsd(decision.stopLoss) });
-  if (num(decision.takeProfit))
-    parts.push({ key: 'target', label: '止盈', value: fmtPriceUsd(decision.takeProfit) });
-  if (entryRef !== null && num(decision.stopLoss) && num(decision.takeProfit)) {
-    const risk = Math.abs(entryRef - decision.stopLoss);
-    const reward = Math.abs(decision.takeProfit - entryRef);
-    if (risk > 0) parts.push({ key: 'reward', label: '盈亏比', value: `1:${(reward / risk).toFixed(2)}` });
-  }
-  if (isNum(decision.leverage) && decision.leverage > 0) {
-    parts.push({ key: 'leverage', label: '杠杆', value: `${decision.leverage}x` });
-  }
-
-  return parts;
-}
+/* `figureParts` / `FIGURE_TITLE` / `FIGURE_PILL_STYLE` 已抽出至 `../lib/decisionFigures.ts`（供决策流与单轮审计详情页共用）。 */
 
 /**
  * 一条**没有配上决策**的执行记录，一行小字。

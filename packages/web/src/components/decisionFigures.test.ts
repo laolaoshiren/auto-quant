@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { figureParts } from './DecisionFeed.js';
+import { extractPromptPositionContext } from '../lib/decisionFigures.js';
 import { isPendingOrderWaitDecision } from './DecisionAudit.js';
 import type { Decision } from '@aq/shared';
 
@@ -260,4 +261,88 @@ test('★ 未成交限价委托识别：带括号 SL/TP 说明的挂单等待必
     isPendingOrderWaitDecision('hold', '开仓均价 9.135，当前浮盈 +1.8%，继续持有看目标位，暂不撤离。'),
     false,
   );
+});
+
+test('★ 开仓决策止损与止盈必须附带距入场价百分比', () => {
+  // 多头限价（线上 #5233 ENAUSDT 真实样本）
+  const longParts = figureParts(
+    makeDecision({
+      symbol: 'ENAUSDT',
+      action: 'open_long',
+      entryType: 'limit',
+      limitPrice: 0.1045,
+      stopLoss: 0.1031,
+      takeProfit: 0.1101,
+      positionSizeUsd: 90,
+      leverage: 10,
+    }),
+    0.10531,
+  );
+  assert.equal(longParts.find((p) => p.key === 'stop')?.sub, '(-1.34%)');
+  assert.equal(longParts.find((p) => p.key === 'target')?.sub, '(+5.36%)');
+
+  // 空头限价（UNIUSDT 样本）
+  const shortParts = figureParts(
+    makeDecision({
+      symbol: 'UNIUSDT',
+      action: 'open_short',
+      entryType: 'limit',
+      limitPrice: 4.665,
+      stopLoss: 4.715,
+      takeProfit: 4.545,
+      positionSizeUsd: 56,
+      leverage: 10,
+    }),
+    4.65,
+  );
+  assert.equal(shortParts.find((p) => p.key === 'stop')?.sub, '(+1.07%)');
+  assert.equal(shortParts.find((p) => p.key === 'target')?.sub, '(-2.57%)');
+});
+
+test('★ 调整保护位必须完整展示从多少到多少、增减量与百分比，并支持历史 userPrompt 回溯', () => {
+  const samplePrompt = [
+    '# 当前持仓战术面板与挂单',
+    '- **BTCUSDT 多 10x** | 名义 $185.18 · 均价 61330.0 → 现价 61726.2 (+0.65%) · 浮盈 +1.19U (+6.5% ROE) · 持仓 3.0h · SL=60970.0 · TP=62400.0',
+  ].join('\n');
+
+  const ctx = extractPromptPositionContext(samplePrompt, 'BTCUSDT');
+  assert.deepEqual(ctx, {
+    entryPrice: 61330,
+    previousStopLoss: 60970,
+    previousTakeProfit: 62400,
+  });
+
+  const parts = figureParts(
+    makeDecision({
+      symbol: 'BTCUSDT',
+      action: 'adjust_protection',
+      stopLoss: 61300,
+      takeProfit: 62400,
+    }),
+    61726.2,
+    ctx,
+  );
+
+  const stop = parts.find((p) => p.key === 'stop');
+  assert.equal(stop?.label, '止损');
+  assert.equal(stop?.value, '60,970.00 → 61,300.00');
+  assert.equal(stop?.sub, '(+330.00 / +0.54%)');
+
+  const tp = parts.find((p) => p.key === 'target');
+  assert.equal(tp?.label, '止盈');
+  assert.equal(tp?.value, '62,400.00');
+  assert.equal(tp?.sub, '(未变 · +1.74%)');
+
+  // 下调止盈测试（负增减量与负百分比）
+  const lowerTp = figureParts(
+    makeDecision({
+      symbol: 'BTCUSDT',
+      action: 'adjust_protection',
+      takeProfit: 62000,
+    }),
+    61726.2,
+    ctx,
+  ).find((p) => p.key === 'target');
+  assert.equal(lowerTp?.value, '62,400.00 → 62,000.00');
+  assert.equal(lowerTp?.sub, '(-400.00 / -0.64%)');
 });
