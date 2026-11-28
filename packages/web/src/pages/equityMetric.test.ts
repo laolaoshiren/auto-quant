@@ -129,9 +129,10 @@ test('★★★ 那一行必须只有【一行】（对照行已按用户要求�
    * 所以这里钉住"那一行的渲染里只有一个 flex 容器" ——
    * 如果谁再加回第二行解释，这条会红，而人会回来看这段注释。
    */
-  const i = PAGE.indexOf('function EquityWindowLine');
+  const PANELS = readFileSync(new URL('./trader/TraderPanels.tsx', import.meta.url), 'utf8');
+  const i = PANELS.indexOf('function EquityWindowLine');
   assert.ok(i >= 0, '★ 找不到 `EquityWindowLine`');
-  const body = PAGE.slice(i, i + 2600);
+  const body = PANELS.slice(i, i + 2600);
   const divCount = (body.match(/<div className="mb-2/g) ?? []).length;
   assert.equal(divCount, 1, `★ 那一行只能有一个容器（实际 ${divCount} 个）`);
   assert.ok(
@@ -206,7 +207,7 @@ test('★★★ `calibratedEquity` 与列表页「归属权益」必须是同一
     '★ calibratedEquity 必须与 attributedEquity 同构',
   );
   const repo = readFileSync(
-    new URL('../../../server/src/store/repositories.ts', import.meta.url),
+    new URL('../../../server/src/store/telemetryRepo.ts', import.meta.url),
     'utf8',
   );
   assert.ok(

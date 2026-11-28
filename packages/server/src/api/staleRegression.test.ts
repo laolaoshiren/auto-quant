@@ -256,7 +256,7 @@ test('★★★ 两个调用点都必须真的把 `healthContext()` 传进去', 
    * （本仓库反复出现的形状：「能力在、没人用」。`t99` 里我刚用同一招守过
    * `await this.auditStaleTraders()` 的接线。）
    */
-  const server = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('./routes/systemAuthRoutes.ts', import.meta.url), 'utf8');
   assert.match(
     server,
     /evaluateTraderHealth\(traders\.list\(\), Date\.now\(\), runningSince, healthContext\(\)\)/,
@@ -294,7 +294,7 @@ test('★★★ `/api/health` 的 `staleTraders` 必须把 `thresholdMs` 带出�
    * 判据：`staleTraders: health.stale.map(...)` 那一段里必须出现
    * `thresholdMs: entry.thresholdMs`。
    */
-  const server = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+  const server = readFileSync(new URL('./routes/systemAuthRoutes.ts', import.meta.url), 'utf8');
   const at = server.indexOf('staleTraders: health.stale.map');
   assert.notEqual(at, -1, '★ 找不到 staleTraders 映射 —— 判据失效');
   const block = server.slice(at, at + 700);

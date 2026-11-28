@@ -45,10 +45,17 @@
  * ⚠️ 白名单**按路由精确匹配并附理由**，不是"整个文件豁免"。
  */
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const SRC = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+const ROUTES_DIR = new URL('./routes/', import.meta.url);
+const SRC = [
+  readFileSync(new URL('./server.ts', import.meta.url), 'utf8'),
+  ...readdirSync(ROUTES_DIR)
+    .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+    .sort()
+    .map((f) => readFileSync(new URL(f, ROUTES_DIR), 'utf8')),
+].join('\n');
 
 /** 剥掉行注释与块注释的行，但**保留行号**（否则报错位置会错）。 */
 function stripCommentsKeepLines(text: string): string {

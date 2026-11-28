@@ -40,7 +40,7 @@
 
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, before, beforeEach, describe, it } from 'node:test';
@@ -701,7 +701,14 @@ describe('接线证明（带有效令牌时必须真的走到业务层 —— �
  * 源码列表用来对账"有没有漏登记"，`app.inject()` 用来证明"运行时到底怎么回"。
  */
 function serverRoutes(): Set<string> {
-  const source = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+  const routesDir = new URL('./routes/', import.meta.url);
+  const source = [
+    readFileSync(new URL('./server.ts', import.meta.url), 'utf8'),
+    ...readdirSync(routesDir)
+      .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+      .sort()
+      .map((f) => readFileSync(new URL(f, routesDir), 'utf8')),
+  ].join('\n');
   const routes = new Set<string>();
   for (const line of source.split('\n')) {
     const match = /app\.(get|post|put|patch|delete)\(\s*'([^']+)'/.exec(line);

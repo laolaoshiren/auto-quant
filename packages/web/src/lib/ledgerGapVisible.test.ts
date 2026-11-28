@@ -38,7 +38,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const SERVER = readFileSync(new URL('../../../server/src/api/server.ts', import.meta.url), 'utf8');
+const SERVER = readFileSync(new URL('../../../server/src/api/routes/traderDataRoutes.ts', import.meta.url), 'utf8');
 const API = readFileSync(new URL('./api.ts', import.meta.url), 'utf8');
 const CELLS = readFileSync(new URL('../components/BalanceCells.tsx', import.meta.url), 'utf8');
 

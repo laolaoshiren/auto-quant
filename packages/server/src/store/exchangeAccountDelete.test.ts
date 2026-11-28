@@ -30,8 +30,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const REPO = readFileSync(new URL('./repositories.ts', import.meta.url), 'utf8');
-const SERVER = readFileSync(new URL('../api/server.ts', import.meta.url), 'utf8');
+const REPO = readFileSync(new URL('./configRepos.ts', import.meta.url), 'utf8');
+const SERVER = readFileSync(new URL('../api/routes/exchangeModelRoutes.ts', import.meta.url), 'utf8');
 
 /**
  * 取 `exchanges` 这个仓储对象的方法体。

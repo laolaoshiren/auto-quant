@@ -233,9 +233,12 @@ test('★★★ by_code 岗位必须写明【由哪段代码承担】，而且�
    * （本仓库对这种"判据比它要防的东西宽"的形态记过教训：
    *  `docs/archive/FINDING-clerk-unwired.md` 2026-10-14 补充 —— 判据本身也需要校准。）
    */
-  const PLACES: Record<string, { file: string; needles: Array<{ pattern: RegExp; what: string }> }> = {
+  const PLACES: Record<string, { files: string[]; needles: Array<{ pattern: RegExp; what: string }> }> = {
     data_sentinel: {
-      file: 'packages/server/src/api/server.ts',
+      files: [
+        'packages/server/src/api/routes/systemAuthRoutes.ts',
+        'packages/server/src/api/health.ts',
+      ],
       needles: [
         {
           /* 响应体里的字段构造：`staleTraders: health.stale.map(...)`。 */
@@ -250,7 +253,7 @@ test('★★★ by_code 岗位必须写明【由哪段代码承担】，而且�
       ],
     },
     ops_watchdog: {
-      file: 'packages/server/src/trader/selfcheck.ts',
+      files: ['packages/server/src/trader/selfcheck.ts'],
       needles: [
         {
           /* 函数定义处（不是调用点）—— `export function findDeterministicProblems(`。 */
@@ -278,13 +281,17 @@ test('★★★ by_code 岗位必须写明【由哪段代码承担】，而且�
       `★ ${role.id} 新标为 by_code，但这条测试还不知道去哪核对它的承担物 —— ` +
         `请把它写进 PLACES 并说明承担它的模块`,
     );
-    const file = path.join(REPO_ROOT, place.file);
-    assert.ok(existsSync(file), `★ ${role.id} 的 carriedBy 指向的文件不存在：${place.file}`);
-    const text = readFileSync(file, 'utf8');
+    const texts: string[] = [];
+    for (const rel of place.files) {
+      const file = path.join(REPO_ROOT, rel);
+      assert.ok(existsSync(file), `★ ${role.id} 的 carriedBy 指向的文件不存在：${rel}`);
+      texts.push(readFileSync(file, 'utf8'));
+    }
+    const text = texts.join('\n');
     for (const { pattern, what } of place.needles) {
       assert.ok(
         pattern.test(text),
-        `★ ${role.id} 声称由 ${place.file} 承担，但那个文件里找不到「${what}」（${pattern}）—— ` +
+        `★ ${role.id} 声称由 ${place.files.join(', ')} 承担，但找不到「${what}」（${pattern}）—— ` +
           `界面会一直说"已由代码承担"，而承担物已经不在了`,
       );
     }

@@ -34,7 +34,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const SRC = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+const SRC = readFileSync(new URL('./routes/traderDataRoutes.ts', import.meta.url), 'utf8');
 
 /** 取出某个路由处理函数的源码片段（从 `app.get('<path>'` 到下一个 `app.` 声明）。 */
 function routeBody(path: string): string {

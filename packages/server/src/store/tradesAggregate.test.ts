@@ -227,7 +227,7 @@ test('★★★ 聚合 SQL 只出现一次 —— performanceSince 不得再复�
    * 边界（诚实说明）：它抓不住"用别的写法重新实现一遍聚合"；它抓的是最可能
    * 发生的那一种 —— 复制粘贴再改。
    */
-  const file = fileURLToPath(new URL('./repositories.ts', import.meta.url));
+  const file = fileURLToPath(new URL('./tradesRepo.ts', import.meta.url));
   const source = readFileSync(file, 'utf8');
   const matches = source.match(/SUM\(CASE WHEN net_pnl >\s+0 THEN 1 ELSE 0 END\)/g) ?? [];
   assert.equal(

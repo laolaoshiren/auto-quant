@@ -44,7 +44,7 @@ import { MIGRATIONS } from '../db/schema.js';
 import { codeOnly } from '../testUtils/sourceText.js';
 
 const SCHEMA = readFileSync(new URL('../db/schema.ts', import.meta.url), 'utf8');
-const REPO = readFileSync(new URL('../store/repositories.ts', import.meta.url), 'utf8');
+const REPO = readFileSync(new URL('../store/configRepos.ts', import.meta.url), 'utf8');
 const MGR = readFileSync(new URL('./manager.ts', import.meta.url), 'utf8');
 
 test('★★★ 必须有 `dry_run` 迁移（否则重启后无法区分测试机与实盘机）', () => {

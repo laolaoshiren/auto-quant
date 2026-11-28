@@ -26,7 +26,7 @@
  * 被判成两条不同的路由，24 条带参数的前端调用全被误报成"后端没有"。
  * **问对问题之前，先让工具对。**
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 
 /*
  * ⚠️ 用 `process.cwd()` 而不是 `new URL('..', import.meta.url).pathname` ——
@@ -36,7 +36,15 @@ import { readFileSync } from 'node:fs';
  */
 const ROOT = `${process.cwd()}/`;
 const apiSrc = readFileSync(`${ROOT}packages/web/src/lib/api.ts`, 'utf8');
-const serverSrc = readFileSync(`${ROOT}packages/server/src/api/server.ts`, 'utf8');
+const routesDir = `${ROOT}packages/server/src/api/routes`;
+const routeFiles = readdirSync(routesDir)
+  .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+  .sort()
+  .map((f) => readFileSync(`${routesDir}/${f}`, 'utf8'));
+const serverSrc = [
+  readFileSync(`${ROOT}packages/server/src/api/server.ts`, 'utf8'),
+  ...routeFiles,
+].join('\n');
 
 /**
  * 后端有、前端**刻意**不调的端点。

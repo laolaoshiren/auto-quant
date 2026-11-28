@@ -182,7 +182,7 @@ test('★★★ cancelOpenBySymbol 只动 NEW，不改写历史状态', () => {
    * 已成交（`FILLED`）与早已撤销的行是**历史事实**，不能改写。
    * 判据：SQL 里必须有 `status = 'NEW'` 这个条件。
    */
-  const REPO = readFileSync(new URL('../store/repositories.ts', import.meta.url), 'utf8');
+  const REPO = readFileSync(new URL('../store/ordersRepo.ts', import.meta.url), 'utf8');
   const fn = /cancelOpenBySymbol\(traderId: number, symbol: string\)[\s\S]*?\n  \},/.exec(REPO);
   assert.ok(fn !== null, '★ 应当能找到 cancelOpenBySymbol');
   assert.ok(
