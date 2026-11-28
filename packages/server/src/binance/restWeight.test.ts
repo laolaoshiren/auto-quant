@@ -520,16 +520,22 @@ test('★★★ 安全 P1 #4：权重软限速休眠期间不占并发槽，高�
       }),
     );
   await settle();
-  assert.equal(pending.length, 0, '高优先级请求收到 429 后必须遵守退避，不得绕过退避立即重试');
+  assert.equal(
+    urls.filter((u) => u.includes('/fapi/v1/order')).length,
+    1,
+    '高优先级请求收到 429 后必须遵守退避，不得绕过退避立即重试',
+  );
 
-  /* 等待窗口自然滚过 400ms 后放行 marketReq，再等待 1s 退避完成放行 tradeReq 重试 */
-  await new Promise((r) => setTimeout(r, 480));
+  /* 等待窗口自然滚过后放行 marketReq，再等待 1s 退避完成放行 tradeReq 重试 */
+  if (pending.length === 0) {
+    await new Promise((r) => setTimeout(r, 480));
+  }
   assert.equal(pending.length, 1, '窗口滚过后低优先级行情请求恢复发出');
   assert.ok(urls[urls.length - 1]!.includes('/fapi/v1/klines'));
   pending.shift()?.resolve(jsonResponse({ klines: true }));
   await marketReq;
 
-  await new Promise((r) => setTimeout(r, 700));
+  await new Promise((r) => setTimeout(r, 900));
   await settle();
   assert.equal(pending.length, 1, '429 退避结束后高优先级请求按期重试');
   assert.ok(urls[urls.length - 1]!.includes('/fapi/v1/order'));

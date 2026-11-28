@@ -75,6 +75,7 @@ test('★ 六个手续费调用点都经过共享实现', () => {
 });
 
 test('★ 非结算资产手续费必须被单独报告，不能静默丢弃', () => {
+  const reconcileCode = readFileSync(new URL('./tradeHistoryReconcile.ts', import.meta.url), 'utf8');
   /* 运行时：每一笔带 foreign 的成交都要 emit 一条 warn。 */
   assert.ok(
     autoTraderCode.includes('private reportForeignFees('),
@@ -82,16 +83,17 @@ test('★ 非结算资产手续费必须被单独报告，不能静默丢弃', (
   );
   /* 对账重建：ReconstructedTrade.foreignFees 也要消费（原来没有任何消费方）。 */
   assert.ok(
-    autoTraderCode.includes('this.reportForeignFees(trip.symbol, trip.foreignFees)'),
+    reconcileCode.includes('ctx.reportForeignFees(trip.symbol, trip.foreignFees)'),
     '对账重建出来的 foreignFees 没有被报告 —— 它会凭空消失',
   );
 });
 
 test('★ income 流水口径同样只认结算资产', () => {
+  const reconcileCode = readFileSync(new URL('./tradeHistoryReconcile.ts', import.meta.url), 'utf8');
   /* 对账侧（commissionsInWindow）与总账校验（exchangeNet）都按 asset 过滤。 */
   const guards = incomeCode.match(/isSettlementAsset\(event\.asset\)/g) ?? [];
   assert.ok(guards.length >= 1, 'commissionsInWindow 缺少 asset 过滤');
-  const ledgerGuards = autoTraderCode.match(/isSettlementAsset\(e\.asset\)/g) ?? [];
+  const ledgerGuards = reconcileCode.match(/isSettlementAsset\(e\.asset\)/g) ?? [];
   assert.ok(
     ledgerGuards.length >= 1,
     '总账校验的 exchangeNet 缺少 asset 过滤 —— 两边口径不同会让差额告警永久响',

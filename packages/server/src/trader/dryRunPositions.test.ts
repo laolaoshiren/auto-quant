@@ -172,12 +172,15 @@ test('★★★ 模拟盘的结算必须记手续费（记 0 会让它比现实�
     '★ paperPositions 内部必须调用注入的 dryRunRoundTripFee()',
   );
 
-  /* 共用估算本体：总额 = 名义 × 往返费率；两侧各半。 */
+  /* 共用估算本体（阶段 2b 已迁至 closeBooking.ts，autoTrader.ts 保留委托入口）：总额 = 名义 × 往返费率；两侧各半。 */
   const helperAt = CODE.indexOf('private dryRunRoundTripFee(');
-  assert.ok(helperAt > 0, '★ 必须有共用的 dryRunRoundTripFee()');
-  const helper = CODE.slice(helperAt, helperAt + 900);
+  assert.ok(helperAt > 0, '★ 必须有共用的 dryRunRoundTripFee() 委托入口');
+  const closeBookingCode = readFileSync(new URL('./closeBooking.ts', import.meta.url), 'utf8');
+  const implAt = closeBookingCode.indexOf('export function dryRunRoundTripFeeForTrader(');
+  assert.ok(implAt >= 0, '★ closeBooking.ts 必须包含 dryRunRoundTripFeeForTrader 实现');
+  const helper = closeBookingCode.slice(implAt, implAt + 900);
   assert.ok(
-    /exitPrice \* quantity \* this\.effectiveConfig\(\)\.riskControl\.fallbackRoundTripFeeRate/.test(helper),
+    /exitPrice \* quantity \* ctx\.effectiveConfig\(\)\.riskControl\.fallbackRoundTripFeeRate/.test(helper),
     '★ 手续费总额 = 名义价值 × 往返费率（复用策略里已有的费率）',
   );
   assert.ok(

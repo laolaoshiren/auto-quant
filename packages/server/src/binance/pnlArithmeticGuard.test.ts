@@ -100,6 +100,10 @@ const ALLOWED: ReadonlyMap<string, string> = new Map([
       '⚠️ 若将来这一笔开始带开仓费/资金费，**必须改调 `netPnlOf`**，否则这条豁免不成立。',
   ],
   [
+    'trader/tradeHistoryReconcile.ts',
+    '分批平仓回合拆尾仓毛利：`remGross = trip.grossPnl - partialGross`（毛利差值，不是算净额；净额仍统一调用 `netPnlOf`）。',
+  ],
+  [
     'db/schema.ts',
     '**一次性迁移的 backfill**（`M2_TRADE_ACCOUNTING` 里的 `UPDATE trades SET net_pnl = pnl - fee`）' +
       '—— 不是活跃逻辑，且注释说明"reconciliation pass 会修正"。',

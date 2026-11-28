@@ -37,6 +37,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const SRC = readFileSync(new URL('./autoTrader.ts', import.meta.url), 'utf8');
+const CLOSE_BOOKING_SRC = readFileSync(new URL('./closeBooking.ts', import.meta.url), 'utf8');
 
 /** 剥注释但保留行号。 */
 function stripCommentsKeepLines(text: string): string {
@@ -169,20 +170,35 @@ test('★★★ 入账口必须真的"先写账再关行" —— 但幂等分支
    * 已经证明"账已存在"**。这里用"该 close 之前出现过 `insert` **或**
    * `alreadyBooked`"来判 —— 后者正是那条幂等分支的判据变量。
    */
-  const fn = methods().find((m) => m.name === 'bookClosedPosition');
-  assert.ok(fn, '找不到 `bookClosedPosition` —— 结构变了，请更新本测试');
+  /*
+   * `bookClosedPosition` 已于阶段 2b 委托给 `closeBooking.ts` 的 `bookClosedPositionForTrader`，
+   * 所以这里同时确认 `autoTrader.ts` 保留了委托入口，并在 `closeBooking.ts` 源码上执行同一条先写账再关行校验。
+   */
+  const facadeFn = methods().find((m) => m.name === 'bookClosedPosition');
+  assert.ok(facadeFn, '找不到 `AutoTrader.bookClosedPosition` 委托入口 —— 结构变了，请更新本测试');
+  assert.ok(
+    /bookClosedPositionForTrader\(/.test(facadeFn.body),
+    '★★★ `AutoTrader.bookClosedPosition` 必须委托给 `bookClosedPositionForTrader`',
+  );
 
-  const closeIdx = fn.body.indexOf('positionStore.close(');
-  assert.ok(closeIdx > 0, '★★★ `bookClosedPosition` 里找不到 `positionStore.close(`');
+  const cbCode = stripCommentsKeepLines(CLOSE_BOOKING_SRC);
+  const fnStart = cbCode.indexOf('export async function bookClosedPositionForTrader(');
+  assert.ok(fnStart >= 0, '找不到 `closeBooking.ts` 中的 `bookClosedPositionForTrader`');
+  const nextFn = cbCode.indexOf('\nexport ', fnStart + 10);
+  const fnBody = cbCode.slice(fnStart, nextFn > 0 ? nextFn : cbCode.length);
+  const fnStartLine = cbCode.slice(0, fnStart).split('\n').length;
+
+  const closeIdx = fnBody.indexOf('positionStore.close(');
+  assert.ok(closeIdx > 0, '★★★ `bookClosedPositionForTrader` 里找不到 `positionStore.close(`');
 
   /* 逐个 `close` 检查它之前有没有"账"（insert 或 alreadyBooked）。 */
-  const lines = fn.body.split('\n');
+  const lines = fnBody.split('\n');
   const problems: string[] = [];
   for (let i = 0; i < lines.length; i += 1) {
     if (!/positionStore\.close\(/.test(lines[i] ?? '')) continue;
     const before = lines.slice(0, i).join('\n');
     const hasBook = /tradeStore\.insert\(/.test(before) || /alreadyBooked/.test(before);
-    if (!hasBook) problems.push(`第 ${fn.startLine + i} 行附近的 \`positionStore.close(\` 之前没有任何入账`);
+    if (!hasBook) problems.push(`closeBooking.ts 第 ${fnStartLine + i} 行附近的 \`positionStore.close(\` 之前没有任何入账`);
   }
 
   assert.deepEqual(

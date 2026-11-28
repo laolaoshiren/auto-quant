@@ -43,6 +43,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const RAW = readFileSync(new URL('./autoTrader.ts', import.meta.url), 'utf8');
+const CLOSE_BOOKING_RAW = readFileSync(new URL('./closeBooking.ts', import.meta.url), 'utf8');
+const TRADE_HISTORY_RAW = readFileSync(new URL('./tradeHistoryReconcile.ts', import.meta.url), 'utf8');
 
 /** 剥注释但**保留行号**（报错里的行号就是文件行号）。 */
 function stripCommentsKeepLines(text: string): string {
@@ -273,10 +275,21 @@ function ledgerProblems(code: string): string[] {
   }
 
   /* ── ④ 消失路径必须能走到入账口 ─────────────────────────────────── */
+  const closeBookingCode = stripCommentsKeepLines(CLOSE_BOOKING_RAW);
+  const tradeHistoryCode = stripCommentsKeepLines(TRADE_HISTORY_RAW);
   if (!names.has('bookClosedPosition')) {
     problems.push('找不到 bookClosedPosition() —— 入账口改名/消失，本守卫的判据失效了');
-  } else if (!/tradeStore\.insert\(/.test(all.find((m) => m.name === 'bookClosedPosition')!.body)) {
-    problems.push('bookClosedPosition() 里没有 tradeStore.insert( —— 入账口不写账了？');
+  } else {
+    const bpBody = all.find((m) => m.name === 'bookClosedPosition')!.body;
+    const delegatesToModule =
+      /bookClosedPositionForTrader\(/.test(bpBody) &&
+      /export async function bookClosedPositionForTrader[\s\S]*tradeStore\.insert\(/.test(closeBookingCode);
+    if (!/tradeStore\.insert\(/.test(bpBody) && !delegatesToModule) {
+      problems.push('bookClosedPosition() 里没有 tradeStore.insert(（且未委托到含写账的 closeBooking.ts）—— 入账口不写账了？');
+    }
+  }
+  if (!/export async function reconcileTradeHistoryForTrader[\s\S]*tradeStore\.insert\(/.test(tradeHistoryCode)) {
+    problems.push('tradeHistoryReconcile.ts 的 reconcileTradeHistoryForTrader() 找不到 tradeStore.insert( —— 历史重建路径不写账了？');
   }
   for (const [from, why] of MUST_REACH_BOOKING) {
     if (!names.has(from)) {
@@ -436,5 +449,12 @@ test('★★★ 判据必须能真的报出问题 —— 四种人造变异逐�
 
   /* 反向：合法输入不许被误报（否则"报出的问题"里全是噪音）。 */
   assert.deepEqual(ledgerProblems(mutatedA).filter((p) => !p.includes('t43SneakClose')), [], '★ 变异 A 之外不该多报');
-  assert.equal(all.filter((m) => /tradeStore\.insert\(/.test(m.body)).length, 3, '★ 写账点数量变了 —— 请复核登记表');
+  const autoInsertMethods = all.filter((m) => /tradeStore\.insert\(/.test(m.body)).length;
+  const closeBookingInsertFn = /tradeStore\.insert\(/.test(stripCommentsKeepLines(CLOSE_BOOKING_RAW)) ? 1 : 0;
+  const tradeHistoryInsertFn = /tradeStore\.insert\(/.test(stripCommentsKeepLines(TRADE_HISTORY_RAW)) ? 1 : 0;
+  assert.equal(
+    autoInsertMethods + closeBookingInsertFn + tradeHistoryInsertFn,
+    3,
+    '★ 写账方法总数变了（executeReduce + bookClosedPositionForTrader + reconcileTradeHistoryForTrader 应恰好 3 个）—— 请复核登记表',
+  );
 });
