@@ -5809,6 +5809,12 @@ export class AutoTrader {
      * 失败，而不是"订单被拒"。
      */
     state.phase = 'bookkeeping';
+    // 顺序硬约束（见 reconcileAgainstExchange 注释）：
+    // 若限价挂单恰好在本轮 LLM 决策期间成交，必须先由 `settlePendingEntries()` 按原定止损/止盈转正，
+    // 再跑 `reconcilePositions()`；否则后者会把刚成交的限价单误当成"外部手工仓位"收养并挂错 2.5% 兜底止损、丢掉止盈。
+    await this.settlePendingEntries().catch((error) => {
+      log.warn(`[${this.deps.trader.name}] 周期收尾待成交对账失败（不影响其余收尾）：${(error as Error).message}`);
+    });
     const finalPositions = await this.effectivePositions().catch(() => livePositions);
     await this.reconcilePositions(finalPositions);
     if (this.pendingFillReconcile) {

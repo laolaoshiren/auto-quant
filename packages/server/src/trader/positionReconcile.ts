@@ -218,18 +218,29 @@ export async function ensureStopsOnOpenPositionsForTrader(input: {
     if (!live) continue;
 
     let orderTypes: string[];
+    let liveStopPrice: number | null = null;
     try {
       const [regular, algo] = await Promise.all([
         input.getOpenOrders(local.symbol),
         input.getOpenAlgoOrders(local.symbol),
       ]);
-      orderTypes = [...regular, ...algo].map((order) => {
+      const combined = [...regular, ...algo];
+      orderTypes = combined.map((order) => {
         /*
          * ⚠️ **字段名有两个，必须都看**：普通委托用 `type`，Algo 条件单用 `orderType`。
          */
         const type =
           (order as { orderType?: unknown }).orderType ?? (order as { type?: unknown }).type;
-        return String(type ?? '');
+        const typeStr = String(type ?? '');
+        if (liveStopPrice === null && STOP_TYPES.has(typeStr)) {
+          const trigger = Number(
+            (order as { triggerPrice?: unknown }).triggerPrice ??
+              (order as { stopPrice?: unknown }).stopPrice ??
+              0,
+          );
+          if (Number.isFinite(trigger) && trigger > 0) liveStopPrice = trigger;
+        }
+        return typeStr;
       });
     } catch (error) {
       input.logWarn(
@@ -244,8 +255,6 @@ export async function ensureStopsOnOpenPositionsForTrader(input: {
     const isLong = local.side === 'long';
     const mark = live.markPrice > 0 ? live.markPrice : live.entryPrice;
 
-    if (hasStop && hasTarget) continue;
-
     /* 本地记录的保护位优先（那是模型/系统当初认定的失效位）。 */
     const recordedOk =
       local.stop_loss !== null &&
@@ -253,9 +262,32 @@ export async function ensureStopsOnOpenPositionsForTrader(input: {
       (isLong ? local.stop_loss < mark : local.stop_loss > mark);
 
     const fallbackPercent = input.getFallbackStopLossPercent();
+    const expectedFallbackStop = fallbackStopPrice(live.entryPrice, isLong, fallbackPercent);
+    const liveIsFallbackStop =
+      liveStopPrice !== null &&
+      expectedFallbackStop > 0 &&
+      Math.abs(liveStopPrice - expectedFallbackStop) / expectedFallbackStop <= 0.003;
+
+    /*
+     * 当限价单成交瞬间曾被对账抢先收养（open_reasoning 以「收养：」开头），随后 `promotePendingEntry`
+     * 把限价单预设的真实止损/止盈写回账本，此时交易所侧仍挂着收养阶段的 2.5% 兜底止损（与账本止损偏离 > 0.2%）。
+     * 仅在交易所活止损确仍停在系统兜底价位时替换（绝不覆盖人工在交易所主动挪过的止损），
+     * 真正兑现「下一轮对账会据此替换兜底保护单」的承诺。
+     */
+    const needsAdoptedStopSync =
+      hasStop &&
+      recordedOk &&
+      typeof local.open_reasoning === 'string' &&
+      local.open_reasoning.startsWith('收养：') &&
+      liveIsFallbackStop &&
+      liveStopPrice !== null &&
+      Math.abs(liveStopPrice - (local.stop_loss as number)) / (local.stop_loss as number) > 0.002;
+
+    if (hasStop && hasTarget && !needsAdoptedStopSync) continue;
+
     let stopForRr: number;
     let stopToPlace: number | null = null;
-    if (!hasStop) {
+    if (!hasStop || needsAdoptedStopSync) {
       if (recordedOk) {
         stopToPlace = local.stop_loss as number;
       } else {
@@ -330,10 +362,10 @@ export async function ensureStopsOnOpenPositionsForTrader(input: {
       }
     }
 
-    /* 已有止损且本轮决定不补固定止盈 → 完全跳过，不碰活止损、不误报无止损。 */
-    if (hasStop && target === null) continue;
+    /* 已有止损且无需替换兜底止损、本轮又决定不补固定止盈 → 完全跳过，不碰活止损、不误报无止损。 */
+    if (hasStop && !needsAdoptedStopSync && target === null) continue;
 
-    if (hasStop && target !== null) {
+    if (hasStop && !needsAdoptedStopSync && target !== null) {
       const protection = await input.replacePositionProtection({
         symbol: local.symbol,
         side: isLong ? 'long' : 'short',
@@ -365,12 +397,20 @@ export async function ensureStopsOnOpenPositionsForTrader(input: {
     });
 
     if (protection.stopPlaced) {
-      input.emit(
-        'warn',
-        `⚠️ ${local.symbol} 的持仓在交易所侧**没有止损**，已自动重挂 ${stopToPlace}` +
-          `（${recordedOk ? '用本地记录的保护位' : '用兜底比例'}${protection.targetPlaced ? '，止盈一并恢复' : ''}）` +
-          '—— 它此前为什么消失值得查（撤单失败/被替换/交易所侧过期）。',
-      );
+      if (needsAdoptedStopSync) {
+        input.emit(
+          'info',
+          `已将 ${local.symbol} 的收养兜底止损（${liveStopPrice}）替换为限价单预设止损 ${stopToPlace}` +
+            `${protection.targetPlaced && target !== null ? `，并补挂预设止盈 ${target}` : ''}。`,
+        );
+      } else {
+        input.emit(
+          'warn',
+          `⚠️ ${local.symbol} 的持仓在交易所侧**没有止损**，已自动重挂 ${stopToPlace}` +
+            `（${recordedOk ? '用本地记录的保护位' : '用兜底比例'}${protection.targetPlaced ? '，止盈一并恢复' : ''}）` +
+            '—— 它此前为什么消失值得查（撤单失败/被替换/交易所侧过期）。',
+        );
+      }
     } else {
       input.emit(
         'error',
