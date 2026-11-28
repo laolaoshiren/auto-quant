@@ -23,6 +23,37 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
-    chunkSizeWarningLimit: 1500,
+    chunkSizeWarningLimit: 500,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const norm = id.replace(/\\/g, '/');
+          if (!norm.includes('/node_modules/')) return undefined;
+          if (
+            norm.includes('/node_modules/react/') ||
+            norm.includes('/node_modules/react-dom/') ||
+            norm.includes('/node_modules/scheduler/') ||
+            norm.includes('/node_modules/react-router')
+          ) {
+            return 'vendor-react';
+          }
+          if (
+            norm.includes('/node_modules/recharts/') ||
+            norm.includes('/node_modules/d3-') ||
+            norm.includes('/node_modules/victory-vendor/') ||
+            norm.includes('/node_modules/lodash')
+          ) {
+            return 'vendor-recharts';
+          }
+          if (norm.includes('/node_modules/@radix-ui/') || norm.includes('/node_modules/cmdk/')) {
+            return 'vendor-radix';
+          }
+          if (norm.includes('/node_modules/lucide-react/')) {
+            return 'vendor-icons';
+          }
+          return undefined;
+        },
+      },
+    },
   },
 });

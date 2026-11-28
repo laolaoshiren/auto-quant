@@ -1,6 +1,8 @@
-import type { Decision, ExecutionLogEntry } from '@aq/shared';
+import { extractPromptPositionContext, type Decision, type ExecutionLogEntry } from '@aq/shared';
 import { isOpenAction } from '../components/DecisionAudit';
 import { fmtPriceUsd, fmtQty, fmtUsd, isNum } from './format';
+
+export { extractPromptPositionContext };
 
 export type FigureKey =
   | 'size'
@@ -110,62 +112,6 @@ export function formatSignedPriceDelta(delta: number, refPrice: number): string 
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   })}`;
-}
-
-function escapeRegExp(raw: string): string {
-  return raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * 从周期 `userPrompt` 的「当前持仓」段落回溯提取调整前的均价、原止损、原止盈。
- * 既支持智能托管 2.0 战术面板格式（`- **BTCUSDT 多 10x** | ... · 均价 61330.0 ... · SL=60970.0 · TP=62400.0`），
- * 也兼容常规策略模板的持仓行，使历史旧记录也能完整展示「从多少到多少 · 增减 · 百分比」。
- */
-export function extractPromptPositionContext(
-  userPrompt: string | null | undefined,
-  symbol: string,
-): FigureContext | null {
-  if (!userPrompt || !symbol) return null;
-  const norm = symbol.trim().toUpperCase();
-  if (!norm) return null;
-
-  const lines = userPrompt.split('\n');
-  const symRe = new RegExp(`(?:^|[\\s*|\\[])\\*{0,2}${escapeRegExp(norm)}\\b`, 'i');
-
-  for (const line of lines) {
-    if (!symRe.test(line)) continue;
-    // 只匹配包含持仓字段（均价/开仓价 或 SL=/TP=/止损）的持仓摘要行，跳过普通行情候选行
-    const hasPosMarkers =
-      /(?:均价|开仓价?|entry)\s*[=:]?\s*\d/i.test(line) ||
-      /(?:SL|止损)\s*[=:]\s*(?:\d|无|none)/i.test(line) ||
-      /(?:TP|止盈)\s*[=:]\s*(?:\d|无|none)/i.test(line);
-    if (!hasPosMarkers) continue;
-
-    const entryMatch = line.match(/(?:均价|开仓价?|entry)\s*[=:]?\s*\$?([\d,]+(?:\.\d+)?)/i);
-    const slMatch = line.match(/(?:\bSL|止损)\s*[=:]\s*\$?([\d,]+(?:\.\d+)?|无|none)/i);
-    const tpMatch = line.match(/(?:\bTP|止盈)\s*[=:]\s*\$?([\d,]+(?:\.\d+)?|无|none)/i);
-
-    const parseVal = (m: RegExpMatchArray | null): number | null | undefined => {
-      if (!m) return undefined;
-      const token = m[1]!.replace(/,/g, '').trim();
-      if (token === '无' || token.toLowerCase() === 'none') return null;
-      const n = Number(token);
-      return Number.isFinite(n) && n > 0 ? n : undefined;
-    };
-
-    const entryPrice = parseVal(entryMatch);
-    const previousStopLoss = parseVal(slMatch);
-    const previousTakeProfit = parseVal(tpMatch);
-
-    if (entryPrice !== undefined || previousStopLoss !== undefined || previousTakeProfit !== undefined) {
-      return {
-        ...(entryPrice !== undefined ? { entryPrice } : {}),
-        ...(previousStopLoss !== undefined ? { previousStopLoss } : {}),
-        ...(previousTakeProfit !== undefined ? { previousTakeProfit } : {}),
-      };
-    }
-  }
-  return null;
 }
 
 /** 合并执行日志结构化字段（新记录权威）与 `userPrompt` 持仓摘要（历史记录兜底）。 */

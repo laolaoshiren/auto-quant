@@ -25,6 +25,7 @@ import {
   beijingDayStartIso,
   calculateTokenCost,
   defaultStrategyConfig,
+  extractPromptPositionContext,
   inferManagedRiskProfile,
   providerDefaults,
   defaultAiTeamConfig,
@@ -47,6 +48,7 @@ import type { ExchangeConnection } from '../binance/bootstrap.js';
 import type { GateConnection } from '../gate/connection.js';
 import { preflight } from '../binance/bootstrap.js';
 import type { Vault } from '../crypto/vault.js';
+import { isCorsOriginAllowed, parseCorsAllowedOrigins } from './corsOrigin.js';
 import { dbPath, env, webDistDir } from '../env.js';
 import { checkForUpdates, readAppVersion, readBuildInfo, readLocalBuildInfo } from '../buildInfo.js';
 import { eventBus } from '../events.js';
@@ -1014,7 +1016,18 @@ export async function buildServer(deps: ApiDependencies): Promise<FastifyInstanc
     trustProxy,
   });
 
-  await app.register(cors, { origin: true, credentials: true });
+  const extraCorsOrigins = parseCorsAllowedOrigins(process.env.CORS_ALLOWED_ORIGINS);
+  await app.register(cors, {
+    delegator: (req, callback) => {
+      const origin = req.headers.origin;
+      const requestHost = req.host || req.headers.host || null;
+      const allowed = isCorsOriginAllowed(origin, {
+        requestHost,
+        extraAllowedOrigins: extraCorsOrigins,
+      });
+      callback(null, { origin: allowed, credentials: true });
+    },
+  });
   await app.register(websocket, {
     options: {
       maxPayload: 64 * 1024,
@@ -4925,41 +4938,6 @@ function hydrateAdjustmentContextFromPrompt(
   }
   if (!needsHydrate) return log;
 
-  const lines = userPrompt.split('\n');
-  const parseLine = (symbol: string): { entryPrice?: number | null; previousStopLoss?: number | null; previousTakeProfit?: number | null } | null => {
-    const norm = symbol.trim().toUpperCase();
-    if (!norm) return null;
-    const escaped = norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const symRe = new RegExp(`(?:^|[\\s*|\\[])\\*{0,2}${escaped}\\b`, 'i');
-    for (const line of lines) {
-      if (!symRe.test(line)) continue;
-      const hasPosMarkers =
-        /(?:均价|开仓价?|entry)\s*[=:]?\s*\d/i.test(line) ||
-        /(?:SL|止损)\s*[=:]\s*(?:\d|无|none)/i.test(line) ||
-        /(?:TP|止盈)\s*[=:]\s*(?:\d|无|none)/i.test(line);
-      if (!hasPosMarkers) continue;
-
-      const parseVal = (m: RegExpMatchArray | null): number | null | undefined => {
-        if (!m) return undefined;
-        const token = m[1]!.replace(/,/g, '').trim();
-        if (token === '无' || token.toLowerCase() === 'none') return null;
-        const n = Number(token);
-        return Number.isFinite(n) && n > 0 ? n : undefined;
-      };
-      const entryPrice = parseVal(line.match(/(?:均价|开仓价?|entry)\s*[=:]?\s*\$?([\d,]+(?:\.\d+)?)/i));
-      const previousStopLoss = parseVal(line.match(/(?:\bSL|止损)\s*[=:]\s*\$?([\d,]+(?:\.\d+)?|无|none)/i));
-      const previousTakeProfit = parseVal(line.match(/(?:\bTP|止盈)\s*[=:]\s*\$?([\d,]+(?:\.\d+)?|无|none)/i));
-      if (entryPrice !== undefined || previousStopLoss !== undefined || previousTakeProfit !== undefined) {
-        return {
-          ...(entryPrice !== undefined ? { entryPrice } : {}),
-          ...(previousStopLoss !== undefined ? { previousStopLoss } : {}),
-          ...(previousTakeProfit !== undefined ? { previousTakeProfit } : {}),
-        };
-      }
-    }
-    return null;
-  };
-
   return log.map((entry) => {
     if (
       entry.status === 'data' ||
@@ -4970,7 +4948,7 @@ function hydrateAdjustmentContextFromPrompt(
     ) {
       return entry;
     }
-    const ctx = parseLine(entry.symbol);
+    const ctx = extractPromptPositionContext(userPrompt, entry.symbol);
     return ctx ? { ...entry, ...ctx } : entry;
   });
 }

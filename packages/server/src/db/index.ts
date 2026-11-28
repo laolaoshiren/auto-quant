@@ -29,6 +29,27 @@ function bind(params: unknown[]): SqlValue[] {
   return params.map(normalise);
 }
 
+/** Result snapshot returned by `Db.maintenance()`. */
+export interface DbMaintenanceResult {
+  /** SQLite auto_vacuum mode: 0 = NONE, 1 = FULL, 2 = INCREMENTAL. */
+  autoVacuumMode: number;
+  freelistBefore: number;
+  freelistAfter: number;
+  reclaimedPages: number;
+  checkpointBusy: number;
+  checkpointLog: number;
+  checkpointCheckpointed: number;
+}
+
+export interface DbMaintenanceOptions {
+  /** Minimum freelist page count before triggering `incremental_vacuum` (default: 512 pages ≈ 2 MB). */
+  minFreelistPages?: number;
+  /** Maximum pages to reclaim in a single maintenance pass (default: 1024 pages ≈ 4 MB). */
+  maxVacuumPages?: number;
+  /** WAL checkpoint mode (default: 'PASSIVE', never blocks active writers). */
+  checkpointMode?: 'PASSIVE' | 'TRUNCATE';
+}
+
 /**
  * Thin, typed wrapper over `node:sqlite`. Using the built-in driver keeps the
  * project free of native build steps — there is nothing to compile on install.
@@ -40,6 +61,9 @@ export class Db {
 
   constructor(file: string) {
     this.db = new DatabaseSync(file);
+    // 新建空库默认开启 INCREMENTAL auto_vacuum；对已有旧库（auto_vacuum=0）为安全无副作用，
+    // 待一次维护性 VACUUM 后即永久生效，彻底避免历史决策裁剪后空闲页无限累积。
+    this.db.exec('PRAGMA auto_vacuum = INCREMENTAL');
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA foreign_keys = ON');
     this.db.exec('PRAGMA busy_timeout = 5000');
@@ -175,6 +199,48 @@ export class Db {
     }
   }
   private inTransaction = false;
+
+  /**
+   * 轻量级在线维护：在 `auto_vacuum = INCREMENTAL` 模式下按有界步长归还空闲页给操作系统，
+   * 并执行非阻塞 WAL checkpoint，防止 SQLite 文件在长期裁剪 `decision_records` 后持续膨胀。
+   */
+  maintenance(options: DbMaintenanceOptions = {}): DbMaintenanceResult {
+    const minFreelistPages = Math.max(1, Math.floor(options.minFreelistPages ?? 512));
+    const maxVacuumPages = Math.max(1, Math.floor(options.maxVacuumPages ?? 1024));
+    const checkpointMode = options.checkpointMode === 'TRUNCATE' ? 'TRUNCATE' : 'PASSIVE';
+
+    const autoVacuumRow = this.db.prepare('PRAGMA auto_vacuum').get() as
+      | { auto_vacuum: number }
+      | undefined;
+    const autoVacuumMode = Number(autoVacuumRow?.auto_vacuum ?? 0);
+
+    const readFreelist = (): number => {
+      const row = this.db.prepare('PRAGMA freelist_count').get() as
+        | { freelist_count: number }
+        | undefined;
+      return Number(row?.freelist_count ?? 0);
+    };
+
+    const freelistBefore = readFreelist();
+    if (autoVacuumMode === 2 && freelistBefore >= minFreelistPages) {
+      this.db.exec(`PRAGMA incremental_vacuum(${maxVacuumPages})`);
+    }
+    const freelistAfter = readFreelist();
+
+    const cpRow = this.db.prepare(`PRAGMA wal_checkpoint(${checkpointMode})`).get() as
+      | { busy: number; log: number; checkpointed: number }
+      | undefined;
+
+    return {
+      autoVacuumMode,
+      freelistBefore,
+      freelistAfter,
+      reclaimedPages: Math.max(0, freelistBefore - freelistAfter),
+      checkpointBusy: Number(cpRow?.busy ?? 0),
+      checkpointLog: Number(cpRow?.log ?? 0),
+      checkpointCheckpointed: Number(cpRow?.checkpointed ?? 0),
+    };
+  }
 
   close(): void {
     this.cache.clear();

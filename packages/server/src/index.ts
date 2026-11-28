@@ -48,8 +48,36 @@ async function main(): Promise<void> {
   await ensureDataDir();
 
   /* --- Storage ---------------------------------------------------------- */
-  initDb(dbPath);
+  const db = initDb(dbPath);
   log.info(`数据库就绪：${dbPath}`);
+
+  // 定期做轻量 SQLite 在线维护（INCREMENTAL 空闲页回收 + 非阻塞 WAL checkpoint），
+  // 避免历史决策裁剪后数据库文件持续膨胀。
+  const DB_MAINTENANCE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  let autoVacuumHintLogged = false;
+  const runDbMaintenance = (): void => {
+    try {
+      const stats = db.maintenance({
+        minFreelistPages: 512,
+        maxVacuumPages: 2048,
+        checkpointMode: 'PASSIVE',
+      });
+      if (stats.reclaimedPages > 0) {
+        log.info(
+          `[db] 在线维护回收 ${stats.reclaimedPages} 页空闲空间（剩余空闲页 ${stats.freelistAfter}，WAL checkpoint ${stats.checkpointCheckpointed}/${stats.checkpointLog}）`,
+        );
+      } else if (stats.autoVacuumMode === 0 && stats.freelistAfter >= 4096 && !autoVacuumHintLogged) {
+        autoVacuumHintLogged = true;
+        log.warn(
+          `[db] 检测到 ${stats.freelistAfter} 个未回收空闲页（auto_vacuum=NONE），可在低峰停机执行一次 VACUUM 释放磁盘并激活增量回收。`,
+        );
+      }
+    } catch (error) {
+      log.warn(`[db] 在线维护跳过（不影响交易）：${(error as Error).message}`);
+    }
+  };
+  const dbMaintenanceTimer = setInterval(runDbMaintenance, DB_MAINTENANCE_INTERVAL_MS);
+  dbMaintenanceTimer.unref();
 
   /* --- Secrets ---------------------------------------------------------- */
   const masterKey = await resolveMasterKey();
@@ -204,6 +232,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log.info(`收到 ${signal} 信号，正在关闭`);
     try {
+      clearInterval(dbMaintenanceTimer);
       /*
        * `stopAll` waits for any cycle still in flight before returning.
        *

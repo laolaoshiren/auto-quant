@@ -487,12 +487,12 @@ test('★★★ 安全 P1 #4：权重软限速休眠期间不占并发槽，高�
   assert.equal(isTradingPriorityRequest('POST', '/fapi/v1/listenKey'), false);
 
   /*
-   * 把权重推过 75%（2400 * 0.75 = 1800），同时将窗口剩余时间设为 ~150ms、
-   * 读数设为足够大以确保衰减后仍超 75%，既能验证软限速暂停，又不让测试拖慢 10 秒。
+   * 把权重推过 75%（2400 * 0.75 = 1800），同时将窗口剩余时间设为 ~400ms、
+   * 读数设为足够大以确保衰减后仍超 75%，既留足并行测试负载下的抖动余量，又不让测试拖慢。
    */
   const rest = makeSignedRest(1, 1);
   rest.usedWeight1m = 1_000_000;
-  (rest as unknown as { weightWindowStart: number }).weightWindowStart = Date.now() - (WEIGHT_WINDOW_MS - 150);
+  (rest as unknown as { weightWindowStart: number }).weightWindowStart = Date.now() - (WEIGHT_WINDOW_MS - 400);
 
   /*
    * 发起一个低优先级行情请求：它会进入 75% 权重软限速休眠，但**不能占着并发槽位**。
@@ -522,14 +522,14 @@ test('★★★ 安全 P1 #4：权重软限速休眠期间不占并发槽，高�
   await settle();
   assert.equal(pending.length, 0, '高优先级请求收到 429 后必须遵守退避，不得绕过退避立即重试');
 
-  /* 等待窗口自然滚过 150ms 后放行 marketReq，再等待 1s 退避完成放行 tradeReq 重试 */
-  await new Promise((r) => setTimeout(r, 250));
+  /* 等待窗口自然滚过 400ms 后放行 marketReq，再等待 1s 退避完成放行 tradeReq 重试 */
+  await new Promise((r) => setTimeout(r, 480));
   assert.equal(pending.length, 1, '窗口滚过后低优先级行情请求恢复发出');
   assert.ok(urls[urls.length - 1]!.includes('/fapi/v1/klines'));
   pending.shift()?.resolve(jsonResponse({ klines: true }));
   await marketReq;
 
-  await new Promise((r) => setTimeout(r, 900));
+  await new Promise((r) => setTimeout(r, 700));
   await settle();
   assert.equal(pending.length, 1, '429 退避结束后高优先级请求按期重试');
   assert.ok(urls[urls.length - 1]!.includes('/fapi/v1/order'));
